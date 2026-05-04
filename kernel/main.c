@@ -16,6 +16,7 @@
 
 #include "uart.h"
 #include "../arch/arm64/kaslr.h"
+#include "../arch/arm64/exception.h"
 #include "../mm/phys.h"
 #include "../mm/magazines.h"
 #include "../mm/slub.h"
@@ -106,7 +107,7 @@ void boot_main(void) {
     }
     uart_puts("\n");
 
-    uart_puts("  hardening: MMU+W^X+extinction+KASLR (P1-C-extras; PAC/MTE/CFI at P1-H)\n");
+    uart_puts("  hardening: MMU+W^X+extinction+KASLR+vectors (P1-F; PAC/MTE/CFI at P1-H)\n");
 
     uart_puts("  kernel base: ");
     uart_puthex64(kaslr_kernel_high_base());
@@ -193,6 +194,16 @@ void boot_main(void) {
     // a meta cache for kmem_cache_create. Public API: kmalloc /
     // kfree / kmem_cache_*.
     slub_init();
+
+    // Phase 4: arm the exception vector table (P1-F). After this,
+    // synchronous faults route through arch/arm64/exception.c —
+    // boot-stack guard region accesses → extinction("kernel stack
+    // overflow"); kernel-image permission faults → extinction(
+    // "PTE violates W^X"); other sync faults → extinction with
+    // ESR/FAR/ELR diagnostic. IRQ / FIQ / SError vectors and the
+    // lower-EL group all extinction (unexpected at this phase;
+    // P1-G adds GIC and IRQ dispatch, Phase 2 adds userspace).
+    exception_init();
 
     // SLUB smoke test: small + medium + large allocations through
     // both kmalloc paths (slab vs direct alloc_pages), plus a

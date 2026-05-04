@@ -21,12 +21,12 @@ When a section describes a detail enforced by a spec, the spec's action / invari
 
 ## Snapshot
 
-- **Tip**: P1-E landed at commit `e867e3b` — SLUB kernel object allocator (kmalloc / kfree / kmem_cache_*). Phase 1 momentum: P1-A → P1-E complete. Invariants I-12 (W^X), I-15 (DTB-driven HW discovery), and I-16 (KASLR) all live.
-- **Phases**: Phase 0 done; Phase 1 in progress (P1-A through P1-E complete; P1-F GIC + exception vectors next).
-- **Tests**: 0 unit tests; 1 integration check (`tools/test.sh` boot-banner verify). PASS. Boot smoke tests exercise both phys (256 × 4 KiB + 2 MiB + 4 MiB) and SLUB (1500 × kmalloc-8 + mixed sizes + 8 KiB direct + custom cache); 5+ consecutive boots produce distinct KASLR offsets. Test harness lands in P1-I.
+- **Tip**: P1-F landed at commit `(pending hash-fixup)` — exception vector table + sync handler with stack-overflow / W^X-violation detection. Phase 1 momentum: P1-A → P1-F complete. Invariants I-12 (W^X), I-15 (DTB-driven HW discovery), and I-16 (KASLR) all live; the deferred fault paths from P1-C and P1-C-extras Part A finally close.
+- **Phases**: Phase 0 done; Phase 1 in progress (P1-A through P1-F complete; P1-G ARM generic timer next, OR P1-F-extras GIC + IRQ-driven UART before that).
+- **Tests**: 0 unit tests; 1 integration check (`tools/test.sh` boot-banner verify). PASS. Boot smoke tests exercise both phys + SLUB; 5+ consecutive boots produce distinct KASLR offsets and successful smokes; vector table verified by disassembly + readelf. Test harness lands in P1-I.
 - **Specs**: 0 written; 9 planned.
-- **LOC**: ~1830 C99 + ~210 ASM + ~75 linker-script + ~220 CMake/shell ≈ 2335 LOC.
-- **Kernel ELF**: ~155 KB debug. Flat binary: 16 KB. Page tables: 40 KiB BSS. struct page array: 24 MiB BSS (struct page now 48 bytes for SLUB).
+- **LOC**: ~2080 C99 + ~370 ASM + ~75 linker-script + ~220 CMake/shell ≈ 2745 LOC.
+- **Kernel ELF**: ~165 KB debug. Flat binary: 16 KB. Page tables: 40 KiB BSS. struct page array: 24 MiB BSS. Vector table: 2 KiB in `.text`.
 
 For phase-level status see `docs/phaseN-status.md`. The reference below covers the as-built layers in bottom-up order. Per-subsystem files appear as their subsystems land during Phase 1 onward.
 
@@ -44,6 +44,7 @@ For phase-level status see `docs/phaseN-status.md`. The reference below covers t
 | [05-kaslr.md](reference/05-kaslr.md) | KASLR (invariant I-16): arch/arm64/kaslr.{h,c}; entropy chain (DTB kaslr-seed / rng-seed / cntpct fallback); .rela.dyn relocator; long-branch into TTBR1 | medium | **P1-C-extras Part B landed**; entropy bump (13 → 18 bits) is post-v1.0 hardening |
 | [06-allocator.md](reference/06-allocator.md) | Physical allocator: struct page, mm/buddy.{h,c}, mm/magazines.{h,c}, mm/phys.{h,c} — DTB-driven bootstrap, buddy free lists, per-CPU magazines, public API | medium | **P1-D landed**; SLUB layered on alloc_pages at P1-E |
 | [07-slub.md](reference/07-slub.md) | SLUB kernel object allocator: mm/slub.{h,c} — per-cache partial slab list, embedded freelist, kmalloc / kfree / kmem_cache_*, bootstrap via meta cache | medium | **P1-E landed**; multi-page slabs (>2 KiB caches) post-v1.0 |
+| [08-exception.md](reference/08-exception.md) | Exception handling: arch/arm64/{vectors.S, exception.{h,c}} — 16-entry vector table, KERNEL_ENTRY save, sync handler with stack-overflow + W^X violation detection, exception_unexpected catch-all | medium | **P1-F landed**; per-CPU exception stack at Phase 2; GIC + IRQ at P1-G |
 | 07-irq.md (planned) | GIC + exception vectors + IPI | small | Phase 1-2 |
 | 05-process.md (planned) | Proc + Thread + rfork + notes + errstr | medium | Phase 2 |
 | 06-scheduler.md (planned) | EEVDF + per-CPU + work-stealing | medium | Phase 2 |

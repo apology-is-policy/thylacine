@@ -13,6 +13,8 @@ set(KERNEL_SRCS
     ../arch/arm64/uart.c
     ../arch/arm64/mmu.c
     ../arch/arm64/kaslr.c
+    ../arch/arm64/exception.c
+    ../arch/arm64/vectors.S
     ../lib/dtb.c
     ../mm/buddy.c
     ../mm/magazines.c
