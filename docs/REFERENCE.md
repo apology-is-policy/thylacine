@@ -21,7 +21,7 @@ When a section describes a detail enforced by a spec, the spec's action / invari
 
 ## Snapshot
 
-- **Tip**: in-kernel test harness landed at commit `(pending hash-fixup)` — kernel/test/{test.{h,c},test_kaslr.c,test_dtb.c,test_phys.c,test_slub.c} with sentinel-terminated registry, TEST_ASSERT macro, per-test PASS/FAIL on UART. Refactors the previous inline alloc/kmem smokes into named test cases. Phase 1 momentum: P1-A → P1-F complete + test harness; P1-G ARM generic timer + GIC + IRQ-driven UART next.
+- **Tip**: in-kernel test harness landed at commit `c3f9196` — kernel/test/{test.{h,c},test_kaslr.c,test_dtb.c,test_phys.c,test_slub.c} with sentinel-terminated registry, TEST_ASSERT macro, per-test PASS/FAIL on UART. Refactors the previous inline alloc/kmem smokes into named test cases. Phase 1 momentum: P1-A → P1-F complete + test harness; P1-G ARM generic timer + GIC + IRQ-driven UART next.
 - **Phases**: Phase 0 done; Phase 1 in progress (P1-A through P1-F + test harness complete; P1-G next).
 - **Tests**: **4/4 in-kernel tests PASS** every boot (kaslr.mix64_avalanche, dtb.chosen_kaslr_seed_present, phys.alloc_smoke, slub.kmem_smoke). 1 integration check (`tools/test.sh`). 5+ consecutive boots all PASS. Host-side sanitizer matrix + 10000-iteration leak check land at P1-I.
 - **Specs**: 0 written; 9 planned.

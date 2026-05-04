@@ -278,7 +278,7 @@ The harness adds boot time but keeps the kernel honest. Phase 2's gate on Phase 
 - Tests for evolving subsystems: scheduler (Phase 2), namespace (Phase 2), handle table (Phase 2), 9P client (Phase 4), POSIX surface (Phase 5), syscalls (Phase 5).
 - Deliberate-failure test (verifies the runner reports FAIL correctly). P1-I.
 
-**Landed**: cross-cutting harness addition between P1-F and P1-G; commit `(pending hash-fixup)`.
+**Landed**: cross-cutting harness addition between P1-F and P1-G; commit `c3f9196`.
 
 ---
 
