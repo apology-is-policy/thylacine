@@ -30,6 +30,7 @@ void test_phys_alloc_smoke(void);
 void test_slub_kmem_smoke(void);
 void test_gic_init_smoke(void);
 void test_timer_tick_increments(void);
+void test_hardening_detect_smoke(void);
 
 // ---------------------------------------------------------------------------
 // Registry. Sentinel-terminated.
@@ -42,6 +43,7 @@ struct test_case g_tests[] = {
     { "slub.kmem_smoke",               test_slub_kmem_smoke,               false, NULL },
     { "gic.init_smoke",                test_gic_init_smoke,                false, NULL },
     { "timer.tick_increments",         test_timer_tick_increments,         false, NULL },
+    { "hardening.detect_smoke",        test_hardening_detect_smoke,        false, NULL },
     { NULL, NULL, false, NULL },          // sentinel
 };
 

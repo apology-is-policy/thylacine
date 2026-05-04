@@ -189,6 +189,55 @@ _real_start:
     add     x0, x0, :lo12:_entered_at_el2
     str     x20, [x0]
 
+    // 6.5. P1-H: PAC + BTI runtime enable.
+    //
+    // PAC: We program the APIA key from cntpct_el0. The compiler's
+    //  -mbranch-protection=pac-ret emits paciasp / autiasp around
+    //  every non-leaf function; on ARMv8.0 hardware these are NOPs in
+    //  the HINT space (harmless), on ARMv8.3+ they sign / authenticate
+    //  the link register against APIAKey. Both halves of the key are
+    //  programmed before the first paciasp runs (which happens when
+    //  the next BL transfers control into a C function emitting the
+    //  prologue) so the auth and sign are consistent. We also set
+    //  APIB / APDA / APDB keys for completeness — pac-ret only uses
+    //  APIA, but if Phase 2 turns on data-pointer auth or PAC-B
+    //  variants, the keys are pre-seeded.
+    //
+    // BTI: SCTLR_EL1.BT0 (bit 35) enables Branch Target Identification
+    //  enforcement at EL1 on ARMv8.5+. Pages with PTE.GP=1 (set by
+    //  mmu.c via PTE_KERN_TEXT) require indirect-branch targets to
+    //  match a `bti j/c/jc` marker matching PSTATE.BTYPE. The compiler
+    //  emits `bti c` at function-call landing pads under
+    //  -mbranch-protection=bti.
+    //
+    // Both EnIA (bit 31) and BT0 (bit 35) are RES0 on hardware that
+    // doesn't implement FEAT_PAuth / FEAT_BTI — writing 1 is a NOP
+    // there. So this sequence is zero-cost on ARMv8.0 and unlocks the
+    // hardening on ARMv8.3+ / 8.5+.
+    mrs     x0, cntpct_el0
+    msr     apiakeyhi_el1, x0
+    ror     x1, x0, #13
+    msr     apiakeylo_el1, x1
+    msr     apibkeyhi_el1, x1
+    ror     x2, x1, #17
+    msr     apibkeylo_el1, x2
+    msr     apdakeyhi_el1, x2
+    ror     x3, x2, #19
+    msr     apdakeylo_el1, x3
+    msr     apdbkeyhi_el1, x3
+    ror     x4, x3, #23
+    msr     apdbkeylo_el1, x4
+
+    // SCTLR_EL1: set EnIA (31), EnIB (30), EnDA (27), EnDB (13), BT0 (35).
+    //   bits = 0x00000008_c8002000
+    mrs     x0, sctlr_el1
+    movz    x1, #0x2000, lsl #0
+    movk    x1, #0xc800, lsl #16
+    movk    x1, #0x0008, lsl #32
+    orr     x0, x0, x1
+    msr     sctlr_el1, x0
+    isb
+
     // 7. KASLR. Choose a randomized slide from DTB seed (or hardware
     //    counter fallback), apply any R_AARCH64_RELATIVE relocations
     //    in the embedded .rela.dyn section. Returns the slide in x0.
@@ -207,10 +256,17 @@ _real_start:
     //    boot_main via kaslr_high_va_addr(pa); the PA we pass is the
     //    PC-relative-resolved address of boot_main (current PC = PA,
     //    PIC mode → adrp+add gives PA).
+    //
+    // Use BLR (not BR) so the branch sets PSTATE.BTYPE = 01 (call
+    // type), which matches the `bti c` marker the compiler emits at
+    // boot_main's prologue. With BR, BTYPE would be 10 (jump type)
+    // and BTI on FEAT_BTI hardware would fault on the `bti c`. The
+    // discarded LR is harmless because boot_main is `noreturn` and
+    // never reads it.
     adrp    x0, boot_main
     add     x0, x0, :lo12:boot_main
     bl      kaslr_high_va_addr          // x0 = high VA of boot_main
-    br      x0                          // branch to high VA
+    blr     x0                          // call high-VA boot_main
 
     // 10. boot_main() must not return. If it does, fall through to halt.
     b       _hang
@@ -230,6 +286,15 @@ _real_start:
 .globl _hang
 .type _hang, %function
 _hang:
+    // BTI landing pad: accept call (BTYPE=01), jump (BTYPE=10), or
+    // jump-call (BTYPE=11). All current reaches are direct branches
+    // (b _hang / bl _hang) which don't trigger BTI checks, but
+    // _hang lives in a GP=1 page (PTE_KERN_TEXT) and SCTLR_EL1.BT0=1,
+    // so a future indirect dispatch (function-pointer table, panic
+    // handler array) into _hang would fault on the bare wfi. `bti jc`
+    // is a HINT-space NOP on ARMv8.0..8.4 — zero cost, prevents the
+    // class of bug at the cost of one instruction (P1-H audit F16).
+    bti     jc
 1:  wfi
     b       1b
 .size _hang, . - _hang

@@ -17,12 +17,15 @@
 #include "uart.h"
 #include "../arch/arm64/exception.h"
 #include "../arch/arm64/gic.h"
+#include "../arch/arm64/hwfeat.h"
 #include "../arch/arm64/kaslr.h"
 #include "../arch/arm64/timer.h"
 #include "../mm/magazines.h"
 #include "../mm/phys.h"
 #include "../mm/slub.h"
 #include "test/test.h"
+
+#include <thylacine/canary.h>
 
 #include <stdint.h>
 #include <thylacine/dtb.h>
@@ -110,7 +113,43 @@ void boot_main(void) {
     }
     uart_puts("\n");
 
-    uart_puts("  hardening: MMU+W^X+extinction+KASLR+vectors+IRQ (P1-G; PAC/MTE/CFI at P1-H)\n");
+    // P1-H: detect hardware-supported hardening features. The compile-
+    // time flags (canaries, PAC, BTI, LSE) are always emitted; this
+    // detection tells the operator which of those will actually be
+    // enforced by the running CPU. Set up `g_hw_features` early so the
+    // banner can report it accurately.
+    hw_features_detect();
+
+    uart_puts("  hardening: MMU+W^X+extinction+KASLR+vectors+IRQ+canaries+PAC+BTI+LSE (P1-H)\n");
+
+    // Per-feature live-status banner line. Reports what the CPU
+    // *implements* (different from the static "we compiled with X"
+    // line above). On QEMU virt with -cpu max we expect: PAC,BTI,LSE
+    // (MTE is host-emulator-controlled; not always live).
+    {
+        char buf[64];
+        unsigned n = hw_features_describe(buf, sizeof(buf));
+        (void)n;
+        uart_puts("  features: ");
+        uart_puts(buf);
+        uart_puts(" (CPU-implemented)\n");
+    }
+
+    // Print a 16-bit XOR-fold of the cookie as a presence indicator that
+    // varies across boots without leaking the cookie itself. A serial-
+    // console attacker who reads the full cookie can forge any canary
+    // check (P1-H audit F14); the fold is one-way and non-recoverable
+    // — sufficient diagnostic that the cookie was randomized, but
+    // insufficient to defeat the protection.
+    {
+        u64 c = canary_get_cookie();
+        u64 fold = (c ^ (c >> 32));
+        fold = (fold ^ (fold >> 16)) & 0xFFFFu;
+        uart_puts("  canary: initialized (fold ");
+        uart_puthex64(fold);
+        uart_puts(")\n");
+    }
+
 
     uart_puts("  kernel base: ");
     uart_puthex64(kaslr_kernel_high_base());

@@ -16,6 +16,7 @@
 #include "kaslr.h"
 
 #include <stdint.h>
+#include <thylacine/canary.h>
 #include <thylacine/dtb.h>
 #include <thylacine/types.h>
 
@@ -175,6 +176,20 @@ static void apply_relocations(u64 slide) {
 // kaslr_init — compose entropy, choose a slide, apply relocations.
 // ---------------------------------------------------------------------------
 
+// kaslr_init must NOT be canary-protected. The function calls
+// canary_init below, which overwrites __stack_chk_guard. Any canary
+// check on this function's frame would read the link-time magic
+// value at prologue (saved on the stack) and the runtime cookie at
+// epilogue (loaded from __stack_chk_guard) — mismatch.
+//
+// Functions called from kaslr_init BEFORE canary_init runs (mix64,
+// dtb_get_chosen_*, read_cntpct, apply_relocations of which there
+// are zero entries today) all complete and pop their frames before
+// __stack_chk_guard changes — they read the magic value consistently
+// at prologue + epilogue. After canary_init returns, all subsequent
+// callers of kaslr_init's continuation read the runtime cookie
+// consistently.
+__attribute__((no_stack_protector))
 u64 kaslr_init(void) {
     u64 raw = 0;
     kaslr_seed_source_t source = KASLR_SEED_NONE;
@@ -214,6 +229,19 @@ u64 kaslr_init(void) {
 
     // Mix bits to avoid weak low-order entropy in the cntpct path.
     u64 mixed = mix64(raw);
+
+    // Initialize the stack-canary cookie now — using `mixed` as the
+    // seed so the cookie shares KASLR's entropy. This MUST happen
+    // before kaslr_init returns; kaslr_init's no_stack_protector
+    // attribute means it doesn't check its own canary, so writing
+    // __stack_chk_guard mid-function is safe. Functions called from
+    // kaslr_init's prologue (mix64, dtb_*) have already returned by
+    // this point; their canary reads were consistent against the
+    // pre-canary_init magic value. The remaining work in kaslr_init
+    // (apply_relocations + return) calls into apply_relocations
+    // AFTER canary_init, so apply_relocations reads the runtime
+    // cookie at both prologue and epilogue — consistent.
+    canary_init(mixed);
 
     // Choose offset: 2 MiB-aligned, bounded to < 1 GiB. Always non-zero
     // (so KASLR doesn't trivially return slide=0 if mix happens to give

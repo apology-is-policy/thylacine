@@ -78,6 +78,12 @@
 #define PTE_SH_NONE       (0ull << 8)
 #define PTE_AF            (1ull << 10)
 #define PTE_NG            (1ull << 11)
+// PTE_GP — Guarded Page (P1-H, FEAT_BTI ARMv8.5+). When set, PSTATE.BTYPE
+// is checked against BTI markers (`bti j/c/jc`) at indirect-branch landing
+// pads in this page. Pages without GP are not BTI-checked. We set this
+// for kernel text only so the compiler's -mbranch-protection=bti markers
+// take effect on ARMv8.5+ hardware. RES0 on ARMv8.0..8.4 — harmless.
+#define PTE_GP            (1ull << 50)
 #define PTE_PXN           (1ull << 53)
 #define PTE_UXN           (1ull << 54)
 
@@ -95,9 +101,10 @@
 
 #define PTE_KERN_TEXT \
     (PTE_VALID | PTE_TYPE_PAGE | PTE_AF | PTE_SH_INNER | \
-     PTE_ATTR_IDX(MAIR_IDX_NORMAL_WB) | PTE_AP_RO_EL1 | PTE_UXN)
+     PTE_ATTR_IDX(MAIR_IDX_NORMAL_WB) | PTE_AP_RO_EL1 | PTE_UXN | PTE_GP)
 //   (RX at EL1; RO -> writable=false; PXN=0 -> executable-at-EL1=true.
-//    Composite: not-writable AND executable. W^X OK.)
+//    Composite: not-writable AND executable. W^X OK.
+//    GP=1 enables BTI checks on FEAT_BTI hardware (P1-H).)
 
 #define PTE_KERN_RO \
     (PTE_VALID | PTE_TYPE_PAGE | PTE_AF | PTE_SH_INNER | \

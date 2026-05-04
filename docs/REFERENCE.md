@@ -21,12 +21,12 @@ When a section describes a detail enforced by a spec, the spec's action / invari
 
 ## Snapshot
 
-- **Tip**: P1-G landed at commit `39eafb4` — GIC v3 driver (`arch/arm64/gic.{h,c}`), ARM generic timer (`arch/arm64/timer.{h,c}`), `exception_irq_curr_el` + `.Lexception_return` shared trampoline in vectors.S, `mmu_map_device` for post-MMU MMIO mapping, multi-region DTB lookup helpers. The IRQ vector slot is now live; tick counter visible in the boot banner ("ticks: 9 (kernel breathing)"). Two new in-kernel tests: gic.init_smoke + timer.tick_increments. Phase 1 momentum: P1-A → P1-G complete; P1-H (hardening flags) next.
-- **Phases**: Phase 0 done; Phase 1 in progress (P1-A through P1-G complete; P1-H next).
-- **Tests**: **6/6 in-kernel tests PASS** every boot (kaslr.mix64_avalanche, dtb.chosen_kaslr_seed_present, phys.alloc_smoke, slub.kmem_smoke, gic.init_smoke, timer.tick_increments). 1 integration check (`tools/test.sh`). 5+ consecutive boots all PASS. Host-side sanitizer matrix + 10000-iteration leak check land at P1-I.
+- **Tip**: P1-H landed at commit `*(pending)*` — hardening flag enablement: stack canaries (`-fstack-protector-strong` + `__stack_chk_guard` initialized from KASLR entropy), PAC return-address signing (`-mbranch-protection=pac-ret`; APIA key + SCTLR_EL1.EnIA from start.S), BTI indirect-branch guards (`-mbranch-protection=bti`; SCTLR_EL1.BT0 + PTE_GP on kernel text), LSE atomics permission (`-march=armv8-a+lse+pauth+bti`), stack-clash protection, NX stack. New `arch/arm64/hwfeat.{h,c}` reads ID_AA64ISAR0/1 + PFR1 to populate `g_hw_features` for banner reporting. CFI / MTE / `_FORTIFY_SOURCE` deferred with explicit rationale. Predecessor: `39eafb4` (P1-G + audit R1 close).
+- **Phases**: Phase 0 done; Phase 1 in progress (P1-A through P1-H complete; P1-I exit verification next).
+- **Tests**: **7/7 in-kernel tests PASS** every boot (kaslr.mix64_avalanche, dtb.chosen_kaslr_seed_present, phys.alloc_smoke, slub.kmem_smoke, gic.init_smoke, timer.tick_increments, hardening.detect_smoke). 1 integration check (`tools/test.sh`). 5+ consecutive boots all PASS, with 5 distinct KASLR offsets AND 5 distinct canary cookies. Deliberate-fault matrix (canary smash, PAC mismatch, BTI fault, W^X violation) lands at P1-I.
 - **Specs**: 0 written; 9 planned.
-- **LOC**: ~2750 C99 + ~370 ASM + ~75 linker-script + ~220 CMake/shell ≈ 3415 LOC.
-- **Kernel ELF**: ~190 KB debug. Flat binary: 25 KB. Page tables: 40 KiB BSS. struct page array: 24 MiB BSS. GIC handler table: 16 KiB BSS. Vector table: 2 KiB in `.text`.
+- **LOC**: ~2980 C99 + ~410 ASM + ~75 linker-script + ~220 CMake/shell ≈ 3685 LOC.
+- **Kernel ELF**: ~206 KB debug. Flat binary: 29 KB. Page tables: 40 KiB BSS. struct page array: 24 MiB BSS. GIC handler table: 16 KiB BSS. Vector table: 2 KiB in `.text`.
 
 For phase-level status see `docs/phaseN-status.md`. The reference below covers the as-built layers in bottom-up order. Per-subsystem files appear as their subsystems land during Phase 1 onward.
 
@@ -48,6 +48,7 @@ For phase-level status see `docs/phaseN-status.md`. The reference below covers t
 | [09-test-harness.md](reference/09-test-harness.md) | In-kernel test harness: kernel/test/{test.{h,c},test_*.c} — sentinel-terminated registry, TEST_ASSERT macro, per-test PASS/FAIL reporting; 6 leaf-API tests at v1.0 | small | **landed**; host-side sanitizer matrix + 10000-iteration leak check at P1-I |
 | [10-gic.md](reference/10-gic.md) | GIC v3 driver: arch/arm64/gic.{h,c} — DTB v2/v3 autodetect, distributor + redistributor + sysreg CPU interface, IRQ enable/disable/ack/eoi, handler dispatch table | medium | **P1-G landed**; v2 path + ITS + SMP redist walk deferred |
 | [11-timer.md](reference/11-timer.md) | ARM generic timer: arch/arm64/timer.{h,c} — EL1 non-secure phys at 1000 Hz on PPI 14 (INTID 30), CNTP_TVAL_EL0 reload pattern, WFI-based busy wait | small | **P1-G landed**; oneshot + per-CPU SMP at Phase 2 |
+| [12-hardening.md](reference/12-hardening.md) | Hardening enablement: toolchain flags, kernel/canary.c (`__stack_chk_guard` + `__stack_chk_fail`), arch/arm64/start.S PAC keys + SCTLR enable, arch/arm64/hwfeat.{h,c} ID-register inspection, PTE_GP for BTI on kernel text | medium | **P1-H landed**; CFI / MTE / `_FORTIFY_SOURCE` deferred with explicit rationale |
 | 05-process.md (planned) | Proc + Thread + rfork + notes + errstr | medium | Phase 2 |
 | 06-scheduler.md (planned) | EEVDF + per-CPU + work-stealing | medium | Phase 2 |
 | 07-namespace.md (planned) | Pgrp + bind + mount | small | Phase 2 |
@@ -90,3 +91,4 @@ See `ARCHITECTURE.md §29` for the definitive glossary. As implementation lands 
 |---|---|---|
 | 2026-05-04 | Scaffolded (Phase 0 complete). | Template for the as-built reference. Per-subsystem files (`reference/01-...md`, etc.) appear as subsystems land during Phase 1 onward. |
 | 2026-05-04 | P1-G landed: 10-gic.md + 11-timer.md added; snapshot bumped (6/6 tests, 3415 LOC, 190 KB ELF). 08-exception.md updated for live IRQ slot + `.Lexception_return` trampoline. | GIC v3 + ARM generic timer chunk closed; the kernel now receives 1000 Hz ticks. |
+| 2026-05-04 | P1-H landed: 12-hardening.md added; snapshot bumped (7/7 tests, 3685 LOC, 206 KB ELF). 03-mmu.md (PTE_GP) + 05-kaslr.md (canary_init slot) + 01-boot.md (PAC + canary entry sequence) updated. | v1.0 hardening commitment closed: canaries + PAC + BTI + LSE + stack-clash + NX stack. CFI / MTE / FORTIFY deferred with rationale. |

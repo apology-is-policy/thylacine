@@ -9,6 +9,7 @@
 set(KERNEL_SRCS
     main.c
     extinction.c
+    canary.c
     ../arch/arm64/start.S
     ../arch/arm64/uart.c
     ../arch/arm64/mmu.c
@@ -17,6 +18,7 @@ set(KERNEL_SRCS
     ../arch/arm64/vectors.S
     ../arch/arm64/gic.c
     ../arch/arm64/timer.c
+    ../arch/arm64/hwfeat.c
     ../lib/dtb.c
     ../mm/buddy.c
     ../mm/magazines.c
@@ -29,6 +31,7 @@ set(KERNEL_SRCS
     test/test_slub.c
     test/test_gic.c
     test/test_timer.c
+    test/test_hardening.c
 )
 
 set(KERNEL_LD_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/../arch/arm64/kernel.ld)

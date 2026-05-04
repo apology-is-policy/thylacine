@@ -47,17 +47,15 @@ set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
 set(THYLACINE_TARGET_TRIPLE "aarch64-none-elf"
     CACHE STRING "Target triple for kernel cross-compile")
 
-# Baseline architecture flags. ARMv8-A baseline at P1-A; hardening flags
-# (PAC/MTE/BTI/LSE/CFI/canaries) layered in at P1-H.
+# Baseline architecture flags. ARMv8-A + LSE at P1-H; hardening flags
+# (canaries, stack-clash, PAC, BTI) layered on top.
 #
 # -ffreestanding: no hosted environment (no libc; we provide our own).
 # -nostdlib + -nostartfiles: no host startup; our start.S is the entry.
 # -fno-builtin: don't assume libc semantics for memcpy/strlen/etc.
 # -fno-common: BSS variables go in .bss, not COMMON (deterministic linkage).
-# -fno-stack-protector: explicitly disabled at P1-A; P1-H enables canaries.
 # -mgeneral-regs-only: no FP/SIMD in kernel (saves context-switch overhead;
 #   userspace gets full FP).
-# -mno-red-zone: ARM64 has no red zone but the flag is harmless on AArch64.
 # -fpie: position-independent executable. P1-C-extras Part B switches the
 #   kernel to PIE so KASLR can apply R_AARCH64_RELATIVE relocations and
 #   slide the kernel's high-VA base by a random offset at boot. PIC code
@@ -69,19 +67,67 @@ set(THYLACINE_TARGET_TRIPLE "aarch64-none-elf"
 #   ±4 GiB code/data spread). Keeps the relocation table small and
 #   permits direct PC-relative addressing of every symbol in the
 #   image. (The kernel image is < 200 KB; tiny is fine.)
+#
+# P1-H hardening additions:
+#   -march=armv8-a+lse             — permit LSE atomic instructions where
+#                                    the compiler chooses to emit them.
+#                                    Today the kernel has no atomic builtins
+#                                    so no LSE ops are emitted; Phase 2's
+#                                    spinlocks land their atomics in a
+#                                    dedicated TU with runtime fallback.
+#                                    Forward-compatible.
+#   -fstack-protector-strong       — stack canaries on functions with
+#                                    address-taken locals or arrays. We
+#                                    provide __stack_chk_guard and
+#                                    __stack_chk_fail (kernel/canary.c).
+#                                    Initialized in kaslr_init from boot
+#                                    entropy; kaslr_init itself is marked
+#                                    no_stack_protector to avoid checking
+#                                    a half-initialized cookie.
+#   -fstack-clash-protection       — probe stack guard pages on large
+#                                    function-frame allocations. Mostly
+#                                    inert in our codebase (boot stack is
+#                                    16 KiB, no large frames) but
+#                                    defense-in-depth + future-proof.
+#   -mbranch-protection=pac-ret+bti
+#                                  — pac-ret: emit paciasp / autiasp around
+#                                    every non-leaf function so return
+#                                    addresses get signed at entry and
+#                                    verified at exit. NOPs on ARMv8.0
+#                                    hardware (HINT space); start.S sets
+#                                    APIA key + SCTLR_EL1.EnIA=1 so the
+#                                    instructions sign/auth on ARMv8.3+.
+#                                  — bti: emit `bti j/c/jc` markers at
+#                                    indirect-branch landing pads. NOPs on
+#                                    ARMv8.0; start.S sets SCTLR_EL1.BT0
+#                                    so ARMv8.5+ enforces guard.
+#
+# DEFERRED to post-v1.0 (per CLAUDE.md "complexity is permitted only where
+# it is verified"):
+#   -fsanitize=cfi                 — needs ThinLTO + careful indirect-call
+#                                    audit. Linux's kCFI is the reference;
+#                                    too risky to enable without dedicated
+#                                    test path. Post-v1.0.
+#   MTE (-march=...+memtag)        — needs SLUB tag-aware integration. Per
+#                                    ARCH §24.3 measurement deferred to
+#                                    Phase 8.
+#   _FORTIFY_SOURCE=2              — needs hosted libc (__sprintf_chk etc).
+#                                    N/A in freestanding kernel.
 set(THYLACINE_KERNEL_C_FLAGS
     "--target=${THYLACINE_TARGET_TRIPLE}"
-    "-march=armv8-a"
+    "-march=armv8-a+lse+pauth+bti"
     "-ffreestanding"
     "-fno-builtin"
     "-fno-common"
-    "-fno-stack-protector"
     "-fpie"
     "-fdirect-access-external-data"
     "-mcmodel=tiny"
     "-mgeneral-regs-only"
     "-mno-outline-atomics"
     "-fno-omit-frame-pointer"
+    "-fstack-protector-strong"
+    "-fstack-clash-protection"
+    "-mbranch-protection=pac-ret+bti"
     "-Wall"
     "-Wextra"
     "-Wstrict-prototypes"
@@ -118,6 +164,8 @@ set(THYLACINE_KERNEL_LD_FLAGS
     "-Wl,-z,text"
     "-Wl,-z,norelro"
     "-Wl,-z,nopack-relative-relocs"
+    "-Wl,-z,noexecstack"            # NX stack — make explicit even though our
+                                    # static-pie has no PT_GNU_STACK by default
     "-Wl,--no-dynamic-linker"
     "-Wl,--build-id=none"
     "-Wl,--no-undefined"

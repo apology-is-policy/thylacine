@@ -173,6 +173,16 @@ _Static_assert((PTE_KERN_RO & PTE_PXN) != 0,
 _Static_assert((PTE_DEVICE_RW_BLOCK & PTE_PXN) != 0,
                "Device PTEs must NOT allow EL1 execution");
 
+// P1-H BTI guard-page invariant. A future PTE-bit refactor that moves
+// PTE_GP without updating PTE_KERN_TEXT would silently disable BTI on
+// kernel text on FEAT_BTI hardware. These asserts pin both the bit
+// position and PTE_KERN_TEXT's adoption.
+_Static_assert(PTE_GP == (1ull << 50),
+               "PTE_GP must be bit 50 per ARM ARM (FEAT_BTI Stage 1 EL1 PTE)");
+_Static_assert((PTE_KERN_TEXT & PTE_GP) != 0,
+               "PTE_KERN_TEXT must be BTI-guarded (GP=1) so the compiler's "
+               "bti markers take effect on FEAT_BTI hardware");
+
 // ---------------------------------------------------------------------------
 // Build the page tables (TTBR0 identity + TTBR1 kernel high-half).
 // ---------------------------------------------------------------------------

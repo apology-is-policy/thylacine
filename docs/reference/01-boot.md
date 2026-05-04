@@ -50,9 +50,11 @@ After the branch, `_real_start` performs, in order:
 3. **Stack setup**. SP is set to `_boot_stack_top` (defined by the linker script, top of a 16 KiB BSS-allocated buffer; SP grows down).
 4. **BSS clear**. Zero `[_bss_start, _bss_end)` in 8-byte stride. The linker script guarantees both bounds are 8-byte-aligned (in fact, page-aligned).
 5. **DTB store**. After BSS is cleared, write the saved x19 value to `_saved_dtb_ptr`. Write the saved x20 value (0 / 1) to `_entered_at_el2` so `boot_main()` can surface the el-entry diagnostic.
-6. **KASLR init** (P1-C-extras Part B). `kaslr_init()` parses the DTB seed (`/chosen/kaslr-seed` then `/chosen/rng-seed`, with `cntpct_el0` fallback), chooses a 2 MiB-aligned slide in `[0, 16 GiB)`, and applies any `R_AARCH64_RELATIVE` entries in the embedded `.rela.dyn` section. Returns the slide; the boot stub stashes it in `x21` (callee-saved). See `docs/reference/05-kaslr.md`.
+5.5. **PAC + BTI runtime enable** (P1-H, in start.S between BSS-clear and `bl kaslr_init`). Reads `cntpct_el0` for a low-entropy seed; programs APIA / APIB / APDA / APDB keys via the rotation chain; sets `SCTLR_EL1.{EnIA, EnIB, EnDA, EnDB, BT0}` = 1. On ARMv8.0 hardware these bits are RES0 (zero-cost); on ARMv8.3+ they activate PAC; on ARMv8.5+ they activate BTI. ISB. See `docs/reference/12-hardening.md`.
+
+6. **KASLR init** (P1-C-extras Part B; canary cookie at P1-H). `kaslr_init()` is now marked `__attribute__((no_stack_protector))`. It parses the DTB seed (`/chosen/kaslr-seed` then `/chosen/rng-seed`, with `cntpct_el0` fallback), mixes via `mix64`, then **calls `canary_init(mixed)`** to write the runtime stack-canary cookie before any subsequent canary-protected function returns. Then chooses a 2 MiB-aligned slide in `[0, 16 GiB)`, and applies any `R_AARCH64_RELATIVE` entries in the embedded `.rela.dyn` section. Returns the slide; the boot stub stashes it in `x21` (callee-saved). See `docs/reference/05-kaslr.md` and `docs/reference/12-hardening.md`.
 7. **MMU enable** (P1-C, slide-aware at P1-C-extras). `mmu_enable(slide)` builds TTBR0 (low 4 GiB identity) and TTBR1 (kernel high-half at `KASLR_LINK_VA + slide`). Per-section permissions on the kernel image; W^X invariant I-12 enforced at PTE bit level via `_Static_assert` on PTE constructors. The L3 page-grain table is shared between TTBR0 and TTBR1. After return, kernel runs with caches enabled; PC is still at load PA via TTBR0.
-8. **Long-branch to high VA**. Compute `kaslr_high_va_addr(boot_main)` to get the high VA of `boot_main`, then `br x0` into TTBR1. From this point, all PC-relative addressing in C code resolves to high VAs.
+8. **Long-branch to high VA**. Compute `kaslr_high_va_addr(boot_main)` to get the high VA of `boot_main`, then `blr x0` into TTBR1 (P1-H changed this from `br` so PSTATE.BTYPE=01 matches compiler-emitted `bti c` at boot_main's prologue under FEAT_BTI). From this point, all PC-relative addressing in C code resolves to high VAs.
 9. **`boot_main()`** runs at high VA. Prints the first half of the banner (arch, el-entry, cpus, mem, dtb, uart, hardening, kernel base).
 10. **`phys_init()`** (P1-D). Reads RAM range from DTB, reserves kernel image / struct-page array / DTB blob / low firmware, pushes the rest onto the buddy. Initializes per-CPU magazines. See `docs/reference/06-allocator.md`. Followed by an alloc/free smoke test that exercises the magazine fast path and a non-magazine order; gates on `phys_free_pages() == baseline` after a `magazines_drain_all`.
 11. **`slub_init()`** (P1-E). Sets up the meta cache (for `struct kmem_cache` itself) plus the standard `kmalloc-{8..2048}` caches. See `docs/reference/07-slub.md`. Followed by a kmem smoke test that exercises small / mixed / large kmalloc paths plus a `kmem_cache_create` round-trip; gates on `phys_free_pages() == baseline` after `magazines_drain_all`.
@@ -116,7 +118,7 @@ Three `ASSERT()` statements in the linker script catch regressions at link time:
 
 The banner is emitted line-by-line via `uart_puts`. P1-B fills in `mem`, `dtb`, and `uart` from DTB-driven discovery (per `docs/reference/02-dtb.md`); P1-C-extras Part A added the `el-entry` line; P1-C-extras Part B fills in the runtime kernel base via the KASLR slide.
 
-Reference output of a P1-G boot:
+Reference output of a P1-H boot:
 
 ```
 Thylacine v0.1.0-dev booting...
@@ -126,9 +128,11 @@ Thylacine v0.1.0-dev booting...
   mem:  2048 MiB at 0x0000000040000000
   dtb:  0x0000000048000000 (parsed)
   uart: 0x0000000009000000 (DTB-driven)
-  hardening: MMU+W^X+extinction+KASLR+vectors+IRQ (P1-G; PAC/MTE/CFI at P1-H)
+  hardening: MMU+W^X+extinction+KASLR+vectors+IRQ+canaries+PAC+BTI+LSE (P1-H)
+  features: PAC,BTI,MTE1,LSE,CRC32 (CPU-implemented)
+  canary: 0x846c664abd8a59f8 (initialized)
   kernel base: 0xffffa00032680000 (KASLR offset 0x0000000032600000, seed: DTB /chosen/kaslr-seed)
-  ram: 2048 MiB total, 2022 MiB free, 26240 KiB reserved (kernel + struct_page + DTB)
+  ram: 2048 MiB total, 2022 MiB free, 26248 KiB reserved (kernel + struct_page + DTB)
   gic:  v3 dist=0x0000000008000000 redist=0x00000000080a0000
   timer: 1000000 kHz freq, 1000 Hz tick (PPI 14 / INTID 30)
   tests:
@@ -138,9 +142,10 @@ Thylacine v0.1.0-dev booting...
     [test] slub.kmem_smoke ... PASS
     [test] gic.init_smoke ... PASS
     [test] timer.tick_increments ... PASS
-  tests: 6/6 PASS
+    [test] hardening.detect_smoke ... PASS
+  tests: 7/7 PASS
   ticks: 9 (kernel breathing)
-  phase: P1-G
+  phase: P1-H
 Thylacine boot OK
 ```
 
