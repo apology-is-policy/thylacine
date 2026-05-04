@@ -130,7 +130,7 @@ Thylacine v0.1.0-dev booting...
   uart: 0x0000000009000000 (DTB-driven)
   hardening: MMU+W^X+extinction+KASLR+vectors+IRQ+canaries+PAC+BTI+LSE (P1-H)
   features: PAC,BTI,MTE1,LSE,CRC32 (CPU-implemented)
-  canary: 0x846c664abd8a59f8 (initialized)
+  canary: initialized (fold 0x000000000000a9ba)
   kernel base: 0xffffa00032680000 (KASLR offset 0x0000000032600000, seed: DTB /chosen/kaslr-seed)
   ram: 2048 MiB total, 2022 MiB free, 26248 KiB reserved (kernel + struct_page + DTB)
   gic:  v3 dist=0x0000000008000000 redist=0x00000000080a0000

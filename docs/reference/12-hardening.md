@@ -178,7 +178,7 @@ The feature is "present" iff the field is non-zero. `hw_features_describe` produ
 ```
   hardening: MMU+W^X+extinction+KASLR+vectors+IRQ+canaries+PAC+BTI+LSE (P1-H)
   features: PAC,BTI,MTE1,LSE,CRC32 (CPU-implemented)
-  canary: 0x<cookie> (initialized)
+  canary: initialized (fold 0x<16-bit>)
 ```
 
 The hardening line lists what was *compiled in*; the features line lists what the *CPU implements*. They diverge gracefully on older hardware (ARMv8.0 → "compiled with PAC/BTI but CPU lacks them, so they're harmless NOPs").
@@ -314,7 +314,7 @@ The hardening overhead is dominated by canary checks; PAC + BTI are essentially 
 - **PAC poisoned-address recognition** in fault handler: P1-I refinement (currently shows `"unhandled translation fault"` for PAC failures). The hardware behavior is "ret to a high-bit address that triggers translation fault"; the diagnostic would inspect the FAR and emit `"PAC auth failure on return"`.
 - **Atomic primitives with LSE / LL/SC runtime patching**: Phase 2 with spinlocks. The compile flag `+lse` is already set; the patching mechanism (`apply_alternatives()`) lands when atomics arrive.
 
-**Landed**: P1-H at commit `*(pending)*`.
+**Landed**: P1-H at commit `e8c9c5c`.
 
 ---
 
