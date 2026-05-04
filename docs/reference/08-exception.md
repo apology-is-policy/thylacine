@@ -312,7 +312,7 @@ P1-F is reactive — no per-tick overhead. Cost is paid only on exceptions:
 - Deliberate-fault test target — P1-I.
 - SError handler at Current-EL-SPx — Phase 2 (currently extinctions; design-wise SError is for hardware-uncorrectable errors and panic is the right answer until there's a recovery story).
 
-**Landed**: P1-F at commit `67a6b16`; P1-G IRQ extension at commit `*(pending)*`.
+**Landed**: P1-F at commit `67a6b16`; P1-G IRQ extension at commit `39eafb4`.
 
 ---
 

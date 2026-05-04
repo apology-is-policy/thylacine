@@ -299,7 +299,7 @@ VISION §4.5's IRQ-to-userspace handler p99 budget is < 5 µs. Kernel-internal I
 - Pi 5 support: GIC distributor at PA > 4 GiB; needs TTBR0 extension or high-VA mapping.
 - IRQ-driven UART. Mechanism is in place; routing through `gic_attach` is post-v1.0.
 
-**Landed**: P1-G at commit `*(pending)*`.
+**Landed**: P1-G at commit `39eafb4`.
 
 ---
 

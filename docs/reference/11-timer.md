@@ -220,7 +220,7 @@ CPU overhead at 1000 Hz is negligible. Phase 2's scheduler tick adds a few hundr
 - Frequency calibration / drift compensation. Post-v1.0.
 - Suspend-resume timer state save. Way post-v1.0 (suspend support arrives at v1.1 / v2.0).
 
-**Landed**: P1-G at commit `*(pending)*`.
+**Landed**: P1-G at commit `39eafb4`.
 
 ---
 

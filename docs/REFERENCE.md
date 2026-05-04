@@ -21,7 +21,7 @@ When a section describes a detail enforced by a spec, the spec's action / invari
 
 ## Snapshot
 
-- **Tip**: P1-G landed at commit `*(pending)*` — GIC v3 driver (`arch/arm64/gic.{h,c}`), ARM generic timer (`arch/arm64/timer.{h,c}`), `exception_irq_curr_el` + `.Lexception_return` shared trampoline in vectors.S, `mmu_map_device` for post-MMU MMIO mapping, multi-region DTB lookup helpers. The IRQ vector slot is now live; tick counter visible in the boot banner ("ticks: 9 (kernel breathing)"). Two new in-kernel tests: gic.init_smoke + timer.tick_increments. Phase 1 momentum: P1-A → P1-G complete; P1-H (hardening flags) next.
+- **Tip**: P1-G landed at commit `39eafb4` — GIC v3 driver (`arch/arm64/gic.{h,c}`), ARM generic timer (`arch/arm64/timer.{h,c}`), `exception_irq_curr_el` + `.Lexception_return` shared trampoline in vectors.S, `mmu_map_device` for post-MMU MMIO mapping, multi-region DTB lookup helpers. The IRQ vector slot is now live; tick counter visible in the boot banner ("ticks: 9 (kernel breathing)"). Two new in-kernel tests: gic.init_smoke + timer.tick_increments. Phase 1 momentum: P1-A → P1-G complete; P1-H (hardening flags) next.
 - **Phases**: Phase 0 done; Phase 1 in progress (P1-A through P1-G complete; P1-H next).
 - **Tests**: **6/6 in-kernel tests PASS** every boot (kaslr.mix64_avalanche, dtb.chosen_kaslr_seed_present, phys.alloc_smoke, slub.kmem_smoke, gic.init_smoke, timer.tick_increments). 1 integration check (`tools/test.sh`). 5+ consecutive boots all PASS. Host-side sanitizer matrix + 10000-iteration leak check land at P1-I.
 - **Specs**: 0 written; 9 planned.
