@@ -64,6 +64,7 @@ P1-C maps the low 4 GiB:
   - Override: the 2 MiB block containing `0x09000000` (PL011) → Device-nGnRnE block.
   - Override: the 2 MiB block containing the kernel image → table descriptor pointing at `l3_kernel`.
 - 1× **L3 table** for the kernel-image 2 MiB region (page-granular permissions).
+  - One PTE in this table — the slot for `_boot_stack_guard` — is left at zero (PTE_VALID=0). A stack overflow into the guard page faults synchronously rather than corrupting prior BSS. P1-C-extras Part A.
 
 Total page-table footprint: **7 × 4 KiB = 28 KiB**, BSS-allocated and zeroed by `start.S`.
 
@@ -200,14 +201,17 @@ P1-C measurements on QEMU virt under Hypervisor.framework:
 - Linker script exposes `_text_end`, `_rodata_end`, `_data_end` for per-section page assignment.
 - `bl mmu_enable` inserted in `_real_start` between BSS clear and `boot_main()`.
 
-**Deferred to P1-C-extras** (next sub-chunk):
+**Implemented at P1-C-extras Part A**:
+
+- Boot-stack guard page: 4 KiB non-present mapping at `_boot_stack_guard` (immediately below `_boot_stack_bottom`). `build_identity_map()` zeroes the L3 PTE for the guard slot after laying down the per-section mappings. Stack overflow now faults synchronously instead of silently corrupting BSS. The fault diagnostic ("kernel stack overflow") gets wired in P1-F when exception vectors land.
+- EL2 → EL1 drop diagnostic. (Lives in `arch/arm64/start.S`, not `mmu.c`. Cross-referenced from `docs/reference/01-boot.md`.)
+
+**Deferred to P1-C-extras Part B** (next sub-chunk):
 
 - KASLR (kernel image relocation into TTBR1 high half; PIE relocations; randomized offset from `dtb_get_chosen_kaslr_seed()`).
 - TTBR1 high-half mapping populated.
-- Boot stack guard page (non-present mapping below `_boot_stack_bottom`; catches stack overflow as a fault).
-- EL2→EL1 drop diagnostic (Pi 5 concern; not load-bearing for QEMU virt).
 
-**Landed**: P1-C at commit `(pending hash-fixup)`.
+**Landed**: P1-C at commit `6462227`; P1-C-extras Part A at commit `(pending hash-fixup)`.
 
 ---
 

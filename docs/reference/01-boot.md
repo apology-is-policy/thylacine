@@ -36,7 +36,7 @@ The boot path has no caller-facing API surface in the C sense; the entry point i
 
 QEMU's `-kernel` direct loader hands control to the kernel image. **At P1-B** (after adding the Linux ARM64 image header), QEMU recognizes the kernel as a Linux Image (`is_linux = 1`) and:
 
-- **EL**: EL1h (kernel mode, `SP_EL1` selected). QEMU virt boots at EL1 by default; if we ever come in at EL2 (Pi 5 bare metal post-v1.0), the EL2→EL1 drop sequence lands at P1-C / `arch/arm64/rpi5/boot.S`.
+- **EL**: EL1h on QEMU virt; EL2h on Pi 5 bare metal (and most modern firmware). The kernel handles both: at EL1 we proceed directly; at EL2 we drop to EL1h via the canonical SPSR_EL2 / ELR_EL2 / `eret` sequence (P1-C-extras). EL3 / EL0 entry is unsupported and halts silently (no UART available without a stack + DTB-discovered base — diagnostics surface at the boot banner via `_entered_at_el2`).
 - **x0**: DTB physical address. With the Linux ARM64 image header in place from P1-B, QEMU loads the DTB at `loader_start + min(ram_size/2, 128 MiB)` — for our 2 GiB RAM, that's `0x48000000` — and passes the address in `x0`. (At P1-A, before the image header was added, x0 was 0 and the DTB was never loaded — see `docs/reference/02-dtb.md` "Linux ARM64 image header" for the investigation that surfaced this.)
 - **x1..x3**: 0 (reserved by Linux protocol).
 - **MMU off, caches off**, interrupts masked. Single CPU executing.
@@ -45,13 +45,44 @@ The Linux ARM64 image header (64 bytes) lives at offset 0 of the binary. `code0`
 
 After the branch, `_real_start` performs, in order:
 
-1. **EL check**. Reads `CurrentEL`, branches to `.Lnot_el1` if not EL1. The wrong-EL handler halts silently — P1-C will replace this with a proper EL2→EL1 drop and a UART diagnostic.
-2. **DTB save into x19**. The DTB pointer in `x0` is moved to a callee-saved register because the BSS clear in step 4 would zero `_saved_dtb_ptr` if we wrote it first. (This was caught and fixed mid-implementation at P1-A; the bug-and-fix is documented in `start.S` comments.)
+1. **EL check + drop**. Reads `CurrentEL[3:2]`. If EL1, sets `x20 = 0` and continues. If EL2, runs the drop sequence (below). If EL3 or EL0, branches to `_hang` (silent halt — these are not realistic targets).
+2. **DTB save into x19**. The DTB pointer in `x0` is moved to a callee-saved register because the BSS clear in step 4 would zero `_saved_dtb_ptr` if we wrote it first. (This was caught and fixed mid-implementation at P1-A; the bug-and-fix is documented in `start.S` comments.) `x0` is preserved across the EL2 drop's `eret` per the AArch64 GP-register-passthrough rule.
 3. **Stack setup**. SP is set to `_boot_stack_top` (defined by the linker script, top of a 16 KiB BSS-allocated buffer; SP grows down).
 4. **BSS clear**. Zero `[_bss_start, _bss_end)` in 8-byte stride. The linker script guarantees both bounds are 8-byte-aligned (in fact, page-aligned).
-5. **DTB store**. After BSS is cleared, write the saved x19 value to `_saved_dtb_ptr`.
-6. **Branch to `boot_main()`**.
-7. **Fallthrough to `_hang`**. `boot_main()` is `noreturn`; if it ever returns, the assembly falls through into the `wfi` loop.
+5. **DTB store**. After BSS is cleared, write the saved x19 value to `_saved_dtb_ptr`. Write the saved x20 value (0 / 1) to `_entered_at_el2` so `boot_main()` can surface the el-entry diagnostic.
+6. **MMU enable** (P1-C). Identity-maps low 4 GiB; per-section permissions on the kernel image; W^X invariant I-12 enforced at PTE bit level. After return, kernel runs with caches enabled.
+7. **Branch to `boot_main()`**.
+8. **Fallthrough to `_hang`**. `boot_main()` is `noreturn`; if it ever returns, the assembly falls through into the `wfi` loop.
+
+#### EL2 → EL1 drop (P1-C-extras)
+
+If `CurrentEL == 2`, `_real_start` runs the canonical drop sequence per ARM ARM D1.6 (process state on exception return):
+
+| Step | Register | Value | Purpose |
+|---|---|---|---|
+| 1 | `HCR_EL2.RW` | 1 | EL1 is AArch64 |
+| 2 | `CNTHCTL_EL2.{EL1PCEN, EL1PCTEN}` | 1 | Allow EL1 to read physical timer + counter (used at P1-G) |
+| 3 | `CNTVOFF_EL2` | 0 | No virtual time offset |
+| 4 | `VTTBR_EL2` | 0 | No Stage 2 translation (we are not a hypervisor) |
+| 5 | `SCTLR_EL1` | `0x30D00800` | `INIT_SCTLR_EL1_MMU_OFF` — RES1 bits set, MMU/caches off, little-endian |
+| 6 | `SPSR_EL2` | `0x3C5` | Target = EL1h, DAIF masked |
+| 7 | `ELR_EL2` | `.Lpost_el2_drop` | Return target |
+| 8 | (eret) | — | Drop to EL1; GP regs (incl. x0 = DTB) preserved |
+
+`SCTLR_EL1 = 0x30D00800` sets bits 11, 20, 22, 23, 28, 29 (RES1 in ARMv8.0+ per ARM ARM D13.2.118) and clears everything else — MMU off, caches off, alignment checks off, little-endian. This matches Linux's `INIT_SCTLR_EL1_MMU_OFF`.
+
+`SPSR_EL2 = 0x3C5` is `M[3:0]=0b0101` (EL1h target with SP_EL1 selected) plus `D|A|I|F = 1` (DAIF masked) — interrupts stay masked across the drop and through subsequent boot until P1-F's GIC + exception vector setup unmasks them.
+
+After `eret`, control resumes at `.Lpost_el2_drop`, which sets `x20 = 1` and joins the `.Lel1_main` flow. `boot_main()` reads `_entered_at_el2` to print the diagnostic line:
+
+```
+  el-entry: EL2 -> EL1 (dropped)        # if entered at EL2
+  el-entry: EL1 (direct)                # if entered at EL1
+```
+
+QEMU virt always shows `EL1 (direct)`. Pi 5 bare metal (post-v1.0) will show `EL2 -> EL1 (dropped)`. The diagnostic is informational; the test gate is still the `Thylacine boot OK` line.
+
+The drop is **not** position-independent code on the entry side — it's plain assembly with PC-relative `adrp`. PIE relocations land at P1-C-extras KASLR (see "Status").
 
 ### Memory layout (`arch/arm64/kernel.ld`)
 
@@ -129,17 +160,22 @@ Holds the DTB physical address handed to us by the bootloader in `x0`. Populated
 
 16 KiB BSS-allocated buffer, page-aligned. `_boot_stack_bottom` and `_boot_stack_top` bracket it; `_start` sets `SP = _boot_stack_top` (highest address; SP grows down).
 
-P1-C will add a guard page below `_boot_stack_bottom` once the MMU is enabled — a non-present mapping that traps stack overflow into a recoverable fault.
+A 4 KiB **guard page** sits between BSS general data and the stack at `[_boot_stack_guard, _boot_stack_bottom)`. The page is BSS-allocated (zero-cleared at boot) but its L3 PTE is set to zero in `arch/arm64/mmu.c` — so any access (including a stack overflow that walks below `_boot_stack_bottom`) triggers a translation fault at EL1 stage 1 with `FAR_EL1` inside the guard region. Until P1-F's exception handler lands, the fault wedges QEMU; once the handler exists, it routes to `extinction("kernel stack overflow", FAR_EL1)`.
+
+The guard layout — 4 KiB page below the stack, mapped non-present — defends `boot_main()` and any future early kernel code. Each Phase 2 thread gets its own guard page once per-thread stacks land.
 
 ### Kernel image symbols (linker-script-defined)
 
 | Symbol | Meaning | Used by |
 |---|---|---|
-| `_kernel_start` | First byte of `.text` (== load address) | `boot_main()` for the banner; future relocator (P1-C KASLR) |
+| `_kernel_start` | First byte of `.text` (== load address) | `boot_main()` for the banner; future relocator (P1-C-extras KASLR) |
 | `_kernel_end` | First byte past `.bss` (page-aligned) | Future allocator bootstrap (P1-D) — first usable physical page is `_kernel_end` |
 | `_bss_start` / `_bss_end` | BSS bounds | `_start` BSS clear loop |
-| `_boot_stack_bottom` / `_boot_stack_top` | Boot stack bracket | `_start` stack setup; future overflow-detection (P1-C) |
+| `_boot_stack_guard` | First byte of the 4 KiB stack guard page (in BSS) | `mmu.c` — overrides this PTE to non-present in L3 |
+| `_boot_stack_bottom` | First usable byte of the stack (== `_boot_stack_guard + 4 KiB`) | linker ASSERT |
+| `_boot_stack_top` | Top of the boot stack | `_start` stack setup |
 | `_saved_dtb_ptr` | DTB physical address (BSS variable) | `_start` writes; `boot_main()` reads |
+| `_entered_at_el2` | 1 if dropped from EL2; 0 if direct EL1 entry (BSS variable) | `_start` writes; `boot_main()` reads for the el-entry banner line |
 
 ---
 
@@ -166,16 +202,20 @@ Manual verification confirmed at commit landing (this sub-chunk's commit). Autom
 
 ## Error paths
 
-P1-A error paths are minimal:
+Boot-path error handling at P1-C-extras:
 
-| Condition | Behavior | P1-A status |
+| Condition | Behavior | Status |
 |---|---|---|
-| Wrong-EL entry (not EL1) | Silent halt at `.Lnot_el1` | Provisional; P1-C adds UART diagnostic |
+| Entered at EL3 / EL0 | Silent halt at `_hang` | Defensive; not realistic on QEMU virt or Pi 5 (both deliver EL1 or EL2) |
+| Entered at EL2 | Drop to EL1; flag in `_entered_at_el2` | Designed (P1-C-extras); banner reports it |
+| Boot-stack overflow | Translation fault on guard page | Designed (P1-C-extras); P1-F's handler routes to `extinction("kernel stack overflow", FAR_EL1)` |
 | `boot_main()` returns | Falls through to `_hang` | Designed; defense in depth |
 | UART TX FIFO full | Spin on `FR.TXFF` | Bounded by host-side QEMU draining; not a real concern |
 | BSS clear miscount | Linker `ASSERT()` catches misalignment | Compile-time guard |
+| W^X PTE constructor regression | `_Static_assert` in `mmu.c` fails the build | P1-C compile-time guard |
+| Unhandled CPU exception | Wedged QEMU (no vector table yet) | Provisional; P1-F installs `arch/arm64/vectors.S` |
 
-P1-C lands the panic infrastructure: `panic(fmt, ...)` prints `PANIC: <message>` then halts. Until then, any unrecoverable condition is a silent halt or a bare-metal exception (which we don't yet handle — exception vectors land at P1-F).
+`extinction(msg)` (P1-C) is the kernel ELE primitive: prints `EXTINCTION: <msg>` then halts. Stack-overflow / W^X-violation / unhandled-fault paths route through it once P1-F's exception infrastructure lands.
 
 ---
 
@@ -217,18 +257,27 @@ The boot-to-banner figure is informal; rigorous measurement lands in P1-I with t
 - DTB-driven UART base via `uart_set_base()`; resolves invariant I-15.
 - DTB-driven memory size in the banner (`mem: 2048 MiB at 0x40000000`).
 
+**Implemented at P1-C**:
+
+- MMU enable in `_real_start` between BSS clear and `boot_main()`; identity map of low 4 GiB; per-section permissions for the kernel image; W^X invariant I-12 enforced at PTE bit level via `_Static_assert` on PTE constructors. See `docs/reference/03-mmu.md`.
+- `extinction()` / `extinction_with_addr()` / `ASSERT_OR_DIE()` — the kernel ELE primitive with the `EXTINCTION:` ABI prefix. See `docs/reference/04-extinction.md`.
+
+**Implemented at P1-C-extras** (Part A — EL drop + guard page):
+
+- EL2 → EL1 drop sequence in `_real_start` for firmware that hands the kernel control at EL2 (Pi 5). QEMU virt continues to enter at EL1 and falls through directly. The boot banner now carries an `el-entry: <EL1 (direct) | EL2 -> EL1 (dropped)>` diagnostic via the new `_entered_at_el2` BSS variable. EL3 / EL0 entry halts silently.
+- Boot-stack guard page: a 4 KiB BSS slot at `_boot_stack_guard` (immediately below `_boot_stack_bottom`) whose L3 PTE is zeroed by `arch/arm64/mmu.c`. A stack overflow now triggers a translation fault on the guard region — much louder than silently corrupting BSS. The fault diagnostic (`extinction("kernel stack overflow", FAR_EL1)`) gets wired in P1-F when exception vectors land.
+
 **Not yet implemented**:
 
-- MMU enablement (P1-C). All addresses are physical at P1-A/B; W^X is unenforced.
-- KASLR (P1-C). Kernel base is fixed at `0x40080000`.
+- KASLR (P1-C-extras Part B). Kernel base is fixed at `0x40080000`; the banner's `kernel base: …` line still shows the link address.
 - Physical frame allocator (P1-D).
 - SLUB kernel object allocator (P1-E).
-- GIC + exception vectors (P1-F).
+- GIC + exception vectors (P1-F). The guard page mapping is in place but the fault handler that observes it lands here.
 - ARM generic timer (P1-G).
 - Hardening flags (P1-H).
 - Phase 1 exit verification (P1-I).
 
-**Landed**: P1-A at commit `2b332d8`; P1-B at commit `(pending hash-fixup)`.
+**Landed**: P1-A at commit `2b332d8`; P1-B at commit `d3e33a8`; P1-C at commit `6462227`; P1-C-extras-a at commit `(pending hash-fixup)`.
 
 ---
 
@@ -244,13 +293,17 @@ At P1-A the kernel was loaded as an ELF; QEMU's ELF loader runs `is_linux = 0` a
 
 P1-A used a hardcoded PL011 base in `uart.c` and tracked it as a one-chunk-only `FIXME(I-15)`. P1-B replaced the hardcoded base with DTB-driven discovery via `dtb_get_compat_reg("arm,pl011", ...)`. The fallback (`0x09000000`, QEMU virt) remains in `uart.c` for the pre-`dtb_init` window plus recovery when the DTB is unparseable, but the normal-operation path is fully DTB-driven. Invariant I-15 satisfied.
 
-### Boot stack guard page
+### Boot stack guard page (resolved at P1-C-extras)
 
-The 16 KiB boot stack has no guard page at P1-A — the MMU isn't enabled. Stack overflow corrupts the BSS region just below `_boot_stack_bottom`. Risk is low because `boot_main()` does no significant stack work. P1-C adds an unmapped guard page once the MMU is up.
+P1-A through P1-C had no guard page — stack overflow silently corrupted the BSS region below `_boot_stack_bottom`. P1-C-extras adds a 4 KiB non-present mapping at `_boot_stack_guard` (`mmu.c`'s `build_identity_map()` zeroes the L3 PTE for the guard slot). Stack overflow now triggers a translation fault on the guard region. The fault diagnostic — routing to `extinction("kernel stack overflow", FAR_EL1)` — lands in P1-F when exception vectors are installed; until then, the fault wedges QEMU but is recognisable in the QEMU trace as a stage-1 EL1 abort with `FAR_EL1` inside `[_boot_stack_guard, _boot_stack_bottom)`.
 
 ### No exception handling
 
 If anything in `_start` or `boot_main()` faults, the CPU takes a synchronous exception with no handler — the result is QEMU reset or a wedged state. P1-F installs the exception vector table. Until then, treat boot as a fragile linear path.
+
+### Pi 5 entry-EL diagnostic only
+
+The EL2 → EL1 drop is exercised in code review (the disassembled sequence is correct) but not yet on a real Pi 5 — QEMU virt always enters at EL1. The first time it runs end-to-end is when the Pi 5 board target arrives (post-v1.0). Until then, the `el-entry: EL2 -> EL1 (dropped)` banner line is the diagnostic that confirms it worked.
 
 ---
 

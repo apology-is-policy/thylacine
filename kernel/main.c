@@ -25,6 +25,12 @@
 // before boot_main() is called.
 extern volatile u64 _saved_dtb_ptr;
 
+// From arch/arm64/start.S — 1 if the kernel was entered at EL2 and
+// dropped to EL1 by _real_start, 0 if entered at EL1 directly. Used
+// for the el-entry banner diagnostic; surfaces a Pi 5 (or other
+// EL2-entry firmware) condition that QEMU virt never exhibits.
+extern volatile u64 _entered_at_el2;
+
 // From arch/arm64/kernel.ld.
 extern char _kernel_start[];
 extern char _kernel_end[];
@@ -54,6 +60,13 @@ void boot_main(void) {
     uart_puts("Thylacine v" THYLACINE_VERSION_STRING "-dev booting...\n");
 
     uart_puts("  arch: arm64\n");
+
+    uart_puts("  el-entry: ");
+    if (_entered_at_el2) {
+        uart_puts("EL2 -> EL1 (dropped)\n");
+    } else {
+        uart_puts("EL1 (direct)\n");
+    }
 
     uart_puts("  cpus: 1 (P1-C; SMP at P1-F)\n");
 

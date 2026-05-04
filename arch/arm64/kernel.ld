@@ -13,17 +13,23 @@
  *   invariant (I-12) starts here even though MMU isn't enabled yet.
  *
  * - BSS-allocated boot stack: 16 KiB (THREAD_STACK_SIZE per ARCH §7.3 future
- *   commitment). Aligned to a page; a guard page below it is added at P1-C
- *   when the MMU lands and we can mark a page non-present.
+ *   commitment). Aligned to a page; a 4 KiB guard page sits BELOW the stack
+ *   at _boot_stack_guard. mmu.c zeroes its L3 PTE so a stack overflow into
+ *   the guard region faults synchronously instead of silently corrupting
+ *   BSS. The guard page is in BSS and zero-cleared by the BSS clear loop;
+ *   it becomes unreachable only after mmu_enable() runs.
  *
  * - At P1-A, the kernel runs at the load address with no relocation. KASLR
- *   relocation lands at P1-C; PIE flags are off in the toolchain file.
+ *   relocation lands at P1-C-extras; PIE flags are off in the toolchain
+ *   file at this sub-chunk and get flipped on when KASLR lands.
  *
  * Symbols exported for C code (see arch/arm64/start.S references):
  *   _kernel_start    — first byte of the kernel image (== load address)
  *   _kernel_end      — first byte past the kernel image
  *   _bss_start, _bss_end — BSS bounds (start.S clears this range)
- *   _boot_stack_top  — top of the boot stack (start.S sets SP to this)
+ *   _boot_stack_guard    — start of the 4 KiB stack guard page
+ *   _boot_stack_bottom   — first usable stack byte (== _boot_stack_guard + 4 KiB)
+ *   _boot_stack_top      — top of the boot stack (start.S sets SP to this)
  */
 
 ENTRY(_start)
@@ -65,10 +71,20 @@ SECTIONS
         *(.bss .bss.*)
         *(COMMON)
 
+        /* Stack guard page. mmu.c zeroes the L3 PTE for [_boot_stack_guard,
+         * _boot_stack_bottom) so a stack overflow faults synchronously
+         * (translation fault, FAR_EL1 inside the guard region) instead of
+         * silently corrupting prior BSS. The page is BSS-allocated and
+         * zero-cleared at boot; once mmu_enable() runs, it's unreachable
+         * via TTBR0/TTBR1. P1-F's fault handler will recognize FAR_EL1
+         * inside this region as a stack-overflow extinction. */
+        . = ALIGN(PAGE_SIZE);
+        _boot_stack_guard = .;
+        . += PAGE_SIZE;
+
         /* Boot stack lives in BSS so it's zeroed at startup. SP grows down,
          * so the "top" pointer in start.S is _boot_stack_top, which is the
          * highest address — i.e. the END of the buffer. */
-        . = ALIGN(PAGE_SIZE);
         _boot_stack_bottom = .;
         . += BOOT_STACK_SIZE;
         _boot_stack_top = .;
@@ -108,5 +124,7 @@ ASSERT(_kernel_start == KERNEL_LOAD_ADDR,
        "Kernel must load at KERNEL_LOAD_ADDR (0x40080000)")
 ASSERT((_boot_stack_top - _boot_stack_bottom) == BOOT_STACK_SIZE,
        "Boot stack size mismatch")
-ASSERT((_kernel_end - _kernel_start) < 0x100000,
-       "Kernel image > 1 MiB at P1-A; investigate before continuing")
+ASSERT((_boot_stack_bottom - _boot_stack_guard) == PAGE_SIZE,
+       "Boot stack guard page must be exactly 4 KiB")
+ASSERT((_kernel_end - _kernel_start) < 0x200000,
+       "Kernel image > 2 MiB; the L3 kernel mapping covers exactly 2 MiB")

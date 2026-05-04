@@ -49,6 +49,12 @@ extern char _rodata_end[];    // end of .rodata (== start of .data)
 extern char _data_end[];      // end of .data (== start of .bss)
 // _bss_start, _bss_end are already exported by kernel.ld.
 
+// Boot-stack guard page. Kernel.ld places this 4 KiB slot immediately
+// below the boot stack. mmu.c zeroes its L3 PTE in build_identity_map()
+// so a stack overflow faults synchronously rather than silently
+// corrupting prior BSS.
+extern char _boot_stack_guard[];
+
 // ---------------------------------------------------------------------------
 // Page table memory.
 //
@@ -229,6 +235,16 @@ static void build_identity_map(void) {
         // (.data is between de and bs but currently empty; the loop
         // above covers de..ke which includes both .data and .bss.)
         (void)bs;       // keep the symbol referenced for future use
+
+        // Boot-stack guard page → non-present (PTE_VALID=0). A stack
+        // overflow into [_boot_stack_guard, _boot_stack_bottom) takes
+        // a translation fault at EL1 stage 1 with FAR_EL1 inside the
+        // guard region — much louder than silently corrupting BSS.
+        // P1-F's exception handler will recognise this fault class and
+        // route it to extinction("kernel stack overflow", FAR_EL1).
+        u64 guard_pa = (u64)(uintptr_t)_boot_stack_guard;
+        u32 guard_idx = (u32)((guard_pa - kernel_2mib_base) >> PAGE_SHIFT);
+        l3_kernel[guard_idx] = 0;
 
         l2_table[gib][idx] = make_table_pte(l3_kernel);
     }
