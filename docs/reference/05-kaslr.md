@@ -259,7 +259,7 @@ Expected: 10 distinct offsets ranging across [0x200000, 0x3FFE00000) (2 MiB to 1
 - TTBR0 retire (Phase 2, when user mappings move into TTBR0). Today TTBR0 stays identity-mapped for low PA access.
 - `mmu.tla` formal spec (post-v1.0 unless a real bug surfaces).
 
-**Landed**: P1-C-extras Part B at commit `(pending hash-fixup)`.
+**Landed**: P1-C-extras Part B at commit `74fd391`.
 
 ---
 

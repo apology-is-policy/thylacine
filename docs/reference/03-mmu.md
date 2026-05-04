@@ -226,7 +226,7 @@ P1-C measurements on QEMU virt under Hypervisor.framework:
 - Page table footprint grew from 28 KiB to 40 KiB.
 - KASLR slide-aware kernel high-VA mapping invariant **I-16** satisfied. See `docs/reference/05-kaslr.md` for the entropy chain, .rela.dyn walker, and long-branch.
 
-**Landed**: P1-C at commit `6462227`; P1-C-extras Part A at commit `ff22ca3`; P1-C-extras Part B at commit `(pending hash-fixup)`.
+**Landed**: P1-C at commit `6462227`; P1-C-extras Part A at commit `ff22ca3`; P1-C-extras Part B at commit `74fd391`.
 
 ---
 

@@ -21,7 +21,7 @@ When a section describes a detail enforced by a spec, the spec's action / invari
 
 ## Snapshot
 
-- **Tip**: P1-C-extras landed in two parts. Part A (commit `ff22ca3`): EL2→EL1 drop diagnostic + boot-stack guard page. Part B (commit `(pending hash-fixup)`): KASLR — kernel runs at randomized high VA `0xFFFFA00*` via TTBR1, with .rela.dyn relocator infrastructure. Phase 1 invariants I-12 (W^X) and I-16 (KASLR) both satisfied.
+- **Tip**: P1-C-extras landed in two parts. Part A (commit `ff22ca3`): EL2→EL1 drop diagnostic + boot-stack guard page. Part B (commit `74fd391`): KASLR — kernel runs at randomized high VA `0xFFFFA00*` via TTBR1, with .rela.dyn relocator infrastructure. Phase 1 invariants I-12 (W^X) and I-16 (KASLR) both satisfied.
 - **Phases**: Phase 0 done; Phase 1 in progress (P1-A + P1-B + P1-C + P1-C-extras complete; P1-D physical allocator next).
 - **Tests**: 0 unit tests; 1 integration check (`tools/test.sh` boot-banner verify). PASS. 10 consecutive boots produce 10 distinct KASLR offsets. Test harness lands in P1-I.
 - **Specs**: 0 written; 9 planned.
