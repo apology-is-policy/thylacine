@@ -21,7 +21,7 @@ When a section describes a detail enforced by a spec, the spec's action / invari
 
 ## Snapshot
 
-- **Tip**: P1-F landed at commit `(pending hash-fixup)` — exception vector table + sync handler with stack-overflow / W^X-violation detection. Phase 1 momentum: P1-A → P1-F complete. Invariants I-12 (W^X), I-15 (DTB-driven HW discovery), and I-16 (KASLR) all live; the deferred fault paths from P1-C and P1-C-extras Part A finally close.
+- **Tip**: P1-F landed at commit `67a6b16` — exception vector table + sync handler with stack-overflow / W^X-violation detection. Phase 1 momentum: P1-A → P1-F complete. Invariants I-12 (W^X), I-15 (DTB-driven HW discovery), and I-16 (KASLR) all live; the deferred fault paths from P1-C and P1-C-extras Part A finally close.
 - **Phases**: Phase 0 done; Phase 1 in progress (P1-A through P1-F complete; P1-G ARM generic timer next, OR P1-F-extras GIC + IRQ-driven UART before that).
 - **Tests**: 0 unit tests; 1 integration check (`tools/test.sh` boot-banner verify). PASS. Boot smoke tests exercise both phys + SLUB; 5+ consecutive boots produce distinct KASLR offsets and successful smokes; vector table verified by disassembly + readelf. Test harness lands in P1-I.
 - **Specs**: 0 written; 9 planned.

@@ -284,7 +284,7 @@ P1-F is reactive — no per-tick overhead. Cost is paid only on exceptions:
 - Userspace exception entry — Phase 2 (lower-EL Sync becomes the syscall + page-fault path).
 - Deliberate-fault test target — P1-I.
 
-**Landed**: P1-F at commit `(pending hash-fixup)`.
+**Landed**: P1-F at commit `67a6b16`.
 
 ---
 
