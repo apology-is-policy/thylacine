@@ -20,6 +20,11 @@ set(KERNEL_SRCS
     ../mm/magazines.c
     ../mm/phys.c
     ../mm/slub.c
+    test/test.c
+    test/test_kaslr.c
+    test/test_dtb.c
+    test/test_phys.c
+    test/test_slub.c
 )
 
 set(KERNEL_LD_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/../arch/arm64/kernel.ld)

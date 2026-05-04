@@ -21,12 +21,12 @@ When a section describes a detail enforced by a spec, the spec's action / invari
 
 ## Snapshot
 
-- **Tip**: P1-F landed at commit `67a6b16` — exception vector table + sync handler with stack-overflow / W^X-violation detection. Phase 1 momentum: P1-A → P1-F complete. Invariants I-12 (W^X), I-15 (DTB-driven HW discovery), and I-16 (KASLR) all live; the deferred fault paths from P1-C and P1-C-extras Part A finally close.
-- **Phases**: Phase 0 done; Phase 1 in progress (P1-A through P1-F complete; P1-G ARM generic timer next, OR P1-F-extras GIC + IRQ-driven UART before that).
-- **Tests**: 0 unit tests; 1 integration check (`tools/test.sh` boot-banner verify). PASS. Boot smoke tests exercise both phys + SLUB; 5+ consecutive boots produce distinct KASLR offsets and successful smokes; vector table verified by disassembly + readelf. Test harness lands in P1-I.
+- **Tip**: in-kernel test harness landed at commit `(pending hash-fixup)` — kernel/test/{test.{h,c},test_kaslr.c,test_dtb.c,test_phys.c,test_slub.c} with sentinel-terminated registry, TEST_ASSERT macro, per-test PASS/FAIL on UART. Refactors the previous inline alloc/kmem smokes into named test cases. Phase 1 momentum: P1-A → P1-F complete + test harness; P1-G ARM generic timer + GIC + IRQ-driven UART next.
+- **Phases**: Phase 0 done; Phase 1 in progress (P1-A through P1-F + test harness complete; P1-G next).
+- **Tests**: **4/4 in-kernel tests PASS** every boot (kaslr.mix64_avalanche, dtb.chosen_kaslr_seed_present, phys.alloc_smoke, slub.kmem_smoke). 1 integration check (`tools/test.sh`). 5+ consecutive boots all PASS. Host-side sanitizer matrix + 10000-iteration leak check land at P1-I.
 - **Specs**: 0 written; 9 planned.
-- **LOC**: ~2080 C99 + ~370 ASM + ~75 linker-script + ~220 CMake/shell ≈ 2745 LOC.
-- **Kernel ELF**: ~165 KB debug. Flat binary: 16 KB. Page tables: 40 KiB BSS. struct page array: 24 MiB BSS. Vector table: 2 KiB in `.text`.
+- **LOC**: ~2280 C99 + ~370 ASM + ~75 linker-script + ~220 CMake/shell ≈ 2945 LOC.
+- **Kernel ELF**: ~175 KB debug. Flat binary: 25 KB. Page tables: 40 KiB BSS. struct page array: 24 MiB BSS. Vector table: 2 KiB in `.text`.
 
 For phase-level status see `docs/phaseN-status.md`. The reference below covers the as-built layers in bottom-up order. Per-subsystem files appear as their subsystems land during Phase 1 onward.
 
@@ -45,6 +45,7 @@ For phase-level status see `docs/phaseN-status.md`. The reference below covers t
 | [06-allocator.md](reference/06-allocator.md) | Physical allocator: struct page, mm/buddy.{h,c}, mm/magazines.{h,c}, mm/phys.{h,c} — DTB-driven bootstrap, buddy free lists, per-CPU magazines, public API | medium | **P1-D landed**; SLUB layered on alloc_pages at P1-E |
 | [07-slub.md](reference/07-slub.md) | SLUB kernel object allocator: mm/slub.{h,c} — per-cache partial slab list, embedded freelist, kmalloc / kfree / kmem_cache_*, bootstrap via meta cache | medium | **P1-E landed**; multi-page slabs (>2 KiB caches) post-v1.0 |
 | [08-exception.md](reference/08-exception.md) | Exception handling: arch/arm64/{vectors.S, exception.{h,c}} — 16-entry vector table, KERNEL_ENTRY save, sync handler with stack-overflow + W^X violation detection, exception_unexpected catch-all | medium | **P1-F landed**; per-CPU exception stack at Phase 2; GIC + IRQ at P1-G |
+| [09-test-harness.md](reference/09-test-harness.md) | In-kernel test harness: kernel/test/{test.{h,c},test_*.c} — sentinel-terminated registry, TEST_ASSERT macro, per-test PASS/FAIL reporting; 4 leaf-API tests at v1.0 | small | **landed**; host-side sanitizer matrix + 10000-iteration leak check at P1-I |
 | 07-irq.md (planned) | GIC + exception vectors + IPI | small | Phase 1-2 |
 | 05-process.md (planned) | Proc + Thread + rfork + notes + errstr | medium | Phase 2 |
 | 06-scheduler.md (planned) | EEVDF + per-CPU + work-stealing | medium | Phase 2 |

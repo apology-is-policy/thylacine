@@ -94,4 +94,11 @@ u64 kaslr_kernel_high_base(void);
 u64 kaslr_kernel_pa_start(void);
 u64 kaslr_kernel_pa_end(void);
 
+// Test-only accessor for the SipHash-style avalanche mix function.
+// Exposed because mix64 is the closest thing to a pure function in
+// kaslr.c — testing it independently of the boot path is the cheapest
+// way to verify the entropy chain stays well-behaved across compiler
+// changes. Not part of the production API.
+u64 kaslr_test_mix64(u64 x);
+
 #endif // THYLACINE_ARCH_ARM64_KASLR_H

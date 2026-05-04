@@ -57,8 +57,9 @@ After the branch, `_real_start` performs, in order:
 10. **`phys_init()`** (P1-D). Reads RAM range from DTB, reserves kernel image / struct-page array / DTB blob / low firmware, pushes the rest onto the buddy. Initializes per-CPU magazines. See `docs/reference/06-allocator.md`. Followed by an alloc/free smoke test that exercises the magazine fast path and a non-magazine order; gates on `phys_free_pages() == baseline` after a `magazines_drain_all`.
 11. **`slub_init()`** (P1-E). Sets up the meta cache (for `struct kmem_cache` itself) plus the standard `kmalloc-{8..2048}` caches. See `docs/reference/07-slub.md`. Followed by a kmem smoke test that exercises small / mixed / large kmalloc paths plus a `kmem_cache_create` round-trip; gates on `phys_free_pages() == baseline` after `magazines_drain_all`.
 12. **`exception_init()`** (P1-F). Sets `VBAR_EL1` to `_exception_vectors`. Sync exceptions now route through `arch/arm64/exception.c` — boot-stack-guard accesses → `extinction("kernel stack overflow", FAR_EL1)`; W^X violations on kernel image → `extinction("PTE violates W^X")`; other faults → `extinction` with ESR/FAR/ELR. IRQ / FIQ / SError vectors and lower-EL entries all route to `exception_unexpected`. See `docs/reference/08-exception.md`.
-13. **Banner finishes** (ram, alloc smoke, kmem smoke, phase) and prints `Thylacine boot OK`.
-14. **Fallthrough to `_hang`**. `boot_main()` is `noreturn`; if it ever returns, the assembly falls through into the `wfi` loop.
+13. **`test_run_all()`** (test harness). Walks `kernel/test/test.c`'s `g_tests[]` array; each test reports PASS/FAIL on UART. Currently 4 tests: kaslr.mix64_avalanche, dtb.chosen_kaslr_seed_present, phys.alloc_smoke, slub.kmem_smoke. `boot_main` extinctions if any test fails. See `docs/reference/09-test-harness.md`.
+14. **Banner finishes** (ram, test summary, phase) and prints `Thylacine boot OK`.
+15. **Fallthrough to `_hang`**. `boot_main()` is `noreturn`; if it ever returns, the assembly falls through into the `wfi` loop.
 
 #### EL2 → EL1 drop (P1-C-extras)
 
@@ -124,10 +125,14 @@ Thylacine v0.1.0-dev booting...
   dtb:  0x0000000048000000 (parsed)
   uart: 0x0000000009000000 (DTB-driven)
   hardening: MMU+W^X+extinction+KASLR+vectors (P1-F; PAC/MTE/CFI at P1-H)
-  kernel base: 0xffffa0028d880000 (KASLR offset 0x000000028d800000, seed: DTB /chosen/kaslr-seed)
-  ram: 2048 MiB total, 2022 MiB free, 26216 KiB reserved (kernel + struct_page + DTB)
-  alloc smoke: PASS (256 x 4 KiB + 2 MiB + 4 MiB alloc+free; free count restored)
-  kmem smoke: PASS (1500 x kmalloc-8 + mixed sizes + 8 KiB direct + custom cache)
+  kernel base: 0xffffa00220e80000 (KASLR offset 0x0000000220e00000, seed: DTB /chosen/kaslr-seed)
+  ram: 2048 MiB total, 2022 MiB free, 26224 KiB reserved (kernel + struct_page + DTB)
+  tests:
+    [test] kaslr.mix64_avalanche ... PASS
+    [test] dtb.chosen_kaslr_seed_present ... PASS
+    [test] phys.alloc_smoke ... PASS
+    [test] slub.kmem_smoke ... PASS
+  tests: 4/4 PASS
   phase: P1-F
 Thylacine boot OK
 ```

@@ -20,6 +20,7 @@
 #include "../mm/phys.h"
 #include "../mm/magazines.h"
 #include "../mm/slub.h"
+#include "test/test.h"
 
 #include <stdint.h>
 #include <thylacine/dtb.h>
@@ -136,60 +137,6 @@ void boot_main(void) {
     uart_putdec((reserved * PAGE_SIZE) / 1024UL);
     uart_puts(" KiB reserved (kernel + struct_page + DTB)\n");
 
-    // Smoke test: alloc/free 256 single pages plus a 2 MiB block;
-    // verify free count returns to baseline. A real test harness
-    // lands at P1-I; this is a sanity check that exercises the
-    // magazine fast path (orders 0 and 9), the magazine refill /
-    // drain, AND a non-magazine order (>=10 falls through to buddy
-    // direct).
-    {
-        u64 baseline = phys_free_pages();
-        #define SMOKE_N 256
-        struct page *pages[SMOKE_N];
-        bool ok = true;
-        for (int i = 0; i < SMOKE_N; i++) {
-            pages[i] = alloc_pages(0, KP_ZERO);
-            if (!pages[i]) { ok = false; break; }
-        }
-        for (int i = 0; i < SMOKE_N; i++) {
-            if (pages[i]) free_pages(pages[i], 0);
-        }
-
-        // Order-9 (2 MiB) round-trip — exercises the second magazine slot.
-        struct page *big2 = alloc_pages(9, KP_ZERO);
-        if (!big2) ok = false;
-        if (big2) free_pages(big2, 9);
-
-        // Order-10 (4 MiB) round-trip — bypasses magazines, hits buddy
-        // direct + tests split/merge of larger blocks.
-        struct page *big10 = alloc_pages(10, 0);
-        if (!big10) ok = false;
-        if (big10) free_pages(big10, 10);
-
-        // Drain magazines back to buddy so the accounting is exact.
-        // (Without this, the per-CPU magazine retains pages refilled
-        // during the test — pages that are "allocated" from the buddy's
-        // perspective even though the test logically returned them.)
-        magazines_drain_all();
-
-        u64 after = phys_free_pages();
-        uart_puts("  alloc smoke: ");
-        if (ok && after == baseline) {
-            uart_puts("PASS (256 x 4 KiB + 2 MiB + 4 MiB alloc+free; free count restored)\n");
-        } else {
-            uart_puts("FAIL (");
-            if (!ok) uart_puts("alloc returned NULL; ");
-            if (after != baseline) {
-                uart_puts("free count drift baseline=");
-                uart_putdec(baseline);
-                uart_puts(" after=");
-                uart_putdec(after);
-            }
-            uart_puts(")\n");
-            extinction("phys_init smoke test failed");
-        }
-    }
-
     // Phase 3: SLUB on top of phys. Standard kmalloc-* caches plus
     // a meta cache for kmem_cache_create. Public API: kmalloc /
     // kfree / kmem_cache_*.
@@ -205,73 +152,24 @@ void boot_main(void) {
     // P1-G adds GIC and IRQ dispatch, Phase 2 adds userspace).
     exception_init();
 
-    // SLUB smoke test: small + medium + large allocations through
-    // both kmalloc paths (slab vs direct alloc_pages), plus a
-    // dynamic kmem_cache_create / alloc / free / destroy round
-    // trip. Drain magazines + verify phys_free_pages() returns to
-    // baseline.
-    {
-        u64 baseline = phys_free_pages();
-        bool ok = true;
-
-        // Many small allocations from kmalloc-8 (forces multiple
-        // slab pages — each 4 KiB slab holds 512 8-byte objects).
-        // Static so the 12 KiB array doesn't crowd the boot stack
-        // (16 KiB total minus the rest of boot_main's frames).
-        #define KMEM_SMOKE_SMALL_N 1500
-        static void *smalls[KMEM_SMOKE_SMALL_N];
-        for (int i = 0; i < KMEM_SMOKE_SMALL_N; i++) {
-            smalls[i] = kmalloc(8, KP_ZERO);
-            if (!smalls[i]) { ok = false; break; }
-        }
-        for (int i = 0; i < KMEM_SMOKE_SMALL_N; i++) {
-            if (smalls[i]) kfree(smalls[i]);
-        }
-
-        // Mixed-size kmalloc round-trip: each cache exercised once.
-        size_t sizes[] = { 16, 64, 128, 512, 2048 };
-        for (size_t i = 0; i < sizeof(sizes) / sizeof(sizes[0]); i++) {
-            void *p = kmalloc(sizes[i], 0);
-            if (!p) { ok = false; break; }
-            kfree(p);
-        }
-
-        // Large allocation that bypasses slab (>2048 → direct
-        // alloc_pages path).
-        void *big = kzalloc(8192, 0);
-        if (!big) ok = false;
-        if (big) kfree(big);
-
-        // Custom typed cache via kmem_cache_create. Allocate a
-        // handful, free them, destroy the cache.
-        struct kmem_cache *c = kmem_cache_create("smoke-typed", 100, 16, 0);
-        if (!c) ok = false;
-        if (c) {
-            void *t1 = kmem_cache_alloc(c, KP_ZERO);
-            void *t2 = kmem_cache_alloc(c, KP_ZERO);
-            if (!t1 || !t2) ok = false;
-            if (t1) kmem_cache_free(c, t1);
-            if (t2) kmem_cache_free(c, t2);
-            kmem_cache_destroy(c);
-        }
-
-        magazines_drain_all();
-        u64 after = phys_free_pages();
-        uart_puts("  kmem smoke: ");
-        if (ok && after == baseline) {
-            uart_puts("PASS (1500 x kmalloc-8 + mixed sizes + 8 KiB direct + custom cache)\n");
-        } else {
-            uart_puts("FAIL (");
-            if (!ok) uart_puts("alloc returned NULL; ");
-            if (after != baseline) {
-                uart_puts("free count drift baseline=");
-                uart_putdec(baseline);
-                uart_puts(" after=");
-                uart_putdec(after);
-            }
-            uart_puts(")\n");
-            extinction("slub smoke test failed");
-        }
+    // In-kernel test harness. Runs every test in g_tests[] (kaslr
+    // mix64 avalanche, DTB chosen seed presence, refactored phys
+    // alloc smoke, refactored slub kmem smoke). Tests cover stable
+    // leaf APIs only — internal data-structure invariants are
+    // tested implicitly via the smoke flows so we don't pin
+    // ourselves to evolving subsystem layouts. Future host-side
+    // sanitizer matrix lands at P1-I.
+    uart_puts("  tests:\n");
+    test_run_all();
+    uart_puts("  tests: ");
+    uart_putdec(test_passed());
+    uart_puts("/");
+    uart_putdec(test_total());
+    if (test_all_passed()) {
+        uart_puts(" PASS\n");
+    } else {
+        uart_puts(" FAIL\n");
+        extinction("kernel test suite failed");
     }
 
     uart_puts("  phase: " THYLACINE_PHASE_STRING "\n");

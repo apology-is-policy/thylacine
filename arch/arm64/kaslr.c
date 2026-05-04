@@ -121,6 +121,13 @@ static u64 mix64(u64 x) {
     return x;
 }
 
+// Test wrapper — see kaslr.h. Forwards to the static mix64 so the
+// in-kernel test harness (kernel/test/test_kaslr.c) can verify the
+// avalanche property without duplicating the algorithm.
+u64 kaslr_test_mix64(u64 x) {
+    return mix64(x);
+}
+
 // ---------------------------------------------------------------------------
 // Relocation walker.
 //
