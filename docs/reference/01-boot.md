@@ -301,7 +301,7 @@ The boot-to-banner figure is informal; rigorous measurement lands in P1-I with t
 - Hardening flags (P1-H).
 - Phase 1 exit verification (P1-I).
 
-**Landed**: P1-A at commit `2b332d8`; P1-B at commit `d3e33a8`; P1-C at commit `6462227`; P1-C-extras Part A at commit `ff22ca3`; P1-C-extras Part B at commit `74fd391`; P1-D at commit `198c48c`; P1-E at commit `(pending hash-fixup)`.
+**Landed**: P1-A at commit `2b332d8`; P1-B at commit `d3e33a8`; P1-C at commit `6462227`; P1-C-extras Part A at commit `ff22ca3`; P1-C-extras Part B at commit `74fd391`; P1-D at commit `198c48c`; P1-E at commit `e867e3b`.
 
 ---
 

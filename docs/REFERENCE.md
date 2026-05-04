@@ -21,7 +21,7 @@ When a section describes a detail enforced by a spec, the spec's action / invari
 
 ## Snapshot
 
-- **Tip**: P1-E landed at commit `(pending hash-fixup)` — SLUB kernel object allocator (kmalloc / kfree / kmem_cache_*). Phase 1 momentum: P1-A → P1-E complete. Invariants I-12 (W^X), I-15 (DTB-driven HW discovery), and I-16 (KASLR) all live.
+- **Tip**: P1-E landed at commit `e867e3b` — SLUB kernel object allocator (kmalloc / kfree / kmem_cache_*). Phase 1 momentum: P1-A → P1-E complete. Invariants I-12 (W^X), I-15 (DTB-driven HW discovery), and I-16 (KASLR) all live.
 - **Phases**: Phase 0 done; Phase 1 in progress (P1-A through P1-E complete; P1-F GIC + exception vectors next).
 - **Tests**: 0 unit tests; 1 integration check (`tools/test.sh` boot-banner verify). PASS. Boot smoke tests exercise both phys (256 × 4 KiB + 2 MiB + 4 MiB) and SLUB (1500 × kmalloc-8 + mixed sizes + 8 KiB direct + custom cache); 5+ consecutive boots produce distinct KASLR offsets. Test harness lands in P1-I.
 - **Specs**: 0 written; 9 planned.

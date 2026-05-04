@@ -315,7 +315,7 @@ Latency numbers are estimates — formal benchmarks at P1-I.
 - 10000-iteration leak check + sanitizer matrix (P1-I).
 - Free-object cookie / double-free detection (P1-I or post-v1.0).
 
-**Landed**: P1-E at commit `(pending hash-fixup)`.
+**Landed**: P1-E at commit `e867e3b`.
 
 ---
 
