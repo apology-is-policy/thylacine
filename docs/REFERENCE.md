@@ -21,12 +21,12 @@ When a section describes a detail enforced by a spec, the spec's action / invari
 
 ## Snapshot
 
-- **Tip**: P1-C-extras landed in two parts. Part A (commit `ff22ca3`): EL2→EL1 drop diagnostic + boot-stack guard page. Part B (commit `74fd391`): KASLR — kernel runs at randomized high VA `0xFFFFA00*` via TTBR1, with .rela.dyn relocator infrastructure. Phase 1 invariants I-12 (W^X) and I-16 (KASLR) both satisfied.
-- **Phases**: Phase 0 done; Phase 1 in progress (P1-A + P1-B + P1-C + P1-C-extras complete; P1-D physical allocator next).
-- **Tests**: 0 unit tests; 1 integration check (`tools/test.sh` boot-banner verify). PASS. 10 consecutive boots produce 10 distinct KASLR offsets. Test harness lands in P1-I.
+- **Tip**: P1-D landed at commit `(pending hash-fixup)` — physical allocator (buddy + per-CPU magazines + DTB-driven bootstrap). Phase 1 momentum: P1-A → P1-D complete. Invariants I-12 (W^X), I-15 (DTB-driven HW discovery), and I-16 (KASLR) all live.
+- **Phases**: Phase 0 done; Phase 1 in progress (P1-A + P1-B + P1-C + P1-C-extras + P1-D complete; P1-E SLUB kernel-object allocator next).
+- **Tests**: 0 unit tests; 1 integration check (`tools/test.sh` boot-banner verify). PASS. Boot smoke test exercises 256 × 4 KiB + 2 MiB + 4 MiB alloc/free with `magazines_drain_all` for clean accounting. 5+ consecutive boots produce distinct KASLR offsets. Test harness lands in P1-I.
 - **Specs**: 0 written; 9 planned.
-- **LOC**: ~860 C99 + ~210 ASM + ~75 linker-script + ~220 CMake/shell ≈ 1365 LOC.
-- **Kernel ELF**: 117 KB debug / ~108 KB stripped. Kernel flat binary: 16 KB. Page tables: 40 KiB BSS-allocated.
+- **LOC**: ~1430 C99 + ~210 ASM + ~75 linker-script + ~220 CMake/shell ≈ 1935 LOC.
+- **Kernel ELF**: ~138 KB debug. Flat binary: 16 KB. Page tables: 40 KiB BSS. struct page array: 16 MiB BSS (sized for 2 GiB RAM).
 
 For phase-level status see `docs/phaseN-status.md`. The reference below covers the as-built layers in bottom-up order. Per-subsystem files appear as their subsystems land during Phase 1 onward.
 
@@ -42,7 +42,8 @@ For phase-level status see `docs/phaseN-status.md`. The reference below covers t
 | [03-mmu.md](reference/03-mmu.md) | MMU + W^X invariant I-12: arch/arm64/mmu.{h,c}; PTE constructors with _Static_asserts; TTBR0 identity + TTBR1 high-half (KASLR-aware) | medium | **P1-C + P1-C-extras landed**; SMP secondary bring-up at Phase 2 |
 | [04-extinction.md](reference/04-extinction.md) | Kernel ELE — extinction(msg) + ASSERT_OR_DIE; EXTINCTION: ABI prefix per TOOLING.md §10 | small | **P1-C landed**; first deliberate caller at P1-F (fault handler) |
 | [05-kaslr.md](reference/05-kaslr.md) | KASLR (invariant I-16): arch/arm64/kaslr.{h,c}; entropy chain (DTB kaslr-seed / rng-seed / cntpct fallback); .rela.dyn relocator; long-branch into TTBR1 | medium | **P1-C-extras Part B landed**; entropy bump (13 → 18 bits) is post-v1.0 hardening |
-| 06-allocator.md (planned) | Buddy + per-CPU magazines + SLUB | medium | Phase 1 (P1-D, P1-E) |
+| [06-allocator.md](reference/06-allocator.md) | Physical allocator: struct page, mm/buddy.{h,c}, mm/magazines.{h,c}, mm/phys.{h,c} — DTB-driven bootstrap, buddy free lists, per-CPU magazines, public API | medium | **P1-D landed**; SLUB layered on alloc_pages at P1-E |
+| 07-allocator-slub.md (planned) | SLUB kernel object allocator | medium | Phase 1 (P1-E) |
 | 07-irq.md (planned) | GIC + exception vectors + IPI | small | Phase 1-2 |
 | 05-process.md (planned) | Proc + Thread + rfork + notes + errstr | medium | Phase 2 |
 | 06-scheduler.md (planned) | EEVDF + per-CPU + work-stealing | medium | Phase 2 |

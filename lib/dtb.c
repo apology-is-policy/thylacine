@@ -144,6 +144,10 @@ bool dtb_is_ready(void) {
     return g_dtb.ready;
 }
 
+u32 dtb_get_total_size(void) {
+    return g_dtb.ready ? g_dtb.totalsize : 0;
+}
+
 // ---------------------------------------------------------------------------
 // Structure-block walker.
 //

@@ -16,9 +16,13 @@
 
 #include "uart.h"
 #include "../arch/arm64/kaslr.h"
+#include "../mm/phys.h"
+#include "../mm/magazines.h"
 
 #include <stdint.h>
 #include <thylacine/dtb.h>
+#include <thylacine/extinction.h>
+#include <thylacine/page.h>
 #include <thylacine/types.h>
 
 // From arch/arm64/start.S — DTB physical address handed to us by the
@@ -110,6 +114,79 @@ void boot_main(void) {
     uart_puts(", seed: ");
     uart_puts(kaslr_seed_source_str(kaslr_get_seed_source()));
     uart_puts(")\n");
+
+    // Phase 2: bring up the physical allocator. Reads RAM range from
+    // DTB, reserves [low firmware, kernel image, struct page array,
+    // DTB blob], pushes the rest onto the buddy.
+    if (!phys_init()) {
+        extinction("phys_init failed");
+    }
+
+    u64 total_pages    = phys_total_pages();
+    u64 free_pages_now = phys_free_pages();
+    u64 reserved       = phys_reserved_pages();
+
+    uart_puts("  ram: ");
+    uart_putdec((total_pages * PAGE_SIZE) / (1024UL * 1024UL));
+    uart_puts(" MiB total, ");
+    uart_putdec((free_pages_now * PAGE_SIZE) / (1024UL * 1024UL));
+    uart_puts(" MiB free, ");
+    uart_putdec((reserved * PAGE_SIZE) / 1024UL);
+    uart_puts(" KiB reserved (kernel + struct_page + DTB)\n");
+
+    // Smoke test: alloc/free 256 single pages plus a 2 MiB block;
+    // verify free count returns to baseline. A real test harness
+    // lands at P1-I; this is a sanity check that exercises the
+    // magazine fast path (orders 0 and 9), the magazine refill /
+    // drain, AND a non-magazine order (>=10 falls through to buddy
+    // direct).
+    {
+        u64 baseline = phys_free_pages();
+        #define SMOKE_N 256
+        struct page *pages[SMOKE_N];
+        bool ok = true;
+        for (int i = 0; i < SMOKE_N; i++) {
+            pages[i] = alloc_pages(0, KP_ZERO);
+            if (!pages[i]) { ok = false; break; }
+        }
+        for (int i = 0; i < SMOKE_N; i++) {
+            if (pages[i]) free_pages(pages[i], 0);
+        }
+
+        // Order-9 (2 MiB) round-trip — exercises the second magazine slot.
+        struct page *big2 = alloc_pages(9, KP_ZERO);
+        if (!big2) ok = false;
+        if (big2) free_pages(big2, 9);
+
+        // Order-10 (4 MiB) round-trip — bypasses magazines, hits buddy
+        // direct + tests split/merge of larger blocks.
+        struct page *big10 = alloc_pages(10, 0);
+        if (!big10) ok = false;
+        if (big10) free_pages(big10, 10);
+
+        // Drain magazines back to buddy so the accounting is exact.
+        // (Without this, the per-CPU magazine retains pages refilled
+        // during the test — pages that are "allocated" from the buddy's
+        // perspective even though the test logically returned them.)
+        magazines_drain_all();
+
+        u64 after = phys_free_pages();
+        uart_puts("  alloc smoke: ");
+        if (ok && after == baseline) {
+            uart_puts("PASS (256 x 4 KiB + 2 MiB + 4 MiB alloc+free; free count restored)\n");
+        } else {
+            uart_puts("FAIL (");
+            if (!ok) uart_puts("alloc returned NULL; ");
+            if (after != baseline) {
+                uart_puts("free count drift baseline=");
+                uart_putdec(baseline);
+                uart_puts(" after=");
+                uart_putdec(after);
+            }
+            uart_puts(")\n");
+            extinction("phys_init smoke test failed");
+        }
+    }
 
     uart_puts("  phase: " THYLACINE_PHASE_STRING "\n");
 

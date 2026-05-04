@@ -38,6 +38,24 @@ extern char _kernel_start[];
 static u64 g_kaslr_offset;
 static kaslr_seed_source_t g_kaslr_seed_source;
 
+// Load PAs of the kernel image, cached during kaslr_init while we're
+// still running at PA (PC = load PA, so PC-relative adrp+add gives
+// the load PA). After the long-branch into TTBR1, PC-relative gives
+// high VA, so phys_init reads these accessors instead of recomputing.
+//
+// `volatile` is load-bearing here. Without it, clang at -O2 with
+// -fpie -mcmodel=tiny folds the store-then-load pattern: it observes
+// that g_kernel_pa_start is only ever assigned `(uintptr_t)_kernel_start`
+// (which it treats as a link-time constant) and rewrites the storage
+// as a 1-byte boolean ("was it set?"), then in the accessor returns
+// the link-time address gated on that boolean. At runtime under PIE,
+// the link-time address ≠ load PA, so the value comes back wrong.
+// The fix is to force actual 8-byte memory traffic via volatile —
+// the address that gets stored is the one the adrp+add at the call
+// site computed (PA when running pre-MMU, high VA after the branch).
+static volatile u64 g_kernel_pa_start;
+static volatile u64 g_kernel_pa_end;
+
 u64 kaslr_get_offset(void) {
     return g_kaslr_offset;
 }
@@ -55,6 +73,14 @@ u64 kaslr_high_va_addr(void *pa) {
 
 u64 kaslr_kernel_high_base(void) {
     return KASLR_LINK_VA + g_kaslr_offset;
+}
+
+u64 kaslr_kernel_pa_start(void) {
+    return g_kernel_pa_start;
+}
+
+u64 kaslr_kernel_pa_end(void) {
+    return g_kernel_pa_end;
 }
 
 const char *kaslr_seed_source_str(kaslr_seed_source_t s) {
@@ -145,6 +171,16 @@ static void apply_relocations(u64 slide) {
 u64 kaslr_init(void) {
     u64 raw = 0;
     kaslr_seed_source_t source = KASLR_SEED_NONE;
+
+    // Cache load-PA bounds of the kernel image. We're still running
+    // at PA here (PC = load PA pre-MMU + pre-long-branch), so the
+    // PC-relative adrp+add evaluates to the runtime load PA. After
+    // the long-branch into TTBR1 (kicked by start.S), the same
+    // expression resolves to the high VA — phys_init reads these
+    // cached values instead.
+    g_kernel_pa_start = (u64)(uintptr_t)_kernel_start;
+    extern char _kernel_end[];
+    g_kernel_pa_end   = (u64)(uintptr_t)_kernel_end;
 
     // Initialize the DTB parser if the boot stub didn't already.
     if (!dtb_is_ready()) {

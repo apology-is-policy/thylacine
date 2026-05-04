@@ -46,6 +46,11 @@ bool dtb_init(paddr_t base);
 // Whether dtb_init() previously succeeded.
 bool dtb_is_ready(void);
 
+// Total size in bytes of the DTB blob (= the FDT header's totalsize
+// field). Used by phys_init to reserve the DTB region from the
+// physical allocator. Returns 0 if dtb_init has not run.
+u32 dtb_get_total_size(void);
+
 // Get the first /memory@... node's first (base, size) pair.
 //
 // Assumes #address-cells = 2 and #size-cells = 2 at the root, which is

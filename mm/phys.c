@@ -1,0 +1,214 @@
+// Physical allocator coordinator + DTB-driven bootstrap.
+//
+// Layout:
+//   [mem_base, _kernel_pa_start)             — RESERVED low firmware region
+//   [_kernel_pa_start, _kernel_pa_end)       — RESERVED kernel image
+//   [struct_page_pa_start, struct_page_pa_end) — RESERVED struct page array
+//   [..., dtb_pa_start)                       — FREE
+//   [dtb_pa_start, dtb_pa_end)                — RESERVED DTB blob
+//   [dtb_pa_end, mem_end)                     — FREE
+//
+// We sort the three reservation ranges by start address, then walk
+// the gaps between them and call buddy_free_region for each gap.
+//
+// Per ARCHITECTURE.md §6.3.
+
+#include "phys.h"
+#include "buddy.h"
+#include "magazines.h"
+
+#include "../arch/arm64/kaslr.h"
+
+#include <thylacine/dtb.h>
+#include <thylacine/extinction.h>
+#include <thylacine/page.h>
+#include <thylacine/types.h>
+
+extern volatile u64 _saved_dtb_ptr;
+
+// Snapshot of the layout for diagnostic queries (banner).
+static u64 g_total_pages;
+static u64 g_initial_free_pages;
+
+// ---------------------------------------------------------------------------
+// Layout helpers.
+// ---------------------------------------------------------------------------
+
+struct reservation { paddr_t start; paddr_t end; };
+
+static void sort3_by_start(struct reservation r[3]) {
+    // Tiny insertion sort; three elements.
+    for (int i = 1; i < 3; i++) {
+        struct reservation key = r[i];
+        int j = i - 1;
+        while (j >= 0 && r[j].start > key.start) {
+            r[j + 1] = r[j];
+            j--;
+        }
+        r[j + 1] = key;
+    }
+}
+
+static inline paddr_t round_up(paddr_t v, paddr_t a) {
+    return (v + (a - 1)) & ~(a - 1);
+}
+
+static inline paddr_t round_down(paddr_t v, paddr_t a) {
+    return v & ~(a - 1);
+}
+
+// ---------------------------------------------------------------------------
+// phys_init.
+// ---------------------------------------------------------------------------
+
+bool phys_init(void) {
+    if (!dtb_is_ready()) {
+        extinction("phys_init: DTB not ready");
+    }
+
+    // 1. Discover RAM.
+    u64 mem_base, mem_size;
+    if (!dtb_get_memory(&mem_base, &mem_size)) {
+        extinction("phys_init: DTB has no /memory node");
+    }
+    paddr_t zone_base = (paddr_t)mem_base;
+    paddr_t zone_end  = (paddr_t)(mem_base + mem_size);
+
+    // 2. Kernel image PA range — captured by kaslr.c during kaslr_init
+    //    while still running at PA. After the long-branch into TTBR1,
+    //    PC-relative adrp+add gives high VAs, so we read the cached
+    //    values rather than re-deriving here.
+    paddr_t kern_pa_start = (paddr_t)kaslr_kernel_pa_start();
+    paddr_t kern_pa_end   = round_up((paddr_t)kaslr_kernel_pa_end(), PAGE_SIZE);
+
+    // 3. struct page array placement: just past the kernel image,
+    //    page-aligned. Sized for the full zone.
+    paddr_t struct_pages_pa_start = kern_pa_end;
+    u64 num_pages_total = (zone_end - zone_base) >> PAGE_SHIFT;
+    u64 struct_pages_bytes = round_up(num_pages_total * sizeof(struct page),
+                                      PAGE_SIZE);
+    paddr_t struct_pages_pa_end = struct_pages_pa_start + struct_pages_bytes;
+
+    // 4. DTB blob reservation: [dtb_pa, dtb_pa + dtb_size), page-aligned.
+    paddr_t dtb_pa_start = round_down((paddr_t)_saved_dtb_ptr, PAGE_SIZE);
+    paddr_t dtb_pa_end   = round_up((paddr_t)_saved_dtb_ptr +
+                                    (paddr_t)dtb_get_total_size(),
+                                    PAGE_SIZE);
+
+    // Sanity: every reservation must lie within the zone.
+    if (kern_pa_start < zone_base || kern_pa_end > zone_end ||
+        struct_pages_pa_end > zone_end ||
+        dtb_pa_start < zone_base || dtb_pa_end > zone_end) {
+        extinction("phys_init: reservation outside DTB-discovered RAM");
+    }
+
+    // 5. Initialize the buddy zone. struct_pages lives at
+    //    struct_pages_pa_start in PA-identity-mapped TTBR0 space; we
+    //    address it as a regular pointer and the MMU translates via
+    //    TTBR0 (low VA == PA below 4 GiB).
+    struct page *struct_pages =
+        (struct page *)(uintptr_t)struct_pages_pa_start;
+    buddy_zone_init(&g_zone0, zone_base, zone_end, struct_pages);
+
+    // 6. Free regions = the gaps between sorted reservations.
+    //    The "low firmware" region [zone_base, kern_pa_start) is
+    //    treated as RESERVED — we don't know what (if anything) the
+    //    bootloader left in there, and it's tiny on QEMU virt
+    //    (512 KiB before kernel at 0x40080000).
+    struct reservation res[3] = {
+        { kern_pa_start,         kern_pa_end },
+        { struct_pages_pa_start, struct_pages_pa_end },
+        { dtb_pa_start,          dtb_pa_end },
+    };
+    sort3_by_start(res);
+
+    // Walk: gap between zone start and first reservation, then
+    // between consecutive reservations, then after last reservation.
+    paddr_t cursor = round_up(zone_base, PAGE_SIZE);
+
+    // Skip low firmware area: jump cursor past _kernel_pa_start
+    // boundary. (In other words, treat [zone_base, kern_pa_start)
+    // as implicitly reserved — see comment above.)
+    if (cursor < kern_pa_start) cursor = kern_pa_start;
+
+    for (int i = 0; i < 3; i++) {
+        if (cursor < res[i].start) {
+            buddy_free_region(&g_zone0, cursor, res[i].start);
+        }
+        if (cursor < res[i].end) cursor = res[i].end;
+    }
+    if (cursor < zone_end) {
+        buddy_free_region(&g_zone0, cursor, zone_end);
+    }
+
+    // 7. Initialize per-CPU magazines.
+    magazines_init();
+
+    g_total_pages        = num_pages_total;
+    g_initial_free_pages = g_zone0.total_free_pages;
+
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Diagnostic accessors.
+// ---------------------------------------------------------------------------
+
+u64 phys_total_pages(void) {
+    return g_total_pages;
+}
+
+u64 phys_free_pages(void) {
+    return g_zone0.total_free_pages;
+}
+
+u64 phys_reserved_pages(void) {
+    return g_total_pages - g_initial_free_pages;
+}
+
+// ---------------------------------------------------------------------------
+// Public alloc / free API.
+// ---------------------------------------------------------------------------
+
+struct page *alloc_pages(unsigned order, unsigned flags) {
+    struct page *p = mag_alloc(order);
+    if (!p) {
+        // Magazine miss (or order isn't magazine-managed). Buddy direct.
+        p = buddy_alloc(&g_zone0, order);
+    }
+    if (!p) return NULL;
+
+    if (flags & KP_ZERO) {
+        // Zero the allocated region. We're at PA; TTBR0 identity-maps it.
+        u64 *q = (u64 *)(uintptr_t)page_to_pa(p);
+        u64 n  = (1ull << order) << PAGE_SHIFT;
+        for (u64 i = 0; i < n / 8; i++) q[i] = 0;
+    }
+    return p;
+}
+
+void free_pages(struct page *p, unsigned order) {
+    if (!p) return;
+    if (mag_free(p, order)) return;
+    buddy_free(&g_zone0, p, order);
+}
+
+struct page *alloc_pages_node(int node, unsigned order, unsigned flags) {
+    (void)node;     // single zone at v1.0
+    return alloc_pages(order, flags);
+}
+
+// kpage_alloc returns a void* that's a cast load PA. TTBR0 identity-
+// maps low PA so the kernel can dereference directly. Phase 2 will
+// promote this to a high-VA direct-map pointer when TTBR0 retires.
+void *kpage_alloc(unsigned flags) {
+    struct page *p = alloc_pages(0, flags);
+    if (!p) return NULL;
+    return (void *)(uintptr_t)page_to_pa(p);
+}
+
+void kpage_free(void *p) {
+    if (!p) return;
+    paddr_t pa = (paddr_t)(uintptr_t)p;
+    free_pages(pa_to_page(pa), 0);
+}

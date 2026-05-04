@@ -85,4 +85,13 @@ u64 kaslr_high_va_addr(void *pa);
 // for the banner ("kernel base: 0x...").
 u64 kaslr_kernel_high_base(void);
 
+// Cached load-PA bounds of the kernel image. kaslr_init() captures
+// (uintptr_t)_kernel_start and (uintptr_t)_kernel_end while running
+// at PA (PC = load PA, PC-relative addressing gives PA). After the
+// long-branch into TTBR1, those PC-relative computations resolve to
+// high VAs; consumers that need the load PA (e.g., phys_init for the
+// kernel-image reservation) read these accessors instead.
+u64 kaslr_kernel_pa_start(void);
+u64 kaslr_kernel_pa_end(void);
+
 #endif // THYLACINE_ARCH_ARM64_KASLR_H

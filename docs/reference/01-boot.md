@@ -53,8 +53,10 @@ After the branch, `_real_start` performs, in order:
 6. **KASLR init** (P1-C-extras Part B). `kaslr_init()` parses the DTB seed (`/chosen/kaslr-seed` then `/chosen/rng-seed`, with `cntpct_el0` fallback), chooses a 2 MiB-aligned slide in `[0, 16 GiB)`, and applies any `R_AARCH64_RELATIVE` entries in the embedded `.rela.dyn` section. Returns the slide; the boot stub stashes it in `x21` (callee-saved). See `docs/reference/05-kaslr.md`.
 7. **MMU enable** (P1-C, slide-aware at P1-C-extras). `mmu_enable(slide)` builds TTBR0 (low 4 GiB identity) and TTBR1 (kernel high-half at `KASLR_LINK_VA + slide`). Per-section permissions on the kernel image; W^X invariant I-12 enforced at PTE bit level via `_Static_assert` on PTE constructors. The L3 page-grain table is shared between TTBR0 and TTBR1. After return, kernel runs with caches enabled; PC is still at load PA via TTBR0.
 8. **Long-branch to high VA**. Compute `kaslr_high_va_addr(boot_main)` to get the high VA of `boot_main`, then `br x0` into TTBR1. From this point, all PC-relative addressing in C code resolves to high VAs.
-9. **`boot_main()`** runs at high VA. Prints the banner; the banner's `kernel base: 0x...` line shows the runtime base = `KASLR_LINK_VA + offset`.
-10. **Fallthrough to `_hang`**. `boot_main()` is `noreturn`; if it ever returns, the assembly falls through into the `wfi` loop.
+9. **`boot_main()`** runs at high VA. Prints the first half of the banner (arch, el-entry, cpus, mem, dtb, uart, hardening, kernel base).
+10. **`phys_init()`** (P1-D). Reads RAM range from DTB, reserves kernel image / struct-page array / DTB blob / low firmware, pushes the rest onto the buddy. Initializes per-CPU magazines. See `docs/reference/06-allocator.md`. Followed by an alloc/free smoke test that exercises the magazine fast path and a non-magazine order; gates on `phys_free_pages() == baseline` after a `magazines_drain_all`.
+11. **Banner finishes** (ram, alloc smoke, phase) and prints `Thylacine boot OK`.
+12. **Fallthrough to `_hang`**. `boot_main()` is `noreturn`; if it ever returns, the assembly falls through into the `wfi` loop.
 
 #### EL2 → EL1 drop (P1-C-extras)
 
@@ -109,7 +111,7 @@ Three `ASSERT()` statements in the linker script catch regressions at link time:
 
 The banner is emitted line-by-line via `uart_puts`. P1-B fills in `mem`, `dtb`, and `uart` from DTB-driven discovery (per `docs/reference/02-dtb.md`); P1-C-extras Part A added the `el-entry` line; P1-C-extras Part B fills in the runtime kernel base via the KASLR slide.
 
-Reference output of a P1-C-extras boot:
+Reference output of a P1-D boot:
 
 ```
 Thylacine v0.1.0-dev booting...
@@ -120,8 +122,10 @@ Thylacine v0.1.0-dev booting...
   dtb:  0x0000000048000000 (parsed)
   uart: 0x0000000009000000 (DTB-driven)
   hardening: MMU+W^X+extinction+KASLR (P1-C-extras; PAC/MTE/CFI at P1-H)
-  kernel base: 0xffffa0009e080000 (KASLR offset 0x000000009e000000, seed: DTB /chosen/kaslr-seed)
-  phase: P1-C-extras
+  kernel base: 0xffffa00071480000 (KASLR offset 0x0000000071400000, seed: DTB /chosen/kaslr-seed)
+  ram: 2048 MiB total, 2030 MiB free, 18008 KiB reserved (kernel + struct_page + DTB)
+  alloc smoke: PASS (256 x 4 KiB + 2 MiB + 4 MiB alloc+free; free count restored)
+  phase: P1-D
 Thylacine boot OK
 ```
 
@@ -280,16 +284,19 @@ The boot-to-banner figure is informal; rigorous measurement lands in P1-I with t
 - Boot banner shows `kernel base: 0x..., KASLR offset 0x..., seed: <source>` (varies per boot).
 - Invariant **I-16** satisfied: kernel base differs across 10 consecutive boots.
 
+**Implemented at P1-D**:
+
+- Physical frame allocator: buddy + per-CPU magazines + DTB-driven bootstrap. New `mm/buddy.{h,c}` (~280 LOC), `mm/magazines.{h,c}` (~110 LOC), `mm/phys.{h,c}` (~170 LOC), `kernel/include/thylacine/page.h` (struct page + flags + PFN/page conversion), `kernel/include/thylacine/spinlock.h` (lock stub). `boot_main` calls `phys_init()` then runs an alloc/free smoke test. See `docs/reference/06-allocator.md`. The kaslr.c PA-range accessors (`kaslr_kernel_pa_start` / `kaslr_kernel_pa_end`) gain a `volatile` qualifier to defeat a clang `-O2 -fpie -mcmodel=tiny` constant-fold; the comment in `kaslr.c` documents the fragile interaction.
+
 **Not yet implemented**:
 
-- Physical frame allocator (P1-D).
 - SLUB kernel object allocator (P1-E).
 - GIC + exception vectors (P1-F). The guard page mapping is in place but the fault handler that observes it lands here.
 - ARM generic timer (P1-G).
 - Hardening flags (P1-H).
 - Phase 1 exit verification (P1-I).
 
-**Landed**: P1-A at commit `2b332d8`; P1-B at commit `d3e33a8`; P1-C at commit `6462227`; P1-C-extras Part A at commit `ff22ca3`; P1-C-extras Part B at commit `74fd391`.
+**Landed**: P1-A at commit `2b332d8`; P1-B at commit `d3e33a8`; P1-C at commit `6462227`; P1-C-extras Part A at commit `ff22ca3`; P1-C-extras Part B at commit `74fd391`; P1-D at commit `(pending hash-fixup)`.
 
 ---
 
