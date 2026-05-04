@@ -21,11 +21,12 @@ When a section describes a detail enforced by a spec, the spec's action / invari
 
 ## Snapshot
 
-- **Tip**: (Phase 0 complete; Phase 1 not yet started)
-- **Phases**: Phase 0 done; Phase 1 entry pending.
-- **Tests**: 0 (no implementation yet).
+- **Tip**: P1-A landed (boot stub + UART + banner). Commit `(pending hash-fixup)`.
+- **Phases**: Phase 0 done; Phase 1 in progress (P1-A complete; P1-B next).
+- **Tests**: 0 unit tests; 1 manual integration check (boot-banner verify). Test harness lands in P1-I.
 - **Specs**: 0 written; 9 planned.
-- **LOC**: 0 (no implementation yet).
+- **LOC**: ~80 C99 + ~110 ASM (`start.S`) + ~40 linker-script + ~150 CMake/shell ≈ 380 LOC.
+- **Kernel ELF**: 81 KB debug / 74 KB stripped.
 
 For phase-level status see `docs/phaseN-status.md`. The reference below covers the as-built layers in bottom-up order. Per-subsystem files appear as their subsystems land during Phase 1 onward.
 
@@ -36,7 +37,7 @@ For phase-level status see `docs/phaseN-status.md`. The reference below covers t
 | File | Layer | Size guide | Status |
 |---|---|---|---|
 | [00-overview.md](reference/00-overview.md) | Layer cake + cross-cutting concerns | medium | scaffolded |
-| 01-boot.md (planned) | Boot path: start.S, MMU, KASLR | small | Phase 1 |
+| [01-boot.md](reference/01-boot.md) | Boot path: start.S, MMU, KASLR | medium | **P1-A landed**; extended at P1-B (DTB), P1-C (MMU + KASLR) |
 | 02-memory.md (planned) | Buddy + magazines + SLUB + VMAs + W^X | medium | Phase 1-2 |
 | 03-irq.md (planned) | GIC + exception vectors + IPI | small | Phase 1-2 |
 | 04-process.md (planned) | Proc + Thread + rfork + notes + errstr | medium | Phase 2 |

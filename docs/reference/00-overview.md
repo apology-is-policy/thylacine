@@ -81,7 +81,7 @@ Reference: `ARCHITECTURE.md §10.2`, `§21`.
 | Phase | Status | Highlights | See |
 |---|---|---|---|
 | 0 | ✅ complete | VISION + COMPARISON + NOVEL + ARCHITECTURE + ROADMAP + TOOLING + CLAUDE.md scripture | (the scripture itself) |
-| 1 | ⏳ entry pending | Boot, memory, hardening defaults, IRQ | phase1-status.md |
+| 1 | 🚧 in progress | P1-A landed: boot stub + UART + banner. P1-B (DTB) next. | phase1-status.md, reference/01-boot.md |
 | 2 | — | Process model + EEVDF scheduler + handles + VMO | (planned) |
 | 3 | — | Userspace VirtIO drivers (no in-kernel virtio-blk) | (planned) |
 | 4 | — | 9P client + Stratum mount | (planned) |
@@ -94,9 +94,10 @@ Reference: `ARCHITECTURE.md §10.2`, `§21`.
 
 ## Test posture
 
-- Test suite count: 0.
-- Sanitizer matrix: not yet enabled.
+- Test suite count: 0 (test harness lands in P1-I).
+- Sanitizer matrix: not yet enabled (per-phase enablement; ASan + UBSan from P1-I, TSan from Phase 2 SMP).
 - Spec count: 0 written; 9 planned per `ARCHITECTURE.md §25.2`.
+- Manual verification at P1-A: boot-banner integration check via `tools/run-vm.sh`.
 
 (Refreshed per chunk during implementation.)
 
@@ -104,8 +105,9 @@ Reference: `ARCHITECTURE.md §10.2`, `§21`.
 
 ## Build + CI
 
-- Local invocation: see `CLAUDE.md` "Build + test commands".
-- CI workflow: not yet configured (Phase 1 deliverable).
+- Local invocation: `tools/build.sh kernel` + `tools/run-vm.sh`. See `CLAUDE.md` "Build + test commands" for the canonical reference.
+- CI workflow: not yet configured (P1-I deliverable — auto-build + boot-banner check + sanitizer matrix).
+- Toolchain: clang 22 + ld.lld 22 + cmake 4 (Apple Silicon Mac via Homebrew). Cross-compile target `aarch64-none-elf`.
 
 ---
 
