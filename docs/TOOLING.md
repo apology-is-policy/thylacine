@@ -449,19 +449,21 @@ The line `Thylacine boot OK` is the agent's boot-success signal. It must:
 - Be the last kernel-printed line before userspace takes over.
 - Not appear if the kernel panicked before completing init.
 
-A kernel panic must print:
+A kernel **extinction** (ELE — Extinction Level Event; the thylacine's own fate transposed onto a kernel that has lost the will to continue) must print:
 
 ```
-PANIC: <message>
-  at <file>:<line>
-  <register dump>
+EXTINCTION: <message>
+  at <file>:<line>          (when registered with extinction_with_addr or richer variants land)
+  <register dump>            (P1-F+, when exception infrastructure is in place)
   <PAC mismatch info if applicable>
   <MTE tag mismatch info if applicable>
 ```
 
-The `PANIC:` prefix is the agent's panic-detection signal. Any output matching `/^PANIC:/` on the UART stream triggers the agent to: record the panic message, restore the last good snapshot, and report to the human before retrying.
+The `EXTINCTION:` prefix is the agent's catastrophic-failure-detection signal. Any output matching `/^EXTINCTION:/` on the UART stream triggers the agent to: record the message, restore the last good snapshot, and report to the human before retrying.
 
-These two strings are part of the kernel ABI with the development tooling. They do not change without updating `tools/run-vm.sh`, `tools/agent-protocol.md`, and `CLAUDE.md` in the same commit.
+The function is `extinction(const char *msg)` / `extinction_with_addr(const char *msg, uintptr_t addr)` in `kernel/extinction.c` (header `kernel/include/thylacine/extinction.h`). Convenience macro `ASSERT_OR_DIE(expr, msg)` for assert-style checks.
+
+These two strings (the success banner and the EXTINCTION prefix) are part of the kernel ABI with the development tooling. They do not change without updating `tools/run-vm.sh`, `tools/test.sh`, `tools/agent-protocol.md`, and `CLAUDE.md` in the same commit.
 
 ---
 

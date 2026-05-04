@@ -14,14 +14,17 @@ Per `ROADMAP.md §4`.
 |---|---|---|
 | 2b332d8 | **P1-A**: toolchain + build system + minimal boot stub. CMake + clang 22 + ld.lld 22 cross-compile to `aarch64-none-elf`. `arch/arm64/start.S` + `kernel.ld` + `arch/arm64/uart.c` + `kernel/main.c`. Boot banner per `TOOLING.md §10`. `tools/run-vm.sh` + `tools/test.sh` + Makefile. Kernel ELF 81 KB debug / 74 KB stripped. | Manual + `tools/test.sh` (boot-banner regex match within 10s). PASS. |
 | d3e33a8 | **P1-B**: DTB parsing + Linux ARM64 image header + flat-binary build + DTB-driven UART base. `lib/dtb.c` (~340 LOC) implements an FDT v17 parser with `dtb_init`, `dtb_get_memory`, `dtb_get_compat_reg`, `dtb_get_chosen_kaslr_seed`. `start.S` gains a 64-byte Linux ARM64 image header at offset 0 (`ARM\x64` magic at 0x38) so QEMU's `load_aarch64_image()` loads the DTB and passes it in `x0`. CMake post-link `objcopy -O binary` produces `thylacine.bin` alongside the ELF; `tools/run-vm.sh` uses the binary. Resolves I-15 violation: `uart.c` PL011 base now updated from `dtb_get_compat_reg("arm,pl011")`. Banner shows `mem: 2048 MiB at 0x40000000`, `dtb: 0x48000000 (parsed)`, `uart: 0x09000000 (DTB-driven)`. | `tools/test.sh` PASS. |
+| *(pending)* | **P1-C**: MMU enable with W^X invariant I-12 + extinction (kernel ELE) infra. `arch/arm64/mmu.{h,c}` (~300 LOC) builds 4-level page tables (1 L0 + 1 L1 + 4 L2 + 1 L3 = 28 KiB BSS), identity-maps low 4 GiB, programs MAIR + TCR + TTBR + SCTLR. Per-section permissions (.text RX, .rodata R, .data/.bss RW) via L3 page-grain mappings; PL011 region as Device-nGnRnE block. **W^X invariant I-12 encoded in PTE constructors with `_Static_assert`**. `kernel/extinction.{c}` + `kernel/include/thylacine/extinction.h` (~50 LOC) provide `extinction(msg)`, `extinction_with_addr(msg, addr)`, `ASSERT_OR_DIE(expr, msg)`. **Kernel panic prefix renamed to `EXTINCTION:`** (thematic — thylacine extinction event); TOOLING.md §10 + CLAUDE.md + tools/test.sh updated for the rename. Banner shows `hardening: MMU+W^X+extinction (P1-C; KASLR/PAC/MTE/CFI at later sub-chunks)`. **Deferred to P1-C-extras**: KASLR (kernel image relocation into TTBR1 high half via PIE relocations + `dtb_get_chosen_kaslr_seed`), TTBR1 high-half mappings beyond stub, boot stack guard page, EL2→EL1 drop diagnostic. | `tools/test.sh` PASS. |
 
 ## Remaining work
 
 (Sub-chunk plan, refined at Phase 1 entry. P1-A landed; tentative order for the rest:)
 
 1. ✅ **P1-A: Toolchain + tools/run-vm.sh + boot stub.** Landed.
-2. ✅ **P1-B: DTB parsing.** Landed. **Resolved the DTB pointer mystery via Linux ARM64 image header** (the alternative — probing — is documented in caveats but not used). FDT parser (~340 LOC). DTB-driven UART base resolves I-15. `arm,pl011` lookup uses a stack-based per-node accumulator (single-flag approach missed the match because PL011's `compatible` property comes after its `reg`). `be32_load` uses a `volatile` u32 read to prevent compiler fusion into a misaligned 8-byte load on Device memory (caught empirically — debug printfs broke fusion and made the parser work; without them it faulted silently).
-3. **P1-C: MMU + KASLR.** `arch/arm64/mmu.c` enables MMU with TTBR0 (identity) + TTBR1 (kernel high half); KASLR offset applied; relocations processed. `_Static_assert` on PTE bit layout for W^X. Boot stack guard page added. EL2→EL1 drop diagnostic via UART (replaces silent `.Lnot_el1` halt). Panic infrastructure (`panic(fmt, ...)` printing `PANIC:` prefix per TOOLING ABI). Once cacheable Normal memory is in use, the `volatile` constraint in `be32_load` becomes optional (still keep — defends against bare-metal recovery paths where MMU may be off).
+2. ✅ **P1-B: DTB parsing.** Landed. Linux ARM64 image header resolved the DTB-pointer-zero observation; FDT parser (~340 LOC); volatile reads prevent clang fusion into misaligned 8-byte loads.
+3. ✅ **P1-C: MMU + W^X + extinction infra.** Landed. Identity map of low 4 GiB; per-section perms via L3 paging; PTE constructors `_Static_assert` W^X (I-12); `extinction()` with `EXTINCTION:` ABI prefix (thematic rename from `panic`). **Deferred to P1-C-extras** (next chunk): KASLR (kernel relocation into TTBR1 high half via PIE relocations + DTB-derived seed), boot stack guard page, EL2→EL1 drop diagnostic. The deferral keeps this chunk reviewable; KASLR's PIE-relocation path is its own ~300-500 LOC + iteration cycle.
+4. **P1-C-extras: KASLR + boot stack guard + EL2 drop.** Compile kernel with `-fpic`/`-fpie`; switch linker script to PIE-friendly form; process R_AARCH64_RELATIVE relocations at boot; randomize kernel VA in TTBR1's `0xFFFF_A000_*` region using seed from `dtb_get_chosen_kaslr_seed()` (low-entropy boot-counter fallback if absent). Map a non-present guard page below `_boot_stack_bottom`. Add EL2→EL1 drop sequence + UART diagnostic if entered at EL2 (Pi 5 concern). KASLR randomization verified across 10 boots.
+5. **P1-D: Physical allocator (buddy + magazines).** `mm/buddy.c` + `mm/magazines.c` per `ARCHITECTURE.md §6.3`.
 4. **P1-D: Physical allocator (buddy + magazines).** `mm/buddy.c` + `mm/magazines.c` per `ARCHITECTURE.md §6.3`.
 5. **P1-E: Kernel object allocator (SLUB).** `mm/slub.c` with standard `kmalloc-N` caches.
 6. **P1-F: GIC + exception vectors.** `arch/arm64/gic.c` + `arch/arm64/vectors.S` + `arch/arm64/exception.c`. Real UART init (CR/LCR_H/IBRD/FBRD).
@@ -33,8 +36,9 @@ Per `ROADMAP.md §4`.
 
 (Copy from `ROADMAP.md §4.2`; tick as deliverables complete.)
 
-- [x] **QEMU `virt` ARM64 boots to a UART banner without crashing.** Landed at P1-A; still passes at P1-B with DTB-driven banner.
-- [ ] Boot to UART banner: < 500ms. Informally measured ~50 ms at P1-A/B (DTB parse adds ~150 µs; negligible). Rigorous measurement at P1-I.
+- [x] **QEMU `virt` ARM64 boots to a UART banner without crashing.** Landed at P1-A; still passes at P1-B and P1-C.
+- [ ] Boot to UART banner: < 500ms. Informally measured ~50 ms through P1-C (DTB parse adds ~150 µs; MMU enable adds ~50 µs; negligible). Rigorous measurement at P1-I.
+- [x] **MMU on with kernel VA map correct** (read/write kernel data, no fault). Landed at P1-C. **W^X invariant I-12 enforced at PTE bit level via `_Static_assert` on PTE constructors**.
 - [ ] `kmalloc`/`kfree` round-trip 10,000 allocations without leak. P1-D / P1-E.
 - [ ] GIC initialized; timer IRQ fires at 1000 Hz (verified via UART counter). P1-F / P1-G.
 - [ ] MMU on; kernel VA map correct (read/write kernel data, no fault). P1-C.
@@ -124,7 +128,8 @@ Toolchain dependencies (Apple Silicon Mac via Homebrew):
 | DTB parser | `lib/dtb.c`, `kernel/include/thylacine/dtb.h` | Hardware view derives entirely from DTB (I-15); malformed DTB must be detected | P1-B |
 | Linux ARM64 image header | `arch/arm64/start.S` (offset 0..0x40), `arch/arm64/kernel.ld` (`_image_size` symbol) | QEMU `load_aarch64_image()` detection; DTB delivery | P1-B |
 | Allocator | `mm/buddy.c` (P1-D), `mm/slub.c` (P1-E), `mm/magazines.c` (P1-D) | Allocation correctness | (planned) |
-| Page tables | `arch/arm64/mmu.c` (P1-C), `mm/wxe.c` (P1-C) | W^X invariant (I-12) | (planned) |
+| Page tables / MMU | `arch/arm64/mmu.c`, `arch/arm64/mmu.h`, `arch/arm64/kernel.ld` (`_text_end` / `_rodata_end` / `_data_end`) | W^X invariant (I-12); MMU enable; identity map | P1-C |
+| Extinction / panic | `kernel/extinction.c`, `kernel/include/thylacine/extinction.h` | EXTINCTION: ABI per TOOLING.md §10 | P1-C |
 | KASLR | `arch/arm64/kaslr.c` (P1-C) | Entropy + relocation correctness (I-16) | (planned) |
 | LSE detection | `arch/arm64/atomic.S` (P1-H) | Runtime patching correctness | (planned) |
 

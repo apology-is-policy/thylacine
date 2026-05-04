@@ -55,7 +55,7 @@ void boot_main(void) {
 
     uart_puts("  arch: arm64\n");
 
-    uart_puts("  cpus: 1 (P1-B; SMP at P1-F)\n");
+    uart_puts("  cpus: 1 (P1-C; SMP at P1-F)\n");
 
     uart_puts("  mem:  ");
     if (mem_ok) {
@@ -87,7 +87,7 @@ void boot_main(void) {
     }
     uart_puts("\n");
 
-    uart_puts("  hardening: minimal (P1-B baseline; full stack at P1-H)\n");
+    uart_puts("  hardening: MMU+W^X+extinction (P1-C; KASLR/PAC/MTE/CFI at later sub-chunks)\n");
 
     uart_puts("  kernel base: ");
     uart_puthex64((u64)(uintptr_t)_kernel_start);

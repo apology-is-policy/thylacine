@@ -81,7 +81,7 @@ Reference: `ARCHITECTURE.md §10.2`, `§21`.
 | Phase | Status | Highlights | See |
 |---|---|---|---|
 | 0 | ✅ complete | VISION + COMPARISON + NOVEL + ARCHITECTURE + ROADMAP + TOOLING + CLAUDE.md scripture | (the scripture itself) |
-| 1 | 🚧 in progress | P1-A + P1-B landed: boot stub, UART, banner, Linux ARM64 image header, DTB parser, DTB-driven hardware discovery. P1-C (MMU + KASLR) next. | phase1-status.md, reference/01-boot.md, reference/02-dtb.md |
+| 1 | 🚧 in progress | P1-A/B/C landed: boot stub, UART, banner, Linux ARM64 image header, DTB parser, DTB-driven hardware discovery, MMU on with W^X, extinction (kernel ELE) infra. P1-C-extras (KASLR + guard page + EL2 drop) and P1-D (physical allocator) next. | phase1-status.md, reference/01-boot.md, reference/02-dtb.md, reference/03-mmu.md, reference/04-extinction.md |
 | 2 | — | Process model + EEVDF scheduler + handles + VMO | (planned) |
 | 3 | — | Userspace VirtIO drivers (no in-kernel virtio-blk) | (planned) |
 | 4 | — | 9P client + Stratum mount | (planned) |

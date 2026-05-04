@@ -98,8 +98,13 @@ _real_start:
     add     x0, x0, :lo12:_saved_dtb_ptr
     str     x19, [x0]
 
-    // 6. Branch to boot_main(). No args at P1-B; the DTB pointer is
-    //    available via the saved_dtb_ptr global.
+    // 6. Enable the MMU. After this returns, the kernel runs with caches
+    //    enabled and per-section page protections in force (W^X invariant
+    //    I-12 enforced at PTE bit level). Identity-mapped low 4 GiB so
+    //    PCs and SP remain valid through the transition.
+    bl      mmu_enable
+
+    // 7. Branch to boot_main().
     bl      boot_main
 
     // 7. boot_main() must not return. If it does, fall through to halt.

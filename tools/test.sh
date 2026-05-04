@@ -6,10 +6,9 @@
 # Utopia, this script grows into a structured-result protocol with the
 # `thylacine_run` shell wrapper.
 #
-# At P1-A: the test is "build the kernel, boot it under QEMU, verify the
-# `Thylacine boot OK` banner appears on UART, then halt QEMU." Pass = banner
-# observed within timeout. Fail = no banner, or `PANIC:` prefix observed,
-# or QEMU crashes.
+# Pass = `Thylacine boot OK` banner observed within timeout. Fail = no banner,
+# or `EXTINCTION:` prefix observed (kernel ELE — Extinction Level Event;
+# named for the thylacine's own fate when the kernel dies), or QEMU crashes.
 
 set -euo pipefail
 
@@ -20,7 +19,7 @@ LOG_FILE="$BUILD_DIR/test-boot.log"
 
 BOOT_TIMEOUT="${BOOT_TIMEOUT:-10}"          # seconds
 BOOT_MARKER="Thylacine boot OK"
-PANIC_MARKER="PANIC:"
+EXTINCTION_MARKER="EXTINCTION:"             # per TOOLING.md §10 ABI
 
 mkdir -p "$BUILD_DIR"
 
@@ -45,16 +44,16 @@ while [[ $(date +%s) -lt $deadline ]]; do
         result="pass"
         break
     fi
-    if [[ -f "$LOG_FILE" ]] && grep -q "^$PANIC_MARKER" "$LOG_FILE"; then
-        result="panic"
+    if [[ -f "$LOG_FILE" ]] && grep -q "^$EXTINCTION_MARKER" "$LOG_FILE"; then
+        result="extinction"
         break
     fi
     if ! kill -0 "$QEMU_PID" 2>/dev/null; then
         # QEMU exited before the marker. Final check on the log.
         if grep -q "$BOOT_MARKER" "$LOG_FILE"; then
             result="pass"
-        elif grep -q "^$PANIC_MARKER" "$LOG_FILE"; then
-            result="panic"
+        elif grep -q "^$EXTINCTION_MARKER" "$LOG_FILE"; then
+            result="extinction"
         else
             result="qemu-exit"
         fi
@@ -75,11 +74,11 @@ case "$result" in
         echo "----------------"
         exit 0
         ;;
-    panic)
-        echo "==> FAIL: kernel panic detected." >&2
-        echo "--- panic context ---" >&2
-        grep -B 2 -A 10 "^$PANIC_MARKER" "$LOG_FILE" >&2
-        echo "---------------------" >&2
+    extinction)
+        echo "==> FAIL: kernel extinction detected." >&2
+        echo "--- ELE context ---" >&2
+        grep -B 2 -A 10 "^$EXTINCTION_MARKER" "$LOG_FILE" >&2
+        echo "-------------------" >&2
         exit 1
         ;;
     qemu-exit)

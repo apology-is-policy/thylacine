@@ -46,10 +46,6 @@ static inline uint32_t be32_to_host(uint32_t v) {
     return __builtin_bswap32(v);
 }
 
-static inline uint64_t be64_to_host(uint64_t v) {
-    return __builtin_bswap64(v);
-}
-
 // Read a big-endian u32 from a (possibly unaligned) byte pointer.
 //
 // IMPORTANT (P1-A through P1-C entry): the MMU is off and all kernel data
@@ -70,16 +66,10 @@ static inline uint32_t be32_load(const void *p) {
     return be32_to_host(v);
 }
 
-// Read a big-endian u64 from a (possibly unaligned) byte pointer.
-//
-// Implemented as two volatile be32 reads to keep every memory access
-// 4-byte-aligned regardless of the input pointer's higher alignment.
-// See the be32_load comment for the Device-memory rationale.
-static inline uint64_t be64_load(const void *p) {
-    uint32_t hi = be32_load(p);
-    uint32_t lo = be32_load((const uint8_t *)p + 4);
-    return ((uint64_t)hi << 32) | lo;
-}
+// (be64_load was previously declared here as two be32_load calls. It was
+// unused after switching dtb_get_memory and dtb_get_compat_reg to the
+// shared read_reg_pair() helper, which inlines the four 4-byte loads
+// directly. Removed at P1-C cleanup to silence -Wunused-function.)
 
 // ---------------------------------------------------------------------------
 // Minimal helpers (no libc).

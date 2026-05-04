@@ -20,7 +20,7 @@ project(thylacine
 )
 
 # Phase tag — bumped per phase exit. Influences boot banner.
-set(THYLACINE_PHASE "P1-B" CACHE STRING "Current implementation phase")
+set(THYLACINE_PHASE "P1-C" CACHE STRING "Current implementation phase")
 
 # Build-time options. Each defaults to off at P1-A and gets enabled at later phases.
 option(THYLACINE_HARDENING_FULL "Enable full hardening (CFI/PAC/MTE/BTI/LSE/canaries) — P1-H+" OFF)

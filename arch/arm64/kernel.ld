@@ -37,21 +37,27 @@ SECTIONS
     . = KERNEL_LOAD_ADDR;
     _kernel_start = .;
 
-    /* .text — kernel code. Future MMU mapping: RX. */
+    /* .text — kernel code. MMU mapping: RX (P1-C and onward). */
     .text : ALIGN(PAGE_SIZE) {
         KEEP(*(.text._start))      /* _start MUST be the first instruction */
         *(.text .text.*)
     }
+    . = ALIGN(PAGE_SIZE);
+    _text_end = .;
 
-    /* .rodata — read-only data. Future MMU mapping: R. */
+    /* .rodata — read-only data. MMU mapping: R (P1-C and onward). */
     .rodata : ALIGN(PAGE_SIZE) {
         *(.rodata .rodata.*)
     }
+    . = ALIGN(PAGE_SIZE);
+    _rodata_end = .;
 
-    /* .data — initialized writable data. Future MMU mapping: RW. */
+    /* .data — initialized writable data. MMU mapping: RW. */
     .data : ALIGN(PAGE_SIZE) {
         *(.data .data.*)
     }
+    . = ALIGN(PAGE_SIZE);
+    _data_end = .;
 
     /* .bss — zero-initialized data. start.S clears [_bss_start, _bss_end). */
     .bss : ALIGN(PAGE_SIZE) {

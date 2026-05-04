@@ -534,7 +534,7 @@ Thylacine vX.Y-dev booting...
 Thylacine boot OK
 ```
 
-A kernel panic prints `PANIC: <message>` as a recognizable prefix. These two strings are part of the kernel ABI with the development tooling. They do not change without updating `tools/run-vm.sh`, `tools/agent-protocol.md`, and this document in the same commit.
+A kernel **extinction** (ELE — Extinction Level Event; the thematic name for kernel panic) prints `EXTINCTION: <message>` as a recognizable prefix. Use `extinction(msg)` or `extinction_with_addr(msg, addr)` from `kernel/extinction.c`; `ASSERT_OR_DIE(expr, msg)` for assert-style checks. These two strings (boot banner success line + EXTINCTION prefix) are part of the kernel ABI with the development tooling. They do not change without updating `tools/run-vm.sh`, `tools/test.sh`, `tools/agent-protocol.md`, and this document in the same commit.
 
 ---
 

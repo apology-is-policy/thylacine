@@ -8,8 +8,10 @@
 
 set(KERNEL_SRCS
     main.c
+    extinction.c
     ../arch/arm64/start.S
     ../arch/arm64/uart.c
+    ../arch/arm64/mmu.c
     ../lib/dtb.c
 )
 
