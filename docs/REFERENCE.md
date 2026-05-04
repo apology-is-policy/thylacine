@@ -21,7 +21,7 @@ When a section describes a detail enforced by a spec, the spec's action / invari
 
 ## Snapshot
 
-- **Tip**: P1-D landed at commit `(pending hash-fixup)` — physical allocator (buddy + per-CPU magazines + DTB-driven bootstrap). Phase 1 momentum: P1-A → P1-D complete. Invariants I-12 (W^X), I-15 (DTB-driven HW discovery), and I-16 (KASLR) all live.
+- **Tip**: P1-D landed at commit `198c48c` — physical allocator (buddy + per-CPU magazines + DTB-driven bootstrap). Phase 1 momentum: P1-A → P1-D complete. Invariants I-12 (W^X), I-15 (DTB-driven HW discovery), and I-16 (KASLR) all live.
 - **Phases**: Phase 0 done; Phase 1 in progress (P1-A + P1-B + P1-C + P1-C-extras + P1-D complete; P1-E SLUB kernel-object allocator next).
 - **Tests**: 0 unit tests; 1 integration check (`tools/test.sh` boot-banner verify). PASS. Boot smoke test exercises 256 × 4 KiB + 2 MiB + 4 MiB alloc/free with `magazines_drain_all` for clean accounting. 5+ consecutive boots produce distinct KASLR offsets. Test harness lands in P1-I.
 - **Specs**: 0 written; 9 planned.

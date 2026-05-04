@@ -288,7 +288,7 @@ Latency numbers are estimates — rigorous measurement at P1-I.
 - Real spin lock (P1-F — LL/SC on first SMP entry; LSE at P1-H where supported).
 - 10000-iteration leak check + sanitizer matrix (P1-I).
 
-**Landed**: P1-D at commit `(pending hash-fixup)`.
+**Landed**: P1-D at commit `198c48c`.
 
 ---
 
