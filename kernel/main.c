@@ -18,6 +18,7 @@
 #include "../arch/arm64/kaslr.h"
 #include "../mm/phys.h"
 #include "../mm/magazines.h"
+#include "../mm/slub.h"
 
 #include <stdint.h>
 #include <thylacine/dtb.h>
@@ -185,6 +186,80 @@ void boot_main(void) {
             }
             uart_puts(")\n");
             extinction("phys_init smoke test failed");
+        }
+    }
+
+    // Phase 3: SLUB on top of phys. Standard kmalloc-* caches plus
+    // a meta cache for kmem_cache_create. Public API: kmalloc /
+    // kfree / kmem_cache_*.
+    slub_init();
+
+    // SLUB smoke test: small + medium + large allocations through
+    // both kmalloc paths (slab vs direct alloc_pages), plus a
+    // dynamic kmem_cache_create / alloc / free / destroy round
+    // trip. Drain magazines + verify phys_free_pages() returns to
+    // baseline.
+    {
+        u64 baseline = phys_free_pages();
+        bool ok = true;
+
+        // Many small allocations from kmalloc-8 (forces multiple
+        // slab pages — each 4 KiB slab holds 512 8-byte objects).
+        // Static so the 12 KiB array doesn't crowd the boot stack
+        // (16 KiB total minus the rest of boot_main's frames).
+        #define KMEM_SMOKE_SMALL_N 1500
+        static void *smalls[KMEM_SMOKE_SMALL_N];
+        for (int i = 0; i < KMEM_SMOKE_SMALL_N; i++) {
+            smalls[i] = kmalloc(8, KP_ZERO);
+            if (!smalls[i]) { ok = false; break; }
+        }
+        for (int i = 0; i < KMEM_SMOKE_SMALL_N; i++) {
+            if (smalls[i]) kfree(smalls[i]);
+        }
+
+        // Mixed-size kmalloc round-trip: each cache exercised once.
+        size_t sizes[] = { 16, 64, 128, 512, 2048 };
+        for (size_t i = 0; i < sizeof(sizes) / sizeof(sizes[0]); i++) {
+            void *p = kmalloc(sizes[i], 0);
+            if (!p) { ok = false; break; }
+            kfree(p);
+        }
+
+        // Large allocation that bypasses slab (>2048 → direct
+        // alloc_pages path).
+        void *big = kzalloc(8192, 0);
+        if (!big) ok = false;
+        if (big) kfree(big);
+
+        // Custom typed cache via kmem_cache_create. Allocate a
+        // handful, free them, destroy the cache.
+        struct kmem_cache *c = kmem_cache_create("smoke-typed", 100, 16, 0);
+        if (!c) ok = false;
+        if (c) {
+            void *t1 = kmem_cache_alloc(c, KP_ZERO);
+            void *t2 = kmem_cache_alloc(c, KP_ZERO);
+            if (!t1 || !t2) ok = false;
+            if (t1) kmem_cache_free(c, t1);
+            if (t2) kmem_cache_free(c, t2);
+            kmem_cache_destroy(c);
+        }
+
+        magazines_drain_all();
+        u64 after = phys_free_pages();
+        uart_puts("  kmem smoke: ");
+        if (ok && after == baseline) {
+            uart_puts("PASS (1500 x kmalloc-8 + mixed sizes + 8 KiB direct + custom cache)\n");
+        } else {
+            uart_puts("FAIL (");
+            if (!ok) uart_puts("alloc returned NULL; ");
+            if (after != baseline) {
+                uart_puts("free count drift baseline=");
+                uart_putdec(baseline);
+                uart_puts(" after=");
+                uart_putdec(after);
+            }
+            uart_puts(")\n");
+            extinction("slub smoke test failed");
         }
     }
 

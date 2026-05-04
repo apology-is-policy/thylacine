@@ -22,20 +22,33 @@
 // allocation. ARCH §6.3 documents orders 0..18 (4 KiB to 1 GiB).
 #define MAX_ORDER   18
 
+// Forward declaration so struct page can carry a backref. Defined in
+// mm/slub.h.
+struct kmem_cache;
+
 // Page descriptor. One per physical 4 KiB frame in the managed zone.
 //
-// Size: 32 bytes — chosen to fit cache-line-friendly within an array
-// while carrying the doubly-linked-list pointers needed for O(1)
-// free-list manipulation. For 2 GiB of RAM at 4 KiB granule (524288
-// pages), the struct page array is 16 MiB — placed by phys_init just
-// past the kernel image at the start of free RAM.
+// Size: 48 bytes — chosen to carry the doubly-linked-list pointers
+// (O(1) free-list manipulation) plus the two SLUB-only fields
+// (slab_freelist + slab_cache). For 2 GiB of RAM at 4 KiB granule
+// (524288 pages), the struct page array is 24 MiB — placed by
+// phys_init just past the kernel image at the start of free RAM.
+//
+// The slab-only fields are valid when (flags & PG_SLAB); for a buddy
+// free or generic kernel allocation page they're zero. We accept the
+// 50% size growth from P1-D (16 MiB → 24 MiB) over the alternative
+// of overlaying with a union — clarity of access and absence of
+// "is this field meaningful?" footguns matter more than ~8 MiB of
+// BSS at v1.0.
 struct page {
     struct page *next;          // free list next (NULL if not on a list)
     struct page *prev;          // free list prev
-    u32 order;                  // current order if PG_FREE; 0 if allocated
+    u32 order;                  // current order if PG_FREE; slab order if PG_SLAB
     u32 flags;                  // PG_*
-    u32 refcount;               // placeholder for VMO refcounting at Phase 2-3
-    u32 _pad;                   // 4-byte alignment slack to 32 bytes
+    u32 refcount;               // VMO refcount placeholder; slab: inuse count
+    u32 _pad;                   // 4-byte alignment slack
+    void *slab_freelist;        // SLUB: head of free objects in this slab
+    struct kmem_cache *slab_cache; // SLUB: cache backref (NULL when not a slab)
 };
 
 // struct page flags.
@@ -43,6 +56,7 @@ struct page {
 #define PG_RESERVED   (1u << 1) // page is reserved (kernel image, DTB blob,
                                 // struct-page array itself, low firmware)
 #define PG_KERNEL     (1u << 2) // page is allocated to the kernel
+#define PG_SLAB       (1u << 3) // page is a SLUB slab (slab_freelist + slab_cache valid)
 
 // Allocation flags (caller-passed to alloc_pages / kpage_alloc).
 //

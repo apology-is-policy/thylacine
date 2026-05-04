@@ -55,8 +55,9 @@ After the branch, `_real_start` performs, in order:
 8. **Long-branch to high VA**. Compute `kaslr_high_va_addr(boot_main)` to get the high VA of `boot_main`, then `br x0` into TTBR1. From this point, all PC-relative addressing in C code resolves to high VAs.
 9. **`boot_main()`** runs at high VA. Prints the first half of the banner (arch, el-entry, cpus, mem, dtb, uart, hardening, kernel base).
 10. **`phys_init()`** (P1-D). Reads RAM range from DTB, reserves kernel image / struct-page array / DTB blob / low firmware, pushes the rest onto the buddy. Initializes per-CPU magazines. See `docs/reference/06-allocator.md`. Followed by an alloc/free smoke test that exercises the magazine fast path and a non-magazine order; gates on `phys_free_pages() == baseline` after a `magazines_drain_all`.
-11. **Banner finishes** (ram, alloc smoke, phase) and prints `Thylacine boot OK`.
-12. **Fallthrough to `_hang`**. `boot_main()` is `noreturn`; if it ever returns, the assembly falls through into the `wfi` loop.
+11. **`slub_init()`** (P1-E). Sets up the meta cache (for `struct kmem_cache` itself) plus the standard `kmalloc-{8..2048}` caches. See `docs/reference/07-slub.md`. Followed by a kmem smoke test that exercises small / mixed / large kmalloc paths plus a `kmem_cache_create` round-trip; gates on `phys_free_pages() == baseline` after `magazines_drain_all`.
+12. **Banner finishes** (ram, alloc smoke, kmem smoke, phase) and prints `Thylacine boot OK`.
+13. **Fallthrough to `_hang`**. `boot_main()` is `noreturn`; if it ever returns, the assembly falls through into the `wfi` loop.
 
 #### EL2 → EL1 drop (P1-C-extras)
 
@@ -111,7 +112,7 @@ Three `ASSERT()` statements in the linker script catch regressions at link time:
 
 The banner is emitted line-by-line via `uart_puts`. P1-B fills in `mem`, `dtb`, and `uart` from DTB-driven discovery (per `docs/reference/02-dtb.md`); P1-C-extras Part A added the `el-entry` line; P1-C-extras Part B fills in the runtime kernel base via the KASLR slide.
 
-Reference output of a P1-D boot:
+Reference output of a P1-E boot:
 
 ```
 Thylacine v0.1.0-dev booting...
@@ -122,10 +123,11 @@ Thylacine v0.1.0-dev booting...
   dtb:  0x0000000048000000 (parsed)
   uart: 0x0000000009000000 (DTB-driven)
   hardening: MMU+W^X+extinction+KASLR (P1-C-extras; PAC/MTE/CFI at P1-H)
-  kernel base: 0xffffa00071480000 (KASLR offset 0x0000000071400000, seed: DTB /chosen/kaslr-seed)
-  ram: 2048 MiB total, 2030 MiB free, 18008 KiB reserved (kernel + struct_page + DTB)
+  kernel base: 0xffffa0012d880000 (KASLR offset 0x000000012d800000, seed: DTB /chosen/kaslr-seed)
+  ram: 2048 MiB total, 2022 MiB free, 26212 KiB reserved (kernel + struct_page + DTB)
   alloc smoke: PASS (256 x 4 KiB + 2 MiB + 4 MiB alloc+free; free count restored)
-  phase: P1-D
+  kmem smoke: PASS (1500 x kmalloc-8 + mixed sizes + 8 KiB direct + custom cache)
+  phase: P1-E
 Thylacine boot OK
 ```
 
@@ -288,15 +290,18 @@ The boot-to-banner figure is informal; rigorous measurement lands in P1-I with t
 
 - Physical frame allocator: buddy + per-CPU magazines + DTB-driven bootstrap. New `mm/buddy.{h,c}` (~280 LOC), `mm/magazines.{h,c}` (~110 LOC), `mm/phys.{h,c}` (~170 LOC), `kernel/include/thylacine/page.h` (struct page + flags + PFN/page conversion), `kernel/include/thylacine/spinlock.h` (lock stub). `boot_main` calls `phys_init()` then runs an alloc/free smoke test. See `docs/reference/06-allocator.md`. The kaslr.c PA-range accessors (`kaslr_kernel_pa_start` / `kaslr_kernel_pa_end`) gain a `volatile` qualifier to defeat a clang `-O2 -fpie -mcmodel=tiny` constant-fold; the comment in `kaslr.c` documents the fragile interaction.
 
+**Implemented at P1-E**:
+
+- SLUB kernel object allocator: `mm/slub.{h,c}` (~370 LOC). Standard `kmalloc-{8..2048}` caches plus meta cache for `struct kmem_cache` itself; sizes > 2 KiB bypass to `alloc_pages` directly. Public API: `kmem_cache_create` / `kmem_cache_alloc` / `kmem_cache_free` / `kmem_cache_destroy` / `kmalloc` / `kzalloc` / `kcalloc` / `kfree`. `boot_main` calls `slub_init()` then runs a kmem smoke test. `struct page` extended from 32 to 48 bytes with `slab_freelist` + `slab_cache` fields; new `PG_SLAB` flag. struct page array grew from 16 MiB to 24 MiB on 2 GiB RAM. See `docs/reference/07-slub.md`.
+
 **Not yet implemented**:
 
-- SLUB kernel object allocator (P1-E).
 - GIC + exception vectors (P1-F). The guard page mapping is in place but the fault handler that observes it lands here.
 - ARM generic timer (P1-G).
 - Hardening flags (P1-H).
 - Phase 1 exit verification (P1-I).
 
-**Landed**: P1-A at commit `2b332d8`; P1-B at commit `d3e33a8`; P1-C at commit `6462227`; P1-C-extras Part A at commit `ff22ca3`; P1-C-extras Part B at commit `74fd391`; P1-D at commit `198c48c`.
+**Landed**: P1-A at commit `2b332d8`; P1-B at commit `d3e33a8`; P1-C at commit `6462227`; P1-C-extras Part A at commit `ff22ca3`; P1-C-extras Part B at commit `74fd391`; P1-D at commit `198c48c`; P1-E at commit `(pending hash-fixup)`.
 
 ---
 

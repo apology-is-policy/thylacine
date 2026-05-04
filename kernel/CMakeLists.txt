@@ -17,6 +17,7 @@ set(KERNEL_SRCS
     ../mm/buddy.c
     ../mm/magazines.c
     ../mm/phys.c
+    ../mm/slub.c
 )
 
 set(KERNEL_LD_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/../arch/arm64/kernel.ld)
