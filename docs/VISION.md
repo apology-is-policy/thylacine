@@ -356,7 +356,72 @@ The compat layer is *additive*: it does not modify the kernel API. The kernel AP
 
 ---
 
-## 13. Halcyon — the graphical shell
+## 13. Utopia — the textual POSIX milestone
+
+Before Halcyon arrives at Phase 6, Thylacine has a named milestone: **Utopia** — the textual POSIX environment that proves the kernel + 9P client + Stratum + compat layer all compose into something a developer could actually use, even without graphics. Utopia is the project's first user-facing deliverable; it lands at Phase 5 exit and is the v0.5-equivalent.
+
+The test for Utopia is *"does it feel real, not broken?"* — a developer SSHing into a Thylacine VM (or attaching via the QEMU UART console) should be able to:
+
+- Run a shell — both `rc` (Plan 9 native, scriptable) and `bash` (POSIX compat for Linux scripts).
+- Run a complete coreutils suite — every standard CLI tool a Linux developer reaches for, with Linux-compatible flag semantics, not a stripped-down subset.
+- Compile and run C programs against the musl port.
+- Use `vim`, `less`, `top`, `htop`, `tmux`, `ssh`, `git`, `make`, `curl`, `python3`, `gcc`/`clang` — all the textual tools that depend on `termios`, `poll`, `pty`, signal handling, and threading working correctly.
+- Run pipelines with redirection, job control (`Ctrl-Z` / `bg` / `fg`), and `Ctrl-C` interruption that translates correctly to Plan 9 notes underneath.
+- Open files on Stratum and trust that crash safety + integrity verification work.
+- Run a static Linux ARM64 binary via the syscall translation shim.
+
+### 13.1 The userland layering
+
+Three userland tiers ship with Utopia, layered by audience and breadth:
+
+**Tier 1 — Plan 9 userland (native, ports)**:
+- `rc` — Plan 9's shell. The native scripting environment. ports `rc-9front`.
+- `mk` — Plan 9's `make` replacement. Cleaner semantics, simpler grammar.
+- `awk`, `troff`, `tbl`, `eqn` — Plan 9 ports.
+- `9` — the launcher for Plan 9 commands when invoked from `bash` context.
+- Source: `9base` / `plan9port` ports adapted to musl.
+
+**Tier 2 — Modern coreutils (POSIX-compatible default)**:
+- A complete GNU-coreutils-equivalent suite providing every flag and option a Linux developer expects. Sourced as a port of one of:
+  - **GNU coreutils** (the reference; widest compatibility; large; GPL).
+  - **uutils-coreutils** (Rust rewrite of GNU; modern memory-safe; permissive license; reaching parity).
+  - **sbase + ubase** (suckless; minimal; smaller surface; missing some Linux extensions).
+- The decision (Phase 5 entry) is between GNU coreutils and uutils-coreutils. Default lean: **uutils-coreutils** (Rust rewrite) — under the SOTA-from-start tenet, a memory-safe modern implementation beats the C reference. GNU coreutils is the fallback if uutils has functional gaps Phase 5 surfaces.
+- Coverage: `ls`, `cat`, `echo`, `cp`, `mv`, `rm`, `mkdir`, `rmdir`, `chmod`, `chown`, `chgrp`, `ln`, `touch`, `stat`, `du`, `df`, `tee`, `dd`, `seq`, `yes`, `true`, `false`, `test`, `[`, `expr`, `printf`, `printenv`, `env`, `pwd`, `which`, `whoami`, `id`, `groups`, `hostname`, `uname`, `date`, `tty`, `tput`, `clear`, `reset`, `sleep`, `timeout`, `nice`, `nohup`, `time`, `kill`, `pkill`, `pgrep`, `ps`, `top`, `htop`, `free`, `vmstat`, `lsof`, `tar`, `gzip`, `bzip2`, `xz`, `zstd`, `cpio`, `find`, `xargs`, `sort`, `uniq`, `wc`, `head`, `tail`, `cut`, `paste`, `join`, `split`, `csplit`, `comm`, `diff`, `patch`, `cmp`, `md5sum`, `sha256sum`, `b3sum`, `od`, `hexdump`, `xxd`, `strings`, `file`, `grep`, `sed`, `awk`, `tr`, `fmt`, `fold`, `pr`, `nl`, `column`, `expand`, `unexpand`, `iconv`, `base64`, `base32`, `b2sum`, `realpath`, `readlink`, `dirname`, `basename`, `mktemp`, `install`, `getopt`, `getopts`, `mountpoint`, `chroot`, `runuser`, `sudo` (translates to janus-mediated capability requests; v1.0 stub).
+
+  This is the full standard Linux-developer expectation. **No subset.** A Utopia where `cp -a` doesn't preserve xattrs because we shipped a stripped coreutils is a broken Utopia.
+
+**Tier 3 — POSIX BusyBox (recovery / minimum-viable)**:
+- BusyBox compiled against musl, included in the initramfs and as a single-binary recovery option. The Tier 2 coreutils are the everyday tools; BusyBox is the "kernel boots, modular coreutils failed to mount, here is everything you need in one binary" recovery surface.
+- This dual presence (Tier 2 for daily use, BusyBox in initramfs) is the standard for hardened Linux distributions; Thylacine adopts it.
+
+The same Stratum that holds `/usr/bin/` holds `/sbin/busybox`; both are accessible regardless of mount state.
+
+The Utopia milestone exists because Halcyon is too risky to be the first user-facing thing. If Halcyon's scroll-buffer-with-inline-graphics model has surprising edge cases (and it will), the project must already be in a position where someone can use Thylacine for real work without it. Utopia is that position.
+
+The minimum-viable Utopia surface is enumerated in `ARCHITECTURE.md §23.2`:
+
+- **Native + compat shells**: `rc`, `bash`.
+- **musl libc port** with full Thylacine syscall support.
+- **`poll`, `select`** — without these, every interactive program is broken.
+- **`futex`** — every threaded program needs this.
+- **`/proc` synthetic 9P server** with Linux-compat field names.
+- **`/dev/{null,zero,random,urandom,tty}`**.
+- **`/dev/pts/`** — pseudo-terminals for `ssh`, `tmux`, `vim`.
+- **`termios` on `/dev/cons`** — raw mode, cooked mode, echo control.
+- **Signal translation** — every POSIX signal that doesn't directly conflict with Plan 9 notes.
+- **TPIDR_EL0 save/restore** for TLS.
+- **`/etc/{passwd,group,hostname,resolv.conf,localtime}`** as ordinary Stratum files.
+- **`/tmp`, `/run`** as tmpfs.
+- **Dynamic linker** (`ld-thylacine.so` — musl's, relinked).
+
+Once Utopia ships at Phase 5 exit, Halcyon (Phase 6) inherits a substrate that is already *useful*. Halcyon adds graphics; Utopia proves the rest works.
+
+Utopia is not a separate codebase or build target — it is the state of the system at Phase 5 exit. The name marks the milestone, not the artifact. When this document refers to Utopia, it means the v0.5 POSIX-textual-environment-on-9P-substrate; when it refers to Halcyon, it means the v1.0 graphical-scroll-buffer-shell layered on top of Utopia.
+
+---
+
+## 14. Halcyon — the graphical shell
 
 Halcyon deserves its own section in the vision document because it is the most unusual design decision and the most exposed to "this can't work" objections.
 
@@ -422,7 +487,7 @@ Rust is chosen because Halcyon parses bash-subset syntax, manages a scroll buffe
 
 ---
 
-## 14. Open questions
+## 15. Open questions
 
 Tracked here, resolved in `ARCHITECTURE.md` or carried into Phase 1+:
 
@@ -435,7 +500,7 @@ Tracked here, resolved in `ARCHITECTURE.md` or carried into Phase 1+:
 
 ---
 
-## 15. Revision history
+## 16. Revision history
 
 | Date | Change | Reason |
 |---|---|---|
@@ -443,7 +508,7 @@ Tracked here, resolved in `ARCHITECTURE.md` or carried into Phase 1+:
 
 ---
 
-## 16. Summary
+## 17. Summary
 
 Thylacine OS is the operating system Plan 9 would have become if the industry had not walked away. It is built from first principles, in the right language for each layer (C99 kernel, Rust userspace), for the right architecture (ARM64 first), with the right filesystem underneath it (Stratum), with the right shell as the face of it (Halcyon), and with maximum verification rigor at every level — formal specs, adversarial audits, sanitizer matrices, no shortcut implementations.
 
