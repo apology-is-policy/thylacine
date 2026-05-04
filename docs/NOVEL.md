@@ -22,7 +22,7 @@ The goal is to make `ARCHITECTURE.md` easier to write: each angle becomes a know
 | 1 | 9P as universal composition, totalized | Low | 6–8 KLOC C99 | Continuous, foundational |
 | 2 | Userspace drivers via typed handles + VMO zero-copy | Medium | 7–10 KLOC C99 + 8–12 KLOC Rust | Phase 2-3 |
 | 3 | Pipelined 9P client with out-of-order completion | Low-medium | 3–5 KLOC C99 | Phase 4 (foundational for 4+) |
-| 4 | Halcyon: shell as the graphical environment | Medium-high | 8–12 KLOC Rust | Phase 6 |
+| 4 | Halcyon: shell as the graphical environment | Medium-high | 8–12 KLOC Rust | Phase 8 (final) |
 | 5 | Stratum as native FS with namespace coupling | Low | 4–6 KLOC C99 (kernel side) | Phase 4 |
 | 6 | EEVDF scheduler on Plan 9-heritage kernel | Medium | 4–6 KLOC C99 | Phase 2 |
 | 7 | SOTA security hardening from day one | Low-medium | 3–5 KLOC C99 (mostly compiler/linker config + targeted code) | Phase 1-2 |
@@ -72,7 +72,7 @@ Thylacine's totalization:
 - A shell user can browse `/proc/<pid>/`, `/dev/`, `/dev/fb/`, `/net/tcp/`, `/dev/video/player/`, `/dev/janus/keys/` with `ls`, `cat`, `echo` — no special tools.
 - Adding a new "kernel feature" means writing a new 9P server, not modifying the kernel.
 - A program written for Linux that opens `/proc/self/cmdline` reads the expected bytes via Thylacine's compat 9P server.
-- **Utopia milestone (Phase 5 exit)**: a developer using Thylacine via SSH or UART console finds a complete textual POSIX environment that "feels real, not broken" (per VISION §13). Everything below works on the 9P substrate: shell (`rc` + `bash`), full coreutils (uutils-coreutils, complete flag coverage — not stripped), `vim`, `less`, `top`, `tmux`, `ssh`, `git`, `make`, `python3`, `gcc`/`clang`, all tools that depend on `termios` / `poll` / `pty` / signal handling / threading. BusyBox is the recovery shell in initramfs; coreutils is the daily driver. Utopia is the test that the angle's totalization is real, not just theoretical — if any POSIX surface is broken, Utopia exposes it before Halcyon arrives at Phase 6.
+- **Utopia milestone (Phase 5 exit)**: a developer using Thylacine via SSH or UART console finds a complete textual POSIX environment that "feels real, not broken" (per VISION §13). Everything below works on the 9P substrate: shell (`rc` + `bash`), full coreutils (uutils-coreutils, complete flag coverage — not stripped), `vim`, `less`, `top`, `tmux`, `ssh`, `git`, `make`, `python3`, `gcc`/`clang`, all tools that depend on `termios` / `poll` / `pty` / signal handling / threading. BusyBox is the recovery shell in initramfs; coreutils is the daily driver. Utopia is the test that the angle's totalization is real, not just theoretical — if any POSIX surface is broken, Utopia exposes it before later phases (Linux compat at Phase 6, hardening at Phase 7, Halcyon at Phase 8).
 
 **Dependencies**:
 - Kernel `Dev` infrastructure (Phase 2-3).
@@ -98,7 +98,7 @@ Thylacine's totalization:
 - **Microkernel RPC + custom protocol per subsystem** (MINIX 3 / Helios). Rejected because: this is exactly the fragmentation 9P is designed to eliminate. Each protocol is a new attack surface, a new client library, a new audit target.
 - **Linux-style mixed protocols (sockets + sysfs + procfs + netlink + dbus + ...)**. Rejected because: the same fragmentation problem at higher cost.
 
-**Sequence**: Foundational. Phase 1 (kernel skeleton) starts with `Dev` + `Chan` infrastructure. Phase 4 lands the 9P client. POSIX-compat 9P servers land at Phase 5-7. The model is in continuous refinement throughout v1.0; full totalization is the v1.0 release criterion (Phase 8 audit pass: every kernel feature reachable as a 9P path).
+**Sequence**: Foundational. Phase 1 (kernel skeleton) starts with `Dev` + `Chan` infrastructure. Phase 4 lands the 9P client. POSIX-compat 9P servers land at Phase 5-6. The model is in continuous refinement throughout v1.0; full totalization is verified at the Phase 7 audit pass (every kernel feature reachable as a 9P path) and re-validated at Phase 8 with Halcyon's additional 9P-server surface.
 
 ---
 
@@ -247,7 +247,13 @@ The model:
 
 Halcyon is the bet that, for shell-driven development workflows, this is enough.
 
-**Halcyon presupposes Utopia.** Utopia (VISION §13) is the textual POSIX environment that lands at Phase 5 exit — `rc` + `bash` + complete coreutils + `vim` + `tmux` + `ssh` + `git` + `make` + every textual tool a Linux developer expects. Halcyon arrives at Phase 6 *on top of* Utopia, adding inline graphics, image display, and video playback to an already-working shell environment. This sequencing is load-bearing: if Halcyon's design has surprising edge cases, Utopia is the user's working environment until Halcyon stabilizes; Thylacine never enters a state where the user has nothing usable. Halcyon is *additive* over Utopia; it is not a replacement.
+**Halcyon is deliberately the last phase of v1.0.** It presupposes Utopia (Phase 5 exit), Linux compat + network (Phase 6 exit), and full hardening + audit (Phase 7 exit). Halcyon arrives at Phase 8 *on top of* a hardened, audited, Linux-binary-compatible, network-capable substrate, adding inline graphics, image display, and video playback to an already-working environment. This sequencing is load-bearing for two reasons:
+
+1. **Risk isolation**: Halcyon is the highest-risk angle (medium-high; the scroll-buffer-with-inline-graphics model is novel in production). Holding it to last means its risk does not endanger the rest of the OS. If Halcyon's design has surprising edge cases, the textual + compat substrate is the user's working environment until Halcyon stabilizes.
+
+2. **Shippable v1.0-rc fallback**: Phase 7 exit produces a complete, hardened, audited, Linux-compatible textual OS — a real shippable v1.0-rc. If Halcyon hits a wall at Phase 8, the project ships the v1.0-rc as v1.0 and treats Halcyon as v1.1. The "practical working OS" the user committed to (per VISION §13) is delivered regardless.
+
+Halcyon is *additive* over the practical OS; it is not a replacement. Thylacine never enters a state where the user has nothing usable.
 
 The model:
 
@@ -297,7 +303,7 @@ The Rust implementation matters: parsing bash-subset syntax, managing the scroll
 - A user runs `tmux` inside Halcyon and gets multi-pane workflows (via tmux's own model — Halcyon doesn't know about panes).
 
 **Dependencies**:
-- VirtIO-GPU userspace driver (`/dev/fb/`) — Phase 3 (driver) + Phase 6 (Halcyon-side).
+- VirtIO-GPU userspace driver (`/dev/fb/`) — Phase 3 (driver) + Phase 8 (Halcyon-side).
 - Video decoder (software at v1.0) as 9P server — Phase 6.
 - `pthread`, `futex`, `poll`, `pty`, `termios` — Phase 5.
 - `bash` port — Phase 5.
@@ -325,7 +331,7 @@ The Rust implementation matters: parsing bash-subset syntax, managing the scroll
 - **Plain text terminal + sixel-like inline graphics** (modern terminal emulators). Considered. Sixel works inside `iTerm2`, etc. But Halcyon goes further: graphical regions are first-class scroll-buffer entries with structured history, not encoded-bytes-in-text. This makes the implementation cleaner (no escape-sequence soup) and the UX richer (scrolling preserves images byte-for-byte).
 - **Wayland compositor with everything routed through it** (modernist alternative). Rejected: this is the standard; we are deliberately the not-standard.
 
-**Sequence**: Phase 6. Halcyon is the v1.0 marquee feature; it's also the riskiest, and lands after the dependency chain (drivers, 9P, compat) is solid.
+**Sequence**: Phase 8 (the final phase of v1.0). Halcyon is the v1.0 marquee feature; it's also the riskiest, and lands after the entire dependency chain (drivers, 9P, Stratum, Utopia, Linux compat, network, hardening, audit) is solid. Phase 7 exits with a hardened, audited textual v1.0-rc that is shippable as v1.0 if Halcyon slips. This is deliberate insurance.
 
 ---
 
@@ -407,7 +413,7 @@ The model:
 - Three priority bands as separate run-trees: interactive (high weight, short deadlines), normal (default), idle (low weight).
 - **Per-CPU run trees**, not global. Work-stealing on idle: an idle CPU steals from the busiest peer.
 - ARM generic timer for tick (or tickless: program the next deadline; sleep until then).
-- Preemption at EL0→EL1 boundary in Phase 2 (syscall + IRQ entry); kernel preemption deferred to Phase 8 hardening.
+- Preemption at EL0→EL1 boundary in Phase 2 (syscall + IRQ entry); kernel preemption deferred to Phase 7 hardening.
 - Single-CPU baseline at Phase 2 entry; SMP enabled at Phase 2 exit (4 CPUs first; up to 8 by v1.0).
 
 **Scope — in**:
@@ -520,7 +526,7 @@ The model:
 - Test: an attempt to `mprotect(addr, len, PROT_READ | PROT_WRITE | PROT_EXEC)` is rejected.
 - Test: a forged kernel return address (PAC mismatch) panics the kernel cleanly with an attestation message.
 - Boot KASLR: kernel base address differs across boots (verified via `/ctl/kernel/base`).
-- Phase 8 audit pass on the security stack.
+- Phase 7 audit pass on the security stack (the comprehensive hardening + audit + 8-CPU stress phase).
 
 **Dependencies**:
 - Compiler toolchain (Clang, supports all the flags).
@@ -551,7 +557,7 @@ The model:
 - **Software CFI only, no PAC/MTE/BTI**. Rejected: Apple Silicon has all of these; not using them would be deliberately leaving security on the table.
 - **IPE / SBoMC / TPM-based attestation**. Deferred: these are deployment policies; v1.0 ships with the build-time hardening.
 
-**Sequence**: Phase 1 (build flags + KASLR + basic ARM hardening) → Phase 2 (W^X + ELF loader + mprotect) → Phase 8 (final audit pass + measurement).
+**Sequence**: Phase 1 (build flags + KASLR + basic ARM hardening) → Phase 2 (W^X + ELF loader + mprotect) → Phase 7 (final audit pass + measurement; v1.0-rc release tag).
 
 ---
 
@@ -713,19 +719,30 @@ Natural order, derived from the dependencies:
 
 - **Angle #1 — POSIX surfaces as 9P servers.** Phase 5-7 deliverables. The POSIX surfaces (`/proc`, `/dev/pts/`, `/sys`, `/run`) all arrive as 9P servers in this phase block.
 - **Angle #8 — Formal verification.** `poll.tla`, `futex.tla`, `notes.tla`, `pty.tla` at Phase 5.
-- **Utopia milestone (Phase 5 exit)**: the textual POSIX environment is complete and "feels real, not broken." musl port + uutils-coreutils (full flag coverage, no subset) + `rc` + `bash` + `vim` + `tmux` + `ssh` + `git` + `make` + `python3` + `gcc`/`clang` all run. BusyBox in initramfs as the recovery shell. The user can use Thylacine for real work via SSH or UART console at this point — Halcyon at Phase 6 is additive over Utopia, not a replacement. Utopia is the v0.5-equivalent visible deliverable.
+- **Utopia milestone (Phase 5 exit)**: the textual POSIX environment is complete and "feels real, not broken." musl port + uutils-coreutils (full flag coverage, no subset) + `rc` + `bash` + `vim` + `tmux` + `ssh` + `git` + `make` + `python3` + `gcc`/`clang` all run. BusyBox in initramfs as the recovery shell. The user can use Thylacine for real work via SSH or UART console at this point — subsequent phases (Linux compat at Phase 6, hardening at Phase 7, Halcyon at Phase 8) are additive over Utopia, not replacements. Utopia is the v0.5-equivalent visible deliverable.
 
-### Phase D — Halcyon + compat (Phases 6-7 of ROADMAP)
+### Phase D — Linux compat + network (Phase 6 of ROADMAP)
 
-- **Angle #4 — Halcyon.** Phase 6 deliverable.
+- **Angle #1 — Linux-shaped POSIX surfaces** (`/proc-linux`, `/sys-linux`, `/dev-linux`) as 9P servers. Phase 6 deliverable.
+- **Linux ARM64 binary shim.** Top-50 syscall coverage. Phase 6 deliverable.
+- **OCI container as namespace.** Phase 6 deliverable.
+- **Network stack** (smoltcp Rust port, with Plan 9 IP fallback option). Phase 6 deliverable.
+
+### Phase E — Hardening + audit + v1.0-rc (Phase 7 of ROADMAP)
+
+- **Angle #7 — Final security audit pass** across every audit-trigger surface from `ARCHITECTURE.md §25.4`.
+- **Angle #8 — Spec-to-code mapping verified end-to-end** for all 9 TLA+ specs.
+- **Angle #6 — 8-CPU SMP 72-hour stress.**
+- All latency budgets (VISION §4.5) measured and gated.
+- Fuzzer integration (1000+ CPU-hours per surface).
+- **v1.0-rc release tag at Phase 7 exit** — a complete, hardened, audited textual + compat OS. If Halcyon (Phase 8) slips, this v1.0-rc ships as v1.0 and Halcyon becomes v1.1.
+
+### Phase F — Halcyon + v1.0 final (Phase 8 of ROADMAP)
+
+- **Angle #4 — Halcyon.** Phase 8 deliverable. The marquee feature; also the riskiest. Lands on top of the hardened, audited substrate.
 - **Angle #1 — Halcyon as 9P client.** Same phase.
-
-### Phase E — Hardening + release (Phase 8 of ROADMAP)
-
-- **Angle #7 — Final security audit pass.**
-- **Angle #8 — Spec-to-code mapping verified end-to-end.**
-- **Angle #6 — 8-CPU SMP stress.**
-- All angles measured against budget.
+- **Halcyon-surface audit pass.** Halcyon-introduced surfaces (scroll-buffer state machine, image decode, video player 9P client, framebuffer driver extensions) get their own focused audit round.
+- **v1.0 final release** at Phase 8 exit.
 
 ### Phase 0 (ongoing) — Designed-not-implemented contracts
 

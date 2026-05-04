@@ -74,10 +74,10 @@ qemu-system-aarch64 \
 **Flags to add as phases progress:**
 
 ```sh
-  -device virtio-gpu-pci \              # Phase 6: framebuffer (Halcyon)
-  -display sdl \                        # Phase 6: display window on host
-  -device virtio-keyboard-pci \         # Phase 6: keyboard input
-  -device virtio-mouse-pci              # Phase 6: mouse input
+  -device virtio-gpu-pci \              # Phase 8: framebuffer (Halcyon)
+  -display sdl \                        # Phase 8: display window on host
+  -device virtio-keyboard-pci \         # Phase 8: keyboard input
+  -device virtio-mouse-pci              # Phase 8: mouse input
 ```
 
 `run-vm.sh` accepts arguments:
@@ -314,7 +314,7 @@ CI runs TLC on every PR touching specified files; failing TLC blocks merge.
 
 ## 8. Raspberry Pi 5 — second hardware target
 
-**When**: post-v1.0 (v1.1 candidate per `ROADMAP.md §12.1`). Pi 5 work *can* begin in parallel with Phase 7-8 of v1.0 if there's spare capacity, but it is not a v1.0 release deliverable. The reasoning: Phase 7 (Linux compat + network) and Phase 8 (hardening) are full-effort phases against QEMU `virt`; pulling in Pi 5 hardware bring-up at the same time risks both.
+**When**: post-v1.0 (v1.1 candidate per `ROADMAP.md §12.1`). Pi 5 work *can* begin in parallel with later v1.0 phases if there's spare capacity, but it is not a v1.0 release deliverable. The reasoning: Phase 6 (Linux compat + network), Phase 7 (hardening + audit + 8-CPU stress + v1.0-rc), and Phase 8 (Halcyon + v1.0 final) are full-effort phases against QEMU `virt`; pulling in Pi 5 hardware bring-up at the same time risks all of them.
 
 **Why Pi 5**:
 - GIC-400 interrupt controller: identical to QEMU `virt` — GIC driver transfers directly with no changes.

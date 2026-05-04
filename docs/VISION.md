@@ -169,7 +169,7 @@ These are aggressive — seL4 / Fuchsia / Helios territory — and achievable on
 - Boot times: Phase 8 v1.0 release exit.
 - Syscall latencies: measured continuously from Phase 2 onward.
 - 9P round-trip: gated at Phase 4 exit.
-- Halcyon frame time: gated at Phase 6 exit.
+- Halcyon frame time: gated at Phase 8 exit.
 - IRQ-to-handler: gated at Phase 8 v1.0 release exit (drives the userspace-driver argument; if we miss this number, the driver model is broken).
 
 Tail-latency regression is treated as a bug, not a performance variance.
@@ -220,8 +220,8 @@ Detailed in `NOVEL.md`. Each is a concrete, testable commitment.
 | 1 | 9P-as-universal-composition, total | Low | Foundational |
 | 2 | Userspace drivers via typed handles + VMO zero-copy | Medium | Phase 2-3 |
 | 3 | Pipelined 9P client (out-of-order, flow-controlled) | Low | Phase 4 |
-| 4 | Halcyon graphical scroll-buffer shell, no windowing system | Medium | Phase 6 |
-| 5 | POSIX surfaces as 9P servers (`/proc`, `/dev`, `/sys`, `/dev/pts`) | Low | Phase 5-7 |
+| 4 | Halcyon graphical scroll-buffer shell, no windowing system | Medium-high | Phase 8 (final) |
+| 5 | POSIX surfaces as 9P servers (`/proc`, `/dev`, `/sys`, `/dev/pts`) | Low | Phase 5-6 |
 | 6 | Stratum as native filesystem from Phase 4 | Low | Phase 4 |
 | 7 | Per-process namespace inheriting Stratum's per-connection namespace | Low | Phase 4 |
 | 8 | EEVDF scheduler with SOTA hardening (PAC, MTE, KASLR, ASLR, W^X, CFI, LSE atomics) from day one | Medium | Phase 1-2 |
@@ -358,7 +358,7 @@ The compat layer is *additive*: it does not modify the kernel API. The kernel AP
 
 ## 13. Utopia — the textual POSIX milestone
 
-Before Halcyon arrives at Phase 6, Thylacine has a named milestone: **Utopia** — the textual POSIX environment that proves the kernel + 9P client + Stratum + compat layer all compose into something a developer could actually use, even without graphics. Utopia is the project's first user-facing deliverable; it lands at Phase 5 exit and is the v0.5-equivalent.
+Before Halcyon arrives — Halcyon is deliberately the *last* phase of v1.0 (Phase 8), per `ROADMAP.md` — Thylacine has a named milestone: **Utopia** — the textual POSIX environment that proves the kernel + 9P client + Stratum + compat layer all compose into something a developer could actually use, even without graphics. Utopia is the project's first user-facing deliverable; it lands at Phase 5 exit and is the v0.5-equivalent. Polished Utopia + Linux compat + network + hardening + audit (Phases 5-7) is the **practical working OS** that v1.0 commits to; Halcyon (Phase 8) is the graphical layer added on top of an already-stable, already-shippable substrate.
 
 The test for Utopia is *"does it feel real, not broken?"* — a developer SSHing into a Thylacine VM (or attaching via the QEMU UART console) should be able to:
 
@@ -415,9 +415,9 @@ The minimum-viable Utopia surface is enumerated in `ARCHITECTURE.md §23.2`:
 - **`/tmp`, `/run`** as tmpfs.
 - **Dynamic linker** (`ld-thylacine.so` — musl's, relinked).
 
-Once Utopia ships at Phase 5 exit, Halcyon (Phase 6) inherits a substrate that is already *useful*. Halcyon adds graphics; Utopia proves the rest works.
+Once Utopia ships at Phase 5 exit, the substrate is already *useful*. Linux compat (Phase 6) and hardening (Phase 7) extend the practical working OS while Halcyon's design risk is held at arm's length. Halcyon (Phase 8) inherits a hardened, audited, network-capable, Linux-binary-compatible substrate. Halcyon adds graphics; everything else proves the rest works first.
 
-Utopia is not a separate codebase or build target — it is the state of the system at Phase 5 exit. The name marks the milestone, not the artifact. When this document refers to Utopia, it means the v0.5 POSIX-textual-environment-on-9P-substrate; when it refers to Halcyon, it means the v1.0 graphical-scroll-buffer-shell layered on top of Utopia.
+Utopia is not a separate codebase or build target — it is the state of the system at Phase 5 exit. The name marks the milestone, not the artifact. When this document refers to Utopia, it means the v0.5 POSIX-textual-environment-on-9P-substrate; when it refers to Halcyon, it means the v1.0 graphical-scroll-buffer-shell that lands at Phase 8. **If Halcyon's medium-high risk materializes and Phase 8 slips, the project ships the textual v1.0-rc produced at Phase 7 exit as v1.0 and treats Halcyon as v1.1.** This sequencing is deliberate insurance against the riskiest novel angle.
 
 ---
 
