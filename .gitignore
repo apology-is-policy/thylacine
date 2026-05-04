@@ -1,0 +1,44 @@
+# Build artifacts
+build/
+target/
+*.o
+*.a
+*.elf
+*.img
+*.bin
+
+# QEMU + dev tooling
+share/
+.qemu_state/
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Rust
+Cargo.lock.*
+**/target/
+
+# TLA+ tools state
+*.toolbox/
+states/
+*.dot
+
+# Sysroot (built once, cached)
+sysroot/
+
+# Snapshot images (large; machine-specific)
+snapshots/
+
+# Log files
+*.log
+
+# Generated docs
+docs/_build/
+
+# Local config overrides
+.env.local
+*.local

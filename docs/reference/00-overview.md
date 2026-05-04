@@ -1,0 +1,116 @@
+# 00 — Overview
+
+This is the as-built bird's-eye view of Thylacine OS. It is updated per chunk during implementation. Currently scaffolded; full content lands as subsystems implement.
+
+---
+
+## Layer cake (bottom-up)
+
+```
+(scaffolded; redrawn per chunk during Phases 1-8)
+
+Target end state at v1.0:
+
+  ┌─────────────────────────────────────────────────────────┐
+  │  Halcyon (Phase 8)                                      │
+  │  Scroll-buffer shell, image, video                      │
+  ├─────────────────────────────────────────────────────────┤
+  │  Userspace services (Phase 5-7)                         │
+  │  janus, drivers, video player, network stack,           │
+  │  POSIX-compat 9P servers, container runner              │
+  ├─────────────────────────────────────────────────────────┤
+  │  Compat layer (Phase 5-6)                               │
+  │  musl libc port, Linux ARM64 syscall shim               │
+  ├─────────────────────────────────────────────────────────┤
+  │  Kernel (Phase 1-4)                                     │
+  │  Namespace, EEVDF, VM, 9P client (pipelined),           │
+  │  Handle table, VMO manager, IRQ forwarding, Notes,      │
+  │  Dev, Chan, Pipes, rendezvous, PTY infrastructure       │
+  ├─────────────────────────────────────────────────────────┤
+  │  Stratum (Phase 4 dependency; external)                 │
+  │  PQ-encrypted, formally verified, COW filesystem        │
+  └─────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Cross-cutting concerns
+
+### Subordination invariant (handles ↔ 9P)
+
+(One paragraph describing the invariant + which specs pin it + which code paths uphold it. Filled in when handles land in Phase 2.)
+
+Reference: `ARCHITECTURE.md §18.1`.
+
+### W^X
+
+(One paragraph. Filled in when memory subsystem lands in Phase 1-2.)
+
+Reference: `ARCHITECTURE.md §6.6`, invariant I-12.
+
+### Lock order (global)
+
+(The global lock-acquisition order with any reversal-warnings. Filled in when SMP scheduler lands in Phase 2.)
+
+Reference: `ARCHITECTURE.md §20`.
+
+### KASLR / ASLR
+
+(Filled in when boot subsystem lands in Phase 1.)
+
+Reference: `ARCHITECTURE.md §5.3`, `§24`.
+
+### 9P session lifecycle
+
+(Filled in when 9P client lands in Phase 4.)
+
+Reference: `ARCHITECTURE.md §10.2`, `§21`.
+
+---
+
+## Versioning
+
+| Version | Bump reason |
+|---|---|
+| (none yet) | Phase 0 complete; v0.1 lands at Phase 1 exit. |
+
+---
+
+## Phase status (as-built)
+
+| Phase | Status | Highlights | See |
+|---|---|---|---|
+| 0 | ✅ complete | VISION + COMPARISON + NOVEL + ARCHITECTURE + ROADMAP + TOOLING + CLAUDE.md scripture | (the scripture itself) |
+| 1 | ⏳ entry pending | Boot, memory, hardening defaults, IRQ | phase1-status.md |
+| 2 | — | Process model + EEVDF scheduler + handles + VMO | (planned) |
+| 3 | — | Userspace VirtIO drivers (no in-kernel virtio-blk) | (planned) |
+| 4 | — | 9P client + Stratum mount | (planned) |
+| 5 | — | Syscalls + musl + uutils + **Utopia** ships | (planned) |
+| 6 | — | Linux compat + network + container runner | (planned) |
+| 7 | — | Hardening + audit + 8-CPU stress + **v1.0-rc.1 tag** | (planned) |
+| 8 | — | Halcyon + v1.0 final | (planned) |
+
+---
+
+## Test posture
+
+- Test suite count: 0.
+- Sanitizer matrix: not yet enabled.
+- Spec count: 0 written; 9 planned per `ARCHITECTURE.md §25.2`.
+
+(Refreshed per chunk during implementation.)
+
+---
+
+## Build + CI
+
+- Local invocation: see `CLAUDE.md` "Build + test commands".
+- CI workflow: not yet configured (Phase 1 deliverable).
+
+---
+
+## Revision history
+
+| Date | Change | Reason |
+|---|---|---|
+| 2026-05-04 | Scaffolded (Phase 0 complete). | Bird's-eye overview template. Per-chunk updates begin at Phase 1 entry. |
