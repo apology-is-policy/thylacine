@@ -65,10 +65,28 @@ bool dtb_get_memory(u64 *base, u64 *size);
 // then return its first `reg` (base, size) pair.
 //
 // Used by P1-B to discover the PL011 base address (compat = "arm,pl011")
-// and by P1-F to find the GIC base, ARM generic timer, etc.
+// and by P1-G to find the GIC distributor, ARM generic timer, etc.
 //
 // Returns true on success.
 bool dtb_get_compat_reg(const char *compat, u64 *base, u64 *size);
+
+// Like dtb_get_compat_reg, but returns the `reg` pair at `idx` (0-based)
+// within the matched node's reg property. GICv3 uses a two-region reg
+// (distributor at idx 0, redistributor at idx 1); GICv2 uses two regions
+// (distributor at idx 0, CPU interface at idx 1) too. A single-region
+// reg (e.g. PL011) is reachable with idx = 0 — equivalent to
+// dtb_get_compat_reg.
+//
+// Returns false if no node matches `compat`, or if the matched node's
+// reg property holds fewer than (idx + 1) pairs.
+bool dtb_get_compat_reg_n(const char *compat, u32 idx,
+                          u64 *base, u64 *size);
+
+// True iff some DTB node's "compatible" property contains `compat`.
+// Used by gic.c for v2-vs-v3 autodetect (probe "arm,gic-v3" first, then
+// "arm,cortex-a15-gic" / "arm,gic-400" for v2). Cheaper than the full
+// dtb_get_compat_reg walk if you only care whether a string exists.
+bool dtb_has_compat(const char *compat);
 
 // Read /chosen/kaslr-seed as 64 bits (the property is two u32 cells in
 // the DTB; we concatenate them in the FDT-cell order). Returns 0 if the

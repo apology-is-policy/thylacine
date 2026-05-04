@@ -40,6 +40,22 @@ void mmu_enable(u64 slide);
 // path; future fault-handler can call it on a fault PTE to print
 // "extinction: PTE violates W^X".
 bool pte_violates_wxe(u64 pte);
+
+// Convert MMIO region [pa, pa+size) in TTBR0's identity map from
+// Normal-WB cacheable to Device-nGnRnE attributes. Granularity is
+// the 2 MiB block (TTBR0's L2 entries cover the kernel-image GiB as
+// 2 MiB blocks). Caller must guarantee no kernel code holds a cached
+// value of any address in [pa, pa+size) before calling — used at
+// boot_main time for GIC bring-up (P1-G), virtio devices (Phase 3).
+//
+// Implemented as break-before-make per ARM ARM B2.7: invalidate L2
+// entries, dsb ishst + tlbi vmalle1is + dsb ish + isb (break), then
+// write Device descriptors + dsb ishst + isb (make).
+//
+// Constraint: pa + size must fit in [0, 4 GiB) — TTBR0's identity
+// covers only the low 4 GiB at v1.0. Returns false if unaligned or
+// out of range; true on success.
+bool mmu_map_device(paddr_t pa, u64 size);
 ```
 
 The header also exposes the PTE bit constants (`PTE_VALID`, `PTE_AF`, `PTE_AP_*`, `PTE_PXN`, `PTE_UXN`, etc.), the MAIR attribute indices (`MAIR_IDX_DEVICE`, `MAIR_IDX_NORMAL_WB`, ...), and the canonical W^X-safe constructors (`PTE_KERN_TEXT`, `PTE_KERN_RO`, `PTE_KERN_RW`, `PTE_KERN_RW_BLOCK`, `PTE_DEVICE_RW_BLOCK`).

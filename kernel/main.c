@@ -15,10 +15,12 @@
 // `TOOLING.md`.
 
 #include "uart.h"
-#include "../arch/arm64/kaslr.h"
 #include "../arch/arm64/exception.h"
-#include "../mm/phys.h"
+#include "../arch/arm64/gic.h"
+#include "../arch/arm64/kaslr.h"
+#include "../arch/arm64/timer.h"
 #include "../mm/magazines.h"
+#include "../mm/phys.h"
 #include "../mm/slub.h"
 #include "test/test.h"
 
@@ -108,7 +110,7 @@ void boot_main(void) {
     }
     uart_puts("\n");
 
-    uart_puts("  hardening: MMU+W^X+extinction+KASLR+vectors (P1-F; PAC/MTE/CFI at P1-H)\n");
+    uart_puts("  hardening: MMU+W^X+extinction+KASLR+vectors+IRQ (P1-G; PAC/MTE/CFI at P1-H)\n");
 
     uart_puts("  kernel base: ");
     uart_puthex64(kaslr_kernel_high_base());
@@ -147,10 +149,47 @@ void boot_main(void) {
     // boot-stack guard region accesses → extinction("kernel stack
     // overflow"); kernel-image permission faults → extinction(
     // "PTE violates W^X"); other sync faults → extinction with
-    // ESR/FAR/ELR diagnostic. IRQ / FIQ / SError vectors and the
-    // lower-EL group all extinction (unexpected at this phase;
-    // P1-G adds GIC and IRQ dispatch, Phase 2 adds userspace).
+    // ESR/FAR/ELR diagnostic. The IRQ slot is wired by P1-G below.
+    // FIQ / SError + lower-EL group remain unexpected (Phase 2
+    // wires up the lower-EL group when userspace lands).
     exception_init();
+
+    // Phase 5: bring up the GIC, ARM generic timer, and route the
+    // timer IRQ (PPI 14 → INTID 30) through. After this the kernel
+    // receives 1000 Hz ticks; tick observation below confirms the
+    // interrupt path is live.
+    //
+    // gic_init autodetects v2-vs-v3 from DTB; v3 is QEMU virt's
+    // default with run-vm.sh's gic-version=3. v2 detection extincts
+    // cleanly with a deferred-to-future-chunk diagnostic.
+    if (!gic_init()) {
+        extinction("gic_init returned false (no extinction caught — bug?)");
+    }
+    if (!timer_init(1000)) {
+        extinction("timer_init failed (CNTFRQ_EL0 = 0 or hz out of range)");
+    }
+    if (!gic_attach(TIMER_INTID_EL1_PHYS_NS, timer_irq_handler, NULL)) {
+        extinction("gic_attach(timer) failed");
+    }
+    if (!gic_enable_irq(TIMER_INTID_EL1_PHYS_NS)) {
+        extinction("gic_enable_irq(timer) failed");
+    }
+    // Unmask IRQs at PSTATE. The DAIF.I bit gates IRQ delivery;
+    // clearing it via daifclr opens the gate. FIQ / SError stay
+    // masked at v1.0.
+    __asm__ __volatile__("msr daifclr, #2" ::: "memory");
+
+    uart_puts("  gic:  v");
+    uart_putdec((u64)gic_version());
+    uart_puts(" dist=");
+    uart_puthex64(gic_dist_base());
+    uart_puts(" redist=");
+    uart_puthex64(gic_redist_base());
+    uart_puts("\n");
+
+    uart_puts("  timer: ");
+    uart_putdec(timer_get_freq() / 1000UL);
+    uart_puts(" kHz freq, 1000 Hz tick (PPI 14 / INTID 30)\n");
 
     // In-kernel test harness. Runs every test in g_tests[] (kaslr
     // mix64 avalanche, DTB chosen seed presence, refactored phys
@@ -171,6 +210,15 @@ void boot_main(void) {
         uart_puts(" FAIL\n");
         extinction("kernel test suite failed");
     }
+
+    // Wait for ticks to confirm IRQ delivery, then print the count.
+    // 5 ticks at 1000 Hz = 5 ms — enough to demonstrate the path is
+    // live without elongating the boot. WFI inside the loop puts the
+    // CPU to sleep until the next IRQ arrives.
+    timer_busy_wait_ticks(5);
+    uart_puts("  ticks: ");
+    uart_putdec(timer_get_ticks());
+    uart_puts(" (kernel breathing)\n");
 
     uart_puts("  phase: " THYLACINE_PHASE_STRING "\n");
 

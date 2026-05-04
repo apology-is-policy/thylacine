@@ -11,8 +11,8 @@
 //   0x080   Current EL with SP_EL0  IRQ
 //   0x100   Current EL with SP_EL0  FIQ
 //   0x180   Current EL with SP_EL0  SError
-//   0x200   Current EL with SP_ELx  Synchronous   ← LIVE entry at P1-F
-//   0x280   Current EL with SP_ELx  IRQ            (unexpected at P1-F)
+//   0x200   Current EL with SP_ELx  Synchronous   ← LIVE entry (P1-F)
+//   0x280   Current EL with SP_ELx  IRQ            ← LIVE entry (P1-G)
 //   0x300   Current EL with SP_ELx  FIQ            (unexpected)
 //   0x380   Current EL with SP_ELx  SError         (unexpected)
 //   0x400   Lower EL using AArch64  Synchronous   (no userspace yet)
@@ -24,9 +24,13 @@
 //   0x700   Lower EL using AArch32  FIQ            (we don't run AArch32)
 //   0x780   Lower EL using AArch32  SError         (we don't run AArch32)
 //
-// At P1-F only the Current-EL-SPx Sync handler does real work; every
-// other entry calls exception_unexpected with the vector index, which
-// extinctions. Phase 2 / P1-G fill in IRQ + lower-EL entries.
+// At P1-G the Sync slot terminates in extinction; the IRQ slot is the
+// first recoverable path — vectors.S calls exception_irq_curr_el and
+// then resumes the interrupted code via the shared .Lexception_return
+// trampoline (KERNEL_EXIT lives there to keep the slot ≤ 0x80 bytes;
+// `.L` prefix keeps it out of the symbol table).
+// All other 14 entries call exception_unexpected with the vector index,
+// which extinctions. Phase 2 fills lower-EL entries when userspace lands.
 //
 // KNOWN LIMITATION: the handler runs on the existing SP_EL1 (i.e., the
 // boot stack at P1-F). A stack overflow that triggers a fault then
@@ -165,8 +169,11 @@ _exception_vectors:
     bl      exception_sync_curr_el
     b       _hang                        /* unreached if extinction took over */
 
-    .org _exception_vectors + 0x280      /* IRQ */
-    VEC_UNEXPECTED 5
+    .org _exception_vectors + 0x280      /* IRQ — recoverable */
+    KERNEL_ENTRY
+    mov     x0, sp
+    bl      exception_irq_curr_el
+    b       .Lexception_return           /* shared KERNEL_EXIT trampoline (local) */
 
     .org _exception_vectors + 0x300      /* FIQ */
     VEC_UNEXPECTED 6
@@ -206,3 +213,29 @@ _exception_vectors:
 
     .org _exception_vectors + 0x800
 .size _exception_vectors, . - _exception_vectors
+
+// ---------------------------------------------------------------------------
+// .Lexception_return — shared trampoline for recoverable exception paths.
+//
+// Each vector slot is capped at 0x80 bytes (32 instructions). KERNEL_ENTRY
+// is ~25 instructions; KERNEL_EXIT is ~23. The combined sequence
+// (entry + handler call + exit) is 50+ instructions, well over the budget.
+// We factor KERNEL_EXIT into this trampoline so any recoverable slot fits
+// as: KERNEL_ENTRY + mov x0,sp + bl handler + b .Lexception_return = 28
+// instructions.
+//
+// **Local label** (`.L` prefix; not exposed in the symbol table). This
+// prevents accidental control transfer from outside the vector path —
+// branching to `_exception_return` as a global would let any kernel
+// caller invoke KERNEL_EXIT on whatever happens to sit on the current
+// SP, ERETing to attacker-controllable ELR_EL1 + SPSR_EL1. Phase 2's
+// recoverable sync-fault paths (page-fault COW, etc.) will branch here
+// from within vectors.S the same way the IRQ slot does — no need for
+// a global symbol.
+//
+// The trampoline doesn't peek at SP_EL0 / x0 — it restores everything
+// KERNEL_ENTRY saved, then ERETs to ELR_EL1 with SPSR_EL1.
+// ---------------------------------------------------------------------------
+.section ".text", "ax"
+.Lexception_return:
+    KERNEL_EXIT

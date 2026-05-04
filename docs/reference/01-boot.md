@@ -56,10 +56,12 @@ After the branch, `_real_start` performs, in order:
 9. **`boot_main()`** runs at high VA. Prints the first half of the banner (arch, el-entry, cpus, mem, dtb, uart, hardening, kernel base).
 10. **`phys_init()`** (P1-D). Reads RAM range from DTB, reserves kernel image / struct-page array / DTB blob / low firmware, pushes the rest onto the buddy. Initializes per-CPU magazines. See `docs/reference/06-allocator.md`. Followed by an alloc/free smoke test that exercises the magazine fast path and a non-magazine order; gates on `phys_free_pages() == baseline` after a `magazines_drain_all`.
 11. **`slub_init()`** (P1-E). Sets up the meta cache (for `struct kmem_cache` itself) plus the standard `kmalloc-{8..2048}` caches. See `docs/reference/07-slub.md`. Followed by a kmem smoke test that exercises small / mixed / large kmalloc paths plus a `kmem_cache_create` round-trip; gates on `phys_free_pages() == baseline` after `magazines_drain_all`.
-12. **`exception_init()`** (P1-F). Sets `VBAR_EL1` to `_exception_vectors`. Sync exceptions now route through `arch/arm64/exception.c` — boot-stack-guard accesses → `extinction("kernel stack overflow", FAR_EL1)`; W^X violations on kernel image → `extinction("PTE violates W^X")`; other faults → `extinction` with ESR/FAR/ELR. IRQ / FIQ / SError vectors and lower-EL entries all route to `exception_unexpected`. See `docs/reference/08-exception.md`.
-13. **`test_run_all()`** (test harness). Walks `kernel/test/test.c`'s `g_tests[]` array; each test reports PASS/FAIL on UART. Currently 4 tests: kaslr.mix64_avalanche, dtb.chosen_kaslr_seed_present, phys.alloc_smoke, slub.kmem_smoke. `boot_main` extinctions if any test fails. See `docs/reference/09-test-harness.md`.
-14. **Banner finishes** (ram, test summary, phase) and prints `Thylacine boot OK`.
-15. **Fallthrough to `_hang`**. `boot_main()` is `noreturn`; if it ever returns, the assembly falls through into the `wfi` loop.
+12. **`exception_init()`** (P1-F). Sets `VBAR_EL1` to `_exception_vectors`. Sync exceptions now route through `arch/arm64/exception.c` — boot-stack-guard accesses → `extinction("kernel stack overflow", FAR_EL1)`; W^X violations on kernel image → `extinction("PTE violates W^X")`; other faults → `extinction` with ESR/FAR/ELR. IRQ slot is wired by step 13 (P1-G); FIQ / SError / lower-EL entries all route to `exception_unexpected`. See `docs/reference/08-exception.md`.
+13. **GIC + timer + IRQ unmask** (P1-G). `gic_init()` autodetects v2-vs-v3 from DTB (v3 live; v2 extincts cleanly), maps the distributor + redistributor regions Device-nGnRnE via `mmu_map_device`, brings up the distributor + this CPU's redistributor + the system-register CPU interface. `timer_init(1000)` programs the EL1 non-secure physical timer at 1000 Hz on PPI 14 (INTID 30). `gic_attach(INTID 30, timer_irq_handler, NULL)` + `gic_enable_irq(INTID 30)` route the IRQ. `msr daifclr, #2` unmasks IRQs at PSTATE. From here on, the kernel receives 1000 Hz ticks; the IRQ vector slot at offset `0x280` calls `exception_irq_curr_el` → `gic_acknowledge` → `gic_dispatch` → `gic_eoi` → `.Lexception_return` (the shared `KERNEL_EXIT` trampoline). See `docs/reference/10-gic.md` and `docs/reference/11-timer.md`.
+14. **`test_run_all()`** (test harness). Walks `kernel/test/test.c`'s `g_tests[]` array; each test reports PASS/FAIL on UART. Currently 6 tests: kaslr.mix64_avalanche, dtb.chosen_kaslr_seed_present, phys.alloc_smoke, slub.kmem_smoke, gic.init_smoke, timer.tick_increments. `boot_main` extinctions if any test fails. See `docs/reference/09-test-harness.md`.
+15. **`timer_busy_wait_ticks(5)`** (P1-G). WFI loop until 5 ticks have passed; prints `ticks: N (kernel breathing)`.
+16. **Banner finishes** (phase) and prints `Thylacine boot OK`.
+17. **Fallthrough to `_hang`**. `boot_main()` is `noreturn`; if it ever returns, the assembly falls through into the `wfi` loop. From P1-G onward `_hang` itself is also a productive state — IRQs are unmasked, so the timer keeps firing and `g_ticks` keeps incrementing during the WFI loop.
 
 #### EL2 → EL1 drop (P1-C-extras)
 
@@ -114,7 +116,7 @@ Three `ASSERT()` statements in the linker script catch regressions at link time:
 
 The banner is emitted line-by-line via `uart_puts`. P1-B fills in `mem`, `dtb`, and `uart` from DTB-driven discovery (per `docs/reference/02-dtb.md`); P1-C-extras Part A added the `el-entry` line; P1-C-extras Part B fills in the runtime kernel base via the KASLR slide.
 
-Reference output of a P1-F boot:
+Reference output of a P1-G boot:
 
 ```
 Thylacine v0.1.0-dev booting...
@@ -124,16 +126,21 @@ Thylacine v0.1.0-dev booting...
   mem:  2048 MiB at 0x0000000040000000
   dtb:  0x0000000048000000 (parsed)
   uart: 0x0000000009000000 (DTB-driven)
-  hardening: MMU+W^X+extinction+KASLR+vectors (P1-F; PAC/MTE/CFI at P1-H)
-  kernel base: 0xffffa00220e80000 (KASLR offset 0x0000000220e00000, seed: DTB /chosen/kaslr-seed)
-  ram: 2048 MiB total, 2022 MiB free, 26224 KiB reserved (kernel + struct_page + DTB)
+  hardening: MMU+W^X+extinction+KASLR+vectors+IRQ (P1-G; PAC/MTE/CFI at P1-H)
+  kernel base: 0xffffa00032680000 (KASLR offset 0x0000000032600000, seed: DTB /chosen/kaslr-seed)
+  ram: 2048 MiB total, 2022 MiB free, 26240 KiB reserved (kernel + struct_page + DTB)
+  gic:  v3 dist=0x0000000008000000 redist=0x00000000080a0000
+  timer: 1000000 kHz freq, 1000 Hz tick (PPI 14 / INTID 30)
   tests:
     [test] kaslr.mix64_avalanche ... PASS
     [test] dtb.chosen_kaslr_seed_present ... PASS
     [test] phys.alloc_smoke ... PASS
     [test] slub.kmem_smoke ... PASS
-  tests: 4/4 PASS
-  phase: P1-F
+    [test] gic.init_smoke ... PASS
+    [test] timer.tick_increments ... PASS
+  tests: 6/6 PASS
+  ticks: 9 (kernel breathing)
+  phase: P1-G
 Thylacine boot OK
 ```
 
@@ -154,7 +161,7 @@ Minimal polled-output driver. Functions:
 
 The PL011 base is now runtime-configurable, defaulting to the QEMU virt fallback `0x09000000` for early-boot prints (before `dtb_init` runs). After `dtb_init`, `boot_main()` calls `dtb_get_compat_reg("arm,pl011", ...)` and updates the base via `uart_set_base()`. **Invariant I-15 (DTB-driven discovery) is now satisfied for normal operation**; the fallback exists only for the pre-DTB-parse window plus a recovery path if the DTB is corrupt. The P1-A `FIXME(I-15)` comment was removed at P1-B.
 
-QEMU's `-kernel` direct loader leaves the PL011 in a usable state — TX works without explicit `CR/LCR_H/IBRD/FBRD` programming. P1-F adds the full UART init when interrupt-driven I/O lands.
+QEMU's `-kernel` direct loader leaves the PL011 in a usable state — TX works without explicit `CR/LCR_H/IBRD/FBRD` programming. IRQ-driven UART TX (CR / LCR_H / IBRD / FBRD programming + interrupt-driven circular buffer) is post-v1.0 — the polled path is fine for the boot-and-shutdown windows; userspace consoles at Phase 5 use `/dev/cons` regardless.
 
 ---
 

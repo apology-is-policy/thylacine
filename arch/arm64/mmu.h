@@ -152,4 +152,26 @@ void mmu_enable(u64 slide);
 // audit-trigger surface verifier (and by tests at P1-I+).
 bool pte_violates_wxe(u64 pte);
 
+// Convert MMIO region [pa, pa+size) in TTBR0's identity map from
+// Normal-WB cacheable to Device-nGnRnE attributes. Granularity is the
+// 2 MiB block (TTBR0's L2 entries cover the kernel-image GiB as
+// 2 MiB blocks); the smallest 2 MiB-aligned superset of [pa, pa+size)
+// is converted. Over-mapping is safe because the surrounding
+// device-adjacent addresses are reserved by `phys.c` and never used
+// for kernel data.
+//
+// The conversion is performed as a break-before-make: each affected
+// L2 entry is invalidated, the TLB is flushed (Inner-Shareable), then
+// the new Device descriptor is written. Caller must guarantee no
+// kernel code holds a cached copy of any address in [pa, pa+size)
+// before calling — the only callers at v1.0 are device drivers
+// (gic_init in P1-G; future virtio drivers in Phase 3) running
+// before any access through the prior mapping.
+//
+// Constraint: pa + size must fit in [0, 4 GiB) — TTBR0's identity
+// covers only the low 4 GiB at v1.0. Pi 5's GIC at PA > 4 GiB needs a
+// TTBR0 extension (deferred). Returns false if the range is unaligned
+// or escapes 4 GiB; true on success.
+bool mmu_map_device(paddr_t pa, u64 size);
+
 #endif // THYLACINE_ARCH_ARM64_MMU_H

@@ -46,6 +46,19 @@ bool dtb_get_memory(u64 *base, u64 *size);
 // so that property order within a node doesn't matter.
 bool dtb_get_compat_reg(const char *compat, u64 *base, u64 *size);
 
+// Like dtb_get_compat_reg, but returns the (base, size) pair at index
+// `idx` within the matched node's reg property. Used by P1-G's GIC
+// driver: GICv3 advertises distributor at reg[0] and redistributor at
+// reg[1]. Returns false if the node's reg holds fewer than (idx + 1)
+// pairs. dtb_get_compat_reg(compat, ...) is sugar for idx = 0.
+bool dtb_get_compat_reg_n(const char *compat, u32 idx, u64 *base, u64 *size);
+
+// True iff some DTB node's "compatible" property contains `compat`.
+// Used by P1-G for v2-vs-v3 autodetect (probes "arm,gic-v3" first,
+// then v2 candidates). Cheaper than the full reg walk if you only
+// care whether a string exists.
+bool dtb_has_compat(const char *compat);
+
 // /chosen/kaslr-seed as a 64-bit value (concatenated from two u32 cells).
 // Returns 0 if absent — caller should treat that as low-entropy fallback
 // per ARCH §5.3 KASLR design.

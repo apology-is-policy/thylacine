@@ -351,3 +351,85 @@ void mmu_enable(u64 slide) {
     // PC is still load PA via TTBR0; the boot stub now long-branches
     // to the high VA via TTBR1 and continues from there.
 }
+
+// ---------------------------------------------------------------------------
+// mmu_map_device — post-boot MMIO region attribute change.
+//
+// Walks the affected L2 entries in TTBR0's identity map (covering the
+// low 4 GiB), evicts any cached lines from the prior Normal-WB
+// mapping, replaces the L2 entries with Device-nGnRnE blocks, and
+// flushes the TLB. Used at boot_main time to install GIC distributor
+// + redistributor mappings discovered from DTB; future device drivers
+// extend this pattern.
+//
+// Break-before-make discipline (per ARM ARM B2.7.1):
+//   1. Clean+invalidate dcache by VA over the affected region. The
+//      prior mapping is Normal-WB cacheable; switching to Device
+//      without clearing the cache lines leaves dirty data that may
+//      write back later through the new Device mapping (corrupts MMIO
+//      registers). Operate by VA via the identity map (low PA == VA).
+//      Then dsb ish to publish the cleans before invalidation.
+//   2. Zero the L2 entries (break). dsb ishst → tlbi vmalle1is → dsb
+//      ish → isb. After this, any access to the region faults.
+//   3. Write the new Device descriptors (make). dsb ishst + isb.
+//
+// We batch BBM across all blocks in the range to keep TLB flushes
+// cheap (single full-flush vs N per-VA flushes).
+// ---------------------------------------------------------------------------
+
+static inline void dsb_ish(void)   { __asm__ __volatile__("dsb ish"   ::: "memory"); }
+static inline void dsb_ishst(void) { __asm__ __volatile__("dsb ishst" ::: "memory"); }
+static inline void isb(void)       { __asm__ __volatile__("isb"       ::: "memory"); }
+static inline void tlbi_vmalle1is(void) {
+    __asm__ __volatile__("tlbi vmalle1is" ::: "memory");
+}
+
+// Conservative cache-line stride. Real ARMv8 cores have CTR_EL0.DminLine
+// reporting the actual size; 64 bytes is a safe lower bound for every
+// implementation we target (Cortex-A53 / A72 / A76, Apple Silicon,
+// QEMU's max model). Stepping at 64 bytes either hits each line
+// once (LINE >= DminLine) or visits each line multiple times
+// (LINE < DminLine, harmless — `dc civac` is idempotent).
+#define DCACHE_LINE_BYTES   64
+
+bool mmu_map_device(paddr_t pa, u64 size) {
+    if (size == 0) return false;
+    if (pa + size < pa) return false;            // overflow
+    if ((pa + size) > (4ull << 30)) return false; // outside TTBR0 identity
+
+    // Round to enclosing 2 MiB blocks.
+    paddr_t pa_first = pa & ~(BLOCK_SIZE_L2 - 1);
+    paddr_t pa_last  = (pa + size - 1) & ~(BLOCK_SIZE_L2 - 1);
+    paddr_t pa_end   = pa_last + BLOCK_SIZE_L2;   // exclusive end
+
+    // Step 1: clean+invalidate dcache for the region (still mapped
+    // Normal-WB at this point). Operate by VA via TTBR0 identity.
+    // After this, any dirty lines from the prior mapping have been
+    // written back; the cache no longer holds the region.
+    for (u64 va = pa_first; va < pa_end; va += DCACHE_LINE_BYTES) {
+        __asm__ __volatile__("dc civac, %0" :: "r"(va) : "memory");
+    }
+    dsb_ish();
+
+    // Step 2: invalidate all affected L2 entries (break).
+    for (paddr_t p = pa_first; p <= pa_last; p += BLOCK_SIZE_L2) {
+        u32 gib = (u32)(p >> BLOCK_SHIFT_L1);
+        u32 idx = (u32)((p >> BLOCK_SHIFT_L2) & 0x1ff);
+        l2_ttbr0[gib][idx] = 0;
+    }
+    dsb_ishst();
+    tlbi_vmalle1is();
+    dsb_ish();
+    isb();
+
+    // Step 3: write the new Device descriptors (make).
+    for (paddr_t p = pa_first; p <= pa_last; p += BLOCK_SIZE_L2) {
+        u32 gib = (u32)(p >> BLOCK_SHIFT_L1);
+        u32 idx = (u32)((p >> BLOCK_SHIFT_L2) & 0x1ff);
+        l2_ttbr0[gib][idx] = make_block_pte_l2(p, PTE_DEVICE_RW_BLOCK);
+    }
+    dsb_ishst();
+    isb();
+
+    return true;
+}

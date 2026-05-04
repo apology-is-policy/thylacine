@@ -3,21 +3,23 @@
 // vectors.S saves all GP regs + special regs into a struct
 // exception_context, then calls into the C handlers below. Each
 // handler decides whether to:
-//   - Recover (currently no recoverable exceptions; future Phase 2
-//     page-fault handler will COW etc.).
+//   - Recover (P1-G: IRQ handler returns normally; vectors.S issues
+//     KERNEL_EXIT to ERET. Phase 2's page-fault handler will COW etc.).
 //   - extinction with a specific diagnostic.
 //
-// At P1-F the live diagnostics are:
+// At P1-G the live diagnostics + handlers are:
 //   - "kernel stack overflow" — translation/permission fault with
 //     FAR inside the boot-stack guard region.
 //   - "PTE violates W^X" — permission fault in kernel image area
 //     (write to .text/.rodata or exec from .data/.bss).
+//   - IRQ — gic_acknowledge → gic_dispatch → gic_eoi.
 // All other faults extinction with the raw ESR/FAR/ELR for forensic
 // analysis.
 //
 // Per ARCHITECTURE.md §12.
 
 #include "exception.h"
+#include "gic.h"
 #include "kaslr.h"
 
 #include <thylacine/extinction.h>
@@ -224,6 +226,30 @@ void exception_sync_curr_el(struct exception_context *ctx) {
 // current EL with SPx, at P1-F). vector_idx is the index 0..15 from
 // vectors.S so the diagnostic narrows down which one fired.
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// IRQ handler at current EL with SPx.
+//
+// Acknowledge → dispatch → EOI is the GICv3 single-step flow with
+// ICC_CTLR_EL1.EOImode=0. A spurious INTID (1023) skips the dispatch
+// AND the EOI per ARM IHI 0069 §3.7.
+//
+// Returns normally; vectors.S issues KERNEL_EXIT (eret) on return,
+// resuming the interrupted code with all GP regs restored.
+// ---------------------------------------------------------------------------
+
+void exception_irq_curr_el(struct exception_context *ctx) {
+    (void)ctx;       // available for scheduler use at Phase 2
+    u32 intid = gic_acknowledge();
+    // INTIDs 1020..1023 are reserved per ARM IHI 0069 §2.2.1 (1023 is
+    // explicitly "spurious"; 1020..1022 are also reserved and must not
+    // be dispatched or EOI'd). Treat the full range as spurious.
+    if (intid >= GIC_NUM_INTIDS) {
+        return;
+    }
+    gic_dispatch(intid);
+    gic_eoi(intid);
+}
 
 void exception_unexpected(struct exception_context *ctx, u64 vector_idx) {
     // Stash ESR / FAR / ELR / vector_idx into recognizable diagnostic.

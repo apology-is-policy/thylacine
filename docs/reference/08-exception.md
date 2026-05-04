@@ -2,9 +2,9 @@
 
 The kernel's ARM64 exception vector table and synchronous-fault dispatch. Every CPU exception (sync abort, IRQ, FIQ, SError) at any source EL routes through one of 16 vector entries; entries either dispatch to a real C handler or `extinction` with a vector-index diagnostic.
 
-P1-F deliverable. The deferred fault paths from P1-C-extras Part A (boot-stack guard) and P1-C (W^X violation) finally close: a stack overflow now triggers `extinction("kernel stack overflow", FAR_EL1)`; a write to `.text` or exec from `.data/.bss` triggers `extinction("PTE violates W^X (kernel image)", FAR_EL1)`.
+P1-F deliverable, extended at P1-G. The deferred fault paths from P1-C-extras Part A (boot-stack guard) and P1-C (W^X violation) closed at P1-F; the IRQ slot went live at P1-G, dispatching through `gic_acknowledge → gic_dispatch → gic_eoi` and resuming the interrupted code via the shared `.Lexception_return` trampoline.
 
-Scope: `arch/arm64/vectors.S` (16-entry table, save/restore macros), `arch/arm64/exception.{h,c}` (struct exception_context, ESR/FAR decode, dispatch handlers), `kernel/main.c`'s call to `exception_init()` after `slub_init()`, banner update. Also see `docs/reference/01-boot.md` (entry sequence) and `docs/reference/04-extinction.md` (the ELE primitive that handlers terminate with).
+Scope: `arch/arm64/vectors.S` (16-entry table, save/restore macros, `.Lexception_return` trampoline at P1-G), `arch/arm64/exception.{h,c}` (struct exception_context, ESR/FAR decode, sync + IRQ dispatch handlers), `kernel/main.c`'s `exception_init()` slot, banner update. Also see `docs/reference/01-boot.md` (entry sequence), `docs/reference/04-extinction.md` (the ELE primitive that handlers terminate with), `docs/reference/10-gic.md` (P1-G — the GIC driver dispatched to from the IRQ slot), `docs/reference/11-timer.md` (P1-G — the first IRQ source).
 
 Reference: `ARCHITECTURE.md §12` (interrupt handling design intent), `§28` (invariant I-12 enforcement).
 
@@ -42,6 +42,7 @@ struct exception_context {
 
 void exception_init(void);                                   // install VBAR_EL1
 void exception_sync_curr_el(struct exception_context *);     // sync handler
+void exception_irq_curr_el(struct exception_context *);      // IRQ handler (P1-G)
 __attribute__((noreturn))
 void exception_unexpected(struct exception_context *, u64 vector_idx);
 #endif
@@ -65,8 +66,8 @@ ARMv8 mandates a 0x800-aligned 16-entry table. Each entry is 0x80 bytes (32 inst
 | `0x080` | Current EL with SP_EL0 | IRQ | unexpected (idx 1) |
 | `0x100` | Current EL with SP_EL0 | FIQ | unexpected (idx 2) |
 | `0x180` | Current EL with SP_EL0 | SError | unexpected (idx 3) |
-| **`0x200`** | **Current EL with SP_ELx** | **Sync** | **`exception_sync_curr_el` ← LIVE** |
-| `0x280` | Current EL with SP_ELx | IRQ | unexpected (idx 5) |
+| **`0x200`** | **Current EL with SP_ELx** | **Sync** | **`exception_sync_curr_el` ← LIVE (P1-F)** |
+| **`0x280`** | **Current EL with SP_ELx** | **IRQ** | **`exception_irq_curr_el` + `.Lexception_return` ← LIVE (P1-G)** |
 | `0x300` | Current EL with SP_ELx | FIQ | unexpected (idx 6) |
 | `0x380` | Current EL with SP_ELx | SError | unexpected (idx 7) |
 | `0x400` | Lower EL using AArch64 | Sync | unexpected (idx 8) |
@@ -78,9 +79,9 @@ ARMv8 mandates a 0x800-aligned 16-entry table. Each entry is 0x80 bytes (32 inst
 | `0x700` | Lower EL using AArch32 | FIQ | unexpected (idx 14) |
 | `0x780` | Lower EL using AArch32 | SError | unexpected (idx 15) |
 
-Most entries are stamped out via the `VEC_UNEXPECTED <idx>` macro: `KERNEL_ENTRY` (save 31 GP regs + 5 special regs onto SP_EL1), pass `(ctx_pointer, idx)` to `exception_unexpected`, fall through to `_hang` for safety. The Current-EL-SPx Sync entry calls `exception_sync_curr_el(ctx)` for real diagnostics.
+Most entries are stamped out via the `VEC_UNEXPECTED <idx>` macro: `KERNEL_ENTRY` (save 31 GP regs + 5 special regs onto SP_EL1), pass `(ctx_pointer, idx)` to `exception_unexpected`, fall through to `_hang` for safety. The Current-EL-SPx Sync entry calls `exception_sync_curr_el(ctx)` for real diagnostics; the Current-EL-SPx IRQ entry (live at P1-G) calls `exception_irq_curr_el(ctx)` and then branches to `.Lexception_return` (the shared `KERNEL_EXIT` trampoline) which `eret`s to the interrupted code.
 
-Each entry must fit within 0x80 bytes (32 instructions). KERNEL_ENTRY is ~24 instructions; the dispatch + safety branch is 4 more, total 28 — comfortably under the slot budget. KERNEL_EXIT (the eret-side mirror) is defined in `vectors.S` for Phase 2's recoverable handlers but is NOT used inline at P1-F (would push slots over 0x80 — every P1-F exception terminates in extinction, so the restore path is dead code).
+Each entry must fit within 0x80 bytes (32 instructions). `KERNEL_ENTRY` is ~25 instructions; the dispatch + safety branch is 3 more, total 28 — comfortably under the slot budget. `KERNEL_EXIT` (the eret-side mirror) is ~23 instructions, so inlining it inside any slot would overflow. Instead, P1-G factors `KERNEL_EXIT` into a shared `.Lexception_return` symbol after the vector table; the IRQ slot ends with `b .Lexception_return`, and Phase 2's recoverable sync-fault handlers (page-fault COW, etc.) will branch there too. Slots that terminate in `extinction` (Sync, every `VEC_UNEXPECTED`) skip the trampoline because the path is `noreturn`.
 
 ### `KERNEL_ENTRY` save layout
 
@@ -155,6 +156,24 @@ extinction(names[vector_idx]);
 ```
 
 For a developer reading the QEMU output post-extinction, the prefix immediately identifies the vector class — invaluable when debugging an unexpected fault while building out future phases.
+
+### IRQ handler (`exception_irq_curr_el`)
+
+```c
+void exception_irq_curr_el(struct exception_context *ctx) {
+    (void)ctx;       // available for scheduler use at Phase 2
+    u32 intid = gic_acknowledge();
+    if (intid == GIC_INTID_SPURIOUS) {
+        return;
+    }
+    gic_dispatch(intid);
+    gic_eoi(intid);
+}
+```
+
+Acknowledge → dispatch → EOI is the GICv3 single-step flow with `ICC_CTLR_EL1.EOImode=0`. A spurious INTID (1023) skips both dispatch and EOI per ARM IHI 0069 §3.7. The handler returns normally; `vectors.S` continues to `.Lexception_return` which restores all GP regs from the saved context and `eret`s to the interrupted PC + PSTATE. IRQs remain masked at PSTATE for the duration of the handler (the CPU sets DAIF.I on entry); reentry is opt-in by clearing it inside the handler if a future scheduler tick wants nested IRQs (post-v1.0).
+
+`ctx` is unused at P1-G but available for Phase 2's scheduler tick to read interrupted SPSR (preemption decisions need to know whether interrupted code held a kernel spinlock). Phase 3 device IRQs will use `ctx` only if the handler needs the faulting register state, which is rare.
 
 ### `exception_init`
 
@@ -240,7 +259,9 @@ Future tests (P1-I+):
 | Sync fault: kernel-image alignment fault (SP/PC) | `extinction("SP alignment fault" / "PC alignment fault", far_or_elr)`. |
 | Sync fault: deliberate `brk #imm` | `extinction("brk instruction (assertion?)", elr)`. |
 | Sync fault: anything else | `extinction("unhandled sync exception (EC in ESR_EL1)", esr)`. |
-| IRQ / FIQ / SError at current EL | `extinction("[Curr EL/SPx] {IRQ,FIQ,SError}")` — unexpected at P1-F. |
+| IRQ at current EL with SP_ELx | `exception_irq_curr_el` → ack → `gic_dispatch` → eoi → resume. P1-G live. |
+| IRQ at current EL with SP_EL0 / lower-EL IRQ | `extinction("[... ] IRQ")` — unexpected (kernel always uses SP_EL1; no userspace yet). |
+| FIQ / SError at current EL | `extinction("[Curr EL/SPx] {FIQ,SError}")` — unexpected at P1-G (FIQ unused at v1.0; SError handler at Phase 2). |
 | Lower-EL entry of any kind | `extinction("[Lower EL a64/a32] ...")` — no userspace yet. |
 | Current-EL-SP0 entry of any kind | `extinction("[Curr EL/SP0] ...")` — kernel always uses SP_EL1. |
 | Recursive fault during KERNEL_ENTRY (stack already in guard region) | QEMU wedge. Documented limitation; per-CPU exception stack at Phase 2. |
@@ -269,22 +290,29 @@ P1-F is reactive — no per-tick overhead. Cost is paid only on exceptions:
 - 16-entry exception vector table at `_exception_vectors` (page-aligned; 0x800 bytes total).
 - `exception_init()` sets VBAR_EL1 to the table's high VA.
 - `KERNEL_ENTRY` save macro (32 GP regs + 5 special regs = 288 bytes onto SP_EL1).
-- `KERNEL_EXIT` restore macro (defined; unused inline at P1-F because every fault terminates in extinction).
+- `KERNEL_EXIT` restore macro (defined).
 - `exception_sync_curr_el` — decodes ESR + FAR; recognises stack-overflow (boot-stack guard region), W^X violations (kernel image permission fault), translation faults, alignment faults, brk instructions; everything else generic extinction.
 - `exception_unexpected` — catch-all for non-live entries with descriptive name table in `.rodata`.
 - Compile-time layout assertions for `struct exception_context` field offsets.
 - Banner update: `hardening: MMU+W^X+extinction+KASLR+vectors (P1-F; ...)`.
 
+**Implemented at P1-G**:
+
+- `exception_irq_curr_el` — GIC ack → dispatch → EOI; spurious-INTID handling per ARM IHI 0069 §3.7.
+- `.Lexception_return` trampoline — `KERNEL_EXIT` factored out so the IRQ slot fits in 0x80 bytes; reusable by Phase 2's recoverable sync-fault handlers.
+- IRQ vector slot at offset `0x280` repointed from `VEC_UNEXPECTED 5` to `KERNEL_ENTRY + bl exception_irq_curr_el + b .Lexception_return`.
+- Banner update: `hardening: MMU+W^X+extinction+KASLR+vectors+IRQ (P1-G; ...)`.
+
 **Not yet implemented**:
 
-- GIC + real IRQ dispatch (the IRQ vector entries call `exception_unexpected`). P1-G or a P1-F-extras chunk.
-- IRQ-driven PL011 TX (still polled). Same chunk as GIC.
+- IRQ-driven PL011 TX (still polled). The mechanism is in place; routing the UART IRQ through `gic_attach` is post-v1.0 (the polled path is fine for the boot-and-shutdown windows; userspace consoles at Phase 5 use `/dev/cons` regardless).
 - Per-CPU exception stack — handler runs on the existing SP_EL1 (boot stack at v1.0). A stack-overflow recursion wedges the kernel without producing diagnostic output. Phase 2 introduces per-thread + per-CPU exception stacks.
-- Recoverable sync faults — Phase 2 page-fault handler with VMO backing. KERNEL_EXIT is defined and ready.
+- Recoverable sync faults — Phase 2 page-fault handler with VMO backing. `KERNEL_EXIT` and `.Lexception_return` are ready.
 - Userspace exception entry — Phase 2 (lower-EL Sync becomes the syscall + page-fault path).
 - Deliberate-fault test target — P1-I.
+- SError handler at Current-EL-SPx — Phase 2 (currently extinctions; design-wise SError is for hardware-uncorrectable errors and panic is the right answer until there's a recovery story).
 
-**Landed**: P1-F at commit `67a6b16`.
+**Landed**: P1-F at commit `67a6b16`; P1-G IRQ extension at commit `*(pending)*`.
 
 ---
 
@@ -304,9 +332,11 @@ We accept the limitation at v1.0 because (a) `boot_main` does no significant sta
 
 `vectors.S` `#include`s `exception.h` to get `EXCEPTION_CTX_SIZE`. The C struct, function declarations, and `<thylacine/types.h>` include must be guarded with `#ifndef __ASSEMBLER__` or the assembler chokes on the C syntax. The pattern is standard (Linux uses it everywhere) but easy to miss if a future header carries C declarations into `.S`-included territory.
 
-### KERNEL_EXIT is dead code at P1-F
+### `KERNEL_EXIT` is now reachable via `.Lexception_return` (P1-G)
 
-The macro is defined in `vectors.S` and ready for Phase 2's recoverable handlers. Inlining it into the Current-EL-SPx Sync slot would push the slot from 28 instructions (108 bytes, fits in 128-byte slot) to 47 instructions (188 bytes, overflows). The fix when Phase 2 needs it: move the Sync-slot body to a trampoline outside the vector area — `vectors.S` slot just `b sync_trampoline`; the trampoline runs KERNEL_ENTRY + dispatch + KERNEL_EXIT.
+The macro was dead code at P1-F. P1-G factors it into a labeled symbol after the vector table: each recoverable slot ends with `b .Lexception_return`, which `eret`s. The IRQ slot uses this; Phase 2's recoverable sync faults will too. The Sync slot continues to terminate in `extinction` (every sync fault is fatal at v1.0 pre-userspace) — the trampoline doesn't apply there.
+
+Future: when Phase 2 makes SP_EL0 / lower-EL entries live, those will also `b .Lexception_return` for return-to-userspace. The trampoline doesn't care which EL it returns to — it restores `ELR_EL1` + `SPSR_EL1` from the saved context, and `eret` derives the target EL from `SPSR.M`.
 
 ### `exception_unexpected` strings live in `.rodata`
 

@@ -318,7 +318,26 @@ bool dtb_get_memory(u64 *base, u64 *size) {
 #define DTB_MAX_DEPTH 16
 
 bool dtb_get_compat_reg(const char *compat, u64 *base, u64 *size) {
+    return dtb_get_compat_reg_n(compat, 0, base, size);
+}
+
+// Walk the structure block; for every node, track its compatible-match
+// status and its reg property bounds (data + length). On END_NODE for a
+// matched node, check whether reg has at least (idx+1) pairs and emit
+// the requested pair.
+//
+// The reg property under #address-cells = 2, #size-cells = 2 (QEMU virt
+// + ARM64 Linux convention) packs each (base, size) entry into 16
+// bytes; we generalize over multi-region reg via the index argument.
+// Per-call upper bound on idx. Real reg properties never have more
+// than a handful of pairs; bound at 64 prevents `(idx + 1) * 16u`
+// from overflowing u32 (which would make the bounds check below
+// vacuously true and let the caller read past the property buffer).
+#define DTB_REG_MAX_IDX   64u
+
+bool dtb_get_compat_reg_n(const char *compat, u32 idx, u64 *base, u64 *size) {
     if (!g_dtb.ready) return false;
+    if (idx > DTB_REG_MAX_IDX) return false;
 
     struct fdt_walker w;
     walker_start(&w);
@@ -333,6 +352,7 @@ bool dtb_get_compat_reg(const char *compat, u64 *base, u64 *size) {
     struct {
         bool compat_matched;
         const uint8_t *reg_data;
+        uint32_t reg_len;
     } stack[DTB_MAX_DEPTH];
     int sp = 0;
 
@@ -347,6 +367,7 @@ bool dtb_get_compat_reg(const char *compat, u64 *base, u64 *size) {
             if (sp < DTB_MAX_DEPTH) {
                 stack[sp].compat_matched = false;
                 stack[sp].reg_data = NULL;
+                stack[sp].reg_len = 0;
             }
             sp++;
             continue;
@@ -356,20 +377,49 @@ bool dtb_get_compat_reg(const char *compat, u64 *base, u64 *size) {
                 sp--;
                 if (sp < DTB_MAX_DEPTH &&
                     stack[sp].compat_matched && stack[sp].reg_data) {
-                    read_reg_pair(stack[sp].reg_data, base, size);
-                    return true;
+                    // Each (base, size) pair is 16 bytes. Bounds-check
+                    // before indexing; reject malformed reg.
+                    uint32_t need = (idx + 1) * 16u;
+                    if (stack[sp].reg_len >= need) {
+                        read_reg_pair(stack[sp].reg_data + idx * 16u,
+                                      base, size);
+                        return true;
+                    }
                 }
             }
             continue;
         }
         if (tok == FDT_PROP && sp > 0 && sp <= DTB_MAX_DEPTH) {
-            int idx = sp - 1;
+            int si = sp - 1;
             if (k_streq(propname, "compatible")) {
                 if (stringlist_contains((const char *)propdata, proplen, compat)) {
-                    stack[idx].compat_matched = true;
+                    stack[si].compat_matched = true;
                 }
             } else if (k_streq(propname, "reg") && proplen >= 16) {
-                stack[idx].reg_data = propdata;
+                stack[si].reg_data = propdata;
+                stack[si].reg_len  = proplen;
+            }
+        }
+    }
+    return false;
+}
+
+bool dtb_has_compat(const char *compat) {
+    if (!g_dtb.ready) return false;
+
+    struct fdt_walker w;
+    walker_start(&w);
+
+    for (;;) {
+        const char *name = NULL, *propname = NULL;
+        const uint8_t *propdata = NULL;
+        uint32_t proplen = 0;
+        uint32_t tok = walker_next(&w, &name, &propname, &propdata, &proplen);
+        if (tok == FDT_END) break;
+
+        if (tok == FDT_PROP && k_streq(propname, "compatible")) {
+            if (stringlist_contains((const char *)propdata, proplen, compat)) {
+                return true;
             }
         }
     }

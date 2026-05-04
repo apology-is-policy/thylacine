@@ -28,16 +28,20 @@ void test_kaslr_mix64_avalanche(void);
 void test_dtb_chosen_kaslr_seed_present(void);
 void test_phys_alloc_smoke(void);
 void test_slub_kmem_smoke(void);
+void test_gic_init_smoke(void);
+void test_timer_tick_increments(void);
 
 // ---------------------------------------------------------------------------
 // Registry. Sentinel-terminated.
 // ---------------------------------------------------------------------------
 
 struct test_case g_tests[] = {
-    { "kaslr.mix64_avalanche",        test_kaslr_mix64_avalanche,        false, NULL },
+    { "kaslr.mix64_avalanche",         test_kaslr_mix64_avalanche,         false, NULL },
     { "dtb.chosen_kaslr_seed_present", test_dtb_chosen_kaslr_seed_present, false, NULL },
-    { "phys.alloc_smoke",             test_phys_alloc_smoke,             false, NULL },
-    { "slub.kmem_smoke",              test_slub_kmem_smoke,              false, NULL },
+    { "phys.alloc_smoke",              test_phys_alloc_smoke,              false, NULL },
+    { "slub.kmem_smoke",               test_slub_kmem_smoke,               false, NULL },
+    { "gic.init_smoke",                test_gic_init_smoke,                false, NULL },
+    { "timer.tick_increments",         test_timer_tick_increments,         false, NULL },
     { NULL, NULL, false, NULL },          // sentinel
 };
 

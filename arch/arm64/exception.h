@@ -47,16 +47,27 @@ void exception_init(void);
 // C handlers called by vectors.S. The vector table is laid out as
 // 4 "EL source" groups × 4 "exception type" entries each = 16 total.
 //
-// At P1-F we route:
+// At P1-G we route:
 //   - Current-EL-SPx Sync     → exception_sync_curr_el
-//   - All other 15 entries    → exception_unexpected
+//   - Current-EL-SPx IRQ      → exception_irq_curr_el (P1-G)
+//   - All other 14 entries    → exception_unexpected
 //
 // (Lower-EL and Current-EL-SP0 entries are unexpected at this phase
-// — no userspace yet, kernel always uses SP_EL1.)
+// — no userspace yet, kernel always uses SP_EL1. Phase 2 wires up
+// the lower-EL group when userspace lands.)
 __attribute__((noreturn))
 void exception_unexpected(struct exception_context *ctx, u64 vector_idx);
 
 void exception_sync_curr_el(struct exception_context *ctx);
+
+// IRQ handler at current EL with SPx (the kernel's normal mode).
+// Acknowledges via gic_acknowledge, dispatches to the registered
+// handler via gic_dispatch, then issues gic_eoi. Returns normally —
+// vectors.S resumes via KERNEL_EXIT after this returns. ctx is
+// available for handlers that need to inspect interrupted state
+// (e.g., scheduler tick observing PSTATE for preemption decisions
+// at Phase 2).
+void exception_irq_curr_el(struct exception_context *ctx);
 
 #endif // __ASSEMBLER__
 

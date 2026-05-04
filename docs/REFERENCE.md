@@ -21,12 +21,12 @@ When a section describes a detail enforced by a spec, the spec's action / invari
 
 ## Snapshot
 
-- **Tip**: in-kernel test harness landed at commit `c3f9196` — kernel/test/{test.{h,c},test_kaslr.c,test_dtb.c,test_phys.c,test_slub.c} with sentinel-terminated registry, TEST_ASSERT macro, per-test PASS/FAIL on UART. Refactors the previous inline alloc/kmem smokes into named test cases. Phase 1 momentum: P1-A → P1-F complete + test harness; P1-G ARM generic timer + GIC + IRQ-driven UART next.
-- **Phases**: Phase 0 done; Phase 1 in progress (P1-A through P1-F + test harness complete; P1-G next).
-- **Tests**: **4/4 in-kernel tests PASS** every boot (kaslr.mix64_avalanche, dtb.chosen_kaslr_seed_present, phys.alloc_smoke, slub.kmem_smoke). 1 integration check (`tools/test.sh`). 5+ consecutive boots all PASS. Host-side sanitizer matrix + 10000-iteration leak check land at P1-I.
+- **Tip**: P1-G landed at commit `*(pending)*` — GIC v3 driver (`arch/arm64/gic.{h,c}`), ARM generic timer (`arch/arm64/timer.{h,c}`), `exception_irq_curr_el` + `.Lexception_return` shared trampoline in vectors.S, `mmu_map_device` for post-MMU MMIO mapping, multi-region DTB lookup helpers. The IRQ vector slot is now live; tick counter visible in the boot banner ("ticks: 9 (kernel breathing)"). Two new in-kernel tests: gic.init_smoke + timer.tick_increments. Phase 1 momentum: P1-A → P1-G complete; P1-H (hardening flags) next.
+- **Phases**: Phase 0 done; Phase 1 in progress (P1-A through P1-G complete; P1-H next).
+- **Tests**: **6/6 in-kernel tests PASS** every boot (kaslr.mix64_avalanche, dtb.chosen_kaslr_seed_present, phys.alloc_smoke, slub.kmem_smoke, gic.init_smoke, timer.tick_increments). 1 integration check (`tools/test.sh`). 5+ consecutive boots all PASS. Host-side sanitizer matrix + 10000-iteration leak check land at P1-I.
 - **Specs**: 0 written; 9 planned.
-- **LOC**: ~2280 C99 + ~370 ASM + ~75 linker-script + ~220 CMake/shell ≈ 2945 LOC.
-- **Kernel ELF**: ~175 KB debug. Flat binary: 25 KB. Page tables: 40 KiB BSS. struct page array: 24 MiB BSS. Vector table: 2 KiB in `.text`.
+- **LOC**: ~2750 C99 + ~370 ASM + ~75 linker-script + ~220 CMake/shell ≈ 3415 LOC.
+- **Kernel ELF**: ~190 KB debug. Flat binary: 25 KB. Page tables: 40 KiB BSS. struct page array: 24 MiB BSS. GIC handler table: 16 KiB BSS. Vector table: 2 KiB in `.text`.
 
 For phase-level status see `docs/phaseN-status.md`. The reference below covers the as-built layers in bottom-up order. Per-subsystem files appear as their subsystems land during Phase 1 onward.
 
@@ -45,8 +45,9 @@ For phase-level status see `docs/phaseN-status.md`. The reference below covers t
 | [06-allocator.md](reference/06-allocator.md) | Physical allocator: struct page, mm/buddy.{h,c}, mm/magazines.{h,c}, mm/phys.{h,c} — DTB-driven bootstrap, buddy free lists, per-CPU magazines, public API | medium | **P1-D landed**; SLUB layered on alloc_pages at P1-E |
 | [07-slub.md](reference/07-slub.md) | SLUB kernel object allocator: mm/slub.{h,c} — per-cache partial slab list, embedded freelist, kmalloc / kfree / kmem_cache_*, bootstrap via meta cache | medium | **P1-E landed**; multi-page slabs (>2 KiB caches) post-v1.0 |
 | [08-exception.md](reference/08-exception.md) | Exception handling: arch/arm64/{vectors.S, exception.{h,c}} — 16-entry vector table, KERNEL_ENTRY save, sync handler with stack-overflow + W^X violation detection, exception_unexpected catch-all | medium | **P1-F landed**; per-CPU exception stack at Phase 2; GIC + IRQ at P1-G |
-| [09-test-harness.md](reference/09-test-harness.md) | In-kernel test harness: kernel/test/{test.{h,c},test_*.c} — sentinel-terminated registry, TEST_ASSERT macro, per-test PASS/FAIL reporting; 4 leaf-API tests at v1.0 | small | **landed**; host-side sanitizer matrix + 10000-iteration leak check at P1-I |
-| 07-irq.md (planned) | GIC + exception vectors + IPI | small | Phase 1-2 |
+| [09-test-harness.md](reference/09-test-harness.md) | In-kernel test harness: kernel/test/{test.{h,c},test_*.c} — sentinel-terminated registry, TEST_ASSERT macro, per-test PASS/FAIL reporting; 6 leaf-API tests at v1.0 | small | **landed**; host-side sanitizer matrix + 10000-iteration leak check at P1-I |
+| [10-gic.md](reference/10-gic.md) | GIC v3 driver: arch/arm64/gic.{h,c} — DTB v2/v3 autodetect, distributor + redistributor + sysreg CPU interface, IRQ enable/disable/ack/eoi, handler dispatch table | medium | **P1-G landed**; v2 path + ITS + SMP redist walk deferred |
+| [11-timer.md](reference/11-timer.md) | ARM generic timer: arch/arm64/timer.{h,c} — EL1 non-secure phys at 1000 Hz on PPI 14 (INTID 30), CNTP_TVAL_EL0 reload pattern, WFI-based busy wait | small | **P1-G landed**; oneshot + per-CPU SMP at Phase 2 |
 | 05-process.md (planned) | Proc + Thread + rfork + notes + errstr | medium | Phase 2 |
 | 06-scheduler.md (planned) | EEVDF + per-CPU + work-stealing | medium | Phase 2 |
 | 07-namespace.md (planned) | Pgrp + bind + mount | small | Phase 2 |
@@ -88,3 +89,4 @@ See `ARCHITECTURE.md §29` for the definitive glossary. As implementation lands 
 | Date | Change | Reason |
 |---|---|---|
 | 2026-05-04 | Scaffolded (Phase 0 complete). | Template for the as-built reference. Per-subsystem files (`reference/01-...md`, etc.) appear as subsystems land during Phase 1 onward. |
+| 2026-05-04 | P1-G landed: 10-gic.md + 11-timer.md added; snapshot bumped (6/6 tests, 3415 LOC, 190 KB ELF). 08-exception.md updated for live IRQ slot + `.Lexception_return` trampoline. | GIC v3 + ARM generic timer chunk closed; the kernel now receives 1000 Hz ticks. |
