@@ -211,7 +211,7 @@ P1-C measurements on QEMU virt under Hypervisor.framework:
 - KASLR (kernel image relocation into TTBR1 high half; PIE relocations; randomized offset from `dtb_get_chosen_kaslr_seed()`).
 - TTBR1 high-half mapping populated.
 
-**Landed**: P1-C at commit `6462227`; P1-C-extras Part A at commit `(pending hash-fixup)`.
+**Landed**: P1-C at commit `6462227`; P1-C-extras Part A at commit `ff22ca3`.
 
 ---
 
