@@ -23,6 +23,12 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 KERNEL_ELF="$REPO_ROOT/build/kernel/thylacine.elf"
+# Flat-binary form, with Linux ARM64 image header. QEMU's load_aarch64_image()
+# detects the ARM\x64 magic at offset 0x38 and treats us as a Linux Image
+# (is_linux=1), which causes it to load the DTB and pass its address in x0.
+# An ELF load (is_linux=0) skips the DTB entirely. See docs/reference/01-boot.md
+# "Caveats > DTB pointer observed as 0x0" for the investigation.
+KERNEL_BIN="$REPO_ROOT/build/kernel/thylacine.bin"
 
 cpus=4
 mem_mib=2048
@@ -68,8 +74,8 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-if [[ ! -f "$KERNEL_ELF" ]]; then
-    echo "Kernel ELF not found: $KERNEL_ELF" >&2
+if [[ ! -f "$KERNEL_BIN" ]]; then
+    echo "Kernel flat binary not found: $KERNEL_BIN" >&2
     echo "Build first: tools/build.sh kernel" >&2
     exit 1
 fi
@@ -97,7 +103,7 @@ exec qemu-system-aarch64 \
     -cpu max \
     -smp "$cpus" \
     -m "$mem_mib" \
-    -kernel "$KERNEL_ELF" \
+    -kernel "$KERNEL_BIN" \
     -nographic \
     -serial mon:stdio \
     ${gdb_flags[@]+"${gdb_flags[@]}"} \

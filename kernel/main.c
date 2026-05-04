@@ -1,14 +1,13 @@
 // Thylacine kernel main entry — boot_main().
 //
-// Called from arch/arm64/start.S after BSS clear and stack setup. Prints
-// the boot banner per TOOLING.md §10 (load-bearing kernel ABI for the
-// agentic tooling), then halts.
+// Called from arch/arm64/start.S after BSS clear and stack setup. Parses
+// the DTB QEMU loaded for us, updates the UART base from DTB, prints the
+// boot banner per TOOLING.md §10 (load-bearing kernel ABI for the agentic
+// tooling), then halts.
 //
-// At P1-A: most banner fields are placeholders. P1-B parses DTB → mem +
-// dtb fields. P1-C enables KASLR → kernel base + KASLR offset fields.
-// P1-F brings up SMP → cpus field. P1-H enables the full hardening stack
-// → hardening field. The placeholder text inside parentheses tracks which
-// future sub-chunk fills each field.
+// At P1-B: DTB is parsed; mem field shows discovered RAM size; UART base
+// confirmed via DTB. Remaining fields (kaslr offset, full hardening, SMP
+// CPU count) are filled in at P1-C / P1-F / P1-H respectively.
 //
 // The `Thylacine boot OK` line is the agent's boot-success signal per
 // TOOLING.md §10. Do not change without a coordinated update to
@@ -18,31 +17,77 @@
 #include "uart.h"
 
 #include <stdint.h>
+#include <thylacine/dtb.h>
 #include <thylacine/types.h>
 
 // From arch/arm64/start.S — DTB physical address handed to us by the
-// bootloader. Populated before boot_main() is called.
+// bootloader (in x0 per the Linux ARM64 boot protocol). Populated
+// before boot_main() is called.
 extern volatile u64 _saved_dtb_ptr;
 
 // From arch/arm64/kernel.ld.
 extern char _kernel_start[];
+extern char _kernel_end[];
 
 void boot_main(void);
 
 void boot_main(void) {
+    // Phase 1: parse the DTB (early prints use the fallback PL011 base
+    // 0x09000000 from uart.c; if the DTB places PL011 elsewhere,
+    // uart_set_base() below will update it before the banner prints).
+    bool dtb_ok = dtb_init((paddr_t)_saved_dtb_ptr);
+
+    u64 mem_base = 0, mem_size = 0;
+    bool mem_ok = false;
+    u64 dtb_uart_base = 0, dtb_uart_size = 0;
+    bool uart_ok = false;
+
+    if (dtb_ok) {
+        mem_ok  = dtb_get_memory(&mem_base, &mem_size);
+        uart_ok = dtb_get_compat_reg("arm,pl011", &dtb_uart_base, &dtb_uart_size);
+        if (uart_ok) {
+            uart_set_base((uintptr_t)dtb_uart_base);
+        }
+    }
+
+    // Banner. Format is kernel ABI per TOOLING.md §10; do not change.
     uart_puts("Thylacine v" THYLACINE_VERSION_STRING "-dev booting...\n");
 
     uart_puts("  arch: arm64\n");
 
-    uart_puts("  cpus: 1 (P1-A; SMP at P1-F)\n");
+    uart_puts("  cpus: 1 (P1-B; SMP at P1-F)\n");
 
-    uart_puts("  mem:  unknown (DTB at P1-B)\n");
+    uart_puts("  mem:  ");
+    if (mem_ok) {
+        uart_putdec(mem_size / (1024UL * 1024UL));
+        uart_puts(" MiB at ");
+        uart_puthex64(mem_base);
+    } else {
+        uart_puts("unknown (DTB parse failed or /memory absent)");
+    }
+    uart_puts("\n");
 
     uart_puts("  dtb:  ");
     uart_puthex64(_saved_dtb_ptr);
+    if (!dtb_ok) {
+        uart_puts(" (parse FAILED — fallback UART, no memory info)");
+    } else {
+        uart_puts(" (parsed)");
+    }
     uart_puts("\n");
 
-    uart_puts("  hardening: minimal (P1-A baseline; full stack at P1-H)\n");
+    uart_puts("  uart: ");
+    uart_puthex64((u64)uart_get_base());
+    if (uart_ok) {
+        uart_puts(" (DTB-driven)");
+    } else if (dtb_ok) {
+        uart_puts(" (fallback; arm,pl011 absent in DTB)");
+    } else {
+        uart_puts(" (fallback; DTB unavailable)");
+    }
+    uart_puts("\n");
+
+    uart_puts("  hardening: minimal (P1-B baseline; full stack at P1-H)\n");
 
     uart_puts("  kernel base: ");
     uart_puthex64((u64)(uintptr_t)_kernel_start);

@@ -2,7 +2,7 @@
 
 The kernel's boot path: from QEMU `-kernel` direct entry through `_start` (assembly), `boot_main()` (C), to a halt loop. This document describes what exists in the tree as of **P1-A**; subsequent sub-chunks (P1-B DTB parser, P1-C MMU + KASLR, etc.) extend it.
 
-Scope: `arch/arm64/start.S`, `arch/arm64/kernel.ld`, `arch/arm64/uart.c` + `arch/arm64/uart.h`, `kernel/main.c`, `kernel/include/thylacine/types.h`.
+Scope: `arch/arm64/start.S` (incl. Linux ARM64 image header at offset 0; added at P1-B), `arch/arm64/kernel.ld` (incl. `_image_size` linker-resolved symbol; added at P1-B), `arch/arm64/uart.c` + `arch/arm64/uart.h` (runtime-configurable PL011 base; updated at P1-B), `kernel/main.c` (DTB integration; updated at P1-B), `kernel/include/thylacine/types.h`. Also see `docs/reference/02-dtb.md` for the FDT parser introduced at P1-B.
 
 Reference: `ARCHITECTURE.md §5` (boot sequence design intent), `TOOLING.md §10` (boot banner contract).
 
@@ -34,17 +34,19 @@ The boot path has no caller-facing API surface in the C sense; the entry point i
 
 ### Entry sequence (`arch/arm64/start.S`)
 
-QEMU's `-kernel` direct loader hands control to `_start` with:
+QEMU's `-kernel` direct loader hands control to the kernel image. **At P1-B** (after adding the Linux ARM64 image header), QEMU recognizes the kernel as a Linux Image (`is_linux = 1`) and:
 
 - **EL**: EL1h (kernel mode, `SP_EL1` selected). QEMU virt boots at EL1 by default; if we ever come in at EL2 (Pi 5 bare metal post-v1.0), the EL2→EL1 drop sequence lands at P1-C / `arch/arm64/rpi5/boot.S`.
-- **x0**: DTB physical address (Linux ARM64 boot protocol convention). At P1-A, observed value is `0` for QEMU `-kernel` ELF entry — see [Caveats](#caveats).
+- **x0**: DTB physical address. With the Linux ARM64 image header in place from P1-B, QEMU loads the DTB at `loader_start + min(ram_size/2, 128 MiB)` — for our 2 GiB RAM, that's `0x48000000` — and passes the address in `x0`. (At P1-A, before the image header was added, x0 was 0 and the DTB was never loaded — see `docs/reference/02-dtb.md` "Linux ARM64 image header" for the investigation that surfaced this.)
 - **x1..x3**: 0 (reserved by Linux protocol).
 - **MMU off, caches off**, interrupts masked. Single CPU executing.
 
-`_start` performs, in order:
+The Linux ARM64 image header (64 bytes) lives at offset 0 of the binary. `code0` at offset 0 is `b _real_start` — a branch over the header into the actual boot code. The header carries `text_offset = 0x80000`, `image_size = _kernel_end - _kernel_start` (linker-resolved via `_image_size` symbol in `kernel.ld`), and `flags = 0xa` (little-endian + 4 KiB granule + placement-anywhere). `magic` at offset 0x38 is `0x644d5241` ("ARM\x64") — this is what QEMU detects.
 
-1. **EL check**. Reads `CurrentEL`, branches to `.Lnot_el1` if not EL1. The wrong-EL handler in `start.S:88` halts silently — P1-C will replace this with a proper EL2→EL1 drop and a UART diagnostic.
-2. **DTB save into x19**. The DTB pointer in `x0` is moved to a callee-saved register because the BSS clear in step 4 would zero `_saved_dtb_ptr` if we wrote it first. (This was caught and fixed mid-implementation; the bug-and-fix is documented in `start.S` comments.)
+After the branch, `_real_start` performs, in order:
+
+1. **EL check**. Reads `CurrentEL`, branches to `.Lnot_el1` if not EL1. The wrong-EL handler halts silently — P1-C will replace this with a proper EL2→EL1 drop and a UART diagnostic.
+2. **DTB save into x19**. The DTB pointer in `x0` is moved to a callee-saved register because the BSS clear in step 4 would zero `_saved_dtb_ptr` if we wrote it first. (This was caught and fixed mid-implementation at P1-A; the bug-and-fix is documented in `start.S` comments.)
 3. **Stack setup**. SP is set to `_boot_stack_top` (defined by the linker script, top of a 16 KiB BSS-allocated buffer; SP grows down).
 4. **BSS clear**. Zero `[_bss_start, _bss_end)` in 8-byte stride. The linker script guarantees both bounds are 8-byte-aligned (in fact, page-aligned).
 5. **DTB store**. After BSS is cleared, write the saved x19 value to `_saved_dtb_ptr`.
@@ -72,32 +74,39 @@ Three `ASSERT()` statements in the linker script catch regressions at link time:
 
 ### Boot banner (`kernel/main.c`)
 
-The banner is emitted line-by-line via `uart_puts`. At P1-A all dynamic fields except `dtb` and `kernel base` are placeholders annotated with the sub-chunk that fills them:
+The banner is emitted line-by-line via `uart_puts`. P1-B fills in `mem`, `dtb`, and `uart` from DTB-driven discovery (per `docs/reference/02-dtb.md`); remaining fields are placeholders annotated with the sub-chunk that fills them.
+
+Reference output of a P1-B boot:
 
 ```
 Thylacine v0.1.0-dev booting...
   arch: arm64
-  cpus: 1 (P1-A; SMP at P1-F)
-  mem:  unknown (DTB at P1-B)
-  dtb:  0x0000000000000000
-  hardening: minimal (P1-A baseline; full stack at P1-H)
+  cpus: 1 (P1-B; SMP at P1-F)
+  mem:  2048 MiB at 0x0000000040000000
+  dtb:  0x0000000048000000 (parsed)
+  uart: 0x0000000009000000 (DTB-driven)
+  hardening: minimal (P1-B baseline; full stack at P1-H)
   kernel base: 0x0000000040080000 (KASLR at P1-C)
-  phase: P1-A
+  phase: P1-B
 Thylacine boot OK
 ```
 
-The version string comes from `THYLACINE_VERSION_STRING` (set by `CMakeLists.txt` from the project version `0.1.0`); the phase string from `THYLACINE_PHASE_STRING` (set by the `THYLACINE_PHASE` cache variable, default `P1-A`).
+The version string comes from `THYLACINE_VERSION_STRING` (set by `CMakeLists.txt` from the project version `0.1.0`); the phase string from `THYLACINE_PHASE_STRING` (set by the `THYLACINE_PHASE` cache variable, default `P1-B` after P1-A close).
+
+`boot_main()` calls `dtb_init(_saved_dtb_ptr)` before printing the banner. On success, it calls `dtb_get_memory()` for the memory line and `dtb_get_compat_reg("arm,pl011", ...)` for the UART base. The latter calls `uart_set_base()` to update the active PL011 base, replacing the P1-A hardcoded fallback. If DTB parsing fails, the fallback `0x09000000` (QEMU virt) remains in use and the banner annotates the field as "fallback".
 
 ### PL011 UART driver (`arch/arm64/uart.c`)
 
 Minimal polled-output driver. Functions:
 
+- `uart_set_base(uintptr_t base)`: update the active PL011 base. Called by `boot_main()` after DTB parse to install the discovered address. If never called, the default base remains the P1-A fallback (`0x09000000`, QEMU virt).
+- `uart_get_base()`: query the active base. Used by `boot_main()` to print it in the banner so a developer can confirm DTB-driven discovery worked.
 - `uart_putc(char c)`: spins on `FR.TXFF` (TX FIFO full bit, position 5), writes to `DR`. Translates `\n` to `\r\n` for terminal correctness via `uart_puts`.
 - `uart_puts(const char *s)`: byte-by-byte; CR-translation as above.
 - `uart_puthex64(uint64_t v)`: zero-padded 16-digit hex with `0x` prefix.
 - `uart_putdec(uint64_t v)`: unsigned decimal, no padding.
 
-The PL011 base is hardcoded to `0x09000000` (QEMU virt fixed mapping). **This violates invariant I-15 (DTB-driven discovery) for one chunk only** — `uart.c:21` carries a `FIXME(I-15)` comment and the trip-hazard log in `docs/phase1-status.md` tracks the violation. P1-B parses the DTB, replaces the constant with the discovered base, and clears the FIXME.
+The PL011 base is now runtime-configurable, defaulting to the QEMU virt fallback `0x09000000` for early-boot prints (before `dtb_init` runs). After `dtb_init`, `boot_main()` calls `dtb_get_compat_reg("arm,pl011", ...)` and updates the base via `uart_set_base()`. **Invariant I-15 (DTB-driven discovery) is now satisfied for normal operation**; the fallback exists only for the pre-DTB-parse window plus a recovery path if the DTB is corrupt. The P1-A `FIXME(I-15)` comment was removed at P1-B.
 
 QEMU's `-kernel` direct loader leaves the PL011 in a usable state — TX works without explicit `CR/LCR_H/IBRD/FBRD` programming. P1-F adds the full UART init when interrupt-driven I/O lands.
 
@@ -172,13 +181,15 @@ P1-C lands the panic infrastructure: `panic(fmt, ...)` prints `PANIC: <message>`
 
 ## Performance characteristics
 
-P1-A measurements on QEMU virt under Hypervisor.framework on Apple Silicon:
+Measurements on QEMU virt under Hypervisor.framework on Apple Silicon:
 
-| Metric | Measured (P1-A) | VISION §4.5 budget | Notes |
+| Metric | Measured (P1-B) | VISION §4.5 budget | Notes |
 |---|---|---|---|
-| Boot to UART banner | ~50 ms | < 500 ms | Comfortable margin; budget is for the full Phase 1 boot. |
-| Kernel ELF size (debug build) | 81 KB | < 1 MB target | Mostly DWARF debug info. |
-| Kernel ELF size (stripped) | 74 KB | (not gated) | Will grow as subsystems land; target < 100 KB through Phase 1. |
+| Boot to UART banner | ~50 ms | < 500 ms | Comfortable margin. DTB parse adds ~150 µs; negligible. |
+| Kernel ELF size (debug build) | 91 KB | < 1 MB target | Mostly DWARF debug info; +10 KB from P1-A for DTB parser. |
+| Kernel ELF size (stripped) | 84 KB | (not gated) | Target < 100 KB through Phase 1. |
+| Kernel flat binary | 8.2 KB | (not gated) | `objcopy -O binary`; loaded sections only (no BSS). |
+| DTB parse total | ~150 µs | (not gated) | `dtb_init` + `dtb_get_memory` + `dtb_get_compat_reg("arm,pl011")`. |
 | `uart_putc` latency | ~µs (host-bound) | (not gated) | QEMU PL011 emulation; P1-F adds IRQ-driven TX. |
 
 The boot-to-banner figure is informal; rigorous measurement lands in P1-I with the Phase 1 exit benchmark suite.
@@ -187,20 +198,28 @@ The boot-to-banner figure is informal; rigorous measurement lands in P1-I with t
 
 ## Status
 
-**Implemented at P1-A** (this sub-chunk):
+**Implemented at P1-A**:
 
 - ELF kernel that builds via `tools/build.sh kernel`.
 - ARM64 entry at EL1 with stack setup, BSS clear, DTB pointer save.
-- PL011 polled UART output.
+- PL011 polled UART output (hardcoded base, fallback now).
 - Boot banner per `TOOLING.md §10` ABI contract.
 - `_hang` clean-halt path.
 - `tools/run-vm.sh` QEMU launcher with `-cpu max -smp 4 -m 2G -nographic` defaults.
 - CMake + Cargo-ready build infrastructure.
 
+**Implemented at P1-B**:
+
+- Linux ARM64 image header in `start.S` (64 bytes; `ARM\x64` magic; `_image_size` linker-resolved). Triggers QEMU's `load_aarch64_image()` path so the DTB is loaded into RAM and its address passed in `x0`.
+- Flat-binary build target via `objcopy -O binary` (produces `thylacine.bin` alongside `thylacine.elf`).
+- `tools/run-vm.sh` switched to `-kernel thylacine.bin`.
+- DTB parser (`lib/dtb.c` + `kernel/include/thylacine/dtb.h`); see `docs/reference/02-dtb.md`.
+- DTB-driven UART base via `uart_set_base()`; resolves invariant I-15.
+- DTB-driven memory size in the banner (`mem: 2048 MiB at 0x40000000`).
+
 **Not yet implemented**:
 
-- DTB parsing (P1-B). The DTB pointer is observed as `0x0` under QEMU `-kernel` ELF entry; investigate at P1-B entry whether QEMU passes DTB at a fixed address (typical for ARM64 virt: `0x40000000`) versus through `x0`.
-- MMU enablement (P1-C). All addresses are physical at P1-A; W^X is unenforced.
+- MMU enablement (P1-C). All addresses are physical at P1-A/B; W^X is unenforced.
 - KASLR (P1-C). Kernel base is fixed at `0x40080000`.
 - Physical frame allocator (P1-D).
 - SLUB kernel object allocator (P1-E).
@@ -209,27 +228,21 @@ The boot-to-banner figure is informal; rigorous measurement lands in P1-I with t
 - Hardening flags (P1-H).
 - Phase 1 exit verification (P1-I).
 
-**Landed**: commit `(pending — will be filled in by the hash-fixup commit per CLAUDE.md "Audit-close commit anatomy")`.
+**Landed**: P1-A at commit `2b332d8`; P1-B at commit `(pending hash-fixup)`.
 
 ---
 
 ## Caveats
 
-### DTB pointer observed as `0x0`
+### DTB delivery via QEMU `-kernel` ELF (resolved at P1-B)
 
-QEMU virt's `-kernel` direct loader, when given an ELF kernel without the Linux ARM64 image header (`MZ` magic, branch instruction, `arm64` magic-string at offset 0x38), does not synthesize the Linux ARM64 boot protocol's `x0 = DTB ptr` calling convention. The DTB is still loaded into memory — typically near the start of physical RAM at `0x40000000` — but the kernel must locate it.
+At P1-A the kernel was loaded as an ELF; QEMU's ELF loader runs `is_linux = 0` and skips the DTB load entirely. The DTB pointer in `x0` was therefore `0`, and the DTB itself was nowhere in RAM. P1-B added the Linux ARM64 image header (64 bytes at offset 0 of the binary, with `ARM\x64` magic at 0x38) and switched the build to produce a flat binary alongside the ELF; QEMU now detects the Linux Image, loads the DTB at `0x48000000` (per `arm_load_dtb()`), and passes the address in `x0`. See `docs/reference/02-dtb.md` "Linux ARM64 image header" for the investigation.
 
-**Resolution at P1-B**: switch to one of:
+`tools/run-vm.sh` and `tools/test.sh` use `-kernel thylacine.bin` (the flat binary) for this reason. The ELF `thylacine.elf` remains for lldb / objdump / readelf use.
 
-- Add the Linux ARM64 image header to the kernel binary and rely on the standard protocol.
-- Pass the DTB explicitly via QEMU's `-dtb` flag with a known address (less portable).
-- Probe the conventional location (`0x40000000`) and validate via the FDT magic (`0xd00dfeed`).
+### Hardcoded UART base (I-15) — resolved at P1-B
 
-The probe approach is least invasive and matches Linux's recovery path. Decision deferred to P1-B implementation.
-
-### Hardcoded UART base (I-15 violation, scoped to P1-A)
-
-`arch/arm64/uart.c:21` hardcodes `PL011_BASE = 0x09000000`. This violates invariant I-15 (DTB-driven hardware discovery). The violation is **explicit and time-bounded**: it lasts for one sub-chunk (P1-A only); P1-B parses the DTB and replaces the hardcoded base. The trip-hazard log in `docs/phase1-status.md` tracks this; the `FIXME(I-15)` comment in `uart.c` is the in-source reminder.
+P1-A used a hardcoded PL011 base in `uart.c` and tracked it as a one-chunk-only `FIXME(I-15)`. P1-B replaced the hardcoded base with DTB-driven discovery via `dtb_get_compat_reg("arm,pl011", ...)`. The fallback (`0x09000000`, QEMU virt) remains in `uart.c` for the pre-`dtb_init` window plus recovery when the DTB is unparseable, but the normal-operation path is fully DTB-driven. Invariant I-15 satisfied.
 
 ### Boot stack guard page
 

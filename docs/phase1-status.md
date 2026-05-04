@@ -13,14 +13,15 @@ Per `ROADMAP.md §4`.
 | Commit SHA | What | Tests |
 |---|---|---|
 | 2b332d8 | **P1-A**: toolchain + build system + minimal boot stub. CMake + clang 22 + ld.lld 22 cross-compile to `aarch64-none-elf`. `arch/arm64/start.S` + `kernel.ld` + `arch/arm64/uart.c` + `kernel/main.c`. Boot banner per `TOOLING.md §10`. `tools/run-vm.sh` + `tools/test.sh` + Makefile. Kernel ELF 81 KB debug / 74 KB stripped. | Manual + `tools/test.sh` (boot-banner regex match within 10s). PASS. |
+| *(pending)* | **P1-B**: DTB parsing + Linux ARM64 image header + flat-binary build + DTB-driven UART base. `lib/dtb.c` (~340 LOC) implements an FDT v17 parser with `dtb_init`, `dtb_get_memory`, `dtb_get_compat_reg`, `dtb_get_chosen_kaslr_seed`. `start.S` gains a 64-byte Linux ARM64 image header at offset 0 (`ARM\x64` magic at 0x38) so QEMU's `load_aarch64_image()` loads the DTB and passes it in `x0`. CMake post-link `objcopy -O binary` produces `thylacine.bin` alongside the ELF; `tools/run-vm.sh` uses the binary. Resolves I-15 violation: `uart.c` PL011 base now updated from `dtb_get_compat_reg("arm,pl011")`. Banner shows `mem: 2048 MiB at 0x40000000`, `dtb: 0x48000000 (parsed)`, `uart: 0x09000000 (DTB-driven)`. | `tools/test.sh` PASS. |
 
 ## Remaining work
 
 (Sub-chunk plan, refined at Phase 1 entry. P1-A landed; tentative order for the rest:)
 
 1. ✅ **P1-A: Toolchain + tools/run-vm.sh + boot stub.** Landed.
-2. **P1-B: DTB parsing.** `lib/dtb.c` extracts memory regions, GIC base, UART base, timer IRQ, KASLR seed. No libfdt; minimal hand-rolled parser. **Resolves the DTB pointer mystery** (observed as `0x0` at P1-A): probe a known location (`0x40000000`) and validate via FDT magic, since QEMU `-kernel` with ELF doesn't synthesize the Linux ARM64 boot protocol.
-3. **P1-C: MMU + KASLR.** `arch/arm64/mmu.c` enables MMU with TTBR0 (identity) + TTBR1 (kernel high half); KASLR offset applied; relocations processed. `_Static_assert` on PTE bit layout for W^X. Boot stack guard page added. EL2→EL1 drop diagnostic via UART (replaces silent `.Lnot_el1` halt). Panic infrastructure (`panic(fmt, ...)` printing `PANIC:` prefix per TOOLING ABI).
+2. ✅ **P1-B: DTB parsing.** Landed. **Resolved the DTB pointer mystery via Linux ARM64 image header** (the alternative — probing — is documented in caveats but not used). FDT parser (~340 LOC). DTB-driven UART base resolves I-15. `arm,pl011` lookup uses a stack-based per-node accumulator (single-flag approach missed the match because PL011's `compatible` property comes after its `reg`). `be32_load` uses a `volatile` u32 read to prevent compiler fusion into a misaligned 8-byte load on Device memory (caught empirically — debug printfs broke fusion and made the parser work; without them it faulted silently).
+3. **P1-C: MMU + KASLR.** `arch/arm64/mmu.c` enables MMU with TTBR0 (identity) + TTBR1 (kernel high half); KASLR offset applied; relocations processed. `_Static_assert` on PTE bit layout for W^X. Boot stack guard page added. EL2→EL1 drop diagnostic via UART (replaces silent `.Lnot_el1` halt). Panic infrastructure (`panic(fmt, ...)` printing `PANIC:` prefix per TOOLING ABI). Once cacheable Normal memory is in use, the `volatile` constraint in `be32_load` becomes optional (still keep — defends against bare-metal recovery paths where MMU may be off).
 4. **P1-D: Physical allocator (buddy + magazines).** `mm/buddy.c` + `mm/magazines.c` per `ARCHITECTURE.md §6.3`.
 5. **P1-E: Kernel object allocator (SLUB).** `mm/slub.c` with standard `kmalloc-N` caches.
 6. **P1-F: GIC + exception vectors.** `arch/arm64/gic.c` + `arch/arm64/vectors.S` + `arch/arm64/exception.c`. Real UART init (CR/LCR_H/IBRD/FBRD).
@@ -32,8 +33,8 @@ Per `ROADMAP.md §4`.
 
 (Copy from `ROADMAP.md §4.2`; tick as deliverables complete.)
 
-- [x] **QEMU `virt` ARM64 boots to a UART banner without crashing.** Landed at P1-A; verified via `tools/test.sh`.
-- [ ] Boot to UART banner: < 500ms. Informally measured ~50 ms at P1-A; rigorous measurement at P1-I.
+- [x] **QEMU `virt` ARM64 boots to a UART banner without crashing.** Landed at P1-A; still passes at P1-B with DTB-driven banner.
+- [ ] Boot to UART banner: < 500ms. Informally measured ~50 ms at P1-A/B (DTB parse adds ~150 µs; negligible). Rigorous measurement at P1-I.
 - [ ] `kmalloc`/`kfree` round-trip 10,000 allocations without leak. P1-D / P1-E.
 - [ ] GIC initialized; timer IRQ fires at 1000 Hz (verified via UART counter). P1-F / P1-G.
 - [ ] MMU on; kernel VA map correct (read/write kernel data, no fault). P1-C.
@@ -89,9 +90,10 @@ Toolchain dependencies (Apple Silicon Mac via Homebrew):
 
 ## Trip hazards
 
-- **Boot timing budget (500ms)** is tight. Profile each boot subsystem; keep the budget split per-subsystem. P1-A informal measurement is ~50 ms — comfortable margin.
-- **DTB pointer at QEMU `-kernel` ELF entry**: observed as `0x0` at P1-A. QEMU's `-kernel` direct loader for ELF kernels (without the Linux ARM64 image header) does not pass DTB via `x0`. **P1-B must probe** a known location (`0x40000000`) and validate via FDT magic (`0xd00dfeed`). Linux's recovery path uses the same probe; we follow it.
-- **Hardcoded UART base in P1-A** (`arch/arm64/uart.c:21`): `PL011_BASE = 0x09000000` violates invariant I-15 (DTB-driven discovery). **Explicit one-chunk-only shortcut**; P1-B replaces with DTB-discovered base. The `FIXME(I-15)` comment in source is the in-tree reminder.
+- **Boot timing budget (500ms)** is tight. Profile each boot subsystem; keep the budget split per-subsystem. P1-A/B informal measurement is ~50 ms — comfortable margin.
+- ✅ ~~DTB pointer at QEMU `-kernel` ELF entry~~. Resolved at P1-B. Linux ARM64 image header at offset 0 of `start.S` triggers QEMU's `load_aarch64_image()`, which loads the DTB at `0x48000000` and passes the address in `x0`.
+- ✅ ~~Hardcoded UART base in P1-A~~. Resolved at P1-B. `uart.c` now defaults to `0x09000000` for early prints (before `dtb_init`), then `boot_main()` calls `uart_set_base()` with the DTB-discovered address from `dtb_get_compat_reg("arm,pl011")`.
+- **Compiler fusion of `be32_load` calls into unaligned u64 loads** (NEW from P1-B): clang fuses two adjacent 4-byte loads into a single 8-byte load. On Device memory (MMU off) with property data only 4-aligned, the fused load faults. **Mitigation**: `volatile` qualifier on the u32 read in `be32_load` (`lib/dtb.c`). **Codified** in source comments + `docs/reference/02-dtb.md`. Once MMU is on (P1-C+), the constraint relaxes but the volatile is kept as a defensive cushion.
 - **DTB parsing edge cases**: QEMU's DTB is well-formed; real hardware (Pi 5, post-v1.0) is not. v1.0 doesn't see Pi 5; risk is low.
 - **GIC v2 vs v3 autodetection**: QEMU `virt` defaults to GICv2 on older versions, GICv3 on newer. P1-A uses `gic-version=3` explicitly in `tools/run-vm.sh`; P1-F adds DTB-based autodetection.
 - **MMU enablement sequence**: order matters — TTBR registers, TCR, MAIR, then SCTLR.M=1. Get this wrong and the kernel crashes silently or in unexpected ways. P1-C work.
@@ -115,13 +117,16 @@ Toolchain dependencies (Apple Silicon Mac via Homebrew):
 
 ## Audit-trigger surfaces introduced this phase
 
-| Surface | Files | Why |
-|---|---|---|
-| Exception entry | `arch/arm64/start.S`, `arch/arm64/exception.c`, `arch/arm64/vectors.S` | Every fault path |
-| Allocator | `mm/buddy.c`, `mm/slub.c`, `mm/magazines.c` | Allocation correctness |
-| Page tables | `arch/arm64/mmu.c`, `mm/wxe.c` | W^X invariant (I-12) |
-| KASLR | `arch/arm64/kaslr.c` | Entropy + relocation correctness (I-16) |
-| LSE detection | `arch/arm64/atomic.S` | Runtime patching correctness |
+| Surface | Files | Why | Landed at |
+|---|---|---|---|
+| Exception entry | `arch/arm64/start.S`, `arch/arm64/exception.c` (P1-F), `arch/arm64/vectors.S` (P1-F) | Every fault path | P1-A (start.S only); P1-B added Linux image header |
+| Boot banner ABI | `kernel/main.c`, `arch/arm64/uart.c` | Tooling ABI per TOOLING.md §10 | P1-A; updated at P1-B |
+| DTB parser | `lib/dtb.c`, `kernel/include/thylacine/dtb.h` | Hardware view derives entirely from DTB (I-15); malformed DTB must be detected | P1-B |
+| Linux ARM64 image header | `arch/arm64/start.S` (offset 0..0x40), `arch/arm64/kernel.ld` (`_image_size` symbol) | QEMU `load_aarch64_image()` detection; DTB delivery | P1-B |
+| Allocator | `mm/buddy.c` (P1-D), `mm/slub.c` (P1-E), `mm/magazines.c` (P1-D) | Allocation correctness | (planned) |
+| Page tables | `arch/arm64/mmu.c` (P1-C), `mm/wxe.c` (P1-C) | W^X invariant (I-12) | (planned) |
+| KASLR | `arch/arm64/kaslr.c` (P1-C) | Entropy + relocation correctness (I-16) | (planned) |
+| LSE detection | `arch/arm64/atomic.S` (P1-H) | Runtime patching correctness | (planned) |
 
 Audit at Phase 1 exit (per `ROADMAP.md §4.2`): no P0/P1 findings on the boot path.
 

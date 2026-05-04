@@ -10,6 +10,7 @@ set(KERNEL_SRCS
     main.c
     ../arch/arm64/start.S
     ../arch/arm64/uart.c
+    ../lib/dtb.c
 )
 
 set(KERNEL_LD_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/../arch/arm64/kernel.ld)
@@ -41,10 +42,22 @@ set_target_properties(thylacine.elf PROPERTIES
     SUFFIX ""
 )
 
-# Post-build: print kernel size for the boot-time-budget conversation.
+# Post-build:
+# 1. Convert the ELF to a flat binary so QEMU's load_aarch64_image() picks it
+#    up as a Linux ARM64 Image kernel (which loads the DTB and passes it in
+#    x0; ELF load skips the DTB — see docs/reference/01-boot.md). The flat
+#    binary lives alongside the ELF; tools/run-vm.sh uses the .bin.
+# 2. Print kernel size summary for the boot-time-budget conversation.
 add_custom_command(TARGET thylacine.elf POST_BUILD
+    COMMAND ${CMAKE_OBJCOPY} -O binary
+        $<TARGET_FILE:thylacine.elf>
+        $<TARGET_FILE_DIR:thylacine.elf>/thylacine.bin
+    COMMAND ${CMAKE_COMMAND} -E echo
+        "Flat binary: $<TARGET_FILE_DIR:thylacine.elf>/thylacine.bin"
+    COMMAND ls -la
+        $<TARGET_FILE_DIR:thylacine.elf>/thylacine.elf
+        $<TARGET_FILE_DIR:thylacine.elf>/thylacine.bin
     COMMAND ${CMAKE_NM} --print-size --size-sort --radix=d $<TARGET_FILE:thylacine.elf> | tail -10
-    COMMAND ${CMAKE_OBJDUMP} --section-headers $<TARGET_FILE:thylacine.elf>
-    COMMENT "Kernel size summary"
+    COMMENT "Kernel post-link: flat binary + size summary"
     VERBATIM
 )

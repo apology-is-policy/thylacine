@@ -83,6 +83,20 @@ SECTIONS
     }
 }
 
+/*
+ * Linker-computed size symbol. The Linux ARM64 image header in start.S
+ * needs `image_size = _kernel_end - _kernel_start` at offset 0x10 of the
+ * binary, but the assembler cannot evaluate subtraction of external
+ * symbols. Defining the difference here as a linker-resolved absolute
+ * symbol lets start.S do `.quad _image_size` directly.
+ *
+ * Per Linux ARM64 booting protocol §1: image_size includes BSS so that
+ * a bootloader allocating image_size bytes from the load address has
+ * space for the kernel's full memory footprint.
+ */
+_image_size = _kernel_end - _kernel_start;
+
+
 /* Sanity assertions: the linker errors out if these are violated. */
 ASSERT(_kernel_start == KERNEL_LOAD_ADDR,
        "Kernel must load at KERNEL_LOAD_ADDR (0x40080000)")

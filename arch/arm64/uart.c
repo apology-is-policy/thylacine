@@ -1,8 +1,11 @@
 // PL011 UART driver — minimal polled I/O for early boot.
 //
-// QEMU virt maps the primary PL011 at 0x09000000. The QEMU `-kernel` direct
-// loader leaves the UART in a usable state (FIFO disabled by default but
-// transmit works); we don't touch CR/LCR_H/IBRD/FBRD at P1-A.
+// QEMU virt maps the primary PL011 at 0x09000000 by default, but the
+// authoritative source is the DTB ("arm,pl011" compatible). At P1-B the
+// base starts at the QEMU virt fallback and gets updated to the DTB-
+// discovered address by boot_main(). Invariant I-15 (DTB-driven
+// discovery) is satisfied for normal operation; the fallback is a
+// recovery path used only between kernel entry and dtb_init().
 //
 // PL011 register layout (PrimeCell UART Technical Reference Manual, ARM
 // DDI 0183, sections 3.3.x):
@@ -14,20 +17,35 @@
 //   +0x02C  LCR_H  Line Control Register.
 //   +0x030  CR     Control Register.
 //
-// At P1-A: rely on QEMU's default UART state. P1-B (DTB-driven base) and
-// P1-F (full UART driver with IRQ) extend this.
+// At P1-B: rely on QEMU's default UART state. P1-F (full UART driver
+// with IRQ) extends this with proper init.
 
 #include "uart.h"
 
 #include <stdint.h>
 
-// FIXME(I-15): hardcoded UART base. Replace with DTB-discovered address
-// at P1-B. The trip-hazard log in docs/phase1-status.md tracks this.
-#define PL011_BASE  0x09000000UL
-
 #define PL011_DR    0x000
 #define PL011_FR    0x018
 #define PL011_FR_TXFF  (1u << 5)   // TX FIFO full / busy
+
+// Active PL011 base. Defaults to QEMU virt fallback so prints work
+// during early boot (before DTB parsing). uart_set_base() updates this
+// once the DTB is parsed.
+//
+// `volatile` is overkill here (the writer is single-threaded and runs
+// before any interrupts are enabled), but it documents that this is
+// shared state and prevents the compiler from caching it across calls.
+static volatile uintptr_t pl011_base = 0x09000000UL;
+
+void uart_set_base(uintptr_t base) {
+    if (base != 0) {
+        pl011_base = base;
+    }
+}
+
+uintptr_t uart_get_base(void) {
+    return pl011_base;
+}
 
 // Volatile MMIO accessors. ARM64 needs DSB after writes that must be ordered
 // with subsequent operations; for a polled-on-flag UART the natural order is
@@ -41,12 +59,13 @@ static inline uint32_t mmio_read32(uintptr_t base, uintptr_t off) {
 }
 
 void uart_putc(char c) {
+    uintptr_t base = pl011_base;
     // Spin until TX FIFO has room (TXFF clear).
-    while (mmio_read32(PL011_BASE, PL011_FR) & PL011_FR_TXFF) {
-        // Busy-wait. This is fine at P1-A (single CPU, no scheduler).
+    while (mmio_read32(base, PL011_FR) & PL011_FR_TXFF) {
+        // Busy-wait. This is fine at P1-B (single CPU, no scheduler).
         // P1-F adds IRQ-driven TX with a buffer.
     }
-    mmio_write32(PL011_BASE, PL011_DR, (uint32_t)(unsigned char)c);
+    mmio_write32(base, PL011_DR, (uint32_t)(unsigned char)c);
 }
 
 void uart_puts(const char *s) {
