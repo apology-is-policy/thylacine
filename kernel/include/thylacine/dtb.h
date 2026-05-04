@@ -67,10 +67,24 @@ bool dtb_get_compat_reg(const char *compat, u64 *base, u64 *size);
 
 // Read /chosen/kaslr-seed as 64 bits (the property is two u32 cells in
 // the DTB; we concatenate them in the FDT-cell order). Returns 0 if the
-// node or property is absent (caller should treat that as low-entropy
-// fallback per ARCH §5.3).
+// node or property is absent.
 //
-// Used by P1-C KASLR.
+// UEFI on bare metal (Pi 5) populates /chosen/kaslr-seed. QEMU's direct
+// -kernel boot DOES NOT — it only publishes /chosen/rng-seed. Use
+// dtb_get_chosen_rng_seed() as the second-tier fallback.
+//
+// Used by arch/arm64/kaslr.c.
 u64 dtb_get_chosen_kaslr_seed(void);
+
+// Read /chosen/rng-seed as 64 bits, XOR-folding all 4-byte cells. The
+// property is typically 32 bytes / 8 cells (256 bits) on QEMU virt and
+// most UEFI environments; we collapse to 64 bits while preserving
+// entropy across all cells via alternating high/low XOR.
+//
+// Returns 0 if /chosen or the rng-seed property is absent.
+//
+// Used by arch/arm64/kaslr.c as the second-tier seed source after
+// /chosen/kaslr-seed.
+u64 dtb_get_chosen_rng_seed(void);
 
 #endif // THYLACINE_DTB_H

@@ -12,6 +12,7 @@ set(KERNEL_SRCS
     ../arch/arm64/start.S
     ../arch/arm64/uart.c
     ../arch/arm64/mmu.c
+    ../arch/arm64/kaslr.c
     ../lib/dtb.c
 )
 

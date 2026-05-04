@@ -123,13 +123,29 @@
 // Public API.
 // ---------------------------------------------------------------------------
 
-// Build the identity-mapped page tables in BSS and program MAIR / TCR /
-// TTBR / SCTLR. After return, the MMU is on with caches enabled and the
-// kernel runs from VAs identical to physical addresses.
+// Build the page tables in BSS and program MAIR / TCR / TTBR / SCTLR.
 //
-// Called from arch/arm64/start.S after BSS clear and stack setup, before
-// boot_main(). Idempotent only in the trivial sense (don't call twice).
-void mmu_enable(void);
+// At P1-C-extras Part B, this builds two parallel mappings:
+//   1. TTBR0: identity for the low 4 GiB. Keeps DTB and MMIO accessible
+//      via their physical addresses (kernel needs these by absolute PA).
+//      Also covers the kernel's load PA so the boot stub continues to
+//      execute through the MMU enable transition.
+//   2. TTBR1: kernel image at KASLR_LINK_VA + slide. The boot stub
+//      long-branches to this high VA after mmu_enable() returns; from
+//      then on, code runs through TTBR1.
+//
+// Per-section permissions (W^X invariant I-12) apply to BOTH mappings —
+// the L3 table covering the kernel's 2 MiB block is shared between
+// TTBR0 and TTBR1. The boot-stack guard page is non-present in this
+// shared L3, so a stack overflow faults via either translation root.
+//
+// `slide` is the KASLR offset (page-block aligned, < 1 GiB), as chosen
+// by kaslr_init(). Pass 0 to disable KASLR (used for debug builds; not
+// recommended for normal operation).
+//
+// Called from arch/arm64/start.S after BSS clear, DTB save, and
+// kaslr_init(). Idempotent only in the trivial sense (don't call twice).
+void mmu_enable(u64 slide);
 
 // Inspect a PTE for W^X compliance. Returns true iff the PTE is writable
 // AND executable-at-EL1, which is the forbidden combination. Used by the

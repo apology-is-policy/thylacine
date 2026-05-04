@@ -372,8 +372,11 @@ bool dtb_get_compat_reg(const char *compat, u64 *base, u64 *size) {
     return false;
 }
 
-u64 dtb_get_chosen_kaslr_seed(void) {
-    if (!g_dtb.ready) return 0;
+// Walk /chosen for a single property. Returns the property data bounds
+// via *out_data / *out_len if found; returns false if the chosen node
+// or named property is absent.
+static bool dtb_chosen_prop(const char *prop, const uint8_t **out_data, uint32_t *out_len) {
+    if (!g_dtb.ready) return false;
 
     struct fdt_walker w;
     walker_start(&w);
@@ -396,21 +399,51 @@ u64 dtb_get_chosen_kaslr_seed(void) {
             continue;
         }
         if (tok == FDT_END_NODE) {
-            if (in_chosen && w.depth < chosen_depth) {
-                return 0;       // walked past /chosen without finding seed
-            }
+            if (in_chosen && w.depth < chosen_depth) return false;
             continue;
         }
-        if (tok == FDT_PROP && in_chosen && k_streq(propname, "kaslr-seed")) {
-            // kaslr-seed is two u32 cells (8 bytes total).
-            if (proplen < 8) return 0;
-            // Concatenate the two cells as (high << 32) | low. The cell
-            // order in the FDT puts the first cell as the high half by
-            // convention for multi-cell numeric properties.
-            uint32_t hi = be32_load(propdata);
-            uint32_t lo = be32_load(propdata + 4);
-            return ((u64)hi << 32) | lo;
+        if (tok == FDT_PROP && in_chosen && k_streq(propname, prop)) {
+            *out_data = propdata;
+            *out_len = proplen;
+            return true;
         }
     }
-    return 0;
+    return false;
+}
+
+u64 dtb_get_chosen_kaslr_seed(void) {
+    const uint8_t *data;
+    uint32_t len;
+    if (!dtb_chosen_prop("kaslr-seed", &data, &len)) return 0;
+    // kaslr-seed is two u32 cells (8 bytes total). UEFI fills this
+    // with hardware entropy on bare metal.
+    if (len < 8) return 0;
+    uint32_t hi = be32_load(data);
+    uint32_t lo = be32_load(data + 4);
+    return ((u64)hi << 32) | lo;
+}
+
+u64 dtb_get_chosen_rng_seed(void) {
+    const uint8_t *data;
+    uint32_t len;
+    if (!dtb_chosen_prop("rng-seed", &data, &len)) return 0;
+    // /chosen/rng-seed is typically 32 bytes / 8 cells (QEMU virt
+    // publishes 256 bits). XOR-fold all 4-byte cells into a single
+    // u64 so the result preserves entropy across all bits regardless
+    // of how many cells the bootloader provided. Alternate between
+    // high and low halves to avoid trivial cancellation across
+    // adjacent cells.
+    u64 folded = 0;
+    uint32_t i = 0;
+    while (i + 4 <= len) {
+        uint32_t cell = be32_load(data + i);
+        u64 c = (u64)cell;
+        if ((i / 4) & 1) {
+            folded ^= c;
+        } else {
+            folded ^= (c << 32);
+        }
+        i += 4;
+    }
+    return folded;
 }

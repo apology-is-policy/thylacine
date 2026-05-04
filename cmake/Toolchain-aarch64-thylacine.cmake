@@ -58,6 +58,17 @@ set(THYLACINE_TARGET_TRIPLE "aarch64-none-elf"
 # -mgeneral-regs-only: no FP/SIMD in kernel (saves context-switch overhead;
 #   userspace gets full FP).
 # -mno-red-zone: ARM64 has no red zone but the flag is harmless on AArch64.
+# -fpie: position-independent executable. P1-C-extras Part B switches the
+#   kernel to PIE so KASLR can apply R_AARCH64_RELATIVE relocations and
+#   slide the kernel's high-VA base by a random offset at boot. PIC code
+#   uses PC-relative adrp+add for symbol references, naturally adapting to
+#   whichever address the kernel is running at; only absolute pointer
+#   references in static data (none in our minimal kernel today, but
+#   future-proof) need the relocation table walk.
+# -mcmodel=tiny: ARM64 small-code-model relocations (adrp/add only,
+#   ±4 GiB code/data spread). Keeps the relocation table small and
+#   permits direct PC-relative addressing of every symbol in the
+#   image. (The kernel image is < 200 KB; tiny is fine.)
 set(THYLACINE_KERNEL_C_FLAGS
     "--target=${THYLACINE_TARGET_TRIPLE}"
     "-march=armv8-a"
@@ -65,7 +76,9 @@ set(THYLACINE_KERNEL_C_FLAGS
     "-fno-builtin"
     "-fno-common"
     "-fno-stack-protector"
-    "-fno-pic"
+    "-fpie"
+    "-fdirect-access-external-data"
+    "-mcmodel=tiny"
     "-mgeneral-regs-only"
     "-mno-outline-atomics"
     "-fno-omit-frame-pointer"
@@ -83,11 +96,14 @@ set(THYLACINE_KERNEL_C_FLAGS
 # -fuse-ld=lld: use ld.lld (cross-platform ELF linker).
 # -nostdlib + -nostartfiles: no host runtime.
 # -static: no dynamic linking (kernel is self-contained).
-# Non-PIE comes from -fno-pic at compile time + the linker script's fixed
-# load address. Explicit -no-pie in link flags warned "unused during
-# compilation" because clang's link-driver sees it differently; we rely
-# on the compile-time -fno-pic instead, which is what actually controls
-# code-generation.
+# -Wl,-pie: emit a position-independent executable. Combined with -static,
+#   produces a static-pie ELF: PC-relative code, R_AARCH64_RELATIVE entries
+#   in .rela.dyn, no PT_INTERP. The kernel is its own dynamic linker.
+# -Wl,-z,text: forbid text relocations (force PIC-only code generation).
+#   Surfaces any code-side relocation as a build error rather than letting
+#   it through silently.
+# -Wl,--no-dynamic-linker: don't emit a PT_INTERP segment. The kernel has
+#   no dynamic linker; this section would be dead weight in the binary.
 # -Wl,--build-id=none: deterministic builds (no per-build hash).
 # -Wl,--no-undefined: surface missing-symbol errors at link time, not
 #   load time.
@@ -98,6 +114,11 @@ set(THYLACINE_KERNEL_LD_FLAGS
     "-nostdlib"
     "-nostartfiles"
     "-static"
+    "-Wl,-pie"
+    "-Wl,-z,text"
+    "-Wl,-z,norelro"
+    "-Wl,-z,nopack-relative-relocs"
+    "-Wl,--no-dynamic-linker"
     "-Wl,--build-id=none"
     "-Wl,--no-undefined"
 )

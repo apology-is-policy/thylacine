@@ -15,6 +15,7 @@
 // `TOOLING.md`.
 
 #include "uart.h"
+#include "../arch/arm64/kaslr.h"
 
 #include <stdint.h>
 #include <thylacine/dtb.h>
@@ -68,7 +69,7 @@ void boot_main(void) {
         uart_puts("EL1 (direct)\n");
     }
 
-    uart_puts("  cpus: 1 (P1-C; SMP at P1-F)\n");
+    uart_puts("  cpus: 1 (P1-C-extras; SMP at P1-F)\n");
 
     uart_puts("  mem:  ");
     if (mem_ok) {
@@ -100,11 +101,15 @@ void boot_main(void) {
     }
     uart_puts("\n");
 
-    uart_puts("  hardening: MMU+W^X+extinction (P1-C; KASLR/PAC/MTE/CFI at later sub-chunks)\n");
+    uart_puts("  hardening: MMU+W^X+extinction+KASLR (P1-C-extras; PAC/MTE/CFI at P1-H)\n");
 
     uart_puts("  kernel base: ");
-    uart_puthex64((u64)(uintptr_t)_kernel_start);
-    uart_puts(" (KASLR at P1-C)\n");
+    uart_puthex64(kaslr_kernel_high_base());
+    uart_puts(" (KASLR offset ");
+    uart_puthex64(kaslr_get_offset());
+    uart_puts(", seed: ");
+    uart_puts(kaslr_seed_source_str(kaslr_get_seed_source()));
+    uart_puts(")\n");
 
     uart_puts("  phase: " THYLACINE_PHASE_STRING "\n");
 

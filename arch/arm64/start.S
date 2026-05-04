@@ -189,16 +189,30 @@ _real_start:
     add     x0, x0, :lo12:_entered_at_el2
     str     x20, [x0]
 
-    // 7. Enable the MMU. After this returns, the kernel runs with caches
-    //    enabled and per-section page protections in force (W^X invariant
-    //    I-12 enforced at PTE bit level). Identity-mapped low 4 GiB so
-    //    PCs and SP remain valid through the transition.
+    // 7. KASLR. Choose a randomized slide from DTB seed (or hardware
+    //    counter fallback), apply any R_AARCH64_RELATIVE relocations
+    //    in the embedded .rela.dyn section. Returns the slide in x0.
+    bl      kaslr_init
+    mov     x21, x0                     // x21 = slide (callee-saved)
+
+    // 8. Enable the MMU. mmu_enable(slide) builds TTBR0 (low 4 GiB
+    //    identity) and TTBR1 (kernel high-half at KASLR_LINK_VA + slide),
+    //    programs MAIR / TCR / TTBR / SCTLR. Per-section permissions
+    //    enforce W^X (I-12) under both translation roots. After return,
+    //    PC is still load PA via TTBR0; we long-branch to high VA next.
+    mov     x0, x21
     bl      mmu_enable
 
-    // 8. Branch to boot_main().
-    bl      boot_main
+    // 9. Long-branch to high VA. Compute the runtime high VA of
+    //    boot_main via kaslr_high_va_addr(pa); the PA we pass is the
+    //    PC-relative-resolved address of boot_main (current PC = PA,
+    //    PIC mode → adrp+add gives PA).
+    adrp    x0, boot_main
+    add     x0, x0, :lo12:boot_main
+    bl      kaslr_high_va_addr          // x0 = high VA of boot_main
+    br      x0                          // branch to high VA
 
-    // 9. boot_main() must not return. If it does, fall through to halt.
+    // 10. boot_main() must not return. If it does, fall through to halt.
     b       _hang
 
 .size _start, . - _start

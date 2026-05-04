@@ -21,12 +21,12 @@ When a section describes a detail enforced by a spec, the spec's action / invari
 
 ## Snapshot
 
-- **Tip**: P1-C landed (MMU on with W^X invariant I-12 enforced + extinction infrastructure with EXTINCTION: ABI prefix). Commit `(pending hash-fixup)`. KASLR + boot-stack-guard + EL2-drop deferred to P1-C-extras.
-- **Phases**: Phase 0 done; Phase 1 in progress (P1-A + P1-B + P1-C complete; P1-C-extras next, then P1-D physical allocator).
-- **Tests**: 0 unit tests; 1 integration check (`tools/test.sh` boot-banner verify). PASS. Test harness lands in P1-I.
+- **Tip**: P1-C-extras landed in two parts. Part A (commit `ff22ca3`): EL2→EL1 drop diagnostic + boot-stack guard page. Part B (commit `(pending hash-fixup)`): KASLR — kernel runs at randomized high VA `0xFFFFA00*` via TTBR1, with .rela.dyn relocator infrastructure. Phase 1 invariants I-12 (W^X) and I-16 (KASLR) both satisfied.
+- **Phases**: Phase 0 done; Phase 1 in progress (P1-A + P1-B + P1-C + P1-C-extras complete; P1-D physical allocator next).
+- **Tests**: 0 unit tests; 1 integration check (`tools/test.sh` boot-banner verify). PASS. 10 consecutive boots produce 10 distinct KASLR offsets. Test harness lands in P1-I.
 - **Specs**: 0 written; 9 planned.
-- **LOC**: ~640 C99 + ~125 ASM + ~55 linker-script + ~210 CMake/shell ≈ 1030 LOC.
-- **Kernel ELF**: 95 KB debug / 87 KB stripped. Kernel flat binary: 8.2 KB. Page tables: 28 KiB BSS-allocated.
+- **LOC**: ~860 C99 + ~210 ASM + ~75 linker-script + ~220 CMake/shell ≈ 1365 LOC.
+- **Kernel ELF**: 117 KB debug / ~108 KB stripped. Kernel flat binary: 16 KB. Page tables: 40 KiB BSS-allocated.
 
 For phase-level status see `docs/phaseN-status.md`. The reference below covers the as-built layers in bottom-up order. Per-subsystem files appear as their subsystems land during Phase 1 onward.
 
@@ -39,10 +39,11 @@ For phase-level status see `docs/phaseN-status.md`. The reference below covers t
 | [00-overview.md](reference/00-overview.md) | Layer cake + cross-cutting concerns | medium | scaffolded |
 | [01-boot.md](reference/01-boot.md) | Boot path: start.S (incl. Linux ARM64 image header), kernel.ld, MMU, KASLR | medium | **P1-A + P1-B landed**; extended at P1-C (MMU + KASLR) |
 | [02-dtb.md](reference/02-dtb.md) | FDT parser: lib/dtb.c. Memory + compat-reg + kaslr-seed lookups. | medium | **P1-B landed**; kaslr-seed consumed at P1-C-extras |
-| [03-mmu.md](reference/03-mmu.md) | MMU + W^X invariant I-12: arch/arm64/mmu.{h,c}; PTE constructors with _Static_asserts; identity-map low 4 GiB | medium | **P1-C landed**; KASLR / TTBR1 high-half / guard page at P1-C-extras |
+| [03-mmu.md](reference/03-mmu.md) | MMU + W^X invariant I-12: arch/arm64/mmu.{h,c}; PTE constructors with _Static_asserts; TTBR0 identity + TTBR1 high-half (KASLR-aware) | medium | **P1-C + P1-C-extras landed**; SMP secondary bring-up at Phase 2 |
 | [04-extinction.md](reference/04-extinction.md) | Kernel ELE — extinction(msg) + ASSERT_OR_DIE; EXTINCTION: ABI prefix per TOOLING.md §10 | small | **P1-C landed**; first deliberate caller at P1-F (fault handler) |
-| 05-allocator.md (planned) | Buddy + per-CPU magazines + SLUB | medium | Phase 1 (P1-D, P1-E) |
-| 04-irq.md (planned) | GIC + exception vectors + IPI | small | Phase 1-2 |
+| [05-kaslr.md](reference/05-kaslr.md) | KASLR (invariant I-16): arch/arm64/kaslr.{h,c}; entropy chain (DTB kaslr-seed / rng-seed / cntpct fallback); .rela.dyn relocator; long-branch into TTBR1 | medium | **P1-C-extras Part B landed**; entropy bump (13 → 18 bits) is post-v1.0 hardening |
+| 06-allocator.md (planned) | Buddy + per-CPU magazines + SLUB | medium | Phase 1 (P1-D, P1-E) |
+| 07-irq.md (planned) | GIC + exception vectors + IPI | small | Phase 1-2 |
 | 05-process.md (planned) | Proc + Thread + rfork + notes + errstr | medium | Phase 2 |
 | 06-scheduler.md (planned) | EEVDF + per-CPU + work-stealing | medium | Phase 2 |
 | 07-namespace.md (planned) | Pgrp + bind + mount | small | Phase 2 |

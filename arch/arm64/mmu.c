@@ -1,8 +1,23 @@
 // ARM64 MMU — page table setup + enable.
 //
-// Identity-map the low 4 GiB so the kernel's existing physical addresses
-// remain valid after MMU enable. Per-section permissions for the kernel
-// image (W^X invariant I-12). Device-nGnRnE for the PL011 region.
+// At P1-C-extras Part B, the kernel is linked at high VA
+// KASLR_LINK_VA (0xFFFFA00000080000) and randomized at boot by a
+// page-block-aligned offset. mmu.c builds TWO mappings sharing one
+// L3 page-grain table:
+//
+//   - TTBR0 identity for the low 4 GiB. Required for early boot
+//     (PC = load PA pre-branch), DTB access (DTB at PA 0x48000000),
+//     and MMIO (PL011 et al). Will retire to user-space once Phase 2
+//     introduces process address spaces.
+//
+//   - TTBR1 kernel high-half at KASLR_LINK_VA + slide. The boot stub
+//     long-branches into this VA after mmu_enable() returns. From
+//     then on, kernel code runs through TTBR1.
+//
+// Per-section permissions (W^X invariant I-12) live in the shared L3
+// table — same memory under either translation. The boot-stack guard
+// page is non-present in this L3, so a stack overflow faults via
+// either translation root.
 //
 // Memory layout for 48-bit VA / 4 KiB granule / 4-level page tables:
 //
@@ -12,21 +27,23 @@
 //   VA[20:12]  L3 index (each entry covers 4 KiB; 4 KiB pages at this level)
 //   VA[11:0]   page offset
 //
-// At P1-C we map exactly:
+// TTBR0 layout (low 4 GiB identity):
+//   - L0[0] -> l0_ttbr0_l1.
+//   - l0_ttbr0_l1[0..3] -> l2_ttbr0[0..3], one L2 per GiB.
+//   - L2 entries default to 2 MiB Normal-WB RW blocks.
+//   - L2 entry covering PL011 (0x09000000) -> Device-nGnRnE block.
+//   - L2 entry covering kernel image -> table descriptor pointing at
+//     l3_kernel (page-grain perms).
 //
-//   - Low 4 GiB via L0[0] -> L1 -> L2 (4 entries, one per GiB).
-//   - L2 entries default to 2 MiB block mappings of Normal-WB RW memory.
-//   - The 2 MiB region containing the kernel image (0x40000000 + 0x80000
-//     = 0x40080000 lives in the second 2 MiB of L2[1.0], i.e. the L2
-//     entry at index 1 of the second L2 table) is replaced with an L3
-//     table so we can attribute .text / .rodata / .data / .bss / boot
-//     stack each at 4 KiB granularity.
-//   - The 2 MiB region containing PL011 (0x09000000) is replaced with a
-//     Device block.
+// TTBR1 layout (kernel high-half):
+//   - L0[KASLR_L0_IDX] -> l1_ttbr1.
+//   - L1[L1_idx_for(slide)] -> l2_ttbr1.
+//   - L2[L2_idx_for(slide)] -> l3_kernel (the same L3 used by TTBR0).
 //
-// Per ARCHITECTURE.md §6 + §24.
+// Per ARCHITECTURE.md §5.3 + §6 + §24.
 
 #include "mmu.h"
+#include "kaslr.h"
 
 #include <stdint.h>
 #include <thylacine/types.h>
@@ -50,7 +67,7 @@ extern char _data_end[];      // end of .data (== start of .bss)
 // _bss_start, _bss_end are already exported by kernel.ld.
 
 // Boot-stack guard page. Kernel.ld places this 4 KiB slot immediately
-// below the boot stack. mmu.c zeroes its L3 PTE in build_identity_map()
+// below the boot stack. mmu.c zeroes its L3 PTE in build_page_tables()
 // so a stack overflow faults synchronously rather than silently
 // corrupting prior BSS.
 extern char _boot_stack_guard[];
@@ -61,13 +78,21 @@ extern char _boot_stack_guard[];
 // All BSS-allocated and 4 KiB-aligned. Cleared by start.S's BSS clear
 // before mmu_enable() runs.
 //
-// Sizing for "low 4 GiB identity map":
-//   - 1 L0 table (only entry 0 used, but the whole 4 KiB still allocated).
-//   - 1 L1 table (entries 0-3 used; one per GiB).
-//   - 4 L2 tables (one per GiB; each has 512 entries × 2 MiB = 1 GiB).
-//   - 1 L3 table for the kernel-image 2 MiB region (fine-grained perms).
+// Sizing:
+//   TTBR0 (low 4 GiB identity):
+//     - 1 L0 table (only entry 0 used).
+//     - 1 L1 table (entries 0-3 used; one per GiB).
+//     - 4 L2 tables (one per GiB; 1 GiB each via 512 × 2 MiB blocks).
+//   TTBR1 (kernel high-half):
+//     - 1 L0 table (only one entry used — KASLR_L0_IDX).
+//     - 1 L1 table (one entry used — L1 index of slide).
+//     - 1 L2 table (one entry used — L2 index of slide; points at
+//       the SHARED l3_kernel below).
+//   Shared:
+//     - 1 L3 table for the kernel-image 2 MiB region (fine-grained
+//       perms; serves both TTBR0 and TTBR1 mappings).
 //
-// Memory cost: 7 × 4 KiB = 28 KiB. Negligible.
+// Memory cost: 10 × 4 KiB = 40 KiB. Negligible.
 // ---------------------------------------------------------------------------
 
 #define ENTRIES_PER_TABLE 512
@@ -77,17 +102,30 @@ extern char _boot_stack_guard[];
 #define BLOCK_SIZE_L2     (1ull << BLOCK_SHIFT_L2)   // 2 MiB
 #define BLOCK_SHIFT_L1    30
 #define BLOCK_SIZE_L1     (1ull << BLOCK_SHIFT_L1)   // 1 GiB
+#define BLOCK_SHIFT_L0    39
 
-static u64 l0_table[ENTRIES_PER_TABLE]   __attribute__((aligned(PAGE_SIZE)));
-static u64 l1_table[ENTRIES_PER_TABLE]   __attribute__((aligned(PAGE_SIZE)));
-static u64 l2_table[4][ENTRIES_PER_TABLE] __attribute__((aligned(PAGE_SIZE)));
-static u64 l3_kernel[ENTRIES_PER_TABLE]  __attribute__((aligned(PAGE_SIZE)));
+// TTBR0 tables (low 4 GiB identity).
+static u64 l0_ttbr0[ENTRIES_PER_TABLE]    __attribute__((aligned(PAGE_SIZE)));
+static u64 l1_ttbr0[ENTRIES_PER_TABLE]    __attribute__((aligned(PAGE_SIZE)));
+static u64 l2_ttbr0[4][ENTRIES_PER_TABLE] __attribute__((aligned(PAGE_SIZE)));
+
+// TTBR1 tables (kernel high-half). Sparse — only one entry populated
+// at each level.
+static u64 l0_ttbr1[ENTRIES_PER_TABLE]    __attribute__((aligned(PAGE_SIZE)));
+static u64 l1_ttbr1[ENTRIES_PER_TABLE]    __attribute__((aligned(PAGE_SIZE)));
+static u64 l2_ttbr1[ENTRIES_PER_TABLE]    __attribute__((aligned(PAGE_SIZE)));
+
+// Shared L3 table for the kernel-image 2 MiB region. Both TTBR0 and
+// TTBR1 walks land here for kernel-image accesses.
+static u64 l3_kernel[ENTRIES_PER_TABLE]   __attribute__((aligned(PAGE_SIZE)));
 
 // ---------------------------------------------------------------------------
 // PTE constructors and inspectors.
 // ---------------------------------------------------------------------------
 
 // Build a table descriptor pointing at a next-level table (L0/L1/L2 -> next).
+// In PIE/PIC mode, (uintptr_t)table is PC-relative — gives the runtime
+// PA when build_page_tables() runs with MMU off and PC = load PA.
 static inline u64 make_table_pte(const void *table) {
     return ((u64)(uintptr_t)table) | PTE_VALID | PTE_TYPE_TABLE;
 }
@@ -136,80 +174,50 @@ _Static_assert((PTE_DEVICE_RW_BLOCK & PTE_PXN) != 0,
                "Device PTEs must NOT allow EL1 execution");
 
 // ---------------------------------------------------------------------------
-// Build the identity-mapped page tables.
-//
-// L0[0] -> l1_table.
-// l1_table[0..3] -> l2_table[0..3], each covering 1 GiB.
-// l2_table[i] entries default to 2 MiB Normal-WB RW blocks.
-// Override: replace the 2 MiB entry that contains 0x09000000 (PL011)
-//           with a Device-nGnRnE block.
-// Override: replace the 2 MiB entry that contains the kernel image with
-//           a table descriptor pointing at l3_kernel[]; populate
-//           l3_kernel with per-section page descriptors.
+// Build the page tables (TTBR0 identity + TTBR1 kernel high-half).
 // ---------------------------------------------------------------------------
 
 #define PL011_BASE_FALLBACK 0x09000000ull
-#define KERNEL_LOAD_ADDR    0x40080000ull
 
-static void build_identity_map(void) {
-    // L0[0] -> L1.
-    l0_table[0] = make_table_pte(l1_table);
+static void build_page_tables(u64 slide) {
+    // PA of kernel start. In PIC mode this is PC-relative — gives the
+    // runtime load PA when called pre-MMU-on with PC = load PA.
+    u64 pa_kernel_start = (u64)(uintptr_t)_kernel_start;
+    u64 kernel_2mib_pa  = pa_kernel_start & ~(BLOCK_SIZE_L2 - 1);
 
-    // L1[0..3] -> L2[0..3] (4 GiB total).
+    // TTBR0 identity: L0[0] -> L1; L1[0..3] -> L2[0..3].
+    l0_ttbr0[0] = make_table_pte(l1_ttbr0);
     for (int i = 0; i < 4; i++) {
-        l1_table[i] = make_table_pte(l2_table[i]);
+        l1_ttbr0[i] = make_table_pte(l2_ttbr0[i]);
     }
 
-    // L2 entries: default 2 MiB Normal-WB RW blocks across the full 4 GiB.
+    // TTBR0 L2 entries: default 2 MiB Normal-WB RW blocks across 4 GiB.
     for (int gib = 0; gib < 4; gib++) {
         for (int j = 0; j < ENTRIES_PER_TABLE; j++) {
             paddr_t pa = ((paddr_t)gib << BLOCK_SHIFT_L1) +
                          ((paddr_t)j << BLOCK_SHIFT_L2);
-            l2_table[gib][j] = make_block_pte_l2(pa, PTE_KERN_RW_BLOCK);
+            l2_ttbr0[gib][j] = make_block_pte_l2(pa, PTE_KERN_RW_BLOCK);
         }
     }
 
-    // Override: PL011 region (covers 0x09000000) -> Device block.
+    // TTBR0 override: PL011 region (covers 0x09000000) -> Device block.
     {
         u32 gib = (u32)(PL011_BASE_FALLBACK >> BLOCK_SHIFT_L1);
         u32 idx = (u32)((PL011_BASE_FALLBACK >> BLOCK_SHIFT_L2) & 0x1ff);
         paddr_t pa = (PL011_BASE_FALLBACK & ~(BLOCK_SIZE_L2 - 1));
-        l2_table[gib][idx] = make_block_pte_l2(pa, PTE_DEVICE_RW_BLOCK);
+        l2_ttbr0[gib][idx] = make_block_pte_l2(pa, PTE_DEVICE_RW_BLOCK);
     }
 
-    // Override: kernel-image 2 MiB region -> L3 table for fine-grained
-    // permissions. The kernel currently spans roughly 0x40080000..0x40088000
-    // (~28 KiB), all within the 2 MiB region 0x40000000..0x40200000 (the
-    // SECOND 2 MiB region, since the FIRST is 0x40000000..0x40200000 — wait,
-    // let me re-check). KERNEL_LOAD_ADDR = 0x40080000.
-    //   gib = 1 (because 0x40000000 / 1 GiB = 1).
-    //   idx = (0x40080000 >> 21) & 0x1ff = 0  (because 0x40080000 / 2 MiB
-    //         = 0x80000000 / 0x200000 = 0x400 within the 1 GiB region; mod
-    //         512 = 0).
-    // Wait. 0x40080000 / 0x200000 = 0x200 (= 512). Hmm.
-    //
-    // Let me recompute. 0x40080000 in binary: 0100_0000_0000_1000_0000_...
-    //   bits[63:30] = 0x1 (gib index = 1)
-    //   bits[29:21] = 0     (l2 index within that gib = 0)
-    //   bits[20:0]  = 0x80000 (offset within the 2 MiB region)
-    //
-    // So the kernel lives in l2_table[1][0], which covers
-    // 0x40000000..0x40200000. We override that to point at l3_kernel.
+    // Build the SHARED kernel L3 table — covers the 2 MiB region
+    // containing the kernel image. Same content under TTBR0 (low VA)
+    // and TTBR1 (high VA): page descriptors mapping to PA.
+    for (int j = 0; j < ENTRIES_PER_TABLE; j++) {
+        paddr_t pa = kernel_2mib_pa + ((paddr_t)j << PAGE_SHIFT);
+        l3_kernel[j] = make_page_pte_l3(pa, PTE_KERN_RW);
+    }
+
+    // Per-section overrides on l3_kernel.
     {
-        u64 kernel_2mib_base = KERNEL_LOAD_ADDR & ~(BLOCK_SIZE_L2 - 1);
-        u32 gib = (u32)(kernel_2mib_base >> BLOCK_SHIFT_L1);
-        u32 idx = (u32)((kernel_2mib_base >> BLOCK_SHIFT_L2) & 0x1ff);
-
-        // Fill l3_kernel: every page in the 2 MiB region gets a default
-        // Normal-WB RW page mapping. We then override the kernel-image
-        // pages with per-section attributes.
-        for (int j = 0; j < ENTRIES_PER_TABLE; j++) {
-            paddr_t pa = kernel_2mib_base + ((paddr_t)j << PAGE_SHIFT);
-            l3_kernel[j] = make_page_pte_l3(pa, PTE_KERN_RW);
-        }
-
-        // Per-section overrides. Each section is page-aligned per kernel.ld.
-        // Indices into l3_kernel[] = (page_pa - kernel_2mib_base) / PAGE_SIZE.
         u64 ks   = (u64)(uintptr_t)_kernel_start;
         u64 te   = (u64)(uintptr_t)_text_end;
         u64 re   = (u64)(uintptr_t)_rodata_end;
@@ -219,34 +227,60 @@ static void build_identity_map(void) {
 
         // .text — RX
         for (u64 p = ks; p < te; p += PAGE_SIZE) {
-            u32 i = (u32)((p - kernel_2mib_base) >> PAGE_SHIFT);
+            u32 i = (u32)((p - kernel_2mib_pa) >> PAGE_SHIFT);
             l3_kernel[i] = make_page_pte_l3(p, PTE_KERN_TEXT);
         }
-        // .rodata — R
+        // .rodata + .rela.dyn + .dynamic-family — R
+        // (.rela.dyn / .dynamic etc. live between .rodata and .bss in
+        // the linker layout; treating them as R is conservative and
+        // correct.)
         for (u64 p = te; p < re; p += PAGE_SIZE) {
-            u32 i = (u32)((p - kernel_2mib_base) >> PAGE_SHIFT);
+            u32 i = (u32)((p - kernel_2mib_pa) >> PAGE_SHIFT);
             l3_kernel[i] = make_page_pte_l3(p, PTE_KERN_RO);
         }
-        // .data + .bss — RW (default; explicit assignment for clarity)
+        // .data + .bss + .dynamic-family writable bits — RW
         for (u64 p = de; p < ke; p += PAGE_SIZE) {
-            u32 i = (u32)((p - kernel_2mib_base) >> PAGE_SHIFT);
+            u32 i = (u32)((p - kernel_2mib_pa) >> PAGE_SHIFT);
             l3_kernel[i] = make_page_pte_l3(p, PTE_KERN_RW);
         }
-        // (.data is between de and bs but currently empty; the loop
-        // above covers de..ke which includes both .data and .bss.)
-        (void)bs;       // keep the symbol referenced for future use
+        (void)bs;       // keep symbol referenced for future use
 
-        // Boot-stack guard page → non-present (PTE_VALID=0). A stack
-        // overflow into [_boot_stack_guard, _boot_stack_bottom) takes
-        // a translation fault at EL1 stage 1 with FAR_EL1 inside the
-        // guard region — much louder than silently corrupting BSS.
-        // P1-F's exception handler will recognise this fault class and
-        // route it to extinction("kernel stack overflow", FAR_EL1).
+        // Boot-stack guard page → non-present (PTE_VALID=0).
         u64 guard_pa = (u64)(uintptr_t)_boot_stack_guard;
-        u32 guard_idx = (u32)((guard_pa - kernel_2mib_base) >> PAGE_SHIFT);
+        u32 guard_idx = (u32)((guard_pa - kernel_2mib_pa) >> PAGE_SHIFT);
         l3_kernel[guard_idx] = 0;
+    }
 
-        l2_table[gib][idx] = make_table_pte(l3_kernel);
+    // TTBR0: link the kernel L3 into the appropriate L2 entry of the
+    // identity map (so the kernel image is reachable at PA pre-branch).
+    {
+        u32 gib = (u32)(kernel_2mib_pa >> BLOCK_SHIFT_L1);
+        u32 idx = (u32)((kernel_2mib_pa >> BLOCK_SHIFT_L2) & 0x1ff);
+        l2_ttbr0[gib][idx] = make_table_pte(l3_kernel);
+    }
+
+    // TTBR1: kernel high-half mapping at KASLR_LINK_VA + slide.
+    //
+    // The high VA we want to land at is KASLR_LINK_VA + slide. Compute
+    // the L0 / L1 / L2 indices for that VA. Slide is page-block-aligned
+    // (2 MiB) and bounded so L0 stays fixed inside the kernel-modules
+    // KASLR region (per ARCH §6.2: 0xFFFF_A000_*).
+    //
+    // The 2 MiB block containing KASLR_LINK_VA + slide is always
+    // kernel_2mib_va_base + slide_2mib (where kernel_2mib_va_base is
+    // KASLR_LINK_VA & ~(2 MiB - 1) = 0xFFFFA00000000000), because slide
+    // is itself 2 MiB-aligned. Equivalently: high_va & ~(2 MiB - 1).
+    {
+        u64 kernel_high_va = KASLR_LINK_VA + slide;
+        u64 high_va_2mib   = kernel_high_va & ~(BLOCK_SIZE_L2 - 1);
+
+        u32 l0_idx = (u32)((high_va_2mib >> BLOCK_SHIFT_L0) & 0x1ff);
+        u32 l1_idx = (u32)((high_va_2mib >> BLOCK_SHIFT_L1) & 0x1ff);
+        u32 l2_idx = (u32)((high_va_2mib >> BLOCK_SHIFT_L2) & 0x1ff);
+
+        l0_ttbr1[l0_idx] = make_table_pte(l1_ttbr1);
+        l1_ttbr1[l1_idx] = make_table_pte(l2_ttbr1);
+        l2_ttbr1[l2_idx] = make_table_pte(l3_kernel);     // shared L3
     }
 }
 
@@ -255,18 +289,18 @@ static void build_identity_map(void) {
 //
 //   1. MAIR_EL1 (memory attributes). Must be set before any cacheable
 //      mapping is enabled.
-//   2. TCR_EL1 (translation control). 48-bit VA, 4 KiB granule, IPS=4
-//      (40-bit PA — covers our 4 GiB identity), inner+outer WB cacheable
-//      table walks.
-//   3. TTBR0_EL1 / TTBR1_EL1. We use TTBR0 for the identity map; TTBR1
-//      is empty at P1-C (KASLR populates it at P1-C-extras).
+//   2. TCR_EL1 (translation control). 48-bit VA (T0SZ=T1SZ=16),
+//      4 KiB granule for both halves, IPS=40-bit PA, inner+outer WB
+//      cacheable table walks for both halves.
+//   3. TTBR0_EL1 = l0_ttbr0 (identity). TTBR1_EL1 = l0_ttbr1 (kernel
+//      high half).
 //   4. ISB (instruction sync barrier).
 //   5. SCTLR_EL1 |= M (MMU on) | C (data cache) | I (instruction cache).
 //   6. ISB.
 //
-// Once SCTLR.M=1, all kernel addresses are translated via the TTBR0 map.
-// Since our map is identity, code/data accesses see the same physical
-// addresses they did pre-MMU — execution continues seamlessly.
+// Once SCTLR.M=1, all addresses are translated. We keep PC = load PA
+// through the transition (TTBR0 identity covers the kernel image),
+// then the boot stub long-branches to the high VA via TTBR1.
 // ---------------------------------------------------------------------------
 
 #define TCR_T0SZ_48BIT   (16ull << 0)         // VA size = 64 - 16 = 48
@@ -274,8 +308,8 @@ static void build_identity_map(void) {
 #define TCR_SH0_INNER    (3ull  << 12)
 #define TCR_ORGN0_WB     (1ull  << 10)
 #define TCR_IRGN0_WB     (1ull  << 8)
-#define TCR_T1SZ_48BIT   (16ull << 16)        // (TTBR1 unused at P1-C)
-#define TCR_TG1_4K       (2ull  << 30)        // 4 KiB granule (yes, 2 = 4K for TG1)
+#define TCR_T1SZ_48BIT   (16ull << 16)
+#define TCR_TG1_4K       (2ull  << 30)        // 4 KiB granule (TG1 encoding: 2 = 4K)
 #define TCR_SH1_INNER    (3ull  << 28)
 #define TCR_ORGN1_WB     (1ull  << 26)
 #define TCR_IRGN1_WB     (1ull  << 24)
@@ -292,27 +326,28 @@ static void build_identity_map(void) {
 #define SCTLR_C  (1ull << 2)
 #define SCTLR_I  (1ull << 12)
 
-void mmu_enable(void) {
-    build_identity_map();
+void mmu_enable(u64 slide) {
+    build_page_tables(slide);
 
     __asm__ __volatile__(
         "msr mair_el1, %0\n"
         "msr tcr_el1, %1\n"
         "msr ttbr0_el1, %2\n"
-        "msr ttbr1_el1, xzr\n"               // empty at P1-C
+        "msr ttbr1_el1, %3\n"
         "isb\n"
         "mrs x9, sctlr_el1\n"
-        "orr x9, x9, %3\n"
+        "orr x9, x9, %4\n"
         "msr sctlr_el1, x9\n"
         "isb\n"
         :: "r" ((u64)MAIR_VALUE),
            "r" ((u64)TCR_VALUE),
-           "r" ((u64)(uintptr_t)l0_table),
+           "r" ((u64)(uintptr_t)l0_ttbr0),
+           "r" ((u64)(uintptr_t)l0_ttbr1),
            "r" ((u64)(SCTLR_M | SCTLR_C | SCTLR_I))
         : "x9", "memory"
     );
 
     // After this point, all loads/stores go through the page tables.
-    // The boot stack, kernel image, and PL011 are all reachable at
-    // their physical addresses (identity-mapped).
+    // PC is still load PA via TTBR0; the boot stub now long-branches
+    // to the high VA via TTBR1 and continues from there.
 }

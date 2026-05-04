@@ -50,9 +50,11 @@ After the branch, `_real_start` performs, in order:
 3. **Stack setup**. SP is set to `_boot_stack_top` (defined by the linker script, top of a 16 KiB BSS-allocated buffer; SP grows down).
 4. **BSS clear**. Zero `[_bss_start, _bss_end)` in 8-byte stride. The linker script guarantees both bounds are 8-byte-aligned (in fact, page-aligned).
 5. **DTB store**. After BSS is cleared, write the saved x19 value to `_saved_dtb_ptr`. Write the saved x20 value (0 / 1) to `_entered_at_el2` so `boot_main()` can surface the el-entry diagnostic.
-6. **MMU enable** (P1-C). Identity-maps low 4 GiB; per-section permissions on the kernel image; W^X invariant I-12 enforced at PTE bit level. After return, kernel runs with caches enabled.
-7. **Branch to `boot_main()`**.
-8. **Fallthrough to `_hang`**. `boot_main()` is `noreturn`; if it ever returns, the assembly falls through into the `wfi` loop.
+6. **KASLR init** (P1-C-extras Part B). `kaslr_init()` parses the DTB seed (`/chosen/kaslr-seed` then `/chosen/rng-seed`, with `cntpct_el0` fallback), chooses a 2 MiB-aligned slide in `[0, 16 GiB)`, and applies any `R_AARCH64_RELATIVE` entries in the embedded `.rela.dyn` section. Returns the slide; the boot stub stashes it in `x21` (callee-saved). See `docs/reference/05-kaslr.md`.
+7. **MMU enable** (P1-C, slide-aware at P1-C-extras). `mmu_enable(slide)` builds TTBR0 (low 4 GiB identity) and TTBR1 (kernel high-half at `KASLR_LINK_VA + slide`). Per-section permissions on the kernel image; W^X invariant I-12 enforced at PTE bit level via `_Static_assert` on PTE constructors. The L3 page-grain table is shared between TTBR0 and TTBR1. After return, kernel runs with caches enabled; PC is still at load PA via TTBR0.
+8. **Long-branch to high VA**. Compute `kaslr_high_va_addr(boot_main)` to get the high VA of `boot_main`, then `br x0` into TTBR1. From this point, all PC-relative addressing in C code resolves to high VAs.
+9. **`boot_main()`** runs at high VA. Prints the banner; the banner's `kernel base: 0x...` line shows the runtime base = `KASLR_LINK_VA + offset`.
+10. **Fallthrough to `_hang`**. `boot_main()` is `noreturn`; if it ever returns, the assembly falls through into the `wfi` loop.
 
 #### EL2 → EL1 drop (P1-C-extras)
 
@@ -105,26 +107,27 @@ Three `ASSERT()` statements in the linker script catch regressions at link time:
 
 ### Boot banner (`kernel/main.c`)
 
-The banner is emitted line-by-line via `uart_puts`. P1-B fills in `mem`, `dtb`, and `uart` from DTB-driven discovery (per `docs/reference/02-dtb.md`); remaining fields are placeholders annotated with the sub-chunk that fills them.
+The banner is emitted line-by-line via `uart_puts`. P1-B fills in `mem`, `dtb`, and `uart` from DTB-driven discovery (per `docs/reference/02-dtb.md`); P1-C-extras Part A added the `el-entry` line; P1-C-extras Part B fills in the runtime kernel base via the KASLR slide.
 
-Reference output of a P1-B boot:
+Reference output of a P1-C-extras boot:
 
 ```
 Thylacine v0.1.0-dev booting...
   arch: arm64
-  cpus: 1 (P1-B; SMP at P1-F)
+  el-entry: EL1 (direct)
+  cpus: 1 (P1-C-extras; SMP at P1-F)
   mem:  2048 MiB at 0x0000000040000000
   dtb:  0x0000000048000000 (parsed)
   uart: 0x0000000009000000 (DTB-driven)
-  hardening: minimal (P1-B baseline; full stack at P1-H)
-  kernel base: 0x0000000040080000 (KASLR at P1-C)
-  phase: P1-B
+  hardening: MMU+W^X+extinction+KASLR (P1-C-extras; PAC/MTE/CFI at P1-H)
+  kernel base: 0xffffa0009e080000 (KASLR offset 0x000000009e000000, seed: DTB /chosen/kaslr-seed)
+  phase: P1-C-extras
 Thylacine boot OK
 ```
 
-The version string comes from `THYLACINE_VERSION_STRING` (set by `CMakeLists.txt` from the project version `0.1.0`); the phase string from `THYLACINE_PHASE_STRING` (set by the `THYLACINE_PHASE` cache variable, default `P1-B` after P1-A close).
+The `kernel base` line varies per boot (see `docs/reference/05-kaslr.md`). The version string comes from `THYLACINE_VERSION_STRING` (set by `CMakeLists.txt` from the project version `0.1.0`); the phase string from `THYLACINE_PHASE_STRING` (set by the `THYLACINE_PHASE` cache variable, currently `P1-C-extras`).
 
-`boot_main()` calls `dtb_init(_saved_dtb_ptr)` before printing the banner. On success, it calls `dtb_get_memory()` for the memory line and `dtb_get_compat_reg("arm,pl011", ...)` for the UART base. The latter calls `uart_set_base()` to update the active PL011 base, replacing the P1-A hardcoded fallback. If DTB parsing fails, the fallback `0x09000000` (QEMU virt) remains in use and the banner annotates the field as "fallback".
+`boot_main()` calls `dtb_init(_saved_dtb_ptr)` before printing the banner. On success, it calls `dtb_get_memory()` for the memory line and `dtb_get_compat_reg("arm,pl011", ...)` for the UART base. The latter calls `uart_set_base()` to update the active PL011 base, replacing the P1-A hardcoded fallback. If DTB parsing fails, the fallback `0x09000000` (QEMU virt) remains in use and the banner annotates the field as "fallback". `kaslr_kernel_high_base()` / `kaslr_get_offset()` / `kaslr_seed_source_str(kaslr_get_seed_source())` provide the KASLR fields.
 
 ### PL011 UART driver (`arch/arm64/uart.c`)
 
@@ -267,9 +270,18 @@ The boot-to-banner figure is informal; rigorous measurement lands in P1-I with t
 - EL2 → EL1 drop sequence in `_real_start` for firmware that hands the kernel control at EL2 (Pi 5). QEMU virt continues to enter at EL1 and falls through directly. The boot banner now carries an `el-entry: <EL1 (direct) | EL2 -> EL1 (dropped)>` diagnostic via the new `_entered_at_el2` BSS variable. EL3 / EL0 entry halts silently.
 - Boot-stack guard page: a 4 KiB BSS slot at `_boot_stack_guard` (immediately below `_boot_stack_bottom`) whose L3 PTE is zeroed by `arch/arm64/mmu.c`. A stack overflow now triggers a translation fault on the guard region — much louder than silently corrupting BSS. The fault diagnostic (`extinction("kernel stack overflow", FAR_EL1)`) gets wired in P1-F when exception vectors land.
 
+**Implemented at P1-C-extras** (Part B — KASLR):
+
+- Toolchain flipped to `-fpie -fdirect-access-external-data -mcmodel=tiny`; linker flipped to `-Wl,-pie -Wl,-z,text -Wl,-z,norelro -Wl,-z,nopack-relative-relocs -Wl,--no-dynamic-linker`. Kernel is now a static-PIE ELF.
+- Linker script links at `KERNEL_LINK_VA = 0xFFFFA00000080000` with `AT(KERNEL_LOAD_PA = 0x40080000)`. `.rela.dyn` retained in the loaded image.
+- New module `arch/arm64/kaslr.{h,c}` (~150 LOC). Tries `/chosen/kaslr-seed` then `/chosen/rng-seed` then `cntpct_el0` for entropy; mixes via SipHash-style avalanche; produces 13-bit (8192-bucket) 2 MiB-aligned offset in `[0, 16 GiB)`; walks `.rela.dyn` applying `R_AARCH64_RELATIVE` entries (currently 0).
+- `arch/arm64/mmu.c` now builds TTBR1 mapping at `KASLR_LINK_VA + slide` using the SHARED `l3_kernel` page-grain table. Page-table footprint: 40 KiB BSS-allocated.
+- `arch/arm64/start.S` calls `kaslr_init` after BSS clear, passes the slide to `mmu_enable(slide)`, then long-branches into the high VA via `kaslr_high_va_addr` + `br x0`.
+- Boot banner shows `kernel base: 0x..., KASLR offset 0x..., seed: <source>` (varies per boot).
+- Invariant **I-16** satisfied: kernel base differs across 10 consecutive boots.
+
 **Not yet implemented**:
 
-- KASLR (P1-C-extras Part B). Kernel base is fixed at `0x40080000`; the banner's `kernel base: …` line still shows the link address.
 - Physical frame allocator (P1-D).
 - SLUB kernel object allocator (P1-E).
 - GIC + exception vectors (P1-F). The guard page mapping is in place but the fault handler that observes it lands here.
@@ -277,7 +289,7 @@ The boot-to-banner figure is informal; rigorous measurement lands in P1-I with t
 - Hardening flags (P1-H).
 - Phase 1 exit verification (P1-I).
 
-**Landed**: P1-A at commit `2b332d8`; P1-B at commit `d3e33a8`; P1-C at commit `6462227`; P1-C-extras Part A at commit `ff22ca3`.
+**Landed**: P1-A at commit `2b332d8`; P1-B at commit `d3e33a8`; P1-C at commit `6462227`; P1-C-extras Part A at commit `ff22ca3`; P1-C-extras Part B at commit `(pending hash-fixup)`.
 
 ---
 
