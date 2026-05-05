@@ -32,6 +32,8 @@ shift || true
 build_type="Debug"
 hardening_full="OFF"
 kaslr="OFF"
+sanitize=""
+build_dir_override=""
 verbose=""
 extra_cmake_args=()
 
@@ -47,6 +49,16 @@ while [[ $# -gt 0 ]]; do
             ;;
         --kaslr)
             kaslr="ON"
+            shift
+            ;;
+        --sanitize=*)
+            # P1-I: opt-in sanitizer build. Currently supports
+            # --sanitize=undefined (UBSan trapping). KASAN deferred.
+            sanitize="${1#--sanitize=}"
+            shift
+            ;;
+        --build-dir=*)
+            build_dir_override="${1#--build-dir=}"
             shift
             ;;
         --verbose)
@@ -65,13 +77,33 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Translate user-friendly --sanitize values to the CMake variable.
+sanitize_cmake=""
+case "$sanitize" in
+    "")              sanitize_cmake="" ;;
+    ubsan|undefined) sanitize_cmake="undefined" ;;
+    *)
+        echo "Unknown --sanitize value: $sanitize (valid: ubsan/undefined)" >&2
+        exit 1
+        ;;
+esac
+
+# Allow overriding the kernel build directory so a sanitizer build doesn't
+# clobber the production build's CMake cache.
+if [[ -n "$build_dir_override" ]]; then
+    KERNEL_BUILD="$build_dir_override"
+elif [[ -n "$sanitize_cmake" ]]; then
+    KERNEL_BUILD="$BUILD_DIR/kernel-${sanitize_cmake}"
+fi
+
 build_kernel() {
-    echo "==> Building kernel (build_type=$build_type, hardening=$hardening_full, kaslr=$kaslr)"
+    echo "==> Building kernel (build_type=$build_type, hardening=$hardening_full, kaslr=$kaslr, sanitize='${sanitize_cmake}', dir=$KERNEL_BUILD)"
     cmake -S "$REPO_ROOT" -B "$KERNEL_BUILD" \
         -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN_FILE" \
         -DCMAKE_BUILD_TYPE="$build_type" \
         -DTHYLACINE_HARDENING_FULL="$hardening_full" \
         -DTHYLACINE_KASLR="$kaslr" \
+        -DTHYLACINE_SANITIZE="$sanitize_cmake" \
         ${extra_cmake_args[@]+"${extra_cmake_args[@]}"}
     cmake --build "$KERNEL_BUILD" $verbose
     echo "==> Kernel built: $KERNEL_BUILD/thylacine.elf"

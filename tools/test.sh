@@ -14,7 +14,34 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD_DIR="$REPO_ROOT/build"
-KERNEL_ELF="$BUILD_DIR/kernel/thylacine.elf"
+
+# P1-I: optional --sanitize=ubsan flag selects the alternate build dir
+# so the production build's CMake cache isn't clobbered.
+sanitize=""
+extra_args=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --sanitize=*)
+            sanitize="${1#--sanitize=}"
+            shift
+            ;;
+        *)
+            extra_args+=("$1")
+            shift
+            ;;
+    esac
+done
+
+case "$sanitize" in
+    "")              KERNEL_BUILD="$BUILD_DIR/kernel" ;;
+    ubsan|undefined) KERNEL_BUILD="$BUILD_DIR/kernel-undefined" ;;
+    *)
+        echo "Unknown --sanitize value: $sanitize (valid: ubsan/undefined)" >&2
+        exit 1
+        ;;
+esac
+
+KERNEL_ELF="$KERNEL_BUILD/thylacine.elf"
 LOG_FILE="$BUILD_DIR/test-boot.log"
 
 BOOT_TIMEOUT="${BOOT_TIMEOUT:-10}"          # seconds
@@ -26,14 +53,19 @@ mkdir -p "$BUILD_DIR"
 # Build first if the ELF is missing.
 if [[ ! -f "$KERNEL_ELF" ]]; then
     echo "==> Kernel ELF missing; building..."
-    "$REPO_ROOT/tools/build.sh" kernel
+    if [[ -n "$sanitize" ]]; then
+        "$REPO_ROOT/tools/build.sh" kernel "--sanitize=$sanitize"
+    else
+        "$REPO_ROOT/tools/build.sh" kernel
+    fi
 fi
 
 echo "==> Booting kernel under QEMU (timeout ${BOOT_TIMEOUT}s)..."
 echo "    Log: $LOG_FILE"
 
-# Launch QEMU in background; capture UART output to log file.
-"$REPO_ROOT/tools/run-vm.sh" --no-share < /dev/null > "$LOG_FILE" 2>&1 &
+# Launch QEMU in background; capture UART output to log file. Pass the
+# alternate build dir via env so run-vm.sh picks up the sanitizer ELF.
+THYLACINE_BUILD_DIR="$KERNEL_BUILD" "$REPO_ROOT/tools/run-vm.sh" --no-share < /dev/null > "$LOG_FILE" 2>&1 &
 QEMU_PID=$!
 
 # Wait up to BOOT_TIMEOUT seconds for the boot marker to appear.

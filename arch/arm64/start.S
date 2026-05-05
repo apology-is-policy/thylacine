@@ -158,6 +158,17 @@ _real_start:
 // x0 holds the DTB physical address.
 // ---------------------------------------------------------------------------
 .Lel1_main:
+    // 1.5. Capture boot-start counter for the boot-time banner (P1-I).
+    //     CNTPCT_EL0 ticks at the architectural counter frequency
+    //     (CNTFRQ_EL0; ~62.5 MHz on QEMU virt, varies elsewhere).
+    //     Reading it here gives the earliest-recorded reference point;
+    //     boot_main subtracts the post-banner read to compute boot time.
+    //     CNTHCTL_EL2.EL1PCTEN is 1 by this point: either set by EL2
+    //     drop or by firmware on direct-EL1 entry. No DTB needed.
+    //     We can't write to BSS yet (BSS clear hasn't run); stash in
+    //     a callee-saved reg and write after BSS clear, alongside DTB.
+    mrs     x22, cntpct_el0
+
     // 2. Stash DTB pointer in x19 (callee-saved; survives the BSS clear).
     mov     x19, x0
 
@@ -188,6 +199,11 @@ _real_start:
     adrp    x0, _entered_at_el2
     add     x0, x0, :lo12:_entered_at_el2
     str     x20, [x0]
+
+    // 6.25. Save boot-start CNTPCT for the boot-time banner.
+    adrp    x0, _boot_start_cntpct
+    add     x0, x0, :lo12:_boot_start_cntpct
+    str     x22, [x0]
 
     // 6.5. P1-H: PAC + BTI runtime enable.
     //
@@ -324,3 +340,15 @@ _saved_dtb_ptr:
 _entered_at_el2:
     .skip 8
 .size _entered_at_el2, 8
+
+// _boot_start_cntpct — CNTPCT_EL0 captured at the very start of
+// _real_start (before BSS clear, before DTB save, before MMU). Read by
+// boot_main to compute the elapsed boot time. Counter ticks at
+// CNTFRQ_EL0 Hz (architectural; readable post-EL2-drop or directly at
+// EL1 if firmware enabled CNTHCTL_EL2.EL1PCTEN).
+.globl _boot_start_cntpct
+.type _boot_start_cntpct, %object
+.align 3
+_boot_start_cntpct:
+    .skip 8
+.size _boot_start_cntpct, 8

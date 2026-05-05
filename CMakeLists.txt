@@ -20,7 +20,31 @@ project(thylacine
 )
 
 # Phase tag — bumped per phase exit. Influences boot banner.
-set(THYLACINE_PHASE "P1-H" CACHE STRING "Current implementation phase")
+set(THYLACINE_PHASE "P1-I" CACHE STRING "Current implementation phase")
+
+# THYLACINE_SANITIZE — opt-in sanitizer build (P1-I).
+#
+# Empty / unset (default): production build. No sanitizer instrumentation.
+# "undefined":              UBSan trapping mode. -fsanitize=undefined
+#                           -fsanitize-trap=undefined. Undefined behavior
+#                           triggers a BRK instruction that the kernel's
+#                           sync exception handler routes to extinction
+#                           ("brk instruction (assertion?)"). No runtime
+#                           support needed (no __ubsan_handle_*).
+#
+# Future: "address" would enable kernel ASan, but that needs a custom
+# shadow allocator (freestanding kernel; no host ASan runtime). Deferred
+# to post-v1.0 per ARCH §24.5 (userspace gets ASan via dev builds; kernel
+# ASan is out-of-scope at v1.0).
+#
+# Use via:
+#   cmake -B build/kernel-ubsan -DCMAKE_TOOLCHAIN_FILE=... -DTHYLACINE_SANITIZE=undefined
+# Or:
+#   tools/test.sh --sanitize=ubsan
+set(THYLACINE_SANITIZE "" CACHE STRING "Sanitizer mode: '', 'undefined'")
+if(THYLACINE_SANITIZE STREQUAL "undefined")
+    add_compile_options(-fsanitize=undefined -fsanitize-trap=undefined)
+endif()
 
 # Build-time options. Each defaults to off at P1-A and gets enabled at later phases.
 option(THYLACINE_HARDENING_FULL "Enable full hardening (CFI/PAC/MTE/BTI/LSE/canaries) — P1-H+" OFF)

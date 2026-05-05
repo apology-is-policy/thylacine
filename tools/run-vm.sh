@@ -22,13 +22,17 @@
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-KERNEL_ELF="$REPO_ROOT/build/kernel/thylacine.elf"
+# Allow the kernel build dir to be overridden so sanitizer / debug variants
+# (P1-I: tools/test.sh --sanitize=ubsan) can boot without clobbering the
+# production build artifacts.
+KERNEL_BUILD_DIR="${THYLACINE_BUILD_DIR:-$REPO_ROOT/build/kernel}"
+KERNEL_ELF="$KERNEL_BUILD_DIR/thylacine.elf"
 # Flat-binary form, with Linux ARM64 image header. QEMU's load_aarch64_image()
 # detects the ARM\x64 magic at offset 0x38 and treats us as a Linux Image
 # (is_linux=1), which causes it to load the DTB and pass its address in x0.
 # An ELF load (is_linux=0) skips the DTB entirely. See docs/reference/01-boot.md
 # "Caveats > DTB pointer observed as 0x0" for the investigation.
-KERNEL_BIN="$REPO_ROOT/build/kernel/thylacine.bin"
+KERNEL_BIN="$KERNEL_BUILD_DIR/thylacine.bin"
 
 cpus=4
 mem_mib=2048

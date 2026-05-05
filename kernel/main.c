@@ -44,6 +44,10 @@ extern volatile u64 _saved_dtb_ptr;
 // EL2-entry firmware) condition that QEMU virt never exhibits.
 extern volatile u64 _entered_at_el2;
 
+// From arch/arm64/start.S — CNTPCT_EL0 captured at the very start of
+// _real_start. Used to compute the boot-time banner (P1-I).
+extern volatile u64 _boot_start_cntpct;
+
 // From arch/arm64/kernel.ld.
 extern char _kernel_start[];
 extern char _kernel_end[];
@@ -258,6 +262,24 @@ void boot_main(void) {
     uart_puts("  ticks: ");
     uart_putdec(timer_get_ticks());
     uart_puts(" (kernel breathing)\n");
+
+    // Boot-time banner (P1-I; ROADMAP §4.2 < 500 ms exit criterion).
+    // Read CNTPCT now and subtract the start-of-_real_start capture to
+    // get elapsed counter ticks; convert to microseconds via CNTFRQ.
+    // Includes the 5-tick busy-wait above (~5 ms), which is part of
+    // the boot path's normal cost.
+    {
+        u64 now;
+        __asm__ __volatile__("mrs %0, cntpct_el0" : "=r"(now));
+        u64 elapsed_ticks = now - _boot_start_cntpct;
+        u64 freq = (u64)timer_get_freq();         // CNTFRQ_EL0
+        u64 us = (elapsed_ticks * 1000000UL) / freq;
+        uart_puts("  boot-time: ");
+        uart_putdec(us / 1000);
+        uart_puts(".");
+        uart_putdec((us % 1000) / 100);
+        uart_puts(" ms (target < 500 ms per VISION §4)\n");
+    }
 
     uart_puts("  phase: " THYLACINE_PHASE_STRING "\n");
 

@@ -46,3 +46,34 @@ void test_phys_alloc_smoke(void) {
     TEST_ASSERT(after == baseline,
         "phys_free_pages drift: free count not restored after smoke");
 }
+
+// 10 000-iteration alloc/free leak check (ROADMAP §4.2 exit criterion).
+// Cycles a single order-0 page through alloc → free 10 000 times,
+// drains magazines, verifies the free-page count exactly matches the
+// baseline. Catches per-cycle leaks of any size that compound over a
+// realistic kernel uptime.
+//
+// Why a SINGLE pointer (not 10000 simultaneous): the 10K array would
+// overflow the boot stack (10000 × 8 = 80 KiB; boot stack is 16 KiB).
+// Sequential single-allocation is the right test for "leak per
+// alloc/free pair" — a leak would manifest as free-count drift that
+// compounds; the magazine refill/drain hysteresis is exercised
+// implicitly across iterations.
+//
+// Test runs in <100 ms on QEMU virt; fits inside tools/test.sh's
+// 10-second timeout with margin.
+void test_phys_leak_10k(void) {
+    u64 baseline = phys_free_pages();
+
+    for (unsigned i = 0; i < 10000; i++) {
+        struct page *p = alloc_pages(0, KP_ZERO);
+        TEST_ASSERT(p != NULL, "alloc_pages(0) returned NULL mid-10k");
+        free_pages(p, 0);
+    }
+
+    magazines_drain_all();
+
+    u64 after = phys_free_pages();
+    TEST_ASSERT(after == baseline,
+        "phys_free_pages drift after 10000-iter alloc/free");
+}

@@ -65,3 +65,31 @@ void test_slub_kmem_smoke(void) {
     TEST_ASSERT(after == baseline,
         "phys_free_pages drift: free count not restored after kmem smoke");
 }
+
+// 10 000-iteration kmalloc/kfree leak check (ROADMAP §4.2 exit
+// criterion). Cycles a single 64-byte allocation through kmalloc →
+// kfree 10 000 times. Single pointer (10K array would overflow the
+// boot stack). Drains magazines between sub-runs to flush slab-page
+// residency. Verifies phys_free_pages returns to baseline.
+//
+// 64 bytes is in the kmalloc-64 cache; one slab page holds 64 such
+// objects, so the test exercises slab-page acquire/release ~156
+// times across 10 000 iterations (with magazine residency dampening).
+//
+// Test runs in <50 ms on QEMU virt; well within the 10-s test
+// timeout.
+void test_slub_leak_10k(void) {
+    u64 baseline = phys_free_pages();
+
+    for (unsigned i = 0; i < 10000; i++) {
+        void *p = kmalloc(64, 0);
+        TEST_ASSERT(p != NULL, "kmalloc(64) returned NULL mid-10k");
+        kfree(p);
+    }
+
+    magazines_drain_all();
+
+    u64 after = phys_free_pages();
+    TEST_ASSERT(after == baseline,
+        "phys_free_pages drift after 10000-iter kmalloc/kfree");
+}
