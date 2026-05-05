@@ -15,7 +15,7 @@ TLC-clean at `Threads = {t1, t2, t3}, CPUs = {c1, c2}` — 283 distinct states e
 | Spec action | Source location | Notes |
 |---|---|---|
 | `Init` | `kernel/proc.c::proc_init` + `kernel/thread.c::thread_init` | Bootstrap: kproc PID 0 + kthread TID 0 RUNNING on CPU0. cond=FALSE, waiters={} initial. |
-| `Yield(cpu)` | `kernel/sched.c::sched()` (RUNNING-state branch) | Cooperative yield: prev → RUNNABLE, advance vd_t, insert into run tree, switch. |
+| `Yield(cpu)` | `kernel/sched.c::sched()` (RUNNING-state branch). **Also: timer-IRQ-driven preempt path** (P2-Bc): `arch/arm64/timer.c::timer_irq_handler` → `sched_tick` → sets `g_need_resched` when slice expires → `preempt_check_irq` (called from `arch/arm64/vectors.S` IRQ-return) → `sched()` performs the same RUNNING → RUNNABLE+insert+pick-next transition. The spec's Yield is non-deterministic; cooperative yield (sched() called from kernel code) and involuntary preempt (sched() called from preempt_check_irq) are observably indistinguishable. The atomicity that matters for NoMissedWakeup is preserved by sleep()'s spin_lock_irqsave bracketing the WaitOnCond body — preempt cannot fire mid-WaitOnCond. |
 | `Block(cpu)` | `kernel/sched.c::sched()` (SLEEPING-state branch) | Caller-set state SLEEPING; sched() leaves prev out of run tree. P2-Bb path is via sleep(); generic Block usable for postnote stop / etc. at Phase 2 close. |
 | `Wake(t)` | (deferred — generic non-cond wake) | At P2-Bb, all wakes go through wakeup(r) → ready(t). Generic Wake(t) lands when notes / signals at Phase 5. |
 | `Resume(cpu)` | implicit in `kernel/sched.c::pick_next` | Idle CPU pick-up; v1.0 P2-Bb has no idle CPU (UP). P2-C makes this explicit (idle WFI → IPI/IRQ wakeup → resume). |
@@ -32,11 +32,16 @@ TLC-clean at `Threads = {t1, t2, t3}, CPUs = {c1, c2}` — 283 distinct states e
 | `SleepingNotInQueue` (SLEEPING ⇒ no runq + no current) | `sleep()` sets state SLEEPING ONLY after `sched()` has switched the thread off-CPU and pick-next has not re-inserted (the SLEEPING-state branch of sched() is the no-op insert). |
 | **`NoMissedWakeup`** (cond=TRUE ⇒ waiters={}) | `sleep()`'s cond check + waiter-add + sleep transition all happen inside one `while (!cond)` body under `r->lock`. `wakeup()`'s waiter-clear + cond is set by caller, both observable to sleep's resume re-check. The atomicity defeats the missed-wakeup race — proven in TLC, enforced at compile time by the lexical structure of `sleep()`. |
 
-### P2-Bc refinement targets
+### P2-Bc landed
 
-- Model EEVDF: virtual time advancement, vd_t / ve_t per thread, pick-earliest-deadline. Prove latency bound `slice_size × N` (ARCH §28 I-17). Add `PickIsMinDeadline` invariant.
-- Model scheduler-tick preemption (timer IRQ → sched()). Add an `IRQ` action firing periodically; prove that under preemption + EEVDF the latency bound holds.
-- Add IRQ-mask discipline to the model (currently atomicity is implicit; preemption requires it explicit).
+- Timer-IRQ-driven preemption path mapped to spec's existing Yield action (above table) — non-deterministic Yield in the spec covers both cooperative and involuntary yields. NoMissedWakeup atomicity preserved by sleep()'s spin_lock_irqsave bracketing.
+- Per-thread slice + replenish-on-RUNNING modeled implicitly: the spec's Yield can fire at any state, which corresponds to "preempt-when-slice-expires" being an arbitrary scheduler decision.
+
+### Deferred (post-P2-Bc)
+
+- Explicit `Slice` variable + `IRQ`/`Preempt` actions: would let TLC verify slice-bound liveness (LatencyBound I-17). Requires weak fairness annotations + small-bounded slice value to keep state space tractable. Phase 2 close addresses this with the full liveness refinement.
+- Full EEVDF math: vd_t = ve_t + slice × W_total / w_self with weighted virtual time advance. Becomes meaningful when weights differ — Phase 5+ when sched_setweight is exposed. v1.0 weight=1 always; current g_vd_counter++ advance is a valid instantiation of the math.
+- `PickIsMinDeadline` invariant — implies the impl's pick-min-vd_t is correct. Currently provable manually (the impl is mechanically pick-min) but not modeled in the spec.
 
 ### P2-C refinement targets
 

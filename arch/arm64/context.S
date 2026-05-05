@@ -80,11 +80,23 @@ cpu_switch_context:
 // below sets BTYPE=10 (call); the entry function's compiler-emitted
 // `bti c` prologue (under -mbranch-protection=pac-ret+bti) matches.
 //
+// IRQ-mask discipline (P2-Bc): the schedule that switched into this
+// fresh thread had IRQs masked (sched() entry's irqsave; cpu_switch_
+// context preserves PSTATE.DAIF). For a fresh thread with no prior
+// sched() frame to call irqrestore, we unmask IRQs explicitly here
+// so timer-IRQ-driven preemption can fire while the thread runs its
+// entry function. Subsequent sched() calls from the entry restore
+// IRQ state via the normal irqsave/irqrestore pattern; no further
+// asymmetry. `msr daifclr, #2` clears PSTATE.I (IRQ mask bit) only —
+// the other DAIF bits stay at whatever the prior state was.
+//
 // If entry returns, halt on WFE — Phase 2 close adds thread_exit + reap.
 .globl thread_trampoline
 .type thread_trampoline, %function
 thread_trampoline:
     bti     c
+
+    msr     daifclr, #2          /* P2-Bc: unmask IRQs for new thread */
 
     blr     x21
 

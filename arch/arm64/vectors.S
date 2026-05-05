@@ -26,9 +26,16 @@
 //
 // At P1-G the Sync slot terminates in extinction; the IRQ slot is the
 // first recoverable path — vectors.S calls exception_irq_curr_el and
-// then resumes the interrupted code via the shared .Lexception_return
-// trampoline (KERNEL_EXIT lives there to keep the slot ≤ 0x80 bytes;
-// `.L` prefix keeps it out of the symbol table).
+// (P2-Bc) preempt_check_irq, then resumes the interrupted code via the
+// shared .Lexception_return trampoline (KERNEL_EXIT lives there to keep
+// the slot ≤ 0x80 bytes; `.L` prefix keeps it out of the symbol table).
+// preempt_check_irq is a C function that consults g_need_resched (set
+// by sched_tick when the current thread's slice expired) and may call
+// sched() to context-switch — sched()'s save captures the C-stack
+// state of preempt_check_irq's invocation, so when the formerly-current
+// thread is eventually resumed, control flows back through the
+// preempt_check_irq frame, into vectors.S, and through KERNEL_EXIT
+// to eret the IRQed instruction.
 // All other 14 entries call exception_unexpected with the vector index,
 // which extinctions. Phase 2 fills lower-EL entries when userspace lands.
 //
@@ -173,6 +180,7 @@ _exception_vectors:
     KERNEL_ENTRY
     mov     x0, sp
     bl      exception_irq_curr_el
+    bl      preempt_check_irq            /* P2-Bc: maybe context-switch */
     b       .Lexception_return           /* shared KERNEL_EXIT trampoline (local) */
 
     .org _exception_vectors + 0x300      /* FIQ */

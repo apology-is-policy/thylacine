@@ -268,13 +268,47 @@ For v1.0 expected loads, O(N) insert is fine. If a future workload pushes thread
 
 `SCHED_BAND_INTERACTIVE = 0` and KP_ZERO would default `band = 0 = INTERACTIVE`. To override, `thread_create` and `thread_init` explicitly set `band = SCHED_BAND_NORMAL`. A future caller using `kmem_cache_alloc(thread_cache, KP_ZERO)` directly (bypassing `thread_create`) would get `band = INTERACTIVE` by default. This is a subtle hazard; the convention is "use `thread_create` for all Thread descriptors."
 
-### No locks at P2-Ba
+### IRQ-mask discipline at P2-Bc (live)
 
-The run tree is mutated only from cooperative `sched()` and `ready()` calls. P2-Ba is UP + no preemption-via-IRQ; reentrancy is impossible. P2-Bc adds the IRQ-mask discipline once timer IRQ → sched() preemption becomes possible. P2-C adds per-CPU spinlocks for SMP.
+`sched()` and `ready()` bracket their run-tree mutations with `spin_lock_irqsave(NULL)` / `spin_unlock_irqrestore(NULL, s)`. The `lock` argument is NULL — at v1.0 UP there's no contention, but the IRQ mask is real (PSTATE.DAIF.I) and is what defends against timer IRQ → preempt_check_irq → sched() recursion mid-run-tree-mutation. P2-C SMP makes the spin part real with a per-CPU run-tree lock.
 
-### `prev->state = RUNNABLE` assumption
+### `prev->state = RUNNABLE` is no longer assumed (P2-Bb refactor)
 
-`sched()` always sets `prev->state = RUNNABLE`. Wrong for "block on a condition" (which needs SLEEPING). P2-Bb adds `thread_block(rendez)` which does the SLEEPING transition + skips the run-tree insert.
+`sched()` now respects pre-set `prev->state`: RUNNING → yield-insert; SLEEPING/EXITING → don't insert. Callers like `sleep()` set `state = THREAD_SLEEPING` BEFORE calling `sched()`, and the SLEEPING-state branch leaves prev out of the run tree. See [16-rendez.md](16-rendez.md) for the wait/wake protocol.
+
+---
+
+## Preemption (P2-Bc)
+
+The scheduler now drives preemption via the timer IRQ.
+
+### Mechanism
+
+1. **Per-thread slice** — `struct Thread::slice_remaining` (s64) holds the remaining ticks before this thread's quantum expires. Replenished to `THREAD_DEFAULT_SLICE_TICKS = 6` (matching Linux EEVDF default at 1000 Hz) on every RUNNABLE → RUNNING transition (sched()'s pick-next path).
+
+2. **`sched_tick()`** — called from `timer_irq_handler` on every timer fire. Decrements `current->slice_remaining`; when ≤ 0, sets `g_need_resched = true` and replenishes the slice (so the slice doesn't go further negative on subsequent ticks before `preempt_check_irq` runs).
+
+3. **`preempt_check_irq()`** — called from `arch/arm64/vectors.S` IRQ slot, AFTER `exception_irq_curr_el` returns and BEFORE `.Lexception_return` (the eret trampoline). Checks `g_need_resched`; if set + scheduler is initialized + `current_thread` is valid + magic is good, clears the flag and calls `sched()`. `sched()` does its own irqsave/irqrestore + state transitions + cpu_switch_context.
+
+4. **`thread_trampoline` IRQ unmask** — the very first time a fresh thread runs, it lands at `thread_trampoline` (not at sched()'s resumption point). Since it doesn't have a sched() frame to call irqrestore from, we explicitly `msr daifclr, #2` at the start of `thread_trampoline` to unmask IRQs. This makes timer-IRQ-driven preemption fire on the new thread once it starts running. Subsequent re-entries to a preempted thread go through sched()'s frame (which handles irqrestore correctly).
+
+### Spec mapping
+
+The C impl's preempt path (`timer_irq_handler` → `sched_tick` → `g_need_resched` → `preempt_check_irq` → `sched`) maps to the spec's `Yield(cpu)` action — non-deterministic in TLC, observably indistinguishable from cooperative yield. The atomicity that matters for `NoMissedWakeup` is preserved: `sleep()`'s `spin_lock_irqsave` brackets the WaitOnCond body, so a preempt cannot fire mid-cond-check-or-sleep-transition.
+
+LatencyBound (ARCH §28 I-17, slice × N) is a liveness property requiring weak fairness; deferred to a Phase 2 close refinement of `scheduler.tla`.
+
+### Trip-hazards
+
+- **`sched()` deadlock detection assumes UP-no-other-CPU**. With `prev->state == SLEEPING` AND empty run tree, `sched()` extincts (`sched: deadlock — current is blocking, no runnable peer`). At v1.0 P2-Bc single-CPU UP this is correct (only an IRQ could wake, IRQs are masked). P2-C lands SMP idle-WFI: an idle CPU with no runnable thread parks at WFI, gets woken via IPI / IRQ — extinction narrows to genuine deadlocks.
+
+- **`thread_trampoline`'s IRQ unmask is asymmetric**: the FIRST entry to a thread unmasks; subsequent re-entries inherit DAIF from cpu_switch_context's saved state (which sched()'s irqrestore correctly handles). Don't add a second irqsave/irqrestore around the trampoline body — it would conflict with sched()'s discipline.
+
+- **`g_need_resched` is `volatile bool`, not atomic**. UP single-CPU at v1.0: no race (writer is the timer IRQ handler, reader is the same CPU's preempt_check_irq, both serialized via the IRQ mask). P2-C SMP needs `_Atomic(bool)` with release/acquire ordering for cross-CPU need_resched signals (or a per-CPU need_resched + IPI_RESCHED).
+
+- **`sched_tick` skips when `t->state != THREAD_RUNNING`** — defensive: if current's state somehow became RUNNABLE/SLEEPING between the start of an IRQ and sched_tick's read, don't decrement (the next sched_tick will catch the corrected state). This shouldn't happen at v1.0 UP (the only writers to current's state are sched() itself and sleep/wakeup, both with IRQ masked) but the defensive read is cheap.
+
+- **Slice replenish happens on RUNNABLE → RUNNING transition** (sched()'s pick-next path). NOT on `ready()` — a thread that's been ready'd but not yet picked retains whatever slice_remaining it had previously. This is correct: the slice represents "remaining time this quantum" and a thread that hasn't run yet hasn't consumed any.
 
 ---
 

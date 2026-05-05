@@ -91,6 +91,7 @@ void thread_init(void) {
     g_kthread->proc   = kproc();
     g_kthread->weight = 1;
     g_kthread->band   = SCHED_BAND_NORMAL;
+    g_kthread->slice_remaining = THREAD_DEFAULT_SLICE_TICKS;
 
     thread_link_into_proc(g_kthread, kproc());
     g_thread_created++;
@@ -136,6 +137,7 @@ struct Thread *thread_create(struct Proc *proc, void (*entry)(void)) {
     t->kstack_size = THREAD_KSTACK_SIZE;
     t->weight      = 1;
     t->band        = SCHED_BAND_NORMAL;
+    t->slice_remaining = THREAD_DEFAULT_SLICE_TICKS;
 
     // Lay out the initial saved context so the first cpu_switch_context
     // into this thread lands at thread_trampoline, which blr's entry.

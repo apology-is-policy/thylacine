@@ -33,6 +33,12 @@ struct Thread;
 #define SCHED_BAND_IDLE         2u
 #define SCHED_BAND_COUNT        3u
 
+// Default scheduler slice in ticks. At 1000 Hz this is 6 ms, matching
+// Linux EEVDF's default `sched_latency_ns / sched_min_granularity` ~=
+// 6 ms. Per ARCH §8.2 — slice_size is tunable at /ctl/sched/slice-size
+// post-Phase 4 (when /ctl/ exists); v1.0 P2-Bc bakes the default.
+#define THREAD_DEFAULT_SLICE_TICKS  6
+
 // Initialize the scheduler. Must be called AFTER thread_init: the kernel
 // thread is the boot CPU's initial current_thread and must be in the
 // scheduler's accounting before sched() can pick alternatives.
@@ -79,5 +85,23 @@ unsigned sched_runnable_count_band(unsigned band);
 // run tree doesn't carry a dangling pointer. Idempotent: safe to call
 // on an already-not-in-tree thread.
 void sched_remove_if_runnable(struct Thread *t);
+
+// P2-Bc: scheduler tick. Called from the timer IRQ handler on every
+// fire (1000 Hz at v1.0). Decrements current_thread's slice_remaining;
+// when it drops to ≤ 0, sets the global need_resched flag so that
+// preempt_check_irq triggers a context switch on IRQ-return. Cheap
+// fast-path when sched_init hasn't run yet (silent no-op) — boot
+// sequence safety.
+void sched_tick(void);
+
+// P2-Bc: preemption check, called from vectors.S after the IRQ
+// handler has returned but before .Lexception_return restores the
+// interrupted thread's context. If need_resched is set + the
+// scheduler is initialized + current_thread is valid + IRQs are
+// safely maskable, transitions current → RUNNABLE + advances vd_t
+// + picks next + cpu_switch_context. On resume, returns up the
+// stack to vectors.S which then runs KERNEL_EXIT and erets the
+// (formerly preempted) thread back to its IRQed instruction.
+void preempt_check_irq(void);
 
 #endif // THYLACINE_SCHED_H

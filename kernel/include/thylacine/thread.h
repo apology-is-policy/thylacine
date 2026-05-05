@@ -93,11 +93,25 @@ struct Thread {
     // the wait condition. Future poll/futex (Phase 5) generalize to a
     // wait-list of (Rendez, condition) tuples; for now single-Rendez.
     struct Rendez     *rendez_blocked_on;
+
+    // P2-Bc: scheduler-tick preemption. `slice_remaining` is the
+    // number of remaining timer ticks before this thread's slice
+    // expires. Replenished to THREAD_DEFAULT_SLICE_TICKS on every
+    // RUNNABLE → RUNNING transition (sched() pick-next path).
+    // Decremented by sched_tick() (called from the timer IRQ
+    // handler); when ≤ 0, sets g_need_resched so preempt_check_irq
+    // triggers a context switch on IRQ-return.
+    //
+    // Read/written from IRQ context (sched_tick) AND from sched()
+    // (replenish on pick + decrement-check from preempt_check_irq).
+    // IRQ-mask discipline in sched() prevents the IRQ handler from
+    // racing with the replenish.
+    s64                slice_remaining;
 };
 
-_Static_assert(sizeof(struct Thread) == 208,
-               "struct Thread size pinned at 208 bytes (P2-Bb: P2-Ba "
-               "baseline 200 + rendez_blocked_on 8). Adding a field grows "
+_Static_assert(sizeof(struct Thread) == 216,
+               "struct Thread size pinned at 216 bytes (P2-Bc: P2-Bb "
+               "baseline 208 + slice_remaining 8). Adding a field grows "
                "the SLUB cache; update this assert deliberately so the "
                "change is intentional.");
 _Static_assert(__builtin_offsetof(struct Thread, magic) == 0,

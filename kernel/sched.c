@@ -48,6 +48,17 @@ static s64 g_vd_counter = 1;
 // One-shot init flag.
 static bool g_sched_initialized = false;
 
+// P2-Bc: preemption signal. Set by sched_tick() (timer IRQ handler)
+// when the current thread's slice expires. Cleared by
+// preempt_check_irq() right before the actual sched() call.
+//
+// `volatile` because it's read in C without an explicit barrier
+// across the preempt-check / sched call site; the IRQ handler is
+// the writer; the reader is the IRQ-return path. UP at v1.0 P2-Bc:
+// no SMP race; volatile suffices. P2-C SMP needs an atomic_bool with
+// release/acquire.
+static volatile bool g_need_resched = false;
+
 void sched_init(void) {
     if (g_sched_initialized) extinction("sched_init called twice");
     if (!current_thread()) extinction("sched_init before thread_init");
@@ -128,13 +139,35 @@ void ready(struct Thread *t) {
                                   extinction("ready of non-RUNNABLE Thread");
     if (t->band >= SCHED_BAND_COUNT)
                                   extinction("ready: invalid band");
+
+    // P2-Bc: IRQ-mask discipline. The run tree is mutated below;
+    // a timer IRQ firing here would re-enter preempt_check_irq →
+    // sched() and observe the half-mutated tree. Mask IRQs for the
+    // insert. (Same rationale as sched().)
+    irq_state_t s = spin_lock_irqsave(NULL);
+
     if (in_run_tree(t))           extinction("ready of already-runnable Thread");
 
     insert_sorted(t);
+
+    spin_unlock_irqrestore(NULL, s);
 }
 
 void sched(void) {
     if (!g_sched_initialized) extinction("sched() before sched_init");
+
+    // P2-Bc: IRQ-mask discipline. sched() mutates shared state
+    // (run tree, current_thread via TPIDR_EL1, vd_t counter) — a
+    // timer IRQ firing inside this critical section would re-enter
+    // preempt_check_irq → sched(), corrupting the run tree. Mask
+    // IRQs locally for the duration; the saved DAIF is restored on
+    // resumption (after the eventual switch-back propagates the
+    // saved state through cpu_switch_context).
+    //
+    // The lock argument is NULL — we're not contending on a shared
+    // lock (UP single-CPU at v1.0); the IRQ mask is what we need.
+    // P2-C SMP turns the spin part real with a per-CPU run-tree lock.
+    irq_state_t s = spin_lock_irqsave(NULL);
 
     struct Thread *prev = current_thread();
     if (!prev) extinction("sched() with no current thread");
@@ -169,7 +202,14 @@ void sched(void) {
             // runnable thread parks at WFI, gets woken by IPI / IRQ.
             extinction("sched: deadlock — current is blocking, no runnable peer");
         }
-        // Yield path with no runnable peer: keep prev running.
+        // Yield path with no runnable peer: keep prev running. Refill
+        // slice — the rationale for this sched() call (pre-emption,
+        // explicit yield) was that prev's slice expired or yield was
+        // requested; either way, give prev a fresh slice now that
+        // it's the only runnable thread and we'd otherwise have to
+        // immediately preempt-back-into-it.
+        prev->slice_remaining = THREAD_DEFAULT_SLICE_TICKS;
+        spin_unlock_irqrestore(NULL, s);
         return;
     }
 
@@ -178,14 +218,15 @@ void sched(void) {
         // under SMP race (cross-CPU wakeup re-inserted prev into a
         // runqueue between drop-Rendez-lock and entering sched).
         // Don't switch to self — re-insert and let the next sched()
-        // try again. UP: should not happen at v1.0 P2-Bb (see SMP
-        // race trip-hazard).
+        // try again. UP: should not happen at v1.0 (see SMP race
+        // trip-hazard).
         if (prev->state == THREAD_RUNNING) {
             // Prev was yielding; it's still RUNNING. pick_next won't
             // return prev unless prev is RUNNABLE (in some runqueue).
             // RUNNING but in a runqueue is the SMP race symptom.
             insert_sorted(prev);
         }
+        spin_unlock_irqrestore(NULL, s);
         return;
     }
 
@@ -200,6 +241,10 @@ void sched(void) {
     // the run tree. wakeup()/ready() will re-insert SLEEPING; EXITING
     // never returns and gets reaped at Phase 2 close.
 
+    // Replenish next's slice on RUNNABLE → RUNNING transition. The
+    // slice is consumed during the running quantum; sched_tick()
+    // decrements it on each timer IRQ.
+    next->slice_remaining = THREAD_DEFAULT_SLICE_TICKS;
     next->state = THREAD_RUNNING;
     set_current_thread(next);
 
@@ -209,7 +254,10 @@ void sched(void) {
     // were set by whichever peer transitioned us out of SLEEPING (via
     // wakeup → ready) or yielded back (via sched picking us). prev is
     // no longer in the run tree (the peer's pick_next removed it
-    // before switching).
+    // before switching). prev's slice was replenished by whichever
+    // peer's sched() picked prev (the same code path above, in their
+    // frame).
+    spin_unlock_irqrestore(NULL, s);
 }
 
 void sched_remove_if_runnable(struct Thread *t) {
@@ -319,6 +367,77 @@ void sleep(struct Rendez *r, int (*cond)(void *arg), void *arg) {
 
     spin_unlock_irqrestore(&r->lock, s);
 }
+
+// ============================================================================
+// Scheduler-tick preemption (P2-Bc).
+//
+// The timer IRQ fires at fixed Hz (1000 at v1.0). Each fire:
+//   1. timer_irq_handler increments g_ticks + reloads the timer.
+//   2. timer_irq_handler calls sched_tick() (defined here).
+//   3. sched_tick() decrements current's slice_remaining; if ≤ 0,
+//      sets g_need_resched and replenishes the slice (so the
+//      decrement doesn't continually fire need_resched on every
+//      subsequent tick before preempt_check_irq runs).
+//   4. The vectors.S IRQ slot, after exception_irq_curr_el returns,
+//      calls preempt_check_irq() (also defined here).
+//   5. preempt_check_irq() sees g_need_resched, clears it, calls
+//      sched(). sched() saves current's context (the "C-stack" state
+//      of preempt_check_irq's invocation, including the bl-return
+//      address into vectors.S), switches to next.
+//   6. When the formerly-current thread is eventually resumed, its
+//      cpu_switch_context's ret returns into preempt_check_irq's
+//      caller frame, which returns to vectors.S, which runs
+//      .Lexception_return → KERNEL_EXIT → eret. The thread continues
+//      from exactly where it was IRQed.
+//
+// The atomicity of "decrement slice + maybe-set-need-resched" + "clear
+// need-resched + call sched" is provided by the IRQ being serialized
+// (one IRQ in flight at a time per CPU); concurrent SMP CPUs each have
+// their own per-CPU sched_tick (P2-C). Reentrancy of sched() from
+// within sched() is prevented by sched()'s irq_save (set above).
+// ============================================================================
+
+void sched_tick(void) {
+    if (!g_sched_initialized) return;
+
+    struct Thread *t = current_thread();
+    if (!t) return;
+    if (t->magic != THREAD_MAGIC) return;     // boot transient; ignore
+    if (t->state != THREAD_RUNNING) return;    // ignore non-running
+
+    // Decrement; if expired, request preemption + replenish.
+    if (--t->slice_remaining <= 0) {
+        g_need_resched = true;
+        t->slice_remaining = THREAD_DEFAULT_SLICE_TICKS;
+    }
+}
+
+void preempt_check_irq(void) {
+    // Fast path: scheduler isn't initialized OR no preemption pending.
+    // Every IRQ-return runs this; keep it cheap.
+    if (!g_need_resched) return;
+    if (!g_sched_initialized) return;
+
+    struct Thread *t = current_thread();
+    if (!t) return;                             // pre-thread_init IRQ
+    if (t->magic != THREAD_MAGIC) return;       // corruption — defer
+
+    // Clear the flag BEFORE sched() so a re-fire-during-sched (which
+    // can't happen at UP because IRQs are masked, but defensive depth
+    // for SMP) doesn't double-trigger.
+    g_need_resched = false;
+
+    // sched() does its own irqsave/irqrestore around the run-tree
+    // mutation. We're called from vectors.S IRQ-return path with IRQs
+    // masked already (the vector was entered with masking implicit).
+    // sched()'s save/restore preserves that — the IRQ stays masked
+    // through the cpu_switch_context, then is restored by
+    // .Lexception_return's KERNEL_EXIT eret to whatever the IRQed
+    // thread had originally.
+    sched();
+}
+
+// ============================================================================
 
 int wakeup(struct Rendez *r) {
     if (!r) extinction("wakeup(NULL rendez)");

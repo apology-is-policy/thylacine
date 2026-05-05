@@ -21,6 +21,7 @@
 #include "gic.h"
 
 #include <thylacine/extinction.h>
+#include <thylacine/sched.h>
 #include <thylacine/types.h>
 
 // Compile-time sanity: PPI 14 → INTID 30 (architectural per ARMv8 ARM
@@ -130,6 +131,11 @@ void timer_irq_handler(u32 intid, void *arg) {
     g_ticks++;
     write_cntp_tval_el0(g_reload);
     // CNTP_CTL stays at ENABLE; no need to rewrite.
+
+    // P2-Bc: scheduler tick. Decrements current's slice; sets
+    // need_resched if expired so preempt_check_irq triggers a
+    // context switch on IRQ-return. No-op before sched_init.
+    sched_tick();
 }
 
 // ---------------------------------------------------------------------------
