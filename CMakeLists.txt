@@ -20,7 +20,7 @@ project(thylacine
 )
 
 # Phase tag — bumped per phase exit. Influences boot banner.
-set(THYLACINE_PHASE "P2-Ca" CACHE STRING "Current implementation phase")
+set(THYLACINE_PHASE "P2-Cb" CACHE STRING "Current implementation phase")
 
 # THYLACINE_SANITIZE — opt-in sanitizer build (P1-I).
 #

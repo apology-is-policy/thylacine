@@ -26,9 +26,27 @@ extern char _kernel_start[];
 extern void secondary_entry(void);
 
 // Per-CPU online flag. Set by secondary_entry's trampoline (asm strb)
-// before the WFI loop. Read by smp_init's wait loop with `volatile` to
-// force the compiler to re-read each iteration.
+// before pac_apply / mmu_program / branch-to-high-VA. Earliest signal
+// that "trampoline reached + idx valid + per-CPU stack assigned."
 volatile u8 g_cpu_online[DTB_MAX_CPUS];
+
+// P2-Cb: per-CPU "fully initialized at high VA" flag. Set by
+// per_cpu_main after VBAR_EL1 + TPIDR_EL1 are configured. The
+// stricter "alive" signal — secondary's PAC + MMU work and the C
+// runtime is reachable.
+volatile u8 g_cpu_alive[DTB_MAX_CPUS];
+
+// P2-Cb: PAC keys (8 u64 halves). See smp.h for layout. Populated by
+// pac_derive_keys (asm in start.S, called once by primary); consumed
+// by pac_apply_this_cpu (asm in start.S, called by every CPU).
+u64 g_pac_keys[8];
+
+// P2-Cb: per-secondary boot stacks. 7 secondaries × 16 KiB = 112 KiB BSS.
+// 16-byte aligned (AAPCS64 SP requirement). Used by secondary_entry
+// asm trampoline; later (P2-Cd+) replaced by per-CPU idle thread
+// stacks once the scheduler picks them.
+__attribute__((aligned(16)))
+char g_secondary_boot_stacks[DTB_MAX_CPUS - 1][SECONDARY_STACK_SIZE];
 
 static unsigned g_cpu_count;
 static unsigned g_cpu_online_count;
@@ -73,14 +91,14 @@ static const char *psci_status_str(int status) {
     }
 }
 
-// Wait for g_cpu_online[idx] to become true with timeout. Returns true
-// if it came online; false on timeout. The polling loop reads through
-// `volatile` so the compiler re-fetches each iteration; the explicit
-// `dmb ish` ensures the read happens after any pending inner-shareable
-// store (the secondary's strb + dsb sy).
-static bool wait_for_online(unsigned idx, u64 timeout_ticks) {
+// Wait for `flag[idx]` to become true with timeout. Returns true if
+// the flag was observed; false on timeout. The polling loop reads
+// through `volatile` so the compiler re-fetches each iteration; the
+// explicit `dmb ish` ensures the read happens after any pending
+// inner-shareable store from the secondary.
+static bool wait_for_flag(volatile u8 *flag, u64 timeout_ticks) {
     u64 start = timer_get_ticks();
-    while (!g_cpu_online[idx]) {
+    while (!*flag) {
         if ((timer_get_ticks() - start) > timeout_ticks) return false;
         __asm__ __volatile__("dmb ish\n" ::: "memory");
         // No WFI here — IRQs may not be live; we want to spin so we
@@ -99,8 +117,10 @@ unsigned smp_init(void) {
         return 0;
     }
 
-    // Mark boot CPU online unconditionally.
+    // Mark boot CPU online + alive unconditionally — boot ran the
+    // full init via boot_main; both flags are conceptually true.
     g_cpu_online[0] = 1;
+    g_cpu_alive[0]  = 1;
     g_cpu_online_count = 1;
 
     // PSCI required for secondary bring-up.
@@ -124,14 +144,23 @@ unsigned smp_init(void) {
         int rc = psci_cpu_on(mpidr, entry_pa, /*context_id=*/(u64)i);
 
         if (rc == 0 || rc == -4 /*ALREADY_ON*/) {
-            // Wait for the trampoline to set the online flag.
-            if (wait_for_online(i, SMP_BRINGUP_TIMEOUT_TICKS)) {
+            // Wait for the secondary to reach per_cpu_main (alive)
+            // — the stricter "fully initialized at high VA" signal.
+            // The earlier g_cpu_online flag (set in trampoline) means
+            // "trampoline ran"; we want both, but watching alive
+            // catches PAC/MMU/VBAR failures that would leave the
+            // secondary stuck mid-init.
+            if (wait_for_flag(&g_cpu_alive[i], SMP_BRINGUP_TIMEOUT_TICKS)) {
                 brought_up++;
                 g_cpu_online_count++;
             } else {
                 uart_puts("  smp: cpu ");
                 uart_putdec((u64)i);
-                uart_puts(" PSCI ok but online-flag timed out\n");
+                if (g_cpu_online[i]) {
+                    uart_puts(" trampoline reached but per_cpu_main timed out (PAC/MMU/VBAR fail?)\n");
+                } else {
+                    uart_puts(" PSCI ok but trampoline never ran\n");
+                }
             }
         } else {
             uart_puts("  smp: cpu ");
@@ -151,4 +180,65 @@ unsigned smp_cpu_count(void) {
 
 unsigned smp_cpu_online_count(void) {
     return g_cpu_online_count;
+}
+
+// ---------------------------------------------------------------------------
+// per_cpu_main (P2-Cb).
+//
+// Reached at the kernel's high VA from the secondary_entry asm
+// trampoline (start.S) AFTER:
+//   - per-CPU boot stack assigned (via SP).
+//   - PAC keys loaded (pac_apply_this_cpu).
+//   - MMU enabled with primary's tables (mmu_program_this_cpu).
+//   - Long-branch via kaslr_high_va_addr to this function.
+//
+// Sets up the remaining per-CPU state:
+//   1. VBAR_EL1 — exception vector table (shared with primary at v1.0;
+//      P2-Cd may give each CPU its own routing table for IRQ affinity).
+//   2. TPIDR_EL1 — per-CPU current_thread pointer. NULL at P2-Cb (no
+//      per-CPU run tree yet); P2-Cd or later assigns each CPU's idle
+//      thread.
+//   3. Flips g_cpu_alive[idx] — the "fully initialized" signal that
+//      smp_init's wait loop watches for.
+//
+// Then enters an idle WFI loop indefinitely. With IRQs masked (PSCI
+// default), nothing wakes the CPU — at P2-Cd when GIC SGIs land, the
+// boot CPU can send IPI_RESCHED to wake a secondary into useful work.
+// ---------------------------------------------------------------------------
+
+extern char _exception_vectors[];
+
+__attribute__((noreturn))
+void per_cpu_main(int cpu_idx) {
+    // VBAR_EL1 — install the kernel exception vector table. ISB so
+    // any subsequent exception sees the new VBAR.
+    u64 vbar = (u64)(uintptr_t)_exception_vectors;
+    __asm__ __volatile__(
+        "msr vbar_el1, %0\n"
+        "isb\n"
+        :: "r"(vbar) : "memory"
+    );
+
+    // TPIDR_EL1 — per-CPU current_thread pointer. NULL at P2-Cb;
+    // P2-Cd or later sets it to the per-CPU idle thread when the
+    // scheduler is per-CPU.
+    __asm__ __volatile__("msr tpidr_el1, xzr" ::: "memory");
+    __asm__ __volatile__("msr tpidr_el0, xzr" ::: "memory");
+
+    // Publish the "fully alive" flag. smp_init's wait loop watches
+    // this. With MMU on, the store goes through cacheable memory;
+    // dsb sy ensures global visibility.
+    if (cpu_idx >= 0 && cpu_idx < (int)DTB_MAX_CPUS) {
+        g_cpu_alive[cpu_idx] = 1;
+    }
+    __asm__ __volatile__("dsb sy" ::: "memory");
+
+    // Idle. WFI parks the CPU until an event (timer IRQ, SGI). At
+    // P2-Cb IRQs are masked (PSCI default; we never unmask) — so WFI
+    // sleeps until reset. P2-Cd lands SGI infrastructure + per-CPU
+    // IRQ routing; this loop becomes the secondary's idle dispatch
+    // point (waking on IPI_RESCHED → calling sched()).
+    for (;;) {
+        __asm__ __volatile__("wfi" ::: "memory");
+    }
 }

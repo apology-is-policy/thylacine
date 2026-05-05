@@ -249,29 +249,14 @@ _real_start:
     // doesn't implement FEAT_PAuth / FEAT_BTI — writing 1 is a NOP
     // there. So this sequence is zero-cost on ARMv8.0 and unlocks the
     // hardening on ARMv8.3+ / 8.5+.
-    mrs     x0, cntpct_el0
-    msr     apiakeyhi_el1, x0
-    ror     x1, x0, #13
-    msr     apiakeylo_el1, x1
-    msr     apibkeyhi_el1, x1
-    ror     x2, x1, #17
-    msr     apibkeylo_el1, x2
-    msr     apdakeyhi_el1, x2
-    ror     x3, x2, #19
-    msr     apdakeylo_el1, x3
-    msr     apdbkeyhi_el1, x3
-    ror     x4, x3, #23
-    msr     apdbkeylo_el1, x4
-
-    // SCTLR_EL1: set EnIA (31), EnIB (30), EnDA (27), EnDB (13), BT0 (35).
-    //   bits = 0x00000008_c8002000
-    mrs     x0, sctlr_el1
-    movz    x1, #0x2000, lsl #0
-    movk    x1, #0xc800, lsl #16
-    movk    x1, #0x0008, lsl #32
-    orr     x0, x0, x1
-    msr     sctlr_el1, x0
-    isb
+    // P2-Cb: refactored — keys derived once on primary, stored in
+    // g_pac_keys[8] (BSS), then applied by pac_apply_this_cpu (also
+    // called by secondary CPU bring-up so all CPUs use IDENTICAL
+    // PAC keys). Cross-CPU PAC consistency is required for thread
+    // migration: a thread's signed return address on its kstack
+    // must auth-validate against APIA on whichever CPU resumes it.
+    bl      pac_derive_keys
+    bl      pac_apply_this_cpu
 
     // 7. KASLR. Choose a randomized slide from DTB seed (or hardware
     //    counter fallback), apply any R_AARCH64_RELATIVE relocations
@@ -338,7 +323,96 @@ _hang:
 .size _hang, . - _hang
 
 // ---------------------------------------------------------------------------
-// secondary_entry — PSCI bring-up trampoline (P2-Ca).
+// PAC key management (P2-Cb refactor).
+//
+// At v1.0 P2-Cb the PAC keys are derived ONCE by the primary CPU from
+// CNTPCT_EL0 + a ROR chain, stored in `g_pac_keys[8]` (BSS), and then
+// applied to AP*KEY*_EL1 on every CPU (primary first, then each
+// secondary as it comes up via PSCI). Cross-CPU PAC key consistency
+// is REQUIRED for thread migration (P2-Ce work-stealing): a thread's
+// signed return address on its kstack must auth-validate against
+// APIA on whichever CPU resumes it. Per-CPU random keys would break
+// migration.
+//
+// Both functions are LEAF (no bl, no callee-saved register usage,
+// no stack frame). They are safe to call before/without paciasp/
+// autiasp emitted by the C compiler — pac_apply_this_cpu in
+// particular is what initializes the keys, so no caller can rely on
+// PAC working before its return.
+//
+// Memory layout — `g_pac_keys` is u64[8]:
+//   [0]  apia_hi   [1]  apia_lo
+//   [2]  apib_hi   [3]  apib_lo
+//   [4]  apda_hi   [5]  apda_lo
+//   [6]  apdb_hi   [7]  apdb_lo
+//
+// (declared in kernel/smp.c so the BSS allocation is in one place
+// with the other SMP globals.)
+// ---------------------------------------------------------------------------
+
+.section ".text", "ax"
+.globl pac_derive_keys
+.type pac_derive_keys, %function
+pac_derive_keys:
+    bti     c                       // safe landing for blr/bl
+
+    // Derive 8 key halves from CNTPCT_EL0 via ROR chain.
+    mrs     x0, cntpct_el0
+    ror     x1, x0, #13
+    ror     x2, x1, #17
+    ror     x3, x2, #19
+    ror     x4, x3, #23
+
+    // Store to g_pac_keys[8] via PIC.
+    adrp    x9, g_pac_keys
+    add     x9, x9, :lo12:g_pac_keys
+    stp     x0, x1, [x9, #0]        // apia hi/lo
+    stp     x1, x2, [x9, #16]       // apib hi/lo
+    stp     x2, x3, [x9, #32]       // apda hi/lo
+    stp     x3, x4, [x9, #48]       // apdb hi/lo
+
+    ret
+.size pac_derive_keys, . - pac_derive_keys
+
+.globl pac_apply_this_cpu
+.type pac_apply_this_cpu, %function
+pac_apply_this_cpu:
+    bti     c                       // safe landing
+
+    adrp    x9, g_pac_keys
+    add     x9, x9, :lo12:g_pac_keys
+
+    ldp     x0, x1, [x9, #0]
+    msr     apiakeyhi_el1, x0
+    msr     apiakeylo_el1, x1
+
+    ldp     x2, x3, [x9, #16]
+    msr     apibkeyhi_el1, x2
+    msr     apibkeylo_el1, x3
+
+    ldp     x4, x5, [x9, #32]
+    msr     apdakeyhi_el1, x4
+    msr     apdakeylo_el1, x5
+
+    ldp     x6, x7, [x9, #48]
+    msr     apdbkeyhi_el1, x6
+    msr     apdbkeylo_el1, x7
+
+    // SCTLR_EL1: set EnIA (31), EnIB (30), EnDA (27), EnDB (13), BT0 (35).
+    //   bits = 0x0000_0008_c800_2000
+    mrs     x0, sctlr_el1
+    movz    x1, #0x2000, lsl #0
+    movk    x1, #0xc800, lsl #16
+    movk    x1, #0x0008, lsl #32
+    orr     x0, x0, x1
+    msr     sctlr_el1, x0
+    isb
+
+    ret
+.size pac_apply_this_cpu, . - pac_apply_this_cpu
+
+// ---------------------------------------------------------------------------
+// secondary_entry — PSCI bring-up trampoline (P2-Ca; extended at P2-Cb).
 //
 // Reached when the primary issues PSCI_CPU_ON for a secondary CPU,
 // pointing the entry-point arg at this label's PA. The secondary
@@ -349,31 +423,31 @@ _hang:
 //   - SP undefined.
 //   - EL1.
 //
-// At P2-Ca the trampoline is intentionally minimal — it flips the
-// per-CPU `g_cpu_online[idx]` flag and parks at WFI. No MMU enable,
-// no PAC init, no per-CPU exception stack, no vector table. Those
-// land in subsequent P2-C sub-chunks. Secondaries here are observably
-// alive (primary sees the flag) but cannot execute kernel code.
+// P2-Cb extension: the trampoline now does full per-CPU init —
+//   1. Validate idx in [1, DTB_MAX_CPUS).
+//   2. Set SP from g_secondary_boot_stacks[idx-1] (16 KiB per CPU).
+//   3. Flip g_cpu_online[idx] (early "trampoline reached" signal).
+//   4. bl pac_apply_this_cpu — load shared keys + enable PAC.
+//   5. bl mmu_program_this_cpu — enable MMU using primary's tables.
+//   6. Long-branch via kaslr_high_va_addr to per_cpu_main(idx) at
+//      the kernel's high VA. per_cpu_main sets VBAR_EL1, TPIDR_EL1,
+//      flips g_cpu_alive[idx] (the "fully initialized" signal), and
+//      enters an idle WFI loop.
 //
-// Cache discipline: secondary writes the flag with caches off (MMU
-// off → all data accesses Device-nGnRnE per ARM ARM B2.7). The store
-// reaches memory directly. dsb sy guarantees completion before the
-// WFI loop. Primary reads the flag through TTBR1's Normal-WB
-// cacheable mapping; cache coherence on QEMU virt is automatic in
-// the inner-shareable domain. On real hardware where coherency might
-// require explicit ops, primary's read uses `volatile` + a memory
-// barrier per iteration of the polling loop (see kernel/smp.c).
+// PSCI bring-up is serialized by smp_init (one secondary at a time),
+// so the per-CPU stack assignment is race-free. PAC keys must be
+// initialized BEFORE bl mmu_program_this_cpu because the C function
+// emits paciasp/autiasp; without keys, autiasp would fail.
 //
-// The trampoline lives in .text so it's part of the kernel image's
-// loaded PA range. Primary computes its PA via:
-//   secondary_entry_pa = kaslr_kernel_pa_start() +
-//                        ((u64)secondary_entry - (u64)_kernel_start)
-// and passes that to PSCI_CPU_ON's entry-point arg.
+// PIC discipline: all symbols (g_cpu_online, g_secondary_boot_stacks,
+// per_cpu_main, etc.) reachable via adrp + lo12 because PC = PA at
+// trampoline entry and all symbols are in the same kernel image
+// (the offset between PC and any kernel symbol is link-time-constant).
 //
-// PIC discipline: g_cpu_online address is reached via adrp + lo12
-// (PC-relative). PC = PA at trampoline entry. g_cpu_online is in
-// BSS (kernel image). Their relative offset is constant (link-time
-// equals run-time) so PC-relative addressing produces the right PA.
+// kaslr_high_va_addr: a leaf C function that takes a PA, returns the
+// runtime high VA after the KASLR slide. Safe to call at low PA via
+// PIC; primary already populated the slide globals before secondaries
+// come up.
 // ---------------------------------------------------------------------------
 .section ".text", "ax"
 .globl secondary_entry
@@ -393,26 +467,55 @@ secondary_entry:
     cmp     x0, x9
     b.ge    secondary_bad
 
-    // Address of g_cpu_online via PC-relative.
+    // Save idx in a callee-saved register — survives the bl
+    // pac_apply_this_cpu / bl mmu_program_this_cpu calls.
+    mov     x19, x0
+
+    // Set SP from g_secondary_boot_stacks[idx-1].
+    //   base = &g_secondary_boot_stacks[idx-1]
+    //   top  = base + SECONDARY_STACK_SIZE (16384)
+    sub     x20, x19, #1                    // idx0 = idx - 1
+    adrp    x9, g_secondary_boot_stacks
+    add     x9, x9, :lo12:g_secondary_boot_stacks
+    mov     x10, #16384                     // SECONDARY_STACK_SIZE
+    madd    x9, x10, x20, x9                // base = stacks + idx0 * 16384
+    add     x9, x9, x10                     // top = base + 16384
+    mov     sp, x9
+
+    // Flip g_cpu_online[idx] — early "trampoline reached" signal
+    // (primary's smp_init also waits for g_cpu_alive set in per_cpu_main).
     adrp    x9, g_cpu_online
     add     x9, x9, :lo12:g_cpu_online
-
-    // Compute g_cpu_online[idx]. Each entry is 1 byte (u8).
-    add     x9, x9, x0
-
-    // Write 1 (online). Caches off → store goes direct to memory.
+    add     x9, x9, x19
     mov     w10, #1
     strb    w10, [x9]
-
-    // Push the write through to PoC + globally observable.
     dsb     sy
 
-    // Park at WFI. Any IRQ would wake us, but PSTATE.DAIF.I is set
-    // (PSCI default) so IRQs don't deliver — WFI sleeps until an
-    // event (sev / unmasked-IRQ / reset). On QEMU virt this loop
-    // sleeps forever in the absence of further wake signals, which is
-    // exactly the intended behavior at P2-Ca (P2-Cb adds per-CPU
-    // sched bringing them back into use).
+    // Apply PAC keys (primary already derived + stored to g_pac_keys).
+    // Leaf asm function — no paciasp emission, safe to call before
+    // PAC is enabled on this CPU.
+    bl      pac_apply_this_cpu
+
+    // Enable MMU using primary's already-built page tables.
+    // mmu_program_this_cpu is a C function; PAC is now enabled so
+    // its paciasp/autiasp work correctly.
+    bl      mmu_program_this_cpu
+
+    // Long-branch to per_cpu_main(idx) at the kernel's high VA.
+    //   1. Get PA of per_cpu_main via PC-relative adrp+add.
+    //   2. Convert to high VA via kaslr_high_va_addr(pa).
+    //   3. Move idx to x0 (per_cpu_main first arg).
+    //   4. blr to high VA.
+    adrp    x0, per_cpu_main
+    add     x0, x0, :lo12:per_cpu_main
+    bl      kaslr_high_va_addr              // x0 = high VA
+    mov     x21, x0                         // x21 = high VA (callee-saved)
+
+    mov     x0, x19                         // x0 = idx (per_cpu_main arg)
+    blr     x21                             // call high-VA per_cpu_main(idx)
+
+    // per_cpu_main is noreturn. Defensive halt at low PA (TTBR0
+    // identity-mapped, so accessible even with MMU on).
 1:  wfi
     b       1b
 

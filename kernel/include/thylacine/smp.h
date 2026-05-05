@@ -31,6 +31,47 @@
 // trampoline.
 extern volatile u8 g_cpu_online[DTB_MAX_CPUS];
 
+// P2-Cb: per-CPU "fully initialized" flag. Set by per_cpu_main at the
+// kernel's high VA AFTER PAC apply + MMU enable + VBAR install +
+// TPIDR_EL1 set. Distinct from g_cpu_online (which is set in the
+// low-PA trampoline before MMU is on) — together they let smp_init
+// distinguish "trampoline reached" from "fully alive at high VA."
+extern volatile u8 g_cpu_alive[DTB_MAX_CPUS];
+
+// P2-Cb: per-CPU PAC keys (8 u64 halves: apia/apib/apda/apdb hi+lo).
+// Derived ONCE on primary by `pac_derive_keys` (asm in start.S) from
+// CNTPCT_EL0 + ROR chain. Loaded by `pac_apply_this_cpu` (asm in
+// start.S) on every CPU — primary first, then each secondary as it
+// comes up. Cross-CPU PAC consistency is REQUIRED for thread
+// migration: a thread's signed return address on its kstack must
+// auth-validate against APIA on whichever CPU resumes it.
+//
+// Layout (matched by pac_derive_keys / pac_apply_this_cpu in start.S):
+//   [0]  apia_hi   [1]  apia_lo
+//   [2]  apib_hi   [3]  apib_lo
+//   [4]  apda_hi   [5]  apda_lo
+//   [6]  apdb_hi   [7]  apdb_lo
+extern u64 g_pac_keys[8];
+
+// P2-Cb: per-secondary boot stacks. Used by the asm trampoline before
+// per_cpu_main switches to a real per-CPU thread stack (P2-Cd or
+// later when the scheduler picks an idle thread for this CPU).
+//
+// One stack per secondary (DTB_MAX_CPUS - 1 = 7). 16 KiB each. 16-byte
+// aligned (AAPCS64 SP requirement).
+#define SECONDARY_STACK_SIZE  16384u
+extern char g_secondary_boot_stacks[DTB_MAX_CPUS - 1][SECONDARY_STACK_SIZE];
+
+// P2-Cb: per-CPU main. Called from secondary_entry asm trampoline at
+// the kernel's high VA after PAC + MMU + per-CPU stack are live.
+// Sets VBAR_EL1 to the kernel vector table, TPIDR_EL1 to NULL (no
+// per-CPU current thread at P2-Cb), flips g_cpu_alive[idx], and
+// enters an idle WFI loop indefinitely. Noreturn.
+//
+// Visible publicly so the asm trampoline's adrp+add resolves it.
+__attribute__((noreturn))
+void per_cpu_main(int cpu_idx);
+
 // Bring up all secondary CPUs (indices 1..dtb_cpu_count()-1) via
 // PSCI_CPU_ON. Waits for each to set its online flag with a per-CPU
 // timeout. Logs each bring-up via uart.

@@ -32,21 +32,28 @@ void test_smp_bringup_smoke(void) {
     TEST_EXPECT_EQ((u64)online, (u64)smp_cpus,
         "all CPUs must be online (PSCI bring-up succeeded)");
 
-    // Boot CPU's online flag set by smp_init.
+    // Boot CPU's online + alive flags set by smp_init.
     TEST_ASSERT(g_cpu_online[0] == 1,
         "g_cpu_online[0] (boot) must be set");
+    TEST_ASSERT(g_cpu_alive[0] == 1,
+        "g_cpu_alive[0] (boot) must be set");
 
-    // Each secondary's online flag set by its asm trampoline (start.S
-    // secondary_entry: strb + dsb sy). If smp_init returned without
-    // timeout, the flag must be observable here.
+    // Each secondary's online flag set by its asm trampoline; alive
+    // flag set by per_cpu_main at the kernel's high VA after PAC
+    // apply + MMU enable + VBAR install + TPIDR set. Both must be
+    // observable here for smp_init to have returned successfully.
     for (unsigned i = 1; i < smp_cpus; i++) {
         TEST_ASSERT(g_cpu_online[i] == 1,
             "secondary CPU online flag must be set after smp_init");
+        TEST_ASSERT(g_cpu_alive[i] == 1,
+            "secondary CPU alive flag (per_cpu_main reached) must be set");
     }
 
     // Slots beyond cpu_count should remain 0 (BSS default, untouched).
     for (unsigned i = smp_cpus; i < DTB_MAX_CPUS; i++) {
         TEST_EXPECT_EQ((u64)g_cpu_online[i], (u64)0,
             "g_cpu_online beyond cpu_count must remain 0");
+        TEST_EXPECT_EQ((u64)g_cpu_alive[i], (u64)0,
+            "g_cpu_alive beyond cpu_count must remain 0");
     }
 }

@@ -197,15 +197,37 @@ Bare metal will be slower (PSCI calls go to TF-A/EL3 firmware which programs the
 
 ---
 
+## Per-CPU init at high VA (P2-Cb)
+
+P2-Cb extends the trampoline so secondaries reach a real C entry point at the kernel's high VA. After the minimal P2-Ca trampoline (online flag + WFI), the trampoline now:
+
+1. **Sets SP** from `g_secondary_boot_stacks[idx-1]` (16 KiB per secondary, BSS, `aligned(16)`).
+2. **Flips `g_cpu_online[idx]`** with caches off — early "trampoline reached" signal (kept for diagnostic distinction from `g_cpu_alive`).
+3. **`bl pac_apply_this_cpu`** — leaf asm function (start.S) loads `g_pac_keys[8]` into `AP*KEY*_EL1` + sets SCTLR.EnIA/EnIB/EnDA/EnDB/BT0. Cross-CPU PAC consistency is REQUIRED for thread migration (P2-Ce work-stealing): a thread's signed return address on its kstack must auth-validate against APIA on whichever CPU resumes it.
+4. **`bl mmu_program_this_cpu`** — re-uses primary's already-built page tables; programs MAIR/TCR/TTBR0/TTBR1/SCTLR.M.
+5. **Long-branch via `kaslr_high_va_addr` to high VA `per_cpu_main(idx)`**.
+
+`per_cpu_main(int cpu_idx)` (kernel/smp.c) is `noreturn` and:
+1. Sets `VBAR_EL1` to `_exception_vectors` (shared with primary).
+2. Sets `TPIDR_EL1 = NULL` (no per-CPU current thread at P2-Cb; P2-Cd or later assigns per-CPU idle threads).
+3. Flips `g_cpu_alive[cpu_idx] = 1` + `dsb sy` — the "fully initialized" signal.
+4. Enters idle WFI loop indefinitely with IRQs masked.
+
+**PAC keys refactor** (P2-Cb): primary's inline PAC code in start.S replaced with `bl pac_derive_keys` (asm function that derives 8 key halves from `cntpct_el0` + ROR chain, stores to `g_pac_keys[8]` BSS) + `bl pac_apply_this_cpu`. Each CPU calls `pac_apply_this_cpu` to load the same shared keys.
+
+**`mmu_enable` refactor** (P2-Ca, used at P2-Cb): split into `mmu_program_this_cpu` (program MMU registers from already-built tables) + `mmu_enable` (build_page_tables + program). Primary calls `mmu_enable` once; secondaries call `mmu_program_this_cpu` directly.
+
+**`smp_init` watches `g_cpu_alive`** at P2-Cb (was `g_cpu_online` at P2-Ca). The stricter signal catches PAC/MMU/VBAR/TPIDR failures that would leave a secondary stuck mid-init. `g_cpu_online` is still set by the trampoline as a diagnostic for "trampoline reached but per_cpu_main didn't" failures (logged with that specific message).
+
+---
+
 ## Status
 
-Implemented: P2-Ca at `<commit-pending>`. Stubbed: nothing. Deferred:
-- **Per-CPU MMU enable + PAC init**: P2-Cb. Refactors: split `mmu_enable` into build/program (already done at P2-Ca to make this trivial); refactor primary's PAC init to populate globals so secondaries can re-load.
+Implemented: P2-Ca + P2-Cb at `<commit-pending>`. Stubbed: nothing. Deferred:
 - **Per-CPU exception stack**: P2-Cc (closes P1-F shared-stack limitation per phase2-status.md trip-hazard).
-- **Per-CPU vector table install** (VBAR_EL1): P2-Cb (low cost — `msr vbar_el1` of the same address as primary).
-- **Per-CPU TPIDR_EL1 (current_thread per CPU)**: P2-Cb. Each CPU's idle thread becomes its initial current.
-- **Per-CPU run tree + per-CPU sched_init**: P2-Cb.
-- **GIC SGI infrastructure + IPI dispatch**: P2-Cd.
+- **Per-CPU run tree + per-CPU sched_init**: P2-Cb.5 or P2-Cd. Currently `g_run_tree` is global (P2-Ba); secondaries cannot be scheduled to until per-CPU run trees land.
+- **Per-CPU idle thread + scheduler integration**: P2-Cd (idle thread per CPU, sched picks idle when nothing else runnable).
+- **GIC SGI infrastructure + IPI dispatch** (IPI_RESCHED/TLB_FLUSH/HALT/GENERIC): P2-Cd.
 - **Work-stealing**: P2-Ce.
 - **finish_task_switch pattern (closes SMP wait/wake race)**: P2-Cf.
 - **scheduler.tla SMP refinement** (per-CPU runqueues + Steal action + IPI ordering invariant I-18): P2-Cg.
