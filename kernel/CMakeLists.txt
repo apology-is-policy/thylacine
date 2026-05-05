@@ -10,6 +10,7 @@ set(KERNEL_SRCS
     main.c
     extinction.c
     canary.c
+    fault_test.c
     ../arch/arm64/start.S
     ../arch/arm64/uart.c
     ../arch/arm64/mmu.c

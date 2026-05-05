@@ -46,6 +46,37 @@ if(THYLACINE_SANITIZE STREQUAL "undefined")
     add_compile_options(-fsanitize=undefined -fsanitize-trap=undefined)
 endif()
 
+# THYLACINE_FAULT_TEST — deliberate-fault test variant (P1-I).
+#
+# Builds a kernel that deliberately triggers exactly one of the
+# v1.0 hardening protections, so tools/test-fault.sh can verify
+# the protection actually fires under attack. Each variant produces
+# a kernel that EXTINCTIONs with a specific diagnostic message; the
+# script gates pass on observing that message.
+#
+# Empty / unset (default): no fault-test code; production behavior.
+# "canary_smash":  function writes past stack-array bounds → canary
+#                  check at function epilogue → __stack_chk_fail →
+#                  extinction("stack canary mismatch (smashed stack)")
+# "wxe_violation": writes to .text region → permission fault → kernel
+#                  image permission-fault path → extinction("PTE
+#                  violates W^X (kernel image)")
+# "bti_fault":     indirect branch to a target whose first instruction
+#                  is NOT a `bti j/c/jc` marker → ARM v8.5 BTI fires →
+#                  ESR_EL1.EC = 0x0D → extinction("BTI fault (...)")
+#
+# DEFERRED at v1.0 — pac_mismatch: requires forging the saved LR via
+# inline asm; the resulting fault depends on FEAT_FPAC presence and
+# implementation-specific poison-bit patterns. Verified instead via
+# code review + hardening.detect_smoke (which checks SCTLR_EL1.EnIA
+# is set + APIA key is non-zero). Post-v1.0 hardening pass adds the
+# deliberate-fault test alongside the dedicated CSPRNG key derivation.
+set(THYLACINE_FAULT_TEST "" CACHE STRING
+    "Fault-test mode: '', 'canary_smash', 'wxe_violation', 'bti_fault'")
+if(THYLACINE_FAULT_TEST)
+    add_compile_definitions(THYLACINE_FAULT_TEST_${THYLACINE_FAULT_TEST}=1)
+endif()
+
 # Build-time options. Each defaults to off at P1-A and gets enabled at later phases.
 option(THYLACINE_HARDENING_FULL "Enable full hardening (CFI/PAC/MTE/BTI/LSE/canaries) — P1-H+" OFF)
 option(THYLACINE_KASLR          "Enable KASLR — P1-C+" OFF)

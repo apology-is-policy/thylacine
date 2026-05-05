@@ -82,6 +82,7 @@ _Static_assert(__builtin_offsetof(struct exception_context, far) == 0x118,
 #define EC_DATA_ABORT_SAME 0x25
 #define EC_SP_ALIGN        0x26
 #define EC_FP_AARCH64      0x2C
+#define EC_BTI             0x0D     /* Branch Target Exception (FEAT_BTI) */
 #define EC_BRK             0x3C     /* deliberate brk #imm */
 
 // For data / instruction aborts, ISS[5:0] = DFSC / IFSC (fault status code).
@@ -208,6 +209,16 @@ void exception_sync_curr_el(struct exception_context *ctx) {
 
     case EC_PC_ALIGN:
         extinction_with_addr("PC alignment fault", (uintptr_t)ctx->elr);
+
+    case EC_BTI:
+        // ARMv8.5+ Branch Target Exception. Raised when an indirect
+        // branch (br/blr) lands on an instruction that is NOT a `bti
+        // j/c/jc` matching PSTATE.BTYPE, IF the target page has
+        // PTE_GP=1 AND SCTLR_EL1.BT0=1. Both conditions are set up in
+        // start.S + mmu.h at boot. Forging an indirect-call target to
+        // bypass the canary would land here on FEAT_BTI hardware.
+        extinction_with_addr("BTI fault (indirect branch to non-guarded target)",
+                             (uintptr_t)ctx->elr);
 
     case EC_BRK:
         // Deliberate brk #imm — assertion failure or debug trap.

@@ -283,6 +283,13 @@ void boot_main(void) {
 
     uart_puts("  phase: " THYLACINE_PHASE_STRING "\n");
 
+    // P1-I deliberate-fault test (no-op in production builds). When
+    // THYLACINE_FAULT_TEST is set, this triggers exactly one
+    // hardening protection (canary smash / W^X / BTI); the resulting
+    // EXTINCTION: line is what tools/test-fault.sh checks for.
+    extern void fault_test_run(void);
+    fault_test_run();
+
     uart_puts("Thylacine boot OK\n");
 
     // boot_main() must not return. start.S has a fallthrough to _hang
