@@ -173,18 +173,30 @@ What the tests do NOT cover (deferred):
 
 ## Spec cross-reference
 
-`specs/scheduler.tla` at P2-A R4 close models:
+`specs/scheduler.tla` at P2-Cg models:
 - Thread state machine (RUNNING / RUNNABLE / SLEEPING).
 - Per-CPU dispatch with the four state-consistency invariants.
 - Wait/wake atomicity (the canonical missed-wakeup race; `NoMissedWakeup` invariant).
+- **Cross-CPU work-stealing (`Steal`) with `NoDoubleEnqueue` invariant** *(P2-Cg)*.
+- **Per-(src, dst) FIFO IPI delivery (`IPI_Send` / `IPI_Deliver`) with `IPIOrdering` invariant** *(P2-Cg, ARCH §28 I-18)*.
 
 P2-Ba's dispatch implementation conforms to the spec's `Yield(cpu)` action — the spec's "pick from runqueue" via CHOOSE is non-deterministic (any choice satisfies the state-machine invariants). P2-Ba picks min-`vd_t`, which is one valid instantiation of the spec's CHOOSE.
 
-P2-Bc adds the EEVDF-specific spec invariants:
-- `PickIsMinDeadline` — sched picks min `vd_t` among runnable threads in the highest-priority non-empty band.
-- `LatencyBound` (I-17) — delay between RUNNABLE and RUNNING ≤ slice_size × N_runnable.
+P2-Cg lifts the SMP discipline introduced at P2-Ce/Cf to the spec level. Three buggy configs (one per invariant) act as executable documentation of the bug each invariant defends against:
 
-The simplified vd_t advance at P2-Ba (monotonic counter) is sound under the existing state-machine invariants but doesn't yet satisfy the latency bound (which requires the full slice-based math). P2-Bc closes both.
+| Config | Flag | Invariant violated | Counterexample shape |
+|---|---|---|---|
+| `scheduler_buggy.cfg`       | `BUGGY = TRUE`           | `NoMissedWakeup`  | BuggyCheck → WakeAll → BuggySleep splits cond-check from sleep-transition; the wakeup that fired between observes empty waiters, so the buggy waiter sleeps after cond=TRUE. |
+| `scheduler_buggy_steal.cfg` | `BUGGY_STEAL = TRUE`     | `NoDoubleEnqueue` | BuggySteal adds a thread to stealer's runq without removing from victim's — thread is in two runqueues. |
+| `scheduler_buggy_ipi.cfg`   | `BUGGY_IPI_ORDER = TRUE` | `IPIOrdering`     | IPI_Send twice; BuggyIPI_Deliver pops the second-sent IPI first; head of queue ≠ next-expected delivery seq. |
+
+The deferred refinements (post-P2-Cg):
+- `PickIsMinDeadline` — sched picks min `vd_t` among runnable threads in the highest-priority non-empty band.
+- `LatencyBound` (I-17) — delay between RUNNABLE and RUNNING ≤ slice_size × N_runnable. Requires weak fairness; Phase 2 close adds.
+- Full EEVDF math: `vd_t = ve_t + slice × W_total / w_self`. Meaningful with weight ≠ 1 (Phase 5+).
+- Per-(src, type, dst) IPI ordering refinement: today's per-(src, dst) version is sound while all IPIs are equal-priority + same-type. P5+ multi-type IPIs (TLB shootdown, halt, generic) refine to per-type queues.
+
+The simplified vd_t advance at P2-Ba (monotonic counter) is sound under the existing state-machine invariants but doesn't yet satisfy the latency bound (which requires the full slice-based math).
 
 ---
 
@@ -240,8 +252,13 @@ VISION §4 budget: 500 ms. Headroom remains generous.
 | Scheduler-tick preemption (timer IRQ → sched) | P2-Bc |
 | IRQ-mask discipline around `sched()` | P2-Bc |
 | Full EEVDF math (weight, slice_size, latency bound) | P2-Bc |
-| Spec EEVDF refinement (`PickIsMinDeadline`, latency bound) | P2-Bc |
-| SMP per-CPU run trees + work-stealing | P2-C |
+| Spec EEVDF refinement (`PickIsMinDeadline`, latency bound) | Phase 2 close |
+| SMP per-CPU run trees | Landed (P2-Cd) |
+| Cross-CPU IPIs (GIC SGIs, IPI_RESCHED) | Landed (P2-Cdc) |
+| Work-stealing (`try_steal` + finish_task_switch handoff) | Landed (P2-Ce) |
+| `on_cpu` flag + SMP wait/wake race close | Landed (P2-Cf) |
+| Spec SMP refinement (`Steal`, `IPI_Send`/`Deliver`, `NoDoubleEnqueue`, `IPIOrdering`) | Landed (P2-Cg) |
+| `LatencyBound` liveness spec | Phase 2 close |
 | Red-black tree refactor | Phase 7 |
 
 ---
@@ -476,11 +493,15 @@ tools/test-fault.sh                    # 3/3 expected
 # KASLR
 tools/verify-kaslr.sh -n 5             # 5/5 distinct expected
 
-# All TLA+ specs (1: scheduler.tla; primary + buggy)
+# All TLA+ specs (1: scheduler.tla; primary + 3 buggy configs)
 export PATH="/opt/homebrew/opt/openjdk/bin:$PATH"
 cd specs
 java -cp /tmp/tla2tools.jar tlc2.TLC -workers auto -deadlock \
-    -config scheduler.cfg scheduler.tla        # 283 states clean
+    -config scheduler.cfg scheduler.tla              # 10188 states clean
 java -cp /tmp/tla2tools.jar tlc2.TLC -workers auto -deadlock \
-    -config scheduler_buggy.cfg scheduler.tla  # 29-state counterexample
+    -config scheduler_buggy.cfg scheduler.tla        # NoMissedWakeup counterexample at depth 6
+java -cp /tmp/tla2tools.jar tlc2.TLC -workers auto -deadlock \
+    -config scheduler_buggy_steal.cfg scheduler.tla  # NoDoubleEnqueue counterexample at depth 4
+java -cp /tmp/tla2tools.jar tlc2.TLC -workers auto -deadlock \
+    -config scheduler_buggy_ipi.cfg scheduler.tla    # IPIOrdering counterexample at depth 6
 ```
