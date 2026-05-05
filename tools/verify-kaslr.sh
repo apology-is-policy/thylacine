@@ -41,12 +41,18 @@ fi
 declare -a offsets=()
 declare -i ok=0 fail=0
 
+# tools/test.sh tails the log; banner growth (P2-A added kproc/kthread lines)
+# can push the KASLR offset out of view. Read the full log file instead so
+# verify-kaslr.sh stays robust against future banner additions.
+LOG_FILE="$REPO_ROOT/build/test-boot.log"
+
 for i in $(seq 1 "$n"); do
     out="$("$REPO_ROOT/tools/test.sh" 2>&1 || true)"
     if grep -q "^Thylacine boot OK" <<<"$out"; then
         ok+=1
         # KASLR offset: parse "kernel base: 0xVA (KASLR offset 0xN, ...)"
-        offset="$(grep -oE 'KASLR offset 0x[0-9a-fA-F]+' <<<"$out" | head -1 | awk '{print $3}')"
+        # from the full log file; the test.sh tail may not contain it.
+        offset="$(grep -oE 'KASLR offset 0x[0-9a-fA-F]+' "$LOG_FILE" | head -1 | awk '{print $3}')"
         offsets+=("$offset")
         if (( verbose )); then echo "boot $i: PASS offset=$offset"; fi
     else

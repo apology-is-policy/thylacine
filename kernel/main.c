@@ -31,6 +31,8 @@
 #include <thylacine/dtb.h>
 #include <thylacine/extinction.h>
 #include <thylacine/page.h>
+#include <thylacine/proc.h>
+#include <thylacine/thread.h>
 #include <thylacine/types.h>
 
 // From arch/arm64/start.S — DTB physical address handed to us by the
@@ -233,6 +235,30 @@ void boot_main(void) {
     uart_puts("  timer: ");
     uart_putdec(timer_get_freq() / 1000UL);
     uart_puts(" kHz freq, 1000 Hz tick (PPI 14 / INTID 30)\n");
+
+    // Phase 6: process / thread bring-up (P2-A entry).
+    //
+    // proc_init creates kproc (PID 0) — the kernel's own process. It
+    // owns the kernel address space, will own the kernel handle table
+    // (Phase 2), and parents the kernel threads. thread_init creates
+    // kthread (TID 0) and parks it in TPIDR_EL1 as the boot CPU's
+    // current thread.
+    //
+    // After this point current_thread() is valid; cpu_switch_context
+    // can save/load thread state; thread_create + thread_switch work.
+    // The actual scheduler (EEVDF) lands at P2-B.
+    proc_init();
+    thread_init();
+
+    uart_puts("  kproc:   pid=");
+    uart_putdec((u64)kproc()->pid);
+    uart_puts(" threads=");
+    uart_putdec((u64)kproc()->thread_count);
+    uart_puts("\n");
+
+    uart_puts("  kthread: tid=");
+    uart_putdec((u64)kthread()->tid);
+    uart_puts(" state=RUNNING (current_thread = kthread)\n");
 
     // In-kernel test harness. Runs every test in g_tests[] (kaslr
     // mix64 avalanche, DTB chosen seed presence, refactored phys

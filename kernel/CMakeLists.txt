@@ -11,6 +11,8 @@ set(KERNEL_SRCS
     extinction.c
     canary.c
     fault_test.c
+    proc.c
+    thread.c
     ../arch/arm64/start.S
     ../arch/arm64/uart.c
     ../arch/arm64/mmu.c
@@ -20,6 +22,7 @@ set(KERNEL_SRCS
     ../arch/arm64/gic.c
     ../arch/arm64/timer.c
     ../arch/arm64/hwfeat.c
+    ../arch/arm64/context.S
     ../lib/dtb.c
     ../mm/buddy.c
     ../mm/magazines.c
@@ -33,6 +36,7 @@ set(KERNEL_SRCS
     test/test_gic.c
     test/test_timer.c
     test/test_hardening.c
+    test/test_context.c
 )
 
 set(KERNEL_LD_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/../arch/arm64/kernel.ld)

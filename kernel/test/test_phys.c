@@ -17,6 +17,15 @@
 void test_phys_alloc_smoke(void) {
     static struct page *pages[SMOKE_N];   // static so we don't crowd boot stack
 
+    // Drain magazines BEFORE taking the baseline. Phase 1 didn't need
+    // this — no SLUB allocations happened pre-test so the magazine was
+    // empty. P2-A's proc_init + thread_init each kmem_cache_create +
+    // kmem_cache_alloc, which trigger first-time slab_new calls, which
+    // refill the order-0 magazine to half-full (8) and consume one or
+    // two pages, leaving ~5 pages resident at test entry. Without a
+    // pre-drain, the post-drain comparison reads HIGHER than baseline
+    // by the resident count and the test reports false drift.
+    magazines_drain_all();
     u64 baseline = phys_free_pages();
 
     // Order-0 (4 KiB) allocations — exercises magazine[0] refill/drain.
@@ -63,6 +72,10 @@ void test_phys_alloc_smoke(void) {
 // Test runs in <100 ms on QEMU virt; fits inside tools/test.sh's
 // 10-second timeout with margin.
 void test_phys_leak_10k(void) {
+    // Same robustness rule as alloc_smoke: drain pre-baseline so the
+    // post-drain comparison is exact regardless of resident magazine
+    // pages at test entry.
+    magazines_drain_all();
     u64 baseline = phys_free_pages();
 
     for (unsigned i = 0; i < 10000; i++) {
