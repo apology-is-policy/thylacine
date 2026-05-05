@@ -11,6 +11,7 @@
 //   3. thread_init    — kthread (TID 0) appears, parented to kproc
 
 #include <thylacine/extinction.h>
+#include <thylacine/page.h>
 #include <thylacine/proc.h>
 #include <thylacine/types.h>
 
@@ -22,10 +23,14 @@ static int                g_next_pid = 0;
 static u64                g_proc_created;
 static u64                g_proc_destroyed;
 
-static void proc_zero_init(struct Proc *p, int pid) {
-    p->pid           = pid;
-    p->thread_count  = 0;
-    p->threads       = NULL;
+// Initialize a freshly-allocated Proc descriptor. Caller has already
+// passed KP_ZERO to kmem_cache_alloc, so all fields are zero/NULL on
+// entry; this only sets the non-zero-default values (magic, pid).
+// New fields added by P2-B onward inherit zero/NULL via KP_ZERO and
+// don't need an explicit setter here unless the default isn't right.
+static void proc_init_fields(struct Proc *p, int pid) {
+    p->magic = PROC_MAGIC;
+    p->pid   = pid;
 }
 
 void proc_init(void) {
@@ -36,15 +41,12 @@ void proc_init(void) {
                                      8,
                                      KMEM_CACHE_PANIC_ON_FAIL);
     if (!g_proc_cache) {
-        // KMEM_CACHE_PANIC_ON_FAIL extincts internally; this is
-        // belt-and-braces in case someone changes that flag's
-        // semantics later.
         extinction("kmem_cache_create(proc) returned NULL");
     }
 
-    g_kproc = kmem_cache_alloc(g_proc_cache, 0);
+    g_kproc = kmem_cache_alloc(g_proc_cache, KP_ZERO);
     if (!g_kproc) extinction("kmem_cache_alloc(kproc) failed");
-    proc_zero_init(g_kproc, 0);
+    proc_init_fields(g_kproc, 0);
     g_proc_created++;
     g_next_pid = 1;
 }
@@ -55,18 +57,22 @@ struct Proc *kproc(void) {
 
 struct Proc *proc_alloc(void) {
     if (!g_proc_cache) extinction("proc_alloc before proc_init");
-    struct Proc *p = kmem_cache_alloc(g_proc_cache, 0);
+    struct Proc *p = kmem_cache_alloc(g_proc_cache, KP_ZERO);
     if (!p) return NULL;
-    proc_zero_init(p, g_next_pid++);
+    proc_init_fields(p, g_next_pid++);
     g_proc_created++;
     return p;
 }
 
 void proc_free(struct Proc *p) {
-    if (!p)              extinction("proc_free(NULL)");
-    if (p == g_kproc)    extinction("proc_free attempted on kproc");
-    if (p->thread_count) extinction("proc_free with live threads (caller must drain)");
-    if (p->threads)      extinction("proc_free with non-NULL threads list");
+    if (!p)                       extinction("proc_free(NULL)");
+    // Magic check catches double-free and corrupt-Proc passes. SLUB's
+    // freelist write at kmem_cache_free clobbers magic; subsequent free
+    // reads the clobbered value and trips here.
+    if (p->magic != PROC_MAGIC)   extinction("proc_free of corrupted or already-freed Proc");
+    if (p == g_kproc)             extinction("proc_free attempted on kproc");
+    if (p->thread_count)          extinction("proc_free with live threads (caller must drain)");
+    if (p->threads)               extinction("proc_free with non-NULL threads list");
     kmem_cache_free(g_proc_cache, p);
     g_proc_destroyed++;
 }

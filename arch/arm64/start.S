@@ -190,6 +190,25 @@ _real_start:
     b       .Lbss_clear
 .Lbss_done:
 
+    // 4.5. Initialize OS-reserved per-CPU registers to known-zero.
+    //
+    // Per ARM ARM, TPIDR_EL0 and TPIDR_EL1 reset values are
+    // architecturally UNKNOWN. P2-A's `current_thread()` accessor
+    // (kernel/include/thylacine/thread.h) reads TPIDR_EL1 — a pre-
+    // thread_init read used to depend on "BSS-default zero" (which
+    // doesn't apply to system registers). The msr to xzr below makes
+    // the pre-thread_init read deterministic-NULL.
+    //
+    // TPIDR_EL0 is the EL0 TLS pointer, saved/restored across context
+    // switches by cpu_switch_context. Without this init, kthread
+    // captures whatever firmware leftover lives there on its first
+    // switch-out — a leak hazard once userspace lands at Phase 5.
+    //
+    // Both writes are 1 instruction each; cost is negligible. Closes
+    // P2-A audit R4 F44 + F45.
+    msr     tpidr_el0, xzr
+    msr     tpidr_el1, xzr
+
     // 5. Save DTB pointer. BSS is now cleared; this write sticks.
     adrp    x0, _saved_dtb_ptr
     add     x0, x0, :lo12:_saved_dtb_ptr
@@ -273,12 +292,15 @@ _real_start:
     //    PC-relative-resolved address of boot_main (current PC = PA,
     //    PIC mode → adrp+add gives PA).
     //
-    // Use BLR (not BR) so the branch sets PSTATE.BTYPE = 01 (call
-    // type), which matches the `bti c` marker the compiler emits at
-    // boot_main's prologue. With BR, BTYPE would be 10 (jump type)
-    // and BTI on FEAT_BTI hardware would fault on the `bti c`. The
+    // Per ARM ARM D24.2.1: BLR sets PSTATE.BTYPE = 0b10 (call), BR
+    // sets BTYPE = 0b01 (jump). bti c matches BTYPE=10 (call); bti j
+    // matches BTYPE=01. The compiler emits `bti c` at boot_main's
+    // prologue under -mbranch-protection=pac-ret+bti. Use BLR so the
+    // resulting BTYPE=10 matches the bti c. With BR, BTYPE=01 would
+    // not match bti c and BTI on FEAT_BTI hardware would fault. The
     // discarded LR is harmless because boot_main is `noreturn` and
-    // never reads it.
+    // never reads it. (P2-A audit R4 F41 fixed the BTYPE-value
+    // mislabel that was here previously.)
     adrp    x0, boot_main
     add     x0, x0, :lo12:boot_main
     bl      kaslr_high_va_addr          // x0 = high VA of boot_main

@@ -17,7 +17,7 @@ The discipline P2-A pins, beyond just "things compile":
 - **Layout invariants**: `struct Context` is exactly 112 bytes with named offsets that the asm switcher hardcodes. Field reorder without an asm update is impossible without a static-assert build break.
 - **Bootstrap order**: `slub_init → proc_init → thread_init`. `current_thread()` returns NULL before `thread_init`; from then on, valid until the kernel exits.
 - **Per-CPU current_thread**: parked in `TPIDR_EL1` (the OS-reserved register), so the accessor is a single `mrs` and naturally per-CPU on SMP without extra plumbing.
-- **BTI / PAC discipline**: `cpu_switch_context` is reached via `bl` from C (BTYPE=10) and starts with `bti c`. `thread_trampoline` is reached via `ret` from `cpu_switch_context` (BTYPE=00) and also starts with `bti c` for defense in depth. Fresh threads enter via the trampoline (`blr x21` → entry function), matching the entry function's own `bti c` prologue.
+- **BTI / PAC discipline**: `cpu_switch_context` is reached via `bl` from C — per ARM ARM D24.2.1, BL is a direct branch and sets `PSTATE.BTYPE = 0b00` (no constraint); `bti c` passes. A future indirect-call site reaching `cpu_switch_context` via `blr` would set `BTYPE = 0b10` (call), which `bti c` also matches. `thread_trampoline` is reached via `ret` from `cpu_switch_context` (`BTYPE = 0b00`) and also starts with `bti c` for defense in depth. Fresh threads enter via the trampoline's `blr x21` (`BTYPE = 0b10`), matching the entry function's own `bti c` prologue.
 - **Spec-first sketch**: `specs/scheduler.tla` is TLC-clean at this sketch level. P2-B refines it (EEVDF deadline math, wait/wake atomicity, IPI ordering); P2-C adds work-stealing fairness.
 
 ---
@@ -134,7 +134,7 @@ Hand-written assembly. ~50 lines. Two symbols: `cpu_switch_context`, `thread_tra
 `cpu_switch_context`:
 
 ```
-bti c                           // BLR landing pad — passes BTYPE=10
+bti c                           // BL → BTYPE=00 (common); BLR → BTYPE=10; bti c passes both
 stp x19, x20, [x0, #0]
 stp x21, x22, [x0, #16]
 stp x23, x24, [x0, #32]

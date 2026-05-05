@@ -27,7 +27,12 @@
 .globl cpu_switch_context
 .type cpu_switch_context, %function
 cpu_switch_context:
-    // Reached via bl from C — BTYPE = 10. bti c is the matching landing.
+    // Per ARM ARM D24.2.1: BL is a direct branch and sets PSTATE.BTYPE
+    // = 0b00 (no constraint). BLR (which a future indirect-call site
+    // might use to reach us) sets BTYPE = 0b10 (call). bti c matches
+    // both: it passes under BTYPE=00 (any landing allowed) and under
+    // BTYPE=10 (call landing). Direct BL from C → BTYPE=00 is the
+    // common case at P2-A.
     bti     c
 
     // Save callee-saved + FP + LR into prev (x0).
@@ -64,13 +69,16 @@ cpu_switch_context:
 
 
 // thread_trampoline — initial ctx.lr for fresh threads created by
-// thread_create. Reached via cpu_switch_context's ret (BTYPE = 00).
-// The first instruction is `bti c` for defense in depth (passes under
-// BTYPE=00; also passes if some future caller reaches this via blr).
+// thread_create. Reached via cpu_switch_context's ret. Per ARM ARM
+// D24.2.1, RET sets PSTATE.BTYPE = 0b00 (no constraint) — the first
+// instruction's bti c here passes regardless. bti c is defensive: it
+// also passes if some future caller reaches the trampoline via blr
+// (BTYPE=10).
 //
-// x21 carries the entry function pointer, parked there by thread_create
-// via ctx.x21 and loaded by cpu_switch_context's `ldp x21,x22`. Calling
-// via blr matches the entry function's `bti c` prologue (BTYPE=10).
+// x21 carries the entry function pointer, parked by thread_create via
+// ctx.x21 and loaded by cpu_switch_context's `ldp x21,x22`. The blr
+// below sets BTYPE=10 (call); the entry function's compiler-emitted
+// `bti c` prologue (under -mbranch-protection=pac-ret+bti) matches.
 //
 // If entry returns, halt on WFE — Phase 2 close adds thread_exit + reap.
 .globl thread_trampoline

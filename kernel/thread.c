@@ -36,13 +36,6 @@ static int                g_next_tid = 0;
 static u64                g_thread_created;
 static u64                g_thread_destroyed;
 
-static void thread_clear_ctx(struct Thread *t) {
-    u64 *p = (u64 *)&t->ctx;
-    for (size_t i = 0; i < sizeof(struct Context) / sizeof(u64); i++) {
-        p[i] = 0;
-    }
-}
-
 static void thread_link_into_proc(struct Thread *t, struct Proc *p) {
     t->prev_in_proc = NULL;
     t->next_in_proc = p->threads;
@@ -77,21 +70,19 @@ void thread_init(void) {
                                        KMEM_CACHE_PANIC_ON_FAIL);
     if (!g_thread_cache) extinction("kmem_cache_create(thread) returned NULL");
 
-    g_kthread = kmem_cache_alloc(g_thread_cache, 0);
+    g_kthread = kmem_cache_alloc(g_thread_cache, KP_ZERO);
     if (!g_kthread) extinction("kmem_cache_alloc(kthread) failed");
 
-    g_kthread->tid           = 0;
-    g_kthread->state         = THREAD_RUNNING;
-    g_kthread->proc          = kproc();
+    // KP_ZERO leaves every field 0/NULL on entry. Only the non-zero-
+    // default values get explicit setters (magic, state, proc).
     // The boot CPU is already running on the boot stack from start.S;
-    // kthread doesn't own a separately-allocated stack. kstack_base = NULL
-    // signifies "boot stack, not owned." thread_free's free_pages call
-    // is gated on kstack_base != NULL.
-    g_kthread->kstack_base   = NULL;
-    g_kthread->kstack_size   = 0;
-    g_kthread->next_in_proc  = NULL;
-    g_kthread->prev_in_proc  = NULL;
-    thread_clear_ctx(g_kthread);
+    // kthread doesn't own a separately-allocated stack — kstack_base
+    // stays NULL via KP_ZERO. thread_free's free_pages call is gated
+    // on kstack_base != NULL.
+    g_kthread->magic = THREAD_MAGIC;
+    g_kthread->tid   = 0;
+    g_kthread->state = THREAD_RUNNING;
+    g_kthread->proc  = kproc();
 
     thread_link_into_proc(g_kthread, kproc());
     g_thread_created++;
@@ -110,8 +101,10 @@ struct Thread *thread_create(struct Proc *proc, void (*entry)(void)) {
     if (!g_thread_cache) extinction("thread_create before thread_init");
     if (!proc)           extinction("thread_create with NULL proc");
     if (!entry)          extinction("thread_create with NULL entry");
+    if (proc->magic != PROC_MAGIC)
+        extinction("thread_create with corrupted proc");
 
-    struct Thread *t = kmem_cache_alloc(g_thread_cache, 0);
+    struct Thread *t = kmem_cache_alloc(g_thread_cache, KP_ZERO);
     if (!t) return NULL;
 
     struct page *stack_pg = alloc_pages(THREAD_KSTACK_ORDER, KP_ZERO);
@@ -121,14 +114,14 @@ struct Thread *thread_create(struct Proc *proc, void (*entry)(void)) {
     }
     void *kstack = (void *)(uintptr_t)page_to_pa(stack_pg);
 
-    t->tid           = g_next_tid++;
-    t->state         = THREAD_RUNNABLE;
-    t->proc          = proc;
-    t->kstack_base   = kstack;
-    t->kstack_size   = THREAD_KSTACK_SIZE;
-    t->next_in_proc  = NULL;
-    t->prev_in_proc  = NULL;
-    thread_clear_ctx(t);
+    // KP_ZERO leaves every field 0/NULL; only the non-zero-default
+    // values get explicit setters.
+    t->magic       = THREAD_MAGIC;
+    t->tid         = g_next_tid++;
+    t->state       = THREAD_RUNNABLE;
+    t->proc        = proc;
+    t->kstack_base = kstack;
+    t->kstack_size = THREAD_KSTACK_SIZE;
 
     // Lay out the initial saved context so the first cpu_switch_context
     // into this thread lands at thread_trampoline, which blr's entry.
@@ -137,6 +130,8 @@ struct Thread *thread_create(struct Proc *proc, void (*entry)(void)) {
     //   ctx.lr  = trampoline    — cpu_switch_context's `ret` lands here
     //   ctx.sp  = top of kstack — 16-byte aligned (alloc_pages returns
     //                              page-aligned, 16 KiB = aligned at top)
+    //
+    // Other ctx fields stay zero via KP_ZERO.
     t->ctx.x21 = (u64)(uintptr_t)entry;
     t->ctx.lr  = (u64)(uintptr_t)thread_trampoline;
     t->ctx.sp  = (u64)((uintptr_t)kstack + THREAD_KSTACK_SIZE);
@@ -148,9 +143,16 @@ struct Thread *thread_create(struct Proc *proc, void (*entry)(void)) {
 
 void thread_free(struct Thread *t) {
     if (!t)                       extinction("thread_free(NULL)");
+    // Magic check catches double-free and corrupt-Thread passes. SLUB's
+    // freelist write at kmem_cache_free clobbers magic; subsequent free
+    // reads the clobbered value and trips here.
+    if (t->magic != THREAD_MAGIC) extinction("thread_free of corrupted or already-freed Thread");
     if (t == g_kthread)           extinction("thread_free attempted on kthread");
     if (t == current_thread())    extinction("thread_free of currently-running thread");
-    if (t->state == THREAD_RUNNING) extinction("thread_free of RUNNING thread");
+    if (t->state == THREAD_STATE_INVALID)
+                                  extinction("thread_free of uninitialized Thread");
+    if (t->state == THREAD_RUNNING)
+                                  extinction("thread_free of RUNNING thread");
 
     thread_unlink_from_proc(t);
 
@@ -167,8 +169,13 @@ void thread_switch(struct Thread *next) {
     struct Thread *prev = current_thread();
     if (!prev)            extinction("thread_switch with no current thread");
     if (!next)            extinction("thread_switch(NULL)");
+    if (next->magic != THREAD_MAGIC)
+        extinction("thread_switch into corrupted or freed Thread");
     if (prev == next)     return;
-    if (next->state == THREAD_EXITING) extinction("thread_switch into EXITING thread");
+    if (next->state == THREAD_STATE_INVALID)
+        extinction("thread_switch into uninitialized Thread");
+    if (next->state == THREAD_EXITING)
+        extinction("thread_switch into EXITING thread");
 
     // State + current pointer updates BEFORE the asm switch. From the
     // outgoing thread's perspective these writes are observed by it

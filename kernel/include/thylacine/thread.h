@@ -22,8 +22,8 @@ struct Proc;
 // P2-B (wait/wake) and Phase 2 close (exit/reap) respectively.
 //
 // State values are non-zero so a zero-initialized Thread is detectably
-// invalid — kmem_cache_alloc returns zero memory; the Thread is only
-// usable after explicit initialization sets state.
+// invalid — kmem_cache_alloc with KP_ZERO returns all-zero memory; the
+// Thread is only usable after explicit initialization sets state.
 enum thread_state {
     THREAD_STATE_INVALID  = 0,    // zero-initialized; not usable
     THREAD_RUNNING        = 1,
@@ -32,7 +32,19 @@ enum thread_state {
     THREAD_EXITING        = 4,    // P2 close: exit/reap path
 };
 
+_Static_assert(THREAD_STATE_INVALID == 0,
+               "THREAD_STATE_INVALID == 0 is the invariant that makes "
+               "zero-initialized Thread structs detectably invalid "
+               "(P2-A audit R4 F46 close)");
+
+// THREAD_MAGIC — sentinel set at thread_create / thread_init; checked at
+// thread_free. At offset 0 so SLUB's freelist write naturally clobbers
+// it on kmem_cache_free; subsequent thread_free reads the clobbered
+// value and extincts (P2-A audit R4 F42 close).
+#define THREAD_MAGIC 0x54485244C0DEFADEULL    // 'THRD' || 0xC0DE'FADE
+
 struct Thread {
+    u64                magic;     // THREAD_MAGIC
     int                tid;
     enum thread_state  state;
     struct Proc       *proc;
@@ -56,6 +68,15 @@ struct Thread {
     struct Thread     *next_in_proc;
     struct Thread     *prev_in_proc;
 };
+
+_Static_assert(sizeof(struct Thread) == 168,
+               "struct Thread size pinned at 168 bytes (P2-A R4 baseline: "
+               "magic 8 + tid 4 + state 4 + proc 8 + ctx 112 + kstack_base 8 "
+               "+ kstack_size 8 + next_in_proc 8 + prev_in_proc 8). Adding "
+               "a field grows the SLUB cache; update this assert "
+               "deliberately so the change is intentional.");
+_Static_assert(__builtin_offsetof(struct Thread, magic) == 0,
+               "magic must be at offset 0 (P2-A audit R4 F42)");
 
 // Default kernel stack size per thread. 4 pages × 4 KiB = 16 KiB. Matches
 // ARCHITECTURE.md §7.3 (THREAD_STACK_SIZE = 16 KiB default with guard
