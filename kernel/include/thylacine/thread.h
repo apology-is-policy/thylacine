@@ -201,9 +201,22 @@ struct Thread *thread_init_per_cpu_idle(unsigned cpu_idx);
 // Returns NULL on OOM (Thread alloc fail or kstack alloc fail; cleanup
 // is internal).
 //
-// At P2-A, entry takes no argument and must not return — the trampoline
-// halts on WFE if it does. Phase 2 close adds entry-with-arg + thread_exit.
+// `entry` takes no argument. For arg-passing (P2-D rfork), use
+// thread_create_with_arg below.
+//
+// At P2-A, entry must not return — the trampoline halts on WFE if it
+// does. P2-D adds exits() as the structured termination path.
 struct Thread *thread_create(struct Proc *proc, void (*entry)(void));
+
+// P2-D: same as thread_create but passes `arg` in x0 to `entry`.
+// Internally sets ctx.x20 = arg; thread_trampoline does `mov x0, x20`
+// before `blr x21` (entry pointer). The trampoline behavior is identical
+// for both forms — thread_create is exactly thread_create_with_arg with
+// arg=0; the call sites differ only in the entry signature they
+// document.
+struct Thread *thread_create_with_arg(struct Proc *proc,
+                                      void (*entry)(void *),
+                                      void *arg);
 
 // Release a Thread descriptor + its kstack. Caller must ensure the
 // thread is not current (current_thread() != t) and not still on any

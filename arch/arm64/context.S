@@ -69,16 +69,20 @@ cpu_switch_context:
 
 
 // thread_trampoline — initial ctx.lr for fresh threads created by
-// thread_create. Reached via cpu_switch_context's ret. Per ARM ARM
-// D24.2.1, RET sets PSTATE.BTYPE = 0b00 (no constraint) — the first
-// instruction's bti c here passes regardless. bti c is defensive: it
-// also passes if some future caller reaches the trampoline via blr
-// (BTYPE=10).
+// thread_create / thread_create_with_arg. Reached via cpu_switch_context's
+// ret. Per ARM ARM D24.2.1, RET sets PSTATE.BTYPE = 0b00 (no constraint)
+// — the first instruction's bti c here passes regardless. bti c is
+// defensive: it also passes if some future caller reaches the trampoline
+// via blr (BTYPE=10).
 //
 // x21 carries the entry function pointer, parked by thread_create via
-// ctx.x21 and loaded by cpu_switch_context's `ldp x21,x22`. The blr
-// below sets BTYPE=10 (call); the entry function's compiler-emitted
-// `bti c` prologue (under -mbranch-protection=pac-ret+bti) matches.
+// ctx.x21 and loaded by cpu_switch_context's `ldp x21,x22`. x20 carries
+// the entry's arg (parked by thread_create_with_arg via ctx.x20; zero
+// for thread_create no-arg entries via KP_ZERO). The mov x0, x20 below
+// places the arg in x0 per AAPCS64; entries that take no arg ignore
+// x0 (it's caller-saved). The blr sets BTYPE=10 (call); the entry
+// function's compiler-emitted `bti c` prologue (under
+// -mbranch-protection=pac-ret+bti) matches.
 //
 // IRQ-mask discipline (P2-Bc): the schedule that switched into this
 // fresh thread had IRQs masked (sched() entry's irqsave; cpu_switch_
@@ -90,7 +94,9 @@ cpu_switch_context:
 // asymmetry. `msr daifclr, #2` clears PSTATE.I (IRQ mask bit) only —
 // the other DAIF bits stay at whatever the prior state was.
 //
-// If entry returns, halt on WFE — Phase 2 close adds thread_exit + reap.
+// If entry returns, halt on WFE — P2-D introduces exits() as the
+// structured termination path; entry returning without exits() is a
+// kernel-thread bug.
 .globl thread_trampoline
 .type thread_trampoline, %function
 thread_trampoline:
@@ -105,14 +111,16 @@ thread_trampoline:
      * sched_finish_task_switch is a leaf C function — calling it
      * before unmask is fine: PAC was applied per-CPU at start.S
      * before the long-branch, and bl preserves x21 (entry fn ptr)
-     * since x21 is callee-saved per AAPCS64. */
+     * AND x20 (entry arg) since both are callee-saved per AAPCS64. */
     bl      sched_finish_task_switch
 
     msr     daifclr, #2          /* P2-Bc: unmask IRQs for new thread */
 
+    mov     x0, x20              /* P2-D: pass arg to entry. zero for
+                                  *      no-arg entries via KP_ZERO. */
     blr     x21
 
-    // Entry returned (no thread_exit at P2-A). Halt.
+    // Entry returned without calling exits() (P2-D). Halt.
 1:  wfe
     b       1b
 .size thread_trampoline, . - thread_trampoline

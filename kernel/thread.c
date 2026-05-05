@@ -138,10 +138,17 @@ struct Thread *thread_init_per_cpu_idle(unsigned cpu_idx) {
     return t;
 }
 
-struct Thread *thread_create(struct Proc *proc, void (*entry)(void)) {
+// Internal: shared body of thread_create + thread_create_with_arg.
+// `entry_void` is the entry pointer (no arg or void* arg form — the
+// trampoline doesn't distinguish; x0 is loaded from x20 unconditionally).
+// `arg` is parked in ctx.x20; for no-arg entries pass NULL and the entry
+// just ignores x0 (caller-saved).
+static struct Thread *thread_create_internal(struct Proc *proc,
+                                             void *entry_void,
+                                             void *arg) {
     if (!g_thread_cache) extinction("thread_create before thread_init");
     if (!proc)           extinction("thread_create with NULL proc");
-    if (!entry)          extinction("thread_create with NULL entry");
+    if (!entry_void)     extinction("thread_create with NULL entry");
     if (proc->magic != PROC_MAGIC)
         extinction("thread_create with corrupted proc");
 
@@ -174,19 +181,31 @@ struct Thread *thread_create(struct Proc *proc, void (*entry)(void)) {
     // Lay out the initial saved context so the first cpu_switch_context
     // into this thread lands at thread_trampoline, which blr's entry.
     //
+    //   ctx.x20 = arg           — trampoline does `mov x0, x20` (P2-D)
     //   ctx.x21 = entry         — trampoline does `blr x21`
     //   ctx.lr  = trampoline    — cpu_switch_context's `ret` lands here
     //   ctx.sp  = top of kstack — 16-byte aligned (alloc_pages returns
     //                              page-aligned, 16 KiB = aligned at top)
     //
     // Other ctx fields stay zero via KP_ZERO.
-    t->ctx.x21 = (u64)(uintptr_t)entry;
+    t->ctx.x20 = (u64)(uintptr_t)arg;
+    t->ctx.x21 = (u64)(uintptr_t)entry_void;
     t->ctx.lr  = (u64)(uintptr_t)thread_trampoline;
     t->ctx.sp  = (u64)((uintptr_t)kstack + THREAD_KSTACK_SIZE);
 
     thread_link_into_proc(t, proc);
     g_thread_created++;
     return t;
+}
+
+struct Thread *thread_create(struct Proc *proc, void (*entry)(void)) {
+    return thread_create_internal(proc, (void *)(uintptr_t)entry, NULL);
+}
+
+struct Thread *thread_create_with_arg(struct Proc *proc,
+                                      void (*entry)(void *),
+                                      void *arg) {
+    return thread_create_internal(proc, (void *)(uintptr_t)entry, arg);
 }
 
 void thread_free(struct Thread *t) {

@@ -27,27 +27,101 @@ The discipline P2-A pins, beyond just "things compile":
 ### `<thylacine/proc.h>`
 
 ```c
+enum proc_state {
+    PROC_STATE_INVALID = 0,
+    PROC_STATE_ALIVE   = 1,
+    PROC_STATE_ZOMBIE  = 2,                       // exits()'d, awaiting wait_pid
+};
+
 struct Proc {
-    int            pid;
-    int            thread_count;
-    struct Thread *threads;          // doubly-linked list (Thread.next_in_proc)
+    u64               magic;                     // PROC_MAGIC
+    int               pid;
+    int               thread_count;
+    enum proc_state   state;                     // P2-Da
+    int               exit_status;               // P2-Da: 0 = clean, non-zero = error
+    struct Thread    *threads;                   // doubly-linked list head
+    struct Proc      *parent;                    // P2-Da
+    struct Proc      *children;                  // P2-Da: list head, chained via sibling
+    struct Proc      *sibling;                   // P2-Da: next in parent's children
+    const char       *exit_msg;                  // P2-Da: caller-owned, lifetime ≥ wait_pid
+    struct Rendez     child_done;                // P2-Da: parent's wait Rendez
 };
 
 void          proc_init(void);                  // bootstraps kproc (PID 0)
 struct Proc  *kproc(void);                      // accessor for kproc
 struct Proc  *proc_alloc(void);                 // SLUB-allocate; returns NULL on OOM
 void          proc_free(struct Proc *p);
+
+// P2-Da: rfork (Plan 9 process/thread creation primitive)
+int           rfork(unsigned flags,
+                    void (*entry)(void *), void *arg);
+__attribute__((noreturn))
+void          exits(const char *msg);
+int           wait_pid(int *status_out);
+
+#define RFPROC      0x0001    // create new Proc (only RFPROC supported at P2-Da)
+#define RFMEM       0x0002    // share address space (Phase 5+)
+#define RFNAMEG     0x0004    // share namespace (P2-E)
+#define RFFDG       0x0008    // share fd table (P2-F)
+#define RFCRED      0x0010    // share credentials (Phase 5+)
+#define RFNOTEG     0x0020    // share note queue (Phase 5+)
+#define RFNOWAIT    0x0040    // detach from parent's children (Phase 5+)
+#define RFREND      0x0080    // share rendezvous space (Phase 5+)
+#define RFENVG      0x0100    // share environment (Phase 5+)
+
 u64           proc_total_created(void);
 u64           proc_total_destroyed(void);
 ```
 
-`proc_init` must be called once after `slub_init`. It allocates kproc (PID 0), zero-initializes it, and sets `g_next_pid = 1`.
+`proc_init` must be called once after `slub_init`. It allocates kproc (PID 0), zero-initializes it, sets state=ALIVE, initializes child_done, and sets `g_next_pid = 1`.
+
+`proc_alloc` returns a fresh Proc with state=ALIVE, child_done initialized, parent/children/sibling NULL. The caller wires linkage (rfork does this).
 
 `proc_free` extincts on:
 - `p == NULL` — programming error.
 - `p == kproc()` — kproc is permanent.
 - `p->thread_count != 0` — the caller must drain threads first.
 - `p->threads != NULL` — same as above, expressed structurally.
+- `p->children != NULL` — caller must reap or re-parent children first.
+- `p->state != PROC_STATE_ZOMBIE` — lifecycle violation (free of ALIVE Proc).
+
+#### `rfork(flags, entry, arg)` (P2-Da)
+
+Creates a new Proc with one initial Thread running `entry(arg)`. At v1.0, only `RFPROC` is supported; other flags trigger an extinction. Subsequent sub-chunks add the resource-sharing flags as their respective subsystems land:
+
+- **RFPROC** — required for "create"; allocates a new Proc + initial Thread.
+- **RFNAMEG** (P2-E) — share parent's namespace instead of cloning.
+- **RFFDG** (P2-F) — share fd table.
+- **RFMEM** (Phase 5+) — share address space (creates a *thread* in current Proc).
+- **RFCRED**, **RFNOTEG**, **RFNOWAIT**, **RFREND**, **RFENVG** — Phase 5+ with the syscall surface.
+
+`entry` is the kernel function the new Thread will run; `arg` is passed in x0 via the trampoline's `mov x0, x20` (P2-Da extension to the existing `blr x21`). Returns the child's PID on success, -1 on OOM.
+
+The kernel-internal call signature (entry takes `void *arg`, returns void) is the v1.0 P2-Da form. When P2-G lands the ELF loader and userspace, `rfork` extends to the syscall split — parent gets the child PID, child gets 0 — via a register-set tweak in the syscall-return path.
+
+#### `exits(msg)` (P2-Da)
+
+Terminates the calling process. `msg` is a status string captured by reference into `Proc->exit_msg` ("ok" → exit_status 0; anything else → exit_status 1; caller-owned lifetime, typically a string literal). Steps:
+1. Re-parent any orphan children to kproc.
+2. Set Proc state=ZOMBIE, exit_status, exit_msg.
+3. Mark calling Thread state=EXITING — sched() leaves it out of the run tree.
+4. Wake parent's `child_done` Rendez.
+5. Yield via `sched()`. Never returns.
+
+At v1.0 P2-Da, `exits` requires `thread_count == 1` (single-thread Procs only). Multi-threaded Procs require IPI-based termination of sibling threads (Phase 5+).
+
+#### `wait_pid(*status_out)` (P2-Da)
+
+Reaps a zombie child. Blocks on the parent's `child_done` Rendez until any child enters ZOMBIE state, then:
+1. Unlinks the zombie from parent's children list.
+2. Copies `exit_status` to `*status_out` (if non-NULL).
+3. `thread_free`s the zombie's Thread (EXITING state accepted) — also releases the kstack pages.
+4. `proc_free`s the zombie Proc.
+5. Returns the zombie's PID.
+
+Returns -1 if the parent has no children at all (live or zombie) — never blocks indefinitely with no possible wakeup.
+
+The cond predicate for the Rendez sleep is "any child in ZOMBIE state OR no children" — the second clause covers the edge case where children exit between the loop's outer scan and the sleep. `scheduler.tla`'s `WaitOnCond`/`WakeAll` discipline (NoMissedWakeup invariant) covers the wait/wake atomicity here at the spec level.
 
 ### `<thylacine/thread.h>`
 
