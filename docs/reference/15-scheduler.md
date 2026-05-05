@@ -312,6 +312,72 @@ LatencyBound (ARCH §28 I-17, slice × N) is a liveness property requiring weak 
 
 ---
 
+## Per-CPU dispatch (P2-Cd)
+
+P2-Cd makes the scheduler per-CPU. Each CPU dispatches independently against its own run tree, vd_counter, and need_resched signal. The boot CPU's behavior is unchanged at the test level (all tests run on CPU 0 and observe the same band-rotation semantics); secondaries gain idle-thread infrastructure without yet receiving cross-CPU work (that's P2-Cdc).
+
+### State
+
+Replaces the global singletons:
+```c
+struct CpuSched {
+    struct Thread *run_tree[SCHED_BAND_COUNT];
+    s64            vd_counter;
+    bool           initialized;
+    struct Thread *idle;            // CPU 0 = kthread; secondary = fresh
+};
+static struct CpuSched g_cpu_sched[DTB_MAX_CPUS];
+static volatile bool   g_need_resched[DTB_MAX_CPUS];   // per-CPU IRQ flag
+```
+
+`smp_cpu_idx_self()` returns this CPU's index from `MPIDR_EL1.Aff0`. All sched.c entry points fan in through `this_cpu_sched()` to read/write the appropriate slot.
+
+### sched_init takes a cpu_idx
+
+`sched_init(cpu_idx)` is called once per CPU:
+- `main.c` calls `sched_init(0)` for the boot CPU after `thread_init`. The boot CPU's idle is `kthread`.
+- `per_cpu_main` (kernel/smp.c) calls `sched_init(idx)` for each secondary after parking its idle Thread in TPIDR_EL1 (via `thread_init_per_cpu_idle(idx)`).
+
+The function records `current_thread()` as the per-CPU idle; the run tree starts empty.
+
+### ready / sched on per-CPU trees
+
+- `ready(t)` inserts into THIS CPU's run tree (the one that owns the call site at the moment of insertion). Cross-CPU placement (e.g., from a wakeup whose target lives on a different CPU) is a P2-Ce work-stealing concern.
+- `sched()` picks from THIS CPU's tree. The "no peer runnable" path is unchanged from P2-Bc — yield-with-no-peer refills the slice and returns; block/exit-with-no-peer extincts (idle is a regular RUNNING thread that's always re-inserted on yield, so the deadlock path is unreachable in practice unless the idle itself blocks).
+- `sched_remove_if_runnable(t)` walks every CPU's tree to find which one owns `t`. At v1.0 a thread is in at most one tree; the same scan generalizes to P2-Ce migration.
+- `sched_runnable_count()` aggregates across all CPUs — diagnostic-only; not a hot path.
+
+### Per-CPU idle thread
+
+Two flavors at v1.0 P2-Cd:
+- **CPU 0 (boot)**: `kthread`, set up by `thread_init` in main.c. It serves dual roles — boot-time test runner AND CPU 0's idle. After tests finish, kthread runs `_hang()` (WFI loop) which IS the boot CPU's idle.
+- **CPU N (secondary)**: a fresh `Thread` allocated by `thread_init_per_cpu_idle(idx)` in `per_cpu_main`. Doesn't own a kstack — it runs on the per-CPU boot stack assigned by `secondary_entry`. Lives in `SCHED_BAND_IDLE` so it sorts below any NORMAL-band runnable thread.
+
+`sched_idle_thread(cpu_idx)` exposes the per-CPU idle pointer for diagnostic + test use.
+
+### per_cpu_main idle loop
+
+At v1.0 P2-Cd:
+```c
+for (;;) {
+    __asm__ __volatile__("wfi" ::: "memory");
+}
+```
+— a pure WFI park. P2-Cdc lands the GIC SGI infrastructure that lets the boot CPU send `IPI_RESCHED` to a secondary; the loop body then becomes:
+```c
+for (;;) {
+    sched();
+    __asm__ __volatile__("wfi" ::: "memory");
+}
+```
+— sched() yields to peers placed by IPI-driven cross-CPU wakeups, falling back to WFI when nothing is queued. We do NOT install this loop body at P2-Cd because WFI on QEMU returns on architectural events even with masked IRQs — without IPIs as a wake source, sched() would spin without ever scheduling productive work, inflating boot time from ~100 ms to >1000 ms.
+
+### Tests added
+
+`smp.per_cpu_idle_smoke` (test_smp.c): verifies `sched_idle_thread(0)` equals `kthread()`, secondaries' idles are non-NULL Thread objects in `SCHED_BAND_IDLE`, and slots beyond `smp_cpu_count()` return NULL.
+
+---
+
 ## Build + verify
 
 ```bash

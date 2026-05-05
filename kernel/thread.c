@@ -106,6 +106,34 @@ struct Thread *kthread(void) {
     return g_kthread;
 }
 
+struct Thread *thread_init_per_cpu_idle(unsigned cpu_idx) {
+    if (!g_thread_cache) extinction("thread_init_per_cpu_idle before thread_init");
+    if (!kproc())        extinction("thread_init_per_cpu_idle before proc_init");
+    if (cpu_idx == 0)    extinction("thread_init_per_cpu_idle: cpu_idx 0 reserved for kthread");
+
+    struct Thread *t = kmem_cache_alloc(g_thread_cache, KP_ZERO);
+    if (!t) return NULL;
+
+    // Same skeleton as thread_init's kthread setup. KP_ZERO already
+    // cleared kstack_base (NULL — this thread runs on the per-CPU
+    // boot stack from start.S, already-current SP_EL0), ctx (zero;
+    // first cpu_switch_context save fills it in), runnable_{next,prev}
+    // (NULL; not in any tree until the idle loop yields once).
+    t->magic  = THREAD_MAGIC;
+    t->tid    = g_next_tid++;
+    t->state  = THREAD_RUNNING;
+    t->proc   = kproc();
+    t->weight = 1;
+    t->band   = SCHED_BAND_IDLE;          // lowest priority band; only
+                                          // runs when nothing else
+                                          // is runnable on this CPU.
+    t->slice_remaining = THREAD_DEFAULT_SLICE_TICKS;
+
+    thread_link_into_proc(t, kproc());
+    g_thread_created++;
+    return t;
+}
+
 struct Thread *thread_create(struct Proc *proc, void (*entry)(void)) {
     if (!g_thread_cache) extinction("thread_create before thread_init");
     if (!proc)           extinction("thread_create with NULL proc");

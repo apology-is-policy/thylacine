@@ -260,7 +260,7 @@ void boot_main(void) {
     // The actual scheduler (EEVDF) lands at P2-B.
     proc_init();
     thread_init();
-    sched_init();
+    sched_init(0);                              // boot CPU's per-CPU sched state
 
     // SMP secondary bring-up (P2-Ca). Reads /psci/method, brings up
     // each /cpus/cpu@N (N>0) via PSCI_CPU_ON pointing at the asm

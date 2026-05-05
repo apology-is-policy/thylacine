@@ -29,57 +29,84 @@
 // real contention point and sched() needs the finish_task_switch
 // pattern — see trip-hazards in docs/phase2-status.md.
 
+#include <thylacine/dtb.h>
 #include <thylacine/extinction.h>
 #include <thylacine/proc.h>
 #include <thylacine/rendez.h>
 #include <thylacine/sched.h>
+#include <thylacine/smp.h>
 #include <thylacine/spinlock.h>
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 
-// Per-band sorted-by-vd_t doubly-linked list head pointer. NULL if the
-// band has no runnable threads. The head's vd_t is the minimum.
-static struct Thread *g_run_tree[SCHED_BAND_COUNT];
-
-// Monotonic vd_t counter. Starts at 1 (kthread reserves vd_t=0); each
-// `sched()` advances current's vd_t to g_vd_counter++.
-static s64 g_vd_counter = 1;
-
-// One-shot init flag.
-static bool g_sched_initialized = false;
-
-// P2-Bc: preemption signal. Set by sched_tick() (timer IRQ handler)
-// when the current thread's slice expires. Cleared by
-// preempt_check_irq() right before the actual sched() call.
+// P2-Cd: per-CPU sched state. Each CPU owns its own band-indexed run
+// tree, monotonic vd_counter, init flag, and idle-thread pointer. This
+// replaces the global singletons used at P2-Ba..Cc — each CPU now
+// dispatches independently against its own queue, and ready() inserts
+// into THIS CPU's tree (cross-CPU placement and work-stealing land at
+// P2-Ce).
 //
-// `volatile` because it's read in C without an explicit barrier
-// across the preempt-check / sched call site; the IRQ handler is
-// the writer; the reader is the IRQ-return path. UP at v1.0 P2-Bc:
-// no SMP race; volatile suffices. P2-C SMP needs an atomic_bool with
-// release/acquire.
-static volatile bool g_need_resched = false;
+// All accesses index by `smp_cpu_idx_self()` (which reads MPIDR_EL1.
+// Aff0). Writes to a foreign CPU's slot are not yet supported and
+// would require coordinated IPIs (P2-Cdc).
+struct CpuSched {
+    struct Thread *run_tree[SCHED_BAND_COUNT];
+    s64            vd_counter;
+    bool           initialized;
+    struct Thread *idle;             // Per-CPU idle thread. CPU 0 = kthread.
+};
 
-void sched_init(void) {
-    if (g_sched_initialized) extinction("sched_init called twice");
-    if (!current_thread()) extinction("sched_init before thread_init");
+static struct CpuSched g_cpu_sched[DTB_MAX_CPUS];
+
+// P2-Cd: per-CPU preemption signal. Each CPU's timer IRQ writes its
+// own slot via sched_tick(); preempt_check_irq() on the same CPU
+// reads it. No cross-CPU access — the writer/reader is always the
+// same CPU because timer IRQs are CPU-local. `volatile` is sufficient
+// (no SMP atomicity needed for self-CPU access).
+static volatile bool g_need_resched[DTB_MAX_CPUS];
+
+static inline struct CpuSched *this_cpu_sched(void) {
+    unsigned idx = smp_cpu_idx_self();
+    if (idx >= DTB_MAX_CPUS) extinction("this_cpu_sched: cpu idx out of range");
+    return &g_cpu_sched[idx];
+}
+
+void sched_init(unsigned cpu_idx) {
+    if (cpu_idx >= DTB_MAX_CPUS)
+        extinction("sched_init: cpu_idx out of range");
+    struct CpuSched *cs = &g_cpu_sched[cpu_idx];
+    if (cs->initialized) extinction("sched_init called twice for the same cpu");
+    if (!current_thread())
+        extinction("sched_init before this CPU's idle thread is parked in TPIDR_EL1");
 
     for (unsigned b = 0; b < SCHED_BAND_COUNT; b++) {
-        g_run_tree[b] = NULL;
+        cs->run_tree[b] = NULL;
     }
-    g_vd_counter = 1;
-    g_sched_initialized = true;
+    cs->vd_counter   = 1;
+    cs->idle         = current_thread();   // CPU's idle thread = first
+                                           // thing parked in TPIDR_EL1
+                                           // before sched_init runs.
+    cs->initialized  = true;
 }
 
-// True iff `t` is currently in some run tree (linked or as head).
-static bool in_run_tree(struct Thread *t) {
+struct Thread *sched_idle_thread(unsigned cpu_idx) {
+    if (cpu_idx >= DTB_MAX_CPUS) return NULL;
+    return g_cpu_sched[cpu_idx].idle;
+}
+
+// True iff `t` is currently in `cs`'s run tree (linked or as head).
+// At v1.0 P2-Cd a thread is only ever in one CPU's tree at a time; the
+// caller passes the CPU's CpuSched. Cross-CPU work-stealing (P2-Ce)
+// will need a "find which CPU has t" helper.
+static bool in_run_tree(struct CpuSched *cs, struct Thread *t) {
     return t->runnable_next != NULL || t->runnable_prev != NULL ||
-           g_run_tree[t->band] == t;
+           cs->run_tree[t->band] == t;
 }
 
-// Insert `t` into its band's tree, sorted ascending by vd_t. Ties (equal
+// Insert `t` into `cs`'s band tree, sorted ascending by vd_t. Ties (equal
 // vd_t) place `t` AFTER existing equal-keyed nodes — FIFO within ties.
-static void insert_sorted(struct Thread *t) {
-    struct Thread **head = &g_run_tree[t->band];
+static void insert_sorted(struct CpuSched *cs, struct Thread *t) {
+    struct Thread **head = &cs->run_tree[t->band];
 
     // Empty band or t < head: prepend.
     if (!*head || (*head)->vd_t > t->vd_t) {
@@ -104,13 +131,13 @@ static void insert_sorted(struct Thread *t) {
     cur->runnable_next = t;
 }
 
-// Remove `t` from its band's tree. Caller has confirmed t is in the tree.
-static void unlink(struct Thread *t) {
+// Remove `t` from `cs`'s band tree. Caller has confirmed t is in the tree.
+static void unlink(struct CpuSched *cs, struct Thread *t) {
     if (t->runnable_prev) {
         t->runnable_prev->runnable_next = t->runnable_next;
     } else {
         // t was the head.
-        g_run_tree[t->band] = t->runnable_next;
+        cs->run_tree[t->band] = t->runnable_next;
     }
     if (t->runnable_next) {
         t->runnable_next->runnable_prev = t->runnable_prev;
@@ -119,13 +146,13 @@ static void unlink(struct Thread *t) {
     t->runnable_prev = NULL;
 }
 
-// Pick the highest-priority runnable thread; remove from its tree.
-// Returns NULL if no thread is runnable across any band.
-static struct Thread *pick_next(void) {
+// Pick the highest-priority runnable thread from `cs`; remove from its
+// tree. Returns NULL if no thread is runnable across any band.
+static struct Thread *pick_next(struct CpuSched *cs) {
     for (unsigned b = 0; b < SCHED_BAND_COUNT; b++) {
-        struct Thread *t = g_run_tree[b];
+        struct Thread *t = cs->run_tree[b];
         if (t) {
-            unlink(t);
+            unlink(cs, t);
             return t;
         }
     }
@@ -146,15 +173,24 @@ void ready(struct Thread *t) {
     // insert. (Same rationale as sched().)
     irq_state_t s = spin_lock_irqsave(NULL);
 
-    if (in_run_tree(t))           extinction("ready of already-runnable Thread");
+    // P2-Cd: insert into THIS CPU's run tree. Cross-CPU placement
+    // (e.g., wakeup of a thread that should run on a different CPU)
+    // is a P2-Ce work-stealing concern.
+    struct CpuSched *cs = this_cpu_sched();
 
-    insert_sorted(t);
+    if (in_run_tree(cs, t))       extinction("ready of already-runnable Thread");
+
+    insert_sorted(cs, t);
 
     spin_unlock_irqrestore(NULL, s);
 }
 
 void sched(void) {
-    if (!g_sched_initialized) extinction("sched() before sched_init");
+    // P2-Cd: read THIS CPU's sched state. All run-tree access goes
+    // through `cs`. Cross-CPU (P2-Ce) will bring its own contention
+    // discipline.
+    struct CpuSched *cs = this_cpu_sched();
+    if (!cs->initialized) extinction("sched() before this CPU's sched_init");
 
     // P2-Bc: IRQ-mask discipline. sched() mutates shared state
     // (run tree, current_thread via TPIDR_EL1, vd_t counter) — a
@@ -165,8 +201,9 @@ void sched(void) {
     // saved state through cpu_switch_context).
     //
     // The lock argument is NULL — we're not contending on a shared
-    // lock (UP single-CPU at v1.0); the IRQ mask is what we need.
-    // P2-C SMP turns the spin part real with a per-CPU run-tree lock.
+    // lock (per-CPU tree, single-CPU mutator at v1.0 P2-Cd); the IRQ
+    // mask is what we need. P2-Ce work-stealing turns the spin part
+    // real with a per-CPU run-tree lock.
     irq_state_t s = spin_lock_irqsave(NULL);
 
     struct Thread *prev = current_thread();
@@ -191,23 +228,22 @@ void sched(void) {
         extinction("sched: invalid prev state");
     }
 
-    struct Thread *next = pick_next();
+    struct Thread *next = pick_next(cs);
     if (!next) {
         if (prev->state != THREAD_RUNNING) {
-            // Block path with no runnable peer. UP-no-preempt: deadlock
-            // (the only event source that could wake prev is an IRQ,
-            // which by the wait/wake discipline must release prev's
-            // wait condition before this; if we got here, the protocol
-            // is broken). P2-C adds idle-WFI on SMP — a CPU with no
-            // runnable thread parks at WFI, gets woken by IPI / IRQ.
+            // Block path with no runnable peer on this CPU. v1.0 P2-Cd:
+            // this is still a deadlock at UP-per-CPU. P2-Cdc lands the
+            // GIC SGI infrastructure that lets idle threads on other
+            // CPUs receive IPI_RESCHED to wake; for now the idle thread
+            // is just a normal-scheduled thread that always-RUNNABLE-
+            // returns to the run tree on yield (see below), so this
+            // path indicates a sleep with no future wakeup possible.
             extinction("sched: deadlock — current is blocking, no runnable peer");
         }
         // Yield path with no runnable peer: keep prev running. Refill
-        // slice — the rationale for this sched() call (pre-emption,
-        // explicit yield) was that prev's slice expired or yield was
-        // requested; either way, give prev a fresh slice now that
-        // it's the only runnable thread and we'd otherwise have to
-        // immediately preempt-back-into-it.
+        // slice — sched() was called for preempt or explicit yield;
+        // either way, prev is the only runnable thread, so give it a
+        // fresh quantum.
         prev->slice_remaining = THREAD_DEFAULT_SLICE_TICKS;
         spin_unlock_irqrestore(NULL, s);
         return;
@@ -218,13 +254,9 @@ void sched(void) {
         // under SMP race (cross-CPU wakeup re-inserted prev into a
         // runqueue between drop-Rendez-lock and entering sched).
         // Don't switch to self — re-insert and let the next sched()
-        // try again. UP: should not happen at v1.0 (see SMP race
-        // trip-hazard).
+        // try again. v1.0 P2-Cd: shouldn't happen on UP-per-CPU.
         if (prev->state == THREAD_RUNNING) {
-            // Prev was yielding; it's still RUNNING. pick_next won't
-            // return prev unless prev is RUNNABLE (in some runqueue).
-            // RUNNING but in a runqueue is the SMP race symptom.
-            insert_sorted(prev);
+            insert_sorted(cs, prev);
         }
         spin_unlock_irqrestore(NULL, s);
         return;
@@ -232,10 +264,16 @@ void sched(void) {
 
     if (prev->state == THREAD_RUNNING) {
         // Yield: advance vd_t past all currently-runnable threads;
-        // insert prev at the back of its band's rotation.
-        prev->vd_t = g_vd_counter++;
+        // insert prev at the back of its band's rotation. P2-Cd: the
+        // per-CPU idle thread participates in the run tree like any
+        // other thread — it's "always runnable" by being re-inserted
+        // here on yield. When a CPU has nothing else queued, sched()
+        // picks idle, which calls WFI inside its run loop and yields
+        // back when an IRQ wakes it. (Per_cpu_main on secondaries +
+        // kthread on primary play this role.)
+        prev->vd_t = cs->vd_counter++;
         prev->state = THREAD_RUNNABLE;
-        insert_sorted(prev);
+        insert_sorted(cs, prev);
     }
     // else: block (SLEEPING) or exit (EXITING) — prev stays out of
     // the run tree. wakeup()/ready() will re-insert SLEEPING; EXITING
@@ -263,15 +301,31 @@ void sched(void) {
 void sched_remove_if_runnable(struct Thread *t) {
     if (!t) return;
     if (t->state != THREAD_RUNNABLE) return;
-    if (!in_run_tree(t)) return;
-    unlink(t);
+    // P2-Cd: walk every CPU's run tree to find the one that owns t.
+    // At v1.0 a thread is only in one CPU's tree, so the first match
+    // wins. P2-Ce work-stealing may move threads between trees;
+    // the same scan covers that case.
+    for (unsigned i = 0; i < DTB_MAX_CPUS; i++) {
+        struct CpuSched *cs = &g_cpu_sched[i];
+        if (!cs->initialized) continue;
+        if (in_run_tree(cs, t)) {
+            unlink(cs, t);
+            return;
+        }
+    }
 }
 
 unsigned sched_runnable_count(void) {
+    // P2-Cd: aggregate across all CPUs' run trees. Diagnostic only —
+    // not a hot-path operation.
     unsigned n = 0;
-    for (unsigned b = 0; b < SCHED_BAND_COUNT; b++) {
-        for (struct Thread *t = g_run_tree[b]; t; t = t->runnable_next) {
-            n++;
+    for (unsigned i = 0; i < DTB_MAX_CPUS; i++) {
+        struct CpuSched *cs = &g_cpu_sched[i];
+        if (!cs->initialized) continue;
+        for (unsigned b = 0; b < SCHED_BAND_COUNT; b++) {
+            for (struct Thread *t = cs->run_tree[b]; t; t = t->runnable_next) {
+                n++;
+            }
         }
     }
     return n;
@@ -280,8 +334,12 @@ unsigned sched_runnable_count(void) {
 unsigned sched_runnable_count_band(unsigned band) {
     if (band >= SCHED_BAND_COUNT) return 0;
     unsigned n = 0;
-    for (struct Thread *t = g_run_tree[band]; t; t = t->runnable_next) {
-        n++;
+    for (unsigned i = 0; i < DTB_MAX_CPUS; i++) {
+        struct CpuSched *cs = &g_cpu_sched[i];
+        if (!cs->initialized) continue;
+        for (struct Thread *t = cs->run_tree[band]; t; t = t->runnable_next) {
+            n++;
+        }
     }
     return n;
 }
@@ -398,34 +456,41 @@ void sleep(struct Rendez *r, int (*cond)(void *arg), void *arg) {
 // ============================================================================
 
 void sched_tick(void) {
-    if (!g_sched_initialized) return;
+    // P2-Cd: per-CPU need_resched + this CPU's sched state.
+    unsigned cpu = smp_cpu_idx_self();
+    if (cpu >= DTB_MAX_CPUS) return;
+    if (!g_cpu_sched[cpu].initialized) return;
 
     struct Thread *t = current_thread();
     if (!t) return;
     if (t->magic != THREAD_MAGIC) return;     // boot transient; ignore
     if (t->state != THREAD_RUNNING) return;    // ignore non-running
 
-    // Decrement; if expired, request preemption + replenish.
+    // Decrement; if expired, request preemption + replenish. The flag
+    // is per-CPU — each CPU's IRQ writes its own slot.
     if (--t->slice_remaining <= 0) {
-        g_need_resched = true;
+        g_need_resched[cpu] = true;
         t->slice_remaining = THREAD_DEFAULT_SLICE_TICKS;
     }
 }
 
 void preempt_check_irq(void) {
     // Fast path: scheduler isn't initialized OR no preemption pending.
-    // Every IRQ-return runs this; keep it cheap.
-    if (!g_need_resched) return;
-    if (!g_sched_initialized) return;
+    // Every IRQ-return runs this; keep it cheap. P2-Cd: per-CPU flag.
+    unsigned cpu = smp_cpu_idx_self();
+    if (cpu >= DTB_MAX_CPUS) return;
+    if (!g_need_resched[cpu]) return;
+    if (!g_cpu_sched[cpu].initialized) return;
 
     struct Thread *t = current_thread();
     if (!t) return;                             // pre-thread_init IRQ
     if (t->magic != THREAD_MAGIC) return;       // corruption — defer
 
     // Clear the flag BEFORE sched() so a re-fire-during-sched (which
-    // can't happen at UP because IRQs are masked, but defensive depth
-    // for SMP) doesn't double-trigger.
-    g_need_resched = false;
+    // can't happen on the same CPU because IRQs are masked, but
+    // defensive depth for SMP cross-CPU writes via IPI_RESCHED at
+    // P2-Cdc) doesn't double-trigger.
+    g_need_resched[cpu] = false;
 
     // sched() does its own irqsave/irqrestore around the run-tree
     // mutation. We're called from vectors.S IRQ-return path with IRQs

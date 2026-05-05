@@ -11,7 +11,9 @@
 
 #include <thylacine/dtb.h>
 #include <thylacine/extinction.h>
+#include <thylacine/sched.h>
 #include <thylacine/smp.h>
+#include <thylacine/thread.h>
 #include <thylacine/types.h>
 
 #include "../arch/arm64/kaslr.h"
@@ -232,6 +234,10 @@ extern char _exception_vectors[];
 
 __attribute__((noreturn))
 void per_cpu_main(int cpu_idx) {
+    if (cpu_idx <= 0 || cpu_idx >= (int)DTB_MAX_CPUS) {
+        extinction("per_cpu_main: invalid cpu_idx");
+    }
+
     // VBAR_EL1 — install the kernel exception vector table. ISB so
     // any subsequent exception sees the new VBAR.
     u64 vbar = (u64)(uintptr_t)_exception_vectors;
@@ -241,25 +247,38 @@ void per_cpu_main(int cpu_idx) {
         :: "r"(vbar) : "memory"
     );
 
-    // TPIDR_EL1 — per-CPU current_thread pointer. NULL at P2-Cb;
-    // P2-Cd or later sets it to the per-CPU idle thread when the
-    // scheduler is per-CPU.
-    __asm__ __volatile__("msr tpidr_el1, xzr" ::: "memory");
+    // P2-Cd: allocate this CPU's idle thread + park in TPIDR_EL1.
+    // The idle thread doesn't own a kstack — it runs on the per-CPU
+    // boot stack already current via SP_EL0 (set in secondary_entry).
+    // We must set TPIDR_EL1 BEFORE sched_init since sched_init reads
+    // current_thread() to record the per-CPU idle pointer.
+    struct Thread *idle = thread_init_per_cpu_idle((unsigned)cpu_idx);
+    if (!idle) extinction("per_cpu_main: thread_init_per_cpu_idle returned NULL");
+    set_current_thread(idle);
     __asm__ __volatile__("msr tpidr_el0, xzr" ::: "memory");
+
+    // Initialize THIS CPU's per-CPU sched state.
+    sched_init((unsigned)cpu_idx);
 
     // Publish the "fully alive" flag. smp_init's wait loop watches
     // this. With MMU on, the store goes through cacheable memory;
-    // dsb sy ensures global visibility.
-    if (cpu_idx >= 0 && cpu_idx < (int)DTB_MAX_CPUS) {
-        g_cpu_alive[cpu_idx] = 1;
-    }
+    // dsb sy ensures global visibility. Order: flag flip after
+    // sched_init so a downstream observer can rely on the per-CPU
+    // sched being functional whenever g_cpu_alive[idx] is true.
+    g_cpu_alive[cpu_idx] = 1;
     __asm__ __volatile__("dsb sy" ::: "memory");
 
-    // Idle. WFI parks the CPU until an event (timer IRQ, SGI). At
-    // P2-Cb IRQs are masked (PSCI default; we never unmask) — so WFI
-    // sleeps until reset. P2-Cd lands SGI infrastructure + per-CPU
-    // IRQ routing; this loop becomes the secondary's idle dispatch
-    // point (waking on IPI_RESCHED → calling sched()).
+    // Per-CPU idle loop. At v1.0 P2-Cd this is a pure WFI park —
+    // secondaries don't unmask IRQs (no per-CPU GIC redistributor
+    // init yet; P2-Cdc lands that), so nothing arrives to wake them
+    // into useful work. The Thread descriptor + sched_init we did
+    // above are infrastructure for P2-Cdc, where the loop becomes:
+    //   for (;;) { sched(); wfi; }
+    // — sched() yields to peers placed by IPI_RESCHED-driven cross-
+    // CPU wakeups, falling back to WFI when nothing is runnable on
+    // this CPU. Calling sched() pre-Cdc adds a tight loop without a
+    // wake source (WFI may return immediately on architectural
+    // events), inflating boot time without scheduling any work.
     for (;;) {
         __asm__ __volatile__("wfi" ::: "memory");
     }

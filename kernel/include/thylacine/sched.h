@@ -39,13 +39,23 @@ struct Thread;
 // post-Phase 4 (when /ctl/ exists); v1.0 P2-Bc bakes the default.
 #define THREAD_DEFAULT_SLICE_TICKS  6
 
-// Initialize the scheduler. Must be called AFTER thread_init: the kernel
-// thread is the boot CPU's initial current_thread and must be in the
-// scheduler's accounting before sched() can pick alternatives.
+// Initialize THIS CPU's scheduler state. Must be called AFTER the CPU's
+// idle thread is parked in TPIDR_EL1 — the idle thread is what sched()
+// falls back to when the run tree empties (P2-Cd). For the boot CPU
+// (cpu_idx=0), the idle thread is `kthread` (set up by thread_init).
+// For secondaries, per_cpu_main creates a fresh idle Thread before
+// calling sched_init.
 //
-// Sets up the per-CPU run trees (one per band, all empty initially —
-// kthread is RUNNING and not in any tree).
-void sched_init(void);
+// Each CPU initializes its own slot in the per-CPU sched state array;
+// concurrent calls from different CPUs are race-free because they
+// touch disjoint slots. Calling twice for the same cpu_idx extincts.
+void sched_init(unsigned cpu_idx);
+
+// Diagnostic accessor: per-CPU idle thread pointer. Returns the Thread
+// installed at sched_init time (CPU 0 = kthread; CPU N = the per_cpu_main
+// idle). NULL if sched_init has not yet been called for cpu_idx, or
+// cpu_idx is out of range.
+struct Thread *sched_idle_thread(unsigned cpu_idx);
 
 // Yield the CPU.
 //

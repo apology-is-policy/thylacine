@@ -150,6 +150,29 @@ void thread_init(void);
 // Accessor for the kernel thread (TID 0). Returns NULL before thread_init.
 struct Thread *kthread(void);
 
+// P2-Cd: allocate the idle Thread for a secondary CPU.
+//
+// Same role kthread plays on the boot CPU: a Thread descriptor that
+// sched_init records as "this CPU's idle." Doesn't own a kstack — the
+// thread runs on the per-CPU boot stack already in use by per_cpu_main
+// (the trampoline assigned that stack via SP_EL0 in start.S).
+//
+// State = THREAD_RUNNING (the caller is "running" as this thread by
+// the time sched_init is called); ctx is zero-initialized and gets
+// filled in by the first cpu_switch_context save (same pattern as
+// kthread).
+//
+// Caller is expected to:
+//   1. Call thread_init_per_cpu_idle(cpu_idx) on this CPU.
+//   2. set_current_thread(returned).
+//   3. sched_init(cpu_idx) — records the returned thread as this
+//      CPU's idle.
+//   4. Enter the per-CPU idle loop.
+//
+// Returns NULL on OOM (Thread alloc fail). cpu_idx >= 1 only — CPU 0's
+// idle is kthread (set up in thread_init).
+struct Thread *thread_init_per_cpu_idle(unsigned cpu_idx);
+
 // Create a kernel thread of `proc` running `entry`. SLUB-allocates the
 // Thread descriptor + 16 KiB kernel stack via alloc_pages(order=2);
 // initializes ctx so the first switch-into the new thread lands at the
