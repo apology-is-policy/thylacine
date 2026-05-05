@@ -115,8 +115,20 @@
 
 static gic_version_t g_version;
 static u64 g_dist_base;        // virtual / identity-mapped physical
-static u64 g_redist_base;      // for CPU 0 at P1-G
+static u64 g_redist_base;      // base of the redistributor REGION;
+                               // per-CPU frames are at +N * 0x20000.
 static u32 g_max_intid;        // from GICD_TYPER
+
+// GICv3 redistributor region stride. Each CPU's redistributor frame is
+// 0x20000 bytes (RD_base 0x0..0xFFFF + SGI_base 0x10000..0x1FFFF). Per
+// IHI 0069 §12.3.1 the redistributor region is contiguous; CPU N's
+// frame base is at offset N * 0x20000 from the region base. On QEMU
+// virt with -smp 4 the region is 4 × 0x20000 = 0x80000 bytes.
+#define GICR_FRAME_STRIDE  0x20000
+
+static inline u64 cpu_redist_base(unsigned cpu_idx) {
+    return g_redist_base + (u64)cpu_idx * GICR_FRAME_STRIDE;
+}
 
 // Handler dispatch table. 1020 INTIDs × 16 bytes = 16320 bytes BSS.
 struct gic_irq_slot {
@@ -261,22 +273,24 @@ static void dist_init(void) {
 #define GICR_ICPENDR0      (GICR_SGI_OFF + 0x0280)
 #define GICR_ICACTIVER0    (GICR_SGI_OFF + 0x0380)
 
-static void redist_init_cpu0(void) {
+static void redist_init_cpu(unsigned cpu_idx) {
+    u64 base = cpu_redist_base(cpu_idx);
+
     // Wake the redistributor: clear ProcessorSleep, wait for
     // ChildrenAsleep to clear (hardware acknowledges the wake).
     //
     // Bound the poll with a deadline: 100 ms at the architectural
     // counter frequency. If hardware never asserts ChildrenAsleep
     // clear, extinct loudly rather than wedging silently.
-    u32 waker = mmio_r32(g_redist_base, GICR_WAKER);
+    u32 waker = mmio_r32(base, GICR_WAKER);
     waker &= ~GICR_WAKER_PROC_SLEEP;
-    mmio_w32(g_redist_base, GICR_WAKER, waker);
+    mmio_w32(base, GICR_WAKER, waker);
     u64 freq = read_cntfrq();
     if (freq == 0) freq = 1000000;          // conservative fallback
     u64 deadline = read_cntpct() + freq / 10;
-    while (mmio_r32(g_redist_base, GICR_WAKER) & GICR_WAKER_CHILD_ASLP) {
+    while (mmio_r32(base, GICR_WAKER) & GICR_WAKER_CHILD_ASLP) {
         if (read_cntpct() > deadline) {
-            extinction("redist_init_cpu0: ChildrenAsleep never cleared (broken redistributor frame?)");
+            extinction("redist_init_cpu: ChildrenAsleep never cleared (broken redistributor frame?)");
         }
     }
 
@@ -286,16 +300,16 @@ static void redist_init_cpu0(void) {
     // OS (kexec) left INTIDs in a non-clean state — otherwise the
     // first IRQ after PSTATE.I unmask could be a stale SGI for which
     // we have no handler attached.
-    mmio_w32(g_redist_base, GICR_ICENABLER0,  0xFFFFFFFFu);
-    mmio_w32(g_redist_base, GICR_ICPENDR0,    0xFFFFFFFFu);
-    mmio_w32(g_redist_base, GICR_ICACTIVER0,  0xFFFFFFFFu);
-    mmio_w32(g_redist_base, GICR_IGROUPR0,    0xFFFFFFFFu);
+    mmio_w32(base, GICR_ICENABLER0,  0xFFFFFFFFu);
+    mmio_w32(base, GICR_ICPENDR0,    0xFFFFFFFFu);
+    mmio_w32(base, GICR_ICACTIVER0,  0xFFFFFFFFu);
+    mmio_w32(base, GICR_IGROUPR0,    0xFFFFFFFFu);
     for (u32 n = 0; n < 32; n++) {
-        mmio_w8(g_redist_base, GICR_IPRIORITYR(0) + n, DEFAULT_PRIORITY);
+        mmio_w8(base, GICR_IPRIORITYR(0) + n, DEFAULT_PRIORITY);
     }
     // PPI config: ICFGR1 covers INTIDs 16..31 (2 bits per INTID).
     // Leave at zero (level-triggered) for the timer + UART.
-    mmio_w32(g_redist_base, GICR_ICFGR1, 0);
+    mmio_w32(base, GICR_ICFGR1, 0);
 }
 
 static void cpu_iface_init(void) {
@@ -370,9 +384,46 @@ bool gic_init(void) {
     // (banked SGI/PPI for this CPU), then CPU interface (last so the
     // CPU starts admitting IRQs only after both sides are armed).
     dist_init();
-    redist_init_cpu0();
+    redist_init_cpu(0);
     cpu_iface_init();
 
+    return true;
+}
+
+bool gic_init_secondary(unsigned cpu_idx) {
+    if (g_version != GIC_VERSION_V3) return false;
+    if (cpu_idx == 0 || cpu_idx >= 64) return false;
+
+    // Per-CPU redistributor wake + SGI/PPI bank config.
+    redist_init_cpu(cpu_idx);
+
+    // Per-CPU CPU interface bring-up (system registers — only writable
+    // from THIS CPU). Same sequence as the boot CPU; the priority mask,
+    // BPR, CTLR, and group-1 enable are all banked per-CPU.
+    cpu_iface_init();
+
+    return true;
+}
+
+bool gic_send_ipi(unsigned target_cpu_idx, u32 sgi_intid) {
+    if (sgi_intid > GIC_SGI_MAX) return false;
+    if (target_cpu_idx >= 16) return false;        // TargetList is 16 bits
+
+    // ICC_SGI1R_EL1 encoding (ARM ARM C5.2.18):
+    //   [55:48]  Aff3
+    //   [47:41]  reserved
+    //   [40]     IRM (0 = TargetList, 1 = broadcast to all-but-self)
+    //   [39:32]  Aff2
+    //   [31:28]  reserved
+    //   [27:24]  INTID (0..15)
+    //   [23:16]  Aff1
+    //   [15:0]   TargetList — bitmap of CPUs within the (Aff1,Aff2,Aff3)
+    //                          cluster, indexed by Aff0
+    //
+    // On QEMU virt all CPUs are Aff3=Aff2=Aff1=0; Aff0 == cpu_idx, so
+    // TargetList = 1 << target_cpu_idx selects the single target.
+    u64 sgi = ((u64)sgi_intid << 24) | (1ULL << target_cpu_idx);
+    __asm__ __volatile__("msr ICC_SGI1R_EL1, %0\nisb\n" :: "r"(sgi) : "memory");
     return true;
 }
 
@@ -406,14 +457,23 @@ void gic_dispatch(u32 intid) {
 // ---------------------------------------------------------------------------
 // gic_enable_irq / gic_disable_irq.
 //
-// SGI/PPI (intid < 32): use redistributor's banked GICR_ISENABLER0.
+// SGI/PPI (intid < 32): use redistributor's banked GICR_ISENABLER0 of
+// the CALLING CPU. SGI/PPI registers are CPU-banked per ARM IHI 0069
+// §5.4.1, so a write affects only the CPU whose frame is targeted.
+// gic_enable_irq is the caller's promise: "enable this SGI/PPI on me."
+//
 // SPI (intid >= 32): use distributor's GICD_ISENABLERn (n = intid / 32).
+// SPIs are global; affinity routing (GICD_IROUTERn) decides which CPU
+// receives the IRQ.
 // ---------------------------------------------------------------------------
+
+#include <thylacine/smp.h>     // smp_cpu_idx_self for per-CPU redist base
 
 bool gic_enable_irq(u32 intid) {
     if (intid >= GIC_NUM_INTIDS) return false;
     if (intid < 32) {
-        mmio_w32(g_redist_base, GICR_ISENABLER0, 1u << intid);
+        u64 base = cpu_redist_base(smp_cpu_idx_self());
+        mmio_w32(base, GICR_ISENABLER0, 1u << intid);
     } else {
         u32 n = intid / 32;
         u32 bit = intid % 32;
@@ -425,7 +485,8 @@ bool gic_enable_irq(u32 intid) {
 bool gic_disable_irq(u32 intid) {
     if (intid >= GIC_NUM_INTIDS) return false;
     if (intid < 32) {
-        mmio_w32(g_redist_base, GICR_ICENABLER0, 1u << intid);
+        u64 base = cpu_redist_base(smp_cpu_idx_self());
+        mmio_w32(base, GICR_ICENABLER0, 1u << intid);
     } else {
         u32 n = intid / 32;
         u32 bit = intid % 32;

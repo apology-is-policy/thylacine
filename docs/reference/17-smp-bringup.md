@@ -287,10 +287,68 @@ FIQ and SError slots in both groups remain `VEC_UNEXPECTED` — neither is unmas
 
 ## Status
 
-Implemented: P2-Ca + P2-Cb + P2-Cc at `<commit-pending>`. Stubbed: nothing. Deferred:
-- **Per-CPU run tree + per-CPU sched_init**: P2-Cd. Currently `g_run_tree` is global (P2-Ba); secondaries cannot be scheduled to until per-CPU run trees land.
-- **Per-CPU idle thread + scheduler integration**: P2-Cd (idle thread per CPU, sched picks idle when nothing else runnable).
-- **Per-CPU SP_EL0 to high VA on secondaries**: P2-Cd (alongside per-CPU idle thread bring-up).
+Implemented: P2-Ca + P2-Cb + P2-Cc + P2-Cd (Cda + Cdb + Cdc) at `<commit-pending>`. Stubbed: nothing. Deferred:
+- **Cross-CPU thread placement**: P2-Ce work-stealing. Currently `ready(t)` inserts into THIS CPU's tree; threads created on the boot CPU stay on the boot CPU.
+- **finish_task_switch pattern (closes SMP wait/wake race)**: P2-Cf.
+- **scheduler.tla SMP refinement** (per-CPU runqueues + Steal action + IPI ordering invariant I-18): P2-Cg.
+- **IPI_TLB_FLUSH / IPI_HALT / IPI_GENERIC** (ARCH §20.4): land when use-cases arrive (TLB shootdown for namespace rebind in Phase 5+; shutdown for clean halt; generic callback delivery).
+- **Per-CPU SP_EL0 to high VA on secondaries**: P2-Ce (alongside per-CPU work delivery).
+- **Pi 5 / multi-cluster Aff{1,2,3} encoding**: Phase 7 hardening pass.
+
+---
+
+## P2-Cd: per-CPU run trees + idle threads + IPI infrastructure
+
+P2-Cd extends per_cpu_main beyond a pure WFI park. After per-CPU init (PAC, MMU, VBAR, exception stack — all from P2-Cb/Cc), each secondary now:
+
+1. Allocates an idle Thread descriptor via `thread_init_per_cpu_idle(cpu_idx)` (no kstack — runs on the per-CPU boot stack assigned by start.S secondary_entry).
+2. Sets TPIDR_EL1 to that idle Thread.
+3. Calls `sched_init(cpu_idx)` — initializes this CPU's slot in `g_cpu_sched[]` (run tree, vd_counter, idle pointer).
+4. Calls `smp_cpu_ipi_init(cpu_idx)` — see below.
+5. Sets `g_cpu_alive[cpu_idx]` (the "fully ready" signal that smp_init waits for).
+6. Enters the idle loop: `for(;;){sched();wfi;}`.
+
+### Per-CPU GIC bring-up (P2-Cdc)
+
+`gic_init_secondary(cpu_idx)` performs this CPU's GIC initialization:
+- Per-CPU redistributor wake + SGI/PPI bank config (group 1 NS, default priority, all disabled). Frame at `g_redist_base + cpu_idx * 0x20000`.
+- Per-CPU CPU interface system-register bring-up: ICC_SRE/PMR/BPR/CTLR/IGRPEN1.
+
+The redistributor MMIO region was mapped Device-nGnRnE in `gic_init` — covers all per-CPU frames in one mmu_map_device call (region size from DTB).
+
+### IPI infrastructure
+
+SGI INTID assignments (`IPI_*` macros in `<thylacine/smp.h>`):
+- **`IPI_RESCHED = 0`** — wake target CPU's WFI to process its run tree. v1.0 P2-Cdc lands this only.
+- IPI_TLB_FLUSH / HALT / GENERIC reserved per ARCH §20.4; deferred until use-cases arrive.
+
+`gic_send_ipi(target_cpu_idx, sgi_intid)` writes ICC_SGI1R_EL1:
+```
+sgi = (sgi_intid << 24) | (1 << target_cpu_idx);
+```
+Encoding pinned for QEMU virt's flat-Aff0 cluster (Aff{1,2,3}=0). Multi-cluster hardware needs Aff fields populated — Phase 7 work.
+
+`ipi_resched_handler(intid, arg)` (smp.c) increments `g_ipi_resched_count[smp_cpu_idx_self()]` for observability. The handler doesn't manually call sched() — vectors.S IRQ slot calls `preempt_check_irq` after `exception_irq_curr_el → gic_dispatch → ipi_resched_handler` returns; if any cross-CPU placer set this CPU's `need_resched`, preempt_check_irq picks it up. At v1.0 P2-Cdc no cross-CPU placer exists yet (P2-Ce); IPI_RESCHED is purely a "wake from WFI" signal proving the SGI delivery path works.
+
+### smp_cpu_ipi_init order
+
+Called from per_cpu_main BEFORE `g_cpu_alive[cpu_idx] = 1` so by the time the boot CPU's smp_init wait observes alive, the secondary is fully IPI-receivable:
+1. gic_init_secondary(cpu_idx)
+2. gic_attach(IPI_RESCHED, ipi_resched_handler, NULL)
+3. gic_enable_irq(IPI_RESCHED)
+4. msr daifclr, #2 (unmask IRQs at PSTATE)
+
+### gic_enable_irq SGI/PPI now per-CPU
+
+P2-Cdc bug fix: `gic_enable_irq` for SGI/PPI was hardcoded to write `g_redist_base` (CPU 0's frame). For secondaries calling it from their own context, the write must target the calling CPU's frame. Refactored to use `cpu_redist_base(smp_cpu_idx_self())`. The fix doesn't affect existing CPU-0 callers (gic_init's timer-PPI enable in main.c) because `cpu_redist_base(0) == g_redist_base`.
+
+### Test
+
+`smp.ipi_resched_smoke`:
+- Snapshot pre-send `g_ipi_resched_count[]` baseline.
+- Boot CPU calls `gic_send_ipi(i, IPI_RESCHED)` for each secondary `i`.
+- Polls (with 100-tick timeout per secondary) until each secondary's count > baseline.
+- Verifies boot CPU's slot unchanged (we don't IPI ourselves).
 - **GIC SGI infrastructure + IPI dispatch** (IPI_RESCHED/TLB_FLUSH/HALT/GENERIC): P2-Cd.
 - **Work-stealing**: P2-Ce.
 - **finish_task_switch pattern (closes SMP wait/wake race)**: P2-Cf.

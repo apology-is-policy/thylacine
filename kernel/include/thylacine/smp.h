@@ -133,4 +133,34 @@ extern volatile uintptr_t g_exception_stack_observed[DTB_MAX_CPUS];
 // in future sub-chunks.
 unsigned smp_cpu_idx_self(void);
 
+// P2-Cdc: IPI (Inter-Processor Interrupt) infrastructure.
+//
+// SGI INTID assignments. v1.0 P2-Cdc lands only IPI_RESCHED — used to
+// wake a secondary's WFI when its run tree gets new work or when
+// preempt_check_irq needs to fire on that CPU. P2-Ce / P2-Cf may add
+// more (IPI_TLB_FLUSH for cross-CPU TLB invalidation; IPI_HALT for
+// shutdown). ARCH §20.4 reserves these names.
+#define IPI_RESCHED       0u    // SGI 0
+// #define IPI_TLB_FLUSH  1u    // SGI 1 — P2-Ce or later
+// #define IPI_HALT       2u    // SGI 2 — P2-Cd2+ shutdown
+// #define IPI_GENERIC    3u    // SGI 3 — generic callback delivery
+
+// P2-Cdc: IPI_RESCHED hit count per CPU. Set by the IPI handler each
+// time a CPU receives an IPI_RESCHED. Tests use this to verify cross-
+// CPU IPI delivery (boot sends to secondary; secondary's slot
+// increments). Read by anyone; only the receiving CPU writes its slot.
+extern volatile u64 g_ipi_resched_count[DTB_MAX_CPUS];
+
+// P2-Cdc: secondary IPI bring-up. Called from per_cpu_main on each
+// secondary AFTER sched_init + g_cpu_alive flag is set. Performs the
+// per-CPU GIC redistributor + CPU interface init via gic_init_secondary,
+// attaches the IPI_RESCHED handler, enables SGI 0 at the source, and
+// unmasks DAIF.I so IRQs can be delivered. From this point on, the
+// secondary can receive IPIs.
+//
+// Must run BEFORE the secondary's idle loop enters its first WFI; the
+// loop body's `for(;;){sched();wfi;}` pattern relies on IRQs being
+// enabled to wake from WFI when an IPI arrives.
+void smp_cpu_ipi_init(unsigned cpu_idx);
+
 #endif // THYLACINE_SMP_H

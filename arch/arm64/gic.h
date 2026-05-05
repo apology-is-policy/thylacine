@@ -133,4 +133,34 @@ void gic_eoi(u32 intid);
 // alternative would be to move dispatch into the IRQ handler itself.
 void gic_dispatch(u32 intid);
 
+// P2-Cdc: per-CPU GIC bring-up for secondaries. Wakes this CPU's
+// redistributor (clear ProcessorSleep, wait ChildrenAsleep), configures
+// the SGI/PPI bank (group 1 NS, default priority, all disabled), and
+// brings up the system-register CPU interface (ICC_SRE/PMR/BPR/CTLR/
+// IGRPEN1). Must be called from the secondary CPU itself — the
+// redistributor MMIO is per-CPU-banked and the CPU interface is
+// system-register-only-from-this-EL.
+//
+// Preconditions: gic_init() has run on the boot CPU (distributor +
+// CPU 0's redistributor + CPU 0's interface are live). cpu_idx is in
+// [1, DTB_MAX_CPUS).
+//
+// Returns true on success; extincts on redistributor wake timeout.
+bool gic_init_secondary(unsigned cpu_idx);
+
+// P2-Cdc: send a Software Generated Interrupt (SGI) to a target CPU.
+// SGIs are GIC INTIDs 0..15 — used as cross-CPU IPI vectors. Target
+// receives an IRQ at the given INTID, dispatches it through the same
+// gic_dispatch path as PPIs/SPIs (i.e., to whatever handler is
+// gic_attach'd).
+//
+// On QEMU virt (and similar flat-Aff0 boards) all CPUs share Aff{1,2,3}
+// = 0 and have Aff0 = 0..N-1. ICC_SGI1R_EL1 is encoded with TargetList =
+// 1 << target_cpu_idx (bitmap within the cluster).
+//
+// sgi_intid must be in [0, GIC_SGI_MAX]. target_cpu_idx must be a valid
+// CPU (caller's responsibility — not validated against
+// smp_cpu_online_count). Returns false on invalid args.
+bool gic_send_ipi(unsigned target_cpu_idx, u32 sgi_intid);
+
 #endif // THYLACINE_ARCH_ARM64_GIC_H

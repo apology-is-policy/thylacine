@@ -20,8 +20,18 @@
 //   recorded. CPU 0's idle is `kthread`; CPUs 1..N-1's idles are
 //   allocated by per_cpu_main via thread_init_per_cpu_idle. All idles
 //   share kproc as their proc.
+//
+// smp.ipi_resched_smoke (P2-Cdc)
+//   Boot CPU sends IPI_RESCHED to each secondary; waits for each
+//   secondary's g_ipi_resched_count slot to increment from its
+//   pre-send baseline. Verifies cross-CPU SGI delivery: the GIC
+//   distributor + each secondary's redistributor + CPU interface
+//   are correctly bringing IPI_RESCHED through to the IPI handler.
 
 #include "test.h"
+
+#include "../../arch/arm64/gic.h"
+#include "../../arch/arm64/timer.h"
 
 #include <thylacine/dtb.h>
 #include <thylacine/proc.h>
@@ -152,4 +162,56 @@ void test_smp_per_cpu_idle_smoke(void) {
         TEST_ASSERT(sched_idle_thread(i) == NULL,
             "sched_idle_thread beyond cpu_count is NULL");
     }
+}
+
+void test_smp_ipi_resched_smoke(void) {
+    unsigned cpus = smp_cpu_count();
+    if (cpus < 2) {
+        // No secondaries available — skip but don't fail. Boot CPU
+        // can't send an IPI to itself meaningfully via SGI 1R (Linux
+        // does sometimes for parking, but the semantics aren't what
+        // we want here).
+        return;
+    }
+
+    // Snapshot pre-send counts. Each secondary may have already
+    // received some IPIs during bring-up if anyone (e.g., a future
+    // sub-chunk) sent them; the test verifies post-send > pre-send,
+    // not absolute count.
+    u64 baseline[DTB_MAX_CPUS];
+    for (unsigned i = 0; i < DTB_MAX_CPUS; i++) {
+        baseline[i] = g_ipi_resched_count[i];
+    }
+
+    // Send IPI_RESCHED to each secondary.
+    for (unsigned i = 1; i < cpus; i++) {
+        TEST_ASSERT(gic_send_ipi(i, IPI_RESCHED),
+            "gic_send_ipi must accept valid target + SGI INTID");
+    }
+
+    // Wait for each secondary's count to increment. Per ARM IHI 0069
+    // §4.5 SGI delivery is microsecond-fast on QEMU virt; bound the
+    // poll at 100 ticks (100 ms) per secondary to allow generous
+    // headroom for emulator latency.
+    for (unsigned i = 1; i < cpus; i++) {
+        u64 deadline = timer_get_ticks() + 100;
+        while (g_ipi_resched_count[i] <= baseline[i]) {
+            if (timer_get_ticks() > deadline) {
+                TEST_ASSERT(false,
+                    "IPI_RESCHED to secondary CPU never observed (handler not invoked?)");
+            }
+            // No WFI — IRQs masked at PSTATE here would block our own
+            // wake; the boot CPU is still running with IRQs enabled
+            // (msr daifclr #2 in main.c) so timer ticks fire and
+            // timer_get_ticks() advances. dmb is enough to re-fetch
+            // the volatile.
+            __asm__ __volatile__("dmb ish" ::: "memory");
+        }
+        TEST_ASSERT(g_ipi_resched_count[i] > baseline[i],
+            "IPI_RESCHED handler must have incremented secondary's count");
+    }
+
+    // Boot CPU's slot should be unchanged — we don't send to ourselves.
+    TEST_EXPECT_EQ(g_ipi_resched_count[0], baseline[0],
+        "boot CPU's IPI count is unchanged (we did not target ourselves)");
 }

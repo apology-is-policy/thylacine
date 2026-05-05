@@ -16,6 +16,7 @@
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 
+#include "../arch/arm64/gic.h"
 #include "../arch/arm64/kaslr.h"
 #include "../arch/arm64/psci.h"
 #include "../arch/arm64/timer.h"
@@ -66,10 +67,51 @@ char g_exception_stacks[DTB_MAX_CPUS][EXCEPTION_STACK_SIZE];
 // reads to verify the address falls inside g_exception_stacks[cpu_idx].
 volatile uintptr_t g_exception_stack_observed[DTB_MAX_CPUS];
 
+// P2-Cdc: IPI_RESCHED receive counter per CPU. Incremented by the
+// IPI handler on every receive; tests read to verify cross-CPU
+// IPI delivery.
+volatile u64 g_ipi_resched_count[DTB_MAX_CPUS];
+
 unsigned smp_cpu_idx_self(void) {
     u64 mpidr;
     __asm__ __volatile__("mrs %0, mpidr_el1" : "=r"(mpidr));
     return (unsigned)(mpidr & 0xffu);
+}
+
+// P2-Cdc: handler for IPI_RESCHED.
+//
+// Called from gic_dispatch via vectors.S IRQ slot when SGI 0 is
+// received on any CPU. Increments this CPU's receive counter (for
+// observability) and otherwise does nothing — the IPI's job is to
+// wake the receiving CPU from WFI. preempt_check_irq runs after
+// this handler returns (vectors.S IRQ slot calls preempt_check_irq
+// after exception_irq_curr_el → gic_dispatch → ipi_resched_handler);
+// if the receiving CPU's need_resched was set by a cross-CPU placer,
+// preempt_check_irq picks it up and calls sched(). At v1.0 P2-Cdc no
+// cross-CPU placer exists yet (P2-Ce work-stealing introduces it);
+// IPI_RESCHED here is purely a "wake from WFI" signal proving the
+// SGI delivery path works.
+static void ipi_resched_handler(u32 intid, void *arg) {
+    (void)intid;
+    (void)arg;
+    unsigned cpu = smp_cpu_idx_self();
+    if (cpu < DTB_MAX_CPUS) {
+        g_ipi_resched_count[cpu]++;
+    }
+}
+
+void smp_cpu_ipi_init(unsigned cpu_idx) {
+    if (cpu_idx == 0) extinction("smp_cpu_ipi_init: cpu_idx 0 reserved for boot path");
+    if (!gic_init_secondary(cpu_idx))
+        extinction("smp_cpu_ipi_init: gic_init_secondary failed");
+    if (!gic_attach(IPI_RESCHED, ipi_resched_handler, NULL))
+        extinction("smp_cpu_ipi_init: gic_attach(IPI_RESCHED) failed");
+    if (!gic_enable_irq(IPI_RESCHED))
+        extinction("smp_cpu_ipi_init: gic_enable_irq(IPI_RESCHED) failed");
+
+    // Unmask IRQs at PSTATE. From this point the secondary admits
+    // GIC SGIs (and any per-CPU PPIs we enable later — timer, etc.).
+    __asm__ __volatile__("msr daifclr, #2" ::: "memory");
 }
 
 static unsigned g_cpu_count;
@@ -260,26 +302,31 @@ void per_cpu_main(int cpu_idx) {
     // Initialize THIS CPU's per-CPU sched state.
     sched_init((unsigned)cpu_idx);
 
+    // P2-Cdc: per-CPU GIC bring-up + IPI handler attachment + IRQ
+    // unmask. Done BEFORE g_cpu_alive flip + the idle loop so:
+    //   1. The boot CPU's smp_init wait still observes alive flip as
+    //      the "fully ready" signal — by the time alive is true, this
+    //      CPU is also IPI-ready.
+    //   2. The first WFI in the idle loop has IRQs unmasked, so an
+    //      incoming IPI_RESCHED actually wakes it.
+    smp_cpu_ipi_init((unsigned)cpu_idx);
+
     // Publish the "fully alive" flag. smp_init's wait loop watches
     // this. With MMU on, the store goes through cacheable memory;
     // dsb sy ensures global visibility. Order: flag flip after
-    // sched_init so a downstream observer can rely on the per-CPU
-    // sched being functional whenever g_cpu_alive[idx] is true.
+    // sched_init + IPI bring-up so a downstream observer can rely on
+    // the per-CPU sched being functional + IPI-receivable whenever
+    // g_cpu_alive[idx] is true.
     g_cpu_alive[cpu_idx] = 1;
     __asm__ __volatile__("dsb sy" ::: "memory");
 
-    // Per-CPU idle loop. At v1.0 P2-Cd this is a pure WFI park —
-    // secondaries don't unmask IRQs (no per-CPU GIC redistributor
-    // init yet; P2-Cdc lands that), so nothing arrives to wake them
-    // into useful work. The Thread descriptor + sched_init we did
-    // above are infrastructure for P2-Cdc, where the loop becomes:
-    //   for (;;) { sched(); wfi; }
-    // — sched() yields to peers placed by IPI_RESCHED-driven cross-
-    // CPU wakeups, falling back to WFI when nothing is runnable on
-    // this CPU. Calling sched() pre-Cdc adds a tight loop without a
-    // wake source (WFI may return immediately on architectural
-    // events), inflating boot time without scheduling any work.
+    // Per-CPU idle loop. With IRQs now unmasked + the per-CPU GIC
+    // brought up, an IPI_RESCHED from any other CPU will wake this
+    // CPU's WFI. sched() yields to anything placed on this CPU's run
+    // tree (P2-Ce work-stealing introduces cross-CPU placement); if
+    // empty, sched() returns and we WFI again until the next event.
     for (;;) {
+        sched();
         __asm__ __volatile__("wfi" ::: "memory");
     }
 }

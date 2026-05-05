@@ -292,6 +292,8 @@ void boot_main(void) {
     uart_putdec((u64)EXCEPTION_STACK_SIZE);
     uart_puts(" B/CPU; SPSel=0 kernel mode)\n");
 
+    uart_puts("  ipi:  GICv3 SGIs live (IPI_RESCHED=SGI 0; per-CPU GIC redist + IRQ unmask on secondaries)\n");
+
     uart_puts("  kproc:   pid=");
     uart_putdec((u64)kproc()->pid);
     uart_puts(" threads=");
