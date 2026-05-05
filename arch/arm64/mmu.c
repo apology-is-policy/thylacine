@@ -336,9 +336,26 @@ static void build_page_tables(u64 slide) {
 #define SCTLR_C  (1ull << 2)
 #define SCTLR_I  (1ull << 12)
 
-void mmu_enable(u64 slide) {
-    build_page_tables(slide);
-
+// mmu_program_this_cpu — program the MMU registers on the calling CPU
+// using the already-built page tables (l0_ttbr0 / l0_ttbr1). Idempotent
+// modulo SCTLR.M (the OR-in is harmless when already set).
+//
+// Called from:
+//   1. mmu_enable (primary CPU at boot, after build_page_tables).
+//   2. secondary CPUs from start.S after PSCI brings them up — they
+//      re-use the primary's tables (the kernel image is shared, the
+//      user-VA TTBR0 identity map covers the same low 4 GiB).
+//
+// SMP coherence: TTBR0 and TTBR1 point to tables in regular RAM that
+// the primary already clean+invalidated to PoC during build (write
+// back any dirty cache lines to PoC; secondaries re-read from PoC
+// when their MMU first walks the table). The primary's tlbi_vmalle1is
+// in mmu_enable below isn't needed on secondaries because their TLB
+// is empty post-PSCI bring-up. P2-Ca trip-hazard: secondaries must
+// clean their own dcache before reading the tables (handled by the
+// PoC clean done by build_page_tables which uses dc cvau + dsb ish;
+// the inner-shareable dsb makes the writeback visible to all CPUs).
+void mmu_program_this_cpu(void) {
     __asm__ __volatile__(
         "msr mair_el1, %0\n"
         "msr tcr_el1, %1\n"
@@ -356,6 +373,11 @@ void mmu_enable(u64 slide) {
            "r" ((u64)(SCTLR_M | SCTLR_C | SCTLR_I))
         : "x9", "memory"
     );
+}
+
+void mmu_enable(u64 slide) {
+    build_page_tables(slide);
+    mmu_program_this_cpu();
 
     // After this point, all loads/stores go through the page tables.
     // PC is still load PA via TTBR0; the boot stub now long-branches

@@ -14,6 +14,7 @@ set(KERNEL_SRCS
     proc.c
     thread.c
     sched.c
+    smp.c
     ../arch/arm64/start.S
     ../arch/arm64/uart.c
     ../arch/arm64/mmu.c
@@ -24,6 +25,7 @@ set(KERNEL_SRCS
     ../arch/arm64/timer.c
     ../arch/arm64/hwfeat.c
     ../arch/arm64/context.S
+    ../arch/arm64/psci.c
     ../lib/dtb.c
     ../mm/buddy.c
     ../mm/magazines.c
@@ -40,6 +42,7 @@ set(KERNEL_SRCS
     test/test_context.c
     test/test_sched.c
     test/test_rendez.c
+    test/test_smp.c
 )
 
 set(KERNEL_LD_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/../arch/arm64/kernel.ld)

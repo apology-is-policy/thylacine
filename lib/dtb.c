@@ -501,3 +501,147 @@ u64 dtb_get_chosen_rng_seed(void) {
     }
     return folded;
 }
+
+// ---------------------------------------------------------------------------
+// CPU enumeration + PSCI method (P2-Ca).
+// ---------------------------------------------------------------------------
+//
+// /cpus/cpu@N nodes are identified by device_type = "cpu". Each holds
+// a `reg` property — under /cpus' #address-cells = 1 and #size-cells = 0
+// (QEMU virt convention), `reg` is a single u32 cell holding the CPU's
+// MPIDR aff bits.
+//
+// We don't track the parent — instead, we match by device_type =
+// "cpu" globally. On QEMU virt this is unambiguous (only the 4 cpu@*
+// nodes have device_type = "cpu"). On stranger boards a /cpus
+// container check could be added; the trade-off is parser complexity
+// vs precision. For v1.0 the global match suffices.
+
+static u32 g_cpu_count_cached = 0;
+
+// Walk callback: for each node with device_type = "cpu", report the
+// cpu's reg cell. Stops walking when stop_at_count is reached.
+//
+// out_mpidrs: pre-allocated buffer of at least DTB_MAX_CPUS u64s.
+// returns: count actually populated (≤ DTB_MAX_CPUS).
+static u32 dtb_walk_cpus(u64 *out_mpidrs, u32 max_count) {
+    if (!g_dtb.ready) return 0;
+
+    struct fdt_walker w;
+    walker_start(&w);
+
+    // Per-node accumulator stack — track device_type and reg per node.
+    struct {
+        bool      is_cpu;
+        u32       reg_cell;
+        bool      reg_present;
+    } stack[DTB_MAX_DEPTH];
+    int sp = 0;
+    u32 count = 0;
+
+    for (;;) {
+        const char *name = NULL, *propname = NULL;
+        const uint8_t *propdata = NULL;
+        uint32_t proplen = 0;
+        uint32_t tok = walker_next(&w, &name, &propname, &propdata, &proplen);
+        if (tok == FDT_END) break;
+
+        if (tok == FDT_BEGIN_NODE) {
+            if (sp < DTB_MAX_DEPTH) {
+                stack[sp].is_cpu      = false;
+                stack[sp].reg_cell    = 0;
+                stack[sp].reg_present = false;
+            }
+            sp++;
+            continue;
+        }
+        if (tok == FDT_END_NODE) {
+            if (sp > 0) {
+                sp--;
+                if (sp < DTB_MAX_DEPTH &&
+                    stack[sp].is_cpu && stack[sp].reg_present) {
+                    if (count < max_count) {
+                        out_mpidrs[count] = (u64)stack[sp].reg_cell;
+                    }
+                    count++;
+                }
+            }
+            continue;
+        }
+        if (tok == FDT_PROP && sp > 0 && sp <= DTB_MAX_DEPTH) {
+            int si = sp - 1;
+            if (k_streq(propname, "device_type") &&
+                proplen >= 4 &&
+                stringlist_contains((const char *)propdata, proplen, "cpu")) {
+                stack[si].is_cpu = true;
+            } else if (k_streq(propname, "reg") && proplen >= 4) {
+                // /cpus has #address-cells = 1; reg is a single u32 cell.
+                stack[si].reg_cell    = be32_load(propdata);
+                stack[si].reg_present = true;
+            }
+        }
+    }
+    return count;
+}
+
+u32 dtb_cpu_count(void) {
+    if (g_cpu_count_cached) return g_cpu_count_cached;
+    u64 ignore[DTB_MAX_CPUS];
+    g_cpu_count_cached = dtb_walk_cpus(ignore, DTB_MAX_CPUS);
+    return g_cpu_count_cached;
+}
+
+bool dtb_cpu_mpidr(u32 idx, u64 *out_mpidr) {
+    if (!out_mpidr) return false;
+    if (idx >= DTB_MAX_CPUS) return false;
+
+    u64 ids[DTB_MAX_CPUS];
+    u32 count = dtb_walk_cpus(ids, DTB_MAX_CPUS);
+    if (idx >= count) return false;
+
+    *out_mpidr = ids[idx];
+    return true;
+}
+
+dtb_psci_method_t dtb_psci_method(void) {
+    if (!g_dtb.ready) return DTB_PSCI_NONE;
+
+    struct fdt_walker w;
+    walker_start(&w);
+
+    bool in_psci = false;
+    int psci_depth = -1;
+    dtb_psci_method_t result = DTB_PSCI_NONE;
+
+    for (;;) {
+        const char *name = NULL, *propname = NULL;
+        const uint8_t *propdata = NULL;
+        uint32_t proplen = 0;
+        uint32_t tok = walker_next(&w, &name, &propname, &propdata, &proplen);
+        if (tok == FDT_END) break;
+
+        if (tok == FDT_BEGIN_NODE) {
+            // Match /psci or /psci@... — name starts with "psci".
+            if (!in_psci && name[0] == 'p' && name[1] == 's' &&
+                name[2] == 'c' && name[3] == 'i') {
+                in_psci = true;
+                psci_depth = w.depth;
+            }
+            continue;
+        }
+        if (tok == FDT_END_NODE) {
+            if (in_psci && w.depth < psci_depth) break;
+            continue;
+        }
+        if (tok == FDT_PROP && in_psci && k_streq(propname, "method")) {
+            // method is a NUL-terminated string: "hvc" or "smc".
+            if (proplen >= 4 && k_streq((const char *)propdata, "hvc")) {
+                result = DTB_PSCI_HVC;
+            } else if (proplen >= 4 && k_streq((const char *)propdata, "smc")) {
+                result = DTB_PSCI_SMC;
+            }
+            break;
+        }
+    }
+    return result;
+}

@@ -33,8 +33,11 @@
 #include <thylacine/page.h>
 #include <thylacine/proc.h>
 #include <thylacine/sched.h>
+#include <thylacine/smp.h>
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
+
+#include "../arch/arm64/psci.h"
 
 // From arch/arm64/start.S — DTB physical address handed to us by the
 // bootloader (in x0 per the Linux ARM64 boot protocol). Populated
@@ -88,7 +91,14 @@ void boot_main(void) {
         uart_puts("EL1 (direct)\n");
     }
 
-    uart_puts("  cpus: 1 (P1-C-extras; SMP at P1-F)\n");
+    {
+        // CPU count printed pre-bringup; smp_init() (later in boot) brings
+        // up the secondaries and reports the online count in the smp: line.
+        u32 dtb_cpus = dtb_cpu_count();
+        uart_puts("  cpus: ");
+        uart_putdec(dtb_cpus ? (u64)dtb_cpus : (u64)1);
+        uart_puts(" (DTB-reported; secondaries bring up at smp_init)\n");
+    }
 
     uart_puts("  mem:  ");
     if (mem_ok) {
@@ -251,6 +261,32 @@ void boot_main(void) {
     proc_init();
     thread_init();
     sched_init();
+
+    // SMP secondary bring-up (P2-Ca). Reads /psci/method, brings up
+    // each /cpus/cpu@N (N>0) via PSCI_CPU_ON pointing at the asm
+    // trampoline secondary_entry. Each secondary flips its online
+    // flag + parks at WFI; primary waits with timeout. Failures are
+    // logged but do not abort the boot.
+    bool psci_ok = psci_init();
+    unsigned secondaries_online = psci_ok ? smp_init() : 0;
+    if (!psci_ok && dtb_cpu_count() > 1) {
+        // Multi-CPU DTB but no PSCI — UP fallback. smp_init still
+        // marks boot online + caches the count.
+        smp_init();
+    }
+
+    uart_puts("  smp:  ");
+    uart_putdec((u64)smp_cpu_online_count());
+    uart_puts("/");
+    uart_putdec((u64)smp_cpu_count());
+    uart_puts(" cpus online (boot + ");
+    uart_putdec((u64)secondaries_online);
+    uart_puts(" secondaries via PSCI ");
+    {
+        dtb_psci_method_t m = dtb_psci_method();
+        uart_puts(m == DTB_PSCI_HVC ? "HVC" : m == DTB_PSCI_SMC ? "SMC" : "NONE");
+    }
+    uart_puts(")\n");
 
     uart_puts("  kproc:   pid=");
     uart_putdec((u64)kproc()->pid);

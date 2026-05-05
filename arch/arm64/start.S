@@ -338,6 +338,92 @@ _hang:
 .size _hang, . - _hang
 
 // ---------------------------------------------------------------------------
+// secondary_entry — PSCI bring-up trampoline (P2-Ca).
+//
+// Reached when the primary issues PSCI_CPU_ON for a secondary CPU,
+// pointing the entry-point arg at this label's PA. The secondary
+// arrives with:
+//   - x0 = context_id passed by primary (= secondary CPU index, 1..N-1).
+//   - MMU off.
+//   - PSTATE.DAIF.* = 1 (all maskable exceptions masked).
+//   - SP undefined.
+//   - EL1.
+//
+// At P2-Ca the trampoline is intentionally minimal — it flips the
+// per-CPU `g_cpu_online[idx]` flag and parks at WFI. No MMU enable,
+// no PAC init, no per-CPU exception stack, no vector table. Those
+// land in subsequent P2-C sub-chunks. Secondaries here are observably
+// alive (primary sees the flag) but cannot execute kernel code.
+//
+// Cache discipline: secondary writes the flag with caches off (MMU
+// off → all data accesses Device-nGnRnE per ARM ARM B2.7). The store
+// reaches memory directly. dsb sy guarantees completion before the
+// WFI loop. Primary reads the flag through TTBR1's Normal-WB
+// cacheable mapping; cache coherence on QEMU virt is automatic in
+// the inner-shareable domain. On real hardware where coherency might
+// require explicit ops, primary's read uses `volatile` + a memory
+// barrier per iteration of the polling loop (see kernel/smp.c).
+//
+// The trampoline lives in .text so it's part of the kernel image's
+// loaded PA range. Primary computes its PA via:
+//   secondary_entry_pa = kaslr_kernel_pa_start() +
+//                        ((u64)secondary_entry - (u64)_kernel_start)
+// and passes that to PSCI_CPU_ON's entry-point arg.
+//
+// PIC discipline: g_cpu_online address is reached via adrp + lo12
+// (PC-relative). PC = PA at trampoline entry. g_cpu_online is in
+// BSS (kernel image). Their relative offset is constant (link-time
+// equals run-time) so PC-relative addressing produces the right PA.
+// ---------------------------------------------------------------------------
+.section ".text", "ax"
+.globl secondary_entry
+.type secondary_entry, %function
+secondary_entry:
+    // BTI landing pad. PSCI dispatch sets BTYPE = 00 (no constraint
+    // — return) on the implementation, but `bti c` is defensive.
+    bti     c
+
+    // x0 = secondary CPU index (passed as PSCI context_id).
+    // Validate: 0 < idx < DTB_MAX_CPUS. If out of range, hang silently
+    // (no UART access — we have no MMU and no DTB-discovered base).
+    mov     x9, #1
+    cmp     x0, x9
+    b.lt    secondary_bad
+    mov     x9, #8                          // DTB_MAX_CPUS at v1.0
+    cmp     x0, x9
+    b.ge    secondary_bad
+
+    // Address of g_cpu_online via PC-relative.
+    adrp    x9, g_cpu_online
+    add     x9, x9, :lo12:g_cpu_online
+
+    // Compute g_cpu_online[idx]. Each entry is 1 byte (u8).
+    add     x9, x9, x0
+
+    // Write 1 (online). Caches off → store goes direct to memory.
+    mov     w10, #1
+    strb    w10, [x9]
+
+    // Push the write through to PoC + globally observable.
+    dsb     sy
+
+    // Park at WFI. Any IRQ would wake us, but PSTATE.DAIF.I is set
+    // (PSCI default) so IRQs don't deliver — WFI sleeps until an
+    // event (sev / unmasked-IRQ / reset). On QEMU virt this loop
+    // sleeps forever in the absence of further wake signals, which is
+    // exactly the intended behavior at P2-Ca (P2-Cb adds per-CPU
+    // sched bringing them back into use).
+1:  wfi
+    b       1b
+
+secondary_bad:
+    // Invalid idx — park at WFI without setting any flag.
+    dsb     sy
+1:  wfi
+    b       1b
+.size secondary_entry, . - secondary_entry
+
+// ---------------------------------------------------------------------------
 // _saved_dtb_ptr — DTB physical address handed to us by the bootloader.
 // BSS-allocated (zeroed at boot), populated by _real_start AFTER the BSS
 // clear. Read by boot_main() to print in the boot banner; consumed by the

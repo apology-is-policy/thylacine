@@ -119,4 +119,44 @@ u64 dtb_get_chosen_kaslr_seed(void);
 // /chosen/kaslr-seed.
 u64 dtb_get_chosen_rng_seed(void);
 
+// CPU enumeration (P2-Ca). Counts and inspects /cpus/cpu@* nodes —
+// identified by device_type = "cpu". QEMU virt convention: each
+// cpu@N has reg = single u32 cell holding the MPIDR aff bits (linear
+// 0..N-1), and enable-method = "psci".
+//
+// Bound at v1.0: DTB_MAX_CPUS = 8 (matches ARCH §20.7 v1.0 SMP cap).
+// Cores past this are reported in count but not enumerable via
+// dtb_cpu_mpidr(). Phase 7 hardening would raise the bound.
+#define DTB_MAX_CPUS 8u
+
+// Number of /cpus/cpu@* nodes whose device_type = "cpu". Returns 0 if
+// dtb_init has not run or no cpu nodes are present (impossible on a
+// well-formed ARM64 DTB).
+u32 dtb_cpu_count(void);
+
+// MPIDR aff value for the `idx`-th cpu node (0-based, in DTB
+// declaration order). Returns false if idx >= dtb_cpu_count() or
+// idx >= DTB_MAX_CPUS. The return is the raw `reg` cell value; on
+// QEMU virt this is the linear core index (0, 1, 2, ...). Real
+// hardware may pack aff0/aff1/aff2/aff3 into the value; the caller
+// passes the raw value to PSCI_CPU_ON.
+bool dtb_cpu_mpidr(u32 idx, u64 *out_mpidr);
+
+// PSCI calling-convention method. Encoded as:
+//   DTB_PSCI_NONE = 0  — no /psci node, or method missing/unknown.
+//   DTB_PSCI_HVC  = 1  — /psci/method = "hvc" (QEMU virt default).
+//   DTB_PSCI_SMC  = 2  — /psci/method = "smc" (most ARM bare metal).
+//
+// PSCI version not exposed — assume PSCI 0.2+ standard function IDs
+// (CPU_ON_64 = 0xc4000003, CPU_OFF = 0x84000002). Older PSCI variants
+// with custom IDs fall back to NONE; if a future board needs them the
+// /psci/cpu_on overrides can be exposed via a richer API.
+typedef enum dtb_psci_method {
+    DTB_PSCI_NONE = 0,
+    DTB_PSCI_HVC  = 1,
+    DTB_PSCI_SMC  = 2,
+} dtb_psci_method_t;
+
+dtb_psci_method_t dtb_psci_method(void);
+
 #endif // THYLACINE_DTB_H

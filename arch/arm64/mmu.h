@@ -154,6 +154,22 @@
 // kaslr_init(). Idempotent only in the trivial sense (don't call twice).
 void mmu_enable(u64 slide);
 
+// Program MMU registers on the calling CPU using the page tables built
+// by a prior mmu_enable() call (P2-Ca). Used by secondary CPU bring-up:
+// the primary calls mmu_enable() at boot which builds + programs;
+// secondaries call mmu_program_this_cpu() to program their MMU
+// registers using the SAME tables (the kernel image is shared).
+//
+// Preconditions:
+//   - mmu_enable() has run on some CPU (built l0_ttbr0 + l0_ttbr1).
+//   - Caller has dsb-ish'd or otherwise observes the table writes
+//     (build_page_tables uses dc cvau + dsb ish, so any later CPU's
+//     MMU walk will see the published tables).
+//   - Caller is at EL1 with MMU off; SCTLR.M is set on return.
+//
+// Idempotent within a CPU; the SCTLR.M OR-in is harmless when set.
+void mmu_program_this_cpu(void);
+
 // Inspect a PTE for W^X compliance. Returns true iff the PTE is writable
 // AND executable-at-EL1, which is the forbidden combination. Used by the
 // audit-trigger surface verifier (and by tests at P1-I+).
