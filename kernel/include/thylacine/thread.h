@@ -16,6 +16,7 @@
 #include <thylacine/types.h>
 
 struct Proc;
+struct Rendez;
 
 // Thread states. P2-A primarily uses RUNNING and RUNNABLE (only those
 // transition during context switches). SLEEPING and EXITING land at
@@ -82,12 +83,21 @@ struct Thread {
     u32                band;            // SCHED_BAND_* (sched.h)
     struct Thread     *runnable_next;
     struct Thread     *runnable_prev;
+
+    // P2-Bb: rendez backref. NULL when not sleeping on a Rendez. Set
+    // by sleep(r, ...) under r->lock atomically with state =
+    // THREAD_SLEEPING; cleared by wakeup(r) under r->lock atomically
+    // with state = THREAD_RUNNABLE. Diagnostic + invariant aid: a
+    // SLEEPING thread with rendez_blocked_on != NULL is sleeping on
+    // that specific Rendez; any debugger / extinction dump can name
+    // the wait condition. Future poll/futex (Phase 5) generalize to a
+    // wait-list of (Rendez, condition) tuples; for now single-Rendez.
+    struct Rendez     *rendez_blocked_on;
 };
 
-_Static_assert(sizeof(struct Thread) == 200,
-               "struct Thread size pinned at 200 bytes (P2-Ba: P2-A R4 "
-               "baseline 168 + 32 EEVDF fields = vd_t 8 + weight 4 + band 4 "
-               "+ runnable_next 8 + runnable_prev 8). Adding a field grows "
+_Static_assert(sizeof(struct Thread) == 208,
+               "struct Thread size pinned at 208 bytes (P2-Bb: P2-Ba "
+               "baseline 200 + rendez_blocked_on 8). Adding a field grows "
                "the SLUB cache; update this assert deliberately so the "
                "change is intentional.");
 _Static_assert(__builtin_offsetof(struct Thread, magic) == 0,

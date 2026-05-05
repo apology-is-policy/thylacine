@@ -1,19 +1,22 @@
-// Scheduler — Plan 9 idiom layer over EEVDF dispatch (P2-Ba).
+// Scheduler — Plan 9 idiom layer over EEVDF dispatch (P2-Ba sched/ready;
+// P2-Bb sleep/wakeup over Rendez).
 //
 // Per ARCHITECTURE.md §8 (scheduler design): EEVDF on per-CPU run trees,
 // three priority bands (INTERACTIVE / NORMAL / IDLE), Plan 9 idiom layer
 // on top.
 //
 // P2-Ba lands the bare dispatch primitive: `sched()` (yield) + `ready(t)`
-// (mark runnable). The wait/wake protocol (`thread_block` / `thread_wake`
-// over a `Rendez`) lands at P2-Bb. Scheduler-tick preemption + IRQ-mask
-// discipline land at P2-Bc.
+// (mark runnable). P2-Bb lands `sleep(r, cond, arg)` + `wakeup(r)` (the
+// wait/wake protocol over a Rendez per ARCH §8.5; declarations live in
+// rendez.h). Scheduler-tick preemption + IRQ-mask discipline land at
+// P2-Bc.
 //
-// At P2-Ba: simplified EEVDF — each thread has an integer vd_t (virtual
-// deadline). On yield, current's vd_t is advanced past the run tree's
-// max so it lands at the back of the rotation; pick-next chooses the
-// runnable thread with min vd_t. Full EEVDF math (vd_t = ve_t + slice ×
-// W_total / w_self with weighted virtual time advance) lands at P2-Bc.
+// At P2-Ba+P2-Bb: simplified EEVDF — each thread has an integer vd_t
+// (virtual deadline). On yield, current's vd_t is advanced past the
+// run tree's max so it lands at the back of the rotation; pick-next
+// chooses the runnable thread with min vd_t. Full EEVDF math (vd_t =
+// ve_t + slice × W_total / w_self with weighted virtual time advance)
+// lands at P2-Bc.
 
 #ifndef THYLACINE_SCHED_H
 #define THYLACINE_SCHED_H

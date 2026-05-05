@@ -37,6 +37,9 @@ void test_context_create_destroy(void);
 void test_context_round_trip(void);
 void test_sched_dispatch_smoke(void);
 void test_sched_runnable_count(void);
+void test_rendez_sleep_immediate_cond_true(void);
+void test_rendez_basic_handoff(void);
+void test_rendez_wakeup_no_waiter(void);
 
 // ---------------------------------------------------------------------------
 // Registry. Sentinel-terminated.
@@ -56,6 +59,11 @@ struct test_case g_tests[] = {
     { "context.round_trip",            test_context_round_trip,            false, NULL },
     { "scheduler.dispatch_smoke",      test_sched_dispatch_smoke,          false, NULL },
     { "scheduler.runnable_count",      test_sched_runnable_count,          false, NULL },
+    { "rendez.sleep_immediate_cond_true",
+                                       test_rendez_sleep_immediate_cond_true,
+                                                                           false, NULL },
+    { "rendez.basic_handoff",          test_rendez_basic_handoff,          false, NULL },
+    { "rendez.wakeup_no_waiter",       test_rendez_wakeup_no_waiter,       false, NULL },
     { NULL, NULL, false, NULL },          // sentinel
 };
 

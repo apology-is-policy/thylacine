@@ -39,6 +39,7 @@ set(KERNEL_SRCS
     test/test_hardening.c
     test/test_context.c
     test/test_sched.c
+    test/test_rendez.c
 )
 
 set(KERNEL_LD_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/../arch/arm64/kernel.ld)
