@@ -221,12 +221,76 @@ P2-Cb extends the trampoline so secondaries reach a real C entry point at the ke
 
 ---
 
+## Per-CPU exception stacks via SPSel=0 (P2-Cc)
+
+P2-Cc separates the kernel's "normal mode" stack from its "exception handling" stack on every CPU. The kernel runs at EL1 with `PSTATE.SPSel = 0` — `sp` refers to `SP_EL0`, which holds the current thread/boot stack. Hardware exception entry sets `SPSel = 1` (per ARM ARM D1.10.4), so `KERNEL_ENTRY` in vectors.S operates on `SP_EL1`. Each CPU's `SP_EL1` is set to the top of its own slot in `g_exception_stacks[DTB_MAX_CPUS][4096]` BSS — total 32 KiB. After the handler returns, `KERNEL_EXIT`'s `eret` restores `SPSel` from `SPSR_EL1.M[0] = 0` and the kernel resumes on `SP_EL0`.
+
+### What this gives us
+
+1. **Per-CPU isolation**. CPU N's `SP_EL1` is `&g_exception_stacks[N][4096]`. Concurrent IRQs on different CPUs land on different exception stacks — there's no cross-CPU stack sharing for handler frames.
+2. **Stack-overflow safety**. A kernel thread that overruns its `SP_EL0` stack into the guard page faults. The fault's `KERNEL_ENTRY` runs on `SP_EL1` (a known-good stack with full headroom), not on the dying `SP_EL0`. So `KERNEL_ENTRY`'s `sub sp, sp, #EXCEPTION_CTX_SIZE` does NOT recursively fault, and `exception_sync_curr_el`'s `kernel stack overflow` diagnostic is reachable. This closes the P1-F "KNOWN LIMITATION" comment in vectors.S.
+
+### How SP_EL0 / SP_EL1 are set up
+
+Both registers are written via different mechanisms because of ARM ARM access rules:
+
+- `SP_EL0`: writable from EL1 via `msr sp_el0, xN` regardless of `SPSel`.
+- `SP_EL1`: `msr sp_el1, xN` is **UNDEFINED** at EL1 (ARM ARM B6.2). The only legal way to write `SP_EL1` from EL1 is `mov sp, xN` while `SPSel = 1` (so that `sp` refers to `SP_EL1`).
+
+So the boot sequence (start.S `_real_start` step 4.6) is:
+1. `mov x0, sp` — copy current sp (= `SP_EL1` = boot stack, set in step 3).
+2. `msr sp_el0, x0` — `SP_EL0 := boot stack top`.
+3. Compute `g_exception_stacks[0]`'s top.
+4. `mov sp, x0` — `SP_EL1 := exception-stack top` (still `SPSel = 1`).
+5. `msr SPSel, #0` — `sp` now refers to `SP_EL0` (= boot stack).
+6. `isb`.
+
+`SP_EL1` at this point is still a low PA (PC-relative resolution before MMU is on). Step 8.5 (after `bl mmu_enable`) re-anchors `SP_EL1` at the post-KASLR HIGH VA via `kaslr_high_va_addr` + the SPSel-dance:
+```asm
+adrp x0, g_exception_stacks
+add  x0, x0, :lo12:g_exception_stacks
+add  x0, x0, #4096                    // EXCEPTION_STACK_SIZE; CPU 0 top
+bl   kaslr_high_va_addr               // x0 = HIGH VA of slot 0 top
+msr  SPSel, #1                         // sp now refers to SP_EL1
+isb
+mov  sp, x0                            // SP_EL1 := HIGH VA top
+msr  SPSel, #0                         // sp back to SP_EL0
+isb
+```
+
+Secondaries do the equivalent in `secondary_entry`: SP_EL0 = per-CPU boot stack, SP_EL1 = per-CPU exception stack at LOW PA, SPSel = 0; then after `bl mmu_program_this_cpu`, the SPSel-dance re-anchors SP_EL1 at the HIGH VA of `g_exception_stacks[idx]`.
+
+### Vector dispatch under SPSel=0
+
+ARM64 routes "current EL" exceptions to one of two vector groups based on `PSTATE.SPSel` at exception time:
+- `SPSel = 0` → offsets `0x000-0x180` ("Current EL with SP_EL0")
+- `SPSel = 1` → offsets `0x200-0x380` ("Current EL with SP_ELx")
+
+P2-Cc moves the live Sync + IRQ slots into the `SP_EL0` group (`0x000` + `0x080`) — that's where the kernel's normal-mode SPSel=0 exceptions land. The `SP_ELx` slots remain live too (`0x200` + `0x280`) because the kernel transits through SPSel=1 mode after a sched() context-switch from inside an IRQ handler: cpu_switch_context's `mov sp` writes the current-SP register (= SP_EL1 since hardware set SPSel=1 on entry) to the new thread's kstack value, then the ret-path lands on `thread_trampoline` which unmasks IRQs while still in SPSel=1 mode. The next IRQ on that CPU dispatches to the SPx group rather than the SP_EL0 group. Both groups call into the same C handlers (`exception_sync_curr_el`, `exception_irq_curr_el`) — identical recovery path, both routes observably equivalent. After the eventual eret unwinds back to the original thread's natural EL1t state, subsequent IRQs route to the SP_EL0 group.
+
+FIQ and SError slots in both groups remain `VEC_UNEXPECTED` — neither is unmasked at v1.0.
+
+### Observability
+
+`smp.exception_stack_smoke` (test_smp.c) verifies the discipline at runtime:
+- Confirms `PSTATE.SPSel == 0` in normal kernel mode (read via `mrs ..., SPSel`).
+- Confirms `g_exception_stacks` BSS is sized exactly `DTB_MAX_CPUS * EXCEPTION_STACK_SIZE` and slots are contiguous.
+- Reads `g_exception_stack_observed[0]`, written by `timer_irq_handler` on its first invocation per CPU as `&local`. Verifies the address falls inside `g_exception_stacks[0]`'s slot — runtime evidence that the timer IRQ ran on the per-CPU exception stack as expected. (Direct `mrs sp_el1` from EL1 is UNDEFINED per ARM ARM, so the observation is captured indirectly via the C handler's local-address.)
+
+`smp_cpu_idx_self()` (smp.c) returns `MPIDR_EL1.Aff0` masked to 8 bits — the boot CPU sees 0, secondaries see 1..N-1. Used by `timer_irq_handler` to index `g_exception_stack_observed`; reusable as a per-CPU dispatch key in future sub-chunks.
+
+### What stays at LOW PA
+
+`g_secondary_boot_stacks` (the per-secondary "normal mode" stack used as `SP_EL0` initially) is set by `secondary_entry` to its low-PA address pre-MMU. After `mmu_program_this_cpu`, `SP_EL1` is re-anchored to high VA but `SP_EL0` is NOT — secondaries continue executing on the low-PA boot stack until P2-Cd assigns each one a per-CPU idle thread (which has its own kstack at high VA). This is a deliberate v1.0 P2-Cc choice: the SP_EL0-side address space transition is part of the per-CPU idle-thread bring-up, not the exception-stack bring-up.
+
+---
+
 ## Status
 
-Implemented: P2-Ca + P2-Cb at `<commit-pending>`. Stubbed: nothing. Deferred:
-- **Per-CPU exception stack**: P2-Cc (closes P1-F shared-stack limitation per phase2-status.md trip-hazard).
-- **Per-CPU run tree + per-CPU sched_init**: P2-Cb.5 or P2-Cd. Currently `g_run_tree` is global (P2-Ba); secondaries cannot be scheduled to until per-CPU run trees land.
+Implemented: P2-Ca + P2-Cb + P2-Cc at `<commit-pending>`. Stubbed: nothing. Deferred:
+- **Per-CPU run tree + per-CPU sched_init**: P2-Cd. Currently `g_run_tree` is global (P2-Ba); secondaries cannot be scheduled to until per-CPU run trees land.
 - **Per-CPU idle thread + scheduler integration**: P2-Cd (idle thread per CPU, sched picks idle when nothing else runnable).
+- **Per-CPU SP_EL0 to high VA on secondaries**: P2-Cd (alongside per-CPU idle thread bring-up).
 - **GIC SGI infrastructure + IPI dispatch** (IPI_RESCHED/TLB_FLUSH/HALT/GENERIC): P2-Cd.
 - **Work-stealing**: P2-Ce.
 - **finish_task_switch pattern (closes SMP wait/wake race)**: P2-Cf.

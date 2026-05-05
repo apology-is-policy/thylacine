@@ -16,6 +16,7 @@
 #ifndef THYLACINE_SMP_H
 #define THYLACINE_SMP_H
 
+#include <stdint.h>
 #include <thylacine/dtb.h>
 #include <thylacine/types.h>
 
@@ -62,6 +63,25 @@ extern u64 g_pac_keys[8];
 #define SECONDARY_STACK_SIZE  16384u
 extern char g_secondary_boot_stacks[DTB_MAX_CPUS - 1][SECONDARY_STACK_SIZE];
 
+// P2-Cc: per-CPU exception stacks. SP_EL1 on each CPU points at the
+// top of its own slot; the kernel runs in SPSel=0 mode (SP=SP_EL0) for
+// normal work, and ARM exception entry hardware-switches to SP_EL1 =
+// this per-CPU stack. Closes the P1-F shared-stack limitation: a
+// stack-overflow fault on the kernel SP_EL0 stack now lands on a
+// distinct SP_EL1 buffer, so KERNEL_ENTRY's `sub sp, sp, #...` runs
+// on a known-good stack and exception_sync_curr_el's stack-overflow
+// diagnostic is reachable instead of recursively faulting.
+//
+// 4 KiB per CPU × DTB_MAX_CPUS (8) = 32 KiB BSS. 4 KiB exceeds
+// EXCEPTION_CTX_SIZE (288 B) by ~14× — generous headroom for handler
+// frames + nested exceptions if they ever land. Sized to one page so
+// the linker's stack alignment costs nothing extra.
+//
+// Indexed by cpu_idx (0 = boot, 1..N-1 = secondaries). Set up by
+// start.S _real_start (CPU 0) and start.S secondary_entry (CPU 1+).
+#define EXCEPTION_STACK_SIZE  4096u
+extern char g_exception_stacks[DTB_MAX_CPUS][EXCEPTION_STACK_SIZE];
+
 // P2-Cb: per-CPU main. Called from secondary_entry asm trampoline at
 // the kernel's high VA after PAC + MMU + per-CPU stack are live.
 // Sets VBAR_EL1 to the kernel vector table, TPIDR_EL1 to NULL (no
@@ -95,5 +115,22 @@ unsigned smp_cpu_count(void);
 
 // Number of CPUs currently online (= 1 + # secondaries that came up).
 unsigned smp_cpu_online_count(void);
+
+// P2-Cc: observability hook for the per-CPU exception-stack discipline.
+// timer_irq_handler captures `&local` (the SP at C handler entry) into
+// this slot on its first call from each CPU. The test
+// smp.exception_stack_smoke checks that the captured address falls
+// inside the corresponding g_exception_stacks[idx] slot.
+//
+// One slot per CPU. Indexed by smp_cpu_idx_self() at write time;
+// readers also index by cpu_idx. Initial value 0 = "not yet observed."
+extern volatile uintptr_t g_exception_stack_observed[DTB_MAX_CPUS];
+
+// Returns this CPU's index from MPIDR_EL1.Aff0 (low 8 bits). Boot CPU
+// reports 0; secondaries report 1..N-1. Valid at any context where
+// MPIDR is readable (always, at EL1+). Used by per-CPU observability
+// hooks (timer_irq_handler) and may be used as a per-CPU dispatch key
+// in future sub-chunks.
+unsigned smp_cpu_idx_self(void);
 
 #endif // THYLACINE_SMP_H

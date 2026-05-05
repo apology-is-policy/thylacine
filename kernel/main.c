@@ -288,6 +288,10 @@ void boot_main(void) {
     }
     uart_puts(")\n");
 
+    uart_puts("  exception: per-CPU SP_EL1 (");
+    uart_putdec((u64)EXCEPTION_STACK_SIZE);
+    uart_puts(" B/CPU; SPSel=0 kernel mode)\n");
+
     uart_puts("  kproc:   pid=");
     uart_putdec((u64)kproc()->pid);
     uart_puts(" threads=");

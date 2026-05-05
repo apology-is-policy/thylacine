@@ -48,6 +48,28 @@ u64 g_pac_keys[8];
 __attribute__((aligned(16)))
 char g_secondary_boot_stacks[DTB_MAX_CPUS - 1][SECONDARY_STACK_SIZE];
 
+// P2-Cc: per-CPU exception stacks. See smp.h for design rationale.
+// 8 CPUs × 4 KiB = 32 KiB BSS. 16-byte aligned for AAPCS64 SP.
+//
+// Each CPU's start-of-init asm sets SP_EL1 = &this[cpu_idx + 1] (i.e.,
+// the top of slot cpu_idx) and msr SPSel, #0 to switch to SP_EL0 for
+// normal kernel work. From that point on, hardware exception entry
+// switches SP to SP_EL1 = this per-CPU stack automatically; KERNEL_EXIT
+// + ERET restore SPSel from SPSR_EL1.M[0] = 0 (EL1t), back to SP_EL0.
+__attribute__((aligned(16)))
+char g_exception_stacks[DTB_MAX_CPUS][EXCEPTION_STACK_SIZE];
+
+// P2-Cc: per-CPU SP-at-exception observability slot. timer_irq_handler
+// writes &local on its first invocation per CPU; smp.exception_stack_smoke
+// reads to verify the address falls inside g_exception_stacks[cpu_idx].
+volatile uintptr_t g_exception_stack_observed[DTB_MAX_CPUS];
+
+unsigned smp_cpu_idx_self(void) {
+    u64 mpidr;
+    __asm__ __volatile__("mrs %0, mpidr_el1" : "=r"(mpidr));
+    return (unsigned)(mpidr & 0xffu);
+}
+
 static unsigned g_cpu_count;
 static unsigned g_cpu_online_count;
 

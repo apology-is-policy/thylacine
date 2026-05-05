@@ -7,10 +7,10 @@
 //
 //   Offset  EL source              Exception type
 //   ------  ---------------------  ---------------
-//   0x000   Current EL with SP_EL0  Synchronous
-//   0x080   Current EL with SP_EL0  IRQ
-//   0x100   Current EL with SP_EL0  FIQ
-//   0x180   Current EL with SP_EL0  SError
+//   0x000   Current EL with SP_EL0  Synchronous   ← LIVE entry (P2-Cc)
+//   0x080   Current EL with SP_EL0  IRQ            ← LIVE entry (P2-Cc)
+//   0x100   Current EL with SP_EL0  FIQ            (unexpected)
+//   0x180   Current EL with SP_EL0  SError         (unexpected)
 //   0x200   Current EL with SP_ELx  Synchronous   ← LIVE entry (P1-F)
 //   0x280   Current EL with SP_ELx  IRQ            ← LIVE entry (P1-G)
 //   0x300   Current EL with SP_ELx  FIQ            (unexpected)
@@ -23,6 +23,26 @@
 //   0x680   Lower EL using AArch32  IRQ            (we don't run AArch32)
 //   0x700   Lower EL using AArch32  FIQ            (we don't run AArch32)
 //   0x780   Lower EL using AArch32  SError         (we don't run AArch32)
+//
+// SPSel discipline (P2-Cc). The kernel runs at EL1 with SPSel=0 in
+// steady state (sp = SP_EL0 = thread/boot stack); hardware exception
+// entry sets SPSel=1, so KERNEL_ENTRY runs on SP_EL1 = per-CPU
+// exception stack (set up by start.S). KERNEL_EXIT restores SPSel
+// from SPSR_EL1.M[0]=0 — kernel resumes on SP_EL0 transparently.
+//
+// BOTH vector groups (SP_EL0 + SP_ELx) for sync + IRQ are LIVE because
+// the kernel transits through SPSel=1 when sched() context-switches
+// out of an IRQ handler: cpu_switch_context's `mov sp` writes the
+// current-SP register (= SP_EL1 since hardware set SPSel=1 on entry)
+// to the new thread's kstack value, then ret jumps to the new
+// thread's resume point — typically thread_trampoline, which unmasks
+// IRQs while still in SPSel=1 mode. The next IRQ on this CPU thus
+// dispatches to the SP_ELx group (0x280) rather than the SP_EL0 group
+// (0x080). Both groups call into exception_irq_curr_el — same handler,
+// same recovery path. After eret in either case, SPSR_EL1 restores
+// SPSel from the entry mode and execution returns to natural EL1t/EL1h
+// state (whichever the eret target is). Phase 5+ refines this when
+// userspace lands and we bring the EL0 vector group online.
 //
 // At P1-G the Sync slot terminates in extinction; the IRQ slot is the
 // first recoverable path — vectors.S calls exception_irq_curr_el and
@@ -39,14 +59,17 @@
 // All other 14 entries call exception_unexpected with the vector index,
 // which extinctions. Phase 2 fills lower-EL entries when userspace lands.
 //
-// KNOWN LIMITATION: the handler runs on the existing SP_EL1 (i.e., the
-// boot stack at P1-F). A stack overflow that triggers a fault then
-// recursively faults inside KERNEL_ENTRY because SP is in the guard
-// region. The recursion wedges QEMU before extinction prints anything.
-// Mitigation: per-CPU exception stack lands at Phase 2 with thread
-// management. Until then, kernel-stack overflow is detected only when
-// the stack is corrupted gradually (so SP still has headroom on the
-// faulting access).
+// P2-Cc: SPSel discipline. The kernel runs in SPSel=0 mode (sp = SP_EL0
+// = thread/boot stack). On exception entry, hardware sets SPSel=1 and
+// makes sp refer to SP_EL1 — set by start.S to a per-CPU slot in
+// g_exception_stacks (4 KiB / CPU). KERNEL_ENTRY's `sub sp, sp, ...`
+// thus runs on a known-good stack regardless of how the SP_EL0 stack
+// was clobbered, which closes the P1-F limitation: a kernel stack
+// overflow into the guard page no longer recursively faults inside
+// KERNEL_ENTRY (sp is now the exception stack, with full headroom),
+// so exception_sync_curr_el's "kernel stack overflow" diagnostic is
+// reachable. KERNEL_EXIT's eret restores SPSel from SPSR_EL1.M[0]=0
+// (EL1t was the entry mode) → kernel resumes on SP_EL0 transparently.
 
 #include "exception.h"
 
@@ -144,31 +167,48 @@
 _exception_vectors:
 
     // ------------------------------------------------------------------
-    // Current EL with SP_EL0 — kernel running on SP_EL0. We never use
-    // SP_EL0 at EL1, so any of these entries firing means kernel state
-    // got corrupted. extinction.
+    // Current EL with SP_EL0 — the live entries (P2-Cc).
+    //
+    // At v1.0 P2-Cc the kernel runs in SPSel=0 mode (sp = SP_EL0 =
+    // thread/boot stack). Exceptions taken at EL1 with SPSel=0 are
+    // routed here. Hardware switches SPSel=1 on entry, so KERNEL_ENTRY
+    // operates on SP_EL1 = per-CPU exception stack (set up by start.S).
+    // KERNEL_EXIT's eret restores SPSel from SPSR_EL1.M[0]=0.
+    //
+    // Sync (0x000) terminates in extinction (exception_sync_curr_el's
+    // noreturn paths); IRQ (0x080) is the recoverable preempt path.
     // ------------------------------------------------------------------
-    .org _exception_vectors + 0x000
-    VEC_UNEXPECTED 0
+    .org _exception_vectors + 0x000      /* Sync — kernel fault handling */
+    KERNEL_ENTRY
+    mov     x0, sp
+    bl      exception_sync_curr_el
+    b       _hang                        /* unreached if extinction took over */
 
-    .org _exception_vectors + 0x080
-    VEC_UNEXPECTED 1
+    .org _exception_vectors + 0x080      /* IRQ — recoverable */
+    KERNEL_ENTRY
+    mov     x0, sp
+    bl      exception_irq_curr_el
+    bl      preempt_check_irq            /* P2-Bc: maybe context-switch */
+    b       .Lexception_return           /* shared KERNEL_EXIT trampoline (local) */
 
-    .org _exception_vectors + 0x100
+    .org _exception_vectors + 0x100      /* FIQ */
     VEC_UNEXPECTED 2
 
-    .org _exception_vectors + 0x180
+    .org _exception_vectors + 0x180      /* SError */
     VEC_UNEXPECTED 3
 
     // ------------------------------------------------------------------
-    // Current EL with SP_ELx — the live entries. Sync goes to the
-    // real handler; IRQ / FIQ / SError extinction (P1-G adds GIC + IRQ).
-    //
-    // At P1-F every sync exception terminates in extinction (via
-    // exception_sync_curr_el's noreturn paths), so we don't run
-    // KERNEL_EXIT inline — it would push the slot over 0x80 bytes.
-    // KERNEL_EXIT remains defined for Phase 2's recoverable
-    // page-fault handler.
+    // Current EL with SP_ELx — kernel running at SPSel=1. This state
+    // is transient: it occurs (a) inside an exception handler (hardware
+    // sets SPSel=1 on entry), and (b) after a sched() context-switch
+    // performed from inside an exception handler — cpu_switch_context's
+    // ret transitions the SP_ELx-mode thread to its resumption point
+    // (often thread_trampoline) which then unmasks IRQs and runs at
+    // SPSel=1 until the eventual eret restores SPSel=0. While in
+    // SPSel=1 mode an IRQ dispatches here (0x280) and a sync fault
+    // dispatches here (0x200); both call the same handlers as the
+    // SP_EL0 group above. Identical recovery path keeps both routes
+    // observably equivalent.
     // ------------------------------------------------------------------
     .org _exception_vectors + 0x200      /* Sync */
     KERNEL_ENTRY

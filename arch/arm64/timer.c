@@ -20,8 +20,10 @@
 
 #include "gic.h"
 
+#include <stdint.h>
 #include <thylacine/extinction.h>
 #include <thylacine/sched.h>
+#include <thylacine/smp.h>
 #include <thylacine/types.h>
 
 // Compile-time sanity: PPI 14 → INTID 30 (architectural per ARMv8 ARM
@@ -131,6 +133,21 @@ void timer_irq_handler(u32 intid, void *arg) {
     g_ticks++;
     write_cntp_tval_el0(g_reload);
     // CNTP_CTL stays at ENABLE; no need to rewrite.
+
+    // P2-Cc: capture SP-at-handler-entry once per CPU so the
+    // smp.exception_stack_smoke test can verify the IRQ ran on the
+    // per-CPU exception stack. The address of `local` is on the
+    // current SP — which under our SPSel=0 + per-CPU SP_EL1 design
+    // is the per-CPU slot in g_exception_stacks. Subsequent
+    // invocations skip to keep the captured value stable for the
+    // test's read.
+    {
+        unsigned cpu = smp_cpu_idx_self();
+        if (cpu < DTB_MAX_CPUS && g_exception_stack_observed[cpu] == 0) {
+            volatile char local;
+            g_exception_stack_observed[cpu] = (uintptr_t)&local;
+        }
+    }
 
     // P2-Bc: scheduler tick. Decrements current's slice; sets
     // need_resched if expired so preempt_check_irq triggers a

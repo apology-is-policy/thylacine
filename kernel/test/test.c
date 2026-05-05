@@ -42,6 +42,7 @@ void test_rendez_sleep_immediate_cond_true(void);
 void test_rendez_basic_handoff(void);
 void test_rendez_wakeup_no_waiter(void);
 void test_smp_bringup_smoke(void);
+void test_smp_exception_stack_smoke(void);
 
 // ---------------------------------------------------------------------------
 // Registry. Sentinel-terminated.
@@ -68,6 +69,7 @@ struct test_case g_tests[] = {
     { "rendez.basic_handoff",          test_rendez_basic_handoff,          false, NULL },
     { "rendez.wakeup_no_waiter",       test_rendez_wakeup_no_waiter,       false, NULL },
     { "smp.bringup_smoke",             test_smp_bringup_smoke,             false, NULL },
+    { "smp.exception_stack_smoke",     test_smp_exception_stack_smoke,     false, NULL },
     { NULL, NULL, false, NULL },          // sentinel
 };
 
