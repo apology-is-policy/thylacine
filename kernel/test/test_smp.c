@@ -27,6 +27,17 @@
 //   pre-send baseline. Verifies cross-CPU SGI delivery: the GIC
 //   distributor + each secondary's redistributor + CPU interface
 //   are correctly bringing IPI_RESCHED through to the IPI handler.
+//
+// smp.work_stealing_smoke (P2-Ce)
+//   Boot CPU creates N threads (N = cpu count) that loop incrementing
+//   a per-CPU counter g_steal_test_count[smp_cpu_idx_self()] and yield.
+//   Boot ready()s all on its own tree, then sends IPI_RESCHED to each
+//   secondary. The IPI wakes each secondary's WFI; the post-WFI sched()
+//   in per_cpu_main's idle loop finds the secondary's tree empty and
+//   try_steal()s a thread from boot's tree. The stolen thread runs on
+//   the secondary, incrementing the counter for that CPU's slot.
+//   Verifies that at least one secondary observed the steal (i.e.,
+//   g_steal_test_count[i] > 0 for some i >= 1).
 
 #include "test.h"
 
@@ -35,6 +46,7 @@
 
 #include <thylacine/dtb.h>
 #include <thylacine/proc.h>
+#include <thylacine/rendez.h>
 #include <thylacine/sched.h>
 #include <thylacine/smp.h>
 #include <thylacine/thread.h>
@@ -214,4 +226,111 @@ void test_smp_ipi_resched_smoke(void) {
     // Boot CPU's slot should be unchanged — we don't send to ourselves.
     TEST_EXPECT_EQ(g_ipi_resched_count[0], baseline[0],
         "boot CPU's IPI count is unchanged (we did not target ourselves)");
+}
+
+static volatile bool g_steal_test_run;
+static volatile u64  g_steal_test_count[DTB_MAX_CPUS];
+static struct Rendez g_steal_test_rendez[DTB_MAX_CPUS];
+static struct Thread *g_steal_test_threads[DTB_MAX_CPUS];
+
+// Cond function for the per-thread "sleep forever" — never returns
+// true, so sleep loops indefinitely (= the thread stays SLEEPING).
+static int never_true(void *arg) { (void)arg; return 0; }
+
+static void steal_test_entry(void) {
+    while (g_steal_test_run) {
+        unsigned cpu = smp_cpu_idx_self();
+        if (cpu < DTB_MAX_CPUS) g_steal_test_count[cpu]++;
+        sched();
+    }
+    // Exit signal observed. Find OUR slot in the threads array
+    // (entry has no arg in the v1.0 thread_create API; we match by
+    // current_thread()) and sleep on its dedicated per-thread Rendez.
+    // We never get woken — the test wants us to settle into SLEEPING
+    // so thread_free can safely reap us. Since each Rendez has a
+    // single waiter (Plan 9 convention), one Rendez per thread is
+    // required.
+    struct Thread *me = current_thread();
+    int slot = -1;
+    for (unsigned i = 0; i < DTB_MAX_CPUS; i++) {
+        if (g_steal_test_threads[i] == me) { slot = (int)i; break; }
+    }
+    if (slot < 0) {
+        // Defensive: shouldn't happen if the test set up threads correctly.
+        for (;;) __asm__ __volatile__("wfe");
+    }
+    sleep(&g_steal_test_rendez[slot], never_true, NULL);
+    // Unreachable — sleep loops on cond which is always false.
+}
+
+void test_smp_work_stealing_smoke(void) {
+    unsigned cpus = smp_cpu_count();
+    if (cpus < 2) {
+        // No secondaries — nothing to steal to. Skip rather than fail.
+        return;
+    }
+
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u,
+        "run trees must be empty at test entry");
+
+    g_steal_test_run = true;
+    for (unsigned i = 0; i < DTB_MAX_CPUS; i++) {
+        g_steal_test_count[i] = 0;
+        g_steal_test_rendez[i] = (struct Rendez)RENDEZ_INIT;
+        g_steal_test_threads[i] = NULL;
+    }
+
+    // Create one thread per CPU; ready() each on boot's tree (ready()
+    // inserts into THIS CPU's tree at v1.0 P2-Ce). Secondaries will
+    // steal these from boot's tree once their WFI wakes via IPI.
+    for (unsigned i = 0; i < cpus; i++) {
+        g_steal_test_threads[i] = thread_create(kproc(), steal_test_entry);
+        TEST_ASSERT(g_steal_test_threads[i] != NULL, "thread_create failed");
+        ready(g_steal_test_threads[i]);
+    }
+
+    // Send IPI_RESCHED to each secondary to wake their WFI. The
+    // post-WFI sched() in per_cpu_main's idle loop is what triggers
+    // the steal.
+    for (unsigned i = 1; i < cpus; i++) {
+        TEST_ASSERT(gic_send_ipi(i, IPI_RESCHED),
+            "gic_send_ipi must accept valid target + SGI");
+    }
+
+    // Wait window. With 4 CPUs all receiving threads, the test threads
+    // hammer their local counters under timer-IRQ-driven preemption
+    // on boot + idle-loop sched on secondaries (after the IPI wake).
+    // 50 ticks is generous (50 ms at 1000 Hz).
+    timer_busy_wait_ticks(50);
+
+    // Signal exit. Threads observe on their next iteration.
+    g_steal_test_run = false;
+
+    // Allow drain.
+    timer_busy_wait_ticks(20);
+
+    // Verify at least one secondary ran a thread — the smoke that
+    // proves the steal path works.
+    bool any_secondary_ran = false;
+    for (unsigned i = 1; i < cpus; i++) {
+        if (g_steal_test_count[i] > 0) {
+            any_secondary_ran = true;
+            break;
+        }
+    }
+    TEST_ASSERT(any_secondary_ran,
+        "no secondary CPU observed work-stealing (try_steal not pulling?)");
+
+    // Cleanup. After exit signal, each thread sleeps on its dedicated
+    // Rendez (state SLEEPING, not in any run tree). thread_free
+    // accepts SLEEPING threads. The Rendez waiter slot still points
+    // at the thread but the test never wakeup()s — no dangling deref
+    // since the Rendez memory is also static-test-scope and unused
+    // after the test returns.
+    for (unsigned i = 0; i < cpus; i++) {
+        thread_free(g_steal_test_threads[i]);
+        g_steal_test_threads[i] = NULL;
+    }
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u,
+        "run trees empty after thread_free");
 }

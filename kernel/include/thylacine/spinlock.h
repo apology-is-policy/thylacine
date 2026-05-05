@@ -24,21 +24,41 @@
 #include <thylacine/types.h>
 
 typedef struct spin_lock {
-    u32 _stub;                  // unused at P1-I; real lock state at Phase 2
+    // 0 = unlocked, 1 = locked. Operated on with C11 atomic builtins
+    // — clang lowers to ARMv8.1 LSE (`swpa`) under -mcpu=cortex-a72 or
+    // newer with +lse, falling back to LL/SC (`ldaxr`/`stxr`) on
+    // ARMv8.0. Both forms preserve acquire/release semantics.
+    u32 value;
 } spin_lock_t;
 
 #define SPIN_LOCK_INIT          ((spin_lock_t){ 0 })
 
 static inline void spin_lock_init(spin_lock_t *l) {
-    l->_stub = 0;
+    __atomic_store_n(&l->value, 0u, __ATOMIC_RELAXED);
 }
 
 static inline void spin_lock(spin_lock_t *l) {
-    (void)l;                    // single CPU: no contention possible
+    // Test-and-set with acquire. Spin on the relaxed-load fast path
+    // when the lock is held (avoids a stream of LL/SC traffic into
+    // the contended cacheline). Yield in the inner spin so the
+    // host scheduler under emulation gets a hint we're idle-spinning.
+    while (__atomic_exchange_n(&l->value, 1u, __ATOMIC_ACQUIRE) != 0u) {
+        while (__atomic_load_n(&l->value, __ATOMIC_RELAXED) != 0u) {
+            __asm__ __volatile__("yield" ::: "memory");
+        }
+    }
 }
 
 static inline void spin_unlock(spin_lock_t *l) {
-    (void)l;
+    __atomic_store_n(&l->value, 0u, __ATOMIC_RELEASE);
+}
+
+// P2-Ce: try-lock for cross-CPU access. Returns true if the lock was
+// acquired, false if held. Used by work-stealing to attempt access to
+// a peer CPU's run tree without blocking — if try_lock fails, the
+// stealer moves to the next peer.
+static inline bool spin_trylock(spin_lock_t *l) {
+    return __atomic_exchange_n(&l->value, 1u, __ATOMIC_ACQUIRE) == 0u;
 }
 
 // IRQ-disabling variants — REAL implementation (P1-I audit F30 close).
@@ -59,7 +79,6 @@ static inline void spin_unlock(spin_lock_t *l) {
 typedef u64 irq_state_t;
 
 static inline irq_state_t spin_lock_irqsave(spin_lock_t *l) {
-    (void)l;
     irq_state_t state;
     // %x0 forces the 64-bit register form (xN); plain %0 may default
     // to wN on the output constraint and emit a sub-word read of a
@@ -70,11 +89,17 @@ static inline irq_state_t spin_lock_irqsave(spin_lock_t *l) {
         : "=r" (state)
         :: "memory"
     );
+    // P2-Ce: real lock acquire after IRQ disable. Order matters —
+    // disabling IRQs first prevents an IRQ handler from being
+    // interrupted while it holds the lock. NULL lock pointer is
+    // legal (per-CPU lockless sections — sched.c's earlier discipline
+    // used it as "IRQ mask only").
+    if (l) spin_lock(l);
     return state;
 }
 
 static inline void spin_unlock_irqrestore(spin_lock_t *l, irq_state_t s) {
-    (void)l;
+    if (l) spin_unlock(l);
     __asm__ __volatile__(
         "msr daif, %x0\n"
         :: "r" (s) : "memory"

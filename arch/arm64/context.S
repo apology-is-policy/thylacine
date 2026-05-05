@@ -96,6 +96,18 @@ cpu_switch_context:
 thread_trampoline:
     bti     c
 
+    /* P2-Ce: release the run-tree lock prev held when switching to us.
+     * Mirrors the post-cpu_switch_context lock-release in sched()'s
+     * resume path. Without this, the per-CPU lock stays held forever
+     * (until the new thread's own first sched() call, which would
+     * then double-acquire and deadlock).
+     *
+     * sched_finish_task_switch is a leaf C function — calling it
+     * before unmask is fine: PAC was applied per-CPU at start.S
+     * before the long-branch, and bl preserves x21 (entry fn ptr)
+     * since x21 is callee-saved per AAPCS64. */
+    bl      sched_finish_task_switch
+
     msr     daifclr, #2          /* P2-Bc: unmask IRQs for new thread */
 
     blr     x21

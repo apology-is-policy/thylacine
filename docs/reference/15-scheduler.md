@@ -378,6 +378,87 @@ for (;;) {
 
 ---
 
+## Work-stealing + finish_task_switch (P2-Ce)
+
+P2-Ce extends the per-CPU scheduler with cross-CPU thread placement (work-stealing) and the lock handoff a stolen thread needs to resume cleanly on the new CPU.
+
+### Real spinlocks
+
+`<thylacine/spinlock.h>`'s `spin_lock`/`spin_unlock`/`spin_trylock` use `__atomic_exchange_n` with acquire/release ordering. On ARMv8.1+ this lowers to `swpa` (LSE single-instruction); on ARMv8.0 to `ldaxr`/`stxr` (LL/SC). The fast-path "spin on relaxed load while held" avoids hammering the contended cacheline with LSE traffic.
+
+`spin_lock_irqsave`/`spin_unlock_irqrestore` now thread NULL through gracefully — `NULL` lock skips the spin part (still does IRQ mask/restore). Preserves the prior contract for callers that used the API as "IRQ mask only."
+
+### Per-CPU run-tree lock
+
+`struct CpuSched.lock` protects each CPU's run tree. Operations:
+- `ready(t)`: take THIS CPU's lock, insert, drop. Cross-CPU placement is the work-stealer's job.
+- `sched()`: take THIS CPU's lock, do everything (pick/steal/insert prev/set next), drop on resume.
+- `sched_remove_if_runnable(t)`: scan all CPUs, take each lock to check membership.
+- `try_steal(cs)`: holds `cs`'s lock; uses `spin_trylock` to grab peer locks (avoids deadlock + back-pressure).
+
+### try_steal logic
+
+```c
+static struct Thread *try_steal(struct CpuSched *cs) {
+    unsigned self = (unsigned)(cs - g_cpu_sched);
+    for (unsigned i = 0; i < DTB_MAX_CPUS; i++) {
+        if (i == self) continue;
+        struct CpuSched *peer = &g_cpu_sched[i];
+        if (!peer->initialized) continue;
+        if (!spin_trylock(&peer->lock)) continue;
+        struct Thread *stolen = NULL;
+        for (unsigned b = 0; b < SCHED_BAND_COUNT && !stolen; b++) {
+            stolen = peer->run_tree[b];
+            if (stolen) unlink(peer, stolen);
+        }
+        spin_unlock(&peer->lock);
+        if (stolen) {
+            stolen->vd_t = cs->vd_counter++;   // rebase to local clock
+            return stolen;
+        }
+    }
+    return NULL;
+}
+```
+
+Called in sched() when `pick_next(cs)` returns NULL — before falling back to "yield with no peer."
+
+### finish_task_switch handoff
+
+The race: per-CPU lock must be held across `cpu_switch_context` (otherwise a peer's `try_steal` could pull `prev` mid-save). On resume, the thread may have migrated to a different CPU. The `cs` variable in the resuming frame is stale.
+
+Solution: `cs->pending_release_lock`. Prev's sched sets it just before the switch:
+```c
+cs->pending_release_lock = &cs->lock;
+cpu_switch_context(&prev->ctx, &next->ctx);
+// On resume — possibly on a different CPU.
+struct CpuSched *cs_now = this_cpu_sched();
+spin_lock_t *lk = cs_now->pending_release_lock;
+cs_now->pending_release_lock = NULL;
+spin_unlock(lk);
+__asm__ __volatile__("msr daif, %x0\n" :: "r"(s) : "memory");
+```
+
+The destination CPU's `pending_release_lock` was set by whoever switched-to-us on this CPU — exactly the lock we need to release.
+
+For fresh threads (first run via `thread_trampoline`), the same handoff applies. `thread_trampoline` (asm) calls `sched_finish_task_switch`:
+```c
+void sched_finish_task_switch(void) {
+    struct CpuSched *cs = this_cpu_sched();
+    spin_lock_t *lk = cs->pending_release_lock;
+    cs->pending_release_lock = NULL;
+    if (lk) spin_unlock(lk);
+}
+```
+
+NULL-guard handles `thread_switch` (P2-A direct-switch primitive used by context tests) which doesn't acquire the per-CPU lock.
+
+### Tests
+
+`smp.work_stealing_smoke`: boot creates N threads, ready()s on its tree, sends IPI_RESCHED to each secondary; secondaries' WFI wakes, post-WFI sched() finds local tree empty and try_steals from boot. Test threads increment per-CPU counters; verify at least one secondary's counter > 0. Threads sleep on per-thread Rendezes after exit signal so thread_free can safely reap them in SLEEPING state.
+
+---
+
 ## Build + verify
 
 ```bash

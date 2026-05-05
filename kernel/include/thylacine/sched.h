@@ -51,6 +51,11 @@ struct Thread;
 // touch disjoint slots. Calling twice for the same cpu_idx extincts.
 void sched_init(unsigned cpu_idx);
 
+// P2-Ce: finish_task_switch helper. Called from thread_trampoline
+// (arch/arm64/context.S) on a fresh thread's first run to release
+// the run-tree lock that prev held at switch time.
+void sched_finish_task_switch(void);
+
 // Diagnostic accessor: per-CPU idle thread pointer. Returns the Thread
 // installed at sched_init time (CPU 0 = kthread; CPU N = the per_cpu_main
 // idle). NULL if sched_init has not yet been called for cpu_idx, or

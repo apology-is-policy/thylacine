@@ -45,6 +45,7 @@ void test_smp_bringup_smoke(void);
 void test_smp_exception_stack_smoke(void);
 void test_smp_per_cpu_idle_smoke(void);
 void test_smp_ipi_resched_smoke(void);
+void test_smp_work_stealing_smoke(void);
 
 // ---------------------------------------------------------------------------
 // Registry. Sentinel-terminated.
@@ -74,6 +75,7 @@ struct test_case g_tests[] = {
     { "smp.exception_stack_smoke",     test_smp_exception_stack_smoke,     false, NULL },
     { "smp.per_cpu_idle_smoke",        test_smp_per_cpu_idle_smoke,        false, NULL },
     { "smp.ipi_resched_smoke",         test_smp_ipi_resched_smoke,         false, NULL },
+    { "smp.work_stealing_smoke",       test_smp_work_stealing_smoke,       false, NULL },
     { NULL, NULL, false, NULL },          // sentinel
 };
 

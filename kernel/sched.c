@@ -50,10 +50,28 @@
 // Aff0). Writes to a foreign CPU's slot are not yet supported and
 // would require coordinated IPIs (P2-Cdc).
 struct CpuSched {
+    // P2-Ce: per-CPU run-tree lock. Acquired by ready()/sched()/
+    // sched_remove_if_runnable on THIS CPU; acquired via try_lock by
+    // peer CPUs during work-stealing. Cross-CPU lock acquisition uses
+    // try_lock only — if a peer is already in its critical section
+    // (insert/remove/pick), the stealer moves on rather than block.
+    spin_lock_t    lock;
     struct Thread *run_tree[SCHED_BAND_COUNT];
     s64            vd_counter;
     bool           initialized;
     struct Thread *idle;             // Per-CPU idle thread. CPU 0 = kthread.
+
+    // P2-Ce: finish_task_switch handoff. Set by prev's sched right
+    // before cpu_switch_context: "this is the lock the resuming
+    // thread should release." Read by the resuming thread (in its
+    // own frame's post-cpu_switch_context resume path, OR in
+    // thread_trampoline for fresh threads). The destination CPU's
+    // cs.pending_release_lock is what gets read — which is exactly
+    // the lock prev held on this CPU when it switched away. Cross-
+    // CPU thread migration (work-stealing) doesn't break this:
+    // whoever switched TO us on the current CPU set the field
+    // correctly for our resume.
+    spin_lock_t   *pending_release_lock;
 };
 
 static struct CpuSched g_cpu_sched[DTB_MAX_CPUS];
@@ -79,6 +97,7 @@ void sched_init(unsigned cpu_idx) {
     if (!current_thread())
         extinction("sched_init before this CPU's idle thread is parked in TPIDR_EL1");
 
+    spin_lock_init(&cs->lock);
     for (unsigned b = 0; b < SCHED_BAND_COUNT; b++) {
         cs->run_tree[b] = NULL;
     }
@@ -167,44 +186,109 @@ void ready(struct Thread *t) {
     if (t->band >= SCHED_BAND_COUNT)
                                   extinction("ready: invalid band");
 
-    // P2-Bc: IRQ-mask discipline. The run tree is mutated below;
-    // a timer IRQ firing here would re-enter preempt_check_irq →
-    // sched() and observe the half-mutated tree. Mask IRQs for the
-    // insert. (Same rationale as sched().)
-    irq_state_t s = spin_lock_irqsave(NULL);
-
-    // P2-Cd: insert into THIS CPU's run tree. Cross-CPU placement
-    // (e.g., wakeup of a thread that should run on a different CPU)
-    // is a P2-Ce work-stealing concern.
+    // P2-Cd/Ce: insert into THIS CPU's run tree under THIS CPU's lock.
+    // Cross-CPU thread placement is a P2-Ce work-stealing concern: the
+    // peer CPU pulls work from us, not the other way around.
     struct CpuSched *cs = this_cpu_sched();
+
+    // P2-Bc/Ce: IRQ-mask discipline + per-CPU run-tree lock. Disable
+    // IRQs first (own-CPU re-entry) then take the lock (cross-CPU
+    // contention against work-stealing peers).
+    irq_state_t s = spin_lock_irqsave(&cs->lock);
 
     if (in_run_tree(cs, t))       extinction("ready of already-runnable Thread");
 
     insert_sorted(cs, t);
 
-    spin_unlock_irqrestore(NULL, s);
+    spin_unlock_irqrestore(&cs->lock, s);
+}
+
+// P2-Ce: finish_task_switch helper for thread_trampoline.
+//
+// A freshly-created thread's first run lands at thread_trampoline (set
+// in ctx.lr by thread_create). thread_trampoline calls this helper to
+// release the run-tree lock that prev held when switching to us.
+// Mirrors the spin_unlock + msr daif sequence that the resume path
+// of a normal sched()-via-context-switch executes — but called from
+// asm, not C, since thread_trampoline doesn't have a sched() frame
+// to return into.
+//
+// Thread_trampoline's IRQ-mask handling (msr daifclr, #2) follows
+// this helper, so we don't need to touch DAIF here. This function
+// only releases the lock that prev held at switch time.
+//
+// NULL-guard: thread_switch() (the legacy direct-switch primitive
+// used by P2-A context tests) bypasses sched() and does NOT acquire
+// a per-CPU run-tree lock. When a fresh thread is the target of a
+// thread_switch into, the trampoline still runs, and this helper
+// sees pending_release_lock = NULL (or stale from an earlier sched).
+// Skip the unlock in that case. The "stale from earlier sched" case
+// is closed by clearing pending_release_lock to NULL after each
+// consumption.
+void sched_finish_task_switch(void) {
+    struct CpuSched *cs = this_cpu_sched();
+    spin_lock_t *lk = cs->pending_release_lock;
+    cs->pending_release_lock = NULL;
+    if (lk) spin_unlock(lk);
+}
+
+// P2-Ce: try to steal a runnable thread from a peer CPU's run tree.
+// Returns NULL if no peer has work or all peers' locks are held by
+// other ops. The stolen thread is REMOVED from the peer's tree;
+// caller is responsible for inserting it (or making it `next`) in
+// THIS CPU's context.
+//
+// Must be called with this CPU's run-tree lock HELD (we update
+// cs->vd_counter while holding it). Per-peer access uses spin_trylock
+// — if any peer is mid-mutation, skip; the next sched() (or this
+// CPU's own ready() arrival) will retry.
+//
+// Stolen thread's vd_t is rebased to fresh on this CPU so it sorts
+// at the back of this CPU's rotation. Without rebasing, the stolen
+// thread's old vd_t (from peer's clock) could be ahead of or behind
+// this CPU's clock, producing arbitrary ordering against locally-
+// queued threads.
+static struct Thread *try_steal(struct CpuSched *cs) {
+    unsigned self = (unsigned)(cs - g_cpu_sched);
+    for (unsigned i = 0; i < DTB_MAX_CPUS; i++) {
+        if (i == self) continue;
+        struct CpuSched *peer = &g_cpu_sched[i];
+        if (!peer->initialized) continue;
+
+        if (!spin_trylock(&peer->lock)) continue;
+
+        // Pick the highest-priority runnable thread from peer.
+        struct Thread *stolen = NULL;
+        for (unsigned b = 0; b < SCHED_BAND_COUNT && !stolen; b++) {
+            stolen = peer->run_tree[b];
+            if (stolen) unlink(peer, stolen);
+        }
+
+        spin_unlock(&peer->lock);
+
+        if (stolen) {
+            // Rebase vd_t into this CPU's clock space.
+            stolen->vd_t = cs->vd_counter++;
+            return stolen;
+        }
+    }
+    return NULL;
 }
 
 void sched(void) {
     // P2-Cd: read THIS CPU's sched state. All run-tree access goes
-    // through `cs`. Cross-CPU (P2-Ce) will bring its own contention
-    // discipline.
+    // through `cs`.
     struct CpuSched *cs = this_cpu_sched();
     if (!cs->initialized) extinction("sched() before this CPU's sched_init");
 
-    // P2-Bc: IRQ-mask discipline. sched() mutates shared state
-    // (run tree, current_thread via TPIDR_EL1, vd_t counter) — a
-    // timer IRQ firing inside this critical section would re-enter
-    // preempt_check_irq → sched(), corrupting the run tree. Mask
-    // IRQs locally for the duration; the saved DAIF is restored on
-    // resumption (after the eventual switch-back propagates the
-    // saved state through cpu_switch_context).
-    //
-    // The lock argument is NULL — we're not contending on a shared
-    // lock (per-CPU tree, single-CPU mutator at v1.0 P2-Cd); the IRQ
-    // mask is what we need. P2-Ce work-stealing turns the spin part
-    // real with a per-CPU run-tree lock.
-    irq_state_t s = spin_lock_irqsave(NULL);
+    // P2-Bc/Ce: IRQ-mask + per-CPU run-tree lock. sched() mutates
+    // shared state (run tree, current_thread via TPIDR_EL1, vd_t
+    // counter) — a timer IRQ firing inside this critical section
+    // would re-enter preempt_check_irq → sched(), corrupting the
+    // run tree. The per-CPU lock additionally protects against
+    // cross-CPU work-stealing: a peer's try_steal will fail to acquire
+    // and move on rather than walk our tree mid-mutation.
+    irq_state_t s = spin_lock_irqsave(&cs->lock);
 
     struct Thread *prev = current_thread();
     if (!prev) extinction("sched() with no current thread");
@@ -230,35 +314,40 @@ void sched(void) {
 
     struct Thread *next = pick_next(cs);
     if (!next) {
+        // P2-Ce: try work-stealing before falling back to local
+        // semantics. If a peer CPU has runnable threads we'd otherwise
+        // sit idle while they're under-served — pull one over. We hold
+        // our own lock through the steal (peer access uses try_lock).
+        next = try_steal(cs);
+    }
+    if (!next) {
         if (prev->state != THREAD_RUNNING) {
-            // Block path with no runnable peer on this CPU. v1.0 P2-Cd:
-            // this is still a deadlock at UP-per-CPU. P2-Cdc lands the
-            // GIC SGI infrastructure that lets idle threads on other
-            // CPUs receive IPI_RESCHED to wake; for now the idle thread
-            // is just a normal-scheduled thread that always-RUNNABLE-
-            // returns to the run tree on yield (see below), so this
-            // path indicates a sleep with no future wakeup possible.
-            extinction("sched: deadlock — current is blocking, no runnable peer");
+            // Block path with no runnable peer anywhere. The thread
+            // that's blocking has no waker scheduled (sleep/wakeup
+            // protocol broken) — extinct loudly. With work-stealing
+            // live, this is a true deadlock signal: no CPU has any
+            // runnable thread that could eventually wake us.
+            extinction("sched: deadlock — current is blocking, no runnable peer system-wide");
         }
         // Yield path with no runnable peer: keep prev running. Refill
         // slice — sched() was called for preempt or explicit yield;
         // either way, prev is the only runnable thread, so give it a
         // fresh quantum.
         prev->slice_remaining = THREAD_DEFAULT_SLICE_TICKS;
-        spin_unlock_irqrestore(NULL, s);
+        spin_unlock_irqrestore(&cs->lock, s);
         return;
     }
 
     if (prev == next) {
-        // pick_next pulled prev out of its own runqueue. Possible
-        // under SMP race (cross-CPU wakeup re-inserted prev into a
-        // runqueue between drop-Rendez-lock and entering sched).
-        // Don't switch to self — re-insert and let the next sched()
-        // try again. v1.0 P2-Cd: shouldn't happen on UP-per-CPU.
+        // pick_next or steal returned prev. Don't switch to self —
+        // re-insert and continue. With work-stealing this can happen
+        // if our own pick_next gave NULL but try_steal pulled prev
+        // back from a peer (e.g., prev was migrated mid-flight by
+        // some future cross-CPU placer). Re-insert under our lock.
         if (prev->state == THREAD_RUNNING) {
             insert_sorted(cs, prev);
         }
-        spin_unlock_irqrestore(NULL, s);
+        spin_unlock_irqrestore(&cs->lock, s);
         return;
     }
 
@@ -286,6 +375,14 @@ void sched(void) {
     next->state = THREAD_RUNNING;
     set_current_thread(next);
 
+    // P2-Ce finish_task_switch handoff: stash the lock to be released
+    // on the destination CPU. cs->pending_release_lock points at THIS
+    // CPU's lock; the resuming thread reads its destination-CPU's
+    // pending_release_lock (which after a cross-CPU migration steal-
+    // path may differ from `cs` in our local frame). Either way, this
+    // CPU's slot is the one whoever resumes here will read.
+    cs->pending_release_lock = &cs->lock;
+
     cpu_switch_context(&prev->ctx, &next->ctx);
 
     // Resumption: prev was switched back to. State and current_thread
@@ -295,23 +392,43 @@ void sched(void) {
     // before switching). prev's slice was replenished by whichever
     // peer's sched() picked prev (the same code path above, in their
     // frame).
-    spin_unlock_irqrestore(NULL, s);
+    //
+    // P2-Ce: lock release after migration. After cpu_switch_context
+    // we may be on a DIFFERENT CPU than at sched-entry (work-stealing
+    // moved us). The local `cs` variable points at our entry-CPU's
+    // CpuSched, which is no longer the right lock to release. Re-read
+    // this_cpu_sched() and unlock its pending_release_lock — the
+    // destination CPU's prev set this field before switching to us.
+    // Then restore IRQ state from our local frame's `s` (per-thread
+    // value, captured at our sched entry).
+    {
+        struct CpuSched *cs_now = this_cpu_sched();
+        spin_lock_t *lk = cs_now->pending_release_lock;
+        cs_now->pending_release_lock = NULL;
+        spin_unlock(lk);
+        __asm__ __volatile__("msr daif, %x0\n" :: "r"(s) : "memory");
+    }
 }
 
 void sched_remove_if_runnable(struct Thread *t) {
     if (!t) return;
     if (t->state != THREAD_RUNNABLE) return;
-    // P2-Cd: walk every CPU's run tree to find the one that owns t.
-    // At v1.0 a thread is only in one CPU's tree, so the first match
-    // wins. P2-Ce work-stealing may move threads between trees;
-    // the same scan covers that case.
+    // P2-Cd/Ce: walk every CPU's run tree to find the one that owns t.
+    // At v1.0 P2-Ce a thread is only in one CPU's tree at a time
+    // (work-stealing transfers ownership atomically under the peer's
+    // lock); the first match wins. Take each CPU's lock for the
+    // mutation — full lock (not try_lock) because thread_free expects
+    // unconditional cleanup; if a peer is mid-mutation we wait.
     for (unsigned i = 0; i < DTB_MAX_CPUS; i++) {
         struct CpuSched *cs = &g_cpu_sched[i];
         if (!cs->initialized) continue;
+        irq_state_t s = spin_lock_irqsave(&cs->lock);
         if (in_run_tree(cs, t)) {
             unlink(cs, t);
+            spin_unlock_irqrestore(&cs->lock, s);
             return;
         }
+        spin_unlock_irqrestore(&cs->lock, s);
     }
 }
 
