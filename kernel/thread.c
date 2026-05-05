@@ -19,6 +19,7 @@
 #include <thylacine/extinction.h>
 #include <thylacine/page.h>
 #include <thylacine/proc.h>
+#include <thylacine/sched.h>
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 
@@ -74,15 +75,22 @@ void thread_init(void) {
     if (!g_kthread) extinction("kmem_cache_alloc(kthread) failed");
 
     // KP_ZERO leaves every field 0/NULL on entry. Only the non-zero-
-    // default values get explicit setters (magic, state, proc).
-    // The boot CPU is already running on the boot stack from start.S;
-    // kthread doesn't own a separately-allocated stack — kstack_base
-    // stays NULL via KP_ZERO. thread_free's free_pages call is gated
-    // on kstack_base != NULL.
-    g_kthread->magic = THREAD_MAGIC;
-    g_kthread->tid   = 0;
-    g_kthread->state = THREAD_RUNNING;
-    g_kthread->proc  = kproc();
+    // default values get explicit setters (magic, state, proc, weight,
+    // band). The boot CPU is already running on the boot stack from
+    // start.S; kthread doesn't own a separately-allocated stack —
+    // kstack_base stays NULL via KP_ZERO. thread_free's free_pages
+    // call is gated on kstack_base != NULL.
+    //
+    // EEVDF defaults: vd_t = 0 (via KP_ZERO; reserved kthread slot —
+    // P2-Ba sched.c starts g_vd_counter at 1 so kthread keeps its
+    // initial 0 until first sched() advances it). weight = 1 (full
+    // EEVDF weight semantics at P2-Bc). band = SCHED_BAND_NORMAL.
+    g_kthread->magic  = THREAD_MAGIC;
+    g_kthread->tid    = 0;
+    g_kthread->state  = THREAD_RUNNING;
+    g_kthread->proc   = kproc();
+    g_kthread->weight = 1;
+    g_kthread->band   = SCHED_BAND_NORMAL;
 
     thread_link_into_proc(g_kthread, kproc());
     g_thread_created++;
@@ -115,13 +123,19 @@ struct Thread *thread_create(struct Proc *proc, void (*entry)(void)) {
     void *kstack = (void *)(uintptr_t)page_to_pa(stack_pg);
 
     // KP_ZERO leaves every field 0/NULL; only the non-zero-default
-    // values get explicit setters.
+    // values get explicit setters. EEVDF defaults: weight=1, band=
+    // NORMAL, vd_t=0 (caller can ready() to insert into run tree;
+    // ready picks up the current vd_t — fresh threads at vd_t=0 sort
+    // ahead of long-running threads whose vd_t has advanced via
+    // sched() yields).
     t->magic       = THREAD_MAGIC;
     t->tid         = g_next_tid++;
     t->state       = THREAD_RUNNABLE;
     t->proc        = proc;
     t->kstack_base = kstack;
     t->kstack_size = THREAD_KSTACK_SIZE;
+    t->weight      = 1;
+    t->band        = SCHED_BAND_NORMAL;
 
     // Lay out the initial saved context so the first cpu_switch_context
     // into this thread lands at thread_trampoline, which blr's entry.
@@ -153,6 +167,11 @@ void thread_free(struct Thread *t) {
                                   extinction("thread_free of uninitialized Thread");
     if (t->state == THREAD_RUNNING)
                                   extinction("thread_free of RUNNING thread");
+
+    // If t was RUNNABLE and sitting in a run tree, remove it before
+    // unlinking from the proc list. sched_remove_if_runnable is a
+    // no-op for non-RUNNABLE threads.
+    sched_remove_if_runnable(t);
 
     thread_unlink_from_proc(t);
 

@@ -32,6 +32,7 @@
 #include <thylacine/extinction.h>
 #include <thylacine/page.h>
 #include <thylacine/proc.h>
+#include <thylacine/sched.h>
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 
@@ -249,6 +250,7 @@ void boot_main(void) {
     // The actual scheduler (EEVDF) lands at P2-B.
     proc_init();
     thread_init();
+    sched_init();
 
     uart_puts("  kproc:   pid=");
     uart_putdec((u64)kproc()->pid);
@@ -259,6 +261,10 @@ void boot_main(void) {
     uart_puts("  kthread: tid=");
     uart_putdec((u64)kthread()->tid);
     uart_puts(" state=RUNNING (current_thread = kthread)\n");
+
+    uart_puts("  sched:   bands=3 (INTERACTIVE/NORMAL/IDLE) runnable=");
+    uart_putdec((u64)sched_runnable_count());
+    uart_puts(" (0 expected pre-test; ready() inserts)\n");
 
     // In-kernel test harness. Runs every test in g_tests[] (kaslr
     // mix64 avalanche, DTB chosen seed presence, refactored phys

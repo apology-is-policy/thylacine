@@ -13,6 +13,7 @@ set(KERNEL_SRCS
     fault_test.c
     proc.c
     thread.c
+    sched.c
     ../arch/arm64/start.S
     ../arch/arm64/uart.c
     ../arch/arm64/mmu.c
@@ -37,6 +38,7 @@ set(KERNEL_SRCS
     test/test_timer.c
     test/test_hardening.c
     test/test_context.c
+    test/test_sched.c
 )
 
 set(KERNEL_LD_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/../arch/arm64/kernel.ld)

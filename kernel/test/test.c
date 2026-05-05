@@ -35,6 +35,8 @@ void test_timer_tick_increments(void);
 void test_hardening_detect_smoke(void);
 void test_context_create_destroy(void);
 void test_context_round_trip(void);
+void test_sched_dispatch_smoke(void);
+void test_sched_runnable_count(void);
 
 // ---------------------------------------------------------------------------
 // Registry. Sentinel-terminated.
@@ -52,6 +54,8 @@ struct test_case g_tests[] = {
     { "hardening.detect_smoke",        test_hardening_detect_smoke,        false, NULL },
     { "context.create_destroy",        test_context_create_destroy,        false, NULL },
     { "context.round_trip",            test_context_round_trip,            false, NULL },
+    { "scheduler.dispatch_smoke",      test_sched_dispatch_smoke,          false, NULL },
+    { "scheduler.runnable_count",      test_sched_runnable_count,          false, NULL },
     { NULL, NULL, false, NULL },          // sentinel
 };
 

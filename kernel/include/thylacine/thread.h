@@ -67,14 +67,29 @@ struct Thread {
     // Linked-list links into Proc->threads (doubly-linked).
     struct Thread     *next_in_proc;
     struct Thread     *prev_in_proc;
+
+    // P2-Ba: EEVDF / run-tree fields. The scheduler's per-CPU run tree
+    // (sched.c) keys on `vd_t`; band selects which of three priority
+    // tiers (INTERACTIVE / NORMAL / IDLE — sched.h SCHED_BAND_*) the
+    // thread belongs to; weight is the EEVDF weight (default 1; higher
+    // → more CPU share — full EEVDF math at P2-Bc).
+    //
+    // runnable_{next,prev} link the thread into its band's sorted-by-
+    // vd_t doubly-linked list. Both NULL when the thread is NOT in any
+    // run tree (RUNNING / SLEEPING / freshly-created).
+    s64                vd_t;
+    u32                weight;
+    u32                band;            // SCHED_BAND_* (sched.h)
+    struct Thread     *runnable_next;
+    struct Thread     *runnable_prev;
 };
 
-_Static_assert(sizeof(struct Thread) == 168,
-               "struct Thread size pinned at 168 bytes (P2-A R4 baseline: "
-               "magic 8 + tid 4 + state 4 + proc 8 + ctx 112 + kstack_base 8 "
-               "+ kstack_size 8 + next_in_proc 8 + prev_in_proc 8). Adding "
-               "a field grows the SLUB cache; update this assert "
-               "deliberately so the change is intentional.");
+_Static_assert(sizeof(struct Thread) == 200,
+               "struct Thread size pinned at 200 bytes (P2-Ba: P2-A R4 "
+               "baseline 168 + 32 EEVDF fields = vd_t 8 + weight 4 + band 4 "
+               "+ runnable_next 8 + runnable_prev 8). Adding a field grows "
+               "the SLUB cache; update this assert deliberately so the "
+               "change is intentional.");
 _Static_assert(__builtin_offsetof(struct Thread, magic) == 0,
                "magic must be at offset 0 (P2-A audit R4 F42)");
 
