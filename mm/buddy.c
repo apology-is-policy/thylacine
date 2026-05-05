@@ -19,6 +19,7 @@
 
 #include "buddy.h"
 
+#include <thylacine/extinction.h>
 #include <thylacine/page.h>
 #include <thylacine/spinlock.h>
 #include <thylacine/types.h>
@@ -255,6 +256,15 @@ static void free_locked(struct buddy_zone *zone, struct page *p, unsigned order)
 }
 
 void buddy_free(struct buddy_zone *zone, struct page *p, unsigned order) {
+    // F37 (audit-r3): defend against corrupted page->order values.
+    // free_locked's merge loop iterates `while (order < MAX_ORDER)`;
+    // an order > MAX_ORDER would walk past the free-list array
+    // bounds. The page-order corruption can come from a stale slab
+    // page or a non-head pointer (which F32's kfree validation
+    // already catches earlier in the path); this is defense-in-depth.
+    if (order > MAX_ORDER) {
+        extinction("buddy_free: order > MAX_ORDER (corrupted page metadata?)");
+    }
     irq_state_t s = spin_lock_irqsave(&zone->lock);
     free_locked(zone, p, order);
     spin_unlock_irqrestore(&zone->lock, s);

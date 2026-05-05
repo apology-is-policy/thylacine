@@ -412,6 +412,28 @@ bool mmu_map_device(paddr_t pa, u64 size) {
     paddr_t pa_last  = (pa + size - 1) & ~(BLOCK_SIZE_L2 - 1);
     paddr_t pa_end   = pa_last + BLOCK_SIZE_L2;   // exclusive end
 
+    // F31 (audit-r3): reject ranges that overlap the kernel image's
+    // 2 MiB block. That block holds a TABLE descriptor pointing at
+    // the SHARED `l3_kernel` (used by both TTBR0 and TTBR1); writing
+    // a Device BLOCK descriptor over it would lose the L3 reference,
+    // demoting the per-section W^X mapping to a coarse 2 MiB Device
+    // block (PXN=1 — kernel text becomes non-executable on the next
+    // TTBR0 access). The shared L3 itself is a static array so it's
+    // not freed, but the TTBR0 access path is severed.
+    {
+        u64 kern_pa_start_v = (u64)(uintptr_t)_kernel_start;
+        u64 kern_pa_end_v   = (u64)(uintptr_t)_kernel_end;
+        u64 kern_2mib       = kern_pa_start_v & ~(BLOCK_SIZE_L2 - 1);
+        u64 kern_2mib_end   = ((kern_pa_end_v - 1) & ~(BLOCK_SIZE_L2 - 1))
+                              + BLOCK_SIZE_L2;
+        // Reject if the requested range hits ANY of the 2 MiB blocks
+        // that contain the kernel image. Equivalently: ranges
+        // [pa_first, pa_end) and [kern_2mib, kern_2mib_end) intersect.
+        if (pa_first < kern_2mib_end && kern_2mib < pa_end) {
+            return false;
+        }
+    }
+
     // Step 1: clean+invalidate dcache for the region (still mapped
     // Normal-WB at this point). Operate by VA via TTBR0 identity.
     // After this, any dirty lines from the prior mapping have been

@@ -36,9 +36,9 @@ static u64 g_initial_free_pages;
 
 struct reservation { paddr_t start; paddr_t end; };
 
-static void sort3_by_start(struct reservation r[3]) {
-    // Tiny insertion sort; three elements.
-    for (int i = 1; i < 3; i++) {
+static void sort_by_start(struct reservation *r, int n) {
+    // Tiny insertion sort; n elements.
+    for (int i = 1; i < n; i++) {
         struct reservation key = r[i];
         int j = i - 1;
         while (j >= 0 && r[j].start > key.start) {
@@ -47,6 +47,19 @@ static void sort3_by_start(struct reservation r[3]) {
         }
         r[j + 1] = key;
     }
+}
+
+// Check that sorted reservations don't overlap. Audit-r3 F29: on
+// machines where firmware places the DTB blob inside the range we
+// claim for the struct_pages array (Pi 5 with 8 GiB RAM has ~96 MiB
+// of struct_pages — easy to collide), the buddy_zone_init clear pass
+// would silently overwrite the DTB. Detect at boot-time before any
+// damage is done.
+static bool reservations_disjoint(const struct reservation *r, int n) {
+    for (int i = 1; i < n; i++) {
+        if (r[i].start < r[i - 1].end) return false;
+    }
+    return true;
 }
 
 static inline paddr_t round_up(paddr_t v, paddr_t a) {
@@ -102,6 +115,24 @@ bool phys_init(void) {
         extinction("phys_init: reservation outside DTB-discovered RAM");
     }
 
+    // F34 (audit-r3): make the low-firmware reservation EXPLICIT in
+    // the array rather than threading it through cursor manipulation.
+    // F29 (audit-r3): verify no overlap among the four reservations
+    // — on Pi 5 with 8 GiB RAM the struct_pages array is ~96 MiB and
+    // can collide with the DTB blob the firmware placed; collision
+    // would cause buddy_zone_init's clear pass to overwrite the DTB.
+    struct reservation res[4] = {
+        { zone_base,             kern_pa_start },        // low firmware
+        { kern_pa_start,         kern_pa_end },          // kernel image
+        { struct_pages_pa_start, struct_pages_pa_end },  // struct page array
+        { dtb_pa_start,          dtb_pa_end },           // DTB blob
+    };
+    sort_by_start(res, 4);
+    if (!reservations_disjoint(res, 4)) {
+        extinction("phys_init: reservation overlap "
+                   "(DTB collides with kernel/struct_pages?)");
+    }
+
     // 5. Initialize the buddy zone. struct_pages lives at
     //    struct_pages_pa_start in PA-identity-mapped TTBR0 space; we
     //    address it as a regular pointer and the MMU translates via
@@ -111,27 +142,11 @@ bool phys_init(void) {
     buddy_zone_init(&g_zone0, zone_base, zone_end, struct_pages);
 
     // 6. Free regions = the gaps between sorted reservations.
-    //    The "low firmware" region [zone_base, kern_pa_start) is
-    //    treated as RESERVED — we don't know what (if anything) the
-    //    bootloader left in there, and it's tiny on QEMU virt
-    //    (512 KiB before kernel at 0x40080000).
-    struct reservation res[3] = {
-        { kern_pa_start,         kern_pa_end },
-        { struct_pages_pa_start, struct_pages_pa_end },
-        { dtb_pa_start,          dtb_pa_end },
-    };
-    sort3_by_start(res);
-
-    // Walk: gap between zone start and first reservation, then
-    // between consecutive reservations, then after last reservation.
+    //    [zone_base, kern_pa_start) (low firmware) is the first entry
+    //    in res[]; we treat it as fully reserved.
     paddr_t cursor = round_up(zone_base, PAGE_SIZE);
 
-    // Skip low firmware area: jump cursor past _kernel_pa_start
-    // boundary. (In other words, treat [zone_base, kern_pa_start)
-    // as implicitly reserved — see comment above.)
-    if (cursor < kern_pa_start) cursor = kern_pa_start;
-
-    for (int i = 0; i < 3; i++) {
+    for (int i = 0; i < 4; i++) {
         if (cursor < res[i].start) {
             buddy_free_region(&g_zone0, cursor, res[i].start);
         }

@@ -31,6 +31,15 @@
 #define FDT_NOP        0x00000004u
 #define FDT_END        0x00000009u
 
+// Pin the FDT format constants at compile time (P1-I audit F35). A
+// merge-conflict typo on FDT_MAGIC would silently reject every DTB on
+// boot; static_asserts catch the drift before the kernel ships.
+_Static_assert(FDT_MAGIC == 0xd00dfeedu,
+               "FDT_MAGIC must be 0xd00dfeed per Devicetree Specification v0.4");
+_Static_assert(FDT_BEGIN_NODE == 1 && FDT_END_NODE == 2 &&
+               FDT_PROP == 3 && FDT_NOP == 4 && FDT_END == 9,
+               "FDT_* token values pinned to spec");
+
 // Initialize the parser. `base` is the physical address of the DTB
 // (received in x0 by start.S; stored in _saved_dtb_ptr).
 //

@@ -53,7 +53,9 @@ struct kmem_cache {
     unsigned objects_per_slab;
 
     struct page partial_list;    // sentinel head of partial slabs
+    struct page full_list;       // sentinel head of full slabs (P1-I F33)
     u64 nr_partial;
+    u64 nr_full;
 
     // Diagnostics
     u64 alloc_count;

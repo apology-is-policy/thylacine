@@ -51,6 +51,14 @@ struct page {
     struct kmem_cache *slab_cache; // SLUB: cache backref (NULL when not a slab)
 };
 
+// Pin struct page size at compile time (P1-I audit F35). The struct
+// page array scales with RAM (24 MiB at 2 GiB / 96 MiB at 8 GiB);
+// adding a field silently grows the BSS reservation. Catch the drift
+// at build time so a future field addition is intentional.
+_Static_assert(sizeof(struct page) == 48,
+               "struct page must be 48 bytes (changes scale the per-RAM BSS); "
+               "if intentional update phys.c reservation math AND this assert");
+
 // struct page flags.
 #define PG_FREE       (1u << 0) // page is currently on a buddy free list
 #define PG_RESERVED   (1u << 1) // page is reserved (kernel image, DTB blob,

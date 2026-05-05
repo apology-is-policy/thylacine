@@ -115,7 +115,9 @@ static void init_cache(struct kmem_cache *c, const char *name,
     c->slab_order  = 0;     // P1-E: single-page slabs only
     c->objects_per_slab = (PAGE_SIZE << c->slab_order) / actual;
     list_init_head(&c->partial_list);
+    list_init_head(&c->full_list);          // F33: track full slabs explicitly
     c->nr_partial      = 0;
+    c->nr_full         = 0;
     c->alloc_count     = 0;
     c->free_count      = 0;
     c->slabs_active    = 0;
@@ -198,12 +200,14 @@ static void *cache_alloc_locked(struct kmem_cache *c) {
     slab->refcount++;
     c->alloc_count++;
 
-    // If the slab is now full, take it off the partial list. (Without
-    // a separate "full" list, we just stop tracking it; kmem_cache_free
-    // will re-add to partial when it transitions from full → has-free.)
+    // If the slab is now full, move it from partial → full list (F33).
+    // Tracking full slabs explicitly closes the destroy-time leak that
+    // would otherwise lose the slab + its struct page metadata.
     if (slab->refcount == c->objects_per_slab) {
         list_remove(slab);
         c->nr_partial--;
+        list_push_front(&c->full_list, slab);
+        c->nr_full++;
     }
 
     return obj;
@@ -237,7 +241,9 @@ static void cache_free_locked(struct kmem_cache *c, void *obj, struct page *slab
     c->free_count++;
 
     if (was_full) {
-        // slab transitions from full → has-free: re-add to partial.
+        // slab transitions from full → has-free: move full → partial (F33).
+        list_remove(slab);
+        c->nr_full--;
         list_push_front(&c->partial_list, slab);
         c->nr_partial++;
     } else if (slab->refcount == 0) {
@@ -282,6 +288,18 @@ void kmem_cache_destroy(struct kmem_cache *c) {
         list_remove(slab);
         c->nr_partial--;
         slab_drain(c, slab);
+    }
+
+    // F33 (audit-r3): destroy with full slabs outstanding means the
+    // caller has live objects in those slabs. The contract documented
+    // in the header says "Caller's responsibility to ensure no live
+    // objects remain" — surfacing the violation as an extinction is
+    // honest. Without this, the full slabs would leak and their
+    // struct pages would carry dangling slab_cache pointers; if the
+    // backing pages got recycled, kfree-from-different-cache could
+    // dereference the freed kmem_cache descriptor.
+    if (c->nr_full != 0) {
+        extinction("kmem_cache_destroy: live objects remain (full slabs)");
     }
 
     // Unlink from the global cache list.
@@ -343,12 +361,35 @@ void *kcalloc(size_t n, size_t size, unsigned flags) {
 
 void kfree(void *p) {
     if (!p) return;
-    struct page *page = pa_to_page((paddr_t)(uintptr_t)p);
+    paddr_t pa = (paddr_t)(uintptr_t)p;
+    struct page *page = pa_to_page(pa);
+
     if (page->flags & PG_SLAB) {
-        kmem_cache_free(page->slab_cache, p);
+        // F32 (audit-r3): validate the pointer is at a slot boundary.
+        // The slab base is the page's PA; valid object addresses are
+        // base + N * actual_size. An interior pointer (kfree(p +
+        // offset)) would dereference the wrong slab metadata at
+        // kmem_cache_free's check or corrupt the freelist on push.
+        struct kmem_cache *c = page->slab_cache;
+        if (!c) {
+            extinction("kfree: PG_SLAB page has no slab_cache");
+        }
+        paddr_t slab_base = page_to_pa(page);
+        if ((pa - slab_base) % c->actual_size != 0) {
+            extinction("kfree: pointer not at object boundary "
+                       "(interior pointer or wrong cache?)");
+        }
+        kmem_cache_free(c, p);
     } else {
-        // Large allocation: call free_pages with the order recorded
-        // on the head page.
+        // Large allocation: the pointer must equal the head-page PA.
+        // F32 (audit-r3): an interior pointer to a multi-page allocation
+        // would land on a SECOND struct page whose flags / order are
+        // uninitialized (post-buddy-split garbage), corrupting buddy
+        // accounting via free_pages with wrong order.
+        if (pa != page_to_pa(page)) {
+            extinction("kfree: large-allocation pointer not page-aligned "
+                       "(interior pointer?)");
+        }
         free_pages(page, page->order);
     }
 }

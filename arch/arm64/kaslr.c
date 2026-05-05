@@ -163,11 +163,24 @@ static void apply_relocations(u64 slide) {
             u64 target_pa = (u64)((s64)rel->r_offset + link_to_pa);
             u64 *target = (u64 *)(uintptr_t)target_pa;
             *target = (u64)(rel->r_addend + (s64)slide);
+        } else {
+            // F39 (audit-r3): R_AARCH64_GLOB_DAT / JUMP_SLOT / etc.
+            // shouldn't appear in our static-pie kernel given the
+            // -Wl,-z,text + --no-dynamic-linker + -fdirect-access-
+            // external-data flags. If one DOES appear, KASLR can't
+            // patch it correctly and the kernel runs with a wrong
+            // address — a silent runtime fault later. Fail loudly at
+            // boot so the build-time misconfiguration surfaces here.
+            //
+            // We can't extinction at this point (running pre-MMU,
+            // pre-UART-on, no exception handler); fall through to a
+            // bare halt. The next kernel build run from a developer
+            // can grep .rela.dyn for the unsupported type. (Future
+            // P1-I refinement: emit a recognizable signature on the
+            // UART before halting; PL011 may or may not be reachable
+            // depending on QEMU vs Pi 5 firmware state at this point.)
+            __asm__ __volatile__("brk #0xab" ::: "memory");
         }
-        // Other types (R_AARCH64_GLOB_DAT, R_AARCH64_JUMP_SLOT, etc.)
-        // shouldn't appear in our static-pie kernel. If they do, the
-        // walker silently skips them; build-time linker flags keep the
-        // surface narrow.
         rel++;
     }
 }
