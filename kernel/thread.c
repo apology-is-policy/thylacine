@@ -92,6 +92,7 @@ void thread_init(void) {
     g_kthread->weight = 1;
     g_kthread->band   = SCHED_BAND_NORMAL;
     g_kthread->slice_remaining = THREAD_DEFAULT_SLICE_TICKS;
+    g_kthread->on_cpu = true;       // P2-Cf: kthread is the boot CPU's running thread
 
     thread_link_into_proc(g_kthread, kproc());
     g_thread_created++;
@@ -128,6 +129,9 @@ struct Thread *thread_init_per_cpu_idle(unsigned cpu_idx) {
                                           // runs when nothing else
                                           // is runnable on this CPU.
     t->slice_remaining = THREAD_DEFAULT_SLICE_TICKS;
+    t->on_cpu = true;                     // P2-Cf: per-CPU idle is
+                                          // the executing thread on
+                                          // this CPU at sched_init.
 
     thread_link_into_proc(t, kproc());
     g_thread_created++;
@@ -237,6 +241,15 @@ void thread_switch(struct Thread *next) {
     // make this window observable.
     prev->state = THREAD_RUNNABLE;
     next->state = THREAD_RUNNING;
+
+    // P2-Cf: same on_cpu handoff as sched(). thread_switch is a P2-A
+    // direct-switch primitive that bypasses the scheduler; we still
+    // need on_cpu transitions so wakeup() observes correct state if
+    // a thread_switch'd thread later participates in Rendez-based
+    // wait/wake. Use sched's per-CPU prev_to_clear_on_cpu via the
+    // public arm/consume helpers.
+    __atomic_store_n(&next->on_cpu, true, __ATOMIC_RELAXED);
+    sched_arm_clear_on_cpu(prev);
     set_current_thread(next);
 
     cpu_switch_context(&prev->ctx, &next->ctx);
@@ -244,6 +257,12 @@ void thread_switch(struct Thread *next) {
     // Resumption point: prev was switched back to. current_thread() now
     // points to prev (set by whichever peer called thread_switch(prev)),
     // and prev->state = RUNNING.
+    //
+    // P2-Cf: clear PREV's on_cpu now that cpu_switch_context completed.
+    // Mirrors sched()'s C-side resume path. Skips lock release because
+    // thread_switch never took the per-CPU run-tree lock; the helper
+    // sched_finish_task_switch's NULL-guard handles that.
+    sched_finish_task_switch();
 }
 
 u64 thread_total_created(void)   { return g_thread_created; }

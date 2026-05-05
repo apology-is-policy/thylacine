@@ -53,8 +53,17 @@ void sched_init(unsigned cpu_idx);
 
 // P2-Ce: finish_task_switch helper. Called from thread_trampoline
 // (arch/arm64/context.S) on a fresh thread's first run to release
-// the run-tree lock that prev held at switch time.
+// the run-tree lock that prev held at switch time. Also clears
+// prev's on_cpu (P2-Cf) so a peer's wakeup() spin can observe
+// completion.
 void sched_finish_task_switch(void);
+
+// P2-Cf: arm a clear-on_cpu handoff. Called by callers that perform
+// their own context switch (currently: thread_switch, the P2-A
+// direct-switch primitive). Stores `prev` in this CPU's CpuSched
+// slot; the destination CPU's resume path consumes it via
+// sched_finish_task_switch.
+void sched_arm_clear_on_cpu(struct Thread *prev);
 
 // Diagnostic accessor: per-CPU idle thread pointer. Returns the Thread
 // installed at sched_init time (CPU 0 = kthread; CPU N = the per_cpu_main

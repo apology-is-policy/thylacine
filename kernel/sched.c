@@ -72,6 +72,14 @@ struct CpuSched {
     // whoever switched TO us on the current CPU set the field
     // correctly for our resume.
     spin_lock_t   *pending_release_lock;
+
+    // P2-Cf: clear-on_cpu handoff. Set by prev's sched right before
+    // cpu_switch_context to point at prev (the thread being switched
+    // away from on this CPU). Read by the destination CPU's resume
+    // path (the thread that's coming on-CPU here) to clear prev's
+    // on_cpu flag — signaling to a wakeup() spinner that prev is
+    // fully switched out and safe to transition.
+    struct Thread *prev_to_clear_on_cpu;
 };
 
 static struct CpuSched g_cpu_sched[DTB_MAX_CPUS];
@@ -225,8 +233,22 @@ void ready(struct Thread *t) {
 // Skip the unlock in that case. The "stale from earlier sched" case
 // is closed by clearing pending_release_lock to NULL after each
 // consumption.
+void sched_arm_clear_on_cpu(struct Thread *prev) {
+    struct CpuSched *cs = this_cpu_sched();
+    cs->prev_to_clear_on_cpu = prev;
+}
+
 void sched_finish_task_switch(void) {
     struct CpuSched *cs = this_cpu_sched();
+    // P2-Cf: clear prev's on_cpu (mirror of sched()'s C-side resume
+    // path). For fresh threads coming through thread_trampoline, this
+    // is the first opportunity post-cpu_switch_context to mark prev
+    // as fully switched out.
+    struct Thread *prev_to_clear = cs->prev_to_clear_on_cpu;
+    cs->prev_to_clear_on_cpu = NULL;
+    if (prev_to_clear) {
+        __atomic_store_n(&prev_to_clear->on_cpu, false, __ATOMIC_RELEASE);
+    }
     spin_lock_t *lk = cs->pending_release_lock;
     cs->pending_release_lock = NULL;
     if (lk) spin_unlock(lk);
@@ -383,6 +405,15 @@ void sched(void) {
     // CPU's slot is the one whoever resumes here will read.
     cs->pending_release_lock = &cs->lock;
 
+    // P2-Cf wait/wake race close: mark next as on_cpu BEFORE the
+    // switch (it's about to be running), and stash prev so the
+    // destination CPU's resume path can clear prev->on_cpu AFTER
+    // cpu_switch_context completes (prev is fully switched out).
+    // wakeup() spins on the waiter's on_cpu, so this transition
+    // protects against a peer transitioning a still-running thread.
+    __atomic_store_n(&next->on_cpu, true, __ATOMIC_RELAXED);
+    cs->prev_to_clear_on_cpu = prev;
+
     cpu_switch_context(&prev->ctx, &next->ctx);
 
     // Resumption: prev was switched back to. State and current_thread
@@ -403,6 +434,15 @@ void sched(void) {
     // value, captured at our sched entry).
     {
         struct CpuSched *cs_now = this_cpu_sched();
+        // P2-Cf: clear PREV's on_cpu now that cpu_switch_context has
+        // saved its full register state. After this release-store any
+        // peer's wakeup() spin loop on prev will exit and proceed to
+        // transition prev → RUNNABLE safely.
+        struct Thread *prev_to_clear = cs_now->prev_to_clear_on_cpu;
+        cs_now->prev_to_clear_on_cpu = NULL;
+        if (prev_to_clear) {
+            __atomic_store_n(&prev_to_clear->on_cpu, false, __ATOMIC_RELEASE);
+        }
         spin_lock_t *lk = cs_now->pending_release_lock;
         cs_now->pending_release_lock = NULL;
         spin_unlock(lk);
@@ -642,6 +682,21 @@ int wakeup(struct Rendez *r) {
         extinction("wakeup: waiter is not SLEEPING");
     if (t->rendez_blocked_on != r)
         extinction("wakeup: waiter rendez backref mismatch");
+
+    // P2-Cf: SMP wait/wake race close. If t is still mid-switch-out
+    // on its previous CPU (cpu_switch_context still saving regs to
+    // t->ctx), transitioning t to RUNNABLE + ready() would let a
+    // peer pick t before its ctx is canonical — concurrent execution
+    // on two CPUs from a half-saved context. Spin until t->on_cpu
+    // becomes false, signaling that the previous CPU's resume path
+    // cleared the flag (= cpu_switch_context completed).
+    //
+    // On UP / single-CPU rendez tests this is a no-op: t is already
+    // off-CPU when wakeup runs (t entered sched() inside sleep()
+    // and was switched out before any wakeup observer could run).
+    while (__atomic_load_n(&t->on_cpu, __ATOMIC_ACQUIRE)) {
+        __asm__ __volatile__("yield" ::: "memory");
+    }
 
     // Atomic under r->lock: clear the waiter + transition state +
     // ready. After this step, sleep's resume re-checks cond (which

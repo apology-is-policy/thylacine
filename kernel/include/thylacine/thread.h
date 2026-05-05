@@ -107,13 +107,33 @@ struct Thread {
     // IRQ-mask discipline in sched() prevents the IRQ handler from
     // racing with the replenish.
     s64                slice_remaining;
+
+    // P2-Cf: SMP wait/wake race close. True while this thread is
+    // ACTIVELY RUNNING on some CPU (registers live; saved context in
+    // ctx is stale). Set to true by sched() (or thread_switch) when
+    // the thread is picked as `next`; cleared to false by the resume
+    // path on the destination CPU AFTER cpu_switch_context completed
+    // — meaning the thread is fully switched out, ctx is canonical,
+    // and another CPU may safely pick this thread without racing
+    // mid-save.
+    //
+    // wakeup() spins on this flag before transitioning a SLEEPING
+    // waiter to RUNNABLE: if the waiter is mid-switch, ready() would
+    // insert it into a runqueue while it's still being saved on
+    // another CPU — peer pick + execution while ctx half-written.
+    // Linux's `task->on_cpu`; same role.
+    //
+    // Accessed via __atomic_load_n / __atomic_store_n with acquire/
+    // release ordering so cross-CPU readers see the consistent
+    // monotonic transitions.
+    volatile bool      on_cpu;
 };
 
-_Static_assert(sizeof(struct Thread) == 216,
-               "struct Thread size pinned at 216 bytes (P2-Bc: P2-Bb "
-               "baseline 208 + slice_remaining 8). Adding a field grows "
-               "the SLUB cache; update this assert deliberately so the "
-               "change is intentional.");
+_Static_assert(sizeof(struct Thread) == 224,
+               "struct Thread size pinned at 224 bytes (P2-Cf: P2-Bc "
+               "baseline 216 + on_cpu 8 incl. tail-padding). Adding a "
+               "field grows the SLUB cache; update this assert "
+               "deliberately so the change is intentional.");
 _Static_assert(__builtin_offsetof(struct Thread, magic) == 0,
                "magic must be at offset 0 (P2-A audit R4 F42)");
 
