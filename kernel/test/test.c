@@ -48,7 +48,7 @@ void test_smp_ipi_resched_smoke(void);
 void test_smp_work_stealing_smoke(void);
 void test_proc_rfork_basic_smoke(void);
 void test_proc_rfork_exits_status(void);
-void test_proc_rfork_stress_100(void);
+void test_proc_rfork_stress_1000(void);
 
 // ---------------------------------------------------------------------------
 // Registry. Sentinel-terminated.
@@ -81,7 +81,7 @@ struct test_case g_tests[] = {
     { "smp.work_stealing_smoke",       test_smp_work_stealing_smoke,       false, NULL },
     { "proc.rfork_basic_smoke",        test_proc_rfork_basic_smoke,        false, NULL },
     { "proc.rfork_exits_status",       test_proc_rfork_exits_status,       false, NULL },
-    { "proc.rfork_stress_100",         test_proc_rfork_stress_100,         false, NULL },
+    { "proc.rfork_stress_1000",        test_proc_rfork_stress_1000,        false, NULL },
     { NULL, NULL, false, NULL },          // sentinel
 };
 
