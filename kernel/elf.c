@@ -38,6 +38,25 @@ static u64 u32_mul_widen(u32 a, u32 b) {
 
 int elf_load(const void *blob, size_t size, struct elf_image *out) {
     if (!blob || !out) return ELF_LOAD_NULL_INPUT;
+
+    // R5-G F70 close: zero `*out` on entry. Partial-population on
+    // early-exit failure paths now leaves a defined-zero state rather
+    // than attacker-controlled data. The contract still says "ignore
+    // *out on non-OK return," but defensive zeroing eliminates a
+    // class of confused-deputy bugs in future callers.
+    {
+        u8 *out_bytes = (u8 *)out;
+        for (size_t i = 0; i < sizeof(*out); i++) out_bytes[i] = 0;
+    }
+
+    // R5-G F61 close: alignment precondition. The cast `blob` →
+    // `const struct Elf64_Ehdr *` is undefined behavior if the pointer
+    // is not at least 8-byte aligned (struct's natural alignment).
+    // UBSan -fsanitize=alignment traps on this; production codegen may
+    // assume alignment in vector / LDP loads. Reject up front.
+    if (((uintptr_t)blob) % _Alignof(struct Elf64_Ehdr) != 0)
+        return ELF_LOAD_BAD_ALIGN;
+
     if (size < sizeof(struct Elf64_Ehdr)) return ELF_LOAD_TOO_SMALL;
 
     const u8 *bytes = (const u8 *)blob;
@@ -82,6 +101,14 @@ int elf_load(const void *blob, size_t size, struct elf_image *out) {
     if (phtab_end > size)
         return ELF_LOAD_PHTAB_OOB;
 
+    // R5-G F62 close: e_phoff must be 8-byte aligned (the natural
+    // alignment of struct Elf64_Phdr). An attacker-controlled odd
+    // phoff would misalign the Phdr-table cast below; UBSan BRKs on
+    // misaligned struct loads. Real linkers always emit phoff =
+    // sizeof(Elf64_Ehdr) = 64, naturally aligned.
+    if (eh->e_phoff % _Alignof(struct Elf64_Phdr) != 0)
+        return ELF_LOAD_PHTAB_OOB;
+
     // -----------------------------------------------------------------
     // Stage 4: per-segment validation. Iterate program headers,
     // collect PT_LOAD entries, enforce W^X + bounds + interp/stack
@@ -95,18 +122,24 @@ int elf_load(const void *blob, size_t size, struct elf_image *out) {
     for (u16 i = 0; i < eh->e_phnum; i++) {
         const struct Elf64_Phdr *p = &ph[i];
 
+        // R5-G F64 close: hoist W^X check ABOVE the switch. The
+        // invariant should be type-blind — every segment with a
+        // p_flags field must be flag-checked, regardless of p_type.
+        // Future segment types (PT_AARCH64_*, PT_GNU_PROPERTY, etc.)
+        // get the check for free; the check no longer depends on
+        // remembering to validate per-case.
+        //
+        // Mask off OS-specific (PF_MASKOS) + proc-specific (PF_MASKPROC)
+        // bits; check architectural PF_W & PF_X only. ARCH §28 I-12.
+        {
+            u32 wx_bits = p->p_flags & (PF_W | PF_X);
+            if (wx_bits == (PF_W | PF_X)) {
+                return ELF_LOAD_RWX_REJECTED;
+            }
+        }
+
         switch (p->p_type) {
         case PT_LOAD:
-            // W^X enforcement: PF_W and PF_X cannot both be set. ARCH
-            // §28 I-12. Mask off OS/proc-specific bits; check the
-            // architectural bits only.
-            {
-                u32 wx_bits = p->p_flags & (PF_W | PF_X);
-                if (wx_bits == (PF_W | PF_X)) {
-                    return ELF_LOAD_RWX_REJECTED;
-                }
-            }
-
             if (p->p_filesz > p->p_memsz)
                 return ELF_LOAD_BAD_FILESZ;
 
@@ -141,6 +174,14 @@ int elf_load(const void *blob, size_t size, struct elf_image *out) {
             // accepts statically-linked ET_EXEC.
             return ELF_LOAD_HAS_INTERP;
 
+        case PT_DYNAMIC:
+            // R5-G F63 close: PT_DYNAMIC is the dynamic-link table —
+            // a stronger indicator of a dynamic binary than PT_INTERP
+            // (which is just the loader path). Static-only policy at
+            // v1.0 rejects PT_DYNAMIC explicitly. Phase 5+ dynamic-
+            // linker support flips this to "process the dynamic table."
+            return ELF_LOAD_HAS_DYNAMIC;
+
         case PT_GNU_STACK:
             // The stack permissions segment. Linkers emit this with
             // p_flags = PF_R | PF_W (NX stack); a binary with PF_X here
@@ -153,16 +194,17 @@ int elf_load(const void *blob, size_t size, struct elf_image *out) {
         case PT_NULL:
         case PT_NOTE:
         case PT_PHDR:
-        case PT_DYNAMIC:
         case PT_TLS:
         case PT_GNU_RELRO:
-            // Skipped at v1.0. PT_DYNAMIC + PT_TLS + PT_GNU_RELRO need
-            // dynamic-linker support. PT_PHDR is auxv-relevant only.
+            // Skipped at v1.0. PT_TLS + PT_GNU_RELRO need dynamic-linker
+            // support. PT_PHDR is auxv-relevant only.
             break;
 
         default:
             // Unknown PT_* — silently skip per System V gABI guidance
             // (loaders must ignore unknown types they don't recognize).
+            // The W^X check above already filtered any PF_W|PF_X
+            // combination, regardless of p_type.
             break;
         }
     }

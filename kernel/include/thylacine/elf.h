@@ -190,9 +190,9 @@ enum elf_load_result {
     ELF_LOAD_BAD_MACHINE    =  -9,    // e_machine != EM_AARCH64
     ELF_LOAD_BAD_FILE_VER   = -10,    // e_version != EV_CURRENT
     ELF_LOAD_BAD_PHENTSIZE  = -11,    // e_phentsize != sizeof(Elf64_Phdr)
-    ELF_LOAD_NO_PHDRS       = -12,    // e_phnum == 0
+    ELF_LOAD_NO_PHDRS       = -12,    // e_phnum == 0 OR no PT_LOAD found in phdrs
     ELF_LOAD_TOO_MANY_PHDRS = -13,    // e_phnum > some sane bound
-    ELF_LOAD_PHTAB_OOB      = -14,    // phoff + phnum*phentsize > size
+    ELF_LOAD_PHTAB_OOB      = -14,    // phoff + phnum*phentsize > size, OR phoff misaligned
     ELF_LOAD_HAS_INTERP     = -15,    // PT_INTERP present (dynamic; v1.0 static only)
     ELF_LOAD_RWX_REJECTED   = -16,    // PT_LOAD with PF_W | PF_X — I-12 violation
     ELF_LOAD_BAD_FILESZ     = -17,    // filesz > memsz
@@ -200,14 +200,24 @@ enum elf_load_result {
     ELF_LOAD_TOO_MANY_LOADS = -19,    // > ELF_MAX_LOAD_SEGMENTS PT_LOAD entries
     ELF_LOAD_BAD_ENTRY      = -20,    // e_entry == 0 OR not in any LOAD segment
     ELF_LOAD_EXEC_STACK     = -21,    // PT_GNU_STACK with PF_X — NX-stack violation
+    ELF_LOAD_BAD_ALIGN      = -22,    // R5-G F61: blob is not 8-byte aligned
+    ELF_LOAD_HAS_DYNAMIC    = -23,    // R5-G F63: PT_DYNAMIC present (dynamic; v1.0 static only)
 };
 
 // elf_load — parse + validate an ELF64 ARM64 blob.
 //
 // Inputs:
-//   blob: pointer to the raw ELF bytes (size bytes long).
+//   blob: pointer to the raw ELF bytes (size bytes long). MUST be at
+//         least 8-byte aligned (the alignment of struct Elf64_Ehdr).
+//         Kernel callers using kmalloc / page-allocator memory satisfy
+//         this trivially; callers passing slices into other buffers
+//         must ensure alignment themselves. R5-G F61 closure.
 //   size: length of blob in bytes.
-//   out:  receives the parsed image on success. Undefined on failure.
+//   out:  receives the parsed image on success. ZEROED on entry —
+//         see R5-G F70 closure — so partial-population on early-exit
+//         leaves a defined-zero state rather than attacker-controlled
+//         data. Caller should still ignore on non-OK return per
+//         convention.
 //
 // Returns ELF_LOAD_OK on success; a negative error code on failure.
 // On failure, *out is left in an undefined state (may be partially

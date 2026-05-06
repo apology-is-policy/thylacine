@@ -41,7 +41,11 @@ void test_elf_bounds_rejection(void);
 void test_elf_policy_rejection(void);
 
 #define TEST_ELF_BLOB_SIZE 4096
-static u8 g_test_elf_blob[TEST_ELF_BLOB_SIZE];
+// R5-G F71 close: explicit alignment so the cast `(struct Elf64_Ehdr *)
+// g_test_elf_blob` is well-defined regardless of compiler heuristics
+// for BSS array placement. Matches the new alignment precondition in
+// elf_load (R5-G F61).
+static _Alignas(struct Elf64_Ehdr) u8 g_test_elf_blob[TEST_ELF_BLOB_SIZE];
 
 // ---------------------------------------------------------------------------
 // Helpers.
@@ -298,6 +302,39 @@ void test_elf_bounds_rejection(void) {
     blob_phdrs()[0].p_memsz  = 100;
     TEST_EXPECT_EQ(elf_load(g_test_elf_blob, size, &img),
         ELF_LOAD_SEG_OOB, "file_offset + filesz > size rejected");
+
+    // R5-G F61 close: misaligned blob pointer rejected. Pass a +1
+    // offset into a non-zero portion of the blob — guaranteed to be
+    // 1-byte-aligned-but-not-8-byte-aligned. The cast inside elf_load
+    // would be UB; the new precondition catches it.
+    size = build_elf(flags, 1);
+    TEST_EXPECT_EQ(elf_load(g_test_elf_blob + 1, size - 1, &img),
+        ELF_LOAD_BAD_ALIGN, "1-byte-aligned blob rejected (R5-G F61)");
+    TEST_EXPECT_EQ(elf_load(g_test_elf_blob + 4, size - 4, &img),
+        ELF_LOAD_BAD_ALIGN, "4-byte-aligned blob rejected (R5-G F61)");
+
+    // R5-G F62 close: misaligned e_phoff rejected. After the bound
+    // check passes (phoff + phtab_bytes <= size), the cast to
+    // struct Elf64_Phdr * requires e_phoff % 8 == 0. An attacker-
+    // crafted phoff = 65 (odd) would misalign the Phdr table.
+    size = build_elf(flags, 1);
+    blob_ehdr()->e_phoff = 65;     // odd; bounds-fits but misaligned
+    TEST_EXPECT_EQ(elf_load(g_test_elf_blob, TEST_ELF_BLOB_SIZE, &img),
+        ELF_LOAD_PHTAB_OOB, "misaligned e_phoff rejected (R5-G F62)");
+
+    // R5-G F68 close: too many PT_LOAD segments rejected. Build a
+    // binary with > ELF_MAX_LOAD_SEGMENTS PT_LOAD entries; verify
+    // ELF_LOAD_TOO_MANY_LOADS.
+    {
+        u32 many[ELF_MAX_LOAD_SEGMENTS + 1];
+        for (int i = 0; i < ELF_MAX_LOAD_SEGMENTS + 1; i++) {
+            many[i] = PF_R | PF_X;
+        }
+        size = build_elf(many, ELF_MAX_LOAD_SEGMENTS + 1);
+        TEST_EXPECT_EQ(elf_load(g_test_elf_blob, size, &img),
+            ELF_LOAD_TOO_MANY_LOADS,
+            "> ELF_MAX_LOAD_SEGMENTS PT_LOAD entries rejected (R5-G F68)");
+    }
 }
 
 void test_elf_policy_rejection(void) {
@@ -311,12 +348,34 @@ void test_elf_policy_rejection(void) {
     TEST_EXPECT_EQ(elf_load(g_test_elf_blob, size, &img),
         ELF_LOAD_HAS_INTERP, "PT_INTERP rejected");
 
-    // PT_GNU_STACK with PF_X rejected (NX-stack policy).
+    // R5-G F63 close: PT_DYNAMIC rejected (static-only policy).
+    // PT_DYNAMIC is the dynamic-link table — a binary carrying it but
+    // no PT_INTERP would silently pass the old impl; the new impl
+    // rejects it explicitly.
+    size = build_elf(flags, 1);
+    blob_phdrs()[0].p_type  = PT_DYNAMIC;
+    blob_phdrs()[0].p_flags = PF_R | PF_W;     // sane flags; reject is by type
+    TEST_EXPECT_EQ(elf_load(g_test_elf_blob, size, &img),
+        ELF_LOAD_HAS_DYNAMIC, "PT_DYNAMIC rejected (R5-G F63)");
+
+    // PT_GNU_STACK with PF_X rejected (NX-stack policy). Use PF_R|PF_X
+    // (no PF_W) so the W^X hoisted check (R5-G F64) doesn't fire first
+    // — this test is specifically about the exec-stack policy, which
+    // catches PF_X regardless of PF_W.
+    size = build_elf(flags, 1);
+    blob_phdrs()[0].p_type  = PT_GNU_STACK;
+    blob_phdrs()[0].p_flags = PF_R | PF_X;
+    TEST_EXPECT_EQ(elf_load(g_test_elf_blob, size, &img),
+        ELF_LOAD_EXEC_STACK, "PT_GNU_STACK with PF_X rejected (NX-stack)");
+
+    // PT_GNU_STACK with full RWX is caught by W^X first (the hoisted
+    // check fires before the GNU_STACK case). Verify ordering.
     size = build_elf(flags, 1);
     blob_phdrs()[0].p_type  = PT_GNU_STACK;
     blob_phdrs()[0].p_flags = PF_R | PF_W | PF_X;
     TEST_EXPECT_EQ(elf_load(g_test_elf_blob, size, &img),
-        ELF_LOAD_EXEC_STACK, "PT_GNU_STACK with PF_X rejected");
+        ELF_LOAD_RWX_REJECTED,
+        "PT_GNU_STACK with full RWX caught by W^X (hoisted check fires first)");
 
     // PT_GNU_STACK with R+W (NX) is fine — but still need a PT_LOAD,
     // so this case has phnum=1 with only GNU_STACK → no LOAD segments.
@@ -338,6 +397,25 @@ void test_elf_policy_rejection(void) {
     blob_ehdr()->e_entry = 0x99999999;
     TEST_EXPECT_EQ(elf_load(g_test_elf_blob, size, &img),
         ELF_LOAD_BAD_ENTRY, "entry outside any LOAD segment rejected");
+
+    // R5-G F69 close: entry boundary tests. Default segment is
+    // [0x10000, 0x11000) (memsz = 0x1000). Boundaries: vaddr exact,
+    // vaddr+memsz-1 (last byte), vaddr+memsz (one past — reject).
+    size = build_elf(flags, 1);
+    blob_ehdr()->e_entry = 0x10000;            // first byte of segment
+    TEST_EXPECT_EQ(elf_load(g_test_elf_blob, size, &img),
+        ELF_LOAD_OK, "entry == vaddr accepted (R5-G F69 boundary)");
+
+    size = build_elf(flags, 1);
+    blob_ehdr()->e_entry = 0x10FFF;            // last byte of segment
+    TEST_EXPECT_EQ(elf_load(g_test_elf_blob, size, &img),
+        ELF_LOAD_OK, "entry == vaddr+memsz-1 accepted (R5-G F69 boundary)");
+
+    size = build_elf(flags, 1);
+    blob_ehdr()->e_entry = 0x11000;            // one past end
+    TEST_EXPECT_EQ(elf_load(g_test_elf_blob, size, &img),
+        ELF_LOAD_BAD_ENTRY,
+        "entry == vaddr+memsz (one past end) rejected (R5-G F69 boundary)");
 
     // Final sanity: original valid blob still parses.
     size = build_elf(flags, 1);

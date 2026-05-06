@@ -220,6 +220,30 @@ The loader doesn't process the section header table (e_shoff / e_shnum / e_shstr
 
 ELFDATA2MSB (big-endian) is rejected. ARM64 supports both BE and LE; Thylacine targets LE only.
 
+### Alignment requirements (R5-G)
+
+The `blob` pointer passed to `elf_load` MUST be at least 8-byte aligned (`_Alignof(struct Elf64_Ehdr)`). Misaligned blobs are rejected with `ELF_LOAD_BAD_ALIGN`. Kernel callers using `kmalloc` / page-allocator memory satisfy this trivially; callers passing slices into other buffers must ensure alignment themselves.
+
+Similarly, `e_phoff` MUST be 8-byte aligned (`_Alignof(struct Elf64_Phdr)`). Real linkers always emit `e_phoff = 64`, naturally aligned. Misaligned phoff is rejected with `ELF_LOAD_PHTAB_OOB`.
+
+Both checks defend against UBSan-trapping kernel builds (`-fsanitize=alignment` is part of `-fsanitize=undefined`) — without them, an attacker submitting a misaligned ELF could trigger kernel BRK as a denial-of-service primitive.
+
+### W^X check is type-blind (R5-G F64)
+
+The W^X check (`p->p_flags & (PF_W | PF_X) == (PF_W | PF_X)` → reject) is hoisted ABOVE the switch over `p->p_type`. Every program header is flag-checked regardless of type, so future segment types automatically inherit the defense. The PT_LOAD-only check would have left an attack surface where a future code-recognized PT_* type with PF_W|PF_X bypasses W^X.
+
+### Static-only policy (R5-G F63)
+
+Both `PT_INTERP` and `PT_DYNAMIC` are rejected. v1.0 accepts statically-linked ET_EXEC binaries only. The two checks form complementary policy:
+- `PT_INTERP` → the dynamic linker path is set; binary is dynamic.
+- `PT_DYNAMIC` → the dynamic-link table is present; binary is dynamic regardless of whether PT_INTERP is set.
+
+A binary with PT_DYNAMIC but no PT_INTERP would have silently passed the PT_INTERP-only check and produced a structurally-OK image; Phase 3+ exec would then fail to relocate, but the policy intent was already violated. Both checks together close the gap.
+
+### Output zeroed on entry (R5-G F70)
+
+`elf_load` now zeros `*out` at function entry (after NULL check). The contract still says "ignore on non-OK return," but partial-population on early-exit failure now leaves a defined-zero state rather than attacker-controlled data. Defensive against buggy callers that read `out->entry` regardless of return code.
+
 ### Maximum LOAD segments = 16
 
 Real binaries have 2-4. 16 is generous. A binary with > 16 LOAD segments is pathological at v1.0 (the linker can be told to merge segments). Phase 5+ may grow this if a real-world binary needs it.
