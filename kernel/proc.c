@@ -27,6 +27,8 @@
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 
+#include "../arch/arm64/asid.h"
+#include "../arch/arm64/mmu.h"
 #include "../mm/slub.h"
 
 static struct kmem_cache *g_proc_cache;
@@ -159,6 +161,10 @@ static void proc_init_fields(struct Proc *p, int pid) {
     p->pid   = pid;
     p->state = PROC_STATE_ALIVE;
     rendez_init(&p->child_done);
+    // P3-Bcb: pgtable_root + asid left at 0 by KP_ZERO. proc_alloc
+    // (post-phys_init) installs real values; proc_init (kproc, pre-
+    // phys_init) leaves them at 0 — kproc never enters EL0 and never
+    // needs a user-half page table or a non-kernel ASID.
     // parent / children / sibling / exit_status / exit_msg / threads /
     // pgrp all left NULL/0 via KP_ZERO; caller (proc_init for kproc;
     // rfork for child Procs) wires linkage explicitly.
@@ -231,6 +237,24 @@ struct Proc *proc_alloc(void) {
         return NULL;
     }
 
+    // P3-Bcb: per-Proc page-table root + ASID. The pgtable_root is a
+    // fresh L0 (KP_ZERO; all 512 entries invalid). The asid is taken
+    // from the asid_alloc free-list / monotonic counter. Both are
+    // installed in TTBR0_EL1 at context switch (P3-Bd) so each Proc's
+    // user-half is independent.
+    //
+    // Order: pgtable_create FIRST (more failure-prone — buddy may be
+    // exhausted), asid_alloc SECOND. Rollback flow on either failure
+    // transitions to ZOMBIE and calls proc_free, which idempotently
+    // releases pgtable (root != 0) + asid (asid != 0).
+    p->pgtable_root = proc_pgtable_create();
+    if (p->pgtable_root == 0) {
+        p->state = PROC_STATE_ZOMBIE;
+        proc_free(p);
+        return NULL;
+    }
+    p->asid = asid_alloc();      // extincts on exhaustion (no rollback path)
+
     // F89: assign the real PID now that handle table is live. This is
     // the only path that exposes a Proc to the world; subsequent rollback
     // (e.g., pgrp_clone or thread_create_with_arg failure in rfork) frees
@@ -284,6 +308,20 @@ void proc_free(struct Proc *p) {
     // but a Proc that crashed mid-session leaves stragglers).
     handle_table_free(p->handles);
     p->handles = NULL;
+
+    // P3-Bcb: release per-Proc address space resources. Both calls are
+    // idempotent on 0: kproc + rolled-back-pre-pgtable_create paths
+    // hit no-ops cleanly. asid_free issues an inner-shareable broadcast
+    // TLB-flush by ASID before returning the slot to the pool (so the
+    // next reuser sees a clean TLB).
+    if (p->pgtable_root != 0) {
+        proc_pgtable_destroy(p->pgtable_root);
+        p->pgtable_root = 0;
+    }
+    if (p->asid != 0) {                // ASID 0 is kernel-reserved
+        asid_free(p->asid);
+        p->asid = 0;
+    }
 
     kmem_cache_free(g_proc_cache, p);
     // R5-H F79: atomic counter bump.

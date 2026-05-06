@@ -51,6 +51,7 @@ set(KERNEL_SRCS
     test/test_elf.c
     test/test_asid.c
     test/test_directmap.c
+    test/test_proc_pgtable.c
     namespace.c
     handle.c
     vmo.c

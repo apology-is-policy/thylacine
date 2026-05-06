@@ -271,4 +271,26 @@ bool mmu_restore_normal(paddr_t pa);
 bool mmu_set_no_access_range(paddr_t pa, unsigned n_pages);
 bool mmu_restore_normal_range(paddr_t pa, unsigned n_pages);
 
+// =============================================================================
+// P3-Bcb: per-Proc translation table allocator.
+//
+// Each non-kernel Proc owns its own L0 translation table for TTBR0
+// (user-half). proc_pgtable_create allocates a fresh L0 (4 KiB,
+// page-aligned, KP_ZERO so all 512 entries are invalid). The returned
+// PA is the value caller writes into struct Proc.pgtable_root; P3-Bd
+// will load it into TTBR0_EL1 at context switch.
+//
+// proc_pgtable_destroy frees the L0 (and any sub-tables installed
+// during the Proc's lifetime). At v1.0 P3-Bcb the L0 has no sub-
+// tables installed (no faults populate it yet); destroy just frees
+// the L0 page. P3-D adds VMA → page-fault → PTE-installation; the
+// destroy will then walk the tree to free L1/L2/L3 sub-tables.
+//
+// Returns 0 on OOM (caller treats as ENOMEM and rolls back the Proc
+// allocation). Idempotent on input root == 0.
+// =============================================================================
+
+paddr_t proc_pgtable_create(void);
+void    proc_pgtable_destroy(paddr_t root);
+
 #endif // THYLACINE_ARCH_ARM64_MMU_H

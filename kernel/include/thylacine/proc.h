@@ -19,6 +19,7 @@
 #ifndef THYLACINE_PROC_H
 #define THYLACINE_PROC_H
 
+#include <thylacine/page.h>     // paddr_t (P3-Bcb pgtable_root)
 #include <thylacine/rendez.h>
 #include <thylacine/types.h>
 
@@ -99,12 +100,30 @@ struct Proc {
     // is one of the slots in a future shared-handle-table design) is
     // forward-looking for the Phase 5+ syscall surface.
     struct HandleTable *handles;
+
+    // P3-Bcb: per-Proc address space.
+    //
+    // pgtable_root is the PA of this Proc's L0 translation table for
+    // TTBR0 (user-half). Allocated at proc_alloc, freed at proc_free.
+    // kproc gets pgtable_root = 0 because (a) it's allocated before
+    // phys_init / buddy and (b) kernel-only Procs never need a user-
+    // half mapping. P3-Bd loads pgtable_root into TTBR0_EL1 at context
+    // switch; P3-Be handles the kproc kernel-only path.
+    //
+    // asid is the ASID assigned to this Proc by asid_alloc. Used at
+    // P3-Bd as the high bits of TTBR0_EL1 so the TLB tags the Proc's
+    // entries with its own ASID (avoiding cross-Proc TLB pollution).
+    // kproc gets asid = 0 (ASID_RESERVED_KERNEL).
+    paddr_t            pgtable_root;
+    u16                asid;
+    u16                _pad_asid[3];     // explicit alignment padding
 };
 
-_Static_assert(sizeof(struct Proc) == 96,
-               "struct Proc size pinned at 96 bytes (P2-Fc: P2-Eb baseline 88 "
-               "+ handles 8). Adding a field grows the SLUB cache; update this "
-               "assert deliberately so the change is intentional.");
+_Static_assert(sizeof(struct Proc) == 112,
+               "struct Proc size pinned at 112 bytes (P2-Fc baseline 96 "
+               "+ pgtable_root 8 + asid 2 + pad 6 = 112). Adding a field "
+               "grows the SLUB cache; update this assert deliberately so "
+               "the change is intentional.");
 _Static_assert(__builtin_offsetof(struct Proc, magic) == 0,
                "magic must be at offset 0 so SLUB's freelist write on "
                "kmem_cache_free clobbers it (double-free defense — "

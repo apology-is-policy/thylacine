@@ -861,3 +861,38 @@ bool mmu_restore_normal_range(paddr_t pa, unsigned n_pages) {
     isb();
     return true;
 }
+
+// =============================================================================
+// P3-Bcb: per-Proc translation table allocator.
+// =============================================================================
+//
+// proc_pgtable_create:
+//   Allocate one 4 KiB page from buddy (KP_ZERO so all 512 L0 entries
+//   are invalid — no user mappings yet). Return its PA, which caller
+//   writes into struct Proc.pgtable_root. The PA is also what's loaded
+//   into TTBR0_EL1 at context switch (P3-Bd).
+//
+// proc_pgtable_destroy:
+//   Free the L0 page. At v1.0 P3-Bcb the L0 has no sub-tables (no
+//   page-fault path populates them yet), so this is a single
+//   `free_pages(l0, 0)`. P3-D adds VMA + page-fault → sub-table
+//   installation; this function will then walk the tree to free
+//   L1/L2/L3 sub-tables before freeing L0. Trip-hazard documented.
+//
+// Idempotent on root == 0 (kproc never allocates a page table; its
+// pgtable_root is 0 forever).
+
+paddr_t proc_pgtable_create(void) {
+    struct page *l0_pg = alloc_pages(0, KP_ZERO);
+    if (!l0_pg) return 0;
+    return page_to_pa(l0_pg);
+}
+
+void proc_pgtable_destroy(paddr_t root) {
+    if (root == 0) return;             // kproc / unwound failure path
+
+    // P3-Bcb only: L0 has no sub-tables yet. Just free the L0 page.
+    // P3-D will refactor this to walk + free the entire tree.
+    struct page *l0_pg = pa_to_page(root);
+    free_pages(l0_pg, 0);
+}
