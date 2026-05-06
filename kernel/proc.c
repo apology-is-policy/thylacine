@@ -17,6 +17,7 @@
 //   3. thread_init    — kthread (TID 0) appears, parented to kproc
 
 #include <thylacine/extinction.h>
+#include <thylacine/handle.h>
 #include <thylacine/page.h>
 #include <thylacine/pgrp.h>
 #include <thylacine/proc.h>
@@ -63,6 +64,13 @@ void proc_init(void) {
     if (!g_kproc) extinction("kmem_cache_alloc(kproc) failed");
     proc_init_fields(g_kproc, 0);
     g_kproc->pgrp = kpgrp();
+
+    // P2-Fc: kproc gets its own handle table. handle_init must run
+    // before proc_init (main.c bootstrap order). Failures here panic —
+    // boot can't continue without kproc.
+    g_kproc->handles = handle_table_alloc();
+    if (!g_kproc->handles) extinction("handle_table_alloc(kproc) failed");
+
     g_proc_created++;
     g_next_pid = 1;
 }
@@ -76,6 +84,19 @@ struct Proc *proc_alloc(void) {
     struct Proc *p = kmem_cache_alloc(g_proc_cache, KP_ZERO);
     if (!p) return NULL;
     proc_init_fields(p, g_next_pid++);
+
+    // P2-Fc: each Proc gets its own handle table. On OOM, roll back
+    // the proc allocation. The Proc has no pgrp / threads / children
+    // yet, so freeing is a clean drop (state must be ZOMBIE for
+    // proc_free; transition + reset to satisfy lifecycle).
+    p->handles = handle_table_alloc();
+    if (!p->handles) {
+        p->state = PROC_STATE_ZOMBIE;
+        kmem_cache_free(g_proc_cache, p);
+        g_proc_destroyed++;
+        return NULL;
+    }
+
     g_proc_created++;
     return p;
 }
@@ -100,6 +121,13 @@ void proc_free(struct Proc *p) {
     // refcount and free only at last release.
     pgrp_unref(p->pgrp);
     p->pgrp = NULL;
+
+    // P2-Fc: release the handle table. Closes any in-use slots first
+    // (defensive — well-behaved Procs close all handles before exits;
+    // but a Proc that crashed mid-session leaves stragglers).
+    handle_table_free(p->handles);
+    p->handles = NULL;
+
     kmem_cache_free(g_proc_cache, p);
     g_proc_destroyed++;
 }

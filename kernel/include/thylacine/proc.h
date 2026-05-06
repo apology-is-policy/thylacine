@@ -54,6 +54,7 @@ _Static_assert(PROC_STATE_INVALID == 0,
                "zero-initialized Proc structs detectably invalid");
 
 struct Pgrp;
+struct HandleTable;
 
 struct Proc {
     u64               magic;            // PROC_MAGIC
@@ -90,11 +91,19 @@ struct Proc {
     // private Pgrp (rfork(RFPROC) calls pgrp_clone). Phase 5+ adds
     // RFNAMEG: shared namespace via refcount sharing.
     struct Pgrp      *pgrp;
+
+    // P2-Fc: handle table. Per-Proc fixed-size at v1.0 (PROC_HANDLE_MAX
+    // slots; see <thylacine/handle.h>). proc_alloc allocates a fresh
+    // empty table; proc_free closes any open handles + releases the
+    // table. RFFDG (rfork shared fd table — Plan 9 idiom; v1.0 P2-Fc
+    // is one of the slots in a future shared-handle-table design) is
+    // forward-looking for the Phase 5+ syscall surface.
+    struct HandleTable *handles;
 };
 
-_Static_assert(sizeof(struct Proc) == 88,
-               "struct Proc size pinned at 88 bytes (P2-Eb: P2-D baseline 80 "
-               "+ pgrp 8). Adding a field grows the SLUB cache; update this "
+_Static_assert(sizeof(struct Proc) == 96,
+               "struct Proc size pinned at 96 bytes (P2-Fc: P2-Eb baseline 88 "
+               "+ handles 8). Adding a field grows the SLUB cache; update this "
                "assert deliberately so the change is intentional.");
 _Static_assert(__builtin_offsetof(struct Proc, magic) == 0,
                "magic must be at offset 0 so SLUB's freelist write on "

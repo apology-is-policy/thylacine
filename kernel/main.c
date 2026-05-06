@@ -30,6 +30,7 @@
 #include <stdint.h>
 #include <thylacine/dtb.h>
 #include <thylacine/extinction.h>
+#include <thylacine/handle.h>
 #include <thylacine/page.h>
 #include <thylacine/pgrp.h>
 #include <thylacine/proc.h>
@@ -262,7 +263,10 @@ void boot_main(void) {
     // After this point current_thread() is valid; cpu_switch_context
     // can save/load thread state; thread_create + thread_switch work.
     // The actual scheduler (EEVDF) lands at P2-B.
+    // P2-Fc: handle_init creates the handle-table SLUB cache. Must run
+    // BEFORE proc_init since proc_init allocates a HandleTable for kproc.
     pgrp_init();
+    handle_init();
     proc_init();
     thread_init();
     sched_init(0);                              // boot CPU's per-CPU sched state

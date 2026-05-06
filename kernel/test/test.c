@@ -52,6 +52,11 @@ void test_proc_rfork_stress_1000(void);
 void test_namespace_bind_smoke(void);
 void test_namespace_cycle_rejected(void);
 void test_namespace_fork_isolated(void);
+void test_handles_alloc_close_smoke(void);
+void test_handles_rights_monotonic(void);
+void test_handles_dup_lifecycle(void);
+void test_handles_full_table_oom(void);
+void test_handles_kind_classifiers(void);
 
 // ---------------------------------------------------------------------------
 // Registry. Sentinel-terminated.
@@ -88,6 +93,11 @@ struct test_case g_tests[] = {
     { "namespace.bind_smoke",          test_namespace_bind_smoke,          false, NULL },
     { "namespace.cycle_rejected",      test_namespace_cycle_rejected,      false, NULL },
     { "namespace.fork_isolated",       test_namespace_fork_isolated,       false, NULL },
+    { "handles.alloc_close_smoke",     test_handles_alloc_close_smoke,     false, NULL },
+    { "handles.rights_monotonic",      test_handles_rights_monotonic,      false, NULL },
+    { "handles.dup_lifecycle",         test_handles_dup_lifecycle,         false, NULL },
+    { "handles.full_table_oom",        test_handles_full_table_oom,        false, NULL },
+    { "handles.kind_classifiers",      test_handles_kind_classifiers,      false, NULL },
     { NULL, NULL, false, NULL },          // sentinel
 };
 
