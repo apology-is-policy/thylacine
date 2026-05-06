@@ -46,11 +46,13 @@ void test_proc_rfork_exits_status(void);
 void test_proc_rfork_stress_1000(void);
 void test_proc_cascading_rfork_wait_smoke(void);
 void test_proc_cascading_rfork_stress(void);
+void test_proc_orphan_reparent_smoke(void);
 
 static volatile u32 g_proc_test_ran;
 static volatile u64 g_cpu_run_count[DTB_MAX_CPUS];
 static volatile u32 g_grandchild_ran;
 static volatile u32 g_grandchild_status_seen;
+static volatile u32 g_orphan_grandchild_ran;
 
 static void proc_test_child_ok(void *arg) {
     (void)arg;
@@ -259,6 +261,90 @@ void test_proc_cascading_rfork_wait_smoke(void) {
         "cascading: thread_total_created mismatch");
     TEST_ASSERT(thread_total_destroyed() - t_destroyed_before == 2,
         "cascading: thread_total_destroyed mismatch (leaked Thread?)");
+}
+
+// proc.orphan_reparent_smoke (R6-A F106 close)
+//   boot rforks A; A rforks B (grandchild); A exits WITHOUT waiting for B
+//   → A's proc_reparent_children moves B from A->children to kproc->children
+//   under proc_table_lock; A goes ZOMBIE; B continues running. Boot reaps
+//   A (and eventually B too — boot's wait_pid is on kproc, and B was
+//   reparented to kproc, so boot can reap B in a subsequent wait_pid).
+//
+// This is the test that the cascading_rfork_stress did NOT exercise:
+// proc_reparent_children with NON-EMPTY p->children. Without the
+// proc_table_lock at this site, the F75 race would fire — A's reparent
+// rewriting B->parent concurrently with B's exits reading B->parent for
+// its own wakeup. With the lock, the rewrite is serialized; B sees a
+// consistent post-rewrite p->parent (= kproc).
+//
+// Boot drains all kproc children via repeated wait_pid until no children
+// remain. At v1.0 this test is non-leaking IF kproc's adopted orphans
+// are reapable by boot — which they are because boot IS kproc's thread.
+// (Future scenarios where kproc adopts orphans from a Proc whose parent
+// is NOT boot would leak; v1.0 doesn't have such scenarios.)
+
+static void orphan_grandchild_entry(void *arg) {
+    (void)arg;
+    __atomic_fetch_add(&g_orphan_grandchild_ran, 1, __ATOMIC_RELAXED);
+    exits("ok");
+}
+
+static void parent_with_orphan_entry(void *arg) {
+    (void)arg;
+    int gc_pid = rfork(RFPROC, orphan_grandchild_entry, NULL);
+    if (gc_pid <= 0) extinction("test: orphan_grandchild rfork failed");
+    // Do NOT wait for the grandchild. exits() will reparent it to kproc
+    // via proc_reparent_children — exercising the F75 lock-protected
+    // path with non-empty p->children.
+    exits("ok");
+}
+
+void test_proc_orphan_reparent_smoke(void) {
+    u64 created_before     = proc_total_created();
+    u64 destroyed_before   = proc_total_destroyed();
+    u64 t_created_before   = thread_total_created();
+    u64 t_destroyed_before = thread_total_destroyed();
+
+    g_orphan_grandchild_ran = 0;
+
+    int child_pid = rfork(RFPROC, parent_with_orphan_entry, NULL);
+    TEST_ASSERT(child_pid > 0, "outer rfork failed");
+
+    // Drain all kproc children. The F75 race is exercised at the moment
+    // the orphan child enters proc_reparent_children with non-empty
+    // p->children. Lock discipline ensures B->parent rewrite is atomic
+    // with B's eventual exits-side wakeup. We don't deterministically
+    // know the order of reaps (A first or B first depends on scheduler
+    // interleaving), only that BOTH must complete.
+    int reap_count = 0;
+    int reaped_a   = 0;
+    while (reap_count < 8) {                  // bounded safety; expect 2
+        int status = -1;
+        int reaped = wait_pid(&status);
+        if (reaped <= 0) break;               // no more children
+        reap_count++;
+        if (reaped == child_pid) reaped_a = 1;
+        TEST_EXPECT_EQ(status, 0,
+            "orphan-reparent: reaped Proc had non-zero status");
+    }
+
+    TEST_ASSERT(reap_count == 2,
+        "orphan-reparent: expected exactly 2 reaps (child + reparented "
+        "grandchild); got count != 2 — F75 race may have occurred OR "
+        "B never ran (work-stealing didn't pick it up)");
+    TEST_ASSERT(reaped_a,
+        "orphan-reparent: child (A) was not among the reaps");
+    TEST_EXPECT_EQ(g_orphan_grandchild_ran, 1u,
+        "orphan-reparent: grandchild did not run (couldn't have exits'd)");
+
+    TEST_ASSERT(proc_total_created()     - created_before     == 2,
+        "orphan-reparent: proc_total_created mismatch");
+    TEST_ASSERT(proc_total_destroyed()   - destroyed_before   == 2,
+        "orphan-reparent: proc_total_destroyed mismatch (LEAK?)");
+    TEST_ASSERT(thread_total_created()   - t_created_before   == 2,
+        "orphan-reparent: thread_total_created mismatch");
+    TEST_ASSERT(thread_total_destroyed() - t_destroyed_before == 2,
+        "orphan-reparent: thread_total_destroyed mismatch (Thread leak?)");
 }
 
 // proc.cascading_rfork_stress

@@ -31,7 +31,14 @@
 
 static struct kmem_cache *g_proc_cache;
 static struct Proc       *g_kproc;
-static int                g_next_pid = 0;
+// R6-A F107: u32 (was int). Signed-overflow on `int` atomic_fetch_add at
+// INT_MAX is UB per C11 5.1.2.4; u32 has defined modular wrap. Cast to
+// int at p->pid assignment with an INT_MAX guard so the public PID type
+// stays signed (sentinel -1 for errors). v1.0 doesn't approach overflow
+// (test PIDs reach low thousands), but the discipline future-proofs
+// against long-running systems and uniformly with R5-H F90's u32-wrap-
+// correct-but-type-fragile concern for g_try_steal_rotate.
+static u32                g_next_pid = 0;
 static u64                g_proc_created;
 static u64                g_proc_destroyed;
 
@@ -66,12 +73,38 @@ static u64                g_proc_destroyed;
 //   relying on three observations:
 //
 //     (1) The parent's children list head + sibling chain is single-
-//         writer at v1.0: only the parent's own thread mutates it (via
-//         its own rfork / wait_pid / exits-reparent). Single-thread
-//         Procs at v1.0; the parent's own thread is the only modifier.
-//         When the parent is in wait_pid (calling sleep, which calls
-//         wait_pid_cond), it is NOT concurrently in exits or rfork.
-//         Hence the list is structurally stable during the cond walk.
+//         writer per non-kproc parent at v1.0: only the parent's own
+//         thread mutates it (via its own rfork / wait_pid / exits-
+//         reparent). Single-thread Procs at v1.0; the parent's own
+//         thread is the only modifier. When the parent is in wait_pid
+//         (calling sleep, which calls wait_pid_cond), it is NOT
+//         concurrently in exits or rfork.
+//
+//         **kproc EXCEPTION (R6-A F105)**: `g_kproc->children` IS
+//         multi-writer — every exiting non-kproc Proc with orphan
+//         children calls `proc_reparent_children(p)` which mutates
+//         `g_kproc->children` (sets `c->sibling = g_kproc->children;
+//         g_kproc->children = c`). The mutators serialize via
+//         proc_table_lock, so each mutation is internally atomic, but
+//         a kthread (kproc's own thread) walking lockless in
+//         wait_pid_cond CAN observe an interleaving where a non-kproc
+//         Proc's reparent is mid-execution.
+//
+//         At v1.0 P3-A this is QUIESCENT: no test creates orphan
+//         grandchildren (every test reaps grandchildren before parent
+//         exits, so `proc_reparent_children` always runs with empty
+//         `p->children`, never mutating kproc's list). Concrete
+//         consequences IF a future test breaks this: walker could miss
+//         a child mid-insert and return "no zombie" → benign sleep
+//         until next wakeup. No UAF possible because kproc never reaps,
+//         so children of kproc are never freed.
+//
+//         Phase 5+ (when concurrent parent+child exits become routine
+//         OR a kthread reaper for kproc's adopted orphans lands), this
+//         walker MUST acquire proc_table_lock (or the mutators MUST
+//         use atomic stores so the walker is structurally safe with
+//         atomic loads). Trip-hazard documented in handoffs/015 +
+//         phase3-status.md + reference/14-process-model.md.
 //
 //     (2) Per-child `state` is mutated by the child's own exits under
 //         proc_table_lock + observed via the wakeup→sleep handshake's
@@ -80,19 +113,27 @@ static u64                g_proc_destroyed;
 //         the child's release on `r->lock` from its wakeup, and the
 //         child's wakeup happens AFTER the child's proc_table_lock-
 //         held state mutation. Acquire/release transitivity covers the
-//         visibility.
+//         visibility — for any child that has called wakeup, the first
+//         cond check ALSO sees the post-wakeup state (no "stale state"
+//         window in practice; see (3)).
 //
-//     (3) The first wait_pid_cond evaluation (entry, before any wakeup)
-//         may see stale state — but that's correct: if no zombie is
-//         visible, sleep; the next wakeup re-evaluates, and that one
-//         sees the updated state via (2).
+//     (3) Defense-in-depth: even if (2)'s release/acquire chain didn't
+//         cover the first cond check (e.g., if a child has not yet
+//         called wakeup), the cond loop's structure tolerates a stale
+//         read: if no zombie is visible, sleep; the next wakeup re-
+//         evaluates with fresh visibility via (2). At v1.0 P3-A (2)
+//         actually covers the first call because parent's program-
+//         ordered writes (rfork) are visible to its own thread, and any
+//         child's wakeup release pairs with parent's first r->lock
+//         acquire. (3) is a defensive re-statement, not the primary
+//         correctness mechanism.
 //
 //   When v1.0 lifts to multi-thread Procs (Phase 5+), assumption (1)
-//   weakens: a sibling thread of the parent could mutate the list
-//   concurrently. wait_pid_cond will need to acquire proc_table_lock
-//   then, AND the sleep protocol will need refactoring to avoid the
-//   r->lock → proc_table_lock nesting that re-introduces the cycle.
-//   Documented as a Phase 5+ trip-hazard.
+//   weakens for ALL parents (not just kproc): a sibling thread of the
+//   parent could mutate the list concurrently. wait_pid_cond will need
+//   to acquire proc_table_lock then, AND the sleep protocol will need
+//   refactoring to avoid the r->lock → proc_table_lock nesting that
+//   re-introduces the cycle. Documented as a Phase 5+ trip-hazard.
 //
 // CASCADING-EXITS RACE (R5-H F75):
 //   Without this lock, parent A's `proc_reparent_children` walk could
@@ -151,7 +192,7 @@ void proc_init(void) {
     // load side (proc_total_created) may be observed from secondary CPUs
     // post-bring-up; using atomic ops uniformly avoids torn-read hazards.
     __atomic_fetch_add(&g_proc_created, 1u, __ATOMIC_RELAXED);
-    g_next_pid = 1;
+    g_next_pid = 1u;       // R6-A F107: u32 (was int).
 }
 
 struct Proc *kproc(void) {
@@ -202,7 +243,17 @@ struct Proc *proc_alloc(void) {
     // ++ would let two Procs collide on the same PID. RELAXED ordering
     // suffices — PID assignment is monotonic but not synchronized with
     // other state.
-    p->pid = __atomic_fetch_add(&g_next_pid, 1, __ATOMIC_RELAXED);
+    //
+    // R6-A F107: u32 atomic + INT_MAX guard. Signed-overflow on int
+    // atomic_fetch_add at INT_MAX is UB; u32 has defined wrap. The
+    // public PID type stays signed (`int`) so -1 remains the error
+    // sentinel; the cast at assignment is well-defined for u32 < 2^31.
+    // The INT_MAX guard extincts loudly on the (unreachable at v1.0)
+    // overflow rather than silently producing a negative PID that aliases
+    // the error sentinel.
+    u32 next = __atomic_fetch_add(&g_next_pid, 1u, __ATOMIC_RELAXED);
+    if (next >= 0x7fffffffu) extinction("proc_alloc: g_next_pid would overflow INT_MAX");
+    p->pid = (int)next;
 
     return p;
 }
@@ -438,29 +489,24 @@ void exits(const char *msg) {
 // g_proc_table_lock nesting that, combined with exits's
 // g_proc_table_lock → r->lock-via-wakeup discipline, deadlocks.
 //
-// Soundness without the lock rests on three v1.0 invariants:
+// Soundness rests on the three invariants documented in detail at
+// `g_proc_table_lock`'s declaration block above. Briefly:
 //
-//   1. The parent's children list head + sibling chain is single-writer
-//      at v1.0 (single-thread Procs; only the parent's own thread
-//      mutates via its rfork / wait_pid / exits-reparent). When the
-//      parent is here in wait_pid_cond, it is NOT concurrently in
-//      exits or rfork. The list is structurally stable for the walk.
+//   1. Single-writer children list (per non-kproc parent at v1.0).
+//      **kproc EXCEPTION (R6-A F105)**: g_kproc->children IS multi-
+//      writer (any exiting Proc with orphan children writes here under
+//      proc_table_lock). At v1.0 P3-A this is quiescent because no
+//      test creates orphan grandchildren. Phase 5+ (or any future test
+//      with cascading-exits + non-empty-grandchildren) MUST refactor
+//      this walker to take proc_table_lock or use atomic loads.
 //
-//   2. Per-child `state` writes happen under g_proc_table_lock in the
-//      child's exits, then the child publishes via wakeup(&parent's
-//      child_done) which has a release on r->lock. Our re-acquire of
-//      r->lock in sleep's resume path acquires-pairs, so we observe
-//      the post-wakeup state including c->state == ZOMBIE.
+//   2. Per-child `state` visibility via the wakeup→sleep handshake's
+//      release/acquire on r->lock.
 //
-//   3. The first wait_pid_cond call at sleep entry (before any wakeup)
-//      may see stale state — but that's correct: if no zombie visible,
-//      we sleep; next wakeup re-evaluates and sees the update via (2).
+//   3. Defense-in-depth: stale-read tolerance via the cond loop's
+//      re-evaluation under (2)'s chain on each subsequent wakeup.
 //
-// Phase 5+ multi-thread-Procs: invariant (1) weakens (sibling threads
-// of the parent could mutate concurrently). At that point this function
-// MUST acquire g_proc_table_lock, AND the sleep protocol must be
-// refactored to avoid the resulting r->lock → g_proc_table_lock cycle.
-// Trip-hazard tracked in handoffs/014-p2h-r5h.md.
+// See g_proc_table_lock's header for the full chain.
 static int wait_pid_cond(void *arg) {
     struct Proc *parent = arg;
     if (!parent->children) return 1;          // no children → wake to return -1
