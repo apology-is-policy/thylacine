@@ -282,6 +282,22 @@ int wait_pid(int *status_out) {
             if (ct->state != THREAD_EXITING)
                 extinction("wait_pid: zombie thread not in EXITING state");
 
+            // P2-Dd-pre: spin until ct is fully off-CPU. exits() on the
+            // child set state=EXITING + sched()'d; the destination
+            // CPU's resume code (sched_finish_task_switch in trampoline
+            // OR the post-cpu_switch_context block in sched()) clears
+            // ct->on_cpu via cs->prev_to_clear_on_cpu. Without this
+            // spin, thread_free could race with the destination CPU
+            // still mid-switch — TPIDR_EL1 on that CPU briefly points
+            // at ct around set_current_thread(next), and freeing ct's
+            // slot mid-window means the next sched() on that CPU sees
+            // a clobbered magic ("sched() with corrupted current").
+            // Mirrors the on_cpu spin in wakeup() for the wait/wake
+            // race close (P2-Cf trip-hazard #16).
+            while (__atomic_load_n(&ct->on_cpu, __ATOMIC_ACQUIRE)) {
+                __asm__ __volatile__("yield" ::: "memory");
+            }
+
             thread_free(ct);
             // thread_free unlinks ct from zombie->threads + decrements
             // thread_count, so by here zombie has thread_count==0 and
