@@ -22,7 +22,11 @@
 
 #include "uart.h"
 
+#include "mmu.h"
+
 #include <stdint.h>
+#include <thylacine/extinction.h>
+#include <thylacine/page.h>
 
 #define PL011_DR    0x000
 #define PL011_FR    0x018
@@ -41,6 +45,17 @@ void uart_set_base(uintptr_t base) {
     if (base != 0) {
         pl011_base = base;
     }
+}
+
+void uart_remap_to_vmalloc(uintptr_t pa, size_t size) {
+    if (pa == 0 || size == 0) return;
+    void *kva = mmu_map_mmio((paddr_t)pa, size);
+    if (!kva) {
+        // mmu_map_mmio extincts on internal errors; only NULL path is
+        // size==0 which we filtered above. Defense-in-depth.
+        extinction("uart_remap_to_vmalloc: mmu_map_mmio returned NULL");
+    }
+    pl011_base = (uintptr_t)kva;
 }
 
 uintptr_t uart_get_base(void) {

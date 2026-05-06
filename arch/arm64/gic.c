@@ -115,9 +115,15 @@
 // ---------------------------------------------------------------------------
 
 static gic_version_t g_version;
-static u64 g_dist_base;        // virtual / identity-mapped physical
-static u64 g_redist_base;      // base of the redistributor REGION;
-                               // per-CPU frames are at +N * 0x20000.
+// P3-Bca: g_dist_base / g_redist_base are kernel VAs in the vmalloc
+// range (0xFFFF_8000_*) returned by mmu_map_mmio. MMIO accessors index
+// off them as `base + register_offset`. Pre-P3-Bca these were PA-as-VA
+// via TTBR0 identity; P3-Bd retires TTBR0 identity entirely so the
+// vmalloc remap is the durable form.
+static u64 g_dist_base;
+static u64 g_redist_base;
+static u64 g_dist_pa;          // PA discovered from DTB (banner / debug)
+static u64 g_redist_pa;
 static u32 g_max_intid;        // from GICD_TYPER
 
 // GICv3 redistributor region stride. Each CPU's redistributor frame is
@@ -367,17 +373,40 @@ bool gic_init(void) {
     if (!dtb_get_compat_reg_n("arm,gic-v3", 1, &rbase, &rsize)) {
         extinction("gic_init: DTB arm,gic-v3 has no reg[1] (redistributor)");
     }
-    g_dist_base   = dbase;
-    g_redist_base = rbase;
+    g_dist_pa   = dbase;
+    g_redist_pa = rbase;
 
-    // Step 3: map both regions Device-nGnRnE in TTBR0. Both are below
-    // 4 GiB on QEMU virt; mmu_map_device validates the bound.
-    if (!mmu_map_device((paddr_t)dbase, dsize)) {
-        extinction("gic_init: mmu_map_device(dist) failed (>4 GiB?)");
+    // Step 3: map both regions Device-nGnRnE into the kernel vmalloc
+    // range (P3-Bca). mmu_map_mmio returns a kernel VA in
+    // 0xFFFF_8000_* that the MMIO accessors below index off. Pre-P3-Bca
+    // gic_init used mmu_map_device which converted the TTBR0-identity
+    // L2 entry to a Device block; P3-Bd retires TTBR0 identity entirely
+    // so the vmalloc-driven path is the durable form.
+    //
+    // Redist region: cap the mapped size at the actual CPU count.
+    // QEMU virt's DTB reports the full reservation for max_cpus (≈ 64 MiB
+    // at 256 max-CPUs × 0x40000 per CPU), but only the configured CPUs'
+    // frames are populated. Mapping the full reported region would burn
+    // through l3_vmalloc unnecessarily. The usable redist region is
+    // `dtb_cpu_count * GICR_FRAME_STRIDE`. dtb_cpu_count is set BEFORE
+    // gic_init in boot_main; smp_init / smp_cpu_count haven't run yet.
+    u32 cpu_count = dtb_cpu_count();
+    if (cpu_count == 0) cpu_count = 1;
+    u64 redist_used_size = (u64)cpu_count * GICR_FRAME_STRIDE;
+    if (redist_used_size > rsize) {
+        redist_used_size = rsize;     // defensive: never exceed DTB-reported
     }
-    if (!mmu_map_device((paddr_t)rbase, rsize)) {
-        extinction("gic_init: mmu_map_device(redist) failed (>4 GiB?)");
+
+    void *dist_kva = mmu_map_mmio((paddr_t)dbase, dsize);
+    if (!dist_kva) {
+        extinction("gic_init: mmu_map_mmio(dist) returned NULL (vmalloc exhausted?)");
     }
+    void *redist_kva = mmu_map_mmio((paddr_t)rbase, redist_used_size);
+    if (!redist_kva) {
+        extinction("gic_init: mmu_map_mmio(redist) returned NULL (vmalloc exhausted?)");
+    }
+    g_dist_base   = (u64)(uintptr_t)dist_kva;
+    g_redist_base = (u64)(uintptr_t)redist_kva;
 
     // Step 4: bring up distributor + this CPU's redistributor + CPU
     // interface. Order matters: distributor first (so SPIs are
@@ -530,3 +559,5 @@ void gic_eoi(u32 intid) {
 gic_version_t gic_version(void) { return g_version; }
 u64 gic_dist_base(void)         { return g_dist_base; }
 u64 gic_redist_base(void)       { return g_redist_base; }
+u64 gic_dist_pa(void)           { return g_dist_pa; }
+u64 gic_redist_pa(void)         { return g_redist_pa; }

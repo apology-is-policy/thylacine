@@ -226,53 +226,32 @@ void mmu_program_this_cpu(void);
 // audit-trigger surface verifier (and by tests at P1-I+).
 bool pte_violates_wxe(u64 pte);
 
-// Convert MMIO region [pa, pa+size) in TTBR0's identity map from
-// Normal-WB cacheable to Device-nGnRnE attributes. Granularity is the
-// 2 MiB block (TTBR0's L2 entries cover the kernel-image GiB as
-// 2 MiB blocks); the smallest 2 MiB-aligned superset of [pa, pa+size)
-// is converted. Over-mapping is safe because the surrounding
-// device-adjacent addresses are reserved by `phys.c` and never used
-// for kernel data.
-//
-// The conversion is performed as a break-before-make: each affected
-// L2 entry is invalidated, the TLB is flushed (Inner-Shareable), then
-// the new Device descriptor is written. Caller must guarantee no
-// kernel code holds a cached copy of any address in [pa, pa+size)
-// before calling — the only callers at v1.0 are device drivers
-// (gic_init in P1-G; future virtio drivers in Phase 3) running
-// before any access through the prior mapping.
-//
-// Constraint: pa + size must fit in [0, 4 GiB) — TTBR0's identity
-// covers only the low 4 GiB at v1.0. Pi 5's GIC at PA > 4 GiB needs a
-// TTBR0 extension (deferred). Returns false if the range is unaligned
-// or escapes 4 GiB; true on success.
-bool mmu_map_device(paddr_t pa, u64 size);
-
-// P2-Dc: per-thread kstack guard pages.
+// P3-Bca: per-thread kstack guard pages — direct map flavor.
 //
 // `mmu_set_no_access(pa)` makes the 4 KiB page at PA unreadable +
-// unwritable + unexecutable in TTBR0's identity mapping. A subsequent
-// access to that PA via the kernel's identity-VA path triggers an
-// instruction-or-data abort which the exception handler reports as a
-// stack-overflow extinction.
+// unwritable + unexecutable IN THE KERNEL DIRECT MAP (TTBR1, base
+// 0xFFFF_0000_0000_0000). A kstack overflow (which accesses
+// `pa_to_kva(pa)` via the SP register) triggers a permission/translation
+// fault that the exception handler reports as a stack-overflow
+// extinction.
 //
-// Implementation requires demoting the L2 block descriptor covering the
-// page to an L3 table — kstacks live in 2 MiB-block-mapped bulk RAM and
-// per-page no-access requires 4 KiB granularity. Demotion is idempotent
-// per L2 block; subsequent calls hitting the same block reuse the
-// existing L3.
+// Implementation requires demoting the relevant `l1_directmap[gib]`
+// entry from a 1 GiB block to a 512×2MiB-block L2, then demoting the
+// relevant L2 entry from a 2 MiB block to a 4-KiB-page L3. Both demotes
+// allocate fresh tables from buddy. Demotes are idempotent: subsequent
+// calls hitting the same GiB / 2 MiB block reuse the existing L2 / L3.
 //
-// `mmu_restore_normal(pa)` reverses the protection: the page becomes
-// PTE_KERN_RW again. Called on thread_free before the underlying pages
+// `mmu_restore_normal(pa)` restores the page to RW + XN in the direct
+// map (PTE_KERN_RW). Called on thread_free before the underlying pages
 // are returned to buddy.
 //
-// At v1.0 P2-Dc these are called single-threaded from the boot CPU
+// At v1.0 P3-Bca these are called single-threaded from the boot CPU
 // (thread_create / thread_free are not yet SMP-safe). Phase 5+ adds a
 // global mmu_lock when multi-thread Procs make concurrent thread_create
 // possible.
 //
-// Returns false on OOM (L3 table allocation failed) or if the PA is
-// outside the TTBR0 identity range (≥ 4 GiB at v1.0).
+// Returns false on OOM (L2 / L3 table allocation failed) or if the PA
+// is outside the direct-map range (PA < 1 GiB or PA >= 9 GiB at v1.0).
 bool mmu_set_no_access(paddr_t pa);
 bool mmu_restore_normal(paddr_t pa);
 
@@ -280,14 +259,13 @@ bool mmu_restore_normal(paddr_t pa);
 // run of pages within a single 2 MiB L2 block (the common case for
 // per-thread guard regions: 4 pages ≪ 1 block). Operates on
 // `[pa, pa + n_pages * PAGE_SIZE)`. One TLB flush at the end instead
-// of per-page — substantial speedup at thread_create / thread_free
-// volume (~10× faster than the per-page loop at 1000 iterations).
+// of per-page.
 //
 // Constraints:
 //   - pa must be 4 KiB aligned.
 //   - n_pages > 0 and the range must lie within a single 2 MiB block
 //     (i.e., (pa + n_pages * PAGE_SIZE - 1) >> 21 == pa >> 21).
-//   - PA range is in TTBR0 identity (< 4 GiB at v1.0).
+//   - PA range is in the direct map (1 GiB ≤ PA < 9 GiB at v1.0).
 //
 // Returns false on alignment / range / OOM violations.
 bool mmu_set_no_access_range(paddr_t pa, unsigned n_pages);

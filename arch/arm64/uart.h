@@ -16,6 +16,7 @@
 #ifndef THYLACINE_ARCH_ARM64_UART_H
 #define THYLACINE_ARCH_ARM64_UART_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 // Update the PL011 base. Called by boot_main() after dtb_init() with
@@ -25,6 +26,18 @@
 // fallback). Calling with 0 is a no-op (so callers can pass an
 // uninitialized variable without harm).
 void uart_set_base(uintptr_t base);
+
+// P3-Bca: map the PL011 region [pa, pa+size) into the kernel vmalloc
+// range and switch the active base to the returned kernel VA. Pre-
+// P3-Bca the active base was the PA (accessed via TTBR0 identity); P3-Bd
+// retires TTBR0 identity entirely so the vmalloc KVA is the durable
+// form. boot_main() calls this exactly once after dtb_get_compat_reg
+// returns the discovered PL011 reg.
+//
+// Extincts on mmu_map_mmio failure (vmalloc exhausted, etc.) — UART is
+// load-bearing for boot diagnostics; silent fallback would mask the
+// failure.
+void uart_remap_to_vmalloc(uintptr_t pa, size_t size);
 
 // Query the active base. Used by main.c to print it in the banner so a
 // developer can confirm the DTB-driven discovery worked.

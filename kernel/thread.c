@@ -160,8 +160,14 @@ struct Thread *thread_init_per_cpu_idle(unsigned cpu_idx) {
 //   page 7 (highest) ┘  ctx.sp starts at top of page 7
 //
 // Stack grows DOWN. An overflow past page 4 hits the guard at page 3,
-// where the L3 PTE is invalid in TTBR0 → page fault → exception
-// handler reports stack-overflow extinction.
+// where the L3 PTE is invalid in the kernel direct map (P3-Bca) →
+// permission/translation fault → exception handler reports stack-
+// overflow extinction.
+//
+// P3-Bca: kstack VAs are kernel direct-map KVAs (pa_to_kva of the
+// alloc'd PA). Pre-P3-Bca they were PA-as-VA via TTBR0 identity; P3-Bd
+// retires TTBR0 identity entirely so the direct-map form is the durable
+// one. The PA is recovered via kva_to_pa for free + guard restore.
 static struct Thread *thread_create_internal(struct Proc *proc,
                                              void *entry_void,
                                              void *arg) {
@@ -179,14 +185,15 @@ static struct Thread *thread_create_internal(struct Proc *proc,
         kmem_cache_free(g_thread_cache, t);
         return NULL;
     }
-    void *kalloc_base = (void *)(uintptr_t)page_to_pa(stack_pg);
+    paddr_t guard_pa = page_to_pa(stack_pg);
+    void *kalloc_base = pa_to_kva(guard_pa);
 
-    // P2-Dc: protect the lower THREAD_KSTACK_GUARD_PAGES as no-access.
-    // The 8-page allocation at order=3 is 32-KiB-aligned, so the 4
-    // guard pages at the bottom always lie within a single 2 MiB block
-    // (32 KiB ≪ 2 MiB). One demote + one TLB flush covers all guards.
-    paddr_t guard_base = (paddr_t)(uintptr_t)kalloc_base;
-    if (!mmu_set_no_access_range(guard_base, THREAD_KSTACK_GUARD_PAGES)) {
+    // P2-Dc / P3-Bca: protect the lower THREAD_KSTACK_GUARD_PAGES as
+    // no-access in the direct map. The 8-page allocation at order=3 is
+    // 32-KiB-aligned, so the 4 guard pages at the bottom always lie
+    // within a single 2 MiB block (32 KiB ≪ 2 MiB). One demote chain +
+    // one TLB flush covers all guards.
+    if (!mmu_set_no_access_range(guard_pa, THREAD_KSTACK_GUARD_PAGES)) {
         free_pages(stack_pg, THREAD_KSTACK_TOTAL_ORDER);
         kmem_cache_free(g_thread_cache, t);
         return NULL;
@@ -279,15 +286,17 @@ void thread_free(struct Thread *t) {
     thread_unlink_from_proc(t);
 
     if (t->kstack_base) {
-        // P2-Dc: restore guard pages to normal RW before returning the
-        // allocation to buddy. If a future allocation reuses these
-        // pages (for any purpose, kstack or otherwise), they need
-        // normal access; leaving them no-access would silently fault
-        // the next user. Batched into one TLB flush.
-        paddr_t guard_base = (paddr_t)(uintptr_t)t->kstack_base;
-        mmu_restore_normal_range(guard_base, THREAD_KSTACK_GUARD_PAGES);
+        // P2-Dc / P3-Bca: restore guard pages to normal RW in the direct
+        // map before returning the allocation to buddy. If a future
+        // allocation reuses these pages (for any purpose, kstack or
+        // otherwise), they need normal access; leaving them no-access
+        // would silently fault the next user. Batched into one TLB
+        // flush. kstack_base is a direct-map KVA; recover the PA via
+        // kva_to_pa.
+        paddr_t guard_pa = kva_to_pa(t->kstack_base);
+        mmu_restore_normal_range(guard_pa, THREAD_KSTACK_GUARD_PAGES);
 
-        struct page *pg = pa_to_page(guard_base);
+        struct page *pg = pa_to_page(guard_pa);
         free_pages(pg, THREAD_KSTACK_TOTAL_ORDER);
     }
 

@@ -79,7 +79,13 @@ void boot_main(void) {
         mem_ok  = dtb_get_memory(&mem_base, &mem_size);
         uart_ok = dtb_get_compat_reg("arm,pl011", &dtb_uart_base, &dtb_uart_size);
         if (uart_ok) {
-            uart_set_base((uintptr_t)dtb_uart_base);
+            // P3-Bca: remap PL011 into the kernel vmalloc range. After
+            // this, all UART writes go through the vmalloc KVA rather
+            // than PA-as-VA via TTBR0 identity. The pre-remap fallback
+            // (pl011_base = 0x09000000UL set in uart.c) covered the
+            // brief window before this call; once it returns, the
+            // active base is the vmalloc KVA returned by mmu_map_mmio.
+            uart_remap_to_vmalloc((uintptr_t)dtb_uart_base, (size_t)dtb_uart_size);
         }
     }
 
@@ -241,9 +247,13 @@ void boot_main(void) {
 
     uart_puts("  gic:  v");
     uart_putdec((u64)gic_version());
-    uart_puts(" dist=");
+    uart_puts(" dist PA=");
+    uart_puthex64(gic_dist_pa());
+    uart_puts(" KVA=");
     uart_puthex64(gic_dist_base());
-    uart_puts(" redist=");
+    uart_puts(" redist PA=");
+    uart_puthex64(gic_redist_pa());
+    uart_puts(" KVA=");
     uart_puthex64(gic_redist_base());
     uart_puts("\n");
 

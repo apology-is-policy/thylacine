@@ -68,11 +68,11 @@ typedef enum {
 // ---------------------------------------------------------------------------
 
 // One-time GIC bring-up. Performs DTB-driven version autodetect, maps
-// the GIC MMIO regions (Device-nGnRnE) via mmu_map_device, initializes
-// the distributor + the calling CPU's redistributor + CPU interface,
-// and leaves all IRQs disabled at the source. Caller follows up with
-// gic_attach + gic_enable_irq for each desired IRQ, then unmasks
-// IRQs at the PSTATE level.
+// the GIC MMIO regions (Device-nGnRnE) into the kernel vmalloc range
+// via mmu_map_mmio (P3-Bca), initializes the distributor + the calling
+// CPU's redistributor + CPU interface, and leaves all IRQs disabled at
+// the source. Caller follows up with gic_attach + gic_enable_irq for
+// each desired IRQ, then unmasks IRQs at the PSTATE level.
 //
 // Must run AFTER dtb_init and AFTER exception_init (so an unexpected
 // IRQ during bring-up routes through the vector table cleanly).
@@ -87,13 +87,16 @@ bool gic_init(void);
 // Reports the detected version. GIC_VERSION_NONE before gic_init runs.
 gic_version_t gic_version(void);
 
-// Reports the live distributor / redistributor / CPU interface bases
-// discovered from DTB (informational; banner / debug). Zero before
-// gic_init runs. GICv3: cpu_interface_base = 0 (system registers
-// instead of MMIO); GICv2 (deferred): cpu_interface_base = real CPU
-// interface MMIO base.
+// Reports the live distributor / redistributor MMIO bases. P3-Bca:
+// gic_dist_base / gic_redist_base return KERNEL VAs in the vmalloc
+// range (0xFFFF_8000_*) — the addresses the MMIO accessors index off.
+// gic_dist_pa / gic_redist_pa return the PHYSICAL addresses discovered
+// from DTB (informational; banner / debug). All four return zero before
+// gic_init runs.
 u64 gic_dist_base(void);
 u64 gic_redist_base(void);
+u64 gic_dist_pa(void);
+u64 gic_redist_pa(void);
 
 // Attach a handler for an INTID. The handler runs in IRQ context with
 // IRQs masked at PSTATE, on the existing SP_EL1 (boot stack at P1-G;

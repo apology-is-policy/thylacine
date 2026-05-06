@@ -114,6 +114,13 @@ bool dtb_init(paddr_t base) {
         return false;
     }
 
+    // P3-Bca: DTB access stays on TTBR0 identity (PA-as-VA) at this
+    // sub-chunk. The direct-map path (pa_to_kva) hangs at the very first
+    // dereference for reasons not diagnosed here — likely related to
+    // pre-phys_init MMU/cache state. P3-Bd will refactor: copy the DTB
+    // into a kernel-allocated buffer post-phys_init OR use a dedicated
+    // TTBR1 reservation, then retire TTBR0 identity. Tracked as a
+    // Phase-3-Bd-blocking work item in `docs/phase3-status.md` trip-hazards.
     const struct fdt_header_be *hdr = (const struct fdt_header_be *)(uintptr_t)base;
 
     uint32_t magic = be32_to_host(hdr->magic);

@@ -23,6 +23,7 @@
 #include "kaslr.h"
 
 #include <thylacine/extinction.h>
+#include <thylacine/page.h>          // pa_to_kva (P3-Bca direct-map alias check)
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 
@@ -167,6 +168,11 @@ static bool addr_is_stack_guard(u64 addr) {
 // True iff `addr` falls inside the kernel image (TEXT / RODATA /
 // DATA / BSS / dynamic-section family). Used to recognize W^X
 // violations on the kernel image specifically.
+//
+// P3-Bca: also recognizes the kernel-image PA range mapped through the
+// kernel direct map (KERNEL_DIRECT_MAP_BASE). A W^X violation accessed
+// through the direct-map alias has FAR = pa_to_kva(kernel_image_pa);
+// `addr_is_kernel_image` matches it via the third range check.
 static bool addr_is_kernel_image(u64 addr) {
     u64 ks_pa = kaslr_kernel_pa_start();
     u64 ke_pa = kaslr_kernel_pa_end();
@@ -174,7 +180,12 @@ static bool addr_is_kernel_image(u64 addr) {
 
     u64 ks_va = (u64)(uintptr_t)_kernel_start;
     u64 ke_va = (u64)(uintptr_t)_kernel_end;
-    return addr >= ks_va && addr < ke_va;
+    if (addr >= ks_va && addr < ke_va) return true;
+
+    // P3-Bca: direct-map alias of the kernel image PA range.
+    u64 ks_kva = (u64)(uintptr_t)pa_to_kva(ks_pa);
+    u64 ke_kva = (u64)(uintptr_t)pa_to_kva(ke_pa);
+    return addr >= ks_kva && addr < ke_kva;
 }
 
 // ---------------------------------------------------------------------------

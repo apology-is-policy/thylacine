@@ -581,108 +581,11 @@ void mmu_enable(u64 slide) {
     // to the high VA via TTBR1 and continues from there.
 }
 
-// ---------------------------------------------------------------------------
-// mmu_map_device — post-boot MMIO region attribute change.
-//
-// Walks the affected L2 entries in TTBR0's identity map (covering the
-// low 4 GiB), evicts any cached lines from the prior Normal-WB
-// mapping, replaces the L2 entries with Device-nGnRnE blocks, and
-// flushes the TLB. Used at boot_main time to install GIC distributor
-// + redistributor mappings discovered from DTB; future device drivers
-// extend this pattern.
-//
-// Break-before-make discipline (per ARM ARM B2.7.1):
-//   1. Clean+invalidate dcache by VA over the affected region. The
-//      prior mapping is Normal-WB cacheable; switching to Device
-//      without clearing the cache lines leaves dirty data that may
-//      write back later through the new Device mapping (corrupts MMIO
-//      registers). Operate by VA via the identity map (low PA == VA).
-//      Then dsb ish to publish the cleans before invalidation.
-//   2. Zero the L2 entries (break). dsb ishst → tlbi vmalle1is → dsb
-//      ish → isb. After this, any access to the region faults.
-//   3. Write the new Device descriptors (make). dsb ishst + isb.
-//
-// We batch BBM across all blocks in the range to keep TLB flushes
-// cheap (single full-flush vs N per-VA flushes).
-// ---------------------------------------------------------------------------
-
 static inline void dsb_ish(void)   { __asm__ __volatile__("dsb ish"   ::: "memory"); }
 static inline void dsb_ishst(void) { __asm__ __volatile__("dsb ishst" ::: "memory"); }
 static inline void isb(void)       { __asm__ __volatile__("isb"       ::: "memory"); }
 static inline void tlbi_vmalle1is(void) {
     __asm__ __volatile__("tlbi vmalle1is" ::: "memory");
-}
-
-// Conservative cache-line stride. Real ARMv8 cores have CTR_EL0.DminLine
-// reporting the actual size; 64 bytes is a safe lower bound for every
-// implementation we target (Cortex-A53 / A72 / A76, Apple Silicon,
-// QEMU's max model). Stepping at 64 bytes either hits each line
-// once (LINE >= DminLine) or visits each line multiple times
-// (LINE < DminLine, harmless — `dc civac` is idempotent).
-#define DCACHE_LINE_BYTES   64
-
-bool mmu_map_device(paddr_t pa, u64 size) {
-    if (size == 0) return false;
-    if (pa + size < pa) return false;            // overflow
-    if ((pa + size) > (4ull << 30)) return false; // outside TTBR0 identity
-
-    // Round to enclosing 2 MiB blocks.
-    paddr_t pa_first = pa & ~(BLOCK_SIZE_L2 - 1);
-    paddr_t pa_last  = (pa + size - 1) & ~(BLOCK_SIZE_L2 - 1);
-    paddr_t pa_end   = pa_last + BLOCK_SIZE_L2;   // exclusive end
-
-    // F31 (audit-r3): reject ranges that overlap the kernel image's
-    // 2 MiB block. That block holds a TABLE descriptor pointing at
-    // the SHARED `l3_kernel` (used by both TTBR0 and TTBR1); writing
-    // a Device BLOCK descriptor over it would lose the L3 reference,
-    // demoting the per-section W^X mapping to a coarse 2 MiB Device
-    // block (PXN=1 — kernel text becomes non-executable on the next
-    // TTBR0 access). The shared L3 itself is a static array so it's
-    // not freed, but the TTBR0 access path is severed.
-    {
-        u64 kern_pa_start_v = (u64)(uintptr_t)_kernel_start;
-        u64 kern_pa_end_v   = (u64)(uintptr_t)_kernel_end;
-        u64 kern_2mib       = kern_pa_start_v & ~(BLOCK_SIZE_L2 - 1);
-        u64 kern_2mib_end   = ((kern_pa_end_v - 1) & ~(BLOCK_SIZE_L2 - 1))
-                              + BLOCK_SIZE_L2;
-        // Reject if the requested range hits ANY of the 2 MiB blocks
-        // that contain the kernel image. Equivalently: ranges
-        // [pa_first, pa_end) and [kern_2mib, kern_2mib_end) intersect.
-        if (pa_first < kern_2mib_end && kern_2mib < pa_end) {
-            return false;
-        }
-    }
-
-    // Step 1: clean+invalidate dcache for the region (still mapped
-    // Normal-WB at this point). Operate by VA via TTBR0 identity.
-    // After this, any dirty lines from the prior mapping have been
-    // written back; the cache no longer holds the region.
-    for (u64 va = pa_first; va < pa_end; va += DCACHE_LINE_BYTES) {
-        __asm__ __volatile__("dc civac, %0" :: "r"(va) : "memory");
-    }
-    dsb_ish();
-
-    // Step 2: invalidate all affected L2 entries (break).
-    for (paddr_t p = pa_first; p <= pa_last; p += BLOCK_SIZE_L2) {
-        u32 gib = (u32)(p >> BLOCK_SHIFT_L1);
-        u32 idx = (u32)((p >> BLOCK_SHIFT_L2) & 0x1ff);
-        l2_ttbr0[gib][idx] = 0;
-    }
-    dsb_ishst();
-    tlbi_vmalle1is();
-    dsb_ish();
-    isb();
-
-    // Step 3: write the new Device descriptors (make).
-    for (paddr_t p = pa_first; p <= pa_last; p += BLOCK_SIZE_L2) {
-        u32 gib = (u32)(p >> BLOCK_SHIFT_L1);
-        u32 idx = (u32)((p >> BLOCK_SHIFT_L2) & 0x1ff);
-        l2_ttbr0[gib][idx] = make_block_pte_l2(p, PTE_DEVICE_RW_BLOCK);
-    }
-    dsb_ishst();
-    isb();
-
-    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -754,13 +657,21 @@ void *mmu_map_mmio(paddr_t pa, size_t size) {
 }
 
 // ---------------------------------------------------------------------------
-// P2-Dc: per-thread kstack guard pages.
+// P3-Bca: per-thread kstack guard pages — operate on the kernel direct map.
 //
-// Bulk RAM is mapped via 2 MiB block descriptors at L2 in TTBR0. To make
-// a single 4 KiB page no-access, we demote the relevant L2 block to an
-// L3 table (allocating a fresh L3 from buddy), populate the L3 with 512
-// page-PTEs reproducing the original block's mapping, then modify the
-// specific L3 entry to be invalid (causing a fault on access).
+// Bulk RAM is mapped in the direct map (0xFFFF_0000_*) via 1 GiB block
+// descriptors at L1 (`l1_directmap[1..8]`), with the kernel-image GiB
+// already demoted to L2 → L3 by build_page_tables (P3-Bb-hardening).
+// To make a 4 KiB page no-access in the direct map we walk the L1
+// entry, demote it to L2 (allocating a fresh L2 from buddy if it's
+// still a 1 GiB block), demote the relevant L2 entry to L3 (allocating
+// a fresh L3 if it's still a 2 MiB block), then invalidate the L3
+// entry for the target page.
+//
+// Pre-P3-Bca, this code operated on TTBR0's identity map. P3-Bca's
+// kstacks live at direct-map KVAs (high VA in TTBR1), so the guard
+// must be enforced at that translation. P3-Bd will retire TTBR0
+// identity entirely.
 //
 // At v1.0 these are called single-threaded from the boot CPU. SMP-safe
 // demote at Phase 5+ when multi-thread Procs make concurrent thread_create
@@ -773,55 +684,101 @@ void *mmu_map_mmio(paddr_t pa, size_t size) {
 
 #include "../../mm/phys.h"
 
-// Locate the L2 entry covering `pa` in TTBR0's identity tables.
-// Returns NULL if pa is outside the TTBR0 identity range (>= 4 GiB).
-static u64 *l2_ttbr0_entry_for(paddr_t pa) {
-    u32 gib = (u32)(pa >> BLOCK_SHIFT_L1);
-    u32 idx = (u32)((pa >> BLOCK_SHIFT_L2) & 0x1ff);
-    if (gib >= 4) return NULL;
-    return &l2_ttbr0[gib][idx];
+// Build a table descriptor from an explicit PA. The `make_table_pte`
+// helper above takes a pointer (used at boot when PC == load PA so
+// pointer arithmetic IS the PA); this variant takes a PA directly,
+// which is what runtime-allocated tables produce via page_to_pa.
+static inline u64 make_table_pte_pa(paddr_t pa) {
+    return pa | PTE_VALID | PTE_TYPE_TABLE;
 }
 
-// Demote the L2 block covering `pa` to an L3 table. Idempotent: if the
-// L2 entry is already a table descriptor, returns the existing L3.
+// Walk l1_directmap to obtain the L2 KVA covering `pa`. Demotes the
+// 1 GiB block to a 512 × 2-MiB-block L2 if needed (allocating a fresh
+// L2 from buddy). Returns NULL if `pa` is outside the direct-map
+// range (PA < 1 GiB or PA >= 9 GiB at v1.0) or on OOM.
 //
-// Allocates one page (4 KiB, page-aligned, KP_ZERO) for the L3 table.
-// Returns NULL on OOM or if `pa` is outside TTBR0 identity or if the
-// L2 entry is invalid (no source mapping to demote from).
-static u64 *demote_l2_block_to_l3(paddr_t pa) {
-    u64 *l2_entry_p = l2_ttbr0_entry_for(pa);
-    if (!l2_entry_p) return NULL;
-    u64 entry = *l2_entry_p;
+// Idempotent: subsequent calls within the same GiB return the same L2.
+static u64 *directmap_walk_to_l2(paddr_t pa) {
+    u32 gib = (u32)(pa >> BLOCK_SHIFT_L1);
+    if (gib < 1 || gib > 8) return NULL;     // outside direct map
 
-    // Already a table descriptor → reuse.
-    if ((entry & PTE_VALID) && (entry & PTE_TYPE_TABLE)) {
-        return (u64 *)(uintptr_t)(entry & ~0xFFFull);
-    }
-    // Source must be a valid block to be demoted.
+    u64 entry = l1_directmap[gib];
     if (!(entry & PTE_VALID)) return NULL;
 
-    // Allocate L3 table.
-    struct page *l3_pg = alloc_pages(0, KP_ZERO);
-    if (!l3_pg) return NULL;
-    u64 *l3 = (u64 *)(uintptr_t)page_to_pa(l3_pg);
-
-    // Reproduce the L2 block's mapping at L3 granularity. At v1.0 bulk
-    // RAM uses PTE_KERN_RW_BLOCK; the L3 equivalent is PTE_KERN_RW.
-    paddr_t block_start = pa & ~(BLOCK_SIZE_L2 - 1);
-    for (u32 i = 0; i < ENTRIES_PER_TABLE; i++) {
-        paddr_t page_pa = block_start + ((u64)i * PAGE_SIZE);
-        l3[i] = make_page_pte_l3(page_pa, PTE_KERN_RW);
+    if (entry & PTE_TYPE_TABLE) {
+        // Already demoted (e.g., the kernel-image GiB was demoted to
+        // l2_directmap_kernel by build_page_tables). The PA in the
+        // entry IS the L2 table's PA; convert via direct-map KVA.
+        paddr_t l2_pa = entry & ~0xFFFull;
+        return (u64 *)pa_to_kva(l2_pa);
     }
 
-    // Break-before-make: invalidate the L2 entry, TLB-flush, write the
-    // new table descriptor.
-    *l2_entry_p = 0;
+    // Demote the 1 GiB block to a fresh L2. The L2 holds 512 × 2-MiB
+    // R/W + XN blocks reproducing the source 1 GiB block's coverage.
+    struct page *l2_pg = alloc_pages(0, KP_ZERO);
+    if (!l2_pg) return NULL;
+    paddr_t l2_pa = page_to_pa(l2_pg);
+    u64 *l2 = (u64 *)pa_to_kva(l2_pa);
+
+    paddr_t gib_pa = (paddr_t)gib << BLOCK_SHIFT_L1;
+    for (u32 i = 0; i < ENTRIES_PER_TABLE; i++) {
+        paddr_t block_pa = gib_pa + ((paddr_t)i << BLOCK_SHIFT_L2);
+        l2[i] = (block_pa & ~(BLOCK_SIZE_L2 - 1)) | PTE_KERN_RW_BLOCK;
+    }
+
+    // Break-before-make on the L1 entry. Per ARM ARM B2.7.1, changing
+    // a block descriptor to a table descriptor (or vice versa) requires
+    // BBM: write 0, TLB-flush, write the new descriptor.
+    l1_directmap[gib] = 0;
     dsb_ishst();
     tlbi_vmalle1is();
     dsb_ish();
     isb();
 
-    *l2_entry_p = make_table_pte(l3);
+    l1_directmap[gib] = make_table_pte_pa(l2_pa);
+    dsb_ishst();
+    isb();
+
+    return l2;
+}
+
+// Walk to the L3 KVA covering `pa`. Demotes the 2-MiB-block L2 entry to
+// a fresh L3 if needed. Returns NULL on OOM or outside-direct-map.
+//
+// Idempotent: subsequent calls within the same 2 MiB return the same L3.
+static u64 *directmap_walk_to_l3(paddr_t pa) {
+    u64 *l2 = directmap_walk_to_l2(pa);
+    if (!l2) return NULL;
+
+    u32 l2_idx = (u32)((pa >> BLOCK_SHIFT_L2) & 0x1ff);
+    u64 entry = l2[l2_idx];
+    if (!(entry & PTE_VALID)) return NULL;
+
+    if (entry & PTE_TYPE_TABLE) {
+        paddr_t l3_pa = entry & ~0xFFFull;
+        return (u64 *)pa_to_kva(l3_pa);
+    }
+
+    // Demote the 2 MiB block to a fresh L3.
+    struct page *l3_pg = alloc_pages(0, KP_ZERO);
+    if (!l3_pg) return NULL;
+    paddr_t l3_pa = page_to_pa(l3_pg);
+    u64 *l3 = (u64 *)pa_to_kva(l3_pa);
+
+    paddr_t block_pa = pa & ~(BLOCK_SIZE_L2 - 1);
+    for (u32 i = 0; i < ENTRIES_PER_TABLE; i++) {
+        paddr_t page_pa = block_pa + ((paddr_t)i << PAGE_SHIFT);
+        l3[i] = make_page_pte_l3(page_pa, PTE_KERN_RW);
+    }
+
+    // BBM on the L2 entry.
+    l2[l2_idx] = 0;
+    dsb_ishst();
+    tlbi_vmalle1is();
+    dsb_ish();
+    isb();
+
+    l2[l2_idx] = make_table_pte_pa(l3_pa);
     dsb_ishst();
     isb();
 
@@ -829,52 +786,32 @@ static u64 *demote_l2_block_to_l3(paddr_t pa) {
 }
 
 bool mmu_set_no_access(paddr_t pa) {
-    if (pa & (PAGE_SIZE - 1)) return false;       // must be page-aligned
+    if (pa & (PAGE_SIZE - 1)) return false;
 
-    u64 *l3 = demote_l2_block_to_l3(pa);
+    u64 *l3 = directmap_walk_to_l3(pa);
     if (!l3) return false;
 
     u32 idx = (u32)((pa >> PAGE_SHIFT) & 0x1ff);
-
-    // Invalidate the page's L3 entry. Break-before-make for this single
-    // PTE: the entry was a valid PTE_KERN_RW (set by demote_l2_block_to_l3)
-    // and we're transitioning to invalid; ARM ARM requires break before
-    // any change that could change the output address or permissions.
     l3[idx] = 0;
     dsb_ishst();
     tlbi_vmalle1is();
     dsb_ish();
     isb();
-
     return true;
 }
 
 bool mmu_restore_normal(paddr_t pa) {
     if (pa & (PAGE_SIZE - 1)) return false;
 
-    u64 *l2_entry_p = l2_ttbr0_entry_for(pa);
-    if (!l2_entry_p) return false;
-    u64 entry = *l2_entry_p;
+    u64 *l3 = directmap_walk_to_l3(pa);
+    if (!l3) return false;
 
-    // If the L2 entry is still a block, the page is implicitly RW
-    // already — nothing to restore (mmu_set_no_access was never called
-    // for any page in this 2 MiB block).
-    if ((entry & PTE_VALID) && !(entry & PTE_TYPE_TABLE)) {
-        return true;
-    }
-    // Or if the L2 entry is invalid, that's a misuse (caller is trying
-    // to unprotect something never mapped). Return failure.
-    if (!(entry & PTE_VALID)) return false;
-
-    u64 *l3 = (u64 *)(uintptr_t)(entry & ~0xFFFull);
     u32 idx = (u32)((pa >> PAGE_SHIFT) & 0x1ff);
-
     l3[idx] = make_page_pte_l3(pa, PTE_KERN_RW);
     dsb_ishst();
     tlbi_vmalle1is();
     dsb_ish();
     isb();
-
     return true;
 }
 
@@ -883,13 +820,15 @@ bool mmu_set_no_access_range(paddr_t pa, unsigned n_pages) {
     if (n_pages == 0)         return false;
     paddr_t end = pa + (paddr_t)n_pages * PAGE_SIZE;
     if (end <= pa)            return false;       // overflow
-    // Range must lie within a single 2 MiB block.
+    // Range must lie within a single 2 MiB block (one L3 covers exactly
+    // one 2 MiB region). Multi-block ranges would need either looping
+    // over L3s or batched API; not needed at v1.0 (kstack guards are
+    // 16 KiB ≪ 2 MiB).
     if ((pa >> BLOCK_SHIFT_L2) != ((end - 1) >> BLOCK_SHIFT_L2)) return false;
 
-    u64 *l3 = demote_l2_block_to_l3(pa);
+    u64 *l3 = directmap_walk_to_l3(pa);
     if (!l3) return false;
 
-    // Invalidate each L3 entry in the run; one TLB flush at the end.
     for (unsigned i = 0; i < n_pages; i++) {
         u32 idx = (u32)(((pa >> PAGE_SHIFT) + i) & 0x1ff);
         l3[idx] = 0;
@@ -908,18 +847,9 @@ bool mmu_restore_normal_range(paddr_t pa, unsigned n_pages) {
     if (end <= pa)            return false;
     if ((pa >> BLOCK_SHIFT_L2) != ((end - 1) >> BLOCK_SHIFT_L2)) return false;
 
-    u64 *l2_entry_p = l2_ttbr0_entry_for(pa);
-    if (!l2_entry_p) return false;
-    u64 entry = *l2_entry_p;
+    u64 *l3 = directmap_walk_to_l3(pa);
+    if (!l3) return false;
 
-    if ((entry & PTE_VALID) && !(entry & PTE_TYPE_TABLE)) {
-        // Block is still mapped as a single 2 MiB block — pages are
-        // already normal, nothing to do.
-        return true;
-    }
-    if (!(entry & PTE_VALID)) return false;
-
-    u64 *l3 = (u64 *)(uintptr_t)(entry & ~0xFFFull);
     for (unsigned i = 0; i < n_pages; i++) {
         paddr_t page_pa = pa + (paddr_t)i * PAGE_SIZE;
         u32 idx = (u32)((page_pa >> PAGE_SHIFT) & 0x1ff);
