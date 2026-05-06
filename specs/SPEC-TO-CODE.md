@@ -71,9 +71,47 @@ TLC-clean at `Threads = {t1, t2, t3}, CPUs = {c1, c2}, MaxIPIs = 2` — 10188 di
 
 ---
 
-## namespace.tla — Phase 2 close (planned)
+## namespace.tla — P2-Ea spec (impl at P2-Eb)
 
-(Stub. Will pin: bind/mount semantics, cycle-freedom, isolation between processes — ARCH §28 I-1, I-3.)
+Status: **cycle-freedom proven; isolation structural; impl deferred to P2-Eb.** Models the Plan 9 namespace primitives — `bind` as a directed graph with cycle-freedom (I-3) the primary state invariant. Isolation (I-1) is structural in the model: bindings[p] and bindings[q] for p # q are independent function values; no action updates two procs simultaneously. RFNAMEG (shared namespace) is deliberately not modeled at this phase — at v1.0 P2-E impl, rfork extincts on non-RFPROC flags, so the spec mirrors private-namespace-per-Proc semantics. Phase 5+ adds the Pgrp layer.
+
+TLC-clean at `Procs = {p1, p2}, Paths = {a, b, c}` — 625 distinct states explored; depth 7. `namespace_buggy.cfg` (BUGGY_CYCLE=TRUE) produces a 2-bind cycle counterexample at depth 4 / 95 states.
+
+| Spec action | Source location | Notes |
+|---|---|---|
+| `Init` | `kernel/namespace.c::pgrp_init` (P2-Eb) | Empty bindings per Proc. At v1.0 P2-Eb the kernel proc (PID 0) starts with the boot-time ramfs bindings; spec models the abstract "namespace exists, empty" precondition. |
+| `Bind(p, src, dst)` | `kernel/namespace.c::bind` (P2-Eb) | The cycle-checked bind primitive. Calls cycle-detection (DFS or transitive-closure walk over the existing bindings) BEFORE inserting the edge. ARCH §9.1 says: "bind(old, new, flags) — attach a file or directory at another point in the tree." Spec's `(src, dst)` is `(old, new)` in ARCH terms. |
+| `Unbind(p, src, dst)` | `kernel/namespace.c::unmount` (P2-Eb) | Removes a bind edge. ARCH §9.1: "unmount(name, old) — remove a mount point." |
+| `ForkClone(parent, child)` | `kernel/proc.c::rfork` (P2-Eb extension) | Models rfork(RFPROC) without RFNAMEG: child gets a private copy of parent's namespace. v1.0 impl is at P2-Eb where rfork's flag handling extends to clone the Pgrp. |
+| `BuggyBind(p, src, dst)` | (none — bug class statically prevented if the impl uses a single `bind` entry point that always calls cycle-detection) | The bug class is "forgot to call cycle-check." The impl's bind() function structures the cycle-check as inseparable from the insert (verify-then-insert under the same lock). A future caller that bypasses bind() and modifies the mount table directly would re-introduce the bug. |
+
+| Spec invariant | Source enforcement |
+|---|---|
+| `NoCycle` (no path is reachable from its own bindings via transitive closure) | `kernel/namespace.c::bind`'s cycle-check before insert. The check walks the existing bind graph from `src` searching for `dst`; if found, the bind would close a cycle and bind() returns -1 with errstr("namespace cycle: cannot bind X onto Y"). |
+
+### P2-Ea landed (this chunk)
+
+- `bindings` variable + Reachable transitive-closure helper.
+- `Bind` / `BuggyBind` / `Unbind` / `ForkClone` actions.
+- `NoCycle` invariant + `WouldCreateCycle` precondition helper.
+- Two configs: namespace.cfg (clean) + namespace_buggy.cfg (counterexample at depth 4).
+- Isolation documented as structural (per-Proc function values; no shared mutable state at this phase).
+
+### P2-Eb impl targets (next chunk)
+
+- `kernel/include/thylacine/pgrp.h` — Pgrp struct (refcount + mount table).
+- `kernel/namespace.c` — `bind`, `unmount`, `pgrp_init`, `pgrp_clone`, lookup helpers.
+- `struct Proc` extended with `struct Pgrp *pgrp`.
+- `rfork` extended to call `pgrp_clone` for RFPROC (without RFNAMEG).
+- Cycle-detection in `bind`: DFS over the existing bind graph.
+- New tests: `namespace.bind_smoke`, `namespace.cycle_rejected`, `namespace.fork_isolated`.
+
+### Deferred
+
+- **RFNAMEG (shared namespace) at Phase 5+**: requires a separate Pgrp indirection layer in the spec (multiple Procs pointing at the same Pgrp). Isolation invariant becomes meaningful as a state predicate (Procs sharing a Pgrp see the same bindings; Procs with separate Pgrps don't). v1.0 P2-Eb extincts on RFNAMEG.
+- **Walk determinism**: ARCH §9.1 lists "walk determinism" alongside cycle-freedom + isolation. The spec's binding graph is deterministic by construction (functional state); walk determinism is structurally satisfied. A separate state invariant could explicitly check "the lookup function is total + single-valued" — deferred.
+- **Mount union semantics (MBEFORE / MAFTER / MREPL flags)**: the spec models `bindings[p][dst]` as a SET (no ordering). The impl's union-list ordering matters for lookup priority but doesn't affect cycle-freedom. Phase 5+ extension can refine this.
+- **`mount` (9P-server-attaching variant)**: structurally identical to bind for the cycle-freedom + isolation invariants. Phase 4 (9P client) lands the impl.
 
 ## handles.tla — Phase 2 close (planned)
 
