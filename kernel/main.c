@@ -39,6 +39,7 @@
 #include <thylacine/sched.h>
 #include <thylacine/smp.h>
 #include <thylacine/thread.h>
+#include <thylacine/vma.h>      // vma_init (P3-Da)
 #include <thylacine/vmo.h>
 #include <thylacine/types.h>
 
@@ -300,6 +301,7 @@ void boot_main(void) {
     pgrp_init();
     handle_init();
     vmo_init();
+    vma_init();
     asid_init();
     proc_init();
     thread_init();

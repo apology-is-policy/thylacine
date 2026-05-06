@@ -26,6 +26,7 @@
 #include <thylacine/spinlock.h>
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
+#include <thylacine/vma.h>
 
 #include "../arch/arm64/asid.h"
 #include "../arch/arm64/mmu.h"
@@ -297,6 +298,14 @@ void proc_free(struct Proc *p) {
     // forgot exits; INVALID means we're freeing an uninitialized Proc.
     if (p->state != PROC_STATE_ZOMBIE)
         extinction("proc_free of non-ZOMBIE Proc (lifecycle violation)");
+
+    // P3-Da: drain VMAs first. Each Vma carries a vmo_unmap; releasing
+    // them BEFORE handle_table_free is the right order — handle closure
+    // independently does vmo_unref (handle_count--) and a VMO with
+    // mapping_count > 0 must NOT free even if handle_count drops to 0
+    // (per specs/vmo.tla NoUseAfterFree).
+    vma_drain(p);
+
     // P2-Eb: release the namespace. Most Procs have a private pgrp
     // (refcount 1; freed here). Phase 5+ shared namespaces decrement
     // refcount and free only at last release.

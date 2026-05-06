@@ -56,6 +56,7 @@ _Static_assert(PROC_STATE_INVALID == 0,
 
 struct Pgrp;
 struct HandleTable;
+struct Vma;
 
 struct Proc {
     u64               magic;            // PROC_MAGIC
@@ -117,13 +118,20 @@ struct Proc {
     paddr_t            pgtable_root;
     u16                asid;
     u16                _pad_asid[3];     // explicit alignment padding
+
+    // P3-Da: per-Proc VMA list (sorted by vaddr_start ascending). Each
+    // VMA describes a contiguous user-VA range with permissions +
+    // backing VMO. The list is the address-space description against
+    // which page faults are dispatched (P3-Dc); the per-Proc pgtable
+    // (TTBR0) is the runtime translation built on demand from the
+    // VMA list as faults fire.
+    struct Vma        *vmas;
 };
 
-_Static_assert(sizeof(struct Proc) == 112,
-               "struct Proc size pinned at 112 bytes (P2-Fc baseline 96 "
-               "+ pgtable_root 8 + asid 2 + pad 6 = 112). Adding a field "
-               "grows the SLUB cache; update this assert deliberately so "
-               "the change is intentional.");
+_Static_assert(sizeof(struct Proc) == 120,
+               "struct Proc size pinned at 120 bytes (P3-Bcb baseline 112 "
+               "+ vmas 8 = 120). Adding a field grows the SLUB cache; "
+               "update this assert deliberately so the change is intentional.");
 _Static_assert(__builtin_offsetof(struct Proc, magic) == 0,
                "magic must be at offset 0 so SLUB's freelist write on "
                "kmem_cache_free clobbers it (double-free defense — "

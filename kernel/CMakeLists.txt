@@ -54,9 +54,11 @@ set(KERNEL_SRCS
     test/test_directmap.c
     test/test_proc_pgtable.c
     test/test_fault_decode.c
+    test/test_vma.c
     namespace.c
     handle.c
     vmo.c
+    vma.c
     elf.c
 )
 

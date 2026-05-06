@@ -79,6 +79,12 @@ void test_fault_decode_kernel_data_permission_write(void);
 void test_fault_decode_user_data_translation(void);
 void test_fault_decode_user_instruction_fetch(void);
 void test_fault_decode_access_flag(void);
+void test_vma_alloc_free_smoke(void);
+void test_vma_alloc_constraints(void);
+void test_vma_insert_lookup_smoke(void);
+void test_vma_insert_overlap_rejected(void);
+void test_vma_insert_sorted_invariant(void);
+void test_vma_drain_releases_all(void);
 void test_directmap_kva_round_trip(void);
 void test_directmap_alloc_through_directmap(void);
 void test_directmap_vmalloc_mmio_smoke(void);
@@ -161,6 +167,12 @@ struct test_case g_tests[] = {
                                        test_fault_decode_user_instruction_fetch,
                                                                            false, NULL },
     { "fault.decode_access_flag",      test_fault_decode_access_flag,      false, NULL },
+    { "vma.alloc_free_smoke",          test_vma_alloc_free_smoke,          false, NULL },
+    { "vma.alloc_constraints",         test_vma_alloc_constraints,         false, NULL },
+    { "vma.insert_lookup_smoke",       test_vma_insert_lookup_smoke,       false, NULL },
+    { "vma.insert_overlap_rejected",   test_vma_insert_overlap_rejected,   false, NULL },
+    { "vma.insert_sorted_invariant",   test_vma_insert_sorted_invariant,   false, NULL },
+    { "vma.drain_releases_all",        test_vma_drain_releases_all,        false, NULL },
     { "directmap.kva_round_trip",      test_directmap_kva_round_trip,      false, NULL },
     { "directmap.alloc_through_directmap",
                                        test_directmap_alloc_through_directmap,
