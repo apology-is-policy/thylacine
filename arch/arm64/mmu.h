@@ -123,6 +123,14 @@
      PTE_ATTR_IDX(MAIR_IDX_NORMAL_WB) | PTE_AP_RW_EL1 | PTE_UXN | PTE_PXN)
 //   2 MiB block form of PTE_KERN_RW (used for bulk RAM identity mapping).
 
+#define PTE_KERN_RO_BLOCK \
+    (PTE_VALID | PTE_TYPE_BLOCK | PTE_AF | PTE_SH_INNER | \
+     PTE_ATTR_IDX(MAIR_IDX_NORMAL_WB) | PTE_AP_RO_EL1 | PTE_UXN | PTE_PXN)
+//   (P3-Bb-hardening: 2 MiB block, R + XN. Used in direct map for the
+//   kernel image's 2 MiB block alongside per-page perms in
+//   l3_directmap_kernel — defends against direct-map-write-to-.text
+//   speculative attacks.)
+
 #define PTE_DEVICE_RW_BLOCK \
     (PTE_VALID | PTE_TYPE_BLOCK | PTE_AF | PTE_SH_NONE | \
      PTE_ATTR_IDX(MAIR_IDX_DEVICE) | PTE_AP_RW_EL1 | PTE_UXN | PTE_PXN)

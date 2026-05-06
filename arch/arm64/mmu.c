@@ -147,6 +147,28 @@ static u64 l1_vmalloc[ENTRIES_PER_TABLE]   __attribute__((aligned(PAGE_SIZE)));
 static u64 l2_vmalloc[ENTRIES_PER_TABLE]   __attribute__((aligned(PAGE_SIZE)));
 static u64 l3_vmalloc[ENTRIES_PER_TABLE]   __attribute__((aligned(PAGE_SIZE)));
 
+// P3-Bb-hardening: direct-map demotion for the kernel image's 1 GiB.
+//
+// Without these tables, `l1_directmap[gib_for_kernel]` is a 1 GiB R/W +
+// XN block. Every byte of physical RAM in that GiB is writable via
+// direct map — INCLUDING the kernel image's `.text` pages. An attacker
+// with an arbitrary-write primitive could rewrite kernel `.text` via
+// the direct-map alias even though `.text` is R/X-only via its kernel-
+// image VA mapping. W^X invariant I-12 is satisfied per-translation but
+// VIOLATED at the physical-page-aliasing level.
+//
+// Mitigation: demote the GiB to a 2-MiB-block L2; further demote the
+// 2 MiB block containing the kernel image to a page-grain L3
+// (`l3_directmap_kernel`). The L3 mirrors `l3_kernel`'s per-section
+// perms but FORCES `PTE_PXN | PTE_UXN` on every entry (no execution
+// via direct map → preserves KASLR for executable jumps; .text becomes
+// RO + XN; .rodata becomes RO + XN; .data + .bss become RW + XN).
+//
+// Other 2 MiB blocks within the kernel's GiB remain default R/W + XN
+// (struct_pages, free RAM for buddy/SLUB).
+static u64 l2_directmap_kernel[ENTRIES_PER_TABLE] __attribute__((aligned(PAGE_SIZE)));
+static u64 l3_directmap_kernel[ENTRIES_PER_TABLE] __attribute__((aligned(PAGE_SIZE)));
+
 // vmalloc bump-allocator cursor. Tracks the next free L3 entry index in
 // l3_vmalloc. Each mmu_map_mmio call advances by ceil(size / PAGE_SIZE).
 // Bounded by ENTRIES_PER_TABLE (512); v1.0 uses ~81 entries (PL011 + GIC
@@ -337,16 +359,74 @@ static void build_page_tables(u64 slide) {
     // Map PA 1 GiB..9 GiB (l1_directmap[1..8]). PA < 1 GiB is conventionally
     // MMIO and is not part of direct map (l1_directmap[0] left invalid).
     // PA ≥ 9 GiB (l1_directmap[9..]) left invalid; v1.0 caps at 8 GiB.
+    //
+    // P3-Bb-hardening: the GiB containing the kernel image is demoted
+    // to 2-MiB-block L2 + page-grain L3 for the kernel image's 2 MiB.
+    // The L3 enforces PTE_PXN | PTE_UXN on every entry — .text accessed
+    // via direct map is RO + XN (vs R/X via kernel image VA), .rodata
+    // is RO + XN, .data + .bss are R/W + XN. Closes the W^X alias-
+    // level violation that an unhardened direct map would otherwise
+    // introduce.
     {
         l0_ttbr1[0] = make_table_pte(l1_directmap);
+
+        u32 kernel_gib = (u32)(kernel_2mib_pa >> BLOCK_SHIFT_L1);
+        u32 kernel_l2_idx = (u32)((kernel_2mib_pa >> BLOCK_SHIFT_L2) & 0x1ff);
+
         for (u32 gib = 1; gib <= 8; gib++) {
             paddr_t pa = (paddr_t)gib << BLOCK_SHIFT_L1;
-            // PTE_KERN_RW_BLOCK has PTE_PXN | PTE_UXN built in: every
-            // direct-map page is R/W + XN. W^X invariant I-12 holds at
-            // the alias level (kernel image's RX mapping is at a
-            // different VA via TTBR1 KASLR offset; same physical page
-            // never both W and X via the same translation).
-            l1_directmap[gib] = (pa & ~(BLOCK_SIZE_L1 - 1)) | PTE_KERN_RW_BLOCK;
+
+            if (gib == kernel_gib) {
+                // Demote to L2: populate l2_directmap_kernel with default
+                // 2 MiB R/W + XN blocks for this GiB; override the
+                // kernel-image 2 MiB to a page-grain table.
+                for (u32 i = 0; i < ENTRIES_PER_TABLE; i++) {
+                    paddr_t block_pa = pa + ((paddr_t)i << BLOCK_SHIFT_L2);
+                    l2_directmap_kernel[i] =
+                        (block_pa & ~(BLOCK_SIZE_L2 - 1)) | PTE_KERN_RW_BLOCK;
+                }
+
+                // Build l3_directmap_kernel: mirror l3_kernel's per-
+                // section perms but force PTE_PXN | PTE_UXN. Default
+                // R/W + XN; sections override below.
+                for (u32 j = 0; j < ENTRIES_PER_TABLE; j++) {
+                    paddr_t page_pa = kernel_2mib_pa + ((paddr_t)j << PAGE_SHIFT);
+                    l3_directmap_kernel[j] = make_page_pte_l3(page_pa, PTE_KERN_RW);
+                }
+
+                u64 ks = (u64)(uintptr_t)_kernel_start;
+                u64 te = (u64)(uintptr_t)_text_end;
+                u64 re = (u64)(uintptr_t)_rodata_end;
+                // .text mirror: RO + XN (PTE_KERN_RO has both bits).
+                for (u64 p = ks; p < te; p += PAGE_SIZE) {
+                    u32 i = (u32)((p - kernel_2mib_pa) >> PAGE_SHIFT);
+                    l3_directmap_kernel[i] = make_page_pte_l3(p, PTE_KERN_RO);
+                }
+                // .rodata mirror: RO + XN.
+                for (u64 p = te; p < re; p += PAGE_SIZE) {
+                    u32 i = (u32)((p - kernel_2mib_pa) >> PAGE_SHIFT);
+                    l3_directmap_kernel[i] = make_page_pte_l3(p, PTE_KERN_RO);
+                }
+                // .data + .bss + tail: RW + XN — already set by the
+                // default loop. No-op.
+
+                // Boot-stack guard page: invalid in l3_kernel; keep
+                // invalid in l3_directmap_kernel to prevent direct-map
+                // probes from sidestepping the guard.
+                u64 guard_pa = (u64)(uintptr_t)_boot_stack_guard;
+                u32 guard_idx = (u32)((guard_pa - kernel_2mib_pa) >> PAGE_SHIFT);
+                l3_directmap_kernel[guard_idx] = 0;
+
+                // Wire the kernel-image 2 MiB → l3_directmap_kernel.
+                l2_directmap_kernel[kernel_l2_idx] =
+                    make_table_pte(l3_directmap_kernel);
+
+                l1_directmap[gib] = make_table_pte(l2_directmap_kernel);
+            } else {
+                // Other GiBs: 1 GiB R/W + XN block.
+                l1_directmap[gib] =
+                    (pa & ~(BLOCK_SIZE_L1 - 1)) | PTE_KERN_RW_BLOCK;
+            }
         }
     }
 
