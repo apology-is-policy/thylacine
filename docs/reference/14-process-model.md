@@ -253,15 +253,37 @@ blr x21                         // entry function (set by thread_create via ctx.
 
 Reached via `cpu_switch_context`'s `ret` (BTYPE=00). The `bti c` is defensive — passes under any BTYPE — and forward-compatible with future indirect-jump dispatch into the trampoline.
 
-### `kernel/proc.c` (~80 LOC)
+### `kernel/proc.c` (~80 LOC at P2-A; ~270 LOC by P3-A)
 
 `proc_init`: extincts on second call; creates the SLUB cache for `struct Proc`; allocates kproc; zero-initializes; sets `g_next_pid = 1`.
 
-`proc_alloc`: kmem_cache_alloc + zero-init via `proc_zero_init`. Returns NULL on OOM.
+`proc_alloc`: kmem_cache_alloc + zero-init via `proc_zero_init`. Returns NULL on OOM. **P3-A**: PID assignment via atomic `__atomic_fetch_add(&g_next_pid, 1, RELAXED)` to defend against cascading-rfork SMP races where multiple Procs allocate concurrently from different CPUs.
 
 `proc_free`: extinct on null / kproc / live-threads / non-empty list; kmem_cache_free.
 
 The struct grows by appending across sub-chunks (P2-B: scheduler stats; P2-C: namespace; P2-D: handles; etc.). Existing offsets stay stable so the SLUB cache size doesn't churn.
+
+#### Proc-table lock (P3-A, R5-H F75 close)
+
+`g_proc_table_lock` is the global SMP serialization point for the Proc-lineage state machine. It protects:
+
+- Each Proc's children list head + per-child sibling chain.
+- Each Proc's `parent` pointer.
+- Each Proc's `state` transitions ALIVE → ZOMBIE.
+- Each Proc's `exit_msg` / `exit_status` mutations.
+- The companion Thread's transition to THREAD_EXITING in `exits()`.
+
+**Lock ordering**: `proc_table_lock → r->lock` (single direction; established in `exits()` where wakeup of parent's `child_done` happens INSIDE `proc_table_lock` to prevent the parent from being reaped between lock release and wakeup).
+
+The reverse order (`r->lock → proc_table_lock`) is **forbidden**. `wait_pid_cond` is the only `r->lock`-holder that needs to read children-list state; at v1.0 it does so WITHOUT acquiring `proc_table_lock`, relying on three invariants:
+
+1. **Single-writer children list**: at v1.0 single-thread Procs, only the parent's own thread mutates the children list. When the parent is in `wait_pid_cond` (called from `sleep` on the parent's thread), it is not concurrently in `exits` or `rfork`. The list is structurally stable.
+2. **State visibility via wakeup→sleep handshake**: per-child `state` is mutated under `proc_table_lock` in the child's `exits`; the child's subsequent `wakeup(&parent->child_done)` performs a release on `r->lock`; the parent's sleep-resume re-acquires `r->lock` (acquire-pairs). Plain reads of `c->state` in `wait_pid_cond` see the post-wakeup state via the acquire/release transitivity.
+3. **First-call tolerance**: the very first cond evaluation at sleep entry (before any wakeup) may see stale state — but that's correct; if no zombie visible, sleep; the next wakeup re-evaluates.
+
+**Phase 5+ trip-hazard**: when multi-thread Procs land, invariant (1) weakens (sibling threads can mutate the parent's children list concurrently). At that point `wait_pid_cond` MUST acquire `proc_table_lock` AND the sleep protocol must be refactored to break the resulting `r->lock → proc_table_lock` cycle. Documented in `docs/handoffs/014-p2h-r5h.md` and `docs/handoffs/015-p3a-f75.md`.
+
+**The race that motivated this lock (R5-H F75)**: parent A in `exits()` runs `proc_reparent_children` walking A's children to rewrite each `c->parent = kproc`. If a child B is concurrently in its own `exits()` reading `c->parent` (= A) for the wakeup target, and B's wakeup line fires after A's full exits → ZOMBIE → wakeup-grandparent → grandparent reaps A → A freed chain, B accesses freed memory at `wakeup(&A->child_done)`. The lock serializes A's mutation with B's read; the wakeup-inside-lock structure additionally prevents A from being reaped between B's read and B's wakeup.
 
 ### `kernel/thread.c` (~160 LOC)
 

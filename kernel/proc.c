@@ -23,6 +23,7 @@
 #include <thylacine/proc.h>
 #include <thylacine/rendez.h>
 #include <thylacine/sched.h>
+#include <thylacine/spinlock.h>
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 
@@ -33,6 +34,81 @@ static struct Proc       *g_kproc;
 static int                g_next_pid = 0;
 static u64                g_proc_created;
 static u64                g_proc_destroyed;
+
+// P3-A (R5-H F75 close): global proc-table lock guarding the Proc-
+// lineage state machine on SMP.
+//
+// PROTECTS:
+//   * Each Proc's children list head + per-child sibling chain.
+//   * Each Proc's `parent` pointer.
+//   * Each Proc's `state` transitions ALIVE → ZOMBIE.
+//   * Each Proc's `exit_msg` / `exit_status` mutations.
+//   * The companion Thread's transition to THREAD_EXITING in `exits()`.
+//
+// LOCK ORDER:
+//
+//   `exits()` holds proc_table_lock through the wakeup of parent's
+//   child_done — the wakeup acquires `r->lock` while proc_table_lock is
+//   still held. Order: proc_table_lock → r->lock.
+//
+//   This bracketing is REQUIRED to defeat a self-audit-found race:
+//   without it, between exits's release of proc_table_lock and exits's
+//   call to wakeup(parent_to_wake->child_done), the parent could be
+//   reaped + freed by the grandparent's wait_pid (which also takes
+//   proc_table_lock — but acquires AFTER our release, blocking us not
+//   at all). Holding proc_table_lock through wakeup ensures the parent
+//   stays alive until our wakeup completes.
+//
+//   For the order to be deadlock-free, NO PATH may hold `r->lock` while
+//   acquiring proc_table_lock. `wait_pid_cond` is THE candidate — it's
+//   called from `sleep` under `r->lock`. The discipline at P3-A:
+//   `wait_pid_cond` reads the children list WITHOUT proc_table_lock,
+//   relying on three observations:
+//
+//     (1) The parent's children list head + sibling chain is single-
+//         writer at v1.0: only the parent's own thread mutates it (via
+//         its own rfork / wait_pid / exits-reparent). Single-thread
+//         Procs at v1.0; the parent's own thread is the only modifier.
+//         When the parent is in wait_pid (calling sleep, which calls
+//         wait_pid_cond), it is NOT concurrently in exits or rfork.
+//         Hence the list is structurally stable during the cond walk.
+//
+//     (2) Per-child `state` is mutated by the child's own exits under
+//         proc_table_lock + observed via the wakeup→sleep handshake's
+//         release/acquire on `r->lock`. Plain reads in wait_pid_cond
+//         see post-wakeup state because `r->lock`'s acquire pairs with
+//         the child's release on `r->lock` from its wakeup, and the
+//         child's wakeup happens AFTER the child's proc_table_lock-
+//         held state mutation. Acquire/release transitivity covers the
+//         visibility.
+//
+//     (3) The first wait_pid_cond evaluation (entry, before any wakeup)
+//         may see stale state — but that's correct: if no zombie is
+//         visible, sleep; the next wakeup re-evaluates, and that one
+//         sees the updated state via (2).
+//
+//   When v1.0 lifts to multi-thread Procs (Phase 5+), assumption (1)
+//   weakens: a sibling thread of the parent could mutate the list
+//   concurrently. wait_pid_cond will need to acquire proc_table_lock
+//   then, AND the sleep protocol will need refactoring to avoid the
+//   r->lock → proc_table_lock nesting that re-introduces the cycle.
+//   Documented as a Phase 5+ trip-hazard.
+//
+// CASCADING-EXITS RACE (R5-H F75):
+//   Without this lock, parent A's `proc_reparent_children` walk could
+//   rewrite child B's `parent` pointer concurrently with B's `exits()`
+//   reading the same field at `wakeup(&p->parent->child_done)`. If B
+//   holds the stale (pre-reparent) pointer in a register and A's
+//   subsequent ZOMBIE + parent-wakeup chain causes A to be reaped +
+//   freed before B's wakeup line fires, B accesses freed-A → UAF on the
+//   Rendez. This lock serializes A's mutation with B's read; the
+//   wakeup-inside-lock structure additionally prevents the
+//   reaped-between-release-and-wakeup variant.
+//
+// SPIN_LOCK_IRQSAVE used uniformly: at v1.0 P3-A, no IRQ handler
+// modifies Proc lineage state, but the discipline future-proofs against
+// notes/signals (Phase 5+) that may surface from IRQ context.
+static spin_lock_t g_proc_table_lock = SPIN_LOCK_INIT;
 
 // Initialize a freshly-allocated Proc descriptor. Caller has already
 // passed KP_ZERO to kmem_cache_alloc, so all fields are zero/NULL on
@@ -119,7 +195,14 @@ struct Proc *proc_alloc(void) {
     // (e.g., pgrp_clone or thread_create_with_arg failure in rfork) frees
     // a Proc with the assigned PID via proc_free, which doesn't unwind
     // PID consumption — but the destroyed++ counter still balances.
-    p->pid = g_next_pid++;
+    //
+    // P3-A self-audit: atomic fetch-add. Cascading rforks on SMP (P3-A
+    // test_proc_cascading_rfork_stress exercises this) can have multiple
+    // Procs in proc_alloc concurrently from different CPUs; non-atomic
+    // ++ would let two Procs collide on the same PID. RELAXED ordering
+    // suffices — PID assignment is monotonic but not synchronized with
+    // other state.
+    p->pid = __atomic_fetch_add(&g_next_pid, 1, __ATOMIC_RELAXED);
 
     return p;
 }
@@ -165,25 +248,9 @@ u64 proc_total_destroyed(void) { return __atomic_load_n(&g_proc_destroyed, __ATO
 
 // Link a child Proc onto a parent's children list (head insertion).
 //
-// SYNCHRONIZATION INVARIANT (R5-H F75 / F87 deferral): the child-list
-// (parent->children + sibling chain + each child's parent pointer) is
-// mutated WITHOUT cross-CPU synchronization at v1.0. This is sound iff:
-//
-//   (a) Each Proc has at most one thread (single-thread Procs at v1.0
-//       P2-D); a Proc never mutates its own child list from two CPUs.
-//   (b) NO cascading exits: a Proc's exits() must not run concurrently
-//       with one of its children's exits(). At v1.0 the only cascading
-//       lineage is kproc → test child[i]; kproc never exits. Tests do
-//       not currently rfork from rfork'd children.
-//
-// Violating (b) opens an SMP UAF: child reads p->parent into a register
-// before parent's proc_reparent_children rewrites it; parent then ZOMBIE
-// + woken; parent's parent reaps; parent freed; child's stale-register
-// wakeup(&parent->child_done) accesses freed memory.
-//
-// Phase 3+ MUST land a proc-table lock (or per-Proc lock) before
-// cascading rfork chains become routine, multi-thread Procs land, or
-// userspace exec is exposed. Tracking item: F75 deferral.
+// PRECONDITION (P3-A, R5-H F75 close): caller must hold
+// `g_proc_table_lock`. This function mutates `parent->children`,
+// `child->parent`, and `child->sibling` — all guarded fields.
 static void proc_link_child(struct Proc *parent, struct Proc *child) {
     child->parent  = parent;
     child->sibling = parent->children;
@@ -193,6 +260,8 @@ static void proc_link_child(struct Proc *parent, struct Proc *child) {
 // Unlink a child from its parent's children list. The child's state is
 // expected to be ZOMBIE (post-exits); after unlink, caller proc_frees
 // the child.
+//
+// PRECONDITION (P3-A): caller must hold `g_proc_table_lock`.
 static void proc_unlink_child(struct Proc *parent, struct Proc *child) {
     if (parent->children == child) {
         parent->children = child->sibling;
@@ -212,6 +281,12 @@ static void proc_unlink_child(struct Proc *parent, struct Proc *child) {
 // zombies — acceptable at v1.0 because the only test scenarios that
 // exercise exits don't have orphan grandchildren. Phase 2 close adds
 // a kthread reaper or moves to PID 1.
+//
+// PRECONDITION (P3-A, R5-H F75 close): caller must hold
+// `g_proc_table_lock`. This function rewrites every reparented child's
+// `parent` and `sibling` pointers — the exact mutations the F75 race
+// targeted. Holding the lock here closes the race against any child's
+// concurrent `exits()` that reads `p->parent`.
 static void proc_reparent_children(struct Proc *p) {
     while (p->children) {
         struct Proc *c = p->children;
@@ -265,11 +340,18 @@ int rfork(unsigned flags, void (*entry)(void *), void *arg) {
         return -1;
     }
 
+    // P3-A: link child into parent's children list under the proc-table
+    // lock. This is the publication point — after release, the child is
+    // visible to any concurrent exits()/wait_pid() on the parent.
+    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
     proc_link_child(parent, child);
+    spin_unlock_irqrestore(&g_proc_table_lock, s);
 
     // Insert into the local CPU's run tree. ready() handles the state
     // transition (RUNNABLE → in-runtree). thread_create already set
-    // state = THREAD_RUNNABLE.
+    // state = THREAD_RUNNABLE. ready() takes its own per-CPU lock; lock
+    // ordering is irrelevant here because we've already released
+    // g_proc_table_lock.
     ready(ct);
 
     return child->pid;
@@ -295,6 +377,27 @@ void exits(const char *msg) {
     if (p->thread_count != 1)
         extinction("exits with thread_count != 1 (multi-thread Procs not supported at P2-D)");
 
+    // P3-A (R5-H F75 close): all lineage mutations + parent wakeup
+    // happen UNDER g_proc_table_lock atomically. The previous code did
+    // these without synchronization, allowing a parallel parent's
+    // proc_reparent_children to rewrite p->parent between our read and
+    // use of it for wakeup. Holding proc_table_lock through the wakeup
+    // additionally prevents a self-audit-found variant: between lock
+    // release and wakeup, the parent could be reaped + freed by the
+    // grandparent's wait_pid; our wakeup would access freed memory.
+    // Holding the lock through wakeup ensures the parent stays alive.
+    //
+    // Lock order: proc_table_lock → r->lock (the rendez lock acquired
+    // inside wakeup). Sound iff no path holds r->lock and tries to
+    // acquire proc_table_lock — at P3-A, wait_pid_cond is the only
+    // r->lock holder, and it does NOT acquire proc_table_lock (per
+    // header comment, single-thread-Proc invariant + wakeup-acquire
+    // visibility chain).
+    //
+    // t->state = THREAD_EXITING also under lock so wait_pid's reap-path
+    // observes consistent (p->state == ZOMBIE AND ct->state == EXITING).
+    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+
     // Re-parent any orphan children to kproc before transitioning.
     if (p->children) {
         proc_reparent_children(p);
@@ -311,15 +414,15 @@ void exits(const char *msg) {
     // run tree (it will be reaped by the parent's wait_pid).
     t->state = THREAD_EXITING;
 
-    // Wake parent's child_done Rendez. The parent re-checks the
-    // children list under r->lock and finds this child in ZOMBIE
-    // state. Producer-side state mutation (p->state = ZOMBIE) happened
-    // BEFORE wakeup — wakeup() takes r->lock, which establishes the
-    // happens-before edge; the parent's sleep cond predicate observes
-    // the ZOMBIE state on resume.
+    // Wake parent's child_done Rendez UNDER proc_table_lock. The lock
+    // bracketing keeps p->parent alive through the wakeup (lock release
+    // happens AFTER wakeup returns). wakeup() acquires r->lock; lock
+    // order proc_table_lock → r->lock established here.
     if (p->parent) {
         wakeup(&p->parent->child_done);
     }
+
+    spin_unlock_irqrestore(&g_proc_table_lock, s);
 
     // Yield. Will not return — we're EXITING, sched() doesn't re-insert,
     // and there's no future wake target for us.
@@ -329,6 +432,35 @@ void exits(const char *msg) {
 
 // cond predicate for wait_pid's sleep: any child in ZOMBIE state, OR
 // the parent has no children at all (-1 return path).
+//
+// CALLED FROM `sleep` UNDER r->lock. P3-A: deliberately does NOT
+// acquire g_proc_table_lock — that would create a r->lock →
+// g_proc_table_lock nesting that, combined with exits's
+// g_proc_table_lock → r->lock-via-wakeup discipline, deadlocks.
+//
+// Soundness without the lock rests on three v1.0 invariants:
+//
+//   1. The parent's children list head + sibling chain is single-writer
+//      at v1.0 (single-thread Procs; only the parent's own thread
+//      mutates via its rfork / wait_pid / exits-reparent). When the
+//      parent is here in wait_pid_cond, it is NOT concurrently in
+//      exits or rfork. The list is structurally stable for the walk.
+//
+//   2. Per-child `state` writes happen under g_proc_table_lock in the
+//      child's exits, then the child publishes via wakeup(&parent's
+//      child_done) which has a release on r->lock. Our re-acquire of
+//      r->lock in sleep's resume path acquires-pairs, so we observe
+//      the post-wakeup state including c->state == ZOMBIE.
+//
+//   3. The first wait_pid_cond call at sleep entry (before any wakeup)
+//      may see stale state — but that's correct: if no zombie visible,
+//      we sleep; next wakeup re-evaluates and sees the update via (2).
+//
+// Phase 5+ multi-thread-Procs: invariant (1) weakens (sibling threads
+// of the parent could mutate concurrently). At that point this function
+// MUST acquire g_proc_table_lock, AND the sleep protocol must be
+// refactored to avoid the resulting r->lock → g_proc_table_lock cycle.
+// Trip-hazard tracked in handoffs/014-p2h-r5h.md.
 static int wait_pid_cond(void *arg) {
     struct Proc *parent = arg;
     if (!parent->children) return 1;          // no children → wake to return -1
@@ -347,8 +479,16 @@ int wait_pid(int *status_out) {
                              extinction("wait_pid with corrupted proc");
 
     for (;;) {
+        // P3-A: walk + unlink + state capture under g_proc_table_lock.
+        // Atomic with concurrent exits() on our children — they hold the
+        // same lock during their ZOMBIE transition, so we either see
+        // the pre-transition state (no zombie yet → sleep) or the post-
+        // transition state (zombie ready to reap).
+        irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+
         if (!p->children) {
             // No children at all (live or zombie). Nothing to wait for.
+            spin_unlock_irqrestore(&g_proc_table_lock, s);
             return -1;
         }
 
@@ -361,32 +501,41 @@ int wait_pid(int *status_out) {
         }
 
         if (zombie) {
-            int pid = zombie->pid;
-            if (status_out) *status_out = zombie->exit_status;
+            int pid    = zombie->pid;
+            int status = zombie->exit_status;
+
+            // Capture the (single) thread to reap. Sanity-check state
+            // INSIDE the lock — exits() set ct->state = EXITING under
+            // the same lock, so this is a consistent observation.
+            struct Thread *ct = zombie->threads;
+            if (!ct) {
+                spin_unlock_irqrestore(&g_proc_table_lock, s);
+                extinction("wait_pid: zombie with no threads");
+            }
+            if (ct->state != THREAD_EXITING) {
+                spin_unlock_irqrestore(&g_proc_table_lock, s);
+                extinction("wait_pid: zombie thread not in EXITING state");
+            }
 
             proc_unlink_child(p, zombie);
 
-            // Reap: free the (single) thread + its kstack + the Proc.
-            // The thread is in EXITING state — thread_free's state-
-            // gate already accepts this (it only blocks RUNNING +
-            // INVALID).
-            struct Thread *ct = zombie->threads;
-            if (!ct) extinction("wait_pid: zombie with no threads");
-            if (ct->state != THREAD_EXITING)
-                extinction("wait_pid: zombie thread not in EXITING state");
+            spin_unlock_irqrestore(&g_proc_table_lock, s);
 
-            // P2-Dd-pre: spin until ct is fully off-CPU. exits() on the
-            // child set state=EXITING + sched()'d; the destination
-            // CPU's resume code (sched_finish_task_switch in trampoline
-            // OR the post-cpu_switch_context block in sched()) clears
+            // Outside the lock: spin on on_cpu, then free thread + Proc.
+            // We released the lock to avoid holding it across thread_free's
+            // multi-CPU run-tree walk (which acquires every CPU's
+            // cs->lock). Lock order would be: g_proc_table_lock → cs->lock.
+            // No reverse exists (sched/ready/wakeup never touch lineage
+            // state), so holding both would be safe — but releasing
+            // first reduces lock-hold time and avoids a long-tail latency
+            // contributor.
+            //
+            // P2-Dd-pre on_cpu spin: exits() set state=EXITING + called
+            // sched(); the destination CPU's resume code clears
             // ct->on_cpu via cs->prev_to_clear_on_cpu. Without this
             // spin, thread_free could race with the destination CPU
-            // still mid-switch — TPIDR_EL1 on that CPU briefly points
-            // at ct around set_current_thread(next), and freeing ct's
-            // slot mid-window means the next sched() on that CPU sees
-            // a clobbered magic ("sched() with corrupted current").
-            // Mirrors the on_cpu spin in wakeup() for the wait/wake
-            // race close (P2-Cf trip-hazard #16).
+            // still mid-switch (TPIDR_EL1 briefly points at ct).
+            // Mirrors the on_cpu spin in wakeup() (P2-Cf).
             while (__atomic_load_n(&ct->on_cpu, __ATOMIC_ACQUIRE)) {
                 __asm__ __volatile__("yield" ::: "memory");
             }
@@ -397,14 +546,18 @@ int wait_pid(int *status_out) {
             // threads==NULL — proc_free's preconditions are met.
 
             proc_free(zombie);
+
+            if (status_out) *status_out = status;
             return pid;
         }
 
-        // No zombie yet, but live children exist. Sleep on child_done.
-        // exits() in any of our children will wakeup this Rendez. The
-        // cond predicate re-evaluates "any zombie? or no children?"
-        // under r->lock; sleep is atomic with the cond check (see
-        // scheduler.tla NoMissedWakeup proof).
+        // No zombie yet, but live children exist. Release the lock and
+        // sleep on child_done. exits() in any of our children will
+        // wakeup this Rendez. The cond predicate re-evaluates "any
+        // zombie? or no children?" under r->lock + g_proc_table_lock;
+        // sleep is atomic with the cond check (see scheduler.tla
+        // NoMissedWakeup proof).
+        spin_unlock_irqrestore(&g_proc_table_lock, s);
         sleep(&p->child_done, wait_pid_cond, p);
     }
 }
