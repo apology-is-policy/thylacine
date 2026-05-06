@@ -65,6 +65,12 @@ void test_vmo_via_handle_table(void);
 void test_vmo_handle_table_orphan_cleanup(void);
 void test_vmo_size_overflow_rejected(void);
 void test_vmo_dup_oom_rollback(void);
+void test_elf_parse_minimal_ok(void);
+void test_elf_parse_multi_segment_ok(void);
+void test_elf_header_rejection(void);
+void test_elf_rwx_rejected(void);
+void test_elf_bounds_rejection(void);
+void test_elf_policy_rejection(void);
 
 // ---------------------------------------------------------------------------
 // Registry. Sentinel-terminated.
@@ -114,6 +120,12 @@ struct test_case g_tests[] = {
     { "vmo.handle_table_orphan_cleanup", test_vmo_handle_table_orphan_cleanup, false, NULL },
     { "vmo.size_overflow_rejected",    test_vmo_size_overflow_rejected,    false, NULL },
     { "vmo.dup_oom_rollback",          test_vmo_dup_oom_rollback,          false, NULL },
+    { "elf.parse_minimal_ok",          test_elf_parse_minimal_ok,          false, NULL },
+    { "elf.parse_multi_segment_ok",    test_elf_parse_multi_segment_ok,    false, NULL },
+    { "elf.header_rejection",          test_elf_header_rejection,          false, NULL },
+    { "elf.rwx_rejected",              test_elf_rwx_rejected,              false, NULL },
+    { "elf.bounds_rejection",          test_elf_bounds_rejection,          false, NULL },
+    { "elf.policy_rejection",          test_elf_policy_rejection,          false, NULL },
     { NULL, NULL, false, NULL },          // sentinel
 };
 

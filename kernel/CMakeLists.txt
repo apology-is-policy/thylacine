@@ -47,9 +47,11 @@ set(KERNEL_SRCS
     test/test_namespace.c
     test/test_handle.c
     test/test_vmo.c
+    test/test_elf.c
     namespace.c
     handle.c
     vmo.c
+    elf.c
 )
 
 set(KERNEL_LD_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/../arch/arm64/kernel.ld)
