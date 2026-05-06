@@ -44,6 +44,8 @@ set(KERNEL_SRCS
     test/test_rendez.c
     test/test_smp.c
     test/test_proc.c
+    test/test_namespace.c
+    namespace.c
 )
 
 set(KERNEL_LD_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/../arch/arm64/kernel.ld)

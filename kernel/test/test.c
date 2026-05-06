@@ -49,6 +49,9 @@ void test_smp_work_stealing_smoke(void);
 void test_proc_rfork_basic_smoke(void);
 void test_proc_rfork_exits_status(void);
 void test_proc_rfork_stress_1000(void);
+void test_namespace_bind_smoke(void);
+void test_namespace_cycle_rejected(void);
+void test_namespace_fork_isolated(void);
 
 // ---------------------------------------------------------------------------
 // Registry. Sentinel-terminated.
@@ -82,6 +85,9 @@ struct test_case g_tests[] = {
     { "proc.rfork_basic_smoke",        test_proc_rfork_basic_smoke,        false, NULL },
     { "proc.rfork_exits_status",       test_proc_rfork_exits_status,       false, NULL },
     { "proc.rfork_stress_1000",        test_proc_rfork_stress_1000,        false, NULL },
+    { "namespace.bind_smoke",          test_namespace_bind_smoke,          false, NULL },
+    { "namespace.cycle_rejected",      test_namespace_cycle_rejected,      false, NULL },
+    { "namespace.fork_isolated",       test_namespace_fork_isolated,       false, NULL },
     { NULL, NULL, false, NULL },          // sentinel
 };
 

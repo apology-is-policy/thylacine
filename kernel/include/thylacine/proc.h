@@ -53,6 +53,8 @@ _Static_assert(PROC_STATE_INVALID == 0,
                "PROC_STATE_INVALID == 0 is the invariant that makes "
                "zero-initialized Proc structs detectably invalid");
 
+struct Pgrp;
+
 struct Proc {
     u64               magic;            // PROC_MAGIC
     int               pid;
@@ -83,14 +85,17 @@ struct Proc {
     // multiple parent threads waiting concurrently are a Phase 5+
     // concern handled by promoting to multi-waiter wait queue).
     struct Rendez     child_done;
+
+    // P2-Eb: namespace (Plan 9 Pgrp). At v1.0 each Proc has its own
+    // private Pgrp (rfork(RFPROC) calls pgrp_clone). Phase 5+ adds
+    // RFNAMEG: shared namespace via refcount sharing.
+    struct Pgrp      *pgrp;
 };
 
-_Static_assert(sizeof(struct Proc) == 80,
-               "struct Proc size pinned at 80 bytes (P2-D: P2-A baseline 24 + "
-               "state 4 + exit_status 4 + parent 8 + children 8 + sibling 8 + "
-               "exit_msg 8 + child_done Rendez 16). Adding a field grows the "
-               "SLUB cache; update this assert deliberately so the change is "
-               "intentional.");
+_Static_assert(sizeof(struct Proc) == 88,
+               "struct Proc size pinned at 88 bytes (P2-Eb: P2-D baseline 80 "
+               "+ pgrp 8). Adding a field grows the SLUB cache; update this "
+               "assert deliberately so the change is intentional.");
 _Static_assert(__builtin_offsetof(struct Proc, magic) == 0,
                "magic must be at offset 0 so SLUB's freelist write on "
                "kmem_cache_free clobbers it (double-free defense — "

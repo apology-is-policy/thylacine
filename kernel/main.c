@@ -31,6 +31,7 @@
 #include <thylacine/dtb.h>
 #include <thylacine/extinction.h>
 #include <thylacine/page.h>
+#include <thylacine/pgrp.h>
 #include <thylacine/proc.h>
 #include <thylacine/sched.h>
 #include <thylacine/smp.h>
@@ -249,6 +250,9 @@ void boot_main(void) {
 
     // Phase 6: process / thread bring-up (P2-A entry).
     //
+    // pgrp_init creates the namespace SLUB cache + kproc's empty Pgrp
+    // (P2-Eb). Must run BEFORE proc_init so kproc has a pgrp to assign.
+    //
     // proc_init creates kproc (PID 0) — the kernel's own process. It
     // owns the kernel address space, will own the kernel handle table
     // (Phase 2), and parents the kernel threads. thread_init creates
@@ -258,6 +262,7 @@ void boot_main(void) {
     // After this point current_thread() is valid; cpu_switch_context
     // can save/load thread state; thread_create + thread_switch work.
     // The actual scheduler (EEVDF) lands at P2-B.
+    pgrp_init();
     proc_init();
     thread_init();
     sched_init(0);                              // boot CPU's per-CPU sched state

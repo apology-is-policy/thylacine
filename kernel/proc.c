@@ -18,6 +18,7 @@
 
 #include <thylacine/extinction.h>
 #include <thylacine/page.h>
+#include <thylacine/pgrp.h>
 #include <thylacine/proc.h>
 #include <thylacine/rendez.h>
 #include <thylacine/sched.h>
@@ -40,12 +41,15 @@ static void proc_init_fields(struct Proc *p, int pid) {
     p->pid   = pid;
     p->state = PROC_STATE_ALIVE;
     rendez_init(&p->child_done);
-    // parent / children / sibling / exit_status / exit_msg / threads
-    // all left NULL/0 via KP_ZERO; rfork wires linkage explicitly.
+    // parent / children / sibling / exit_status / exit_msg / threads /
+    // pgrp all left NULL/0 via KP_ZERO; caller (proc_init for kproc;
+    // rfork for child Procs) wires linkage explicitly.
 }
 
 void proc_init(void) {
     if (g_proc_cache) extinction("proc_init called twice");
+    if (!kpgrp())     extinction("proc_init before pgrp_init "
+                                 "(kproc needs a pgrp at allocation)");
 
     g_proc_cache = kmem_cache_create("proc",
                                      sizeof(struct Proc),
@@ -58,6 +62,7 @@ void proc_init(void) {
     g_kproc = kmem_cache_alloc(g_proc_cache, KP_ZERO);
     if (!g_kproc) extinction("kmem_cache_alloc(kproc) failed");
     proc_init_fields(g_kproc, 0);
+    g_kproc->pgrp = kpgrp();
     g_proc_created++;
     g_next_pid = 1;
 }
@@ -90,6 +95,11 @@ void proc_free(struct Proc *p) {
     // forgot exits; INVALID means we're freeing an uninitialized Proc.
     if (p->state != PROC_STATE_ZOMBIE)
         extinction("proc_free of non-ZOMBIE Proc (lifecycle violation)");
+    // P2-Eb: release the namespace. Most Procs have a private pgrp
+    // (refcount 1; freed here). Phase 5+ shared namespaces decrement
+    // refcount and free only at last release.
+    pgrp_unref(p->pgrp);
+    p->pgrp = NULL;
     kmem_cache_free(g_proc_cache, p);
     g_proc_destroyed++;
 }
@@ -162,11 +172,24 @@ int rfork(unsigned flags, void (*entry)(void *), void *arg) {
     struct Proc *child = proc_alloc();
     if (!child) return -1;
 
+    // P2-Eb: clone parent's namespace into the child. Maps to the spec's
+    // ForkClone action — child gets a deep copy of parent's bindings;
+    // subsequent bind/unmount on either is independent. RFNAMEG (shared
+    // namespace) is unsupported at v1.0; the parent ALWAYS gets a clone.
+    struct Pgrp *child_pgrp = pgrp_clone(parent->pgrp);
+    if (!child_pgrp) {
+        child->state = PROC_STATE_ZOMBIE;
+        // child->pgrp is still NULL; proc_free's pgrp_unref(NULL) is a no-op.
+        proc_free(child);
+        return -1;
+    }
+    child->pgrp = child_pgrp;
+
     struct Thread *ct = thread_create_with_arg(child, entry, arg);
     if (!ct) {
-        // Roll back proc_alloc. The proc is in ALIVE state but with
-        // zero threads — must transition to ZOMBIE before proc_free.
-        // (proc_free's lifecycle check requires ZOMBIE.)
+        // Roll back proc_alloc + pgrp_clone. Transition to ZOMBIE so
+        // proc_free's lifecycle gate passes; proc_free will pgrp_unref
+        // the just-allocated pgrp.
         child->state = PROC_STATE_ZOMBIE;
         proc_free(child);
         return -1;
