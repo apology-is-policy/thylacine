@@ -270,9 +270,22 @@ void sched_finish_task_switch(void) {
 // thread's old vd_t (from peer's clock) could be ahead of or behind
 // this CPU's clock, producing arbitrary ordering against locally-
 // queued threads.
+// P2-Dd: rotate the start index per try_steal invocation. With multiple
+// CPUs concurrently trying to steal, fixed-order scanning concentrates
+// spin_trylock contention on CPU 0; rotating spreads it. The counter
+// is a single global atomic that all CPUs increment, so successive
+// try_steal calls (from any CPU) get sequential start offsets. The
+// spread is approximate, not strictly fair — CPUs racing on the
+// counter may both observe similar values — but it's enough to break
+// the pathological "everyone hits CPU 0 first" pattern.
+static volatile u32 g_try_steal_rotate;
+
 static struct Thread *try_steal(struct CpuSched *cs) {
     unsigned self = (unsigned)(cs - g_cpu_sched);
-    for (unsigned i = 0; i < DTB_MAX_CPUS; i++) {
+    u32 base = __atomic_fetch_add(&g_try_steal_rotate, 1u, __ATOMIC_RELAXED);
+
+    for (unsigned k = 0; k < DTB_MAX_CPUS; k++) {
+        unsigned i = (unsigned)((base + k) % DTB_MAX_CPUS);
         if (i == self) continue;
         struct CpuSched *peer = &g_cpu_sched[i];
         if (!peer->initialized) continue;
