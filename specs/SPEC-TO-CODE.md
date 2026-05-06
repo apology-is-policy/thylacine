@@ -113,9 +113,65 @@ TLC-clean at `Procs = {p1, p2}, Paths = {a, b, c}` — 625 distinct states explo
 - **Mount union semantics (MBEFORE / MAFTER / MREPL flags)**: the spec models `bindings[p][dst]` as a SET (no ordering). The impl's union-list ordering matters for lookup priority but doesn't affect cycle-freedom. Phase 5+ extension can refine this.
 - **`mount` (9P-server-attaching variant)**: structurally identical to bind for the cycle-freedom + isolation invariants. Phase 4 (9P client) lands the impl.
 
-## handles.tla — Phase 2 close (planned)
+## handles.tla — P2-Fa spec (impl at P2-Fc)
 
-(Stub. Will pin: rights monotonicity, transfer-via-9P invariant, hardware-handle non-transferability — ARCH §28 I-2, I-4, I-5, I-6.)
+Status: **rights ceiling proven; hardware-handle non-transferability proven; transfer-only-via-9P proven; capability monotonicity proven; impl deferred to P2-Fc.** Models the kernel handle table with typed kobjs partitioned into transferable + hardware sets, per-handle provenance tags, abstract 9P sessions, and per-Proc coarse capabilities. ARCH §28 invariants pinned: I-2 (capability monotonic reduction), I-4 (transfer only via 9P), I-5 (hardware handles non-transferable), I-6 (rights monotonic on transfer). I-7 (VMO refcount + mapping lifecycle) is OUT OF SCOPE — covered by `vmo.tla`.
+
+TLC-clean at `Procs = {p1, p2}, TxKObjs = {kx}, HwKObjs = {kh}, Rights = {R, T}, Caps = {C}` — 6,055,072 distinct states explored; depth 26; ~4 min on 8 cores. Buggy configs:
+
+| Config | Flag | Invariant violated | Depth | Distinct states |
+|---|---|---|---|---|
+| `handles_buggy_elevate.cfg` | `BUGGY_ELEVATE = TRUE`         | `RightsCeiling`     | 4 | 91 |
+| `handles_buggy_hw.cfg`      | `BUGGY_HW_TRANSFER = TRUE`    | `HwHandlesAtOrigin` | 5 | 444 |
+| `handles_buggy_direct.cfg`  | `BUGGY_DIRECT_TRANSFER = TRUE`| `OnlyTransferVia9P` | 4 | 90 |
+| `handles_buggy_caps.cfg`    | `BUGGY_CAPS_ELEVATE = TRUE`   | `CapsCeiling`       | 4 | 89 |
+
+| Spec action | Source location | Notes |
+|---|---|---|
+| `Init` | `kernel/handle.c::handle_init` (P2-Fc) | Per-Proc handle table allocated empty; ProcRoot starts with full caps. v1.0 P2-Fc has no rfork capability mask wiring; the spec's `proc_caps` is forward-looking for the Phase 5+ syscall surface. |
+| `HandleAlloc(p, k, granted)` | `kernel/handle.c::handle_alloc(struct Proc *, kobj_kind, kobj_t, rights_t)` (P2-Fc) | Kernel allocates a fresh kobj k of statically-typed kind, grants `granted` rights to proc p. Sets origin_rights[k] = granted permanently. Returns handle index. |
+| `HandleClose(p, h)` | `kernel/handle.c::handle_close(struct Proc *, hidx_t)` (P2-Fc) | Releases h from p's table. Decrements kobj's refcount; cascades to vmo_unref if last handle. |
+| `HandleDup(p, h, new_rights)` | `kernel/handle.c::handle_dup(struct Proc *, hidx_t, rights_t new_rights)` (P2-Fc) | Creates a fresh handle in p's table sharing h's kobj with rights ⊆ h.rights. Rejects elevated rights with -EINVAL. |
+| `BuggyDupElevate(p, h, new_rights)` | (none — bug class statically prevented) | The impl's `handle_dup` checks `(new_rights & h->rights) == new_rights` (subset test) before insert. A future caller that bypasses this check would re-introduce the bug. |
+| `OpenSession / CloseSession` | (Phase 4: `kernel/9p_client.c::9p_attach / 9p_clunk`) | At v1.0 P2-Fc the spec models sessions abstractly; no impl callers. Phase 4's 9P client wires actual session lifecycle. |
+| `HandleTransferVia9P(src, dst, h, new_rights)` | (Phase 4: `kernel/handle.c::handle_transfer_via_9p`) | The transfer codepath is **defined** at P2-Fc as a stub (returns -ENOTSUP at v1.0); the policy gates (TxKObjs ∈ TransferableTypes, RightTransfer ∈ rights, session open, new_rights ⊆ rights) are coded against the spec actions. Phase 4 wires the actual 9P payload extraction. |
+| `BuggyHwTransfer(src, dst, h, new_rights)` | (none — bug class statically prevented) | The transfer switch in §18.3 has NO case for KObj_MMIO/IRQ/DMA/Interrupt. `_Static_assert` over the kobj_kind enum ensures every kind is accounted for; a future addition that's transferable must be added explicitly. |
+| `BuggyDirectTransfer(src, dst, h, new_rights)` | (none — bug class statically prevented) | No syscall exists in the impl that transfers a handle directly between procs. The only cross-proc handle path is via 9P (Phase 4). |
+| `ReduceCaps(p, lost)` | (Phase 5+: `kernel/proc.c::rfork` capability mask) | At v1.0 there is no in-kernel caller of capability reduction; the spec models the future behavior. |
+| `BuggyCapsElevate(p, gained)` | (none — bug class statically prevented) | The impl's `rfork` capability mask is `parent->caps & mask` (intersection); no codepath sets caps to a superset. |
+
+| Spec invariant | Source enforcement |
+|---|---|
+| `RightsCeiling` (every handle's rights ⊆ origin_rights of its kobj) | `handle_dup`'s subset check before insert; `handle_transfer_via_9p`'s subset check (Phase 4 wire-up). The kobj's origin_rights is set once at `handle_alloc` and never modified. |
+| `HwHandlesAtOrigin` (every hw-typed handle held by origin proc) | `handle_transfer_via_9p`'s switch statement omits the hw kinds entirely — there is no codepath that copies a hw handle to a non-origin proc. `_Static_assert(KIND_COUNT == ...)` ensures every kind is enumerated; missing case is a compile error. |
+| `OnlyTransferVia9P` (no handle has via="direct") | The impl has no direct-transfer syscall. The only public handle-cross-proc API is `handle_transfer_via_9p`. |
+| `CapsCeiling` (every proc's caps ⊆ initial ceiling) | `rfork`'s capability mask is `&` (bitwise AND); no codepath ORs in elevated bits. |
+
+### P2-Fa landed
+
+- `handles.tla` (~530 LOC TLA+) + 5 cfg files (1 clean + 4 buggy variants).
+- Kobj universe partitioned into `TxKObjs` ∪ `HwKObjs` (set-based, no function-valued constants — clean for TLC).
+- Provenance tags `via \in {"orig", "dup", "9p", "direct"}` capture handle origin; only the buggy variant produces "direct".
+- Per-handle `origin_proc` field tracks where a handle was first granted; preserved by all transfer paths.
+- Per-kobj `origin_rights` ceiling set at `HandleAlloc` and never modified.
+- Per-Proc `proc_caps` modeled with ProcRoot ceiling = Caps and other Procs' ceiling = {}; `BuggyCapsElevate` violates only on non-root procs.
+- Abstract 9P session set; OpenSession/CloseSession lifecycle.
+- Five state invariants: `TypeOk`, `RightsCeiling`, `HwHandlesAtOrigin`, `OnlyTransferVia9P`, `CapsCeiling`.
+
+### P2-Fc impl targets (next chunk)
+
+- `kernel/include/thylacine/handle.h` — Handle struct (kobj_kind + rights + kobj pointer).
+- `kernel/handle.c` — `handle_init`, `handle_alloc`, `handle_close`, `handle_dup`, `handle_get`. Per-Proc fixed-size handle table at v1.0 (growable Phase 5+).
+- `struct Proc` extended with `struct HandleTable handles`.
+- New tests: `handles.alloc_close_smoke`, `handles.rights_monotonic`, `handles.dup_elevate_rejected`, `handles.full_table_oom`.
+- `_Static_assert(KIND_COUNT == ...)` over the kobj_kind enum to pin the type set at compile time.
+
+### Deferred
+
+- **9P session lifecycle (Phase 4)**: spec's OpenSession/CloseSession actions abstract the actual `9p_attach` / `9p_clunk` impl. P2-Fc's `handle_transfer_via_9p` is a stub returning -ENOTSUP; Phase 4 wires the wire-format payload.
+- **rfork capability mask (Phase 5+)**: `proc_caps` and ReduceCaps actions are forward-looking. v1.0 rfork only supports RFPROC; capability mask via syscall surface in Phase 5+.
+- **Per-Proc handle-table growth (Phase 5+)**: v1.0 P2-Fc has a fixed-size table (PROC_HANDLE_MAX); Phase 5+ refactors to growable. The spec is agnostic to the table representation — handles[p] is just a set.
+- **Cross-Proc handle accounting under transfer (Phase 4)**: the spec's HandleTransferVia9P creates a fresh dst handle without affecting src; impl-side, the kobj's refcount is incremented per fresh handle. Phase 4 audit verifies the refcount math.
 
 ## vmo.tla — Phase 3 (planned)
 
