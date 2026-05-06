@@ -151,11 +151,28 @@ The existing rfork stress tests (`proc.rfork_stress_1000`, `proc.cascading_rfork
 
 ## Status
 
-- **Implemented**: pgtable_create / pgtable_destroy / proc_alloc + proc_free integration / 2 tests.
-- **Stubbed**: TTBR0 swap (P3-Bd); sub-table walk in destroy (P3-D).
-- **Deferred**: kproc kernel-only TTBR0 (P3-Be) — kproc's pgtable_root stays 0 at P3-Bcb; P3-Be wires a degenerate "kernel-only" mapping for the TTBR0 swap path's safety.
+- **Implemented at P3-Bcb (`d256804`)**: pgtable_create / pgtable_destroy / proc_alloc + proc_free integration / 2 tests.
+- **Implemented at P3-Bdb (`fd40047`)**: cpu_switch_context TTBR0 swap, struct Context growth (112→120 bytes adding `u64 ttbr0`), `mmu_kernel_ttbr0_pa()` accessor for kproc threads, ctx.ttbr0 wiring in thread_create_internal / thread_init / thread_init_per_cpu_idle, `proc.ttbr0_swap_smoke` test.
+- **Stubbed**: sub-table walk in destroy (P3-D — when VMA tree + page-fault land, sub-tables get populated; destroy must walk + free them).
+- **Implicit**: kproc kernel-only TTBR0 (P3-Be) is satisfied by the `mmu_kernel_ttbr0_pa()` defaulting at thread_init — kthread + per-CPU idle threads carry the kernel-only TTBR0 root from their creation. A separate P3-Be chunk that adds a dedicated "degenerate" TTBR0 page table is unnecessary.
 
-Commit landing point: `d256804`.
+Commit landing points: `d256804` (P3-Bcb), `fd40047` (P3-Bdb).
+
+## TTBR0 swap (P3-Bdb)
+
+`cpu_switch_context` (asm in `arch/arm64/context.S`) saves+loads TTBR0_EL1 alongside the other registers. The save reads the live TTBR0_EL1 into `prev->ctx.ttbr0`; the load writes `next->ctx.ttbr0` into TTBR0_EL1 followed by an ISB (the ISB serializes the TTBR0 change so subsequent translations see the new value).
+
+Encoding: `ctx.ttbr0 = (ASID << 48) | pgtable_root_PA`. The ARM v8 TTBR0_EL1 layout has BADDR in bits 47:1 (bit 0 ignored — L0 tables are page-aligned), and ASID in bits 63:48 (when TCR.A1=0; default). For non-kproc threads, `ctx.ttbr0 = ((u64)proc->asid << 48) | proc->pgtable_root`. For kproc threads (kthread + per-CPU idle), `ctx.ttbr0 = mmu_kernel_ttbr0_pa()` (the PA of the static `l0_ttbr0` array, with implicit ASID 0).
+
+**No TLB flush is needed at the swap.** Per-Proc ASIDs (1..255) tag user-mapping TLB entries; cross-Proc TLB entries don't collide. Kernel mappings via TTBR1 are global (nG=0; ASID-agnostic) and unaffected. ASID reuse (Proc P1 frees ASID X; Proc P2 allocates X) is safe because `asid_free` issues `tlbi aside1is, X` BEFORE returning the slot to the free-list (per P3-Ba; trip-hazard #107).
+
+### Defense-in-depth: kthread + per-CPU idle
+
+`thread_init` (kthread) and `thread_init_per_cpu_idle` (secondary idle threads) pre-populate `ctx.ttbr0 = mmu_kernel_ttbr0_pa()`. Without this, KP_ZERO would leave `ctx.ttbr0 = 0`, and a peer CPU steal (or a future code path that switches INTO kthread before kthread has switched-out once) would load TTBR0_EL1 = 0 → MMU walks PA 0 for any low-VA dereference → fault. Pre-populating ensures any switch into a kproc thread gets a sane (kernel-only) TTBR0.
+
+### Capability cross-reference
+
+The TTBR0 swap mechanism is the runtime enforcement of ARCH §28 I-1 (process isolation: namespace operations in process A don't affect process B). At v1.0 P3-Bdb the page tables are still empty (no user mappings until P3-D adds VMA + page-fault), but the ASID-tagged TLB + per-Proc TTBR0 root is the foundation. Phase 5+ extends to capability-typed kernel addressing per NOVEL §3.9 Contract D — the cpu_switch_context swap surface stays roughly identical; only the encoding becomes capability-derive.
 
 ## Known caveats / footguns
 
