@@ -291,6 +291,20 @@ static void build_page_tables(u64 slide) {
         u64 bs   = (u64)(uintptr_t)_bss_start;
         u64 ke   = (u64)(uintptr_t)_kernel_end;
 
+        // R6-B F114: firmware-area pages [kernel_2mib_pa, _kernel_start)
+        // → invalid. These are pages 0..(_kernel_start - kernel_2mib_pa)
+        // / PAGE_SIZE of the 2 MiB block — typically PA [0x40000000,
+        // 0x40080000) on QEMU virt (the 512 KiB UEFI / firmware
+        // reservation per phys.c res[0]). Phys_init reserves them so
+        // nothing else allocates them, but their content is firmware-
+        // residue of unknown provenance. Marking them invalid in the
+        // kernel-image L3 makes any access fault rather than silently
+        // read/write post-kernel-boot residue.
+        for (u64 p = kernel_2mib_pa; p < ks; p += PAGE_SIZE) {
+            u32 i = (u32)((p - kernel_2mib_pa) >> PAGE_SHIFT);
+            l3_kernel[i] = 0;
+        }
+
         // .text — RX
         for (u64 p = ks; p < te; p += PAGE_SIZE) {
             u32 i = (u32)((p - kernel_2mib_pa) >> PAGE_SHIFT);
@@ -360,6 +374,11 @@ static void build_page_tables(u64 slide) {
     // MMIO and is not part of direct map (l1_directmap[0] left invalid).
     // PA ≥ 9 GiB (l1_directmap[9..]) left invalid; v1.0 caps at 8 GiB.
     //
+    // R6-B F122: BSS zero-initialization guarantees l1_directmap[0] AND
+    // l1_directmap[9..511] = 0 (PTE_VALID=0 ⇒ invalid translation).
+    // The loop below populates only the in-range slots; do NOT modify
+    // unset entries — the BSS-init invariant makes them inaccessible.
+    //
     // P3-Bb-hardening: the GiB containing the kernel image is demoted
     // to 2-MiB-block L2 + page-grain L3 for the kernel image's 2 MiB.
     // The L3 enforces PTE_PXN | PTE_UXN on every entry — .text accessed
@@ -397,6 +416,14 @@ static void build_page_tables(u64 slide) {
                 u64 ks = (u64)(uintptr_t)_kernel_start;
                 u64 te = (u64)(uintptr_t)_text_end;
                 u64 re = (u64)(uintptr_t)_rodata_end;
+
+                // R6-B F114: firmware-area pages → invalid in the
+                // direct-map L3 too. Same rationale as l3_kernel above.
+                for (u64 p = kernel_2mib_pa; p < ks; p += PAGE_SIZE) {
+                    u32 i = (u32)((p - kernel_2mib_pa) >> PAGE_SHIFT);
+                    l3_directmap_kernel[i] = 0;
+                }
+
                 // .text mirror: RO + XN (PTE_KERN_RO has both bits).
                 for (u64 p = ks; p < te; p += PAGE_SIZE) {
                     u32 i = (u32)((p - kernel_2mib_pa) >> PAGE_SHIFT);
@@ -520,6 +547,17 @@ void mmu_program_this_cpu(void) {
         "msr tcr_el1, %1\n"
         "msr ttbr0_el1, %2\n"
         "msr ttbr1_el1, %3\n"
+        "isb\n"
+        // R6-B F120: invalidate any stale TLB entries before SCTLR.M=1.
+        // Cold-boot TLB contents are architecturally UNKNOWN per ARM ARM
+        // D5.7; firmware/EL3 SHOULD have flushed before EL2/EL1 entry
+        // but this is an assumption. Pre-P3-Bb the same omission was
+        // tolerable because TTBR0 identity covered all addresses; P3-Bb
+        // introduces NEW page tables (l1_directmap, l3_vmalloc) whose
+        // surface a poisoned TLB could corrupt. tlbi vmalle1is +
+        // dsb ish + isb removes the firmware-trust assumption.
+        "tlbi vmalle1is\n"
+        "dsb ish\n"
         "isb\n"
         "mrs x9, sctlr_el1\n"
         "orr x9, x9, %4\n"
@@ -665,9 +703,12 @@ bool mmu_map_device(paddr_t pa, u64 size) {
 // callers from other contexts (driver init, exec) need to acquire a
 // vmalloc lock before calling. Documented as a trip-hazard.
 //
-// No TLB flush issued: l3_vmalloc entries were previously zero (invalid),
-// so there are no stale TLB entries to invalidate. dsb_ishst + isb
-// publish the new entries to other CPUs via the inner-shareable scope.
+// R6-B F121: TLB flush issued post-PTE-write. Some ARMv8 implementations
+// cache invalid PTEs in the TLB (per ARM ARM D5.7 implementation-defined);
+// secondary CPUs that already walked TTBR1 may TLB-cache the prior-zero
+// entry. After populating real PTEs, broadcast `tlbi vmalle1is` removes
+// any stale invalid entry. Cost is one flush per call (rare; boot-time
+// only at v1.0).
 
 void *mmu_map_mmio(paddr_t pa, size_t size) {
     if (size == 0) return NULL;
@@ -677,11 +718,18 @@ void *mmu_map_mmio(paddr_t pa, size_t size) {
     if (pa + size < pa) {
         extinction("mmu_map_mmio: pa + size overflow");
     }
+    // R6-B F118: PA must fit in TCR.IPS=40-bit (per mmu.c TCR_IPS_VALUE).
+    // Architecturally undefined behavior on out-of-IPS PA in PTE bits.
+    if (pa >> 40) {
+        extinction("mmu_map_mmio: PA exceeds TCR.IPS=40 (1 TiB)");
+    }
 
     size_t aligned_size = (size + PAGE_SIZE - 1) & ~(size_t)(PAGE_SIZE - 1);
     u32 n_pages = (u32)(aligned_size >> PAGE_SHIFT);
 
-    if (g_vmalloc_next_idx + n_pages > ENTRIES_PER_TABLE) {
+    // R6-B F117: subtraction-form bound. Cannot wrap; safe even if
+    // ENTRIES_PER_TABLE were reduced or g_vmalloc_next_idx grew.
+    if (n_pages > (u32)(ENTRIES_PER_TABLE) - g_vmalloc_next_idx) {
         // Out of vmalloc space. v1.0 doesn't expand; extinct loudly so
         // the bound is visible (rather than silent NULL return that a
         // caller might dereference).
@@ -695,8 +743,12 @@ void *mmu_map_mmio(paddr_t pa, size_t size) {
     }
     g_vmalloc_next_idx += n_pages;
 
+    // R6-B F121: drain stores then flush TLB to remove any cached invalid
+    // entries on secondary CPUs that walked TTBR1 prior to this call.
     dsb_ishst();
-    isb();
+    __asm__ __volatile__("tlbi vmalle1is" ::: "memory");
+    __asm__ __volatile__("dsb ish"        ::: "memory");
+    __asm__ __volatile__("isb"            ::: "memory");
 
     return (void *)(uintptr_t)(VMALLOC_BASE + ((u64)start_idx << PAGE_SHIFT));
 }
