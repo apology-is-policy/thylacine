@@ -23,13 +23,17 @@
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 
+#include "../arch/arm64/mmu.h"
 #include "../mm/phys.h"
 #include "../mm/slub.h"
 
-// 16 KiB stack = 4 pages = order 2.
-#define THREAD_KSTACK_ORDER  2
-_Static_assert((1u << THREAD_KSTACK_ORDER) * PAGE_SIZE == THREAD_KSTACK_SIZE,
-               "THREAD_KSTACK_ORDER must produce THREAD_KSTACK_SIZE bytes");
+// P2-Dc: 32 KiB total allocation per thread = 4 stack pages + 4 guard
+// pages. order=3 = 8 pages from buddy. The guard pages are marked
+// no-access via mmu_set_no_access so a stack-overflow access faults.
+_Static_assert((1u << THREAD_KSTACK_TOTAL_ORDER) * PAGE_SIZE == THREAD_KSTACK_TOTAL_SIZE,
+               "THREAD_KSTACK_TOTAL_ORDER must produce THREAD_KSTACK_TOTAL_SIZE bytes");
+_Static_assert(THREAD_KSTACK_GUARD_PAGES * PAGE_SIZE == THREAD_KSTACK_GUARD_SIZE,
+               "THREAD_KSTACK_GUARD_PAGES * PAGE_SIZE must equal THREAD_KSTACK_GUARD_SIZE");
 
 static struct kmem_cache *g_thread_cache;
 static struct Thread     *g_kthread;
@@ -143,6 +147,21 @@ struct Thread *thread_init_per_cpu_idle(unsigned cpu_idx) {
 // trampoline doesn't distinguish; x0 is loaded from x20 unconditionally).
 // `arg` is parked in ctx.x20; for no-arg entries pass NULL and the entry
 // just ignores x0 (caller-saved).
+//
+// P2-Dc: kstack layout — 8 pages total (32 KiB) at order=3.
+//
+//   page 0 (lowest)  ┐
+//   page 1           │  guard region (16 KiB no-access)
+//   page 2           │
+//   page 3           ┘
+//   page 4           ┐
+//   page 5           │  usable kstack (16 KiB RW)
+//   page 6           │
+//   page 7 (highest) ┘  ctx.sp starts at top of page 7
+//
+// Stack grows DOWN. An overflow past page 4 hits the guard at page 3,
+// where the L3 PTE is invalid in TTBR0 → page fault → exception
+// handler reports stack-overflow extinction.
 static struct Thread *thread_create_internal(struct Proc *proc,
                                              void *entry_void,
                                              void *arg) {
@@ -155,12 +174,23 @@ static struct Thread *thread_create_internal(struct Proc *proc,
     struct Thread *t = kmem_cache_alloc(g_thread_cache, KP_ZERO);
     if (!t) return NULL;
 
-    struct page *stack_pg = alloc_pages(THREAD_KSTACK_ORDER, KP_ZERO);
+    struct page *stack_pg = alloc_pages(THREAD_KSTACK_TOTAL_ORDER, KP_ZERO);
     if (!stack_pg) {
         kmem_cache_free(g_thread_cache, t);
         return NULL;
     }
-    void *kstack = (void *)(uintptr_t)page_to_pa(stack_pg);
+    void *kalloc_base = (void *)(uintptr_t)page_to_pa(stack_pg);
+
+    // P2-Dc: protect the lower THREAD_KSTACK_GUARD_PAGES as no-access.
+    // The 8-page allocation at order=3 is 32-KiB-aligned, so the 4
+    // guard pages at the bottom always lie within a single 2 MiB block
+    // (32 KiB ≪ 2 MiB). One demote + one TLB flush covers all guards.
+    paddr_t guard_base = (paddr_t)(uintptr_t)kalloc_base;
+    if (!mmu_set_no_access_range(guard_base, THREAD_KSTACK_GUARD_PAGES)) {
+        free_pages(stack_pg, THREAD_KSTACK_TOTAL_ORDER);
+        kmem_cache_free(g_thread_cache, t);
+        return NULL;
+    }
 
     // KP_ZERO leaves every field 0/NULL; only the non-zero-default
     // values get explicit setters. EEVDF defaults: weight=1, band=
@@ -172,8 +202,8 @@ static struct Thread *thread_create_internal(struct Proc *proc,
     t->tid         = g_next_tid++;
     t->state       = THREAD_RUNNABLE;
     t->proc        = proc;
-    t->kstack_base = kstack;
-    t->kstack_size = THREAD_KSTACK_SIZE;
+    t->kstack_base = kalloc_base;          // P2-Dc: lowest page (guard)
+    t->kstack_size = THREAD_KSTACK_TOTAL_SIZE;
     t->weight      = 1;
     t->band        = SCHED_BAND_NORMAL;
     t->slice_remaining = THREAD_DEFAULT_SLICE_TICKS;
@@ -184,14 +214,16 @@ static struct Thread *thread_create_internal(struct Proc *proc,
     //   ctx.x20 = arg           — trampoline does `mov x0, x20` (P2-D)
     //   ctx.x21 = entry         — trampoline does `blr x21`
     //   ctx.lr  = trampoline    — cpu_switch_context's `ret` lands here
-    //   ctx.sp  = top of kstack — 16-byte aligned (alloc_pages returns
-    //                              page-aligned, 16 KiB = aligned at top)
+    //   ctx.sp  = top of kstack — page 7's top edge = kalloc_base +
+    //                              THREAD_KSTACK_TOTAL_SIZE (P2-Dc).
+    //                              Stack grows down through pages 7→4
+    //                              (16 KiB usable) then hits guard.
     //
     // Other ctx fields stay zero via KP_ZERO.
     t->ctx.x20 = (u64)(uintptr_t)arg;
     t->ctx.x21 = (u64)(uintptr_t)entry_void;
     t->ctx.lr  = (u64)(uintptr_t)thread_trampoline;
-    t->ctx.sp  = (u64)((uintptr_t)kstack + THREAD_KSTACK_SIZE);
+    t->ctx.sp  = (u64)((uintptr_t)kalloc_base + THREAD_KSTACK_TOTAL_SIZE);
 
     thread_link_into_proc(t, proc);
     g_thread_created++;
@@ -229,8 +261,16 @@ void thread_free(struct Thread *t) {
     thread_unlink_from_proc(t);
 
     if (t->kstack_base) {
-        struct page *pg = pa_to_page((paddr_t)(uintptr_t)t->kstack_base);
-        free_pages(pg, THREAD_KSTACK_ORDER);
+        // P2-Dc: restore guard pages to normal RW before returning the
+        // allocation to buddy. If a future allocation reuses these
+        // pages (for any purpose, kstack or otherwise), they need
+        // normal access; leaving them no-access would silently fault
+        // the next user. Batched into one TLB flush.
+        paddr_t guard_base = (paddr_t)(uintptr_t)t->kstack_base;
+        mmu_restore_normal_range(guard_base, THREAD_KSTACK_GUARD_PAGES);
+
+        struct page *pg = pa_to_page(guard_base);
+        free_pages(pg, THREAD_KSTACK_TOTAL_ORDER);
     }
 
     kmem_cache_free(g_thread_cache, t);

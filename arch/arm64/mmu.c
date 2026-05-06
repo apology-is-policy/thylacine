@@ -487,3 +487,182 @@ bool mmu_map_device(paddr_t pa, u64 size) {
 
     return true;
 }
+
+// ---------------------------------------------------------------------------
+// P2-Dc: per-thread kstack guard pages.
+//
+// Bulk RAM is mapped via 2 MiB block descriptors at L2 in TTBR0. To make
+// a single 4 KiB page no-access, we demote the relevant L2 block to an
+// L3 table (allocating a fresh L3 from buddy), populate the L3 with 512
+// page-PTEs reproducing the original block's mapping, then modify the
+// specific L3 entry to be invalid (causing a fault on access).
+//
+// At v1.0 these are called single-threaded from the boot CPU. SMP-safe
+// demote at Phase 5+ when multi-thread Procs make concurrent thread_create
+// possible — a global mmu_lock plus careful break-before-make across
+// CPUs (DSB ISH + TLB flush + DSB ISH; tlbi vmalle1is is already
+// inner-shareable so all CPUs see the invalidation).
+// ---------------------------------------------------------------------------
+
+#include <thylacine/page.h>
+
+#include "../../mm/phys.h"
+
+// Locate the L2 entry covering `pa` in TTBR0's identity tables.
+// Returns NULL if pa is outside the TTBR0 identity range (>= 4 GiB).
+static u64 *l2_ttbr0_entry_for(paddr_t pa) {
+    u32 gib = (u32)(pa >> BLOCK_SHIFT_L1);
+    u32 idx = (u32)((pa >> BLOCK_SHIFT_L2) & 0x1ff);
+    if (gib >= 4) return NULL;
+    return &l2_ttbr0[gib][idx];
+}
+
+// Demote the L2 block covering `pa` to an L3 table. Idempotent: if the
+// L2 entry is already a table descriptor, returns the existing L3.
+//
+// Allocates one page (4 KiB, page-aligned, KP_ZERO) for the L3 table.
+// Returns NULL on OOM or if `pa` is outside TTBR0 identity or if the
+// L2 entry is invalid (no source mapping to demote from).
+static u64 *demote_l2_block_to_l3(paddr_t pa) {
+    u64 *l2_entry_p = l2_ttbr0_entry_for(pa);
+    if (!l2_entry_p) return NULL;
+    u64 entry = *l2_entry_p;
+
+    // Already a table descriptor → reuse.
+    if ((entry & PTE_VALID) && (entry & PTE_TYPE_TABLE)) {
+        return (u64 *)(uintptr_t)(entry & ~0xFFFull);
+    }
+    // Source must be a valid block to be demoted.
+    if (!(entry & PTE_VALID)) return NULL;
+
+    // Allocate L3 table.
+    struct page *l3_pg = alloc_pages(0, KP_ZERO);
+    if (!l3_pg) return NULL;
+    u64 *l3 = (u64 *)(uintptr_t)page_to_pa(l3_pg);
+
+    // Reproduce the L2 block's mapping at L3 granularity. At v1.0 bulk
+    // RAM uses PTE_KERN_RW_BLOCK; the L3 equivalent is PTE_KERN_RW.
+    paddr_t block_start = pa & ~(BLOCK_SIZE_L2 - 1);
+    for (u32 i = 0; i < ENTRIES_PER_TABLE; i++) {
+        paddr_t page_pa = block_start + ((u64)i * PAGE_SIZE);
+        l3[i] = make_page_pte_l3(page_pa, PTE_KERN_RW);
+    }
+
+    // Break-before-make: invalidate the L2 entry, TLB-flush, write the
+    // new table descriptor.
+    *l2_entry_p = 0;
+    dsb_ishst();
+    tlbi_vmalle1is();
+    dsb_ish();
+    isb();
+
+    *l2_entry_p = make_table_pte(l3);
+    dsb_ishst();
+    isb();
+
+    return l3;
+}
+
+bool mmu_set_no_access(paddr_t pa) {
+    if (pa & (PAGE_SIZE - 1)) return false;       // must be page-aligned
+
+    u64 *l3 = demote_l2_block_to_l3(pa);
+    if (!l3) return false;
+
+    u32 idx = (u32)((pa >> PAGE_SHIFT) & 0x1ff);
+
+    // Invalidate the page's L3 entry. Break-before-make for this single
+    // PTE: the entry was a valid PTE_KERN_RW (set by demote_l2_block_to_l3)
+    // and we're transitioning to invalid; ARM ARM requires break before
+    // any change that could change the output address or permissions.
+    l3[idx] = 0;
+    dsb_ishst();
+    tlbi_vmalle1is();
+    dsb_ish();
+    isb();
+
+    return true;
+}
+
+bool mmu_restore_normal(paddr_t pa) {
+    if (pa & (PAGE_SIZE - 1)) return false;
+
+    u64 *l2_entry_p = l2_ttbr0_entry_for(pa);
+    if (!l2_entry_p) return false;
+    u64 entry = *l2_entry_p;
+
+    // If the L2 entry is still a block, the page is implicitly RW
+    // already — nothing to restore (mmu_set_no_access was never called
+    // for any page in this 2 MiB block).
+    if ((entry & PTE_VALID) && !(entry & PTE_TYPE_TABLE)) {
+        return true;
+    }
+    // Or if the L2 entry is invalid, that's a misuse (caller is trying
+    // to unprotect something never mapped). Return failure.
+    if (!(entry & PTE_VALID)) return false;
+
+    u64 *l3 = (u64 *)(uintptr_t)(entry & ~0xFFFull);
+    u32 idx = (u32)((pa >> PAGE_SHIFT) & 0x1ff);
+
+    l3[idx] = make_page_pte_l3(pa, PTE_KERN_RW);
+    dsb_ishst();
+    tlbi_vmalle1is();
+    dsb_ish();
+    isb();
+
+    return true;
+}
+
+bool mmu_set_no_access_range(paddr_t pa, unsigned n_pages) {
+    if (pa & (PAGE_SIZE - 1)) return false;
+    if (n_pages == 0)         return false;
+    paddr_t end = pa + (paddr_t)n_pages * PAGE_SIZE;
+    if (end <= pa)            return false;       // overflow
+    // Range must lie within a single 2 MiB block.
+    if ((pa >> BLOCK_SHIFT_L2) != ((end - 1) >> BLOCK_SHIFT_L2)) return false;
+
+    u64 *l3 = demote_l2_block_to_l3(pa);
+    if (!l3) return false;
+
+    // Invalidate each L3 entry in the run; one TLB flush at the end.
+    for (unsigned i = 0; i < n_pages; i++) {
+        u32 idx = (u32)(((pa >> PAGE_SHIFT) + i) & 0x1ff);
+        l3[idx] = 0;
+    }
+    dsb_ishst();
+    tlbi_vmalle1is();
+    dsb_ish();
+    isb();
+    return true;
+}
+
+bool mmu_restore_normal_range(paddr_t pa, unsigned n_pages) {
+    if (pa & (PAGE_SIZE - 1)) return false;
+    if (n_pages == 0)         return false;
+    paddr_t end = pa + (paddr_t)n_pages * PAGE_SIZE;
+    if (end <= pa)            return false;
+    if ((pa >> BLOCK_SHIFT_L2) != ((end - 1) >> BLOCK_SHIFT_L2)) return false;
+
+    u64 *l2_entry_p = l2_ttbr0_entry_for(pa);
+    if (!l2_entry_p) return false;
+    u64 entry = *l2_entry_p;
+
+    if ((entry & PTE_VALID) && !(entry & PTE_TYPE_TABLE)) {
+        // Block is still mapped as a single 2 MiB block — pages are
+        // already normal, nothing to do.
+        return true;
+    }
+    if (!(entry & PTE_VALID)) return false;
+
+    u64 *l3 = (u64 *)(uintptr_t)(entry & ~0xFFFull);
+    for (unsigned i = 0; i < n_pages; i++) {
+        paddr_t page_pa = pa + (paddr_t)i * PAGE_SIZE;
+        u32 idx = (u32)((page_pa >> PAGE_SHIFT) & 0x1ff);
+        l3[idx] = make_page_pte_l3(page_pa, PTE_KERN_RW);
+    }
+    dsb_ishst();
+    tlbi_vmalle1is();
+    dsb_ish();
+    isb();
+    return true;
+}

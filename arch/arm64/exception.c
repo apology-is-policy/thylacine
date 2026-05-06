@@ -23,6 +23,7 @@
 #include "kaslr.h"
 
 #include <thylacine/extinction.h>
+#include <thylacine/thread.h>
 #include <thylacine/types.h>
 
 // Linker symbols — boot stack guard region.
@@ -130,9 +131,15 @@ static u64 sym_to_pa(const void *sym) {
     return high_va_to_pa((u64)(uintptr_t)sym);
 }
 
-// True iff `addr` falls inside the boot-stack guard page. Accepts both
-// PAs (the typical case for stack accesses, since SP is PA at P1-F)
-// and high VAs (in case some future code uses high-VA stacks).
+// True iff `addr` falls inside any active stack guard region. At P1-F
+// this was just the boot-stack guard; P2-Dc adds per-thread kstack
+// guards (the bottom THREAD_KSTACK_GUARD_SIZE of each thread_create'd
+// kstack is mapped no-access). Both flavors of guard fault produce the
+// same "kernel stack overflow" extinction.
+//
+// Accepts both PAs (the typical case for kstack accesses via TTBR0
+// identity mapping) and high VAs (boot-stack symbols are high VA at
+// runtime).
 static bool addr_is_stack_guard(u64 addr) {
     u64 guard_pa = sym_to_pa(_boot_stack_guard);
     u64 bottom_pa = sym_to_pa(_boot_stack_bottom);
@@ -141,7 +148,20 @@ static bool addr_is_stack_guard(u64 addr) {
     // High-VA fallback (no high-VA stack today, but check anyway).
     u64 guard_va = (u64)(uintptr_t)_boot_stack_guard;
     u64 bottom_va = (u64)(uintptr_t)_boot_stack_bottom;
-    return addr >= guard_va && addr < bottom_va;
+    if (addr >= guard_va && addr < bottom_va) return true;
+
+    // P2-Dc: per-thread kstack guard region. The current thread's
+    // kstack_base points at the lowest page of the 8-page allocation;
+    // the lower THREAD_KSTACK_GUARD_SIZE is the no-access guard.
+    // Stack overflow lands inside that range.
+    struct Thread *t = current_thread();
+    if (t && t->magic == THREAD_MAGIC && t->kstack_base) {
+        u64 t_guard_base = (u64)(uintptr_t)t->kstack_base;
+        u64 t_guard_end  = t_guard_base + THREAD_KSTACK_GUARD_SIZE;
+        if (addr >= t_guard_base && addr < t_guard_end) return true;
+    }
+
+    return false;
 }
 
 // True iff `addr` falls inside the kernel image (TEXT / RODATA /

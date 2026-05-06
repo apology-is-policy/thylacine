@@ -20,7 +20,7 @@ project(thylacine
 )
 
 # Phase tag — bumped per phase exit. Influences boot banner.
-set(THYLACINE_PHASE "P2-Db" CACHE STRING "Current implementation phase")
+set(THYLACINE_PHASE "P2-Dc" CACHE STRING "Current implementation phase")
 
 # THYLACINE_SANITIZE — opt-in sanitizer build (P1-I).
 #
@@ -72,7 +72,7 @@ endif()
 # is set + APIA key is non-zero). Post-v1.0 hardening pass adds the
 # deliberate-fault test alongside the dedicated CSPRNG key derivation.
 set(THYLACINE_FAULT_TEST "" CACHE STRING
-    "Fault-test mode: '', 'canary_smash', 'wxe_violation', 'bti_fault'")
+    "Fault-test mode: '', 'canary_smash', 'wxe_violation', 'bti_fault', 'kstack_overflow'")
 if(THYLACINE_FAULT_TEST)
     add_compile_definitions(THYLACINE_FAULT_TEST_${THYLACINE_FAULT_TEST}=1)
 endif()

@@ -137,10 +137,19 @@ _Static_assert(sizeof(struct Thread) == 224,
 _Static_assert(__builtin_offsetof(struct Thread, magic) == 0,
                "magic must be at offset 0 (P2-A audit R4 F42)");
 
-// Default kernel stack size per thread. 4 pages × 4 KiB = 16 KiB. Matches
-// ARCHITECTURE.md §7.3 (THREAD_STACK_SIZE = 16 KiB default with guard
-// page; the guard page lands at Phase 2 close).
-#define THREAD_KSTACK_SIZE   (16 * 1024)
+// Default kernel stack size per thread. 4 pages × 4 KiB = 16 KiB.
+// Matches ARCHITECTURE.md §7.3 (THREAD_STACK_SIZE = 16 KiB).
+//
+// P2-Dc adds a 4-page (16 KiB) guard region BELOW the kstack. Total
+// allocation per thread is 8 pages = 32 KiB at order=3 from buddy.
+// The guard pages are marked no-access in TTBR0 — a stack-overflow
+// access faults via the kernel's identity mapping, the exception
+// handler reports it, and extinction("kstack overflow") fires.
+#define THREAD_KSTACK_SIZE         (16 * 1024)
+#define THREAD_KSTACK_GUARD_SIZE   (16 * 1024)
+#define THREAD_KSTACK_TOTAL_SIZE   (THREAD_KSTACK_SIZE + THREAD_KSTACK_GUARD_SIZE)
+#define THREAD_KSTACK_TOTAL_ORDER  3                  // 8 pages = 32 KiB
+#define THREAD_KSTACK_GUARD_PAGES  4                  // bottom 4 pages
 
 // "current thread" is held in TPIDR_EL1, the per-CPU OS-use register.
 // Accessed by inline mrs / msr — no function call overhead in the

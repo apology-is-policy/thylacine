@@ -13,6 +13,9 @@
 // (deliberate-fault verification of canaries / W^X / BTI).
 
 #include "../arch/arm64/uart.h"
+#include <thylacine/proc.h>
+#include <thylacine/sched.h>
+#include <thylacine/thread.h>
 #include <thylacine/types.h>
 
 // ---------------------------------------------------------------------------
@@ -119,6 +122,60 @@ static void provoke_bti_fault(void) {
 #endif
 
 // ---------------------------------------------------------------------------
+// kstack_overflow — recurse on a thread_create'd kstack until SP runs
+// off the bottom of the 16 KiB usable region into the 16 KiB guard.
+// The guard pages are mapped no-access (P2-Dc); the next memory access
+// raises a data abort with FAR inside the guard region. The exception
+// handler's addr_is_stack_guard() recognizes the FAR is inside the
+// current thread's kstack guard and emits "kernel stack overflow".
+//
+// Each recursion frame allocates a 1 KiB volatile array; ~16 frames
+// chew through the 16 KiB usable stack and SP drops into the guard.
+// `volatile` blocks any inlining or DCE; touching the array each call
+// forces the actual stack store.
+// ---------------------------------------------------------------------------
+
+#ifdef THYLACINE_FAULT_TEST_kstack_overflow
+__attribute__((noinline))
+__attribute__((no_stack_protector))
+static void recurse_into_guard(unsigned depth) {
+    volatile char buf[1024];
+    buf[0] = (char)depth;
+    buf[1023] = (char)~depth;
+    // Tail-call avoidance: use the local after the recursive call.
+    recurse_into_guard(depth + 1);
+    buf[0] ^= buf[1023];
+    (void)buf[0];
+}
+
+static void provoke_kstack_overflow_entry(void *arg) {
+    (void)arg;
+    uart_puts("  fault-test: invoking kstack_overflow (recursing)...\n");
+    recurse_into_guard(0);
+    uart_puts("FAIL: recurse_into_guard returned (kstack guard did not fire)\n");
+    exits("err");
+}
+
+static void provoke_kstack_overflow(void) {
+    // Spawn a thread with a fresh guarded kstack and switch into it.
+    // We can't recurse on the boot stack — it has its own static guard
+    // (from start.S) but no per-thread guard, and the test target is
+    // the per-thread P2-Dc mechanism specifically.
+    struct Thread *t = thread_create_with_arg(kproc(),
+                                              provoke_kstack_overflow_entry,
+                                              NULL);
+    if (!t) {
+        uart_puts("FAIL: thread_create_with_arg returned NULL\n");
+        return;
+    }
+    thread_switch(t);
+    // Unreachable: t recurses + faults via the guard. extinction halts
+    // the kernel before thread_switch returns.
+    uart_puts("FAIL: thread_switch returned (overflow thread did not fault)\n");
+}
+#endif
+
+// ---------------------------------------------------------------------------
 // Public entry point. Called from boot_main before the success line.
 //
 // In a production build, evaluates to a single return.
@@ -139,6 +196,8 @@ void fault_test_run(void) {
     uart_puts("  fault-test: invoking bti_fault...\n");
     provoke_bti_fault();
     uart_puts("FAIL: provoke_bti_fault returned (BTI did not fire)\n");
+#elif defined(THYLACINE_FAULT_TEST_kstack_overflow)
+    provoke_kstack_overflow();
 #else
     // No fault test selected — production build.
 #endif

@@ -8,12 +8,14 @@
 # diagnostic message.
 #
 # Variants at v1.0:
-#   canary_smash   — stack canary check fires →
-#                    "EXTINCTION: stack canary mismatch (smashed stack)"
-#   wxe_violation  — kernel-image permission fault →
-#                    "EXTINCTION: PTE violates W^X (kernel image)"
-#   bti_fault      — Branch Target Exception (FEAT_BTI required) →
-#                    "EXTINCTION: BTI fault (...)"
+#   canary_smash    — stack canary check fires →
+#                     "EXTINCTION: stack canary mismatch (smashed stack)"
+#   wxe_violation   — kernel-image permission fault →
+#                     "EXTINCTION: PTE violates W^X (kernel image)"
+#   bti_fault       — Branch Target Exception (FEAT_BTI required) →
+#                     "EXTINCTION: BTI fault (...)"
+#   kstack_overflow — per-thread kstack guard page fires (P2-Dc) →
+#                     "EXTINCTION: kernel stack overflow"
 #
 # Deferred at v1.0 (post-v1.0 hardening pass):
 #   pac_mismatch — needs forged-LR inline asm; the resulting fault
@@ -36,14 +38,15 @@ BOOT_TIMEOUT="${BOOT_TIMEOUT:-10}"
 
 # variant → expected extinction substring (case-sensitive prefix match
 # against the EXTINCTION: line). Keep the case below in sync with this.
-ALL_VARIANTS="canary_smash wxe_violation bti_fault"
+ALL_VARIANTS="canary_smash wxe_violation bti_fault kstack_overflow"
 
 expected_for() {
     case "$1" in
-        canary_smash)  echo "EXTINCTION: stack canary mismatch" ;;
-        wxe_violation) echo "EXTINCTION: PTE violates W^X" ;;
-        bti_fault)     echo "EXTINCTION: BTI fault" ;;
-        *)             echo "" ;;
+        canary_smash)    echo "EXTINCTION: stack canary mismatch" ;;
+        wxe_violation)   echo "EXTINCTION: PTE violates W^X" ;;
+        bti_fault)       echo "EXTINCTION: BTI fault" ;;
+        kstack_overflow) echo "EXTINCTION: kernel stack overflow" ;;
+        *)               echo "" ;;
     esac
 }
 
@@ -53,10 +56,11 @@ selected=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -v|--verbose) verbose=1; shift ;;
-        canary_smash|wxe_violation|bti_fault) selected="$selected $1"; shift ;;
+        canary_smash|wxe_violation|bti_fault|kstack_overflow)
+            selected="$selected $1"; shift ;;
         -h|--help)
             echo "Usage: $0 [-v] [variant...]"
-            echo "Variants: canary_smash wxe_violation bti_fault"
+            echo "Variants: canary_smash wxe_violation bti_fault kstack_overflow"
             exit 0
             ;;
         *) echo "Unknown arg: $1" >&2; exit 2 ;;

@@ -124,7 +124,7 @@ void test_proc_rfork_stress_1000(void) {
     u64 t_destroyed_before = thread_total_destroyed();
 
     g_proc_test_ran = 0;
-    for (int i = 0; i < DTB_MAX_CPUS; i++) g_cpu_run_count[i] = 0;
+    for (unsigned i = 0; i < DTB_MAX_CPUS; i++) g_cpu_run_count[i] = 0;
 
     int done = 0;
     while (done < ITERS) {
@@ -159,7 +159,7 @@ void test_proc_rfork_stress_1000(void) {
         "thread_total_destroyed didn't track ITERS");
 
     u64 sum = 0;
-    for (int i = 0; i < DTB_MAX_CPUS; i++) {
+    for (unsigned i = 0; i < DTB_MAX_CPUS; i++) {
         sum += g_cpu_run_count[i];
     }
     TEST_ASSERT(sum == (u64)ITERS,

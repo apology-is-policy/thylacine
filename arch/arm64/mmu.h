@@ -197,4 +197,49 @@ bool pte_violates_wxe(u64 pte);
 // or escapes 4 GiB; true on success.
 bool mmu_map_device(paddr_t pa, u64 size);
 
+// P2-Dc: per-thread kstack guard pages.
+//
+// `mmu_set_no_access(pa)` makes the 4 KiB page at PA unreadable +
+// unwritable + unexecutable in TTBR0's identity mapping. A subsequent
+// access to that PA via the kernel's identity-VA path triggers an
+// instruction-or-data abort which the exception handler reports as a
+// stack-overflow extinction.
+//
+// Implementation requires demoting the L2 block descriptor covering the
+// page to an L3 table — kstacks live in 2 MiB-block-mapped bulk RAM and
+// per-page no-access requires 4 KiB granularity. Demotion is idempotent
+// per L2 block; subsequent calls hitting the same block reuse the
+// existing L3.
+//
+// `mmu_restore_normal(pa)` reverses the protection: the page becomes
+// PTE_KERN_RW again. Called on thread_free before the underlying pages
+// are returned to buddy.
+//
+// At v1.0 P2-Dc these are called single-threaded from the boot CPU
+// (thread_create / thread_free are not yet SMP-safe). Phase 5+ adds a
+// global mmu_lock when multi-thread Procs make concurrent thread_create
+// possible.
+//
+// Returns false on OOM (L3 table allocation failed) or if the PA is
+// outside the TTBR0 identity range (≥ 4 GiB at v1.0).
+bool mmu_set_no_access(paddr_t pa);
+bool mmu_restore_normal(paddr_t pa);
+
+// Batched variants for callers protecting / unprotecting a contiguous
+// run of pages within a single 2 MiB L2 block (the common case for
+// per-thread guard regions: 4 pages ≪ 1 block). Operates on
+// `[pa, pa + n_pages * PAGE_SIZE)`. One TLB flush at the end instead
+// of per-page — substantial speedup at thread_create / thread_free
+// volume (~10× faster than the per-page loop at 1000 iterations).
+//
+// Constraints:
+//   - pa must be 4 KiB aligned.
+//   - n_pages > 0 and the range must lie within a single 2 MiB block
+//     (i.e., (pa + n_pages * PAGE_SIZE - 1) >> 21 == pa >> 21).
+//   - PA range is in TTBR0 identity (< 4 GiB at v1.0).
+//
+// Returns false on alignment / range / OOM violations.
+bool mmu_set_no_access_range(paddr_t pa, unsigned n_pages);
+bool mmu_restore_normal_range(paddr_t pa, unsigned n_pages);
+
 #endif // THYLACINE_ARCH_ARM64_MMU_H

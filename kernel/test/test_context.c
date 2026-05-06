@@ -47,8 +47,9 @@ void test_context_create_destroy(void) {
         "fresh thread must be RUNNABLE");
     TEST_ASSERT(t->kstack_base != NULL,
         "fresh thread must own a kstack");
-    TEST_EXPECT_EQ(t->kstack_size, (size_t)(16 * 1024),
-        "fresh thread's kstack must be 16 KiB");
+    TEST_EXPECT_EQ(t->kstack_size, (size_t)THREAD_KSTACK_TOTAL_SIZE,
+        "fresh thread's kstack allocation must be THREAD_KSTACK_TOTAL_SIZE "
+        "(P2-Dc: 32 KiB = 16 KiB usable + 16 KiB guard)");
     TEST_EXPECT_EQ(t->proc, kproc(),
         "fresh thread's proc must be kproc");
     TEST_EXPECT_EQ(thread_total_created(), created_before + 1,

@@ -145,7 +145,11 @@ struct Thread {
     struct Thread     *prev_in_proc;
 };
 
-#define THREAD_KSTACK_SIZE   (16 * 1024)
+#define THREAD_KSTACK_SIZE         (16 * 1024)             // usable
+#define THREAD_KSTACK_GUARD_SIZE   (16 * 1024)             // no-access
+#define THREAD_KSTACK_TOTAL_SIZE   (THREAD_KSTACK_SIZE + THREAD_KSTACK_GUARD_SIZE)
+#define THREAD_KSTACK_TOTAL_ORDER  3                        // 8 pages
+#define THREAD_KSTACK_GUARD_PAGES  4                        // bottom 4 pages
 
 static inline struct Thread *current_thread(void);              // mrs TPIDR_EL1
 static inline void           set_current_thread(struct Thread *);  // msr TPIDR_EL1
