@@ -99,7 +99,7 @@ void thread_init(void) {
     g_kthread->on_cpu = true;       // P2-Cf: kthread is the boot CPU's running thread
 
     thread_link_into_proc(g_kthread, kproc());
-    g_thread_created++;
+    __atomic_fetch_add(&g_thread_created, 1u, __ATOMIC_RELAXED);
     g_next_tid = 1;
 
     // Park kthread in TPIDR_EL1 as the current thread. From now on,
@@ -138,7 +138,7 @@ struct Thread *thread_init_per_cpu_idle(unsigned cpu_idx) {
                                           // this CPU at sched_init.
 
     thread_link_into_proc(t, kproc());
-    g_thread_created++;
+    __atomic_fetch_add(&g_thread_created, 1u, __ATOMIC_RELAXED);
     return t;
 }
 
@@ -226,7 +226,7 @@ static struct Thread *thread_create_internal(struct Proc *proc,
     t->ctx.sp  = (u64)((uintptr_t)kalloc_base + THREAD_KSTACK_TOTAL_SIZE);
 
     thread_link_into_proc(t, proc);
-    g_thread_created++;
+    __atomic_fetch_add(&g_thread_created, 1u, __ATOMIC_RELAXED);
     return t;
 }
 
@@ -254,9 +254,27 @@ void thread_free(struct Thread *t) {
                                   extinction("thread_free of RUNNING thread");
 
     // If t was RUNNABLE and sitting in a run tree, remove it before
-    // unlinking from the proc list. sched_remove_if_runnable is a
-    // no-op for non-RUNNABLE threads.
+    // unlinking from the proc list. sched_remove_if_runnable walks all
+    // CPU run trees under their locks and removes if found; it is a
+    // no-op for non-RUNNABLE threads or threads not in any tree (e.g.
+    // fresh-created Threads that never had ready() called on them — a
+    // legitimate test-only pattern: thread_create then thread_free
+    // without any scheduler exposure).
     sched_remove_if_runnable(t);
+
+    // R5-H F76: post-walk RUNNING re-check. Closes the SMP race in which
+    // pick_next on a peer CPU transitions t from RUNNABLE to RUNNING
+    // BETWEEN the line-253 state read and sched_remove_if_runnable's
+    // walk: thread_free's first check sees RUNNABLE → passes; the walk's
+    // fast-path observes RUNNING → returns without removing; thread_free
+    // would otherwise free a thread that's currently running on the
+    // peer CPU (UAF on its kstack mid-cpu_switch_context). After the
+    // walk, t is provably not in any tree (we held every cs->lock
+    // momentarily), so no future pick can transition state to RUNNING.
+    // Thus this re-check IS atomic with the walk: state is stable
+    // here. If state is RUNNING at this point, we lost the race.
+    if (t->state == THREAD_RUNNING)
+        extinction("thread_free: peer CPU transitioned t to RUNNING between gate and walk");
 
     thread_unlink_from_proc(t);
 
@@ -274,7 +292,7 @@ void thread_free(struct Thread *t) {
     }
 
     kmem_cache_free(g_thread_cache, t);
-    g_thread_destroyed++;
+    __atomic_fetch_add(&g_thread_destroyed, 1u, __ATOMIC_RELAXED);
 }
 
 void thread_switch(struct Thread *next) {
@@ -324,5 +342,5 @@ void thread_switch(struct Thread *next) {
     sched_finish_task_switch();
 }
 
-u64 thread_total_created(void)   { return g_thread_created; }
-u64 thread_total_destroyed(void) { return g_thread_destroyed; }
+u64 thread_total_created(void)   { return __atomic_load_n(&g_thread_created, __ATOMIC_RELAXED); }
+u64 thread_total_destroyed(void) { return __atomic_load_n(&g_thread_destroyed, __ATOMIC_RELAXED); }

@@ -58,7 +58,7 @@ void pgrp_init(void) {
     g_kpgrp = kmem_cache_alloc(g_pgrp_cache, KP_ZERO);
     if (!g_kpgrp) extinction("kmem_cache_alloc(kpgrp) failed");
     pgrp_init_fields(g_kpgrp);
-    g_pgrp_created++;
+    __atomic_fetch_add(&g_pgrp_created, 1u, __ATOMIC_RELAXED);
 }
 
 struct Pgrp *kpgrp(void) {
@@ -70,7 +70,7 @@ struct Pgrp *pgrp_alloc(void) {
     struct Pgrp *p = kmem_cache_alloc(g_pgrp_cache, KP_ZERO);
     if (!p) return NULL;
     pgrp_init_fields(p);
-    g_pgrp_created++;
+    __atomic_fetch_add(&g_pgrp_created, 1u, __ATOMIC_RELAXED);
     return p;
 }
 
@@ -78,6 +78,15 @@ struct Pgrp *pgrp_clone(struct Pgrp *parent) {
     if (!parent)                  extinction("pgrp_clone(NULL)");
     if (parent->magic != PGRP_MAGIC)
         extinction("pgrp_clone of corrupted Pgrp");
+    // R5-H F92: defense-in-depth against single-bit-flip / partial-
+    // corruption that leaves magic intact but corrupts nbinds. The bound
+    // is fixed at PGRP_MAX_BINDS; validating here catches a torn nbinds
+    // before the read past binds[]. Same defense lands in bind() /
+    // unmount() implicitly via PGRP_MAX_BINDS bounds checks at each
+    // operation; pgrp_clone is the only single-pass-loop-on-trusted-
+    // length path, so it gets an explicit check.
+    if ((unsigned)parent->nbinds > PGRP_MAX_BINDS)
+        extinction("pgrp_clone: parent->nbinds out of range (corrupted Pgrp)");
 
     struct Pgrp *child = pgrp_alloc();
     if (!child) return NULL;
@@ -96,18 +105,31 @@ struct Pgrp *pgrp_clone(struct Pgrp *parent) {
 void pgrp_ref(struct Pgrp *p) {
     if (!p) return;
     if (p->magic != PGRP_MAGIC)   extinction("pgrp_ref of corrupted Pgrp");
-    p->ref++;
+    // R5-H F80: atomic refcount. v1.0 P2-Eb has each Proc owning a
+    // private Pgrp (refcount = 1; never shared) so contention is zero;
+    // RFNAMEG (Phase 5+) introduces sharing across Procs running on
+    // different CPUs, at which point this primitive must be atomic.
+    // Landing the discipline now closes the latent hazard before the
+    // first sharing test would expose it.
+    __atomic_fetch_add(&p->ref, 1, __ATOMIC_RELAXED);
 }
 
 void pgrp_unref(struct Pgrp *p) {
     if (!p) return;
     if (p->magic != PGRP_MAGIC)   extinction("pgrp_unref of corrupted Pgrp");
     if (p == g_kpgrp)             extinction("pgrp_unref attempted on kpgrp");
-    if (p->ref <= 0)              extinction("pgrp_unref of zero-ref Pgrp");
-    p->ref--;
-    if (p->ref == 0) {
+    // R5-H F80: atomic decrement-and-check. Single fetch_sub returns the
+    // pre-decrement value; if it was 1, the decrement reached 0 and we
+    // own the free. Acquire ordering on the zero-transition load pairs
+    // with the release store of the last reference's mutator (matches
+    // the std::shared_ptr discipline). pre <= 0 indicates underflow —
+    // an unref-of-zero, distinct from the previous "post-decrement is
+    // negative" check (which was racy under SMP).
+    int pre = __atomic_fetch_sub(&p->ref, 1, __ATOMIC_ACQ_REL);
+    if (pre <= 0)                 extinction("pgrp_unref of zero-ref Pgrp");
+    if (pre == 1) {
         kmem_cache_free(g_pgrp_cache, p);
-        g_pgrp_destroyed++;
+        __atomic_fetch_add(&g_pgrp_destroyed, 1u, __ATOMIC_RELAXED);
     }
 }
 
@@ -116,8 +138,8 @@ int pgrp_nbinds(struct Pgrp *p) {
     return p->nbinds;
 }
 
-u64 pgrp_total_created(void)   { return g_pgrp_created; }
-u64 pgrp_total_destroyed(void) { return g_pgrp_destroyed; }
+u64 pgrp_total_created(void)   { return __atomic_load_n(&g_pgrp_created, __ATOMIC_RELAXED); }
+u64 pgrp_total_destroyed(void) { return __atomic_load_n(&g_pgrp_destroyed, __ATOMIC_RELAXED); }
 
 // =============================================================================
 // bind / unmount.

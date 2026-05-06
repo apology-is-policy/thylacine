@@ -316,6 +316,17 @@ void sched(void) {
     struct CpuSched *cs = this_cpu_sched();
     if (!cs->initialized) extinction("sched() before this CPU's sched_init");
 
+    // R5-H F93: clear the per-CPU need_resched flag at sched() entry.
+    // preempt_check_irq already clears before calling, so this is a no-op
+    // on the IRQ-driven path. For voluntary sched() callers (sleep,
+    // exits, explicit yield), this absorbs a stale flag set by sched_tick
+    // since the last preempt_check_irq — preventing a redundant
+    // preempt_check_irq → sched() spin on the next IRQ. Safe at this
+    // location because g_need_resched is per-CPU; only this CPU writes
+    // its own slot (sched_tick + this clear), and the fetch is monotonic
+    // (set TRUE → cleared FALSE → set TRUE again on next slice expiry).
+    g_need_resched[smp_cpu_idx_self()] = false;
+
     // P2-Bc/Ce: IRQ-mask + per-CPU run-tree lock. sched() mutates
     // shared state (run tree, current_thread via TPIDR_EL1, vd_t
     // counter) — a timer IRQ firing inside this critical section

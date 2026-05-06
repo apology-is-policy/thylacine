@@ -6,17 +6,23 @@ Per `CLAUDE.md` Spec-first policy: if the four (spec, technical reference, code,
 
 ---
 
-## scheduler.tla — P2-Cg impl mapping (SMP discipline lifted to spec)
+## scheduler.tla — P2-Cg/H impl mapping (SMP discipline lifted to spec)
 
-Status: **wait/wake proven; SMP runqueue + IPI ordering proven; EEVDF math + LatencyBound deferred** (P2-Cg). Models thread state machine + per-CPU dispatch + cross-CPU work-stealing (`Steal`) + per-(src,dst) FIFO IPI delivery (`IPI_Send` / `IPI_Deliver`) with state-consistency, wait/wake-atomicity, no-double-enqueue, and FIFO-ordering invariants. Proves `NoMissedWakeup` (ARCH §28 I-9), `NoDoubleEnqueue` (ARCH §8.4), and `IPIOrdering` (ARCH §28 I-18) under the correct primitives; produces a counterexample for each under the corresponding buggy primitive. Does NOT yet model EEVDF deadline math (post-P2-Cg) or LatencyBound liveness (Phase 2 close).
+Status: **wait/wake proven; SMP runqueue + IPI ordering proven; LatencyBound liveness proven (P2-H, minimal universe); full-universe per-thread fairness deferred to Phase 5+**. Models thread state machine + per-CPU dispatch + cross-CPU work-stealing (`Steal`) + per-(src,dst) FIFO IPI delivery (`IPI_Send` / `IPI_Deliver`) with state-consistency, wait/wake-atomicity, no-double-enqueue, FIFO-ordering, and "every runnable thread eventually runs" invariants. Proves `NoMissedWakeup` (ARCH §28 I-9), `NoDoubleEnqueue` (ARCH §8.4), `IPIOrdering` (ARCH §28 I-18), and `LatencyBound` (ARCH §28 I-17) under the correct primitives + fairness assumptions; produces a counterexample for each under the corresponding buggy primitive (or, for LatencyBound, fairness drop). Does NOT yet model EEVDF deadline math (post-P2-Cg, deferred to Phase 5+).
 
-TLC-clean at `Threads = {t1, t2, t3}, CPUs = {c1, c2}, MaxIPIs = 2` — 10188 distinct states explored; depth 16. Buggy configs:
+**P2-H spec change**: `Steal` precondition tightened — `current[stealer] = NULL` added so only an idle CPU steals. Without it, the spec admitted a steal-back-and-forth lasso (two busy CPUs trade a thread) that doesn't occur in the impl (since `try_steal` is only called from `pick_next` inside `sched()`, which runs only when the calling CPU is between releasing prev and picking next). The refinement closes the spurious lasso at the spec level. Safety state-space numbers below shifted slightly post-refinement.
 
-| Config | Flag | Invariant violated | Depth | Distinct states |
+Safety: TLC-clean at `Threads = {t1, t2, t3}, CPUs = {c1, c2}, MaxIPIs = 2` — 10188 distinct states explored; depth 17.
+Liveness: TLC-clean at `Threads = {t1, t2}, CPUs = {c1}, MaxIPIs = 1` — 23 distinct states; depth 5.
+
+| Config | Flag | Invariant / Property | Result | Distinct |
 |---|---|---|---|---|
-| `scheduler_buggy.cfg`       | `BUGGY = TRUE`           | `NoMissedWakeup`  | 6 | 245  |
-| `scheduler_buggy_steal.cfg` | `BUGGY_STEAL = TRUE`     | `NoDoubleEnqueue` | 4 | 38   |
-| `scheduler_buggy_ipi.cfg`   | `BUGGY_IPI_ORDER = TRUE` | `IPIOrdering`     | 6 | 470  |
+| `scheduler.cfg`              | safety-only             | `Invariants`          | clean (3T × 2C) | 10188 |
+| `scheduler_liveness.cfg`     | Spec_Live + SF          | `Invariants` + `LatencyBound` | clean (2T × 1C) | 23 |
+| `scheduler_buggy.cfg`        | `BUGGY = TRUE`          | `NoMissedWakeup`     | violation (depth 6) | 101 |
+| `scheduler_buggy_steal.cfg`  | `BUGGY_STEAL = TRUE`    | `NoDoubleEnqueue`    | violation (depth 4) | 40 |
+| `scheduler_buggy_ipi.cfg`    | `BUGGY_IPI_ORDER = TRUE`| `IPIOrdering`        | violation (depth 6) | 442 |
+| `scheduler_buggy_starve.cfg` | Spec (no fairness)      | `LatencyBound`       | stuttering (depth 3) | 23 |
 
 | Spec action | Source location | Notes |
 |---|---|---|
@@ -44,6 +50,17 @@ TLC-clean at `Threads = {t1, t2, t3}, CPUs = {c1, c2}, MaxIPIs = 2` — 10188 di
 | `NoMissedWakeup` (cond=TRUE ⇒ waiters={}) | `sleep()`'s cond check + waiter-add + sleep transition all happen inside one `while (!cond)` body under `r->lock`. `wakeup()`'s waiter-clear + cond is set by caller, both observable to sleep's resume re-check. The atomicity defeats the missed-wakeup race — proven in TLC, enforced at compile time by the lexical structure of `sleep()`. |
 | **`NoDoubleEnqueue`** (thread in ≤1 runq) *(P2-Cg)* | `try_steal`'s `unlink(peer, stolen)` call between read and rebase ensures the thread leaves victim's tree before joining caller's. The unlink is unconditional in the success path; no code path adds-without-removing. Plus, `ready()` is the only public insertion entry; it does not check "already in some other runq" — soundness rests on callers (sched, wakeup, try_steal) maintaining the invariant. |
 | **`IPIOrdering`** (head of queue = next-expected delivery seq) *(P2-Cg)* | GIC SGI hardware: per-(src, dst, sgi_intid) pend bit; edge-trigger; same-priority SGIs are arbitrated FIFO per ARM IHI 0069 §11.2.3. The `gic_dispatch` ACK-and-call path consumes one pending SGI at a time; subsequent SGIs are processed in arbitration order. v1.0 has only IPI_RESCHED, so the invariant is trivially per-pair FIFO. P5+ multi-type IPIs would refine to per-(src, type, dst) FIFO. |
+| **`LatencyBound`** (every RUNNABLE thread eventually runs) *(P2-H, ARCH §28 I-17)* | Three-layer impl enforcement: (1) **EEVDF deadline math** — `kernel/sched.c::insert_sorted` orders the per-CPU run tree by `vd_t`, so the next pick is always the deadline-tightest thread; v1.0 uses uniform weight=1, so `vd_t` advances as `cs->vd_counter++` per dispatch (effectively round-robin). (2) **Timer-driven preempt** — `arch/arm64/timer.c::timer_irq_handler` → `kernel/sched.c::sched_tick` decrements `slice_remaining` and sets `g_need_resched[cpu]` when slice expires; `arch/arm64/exception.c` IRQ-return path calls `preempt_check_irq` → `sched()` to honor the flag. Bounds wall-clock latency for any single thread to `THREAD_DEFAULT_SLICE_TICKS` × tick_period × N. (3) **WFI loop in idle CPUs** — `kernel/sched.c::per_cpu_main` re-enters `sched()` on every IPI_RESCHED, so a runnable thread on a peer's runq triggers steal-and-dispatch on the next idle wake. The spec's SF-on-Resume + SF-on-Yield + SF-on-WakeAll abstracts this layered impl-side enforcement to "fire if enabled inf often." |
+
+### P2-H landed (this chunk)
+
+- `LatencyBound` temporal property (`\A t : [](state[t] = "RUNNABLE" => <>(state[t] = "RUNNING"))`).
+- `Liveness == /\ \A cpu : SF_vars(Resume(cpu)) /\ \A cpu : SF_vars(Yield(cpu)) /\ SF_vars(WakeAll)`.
+- `Spec_Live == Init /\ [][Next]_vars /\ Liveness`.
+- `Steal` precondition tightened: `current[stealer] = NULL` added — only an idle CPU steals (matches impl: `try_steal` is called from `pick_next` inside `sched()`, when calling CPU is between releasing prev and picking next). Closes a spurious steal-back-and-forth lasso. Safety state-space numbers shifted slightly post-refinement.
+- `scheduler_liveness.cfg` (2T × 1C, MaxIPIs=1): `Spec_Live` + invariants + `LatencyBound` clean at 23 distinct states. Liveness check at minimal universe deliberately — full-universe per-thread fairness requires `Yield(cpu, t)` parameterization (see deferred section in scheduler.tla).
+- `scheduler_buggy_starve.cfg` (2T × 1C): `Spec` (no fairness) + `LatencyBound` produces stuttering counterexample at depth 3. Documents "without fairness, the scheduler does not satisfy I-17."
+- ARCH §28 I-17 promoted from "in spec" to **"proven in spec at minimal universe + counterexample documented"**. Full-universe refinement deferred to Phase 5+ when sched_setweight introduces meaningful weight asymmetry.
 
 ### P2-Cg landed
 
@@ -60,9 +77,10 @@ TLC-clean at `Threads = {t1, t2, t3}, CPUs = {c1, c2}, MaxIPIs = 2` — 10188 di
 - Timer-IRQ-driven preemption path mapped to spec's existing Yield action — non-deterministic Yield in the spec covers both cooperative and involuntary yields. NoMissedWakeup atomicity preserved by sleep()'s spin_lock_irqsave bracketing.
 - Per-thread slice + replenish-on-RUNNING modeled implicitly: the spec's Yield can fire at any state, which corresponds to "preempt-when-slice-expires" being an arbitrary scheduler decision.
 
-### Deferred (post-P2-Cg)
+### Deferred (post-P2-H)
 
-- **LatencyBound** (I-17, slice × N): liveness property requiring weak fairness. Phase 2 close adds explicit `Slice` variable + `IRQ`/`Preempt` actions + weak fairness annotations. Bounded slice value to keep state space tractable.
+- **Full-universe LatencyBound** with per-thread fairness: requires parameterizing Yield/Block by both `(cpu, thread)` and adding SF for each pair. State space + fairness-clause cardinality both grow; meaningful when EEVDF weights differ (since equal-weight round-robin emerges naturally from CHOOSE rotation at minimal universe). Phase 5+ when `sched_setweight` is exposed.
+- **Quantitative LatencyBound** (slice × N step bound): requires explicit `Slice` variable + step counter. Today's qualitative ("eventually") form is what TLA+ liveness checks naturally; quantitative bounds need a refinement mapping. Defer to whenever a numeric bound at the spec level becomes load-bearing (e.g., real-time scheduler work post-v1.0).
 - **Full EEVDF math**: `vd_t = ve_t + slice × W_total / w_self` with weighted virtual time advance. Becomes meaningful when weights differ — Phase 5+ when sched_setweight is exposed. v1.0 weight=1 always; current `g_vd_counter++` advance is a valid instantiation.
 - **`PickIsMinDeadline` invariant**: implies the impl's pick-min-vd_t is correct. Currently provable manually (the impl is mechanically pick-min) but not modeled.
 - **Per-IPI-type ordering**: when multiple IPI types coexist (P5+ TLB shootdown, halt, generic), the ordering invariant should refine to per-(src, type, dst) FIFO. Today's per-(src, dst) version is sound only when all IPIs are equal-priority + same-type.

@@ -71,7 +71,10 @@ void proc_init(void) {
     g_kproc->handles = handle_table_alloc();
     if (!g_kproc->handles) extinction("handle_table_alloc(kproc) failed");
 
-    g_proc_created++;
+    // R5-H F79: atomic counter — boot-time bump is single-CPU but the
+    // load side (proc_total_created) may be observed from secondary CPUs
+    // post-bring-up; using atomic ops uniformly avoids torn-read hazards.
+    __atomic_fetch_add(&g_proc_created, 1u, __ATOMIC_RELAXED);
     g_next_pid = 1;
 }
 
@@ -83,13 +86,20 @@ struct Proc *proc_alloc(void) {
     if (!g_proc_cache) extinction("proc_alloc before proc_init");
     struct Proc *p = kmem_cache_alloc(g_proc_cache, KP_ZERO);
     if (!p) return NULL;
-    proc_init_fields(p, g_next_pid++);
+
+    // R5-H F89: PID consumption is deferred until ALL alloc steps
+    // succeed. The previous pattern (proc_init_fields(p, g_next_pid++)
+    // before handle_table_alloc) advanced the PID even on rollback,
+    // permanently sparsifying the PID space. Now: assign the PID only
+    // after handle_table_alloc returns non-NULL.
+    proc_init_fields(p, 0);
 
     // R5-F F50/F53 close: count this Proc as created BEFORE any failure
     // path that might tear it down via proc_free. proc_free does its
     // own destroyed++ — this hoist keeps the counters balanced even
     // when rollback fires (created+1 / destroyed+1 net zero).
-    g_proc_created++;
+    // R5-H F79: atomic counter bump (was non-atomic ++).
+    __atomic_fetch_add(&g_proc_created, 1u, __ATOMIC_RELAXED);
 
     // P2-Fc: each Proc gets its own handle table. On OOM (now reachable
     // post-R5-F F50; PANIC_ON_FAIL dropped from g_handle_table_cache),
@@ -103,6 +113,13 @@ struct Proc *proc_alloc(void) {
         proc_free(p);              // does its own g_proc_destroyed++
         return NULL;
     }
+
+    // F89: assign the real PID now that handle table is live. This is
+    // the only path that exposes a Proc to the world; subsequent rollback
+    // (e.g., pgrp_clone or thread_create_with_arg failure in rfork) frees
+    // a Proc with the assigned PID via proc_free, which doesn't unwind
+    // PID consumption — but the destroyed++ counter still balances.
+    p->pid = g_next_pid++;
 
     return p;
 }
@@ -135,19 +152,38 @@ void proc_free(struct Proc *p) {
     p->handles = NULL;
 
     kmem_cache_free(g_proc_cache, p);
-    g_proc_destroyed++;
+    // R5-H F79: atomic counter bump.
+    __atomic_fetch_add(&g_proc_destroyed, 1u, __ATOMIC_RELAXED);
 }
 
-u64 proc_total_created(void)   { return g_proc_created; }
-u64 proc_total_destroyed(void) { return g_proc_destroyed; }
+u64 proc_total_created(void)   { return __atomic_load_n(&g_proc_created, __ATOMIC_RELAXED); }
+u64 proc_total_destroyed(void) { return __atomic_load_n(&g_proc_destroyed, __ATOMIC_RELAXED); }
 
 // =============================================================================
 // P2-D: rfork / exits / wait_pid
 // =============================================================================
 
 // Link a child Proc onto a parent's children list (head insertion).
-// Single-threaded at v1.0 P2-D — no locking; rfork is called only by
-// kernel test code on the boot CPU. Phase 5+ adds a per-Proc lock.
+//
+// SYNCHRONIZATION INVARIANT (R5-H F75 / F87 deferral): the child-list
+// (parent->children + sibling chain + each child's parent pointer) is
+// mutated WITHOUT cross-CPU synchronization at v1.0. This is sound iff:
+//
+//   (a) Each Proc has at most one thread (single-thread Procs at v1.0
+//       P2-D); a Proc never mutates its own child list from two CPUs.
+//   (b) NO cascading exits: a Proc's exits() must not run concurrently
+//       with one of its children's exits(). At v1.0 the only cascading
+//       lineage is kproc → test child[i]; kproc never exits. Tests do
+//       not currently rfork from rfork'd children.
+//
+// Violating (b) opens an SMP UAF: child reads p->parent into a register
+// before parent's proc_reparent_children rewrites it; parent then ZOMBIE
+// + woken; parent's parent reaps; parent freed; child's stale-register
+// wakeup(&parent->child_done) accesses freed memory.
+//
+// Phase 3+ MUST land a proc-table lock (or per-Proc lock) before
+// cascading rfork chains become routine, multi-thread Procs land, or
+// userspace exec is exposed. Tracking item: F75 deferral.
 static void proc_link_child(struct Proc *parent, struct Proc *child) {
     child->parent  = parent;
     child->sibling = parent->children;

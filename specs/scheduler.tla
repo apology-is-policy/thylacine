@@ -13,6 +13,15 @@
 (*   P2-Bc — preemption mapping (Yield is non-deterministic).              *)
 (*   P2-Cg — Steal action; per-(src,dst) IPI queues; IPIOrdering invariant *)
 (*           (I-18); NoDoubleEnqueue invariant for cross-CPU runq safety.  *)
+(*   P2-H  — LatencyBound liveness (I-17). Spec_Live extends Spec with     *)
+(*           SF on Resume + Yield + WakeAll. Refines Steal's precondition  *)
+(*           to current[stealer] = NULL (only idle CPUs steal — closes a   *)
+(*           spurious steal-back-and-forth lasso). Liveness is checked at  *)
+(*           a minimal universe (2T × 1C) in `scheduler_liveness.cfg`;     *)
+(*           the buggy `scheduler_buggy_starve.cfg` drops fairness and     *)
+(*           produces the stuttering counterexample. Per-thread fairness   *)
+(*           refinement (Yield(cpu, t) parameterized) deferred to Phase    *)
+(*           5+ alongside full EEVDF math.                                 *)
 (*                                                                         *)
 (* Protocol modeled (correct, atomic — see ARCH §8.4, §8.5, §8.7):         *)
 (*                                                                         *)
@@ -48,7 +57,7 @@
 (* policy):                                                                 *)
 (*                                                                         *)
 (*   scheduler.cfg              all flags FALSE — TLC proves all           *)
-(*                              invariants hold.                           *)
+(*                              SAFETY invariants hold (3T × 2C).         *)
 (*   scheduler_buggy.cfg        BUGGY=TRUE — counterexample violates       *)
 (*                              NoMissedWakeup at depth ≈ 4.               *)
 (*   scheduler_buggy_steal.cfg  BUGGY_STEAL=TRUE — counterexample          *)
@@ -57,6 +66,13 @@
 (*   scheduler_buggy_ipi.cfg    BUGGY_IPI_ORDER=TRUE — counterexample      *)
 (*                              violates IPIOrdering (head of queue ≠      *)
 (*                              next-expected delivery seq).               *)
+(*   scheduler_liveness.cfg     2T × 1C with Spec_Live + SF fairness —    *)
+(*                              TLC proves LatencyBound liveness (I-17).  *)
+(*   scheduler_buggy_starve.cfg 2T × 1C with Spec (no fairness) —         *)
+(*                              counterexample stutters; LatencyBound     *)
+(*                              violated. Demonstrates that without       *)
+(*                              fairness assumptions, the scheduler does  *)
+(*                              not satisfy I-17.                          *)
 (*                                                                         *)
 (* Invariants enforced (TLC-checked):                                      *)
 (*                                                                         *)
@@ -96,10 +112,14 @@
 (*   Self-IPIs excluded: src ≠ dst. The hardware permits self-IPIs but     *)
 (*   they're uninteresting for ordering and waste state space.             *)
 (*                                                                         *)
-(* Deferred (Phase 2 close):                                                *)
+(* Deferred (Phase 5+):                                                     *)
 (*                                                                         *)
-(*   LatencyBound (I-17, slice × N): liveness property requiring weak     *)
-(*   fairness; current spec is safety-only.                                *)
+(*   LatencyBound at full universe with per-thread fairness: requires     *)
+(*   parameterizing Yield/Block by both (cpu, thread) and adding SF for   *)
+(*   each (cpu, t) pair. State space and fairness-clause cardinality      *)
+(*   both grow; meaningful when EEVDF weights differ (since equal-weight  *)
+(*   round-robin emerges naturally from CHOOSE rotation at minimal        *)
+(*   universe). Phase 5+ when sched_setweight is exposed.                  *)
 (*                                                                         *)
 (*   Full EEVDF math: vd_t = ve_t + slice × W_total / w_self. Meaningful  *)
 (*   when weights differ (Phase 5+); v1.0 is weight=1 always.              *)
@@ -391,6 +411,19 @@ WakeAll ==
 (***************************************************************************)
 Steal(stealer, victim) ==
     /\ stealer # victim
+    /\ current[stealer] = NULL    \* P2-H: only an idle CPU steals.
+                                  \* The impl's try_steal is called from
+                                  \* pick_next, which runs only when
+                                  \* sched() is about to dispatch — i.e.,
+                                  \* the calling CPU has no settled
+                                  \* current. Without this precondition
+                                  \* the spec admits a steal-back-and-
+                                  \* forth lasso that never occurs in the
+                                  \* impl: two busy CPUs trade a single
+                                  \* thread between their runqs forever
+                                  \* while neither dispatches it. Adding
+                                  \* this precondition closes the
+                                  \* spurious LatencyBound counterexample.
     /\ runq[stealer] = {}
     /\ runq[victim]  # {}
     /\ \E t \in runq[victim] :
@@ -569,5 +602,61 @@ Invariants ==
     /\ NoMissedWakeup
     /\ NoDoubleEnqueue
     /\ IPIOrdering
+
+(***************************************************************************)
+(* ============================ LIVENESS (P2-H) =========================== *)
+(*                                                                         *)
+(* LatencyBound liveness — every RUNNABLE thread eventually runs.          *)
+(* Encodes ARCH §28 I-17. The spec models latency QUALITATIVELY            *)
+(* ("eventually") rather than QUANTITATIVELY ("within slice × N steps")    *)
+(* — TLA+ liveness checks fair-trace inclusion over infinite traces, not   *)
+(* bounded-step paths. A bound-arithmetic refinement would require an      *)
+(* explicit Slice variable + IRQ/Preempt actions firing at bounded         *)
+(* intervals + a step counter; deferred post-P2-H if we ever need to      *)
+(* prove a numeric bound at the spec level (the impl-side bound is        *)
+(* enforced by EEVDF deadline math + sched_tick at slice boundary).       *)
+(*                                                                         *)
+(* Fairness assumptions:                                                   *)
+(*                                                                         *)
+(*   WF on Resume(cpu): an idle CPU (current = NULL) with a non-empty      *)
+(*   runqueue eventually picks a thread up. Without this, idle CPUs       *)
+(*   could trivially halt — runnable threads starve.                       *)
+(*                                                                         *)
+(*   WF on Yield(cpu): a busy CPU eventually yields, allowing other        *)
+(*   RUNNABLE threads on its runqueue to dispatch. Without this, the      *)
+(*   running thread could occupy its CPU forever — runnable threads in    *)
+(*   the same runqueue starve. The CHOOSE in Yield is deterministic, but  *)
+(*   the previous current re-enters the runqueue each step, so successive *)
+(*   Yields rotate through threads (round-robin behavior emerges from     *)
+(*   the state-driven CHOOSE rather than an explicit FIFO).                *)
+(*                                                                         *)
+(*   WF on WakeAll: a producer that has set its precondition (cond=FALSE  *)
+(*   with non-empty waiters) eventually fires. Without this, all threads  *)
+(*   could WaitOnCond indefinitely while a never-firing wakeup leaves     *)
+(*   them in SLEEPING — but since SLEEPING is not RUNNABLE, that doesn't  *)
+(*   directly violate LatencyBound. The fairness is for the regenerative  *)
+(*   loop: WakeAll re-enters threads to RUNNABLE, then LatencyBound       *)
+(*   applies again. (BuggyCheck/BuggySleep/BuggySteal/BuggyIPI_Deliver    *)
+(*   need NO fairness because their gating flags are FALSE in non-buggy   *)
+(*   configs; in buggy configs the safety violation is what we check, not *)
+(*   liveness.)                                                            *)
+(*                                                                         *)
+(* Why we don't promise fairness on Block / Wake(t): Block(cpu) is the    *)
+(* "blocked for a non-cond reason" action; if a thread Blocks, recovery   *)
+(* is via Wake(t). The spec doesn't promise an external waker fires —     *)
+(* that's a caller-side liveness obligation (Phase 5+ note delivery is    *)
+(* where Block-style blocking gets a corresponding wake).                 *)
+(***************************************************************************)
+
+LatencyBound ==
+    \A t \in Threads :
+        [](state[t] = "RUNNABLE" => <>(state[t] = "RUNNING"))
+
+Liveness ==
+    /\ \A cpu \in CPUs : SF_vars(Resume(cpu))
+    /\ \A cpu \in CPUs : SF_vars(Yield(cpu))
+    /\ SF_vars(WakeAll)
+
+Spec_Live == Init /\ [][Next]_vars /\ Liveness
 
 ====

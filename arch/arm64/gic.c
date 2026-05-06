@@ -50,6 +50,7 @@
 #include <stdint.h>
 #include <thylacine/dtb.h>
 #include <thylacine/extinction.h>
+#include <thylacine/smp.h>     // smp_cpu_count / smp_cpu_idx_self for per-CPU bring-up + IPI range check
 #include <thylacine/types.h>
 
 // ---------------------------------------------------------------------------
@@ -407,7 +408,16 @@ bool gic_init_secondary(unsigned cpu_idx) {
 
 bool gic_send_ipi(unsigned target_cpu_idx, u32 sgi_intid) {
     if (sgi_intid > GIC_SGI_MAX) return false;
-    if (target_cpu_idx >= 16) return false;        // TargetList is 16 bits
+    // R5-H F83: validate against the actual CPU count, not the SGI
+    // TargetList width. The previous bound `target_cpu_idx >= 16` rejected
+    // truly-out-of-range indices (the encoding limit) but silently
+    // accepted any 0..15 — including 0..15 indices that don't map to a
+    // configured CPU on the platform. The caller would think the IPI
+    // was sent; hardware would drop the bit (no Aff0=N CPU exists). Now
+    // we reject any index >= the count of CPUs that came online via PSCI.
+    // Same observable behavior as before for all in-range callers; closes
+    // the silent-drop hazard for forward-looking out-of-range loops.
+    if (target_cpu_idx >= smp_cpu_count()) return false;
 
     // ICC_SGI1R_EL1 encoding (ARM ARM C5.2.18):
     //   [55:48]  Aff3
@@ -466,8 +476,6 @@ void gic_dispatch(u32 intid) {
 // SPIs are global; affinity routing (GICD_IROUTERn) decides which CPU
 // receives the IRQ.
 // ---------------------------------------------------------------------------
-
-#include <thylacine/smp.h>     // smp_cpu_idx_self for per-CPU redist base
 
 bool gic_enable_irq(u32 intid) {
     if (intid >= GIC_NUM_INTIDS) return false;
