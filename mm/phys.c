@@ -194,8 +194,11 @@ struct page *alloc_pages(unsigned order, unsigned flags) {
     if (!p) return NULL;
 
     if (flags & KP_ZERO) {
-        // Zero the allocated region. We're at PA; TTBR0 identity-maps it.
-        u64 *q = (u64 *)(uintptr_t)page_to_pa(p);
+        // P3-Bb: zero the allocated region via the kernel direct map.
+        // Pre-P3-Bb this used TTBR0 identity (PA-as-VA); now we use
+        // the high-VA direct map at KERNEL_DIRECT_MAP_BASE so the
+        // zeroing loop is unaffected by future TTBR0 changes.
+        u64 *q = pa_to_kva(page_to_pa(p));
         u64 n  = (1ull << order) << PAGE_SHIFT;
         for (u64 i = 0; i < n / 8; i++) q[i] = 0;
     }
@@ -213,17 +216,19 @@ struct page *alloc_pages_node(int node, unsigned order, unsigned flags) {
     return alloc_pages(order, flags);
 }
 
-// kpage_alloc returns a void* that's a cast load PA. TTBR0 identity-
-// maps low PA so the kernel can dereference directly. Phase 2 will
-// promote this to a high-VA direct-map pointer when TTBR0 retires.
+// kpage_alloc returns a void * that's a kernel direct-map VA (P3-Bb).
+// Pre-P3-Bb this returned the cast load PA via TTBR0 identity; the
+// direct map at 0xFFFF_0000_* now provides a stable high-VA pointer
+// independent of TTBR0 contents.
 void *kpage_alloc(unsigned flags) {
     struct page *p = alloc_pages(0, flags);
     if (!p) return NULL;
-    return (void *)(uintptr_t)page_to_pa(p);
+    return pa_to_kva(page_to_pa(p));
 }
 
 void kpage_free(void *p) {
     if (!p) return;
-    paddr_t pa = (paddr_t)(uintptr_t)p;
+    // P3-Bb: convert direct-map KVA to PA for page-frame database lookup.
+    paddr_t pa = kva_to_pa(p);
     free_pages(pa_to_page(pa), 0);
 }

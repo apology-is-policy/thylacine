@@ -71,6 +71,9 @@ void test_vmo_dup_oom_rollback(void);
 void test_asid_alloc_unique(void);
 void test_asid_free_reuses(void);
 void test_asid_inflight_count(void);
+void test_directmap_kva_round_trip(void);
+void test_directmap_alloc_through_directmap(void);
+void test_directmap_vmalloc_mmio_smoke(void);
 void test_elf_parse_minimal_ok(void);
 void test_elf_parse_multi_segment_ok(void);
 void test_elf_header_rejection(void);
@@ -134,6 +137,11 @@ struct test_case g_tests[] = {
     { "asid.alloc_unique",             test_asid_alloc_unique,             false, NULL },
     { "asid.free_reuses",              test_asid_free_reuses,              false, NULL },
     { "asid.inflight_count",           test_asid_inflight_count,           false, NULL },
+    { "directmap.kva_round_trip",      test_directmap_kva_round_trip,      false, NULL },
+    { "directmap.alloc_through_directmap",
+                                       test_directmap_alloc_through_directmap,
+                                                                           false, NULL },
+    { "directmap.vmalloc_mmio_smoke",  test_directmap_vmalloc_mmio_smoke,  false, NULL },
     { "elf.parse_minimal_ok",          test_elf_parse_minimal_ok,          false, NULL },
     { "elf.parse_multi_segment_ok",    test_elf_parse_multi_segment_ok,    false, NULL },
     { "elf.header_rejection",          test_elf_header_rejection,          false, NULL },

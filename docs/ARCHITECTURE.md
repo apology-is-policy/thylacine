@@ -478,6 +478,54 @@ At v1.0 there's exactly one node. At v2.x multi-socket, the structure is filled 
 
 Buddy allocator + per-CPU magazines for physical frames; SLUB for kernel objects; per-process VMAs in a red-black tree; W^X enforced at PTE bit layer + syscall layer + ELF loader. KASLR randomizes kernel base. NUMA-shaped from v1.0 (single-node).
 
+### 6.10 Capability-based kernel addressing (v2.x direction)
+
+**STATUS**: COMMITTED (v2.x design contract; not v1.0).
+
+The v1.0 kernel direct map (§6.2) is the **pragmatic compromise**, not the principled SOTA. This subsection records the v2.x architectural goal — capability-based kernel addressing — so the v1.0 direct map is explicitly the trade-off rather than implicitly the only choice. Per `NOVEL.md §3.9` Contract D.
+
+**The direct map's "hack-ish" properties** (acknowledged at v1.0):
+
+- Full kernel exposure: every byte of RAM is reachable via constant-offset arithmetic from any kernel code path. A speculative-load gadget anywhere in the kernel can, in principle, read any kernel data — filesystem cache, process credentials, crypto keys, all in one undifferentiated R/W blob.
+- Implicit aliasing: the same physical page lives at multiple VAs (direct map at `0xFFFF_0000_*` + kernel image at `0xFFFF_A000_* + KASLR` + user mapping in TTBR0 if applicable). Cache-attribute coherence is the kernel's responsibility.
+- No subsystem differentiation: filesystem cache, process credentials, and crypto keys all sit in one R/W mapping.
+
+**SOTA alternatives** (research / production-deployed):
+
+- **seL4** — no kernel direct map. Every kernel data structure is allocated via Untyped → typed capabilities and mapped explicitly. The kernel's address space is minimal; every access is capability-mediated. Formally verified.
+- **CHERI** — capability hardware. Pointers carry bounds + type + permission tags enforced by the CPU. Even within a flat address space, kernel code can't fabricate or escalate capabilities. Production-deployed by Arm Morello; Cambridge / SRI's ongoing work.
+
+**Why v2.x, not v1.0**:
+
+- C's type system can't express provably-safe capabilities. `kobj_t` in Thylacine today is `void *` precisely because C bottoms out there. seL4-discipline in C is possible but the safety is by-convention, not enforced.
+- A capability-based kernel allocator requires re-architecting buddy + SLUB + every kernel subsystem to consume/produce capabilities. Multi-year effort.
+- Rust kernel port is the natural carrier (see §3 Toolchain — "Rust-port-friendly discipline" is already a v1.0 commitment) but the port itself is post-v1.0.
+- CHERI / Morello is hardware-conditional; ARM's Morello board is research-grade, not v1.0-shippable.
+
+**What v1.0 commits that survives the v2.x migration**:
+
+- Every direct-map PTE is **R/W + XN unconditionally** — kernel direct map is data, never code. W^X invariant I-12 holds at the alias level: the same physical page mapped R/X via kernel image VA is mapped R/W + XN via direct map; never both R/W and X.
+- The kernel allocator's API surface (`kmem_cache_alloc`, `alloc_pages`, `kmalloc`) is structured around cache + size + flags arguments, NOT raw arithmetic on PAs. v2.x can swap the implementation behind it from "raw void * pointers into direct map" to "typed kernel capabilities with explicit bounds + permissions" without rewriting callers.
+- Every PA↔KVA conversion is funneled through `pa_to_kva()` / `kva_to_pa()` (added at P3-Bb). v2.x replaces these with capability-derive + capability-extract operations.
+- KASLR-randomization of the direct-map base is a v1.x hardening pass. The offset is currently fixed at `0xFFFF_0000_0000_0000`; randomizing it gives speculation-attack mitigation independent of the v2.x capability path.
+- MMIO is mapped at vmalloc range `0xFFFF_8000_*` with Device-nGnRnE attributes, NOT via the direct map. This separation already implements one form of "subsystem differentiation."
+
+**What v2.x changes**:
+
+- `kmem_cache_alloc` returns `cap_t obj_cap` instead of `void *obj` (or returns `void *` AS a capability if CHERI hardware is in use; the source-level API stays similar).
+- Buddy yields capabilities to physical regions, not pointers to direct-map VAs.
+- Kernel subsystems hold typed capabilities to their data structures; access requires explicit unwrap.
+- Speculative-load attacks lose their target: even if a Spectre-style gadget exists in the kernel, the direct map doesn't expose all RAM as data.
+
+**Phasing** (post-v1.0):
+
+- v1.x: KASLR-randomize the direct-map base + audit every kernel call site for compliance with the cache+size+flags API surface (no raw PA arithmetic outside `pa_to_kva` / `kva_to_pa`).
+- v2.0: Rust kernel port begins. Capability-typed allocator API as the primary surface; `void *` is a thin shim during the port window.
+- v2.1+: CHERI / Morello hardware target. Capabilities become CPU-enforced; the C-shim layer is removable.
+- v3.x: full capability discipline — kernel-internal addressing parallels handles.tla's user-facing capability monotonicity.
+
+This direction is consistent with Thylacine's existing commitments: handles.tla discipline applied INWARD; SOTA security; verification-driven design. The compromise at v1.0 is honest and recoverable; the principled answer waits for the right tool.
+
 ---
 
 ## 7. Process and thread model

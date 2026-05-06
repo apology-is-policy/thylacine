@@ -101,4 +101,36 @@ static inline struct page *pa_to_page(paddr_t pa) {
     return pfn_to_page(pa >> PAGE_SHIFT);
 }
 
+// =============================================================================
+// P3-Bb: Kernel direct map (KVA ↔ PA conversion).
+//
+// Per ARCH §6.2 and §6.10: physical RAM is linearly mapped into TTBR1's
+// high half at base 0xFFFF_0000_0000_0000. Kernel allocators return
+// pointers INTO this direct map; PA↔KVA is constant-offset arithmetic.
+//
+// Capability-amenable surface (NOVEL §3.9 Contract D): every PA↔KVA
+// conversion is funneled through these inlines. v2.x can swap the
+// implementation behind them (e.g., capability-derive + capability-
+// extract on CHERI hardware) without rewriting callers.
+//
+// Constraint: PA fits in bits 47:0 (ARCH §6.2: 48-bit VA, ≤ 1 TiB
+// physical at v1.0). The OR-with-base produces the KVA; clearing
+// bits 63:48 recovers the PA.
+//
+// **All direct-map PTEs are unconditionally R/W + XN** — kernel direct
+// map is data, never code. W^X invariant I-12 holds at the alias level:
+// the same physical page mapped R/X via kernel image VA is mapped
+// R/W + XN via direct map; never both R/W and X.
+// =============================================================================
+
+#define KERNEL_DIRECT_MAP_BASE  0xFFFF000000000000ull
+
+static inline void *pa_to_kva(paddr_t pa) {
+    return (void *)(uintptr_t)((u64)pa | KERNEL_DIRECT_MAP_BASE);
+}
+
+static inline paddr_t kva_to_pa(const void *kva) {
+    return (paddr_t)((u64)(uintptr_t)kva & ~KERNEL_DIRECT_MAP_BASE);
+}
+
 #endif // THYLACINE_PAGE_H

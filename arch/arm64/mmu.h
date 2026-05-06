@@ -16,6 +16,8 @@
 #ifndef THYLACINE_ARCH_ARM64_MMU_H
 #define THYLACINE_ARCH_ARM64_MMU_H
 
+#include <stddef.h>           // size_t (for mmu_map_mmio)
+#include <thylacine/page.h>   // paddr_t (for mmu_map_mmio)
 #include <thylacine/types.h>
 
 // ---------------------------------------------------------------------------
@@ -126,9 +128,50 @@
      PTE_ATTR_IDX(MAIR_IDX_DEVICE) | PTE_AP_RW_EL1 | PTE_UXN | PTE_PXN)
 //   (Device-nGnRnE; SH_NONE per ARM ARM B2.7.2; W^X OK by PXN.)
 
+#define PTE_DEVICE_RW \
+    (PTE_VALID | PTE_TYPE_PAGE | PTE_AF | PTE_SH_NONE | \
+     PTE_ATTR_IDX(MAIR_IDX_DEVICE) | PTE_AP_RW_EL1 | PTE_UXN | PTE_PXN)
+//   (P3-Bb: page-grain device mapping for vmalloc-region MMIO.
+//   Device-nGnRnE; SH_NONE per ARM ARM B2.7.2; W^X OK by PXN.)
+
 // ---------------------------------------------------------------------------
 // Public API.
 // ---------------------------------------------------------------------------
+
+// =============================================================================
+// P3-Bb: Kernel direct map + vmalloc API.
+//
+// Per ARCH §6.2 + §6.10. The kernel direct map provides linear PA→KVA
+// translation at base KERNEL_DIRECT_MAP_BASE (0xFFFF_0000_0000_0000); see
+// `<thylacine/page.h>` for the inline pa_to_kva / kva_to_pa helpers.
+// The vmalloc range (0xFFFF_8000_0000_0000) holds page-grain MMIO
+// mappings discovered at runtime from the DTB.
+//
+// At v1.0 P3-Bb the direct map covers physical RAM up to 8 GiB (PA
+// 1 GiB → 9 GiB; PA < 1 GiB is conventionally MMIO on QEMU virt and is
+// excluded). This is sufficient for QEMU virt's 2 GiB default and
+// Pi 5's 8 GiB. Larger configurations need the bump extended.
+// =============================================================================
+
+#define VMALLOC_BASE  0xFFFF800000000000ull
+
+// Map a device-region MMIO range into the vmalloc area. Returns a kernel
+// VA that the caller can pass to MMIO accessors (mmio_w32 etc.). The
+// mapping is Device-nGnRnE attribute (per ARM ARM B2.7.2 — strongly-
+// ordered, no gathering, no reordering, no early write acknowledgement).
+//
+// `pa` and `size` need not be page-aligned; the implementation rounds
+// down `pa` and rounds up `size` to PAGE_SIZE. Returns NULL on out-of-
+// vmalloc-space; extincts on misuse (pa+size overflow, etc.).
+//
+// Idempotent: calling twice with the same (pa, size) returns two
+// DIFFERENT kvas, both mapping the same PA. Caller is responsible for
+// caching the returned kva (typically in a `g_xxx_base` global at the
+// driver layer).
+//
+// Cost: a few PTE writes + dsb_ishst + isb. No TLB flush needed because
+// the new entries were previously invalid (no stale entries to flush).
+void *mmu_map_mmio(paddr_t pa, size_t size);
 
 // Build the page tables in BSS and program MAIR / TCR / TTBR / SCTLR.
 //

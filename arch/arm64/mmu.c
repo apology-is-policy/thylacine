@@ -45,7 +45,9 @@
 #include "mmu.h"
 #include "kaslr.h"
 
+#include <stddef.h>           // size_t (P3-Bb mmu_map_mmio)
 #include <stdint.h>
+#include <thylacine/extinction.h>   // extinction (P3-Bb mmu_map_mmio guards)
 #include <thylacine/types.h>
 
 // ---------------------------------------------------------------------------
@@ -118,6 +120,38 @@ static u64 l2_ttbr1[ENTRIES_PER_TABLE]    __attribute__((aligned(PAGE_SIZE)));
 // Shared L3 table for the kernel-image 2 MiB region. Both TTBR0 and
 // TTBR1 walks land here for kernel-image accesses.
 static u64 l3_kernel[ENTRIES_PER_TABLE]   __attribute__((aligned(PAGE_SIZE)));
+
+// =============================================================================
+// P3-Bb: Direct map + vmalloc tables (TTBR1 high half).
+// =============================================================================
+//
+// Direct map (linear PA→KVA at base 0xFFFF_0000_0000_0000):
+//   - l0_ttbr1[0] -> l1_directmap.
+//   - l1_directmap[1..8] -> 1 GiB blocks at PA 1 GiB..9 GiB (RAM range).
+//   - l1_directmap[0] = invalid (PA 0..1 GiB is MMIO on QEMU virt; not
+//     part of direct map).
+//
+// vmalloc range (page-grain MMIO at base 0xFFFF_8000_0000_0000):
+//   - l0_ttbr1[256] -> l1_vmalloc.
+//   - l1_vmalloc[0] -> l2_vmalloc.
+//   - l2_vmalloc[0] -> l3_vmalloc (covers 2 MiB; 512 × 4 KiB pages).
+//   - l3_vmalloc populated by mmu_map_mmio at runtime.
+//
+// All direct-map PTEs unconditionally R/W + XN (PTE_KERN_RW_BLOCK has
+// PTE_PXN | PTE_UXN built in). All vmalloc-MMIO PTEs are
+// PTE_DEVICE_RW (Device-nGnRnE + PXN + UXN). W^X invariant I-12 holds
+// at the alias level.
+
+static u64 l1_directmap[ENTRIES_PER_TABLE] __attribute__((aligned(PAGE_SIZE)));
+static u64 l1_vmalloc[ENTRIES_PER_TABLE]   __attribute__((aligned(PAGE_SIZE)));
+static u64 l2_vmalloc[ENTRIES_PER_TABLE]   __attribute__((aligned(PAGE_SIZE)));
+static u64 l3_vmalloc[ENTRIES_PER_TABLE]   __attribute__((aligned(PAGE_SIZE)));
+
+// vmalloc bump-allocator cursor. Tracks the next free L3 entry index in
+// l3_vmalloc. Each mmu_map_mmio call advances by ceil(size / PAGE_SIZE).
+// Bounded by ENTRIES_PER_TABLE (512); v1.0 uses ~81 entries (PL011 + GIC
+// dist + 4×GIC redists), leaving ~431 entries of headroom.
+static u32 g_vmalloc_next_idx;
 
 // ---------------------------------------------------------------------------
 // PTE constructors and inspectors.
@@ -291,6 +325,51 @@ static void build_page_tables(u64 slide) {
         l0_ttbr1[l0_idx] = make_table_pte(l1_ttbr1);
         l1_ttbr1[l1_idx] = make_table_pte(l2_ttbr1);
         l2_ttbr1[l2_idx] = make_table_pte(l3_kernel);     // shared L3
+    }
+
+    // P3-Bb: TTBR1 direct map at base KERNEL_DIRECT_MAP_BASE
+    // (0xFFFF_0000_0000_0000). Linear PA→KVA for physical RAM.
+    //
+    // VA decode for 0xFFFF_0000_0000_0000:
+    //   bits 47:39 = 0 → l0_ttbr1[0].
+    //   bits 38:30 = 0..N → l1_directmap[gib] (1 GiB block per entry).
+    //
+    // Map PA 1 GiB..9 GiB (l1_directmap[1..8]). PA < 1 GiB is conventionally
+    // MMIO and is not part of direct map (l1_directmap[0] left invalid).
+    // PA ≥ 9 GiB (l1_directmap[9..]) left invalid; v1.0 caps at 8 GiB.
+    {
+        l0_ttbr1[0] = make_table_pte(l1_directmap);
+        for (u32 gib = 1; gib <= 8; gib++) {
+            paddr_t pa = (paddr_t)gib << BLOCK_SHIFT_L1;
+            // PTE_KERN_RW_BLOCK has PTE_PXN | PTE_UXN built in: every
+            // direct-map page is R/W + XN. W^X invariant I-12 holds at
+            // the alias level (kernel image's RX mapping is at a
+            // different VA via TTBR1 KASLR offset; same physical page
+            // never both W and X via the same translation).
+            l1_directmap[gib] = (pa & ~(BLOCK_SIZE_L1 - 1)) | PTE_KERN_RW_BLOCK;
+        }
+    }
+
+    // P3-Bb: TTBR1 vmalloc range at base VMALLOC_BASE
+    // (0xFFFF_8000_0000_0000). Page-grain MMIO mappings populated by
+    // mmu_map_mmio at runtime.
+    //
+    // VA decode for 0xFFFF_8000_0000_0000:
+    //   bits 47:39 = 256 → l0_ttbr1[256].
+    //   bits 38:30 = 0   → l1_vmalloc[0].
+    //   bits 29:21 = 0   → l2_vmalloc[0].
+    //   bits 20:12 = 0..511 → l3_vmalloc[idx] (4 KiB pages).
+    //
+    // The L3 table covers the first 2 MiB of vmalloc (512 × 4 KiB).
+    // l3_vmalloc entries are zero (invalid) until populated by
+    // mmu_map_mmio.
+    {
+        l0_ttbr1[256] = make_table_pte(l1_vmalloc);
+        l1_vmalloc[0] = make_table_pte(l2_vmalloc);
+        l2_vmalloc[0] = make_table_pte(l3_vmalloc);
+        // l3_vmalloc entries left zero — populated by mmu_map_mmio post-
+        // boot.
+        g_vmalloc_next_idx = 0;
     }
 }
 
@@ -486,6 +565,60 @@ bool mmu_map_device(paddr_t pa, u64 size) {
     isb();
 
     return true;
+}
+
+// ---------------------------------------------------------------------------
+// P3-Bb: mmu_map_mmio — page-grain MMIO mapping in vmalloc range.
+// ---------------------------------------------------------------------------
+//
+// Allocates `n_pages = ceil(size / PAGE_SIZE)` consecutive entries in
+// l3_vmalloc starting at g_vmalloc_next_idx. Each entry maps the
+// corresponding 4 KiB chunk of `[pa..pa+size)` with Device-nGnRnE
+// attributes (PTE_DEVICE_RW). Returns the kernel VA of the first byte.
+//
+// `pa` must be 4 KiB-aligned (extincts otherwise). `size` is rounded
+// up to PAGE_SIZE. Returns NULL if the vmalloc l3 table runs out of
+// entries (logged but not fatal — the caller decides).
+//
+// Threading: at v1.0 P3-Bb mmu_map_mmio is called only from boot_main
+// (single-threaded). The bump cursor is not lock-protected. Phase 3+
+// callers from other contexts (driver init, exec) need to acquire a
+// vmalloc lock before calling. Documented as a trip-hazard.
+//
+// No TLB flush issued: l3_vmalloc entries were previously zero (invalid),
+// so there are no stale TLB entries to invalidate. dsb_ishst + isb
+// publish the new entries to other CPUs via the inner-shareable scope.
+
+void *mmu_map_mmio(paddr_t pa, size_t size) {
+    if (size == 0) return NULL;
+    if (pa & (PAGE_SIZE - 1)) {
+        extinction("mmu_map_mmio: pa not page-aligned");
+    }
+    if (pa + size < pa) {
+        extinction("mmu_map_mmio: pa + size overflow");
+    }
+
+    size_t aligned_size = (size + PAGE_SIZE - 1) & ~(size_t)(PAGE_SIZE - 1);
+    u32 n_pages = (u32)(aligned_size >> PAGE_SHIFT);
+
+    if (g_vmalloc_next_idx + n_pages > ENTRIES_PER_TABLE) {
+        // Out of vmalloc space. v1.0 doesn't expand; extinct loudly so
+        // the bound is visible (rather than silent NULL return that a
+        // caller might dereference).
+        extinction("mmu_map_mmio: l3_vmalloc exhausted (>512 4-KiB MMIO pages)");
+    }
+
+    u32 start_idx = g_vmalloc_next_idx;
+    for (u32 i = 0; i < n_pages; i++) {
+        paddr_t page_pa = pa + ((paddr_t)i << PAGE_SHIFT);
+        l3_vmalloc[start_idx + i] = make_page_pte_l3(page_pa, PTE_DEVICE_RW);
+    }
+    g_vmalloc_next_idx += n_pages;
+
+    dsb_ishst();
+    isb();
+
+    return (void *)(uintptr_t)(VMALLOC_BASE + ((u64)start_idx << PAGE_SHIFT));
 }
 
 // ---------------------------------------------------------------------------

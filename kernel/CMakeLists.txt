@@ -50,6 +50,7 @@ set(KERNEL_SRCS
     test/test_vmo.c
     test/test_elf.c
     test/test_asid.c
+    test/test_directmap.c
     namespace.c
     handle.c
     vmo.c

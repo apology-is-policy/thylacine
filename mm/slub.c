@@ -141,14 +141,19 @@ static void init_cache(struct kmem_cache *c, const char *name,
 // ---------------------------------------------------------------------------
 
 // Initialize a fresh slab page's freelist. All objects are free.
+//
+// P3-Bb: object addresses are kernel direct-map VAs (pa_to_kva), not
+// raw physical addresses. The previous PA-as-VA pun worked because
+// TTBR0's identity-map made low PA = low VA; with the direct map at
+// 0xFFFF_0000_*, kernel pointers must come from there.
 static void slab_init_freelist(struct kmem_cache *c, struct page *slab) {
-    paddr_t base_pa = page_to_pa(slab);
+    void *base_kva = pa_to_kva(page_to_pa(slab));
     void *prev = NULL;
 
     // Walk objects from last to first, threading prev pointers. The
     // resulting freelist starts at object 0 and chains forward.
     for (int i = (int)c->objects_per_slab - 1; i >= 0; i--) {
-        void *obj = (void *)(uintptr_t)(base_pa + (paddr_t)i * c->actual_size);
+        void *obj = (char *)base_kva + (size_t)i * c->actual_size;
         *(void **)obj = prev;
         prev = obj;
     }
@@ -256,7 +261,9 @@ static void cache_free_locked(struct kmem_cache *c, void *obj, struct page *slab
 
 void kmem_cache_free(struct kmem_cache *c, void *obj) {
     if (!obj) return;
-    struct page *slab = pa_to_page((paddr_t)(uintptr_t)obj);
+    // P3-Bb: obj is a kernel direct-map VA; convert to PA via kva_to_pa
+    // before walking the page-frame database.
+    struct page *slab = pa_to_page(kva_to_pa(obj));
     if (!(slab->flags & PG_SLAB) || slab->slab_cache != c) {
         extinction("kmem_cache_free: object not from this cache");
     }
@@ -343,11 +350,12 @@ void *kmalloc(size_t n, unsigned flags) {
     // Large request: bypass slab and use alloc_pages directly. The
     // page itself records the order (set by alloc_pages); kfree
     // reads it back.
+    // P3-Bb: return a direct-map KVA, not the raw PA.
     size_t pages = (n + PAGE_SIZE - 1) >> PAGE_SHIFT;
     unsigned order = (unsigned)ceil_log2_u64((u64)pages);
     struct page *p = alloc_pages(order, flags);
     if (!p) return NULL;
-    return (void *)(uintptr_t)page_to_pa(p);
+    return pa_to_kva(page_to_pa(p));
 }
 
 void *kzalloc(size_t n, unsigned flags) {
@@ -361,7 +369,8 @@ void *kcalloc(size_t n, size_t size, unsigned flags) {
 
 void kfree(void *p) {
     if (!p) return;
-    paddr_t pa = (paddr_t)(uintptr_t)p;
+    // P3-Bb: convert direct-map KVA to PA for page-frame database lookup.
+    paddr_t pa = kva_to_pa(p);
     struct page *page = pa_to_page(pa);
 
     if (page->flags & PG_SLAB) {

@@ -660,10 +660,19 @@ The three contracts:
 - The contract: the kernel's filesystem-mounting interface is generic enough that an in-kernel Stratum driver registers itself just like any other Dev would. No Stratum-specific syscall surface.
 - v1.0 work: design sketch in `ARCHITECTURE.md §14.4`; ensure the mount infrastructure doesn't have 9P-specific assumptions baked in.
 
+**D. Capability-based kernel addressing** (added at P3-Bb design discussion):
+- v1.0 uses a Linux/FreeBSD-style kernel direct map: physical RAM linearly mapped at `0xFFFF_0000_*` in TTBR1; kernel allocators return pointers into the direct map; PA↔KVA conversion is constant-offset arithmetic. Pragmatic, well-understood, performant.
+- v2.x explores a capability-based kernel addressing discipline inspired by seL4 (capability-mediated kernel memory) and CHERI (hardware-tagged pointers with bounds + permissions). The natural extension of Thylacine's existing handles.tla discipline applied INWARD: the same capability-monotonicity rules that govern user-facing handles would govern kernel-internal addressing.
+- The contract: the v1.0 kernel direct map is **explicitly the pragmatic compromise**, not the principled SOTA. The kernel allocator's API surface (`kmem_cache_alloc`, `alloc_pages`, `kmalloc`) is structured so that v2.x can swap the implementation behind it from "raw void * pointers into direct map" to "typed kernel capabilities with explicit bounds + permissions" without callers needing rewrites — the call sites use the cache + size + flags interface, not raw arithmetic on PAs.
+- The honest framing: the direct map exposes every byte of RAM to every line of kernel code (full speculative-load attack surface; no subsystem differentiation between filesystem cache vs process credentials). seL4's principled answer (no kernel direct map; explicit capability-mediated allocation) is multi-year and requires Rust (or CHERI hardware) — C's type system can't express provably-safe capabilities. v2.x is the right horizon.
+- v1.0 work: this NOVEL section (the contract); a brief paragraph in `ARCHITECTURE.md §6` referencing it; ensure SLUB / buddy / VMO call sites use the capability-amenable API surface (already true at v1.0); document the SLUB PA-as-VA convention's removal at P3-Bb so the path is reversible.
+- v1.0 commitment that survives: every direct-map PTE is **R/W + XN unconditionally** — kernel direct map is data, never code. W^X invariant I-12 holds at the alias level (the same physical page mapped R/X via kernel image VA is mapped R/W + XN via direct map; never both). KASLR-randomization of the direct-map base is deferred to a v1.x hardening pass (the offset is currently fixed at `0xFFFF_0000_0000_0000`).
+
 **Scope — in** (Phase 0 design effort):
 - `ARCHITECTURE.md §15.4` — capability elevation via factotum: protocol sketch, threat model, granted-capability shape, integration with `rfork` flags, interaction with namespaces.
 - `ARCHITECTURE.md §20.6` — multikernel SMP direction: per-core kernel instance shape, cross-core 9P channels, hot-plug handling, NUMA story.
 - `ARCHITECTURE.md §14.4` — in-kernel Stratum driver: shared-library linkage model, kernel-side handle types, integration with existing Dev infrastructure.
+- `ARCHITECTURE.md §6.10` — capability-based kernel addressing direction (added at P3-Bb): the v2.x principled alternative to the direct map; references seL4 / CHERI; identifies what v1.0 commits that survives the migration vs what changes.
 
 **Scope — deferred** (the implementations themselves):
 - All three implementations are post-v1.0.
@@ -672,18 +681,19 @@ The three contracts:
 - Implementing any of these at v1.0 would expand v1.0 scope by ~30-50 KLOC and ~2 years; out.
 
 **Done definition**:
-- All three sections in `ARCHITECTURE.md` are at COMMITTED status by Gate 3.
-- Each section is detailed enough that the v2.0 implementation team (which may include this same agent in a later session) can build to spec without redesign.
-- Each section's design is consistent with v1.0 invariants — no v1.0 commitment that would need to be broken to implement the v2.0 feature.
+- All four sections in `ARCHITECTURE.md` are at COMMITTED status by their respective gates (the original three at Gate 3; §6.10 added during Phase 3 design when the direct-map vs capability question surfaced).
+- Each section is detailed enough that the v2.x implementation team (which may include this same agent in a later session) can build to spec without redesign.
+- Each section's design is consistent with v1.0 invariants — no v1.0 commitment that would need to be broken to implement the v2.x feature.
 
 **Dependencies**:
 - ARCH §15 (security model) for §15.4.
 - ARCH §20 (per-core SMP) for §20.6.
 - ARCH §14 (filesystem integration) for §14.4.
+- ARCH §6 (memory management) for §6.10 — the kernel direct map design lives here; the capability-addressing direction is its v2.x successor.
 
 **Complexity**:
-- Phase 0 design effort: ~500-1000 lines of `ARCHITECTURE.md` content per contract; total ~2-3 KLOC of architecture document.
-- v1.0 implementation impact: ~0 KLOC (no code; architectural discipline only).
+- Phase 0 + Phase 3 design effort: ~500-1000 lines of `ARCHITECTURE.md` content per contract; total ~3-4 KLOC of architecture document.
+- v1.0 implementation impact: ~0 KLOC (no code; architectural discipline only) — except for §6.10 where v1.0 implements the direct map (P3-Bb) with the v2.x-compatible API surface.
 
 **Risk — Low**:
 - The contracts are bounded scope statements, not promises of correctness.
