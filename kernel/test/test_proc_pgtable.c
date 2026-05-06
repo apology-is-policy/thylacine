@@ -25,10 +25,13 @@
 #include <thylacine/extinction.h>
 #include <thylacine/page.h>
 #include <thylacine/proc.h>
+#include <thylacine/sched.h>
+#include <thylacine/thread.h>
 #include <thylacine/types.h>
 
 void test_proc_pgtable_alloc_smoke(void);
 void test_proc_pgtable_lifecycle_stress(void);
+void test_proc_ttbr0_swap_smoke(void);
 
 void test_proc_pgtable_alloc_smoke(void) {
     unsigned asid_inflight_before = asid_inflight();
@@ -82,4 +85,73 @@ void test_proc_pgtable_lifecycle_stress(void) {
         "proc_total_destroyed didn't advance by ITERS (leak?)");
     TEST_EXPECT_EQ(asid_inflight(), asid_before,
         "asid_inflight didn't return to baseline (ASID leak?)");
+}
+
+// =============================================================================
+// P3-Bdb: TTBR0 swap on context switch.
+// =============================================================================
+
+// Cross-thread observation slots. Two children each record their live
+// TTBR0_EL1, their Proc's pgtable_root, and their Proc's ASID. The
+// parent verifies post-reap.
+static volatile u64 g_ttbr0_test_ttbr0[2];
+static volatile u64 g_ttbr0_test_pgtable[2];
+static volatile u32 g_ttbr0_test_asid[2];
+
+static void ttbr0_swap_child(void *arg) {
+    int idx = (int)(uintptr_t)arg;
+
+    // Read TTBR0_EL1 — the value cpu_switch_context loaded when
+    // switching into us. It MUST equal (proc->asid << 48) | proc->pgtable_root.
+    u64 ttbr0;
+    __asm__ __volatile__("mrs %0, ttbr0_el1" : "=r"(ttbr0));
+
+    struct Thread *t = current_thread();
+    g_ttbr0_test_ttbr0[idx]   = ttbr0;
+    g_ttbr0_test_pgtable[idx] = t->proc->pgtable_root;
+    g_ttbr0_test_asid[idx]    = t->proc->asid;
+
+    exits("ok");
+}
+
+void test_proc_ttbr0_swap_smoke(void) {
+    // Reset slots so a stale value from a prior test wouldn't pass.
+    for (int i = 0; i < 2; i++) {
+        g_ttbr0_test_ttbr0[i]   = 0;
+        g_ttbr0_test_pgtable[i] = 0;
+        g_ttbr0_test_asid[i]    = 0;
+    }
+
+    int pid0 = rfork(RFPROC, ttbr0_swap_child, (void *)(uintptr_t)0);
+    TEST_ASSERT(pid0 > 0, "rfork pid0 failed");
+    int pid1 = rfork(RFPROC, ttbr0_swap_child, (void *)(uintptr_t)1);
+    TEST_ASSERT(pid1 > 0, "rfork pid1 failed");
+
+    int status;
+    int reaped0 = wait_pid(&status);
+    int reaped1 = wait_pid(&status);
+    TEST_ASSERT(reaped0 > 0 && reaped1 > 0, "wait_pid failed");
+
+    for (int i = 0; i < 2; i++) {
+        TEST_ASSERT(g_ttbr0_test_pgtable[i] != 0,
+            "child pgtable_root is 0 (rfork didn't allocate?)");
+        TEST_ASSERT(g_ttbr0_test_asid[i] >= ASID_USER_FIRST &&
+                    g_ttbr0_test_asid[i] <= ASID_USER_LAST,
+            "child asid out of valid range");
+
+        u64 expected = ((u64)g_ttbr0_test_asid[i] << 48) |
+                       g_ttbr0_test_pgtable[i];
+        TEST_EXPECT_EQ(g_ttbr0_test_ttbr0[i], expected,
+            "live TTBR0_EL1 doesn't match (asid<<48)|pgtable_root");
+    }
+
+    // Two distinct children must have distinct ASIDs (else asid_alloc
+    // is broken or context switch loaded the wrong TTBR0).
+    TEST_ASSERT(g_ttbr0_test_asid[0] != g_ttbr0_test_asid[1],
+        "two rfork'd children share the same ASID (asid_alloc bug?)");
+
+    // And distinct pgtable roots.
+    TEST_ASSERT(g_ttbr0_test_pgtable[0] != g_ttbr0_test_pgtable[1],
+        "two rfork'd children share the same pgtable_root "
+        "(proc_pgtable_create bug?)");
 }

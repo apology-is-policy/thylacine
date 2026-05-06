@@ -16,7 +16,13 @@
 #include <stddef.h>
 #include <thylacine/types.h>
 
-// 14 u64 = 112 bytes. 8-byte aligned (stp/ldp pair friendly).
+// 15 u64 = 120 bytes. 8-byte aligned (stp/ldp pair friendly).
+//
+// P3-Bdb: ttbr0 added — the value to write to TTBR0_EL1 on context
+// switch into this thread. Encodes (ASID << 48) | pgtable_root_PA.
+// kproc threads carry the "kernel-only" TTBR0 value (l0_ttbr0 PA |
+// ASID 0) so any low-VA dereference from kernel code faults at the
+// retired L2 entries (P3-Bda mmu_retire_ttbr0_identity zeroed them).
 struct Context {
     u64 x19;
     u64 x20;
@@ -32,13 +38,14 @@ struct Context {
     u64 lr;          // x30 (link / resume PC)
     u64 sp;          // stack pointer
     u64 tpidr_el0;   // EL0 TLS pointer; 0 for kernel threads, set for userspace
+    u64 ttbr0;       // P3-Bdb: TTBR0_EL1 value (ASID<<48 | pgtable_root_PA)
 };
 
 // Pin context size + field offsets at compile time. arch/arm64/context.S
 // hardcodes these; a field reorder without an asm update would silently
 // corrupt context switches. Static asserts catch the drift at build.
-_Static_assert(sizeof(struct Context) == 112,
-               "struct Context must be 112 bytes (14 u64); arch/arm64/context.S "
+_Static_assert(sizeof(struct Context) == 120,
+               "struct Context must be 120 bytes (15 u64); arch/arm64/context.S "
                "depends on the layout");
 _Static_assert(_Alignof(struct Context) >= 8,
                "struct Context alignment must allow stp/ldp pair access");
@@ -49,6 +56,7 @@ _Static_assert(offsetof(struct Context, fp)  == 80,   "ctx.fp offset");
 _Static_assert(offsetof(struct Context, lr)  == 88,   "ctx.lr offset");
 _Static_assert(offsetof(struct Context, sp)  == 96,   "ctx.sp offset");
 _Static_assert(offsetof(struct Context, tpidr_el0) == 104, "ctx.tpidr_el0 offset");
+_Static_assert(offsetof(struct Context, ttbr0) == 112, "ctx.ttbr0 offset");
 
 // Save callee-saved + SP + LR + TPIDR_EL0 from the live CPU into `prev`;
 // load same fields from `next` into the CPU; ret to next->lr.

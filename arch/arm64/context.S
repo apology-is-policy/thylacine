@@ -17,10 +17,19 @@
 //   x19 @ 0   x20 @ 8    x21 @ 16   x22 @ 24
 //   x23 @ 32  x24 @ 40   x25 @ 48   x26 @ 56
 //   x27 @ 64  x28 @ 72   fp  @ 80   lr  @ 88
-//   sp  @ 96  tpidr_el0 @ 104       (size 112)
+//   sp  @ 96  tpidr_el0 @ 104       ttbr0 @ 112  (size 120)
 //
 // _Static_asserts in context.h pin both sides; a layout drift triggers a
 // build error there before the asm can corrupt context switches.
+//
+// P3-Bdb: ttbr0 swap. Each Thread's Context carries the TTBR0_EL1 value
+// (ASID<<48 | pgtable_root_PA) appropriate for the Thread's Proc.
+// cpu_switch_context saves the live TTBR0_EL1 into prev (atomic with the
+// other register saves) and loads next's TTBR0 into the live CPU. An ISB
+// after MSR TTBR0_EL1 makes the change visible to subsequent fetches.
+// No TLB invalidate is needed: per-Proc ASIDs (1..255) tag user-mappings
+// in the TLB; cross-Proc TLB entries don't collide. Kernel mappings
+// (TTBR1, global, ASID-agnostic) are unaffected.
 
 .section ".text", "ax"
 
@@ -50,6 +59,10 @@ cpu_switch_context:
     mrs     x9, tpidr_el0
     str     x9, [x0, #104]
 
+    // P3-Bdb: save current TTBR0_EL1 into prev->ctx.ttbr0.
+    mrs     x9, ttbr0_el1
+    str     x9, [x0, #112]
+
     // Load next (x1) into the live CPU.
     ldp     x19, x20, [x1, #0]
     ldp     x21, x22, [x1, #16]
@@ -63,6 +76,15 @@ cpu_switch_context:
 
     ldr     x9, [x1, #104]
     msr     tpidr_el0, x9
+
+    // P3-Bdb: load next's TTBR0_EL1. Encoded as (ASID<<48) | pgtable_root.
+    // ISB serializes the TTBR0 change so subsequent translations / TLB
+    // walks see the new value. No TLB invalidate needed: ASID tags user
+    // mappings in the TLB; cross-Proc TLB entries don't collide. Kernel
+    // mappings via TTBR1 are global and unaffected.
+    ldr     x9, [x1, #112]
+    msr     ttbr0_el1, x9
+    isb
 
     ret
 .size cpu_switch_context, . - cpu_switch_context

@@ -73,6 +73,7 @@ void test_asid_free_reuses(void);
 void test_asid_inflight_count(void);
 void test_proc_pgtable_alloc_smoke(void);
 void test_proc_pgtable_lifecycle_stress(void);
+void test_proc_ttbr0_swap_smoke(void);
 void test_directmap_kva_round_trip(void);
 void test_directmap_alloc_through_directmap(void);
 void test_directmap_vmalloc_mmio_smoke(void);
@@ -141,6 +142,7 @@ struct test_case g_tests[] = {
     { "asid.inflight_count",           test_asid_inflight_count,           false, NULL },
     { "proc.pgtable_alloc_smoke",      test_proc_pgtable_alloc_smoke,      false, NULL },
     { "proc.pgtable_lifecycle_stress", test_proc_pgtable_lifecycle_stress, false, NULL },
+    { "proc.ttbr0_swap_smoke",         test_proc_ttbr0_swap_smoke,         false, NULL },
     { "directmap.kva_round_trip",      test_directmap_kva_round_trip,      false, NULL },
     { "directmap.alloc_through_directmap",
                                        test_directmap_alloc_through_directmap,

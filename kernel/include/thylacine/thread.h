@@ -129,10 +129,11 @@ struct Thread {
     volatile bool      on_cpu;
 };
 
-_Static_assert(sizeof(struct Thread) == 224,
-               "struct Thread size pinned at 224 bytes (P2-Cf: P2-Bc "
-               "baseline 216 + on_cpu 8 incl. tail-padding). Adding a "
-               "field grows the SLUB cache; update this assert "
+_Static_assert(sizeof(struct Thread) == 232,
+               "struct Thread size pinned at 232 bytes (P3-Bdb: P2-Cf "
+               "baseline 224 + ctx.ttbr0 +8 = 232 — Context grew from "
+               "112 to 120 bytes when TTBR0_EL1 was added at P3-Bdb). "
+               "Adding a field grows the SLUB cache; update this assert "
                "deliberately so the change is intentional.");
 _Static_assert(__builtin_offsetof(struct Thread, magic) == 0,
                "magic must be at offset 0 (P2-A audit R4 F42)");

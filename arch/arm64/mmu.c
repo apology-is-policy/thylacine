@@ -175,6 +175,15 @@ static u64 l3_directmap_kernel[ENTRIES_PER_TABLE] __attribute__((aligned(PAGE_SI
 // dist + 4×GIC redists), leaving ~431 entries of headroom.
 static u32 g_vmalloc_next_idx;
 
+// P3-Bdb: PA of l0_ttbr0 captured at build_page_tables. Used as the
+// "kernel-only" TTBR0 root for kproc threads. Captured pre-MMU when
+// PC = load PA so `(uintptr_t)l0_ttbr0` resolves to load PA via PIC.
+static paddr_t g_l0_ttbr0_pa;
+
+paddr_t mmu_kernel_ttbr0_pa(void) {
+    return g_l0_ttbr0_pa;
+}
+
 // ---------------------------------------------------------------------------
 // PTE constructors and inspectors.
 // ---------------------------------------------------------------------------
@@ -250,6 +259,12 @@ static void build_page_tables(u64 slide) {
     // runtime load PA when called pre-MMU-on with PC = load PA.
     u64 pa_kernel_start = (u64)(uintptr_t)_kernel_start;
     u64 kernel_2mib_pa  = pa_kernel_start & ~(BLOCK_SIZE_L2 - 1);
+
+    // P3-Bdb: capture the PA of l0_ttbr0 — used as the kernel-only
+    // TTBR0 root for kproc threads after mmu_retire_ttbr0_identity.
+    // Pre-MMU with PC = load PA, `(uintptr_t)l0_ttbr0` resolves to load
+    // PA via PIC adrp+add.
+    g_l0_ttbr0_pa = (paddr_t)(uintptr_t)l0_ttbr0;
 
     // TTBR0 identity: L0[0] -> L1; L1[0..3] -> L2[0..3].
     l0_ttbr0[0] = make_table_pte(l1_ttbr0);

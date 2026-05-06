@@ -98,6 +98,19 @@ void thread_init(void) {
     g_kthread->slice_remaining = THREAD_DEFAULT_SLICE_TICKS;
     g_kthread->on_cpu = true;       // P2-Cf: kthread is the boot CPU's running thread
 
+    // P3-Bdb: pre-populate ctx.ttbr0 with the kernel-only TTBR0 root
+    // (l0_ttbr0 PA + ASID 0). kthread is the boot CPU's running thread
+    // at thread_init time; the FIRST cpu_switch_context FROM kthread
+    // would capture the live TTBR0_EL1 anyway, but pre-populating
+    // protects the path where some peer CPU switches INTO kthread (via
+    // work-stealing or kproc-bound work) before kthread has switched-
+    // out once — that load would otherwise read ctx.ttbr0 = 0 (KP_ZERO)
+    // and write 0 to TTBR0_EL1, faulting on any kernel-mode kstack
+    // access via SP=high VA → TTBR1 (which is fine — TTBR1 is alive)
+    // BUT also breaking any later transition to user-mode (TTBR0 = 0
+    // points at PA 0, garbage). Defense-in-depth.
+    g_kthread->ctx.ttbr0 = (u64)mmu_kernel_ttbr0_pa();
+
     thread_link_into_proc(g_kthread, kproc());
     __atomic_fetch_add(&g_thread_created, 1u, __ATOMIC_RELAXED);
     g_next_tid = 1;
@@ -136,6 +149,9 @@ struct Thread *thread_init_per_cpu_idle(unsigned cpu_idx) {
     t->on_cpu = true;                     // P2-Cf: per-CPU idle is
                                           // the executing thread on
                                           // this CPU at sched_init.
+
+    // P3-Bdb: kernel-only TTBR0 root. See thread_init for rationale.
+    t->ctx.ttbr0 = (u64)mmu_kernel_ttbr0_pa();
 
     thread_link_into_proc(t, kproc());
     __atomic_fetch_add(&g_thread_created, 1u, __ATOMIC_RELAXED);
@@ -225,12 +241,21 @@ static struct Thread *thread_create_internal(struct Proc *proc,
     //                              THREAD_KSTACK_TOTAL_SIZE (P2-Dc).
     //                              Stack grows down through pages 7→4
     //                              (16 KiB usable) then hits guard.
+    //   ctx.ttbr0 = (asid << 48) | pgtable_root  — P3-Bdb. Loaded into
+    //                              TTBR0_EL1 on first cpu_switch_context
+    //                              into this thread. For non-kproc Procs:
+    //                              the Proc's ASID + pgtable_root.
+    //                              For kproc threads: kernel-only TTBR0
+    //                              (l0_ttbr0 PA | ASID 0).
     //
     // Other ctx fields stay zero via KP_ZERO.
     t->ctx.x20 = (u64)(uintptr_t)arg;
     t->ctx.x21 = (u64)(uintptr_t)entry_void;
     t->ctx.lr  = (u64)(uintptr_t)thread_trampoline;
     t->ctx.sp  = (u64)((uintptr_t)kalloc_base + THREAD_KSTACK_TOTAL_SIZE);
+    t->ctx.ttbr0 = (proc->pgtable_root != 0)
+                 ? (((u64)proc->asid << 48) | (u64)proc->pgtable_root)
+                 : (u64)mmu_kernel_ttbr0_pa();      // ASID 0 implicit
 
     thread_link_into_proc(t, proc);
     __atomic_fetch_add(&g_thread_created, 1u, __ATOMIC_RELAXED);

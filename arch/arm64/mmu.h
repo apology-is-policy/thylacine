@@ -296,6 +296,18 @@ bool mmu_restore_normal(paddr_t pa);
 bool mmu_set_no_access_range(paddr_t pa, unsigned n_pages);
 bool mmu_restore_normal_range(paddr_t pa, unsigned n_pages);
 
+// P3-Bdb: PA of the kernel-only TTBR0 page table (l0_ttbr0). Used as the
+// pgtable_root for kproc threads (which have proc->pgtable_root = 0).
+// Captured in build_page_tables at boot time (when PC = load PA, so
+// `(uintptr_t)l0_ttbr0` resolves to load PA via PIC adrp+add).
+//
+// Loading TTBR0_EL1 with this PA gives a "kernel-only" TTBR0: the L0/L1
+// tables are valid, but every L2 entry is invalid (post-mmu_retire_ttbr0_
+// identity). Any low-VA dereference faults at L2. For kernel threads
+// running purely in EL1 with no need for user-half mappings, this is
+// the safe choice — never accidentally translate a low VA.
+paddr_t mmu_kernel_ttbr0_pa(void);
+
 // =============================================================================
 // P3-Bcb: per-Proc translation table allocator.
 //
