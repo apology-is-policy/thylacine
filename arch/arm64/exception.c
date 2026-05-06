@@ -19,19 +19,11 @@
 // Per ARCHITECTURE.md §12.
 
 #include "exception.h"
+#include "fault.h"                    // P3-C: arch_fault_handle / fault_info_decode
 #include "gic.h"
-#include "kaslr.h"
 
 #include <thylacine/extinction.h>
-#include <thylacine/page.h>          // pa_to_kva (P3-Bca direct-map alias check)
-#include <thylacine/thread.h>
 #include <thylacine/types.h>
-
-// Linker symbols — boot stack guard region.
-extern char _boot_stack_guard[];
-extern char _boot_stack_bottom[];
-extern char _kernel_start[];
-extern char _kernel_end[];
 
 // Vector table from vectors.S.
 extern char _exception_vectors[];
@@ -58,135 +50,25 @@ _Static_assert(__builtin_offsetof(struct exception_context, far) == 0x118,
                "far must be at offset 0x118");
 
 // ---------------------------------------------------------------------------
-// ESR_EL1 decode helpers.
-//
-// ESR_EL1[31:26] = EC (exception class).
-// ESR_EL1[25]    = IL (instruction length: 0=16-bit, 1=32-bit).
-// ESR_EL1[24:0]  = ISS (instruction-specific syndrome; semantics vary by EC).
+// ESR_EL1 EC values used directly by the sync-handler dispatch.
+// Page-fault classification + handling moved to arch/arm64/fault.{h,c}
+// at P3-C; this file dispatches data/instruction aborts there and
+// handles the remaining sync exceptions inline.
 //
 // Per ARM ARM D17.2.40.
 // ---------------------------------------------------------------------------
 
 #define ESR_EC_SHIFT       26
-#define ESR_EC_MASK        (0x3Full << ESR_EC_SHIFT)
 #define ESR_EC(esr)        (((esr) >> ESR_EC_SHIFT) & 0x3F)
 
-#define EC_UNKNOWN         0x00
-#define EC_WFI_WFE         0x01
-#define EC_SVC_AARCH64     0x15
-#define EC_HVC_AARCH64     0x16
-#define EC_SMC_AARCH64     0x17
-#define EC_TRAPPED_MSR_MRS 0x18
 #define EC_INST_ABORT_LOWER 0x20    /* instruction abort from lower EL */
 #define EC_INST_ABORT_SAME 0x21     /* instruction abort from current EL */
-#define EC_PC_ALIGN        0x22
 #define EC_DATA_ABORT_LOWER 0x24
 #define EC_DATA_ABORT_SAME 0x25
 #define EC_SP_ALIGN        0x26
-#define EC_FP_AARCH64      0x2C
+#define EC_PC_ALIGN        0x22
 #define EC_BTI             0x0D     /* Branch Target Exception (FEAT_BTI) */
 #define EC_BRK             0x3C     /* deliberate brk #imm */
-
-// For data / instruction aborts, ISS[5:0] = DFSC / IFSC (fault status code).
-#define FSC_TRANS_FAULT_L0 0x04
-#define FSC_TRANS_FAULT_L1 0x05
-#define FSC_TRANS_FAULT_L2 0x06
-#define FSC_TRANS_FAULT_L3 0x07
-#define FSC_PERM_FAULT_L1  0x0D
-#define FSC_PERM_FAULT_L2  0x0E
-#define FSC_PERM_FAULT_L3  0x0F
-#define FSC_MASK           0x3F
-
-static inline u32 esr_fsc(u64 esr) {
-    return (u32)(esr & FSC_MASK);
-}
-
-static inline bool fsc_is_translation(u32 fsc) {
-    return fsc >= FSC_TRANS_FAULT_L0 && fsc <= FSC_TRANS_FAULT_L3;
-}
-
-static inline bool fsc_is_permission(u32 fsc) {
-    return fsc >= FSC_PERM_FAULT_L1 && fsc <= FSC_PERM_FAULT_L3;
-}
-
-// ---------------------------------------------------------------------------
-// PA / VA helpers.
-//
-// FAR_EL1 holds the faulting VA. For accesses that went through TTBR0
-// (low VA == PA via identity), FAR is the PA. For accesses that went
-// through TTBR1 (high VA), FAR is a high VA in the kernel image's
-// runtime region.
-//
-// To check whether FAR is in the boot-stack guard region we need its
-// PA bounds. _boot_stack_guard's compile-time symbol is a high VA at
-// runtime; we convert via the kaslr.c PA accessors.
-// ---------------------------------------------------------------------------
-
-static u64 high_va_to_pa(u64 high_va) {
-    u64 high_va_kernel_start = kaslr_kernel_high_base();
-    u64 pa_kernel_start = kaslr_kernel_pa_start();
-    return high_va - high_va_kernel_start + pa_kernel_start;
-}
-
-static u64 sym_to_pa(const void *sym) {
-    return high_va_to_pa((u64)(uintptr_t)sym);
-}
-
-// True iff `addr` falls inside any active stack guard region. At P1-F
-// this was just the boot-stack guard; P2-Dc adds per-thread kstack
-// guards (the bottom THREAD_KSTACK_GUARD_SIZE of each thread_create'd
-// kstack is mapped no-access). Both flavors of guard fault produce the
-// same "kernel stack overflow" extinction.
-//
-// Accepts both PAs (the typical case for kstack accesses via TTBR0
-// identity mapping) and high VAs (boot-stack symbols are high VA at
-// runtime).
-static bool addr_is_stack_guard(u64 addr) {
-    u64 guard_pa = sym_to_pa(_boot_stack_guard);
-    u64 bottom_pa = sym_to_pa(_boot_stack_bottom);
-    if (addr >= guard_pa && addr < bottom_pa) return true;
-
-    // High-VA fallback (no high-VA stack today, but check anyway).
-    u64 guard_va = (u64)(uintptr_t)_boot_stack_guard;
-    u64 bottom_va = (u64)(uintptr_t)_boot_stack_bottom;
-    if (addr >= guard_va && addr < bottom_va) return true;
-
-    // P2-Dc: per-thread kstack guard region. The current thread's
-    // kstack_base points at the lowest page of the 8-page allocation;
-    // the lower THREAD_KSTACK_GUARD_SIZE is the no-access guard.
-    // Stack overflow lands inside that range.
-    struct Thread *t = current_thread();
-    if (t && t->magic == THREAD_MAGIC && t->kstack_base) {
-        u64 t_guard_base = (u64)(uintptr_t)t->kstack_base;
-        u64 t_guard_end  = t_guard_base + THREAD_KSTACK_GUARD_SIZE;
-        if (addr >= t_guard_base && addr < t_guard_end) return true;
-    }
-
-    return false;
-}
-
-// True iff `addr` falls inside the kernel image (TEXT / RODATA /
-// DATA / BSS / dynamic-section family). Used to recognize W^X
-// violations on the kernel image specifically.
-//
-// P3-Bca: also recognizes the kernel-image PA range mapped through the
-// kernel direct map (KERNEL_DIRECT_MAP_BASE). A W^X violation accessed
-// through the direct-map alias has FAR = pa_to_kva(kernel_image_pa);
-// `addr_is_kernel_image` matches it via the third range check.
-static bool addr_is_kernel_image(u64 addr) {
-    u64 ks_pa = kaslr_kernel_pa_start();
-    u64 ke_pa = kaslr_kernel_pa_end();
-    if (addr >= ks_pa && addr < ke_pa) return true;
-
-    u64 ks_va = (u64)(uintptr_t)_kernel_start;
-    u64 ke_va = (u64)(uintptr_t)_kernel_end;
-    if (addr >= ks_va && addr < ke_va) return true;
-
-    // P3-Bca: direct-map alias of the kernel image PA range.
-    u64 ks_kva = (u64)(uintptr_t)pa_to_kva(ks_pa);
-    u64 ke_kva = (u64)(uintptr_t)pa_to_kva(ke_pa);
-    return addr >= ks_kva && addr < ke_kva;
-}
 
 // ---------------------------------------------------------------------------
 // exception_init.
@@ -201,39 +83,48 @@ void exception_init(void) {
 // ---------------------------------------------------------------------------
 // Sync handler at current EL with SPx (the kernel's normal mode).
 //
-// Decisions in priority order:
-//   1. Permission fault on stack-guard region → kernel stack overflow.
-//   2. Permission fault on kernel image       → W^X violation.
-//   3. Translation fault                       → unhandled page fault.
-//   4. BRK exception (deliberate brk #imm)     → assertion failure.
-//   5. Anything else                            → generic extinction.
+// Page-fault classification (data/instruction aborts) is handed to
+// arch_fault_handle in fault.c. Other sync exceptions (alignment, BTI,
+// BRK) are handled inline below.
 // ---------------------------------------------------------------------------
 
 void exception_sync_curr_el(struct exception_context *ctx) {
     u64 esr = ctx->esr;
     u64 far = ctx->far;
     u32 ec  = (u32)ESR_EC(esr);
-    u32 fsc = esr_fsc(esr);
 
     switch (ec) {
     case EC_DATA_ABORT_SAME:
-    case EC_INST_ABORT_SAME:
-        if (addr_is_stack_guard(far)) {
-            extinction_with_addr("kernel stack overflow", (uintptr_t)far);
+    case EC_INST_ABORT_SAME: {
+        // P3-C: structured fault dispatch. Decode + classify, then hand
+        // to arch_fault_handle. The handler either resolves the fault
+        // (returns FAULT_HANDLED — ERET resumes the interrupted
+        // instruction) or extincts internally with a specific
+        // diagnostic. FAULT_UNHANDLED_USER is unreachable here (this
+        // handler is wired to the Current EL/SPx vector, never sees
+        // lower-EL aborts); P3-E will add `exception_sync_lower_el`
+        // with the same dispatcher and the user-mode handling.
+        struct fault_info fi;
+        fault_info_decode(esr, far, ctx->elr, &fi);
+        enum fault_result r = arch_fault_handle(&fi);
+
+        switch (r) {
+        case FAULT_HANDLED:
+            return;          // ERET resumes the faulting instruction.
+        case FAULT_UNHANDLED_USER:
+            extinction_with_addr("unhandled user-mode fault (no VMA / SIGSEGV pending)",
+                                 (uintptr_t)fi.vaddr);
+        case FAULT_FATAL:
+            // Reserved — current arch_fault_handle paths extinct
+            // internally. Defense-in-depth.
+            extinction_with_addr("arch_fault_handle returned FAULT_FATAL",
+                                 (uintptr_t)fi.vaddr);
         }
-        if (fsc_is_permission(fsc) && addr_is_kernel_image(far)) {
-            extinction_with_addr("PTE violates W^X (kernel image)",
-                                 (uintptr_t)far);
-        }
-        if (fsc_is_translation(fsc)) {
-            extinction_with_addr("unhandled translation fault",
-                                 (uintptr_t)far);
-        }
-        if (fsc_is_permission(fsc)) {
-            extinction_with_addr("unhandled permission fault",
-                                 (uintptr_t)far);
-        }
-        extinction_with_addr("data/instruction abort", (uintptr_t)far);
+        // Unreachable (extinction is noreturn); fallthrough silences any
+        // future compiler warning if the enum gains new values.
+        extinction_with_addr("arch_fault_handle returned unknown result",
+                             (uintptr_t)fi.vaddr);
+    }
 
     case EC_SP_ALIGN:
         extinction_with_addr("SP alignment fault", (uintptr_t)far);

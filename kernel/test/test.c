@@ -74,6 +74,11 @@ void test_asid_inflight_count(void);
 void test_proc_pgtable_alloc_smoke(void);
 void test_proc_pgtable_lifecycle_stress(void);
 void test_proc_ttbr0_swap_smoke(void);
+void test_fault_decode_kernel_data_translation_l2(void);
+void test_fault_decode_kernel_data_permission_write(void);
+void test_fault_decode_user_data_translation(void);
+void test_fault_decode_user_instruction_fetch(void);
+void test_fault_decode_access_flag(void);
 void test_directmap_kva_round_trip(void);
 void test_directmap_alloc_through_directmap(void);
 void test_directmap_vmalloc_mmio_smoke(void);
@@ -143,6 +148,19 @@ struct test_case g_tests[] = {
     { "proc.pgtable_alloc_smoke",      test_proc_pgtable_alloc_smoke,      false, NULL },
     { "proc.pgtable_lifecycle_stress", test_proc_pgtable_lifecycle_stress, false, NULL },
     { "proc.ttbr0_swap_smoke",         test_proc_ttbr0_swap_smoke,         false, NULL },
+    { "fault.decode_kernel_data_translation_l2",
+                                       test_fault_decode_kernel_data_translation_l2,
+                                                                           false, NULL },
+    { "fault.decode_kernel_data_permission_write",
+                                       test_fault_decode_kernel_data_permission_write,
+                                                                           false, NULL },
+    { "fault.decode_user_data_translation",
+                                       test_fault_decode_user_data_translation,
+                                                                           false, NULL },
+    { "fault.decode_user_instruction_fetch",
+                                       test_fault_decode_user_instruction_fetch,
+                                                                           false, NULL },
+    { "fault.decode_access_flag",      test_fault_decode_access_flag,      false, NULL },
     { "directmap.kva_round_trip",      test_directmap_kva_round_trip,      false, NULL },
     { "directmap.alloc_through_directmap",
                                        test_directmap_alloc_through_directmap,

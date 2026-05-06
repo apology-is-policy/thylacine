@@ -20,6 +20,7 @@ set(KERNEL_SRCS
     ../arch/arm64/mmu.c
     ../arch/arm64/kaslr.c
     ../arch/arm64/exception.c
+    ../arch/arm64/fault.c
     ../arch/arm64/vectors.S
     ../arch/arm64/gic.c
     ../arch/arm64/timer.c
@@ -52,6 +53,7 @@ set(KERNEL_SRCS
     test/test_asid.c
     test/test_directmap.c
     test/test_proc_pgtable.c
+    test/test_fault_decode.c
     namespace.c
     handle.c
     vmo.c
