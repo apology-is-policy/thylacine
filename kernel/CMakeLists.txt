@@ -26,6 +26,7 @@ set(KERNEL_SRCS
     ../arch/arm64/hwfeat.c
     ../arch/arm64/context.S
     ../arch/arm64/psci.c
+    ../arch/arm64/asid.c
     ../lib/dtb.c
     ../mm/buddy.c
     ../mm/magazines.c
@@ -48,6 +49,7 @@ set(KERNEL_SRCS
     test/test_handle.c
     test/test_vmo.c
     test/test_elf.c
+    test/test_asid.c
     namespace.c
     handle.c
     vmo.c

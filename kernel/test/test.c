@@ -68,6 +68,9 @@ void test_vmo_via_handle_table(void);
 void test_vmo_handle_table_orphan_cleanup(void);
 void test_vmo_size_overflow_rejected(void);
 void test_vmo_dup_oom_rollback(void);
+void test_asid_alloc_unique(void);
+void test_asid_free_reuses(void);
+void test_asid_inflight_count(void);
 void test_elf_parse_minimal_ok(void);
 void test_elf_parse_multi_segment_ok(void);
 void test_elf_header_rejection(void);
@@ -128,6 +131,9 @@ struct test_case g_tests[] = {
     { "vmo.handle_table_orphan_cleanup", test_vmo_handle_table_orphan_cleanup, false, NULL },
     { "vmo.size_overflow_rejected",    test_vmo_size_overflow_rejected,    false, NULL },
     { "vmo.dup_oom_rollback",          test_vmo_dup_oom_rollback,          false, NULL },
+    { "asid.alloc_unique",             test_asid_alloc_unique,             false, NULL },
+    { "asid.free_reuses",              test_asid_free_reuses,              false, NULL },
+    { "asid.inflight_count",           test_asid_inflight_count,           false, NULL },
     { "elf.parse_minimal_ok",          test_elf_parse_minimal_ok,          false, NULL },
     { "elf.parse_multi_segment_ok",    test_elf_parse_multi_segment_ok,    false, NULL },
     { "elf.header_rejection",          test_elf_header_rejection,          false, NULL },

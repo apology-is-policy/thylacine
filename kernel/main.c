@@ -15,6 +15,7 @@
 // `TOOLING.md`.
 
 #include "uart.h"
+#include "../arch/arm64/asid.h"
 #include "../arch/arm64/exception.h"
 #include "../arch/arm64/gic.h"
 #include "../arch/arm64/hwfeat.h"
@@ -269,9 +270,14 @@ void boot_main(void) {
     // P2-Fd: vmo_init creates the VMO SLUB cache. Order doesn't matter
     // wrt proc_init (no kproc-VMO ownership at v1.0); placed near
     // handle_init for grouping.
+    // P3-Ba: asid_init initializes the ASID allocator. No SLUB dependency
+    // (state lives in BSS). Must run BEFORE any future code that calls
+    // asid_alloc; placed early so the order is unambiguous as Phase 3+
+    // sub-chunks add per-Proc TTBR0 alloc paths.
     pgrp_init();
     handle_init();
     vmo_init();
+    asid_init();
     proc_init();
     thread_init();
     sched_init(0);                              // boot CPU's per-CPU sched state
