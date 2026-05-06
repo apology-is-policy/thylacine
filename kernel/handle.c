@@ -62,10 +62,15 @@ bool kobj_kind_is_hw(enum kobj_kind k) {
 void handle_init(void) {
     if (g_handle_table_cache) extinction("handle_init called twice");
 
+    // R5-F F50/F51 close: NO PANIC_ON_FAIL. Per-Proc handle tables
+    // allocate at proc_alloc, which is reachable from rfork — userspace
+    // OOM (a fork bomb) shouldn't extinct the kernel. Caller-side
+    // rollback paths handle the NULL return per the documented
+    // contract in handle.h.
     g_handle_table_cache = kmem_cache_create("handle_table",
                                              sizeof(struct HandleTable),
                                              8,
-                                             KMEM_CACHE_PANIC_ON_FAIL);
+                                             0);
     if (!g_handle_table_cache) {
         extinction("kmem_cache_create(handle_table) returned NULL");
     }
@@ -92,6 +97,10 @@ struct HandleTable *handle_table_alloc(void) {
 //   KOBJ_PROCESS  — Phase 5+ (proc_unref when struct Proc gets refs).
 //   KOBJ_THREAD   — Phase 5+.
 //   KOBJ_INTERRUPT — Phase 5+.
+//
+// R5-F F54 close: explicit `default:` extincts on out-of-enum kind to
+// catch memory corruption (the static_assert defends at compile time;
+// the default arm defends at runtime).
 static void handle_release_obj(enum kobj_kind kind, void *obj) {
     if (!obj) return;
     switch (kind) {
@@ -111,12 +120,16 @@ static void handle_release_obj(enum kobj_kind kind, void *obj) {
         // to the slot-zeroing path; the underlying kobj's lifetime is
         // managed elsewhere at v1.0 P2-Fc/Fd.
         break;
+    default:
+        extinction("handle_release_obj: out-of-enum kobj_kind (memory corruption?)");
     }
 }
 
 // Per-kind acquire of the underlying kernel object reference. Called
 // from handle_dup (the dup'd handle is a NEW reference; must be ref'd
 // to balance the future close).
+//
+// R5-F F54 close: explicit `default:` extincts on out-of-enum kind.
 static void handle_acquire_obj(enum kobj_kind kind, void *obj) {
     if (!obj) return;
     switch (kind) {
@@ -133,6 +146,8 @@ static void handle_acquire_obj(enum kobj_kind kind, void *obj) {
     case KOBJ_INTERRUPT:
     case KOBJ_KIND_COUNT:
         break;
+    default:
+        extinction("handle_acquire_obj: out-of-enum kobj_kind (memory corruption?)");
     }
 }
 
@@ -189,6 +204,27 @@ hidx_t handle_alloc(struct Proc *p, enum kobj_kind kind,
     struct HandleTable *t = proc_handles_or_extinct(p);
 
     if (!valid_alloc_args(kind, rights)) return -1;
+
+    // R5-F F49 close: defensive runtime check for KOBJ_VMO. The
+    // contract is "the caller has already accounted for one ref"
+    // (typically: vmo_create_anon's initial handle_count=1, OR a
+    // pre-call vmo_ref from a future Phase 4 transfer-via-9p path).
+    // Future-buggy callers that pass a Vmo without holding a ref
+    // would create a slot with no backing count — the first
+    // handle_close would underflow vmo_unref's count check.
+    //
+    // Catching here makes the convention enforced at runtime, not
+    // just documented. The check is a no-op for non-KOBJ_VMO kinds
+    // and for NULL obj (test paths).
+    if (kind == KOBJ_VMO && obj) {
+        struct Vmo *v = (struct Vmo *)obj;
+        if (v->magic != VMO_MAGIC)
+            extinction("handle_alloc(KOBJ_VMO): obj has bad magic (not a Vmo or UAF)");
+        if (v->handle_count <= 0)
+            extinction("handle_alloc(KOBJ_VMO): caller has not accounted for "
+                       "the slot's reference (call vmo_ref first, or use the "
+                       "vmo_create_anon-consumed-reference convention)");
+    }
 
     for (int i = 0; i < PROC_HANDLE_MAX; i++) {
         if (t->slots[i].magic == 0) {

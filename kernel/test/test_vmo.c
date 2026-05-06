@@ -51,6 +51,7 @@ void test_vmo_handles_x_mappings_matrix(void);
 void test_vmo_via_handle_table(void);
 void test_vmo_handle_table_orphan_cleanup(void);
 void test_vmo_size_overflow_rejected(void);
+void test_vmo_dup_oom_rollback(void);
 
 // Convenience: test "did we free a VMO this turn" by snapshot diff.
 static u64 created_diff_snap;
@@ -324,6 +325,70 @@ void test_vmo_size_overflow_rejected(void) {
     TEST_ASSERT(v3 != NULL,
         "vmo_create_anon(4096) must succeed (overflow guard not over-broad)");
     vmo_unref(v3);
+}
+
+void test_vmo_dup_oom_rollback(void) {
+    // R5-F F55 close: handle_dup acquires (vmo_ref) BEFORE alloc;
+    // on alloc failure (table full), it releases (vmo_unref) for
+    // rollback. The acquire/release dance must net to zero —
+    // forgetting either side would leak a ref or underflow the count.
+    //
+    // Construction: fill the handle table with KOBJ_VMO duplicates
+    // of a single VMO; verify handle_count tracks the slot count;
+    // attempt one more dup (must fail); verify handle_count is
+    // UNCHANGED (rollback worked); cleanup closes all handles and
+    // verifies the VMO is freed exactly once.
+    u64 destroyed_before = vmo_total_destroyed();
+
+    struct Proc *p = test_proc_make_for_vmo();
+    TEST_ASSERT(p, "test_proc_make NULL");
+
+    struct Vmo *v = vmo_create_anon(4096);
+    TEST_ASSERT(v, "vmo_create_anon NULL");
+    // After vmo_create_anon: handle_count = 1 (consumed reference).
+
+    hidx_t parent = handle_alloc(p, KOBJ_VMO, RIGHT_READ, v);
+    TEST_ASSERT(parent >= 0, "parent alloc failed");
+    TEST_EXPECT_EQ(vmo_handle_count(v), 1,
+        "after handle_alloc(KOBJ_VMO) — count remains 1 (consumed-ref convention)");
+
+    // Dup until the table is full. The first dup goes into a fresh
+    // slot; subsequent dups fill the remaining slots. Each successful
+    // dup increments handle_count via vmo_ref.
+    int successes = 0;
+    for (int i = 0; i < PROC_HANDLE_MAX; i++) {
+        hidx_t hd = handle_dup(p, parent, RIGHT_READ);
+        if (hd < 0) break;
+        successes++;
+    }
+    // PROC_HANDLE_MAX slots total; 1 used by parent; PROC_HANDLE_MAX-1
+    // successful dups before the table is full.
+    TEST_EXPECT_EQ(successes, PROC_HANDLE_MAX - 1,
+        "should fit PROC_HANDLE_MAX-1 dups alongside the parent");
+    TEST_EXPECT_EQ(handle_table_count(p->handles), PROC_HANDLE_MAX,
+        "table should be full");
+    TEST_EXPECT_EQ(vmo_handle_count(v), PROC_HANDLE_MAX,
+        "handle_count should equal slot count (parent + dups)");
+
+    // The next dup MUST fail (table full). The acquire happened
+    // (vmo_ref → count + 1); the alloc failed; the release fires
+    // (vmo_unref → count - 1). Net: count unchanged.
+    hidx_t failed = handle_dup(p, parent, RIGHT_READ);
+    TEST_EXPECT_EQ(failed, -1,
+        "dup past PROC_HANDLE_MAX must return -1");
+    TEST_EXPECT_EQ(vmo_handle_count(v), PROC_HANDLE_MAX,
+        "handle_dup's acquire/release rollback must net to zero "
+        "(count unchanged after failed dup)");
+    TEST_EXPECT_EQ(vmo_total_destroyed() - destroyed_before, (u64)0,
+        "rollback must NOT trigger a free");
+
+    // Cleanup. test_proc_drop calls proc_free which calls
+    // handle_table_free which closes every slot via handle_release_obj
+    // → vmo_unref. After all 64 closes, count = 0 + mapping_count = 0
+    // → VMO freed exactly once.
+    test_proc_drop_for_vmo(p);
+    TEST_EXPECT_EQ(vmo_total_destroyed() - destroyed_before, (u64)1,
+        "VMO must be freed exactly once after proc_free closes all handles");
 }
 
 void test_vmo_handle_table_orphan_cleanup(void) {

@@ -258,6 +258,15 @@ Stronger than "policy that says don't transfer hardware handles" — at the sysc
 
 `handle_alloc` / `handle_close` / `handle_dup` are not internally synchronized; concurrent callers on different CPUs would race. At v1.0 P2-Fc only the boot CPU calls these (no userspace yet → no syscalls). Phase 5+ adds a per-Proc handle-table lock when the syscall surface goes live and multi-thread Procs become possible.
 
+### Read-vs-mutate severity asymmetry
+
+`handle_get` returns NULL on a NULL Proc / corrupted Proc magic / NULL handle table. `handle_alloc` and `handle_close` extinct via `proc_handles_or_extinct` on the same conditions. The split is deliberate (R5-F F60):
+
+- **Queries** (read-only — `handle_get`, `handle_table_count`, `kobj_kind_is_*`) treat corruption as "no result" and return a defined sentinel. Callers can defensively check the return and continue.
+- **Mutators** (`handle_alloc`, `handle_close`, `handle_dup`, `handle_table_free`) treat corruption as catastrophic and extinct. Mutating against a corrupt Proc would propagate the corruption; failing fast is the safer policy.
+
+A typical syscall handler that does `if ((h = handle_get(p, idx))) ... ; handle_close(p, idx);` will safely no-op on bad Proc at the read site but extinct at the write site if the same condition persisted. In practice the mutator path is unreachable if the read path returned NULL (the syscall handler should bail on the NULL).
+
 ### Capability handles (KObj_Capability) deferred to v2.0
 
 Per ARCH §15.4, factotum-mediated capability elevation grants short-lived `KObj_Capability` handles. Out of scope for v1.0. The kobj_kind enum has space (KOBJ_KIND_COUNT may grow).

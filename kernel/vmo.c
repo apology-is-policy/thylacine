@@ -43,10 +43,14 @@ static u64                g_vmo_destroyed;
 void vmo_init(void) {
     if (g_vmo_cache) extinction("vmo_init called twice");
 
+    // R5-F F50/F51 close: NO PANIC_ON_FAIL. VMO allocation is reachable
+    // from userspace via vmo_create syscall (Phase 5+) — userspace OOM
+    // shouldn't extinct the kernel. The vmo_create_anon documented
+    // contract is "returns NULL on OOM"; the cache flag must match.
     g_vmo_cache = kmem_cache_create("vmo",
                                     sizeof(struct Vmo),
                                     8,
-                                    KMEM_CACHE_PANIC_ON_FAIL);
+                                    0);
     if (!g_vmo_cache) {
         extinction("kmem_cache_create(vmo) returned NULL");
     }
@@ -179,18 +183,26 @@ void vmo_unmap(struct Vmo *v) {
 // Diagnostics.
 // =============================================================================
 
+// R5-F F52 close: magic check on the read-only accessors. The asymmetric
+// "queries are safe to call on freed VMOs" gap from the original impl
+// could let a stale pointer return plausible-looking stale values. The
+// magic check rejects with 0 — a defined sentinel — for any UAF. The
+// cost is one load + compare per call.
 size_t vmo_get_size(const struct Vmo *v) {
     if (!v) return 0;
+    if (v->magic != VMO_MAGIC) return 0;
     return v->size;
 }
 
 int vmo_handle_count(const struct Vmo *v) {
     if (!v) return 0;
+    if (v->magic != VMO_MAGIC) return 0;
     return v->handle_count;
 }
 
 int vmo_mapping_count(const struct Vmo *v) {
     if (!v) return 0;
+    if (v->magic != VMO_MAGIC) return 0;
     return v->mapping_count;
 }
 

@@ -85,19 +85,25 @@ struct Proc *proc_alloc(void) {
     if (!p) return NULL;
     proc_init_fields(p, g_next_pid++);
 
-    // P2-Fc: each Proc gets its own handle table. On OOM, roll back
-    // the proc allocation. The Proc has no pgrp / threads / children
-    // yet, so freeing is a clean drop (state must be ZOMBIE for
-    // proc_free; transition + reset to satisfy lifecycle).
+    // R5-F F50/F53 close: count this Proc as created BEFORE any failure
+    // path that might tear it down via proc_free. proc_free does its
+    // own destroyed++ — this hoist keeps the counters balanced even
+    // when rollback fires (created+1 / destroyed+1 net zero).
+    g_proc_created++;
+
+    // P2-Fc: each Proc gets its own handle table. On OOM (now reachable
+    // post-R5-F F50; PANIC_ON_FAIL dropped from g_handle_table_cache),
+    // delegate cleanup to proc_free — which is future-proof against
+    // struct Proc growth (R5-F F53). The Proc has no pgrp / threads /
+    // children yet (KP_ZERO), so proc_free's pgrp_unref(NULL) +
+    // handle_table_free(NULL) + lifecycle gates all no-op cleanly.
     p->handles = handle_table_alloc();
     if (!p->handles) {
         p->state = PROC_STATE_ZOMBIE;
-        kmem_cache_free(g_proc_cache, p);
-        g_proc_destroyed++;
+        proc_free(p);              // does its own g_proc_destroyed++
         return NULL;
     }
 
-    g_proc_created++;
     return p;
 }
 
