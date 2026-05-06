@@ -173,9 +173,57 @@ TLC-clean at `Procs = {p1, p2}, TxKObjs = {kx}, HwKObjs = {kh}, Rights = {R, T},
 - **Per-Proc handle-table growth (Phase 5+)**: v1.0 P2-Fc has a fixed-size table (PROC_HANDLE_MAX); Phase 5+ refactors to growable. The spec is agnostic to the table representation — handles[p] is just a set.
 - **Cross-Proc handle accounting under transfer (Phase 4)**: the spec's HandleTransferVia9P creates a fresh dst handle without affecting src; impl-side, the kobj's refcount is incremented per fresh handle. Phase 4 audit verifies the refcount math.
 
-## vmo.tla — Phase 3 (planned)
+## vmo.tla — P2-Fb spec (impl at P2-Fd)
 
-(Stub. Will pin: refcount + mapping lifecycle — ARCH §28 I-7.)
+Status: **VMO refcount + mapping lifecycle proven; impl deferred to P2-Fd.** Models the dual-refcount discipline for Virtual Memory Objects per ARCH §19. Pins ARCH §28 invariant I-7 (pages live until last handle closed AND last mapping unmapped).
+
+TLC-clean at `VmoIds = {v1, v2}, MaxRefs = 2` — 100 distinct states explored; depth 9. Buggy configs:
+
+| Config | Flag | Invariant violated | Depth | Distinct states |
+|---|---|---|---|---|
+| `vmo_buggy_free_on_close.cfg` | `BUGGY_FREE_ON_HANDLE_CLOSE = TRUE` | `NoUseAfterFree` (premature) | 6 | 56 |
+| `vmo_buggy_free_on_unmap.cfg` | `BUGGY_FREE_ON_UNMAP = TRUE`        | `NoUseAfterFree` (premature) | 6 | 58 |
+| `vmo_buggy_never_free.cfg`    | `BUGGY_NEVER_FREE = TRUE`           | `NoUseAfterFree` (delayed)   | 6 | 43 |
+
+| Spec action | Source location | Notes |
+|---|---|---|
+| `Init` | `kernel/vmo.c::vmo_init` (P2-Fd) | SLUB cache for struct Vmo. No VMOs alive at boot. |
+| `VmoCreate(v)` | `kernel/vmo.c::vmo_create_anon(size)` (P2-Fd) | Allocates struct Vmo; allocates `size / PAGE_SIZE` pages from buddy; sets handle_count=1, mapping_count=0. Returns the new VMO; the caller's `handle_alloc` wraps it in a Handle. |
+| `HandleOpen(v)` | `kernel/vmo.c::vmo_ref(struct Vmo *)` (P2-Fd) | Atomic increment of handle_count. Called from `handle_dup` (intra-Proc) and (Phase 4) `handle_transfer_via_9p` (cross-Proc). |
+| `HandleClose(v)` | `kernel/vmo.c::vmo_unref(struct Vmo *)` (P2-Fd) | Atomic decrement of handle_count. If both counts reach 0, calls `vmo_free_pages` + `kmem_cache_free`. |
+| `BuggyFreeOnHandleClose(v)` | (none — bug class statically prevented) | The impl's `vmo_unref` checks BOTH counts before freeing: `if (h_count == 0 && m_count == 0) vmo_free_pages(...)`. A future caller that bypasses the check would re-introduce the bug. |
+| `MapVmo(v)` | `kernel/vmo.c::vmo_map(struct Vmo *)` (P2-Fd) | Atomic increment of mapping_count. Called from mmap_handle for VMO-backed VMAs. |
+| `UnmapVmo(v)` | `kernel/vmo.c::vmo_unmap(struct Vmo *)` (P2-Fd) | Atomic decrement of mapping_count. Same dual-check on free as vmo_unref. |
+| `BuggyFreeOnUnmap(v)` | (none — bug class statically prevented) | Same dual-check as BuggyFreeOnHandleClose; structural guarantee. |
+| `BuggyNoFreeHandleClose(v) / BuggyNoFreeUnmap(v)` | (none — bug class statically prevented) | The impl's `vmo_unref` and `vmo_unmap` always evaluate the dual-check at decrement time; no codepath skips the free transition when both counts reach 0. |
+
+| Spec invariant | Source enforcement |
+|---|---|
+| `RefcountConsistent` (counts = 0 if not in vmos) | The impl's struct Vmo is allocated/freed via SLUB; counts are part of the struct. Before allocation: no struct Vmo exists, so counts are not addressable; "not in vmos" maps to "no Vmo struct allocated yet." |
+| `NoUseAfterFree` (pages alive iff at least one count > 0) | `vmo_unref` and `vmo_unmap` both check `(handle_count == 0 AND mapping_count == 0)` after their decrement; if true, free pages. The dual check is the runtime enforcement of I-7. |
+
+### P2-Fb landed (this chunk)
+
+- `vmo.tla` (~290 LOC TLA+) + 4 cfg files (1 clean + 3 buggy variants).
+- VMO state: `vmos`, `handle_count[v]`, `mapping_count[v]`, `pages_alive`.
+- Per-VMO refcounts bounded by `MaxRefs` (CONSTANT) for TLC tractability.
+- Five spec actions: `VmoCreate`, `HandleOpen`, `HandleClose`, `MapVmo`, `UnmapVmo`.
+- Three buggy actions: premature-on-close, premature-on-unmap, never-free (with two delayed-free variants — close + unmap).
+- Two state invariants: `RefcountConsistent` + `NoUseAfterFree` (iff form catches both premature AND delayed free).
+
+### P2-Fd impl targets (next chunk)
+
+- `kernel/include/thylacine/vmo.h` — struct Vmo (size + type + handle_count + mapping_count + pages); inline `vmo_ref` / `vmo_unref` (atomic ops).
+- `kernel/vmo.c` — `vmo_init`, `vmo_create_anon(size)`, `vmo_map`, `vmo_unmap`, `vmo_free_pages`. SLUB cache. Anonymous VMOs only at v1.0 (VMO_PHYS deferred to Phase 3 with the device tree's reserved-memory handling; VMO_FILE deferred post-v1.0).
+- New tests: `vmo.create_close_round_trip`, `vmo.refcount_lifecycle`, `vmo.map_unmap_lifecycle`, `vmo.handles_x_mappings_matrix` (combinations of close-before-unmap, unmap-before-close, etc., verifying pages free at the correct boundary).
+
+### Deferred
+
+- **Physical VMOs (VMO_PHYS) at Phase 3**: when the device tree's reserved-memory regions are exposed, drivers will need physical VMOs over fixed PA ranges (DMA buffers, framebuffer). Spec is agnostic to the backing type — refcount mechanics are identical.
+- **File-backed VMOs (VMO_FILE) post-v1.0**: integration with Stratum's page cache. Spec extension: VmoCreate variants per backing type; refcount mechanics unchanged.
+- **Concurrent map/unmap and ref/unref (Phase 5+)**: at v1.0 P2-F, the impl runs single-CPU; Phase 5+ adds a per-Vmo lock OR atomic-only operations. The spec is single-stepping (atomic transitions); Phase 5+ refinement may need finer-grained atomicity modeling.
+
+
 
 ## 9p_client.tla — Phase 4 (planned)
 
