@@ -8,7 +8,10 @@
 // instruction which clang lowers __builtin_bswap32/64 to directly.
 
 #include <thylacine/dtb.h>
+#include <thylacine/page.h>          // pa_to_kva (P3-Bda relocation)
 #include <thylacine/types.h>
+
+#include "../mm/phys.h"              // alloc_pages / free_pages (P3-Bda)
 
 #include <stdint.h>
 
@@ -28,9 +31,18 @@ struct fdt_header_be {
 };
 
 // Internal cached state. Set by dtb_init(); read by all other entry points.
+//
+// P3-Bda: `relocated` is true after `dtb_relocate_to_buffer` has copied
+// the DTB blob to a kernel direct-map buffer. When true, `struct_kva`
+// and `strings_kva` are valid and dtb_struct_base / dtb_strings_base
+// return them; when false, those helpers fall back to the original PA
+// via TTBR0 identity.
 static struct {
     bool ready;
+    bool relocated;
     paddr_t base;
+    const uint8_t *struct_kva;       // direct-map KVA of struct block (post-relocate)
+    const char    *strings_kva;      // direct-map KVA of strings block (post-relocate)
     uint32_t totalsize;
     uint32_t off_struct;
     uint32_t off_strings;
@@ -114,13 +126,16 @@ bool dtb_init(paddr_t base) {
         return false;
     }
 
-    // P3-Bca: DTB access stays on TTBR0 identity (PA-as-VA) at this
-    // sub-chunk. The direct-map path (pa_to_kva) hangs at the very first
-    // dereference for reasons not diagnosed here — likely related to
-    // pre-phys_init MMU/cache state. P3-Bd will refactor: copy the DTB
-    // into a kernel-allocated buffer post-phys_init OR use a dedicated
-    // TTBR1 reservation, then retire TTBR0 identity. Tracked as a
-    // Phase-3-Bd-blocking work item in `docs/phase3-status.md` trip-hazards.
+    // P3-Bda: dtb_init runs at boot_main entry (pre-phys_init). It reads
+    // the FDT header via TTBR0 identity (PA-as-VA at the original PA).
+    // Direct-map reads at this point in boot empirically fail — likely
+    // due to data-cache state inherited from pre-mmu-on (the cache was
+    // off through build_page_tables; first MMU walks may hit stale
+    // cache lines on some CPU implementations). The relocation step
+    // (dtb_relocate_to_buffer, called from boot_main post-phys_init)
+    // copies the blob to a buddy-allocated buffer; from then on,
+    // dtb_struct_base / dtb_strings_base read through the direct-map
+    // KVA of that buffer, and TTBR0 identity is no longer needed.
     const struct fdt_header_be *hdr = (const struct fdt_header_be *)(uintptr_t)base;
 
     uint32_t magic = be32_to_host(hdr->magic);
@@ -155,6 +170,77 @@ u32 dtb_get_total_size(void) {
     return g_dtb.ready ? g_dtb.totalsize : 0;
 }
 
+// =============================================================================
+// P3-Bda: DTB relocation to a kernel-allocated buffer.
+// =============================================================================
+//
+// Pre-relocation, dtb_struct_base / dtb_strings_base read the DTB blob
+// at its original PA via TTBR0 identity (PA-as-VA). This works at P3-Bca
+// because TTBR0 identity is alive from boot, but BLOCKS retiring TTBR0
+// identity entirely.
+//
+// Post-relocation:
+//   1. The DTB blob has been copied byte-for-byte to a buddy-allocated
+//      buffer (size = ceil(totalsize / PAGE_SIZE) pages, KP_ZERO so any
+//      tail past totalsize is zeroed).
+//   2. g_dtb.struct_kva and g_dtb.strings_kva point into the buffer at
+//      the appropriate offsets — direct-map KVAs (0xFFFF_0000_*).
+//   3. g_dtb.relocated = true. dtb_struct_base / dtb_strings_base now
+//      return the KVAs.
+//
+// The original PA's data is still readable via TTBR0 identity until P3-Bd
+// retires that mapping; after retirement, ONLY the buffer is reachable
+// — and the parser doesn't care because it's all KVA-relative now.
+//
+// At v1.0 P3-Bda this runs once at boot from boot_main (post-phys_init).
+// Idempotent on re-call (no-op if already relocated). Forward-compat:
+// Phase 5+ may need to relocate again if the kernel virtual layout
+// changes (e.g., late KASLR re-randomization).
+
+// Compute the smallest order N such that 2^N pages cover `bytes`.
+static unsigned bytes_to_order(u64 bytes) {
+    if (bytes == 0) return 0;
+    u64 pages = (bytes + PAGE_SIZE - 1) >> PAGE_SHIFT;
+    if (pages == 1) return 0;
+    // Round up to next power of two.
+    unsigned order = 0;
+    u64 p = 1;
+    while (p < pages) {
+        p <<= 1;
+        order++;
+    }
+    return order;
+}
+
+bool dtb_relocate_to_buffer(void) {
+    if (!g_dtb.ready)     return false;
+    if (g_dtb.relocated)  return true;          // idempotent
+
+    // Allocate enough buddy pages to hold `totalsize` bytes. Real DTBs
+    // are tiny: QEMU virt ≈ 1 KiB; bare metal ≈ 30 KiB. order=0 covers
+    // up to 4 KiB; order=3 up to 32 KiB; etc.
+    unsigned order = bytes_to_order(g_dtb.totalsize);
+    struct page *buf_pg = alloc_pages(order, KP_ZERO);
+    if (!buf_pg) return false;
+
+    // Copy bytes from original PA (read via TTBR0 identity — still alive
+    // at this point in boot) to buffer (write via direct-map KVA).
+    paddr_t buf_pa = page_to_pa(buf_pg);
+    uint8_t *buf_kva = (uint8_t *)pa_to_kva(buf_pa);
+    const uint8_t *src = (const uint8_t *)(uintptr_t)g_dtb.base;
+
+    for (uint32_t i = 0; i < g_dtb.totalsize; i++) {
+        buf_kva[i] = src[i];
+    }
+
+    // Switch the parser to read through the buffer.
+    g_dtb.struct_kva  = buf_kva + g_dtb.off_struct;
+    g_dtb.strings_kva = (const char *)buf_kva + g_dtb.off_strings;
+    g_dtb.relocated   = true;
+
+    return true;
+}
+
 // ---------------------------------------------------------------------------
 // Structure-block walker.
 //
@@ -170,10 +256,14 @@ u32 dtb_get_total_size(void) {
 // ---------------------------------------------------------------------------
 
 static const uint8_t *dtb_struct_base(void) {
+    // P3-Bda: post-relocation use direct-map KVA into the kernel buffer;
+    // pre-relocation fall back to TTBR0 identity at the original PA.
+    if (g_dtb.relocated) return g_dtb.struct_kva;
     return (const uint8_t *)(uintptr_t)g_dtb.base + g_dtb.off_struct;
 }
 
 static const char *dtb_strings_base(void) {
+    if (g_dtb.relocated) return g_dtb.strings_kva;
     return (const char *)(uintptr_t)g_dtb.base + g_dtb.off_strings;
 }
 

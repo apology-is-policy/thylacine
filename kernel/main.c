@@ -20,6 +20,7 @@
 #include "../arch/arm64/gic.h"
 #include "../arch/arm64/hwfeat.h"
 #include "../arch/arm64/kaslr.h"
+#include "../arch/arm64/mmu.h"          // mmu_retire_ttbr0_identity (P3-Bda)
 #include "../arch/arm64/timer.h"
 #include "../mm/magazines.h"
 #include "../mm/phys.h"
@@ -205,6 +206,18 @@ void boot_main(void) {
     uart_putdec((reserved * PAGE_SIZE) / 1024UL);
     uart_puts(" KiB reserved (kernel + struct_page + DTB)\n");
 
+    // P3-Bda: relocate the DTB blob from its original PA (where QEMU
+    // placed it; reachable only via TTBR0 identity) to a buddy-allocated
+    // buffer in the kernel direct map. After this call, all DTB walks
+    // go through the buffer's direct-map KVA. Done HERE because:
+    //   - phys_init has just run; buddy is ready.
+    //   - Subsequent code (gic_init at minimum) calls dtb_get_compat_reg,
+    //     which must NOT touch the original PA after we retire TTBR0
+    //     identity.
+    if (!dtb_relocate_to_buffer()) {
+        extinction("dtb_relocate_to_buffer failed (DTB > free buddy memory?)");
+    }
+
     // Phase 3: SLUB on top of phys. Standard kmalloc-* caches plus
     // a meta cache for kmem_cache_create. Public API: kmalloc /
     // kfree / kmem_cache_*.
@@ -304,6 +317,25 @@ void boot_main(void) {
         // marks boot online + caches the count.
         smp_init();
     }
+
+    // P3-Bda: retire the TTBR0 identity map. By now, all secondaries
+    // have completed their secondary_entry trampoline (which uses
+    // TTBR0 identity for stack until SP_EL0 is re-anchored to high
+    // VA post-mmu_program_this_cpu). After this call, any low-VA
+    // dereference (PA-as-VA-via-TTBR0 idiom) faults at the L2 invalid
+    // entry. All known callers were migrated:
+    //   - UART → vmalloc (P3-Bca uart_remap_to_vmalloc).
+    //   - GIC → vmalloc (P3-Bca gic_init via mmu_map_mmio).
+    //   - kstack → direct-map (P3-Bca kernel/thread.c).
+    //   - struct_pages → direct-map (P3-Bda mm/phys.c::phys_init).
+    //   - DTB → buffer in direct map (P3-Bda dtb_relocate_to_buffer).
+    //   - boot stack SP_EL0 → high VA (P3-Bda start.S step 8.6).
+    //   - secondary boot stack SP_EL0 → high VA (P3-Bda start.S
+    //     secondary_entry post-mmu_program_this_cpu).
+    //
+    // Boot-CPU TTBR0_EL1 still points at l0_ttbr0 (now with empty L2s);
+    // P3-Bdb will swap it to per-Proc page-tables on context switch.
+    mmu_retire_ttbr0_identity();
 
     uart_puts("  smp:  ");
     uart_putdec((u64)smp_cpu_online_count());

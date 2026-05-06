@@ -133,12 +133,17 @@ bool phys_init(void) {
                    "(DTB collides with kernel/struct_pages?)");
     }
 
-    // 5. Initialize the buddy zone. struct_pages lives at
-    //    struct_pages_pa_start in PA-identity-mapped TTBR0 space; we
-    //    address it as a regular pointer and the MMU translates via
-    //    TTBR0 (low VA == PA below 4 GiB).
+    // 5. Initialize the buddy zone. struct_pages lives at PA
+    //    `struct_pages_pa_start` in physical RAM. Pre-P3-Bda we
+    //    addressed it via TTBR0 identity (PA-as-VA); P3-Bda retires
+    //    TTBR0 identity, so we now use the kernel direct map (TTBR1
+    //    high half at 0xFFFF_0000_*) — pa_to_kva(pa) = pa | base. The
+    //    direct-map alias of the struct_pages region is RW + XN at
+    //    runtime; reads/writes through it walk via TTBR1's
+    //    l1_directmap → l2_directmap_kernel (for the kernel-image GiB)
+    //    or l1_directmap[gib] 1 GiB block (for other GiBs).
     struct page *struct_pages =
-        (struct page *)(uintptr_t)struct_pages_pa_start;
+        (struct page *)pa_to_kva(struct_pages_pa_start);
     buddy_zone_init(&g_zone0, zone_base, zone_end, struct_pages);
 
     // 6. Free regions = the gaps between sorted reservations.

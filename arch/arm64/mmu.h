@@ -226,6 +226,31 @@ void mmu_program_this_cpu(void);
 // audit-trigger surface verifier (and by tests at P1-I+).
 bool pte_violates_wxe(u64 pte);
 
+// P3-Bda: retire the TTBR0 identity map. Zeros every L2 entry in
+// l2_ttbr0[0..3] (the 4-GiB identity map) so any subsequent TTBR0 walk
+// for a low VA hits an invalid block and faults. The L0 + L1 tables
+// stay valid (table descriptors pointing at the now-empty L2s) so that
+// TTBR0_EL1 itself can be left pointing at l0_ttbr0 — the MMU walks one
+// level deeper before hitting the invalid entry, which is fine for fault
+// triggering and avoids leaving TTBR0 at PA 0 (which would point at
+// arbitrary RAM contents).
+//
+// Called from boot_main AFTER:
+//   - uart_remap_to_vmalloc (UART no longer needs PL011 PA fallback).
+//   - phys_init (buddy ready for DTB relocation).
+//   - dtb_relocate_to_buffer (DTB queries no longer need original PA).
+//
+// At v1.0 P3-Bda: no further low-VA access exists in the kernel (kstack
+// → direct map at P3-Bca; DTB → direct-map buffer at P3-Bda; UART →
+// vmalloc at P3-Bca; GIC → vmalloc at P3-Bca). After this call, any
+// stray low-VA dereference (a future bug with PA-as-VA-via-TTBR0) faults
+// loudly rather than silently succeeding.
+//
+// Issues a broadcast TLB invalidate after PTE writes (per ARM ARM
+// B2.7.1 break-before-make: zero the entry, dsb_ishst, tlbi_vmalle1is,
+// dsb_ish, isb).
+void mmu_retire_ttbr0_identity(void);
+
 // P3-Bca: per-thread kstack guard pages — direct map flavor.
 //
 // `mmu_set_no_access(pa)` makes the 4 KiB page at PA unreadable +

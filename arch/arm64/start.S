@@ -352,6 +352,30 @@ _real_start:
     msr     SPSel, #0                       // sp back to SP_EL0
     isb
 
+    // 8.6. P3-Bda: re-anchor SP_EL0 at the post-KASLR HIGH VA of
+    //      _boot_stack_top.
+    //
+    // Step 4.6 set SP_EL0 = load PA of _boot_stack_top (PC-relative
+    // adrp+add at PC=load_PA). That works while TTBR0 identity covers
+    // the kernel image's GiB. After P3-Bda's mmu_retire_ttbr0_identity,
+    // any stack access at load PA faults. Switching sp = SP_EL0 to the
+    // HIGH VA of _boot_stack_top routes future kernel-stack accesses
+    // through TTBR1's kernel-image mapping (l3_kernel), which is alive
+    // forever.
+    //
+    // The boot_stack at load PA and at high VA map to the same physical
+    // memory (l3_kernel covers the kernel image's 2 MiB block under
+    // both TTBR0 identity and TTBR1 high-VA — same L3 table); so
+    // switching sp from one to the other doesn't lose data. We move sp
+    // to the TOP of the boot stack: _real_start has no live stack
+    // frame at this point (all bl calls have returned + popped their
+    // saved lr), so resetting sp is safe.
+    adrp    x0, _boot_stack_top
+    add     x0, x0, :lo12:_boot_stack_top
+    bl      kaslr_high_va_addr              // x0 = HIGH VA of _boot_stack_top
+    mov     sp, x0                          // sp = SP_EL0 := HIGH VA top
+    isb
+
     // 9. Long-branch to high VA. Compute the runtime high VA of
     //    boot_main via kaslr_high_va_addr(pa); the PA we pass is the
     //    PC-relative-resolved address of boot_main (current PC = PA,
@@ -624,6 +648,23 @@ secondary_entry:
     isb
     mov     sp, x0                          // SP_EL1 := HIGH VA top
     msr     SPSel, #0                       // sp back to SP_EL0
+    isb
+
+    // P3-Bda: re-anchor SP_EL0 at the post-KASLR HIGH VA of this CPU's
+    // boot-stack-slot top. Mirrors primary's _real_start step 8.6 —
+    // required because P3-Bda retires TTBR0 identity, after which the
+    // load-PA stack pointer would fault on every kernel access. The
+    // boot stack at load PA and at high VA map to the same physical
+    // memory (l3_kernel covers the kernel image's 2 MiB block under
+    // both translations); switching sp doesn't lose data.
+    sub     x20, x19, #1                    // idx0 = idx - 1
+    adrp    x0, g_secondary_boot_stacks
+    add     x0, x0, :lo12:g_secondary_boot_stacks
+    mov     x9, #16384                      // SECONDARY_STACK_SIZE
+    madd    x0, x9, x20, x0                 // base = stacks + idx0 * 16384
+    add     x0, x0, x9                      // top = base + 16384
+    bl      kaslr_high_va_addr              // x0 = HIGH VA of slot top
+    mov     sp, x0                          // sp = SP_EL0 := HIGH VA top
     isb
 
     // Long-branch to per_cpu_main(idx) at the kernel's high VA.

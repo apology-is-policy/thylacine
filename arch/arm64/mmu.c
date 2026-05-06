@@ -588,6 +588,33 @@ static inline void tlbi_vmalle1is(void) {
     __asm__ __volatile__("tlbi vmalle1is" ::: "memory");
 }
 
+// =============================================================================
+// P3-Bda: retire TTBR0 identity map.
+// =============================================================================
+
+void mmu_retire_ttbr0_identity(void) {
+    // Zero every L2 entry across all 4 L2 tables (l2_ttbr0[0..3] each
+    // holds 512 entries covering 1 GiB). After this, the TTBR0 walk for
+    // any low VA reaches l2_ttbr0[gib][idx] = 0 and faults (translation
+    // fault at L2). The L0 + L1 tables stay populated so TTBR0_EL1 can
+    // continue pointing at l0_ttbr0 — the walk goes one level deeper
+    // before hitting the invalid entry.
+    //
+    // Per ARM ARM B2.7.1 break-before-make: zero the entries, drain the
+    // stores, broadcast TLB invalidate (inner-shareable, all CPUs),
+    // wait for completion, ISB to discard speculative translations on
+    // this CPU.
+    for (int gib = 0; gib < 4; gib++) {
+        for (int j = 0; j < ENTRIES_PER_TABLE; j++) {
+            l2_ttbr0[gib][j] = 0;
+        }
+    }
+    dsb_ishst();
+    tlbi_vmalle1is();
+    dsb_ish();
+    isb();
+}
+
 // ---------------------------------------------------------------------------
 // P3-Bb: mmu_map_mmio — page-grain MMIO mapping in vmalloc range.
 // ---------------------------------------------------------------------------

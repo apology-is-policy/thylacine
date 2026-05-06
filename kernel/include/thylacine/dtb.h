@@ -60,6 +60,23 @@ bool dtb_is_ready(void);
 // physical allocator. Returns 0 if dtb_init has not run.
 u32 dtb_get_total_size(void);
 
+// P3-Bda: relocate the DTB blob from the original PA (where QEMU placed
+// it) to a kernel-allocated buffer. After this call, all DTB walks
+// (dtb_struct_base / dtb_strings_base internally) read through the
+// buffer's kernel direct-map KVA instead of via TTBR0 identity at the
+// original PA. Once relocated, retiring TTBR0 identity is safe (no
+// DTB code path touches the original PA anymore).
+//
+// Must be called AFTER phys_init (the buffer comes from buddy via
+// kpage_alloc). Idempotent: re-calling is a no-op once g_dtb.relocated
+// is true.
+//
+// Returns true on success. Returns false on:
+//   - dtb_init not run yet (g_dtb.ready == false).
+//   - kpage_alloc OOM (insufficient buddy memory at boot — typical
+//     v1.0 DTB is ~1 KiB, which always fits).
+bool dtb_relocate_to_buffer(void);
+
 // Get the first /memory@... node's first (base, size) pair.
 //
 // Assumes #address-cells = 2 and #size-cells = 2 at the root, which is
