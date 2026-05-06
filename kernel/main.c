@@ -37,6 +37,7 @@
 #include <thylacine/sched.h>
 #include <thylacine/smp.h>
 #include <thylacine/thread.h>
+#include <thylacine/vmo.h>
 #include <thylacine/types.h>
 
 #include "../arch/arm64/psci.h"
@@ -265,8 +266,12 @@ void boot_main(void) {
     // The actual scheduler (EEVDF) lands at P2-B.
     // P2-Fc: handle_init creates the handle-table SLUB cache. Must run
     // BEFORE proc_init since proc_init allocates a HandleTable for kproc.
+    // P2-Fd: vmo_init creates the VMO SLUB cache. Order doesn't matter
+    // wrt proc_init (no kproc-VMO ownership at v1.0); placed near
+    // handle_init for grouping.
     pgrp_init();
     handle_init();
+    vmo_init();
     proc_init();
     thread_init();
     sched_init(0);                              // boot CPU's per-CPU sched state

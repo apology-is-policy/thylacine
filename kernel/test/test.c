@@ -57,6 +57,12 @@ void test_handles_rights_monotonic(void);
 void test_handles_dup_lifecycle(void);
 void test_handles_full_table_oom(void);
 void test_handles_kind_classifiers(void);
+void test_vmo_create_close_round_trip(void);
+void test_vmo_refcount_lifecycle(void);
+void test_vmo_map_unmap_lifecycle(void);
+void test_vmo_handles_x_mappings_matrix(void);
+void test_vmo_via_handle_table(void);
+void test_vmo_handle_table_orphan_cleanup(void);
 
 // ---------------------------------------------------------------------------
 // Registry. Sentinel-terminated.
@@ -98,6 +104,12 @@ struct test_case g_tests[] = {
     { "handles.dup_lifecycle",         test_handles_dup_lifecycle,         false, NULL },
     { "handles.full_table_oom",        test_handles_full_table_oom,        false, NULL },
     { "handles.kind_classifiers",      test_handles_kind_classifiers,      false, NULL },
+    { "vmo.create_close_round_trip",   test_vmo_create_close_round_trip,   false, NULL },
+    { "vmo.refcount_lifecycle",        test_vmo_refcount_lifecycle,        false, NULL },
+    { "vmo.map_unmap_lifecycle",       test_vmo_map_unmap_lifecycle,       false, NULL },
+    { "vmo.handles_x_mappings_matrix", test_vmo_handles_x_mappings_matrix, false, NULL },
+    { "vmo.via_handle_table",          test_vmo_via_handle_table,          false, NULL },
+    { "vmo.handle_table_orphan_cleanup", test_vmo_handle_table_orphan_cleanup, false, NULL },
     { NULL, NULL, false, NULL },          // sentinel
 };
 

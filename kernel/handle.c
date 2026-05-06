@@ -33,6 +33,7 @@
 #include <thylacine/handle.h>
 #include <thylacine/proc.h>
 #include <thylacine/types.h>
+#include <thylacine/vmo.h>
 
 #include "../mm/slub.h"
 
@@ -78,15 +79,72 @@ struct HandleTable *handle_table_alloc(void) {
     return t;   // NULL on OOM
 }
 
+// Per-kind release of the underlying kernel object reference. Called
+// from handle_close (caller passes a Proc) and handle_table_free
+// (orphan path; no Proc available — table outlives it).
+//
+// At v1.0 P2-Fd: KOBJ_VMO has refcount integration via vmo_unref;
+// other kinds are no-op. As subsystems land:
+//   KOBJ_CHAN     — Phase 4 (chan_unref via 9P client).
+//   KOBJ_MMIO     — Phase 3 (driver-startup CMA release).
+//   KOBJ_IRQ      — Phase 3 (gic_unregister).
+//   KOBJ_DMA      — Phase 3 (CMA release).
+//   KOBJ_PROCESS  — Phase 5+ (proc_unref when struct Proc gets refs).
+//   KOBJ_THREAD   — Phase 5+.
+//   KOBJ_INTERRUPT — Phase 5+.
+static void handle_release_obj(enum kobj_kind kind, void *obj) {
+    if (!obj) return;
+    switch (kind) {
+    case KOBJ_VMO:
+        vmo_unref((struct Vmo *)obj);
+        break;
+    case KOBJ_INVALID:
+    case KOBJ_PROCESS:
+    case KOBJ_THREAD:
+    case KOBJ_CHAN:
+    case KOBJ_MMIO:
+    case KOBJ_IRQ:
+    case KOBJ_DMA:
+    case KOBJ_INTERRUPT:
+    case KOBJ_KIND_COUNT:
+        // No refcount integration yet — see comment above. Falls through
+        // to the slot-zeroing path; the underlying kobj's lifetime is
+        // managed elsewhere at v1.0 P2-Fc/Fd.
+        break;
+    }
+}
+
+// Per-kind acquire of the underlying kernel object reference. Called
+// from handle_dup (the dup'd handle is a NEW reference; must be ref'd
+// to balance the future close).
+static void handle_acquire_obj(enum kobj_kind kind, void *obj) {
+    if (!obj) return;
+    switch (kind) {
+    case KOBJ_VMO:
+        vmo_ref((struct Vmo *)obj);
+        break;
+    case KOBJ_INVALID:
+    case KOBJ_PROCESS:
+    case KOBJ_THREAD:
+    case KOBJ_CHAN:
+    case KOBJ_MMIO:
+    case KOBJ_IRQ:
+    case KOBJ_DMA:
+    case KOBJ_INTERRUPT:
+    case KOBJ_KIND_COUNT:
+        break;
+    }
+}
+
 void handle_table_free(struct HandleTable *t) {
     if (!t) return;
 
-    // Close any in-use handles before releasing the table. At v1.0 P2-Fc,
-    // close does NOT decrement underlying kobj refcounts (no kobj has
-    // integrated refcount yet); it only zeros the slot. P2-Fd integrates
-    // vmo_unref for KOBJ_VMO; future phases add refs for other kinds.
+    // Close any in-use handles before releasing the table. Calls the
+    // per-kind release path so underlying refcounts (KOBJ_VMO at P2-Fd)
+    // are decremented correctly even on orphan-table cleanup.
     for (int i = 0; i < PROC_HANDLE_MAX; i++) {
         if (t->slots[i].magic == HANDLE_MAGIC) {
+            handle_release_obj(t->slots[i].kind, t->slots[i].obj);
             t->slots[i].magic  = 0;
             t->slots[i].kind   = KOBJ_INVALID;
             t->slots[i].rights = RIGHT_NONE;
@@ -152,6 +210,10 @@ int handle_close(struct Proc *p, hidx_t h) {
     struct Handle *slot = &t->slots[h];
     if (slot->magic != HANDLE_MAGIC)    return -1;
 
+    // Per-kind release. P2-Fd integrates vmo_unref for KOBJ_VMO; future
+    // phases add the other kinds.
+    handle_release_obj(slot->kind, slot->obj);
+
     slot->magic  = 0;
     slot->kind   = KOBJ_INVALID;
     slot->rights = RIGHT_NONE;
@@ -180,7 +242,24 @@ hidx_t handle_dup(struct Proc *p, hidx_t h, rights_t new_rights) {
     if ((new_rights & parent->rights) != new_rights) return -1;
     if (!valid_alloc_args(parent->kind, new_rights)) return -1;
 
-    return handle_alloc(p, parent->kind, new_rights, parent->obj);
+    // Capture parent's kind + obj BEFORE handle_alloc — the alloc may
+    // reuse parent's slot (it scans for the lowest free slot, but in
+    // pathological cases of reuse-after-fragmentation the parent slot
+    // could be ours after handle_close earlier; defensive).
+    enum kobj_kind kind = parent->kind;
+    void          *obj  = parent->obj;
+
+    // Acquire a new reference to the underlying kobj. P2-Fd integrates
+    // vmo_ref for KOBJ_VMO. The dup'd handle is a NEW reference; the
+    // future handle_close on it will release the corresponding ref.
+    handle_acquire_obj(kind, obj);
+
+    hidx_t child = handle_alloc(p, kind, new_rights, obj);
+    if (child < 0) {
+        // Roll back the acquire on alloc failure.
+        handle_release_obj(kind, obj);
+    }
+    return child;
 }
 
 u64 handle_total_allocated(void) { return g_handle_allocated; }
