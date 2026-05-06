@@ -50,6 +50,7 @@ void test_vmo_map_unmap_lifecycle(void);
 void test_vmo_handles_x_mappings_matrix(void);
 void test_vmo_via_handle_table(void);
 void test_vmo_handle_table_orphan_cleanup(void);
+void test_vmo_size_overflow_rejected(void);
 
 // Convenience: test "did we free a VMO this turn" by snapshot diff.
 static u64 created_diff_snap;
@@ -294,6 +295,35 @@ void test_vmo_via_handle_table(void) {
         "exactly 1 VMO created");
 
     test_proc_drop_for_vmo(p);
+}
+
+void test_vmo_size_overflow_rejected(void) {
+    // P2-Fd self-audit (pre-R5-F): vmo_create_anon's `(size + PAGE_SIZE
+    // - 1) / PAGE_SIZE` arithmetic wraps when size is within
+    // (PAGE_SIZE - 1) of SIZE_MAX, producing page_count = 0 and a
+    // 1-page VMO claiming size = 0. The fix in vmo_create_anon adds an
+    // explicit overflow guard before the arithmetic; this test pins the
+    // rejection.
+    u64 destroyed_before = vmo_total_destroyed();
+
+    // Just within the wrap boundary — must reject.
+    struct Vmo *v1 = vmo_create_anon((size_t)-1);    // SIZE_MAX
+    TEST_EXPECT_EQ(v1, NULL,
+        "vmo_create_anon(SIZE_MAX) must return NULL (overflow guard)");
+
+    struct Vmo *v2 = vmo_create_anon((size_t)-2);    // SIZE_MAX - 1
+    TEST_EXPECT_EQ(v2, NULL,
+        "vmo_create_anon(SIZE_MAX-1) must return NULL (overflow guard)");
+
+    // No allocations performed; counter unchanged.
+    TEST_EXPECT_EQ(vmo_total_destroyed() - destroyed_before, (u64)0,
+        "rejected requests must not allocate or destroy any VMO");
+
+    // Sanity: a normal small size still works.
+    struct Vmo *v3 = vmo_create_anon(4096);
+    TEST_ASSERT(v3 != NULL,
+        "vmo_create_anon(4096) must succeed (overflow guard not over-broad)");
+    vmo_unref(v3);
 }
 
 void test_vmo_handle_table_orphan_cleanup(void) {

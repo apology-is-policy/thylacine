@@ -68,6 +68,12 @@ static unsigned order_for_pages(size_t page_count) {
 struct Vmo *vmo_create_anon(size_t size) {
     if (!g_vmo_cache) extinction("vmo_create_anon before vmo_init");
     if (size == 0)    return NULL;
+    // Overflow guard: `size + PAGE_SIZE - 1` wraps to a small value when
+    // size is within (PAGE_SIZE - 1) of SIZE_MAX, producing a tiny
+    // page_count for what was supposed to be an enormous request. Reject
+    // such requests explicitly (the caller meant something pathological;
+    // we won't silently truncate to a 1-page VMO claiming size = 0).
+    if (size > SIZE_MAX - (PAGE_SIZE - 1)) return NULL;
 
     struct Vmo *v = kmem_cache_alloc(g_vmo_cache, KP_ZERO);
     if (!v) return NULL;

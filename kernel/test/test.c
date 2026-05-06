@@ -63,6 +63,7 @@ void test_vmo_map_unmap_lifecycle(void);
 void test_vmo_handles_x_mappings_matrix(void);
 void test_vmo_via_handle_table(void);
 void test_vmo_handle_table_orphan_cleanup(void);
+void test_vmo_size_overflow_rejected(void);
 
 // ---------------------------------------------------------------------------
 // Registry. Sentinel-terminated.
@@ -110,6 +111,7 @@ struct test_case g_tests[] = {
     { "vmo.handles_x_mappings_matrix", test_vmo_handles_x_mappings_matrix, false, NULL },
     { "vmo.via_handle_table",          test_vmo_via_handle_table,          false, NULL },
     { "vmo.handle_table_orphan_cleanup", test_vmo_handle_table_orphan_cleanup, false, NULL },
+    { "vmo.size_overflow_rejected",    test_vmo_size_overflow_rejected,    false, NULL },
     { NULL, NULL, false, NULL },          // sentinel
 };
 
