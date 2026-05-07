@@ -60,6 +60,18 @@ void exception_unexpected(struct exception_context *ctx, u64 vector_idx);
 
 void exception_sync_curr_el(struct exception_context *ctx);
 
+// P3-Ea: sync handler for exceptions taken from EL0 (userspace).
+//
+// Routes data/instruction aborts through `arch_fault_handle`'s user-mode
+// dispatch path (P3-Dc demand paging). On FAULT_HANDLED returns
+// normally — vectors.S slot 0x400 ERETs via .Lexception_return,
+// resuming the faulting EL0 instruction.
+//
+// SVC (EC 0x15) extincts at v1.0; P3-Ec adds the real syscall dispatcher.
+//
+// All other EC values extinct with a recognizable diagnostic.
+void exception_sync_lower_el(struct exception_context *ctx);
+
 // IRQ handler at current EL with SPx (the kernel's normal mode).
 // Acknowledges via gic_acknowledge, dispatches to the registered
 // handler via gic_dispatch, then issues gic_eoi. Returns normally —

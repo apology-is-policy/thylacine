@@ -69,6 +69,7 @@ _Static_assert(__builtin_offsetof(struct exception_context, far) == 0x118,
 #define EC_PC_ALIGN        0x22
 #define EC_BTI             0x0D     /* Branch Target Exception (FEAT_BTI) */
 #define EC_BRK             0x3C     /* deliberate brk #imm */
+#define EC_SVC_AARCH64     0x15     /* svc #imm at EL0 (AArch64) */
 
 // ---------------------------------------------------------------------------
 // exception_init.
@@ -182,6 +183,86 @@ void exception_irq_curr_el(struct exception_context *ctx) {
     }
     gic_dispatch(intid);
     gic_eoi(intid);
+}
+
+// =============================================================================
+// P3-Ea: sync handler for EL0 exceptions.
+// =============================================================================
+//
+// Counterpart to exception_sync_curr_el for EL0 → EL1 sync exceptions.
+// Routes through the same arch_fault_handle dispatcher — fault_info_decode
+// inspects EC and sets `from_user=true` for EC_DATA_ABORT_LOWER /
+// EC_INST_ABORT_LOWER, which routes the user-mode case through
+// userland_demand_page (P3-Dc).
+//
+// On FAULT_HANDLED the function returns normally; vectors.S slot 0x400
+// branches to .Lexception_return which ERETs to ELR_EL1 (the faulting
+// EL0 instruction).
+//
+// On FAULT_UNHANDLED_USER (no VMA / permission denied) the handler
+// extincts. Phase 5+ note delivery upgrades this to a SIGSEGV-like
+// note.
+//
+// SVC (EC 0x15) extincts at v1.0 — userspace syscalls land at P3-Ec.
+//
+// EC_PC_ALIGN / EC_SP_ALIGN / EC_BTI / EC_BRK from EL0 also extinct
+// at v1.0; Phase 5+ note delivery handles these as user-faults.
+void exception_sync_lower_el(struct exception_context *ctx) {
+    u64 esr = ctx->esr;
+    u64 far = ctx->far;
+    u32 ec  = (u32)ESR_EC(esr);
+
+    switch (ec) {
+    case EC_DATA_ABORT_LOWER:
+    case EC_INST_ABORT_LOWER: {
+        struct fault_info fi;
+        fault_info_decode(esr, far, ctx->elr, &fi);
+        enum fault_result r = arch_fault_handle(&fi);
+
+        switch (r) {
+        case FAULT_HANDLED:
+            return;          // ERET resumes the faulting EL0 instruction.
+        case FAULT_UNHANDLED_USER:
+            // Phase 5+: deliver SIGSEGV-like note to the offending
+            // Proc; the thread terminates rather than the kernel
+            // extincting. At v1.0 we extinct loudly so test failures
+            // surface immediately rather than the user thread silently
+            // dying.
+            extinction_with_addr("EL0 fault: no VMA covers vaddr / permission denied",
+                                 (uintptr_t)fi.vaddr);
+        case FAULT_FATAL:
+            extinction_with_addr("arch_fault_handle returned FAULT_FATAL (EL0)",
+                                 (uintptr_t)fi.vaddr);
+        }
+        extinction_with_addr("arch_fault_handle returned unknown result (EL0)",
+                             (uintptr_t)fi.vaddr);
+    }
+
+    case EC_SVC_AARCH64:
+        // svc #imm at EL0. The syscall dispatcher lands at P3-Ec; v1.0
+        // pre-Ec extincts so an accidental syscall instruction in early
+        // userspace surfaces.
+        extinction_with_addr("EL0 SVC (userspace syscall) — not implemented at v1.0",
+                             (uintptr_t)ctx->elr);
+
+    case EC_PC_ALIGN:
+        extinction_with_addr("EL0 PC alignment fault", (uintptr_t)ctx->elr);
+
+    case EC_SP_ALIGN:
+        extinction_with_addr("EL0 SP alignment fault", (uintptr_t)far);
+
+    case EC_BTI:
+        extinction_with_addr("EL0 BTI fault (indirect branch to non-guarded target)",
+                             (uintptr_t)ctx->elr);
+
+    case EC_BRK:
+        extinction_with_addr("EL0 brk instruction (assertion?)",
+                             (uintptr_t)ctx->elr);
+
+    default:
+        extinction_with_addr("EL0 unhandled sync exception (EC in ESR_EL1)",
+                             (uintptr_t)esr);
+    }
 }
 
 void exception_unexpected(struct exception_context *ctx, u64 vector_idx) {

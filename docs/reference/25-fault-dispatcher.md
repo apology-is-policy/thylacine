@@ -1,4 +1,4 @@
-# Reference: page-fault dispatcher (P3-C / P3-Dc)
+# Reference: page-fault dispatcher (P3-C / P3-Dc / P3-Ea)
 
 ## Purpose
 
@@ -6,7 +6,8 @@ The fault dispatcher decodes ARMv8 ESR_EL1 / FAR_EL1 / ELR_EL1 into a structured
 
 History:
 - **P3-C** (`12ff454`): structured decode + classification. Resolve path empty; every call extincts.
-- **P3-Dc**: user-mode demand-paging path live. `userland_demand_page` looks up the VMA covering FAR, validates the access against VMA prot, resolves the VMO offset to a backing PA, and installs a leaf PTE in the per-Proc TTBR0 tree (`mmu_install_user_pte`). User-mode resolves return `FAULT_HANDLED`. Failures fall through to `FAULT_UNHANDLED_USER`.
+- **P3-Dc** (`936c2ed`): user-mode demand-paging path live. `userland_demand_page` looks up the VMA covering FAR, validates the access against VMA prot, resolves the VMO offset to a backing PA, and installs a leaf PTE in the per-Proc TTBR0 tree (`mmu_install_user_pte`). User-mode resolves return `FAULT_HANDLED`. Failures fall through to `FAULT_UNHANDLED_USER`.
+- **P3-Ea**: EL0 sync vector live. New `exception_sync_lower_el` handles sync exceptions taken from EL0 (data/instr abort routed through `arch_fault_handle` for demand paging; SVC stub extincts at v1.0; alignment / BTI / BRK extinct with EL0-prefixed diagnostics). Vector slot 0x400 wired (was VEC_UNEXPECTED 8); IRQ slot 0x480 wired to `exception_irq_curr_el` + `preempt_check_irq` (was VEC_UNEXPECTED 9).
 
 The dispatcher is the substrate for:
 - ARCH §28 I-12 (W^X) runtime detection — kernel-image permission faults are recognized and produce "PTE violates W^X (kernel image)" extinctions.
@@ -106,6 +107,35 @@ Exposed in the header so tests can drive demand paging directly (a synthetic `fa
 | 0x0D..0x0F | Permission fault L1..L3 |
 
 `arch_fault_handle` performs the priority-ordered checks above. Each check that matches calls `extinction_with_addr` (noreturn). The `FAULT_UNHANDLED_USER` return is the only non-extinction path; the caller (`exception_sync_curr_el`) currently extincts on it.
+
+### `arch/arm64/exception.c::exception_sync_lower_el` — P3-Ea
+
+Counterpart for EL0 → EL1 sync exceptions. Same shape as `exception_sync_curr_el` but switches on the LOWER EC values:
+
+```c
+case EC_DATA_ABORT_LOWER:
+case EC_INST_ABORT_LOWER: {
+    struct fault_info fi;
+    fault_info_decode(esr, far, ctx->elr, &fi);
+    enum fault_result r = arch_fault_handle(&fi);
+    switch (r) {
+    case FAULT_HANDLED: return;       // ERET resumes the EL0 instruction.
+    case FAULT_UNHANDLED_USER:
+        extinction_with_addr("EL0 fault: no VMA covers vaddr / permission denied",
+                             (uintptr_t)fi.vaddr);
+    /* ... */
+    }
+}
+
+case EC_SVC_AARCH64:
+    extinction_with_addr("EL0 SVC (userspace syscall) — not implemented at v1.0",
+                         (uintptr_t)ctx->elr);
+
+case EC_PC_ALIGN / EC_SP_ALIGN / EC_BTI / EC_BRK:
+    /* extinct with EL0-prefixed diagnostic */
+```
+
+`fault_info_decode` already sets `from_user=true` for the LOWER ECs, so `arch_fault_handle` routes through `userland_demand_page` (P3-Dc) — no additional dispatch logic needed. On `FAULT_HANDLED` return, vectors.S slot 0x400 branches to `.Lexception_return` and ERETs. On `FAULT_UNHANDLED_USER` the handler extincts (Phase 5+ note delivery upgrades to SIGSEGV).
 
 ### `arch/arm64/exception.c::exception_sync_curr_el`
 
@@ -287,10 +317,11 @@ The dispatcher itself is not on a hot path (faults are exceptional). Performance
 ## Status
 
 - **Implemented at P3-C** (`12ff454`): `fault_info_decode`, `arch_fault_handle` with the kernel-mode classification paths, exception.c refactor to use the dispatcher, 5 decoder unit tests.
-- **Implemented at P3-Dc**: `userland_demand_page` (vma_lookup → permission check → VMO offset → PTE install). `mmu_install_user_pte` walks/grows the per-Proc TTBR0 tree. `arch_fault_handle`'s user-mode case routes through `userland_demand_page`. 7 new unit tests in `test_demand_page.c`.
-- **Stubbed**: COW (post-v1.0; not on the critical path for /init or the typical static-ELF case). EL0 sync exception vector (P3-E adds `exception_sync_lower_el` which reuses the dispatcher).
+- **Implemented at P3-Dc** (`936c2ed`): `userland_demand_page` (vma_lookup → permission check → VMO offset → PTE install). `mmu_install_user_pte` walks/grows the per-Proc TTBR0 tree. `arch_fault_handle`'s user-mode case routes through `userland_demand_page`. 7 new unit tests in `test_demand_page.c`.
+- **Implemented at P3-Ea**: `exception_sync_lower_el` for EL0 sync vector slot 0x400. EL0 IRQ slot 0x480 wired to `exception_irq_curr_el` + `preempt_check_irq`. SVC + alignment + BTI + BRK from EL0 stub-extinct at v1.0; P3-Ec wires real syscall dispatch.
+- **Stubbed**: COW (post-v1.0; not on the critical path for /init or the typical static-ELF case). SVC/syscall dispatcher (P3-Ec).
 
-Commit landing points: `12ff454` (P3-C), `936c2ed` (P3-Dc).
+Commit landing points: `12ff454` (P3-C), `936c2ed` (P3-Dc), `<P3-Ea hash>`.
 
 ## Known caveats / footguns
 

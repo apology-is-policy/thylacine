@@ -230,13 +230,34 @@ _exception_vectors:
     VEC_UNEXPECTED 7
 
     // ------------------------------------------------------------------
-    // Lower EL using AArch64 — userspace lands at Phase 2.
+    // Lower EL using AArch64 — userspace.
+    //
+    // P3-Ea: sync (0x400) routes EL0 page faults through
+    // exception_sync_lower_el → arch_fault_handle → userland_demand_page
+    // (P3-Dc demand paging). On FAULT_HANDLED the trampoline ERETs to
+    // resume the faulting EL0 instruction. SVC stubs extinct at v1.0;
+    // P3-Ec adds the syscall dispatcher.
+    //
+    // IRQ (0x480) reuses exception_irq_curr_el — same GIC ack→dispatch→
+    // EOI flow regardless of EL source. KERNEL_ENTRY captures SP_EL0
+    // (the user's stack at fault) for the saved context. preempt_check_irq
+    // observes the slice/need_resched and may context-switch.
+    //
+    // FIQ + SError still extinct (no FIQ source online; SError indicates
+    // hardware-level corruption that v1.0 can't recover from cleanly).
     // ------------------------------------------------------------------
-    .org _exception_vectors + 0x400
-    VEC_UNEXPECTED 8
+    .org _exception_vectors + 0x400      /* Sync from EL0 */
+    KERNEL_ENTRY
+    mov     x0, sp
+    bl      exception_sync_lower_el
+    b       .Lexception_return           /* ERET to EL0 on FAULT_HANDLED */
 
-    .org _exception_vectors + 0x480
-    VEC_UNEXPECTED 9
+    .org _exception_vectors + 0x480      /* IRQ from EL0 */
+    KERNEL_ENTRY
+    mov     x0, sp
+    bl      exception_irq_curr_el
+    bl      preempt_check_irq            /* P2-Bc: maybe context-switch */
+    b       .Lexception_return
 
     .org _exception_vectors + 0x500
     VEC_UNEXPECTED 10
