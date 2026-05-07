@@ -350,6 +350,20 @@ They're accessed via PC-relative `adrp+add` from the handler — works through T
 
 `extinction_with_addr` prints message + one address. We don't yet walk the frame-pointer chain (x29 is saved in the context but not reported). Phase 2's debug infrastructure adds a `dump_stack` helper that walks fp/lr from the saved context.
 
+### `userland_enter` SPSel discipline (P4-Fix157)
+
+`userland_enter(entry, sp)` (`arch/arm64/userland.S`) is the asm trampoline that does the `eret` from EL1 to EL0. Its job: program `ELR_EL1=entry`, `SPSR_EL1=0` (EL0t, DAIF clear), and write the user stack pointer.
+
+The user-stack write is `mov sp, x17`, which writes whichever stack-pointer register the live `sp` aliases — `SP_EL0` if `PSTATE.SPSel==0`, `SP_EL1` if `PSTATE.SPSel==1`. The kernel's normal-mode steady state is `SPSel=0` (so `sp == SP_EL0`), and at that state the `mov` does the right thing — it programs the EL0 user stack.
+
+The trip-hazard #157 root cause was that `userland_enter` could be called at `SPSel=1`. The path: a kthread on CPU N is dispatched by `cpu_switch_context` from inside an IRQ handler (timer preempt → `preempt_check_irq` → `sched()`) — this dispatch chain runs entirely at `SPSel=1` because hardware sets `SPSel=1` on exception entry and nothing in the IRQ vector or `sched()` lowers it. When the freshly-dispatched kthread runs `exec_thunk` → `userland_enter`, `sp` aliases `SP_EL1`. The `mov sp, x17` then writes `SP_EL1 := 0x80000000` (the user-VA stack top), corrupting the per-CPU exception stack pointer. After the `eret`, `SPSR_EL1.M=EL0t` lowers the EL0 thread to `SPSel=0`, but `SP_EL1` stays at the corrupt low VA. The user program runs to its first `svc` (or fault), hardware enters EL1 with `SPSel=1`, `KERNEL_ENTRY`'s `sub sp, sp, #EXCEPTION_CTX_SIZE` decrements the corrupt `SP_EL1` to `0x7FFF_FEE0`, and the immediately-following `stp` faults at translation-fault L0 (low VA isn't mapped under TTBR0 of any kind once identity is retired). The fault re-enters at vector `0x200` with the already-corrupt `SP_EL1`, which gets decremented by `0x120` again, and so on — an infinite EL1↔EL1 abort loop that hangs the kernel silently. (`-d int` capture: `FAR` decreases by exactly `0x120` per loop iteration, matching `EXCEPTION_CTX_SIZE`.)
+
+The fix is in `userland.S`: `msr SPSel, #0; isb` immediately before `mov sp, x17`. After the explicit transition, `sp` always aliases `SP_EL0` regardless of the entry context. `SP_EL1` is left at whatever the dispatch path set it to — which is correct: under the IRQ-driven dispatch path, `cpu_switch_context`'s `mov sp, x9` (running at `SPSel=1`) wrote `SP_EL1 := next_thread->ctx.sp` (the kthread's own kstack), so subsequent EL0→EL1 transitions land on this kthread's kstack. Under the SPSel=0 dispatch path, `SP_EL1` retains the per-CPU exception stack value initialized in `start.S` step 8.5.
+
+Why iter 1 worked: the very first userspace dispatch of a session typically lands on the parent's `wait_pid → sleep → sched` path, which runs at `SPSel=0`. Subsequent iterations are more likely to take the timer-IRQ-driven preempt path, putting them at `SPSel=1`. The timing-sensitive nature of the bug is why the original audit's pre-eret state comparison (TTBR0/SPSR/ELR/SCTLR/TPIDR/L0[0]) reported "bit-identical" — those registers genuinely match between iterations, but `PSTATE.SPSel` at `userland_enter` entry differed.
+
+The regression test for #157 lives in `kernel/test/test_userspace2.c` (`userspace.first_iteration` + `userspace.second_iteration`). Both iterations now pass.
+
 ---
 
 ## See also

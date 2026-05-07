@@ -193,6 +193,8 @@ void test_irqfwd_create_destroy(void);
 void test_irqfwd_refcount_lifecycle(void);
 void test_irqfwd_wait_wakes_on_sgi(void);
 void test_irqfwd_collapses_concurrent_fires(void);
+void test_userspace_first_iteration(void);
+void test_userspace_second_iteration(void);
 
 // ---------------------------------------------------------------------------
 // Registry. Sentinel-terminated.
@@ -413,6 +415,8 @@ struct test_case g_tests[] = {
     { "irqfwd.wait_wakes_on_sgi",      test_irqfwd_wait_wakes_on_sgi,      false, NULL },
     { "irqfwd.collapses_concurrent_fires",
                                        test_irqfwd_collapses_concurrent_fires, false, NULL },
+    { "userspace.first_iteration",     test_userspace_first_iteration,     false, NULL },
+    { "userspace.second_iteration",    test_userspace_second_iteration,    false, NULL },
     { NULL, NULL, false, NULL },          // sentinel
 };
 

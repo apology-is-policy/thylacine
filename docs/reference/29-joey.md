@@ -103,18 +103,17 @@ Phase 5+ /init-as-supervisor (long-running parent that respawns dead children, s
 
 ## Tests
 
-P3-F retires the predecessor `userspace.exec_exits_ok` test in favor of the production `joey_run()` path. Rationale: trip-hazard #157 (second-userspace-test-iteration hang) means running TWO userspace exec'd threads sequentially within the kernel test harness reproducibly hangs the second. The prior test ran ONE userspace exec; adding /init AFTER it would have hit the bug. /init alone runs once per boot — the bug doesn't manifest, and the production path itself is the regression guard.
+P3-F retired the predecessor `userspace.exec_exits_ok` test in favor of the production `joey_run()` path because of trip-hazard #157 (second-userspace-iteration hang). With #157 closed at **P4-Fix157** (SPSel discipline in `userland_enter` — see `docs/reference/08-exception.md` § "userland_enter SPSel discipline"), the bug no longer manifests, and the regression test is `kernel/test/test_userspace2.c`:
 
-Trade made:
-- **Loss**: a unit-tested invocation of exec_setup+userland_enter inside a try/wait_pid harness (could test specific failure modes via test_userspace's `_fail` sibling — never landed).
-- **Gain**: the production boot path itself is the regression guard. If exec_setup or userland_enter regresses, /init fails to print "hello" or wait_pid sees a non-zero status, and the kernel extincts (visible to tools/test.sh).
+- `userspace.first_iteration` — first rfork+exec_setup+userland_enter+wait_pid round.
+- `userspace.second_iteration` — second round; specifically catches a regression of the SPSel discipline. Both must pass for the test suite to clear.
 
-The following tests exercise /init's component primitives in isolation (unaffected by P3-F):
+The end-to-end production boot path /init also regression-guards. If `exec_setup` or `userland_enter` regresses, /init fails to print "hello" or `wait_pid` sees a non-zero status, and the kernel extincts (visible to `tools/test.sh`).
+
+The following tests exercise /init's component primitives in isolation:
 - `kernel/test/test_exec.c` — 5 tests on `exec_setup` (ELF parse, segment data copy, constraints, multi-segment, lifecycle).
 - `kernel/test/test_syscall.c` — 5 tests on `syscall_dispatch` (unknown nr, SYS_PUTS, SYS_EXITS ok/fail, args layout).
 - `kernel/test/test_demand_page.c` — 7 tests on the demand-paging path.
-
-The end-to-end "userspace runs in EL0" assertion is now the boot-path /init itself.
 
 ## Performance characteristics
 

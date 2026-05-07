@@ -89,6 +89,7 @@ set(KERNEL_SRCS
     test/test_devramfs.c
     test/test_virtio.c
     test/test_irqfwd.c
+    test/test_userspace2.c
 )
 
 set(KERNEL_LD_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/../arch/arm64/kernel.ld)

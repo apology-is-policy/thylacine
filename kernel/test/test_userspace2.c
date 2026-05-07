@@ -84,15 +84,21 @@ static void exec_thunk(void *arg) {
     struct Thread *t = current_thread();
     struct Proc *p = t->proc;
 
-    uart_puts("    [iteration ");
-    uart_putdec((u64)ea->iteration);
-    uart_puts("] exec_thunk: pid=");
-    uart_putdec((u64)p->pid);
-    uart_puts(" asid=");
-    uart_putdec((u64)p->asid);
-    uart_puts(" pgtable_root=");
-    uart_puthex64((u64)p->pgtable_root);
-    uart_puts("\n");
+    {
+        u64 mpidr;
+        __asm__ __volatile__("mrs %0, mpidr_el1" : "=r"(mpidr));
+        uart_puts("    [iteration ");
+        uart_putdec((u64)ea->iteration);
+        uart_puts("] exec_thunk: pid=");
+        uart_putdec((u64)p->pid);
+        uart_puts(" asid=");
+        uart_putdec((u64)p->asid);
+        uart_puts(" pgtable_root=");
+        uart_puthex64((u64)p->pgtable_root);
+        uart_puts(" cpu=");
+        uart_puthex64(mpidr & 0xFFFF);
+        uart_puts("\n");
+    }
 
     u64 entry = 0, sp = 0;
     int rc = exec_setup(p, ea->blob, ea->size, &entry, &sp);

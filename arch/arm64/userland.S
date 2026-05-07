@@ -75,6 +75,33 @@ userland_enter:
     mov     x29, xzr             // FP
     mov     x30, xzr             // LR
 
+    // [#157 fix] Force SPSel=0 before writing sp.
+    //
+    // The prior code path assumed `sp` always aliases SP_EL0, but that
+    // only holds when PSTATE.SPSel=0. When userland_enter is called from
+    // a kthread that was dispatched in SPSel=1 state (e.g., the parent
+    // got preempted by a timer IRQ → preempt_check_irq → sched →
+    // cpu_switch_context, all running at SPSel=1, and the new thread's
+    // trampoline never lowered SPSel back to 0), `mov sp, x17` writes
+    // SP_EL1 — not SP_EL0. After eret to EL0 the user stack is unset
+    // (SP_EL0 retains stale state) AND every subsequent EL1 exception
+    // entry uses the corrupt SP_EL1 (= 0x80000000 user VA), which lives
+    // in TTBR0 territory; KERNEL_ENTRY's first stp faults, fault
+    // handler re-enters at the same vector, decrements SP_EL1 by
+    // EXCEPTION_CTX_SIZE (0x120), faults again, ad infinitum. This is
+    // the trip-hazard #157 root cause (deferred from R7).
+    //
+    // Why iter 1 worked: iter 1's child happened to be dispatched at
+    // SPSel=0 (parent's wait_pid sleep path). Iter 2's dispatch went
+    // through an IRQ-driven sched (timer preempt of the parent's busy
+    // wait), arriving at SPSel=1.
+    //
+    // The fix: explicitly switch to SPSel=0 before writing sp.
+    // ISB serializes the SPSel update so subsequent `mov sp, ...`
+    // observes the new SPSel value (and thus aliases SP_EL0).
+    msr     SPSel, #0
+    isb
+
     // LAST step before eret: set SP. Live SP changes from kernel
     // kstack to user_sp here. Subsequent instructions (mov + eret)
     // do NOT touch the stack — pure register ops.

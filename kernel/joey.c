@@ -190,14 +190,15 @@ static void joey_thunk(void *arg) {
 }
 
 void joey_run(void) {
-    // R7 F136 close: one-call guard. v1.0 invariant — joey_run is
-    // called exactly once per boot from boot_main. Trip-hazard #157
-    // (second-userspace-iteration hang on QEMU virt) makes a second
-    // userspace exec hang silently; the guard converts an accidental
-    // double-call (e.g., a future Phase 5+ supervisor refactor) into
-    // an explicit, loud failure rather than the silent #157 hang.
-    // g_joey_elf_blob is single-use BSS — concurrent rebuilds would
-    // also race, so the guard doubles as memory-safety enforcement.
+    // One-call guard. v1.0 invariant — joey_run is called exactly once
+    // per boot from boot_main. g_joey_elf_blob is single-use BSS;
+    // concurrent rebuilds would race the build_init_elf zero-fill +
+    // header writes against a peer reader. The guard catches accidental
+    // double-call (e.g., a future Phase 5+ supervisor refactor that
+    // tries to re-run joey_run instead of re-execing). Originally
+    // landed at R7 F136 as a #157 mitigation; with #157 fixed (P4-Fix157
+    // — SPSel discipline in userland_enter), the guard is retained for
+    // its structural role.
     static bool g_joey_run_called = false;
     if (g_joey_run_called) {
         extinction("joey_run: double call (v1.0 single-use invariant)");
