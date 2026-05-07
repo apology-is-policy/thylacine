@@ -309,22 +309,42 @@ bool mmu_restore_normal_range(paddr_t pa, unsigned n_pages);
 paddr_t mmu_kernel_ttbr0_pa(void);
 
 // =============================================================================
-// P3-Bcb: per-Proc translation table allocator.
+// P3-Bcb / P3-Db: per-Proc translation table allocator + recursive teardown.
 //
 // Each non-kernel Proc owns its own L0 translation table for TTBR0
 // (user-half). proc_pgtable_create allocates a fresh L0 (4 KiB,
 // page-aligned, KP_ZERO so all 512 entries are invalid). The returned
 // PA is the value caller writes into struct Proc.pgtable_root; P3-Bd
-// will load it into TTBR0_EL1 at context switch.
+// loads it into TTBR0_EL1 at context switch.
 //
-// proc_pgtable_destroy frees the L0 (and any sub-tables installed
-// during the Proc's lifetime). At v1.0 P3-Bcb the L0 has no sub-
-// tables installed (no faults populate it yet); destroy just frees
-// the L0 page. P3-D adds VMA → page-fault → PTE-installation; the
-// destroy will then walk the tree to free L1/L2/L3 sub-tables.
+// proc_pgtable_destroy walks the L0 → L1 → L2 → L3 tree (P3-Db) and
+// frees every sub-table reached via a table descriptor, then frees
+// the L0 root. Leaf pages (L3 page descriptors / L2 block descriptors)
+// are NOT freed — those user-VA-mapped pages are owned by the VMA
+// layer (VMO mapping_count). The walker frees only translation-table
+// pages.
+//
+// Pre-P3-Db, this only freed the L0 page. P3-Db extended it to handle
+// the post-P3-Dc world where demand-paging populates sub-tables.
+// Today's tree continues to have no sub-tables (P3-Db is wired in
+// advance of demand paging); the walk is no-op-on-empty.
 //
 // Returns 0 on OOM (caller treats as ENOMEM and rolls back the Proc
 // allocation). Idempotent on input root == 0.
+//
+// TLB lifecycle: asid_free issues a broadcast `tlbi aside1is` that
+// invalidates all TLB entries tagged with the freed Proc's ASID. The
+// flush happens BEFORE the ASID is returned to the free-list (see
+// arch/arm64/asid.c), which ensures any subsequent reuser starts with a
+// clean TLB. Independently, the freed pgtable PAs may be returned to
+// buddy by proc_pgtable_destroy and recycled — that's safe because:
+//   (a) The Proc is not running on any CPU at proc_free time (its sole
+//       thread reached THREAD_EXITING + sched dropped it; wait_pid spun
+//       on on_cpu == 0 before reaping).
+//   (b) No other Proc uses our ASID until asid_free's flush + free-list
+//       push, after which any reuser sees no stale entries.
+// proc.c::proc_free's order (proc_pgtable_destroy before asid_free) is
+// thus correct; reversing would also be correct.
 // =============================================================================
 
 paddr_t proc_pgtable_create(void);

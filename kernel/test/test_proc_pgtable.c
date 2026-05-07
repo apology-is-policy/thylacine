@@ -1,6 +1,6 @@
-// P3-Bcb: per-Proc page-table allocator tests.
+// P3-Bcb / P3-Db: per-Proc page-table allocator tests.
 //
-// Two smoke tests:
+// Three+1 smoke tests:
 //
 //   proc.pgtable_alloc_smoke
 //     proc_alloc returns a Proc with non-zero pgtable_root and an asid
@@ -13,14 +13,28 @@
 //     proc_total_destroyed advance in step (no leak), and asid_inflight
 //     returns to baseline (no ASID leak).
 //
-// At v1.0 P3-Bcb the page table sits unused — P3-Bd loads it into
-// TTBR0_EL1 at context switch. These tests verify the lifecycle
-// plumbing (alloc, store-in-Proc, free, ASID accounting) without
-// requiring TTBR0 swap.
+//   proc.ttbr0_swap_smoke
+//     Two rfork'd children record their live TTBR0_EL1; verify each
+//     equals (asid<<48) | pgtable_root.
+//
+//   proc.pgtable_destroy_walk_releases_subtables  (P3-Db; closes
+//                                                  trip-hazard #116)
+//     Manually install a 3-deep sub-table chain (L1 → L2 → L3) under
+//     the Proc's L0; drop the Proc; verify all 4 page-table pages
+//     return to buddy (proc_pgtable_destroy walks the tree, not just
+//     the L0 root).
+//
+// At v1.0 P3-Db the page table sits mostly empty — vmo_map installs
+// only VMAs (not PTEs); demand paging via P3-Dc populates sub-tables
+// on fault. The destroy_walk test exercises the walker by manually
+// installing the tree the way demand paging will once it lands.
 
 #include "test.h"
 
 #include "../../arch/arm64/asid.h"
+#include "../../arch/arm64/mmu.h"
+
+#include "../../mm/phys.h"
 
 #include <thylacine/extinction.h>
 #include <thylacine/page.h>
@@ -32,6 +46,7 @@
 void test_proc_pgtable_alloc_smoke(void);
 void test_proc_pgtable_lifecycle_stress(void);
 void test_proc_ttbr0_swap_smoke(void);
+void test_proc_pgtable_destroy_walk_releases_subtables(void);
 
 void test_proc_pgtable_alloc_smoke(void) {
     unsigned asid_inflight_before = asid_inflight();
@@ -154,4 +169,67 @@ void test_proc_ttbr0_swap_smoke(void) {
     TEST_ASSERT(g_ttbr0_test_pgtable[0] != g_ttbr0_test_pgtable[1],
         "two rfork'd children share the same pgtable_root "
         "(proc_pgtable_create bug?)");
+}
+
+// =============================================================================
+// P3-Db: proc_pgtable_destroy walks the L0 → L1 → L2 → L3 tree.
+// =============================================================================
+
+// Local PTE-bit duplicates for table-descriptor construction. The
+// production constants live in arch/arm64/mmu.h; we duplicate just the
+// two bits we need so the test stays a self-contained unit and isn't
+// fragile to PTE-bit-layout refactors elsewhere.
+#define PTE_BIT_VALID       (1ull << 0)
+#define PTE_BIT_TYPE_TABLE  (1ull << 1)
+
+static inline u64 mk_table_pte(paddr_t next_table_pa) {
+    return next_table_pa | PTE_BIT_VALID | PTE_BIT_TYPE_TABLE;
+}
+
+void test_proc_pgtable_destroy_walk_releases_subtables(void) {
+    // Snapshot free-page count BEFORE we allocate anything. proc_alloc
+    // may consume non-pgtable buddy pages too (struct Proc via SLUB
+    // cache, handle table fill, etc.) — but proc_free releases them
+    // symmetrically, so the round-trip check `free_after == free_before`
+    // is the meaningful invariant.
+    u64 free_before = phys_free_pages();
+
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc failed");
+    TEST_ASSERT(p->pgtable_root != 0, "pgtable_root is 0");
+
+    // Allocate three sub-tables (L1, L2, L3). Each is one 4 KiB page.
+    struct page *l1_pg = alloc_pages(0, KP_ZERO);
+    struct page *l2_pg = alloc_pages(0, KP_ZERO);
+    struct page *l3_pg = alloc_pages(0, KP_ZERO);
+    TEST_ASSERT(l1_pg && l2_pg && l3_pg, "alloc_pages for sub-tables failed");
+
+    paddr_t l1_pa = page_to_pa(l1_pg);
+    paddr_t l2_pa = page_to_pa(l2_pg);
+    paddr_t l3_pa = page_to_pa(l3_pg);
+
+    // Install the chain. L0[0] → L1; L1[0] → L2; L2[0] → L3; L3[0]
+    // unset (we don't install a leaf — leaf pages are owned by the VMA
+    // layer; the destroy walker correctly DOES NOT free them).
+    u64 *l0 = (u64 *)pa_to_kva(p->pgtable_root);
+    u64 *l1 = (u64 *)pa_to_kva(l1_pa);
+    u64 *l2 = (u64 *)pa_to_kva(l2_pa);
+    l0[0] = mk_table_pte(l1_pa);
+    l1[0] = mk_table_pte(l2_pa);
+    l2[0] = mk_table_pte(l3_pa);
+
+    // Drop the Proc. proc_free → proc_pgtable_destroy walks the tree,
+    // freeing L1, L2, L3 sub-tables AND the L0 root. asid_free fires
+    // alongside, but ASIDs are slot indices not buddy pages — they
+    // don't affect free_pages.
+    p->state = 2;     // PROC_STATE_ZOMBIE
+    proc_free(p);
+
+    // Round-trip: free count returns to baseline IFF the walker freed
+    // every sub-table. Pre-P3-Db implementation freed only the L0 →
+    // free_after = free_before - 3 (L1+L2+L3 leaked).
+    u64 free_after = phys_free_pages();
+    TEST_EXPECT_EQ(free_after, free_before,
+        "proc_pgtable_destroy must walk + free ALL sub-tables; "
+        "if 3 pages are missing, only L0 got freed (the bug this test pins)");
 }

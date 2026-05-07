@@ -1,8 +1,13 @@
-# Reference: per-Proc VMA list (P3-Da)
+# Reference: per-Proc VMA list (P3-Da / P3-Db)
 
 ## Purpose
 
-A VMA (Virtual Memory Area) describes a contiguous range of user virtual addresses with associated permissions and a backing VMO. The sorted list of VMAs anchored at `struct Proc.vmas` forms the per-Proc address-space description against which page faults are dispatched. P3-Da establishes the data structure + lifecycle hooks; P3-Db wires `vmo_map` to create VMA entries; P3-Dc connects `arch_fault_handle`'s user-mode path to `vma_lookup` → demand paging.
+A VMA (Virtual Memory Area) describes a contiguous range of user virtual addresses with associated permissions and a backing VMO. The sorted list of VMAs anchored at `struct Proc.vmas` forms the per-Proc address-space description against which page faults are dispatched.
+
+History:
+- **P3-Da**: data structure + alloc/free/insert/remove/lookup/drain API; struct Proc grows 112→120 bytes; bootstrap order (vmo_init → vma_init → asid_init → proc_init); proc_free wires vma_drain BEFORE handle_table_free for correct VMO lifecycle.
+- **P3-Db**: high-level entries `vmo_map(Proc*, Vmo*, vaddr, length, prot)` + `vmo_unmap(Proc*, vaddr, length)` route through `vma_alloc + vma_insert` and `vma_remove + vma_free`. The bare refcount-only ops are renamed `vmo_acquire_mapping` / `vmo_release_mapping` to free the public names.
+- **P3-Dc**: connects `arch_fault_handle`'s user-mode path to `vma_lookup` → demand paging.
 
 ARCH §16 (process address space) names this surface explicitly as the "VMA tree" — at v1.0 P3-Da it's a sorted doubly-linked list (O(N) operations, room for ~hundreds of entries before perceptible cost). Phase 5+ adds an interval tree (RB-tree with per-node interval-max) for O(log N) lookup once N grows.
 
@@ -47,7 +52,9 @@ u64 vma_total_freed(void);
 - `vmo != NULL`.
 - `prot` ∈ `{0, R, RW, RX}` — W+X rejected at the VMA layer (mirrors ARCH §28 I-12).
 
-Returns NULL on any constraint violation without partial allocation. Calls `vmo_map` (mapping_count++) on success; `vma_free` calls `vmo_unmap` symmetrically.
+Returns NULL on any constraint violation without partial allocation. Calls `vmo_acquire_mapping` (mapping_count++) on success; `vma_free` calls `vmo_release_mapping` symmetrically.
+
+(Pre-P3-Db, the refcount-only ops were named `vmo_map` / `vmo_unmap`; they were renamed when the public `vmo_map(Proc*, ...)` entry point arrived. The new high-level entry calls `vma_alloc + vma_insert`; on `vma_insert` overlap, the entry calls `vma_free` to roll back the acquire.)
 
 #### Insertion + lookup
 
@@ -73,7 +80,7 @@ Adjacent ranges (touching at a single boundary) are NOT overlap — `[a, b)` and
 - SLUB cache `g_vma_cache` (sized for `struct Vma` = 64 bytes).
 - Atomic counters `g_vma_allocated` / `g_vma_freed` for diagnostic + leak detection.
 - `ranges_overlap(a, b, c, d) = (a < d && c < b)` — half-open form.
-- `vma_alloc` calls `vmo_map(vmo)` (mapping_count++) on success; `vma_free` calls `vmo_unmap(vmo)` (mapping_count--).
+- `vma_alloc` calls `vmo_acquire_mapping(vmo)` (mapping_count++) on success; `vma_free` calls `vmo_release_mapping(vmo)` (mapping_count--).
 
 ### `kernel/proc.c` integration
 
@@ -167,9 +174,9 @@ Phase 5+ RB-tree converts insert/lookup to O(log N).
 ## Status
 
 - **Implemented at P3-Da (`a7ff570`)**: data structure + alloc/free/insert/remove/lookup/drain + 6 unit tests + struct Proc integration + bootstrap order.
-- **Stubbed**: `vmo_map` extension to take (Proc, vaddr, length, prot) → vma_alloc + vma_insert (P3-Db).
+- **Implemented at P3-Db**: `vmo_map(Proc*, Vmo*, vaddr, length, prot)` + `vmo_unmap(Proc*, vaddr, length)` route through `vma_alloc + vma_insert` / `vma_remove + vma_free`. Refcount-only ops renamed to `vmo_acquire_mapping` / `vmo_release_mapping`. New tests: `vmo.map_proc_smoke / vmo.map_proc_constraints / vmo.map_proc_overlap_rejected / vmo.unmap_proc_smoke / vmo.unmap_proc_no_match`. Plus `proc_pgtable_destroy` sub-table walk lands at P3-Db (closes trip-hazard #116).
 - **Stubbed**: arch_fault_handle's user-mode dispatch path → vma_lookup → demand paging (P3-Dc).
-- **Stubbed**: proc_pgtable_destroy sub-table walk (P3-Db / P3-D depending on when sub-tables get populated).
+- **Stubbed**: partial unmap (sub-VMA range) — post-v1.0.
 
 ## Known caveats / footguns
 
@@ -183,7 +190,9 @@ Phase 5+ RB-tree converts insert/lookup to O(log N).
 
 5. **VMA list is sorted**. `vma_insert` relies on this for overlap detection AND lookup early-exit. Direct manipulation of `p->vmas` outside the API risks breaking the invariant; only `vma_insert/remove/drain` should mutate.
 
-6. **`vma_alloc` always takes `vmo_map`** (mapping_count++). Callers that pre-incremented mapping_count externally would over-count. The vma layer is the only place that takes mapping_count at v1.0; future direct mapping_count manipulation must be coordinated.
+6. **`vma_alloc` always takes `vmo_acquire_mapping`** (mapping_count++). Callers that pre-incremented mapping_count externally would over-count. The vma layer is the only place that takes mapping_count at v1.0; future direct mapping_count manipulation must be coordinated.
+
+7. **High-level `vmo_map(Proc*, ...)` rolls back on overlap rejection.** When `vma_insert` returns -1, the path calls `vma_free` which fires `vmo_release_mapping` to symmetrically reverse the `vma_alloc`-time acquire. mapping_count ends UNCHANGED on rejection. The order matters — if you wrote `vma_alloc + vma_insert + (no rollback)`, you'd leak a mapping_count++ on every overlap rejection.
 
 ## Naming rationale
 

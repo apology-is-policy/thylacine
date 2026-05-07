@@ -74,6 +74,12 @@ void test_asid_inflight_count(void);
 void test_proc_pgtable_alloc_smoke(void);
 void test_proc_pgtable_lifecycle_stress(void);
 void test_proc_ttbr0_swap_smoke(void);
+void test_proc_pgtable_destroy_walk_releases_subtables(void);
+void test_vmo_map_proc_smoke(void);
+void test_vmo_map_proc_constraints(void);
+void test_vmo_map_proc_overlap_rejected(void);
+void test_vmo_unmap_proc_smoke(void);
+void test_vmo_unmap_proc_no_match(void);
 void test_fault_decode_kernel_data_translation_l2(void);
 void test_fault_decode_kernel_data_permission_write(void);
 void test_fault_decode_user_data_translation(void);
@@ -154,6 +160,14 @@ struct test_case g_tests[] = {
     { "proc.pgtable_alloc_smoke",      test_proc_pgtable_alloc_smoke,      false, NULL },
     { "proc.pgtable_lifecycle_stress", test_proc_pgtable_lifecycle_stress, false, NULL },
     { "proc.ttbr0_swap_smoke",         test_proc_ttbr0_swap_smoke,         false, NULL },
+    { "proc.pgtable_destroy_walk_releases_subtables",
+                                       test_proc_pgtable_destroy_walk_releases_subtables,
+                                                                           false, NULL },
+    { "vmo.map_proc_smoke",            test_vmo_map_proc_smoke,            false, NULL },
+    { "vmo.map_proc_constraints",      test_vmo_map_proc_constraints,      false, NULL },
+    { "vmo.map_proc_overlap_rejected", test_vmo_map_proc_overlap_rejected, false, NULL },
+    { "vmo.unmap_proc_smoke",          test_vmo_unmap_proc_smoke,          false, NULL },
+    { "vmo.unmap_proc_no_match",       test_vmo_unmap_proc_no_match,       false, NULL },
     { "fault.decode_kernel_data_translation_l2",
                                        test_fault_decode_kernel_data_translation_l2,
                                                                            false, NULL },

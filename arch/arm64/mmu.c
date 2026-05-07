@@ -905,7 +905,7 @@ bool mmu_restore_normal_range(paddr_t pa, unsigned n_pages) {
 }
 
 // =============================================================================
-// P3-Bcb: per-Proc translation table allocator.
+// P3-Bcb / P3-Db: per-Proc translation table allocator + recursive teardown.
 // =============================================================================
 //
 // proc_pgtable_create:
@@ -914,15 +914,103 @@ bool mmu_restore_normal_range(paddr_t pa, unsigned n_pages) {
 //   writes into struct Proc.pgtable_root. The PA is also what's loaded
 //   into TTBR0_EL1 at context switch (P3-Bd).
 //
-// proc_pgtable_destroy:
-//   Free the L0 page. At v1.0 P3-Bcb the L0 has no sub-tables (no
-//   page-fault path populates them yet), so this is a single
-//   `free_pages(l0, 0)`. P3-D adds VMA + page-fault → sub-table
-//   installation; this function will then walk the tree to free
-//   L1/L2/L3 sub-tables before freeing L0. Trip-hazard documented.
+// proc_pgtable_destroy (P3-Db extension closing trip-hazard #116):
+//   Walk the L0 → L1 → L2 → L3 tree, freeing every sub-table reachable
+//   from a table descriptor. L3 entries are LEAF page descriptors that
+//   point at VMO-backed user pages — those pages are owned by the VMA
+//   layer (their lifecycle is the VMO refcount, freed at vma_drain →
+//   vmo_release_mapping). The pgtable walk does NOT free leaf pages;
+//   it frees only the table pages themselves (L1, L2, L3 sub-tables
+//   plus the L0 root).
+//
+//   Pre-P3-Db (P3-Bcb baseline) only freed the L0 page. That was sound
+//   because no path populated user-half PTEs (vma_alloc didn't install
+//   PTEs — it only refcounted the VMO). At P3-Db vmo_map still doesn't
+//   install PTEs (demand paging via P3-Dc does), so today's tree
+//   continues to have no sub-tables; the walk is no-op-on-empty. The
+//   walk is wired in advance of P3-Dc so the lifecycle is correct
+//   from the moment PTE installation arrives.
+//
+// Address-space coverage (TTBR0 user-half, 48-bit VA, 4-KiB granule):
+//   - L0 covers VA[47:39]: 512 entries, each 512 GiB.
+//   - L1 covers VA[38:30]: 512 entries, each 1 GiB.
+//   - L2 covers VA[29:21]: 512 entries, each 2 MiB. Block descriptors
+//     allowed at L2 (2-MiB user mappings); v1.0 P3-Db doesn't issue
+//     them — vma_alloc / demand-paging produce L3 pages — but the walk
+//     handles a future block-at-L2 by NOT recursing into a block
+//     descriptor (block has PTE_TYPE_BLOCK = 0; table has PTE_TYPE_TABLE
+//     = 1).
+//   - L3 covers VA[20:12]: 512 entries, each 4 KiB. ALL valid L3 entries
+//     are page descriptors (leaves) — the walk never recurses past L3.
+//
+// Free order: bottom-up (L3 → L2 → L1 → L0). Each level walks its 512
+// entries; for any table descriptor, recurses into the next level then
+// frees the page. Block / leaf / invalid entries are skipped (no walk,
+// no free).
 //
 // Idempotent on root == 0 (kproc never allocates a page table; its
 // pgtable_root is 0 forever).
+//
+// Cost: bounded by the number of sub-tables that were installed. An
+// empty tree (no user pages ever mapped) has only the L0 itself.
+// A fully-populated 4-GiB user space has ~4 L1 sub-tables + ~4096 L2
+// + ~2 million L3 — but realistic v1.0 userspace processes touch a
+// few segments + a stack, so a handful of L3 sub-tables. The walk is
+// O(walked entries); the cap on iterations is 512^4 ≈ 64 billion,
+// reached only by an exhaustive map. The walker DOES short-circuit
+// past invalid entries within each level, so the practical cost is
+// proportional to populated-only entries.
+//
+// Per ARM ARM D5.7: a freed translation table whose old PA was
+// referenced by a (now-being-torn-down) translation regime should not
+// be reused for a different mapping until any cached translations are
+// invalidated. The Proc lifecycle handles this independently of the
+// pgtable walker:
+//   - proc.c::wait_pid spun on `ct->on_cpu == 0` before reaping, so no
+//     CPU is mid-walk against this Proc's TTBR0 at proc_free time.
+//   - asid.c::asid_free broadcasts `tlbi aside1is` BEFORE pushing the
+//     ASID onto the free-list, so any subsequent reuser of the ASID
+//     starts with a TLB clean of this Proc's prior translations.
+// The walker may therefore free table pages without per-walk TLB ops;
+// the order in proc.c::proc_free (pgtable_destroy then asid_free) is
+// correct, and the reverse would also be correct.
+
+static void l3_walk_and_free(paddr_t l3_pa) {
+    // L3 entries are LEAF page descriptors. We do NOT free the pages
+    // they point at — those belong to the VMA layer (VMO refcount).
+    // We just free the L3 table page itself.
+    struct page *l3_pg = pa_to_page(l3_pa);
+    free_pages(l3_pg, 0);
+}
+
+static void l2_walk_and_free(paddr_t l2_pa) {
+    u64 *l2 = (u64 *)pa_to_kva(l2_pa);
+    for (u32 i = 0; i < ENTRIES_PER_TABLE; i++) {
+        u64 e = l2[i];
+        if (!(e & PTE_VALID)) continue;
+        // Block descriptor at L2 (2 MiB block) — leaf, no sub-table.
+        // Skip the recurse but no free needed (block points at user
+        // pages owned by VMA layer, same as L3 leaf pages).
+        if (!(e & PTE_TYPE_TABLE)) continue;
+        paddr_t l3_pa = e & ~0xFFFull;
+        l3_walk_and_free(l3_pa);
+    }
+    struct page *l2_pg = pa_to_page(l2_pa);
+    free_pages(l2_pg, 0);
+}
+
+static void l1_walk_and_free(paddr_t l1_pa) {
+    u64 *l1 = (u64 *)pa_to_kva(l1_pa);
+    for (u32 i = 0; i < ENTRIES_PER_TABLE; i++) {
+        u64 e = l1[i];
+        if (!(e & PTE_VALID)) continue;
+        if (!(e & PTE_TYPE_TABLE)) continue;     // 1 GiB block → leaf
+        paddr_t l2_pa = e & ~0xFFFull;
+        l2_walk_and_free(l2_pa);
+    }
+    struct page *l1_pg = pa_to_page(l1_pa);
+    free_pages(l1_pg, 0);
+}
 
 paddr_t proc_pgtable_create(void) {
     struct page *l0_pg = alloc_pages(0, KP_ZERO);
@@ -933,8 +1021,14 @@ paddr_t proc_pgtable_create(void) {
 void proc_pgtable_destroy(paddr_t root) {
     if (root == 0) return;             // kproc / unwound failure path
 
-    // P3-Bcb only: L0 has no sub-tables yet. Just free the L0 page.
-    // P3-D will refactor this to walk + free the entire tree.
+    u64 *l0 = (u64 *)pa_to_kva(root);
+    for (u32 i = 0; i < ENTRIES_PER_TABLE; i++) {
+        u64 e = l0[i];
+        if (!(e & PTE_VALID)) continue;
+        if (!(e & PTE_TYPE_TABLE)) continue;     // unreachable at v1.0 (L0 has no block form)
+        paddr_t l1_pa = e & ~0xFFFull;
+        l1_walk_and_free(l1_pa);
+    }
     struct page *l0_pg = pa_to_page(root);
     free_pages(l0_pg, 0);
 }

@@ -1,10 +1,13 @@
-# Reference: per-Proc page-table allocator (P3-Bcb)
+# Reference: per-Proc page-table allocator (P3-Bcb / P3-Bd / P3-Db)
 
 ## Purpose
 
 Each non-kernel Proc owns its own L0 translation table for TTBR0 (the user-half of the 48-bit VA space). Per-Proc page tables are the foundation for independent address spaces — every Proc sees its own user-mappings, and a context switch loads the destination's pgtable_root + asid into TTBR0_EL1.
 
-P3-Bcb is the **lifecycle plumbing only**: alloc at `proc_alloc`, free at `proc_free`. The actual TTBR0 swap on context switch lands at P3-Bd; populating L1/L2/L3 sub-tables happens at P3-D (VMA tree + page-fault handler). At P3-Bcb the allocated L0 sits unused — all 512 entries are invalid.
+History:
+- **P3-Bcb**: lifecycle plumbing — alloc at `proc_alloc`, free at `proc_free`. Both API entries are trivial: `proc_pgtable_create` allocates a single L0 page; `proc_pgtable_destroy` frees just that page.
+- **P3-Bd**: TTBR0 swap on context switch (`cpu_switch_context` saves+loads TTBR0_EL1 atomically with the rest of the register state).
+- **P3-Db**: extends `proc_pgtable_destroy` to recursively walk L0 → L1 → L2 → L3 freeing every sub-table reached via a table descriptor (closes trip-hazard #116). Wired in advance of demand-paging populating sub-tables (P3-Dc).
 
 ARCH §16: "Each Proc has a private user-half address space (TTBR0). Kernel-half (TTBR1) is shared. Independent address spaces are critical for process isolation; the per-Proc pgtable_root is what makes them independent."
 
@@ -29,11 +32,22 @@ TTBR0_EL1 = (asid << 48) | pgtable_root
 
 (P3-Bd will wire this load.)
 
-#### `proc_pgtable_destroy(paddr_t root)`
+#### `proc_pgtable_destroy(paddr_t root)` — P3-Db recursive walk
 
-Frees the L0 page back to buddy. Idempotent on `root == 0` (kproc + rolled-back-pre-create paths hit a no-op).
+Walks the L0 → L1 → L2 → L3 tree depth-first, freeing every translation-table page reachable via a table descriptor. Leaf pages (L3 page descriptors / L2 block descriptors) are NOT freed — those user-VA-mapped pages are owned by the VMA layer (VMO `mapping_count` lifecycle); the walker frees only translation-table pages. Idempotent on `root == 0` (kproc + rolled-back-pre-create paths hit a no-op).
 
-**v1.0 P3-Bcb scope: frees just the L0 page.** No sub-tables exist yet because no fault-handler / vmo_map path populates L1/L2/L3 entries. P3-D adds page-fault → demand-page allocation → PTE installation; `proc_pgtable_destroy` will then need to walk L0 → L1 → L2 → L3, freeing every installed sub-table before the L0. That refactor is **P3-D-blocking** and tracked as trip-hazard #116 in `phase3-status.md`.
+**Walk discipline**:
+1. For each L0 entry: skip invalid; for table descriptors, recurse into L1; (L0 has no block form on AArch64 stage-1 with 4-KiB granule, so the block-skip branch is dead at v1.0 but kept for symmetry).
+2. For each L1 entry: skip invalid; skip block descriptors (1-GiB user blocks are leaf and the user pages they reference belong to VMA layer); for table descriptors, recurse into L2.
+3. For each L2 entry: skip invalid; skip block descriptors (2-MiB user blocks); for table descriptors, recurse into L3.
+4. For L3: free the L3 table page itself; do NOT touch its 512 page-descriptor entries (those are leaves).
+5. After children freed, free the table page at this level.
+
+**Cost**: bounded by populated entries — empty tree (no faults yet) is O(L0 = 1 page free); fully-populated 4-GiB user space is the worst case. v1.0 userspace processes touch a few segments + a stack, so a handful of L3 sub-tables per Proc.
+
+**TLB lifecycle**: the walker does NOT issue per-page TLB ops. ASID-tagged entries for the dying Proc are flushed by `asid_free`'s broadcast `tlbi aside1is`, which fires before the ASID is recycled (regardless of whether `asid_free` runs before or after `proc_pgtable_destroy` in `proc_free`). The Proc is also no longer running on any CPU at `proc_free` time (`wait_pid` spun on `on_cpu == 0`).
+
+Pre-P3-Db, this freed only the L0 page (sub-tables would have leaked once demand paging populated them). Since no path populated sub-tables before P3-Db landed, the v1.0 P3-Bcb shortcut was sound at that point. P3-Db ships the walker in advance of P3-Dc's demand-paging fault handler so the lifecycle is correct from the moment PTE installation arrives.
 
 ## Implementation
 
@@ -46,14 +60,38 @@ paddr_t proc_pgtable_create(void) {
     return page_to_pa(l0_pg);
 }
 
+static void l3_walk_and_free(paddr_t l3_pa) {
+    struct page *l3_pg = pa_to_page(l3_pa);
+    free_pages(l3_pg, 0);
+}
+
+static void l2_walk_and_free(paddr_t l2_pa) {
+    u64 *l2 = (u64 *)pa_to_kva(l2_pa);
+    for (u32 i = 0; i < ENTRIES_PER_TABLE; i++) {
+        u64 e = l2[i];
+        if (!(e & PTE_VALID)) continue;
+        if (!(e & PTE_TYPE_TABLE)) continue;     // 2-MiB block leaf
+        l3_walk_and_free(e & ~0xFFFull);
+    }
+    free_pages(pa_to_page(l2_pa), 0);
+}
+
+static void l1_walk_and_free(paddr_t l1_pa) { /* same structure as l2_walk_and_free */ }
+
 void proc_pgtable_destroy(paddr_t root) {
     if (root == 0) return;
-    struct page *l0_pg = pa_to_page(root);
-    free_pages(l0_pg, 0);
+    u64 *l0 = (u64 *)pa_to_kva(root);
+    for (u32 i = 0; i < ENTRIES_PER_TABLE; i++) {
+        u64 e = l0[i];
+        if (!(e & PTE_VALID)) continue;
+        if (!(e & PTE_TYPE_TABLE)) continue;
+        l1_walk_and_free(e & ~0xFFFull);
+    }
+    free_pages(pa_to_page(root), 0);
 }
 ```
 
-The implementation is intentionally trivial because P3-Bcb is just plumbing. The complexity arrives at P3-D when fault-driven sub-table allocation lands.
+The walker is straightforward sorted-list-style recursion. `pa_to_kva` is the direct-map cast; the walker reads PTE bits via the kernel direct-map alias of the table page, never via TTBR0.
 
 ### `kernel/proc.c` integration
 
@@ -135,6 +173,10 @@ No new TLA+ spec at P3-Bcb (impl-only refactor). The pgtable lifecycle is struct
 
 - **`proc.pgtable_lifecycle_stress`**: 64 alloc/free cycles. Verify `proc_total_created` / `proc_total_destroyed` advance in step (no leak), and `asid_inflight()` returns to baseline after the loop (no ASID leak).
 
+- **`proc.ttbr0_swap_smoke`**: Two `rfork`'d children record their live `TTBR0_EL1`; verify each equals `(asid << 48) | pgtable_root`. Implicitly exercises the per-Proc swap from `cpu_switch_context`.
+
+- **`proc.pgtable_destroy_walk_releases_subtables`** (P3-Db): Manually install a 3-deep sub-table chain (L1 → L2 → L3) under the Proc's L0; drop the Proc; verify all 4 page-table pages return to buddy (the round-trip `phys_free_pages()` check). Pre-P3-Db's L0-only free would leak L1+L2+L3 → free count short by 3. Closes trip-hazard #116.
+
 The existing rfork stress tests (`proc.rfork_stress_1000`, `proc.cascading_rfork_stress`) implicitly exercise pgtable_create / pgtable_destroy at high volume; the new tests are focused regression checks for the lifecycle plumbing alone.
 
 ## Error paths
@@ -151,12 +193,13 @@ The existing rfork stress tests (`proc.rfork_stress_1000`, `proc.cascading_rfork
 
 ## Status
 
-- **Implemented at P3-Bcb (`d256804`)**: pgtable_create / pgtable_destroy / proc_alloc + proc_free integration / 2 tests.
+- **Implemented at P3-Bcb (`d256804`)**: pgtable_create / pgtable_destroy (L0-only) / proc_alloc + proc_free integration / 2 tests.
 - **Implemented at P3-Bdb (`fd40047`)**: cpu_switch_context TTBR0 swap, struct Context growth (112→120 bytes adding `u64 ttbr0`), `mmu_kernel_ttbr0_pa()` accessor for kproc threads, ctx.ttbr0 wiring in thread_create_internal / thread_init / thread_init_per_cpu_idle, `proc.ttbr0_swap_smoke` test.
-- **Stubbed**: sub-table walk in destroy (P3-D — when VMA tree + page-fault land, sub-tables get populated; destroy must walk + free them).
+- **Implemented at P3-Db**: recursive `proc_pgtable_destroy` walk (L0 → L1 → L2 → L3 freeing every reachable sub-table). New test `proc.pgtable_destroy_walk_releases_subtables`. Closes trip-hazard #116.
+- **Stubbed**: PTE installation. P3-Dc adds the user-mode page-fault dispatcher → `vma_lookup` → page allocate → PTE install (which is what populates the sub-tables the new walker is wired to free).
 - **Implicit**: kproc kernel-only TTBR0 (P3-Be) is satisfied by the `mmu_kernel_ttbr0_pa()` defaulting at thread_init — kthread + per-CPU idle threads carry the kernel-only TTBR0 root from their creation. A separate P3-Be chunk that adds a dedicated "degenerate" TTBR0 page table is unnecessary.
 
-Commit landing points: `d256804` (P3-Bcb), `fd40047` (P3-Bdb).
+Commit landing points: `d256804` (P3-Bcb), `fd40047` (P3-Bdb), `<P3-Db hash>` (P3-Db walker).
 
 ## TTBR0 swap (P3-Bdb)
 

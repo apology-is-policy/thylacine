@@ -1,6 +1,8 @@
-// VMO refcount + mapping lifecycle tests (P2-Fd).
+// VMO refcount + mapping lifecycle tests (P2-Fd / P3-Db).
 //
-// Six tests:
+// Six original tests cover the dual-refcount lifecycle. Two more added at
+// P3-Db cover the new vmo_map(Proc, ...) / vmo_unmap(Proc, ...) entry
+// points; see test_vmo_map_proc.c.
 //
 //   vmo.create_close_round_trip
 //     vmo_create_anon → vmo_unref. Verify cumulative counters increment.
@@ -13,6 +15,9 @@
 //   vmo.map_unmap_lifecycle
 //     create + map + unref + unmap → freed only on unmap. Verifies that
 //     handle_count alone reaching 0 does NOT free if mapping_count > 0.
+//     Uses the bare refcount ops (vmo_acquire_mapping /
+//     vmo_release_mapping) directly so the lifecycle is exercised in
+//     isolation without going through the VMA layer.
 //
 //   vmo.handles_x_mappings_matrix
 //     Cross-product: close-handle-then-unmap, unmap-then-close, multiple
@@ -121,7 +126,7 @@ void test_vmo_map_unmap_lifecycle(void) {
     TEST_ASSERT(v != NULL, "vmo_create_anon NULL");
 
     // Open a mapping. mapping_count = 1, handle_count = 1.
-    vmo_map(v);
+    vmo_acquire_mapping(v);
     TEST_EXPECT_EQ(vmo_mapping_count(v), 1, "map → mapping_count=1");
     TEST_EXPECT_EQ(vmo_handle_count(v), 1, "handle_count unchanged by map");
 
@@ -135,7 +140,7 @@ void test_vmo_map_unmap_lifecycle(void) {
     TEST_EXPECT_EQ(vmo_mapping_count(v), 1, "mapping_count = 1");
 
     // Release the last mapping. Now both counts = 0; freed.
-    vmo_unmap(v);
+    vmo_release_mapping(v);
     TEST_EXPECT_EQ(destroyed_since_snap(), (u64)1,
         "freed at last unmap when handle_count was already 0");
 }
@@ -150,12 +155,12 @@ void test_vmo_handles_x_mappings_matrix(void) {
     {
         struct Vmo *v = vmo_create_anon(4096);
         TEST_ASSERT(v, "create_1 NULL");
-        vmo_map(v);
+        vmo_acquire_mapping(v);
         u64 before_destroys = destroyed_since_snap();
         vmo_unref(v);
         TEST_EXPECT_EQ(destroyed_since_snap(), before_destroys,
             "case 1: handle close while mapped — must NOT free");
-        vmo_unmap(v);
+        vmo_release_mapping(v);
         TEST_EXPECT_EQ(destroyed_since_snap(), before_destroys + 1,
             "case 1: unmap brings both to 0 — MUST free");
     }
@@ -164,9 +169,9 @@ void test_vmo_handles_x_mappings_matrix(void) {
     {
         struct Vmo *v = vmo_create_anon(4096);
         TEST_ASSERT(v, "create_2 NULL");
-        vmo_map(v);
+        vmo_acquire_mapping(v);
         u64 before_destroys = destroyed_since_snap();
-        vmo_unmap(v);
+        vmo_release_mapping(v);
         TEST_EXPECT_EQ(destroyed_since_snap(), before_destroys,
             "case 2: unmap while handle held — must NOT free");
         vmo_unref(v);
@@ -179,7 +184,7 @@ void test_vmo_handles_x_mappings_matrix(void) {
         struct Vmo *v = vmo_create_anon(4096);
         TEST_ASSERT(v, "create_3 NULL");
         vmo_ref(v);                  // handle_count = 2
-        vmo_map(v);                  // mapping_count = 1
+        vmo_acquire_mapping(v);                  // mapping_count = 1
         u64 before_destroys = destroyed_since_snap();
         vmo_unref(v);                // handle_count = 1
         TEST_EXPECT_EQ(destroyed_since_snap(), before_destroys,
@@ -187,7 +192,7 @@ void test_vmo_handles_x_mappings_matrix(void) {
         vmo_unref(v);                // handle_count = 0
         TEST_EXPECT_EQ(destroyed_since_snap(), before_destroys,
             "case 3b: last handle close while mapping_count > 0 — no free");
-        vmo_unmap(v);                // mapping_count = 0
+        vmo_release_mapping(v);                // mapping_count = 0
         TEST_EXPECT_EQ(destroyed_since_snap(), before_destroys + 1,
             "case 3c: last unmap — free");
     }
@@ -196,12 +201,12 @@ void test_vmo_handles_x_mappings_matrix(void) {
     {
         struct Vmo *v = vmo_create_anon(4096);
         TEST_ASSERT(v, "create_4 NULL");
-        vmo_map(v); vmo_map(v);      // mapping_count = 2
+        vmo_acquire_mapping(v); vmo_acquire_mapping(v);      // mapping_count = 2
         u64 before_destroys = destroyed_since_snap();
-        vmo_unmap(v);                // mapping_count = 1
+        vmo_release_mapping(v);                // mapping_count = 1
         TEST_EXPECT_EQ(destroyed_since_snap(), before_destroys,
             "case 4a: unmap with mapping_count still > 0 — no free");
-        vmo_unmap(v);                // mapping_count = 0
+        vmo_release_mapping(v);                // mapping_count = 0
         TEST_EXPECT_EQ(destroyed_since_snap(), before_destroys,
             "case 4b: last unmap with handle_count > 0 — no free");
         vmo_unref(v);                // handle_count = 0
@@ -214,10 +219,10 @@ void test_vmo_handles_x_mappings_matrix(void) {
         struct Vmo *v = vmo_create_anon(4096);
         TEST_ASSERT(v, "create_5 NULL");
         vmo_ref(v);                  // h=2
-        vmo_map(v);                  // m=1
+        vmo_acquire_mapping(v);                  // m=1
         vmo_unref(v);                // h=1
         vmo_ref(v);                  // h=2
-        vmo_unmap(v);                // m=0
+        vmo_release_mapping(v);                // m=0
         u64 before_destroys = destroyed_since_snap();
         vmo_unref(v);                // h=1
         TEST_EXPECT_EQ(destroyed_since_snap(), before_destroys,

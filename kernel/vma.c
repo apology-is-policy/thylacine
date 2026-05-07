@@ -1,12 +1,16 @@
-// Per-Proc VMA list — implementation (P3-Da).
+// Per-Proc VMA list — implementation (P3-Da / P3-Db).
 //
 // Sorted doubly-linked list of VMAs anchored at struct Proc.vmas.
 // O(N) operations at v1.0; RB-tree is a Phase 5+ optimization.
 //
-// VMO refcounting: vma_alloc takes a vmo_map (mapping_count++); vma_free
-// takes a vmo_unmap (mapping_count--). The dual-refcount lifecycle in
-// vmo.c (handle_count + mapping_count) ensures the VMO survives until
-// both reach zero — see specs/vmo.tla.
+// VMO refcounting: vma_alloc takes a vmo_acquire_mapping (mapping_count
+// ++); vma_free takes a vmo_release_mapping (mapping_count--). The dual-
+// refcount lifecycle in vmo.c (handle_count + mapping_count) ensures the
+// VMO survives until both reach zero — see specs/vmo.tla.
+//
+// (Pre-P3-Db, the refcount-only ops were named vmo_map / vmo_unmap.
+// They were renamed when the public vmo_map(Proc*, ...) entry point
+// arrived.)
 //
 // Per ARCHITECTURE.md §16.
 
@@ -69,13 +73,13 @@ struct Vma *vma_alloc(u64 vaddr_start, u64 vaddr_end, u32 prot,
     v->vmo_offset  = vmo_offset;
     // next/prev left NULL via KP_ZERO; vma_insert wires them.
 
-    // P2-Fd contract: vmo_map increments mapping_count. The VMA's
-    // existence in a Proc's list is an active mapping; we count it
-    // against the VMO's lifecycle. vmo_unmap'd when vma_free runs.
-    // vmo_map is `void` — it cannot fail at v1.0 (mapping_count saturates
-    // structurally per ARCH §28 I-7; if a future overflow check is added
-    // it'd extinct internally).
-    vmo_map(vmo);
+    // P2-Fd contract: vmo_acquire_mapping increments mapping_count. The
+    // VMA's existence in a Proc's list is an active mapping; we count
+    // it against the VMO's lifecycle. vmo_release_mapping'd when
+    // vma_free runs. vmo_acquire_mapping is `void` — it cannot fail at
+    // v1.0 (mapping_count saturates structurally per ARCH §28 I-7; if a
+    // future overflow check is added it'd extinct internally).
+    vmo_acquire_mapping(vmo);
 
     __atomic_fetch_add(&g_vma_allocated, 1u, __ATOMIC_RELAXED);
     return v;
@@ -86,10 +90,11 @@ void vma_free(struct Vma *v) {
     if (v->magic != VMA_MAGIC)  extinction("vma_free of corrupted/already-freed Vma");
     if (v->next || v->prev)     extinction("vma_free of Vma still in a list");
 
-    // Release the VMO mapping ref. vmo_unmap may free the VMO if both
-    // handle_count and mapping_count reach zero (see specs/vmo.tla).
+    // Release the VMO mapping ref. vmo_release_mapping may free the VMO
+    // if both handle_count and mapping_count reach zero (see
+    // specs/vmo.tla).
     if (v->vmo) {
-        vmo_unmap(v->vmo);
+        vmo_release_mapping(v->vmo);
         v->vmo = NULL;
     }
 

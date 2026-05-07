@@ -1,4 +1,5 @@
-// Virtual Memory Object (VMO) impl — dual-refcount lifecycle (P2-Fd).
+// Virtual Memory Object (VMO) impl — dual-refcount lifecycle (P2-Fd /
+// P3-Db).
 //
 // Per ARCHITECTURE.md §19 + specs/vmo.tla. Implements the spec's
 // VmoCreate / HandleOpen / HandleClose / MapVmo / UnmapVmo actions on
@@ -8,7 +9,8 @@
 //
 //   pages alive iff (handle_count > 0 OR mapping_count > 0)
 //
-// Enforced at runtime by the dual-check in vmo_unref AND vmo_unmap:
+// Enforced at runtime by the dual-check in vmo_unref AND
+// vmo_release_mapping:
 //
 //   if (handle_count == 0 && mapping_count == 0) vmo_free_internal(v);
 //
@@ -18,15 +20,26 @@
 // each correspond to a way this dual-check could be wrong: free without
 // checking the other count (premature) or fail to check at all (leak).
 //
-// At v1.0 P2-Fd:
+// API split (P3-Db):
+//   - vmo_acquire_mapping / vmo_release_mapping: bare refcount ops
+//     (formerly vmo_map / vmo_unmap pre-P3-Db). Internal to the VMA
+//     layer; tests use them to exercise the refcount lifecycle.
+//   - vmo_map(Proc, Vmo, vaddr, length, prot): public mapping entry —
+//     calls vma_alloc + vma_insert. Returns 0/-1.
+//   - vmo_unmap(Proc, vaddr, length): public unmap entry — calls
+//     vma_remove + vma_free. Returns 0/-1.
+//
+// At v1.0 P3-Db:
 //   - Anonymous VMOs only. alloc_pages(order, KP_ZERO) for the chunk.
-//   - vmo_map / vmo_unmap track count only; no actual VMA wire-up
-//     (Phase 3 with the page-fault handler).
+//   - vmo_map installs a VMA only — no PTE installation. Demand paging
+//     via the user-mode fault path lands at P3-Dc.
 //   - Single-CPU lifecycle; Phase 5+ adds atomic ops.
 
 #include <thylacine/extinction.h>
 #include <thylacine/page.h>
+#include <thylacine/proc.h>
 #include <thylacine/types.h>
+#include <thylacine/vma.h>
 #include <thylacine/vmo.h>
 
 #include "../mm/phys.h"
@@ -156,27 +169,79 @@ void vmo_unref(struct Vmo *v) {
     }
 }
 
-void vmo_map(struct Vmo *v) {
-    if (!v)                       extinction("vmo_map(NULL)");
-    if (v->magic != VMO_MAGIC)    extinction("vmo_map of corrupted VMO");
+void vmo_acquire_mapping(struct Vmo *v) {
+    if (!v)                       extinction("vmo_acquire_mapping(NULL)");
+    if (v->magic != VMO_MAGIC)    extinction("vmo_acquire_mapping of corrupted VMO");
     if (!v->pages)
-        extinction("vmo_map of VMO with NULL pages (use-after-free)");
+        extinction("vmo_acquire_mapping of VMO with NULL pages (use-after-free)");
 
     v->mapping_count++;
 }
 
-void vmo_unmap(struct Vmo *v) {
-    if (!v)                       extinction("vmo_unmap(NULL)");
+void vmo_release_mapping(struct Vmo *v) {
+    if (!v)                       extinction("vmo_release_mapping(NULL)");
     if (v->magic != VMO_MAGIC)
-        extinction("vmo_unmap of corrupted VMO (use-after-free?)");
+        extinction("vmo_release_mapping of corrupted VMO (use-after-free?)");
     if (v->mapping_count <= 0)
-        extinction("vmo_unmap of zero-mapping VMO");
+        extinction("vmo_release_mapping of zero-mapping VMO");
 
     v->mapping_count--;
     // Same dual-check as vmo_unref — symmetric.
     if (v->handle_count == 0 && v->mapping_count == 0) {
         vmo_free_internal(v);
     }
+}
+
+// =============================================================================
+// P3-Db: high-level map / unmap into a Proc's address space.
+// =============================================================================
+
+int vmo_map(struct Proc *p, struct Vmo *v, u64 vaddr, size_t length, u32 prot) {
+    if (!p || !v) return -1;
+    if (length == 0) return -1;
+    if (vaddr & (PAGE_SIZE - 1)) return -1;
+    if (length & (PAGE_SIZE - 1)) return -1;
+    // Overflow guard: vaddr + length must not wrap. The page-aligned
+    // checks above bound `vaddr` and `length` to non-pathological values
+    // but a sufficiently large `vaddr` near the top of the user-VA space
+    // could still wrap.
+    if (vaddr + length < vaddr) return -1;
+
+    // Delegate constraint validation (W+X reject, prot value) to vma_alloc.
+    // It returns NULL on any constraint violation OR on SLUB OOM, and
+    // takes vmo_acquire_mapping internally on success.
+    struct Vma *vma = vma_alloc(vaddr, vaddr + length, prot, v, /*offset=*/0);
+    if (!vma) return -1;
+
+    // vma_insert returns -1 on overlap. On overlap, the Vma is still
+    // owned by us — vma_free releases the VMO mapping ref symmetrically.
+    if (vma_insert(p, vma) != 0) {
+        vma_free(vma);
+        return -1;
+    }
+    return 0;
+}
+
+int vmo_unmap(struct Proc *p, u64 vaddr, size_t length) {
+    if (!p) return -1;
+    if (length == 0) return -1;
+    if (vaddr & (PAGE_SIZE - 1)) return -1;
+    if (length & (PAGE_SIZE - 1)) return -1;
+
+    // Find the VMA whose range matches [vaddr, vaddr + length) exactly.
+    // vma_lookup with vaddr would find any VMA covering vaddr, but at
+    // v1.0 we require exact-match (no partial unmap), so we walk + check.
+    u64 want_end = vaddr + length;
+    if (want_end < vaddr) return -1;     // overflow
+
+    struct Vma *vma = vma_lookup(p, vaddr);
+    if (!vma) return -1;
+    if (vma->vaddr_start != vaddr) return -1;
+    if (vma->vaddr_end   != want_end) return -1;
+
+    vma_remove(p, vma);
+    vma_free(vma);
+    return 0;
 }
 
 // =============================================================================

@@ -66,7 +66,8 @@ void vma_init(void);
 // Allocate a fresh Vma descriptor. Initializes magic + the passed
 // fields; next/prev set to NULL (caller's responsibility to insert
 // into the per-Proc list via vma_insert). Refcounts the VMO via
-// vmo_ref. Returns NULL on OOM.
+// vmo_acquire_mapping (mapping_count++). Returns NULL on OOM or any
+// constraint violation.
 //
 // Constraints:
 //   - vaddr_start < vaddr_end.

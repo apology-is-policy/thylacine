@@ -55,6 +55,7 @@ set(KERNEL_SRCS
     test/test_proc_pgtable.c
     test/test_fault_decode.c
     test/test_vma.c
+    test/test_vmo_map_proc.c
     namespace.c
     handle.c
     vmo.c
