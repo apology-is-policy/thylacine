@@ -12,6 +12,7 @@ Per `ROADMAP.md §6`. Phase 3 entry chunk **P3-A** (R5-H F75 proc-table lock clo
 
 | Commit SHA | What | Tests |
 |---|---|---|
+| *(pending)* | **P3-F: minimal /init in production boot path**. New `kernel/init.c` (~165 LOC) + `kernel/include/thylacine/init.h` (~30 LOC). `init_run()` builds a synthetic ELF wrapping a 9-instruction hand-encoded AArch64 program (`movz x0,#0x40; movk x0,#1,lsl #16` → addr 0x10040; `movz x1,#6; movz x8,#1; svc #0` → SYS_PUTS("hello\n",6); `movz x0,#0; movz x8,#0; svc #0` → SYS_EXITS(0); `b .` defensive). rfork(RFPROC, init_thunk, &args) creates a child Proc on a kthread kstack; init_thunk calls exec_setup + userland_enter (eret to EL0). Child user code demand-pages, runs the SVCs, kernel routes through `syscall_dispatch` → "hello\n" appears on UART → `exits("ok")`; parent's `wait_pid` reaps + asserts `exit_status==0`; init_run extincts on any failure. Wired into `boot_main()` AFTER `test_run_all` + `fault_test_run` and BEFORE the "Thylacine boot OK" banner. Rationale for placement: tests must pass first; /init's success is part of bring-up's success at v1.0; failure surfaces as `EXTINCTION:` for tools/test.sh. **Retires `userspace.exec_exits_ok`** — trip-hazard #157 (second-userspace-iteration hang) means running ANY second exec'd EL0 thread after the first reproducibly hangs; /init alone runs once per boot and serves as the regression guard. Test count drops 94→93. CMake phase string bumped to "P3-F". Encodings verified against `clang --target=aarch64-none-elf -c` disassembly. Reference doc `docs/reference/29-init.md` (~165 lines) authored. **Spec posture**: no new TLA+ at P3-F — impl-orchestration over already-spec'd primitives (rfork, exec_setup via vmo.tla, userland_enter, wait_pid). Phase 5+ /init-as-supervisor warrants spec extension. ROADMAP §6 exit criterion "/init starts and prints 'hello' via syscall" closed. | **93/93 tests** PASS (test_userspace.c retired; net -1 test); ~336 ms boot (production); ~344 ms UBSan; **4/4 fault matrix**; KASLR 5/5 distinct; 4 specs unchanged. |
 | `9683343` | **P3-Ed: userland_enter asm trampoline + end-to-end exec test — USERSPACE RUNS**. New `arch/arm64/userland.S` (~80 LOC): `userland_enter(entry_pc, user_sp)` parks args in x16/x17, sets ELR_EL1 + SPSR_EL1=0 (PSTATE: EL0t, all DAIF clear), zeros every other GPR, sets live SP to user_sp via `mov sp, x17` (NOT `msr sp_el0, x17` — empirical: msr to live SP at EL1+SPSel=0 raises EC=0 on QEMU virt; mov-via-add-form works), erets. New `kernel/test/test_userspace.c` (~140 LOC): `exec_thunk` runs in EL1 on rfork'd kthread kstack, calls exec_setup + userland_enter; child user thread demand-pages + executes 4 hand-encoded AArch64 instructions (`movz x8,#0` / `movz x0,#0` / `svc #0` / `b .`) → SVC traps → SYS_EXITS → exits("ok"); parent wait_pid observes pid + exit_status=0. Validates the full chain: kernel→exec→userspace→fault→demand-page→syscall→kernel. **Known issue (deferred)**: a second-userspace-test-iteration hang reproducible against any second exec'd EL0 thread (TTBR0 + L0[0]=0 verified clean in both; tlbi vmalle1is + ic ialluis don't resolve; cause unidentified after ~30min debug). Documented as trip-hazard #157; investigation deferred to a focused audit. The single end-to-end test demonstrates the v1.0 milestone — userspace runs in EL0 and round-trips through the kernel via SVC. | **94/94 tests** PASS (1 new); ~340 ms boot (production); ~360 ms UBSan; **4/4 fault matrix**; KASLR 5/5; 4 specs unchanged. |
 | `48dfc5c` | **P3-Ec: minimal SVC syscall handler**. New `kernel/syscall.c` (~80 LOC) + `kernel/include/thylacine/syscall.h` (~50 LOC). `syscall_dispatch(ctx)` reads syscall number from `ctx->regs[8]` and args from `ctx->regs[0..5]` per AArch64 ABI; writes return value to `ctx->regs[0]`. Two syscalls: SYS_EXITS(status) maps to kernel exits() (status==0 → "ok", non-zero → "fail"; v1.0 binary mapping); SYS_PUTS(buf, len) writes `len` bytes to UART (rejects NULL buf / len > 4096 / zero len returns 0). Unknown syscall → -1 (ENOSYS-equivalent). exception_sync_lower_el's EC_SVC_AARCH64 case routes through syscall_dispatch (was extinction stub). New reference doc 28-syscall.md. 5 new tests in `kernel/test/test_syscall.c` (~150 LOC): syscall.dispatch_unknown (-1 return), dispatch_puts_smoke (success + NULL/oversized/zero edge cases; UART output visible in boot log), dispatch_exits_ok (rfork child → SYS_EXITS(0) → wait_pid sees exit_status=0), dispatch_exits_fail (SYS_EXITS(42) → exit_status=1), dispatch_args_in_x0_to_x5 (verifies ABI register layout via poisoned-regs check). **Spec posture**: no new TLA+ — bounded switch over a small enum; each case calls into existing P2-D / P1-G primitives. Phase 5+ full syscall surface will warrant per-family spec extensions. | **93/93 tests** PASS (5 new); ~337 ms boot (production); ~355 ms UBSan; **4/4 fault matrix**; KASLR 5/5; 4 specs unchanged. |
 | `9f0d1b6` | **P3-Eb: exec_setup — load ELF into Proc address space**. New `kernel/exec.c` (~150 LOC) + `kernel/include/thylacine/exec.h` (~90 LOC) implement `exec_setup(p, blob, size, *entry_out, *sp_out)` — the bridge between P2-Ga's elf_load (parse + validate) and P3-D's VMA + VMO machinery. For each PT_LOAD segment: vmo_create_anon(size_rounded) → copy filesz bytes from blob via direct map (pa_to_kva on vmo->pages) → vmo_map(p, vmo, vaddr, size, prot) → vmo_unref (drop caller-held handle; mapping_count keeps alive). User stack: vmo_create_anon(16 KiB) + vmo_map at `[EXEC_USER_STACK_BASE, EXEC_USER_STACK_TOP) = [0x7FFFC000, 0x80000000)`. Constraints: non-kproc Proc; clean (vmas==NULL); page-aligned segment vaddr + file_offset (rejected if not). Returns 0 on success / -1 on any failure (caller disposes via proc_free). New reference doc 27-exec.md. 5 new tests in `kernel/test/test_exec.c` (~270 LOC): exec.setup_smoke (single segment + stack + entry/sp), exec.setup_segment_data_copied (256 bytes of recognizable data; verify direct-map readback matches; tail zero-padded), exec.setup_constraints (NULL Proc/blob/out, corrupt magic, unaligned vaddr), exec.setup_multi_segment (text RX + rodata R + data RW), exec.setup_lifecycle_round_trip (proc_free returns phys_free_pages to baseline). **No new TLA+ at P3-Eb** — the orchestration is a sequence of already-spec'd primitives (vmo.tla covers refcount; sub-table walker spec'd in P3-Db). Phase 5+ exec(2) syscall semantics (replace-in-place atomicity) is the spec-extension point. | **88/88 tests** PASS (5 new); ~337 ms boot (production); ~355 ms UBSan; **4/4 fault matrix**; KASLR 5/5; 4 specs unchanged. |
@@ -52,24 +53,22 @@ Sub-chunk plan (refined as Phase 3 progresses):
    2. ✅ **P3-Eb: exec_setup — ELF → address space**. Landed.
    3. ✅ **P3-Ec: minimal SVC syscall handler**. Landed.
    4. ✅ **P3-Ed: userland_enter asm trampoline + end-to-end exec test**. Landed. v1.0's first userspace runs in EL0 and round-trips through the kernel via SVC.
-6. **P3-F: minimal /init**. The first userspace process. Embedded ramfs at boot (Phase 4 swaps to Stratum). `/init` could be: a static binary that prints "hello" via syscall. Validates the full chain: kernel → exec → userspace → syscall → kernel.
+6. ✅ **P3-F: minimal /init**. Landed. The first userspace process in the production boot path: hand-encoded SYS_PUTS("hello\n") + SYS_EXITS(0). Validates the full chain `kernel → exec → userspace → syscall → kernel` without test-harness scaffolding. ROADMAP §6 "/init starts and prints 'hello' via syscall" exit criterion closed.
 7. **P3-G: P2-Dd pulled forward** — `ready()` / `wakeup()` send IPI_RESCHED when target CPU is idle. Closes R5-H F77 + F78 (sched-extinction-on-transient-race + idle-CPU-misses-ready). Critical for SMP scheduling fairness once userspace creates real load.
-8. **P3-H: Phase 3 closing audit**. Cumulative review covering all P3 sub-chunks; Round-N spec verification; ROADMAP §6 exit-criteria checklist.
+8. **P3-H: Phase 3 closing audit**. Cumulative review covering all P3 sub-chunks; Round-N spec verification; ROADMAP §6 exit-criteria checklist; **investigation of trip-hazard #157** (second-userspace-iteration hang).
 
 ## Exit criteria status
 
-Per `ROADMAP.md §6`, post-P3-A:
+Per `ROADMAP.md §6`, post-P3-F:
 
-(To be filled in as Phase 3 progresses. Initial entry — only P3-A landed.)
-
-- [ ] Userspace process runs in EL0; syscall returns to EL0.
-- [ ] Static ELF from ramfs loads + runs via exec().
-- [ ] Page fault handler allocates demand pages; user stack growth works.
-- [ ] mmap of VMO + read/write/unmap cycle correct.
-- [ ] /init starts and prints "hello" via syscall.
-- [ ] R5-H F75 closed. ← **MET in P3-A**.
+- [x] Userspace process runs in EL0; syscall returns to EL0. — **MET in P3-Ed** (test fixture); **closed in P3-F** (production /init).
+- [ ] Static ELF from ramfs loads + runs via exec(). — synthetic ELF works (test_exec + /init); ramfs lands at Phase 4.
+- [x] Page fault handler allocates demand pages; user stack growth works. — **MET in P3-Dc + P3-Eb**. Stack growth on stack-fault is Phase 5+ (v1.0 stack is fixed-size 16 KiB).
+- [ ] mmap of VMO + read/write/unmap cycle correct. — kernel-side covered (vmo_map/unmap proc tests); userspace mmap(2) syscall is Phase 5+.
+- [x] /init starts and prints "hello" via syscall. — **MET in P3-F**. SYS_PUTS writes "hello\n" to UART; SYS_EXITS(0) exits cleanly.
+- [x] R5-H F75 closed. — **MET in P3-A**.
 - [ ] R5-H F77/F78 closed via P3-G.
-- [ ] No P0/P1 audit findings.
+- [ ] No P0/P1 audit findings. — pending P3-H (closing audit; includes trip-hazard #157 investigation).
 
 ## Build + verify commands
 
@@ -84,6 +83,20 @@ tools/verify-kaslr.sh -n 5
 ## Trip hazards
 
 (Cumulative from Phase 1+2 plus new Phase 3 entries.)
+
+### NEW at P3-F
+
+161. **/init runs once per boot** (P3-F). Trip-hazard #157 (second-userspace-iteration hang) means a SECOND userspace exec after /init's reproducibly hangs. v1.0 keeps /init alone — no test fixture exec, no second user process spawned by /init's exits. Phase 5+ /init-as-supervisor (spawning child drivers / shells) MUST resolve trip-hazard #157 first. The hazard's root cause is unidentified at v1.0 (TLB walker uop cache, I-cache VIPT-with-ASID, PSCI-level state suspected); investigation deferred to P3-H closing audit.
+
+162. **/init's /init blob is hand-encoded AArch64** (P3-F). Modifying `g_init_program[]` requires re-running `clang --target=aarch64-none-elf -c <test.S>` to verify the new encoding. Off-by-one bit errors silently make the kernel extinct on the SVC dispatch (or worse, allow the user thread to triple-fault silently). Not user-modifiable in production; if changes are needed, run the cross-assembler and update both the array and any address-encoding instructions.
+
+163. **/init's segment is fixed at vaddr 0x10000** (P3-F). The `movz x0, #0x40 / movk x0, #1, lsl #16` sequence assumes the segment maps at 0x10000; `INIT_SEGMENT_VADDR` and `INIT_MSG_SEGMENT_OFF` are coupled to the encoding. Phase 5+ user-VA ASLR will require switching the addressing pattern to PC-relative (adrp/add) or a literal-pool load.
+
+164. **`userspace.exec_exits_ok` test retired at P3-F** (was P3-Ed-introduced). The test's role as the v1.0 userspace demonstrator is taken over by `/init` in the production boot path. Test count: 94→93. The boot-path /init invocation IS the regression guard for exec_setup + userland_enter + SYS_PUTS + SYS_EXITS; if any of these regress, /init fails to print "hello" or wait_pid sees non-zero exit_status, kernel extincts.
+
+165. **/init's pid is whatever g_next_pid happens to be** (P3-F). At v1.0 P3-F /init's pid is typically 1305+ after the test suite consumes pids. ARCH §7.4 + standard Plan 9 convention assigns PID 1 to /init; the v1.0 simplification is that no role-of-/init logic depends on PID 1. Phase 5+ may pin /init by reserving the slot at proc_init.
+
+166. **/init failure extincts the kernel at v1.0** (P3-F). No retry / restart loop. Reason: the strongest signal for tools/test.sh + simplest semantics for the milestone. Phase 5+ adds a restart loop or recovery shell.
 
 ### NEW at P3-Ed
 

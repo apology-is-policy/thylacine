@@ -60,7 +60,6 @@ set(KERNEL_SRCS
     test/test_demand_page.c
     test/test_exec.c
     test/test_syscall.c
-    test/test_userspace.c
     namespace.c
     handle.c
     vmo.c
@@ -68,6 +67,7 @@ set(KERNEL_SRCS
     elf.c
     exec.c
     syscall.c
+    init.c
 )
 
 set(KERNEL_LD_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/../arch/arm64/kernel.ld)

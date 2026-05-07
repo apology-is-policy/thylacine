@@ -97,7 +97,6 @@ void test_syscall_dispatch_puts_smoke(void);
 void test_syscall_dispatch_exits_ok(void);
 void test_syscall_dispatch_exits_fail(void);
 void test_syscall_dispatch_args_in_x0_to_x5(void);
-void test_userspace_exec_exits_ok(void);
 void test_fault_decode_kernel_data_translation_l2(void);
 void test_fault_decode_kernel_data_permission_write(void);
 void test_fault_decode_user_data_translation(void);
@@ -217,7 +216,6 @@ struct test_case g_tests[] = {
     { "syscall.dispatch_args_in_x0_to_x5",
                                        test_syscall_dispatch_args_in_x0_to_x5,
                                                                            false, NULL },
-    { "userspace.exec_exits_ok",       test_userspace_exec_exits_ok,       false, NULL },
     { "fault.decode_kernel_data_translation_l2",
                                        test_fault_decode_kernel_data_translation_l2,
                                                                            false, NULL },

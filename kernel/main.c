@@ -33,6 +33,7 @@
 #include <thylacine/dtb.h>
 #include <thylacine/extinction.h>
 #include <thylacine/handle.h>
+#include <thylacine/init.h>     // init_run (P3-F)
 #include <thylacine/page.h>
 #include <thylacine/pgrp.h>
 #include <thylacine/proc.h>
@@ -427,6 +428,16 @@ void boot_main(void) {
     // EXTINCTION: line is what tools/test-fault.sh checks for.
     extern void fault_test_run(void);
     fault_test_run();
+
+    // P3-F: /init is the first userspace process. v1.0 embedded blob —
+    // prints "hello\n" via SYS_PUTS and exits via SYS_EXITS(0). Validates
+    // the kernel→exec→userspace→syscall→kernel chain end-to-end in the
+    // production boot path (no test-harness scaffolding). Trip-hazard
+    // #157 (second-userspace-exec hang) means we run /init exactly once
+    // per boot and don't follow it with another userspace exec; the
+    // prior `userspace.exec_exits_ok` test was retired in favor of this.
+    // Failure (rfork OOM / exec error / non-zero exit_status) extincts.
+    init_run();
 
     uart_puts("Thylacine boot OK\n");
 
