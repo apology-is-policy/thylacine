@@ -183,7 +183,7 @@ Total exec_setup for a small static ELF: ~50–200 µs. The largest cost is the 
 - **Stubbed**: ELF fixture build infrastructure + end-to-end exec test (P3-Ed).
 - **Stubbed**: exec syscall surface (Phase 5+ syscall layer).
 
-Commit landing point: `<P3-Eb hash>`.
+Commit landing point: `9f0d1b6`.
 
 ## Known caveats / footguns
 
