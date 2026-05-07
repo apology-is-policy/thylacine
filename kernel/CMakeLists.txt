@@ -76,9 +76,11 @@ set(KERNEL_SRCS
     zero.c
     random.c
     devproc.c
+    devctl.c
     test/test_dev.c
     test/test_trivial_devs.c
     test/test_devproc.c
+    test/test_devctl.c
 )
 
 set(KERNEL_LD_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/../arch/arm64/kernel.ld)

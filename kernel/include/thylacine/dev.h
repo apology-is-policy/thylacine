@@ -131,6 +131,7 @@ extern struct Dev devrandom;      // dc='r'  — CSPRNG (RNDR-backed at v1.0)
 
 // Kernel-internal directory Devs (P4-C+).
 extern struct Dev devproc;        // dc='p'  — /proc/<pid>/{status,cmdline,ctl,ns}
+extern struct Dev devctl;         // dc='C'  — /ctl/{procs,memory,devices,kernel-base,sched}
 
 // =============================================================================
 // Shared helpers for leaf-file Devs (P4-B).

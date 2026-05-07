@@ -154,6 +154,17 @@ void test_devproc_read_ctl_returns_zero(void);
 void test_devproc_write_ctl_consumes(void);
 void test_devproc_read_dir_returns_neg1(void);
 void test_devproc_read_partial_offset(void);
+void test_devctl_bestiary_smoke(void);
+void test_devctl_attach_returns_dir(void);
+void test_devctl_walk_to_each_leaf(void);
+void test_devctl_walk_unknown_misses(void);
+void test_devctl_read_procs_format(void);
+void test_devctl_read_memory_format(void);
+void test_devctl_read_devices_format(void);
+void test_devctl_read_kernel_base_format(void);
+void test_devctl_read_sched_format(void);
+void test_devctl_write_rejected(void);
+void test_devctl_read_dir_returns_neg1(void);
 
 // ---------------------------------------------------------------------------
 // Registry. Sentinel-terminated.
@@ -328,6 +339,18 @@ struct test_case g_tests[] = {
     { "devproc.write_ctl_consumes",    test_devproc_write_ctl_consumes,    false, NULL },
     { "devproc.read_dir_returns_neg1", test_devproc_read_dir_returns_neg1, false, NULL },
     { "devproc.read_partial_offset",   test_devproc_read_partial_offset,   false, NULL },
+    { "devctl.bestiary_smoke",         test_devctl_bestiary_smoke,         false, NULL },
+    { "devctl.attach_returns_dir",     test_devctl_attach_returns_dir,     false, NULL },
+    { "devctl.walk_to_each_leaf",      test_devctl_walk_to_each_leaf,      false, NULL },
+    { "devctl.walk_unknown_misses",    test_devctl_walk_unknown_misses,    false, NULL },
+    { "devctl.read_procs_format",      test_devctl_read_procs_format,      false, NULL },
+    { "devctl.read_memory_format",     test_devctl_read_memory_format,     false, NULL },
+    { "devctl.read_devices_format",    test_devctl_read_devices_format,    false, NULL },
+    { "devctl.read_kernel_base_format",
+                                       test_devctl_read_kernel_base_format, false, NULL },
+    { "devctl.read_sched_format",      test_devctl_read_sched_format,      false, NULL },
+    { "devctl.write_rejected",         test_devctl_write_rejected,         false, NULL },
+    { "devctl.read_dir_returns_neg1",  test_devctl_read_dir_returns_neg1,  false, NULL },
     { NULL, NULL, false, NULL },          // sentinel
 };
 
