@@ -71,7 +71,12 @@ set(KERNEL_SRCS
     spoor.c
     dev.c
     devnone.c
+    cons.c
+    null.c
+    zero.c
+    random.c
     test/test_dev.c
+    test/test_trivial_devs.c
 )
 
 set(KERNEL_LD_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/../arch/arm64/kernel.ld)

@@ -12,6 +12,7 @@
 
 #include <thylacine/dev.h>
 #include <thylacine/extinction.h>
+#include <thylacine/spinlock.h>
 #include <thylacine/spoor.h>
 #include <thylacine/types.h>
 
@@ -99,12 +100,19 @@ void dev_init(void) {
     // Sequence per dev.h:
     //   1. spoor_init() — Spoor SLUB cache.
     //   2. dev_register(&devnone) — devnone is always first.
-    //   3. (Future: P4-B+ devs register themselves here; each calls
-    //      dev_register(&dev_<name>) then ->init() runs in step 4.)
+    //   3. dev_register the kernel-internal trivial Devs (P4-B).
+    //      Order: cons first (so the boot banner could route through
+    //      it; not yet, but the slot is reserved); then null / zero /
+    //      random in alphabetical order for predictable bestiary
+    //      iteration.
     //   4. Walk bestiary[] calling each non-NULL dev->init().
     spoor_init();
 
     dev_register(&devnone);
+    dev_register(&devcons);
+    dev_register(&devnull);
+    dev_register(&devzero);
+    dev_register(&devrandom);
 
     // Walk bestiary: dev->init() may itself dev_register additional
     // devs (e.g., a virtio probe that fans out to multiple instances).
@@ -124,4 +132,37 @@ void dev_init(void) {
     g_dev_init_done = true;
 
     dev_init_banner(g_dev_count);
+}
+
+// =============================================================================
+// Shared helpers for leaf-file Devs (P4-B).
+// =============================================================================
+//
+// dev_simple_attach: alloc Spoor + populate qid. Caller picks the
+// qtype — typically QTFILE for a single-file leaf, QTDIR for a Dev
+// whose root is a directory.
+struct Spoor *dev_simple_attach(struct Dev *d, u8 qtype) {
+    struct Spoor *c = spoor_alloc(d);
+    if (!c) return NULL;
+    c->qid.path = 0;
+    c->qid.vers = 0;
+    c->qid.type = qtype;
+    return c;
+}
+
+// dev_simple_open: mark COPEN + record omode. Idempotent — re-opening
+// an already-open Spoor just updates omode (matches Plan 9 idiom).
+struct Spoor *dev_simple_open(struct Spoor *c, int omode) {
+    if (!c) return NULL;
+    c->flag |= COPEN;
+    c->mode = omode;
+    return c;
+}
+
+// dev_simple_close: clear COPEN. Per-Dev close hooks that need to
+// release aux state should call dev_simple_close last (or first;
+// order doesn't matter at v1.0 since aux is dev-private).
+void dev_simple_close(struct Spoor *c) {
+    if (!c) return;
+    c->flag &= ~COPEN;
 }

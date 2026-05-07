@@ -129,6 +129,18 @@ void test_spoor_clone_lifecycle(void);
 void test_spoor_clone_copies_state(void);
 void test_spoor_clunk_dispatches_close(void);
 void test_spoor_alloc_10k_no_leak(void);
+void test_trivial_devs_bestiary_smoke(void);
+void test_null_attach_open_close(void);
+void test_null_read_returns_eof(void);
+void test_null_write_consumes(void);
+void test_zero_read_fills_zeroes(void);
+void test_zero_write_consumes(void);
+void test_random_rndr_available(void);
+void test_random_read_produces_nonzero_bytes(void);
+void test_random_read_varies_across_calls(void);
+void test_cons_write_advances(void);
+void test_cons_read_returns_eof(void);
+void test_trivial_devs_devnull_10k_no_leak(void);
 
 // ---------------------------------------------------------------------------
 // Registry. Sentinel-terminated.
@@ -274,6 +286,20 @@ struct test_case g_tests[] = {
     { "spoor.clone_copies_state",      test_spoor_clone_copies_state,      false, NULL },
     { "spoor.clunk_dispatches_close",  test_spoor_clunk_dispatches_close,  false, NULL },
     { "spoor.alloc_10k_no_leak",       test_spoor_alloc_10k_no_leak,       false, NULL },
+    { "trivial_devs.bestiary_smoke",   test_trivial_devs_bestiary_smoke,   false, NULL },
+    { "null.attach_open_close",        test_null_attach_open_close,        false, NULL },
+    { "null.read_returns_eof",         test_null_read_returns_eof,         false, NULL },
+    { "null.write_consumes",           test_null_write_consumes,           false, NULL },
+    { "zero.read_fills_zeroes",        test_zero_read_fills_zeroes,        false, NULL },
+    { "zero.write_consumes",           test_zero_write_consumes,           false, NULL },
+    { "random.rndr_available",         test_random_rndr_available,         false, NULL },
+    { "random.read_produces_nonzero",  test_random_read_produces_nonzero_bytes, false, NULL },
+    { "random.read_varies",            test_random_read_varies_across_calls, false, NULL },
+    { "cons.write_advances",           test_cons_write_advances,           false, NULL },
+    { "cons.read_returns_eof",         test_cons_read_returns_eof,         false, NULL },
+    { "trivial_devs.devnull_10k_no_leak",
+                                       test_trivial_devs_devnull_10k_no_leak,
+                                                                           false, NULL },
     { NULL, NULL, false, NULL },          // sentinel
 };
 

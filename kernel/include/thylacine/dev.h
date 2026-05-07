@@ -122,6 +122,34 @@ extern struct Dev *bestiary[];        // sentinel-terminated; size <= BESTIARY_M
 // to attach).
 extern struct Dev devnone;
 
+// Kernel-internal trivial Devs (P4-B): single-file leaf Devs that
+// expose one resource each. The dc characters are unique kernel-wide.
+extern struct Dev devcons;        // dc='c'  — UART console (write-only at v1.0)
+extern struct Dev devnull;        // dc='0'  — bit bucket (writes consumed; reads return 0/EOF)
+extern struct Dev devzero;        // dc='z'  — produces zeroes
+extern struct Dev devrandom;      // dc='r'  — CSPRNG (RNDR-backed at v1.0)
+
+// =============================================================================
+// Shared helpers for leaf-file Devs (P4-B).
+// =============================================================================
+//
+// Most kernel-internal Devs at v1.0 are single-file leaves: one Spoor
+// per opener; no walk; open succeeds for any mode; close releases the
+// COPEN flag. Devs implement the read/write semantics that matter and
+// inherit the lifecycle plumbing from these helpers.
+//
+// dev_simple_attach: spoor_alloc + populate qid (path=0, vers=0, type
+// = the dev's qtype — typically QTFILE for a single-file leaf).
+//
+// dev_simple_open: mark COPEN + record the omode. Returns c on success,
+// NULL if c is NULL.
+//
+// dev_simple_close: clear COPEN. Per-Dev close hooks that need to
+// release aux state should call dev_simple_close last.
+struct Spoor *dev_simple_attach(struct Dev *d, u8 qtype);
+struct Spoor *dev_simple_open(struct Spoor *c, int omode);
+void          dev_simple_close(struct Spoor *c);
+
 // Bring up the device subsystem. Sequence:
 //   1. spoor_init()             — SLUB cache for struct Spoor.
 //   2. dev_register(&devnone)   — devnone is always first.
