@@ -138,7 +138,7 @@ Total boot time at P3-F: ~336 ms. Under the 500 ms VISION §4 budget. The /init 
 - **Stubbed**: real /init binary (Phase 4 ramfs / Phase 5 cross-toolchain).
 - **Stubbed**: /init-as-supervisor (Phase 5+ long-running supervisor model).
 
-Commit landing point: *(pending)*.
+Commit landing point: `00527db`.
 
 ## Known caveats / footguns
 
