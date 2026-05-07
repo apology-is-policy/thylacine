@@ -243,4 +243,35 @@ int wait_pid(int *status_out);
 u64 proc_total_created(void);
 u64 proc_total_destroyed(void);
 
+// =============================================================================
+// P4-C: Proc lookup for devproc.
+// =============================================================================
+//
+// proc_find_by_pid: locate a Proc by its PID via DFS from kproc through
+// the children/sibling tree. Returns the matching Proc * or NULL.
+// Acquires + releases g_proc_table_lock internally.
+//
+// At v1.0 P4-C the returned pointer is stable only under the
+// "no concurrent reap" assumption: the caller must not be racing a
+// wait_pid that's about to free the target. This is safe in v1.0's
+// kernel-internal callers (devproc reads under the kernel's
+// non-preemptive context; the future syscall layer's /proc reads
+// run in the calling thread's context, where the target Proc cannot
+// be reaped without the calling thread participating).
+//
+// Phase 5+ adds proper Proc refcounting: proc_find_by_pid will return a
+// proc_get'd reference, requiring proc_put to release.
+struct Proc *proc_find_by_pid(int pid);
+
+// proc_for_each: invoke callback(p, arg) for every Proc in the tree
+// (DFS from kproc). The callback returns 0 to continue, non-zero to
+// stop early. Returns the last callback return value (0 if iteration
+// completed). g_proc_table_lock held throughout — callbacks must not
+// re-enter proc_find_by_pid / rfork / exits / wait_pid / proc_for_each.
+//
+// Used by future devproc readdir (when 9P readdir lands at Phase 4+).
+// Not called at v1.0 P4-C; declared here so the API is stable for
+// the future caller.
+int proc_for_each(int (*callback)(struct Proc *p, void *arg), void *arg);
+
 #endif // THYLACINE_PROC_H

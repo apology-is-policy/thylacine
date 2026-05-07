@@ -129,6 +129,9 @@ extern struct Dev devnull;        // dc='0'  — bit bucket (writes consumed; re
 extern struct Dev devzero;        // dc='z'  — produces zeroes
 extern struct Dev devrandom;      // dc='r'  — CSPRNG (RNDR-backed at v1.0)
 
+// Kernel-internal directory Devs (P4-C+).
+extern struct Dev devproc;        // dc='p'  — /proc/<pid>/{status,cmdline,ctl,ns}
+
 // =============================================================================
 // Shared helpers for leaf-file Devs (P4-B).
 // =============================================================================

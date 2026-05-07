@@ -141,6 +141,19 @@ void test_random_read_varies_across_calls(void);
 void test_cons_write_advances(void);
 void test_cons_read_returns_eof(void);
 void test_trivial_devs_devnull_10k_no_leak(void);
+void test_devproc_bestiary_smoke(void);
+void test_devproc_attach_returns_dir(void);
+void test_devproc_walk_root_to_kproc_dir(void);
+void test_devproc_walk_unknown_pid_misses(void);
+void test_devproc_walk_to_status_file(void);
+void test_devproc_walk_dotdot_to_root(void);
+void test_devproc_read_status_format(void);
+void test_devproc_read_cmdline_kproc(void);
+void test_devproc_read_ns_format(void);
+void test_devproc_read_ctl_returns_zero(void);
+void test_devproc_write_ctl_consumes(void);
+void test_devproc_read_dir_returns_neg1(void);
+void test_devproc_read_partial_offset(void);
 
 // ---------------------------------------------------------------------------
 // Registry. Sentinel-terminated.
@@ -300,6 +313,21 @@ struct test_case g_tests[] = {
     { "trivial_devs.devnull_10k_no_leak",
                                        test_trivial_devs_devnull_10k_no_leak,
                                                                            false, NULL },
+    { "devproc.bestiary_smoke",        test_devproc_bestiary_smoke,        false, NULL },
+    { "devproc.attach_returns_dir",    test_devproc_attach_returns_dir,    false, NULL },
+    { "devproc.walk_root_to_kproc_dir",
+                                       test_devproc_walk_root_to_kproc_dir, false, NULL },
+    { "devproc.walk_unknown_pid_misses",
+                                       test_devproc_walk_unknown_pid_misses, false, NULL },
+    { "devproc.walk_to_status_file",   test_devproc_walk_to_status_file,   false, NULL },
+    { "devproc.walk_dotdot_to_root",   test_devproc_walk_dotdot_to_root,   false, NULL },
+    { "devproc.read_status_format",    test_devproc_read_status_format,    false, NULL },
+    { "devproc.read_cmdline_kproc",    test_devproc_read_cmdline_kproc,    false, NULL },
+    { "devproc.read_ns_format",        test_devproc_read_ns_format,        false, NULL },
+    { "devproc.read_ctl_returns_zero", test_devproc_read_ctl_returns_zero, false, NULL },
+    { "devproc.write_ctl_consumes",    test_devproc_write_ctl_consumes,    false, NULL },
+    { "devproc.read_dir_returns_neg1", test_devproc_read_dir_returns_neg1, false, NULL },
+    { "devproc.read_partial_offset",   test_devproc_read_partial_offset,   false, NULL },
     { NULL, NULL, false, NULL },          // sentinel
 };
 

@@ -341,6 +341,54 @@ u64 proc_total_created(void)   { return __atomic_load_n(&g_proc_created, __ATOMI
 u64 proc_total_destroyed(void) { return __atomic_load_n(&g_proc_destroyed, __ATOMIC_RELAXED); }
 
 // =============================================================================
+// P4-C: Proc lookup for devproc (by pid + iterate-all).
+// =============================================================================
+//
+// Both walkers DFS from kproc through the children/sibling tree. The
+// proc-table forms a rooted tree with kproc at the root; every Proc
+// alive has a path from kproc through parent pointers (zombies + their
+// children re-parent on exit per orphan_reparent_to_kproc).
+
+// Recursive helper. PRECONDITION: caller holds g_proc_table_lock.
+static struct Proc *proc_find_by_pid_walk(struct Proc *root, int pid) {
+    if (!root) return NULL;
+    if (root->pid == pid) return root;
+    for (struct Proc *child = root->children; child; child = child->sibling) {
+        struct Proc *r = proc_find_by_pid_walk(child, pid);
+        if (r) return r;
+    }
+    return NULL;
+}
+
+struct Proc *proc_find_by_pid(int pid) {
+    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    struct Proc *p = proc_find_by_pid_walk(kproc(), pid);
+    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    return p;
+}
+
+// Recursive iterate. Returns first non-zero callback result; 0 if all
+// callbacks returned 0. PRECONDITION: caller holds g_proc_table_lock.
+static int proc_for_each_walk(struct Proc *root,
+                              int (*cb)(struct Proc *, void *), void *arg) {
+    if (!root) return 0;
+    int rv = cb(root, arg);
+    if (rv) return rv;
+    for (struct Proc *child = root->children; child; child = child->sibling) {
+        rv = proc_for_each_walk(child, cb, arg);
+        if (rv) return rv;
+    }
+    return 0;
+}
+
+int proc_for_each(int (*callback)(struct Proc *p, void *arg), void *arg) {
+    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    int rv = proc_for_each_walk(kproc(), callback, arg);
+    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    return rv;
+}
+
+// =============================================================================
 // P2-D: rfork / exits / wait_pid
 // =============================================================================
 

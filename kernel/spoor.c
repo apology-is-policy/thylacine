@@ -152,3 +152,28 @@ void spoor_clunk(struct Spoor *c) {
 
 u64 spoor_total_allocated(void) { return g_spoor_allocated; }
 u64 spoor_total_freed(void)     { return g_spoor_freed; }
+
+// =============================================================================
+// Walkqid allocation (P4-C).
+// =============================================================================
+//
+// kmalloc-backed; the Walkqid is per-call temporary that the walk caller
+// owns until done. walkqid_alloc(0) returns a Walkqid with a 1-slot
+// tail to avoid zero-sized-allocation edge cases (the caller decides
+// nqid; an unused slot is fine).
+
+struct Walkqid *walkqid_alloc(int max_qids) {
+    if (max_qids < 0) return NULL;
+    int slots = max_qids > 0 ? max_qids : 1;
+    size_t bytes = sizeof(struct Walkqid) + (size_t)slots * sizeof(struct Qid);
+    struct Walkqid *w = kmalloc(bytes, KP_ZERO);
+    if (!w) return NULL;
+    w->spoor = NULL;
+    w->nqid  = 0;
+    return w;
+}
+
+void walkqid_free(struct Walkqid *w) {
+    if (!w) return;
+    kfree(w);
+}

@@ -173,4 +173,20 @@ void spoor_clunk(struct Spoor *c);
 u64 spoor_total_allocated(void);
 u64 spoor_total_freed(void);
 
+// =============================================================================
+// Walkqid allocation (P4-C — devs that implement non-trivial walks).
+// =============================================================================
+//
+// walkqid_alloc: kmalloc a Walkqid + room for `max_qids` qids in the
+// flexible array. Returns NULL on OOM. The caller fills in `spoor` +
+// `nqid` + `qid[]` and returns it from `dev->walk`. The walk caller
+// owns the Walkqid memory and must walkqid_free when done.
+//
+// Devs that always succeed in O(1) walk (single-file leaves like devnull)
+// don't use this — they return NULL from walk to signal "no walking
+// supported". Devs with a directory namespace (devproc, future devctl,
+// devramfs) use walkqid_alloc.
+struct Walkqid *walkqid_alloc(int max_qids);
+void            walkqid_free(struct Walkqid *w);
+
 #endif  // THYLACINE_SPOOR_H
