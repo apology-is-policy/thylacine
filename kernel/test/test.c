@@ -87,6 +87,11 @@ void test_demand_page_smoke(void);
 void test_demand_page_no_vma(void);
 void test_demand_page_permission_denied(void);
 void test_demand_page_lifecycle_round_trip(void);
+void test_exec_setup_smoke(void);
+void test_exec_setup_segment_data_copied(void);
+void test_exec_setup_constraints(void);
+void test_exec_setup_multi_segment(void);
+void test_exec_setup_lifecycle_round_trip(void);
 void test_fault_decode_kernel_data_translation_l2(void);
 void test_fault_decode_kernel_data_permission_write(void);
 void test_fault_decode_user_data_translation(void);
@@ -189,6 +194,15 @@ struct test_case g_tests[] = {
     { "demand_page.permission_denied", test_demand_page_permission_denied, false, NULL },
     { "demand_page.lifecycle_round_trip",
                                        test_demand_page_lifecycle_round_trip,
+                                                                           false, NULL },
+    { "exec.setup_smoke",              test_exec_setup_smoke,              false, NULL },
+    { "exec.setup_segment_data_copied",
+                                       test_exec_setup_segment_data_copied,
+                                                                           false, NULL },
+    { "exec.setup_constraints",        test_exec_setup_constraints,        false, NULL },
+    { "exec.setup_multi_segment",      test_exec_setup_multi_segment,      false, NULL },
+    { "exec.setup_lifecycle_round_trip",
+                                       test_exec_setup_lifecycle_round_trip,
                                                                            false, NULL },
     { "fault.decode_kernel_data_translation_l2",
                                        test_fault_decode_kernel_data_translation_l2,
