@@ -120,6 +120,15 @@ void test_elf_header_rejection(void);
 void test_elf_rwx_rejected(void);
 void test_elf_bounds_rejection(void);
 void test_elf_policy_rejection(void);
+void test_dev_boot_registration_smoke(void);
+void test_dev_lookup_unknown(void);
+void test_dev_devnone_ops_smoke(void);
+void test_spoor_alloc_unref_round_trip(void);
+void test_spoor_ref_lifecycle(void);
+void test_spoor_clone_lifecycle(void);
+void test_spoor_clone_copies_state(void);
+void test_spoor_clunk_dispatches_close(void);
+void test_spoor_alloc_10k_no_leak(void);
 
 // ---------------------------------------------------------------------------
 // Registry. Sentinel-terminated.
@@ -256,6 +265,15 @@ struct test_case g_tests[] = {
     { "elf.rwx_rejected",              test_elf_rwx_rejected,              false, NULL },
     { "elf.bounds_rejection",          test_elf_bounds_rejection,          false, NULL },
     { "elf.policy_rejection",          test_elf_policy_rejection,          false, NULL },
+    { "dev.boot_registration_smoke",   test_dev_boot_registration_smoke,   false, NULL },
+    { "dev.lookup_unknown",            test_dev_lookup_unknown,            false, NULL },
+    { "dev.devnone_ops_smoke",         test_dev_devnone_ops_smoke,         false, NULL },
+    { "spoor.alloc_unref_round_trip",  test_spoor_alloc_unref_round_trip,  false, NULL },
+    { "spoor.ref_lifecycle",           test_spoor_ref_lifecycle,           false, NULL },
+    { "spoor.clone_lifecycle",         test_spoor_clone_lifecycle,         false, NULL },
+    { "spoor.clone_copies_state",      test_spoor_clone_copies_state,      false, NULL },
+    { "spoor.clunk_dispatches_close",  test_spoor_clunk_dispatches_close,  false, NULL },
+    { "spoor.alloc_10k_no_leak",       test_spoor_alloc_10k_no_leak,       false, NULL },
     { NULL, NULL, false, NULL },          // sentinel
 };
 

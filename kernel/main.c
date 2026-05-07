@@ -42,6 +42,7 @@
 #include <thylacine/thread.h>
 #include <thylacine/vma.h>      // vma_init (P3-Da)
 #include <thylacine/burrow.h>
+#include <thylacine/dev.h>
 #include <thylacine/types.h>
 
 #include "../arch/arm64/psci.h"
@@ -307,6 +308,14 @@ void boot_main(void) {
     proc_init();
     thread_init();
     sched_init(0);                              // boot CPU's per-CPU sched state
+
+    // P4-A: bring up the device subsystem. spoor_init allocates the
+    // Spoor SLUB cache; dev_register(&devnone) seeds the bestiary; the
+    // bestiary walk calls each ->init() once (no-op for devnone at v1.0;
+    // P4-B's cons / null / zero / random will hook here). Order: after
+    // sched_init so that any future driver-side dev->init that allocates
+    // a Spoor + walks has a working scheduler context.
+    dev_init();
 
     // SMP secondary bring-up (P2-Ca). Reads /psci/method, brings up
     // each /cpus/cpu@N (N>0) via PSCI_CPU_ON pointing at the asm

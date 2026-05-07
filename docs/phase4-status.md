@@ -18,7 +18,7 @@ Per CLAUDE.md spec-first policy: VirtIO core is impl-only (transport correctness
 
 | Commit SHA | What | Tests |
 |---|---|---|
-| *(none yet — Phase 4 entry)* | | |
+| *(pending)* | **P4-A: Dev vtable + Spoor lifecycle + devnone stub.** New `kernel/include/thylacine/dev.h` + `spoor.h`. New `kernel/dev.c` (~120 LOC; bestiary[] registry, dev_register/dev_lookup_by_dc/by_name, dev_init walks bestiary calling each ->init()). New `kernel/spoor.c` (~150 LOC; SPOOR_MAGIC + counter discipline mirrors burrow.c; spoor_alloc/ref/unref/clone/clunk). New `kernel/devnone.c` (~110 LOC; dc='-', all ops safe no-ops or graceful failures). Boot wire-up: `dev_init()` after `sched_init` in main.c. Tests: 9 (`dev.boot_registration_smoke`, `dev.lookup_unknown`, `dev.devnone_ops_smoke`, `spoor.alloc_unref_round_trip`, `spoor.ref_lifecycle`, `spoor.clone_lifecycle`, `spoor.clone_copies_state`, `spoor.clunk_dispatches_close`, `spoor.alloc_10k_no_leak`). Reference doc: `docs/reference/30-dev-spoor.md`. | 105/105 PASS × default + UBSan; 4/4 fault; 5/5 KASLR. |
 
 ---
 

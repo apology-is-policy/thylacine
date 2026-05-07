@@ -68,6 +68,10 @@ set(KERNEL_SRCS
     exec.c
     syscall.c
     joey.c
+    spoor.c
+    dev.c
+    devnone.c
+    test/test_dev.c
 )
 
 set(KERNEL_LD_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/../arch/arm64/kernel.ld)
