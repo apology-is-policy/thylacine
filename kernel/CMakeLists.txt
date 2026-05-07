@@ -26,6 +26,7 @@ set(KERNEL_SRCS
     ../arch/arm64/timer.c
     ../arch/arm64/hwfeat.c
     ../arch/arm64/context.S
+    ../arch/arm64/userland.S
     ../arch/arm64/psci.c
     ../arch/arm64/asid.c
     ../lib/dtb.c
@@ -59,6 +60,7 @@ set(KERNEL_SRCS
     test/test_demand_page.c
     test/test_exec.c
     test/test_syscall.c
+    test/test_userspace.c
     namespace.c
     handle.c
     vmo.c

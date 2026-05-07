@@ -90,4 +90,15 @@ struct Proc;
 int exec_setup(struct Proc *p, const void *blob, size_t blob_size,
                u64 *entry_out, u64 *sp_out);
 
+// Kernel→EL0 transition (asm in arch/arm64/userland.S). Sets
+// ELR_EL1 = entry_pc, SP_EL0 = user_sp, SPSR_EL1 = 0 (PSTATE = EL0t,
+// all DAIF clear), zeros every GPR, then eret. Never returns —
+// transitions atomically to EL0.
+//
+// At v1.0 P3-Ed this is the only path from kernel to EL0. Phase 5+
+// syscall-return path uses the existing exception-exit ERET via
+// .Lexception_return for the syscall-return case.
+__attribute__((noreturn))
+extern void userland_enter(u64 entry_pc, u64 user_sp);
+
 #endif // THYLACINE_EXEC_H
