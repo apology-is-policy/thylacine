@@ -108,6 +108,32 @@ build_kernel() {
     cmake --build "$KERNEL_BUILD" $verbose
     echo "==> Kernel built: $KERNEL_BUILD/thylacine.elf"
     ls -la "$KERNEL_BUILD/thylacine.elf"
+
+    # P4-E: build the ramfs cpio alongside the kernel so QEMU's
+    # -initrd has something to load. The cpio is independent of
+    # the kernel ELF (loaded separately by the bootloader); rebuilding
+    # it on every kernel build keeps the file table reproducible.
+    build_ramfs
+}
+
+build_ramfs() {
+    local ramfs_src="$BUILD_DIR/ramfs-src"
+    local ramfs_out="$BUILD_DIR/ramfs.cpio"
+    mkdir -p "$ramfs_src"
+
+    # Sample files. Generated at build time so they reflect the
+    # current build's THYLACINE_VERSION_STRING. Phase 5+ will replace
+    # this with the userspace driver binaries + /joey blob; v1.0
+    # P4-E ships these two as the read-side smoke set.
+    cat > "$ramfs_src/welcome" <<'EOF'
+Welcome to Thylacine ramfs.
+EOF
+    cat > "$ramfs_src/version" <<'EOF'
+Thylacine v0.1-dev
+EOF
+
+    python3 "$REPO_ROOT/tools/mkcpio.py" "$ramfs_src" "$ramfs_out"
+    echo "==> ramfs cpio: $ramfs_out"
 }
 
 build_sysroot() {
@@ -137,6 +163,7 @@ clean() {
 
 case "$target" in
     kernel)    build_kernel    ;;
+    ramfs)     build_ramfs     ;;
     sysroot)   build_sysroot   ;;
     userspace) build_userspace ;;
     disk)      build_disk      ;;
@@ -144,7 +171,7 @@ case "$target" in
     clean)     clean           ;;
     *)
         echo "Unknown target: $target" >&2
-        echo "Valid: kernel, sysroot, userspace, disk, all, clean" >&2
+        echo "Valid: kernel, ramfs, sysroot, userspace, disk, all, clean" >&2
         exit 1
         ;;
 esac

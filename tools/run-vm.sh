@@ -84,6 +84,18 @@ if [[ ! -f "$KERNEL_BIN" ]]; then
     exit 1
 fi
 
+# P4-E: ramfs cpio archive loaded by QEMU at boot via -initrd. The
+# kernel parses it via lib/dtb.c (linux,initrd-start/end probe) +
+# kernel/cpio.c iterator and populates devramfs. tools/build.sh kernel
+# also runs build_ramfs which writes this file; we point at the
+# build/-relative path (NOT the per-build sanitizer dir, since the
+# cpio is build-config-independent).
+RAMFS_CPIO="${THYLACINE_RAMFS_CPIO:-$REPO_ROOT/build/ramfs.cpio}"
+ramfs_flags=()
+if [[ -f "$RAMFS_CPIO" ]]; then
+    ramfs_flags=(-initrd "$RAMFS_CPIO")
+fi
+
 # 9P host share — appears at /host inside the guest once the 9P client lands
 # (P1-A: no client yet, so the QEMU virtfs entry is benign overhead). Per
 # TOOLING.md §4 (the hot-reload mechanism). Default-on; --no-share disables.
@@ -108,6 +120,7 @@ exec qemu-system-aarch64 \
     -smp "$cpus" \
     -m "$mem_mib" \
     -kernel "$KERNEL_BIN" \
+    ${ramfs_flags[@]+"${ramfs_flags[@]}"} \
     -nographic \
     -serial mon:stdio \
     ${gdb_flags[@]+"${gdb_flags[@]}"} \

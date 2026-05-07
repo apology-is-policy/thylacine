@@ -132,6 +132,11 @@ extern struct Dev devrandom;      // dc='r'  — CSPRNG (RNDR-backed at v1.0)
 // Kernel-internal directory Devs (P4-C+).
 extern struct Dev devproc;        // dc='p'  — /proc/<pid>/{status,cmdline,ctl,ns}
 extern struct Dev devctl;         // dc='C'  — /ctl/{procs,memory,devices,kernel-base,sched}
+extern struct Dev devramfs;       // dc='m'  — /ramfs/<file> from cpio newc initrd
+
+// devramfs diagnostics (used by tests).
+int  devramfs_file_count(void);
+bool devramfs_initialized(void);
 
 // =============================================================================
 // Shared helpers for leaf-file Devs (P4-B).

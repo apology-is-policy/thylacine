@@ -574,6 +574,37 @@ u64 dtb_get_chosen_kaslr_seed(void) {
     return ((u64)hi << 32) | lo;
 }
 
+// Helper for /chosen address values. QEMU virt with #address-cells=2
+// emits 8-byte big-endian; some bootloaders use 4-byte. Accept either
+// width; treat <4 bytes as absent.
+static u64 dtb_chosen_addr_value(const uint8_t *data, uint32_t len) {
+    if (len >= 8) {
+        uint32_t hi = be32_load(data);
+        uint32_t lo = be32_load(data + 4);
+        return ((u64)hi << 32) | lo;
+    }
+    if (len >= 4) {
+        return (u64)be32_load(data);
+    }
+    return 0;
+}
+
+bool dtb_get_chosen_initrd(u64 *start, u64 *end) {
+    if (!start || !end) return false;
+    const uint8_t *data;
+    uint32_t len;
+
+    if (!dtb_chosen_prop("linux,initrd-start", &data, &len)) return false;
+    *start = dtb_chosen_addr_value(data, len);
+
+    if (!dtb_chosen_prop("linux,initrd-end", &data, &len)) return false;
+    *end = dtb_chosen_addr_value(data, len);
+
+    // Sanity: end strictly greater than start; both non-zero.
+    if (*start == 0 || *end <= *start) return false;
+    return true;
+}
+
 u64 dtb_get_chosen_rng_seed(void) {
     const uint8_t *data;
     uint32_t len;

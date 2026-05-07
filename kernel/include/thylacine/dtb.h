@@ -136,6 +136,14 @@ u64 dtb_get_chosen_kaslr_seed(void);
 // /chosen/kaslr-seed.
 u64 dtb_get_chosen_rng_seed(void);
 
+// P4-E: read /chosen/linux,initrd-start + linux,initrd-end as u64
+// big-endian addresses (QEMU virt #address-cells=2 publishes 8-byte
+// cells; 4-byte cells also accepted for portability). Returns true
+// on a clean read (both properties present + end > start > 0); false
+// on absence or malformation. The values are physical addresses; the
+// kernel's direct map provides the KVA via pa_to_kva.
+bool dtb_get_chosen_initrd(u64 *start, u64 *end);
+
 // CPU enumeration (P2-Ca). Counts and inspects /cpus/cpu@* nodes —
 // identified by device_type = "cpu". QEMU virt convention: each
 // cpu@N has reg = single u32 cell holding the MPIDR aff bits (linear

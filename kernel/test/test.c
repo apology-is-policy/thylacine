@@ -165,6 +165,23 @@ void test_devctl_read_kernel_base_format(void);
 void test_devctl_read_sched_format(void);
 void test_devctl_write_rejected(void);
 void test_devctl_read_dir_returns_neg1(void);
+void test_cpio_is_valid_recognizes_magic(void);
+void test_cpio_iter_empty_archive(void);
+void test_cpio_iter_single_entry(void);
+void test_cpio_iter_two_entries(void);
+void test_cpio_iter_rejects_truncated(void);
+void test_cpio_iter_rejects_bad_magic(void);
+void test_cpio_count_matches(void);
+void test_devramfs_bestiary_smoke(void);
+void test_devramfs_initialized_with_files(void);
+void test_devramfs_attach_returns_dir(void);
+void test_devramfs_walk_to_welcome(void);
+void test_devramfs_walk_unknown_misses(void);
+void test_devramfs_read_welcome(void);
+void test_devramfs_read_version(void);
+void test_devramfs_read_partial_offset(void);
+void test_devramfs_read_dir_returns_neg1(void);
+void test_devramfs_write_rejected(void);
 
 // ---------------------------------------------------------------------------
 // Registry. Sentinel-terminated.
@@ -351,6 +368,26 @@ struct test_case g_tests[] = {
     { "devctl.read_sched_format",      test_devctl_read_sched_format,      false, NULL },
     { "devctl.write_rejected",         test_devctl_write_rejected,         false, NULL },
     { "devctl.read_dir_returns_neg1",  test_devctl_read_dir_returns_neg1,  false, NULL },
+    { "cpio.is_valid_recognizes_magic",
+                                       test_cpio_is_valid_recognizes_magic, false, NULL },
+    { "cpio.iter_empty_archive",       test_cpio_iter_empty_archive,       false, NULL },
+    { "cpio.iter_single_entry",        test_cpio_iter_single_entry,        false, NULL },
+    { "cpio.iter_two_entries",         test_cpio_iter_two_entries,         false, NULL },
+    { "cpio.iter_rejects_truncated",   test_cpio_iter_rejects_truncated,   false, NULL },
+    { "cpio.iter_rejects_bad_magic",   test_cpio_iter_rejects_bad_magic,   false, NULL },
+    { "cpio.count_matches",            test_cpio_count_matches,            false, NULL },
+    { "devramfs.bestiary_smoke",       test_devramfs_bestiary_smoke,       false, NULL },
+    { "devramfs.initialized_with_files",
+                                       test_devramfs_initialized_with_files, false, NULL },
+    { "devramfs.attach_returns_dir",   test_devramfs_attach_returns_dir,   false, NULL },
+    { "devramfs.walk_to_welcome",      test_devramfs_walk_to_welcome,      false, NULL },
+    { "devramfs.walk_unknown_misses",  test_devramfs_walk_unknown_misses,  false, NULL },
+    { "devramfs.read_welcome",         test_devramfs_read_welcome,         false, NULL },
+    { "devramfs.read_version",         test_devramfs_read_version,         false, NULL },
+    { "devramfs.read_partial_offset",  test_devramfs_read_partial_offset,  false, NULL },
+    { "devramfs.read_dir_returns_neg1",
+                                       test_devramfs_read_dir_returns_neg1, false, NULL },
+    { "devramfs.write_rejected",       test_devramfs_write_rejected,       false, NULL },
     { NULL, NULL, false, NULL },          // sentinel
 };
 

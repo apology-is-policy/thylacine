@@ -115,6 +115,7 @@ void dev_init(void) {
     dev_register(&devrandom);
     dev_register(&devproc);
     dev_register(&devctl);
+    dev_register(&devramfs);
 
     // Walk bestiary: dev->init() may itself dev_register additional
     // devs (e.g., a virtio probe that fans out to multiple instances).

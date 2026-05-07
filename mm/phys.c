@@ -108,29 +108,56 @@ bool phys_init(void) {
                                     (paddr_t)dtb_get_total_size(),
                                     PAGE_SIZE);
 
+    // 4b. Initrd reservation (P4-E). When QEMU's `-initrd` is in play,
+    //     the bootloader records [linux,initrd-start, linux,initrd-end)
+    //     in /chosen. The cpio blob lives in this range and devramfs
+    //     reads from it after dev_init; if the buddy isn't told to
+    //     reserve it, those pages free + get reused, clobbering the
+    //     blob bytes that g_ramfs_files[].name + .data point at.
+    //     The bug surfaces deterministically once the kernel image grows
+    //     enough (e.g., UBSan build) to push buddy allocations past the
+    //     low-zone threshold.
+    paddr_t initrd_pa_start = 0, initrd_pa_end = 0;
+    bool    have_initrd = false;
+    {
+        u64 s, e;
+        if (dtb_get_chosen_initrd(&s, &e)) {
+            initrd_pa_start = round_down((paddr_t)s, PAGE_SIZE);
+            initrd_pa_end   = round_up((paddr_t)e, PAGE_SIZE);
+            have_initrd = true;
+        }
+    }
+
     // Sanity: every reservation must lie within the zone.
     if (kern_pa_start < zone_base || kern_pa_end > zone_end ||
         struct_pages_pa_end > zone_end ||
-        dtb_pa_start < zone_base || dtb_pa_end > zone_end) {
+        dtb_pa_start < zone_base || dtb_pa_end > zone_end ||
+        (have_initrd && (initrd_pa_start < zone_base ||
+                         initrd_pa_end > zone_end))) {
         extinction("phys_init: reservation outside DTB-discovered RAM");
     }
 
     // F34 (audit-r3): make the low-firmware reservation EXPLICIT in
     // the array rather than threading it through cursor manipulation.
-    // F29 (audit-r3): verify no overlap among the four reservations
-    // — on Pi 5 with 8 GiB RAM the struct_pages array is ~96 MiB and
-    // can collide with the DTB blob the firmware placed; collision
-    // would cause buddy_zone_init's clear pass to overwrite the DTB.
-    struct reservation res[4] = {
+    // F29 (audit-r3): verify no overlap among the reservations.
+    // P4-E: append initrd reservation if present.
+    struct reservation res[5] = {
         { zone_base,             kern_pa_start },        // low firmware
         { kern_pa_start,         kern_pa_end },          // kernel image
         { struct_pages_pa_start, struct_pages_pa_end },  // struct page array
         { dtb_pa_start,          dtb_pa_end },           // DTB blob
+        { 0, 0 },                                        // initrd (filled below)
     };
-    sort_by_start(res, 4);
-    if (!reservations_disjoint(res, 4)) {
+    int res_count = 4;
+    if (have_initrd) {
+        res[4].start = initrd_pa_start;
+        res[4].end   = initrd_pa_end;
+        res_count = 5;
+    }
+    sort_by_start(res, res_count);
+    if (!reservations_disjoint(res, res_count)) {
         extinction("phys_init: reservation overlap "
-                   "(DTB collides with kernel/struct_pages?)");
+                   "(DTB collides with kernel/struct_pages/initrd?)");
     }
 
     // 5. Initialize the buddy zone. struct_pages lives at PA
@@ -151,7 +178,7 @@ bool phys_init(void) {
     //    in res[]; we treat it as fully reserved.
     paddr_t cursor = round_up(zone_base, PAGE_SIZE);
 
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < res_count; i++) {
         if (cursor < res[i].start) {
             buddy_free_region(&g_zone0, cursor, res[i].start);
         }
