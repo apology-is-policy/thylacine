@@ -92,6 +92,11 @@ void test_exec_setup_segment_data_copied(void);
 void test_exec_setup_constraints(void);
 void test_exec_setup_multi_segment(void);
 void test_exec_setup_lifecycle_round_trip(void);
+void test_syscall_dispatch_unknown(void);
+void test_syscall_dispatch_puts_smoke(void);
+void test_syscall_dispatch_exits_ok(void);
+void test_syscall_dispatch_exits_fail(void);
+void test_syscall_dispatch_args_in_x0_to_x5(void);
 void test_fault_decode_kernel_data_translation_l2(void);
 void test_fault_decode_kernel_data_permission_write(void);
 void test_fault_decode_user_data_translation(void);
@@ -203,6 +208,13 @@ struct test_case g_tests[] = {
     { "exec.setup_multi_segment",      test_exec_setup_multi_segment,      false, NULL },
     { "exec.setup_lifecycle_round_trip",
                                        test_exec_setup_lifecycle_round_trip,
+                                                                           false, NULL },
+    { "syscall.dispatch_unknown",      test_syscall_dispatch_unknown,      false, NULL },
+    { "syscall.dispatch_puts_smoke",   test_syscall_dispatch_puts_smoke,   false, NULL },
+    { "syscall.dispatch_exits_ok",     test_syscall_dispatch_exits_ok,     false, NULL },
+    { "syscall.dispatch_exits_fail",   test_syscall_dispatch_exits_fail,   false, NULL },
+    { "syscall.dispatch_args_in_x0_to_x5",
+                                       test_syscall_dispatch_args_in_x0_to_x5,
                                                                            false, NULL },
     { "fault.decode_kernel_data_translation_l2",
                                        test_fault_decode_kernel_data_translation_l2,

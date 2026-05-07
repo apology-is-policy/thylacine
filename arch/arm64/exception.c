@@ -23,6 +23,7 @@
 #include "gic.h"
 
 #include <thylacine/extinction.h>
+#include <thylacine/syscall.h>        // P3-Ec: syscall_dispatch
 #include <thylacine/types.h>
 
 // Vector table from vectors.S.
@@ -239,11 +240,13 @@ void exception_sync_lower_el(struct exception_context *ctx) {
     }
 
     case EC_SVC_AARCH64:
-        // svc #imm at EL0. The syscall dispatcher lands at P3-Ec; v1.0
-        // pre-Ec extincts so an accidental syscall instruction in early
-        // userspace surfaces.
-        extinction_with_addr("EL0 SVC (userspace syscall) — not implemented at v1.0",
-                             (uintptr_t)ctx->elr);
+        // svc #imm at EL0. P3-Ec: route through syscall_dispatch which
+        // reads nr from x8, args from x0..x5, writes return value to
+        // x0. SYS_EXITS does not return (kernel exits() + sched()
+        // pick another thread). All other syscalls return normally;
+        // vectors.S ERETs to EL0 with the result in x0.
+        syscall_dispatch(ctx);
+        return;
 
     case EC_PC_ALIGN:
         extinction_with_addr("EL0 PC alignment fault", (uintptr_t)ctx->elr);
