@@ -79,12 +79,14 @@ set(KERNEL_SRCS
     devctl.c
     devramfs.c
     cpio.c
+    virtio.c
     test/test_dev.c
     test/test_trivial_devs.c
     test/test_devproc.c
     test/test_devctl.c
     test/test_cpio.c
     test/test_devramfs.c
+    test/test_virtio.c
 )
 
 set(KERNEL_LD_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/../arch/arm64/kernel.ld)

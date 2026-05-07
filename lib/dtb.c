@@ -501,6 +501,67 @@ bool dtb_get_compat_reg_n(const char *compat, u32 idx, u64 *base, u64 *size) {
     return false;
 }
 
+// P4-F: enumerate every matching node, calling cb per match.
+u32 dtb_for_each_compat_reg(const char *compat, dtb_compat_cb cb, void *arg) {
+    if (!g_dtb.ready || !cb) return 0;
+
+    struct fdt_walker w;
+    walker_start(&w);
+
+    struct {
+        bool compat_matched;
+        const uint8_t *reg_data;
+        uint32_t reg_len;
+    } stack[DTB_MAX_DEPTH];
+    int sp = 0;
+    u32 match_idx = 0;
+
+    for (;;) {
+        const char *name = NULL, *propname = NULL;
+        const uint8_t *propdata = NULL;
+        uint32_t proplen = 0;
+        uint32_t tok = walker_next(&w, &name, &propname, &propdata, &proplen);
+        if (tok == FDT_END) break;
+
+        if (tok == FDT_BEGIN_NODE) {
+            if (sp < DTB_MAX_DEPTH) {
+                stack[sp].compat_matched = false;
+                stack[sp].reg_data = NULL;
+                stack[sp].reg_len = 0;
+            }
+            sp++;
+            continue;
+        }
+        if (tok == FDT_END_NODE) {
+            if (sp > 0) {
+                sp--;
+                if (sp < DTB_MAX_DEPTH &&
+                    stack[sp].compat_matched && stack[sp].reg_data &&
+                    stack[sp].reg_len >= 16) {
+                    u64 base, size;
+                    read_reg_pair(stack[sp].reg_data, &base, &size);
+                    int rv = cb(match_idx, base, size, arg);
+                    match_idx++;
+                    if (rv != 0) return match_idx;
+                }
+            }
+            continue;
+        }
+        if (tok == FDT_PROP && sp > 0 && sp <= DTB_MAX_DEPTH) {
+            int si = sp - 1;
+            if (k_streq(propname, "compatible")) {
+                if (stringlist_contains((const char *)propdata, proplen, compat)) {
+                    stack[si].compat_matched = true;
+                }
+            } else if (k_streq(propname, "reg") && proplen >= 16) {
+                stack[si].reg_data = propdata;
+                stack[si].reg_len  = proplen;
+            }
+        }
+    }
+    return match_idx;
+}
+
 bool dtb_has_compat(const char *compat) {
     if (!g_dtb.ready) return false;
 

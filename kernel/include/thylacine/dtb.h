@@ -114,6 +114,18 @@ bool dtb_get_compat_reg_n(const char *compat, u32 idx,
 // dtb_get_compat_reg walk if you only care whether a string exists.
 bool dtb_has_compat(const char *compat);
 
+// P4-F: enumerate every node whose `compatible` contains `compat`.
+// Calls `cb(match_idx, reg_base, reg_size, arg)` per matching node
+// using the node's first reg pair. The match_idx is 0-based in DTB
+// declaration order. Iteration stops if the callback returns non-zero
+// or the DTB is exhausted. Returns the number of matches dispatched.
+//
+// Used by virtio.c to enumerate the 32 virtio-mmio slots QEMU virt
+// publishes; future drivers needing multi-match enumeration follow
+// the same pattern.
+typedef int (*dtb_compat_cb)(u32 match_idx, u64 reg_base, u64 reg_size, void *arg);
+u32 dtb_for_each_compat_reg(const char *compat, dtb_compat_cb cb, void *arg);
+
 // Read /chosen/kaslr-seed as 64 bits (the property is two u32 cells in
 // the DTB; we concatenate them in the FDT-cell order). Returns 0 if the
 // node or property is absent.

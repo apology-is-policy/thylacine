@@ -44,6 +44,7 @@
 #include <thylacine/burrow.h>
 #include <thylacine/dev.h>
 #include <thylacine/types.h>
+#include <thylacine/virtio.h>
 
 #include "../arch/arm64/psci.h"
 
@@ -316,6 +317,12 @@ void boot_main(void) {
     // sched_init so that any future driver-side dev->init that allocates
     // a Spoor + walks has a working scheduler context.
     dev_init();
+
+    // P4-F: VirtIO MMIO transport probe. Walks DTB for "virtio,mmio"
+    // nodes; maps each MMIO range; reads transport identity. Order:
+    // after dev_init since virtio_init prints to UART (cons must be
+    // up) and after slub_init since virtqueue_create uses kmalloc.
+    virtio_init();
 
     // SMP secondary bring-up (P2-Ca). Reads /psci/method, brings up
     // each /cpus/cpu@N (N>0) via PSCI_CPU_ON pointing at the asm

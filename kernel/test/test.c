@@ -182,6 +182,13 @@ void test_devramfs_read_version(void);
 void test_devramfs_read_partial_offset(void);
 void test_devramfs_read_dir_returns_neg1(void);
 void test_devramfs_write_rejected(void);
+void test_virtio_mmio_probe(void);
+void test_virtio_magic_value(void);
+void test_virtio_version_modern(void);
+void test_virtio_rng_present(void);
+void test_virtio_negotiate_features_smoke(void);
+void test_virtio_virtqueue_alloc_destroy(void);
+void test_virtio_find_by_device_id(void);
 
 // ---------------------------------------------------------------------------
 // Registry. Sentinel-terminated.
@@ -388,6 +395,15 @@ struct test_case g_tests[] = {
     { "devramfs.read_dir_returns_neg1",
                                        test_devramfs_read_dir_returns_neg1, false, NULL },
     { "devramfs.write_rejected",       test_devramfs_write_rejected,       false, NULL },
+    { "virtio.mmio_probe",             test_virtio_mmio_probe,             false, NULL },
+    { "virtio.magic_value",            test_virtio_magic_value,            false, NULL },
+    { "virtio.version_modern",         test_virtio_version_modern,         false, NULL },
+    { "virtio.rng_present",            test_virtio_rng_present,            false, NULL },
+    { "virtio.negotiate_features_smoke",
+                                       test_virtio_negotiate_features_smoke, false, NULL },
+    { "virtio.virtqueue_alloc_destroy",
+                                       test_virtio_virtqueue_alloc_destroy, false, NULL },
+    { "virtio.find_by_device_id",      test_virtio_find_by_device_id,      false, NULL },
     { NULL, NULL, false, NULL },          // sentinel
 };
 
