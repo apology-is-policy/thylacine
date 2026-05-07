@@ -71,6 +71,32 @@ void sched_arm_clear_on_cpu(struct Thread *prev);
 // cpu_idx is out of range.
 struct Thread *sched_idle_thread(unsigned cpu_idx);
 
+// P3-G: WFI signaling for ready/wakeup wake-idle-peer (closes R5-H F78).
+//
+// `sched_set_idle_in_wfi(true)` is called by THIS CPU immediately before
+// entering `wfi` in per_cpu_main's idle loop; `false` is called immediately
+// after WFI exits. Peer CPUs read these flags via `sched_idle_in_wfi(idx)`
+// to identify wake targets; ready() / wakeup() send IPI_RESCHED to one
+// such target so it wakes from WFI and runs sched (which try_steals the
+// new work). Without this signaling, secondaries (no per-CPU timer at
+// v1.0) starve runnable threads while sitting in WFI.
+//
+// Boot CPU stays FALSE forever: its post-init flow is `_hang`'s asm wfi
+// loop with no C-level set hook; secondaries are the canonical wake
+// target. See ARCH §8 + scheduler.tla `EnterWFI` for the spec model.
+void sched_set_idle_in_wfi(bool in_wfi);
+bool sched_idle_in_wfi(unsigned cpu_idx);
+
+// P3-G: notify-idle-peer toggle. Off (default) during in-kernel tests so
+// they keep their UP-like assumptions; on (set by boot_main between
+// test_run_all() and init_run()) for production. When off, ready() /
+// wakeup() do NOT send IPI_RESCHED to idle peers — work-stealing happens
+// only via the secondary's natural sched cycle (which never fires while
+// secondaries sit in WFI; tests that depend on cross-CPU placement send
+// IPIs explicitly). When on, every ready/wakeup that places work wakes
+// an idle peer, closing R5-H F78 in the production path.
+void sched_set_notify_enabled(bool enabled);
+
 // Yield the CPU.
 //
 // Picks the highest-priority runnable thread across bands; within a

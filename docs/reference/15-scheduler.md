@@ -476,6 +476,76 @@ NULL-guard handles `thread_switch` (P2-A direct-switch primitive used by context
 
 ---
 
+## WFI-aware work-stealing (P3-G)
+
+Closes R5-H **F77** (try_steal extincts on transient peer-lock contention) + **F78** (ready/wakeup don't IPI an idle peer in WFI). Without these fixes, secondaries — which have no per-CPU timer at v1.0 — can sit in WFI indefinitely while runnable work waits on a peer's tree.
+
+### Mechanism
+
+Three pieces collaborate:
+
+1. **idle_in_wfi flag** (`struct CpuSched.idle_in_wfi`). Volatile bool per-CPU. Set TRUE by THIS CPU immediately before its `wfi` instruction in `per_cpu_main`'s idle loop; cleared FALSE immediately after WFI exits. Boot CPU stays FALSE forever (boot's post-init flow is `_hang`'s asm wfi loop, no C-level set hook). Maps to scheduler.tla's `wfi[cpu]` variable + `EnterWFI(cpu)` action.
+
+2. **`sched_notify_idle_peer()`**. Walks `g_cpu_sched[i]` for `i ≠ self`; first peer with `idle_in_wfi==true` receives `gic_send_ipi(IPI_RESCHED)`. Stops on first send (single-peer wake; multiple wakes would be a thundering herd). Called from `ready()` AFTER releasing the local lock so the peer's IPI handler doesn't contend. Maps to scheduler.tla's `NotifyWFIPeer(src, dst)` action.
+
+3. **`try_steal` contention sentinel + retry**. `try_steal(cs, &contended_out)` sets `*contended_out` TRUE if at least one peer was skipped due to `spin_trylock` failure. `sched()` distinguishes "all peers genuinely empty" from "some peer's lock momentarily held": on the SLEEPING-prev path, NULL+contended triggers a brief CPU-relax + one retry before extinction. Closes F77's spurious-extinction false positive.
+
+### Test-mode toggle
+
+`sched_set_notify_enabled(bool)` gates `sched_notify_idle_peer()`. Disabled by default during in-kernel tests so they keep their UP-like single-CPU assumptions (e.g., `rendez.basic_handoff` assumes the readied consumer runs on the same CPU that readied it — work-stealing breaks that assumption). Boot calls `sched_set_notify_enabled(true)` AFTER `test_run_all()` and BEFORE `init_run()`. Once enabled, every ready/wakeup placing work wakes an idle peer.
+
+### Boot-flow cadence
+
+```
+boot_main()
+   │
+   ├── ... bringup ...
+   ├── test_run_all()              # in-kernel tests; UP-like (notify off)
+   ├── fault_test_run()
+   │
+   ├── sched_set_notify_enabled(true)   ← P3-G: SMP behavior live
+   │
+   ├── init_run()                  # /init runs; ready/wakeup IPI peers
+   │
+   └── "Thylacine boot OK"
+```
+
+Production /init's `wait_pid` benefits: when /init's child exits + parent sleeps + child eventually wakes parent via wakeup, the wakeup IPIs an idle secondary if any. Cross-CPU placement becomes real.
+
+### Spec cross-reference
+
+`specs/scheduler.tla` extended with:
+
+- **`wfi: [CPUs -> BOOLEAN]`** variable.
+- **`EnterWFI(cpu)`** action: pre `current[cpu]=NULL ∧ runq[cpu]={} ∧ ~wfi[cpu] ∧ Cardinality(CPUs)>1`. Effect: `wfi[cpu]=TRUE`. Multi-CPU only — single-CPU configs can't IPI themselves; existing 1C tests rely on Resume/Yield/WakeAll fairness to avoid this state.
+- **`NotifyWFIPeer(src, dst)`** action: pre `wfi[dst] ∧ ∃c: runq[c]≠{}`. Sends an IPI; structurally identical to `IPI_Send` with stronger precondition.
+- **`Resume(cpu)`** + **`Steal(stealer, victim)`** preconditions strengthened with `~wfi`.
+- **`IPI_Deliver(src, dst)`** + **`BuggyIPI_Deliver`** also clear `wfi[dst]=FALSE` — IPI delivery wakes the dst from WFI.
+- **`Liveness_Wfi`**: `Liveness ∧ ∀pair: SF(NotifyWFIPeer(pair)) ∧ SF(IPI_Deliver(pair))`. Strong fairness on both clauses ensures a WFI'd CPU never starves a runnable thread.
+- **`Spec_Live_Wfi == Init ∧ [][Next] ∧ Liveness_Wfi`**.
+
+Configs:
+
+- `scheduler_liveness_wfi.cfg` (correct): `SPECIFICATION Spec_Live_Wfi`. 3T × 2C. LatencyBound holds — proves the fix is sound. ~5760 distinct states.
+- `scheduler_buggy_wfi.cfg` (buggy): `SPECIFICATION Spec_Live` (no WFI fairness). Same 3T × 2C. LatencyBound violated — TLC produces a counterexample showing a CPU stuck in WFI while a thread starves on a peer's runq. Proves the fix is necessary.
+
+Existing buggy configs (`scheduler_buggy.cfg`, `scheduler_buggy_steal.cfg`, `scheduler_buggy_ipi.cfg`, `scheduler_buggy_starve.cfg`) still produce their original counterexamples (P3-G's wfi extension is orthogonal). Existing `scheduler.cfg` state count grew from 10188 → 25416 due to `wfi` adding a new state dimension.
+
+### Tests
+
+- **`scheduler.idle_in_wfi_observability`** — accessor smoke. Out-of-range cpu_idx returns false; boot CPU stays FALSE (no wfi loop hook); after settle window, at least one secondary reports `idle_in_wfi==true`.
+- **`scheduler.notify_idle_peer_smoke`** — load-bearing. Toggle notify on; ready a thread on boot; verify a secondary's `g_ipi_resched_count[i]` increments. Restores toggle off for subsequent tests.
+- **`scheduler.notify_disabled_no_ipi`** — UP-like default. Toggle notify off; ready a thread; verify NO secondary IPIs fired. Confirms tests stay in UP-like mode.
+
+### Trip-hazards
+
+- **WFI-aware test mode**: tests assume `sched_set_notify_enabled(false)` (the default at boot, restored by P3-G tests after toggling on). New tests that depend on cross-CPU placement must explicitly enable. Tests that don't care should NOT toggle.
+- **First-ready-on-secondary loop**: when /init runs (notify enabled), the first ready/wakeup wakes one secondary. Subsequent ready/wakeup on the same CPU — if no other secondary is in WFI — falls through. The selection is rotation-style (self+1, self+2, ...); under sustained load, IPIs distribute across all online secondaries.
+- **try_steal retry budget**: 256-iteration CPU-relax bounded. Truly-empty system still extincts in finite time; transient contention absorbed. Cap is conservative (microseconds at typical clock rates).
+- **The boot CPU is intentionally NOT a wake target**: its post-init flow is `_hang`'s asm wfi loop with no C-level idle_in_wfi hook. If a future change adds a sched/wfi loop on boot post-init (like Linux's idle task), this hook needs adding. Today's invariant: only secondaries are wake candidates.
+
+---
+
 ## Build + verify
 
 ```bash

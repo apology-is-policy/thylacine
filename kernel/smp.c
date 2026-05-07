@@ -325,8 +325,16 @@ void per_cpu_main(int cpu_idx) {
     // CPU's WFI. sched() yields to anything placed on this CPU's run
     // tree (P2-Ce work-stealing introduces cross-CPU placement); if
     // empty, sched() returns and we WFI again until the next event.
+    //
+    // P3-G: idle_in_wfi flag flips TRUE before WFI, FALSE after. Peer
+    // CPUs read it to identify wake targets in sched_notify_idle_peer.
+    // Without this, ready/wakeup placing work elsewhere wouldn't wake
+    // this CPU — it'd starve in WFI indefinitely (no per-CPU timer
+    // at v1.0). Closes R5-H F78. Maps to scheduler.tla `EnterWFI`.
     for (;;) {
         sched();
+        sched_set_idle_in_wfi(true);
         __asm__ __volatile__("wfi" ::: "memory");
+        sched_set_idle_in_wfi(false);
     }
 }

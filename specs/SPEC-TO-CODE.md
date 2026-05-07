@@ -52,7 +52,22 @@ Liveness: TLC-clean at `Threads = {t1, t2}, CPUs = {c1}, MaxIPIs = 1` — 23 dis
 | **`IPIOrdering`** (head of queue = next-expected delivery seq) *(P2-Cg)* | GIC SGI hardware: per-(src, dst, sgi_intid) pend bit; edge-trigger; same-priority SGIs are arbitrated FIFO per ARM IHI 0069 §11.2.3. The `gic_dispatch` ACK-and-call path consumes one pending SGI at a time; subsequent SGIs are processed in arbitration order. v1.0 has only IPI_RESCHED, so the invariant is trivially per-pair FIFO. P5+ multi-type IPIs would refine to per-(src, type, dst) FIFO. |
 | **`LatencyBound`** (every RUNNABLE thread eventually runs) *(P2-H, ARCH §28 I-17)* | Three-layer impl enforcement: (1) **EEVDF deadline math** — `kernel/sched.c::insert_sorted` orders the per-CPU run tree by `vd_t`, so the next pick is always the deadline-tightest thread; v1.0 uses uniform weight=1, so `vd_t` advances as `cs->vd_counter++` per dispatch (effectively round-robin). (2) **Timer-driven preempt** — `arch/arm64/timer.c::timer_irq_handler` → `kernel/sched.c::sched_tick` decrements `slice_remaining` and sets `g_need_resched[cpu]` when slice expires; `arch/arm64/exception.c` IRQ-return path calls `preempt_check_irq` → `sched()` to honor the flag. Bounds wall-clock latency for any single thread to `THREAD_DEFAULT_SLICE_TICKS` × tick_period × N. (3) **WFI loop in idle CPUs** — `kernel/sched.c::per_cpu_main` re-enters `sched()` on every IPI_RESCHED, so a runnable thread on a peer's runq triggers steal-and-dispatch on the next idle wake. The spec's SF-on-Resume + SF-on-Yield + SF-on-WakeAll abstracts this layered impl-side enforcement to "fire if enabled inf often." |
 
-### P2-H landed (this chunk)
+### P3-G landed (this chunk)
+
+- **`wfi: [CPUs -> BOOLEAN]`** variable added: TRUE while CPU is halted in WFI awaiting IPI. Maps to `kernel/sched.c::struct CpuSched::idle_in_wfi`.
+- **`EnterWFI(cpu)`** action: pre `current[cpu]=NULL ∧ runq[cpu]={} ∧ ~wfi[cpu] ∧ Cardinality(CPUs)>1`. Effect: `wfi[cpu]=TRUE`. Maps to `kernel/smp.c::per_cpu_main`'s set-and-WFI sequence in the idle loop.
+- **`NotifyWFIPeer(src, dst)`** action: pre `wfi[dst] ∧ ∃c: runq[c]≠{}`. Sends IPI; structurally identical to `IPI_Send` with stronger precondition. Maps to `kernel/sched.c::sched_notify_idle_peer` called from `ready()`.
+- **`Resume(cpu)`** + **`Steal(stealer, victim)`** preconditions extended with `~wfi`. The impl-side analogue: a CPU in WFI is halted; can't run `sched()` and can't `try_steal` until IPI wakes it.
+- **`IPI_Deliver(src, dst)`** + **`BuggyIPI_Deliver`**: also clear `wfi[dst]=FALSE`. Models the GIC SGI delivery exiting WFI on the dst CPU.
+- **`Liveness_Wfi`**: extends `Liveness` with `\A pair : SF_vars(NotifyWFIPeer(pair[1],pair[2])) ∧ \A pair : SF_vars(IPI_Deliver(pair[1],pair[2]))`. Strong fairness on both clauses ensures a WFI'd CPU never indefinitely starves a runnable thread.
+- **`Spec_Live_Wfi == Init ∧ [][Next] ∧ Liveness_Wfi`**.
+- **`scheduler_liveness_wfi.cfg`** (3T × 2C, MaxIPIs=2): correct, ~5760 distinct states, LatencyBound holds.
+- **`scheduler_buggy_wfi.cfg`** (3T × 2C, MaxIPIs=2): SPECIFICATION uses `Spec_Live` (no WFI fairness). LatencyBound violated — TLC produces counterexample showing CPU stuck in WFI while a thread starves on a peer's runq. Models the F78 impl bug (ready/wakeup don't IPI a WFI'd peer).
+- Existing `scheduler.cfg` state count grew 10188 → 25416 due to the wfi variable. All existing buggy configs (`scheduler_buggy.cfg` / `_steal.cfg` / `_ipi.cfg` / `_starve.cfg`) still produce their original counterexamples; the wfi addition is orthogonal.
+- Closes R5-H **F77** (try_steal contention sentinel + sched retry; impl-only, no spec change required) + **F78** (WFI machinery + NotifyWFIPeer fairness).
+- ARCH §28 **I-9** (NoMissedWakeup) and **I-18** (IPIOrdering) preserved by the extension. **I-17** (LatencyBound) now proven across two universes: 1C cooperative-only (`scheduler_liveness.cfg`, 23 states) AND 2C with WFI/IPI (`scheduler_liveness_wfi.cfg`, 5760 states).
+
+### P2-H landed (prior)
 
 - `LatencyBound` temporal property (`\A t : [](state[t] = "RUNNABLE" => <>(state[t] = "RUNNING"))`).
 - `Liveness == /\ \A cpu : SF_vars(Resume(cpu)) /\ \A cpu : SF_vars(Yield(cpu)) /\ SF_vars(WakeAll)`.

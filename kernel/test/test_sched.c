@@ -25,8 +25,10 @@
 
 #include "../../arch/arm64/timer.h"
 
+#include <thylacine/dtb.h>
 #include <thylacine/proc.h>
 #include <thylacine/sched.h>
+#include <thylacine/smp.h>
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 
@@ -216,4 +218,157 @@ void test_sched_runnable_count(void) {
     thread_free(t);
     TEST_EXPECT_EQ(sched_runnable_count(), 0u,
         "thread_free of RUNNABLE thread restored count to 0");
+}
+
+
+// =============================================================================
+// P3-G: WFI-aware work-stealing tests.
+// =============================================================================
+
+// scheduler.idle_in_wfi_observability — verify the per-CPU idle_in_wfi
+// flag is observable from boot. Out-of-range queries return false (not
+// extinction); boot CPU stays FALSE forever (no wfi loop hook); after
+// secondaries settle into per_cpu_main's wfi loop, at least one reports
+// idle_in_wfi=true.
+//
+// Closes part of R5-H F78 verification — the "is this peer in WFI?"
+// signal that ready/wakeup consult to choose a wake target.
+void test_sched_idle_in_wfi_observability(void) {
+    // Out-of-range — no extinction, returns false defensively.
+    TEST_EXPECT_EQ(sched_idle_in_wfi(DTB_MAX_CPUS), false,
+        "out-of-range cpu_idx returns false");
+    TEST_EXPECT_EQ(sched_idle_in_wfi(DTB_MAX_CPUS + 100), false,
+        "way-out-of-range cpu_idx returns false");
+
+    // Boot CPU never enters per_cpu_main's wfi loop — stays FALSE.
+    TEST_EXPECT_EQ(sched_idle_in_wfi(0), false,
+        "boot CPU is never in wfi (post-init runs in _hang's asm loop)");
+
+    // If running multi-CPU, secondaries should be in WFI by now.
+    // Allow brief settle window for any in-flight ipi handling.
+    if (smp_cpu_count() < 2) {
+        return;     // UP — nothing to assert.
+    }
+    timer_busy_wait_ticks(2);
+
+    bool any_in_wfi = false;
+    for (unsigned i = 1; i < smp_cpu_count(); i++) {
+        if (sched_idle_in_wfi(i)) {
+            any_in_wfi = true;
+            break;
+        }
+    }
+    TEST_ASSERT(any_in_wfi,
+        "at least one secondary should be in WFI after settle window");
+}
+
+static volatile u32 g_notify_test_ran;
+
+static void notify_test_thread(void) {
+    g_notify_test_ran++;
+    sched();
+    // Unreachable — boot doesn't switch back here.
+}
+
+// scheduler.notify_idle_peer_smoke — verify that with notify enabled,
+// ready() of a thread on boot wakes an idle secondary via IPI_RESCHED.
+// The IPI hits the secondary, the secondary's wfi exits, the secondary's
+// post-wfi sched picks try_steal, the secondary steals our thread.
+//
+// Observable: g_ipi_resched_count[secondary] increments by ≥ 1 across
+// the ready call.
+//
+// Closes the load-bearing piece of R5-H F78. Without sched_set_notify_
+// enabled(true), ready() doesn't IPI; with it, ready() does.
+void test_sched_notify_idle_peer_smoke(void) {
+    if (smp_cpu_count() < 2) {
+        return;     // UP — no peer to notify.
+    }
+
+    // Settle window: ensure secondaries are in WFI before we start.
+    timer_busy_wait_ticks(2);
+
+    // Snapshot per-secondary IPI counts before.
+    u64 ipi_before[DTB_MAX_CPUS];
+    for (unsigned i = 0; i < DTB_MAX_CPUS; i++) {
+        ipi_before[i] = g_ipi_resched_count[i];
+    }
+
+    // Toggle notify on for this test only — boot enables it permanently
+    // before /init, but the test framework runs with it OFF.
+    sched_set_notify_enabled(true);
+
+    // Create + ready a thread. ready() will fire notify_idle_peer
+    // and hit one secondary with IPI_RESCHED.
+    g_notify_test_ran = 0;
+    struct Thread *t = thread_create(kproc(), notify_test_thread);
+    TEST_ASSERT(t != NULL, "thread_create failed");
+    ready(t);
+
+    // Allow the IPI to deliver + secondary to process. 5 ticks ~5 ms.
+    timer_busy_wait_ticks(5);
+
+    // Restore notify state for subsequent tests (UP-like assumption).
+    sched_set_notify_enabled(false);
+
+    // At least one secondary's IPI count should have increased.
+    bool any_secondary_received = false;
+    for (unsigned i = 1; i < DTB_MAX_CPUS; i++) {
+        if (g_ipi_resched_count[i] > ipi_before[i]) {
+            any_secondary_received = true;
+            break;
+        }
+    }
+    TEST_ASSERT(any_secondary_received,
+        "at least one secondary received IPI_RESCHED via notify_idle_peer");
+
+    // Cleanup. Either secondary stole + ran the thread (g_notify_test_ran
+    // > 0), or the thread is still RUNNABLE in some tree (boot's or
+    // a secondary's). thread_free is idempotent across both.
+    thread_free(t);
+}
+
+// scheduler.notify_disabled_no_ipi — when notify is disabled (default
+// during in-kernel tests), ready() does NOT send IPI to peers. Tests
+// that assume UP-like consumer-runs-on-readier semantics keep working.
+void test_sched_notify_disabled_no_ipi(void) {
+    if (smp_cpu_count() < 2) {
+        return;
+    }
+
+    // Ensure disabled (the default state during tests).
+    sched_set_notify_enabled(false);
+
+    timer_busy_wait_ticks(2);
+
+    u64 ipi_before[DTB_MAX_CPUS];
+    for (unsigned i = 0; i < DTB_MAX_CPUS; i++) {
+        ipi_before[i] = g_ipi_resched_count[i];
+    }
+
+    // ready a thread; with notify disabled, no IPI should fire.
+    g_notify_test_ran = 0;
+    struct Thread *t = thread_create(kproc(), notify_test_thread);
+    TEST_ASSERT(t != NULL, "thread_create failed");
+    ready(t);
+
+    // Settle. No IPI means secondaries stay in WFI.
+    timer_busy_wait_ticks(3);
+
+    // Aggregate IPI counts across all secondaries; none should have
+    // changed (timer-driven IRQs don't trigger IPI; only explicit
+    // gic_send_ipi does, which only happens via notify_idle_peer
+    // when enabled, or in tests that explicitly send).
+    u64 total_delta = 0;
+    for (unsigned i = 1; i < DTB_MAX_CPUS; i++) {
+        if (g_ipi_resched_count[i] > ipi_before[i]) {
+            total_delta += g_ipi_resched_count[i] - ipi_before[i];
+        }
+    }
+    TEST_EXPECT_EQ(total_delta, 0u,
+        "no secondary IPIs fired with notify disabled");
+
+    // Cleanup. Thread is still in boot's tree (no steal possible
+    // without IPI to wake secondaries). thread_free removes.
+    thread_free(t);
 }

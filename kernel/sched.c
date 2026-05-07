@@ -39,6 +39,8 @@
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 
+#include "../arch/arm64/gic.h"      // P3-G: gic_send_ipi for ready/wakeup wake-idle-peer.
+
 // P2-Cd: per-CPU sched state. Each CPU owns its own band-indexed run
 // tree, monotonic vd_counter, init flag, and idle-thread pointer. This
 // replaces the global singletons used at P2-Ba..Cc — each CPU now
@@ -80,6 +82,27 @@ struct CpuSched {
     // on_cpu flag — signaling to a wakeup() spinner that prev is
     // fully switched out and safe to transition.
     struct Thread *prev_to_clear_on_cpu;
+
+    // P3-G: WFI signaling for cross-CPU wake. Set TRUE by THIS CPU
+    // immediately before its `wfi` instruction in per_cpu_main's idle
+    // loop; cleared TRUE→FALSE by THIS CPU immediately after WFI exits
+    // (via any IRQ — IPI_RESCHED is the canonical case). Read by PEER
+    // CPUs in `sched_notify_idle_peer()` to identify a wake target.
+    //
+    // Race semantics: peer's read can stall behind this CPU's wfi-exit
+    // clear, causing a spurious IPI to a CPU that just woke up. The
+    // IPI handler is a no-op + count, so the spurious IPI is harmless.
+    // Use of `volatile` is sufficient — the writer/reader access is
+    // single-store/single-load with no derived data; relaxed atomic
+    // semantics are what we want.
+    //
+    // Boot CPU: stays FALSE forever (boot's idle is the kthread driven
+    // by timer IRQ, not per_cpu_main's explicit wfi loop). At v1.0 the
+    // primary's post-init flow sits in `_hang`'s asm wfi loop with no
+    // C-level set/clear hooks; secondaries are the only candidates for
+    // wake-via-IPI placement. Modeling this in `scheduler.tla` is
+    // covered by `EnterWFI(cpu)` + `IPI_Deliver`-clears-`wfi[dst]`.
+    volatile bool  idle_in_wfi;
 };
 
 static struct CpuSched g_cpu_sched[DTB_MAX_CPUS];
@@ -119,6 +142,19 @@ void sched_init(unsigned cpu_idx) {
 struct Thread *sched_idle_thread(unsigned cpu_idx) {
     if (cpu_idx >= DTB_MAX_CPUS) return NULL;
     return g_cpu_sched[cpu_idx].idle;
+}
+
+void sched_set_idle_in_wfi(bool in_wfi) {
+    unsigned idx = smp_cpu_idx_self();
+    if (idx >= DTB_MAX_CPUS) return;
+    if (!g_cpu_sched[idx].initialized) return;
+    g_cpu_sched[idx].idle_in_wfi = in_wfi;
+}
+
+bool sched_idle_in_wfi(unsigned cpu_idx) {
+    if (cpu_idx >= DTB_MAX_CPUS) return false;
+    if (!g_cpu_sched[cpu_idx].initialized) return false;
+    return g_cpu_sched[cpu_idx].idle_in_wfi;
 }
 
 // True iff `t` is currently in `cs`'s run tree (linked or as head).
@@ -186,6 +222,80 @@ static struct Thread *pick_next(struct CpuSched *cs) {
     return NULL;
 }
 
+// P3-G: notify-idle-peer toggle. Off during in-kernel tests (UP-like),
+// on once production /init starts. Tests are written against UP semantics
+// (e.g., rendez.basic_handoff assumes consumer runs on the same CPU that
+// readied it); enabling cross-CPU work-stealing during tests breaks those
+// assumptions. The toggle keeps tests UP-like while letting real workload
+// (post-test, /init and beyond) benefit from work-stealing.
+//
+// `sched_set_notify_enabled(true)` is called from boot_main between
+// `test_run_all()` and `init_run()`. After that point, every ready() /
+// wakeup() call wakes an idle peer if any.
+//
+// Reads/writes of g_sched_notify_enabled use volatile + relaxed — the
+// flag is set once at boot, observed by every CPU; no synchronization
+// needed beyond memory ordering of the boot-CPU's set being visible
+// before the first cross-CPU read (boot's banner UART writes after the
+// set provide an implicit dsb-equivalent boundary).
+static volatile bool g_sched_notify_enabled;
+
+void sched_set_notify_enabled(bool enabled) {
+    g_sched_notify_enabled = enabled;
+}
+
+// P3-G: pick an idle peer CPU (one currently halted in WFI, identified by
+// cs->idle_in_wfi) and send it IPI_RESCHED to wake it. Returns true if an
+// IPI was sent, false if no peer was in WFI.
+//
+// Walks `g_cpu_sched[i]` for i ≠ self; first peer with `idle_in_wfi==true`
+// wins. Stops on first send — only one peer needs to wake to run try_steal.
+// Multiple-peer wakes would be a thundering herd (all wake, all try_steal,
+// only one gets the work).
+//
+// Closes R5-H F78. Without this, ready/wakeup placing work on this CPU's
+// tree leaves idle peer CPUs stuck in WFI indefinitely (secondaries have
+// no per-CPU timer at v1.0; only IPI wakes WFI). Maps to scheduler.tla
+// `NotifyWFIPeer(src, dst)` action.
+//
+// Called WITHOUT cs->lock held — peer's wake handler doesn't contend with
+// this CPU's tree. The IPI itself is fire-and-forget (gic_send_ipi sets
+// the SGI pend bit; GIC delivers asynchronously).
+//
+// The caller's CPU is excluded (self can't be in WFI while running ready).
+//
+// Gated by g_sched_notify_enabled — disabled during in-kernel tests,
+// enabled before /init runs.
+static bool sched_notify_idle_peer(void) {
+    if (!g_sched_notify_enabled) return false;
+
+    unsigned self = smp_cpu_idx_self();
+    unsigned online = smp_cpu_online_count();
+    if (online <= 1) return false;     // UP: no peers to wake.
+
+    // Walk peers in cyclic order starting from self+1 (mod max). The
+    // rotation distributes wakes across peers when many readys fire
+    // concurrently. We use online count for the bound; CPUs above
+    // `online` are guaranteed to have idle_in_wfi=false (uninitialized
+    // sched state).
+    for (unsigned k = 1; k < DTB_MAX_CPUS; k++) {
+        unsigned i = (self + k) % DTB_MAX_CPUS;
+        if (i == self) continue;
+        if (i >= DTB_MAX_CPUS) continue;
+        struct CpuSched *peer = &g_cpu_sched[i];
+        if (!peer->initialized) continue;
+        // Relaxed read — the racy outcome (peer woke between read and IPI)
+        // is benign: the IPI fires, peer's already-running IPI handler
+        // runs as a no-op, control returns to peer's loop.
+        if (!peer->idle_in_wfi) continue;
+        // Found an idle peer. Send IPI; ignore failure (gic_send_ipi
+        // returns false on out-of-range CPU idx, which can't happen here).
+        (void)gic_send_ipi(i, IPI_RESCHED);
+        return true;
+    }
+    return false;
+}
+
 void ready(struct Thread *t) {
     if (!t)                       extinction("ready(NULL)");
     if (t->magic != THREAD_MAGIC) extinction("ready of corrupted Thread");
@@ -209,6 +319,12 @@ void ready(struct Thread *t) {
     insert_sorted(cs, t);
 
     spin_unlock_irqrestore(&cs->lock, s);
+
+    // P3-G: notify an idle peer (in WFI) so it can wake and try_steal
+    // the new work. Done AFTER releasing our lock so the peer's IPI
+    // handler doesn't contend on it. Closes R5-H F78. Maps to
+    // scheduler.tla `NotifyWFIPeer(src=self, dst=peer)`.
+    (void)sched_notify_idle_peer();
 }
 
 // P2-Ce: finish_task_switch helper for thread_trampoline.
@@ -280,7 +396,14 @@ void sched_finish_task_switch(void) {
 // the pathological "everyone hits CPU 0 first" pattern.
 static volatile u32 g_try_steal_rotate;
 
-static struct Thread *try_steal(struct CpuSched *cs) {
+// P3-G: try_steal returns NULL on either "all peers genuinely empty" OR
+// "some peer's lock was held — couldn't see its tree". Distinguishing
+// matters at the SLEEPING-prev path: with prev blocking, NULL+contended
+// is a transient race (retry); NULL+empty is a true deadlock (extinct).
+// `contended_out` is set TRUE iff at least one peer was skipped due to
+// spin_trylock failure. Closes R5-H F77.
+static struct Thread *try_steal(struct CpuSched *cs, bool *contended_out) {
+    if (contended_out) *contended_out = false;
     unsigned self = (unsigned)(cs - g_cpu_sched);
     u32 base = __atomic_fetch_add(&g_try_steal_rotate, 1u, __ATOMIC_RELAXED);
 
@@ -290,7 +413,13 @@ static struct Thread *try_steal(struct CpuSched *cs) {
         struct CpuSched *peer = &g_cpu_sched[i];
         if (!peer->initialized) continue;
 
-        if (!spin_trylock(&peer->lock)) continue;
+        if (!spin_trylock(&peer->lock)) {
+            // Peer is mid-mutation (insert/remove/pick). We couldn't see
+            // its tree. Mark contended so the caller can distinguish
+            // "saw nothing" from "couldn't see anything".
+            if (contended_out) *contended_out = true;
+            continue;
+        }
 
         // Pick the highest-priority runnable thread from peer.
         struct Thread *stolen = NULL;
@@ -359,12 +488,30 @@ void sched(void) {
     }
 
     struct Thread *next = pick_next(cs);
+    bool steal_contended = false;
     if (!next) {
         // P2-Ce: try work-stealing before falling back to local
         // semantics. If a peer CPU has runnable threads we'd otherwise
         // sit idle while they're under-served — pull one over. We hold
         // our own lock through the steal (peer access uses try_lock).
-        next = try_steal(cs);
+        // P3-G: pass contention sentinel so we can distinguish "saw
+        // peers empty" from "couldn't see peers due to lock-held".
+        next = try_steal(cs, &steal_contended);
+
+        // P3-G F77 close: if try_steal failed AND some peer was contended
+        // AND we're on the blocking path (extinction would fire below),
+        // retry once. The peer's mid-mutation is transient (single critical
+        // section in ready/sched/sched_remove_if_runnable); a brief spin
+        // before re-querying gives it time to release. Yield-path callers
+        // (prev RUNNING) don't need the retry — they can keep running prev
+        // and try again on the next sched.
+        if (!next && steal_contended && prev->state != THREAD_RUNNING) {
+            // Brief CPU-relax so the peer holding the contended lock has
+            // time to release. The cap (~256 iters) is bounded so a
+            // truly-empty system still extincts in finite time.
+            for (volatile unsigned r = 0; r < 256; r++) { /* yield */ }
+            next = try_steal(cs, &steal_contended);
+        }
     }
     if (!next) {
         if (prev->state != THREAD_RUNNING) {
@@ -373,6 +520,10 @@ void sched(void) {
             // protocol broken) — extinct loudly. With work-stealing
             // live, this is a true deadlock signal: no CPU has any
             // runnable thread that could eventually wake us.
+            //
+            // P3-G: the retry above absorbed transient contention. If
+            // we're here, both attempts saw nothing OR we never saw
+            // contention. Either way, extinction is the right call.
             extinction("sched: deadlock — current is blocking, no runnable peer system-wide");
         }
         // Yield path with no runnable peer: keep prev running. Refill

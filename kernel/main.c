@@ -429,6 +429,13 @@ void boot_main(void) {
     extern void fault_test_run(void);
     fault_test_run();
 
+    // P3-G: enable cross-CPU work-stealing IPIs from ready()/wakeup().
+    // Off during in-kernel tests so they keep their UP-like single-CPU
+    // assumptions; on for /init and beyond so secondaries actually
+    // pick up runnable work instead of sitting in WFI indefinitely.
+    // Closes R5-H F78. See sched.c::sched_notify_idle_peer.
+    sched_set_notify_enabled(true);
+
     // P3-F: /init is the first userspace process. v1.0 embedded blob —
     // prints "hello\n" via SYS_PUTS and exits via SYS_EXITS(0). Validates
     // the kernel→exec→userspace→syscall→kernel chain end-to-end in the

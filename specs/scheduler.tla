@@ -22,6 +22,19 @@
 (*           produces the stuttering counterexample. Per-thread fairness   *)
 (*           refinement (Yield(cpu, t) parameterized) deferred to Phase    *)
 (*           5+ alongside full EEVDF math.                                 *)
+(*   P3-G  — WFI mechanic + IPI-as-wake-from-WFI. Closes R5-H F78 (impl    *)
+(*           bug: ready/wakeup don't IPI an idle peer in WFI). Adds wfi    *)
+(*           variable, EnterWFI action, ~wfi precondition on Resume +      *)
+(*           Steal, IPI_Deliver-clears-wfi[dst] semantic. New action       *)
+(*           NotifyWFIPeer captures ready/wakeup's IPI-on-place-with-      *)
+(*           idle-peer logic; correct path has SF on it (closes the WFI   *)
+(*           starvation gap). Multi-CPU only — single-CPU configs gate    *)
+(*           EnterWFI off via Cardinality(CPUs) > 1 to keep existing      *)
+(*           1C tests intact. New cfg matrix: scheduler_liveness_wfi.cfg  *)
+(*           (correct: 3T × 2C with SF on NotifyWFIPeer + IPI_Deliver,    *)
+(*           LatencyBound holds); scheduler_buggy_wfi.cfg (buggy: same    *)
+(*           setup but Spec_Live without WFI fairness, demonstrates       *)
+(*           idle-CPU-stuck-in-WFI counterexample to LatencyBound).       *)
 (*                                                                         *)
 (* Protocol modeled (correct, atomic — see ARCH §8.4, §8.5, §8.7):         *)
 (*                                                                         *)
@@ -166,12 +179,17 @@ VARIABLES
                      \*   sequence numbers (per-pair FIFO).
     ipi_send_seq,    \* P2-Cg: [<<src,dst>> -> Nat] — next sequence number
                      \*   to assign on send. Monotonic per pair.
-    ipi_deliver_seq  \* P2-Cg: [<<src,dst>> -> Nat] — next-expected delivery
+    ipi_deliver_seq, \* P2-Cg: [<<src,dst>> -> Nat] — next-expected delivery
                      \*   sequence number per pair. Increments by one on
                      \*   each delivery (correct or buggy).
+    wfi              \* P3-G: [CPUs -> BOOLEAN] — TRUE while CPU is halted
+                     \*   in WFI awaiting an IPI. EnterWFI sets; IPI_Deliver
+                     \*   to dst clears wfi[dst]. ~wfi precondition gates
+                     \*   Resume / Steal so a WFI'd CPU cannot dispatch
+                     \*   until woken. Closes R5-H F78 modeling gap.
 
 vars == <<state, current, runq, cond, waiters, pending_sleep,
-          ipi_queue, ipi_send_seq, ipi_deliver_seq>>
+          ipi_queue, ipi_send_seq, ipi_deliver_seq, wfi>>
 
 \* P2-Cg: useful tuples for UNCHANGED clauses.
 ipi_vars  == <<ipi_queue, ipi_send_seq, ipi_deliver_seq>>
@@ -194,6 +212,7 @@ TypeOk ==
     /\ ipi_queue       \in [CpuPair -> Seq(Nat)]
     /\ ipi_send_seq    \in [CpuPair -> Nat]
     /\ ipi_deliver_seq \in [CpuPair -> Nat]
+    /\ wfi             \in [CPUs    -> BOOLEAN]
 
 (***************************************************************************)
 (* Initial state: pick one CPU as cpu0 and one thread as t0; t0 starts     *)
@@ -213,6 +232,7 @@ Init ==
         /\ ipi_queue       = [p \in CpuPair |-> <<>>]
         /\ ipi_send_seq    = [p \in CpuPair |-> 0]
         /\ ipi_deliver_seq = [p \in CpuPair |-> 0]
+        /\ wfi             = [c \in CPUs    |-> FALSE]
 
 (***************************************************************************)
 (* Yield(cpu): the running thread on `cpu` voluntarily yields. Goes to     *)
@@ -235,7 +255,7 @@ Yield(cpu) ==
                                               ![next] = "RUNNING"]
                   /\ current' = [current EXCEPT ![cpu] = next]
                   /\ runq'    = [runq EXCEPT ![cpu] = (rq \ {next}) \cup {prev}]
-                  /\ UNCHANGED <<wait_vars, ipi_vars>>
+                  /\ UNCHANGED <<wait_vars, ipi_vars, wfi>>
 
 (***************************************************************************)
 (* Block(cpu): voluntary block — thread blocks for a non-cond reason       *)
@@ -252,14 +272,14 @@ Block(cpu) ==
        IN  IF rq = {} THEN
               /\ state'   = [state EXCEPT ![prev] = "SLEEPING"]
               /\ current' = [current EXCEPT ![cpu] = NULL]
-              /\ UNCHANGED <<runq, wait_vars, ipi_vars>>
+              /\ UNCHANGED <<runq, wait_vars, ipi_vars, wfi>>
            ELSE
               LET next == CHOOSE t \in rq : TRUE
               IN  /\ state'   = [state EXCEPT ![prev] = "SLEEPING",
                                               ![next] = "RUNNING"]
                   /\ current' = [current EXCEPT ![cpu] = next]
                   /\ runq'    = [runq EXCEPT ![cpu] = rq \ {next}]
-                  /\ UNCHANGED <<wait_vars, ipi_vars>>
+                  /\ UNCHANGED <<wait_vars, ipi_vars, wfi>>
 
 (***************************************************************************)
 (* Wake(t): per-thread voluntary wake (e.g., timer expiry, signal). Wakes  *)
@@ -273,19 +293,20 @@ Wake(t) ==
     /\ \E cpu \in CPUs :
         /\ state' = [state EXCEPT ![t] = "RUNNABLE"]
         /\ runq'  = [runq  EXCEPT ![cpu] = runq[cpu] \cup {t}]
-        /\ UNCHANGED <<current, wait_vars, ipi_vars>>
+        /\ UNCHANGED <<current, wait_vars, ipi_vars, wfi>>
 
 (***************************************************************************)
 (* Resume(cpu): an idle CPU picks up a runnable thread from its queue.     *)
 (***************************************************************************)
 Resume(cpu) ==
+    /\ ~wfi[cpu]                  \* P3-G: WFI'd CPU cannot dispatch.
     /\ current[cpu] = NULL
     /\ runq[cpu]    # {}
     /\ LET next == CHOOSE t \in runq[cpu] : TRUE
        IN  /\ state'   = [state   EXCEPT ![next] = "RUNNING"]
            /\ current' = [current EXCEPT ![cpu]  = next]
            /\ runq'    = [runq    EXCEPT ![cpu]  = runq[cpu] \ {next}]
-           /\ UNCHANGED <<wait_vars, ipi_vars>>
+           /\ UNCHANGED <<wait_vars, ipi_vars, wfi>>
 
 (***************************************************************************)
 (* WaitOnCond(cpu) — CORRECT version of the wait/wake protocol.            *)
@@ -313,7 +334,7 @@ WaitOnCond(cpu) ==
                  /\ state'   = [state EXCEPT ![prev] = "SLEEPING"]
                  /\ waiters' = waiters \cup {prev}
                  /\ current' = [current EXCEPT ![cpu] = NULL]
-                 /\ UNCHANGED <<runq, cond, pending_sleep, ipi_vars>>
+                 /\ UNCHANGED <<runq, cond, pending_sleep, ipi_vars, wfi>>
               ELSE
                  LET next == CHOOSE t \in rq : TRUE
                  IN  /\ state'   = [state EXCEPT ![prev] = "SLEEPING",
@@ -321,7 +342,7 @@ WaitOnCond(cpu) ==
                      /\ waiters' = waiters \cup {prev}
                      /\ current' = [current EXCEPT ![cpu] = next]
                      /\ runq'    = [runq EXCEPT ![cpu] = rq \ {next}]
-                     /\ UNCHANGED <<cond, pending_sleep, ipi_vars>>
+                     /\ UNCHANGED <<cond, pending_sleep, ipi_vars, wfi>>
 
 (***************************************************************************)
 (* BuggyCheck(cpu) — split step 1 of the buggy variant.                    *)
@@ -338,7 +359,7 @@ BuggyCheck(cpu) ==
     /\ ~pending_sleep[current[cpu]]
     /\ ~cond                                  \* observed cond=FALSE
     /\ pending_sleep' = [pending_sleep EXCEPT ![current[cpu]] = TRUE]
-    /\ UNCHANGED <<state, current, runq, cond, waiters, ipi_vars>>
+    /\ UNCHANGED <<state, current, runq, cond, waiters, ipi_vars, wfi>>
 
 (***************************************************************************)
 (* BuggySleep(cpu) — split step 2 of the buggy variant.                    *)
@@ -360,7 +381,7 @@ BuggySleep(cpu) ==
               /\ waiters'       = waiters \cup {prev}
               /\ pending_sleep' = [pending_sleep EXCEPT ![prev] = FALSE]
               /\ current'       = [current EXCEPT ![cpu] = NULL]
-              /\ UNCHANGED <<runq, cond, ipi_vars>>
+              /\ UNCHANGED <<runq, cond, ipi_vars, wfi>>
            ELSE
               LET next == CHOOSE t \in rq : TRUE
               IN  /\ state'         = [state EXCEPT ![prev] = "SLEEPING",
@@ -369,7 +390,7 @@ BuggySleep(cpu) ==
                   /\ pending_sleep' = [pending_sleep EXCEPT ![prev] = FALSE]
                   /\ current'       = [current EXCEPT ![cpu] = next]
                   /\ runq'          = [runq EXCEPT ![cpu] = rq \ {next}]
-                  /\ UNCHANGED <<cond, ipi_vars>>
+                  /\ UNCHANGED <<cond, ipi_vars, wfi>>
 
 (***************************************************************************)
 (* WakeAll — producer atomic: cond := TRUE; transition every waiter to    *)
@@ -390,7 +411,7 @@ WakeAll ==
                 IF t \in waiters THEN "RUNNABLE" ELSE state[t]]
            /\ runq'    = [runq EXCEPT ![cpu0] = runq[cpu0] \cup waiters]
            /\ waiters' = {}
-           /\ UNCHANGED <<current, pending_sleep, ipi_vars>>
+           /\ UNCHANGED <<current, pending_sleep, ipi_vars, wfi>>
 
 (***************************************************************************)
 (* Steal(stealer, victim) — cross-CPU work-stealing (P2-Cg, ARCH §8.4).    *)
@@ -410,6 +431,7 @@ WakeAll ==
 (* refinement).                                                            *)
 (***************************************************************************)
 Steal(stealer, victim) ==
+    /\ ~wfi[stealer]              \* P3-G: WFI'd CPU cannot run try_steal.
     /\ stealer # victim
     /\ current[stealer] = NULL    \* P2-H: only an idle CPU steals.
                                   \* The impl's try_steal is called from
@@ -430,7 +452,7 @@ Steal(stealer, victim) ==
          /\ runq' = [runq EXCEPT
                 ![victim]  = runq[victim] \ {t},
                 ![stealer] = runq[stealer] \cup {t}]
-         /\ UNCHANGED <<state, current, wait_vars, ipi_vars>>
+         /\ UNCHANGED <<state, current, wait_vars, ipi_vars, wfi>>
 
 (***************************************************************************)
 (* BuggySteal(stealer, victim) — non-atomic steal modeling a class of      *)
@@ -453,7 +475,7 @@ BuggySteal(stealer, victim) ==
     /\ \E t \in runq[victim] :
          /\ runq' = [runq EXCEPT ![stealer] = runq[stealer] \cup {t}]
          \* BUG: doesn't remove t from victim's runq.
-         /\ UNCHANGED <<state, current, wait_vars, ipi_vars>>
+         /\ UNCHANGED <<state, current, wait_vars, ipi_vars, wfi>>
 
 (***************************************************************************)
 (* IPI_Send(src, dst) — append a new IPI to the (src, dst) FIFO queue.     *)
@@ -474,7 +496,7 @@ IPI_Send(src, dst) ==
     /\ ipi_queue'    = [ipi_queue EXCEPT
             ![<<src, dst>>] = Append(@, ipi_send_seq[<<src, dst>>])]
     /\ ipi_send_seq' = [ipi_send_seq EXCEPT ![<<src, dst>>] = @ + 1]
-    /\ UNCHANGED <<state, current, runq, wait_vars, ipi_deliver_seq>>
+    /\ UNCHANGED <<state, current, runq, wait_vars, ipi_deliver_seq, wfi>>
 
 (***************************************************************************)
 (* IPI_Deliver(src, dst) — CORRECT FIFO delivery.                          *)
@@ -494,6 +516,7 @@ IPI_Deliver(src, dst) ==
     /\ Len(ipi_queue[<<src, dst>>]) > 0
     /\ ipi_queue'       = [ipi_queue EXCEPT ![<<src, dst>>] = Tail(@)]
     /\ ipi_deliver_seq' = [ipi_deliver_seq EXCEPT ![<<src, dst>>] = @ + 1]
+    /\ wfi'             = [wfi EXCEPT ![dst] = FALSE]   \* P3-G: IPI wakes WFI'd dst.
     /\ UNCHANGED <<state, current, runq, wait_vars, ipi_send_seq>>
 
 (***************************************************************************)
@@ -517,7 +540,73 @@ BuggyIPI_Deliver(src, dst) ==
          /\ ipi_queue' = [ipi_queue EXCEPT ![<<src, dst>>] =
                 SubSeq(@, 1, i - 1) \o SubSeq(@, i + 1, Len(@))]
          /\ ipi_deliver_seq' = [ipi_deliver_seq EXCEPT ![<<src, dst>>] = @ + 1]
+    /\ wfi'             = [wfi EXCEPT ![dst] = FALSE]   \* P3-G: buggy variant still wakes WFI'd dst.
     /\ UNCHANGED <<state, current, runq, wait_vars, ipi_send_seq>>
+
+(***************************************************************************)
+(* P3-G: EnterWFI(cpu) — an idle CPU halts in WFI awaiting an IPI.         *)
+(*                                                                         *)
+(* Models the impl's secondary-CPU idle loop: per_cpu_main runs            *)
+(* `for (;;) { sched(); wfi; }`. After sched returns without picking      *)
+(* anything, the CPU executes WFI. Once in WFI, the CPU is halted until    *)
+(* an IPI arrives — Resume / Steal cannot fire, even if work appears       *)
+(* on its own runq or a peer's runq.                                       *)
+(*                                                                         *)
+(* Preconditions match the impl's idle-after-try_steal-failed state:       *)
+(*   1. current[cpu] = NULL — sched returned NULL (no work picked).       *)
+(*   2. runq[cpu] = {} — own queue is empty.                               *)
+(*   3. ~wfi[cpu] — not already in WFI.                                    *)
+(*                                                                         *)
+(* NOTE: we do NOT require "no peer has work" because the impl's idle      *)
+(* loop calls WFI even if try_steal could succeed — try_steal only runs    *)
+(* once per sched cycle, and if a peer adds work AFTER that try_steal,     *)
+(* the WFI is already entered. The IPI from the peer's place-and-notify    *)
+(* logic is what wakes us. Modeling EnterWFI without the peer-empty       *)
+(* precondition exposes the F78 race more faithfully.                     *)
+(*                                                                         *)
+(* Gated to multi-CPU configs (Cardinality(CPUs) > 1) so existing 1-CPU   *)
+(* liveness checks (scheduler_liveness.cfg, scheduler_buggy_starve.cfg)   *)
+(* don't trigger spurious WFI starvation that has no impl analogue (a    *)
+(* lone CPU that needs to wake itself can't IPI itself; the impl uses    *)
+(* the timer IRQ on the boot CPU for self-preemption, modeled via         *)
+(* fairness on Resume / Yield / WakeAll in those configs).                *)
+(***************************************************************************)
+EnterWFI(cpu) ==
+    /\ Cardinality(CPUs) > 1
+    /\ current[cpu] = NULL
+    /\ runq[cpu]    = {}
+    /\ ~wfi[cpu]
+    /\ wfi' = [wfi EXCEPT ![cpu] = TRUE]
+    /\ UNCHANGED <<state, current, runq, wait_vars, ipi_vars>>
+
+(***************************************************************************)
+(* P3-G: NotifyWFIPeer(src, dst) — dispatcher-equivalent of "ready()       *)
+(* placed work on src's runq AND dst is in WFI; send IPI_RESCHED to dst    *)
+(* so dst wakes and runs sched (which try_steals our work)."               *)
+(*                                                                         *)
+(* Distinct from the generic IPI_Send so liveness can be scoped specifi-   *)
+(* cally to the wake-WFI-peer-when-work-exists case. SF on this action   *)
+(* (in Liveness_Wfi) closes the gap that lets a WFI'd peer starve while   *)
+(* runnable work sits on src's runq.                                       *)
+(*                                                                         *)
+(* Maps to: kernel/sched.c::ready() + wakeup() detect WFI'd peer + call   *)
+(* gic_send_ipi(peer_idx, IPI_RESCHED). Idempotent under bound checks      *)
+(* (the actual hardware idempotently sets the SGI pending bit).            *)
+(*                                                                         *)
+(* The action satisfies the same per-pair queue+seq invariants as          *)
+(* IPI_Send — i.e., it's an instance of IPI_Send with a stronger          *)
+(* precondition. Modeled separately so fairness can refer to it.           *)
+(***************************************************************************)
+NotifyWFIPeer(src, dst) ==
+    /\ src # dst
+    /\ wfi[dst]
+    /\ \E c \in CPUs : runq[c] # {}
+    /\ Len(ipi_queue[<<src, dst>>]) < MaxIPIs
+    /\ ipi_send_seq[<<src, dst>>] < MaxIPIs
+    /\ ipi_queue'    = [ipi_queue EXCEPT
+            ![<<src, dst>>] = Append(@, ipi_send_seq[<<src, dst>>])]
+    /\ ipi_send_seq' = [ipi_send_seq EXCEPT ![<<src, dst>>] = @ + 1]
+    /\ UNCHANGED <<state, current, runq, wait_vars, ipi_deliver_seq, wfi>>
 
 Next ==
     \/ \E cpu \in CPUs    : Yield(cpu)
@@ -533,6 +622,8 @@ Next ==
     \/ \E s, d \in CPUs   : IPI_Send(s, d)
     \/ \E s, d \in CPUs   : IPI_Deliver(s, d)
     \/ \E s, d \in CPUs   : BuggyIPI_Deliver(s, d)
+    \/ \E cpu  \in CPUs   : EnterWFI(cpu)
+    \/ \E s, d \in CPUs   : NotifyWFIPeer(s, d)
 
 Spec == Init /\ [][Next]_vars
 
@@ -658,5 +749,32 @@ Liveness ==
     /\ SF_vars(WakeAll)
 
 Spec_Live == Init /\ [][Next]_vars /\ Liveness
+
+(***************************************************************************)
+(* P3-G: Liveness_Wfi — strong fairness on the WFI wake-and-deliver path.  *)
+(*                                                                         *)
+(* Extends Liveness with SF on:                                            *)
+(*   - NotifyWFIPeer(src, dst): a runnable thread + WFI'd peer eventually  *)
+(*     trigger an IPI to the peer. Models ready/wakeup-IPI-when-peer-WFI. *)
+(*   - IPI_Deliver(src, dst): once an IPI is sent, it eventually delivers, *)
+(*     clearing wfi[dst]. Models the GIC SGI pend-bit edge eventually     *)
+(*     reaching the dst CPU's IRQ controller.                             *)
+(*                                                                         *)
+(* With both fair, a WFI'd CPU never indefinitely starves a runnable      *)
+(* thread: the impl path "ready places work + IPI peer + IPI delivers +    *)
+(* peer wakes + Resume picks" closes the gap.                              *)
+(*                                                                         *)
+(* The buggy variant (`scheduler_buggy_wfi.cfg`) drops these clauses and   *)
+(* uses Spec_Live instead. Under that fairness, NotifyWFIPeer can be       *)
+(* enabled forever without firing — a WFI'd peer starves and LatencyBound  *)
+(* is violated. Models the F78 impl bug: ready/wakeup don't IPI peers,    *)
+(* so peers in WFI never receive a wake signal even when work exists.     *)
+(***************************************************************************)
+Liveness_Wfi ==
+    /\ Liveness
+    /\ \A pair \in CpuPair : SF_vars(NotifyWFIPeer(pair[1], pair[2]))
+    /\ \A pair \in CpuPair : SF_vars(IPI_Deliver(pair[1], pair[2]))
+
+Spec_Live_Wfi == Init /\ [][Next]_vars /\ Liveness_Wfi
 
 ====
