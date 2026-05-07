@@ -80,6 +80,13 @@ void test_vmo_map_proc_constraints(void);
 void test_vmo_map_proc_overlap_rejected(void);
 void test_vmo_unmap_proc_smoke(void);
 void test_vmo_unmap_proc_no_match(void);
+void test_pgtable_install_user_pte_smoke(void);
+void test_pgtable_install_user_pte_constraints(void);
+void test_pgtable_install_user_pte_idempotent(void);
+void test_demand_page_smoke(void);
+void test_demand_page_no_vma(void);
+void test_demand_page_permission_denied(void);
+void test_demand_page_lifecycle_round_trip(void);
 void test_fault_decode_kernel_data_translation_l2(void);
 void test_fault_decode_kernel_data_permission_write(void);
 void test_fault_decode_user_data_translation(void);
@@ -168,6 +175,21 @@ struct test_case g_tests[] = {
     { "vmo.map_proc_overlap_rejected", test_vmo_map_proc_overlap_rejected, false, NULL },
     { "vmo.unmap_proc_smoke",          test_vmo_unmap_proc_smoke,          false, NULL },
     { "vmo.unmap_proc_no_match",       test_vmo_unmap_proc_no_match,       false, NULL },
+    { "pgtable.install_user_pte_smoke",
+                                       test_pgtable_install_user_pte_smoke,
+                                                                           false, NULL },
+    { "pgtable.install_user_pte_constraints",
+                                       test_pgtable_install_user_pte_constraints,
+                                                                           false, NULL },
+    { "pgtable.install_user_pte_idempotent",
+                                       test_pgtable_install_user_pte_idempotent,
+                                                                           false, NULL },
+    { "demand_page.smoke",             test_demand_page_smoke,             false, NULL },
+    { "demand_page.no_vma",            test_demand_page_no_vma,            false, NULL },
+    { "demand_page.permission_denied", test_demand_page_permission_denied, false, NULL },
+    { "demand_page.lifecycle_round_trip",
+                                       test_demand_page_lifecycle_round_trip,
+                                                                           false, NULL },
     { "fault.decode_kernel_data_translation_l2",
                                        test_fault_decode_kernel_data_translation_l2,
                                                                            false, NULL },

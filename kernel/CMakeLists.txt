@@ -56,6 +56,7 @@ set(KERNEL_SRCS
     test/test_fault_decode.c
     test/test_vma.c
     test/test_vmo_map_proc.c
+    test/test_demand_page.c
     namespace.c
     handle.c
     vmo.c

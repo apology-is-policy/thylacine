@@ -1,13 +1,17 @@
-# Reference: page-fault dispatcher (P3-C)
+# Reference: page-fault dispatcher (P3-C / P3-Dc)
 
 ## Purpose
 
-The fault dispatcher decodes ARMv8 ESR_EL1 / FAR_EL1 / ELR_EL1 into a structured `fault_info` and routes the fault to a handler that either resolves it (returns `FAULT_HANDLED` — the ERET resumes the interrupted instruction) or extincts with a specific diagnostic. At v1.0 P3-C the resolve path is empty (no in-tree handler resolves a fault); every call extincts. P3-D adds VMA-tree dispatch for user-mode faults — that wires the demand-paging path that turns `FAULT_UNHANDLED_USER` into a satisfied page allocation.
+The fault dispatcher decodes ARMv8 ESR_EL1 / FAR_EL1 / ELR_EL1 into a structured `fault_info` and routes the fault to a handler that either resolves it (returns `FAULT_HANDLED` — the ERET resumes the interrupted instruction) or extincts with a specific diagnostic.
+
+History:
+- **P3-C** (`12ff454`): structured decode + classification. Resolve path empty; every call extincts.
+- **P3-Dc**: user-mode demand-paging path live. `userland_demand_page` looks up the VMA covering FAR, validates the access against VMA prot, resolves the VMO offset to a backing PA, and installs a leaf PTE in the per-Proc TTBR0 tree (`mmu_install_user_pte`). User-mode resolves return `FAULT_HANDLED`. Failures fall through to `FAULT_UNHANDLED_USER`.
 
 The dispatcher is the substrate for:
 - ARCH §28 I-12 (W^X) runtime detection — kernel-image permission faults are recognized and produce "PTE violates W^X (kernel image)" extinctions.
 - Per-thread kstack overflow detection (P3-Bca: kstack guard pages mapped no-access in the kernel direct map).
-- Per-Proc VMA dispatch at P3-D (TODO).
+- Per-Proc VMA dispatch + demand-paging at P3-Dc.
 
 ARCH §12: "Synchronous exceptions enter `exception_sync_*`. Page faults dispatch through `arch_fault_handle` after structured decoding via `fault_info_decode`."
 
@@ -39,6 +43,11 @@ enum fault_result {
 
 void fault_info_decode(u64 esr, u64 far, u64 elr, struct fault_info *out);
 enum fault_result arch_fault_handle(const struct fault_info *fi);
+
+// P3-Dc: user-mode demand paging.
+struct Proc;
+enum fault_result userland_demand_page(struct Proc *p,
+                                       const struct fault_info *fi);
 ```
 
 #### `fault_info_decode(esr, far, elr, *out)`
@@ -63,10 +72,26 @@ Top-level dispatcher. At v1.0 P3-C the order of checks is:
 3. **Kernel-mode + translation fault** → `extinction("unhandled kernel translation fault")`.
 4. **Kernel-mode + permission fault (other)** → `extinction("unhandled kernel permission fault")`.
 5. **Kernel-mode + access-flag fault** → `extinction("unhandled kernel access-flag fault")`.
-6. **User-mode** → returns `FAULT_UNHANDLED_USER` (caller extincts at v1.0; P3-D wires VMA-tree dispatch here).
+6. **User-mode** → routes through `userland_demand_page(current_thread()->proc, fi)`. Returns `FAULT_HANDLED` on success / `FAULT_UNHANDLED_USER` on failure (caller extincts at v1.0; Phase 5+ note delivery upgrades to SIGSEGV).
 7. **Anything else** → `extinction("unclassified kernel fault (ESR)")`.
 
-Returns `FAULT_HANDLED` only if a future P3-D path resolves the fault (none yet).
+Returns `FAULT_HANDLED` for resolved user-mode faults (P3-Dc); for kernel-mode faults the resolve path remains empty (every kernel-mode fault extincts).
+
+#### `userland_demand_page(p, fi)` — P3-Dc
+
+The per-Proc VMA-tree dispatcher. Steps:
+
+1. Validate Proc magic + non-zero `pgtable_root` (kproc has 0 — never demand-pages).
+2. `vma_lookup(p, fi->vaddr)` — sorted-list walk to find the VMA covering the faulting VA. Returns NULL → `FAULT_UNHANDLED_USER`.
+3. Permission check vs fault type:
+   - `is_write` requires `VMA_PROT_WRITE`.
+   - `is_instruction` requires `VMA_PROT_EXEC`.
+   - Read fault requires `VMA_PROT_READ`.
+4. Resolve the VMO offset: `vmo_byte_off = vma->vmo_offset + (page_va - vma->vaddr_start)`. Reject if offset ≥ `vmo->size`.
+5. Resolve to a backing PA: `vmo_base_pa + (vmo_byte_off & ~PAGE_MASK)`. v1.0 anonymous VMO: pages are eagerly allocated in a single `alloc_pages(order)` chunk; page i is at `page_to_pa(vmo->pages) + i * PAGE_SIZE`.
+6. `mmu_install_user_pte(p->pgtable_root, p->asid, page_va, page_pa, vma->prot)` — walks the L0 → L1 → L2 → L3 tree, allocates sub-tables KP_ZERO as needed, installs the leaf PTE.
+
+Exposed in the header so tests can drive demand paging directly (a synthetic `fault_info` + a manually constructed Proc) without triggering a real EL0 fault — at v1.0 pre-exec there's no userspace to fault.
 
 ## Implementation
 
@@ -164,31 +189,53 @@ EC switch
           └── extinction("unhandled sync exception")
 ```
 
-### Future state at P3-D
-
-At P3-D the user-mode path becomes:
+### User-mode resolved (P3-Dc)
 
 ```
 6. user-mode
    │
-   ├── VMA tree lookup (current_thread()->proc->vmas)
+   │ userland_demand_page(p, fi)
+   ▼
+   ├── vma_lookup(p, fi->vaddr)
    │      │
-   │      ├── VMA covers FAR + permissions match
-   │      │   ├── allocate page (alloc_pages)
-   │      │   ├── install PTE in per-Proc page table
-   │      │   ├── flush single TLB entry (tlbi vaae1is)
-   │      │   └── return FAULT_HANDLED
+   │      ├── VMA covers FAR
+   │      │   │
+   │      │   ├── permission check vs is_write / is_instruction / read
+   │      │   │      │
+   │      │   │      ├── allowed
+   │      │   │      │   ├── resolve VMO offset → backing PA
+   │      │   │      │   ├── mmu_install_user_pte (walks/grows L0..L3)
+   │      │   │      │   └── return FAULT_HANDLED
+   │      │   │      │
+   │      │   │      └── denied → return FAULT_UNHANDLED_USER
+   │      │   │
+   │      │   └── (no TLB flush: invalid → valid; ARM ARM B2.7.1)
    │      │
-   │      └── no VMA / permission mismatch
-   │              │
-   │              └── return FAULT_UNHANDLED_USER (→ Phase 5+ SIGSEGV)
+   │      └── no VMA → return FAULT_UNHANDLED_USER
 ```
+
+PTE bit encoding for user pages:
+- `VMA_PROT_R`  → `AP_RO_ANY | PXN | UXN` (RO for both ELs; no exec).
+- `VMA_PROT_RW` → `AP_RW_ANY | PXN | UXN` (RW for both ELs; no exec).
+- `VMA_PROT_RX` → `AP_RO_ANY | PXN` (RO for both ELs; user can exec).
+- `VMA_PROT_W|X` is rejected at the VMA layer (vma_alloc) AND at the PTE installer (defense in depth).
+
+W^X (I-12) holds by construction at every PTE: writable PTEs always have UXN+PXN set; executable-at-EL0 PTEs are read-only.
 
 ## Spec cross-reference
 
-No new TLA+ spec at P3-C (config parsing per CLAUDE.md "Features that usually don't [benefit from spec]"). The dispatch logic is straight if-else; the resolve paths (P3-D's COW + demand paging) ARE spec-worthy and will extend `vmo.tla` or land a new `mm.tla`.
+No new TLA+ spec at P3-C or P3-Dc. The reasoning:
 
-ARCH §28 I-12 (W^X) is enforced at runtime by check #2 in arch_fault_handle. The PTE constructors enforce I-12 at PTE-construction time; the dispatcher provides the runtime "you violated it" diagnostic.
+- **P3-C dispatch**: straight if-else over decoded ESR — config parsing per CLAUDE.md "Features that usually don't [benefit from spec]".
+
+- **P3-Dc demand paging at v1.0**: structurally simple under the v1.0 single-thread-Proc invariant.
+  - **No new concurrency**: only the running thread of Proc P faults P's pgtable. No two CPUs concurrently demand-page on the same Proc. (Phase 5+ multi-thread Procs DO introduce concurrency on `mmu_install_user_pte`'s walk; a per-Proc pgtable lock OR a TLA+ extension at that point becomes necessary.)
+  - **No new refcount semantics**: `userland_demand_page` doesn't take or release VMO refs. The VMA already holds `mapping_count`; the demand-paged page is just a PA reference, not a fresh ref. `vmo.tla::NoUseAfterFree` continues to hold by construction.
+  - **W^X invariant by construction**: PTE bits derived from VMA prot, and VMA prot already excludes W+X. Every PTE the installer can produce satisfies "writable XOR executable-at-EL0".
+
+The intermediate invariants `userland_demand_page` upholds — VMA-presence implies access permitted; PTE bits respect VMA prot; sub-table allocation rolls back cleanly on failure — are local to the function and verified by the unit tests. They're documented in commentary above the impl rather than formalized in TLA+; if a future bug demonstrates the structural reasoning was insufficient, a spec extension lands at that point.
+
+ARCH §28 I-12 (W^X) is enforced at runtime by check #2 in arch_fault_handle (kernel-image case) and at PTE-construction time in `mmu_install_user_pte` (user-image case). PTE constructors at static layer + VMA layer + ELF loader form the layered defense.
 
 ## Tests
 
@@ -201,6 +248,16 @@ ARCH §28 I-12 (W^X) is enforced at runtime by check #2 in arch_fault_handle. Th
 - `fault.decode_access_flag`: data abort, access-flag fault L2 (FEAT_HAFDBS).
 
 Each test constructs a synthetic ESR via `mk_esr(ec, iss)` and verifies the decoded `fault_info` fields.
+
+`kernel/test/test_demand_page.c` (P3-Dc) — seven unit tests on the demand-paging pipeline:
+
+- `pgtable.install_user_pte_smoke`: install RW + RX leaf PTEs; verify L0→L3 chain is allocated; verify PTE bits match expected encoding (AP, PXN, UXN, AF, nG).
+- `pgtable.install_user_pte_constraints`: zero pgtable_root, unaligned vaddr/pa, high-VA vaddr, W+X prot — all return -1.
+- `pgtable.install_user_pte_idempotent`: identical re-install returns 0 without reallocating; mismatching PA at the same vaddr returns -1.
+- `demand_page.smoke`: synthetic fault_info on a mapped VMA returns FAULT_HANDLED; L3 entry installed at expected vaddr pointing at the VMO's backing page.
+- `demand_page.no_vma`: fault on unmapped vaddr → FAULT_UNHANDLED_USER.
+- `demand_page.permission_denied`: write fault on RO VMA / instruction fault on non-EXEC VMA → FAULT_UNHANDLED_USER. Read fault on R-only VMA → FAULT_HANDLED.
+- `demand_page.lifecycle_round_trip`: 4-page VMA + demand-page each page; proc_free + vmo_unref returns `phys_free_pages` to baseline (sub-tables freed by P3-Db walker; backing pages freed by VMO lifecycle).
 
 The integration tests (`tools/test-fault.sh`) cover the dispatch:
 
@@ -229,10 +286,11 @@ The dispatcher itself is not on a hot path (faults are exceptional). Performance
 
 ## Status
 
-- **Implemented at P3-C**: `fault_info_decode`, `arch_fault_handle` with the kernel-mode classification paths, exception.c refactor to use the dispatcher, 5 decoder unit tests.
-- **Stubbed**: user-mode VMA dispatch (P3-D), demand paging (P3-D), COW (P3-D).
+- **Implemented at P3-C** (`12ff454`): `fault_info_decode`, `arch_fault_handle` with the kernel-mode classification paths, exception.c refactor to use the dispatcher, 5 decoder unit tests.
+- **Implemented at P3-Dc**: `userland_demand_page` (vma_lookup → permission check → VMO offset → PTE install). `mmu_install_user_pte` walks/grows the per-Proc TTBR0 tree. `arch_fault_handle`'s user-mode case routes through `userland_demand_page`. 7 new unit tests in `test_demand_page.c`.
+- **Stubbed**: COW (post-v1.0; not on the critical path for /init or the typical static-ELF case). EL0 sync exception vector (P3-E adds `exception_sync_lower_el` which reuses the dispatcher).
 
-Commit landing point: `<TODO: pending>`.
+Commit landing points: `12ff454` (P3-C), `<P3-Dc hash>`.
 
 ## Known caveats / footguns
 

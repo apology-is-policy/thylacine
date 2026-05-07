@@ -1018,6 +1018,143 @@ paddr_t proc_pgtable_create(void) {
     return page_to_pa(l0_pg);
 }
 
+// =============================================================================
+// P3-Dc: user-mode leaf PTE installer + helpers.
+// =============================================================================
+
+#include <thylacine/vma.h>          // VMA_PROT_* bits
+
+// Build a user-mode L3 page descriptor from a PA + VMA prot bits.
+// Encoding (ARM ARM D5.4.1):
+//   - VALID + TYPE_PAGE: leaf at L3.
+//   - SH_INNER + ATTR_IDX_NORMAL_WB + AF + nG: standard cacheable user.
+//   - PXN: kernel never executes user pages (defense-in-depth across
+//     ARCH §28 I-12 layers).
+//   - AP / UXN derived from prot:
+//
+//        prot              AP[2:1]      PXN  UXN  meaning
+//        ------------      ----------   ---  ---  -----------------
+//        VMA_PROT_R        AP_RO_ANY    1    1    user-readonly, no exec
+//        VMA_PROT_RW       AP_RW_ANY    1    1    user-RW, no exec
+//        VMA_PROT_RX       AP_RO_ANY    1    0    user-readonly, user exec
+//        VMA_PROT_W only   (rejected at vma_alloc; W without R is invalid)
+//        VMA_PROT_W|X      (rejected at vma_alloc; W^X invariant)
+//
+// W^X (I-12) holds by construction: only RX has UXN clear, and RX is
+// AP_RO_ANY (not writable). RW + EXEC is rejected at the VMA layer.
+static inline u64 make_user_pte_l3(paddr_t pa, u32 prot) {
+    u64 pte = (pa & ~(PAGE_SIZE - 1)) |
+              PTE_VALID | PTE_TYPE_PAGE |
+              PTE_ATTR_IDX(MAIR_IDX_NORMAL_WB) |
+              PTE_SH_INNER |
+              PTE_AF |
+              PTE_NG |
+              PTE_PXN;
+    if (prot & VMA_PROT_WRITE) {
+        pte |= PTE_AP_RW_ANY;        // RW EL0+EL1
+    } else {
+        pte |= PTE_AP_RO_ANY;        // RO EL0+EL1
+    }
+    if (!(prot & VMA_PROT_EXEC)) {
+        pte |= PTE_UXN;              // user cannot execute
+    }
+    return pte;
+}
+
+int mmu_install_user_pte(paddr_t pgtable_root, u16 asid,
+                         u64 vaddr, paddr_t pa, u32 prot) {
+    (void)asid;       // reserved for replace-PTE paths
+
+    // Argument validation.
+    if (pgtable_root == 0)               return -1;
+    if (vaddr & (PAGE_SIZE - 1))         return -1;
+    if (pa & (PAGE_SIZE - 1))            return -1;
+    // VA must be in the TTBR0 user-half (top 16 bits = 0). High-VA
+    // (TTBR1) translation goes through the kernel page tables, not the
+    // per-Proc tree; installing a "user" PTE at a high VA would corrupt
+    // semantics.
+    if (vaddr >> 48)                     return -1;
+    // PA must fit in TCR.IPS = 40-bit (mirrors mmu_map_mmio's R6-B F118).
+    if (pa >> 40)                        return -1;
+    // VMA layer rejects W+X already; defense-in-depth duplicate check.
+    if ((prot & VMA_PROT_WRITE) && (prot & VMA_PROT_EXEC)) return -1;
+
+    u32 idx0 = (u32)((vaddr >> BLOCK_SHIFT_L0) & 0x1ff);
+    u32 idx1 = (u32)((vaddr >> BLOCK_SHIFT_L1) & 0x1ff);
+    u32 idx2 = (u32)((vaddr >> BLOCK_SHIFT_L2) & 0x1ff);
+    u32 idx3 = (u32)((vaddr >> PAGE_SHIFT)     & 0x1ff);
+
+    // L0 → L1 walk + grow.
+    u64 *l0 = (u64 *)pa_to_kva(pgtable_root);
+    u64 e = l0[idx0];
+    paddr_t l1_pa;
+    if (!(e & PTE_VALID)) {
+        struct page *l1_pg = alloc_pages(0, KP_ZERO);
+        if (!l1_pg) return -1;
+        l1_pa = page_to_pa(l1_pg);
+        l0[idx0] = make_table_pte_pa(l1_pa);
+    } else {
+        // L0 has no block-descriptor form on AArch64 with 4-KiB granule
+        // (ARM ARM D5.2.6). An entry without TYPE_TABLE is malformed.
+        if (!(e & PTE_TYPE_TABLE)) return -1;
+        l1_pa = e & ~0xFFFull;
+    }
+
+    // L1 → L2 walk + grow.
+    u64 *l1 = (u64 *)pa_to_kva(l1_pa);
+    e = l1[idx1];
+    paddr_t l2_pa;
+    if (!(e & PTE_VALID)) {
+        struct page *l2_pg = alloc_pages(0, KP_ZERO);
+        if (!l2_pg) return -1;
+        l2_pa = page_to_pa(l2_pg);
+        l1[idx1] = make_table_pte_pa(l2_pa);
+    } else {
+        // 1-GiB block at L1 not expected for v1.0 user mappings.
+        if (!(e & PTE_TYPE_TABLE)) return -1;
+        l2_pa = e & ~0xFFFull;
+    }
+
+    // L2 → L3 walk + grow.
+    u64 *l2 = (u64 *)pa_to_kva(l2_pa);
+    e = l2[idx2];
+    paddr_t l3_pa;
+    if (!(e & PTE_VALID)) {
+        struct page *l3_pg = alloc_pages(0, KP_ZERO);
+        if (!l3_pg) return -1;
+        l3_pa = page_to_pa(l3_pg);
+        l2[idx2] = make_table_pte_pa(l3_pa);
+    } else {
+        // 2-MiB block at L2 not expected for v1.0 user mappings.
+        if (!(e & PTE_TYPE_TABLE)) return -1;
+        l3_pa = e & ~0xFFFull;
+    }
+
+    // L3 leaf install.
+    u64 *l3 = (u64 *)pa_to_kva(l3_pa);
+    u64 want = make_user_pte_l3(pa, prot);
+    u64 existing = l3[idx3];
+    if (existing & PTE_VALID) {
+        // Already mapped. If matching, the install is idempotent (a
+        // legitimate concurrent-fault retry from a future multi-thread
+        // Proc, or a same-Proc replay during fault unwinding). If
+        // mismatching, that's a bug in the caller — return -1 so the
+        // demand-paging path can extinct loudly rather than silently
+        // overwriting the prior mapping.
+        if (existing == want) return 0;
+        return -1;
+    }
+    l3[idx3] = want;
+
+    // Drain stores so the MMU walker on this CPU (and any peer that
+    // happens to walk later) sees the new PTE. No TLB flush required —
+    // invalid → valid doesn't require invalidation per ARM ARM B2.7.1.
+    dsb_ishst();
+    isb();
+
+    return 0;
+}
+
 void proc_pgtable_destroy(paddr_t root) {
     if (root == 0) return;             // kproc / unwound failure path
 

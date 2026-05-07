@@ -1,19 +1,22 @@
-// arch/arm64/fault.h — page-fault dispatcher (P3-C).
+// arch/arm64/fault.h — page-fault dispatcher (P3-C / P3-Dc).
 //
 // Decodes ESR_EL1 + FAR_EL1 + ELR_EL1 into a structured `fault_info`
 // and dispatches to handlers that either resolve the fault (return
 // FAULT_HANDLED — the ERET resumes the interrupted instruction) or
 // extinct with a specific diagnostic.
 //
-// At v1.0 P3-C the dispatcher's job is classification + plumbing; the
-// only paths that resolve are kernel-image patterns already known
-// (kstack guard → "kernel stack overflow"; W^X violation → "PTE
-// violates W^X"). User-mode demand paging arrives at P3-D when the
-// VMA tree + VMO mapping land. The hook is in place: the dispatcher
-// has a documented FAULT_UNHANDLED_USER return value that P3-D will
-// expand into VMA lookup + page allocation.
+// At P3-Dc the dispatcher resolves user-mode faults via demand paging:
+// `userland_demand_page` looks up the VMA covering the faulting VA,
+// validates the access type against VMA prot, resolves the VMO offset
+// to a backing PA, and installs a leaf PTE in the per-Proc TTBR0 tree
+// (mmu_install_user_pte). On success the ERET resumes the faulting
+// instruction. On failure (no VMA, permission denied, OOM during
+// sub-table alloc) the dispatcher returns FAULT_UNHANDLED_USER; the
+// caller (exception handler) extincts at v1.0 (no userspace yet) and
+// will become a SIGSEGV-like note delivery at Phase 5+.
 //
-// Per ARCHITECTURE.md §12 (exception model).
+// Per ARCHITECTURE.md §12 (exception model) + §16 (process address
+// space) + §28 invariants I-7 (VMO refcount) + I-12 (W^X).
 
 #ifndef THYLACINE_ARCH_ARM64_FAULT_H
 #define THYLACINE_ARCH_ARM64_FAULT_H
@@ -86,5 +89,38 @@ void fault_info_decode(u64 esr, u64 far, u64 elr, struct fault_info *out);
 // is safe. Other return values are advisory; the dispatcher itself
 // handles the FATAL path internally.
 enum fault_result arch_fault_handle(const struct fault_info *fi);
+
+// =============================================================================
+// P3-Dc: user-mode demand-paging entry.
+//
+// Called by `arch_fault_handle` when fi->from_user is true. Resolves
+// the fault by:
+//   1. vma_lookup(p, fi->vaddr) — find the VMA covering the faulting VA.
+//   2. Permission check vs fi->is_write / fi->is_instruction.
+//   3. Resolve the VMO offset → backing PA.
+//   4. mmu_install_user_pte(p->pgtable_root, p->asid, vaddr, pa, prot).
+//
+// Returns:
+//   FAULT_HANDLED         — PTE installed; ERET will resume safely.
+//   FAULT_UNHANDLED_USER  — no VMA covers vaddr, or access permission
+//                            denied, or sub-table alloc OOM, or some
+//                            other unrecoverable condition. Caller
+//                            extincts at v1.0; Phase 5+ delivers a
+//                            note.
+//
+// Exposed in the header so tests can drive it with a synthetic
+// fault_info + a manually-constructed Proc, without relying on
+// triggering a real EL0 fault (impossible at v1.0 pre-exec).
+//
+// At v1.0 P3-Dc this runs single-threaded per-Proc (single-thread
+// Procs from P2-D). Phase 5+ multi-thread Procs need a per-Proc
+// pgtable lock around the install path to serialize concurrent
+// faults that would otherwise race on sub-table allocation.
+// =============================================================================
+
+struct Proc;
+
+enum fault_result userland_demand_page(struct Proc *p,
+                                       const struct fault_info *fi);
 
 #endif // THYLACINE_ARCH_ARM64_FAULT_H

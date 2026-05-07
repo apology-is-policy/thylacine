@@ -1,21 +1,28 @@
-// arch/arm64/fault.c — page-fault dispatcher (P3-C).
+// arch/arm64/fault.c — page-fault dispatcher (P3-C / P3-Dc).
 //
 // Decodes ESR_EL1 / FAR_EL1 / ELR_EL1 into a structured `fault_info`
-// and dispatches to handlers. At v1.0 P3-C the only resolved-fault
-// paths are kernel-image patterns already recognized (kstack guard →
-// "kernel stack overflow"; W^X violation → "PTE violates W^X"); every
-// other fault extincts.
+// and dispatches to handlers. At P3-Dc the user-mode path resolves
+// faults via demand paging: `userland_demand_page` looks up the VMA
+// covering FAR, validates the access type vs VMA prot, resolves to
+// the backing VMO PA, and installs an L3 PTE in the per-Proc TTBR0
+// tree (mmu_install_user_pte). Other fault paths still extinct
+// (kstack guard / W^X / unhandled kernel translation).
 //
-// Per ARCHITECTURE.md §12 (exception model).
+// Per ARCHITECTURE.md §12 (exception model) + §16 (process address
+// space) + §28 invariants I-7 + I-12.
 
 #include "fault.h"
 
 #include "kaslr.h"
+#include "mmu.h"
 
 #include <thylacine/extinction.h>
 #include <thylacine/page.h>
+#include <thylacine/proc.h>
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
+#include <thylacine/vma.h>
+#include <thylacine/vmo.h>
 
 // Linker symbols — boot stack guard region + kernel image bounds.
 extern char _boot_stack_guard[];
@@ -234,22 +241,79 @@ enum fault_result arch_fault_handle(const struct fault_info *fi) {
                              (uintptr_t)fi->vaddr);
     }
 
-    // 6. User-mode fault.
+    // 6. User-mode fault — demand paging via the VMA tree (P3-Dc).
     //
-    //    At v1.0 P3-C there's no userspace — exec doesn't land until
-    //    P3-E. So a user-mode fault means the test harness or some
-    //    early-init path accidentally executed code at EL0. Extincts.
+    //    Routes through `userland_demand_page` which performs vma_lookup,
+    //    permission check, VMO resolution, and PTE install. Returns
+    //    FAULT_HANDLED on success → ERET resumes. Returns
+    //    FAULT_UNHANDLED_USER if no VMA covers vaddr / permission denied
+    //    / sub-table OOM — caller (exception.c) extincts at v1.0; Phase
+    //    5+ note delivery upgrades this to SIGSEGV.
     //
-    //    At P3-D: this branch dispatches to VMA-tree lookup. Demand
-    //    paging walks current_thread()->proc's VMAs, finds the segment
-    //    covering FAR, allocates a page, installs the PTE, returns
-    //    FAULT_HANDLED. SIGSEGV-like (Phase 5+ note delivery) for
-    //    truly bad VAs.
+    //    At v1.0 pre-P3-E this branch is dead code in production (no
+    //    EL0 thread runs); tests drive `userland_demand_page` directly
+    //    with a synthetic fault_info + manually-constructed Proc.
     if (fi->from_user) {
-        return FAULT_UNHANDLED_USER;
+        struct Thread *t = current_thread();
+        if (!t || t->magic != THREAD_MAGIC) return FAULT_UNHANDLED_USER;
+        if (!t->proc || t->proc->magic != PROC_MAGIC) return FAULT_UNHANDLED_USER;
+        return userland_demand_page(t->proc, fi);
     }
 
     // 7. Catch-all.
     extinction_with_addr("unclassified kernel fault (ESR)",
                          (uintptr_t)fi->esr);
+}
+
+// =============================================================================
+// P3-Dc: userland_demand_page — VMA → VMO → PTE install pipeline.
+// =============================================================================
+
+enum fault_result userland_demand_page(struct Proc *p,
+                                       const struct fault_info *fi) {
+    if (!p || !fi)                       return FAULT_UNHANDLED_USER;
+    if (p->magic != PROC_MAGIC)          return FAULT_UNHANDLED_USER;
+    if (p->pgtable_root == 0)            return FAULT_UNHANDLED_USER;
+
+    // 1. VMA lookup.
+    struct Vma *vma = vma_lookup(p, fi->vaddr);
+    if (!vma)                            return FAULT_UNHANDLED_USER;
+
+    // 2. Permission check vs fault type.
+    //    - Write fault → VMA must permit WRITE.
+    //    - Instruction fault → VMA must permit EXEC.
+    //    - Read fault → VMA must permit READ (any of R / RW / RX).
+    if (fi->is_write && !(vma->prot & VMA_PROT_WRITE)) {
+        return FAULT_UNHANDLED_USER;
+    }
+    if (fi->is_instruction && !(vma->prot & VMA_PROT_EXEC)) {
+        return FAULT_UNHANDLED_USER;
+    }
+    if (!fi->is_write && !fi->is_instruction &&
+        !(vma->prot & VMA_PROT_READ)) {
+        return FAULT_UNHANDLED_USER;
+    }
+
+    // 3. Resolve the VMO offset for the page covering fi->vaddr.
+    u64 page_va        = fi->vaddr & ~(PAGE_SIZE - 1);
+    u64 in_vma_offset  = page_va - vma->vaddr_start;
+    u64 vmo_byte_off   = vma->vmo_offset + in_vma_offset;
+
+    if (!vma->vmo)                       return FAULT_UNHANDLED_USER;
+    if (vma->vmo->magic != VMO_MAGIC)    return FAULT_UNHANDLED_USER;
+    if (vmo_byte_off >= vma->vmo->size)  return FAULT_UNHANDLED_USER;
+
+    // 4. Resolve to a backing PA. v1.0 anonymous VMO: vmo->pages is the
+    //    head of a contiguous alloc_pages chunk; page i is at
+    //    page_to_pa(vmo->pages) + i * PAGE_SIZE.
+    if (!vma->vmo->pages)                return FAULT_UNHANDLED_USER;
+    paddr_t vmo_base_pa = page_to_pa(vma->vmo->pages);
+    paddr_t page_pa     = vmo_base_pa + (vmo_byte_off & ~(u64)(PAGE_SIZE - 1));
+
+    // 5. Install the leaf PTE in the per-Proc TTBR0 tree.
+    int rc = mmu_install_user_pte(p->pgtable_root, p->asid,
+                                  page_va, page_pa, vma->prot);
+    if (rc != 0)                         return FAULT_UNHANDLED_USER;
+
+    return FAULT_HANDLED;
 }

@@ -350,4 +350,47 @@ paddr_t mmu_kernel_ttbr0_pa(void);
 paddr_t proc_pgtable_create(void);
 void    proc_pgtable_destroy(paddr_t root);
 
+// =============================================================================
+// P3-Dc: install a user-mode leaf PTE in a per-Proc page-table tree.
+//
+// Walks the L0 → L1 → L2 → L3 tree rooted at `pgtable_root`, allocating
+// any missing sub-tables (KP_ZERO via alloc_pages). Installs an L3 leaf
+// page descriptor mapping `vaddr` (4 KiB-aligned user VA) to `pa`
+// (4 KiB-aligned PA) with permissions derived from `prot`:
+//
+//   prot & VMA_PROT_WRITE   → AP_RW_ANY (RW EL0+EL1)   else AP_RO_ANY
+//   prot & VMA_PROT_EXEC    → UXN clear (user can exec) else UXN set
+//
+// PXN is set unconditionally — kernel never executes user pages. nG is
+// set so the entry is ASID-tagged. AF + SH_INNER + ATTR_IDX_NORMAL_WB.
+//
+// Idempotent on already-installed mapping with matching PA + prot
+// (concurrent fault on the same page from a multi-thread Proc; not
+// expected at v1.0 single-thread Procs but defensively handled).
+// Returns -1 if an existing PTE points at a different PA or carries
+// different prot bits — signals a logic bug in the demand-paging path.
+//
+// Returns:
+//   0   on success.
+//   -1  on alignment violation (vaddr / pa not 4-KiB-aligned), out-of-
+//       range vaddr (high bit set — not user-half), out-of-IPS pa,
+//       sub-table alloc OOM, or already-installed-with-mismatch.
+//
+// No TLB flush issued: invalid → valid transitions don't require it
+// (per ARM ARM B2.7.1). The caller (userland_demand_page) issues
+// `dsb_ishst + isb` after this returns to ensure the new PTE is
+// observable to the MMU walker before ERET resumes execution.
+//
+// At v1.0 P3-Dc this runs single-threaded (single-thread Proc + single
+// CPU touching that Proc's pgtable at a time). Phase 5+ multi-thread
+// concurrent demand-page on the same Proc requires a per-Proc
+// pgtable lock; documented as a trip-hazard.
+//
+// `asid` is currently unused; reserved for future replace-PTE paths
+// that need an ASID-targeted TLB invalidate.
+// =============================================================================
+
+int mmu_install_user_pte(paddr_t pgtable_root, u16 asid,
+                         u64 vaddr, paddr_t pa, u32 prot);
+
 #endif // THYLACINE_ARCH_ARM64_MMU_H
