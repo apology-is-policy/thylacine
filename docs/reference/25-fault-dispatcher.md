@@ -290,7 +290,7 @@ The dispatcher itself is not on a hot path (faults are exceptional). Performance
 - **Implemented at P3-Dc**: `userland_demand_page` (vma_lookup → permission check → VMO offset → PTE install). `mmu_install_user_pte` walks/grows the per-Proc TTBR0 tree. `arch_fault_handle`'s user-mode case routes through `userland_demand_page`. 7 new unit tests in `test_demand_page.c`.
 - **Stubbed**: COW (post-v1.0; not on the critical path for /init or the typical static-ELF case). EL0 sync exception vector (P3-E adds `exception_sync_lower_el` which reuses the dispatcher).
 
-Commit landing points: `12ff454` (P3-C), `<P3-Dc hash>`.
+Commit landing points: `12ff454` (P3-C), `936c2ed` (P3-Dc).
 
 ## Known caveats / footguns
 

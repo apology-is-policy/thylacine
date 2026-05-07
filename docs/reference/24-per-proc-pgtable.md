@@ -226,7 +226,7 @@ The existing rfork stress tests (`proc.rfork_stress_1000`, `proc.cascading_rfork
 - **Implemented at P3-Dc**: `mmu_install_user_pte` walks/grows the tree + installs leaf PTEs. Called from `userland_demand_page`. 3 new tests in `test_demand_page.c` (`pgtable.install_user_pte_smoke / _constraints / _idempotent`).
 - **Implicit**: kproc kernel-only TTBR0 (P3-Be) is satisfied by the `mmu_kernel_ttbr0_pa()` defaulting at thread_init — kthread + per-CPU idle threads carry the kernel-only TTBR0 root from their creation. A separate P3-Be chunk that adds a dedicated "degenerate" TTBR0 page table is unnecessary.
 
-Commit landing points: `d256804` (P3-Bcb), `fd40047` (P3-Bdb), `f5585a6` (P3-Db walker), `<P3-Dc hash>` (mmu_install_user_pte).
+Commit landing points: `d256804` (P3-Bcb), `fd40047` (P3-Bdb), `f5585a6` (P3-Db walker), `936c2ed` (P3-Dc mmu_install_user_pte).
 
 ## TTBR0 swap (P3-Bdb)
 
