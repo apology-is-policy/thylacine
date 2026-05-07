@@ -22,17 +22,23 @@
 userland_enter:
     bti     c
 
-    // P2-Cc kernel runs at EL1 with SPSel=0, so the live `sp` register
-    // is the SP_EL0 alias. Writing the user_sp value via `mov sp, x17`
-    // (encoded `add sp, x17, #0`) updates SP_EL0 directly — semantically
-    // identical to `msr sp_el0, x17` on a conformant ARMv8 EL1 with
-    // SPSel=0. We use the `mov sp` form for two reasons: (1) it's a
-    // single data-processing instruction with no system-register encode
-    // overhead, and (2) `msr sp_el0, x17` was empirically observed to
-    // raise a synchronous EC=0 ("Unknown reason") on the QEMU virt
-    // version we shipped against during P3-Ed bring-up (R7 F135 closure
-    // re-classifies this as a QEMU quirk, not an architectural issue —
-    // newer QEMU versions accept the `msr` form correctly).
+    // SP-write strategy: `mov sp, x17` (encoded `add sp, x17, #0`) updates
+    // whichever SP register `sp` aliases under the current PSTATE.SPSel
+    // (SP_EL0 at SPSel=0; SP_EL1 at SPSel=1). The fix block below at line
+    // 102 explicitly forces SPSel=0 immediately before this write, so
+    // `mov sp, x17` always lands SP_EL0 := user_sp regardless of the
+    // entry-side SPSel — closing trip-hazard #157 (P4-Fix157).
+    //
+    // The `mov sp` form is preserved over the alternative `msr sp_el0,
+    // x17` for backward compatibility with older QEMU virt versions: the
+    // `msr sp_el0, x17` form was empirically observed to raise a
+    // synchronous EC=0 ("Unknown reason") on the QEMU virt version we
+    // shipped against during P3-Ed bring-up (R7 F135 reclassified that as
+    // a QEMU quirk, not an architectural issue — newer QEMU versions
+    // accept the `msr` form correctly). Switching to `msr sp_el0, x17`
+    // would let us drop the SPSel dance entirely; tracked as a future
+    // simplification once the test-infrastructure QEMU baseline is past
+    // the affected version.
     //
     // Park entry + user_sp in x16/x17 (caller-saved scratch; this
     // routine is __noreturn), zero every other GPR, then write SP

@@ -1,7 +1,22 @@
-// Audit R7 probe: reproducer for trip-hazard #157 (second-userspace-iteration hang).
+// Trip-hazard #157 regression test (closed at P4-Fix157).
 //
-// Two consecutive userspace exec invocations. If the first passes and the
-// second hangs, we've reproduced the issue.
+// Two consecutive rfork → exec_setup → userland_enter → wait_pid rounds.
+// Pre-fix, the iter-2 entry path through the IRQ-driven dispatch chain
+// (timer IRQ → preempt_check_irq → sched → cpu_switch_context, all at
+// SPSel=1) led `userland_enter`'s `mov sp, x17` to clobber SP_EL1 instead
+// of SP_EL0; the next EL0→EL1 transition then trapped to a recursive
+// EL1↔EL1 abort loop (FAR stride = EXCEPTION_CTX_SIZE) and the kernel
+// hung silently. In the test-harness ordering (these tests run after the
+// irqfwd suite), the parent thread is reliably at SPSel=1 by the time
+// these tests execute; pre-fix BOTH iterations would hang deterministically
+// in this ordering. (In the original `joey_run` context — first userspace
+// dispatch at boot, parent on the SPSel=0 sleep path — only iter 2 hung;
+// hence the historical "second-userspace-iteration hang" framing.)
+//
+// Post-fix (`msr SPSel, #0; isb` immediately before `mov sp, x17` in
+// `arch/arm64/userland.S`): both iterations pass. Either failing is a
+// regression of the SPSel discipline. See `docs/reference/08-exception.md`
+// § "userland_enter SPSel discipline" for full root-cause discussion.
 
 #include "test.h"
 
