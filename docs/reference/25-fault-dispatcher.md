@@ -321,7 +321,7 @@ The dispatcher itself is not on a hot path (faults are exceptional). Performance
 - **Implemented at P3-Ea**: `exception_sync_lower_el` for EL0 sync vector slot 0x400. EL0 IRQ slot 0x480 wired to `exception_irq_curr_el` + `preempt_check_irq`. SVC + alignment + BTI + BRK from EL0 stub-extinct at v1.0; P3-Ec wires real syscall dispatch.
 - **Stubbed**: COW (post-v1.0; not on the critical path for /init or the typical static-ELF case). SVC/syscall dispatcher (P3-Ec).
 
-Commit landing points: `12ff454` (P3-C), `936c2ed` (P3-Dc), `<P3-Ea hash>`.
+Commit landing points: `12ff454` (P3-C), `936c2ed` (P3-Dc), `793c535` (P3-Ea).
 
 ## Known caveats / footguns
 
