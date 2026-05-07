@@ -122,7 +122,7 @@ The SYS_PUTS test channel produces visible UART output during the test run — `
 - **Stubbed**: full Thylacine syscall surface (Phase 5+).
 - **Stubbed**: copy_from_user / copy_to_user with fault-recovery (Phase 5+).
 
-Commit landing point: `<P3-Ec hash>`.
+Commit landing point: `48dfc5c`.
 
 ## Known caveats / footguns
 
