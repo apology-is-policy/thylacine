@@ -189,6 +189,10 @@ void test_virtio_rng_present(void);
 void test_virtio_negotiate_features_smoke(void);
 void test_virtio_virtqueue_alloc_destroy(void);
 void test_virtio_find_by_device_id(void);
+void test_irqfwd_create_destroy(void);
+void test_irqfwd_refcount_lifecycle(void);
+void test_irqfwd_wait_wakes_on_sgi(void);
+void test_irqfwd_collapses_concurrent_fires(void);
 
 // ---------------------------------------------------------------------------
 // Registry. Sentinel-terminated.
@@ -404,6 +408,11 @@ struct test_case g_tests[] = {
     { "virtio.virtqueue_alloc_destroy",
                                        test_virtio_virtqueue_alloc_destroy, false, NULL },
     { "virtio.find_by_device_id",      test_virtio_find_by_device_id,      false, NULL },
+    { "irqfwd.create_destroy",         test_irqfwd_create_destroy,         false, NULL },
+    { "irqfwd.refcount_lifecycle",     test_irqfwd_refcount_lifecycle,     false, NULL },
+    { "irqfwd.wait_wakes_on_sgi",      test_irqfwd_wait_wakes_on_sgi,      false, NULL },
+    { "irqfwd.collapses_concurrent_fires",
+                                       test_irqfwd_collapses_concurrent_fires, false, NULL },
     { NULL, NULL, false, NULL },          // sentinel
 };
 
