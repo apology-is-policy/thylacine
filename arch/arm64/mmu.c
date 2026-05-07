@@ -1147,10 +1147,24 @@ int mmu_install_user_pte(paddr_t pgtable_root, u16 asid,
     l3[idx3] = want;
 
     // Drain stores so the MMU walker on this CPU (and any peer that
-    // happens to walk later) sees the new PTE. No TLB flush required —
-    // invalid → valid doesn't require invalidation per ARM ARM B2.7.1.
+    // happens to walk later) sees the new PTE. R7 F129 close: ARM ARM
+    // D5.7.6 explicitly permits implementations to cache invalid
+    // translation table descriptors in TLB / walker caches. Without an
+    // invalidate of the by-VA translation, a peer (or this CPU's
+    // speculative walker) may keep returning a stale invalid → fault →
+    // dispatcher would loop. R6-B F121 closed the same hazard for
+    // mmu_map_mmio's table-descriptor install; the same discipline
+    // applies to L3 leaf installs here. tlbi vaae1is invalidates by VA
+    // for all ASIDs at EL1 broadcast inner-shareable — tightest scope
+    // for a single-page install.
     dsb_ishst();
-    isb();
+    __asm__ __volatile__(
+        "tlbi vaae1is, %0\n"
+        "dsb ish\n"
+        "isb\n"
+        :: "r" ((u64)vaddr >> 12)        // tlbi VA encoding: bits[55:12] of VA
+        : "memory"
+    );
 
     return 0;
 }

@@ -22,10 +22,17 @@
 userland_enter:
     bti     c
 
-    // SUBTLE: P2-Cc kernel runs at EL1 with SPSel=0, so the live SP
-    // register IS SP_EL0. `msr sp_el0, x` on QEMU virt with SPSel=0
-    // raises a synchronous EC=0 (Unknown reason) — empirically.
-    // `mov sp, x17` (encoded as `add sp, x17, #0`) works correctly.
+    // P2-Cc kernel runs at EL1 with SPSel=0, so the live `sp` register
+    // is the SP_EL0 alias. Writing the user_sp value via `mov sp, x17`
+    // (encoded `add sp, x17, #0`) updates SP_EL0 directly — semantically
+    // identical to `msr sp_el0, x17` on a conformant ARMv8 EL1 with
+    // SPSel=0. We use the `mov sp` form for two reasons: (1) it's a
+    // single data-processing instruction with no system-register encode
+    // overhead, and (2) `msr sp_el0, x17` was empirically observed to
+    // raise a synchronous EC=0 ("Unknown reason") on the QEMU virt
+    // version we shipped against during P3-Ed bring-up (R7 F135 closure
+    // re-classifies this as a QEMU quirk, not an architectural issue —
+    // newer QEMU versions accept the `msr` form correctly).
     //
     // Park entry + user_sp in x16/x17 (caller-saved scratch; this
     // routine is __noreturn), zero every other GPR, then write SP

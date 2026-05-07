@@ -90,6 +90,39 @@ static int exec_map_segment(struct Proc *p, const void *blob,
         for (size_t i = 0; i < seg->filesz; i++) {
             vmo_kva[i] = src[i];
         }
+
+        // R7 F134 close: cache maintenance for executable segments.
+        // Bytes were written via the data path (D-cache); EL0 fetches
+        // them via I-cache. ARM ARM B2.4.2 requires `dc cvau` (clean
+        // to PoU) + `ic ivau` (invalidate I-cache to PoU) per cache
+        // line + DSB/ISB to make instruction visibility atomic with
+        // the data write. Without this, the I-cache may serve stale
+        // bytes from a prior occupant of the same physical page —
+        // critical at Phase 4+ when different binaries can share PA
+        // recycling. v1.0 P3-F masks the hazard because /init's blob
+        // bytes don't change across iterations.
+        //
+        // Only required when segment is executable. RW-only segments
+        // (data, bss) don't need I-cache maintenance.
+        if (seg->flags & PF_X) {
+            // ARM ARM cache-line size from CTR_EL0.DminLine; v1.0 uses
+            // a conservative 64-byte fixed line (matches Cortex-A72/76
+            // DminLine 4 → 16 words = 64B). Phase 5+ may read CTR_EL0
+            // dynamically.
+            const size_t line = 64;
+            uintptr_t start = (uintptr_t)vmo_kva;
+            uintptr_t end   = start + seg->filesz;
+            uintptr_t addr  = start & ~(uintptr_t)(line - 1);
+            for (; addr < end; addr += line) {
+                __asm__ __volatile__("dc cvau, %0" :: "r" (addr) : "memory");
+            }
+            __asm__ __volatile__("dsb ish" ::: "memory");
+            addr = start & ~(uintptr_t)(line - 1);
+            for (; addr < end; addr += line) {
+                __asm__ __volatile__("ic ivau, %0" :: "r" (addr) : "memory");
+            }
+            __asm__ __volatile__("dsb ish\nisb\n" ::: "memory");
+        }
     }
     // [filesz, size) stays zero from KP_ZERO.
 

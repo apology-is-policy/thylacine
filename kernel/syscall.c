@@ -54,17 +54,37 @@ static void sys_exits_handler(u64 status) {
 //   - len <= 4096 (one page; reject larger as obvious garbage / reserved
 //     for Phase 5+ where userspace uses iovec for larger writes).
 //   - buf NULL rejected.
+//   - buf + len must lie entirely within the user-VA half (TTBR0 range,
+//     low VAs) — see SYS_PUTS_USER_VA_TOP. Closes R7 F127: without this,
+//     EL0 can pass a kernel-half VA (TTBR1 range) and the kernel's
+//     dereference walks via TTBR1 → reads kernel memory → leaks bytes
+//     out the UART. PAN/SPAN are not configured at v1.0; the bound
+//     check is the privilege boundary on this surface.
 //
 // Bytes are written one at a time via uart_putc. v1.0 doesn't validate
-// the buffer's VMA presence — if buf points outside any VMA, the read
-// faults in the demand-paging path; if no VMA covers it,
+// the buffer's VMA presence within user-VA — if buf points outside any
+// VMA, the read faults in the demand-paging path; if no VMA covers it,
 // userland_demand_page returns FAULT_UNHANDLED_USER and the kernel
 // extincts at exception_sync_lower_el. Phase 5+ adds copy_from_user-
 // style validators that translate the fault into a -EFAULT return.
+
+// User-VA top bound for syscall pointer validation. ARM64 4-KiB granule
+// at v1.0 uses 48-bit VAs; user half is TTBR0-anchored at low VA. The
+// EXEC_USER_STACK_TOP (0x8000_0000) sits well below this bound. Any VA
+// >= USER_VA_TOP is in the kernel-VA-only region (TTBR1 range or
+// reserved hole) and MUST NOT be dereferenced from a syscall handler.
+#define SYS_PUTS_USER_VA_TOP    0x0001000000000000ull
+
 static s64 sys_puts_handler(u64 buf_va, u64 len) {
     if (len == 0)            return 0;
     if (len > 4096)          return -1;
     if (buf_va == 0)         return -1;
+
+    // R7 F127 close: reject kernel-half VA arguments. Overflow-safe:
+    // if buf_va + len wraps past UINT64_MAX, that's also a reject.
+    if (buf_va >= SYS_PUTS_USER_VA_TOP)              return -1;
+    if (buf_va + len < buf_va)                        return -1;
+    if (buf_va + len > SYS_PUTS_USER_VA_TOP)          return -1;
 
     const char *buf = (const char *)(uintptr_t)buf_va;
     for (u64 i = 0; i < len; i++) {

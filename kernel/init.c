@@ -190,6 +190,20 @@ static void init_thunk(void *arg) {
 }
 
 void init_run(void) {
+    // R7 F136 close: one-call guard. v1.0 invariant — init_run is
+    // called exactly once per boot from boot_main. Trip-hazard #157
+    // (second-userspace-iteration hang on QEMU virt) makes a second
+    // userspace exec hang silently; the guard converts an accidental
+    // double-call (e.g., a future Phase 5+ supervisor refactor) into
+    // an explicit, loud failure rather than the silent #157 hang.
+    // g_init_elf_blob is single-use BSS — concurrent rebuilds would
+    // also race, so the guard doubles as memory-safety enforcement.
+    static bool g_init_run_called = false;
+    if (g_init_run_called) {
+        extinction("init_run: double call (v1.0 single-use invariant)");
+    }
+    g_init_run_called = true;
+
     uart_puts("  init: rforking child for /init (9-instr hello blob)\n");
 
     size_t blob_size = build_init_elf();

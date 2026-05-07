@@ -13,6 +13,7 @@
 #include <thylacine/extinction.h>
 #include <thylacine/sched.h>
 #include <thylacine/smp.h>
+#include <thylacine/spinlock.h>      // R7 F128: irq_state_t + irqsave/restore
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 
@@ -331,10 +332,37 @@ void per_cpu_main(int cpu_idx) {
     // Without this, ready/wakeup placing work elsewhere wouldn't wake
     // this CPU — it'd starve in WFI indefinitely (no per-CPU timer
     // at v1.0). Closes R5-H F78. Maps to scheduler.tla `EnterWFI`.
+    //
+    // R7 F128 close: IRQ-masked window around (sched, flag-set, wfi).
+    //
+    // Race the masking closes:
+    //   B (this CPU): sched() returns empty. Pre-fix, B would set the
+    //     flag AFTER sched returned, leaving a window where B looks
+    //     "running" to peer notifiers but is actually about to wfi.
+    //   A (peer): ready(t) places work on A's tree, calls notify_idle_peer
+    //     which reads B's flag — sees FALSE (window). Skips B.
+    //   B: sets flag TRUE, wfi. No pending IPI; B sleeps with work
+    //     available somewhere else; runnable thread starves until next
+    //     unrelated wake event.
+    //
+    // The fix: mask IRQs, set flag TRUE, sched (may pick + run work or
+    // return empty), wfi, on wake clear flag, unmask. While IRQs are
+    // masked, an incoming IPI sets the GIC pend bit but does NOT
+    // deliver until unmask. WFI architecturally still exits on a pending
+    // IRQ even with PSTATE.I=1 (ARM ARM C5.3.2). So if A's notifier
+    // sends an IPI any time after B sets flag=TRUE, B's wfi sees the
+    // pending IRQ and exits; B clears flag, unmasks, IPI handler runs,
+    // loop iterates and sched picks up the work.
+    //
+    // sched() internally takes its own spin_lock_irqsave/restore — so
+    // calling sched with IRQs already masked is sound (sched saves
+    // MASKED, restores MASKED).
     for (;;) {
-        sched();
+        irq_state_t s = spin_lock_irqsave(NULL);
         sched_set_idle_in_wfi(true);
+        sched();
         __asm__ __volatile__("wfi" ::: "memory");
         sched_set_idle_in_wfi(false);
+        spin_unlock_irqrestore(NULL, s);
     }
 }
