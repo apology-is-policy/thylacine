@@ -199,7 +199,7 @@ The existing rfork stress tests (`proc.rfork_stress_1000`, `proc.cascading_rfork
 - **Stubbed**: PTE installation. P3-Dc adds the user-mode page-fault dispatcher → `vma_lookup` → page allocate → PTE install (which is what populates the sub-tables the new walker is wired to free).
 - **Implicit**: kproc kernel-only TTBR0 (P3-Be) is satisfied by the `mmu_kernel_ttbr0_pa()` defaulting at thread_init — kthread + per-CPU idle threads carry the kernel-only TTBR0 root from their creation. A separate P3-Be chunk that adds a dedicated "degenerate" TTBR0 page table is unnecessary.
 
-Commit landing points: `d256804` (P3-Bcb), `fd40047` (P3-Bdb), `<P3-Db hash>` (P3-Db walker).
+Commit landing points: `d256804` (P3-Bcb), `fd40047` (P3-Bdb), `f5585a6` (P3-Db walker).
 
 ## TTBR0 swap (P3-Bdb)
 
