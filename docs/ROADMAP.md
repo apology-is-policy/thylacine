@@ -29,7 +29,7 @@ Phase 1  ─ Kernel skeleton                      [foundation]
             Boot, memory, exception vectors, UART, hardening defaults
 
 Phase 2  ─ Process model + scheduler + handles  [core kernel]
-            rfork, exec, namespace, EEVDF, handle table, VMO manager
+            rfork, exec, territory, EEVDF, handle table, BURROW manager
 
 Phase 3  ─ Device model + userspace drivers     [device layer]
             Dev vtable, VirtIO core, userspace virtio-blk/net/input/gpu
@@ -74,7 +74,7 @@ If TLC fails, the merge fails — the spec is fixed first, then the implementati
 
 - **Unit tests**: per-function, per-syscall.
 - **Integration tests**: boot a QEMU instance, run a workload, check result.
-- **Stress tests**: long-running, with process creation/destruction, namespace manipulation, I/O concurrency.
+- **Stress tests**: long-running, with process creation/destruction, territory manipulation, I/O concurrency.
 - **Sanitizer matrices**: every commit on the default build + ASan + UBSan + (TSan from Phase 2 onward when SMP is enabled).
 
 Pre-commit: full test suite on default build. Pre-merge for invariant-bearing changes: all matrices + all specs.
@@ -204,7 +204,7 @@ None. This is the foundation phase.
 
 ## 5. Phase 2: Process model + scheduler + handles
 
-**Goal**: the kernel can create, schedule, and destroy processes. `rfork`, `exec`, `exits`, `wait` work. Multiple processes run concurrently with EEVDF preemption. Per-CPU SMP scheduling on 4 vCPUs. Handle table + VMO manager production-ready.
+**Goal**: the kernel can create, schedule, and destroy processes. `rfork`, `exec`, `exits`, `wait` work. Multiple processes run concurrently with EEVDF preemption. Per-CPU SMP scheduling on 4 vCPUs. Handle table + BURROW manager production-ready.
 
 ### 5.1 Deliverables
 
@@ -222,28 +222,28 @@ None. This is the foundation phase.
 - `arch/arm64/timer.c`: ARM generic timer driver; tickless idle.
 - `arch/arm64/ipi.c`: GIC SGI-based IPI infrastructure; IPI types (`IPI_RESCHED`, `IPI_TLB_FLUSH`, `IPI_HALT`, `IPI_GENERIC`).
 
-**Namespace**:
-- `kernel/namespace.c`: `Pgrp`, `bind`, `mount` (stub: only ramfs mountable at this phase), `unmount`. Namespace cloned on `rfork(RFPROC)`; shared on `rfork(RFPROC | RFNAMEG)`.
+**Territory**:
+- `kernel/territory.c`: `Territory`, `bind`, `mount` (stub: only ramfs mountable at this phase), `unmount`. Territory cloned on `rfork(RFPROC)`; shared on `rfork(RFPROC | RFNAMEG)`.
 
-**Handle table + VMO** (full per `ARCHITECTURE.md §18-§19`, all 8 KObj types):
+**Handle table + BURROW** (full per `ARCHITECTURE.md §18-§19`, all 8 KObj types):
 - `kernel/handle.c`: handle table per-process. Allocation, rights checking, transfer-via-9P (placeholder; 9P client comes Phase 4).
-- `kernel/vmo.c`: VMO manager. `vmo_create()`, `vmo_create_physical()`, `mmap_handle()`, `irq_wait()` (placeholder for Phase 3 IRQ delivery).
-- Handle types declared and enforced: `Process`, `Thread`, `VMO`, `MMIO`, `IRQ`, `DMA`, `Chan`, `Interrupt`. Hardware handles non-transferable by typed switch (per `ARCHITECTURE.md §18.3`).
+- `kernel/burrow.c`: BURROW manager. `burrow_create()`, `burrow_create_physical()`, `mmap_handle()`, `irq_wait()` (placeholder for Phase 3 IRQ delivery).
+- Handle types declared and enforced: `Process`, `Thread`, `BURROW`, `MMIO`, `IRQ`, `DMA`, `Spoor`, `Interrupt`. Hardware handles non-transferable by typed switch (per `ARCHITECTURE.md §18.3`).
 
 **Memory**:
 - `mm/vm.c` (extend): user address space management. `mmap` / `munmap` / `mprotect`. Page fault handler: allocate-on-demand for anonymous VMOs.
-- `arch/arm64/fault.c`: page fault handler. Demand-pages anon mappings; COW on first write to shared page; VMO-backed faults route to VMO page lookup.
+- `arch/arm64/fault.c`: page fault handler. Demand-pages anon mappings; COW on first write to shared page; BURROW-backed faults route to BURROW page lookup.
 
 **Pipes and notes**:
 - `kernel/pipe.c`: kernel pipe implementation. `pipe(fd[2])` syscall. Blocking read/write with a ring buffer.
 - `kernel/notes.c`: note delivery, mask, handler invocation.
 
 **Init**:
-- `init/init-minimal.c`: the first userspace process at this phase. Starts a UART debug shell (busybox-equivalent, statically linked).
+- `init/joey-minimal.c`: the first userspace process at this phase. Starts a UART debug shell (busybox-equivalent, statically linked).
 
 **Specs**:
 - `specs/scheduler.tla`: EEVDF correctness, IPI ordering, wakeup atomicity, work-stealing fairness.
-- `specs/namespace.tla`: bind/mount semantics, cycle-freedom, isolation.
+- `specs/territory.tla`: bind/mount semantics, cycle-freedom, isolation.
 - `specs/handles.tla`: rights monotonicity, transfer-via-9P invariant, hardware-handle non-transferability.
 
 ### 5.2 Exit criteria
@@ -255,19 +255,19 @@ None. This is the foundation phase.
 - [ ] init starts a UART shell; `echo hello` works via pipe.
 - [ ] Page fault handler allocates demand pages; stack growth works.
 - [ ] **Handle table**: 10,000 handles open/close cycle without leak; rights reduction enforced; hardware-handle transfer attempt panics cleanly.
-- [ ] **VMO**: create, map, write, read, unmap, close cycle correct; pages freed on last-handle-close + last-mapping-unmap.
+- [ ] **BURROW**: create, map, write, read, unmap, close cycle correct; pages freed on last-handle-close + last-mapping-unmap.
 - [ ] Stress: 1000 `rfork`/`exits`/`wait` cycles across 4 CPUs without leak or panic.
 - [ ] Wakeup atomicity: 1000 producer/consumer pairs across 4 CPUs in tight loop; no missed wakeups (verified by counter).
 - [ ] Work-stealing: 4-CPU test with imbalanced load; load redistributes within 5ms.
 - [ ] **TSan clean** on the SMP test suite.
-- [ ] `specs/scheduler.tla`, `specs/namespace.tla`, `specs/handles.tla` clean under TLC.
+- [ ] `specs/scheduler.tla`, `specs/territory.tla`, `specs/handles.tla` clean under TLC.
 - [ ] `SPEC-TO-CODE.md` for all three specs maintained.
 - [ ] No P0/P1 audit findings.
 
 ### 5.3 Specs landing this phase
 
 - `specs/scheduler.tla` (mandatory)
-- `specs/namespace.tla` (mandatory)
+- `specs/territory.tla` (mandatory)
 - `specs/handles.tla` (mandatory)
 
 `SPEC-TO-CODE.md` mappings produced and CI-verified.
@@ -278,9 +278,9 @@ None. This is the foundation phase.
 |---|---|---|
 | Scheduler | `kernel/sched.c`, `kernel/eevdf.c`, `kernel/run_tree.c`, `arch/arm64/context.c`, `arch/arm64/ipi.c` | EEVDF correctness, SMP, wakeup |
 | Process | `kernel/proc.c`, `kernel/thread.c` | Lifecycle, rfork semantics |
-| Namespace | `kernel/namespace.c` | Cycle-freedom, isolation |
+| Territory | `kernel/territory.c` | Cycle-freedom, isolation |
 | Handle table | `kernel/handle.c` | Rights, transfer, type discipline |
-| VMO | `kernel/vmo.c`, `mm/vmo_pages.c` | Refcount, mapping lifecycle |
+| BURROW | `kernel/burrow.c`, `mm/burrow_pages.c` | Refcount, mapping lifecycle |
 | Page fault | `arch/arm64/fault.c`, `mm/vm.c` | Lifetime, COW |
 | ELF loader | `arch/arm64/elf.c` | RWX rejection |
 | `mprotect` | `mm/vm.c` mprotect handler | W^X enforcement at runtime |
@@ -289,7 +289,7 @@ None. This is the foundation phase.
 
 - **Scheduler correctness**: race conditions in `sched()` / `wakeup()` are subtle. Mitigation: TLA+ spec before coding; TSan from day one; single-CPU first, then 4-CPU.
 - **EEVDF tuning**: `slice_size` parameter tuning may need empirical work. Mitigation: parameterize; sweep at Phase 8.
-- **VMO lifecycle correctness**: handle ref + mapping ref interaction is subtle. Mitigation: `specs/vmo.tla` written here even though it's a Phase 3 deliverable (early scaffolding).
+- **BURROW lifecycle correctness**: handle ref + mapping ref interaction is subtle. Mitigation: `specs/burrow.tla` written here even though it's a Phase 3 deliverable (early scaffolding).
 - **TLS corruption**: forgetting `TPIDR_EL0` save/restore breaks musl's TLS. Mitigation: tested early via a TLS-using userspace program.
 - **ELF loader edge cases**: static ARM64 ELF with `PT_LOAD` segments. Keep simple at Phase 2 (no dynamic linker, no interpreter — Phase 5 work).
 
@@ -300,8 +300,8 @@ None. This is the foundation phase.
 ### 5.7 Parallel opportunities
 
 - Process / thread + scheduler can be built in parallel.
-- Handle table + VMO can be built in parallel.
-- Namespace work parallelizes with all of the above.
+- Handle table + BURROW can be built in parallel.
+- Territory work parallelizes with all of the above.
 - Specs can be written before, during, or alongside implementation; they always land first chronologically.
 
 ### 5.8 Performance budget contribution
@@ -319,16 +319,16 @@ None. This is the foundation phase.
 
 ### 6.1 Deliverables
 
-**Dev vtable + Chan**:
-- `kernel/dev.c`: Dev vtable infrastructure. `devtab[]` registration. Chan lifecycle (`alloc`, `free`, `walk`, `clunk`).
-- `kernel/chan.c`: Chan operations. Reference counting; per-Chan locking.
+**Dev vtable + Spoor**:
+- `kernel/dev.c`: Dev vtable infrastructure. `bestiary[]` registration. Spoor lifecycle (`alloc`, `free`, `walk`, `clunk`).
+- `kernel/spoor.c`: Spoor operations. Reference counting; per-Spoor locking.
 
 **Kernel-internal Devs**:
 - `dev/cons.c`: console device (`/dev/cons`, `/dev/consctl`). Wires UART to Dev interface.
 - `dev/null.c`, `dev/zero.c`: trivial.
 - `dev/random.c`: CSPRNG. ARM64 `RNDR` instruction + chacha20 stir.
 - `dev/proc.c`: `/proc/<pid>/` — synthetic Dev exposing process state (status, cmdline, fd list, mem).
-- `dev/ctl.c`: `/ctl/` — kernel admin synthetic Dev. Exposes scheduler stats, IRQ counters, namespace dump.
+- `dev/ctl.c`: `/ctl/` — kernel admin synthetic Dev. Exposes scheduler stats, IRQ counters, territory dump.
 - `dev/ramfs.c`: in-memory filesystem. cpio-loaded at boot; freed once persistent FS is mounted.
 
 **VirtIO core (in-kernel transport)**:
@@ -346,7 +346,7 @@ None. This is the foundation phase.
 - `init/driver-supervisor.c`: runs as init child; watches for driver process exit; restarts on crash. Hooks into `/ctl/proc-events/exit` notifications.
 
 **Specs**:
-- `specs/vmo.tla`: refcount + mapping lifecycle. Mostly written in Phase 2 (as scaffolding); finalized here.
+- `specs/burrow.tla`: refcount + mapping lifecycle. Mostly written in Phase 2 (as scaffolding); finalized here.
 
 ### 6.2 Exit criteria
 
@@ -354,18 +354,18 @@ None. This is the foundation phase.
 - [ ] **Userspace virtio-blk**: read 1 GiB from VirtIO block device successfully; write 1 GiB and read it back, verify bit-exact.
 - [ ] **Userspace virtio-net**: send and receive raw Ethernet frames via `/dev/ether0`; checksum verified.
 - [ ] **Userspace virtio-input**: keyboard input from VirtIO console reaches user processes via `/dev/cons`.
-- [ ] **Userspace virtio-gpu**: write pixels to framebuffer via VMO handle; visible on QEMU display.
-- [ ] Chan lifecycle: 10,000 open/read/close cycles on `/dev/null` without leak.
+- [ ] **Userspace virtio-gpu**: write pixels to framebuffer via BURROW handle; visible on QEMU display.
+- [ ] Spoor lifecycle: 10,000 open/read/close cycles on `/dev/null` without leak.
 - [ ] Dev vtable: all 11 ops dispatch correctly for cons, null, zero, random, proc, ctl, ramfs.
 - [ ] **Driver crash recovery**: kill the virtio-blk driver process mid-I/O; supervisor restarts; subsequent I/O resumes.
 - [ ] **Hardware handle non-transferability**: attempt to transfer `KObj_MMIO` panics with explicit "non-transferable type" message. Verified by deliberate test.
 - [ ] IRQ-to-userspace handler latency p99 < 5µs (VISION §4.5 budget). Measured via dedicated benchmark.
-- [ ] `specs/vmo.tla` clean under TLC. `SPEC-TO-CODE.md` maintained.
+- [ ] `specs/burrow.tla` clean under TLC. `SPEC-TO-CODE.md` maintained.
 - [ ] No P0/P1 audit findings on driver model.
 
 ### 6.3 Specs landing this phase
 
-- `specs/vmo.tla` (mandatory; scaffolded in Phase 2, finalized here).
+- `specs/burrow.tla` (mandatory; scaffolded in Phase 2, finalized here).
 
 ### 6.4 Audit-trigger surfaces introduced or modified
 
@@ -373,7 +373,7 @@ None. This is the foundation phase.
 |---|---|---|
 | VirtIO core | `kernel/virtio.c`, `kernel/virtio_pci.c` | Transport correctness |
 | IRQ forwarding | `kernel/irqfwd.c` | Userspace IRQ delivery |
-| VMO finalized | `kernel/vmo.c`, `mm/vmo_pages.c` | Refcount, mapping lifecycle |
+| BURROW finalized | `kernel/burrow.c`, `mm/burrow_pages.c` | Refcount, mapping lifecycle |
 | Userspace driver protocol | (driver Rust code, audit-target since v1.0) | Hardware access correctness |
 
 ### 6.5 Risks
@@ -382,11 +382,11 @@ None. This is the foundation phase.
 - **IRQ sharing**: VirtIO devices share IRQ lines in some QEMU configurations. Mitigation: GIC shared IRQ dispatch tested.
 - **IRQ latency**: 5µs p99 to userspace is the architecture's claim; if missed, the project's driver model is in question. Mitigation: benchmark early in Phase 3; if missing, optimize the IRQ-to-handle wakeup path before Phase 4.
 - **Driver process supervision**: getting clean crash recovery right requires careful ordering. Mitigation: write the supervision logic with a TLA+ sketch first.
-- **VMO lifetime under driver crash**: when a driver crashes holding VMO handles, the kernel must clean up correctly without leaving stale mappings. Mitigation: `specs/vmo.tla` covers this.
+- **BURROW lifetime under driver crash**: when a driver crashes holding BURROW handles, the kernel must clean up correctly without leaving stale mappings. Mitigation: `specs/burrow.tla` covers this.
 
 ### 6.6 Dependencies
 
-- Phase 2 (handle table, VMO manager, IPI infrastructure, scheduler).
+- Phase 2 (handle table, BURROW manager, IPI infrastructure, scheduler).
 
 ### 6.7 Parallel opportunities
 
@@ -415,7 +415,7 @@ None. This is the foundation phase.
 - Per-process 9P connection management: connection established at `rfork`; closed at `exits`.
 
 **Stratum daemon integration**:
-- `init/init.c` (extend): after Phase 2's UART shell:
+- `init/joey.c` (extend): after Phase 2's UART shell:
   1. Mount ramfs at `/`.
   2. Start `stratum` daemon (reads from VirtIO block; presents 9P server at `/var/run/stratum.sock`).
   3. Start `janus` daemon (key agent at `/dev/janus/`).
@@ -441,7 +441,7 @@ None. This is the foundation phase.
 - [ ] **Pipelined throughput**: process issuing 32 concurrent reads on a Stratum file achieves throughput ≥ 90% of the session's bandwidth limit (vs naive serialized 9P).
 - [ ] **9P round-trip latency** (loopback Stratum): p99 < 500µs (VISION §4.5).
 - [ ] Per-process 9P connections: 100 processes each with their own connection to Stratum work without leaks.
-- [ ] Stratum extensions verified: `Tbind` composes a subvolume into a connection's namespace; `Tpin` pins a snapshot; `Tsync` commits.
+- [ ] Stratum extensions verified: `Tbind` composes a subvolume into a connection's territory; `Tpin` pins a snapshot; `Tsync` commits.
 - [ ] `specs/9p_client.tla` clean under TLC.
 - [ ] No P0/P1 audit findings on the 9P client.
 
@@ -454,7 +454,7 @@ None. This is the foundation phase.
 | Surface | Files | Why |
 |---|---|---|
 | 9P client | `kernel/9p_client.c`, `kernel/9p_session.c`, `kernel/9p_attach.c` | Wire protocol correctness, fid lifecycle, tag uniqueness, pipelining |
-| Boot transition | `init/init.c` | ramfs → Stratum handoff correctness |
+| Boot transition | `init/joey.c` | ramfs → Stratum handoff correctness |
 
 ### 7.5 Risks
 
@@ -467,7 +467,7 @@ None. This is the foundation phase.
 ### 7.6 Dependencies
 
 - Phase 3 (kernel virtio-blk userspace driver — Stratum reads from it).
-- Phase 2 (handle table, VMO manager — for VMO transfer over 9P).
+- Phase 2 (handle table, BURROW manager — for BURROW transfer over 9P).
 - **External**: Stratum Phase 9 (9P server + extensions).
 
 ### 7.7 Parallel opportunities
@@ -495,7 +495,7 @@ None. This is the foundation phase.
 - `kernel/syscall-linux-shim.c`: top-50 Linux ARM64 syscall translation (per `§11.5`).
 
 **Multiplexed I/O**:
-- `kernel/poll.c`: `poll(fds, nfds, timeout)`. Wait list across N fds; first ready wakes thread. For 9P-backed fds, server signals readiness via 9P session notification; for kernel fds, readiness tracked in Chan structures.
+- `kernel/poll.c`: `poll(fds, nfds, timeout)`. Wait list across N fds; first ready wakes thread. For 9P-backed fds, server signals readiness via 9P session notification; for kernel fds, readiness tracked in Spoor structures.
 - `select()` implemented atop `poll()`.
 
 **Threading primitives**:
@@ -582,7 +582,7 @@ The exit criteria are the Utopia bring-up integration test (per `ARCHITECTURE.md
 
 - Phase 4 (Stratum mount; 9P client; per-process 9P connections).
 - Phase 3 (Userspace drivers; framebuffer is fully exercised at Phase 8 with Halcyon, but the userspace virtio-gpu driver itself is Phase 3).
-- Phase 2 (handles, scheduler, namespace, processes).
+- Phase 2 (handles, scheduler, territory, processes).
 
 ### 8.7 Parallel opportunities
 
@@ -608,7 +608,7 @@ The exit criteria are the Utopia bring-up integration test (per `ARCHITECTURE.md
 
 ## 9. Phase 6: Linux compat + network
 
-**Goal**: a meaningful set of pre-built Linux ARM64 binaries runs on Thylacine without recompilation. Container-as-namespace works. Network stack (TCP/IP) up and running for both Thylacine-native programs and Linux containers. Combined with Phase 5's Utopia, this delivers a **practical working OS** — fully usable via SSH or UART before any graphical layer is added.
+**Goal**: a meaningful set of pre-built Linux ARM64 binaries runs on Thylacine without recompilation. Container-as-territory works. Network stack (TCP/IP) up and running for both Thylacine-native programs and Linux containers. Combined with Phase 5's Utopia, this delivers a **practical working OS** — fully usable via SSH or UART before any graphical layer is added.
 
 ### 9.1 Deliverables
 
@@ -624,9 +624,9 @@ The exit criteria are the Utopia bring-up integration test (per `ARCHITECTURE.md
 **Container runner (`thylacine-run`)**:
 - Userspace tool that:
   1. Takes an OCI container image (or directory root).
-  2. Constructs a new process namespace with the container root + synthetic Linux servers (`/proc-linux`, `/sys-linux`, `/dev-linux`).
-  3. Starts the container's init inside the namespace.
-- This is the "flatpak / Steam Deck" model — containers are namespaces. No cgroups, no seccomp at v1.0; namespace isolation is the boundary.
+  2. Constructs a new process territory with the container root + synthetic Linux servers (`/proc-linux`, `/sys-linux`, `/dev-linux`).
+  3. Starts the container's init inside the territory.
+- This is the "flatpak / Steam Deck" model — containers are territories. No cgroups, no seccomp at v1.0; territory isolation is the boundary.
 
 **Network stack**:
 - `net/` (userspace 9P server): TCP/IP stack via smoltcp Rust port.
@@ -660,7 +660,7 @@ None mandatory. Network protocol correctness is smoltcp's responsibility (it's b
 | Surface | Files | Why |
 |---|---|---|
 | Linux syscall shim (extended) | `kernel/syscall-linux-shim.c` | Larger surface; more translation correctness |
-| Container runner | `thylacine-run/` | Namespace construction correctness, isolation |
+| Container runner | `thylacine-run/` | Territory construction correctness, isolation |
 | Network stack | `net/` | TCP/IP correctness; socket API translation |
 
 ### 9.5 Risks
@@ -811,13 +811,13 @@ This is the last phase of v1.0 and the highest-risk angle (`NOVEL.md` Angle #4 �
 ### 11.1 Deliverables
 
 **VirtIO-GPU userspace driver (extend Phase 3)**:
-- `drivers/virtio-gpu/`: extend with VMO-handle-based zero-copy framebuffer; expose `/dev/fb/` per `ARCHITECTURE.md §17.2`.
+- `drivers/virtio-gpu/`: extend with BURROW-handle-based zero-copy framebuffer; expose `/dev/fb/` per `ARCHITECTURE.md §17.2`.
 
 **Halcyon (Rust)** (`halcyon/`):
 - Scroll-buffer rendering (text + graphical regions in time order).
 - Monospace font rendering via fontdue (Iosevka or equivalent at v1.0).
 - Image display: `display image.png` decodes via `png` / `image` crate; renders inline.
-- Video display: mounts `/dev/video/player/`; polls `frame` (VMO handle); blits to graphical region.
+- Video display: mounts `/dev/video/player/`; polls `frame` (BURROW handle); blits to graphical region.
 - Bash-subset interactive parser; job control (`Ctrl-Z`, `bg`, `fg`); pipes; redirection.
 - 9P mount commands.
 
@@ -863,7 +863,7 @@ This is the last phase of v1.0 and the highest-risk angle (`NOVEL.md` Angle #4 �
 
 ### 11.3 Specs landing this phase
 
-None mandatory. Halcyon is mostly UI; the underlying primitives (9P client, framebuffer, VMO transfer, signals, PTY) are spec'd at earlier phases.
+None mandatory. Halcyon is mostly UI; the underlying primitives (9P client, framebuffer, BURROW transfer, signals, PTY) are spec'd at earlier phases.
 
 ### 11.4 Audit-trigger surfaces introduced
 
@@ -872,7 +872,7 @@ None mandatory. Halcyon is mostly UI; the underlying primitives (9P client, fram
 | Halcyon shell parser | `halcyon/src/parser/` | Bash-subset semantics correctness |
 | Halcyon scroll buffer | `halcyon/src/buffer/` | State machine correctness |
 | Video player | `drivers/video/src/` | 9P server + decode correctness |
-| Framebuffer driver (extended) | `drivers/virtio-gpu/src/` | VMO sharing correctness |
+| Framebuffer driver (extended) | `drivers/virtio-gpu/src/` | BURROW sharing correctness |
 | Image decode | `halcyon/src/image/` | Memory safety; format-fuzz coverage |
 
 ### 11.5 Risks
@@ -881,7 +881,7 @@ None mandatory. Halcyon is mostly UI; the underlying primitives (9P client, fram
 - **Scroll buffer model edge cases**: resize, reflowing text around images, history trimming need careful design. Mitigation: design pass before writing rendering code.
 - **Video performance**: software H.264 decode may not keep up at 1080p. Mitigation: profile; reduce target to 720p if needed; HW decode is post-v1.0.
 - **Bash compat coverage**: parser is a "subset"; some Bash features will not work. Mitigation: explicit subset documentation; any scripts that need full Bash run via `/bin/bash` directly.
-- **VMO-based framebuffer race**: writer/reader race when Halcyon writes pixels and driver issues `flush`. Mitigation: simple double-buffering; documented protocol.
+- **BURROW-based framebuffer race**: writer/reader race when Halcyon writes pixels and driver issues `flush`. Mitigation: simple double-buffering; documented protocol.
 - **Halcyon-as-final-phase risk**: if Halcyon hits any of the above, Phase 8 slips. Mitigation: **Phase 7 produced v1.0-rc.1 as the shippable fallback**. If Halcyon takes meaningfully longer than estimated, the project ships v1.0-rc as v1.0 and treats Halcyon as v1.1. This is deliberate insurance, not aspirational — the v1.0-rc tag exists at Phase 7 exit precisely so Halcyon can fail without dragging the rest of the OS.
 
 ### 11.6 Dependencies
@@ -941,7 +941,7 @@ These are explicitly *not in v1.0*; they're tracked for post-v1.0 work.
 - **`io_uring` syscall surface**: ~5-8 KLOC. The existing 9P pipelining gives most of the win for 9P-mediated I/O; `io_uring` is for direct kernel I/O paths (rare under Thylacine architecture).
 - **Bluetooth + USB beyond keyboard/mouse**: USB stack, basic Bluetooth.
 - **Multi-pane Halcyon (within scroll buffer)**: experiment with scroll-buffer-with-side-by-side regions. Carefully scoped to not become a windowing system.
-- **`thylacine-run` improvements**: cgroups-equivalent (without cgroup machinery; using namespace-level resource accounting).
+- **`thylacine-run` improvements**: cgroups-equivalent (without cgroup machinery; using territory-level resource accounting).
 
 ### 12.3 v2.0 candidates (12-24+ months)
 
@@ -952,15 +952,15 @@ These are explicitly *not in v1.0*; they're tracked for post-v1.0 work.
 - **RISC-V port**: target first RVA23-compliant SBC. Mechanical above `arch/`.
 - **x86-64 port**: target QEMU `q35`; later bare metal.
 - **Rust kernel components**: selected modules (9P client, ELF loader, handle table) ported from C99 to Rust.
-- **Full POSIX ACLs / xattrs at the namespace level**: complement Stratum's existing xattr/ACL with namespace-level semantics.
-- **MAC (mandatory access control)**: SELinux-equivalent for multi-tenant deployments. Post-v2.0; namespace isolation suffices for v1.0/v1.x.
+- **Full POSIX ACLs / xattrs at the territory level**: complement Stratum's existing xattr/ACL with territory-level semantics.
+- **MAC (mandatory access control)**: SELinux-equivalent for multi-tenant deployments. Post-v2.0; territory isolation suffices for v1.0/v1.x.
 - **Audio stack**: VirtIO sound device + userspace audio server.
 
 ### 12.4 v3.0 horizon
 
 - **Multikernel + 16+ cores**: per-core kernel instances; cross-core via 9P; NUMA-aware. The full Barrelfish-style architecture.
-- **Network filesystem as native namespace**: 9P-over-TLS; Thylacine processes' namespaces transparently span machines.
-- **Distributed namespaces**: per-process namespaces that span multiple Thylacine nodes via 9P forwarding.
+- **Network filesystem as native territory**: 9P-over-TLS; Thylacine processes' territories transparently span machines.
+- **Distributed territories**: per-process territories that span multiple Thylacine nodes via 9P forwarding.
 
 ### 12.5 Ruled out
 
@@ -1078,8 +1078,8 @@ Stratum is on Phase 8 (POSIX surface) currently, on track for Phase 9 (9P server
 | GIC + IRQ infrastructure | 1 | §12 |
 | Process + thread + rfork | 2 | §7 |
 | EEVDF scheduler + per-CPU + IPI | 2 | §8 |
-| Namespace primitives | 2 | §9.1 |
-| Handle table + VMO manager | 2 | §18, §19 |
+| Territory primitives | 2 | §9.1 |
+| Handle table + BURROW manager | 2 | §18, §19 |
 | Page fault + COW + W^X enforcement | 2 | §6 |
 | Pipes + notes | 2 | §10 |
 | Dev vtable | 3 | §9.2 |
@@ -1149,5 +1149,5 @@ The thylacine runs again.
 
 | Date | Change | Reason |
 |---|---|---|
-| 2026-05-04 | Initial draft (Phase 0). | Ground-up rewrite from `tlcprimer/ROADMAP.md`. Userspace drivers from Phase 3 (no in-kernel virtio-blk shortcut). Utopia milestone at Phase 5 exit. uutils-coreutils as default coreutils; Plan 9 userland Tier 1; BusyBox in initramfs. Stratum coordination story aligned with Stratum's actual state (feature-complete; Phase 9 9P server is the integration target). 9 TLA+ specs gate-tied to phases (`scheduler` / `namespace` / `handles` at Phase 2; `vmo` at Phase 3; `9p_client` at Phase 4; `poll` / `futex` / `notes` / `pty` at Phase 5). 8-CPU stress at Phase 8. SOTA hardening from Phase 1. Performance budgets per phase. Per-phase deliverable mapping cross-reference. Risk register expanded. v2.0 contracts (factotum / multikernel / in-kernel Stratum) tracked under post-v1.0. |
+| 2026-05-04 | Initial draft (Phase 0). | Ground-up rewrite from `tlcprimer/ROADMAP.md`. Userspace drivers from Phase 3 (no in-kernel virtio-blk shortcut). Utopia milestone at Phase 5 exit. uutils-coreutils as default coreutils; Plan 9 userland Tier 1; BusyBox in initramfs. Stratum coordination story aligned with Stratum's actual state (feature-complete; Phase 9 9P server is the integration target). 9 TLA+ specs gate-tied to phases (`scheduler` / `territory` / `handles` at Phase 2; `burrow` at Phase 3; `9p_client` at Phase 4; `poll` / `futex` / `notes` / `pty` at Phase 5). 8-CPU stress at Phase 8. SOTA hardening from Phase 1. Performance budgets per phase. Per-phase deliverable mapping cross-reference. Risk register expanded. v2.0 contracts (factotum / multikernel / in-kernel Stratum) tracked under post-v1.0. |
 | 2026-05-04 | Halcyon-as-last-phase reorder. | User direction: "place Halcyon as the last phase — practical working OS with compat, binary shims, and polished Utopia will suffice." Phase 6 → Linux compat + network (was Phase 7). Phase 7 → Hardening + audit + 8-CPU stress + **v1.0-rc.1 tag** (was Phase 8 hardening). Phase 8 → Halcyon + Halcyon-surface audit + **v1.0 final** (was Phase 6). Risk register restructured: Halcyon's medium-high risk now isolated to the last phase; Phase 7 produces a shippable v1.0-rc as deliberate insurance. If Halcyon hits a wall, v1.0-rc ships as v1.0 and Halcyon becomes v1.1. |

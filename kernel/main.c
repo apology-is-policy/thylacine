@@ -33,15 +33,15 @@
 #include <thylacine/dtb.h>
 #include <thylacine/extinction.h>
 #include <thylacine/handle.h>
-#include <thylacine/init.h>     // init_run (P3-F)
+#include <thylacine/joey.h>     // joey_run (P3-F)
 #include <thylacine/page.h>
-#include <thylacine/pgrp.h>
+#include <thylacine/territory.h>
 #include <thylacine/proc.h>
 #include <thylacine/sched.h>
 #include <thylacine/smp.h>
 #include <thylacine/thread.h>
 #include <thylacine/vma.h>      // vma_init (P3-Da)
-#include <thylacine/vmo.h>
+#include <thylacine/burrow.h>
 #include <thylacine/types.h>
 
 #include "../arch/arm64/psci.h"
@@ -278,8 +278,8 @@ void boot_main(void) {
 
     // Phase 6: process / thread bring-up (P2-A entry).
     //
-    // pgrp_init creates the namespace SLUB cache + kproc's empty Pgrp
-    // (P2-Eb). Must run BEFORE proc_init so kproc has a pgrp to assign.
+    // territory_init creates the territory SLUB cache + kproc's empty Territory
+    // (P2-Eb). Must run BEFORE proc_init so kproc has a territory to assign.
     //
     // proc_init creates kproc (PID 0) — the kernel's own process. It
     // owns the kernel address space, will own the kernel handle table
@@ -292,16 +292,16 @@ void boot_main(void) {
     // The actual scheduler (EEVDF) lands at P2-B.
     // P2-Fc: handle_init creates the handle-table SLUB cache. Must run
     // BEFORE proc_init since proc_init allocates a HandleTable for kproc.
-    // P2-Fd: vmo_init creates the VMO SLUB cache. Order doesn't matter
-    // wrt proc_init (no kproc-VMO ownership at v1.0); placed near
+    // P2-Fd: burrow_init creates the BURROW SLUB cache. Order doesn't matter
+    // wrt proc_init (no kproc-BURROW ownership at v1.0); placed near
     // handle_init for grouping.
     // P3-Ba: asid_init initializes the ASID allocator. No SLUB dependency
     // (state lives in BSS). Must run BEFORE any future code that calls
     // asid_alloc; placed early so the order is unambiguous as Phase 3+
     // sub-chunks add per-Proc TTBR0 alloc paths.
-    pgrp_init();
+    territory_init();
     handle_init();
-    vmo_init();
+    burrow_init();
     vma_init();
     asid_init();
     proc_init();
@@ -444,12 +444,12 @@ void boot_main(void) {
     // per boot and don't follow it with another userspace exec; the
     // prior `userspace.exec_exits_ok` test was retired in favor of this.
     // Failure (rfork OOM / exec error / non-zero exit_status) extincts.
-    init_run();
+    joey_run();
 
     uart_puts("Thylacine boot OK\n");
 
-    // boot_main() must not return. start.S has a fallthrough to _hang
+    // boot_main() must not return. start.S has a fallthrough to _torpor
     // for safety, but be explicit here too.
-    extern void _hang(void) __attribute__((noreturn));
-    _hang();
+    extern void _torpor(void) __attribute__((noreturn));
+    _torpor();
 }

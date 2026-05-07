@@ -2,7 +2,7 @@
 //
 // A VMA describes a contiguous range of user virtual addresses
 // `[vaddr_start, vaddr_end)` with associated permissions and a backing
-// VMO. The sorted-list of VMAs anchored at `struct Proc.vmas` is
+// BURROW. The sorted-list of VMAs anchored at `struct Proc.vmas` is
 // per-Proc state; it forms the "address space description" against
 // which page faults are dispatched (P3-Dc adds the dispatcher
 // integration).
@@ -21,7 +21,7 @@
 #include <thylacine/types.h>
 
 struct Proc;
-struct Vmo;
+struct Burrow;
 
 // VMA permission bits. Map to PTE_KERN_TEXT/RO/RW + user-bit at PTE
 // installation time (P3-Db). At v1.0 P3-Da these are policy markers
@@ -35,7 +35,7 @@ struct Vmo;
 #define VMA_PROT_RX   (VMA_PROT_READ | VMA_PROT_EXEC)
 
 // VMA_MAGIC at offset 0 — SLUB freelist clobber defense (mirrors
-// struct Proc / struct Thread / struct Vmo / struct Handle pattern).
+// struct Proc / struct Thread / struct Burrow / struct Handle pattern).
 #define VMA_MAGIC 0x564D413043ADEFADULL    // 'VMA0' || 0xCADE'FADE
 
 struct Vma {
@@ -44,8 +44,8 @@ struct Vma {
     u64 vaddr_end;        // exclusive, page-aligned
     u32 prot;             // VMA_PROT_* bitmask
     u32 _pad;             // 8-byte alignment
-    struct Vmo *vmo;      // backing object (refcounted)
-    u64 vmo_offset;       // byte offset into VMO
+    struct Burrow *burrow;      // backing object (refcounted)
+    u64 burrow_offset;       // byte offset into BURROW
 
     // Sorted doubly-linked list. Sorted by vaddr_start ascending.
     // Anchored at struct Proc.vmas.
@@ -65,22 +65,22 @@ void vma_init(void);
 
 // Allocate a fresh Vma descriptor. Initializes magic + the passed
 // fields; next/prev set to NULL (caller's responsibility to insert
-// into the per-Proc list via vma_insert). Refcounts the VMO via
-// vmo_acquire_mapping (mapping_count++). Returns NULL on OOM or any
+// into the per-Proc list via vma_insert). Refcounts the BURROW via
+// burrow_acquire_mapping (mapping_count++). Returns NULL on OOM or any
 // constraint violation.
 //
 // Constraints:
 //   - vaddr_start < vaddr_end.
 //   - both page-aligned (4 KiB).
-//   - vmo non-NULL.
+//   - burrow non-NULL.
 //   - prot ∈ {0, R, RW, RX} (at v1.0 we reject W+X to mirror the W^X
 //     invariant; runtime enforcement happens at PTE installation).
 //
 // Returns NULL on any constraint violation (without partial allocation).
 struct Vma *vma_alloc(u64 vaddr_start, u64 vaddr_end, u32 prot,
-                     struct Vmo *vmo, u64 vmo_offset);
+                     struct Burrow *burrow, u64 burrow_offset);
 
-// Free a Vma descriptor. Releases the VMO ref. Caller MUST have
+// Free a Vma descriptor. Releases the BURROW ref. Caller MUST have
 // removed it from any per-Proc list (extincts otherwise — magic check
 // + next/prev != NULL detection).
 void vma_free(struct Vma *v);
@@ -109,7 +109,7 @@ struct Vma *vma_lookup(struct Proc *p, u64 vaddr);
 // Walk every VMA in Proc `p`'s list and free it. Used at proc_free
 // to release all VMAs (and decrement their VMOs' mapping counts).
 // Caller (proc_free) calls this BEFORE handle_table_free — handle
-// closure of VMO handles independently decrements vmo->handle_count.
+// closure of BURROW handles independently decrements burrow->handle_count.
 void vma_drain(struct Proc *p);
 
 // Diagnostic accessors.

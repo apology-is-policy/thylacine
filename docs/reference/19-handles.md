@@ -6,7 +6,7 @@ The kernel handle table — typed unforgeable tokens that name kernel objects a 
 
 ## Purpose
 
-Eight typed kobj kinds (Process / Thread / VMO / Chan / MMIO / IRQ / DMA / Interrupt) form Thylacine's kernel-object universe. Each is named by a `struct Handle` (kobj_kind + rights + obj pointer); each Proc owns a fixed-size `struct HandleTable` of these. Handles cannot be forged — a Proc receives them only via kernel grant or 9P transfer (Phase 4).
+Eight typed kobj kinds (Process / Thread / BURROW / Spoor / MMIO / IRQ / DMA / Interrupt) form Thylacine's kernel-object universe. Each is named by a `struct Handle` (kobj_kind + rights + obj pointer); each Proc owns a fixed-size `struct HandleTable` of these. Handles cannot be forged — a Proc receives them only via kernel grant or 9P transfer (Phase 4).
 
 Key invariants (proven in `specs/handles.tla`):
 
@@ -26,8 +26,8 @@ enum kobj_kind {
     KOBJ_INVALID    = 0,
     KOBJ_PROCESS    = 1,
     KOBJ_THREAD     = 2,
-    KOBJ_VMO        = 3,
-    KOBJ_CHAN       = 4,
+    KOBJ_BURROW        = 3,
+    KOBJ_SPOOR       = 4,
     KOBJ_MMIO       = 5,
     KOBJ_IRQ        = 6,
     KOBJ_DMA        = 7,
@@ -38,7 +38,7 @@ _Static_assert(KOBJ_KIND_COUNT == 9, ...);
 
 #define KOBJ_KIND_TRANSFERABLE_MASK \
     ((1u << KOBJ_PROCESS) | (1u << KOBJ_THREAD) |
-     (1u << KOBJ_VMO)     | (1u << KOBJ_CHAN))
+     (1u << KOBJ_BURROW)     | (1u << KOBJ_SPOOR))
 #define KOBJ_KIND_HW_MASK \
     ((1u << KOBJ_MMIO) | (1u << KOBJ_IRQ) |
      (1u << KOBJ_DMA)  | (1u << KOBJ_INTERRUPT))
@@ -116,7 +116,7 @@ u64 handle_total_freed(void);
 
 ### HandleTable lifecycle
 
-- `handle_init`: SLUB cache + idempotency check. Called from `boot_main` AFTER `pgrp_init` and BEFORE `proc_init` (proc_init allocates a HandleTable for kproc).
+- `handle_init`: SLUB cache + idempotency check. Called from `boot_main` AFTER `territory_init` and BEFORE `proc_init` (proc_init allocates a HandleTable for kproc).
 - `handle_table_alloc`: SLUB-allocate via `kmem_cache_alloc(KP_ZERO)`. Every slot's magic = 0 (free) at allocation. Returns NULL on OOM.
 - `handle_table_free`: closes any in-use slots (zeros magic, kind, rights, obj) before `kmem_cache_free`. NULL-safe.
 
@@ -166,10 +166,10 @@ Standard subset test: `A ⊆ B` iff `A & B == A`. Maps to the spec's `new_rights
 ### Bootstrap order
 
 ```
-slub_init → pgrp_init → handle_init → proc_init → thread_init → sched_init
+slub_init → territory_init → handle_init → proc_init → thread_init → sched_init
 ```
 
-`handle_init` between `pgrp_init` and `proc_init`: the slab cache must exist before kproc's table is allocated.
+`handle_init` between `territory_init` and `proc_init`: the slab cache must exist before kproc's table is allocated.
 
 ---
 
@@ -211,7 +211,7 @@ Mapping (canonical at `specs/SPEC-TO-CODE.md`):
 - `handles.rights_monotonic` — dup with subset succeeds; dup with elevated rights or disjoint rights fails (-1); dup with empty rights fails.
 - `handles.dup_lifecycle` — dup; close parent; dup remains. Dup again; close child; original dup remains. Independent close ordering.
 - `handles.full_table_oom` — alloc to PROC_HANDLE_MAX; verify all distinct slots + (-1) on overflow + slot reuse after partial close.
-- `handles.kind_classifiers` — truth table: PROCESS/THREAD/VMO/CHAN are transferable; MMIO/IRQ/DMA/INTERRUPT are hw; KOBJ_INVALID is neither; out-of-range rejected by both classifiers (defensive).
+- `handles.kind_classifiers` — truth table: PROCESS/THREAD/BURROW/CHAN are transferable; MMIO/IRQ/DMA/INTERRUPT are hw; KOBJ_INVALID is neither; out-of-range rejected by both classifiers (defensive).
 
 ---
 
@@ -219,12 +219,12 @@ Mapping (canonical at `specs/SPEC-TO-CODE.md`):
 
 ### `obj` may be NULL at v1.0
 
-For kobj kinds whose underlying impl isn't yet integrated (KOBJ_VMO at P2-Fc — comes at P2-Fd; KOBJ_CHAN — Phase 4; KOBJ_MMIO/IRQ/DMA — Phase 3; KOBJ_INTERRUPT — Phase 5+), test code may pass `obj = NULL`. Production callers always pass a valid pointer. The handle table itself doesn't deref `obj` — that's the responsibility of the syscall handler / driver code that gets the handle and uses it.
+For kobj kinds whose underlying impl isn't yet integrated (KOBJ_BURROW at P2-Fc — comes at P2-Fd; KOBJ_SPOOR — Phase 4; KOBJ_MMIO/IRQ/DMA — Phase 3; KOBJ_INTERRUPT — Phase 5+), test code may pass `obj = NULL`. Production callers always pass a valid pointer. The handle table itself doesn't deref `obj` — that's the responsibility of the syscall handler / driver code that gets the handle and uses it.
 
 ### No underlying-kobj refcount integration at P2-Fc
 
-`handle_close` just zeros the slot. P2-Fd integrates `vmo_unref` for KOBJ_VMO (which has its own dual-refcount lifecycle). Other kinds get refcount integration as their syscalls land:
-- KOBJ_CHAN: Phase 4 with the 9P client.
+`handle_close` just zeros the slot. P2-Fd integrates `burrow_unref` for KOBJ_BURROW (which has its own dual-refcount lifecycle). Other kinds get refcount integration as their syscalls land:
+- KOBJ_SPOOR: Phase 4 with the 9P client.
 - KOBJ_PROCESS / THREAD: when they become syscall-visible (Phase 5+).
 - KOBJ_MMIO / IRQ / DMA / INTERRUPT: when the driver-startup flow lands at Phase 3.
 
@@ -242,8 +242,8 @@ The transfer-via-9P codepath (Phase 4) will switch on `h->kind` and have cases O
 switch (h->kind) {
 case KOBJ_PROCESS:
 case KOBJ_THREAD:
-case KOBJ_VMO:
-case KOBJ_CHAN:
+case KOBJ_BURROW:
+case KOBJ_SPOOR:
     if (!(h->rights & RIGHT_TRANSFER)) return -EPERM;
     return do_transfer_via_9p(...);
 /* No code path for hardware kinds. */
@@ -280,12 +280,12 @@ Per ARCH §15.4, factotum-mediated capability elevation grants short-lived `KObj
 | `handle.h` API + `handle.c` impl | Landed (P2-Fc) |
 | `struct Proc.handles` field | Landed (P2-Fc) |
 | `proc_alloc`/`proc_init`/`proc_free` integration | Landed (P2-Fc) |
-| `handle_init` bootstrap | Landed (P2-Fc; between `pgrp_init` and `proc_init`) |
+| `handle_init` bootstrap | Landed (P2-Fc; between `territory_init` and `proc_init`) |
 | Type classifiers (`is_transferable` / `is_hw`) | Landed (P2-Fc) |
 | In-kernel tests | 5 added: alloc_close_smoke / rights_monotonic / dup_lifecycle / full_table_oom / kind_classifiers |
 | Spec `handles.tla` + 4 buggy configs | Landed (P2-Fa) |
-| KOBJ_VMO underlying-obj integration | P2-Fd |
-| KOBJ_CHAN underlying-obj integration | Phase 4 |
+| KOBJ_BURROW underlying-obj integration | P2-Fd |
+| KOBJ_SPOOR underlying-obj integration | Phase 4 |
 | KOBJ_MMIO / IRQ / DMA underlying-obj integration | Phase 3 |
 | `handle_transfer_via_9p` impl | Phase 4 (with 9P client) |
 | Per-Proc handle-table lock | Phase 5+ |

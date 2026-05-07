@@ -1,6 +1,6 @@
-// /init — first userspace process (P3-F).
+// /joey — first userspace process (P3-F).
 //
-// At v1.0 P3-F, /init is a tiny embedded AArch64 program: prints
+// At v1.0 P3-F, /joey is a tiny embedded AArch64 program: prints
 // "hello\n" via SYS_PUTS, exits via SYS_EXITS(0). Validates the full
 // kernel→exec→userspace→syscall→kernel chain WITHOUT the test-harness
 // scaffolding that the prior `userspace.exec_exits_ok` test required.
@@ -35,10 +35,10 @@
 //   boot_main() … all bring-up …
 //     test_run_all()                    in-kernel tests (kproc context)
 //     fault_test_run()                  hardening proof (production no-op)
-//     init_run()                        ← P3-F
+//     joey_run()                        ← P3-F
 //       build_init_elf()                construct synthetic ELF blob
-//       rfork(RFPROC, init_thunk, args) child Proc on kthread kstack
-//         init_thunk:
+//       rfork(RFPROC, joey_thunk, args) child Proc on kthread kstack
+//         joey_thunk:
 //           exec_setup(p, blob, size)   populate child's address space
 //           userland_enter(entry, sp)   eret to EL0 (never returns)
 //         child user code runs:
@@ -47,14 +47,14 @@
 //       wait_pid(&status)               block; reap child
 //     "Thylacine boot OK"               TOOLING.md §10 ABI
 //
-// Spec posture: no new TLA+ at P3-F. /init is impl-orchestration over
+// Spec posture: no new TLA+ at P3-F. /joey is impl-orchestration over
 // already-spec'd primitives (rfork from proc model; exec_setup from
-// vmo.tla mapping lifecycle; userland_enter is a single-instruction
-// EL transition). Phase 5+ /init-as-server (long-running supervisor)
+// burrow.tla mapping lifecycle; userland_enter is a single-instruction
+// EL transition). Phase 5+ /joey-as-server (long-running supervisor)
 // will warrant a spec extension covering the supervisor/child
 // reaping protocol.
 
-#include <thylacine/init.h>
+#include <thylacine/joey.h>
 
 #include <thylacine/elf.h>
 #include <thylacine/exec.h>
@@ -68,7 +68,7 @@
 
 // User program — 9 hand-encoded AArch64 instructions, little-endian u32.
 // Verified against `clang --target=aarch64-none-elf -c` disassembly.
-static const u32 g_init_program[] = {
+static const u32 g_joey_program[] = {
     0xd2800800,  // movz x0, #0x40        ; x0[15:0] = 0x40
     0xf2a00020,  // movk x0, #1, lsl #16  ; x0 = 0x10040 (msg addr)
     0xd28000c1,  // movz x1, #6           ; x1 = 6 (msg length)
@@ -82,31 +82,31 @@ static const u32 g_init_program[] = {
 
 // User program embedded in the same RX page as the message. Code
 // lives at byte offset 0..0x23; message at byte offset 0x40..0x45.
-static const char g_init_msg[] = "hello\n";
+static const char g_joey_msg[] = "hello\n";
 
 // In-segment offset of the message. Code occupies the first 36 bytes;
 // rounded to 0x40 to give the program a clean address to load.
-#define INIT_MSG_SEGMENT_OFF   0x40
+#define JOEY_MSG_SEGMENT_OFF   0x40
 
-// Single PT_LOAD segment vaddr (must match g_init_program's adrp/movz
-// computation: x0 = 0x10040 = INIT_SEGMENT_VADDR + INIT_MSG_SEGMENT_OFF).
-#define INIT_SEGMENT_VADDR     0x10000ull
+// Single PT_LOAD segment vaddr (must match g_joey_program's adrp/movz
+// computation: x0 = 0x10040 = JOEY_SEGMENT_VADDR + JOEY_MSG_SEGMENT_OFF).
+#define JOEY_SEGMENT_VADDR     0x10000ull
 
 // ELF blob: header page + segment page = 8 KiB. Sized to host one ELF
 // header + one PT_LOAD program header + segment data.
-#define INIT_ELF_BLOB_SIZE     8192
-static _Alignas(struct Elf64_Ehdr) u8 g_init_elf_blob[INIT_ELF_BLOB_SIZE];
+#define JOEY_ELF_BLOB_SIZE     8192
+static _Alignas(struct Elf64_Ehdr) u8 g_joey_elf_blob[JOEY_ELF_BLOB_SIZE];
 
-// Build the synthetic ELF in g_init_elf_blob. Returns the populated
+// Build the synthetic ELF in g_joey_elf_blob. Returns the populated
 // blob size (bytes from offset 0 to one past the last meaningful byte).
 static size_t build_init_elf(void) {
     // Zero everything so trailing bytes (including post-message padding)
     // are clean, deterministic, KASLR-stable.
-    for (size_t i = 0; i < INIT_ELF_BLOB_SIZE; i++) {
-        g_init_elf_blob[i] = 0;
+    for (size_t i = 0; i < JOEY_ELF_BLOB_SIZE; i++) {
+        g_joey_elf_blob[i] = 0;
     }
 
-    struct Elf64_Ehdr *eh = (struct Elf64_Ehdr *)g_init_elf_blob;
+    struct Elf64_Ehdr *eh = (struct Elf64_Ehdr *)g_joey_elf_blob;
     eh->e_ident[EI_MAG0]    = ELFMAG0;
     eh->e_ident[EI_MAG1]    = ELFMAG1;
     eh->e_ident[EI_MAG2]    = ELFMAG2;
@@ -118,37 +118,37 @@ static size_t build_init_elf(void) {
     eh->e_type      = ET_EXEC;
     eh->e_machine   = EM_AARCH64;
     eh->e_version   = EV_CURRENT;
-    eh->e_entry     = INIT_SEGMENT_VADDR;
+    eh->e_entry     = JOEY_SEGMENT_VADDR;
     eh->e_phoff     = sizeof(struct Elf64_Ehdr);
     eh->e_ehsize    = sizeof(struct Elf64_Ehdr);
     eh->e_phentsize = sizeof(struct Elf64_Phdr);
     eh->e_phnum     = 1;
 
-    struct Elf64_Phdr *ph = (struct Elf64_Phdr *)(g_init_elf_blob + eh->e_phoff);
+    struct Elf64_Phdr *ph = (struct Elf64_Phdr *)(g_joey_elf_blob + eh->e_phoff);
     ph[0].p_type   = PT_LOAD;
     ph[0].p_flags  = PF_R | PF_X;
     ph[0].p_offset = (u64)PAGE_SIZE;            // segment data at second page
-    ph[0].p_vaddr  = INIT_SEGMENT_VADDR;
-    ph[0].p_paddr  = INIT_SEGMENT_VADDR;
-    // filesz spans code + padding + message: INIT_MSG_SEGMENT_OFF + 6 bytes.
-    // sizeof(g_init_msg) is 7 (includes the implicit trailing NUL); we
+    ph[0].p_vaddr  = JOEY_SEGMENT_VADDR;
+    ph[0].p_paddr  = JOEY_SEGMENT_VADDR;
+    // filesz spans code + padding + message: JOEY_MSG_SEGMENT_OFF + 6 bytes.
+    // sizeof(g_joey_msg) is 7 (includes the implicit trailing NUL); we
     // copy 6 to match the SYS_PUTS length arg (movz x1, #6) so the NUL
     // doesn't reach UART.
-    ph[0].p_filesz = (u64)(INIT_MSG_SEGMENT_OFF + sizeof(g_init_msg) - 1);
+    ph[0].p_filesz = (u64)(JOEY_MSG_SEGMENT_OFF + sizeof(g_joey_msg) - 1);
     ph[0].p_memsz  = (u64)PAGE_SIZE;
     ph[0].p_align  = (u64)PAGE_SIZE;
 
     // Copy the program code at file_offset = PAGE_SIZE (segment vaddr 0x10000).
-    u32 *code_dst = (u32 *)(g_init_elf_blob + PAGE_SIZE);
-    for (size_t i = 0; i < sizeof(g_init_program) / sizeof(u32); i++) {
-        code_dst[i] = g_init_program[i];
+    u32 *code_dst = (u32 *)(g_joey_elf_blob + PAGE_SIZE);
+    for (size_t i = 0; i < sizeof(g_joey_program) / sizeof(u32); i++) {
+        code_dst[i] = g_joey_program[i];
     }
 
-    // Copy the message at file_offset = PAGE_SIZE + INIT_MSG_SEGMENT_OFF
+    // Copy the message at file_offset = PAGE_SIZE + JOEY_MSG_SEGMENT_OFF
     // (segment vaddr 0x10040). The 6 bytes match the SYS_PUTS length arg.
-    u8 *msg_dst = g_init_elf_blob + PAGE_SIZE + INIT_MSG_SEGMENT_OFF;
-    for (size_t i = 0; i < sizeof(g_init_msg) - 1; i++) {
-        msg_dst[i] = (u8)g_init_msg[i];
+    u8 *msg_dst = g_joey_elf_blob + PAGE_SIZE + JOEY_MSG_SEGMENT_OFF;
+    for (size_t i = 0; i < sizeof(g_joey_msg) - 1; i++) {
+        msg_dst[i] = (u8)g_joey_msg[i];
     }
 
     // Total blob size = header page + segment page (one full PAGE_SIZE
@@ -158,10 +158,10 @@ static size_t build_init_elf(void) {
 }
 
 // Arguments passed via rfork's `arg` to the child entry. Lives on the
-// caller (boot CPU) stack for the duration of init_run(); the child
+// caller (boot CPU) stack for the duration of joey_run(); the child
 // reads it once before transitioning to EL0, after which the parent
 // blocks in wait_pid().
-struct init_args {
+struct joey_args {
     const void *blob;
     size_t      blob_size;
 };
@@ -172,12 +172,12 @@ struct init_args {
 // (transitions to EL0). On exec_setup failure, exits("fail-exec") so
 // the parent's wait_pid observes a non-zero exit_status.
 __attribute__((noreturn))
-static void init_thunk(void *arg) {
-    struct init_args *ia = (struct init_args *)arg;
+static void joey_thunk(void *arg) {
+    struct joey_args *ia = (struct joey_args *)arg;
     struct Thread *t = current_thread();
-    if (!t) extinction("init_thunk: no current_thread");
+    if (!t) extinction("joey_thunk: no current_thread");
     struct Proc *p = t->proc;
-    if (!p) extinction("init_thunk: no proc");
+    if (!p) extinction("joey_thunk: no proc");
 
     u64 entry = 0, sp = 0;
     int rc = exec_setup(p, ia->blob, ia->blob_size, &entry, &sp);
@@ -189,45 +189,45 @@ static void init_thunk(void *arg) {
     // userland_enter is __noreturn; control transfers to EL0 atomically.
 }
 
-void init_run(void) {
-    // R7 F136 close: one-call guard. v1.0 invariant — init_run is
+void joey_run(void) {
+    // R7 F136 close: one-call guard. v1.0 invariant — joey_run is
     // called exactly once per boot from boot_main. Trip-hazard #157
     // (second-userspace-iteration hang on QEMU virt) makes a second
     // userspace exec hang silently; the guard converts an accidental
     // double-call (e.g., a future Phase 5+ supervisor refactor) into
     // an explicit, loud failure rather than the silent #157 hang.
-    // g_init_elf_blob is single-use BSS — concurrent rebuilds would
+    // g_joey_elf_blob is single-use BSS — concurrent rebuilds would
     // also race, so the guard doubles as memory-safety enforcement.
-    static bool g_init_run_called = false;
-    if (g_init_run_called) {
-        extinction("init_run: double call (v1.0 single-use invariant)");
+    static bool g_joey_run_called = false;
+    if (g_joey_run_called) {
+        extinction("joey_run: double call (v1.0 single-use invariant)");
     }
-    g_init_run_called = true;
+    g_joey_run_called = true;
 
-    uart_puts("  init: rforking child for /init (9-instr hello blob)\n");
+    uart_puts("  joey: rforking child for /joey (9-instr hello blob)\n");
 
     size_t blob_size = build_init_elf();
 
-    struct init_args args = {
-        .blob      = g_init_elf_blob,
+    struct joey_args args = {
+        .blob      = g_joey_elf_blob,
         .blob_size = blob_size,
     };
 
-    int pid = rfork(RFPROC, init_thunk, &args);
+    int pid = rfork(RFPROC, joey_thunk, &args);
     if (pid < 0) {
-        extinction("init: rfork(RFPROC, init_thunk) failed");
+        extinction("joey: rfork(RFPROC, joey_thunk) failed");
     }
 
     int status = -42;
     int reaped = wait_pid(&status);
     if (reaped != pid) {
-        extinction_with_addr("init: wait_pid returned wrong pid", (u64)reaped);
+        extinction_with_addr("joey: wait_pid returned wrong pid", (u64)reaped);
     }
     if (status != 0) {
-        extinction_with_addr("init: /init exited non-zero", (u64)status);
+        extinction_with_addr("joey: /joey exited non-zero", (u64)status);
     }
 
-    uart_puts("  init: /init pid=");
+    uart_puts("  joey: /joey pid=");
     uart_putdec((u64)pid);
     uart_puts(" exited cleanly (status=0)\n");
 }

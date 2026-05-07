@@ -1,7 +1,7 @@
 // Process descriptor — Plan 9 Proc struct, Thylacine adaptation.
 //
 // Per ARCHITECTURE.md §7.2 + §7.4 + §7.9. A Proc owns an address space,
-// namespace, fd table, handle table, credentials, threads, notes,
+// territory, fd table, handle table, credentials, threads, notes,
 // parent/child links. The struct grows by appending; existing field
 // offsets stay stable so incremental sub-chunks don't churn the SLUB
 // cache size. New fields default to zero/NULL via KP_ZERO at allocation
@@ -11,7 +11,7 @@
 //   P2-A:  pid + threads list + thread_count.
 //   P2-D:  + state (ALIVE / ZOMBIE) + parent + children + sibling
 //          + exit_status + exit_msg + child_done Rendez.
-//   P2-E:  + namespace pointer (Pgrp).
+//   P2-E:  + territory pointer (Territory).
 //   P2-F:  + handle table head.
 //   P2-G:  + address space (page table root, vma_tree) + credentials
 //          + capability bitmask + notes queue.
@@ -54,7 +54,7 @@ _Static_assert(PROC_STATE_INVALID == 0,
                "PROC_STATE_INVALID == 0 is the invariant that makes "
                "zero-initialized Proc structs detectably invalid");
 
-struct Pgrp;
+struct Territory;
 struct HandleTable;
 struct Vma;
 
@@ -89,10 +89,10 @@ struct Proc {
     // concern handled by promoting to multi-waiter wait queue).
     struct Rendez     child_done;
 
-    // P2-Eb: namespace (Plan 9 Pgrp). At v1.0 each Proc has its own
-    // private Pgrp (rfork(RFPROC) calls pgrp_clone). Phase 5+ adds
-    // RFNAMEG: shared namespace via refcount sharing.
-    struct Pgrp      *pgrp;
+    // P2-Eb: territory (Plan 9 Territory). At v1.0 each Proc has its own
+    // private Territory (rfork(RFPROC) calls territory_clone). Phase 5+ adds
+    // RFNAMEG: shared territory via refcount sharing.
+    struct Territory      *territory;
 
     // P2-Fc: handle table. Per-Proc fixed-size at v1.0 (PROC_HANDLE_MAX
     // slots; see <thylacine/handle.h>). proc_alloc allocates a fresh
@@ -121,7 +121,7 @@ struct Proc {
 
     // P3-Da: per-Proc VMA list (sorted by vaddr_start ascending). Each
     // VMA describes a contiguous user-VA range with permissions +
-    // backing VMO. The list is the address-space description against
+    // backing BURROW. The list is the address-space description against
     // which page faults are dispatched (P3-Dc); the per-Proc pgtable
     // (TTBR0) is the runtime translation built on demand from the
     // VMA list as faults fire.
@@ -160,7 +160,7 @@ void proc_free(struct Proc *p);
 //
 // `flags` selects which resources are shared vs cloned (per ARCH §7.4).
 // At v1.0 P2-D, only RFPROC is supported — all other flags trigger an
-// extinction. Subsequent sub-chunks add RFNAMEG (P2-E namespace),
+// extinction. Subsequent sub-chunks add RFNAMEG (P2-E territory),
 // RFFDG (P2-F fd table), RFMEM (P2-G address space), etc.
 //
 // `entry` is the kernel function the new process's initial thread will
@@ -185,7 +185,7 @@ int rfork(unsigned flags, void (*entry)(void *), void *arg);
 // rfork flags. Per ARCH §7.4. Only RFPROC implemented at P2-D.
 #define RFPROC      0x0001    // create a new Proc (always required)
 #define RFMEM       0x0002    // share address space (future P2-G)
-#define RFNAMEG     0x0004    // share namespace (future P2-E)
+#define RFNAMEG     0x0004    // share territory (future P2-E)
 #define RFFDG       0x0008    // share fd table (future P2-F)
 #define RFCRED      0x0010    // share credentials (future P2-G)
 #define RFNOTEG     0x0020    // share note queue (future Phase 5)

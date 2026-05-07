@@ -321,7 +321,7 @@ paddr_t mmu_kernel_ttbr0_pa(void);
 // frees every sub-table reached via a table descriptor, then frees
 // the L0 root. Leaf pages (L3 page descriptors / L2 block descriptors)
 // are NOT freed — those user-VA-mapped pages are owned by the VMA
-// layer (VMO mapping_count). The walker frees only translation-table
+// layer (BURROW mapping_count). The walker frees only translation-table
 // pages.
 //
 // Pre-P3-Db, this only freed the L0 page. P3-Db extended it to handle

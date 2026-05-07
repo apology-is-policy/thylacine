@@ -245,7 +245,7 @@ The human reviews diffs and sets direction. The agent implements, verifies, and 
 ┌─────────────────────────────────────────────────────────┐
 │ 2. Agent reads ARCHITECTURE.md §23.3 (poll spec)        │
 │    Checks ROADMAP.md Phase 5 exit criteria              │
-│    Reviews existing kernel/chan.c for readiness hooks   │
+│    Reviews existing kernel/spoor.c for readiness hooks   │
 │    Confirms specs/poll.tla scaffolded                   │
 └────────────────────┬────────────────────────────────────┘
                      ↓
@@ -295,9 +295,9 @@ The full list of nine TLA+ specs gate-tied to phases is in `NOVEL.md` Angle #8 a
 | # | Spec | Phase |
 |---|---|---|
 | 1 | `specs/scheduler.tla` | 2 |
-| 2 | `specs/namespace.tla` | 2 |
+| 2 | `specs/territory.tla` | 2 |
 | 3 | `specs/handles.tla` | 2 |
-| 4 | `specs/vmo.tla` | 3 |
+| 4 | `specs/burrow.tla` | 3 |
 | 5 | `specs/9p_client.tla` | 4 |
 | 6 | `specs/poll.tla` | 5 |
 | 7 | `specs/futex.tla` | 5 |
@@ -376,7 +376,7 @@ Pi 5 framebuffer via VideoCore mailbox:
 init:
   send mailbox FRAMEBUFFER_ALLOCATE: width=1920, height=1080, depth=32
   receive: physical address, pitch
-  map physical address into driver process VA (KObj_VMO physical)
+  map physical address into driver process VA (KObj_Burrow physical)
   expose /dev/fb/ 9P server as normal
 
 /dev/fb/image write:

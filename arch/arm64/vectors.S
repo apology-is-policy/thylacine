@@ -152,7 +152,7 @@
     mov     x0, sp
     mov     x1, #\idx
     bl      exception_unexpected
-    b       _hang                   // unreached; silences the assembler
+    b       _torpor                   // unreached; silences the assembler
 .endm
 
 // ---------------------------------------------------------------------------
@@ -182,7 +182,7 @@ _exception_vectors:
     KERNEL_ENTRY
     mov     x0, sp
     bl      exception_sync_curr_el
-    b       _hang                        /* unreached if extinction took over */
+    b       _torpor                        /* unreached if extinction took over */
 
     .org _exception_vectors + 0x080      /* IRQ — recoverable */
     KERNEL_ENTRY
@@ -214,7 +214,7 @@ _exception_vectors:
     KERNEL_ENTRY
     mov     x0, sp
     bl      exception_sync_curr_el
-    b       _hang                        /* unreached if extinction took over */
+    b       _torpor                        /* unreached if extinction took over */
 
     .org _exception_vectors + 0x280      /* IRQ — recoverable */
     KERNEL_ENTRY

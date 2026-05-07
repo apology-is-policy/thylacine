@@ -104,51 +104,51 @@ Liveness: TLC-clean at `Threads = {t1, t2}, CPUs = {c1}, MaxIPIs = 1` — 23 dis
 
 ---
 
-## namespace.tla — P2-Ea spec (impl at P2-Eb)
+## territory.tla — P2-Ea spec (impl at P2-Eb)
 
-Status: **cycle-freedom proven; isolation structural; impl deferred to P2-Eb.** Models the Plan 9 namespace primitives — `bind` as a directed graph with cycle-freedom (I-3) the primary state invariant. Isolation (I-1) is structural in the model: bindings[p] and bindings[q] for p # q are independent function values; no action updates two procs simultaneously. RFNAMEG (shared namespace) is deliberately not modeled at this phase — at v1.0 P2-E impl, rfork extincts on non-RFPROC flags, so the spec mirrors private-namespace-per-Proc semantics. Phase 5+ adds the Pgrp layer.
+Status: **cycle-freedom proven; isolation structural; impl deferred to P2-Eb.** Models the Plan 9 territory primitives — `bind` as a directed graph with cycle-freedom (I-3) the primary state invariant. Isolation (I-1) is structural in the model: bindings[p] and bindings[q] for p # q are independent function values; no action updates two procs simultaneously. RFNAMEG (shared territory) is deliberately not modeled at this phase — at v1.0 P2-E impl, rfork extincts on non-RFPROC flags, so the spec mirrors private-territory-per-Proc semantics. Phase 5+ adds the Territory layer.
 
 TLC-clean at `Procs = {p1, p2}, Paths = {a, b, c}` — 625 distinct states explored; depth 7. `namespace_buggy.cfg` (BUGGY_CYCLE=TRUE) produces a 2-bind cycle counterexample at depth 4 / 95 states.
 
 | Spec action | Source location | Notes |
 |---|---|---|
-| `Init` | `kernel/namespace.c::pgrp_init` (P2-Eb) | Empty bindings per Proc. At v1.0 P2-Eb the kernel proc (PID 0) starts with the boot-time ramfs bindings; spec models the abstract "namespace exists, empty" precondition. |
-| `Bind(p, src, dst)` | `kernel/namespace.c::bind` (P2-Eb) | The cycle-checked bind primitive. Calls cycle-detection (DFS or transitive-closure walk over the existing bindings) BEFORE inserting the edge. ARCH §9.1 says: "bind(old, new, flags) — attach a file or directory at another point in the tree." Spec's `(src, dst)` is `(old, new)` in ARCH terms. |
-| `Unbind(p, src, dst)` | `kernel/namespace.c::unmount` (P2-Eb) | Removes a bind edge. ARCH §9.1: "unmount(name, old) — remove a mount point." |
-| `ForkClone(parent, child)` | `kernel/proc.c::rfork` (P2-Eb extension) | Models rfork(RFPROC) without RFNAMEG: child gets a private copy of parent's namespace. v1.0 impl is at P2-Eb where rfork's flag handling extends to clone the Pgrp. |
+| `Init` | `kernel/territory.c::territory_init` (P2-Eb) | Empty bindings per Proc. At v1.0 P2-Eb the kernel proc (PID 0) starts with the boot-time ramfs bindings; spec models the abstract "territory exists, empty" precondition. |
+| `Bind(p, src, dst)` | `kernel/territory.c::bind` (P2-Eb) | The cycle-checked bind primitive. Calls cycle-detection (DFS or transitive-closure walk over the existing bindings) BEFORE inserting the edge. ARCH §9.1 says: "bind(old, new, flags) — attach a file or directory at another point in the tree." Spec's `(src, dst)` is `(old, new)` in ARCH terms. |
+| `Unbind(p, src, dst)` | `kernel/territory.c::unmount` (P2-Eb) | Removes a bind edge. ARCH §9.1: "unmount(name, old) — remove a mount point." |
+| `ForkClone(parent, child)` | `kernel/proc.c::rfork` (P2-Eb extension) | Models rfork(RFPROC) without RFNAMEG: child gets a private copy of parent's territory. v1.0 impl is at P2-Eb where rfork's flag handling extends to clone the Territory. |
 | `BuggyBind(p, src, dst)` | (none — bug class statically prevented if the impl uses a single `bind` entry point that always calls cycle-detection) | The bug class is "forgot to call cycle-check." The impl's bind() function structures the cycle-check as inseparable from the insert (verify-then-insert under the same lock). A future caller that bypasses bind() and modifies the mount table directly would re-introduce the bug. |
 
 | Spec invariant | Source enforcement |
 |---|---|
-| `NoCycle` (no path is reachable from its own bindings via transitive closure) | `kernel/namespace.c::bind`'s cycle-check before insert. The check walks the existing bind graph from `src` searching for `dst`; if found, the bind would close a cycle and bind() returns -1 with errstr("namespace cycle: cannot bind X onto Y"). |
+| `NoCycle` (no path is reachable from its own bindings via transitive closure) | `kernel/territory.c::bind`'s cycle-check before insert. The check walks the existing bind graph from `src` searching for `dst`; if found, the bind would close a cycle and bind() returns -1 with errstr("territory cycle: cannot bind X onto Y"). |
 
 ### P2-Ea landed (this chunk)
 
 - `bindings` variable + Reachable transitive-closure helper.
 - `Bind` / `BuggyBind` / `Unbind` / `ForkClone` actions.
 - `NoCycle` invariant + `WouldCreateCycle` precondition helper.
-- Two configs: namespace.cfg (clean) + namespace_buggy.cfg (counterexample at depth 4).
+- Two configs: territory.cfg (clean) + namespace_buggy.cfg (counterexample at depth 4).
 - Isolation documented as structural (per-Proc function values; no shared mutable state at this phase).
 
 ### P2-Eb impl targets (next chunk)
 
-- `kernel/include/thylacine/pgrp.h` — Pgrp struct (refcount + mount table).
-- `kernel/namespace.c` — `bind`, `unmount`, `pgrp_init`, `pgrp_clone`, lookup helpers.
-- `struct Proc` extended with `struct Pgrp *pgrp`.
-- `rfork` extended to call `pgrp_clone` for RFPROC (without RFNAMEG).
+- `kernel/include/thylacine/territory.h` — Territory struct (refcount + mount table).
+- `kernel/territory.c` — `bind`, `unmount`, `territory_init`, `territory_clone`, lookup helpers.
+- `struct Proc` extended with `struct Territory *territory`.
+- `rfork` extended to call `territory_clone` for RFPROC (without RFNAMEG).
 - Cycle-detection in `bind`: DFS over the existing bind graph.
-- New tests: `namespace.bind_smoke`, `namespace.cycle_rejected`, `namespace.fork_isolated`.
+- New tests: `territory.bind_smoke`, `territory.cycle_rejected`, `territory.fork_isolated`.
 
 ### Deferred
 
-- **RFNAMEG (shared namespace) at Phase 5+**: requires a separate Pgrp indirection layer in the spec (multiple Procs pointing at the same Pgrp). Isolation invariant becomes meaningful as a state predicate (Procs sharing a Pgrp see the same bindings; Procs with separate Pgrps don't). v1.0 P2-Eb extincts on RFNAMEG.
+- **RFNAMEG (shared territory) at Phase 5+**: requires a separate Territory indirection layer in the spec (multiple Procs pointing at the same Territory). Isolation invariant becomes meaningful as a state predicate (Procs sharing a Territory see the same bindings; Procs with separate Territories don't). v1.0 P2-Eb extincts on RFNAMEG.
 - **Walk determinism**: ARCH §9.1 lists "walk determinism" alongside cycle-freedom + isolation. The spec's binding graph is deterministic by construction (functional state); walk determinism is structurally satisfied. A separate state invariant could explicitly check "the lookup function is total + single-valued" — deferred.
 - **Mount union semantics (MBEFORE / MAFTER / MREPL flags)**: the spec models `bindings[p][dst]` as a SET (no ordering). The impl's union-list ordering matters for lookup priority but doesn't affect cycle-freedom. Phase 5+ extension can refine this.
 - **`mount` (9P-server-attaching variant)**: structurally identical to bind for the cycle-freedom + isolation invariants. Phase 4 (9P client) lands the impl.
 
 ## handles.tla — P2-Fa spec (impl at P2-Fc)
 
-Status: **rights ceiling proven; hardware-handle non-transferability proven; transfer-only-via-9P proven; capability monotonicity proven; impl deferred to P2-Fc.** Models the kernel handle table with typed kobjs partitioned into transferable + hardware sets, per-handle provenance tags, abstract 9P sessions, and per-Proc coarse capabilities. ARCH §28 invariants pinned: I-2 (capability monotonic reduction), I-4 (transfer only via 9P), I-5 (hardware handles non-transferable), I-6 (rights monotonic on transfer). I-7 (VMO refcount + mapping lifecycle) is OUT OF SCOPE — covered by `vmo.tla`.
+Status: **rights ceiling proven; hardware-handle non-transferability proven; transfer-only-via-9P proven; capability monotonicity proven; impl deferred to P2-Fc.** Models the kernel handle table with typed kobjs partitioned into transferable + hardware sets, per-handle provenance tags, abstract 9P sessions, and per-Proc coarse capabilities. ARCH §28 invariants pinned: I-2 (capability monotonic reduction), I-4 (transfer only via 9P), I-5 (hardware handles non-transferable), I-6 (rights monotonic on transfer). I-7 (BURROW refcount + mapping lifecycle) is OUT OF SCOPE — covered by `burrow.tla`.
 
 TLC-clean at `Procs = {p1, p2}, TxKObjs = {kx}, HwKObjs = {kh}, Rights = {R, T}, Caps = {C}` — 6,055,072 distinct states explored; depth 26; ~4 min on 8 cores. Buggy configs:
 
@@ -163,7 +163,7 @@ TLC-clean at `Procs = {p1, p2}, TxKObjs = {kx}, HwKObjs = {kh}, Rights = {R, T},
 |---|---|---|
 | `Init` | `kernel/handle.c::handle_init` (P2-Fc) | Per-Proc handle table allocated empty; ProcRoot starts with full caps. v1.0 P2-Fc has no rfork capability mask wiring; the spec's `proc_caps` is forward-looking for the Phase 5+ syscall surface. |
 | `HandleAlloc(p, k, granted)` | `kernel/handle.c::handle_alloc(struct Proc *, kobj_kind, kobj_t, rights_t)` (P2-Fc) | Kernel allocates a fresh kobj k of statically-typed kind, grants `granted` rights to proc p. Sets origin_rights[k] = granted permanently. Returns handle index. |
-| `HandleClose(p, h)` | `kernel/handle.c::handle_close(struct Proc *, hidx_t)` (P2-Fc) | Releases h from p's table. Decrements kobj's refcount; cascades to vmo_unref if last handle. |
+| `HandleClose(p, h)` | `kernel/handle.c::handle_close(struct Proc *, hidx_t)` (P2-Fc) | Releases h from p's table. Decrements kobj's refcount; cascades to burrow_unref if last handle. |
 | `HandleDup(p, h, new_rights)` | `kernel/handle.c::handle_dup(struct Proc *, hidx_t, rights_t new_rights)` (P2-Fc) | Creates a fresh handle in p's table sharing h's kobj with rights ⊆ h.rights. Rejects elevated rights with -EINVAL. |
 | `BuggyDupElevate(p, h, new_rights)` | (none — bug class statically prevented) | The impl's `handle_dup` checks `(new_rights & h->rights) == new_rights` (subset test) before insert. A future caller that bypasses this check would re-introduce the bug. |
 | `OpenSession / CloseSession` | (Phase 4: `kernel/9p_client.c::9p_attach / 9p_clunk`) | At v1.0 P2-Fc the spec models sessions abstractly; no impl callers. Phase 4's 9P client wires actual session lifecycle. |
@@ -206,55 +206,55 @@ TLC-clean at `Procs = {p1, p2}, TxKObjs = {kx}, HwKObjs = {kh}, Rights = {R, T},
 - **Per-Proc handle-table growth (Phase 5+)**: v1.0 P2-Fc has a fixed-size table (PROC_HANDLE_MAX); Phase 5+ refactors to growable. The spec is agnostic to the table representation — handles[p] is just a set.
 - **Cross-Proc handle accounting under transfer (Phase 4)**: the spec's HandleTransferVia9P creates a fresh dst handle without affecting src; impl-side, the kobj's refcount is incremented per fresh handle. Phase 4 audit verifies the refcount math.
 
-## vmo.tla — P2-Fb spec (impl at P2-Fd)
+## burrow.tla — P2-Fb spec (impl at P2-Fd)
 
-Status: **VMO refcount + mapping lifecycle proven; impl deferred to P2-Fd.** Models the dual-refcount discipline for Virtual Memory Objects per ARCH §19. Pins ARCH §28 invariant I-7 (pages live until last handle closed AND last mapping unmapped).
+Status: **BURROW refcount + mapping lifecycle proven; impl deferred to P2-Fd.** Models the dual-refcount discipline for Virtual Memory Objects per ARCH §19. Pins ARCH §28 invariant I-7 (pages live until last handle closed AND last mapping unmapped).
 
 TLC-clean at `VmoIds = {v1, v2}, MaxRefs = 2` — 100 distinct states explored; depth 9. Buggy configs:
 
 | Config | Flag | Invariant violated | Depth | Distinct states |
 |---|---|---|---|---|
-| `vmo_buggy_free_on_close.cfg` | `BUGGY_FREE_ON_HANDLE_CLOSE = TRUE` | `NoUseAfterFree` (premature) | 6 | 56 |
-| `vmo_buggy_free_on_unmap.cfg` | `BUGGY_FREE_ON_UNMAP = TRUE`        | `NoUseAfterFree` (premature) | 6 | 58 |
-| `vmo_buggy_never_free.cfg`    | `BUGGY_NEVER_FREE = TRUE`           | `NoUseAfterFree` (delayed)   | 6 | 43 |
+| `burrow_buggy_free_on_close.cfg` | `BUGGY_FREE_ON_HANDLE_CLOSE = TRUE` | `NoUseAfterFree` (premature) | 6 | 56 |
+| `burrow_buggy_free_on_unmap.cfg` | `BUGGY_FREE_ON_UNMAP = TRUE`        | `NoUseAfterFree` (premature) | 6 | 58 |
+| `burrow_buggy_never_free.cfg`    | `BUGGY_NEVER_FREE = TRUE`           | `NoUseAfterFree` (delayed)   | 6 | 43 |
 
 | Spec action | Source location | Notes |
 |---|---|---|
-| `Init` | `kernel/vmo.c::vmo_init` (P2-Fd) | SLUB cache for struct Vmo. No VMOs alive at boot. |
-| `VmoCreate(v)` | `kernel/vmo.c::vmo_create_anon(size)` (P2-Fd) | Allocates struct Vmo; allocates `size / PAGE_SIZE` pages from buddy; sets handle_count=1, mapping_count=0. Returns the new VMO; the caller's `handle_alloc` wraps it in a Handle. |
-| `HandleOpen(v)` | `kernel/vmo.c::vmo_ref(struct Vmo *)` (P2-Fd) | Atomic increment of handle_count. Called from `handle_dup` (intra-Proc) and (Phase 4) `handle_transfer_via_9p` (cross-Proc). |
-| `HandleClose(v)` | `kernel/vmo.c::vmo_unref(struct Vmo *)` (P2-Fd) | Atomic decrement of handle_count. If both counts reach 0, calls `vmo_free_pages` + `kmem_cache_free`. |
-| `BuggyFreeOnHandleClose(v)` | (none — bug class statically prevented) | The impl's `vmo_unref` checks BOTH counts before freeing: `if (h_count == 0 && m_count == 0) vmo_free_pages(...)`. A future caller that bypasses the check would re-introduce the bug. |
-| `MapVmo(v)` | `kernel/vmo.c::vmo_map(struct Vmo *)` (P2-Fd) | Atomic increment of mapping_count. Called from mmap_handle for VMO-backed VMAs. |
-| `UnmapVmo(v)` | `kernel/vmo.c::vmo_unmap(struct Vmo *)` (P2-Fd) | Atomic decrement of mapping_count. Same dual-check on free as vmo_unref. |
+| `Init` | `kernel/burrow.c::burrow_init` (P2-Fd) | SLUB cache for struct Burrow. No VMOs alive at boot. |
+| `VmoCreate(v)` | `kernel/burrow.c::burrow_create_anon(size)` (P2-Fd) | Allocates struct Burrow; allocates `size / PAGE_SIZE` pages from buddy; sets handle_count=1, mapping_count=0. Returns the new BURROW; the caller's `handle_alloc` wraps it in a Handle. |
+| `HandleOpen(v)` | `kernel/burrow.c::burrow_ref(struct Burrow *)` (P2-Fd) | Atomic increment of handle_count. Called from `handle_dup` (intra-Proc) and (Phase 4) `handle_transfer_via_9p` (cross-Proc). |
+| `HandleClose(v)` | `kernel/burrow.c::burrow_unref(struct Burrow *)` (P2-Fd) | Atomic decrement of handle_count. If both counts reach 0, calls `burrow_free_pages` + `kmem_cache_free`. |
+| `BuggyFreeOnHandleClose(v)` | (none — bug class statically prevented) | The impl's `burrow_unref` checks BOTH counts before freeing: `if (h_count == 0 && m_count == 0) burrow_free_pages(...)`. A future caller that bypasses the check would re-introduce the bug. |
+| `MapVmo(v)` | `kernel/burrow.c::burrow_map(struct Burrow *)` (P2-Fd) | Atomic increment of mapping_count. Called from mmap_handle for BURROW-backed VMAs. |
+| `UnmapVmo(v)` | `kernel/burrow.c::burrow_unmap(struct Burrow *)` (P2-Fd) | Atomic decrement of mapping_count. Same dual-check on free as burrow_unref. |
 | `BuggyFreeOnUnmap(v)` | (none — bug class statically prevented) | Same dual-check as BuggyFreeOnHandleClose; structural guarantee. |
-| `BuggyNoFreeHandleClose(v) / BuggyNoFreeUnmap(v)` | (none — bug class statically prevented) | The impl's `vmo_unref` and `vmo_unmap` always evaluate the dual-check at decrement time; no codepath skips the free transition when both counts reach 0. |
+| `BuggyNoFreeHandleClose(v) / BuggyNoFreeUnmap(v)` | (none — bug class statically prevented) | The impl's `burrow_unref` and `burrow_unmap` always evaluate the dual-check at decrement time; no codepath skips the free transition when both counts reach 0. |
 
 | Spec invariant | Source enforcement |
 |---|---|
-| `RefcountConsistent` (counts = 0 if not in vmos) | The impl's struct Vmo is allocated/freed via SLUB; counts are part of the struct. Before allocation: no struct Vmo exists, so counts are not addressable; "not in vmos" maps to "no Vmo struct allocated yet." |
-| `NoUseAfterFree` (pages alive iff at least one count > 0) | `vmo_unref` and `vmo_unmap` both check `(handle_count == 0 AND mapping_count == 0)` after their decrement; if true, free pages. The dual check is the runtime enforcement of I-7. |
+| `RefcountConsistent` (counts = 0 if not in vmos) | The impl's struct Burrow is allocated/freed via SLUB; counts are part of the struct. Before allocation: no struct Burrow exists, so counts are not addressable; "not in vmos" maps to "no Burrow struct allocated yet." |
+| `NoUseAfterFree` (pages alive iff at least one count > 0) | `burrow_unref` and `burrow_unmap` both check `(handle_count == 0 AND mapping_count == 0)` after their decrement; if true, free pages. The dual check is the runtime enforcement of I-7. |
 
 ### P2-Fb landed (this chunk)
 
-- `vmo.tla` (~290 LOC TLA+) + 4 cfg files (1 clean + 3 buggy variants).
-- VMO state: `vmos`, `handle_count[v]`, `mapping_count[v]`, `pages_alive`.
-- Per-VMO refcounts bounded by `MaxRefs` (CONSTANT) for TLC tractability.
+- `burrow.tla` (~290 LOC TLA+) + 4 cfg files (1 clean + 3 buggy variants).
+- BURROW state: `vmos`, `handle_count[v]`, `mapping_count[v]`, `pages_alive`.
+- Per-BURROW refcounts bounded by `MaxRefs` (CONSTANT) for TLC tractability.
 - Five spec actions: `VmoCreate`, `HandleOpen`, `HandleClose`, `MapVmo`, `UnmapVmo`.
 - Three buggy actions: premature-on-close, premature-on-unmap, never-free (with two delayed-free variants — close + unmap).
 - Two state invariants: `RefcountConsistent` + `NoUseAfterFree` (iff form catches both premature AND delayed free).
 
 ### P2-Fd impl targets (next chunk)
 
-- `kernel/include/thylacine/vmo.h` — struct Vmo (size + type + handle_count + mapping_count + pages); inline `vmo_ref` / `vmo_unref` (atomic ops).
-- `kernel/vmo.c` — `vmo_init`, `vmo_create_anon(size)`, `vmo_map`, `vmo_unmap`, `vmo_free_pages`. SLUB cache. Anonymous VMOs only at v1.0 (VMO_PHYS deferred to Phase 3 with the device tree's reserved-memory handling; VMO_FILE deferred post-v1.0).
-- New tests: `vmo.create_close_round_trip`, `vmo.refcount_lifecycle`, `vmo.map_unmap_lifecycle`, `vmo.handles_x_mappings_matrix` (combinations of close-before-unmap, unmap-before-close, etc., verifying pages free at the correct boundary).
+- `kernel/include/thylacine/burrow.h` — struct Burrow (size + type + handle_count + mapping_count + pages); inline `burrow_ref` / `burrow_unref` (atomic ops).
+- `kernel/burrow.c` — `burrow_init`, `burrow_create_anon(size)`, `burrow_map`, `burrow_unmap`, `burrow_free_pages`. SLUB cache. Anonymous VMOs only at v1.0 (VMO_PHYS deferred to Phase 3 with the device tree's reserved-memory handling; VMO_FILE deferred post-v1.0).
+- New tests: `burrow.create_close_round_trip`, `burrow.refcount_lifecycle`, `burrow.map_unmap_lifecycle`, `burrow.handles_x_mappings_matrix` (combinations of close-before-unmap, unmap-before-close, etc., verifying pages free at the correct boundary).
 
 ### Deferred
 
 - **Physical VMOs (VMO_PHYS) at Phase 3**: when the device tree's reserved-memory regions are exposed, drivers will need physical VMOs over fixed PA ranges (DMA buffers, framebuffer). Spec is agnostic to the backing type — refcount mechanics are identical.
 - **File-backed VMOs (VMO_FILE) post-v1.0**: integration with Stratum's page cache. Spec extension: VmoCreate variants per backing type; refcount mechanics unchanged.
-- **Concurrent map/unmap and ref/unref (Phase 5+)**: at v1.0 P2-F, the impl runs single-CPU; Phase 5+ adds a per-Vmo lock OR atomic-only operations. The spec is single-stepping (atomic transitions); Phase 5+ refinement may need finer-grained atomicity modeling.
+- **Concurrent map/unmap and ref/unref (Phase 5+)**: at v1.0 P2-F, the impl runs single-CPU; Phase 5+ adds a per-Burrow lock OR atomic-only operations. The spec is single-stepping (atomic transitions); Phase 5+ refinement may need finer-grained atomicity modeling.
 
 
 

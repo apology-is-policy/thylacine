@@ -1,22 +1,22 @@
----- MODULE vmo ----
+---- MODULE burrow ----
 (***************************************************************************)
-(* Thylacine VMO refcount lifecycle — P2-Fb spec.                          *)
+(* Thylacine BURROW refcount lifecycle — P2-Fb spec.                          *)
 (*                                                                         *)
 (* Models the refcount + mapping lifecycle for a Virtual Memory Object   *)
-(* (VMO) per ARCH §19. Pins ARCH §28 invariant I-7:                        *)
+(* (BURROW) per ARCH §19. Pins ARCH §28 invariant I-7:                        *)
 (*                                                                         *)
-(*   I-7 — VMO pages live until last handle closed AND last mapping       *)
+(*   I-7 — BURROW pages live until last handle closed AND last mapping       *)
 (*         unmapped.                                                        *)
 (*                                                                         *)
 (* Modeling decisions:                                                     *)
 (*                                                                         *)
-(*   Each VMO has two refcounts: handle_count (open handles) and         *)
+(*   Each BURROW has two refcounts: handle_count (open handles) and         *)
 (*   mapping_count (open mappings into address spaces). Pages exist iff    *)
 (*   at least one count is > 0; the moment both reach 0, pages MUST be   *)
 (*   freed.                                                                 *)
 (*                                                                         *)
 (*   We do NOT model individual handles or processes — handles.tla covers*)
-(*   the per-handle policy (rights, transferability, provenance). vmo.tla*)
+(*   the per-handle policy (rights, transferability, provenance). burrow.tla*)
 (*   focuses purely on the refcount mechanics. A handle dup or 9P transfer*)
 (*   collapses to "open another handle"; a process exit collapses to     *)
 (*   "close all handles in that process."                                 *)
@@ -35,15 +35,15 @@
 (* Buggy-config matrix (executable documentation per CLAUDE.md spec-first*)
 (* policy):                                                                *)
 (*                                                                         *)
-(*   vmo.cfg                       all flags FALSE — TLC proves          *)
+(*   burrow.cfg                       all flags FALSE — TLC proves          *)
 (*                                  NoUseAfterFree.                        *)
-(*   vmo_buggy_free_on_close.cfg   BUGGY_FREE_ON_HANDLE_CLOSE=TRUE —     *)
+(*   burrow_buggy_free_on_close.cfg   BUGGY_FREE_ON_HANDLE_CLOSE=TRUE —     *)
 (*                                  premature free on handle_count=0     *)
 (*                                  while mapping_count > 0.              *)
-(*   vmo_buggy_free_on_unmap.cfg   BUGGY_FREE_ON_UNMAP=TRUE —            *)
+(*   burrow_buggy_free_on_unmap.cfg   BUGGY_FREE_ON_UNMAP=TRUE —            *)
 (*                                  premature free on mapping_count=0    *)
 (*                                  while handle_count > 0.               *)
-(*   vmo_buggy_never_free.cfg      BUGGY_NEVER_FREE=TRUE —               *)
+(*   burrow_buggy_never_free.cfg      BUGGY_NEVER_FREE=TRUE —               *)
 (*                                  delayed/never free; pages alive at   *)
 (*                                  both counts = 0 (resource leak).      *)
 (*                                                                         *)
@@ -62,7 +62,7 @@
 EXTENDS Naturals, FiniteSets
 
 CONSTANTS
-    VmoIds,                          \* set of VMO identifiers (>= 1)
+    VmoIds,                          \* set of BURROW identifiers (>= 1)
     MaxRefs,                         \* Nat — bound on refcounts for TLC
     BUGGY_FREE_ON_HANDLE_CLOSE,      \* BOOLEAN
     BUGGY_FREE_ON_UNMAP,             \* BOOLEAN
@@ -98,14 +98,14 @@ Init ==
     /\ pages_alive = {}
 
 (***************************************************************************)
-(* VmoCreate(v) — allocate a fresh VMO of identity v. The creator gets    *)
+(* VmoCreate(v) — allocate a fresh BURROW of identity v. The creator gets    *)
 (* the first handle: handle_count[v] = 1. Pages are allocated.            *)
 (*                                                                         *)
 (* Each v can be created at most once (v \notin vmos). Bounds state space.*)
-(* In the impl, VMO identities are unique to their lifetime; freed VMOs  *)
+(* In the impl, BURROW identities are unique to their lifetime; freed VMOs  *)
 (* don't get re-created with the same id while modeling proceeds.         *)
 (*                                                                         *)
-(* Maps to `kernel/vmo.c::vmo_create_anon` (P2-Fd).                        *)
+(* Maps to `kernel/burrow.c::burrow_create_anon` (P2-Fd).                        *)
 (***************************************************************************)
 VmoCreate(v) ==
     /\ v \notin vmos
@@ -117,15 +117,15 @@ VmoCreate(v) ==
 (***************************************************************************)
 (* HandleOpen(v) — increment handle_count. Models a handle dup (within   *)
 (* a Proc) or a handle transfer (cross-Proc via 9P). Both produce a fresh*)
-(* handle to an existing VMO; both increment the count by 1.              *)
+(* handle to an existing BURROW; both increment the count by 1.              *)
 (*                                                                         *)
 (* Precondition: v's pages are alive (you can't open a handle to a freed*)
-(* VMO).                                                                   *)
+(* BURROW).                                                                   *)
 (*                                                                         *)
 (* Maps to `kernel/handle.c::handle_dup` and the eventual                  *)
 (* `kernel/handle.c::handle_transfer_via_9p` (Phase 4) for handles whose *)
-(* kobj is a VMO. Each call increments the VMO's handle_count via        *)
-(* `kernel/vmo.c::vmo_ref`.                                                *)
+(* kobj is a BURROW. Each call increments the BURROW's handle_count via        *)
+(* `kernel/burrow.c::burrow_ref`.                                                *)
 (***************************************************************************)
 HandleOpen(v) ==
     /\ v \in pages_alive
@@ -137,8 +137,8 @@ HandleOpen(v) ==
 (* HandleClose(v) — decrement handle_count. If both counts reach 0, free *)
 (* pages.                                                                  *)
 (*                                                                         *)
-(* Maps to `kernel/handle.c::handle_close` for VMO-typed handles +       *)
-(* `kernel/vmo.c::vmo_unref` (P2-Fd).                                      *)
+(* Maps to `kernel/handle.c::handle_close` for BURROW-typed handles +       *)
+(* `kernel/burrow.c::burrow_unref` (P2-Fd).                                      *)
 (***************************************************************************)
 HandleClose(v) ==
     /\ handle_count[v] > 0
@@ -154,7 +154,7 @@ HandleClose(v) ==
 (* BuggyFreeOnHandleClose(v) — premature free: pages dropped when        *)
 (* handle_count reaches 0 even if mapping_count > 0. UAF.                 *)
 (*                                                                         *)
-(* Real-world analogue: vmo_unref's free path forgets to check            *)
+(* Real-world analogue: burrow_unref's free path forgets to check            *)
 (* mapping_count. The VMA still references freed pages.                    *)
 (*                                                                         *)
 (* Caught by NoUseAfterFree.                                               *)
@@ -170,11 +170,11 @@ BuggyFreeOnHandleClose(v) ==
     /\ UNCHANGED <<vmos, mapping_count>>
 
 (***************************************************************************)
-(* MapVmo(v) — create a new mapping for VMO v in some address space.     *)
+(* MapVmo(v) — create a new mapping for BURROW v in some address space.     *)
 (* Increments mapping_count. Caller must already hold a handle (so v's   *)
 (* pages are alive).                                                       *)
 (*                                                                         *)
-(* Maps to `kernel/vmo.c::vmo_map` (P2-Fd) called from mmap_handle.       *)
+(* Maps to `kernel/burrow.c::burrow_map` (P2-Fd) called from mmap_handle.       *)
 (***************************************************************************)
 MapVmo(v) ==
     /\ v \in pages_alive
@@ -186,7 +186,7 @@ MapVmo(v) ==
 (* UnmapVmo(v) — destroy one mapping. Decrements mapping_count. If both  *)
 (* counts reach 0, free pages.                                             *)
 (*                                                                         *)
-(* Maps to `kernel/vmo.c::vmo_unmap` (P2-Fd) called from munmap.           *)
+(* Maps to `kernel/burrow.c::burrow_unmap` (P2-Fd) called from munmap.           *)
 (***************************************************************************)
 UnmapVmo(v) ==
     /\ mapping_count[v] > 0
@@ -202,7 +202,7 @@ UnmapVmo(v) ==
 (* BuggyFreeOnUnmap(v) — premature free: pages dropped when              *)
 (* mapping_count reaches 0 even if handle_count > 0. UAF.                 *)
 (*                                                                         *)
-(* Real-world analogue: vmo_unmap's free path forgets to check            *)
+(* Real-world analogue: burrow_unmap's free path forgets to check            *)
 (* handle_count. The handle still references freed pages.                  *)
 (*                                                                         *)
 (* Caught by NoUseAfterFree.                                               *)
@@ -222,7 +222,7 @@ BuggyFreeOnUnmap(v) ==
 (* the close/unmap action decrements the count but never triggers the    *)
 (* free transition, even when both counts reach 0. Resource leak.         *)
 (*                                                                         *)
-(* Real-world analogue: vmo_unref's free path is structured behind a      *)
+(* Real-world analogue: burrow_unref's free path is structured behind a      *)
 (* condition that's wrong (never fires) or a callsite that's missed.      *)
 (*                                                                         *)
 (* Caught by NoUseAfterFree (the iff form catches both premature AND     *)

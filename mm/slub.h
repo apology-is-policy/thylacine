@@ -11,7 +11,7 @@
 //     general-purpose. kmalloc(N) finds the next-larger cache; sizes
 //     above 2048 bypass to alloc_pages directly.
 //   - kmem_cache_create(name, size, align, flags) for typed caches
-//     (Phase 2: proc_cache, thread_cache, chan_cache, vmo_cache,
+//     (Phase 2: proc_cache, thread_cache, spoor_cache, burrow_cache,
 //     handle_cache).
 //
 // Bootstrap: a static `g_meta_cache` is initialized first so

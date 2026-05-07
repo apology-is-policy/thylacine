@@ -20,7 +20,7 @@
 //   demand_page.smoke
 //     Build a synthetic fault_info (from_user=true; vaddr inside a
 //     mapped VMA); call userland_demand_page; verify FAULT_HANDLED +
-//     L3 PTE installed at the expected index pointing at the VMO's
+//     L3 PTE installed at the expected index pointing at the BURROW's
 //     backing page.
 //
 //   demand_page.no_vma
@@ -48,7 +48,7 @@
 #include <thylacine/proc.h>
 #include <thylacine/types.h>
 #include <thylacine/vma.h>
-#include <thylacine/vmo.h>
+#include <thylacine/burrow.h>
 
 void test_pgtable_install_user_pte_smoke(void);
 void test_pgtable_install_user_pte_constraints(void);
@@ -259,11 +259,11 @@ static void make_fi(struct fault_info *fi, u64 vaddr, bool is_write, bool is_ins
 void test_demand_page_smoke(void) {
     struct Proc *p = make_proc();
     TEST_ASSERT(p != NULL, "proc_alloc failed");
-    struct Vmo *v = vmo_create_anon(ONE_PAGE);
-    TEST_ASSERT(v != NULL, "vmo_create_anon failed");
+    struct Burrow *v = burrow_create_anon(ONE_PAGE);
+    TEST_ASSERT(v != NULL, "burrow_create_anon failed");
 
-    int rc = vmo_map(p, v, USER_VA, ONE_PAGE, VMA_PROT_RW);
-    TEST_EXPECT_EQ(rc, 0, "vmo_map");
+    int rc = burrow_map(p, v, USER_VA, ONE_PAGE, VMA_PROT_RW);
+    TEST_EXPECT_EQ(rc, 0, "burrow_map");
 
     struct fault_info fi;
     make_fi(&fi, USER_VA + 0x100, /*is_write=*/false, /*is_instr=*/false);
@@ -271,15 +271,15 @@ void test_demand_page_smoke(void) {
     enum fault_result r = userland_demand_page(p, &fi);
     TEST_EXPECT_EQ(r, FAULT_HANDLED, "demand_page should resolve a mapped VA");
 
-    // Verify the L3 entry is now installed at USER_VA pointing at vmo->pages.
+    // Verify the L3 entry is now installed at USER_VA pointing at burrow->pages.
     u64 pte = walk_to_l3_entry(p->pgtable_root, USER_VA);
     TEST_ASSERT(pte != 0, "L3 entry not installed after demand_page");
     paddr_t expected_pa = page_to_pa(v->pages);
     TEST_EXPECT_EQ(pte & 0x0000FFFFFFFFF000ull, expected_pa,
-        "PTE PA must equal VMO's page 0 PA");
+        "PTE PA must equal BURROW's page 0 PA");
 
     drop_proc(p);
-    vmo_unref(v);
+    burrow_unref(v);
 }
 
 void test_demand_page_no_vma(void) {
@@ -299,12 +299,12 @@ void test_demand_page_no_vma(void) {
 void test_demand_page_permission_denied(void) {
     struct Proc *p = make_proc();
     TEST_ASSERT(p != NULL, "proc_alloc failed");
-    struct Vmo *v = vmo_create_anon(ONE_PAGE);
-    TEST_ASSERT(v != NULL, "vmo_create_anon failed");
+    struct Burrow *v = burrow_create_anon(ONE_PAGE);
+    TEST_ASSERT(v != NULL, "burrow_create_anon failed");
 
     // RO mapping.
-    int rc = vmo_map(p, v, USER_VA, ONE_PAGE, VMA_PROT_READ);
-    TEST_EXPECT_EQ(rc, 0, "vmo_map RO");
+    int rc = burrow_map(p, v, USER_VA, ONE_PAGE, VMA_PROT_READ);
+    TEST_EXPECT_EQ(rc, 0, "burrow_map RO");
 
     // Write fault on a RO mapping → denied.
     struct fault_info fi;
@@ -326,23 +326,23 @@ void test_demand_page_permission_denied(void) {
         "read fault on R VMA → FAULT_HANDLED");
 
     drop_proc(p);
-    vmo_unref(v);
+    burrow_unref(v);
 }
 
 void test_demand_page_lifecycle_round_trip(void) {
-    // Snapshot before any allocation. proc_free + vmo_unref must
+    // Snapshot before any allocation. proc_free + burrow_unref must
     // restore phys_free_pages to baseline.
     u64 free_before = phys_free_pages();
 
     struct Proc *p = make_proc();
     TEST_ASSERT(p != NULL, "proc_alloc failed");
 
-    // Allocate a 4-page VMO. vmo_create_anon rounds up to 2^order;
+    // Allocate a 4-page BURROW. burrow_create_anon rounds up to 2^order;
     // page_count=4 → order=2 → exactly 4 pages.
-    struct Vmo *v = vmo_create_anon(FOUR_PAGES);
-    TEST_ASSERT(v != NULL, "vmo_create_anon");
-    int rc = vmo_map(p, v, USER_VA, FOUR_PAGES, VMA_PROT_RW);
-    TEST_EXPECT_EQ(rc, 0, "vmo_map");
+    struct Burrow *v = burrow_create_anon(FOUR_PAGES);
+    TEST_ASSERT(v != NULL, "burrow_create_anon");
+    int rc = burrow_map(p, v, USER_VA, FOUR_PAGES, VMA_PROT_RW);
+    TEST_EXPECT_EQ(rc, 0, "burrow_map");
 
     // Demand-page each of the 4 pages.
     for (int i = 0; i < 4; i++) {
@@ -362,16 +362,16 @@ void test_demand_page_lifecycle_round_trip(void) {
         TEST_ASSERT(pte != 0, "L3 entry not installed for page i");
     }
 
-    // Drop the Proc. proc_free → vma_drain → vmo_release_mapping;
+    // Drop the Proc. proc_free → vma_drain → burrow_release_mapping;
     // proc_pgtable_destroy walks + frees L0 + L1 + L2 + L3.
     drop_proc(p);
-    // Drop the VMO's caller-held handle. Both counts → 0; vmo_free_internal
+    // Drop the BURROW's caller-held handle. Both counts → 0; burrow_free_internal
     // returns the 4 backing pages.
-    vmo_unref(v);
+    burrow_unref(v);
 
     u64 free_after = phys_free_pages();
     TEST_EXPECT_EQ(free_after, free_before,
         "phys_free_pages must return to baseline (no leak in demand-page "
-        "lifecycle: VMA → vmo_release_mapping; sub-tables → "
-        "proc_pgtable_destroy walker; backing pages → vmo_free_internal)");
+        "lifecycle: VMA → burrow_release_mapping; sub-tables → "
+        "proc_pgtable_destroy walker; backing pages → burrow_free_internal)");
 }

@@ -36,7 +36,7 @@ void extinction(const char *msg) {
     uart_puts("EXTINCTION: ");        // ABI prefix per TOOLING.md §10
     uart_puts(msg);
     uart_puts("\n");
-    _hang();                          // arch/arm64/start.S WFI loop
+    _torpor();                          // arch/arm64/start.S WFI loop
 }
 ```
 
@@ -100,14 +100,14 @@ The function was originally named `panic()` (per the priming docs and standard k
 
 Other thematic possibilities considered and held for future signoff:
 
-- `_hang` (the WFI loop) → could become `_torpor` (the marsupial deep-sleep state). Not blocked; held for explicit signoff.
+- `_torpor` (the WFI loop) → could become `_torpor` (the marsupial deep-sleep state). Not blocked; held for explicit signoff.
 - The audit prosecutor agent → "tracker" or "hunter" instead of "prosecutor"? Stratum uses "prosecutor"; preserving cross-project continuity is more valuable than thematic novelty.
 
 ---
 
 ## See also
 
-- `docs/reference/01-boot.md` — boot path; `_hang` is the underlying halt loop.
+- `docs/reference/01-boot.md` — boot path; `_torpor` is the underlying halt loop.
 - `docs/reference/03-mmu.md` — MMU + W^X; future fault path will use `pte_violates_wxe(pte)` + `extinction_with_addr(...)`.
 - `docs/TOOLING.md §10` — kernel ABI contract.
 - `CLAUDE.md` — operational framework; "Boot banner contract" references the EXTINCTION prefix.

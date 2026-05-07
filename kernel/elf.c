@@ -5,7 +5,7 @@
 // W^X-violating segments; produces a structured segment list.
 //
 // At v1.0 P2-Ga the loader is parse-only — it does NOT map segments
-// into an address space. Phase 3 wires the actual mapping (VMO-backed
+// into an address space. Phase 3 wires the actual mapping (BURROW-backed
 // segment + page fault demand paging). Phase 5+ adds the exec()
 // syscall surface that calls into this loader.
 //

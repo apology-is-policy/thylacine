@@ -29,8 +29,8 @@
 //   - Symbol table parsing not performed.
 //
 // Phase 3+ refinement:
-//   - VMO-backed segment mapping via vmo_map.
-//   - Demand paging from the segment's VMO.
+//   - BURROW-backed segment mapping via burrow_map.
+//   - Demand paging from the segment's BURROW.
 //   - exec() syscall surface in Phase 5+.
 //
 // Phase 5+ refinement:

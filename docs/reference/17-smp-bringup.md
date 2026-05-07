@@ -291,7 +291,7 @@ Implemented: P2-Ca + P2-Cb + P2-Cc + P2-Cd (Cda + Cdb + Cdc) at `<commit-pending
 - **Cross-CPU thread placement**: P2-Ce work-stealing. Currently `ready(t)` inserts into THIS CPU's tree; threads created on the boot CPU stay on the boot CPU.
 - **finish_task_switch pattern (closes SMP wait/wake race)**: P2-Cf.
 - **scheduler.tla SMP refinement** (per-CPU runqueues + Steal action + IPI ordering invariant I-18): P2-Cg.
-- **IPI_TLB_FLUSH / IPI_HALT / IPI_GENERIC** (ARCH §20.4): land when use-cases arrive (TLB shootdown for namespace rebind in Phase 5+; shutdown for clean halt; generic callback delivery).
+- **IPI_TLB_FLUSH / IPI_HALT / IPI_GENERIC** (ARCH §20.4): land when use-cases arrive (TLB shootdown for territory rebind in Phase 5+; shutdown for clean halt; generic callback delivery).
 - **Per-CPU SP_EL0 to high VA on secondaries**: P2-Ce (alongside per-CPU work delivery).
 - **Pi 5 / multi-cluster Aff{1,2,3} encoding**: Phase 7 hardening pass.
 

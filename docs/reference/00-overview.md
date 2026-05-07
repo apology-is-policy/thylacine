@@ -23,9 +23,9 @@ Target end state at v1.0:
   │  musl libc port, Linux ARM64 syscall shim               │
   ├─────────────────────────────────────────────────────────┤
   │  Kernel (Phase 1-4)                                     │
-  │  Namespace, EEVDF, VM, 9P client (pipelined),           │
-  │  Handle table, VMO manager, IRQ forwarding, Notes,      │
-  │  Dev, Chan, Pipes, rendezvous, PTY infrastructure       │
+  │  Territory, EEVDF, VM, 9P client (pipelined),           │
+  │  Handle table, BURROW manager, IRQ forwarding, Notes,      │
+  │  Dev, Spoor, Pipes, rendezvous, PTY infrastructure       │
   ├─────────────────────────────────────────────────────────┤
   │  Stratum (Phase 4 dependency; external)                 │
   │  PQ-encrypted, formally verified, COW filesystem        │
@@ -82,7 +82,7 @@ Reference: `ARCHITECTURE.md §10.2`, `§21`.
 |---|---|---|---|
 | 0 | ✅ complete | VISION + COMPARISON + NOVEL + ARCHITECTURE + ROADMAP + TOOLING + CLAUDE.md scripture | (the scripture itself) |
 | 1 | 🚧 in progress | P1-A/B/C landed: boot stub, UART, banner, Linux ARM64 image header, DTB parser, DTB-driven hardware discovery, MMU on with W^X, extinction (kernel ELE) infra. P1-C-extras (KASLR + guard page + EL2 drop) and P1-D (physical allocator) next. | phase1-status.md, reference/01-boot.md, reference/02-dtb.md, reference/03-mmu.md, reference/04-extinction.md |
-| 2 | — | Process model + EEVDF scheduler + handles + VMO | (planned) |
+| 2 | — | Process model + EEVDF scheduler + handles + BURROW | (planned) |
 | 3 | — | Userspace VirtIO drivers (no in-kernel virtio-blk) | (planned) |
 | 4 | — | 9P client + Stratum mount | (planned) |
 | 5 | — | Syscalls + musl + uutils + **Utopia** ships | (planned) |

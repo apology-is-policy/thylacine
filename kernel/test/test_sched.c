@@ -242,7 +242,7 @@ void test_sched_idle_in_wfi_observability(void) {
 
     // Boot CPU never enters per_cpu_main's wfi loop — stays FALSE.
     TEST_EXPECT_EQ(sched_idle_in_wfi(0), false,
-        "boot CPU is never in wfi (post-init runs in _hang's asm loop)");
+        "boot CPU is never in wfi (post-init runs in _torpor's asm loop)");
 
     // If running multi-CPU, secondaries should be in WFI by now.
     // Allow brief settle window for any in-flight ipi handling.

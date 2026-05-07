@@ -61,7 +61,7 @@ TTBR0_EL1 = (asid << 48) | pgtable_root
 
 #### `proc_pgtable_destroy(paddr_t root)` — P3-Db recursive walk
 
-Walks the L0 → L1 → L2 → L3 tree depth-first, freeing every translation-table page reachable via a table descriptor. Leaf pages (L3 page descriptors / L2 block descriptors) are NOT freed — those user-VA-mapped pages are owned by the VMA layer (VMO `mapping_count` lifecycle); the walker frees only translation-table pages. Idempotent on `root == 0` (kproc + rolled-back-pre-create paths hit a no-op).
+Walks the L0 → L1 → L2 → L3 tree depth-first, freeing every translation-table page reachable via a table descriptor. Leaf pages (L3 page descriptors / L2 block descriptors) are NOT freed — those user-VA-mapped pages are owned by the VMA layer (BURROW `mapping_count` lifecycle); the walker frees only translation-table pages. Idempotent on `root == 0` (kproc + rolled-back-pre-create paths hit a no-op).
 
 **Walk discipline**:
 1. For each L0 entry: skip invalid; for table descriptors, recurse into L1; (L0 has no block form on AArch64 stage-1 with 4-KiB granule, so the block-skip branch is dead at v1.0 but kept for symmetry).
@@ -242,7 +242,7 @@ Encoding: `ctx.ttbr0 = (ASID << 48) | pgtable_root_PA`. The ARM v8 TTBR0_EL1 lay
 
 ### Capability cross-reference
 
-The TTBR0 swap mechanism is the runtime enforcement of ARCH §28 I-1 (process isolation: namespace operations in process A don't affect process B). At v1.0 P3-Bdb the page tables are still empty (no user mappings until P3-D adds VMA + page-fault), but the ASID-tagged TLB + per-Proc TTBR0 root is the foundation. Phase 5+ extends to capability-typed kernel addressing per NOVEL §3.9 Contract D — the cpu_switch_context swap surface stays roughly identical; only the encoding becomes capability-derive.
+The TTBR0 swap mechanism is the runtime enforcement of ARCH §28 I-1 (process isolation: territory operations in process A don't affect process B). At v1.0 P3-Bdb the page tables are still empty (no user mappings until P3-D adds VMA + page-fault), but the ASID-tagged TLB + per-Proc TTBR0 root is the foundation. Phase 5+ extends to capability-typed kernel addressing per NOVEL §3.9 Contract D — the cpu_switch_context swap surface stays roughly identical; only the encoding becomes capability-derive.
 
 ## Known caveats / footguns
 

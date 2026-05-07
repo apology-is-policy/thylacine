@@ -9,7 +9,7 @@
 // (Phase 4 9P client) or an embedded ramfs (Phase 5 fs surface);
 // the v1.0 embedded blob is the bridge until ramfs lands.
 //
-// init_run() is called from boot_main() AFTER all kernel bring-up
+// joey_run() is called from boot_main() AFTER all kernel bring-up
 // (DTB, MMU, GIC, timer, proc/thread/sched, smp, in-kernel tests,
 // fault_test) and BEFORE the "Thylacine boot OK" banner. Boot order
 // rationale:
@@ -19,7 +19,7 @@
 //     TOOLING.md §10. /init's success is part of bring-up's success
 //     at v1.0, so it precedes the banner.
 //   - If /init fails (rfork OOM / exec_setup error / non-zero exit
-//     status), init_run extincts — surfaces as the EXTINCTION:
+//     status), joey_run extincts — surfaces as the EXTINCTION:
 //     prefix, which tools/test.sh recognizes as failure.
 //
 // At Phase 5+ when /init becomes long-running (real userspace
@@ -33,6 +33,6 @@
 // Build the embedded /init ELF, rfork a child Proc, exec_setup the blob,
 // userland_enter into EL0, wait_pid for completion, verify exit_status==0.
 // Extincts on any failure (so tools/test.sh observes EXTINCTION:).
-void init_run(void);
+void joey_run(void);
 
 #endif // THYLACINE_INIT_H

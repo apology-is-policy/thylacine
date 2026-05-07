@@ -37,9 +37,9 @@ done
 | # | Spec | Phase | Invariants |
 |---|---|---|---|
 | 1 | `scheduler.tla` | 2 | EEVDF correctness, IPI ordering, wakeup atomicity, work-stealing fairness |
-| 2 | `namespace.tla` | 2 | bind/mount semantics, cycle-freedom, isolation between processes |
+| 2 | `territory.tla` | 2 | bind/mount semantics, cycle-freedom, isolation between processes |
 | 3 | `handles.tla` | 2 | Rights monotonicity, transfer-via-9P invariant, hardware-handle non-transferability |
-| 4 | `vmo.tla` | 3 | Refcount + mapping lifecycle, no-use-after-free |
+| 4 | `burrow.tla` | 3 | Refcount + mapping lifecycle, no-use-after-free |
 | 5 | `9p_client.tla` | 4 | Tag uniqueness per session, fid lifecycle, out-of-order completion correctness, flow control |
 | 6 | `poll.tla` | 5 | Wait/wake state machine, missed-wakeup-freedom across N fds |
 | 7 | `futex.tla` | 5 | FUTEX_WAIT / FUTEX_WAKE atomicity (no wakeup lost between value check and sleep) |
@@ -89,7 +89,7 @@ CI runs TLC on every PR touching specified files. Failing TLC blocks merge.
 
 Per `CLAUDE.md` "Spec-first policy":
 
-If a feature touches a load-bearing invariant — concurrency, commit ordering, namespace operations, handle transfer, VMO lifecycle, 9P pipelining, scheduler IPI, futex atomicity, poll wait/wake, note delivery, PTY semantics, capability checks, anything in `ARCHITECTURE.md §28` Invariants list — the TLA+ model comes BEFORE the implementation.
+If a feature touches a load-bearing invariant — concurrency, commit ordering, territory operations, handle transfer, BURROW lifecycle, 9P pipelining, scheduler IPI, futex atomicity, poll wait/wake, note delivery, PTY semantics, capability checks, anything in `ARCHITECTURE.md §28` Invariants list — the TLA+ model comes BEFORE the implementation.
 
 Pure computation, test helpers, config parsing, CLI glue: skip the spec.
 
@@ -101,7 +101,7 @@ If you cannot articulate the invariant formally, you don't understand it well en
 
 Phase 0 complete; no specs written yet. All 9 land per phase per the table above:
 
-- Phase 2 (next): `scheduler.tla`, `namespace.tla`, `handles.tla`.
-- Phase 3: `vmo.tla`.
+- Phase 2 (next): `scheduler.tla`, `territory.tla`, `handles.tla`.
+- Phase 3: `burrow.tla`.
 - Phase 4: `9p_client.tla`.
 - Phase 5: `poll.tla`, `futex.tla`, `notes.tla`, `pty.tla`.

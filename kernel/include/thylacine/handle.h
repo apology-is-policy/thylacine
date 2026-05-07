@@ -3,18 +3,18 @@
 // Per ARCHITECTURE.md §18 + specs/handles.tla. A Handle is a per-Proc
 // integer index naming a kernel object the process is allowed to access.
 // Handles cannot be forged; they can only be received from the kernel
-// (e.g., as the return of `vmo_create`) or transferred via 9P (Phase 4).
+// (e.g., as the return of `burrow_create`) or transferred via 9P (Phase 4).
 //
 // At v1.0 P2-Fc:
-//   - Eight kobj kinds (per §18.2): Process / Thread / VMO / Chan
+//   - Eight kobj kinds (per §18.2): Process / Thread / BURROW / Spoor
 //     (transferable) + MMIO / IRQ / DMA / Interrupt (non-transferable).
 //   - Six rights (per §18.2): READ / WRITE / MAP / TRANSFER / DMA / SIGNAL.
 //   - Per-Proc HandleTable is a fixed-size array (PROC_HANDLE_MAX = 64).
 //     Phase 5+ refactors to growable RB-tree when the syscall surface
 //     lands.
 //   - Underlying-kobj refcount integration: not yet. handle_close just
-//     zeros the slot. P2-Fd integrates `vmo_unref` for KOBJ_VMO; future
-//     phases add refs for other kinds (struct Proc / Chan / etc.).
+//     zeros the slot. P2-Fd integrates `burrow_unref` for KOBJ_BURROW; future
+//     phases add refs for other kinds (struct Proc / Spoor / etc.).
 //   - Cross-Proc transfer (handle_transfer_via_9p): not yet. Phase 4
 //     wires the 9P out-of-band metadata path per §18.6.
 //   - Type partitioning (transferable vs hw) is enforced at compile time
@@ -46,8 +46,8 @@ enum kobj_kind {
     KOBJ_INVALID    = 0,    // zero-initialized; not usable
     KOBJ_PROCESS    = 1,    // a struct Proc *
     KOBJ_THREAD     = 2,    // a struct Thread *
-    KOBJ_VMO        = 3,    // a struct Vmo * (P2-Fd)
-    KOBJ_CHAN       = 4,    // an open 9P channel (Phase 4)
+    KOBJ_BURROW        = 3,    // a struct Burrow * (P2-Fd)
+    KOBJ_SPOOR       = 4,    // an open 9P channel (Phase 4)
     KOBJ_MMIO       = 5,    // an MMIO range, non-transferable
     KOBJ_IRQ        = 6,    // an IRQ subscription, non-transferable
     KOBJ_DMA        = 7,    // a DMA buffer, non-transferable
@@ -65,7 +65,7 @@ _Static_assert(KOBJ_KIND_COUNT == 9,
                "switch over kobj_kind (handle_transfer_via_9p, etc.)");
 
 // Per ARCH §28 I-4 + I-5: handles are partitioned into transferable
-// (Process / Thread / VMO / Chan — pass-able via 9P) and hardware
+// (Process / Thread / BURROW / Spoor — pass-able via 9P) and hardware
 // (MMIO / IRQ / DMA / Interrupt — non-transferable). KOBJ_INVALID is
 // neither.
 //
@@ -74,7 +74,7 @@ _Static_assert(KOBJ_KIND_COUNT == 9,
 // in both sets — a violation would silently let a hw handle transfer.
 #define KOBJ_KIND_TRANSFERABLE_MASK \
     ((1u << KOBJ_PROCESS) | (1u << KOBJ_THREAD) | \
-     (1u << KOBJ_VMO)     | (1u << KOBJ_CHAN))
+     (1u << KOBJ_BURROW)     | (1u << KOBJ_SPOOR))
 
 #define KOBJ_KIND_HW_MASK \
     ((1u << KOBJ_MMIO) | (1u << KOBJ_IRQ) | \
@@ -138,7 +138,7 @@ struct HandleTable *handle_table_alloc(void);
 
 // Release a HandleTable. Closes any open handles first (zeros their
 // slots; at v1.0 P2-Fc no underlying kobj refcount is decremented —
-// P2-Fd integrates vmo_unref for KOBJ_VMO; future phases wire the
+// P2-Fd integrates burrow_unref for KOBJ_BURROW; future phases wire the
 // other kinds).
 void handle_table_free(struct HandleTable *t);
 
@@ -190,8 +190,8 @@ struct Handle *handle_get(struct Proc *p, hidx_t h);
 hidx_t handle_dup(struct Proc *p, hidx_t h, rights_t new_rights);
 
 // Type classifiers. Map to the spec's TxKObjs / HwKObjs partitions.
-// kobj_kind_is_transferable returns true for Process / Thread / VMO /
-// Chan; kobj_kind_is_hw returns true for MMIO / IRQ / DMA / Interrupt.
+// kobj_kind_is_transferable returns true for Process / Thread / BURROW /
+// Spoor; kobj_kind_is_hw returns true for MMIO / IRQ / DMA / Interrupt.
 // KOBJ_INVALID returns false from both.
 bool kobj_kind_is_transferable(enum kobj_kind k);
 bool kobj_kind_is_hw(enum kobj_kind k);

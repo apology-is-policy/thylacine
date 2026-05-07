@@ -24,7 +24,7 @@
 //     return to buddy (proc_pgtable_destroy walks the tree, not just
 //     the L0 root).
 //
-// At v1.0 P3-Db the page table sits mostly empty — vmo_map installs
+// At v1.0 P3-Db the page table sits mostly empty — burrow_map installs
 // only VMAs (not PTEs); demand paging via P3-Dc populates sub-tables
 // on fault. The destroy_walk test exercises the walker by manually
 // installing the tree the way demand paging will once it lands.

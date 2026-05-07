@@ -47,27 +47,27 @@ set(KERNEL_SRCS
     test/test_rendez.c
     test/test_smp.c
     test/test_proc.c
-    test/test_namespace.c
+    test/test_territory.c
     test/test_handle.c
-    test/test_vmo.c
+    test/test_burrow.c
     test/test_elf.c
     test/test_asid.c
     test/test_directmap.c
     test/test_proc_pgtable.c
     test/test_fault_decode.c
     test/test_vma.c
-    test/test_vmo_map_proc.c
+    test/test_burrow_map_proc.c
     test/test_demand_page.c
     test/test_exec.c
     test/test_syscall.c
-    namespace.c
+    territory.c
     handle.c
-    vmo.c
+    burrow.c
     vma.c
     elf.c
     exec.c
     syscall.c
-    init.c
+    joey.c
 )
 
 set(KERNEL_LD_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/../arch/arm64/kernel.ld)

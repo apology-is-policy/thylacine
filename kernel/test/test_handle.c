@@ -25,7 +25,7 @@
 //
 //   handles.kind_classifiers
 //     Truth table: kobj_kind_is_transferable / kobj_kind_is_hw for every
-//     enum value (KOBJ_INVALID, PROCESS, THREAD, VMO, CHAN, MMIO, IRQ,
+//     enum value (KOBJ_INVALID, PROCESS, THREAD, BURROW, CHAN, MMIO, IRQ,
 //     DMA, INTERRUPT). Pins the spec's TxKObjs / HwKObjs partition.
 //
 // Maps to specs/handles.tla state invariants:
@@ -39,7 +39,7 @@
 #include "test.h"
 
 #include <thylacine/handle.h>
-#include <thylacine/pgrp.h>
+#include <thylacine/territory.h>
 #include <thylacine/proc.h>
 #include <thylacine/types.h>
 
@@ -55,8 +55,8 @@ void test_handles_kind_classifiers(void);
 static struct Proc *test_proc_make(void) {
     struct Proc *p = proc_alloc();
     if (!p) return NULL;
-    // proc_alloc leaves pgrp = NULL; proc_free's pgrp_unref(NULL) is a
-    // no-op, so that's fine for tests that don't exercise namespace.
+    // proc_alloc leaves territory = NULL; proc_free's territory_unref(NULL) is a
+    // no-op, so that's fine for tests that don't exercise territory.
     return p;
 }
 
@@ -140,7 +140,7 @@ void test_handles_rights_monotonic(void) {
     TEST_ASSERT(p != NULL, "test_proc_make returned NULL");
 
     // Parent has READ + WRITE.
-    hidx_t parent = handle_alloc(p, KOBJ_VMO, RIGHT_READ | RIGHT_WRITE, NULL);
+    hidx_t parent = handle_alloc(p, KOBJ_BURROW, RIGHT_READ | RIGHT_WRITE, NULL);
     TEST_ASSERT(parent >= 0, "parent alloc failed");
 
     // Dup with subset rights = READ. Succeeds.
@@ -150,7 +150,7 @@ void test_handles_rights_monotonic(void) {
     TEST_ASSERT(got != NULL, "child_read handle_get NULL");
     TEST_EXPECT_EQ(got->rights, (rights_t)RIGHT_READ,
         "child_read rights must be exactly READ");
-    TEST_EXPECT_EQ((int)got->kind, (int)KOBJ_VMO,
+    TEST_EXPECT_EQ((int)got->kind, (int)KOBJ_BURROW,
         "child_read kind preserved from parent");
 
     // Dup with same rights = READ + WRITE. Succeeds (subset of self is self).
@@ -259,14 +259,14 @@ void test_handles_full_table_oom(void) {
 }
 
 void test_handles_kind_classifiers(void) {
-    // Transferable: PROCESS, THREAD, VMO, CHAN.
+    // Transferable: PROCESS, THREAD, BURROW, CHAN.
     TEST_ASSERT(kobj_kind_is_transferable(KOBJ_PROCESS),
         "PROCESS must be transferable");
     TEST_ASSERT(kobj_kind_is_transferable(KOBJ_THREAD),
         "THREAD must be transferable");
-    TEST_ASSERT(kobj_kind_is_transferable(KOBJ_VMO),
-        "VMO must be transferable");
-    TEST_ASSERT(kobj_kind_is_transferable(KOBJ_CHAN),
+    TEST_ASSERT(kobj_kind_is_transferable(KOBJ_BURROW),
+        "BURROW must be transferable");
+    TEST_ASSERT(kobj_kind_is_transferable(KOBJ_SPOOR),
         "CHAN must be transferable");
 
     // Hardware: MMIO, IRQ, DMA, INTERRUPT.

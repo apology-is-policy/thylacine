@@ -1,6 +1,6 @@
 # 07 — SLUB kernel object allocator (as-built reference)
 
-The kernel's variable-size object allocator. SLUB-style (Linux's modern default since 2008): per-object-class slab pages with embedded freelist, per-cache partial-slab list, zero-overhead-per-free-object accounting. Layered on top of `mm/phys`'s `alloc_pages`. Provides `kmalloc(N)` / `kfree(p)` / `kmem_cache_*` for kernel objects — the foundation Phase 2's process / thread / handle / VMO / chan structures will build on.
+The kernel's variable-size object allocator. SLUB-style (Linux's modern default since 2008): per-object-class slab pages with embedded freelist, per-cache partial-slab list, zero-overhead-per-free-object accounting. Layered on top of `mm/phys`'s `alloc_pages`. Provides `kmalloc(N)` / `kfree(p)` / `kmem_cache_*` for kernel objects — the foundation Phase 2's process / thread / handle / BURROW / spoor structures will build on.
 
 P1-E deliverable. Standard kmalloc-{8..2048} caches plus a meta cache for `struct kmem_cache` itself; sizes above 2048 bypass slab and go directly through `alloc_pages`.
 
@@ -12,7 +12,7 @@ Reference: `ARCHITECTURE.md §6.4` (kernel object allocator design intent).
 
 ## Purpose
 
-`mm/phys.c` gives us 4 KiB / 2 MiB / etc. page chunks. Phase 2+ will allocate hundreds of variable-size structures (`struct Proc`, `struct Thread`, `struct Chan`, `struct VMO`, `struct Handle`, plus dynamically-sized buffers); doing each as a 4 KiB `kpage_alloc` would waste >99% of every allocation. SLUB groups same-size allocations into shared "slab" pages so the unused capacity in each page is amortized across many objects.
+`mm/phys.c` gives us 4 KiB / 2 MiB / etc. page chunks. Phase 2+ will allocate hundreds of variable-size structures (`struct Proc`, `struct Thread`, `struct Spoor`, `struct BURROW`, `struct Handle`, plus dynamically-sized buffers); doing each as a 4 KiB `kpage_alloc` would waste >99% of every allocation. SLUB groups same-size allocations into shared "slab" pages so the unused capacity in each page is amortized across many objects.
 
 Each `struct kmem_cache` owns:
 - A target object size + alignment.
@@ -205,7 +205,7 @@ struct page {
     struct page *next, *prev;       // free list / partial list / full list
     u32 order;                      // buddy order or slab order
     u32 flags;                      // PG_FREE / PG_RESERVED / PG_KERNEL / PG_SLAB
-    u32 refcount;                   // VMO refcount; slab: inuse count
+    u32 refcount;                   // BURROW refcount; slab: inuse count
     u32 _pad;
     void *slab_freelist;            // SLUB: head of free objects (NULL if not slab)
     struct kmem_cache *slab_cache;  // SLUB: cache backref (NULL if not slab)
@@ -311,7 +311,7 @@ Latency numbers are estimates — formal benchmarks at P1-I.
 - Multi-page slabs (`slab_order > 0`) for objects > 2048 bytes within `kmem_cache_create`. Currently rejected with NULL return; large kmalloc still works via `alloc_pages` direct path.
 - Per-CPU active-slab fast path (NCPUS=1 at P1-E; meaningful only when SMP arrives at P1-F).
 - Debug mode (red zones, poison patterns, allocation/free trace). Boot-cmdline opt-in lands at P1-I.
-- `slab_caches` enumeration via `/ctl/mem` (Phase 2 — needs the namespace + Dev infrastructure).
+- `slab_caches` enumeration via `/ctl/mem` (Phase 2 — needs the territory + Dev infrastructure).
 - 10000-iteration leak check + sanitizer matrix (P1-I).
 - Free-object cookie / double-free detection (P1-I or post-v1.0).
 
@@ -323,7 +323,7 @@ Latency numbers are estimates — formal benchmarks at P1-I.
 
 ### Single-page slabs only at v1.0
 
-`slab_order = 0` is hardcoded. For object sizes ≤ 2048 bytes, single-page slabs hold ≥ 2 objects per page (kmalloc-2048: 2 objects/page). For sizes ≤ 1024 bytes, ≥ 4 objects/page. For typical kernel objects (Phase 2's `struct Proc`, `struct Thread`, `struct Chan`, `struct VMO`, `struct Handle` are all < 512 bytes), we get ≥ 8 objects/page — comfortable.
+`slab_order = 0` is hardcoded. For object sizes ≤ 2048 bytes, single-page slabs hold ≥ 2 objects per page (kmalloc-2048: 2 objects/page). For sizes ≤ 1024 bytes, ≥ 4 objects/page. For typical kernel objects (Phase 2's `struct Proc`, `struct Thread`, `struct Spoor`, `struct BURROW`, `struct Handle` are all < 512 bytes), we get ≥ 8 objects/page — comfortable.
 
 If a Phase 2 caller creates a cache for objects > 2 KiB, `kmem_cache_create` returns NULL. The future bump to multi-page slabs (compound pages) is mechanical — primarily updating `slab_init_freelist` to thread across multiple pages and adjusting `pa_to_page` to derive the slab head from any page in the compound. Linux's slub_setup uses `__GFP_COMP` and the head/tail page distinction; we'd do the same.
 

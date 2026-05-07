@@ -20,10 +20,10 @@ The goal is to make `ARCHITECTURE.md` easier to write: each angle becomes a know
 | # | Angle | Risk | LOC estimate | Sequence |
 |---|---|---|---|---|
 | 1 | 9P as universal composition, totalized | Low | 6–8 KLOC C99 | Continuous, foundational |
-| 2 | Userspace drivers via typed handles + VMO zero-copy | Medium | 7–10 KLOC C99 + 8–12 KLOC Rust | Phase 2-3 |
+| 2 | Userspace drivers via typed handles + BURROW zero-copy | Medium | 7–10 KLOC C99 + 8–12 KLOC Rust | Phase 2-3 |
 | 3 | Pipelined 9P client with out-of-order completion | Low-medium | 3–5 KLOC C99 | Phase 4 (foundational for 4+) |
 | 4 | Halcyon: shell as the graphical environment | Medium-high | 8–12 KLOC Rust | Phase 8 (final) |
-| 5 | Stratum as native FS with namespace coupling | Low | 4–6 KLOC C99 (kernel side) | Phase 4 |
+| 5 | Stratum as native FS with territory coupling | Low | 4–6 KLOC C99 (kernel side) | Phase 4 |
 | 6 | EEVDF scheduler on Plan 9-heritage kernel | Medium | 4–6 KLOC C99 | Phase 2 |
 | 7 | SOTA security hardening from day one | Low-medium | 3–5 KLOC C99 (mostly compiler/linker config + targeted code) | Phase 1-2 |
 | 8 | Formal verification cadence: nine TLA+ specs | Low-medium | 4–6 KLOC TLA+ | Continuous |
@@ -45,21 +45,21 @@ Thylacine's totalization:
 
 - **Drivers as 9P servers** (covered by angle #2).
 - **POSIX surfaces as 9P servers**: `/proc`, `/dev`, `/sys`, `/dev/pts`, `/run`, `/tmp` are 9P trees served by dedicated processes (or kernel-internal `Dev`s for performance-critical ones). Linux programs see what they expect; underneath it's all 9P.
-- **The kernel's administrative interface** is `/ctl/` — a synthetic 9P tree exposing kernel configuration, scheduler stats, IRQ counts, namespace dumps, etc.
+- **The kernel's administrative interface** is `/ctl/` — a synthetic 9P tree exposing kernel configuration, scheduler stats, IRQ counts, territory dumps, etc.
 - **Halcyon mounts 9P servers** for everything it displays (framebuffer, video, fonts, etc.).
 - **Stratum is a 9P server** mounted as the root FS.
 - **janus is a 9P server** mounted as `/dev/janus/`.
 
 **Scope — in**:
-- Kernel `Dev` vtable + `Chan` + `Walkqid` + `attach` / `walk` / `open` / `read` / `write` / `clunk` / etc. as the unified resource interface.
+- Kernel `Dev` vtable + `Spoor` + `Walkqid` + `attach` / `walk` / `open` / `read` / `write` / `clunk` / etc. as the unified resource interface.
 - Kernel-internal `Dev` implementations: `cons`, `consctl`, `null`, `zero`, `random`, `proc`, `procfs`, `ctl`, `ramfs`.
 - Synthetic 9P servers (userspace) for: Linux-compat `/proc`, Linux-compat `/sys`, `/dev/pts/`, `/run/`.
 - Kernel 9P server-ification of itself: `/ctl/` is a kernel `Dev`.
-- Bind / mount / unmount syscalls as the only namespace composition primitives.
+- Bind / mount / unmount syscalls as the only territory composition primitives.
 - Union mounts via `bind(MBEFORE | MAFTER)`.
 
 **Scope — deferred** (post-v1.0):
-- 9P-over-network as a first-class composition primitive for distributed namespaces. 9P is network-capable today; we don't make multi-machine workflows a v1.0 design center.
+- 9P-over-network as a first-class composition primitive for distributed territories. 9P is network-capable today; we don't make multi-machine workflows a v1.0 design center.
 - 9P RPC extensions for service mesh / RPC-style use cases. The 9P read/write model is sufficient for v1.0.
 
 **Scope — out**:
@@ -67,7 +67,7 @@ Thylacine's totalization:
 - A separate IPC mechanism alongside 9P. There is exactly one composition mechanism in Thylacine.
 
 **Done definition**:
-- Every resource exposed by the OS is reachable as a path in some process's namespace.
+- Every resource exposed by the OS is reachable as a path in some process's territory.
 - Every operation against any resource is a 9P message (or a kernel-internal `Dev` call that mirrors 9P semantics).
 - A shell user can browse `/proc/<pid>/`, `/dev/`, `/dev/fb/`, `/net/tcp/`, `/dev/video/player/`, `/dev/janus/keys/` with `ls`, `cat`, `echo` — no special tools.
 - Adding a new "kernel feature" means writing a new 9P server, not modifying the kernel.
@@ -98,13 +98,13 @@ Thylacine's totalization:
 - **Microkernel RPC + custom protocol per subsystem** (MINIX 3 / Helios). Rejected because: this is exactly the fragmentation 9P is designed to eliminate. Each protocol is a new attack surface, a new client library, a new audit target.
 - **Linux-style mixed protocols (sockets + sysfs + procfs + netlink + dbus + ...)**. Rejected because: the same fragmentation problem at higher cost.
 
-**Sequence**: Foundational. Phase 1 (kernel skeleton) starts with `Dev` + `Chan` infrastructure. Phase 4 lands the 9P client. POSIX-compat 9P servers land at Phase 5-6. The model is in continuous refinement throughout v1.0; full totalization is verified at the Phase 7 audit pass (every kernel feature reachable as a 9P path) and re-validated at Phase 8 with Halcyon's additional 9P-server surface.
+**Sequence**: Foundational. Phase 1 (kernel skeleton) starts with `Dev` + `Spoor` infrastructure. Phase 4 lands the 9P client. POSIX-compat 9P servers land at Phase 5-6. The model is in continuous refinement throughout v1.0; full totalization is verified at the Phase 7 audit pass (every kernel feature reachable as a 9P path) and re-validated at Phase 8 with Halcyon's additional 9P-server surface.
 
 ---
 
-### 3.2 Angle #2 — Userspace drivers via typed kernel handles + VMO zero-copy
+### 3.2 Angle #2 — Userspace drivers via typed kernel handles + BURROW zero-copy
 
-**Why it's novel**: Fuchsia / Zircon pioneered the typed-handle + VMO model. seL4 has equivalent capability-based machinery. MINIX 3 has userspace drivers without the zero-copy zero-IPC-overhead story. **No system has combined typed handles + VMOs with 9P as the public driver interface and the subordination invariant making the 9P-mediated transfer the only path.** This is Thylacine's contribution — not the typed-handle model alone (Fuchsia has it) but its subordination to 9P as the universal composition mechanism.
+**Why it's novel**: Fuchsia / Zircon pioneered the typed-handle + BURROW model. seL4 has equivalent capability-based machinery. MINIX 3 has userspace drivers without the zero-copy zero-IPC-overhead story. **No system has combined typed handles + VMOs with 9P as the public driver interface and the subordination invariant making the 9P-mediated transfer the only path.** This is Thylacine's contribution — not the typed-handle model alone (Fuchsia has it) but its subordination to 9P as the universal composition mechanism.
 
 The model:
 
@@ -113,19 +113,19 @@ The model:
   - `KObj_IRQ` — right to receive a specific interrupt.
   - `KObj_DMA` — DMA-capable physically contiguous buffer (CMA-allocated).
 - These handles are **non-transferable by type**. The transfer syscall has no code path for them; attempting to transfer panics the offender. (Driver crashes are isolated; misbehaved-but-not-malicious driver bugs are not a hard kernel failure.)
-- Drivers expose results via a 9P server. Bulk data (framebuffer pixels, decoded video frames, packet rings) is shared via VMO handles transferred over the 9P session.
+- Drivers expose results via a 9P server. Bulk data (framebuffer pixels, decoded video frames, packet rings) is shared via BURROW handles transferred over the 9P session.
 - VMOs are first-class kernel objects: anonymous (zero-filled on demand), physical (pinned for DMA), or file-backed (Stratum page cache, post-v1.0). Reference-counted; pages live as long as any handle or mapping refers to them.
-- VMO handles transfer between processes only via 9P sessions (subordination invariant — VISION I-4).
+- BURROW handles transfer between processes only via 9P sessions (subordination invariant — VISION I-4).
 
 **Scope — in**:
-- Kernel handle table per-process; eight handle types (`Process`, `Thread`, `VMO`, `MMIO`, `IRQ`, `DMA`, `Chan`, `Interrupt`).
+- Kernel handle table per-process; eight handle types (`Process`, `Thread`, `BURROW`, `MMIO`, `IRQ`, `DMA`, `Spoor`, `Interrupt`).
 - Right-bit model with monotonic reduction on transfer.
-- Typed transfer syscall covering only `Transferable` handles (`Process`, `Thread`, `VMO`, `Chan`).
-- VMO manager: anonymous + physical, page lifecycle, mapping into address spaces.
+- Typed transfer syscall covering only `Transferable` handles (`Process`, `Thread`, `BURROW`, `Spoor`).
+- BURROW manager: anonymous + physical, page lifecycle, mapping into address spaces.
 - IRQ forwarding kernel infrastructure: hardware IRQ → kernel records → wakes the IRQ-handle blocker; zero kernel involvement after handle setup.
 - VirtIO core in kernel (transport-level only): virtqueue management, descriptor chains, IRQ hookup. Devices are userspace.
 - Userspace virtio-blk, virtio-net, virtio-input, virtio-gpu drivers (Rust) at Phase 3.
-- `vmo_create` / `vmo_create_physical` / `mmap_handle` / `irq_wait` syscalls.
+- `burrow_create` / `burrow_create_physical` / `mmap_handle` / `irq_wait` syscalls.
 
 **Scope — deferred** (post-v1.0):
 - IOMMU-mediated DMA isolation (ARM64 SMMU). v1.0 trusts driver processes; v2.0 adds IOMMU enforcement so driver bugs can't DMA over kernel memory.
@@ -135,23 +135,23 @@ The model:
 **Scope — out**:
 - General-purpose handle transfer outside 9P sessions. The subordination invariant is non-negotiable.
 - Transferable hardware handles. `KObj_MMIO`, `KObj_IRQ`, `KObj_DMA` are fundamentally untransferable.
-- Capability-based replacement of namespaces. Handles are private to drivers; namespaces are public.
+- Capability-based replacement of territories. Handles are private to drivers; territories are public.
 
 **Done definition**:
 - Phase 3 ships userspace virtio-blk, virtio-net, virtio-input as 9P servers, with all hardware access via typed handles. No in-kernel VirtIO device driver code at v1.0.
 - `KObj_MMIO`, `KObj_IRQ`, `KObj_DMA` cannot be transferred — verified by a runtime test that attempts `transfer(KObj_MMIO_handle)` and asserts a kernel-detected violation.
-- A VirtIO-GPU framebuffer write completes without copy: driver creates VMO, Halcyon receives handle via 9P, maps it, writes pixels, signals via `/dev/fb/ctl flush`. Verified by performance regression: zero-copy framebuffer write achieves > 99% of memcpy-bandwidth limit.
+- A VirtIO-GPU framebuffer write completes without copy: driver creates BURROW, Halcyon receives handle via 9P, maps it, writes pixels, signals via `/dev/fb/ctl flush`. Verified by performance regression: zero-copy framebuffer write achieves > 99% of memcpy-bandwidth limit.
 - Driver crash test: kill the virtio-blk driver mid-I/O. Kernel does not crash. Filesystem mount remains; subsequent mount-restart reconnects.
-- Specs `handles.tla` and `vmo.tla` clean under TLC.
+- Specs `handles.tla` and `burrow.tla` clean under TLC.
 
 **Dependencies**:
-- Phase 2 produces the handle table + VMO manager + IRQ forwarding infrastructure.
+- Phase 2 produces the handle table + BURROW manager + IRQ forwarding infrastructure.
 - Phase 3 produces the VirtIO core + userspace drivers.
-- 9P client (Phase 4) for cross-process VMO handle transfer.
+- 9P client (Phase 4) for cross-process BURROW handle transfer.
 
 **Complexity**:
 - Kernel handle table: ~1.5 KLOC (alloc, close, rights check, transfer-syscall typed dispatch).
-- VMO manager: ~2 KLOC (anonymous + physical paths, mapping, refcount, free).
+- BURROW manager: ~2 KLOC (anonymous + physical paths, mapping, refcount, free).
 - IRQ forwarding: ~1 KLOC (GIC-to-userspace dispatch, blocker wake).
 - VirtIO core: ~2 KLOC (virtqueue, descriptor chain, IRQ hookup).
 - Userspace virtio-blk driver: ~2 KLOC Rust.
@@ -161,9 +161,9 @@ The model:
 - Total: 7–10 KLOC C99 (kernel side) + 8–12 KLOC Rust (drivers).
 
 **Risk — Medium**:
-- Typed-handle model has prior production art (Fuchsia, seL4). Risk is correctness of our specific subordination invariant and the zero-copy path's lifetime correctness. `handles.tla` and `vmo.tla` cover these.
+- Typed-handle model has prior production art (Fuchsia, seL4). Risk is correctness of our specific subordination invariant and the zero-copy path's lifetime correctness. `handles.tla` and `burrow.tla` cover these.
 - Userspace IRQ-to-handler latency must hit the < 5µs p99 budget. ARM64 exception path is clean; ~1-2µs is achievable on Apple Silicon. If we miss this number, the entire driver model is performance-suspect.
-- Driver process crash recovery: when a driver crashes, all its 9P sessions clunk; the kernel must reclaim its handles cleanly. VMOs must remain alive for any other process holding their handles. This lifetime story is what `vmo.tla` proves.
+- Driver process crash recovery: when a driver crashes, all its 9P sessions clunk; the kernel must reclaim its handles cleanly. VMOs must remain alive for any other process holding their handles. This lifetime story is what `burrow.tla` proves.
 
 **Alternative approaches considered**:
 - **In-kernel drivers** (Linux model). Rejected: monolithic kernel; driver bugs crash kernel; updates require module reload. Phase 3 with in-kernel virtio-blk was the priming's expedience shortcut; rejected under SOTA tenet.
@@ -171,7 +171,7 @@ The model:
 - **Capability-based IPC for drivers** (Fuchsia model without 9P). Rejected: drivers expose 9P interfaces as the public contract; capabilities are private mechanisms.
 - **Process-per-driver-per-device** vs **one driver process for many devices**. Resolved: one driver process per *device class* (one virtio-blk process serving all virtio-blk devices), not per-device. Driver implements per-device state internally.
 
-**Sequence**: Phase 2 (handle infrastructure + VMO manager) → Phase 3 (VirtIO core + userspace drivers). The Phase 2 work is foundational; Phase 3 is the first live test of the model.
+**Sequence**: Phase 2 (handle infrastructure + BURROW manager) → Phase 3 (VirtIO core + userspace drivers). The Phase 2 work is foundational; Phase 3 is the first live test of the model.
 
 ---
 
@@ -264,7 +264,7 @@ The model:
 - Output appends to the buffer; old entries scroll off the top (configurable history depth).
 - Commands are entered at the bottom; output renders inline.
 - Image display: `display image.png` adds a graphical region, sized as the image dimensions.
-- Video: a 9P server (`/dev/video/player/`) decodes; Halcyon polls `frame` (which returns a VMO handle to the decoded frame buffer); blits to a graphical region; updates as `frame` content changes.
+- Video: a 9P server (`/dev/video/player/`) decodes; Halcyon polls `frame` (which returns a BURROW handle to the decoded frame buffer); blits to a graphical region; updates as `frame` content changes.
 - No overlapping regions, no resizable windows, no z-order. Time-ordered scroll.
 
 The Rust implementation matters: parsing bash-subset syntax, managing the scroll buffer state machine, decoding PNGs, rendering fonts via fontdue — these are exactly the domains where C UAF / overflow CVEs have been historically prolific. Rust's borrow checker eliminates the class.
@@ -277,7 +277,7 @@ The Rust implementation matters: parsing bash-subset syntax, managing the scroll
 - Video playback via `/dev/video/player/` — software H.264 decode at v1.0.
 - Bash-subset interactive parser: `cmd args`, `|`, `>`, `<`, `&`, `&&`, `||`, simple `$VAR` substitution. Job control (`Ctrl-Z` / `bg` / `fg`) at v1.0. Full bash compatibility is post-v1.0; programs that need bash-specific features run `bash` as a subshell.
 - 9P mount commands: `mount -t 9p server path`.
-- VMO handle reception: video frame buffers transferred zero-copy via 9P session.
+- BURROW handle reception: video frame buffers transferred zero-copy via 9P session.
 
 **Scope — deferred** (post-v1.0):
 - Hardware video decode via VirtIO video extension.
@@ -307,7 +307,7 @@ The Rust implementation matters: parsing bash-subset syntax, managing the scroll
 - Video decoder (software at v1.0) as 9P server — Phase 6.
 - `pthread`, `futex`, `poll`, `pty`, `termios` — Phase 5.
 - `bash` port — Phase 5.
-- VMO handle transfer over 9P — Phase 4.
+- BURROW handle transfer over 9P — Phase 4.
 
 **Complexity**:
 - Scroll buffer model + rendering: ~3 KLOC Rust.
@@ -335,16 +335,16 @@ The Rust implementation matters: parsing bash-subset syntax, managing the scroll
 
 ---
 
-### 3.5 Angle #5 — Stratum as native filesystem with namespace coupling
+### 3.5 Angle #5 — Stratum as native filesystem with territory coupling
 
-**Why it's novel**: most OSes have *a* filesystem — usually whatever the kernel ships (ext4, NTFS, APFS, Minfs). Plan 9 had cwfs / fossil / kfs — adequate but not state-of-the-art. **No OS has a filesystem as advanced as Stratum (PQ-encrypted, formally verified, Merkle-rooted, content-defined chunking, lock-free metadata, succinct in-RAM state) AND has the OS's namespace model coupled to the filesystem's namespace model AND has the OS-FS interface be exactly the protocol the FS already speaks**. Thylacine on Stratum is a unique combination because Stratum was independently designed to be 9P-native; the coupling is a free lunch.
+**Why it's novel**: most OSes have *a* filesystem — usually whatever the kernel ships (ext4, NTFS, APFS, Minfs). Plan 9 had cwfs / fossil / kfs — adequate but not state-of-the-art. **No OS has a filesystem as advanced as Stratum (PQ-encrypted, formally verified, Merkle-rooted, content-defined chunking, lock-free metadata, succinct in-RAM state) AND has the OS's territory model coupled to the filesystem's territory model AND has the OS-FS interface be exactly the protocol the FS already speaks**. Thylacine on Stratum is a unique combination because Stratum was independently designed to be 9P-native; the coupling is a free lunch.
 
 The model:
 
 - Stratum runs as a userspace daemon. The kernel mounts it at `/` via `mount(stratum_fd, "/", ...)` after the initramfs phase.
 - The kernel's 9P client speaks 9P2000.L + Stratum extensions (Tbind, Tunbind, Tpin, Tunpin, Tsync, Treflink, Tfallocate) to Stratum.
 - Each Thylacine process gets its own 9P connection to Stratum (one connection per Proc; at v1.0 — see VISION §11 for the rationale).
-- Per-connection Stratum namespace = per-process Thylacine namespace inside Stratum's purview. Composition within Stratum (multiple subvolumes overlaid) uses Stratum's `Tbind` / `Tunbind`. Composition across servers (Stratum + a network FS) uses Thylacine's `bind` / `mount` (kernel-level).
+- Per-connection Stratum territory = per-process Thylacine territory inside Stratum's purview. Composition within Stratum (multiple subvolumes overlaid) uses Stratum's `Tbind` / `Tunbind`. Composition across servers (Stratum + a network FS) uses Thylacine's `bind` / `mount` (kernel-level).
 - Stratum's per-extent encryption, Merkle integrity, lock-free metadata, snapshots, clones, send/recv, dedup — all transparent to the kernel. The kernel sees: 9P operations succeed or fail; when they succeed, the data is integrity-verified.
 - Stratum's `janus` key agent runs as another userspace 9P server (`/dev/janus/`). Halcyon, programs needing key-mediated operations, interact with janus over 9P.
 
@@ -366,7 +366,7 @@ The model:
 **Done definition**:
 - Phase 4: kernel mounts Stratum at `/`; `ls`, `cat`, `mkdir`, `rm`, `cp` all work.
 - Reboot test: data written before reboot is present after reboot, integrity-verified by Stratum's Merkle layer.
-- Per-process namespace test: process A binds `/home/alice` from one subvolume, process B binds `/home/alice` from another; both succeed without interference.
+- Per-process territory test: process A binds `/home/alice` from one subvolume, process B binds `/home/alice` from another; both succeed without interference.
 - janus integration: a passphrase-protected dataset can be unwrapped via janus and become readable.
 - 9P round-trip latency (Stratum loopback) p99 < 500µs.
 - Stress: 1000 concurrent file operations across 10 connections without leak or protocol error.
@@ -515,7 +515,7 @@ The model:
 - IPE (Integrity Policy Enforcement) policies for binary integrity at exec time.
 
 **Scope — out**:
-- Mandatory access control (SELinux / AppArmor equivalent). The namespace model provides isolation; MAC is a different threat model. v2.x consideration.
+- Mandatory access control (SELinux / AppArmor equivalent). The territory model provides isolation; MAC is a different threat model. v2.x consideration.
 - Kernel module signature verification. v1.0 has no loadable kernel modules; the question is moot.
 
 **Done definition**:
@@ -570,9 +570,9 @@ The nine specs:
 | # | Spec | What it proves | Phase |
 |---|---|---|---|
 | 1 | `scheduler.tla` | Per-CPU EEVDF correctness, IPI ordering, wakeup atomicity, work-stealing fairness | Phase 2 |
-| 2 | `namespace.tla` | bind/mount semantics, cycle-freedom, isolation between processes | Phase 2 |
+| 2 | `territory.tla` | bind/mount semantics, cycle-freedom, isolation between processes | Phase 2 |
 | 3 | `handles.tla` | Rights monotonicity, transfer-via-9P invariant, hardware-handle non-transferability | Phase 2 |
-| 4 | `vmo.tla` | Refcount + mapping lifecycle, no-use-after-free | Phase 3 |
+| 4 | `burrow.tla` | Refcount + mapping lifecycle, no-use-after-free | Phase 3 |
 | 5 | `9p_client.tla` | Tag uniqueness per session, fid lifecycle, out-of-order completion correctness, flow control | Phase 4 |
 | 6 | `poll.tla` | Wait/wake state machine, missed-wakeup-freedom across N fds | Phase 5 |
 | 7 | `futex.tla` | FUTEX_WAIT / FUTEX_WAKE atomicity (no wakeup lost between value check and sleep) | Phase 5 |
@@ -608,9 +608,9 @@ The nine specs:
 
 **Complexity**:
 - `scheduler.tla`: ~500 lines.
-- `namespace.tla`: ~400 lines.
+- `territory.tla`: ~400 lines.
 - `handles.tla`: ~400 lines.
-- `vmo.tla`: ~350 lines.
+- `burrow.tla`: ~350 lines.
 - `9p_client.tla`: ~600 lines (most complex; multi-tag pipelining).
 - `poll.tla`: ~400 lines.
 - `futex.tla`: ~300 lines.
@@ -632,7 +632,7 @@ The nine specs:
 - **Alloy** (bounded model checking). Considered; less well-suited to liveness properties than TLA+. TLA+ is the better fit for OS protocols.
 - **No formal verification, rely on tests + audits**. Rejected: SOTA tenet; the audit-only model has missed bugs Stratum's specs caught.
 
-**Sequence**: Continuous from Phase 0. `scheduler.tla` and `namespace.tla` and `handles.tla` are Phase 2 deliverables. `vmo.tla` is Phase 3. `9p_client.tla` is Phase 4. `poll.tla`, `futex.tla`, `notes.tla`, `pty.tla` are Phase 5.
+**Sequence**: Continuous from Phase 0. `scheduler.tla` and `territory.tla` and `handles.tla` are Phase 2 deliverables. `burrow.tla` is Phase 3. `9p_client.tla` is Phase 4. `poll.tla`, `futex.tla`, `notes.tla`, `pty.tla` are Phase 5.
 
 ---
 
@@ -665,11 +665,11 @@ The three contracts:
 - v2.x explores a capability-based kernel addressing discipline inspired by seL4 (capability-mediated kernel memory) and CHERI (hardware-tagged pointers with bounds + permissions). The natural extension of Thylacine's existing handles.tla discipline applied INWARD: the same capability-monotonicity rules that govern user-facing handles would govern kernel-internal addressing.
 - The contract: the v1.0 kernel direct map is **explicitly the pragmatic compromise**, not the principled SOTA. The kernel allocator's API surface (`kmem_cache_alloc`, `alloc_pages`, `kmalloc`) is structured so that v2.x can swap the implementation behind it from "raw void * pointers into direct map" to "typed kernel capabilities with explicit bounds + permissions" without callers needing rewrites — the call sites use the cache + size + flags interface, not raw arithmetic on PAs.
 - The honest framing: the direct map exposes every byte of RAM to every line of kernel code (full speculative-load attack surface; no subsystem differentiation between filesystem cache vs process credentials). seL4's principled answer (no kernel direct map; explicit capability-mediated allocation) is multi-year and requires Rust (or CHERI hardware) — C's type system can't express provably-safe capabilities. v2.x is the right horizon.
-- v1.0 work: this NOVEL section (the contract); a brief paragraph in `ARCHITECTURE.md §6` referencing it; ensure SLUB / buddy / VMO call sites use the capability-amenable API surface (already true at v1.0); document the SLUB PA-as-VA convention's removal at P3-Bb so the path is reversible.
+- v1.0 work: this NOVEL section (the contract); a brief paragraph in `ARCHITECTURE.md §6` referencing it; ensure SLUB / buddy / BURROW call sites use the capability-amenable API surface (already true at v1.0); document the SLUB PA-as-VA convention's removal at P3-Bb so the path is reversible.
 - v1.0 commitment that survives: every direct-map PTE is **R/W + XN unconditionally** — kernel direct map is data, never code. W^X invariant I-12 holds at the alias level (the same physical page mapped R/X via kernel image VA is mapped R/W + XN via direct map; never both). KASLR-randomization of the direct-map base is deferred to a v1.x hardening pass (the offset is currently fixed at `0xFFFF_0000_0000_0000`).
 
 **Scope — in** (Phase 0 design effort):
-- `ARCHITECTURE.md §15.4` — capability elevation via factotum: protocol sketch, threat model, granted-capability shape, integration with `rfork` flags, interaction with namespaces.
+- `ARCHITECTURE.md §15.4` — capability elevation via factotum: protocol sketch, threat model, granted-capability shape, integration with `rfork` flags, interaction with territories.
 - `ARCHITECTURE.md §20.6` — multikernel SMP direction: per-core kernel instance shape, cross-core 9P channels, hot-plug handling, NUMA story.
 - `ARCHITECTURE.md §14.4` — in-kernel Stratum driver: shared-library linkage model, kernel-side handle types, integration with existing Dev infrastructure.
 - `ARCHITECTURE.md §6.10` — capability-based kernel addressing direction (added at P3-Bb): the v2.x principled alternative to the direct map; references seL4 / CHERI; identifies what v1.0 commits that survives the migration vs what changes.
@@ -714,16 +714,16 @@ Natural order, derived from the dependencies:
 ### Phase A — Foundations (Phases 1-2 of ROADMAP)
 
 - **Angle #7 — SOTA security hardening.** Build flags + KASLR + ARM hardening in place from Phase 1. Continued through Phase 2 (W^X enforcement).
-- **Angle #1 — 9P as universal composition.** Kernel `Dev` framework + `Chan` from Phase 1. Foundational for everything.
+- **Angle #1 — 9P as universal composition.** Kernel `Dev` framework + `Spoor` from Phase 1. Foundational for everything.
 - **Angle #6 — EEVDF scheduler.** Phase 2 deliverable.
-- **Angle #2 — Userspace driver infrastructure.** Phase 2 produces the handle table + VMO manager + IRQ forwarding; Phase 3 lights up userspace drivers.
-- **Angle #8 — Formal verification.** `scheduler.tla`, `namespace.tla`, `handles.tla` at Phase 2.
+- **Angle #2 — Userspace driver infrastructure.** Phase 2 produces the handle table + BURROW manager + IRQ forwarding; Phase 3 lights up userspace drivers.
+- **Angle #8 — Formal verification.** `scheduler.tla`, `territory.tla`, `handles.tla` at Phase 2.
 
 ### Phase B — Storage + 9P (Phase 4 of ROADMAP)
 
 - **Angle #3 — Pipelined 9P client.** Phase 4 deliverable, foundational for Phase 4-8.
 - **Angle #5 — Stratum integration.** Phase 4 deliverable.
-- **Angle #8 — Formal verification.** `vmo.tla` at Phase 3, `9p_client.tla` at Phase 4.
+- **Angle #8 — Formal verification.** `burrow.tla` at Phase 3, `9p_client.tla` at Phase 4.
 
 ### Phase C — Userspace + Utopia (Phases 5-7 of ROADMAP)
 
@@ -735,7 +735,7 @@ Natural order, derived from the dependencies:
 
 - **Angle #1 — Linux-shaped POSIX surfaces** (`/proc-linux`, `/sys-linux`, `/dev-linux`) as 9P servers. Phase 6 deliverable.
 - **Linux ARM64 binary shim.** Top-50 syscall coverage. Phase 6 deliverable.
-- **OCI container as namespace.** Phase 6 deliverable.
+- **OCI container as territory.** Phase 6 deliverable.
 - **Network stack** (smoltcp Rust port, with Plan 9 IP fallback option). Phase 6 deliverable.
 
 ### Phase E — Hardening + audit + v1.0-rc (Phase 7 of ROADMAP)

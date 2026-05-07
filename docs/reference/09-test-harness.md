@@ -21,7 +21,7 @@ The harness is freestanding-friendly: no constructors, no linker sections, no ho
 **What we deliberately don't test (yet)**:
 
 - **Internal data-structure invariants of evolving subsystems**: e.g., the buddy free-list shape, SLUB partial-list discipline, per-thread stack layout. These tests would need rewriting whenever the subsystem grows (P1-G adds GIC dispatch; Phase 2 adds per-CPU active slabs; etc.). We instead test the public smoke flows, which exercise those invariants implicitly.
-- **Evolving APIs**: scheduler, namespace, handle table, VMO, 9P client. These get tests when their APIs stabilize at Phase 2/3/4 exit.
+- **Evolving APIs**: scheduler, territory, handle table, BURROW, 9P client. These get tests when their APIs stabilize at Phase 2/3/4 exit.
 - **Concurrency / race conditions**: TSan + TLA+ specs at P1-I and Phase 2 spec gates.
 - **Sanitizer-instrumented runs**: ASan + UBSan at P1-I.
 
@@ -275,7 +275,7 @@ The harness adds boot time but keeps the kernel honest. Phase 2's gate on Phase 
 - Host-side test target (compile leaf modules with `-fsanitize=address,undefined` for x86_64 host runs). P1-I deliverable.
 - 10000-iteration alloc/free leak check (per ROADMAP §4.2 exit criterion). P1-I.
 - TLA+ spec runs gated to test-target builds. P1-I.
-- Tests for evolving subsystems: scheduler (Phase 2), namespace (Phase 2), handle table (Phase 2), 9P client (Phase 4), POSIX surface (Phase 5), syscalls (Phase 5).
+- Tests for evolving subsystems: scheduler (Phase 2), territory (Phase 2), handle table (Phase 2), 9P client (Phase 4), POSIX surface (Phase 5), syscalls (Phase 5).
 - Deliberate-failure test (verifies the runner reports FAIL correctly). P1-I.
 
 **Landed**: cross-cutting harness addition between P1-F and P1-G; commit `c3f9196`.
@@ -286,13 +286,13 @@ The harness adds boot time but keeps the kernel honest. Phase 2's gate on Phase 
 
 ### Boot-time only
 
-`test_run_all` is called once from `boot_main`. There's no way to re-run tests at v1.0 (no `/proc/sys/kernel/test/run` knob, no signal handler). Phase 2's `/ctl/` namespace + the kernel `Dev` infrastructure can expose a re-run knob if needed.
+`test_run_all` is called once from `boot_main`. There's no way to re-run tests at v1.0 (no `/proc/sys/kernel/test/run` knob, no signal handler). Phase 2's `/ctl/` territory + the kernel `Dev` infrastructure can expose a re-run knob if needed.
 
 ### Tests share the live kernel state
 
 All tests run against the same kernel: same allocator, same DTB parser, same struct page array. A test that corrupts global state pollutes subsequent tests. The smoke-test pattern (capture baseline, perform work, assert baseline restored) catches most drift, but a test that leaks 1 KiB of memory and 1 byte of `g_zone0` accounting wouldn't be caught locally — it'd show up only as a drift in a later test.
 
-For regression coverage of leaf APIs this is fine. For invariant-bearing tests (Phase 2+ scheduler races, namespace cycles), the spec-first methodology kicks in; runtime tests are a complement, not the primary defense.
+For regression coverage of leaf APIs this is fine. For invariant-bearing tests (Phase 2+ scheduler races, territory cycles), the spec-first methodology kicks in; runtime tests are a complement, not the primary defense.
 
 ### Stack budget
 

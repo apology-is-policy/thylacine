@@ -7,7 +7,7 @@
 //
 // At P3-Dc the dispatcher resolves user-mode faults via demand paging:
 // `userland_demand_page` looks up the VMA covering the faulting VA,
-// validates the access type against VMA prot, resolves the VMO offset
+// validates the access type against VMA prot, resolves the BURROW offset
 // to a backing PA, and installs a leaf PTE in the per-Proc TTBR0 tree
 // (mmu_install_user_pte). On success the ERET resumes the faulting
 // instruction. On failure (no VMA, permission denied, OOM during
@@ -16,7 +16,7 @@
 // will become a SIGSEGV-like note delivery at Phase 5+.
 //
 // Per ARCHITECTURE.md §12 (exception model) + §16 (process address
-// space) + §28 invariants I-7 (VMO refcount) + I-12 (W^X).
+// space) + §28 invariants I-7 (BURROW refcount) + I-12 (W^X).
 
 #ifndef THYLACINE_ARCH_ARM64_FAULT_H
 #define THYLACINE_ARCH_ARM64_FAULT_H
@@ -97,7 +97,7 @@ enum fault_result arch_fault_handle(const struct fault_info *fi);
 // the fault by:
 //   1. vma_lookup(p, fi->vaddr) — find the VMA covering the faulting VA.
 //   2. Permission check vs fi->is_write / fi->is_instruction.
-//   3. Resolve the VMO offset → backing PA.
+//   3. Resolve the BURROW offset → backing PA.
 //   4. mmu_install_user_pte(p->pgtable_root, p->asid, vaddr, pa, prot).
 //
 // Returns:

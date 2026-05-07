@@ -98,7 +98,7 @@ struct CpuSched {
     //
     // Boot CPU: stays FALSE forever (boot's idle is the kthread driven
     // by timer IRQ, not per_cpu_main's explicit wfi loop). At v1.0 the
-    // primary's post-init flow sits in `_hang`'s asm wfi loop with no
+    // primary's post-init flow sits in `_torpor`'s asm wfi loop with no
     // C-level set/clear hooks; secondaries are the only candidates for
     // wake-via-IPI placement. Modeling this in `scheduler.tla` is
     // covered by `EnterWFI(cpu)` + `IPI_Deliver`-clears-`wfi[dst]`.
@@ -230,7 +230,7 @@ static struct Thread *pick_next(struct CpuSched *cs) {
 // (post-test, /init and beyond) benefit from work-stealing.
 //
 // `sched_set_notify_enabled(true)` is called from boot_main between
-// `test_run_all()` and `init_run()`. After that point, every ready() /
+// `test_run_all()` and `joey_run()`. After that point, every ready() /
 // wakeup() call wakes an idle peer if any.
 //
 // Reads/writes of g_sched_notify_enabled use volatile + relaxed — the

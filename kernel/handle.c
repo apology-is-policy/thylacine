@@ -26,14 +26,14 @@
 // Phase 5+ refinement:
 //   - Growable table via RB-tree keyed by hidx_t.
 //   - Per-Proc handle-table lock for SMP safety.
-//   - Refcount integration via vmo_ref/unref (P2-Fd is the first step).
+//   - Refcount integration via burrow_ref/unref (P2-Fd is the first step).
 //   - Capability-handle elevation via factotum (per ARCH §15.4).
 
 #include <thylacine/extinction.h>
 #include <thylacine/handle.h>
 #include <thylacine/proc.h>
 #include <thylacine/types.h>
-#include <thylacine/vmo.h>
+#include <thylacine/burrow.h>
 
 #include "../mm/slub.h"
 
@@ -88,9 +88,9 @@ struct HandleTable *handle_table_alloc(void) {
 // from handle_close (caller passes a Proc) and handle_table_free
 // (orphan path; no Proc available — table outlives it).
 //
-// At v1.0 P2-Fd: KOBJ_VMO has refcount integration via vmo_unref;
+// At v1.0 P2-Fd: KOBJ_BURROW has refcount integration via burrow_unref;
 // other kinds are no-op. As subsystems land:
-//   KOBJ_CHAN     — Phase 4 (chan_unref via 9P client).
+//   KOBJ_SPOOR     — Phase 4 (spoor_unref via 9P client).
 //   KOBJ_MMIO     — Phase 3 (driver-startup CMA release).
 //   KOBJ_IRQ      — Phase 3 (gic_unregister).
 //   KOBJ_DMA      — Phase 3 (CMA release).
@@ -104,13 +104,13 @@ struct HandleTable *handle_table_alloc(void) {
 static void handle_release_obj(enum kobj_kind kind, void *obj) {
     if (!obj) return;
     switch (kind) {
-    case KOBJ_VMO:
-        vmo_unref((struct Vmo *)obj);
+    case KOBJ_BURROW:
+        burrow_unref((struct Burrow *)obj);
         break;
     case KOBJ_INVALID:
     case KOBJ_PROCESS:
     case KOBJ_THREAD:
-    case KOBJ_CHAN:
+    case KOBJ_SPOOR:
     case KOBJ_MMIO:
     case KOBJ_IRQ:
     case KOBJ_DMA:
@@ -133,13 +133,13 @@ static void handle_release_obj(enum kobj_kind kind, void *obj) {
 static void handle_acquire_obj(enum kobj_kind kind, void *obj) {
     if (!obj) return;
     switch (kind) {
-    case KOBJ_VMO:
-        vmo_ref((struct Vmo *)obj);
+    case KOBJ_BURROW:
+        burrow_ref((struct Burrow *)obj);
         break;
     case KOBJ_INVALID:
     case KOBJ_PROCESS:
     case KOBJ_THREAD:
-    case KOBJ_CHAN:
+    case KOBJ_SPOOR:
     case KOBJ_MMIO:
     case KOBJ_IRQ:
     case KOBJ_DMA:
@@ -155,7 +155,7 @@ void handle_table_free(struct HandleTable *t) {
     if (!t) return;
 
     // Close any in-use handles before releasing the table. Calls the
-    // per-kind release path so underlying refcounts (KOBJ_VMO at P2-Fd)
+    // per-kind release path so underlying refcounts (KOBJ_BURROW at P2-Fd)
     // are decremented correctly even on orphan-table cleanup.
     for (int i = 0; i < PROC_HANDLE_MAX; i++) {
         if (t->slots[i].magic == HANDLE_MAGIC) {
@@ -205,25 +205,25 @@ hidx_t handle_alloc(struct Proc *p, enum kobj_kind kind,
 
     if (!valid_alloc_args(kind, rights)) return -1;
 
-    // R5-F F49 close: defensive runtime check for KOBJ_VMO. The
+    // R5-F F49 close: defensive runtime check for KOBJ_BURROW. The
     // contract is "the caller has already accounted for one ref"
-    // (typically: vmo_create_anon's initial handle_count=1, OR a
-    // pre-call vmo_ref from a future Phase 4 transfer-via-9p path).
-    // Future-buggy callers that pass a Vmo without holding a ref
+    // (typically: burrow_create_anon's initial handle_count=1, OR a
+    // pre-call burrow_ref from a future Phase 4 transfer-via-9p path).
+    // Future-buggy callers that pass a Burrow without holding a ref
     // would create a slot with no backing count — the first
-    // handle_close would underflow vmo_unref's count check.
+    // handle_close would underflow burrow_unref's count check.
     //
     // Catching here makes the convention enforced at runtime, not
-    // just documented. The check is a no-op for non-KOBJ_VMO kinds
+    // just documented. The check is a no-op for non-KOBJ_BURROW kinds
     // and for NULL obj (test paths).
-    if (kind == KOBJ_VMO && obj) {
-        struct Vmo *v = (struct Vmo *)obj;
+    if (kind == KOBJ_BURROW && obj) {
+        struct Burrow *v = (struct Burrow *)obj;
         if (v->magic != VMO_MAGIC)
-            extinction("handle_alloc(KOBJ_VMO): obj has bad magic (not a Vmo or UAF)");
+            extinction("handle_alloc(KOBJ_BURROW): obj has bad magic (not a Burrow or UAF)");
         if (v->handle_count <= 0)
-            extinction("handle_alloc(KOBJ_VMO): caller has not accounted for "
-                       "the slot's reference (call vmo_ref first, or use the "
-                       "vmo_create_anon-consumed-reference convention)");
+            extinction("handle_alloc(KOBJ_BURROW): caller has not accounted for "
+                       "the slot's reference (call burrow_ref first, or use the "
+                       "burrow_create_anon-consumed-reference convention)");
     }
 
     for (int i = 0; i < PROC_HANDLE_MAX; i++) {
@@ -246,7 +246,7 @@ int handle_close(struct Proc *p, hidx_t h) {
     struct Handle *slot = &t->slots[h];
     if (slot->magic != HANDLE_MAGIC)    return -1;
 
-    // Per-kind release. P2-Fd integrates vmo_unref for KOBJ_VMO; future
+    // Per-kind release. P2-Fd integrates burrow_unref for KOBJ_BURROW; future
     // phases add the other kinds.
     handle_release_obj(slot->kind, slot->obj);
 
@@ -286,7 +286,7 @@ hidx_t handle_dup(struct Proc *p, hidx_t h, rights_t new_rights) {
     void          *obj  = parent->obj;
 
     // Acquire a new reference to the underlying kobj. P2-Fd integrates
-    // vmo_ref for KOBJ_VMO. The dup'd handle is a NEW reference; the
+    // burrow_ref for KOBJ_BURROW. The dup'd handle is a NEW reference; the
     // future handle_close on it will release the corresponding ref.
     handle_acquire_obj(kind, obj);
 

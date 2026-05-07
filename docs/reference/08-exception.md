@@ -79,7 +79,7 @@ ARMv8 mandates a 0x800-aligned 16-entry table. Each entry is 0x80 bytes (32 inst
 | `0x700` | Lower EL using AArch32 | FIQ | unexpected (idx 14) |
 | `0x780` | Lower EL using AArch32 | SError | unexpected (idx 15) |
 
-Most entries are stamped out via the `VEC_UNEXPECTED <idx>` macro: `KERNEL_ENTRY` (save 31 GP regs + 5 special regs onto SP_EL1), pass `(ctx_pointer, idx)` to `exception_unexpected`, fall through to `_hang` for safety. The Current-EL-SPx Sync entry calls `exception_sync_curr_el(ctx)` for real diagnostics; the Current-EL-SPx IRQ entry (live at P1-G) calls `exception_irq_curr_el(ctx)` and then branches to `.Lexception_return` (the shared `KERNEL_EXIT` trampoline) which `eret`s to the interrupted code.
+Most entries are stamped out via the `VEC_UNEXPECTED <idx>` macro: `KERNEL_ENTRY` (save 31 GP regs + 5 special regs onto SP_EL1), pass `(ctx_pointer, idx)` to `exception_unexpected`, fall through to `_torpor` for safety. The Current-EL-SPx Sync entry calls `exception_sync_curr_el(ctx)` for real diagnostics; the Current-EL-SPx IRQ entry (live at P1-G) calls `exception_irq_curr_el(ctx)` and then branches to `.Lexception_return` (the shared `KERNEL_EXIT` trampoline) which `eret`s to the interrupted code.
 
 Each entry must fit within 0x80 bytes (32 instructions). `KERNEL_ENTRY` is ~25 instructions; the dispatch + safety branch is 3 more, total 28 — comfortably under the slot budget. `KERNEL_EXIT` (the eret-side mirror) is ~23 instructions, so inlining it inside any slot would overflow. Instead, P1-G factors `KERNEL_EXIT` into a shared `.Lexception_return` symbol after the vector table; the IRQ slot ends with `b .Lexception_return`, and Phase 2's recoverable sync-fault handlers (page-fault COW, etc.) will branch there too. Slots that terminate in `extinction` (Sync, every `VEC_UNEXPECTED`) skip the trampoline because the path is `noreturn`.
 
@@ -307,7 +307,7 @@ P1-F is reactive — no per-tick overhead. Cost is paid only on exceptions:
 
 - IRQ-driven PL011 TX (still polled). The mechanism is in place; routing the UART IRQ through `gic_attach` is post-v1.0 (the polled path is fine for the boot-and-shutdown windows; userspace consoles at Phase 5 use `/dev/cons` regardless).
 - Per-CPU exception stack — handler runs on the existing SP_EL1 (boot stack at v1.0). A stack-overflow recursion wedges the kernel without producing diagnostic output. Phase 2 introduces per-thread + per-CPU exception stacks.
-- Recoverable sync faults — Phase 2 page-fault handler with VMO backing. `KERNEL_EXIT` and `.Lexception_return` are ready.
+- Recoverable sync faults — Phase 2 page-fault handler with BURROW backing. `KERNEL_EXIT` and `.Lexception_return` are ready.
 - Userspace exception entry — Phase 2 (lower-EL Sync becomes the syscall + page-fault path).
 - Deliberate-fault test target — P1-I.
 - SError handler at Current-EL-SPx — Phase 2 (currently extinctions; design-wise SError is for hardware-uncorrectable errors and panic is the right answer until there's a recovery story).

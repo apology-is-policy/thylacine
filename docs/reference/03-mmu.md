@@ -262,7 +262,7 @@ At P1-C-extras the page tables are fixed-size BSS arrays. This is fine for ident
 
 ### TTBR0 identity stays active post-KASLR
 
-After P1-C-extras Part B, TTBR1 holds the kernel high-half mapping but TTBR0 keeps the low 4 GiB identity map. Kernel data accesses to absolute PAs (the saved DTB pointer, PL011 MMIO, future MMIO regions) translate through TTBR0. Phase 2 will retire TTBR0 when user namespaces start to live there; until then, the kernel can read low PAs by absolute addressing. The trade-off is a wider attack surface (TTBR0 has the kernel's full RAM mapped); the mitigation is that nothing in user code runs during this period.
+After P1-C-extras Part B, TTBR1 holds the kernel high-half mapping but TTBR0 keeps the low 4 GiB identity map. Kernel data accesses to absolute PAs (the saved DTB pointer, PL011 MMIO, future MMIO regions) translate through TTBR0. Phase 2 will retire TTBR0 when user territories start to live there; until then, the kernel can read low PAs by absolute addressing. The trade-off is a wider attack surface (TTBR0 has the kernel's full RAM mapped); the mitigation is that nothing in user code runs during this period.
 
 ### L3 table is shared between TTBR0 and TTBR1
 

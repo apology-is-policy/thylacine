@@ -367,7 +367,7 @@ The function records `current_thread()` as the per-CPU idle; the run tree starts
 ### Per-CPU idle thread
 
 Two flavors at v1.0 P2-Cd:
-- **CPU 0 (boot)**: `kthread`, set up by `thread_init` in main.c. It serves dual roles — boot-time test runner AND CPU 0's idle. After tests finish, kthread runs `_hang()` (WFI loop) which IS the boot CPU's idle.
+- **CPU 0 (boot)**: `kthread`, set up by `thread_init` in main.c. It serves dual roles — boot-time test runner AND CPU 0's idle. After tests finish, kthread runs `_torpor()` (WFI loop) which IS the boot CPU's idle.
 - **CPU N (secondary)**: a fresh `Thread` allocated by `thread_init_per_cpu_idle(idx)` in `per_cpu_main`. Doesn't own a kstack — it runs on the per-CPU boot stack assigned by `secondary_entry`. Lives in `SCHED_BAND_IDLE` so it sorts below any NORMAL-band runnable thread.
 
 `sched_idle_thread(cpu_idx)` exposes the per-CPU idle pointer for diagnostic + test use.
@@ -484,7 +484,7 @@ Closes R5-H **F77** (try_steal extincts on transient peer-lock contention) + **F
 
 Three pieces collaborate:
 
-1. **idle_in_wfi flag** (`struct CpuSched.idle_in_wfi`). Volatile bool per-CPU. Set TRUE by THIS CPU immediately before its `wfi` instruction in `per_cpu_main`'s idle loop; cleared FALSE immediately after WFI exits. Boot CPU stays FALSE forever (boot's post-init flow is `_hang`'s asm wfi loop, no C-level set hook). Maps to scheduler.tla's `wfi[cpu]` variable + `EnterWFI(cpu)` action.
+1. **idle_in_wfi flag** (`struct CpuSched.idle_in_wfi`). Volatile bool per-CPU. Set TRUE by THIS CPU immediately before its `wfi` instruction in `per_cpu_main`'s idle loop; cleared FALSE immediately after WFI exits. Boot CPU stays FALSE forever (boot's post-init flow is `_torpor`'s asm wfi loop, no C-level set hook). Maps to scheduler.tla's `wfi[cpu]` variable + `EnterWFI(cpu)` action.
 
 2. **`sched_notify_idle_peer()`**. Walks `g_cpu_sched[i]` for `i ≠ self`; first peer with `idle_in_wfi==true` receives `gic_send_ipi(IPI_RESCHED)`. Stops on first send (single-peer wake; multiple wakes would be a thundering herd). Called from `ready()` AFTER releasing the local lock so the peer's IPI handler doesn't contend. Maps to scheduler.tla's `NotifyWFIPeer(src, dst)` action.
 
@@ -492,7 +492,7 @@ Three pieces collaborate:
 
 ### Test-mode toggle
 
-`sched_set_notify_enabled(bool)` gates `sched_notify_idle_peer()`. Disabled by default during in-kernel tests so they keep their UP-like single-CPU assumptions (e.g., `rendez.basic_handoff` assumes the readied consumer runs on the same CPU that readied it — work-stealing breaks that assumption). Boot calls `sched_set_notify_enabled(true)` AFTER `test_run_all()` and BEFORE `init_run()`. Once enabled, every ready/wakeup placing work wakes an idle peer.
+`sched_set_notify_enabled(bool)` gates `sched_notify_idle_peer()`. Disabled by default during in-kernel tests so they keep their UP-like single-CPU assumptions (e.g., `rendez.basic_handoff` assumes the readied consumer runs on the same CPU that readied it — work-stealing breaks that assumption). Boot calls `sched_set_notify_enabled(true)` AFTER `test_run_all()` and BEFORE `joey_run()`. Once enabled, every ready/wakeup placing work wakes an idle peer.
 
 ### Boot-flow cadence
 
@@ -505,7 +505,7 @@ boot_main()
    │
    ├── sched_set_notify_enabled(true)   ← P3-G: SMP behavior live
    │
-   ├── init_run()                  # /init runs; ready/wakeup IPI peers
+   ├── joey_run()                  # /init runs; ready/wakeup IPI peers
    │
    └── "Thylacine boot OK"
 ```
@@ -542,7 +542,7 @@ Existing buggy configs (`scheduler_buggy.cfg`, `scheduler_buggy_steal.cfg`, `sch
 - **WFI-aware test mode**: tests assume `sched_set_notify_enabled(false)` (the default at boot, restored by P3-G tests after toggling on). New tests that depend on cross-CPU placement must explicitly enable. Tests that don't care should NOT toggle.
 - **First-ready-on-secondary loop**: when /init runs (notify enabled), the first ready/wakeup wakes one secondary. Subsequent ready/wakeup on the same CPU — if no other secondary is in WFI — falls through. The selection is rotation-style (self+1, self+2, ...); under sustained load, IPIs distribute across all online secondaries.
 - **try_steal retry budget**: 256-iteration CPU-relax bounded. Truly-empty system still extincts in finite time; transient contention absorbed. Cap is conservative (microseconds at typical clock rates).
-- **The boot CPU is intentionally NOT a wake target**: its post-init flow is `_hang`'s asm wfi loop with no C-level idle_in_wfi hook. If a future change adds a sched/wfi loop on boot post-init (like Linux's idle task), this hook needs adding. Today's invariant: only secondaries are wake candidates.
+- **The boot CPU is intentionally NOT a wake target**: its post-init flow is `_torpor`'s asm wfi loop with no C-level idle_in_wfi hook. If a future change adds a sched/wfi loop on boot post-init (like Linux's idle task), this hook needs adding. Today's invariant: only secondaries are wake candidates.
 
 ---
 

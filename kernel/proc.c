@@ -6,7 +6,7 @@
 // initial Thread; exits transitions Proc to ZOMBIE; wait_pid reaps
 // zombie children.
 //
-// At v1.0 P2-D, only RFPROC is supported in rfork — namespace, fd
+// At v1.0 P2-D, only RFPROC is supported in rfork — territory, fd
 // table, address space, credentials, etc. land in subsequent P2 sub-
 // chunks. Multi-thread Procs and the Linux clone() flag translation
 // land at Phase 5+ with the syscall surface.
@@ -19,7 +19,7 @@
 #include <thylacine/extinction.h>
 #include <thylacine/handle.h>
 #include <thylacine/page.h>
-#include <thylacine/pgrp.h>
+#include <thylacine/territory.h>
 #include <thylacine/proc.h>
 #include <thylacine/rendez.h>
 #include <thylacine/sched.h>
@@ -167,14 +167,14 @@ static void proc_init_fields(struct Proc *p, int pid) {
     // phys_init) leaves them at 0 — kproc never enters EL0 and never
     // needs a user-half page table or a non-kernel ASID.
     // parent / children / sibling / exit_status / exit_msg / threads /
-    // pgrp all left NULL/0 via KP_ZERO; caller (proc_init for kproc;
+    // territory all left NULL/0 via KP_ZERO; caller (proc_init for kproc;
     // rfork for child Procs) wires linkage explicitly.
 }
 
 void proc_init(void) {
     if (g_proc_cache) extinction("proc_init called twice");
-    if (!kpgrp())     extinction("proc_init before pgrp_init "
-                                 "(kproc needs a pgrp at allocation)");
+    if (!kpgrp())     extinction("proc_init before territory_init "
+                                 "(kproc needs a territory at allocation)");
 
     g_proc_cache = kmem_cache_create("proc",
                                      sizeof(struct Proc),
@@ -187,7 +187,7 @@ void proc_init(void) {
     g_kproc = kmem_cache_alloc(g_proc_cache, KP_ZERO);
     if (!g_kproc) extinction("kmem_cache_alloc(kproc) failed");
     proc_init_fields(g_kproc, 0);
-    g_kproc->pgrp = kpgrp();
+    g_kproc->territory = kpgrp();
 
     // P2-Fc: kproc gets its own handle table. handle_init must run
     // before proc_init (main.c bootstrap order). Failures here panic —
@@ -228,8 +228,8 @@ struct Proc *proc_alloc(void) {
     // P2-Fc: each Proc gets its own handle table. On OOM (now reachable
     // post-R5-F F50; PANIC_ON_FAIL dropped from g_handle_table_cache),
     // delegate cleanup to proc_free — which is future-proof against
-    // struct Proc growth (R5-F F53). The Proc has no pgrp / threads /
-    // children yet (KP_ZERO), so proc_free's pgrp_unref(NULL) +
+    // struct Proc growth (R5-F F53). The Proc has no territory / threads /
+    // children yet (KP_ZERO), so proc_free's territory_unref(NULL) +
     // handle_table_free(NULL) + lifecycle gates all no-op cleanly.
     p->handles = handle_table_alloc();
     if (!p->handles) {
@@ -258,7 +258,7 @@ struct Proc *proc_alloc(void) {
 
     // F89: assign the real PID now that handle table is live. This is
     // the only path that exposes a Proc to the world; subsequent rollback
-    // (e.g., pgrp_clone or thread_create_with_arg failure in rfork) frees
+    // (e.g., territory_clone or thread_create_with_arg failure in rfork) frees
     // a Proc with the assigned PID via proc_free, which doesn't unwind
     // PID consumption — but the destroyed++ counter still balances.
     //
@@ -299,18 +299,18 @@ void proc_free(struct Proc *p) {
     if (p->state != PROC_STATE_ZOMBIE)
         extinction("proc_free of non-ZOMBIE Proc (lifecycle violation)");
 
-    // P3-Da: drain VMAs first. Each Vma carries a vmo_unmap; releasing
+    // P3-Da: drain VMAs first. Each Vma carries a burrow_unmap; releasing
     // them BEFORE handle_table_free is the right order — handle closure
-    // independently does vmo_unref (handle_count--) and a VMO with
+    // independently does burrow_unref (handle_count--) and a BURROW with
     // mapping_count > 0 must NOT free even if handle_count drops to 0
-    // (per specs/vmo.tla NoUseAfterFree).
+    // (per specs/burrow.tla NoUseAfterFree).
     vma_drain(p);
 
-    // P2-Eb: release the namespace. Most Procs have a private pgrp
-    // (refcount 1; freed here). Phase 5+ shared namespaces decrement
+    // P2-Eb: release the territory. Most Procs have a private territory
+    // (refcount 1; freed here). Phase 5+ shared territories decrement
     // refcount and free only at last release.
-    pgrp_unref(p->pgrp);
-    p->pgrp = NULL;
+    territory_unref(p->territory);
+    p->territory = NULL;
 
     // P2-Fc: release the handle table. Closes any in-use slots first
     // (defensive — well-behaved Procs close all handles before exits;
@@ -415,24 +415,24 @@ int rfork(unsigned flags, void (*entry)(void *), void *arg) {
     struct Proc *child = proc_alloc();
     if (!child) return -1;
 
-    // P2-Eb: clone parent's namespace into the child. Maps to the spec's
+    // P2-Eb: clone parent's territory into the child. Maps to the spec's
     // ForkClone action — child gets a deep copy of parent's bindings;
     // subsequent bind/unmount on either is independent. RFNAMEG (shared
-    // namespace) is unsupported at v1.0; the parent ALWAYS gets a clone.
-    struct Pgrp *child_pgrp = pgrp_clone(parent->pgrp);
+    // territory) is unsupported at v1.0; the parent ALWAYS gets a clone.
+    struct Territory *child_pgrp = territory_clone(parent->territory);
     if (!child_pgrp) {
         child->state = PROC_STATE_ZOMBIE;
-        // child->pgrp is still NULL; proc_free's pgrp_unref(NULL) is a no-op.
+        // child->territory is still NULL; proc_free's territory_unref(NULL) is a no-op.
         proc_free(child);
         return -1;
     }
-    child->pgrp = child_pgrp;
+    child->territory = child_pgrp;
 
     struct Thread *ct = thread_create_with_arg(child, entry, arg);
     if (!ct) {
-        // Roll back proc_alloc + pgrp_clone. Transition to ZOMBIE so
-        // proc_free's lifecycle gate passes; proc_free will pgrp_unref
-        // the just-allocated pgrp.
+        // Roll back proc_alloc + territory_clone. Transition to ZOMBIE so
+        // proc_free's lifecycle gate passes; proc_free will territory_unref
+        // the just-allocated territory.
         child->state = PROC_STATE_ZOMBIE;
         proc_free(child);
         return -1;

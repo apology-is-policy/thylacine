@@ -8,12 +8,12 @@
 //     elf_load(blob, size, &img)
 //       │
 //       ├── for each PT_LOAD segment:
-//       │       vmo_create_anon(size_rounded)
-//       │       copy bytes from blob to vmo->pages via direct map
-//       │       vmo_map(p, vmo, vaddr, size_rounded, prot)
-//       │       vmo_unref(vmo)        // mapping_count keeps alive
+//       │       burrow_create_anon(size_rounded)
+//       │       copy bytes from blob to burrow->pages via direct map
+//       │       burrow_map(p, burrow, vaddr, size_rounded, prot)
+//       │       burrow_unref(burrow)        // mapping_count keeps alive
 //       │
-//       ├── allocate user-stack VMO + vmo_map at top of user-VA
+//       ├── allocate user-stack BURROW + burrow_map at top of user-VA
 //       │
 //       └── return entry + sp_top
 //
@@ -65,13 +65,13 @@ struct Proc;
 //
 // Side effects on success:
 //   - Each PT_LOAD segment installed as a VMA backed by a fresh
-//     anonymous VMO. The VMO's pages are populated with bytes from the
+//     anonymous BURROW. The BURROW's pages are populated with bytes from the
 //     blob (filesz bytes from blob[file_offset..]); tail (memsz -
 //     filesz) is zero (KP_ZERO from alloc).
 //   - User stack VMA installed at `[EXEC_USER_STACK_BASE,
-//     EXEC_USER_STACK_TOP)` backed by a fresh anonymous VMO (zeroed).
-//   - Caller-held VMO handles dropped via vmo_unref; mapping_count
-//     (held by the VMA) keeps each VMO alive until proc_free's
+//     EXEC_USER_STACK_TOP)` backed by a fresh anonymous BURROW (zeroed).
+//   - Caller-held BURROW handles dropped via burrow_unref; mapping_count
+//     (held by the VMA) keeps each BURROW alive until proc_free's
 //     vma_drain.
 //
 // Side effects on failure:

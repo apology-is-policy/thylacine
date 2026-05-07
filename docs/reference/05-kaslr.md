@@ -267,7 +267,7 @@ Expected: 10 distinct offsets ranging across [0x200000, 0x3FFE00000) (2 MiB to 1
 
 ### TTBR0 stays active
 
-After KASLR, TTBR0 still holds the low-4-GiB identity map. Kernel data accesses to absolute PAs (e.g., the saved DTB pointer, PL011 MMIO) translate through TTBR0. This is by design at P1-C-extras — Phase 2 will retire TTBR0 when user namespaces start to live there. Until then, the kernel can read PAs by absolute addressing.
+After KASLR, TTBR0 still holds the low-4-GiB identity map. Kernel data accesses to absolute PAs (e.g., the saved DTB pointer, PL011 MMIO) translate through TTBR0. This is by design at P1-C-extras — Phase 2 will retire TTBR0 when user territories start to live there. Until then, the kernel can read PAs by absolute addressing.
 
 ### `.rela.dyn` is empty today
 

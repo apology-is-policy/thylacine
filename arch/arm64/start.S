@@ -83,7 +83,7 @@ _real_start:
     cmp     x1, #2
     b.eq    .Lat_el2
     cmp     x1, #1
-    b.ne    _hang                       // EL3 or EL0 — silent halt
+    b.ne    _torpor                       // EL3 or EL0 — silent halt
     mov     x20, #0
     b       .Lel1_main
 
@@ -396,13 +396,13 @@ _real_start:
     blr     x0                          // call high-VA boot_main
 
     // 10. boot_main() must not return. If it does, fall through to halt.
-    b       _hang
+    b       _torpor
 
 .size _start, . - _start
 .size _real_start, . - _real_start
 
 // ---------------------------------------------------------------------------
-// _hang — clean halt loop. WFI until an external event.
+// _torpor — clean halt loop. WFI until an external event.
 //
 // Used by:
 //   - Post-boot_main() fallthrough (boot_main shouldn't return).
@@ -410,21 +410,21 @@ _real_start:
 //   - extinction() in kernel/extinction.c.
 // ---------------------------------------------------------------------------
 .section ".text", "ax"
-.globl _hang
-.type _hang, %function
-_hang:
+.globl _torpor
+.type _torpor, %function
+_torpor:
     // BTI landing pad: accept call (BTYPE=01), jump (BTYPE=10), or
     // jump-call (BTYPE=11). All current reaches are direct branches
-    // (b _hang / bl _hang) which don't trigger BTI checks, but
-    // _hang lives in a GP=1 page (PTE_KERN_TEXT) and SCTLR_EL1.BT0=1,
+    // (b _torpor / bl _torpor) which don't trigger BTI checks, but
+    // _torpor lives in a GP=1 page (PTE_KERN_TEXT) and SCTLR_EL1.BT0=1,
     // so a future indirect dispatch (function-pointer table, panic
-    // handler array) into _hang would fault on the bare wfi. `bti jc`
+    // handler array) into _torpor would fault on the bare wfi. `bti jc`
     // is a HINT-space NOP on ARMv8.0..8.4 — zero cost, prevents the
     // class of bug at the cost of one instruction (P1-H audit F16).
     bti     jc
 1:  wfi
     b       1b
-.size _hang, . - _hang
+.size _torpor, . - _torpor
 
 // ---------------------------------------------------------------------------
 // PAC key management (P2-Cb refactor).

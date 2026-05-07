@@ -45,7 +45,7 @@ struct page {
     struct page *prev;          // free list prev
     u32 order;                  // current order if PG_FREE; slab order if PG_SLAB
     u32 flags;                  // PG_*
-    u32 refcount;               // VMO refcount placeholder; slab: inuse count
+    u32 refcount;               // BURROW refcount placeholder; slab: inuse count
     u32 _pad;                   // 4-byte alignment slack
     void *slab_freelist;        // SLUB: head of free objects in this slab
     struct kmem_cache *slab_cache; // SLUB: cache backref (NULL when not a slab)

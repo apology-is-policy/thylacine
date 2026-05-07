@@ -61,7 +61,7 @@ int           wait_pid(int *status_out);
 
 #define RFPROC      0x0001    // create new Proc (only RFPROC supported at P2-Da)
 #define RFMEM       0x0002    // share address space (Phase 5+)
-#define RFNAMEG     0x0004    // share namespace (P2-E)
+#define RFNAMEG     0x0004    // share territory (P2-E)
 #define RFFDG       0x0008    // share fd table (P2-F)
 #define RFCRED      0x0010    // share credentials (Phase 5+)
 #define RFNOTEG     0x0020    // share note queue (Phase 5+)
@@ -90,7 +90,7 @@ u64           proc_total_destroyed(void);
 Creates a new Proc with one initial Thread running `entry(arg)`. At v1.0, only `RFPROC` is supported; other flags trigger an extinction. Subsequent sub-chunks add the resource-sharing flags as their respective subsystems land:
 
 - **RFPROC** — required for "create"; allocates a new Proc + initial Thread.
-- **RFNAMEG** (P2-E) — share parent's namespace instead of cloning.
+- **RFNAMEG** (P2-E) — share parent's territory instead of cloning.
 - **RFFDG** (P2-F) — share fd table.
 - **RFMEM** (Phase 5+) — share address space (creates a *thread* in current Proc).
 - **RFCRED**, **RFNOTEG**, **RFNOWAIT**, **RFREND**, **RFENVG** — Phase 5+ with the syscall surface.
@@ -261,7 +261,7 @@ Reached via `cpu_switch_context`'s `ret` (BTYPE=00). The `bti c` is defensive �
 
 `proc_free`: extinct on null / kproc / live-threads / non-empty list; kmem_cache_free.
 
-The struct grows by appending across sub-chunks (P2-B: scheduler stats; P2-C: namespace; P2-D: handles; etc.). Existing offsets stay stable so the SLUB cache size doesn't churn.
+The struct grows by appending across sub-chunks (P2-B: scheduler stats; P2-C: territory; P2-D: handles; etc.). Existing offsets stay stable so the SLUB cache size doesn't churn.
 
 #### Proc-table lock (P3-A, R5-H F75 close)
 
@@ -347,7 +347,7 @@ P2-A:
 
 Future appends:
 - P2-B: scheduler statistics (per-Proc CPU time, vruntime accumulation).
-- P2-C: namespace pointer (`struct Pgrp *`).
+- P2-C: territory pointer (`struct Territory *`).
 - P2-D: handle table head (`struct HandleTable *`).
 - P2-E: address space (page table root, vma_tree).
 - P2-F: notes queue, parent/children, `exit_status`.

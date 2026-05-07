@@ -1,10 +1,10 @@
 // kernel-internal exec — load an ELF into a Proc's address space (P3-Eb).
 //
 // Per ARCHITECTURE.md §16 (process address space). Bridges P2-Ga's
-// elf_load (parse + validate) to P3-D's VMA + VMO machinery: each
-// PT_LOAD segment becomes a fresh anonymous VMO (eager-allocated
+// elf_load (parse + validate) to P3-D's VMA + BURROW machinery: each
+// PT_LOAD segment becomes a fresh anonymous BURROW (eager-allocated
 // backing pages) populated with blob bytes via the kernel direct map,
-// then mapped into the per-Proc TTBR0 tree via vmo_map.
+// then mapped into the per-Proc TTBR0 tree via burrow_map.
 //
 // The user stack is a dedicated 16 KiB VMA at `[EXEC_USER_STACK_BASE,
 // EXEC_USER_STACK_TOP)`. v1.0 doesn't grow the stack; Phase 5+ adds
@@ -22,7 +22,7 @@
 #include <thylacine/proc.h>
 #include <thylacine/types.h>
 #include <thylacine/vma.h>
-#include <thylacine/vmo.h>
+#include <thylacine/burrow.h>
 
 #include "../mm/phys.h"
 
@@ -49,14 +49,14 @@ static u64 round_up_page(u64 x) {
 // Map a single PT_LOAD segment into the Proc's address space.
 //
 // Steps:
-//   1. Round vaddr range up to page boundaries → size for the VMO.
-//   2. vmo_create_anon(size).
-//   3. Copy `filesz` bytes from blob[file_offset..] into the VMO via
+//   1. Round vaddr range up to page boundaries → size for the BURROW.
+//   2. burrow_create_anon(size).
+//   3. Copy `filesz` bytes from blob[file_offset..] into the BURROW via
 //      direct map. The remaining (memsz - filesz) bytes are already
 //      zero (KP_ZERO from alloc_pages).
-//   4. vmo_map(p, vmo, vaddr_start, size, prot).
-//   5. vmo_unref(vmo) — drop the caller-held handle. mapping_count
-//      (held by the VMA) keeps the VMO alive until proc_free's
+//   4. burrow_map(p, burrow, vaddr_start, size, prot).
+//   5. burrow_unref(burrow) — drop the caller-held handle. mapping_count
+//      (held by the VMA) keeps the BURROW alive until proc_free's
 //      vma_drain.
 //
 // Returns 0 on success, -1 on failure (alignment violation, SLUB OOM,
@@ -71,24 +71,24 @@ static int exec_map_segment(struct Proc *p, const void *blob,
 
     if (seg->memsz == 0)                    return -1;
 
-    // memsz must fit within VMO addressable range (overflow guard).
+    // memsz must fit within BURROW addressable range (overflow guard).
     u64 vaddr_end = seg->vaddr + seg->memsz;
     if (vaddr_end < seg->vaddr)             return -1;
     u64 vaddr_end_aligned = round_up_page(vaddr_end);
     if (vaddr_end_aligned == 0)             return -1;
     size_t size = (size_t)(vaddr_end_aligned - seg->vaddr);
 
-    struct Vmo *vmo = vmo_create_anon(size);
-    if (!vmo)                               return -1;
+    struct Burrow *burrow = burrow_create_anon(size);
+    if (!burrow)                               return -1;
 
-    // Copy filesz bytes from blob[file_offset..] → vmo's first page (offset 0).
-    // The VMO's pages start at offset 0; vmaddr_start corresponds to
-    // VMO offset 0 (the segment is page-aligned).
+    // Copy filesz bytes from blob[file_offset..] → burrow's first page (offset 0).
+    // The BURROW's pages start at offset 0; vmaddr_start corresponds to
+    // BURROW offset 0 (the segment is page-aligned).
     if (seg->filesz > 0) {
-        u8 *vmo_kva = (u8 *)pa_to_kva(page_to_pa(vmo->pages));
+        u8 *burrow_kva = (u8 *)pa_to_kva(page_to_pa(burrow->pages));
         const u8 *src = (const u8 *)blob + seg->file_offset;
         for (size_t i = 0; i < seg->filesz; i++) {
-            vmo_kva[i] = src[i];
+            burrow_kva[i] = src[i];
         }
 
         // R7 F134 close: cache maintenance for executable segments.
@@ -110,7 +110,7 @@ static int exec_map_segment(struct Proc *p, const void *blob,
             // DminLine 4 → 16 words = 64B). Phase 5+ may read CTR_EL0
             // dynamically.
             const size_t line = 64;
-            uintptr_t start = (uintptr_t)vmo_kva;
+            uintptr_t start = (uintptr_t)burrow_kva;
             uintptr_t end   = start + seg->filesz;
             uintptr_t addr  = start & ~(uintptr_t)(line - 1);
             for (; addr < end; addr += line) {
@@ -127,31 +127,31 @@ static int exec_map_segment(struct Proc *p, const void *blob,
     // [filesz, size) stays zero from KP_ZERO.
 
     u32 prot = vma_prot_for_elf(seg->flags);
-    int rc = vmo_map(p, vmo, seg->vaddr, size, prot);
+    int rc = burrow_map(p, burrow, seg->vaddr, size, prot);
     if (rc != 0) {
-        vmo_unref(vmo);
+        burrow_unref(burrow);
         return -1;
     }
 
     // Drop the caller-held handle. mapping_count=1 (from vma_alloc)
-    // keeps the VMO alive; freed at proc_free's vma_drain when
+    // keeps the BURROW alive; freed at proc_free's vma_drain when
     // mapping_count drops to 0 (and handle_count is 0).
-    vmo_unref(vmo);
+    burrow_unref(burrow);
     return 0;
 }
 
 // Map the user stack — a 16 KiB anonymous VMA at the fixed top-of-user-VA.
 static int exec_map_user_stack(struct Proc *p) {
-    struct Vmo *vmo = vmo_create_anon(EXEC_USER_STACK_SIZE);
-    if (!vmo)                               return -1;
+    struct Burrow *burrow = burrow_create_anon(EXEC_USER_STACK_SIZE);
+    if (!burrow)                               return -1;
 
-    int rc = vmo_map(p, vmo, EXEC_USER_STACK_BASE, EXEC_USER_STACK_SIZE,
+    int rc = burrow_map(p, burrow, EXEC_USER_STACK_BASE, EXEC_USER_STACK_SIZE,
                      VMA_PROT_RW);
     if (rc != 0) {
-        vmo_unref(vmo);
+        burrow_unref(burrow);
         return -1;
     }
-    vmo_unref(vmo);
+    burrow_unref(burrow);
     return 0;
 }
 

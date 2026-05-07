@@ -39,13 +39,13 @@ The bar: a user landing on a topic page should be able to learn how to do the th
 | [00-overview.md](manual/00-overview.md) | Bird's-eye view of using Thylacine | All users | Phase 0 (this scaffold) |
 | 01-getting-started.md (planned) | Install, boot, first login | All users | Phase 5 (Utopia) |
 | 02-shells.md (planned) | rc, bash, pipelines, redirection, job control | Developers, admins | Phase 5 |
-| 03-namespaces.md (planned) | bind / mount / unmount; per-process namespaces; containers as namespaces | Developers, admins | Phase 5-6 |
+| 03-territories.md (planned) | bind / mount / unmount; per-process territories; containers as territories | Developers, admins | Phase 5-6 |
 | 04-coreutils.md (planned) | uutils-coreutils + Plan 9 userland; differences from GNU | Developers | Phase 5 |
 | 05-syscalls.md (planned) | Native + Linux-compat syscall surface; man-page-quality reference | Developers | Phase 5 |
 | 06-posix-programming.md (planned) | poll, futex, pthread, signals; what works, what's deferred | Developers | Phase 5 |
 | 07-stratum-admin.md (planned) | Pools, datasets, snapshots, send/recv, encryption, /ctl/, janus | Admins | Phase 4-5 |
 | 08-linux-binary-compat.md (planned) | What runs (musl-static, OCI containers); what's best-effort | Developers, users | Phase 6 |
-| 09-containers.md (planned) | thylacine-run; OCI images; namespace construction | Users, admins | Phase 6 |
+| 09-containers.md (planned) | thylacine-run; OCI images; territory construction | Users, admins | Phase 6 |
 | 10-network.md (planned) | /net/ administration; sockets API; smoltcp behavior | Admins, developers | Phase 6 |
 | 11-troubleshooting.md (planned) | Boot failures, recovery shell, common panics, /ctl/log/ | All users | Phase 5+ |
 | 12-halcyon.md (planned) | Halcyon usage; scroll buffer; image display; video; customization | End users | Phase 8 |

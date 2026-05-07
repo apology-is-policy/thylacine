@@ -11,7 +11,7 @@ Thylacine is a Plan 9-heritage operating system targeting ARM64, designed to be 
 
 The three convictions:
 
-1. **Plan 9's ideas were correct.** The namespace model, the "everything is a file" philosophy taken seriously rather than superficially, and per-process namespaces as the primary isolation primitive — these are better ideas than what Unix evolved into. The industry walked away from them. Thylacine doesn't.
+1. **Plan 9's ideas were correct.** The territory model, the "everything is a file" philosophy taken seriously rather than superficially, and per-process territories as the primary isolation primitive — these are better ideas than what Unix evolved into. The industry walked away from them. Thylacine doesn't.
 2. **The shell is sufficient as a UI.** A graphical windowing system is not a prerequisite for a capable, pleasant computing environment. A shell that renders images, plays video, and composes interfaces from synthetic filesystems can do everything a modern user needs, without the complexity tax of a compositor, a scene graph, or a display server.
 3. **The filesystem is the OS.** Stratum — Thylacine's native filesystem — is not an afterthought. It is the storage substrate the OS is designed to run on: COW, formally verified, post-quantum encrypted, 9P-native. The OS and the filesystem share a design philosophy and a protocol.
 
@@ -44,25 +44,25 @@ This is the core thesis. **9P is not a filesystem protocol. It is the unifying c
 
 This is not aesthetic. It means:
 
-- **One permission model** for all resources (file mode bits + namespace position).
-- **One IPC mechanism** (9P read/write/walk/clunk on a Chan).
-- **One namespace operation** (`bind`, `mount`) for composition.
+- **One permission model** for all resources (file mode bits + territory position).
+- **One IPC mechanism** (9P read/write/walk/clunk on a Spoor).
+- **One territory operation** (`bind`, `mount`) for composition.
 - **Drivers are userspace processes** with no special kernel privilege beyond typed hardware handles.
 - **The entire system is observable and controllable from a shell** — there is no separate admin API, no separate driver-loading interface, no separate IPC framework.
 
 Every architectural decision in this project is tested against the thesis. If a feature requires a separate composition mechanism alongside 9P, the design has failed and is reworked.
 
-### 3.2 Namespaces are the isolation primitive
+### 3.2 Territories are the isolation primitive
 
-Each process has its own namespace — its own view of the filesystem tree. Containers, sandboxes, and compatibility environments are not special kernel features: they are processes with carefully constructed namespaces. This is what Plan 9 had from the start. Thylacine inherits it unchanged.
+Each process has its own territory — its own view of the filesystem tree. Containers, sandboxes, and compatibility environments are not special kernel features: they are processes with carefully constructed territories. This is what Plan 9 had from the start. Thylacine inherits it unchanged.
 
 A "container" in Thylacine is a process with:
-- A root namespace constructed from a chosen filesystem root (Stratum subvolume, OCI image extracted to a 9P server, etc.).
+- A root territory constructed from a chosen filesystem root (Stratum subvolume, OCI image extracted to a 9P server, etc.).
 - A restricted `/dev/` showing only the device servers permitted.
-- A private `/proc/` view (typically scoped via `rfork(RFNAMEG)` and namespace pruning).
+- A private `/proc/` view (typically scoped via `rfork(RFNAMEG)` and territory pruning).
 - A private set of capabilities (reduced via `rfork`).
 
-There is no separate container runtime, no cgroups, no namespaces-as-kernel-feature beyond the per-process namespace. Linux container images run via namespace construction, not via any new kernel mechanism. This is the Plan 9 / per-connection-9P-namespace model that Stratum already commits to (Stratum's NOVEL angle #8); the OS extends it to per-process.
+There is no separate container runtime, no cgroups, no territories-as-kernel-feature beyond the per-process territory. Linux container images run via territory construction, not via any new kernel mechanism. This is the Plan 9 / per-connection-9P-territory model that Stratum already commits to (Stratum's NOVEL angle #8); the OS extends it to per-process.
 
 ### 3.3 The shell is the graphical environment
 
@@ -87,11 +87,11 @@ Kernel drivers are the exception, not the rule. The preferred — and from Phase
 
 Crashes are isolated. Updates don't require reboots. Auditing is tractable. The 9P interface is the public contract; the handle is the private mechanism.
 
-This commitment is non-negotiable. The priming Phase 0 plan included an in-kernel virtio-blk for "Phase 3 expedience, promote to userspace by Phase 6." That deferral is rejected; Phase 3 ships userspace drivers from day one. The cost is that Phase 2 must produce a complete handle table and VMO manager before Phase 3 begins. That cost is paid.
+This commitment is non-negotiable. The priming Phase 0 plan included an in-kernel virtio-blk for "Phase 3 expedience, promote to userspace by Phase 6." That deferral is rejected; Phase 3 ships userspace drivers from day one. The cost is that Phase 2 must produce a complete handle table and BURROW manager before Phase 3 begins. That cost is paid.
 
 ### 3.6 Maximum complexity, maximum verification
 
-The kernel will not be small. By v1.0 it implements: namespace management, EEVDF scheduler, virtual memory with NUMA-shape support, a 9P client with pipelining, handle table, VMO manager, IRQ forwarding, `poll`, `futex`, signal delivery, PTY infrastructure, the entire compat shim. That is a real kernel — not minimalist for its own sake.
+The kernel will not be small. By v1.0 it implements: territory management, EEVDF scheduler, virtual memory with NUMA-shape support, a 9P client with pipelining, handle table, BURROW manager, IRQ forwarding, `poll`, `futex`, signal delivery, PTY infrastructure, the entire compat shim. That is a real kernel — not minimalist for its own sake.
 
 **Maximum complexity is permitted where it can be verified.** Every load-bearing invariant gets a TLA+ specification before the implementation is written. Fuzzers, sanitizers, and adversarial audit rounds are part of the development loop, not an afterthought. The audit pattern proven by Stratum (15 audit rounds, ~60 corruption-class fixes found, every round caught bugs the test suite missed) becomes Thylacine's permanent development cadence.
 
@@ -180,8 +180,8 @@ Tail-latency regression is treated as a bug, not a performance variance.
 
 In order of priority when they conflict. Each property has a brief rationale; the conflict-tiebreak rule is the single most important output of this section.
 
-1. **Correctness.** The kernel must not corrupt data, violate namespace isolation, or permit privilege escalation. Correctness is non-negotiable. Every load-bearing invariant has a formal spec; every audit-trigger surface has an adversarial review.
-2. **Security.** Namespace isolation as the primary boundary. Stratum's cryptographic integrity as the storage boundary. Userspace drivers as the fault-isolation boundary. Hardware extensions (PAC, MTE, BTI) used everywhere they apply. KASLR, ASLR, W^X, CFI as baseline.
+1. **Correctness.** The kernel must not corrupt data, violate territory isolation, or permit privilege escalation. Correctness is non-negotiable. Every load-bearing invariant has a formal spec; every audit-trigger surface has an adversarial review.
+2. **Security.** Territory isolation as the primary boundary. Stratum's cryptographic integrity as the storage boundary. Userspace drivers as the fault-isolation boundary. Hardware extensions (PAC, MTE, BTI) used everywhere they apply. KASLR, ASLR, W^X, CFI as baseline.
 3. **Auditability.** The interface layer is simple — one mechanism: 9P. The implementation is no smaller than it must be to do the job correctly, but every component has a bounded specification and a documented interface. A reviewer should be able to read one component without depending on knowledge of the rest. (Renamed from "Simplicity" — the priming was honest about the kernel's scope; auditability is the property worth optimizing.)
 4. **Usability.** Halcyon should be a genuinely pleasant environment. The graphical shell is not a compromise; for the workflows it covers, it should be better than a terminal emulator running inside a windowing system.
 5. **Compatibility.** Linux/POSIX binary compatibility is useful. It is not load-bearing. Degraded compatibility is acceptable; degraded correctness or security is not. musl-static and musl-dynamic ARM64 binaries run; glibc binaries run on best-effort.
@@ -197,9 +197,9 @@ A non-exhaustive list of systems this project should be measured against. Detail
 
 | System | What they did right | Where they fell short | Relevance |
 |---|---|---|---|
-| **Plan 9 from Bell Labs** | Namespace model, 9P, "everything is a file" taken literally, factotum, Dev vtable | Did not survive the industry transition; graphics model (rio/8½) didn't fit the modern workflow; user-facing applications never reached critical mass | Direct ancestor; we inherit the model |
+| **Plan 9 from Bell Labs** | Territory model, 9P, "everything is a file" taken literally, factotum, Dev vtable | Did not survive the industry transition; graphics model (rio/8½) didn't fit the modern workflow; user-facing applications never reached critical mass | Direct ancestor; we inherit the model |
 | **9Front** | Kept Plan 9 alive; better hardware support; SMP improvements; modern USB | Still Plan 9-shaped; no encryption story for storage; not aimed at being a "daily driver" | Reference implementation; many decisions cite 9Front |
-| **Linux** | Hardware support, tooling, ecosystem, performance | Architectural sprawl; Unix semantics underneath all the modernization; capability model (capabilities, namespaces, cgroups) is bolt-on | Compat target; not an architectural model |
+| **Linux** | Hardware support, tooling, ecosystem, performance | Architectural sprawl; Unix semantics underneath all the modernization; capability model (capabilities, territories, cgroups) is bolt-on | Compat target; not an architectural model |
 | **Fuchsia / Zircon** | Capability-based microkernel; typed handles; VMOs as first-class kernel objects; pipelined IPC | Closed development model; complex protocol surface; failed product strategy | Architectural source for typed handles + VMOs (subordinated to 9P) |
 | **seL4** | Formally verified microkernel; capability-based; minimal TCB | Hostile ergonomics for application development; capability mediation everywhere is heavyweight | Verification model; the "specs come before code" methodology |
 | **Redox** | Microkernel + Rust + 9P-ish scheme model | Limited driver coverage; small ecosystem; not yet daily-driver capable | Adjacent project; valuable lessons on Rust + microkernel trade-offs |
@@ -218,12 +218,12 @@ Detailed in `NOVEL.md`. Each is a concrete, testable commitment.
 | # | Angle | Risk | Sequence |
 |---|---|---|---|
 | 1 | 9P-as-universal-composition, total | Low | Foundational |
-| 2 | Userspace drivers via typed handles + VMO zero-copy | Medium | Phase 2-3 |
+| 2 | Userspace drivers via typed handles + BURROW zero-copy | Medium | Phase 2-3 |
 | 3 | Pipelined 9P client (out-of-order, flow-controlled) | Low | Phase 4 |
 | 4 | Halcyon graphical scroll-buffer shell, no windowing system | Medium-high | Phase 8 (final) |
 | 5 | POSIX surfaces as 9P servers (`/proc`, `/dev`, `/sys`, `/dev/pts`) | Low | Phase 5-6 |
 | 6 | Stratum as native filesystem from Phase 4 | Low | Phase 4 |
-| 7 | Per-process namespace inheriting Stratum's per-connection namespace | Low | Phase 4 |
+| 7 | Per-process territory inheriting Stratum's per-connection territory | Low | Phase 4 |
 | 8 | EEVDF scheduler with SOTA hardening (PAC, MTE, KASLR, ASLR, W^X, CFI, LSE atomics) from day one | Medium | Phase 1-2 |
 | 9 | Formal-verification cadence: nine TLA+ specs gate-tied to phases | Low-medium | Continuous |
 | 10 | Designed-not-implemented v2.0 hooks: factotum capability mediation, multikernel SMP, in-kernel Stratum driver | Low | Phase 0 contracts; v2.0 implementations |
@@ -237,15 +237,15 @@ Total novel-angle implementation: ~50-70 KLOC of C99 (kernel) + ~20-30 KLOC of R
 These are the invariants that, if violated, constitute correctness or security failure. Every one of these gets a TLA+ spec or equivalent formal treatment; every one is enumerated in `ARCHITECTURE.md §N` (the "Invariants that must hold" section). These are the audit-trigger anchors.
 
 **Process and isolation invariants**:
-- I-1. **Namespace isolation**: namespace operations in process A do not affect process B's namespace, except via explicit shared-mount handoff at process creation.
+- I-1. **Territory isolation**: territory operations in process A do not affect process B's territory, except via explicit shared-mount handoff at process creation.
 - I-2. **Capability monotonicity**: a process's capability set can only be reduced (via `rfork`), never elevated, without kernel mediation.
-- I-3. **Namespace acyclicity**: mount points form a DAG, never a cycle.
+- I-3. **Territory acyclicity**: mount points form a DAG, never a cycle.
 
 **Handle and capability invariants**:
 - I-4. **Handle subordination**: handles transfer between processes only via 9P sessions. No syscall exists for direct handle transfer.
 - I-5. **Hardware-handle non-transferability**: `KObj_MMIO`, `KObj_IRQ`, `KObj_DMA` handles cannot be transferred — the transfer syscall has no code path for them. Enforced at the syscall site.
 - I-6. **Right monotonicity**: handle rights can only be reduced when transferring, never elevated.
-- I-7. **VMO lifecycle**: a VMO's pages remain live until the last handle is closed *and* the last mapping is unmapped. No reader-after-free at the kernel level.
+- I-7. **BURROW lifecycle**: a BURROW's pages remain live until the last handle is closed *and* the last mapping is unmapped. No reader-after-free at the kernel level.
 
 **Concurrency invariants**:
 - I-8. **Scheduler progress**: every runnable thread eventually runs (no starvation under EEVDF's deadline computation).
@@ -300,14 +300,14 @@ Explicit, with rationale. Each non-goal is a deliberate scope choice; relaxing a
 Thylacine is not a Plan 9 fork. It does not derive from Plan 9 source code. It is a new OS that takes Plan 9's ideas seriously and implements them in 2026, on current hardware, with current tools, current security understanding, and current verification methodology.
 
 **Specifically inherited from Plan 9**:
-- The namespace model (per-process, composable via `bind`/`mount`).
+- The territory model (per-process, composable via `bind`/`mount`).
 - 9P (specifically 9P2000.L; see `ARCHITECTURE.md §11`) as the universal IPC and resource protocol.
 - The `Dev` vtable pattern for kernel devices.
 - `rfork` as the universal process/thread creation primitive.
 - Notes as the internal asynchronous-message model (POSIX signals are a translation surface).
 - The principle that authentication and key management are separate services (→ janus).
 - The synthetic filesystem as the administration interface (→ `/ctl/`, `/proc/`).
-- `Walkqid`, fid, qid, the open Chan as the fundamental kernel currency.
+- `Walkqid`, fid, qid, the open Spoor as the fundamental kernel currency.
 
 **Specifically not inherited**:
 - Plan 9's graphics model (rio / 8½). Halcyon replaces it entirely.
@@ -324,11 +324,11 @@ Thylacine is not a Plan 9 fork. It does not derive from Plan 9 source code. It i
 
 Stratum is Thylacine's native filesystem. This relationship is intentional and architectural:
 
-- **Stratum is internally feature-complete as of 2026-05-04.** Phases 1-7 of Stratum's v2 roadmap (foundations, lock-free Bε-tree, persistence, integrity + crypto, multi-device, namespaces, cold tier + features) are landed. Phase 8 (POSIX surface — inodes, dirents, xattrs, ACLs, the full set of modern POSIX file/dir ops including every `O_TMPFILE` / `F_SEAL_*` / `FALLOC_FL_*` / `renameat2` / `name_to_handle_at` / `*at` flag and primitive) is in progress. Phase 9 (9P server + clients) is queued.
+- **Stratum is internally feature-complete as of 2026-05-04.** Phases 1-7 of Stratum's v2 roadmap (foundations, lock-free Bε-tree, persistence, integrity + crypto, multi-device, territories, cold tier + features) are landed. Phase 8 (POSIX surface — inodes, dirents, xattrs, ACLs, the full set of modern POSIX file/dir ops including every `O_TMPFILE` / `F_SEAL_*` / `FALLOC_FL_*` / `renameat2` / `name_to_handle_at` / `*at` flag and primitive) is in progress. Phase 9 (9P server + clients) is queued.
 - **Thylacine integrates with Stratum's Phase 9 9P server.** Specifically the 9P2000.L dialect with Stratum extensions: `Tbind` / `Tunbind` (per-connection subvolume composition), `Tpin` / `Tunpin` (snapshot pinning), `Tsync` (commit), `Treflink` (`copy_file_range` with reflink), `Tfallocate` (every `FALLOC_FL_*` flag). Thylacine's kernel 9P client (Phase 4) must speak these extensions; the syscall layer translates Thylacine native calls into Stratum protocol messages.
-- **Stratum's per-connection namespace model maps directly to Thylacine's per-process namespace model.** Each Thylacine process establishes its own 9P connection to Stratum at process creation; each connection gets its own Stratum-side namespace; the per-process Thylacine namespace and the per-connection Stratum namespace are complementary layers. The Thylacine namespace governs cross-server composition (e.g. mounting Stratum + a network FS + `/dev/`); the Stratum per-connection namespace governs composition *within* a single Stratum connection (e.g. multiple subvolumes overlaid via `Tbind`). A program that wants `home/` from one Stratum subvolume and `code/` from another can do it either way: two `mount()` syscalls (Thylacine-level), or one mount + two `Tbind` ops (Stratum-level). Both work; the first is simpler, the second more efficient.
+- **Stratum's per-connection territory model maps directly to Thylacine's per-process territory model.** Each Thylacine process establishes its own 9P connection to Stratum at process creation; each connection gets its own Stratum-side territory; the per-process Thylacine territory and the per-connection Stratum territory are complementary layers. The Thylacine territory governs cross-server composition (e.g. mounting Stratum + a network FS + `/dev/`); the Stratum per-connection territory governs composition *within* a single Stratum connection (e.g. multiple subvolumes overlaid via `Tbind`). A program that wants `home/` from one Stratum subvolume and `code/` from another can do it either way: two `mount()` syscalls (Thylacine-level), or one mount + two `Tbind` ops (Stratum-level). Both work; the first is simpler, the second more efficient.
 - **Stratum's `janus` key agent is a userspace 9P server** — exactly the driver model Thylacine uses for everything. It runs unchanged on Thylacine. Authentication backends (passphrase, TPM 2.0, YubiKey, PKCS#11) all transfer; janus on Thylacine is the same binary as janus on Linux/macOS.
-- **Stratum's formal verification posture** (TLA+ specs, adversarial audit loop, property-based tests, fuzz harness) is the model for Thylacine's own correctness work. The audit pattern, the spec naming convention, the buggy-config counterexample pattern — all transfer. Stratum has 8+ TLA+ specs (`sync.tla`, `nonce.tla`, `allocator.tla`, `tree_commit.tla`, `namespace.tla`, `inode.tla`, `dirent.tla`, plus extensions); Thylacine targets 9 (`scheduler.tla`, `namespace.tla`, `handles.tla`, `vmo.tla`, `9p_client.tla`, `poll.tla`, `futex.tla`, `notes.tla`, `pty.tla`).
+- **Stratum's formal verification posture** (TLA+ specs, adversarial audit loop, property-based tests, fuzz harness) is the model for Thylacine's own correctness work. The audit pattern, the spec naming convention, the buggy-config counterexample pattern — all transfer. Stratum has 8+ TLA+ specs (`sync.tla`, `nonce.tla`, `allocator.tla`, `tree_commit.tla`, `territory.tla`, `inode.tla`, `dirent.tla`, plus extensions); Thylacine targets 9 (`scheduler.tla`, `territory.tla`, `handles.tla`, `burrow.tla`, `9p_client.tla`, `poll.tla`, `futex.tla`, `notes.tla`, `pty.tla`).
 
 Stratum was not designed for Thylacine. It will fit as if it was. The fit is evidence that both projects are built on the same proposition: 9P as the universal composition mechanism.
 
@@ -348,7 +348,7 @@ Thylacine is not a Linux clone. It is an OS that *runs* a useful subset of Linux
 
 **Tier 2 — static Linux ARM64 binary**: pre-built static ARM64 ELF binaries that use a top-50 Linux syscall surface. Run via the kernel's syscall translation shim. Best-effort; works for most CLI tools.
 
-**Tier 3 — Linux container**: OCI container images run inside a Thylacine namespace. The kernel primitive (namespace) handles container isolation; synthetic Linux-shaped 9P servers (`/proc`, `/sys`, `/dev` Linux layout) provide the expected files. This is the "flatpak / Steam Deck" model — containers as namespaces, not as a separate kernel subsystem.
+**Tier 3 — Linux container**: OCI container images run inside a Thylacine territory. The kernel primitive (territory) handles container isolation; synthetic Linux-shaped 9P servers (`/proc`, `/sys`, `/dev` Linux layout) provide the expected files. This is the "flatpak / Steam Deck" model — containers as territories, not as a separate kernel subsystem.
 
 **Out of scope at v1.0**: glibc-dynamic binaries (no `/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1`); programs that require `epoll` / `inotify` / `io_uring` (those land post-v1.0); programs that require non-trivial `/sys` parsing.
 
@@ -459,11 +459,11 @@ Video playback is not a Halcyon built-in. It is a 9P server:
     ctl          ← write: "play <file>", "pause", "seek <seconds>", "stop"
     position     ← read: current position in seconds
     duration     ← read: total duration
-    frame        ← read: current decoded frame (VMO handle, ARGB32)
+    frame        ← read: current decoded frame (BURROW handle, ARGB32)
     audio/ctl    ← write: "volume <0..100>", "mute", "unmute"
 ```
 
-Halcyon mounts the video server, polls `frame` (which is a VMO handle for zero-copy access), and blits the result into a graphical region in the scroll buffer. Hardware video decoding (post-v1.0) is a driver that exposes this same interface. The shell does not need to know about codecs.
+Halcyon mounts the video server, polls `frame` (which is a BURROW handle for zero-copy access), and blits the result into a graphical region in the scroll buffer. Hardware video decoding (post-v1.0) is a driver that exposes this same interface. The shell does not need to know about codecs.
 
 ### 13.3 What Halcyon is not
 

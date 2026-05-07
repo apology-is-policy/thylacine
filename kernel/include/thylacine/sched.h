@@ -81,7 +81,7 @@ struct Thread *sched_idle_thread(unsigned cpu_idx);
 // new work). Without this signaling, secondaries (no per-CPU timer at
 // v1.0) starve runnable threads while sitting in WFI.
 //
-// Boot CPU stays FALSE forever: its post-init flow is `_hang`'s asm wfi
+// Boot CPU stays FALSE forever: its post-init flow is `_torpor`'s asm wfi
 // loop with no C-level set hook; secondaries are the canonical wake
 // target. See ARCH §8 + scheduler.tla `EnterWFI` for the spec model.
 void sched_set_idle_in_wfi(bool in_wfi);
@@ -89,7 +89,7 @@ bool sched_idle_in_wfi(unsigned cpu_idx);
 
 // P3-G: notify-idle-peer toggle. Off (default) during in-kernel tests so
 // they keep their UP-like assumptions; on (set by boot_main between
-// test_run_all() and init_run()) for production. When off, ready() /
+// test_run_all() and joey_run()) for production. When off, ready() /
 // wakeup() do NOT send IPI_RESCHED to idle peers — work-stealing happens
 // only via the secondary's natural sched cycle (which never fires while
 // secondaries sit in WFI; tests that depend on cross-CPU placement send

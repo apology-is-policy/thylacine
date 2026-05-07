@@ -6,7 +6,7 @@ The fault dispatcher decodes ARMv8 ESR_EL1 / FAR_EL1 / ELR_EL1 into a structured
 
 History:
 - **P3-C** (`12ff454`): structured decode + classification. Resolve path empty; every call extincts.
-- **P3-Dc** (`936c2ed`): user-mode demand-paging path live. `userland_demand_page` looks up the VMA covering FAR, validates the access against VMA prot, resolves the VMO offset to a backing PA, and installs a leaf PTE in the per-Proc TTBR0 tree (`mmu_install_user_pte`). User-mode resolves return `FAULT_HANDLED`. Failures fall through to `FAULT_UNHANDLED_USER`.
+- **P3-Dc** (`936c2ed`): user-mode demand-paging path live. `userland_demand_page` looks up the VMA covering FAR, validates the access against VMA prot, resolves the BURROW offset to a backing PA, and installs a leaf PTE in the per-Proc TTBR0 tree (`mmu_install_user_pte`). User-mode resolves return `FAULT_HANDLED`. Failures fall through to `FAULT_UNHANDLED_USER`.
 - **P3-Ea**: EL0 sync vector live. New `exception_sync_lower_el` handles sync exceptions taken from EL0 (data/instr abort routed through `arch_fault_handle` for demand paging; SVC stub extincts at v1.0; alignment / BTI / BRK extinct with EL0-prefixed diagnostics). Vector slot 0x400 wired (was VEC_UNEXPECTED 8); IRQ slot 0x480 wired to `exception_irq_curr_el` + `preempt_check_irq` (was VEC_UNEXPECTED 9).
 
 The dispatcher is the substrate for:
@@ -88,8 +88,8 @@ The per-Proc VMA-tree dispatcher. Steps:
    - `is_write` requires `VMA_PROT_WRITE`.
    - `is_instruction` requires `VMA_PROT_EXEC`.
    - Read fault requires `VMA_PROT_READ`.
-4. Resolve the VMO offset: `vmo_byte_off = vma->vmo_offset + (page_va - vma->vaddr_start)`. Reject if offset ≥ `vmo->size`.
-5. Resolve to a backing PA: `vmo_base_pa + (vmo_byte_off & ~PAGE_MASK)`. v1.0 anonymous VMO: pages are eagerly allocated in a single `alloc_pages(order)` chunk; page i is at `page_to_pa(vmo->pages) + i * PAGE_SIZE`.
+4. Resolve the BURROW offset: `burrow_byte_off = vma->burrow_offset + (page_va - vma->vaddr_start)`. Reject if offset ≥ `burrow->size`.
+5. Resolve to a backing PA: `burrow_base_pa + (burrow_byte_off & ~PAGE_MASK)`. v1.0 anonymous BURROW: pages are eagerly allocated in a single `alloc_pages(order)` chunk; page i is at `page_to_pa(burrow->pages) + i * PAGE_SIZE`.
 6. `mmu_install_user_pte(p->pgtable_root, p->asid, page_va, page_pa, vma->prot)` — walks the L0 → L1 → L2 → L3 tree, allocates sub-tables KP_ZERO as needed, installs the leaf PTE.
 
 Exposed in the header so tests can drive demand paging directly (a synthetic `fault_info` + a manually constructed Proc) without triggering a real EL0 fault — at v1.0 pre-exec there's no userspace to fault.
@@ -233,7 +233,7 @@ EC switch
    │      │   ├── permission check vs is_write / is_instruction / read
    │      │   │      │
    │      │   │      ├── allowed
-   │      │   │      │   ├── resolve VMO offset → backing PA
+   │      │   │      │   ├── resolve BURROW offset → backing PA
    │      │   │      │   ├── mmu_install_user_pte (walks/grows L0..L3)
    │      │   │      │   └── return FAULT_HANDLED
    │      │   │      │
@@ -260,7 +260,7 @@ No new TLA+ spec at P3-C or P3-Dc. The reasoning:
 
 - **P3-Dc demand paging at v1.0**: structurally simple under the v1.0 single-thread-Proc invariant.
   - **No new concurrency**: only the running thread of Proc P faults P's pgtable. No two CPUs concurrently demand-page on the same Proc. (Phase 5+ multi-thread Procs DO introduce concurrency on `mmu_install_user_pte`'s walk; a per-Proc pgtable lock OR a TLA+ extension at that point becomes necessary.)
-  - **No new refcount semantics**: `userland_demand_page` doesn't take or release VMO refs. The VMA already holds `mapping_count`; the demand-paged page is just a PA reference, not a fresh ref. `vmo.tla::NoUseAfterFree` continues to hold by construction.
+  - **No new refcount semantics**: `userland_demand_page` doesn't take or release BURROW refs. The VMA already holds `mapping_count`; the demand-paged page is just a PA reference, not a fresh ref. `burrow.tla::NoUseAfterFree` continues to hold by construction.
   - **W^X invariant by construction**: PTE bits derived from VMA prot, and VMA prot already excludes W+X. Every PTE the installer can produce satisfies "writable XOR executable-at-EL0".
 
 The intermediate invariants `userland_demand_page` upholds — VMA-presence implies access permitted; PTE bits respect VMA prot; sub-table allocation rolls back cleanly on failure — are local to the function and verified by the unit tests. They're documented in commentary above the impl rather than formalized in TLA+; if a future bug demonstrates the structural reasoning was insufficient, a spec extension lands at that point.
@@ -284,10 +284,10 @@ Each test constructs a synthetic ESR via `mk_esr(ec, iss)` and verifies the deco
 - `pgtable.install_user_pte_smoke`: install RW + RX leaf PTEs; verify L0→L3 chain is allocated; verify PTE bits match expected encoding (AP, PXN, UXN, AF, nG).
 - `pgtable.install_user_pte_constraints`: zero pgtable_root, unaligned vaddr/pa, high-VA vaddr, W+X prot — all return -1.
 - `pgtable.install_user_pte_idempotent`: identical re-install returns 0 without reallocating; mismatching PA at the same vaddr returns -1.
-- `demand_page.smoke`: synthetic fault_info on a mapped VMA returns FAULT_HANDLED; L3 entry installed at expected vaddr pointing at the VMO's backing page.
+- `demand_page.smoke`: synthetic fault_info on a mapped VMA returns FAULT_HANDLED; L3 entry installed at expected vaddr pointing at the BURROW's backing page.
 - `demand_page.no_vma`: fault on unmapped vaddr → FAULT_UNHANDLED_USER.
 - `demand_page.permission_denied`: write fault on RO VMA / instruction fault on non-EXEC VMA → FAULT_UNHANDLED_USER. Read fault on R-only VMA → FAULT_HANDLED.
-- `demand_page.lifecycle_round_trip`: 4-page VMA + demand-page each page; proc_free + vmo_unref returns `phys_free_pages` to baseline (sub-tables freed by P3-Db walker; backing pages freed by VMO lifecycle).
+- `demand_page.lifecycle_round_trip`: 4-page VMA + demand-page each page; proc_free + burrow_unref returns `phys_free_pages` to baseline (sub-tables freed by P3-Db walker; backing pages freed by BURROW lifecycle).
 
 The integration tests (`tools/test-fault.sh`) cover the dispatch:
 
@@ -317,7 +317,7 @@ The dispatcher itself is not on a hot path (faults are exceptional). Performance
 ## Status
 
 - **Implemented at P3-C** (`12ff454`): `fault_info_decode`, `arch_fault_handle` with the kernel-mode classification paths, exception.c refactor to use the dispatcher, 5 decoder unit tests.
-- **Implemented at P3-Dc** (`936c2ed`): `userland_demand_page` (vma_lookup → permission check → VMO offset → PTE install). `mmu_install_user_pte` walks/grows the per-Proc TTBR0 tree. `arch_fault_handle`'s user-mode case routes through `userland_demand_page`. 7 new unit tests in `test_demand_page.c`.
+- **Implemented at P3-Dc** (`936c2ed`): `userland_demand_page` (vma_lookup → permission check → BURROW offset → PTE install). `mmu_install_user_pte` walks/grows the per-Proc TTBR0 tree. `arch_fault_handle`'s user-mode case routes through `userland_demand_page`. 7 new unit tests in `test_demand_page.c`.
 - **Implemented at P3-Ea**: `exception_sync_lower_el` for EL0 sync vector slot 0x400. EL0 IRQ slot 0x480 wired to `exception_irq_curr_el` + `preempt_check_irq`. SVC + alignment + BTI + BRK from EL0 stub-extinct at v1.0; P3-Ec wires real syscall dispatch.
 - **Stubbed**: COW (post-v1.0; not on the critical path for /init or the typical static-ELF case). SVC/syscall dispatcher (P3-Ec).
 

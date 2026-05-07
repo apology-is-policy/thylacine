@@ -917,15 +917,15 @@ bool mmu_restore_normal_range(paddr_t pa, unsigned n_pages) {
 // proc_pgtable_destroy (P3-Db extension closing trip-hazard #116):
 //   Walk the L0 → L1 → L2 → L3 tree, freeing every sub-table reachable
 //   from a table descriptor. L3 entries are LEAF page descriptors that
-//   point at VMO-backed user pages — those pages are owned by the VMA
-//   layer (their lifecycle is the VMO refcount, freed at vma_drain →
-//   vmo_release_mapping). The pgtable walk does NOT free leaf pages;
+//   point at BURROW-backed user pages — those pages are owned by the VMA
+//   layer (their lifecycle is the BURROW refcount, freed at vma_drain →
+//   burrow_release_mapping). The pgtable walk does NOT free leaf pages;
 //   it frees only the table pages themselves (L1, L2, L3 sub-tables
 //   plus the L0 root).
 //
 //   Pre-P3-Db (P3-Bcb baseline) only freed the L0 page. That was sound
 //   because no path populated user-half PTEs (vma_alloc didn't install
-//   PTEs — it only refcounted the VMO). At P3-Db vmo_map still doesn't
+//   PTEs — it only refcounted the BURROW). At P3-Db burrow_map still doesn't
 //   install PTEs (demand paging via P3-Dc does), so today's tree
 //   continues to have no sub-tables; the walk is no-op-on-empty. The
 //   walk is wired in advance of P3-Dc so the lifecycle is correct
@@ -977,7 +977,7 @@ bool mmu_restore_normal_range(paddr_t pa, unsigned n_pages) {
 
 static void l3_walk_and_free(paddr_t l3_pa) {
     // L3 entries are LEAF page descriptors. We do NOT free the pages
-    // they point at — those belong to the VMA layer (VMO refcount).
+    // they point at — those belong to the VMA layer (BURROW refcount).
     // We just free the L3 table page itself.
     struct page *l3_pg = pa_to_page(l3_pa);
     free_pages(l3_pg, 0);

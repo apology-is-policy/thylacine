@@ -6,7 +6,7 @@
 // At P1-E we ship single-page slabs only (slab_order = 0). Object
 // sizes up to SLUB_MAX_OBJECT_SIZE = 2048 bytes go through slab;
 // larger requests bypass to alloc_pages directly. This covers every
-// kernel struct we'll allocate at v1.0 (Proc, Thread, Chan, VMO,
+// kernel struct we'll allocate at v1.0 (Proc, Thread, Spoor, BURROW,
 // Handle are all well under 2 KiB) and the kmalloc-{8..2048}
 // general-purpose caches. kmalloc-{4096..262144} from ARCH §6.4 are
 // served via alloc_pages — same API surface, different backend.

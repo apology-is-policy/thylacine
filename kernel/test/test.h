@@ -11,7 +11,7 @@
 // (buddy free-list shape, SLUB partial-list discipline) are tested
 // implicitly via the smoke flows; explicit invariant tests would need
 // rewriting as those subsystems evolve, so we defer them. Phase 2's
-// process / handle / VMO surfaces will get their own tests when the
+// process / handle / BURROW surfaces will get their own tests when the
 // APIs stabilize.
 //
 // Per CLAUDE.md "test what is stable" guidance + the user's directive

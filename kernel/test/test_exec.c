@@ -9,7 +9,7 @@
 //
 //   exec.setup_segment_data_copied
 //     ELF with a PT_LOAD segment containing recognizable bytes;
-//     verify the bytes are present in the VMO's backing pages
+//     verify the bytes are present in the BURROW's backing pages
 //     (read via direct map).
 //
 //   exec.setup_constraints
@@ -25,7 +25,7 @@
 //   exec.setup_lifecycle_round_trip
 //     exec_setup + proc_free → all backing pages return to baseline
 //     (sub-tables freed by P3-Db walker; segment + stack VMOs freed
-//     by mapping_count→0 at vma_drain since vmo_unref already dropped
+//     by mapping_count→0 at vma_drain since burrow_unref already dropped
 //     the caller-held handle in exec_setup).
 
 #include "test.h"
@@ -37,7 +37,7 @@
 #include <thylacine/proc.h>
 #include <thylacine/types.h>
 #include <thylacine/vma.h>
-#include <thylacine/vmo.h>
+#include <thylacine/burrow.h>
 
 #include "../../mm/phys.h"
 
@@ -169,21 +169,21 @@ void test_exec_setup_segment_data_copied(void) {
     int rc = exec_setup(p, g_elf_blob, size, &entry, &sp);
     TEST_EXPECT_EQ(rc, 0, "exec_setup with data");
 
-    // Verify the bytes are now in the segment's VMO via vma_lookup
-    // → vma->vmo->pages → direct map.
+    // Verify the bytes are now in the segment's BURROW via vma_lookup
+    // → vma->burrow->pages → direct map.
     struct Vma *vma = vma_lookup(p, 0x10000ull);
     TEST_ASSERT(vma != NULL, "segment VMA");
-    TEST_ASSERT(vma->vmo != NULL, "VMA has VMO");
-    TEST_ASSERT(vma->vmo->pages != NULL, "VMO has backing pages");
+    TEST_ASSERT(vma->burrow != NULL, "VMA has BURROW");
+    TEST_ASSERT(vma->burrow->pages != NULL, "BURROW has backing pages");
 
-    u8 *vmo_kva = (u8 *)pa_to_kva(page_to_pa(vma->vmo->pages));
+    u8 *burrow_kva = (u8 *)pa_to_kva(page_to_pa(vma->burrow->pages));
     for (size_t i = 0; i < 256; i++) {
         u8 want = (u8)(i ^ 0x5A);
-        TEST_EXPECT_EQ(vmo_kva[i], want, "segment byte at offset i");
+        TEST_EXPECT_EQ(burrow_kva[i], want, "segment byte at offset i");
     }
     // Tail of the page (256 .. PAGE_SIZE) should be zero.
     for (size_t i = 256; i < PAGE_SIZE; i++) {
-        TEST_EXPECT_EQ(vmo_kva[i], (u8)0, "tail zero-padded");
+        TEST_EXPECT_EQ(burrow_kva[i], (u8)0, "tail zero-padded");
     }
 
     drop_proc(p);
@@ -279,7 +279,7 @@ void test_exec_setup_lifecycle_round_trip(void) {
     u64 free_after = phys_free_pages();
     TEST_EXPECT_EQ(free_after, free_before,
         "phys_free_pages must return to baseline (no leak in exec lifecycle: "
-        "segment VMOs freed via vma_drain → vmo_release_mapping → "
-        "mapping_count→0 + handle_count==0 → vmo_free_internal; sub-tables "
+        "segment VMOs freed via vma_drain → burrow_release_mapping → "
+        "mapping_count→0 + handle_count==0 → burrow_free_internal; sub-tables "
         "freed by proc_pgtable_destroy walker)");
 }

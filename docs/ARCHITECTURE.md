@@ -60,15 +60,15 @@ Section §25.4 enumerates the audit-trigger surfaces. Every change to a file or 
   │    janus (key agent) │ drivers │ video │ network stack  │
   │    POSIX-compat 9P servers ( /proc, /sys, /dev/pts )    │
   │    ← hardware via typed handles (MMIO / IRQ / DMA)    → │
-  │    ← buffer sharing via VMO handles (zero-copy)       → │
+  │    ← buffer sharing via BURROW handles (zero-copy)       → │
   ├─────────────────────────────────────────────────────────┤
   │  Compatibility layer (POSIX/Linux syscall translation)  │
   │    musl port │ Linux ARM64 syscall shim │ container ns  │
   ├─────────────────────────────────────────────────────────┤
   │  Thylacine kernel (C99, ARM64)                          │
-  │    Namespace │ EEVDF Scheduler │ VM │ 9P client (pipe.) │
-  │    Handle table │ VMO manager │ IRQ forwarding │ Notes  │
-  │    Dev vtable │ Chan │ Pipes │ rendezvous │ Pty infra   │
+  │    Territory │ EEVDF Scheduler │ VM │ 9P client (pipe.) │
+  │    Handle table │ BURROW manager │ IRQ forwarding │ Notes  │
+  │    Dev vtable │ Spoor │ Pipes │ rendezvous │ Pty infra   │
   ├─────────────────────────────────────────────────────────┤
   │  Stratum (native filesystem, 9P server, userspace)      │
   │  — Phase 4, 9P2000.L + Stratum extensions               │
@@ -77,28 +77,28 @@ Section §25.4 enumerates the audit-trigger surfaces. Every change to a file or 
 
 ### 2.2 Key abstractions
 
-- **Process (`Proc`)**: unit of isolation. Has a private namespace, address space, credential set, handle table, and one or more threads.
-- **Thread**: register context + kernel stack + signal mask + per-thread `errstr`. Multiple threads share a process's address space, namespace, fd table, and handle table unless explicitly cloned via `rfork`.
-- **Namespace (`Pgrp`)**: a process's view of the resource tree. Composed via `bind` and `mount`.
-- **Chan**: the kernel object representing an open resource (file, device, synthetic node). Carries `qid`, `dev` pointer, offset, mode. The fundamental currency of the kernel; `read` / `write` / `walk` / `clunk` operate on Chans.
+- **Process (`Proc`)**: unit of isolation. Has a private territory, address space, credential set, handle table, and one or more threads.
+- **Thread**: register context + kernel stack + signal mask + per-thread `errstr`. Multiple threads share a process's address space, territory, fd table, and handle table unless explicitly cloned via `rfork`.
+- **Territory (`Territory`)**: a process's view of the resource tree. Composed via `bind` and `mount`.
+- **Spoor**: the kernel object representing an open resource (file, device, synthetic node). Carries `qid`, `dev` pointer, offset, mode. The fundamental currency of the kernel; `read` / `write` / `walk` / `clunk` operate on Spoors.
 - **Dev**: the vtable every kernel device implements (`attach`, `walk`, `stat`, `open`, `create`, `read`, `write`, `close`, `remove`, `wstat`, etc.). All kernel devices implement this interface; userspace devices implement it remotely via 9P.
-- **9P server**: any userspace process exposing a resource tree via the 9P2000.L protocol. Drivers, services, and the filesystem are all 9P servers. Mounted into a process namespace via the kernel's 9P client.
-- **Kernel object handle**: typed, unforgeable integer token scoped to a process. Eight types: `Process`, `Thread`, `VMO`, `MMIO`, `IRQ`, `DMA`, `Chan`, `Interrupt`. Carry rights bitmasks.
-- **VMO** (Virtual Memory Object): kernel object representing a region of memory, independent of any process's address space. Reference-counted; pages live as long as any handle or mapping refers to them.
+- **9P server**: any userspace process exposing a resource tree via the 9P2000.L protocol. Drivers, services, and the filesystem are all 9P servers. Mounted into a process territory via the kernel's 9P client.
+- **Kernel object handle**: typed, unforgeable integer token scoped to a process. Eight types: `Process`, `Thread`, `BURROW`, `MMIO`, `IRQ`, `DMA`, `Spoor`, `Interrupt`. Carry rights bitmasks.
+- **BURROW** (Virtual Memory Object): kernel object representing a region of memory, independent of any process's address space. Reference-counted; pages live as long as any handle or mapping refers to them.
 - **Note**: async text message delivered to a process. Plan 9's signal model. POSIX signals translate to/from notes in the compat layer.
 
 ### 2.3 Invariants each abstraction maintains
 
 | Abstraction | Invariant | Enforcement | Spec |
 |---|---|---|---|
-| Process | Namespace operations don't affect other processes' namespaces | Kernel namespace isolation | `namespace.tla` |
+| Process | Territory operations don't affect other processes' territories | Kernel territory isolation | `territory.tla` |
 | Process | Capability set monotonically reduces (`rfork` only reduces, never elevates) | Syscall gate | `handles.tla` |
-| Chan | `chan->dev` valid for the chan's lifetime | Ref-counted dev attachment | runtime |
-| Namespace mount | Mount points form a DAG, never a cycle | Kernel mount validation | `namespace.tla` |
+| Spoor | `spoor->dev` valid for the spoor's lifetime | Ref-counted dev attachment | runtime |
+| Territory mount | Mount points form a DAG, never a cycle | Kernel mount validation | `territory.tla` |
 | Handle | Rights monotonically reduce on transfer | Syscall-level check | `handles.tla` |
 | Handle (hardware) | `KObj_MMIO`, `KObj_IRQ`, `KObj_DMA` cannot transfer | Syscall has no code path; static_assert | `handles.tla` |
-| Handle (other) | Transferable handles (`Process`, `Thread`, `VMO`, `Chan`) transfer only via 9P | Kernel transfer syscall accepts only 9P-attached transfers | `handles.tla` |
-| VMO | Pages live until last handle closed AND last mapping unmapped | Ref-counted; `vmo.tla` proves no UAF | `vmo.tla` |
+| Handle (other) | Transferable handles (`Process`, `Thread`, `BURROW`, `Spoor`) transfer only via 9P | Kernel transfer syscall accepts only 9P-attached transfers | `handles.tla` |
+| BURROW | Pages live until last handle closed AND last mapping unmapped | Ref-counted; `burrow.tla` proves no UAF | `burrow.tla` |
 | 9P session | Fid table is per-connection; fids don't leak between connections | Per-session fid table | `9p_client.tla` |
 | 9P session | Per-session tag uniqueness | Per-session tag pool with monotonic generation | `9p_client.tla` |
 | Scheduler | Every runnable thread eventually runs | EEVDF deadline computation | `scheduler.tla` |
@@ -110,7 +110,7 @@ The full enumerated invariant list (I-1 through I-N) lives in §28 with file-lev
 
 ### 2.4 Layer responsibilities
 
-- **Kernel** owns: virtual memory, scheduling, namespace primitives, handle table, VMO manager, IRQ forwarding, 9P client, ramfs, procfs (synthetic Dev), tmpfs, ctlfs, console (cons / consctl). All in C99.
+- **Kernel** owns: virtual memory, scheduling, territory primitives, handle table, BURROW manager, IRQ forwarding, 9P client, ramfs, procfs (synthetic Dev), tmpfs, ctlfs, console (cons / consctl). All in C99.
 - **Userspace driver processes** own: VirtIO devices (block, net, GPU, input). All in Rust. They hold `KObj_MMIO` / `KObj_IRQ` / `KObj_DMA` handles for hardware access and expose results as 9P servers.
 - **Userspace services** own: network stack (TCP/IP), key agent (janus), POSIX-compat synthetic FS (`/proc-linux`, `/sys-linux`, `/dev/pts/`), video player. All in Rust except where C-FFI bindings to existing libraries (Stratum's `libstratum.a`, libsodium, etc.) make C the right call.
 - **Halcyon** owns: the graphical scroll-buffer shell. Rust.
@@ -126,7 +126,7 @@ The full enumerated invariant list (I-1 through I-N) lives in §28 with file-lev
 | Layer | Language | Rationale |
 |---|---|---|
 | Kernel | **C99** | Total control, no hidden runtime, all prior kernel art is C. Matches Stratum's heritage. SOTA C99 with sanitizers + formal specs is sound (seL4 precedent). |
-| Userspace drivers | **Rust** | Drivers handle hardware DMA descriptors, parse 9P, manage VMO ref-counts — exactly the domains where Rust's borrow checker eliminates classes of bugs. |
+| Userspace drivers | **Rust** | Drivers handle hardware DMA descriptors, parse 9P, manage BURROW ref-counts — exactly the domains where Rust's borrow checker eliminates classes of bugs. |
 | Halcyon | **Rust** | Parses bash-subset syntax, decodes images, renders fonts, manages a stateful UI — historically high CVE density in C; Rust eliminates UAF + buffer overflow at compile time. |
 | Userspace services (network stack, video player, etc.) | **Rust** | Same rationale as drivers. |
 | POSIX-compat synthetic FS | **C99** | Small servers wrapping existing C libraries (libfuse-9p, etc.); Rust would add crate-build complexity for little gain. Rewrite candidates for v2.0. |
@@ -209,7 +209,7 @@ The delta from QEMU `virt` to Pi 5 bare metal: EL2→EL1 drop sequence, mailbox 
 
 ### 4.5 RISC-V (long horizon, v2.x)
 
-Post-v1.0. Target: first RVA23-compliant SBC with PCIe and NVMe (Milk-V Jupiter 2 or equivalent). The kernel port from ARM64 to RISC-V is mechanical above `arch/`: swap GIC for PLIC, ARM CSRs for RISC-V CSRs, ARM generic timer for SBI timer. All namespace, scheduler, 9P, VMO, and handle code is architecture-independent and transfers without modification.
+Post-v1.0. Target: first RVA23-compliant SBC with PCIe and NVMe (Milk-V Jupiter 2 or equivalent). The kernel port from ARM64 to RISC-V is mechanical above `arch/`: swap GIC for PLIC, ARM CSRs for RISC-V CSRs, ARM generic timer for SBI timer. All territory, scheduler, 9P, BURROW, and handle code is architecture-independent and transfers without modification.
 
 x86-64 is also v2.x. Both ports get clean abstractions because v1.0's ARM64-only design isn't contaminated by the older architecture.
 
@@ -242,13 +242,13 @@ boot_main()
     ↓ proc_init(): bootstrap proc (PID 0); idle thread
     ↓ irq_init(): GIC distributor + CPU interface; attach timer IRQ
     ↓ mount_initramfs(): cpio archive at /; contains stratum, janus, init binaries
-    ↓ create init process; exec("/sbin/init")
+    ↓ create init process; exec("/sbin/joey")
     ↓ idle loop: WFI on each CPU
-init (userspace, /sbin/init)
+init (userspace, /sbin/joey)
     ↓ start stratum (mounts VirtIO block; presents 9P server)
     ↓ start janus (mounts /dev/janus/; key agent)
     ↓ remount / from Stratum (kernel umounts ramfs from /)
-    ↓ exec /sbin/init-stage2 if present, else /bin/sh
+    ↓ exec /sbin/joey-stage2 if present, else /bin/sh
 ```
 
 ### 5.2 Bootloader contract
@@ -282,7 +282,7 @@ The KASLR seed is passed by the bootloader; if absent, kernel falls back to a lo
 cpio format, passed by the bootloader as a "ramdisk" image (bootloader-specific mechanism: UEFI passes via a config table; U-Boot passes via DTB `/chosen/linux,initrd-start` etc.).
 
 Contents:
-- `/sbin/init` (Phase 4+) or `/sbin/init-minimal` (Phase 1-3 — UART shell only).
+- `/sbin/joey` (Phase 4+) or `/sbin/joey-minimal` (Phase 1-3 — UART shell only).
 - `/sbin/stratum` — Stratum daemon binary (Phase 4+).
 - `/sbin/janus` — key agent binary (Phase 4+).
 - `/sbin/busybox` — recovery shell (Phase 5+).
@@ -395,8 +395,8 @@ Flags: `KP_ZERO` (zero on alloc), `KP_DMA` (low-32-bit physical), `KP_NOWAIT` (r
 **Standard caches**:
 - `proc_cache` (size of `struct Proc`)
 - `thread_cache` (size of `struct Thread`)
-- `chan_cache` (size of `struct Chan`)
-- `vmo_cache` (size of `struct Vmo`)
+- `spoor_cache` (size of `struct Spoor`)
+- `burrow_cache` (size of `struct Burrow`)
 - `handle_cache` (size of `struct Handle`)
 - 16 power-of-two general-purpose caches: `kmalloc-8`, `kmalloc-16`, ..., `kmalloc-262144`. `kmalloc(N)` finds the next-larger power of two.
 
@@ -427,11 +427,11 @@ struct vma {
             void *page_handle;  /* anonymous page state */
         } anon;
         struct {
-            struct Vmo *vmo;    /* VMO-backed mapping */
+            struct Burrow *burrow;    /* BURROW-backed mapping */
             uintptr_t offset;
-        } vmo;
+        } burrow;
         struct {
-            struct Chan *chan;  /* file-backed (post-v1.0) */
+            struct Spoor *spoor;  /* file-backed (post-v1.0) */
             uintptr_t offset;
         } file;
     };
@@ -442,11 +442,11 @@ struct vma {
 **Page fault handler** (`arch/arm64/fault.c`):
 - Demand-pages anonymous mappings on first touch (zero-filled).
 - COW-copies on first write to a `RFPROC`-shared page.
-- Translates VMO-backed faults to VMO page lookups.
+- Translates BURROW-backed faults to BURROW page lookups.
 - Panics on kernel faults outside the direct map / vmalloc / fixmap regions (a kernel page fault is a bug, not a recoverable condition).
 
 **`mmap` and `mprotect`**:
-- `mmap(addr, len, prot, flags, fd, off)` creates a vma. Anonymous if `fd == -1`; file-backed if `fd` references a Chan; VMO-backed if `fd` is a VMO handle wrapped in a Chan.
+- `mmap(addr, len, prot, flags, fd, off)` creates a vma. Anonymous if `fd == -1`; file-backed if `fd` references a Spoor; BURROW-backed if `fd` is a BURROW handle wrapped in a Spoor.
 - `mprotect(addr, len, prot)` updates the vma's flags. **Rejects W^X violations**: a transition from `R+W` to `R+X` (or `R+W+X`) returns `-EPERM`. Once a page is writable, it cannot become executable without a separate kernel-mediated path (none at v1.0; future JIT support will define one).
 
 ### 6.6 W^X enforcement
@@ -472,7 +472,7 @@ At v1.0 there's exactly one node. At v2.x multi-socket, the structure is filled 
 ### 6.8 Open design questions
 
 - THP / 2 MiB user mappings for hugepage workloads. Post-v1.0; v1.0 user mappings are 4 KiB only. Kernel mappings use 2 MiB blocks where contiguous.
-- Memory cgroups-equivalent for namespace-level memory accounting. Plan 9 doesn't have this; Linux does (`memory.max`); for the development-VM target, system-wide accounting via `/ctl/mm/` is sufficient at v1.0.
+- Memory cgroups-equivalent for territory-level memory accounting. Plan 9 doesn't have this; Linux does (`memory.max`); for the development-VM target, system-wide accounting via `/ctl/mm/` is sufficient at v1.0.
 
 ### 6.9 Summary
 
@@ -550,8 +550,8 @@ This direction is consistent with Thylacine's existing commitments: handles.tla 
 
 A `Proc` owns:
 - An address space (page table root, `vma_tree`).
-- A namespace (`Pgrp` — mount table + per-bind overlays).
-- A file descriptor table (open `Chan`s).
+- A territory (`Territory` — mount table + per-bind overlays).
+- A file descriptor table (open `Spoor`s).
 - A handle table (typed kernel object handles).
 - A credential set (uid, gid, supplementary groups, capabilities).
 - A set of threads (one or more).
@@ -561,7 +561,7 @@ A `Proc` owns:
 ```c
 struct Proc {
     int            pid;
-    struct Pgrp   *namespace;
+    struct Territory   *territory;
     struct AddrSpace *addr_space;
     struct FdTable *fds;
     struct HandleTable *handles;
@@ -614,7 +614,7 @@ struct Thread {
 |---|---|
 | `RFPROC` | Create a new Proc (always required for "create"). |
 | `RFMEM` | Share address space (creates a thread within current Proc, not a new Proc). |
-| `RFNAMEG` | Share namespace (default for threads; clone for processes). |
+| `RFNAMEG` | Share territory (default for threads; clone for processes). |
 | `RFFDG` | Share file descriptor table (default for threads). |
 | `RFCRED` | Share credentials. |
 | `RFNOTEG` | Share note queue (default for threads). |
@@ -625,7 +625,7 @@ struct Thread {
 Examples:
 - POSIX `fork()`: `rfork(RFPROC | RFFDG | RFENVG)` — new Proc, copy-on-write address space, clone fd table.
 - POSIX `pthread_create()`: `rfork(RFPROC | RFMEM | RFNAMEG | RFFDG | RFCRED | RFNOTEG)` — new thread within existing Proc.
-- Plan 9 container: `rfork(RFPROC | RFNAMEG)` — new Proc, fresh namespace, copy-on-write address space.
+- Plan 9 container: `rfork(RFPROC | RFNAMEG)` — new Proc, fresh territory, copy-on-write address space.
 - Capability reduction: `rfork(0)` (no resource flags) — no creation; just reduces capabilities of the calling process. Used for sandboxing.
 
 The musl port's `clone()` syscall translates Linux `CLONE_*` flags into `rfork()` flags; the translation is straightforward and well-defined.
@@ -670,9 +670,9 @@ Each `Proc` has a coarse-grained capability bitmask:
 | `CAP_HW_HANDLE` | Receive hardware handles at process creation (driver bit) |
 | `CAP_RAW_MEM` | Open `/dev/mem` for physical memory access |
 | `CAP_PTRACE` | Debug another process |
-| `CAP_NS_ADMIN` | Modify namespace beyond own (e.g., post-mount /proc) |
+| `CAP_NS_ADMIN` | Modify territory beyond own (e.g., post-mount /proc) |
 | `CAP_NET_ADMIN` | Configure network interfaces |
-| `CAP_SYS_ADMIN` | Mount filesystems other than into own namespace |
+| `CAP_SYS_ADMIN` | Mount filesystems other than into own territory |
 
 Capabilities can only be reduced via `rfork`, never elevated, except via the v2.0 factotum-mediated capability elevation (§15.4 — designed-not-implemented at v1.0).
 
@@ -683,7 +683,7 @@ Default at process creation: empty set. Drivers receive `CAP_HW_HANDLE` from ker
 Every thread has a per-thread `errstr` buffer (Plan 9 idiom). System calls returning failure also set this buffer with a textual description:
 
 ```c
-errstr("namespace cycle: cannot bind /a/b onto /a (would create loop)");
+errstr("territory cycle: cannot bind /a/b onto /a (would create loop)");
 return -1;
 ```
 
@@ -699,10 +699,10 @@ This is richer than POSIX errno alone and is preserved as a Plan 9 idiom worth k
 
 When a process exits:
 1. All threads stopped.
-2. All open Chans clunked.
+2. All open Spoors clunked.
 3. All handles closed.
 4. Address space torn down.
-5. Namespace dropped.
+5. Territory dropped.
 6. Children re-parented to PID 1 (init).
 7. Notes drained.
 8. Parent notified (synthetic note-equivalent if waiting).
@@ -867,13 +867,13 @@ EEVDF on per-CPU run trees with work-stealing, three priority bands, tickless id
 
 ---
 
-## 9. Namespace and device model
+## 9. Territory and device model
 
 **STATUS**: COMMITTED
 
-### 9.1 The namespace
+### 9.1 The territory
 
-Each process has a private namespace — a tree of mount points mapping names to resource servers. The namespace is the fundamental unit of isolation and composition.
+Each process has a private territory — a tree of mount points mapping names to resource servers. The territory is the fundamental unit of isolation and composition.
 
 **Operations**:
 - `bind(old, new, flags)` — attach a file or directory at another point in the tree. Flags: `MREPL` (replace), `MBEFORE` (union, checked first), `MAFTER` (union, checked last), `MCREATE` (allow creates in the union).
@@ -882,14 +882,14 @@ Each process has a private namespace — a tree of mount points mapping names to
 
 These three operations, composed, express containers, overlay filesystems, per-process views, chroot, and capability restriction — without additional kernel machinery.
 
-**Namespace inheritance at `rfork`**: by default (no `RFNAMEG`), the child gets a private copy of the parent's namespace. Modifications to the child don't affect parent. With `RFNAMEG`, parent and child share the namespace (typical for thread creation).
+**Territory inheritance at `rfork`**: by default (no `RFNAMEG`), the child gets a private copy of the parent's territory. Modifications to the child don't affect parent. With `RFNAMEG`, parent and child share the territory (typical for thread creation).
 
-**Namespace data structure** (`kernel/namespace.c`):
+**Territory data structure** (`kernel/territory.c`):
 
 ```c
 struct Mount {
-    struct Chan *to;           /* what's mounted */
-    struct Chan *from;          /* mount point */
+    struct Spoor *to;           /* what's mounted */
+    struct Spoor *from;          /* mount point */
     int flags;
     struct Mount *next, *prev;
     int order;                  /* union ordering */
@@ -900,7 +900,7 @@ struct MountHead {
     struct rb_node rb;
 };
 
-struct Pgrp {
+struct Territory {
     struct MountTable {
         struct rb_tree mounts;  /* keyed by mount point qid */
         rwlock_t lock;
@@ -909,12 +909,12 @@ struct Pgrp {
 };
 ```
 
-`bind` / `mount` operations take `Pgrp->mt.lock` write-locked; lookups take it read-locked. Lock contention is rare (mount changes happen at process startup or container creation, not on hot paths).
+`bind` / `mount` operations take `Territory->mt.lock` write-locked; lookups take it read-locked. Lock contention is rare (mount changes happen at process startup or container creation, not on hot paths).
 
-**Spec**: `namespace.tla` proves:
+**Spec**: `territory.tla` proves:
 - Cycle-freedom: no `bind` operation can create a cycle.
-- Isolation: namespace operations in process A don't affect process B's namespace (unless they share via `RFNAMEG`).
-- Walk determinism: a path lookup from a fixed namespace state always produces the same Chan.
+- Isolation: territory operations in process A don't affect process B's territory (unless they share via `RFNAMEG`).
+- Walk determinism: a path lookup from a fixed territory state always produces the same Spoor.
 
 ### 9.2 The Dev vtable
 
@@ -928,19 +928,19 @@ struct Dev {
     void   (*reset)(void);
     void   (*init)(void);
     void   (*shutdown)(void);
-    struct Chan*  (*attach)(char *spec);
-    struct Walkqid* (*walk)(struct Chan *c, struct Chan *nc, char **name, int nname);
-    int    (*stat)(struct Chan *c, uint8_t *dp, int n);
-    struct Chan*  (*open)(struct Chan *c, int omode);
-    void   (*create)(struct Chan *c, char *name, int omode, uint32_t perm);
-    void   (*close)(struct Chan *c);
-    long   (*read)(struct Chan *c, void *buf, long n, int64_t off);
-    struct Block* (*bread)(struct Chan *c, long n, int64_t off);
-    long   (*write)(struct Chan *c, void *buf, long n, int64_t off);
-    long   (*bwrite)(struct Chan *c, struct Block *bp, int64_t off);
-    void   (*remove)(struct Chan *c);
-    int    (*wstat)(struct Chan *c, uint8_t *dp, int n);
-    struct Chan*  (*power)(struct Chan *c, int on);
+    struct Spoor*  (*attach)(char *spec);
+    struct Walkqid* (*walk)(struct Spoor *c, struct Spoor *nc, char **name, int nname);
+    int    (*stat)(struct Spoor *c, uint8_t *dp, int n);
+    struct Spoor*  (*open)(struct Spoor *c, int omode);
+    void   (*create)(struct Spoor *c, char *name, int omode, uint32_t perm);
+    void   (*close)(struct Spoor *c);
+    long   (*read)(struct Spoor *c, void *buf, long n, int64_t off);
+    struct Block* (*bread)(struct Spoor *c, long n, int64_t off);
+    long   (*write)(struct Spoor *c, void *buf, long n, int64_t off);
+    long   (*bwrite)(struct Spoor *c, struct Block *bp, int64_t off);
+    void   (*remove)(struct Spoor *c);
+    int    (*wstat)(struct Spoor *c, uint8_t *dp, int n);
+    struct Spoor*  (*power)(struct Spoor *c, int on);
 };
 ```
 
@@ -966,14 +966,14 @@ After step 5, the kernel has no further involvement in the hot path. The driver 
 
 **Driver crash recovery**: if a driver process crashes (segfault, assertion, OOM):
 1. Kernel observes the process exit.
-2. All 9P sessions to the driver are clunked; affected `Chan`s in clients are marked invalid (return `-EIO` on subsequent ops).
+2. All 9P sessions to the driver are clunked; affected `Spoor`s in clients are marked invalid (return `-EIO` on subsequent ops).
 3. Handles held by the driver are released (the `KObj_*` resources go back to the kernel free pool).
 4. `init` (or a designated supervisor) detects the crash and restarts the driver. New driver process gets fresh handles for the same hardware.
 5. Clients reconnect; resume.
 
 This is the same shape as MINIX 3's reincarnation server. Implemented as a userspace supervisor (Phase 6+); kernel exposes the necessary signals (`/ctl/proc-events/exit`).
 
-### 9.4 Device namespace layout (v1.0 target)
+### 9.4 Device territory layout (v1.0 target)
 
 ```
 /
@@ -990,7 +990,7 @@ This is the same shape as MINIX 3's reincarnation server. Implemented as a users
 │   ├── pts/             ← PTY slaves (userspace 9P server)
 │   ├── fb/              ← framebuffer (userspace driver, virtio-gpu)
 │   │   ├── ctl          ← write: "res 1920 1080", "flush"
-│   │   ├── image        ← VMO handle to pixel buffer
+│   │   ├── image        ← BURROW handle to pixel buffer
 │   │   └── info         ← read: current resolution, format
 │   ├── video/           ← video player (userspace 9P server)
 │   │   └── player/
@@ -1003,7 +1003,7 @@ This is the same shape as MINIX 3's reincarnation server. Implemented as a users
 │   │   ├── audit
 │   │   └── ctl
 │   └── virtio-blk0     ← virtio block device interface (rare; usually via /dev/sda)
-├── proc/                ← process namespace (kernel Dev)
+├── proc/                ← process territory (kernel Dev)
 │   └── <pid>/
 │       ├── ctl
 │       ├── mem
@@ -1035,12 +1035,12 @@ This is the same shape as MINIX 3's reincarnation server. Implemented as a users
 └── (root from Stratum)
 ```
 
-### 9.5 Interactions with the per-process namespace
+### 9.5 Interactions with the per-process territory
 
-A process's namespace is a tree. The mount table at any path can have multiple Chans (union mount):
+A process's territory is a tree. The mount table at any path can have multiple Spoors (union mount):
 
 ```
-Process A's namespace:
+Process A's territory:
 /home/alice (bound from /var/stratum/users/alice)
 /code       (bound from /var/stratum/code)
 /dev        (kernel Dev tree)
@@ -1055,7 +1055,7 @@ None at Gate 3.
 
 ### 9.7 Summary
 
-Per-process namespace, `bind` / `mount` / `unmount` as the only composition operations. `Dev` vtable for kernel devices; userspace drivers as 9P servers. Standard `/dev/`, `/proc/`, `/ctl/` paths. Driver crash recovery via process supervision.
+Per-process territory, `bind` / `mount` / `unmount` as the only composition operations. `Dev` vtable for kernel devices; userspace drivers as 9P servers. Standard `/dev/`, `/proc/`, `/ctl/` paths. Driver crash recovery via process supervision.
 
 ---
 
@@ -1065,7 +1065,7 @@ Per-process namespace, `bind` / `mount` / `unmount` as the only composition oper
 
 ### 10.1 9P as the universal IPC
 
-There is no separate IPC mechanism. All inter-process communication is mediated by 9P: one process mounts another's 9P server and reads/writes files. Pipes are 9P streams. Shared memory is a 9P file backed by anonymous memory (with VMO handles for zero-copy). Message queues are 9P files.
+There is no separate IPC mechanism. All inter-process communication is mediated by 9P: one process mounts another's 9P server and reads/writes files. Pipes are 9P streams. Shared memory is a 9P file backed by anonymous memory (with BURROW handles for zero-copy). Message queues are 9P files.
 
 This is the Plan 9 model, adopted unchanged.
 
@@ -1074,7 +1074,7 @@ This is the Plan 9 model, adopted unchanged.
 **Dialect**: 9P2000.L (the Linux-extended dialect). Includes the L-extension messages: `Tgetattr`, `Tsetattr`, `Treaddir`, `Tlock`, `Tlink`, `Tsymlink`, `Tmknod`, `Trename`, `Tflush`, `Trenameat`, `Tunlinkat`, `Txattrwalk`, `Txattrcreate`, `Tfsync`, `Tlcreate`, `Tmkdir`. Also covers POSIX file modes properly (vs vanilla 9P2000's restricted set).
 
 **Stratum extensions** (committed at Stratum's Phase 9):
-- `Tbind` / `Rbind` — per-connection subvolume composition (within the Stratum connection's namespace).
+- `Tbind` / `Rbind` — per-connection subvolume composition (within the Stratum connection's territory).
 - `Tunbind` / `Runbind` — undo the above.
 - `Tpin` / `Rpin` — pin a snapshot for the connection (prevents reclamation).
 - `Tunpin` / `Runpin` — release the pin.
@@ -1087,7 +1087,7 @@ These are negotiated at session establishment; clients that don't support them f
 ### 10.3 Pipes
 
 Pipes are kernel-implemented 9P streams:
-- `pipe(fd[2])` creates a pair of `Chan`s backed by a kernel ring buffer.
+- `pipe(fd[2])` creates a pair of `Spoor`s backed by a kernel ring buffer.
 - Read end has read-only mode; write end has write-only.
 - Reads block when empty; writes block when full.
 - EOF on write end causes EOF on read end.
@@ -1095,7 +1095,7 @@ Pipes are kernel-implemented 9P streams:
 
 Pipes are the primary mechanism for connecting processes. Shell pipelines compose processes via pipes, exactly as in Unix.
 
-For very large inter-process data transfer (GiB-class), VMO-based shared-memory regions transferred via 9P sessions (§19) are the zero-copy alternative.
+For very large inter-process data transfer (GiB-class), BURROW-based shared-memory regions transferred via 9P sessions (§19) are the zero-copy alternative.
 
 ### 10.4 Notes (signals)
 
@@ -1131,7 +1131,7 @@ The syscall interface is Plan 9-heritage, not POSIX. The syscall table is small 
 
 | Syscall | Description |
 |---|---|
-| `open(name, mode)` | Open a file in the namespace |
+| `open(name, mode)` | Open a file in the territory |
 | `close(fd)` | Close a file descriptor |
 | `read(fd, buf, n)` | Read from fd |
 | `write(fd, buf, n)` | Write to fd |
@@ -1143,7 +1143,7 @@ The syscall interface is Plan 9-heritage, not POSIX. The syscall table is small 
 | `fstat(fd, buf, n)` | Stat an open fd |
 | `create(name, mode, perm)` | Create a file |
 | `remove(name)` | Remove a file |
-| `bind(old, new, flags)` | Bind in namespace |
+| `bind(old, new, flags)` | Bind in territory |
 | `mount(fd, afd, old, flags, aname)` | Mount 9P server |
 | `unmount(name, old)` | Unmount |
 | `rfork(flags)` | Create process/thread |
@@ -1175,13 +1175,13 @@ Per §18:
 | `handle_close(h)` | Release a handle |
 | `handle_rights(h)` | Query rights on a handle |
 | `handle_reduce(h, rights)` | Return new handle with reduced rights |
-| `mmap_handle(h, addr, len, prot)` | Map a VMO or MMIO handle |
+| `mmap_handle(h, addr, len, prot)` | Map a BURROW or MMIO handle |
 | `irq_wait(h)` | Block until IRQ handle fires; returns count |
-| `vmo_create(size, flags)` | Create anonymous VMO |
-| `vmo_create_physical(paddr, size)` | Create physical VMO (privileged) |
-| `vmo_get_size(h)` | Query VMO size |
-| `vmo_read(h, buf, off, len)` | Read from VMO without mapping |
-| `vmo_write(h, buf, off, len)` | Write to VMO without mapping |
+| `burrow_create(size, flags)` | Create anonymous BURROW |
+| `burrow_create_physical(paddr, size)` | Create physical BURROW (privileged) |
+| `burrow_get_size(h)` | Query BURROW size |
+| `burrow_read(h, buf, off, len)` | Read from BURROW without mapping |
+| `burrow_write(h, buf, off, len)` | Write to BURROW without mapping |
 
 ### 11.4 POSIX compat surface
 
@@ -1213,7 +1213,7 @@ Out at v1.0: `epoll_*`, `inotify_*`, `io_uring_*`, `bpf`, `perf_event_open`, `pt
 
 ARM64: x0-x7 carry up to 8 args; x8 carries the syscall number; `SVC #0` traps. Return value in x0; second return (e.g., for `pipe`) in x1. Errors signaled by negative x0 with errno in `errstr` (Plan 9 style); musl translates to negative-errno return.
 
-The kernel uses a monotonic syscall number namespace; Linux syscall numbers don't overlap (kernel has its own numbering). The Linux shim has a separate entry path that decodes Linux numbers and dispatches.
+The kernel uses a monotonic syscall number territory; Linux syscall numbers don't overlap (kernel has its own numbering). The Linux shim has a separate entry path that decodes Linux numbers and dispatches.
 
 ### 11.7 Open design questions
 
@@ -1399,7 +1399,7 @@ Implementation (`kernel/9p_client.c`): wire protocol encode/decode, fid manageme
 
 At process creation, if the process inherits a Stratum mount, a fresh 9P connection is established. (Per VISION §11, one connection per Proc at v1.0; multiplexing is a v2.x optimization.) The connection is kept alive for the process's lifetime; closed at exit.
 
-Stratum sees N connections, one per Thylacine process, and gives each its own per-connection namespace (Stratum's NOVEL angle #8). Thylacine's per-process namespace and Stratum's per-connection namespace are complementary layers (VISION §11).
+Stratum sees N connections, one per Thylacine process, and gives each its own per-connection territory (Stratum's NOVEL angle #8). Thylacine's per-process territory and Stratum's per-connection territory are complementary layers (VISION §11).
 
 ### 14.4 In-kernel Stratum driver — DESIGNED-NOT-IMPLEMENTED for v2.0
 
@@ -1486,13 +1486,13 @@ Stratum (userspace 9P) for persistent storage; ramfs (kernel) for early boot; tm
 
 **STATUS**: COMMITTED
 
-### 15.1 Namespace isolation as the primary boundary
+### 15.1 Territory isolation as the primary boundary
 
-Each process's namespace is private. By default, a child process inherits its parent's namespace at `rfork` time, but modifications to the child's namespace do not affect the parent's. **This is the primary isolation mechanism in Thylacine.**
+Each process's territory is private. By default, a child process inherits its parent's territory at `rfork` time, but modifications to the child's territory do not affect the parent's. **This is the primary isolation mechanism in Thylacine.**
 
-A "container" is simply a process whose namespace has been constructed to isolate it: a different root, a restricted `/dev/`, a private network server. No additional kernel mechanism is required (no cgroups, no AppArmor, no seccomp at v1.0).
+A "container" is simply a process whose territory has been constructed to isolate it: a different root, a restricted `/dev/`, a private network server. No additional kernel mechanism is required (no cgroups, no AppArmor, no seccomp at v1.0).
 
-Spec: `namespace.tla` proves isolation.
+Spec: `territory.tla` proves isolation.
 
 ### 15.2 Credentials
 
@@ -1543,12 +1543,12 @@ Detailed in §24. Summary: KASLR, ASLR, W^X (enforced as invariant), CFI, stack 
 
 ### 15.6 Open design questions
 
-- **Mandatory access control (MAC)**: not at v1.0. Namespace isolation provides much of what MAC provides without policy complexity. Revisited post-v1.0 if specific compliance / multi-tenant scenarios require it.
-- **seccomp-equivalent syscall filtering**: a process can restrict its own syscall surface. v1.0 does this implicitly via namespace pruning (without `/dev/foo`, the syscall surface that takes a path doesn't reach foo). Explicit per-syscall filtering is post-v1.0.
+- **Mandatory access control (MAC)**: not at v1.0. Territory isolation provides much of what MAC provides without policy complexity. Revisited post-v1.0 if specific compliance / multi-tenant scenarios require it.
+- **seccomp-equivalent syscall filtering**: a process can restrict its own syscall surface. v1.0 does this implicitly via territory pruning (without `/dev/foo`, the syscall surface that takes a path doesn't reach foo). Explicit per-syscall filtering is post-v1.0.
 
 ### 15.7 Summary
 
-Namespace isolation primary; standard Unix DAC + coarse capabilities; full SOTA hardening; factotum-mediated capability elevation designed for v2.0.
+Territory isolation primary; standard Unix DAC + coarse capabilities; full SOTA hardening; factotum-mediated capability elevation designed for v2.0.
 
 ---
 
@@ -1564,7 +1564,7 @@ Per `VISION.md §12`:
 |---|---|---|
 | 1 — native | Programs compiled against musl port | musl libc port to Thylacine syscalls |
 | 2 — Linux static | Pre-built static Linux ARM64 binaries | Kernel syscall translation shim |
-| 3 — container | OCI / Docker images | Process namespace + Linux-shaped 9P servers |
+| 3 — container | OCI / Docker images | Process territory + Linux-shaped 9P servers |
 
 ### 16.2 musl port
 
@@ -1632,24 +1632,24 @@ Hard cases handled:
 
 Spec: `notes.tla` covers note delivery and signal-translation atomicity.
 
-### 16.5 Container as namespace
+### 16.5 Container as territory
 
-Linux container images (OCI format) run inside a Thylacine namespace:
+Linux container images (OCI format) run inside a Thylacine territory:
 1. Mount the container's root filesystem (extracted to a Stratum subvolume or a 9P server) as the process root.
 2. Provide synthetic `/proc-linux`, `/sys-linux`, `/dev-linux` 9P servers matching the Linux layout.
-3. Run the container's init as a normal Thylacine process with the constructed namespace.
+3. Run the container's init as a normal Thylacine process with the constructed territory.
 
-This is the "flatpak / Steam Deck" model from the vision: containers are namespaces, not a separate subsystem. The kernel primitive (namespace) handles both.
+This is the "flatpak / Steam Deck" model from the vision: containers are territories, not a separate subsystem. The kernel primitive (territory) handles both.
 
-`thylacine-run` (a userspace tool, Phase 6) takes an OCI image and produces the namespace + init process. No cgroups, no seccomp at v1.0; namespace isolation is the boundary.
+`thylacine-run` (a userspace tool, Phase 6) takes an OCI image and produces the territory + init process. No cgroups, no seccomp at v1.0; territory isolation is the boundary.
 
 ### 16.6 Open design questions
 
-- **`epoll` design** (post-v1.0). The shape is: `epoll_create` returns a Chan; `epoll_ctl` adds/removes fds; `epoll_wait` blocks on multiple fds simultaneously. Cleanest implementation: a kernel `Dev` that wraps the existing `poll` infrastructure with a stable fd set. v1.1 candidate.
+- **`epoll` design** (post-v1.0). The shape is: `epoll_create` returns a Spoor; `epoll_ctl` adds/removes fds; `epoll_wait` blocks on multiple fds simultaneously. Cleanest implementation: a kernel `Dev` that wraps the existing `poll` infrastructure with a stable fd set. v1.1 candidate.
 
 ### 16.7 Summary
 
-musl port (Tier 1 native); Linux syscall shim (Tier 2 static); container-as-namespace (Tier 3). Signals → notes via musl translation. epoll/inotify/io_uring deferred.
+musl port (Tier 1 native); Linux syscall shim (Tier 2 static); container-as-territory (Tier 3). Signals → notes via musl translation. epoll/inotify/io_uring deferred.
 
 ---
 
@@ -1660,7 +1660,7 @@ musl port (Tier 1 native); Linux syscall shim (Tier 2 static); container-as-name
 ### 17.1 Kernel surface Halcyon depends on
 
 Halcyon requires from the kernel:
-- **Framebuffer**: `/dev/fb/image` (VMO handle), `/dev/fb/ctl` (resolution, format, flush).
+- **Framebuffer**: `/dev/fb/image` (BURROW handle), `/dev/fb/ctl` (resolution, format, flush).
 - **Input**: `/dev/cons` (keyboard via UART or VirtIO input); `/dev/mouse` (if mouse connected).
 - **Processes**: `rfork`, `exec`, `pipe`, `wait` for command execution.
 - **9P mounts**: standard `mount` syscall to bring up video servers, image servers, etc.
@@ -1675,11 +1675,11 @@ The framebuffer device is a userspace VirtIO-GPU driver exposing:
 ```
 /dev/fb/
     ctl       ← write: "res <width> <height> <depth>", "flush"
-    image     ← VMO handle to ARGB32 pixel buffer (zero-copy)
+    image     ← BURROW handle to ARGB32 pixel buffer (zero-copy)
     info      ← read: current resolution and format
 ```
 
-Halcyon receives the VMO handle on first open of `/dev/fb/image`; maps it; writes pixels directly to the mapped region; issues `flush` via `/dev/fb/ctl`. The VirtIO-GPU driver handles the DMA transfer to the host GPU.
+Halcyon receives the BURROW handle on first open of `/dev/fb/image`; maps it; writes pixels directly to the mapped region; issues `flush` via `/dev/fb/ctl`. The VirtIO-GPU driver handles the DMA transfer to the host GPU.
 
 For bare metal Apple Silicon (post-v2.0), the framebuffer device speaks to the AGX driver (via Asahi) via the same 9P interface. Halcyon does not change.
 
@@ -1693,7 +1693,7 @@ Mouse via `/dev/mouse` (if VirtIO input device is present). Halcyon uses mouse f
 
 Halcyon is the user's primary launcher. When the user types `cmd args`, Halcyon:
 1. Parses the command line.
-2. `rfork(RFPROC | RFFDG | RFNAMEG)` — new process, share fd table briefly to set up redirections, share namespace (so mounted servers are visible).
+2. `rfork(RFPROC | RFFDG | RFNAMEG)` — new process, share fd table briefly to set up redirections, share territory (so mounted servers are visible).
 3. In the child: set up file redirections via `dup`; `exec(cmd, args)`.
 4. In the parent: `wait` for the child; collect exit status.
 
@@ -1733,8 +1733,8 @@ Every resource the kernel manages is a **kernel object**. Kernel objects are acc
 |---|---|---|
 | `KObj_Process` | A process | Yes (within 9P) |
 | `KObj_Thread` | A thread within a process | Yes |
-| `KObj_VMO` | A virtual memory object | Yes |
-| `KObj_Chan` | An open 9P channel (wraps Chan) | Yes |
+| `KObj_Burrow` | A virtual memory object | Yes |
+| `KObj_Spoor` | An open 9P channel (wraps Spoor) | Yes |
 | `KObj_MMIO` | A mapped MMIO region at a specific phys range | **No (typed)** |
 | `KObj_IRQ` | The right to receive a specific interrupt | **No (typed)** |
 | `KObj_DMA` | A DMA-capable physically contiguous buffer | **No (typed)** |
@@ -1746,7 +1746,7 @@ Handles carry **rights** — a bitmask of what the holder can do:
 |---|---|
 | `RIGHT_READ` | Read the object's state |
 | `RIGHT_WRITE` | Modify the object's state |
-| `RIGHT_MAP` | Map the object into an address space (VMO, MMIO) |
+| `RIGHT_MAP` | Map the object into an address space (BURROW, MMIO) |
 | `RIGHT_TRANSFER` | Pass the handle to another process (only meaningful for transferable types) |
 | `RIGHT_DMA` | Program DMA from this object |
 | `RIGHT_SIGNAL` | Deliver/receive signals on this object |
@@ -1758,14 +1758,14 @@ Rights monotonically reduce when transferring; never elevate.
 The transfer syscall is typed — not just runtime-checked. The transfer-via-9P mechanism's switch covers only transferable types:
 
 ```c
-long handle_transfer_via_9p(struct Chan *9p_chan, int handle_idx) {
+long handle_transfer_via_9p(struct Spoor *9p_chan, int handle_idx) {
     struct Handle *h = handle_get(handle_idx);
     if (!h) return -EBADF;
     switch (h->type) {
     case KObj_Process:
     case KObj_Thread:
-    case KObj_VMO:
-    case KObj_Chan:
+    case KObj_Burrow:
+    case KObj_Spoor:
         if (!(h->rights & RIGHT_TRANSFER)) return -EPERM;
         return do_transfer_via_9p(9p_chan, h);
     /* No code path for KObj_MMIO, KObj_IRQ, KObj_DMA, KObj_Interrupt. */
@@ -1804,20 +1804,20 @@ After step 4, the kernel has no further involvement in the hot path. The driver 
 ### 18.5 Regular processes
 
 Regular processes receive no hardware handles. They hold only:
-- `KObj_Chan` handles to open 9P connections (the normal file descriptor model).
-- `KObj_VMO` handles for shared memory passed to them explicitly (e.g., framebuffer).
+- `KObj_Spoor` handles to open 9P connections (the normal file descriptor model).
+- `KObj_Burrow` handles for shared memory passed to them explicitly (e.g., framebuffer).
 - `KObj_Process` and `KObj_Thread` handles for process management.
 
 This is the hard boundary: regular programs cannot reach hardware regardless of what they do. The capability is simply not present in their handle table.
 
 ### 18.6 Handle transfer over 9P
 
-`KObj_VMO` (with `RIGHT_TRANSFER`) and `KObj_Chan` are passed between processes over a 9P connection as out-of-band metadata on a message. This is the mechanism for zero-copy buffer passing: a driver creates a VMO, fills it, and passes the VMO handle to Halcyon (or any consumer) via the 9P session. The consumer maps the VMO and reads directly. No copy, kernel not in the data path.
+`KObj_Burrow` (with `RIGHT_TRANSFER`) and `KObj_Spoor` are passed between processes over a 9P connection as out-of-band metadata on a message. This is the mechanism for zero-copy buffer passing: a driver creates a BURROW, fills it, and passes the BURROW handle to Halcyon (or any consumer) via the 9P session. The consumer maps the BURROW and reads directly. No copy, kernel not in the data path.
 
 The 9P out-of-band attachment uses an extension to 9P2000.L (negotiated at session establishment):
 
 ```
-Twrite tag fid offset count data <handle: vmo_handle>
+Twrite tag fid offset count data <handle: burrow_handle>
 ```
 
 The receiver (or kernel-mediated 9P receive path) extracts the handle from the message metadata, places it in the receiving process's handle table with the requested rights, and continues normal 9P processing.
@@ -1838,17 +1838,17 @@ Eight kernel object types, four transferable, four non-transferable. Subordinati
 
 *Informed by: Zircon (Fuchsia).*
 
-### 19.1 What a VMO is
+### 19.1 What a BURROW is
 
 A **Virtual Memory Object** is a kernel object representing a region of memory, independent of any process's address space. It is the unit of memory sharing in Thylacine.
 
-A VMO has:
+A BURROW has:
 - A size (page-aligned).
 - A backing type: anonymous (zero-filled on demand), physical (pinned for DMA), or file-backed (Stratum page cache, post-v1.0).
 - A reference count. Pages are freed when the last handle is closed and all mappings are unmapped.
 
 ```c
-struct Vmo {
+struct Burrow {
     size_t size;
     enum {VMO_ANON, VMO_PHYS, VMO_FILE} type;
     union {
@@ -1858,7 +1858,7 @@ struct Vmo {
             int locked;
         } phys;
         struct {                      /* post-v1.0 */
-            struct Chan *chan;
+            struct Spoor *spoor;
             uint64_t offset;
         } file;
     };
@@ -1872,38 +1872,38 @@ struct Vmo {
 
 Unix `mmap(MAP_ANONYMOUS | MAP_SHARED)` shared memory has implicit aliasing — two processes share memory by convention (both knowing the fd number or the shm name), not by explicit kernel-tracked grant. VMOs make sharing explicit:
 
-- One process creates the VMO and holds the handle.
-- It maps the VMO into its address space.
-- It passes the VMO handle (with `RIGHT_MAP | RIGHT_READ`) to another process via 9P.
-- The second process maps the VMO independently.
+- One process creates the BURROW and holds the handle.
+- It maps the BURROW into its address space.
+- It passes the BURROW handle (with `RIGHT_MAP | RIGHT_READ`) to another process via 9P.
+- The second process maps the BURROW independently.
 
 The kernel tracks both mappings. When the producing process unmaps, the pages remain live until all handles are closed and all mappings are gone. No use-after-free at the kernel level.
 
 ### 19.3 Primary use cases
 
-**Zero-copy framebuffer**: VirtIO-GPU driver creates a physical VMO for the framebuffer. Halcyon receives the VMO handle and maps it. Halcyon writes pixels directly into the mapped region. Driver issues `flush` when Halcyon signals readiness. No copy at any point.
+**Zero-copy framebuffer**: VirtIO-GPU driver creates a physical BURROW for the framebuffer. Halcyon receives the BURROW handle and maps it. Halcyon writes pixels directly into the mapped region. Driver issues `flush` when Halcyon signals readiness. No copy at any point.
 
-**Zero-copy video decode**: video decoder creates a physical VMO per decoded frame. Passes VMO handle to the video player 9P server. Player passes it to Halcyon. Halcyon blits from the mapped VMO into the framebuffer VMO. One blit; no intermediate copies; no kernel involvement after handle transfer.
+**Zero-copy video decode**: video decoder creates a physical BURROW per decoded frame. Passes BURROW handle to the video player 9P server. Player passes it to Halcyon. Halcyon blits from the mapped BURROW into the framebuffer BURROW. One blit; no intermediate copies; no kernel involvement after handle transfer.
 
-**DMA buffer lifecycle**: NVMe / VirtIO-blk driver creates a physical VMO for its DMA descriptor rings and data buffers. The VMO handle is held exclusively by the driver. The kernel's IOMMU mapping (post-v1.0) is derived from the VMO's physical page list. Clean, auditable DMA ownership.
+**DMA buffer lifecycle**: NVMe / VirtIO-blk driver creates a physical BURROW for its DMA descriptor rings and data buffers. The BURROW handle is held exclusively by the driver. The kernel's IOMMU mapping (post-v1.0) is derived from the BURROW's physical page list. Clean, auditable DMA ownership.
 
-**Inter-driver shared memory**: two cooperating driver processes (e.g., network driver and network stack) share a ring buffer via a VMO. No kernel copy in the packet path.
+**Inter-driver shared memory**: two cooperating driver processes (e.g., network driver and network stack) share a ring buffer via a BURROW. No kernel copy in the packet path.
 
-### 19.4 VMO syscalls
+### 19.4 BURROW syscalls
 
 | Syscall | Description |
 |---|---|
-| `vmo_create(size, flags)` | Create anonymous VMO, return handle |
-| `vmo_create_physical(paddr, size)` | Create VMO over physical range (privileged) |
-| `vmo_get_size(h)` | Query VMO size |
-| `vmo_read(h, buf, off, len)` | Read from VMO without mapping |
-| `vmo_write(h, buf, off, len)` | Write to VMO without mapping |
+| `burrow_create(size, flags)` | Create anonymous BURROW, return handle |
+| `burrow_create_physical(paddr, size)` | Create BURROW over physical range (privileged) |
+| `burrow_get_size(h)` | Query BURROW size |
+| `burrow_read(h, buf, off, len)` | Read from BURROW without mapping |
+| `burrow_write(h, buf, off, len)` | Write to BURROW without mapping |
 
 Mapping is done via `mmap_handle()` from §18. Unmapping via standard `munmap`.
 
 ### 19.5 Spec
 
-`specs/vmo.tla` proves:
+`specs/burrow.tla` proves:
 - Pages live until last handle closed AND last mapping unmapped (no use-after-free).
 - Mapping/unmapping is atomic with respect to handle close.
 - Reference counts are accurate under concurrent open/close/map/unmap.
@@ -1947,11 +1947,11 @@ Some structures genuinely require cross-CPU visibility:
 | Structure | Sharing mechanism |
 |---|---|
 | Process table | RCU-style: readers lockless, writers take a narrow lock |
-| VMO reference counts | Atomic operations (no lock) |
+| BURROW reference counts | Atomic operations (no lock) |
 | Handle table (per-process) | Per-process lock, not global |
 | IRQ routing table | Written at boot/driver-start only, read locklessly after |
 | 9P session table | Per-session lock |
-| Namespace mount table | Per-process rwlock |
+| Territory mount table | Per-process rwlock |
 
 ### 20.4 IPI types and payloads
 
@@ -2209,8 +2209,8 @@ Plus Plan 9 userland (Tier 1): `rc`, `mk`, `awk`, `troff`, `tbl`, `eqn`, `9` lau
     statm       ← memory stats
     cwd         ← symlink to current working directory
     exe         ← symlink to executable path
-    root        ← symlink to root of process namespace
-    ns/         ← namespace dump
+    root        ← symlink to root of process territory
+    ns/         ← territory dump
 /proc/self/     ← symlink to /proc/<current-pid>/
 ```
 
@@ -2244,7 +2244,7 @@ Plus Plan 9 userland (Tier 1): `rc`, `mk`, `awk`, `troff`, `tbl`, `eqn`, `9` lau
 
 **Status**: `poll` and `select` are must-have for Phase 5 (Utopia). Without `poll`, interactive bash, curl, Python asyncio, and essentially all non-trivial programs are broken.
 
-**`poll(fds, nfds, timeout)`**: park the calling thread with a wait list across N fds. The first fd to become ready wakes the thread. For 9P-backed fds, the server signals readiness via a synthetic notification on the 9P session. For pipes and kernel fds, readiness is tracked in the kernel's Chan structures.
+**`poll(fds, nfds, timeout)`**: park the calling thread with a wait list across N fds. The first fd to become ready wakes the thread. For 9P-backed fds, the server signals readiness via a synthetic notification on the 9P session. For pipes and kernel fds, readiness is tracked in the kernel's Spoor structures.
 
 **`select()`**: implemented on top of `poll()`. Trivial.
 
@@ -2337,7 +2337,7 @@ Should have before Phase 8 (Halcyon):
 Defer to Phase 6 (Linux binary compat):
   /sys stub
   setuid/setgid mechanics (deferred-not-implemented per §15.4)
-  Extended attributes (xattr) at the namespace level
+  Extended attributes (xattr) at the territory level
   POSIX ACLs
 
 Defer to v1.1+:
@@ -2516,9 +2516,9 @@ Per `NOVEL.md` Angle #8. Practical TLA+ verification of every load-bearing OS in
 | # | Spec | Phase | Invariants |
 |---|---|---|---|
 | 1 | `specs/scheduler.tla` | 2 | EEVDF correctness, IPI ordering, wakeup atomicity, work-stealing fairness |
-| 2 | `specs/namespace.tla` | 2 | bind/mount semantics, cycle-freedom, isolation between processes |
+| 2 | `specs/territory.tla` | 2 | bind/mount semantics, cycle-freedom, isolation between processes |
 | 3 | `specs/handles.tla` | 2 | Rights monotonicity, transfer-via-9P invariant, hardware-handle non-transferability |
-| 4 | `specs/vmo.tla` | 3 | Refcount + mapping lifecycle, no-use-after-free |
+| 4 | `specs/burrow.tla` | 3 | Refcount + mapping lifecycle, no-use-after-free |
 | 5 | `specs/9p_client.tla` | 4 | Tag uniqueness per session, fid lifecycle, out-of-order completion correctness, flow control |
 | 6 | `specs/poll.tla` | 5 | Wait/wake state machine, missed-wakeup-freedom across N fds |
 | 7 | `specs/futex.tla` | 5 | FUTEX_WAIT / FUTEX_WAKE atomicity (no wakeup lost between value check and sleep) |
@@ -2545,9 +2545,9 @@ Every change to a file or function listed below spawns an adversarial soundness 
 | Page fault | `arch/arm64/fault.c`, `mm/vm.c` | Lifetime, demand-page, COW, W^X |
 | Allocator | `mm/buddy.c`, `mm/slub.c`, `mm/magazines.c` | Allocation correctness, lock-free invariants |
 | Scheduler | `kernel/sched.c`, `arch/arm64/context.c`, `arch/arm64/ipi.c` | EEVDF correctness, SMP, wakeup atomicity |
-| Namespace | `kernel/namespace.c` | Cycle-freedom, isolation |
+| Territory | `kernel/territory.c` | Cycle-freedom, isolation |
 | Handle table | `kernel/handle.c` | Rights monotonicity, transfer rules, hardware-handle non-transferability |
-| VMO | `kernel/vmo.c`, `mm/vmo_pages.c` | Refcount, mapping lifecycle |
+| BURROW | `kernel/burrow.c`, `mm/burrow_pages.c` | Refcount, mapping lifecycle |
 | 9P client | `kernel/9p_client.c`, `kernel/9p_session.c` | Tag uniqueness, fid lifecycle, pipelining |
 | Notes / signals | `kernel/notes.c`, `compat/signals.c` | Delivery ordering, async safety |
 | Capability checks | All syscall entry points | Privilege correctness |
@@ -2555,7 +2555,7 @@ Every change to a file or function listed below spawns an adversarial soundness 
 | Crypto code | None in v1.0 kernel; janus in userspace | Side-channel, key handling |
 | ELF loader | `kernel/elf.c` | RWX rejection, relocation correctness |
 | `mprotect` / `mmap` | `mm/vm.c` syscall handlers | W^X enforcement |
-| Initial bringup | `kernel/main.c`, `init/init.c` | Boot ordering correctness |
+| Initial bringup | `kernel/main.c`, `init/joey.c` | Boot ordering correctness |
 
 ### 25.5 The audit round
 
@@ -2603,7 +2603,7 @@ All section-local open questions are resolved at Gate 3. Cross-cutting open ques
 | §6 Memory management | COMMITTED | 1 |
 | §7 Process and thread model | COMMITTED | 2 |
 | §8 Scheduler | COMMITTED | 1 |
-| §9 Namespace and device model | COMMITTED | 1 |
+| §9 Territory and device model | COMMITTED | 1 |
 | §10 IPC | COMMITTED | 1 |
 | §11 Syscall interface | COMMITTED | 2 |
 | §12 Interrupt and exception handling | COMMITTED | 2 |
@@ -2633,13 +2633,13 @@ The complete list of load-bearing invariants. Source for `VISION.md §8`. Each m
 
 | # | Invariant | Enforcement | Spec |
 |---|---|---|---|
-| I-1 | Namespace operations in process A don't affect process B | Kernel namespace isolation | `namespace.tla` |
+| I-1 | Territory operations in process A don't affect process B | Kernel territory isolation | `territory.tla` |
 | I-2 | Capability set monotonically reduces (`rfork` only reduces) | Syscall gate | `handles.tla` |
-| I-3 | Mount points form a DAG, never a cycle | Kernel mount validation | `namespace.tla` |
+| I-3 | Mount points form a DAG, never a cycle | Kernel mount validation | `territory.tla` |
 | I-4 | Handles transfer between processes only via 9P sessions | Syscall surface (no direct-transfer syscall exists) | `handles.tla` |
 | I-5 | `KObj_MMIO`, `KObj_IRQ`, `KObj_DMA` cannot be transferred | Transfer syscall has no code path; static_assert | `handles.tla` |
 | I-6 | Handle rights monotonically reduce on transfer | Syscall-level check | `handles.tla` |
-| I-7 | VMO pages live until last handle closed AND last mapping unmapped | Refcount; runtime check | `vmo.tla` |
+| I-7 | BURROW pages live until last handle closed AND last mapping unmapped | Refcount; runtime check | `burrow.tla` |
 | I-8 | Every runnable thread eventually runs | EEVDF deadline computation | `scheduler.tla` |
 | I-9 | No wakeup is lost between wait-condition check and sleep | Wait/wake protocol | `scheduler.tla`, `poll.tla`, `futex.tla` |
 | I-10 | Per-9P-session tag uniqueness | Per-session tag pool with monotonic generation | `9p_client.tla` |
@@ -2665,12 +2665,12 @@ These are the project's promises. Every one has a spec or a runtime check or a c
 | 9P | Plan 9 protocol — universal file-server protocol; Thylacine speaks 9P2000.L |
 | ASLR | Address Space Layout Randomization (userspace) |
 | BTI | Branch Target Identification (ARMv8.5+ hardware feature) |
-| Chan | Kernel object representing an open resource |
+| Spoor | Kernel object representing an open resource |
 | CFI | Control Flow Integrity (compiler-level mitigation) |
 | `Dev` | Kernel device vtable |
 | DTB | Device Tree Blob — describes hardware to the kernel |
 | EEVDF | Earliest Eligible Virtual Deadline First scheduler |
-| EBR | Epoch-Based Reclamation (used in `vmo.tla`) |
+| EBR | Epoch-Based Reclamation (used in `burrow.tla`) |
 | EL0/EL1/EL2/EL3 | ARM64 Exception Levels |
 | `errstr` | Plan 9's per-thread error string |
 | GIC | Generic Interrupt Controller (ARM) |
@@ -2679,20 +2679,20 @@ These are the project's promises. Every one has a spec or a runtime check or a c
 | IPI | Inter-Processor Interrupt |
 | janus | Stratum's key agent (also runs on Thylacine) |
 | KASLR | Kernel ASLR |
-| KObj | Kernel Object (e.g., `KObj_MMIO`, `KObj_VMO`) |
+| KObj | Kernel Object (e.g., `KObj_MMIO`, `KObj_Burrow`) |
 | LSE | Large System Extensions (ARMv8.1+ atomic instructions) |
 | MTE | Memory Tagging Extension (ARMv8.5+) |
-| Namespace | Per-process tree of mount points |
+| Territory | Per-process tree of mount points |
 | Note | Plan 9's asynchronous text message (signal-equivalent) |
 | PAC | Pointer Authentication Code (ARMv8.3+) |
-| `Pgrp` | Process Group / namespace |
+| `Territory` | Process Group / territory |
 | Proc | Process |
 | `rfork` | Plan 9 process/thread creation primitive |
 | SLUB | Linux's modern slab allocator (replaces classical slab) |
 | Stratum | Thylacine's native filesystem (independent project; feature-complete) |
 | TLA+ | Temporal Logic of Actions, Lamport's specification language |
 | Utopia | The Phase 5 milestone — textual POSIX environment that "feels real" |
-| VMO | Virtual Memory Object (kernel object for shared memory regions) |
+| BURROW | Virtual Memory Object (kernel object for shared memory regions) |
 | W^X | Write XOR Execute (page protection invariant) |
 
 ---

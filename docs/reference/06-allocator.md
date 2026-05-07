@@ -33,7 +33,7 @@ struct page {
     struct page *next, *prev;           // free list (16 bytes)
     u32 order;                          // current order if PG_FREE
     u32 flags;                          // PG_*
-    u32 refcount;                       // VMO placeholder (Phase 2-3)
+    u32 refcount;                       // BURROW placeholder (Phase 2-3)
     u32 _pad;
 };
 
@@ -190,7 +190,7 @@ This is a sanity check, not a real test harness — that lands at P1-I with ASan
 | `next`, `prev` | 16 | Doubly-linked free list (sentinel-headed). NULL when not on a list. |
 | `order` | 4 | Current order if `PG_FREE`; 0 if `PG_KERNEL`. |
 | `flags` | 4 | Bitwise OR of `PG_FREE` / `PG_RESERVED` / `PG_KERNEL`. |
-| `refcount` | 4 | Placeholder for VMO refcounting (Phase 2-3). 1 when allocated, 0 when free. |
+| `refcount` | 4 | Placeholder for BURROW refcounting (Phase 2-3). 1 when allocated, 0 when free. |
 | `_pad` | 4 | Alignment slack to 32 bytes. |
 
 For 2 GiB RAM at 4 KiB granule: 524288 pages × 32 bytes = 16 MiB struct page array.
@@ -318,7 +318,7 @@ At P1-D, `kpage_alloc(flags)` returns `(void *)(uintptr_t)page_to_pa(p)` — a l
 
 `buddy_zone_init` marks every struct page `PG_RESERVED` initially; `buddy_free_region` flips the to-be-free pages to `PG_FREE`. After init, reserved pages can be queried via the `flags` field but never appear on free lists or get returned from `alloc_pages`. They stay reserved for the kernel image / struct page array / DTB blob lifetime.
 
-Phase 2's process page-table allocation and Phase 3's userspace VMO management will re-use the same `struct page` pool but track ownership via separate mechanisms (per-VMO refcount, per-process page-table owner, etc.) — the buddy doesn't see those.
+Phase 2's process page-table allocation and Phase 3's userspace BURROW management will re-use the same `struct page` pool but track ownership via separate mechanisms (per-BURROW refcount, per-process page-table owner, etc.) — the buddy doesn't see those.
 
 ---
 

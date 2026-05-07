@@ -24,7 +24,7 @@ The boot path has no caller-facing API surface in the C sense; the entry point i
 |---|---|---|
 | ELF entry symbol `_start` | Linker entry point | `arch/arm64/start.S:21` (the `.text._start` section, kept first by `kernel.ld`) |
 | Boot banner output to UART | Stdout text contract | Emitted by `kernel/main.c:boot_main()` |
-| `_hang` halt loop | Entry point for clean halts | `arch/arm64/start.S:64` |
+| `_torpor` halt loop | Entry point for clean halts | `arch/arm64/start.S:64` |
 | `_saved_dtb_ptr` | BSS variable holding DTB physical address | Populated by `_start`; read by `boot_main()` to print the banner; consumed by the DTB parser at P1-B |
 | `uart_putc / uart_puts / uart_puthex64 / uart_putdec` | Polled UART output | `arch/arm64/uart.h:18-35`. Replaced by `/dev/cons` (kernel `Dev`) at Phase 3 |
 
@@ -45,7 +45,7 @@ The Linux ARM64 image header (64 bytes) lives at offset 0 of the binary. `code0`
 
 After the branch, `_real_start` performs, in order:
 
-1. **EL check + drop**. Reads `CurrentEL[3:2]`. If EL1, sets `x20 = 0` and continues. If EL2, runs the drop sequence (below). If EL3 or EL0, branches to `_hang` (silent halt — these are not realistic targets).
+1. **EL check + drop**. Reads `CurrentEL[3:2]`. If EL1, sets `x20 = 0` and continues. If EL2, runs the drop sequence (below). If EL3 or EL0, branches to `_torpor` (silent halt — these are not realistic targets).
 2. **DTB save into x19**. The DTB pointer in `x0` is moved to a callee-saved register because the BSS clear in step 4 would zero `_saved_dtb_ptr` if we wrote it first. (This was caught and fixed mid-implementation at P1-A; the bug-and-fix is documented in `start.S` comments.) `x0` is preserved across the EL2 drop's `eret` per the AArch64 GP-register-passthrough rule.
 3. **Stack setup**. SP is set to `_boot_stack_top` (defined by the linker script, top of a 16 KiB BSS-allocated buffer; SP grows down).
 4. **BSS clear**. Zero `[_bss_start, _bss_end)` in 8-byte stride. The linker script guarantees both bounds are 8-byte-aligned (in fact, page-aligned).
@@ -63,7 +63,7 @@ After the branch, `_real_start` performs, in order:
 14. **`test_run_all()`** (test harness). Walks `kernel/test/test.c`'s `g_tests[]` array; each test reports PASS/FAIL on UART. Currently 6 tests: kaslr.mix64_avalanche, dtb.chosen_kaslr_seed_present, phys.alloc_smoke, slub.kmem_smoke, gic.init_smoke, timer.tick_increments. `boot_main` extinctions if any test fails. See `docs/reference/09-test-harness.md`.
 15. **`timer_busy_wait_ticks(5)`** (P1-G). WFI loop until 5 ticks have passed; prints `ticks: N (kernel breathing)`.
 16. **Banner finishes** (phase) and prints `Thylacine boot OK`.
-17. **Fallthrough to `_hang`**. `boot_main()` is `noreturn`; if it ever returns, the assembly falls through into the `wfi` loop. From P1-G onward `_hang` itself is also a productive state — IRQs are unmasked, so the timer keeps firing and `g_ticks` keeps incrementing during the WFI loop.
+17. **Fallthrough to `_torpor`**. `boot_main()` is `noreturn`; if it ever returns, the assembly falls through into the `wfi` loop. From P1-G onward `_torpor` itself is also a productive state — IRQs are unmasked, so the timer keeps firing and `g_ticks` keeps incrementing during the WFI loop.
 
 #### EL2 → EL1 drop (P1-C-extras)
 
@@ -233,10 +233,10 @@ Boot-path error handling at P1-C-extras:
 
 | Condition | Behavior | Status |
 |---|---|---|
-| Entered at EL3 / EL0 | Silent halt at `_hang` | Defensive; not realistic on QEMU virt or Pi 5 (both deliver EL1 or EL2) |
+| Entered at EL3 / EL0 | Silent halt at `_torpor` | Defensive; not realistic on QEMU virt or Pi 5 (both deliver EL1 or EL2) |
 | Entered at EL2 | Drop to EL1; flag in `_entered_at_el2` | Designed (P1-C-extras); banner reports it |
 | Boot-stack overflow | Translation fault on guard page | Designed (P1-C-extras); P1-F's handler routes to `extinction("kernel stack overflow", FAR_EL1)` |
-| `boot_main()` returns | Falls through to `_hang` | Designed; defense in depth |
+| `boot_main()` returns | Falls through to `_torpor` | Designed; defense in depth |
 | UART TX FIFO full | Spin on `FR.TXFF` | Bounded by host-side QEMU draining; not a real concern |
 | BSS clear miscount | Linker `ASSERT()` catches misalignment | Compile-time guard |
 | W^X PTE constructor regression | `_Static_assert` in `mmu.c` fails the build | P1-C compile-time guard |
@@ -271,7 +271,7 @@ The boot-to-banner figure is informal; rigorous measurement lands in P1-I with t
 - ARM64 entry at EL1 with stack setup, BSS clear, DTB pointer save.
 - PL011 polled UART output (hardcoded base, fallback now).
 - Boot banner per `TOOLING.md §10` ABI contract.
-- `_hang` clean-halt path.
+- `_torpor` clean-halt path.
 - `tools/run-vm.sh` QEMU launcher with `-cpu max -smp 4 -m 2G -nographic` defaults.
 - CMake + Cargo-ready build infrastructure.
 

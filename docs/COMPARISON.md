@@ -6,21 +6,21 @@
 
 This document answers: **where does Thylacine match existing operating systems, where does it lead, and where does it deliberately not compete?**
 
-A feature matrix is easy to cheat — anyone can write `✓` next to any feature if the definition is loose. This document tries to be precise about feature *quality* and *architectural shape*, not just presence. A `✓` in Linux's "container" column means the production-tested namespaces + cgroups stack with cgroup-v2, AppArmor, seccomp; a `✓` in Plan 9's "container" column means per-process namespaces composed via `bind`/`mount` with no separate machinery. Both get `✓` in lazy matrices; the architectural reality is that Plan 9's model is *primary* to its design and Linux's is bolted onto a Unix base.
+A feature matrix is easy to cheat — anyone can write `✓` next to any feature if the definition is loose. This document tries to be precise about feature *quality* and *architectural shape*, not just presence. A `✓` in Linux's "container" column means the production-tested territories + cgroups stack with cgroup-v2, AppArmor, seccomp; a `✓` in Plan 9's "container" column means per-process territories composed via `bind`/`mount` with no separate machinery. Both get `✓` in lazy matrices; the architectural reality is that Plan 9's model is *primary* to its design and Linux's is bolted onto a Unix base.
 
 ## 2. Comparison subjects
 
 Eight comparison subjects, grouped by relationship.
 
 **Direct architectural ancestors** (Thylacine inherits substantially):
-- **Plan 9 from Bell Labs** (Bell Labs, 1990s; last release Fourth Edition 2002). The single closest ancestor. Source of the namespace model, 9P, `Dev` vtable, `rfork`, notes, factotum, `/proc` synthetic FS.
+- **Plan 9 from Bell Labs** (Bell Labs, 1990s; last release Fourth Edition 2002). The single closest ancestor. Source of the territory model, 9P, `Dev` vtable, `rfork`, notes, factotum, `/proc` synthetic FS.
 - **9Front** (community, 2011-present). The most vital continuation of Plan 9. Better hardware support, USB, SMP, various refinements. Reference implementation for many decisions.
 
 **Production peers** (Thylacine targets parity-or-lead):
 - **Linux** (Linus Torvalds + community, 1991-present). The compatibility target; the system most users come from. Architectural shape is "Unix evolved over 35 years." Massive ecosystem, massive codebase.
 
 **Capability-based / microkernel peers** (Thylacine borrows architectural elements):
-- **Fuchsia / Zircon** (Google, 2016-present). Capability-based microkernel; typed handles; VMOs as first-class kernel objects. The single most direct source for Thylacine's handle and VMO designs.
+- **Fuchsia / Zircon** (Google, 2016-present). Capability-based microkernel; typed handles; VMOs as first-class kernel objects. The single most direct source for Thylacine's handle and BURROW designs.
 - **seL4** (NICTA / DSTG / proofcraft, 2009-present). Formally verified capability microkernel. Source of the verification methodology.
 
 **Adjacent / experimental peers** (Thylacine learns lessons from):
@@ -47,10 +47,10 @@ Cells use:
 
 | Feature | Plan 9 | 9Front | Linux | Fuchsia | seL4 | Redox | MINIX 3 | **Thylacine v1.0** |
 |---|---|---|---|---|---|---|---|---|
-| **Namespace model** |
-| Per-process namespace, primary | ✓ | ✓ | ○ (`unshare`) | ✗ | ✗ | ○ | ✗ | ✓ |
+| **Territory model** |
+| Per-process territory, primary | ✓ | ✓ | ○ (`unshare`) | ✗ | ✗ | ○ | ✗ | ✓ |
 | `bind` / `mount` as composition | ✓ | ✓ | ~ (mount only) | ✗ | ✗ | ○ | ✗ | ✓ |
-| Container = namespace, no separate runtime | ✓ | ✓ | ✗ (cgroups+ns) | ✗ | ✗ | ○ | ✗ | ✓ |
+| Container = territory, no separate runtime | ✓ | ✓ | ✗ (cgroups+ns) | ✗ | ✗ | ○ | ✗ | ✓ |
 | Union mounts native | ✓ | ✓ | ○ (overlayfs) | ✗ | ✗ | ✗ | ✗ | ✓ |
 | **Protocol / IPC** |
 | 9P-native protocol | ✓ | ✓ | ○ (virtfs) | ✗ | ✗ | ~ (scheme model) | ✗ | ★ totalized |
@@ -64,7 +64,7 @@ Cells use:
 | Driver update without reboot | ✗ | ✗ | ~ (modules) | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Drivers expose 9P interface | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ | ★ |
 | **Memory model** |
-| First-class VMO kernel objects | ✗ | ✗ | ✗ | ✓ | ~ (untyped) | ✗ | ✗ | ✓ |
+| First-class BURROW kernel objects | ✗ | ✗ | ✗ | ✓ | ~ (untyped) | ✗ | ✗ | ✓ |
 | Zero-copy buffer sharing | ✗ | ✗ | ○ (`splice`) | ✓ | ✓ | ○ | ✗ | ✓ |
 | KASLR | ✗ | ✗ | ✓ | ✓ | ○ | ✗ | ✗ | ✓ |
 | Userspace ASLR | ✗ | ✗ | ✓ | ✓ | ✓ | ✓ | ✗ | ✓ |
@@ -115,8 +115,8 @@ Cells use:
 
 **Caveats (column notes)**:
 
-- **Plan 9 / 9Front**: namespace + 9P + Dev + factotum are mature and production-tested for the workflows they cover. Hardware support is narrower than Linux. SMP works in 9Front but is not as polished. No native COW FS, no native encryption.
-- **Linux**: massive feature set; per-process namespace is bolt-on (`unshare`, `clone(CLONE_NEWNS)`). Containers require cgroups + namespaces + AppArmor/SELinux + seccomp + a runtime. Drivers are kernel-mode primarily; userspace drivers via FUSE / DPDK / VFIO exist but are exceptions.
+- **Plan 9 / 9Front**: territory + 9P + Dev + factotum are mature and production-tested for the workflows they cover. Hardware support is narrower than Linux. SMP works in 9Front but is not as polished. No native COW FS, no native encryption.
+- **Linux**: massive feature set; per-process territory is bolt-on (`unshare`, `clone(CLONE_NEWNS)`). Containers require cgroups + territories + AppArmor/SELinux + seccomp + a runtime. Drivers are kernel-mode primarily; userspace drivers via FUSE / DPDK / VFIO exist but are exceptions.
 - **Fuchsia**: typed handles + VMOs are core; 9P is absent. Capabilities are the IPC primary. Display via Scenic + Flutter.
 - **seL4**: formally verified, but ergonomics are hostile to application development. Capabilities are the primary primitive. Userland is bring-your-own.
 - **Redox**: scheme-based IPC similar to 9P in spirit but not protocol-compatible. Rust kernel and userspace. Limited hardware coverage; not yet daily-driver-capable.
@@ -141,20 +141,20 @@ The 6 ★s are where Thylacine has no peer at v1.0 release.
 
 Numbers in the matrix don't tell the whole story. This section narrates the *why* behind each category.
 
-### 4.1 Composition: namespaces and 9P
+### 4.1 Composition: territories and 9P
 
-**Where Plan 9 / 9Front lead** (and Thylacine inherits): per-process namespaces composed via `bind` / `mount`. Containers *are* namespaces, not namespaces-plus-cgroups-plus-AppArmor. One mechanism, not three.
+**Where Plan 9 / 9Front lead** (and Thylacine inherits): per-process territories composed via `bind` / `mount`. Containers *are* territories, not territories-plus-cgroups-plus-AppArmor. One mechanism, not three.
 
-**Where Linux compromised**: namespaces were added piecemeal (`CLONE_NEWNS`, `CLONE_NEWNET`, `CLONE_NEWPID`, ... ) on top of a Unix base where the global namespace was the assumption. They work, but they're optional, opt-in, and a process accidentally not unsharing a namespace silently joins the global one. Security-critical isolation depends on container runtimes correctly orchestrating multiple primitives. The complexity is real and contributes to container escape vulnerabilities (CVE history shows ~10/year in this surface).
+**Where Linux compromised**: territories were added piecemeal (`CLONE_NEWNS`, `CLONE_NEWNET`, `CLONE_NEWPID`, ... ) on top of a Unix base where the global territory was the assumption. They work, but they're optional, opt-in, and a process accidentally not unsharing a territory silently joins the global one. Security-critical isolation depends on container runtimes correctly orchestrating multiple primitives. The complexity is real and contributes to container escape vulnerabilities (CVE history shows ~10/year in this surface).
 
-**Where Fuchsia / seL4 compromised**: capabilities replace namespaces. This is a fine choice for a microkernel, but it means there's no "compose two filesystems into a directory tree" primitive — you either get a capability or you don't. Hierarchical composition is reinvented at the application layer.
+**Where Fuchsia / seL4 compromised**: capabilities replace territories. This is a fine choice for a microkernel, but it means there's no "compose two filesystems into a directory tree" primitive — you either get a capability or you don't. Hierarchical composition is reinvented at the application layer.
 
 **Where Thylacine leads**:
 - **9P-as-universal-composition, totalized**. Plan 9 had 9P everywhere except authentication, graphics, and some device interfaces — those escaped. Thylacine totalizes the model: Halcyon mounts 9P servers (no special graphics protocol); janus is a 9P server (auth via 9P); drivers are 9P servers (no driver protocol). The thesis is: if it can be a file, it is a file; if it can be a 9P server, it is a 9P server.
 - **POSIX surfaces as 9P servers, native**. `/proc`, `/dev`, `/sys`, `/dev/pts`, `/run`, `/tmp` are all 9P servers. Linux programs see what they expect; underneath it's all 9P. Adding a new POSIX surface is adding a new 9P server, not modifying the kernel.
-- **Per-process namespace = per-connection 9P namespace**. Stratum's per-connection namespace (its NOVEL angle #8) is the natural granularity; Thylacine's per-process model maps to it 1:1.
+- **Per-process territory = per-connection 9P territory**. Stratum's per-connection territory (its NOVEL angle #8) is the natural granularity; Thylacine's per-process model maps to it 1:1.
 
-**Where Thylacine deliberately doesn't go**: capability-based replacement of namespaces. seL4's model is more granular but lacks the hierarchical composition that makes shell-driven workflows work. Thylacine is a Plan 9 revival, not an seL4 application platform.
+**Where Thylacine deliberately doesn't go**: capability-based replacement of territories. seL4's model is more granular but lacks the hierarchical composition that makes shell-driven workflows work. Thylacine is a Plan 9 revival, not an seL4 application platform.
 
 ### 4.2 Driver model
 
@@ -163,7 +163,7 @@ Numbers in the matrix don't tell the whole story. This section narrates the *why
 **Where Fuchsia / seL4 / MINIX 3 lead**: userspace drivers from day one. Capability-mediated hardware access. Crashes isolated. Updates trivial. The cost is IPC overhead for hot-path operations.
 
 **Where Thylacine leads**:
-- **Userspace drivers via typed handles + VMO zero-copy**. Drivers hold `KObj_MMIO` / `KObj_IRQ` / `KObj_DMA` handles for hardware access (hot path bypasses the kernel) and expose results via 9P with VMO-handle attachments for bulk data (zero-copy). The 9P interface is the public contract; the handles are the private mechanism.
+- **Userspace drivers via typed handles + BURROW zero-copy**. Drivers hold `KObj_MMIO` / `KObj_IRQ` / `KObj_DMA` handles for hardware access (hot path bypasses the kernel) and expose results via 9P with BURROW-handle attachments for bulk data (zero-copy). The 9P interface is the public contract; the handles are the private mechanism.
 - **Subordination invariant**: handles transfer between processes only via 9P sessions. Hardware handles are non-transferable by type — the transfer syscall has no code path for them. This is stronger than Fuchsia's runtime check; at the syscall site, the invariant is unfalsifiable.
 - **Driver update without reboot is not just supported — it's the default**. Unmount the 9P server, restart the driver process, remount. Linux module reload is comparable for narrow cases; for most drivers (network, GPU) it is not actually possible.
 
@@ -226,8 +226,8 @@ This is the most exposed design decision in Thylacine. The risk is that "shell-d
 **Where Fuchsia / seL4 / MINIX 3 have**: minimal filesystems (Minfs, etc.). Storage was never the focus.
 
 **Where Thylacine leads** (via Stratum):
-- **Stratum as native filesystem**: COW, formally verified sync, PQ-hybrid AEAD-SIV encryption, Merkle-rooted metadata integrity, content-defined chunking, lock-free metadata path with MVCC readers, succinct in-RAM state (~1 MiB allocator RAM per TiB), Reed-Solomon + Locally Repairable Codes for redundancy, io_uring-native I/O, per-connection 9P namespaces, synthetic `/ctl/` administration, factotum-style key agent.
-- **The OS and the FS share a protocol**. Stratum is a 9P server; Thylacine mounts it like any other 9P server. No translation layer. Stratum's per-connection namespace maps 1:1 to Thylacine's per-process namespace.
+- **Stratum as native filesystem**: COW, formally verified sync, PQ-hybrid AEAD-SIV encryption, Merkle-rooted metadata integrity, content-defined chunking, lock-free metadata path with MVCC readers, succinct in-RAM state (~1 MiB allocator RAM per TiB), Reed-Solomon + Locally Repairable Codes for redundancy, io_uring-native I/O, per-connection 9P territories, synthetic `/ctl/` administration, factotum-style key agent.
+- **The OS and the FS share a protocol**. Stratum is a 9P server; Thylacine mounts it like any other 9P server. No translation layer. Stratum's per-connection territory maps 1:1 to Thylacine's per-process territory.
 
 This is the strongest point of leverage in the project. Thylacine on Stratum is a fundamentally different storage story than any other OS: tamper-evident, post-quantum-encrypted, formally verified, with the OS integration being literally just "mount the 9P server."
 
@@ -244,7 +244,7 @@ This is the strongest point of leverage in the project. Thylacine on Stratum is 
 **Where Thylacine targets** (three tiers, per VISION §12):
 1. **Tier 1 — native**: programs compiled against the musl port. Build clean, link clean, run with full functionality. The full Linux developer surface — `rc` + `bash` + uutils-coreutils (complete flag coverage), `vim`, `less`, `top`, `htop`, `tmux`, `ssh`, `git`, `make`, `mk`, `gcc`/`clang`, `python3`, `curl`. BusyBox in initramfs as recovery. This tier delivers **Utopia** (VISION §13) at Phase 5 exit — the textual POSIX environment that proves the kernel + 9P + Stratum + compat layer compose into a usable system before Halcyon arrives.
 2. **Tier 2 — static Linux ARM64 binaries**: pre-built static ARM64 ELF binaries via the Linux syscall translation shim. Best-effort; covers most CLI tools.
-3. **Tier 3 — OCI container as namespace**: Linux container images run inside a Thylacine namespace. The kernel primitive (namespace) handles container isolation; synthetic Linux-shaped 9P servers (`/proc`, `/sys`, `/dev` Linux layout) provide the expected files.
+3. **Tier 3 — OCI container as territory**: Linux container images run inside a Thylacine territory. The kernel primitive (territory) handles container isolation; synthetic Linux-shaped 9P servers (`/proc`, `/sys`, `/dev` Linux layout) provide the expected files.
 
 **Out at v1.0**: glibc-dynamic binaries, programs requiring `epoll` / `inotify` / `io_uring` (post-v1.0 surface), Windows binaries.
 
@@ -256,7 +256,7 @@ This puts Thylacine at "useful Linux compat" territory — narrower than Linux's
 
 **Where Linux / Fuchsia have**: extensive testing, sanitizers, fuzzers, but no formal proofs. CFI catches a class of CFG attacks at runtime.
 
-**Where Thylacine targets**: formal specs for load-bearing invariants, not full functional correctness. Nine TLA+ specs (`scheduler`, `namespace`, `handles`, `vmo`, `9p_client`, `poll`, `futex`, `notes`, `pty`) gate-tied to phases. Adversarial audit cadence (modeled on Stratum's 15-round audit history). Sanitizer matrices (ASan, UBSan, TSan) on every commit. Property-based tests + fuzzers as standard. The bar is *practical formal verification* — every load-bearing invariant has a spec; the spec is the source of truth; the implementation references the spec; CI runs TLC on every PR touching specified subsystems.
+**Where Thylacine targets**: formal specs for load-bearing invariants, not full functional correctness. Nine TLA+ specs (`scheduler`, `territory`, `handles`, `burrow`, `9p_client`, `poll`, `futex`, `notes`, `pty`) gate-tied to phases. Adversarial audit cadence (modeled on Stratum's 15-round audit history). Sanitizer matrices (ASan, UBSan, TSan) on every commit. Property-based tests + fuzzers as standard. The bar is *practical formal verification* — every load-bearing invariant has a spec; the spec is the source of truth; the implementation references the spec; CI runs TLC on every PR touching specified subsystems.
 
 This is the same bar Stratum holds itself to. It's higher than Linux and Fuchsia; lower than seL4's full-correctness proof. The trade: seL4-class verification for a Plan 9-shaped OS would take a decade and require ~10x the team. Practical TLA+ verification is achievable in the project's actual scope.
 
@@ -300,7 +300,7 @@ We do *not* lead on raw throughput. We trade throughput for the architectural in
 
 ### 5.1 Where Thylacine matches the bar
 
-- **Plan 9 / 9Front on namespaces, 9P, `rfork`, `Dev`, notes, factotum**. Architecturally: Plan 9 with 25 years of hindsight applied.
+- **Plan 9 / 9Front on territories, 9P, `rfork`, `Dev`, notes, factotum**. Architecturally: Plan 9 with 25 years of hindsight applied.
 - **Fuchsia on typed handles, VMOs, userspace drivers**. Subordinated to 9P (the public interface) as the private mechanism.
 - **Linux on KASLR, ASLR, W^X, CFI, stack canaries, compiler hardening**. Standard modern security baseline.
 - **seL4 on the spec-first methodology** for invariant-bearing changes. Practical TLA+ rather than full Isabelle proofs.
@@ -312,7 +312,7 @@ We do *not* lead on raw throughput. We trade throughput for the architectural in
 - **Halcyon: shell as the graphical environment**. Inline graphics in scroll buffer, video as 9P server, no compositor, no windowing system. Unique design point.
 - **Userspace drivers via 9P + handles, totalized**. Hardware handles are non-transferable by type; transfer-via-9P is enforced at the syscall site as an invariant.
 - **POSIX surfaces as 9P servers, native**. `/proc`, `/dev`, `/sys`, `/dev/pts`, `/run`, `/tmp` are all 9P servers. No special compat machinery.
-- **Per-process namespace = per-connection Stratum namespace**. Cleanest possible OS-FS coupling.
+- **Per-process territory = per-connection Stratum territory**. Cleanest possible OS-FS coupling.
 - **MTE enabled by default where hardware supports**. Catches UAF / heap overflow at hardware speed.
 - **W^X as enumerated invariant** (not just default-on policy).
 - **Spec-first for invariant-bearing changes**, with nine TLA+ specs gate-tied to phases.
@@ -353,13 +353,13 @@ We do *not* lead on raw throughput. We trade throughput for the architectural in
 
 | Subsystem | Plan 9 | Thylacine |
 |---|---|---|
-| Namespace | Per-process, `bind`/`mount` | Same, with hardened isolation invariants spec'd |
+| Territory | Per-process, `bind`/`mount` | Same, with hardened isolation invariants spec'd |
 | Process | `rfork` | Same, plus `pthread`/`futex`/`poll` translation in musl |
 | 9P dialect | 9P2000 (vanilla) | 9P2000.L + Stratum extensions (Tbind, Tunbind, Tpin, Tunpin, Tsync, Treflink, Tfallocate) |
 | Pipelining | Optional in protocol; usually not exploited | Mandatory; up to 32 concurrent ops/session |
 | Drivers | Mostly in-kernel | Userspace from Phase 3, no exceptions |
 | Driver hardware access | Privileged kernel context | Typed handles (`KObj_MMIO`/`IRQ`/`DMA`); subordinated to 9P |
-| Memory sharing | Anonymous shm (convention-based) | First-class VMO kernel objects (Zircon-derived, transferable via 9P) |
+| Memory sharing | Anonymous shm (convention-based) | First-class BURROW kernel objects (Zircon-derived, transferable via 9P) |
 | Notes / signals | Notes | Notes internally; POSIX signals via translation |
 | Authentication | factotum + p9any/p9sk1 | janus + Stratum's PQ-hybrid wrap-key |
 | Filesystem | cwfs / fossil / kfs | Stratum (PQ-encrypted, Merkle-integrity, formally verified) |
@@ -375,12 +375,12 @@ The pattern: every Plan 9 idea preserved; every Plan 9 limitation revisited with
 
 ## 7. The positioning claim
 
-Thylacine OS is **the operating system Plan 9 would have become if the industry had not walked away** — built from first principles in 2026, with the namespace + 9P architecture taken to its conclusion, the typed-handle / VMO performance model adopted from Fuchsia (subordinated to 9P), the verification methodology adopted from seL4 + Stratum, the security hardening adopted from Linux + Fuchsia, the storage substrate provided by Stratum's already-feature-complete-and-verified filesystem.
+Thylacine OS is **the operating system Plan 9 would have become if the industry had not walked away** — built from first principles in 2026, with the territory + 9P architecture taken to its conclusion, the typed-handle / BURROW performance model adopted from Fuchsia (subordinated to 9P), the verification methodology adopted from seL4 + Stratum, the security hardening adopted from Linux + Fuchsia, the storage substrate provided by Stratum's already-feature-complete-and-verified filesystem.
 
 It is not a research OS — it is meant to be the thing you actually use to develop software. But it uses the research, and it uses Plan 9's complete architectural lineage rather than picking pieces.
 
 The consolidated value proposition: **Plan 9's thread, picked back up in 2026 and carried forward with the same rigor that produced Stratum, Fuchsia, and seL4, deliberately scoped for shell-driven development workflows on ARM64 hardware, and held to the standard that any complexity must be verified before it enters the binary.**
 
-It matches Plan 9 / 9Front on architecture, leads them on verification + hardening + filesystem + graphics. It matches Fuchsia on typed handles + VMOs, leads it on namespace composition + 9P-as-universal-protocol. It matches seL4 on spec-first methodology, leads it on ergonomics for Plan 9-shape applications. It matches Linux on hardening defaults + container compat, deliberately doesn't compete on hardware breadth or windowing-system applications.
+It matches Plan 9 / 9Front on architecture, leads them on verification + hardening + filesystem + graphics. It matches Fuchsia on typed handles + VMOs, leads it on territory composition + 9P-as-universal-protocol. It matches seL4 on spec-first methodology, leads it on ergonomics for Plan 9-shape applications. It matches Linux on hardening defaults + container compat, deliberately doesn't compete on hardware breadth or windowing-system applications.
 
 **Not a research OS. Not a toy. The OS Plan 9 would have become.**

@@ -3,13 +3,13 @@
 // Sorted doubly-linked list of VMAs anchored at struct Proc.vmas.
 // O(N) operations at v1.0; RB-tree is a Phase 5+ optimization.
 //
-// VMO refcounting: vma_alloc takes a vmo_acquire_mapping (mapping_count
-// ++); vma_free takes a vmo_release_mapping (mapping_count--). The dual-
-// refcount lifecycle in vmo.c (handle_count + mapping_count) ensures the
-// VMO survives until both reach zero — see specs/vmo.tla.
+// BURROW refcounting: vma_alloc takes a burrow_acquire_mapping (mapping_count
+// ++); vma_free takes a burrow_release_mapping (mapping_count--). The dual-
+// refcount lifecycle in burrow.c (handle_count + mapping_count) ensures the
+// BURROW survives until both reach zero — see specs/burrow.tla.
 //
-// (Pre-P3-Db, the refcount-only ops were named vmo_map / vmo_unmap.
-// They were renamed when the public vmo_map(Proc*, ...) entry point
+// (Pre-P3-Db, the refcount-only ops were named burrow_map / burrow_unmap.
+// They were renamed when the public burrow_map(Proc*, ...) entry point
 // arrived.)
 //
 // Per ARCHITECTURE.md §16.
@@ -18,7 +18,7 @@
 #include <thylacine/page.h>
 #include <thylacine/proc.h>
 #include <thylacine/vma.h>
-#include <thylacine/vmo.h>
+#include <thylacine/burrow.h>
 
 #include "../mm/slub.h"
 
@@ -49,9 +49,9 @@ void vma_init(void) {
 // =============================================================================
 
 struct Vma *vma_alloc(u64 vaddr_start, u64 vaddr_end, u32 prot,
-                     struct Vmo *vmo, u64 vmo_offset) {
+                     struct Burrow *burrow, u64 burrow_offset) {
     if (!g_vma_cache) extinction("vma_alloc before vma_init");
-    if (!vmo)         return NULL;
+    if (!burrow)         return NULL;
 
     if (vaddr_start >= vaddr_end) return NULL;
     if (vaddr_start & (PAGE_SIZE - 1)) return NULL;
@@ -69,17 +69,17 @@ struct Vma *vma_alloc(u64 vaddr_start, u64 vaddr_end, u32 prot,
     v->vaddr_start = vaddr_start;
     v->vaddr_end   = vaddr_end;
     v->prot        = prot;
-    v->vmo         = vmo;
-    v->vmo_offset  = vmo_offset;
+    v->burrow         = burrow;
+    v->burrow_offset  = burrow_offset;
     // next/prev left NULL via KP_ZERO; vma_insert wires them.
 
-    // P2-Fd contract: vmo_acquire_mapping increments mapping_count. The
+    // P2-Fd contract: burrow_acquire_mapping increments mapping_count. The
     // VMA's existence in a Proc's list is an active mapping; we count
-    // it against the VMO's lifecycle. vmo_release_mapping'd when
-    // vma_free runs. vmo_acquire_mapping is `void` — it cannot fail at
+    // it against the BURROW's lifecycle. burrow_release_mapping'd when
+    // vma_free runs. burrow_acquire_mapping is `void` — it cannot fail at
     // v1.0 (mapping_count saturates structurally per ARCH §28 I-7; if a
     // future overflow check is added it'd extinct internally).
-    vmo_acquire_mapping(vmo);
+    burrow_acquire_mapping(burrow);
 
     __atomic_fetch_add(&g_vma_allocated, 1u, __ATOMIC_RELAXED);
     return v;
@@ -90,12 +90,12 @@ void vma_free(struct Vma *v) {
     if (v->magic != VMA_MAGIC)  extinction("vma_free of corrupted/already-freed Vma");
     if (v->next || v->prev)     extinction("vma_free of Vma still in a list");
 
-    // Release the VMO mapping ref. vmo_release_mapping may free the VMO
+    // Release the BURROW mapping ref. burrow_release_mapping may free the BURROW
     // if both handle_count and mapping_count reach zero (see
-    // specs/vmo.tla).
-    if (v->vmo) {
-        vmo_release_mapping(v->vmo);
-        v->vmo = NULL;
+    // specs/burrow.tla).
+    if (v->burrow) {
+        burrow_release_mapping(v->burrow);
+        v->burrow = NULL;
     }
 
     kmem_cache_free(g_vma_cache, v);

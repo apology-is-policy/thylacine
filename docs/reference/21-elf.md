@@ -202,7 +202,7 @@ Each test constructs a synthetic ELF blob in a static buffer (`g_test_elf_blob`,
 
 ### No mapping at v1.0
 
-The loader returns `struct elf_image` with segment metadata; nothing is mapped into any address space. Phase 3 wires the actual mapping — segment data → VMO → vmo_map into the destination process's VMA tree.
+The loader returns `struct elf_image` with segment metadata; nothing is mapped into any address space. Phase 3 wires the actual mapping — segment data → BURROW → burrow_map into the destination process's VMA tree.
 
 ### Static binaries only
 

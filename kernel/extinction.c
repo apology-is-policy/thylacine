@@ -7,14 +7,14 @@
 
 #include "../arch/arm64/uart.h"
 
-extern void _hang(void) __attribute__((noreturn));
+extern void _torpor(void) __attribute__((noreturn));
 
 void extinction(const char *msg) {
     uart_puts("\n");
     uart_puts("EXTINCTION: ");
     uart_puts(msg);
     uart_puts("\n");
-    _hang();
+    _torpor();
 }
 
 void extinction_with_addr(const char *msg, uintptr_t addr) {
@@ -24,5 +24,5 @@ void extinction_with_addr(const char *msg, uintptr_t addr) {
     uart_puts(" 0x");
     uart_puthex64((uint64_t)addr);
     uart_puts("\n");
-    _hang();
+    _torpor();
 }

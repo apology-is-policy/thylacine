@@ -101,7 +101,7 @@ No new TLA+ at P3-Ec. The syscall dispatch is a bounded switch over a small enum
 Phase 5+ syscall extension adds:
 - File handle ops (`open` / `close` / `read` / `write`) — interacts with handles.tla.
 - Thread/Proc ops (`rfork`, `wait`, `notify`) — interacts with scheduler.tla.
-- Memory ops (`mmap`, `munmap`, `mprotect`) — interacts with vmo.tla.
+- Memory ops (`mmap`, `munmap`, `mprotect`) — interacts with burrow.tla.
 - Each large-surface syscall family is its own spec extension.
 
 ## Tests
