@@ -19,6 +19,7 @@
 #ifndef THYLACINE_PROC_H
 #define THYLACINE_PROC_H
 
+#include <thylacine/caps.h>     // caps_t (P4-Ic3 rfork_with_caps signature)
 #include <thylacine/page.h>     // paddr_t (P3-Bcb pgtable_root)
 #include <thylacine/rendez.h>
 #include <thylacine/types.h>
@@ -195,6 +196,27 @@ void proc_free(struct Proc *p);
 // userspace, rfork's semantics extend to the syscall split (parent gets
 // PID, child gets 0 — a register-set tweak in the syscall-return path).
 int rfork(unsigned flags, void (*entry)(void *), void *arg);
+
+// P4-Ic3: kernel-internal rfork that grants the child a capability subset.
+//
+// Identical to `rfork` except the child's caps field is set to
+// `(parent->caps & caps_mask)` — the AND with the parent's current caps
+// is the impl-side enforcement of specs/handles.tla::RforkWithCaps's
+// `granted \subseteq proc_caps[parent]` precondition (CapsCeiling). A
+// caller cannot grant a capability the caller itself doesn't hold; if
+// `caps_mask` requests bits beyond the parent's caps, the resulting
+// child gets only the intersection. The parent's caps are read under
+// `__ATOMIC_ACQUIRE` to coalesce a single observable snapshot.
+//
+// At v1.0 the only intended caller is kernel-internal context that runs
+// as kproc (which holds CAP_ALL) and wants to spawn a driver Proc
+// holding a specific subset (e.g., CAP_HW_CREATE for the virtio-blk
+// driver). Phase 5+ can lift this to a syscall — the spec's
+// `RforkWithCaps` action already models the userspace-callable form.
+//
+// Returns the child's PID on success; -1 on OOM (identical to `rfork`).
+int rfork_with_caps(unsigned flags, void (*entry)(void *), void *arg,
+                    caps_t caps_mask);
 
 // rfork flags. Per ARCH §7.4. Only RFPROC implemented at P2-D.
 #define RFPROC      0x0001    // create a new Proc (always required)

@@ -146,39 +146,51 @@ TLC-clean at `Procs = {p1, p2}, Paths = {a, b, c}` — 625 distinct states explo
 - **Mount union semantics (MBEFORE / MAFTER / MREPL flags)**: the spec models `bindings[p][dst]` as a SET (no ordering). The impl's union-list ordering matters for lookup priority but doesn't affect cycle-freedom. Phase 5+ extension can refine this.
 - **`mount` (9P-server-attaching variant)**: structurally identical to bind for the cycle-freedom + isolation invariants. Phase 4 (9P client) lands the impl.
 
-## handles.tla — P2-Fa spec (impl at P2-Fc)
+## handles.tla — P2-Fa + P4-Ib + P4-Ic3 spec (impl at P2-Fc + P4-Ib + P4-Ic3)
 
-Status: **rights ceiling proven; hardware-handle non-transferability proven; transfer-only-via-9P proven; capability monotonicity proven; impl deferred to P2-Fc.** Models the kernel handle table with typed kobjs partitioned into transferable + hardware sets, per-handle provenance tags, abstract 9P sessions, and per-Proc coarse capabilities. ARCH §28 invariants pinned: I-2 (capability monotonic reduction), I-4 (transfer only via 9P), I-5 (hardware handles non-transferable), I-6 (rights monotonic on transfer). I-7 (BURROW refcount + mapping lifecycle) is OUT OF SCOPE — covered by `burrow.tla`.
+Status: **rights ceiling proven; hardware-handle non-transferability proven; transfer-only-via-9P proven; capability monotonicity proven; hw-handle non-duplicability proven; hw-resource exclusivity proven; hw-handle-implies-cap proven; rfork-capability-grant ceiling proven; impl landed at P2-Fc + P4-Ib + P4-Ic3.** Models the kernel handle table with typed kobjs partitioned into transferable + hardware sets, per-handle provenance tags, abstract 9P sessions, per-Proc coarse capabilities, and dynamic per-Proc capability ceilings (rfork-time inheritance). ARCH §28 invariants pinned: I-2 (capability monotonic reduction), I-4 (transfer only via 9P), I-5 (hardware handles non-transferable), I-6 (rights monotonic on transfer). I-7 (BURROW refcount + mapping lifecycle) is OUT OF SCOPE — covered by `burrow.tla`.
 
-TLC-clean at `Procs = {p1, p2}, TxKObjs = {kx}, HwKObjs = {kh}, Rights = {R, T}, Caps = {C}` — 6,055,072 distinct states explored; depth 26; ~4 min on 8 cores. Buggy configs:
+TLC-clean at `Procs = {p1, p2}, TxKObjs = {kx}, HwKObjs = {kh}, Rights = {R, T}, Caps = {C, HW}, CapHwCreate = HW` — **11,715,248 distinct states explored / 317,925,297 generated; depth 25; ~9 min on 8 cores** (state space grew vs. the pre-P4-Ic3 baseline because `proc_ceiling` adds a state dimension). Buggy configs:
 
 | Config | Flag | Invariant violated | Depth | Distinct states |
 |---|---|---|---|---|
-| `handles_buggy_elevate.cfg` | `BUGGY_ELEVATE = TRUE`         | `RightsCeiling`     | 4 | 91 |
-| `handles_buggy_hw.cfg`      | `BUGGY_HW_TRANSFER = TRUE`    | `HwHandlesAtOrigin` | 5 | 444 |
-| `handles_buggy_direct.cfg`  | `BUGGY_DIRECT_TRANSFER = TRUE`| `OnlyTransferVia9P` | 4 | 90 |
-| `handles_buggy_caps.cfg`    | `BUGGY_CAPS_ELEVATE = TRUE`   | `CapsCeiling`       | 4 | 89 |
+| `handles_buggy_elevate.cfg`        | `BUGGY_ELEVATE = TRUE`           | `RightsCeiling`        | 4 | 75 |
+| `handles_buggy_hw.cfg`             | `BUGGY_HW_TRANSFER = TRUE`       | `HwHandlesAtOrigin`    | 5 | 523 |
+| `handles_buggy_direct.cfg`         | `BUGGY_DIRECT_TRANSFER = TRUE`   | `OnlyTransferVia9P`    | 5 | 73 |
+| `handles_buggy_caps.cfg`           | `BUGGY_CAPS_ELEVATE = TRUE`      | `CapsCeiling`          | 4 | 80 |
+| `handles_buggy_hw_dup.cfg`         | `BUGGY_HW_DUP = TRUE`            | `NoHwDup`              | 4 | 131 |
+| `handles_buggy_hw_overlap.cfg`     | `BUGGY_HW_OVERLAP = TRUE`        | `HwResourceExclusive`  | 4 | 124 |
+| `handles_buggy_hw_nocap.cfg`       | `BUGGY_HW_CREATE_NO_CAP = TRUE`  | `HwHandleImpliesCap`   | 4 | 169 |
+| `handles_buggy_rfork_elevate.cfg`  | `BUGGY_RFORK_ELEVATE = TRUE`     | `CapsCeiling` (dynamic ceiling) | 5 | 534 |
 
 | Spec action | Source location | Notes |
 |---|---|---|
-| `Init` | `kernel/handle.c::handle_init` (P2-Fc) | Per-Proc handle table allocated empty; ProcRoot starts with full caps. v1.0 P2-Fc has no rfork capability mask wiring; the spec's `proc_caps` is forward-looking for the Phase 5+ syscall surface. |
-| `HandleAlloc(p, k, granted)` | `kernel/handle.c::handle_alloc(struct Proc *, kobj_kind, kobj_t, rights_t)` (P2-Fc) | Kernel allocates a fresh kobj k of statically-typed kind, grants `granted` rights to proc p. Sets origin_rights[k] = granted permanently. Returns handle index. |
-| `HandleClose(p, h)` | `kernel/handle.c::handle_close(struct Proc *, hidx_t)` (P2-Fc) | Releases h from p's table. Decrements kobj's refcount; cascades to burrow_unref if last handle. |
-| `HandleDup(p, h, new_rights)` | `kernel/handle.c::handle_dup(struct Proc *, hidx_t, rights_t new_rights)` (P2-Fc) | Creates a fresh handle in p's table sharing h's kobj with rights ⊆ h.rights. Rejects elevated rights with -EINVAL. |
+| `Init` | `kernel/handle.c::handle_init` (P2-Fc) + `kernel/proc.c::proc_init` (kproc.caps = CAP_ALL at line 199) | Per-Proc handle table allocated empty; kproc (= ProcRoot) starts with `caps = CAP_ALL` and `proc_ceiling = Caps`. Every other Proc starts with `caps = {}` and `proc_ceiling = {}` (via `KP_ZERO` in `proc_alloc`). |
+| `HandleAlloc(p, k, granted)` | `kernel/handle.c::handle_alloc(struct Proc *, kobj_kind, kobj_t, rights_t)` (P2-Fc) + cap-gated entries in `kernel/syscall.c::sys_mmio_create_handler` / `sys_irq_create_handler` (P4-Ib) | Kernel allocates a fresh kobj k of statically-typed kind, grants `granted` rights to proc p. Sets origin_rights[k] = granted permanently. The P4-Ib hw-kobj precondition `CapHwCreate \in proc_caps[p]` is enforced syscall-side via `__atomic_load_n(&p->caps, __ATOMIC_ACQUIRE) & CAP_HW_CREATE`. |
+| `HandleClose(p, h)` | `kernel/handle.c::handle_close(struct Proc *, hidx_t)` (P2-Fc) | Releases h from p's table. Decrements kobj's refcount; cascades to burrow_unref / kobj_mmio_unref / kobj_irq_unref if last handle (P4-Ib). |
+| `HandleDup(p, h, new_rights)` | `kernel/handle.c::handle_dup(struct Proc *, hidx_t, rights_t new_rights)` (P2-Fc + P4-Ib hw reject) | Creates a fresh handle in p's table sharing h's kobj with rights ⊆ h.rights. Rejects elevated rights with -EINVAL; **rejects hw-kobj kinds entirely** (NoHwDup, P4-Ib). |
 | `BuggyDupElevate(p, h, new_rights)` | (none — bug class statically prevented) | The impl's `handle_dup` checks `(new_rights & h->rights) == new_rights` (subset test) before insert. A future caller that bypasses this check would re-introduce the bug. |
 | `OpenSession / CloseSession` | (Phase 4: `kernel/9p_client.c::9p_attach / 9p_clunk`) | At v1.0 P2-Fc the spec models sessions abstractly; no impl callers. Phase 4's 9P client wires actual session lifecycle. |
 | `HandleTransferVia9P(src, dst, h, new_rights)` | (Phase 4: `kernel/handle.c::handle_transfer_via_9p`) | The transfer codepath is **defined** at P2-Fc as a stub (returns -ENOTSUP at v1.0); the policy gates (TxKObjs ∈ TransferableTypes, RightTransfer ∈ rights, session open, new_rights ⊆ rights) are coded against the spec actions. Phase 4 wires the actual 9P payload extraction. |
 | `BuggyHwTransfer(src, dst, h, new_rights)` | (none — bug class statically prevented) | The transfer switch in §18.3 has NO case for KObj_MMIO/IRQ/DMA/Interrupt. `_Static_assert` over the kobj_kind enum ensures every kind is accounted for; a future addition that's transferable must be added explicitly. |
 | `BuggyDirectTransfer(src, dst, h, new_rights)` | (none — bug class statically prevented) | No syscall exists in the impl that transfers a handle directly between procs. The only cross-proc handle path is via 9P (Phase 4). |
-| `ReduceCaps(p, lost)` | (Phase 5+: `kernel/proc.c::rfork` capability mask) | At v1.0 there is no in-kernel caller of capability reduction; the spec models the future behavior. |
-| `BuggyCapsElevate(p, gained)` | (none — bug class statically prevented) | The impl's `rfork` capability mask is `parent->caps & mask` (intersection); no codepath sets caps to a superset. |
+| `ReduceCaps(p, lost)` | (Phase 5+: future cap-drop syscall) | At v1.0 there is no in-kernel caller of capability reduction. The spec's precondition `CapHwCreate \in lost => no hw handles in p` (P4-Ib refinement) is forward-looking — the future syscall must enumerate `p->handles` and reject if any has `kobj_kind_is_hw(kind)` (R9 F150 implementer note in caps.h). |
+| `BuggyCapsElevate(p, gained)` | (none — bug class statically prevented) | No impl syscall ever ORs in elevated bits to `p->caps`. Catch surface narrowed at P4-Ic3 to "bits beyond ceiling" (not "bits not currently held") — see F162 commentary in `handles.tla` near `BuggyCapsElevate`. |
+| `BuggyHwDup(p, h, new_rights)` | (none — bug class statically prevented at P4-Ib) | `handle_dup` rejects when `h->obj->kind` is hw via the new `handle_kind_is_hw_kobj()` check. A future case that misses the hw kinds would re-introduce the bug. |
+| `BuggyHwOverlap(p, k, granted)` | (none — bug class statically prevented at P4-Ib + P4-Ic2) | `kobj_mmio_create` rejects via `g_mmio_claims` overlap scan; `kobj_irq_create` rejects via `g_intid_claimed` bitmap. P4-Ic2 added kernel-MMIO-reservation (`kobj_mmio_reserve_kernel_ranges`) so userspace can't claim GIC/UART/ECAM/virtio-mmio either. |
+| `BuggyHwCreateNoCap(p, k, granted)` | (none — bug class statically prevented at P4-Ib) | Syscall handlers gate on `__atomic_load_n(&p->caps, __ATOMIC_ACQUIRE) & CAP_HW_CREATE` before allocating. R9 F146 hardened the read to acquire-fence. |
+| `RforkWithCaps(parent, child, granted)` | `kernel/proc.c::rfork_internal` (P4-Ic3, lines 469-538) + `rfork_with_caps` (lines 545-548) | Kernel-internal capability grant primitive. `child->caps = __atomic_load_n(&parent->caps, __ATOMIC_ACQUIRE) & caps_mask` enforces `granted \subseteq proc_caps[parent]` regardless of caller-supplied mask. The plain `rfork` is a delegate with `caps_mask = CAP_NONE`. |
+| `BuggyRforkElevate(parent, child, gained)` | (none — bug class statically prevented at P4-Ic3) | The AND with `parent_caps` at line 499 of `rfork_internal` makes it impossible for the caller to elevate the child's caps above the parent's. A future refactor that replaces `&` with `=` or `\|` would re-introduce the bug. |
 
 | Spec invariant | Source enforcement |
 |---|---|
 | `RightsCeiling` (every handle's rights ⊆ origin_rights of its kobj) | `handle_dup`'s subset check before insert; `handle_transfer_via_9p`'s subset check (Phase 4 wire-up). The kobj's origin_rights is set once at `handle_alloc` and never modified. |
-| `HwHandlesAtOrigin` (every hw-typed handle held by origin proc) | `handle_transfer_via_9p`'s switch statement omits the hw kinds entirely — there is no codepath that copies a hw handle to a non-origin proc. `_Static_assert(KIND_COUNT == ...)` ensures every kind is enumerated; missing case is a compile error. |
+| `HwHandlesAtOrigin` (every hw-typed handle held by origin proc) | `handle_transfer_via_9p`'s switch statement omits the hw kinds entirely. `_Static_assert(KIND_COUNT == ...)` ensures every kind is enumerated; missing case is a compile error. |
 | `OnlyTransferVia9P` (no handle has via="direct") | The impl has no direct-transfer syscall. The only public handle-cross-proc API is `handle_transfer_via_9p`. |
-| `CapsCeiling` (every proc's caps ⊆ initial ceiling) | `rfork`'s capability mask is `&` (bitwise AND); no codepath ORs in elevated bits. |
+| `CapsCeiling` (every proc's caps ⊆ proc_ceiling[p]) | **At P4-Ic3 this is dynamic**: ProcRoot's ceiling is `Caps` at Init; non-root Procs start with ceiling `{}` (via `KP_ZERO`) and have their ceiling set by `RforkWithCaps` to `proc_caps[parent]` at fork time. Impl-side, `rfork_internal`'s AND-with-parent_caps clamps the child's caps to its newly-established ceiling. Since v1.0 has no syscall that grows caps post-fork (no GrantCaps), `proc_caps[p]` only changes monotonically downward (via the future ReduceCaps) or via the one-shot rfork initialization — so the dynamic ceiling holds. |
+| `NoHwDup` (no hw-kobj handle has via="dup") | `handle_dup` rejects when `h->obj->kind` is hw-kobj-kind via `handle_kind_is_hw_kobj()`. P4-Ib. |
+| `HwResourceExclusive` (at most one alive handle per hw kobj across all procs) | `kobj_mmio_create`'s `g_mmio_claims` overlap scan + `kobj_irq_create`'s `g_intid_claimed` bitmap. P4-Ib + P4-Ic2 kernel-MMIO-reservation. |
+| `HwHandleImpliesCap` (every hw-handle holder has CAP_HW_CREATE) | Syscall handlers gate on `__atomic_load_n(&p->caps, __ATOMIC_ACQUIRE) & CAP_HW_CREATE` before allocating. `ReduceCaps` (spec; future syscall) refuses to drop CAP_HW_CREATE while holding hw handles (R9 F150 implementer note). |
 
 ### P2-Fa landed
 

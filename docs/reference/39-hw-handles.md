@@ -285,8 +285,9 @@ Buggy variants pinned by counter-examples (handles_buggy_*.cfg files):
 - `BuggyHwDup` (P4-Ib) → `NoHwDup` violated
 - `BuggyHwOverlap` (P4-Ib) → `HwResourceExclusive` violated
 - `BuggyHwCreateNoCap` (P4-Ib) → `HwHandleImpliesCap` violated
+- `BuggyRforkElevate` (P4-Ic3) → `CapsCeiling` violated (dynamic ceiling — child grant exceeds parent's caps)
 
-All 7 buggy cfgs produce expected counterexamples under TLC; correct cfg explores 1.4M distinct states without violation.
+All 8 buggy cfgs produce expected counterexamples under TLC; correct cfg explores **11.7M distinct states** (depth 25, ~9 min on 8 cores) without violation. The pre-P4-Ic3 figure was 1.4M; the state space grew because `proc_ceiling` adds a state dimension and `RforkWithCaps` is now a reachable action.
 
 ---
 
@@ -297,6 +298,9 @@ All 7 buggy cfgs produce expected counterexamples under TLC; correct cfg explore
 | `caps.kproc_has_all` | `kproc->caps == CAP_ALL` post-`proc_init` |
 | `caps.kproc_has_hw_create` | Specifically `kproc->caps & CAP_HW_CREATE != 0` (catches accidental CAP_ALL refactor that drops the bit) |
 | `caps.rfork_child_has_none` | `rfork(RFPROC, ...)` child observes `proc->caps == CAP_NONE` |
+| `caps.rfork_with_caps_grants_subset` | P4-Ic3: `rfork_with_caps(CAP_HW_CREATE)` from kproc grants exactly `CAP_HW_CREATE` |
+| `caps.rfork_with_caps_clamps_to_parent` | P4-Ic3: a zero-cap parent forking with `caps_mask=CAP_HW_CREATE` yields child with `CAP_NONE` (AND-with-parent clamp) |
+| `caps.rfork_with_caps_zero_mask` | P4-Ic3: `caps_mask=CAP_NONE` is equivalent to plain `rfork` |
 | `mmio_handle.create_basic` | round-trip create + unref |
 | `mmio_handle.create_misaligned_rejected` | pa or size not page-aligned → NULL |
 | `mmio_handle.create_zero_size_rejected` | size == 0 → NULL |
@@ -348,16 +352,18 @@ The userspace SVC path (caller invokes `t_mmio_create` / `t_irq_create` / `t_irq
 | `caps.h` + `struct Proc.caps` | **Landed (P4-Ib)** |
 | kproc CAP_ALL init | **Landed (P4-Ib)** in `proc_init` |
 | rfork inherits CAP_NONE | **Landed (P4-Ib)** via `KP_ZERO` (no inheritance impl) |
+| `rfork_with_caps(flags, entry, arg, mask)` kernel-internal grant | **Landed (P4-Ic3)** — `kernel/proc.c::rfork_internal` ANDs `parent->caps` with `mask`; `rfork` delegates with `CAP_NONE` |
 | `mmio_handle.h/c` + `g_mmio_claims` | **Landed (P4-Ib)** |
 | `kernel/irqfwd.c` INTID claim | **Landed (P4-Ib)** — `g_intid_claimed` + `intid_try_claim`/`intid_release` |
 | `handle.c` hw-dup rejection | **Landed (P4-Ib)** |
 | `handle.c` KOBJ_MMIO + KOBJ_IRQ release wiring | **Landed (P4-Ib)** |
 | Spec `handles.tla` extension | **Landed (P4-Ib)** — 3 invariants + 3 buggy actions + 3 cfg variants |
+| Spec `handles.tla::RforkWithCaps` action + `proc_ceiling` state var | **Landed (P4-Ic3)** — strengthened `CapsCeiling` to dynamic ceiling; +1 buggy action (`BuggyRforkElevate`) + cfg variant |
 | Syscall handlers (MMIO_CREATE, IRQ_CREATE, IRQ_WAIT) | **Landed (P4-Ib)** |
 | `libt` syscall wrappers | **Landed (P4-Ib + extended P4-Ic2 with `t_mmio_map`)** |
 | `SYS_MMIO_MAP` syscall + `kobj_mmio_map_into_user` semantics | **Landed (P4-Ic2)** — `BURROW_TYPE_MMIO` (P4-Ic1) + `userland_demand_page` dispatch (P4-Ic2) + device-memory PTE attrs (P4-Ic2) |
 | `mmu_install_user_pte(device_memory)` flag | **Landed (P4-Ic2)** |
-| Cap-grant syscall (parent → child) | **Phase 5+** |
+| Cap-grant syscall (parent → child userspace-callable) | **Phase 5+** — kernel-internal grant path lands at P4-Ic3 via `rfork_with_caps`; userspace surface deferred |
 | Cap-drop syscall (with hw-handle interlock) | **Phase 5+** |
 | 9P-aware `handle_transfer_via_9p` for KOBJ_SPOOR | **Phase 4** (separate sub-chunk) |
 
@@ -371,7 +377,7 @@ The userspace SVC path (caller invokes `t_mmio_create` / `t_irq_create` / `t_irq
 
 3. **`ReduceCaps`-of-CAP_HW_CREATE-while-holding-hw-handle is undefined at v1.0**. The spec models this as forbidden; the impl can't check because there's no cap-drop syscall yet. When the syscall lands (Phase 5+), it MUST enumerate `p->handles` and reject if any has `kobj_kind_is_hw(kind)`.
 
-4. **Capability inheritance at `rfork`**. v1.0 children start with `CAP_NONE`. Production drivers (P4-Ic+) need a way to receive `CAP_HW_CREATE`. v1.0 path: kproc directly rforks the driver with kproc-context capability grant (an internal-only path); userspace cap-grant is Phase 5+.
+4. **Capability inheritance at `rfork`**. v1.0 children start with `CAP_NONE`. Production drivers (P4-Ic+) receive `CAP_HW_CREATE` via the kernel-internal `rfork_with_caps(flags, entry, arg, caps_mask)` primitive (P4-Ic3) — the child's caps are set to `parent->caps & caps_mask` so a caller cannot grant beyond its own ceiling. Userspace cap-grant syscall surface is Phase 5+.
 
 5. **`KOBJ_DMA` + `KOBJ_INTERRUPT` are in the hw mask but lack implementation**. `handle_dup` rejects them (correct); `handle_release_obj` has no-op cases for them (no impl to call). Adding the impl is a future sub-chunk; the spec already covers them as HwKObjs.
 

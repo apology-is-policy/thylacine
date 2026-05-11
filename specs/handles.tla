@@ -53,8 +53,18 @@
 (*   Process capabilities are modeled as proc_caps[p] \in SUBSET Caps.   *)
 (*   ReduceCaps lowers; BuggyCapsElevate raises. Each proc has an       *)
 (*   InitialCapsOf(p) ceiling: ProcRoot starts with Caps (the universe), *)
-(*   every other proc starts with {} (empty caps). CapsCeiling requires  *)
-(*   proc_caps[p] \subseteq InitialCapsOf(p).                            *)
+(*   every other proc starts with {} (empty caps).                       *)
+(*                                                                         *)
+(*   P4-Ic3: proc_ceiling[p] \in SUBSET Caps is the dynamic capability  *)
+(*   ceiling — the largest set of caps p is permitted to hold across its *)
+(*   lifetime. Init: ProcRoot -> Caps; others -> {}. RforkWithCaps sets  *)
+(*   the child's ceiling to proc_caps[parent] AT fork time (capturing    *)
+(*   the parent's CURRENT caps as the child's permanent upper bound).   *)
+(*   CapsCeiling requires proc_caps[p] \subseteq proc_ceiling[p] AT all  *)
+(*   times. This preserves the old "non-root procs start with {} ceiling*)
+(*   and BuggyCapsElevate is caught" semantics, while modeling P4-Ic3's *)
+(*   rfork_with_caps kernel-internal primitive that allows kproc to     *)
+(*   grant subset-of-parent caps to a child Proc.                        *)
 (*                                                                         *)
 (* Buggy-config matrix (executable documentation per CLAUDE.md spec-first*)
 (* policy):                                                                *)
@@ -71,6 +81,10 @@
 (*   handles_buggy_caps.cfg       BUGGY_CAPS_ELEVATE=TRUE — counter-    *)
 (*                                example where a non-root proc gains   *)
 (*                                caps it never started with.             *)
+(*   handles_buggy_rfork_elevate.cfg                                       *)
+(*                                BUGGY_RFORK_ELEVATE=TRUE — counter-    *)
+(*                                example where rfork grants child more  *)
+(*                                caps than the parent currently holds.  *)
 (*                                                                         *)
 (* Invariants enforced (TLC-checked):                                      *)
 (*                                                                         *)
@@ -86,9 +100,10 @@
 (*                        — never "direct". ARCH §28 I-4 (transfer only *)
 (*                        via 9P).                                          *)
 (*                                                                         *)
-(*   CapsCeiling        — every proc's caps \subseteq its InitialCapsOf *)
-(*                        ceiling. ARCH §28 I-2 (capability monotonic    *)
-(*                        reduction).                                      *)
+(*   CapsCeiling        — every proc's caps \subseteq proc_ceiling[p]   *)
+(*                        (dynamic, set at Init for ProcRoot=Caps + at   *)
+(*                        rfork time for child=proc_caps[parent]).      *)
+(*                        ARCH §28 I-2 (capability monotonic reduction). *)
 (*                                                                         *)
 (* See ARCHITECTURE.md §13 (capabilities), §18 (handles), §28 invariants. *)
 (***************************************************************************)
@@ -108,7 +123,8 @@ CONSTANTS
     BUGGY_CAPS_ELEVATE,     \* BOOLEAN — enables BuggyCapsElevate
     BUGGY_HW_DUP,           \* P4-Ib: enables BuggyHwDup (dup of hw kobj)
     BUGGY_HW_OVERLAP,       \* P4-Ib: enables BuggyHwOverlap (double-alloc of hw kobj)
-    BUGGY_HW_CREATE_NO_CAP  \* P4-Ib: enables BuggyHwCreateNoCap (hw alloc without cap)
+    BUGGY_HW_CREATE_NO_CAP, \* P4-Ib: enables BuggyHwCreateNoCap (hw alloc without cap)
+    BUGGY_RFORK_ELEVATE     \* P4-Ic3: enables BuggyRforkElevate (rfork grants > parent)
 
 KObjs == TxKObjs \cup HwKObjs
 
@@ -125,6 +141,7 @@ ASSUME BUGGY_CAPS_ELEVATE \in BOOLEAN
 ASSUME BUGGY_HW_DUP \in BOOLEAN
 ASSUME BUGGY_HW_OVERLAP \in BOOLEAN
 ASSUME BUGGY_HW_CREATE_NO_CAP \in BOOLEAN
+ASSUME BUGGY_RFORK_ELEVATE \in BOOLEAN
 
 (***************************************************************************)
 (* ProcRoot is the proc that starts with full capabilities (Caps). All   *)
@@ -154,26 +171,30 @@ VARIABLES
     origin_rights,  \* [KObjs -> SUBSET Rights] — set at first alloc
     kobjs_alive,    \* SUBSET KObjs — kobjs that have been HandleAlloc'd
     proc_caps,      \* [Procs -> SUBSET Caps]
+    proc_ceiling,   \* [Procs -> SUBSET Caps] — P4-Ic3 dynamic cap ceiling
     sessions        \* SUBSET (Procs \X Procs) — directional 9P session pairs
 
-vars == <<handles, origin_rights, kobjs_alive, proc_caps, sessions>>
+vars == <<handles, origin_rights, kobjs_alive, proc_caps, proc_ceiling, sessions>>
 
 TypeOk ==
     /\ handles \in [Procs -> SUBSET HandleRecord]
     /\ origin_rights \in [KObjs -> SUBSET Rights]
     /\ kobjs_alive \subseteq KObjs
     /\ proc_caps \in [Procs -> SUBSET Caps]
+    /\ proc_ceiling \in [Procs -> SUBSET Caps]
     /\ sessions \subseteq (Procs \X Procs)
 
 (***************************************************************************)
 (* Init: no kobjs alive; no handles; origin_rights all-empty placeholder; *)
-(* proc_caps initialized per InitialCapsOf; no 9P sessions open.           *)
+(* proc_caps initialized per InitialCapsOf; proc_ceiling matches initial  *)
+(* caps (ProcRoot=Caps universe, non-root=empty); no 9P sessions open.    *)
 (***************************************************************************)
 Init ==
     /\ handles = [p \in Procs |-> {}]
     /\ origin_rights = [k \in KObjs |-> {}]
     /\ kobjs_alive = {}
     /\ proc_caps = [p \in Procs |-> InitialCapsOf(p)]
+    /\ proc_ceiling = [p \in Procs |-> InitialCapsOf(p)]
     /\ sessions = {}
 
 (***************************************************************************)
@@ -208,7 +229,7 @@ HandleAlloc(p, k, granted) ==
                                                   rights |-> granted,
                                                   origin_proc |-> p,
                                                   via |-> "orig"]}]
-    /\ UNCHANGED <<proc_caps, sessions>>
+    /\ UNCHANGED <<proc_caps, proc_ceiling, sessions>>
 
 (***************************************************************************)
 (* HandleClose(p, h) — releases h from p's table.                         *)
@@ -218,7 +239,7 @@ HandleAlloc(p, k, granted) ==
 HandleClose(p, h) ==
     /\ h \in handles[p]
     /\ handles' = [handles EXCEPT ![p] = @ \ {h}]
-    /\ UNCHANGED <<origin_rights, kobjs_alive, proc_caps, sessions>>
+    /\ UNCHANGED <<origin_rights, kobjs_alive, proc_caps, proc_ceiling, sessions>>
 
 (***************************************************************************)
 (* HandleDup(p, h, new_rights) — creates a fresh handle in p's table     *)
@@ -246,7 +267,7 @@ HandleDup(p, h, new_rights) ==
                                                   rights |-> new_rights,
                                                   origin_proc |-> h.origin_proc,
                                                   via |-> "dup"]}]
-    /\ UNCHANGED <<origin_rights, kobjs_alive, proc_caps, sessions>>
+    /\ UNCHANGED <<origin_rights, kobjs_alive, proc_caps, proc_ceiling, sessions>>
 
 (***************************************************************************)
 (* BuggyDupElevate(p, h, new_rights) — bug class: dup creates a handle  *)
@@ -268,7 +289,7 @@ BuggyDupElevate(p, h, new_rights) ==
                                                   rights |-> new_rights,
                                                   origin_proc |-> h.origin_proc,
                                                   via |-> "dup"]}]
-    /\ UNCHANGED <<origin_rights, kobjs_alive, proc_caps, sessions>>
+    /\ UNCHANGED <<origin_rights, kobjs_alive, proc_caps, proc_ceiling, sessions>>
 
 (***************************************************************************)
 (* OpenSession / CloseSession — 9P session lifecycle modeled abstractly. *)
@@ -282,12 +303,12 @@ OpenSession(src, dst) ==
     /\ src # dst
     /\ <<src, dst>> \notin sessions
     /\ sessions' = sessions \cup {<<src, dst>>}
-    /\ UNCHANGED <<handles, origin_rights, kobjs_alive, proc_caps>>
+    /\ UNCHANGED <<handles, origin_rights, kobjs_alive, proc_caps, proc_ceiling>>
 
 CloseSession(src, dst) ==
     /\ <<src, dst>> \in sessions
     /\ sessions' = sessions \ {<<src, dst>>}
-    /\ UNCHANGED <<handles, origin_rights, kobjs_alive, proc_caps>>
+    /\ UNCHANGED <<handles, origin_rights, kobjs_alive, proc_caps, proc_ceiling>>
 
 (***************************************************************************)
 (* HandleTransferVia9P(src, dst, h, new_rights) — copies h from src to   *)
@@ -318,7 +339,7 @@ HandleTransferVia9P(src, dst, h, new_rights) ==
                                                     rights |-> new_rights,
                                                     origin_proc |-> h.origin_proc,
                                                     via |-> "9p"]}]
-    /\ UNCHANGED <<origin_rights, kobjs_alive, proc_caps, sessions>>
+    /\ UNCHANGED <<origin_rights, kobjs_alive, proc_caps, proc_ceiling, sessions>>
 
 (***************************************************************************)
 (* BuggyHwTransfer(src, dst, h, new_rights) — bug class: a hardware-typed*)
@@ -344,7 +365,7 @@ BuggyHwTransfer(src, dst, h, new_rights) ==
                                                     rights |-> new_rights,
                                                     origin_proc |-> h.origin_proc,
                                                     via |-> "9p"]}]
-    /\ UNCHANGED <<origin_rights, kobjs_alive, proc_caps, sessions>>
+    /\ UNCHANGED <<origin_rights, kobjs_alive, proc_caps, proc_ceiling, sessions>>
 
 (***************************************************************************)
 (* BuggyDirectTransfer(src, dst, h, new_rights) — bug class: a syscall  *)
@@ -370,7 +391,7 @@ BuggyDirectTransfer(src, dst, h, new_rights) ==
                                                     rights |-> new_rights,
                                                     origin_proc |-> h.origin_proc,
                                                     via |-> "direct"]}]
-    /\ UNCHANGED <<origin_rights, kobjs_alive, proc_caps, sessions>>
+    /\ UNCHANGED <<origin_rights, kobjs_alive, proc_caps, proc_ceiling, sessions>>
 
 (***************************************************************************)
 (* ReduceCaps(p, lost) — proc voluntarily drops capability bits.          *)
@@ -394,14 +415,30 @@ ReduceCaps(p, lost) ==
     /\ (CapHwCreate \in lost) =>
            ~(\E h \in handles[p] : h.kobj \in HwKObjs)
     /\ proc_caps' = [proc_caps EXCEPT ![p] = @ \ lost]
-    /\ UNCHANGED <<handles, origin_rights, kobjs_alive, sessions>>
+    /\ UNCHANGED <<handles, origin_rights, kobjs_alive, proc_ceiling, sessions>>
 
 (***************************************************************************)
 (* BuggyCapsElevate(p, gained) — bug class: rfork raises a proc's caps  *)
 (* above its initial set.                                                  *)
 (*                                                                         *)
 (* Caught by CapsCeiling invariant for non-root procs (whose ceiling is  *)
-(* {}; any gain violates).                                                 *)
+(* {} at Init; any gain violates).                                         *)
+(*                                                                         *)
+(* P4-Ic3 catch-surface note (R11 F162): the dynamic CapsCeiling          *)
+(* introduced at P4-Ic3 narrows this bug class's catch surface — a proc  *)
+(* whose `proc_ceiling` has been raised via RforkWithCaps (e.g.,         *)
+(* `RforkWithCaps(ProcRoot, p, {})` initializes p with ceiling=Caps but  *)
+(* caps={}) admits BuggyCapsElevate "within ceiling" without violating   *)
+(* CapsCeiling. This is INTENTIONAL: the spec models post-fork as       *)
+(* "ceiling captures the static authorization envelope; current caps    *)
+(* are a subset that can shrink." A bug-class equivalent of "caps grew  *)
+(* within ceiling" doesn't exist at v1.0 because there is no impl-side  *)
+(* syscall that raises caps post-fork. If such a syscall lands at      *)
+(* Phase 5+ (e.g., `GrantCaps`), the spec should add a state action     *)
+(* modeling it; until then the narrowed coverage is the correct model. *)
+(* TLC `handles_buggy_caps.cfg` continues to produce a counterexample  *)
+(* at depth 4 via the direct-from-Init path (BuggyCapsElevate on a     *)
+(* never-rfork'd proc whose ceiling is still {}).                        *)
 (***************************************************************************)
 BuggyCapsElevate(p, gained) ==
     /\ BUGGY_CAPS_ELEVATE
@@ -409,7 +446,7 @@ BuggyCapsElevate(p, gained) ==
     /\ gained \cap proc_caps[p] = {}
     /\ gained # {}
     /\ proc_caps' = [proc_caps EXCEPT ![p] = @ \cup gained]
-    /\ UNCHANGED <<handles, origin_rights, kobjs_alive, sessions>>
+    /\ UNCHANGED <<handles, origin_rights, kobjs_alive, proc_ceiling, sessions>>
 
 (***************************************************************************)
 (* BuggyHwDup(p, h, new_rights) — P4-Ib bug class: dup creates a second  *)
@@ -433,7 +470,7 @@ BuggyHwDup(p, h, new_rights) ==
                                                   rights |-> new_rights,
                                                   origin_proc |-> h.origin_proc,
                                                   via |-> "dup"]}]
-    /\ UNCHANGED <<origin_rights, kobjs_alive, proc_caps, sessions>>
+    /\ UNCHANGED <<origin_rights, kobjs_alive, proc_caps, proc_ceiling, sessions>>
 
 (***************************************************************************)
 (* BuggyHwOverlap(p, k, granted) — P4-Ib bug class: kernel allocates a   *)
@@ -471,7 +508,7 @@ BuggyHwOverlap(p, k, granted) ==
                                                   rights |-> granted,
                                                   origin_proc |-> p,
                                                   via |-> "orig"]}]
-    /\ UNCHANGED <<origin_rights, kobjs_alive, proc_caps, sessions>>
+    /\ UNCHANGED <<origin_rights, kobjs_alive, proc_caps, proc_ceiling, sessions>>
 
 (***************************************************************************)
 (* BuggyHwCreateNoCap(p, k, granted) — P4-Ib bug class: kernel grants a *)
@@ -499,7 +536,65 @@ BuggyHwCreateNoCap(p, k, granted) ==
                                                   rights |-> granted,
                                                   origin_proc |-> p,
                                                   via |-> "orig"]}]
-    /\ UNCHANGED <<proc_caps, sessions>>
+    /\ UNCHANGED <<proc_caps, proc_ceiling, sessions>>
+
+(***************************************************************************)
+(* RforkWithCaps(parent, child, granted) — P4-Ic3 kernel-internal       *)
+(* primitive. The parent (typically kproc) creates a new Proc with caps  *)
+(* set to `granted`, where granted is a subset of the parent's CURRENT  *)
+(* caps. The child's ceiling is captured from the parent's current caps *)
+(* (this becomes the child's permanent upper bound for all future        *)
+(* operations).                                                            *)
+(*                                                                         *)
+(* Preconditions:                                                          *)
+(*   - granted \subseteq proc_caps[parent]: subset-of-parent              *)
+(*     (CapsCeiling for child is preserved).                              *)
+(*   - The child slot is uninitialized: proc_caps = {}, proc_ceiling = {},*)
+(*     handles = {}. This prevents re-grant on the same slot and matches  *)
+(*     the impl-side semantics that proc_alloc returns a fresh-zeroed     *)
+(*     Proc.                                                                *)
+(*   - parent # child: rfork creates a distinct Proc.                      *)
+(*                                                                         *)
+(* Maps to `kernel/proc.c::rfork_with_caps(flags, entry, arg, mask)`.     *)
+(***************************************************************************)
+RforkWithCaps(parent, child, granted) ==
+    /\ parent # child
+    /\ granted \subseteq proc_caps[parent]
+    /\ proc_caps[child] = {}
+    /\ proc_ceiling[child] = {}
+    /\ handles[child] = {}
+    /\ proc_ceiling' = [proc_ceiling EXCEPT ![child] = proc_caps[parent]]
+    /\ proc_caps' = [proc_caps EXCEPT ![child] = granted]
+    /\ UNCHANGED <<handles, origin_rights, kobjs_alive, sessions>>
+
+(***************************************************************************)
+(* BuggyRforkElevate(parent, child, gained) — P4-Ic3 bug class: kernel  *)
+(* rfork_with_caps grants the child MORE caps than the parent holds.     *)
+(*                                                                         *)
+(* Real-world analogue: missing AND-with-parent-caps in rfork_with_caps  *)
+(* — e.g., `child->caps = mask` instead of `child->caps = parent->caps  *)
+(* & mask`. Or a kernel-side caller that constructs `granted` from a    *)
+(* user-supplied bitmask without bounding it by the caller's own caps.   *)
+(*                                                                         *)
+(* The action mirrors RforkWithCaps's effects (correct ceiling = parent's*)
+(* caps; child sees proc_caps = gained) but DROPS the                     *)
+(* `granted \subseteq proc_caps[parent]` precondition. CapsCeiling catches*)
+(* the consequence: proc_caps[child] = gained \notsubseteq proc_caps[parent]*)
+(* = proc_ceiling[child].                                                  *)
+(*                                                                         *)
+(* Caught by `CapsCeiling` invariant.                                      *)
+(***************************************************************************)
+BuggyRforkElevate(parent, child, gained) ==
+    /\ BUGGY_RFORK_ELEVATE
+    /\ parent # child
+    /\ proc_caps[child] = {}
+    /\ proc_ceiling[child] = {}
+    /\ handles[child] = {}
+    /\ gained \subseteq Caps
+    /\ ~(gained \subseteq proc_caps[parent])
+    /\ proc_ceiling' = [proc_ceiling EXCEPT ![child] = proc_caps[parent]]
+    /\ proc_caps' = [proc_caps EXCEPT ![child] = gained]
+    /\ UNCHANGED <<handles, origin_rights, kobjs_alive, sessions>>
 
 (***************************************************************************)
 (* Next: disjunction of all actions. \E ranges over actual handles in a  *)
@@ -524,6 +619,10 @@ Next ==
     \/ \E p \in Procs : \E h \in handles[p] : \E nr \in SUBSET Rights : BuggyHwDup(p, h, nr)
     \/ \E p \in Procs : \E k \in KObjs : \E granted \in SUBSET Rights : BuggyHwOverlap(p, k, granted)
     \/ \E p \in Procs : \E k \in KObjs : \E granted \in SUBSET Rights : BuggyHwCreateNoCap(p, k, granted)
+    \/ \E parent \in Procs : \E child \in Procs : \E granted \in SUBSET Caps :
+           RforkWithCaps(parent, child, granted)
+    \/ \E parent \in Procs : \E child \in Procs : \E gained \in SUBSET Caps :
+           BuggyRforkElevate(parent, child, gained)
 
 Spec == Init /\ [][Next]_vars
 
@@ -559,11 +658,15 @@ OnlyTransferVia9P ==
     \A p \in Procs : \A h \in handles[p] : h.via # "direct"
 
 (***************************************************************************)
-(* CapsCeiling — every proc's capabilities are a subset of its initial   *)
-(* ceiling. ARCH §28 I-2 (capability monotonic reduction).                *)
+(* CapsCeiling — every proc's capabilities are a subset of its DYNAMIC   *)
+(* ceiling (proc_ceiling[p]). At Init, the ceiling matches               *)
+(* InitialCapsOf — so non-rfork'd procs keep the old "non-root starts    *)
+(* empty" semantics. After RforkWithCaps fires on a child, the child's   *)
+(* ceiling is the parent's caps AT fork time. ARCH §28 I-2 (capability   *)
+(* monotonic reduction) + P4-Ic3 (rfork-time inheritance).                *)
 (***************************************************************************)
 CapsCeiling ==
-    \A p \in Procs : proc_caps[p] \subseteq InitialCapsOf(p)
+    \A p \in Procs : proc_caps[p] \subseteq proc_ceiling[p]
 
 (***************************************************************************)
 (* NoHwDup — P4-Ib. No handle to a hw kobj was created via dup. Extends *)

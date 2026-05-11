@@ -207,6 +207,9 @@ void test_userspace_ramfs_hello_rs(void);
 void test_caps_kproc_has_all(void);
 void test_caps_kproc_has_hw_create(void);
 void test_caps_rfork_child_has_none(void);
+void test_caps_rfork_with_caps_grants_subset(void);
+void test_caps_rfork_with_caps_clamps_to_parent(void);
+void test_caps_rfork_with_caps_zero_mask(void);
 void test_mmio_handle_create_basic(void);
 void test_mmio_handle_create_misaligned_rejected(void);
 void test_mmio_handle_create_zero_size_rejected(void);
@@ -467,6 +470,15 @@ struct test_case g_tests[] = {
     { "caps.kproc_has_all",            test_caps_kproc_has_all,            false, NULL },
     { "caps.kproc_has_hw_create",      test_caps_kproc_has_hw_create,      false, NULL },
     { "caps.rfork_child_has_none",     test_caps_rfork_child_has_none,     false, NULL },
+    { "caps.rfork_with_caps_grants_subset",
+                                       test_caps_rfork_with_caps_grants_subset,
+                                                                           false, NULL },
+    { "caps.rfork_with_caps_clamps_to_parent",
+                                       test_caps_rfork_with_caps_clamps_to_parent,
+                                                                           false, NULL },
+    { "caps.rfork_with_caps_zero_mask",
+                                       test_caps_rfork_with_caps_zero_mask,
+                                                                           false, NULL },
     { "mmio_handle.create_basic",      test_mmio_handle_create_basic,      false, NULL },
     { "mmio_handle.create_misaligned_rejected",
                                        test_mmio_handle_create_misaligned_rejected,

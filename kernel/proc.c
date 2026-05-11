@@ -452,7 +452,22 @@ static void proc_reparent_children(struct Proc *p) {
     }
 }
 
-int rfork(unsigned flags, void (*entry)(void *), void *arg) {
+// Shared internal worker for rfork + rfork_with_caps. The only difference
+// between them is `caps_mask`: the child's caps are set to
+// `parent->caps & caps_mask` AFTER proc_alloc (which KP_ZEROs caps to
+// CAP_NONE). This preserves specs/handles.tla::RforkWithCaps's invariant
+// `granted \subseteq proc_caps[parent]` — bit-AND with parent's caps
+// ceils the grant at the parent's current caps regardless of what mask
+// the caller passes.
+//
+// P4-Ic3: the rfork_with_caps entry point exposes this kernel-internal
+// capability grant path so kproc can spawn a driver Proc holding
+// CAP_HW_CREATE (or any subset of kproc's caps). The plain rfork()
+// surface delegates with mask=CAP_NONE so children inherit no caps —
+// the v1.0 default for any rfork-from-non-kproc-context path that
+// hasn't been explicitly designed to grant caps.
+static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
+                          caps_t caps_mask) {
     // P2-D: only RFPROC supported. Other flags reserved for subsequent
     // sub-chunks (RFNAMEG at P2-E, RFFDG at P2-F, RFMEM at P2-G, etc.).
     if (flags != RFPROC) {
@@ -471,6 +486,17 @@ int rfork(unsigned flags, void (*entry)(void *), void *arg) {
 
     struct Proc *child = proc_alloc();
     if (!child) return -1;
+
+    // P4-Ic3: capture parent->caps once under acquire fence. R9 F146
+    // applied the acquire-on-read discipline at the syscall layer; the
+    // same applies here because the child's caps are bounded by what
+    // the parent observably holds NOW. Without the fence the compiler
+    // could hoist or split the read, admitting torn intermediate states
+    // (mid-ReduceCaps update from another CPU). Maps to spec's
+    // `granted \subseteq proc_caps[parent]`: the AND with caps_mask is
+    // the impl-side "ceiling at parent's current caps" enforcement.
+    caps_t parent_caps = __atomic_load_n(&parent->caps, __ATOMIC_ACQUIRE);
+    child->caps = parent_caps & caps_mask;
 
     // P2-Eb: clone parent's territory into the child. Maps to the spec's
     // ForkClone action — child gets a deep copy of parent's bindings;
@@ -510,6 +536,15 @@ int rfork(unsigned flags, void (*entry)(void *), void *arg) {
     ready(ct);
 
     return child->pid;
+}
+
+int rfork(unsigned flags, void (*entry)(void *), void *arg) {
+    return rfork_internal(flags, entry, arg, CAP_NONE);
+}
+
+int rfork_with_caps(unsigned flags, void (*entry)(void *), void *arg,
+                    caps_t caps_mask) {
+    return rfork_internal(flags, entry, arg, caps_mask);
 }
 
 void exits(const char *msg) {
