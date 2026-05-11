@@ -27,6 +27,8 @@ void test_mmio_handle_create_overlap_rejected(void);
 void test_mmio_handle_create_adjacent_ok(void);
 void test_mmio_handle_create_unref_releases_slot(void);
 void test_mmio_handle_double_unref_extincts(void);
+void test_mmio_handle_create_kernel_reserved_rejected(void);
+void test_mmio_handle_create_out_of_ips_rejected(void);
 
 // Synthetic PA range used by the tests. Page-aligned. Picked
 // arbitrarily — claim tracking doesn't touch the actual memory.
@@ -105,6 +107,51 @@ void test_mmio_handle_create_unref_releases_slot(void) {
     struct KObj_MMIO *k2 = kobj_mmio_create(TEST_MMIO_PA_A, TEST_MMIO_SIZE);
     TEST_ASSERT(k2 != NULL, "k2 (after k1 unref) should succeed");
     kobj_mmio_unref(k2);
+}
+
+// R10 F154 (P1) regression: kobj_mmio_create rejects PAs that overlap
+// kernel-reserved MMIO ranges (GIC, PL011, ECAM, VirtIO MMIO). Without
+// this, a userspace driver with CAP_HW_CREATE could claim the GIC
+// distributor + map it into userspace + scribble on kernel IRQ state.
+// kobj_mmio_reserve_kernel_ranges() at boot pre-populates g_mmio_claims;
+// this test verifies the rejection at the user-create path.
+void test_mmio_handle_create_kernel_reserved_rejected(void) {
+    // GIC distributor on QEMU virt: PA 0x08000000, 64 KiB. The
+    // reservation is page-aligned outward so the entire range is
+    // protected. A kobj_mmio_create at the exact GIC PA must fail.
+    struct KObj_MMIO *k = kobj_mmio_create(0x08000000ull, PAGE_SIZE);
+    TEST_ASSERT(k == NULL,
+                "kobj_mmio_create on GIC distributor PA must be rejected");
+
+    // PL011 UART: PA 0x09000000, 4 KiB. Also reserved.
+    struct KObj_MMIO *k2 = kobj_mmio_create(0x09000000ull, PAGE_SIZE);
+    TEST_ASSERT(k2 == NULL,
+                "kobj_mmio_create on PL011 UART PA must be rejected");
+
+    // Partial overlap with GIC redistributor — start of redist range
+    // is 0x080a0000. A create at 0x08090000 (NOT in redist) + size
+    // 0x20000 would overlap the redist start. Should be rejected.
+    struct KObj_MMIO *k3 = kobj_mmio_create(0x08090000ull, 0x20000ull);
+    TEST_ASSERT(k3 == NULL,
+                "kobj_mmio_create overlapping GIC redist must be rejected");
+}
+
+// R10 F156 (P2) regression: kobj_mmio_create rejects PA that exceeds
+// TCR.IPS = 40 bits. Without this rejection, a userspace caller would
+// trigger FAULT_UNHANDLED_USER on first access → kernel extinction.
+// Mirrors mmu_map_mmio's IPS check.
+void test_mmio_handle_create_out_of_ips_rejected(void) {
+    // PA at 1 TiB (2^40). Architecturally invalid in 40-bit IPS.
+    struct KObj_MMIO *k = kobj_mmio_create((u64)1 << 40, PAGE_SIZE);
+    TEST_ASSERT(k == NULL, "kobj_mmio_create at PA=2^40 must be rejected");
+
+    // PA just below the boundary, but pa + size crosses it: pa =
+    // (1<<40) - PAGE_SIZE; size = 2 * PAGE_SIZE. The first page is
+    // valid but pa+size-1 sits at (1<<40) + PAGE_SIZE - 1 → out of IPS.
+    struct KObj_MMIO *k2 = kobj_mmio_create(((u64)1 << 40) - PAGE_SIZE,
+                                            2 * PAGE_SIZE);
+    TEST_ASSERT(k2 == NULL,
+                "kobj_mmio_create with range crossing IPS boundary must be rejected");
 }
 
 // Verify the live-count instrumentation tracks correctly across a

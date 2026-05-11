@@ -72,8 +72,36 @@ enum {
     SYS_MMIO_CREATE = 2,   // arg: pa (x0), size (x1), rights (x2)
     SYS_IRQ_CREATE  = 3,   // arg: intid (x0), rights (x1)
     SYS_IRQ_WAIT    = 4,   // arg: handle (x0)
+    SYS_MMIO_MAP    = 5,   // P4-Ic2: arg: handle (x0), vaddr (x1), prot (x2)
 };
 ```
+
+**`SYS_MMIO_MAP` (P4-Ic2)** — installs a user-VA mapping for a `KObj_MMIO` handle. Sequence:
+1. Cap check (defense; spec invariant `HwHandleImpliesCap` already guarantees the cap is held since the handle exists in p->handles).
+2. `handle_get` + verify kind=`KOBJ_MMIO` + `RIGHT_MAP` in rights.
+3. Validate `prot` (non-zero; only `READ|WRITE` bits; no `EXEC` — MMIO PTEs aren't architecturally executable in a useful way per ARM ARM B2.7.2); bound by handle rights (`RIGHT_WRITE` required for `VMA_PROT_WRITE`, `RIGHT_READ` for `VMA_PROT_READ`).
+4. `burrow_create_mmio(km)` — wraps the KObj_MMIO in a `BURROW_TYPE_MMIO` Burrow (refs the kobj for the Burrow's lifetime).
+5. `burrow_map(p, b, vaddr, km->size, prot)` — installs the VMA via `vma_alloc` + `vma_insert`. PTEs install lazily on first access (demand-paging via `userland_demand_page`).
+6. `burrow_unref(b)` — transfers ownership to the VMA's mapping ref (matches anon flow). On failure, releases the construction ref → `burrow_free_internal` → `kobj_mmio_unref` → claim released.
+
+The actual PTE install happens at first-access via `userland_demand_page` (`arch/arm64/fault.c`):
+
+```c
+switch (vma->burrow->type) {
+case BURROW_TYPE_ANON:
+    page_pa = page_to_pa(vma->burrow->pages) + offset;
+    device_memory = false;        // MAIR_IDX_NORMAL_WB
+    break;
+case BURROW_TYPE_MMIO:
+    page_pa = vma->burrow->pa + offset;
+    device_memory = true;         // MAIR_IDX_DEVICE (nGnRnE)
+    break;
+}
+mmu_install_user_pte(p->pgtable_root, p->asid, page_va, page_pa,
+                     vma->prot, device_memory);
+```
+
+Device-memory PTE attrs (`MAIR_IDX_DEVICE = 0`, `MAIR_ATTR_DEVICE_nGnRnE = 0x00` per `arch/arm64/mmu.h`) ensure CPU doesn't gather / reorder / coalesce MMIO accesses.
 
 Each cap-gated syscall checks `current_thread()->proc->caps & CAP_HW_CREATE` before any allocation; returns -1 (EPERM) on cap-missing. Rights validation rejects `rights == 0` or `rights & ~RIGHT_ALL`. INTID range bound is enforced by `intid_try_claim` inside `kobj_irq_create`.
 
@@ -83,9 +111,16 @@ Each cap-gated syscall checks `current_thread()->proc->caps & CAP_HW_CREATE` bef
 long t_mmio_create(unsigned long pa, unsigned long size, unsigned long rights);
 long t_irq_create(unsigned long intid, unsigned long rights);
 long t_irq_wait(long handle);
+long t_mmio_map(long handle, unsigned long vaddr, unsigned long prot);   // P4-Ic2
+
+#define T_PROT_READ       (1u << 0)
+#define T_PROT_WRITE      (1u << 1)
+#define T_PROT_EXEC       (1u << 2)
 ```
 
-Same return semantics: non-negative handle index on success, -1 on error.
+`t_mmio_create` / `t_irq_create`: non-negative handle index on success, -1 on error.
+`t_irq_wait`: collapsed IRQ count (>=1) on success, -1 on error.
+`t_mmio_map`: 0 on success, -1 on error.
 
 ---
 
@@ -319,8 +354,9 @@ The userspace SVC path (caller invokes `t_mmio_create` / `t_irq_create` / `t_irq
 | `handle.c` KOBJ_MMIO + KOBJ_IRQ release wiring | **Landed (P4-Ib)** |
 | Spec `handles.tla` extension | **Landed (P4-Ib)** — 3 invariants + 3 buggy actions + 3 cfg variants |
 | Syscall handlers (MMIO_CREATE, IRQ_CREATE, IRQ_WAIT) | **Landed (P4-Ib)** |
-| `libt` syscall wrappers | **Landed (P4-Ib)** |
-| `kobj_mmio_map_into_user` syscall | **Deferred to P4-Ic** — needs Burrow-type extension for MMIO pages |
+| `libt` syscall wrappers | **Landed (P4-Ib + extended P4-Ic2 with `t_mmio_map`)** |
+| `SYS_MMIO_MAP` syscall + `kobj_mmio_map_into_user` semantics | **Landed (P4-Ic2)** — `BURROW_TYPE_MMIO` (P4-Ic1) + `userland_demand_page` dispatch (P4-Ic2) + device-memory PTE attrs (P4-Ic2) |
+| `mmu_install_user_pte(device_memory)` flag | **Landed (P4-Ic2)** |
 | Cap-grant syscall (parent → child) | **Phase 5+** |
 | Cap-drop syscall (with hw-handle interlock) | **Phase 5+** |
 | 9P-aware `handle_transfer_via_9p` for KOBJ_SPOOR | **Phase 4** (separate sub-chunk) |

@@ -136,7 +136,8 @@ void test_pgtable_install_user_pte_smoke(void) {
 
     // Install RW + R (no exec).
     int rc = mmu_install_user_pte(p->pgtable_root, p->asid,
-                                  USER_VA, backing_pa, VMA_PROT_RW);
+                                  USER_VA, backing_pa, VMA_PROT_RW,
+                                  /*device_memory=*/false);
     TEST_EXPECT_EQ(rc, 0, "install RW PTE should succeed");
 
     u64 pte = walk_to_l3_entry(p->pgtable_root, USER_VA);
@@ -158,7 +159,8 @@ void test_pgtable_install_user_pte_smoke(void) {
     paddr_t code_pa = page_to_pa(alloc_pages(0, KP_ZERO));
     TEST_ASSERT(code_pa != 0, "alloc_pages code backing failed");
     rc = mmu_install_user_pte(p->pgtable_root, p->asid,
-                              USER_VA + ONE_PAGE, code_pa, VMA_PROT_RX);
+                              USER_VA + ONE_PAGE, code_pa, VMA_PROT_RX,
+                              /*device_memory=*/false);
     TEST_EXPECT_EQ(rc, 0, "install RX PTE should succeed");
 
     u64 pte_rx = walk_to_l3_entry(p->pgtable_root, USER_VA + ONE_PAGE);
@@ -178,28 +180,28 @@ void test_pgtable_install_user_pte_constraints(void) {
     TEST_ASSERT(backing_pa != 0, "backing alloc");
 
     // Zero pgtable_root.
-    TEST_EXPECT_EQ(mmu_install_user_pte(0, 0, USER_VA, backing_pa, VMA_PROT_RW), -1,
+    TEST_EXPECT_EQ(mmu_install_user_pte(0, 0, USER_VA, backing_pa, VMA_PROT_RW, false), -1,
         "pgtable_root=0 rejected");
 
     // Unaligned vaddr.
     TEST_EXPECT_EQ(mmu_install_user_pte(p->pgtable_root, p->asid,
-                                        USER_VA + 1, backing_pa, VMA_PROT_RW), -1,
+                                        USER_VA + 1, backing_pa, VMA_PROT_RW, false), -1,
         "unaligned vaddr rejected");
 
     // Unaligned pa.
     TEST_EXPECT_EQ(mmu_install_user_pte(p->pgtable_root, p->asid,
-                                        USER_VA, backing_pa + 1, VMA_PROT_RW), -1,
+                                        USER_VA, backing_pa + 1, VMA_PROT_RW, false), -1,
         "unaligned pa rejected");
 
     // vaddr in TTBR1 high half — installer rejects (top bits set).
     TEST_EXPECT_EQ(mmu_install_user_pte(p->pgtable_root, p->asid,
-                                        0xFFFF000000000000ull, backing_pa, VMA_PROT_RW), -1,
+                                        0xFFFF000000000000ull, backing_pa, VMA_PROT_RW, false), -1,
         "high-VA vaddr rejected");
 
     // W+X prot.
     TEST_EXPECT_EQ(mmu_install_user_pte(p->pgtable_root, p->asid,
                                         USER_VA, backing_pa,
-                                        VMA_PROT_READ | VMA_PROT_WRITE | VMA_PROT_EXEC), -1,
+                                        VMA_PROT_READ | VMA_PROT_WRITE | VMA_PROT_EXEC, false), -1,
         "W+X rejected at PTE installer (defense-in-depth)");
 
     drop_proc(p);
@@ -213,7 +215,8 @@ void test_pgtable_install_user_pte_idempotent(void) {
 
     // First install.
     int rc = mmu_install_user_pte(p->pgtable_root, p->asid,
-                                  USER_VA, backing_pa, VMA_PROT_RW);
+                                  USER_VA, backing_pa, VMA_PROT_RW,
+                                  /*device_memory=*/false);
     TEST_EXPECT_EQ(rc, 0, "first install ok");
 
     // Snapshot free pages — second identical install must not allocate
@@ -221,7 +224,7 @@ void test_pgtable_install_user_pte_idempotent(void) {
     u64 free_before_second = phys_free_pages();
 
     rc = mmu_install_user_pte(p->pgtable_root, p->asid,
-                              USER_VA, backing_pa, VMA_PROT_RW);
+                              USER_VA, backing_pa, VMA_PROT_RW, false);
     TEST_EXPECT_EQ(rc, 0, "idempotent second install returns 0");
     TEST_EXPECT_EQ(phys_free_pages(), free_before_second,
         "no buddy alloc on idempotent re-install");
@@ -230,7 +233,7 @@ void test_pgtable_install_user_pte_idempotent(void) {
     paddr_t other_pa = page_to_pa(alloc_pages(0, KP_ZERO));
     TEST_ASSERT(other_pa != 0, "other backing alloc");
     rc = mmu_install_user_pte(p->pgtable_root, p->asid,
-                              USER_VA, other_pa, VMA_PROT_RW);
+                              USER_VA, other_pa, VMA_PROT_RW, false);
     TEST_EXPECT_EQ(rc, -1, "mismatching install rejected");
 
     drop_proc(p);

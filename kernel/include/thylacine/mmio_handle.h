@@ -52,6 +52,30 @@ struct KObj_MMIO {
 // extincts on re-call.
 void kobj_mmio_init(void);
 
+// R10 F154 (P1) close: pre-reserve PA ranges owned by kernel-internal
+// callers (those that call `mmu_map_mmio` directly, bypassing
+// `kobj_mmio_create`'s claim layer). Without this, a userspace caller
+// with `CAP_HW_CREATE` (granted at P4-Ic5+ for drivers) could call
+// `t_mmio_create(pa=GIC_DISTRIBUTOR_PA, ...)` — succeeds because the
+// kernel-owned range isn't in `g_mmio_claims` — and then `t_mmio_map`
+// installs user-VA PTEs pointing at the GIC. Driver writes to GICD_*
+// registers from userspace → break kernel IRQ delivery (privilege
+// escalation; mirror of R9 F142 but on the MMIO side).
+//
+// Reservation walks the DTB for compatibles known to be kernel-claimed
+// (GICv3 distributor + redistributor, PL011 UART, ECAM PCIe root,
+// VirtIO MMIO transports) and inserts each into `g_mmio_claims[]` with
+// a sentinel owner so subsequent `kobj_mmio_create` for overlapping
+// PAs return NULL.
+//
+// Must be called AFTER `kobj_mmio_init` (it modifies `g_mmio_claims`)
+// AND AFTER `dtb_init` (it walks DTB compatibles).
+void kobj_mmio_reserve_kernel_ranges(void);
+
+// Diagnostic: how many kernel-reserved slots are currently held.
+// Useful for boot banner observability + tests.
+int kobj_mmio_kernel_reserved_count(void);
+
 // Allocate a fresh KObj_MMIO claiming the PA range [pa, pa+size).
 // Returns NULL on:
 //   - pa or size not page-aligned (pa % PAGE_SIZE != 0; size % PAGE_SIZE != 0).

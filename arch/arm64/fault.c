@@ -303,16 +303,37 @@ enum fault_result userland_demand_page(struct Proc *p,
     if (vma->burrow->magic != VMO_MAGIC)    return FAULT_UNHANDLED_USER;
     if (burrow_byte_off >= vma->burrow->size)  return FAULT_UNHANDLED_USER;
 
-    // 4. Resolve to a backing PA. v1.0 anonymous BURROW: burrow->pages is the
-    //    head of a contiguous alloc_pages chunk; page i is at
-    //    page_to_pa(burrow->pages) + i * PAGE_SIZE.
-    if (!vma->burrow->pages)                return FAULT_UNHANDLED_USER;
-    paddr_t burrow_base_pa = page_to_pa(vma->burrow->pages);
-    paddr_t page_pa     = burrow_base_pa + (burrow_byte_off & ~(u64)(PAGE_SIZE - 1));
+    // 4. Resolve to a backing PA. P4-Ic2: dispatch on burrow type.
+    //    - BURROW_TYPE_ANON: pages is the head of a contiguous alloc_pages
+    //      chunk; page i is at page_to_pa(pages) + i * PAGE_SIZE.
+    //      PTE attrs are MAIR_IDX_NORMAL_WB (cacheable RAM).
+    //    - BURROW_TYPE_MMIO: pa is the device PA (page-aligned, fixed);
+    //      page i is at burrow->pa + i * PAGE_SIZE.
+    //      PTE attrs are MAIR_IDX_DEVICE (nGnRnE).
+    paddr_t page_pa;
+    bool    device_memory;
+    switch (vma->burrow->type) {
+    case BURROW_TYPE_ANON:
+        if (!vma->burrow->pages)            return FAULT_UNHANDLED_USER;
+        page_pa = page_to_pa(vma->burrow->pages) +
+                  (burrow_byte_off & ~(u64)(PAGE_SIZE - 1));
+        device_memory = false;
+        break;
+    case BURROW_TYPE_MMIO:
+        if (!vma->burrow->kobj_mmio)        return FAULT_UNHANDLED_USER;
+        page_pa = vma->burrow->pa +
+                  (burrow_byte_off & ~(u64)(PAGE_SIZE - 1));
+        device_memory = true;
+        break;
+    case BURROW_TYPE_INVALID:
+    default:
+        return FAULT_UNHANDLED_USER;
+    }
 
     // 5. Install the leaf PTE in the per-Proc TTBR0 tree.
     int rc = mmu_install_user_pte(p->pgtable_root, p->asid,
-                                  page_va, page_pa, vma->prot);
+                                  page_va, page_pa, vma->prot,
+                                  device_memory);
     if (rc != 0)                         return FAULT_UNHANDLED_USER;
 
     return FAULT_HANDLED;

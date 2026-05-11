@@ -36,7 +36,14 @@ enum {
     T_SYS_MMIO_CREATE = 2,  // P4-Ib: create KObj_MMIO handle
     T_SYS_IRQ_CREATE  = 3,  // P4-Ib: create KObj_IRQ handle
     T_SYS_IRQ_WAIT    = 4,  // P4-Ib: block until IRQ fires
+    T_SYS_MMIO_MAP    = 5,  // P4-Ic2: map KObj_MMIO into user-VA
 };
+
+// VMA prot bits — MUST mirror kernel/include/thylacine/vma.h's
+// VMA_PROT_* values. Used as the 3rd argument to t_mmio_map.
+#define T_PROT_READ       (1u << 0)
+#define T_PROT_WRITE      (1u << 1)
+#define T_PROT_EXEC       (1u << 2)
 
 // Rights bits. MUST mirror kernel/include/thylacine/handle.h.
 #define T_RIGHT_READ      (1u << 0)
@@ -139,6 +146,32 @@ static inline long t_irq_wait(long h) {
         "svc #0"
         : "+r"(x0)
         : "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
+// t_mmio_map — install a user-VA mapping for a KObj_MMIO handle. The
+// PTEs are installed lazily on first access (demand-paging). Returns 0
+// on success, -1 on:
+//   - cap-missing (defense)
+//   - bad handle (range, wrong kind, missing T_RIGHT_MAP)
+//   - prot exceeds rights / EXEC requested / prot == 0
+//   - vaddr unaligned / overflow / overlaps existing VMA
+//   - OOM
+//
+// Pinned by specs/handles.tla::HwHandleImpliesCap (cap held) +
+// specs/burrow.tla::NoUseAfterFree (Burrow lifecycle bound to VMA).
+__attribute__((always_inline))
+static inline long t_mmio_map(long h, unsigned long vaddr, unsigned long prot) {
+    register long x0 __asm__("x0") = h;
+    register long x1 __asm__("x1") = (long)vaddr;
+    register long x2 __asm__("x2") = (long)prot;
+    register long x8 __asm__("x8") = T_SYS_MMIO_MAP;
+    __asm__ volatile (
+        "svc #0"
+        : "+r"(x0)
+        : "r"(x1), "r"(x2), "r"(x8)
         : "memory", "cc"
     );
     return x0;

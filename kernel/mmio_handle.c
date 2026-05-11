@@ -12,6 +12,7 @@
 // context. No nested-lock paths (no other locks taken under
 // g_mmio_lock); held only for the constant-time scan + insert/release.
 
+#include <thylacine/dtb.h>           // R10 F154: DTB compat lookup
 #include <thylacine/extinction.h>
 #include <thylacine/mmio_handle.h>
 #include <thylacine/page.h>
@@ -114,6 +115,14 @@ static int find_slot_by_owner(struct KObj_MMIO *k) {
 // Lifecycle.
 // =============================================================================
 
+// R10 F154 (P1) close: sentinel value for slots reserved by the kernel
+// for its own MMIO use (not user-allocated). `find_slot_by_owner` won't
+// match against this sentinel (callers pass real KObj_MMIO pointers);
+// `ranges_overlap` doesn't care about ownership — it only checks for
+// PA overlap, which is what blocks user `kobj_mmio_create` from
+// claiming kernel ranges.
+#define KOBJ_MMIO_KERNEL_RESERVED  ((struct KObj_MMIO *)0x1)
+
 struct KObj_MMIO *kobj_mmio_create(u64 pa, size_t size) {
     if (!g_mmio_initialized)              return NULL;
     if (size == 0)                        return NULL;
@@ -121,6 +130,15 @@ struct KObj_MMIO *kobj_mmio_create(u64 pa, size_t size) {
     if ((size & (PAGE_SIZE - 1)) != 0)    return NULL;
     // Overflow check: pa + size must not wrap.
     if (size > (u64)-1 - pa)              return NULL;
+    // R10 F156 (P2) close: PA range must fit in TCR.IPS = 40 bits.
+    // Without this check, a userspace caller with CAP_HW_CREATE could
+    // pass an out-of-IPS PA; `kobj_mmio_create` would succeed, but
+    // `mmu_install_user_pte` later rejects (mmu.c:1099) on demand-page,
+    // returning FAULT_UNHANDLED_USER → kernel extinction. Reject at
+    // the syscall entry point instead so a malformed userspace request
+    // gets a clean -1 instead of a kernel termination. Mirrors
+    // `mmu_map_mmio`'s IPS check at mmu.c:668.
+    if ((pa + size - 1) >> 40)            return NULL;
 
     struct KObj_MMIO *k = kmalloc(sizeof(*k), KP_ZERO);
     if (!k) return NULL;
@@ -247,4 +265,146 @@ void kobj_mmio_unref(struct KObj_MMIO *k) {
 
 void kobj_mmio_destroy(struct KObj_MMIO *k) {
     kobj_mmio_unref(k);
+}
+
+// =============================================================================
+// R10 F154 (P1) close: kernel-MMIO reservation.
+// =============================================================================
+//
+// Pre-claim PA ranges that the kernel uses directly (via mmu_map_mmio +
+// the direct-map / vmalloc paths) so userspace `kobj_mmio_create` for
+// overlapping PAs returns NULL. Each reservation occupies a slot in
+// g_mmio_claims with a sentinel `owner = KOBJ_MMIO_KERNEL_RESERVED`;
+// `ranges_overlap` rejects any subsequent overlapping create regardless
+// of which proc requests it.
+
+// Helper: insert one (pa, size) into g_mmio_claims as kernel-reserved.
+// Caller is in boot-time context; we don't bother with the spinlock
+// (single-CPU boot, no other claim path is active yet).
+//
+// Page-aligns the range (MMU works at PTE granularity) and DEDUPES
+// against existing reservations — multiple sub-page entries that
+// expand to the same page (e.g., QEMU virt has 8 virtio,mmio slots
+// per page, spaced 0x200 apart) collapse to one reservation.
+//
+// Extincts on table-full because the static slot count is sized
+// assuming kernel reservations + a few driver claims fit comfortably;
+// an exhausted table at boot is a system-design error worth screaming
+// about.
+static void reserve_kernel_range(u64 pa, size_t size, const char *what) {
+    if (size == 0)                              return;
+    // Page-align: kernel may register a sub-page range (e.g. some MMIO
+    // is < 4 KiB). Round outward to page boundaries so the claim
+    // covers the full range the MMU has mapped.
+    u64 aligned_pa  = pa & ~(u64)(PAGE_SIZE - 1);
+    u64 end         = pa + size;
+    u64 aligned_end = (end + PAGE_SIZE - 1) & ~(u64)(PAGE_SIZE - 1);
+    size_t aligned_size = (size_t)(aligned_end - aligned_pa);
+
+    // Dedupe: if the page-aligned range already overlaps a prior
+    // reservation, skip. ranges_overlap is the same predicate
+    // kobj_mmio_create uses, so the dedupe semantics are exact.
+    if (ranges_overlap(aligned_pa, aligned_size)) return;
+
+    int slot = -1;
+    for (int i = 0; i < KOBJ_MMIO_MAX; i++) {
+        if (!g_mmio_claims[i].owner) { slot = i; break; }
+    }
+    if (slot < 0) {
+        extinction("kobj_mmio_reserve_kernel_ranges: g_mmio_claims full "
+                   "(KOBJ_MMIO_MAX too small for kernel reservations + driver headroom)");
+    }
+    g_mmio_claims[slot].owner = KOBJ_MMIO_KERNEL_RESERVED;
+    g_mmio_claims[slot].pa    = aligned_pa;
+    g_mmio_claims[slot].size  = aligned_size;
+
+    uart_puts("  kobj_mmio: reserved kernel range ");
+    uart_puts(what);
+    uart_puts(" PA=");
+    uart_puthex64(aligned_pa);
+    uart_puts(" size=");
+    uart_puthex64((u64)aligned_size);
+    uart_puts("\n");
+}
+
+// Try to reserve a single DTB compatible's reg range, if present.
+// Silently no-ops on DTB-absent (some compatibles may not exist on every
+// platform — e.g., pci-host-ecam-generic isn't present on QEMU virt
+// before -machine virt,gic-version=3 was added; we don't extinct on
+// missing entries).
+static void reserve_compat(const char *compat) {
+    u64 pa = 0, size = 0;
+    if (!dtb_get_compat_reg(compat, &pa, &size)) return;
+    reserve_kernel_range(pa, (size_t)size, compat);
+}
+
+// Callback for dtb_for_each_compat_reg used to enumerate all VirtIO MMIO
+// transports. match_idx unused (we name each slot uniformly).
+static int reserve_virtio_mmio_cb(u32 match_idx, u64 reg_base,
+                                  u64 reg_size, void *arg) {
+    (void)match_idx; (void)arg;
+    reserve_kernel_range(reg_base, (size_t)reg_size, "virtio,mmio");
+    return 0;
+}
+
+void kobj_mmio_reserve_kernel_ranges(void) {
+    if (!g_mmio_initialized) {
+        extinction("kobj_mmio_reserve_kernel_ranges before kobj_mmio_init");
+    }
+
+    // GIC v3: distributor + redistributor + (optional) ITS. Two reg
+    // pairs at the same node; we reserve both via dtb_get_compat_reg_n.
+    u64 gic_pa = 0, gic_size = 0;
+    if (dtb_get_compat_reg_n("arm,gic-v3", 0, &gic_pa, &gic_size)) {
+        reserve_kernel_range(gic_pa, (size_t)gic_size, "arm,gic-v3 dist");
+    }
+    if (dtb_get_compat_reg_n("arm,gic-v3", 1, &gic_pa, &gic_size)) {
+        reserve_kernel_range(gic_pa, (size_t)gic_size, "arm,gic-v3 redist");
+    }
+    // GIC v2 fallback (some platforms): two reg pairs (distributor +
+    // cpu-interface). At v1.0 QEMU virt is v3; v2 reservation is
+    // forward-compat for platforms that downshift.
+    if (dtb_get_compat_reg_n("arm,cortex-a15-gic", 0, &gic_pa, &gic_size)) {
+        reserve_kernel_range(gic_pa, (size_t)gic_size, "gic-v2 dist");
+    }
+    if (dtb_get_compat_reg_n("arm,cortex-a15-gic", 1, &gic_pa, &gic_size)) {
+        reserve_kernel_range(gic_pa, (size_t)gic_size, "gic-v2 cpu-iface");
+    }
+
+    // PL011 UART: kernel diagnostic console. A userspace driver could
+    // not legitimately claim this and userspace-driven UART access
+    // would corrupt the kernel's UART register state (clobber the
+    // boot banner ABI, EXTINCTION delivery, etc.).
+    reserve_compat("arm,pl011");
+
+    // PCIe ECAM: kernel uses for VirtIO PCI enumeration (P4-H). The
+    // ECAM mapping is per-bus; we reserve the WHOLE ECAM range (typically
+    // 256 MiB on QEMU virt). Drivers should use individual VirtIO PCI
+    // device handles, not raw ECAM.
+    reserve_compat("pci-host-ecam-generic");
+
+    // VirtIO MMIO transports: enumerate all matching nodes. QEMU virt
+    // publishes 32 virtio_mmio@<addr> nodes; the kernel probes them
+    // in P4-F (virtio.c). User drivers should NOT raw-claim these PA
+    // ranges; the P4-Ic5+ driver model will lift specific
+    // VirtIO-device claims out of this reservation via a higher-level
+    // API (KOBJ_VIRTIO_DEV or similar).
+    //
+    // NOTE: dtb_get_compat_reg_n's idx selects the n-th reg PAIR
+    // WITHIN one node, not the n-th matching node. For per-node
+    // enumeration we use dtb_for_each_compat_reg (P4-F's helper),
+    // which calls a callback per matching node.
+    (void)dtb_for_each_compat_reg("virtio,mmio",
+                                   reserve_virtio_mmio_cb,
+                                   NULL);
+}
+
+int kobj_mmio_kernel_reserved_count(void) {
+    int n = 0;
+    irq_state_t s = spin_lock_irqsave(&g_mmio_lock);
+    for (int i = 0; i < KOBJ_MMIO_MAX; i++) {
+        if (g_mmio_claims[i].owner == KOBJ_MMIO_KERNEL_RESERVED) n++;
+    }
+    spin_unlock_irqrestore(&g_mmio_lock, s);
+    return n;
 }

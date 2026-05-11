@@ -339,6 +339,15 @@ void boot_main(void) {
     // BEFORE any user-driven kobj_irq_create.
     irqfwd_init();
 
+    // P4-Ic2 R10 F154: reserve kernel-owned MMIO PA ranges in
+    // g_mmio_claims so that subsequent kobj_mmio_create (via
+    // SYS_MMIO_CREATE / SYS_MMIO_MAP from a userspace driver) can't
+    // claim PA ranges that the kernel uses directly (GIC, PL011,
+    // ECAM, VirtIO MMIO). Mirrors irqfwd_init's pattern. Must run
+    // AFTER kobj_mmio_init + dtb_init + after the kernel has mapped
+    // its own MMIO (so we know the full claim set).
+    kobj_mmio_reserve_kernel_ranges();
+
     // P4-H: VirtIO PCIe enumeration. Probes the DTB-described PCIe
     // ECAM (pci-host-ecam-generic), maps bus 0's config space via
     // mmu_map_mmio, walks (dev, fn) on bus 0, and records every

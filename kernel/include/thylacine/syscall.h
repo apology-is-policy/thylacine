@@ -44,6 +44,12 @@ enum {
     SYS_MMIO_CREATE = 2,    // arg: pa (x0), size (x1), rights (x2)
     SYS_IRQ_CREATE  = 3,    // arg: intid (x0), rights (x1)
     SYS_IRQ_WAIT    = 4,    // arg: handle (x0)
+    // P4-Ic2: install a user-VA mapping for a KObj_MMIO handle. arg:
+    // handle (x0), vaddr (x1), prot (x2). The Burrow + VMA carry the
+    // KObj_MMIO ref so the mapping lifetime is bound to the proc's
+    // address space (proc exit → VMA tear-down → burrow_release_mapping
+    // → final unref of the kobj_mmio).
+    SYS_MMIO_MAP    = 5,    // arg: handle (x0), vaddr (x1), prot (x2)
 };
 
 struct exception_context;

@@ -6,6 +6,7 @@
 // surface; each syscall lands in its own TU.
 
 #include <thylacine/syscall.h>
+#include <thylacine/burrow.h>
 #include <thylacine/caps.h>
 #include <thylacine/extinction.h>
 #include <thylacine/handle.h>
@@ -14,6 +15,7 @@
 #include <thylacine/proc.h>
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
+#include <thylacine/vma.h>
 
 #include "../arch/arm64/exception.h"
 #include "../arch/arm64/uart.h"
@@ -248,6 +250,89 @@ static s64 sys_irq_wait_handler(u64 hraw) {
 }
 
 // =============================================================================
+// SYS_MMIO_MAP — install a user-VA mapping for a KObj_MMIO handle (P4-Ic2).
+// =============================================================================
+//
+// AArch64 ABI: x0 = handle index, x1 = vaddr, x2 = prot.
+//
+// Validates the handle (KOBJ_MMIO + RIGHT_MAP), bounds the requested
+// prot by the handle's rights (a holder without RIGHT_WRITE can't map
+// RW), creates a BURROW_TYPE_MMIO Burrow wrapping the KObj_MMIO,
+// installs a VMA via burrow_map, and drops the construction reference
+// (transferring ownership to the VMA's mapping ref). The actual PTE
+// installation happens lazily via userland_demand_page on first access.
+//
+// Returns 0 on success, -1 on:
+//   - NULL Proc / corrupted Proc (handler entry guard)
+//   - cap-missing CAP_HW_CREATE (defense-in-depth — spec invariant
+//     HwHandleImpliesCap already requires the cap to hold the handle)
+//   - bad handle (out of range, wrong kind, missing RIGHT_MAP)
+//   - prot exceeds handle rights (e.g., WRITE without RIGHT_WRITE)
+//   - prot has EXEC set (MMIO is not executable; ARM ARM B2.7.2)
+//   - prot == 0 (must have at least READ)
+//   - burrow_create_mmio OOM
+//   - burrow_map failure (overlap with existing VMA, vaddr misalign,
+//     overflow, SLUB OOM for the Vma struct)
+static s64 sys_mmio_map_handler(u64 hraw, u64 vaddr, u64 prot_raw) {
+    struct Thread *t = current_thread();
+    if (!t)                                          return -1;
+    struct Proc *p = t->proc;
+    if (!p)                                          return -1;
+
+    // Defense-in-depth: hw-handle ownership implies CAP_HW_CREATE per
+    // spec invariant HwHandleImpliesCap. If a future path violates the
+    // invariant (handle held without cap), the syscall layer catches
+    // it before the mapping is installed.
+    if ((__atomic_load_n(&p->caps, __ATOMIC_ACQUIRE) & CAP_HW_CREATE) == 0)
+        return -1;
+
+    struct Handle *slot = handle_get(p, (hidx_t)hraw);
+    if (!slot)                                       return -1;
+    if (slot->kind != KOBJ_MMIO)                     return -1;
+    if ((slot->rights & RIGHT_MAP) == 0)             return -1;
+
+    // Bound requested prot by the handle's rights. R+W → handle must
+    // have RIGHT_WRITE; R → handle must have RIGHT_READ. EXEC is
+    // rejected entirely for MMIO mappings (device-memory PTEs aren't
+    // architecturally executable in a useful way).
+    u32 prot = (u32)prot_raw;
+    if (prot == 0)                                   return -1;
+    if (prot & ~(u32)(VMA_PROT_READ | VMA_PROT_WRITE)) return -1;
+    if ((prot & VMA_PROT_WRITE) && !(slot->rights & RIGHT_WRITE)) return -1;
+    if ((prot & VMA_PROT_READ)  && !(slot->rights & RIGHT_READ))  return -1;
+
+    // R10 F155 (P2) close: AArch64 has no write-only AP encoding
+    // (AP[2:1] = {00=RW EL1, 01=RW any, 10=RO EL1, 11=RO any} — no
+    // W-only state per ARM ARM D5.4.1). A `prot=VMA_PROT_WRITE` only
+    // request would result in a fully-RW PTE, breaking the rights
+    // claim ("caller can write but not read this device"). Reject
+    // the construct so the rights model and the actual PTE always
+    // agree. Drivers that want write access MUST request R+W.
+    if ((prot & VMA_PROT_WRITE) && !(prot & VMA_PROT_READ)) return -1;
+
+    struct KObj_MMIO *km = (struct KObj_MMIO *)slot->obj;
+    if (!km)                                         return -1;
+    if (km->magic != KOBJ_MMIO_MAGIC)                return -1;
+
+    // Create the Burrow. handle_count=1 is the construction reference.
+    struct Burrow *b = burrow_create_mmio(km);
+    if (!b)                                          return -1;
+
+    // Install the VMA via burrow_map. On success, mapping_count is
+    // incremented (matches anon flow); we then drop the construction
+    // reference, transferring ownership to the VMA. On failure, drop
+    // the construction reference which (since mapping_count is still
+    // 0) triggers burrow_free_internal and releases the kobj_mmio ref.
+    int rc = burrow_map(p, b, vaddr, km->size, prot);
+    if (rc < 0) {
+        burrow_unref(b);
+        return -1;
+    }
+    burrow_unref(b);
+    return 0;
+}
+
+// =============================================================================
 // Dispatch entry.
 // =============================================================================
 
@@ -278,6 +363,12 @@ void syscall_dispatch(struct exception_context *ctx) {
 
     case SYS_IRQ_WAIT:
         ctx->regs[0] = (u64)sys_irq_wait_handler(ctx->regs[0]);
+        return;
+
+    case SYS_MMIO_MAP:
+        ctx->regs[0] = (u64)sys_mmio_map_handler(ctx->regs[0],
+                                                 ctx->regs[1],
+                                                 ctx->regs[2]);
         return;
 
     default:

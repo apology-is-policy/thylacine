@@ -215,6 +215,8 @@ void test_mmio_handle_create_overlap_rejected(void);
 void test_mmio_handle_create_adjacent_ok(void);
 void test_mmio_handle_create_unref_releases_slot(void);
 void test_mmio_handle_double_unref_extincts(void);
+void test_mmio_handle_create_kernel_reserved_rejected(void);
+void test_mmio_handle_create_out_of_ips_rejected(void);
 void test_handle_hw_mmio_dup_rejected(void);
 void test_handle_hw_irq_dup_rejected(void);
 void test_handle_hw_mmio_close_releases_claim(void);
@@ -226,6 +228,9 @@ void test_burrow_mmio_create_holds_kobj_ref(void);
 void test_burrow_mmio_unref_releases_kobj_ref(void);
 void test_burrow_mmio_acquire_mapping_works(void);
 void test_burrow_mmio_lifecycle_round_trip(void);
+void test_mmio_map_install_vma(void);
+void test_mmio_map_overlap_rejected(void);
+void test_mmio_map_proc_free_releases_kobj(void);
 
 // ---------------------------------------------------------------------------
 // Registry. Sentinel-terminated.
@@ -484,6 +489,12 @@ struct test_case g_tests[] = {
     { "mmio_handle.live_count_round_trip",
                                        test_mmio_handle_double_unref_extincts,
                                                                            false, NULL },
+    { "mmio_handle.kernel_reserved_rejected",
+                                       test_mmio_handle_create_kernel_reserved_rejected,
+                                                                           false, NULL },
+    { "mmio_handle.out_of_ips_rejected",
+                                       test_mmio_handle_create_out_of_ips_rejected,
+                                                                           false, NULL },
     { "handle_hw.mmio_dup_rejected",   test_handle_hw_mmio_dup_rejected,   false, NULL },
     { "handle_hw.irq_dup_rejected",    test_handle_hw_irq_dup_rejected,    false, NULL },
     { "handle_hw.mmio_close_releases_claim",
@@ -506,6 +517,10 @@ struct test_case g_tests[] = {
                                        test_burrow_mmio_acquire_mapping_works, false, NULL },
     { "burrow_mmio.lifecycle_round_trip",
                                        test_burrow_mmio_lifecycle_round_trip, false, NULL },
+    { "mmio_map.install_vma",          test_mmio_map_install_vma,          false, NULL },
+    { "mmio_map.overlap_rejected",     test_mmio_map_overlap_rejected,     false, NULL },
+    { "mmio_map.proc_free_releases_kobj",
+                                       test_mmio_map_proc_free_releases_kobj, false, NULL },
     { NULL, NULL, false, NULL },          // sentinel
 };
 

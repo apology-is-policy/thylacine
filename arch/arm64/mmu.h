@@ -390,7 +390,14 @@ void    proc_pgtable_destroy(paddr_t root);
 // that need an ASID-targeted TLB invalidate.
 // =============================================================================
 
+// P4-Ic2: device_memory selects the PTE MAIR attribute index —
+// MAIR_IDX_NORMAL_WB for cacheable RAM (anonymous Burrows) vs
+// MAIR_IDX_DEVICE (device-nGnRnE) for MMIO device registers. False
+// for BURROW_TYPE_ANON; true for BURROW_TYPE_MMIO. The flag also
+// disables instruction-fetch-meaningfulness (device-memory PTEs
+// shouldn't be EXEC; the VMA layer rejects W^X violations already).
 int mmu_install_user_pte(paddr_t pgtable_root, u16 asid,
-                         u64 vaddr, paddr_t pa, u32 prot);
+                         u64 vaddr, paddr_t pa, u32 prot,
+                         bool device_memory);
 
 #endif // THYLACINE_ARCH_ARM64_MMU_H

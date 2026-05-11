@@ -297,8 +297,8 @@ The struct contains `enum burrow_type` whose underlying integer type is implemen
 | `burrow_create_physical` (BURROW_TYPE_PHYS) for DMA buffers | Post-v1.0 (separate from MMIO) |
 | `BURROW_TYPE_FILE` (Stratum page cache) | Post-v1.0 |
 | PTE installation (demand paging) for ANON | **Landed (P3-Dc)** — `userland_demand_page` in arch/arm64/fault.c |
-| PTE installation for MMIO (device-memory PTE attrs) | **P4-Ic2** — wire `userland_demand_page` to dispatch on `vma->burrow->type`; extend `mmu_install_user_pte` to accept device-memory flag |
-| `kobj_mmio_map_into_user` syscall | **P4-Ic2** — calls `burrow_create_mmio` + `burrow_map`; first userspace MMIO mapping path |
+| PTE installation for MMIO (device-memory PTE attrs) | **Landed (P4-Ic2)** — `userland_demand_page` dispatches on `vma->burrow->type`; `mmu_install_user_pte` accepts `bool device_memory` flag |
+| `SYS_MMIO_MAP` syscall | **Landed (P4-Ic2)** — calls `burrow_create_mmio` + `burrow_map`; PTEs install lazily via demand-page |
 | Partial unmap (sub-range of an existing VMA) | Post-v1.0 |
 | Atomic refcount ops (SMP) | Phase 5+ |
 

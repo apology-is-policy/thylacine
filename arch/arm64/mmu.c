@@ -1042,10 +1042,44 @@ paddr_t proc_pgtable_create(void) {
 //
 // W^X (I-12) holds by construction: only RX has UXN clear, and RX is
 // AP_RO_ANY (not writable). RW + EXEC is rejected at the VMA layer.
-static inline u64 make_user_pte_l3(paddr_t pa, u32 prot) {
+static inline u64 make_user_pte_l3(paddr_t pa, u32 prot, bool device_memory) {
+    // R10 F157 (P3) close: EXEC + device-memory is architecturally
+    // meaningless (ARM ARM B2.7.2: instruction fetch from device-nGnRnE
+    // is implementation-defined). The syscall layer already rejects
+    // EXEC on MMIO mappings (sys_mmio_map_handler in kernel/syscall.c
+    // limits prot to R|W). This is defense-in-depth at the PTE
+    // encoder: a future kernel-internal caller that bypasses the
+    // syscall layer (e.g., direct burrow_map with VMA_PROT_RX on a
+    // MMIO Burrow) gets a hard extinction here rather than producing
+    // a UB device-EXEC PTE.
+    if (device_memory && (prot & VMA_PROT_EXEC)) {
+        extinction("make_user_pte_l3: EXEC + device_memory rejected "
+                   "(arch-meaningless per ARM ARM B2.7.2)");
+    }
+    // P4-Ic2: device_memory selects the MAIR attribute index.
+    //   normal-WB (MAIR_IDX_NORMAL_WB) — cacheable RAM. Default for
+    //     anonymous Burrows (BURROW_TYPE_ANON).
+    //   device-nGnRnE (MAIR_IDX_DEVICE) — non-Gathering, non-Reordering,
+    //     non-Early-write-acknowledge. Required for MMIO device
+    //     registers so the CPU doesn't merge / reorder / coalesce
+    //     accesses. Used for BURROW_TYPE_MMIO mappings.
+    //
+    // For device memory, the SH (shareability) bits are architecturally
+    // ignored by the MMU (ARM ARM D5.2.5) but we still set SH_INNER for
+    // consistency with the rest of our PTE encoding.
+    //
+    // Device memory pages are NEVER executable — drivers map MMIO
+    // for register access, not instruction fetch. We force UXN unless
+    // the caller explicitly requests EXEC, but VMA_PROT_EXEC on a
+    // device PTE is meaningless (instruction fetch from device-nGnRnE
+    // memory is implementation-defined per ARM ARM B2.7.2). The VMA
+    // layer should reject EXEC on MMIO mappings; this PTE encoder
+    // accepts it (UXN cleared) but the downstream behavior is
+    // undefined and shouldn't be relied on.
+    u32 attr_idx = device_memory ? MAIR_IDX_DEVICE : MAIR_IDX_NORMAL_WB;
     u64 pte = (pa & ~(PAGE_SIZE - 1)) |
               PTE_VALID | PTE_TYPE_PAGE |
-              PTE_ATTR_IDX(MAIR_IDX_NORMAL_WB) |
+              PTE_ATTR_IDX(attr_idx) |
               PTE_SH_INNER |
               PTE_AF |
               PTE_NG |
@@ -1062,18 +1096,22 @@ static inline u64 make_user_pte_l3(paddr_t pa, u32 prot) {
 }
 
 int mmu_install_user_pte(paddr_t pgtable_root, u16 asid,
-                         u64 vaddr, paddr_t pa, u32 prot) {
+                         u64 vaddr, paddr_t pa, u32 prot,
+                         bool device_memory) {
     (void)asid;       // reserved for replace-PTE paths
 
     // Argument validation.
     if (pgtable_root == 0)               return -1;
     if (vaddr & (PAGE_SIZE - 1))         return -1;
     if (pa & (PAGE_SIZE - 1))            return -1;
-    // VA must be in the TTBR0 user-half (top 16 bits = 0). High-VA
-    // (TTBR1) translation goes through the kernel page tables, not the
-    // per-Proc tree; installing a "user" PTE at a high VA would corrupt
-    // semantics.
-    if (vaddr >> 48)                     return -1;
+    // VA must be in the TTBR0 user-half. With 48-bit VAs and no TBI,
+    // valid user-VAs are bits 47..0 with bit 47 forced to 0 (the
+    // TTBR-selector mirror rule: bits 63..47 must be all-0 for TTBR0
+    // or all-1 for TTBR1). R10 F158 (P3) close: tightened from
+    // `vaddr >> 48 != 0` (which let bit-47=1 vaddrs through, producing
+    // PTEs in the per-Proc tree at addresses the MMU would never walk
+    // → fault storm on first access) to `vaddr >> 47 != 0`.
+    if (vaddr >> 47)                     return -1;
     // PA must fit in TCR.IPS = 40-bit (mirrors mmu_map_mmio's R6-B F118).
     if (pa >> 40)                        return -1;
     // VMA layer rejects W+X already; defense-in-depth duplicate check.
@@ -1132,7 +1170,7 @@ int mmu_install_user_pte(paddr_t pgtable_root, u16 asid,
 
     // L3 leaf install.
     u64 *l3 = (u64 *)pa_to_kva(l3_pa);
-    u64 want = make_user_pte_l3(pa, prot);
+    u64 want = make_user_pte_l3(pa, prot, device_memory);
     u64 existing = l3[idx3];
     if (existing & PTE_VALID) {
         // Already mapped. If matching, the install is idempotent (a
