@@ -17,7 +17,14 @@
 #                                   R10 F159 (SVC-path test coverage
 #                                   for SYS_IRQ_CREATE + SYS_IRQ_WAIT).
 #                                   Companion to mmio-probe.
-#   (P4-Ic5b+ will add the full virtio-blk driver crate.)
+#   - virtio-blk-probe  (P4-Ic5b2) — first composed userspace driver.
+#                                   Drives QEMU virt's virtio-blk-device
+#                                   via the MMIO transport: claims slot
+#                                   + DMA buf + IRQ; runs VirtIO 1.2 init;
+#                                   issues VIRTIO_BLK_T_IN(sector=0);
+#                                   verifies block 0 signature against
+#                                   the on-disk pattern produced by
+#                                   tools/build.sh disk.
 #
 # Build via tools/build.sh userspace (preferred) or directly from this
 # directory:
@@ -28,7 +35,7 @@
 
 [workspace]
 resolver = "2"
-members = ["lib/libthyla-rs", "hello-rs", "mmio-probe", "irq-probe"]
+members = ["lib/libthyla-rs", "hello-rs", "mmio-probe", "irq-probe", "virtio-blk-probe"]
 
 [workspace.package]
 edition = "2021"

@@ -519,6 +519,41 @@ bool gic_enable_irq(u32 intid) {
     return true;
 }
 
+bool gic_set_spi_edge_triggered(u32 intid) {
+    // P4-Ic5b2: configure a specific SPI to be edge-triggered (rising
+    // edge). GIC init defaults all SPIs to level-triggered (ICFGR = 0,
+    // per gic_init), which is the safer default for unknown signalling
+    // patterns. Devices that genuinely use edge — QEMU virt's
+    // virtio-mmio bus is the canonical case (DTB declares
+    // `interrupts = <SPI N IRQ_TYPE_EDGE_RISING>` per
+    // hw/arm/virt.c::create_virtio_devices) — call this from their
+    // IRQ-claim path to flip ICFGR to 0b10 for the specific INTID.
+    //
+    // Without this transition, a level-triggered virtio-mmio IRQ would
+    // either fire infinitely until the driver deasserts via
+    // InterruptACK (the kernel doesn't yet, at the v1.0 KObj_IRQ layer)
+    // or fail to fire at all on some GIC implementations that strictly
+    // require the configured edge type to match the wire reality.
+    //
+    // The 2-bit-per-INTID encoding: bit-pair at position (intid % 16)*2
+    // in GICD_ICFGR(intid / 16). 0b10 = edge, 0b00 = level. We RMW
+    // because the same 32-bit register covers 16 INTIDs and a blind
+    // write would clobber neighboring SPI configurations.
+    //
+    // SPI-only because ICFGR for SGIs (intid 0..15) is RAZ/WI per ARM
+    // IHI 0069 §12.9.7 (SGIs are always edge); PPIs (16..31) live in
+    // the redistributor's GICR_ICFGR1 and are out of scope.
+    if (intid < GIC_SPI_MIN || intid >= GIC_NUM_INTIDS) return false;
+    if (g_dist_base == 0)                              return false;
+    u32 reg     = GICD_ICFGR(intid / 16);
+    u32 bit_off = (intid % 16) * 2;
+    u32 mask    = 0x3u << bit_off;
+    u32 val     = 0x2u << bit_off;  // 0b10 = edge-triggered
+    u32 cur     = mmio_r32(g_dist_base, reg);
+    mmio_w32(g_dist_base, reg, (cur & ~mask) | val);
+    return true;
+}
+
 bool gic_set_pending_spi(u32 intid) {
     // P4-Ic5-IRQ-probe: write GICD_ISPENDR<n>.bit to mark this SPI as
     // pending. SPI-only because the distributor frame's GICD_ISPENDR

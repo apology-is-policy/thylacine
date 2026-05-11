@@ -160,6 +160,20 @@ struct KObj_IRQ *kobj_irq_create(u32 intid) {
     rendez_init(&k->rendez);
     k->pending_count = 0;
 
+    // P4-Ic5b2: SPIs claimed via kobj_irq_create are edge-triggered by
+    // default. The kernel GIC init pre-configures all SPIs to level
+    // (the safer unknown-signalling default); the device-driver layer
+    // knows its IRQ is edge-triggered (QEMU virt's virtio-mmio +
+    // typical real-ARM virtio devices) and flips ICFGR here. Phase 5+
+    // can add a `bool edge_triggered` parameter or a DTB-driven default
+    // when level-triggered userspace IRQs become a real use case. For
+    // SGIs/PPIs (intid < 32) the helper is a no-op — SGIs are always
+    // edge per IHI 0069 §12.9.7, and PPIs are kernel-reserved at v1.0
+    // (timer at 30, IPIs at 0).
+    if (intid >= 32) {
+        gic_set_spi_edge_triggered(intid);
+    }
+
     // Register handler + enable the IRQ. gic_attach binds (intid →
     // dispatch + arg); gic_enable_irq unmasks it on the CPU's
     // redistributor (for SGIs/PPIs) or distributor (for SPIs).

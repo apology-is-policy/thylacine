@@ -1,0 +1,25 @@
+[package]
+name = "virtio-blk-probe"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "virtio-blk-probe"
+path = "src/main.rs"
+
+[dependencies]
+# libthyla-rs provides _start + #[panic_handler] + SVC wrappers (P4-Ic4).
+# virtio-blk-probe is the first userspace binary to compose the FULL set
+# of hardware-handle syscalls in one process:
+#   - t_mmio_create + t_mmio_map (P4-Ib + P4-Ic2): claim + map the
+#     virtio-mmio slot's transport registers.
+#   - t_dma_create + t_dma_map  (P4-Ic5b1b):     allocate + map a
+#     contiguous pinned DMA buffer for the virtqueue rings + the blk
+#     request / data / status descriptors.
+#   - t_irq_create + t_irq_wait (P4-Ib + P4-G):  subscribe to the
+#     device's completion IRQ; sleep until the virtqueue Used-ring
+#     index advances.
+# Plus t_puts / t_putstr / t_exits for diagnostics.
+libthyla-rs = { path = "../lib/libthyla-rs" }

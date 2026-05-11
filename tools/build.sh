@@ -123,6 +123,12 @@ build_kernel() {
     # /hello (and future /<bin>) without an extra invocation.
     build_userspace
     build_ramfs
+
+    # P4-Ic5b2: produce build/disk.img alongside the kernel so
+    # tools/test.sh's QEMU launch can attach it as virtio-blk-device's
+    # backing store. Regeneration is cheap (~1 MiB sparse-write) and
+    # keeps the on-disk signature byte-identical across rebuilds.
+    build_disk
 }
 
 build_ramfs() {
@@ -157,7 +163,7 @@ EOF
     # P4-Ia2: copy any built Rust-side userspace binaries from
     # build/usr-rs/<target>/release/. Same curation discipline.
     # Binary name = crate's [[bin]] name = directory under usr/.
-    local usr_rs_bins=( "hello-rs" "mmio-probe" "irq-probe" )
+    local usr_rs_bins=( "hello-rs" "mmio-probe" "irq-probe" "virtio-blk-probe" )
     local rs_release="$USR_RS_BUILD/$USR_RS_TARGET/release"
     for bin in "${usr_rs_bins[@]}"; do
         local src="$rs_release/$bin"
@@ -204,12 +210,31 @@ build_sysroot() {
 }
 
 build_disk() {
-    echo "==> disk is a Phase 4 deliverable; not yet implemented."
-    exit 1
+    # P4-Ic5b2: deterministic raw disk image backing QEMU's virtio-blk-device.
+    # Block 0 carries a fixed 16-byte ASCII signature the userspace
+    # virtio-blk-probe verifies after issuing VIRTIO_BLK_T_IN(sector=0).
+    # Total size 1 MiB (2048 blocks) — large enough that the device
+    # negotiates a multi-block range but small enough that "wipe + recreate"
+    # is essentially free on every build.
+    local disk="$BUILD_DIR/disk.img"
+    local signature='THYLACINE-DISK-1'   # 16 bytes; matches DISK_SIGNATURE in usr/virtio-blk-probe/src/main.rs
+    echo "==> Building disk image: $disk"
+    mkdir -p "$BUILD_DIR"
+    : > "$disk"
+    truncate -s 1M "$disk"
+    printf '%s' "$signature" | dd of="$disk" bs=16 count=1 conv=notrunc status=none
+    local readback
+    readback="$(head -c 16 "$disk")"
+    if [[ "$readback" != "$signature" ]]; then
+        echo "    ERROR: block 0 signature mismatch (got '$readback')" >&2
+        exit 1
+    fi
+    echo "    block 0 signature: '$readback' (16 bytes)"
+    echo "    size: $(wc -c < "$disk") bytes"
 }
 
 build_all() {
-    # build_kernel calls build_userspace + build_ramfs internally.
+    # build_kernel calls build_userspace + build_ramfs + build_disk internally.
     build_kernel
 }
 

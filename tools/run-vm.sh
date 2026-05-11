@@ -96,6 +96,38 @@ if [[ -f "$RAMFS_CPIO" ]]; then
     ramfs_flags=(-initrd "$RAMFS_CPIO")
 fi
 
+# P4-Ic5b2: virtio-blk-device backing store. tools/build.sh disk
+# generates build/disk.img (1 MiB, block 0 = "THYLACINE-DISK-1\0..." +
+# zeroes). The userspace virtio-blk-probe binary issues VIRTIO_BLK_T_IN
+# for sector 0 and verifies the signature; absence of the file produces
+# a graceful skip in test_virtio_blk_probe.c (it sees no DeviceID=2
+# slot via virtio_mmio_find_by_device_id and reports SKIP rather than
+# spawning a probe that would block forever on t_irq_wait).
+#
+# Slot assignment on QEMU virt: virtio-mmio devices are added to slots
+# in REVERSE order of their flag position (hw/arm/virt.c reads the
+# device list back-to-front). We list virtio-blk-device FIRST so it
+# lands in slot 31 (PA 0x0a003e00, INTID 79). virtio-rng-device follows
+# and gets slot 30 (PA 0x0a003c00, INTID 78). The probe scans all 32
+# slots, so the order is informational rather than load-bearing.
+DISK_IMG="${THYLACINE_DISK_IMG:-$REPO_ROOT/build/disk.img}"
+disk_flags=()
+if [[ -f "$DISK_IMG" ]]; then
+    # `-global virtio-mmio.force-legacy=false` flips the virtio-mmio bus
+    # to its MODERN (Version=2) transport per VIRTIO 1.2 §4.2.2.
+    # QEMU's default on the ARM virt machine is the legacy transport
+    # (Version=1) for backward compatibility with kernels that pre-date
+    # VIRTIO 1.0. Thylacine's userspace driver crates target the modern
+    # transport exclusively (the legacy MMIO register layout is
+    # different + uses GUEST_PAGE_SIZE / QueuePFN semantics that we
+    # don't support).
+    disk_flags=(
+        -global virtio-mmio.force-legacy=false
+        -drive "if=none,id=disk0,format=raw,file=$DISK_IMG"
+        -device virtio-blk-device,drive=disk0
+    )
+fi
+
 # 9P host share — appears at /host inside the guest once the 9P client lands
 # (P1-A: no client yet, so the QEMU virtfs entry is benign overhead). Per
 # TOOLING.md §4 (the hot-reload mechanism). Default-on; --no-share disables.
@@ -114,6 +146,11 @@ if [[ -n "$snapshot" ]]; then
 fi
 
 # Canonical QEMU flags per TOOLING.md §3.
+#
+# disk_flags (P4-Ic5b2) comes BEFORE virtio-rng-device because QEMU
+# assigns virtio-mmio slots in reverse-creation order, so the first
+# -device lands at slot 31. virtio-blk-probe scans 0..31 either way;
+# the ordering keeps slot 31 conventionally the "primary device."
 exec qemu-system-aarch64 \
     -machine virt,gic-version=3 \
     -cpu max \
@@ -121,6 +158,7 @@ exec qemu-system-aarch64 \
     -m "$mem_mib" \
     -kernel "$KERNEL_BIN" \
     ${ramfs_flags[@]+"${ramfs_flags[@]}"} \
+    ${disk_flags[@]+"${disk_flags[@]}"} \
     -device virtio-rng-device,id=rng0 \
     -device virtio-rng-pci,id=rng_pci0 \
     -nographic \

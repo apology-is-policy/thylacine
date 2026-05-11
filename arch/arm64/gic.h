@@ -166,6 +166,22 @@ bool gic_init_secondary(unsigned cpu_idx);
 // Returns false if intid is out of SPI range or GIC isn't initialized.
 bool gic_set_pending_spi(u32 intid);
 
+// P4-Ic5b2: configure the specified SPI to be edge-triggered (rising
+// edge). gic_init defaults all SPIs to level-triggered (ICFGR = 0); a
+// device that genuinely uses edge — QEMU virt's virtio-mmio bus is the
+// canonical case — calls this from its IRQ-claim path before
+// gic_enable_irq so the GIC's edge-detector latches the first
+// assertion. Without this transition, level-triggered probing of a
+// device-edge IRQ can either fire infinitely or fail to fire at all
+// depending on the exact GIC implementation.
+//
+// SPI-only (intid >= 32). SGIs are RAZ/WI in the ICFGR per IHI 0069
+// §12.9.7 (always edge anyway); PPIs live in the redistributor's
+// GICR_ICFGR1 and are out of scope at v1.0.
+//
+// Returns false if intid is out of SPI range or GIC isn't initialized.
+bool gic_set_spi_edge_triggered(u32 intid);
+
 // P2-Cdc: send a Software Generated Interrupt (SGI) to a target CPU.
 // SGIs are GIC INTIDs 0..15 — used as cross-CPU IPI vectors. Target
 // receives an IRQ at the given INTID, dispatches it through the same
