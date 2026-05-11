@@ -204,6 +204,22 @@ void test_userspace_first_iteration(void);
 void test_userspace_second_iteration(void);
 void test_userspace_ramfs_hello(void);
 void test_userspace_ramfs_hello_rs(void);
+void test_caps_kproc_has_all(void);
+void test_caps_kproc_has_hw_create(void);
+void test_caps_rfork_child_has_none(void);
+void test_mmio_handle_create_basic(void);
+void test_mmio_handle_create_misaligned_rejected(void);
+void test_mmio_handle_create_zero_size_rejected(void);
+void test_mmio_handle_create_overflow_rejected(void);
+void test_mmio_handle_create_overlap_rejected(void);
+void test_mmio_handle_create_adjacent_ok(void);
+void test_mmio_handle_create_unref_releases_slot(void);
+void test_mmio_handle_double_unref_extincts(void);
+void test_handle_hw_mmio_dup_rejected(void);
+void test_handle_hw_irq_dup_rejected(void);
+void test_handle_hw_mmio_close_releases_claim(void);
+void test_handle_hw_irq_close_releases_intid(void);
+void test_handle_hw_irq_kernel_reserved_rejected(void);
 
 // ---------------------------------------------------------------------------
 // Registry. Sentinel-terminated.
@@ -437,6 +453,42 @@ struct test_case g_tests[] = {
     { "userspace.second_iteration",    test_userspace_second_iteration,    false, NULL },
     { "userspace.ramfs_hello",         test_userspace_ramfs_hello,         false, NULL },
     { "userspace.ramfs_hello_rs",      test_userspace_ramfs_hello_rs,      false, NULL },
+    { "caps.kproc_has_all",            test_caps_kproc_has_all,            false, NULL },
+    { "caps.kproc_has_hw_create",      test_caps_kproc_has_hw_create,      false, NULL },
+    { "caps.rfork_child_has_none",     test_caps_rfork_child_has_none,     false, NULL },
+    { "mmio_handle.create_basic",      test_mmio_handle_create_basic,      false, NULL },
+    { "mmio_handle.create_misaligned_rejected",
+                                       test_mmio_handle_create_misaligned_rejected,
+                                                                           false, NULL },
+    { "mmio_handle.create_zero_size_rejected",
+                                       test_mmio_handle_create_zero_size_rejected,
+                                                                           false, NULL },
+    { "mmio_handle.create_overflow_rejected",
+                                       test_mmio_handle_create_overflow_rejected,
+                                                                           false, NULL },
+    { "mmio_handle.create_overlap_rejected",
+                                       test_mmio_handle_create_overlap_rejected,
+                                                                           false, NULL },
+    { "mmio_handle.create_adjacent_ok",
+                                       test_mmio_handle_create_adjacent_ok,
+                                                                           false, NULL },
+    { "mmio_handle.create_unref_releases_slot",
+                                       test_mmio_handle_create_unref_releases_slot,
+                                                                           false, NULL },
+    { "mmio_handle.live_count_round_trip",
+                                       test_mmio_handle_double_unref_extincts,
+                                                                           false, NULL },
+    { "handle_hw.mmio_dup_rejected",   test_handle_hw_mmio_dup_rejected,   false, NULL },
+    { "handle_hw.irq_dup_rejected",    test_handle_hw_irq_dup_rejected,    false, NULL },
+    { "handle_hw.mmio_close_releases_claim",
+                                       test_handle_hw_mmio_close_releases_claim,
+                                                                           false, NULL },
+    { "handle_hw.irq_close_releases_intid",
+                                       test_handle_hw_irq_close_releases_intid,
+                                                                           false, NULL },
+    { "handle_hw.irq_kernel_reserved_rejected",
+                                       test_handle_hw_irq_kernel_reserved_rejected,
+                                                                           false, NULL },
     { NULL, NULL, false, NULL },          // sentinel
 };
 

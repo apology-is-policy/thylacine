@@ -1,0 +1,353 @@
+# 39 — Hardware handles + capability gating (P4-Ib)
+
+## Purpose
+
+P4-Ib lifts the kernel from "hw kobj kinds exist in the type enum" (P2-Fc) to "userspace drivers can create + own KObj_MMIO and KObj_IRQ handles through syscalls, with PA / INTID exclusivity enforced at the kernel layer, gated by a per-Proc capability". This is the substrate the first Rust userspace driver (P4-Ic — virtio-blk) builds atop.
+
+Three load-bearing invariants pinned at this layer, all proven in `specs/handles.tla` (extended at P4-Ib):
+
+- **HwResourceExclusive**: at most one alive handle per hw kobj across all procs (no two drivers claim the same MMIO range / INTID).
+- **NoHwDup**: `handle_dup` of a hardware-kind handle is rejected (drivers hold exactly one origin handle per resource).
+- **HwHandleImpliesCap**: every hw-handle holder has `CAP_HW_CREATE` in `proc->caps` (capability-gated creation).
+
+Plus three pre-existing invariants the chunk preserves:
+
+- I-5 (HwHandlesAtOrigin) — hw handles non-transferable across procs.
+- I-6 (RightsCeiling) — rights monotonically reduce.
+- I-2 (CapsCeiling) — capabilities monotonically reduce.
+
+---
+
+## Public API
+
+### `<thylacine/caps.h>` — capability bitmask
+
+```c
+typedef u64 caps_t;
+
+#define CAP_HW_CREATE   (1ull << 0)
+#define CAP_ALL         (CAP_HW_CREATE)        // grows as caps land
+#define CAP_NONE        0ull
+```
+
+`CAP_ALL` is the kproc-initial mask; `CAP_NONE` is the rfork'd-child default. The `_Static_assert(CAP_ALL == CAP_HW_CREATE)` catches drift when new CAP_* bits land (each addition requires bumping `CAP_ALL` so kproc inherits the new domain).
+
+Reserved for Phase 5+ (one bit per domain): `CAP_NS_MOUNT`, `CAP_NS_BIND`, `CAP_SIGNAL_ANY`, `CAP_NET_RAW`, `CAP_TIME_SET`, `CAP_REBOOT`.
+
+### `struct Proc.caps` — per-Proc capability mask
+
+Added at P4-Ib; struct grew 120 → 128 bytes. `kproc` is initialized to `CAP_ALL` at `proc_init`; `rfork`'d children leave `caps = CAP_NONE` via `KP_ZERO`. Capability inheritance / grant via syscall is a Phase 5+ deliverable.
+
+### `<thylacine/mmio_handle.h>` — KObj_MMIO lifecycle
+
+```c
+#define KOBJ_MMIO_MAGIC 0x4D4D494F0BADC0DEULL
+
+struct KObj_MMIO {
+    u64    magic;
+    u64    pa;          // page-aligned physical address
+    size_t size;        // page-aligned, > 0
+    int    ref;         // refcount; starts at 1
+};
+
+void kobj_mmio_init(void);                          // boot bring-up
+
+struct KObj_MMIO *kobj_mmio_create(u64 pa, size_t size);
+void              kobj_mmio_ref(struct KObj_MMIO *);
+void              kobj_mmio_unref(struct KObj_MMIO *);
+void              kobj_mmio_destroy(struct KObj_MMIO *);
+
+u64 kobj_mmio_total_created(void);   // diagnostic / leak counters
+u64 kobj_mmio_live_count(void);
+```
+
+`kobj_mmio_create` is the structural enforcement of `HwResourceExclusive`: returns `NULL` if the requested `[pa, pa+size)` overlaps any currently-claimed range. The check is under a single spinlock acquire (`g_mmio_lock`); no TOCTOU between the overlap scan and the slot insert.
+
+### Syscall surface — `<thylacine/syscall.h>`
+
+```c
+enum {
+    SYS_EXITS       = 0,
+    SYS_PUTS        = 1,
+    SYS_MMIO_CREATE = 2,   // arg: pa (x0), size (x1), rights (x2)
+    SYS_IRQ_CREATE  = 3,   // arg: intid (x0), rights (x1)
+    SYS_IRQ_WAIT    = 4,   // arg: handle (x0)
+};
+```
+
+Each cap-gated syscall checks `current_thread()->proc->caps & CAP_HW_CREATE` before any allocation; returns -1 (EPERM) on cap-missing. Rights validation rejects `rights == 0` or `rights & ~RIGHT_ALL`. INTID range bound is enforced by `intid_try_claim` inside `kobj_irq_create`.
+
+### `<thyla/syscall.h>` (libt — userspace) — inline wrappers
+
+```c
+long t_mmio_create(unsigned long pa, unsigned long size, unsigned long rights);
+long t_irq_create(unsigned long intid, unsigned long rights);
+long t_irq_wait(long handle);
+```
+
+Same return semantics: non-negative handle index on success, -1 on error.
+
+---
+
+## Implementation
+
+### `kernel/mmio_handle.c` — `g_mmio_claims` table
+
+```c
+#define KOBJ_MMIO_MAX 32
+
+struct mmio_claim {
+    struct KObj_MMIO *owner;   // NULL = slot free
+    u64               pa;
+    size_t            size;
+};
+
+static struct mmio_claim g_mmio_claims[KOBJ_MMIO_MAX];
+static spin_lock_t       g_mmio_lock = SPIN_LOCK_INIT;
+```
+
+Linear scan + insert under one lock acquire. Overlap formula: two ranges `[a, a+s_a)` and `[b, b+s_b)` overlap iff `a < b + s_b && b < a + s_a` (handles all partial / complete overlap; adjacency-but-not-overlap = `b == a + s_a` is permitted).
+
+Adjacent (not overlapping) ranges are explicitly allowed — `test_mmio_handle_create_adjacent_ok` exercises `[A, A+SIZE)` + `[A+SIZE, A+2*SIZE)` both succeeding.
+
+Static table sized at 32 claims at v1.0; Phase 5+ refactors to a growable RB-tree keyed by PA when the system has hundreds of live MMIO regions.
+
+### `kernel/irqfwd.c` — INTID claim tracking
+
+```c
+static bool        g_intid_claimed[GIC_NUM_INTIDS];
+static spin_lock_t g_intid_lock = SPIN_LOCK_INIT;
+
+static bool intid_try_claim(u32 intid);   // claim if free
+static void intid_release(u32 intid);     // unconditional release
+```
+
+Added because `gic_attach` silently overwrites any existing handler for the same INTID — without this claim layer, two callers of `kobj_irq_create(intid)` would both succeed (second's attach overwriting first's), violating `HwResourceExclusive`. The claim table is checked before any state mutation; if already claimed, `kobj_irq_create` returns `NULL`.
+
+Released in `kobj_irq_free_internal` AFTER `gic_disable_irq` so no IRQ can fire on the released INTID's slot between release and the next create's attach.
+
+### `kernel/handle.c` — hw rejection in `handle_dup`
+
+```c
+hidx_t handle_dup(struct Proc *p, hidx_t h, rights_t new_rights) {
+    struct Handle *parent = handle_get(p, h);
+    if (!parent) return -1;
+
+    // P4-Ib NoHwDup: dup forbidden for hardware kinds.
+    if (kobj_kind_is_hw(parent->kind)) return -1;
+
+    // ... rights check, alloc, etc.
+}
+```
+
+Covers all four hw kinds via `KOBJ_KIND_HW_MASK`. Extension to a new hw kind requires updating the mask (existing `_Static_assert` catches the mask change at compile time).
+
+### `kernel/handle.c` — `handle_release_obj` cases
+
+```c
+case KOBJ_MMIO: kobj_mmio_unref((struct KObj_MMIO *)obj); break;
+case KOBJ_IRQ:  kobj_irq_unref ((struct KObj_IRQ  *)obj); break;
+```
+
+Closing the last handle to an MMIO releases the PA-range claim; closing the last handle to an IRQ disables the GIC line + releases the INTID claim. `handle_acquire_obj` has the symmetric `kobj_mmio_ref` / `kobj_irq_ref` paths even though `handle_dup` of hw is rejected — defense in depth + forward-compatibility (future Phase 5+ paths might end up with multiple hw handle holders in edge cases like crash recovery).
+
+### `kernel/syscall.c` — capability check + rollback
+
+```c
+static s64 sys_mmio_create_handler(u64 pa, u64 size, u64 rights) {
+    struct Proc *p = current_thread()->proc;
+    if (!p)                                          return -1;
+    if ((p->caps & CAP_HW_CREATE) == 0)              return -1;  // HwHandleImpliesCap
+    if (rights == 0 || (rights & ~(u64)RIGHT_ALL))   return -1;  // RightsCeiling
+
+    struct KObj_MMIO *k = kobj_mmio_create(pa, (size_t)size);    // HwResourceExclusive
+    if (!k)                                          return -1;
+
+    hidx_t h = handle_alloc(p, KOBJ_MMIO, (rights_t)rights, k);
+    if (h < 0) {
+        kobj_mmio_unref(k);   // rollback: release the claim
+        return -1;
+    }
+    return (s64)h;
+}
+```
+
+Rollback discipline: if any post-create step fails, `kobj_mmio_unref` releases the PA claim back to `g_mmio_claims` so a retry (or another driver) can re-claim. Same pattern in `sys_irq_create_handler`.
+
+---
+
+## Data structures
+
+### `struct Proc` size bump
+
+```
+struct Proc — was 120 bytes (P3-Bcb baseline 112 + vmas 8)
+            — now 128 bytes (P3-Bcb baseline 112 + vmas 8 + caps 8)
+```
+
+`_Static_assert(sizeof(struct Proc) == 128)` pins the new size. Every byte of bloat costs `SLUB_caches × cached_slabs × 64_slots`, so changes are deliberate.
+
+### `g_mmio_claims[32]` — claim table
+
+32 × 24 bytes = 768 bytes BSS. Linear scan worst-case 32 entries under lock; effectively constant-time at v1.0 scale.
+
+### `g_intid_claimed[GIC_NUM_INTIDS=1020]` — 1020 bytes BSS
+
+A bitmap form would save 1004 bytes; the boolean form keeps the code obvious. Negligible cost.
+
+---
+
+## State machines
+
+### KObj_MMIO refcount lifecycle
+
+```
+   kobj_mmio_create
+        ↓                                  
+   ref=1; claim asserted
+   ↓                       ↓ (last handle_close on this obj OR direct unref)
+   handle_alloc/_ref       kobj_mmio_unref → ref=0 → kobj_mmio_free_internal
+   ↑                                                  ↓
+   ref++ (defense-only;                               claim released
+   handle_dup rejected at P4-Ib)                      magic clobbered
+                                                      kfree(k)
+```
+
+Lock discipline: `g_mmio_lock` taken inside `kobj_mmio_create` (overlap scan + slot insert) + `kobj_mmio_free_internal` (slot release). No nested lock takes; no callbacks-under-lock.
+
+### KObj_IRQ INTID claim lifecycle
+
+```
+   kobj_irq_create(intid)
+        ↓
+   intid_try_claim → kmalloc → gic_attach → gic_enable_irq → return k
+
+   kobj_irq_unref → ref=0 → kobj_irq_free_internal:
+        ↓
+   gic_disable_irq → gic_attach(NULL) [no-op, see below] → intid_release
+        ↓
+   magic clobber → kfree
+```
+
+The `gic_attach(intid, NULL, NULL)` call in `kobj_irq_free_internal` returns `false` because the GIC's `gic_attach` rejects NULL handlers — the slot retains its `kobj_irq_dispatch + arg=k` pointer. Stale-fire safety: the magic clobber before kfree makes `kobj_irq_dispatch`'s `k->magic != KOBJ_IRQ_MAGIC` check return early on any in-flight IRQ that races with the free.
+
+---
+
+## Spec cross-reference
+
+| Spec action | Impl site |
+|---|---|
+| `HandleAlloc(p, k, granted)` (with `k ∈ HwKObjs` precondition `CapHwCreate ∈ proc_caps[p]`) | `sys_mmio_create_handler` / `sys_irq_create_handler` cap check + `handle_alloc` |
+| `HandleDup(p, h, nr)` (with `h.kobj ∈ TxKObjs` precondition) | `handle_dup`'s `kobj_kind_is_hw(parent->kind) → return -1` |
+| `HandleClose(p, h)` (with MMIO claim release) | `handle_close` → `handle_release_obj` → `kobj_mmio_unref`'s claim release |
+| `ReduceCaps(p, lost)` (with `CapHwCreate ∈ lost ⇒ ¬∃ hw handle in p`) | **Forward-looking**: v1.0 has no cap-drop syscall; when it lands (Phase 5+), it MUST check `p` has no live hw handles before allowing the drop |
+
+Buggy variants pinned by counter-examples (handles_buggy_*.cfg files):
+- `BuggyDupElevate` → `RightsCeiling` violated
+- `BuggyHwTransfer` → `HwHandlesAtOrigin` violated
+- `BuggyDirectTransfer` → `OnlyTransferVia9P` violated
+- `BuggyCapsElevate` → `CapsCeiling` violated
+- `BuggyHwDup` (P4-Ib) → `NoHwDup` violated
+- `BuggyHwOverlap` (P4-Ib) → `HwResourceExclusive` violated
+- `BuggyHwCreateNoCap` (P4-Ib) → `HwHandleImpliesCap` violated
+
+All 7 buggy cfgs produce expected counterexamples under TLC; correct cfg explores 1.4M distinct states without violation.
+
+---
+
+## Tests
+
+| Test | What |
+|---|---|
+| `caps.kproc_has_all` | `kproc->caps == CAP_ALL` post-`proc_init` |
+| `caps.kproc_has_hw_create` | Specifically `kproc->caps & CAP_HW_CREATE != 0` (catches accidental CAP_ALL refactor that drops the bit) |
+| `caps.rfork_child_has_none` | `rfork(RFPROC, ...)` child observes `proc->caps == CAP_NONE` |
+| `mmio_handle.create_basic` | round-trip create + unref |
+| `mmio_handle.create_misaligned_rejected` | pa or size not page-aligned → NULL |
+| `mmio_handle.create_zero_size_rejected` | size == 0 → NULL |
+| `mmio_handle.create_overflow_rejected` | pa + size overflows u64 → NULL |
+| `mmio_handle.create_overlap_rejected` | exact + partial overlap both rejected (HwResourceExclusive) |
+| `mmio_handle.create_adjacent_ok` | adjacent non-overlapping ranges both succeed |
+| `mmio_handle.create_unref_releases_slot` | re-claim same PA after unref succeeds |
+| `mmio_handle.live_count_round_trip` | `total_created` + `live_count` instrumentation works |
+| `handle_hw.mmio_dup_rejected` | `handle_dup` on KOBJ_MMIO returns -1 (NoHwDup) |
+| `handle_hw.irq_dup_rejected` | `handle_dup` on KOBJ_IRQ returns -1 (NoHwDup) |
+| `handle_hw.mmio_close_releases_claim` | `handle_close` → claim returns to pool |
+| `handle_hw.irq_close_releases_intid` | `handle_close` → INTID returns to pool |
+
+All 15 PASS at P4-Ib tip; 180 → 195 total in-kernel tests.
+
+The userspace SVC path (caller invokes `t_mmio_create` / `t_irq_create` / `t_irq_wait` and traps into the kernel) is exercised end-to-end by the first userspace driver test in P4-Ic — at P4-Ib the syscall handlers are validated by code review + the cap-check / arg-validation paths above.
+
+---
+
+## Error paths
+
+| Path | Failure | Result |
+|---|---|---|
+| `sys_mmio_create_handler` | `proc->caps & CAP_HW_CREATE == 0` | -1 (EPERM-equivalent) |
+| `sys_mmio_create_handler` | `rights == 0` or `rights & ~RIGHT_ALL` | -1 |
+| `sys_mmio_create_handler` | `kobj_mmio_create` returns NULL (overlap / OOM / table-full / misalign) | -1 |
+| `sys_mmio_create_handler` | `handle_alloc` returns -1 (table-full) | `kobj_mmio_unref` → -1 (claim released) |
+| `sys_irq_create_handler` | as above; INTID > u32 range also -1 | -1 |
+| `sys_irq_wait_handler` | bad handle / wrong kind / missing `RIGHT_SIGNAL` | -1 |
+
+---
+
+## Performance characteristics
+
+| Operation | Cost |
+|---|---|
+| `kobj_mmio_create` | O(KOBJ_MMIO_MAX) under one lock; ~32 entries → 200 ns worst case |
+| `kobj_mmio_unref` (last) | O(KOBJ_MMIO_MAX) under one lock for slot lookup |
+| `kobj_irq_create` | O(1) under one lock + gic_attach + gic_enable_irq |
+| `handle_dup` of hw | O(1) — early `return -1` before any state mutation |
+| `SYS_MMIO_CREATE` syscall total | < 1 µs at v1.0 scale (mostly the SVC + context save/restore) |
+
+---
+
+## Status
+
+| Component | State |
+|---|---|
+| `caps.h` + `struct Proc.caps` | **Landed (P4-Ib)** |
+| kproc CAP_ALL init | **Landed (P4-Ib)** in `proc_init` |
+| rfork inherits CAP_NONE | **Landed (P4-Ib)** via `KP_ZERO` (no inheritance impl) |
+| `mmio_handle.h/c` + `g_mmio_claims` | **Landed (P4-Ib)** |
+| `kernel/irqfwd.c` INTID claim | **Landed (P4-Ib)** — `g_intid_claimed` + `intid_try_claim`/`intid_release` |
+| `handle.c` hw-dup rejection | **Landed (P4-Ib)** |
+| `handle.c` KOBJ_MMIO + KOBJ_IRQ release wiring | **Landed (P4-Ib)** |
+| Spec `handles.tla` extension | **Landed (P4-Ib)** — 3 invariants + 3 buggy actions + 3 cfg variants |
+| Syscall handlers (MMIO_CREATE, IRQ_CREATE, IRQ_WAIT) | **Landed (P4-Ib)** |
+| `libt` syscall wrappers | **Landed (P4-Ib)** |
+| `kobj_mmio_map_into_user` syscall | **Deferred to P4-Ic** — needs Burrow-type extension for MMIO pages |
+| Cap-grant syscall (parent → child) | **Phase 5+** |
+| Cap-drop syscall (with hw-handle interlock) | **Phase 5+** |
+| 9P-aware `handle_transfer_via_9p` for KOBJ_SPOOR | **Phase 4** (separate sub-chunk) |
+
+---
+
+## Known caveats / footguns
+
+1. **`kobj_mmio_map_into_user` is NOT in P4-Ib**. The claim ticket exists at P4-Ib (the handle proves PA exclusivity) but installing PTEs into the user address space is a P4-Ic concern. Currently no way to actually access the MMIO from userspace; the spec extension validates the OWNERSHIP semantics independently of the MAPPING.
+
+2. **`gic_attach(intid, NULL, NULL)` is a no-op** because the GIC `gic_attach` rejects NULL handlers. Stale `g_handlers[intid]` retains the pre-free `kobj_irq_dispatch + arg=k` pointer. Stale-fire safety relies on the magic clobber + IRQ-already-disabled discipline; future cleanup would be `gic_detach(intid)` as a proper API.
+
+3. **`ReduceCaps`-of-CAP_HW_CREATE-while-holding-hw-handle is undefined at v1.0**. The spec models this as forbidden; the impl can't check because there's no cap-drop syscall yet. When the syscall lands (Phase 5+), it MUST enumerate `p->handles` and reject if any has `kobj_kind_is_hw(kind)`.
+
+4. **Capability inheritance at `rfork`**. v1.0 children start with `CAP_NONE`. Production drivers (P4-Ic+) need a way to receive `CAP_HW_CREATE`. v1.0 path: kproc directly rforks the driver with kproc-context capability grant (an internal-only path); userspace cap-grant is Phase 5+.
+
+5. **`KOBJ_DMA` + `KOBJ_INTERRUPT` are in the hw mask but lack implementation**. `handle_dup` rejects them (correct); `handle_release_obj` has no-op cases for them (no impl to call). Adding the impl is a future sub-chunk; the spec already covers them as HwKObjs.
+
+6. **`g_mmio_claims` is global, not per-Proc**. The exclusivity invariant is system-wide. A future enhancement could partition claims per-Proc for faster lookups when many procs each hold few claims; v1.0's 32-entry linear scan is fine.
+
+7. **`SYS_IRQ_WAIT` requires `RIGHT_SIGNAL`** in the handle's rights, but `SYS_IRQ_CREATE` doesn't validate that `rights` includes `RIGHT_SIGNAL`. A caller could create a KObj_IRQ handle without SIGNAL, then call wait, and get -1. Slightly surprising; documented here. The fix is one-line at create-time but adds policy not present in the spec; left as-is per the principle that the spec is authoritative.
+
+---
+
+## Naming rationale
+
+`KObj_MMIO` mirrors `KObj_IRQ` (P4-G) in capitalization and prefix. `kobj_mmio_*` for the API verbs matches `kobj_irq_*`. `g_mmio_claims` is straightforward; could be thematically renamed (e.g., `g_territory_claims`) but the resource-tracking domain is generic enough that the descriptive name wins.
+
+Held proposals (none load-bearing):
+- `CAP_HW_CREATE` could be `CAP_HW_GRANT` or `CAP_DRIVER`; the verb form `CREATE` matches the syscall it gates. Holding.

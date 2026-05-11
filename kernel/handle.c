@@ -31,6 +31,8 @@
 
 #include <thylacine/extinction.h>
 #include <thylacine/handle.h>
+#include <thylacine/irqfwd.h>
+#include <thylacine/mmio_handle.h>
 #include <thylacine/proc.h>
 #include <thylacine/types.h>
 #include <thylacine/burrow.h>
@@ -107,18 +109,30 @@ static void handle_release_obj(enum kobj_kind kind, void *obj) {
     case KOBJ_BURROW:
         burrow_unref((struct Burrow *)obj);
         break;
+    case KOBJ_MMIO:
+        // P4-Ib: KObj_MMIO release drops the refcount; the last unref
+        // releases the PA-range claim back to g_mmio_claims so a
+        // subsequent kobj_mmio_create can reuse the range.
+        kobj_mmio_unref((struct KObj_MMIO *)obj);
+        break;
+    case KOBJ_IRQ:
+        // P4-Ib: KObj_IRQ release drops the refcount; the last unref
+        // disables the IRQ + unregisters the GIC handler. Existing
+        // refcount machinery from P4-G (kernel/irqfwd.c).
+        kobj_irq_unref((struct KObj_IRQ *)obj);
+        break;
     case KOBJ_INVALID:
     case KOBJ_PROCESS:
     case KOBJ_THREAD:
     case KOBJ_SPOOR:
-    case KOBJ_MMIO:
-    case KOBJ_IRQ:
     case KOBJ_DMA:
     case KOBJ_INTERRUPT:
     case KOBJ_KIND_COUNT:
-        // No refcount integration yet — see comment above. Falls through
-        // to the slot-zeroing path; the underlying kobj's lifetime is
-        // managed elsewhere at v1.0 P2-Fc/Fd.
+        // No refcount integration yet for these. KOBJ_SPOOR lands at
+        // Phase 4 (9P client spoor_unref); KOBJ_DMA lands when DMA
+        // handles arrive; KOBJ_PROCESS / KOBJ_THREAD wait for struct
+        // Proc / Thread to gain refs (Phase 5+); KOBJ_INTERRUPT lands
+        // with the Phase 5+ interrupt-eventfd surface.
         break;
     default:
         extinction("handle_release_obj: out-of-enum kobj_kind (memory corruption?)");
@@ -136,12 +150,23 @@ static void handle_acquire_obj(enum kobj_kind kind, void *obj) {
     case KOBJ_BURROW:
         burrow_ref((struct Burrow *)obj);
         break;
+    case KOBJ_MMIO:
+        // P4-Ib: in v1.0 dup is rejected for KOBJ_MMIO (NoHwDup), so
+        // handle_acquire_obj will never be called with KOBJ_MMIO from
+        // handle_dup. Including the case anyway as defense-in-depth +
+        // forward-compatibility for the Phase 5+ transfer-via-9P path
+        // (which is also forbidden for hw kinds per HwHandlesAtOrigin,
+        // but the static_assert pins that).
+        kobj_mmio_ref((struct KObj_MMIO *)obj);
+        break;
+    case KOBJ_IRQ:
+        // P4-Ib: same rationale as KOBJ_MMIO above.
+        kobj_irq_ref((struct KObj_IRQ *)obj);
+        break;
     case KOBJ_INVALID:
     case KOBJ_PROCESS:
     case KOBJ_THREAD:
     case KOBJ_SPOOR:
-    case KOBJ_MMIO:
-    case KOBJ_IRQ:
     case KOBJ_DMA:
     case KOBJ_INTERRUPT:
     case KOBJ_KIND_COUNT:
@@ -269,6 +294,15 @@ struct Handle *handle_get(struct Proc *p, hidx_t h) {
 hidx_t handle_dup(struct Proc *p, hidx_t h, rights_t new_rights) {
     struct Handle *parent = handle_get(p, h);
     if (!parent) return -1;
+
+    // P4-Ib NoHwDup: dup is forbidden for hardware kinds (KOBJ_MMIO,
+    // KOBJ_IRQ, KOBJ_DMA, KOBJ_INTERRUPT). Maps to specs/handles.tla
+    // HandleDup precondition `h.kobj \in TxKObjs` + the new NoHwDup
+    // invariant. Extends I-5 from "non-transferable across procs" to
+    // "non-duplicable at all" — drivers hold exactly one handle per
+    // hw resource. The bug class is BuggyHwDup in the spec; the
+    // runtime check rejects it.
+    if (kobj_kind_is_hw(parent->kind)) return -1;
 
     // Rights monotonic reduction: new_rights MUST be a subset of
     // parent->rights. Models the spec's HandleDup precondition.

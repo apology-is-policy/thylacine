@@ -33,7 +33,9 @@
 #include <thylacine/dtb.h>
 #include <thylacine/extinction.h>
 #include <thylacine/handle.h>
+#include <thylacine/irqfwd.h>           // irqfwd_init (P4-Ib R9 F142)
 #include <thylacine/joey.h>     // joey_run (P3-F)
+#include <thylacine/mmio_handle.h>      // kobj_mmio_init (P4-Ib)
 #include <thylacine/page.h>
 #include <thylacine/territory.h>
 #include <thylacine/proc.h>
@@ -307,6 +309,10 @@ void boot_main(void) {
     burrow_init();
     vma_init();
     asid_init();
+    // P4-Ib: kobj_mmio_init sets up the MMIO claim-tracking table.
+    // Independent of proc/thread/sched bring-up; placed here for
+    // grouping with handle_init.
+    kobj_mmio_init();
     proc_init();
     thread_init();
     sched_init(0);                              // boot CPU's per-CPU sched state
@@ -324,6 +330,14 @@ void boot_main(void) {
     // after dev_init since virtio_init prints to UART (cons must be
     // up) and after slub_init since virtqueue_create uses kmalloc.
     virtio_init();
+
+    // P4-Ib R9 F142: reserve kernel-owned INTIDs in g_intid_claimed
+    // so that subsequent kobj_irq_create (via SYS_IRQ_CREATE syscall
+    // from a userspace driver) can't accidentally clobber the timer
+    // or IPI_RESCHED handler slots. Must run AFTER timer_init +
+    // smp_init (their gic_attach calls bypass the claim layer) and
+    // BEFORE any user-driven kobj_irq_create.
+    irqfwd_init();
 
     // P4-H: VirtIO PCIe enumeration. Probes the DTB-described PCIe
     // ECAM (pci-host-ecam-generic), maps bus 0's config space via

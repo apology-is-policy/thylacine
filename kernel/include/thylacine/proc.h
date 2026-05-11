@@ -126,11 +126,25 @@ struct Proc {
     // (TTBR0) is the runtime translation built on demand from the
     // VMA list as faults fire.
     struct Vma        *vmas;
+
+    // P4-Ib: per-Proc capability bitmask. Drawn from CAP_* in
+    // <thylacine/caps.h>. Capabilities monotonically reduce: rfork's
+    // child inherits a SUBSET of the parent's caps (at v1.0: empty —
+    // children start with no caps unless explicitly granted by a future
+    // Phase 5+ capability-grant syscall). kproc starts with CAP_ALL.
+    //
+    // Pinned by specs/handles.tla:
+    //   - HwHandleImpliesCap: holding a hw handle requires CAP_HW_CREATE.
+    //   - CapsCeiling:        proc_caps[p] subset of InitialCapsOf(p).
+    //   - ReduceCaps invariant: CAP_HW_CREATE can't be dropped while
+    //     p still holds any hw handle (v1.0 doesn't expose a drop
+    //     syscall; this is structural).
+    u64                caps;
 };
 
-_Static_assert(sizeof(struct Proc) == 120,
-               "struct Proc size pinned at 120 bytes (P3-Bcb baseline 112 "
-               "+ vmas 8 = 120). Adding a field grows the SLUB cache; "
+_Static_assert(sizeof(struct Proc) == 128,
+               "struct Proc size pinned at 128 bytes (P3-Bcb baseline 112 "
+               "+ vmas 8 + caps 8 = 128). Adding a field grows the SLUB cache; "
                "update this assert deliberately so the change is intentional.");
 _Static_assert(__builtin_offsetof(struct Proc, magic) == 0,
                "magic must be at offset 0 so SLUB's freelist write on "

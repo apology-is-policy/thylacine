@@ -14,6 +14,9 @@ Key invariants (proven in `specs/handles.tla`):
 - **Hardware non-transferability (ARCH §28 I-5)**: `KObj_MMIO`, `KObj_IRQ`, `KObj_DMA`, `KObj_Interrupt` cannot transfer. The 9P transfer codepath has no case for these kinds; `_Static_assert(KOBJ_KIND_COUNT == 9)` pins the enum so the type partition can't drift silently.
 - **Transfer only via 9P (ARCH §28 I-4)**: no syscall exists for direct cross-Proc transfer. The only public path is `handle_transfer_via_9p` (Phase 4).
 - **Capability monotonic reduction (ARCH §28 I-2)**: per-Proc coarse capabilities only reduce. Forward-looking; `rfork`'s capability mask uses bitwise AND (Phase 5+ syscall surface).
+- **P4-Ib NoHwDup**: `handle_dup` of `KObj_MMIO`/`IRQ`/`DMA`/`Interrupt` is rejected — extends I-5's "non-transferable across procs" to "non-duplicable at all". Drivers hold exactly one handle per hw resource.
+- **P4-Ib HwResourceExclusive**: at most one alive handle per hw kobj across all procs. Two drivers can't claim the same MMIO range / INTID. Enforced impl-side by `g_mmio_claims` overlap rejection (`kernel/mmio_handle.c`) + `g_intid_claimed` (`kernel/irqfwd.c`).
+- **P4-Ib HwHandleImpliesCap**: every alive hw-handle holder has `CAP_HW_CREATE` in `proc->caps`. Enforced by `sys_mmio_create_handler` / `sys_irq_create_handler` cap check before allocation.
 
 ---
 
@@ -282,12 +285,16 @@ Per ARCH §15.4, factotum-mediated capability elevation grants short-lived `KObj
 | `proc_alloc`/`proc_init`/`proc_free` integration | Landed (P2-Fc) |
 | `handle_init` bootstrap | Landed (P2-Fc; between `territory_init` and `proc_init`) |
 | Type classifiers (`is_transferable` / `is_hw`) | Landed (P2-Fc) |
-| In-kernel tests | 5 added: alloc_close_smoke / rights_monotonic / dup_lifecycle / full_table_oom / kind_classifiers |
-| Spec `handles.tla` + 4 buggy configs | Landed (P2-Fa) |
-| KOBJ_BURROW underlying-obj integration | P2-Fd |
-| KOBJ_SPOOR underlying-obj integration | Phase 4 |
-| KOBJ_MMIO / IRQ / DMA underlying-obj integration | Phase 3 |
+| In-kernel tests | 5 added at P2-Fc + 7 added at P4-Ib (caps + mmio_handle + handle_hw) |
+| Spec `handles.tla` + 4 buggy configs | Landed (P2-Fa); extended at P4-Ib (+3 invariants, +3 buggy cfgs) |
+| KOBJ_BURROW underlying-obj integration | Landed (P2-Fd) |
+| KOBJ_SPOOR underlying-obj integration | Phase 4 (9P client) |
+| KOBJ_MMIO / IRQ underlying-obj integration | **Landed (P4-Ib)** — `kobj_mmio_unref` + `kobj_irq_unref` wired into `handle_release_obj` |
+| KOBJ_DMA underlying-obj integration | Deferred (no DMA-buffer surface yet) |
+| `handle_dup` hw-rejection | **Landed (P4-Ib)** — `kobj_kind_is_hw(parent->kind) → return -1` |
 | `handle_transfer_via_9p` impl | Phase 4 (with 9P client) |
 | Per-Proc handle-table lock | Phase 5+ |
 | Growable RB-tree (replacing fixed slots) | Phase 5+ when bind count justifies |
 | `KObj_Capability` (factotum elevation) | v2.0 |
+
+For the hw-handle creation surface (KObj_MMIO + KObj_IRQ syscalls + capability gating + spec extension) see `docs/reference/39-hw-handles.md`.

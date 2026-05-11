@@ -100,11 +100,15 @@ CONSTANTS
     HwKObjs,                \* SUBSET KObjs — hardware/non-transferable kobjs
     Rights,                 \* set of right labels (must include RightTransfer)
     RightTransfer,          \* the "RIGHT_TRANSFER" element of Rights
-    Caps,                   \* set of capability labels
+    Caps,                   \* set of capability labels (must include CapHwCreate)
+    CapHwCreate,            \* P4-Ib: capability required to create hw kobjs
     BUGGY_ELEVATE,          \* BOOLEAN — enables BuggyDupElevate
     BUGGY_HW_TRANSFER,      \* BOOLEAN — enables BuggyHwTransfer
     BUGGY_DIRECT_TRANSFER,  \* BOOLEAN — enables BuggyDirectTransfer
-    BUGGY_CAPS_ELEVATE      \* BOOLEAN — enables BuggyCapsElevate
+    BUGGY_CAPS_ELEVATE,     \* BOOLEAN — enables BuggyCapsElevate
+    BUGGY_HW_DUP,           \* P4-Ib: enables BuggyHwDup (dup of hw kobj)
+    BUGGY_HW_OVERLAP,       \* P4-Ib: enables BuggyHwOverlap (double-alloc of hw kobj)
+    BUGGY_HW_CREATE_NO_CAP  \* P4-Ib: enables BuggyHwCreateNoCap (hw alloc without cap)
 
 KObjs == TxKObjs \cup HwKObjs
 
@@ -112,11 +116,15 @@ ASSUME Cardinality(Procs) >= 2
 ASSUME Cardinality(KObjs) >= 1
 ASSUME Cardinality(Rights) >= 2
 ASSUME RightTransfer \in Rights
+ASSUME CapHwCreate \in Caps
 ASSUME TxKObjs \cap HwKObjs = {}
 ASSUME BUGGY_ELEVATE \in BOOLEAN
 ASSUME BUGGY_HW_TRANSFER \in BOOLEAN
 ASSUME BUGGY_DIRECT_TRANSFER \in BOOLEAN
 ASSUME BUGGY_CAPS_ELEVATE \in BOOLEAN
+ASSUME BUGGY_HW_DUP \in BOOLEAN
+ASSUME BUGGY_HW_OVERLAP \in BOOLEAN
+ASSUME BUGGY_HW_CREATE_NO_CAP \in BOOLEAN
 
 (***************************************************************************)
 (* ProcRoot is the proc that starts with full capabilities (Caps). All   *)
@@ -187,6 +195,13 @@ HandleAlloc(p, k, granted) ==
     /\ k \notin kobjs_alive
     /\ granted \subseteq Rights
     /\ granted # {}
+    \* P4-Ib: hw kobj creation requires the CapHwCreate capability in the
+    \* origin proc. Maps to the impl-side check in `kernel/syscall.c`'s
+    \* SYS_MMIO_CREATE / SYS_IRQ_CREATE handlers: `if (!(p->caps &
+    \* CAP_HW_CREATE)) return -EPERM`. The bug class
+    \* `BuggyHwCreateNoCap` (below) bypasses this check; the
+    \* `HwHandleImpliesCap` invariant catches the consequence.
+    /\ (k \in HwKObjs) => CapHwCreate \in proc_caps[p]
     /\ kobjs_alive' = kobjs_alive \cup {k}
     /\ origin_rights' = [origin_rights EXCEPT ![k] = granted]
     /\ handles' = [handles EXCEPT ![p] = @ \cup {[kobj |-> k,
@@ -218,6 +233,13 @@ HandleClose(p, h) ==
 (***************************************************************************)
 HandleDup(p, h, new_rights) ==
     /\ h \in handles[p]
+    \* P4-Ib: dup forbidden for hw kobjs. Extends I-5 (non-transferable
+    \* across procs) to "non-duplicable at all". A driver holds a single
+    \* handle to its MMIO range / INTID; there's no legitimate use case
+    \* for in-proc duplication, and forbidding it pins
+    \* HwResourceExclusive. The bug class `BuggyHwDup` (below) bypasses
+    \* this; `NoHwDup` invariant catches the consequence.
+    /\ h.kobj \in TxKObjs
     /\ new_rights \subseteq h.rights
     /\ new_rights # {}
     /\ handles' = [handles EXCEPT ![p] = @ \cup {[kobj |-> h.kobj,
@@ -361,6 +383,16 @@ BuggyDirectTransfer(src, dst, h, new_rights) ==
 ReduceCaps(p, lost) ==
     /\ lost \subseteq proc_caps[p]
     /\ lost # {}
+    \* P4-Ib: CapHwCreate cannot be dropped while p holds any hw handle.
+    \* This pins `HwHandleImpliesCap` as a state invariant — without this
+    \* restriction the cap could be dropped after alloc, leaving a state
+    \* where the proc holds a hw handle but lacks the cap. At v1.0 the
+    \* kernel doesn't revoke hw handles when the cap is dropped; the spec
+    \* models this by forbidding the drop in the affected case.
+    \* Equivalent kernel-side discipline: `rfork` with a mask that clears
+    \* CAP_HW_CREATE returns -EBUSY if p still has any hw handle open.
+    /\ (CapHwCreate \in lost) =>
+           ~(\E h \in handles[p] : h.kobj \in HwKObjs)
     /\ proc_caps' = [proc_caps EXCEPT ![p] = @ \ lost]
     /\ UNCHANGED <<handles, origin_rights, kobjs_alive, sessions>>
 
@@ -378,6 +410,96 @@ BuggyCapsElevate(p, gained) ==
     /\ gained # {}
     /\ proc_caps' = [proc_caps EXCEPT ![p] = @ \cup gained]
     /\ UNCHANGED <<handles, origin_rights, kobjs_alive, sessions>>
+
+(***************************************************************************)
+(* BuggyHwDup(p, h, new_rights) — P4-Ib bug class: dup creates a second  *)
+(* handle to a hw kobj. Mirrors HandleDup's effects but allows h.kobj    *)
+(* to be in HwKObjs.                                                       *)
+(*                                                                         *)
+(* Real-world analogue: `handle_dup` switch on kind that accidentally     *)
+(* allows KOBJ_MMIO / KOBJ_IRQ. The correct impl rejects with -EINVAL    *)
+(* (see `kernel/handle.c::handle_dup`'s `h.kobj IS_NOT_TX → return -1`   *)
+(* check, P4-Ib).                                                          *)
+(*                                                                         *)
+(* Caught by `NoHwDup` invariant: a handle to a hw kobj has via="dup".   *)
+(***************************************************************************)
+BuggyHwDup(p, h, new_rights) ==
+    /\ BUGGY_HW_DUP
+    /\ h \in handles[p]
+    /\ h.kobj \in HwKObjs
+    /\ new_rights \subseteq h.rights
+    /\ new_rights # {}
+    /\ handles' = [handles EXCEPT ![p] = @ \cup {[kobj |-> h.kobj,
+                                                  rights |-> new_rights,
+                                                  origin_proc |-> h.origin_proc,
+                                                  via |-> "dup"]}]
+    /\ UNCHANGED <<origin_rights, kobjs_alive, proc_caps, sessions>>
+
+(***************************************************************************)
+(* BuggyHwOverlap(p, k, granted) — P4-Ib bug class: kernel allocates a   *)
+(* second handle to an ALREADY-alive hw kobj (i.e., bypasses the         *)
+(* `k \notin kobjs_alive` precondition specifically for hw kobjs).      *)
+(*                                                                         *)
+(* Real-world analogue: `kobj_mmio_create(pa)` for a PA that's already   *)
+(* in g_mmio_claims — the impl missed the overlap check (off-by-one in   *)
+(* the range comparison; race between two cores' creates; etc.). The     *)
+(* result: two KObj_MMIO structs both claim the same hardware range,    *)
+(* and two procs hold handles to "the same" resource.                    *)
+(*                                                                         *)
+(* The action does NOT update kobjs_alive (it's already in the set);    *)
+(* origin_rights stays at the rights from the FIRST alloc. The new      *)
+(* handle is in a DIFFERENT proc (otherwise it'd just be a second handle*)
+(* to a kobj the same proc already owns, which is the dup hazard).      *)
+(*                                                                         *)
+(* Caught by `HwResourceExclusive` invariant.                              *)
+(***************************************************************************)
+BuggyHwOverlap(p, k, granted) ==
+    /\ BUGGY_HW_OVERLAP
+    /\ k \in HwKObjs
+    /\ k \in kobjs_alive
+    \* R9 F153 (P3) close: dropped the prior `~(\E h \in handles[p] :
+    \* h.kobj = k)` precondition so the action can ALSO fire when p
+    \* already holds a handle to k (same-proc double-alloc). The impl's
+    \* g_mmio_claims is global and rejects same-proc overlap too;
+    \* without this relaxation TLC didn't exercise that case. The
+    \* `HwResourceExclusive` invariant catches both cross-proc and
+    \* same-proc duplication because it counts handles across ALL
+    \* procs for the given kobj.
+    /\ granted \subseteq origin_rights[k]
+    /\ granted # {}
+    /\ handles' = [handles EXCEPT ![p] = @ \cup {[kobj |-> k,
+                                                  rights |-> granted,
+                                                  origin_proc |-> p,
+                                                  via |-> "orig"]}]
+    /\ UNCHANGED <<origin_rights, kobjs_alive, proc_caps, sessions>>
+
+(***************************************************************************)
+(* BuggyHwCreateNoCap(p, k, granted) — P4-Ib bug class: kernel grants a *)
+(* hw handle to a proc that lacks CapHwCreate.                            *)
+(*                                                                         *)
+(* Real-world analogue: missing capability check in SYS_MMIO_CREATE /     *)
+(* SYS_IRQ_CREATE — any userspace proc could call kobj_mmio_create(0x0,  *)
+(* sizeof_RAM) and gain a handle to the entire physical memory.          *)
+(*                                                                         *)
+(* Differs from HandleAlloc only by skipping the CapHwCreate \in        *)
+(* proc_caps[p] precondition.                                              *)
+(*                                                                         *)
+(* Caught by `HwHandleImpliesCap` invariant.                               *)
+(***************************************************************************)
+BuggyHwCreateNoCap(p, k, granted) ==
+    /\ BUGGY_HW_CREATE_NO_CAP
+    /\ k \in HwKObjs
+    /\ k \notin kobjs_alive
+    /\ CapHwCreate \notin proc_caps[p]
+    /\ granted \subseteq Rights
+    /\ granted # {}
+    /\ kobjs_alive' = kobjs_alive \cup {k}
+    /\ origin_rights' = [origin_rights EXCEPT ![k] = granted]
+    /\ handles' = [handles EXCEPT ![p] = @ \cup {[kobj |-> k,
+                                                  rights |-> granted,
+                                                  origin_proc |-> p,
+                                                  via |-> "orig"]}]
+    /\ UNCHANGED <<proc_caps, sessions>>
 
 (***************************************************************************)
 (* Next: disjunction of all actions. \E ranges over actual handles in a  *)
@@ -399,6 +521,9 @@ Next ==
            BuggyDirectTransfer(src, dst, h, nr)
     \/ \E p \in Procs, lost \in SUBSET Caps                   : ReduceCaps(p, lost)
     \/ \E p \in Procs, gained \in SUBSET Caps                 : BuggyCapsElevate(p, gained)
+    \/ \E p \in Procs : \E h \in handles[p] : \E nr \in SUBSET Rights : BuggyHwDup(p, h, nr)
+    \/ \E p \in Procs : \E k \in KObjs : \E granted \in SUBSET Rights : BuggyHwOverlap(p, k, granted)
+    \/ \E p \in Procs : \E k \in KObjs : \E granted \in SUBSET Rights : BuggyHwCreateNoCap(p, k, granted)
 
 Spec == Init /\ [][Next]_vars
 
@@ -440,11 +565,58 @@ OnlyTransferVia9P ==
 CapsCeiling ==
     \A p \in Procs : proc_caps[p] \subseteq InitialCapsOf(p)
 
+(***************************************************************************)
+(* NoHwDup — P4-Ib. No handle to a hw kobj was created via dup. Extends *)
+(* I-5's "non-transferable across procs" to "non-duplicable at all":     *)
+(* drivers hold exactly one origin handle per hw kobj.                    *)
+(*                                                                         *)
+(* Caught by `BuggyHwDup` (in the corresponding buggy config).             *)
+(***************************************************************************)
+NoHwDup ==
+    \A p \in Procs : \A h \in handles[p] :
+        (h.kobj \in HwKObjs) => h.via # "dup"
+
+(***************************************************************************)
+(* HwResourceExclusive — P4-Ib. For each hw kobj, at most one alive      *)
+(* handle exists across all procs. Mathematically follows from           *)
+(* `k \notin kobjs_alive` precondition on HandleAlloc + NoHwDup +        *)
+(* HwHandlesAtOrigin; the explicit invariant catches `BuggyHwOverlap`    *)
+(* which bypasses the `k \notin kobjs_alive` precondition.                *)
+(*                                                                         *)
+(* Models the kernel's "two drivers can't claim the same MMIO range /    *)
+(* INTID" contract. The "kobj identity" here represents a hardware       *)
+(* resource (PA range, INTID); two alive handles to the same identity   *)
+(* would mean two procs each believing they exclusively own the resource.*)
+(***************************************************************************)
+HwResourceExclusive ==
+    \A k \in HwKObjs :
+        Cardinality(UNION {{h \in handles[p] : h.kobj = k} : p \in Procs}) <= 1
+
+(***************************************************************************)
+(* HwHandleImpliesCap — P4-Ib. Every alive handle to a hw kobj is held  *)
+(* by a proc that has CapHwCreate. Models the impl-side requirement:    *)
+(* SYS_MMIO_CREATE / SYS_IRQ_CREATE check `p->caps & CAP_HW_CREATE`     *)
+(* before allocating the handle.                                           *)
+(*                                                                         *)
+(* The state-invariant phrasing relies on ReduceCaps's restriction        *)
+(* (above) that forbids dropping CapHwCreate while holding hw handles —  *)
+(* without that, a proc could alloc-with-cap then drop-cap, producing a *)
+(* state that satisfies "had cap at alloc" but violates "has cap now".  *)
+(*                                                                         *)
+(* Caught by `BuggyHwCreateNoCap` (in the corresponding buggy config).    *)
+(***************************************************************************)
+HwHandleImpliesCap ==
+    \A p \in Procs : \A h \in handles[p] :
+        (h.kobj \in HwKObjs) => CapHwCreate \in proc_caps[p]
+
 Invariants ==
     /\ TypeOk
     /\ RightsCeiling
     /\ HwHandlesAtOrigin
     /\ OnlyTransferVia9P
     /\ CapsCeiling
+    /\ NoHwDup
+    /\ HwResourceExclusive
+    /\ HwHandleImpliesCap
 
 ====

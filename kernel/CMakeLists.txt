@@ -82,6 +82,7 @@ set(KERNEL_SRCS
     virtio.c
     virtio_pci.c
     irqfwd.c
+    mmio_handle.c
     test/test_dev.c
     test/test_trivial_devs.c
     test/test_devproc.c
@@ -93,6 +94,9 @@ set(KERNEL_SRCS
     test/test_irqfwd.c
     test/test_userspace2.c
     test/test_userspace_ramfs.c
+    test/test_caps.c
+    test/test_mmio_handle.c
+    test/test_handle_hw.c
 )
 
 set(KERNEL_LD_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/../arch/arm64/kernel.ld)

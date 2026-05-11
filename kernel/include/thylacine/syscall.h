@@ -34,8 +34,16 @@
 
 // Syscall numbers. v1.0 P3-Ec stable; new syscalls append.
 enum {
-    SYS_EXITS = 0,
-    SYS_PUTS  = 1,
+    SYS_EXITS       = 0,
+    SYS_PUTS        = 1,
+    // P4-Ib: hardware-handle creation + IRQ wait. Caller must hold
+    // CAP_HW_CREATE (proc->caps). Returns hidx_t handle index (>=0)
+    // on success, -1 on permission denied / resource exhausted / arg
+    // validation failure. Maps to specs/handles.tla HandleAlloc with
+    // k \in HwKObjs precondition.
+    SYS_MMIO_CREATE = 2,    // arg: pa (x0), size (x1), rights (x2)
+    SYS_IRQ_CREATE  = 3,    // arg: intid (x0), rights (x1)
+    SYS_IRQ_WAIT    = 4,    // arg: handle (x0)
 };
 
 struct exception_context;

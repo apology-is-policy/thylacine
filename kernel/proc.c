@@ -16,6 +16,7 @@
 //   2. proc_init      — kproc (PID 0) appears
 //   3. thread_init    — kthread (TID 0) appears, parented to kproc
 
+#include <thylacine/caps.h>
 #include <thylacine/extinction.h>
 #include <thylacine/handle.h>
 #include <thylacine/page.h>
@@ -188,6 +189,14 @@ void proc_init(void) {
     if (!g_kproc) extinction("kmem_cache_alloc(kproc) failed");
     proc_init_fields(g_kproc, 0);
     g_kproc->territory = kpgrp();
+
+    // P4-Ib: kproc gets the full capability mask. It's the root of
+    // trust: kernel-internal test code (running in kproc context) can
+    // create hw handles for testing; rfork'd children inherit CAP_NONE
+    // and must be granted caps via a future Phase 5+ capability syscall
+    // before they can create hw handles. Maps to specs/handles.tla
+    // ProcRoot starting with full caps.
+    g_kproc->caps = CAP_ALL;
 
     // P2-Fc: kproc gets its own handle table. handle_init must run
     // before proc_init (main.c bootstrap order). Failures here panic —

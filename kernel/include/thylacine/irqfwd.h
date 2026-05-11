@@ -52,6 +52,17 @@ struct KObj_IRQ {
     u32           pending_count; // collapsed-IRQ count since last wait
 };
 
+// One-time setup: pre-reserve INTIDs owned by kernel-internal callers
+// (those that bypass kobj_irq_create and call gic_attach directly —
+// timer at INTID 30, IPI_RESCHED at SGI 0). Without this reservation,
+// a userspace caller with CAP_HW_CREATE could call kobj_irq_create on
+// the same INTID and clobber the kernel's handler slot (R9 F142, P0).
+//
+// Must be called AFTER gic_init + timer_init (we reserve known
+// kernel-claimed INTIDs after they're attached) and BEFORE any
+// kobj_irq_create caller can race. boot_main wires it after virtio_init.
+void irqfwd_init(void);
+
 // Allocate a KObj_IRQ + register the GIC handler + enable the IRQ.
 // Returns NULL on:
 //   - SLUB / kmalloc OOM.
