@@ -37,6 +37,7 @@
 #include <thylacine/irqfwd.h>           // irqfwd_init (P4-Ib R9 F142)
 #include <thylacine/joey.h>     // joey_run (P3-F)
 #include <thylacine/mmio_handle.h>      // kobj_mmio_init (P4-Ib)
+#include <thylacine/dma_handle.h>       // kobj_dma_init (P4-Ic5b1b)
 #include <thylacine/page.h>
 #include <thylacine/territory.h>
 #include <thylacine/proc.h>
@@ -320,6 +321,12 @@ void boot_main(void) {
     // Independent of proc/thread/sched bring-up; placed here for
     // grouping with handle_init.
     kobj_mmio_init();
+    // P4-Ic5b1b: kobj_dma_init sets up the DMA-handle subsystem.
+    // No state to allocate (buddy is the claim layer); the call is
+    // a one-time init guard + boot-banner diagnostic. Must run AFTER
+    // phys_init (alloc_pages must be live by the time the first
+    // kobj_dma_create fires).
+    kobj_dma_init();
     proc_init();
     thread_init();
     sched_init(0);                              // boot CPU's per-CPU sched state

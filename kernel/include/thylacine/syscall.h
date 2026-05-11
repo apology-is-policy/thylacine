@@ -50,6 +50,24 @@ enum {
     // address space (proc exit → VMA tear-down → burrow_release_mapping
     // → final unref of the kobj_mmio).
     SYS_MMIO_MAP    = 5,    // arg: handle (x0), vaddr (x1), prot (x2)
+    // P4-Ic5b1b: DMA-buffer allocation + mapping. Caller must hold
+    // CAP_HW_CREATE. Distinct from MMIO at the syscall level because
+    // the kernel chooses the PA (via alloc_pages) instead of the caller
+    // specifying it.
+    //
+    // SYS_DMA_CREATE allocates a contiguous pinned page chunk of `size`
+    // bytes (page-aligned, ≤ KOBJ_DMA_MAX_SIZE) and returns a KOBJ_DMA
+    // handle. The PA is stable for the handle's lifetime; the kernel
+    // doesn't migrate the pages.
+    //
+    // SYS_DMA_MAP installs a user-VA mapping for an existing KOBJ_DMA
+    // handle and returns the underlying PA so the driver can embed it
+    // into device-visible descriptors (VirtIO virtqueue rings etc.).
+    // Returns a non-negative PA on success; -1 on failure. PA fits in
+    // 40 bits (IPS bound at v1.0) so the sign bit is never set for a
+    // valid PA; negative return is unambiguously an error.
+    SYS_DMA_CREATE  = 6,    // arg: size (x0), rights (x1)
+    SYS_DMA_MAP     = 7,    // arg: handle (x0), vaddr (x1), prot (x2)
 };
 
 struct exception_context;

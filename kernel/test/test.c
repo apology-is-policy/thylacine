@@ -223,6 +223,19 @@ void test_mmio_handle_double_unref_extincts(void);
 void test_mmio_handle_create_kernel_reserved_rejected(void);
 void test_mmio_handle_virtio_mmio_claimable(void);
 void test_mmio_handle_create_out_of_ips_rejected(void);
+void test_dma_handle_create_basic(void);
+void test_dma_handle_create_zero_size_rejected(void);
+void test_dma_handle_create_oversize_rejected(void);
+void test_dma_handle_create_round_up_to_page(void);
+void test_dma_handle_distinct_pa(void);
+void test_dma_handle_unref_releases_chunk(void);
+void test_dma_handle_zero_init(void);
+void test_burrow_dma_create_basic(void);
+void test_burrow_dma_create_null_rejected(void);
+void test_burrow_dma_holds_kobj_ref(void);
+void test_burrow_dma_lifecycle_round_trip(void);
+void test_dma_map_install_vma(void);
+void test_dma_map_proc_free_releases_kobj(void);
 void test_handle_hw_mmio_dup_rejected(void);
 void test_handle_hw_irq_dup_rejected(void);
 void test_handle_hw_mmio_close_releases_claim(void);
@@ -543,6 +556,29 @@ struct test_case g_tests[] = {
     { "mmio_map.overlap_rejected",     test_mmio_map_overlap_rejected,     false, NULL },
     { "mmio_map.proc_free_releases_kobj",
                                        test_mmio_map_proc_free_releases_kobj, false, NULL },
+    { "dma_handle.create_basic",       test_dma_handle_create_basic,       false, NULL },
+    { "dma_handle.zero_size_rejected", test_dma_handle_create_zero_size_rejected,
+                                                                           false, NULL },
+    { "dma_handle.oversize_rejected",  test_dma_handle_create_oversize_rejected,
+                                                                           false, NULL },
+    { "dma_handle.round_up_to_page",   test_dma_handle_create_round_up_to_page,
+                                                                           false, NULL },
+    { "dma_handle.distinct_pa",        test_dma_handle_distinct_pa,        false, NULL },
+    { "dma_handle.unref_releases_chunk",
+                                       test_dma_handle_unref_releases_chunk,
+                                                                           false, NULL },
+    { "dma_handle.zero_init",          test_dma_handle_zero_init,          false, NULL },
+    { "burrow_dma.create_basic",       test_burrow_dma_create_basic,       false, NULL },
+    { "burrow_dma.create_null_rejected",
+                                       test_burrow_dma_create_null_rejected, false, NULL },
+    { "burrow_dma.holds_kobj_ref",     test_burrow_dma_holds_kobj_ref,     false, NULL },
+    { "burrow_dma.lifecycle_round_trip",
+                                       test_burrow_dma_lifecycle_round_trip,
+                                                                           false, NULL },
+    { "dma_map.install_vma",           test_dma_map_install_vma,           false, NULL },
+    { "dma_map.proc_free_releases_kobj",
+                                       test_dma_map_proc_free_releases_kobj,
+                                                                           false, NULL },
     { NULL, NULL, false, NULL },          // sentinel
 };
 

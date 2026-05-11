@@ -303,13 +303,22 @@ enum fault_result userland_demand_page(struct Proc *p,
     if (vma->burrow->magic != VMO_MAGIC)    return FAULT_UNHANDLED_USER;
     if (burrow_byte_off >= vma->burrow->size)  return FAULT_UNHANDLED_USER;
 
-    // 4. Resolve to a backing PA. P4-Ic2: dispatch on burrow type.
+    // 4. Resolve to a backing PA. P4-Ic2 + P4-Ic5b1b: dispatch on burrow type.
     //    - BURROW_TYPE_ANON: pages is the head of a contiguous alloc_pages
     //      chunk; page i is at page_to_pa(pages) + i * PAGE_SIZE.
     //      PTE attrs are MAIR_IDX_NORMAL_WB (cacheable RAM).
     //    - BURROW_TYPE_MMIO: pa is the device PA (page-aligned, fixed);
     //      page i is at burrow->pa + i * PAGE_SIZE.
     //      PTE attrs are MAIR_IDX_DEVICE (nGnRnE).
+    //    - BURROW_TYPE_DMA (P4-Ic5b1b): pa is the buddy-chosen PA of the
+    //      pinned page chunk owned by the underlying KObj_DMA; page i is
+    //      at burrow->pa + i * PAGE_SIZE. PTE attrs are
+    //      MAIR_IDX_NORMAL_WB (cacheable RAM) — DMA buffers are
+    //      coherent on QEMU virt's VirtIO transports, so the CPU writes
+    //      with normal cache attributes and the device sees the same
+    //      bytes via snoop. Hardware that requires uncached DMA buffers
+    //      (Phase 5+ real platforms) will introduce a flag at create
+    //      time to select Device attrs.
     paddr_t page_pa;
     bool    device_memory;
     switch (vma->burrow->type) {
@@ -324,6 +333,12 @@ enum fault_result userland_demand_page(struct Proc *p,
         page_pa = vma->burrow->pa +
                   (burrow_byte_off & ~(u64)(PAGE_SIZE - 1));
         device_memory = true;
+        break;
+    case BURROW_TYPE_DMA:
+        if (!vma->burrow->kobj_dma)         return FAULT_UNHANDLED_USER;
+        page_pa = vma->burrow->pa +
+                  (burrow_byte_off & ~(u64)(PAGE_SIZE - 1));
+        device_memory = false;
         break;
     case BURROW_TYPE_INVALID:
     default:

@@ -83,6 +83,7 @@ set(KERNEL_SRCS
     virtio_pci.c
     irqfwd.c
     mmio_handle.c
+    dma_handle.c
     test/test_dev.c
     test/test_trivial_devs.c
     test/test_devproc.c
@@ -96,6 +97,7 @@ set(KERNEL_SRCS
     test/test_userspace_ramfs.c
     test/test_caps.c
     test/test_mmio_handle.c
+    test/test_dma_handle.c
     test/test_handle_hw.c
     test/test_burrow_mmio.c
     test/test_mmio_map.c

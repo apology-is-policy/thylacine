@@ -37,6 +37,7 @@
 
 #include <thylacine/extinction.h>
 #include <thylacine/mmio_handle.h>   // P4-Ic1: kobj_mmio_ref/unref for MMIO Burrows
+#include <thylacine/dma_handle.h>    // P4-Ic5b1b: kobj_dma_ref/unref for DMA Burrows
 #include <thylacine/page.h>
 #include <thylacine/proc.h>
 #include <thylacine/types.h>
@@ -152,14 +153,49 @@ struct Burrow *burrow_create_mmio(struct KObj_MMIO *kobj_mmio) {
     return v;
 }
 
+// P4-Ic5b1b: Wrap a KObj_DMA in a Burrow. Holds a reference on the
+// underlying KObj_DMA so the pinned page chunk survives the caller's
+// eventual handle_close on their KObj_DMA handle. Mirrors
+// burrow_create_mmio's construction-reference pattern.
+struct Burrow *burrow_create_dma(struct KObj_DMA *kobj_dma) {
+    if (!g_vmo_cache) extinction("burrow_create_dma before burrow_init");
+    if (!kobj_dma) return NULL;
+    if (kobj_dma->magic != KOBJ_DMA_MAGIC)
+        extinction("burrow_create_dma: kobj_dma has bad magic (UAF?)");
+    if (kobj_dma->size == 0) return NULL;     // defensive; kobj_dma_create rejects
+
+    struct Burrow *v = kmem_cache_alloc(g_vmo_cache, KP_ZERO);
+    if (!v) return NULL;
+
+    // Hold a ref on the kobj_dma for the Burrow's lifetime. Released in
+    // burrow_free_internal when both counts reach 0.
+    kobj_dma_ref(kobj_dma);
+
+    v->magic         = VMO_MAGIC;
+    v->type          = BURROW_TYPE_DMA;
+    v->size          = kobj_dma->size;
+    v->page_count    = kobj_dma->size / PAGE_SIZE;
+    v->handle_count  = 1;            // construction reference
+    v->mapping_count = 0;
+    v->pages         = NULL;         // DMA: page chunk lives on the KObj_DMA
+    v->order         = 0;
+    v->kobj_dma      = kobj_dma;
+    v->pa            = kobj_dma->pa;
+    g_vmo_created++;
+    return v;
+}
+
 // Internal: release pages + struct when both counts have reached 0.
 // The caller has already verified the precondition.
 //
 // P4-Ic1: type-dispatches between ANON (free_pages on the alloc_pages
 // chunk) and MMIO (release the held KObj_MMIO ref; pages was NULL by
-// construction). The double-free guard differs per type:
+// construction). P4-Ic5b1b adds DMA (release the held KObj_DMA ref;
+// pages was NULL on the Burrow — the page chunk lives on the KObj_DMA).
+// The double-free guard differs per type:
 //   - ANON: pages==NULL indicates already-freed → extinct.
 //   - MMIO: kobj_mmio==NULL indicates already-freed → extinct.
+//   - DMA:  kobj_dma==NULL indicates already-freed → extinct.
 static void burrow_free_internal(struct Burrow *v) {
     if (v->magic != VMO_MAGIC)
         extinction("burrow_free_internal of corrupted BURROW");
@@ -187,6 +223,16 @@ static void burrow_free_internal(struct Burrow *v) {
         // alive and only the Burrow goes away.
         kobj_mmio_unref(v->kobj_mmio);
         v->kobj_mmio = NULL;
+        break;
+    case BURROW_TYPE_DMA:
+        if (!v->kobj_dma)
+            extinction("burrow_free_internal(DMA) with kobj_dma already NULL (double-free)");
+        // Drop the Burrow's reference to the KObj_DMA. Mirror of the
+        // MMIO path: the user-handle's ref and the Burrow's ref are
+        // independent; whichever drops last triggers
+        // kobj_dma_free_internal + free_pages on the underlying chunk.
+        kobj_dma_unref(v->kobj_dma);
+        v->kobj_dma = NULL;
         break;
     case BURROW_TYPE_INVALID:
     default:
@@ -244,6 +290,10 @@ void burrow_acquire_mapping(struct Burrow *v) {
     case BURROW_TYPE_MMIO:
         if (!v->kobj_mmio)
             extinction("burrow_acquire_mapping of MMIO BURROW with NULL kobj_mmio (UAF)");
+        break;
+    case BURROW_TYPE_DMA:
+        if (!v->kobj_dma)
+            extinction("burrow_acquire_mapping of DMA BURROW with NULL kobj_dma (UAF)");
         break;
     case BURROW_TYPE_INVALID:
     default:

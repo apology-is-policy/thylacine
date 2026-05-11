@@ -8,6 +8,7 @@
 #include <thylacine/syscall.h>
 #include <thylacine/burrow.h>
 #include <thylacine/caps.h>
+#include <thylacine/dma_handle.h>
 #include <thylacine/extinction.h>
 #include <thylacine/handle.h>
 #include <thylacine/irqfwd.h>
@@ -333,6 +334,147 @@ static s64 sys_mmio_map_handler(u64 hraw, u64 vaddr, u64 prot_raw) {
 }
 
 // =============================================================================
+// SYS_DMA_CREATE — allocate a KObj_DMA handle for a contiguous DMA buffer (P4-Ic5b1b).
+// =============================================================================
+//
+// AArch64 ABI: x0 = size, x1 = rights.
+//
+// Capability-gated per specs/handles.tla::HwHandleImpliesCap:
+//   `caller->caps & CAP_HW_CREATE` must be non-zero (mirrors MMIO/IRQ).
+//
+// Size constraints: > 0, page-aligned at create-time (kobj_dma_create
+// page-aligns up), <= KOBJ_DMA_MAX_SIZE (1 MiB at v1.0). The kernel
+// chooses the PA via alloc_pages — distinct from MMIO where the caller
+// specifies the PA.
+//
+// Returns: hidx_t (>=0) on success, -1 on EPERM / EINVAL / EBUSY /
+// table-full / OOM.
+static s64 sys_dma_create_handler(u64 size, u64 rights) {
+    struct Thread *t = current_thread();
+    if (!t)                                          return -1;
+    struct Proc *p = t->proc;
+    if (!p)                                          return -1;
+
+    // HwHandleImpliesCap: require CAP_HW_CREATE. Acquire-fence load
+    // matches the R9 F146 discipline used in sys_mmio_create /
+    // sys_irq_create — future-proofs against Phase 5+ paths where a
+    // peer thread may mutate caps.
+    if ((__atomic_load_n(&p->caps, __ATOMIC_ACQUIRE) & CAP_HW_CREATE) == 0)
+        return -1;
+
+    // Validate rights early. Reject empty + reject bits outside
+    // RIGHT_ALL. RIGHT_DMA is the natural marker for DMA-capable
+    // handles but isn't structurally required at create time — the
+    // userspace driver decides what it needs at map time.
+    if (rights == 0 || (rights & ~(u64)RIGHT_ALL))   return -1;
+
+    // Bound size against u64 → size_t conversion. size_t is 64-bit on
+    // aarch64; the comparison is safe.
+    if (size == 0)                                   return -1;
+
+    struct KObj_DMA *k = kobj_dma_create((size_t)size);
+    if (!k)                                          return -1;
+
+    hidx_t h = handle_alloc(p, KOBJ_DMA, (rights_t)rights, k);
+    if (h < 0) {
+        // Rollback: release the page chunk back to buddy. Mirrors the
+        // sys_mmio_create rollback for the same reason — the proc never
+        // received a handle, so the construction reference must be
+        // dropped here.
+        kobj_dma_unref(k);
+        return -1;
+    }
+    return (s64)h;
+}
+
+// =============================================================================
+// SYS_DMA_MAP — install a user-VA mapping for a KObj_DMA handle (P4-Ic5b1b).
+// =============================================================================
+//
+// AArch64 ABI: x0 = handle index, x1 = vaddr, x2 = prot.
+//
+// Validates the handle (KOBJ_DMA + RIGHT_MAP), bounds the requested
+// prot by the handle's rights, creates a BURROW_TYPE_DMA Burrow wrapping
+// the KObj_DMA, installs a VMA via burrow_map, drops the construction
+// reference (transferring ownership to the VMA's mapping ref), and
+// returns the underlying PA so the driver can embed it in device-visible
+// descriptors.
+//
+// Returns: non-negative PA on success, -1 on failure. PA fits in 40 bits
+// (TCR.IPS bound at v1.0); the s64 cast is safe — no valid PA has the
+// sign bit set.
+//
+// Failure cases:
+//   - NULL Proc / corrupted Proc.
+//   - cap-missing CAP_HW_CREATE (defense-in-depth — HwHandleImpliesCap
+//     already requires the cap to hold the handle).
+//   - bad handle (out of range, wrong kind, missing RIGHT_MAP).
+//   - prot exceeds handle rights (e.g., WRITE without RIGHT_WRITE).
+//   - prot has EXEC set (DMA buffers are not executable; W^X invariant
+//     I-12 — device data lives in these pages, never code).
+//   - prot == 0 (must have at least READ).
+//   - prot has WRITE without READ (AArch64 has no W-only PTE encoding;
+//     mirrors the SYS_MMIO_MAP R10 F155 close).
+//   - burrow_create_dma OOM.
+//   - burrow_map failure (overlap with existing VMA, vaddr misalign,
+//     overflow, SLUB OOM for the Vma struct).
+static s64 sys_dma_map_handler(u64 hraw, u64 vaddr, u64 prot_raw) {
+    struct Thread *t = current_thread();
+    if (!t)                                          return -1;
+    struct Proc *p = t->proc;
+    if (!p)                                          return -1;
+
+    // Defense-in-depth — hw-handle ownership implies CAP_HW_CREATE per
+    // HwHandleImpliesCap. Mirror of the SYS_MMIO_MAP guard.
+    if ((__atomic_load_n(&p->caps, __ATOMIC_ACQUIRE) & CAP_HW_CREATE) == 0)
+        return -1;
+
+    struct Handle *slot = handle_get(p, (hidx_t)hraw);
+    if (!slot)                                       return -1;
+    if (slot->kind != KOBJ_DMA)                      return -1;
+    if ((slot->rights & RIGHT_MAP) == 0)             return -1;
+
+    // Bound requested prot by the handle's rights. EXEC is rejected
+    // unconditionally — DMA buffers carry data, never code (W^X
+    // invariant I-12 + structural defense against ELF-loaded code
+    // accidentally executing from a DMA buffer).
+    u32 prot = (u32)prot_raw;
+    if (prot == 0)                                   return -1;
+    if (prot & ~(u32)(VMA_PROT_READ | VMA_PROT_WRITE)) return -1;
+    if ((prot & VMA_PROT_WRITE) && !(slot->rights & RIGHT_WRITE)) return -1;
+    if ((prot & VMA_PROT_READ)  && !(slot->rights & RIGHT_READ))  return -1;
+
+    // AArch64 has no write-only PTE encoding (mirrors SYS_MMIO_MAP R10
+    // F155): a `prot = WRITE` only request would map fully-RW, breaking
+    // the rights claim. Reject so rights model and PTE always agree.
+    if ((prot & VMA_PROT_WRITE) && !(prot & VMA_PROT_READ)) return -1;
+
+    struct KObj_DMA *kd = (struct KObj_DMA *)slot->obj;
+    if (!kd)                                         return -1;
+    if (kd->magic != KOBJ_DMA_MAGIC)                 return -1;
+
+    // Create the Burrow. handle_count=1 is the construction reference.
+    struct Burrow *b = burrow_create_dma(kd);
+    if (!b)                                          return -1;
+
+    // Install the VMA via burrow_map. On success, mapping_count++. We
+    // then drop the construction reference, transferring ownership to
+    // the VMA. On failure, dropping the construction reference (with
+    // mapping_count still 0) triggers burrow_free_internal → releases
+    // the held kobj_dma ref → if it was the last ref, free_pages.
+    int rc = burrow_map(p, b, vaddr, kd->size, prot);
+    if (rc < 0) {
+        burrow_unref(b);
+        return -1;
+    }
+    burrow_unref(b);
+
+    // PA fits in 40 bits at v1.0 (TCR.IPS bound; mmu.c:668). The s64
+    // cast is safe — no valid PA has the sign bit set.
+    return (s64)kd->pa;
+}
+
+// =============================================================================
 // Dispatch entry.
 // =============================================================================
 
@@ -369,6 +511,17 @@ void syscall_dispatch(struct exception_context *ctx) {
         ctx->regs[0] = (u64)sys_mmio_map_handler(ctx->regs[0],
                                                  ctx->regs[1],
                                                  ctx->regs[2]);
+        return;
+
+    case SYS_DMA_CREATE:
+        ctx->regs[0] = (u64)sys_dma_create_handler(ctx->regs[0],
+                                                   ctx->regs[1]);
+        return;
+
+    case SYS_DMA_MAP:
+        ctx->regs[0] = (u64)sys_dma_map_handler(ctx->regs[0],
+                                                ctx->regs[1],
+                                                ctx->regs[2]);
         return;
 
     default:

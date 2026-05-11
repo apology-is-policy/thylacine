@@ -37,6 +37,8 @@ enum {
     T_SYS_IRQ_CREATE  = 3,  // P4-Ib: create KObj_IRQ handle
     T_SYS_IRQ_WAIT    = 4,  // P4-Ib: block until IRQ fires
     T_SYS_MMIO_MAP    = 5,  // P4-Ic2: map KObj_MMIO into user-VA
+    T_SYS_DMA_CREATE  = 6,  // P4-Ic5b1b: allocate KObj_DMA handle
+    T_SYS_DMA_MAP     = 7,  // P4-Ic5b1b: map KObj_DMA into user-VA, returns PA
 };
 
 // VMA prot bits — MUST mirror kernel/include/thylacine/vma.h's
@@ -168,6 +170,53 @@ static inline long t_mmio_map(long h, unsigned long vaddr, unsigned long prot) {
     register long x1 __asm__("x1") = (long)vaddr;
     register long x2 __asm__("x2") = (long)prot;
     register long x8 __asm__("x8") = T_SYS_MMIO_MAP;
+    __asm__ volatile (
+        "svc #0"
+        : "+r"(x0)
+        : "r"(x1), "r"(x2), "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
+// t_dma_create — allocate a KObj_DMA handle backed by `size` bytes of
+// kernel-allocated contiguous pinned memory. Requires T_RIGHT_HW_CREATE
+// capability. Size must be > 0 and ≤ 1 MiB at v1.0; kernel page-aligns
+// up. Returns a non-negative handle index on success, -1 on EPERM /
+// EINVAL (bad size) / EOOM. The buffer's PA is chosen by the kernel
+// and stable for the handle's lifetime.
+//
+// Pinned by specs/handles.tla::HwHandleImpliesCap +
+// HwResourceExclusive (via buddy's per-alloc partitioning).
+__attribute__((always_inline))
+static inline long t_dma_create(unsigned long size, unsigned long rights) {
+    register long x0 __asm__("x0") = (long)size;
+    register long x1 __asm__("x1") = (long)rights;
+    register long x8 __asm__("x8") = T_SYS_DMA_CREATE;
+    __asm__ volatile (
+        "svc #0"
+        : "+r"(x0)
+        : "r"(x1), "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
+// t_dma_map — install a user-VA mapping for a KObj_DMA handle and return
+// the underlying PA. The PTEs are installed lazily on first access
+// (demand-paging). Returns the buffer's PA (always non-negative since
+// PA fits in 40 bits at v1.0) on success, -1 on validation failure
+// (cap-missing, bad handle, prot validation, vaddr alignment, OOM).
+//
+// The driver embeds the returned PA into device-visible descriptors
+// (e.g., VirtIO virtqueue desc.addr fields). Pinned by
+// HwHandleImpliesCap + burrow.tla::NoUseAfterFree.
+__attribute__((always_inline))
+static inline long t_dma_map(long h, unsigned long vaddr, unsigned long prot) {
+    register long x0 __asm__("x0") = h;
+    register long x1 __asm__("x1") = (long)vaddr;
+    register long x2 __asm__("x2") = (long)prot;
+    register long x8 __asm__("x8") = T_SYS_DMA_MAP;
     __asm__ volatile (
         "svc #0"
         : "+r"(x0)

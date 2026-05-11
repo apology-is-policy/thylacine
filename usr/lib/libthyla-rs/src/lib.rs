@@ -38,6 +38,8 @@ pub const T_SYS_MMIO_CREATE: u64  = 2;
 pub const T_SYS_IRQ_CREATE: u64   = 3;
 pub const T_SYS_IRQ_WAIT: u64     = 4;
 pub const T_SYS_MMIO_MAP: u64     = 5;
+pub const T_SYS_DMA_CREATE: u64   = 6;
+pub const T_SYS_DMA_MAP: u64      = 7;
 
 // =============================================================================
 // Rights — MUST mirror RIGHT_* bits in kernel/include/thylacine/handle.h.
@@ -180,6 +182,51 @@ pub unsafe fn t_irq_wait(handle: i64) -> i64 {
         "svc #0",
         inlateout("x0") x0,
         in("x8") T_SYS_IRQ_WAIT,
+        options(nostack)
+    );
+    x0
+}
+
+// t_dma_create — create a KObj_DMA handle backed by `size` bytes of
+// kernel-allocated contiguous pinned memory. Requires CAP_HW_CREATE in
+// proc->caps. Size must be > 0 and ≤ 1 MiB at v1.0; kernel rounds up to
+// the next page boundary. Returns a non-negative handle index on
+// success, -1 on cap missing / size out of range / OOM.
+//
+// The DMA buffer's PA is chosen by the kernel and is stable for the
+// handle's lifetime. Use t_dma_map to install it in your address space
+// and obtain the PA for use in device-visible descriptors.
+#[inline(always)]
+pub unsafe fn t_dma_create(size: u64, rights: u32) -> i64 {
+    let mut x0: i64 = size as i64;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") rights as u64,
+        in("x8") T_SYS_DMA_CREATE,
+        options(nostack)
+    );
+    x0
+}
+
+// t_dma_map — install user-VA mappings for a KObj_DMA handle and return
+// the underlying PA. `vaddr` must be page-aligned (4 KiB); `prot` must be
+// non-zero, only R/W bits set (EXEC rejected per W^X), no W-without-R.
+//
+// Returns the buffer's PA on success (always non-negative since PA fits
+// in 40 bits at v1.0), -1 on validation failure. Driver embeds the PA
+// into device-visible descriptors (VirtIO virtqueue rings, etc.).
+//
+// Safety: handle must be valid + held by the caller.
+#[inline(always)]
+pub unsafe fn t_dma_map(handle: i64, vaddr: u64, prot: u32) -> i64 {
+    let mut x0: i64 = handle;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") vaddr,
+        in("x2") prot as u64,
+        in("x8") T_SYS_DMA_MAP,
         options(nostack)
     );
     x0

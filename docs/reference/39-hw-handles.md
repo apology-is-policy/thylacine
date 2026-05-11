@@ -1,8 +1,8 @@
-# 39 — Hardware handles + capability gating (P4-Ib)
+# 39 — Hardware handles + capability gating (P4-Ib + P4-Ic5b1b)
 
 ## Purpose
 
-P4-Ib lifts the kernel from "hw kobj kinds exist in the type enum" (P2-Fc) to "userspace drivers can create + own KObj_MMIO and KObj_IRQ handles through syscalls, with PA / INTID exclusivity enforced at the kernel layer, gated by a per-Proc capability". This is the substrate the first Rust userspace driver (P4-Ic — virtio-blk) builds atop.
+P4-Ib lifted the kernel from "hw kobj kinds exist in the type enum" (P2-Fc) to "userspace drivers can create + own `KObj_MMIO` and `KObj_IRQ` handles through syscalls, with PA / INTID exclusivity enforced at the kernel layer, gated by a per-Proc capability". P4-Ic5b1b extends the same substrate to `KObj_DMA`: kernel-allocated contiguous pinned page chunks for DMA descriptor tables, ring buffers, and bounce buffers. Together they are the substrate the first Rust userspace driver (P4-Ic5b2 — virtio-blk) builds atop.
 
 Three load-bearing invariants pinned at this layer, all proven in `specs/handles.tla` (extended at P4-Ib):
 
@@ -63,6 +63,34 @@ u64 kobj_mmio_live_count(void);
 
 `kobj_mmio_create` is the structural enforcement of `HwResourceExclusive`: returns `NULL` if the requested `[pa, pa+size)` overlaps any currently-claimed range. The check is under a single spinlock acquire (`g_mmio_lock`); no TOCTOU between the overlap scan and the slot insert.
 
+### `<thylacine/dma_handle.h>` — KObj_DMA lifecycle (P4-Ic5b1b)
+
+```c
+#define KOBJ_DMA_MAGIC 0x444D4100BADC0DEEULL
+#define KOBJ_DMA_MAX_SIZE  (1ull * 1024 * 1024)   // 1 MiB
+
+struct KObj_DMA {
+    u64           magic;
+    u64           pa;          // page-aligned, contiguous
+    size_t        size;        // page-aligned, > 0, ≤ KOBJ_DMA_MAX_SIZE
+    struct page  *pages;       // alloc_pages chunk (for free_pages)
+    unsigned      order;       // buddy order
+    int           ref;
+};
+
+void kobj_dma_init(void);                          // boot bring-up
+struct KObj_DMA *kobj_dma_create(size_t size);     // alloc + pin
+void             kobj_dma_ref(struct KObj_DMA *);
+void             kobj_dma_unref(struct KObj_DMA *);
+void             kobj_dma_destroy(struct KObj_DMA *);
+u64              kobj_dma_total_created(void);
+u64              kobj_dma_live_count(void);
+```
+
+`kobj_dma_create` is the structural enforcement of `HwResourceExclusive` for DMA: the buddy allocator returns a fresh contiguous page chunk per call, so distinct `KObj_DMA` cannot share PA. No global claim table is needed — the page allocator IS the claim layer. Distinct from `kobj_mmio_create` where userspace specifies the PA and overlap rejection runs against `g_mmio_claims`.
+
+PA stability across handle lifetime: once `kobj_dma_create` returns, `k->pa` is never modified. No code path mutates it; the structural property (no migrator exists at v1.0) is the impl-side commitment, documented in `specs/SPEC-TO-CODE.md`.
+
 ### Syscall surface — `<thylacine/syscall.h>`
 
 ```c
@@ -73,6 +101,8 @@ enum {
     SYS_IRQ_CREATE  = 3,   // arg: intid (x0), rights (x1)
     SYS_IRQ_WAIT    = 4,   // arg: handle (x0)
     SYS_MMIO_MAP    = 5,   // P4-Ic2: arg: handle (x0), vaddr (x1), prot (x2)
+    SYS_DMA_CREATE  = 6,   // P4-Ic5b1b: arg: size (x0), rights (x1)
+    SYS_DMA_MAP     = 7,   // P4-Ic5b1b: arg: handle (x0), vaddr (x1), prot (x2)
 };
 ```
 
@@ -83,6 +113,25 @@ enum {
 4. `burrow_create_mmio(km)` — wraps the KObj_MMIO in a `BURROW_TYPE_MMIO` Burrow (refs the kobj for the Burrow's lifetime).
 5. `burrow_map(p, b, vaddr, km->size, prot)` — installs the VMA via `vma_alloc` + `vma_insert`. PTEs install lazily on first access (demand-paging via `userland_demand_page`).
 6. `burrow_unref(b)` — transfers ownership to the VMA's mapping ref (matches anon flow). On failure, releases the construction ref → `burrow_free_internal` → `kobj_mmio_unref` → claim released.
+
+**`SYS_DMA_CREATE` (P4-Ic5b1b)** — allocates a contiguous pinned page chunk of `size` bytes (page-aligned, ≤ `KOBJ_DMA_MAX_SIZE`) and returns a `KOBJ_DMA` handle. Sequence:
+1. Cap check: `proc->caps & CAP_HW_CREATE` (HwHandleImpliesCap).
+2. Validate rights: non-zero, within `RIGHT_ALL`.
+3. Validate size: `> 0`.
+4. `kobj_dma_create(size)` — `alloc_pages(order, KP_ZERO)` for contiguous chunk + struct alloc.
+5. `handle_alloc(p, KOBJ_DMA, rights, k)`.
+6. On `handle_alloc` failure: `kobj_dma_unref(k)` releases the chunk back to buddy (rollback discipline mirrors MMIO).
+
+The kernel chooses the PA — userspace cannot specify it. This eliminates the entire bug class of PA-collision with kernel-reserved ranges, IPS-out-of-bound PAs, etc., at the syscall surface (no `kobj_dma_reserve_kernel_ranges` analogue needed because no userspace input ever names a PA).
+
+**`SYS_DMA_MAP` (P4-Ic5b1b)** — installs a user-VA mapping for a `KOBJ_DMA` handle. Returns the buffer's PA on success so the driver can embed it into device-visible descriptors. Sequence:
+1. Cap check (defense-in-depth; `HwHandleImpliesCap`).
+2. `handle_get` + verify kind=`KOBJ_DMA` + `RIGHT_MAP` in rights.
+3. Validate `prot`: non-zero; only `READ|WRITE` bits; no `EXEC` (W^X — DMA pages carry data, not code); bound by handle rights; reject W-without-R (AArch64 has no W-only PTE encoding per R10 F155 close).
+4. `burrow_create_dma(kd)` — wraps the `KObj_DMA` in a `BURROW_TYPE_DMA` Burrow (refs the kobj for the Burrow's lifetime).
+5. `burrow_map(p, b, vaddr, kd->size, prot)` — installs the VMA via `vma_alloc` + `vma_insert`. PTEs install lazily on first access.
+6. `burrow_unref(b)` — transfers ownership to the VMA. On failure, releases construction ref → `burrow_free_internal` → `kobj_dma_unref`.
+7. Return `kd->pa` (non-negative; valid PA fits in 40 bits at v1.0).
 
 The actual PTE install happens at first-access via `userland_demand_page` (`arch/arm64/fault.c`):
 
@@ -96,12 +145,16 @@ case BURROW_TYPE_MMIO:
     page_pa = vma->burrow->pa + offset;
     device_memory = true;         // MAIR_IDX_DEVICE (nGnRnE)
     break;
+case BURROW_TYPE_DMA:             // P4-Ic5b1b
+    page_pa = vma->burrow->pa + offset;
+    device_memory = false;        // MAIR_IDX_NORMAL_WB
+    break;
 }
 mmu_install_user_pte(p->pgtable_root, p->asid, page_va, page_pa,
                      vma->prot, device_memory);
 ```
 
-Device-memory PTE attrs (`MAIR_IDX_DEVICE = 0`, `MAIR_ATTR_DEVICE_nGnRnE = 0x00` per `arch/arm64/mmu.h`) ensure CPU doesn't gather / reorder / coalesce MMIO accesses.
+Device-memory PTE attrs (`MAIR_IDX_DEVICE = 0`, `MAIR_ATTR_DEVICE_nGnRnE = 0x00` per `arch/arm64/mmu.h`) ensure CPU doesn't gather / reorder / coalesce MMIO accesses. DMA buffers use Normal cacheable attrs — CPU + device both access via cacheable PTEs; QEMU virt's VirtIO transports are coherent so no explicit cache maintenance is needed. Phase 5+ real hardware that requires uncached DMA buffers may introduce a flag at create time.
 
 Each cap-gated syscall checks `current_thread()->proc->caps & CAP_HW_CREATE` before any allocation; returns -1 (EPERM) on cap-missing. Rights validation rejects `rights == 0` or `rights & ~RIGHT_ALL`. INTID range bound is enforced by `intid_try_claim` inside `kobj_irq_create`.
 
@@ -111,16 +164,19 @@ Each cap-gated syscall checks `current_thread()->proc->caps & CAP_HW_CREATE` bef
 long t_mmio_create(unsigned long pa, unsigned long size, unsigned long rights);
 long t_irq_create(unsigned long intid, unsigned long rights);
 long t_irq_wait(long handle);
-long t_mmio_map(long handle, unsigned long vaddr, unsigned long prot);   // P4-Ic2
+long t_mmio_map(long handle, unsigned long vaddr, unsigned long prot);    // P4-Ic2
+long t_dma_create(unsigned long size, unsigned long rights);              // P4-Ic5b1b
+long t_dma_map(long handle, unsigned long vaddr, unsigned long prot);     // P4-Ic5b1b
 
 #define T_PROT_READ       (1u << 0)
 #define T_PROT_WRITE      (1u << 1)
 #define T_PROT_EXEC       (1u << 2)
 ```
 
-`t_mmio_create` / `t_irq_create`: non-negative handle index on success, -1 on error.
+`t_mmio_create` / `t_irq_create` / `t_dma_create`: non-negative handle index on success, -1 on error.
 `t_irq_wait`: collapsed IRQ count (>=1) on success, -1 on error.
 `t_mmio_map`: 0 on success, -1 on error.
+`t_dma_map`: non-negative PA on success (always non-negative since PA fits in 40 bits), -1 on error.
 
 ---
 
@@ -317,8 +373,21 @@ All 8 buggy cfgs produce expected counterexamples under TLC; correct cfg explore
 | `handle_hw.irq_dup_rejected` | `handle_dup` on KOBJ_IRQ returns -1 (NoHwDup) |
 | `handle_hw.mmio_close_releases_claim` | `handle_close` → claim returns to pool |
 | `handle_hw.irq_close_releases_intid` | `handle_close` → INTID returns to pool |
+| `dma_handle.create_basic` | P4-Ic5b1b: round-trip create + verify pa/size/ref + page_to_pa(pages)==pa |
+| `dma_handle.zero_size_rejected` | P4-Ic5b1b: `kobj_dma_create(0)` → NULL |
+| `dma_handle.oversize_rejected` | P4-Ic5b1b: `kobj_dma_create(KOBJ_DMA_MAX_SIZE + PAGE_SIZE)` → NULL |
+| `dma_handle.round_up_to_page` | P4-Ic5b1b: sub-page request rounds up to PAGE_SIZE |
+| `dma_handle.distinct_pa` | P4-Ic5b1b: two creates yield distinct PAs (HwResourceExclusive structural) |
+| `dma_handle.unref_releases_chunk` | P4-Ic5b1b: live_count returns to baseline on final unref |
+| `dma_handle.zero_init` | P4-Ic5b1b: KP_ZERO at alloc — buffer reads all-zero via direct map |
+| `burrow_dma.create_basic` | P4-Ic5b1b: type=BURROW_TYPE_DMA + pa+size set correctly + handle_count=1 |
+| `burrow_dma.create_null_rejected` | P4-Ic5b1b: NULL kobj_dma → NULL Burrow |
+| `burrow_dma.holds_kobj_ref` | P4-Ic5b1b: Burrow's ref keeps KObj_DMA alive past caller's unref |
+| `burrow_dma.lifecycle_round_trip` | P4-Ic5b1b: symmetric of above — caller-first then Burrow-first both free at boundary |
+| `dma_map.install_vma` | P4-Ic5b1b: burrow_create_dma + burrow_map installs VMA reachable via vma_lookup |
+| `dma_map.proc_free_releases_kobj` | P4-Ic5b1b: proc_free → VMA → Burrow → KObj_DMA unref cascade |
 
-All 15 PASS at P4-Ib tip; 180 → 195 total in-kernel tests. After P4-Ic5a + P4-Ic5-IRQ-probe, two new userspace-SVC-path tests (`userspace.mmio_probe_rfork_with_caps` + `userspace.irq_probe_rfork_with_caps`) lock in end-to-end SVC coverage for all four hw-handle syscalls (`SYS_MMIO_CREATE`, `SYS_MMIO_MAP`, `SYS_IRQ_CREATE`, `SYS_IRQ_WAIT`).
+All 15 P4-Ib tests + 13 new P4-Ic5b1b tests PASS at P4-Ic5b1b tip; 213 → 226 total in-kernel tests. After P4-Ic5a + P4-Ic5-IRQ-probe, two userspace-SVC-path tests (`userspace.mmio_probe_rfork_with_caps` + `userspace.irq_probe_rfork_with_caps`) lock in end-to-end SVC coverage for all four MMIO/IRQ syscalls (`SYS_MMIO_CREATE`, `SYS_MMIO_MAP`, `SYS_IRQ_CREATE`, `SYS_IRQ_WAIT`). DMA-side SVC-path coverage will land naturally at P4-Ic5b2 when the virtio-blk driver crate exercises the path.
 
 ---
 
@@ -362,9 +431,13 @@ All 15 PASS at P4-Ib tip; 180 → 195 total in-kernel tests. After P4-Ic5a + P4-
 | Spec `handles.tla` extension | **Landed (P4-Ib)** — 3 invariants + 3 buggy actions + 3 cfg variants |
 | Spec `handles.tla::RforkWithCaps` action + `proc_ceiling` state var | **Landed (P4-Ic3)** — strengthened `CapsCeiling` to dynamic ceiling; +1 buggy action (`BuggyRforkElevate`) + cfg variant |
 | Syscall handlers (MMIO_CREATE, IRQ_CREATE, IRQ_WAIT) | **Landed (P4-Ib)** |
-| `libt` syscall wrappers | **Landed (P4-Ib + extended P4-Ic2 with `t_mmio_map`)** |
+| `libt` syscall wrappers | **Landed (P4-Ib + extended P4-Ic2 with `t_mmio_map` + extended P4-Ic5b1b with `t_dma_create` + `t_dma_map`)** |
 | `SYS_MMIO_MAP` syscall + `kobj_mmio_map_into_user` semantics | **Landed (P4-Ic2)** — `BURROW_TYPE_MMIO` (P4-Ic1) + `userland_demand_page` dispatch (P4-Ic2) + device-memory PTE attrs (P4-Ic2) |
-| Userspace SVC-path tests (all four hw-handle syscalls) | **Landed (P4-Ic5a + P4-Ic5-IRQ-probe)** — `mmio-probe` (PL031 RTC live read) + `irq-probe` (pre-pended SPI 96 wait). Closes R10 F159 in full. |
+| `KObj_DMA` lifecycle (`dma_handle.h/c`) | **Landed (P4-Ic5b1b)** — buddy-allocated contiguous chunks; refcount lifecycle mirrors `kobj_mmio`; PA-stability structural via no-migrator |
+| `SYS_DMA_CREATE` + `SYS_DMA_MAP` syscalls | **Landed (P4-Ic5b1b)** — kernel-allocated PA; `t_dma_map` returns PA for descriptor-embed |
+| `BURROW_TYPE_DMA` + `userland_demand_page` DMA dispatch | **Landed (P4-Ic5b1b)** — Normal cacheable PTE attrs (CPU+device coherent on QEMU virt) |
+| `handle.c` KOBJ_DMA release wiring | **Landed (P4-Ic5b1b)** — `handle_release_obj` + `handle_acquire_obj` cases call `kobj_dma_unref` / `kobj_dma_ref` |
+| Userspace SVC-path tests (all four hw-handle syscalls) | **Landed (P4-Ic5a + P4-Ic5-IRQ-probe)** — `mmio-probe` (PL031 RTC live read) + `irq-probe` (pre-pended SPI 96 wait). Closes R10 F159 in full. DMA-side SVC-path lands at P4-Ic5b2. |
 | virtio-mmio reservation policy | **Refined (P4-Ic5b1a)** — virtio-mmio slots REMOVED from `kobj_mmio_reserve_kernel_ranges` (kernel doesn't actively use them post-`virtio_init` probe). GIC/PL011/ECAM reservations stay (kernel-active). Boot reports 4 reserved ranges (was 8). Unblocks P4-Ic5b2 driver-process MMIO claim. |
 | `mmu_install_user_pte(device_memory)` flag | **Landed (P4-Ic2)** |
 | Cap-grant syscall (parent → child userspace-callable) | **Phase 5+** — kernel-internal grant path lands at P4-Ic3 via `rfork_with_caps`; userspace surface deferred |
@@ -383,7 +456,7 @@ All 15 PASS at P4-Ib tip; 180 → 195 total in-kernel tests. After P4-Ic5a + P4-
 
 4. **Capability inheritance at `rfork`**. v1.0 children start with `CAP_NONE`. Production drivers (P4-Ic+) receive `CAP_HW_CREATE` via the kernel-internal `rfork_with_caps(flags, entry, arg, caps_mask)` primitive (P4-Ic3) — the child's caps are set to `parent->caps & caps_mask` so a caller cannot grant beyond its own ceiling. Userspace cap-grant syscall surface is Phase 5+.
 
-5. **`KOBJ_DMA` + `KOBJ_INTERRUPT` are in the hw mask but lack implementation**. `handle_dup` rejects them (correct); `handle_release_obj` has no-op cases for them (no impl to call). Adding the impl is a future sub-chunk; the spec already covers them as HwKObjs.
+5. **`KOBJ_INTERRUPT` is in the hw mask but lacks implementation**. `handle_dup` rejects it (correct); `handle_release_obj` has a no-op case for it (no impl to call). Adding the impl is a future sub-chunk (Phase 5+ eventfd-like notification); the spec already covers it as a HwKObj. `KOBJ_DMA` landed at P4-Ic5b1b.
 
 6. **`g_mmio_claims` is global, not per-Proc**. The exclusivity invariant is system-wide. A future enhancement could partition claims per-Proc for faster lookups when many procs each hold few claims; v1.0's 32-entry linear scan is fine.
 
@@ -393,7 +466,7 @@ All 15 PASS at P4-Ib tip; 180 → 195 total in-kernel tests. After P4-Ic5a + P4-
 
 ## Naming rationale
 
-`KObj_MMIO` mirrors `KObj_IRQ` (P4-G) in capitalization and prefix. `kobj_mmio_*` for the API verbs matches `kobj_irq_*`. `g_mmio_claims` is straightforward; could be thematically renamed (e.g., `g_territory_claims`) but the resource-tracking domain is generic enough that the descriptive name wins.
+`KObj_MMIO` mirrors `KObj_IRQ` (P4-G) in capitalization and prefix. `kobj_mmio_*` for the API verbs matches `kobj_irq_*`. `g_mmio_claims` is straightforward; could be thematically renamed (e.g., `g_territory_claims`) but the resource-tracking domain is generic enough that the descriptive name wins. `KObj_DMA` (P4-Ic5b1b) extends the same pattern.
 
 Held proposals (none load-bearing):
 - `CAP_HW_CREATE` could be `CAP_HW_GRANT` or `CAP_DRIVER`; the verb form `CREATE` matches the syscall it gates. Holding.

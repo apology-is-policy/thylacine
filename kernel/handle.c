@@ -29,6 +29,7 @@
 //   - Refcount integration via burrow_ref/unref (P2-Fd is the first step).
 //   - Capability-handle elevation via factotum (per ARCH §15.4).
 
+#include <thylacine/dma_handle.h>
 #include <thylacine/extinction.h>
 #include <thylacine/handle.h>
 #include <thylacine/irqfwd.h>
@@ -93,9 +94,9 @@ struct HandleTable *handle_table_alloc(void) {
 // At v1.0 P2-Fd: KOBJ_BURROW has refcount integration via burrow_unref;
 // other kinds are no-op. As subsystems land:
 //   KOBJ_SPOOR     — Phase 4 (spoor_unref via 9P client).
-//   KOBJ_MMIO     — Phase 3 (driver-startup CMA release).
-//   KOBJ_IRQ      — Phase 3 (gic_unregister).
-//   KOBJ_DMA      — Phase 3 (CMA release).
+//   KOBJ_MMIO     — landed P4-Ib (kobj_mmio_unref releases PA claim).
+//   KOBJ_IRQ      — landed P4-Ib (kobj_irq_unref disables GIC INTID).
+//   KOBJ_DMA      — landed P4-Ic5b1b (kobj_dma_unref releases page chunk).
 //   KOBJ_PROCESS  — Phase 5+ (proc_unref when struct Proc gets refs).
 //   KOBJ_THREAD   — Phase 5+.
 //   KOBJ_INTERRUPT — Phase 5+.
@@ -121,18 +122,25 @@ static void handle_release_obj(enum kobj_kind kind, void *obj) {
         // refcount machinery from P4-G (kernel/irqfwd.c).
         kobj_irq_unref((struct KObj_IRQ *)obj);
         break;
+    case KOBJ_DMA:
+        // P4-Ic5b1b: KObj_DMA release drops the refcount; the last
+        // unref calls free_pages on the underlying buddy chunk. The
+        // Burrow's separate reference (if any) is dropped independently
+        // via burrow_free_internal's DMA case; either side dropping
+        // last triggers the free.
+        kobj_dma_unref((struct KObj_DMA *)obj);
+        break;
     case KOBJ_INVALID:
     case KOBJ_PROCESS:
     case KOBJ_THREAD:
     case KOBJ_SPOOR:
-    case KOBJ_DMA:
     case KOBJ_INTERRUPT:
     case KOBJ_KIND_COUNT:
         // No refcount integration yet for these. KOBJ_SPOOR lands at
-        // Phase 4 (9P client spoor_unref); KOBJ_DMA lands when DMA
-        // handles arrive; KOBJ_PROCESS / KOBJ_THREAD wait for struct
-        // Proc / Thread to gain refs (Phase 5+); KOBJ_INTERRUPT lands
-        // with the Phase 5+ interrupt-eventfd surface.
+        // Phase 4 (9P client spoor_unref); KOBJ_PROCESS / KOBJ_THREAD
+        // wait for struct Proc / Thread to gain refs (Phase 5+);
+        // KOBJ_INTERRUPT lands with the Phase 5+ interrupt-eventfd
+        // surface.
         break;
     default:
         extinction("handle_release_obj: out-of-enum kobj_kind (memory corruption?)");
@@ -163,11 +171,17 @@ static void handle_acquire_obj(enum kobj_kind kind, void *obj) {
         // P4-Ib: same rationale as KOBJ_MMIO above.
         kobj_irq_ref((struct KObj_IRQ *)obj);
         break;
+    case KOBJ_DMA:
+        // P4-Ic5b1b: same rationale as KOBJ_MMIO above (NoHwDup forbids
+        // dup of hw kinds; this case is dead code at v1.0 but kept for
+        // defense-in-depth + matching switch coverage so the static
+        // assert on KIND_COUNT doesn't have to be revisited).
+        kobj_dma_ref((struct KObj_DMA *)obj);
+        break;
     case KOBJ_INVALID:
     case KOBJ_PROCESS:
     case KOBJ_THREAD:
     case KOBJ_SPOOR:
-    case KOBJ_DMA:
     case KOBJ_INTERRUPT:
     case KOBJ_KIND_COUNT:
         break;
