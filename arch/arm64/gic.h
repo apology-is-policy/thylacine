@@ -151,6 +151,21 @@ void gic_dispatch(u32 intid);
 // Returns true on success; extincts on redistributor wake timeout.
 bool gic_init_secondary(unsigned cpu_idx);
 
+// P4-Ic5-IRQ-probe: manually pend an SPI at the GIC distributor by
+// writing GICD_ISPENDR<n>.bit. Used by test code to simulate an IRQ
+// fire without needing actual hardware to assert. The pending bit is
+// orthogonal to the enable bit per ARM IHI 0069 §12.9.6: pending stays
+// set across enable/disable cycles, and an enable transition with the
+// pending bit set delivers the IRQ immediately (modulo PSTATE.I).
+//
+// SPI-only (intid >= 32). SGI/PPI use the redistributor's GICR_ISPENDR0
+// (banked per-CPU) and aren't needed at v1.0 — the SGI 1 test path in
+// irqfwd_test fires via gic_send_ipi (the architectural SGI mechanism)
+// rather than via pre-pending.
+//
+// Returns false if intid is out of SPI range or GIC isn't initialized.
+bool gic_set_pending_spi(u32 intid);
+
 // P2-Cdc: send a Software Generated Interrupt (SGI) to a target CPU.
 // SGIs are GIC INTIDs 0..15 — used as cross-CPU IPI vectors. Target
 // receives an IRQ at the given INTID, dispatches it through the same

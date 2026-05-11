@@ -178,7 +178,24 @@ ARCH §28 I-19 (note delivery causal order) is the related-but-distinct invarian
 | `irqfwd.wait_wakes_on_sgi` | Self-IPI on SGI 1 → kobj_irq_wait returns ≥ 1 + global fire counter increments. |
 | `irqfwd.collapses_concurrent_fires` | 3 self-IPIs sent before wait → wait returns ≥ 1 (GIC SGI coalescing may reduce count, but at least 1 must be observed). |
 
-All tests use SGI 1 (`IPI_IRQFWD_TEST`) as the fire source, software-triggered via `gic_send_ipi(self, ...)` so we don't need a real hardware device.
+All kernel-side tests use SGI 1 (`IPI_IRQFWD_TEST`) as the fire source, software-triggered via `gic_send_ipi(self, ...)` so we don't need a real hardware device.
+
+The userspace SVC path is exercised by `kernel/test/test_irq_probe.c::userspace.irq_probe_rfork_with_caps` (P4-Ic5-IRQ-probe). Pattern differs from the SGI tests because EL0 callers cannot send SGIs (R9 F142 / F145 — only SPI INTIDs are claimable from `SYS_IRQ_CREATE`):
+
+| Mechanism | Notes |
+|---|---|
+| Pre-pend via `gic_set_pending_spi(96)` | SPI 96 chosen as a safe unused INTID on QEMU virt. The kernel test pre-marks the IRQ as pending **before** spawning the child. Per ARM IHI 0069 §12.9.6 the pending bit is orthogonal to the enable bit; pending stays set across enable transitions. |
+| Child claims SPI 96 via `t_irq_create(96, T_RIGHT_SIGNAL)` | Inside the kernel: `intid_try_claim(96)` ✓ → `kmalloc` + `gic_attach` + `gic_enable_irq(96)`. The enable transition with pending=1 delivers the IRQ immediately on CPU 0 (Aff0=0 routing from `dist_init`). |
+| GIC dispatch increments `pending_count` | Either during the kernel-context `gic_enable_irq` if CPU 0 was at EL1 with IRQs unmasked, or on `ERET` to EL0 once the child unmasks IRQs. Either way `pending_count = 1` is observable from the child's `t_irq_wait`. |
+| Child waits via `t_irq_wait(handle)` | `sleep` cond returns true (count=1) → no block; re-take lock, count=1, zero, return 1. Race-free pattern (the pre-pend before spawn guarantees `pending_count >= 1` by the time `cond` is evaluated). |
+
+The pre-pend pattern was chosen over alternatives:
+
+- **PL031 alarm** (program RTCMR + RTCIMSC and wait for the alarm interrupt to fire): adds 1-second test latency due to PL031's 1 Hz tick. Also requires PL031 R/W MMIO mapping which adds setup overhead.
+- **Kernel test orchestration after spawn** (rfork → sched_yield N times → gic_set_pending): inherently racy — no clean barrier to detect "child has reached t_irq_wait." Could miss the wait state and either fire too early (before handler attached) or too late (after the test runner timeout).
+- **Multi-process trigger** (one binary creates IRQ + waits; another binary triggers SGI): SGIs are kernel-reserved per R9 F142/F145. Adding a debug syscall to trigger an arbitrary INTID expands the audit surface.
+
+Pre-pend wins because the GIC's pending-bit semantics are stable across enable transitions, making the test race-free with zero synchronization overhead.
 
 ---
 
@@ -190,8 +207,9 @@ All tests use SGI 1 (`IPI_IRQFWD_TEST`) as the fire source, software-triggered v
 | `kernel/irqfwd.c` (lifecycle + dispatch + wait) | Landed (P4-G) |
 | GIC integration (gic_attach + gic_enable_irq + gic_disable_irq) | Landed (P4-G) |
 | In-kernel tests | 4 covering lifecycle, refcount, wait/wake, IRQ collapsing |
-| Handle-table integration (KOBJ_IRQ release calls kobj_irq_unref) | Held to P4-I+ alongside the first userspace driver |
-| Userspace syscall wrapper (allocate KOBJ_IRQ via syscall) | Held to Phase 5+ syscall surface |
+| Userspace SVC-path test | Landed (P4-Ic5-IRQ-probe) — `userspace.irq_probe_rfork_with_caps` exercises `t_irq_create` + `t_irq_wait` end-to-end via pre-pended SPI 96 |
+| Handle-table integration (KOBJ_IRQ release calls kobj_irq_unref) | Landed (P4-Ib) |
+| Userspace syscall wrappers (`SYS_IRQ_CREATE` + `SYS_IRQ_WAIT`) | Landed (P4-Ib) |
 | Multi-waiter wait queues | Held to Phase 5+ (poll/futex) |
 | Multi-subscriber per IRQ (fan-out wakeup) | Held — v1.0 each IRQ has exactly one KObj_IRQ |
 | IRQ → userspace latency benchmark (VISION §4.5 p99 < 5µs) | Held to P4-Z (Phase 4 closing audit; needs userspace drivers to measure) |

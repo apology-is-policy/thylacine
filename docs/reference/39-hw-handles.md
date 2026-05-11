@@ -302,6 +302,7 @@ All 8 buggy cfgs produce expected counterexamples under TLC; correct cfg explore
 | `caps.rfork_with_caps_clamps_to_parent` | P4-Ic3: a zero-cap parent forking with `caps_mask=CAP_HW_CREATE` yields child with `CAP_NONE` (AND-with-parent clamp) |
 | `caps.rfork_with_caps_zero_mask` | P4-Ic3: `caps_mask=CAP_NONE` is equivalent to plain `rfork` |
 | `userspace.mmio_probe_rfork_with_caps` | P4-Ic5a: end-to-end userspace SVC path. kproc rforks `/mmio-probe` via `rfork_with_caps(CAP_HW_CREATE)`; binary calls `t_mmio_create` + `t_mmio_map` for PL031 RTC at PA 0x09010000; demand-page MMIO dispatch installs device-memory PTE on first access; verifies live `PeriphID0 == 0x31`; exits 0. Closes the bulk of deferred R10 F159 (SVC-path test coverage for SYS_MMIO_CREATE + SYS_MMIO_MAP). |
+| `userspace.irq_probe_rfork_with_caps` | P4-Ic5-IRQ-probe: companion to mmio-probe; closes the IRQ side of R10 F159. kproc rforks `/irq-probe` via `rfork_with_caps(CAP_HW_CREATE)`; kernel test pre-pends SPI 96 via `gic_set_pending_spi(96)` before the spawn; child calls `t_irq_create(96, T_RIGHT_SIGNAL)` + `t_irq_wait(handle)`; the pre-pended IRQ delivers on `gic_enable_irq` in `kobj_irq_create`, increments `pending_count`, and the wait returns count >= 1 without blocking. Exits 0. Closes the remaining R10 F159 (SVC-path test coverage for SYS_IRQ_CREATE + SYS_IRQ_WAIT). |
 | `mmio_handle.create_basic` | round-trip create + unref |
 | `mmio_handle.create_misaligned_rejected` | pa or size not page-aligned → NULL |
 | `mmio_handle.create_zero_size_rejected` | size == 0 → NULL |
@@ -315,9 +316,7 @@ All 8 buggy cfgs produce expected counterexamples under TLC; correct cfg explore
 | `handle_hw.mmio_close_releases_claim` | `handle_close` → claim returns to pool |
 | `handle_hw.irq_close_releases_intid` | `handle_close` → INTID returns to pool |
 
-All 15 PASS at P4-Ib tip; 180 → 195 total in-kernel tests.
-
-The userspace SVC path (caller invokes `t_mmio_create` / `t_irq_create` / `t_irq_wait` and traps into the kernel) is exercised end-to-end by the first userspace driver test in P4-Ic — at P4-Ib the syscall handlers are validated by code review + the cap-check / arg-validation paths above.
+All 15 PASS at P4-Ib tip; 180 → 195 total in-kernel tests. After P4-Ic5a + P4-Ic5-IRQ-probe, two new userspace-SVC-path tests (`userspace.mmio_probe_rfork_with_caps` + `userspace.irq_probe_rfork_with_caps`) lock in end-to-end SVC coverage for all four hw-handle syscalls (`SYS_MMIO_CREATE`, `SYS_MMIO_MAP`, `SYS_IRQ_CREATE`, `SYS_IRQ_WAIT`).
 
 ---
 
@@ -363,6 +362,7 @@ The userspace SVC path (caller invokes `t_mmio_create` / `t_irq_create` / `t_irq
 | Syscall handlers (MMIO_CREATE, IRQ_CREATE, IRQ_WAIT) | **Landed (P4-Ib)** |
 | `libt` syscall wrappers | **Landed (P4-Ib + extended P4-Ic2 with `t_mmio_map`)** |
 | `SYS_MMIO_MAP` syscall + `kobj_mmio_map_into_user` semantics | **Landed (P4-Ic2)** — `BURROW_TYPE_MMIO` (P4-Ic1) + `userland_demand_page` dispatch (P4-Ic2) + device-memory PTE attrs (P4-Ic2) |
+| Userspace SVC-path tests (all four hw-handle syscalls) | **Landed (P4-Ic5a + P4-Ic5-IRQ-probe)** — `mmio-probe` (PL031 RTC live read) + `irq-probe` (pre-pended SPI 96 wait). Closes R10 F159 in full. |
 | `mmu_install_user_pte(device_memory)` flag | **Landed (P4-Ic2)** |
 | Cap-grant syscall (parent → child userspace-callable) | **Phase 5+** — kernel-internal grant path lands at P4-Ic3 via `rfork_with_caps`; userspace surface deferred |
 | Cap-drop syscall (with hw-handle interlock) | **Phase 5+** |

@@ -126,7 +126,7 @@ Sibling of the C-side `libt`. Provides:
 | Surface | Mirror of |
 |---|---|
 | `T_SYS_*` constants  | `kernel/include/thylacine/syscall.h` |
-| `T_RIGHT_*` constants | `kernel/include/thylacine/handle.h` |
+| `T_RIGHT_*` constants (READ/WRITE/MAP/TRANSFER/DMA/SIGNAL, plus `T_RIGHT_ALL=0x3f`) | `kernel/include/thylacine/handle.h::RIGHT_*` (six bits; positions MUST match exactly) |
 | `T_PROT_*` constants  | `kernel/include/thylacine/vma.h` |
 | `t_exits(status)` → ! | `<thyla/syscall.h>::t_exits` |
 | `t_puts(buf, len) → i64` | `<thyla/syscall.h>::t_puts` |
@@ -425,11 +425,26 @@ step lands when release builds appear (Phase 7+).
   #[no_mangle] pub extern "C" fn rs_main() -> i64 { ...; 0 }`. ELF
   layout pinned identical to pre-extraction (same 66,336-byte binary;
   `_start` at 0x400000; `rs_main` at 0x400018).
-- **P4-Ic5 — next**. Rust no_std virtio-blk driver crate; closes
-  deferred R10 F159 (SVC-path test coverage).
+- **P4-Ic5a — landed**. `/mmio-probe` first userspace hw-handle binary;
+  closes the MMIO side of deferred R10 F159 (SVC-path test coverage
+  for `SYS_MMIO_CREATE` + `SYS_MMIO_MAP`).
+- **P4-Ic5-IRQ-probe — landed**. `/irq-probe` companion to mmio-probe;
+  closes the IRQ side of deferred R10 F159 (SVC-path test coverage for
+  `SYS_IRQ_CREATE` + `SYS_IRQ_WAIT`). Crate at `usr/irq-probe/`; new
+  kernel test `userspace.irq_probe_rfork_with_caps`. Pre-pends SPI 96
+  via new `gic_set_pending_spi` helper before the child spawns; the
+  IRQ delivers when the child's `t_irq_create` enables it. **Bug fix
+  bundled**: libthyla-rs `T_RIGHT_SIGNAL` was incorrectly defined as
+  `1<<4` (the kernel's `RIGHT_DMA` bit); corrected to `1<<5` and the
+  missing `T_RIGHT_DMA = 1<<4` + `T_RIGHT_ALL = 0x3f` added. The bug
+  was dormant under P4-Ic5a (mmio-probe used only `T_RIGHT_READ` +
+  `T_RIGHT_MAP`); the new irq-probe was the first user of `T_RIGHT_SIGNAL`
+  and surfaced the drift in the first test run (`SYS_IRQ_WAIT` returned
+  -1 because the handle held `RIGHT_DMA` instead of `RIGHT_SIGNAL`).
+- **P4-Ic5b — next**. Full virtio-blk driver crate; closes ROADMAP §6.3.
 - **P4-Id — after Ic**. Driver exposed as 9P server.
 
-210/210 tests PASS × default + UBSan; 4/4 fault; 10/10 KASLR (P4-Ic4 tip).
+212/212 tests PASS × default + UBSan; 4/4 fault; 10/10 KASLR (P4-Ic5-IRQ-probe tip).
 
 `kernel/joey.c` remains as the boot-time embedded "hello" blob until
 the disk-loaded `/joey` refactor (post-Phase 5+ when stratum is

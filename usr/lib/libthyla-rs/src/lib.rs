@@ -47,7 +47,12 @@ pub const T_RIGHT_READ: u32     = 1 << 0;
 pub const T_RIGHT_WRITE: u32    = 1 << 1;
 pub const T_RIGHT_MAP: u32      = 1 << 2;
 pub const T_RIGHT_TRANSFER: u32 = 1 << 3;
-pub const T_RIGHT_SIGNAL: u32   = 1 << 4;
+pub const T_RIGHT_DMA: u32      = 1 << 4;
+pub const T_RIGHT_SIGNAL: u32   = 1 << 5;
+// MUST mirror the kernel-side RIGHT_ALL = 0x3f (six bits). A constant
+// included here so consuming crates can assert their requested rights
+// stay within the bound at compile time (Phase 5+ rights expansion).
+pub const T_RIGHT_ALL: u32      = 0x3f;
 
 // =============================================================================
 // Prot bits — MUST mirror VMA_PROT_* in kernel/include/thylacine/vma.h.

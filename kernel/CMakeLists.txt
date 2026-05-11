@@ -100,6 +100,7 @@ set(KERNEL_SRCS
     test/test_burrow_mmio.c
     test/test_mmio_map.c
     test/test_mmio_probe.c
+    test/test_irq_probe.c
 )
 
 set(KERNEL_LD_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/../arch/arm64/kernel.ld)

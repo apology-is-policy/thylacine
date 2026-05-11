@@ -13,6 +13,10 @@
 #                                   test coverage for SYS_MMIO_CREATE +
 #                                   SYS_MMIO_MAP). Spawned by kproc via
 #                                   rfork_with_caps(CAP_HW_CREATE).
+#   - irq-probe         (P4-Ic5-IRQ-probe) — closes the IRQ side of
+#                                   R10 F159 (SVC-path test coverage
+#                                   for SYS_IRQ_CREATE + SYS_IRQ_WAIT).
+#                                   Companion to mmio-probe.
 #   (P4-Ic5b+ will add the full virtio-blk driver crate.)
 #
 # Build via tools/build.sh userspace (preferred) or directly from this
@@ -24,7 +28,7 @@
 
 [workspace]
 resolver = "2"
-members = ["lib/libthyla-rs", "hello-rs", "mmio-probe"]
+members = ["lib/libthyla-rs", "hello-rs", "mmio-probe", "irq-probe"]
 
 [workspace.package]
 edition = "2021"

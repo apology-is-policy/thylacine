@@ -1,0 +1,16 @@
+[package]
+name = "irq-probe"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "irq-probe"
+path = "src/main.rs"
+
+[dependencies]
+# libthyla-rs provides _start + #[panic_handler] + SVC wrappers (P4-Ic4).
+# irq-probe uses t_putstr, t_irq_create, t_irq_wait, t_exits + the
+# T_RIGHT_SIGNAL constant.
+libthyla-rs = { path = "../lib/libthyla-rs" }

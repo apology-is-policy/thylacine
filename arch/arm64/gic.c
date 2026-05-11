@@ -519,6 +519,19 @@ bool gic_enable_irq(u32 intid) {
     return true;
 }
 
+bool gic_set_pending_spi(u32 intid) {
+    // P4-Ic5-IRQ-probe: write GICD_ISPENDR<n>.bit to mark this SPI as
+    // pending. SPI-only because the distributor frame's GICD_ISPENDR
+    // covers INTIDs 32..1019 (with N=0 being SGI/PPI which live in the
+    // redistributor's banked GICR_ISPENDR0).
+    if (intid < GIC_SPI_MIN || intid >= GIC_NUM_INTIDS) return false;
+    if (g_dist_base == 0)                              return false;
+    u32 n = intid / 32;
+    u32 bit = intid % 32;
+    mmio_w32(g_dist_base, GICD_ISPENDR(n), 1u << bit);
+    return true;
+}
+
 bool gic_disable_irq(u32 intid) {
     if (intid >= GIC_NUM_INTIDS) return false;
     if (intid < 32) {
