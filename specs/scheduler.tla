@@ -348,6 +348,21 @@ Block(cpu) ==
 (* must uphold by replacing the current ELE-on-deadlock-check with a     *)
 (* WFI-and-retry pattern. Without SF, the spec admits a trace where t    *)
 (* stutters in SLEEPING forever (scheduler_buggy_hwake.cfg).             *)
+(*                                                                         *)
+(* P4-Ic6 (R12-wfi-cfg): Wake also atomically clears wfi[cpu] of its      *)
+(* target. This models the impl invariant that an IRQ which places work   *)
+(* into a wfi'd CPU's runq either (a) was delivered to that CPU directly  *)
+(* — hardware lifts WFI when the IRQ becomes pending — or (b) was         *)
+(* delivered to a peer CPU, which then IPIs the target (P3-G's            *)
+(* NotifyWFIPeer mechanism) and the IPI eventually delivers, clearing     *)
+(* wfi[target]. The post-state is identical either way: a RUNNABLE thread *)
+(* in runq[target] with ~wfi[target]. Collapsing both impl paths into a   *)
+(* single atomic spec step is a sound abstraction for liveness — TLC      *)
+(* doesn't need to interleave the intermediate IPI steps to verify the    *)
+(* terminal property. Without this clause, the spec admitted a Wake-     *)
+(* enqueues-into-wfi'd-runq deadlock (R12-wfi-cfg in                      *)
+(* scheduler_liveness_wfi.cfg) that does not correspond to any real impl  *)
+(* trace.                                                                  *)
 (***************************************************************************)
 Wake(t) ==
     /\ ~BUGGY
@@ -356,7 +371,8 @@ Wake(t) ==
     /\ \E cpu \in CPUs :
         /\ state' = [state EXCEPT ![t] = "RUNNABLE"]
         /\ runq'  = [runq  EXCEPT ![cpu] = runq[cpu] \cup {t}]
-        /\ UNCHANGED <<current, wait_vars, ipi_vars, wfi>>
+        /\ wfi'   = [wfi   EXCEPT ![cpu] = FALSE]
+        /\ UNCHANGED <<current, wait_vars, ipi_vars>>
 
 (***************************************************************************)
 (* Resume(cpu): an idle CPU picks up a runnable thread from its queue.     *)
@@ -465,6 +481,16 @@ BuggySleep(cpu) ==
 (* because it wasn't in waiters when WakeAll fired.                       *)
 (*                                                                         *)
 (* Idempotent — only fires when cond was FALSE.                           *)
+(*                                                                         *)
+(* P4-Ic6 (R12-wfi-cfg): WakeAll also atomically clears wfi[cpu0] when    *)
+(* it actually places waiters in cpu0's runq. Same impl invariant as      *)
+(* Wake(t): cond-broadcast either wakes the target CPU directly (IRQ to  *)
+(* target → hardware lifts WFI) or IPIs the target (P3-G NotifyWFIPeer    *)
+(* mechanism). The atomic spec step collapses both impl paths into a     *)
+(* single transition with the terminal post-state ~wfi[cpu0]. When       *)
+(* waiters = {} the WakeAll is a no-op for state/runq, so the wfi clear  *)
+(* is gated on waiters # {} to avoid spurious-wake traces with no impl   *)
+(* correspondence.                                                         *)
 (***************************************************************************)
 WakeAll ==
     /\ ~cond
@@ -473,8 +499,11 @@ WakeAll ==
        IN  /\ state' = [t \in Threads |->
                 IF t \in waiters THEN "RUNNABLE" ELSE state[t]]
            /\ runq'    = [runq EXCEPT ![cpu0] = runq[cpu0] \cup waiters]
+           /\ wfi'     = IF waiters # {}
+                            THEN [wfi EXCEPT ![cpu0] = FALSE]
+                            ELSE wfi
            /\ waiters' = {}
-           /\ UNCHANGED <<current, pending_sleep, ipi_vars, wfi>>
+           /\ UNCHANGED <<current, pending_sleep, ipi_vars>>
 
 (***************************************************************************)
 (* Steal(stealer, victim) — cross-CPU work-stealing (P2-Cg, ARCH §8.4).    *)
