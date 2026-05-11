@@ -1,4 +1,4 @@
-// arch/arm64/context.S — context-switch primitive (P2-A).
+// arch/arm64/context.S — context-switch primitive (P2-A; extended P4-Ic5-FP).
 //
 // cpu_switch_context(struct Context *prev /* x0 */, struct Context *next /* x1 */)
 //
@@ -17,7 +17,10 @@
 //   x19 @ 0   x20 @ 8    x21 @ 16   x22 @ 24
 //   x23 @ 32  x24 @ 40   x25 @ 48   x26 @ 56
 //   x27 @ 64  x28 @ 72   fp  @ 80   lr  @ 88
-//   sp  @ 96  tpidr_el0 @ 104       ttbr0 @ 112  (size 120)
+//   sp  @ 96  tpidr_el0 @ 104       ttbr0 @ 112
+//   _pad_fp  @ 120 (alignment pad to 16-byte boundary)
+//   fp_v[0..31] @ 128 (16 STP-Q pairs at 0/32/64/.../480 from fp_v base)
+//   fpsr @ 640  fpcr @ 644  (size 648, 16-byte aligned)
 //
 // _Static_asserts in context.h pin both sides; a layout drift triggers a
 // build error there before the asm can corrupt context switches.
@@ -30,6 +33,31 @@
 // No TLB invalidate is needed: per-Proc ASIDs (1..255) tag user-mappings
 // in the TLB; cross-Proc TLB entries don't collide. Kernel mappings
 // (TTBR1, global, ASID-agnostic) are unaffected.
+//
+// P4-Ic5-FP: eager save/restore of FP/SIMD state. Q0..Q31 + FPSR + FPCR
+// saved into prev and loaded from next every context switch. The kernel
+// is compiled with -mgeneral-regs-only so kernel C code doesn't touch
+// V registers; what we save here is whatever EL0 left in V regs at its
+// most recent EL→EL1 transition (preserved across kernel-mode execution
+// because the kernel never clobbers V regs). CPACR_EL1.FPEN must be
+// 0b11 before this code runs — fp_enable_this_cpu (context.h inline) is
+// called from boot_main + per_cpu_main to set it before any context
+// switch.
+//
+// Why eager not lazy: simpler. Lazy needs per-CPU "current FP owner"
+// tracking + CPACR_EL1.FPEN trap-and-allocate machinery; eager saves
+// 528 bytes per thread inline and always does the round-trip. At v1.0
+// thread counts (< 100 alive at once) the RSS impact is < 100 KiB total.
+// Phase 5+ may switch to lazy if profiling shows the save/restore cost
+// matters.
+
+// Enable FP/SIMD feature for the assembler in this TU. The kernel
+// toolchain is compiled with -mgeneral-regs-only so the C-side doesn't
+// emit FP/SIMD instructions, but the cpu_switch_context save/restore
+// path explicitly handles V0..V31 + FPSR + FPCR. `.arch_extension fp`
+// is additive over the prevailing `-march=armv8-a+lse+...` profile;
+// it doesn't override hardening features. Per Arm GAS reference 6.3.
+.arch_extension fp
 
 .section ".text", "ax"
 
@@ -44,7 +72,9 @@ cpu_switch_context:
     // common case at P2-A.
     bti     c
 
-    // Save callee-saved + FP + LR into prev (x0).
+    // ----- Save prev (x0) -----
+
+    // Save callee-saved + FP + LR.
     stp     x19, x20, [x0, #0]
     stp     x21, x22, [x0, #16]
     stp     x23, x24, [x0, #32]
@@ -63,7 +93,38 @@ cpu_switch_context:
     mrs     x9, ttbr0_el1
     str     x9, [x0, #112]
 
-    // Load next (x1) into the live CPU.
+    // P4-Ic5-FP: save V0..V31 + FPSR + FPCR into prev's fp region.
+    // x9 := &prev->fp_v[0] (offset 128 from prev base). STP (SIMD&FP)
+    // signed-7 immediate × 16 → max +1008; we touch up to +480 here.
+    add     x9, x0, #128
+    stp     q0,  q1,  [x9, #0]
+    stp     q2,  q3,  [x9, #32]
+    stp     q4,  q5,  [x9, #64]
+    stp     q6,  q7,  [x9, #96]
+    stp     q8,  q9,  [x9, #128]
+    stp     q10, q11, [x9, #160]
+    stp     q12, q13, [x9, #192]
+    stp     q14, q15, [x9, #224]
+    stp     q16, q17, [x9, #256]
+    stp     q18, q19, [x9, #288]
+    stp     q20, q21, [x9, #320]
+    stp     q22, q23, [x9, #352]
+    stp     q24, q25, [x9, #384]
+    stp     q26, q27, [x9, #416]
+    stp     q28, q29, [x9, #448]
+    stp     q30, q31, [x9, #480]
+    // FPSR and FPCR are 32-bit; mrs reads the low 32 bits of an Xn.
+    // FPSR (S3_3_C4_C4_1) + FPCR (S3_3_C4_C4_0). Some assembler versions
+    // reject the `msr FPSR/FPCR` mnemonic for write paths; use the
+    // S<op0>_<op1>_C<CRn>_C<CRm>_<op2> generic form which is universally
+    // accepted.
+    mrs     x10, S3_3_C4_C4_1       // FPSR
+    mrs     x11, S3_3_C4_C4_0       // FPCR
+    str     w10, [x0, #640]
+    str     w11, [x0, #644]
+
+    // ----- Load next (x1) -----
+
     ldp     x19, x20, [x1, #0]
     ldp     x21, x22, [x1, #16]
     ldp     x23, x24, [x1, #32]
@@ -85,6 +146,29 @@ cpu_switch_context:
     ldr     x9, [x1, #112]
     msr     ttbr0_el1, x9
     isb
+
+    // P4-Ic5-FP: load V0..V31 + FPSR + FPCR from next's fp region.
+    add     x9, x1, #128
+    ldp     q0,  q1,  [x9, #0]
+    ldp     q2,  q3,  [x9, #32]
+    ldp     q4,  q5,  [x9, #64]
+    ldp     q6,  q7,  [x9, #96]
+    ldp     q8,  q9,  [x9, #128]
+    ldp     q10, q11, [x9, #160]
+    ldp     q12, q13, [x9, #192]
+    ldp     q14, q15, [x9, #224]
+    ldp     q16, q17, [x9, #256]
+    ldp     q18, q19, [x9, #288]
+    ldp     q20, q21, [x9, #320]
+    ldp     q22, q23, [x9, #352]
+    ldp     q24, q25, [x9, #384]
+    ldp     q26, q27, [x9, #416]
+    ldp     q28, q29, [x9, #448]
+    ldp     q30, q31, [x9, #480]
+    ldr     w10, [x1, #640]
+    ldr     w11, [x1, #644]
+    msr     S3_3_C4_C4_1, x10       // FPSR
+    msr     S3_3_C4_C4_0, x11       // FPCR
 
     ret
 .size cpu_switch_context, . - cpu_switch_context

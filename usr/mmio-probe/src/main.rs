@@ -109,8 +109,13 @@ unsafe fn mmio_read32(addr: u64) -> u32 {
 // in no_std + no_alloc, and pulling in core::fmt would add ~2 KB to a
 // 600-byte binary. Manual loop is 18 lines + a fixed buffer.
 //
-// Writes "0xXXXXXXXX" into `buf` (10 bytes; the array must be initialized
-// before the call — see HEX_BUF below for the pattern). Returns 10.
+// Writes "0xXXXXXXXX" into `buf` (10 bytes). Returns 10.
+//
+// Post-P4-Ic5-FP: `let mut hex_buf = [0u8; 10]` at the call site is
+// safe again. The kernel now enables CPACR_EL1.FPEN and saves/restores
+// V regs on context switch, so any compiler-builtins memset that
+// rustc may emit (and which uses NEON `dup v0.4h`) runs at EL0 without
+// trapping. P4-Ic5a's `static mut HEX_BUF` workaround removed.
 fn write_hex_u32(buf: &mut [u8; 10], val: u32) {
     buf[0] = b'0';
     buf[1] = b'x';
@@ -119,14 +124,6 @@ fn write_hex_u32(buf: &mut [u8; 10], val: u32) {
         buf[2 + i] = if nibble < 10 { b'0' + nibble as u8 } else { b'a' + (nibble - 10) as u8 };
     }
 }
-
-// Static buffer for write_hex_u32. Avoids `let mut hex_buf = [0u8; N]`
-// at the call site, which rustc lowers to a compiler-builtins memset
-// using NEON intrinsics — that traps EL0 under the v1.0 kernel which
-// doesn't enable CPACR_EL1.FPEN. The static is pre-initialized at link
-// time (in .data) so no zero-fill runs at runtime. Single-threaded
-// userspace at v1.0 P4-Ic5a — no aliasing hazards.
-static mut HEX_BUF: [u8; 10] = [b'0', b'x', b'0', b'0', b'0', b'0', b'0', b'0', b'0', b'0'];
 
 #[no_mangle]
 pub extern "C" fn rs_main() -> i64 {
@@ -160,16 +157,15 @@ pub extern "C" fn rs_main() -> i64 {
     let periphid0 = unsafe { mmio_read32(USER_VA_MAPPING + PL031_PERIPHID0_OFFSET) };
 
     // Diagnostic: "mmio-probe: rtcdr=0xXXXXXXXX periphid0=0xXXXXXXXX\n".
+    // Stack-init array is safe post-P4-Ic5-FP (kernel saves/restores V
+    // regs; any NEON memset emitted by rustc doesn't trap EL0).
+    let mut hex_buf: [u8; 10] = [0; 10];
     t_putstr("mmio-probe: rtcdr=");
-    unsafe {
-        write_hex_u32(&mut HEX_BUF, rtcdr);
-        t_puts(HEX_BUF.as_ptr(), 10);
-    }
+    write_hex_u32(&mut hex_buf, rtcdr);
+    unsafe { t_puts(hex_buf.as_ptr(), 10); }
     t_putstr(" periphid0=");
-    unsafe {
-        write_hex_u32(&mut HEX_BUF, periphid0);
-        t_puts(HEX_BUF.as_ptr(), 10);
-    }
+    write_hex_u32(&mut hex_buf, periphid0);
+    unsafe { t_puts(hex_buf.as_ptr(), 10); }
     t_putstr("\n");
 
     // Verdict: PeriphID0 MUST be 0x31. This proves the mapping returns

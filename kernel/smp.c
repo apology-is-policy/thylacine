@@ -9,6 +9,7 @@
 // the trampoline (no MMU, no PAC, no per-CPU exception stack). P2-Cb
 // adds full per-CPU init bringing them into the scheduler.
 
+#include <thylacine/context.h>           // fp_enable_this_cpu (P4-Ic5-FP)
 #include <thylacine/dtb.h>
 #include <thylacine/extinction.h>
 #include <thylacine/sched.h>
@@ -280,6 +281,12 @@ void per_cpu_main(int cpu_idx) {
     if (cpu_idx <= 0 || cpu_idx >= (int)DTB_MAX_CPUS) {
         extinction("per_cpu_main: invalid cpu_idx");
     }
+
+    // P4-Ic5-FP: enable CPACR_EL1.FPEN = 0b11 on this secondary CPU
+    // before any context switch. Boot CPU did this in boot_main; each
+    // secondary does it independently here because CPACR_EL1 is
+    // banked per-CPU on AArch64.
+    fp_enable_this_cpu();
 
     // VBAR_EL1 — install the kernel exception vector table. ISB so
     // any subsequent exception sees the new VBAR.

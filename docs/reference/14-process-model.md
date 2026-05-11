@@ -189,13 +189,26 @@ struct Context {
     u64 lr;          // x30 — link / resume PC
     u64 sp;          // stack pointer
     u64 tpidr_el0;   // EL0 TLS pointer (kernel threads: 0; userspace: per-thread)
+    u64 ttbr0;       // P3-Bdb — TTBR0_EL1 value (ASID<<48 | pgtable_root_PA)
+    u64 _pad_fp;     // P4-Ic5-FP — pad to 16-byte align fp_v at offset 128
+    _Alignas(16) u8 fp_v[512];   // P4-Ic5-FP — V0..V31 (32 × 16 B)
+    u32 fpsr;        // P4-Ic5-FP — FPSR (cumulative FP exception flags)
+    u32 fpcr;        // P4-Ic5-FP — FPCR (rounding mode + trap enables)
 };
+// sizeof = 656 (12 u64 GP + 1 _pad_fp + 512 fp_v + 4 fpsr + 4 fpcr + 8 trailing
+// pad), _Alignof = 16.
 
 void          cpu_switch_context(struct Context *prev, struct Context *next);
 extern void   thread_trampoline(void);
+
+// P4-Ic5-FP: header-inline, called from boot_main + per_cpu_main once
+// each per CPU. Sets CPACR_EL1.FPEN = 0b11 (no FP/SIMD trap at any EL).
+static inline void fp_enable_this_cpu(void);
 ```
 
-`cpu_switch_context` saves the AAPCS64 callee-saved registers + SP + LR + TPIDR_EL0 from the live CPU into `prev`; loads the same fields from `next` into the CPU; rets to the loaded LR. Pure asm; from C's view it's a normal function call (caller-saved registers are clobbered, void return).
+`cpu_switch_context` saves the AAPCS64 callee-saved registers + SP + LR + TPIDR_EL0 + TTBR0 + V0..V31 + FPSR + FPCR from the live CPU into `prev`; loads the same fields from `next` into the CPU; rets to the loaded LR. Pure asm; from C's view it's a normal function call (caller-saved registers are clobbered, void return).
+
+**P4-Ic5-FP eager save/restore stance**: every context switch saves+restores 528 B of FP state (32 × 16 B + 4 + 4 = 520 B + 8 B pad-rounded). At v1.0 thread counts (< 100 alive simultaneously) the RSS impact is < 100 KiB; the save/restore cost is ~16 STP-Q pair instructions = ~32 cycles per direction. Phase 5+ may switch to lazy (CPACR_EL1.FPEN trap-and-allocate on first FP use per Thread) if profiling shows the unconditional save/restore matters. The `.arch_extension fp` directive at the top of `arch/arm64/context.S` permits Q-reg instructions in that one TU; the rest of the kernel is `-mgeneral-regs-only`-clean.
 
 The C-level state bookkeeping (current_thread pointer, state field updates) is the caller's responsibility — `thread_switch` is the canonical wrapper that does both.
 

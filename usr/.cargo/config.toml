@@ -42,20 +42,12 @@ rustflags = [
     # C side's `-march=armv8-a+lse+pauth+bti`. Rust's target-feature
     # syntax is independent of clang's -march.
     #
-    # FP/SIMD disabled at v1.0: the Thylacine kernel doesn't yet save
-    # or restore FP register state on context switch (-mgeneral-regs-only
-    # kernel-side; CPACR_EL1.FPEN traps EL0 FP/SIMD instructions). If
-    # rustc emits NEON for memset/memcpy intrinsics (which it does by
-    # default on aarch64-unknown-none — see mmio-probe's memset using
-    # `dup v0.4h` + `mov h0..h3` at P4-Ic5a), the userspace binary
-    # traps with EC=0x07 ("Trapped FP/SIMD/SVE access") on the first
-    # such instruction. Disabling FP/SIMD in the compiler forces
-    # general-register implementations everywhere; the resulting code
-    # is fully kernel-friendly.
-    #
-    # When the kernel gains FP context save/restore (Phase 5+ likely
-    # via lazy-FP-trap-and-allocate), the `-neon,-fp-armv8` flags
-    # come off and userspace gets full SIMD again. The decision lives
-    # here so it applies uniformly across all userspace Rust crates.
-    "-C", "target-feature=+lse,+paca,+pacg,+bti,-neon,-fp-armv8",
+    # FP/SIMD enabled (P4-Ic5-FP): the kernel now saves/restores
+    # Q0..Q31 + FPSR + FPCR on every context switch (eager save/restore
+    # in arch/arm64/context.S; CPACR_EL1.FPEN = 0b11 enabled via
+    # fp_enable_this_cpu in boot_main + per_cpu_main). Userspace can
+    # use any AArch64 Advanced SIMD instruction. rustc's default
+    # codegen for memset/memcpy intrinsics (NEON `dup v0.4h` etc.)
+    # works without traps.
+    "-C", "target-feature=+lse,+paca,+pacg,+bti",
 ]

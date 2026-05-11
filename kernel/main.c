@@ -28,6 +28,7 @@
 #include "test/test.h"
 
 #include <thylacine/canary.h>
+#include <thylacine/context.h>          // fp_enable_this_cpu (P4-Ic5-FP)
 
 #include <stdint.h>
 #include <thylacine/dtb.h>
@@ -73,6 +74,12 @@ extern char _kernel_end[];
 void boot_main(void);
 
 void boot_main(void) {
+    // P4-Ic5-FP: enable CPACR_EL1.FPEN = 0b11 on the boot CPU before
+    // any context switch (and any STP/LDP Q-reg the kernel emits in
+    // cpu_switch_context). Secondaries call this from per_cpu_main.
+    // Idempotent and < 10 cycles; safe to call first thing.
+    fp_enable_this_cpu();
+
     // Phase 1: parse the DTB (early prints use the fallback PL011 base
     // 0x09000000 from uart.c; if the DTB places PL011 elsewhere,
     // uart_set_base() below will update it before the banner prints).
