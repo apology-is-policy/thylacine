@@ -157,6 +157,45 @@ bool sched_idle_in_wfi(unsigned cpu_idx) {
     return g_cpu_sched[cpu_idx].idle_in_wfi;
 }
 
+// P4-Ic6-impl (R12-sched): boot CPU's deadlock-path idle thread.
+// Registered via sched_set_bootcpu_idle in boot_main; consulted by
+// sched()'s deadlock path. Read-only after init; no lock needed (set
+// once before tests + secondaries running).
+static struct Thread *g_bootcpu_idle;
+
+void sched_set_bootcpu_idle(struct Thread *t) {
+    if (g_bootcpu_idle) extinction("sched_set_bootcpu_idle called twice");
+    if (!t) extinction("sched_set_bootcpu_idle(NULL)");
+    if (t->magic != THREAD_MAGIC) extinction("sched_set_bootcpu_idle: corrupted Thread");
+    if (t->band != SCHED_BAND_IDLE) extinction("sched_set_bootcpu_idle: thread must be SCHED_BAND_IDLE");
+    g_bootcpu_idle = t;
+}
+
+// P4-Ic6-impl (R12-sched): boot CPU's idle loop. See sched.h doc.
+//
+// Body mirrors per_cpu_main's tail (kernel/smp.c) for secondaries. The
+// IRQ-mask-then-set-flag-then-sched-then-wfi ordering is the R7 F128
+// close: peer notifiers observe idle_in_wfi=TRUE before the wfi commits,
+// so a peer that calls ready() with new work between (flag set) and
+// (wfi enters) will send an IPI that wfi sees as pending and exits on.
+//
+// Reached via thread_trampoline → blr x21 with x21 = bootcpu_idle_main
+// (set by thread_create in boot_main). The trampoline already calls
+// sched_finish_task_switch + msr daifclr,#2 before reaching here, so
+// PSTATE.I is unmasked on entry. The first spin_lock_irqsave(NULL)
+// re-masks for the body.
+__attribute__((noreturn))
+void bootcpu_idle_main(void) {
+    for (;;) {
+        irq_state_t s = spin_lock_irqsave(NULL);
+        sched_set_idle_in_wfi(true);
+        sched();
+        __asm__ __volatile__("wfi" ::: "memory");
+        sched_set_idle_in_wfi(false);
+        spin_unlock_irqrestore(NULL, s);
+    }
+}
+
 // True iff `t` is currently in `cs`'s run tree (linked or as head).
 // At v1.0 P2-Cd a thread is only ever in one CPU's tree at a time; the
 // caller passes the CPU's CpuSched. Cross-CPU work-stealing (P2-Ce)
@@ -515,17 +554,34 @@ void sched(void) {
     }
     if (!next) {
         if (prev->state != THREAD_RUNNING) {
-            // Block path with no runnable peer anywhere. The thread
-            // that's blocking has no waker scheduled (sleep/wakeup
-            // protocol broken) — extinct loudly. With work-stealing
-            // live, this is a true deadlock signal: no CPU has any
-            // runnable thread that could eventually wake us.
+            // P4-Ic6-impl (R12-sched): fall back to the boot CPU's
+            // dedicated idle thread instead of extincting. Pre-fix
+            // this was an unconditional ELE because no idle thread
+            // existed distinct from kthread (kthread doubled as
+            // cs->idle); kthread blocking with no peer meant the
+            // kernel had nothing to switch to. The boot CPU now has
+            // g_bootcpu_idle (allocated in boot_main, kept off the
+            // run tree to avoid preempt-time SpSel=1 context switches
+            // that would clobber the per-CPU exception stack pointer);
+            // sched() switches to it explicitly on the deadlock path,
+            // which fires only from VOLUNTARY callers (sleep, exits)
+            // at SpSel=0. The idle thread WFI loops until an IRQ
+            // arrives that makes some thread RUNNABLE; its own sched()
+            // then picks that thread up.
             //
-            // P3-G: the retry above absorbed transient contention. If
-            // we're here, both attempts saw nothing OR we never saw
-            // contention. Either way, extinction is the right call.
-            extinction("sched: deadlock — current is blocking, no runnable peer system-wide");
+            // Only the boot CPU has g_bootcpu_idle registered. For
+            // secondaries this path is unreachable in practice: their
+            // per_cpu_main idle is always in cs->run_tree[BAND_IDLE]
+            // after its first yield, so pick_next finds it. Defensive
+            // extinction kept for secondaries / mis-init scenarios.
+            if (g_bootcpu_idle && smp_cpu_idx_self() == 0) {
+                next = g_bootcpu_idle;
+            } else {
+                extinction("sched: deadlock — current is blocking, no runnable peer system-wide");
+            }
         }
+    }
+    if (!next) {
         // Yield path with no runnable peer: keep prev running. Refill
         // slice — sched() was called for preempt or explicit yield;
         // either way, prev is the only runnable thread, so give it a

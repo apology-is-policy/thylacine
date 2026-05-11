@@ -227,9 +227,9 @@ void test_sched_runnable_count(void) {
 
 // scheduler.idle_in_wfi_observability — verify the per-CPU idle_in_wfi
 // flag is observable from boot. Out-of-range queries return false (not
-// extinction); boot CPU stays FALSE forever (no wfi loop hook); after
-// secondaries settle into per_cpu_main's wfi loop, at least one reports
-// idle_in_wfi=true.
+// extinction); boot CPU stays FALSE until the first deadlock-path
+// fallback fires (R12-sched); after secondaries settle into per_cpu_main's
+// wfi loop, at least one reports idle_in_wfi=true.
 //
 // Closes part of R5-H F78 verification — the "is this peer in WFI?"
 // signal that ready/wakeup consult to choose a wake target.
@@ -240,9 +240,13 @@ void test_sched_idle_in_wfi_observability(void) {
     TEST_EXPECT_EQ(sched_idle_in_wfi(DTB_MAX_CPUS + 100), false,
         "way-out-of-range cpu_idx returns false");
 
-    // Boot CPU never enters per_cpu_main's wfi loop — stays FALSE.
+    // P4-Ic6-impl (R12-sched): boot CPU's g_bootcpu_idle runs ONLY when
+    // the deadlock-path fallback fires (prev SLEEPING + no peer
+    // runnable). Pre-virtio_blk_probe this is unreachable; idle_in_wfi(0)
+    // is FALSE. Post-virtio_blk_probe (or any test that triggers the
+    // fallback) it may transiently flip; that's tested elsewhere.
     TEST_EXPECT_EQ(sched_idle_in_wfi(0), false,
-        "boot CPU is never in wfi (post-init runs in _torpor's asm loop)");
+        "boot CPU idle_in_wfi=FALSE before any deadlock-path fallback fires");
 
     // If running multi-CPU, secondaries should be in WFI by now.
     // Allow brief settle window for any in-flight ipi handling.

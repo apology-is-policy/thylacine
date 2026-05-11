@@ -176,46 +176,20 @@ void test_virtio_blk_probe_rfork_with_caps(void) {
                               CAP_HW_CREATE);
     TEST_ASSERT(pid > 0, "rfork_with_caps failed for /virtio-blk-probe");
 
-    // Yield-poll instead of wait_pid: while the child runs the VirtIO
-    // protocol, it briefly enters t_irq_wait waiting for the device's
-    // completion IRQ. wait_pid would put US (the parent test thread)
-    // to sleep on `child_done`, leaving the scheduler with no runnable
-    // peer system-wide while the child sleeps on its hardware-driven
-    // Rendez. The v1.0 scheduler's deadlock check (kernel/sched.c §
-    // "Block path with no runnable peer anywhere") then ELE's because
-    // it has no model for "hardware IRQ will wake us." By yielding via
-    // sched() in a loop instead, we keep the parent in the RUNNABLE
-    // pool: when the child blocks on Rendez, the scheduler picks us;
-    // when the device IRQ fires (~µs later), kobj_irq_dispatch wakes
-    // the child's Rendez → child becomes runnable → next yield picks
-    // it. Once child reaches PROC_STATE_ZOMBIE, the loop exits and
-    // wait_pid sees the zombie immediately + returns without sleeping.
-    //
-    // No iteration bound: tools/test.sh's BOOT_TIMEOUT (10 s default;
-    // 30 s in stress matrices) is the wall-clock safety net for a
-    // genuinely-wedged child. Setting an in-loop bound here would
-    // fall through to wait_pid which would then ELE — worse failure
-    // mode than the test-runner timeout because it kills the kernel
-    // before any subsequent test can run.
-    //
-    // This pattern is specific to userspace tests that wait on hardware
-    // IRQs; the scheduler limitation it works around is captured as a
-    // deferred audit (R12-sched: WFI-and-retry instead of ELE when no
-    // runnable peer + prev is blocking + GIC pending bit set).
-    for (;;) {
-        struct Proc *c = proc_find_by_pid(pid);
-        if (!c || c->state == PROC_STATE_ZOMBIE) break;
-        // sched() to let the child (when runnable) consume CPU; then
-        // WFI to let the CPU idle until the next IRQ (timer tick at
-        // 1 kHz OR the device's completion IRQ). Pure sched()-spin
-        // would burn CPU at ~100% which slows QEMU's emulated virtio
-        // I/O path (the QEMU thread can't keep up with the guest's
-        // tight loop). WFI yields to the host and lets the device
-        // simulation progress.
-        sched();
-        __asm__ __volatile__("wfi" ::: "memory");
-    }
-
+    // P4-Ic6-impl (R12-sched): wait_pid works directly now. Before
+    // R12-sched-impl, this test used a yield-poll pattern (for(;;){
+    // sched(); wfi; } until PROC_STATE_ZOMBIE) to keep the parent
+    // RUNNABLE while the child slept on the IRQ Rendez — because the
+    // scheduler's "no runnable peer system-wide" deadlock check would
+    // ELE when both parent (sleeping on child_done) and child (sleeping
+    // on hardware IRQ) were SLEEPING simultaneously. P4-Ic6-impl
+    // allocates a dedicated boot-CPU idle thread (g_bootcpu_idle) in
+    // BAND_IDLE's run tree, so pick_next always finds something to
+    // switch to even when both parent and child are SLEEPING. The
+    // scheduler switches to bootcpu_idle's WFI loop; the device IRQ
+    // arrives, wakes the child; child runs, exits; exit's wakeup wakes
+    // the parent. This is the wait_pid path that every other userspace
+    // test uses. Closes the R12-sched workaround.
     int status = -42;
     int reaped = wait_pid(&status);
     TEST_EXPECT_EQ(reaped, pid, "wait_pid pid mismatch");

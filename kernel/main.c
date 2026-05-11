@@ -430,9 +430,39 @@ void boot_main(void) {
     uart_putdec((u64)kthread()->tid);
     uart_puts(" state=RUNNING (current_thread = kthread)\n");
 
+    // P4-Ic6-impl (R12-sched): allocate the boot CPU's dedicated idle
+    // thread, distinct from kthread, AND register it as the boot CPU's
+    // sched-deadlock-path fallback via sched_set_bootcpu_idle. NOT
+    // ready()'d into the run tree — preempt's pick_next would otherwise
+    // switch to it at SpSel=1 (preempt is hardware-set to SpSel=1 on
+    // entry), and cpu_switch_context's `mov sp` would clobber SP_EL1
+    // (= exception stack) with bootcpu_idle's kstack. Instead, sched()
+    // explicitly switches to it ONLY in the deadlock path — which fires
+    // exclusively from VOLUNTARY sched() callers (sleep, exits) at
+    // SpSel=0, where cpu_switch_context naturally writes SP_EL0. SP_EL1
+    // stays as the per-CPU exception stack throughout.
+    //
+    // Scenarios where the deadlock path now resolves cleanly (was ELE
+    // pre-fix):
+    //   - kthread calls wait_pid on a hardware-IRQ-blocked child driver
+    //     (e.g., test_virtio_blk_probe); kthread → SLEEPING, child →
+    //     SLEEPING; sched() picks bootcpu_idle as the fallback; idle
+    //     WFI loops; IRQ wakes child; eventually wait_pid wakes kthread.
+    //   - Any voluntary sleep where no peer is runnable system-wide.
+    //
+    // Must be initialized BEFORE test_run_all() since rendez tests
+    // cause kthread to sleep, and an unlucky pre-bootcpu_idle sleep
+    // would hit the now-narrowed deadlock extinction.
+    {
+        struct Thread *bootcpu_idle = thread_create(kproc(), bootcpu_idle_main);
+        if (!bootcpu_idle) extinction("boot_main: bootcpu_idle alloc failed");
+        bootcpu_idle->band = SCHED_BAND_IDLE;
+        sched_set_bootcpu_idle(bootcpu_idle);
+    }
+
     uart_puts("  sched:   bands=3 (INTERACTIVE/NORMAL/IDLE) runnable=");
     uart_putdec((u64)sched_runnable_count());
-    uart_puts(" (0 expected pre-test; ready() inserts)\n");
+    uart_puts(" (0 expected pre-test; bootcpu_idle reserved off-tree)\n");
 
     // In-kernel test harness. Runs every test in g_tests[] (kaslr
     // mix64 avalanche, DTB chosen seed presence, refactored phys
