@@ -87,12 +87,14 @@ except `x0` (return value), so the inline-asm clobber list is just
 
 ## Implementation
 
-### Rust-side `_start` (`usr/hello-rs/src/main.rs` — global_asm!)
+### Rust-side `_start` (`usr/lib/libthyla-rs/src/lib.rs` — global_asm!)
 
-Rust's `#![no_main]` forbids using an external `_start` from a `.a`
-library, so the Rust binary defines its own via `core::arch::global_asm!`:
+At P4-Ic4 the Rust-side `_start` lives in the `libthyla-rs` runtime
+crate (`usr/lib/libthyla-rs/`). Each Rust binary depends on the crate
+and only provides `rs_main` as its program body.
 
 ```rust
+// usr/lib/libthyla-rs/src/lib.rs
 global_asm!(
     ".section .text._start, \"ax\"",
     ".globl _start",
@@ -105,16 +107,67 @@ global_asm!(
 );
 ```
 
-Same contract as the C side: kernel delivers control with sp set, x0..x30
-unspecified; `_start` calls Rust-side `rs_main()` and SYS_EXITS with its
-return value. The `rs_main` symbol is declared `#[no_mangle] pub extern "C"`
-so the AArch64 PCS applies (x0 = return).
+The linker script `usr/scripts/aarch64-userspace.ld` has `ENTRY(_start)`,
+which keeps `_start` alive across the rlib boundary — the linker pulls
+the symbol from `libthyla_rs.rlib` even though no Rust code in the
+binary references it directly. The binary still needs `#![no_std]
+#![no_main]` (Rust requires the binary itself to opt out of `main`),
+but the actual entry sequence lives in the runtime crate.
 
-SVC wrappers live in the same file as inline `asm!` calls — at v1.0
-P4-Ia2 there's only one Rust binary, so factoring out a `libthyla-rs`
-crate would be premature. The factoring happens when the second Rust
-binary (the virtio-blk driver crate, P4-Ic) lands and needs the same
-wrappers.
+Same contract as the C side: kernel delivers control with sp set,
+x0..x30 unspecified; `_start` calls Rust-side `rs_main()` and SYS_EXITS
+with its return value. The `rs_main` symbol must be declared `#[no_mangle]
+pub extern "C"` so the AArch64 PCS applies (x0 = return).
+
+### libthyla-rs runtime crate (P4-Ic4)
+
+Sibling of the C-side `libt`. Provides:
+
+| Surface | Mirror of |
+|---|---|
+| `T_SYS_*` constants  | `kernel/include/thylacine/syscall.h` |
+| `T_RIGHT_*` constants | `kernel/include/thylacine/handle.h` |
+| `T_PROT_*` constants  | `kernel/include/thylacine/vma.h` |
+| `t_exits(status)` → ! | `<thyla/syscall.h>::t_exits` |
+| `t_puts(buf, len) → i64` | `<thyla/syscall.h>::t_puts` |
+| `t_putstr(&str) → i64` | `<thyla/syscall.h>::t_putstr` |
+| `t_mmio_create(pa, size, rights)` | `<thyla/syscall.h>::t_mmio_create` |
+| `t_mmio_map(handle, vaddr, prot)` | `<thyla/syscall.h>::t_mmio_map` |
+| `t_irq_create(intid, rights)` | `<thyla/syscall.h>::t_irq_create` |
+| `t_irq_wait(handle)` | `<thyla/syscall.h>::t_irq_wait` |
+| `_start` (global_asm!) | `libt/src/start.S::_start` |
+| `#[panic_handler]` | C side has no equivalent (panic = abort) |
+
+`#[panic_handler]` is required by `no_std` and must appear exactly once
+across the binary's full dependency tree. libthyla-rs provides one that
+tail-calls `t_exits(1)`; binaries that want a richer handler (e.g.,
+printing the panic message via `t_puts`) would depend on libthyla-rs
+with `default-features = false` and provide their own — a Phase 5+
+extension when the runtime matures.
+
+The Cargo dependency from a binary is straightforward:
+
+```toml
+# usr/hello-rs/Cargo.toml
+[dependencies]
+libthyla-rs = { path = "../lib/libthyla-rs" }
+```
+
+And the binary body collapses to just the entry function:
+
+```rust
+// usr/hello-rs/src/main.rs
+#![no_std]
+#![no_main]
+
+use libthyla_rs::t_putstr;
+
+#[no_mangle]
+pub extern "C" fn rs_main() -> i64 {
+    t_putstr("hello from /hello-rs\n");
+    0
+}
+```
 
 ### C-side `_start` (`usr/lib/libt/src/start.S`)
 
@@ -355,15 +408,28 @@ step lands when release builds appear (Phase 7+).
   `usr/`, `aarch64-unknown-none` target, `/hello-rs` binary,
   `usr/.cargo/config.toml` toolchain pinning, build wrapper extended,
   `userspace.ramfs_hello_rs` kernel test. Inline SVC wrappers in
-  `hello-rs/src/main.rs`; runtime crate extraction held until second
-  Rust binary lands.
-- **P4-Ib — next**. `KObj_MMIO` + `KObj_IRQ` handle-table integration
-  with syscall surface; **spec-first** (extends `specs/handles.tla`).
-- **P4-Ic — after Ib**. The actual virtio-blk driver crate. Factors
-  the SVC wrappers from hello-rs into a shared `libthyla-rs` crate.
+  `hello-rs/src/main.rs` (extracted at P4-Ic4).
+- **P4-Ib — landed**. `KObj_MMIO` + `KObj_IRQ` handle-table integration
+  with syscall surface; spec-first.
+- **P4-Ic1 — landed**. Burrow MMIO type extension.
+- **P4-Ic2 — landed**. `SYS_MMIO_MAP` syscall + device-memory PTE attrs
+  + demand-page MMIO dispatch.
+- **P4-Ic3 — landed**. Kernel-internal `rfork_with_caps` capability
+  grant primitive.
+- **P4-Ic4 — landed**. `libthyla-rs` runtime crate extraction:
+  `_start`, SVC wrappers (`t_exits`, `t_puts`, `t_putstr`,
+  `t_mmio_create`, `t_mmio_map`, `t_irq_create`, `t_irq_wait`),
+  syscall/right/prot constants, and `#[panic_handler]` all moved from
+  `usr/hello-rs/src/main.rs` into the new `usr/lib/libthyla-rs/` crate.
+  hello-rs body collapses to ~10 lines: `use libthyla_rs::t_putstr;
+  #[no_mangle] pub extern "C" fn rs_main() -> i64 { ...; 0 }`. ELF
+  layout pinned identical to pre-extraction (same 66,336-byte binary;
+  `_start` at 0x400000; `rs_main` at 0x400018).
+- **P4-Ic5 — next**. Rust no_std virtio-blk driver crate; closes
+  deferred R10 F159 (SVC-path test coverage).
 - **P4-Id — after Ic**. Driver exposed as 9P server.
 
-180/180 tests PASS × default + UBSan; 4/4 fault; 5/5 KASLR (P4-Ia2 tip).
+210/210 tests PASS × default + UBSan; 4/4 fault; 10/10 KASLR (P4-Ic4 tip).
 
 `kernel/joey.c` remains as the boot-time embedded "hello" blob until
 the disk-loaded `/joey` refactor (post-Phase 5+ when stratum is

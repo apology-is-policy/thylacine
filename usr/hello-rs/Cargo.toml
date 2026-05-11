@@ -9,6 +9,7 @@ license.workspace = true
 name = "hello-rs"
 path = "src/main.rs"
 
-# No dependencies — pure core. P4-Ic introduces virtio-blk and may
-# pull in a small set of audited crates (no_std-compatible, no proc-macro,
-# pinned versions per ARCH §3.5 vendoring policy).
+[dependencies]
+# libthyla-rs provides _start + #[panic_handler] + SVC wrappers (P4-Ic4
+# extraction). hello-rs only needs t_putstr from this crate.
+libthyla-rs = { path = "../lib/libthyla-rs" }

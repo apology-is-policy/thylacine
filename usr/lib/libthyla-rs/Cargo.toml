@@ -1,0 +1,27 @@
+[package]
+name = "libthyla-rs"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lib]
+name = "libthyla_rs"
+path = "src/lib.rs"
+
+# Thylacine userspace runtime — Rust side.
+#
+# Mirror of usr/lib/libt/ on the Rust side. Provides:
+#   - Syscall numbers (T_SYS_*) — mirror kernel/include/thylacine/syscall.h.
+#   - Right bits (T_RIGHT_*)   — mirror kernel/include/thylacine/handle.h.
+#   - Prot bits (T_PROT_*)     — mirror kernel/include/thylacine/vma.h.
+#   - SVC wrappers (t_exits, t_puts, t_putstr, t_mmio_create, t_mmio_map,
+#     t_irq_create, t_irq_wait).
+#   - _start (global_asm; provided as a free symbol; ENTRY(_start) in
+#     usr/scripts/aarch64-userspace.ld keeps it alive across the rlib
+#     boundary).
+#   - #[panic_handler] — default impl maps to t_exits(1).
+#
+# Binaries depend on libthyla-rs and define `#[no_mangle] pub extern "C"
+# fn rs_main() -> i64` as their entry point; _start invokes rs_main and
+# tail-calls SYS_EXITS with the return value.

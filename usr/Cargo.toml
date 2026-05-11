@@ -1,10 +1,14 @@
 # Thylacine native userspace — Rust side.
 #
 # Workspace root for all Rust userspace crates. Sibling of the C side
-# (usr/lib/libt + usr/hello). At P4-Ia2 the only crate is hello-rs;
-# subsequent sub-chunks add the virtio-blk driver crate (P4-Ic) and a
-# proper runtime/syscall crate (extracted from the inline syscalls
-# in hello-rs when the third Rust binary justifies it).
+# (usr/lib/libt + usr/hello).
+#
+# Members:
+#   - lib/libthyla-rs  (P4-Ic4) — runtime crate. SVC wrappers + _start +
+#                                 panic_handler + syscall/right/prot
+#                                 constants. Mirror of C-side libt.
+#   - hello-rs          (P4-Ia2) — first Rust binary; depends on libthyla-rs.
+#   (P4-Ic5+ will add the virtio-blk driver crate.)
 #
 # Build via tools/build.sh userspace (preferred) or directly from this
 # directory:
@@ -15,7 +19,7 @@
 
 [workspace]
 resolver = "2"
-members = ["hello-rs"]
+members = ["lib/libthyla-rs", "hello-rs"]
 
 [workspace.package]
 edition = "2021"
