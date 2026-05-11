@@ -193,6 +193,13 @@ void test_irqfwd_create_destroy(void);
 void test_irqfwd_refcount_lifecycle(void);
 void test_irqfwd_wait_wakes_on_sgi(void);
 void test_irqfwd_collapses_concurrent_fires(void);
+void test_virtio_pci_init_called(void);
+void test_virtio_pci_count_within_bound(void);
+void test_virtio_pci_devices_have_vendor(void);
+void test_virtio_pci_devices_have_cfg(void);
+void test_virtio_pci_find_rng(void);
+void test_virtio_pci_find_unknown_returns_null(void);
+void test_virtio_pci_cfg_read_bounds(void);
 void test_userspace_first_iteration(void);
 void test_userspace_second_iteration(void);
 
@@ -415,6 +422,15 @@ struct test_case g_tests[] = {
     { "irqfwd.wait_wakes_on_sgi",      test_irqfwd_wait_wakes_on_sgi,      false, NULL },
     { "irqfwd.collapses_concurrent_fires",
                                        test_irqfwd_collapses_concurrent_fires, false, NULL },
+    { "virtio_pci.init_called",        test_virtio_pci_init_called,        false, NULL },
+    { "virtio_pci.count_within_bound", test_virtio_pci_count_within_bound, false, NULL },
+    { "virtio_pci.devices_have_vendor",
+                                       test_virtio_pci_devices_have_vendor, false, NULL },
+    { "virtio_pci.devices_have_cfg",   test_virtio_pci_devices_have_cfg,   false, NULL },
+    { "virtio_pci.find_rng",           test_virtio_pci_find_rng,           false, NULL },
+    { "virtio_pci.find_unknown_returns_null",
+                                       test_virtio_pci_find_unknown_returns_null, false, NULL },
+    { "virtio_pci.cfg_read_bounds",    test_virtio_pci_cfg_read_bounds,    false, NULL },
     { "userspace.first_iteration",     test_userspace_first_iteration,     false, NULL },
     { "userspace.second_iteration",    test_userspace_second_iteration,    false, NULL },
     { NULL, NULL, false, NULL },          // sentinel

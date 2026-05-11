@@ -45,6 +45,7 @@
 #include <thylacine/dev.h>
 #include <thylacine/types.h>
 #include <thylacine/virtio.h>
+#include <thylacine/virtio_pci.h>
 
 #include "../arch/arm64/psci.h"
 
@@ -323,6 +324,13 @@ void boot_main(void) {
     // after dev_init since virtio_init prints to UART (cons must be
     // up) and after slub_init since virtqueue_create uses kmalloc.
     virtio_init();
+
+    // P4-H: VirtIO PCIe enumeration. Probes the DTB-described PCIe
+    // ECAM (pci-host-ecam-generic), maps bus 0's config space via
+    // mmu_map_mmio, walks (dev, fn) on bus 0, and records every
+    // VirtIO PCI device (vendor 0x1AF4 + device IDs 0x1000..0x107F).
+    // Silent skip when no PCIe root is present in DTB.
+    virtio_pci_init();
 
     // SMP secondary bring-up (P2-Ca). Reads /psci/method, brings up
     // each /cpus/cpu@N (N>0) via PSCI_CPU_ON pointing at the asm

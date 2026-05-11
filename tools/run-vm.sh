@@ -122,6 +122,7 @@ exec qemu-system-aarch64 \
     -kernel "$KERNEL_BIN" \
     ${ramfs_flags[@]+"${ramfs_flags[@]}"} \
     -device virtio-rng-device,id=rng0 \
+    -device virtio-rng-pci,id=rng_pci0 \
     -nographic \
     -serial mon:stdio \
     ${gdb_flags[@]+"${gdb_flags[@]}"} \

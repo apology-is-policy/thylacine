@@ -80,6 +80,7 @@ set(KERNEL_SRCS
     devramfs.c
     cpio.c
     virtio.c
+    virtio_pci.c
     irqfwd.c
     test/test_dev.c
     test/test_trivial_devs.c
@@ -88,6 +89,7 @@ set(KERNEL_SRCS
     test/test_cpio.c
     test/test_devramfs.c
     test/test_virtio.c
+    test/test_virtio_pci.c
     test/test_irqfwd.c
     test/test_userspace2.c
 )
