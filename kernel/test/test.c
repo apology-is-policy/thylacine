@@ -220,6 +220,12 @@ void test_handle_hw_irq_dup_rejected(void);
 void test_handle_hw_mmio_close_releases_claim(void);
 void test_handle_hw_irq_close_releases_intid(void);
 void test_handle_hw_irq_kernel_reserved_rejected(void);
+void test_burrow_mmio_create_basic(void);
+void test_burrow_mmio_create_null_rejected(void);
+void test_burrow_mmio_create_holds_kobj_ref(void);
+void test_burrow_mmio_unref_releases_kobj_ref(void);
+void test_burrow_mmio_acquire_mapping_works(void);
+void test_burrow_mmio_lifecycle_round_trip(void);
 
 // ---------------------------------------------------------------------------
 // Registry. Sentinel-terminated.
@@ -489,6 +495,17 @@ struct test_case g_tests[] = {
     { "handle_hw.irq_kernel_reserved_rejected",
                                        test_handle_hw_irq_kernel_reserved_rejected,
                                                                            false, NULL },
+    { "burrow_mmio.create_basic",      test_burrow_mmio_create_basic,      false, NULL },
+    { "burrow_mmio.create_null_rejected",
+                                       test_burrow_mmio_create_null_rejected, false, NULL },
+    { "burrow_mmio.create_holds_kobj_ref",
+                                       test_burrow_mmio_create_holds_kobj_ref, false, NULL },
+    { "burrow_mmio.unref_releases_kobj_ref",
+                                       test_burrow_mmio_unref_releases_kobj_ref, false, NULL },
+    { "burrow_mmio.acquire_mapping_works",
+                                       test_burrow_mmio_acquire_mapping_works, false, NULL },
+    { "burrow_mmio.lifecycle_round_trip",
+                                       test_burrow_mmio_lifecycle_round_trip, false, NULL },
     { NULL, NULL, false, NULL },          // sentinel
 };
 

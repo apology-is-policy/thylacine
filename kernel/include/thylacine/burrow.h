@@ -64,11 +64,19 @@ struct Proc;
 enum burrow_type {
     BURROW_TYPE_INVALID = 0,
     BURROW_TYPE_ANON    = 1,
-    // Phase 3+ : BURROW_TYPE_PHYS  (DMA / MMIO buffers)
+    // P4-Ic1: BURROW_TYPE_MMIO — backing is a fixed physical-memory range
+    // owned by a KObj_MMIO (the spec-pinned PA-exclusivity claim ticket
+    // from P4-Ib). The Burrow holds a reference to the underlying
+    // KObj_MMIO; `pages` is NULL (no alloc_pages backing); `pa` carries
+    // the device PA. burrow_unref of a MMIO Burrow skips free_pages and
+    // calls kobj_mmio_unref(kobj_mmio) to release the held reference.
+    BURROW_TYPE_MMIO    = 2,
     // Post-v1.0: BURROW_TYPE_FILE  (Stratum page cache)
+    // Post-v1.0: BURROW_TYPE_DMA   (CMA-backed DMA buffer; separate from MMIO)
 };
 
 struct page;
+struct KObj_MMIO;
 
 struct Burrow {
     u64            magic;          // VMO_MAGIC; clobbered by SLUB on free
@@ -77,8 +85,15 @@ struct Burrow {
     size_t         page_count;
     int            handle_count;   // open handles to this BURROW
     int            mapping_count;  // open mappings (vma's)
-    struct page   *pages;          // alloc_pages chunk; NULL after free
-    unsigned       order;          // for free_pages
+    struct page   *pages;          // alloc_pages chunk; NULL after free; NULL for MMIO
+    unsigned       order;          // for free_pages; unused for MMIO
+    // P4-Ic1: MMIO-only fields. For BURROW_TYPE_ANON these are zero.
+    // For BURROW_TYPE_MMIO: kobj_mmio is the underlying KObj_MMIO whose
+    // PA claim this Burrow holds; pa is the device PA (page-aligned,
+    // matches kobj_mmio->pa); they live for the Burrow's lifetime and
+    // the kobj_mmio ref is released at burrow_free_internal.
+    struct KObj_MMIO *kobj_mmio;   // NULL except for BURROW_TYPE_MMIO
+    u64               pa;           // 0 except for BURROW_TYPE_MMIO
 };
 
 _Static_assert(__builtin_offsetof(struct Burrow, magic) == 0,
@@ -106,6 +121,31 @@ void burrow_init(void);
 // BURROW does NOT increment; burrow_create_anon's count of 1 IS the count
 // that the eventual handle_close will decrement.
 struct Burrow *burrow_create_anon(size_t size);
+
+// P4-Ic1: burrow_create_mmio — wrap a KObj_MMIO in a Burrow so the
+// VMA + page-fault dispatch path can install device-memory PTEs
+// uniformly with the anon-Burrow flow.
+//
+// The Burrow takes a reference on the KObj_MMIO via kobj_mmio_ref so
+// the underlying PA claim survives the caller's eventual kobj_mmio_unref
+// (typically the user's handle_close on their KOBJ_MMIO handle). The
+// Burrow's reference is released when burrow_free_internal fires
+// (handle_count + mapping_count both reach 0).
+//
+// Returns the Burrow with handle_count=1 (caller's construction
+// reference, consumed by either burrow_map → burrow_unref transfer or
+// explicit burrow_unref).
+//
+// Returns NULL on:
+//   - NULL kobj_mmio, corrupted magic.
+//   - kobj_mmio->size == 0 (defensive; kobj_mmio_create rejects this).
+//   - SLUB OOM.
+//
+// At v1.0 P4-Ic1 the Burrow does NOT install any PTEs — that's the
+// VMA layer's job at burrow_map. Demand-page integration in
+// arch/arm64/fault.c (handling the MMIO PA + device-memory PTE attrs)
+// lands at P4-Ic2.
+struct Burrow *burrow_create_mmio(struct KObj_MMIO *kobj_mmio);
 
 // Increment handle_count. Maps to spec's HandleOpen action. Called by
 // handle_dup (and Phase 4's handle_transfer_via_9p) for KOBJ_BURROW

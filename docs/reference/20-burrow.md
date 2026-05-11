@@ -293,8 +293,29 @@ The struct contains `enum burrow_type` whose underlying integer type is implemen
 | Integration with `handle.c` (KOBJ_BURROW release/acquire) | Landed (P2-Fd) |
 | In-kernel tests | 6 (P2-Fd) + 5 (P3-Db) = 11 covering refcount lifecycle + new VMA-installing entry points + overlap rollback. |
 | Spec `burrow.tla` + 3 buggy configs | Landed (P2-Fb); covers `MapVmo` / `UnmapVmo` actions. P3-Db's high-level entry is a thin orchestrator over the spec-modeled refcount + `vma_insert` overlap; no spec extension needed at this sub-chunk. |
-| `burrow_create_physical` (BURROW_TYPE_PHYS) | Phase 3+ (after P3-Dc) |
+| `burrow_create_mmio(struct KObj_MMIO *)` (BURROW_TYPE_MMIO) | **Landed (P4-Ic1)** — wraps KObj_MMIO; holds a ref on the underlying kobj for the Burrow's lifetime; pages=NULL; burrow_free_internal type-dispatches between free_pages (ANON) and kobj_mmio_unref (MMIO). |
+| `burrow_create_physical` (BURROW_TYPE_PHYS) for DMA buffers | Post-v1.0 (separate from MMIO) |
 | `BURROW_TYPE_FILE` (Stratum page cache) | Post-v1.0 |
-| PTE installation (demand paging) | P3-Dc (next sub-chunk) |
+| PTE installation (demand paging) for ANON | **Landed (P3-Dc)** — `userland_demand_page` in arch/arm64/fault.c |
+| PTE installation for MMIO (device-memory PTE attrs) | **P4-Ic2** — wire `userland_demand_page` to dispatch on `vma->burrow->type`; extend `mmu_install_user_pte` to accept device-memory flag |
+| `kobj_mmio_map_into_user` syscall | **P4-Ic2** — calls `burrow_create_mmio` + `burrow_map`; first userspace MMIO mapping path |
 | Partial unmap (sub-range of an existing VMA) | Post-v1.0 |
 | Atomic refcount ops (SMP) | Phase 5+ |
+
+### P4-Ic1 MMIO Burrow details
+
+A MMIO Burrow has the same dual-count NoUseAfterFree lifecycle as ANON — that's why `burrow.tla` didn't need behavioral extension. The differences are all impl-level:
+
+- **No `pages` field**: `pages = NULL`; backing is a fixed PA owned by the underlying `KObj_MMIO`.
+- **`kobj_mmio` cross-reference**: the Burrow holds a `kobj_mmio_ref(km)` for its lifetime. Released in `burrow_free_internal` when both counts reach 0.
+- **`pa` field**: device PA (page-aligned, matches `kobj_mmio->pa`). Read by the demand-page handler (lands at P4-Ic2) to construct device-memory PTEs.
+- **`burrow_free_internal` type switch**: ANON → `free_pages`; MMIO → `kobj_mmio_unref` + struct kfree (no page-allocator interaction).
+- **`burrow_acquire_mapping` liveness check**: ANON checks `pages != NULL`; MMIO checks `kobj_mmio != NULL`. Both indicate "backing resource alive."
+
+Tests at P4-Ic1:
+- `burrow_mmio.create_basic` — round trip
+- `burrow_mmio.create_null_rejected` — NULL kobj_mmio rejected
+- `burrow_mmio.create_holds_kobj_ref` — Burrow's ref keeps kobj alive after caller's unref
+- `burrow_mmio.unref_releases_kobj_ref` — symmetric path
+- `burrow_mmio.acquire_mapping_works` — dual-count mechanics work for MMIO
+- `burrow_mmio.lifecycle_round_trip` — full create → map → unmap → unref → kobj_unref

@@ -36,6 +36,7 @@
 //   - Single-CPU lifecycle; Phase 5+ adds atomic ops.
 
 #include <thylacine/extinction.h>
+#include <thylacine/mmio_handle.h>   // P4-Ic1: kobj_mmio_ref/unref for MMIO Burrows
 #include <thylacine/page.h>
 #include <thylacine/proc.h>
 #include <thylacine/types.h>
@@ -116,8 +117,49 @@ struct Burrow *burrow_create_anon(size_t size) {
     return v;
 }
 
+// P4-Ic1: Wrap a KObj_MMIO in a Burrow. Holds a reference on the
+// underlying KObj_MMIO so the PA claim survives the caller's eventual
+// handle_close. handle_count=1 is the "construction reference" pattern
+// (mirrors burrow_create_anon).
+struct Burrow *burrow_create_mmio(struct KObj_MMIO *kobj_mmio) {
+    if (!g_vmo_cache) extinction("burrow_create_mmio before burrow_init");
+    if (!kobj_mmio) return NULL;
+    // Magic check defends against the caller passing a freed pointer.
+    // kobj_mmio_ref also defends; we duplicate here so the OOM path
+    // below doesn't bump a corrupted ref.
+    if (kobj_mmio->magic != KOBJ_MMIO_MAGIC)
+        extinction("burrow_create_mmio: kobj_mmio has bad magic (UAF?)");
+    if (kobj_mmio->size == 0) return NULL;     // defensive; kobj_mmio_create rejects
+
+    struct Burrow *v = kmem_cache_alloc(g_vmo_cache, KP_ZERO);
+    if (!v) return NULL;
+
+    // Hold a ref on the kobj_mmio for the Burrow's lifetime. The ref
+    // is released in burrow_free_internal when both counts reach 0.
+    kobj_mmio_ref(kobj_mmio);
+
+    v->magic         = VMO_MAGIC;
+    v->type          = BURROW_TYPE_MMIO;
+    v->size          = kobj_mmio->size;
+    v->page_count    = kobj_mmio->size / PAGE_SIZE;
+    v->handle_count  = 1;            // construction reference
+    v->mapping_count = 0;
+    v->pages         = NULL;         // MMIO: no struct page backing
+    v->order         = 0;
+    v->kobj_mmio     = kobj_mmio;
+    v->pa            = kobj_mmio->pa;
+    g_vmo_created++;
+    return v;
+}
+
 // Internal: release pages + struct when both counts have reached 0.
 // The caller has already verified the precondition.
+//
+// P4-Ic1: type-dispatches between ANON (free_pages on the alloc_pages
+// chunk) and MMIO (release the held KObj_MMIO ref; pages was NULL by
+// construction). The double-free guard differs per type:
+//   - ANON: pages==NULL indicates already-freed → extinct.
+//   - MMIO: kobj_mmio==NULL indicates already-freed → extinct.
 static void burrow_free_internal(struct Burrow *v) {
     if (v->magic != VMO_MAGIC)
         extinction("burrow_free_internal of corrupted BURROW");
@@ -127,11 +169,30 @@ static void burrow_free_internal(struct Burrow *v) {
     if (v->mapping_count != 0)
         extinction("burrow_free_internal with mapping_count > 0 (premature free; "
                    "specs/burrow.tla NoUseAfterFree violation)");
-    if (!v->pages)
-        extinction("burrow_free_internal with pages already NULL (double-free)");
 
-    free_pages(v->pages, v->order);
-    v->pages = NULL;                  // defensive — caller shouldn't use v anymore
+    switch (v->type) {
+    case BURROW_TYPE_ANON:
+        if (!v->pages)
+            extinction("burrow_free_internal(ANON) with pages already NULL (double-free)");
+        free_pages(v->pages, v->order);
+        v->pages = NULL;
+        break;
+    case BURROW_TYPE_MMIO:
+        if (!v->kobj_mmio)
+            extinction("burrow_free_internal(MMIO) with kobj_mmio already NULL (double-free)");
+        // Drop the Burrow's reference to the KObj_MMIO. If the userspace
+        // handle has already been closed (its own ref dropped), this
+        // unref is the last one and triggers kobj_mmio_free_internal +
+        // claim release. Otherwise the handle's ref keeps the kobj
+        // alive and only the Burrow goes away.
+        kobj_mmio_unref(v->kobj_mmio);
+        v->kobj_mmio = NULL;
+        break;
+    case BURROW_TYPE_INVALID:
+    default:
+        extinction("burrow_free_internal: invalid burrow type");
+    }
+
     kmem_cache_free(g_vmo_cache, v);
     g_vmo_destroyed++;
 }
@@ -172,8 +233,22 @@ void burrow_unref(struct Burrow *v) {
 void burrow_acquire_mapping(struct Burrow *v) {
     if (!v)                       extinction("burrow_acquire_mapping(NULL)");
     if (v->magic != VMO_MAGIC)    extinction("burrow_acquire_mapping of corrupted BURROW");
-    if (!v->pages)
-        extinction("burrow_acquire_mapping of BURROW with NULL pages (use-after-free)");
+    // P4-Ic1: per-type liveness check. ANON: pages must still be alive.
+    // MMIO: kobj_mmio must still be held (the equivalent "backing
+    // resource" for MMIO Burrows).
+    switch (v->type) {
+    case BURROW_TYPE_ANON:
+        if (!v->pages)
+            extinction("burrow_acquire_mapping of ANON BURROW with NULL pages (UAF)");
+        break;
+    case BURROW_TYPE_MMIO:
+        if (!v->kobj_mmio)
+            extinction("burrow_acquire_mapping of MMIO BURROW with NULL kobj_mmio (UAF)");
+        break;
+    case BURROW_TYPE_INVALID:
+    default:
+        extinction("burrow_acquire_mapping: invalid burrow type");
+    }
 
     v->mapping_count++;
 }
