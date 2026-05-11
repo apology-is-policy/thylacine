@@ -63,10 +63,19 @@ set(THYLACINE_TARGET_TRIPLE "aarch64-none-elf"
 #   whichever address the kernel is running at; only absolute pointer
 #   references in static data (none in our minimal kernel today, but
 #   future-proof) need the relocation table walk.
-# -mcmodel=tiny: ARM64 small-code-model relocations (adrp/add only,
+# -mcmodel=small: ARM64 small-code-model relocations (adrp+add,
 #   ±4 GiB code/data spread). Keeps the relocation table small and
 #   permits direct PC-relative addressing of every symbol in the
-#   image. (The kernel image is < 200 KB; tiny is fine.)
+#   image.
+#
+# Was -mcmodel=tiny pre-P4-Ic5a: tiny uses single-instruction ADR with
+# ±1 MiB range. The kernel image crossed 1 MiB at P4-Ic5a (new
+# test_mmio_probe.c + mmio-probe binary in ramfs cpio), tripping
+# `R_AARCH64_ADR_PREL_LO21 out of range` on `_kernel_end` references
+# in kaslr.c. Switching to small lifts the limit to ±4 GiB via the
+# standard adrp+add pair. KASLR semantics are unaffected — both models
+# produce PC-relative code; only the absolute-pointer-in-.data
+# relocations (R_AARCH64_RELATIVE) participate in KASLR sliding.
 #
 # P1-H hardening additions:
 #   -march=armv8-a+lse             — permit LSE atomic instructions where
@@ -121,7 +130,7 @@ set(THYLACINE_KERNEL_C_FLAGS
     "-fno-common"
     "-fpie"
     "-fdirect-access-external-data"
-    "-mcmodel=tiny"
+    "-mcmodel=small"
     "-mgeneral-regs-only"
     "-mno-outline-atomics"
     "-fno-omit-frame-pointer"

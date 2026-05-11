@@ -301,6 +301,7 @@ All 8 buggy cfgs produce expected counterexamples under TLC; correct cfg explore
 | `caps.rfork_with_caps_grants_subset` | P4-Ic3: `rfork_with_caps(CAP_HW_CREATE)` from kproc grants exactly `CAP_HW_CREATE` |
 | `caps.rfork_with_caps_clamps_to_parent` | P4-Ic3: a zero-cap parent forking with `caps_mask=CAP_HW_CREATE` yields child with `CAP_NONE` (AND-with-parent clamp) |
 | `caps.rfork_with_caps_zero_mask` | P4-Ic3: `caps_mask=CAP_NONE` is equivalent to plain `rfork` |
+| `userspace.mmio_probe_rfork_with_caps` | P4-Ic5a: end-to-end userspace SVC path. kproc rforks `/mmio-probe` via `rfork_with_caps(CAP_HW_CREATE)`; binary calls `t_mmio_create` + `t_mmio_map` for PL031 RTC at PA 0x09010000; demand-page MMIO dispatch installs device-memory PTE on first access; verifies live `PeriphID0 == 0x31`; exits 0. Closes the bulk of deferred R10 F159 (SVC-path test coverage for SYS_MMIO_CREATE + SYS_MMIO_MAP). |
 | `mmio_handle.create_basic` | round-trip create + unref |
 | `mmio_handle.create_misaligned_rejected` | pa or size not page-aligned → NULL |
 | `mmio_handle.create_zero_size_rejected` | size == 0 → NULL |

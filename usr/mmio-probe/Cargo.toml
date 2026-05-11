@@ -1,0 +1,16 @@
+[package]
+name = "mmio-probe"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "mmio-probe"
+path = "src/main.rs"
+
+[dependencies]
+# libthyla-rs provides _start + #[panic_handler] + SVC wrappers (P4-Ic4).
+# mmio-probe uses t_puts, t_putstr, t_mmio_create, t_mmio_map, t_exits +
+# the T_RIGHT_* / T_PROT_* constants.
+libthyla-rs = { path = "../lib/libthyla-rs" }

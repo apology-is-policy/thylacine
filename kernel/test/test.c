@@ -204,6 +204,7 @@ void test_userspace_first_iteration(void);
 void test_userspace_second_iteration(void);
 void test_userspace_ramfs_hello(void);
 void test_userspace_ramfs_hello_rs(void);
+void test_mmio_probe_rfork_with_caps(void);
 void test_caps_kproc_has_all(void);
 void test_caps_kproc_has_hw_create(void);
 void test_caps_rfork_child_has_none(void);
@@ -467,6 +468,8 @@ struct test_case g_tests[] = {
     { "userspace.second_iteration",    test_userspace_second_iteration,    false, NULL },
     { "userspace.ramfs_hello",         test_userspace_ramfs_hello,         false, NULL },
     { "userspace.ramfs_hello_rs",      test_userspace_ramfs_hello_rs,      false, NULL },
+    { "userspace.mmio_probe_rfork_with_caps",
+                                       test_mmio_probe_rfork_with_caps,    false, NULL },
     { "caps.kproc_has_all",            test_caps_kproc_has_all,            false, NULL },
     { "caps.kproc_has_hw_create",      test_caps_kproc_has_hw_create,      false, NULL },
     { "caps.rfork_child_has_none",     test_caps_rfork_child_has_none,     false, NULL },

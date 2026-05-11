@@ -12,3 +12,10 @@ dependencies = [
 [[package]]
 name = "libthyla-rs"
 version = "0.1.0"
+
+[[package]]
+name = "mmio-probe"
+version = "0.1.0"
+dependencies = [
+ "libthyla-rs",
+]
