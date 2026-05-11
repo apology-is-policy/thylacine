@@ -7,10 +7,11 @@
 #
 # Usage:
 #   tools/build.sh kernel        — build the kernel ELF
-#   tools/build.sh sysroot       — build musl + sysroot (Phase 5+)
-#   tools/build.sh userspace     — build all Rust userspace components (Phase 3+)
+#   tools/build.sh userspace     — build native userspace binaries from usr/ (P4-Ia1+)
+#   tools/build.sh ramfs         — assemble build/ramfs.cpio
+#   tools/build.sh sysroot       — build musl + Linux-compat sysroot (Phase 6+)
 #   tools/build.sh disk          — assemble build/disk.img (Phase 4+)
-#   tools/build.sh all           — kernel + sysroot + userspace + disk
+#   tools/build.sh all           — kernel + userspace + ramfs
 #   tools/build.sh clean         — remove build artifacts
 #
 # Options:
@@ -24,7 +25,9 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD_DIR="$REPO_ROOT/build"
 KERNEL_BUILD="$BUILD_DIR/kernel"
+USR_BUILD="$BUILD_DIR/usr"
 TOOLCHAIN_FILE="$REPO_ROOT/cmake/Toolchain-aarch64-thylacine.cmake"
+USR_TOOLCHAIN_FILE="$REPO_ROOT/cmake/Toolchain-aarch64-userspace.cmake"
 
 target="${1:-all}"
 shift || true
@@ -113,18 +116,22 @@ build_kernel() {
     # -initrd has something to load. The cpio is independent of
     # the kernel ELF (loaded separately by the bootloader); rebuilding
     # it on every kernel build keeps the file table reproducible.
+    #
+    # P4-Ia1: build userspace first so build_ramfs picks up the latest
+    # /hello (and future /<bin>) without an extra invocation.
+    build_userspace
     build_ramfs
 }
 
 build_ramfs() {
     local ramfs_src="$BUILD_DIR/ramfs-src"
     local ramfs_out="$BUILD_DIR/ramfs.cpio"
+
+    # Rebuild from scratch so removed userspace binaries don't linger.
+    rm -rf "$ramfs_src"
     mkdir -p "$ramfs_src"
 
-    # Sample files. Generated at build time so they reflect the
-    # current build's THYLACINE_VERSION_STRING. Phase 5+ will replace
-    # this with the userspace driver binaries + /joey blob; v1.0
-    # P4-E ships these two as the read-side smoke set.
+    # Smoke files (read-side checks for devramfs).
     cat > "$ramfs_src/welcome" <<'EOF'
 Welcome to Thylacine ramfs.
 EOF
@@ -132,17 +139,37 @@ EOF
 Thylacine v0.1-dev
 EOF
 
+    # P4-Ia1: copy any built userspace binaries from build/usr into the
+    # cpio root. The list is curated below (not glob) so an accidental
+    # CMake byproduct doesn't get shipped. Each binary's source-of-truth
+    # comment lives in usr/<name>/CMakeLists.txt.
+    local usr_bins=( "hello" )
+    for bin in "${usr_bins[@]}"; do
+        local src="$USR_BUILD/$bin/$bin"
+        if [[ -f "$src" ]]; then
+            cp "$src" "$ramfs_src/$bin"
+            chmod 0755 "$ramfs_src/$bin"
+        fi
+    done
+
     python3 "$REPO_ROOT/tools/mkcpio.py" "$ramfs_src" "$ramfs_out"
     echo "==> ramfs cpio: $ramfs_out"
 }
 
-build_sysroot() {
-    echo "==> sysroot is a Phase 5 deliverable; not yet implemented."
-    exit 1
+build_userspace() {
+    echo "==> Building userspace (dir=$USR_BUILD)"
+    cmake -S "$REPO_ROOT/usr" -B "$USR_BUILD" \
+        -DCMAKE_TOOLCHAIN_FILE="$USR_TOOLCHAIN_FILE" \
+        -DCMAKE_BUILD_TYPE="$build_type" \
+        ${extra_cmake_args[@]+"${extra_cmake_args[@]}"}
+    cmake --build "$USR_BUILD" $verbose
+    echo "==> Userspace built under $USR_BUILD"
+    ls -la "$USR_BUILD/hello/hello" 2>/dev/null || true
 }
 
-build_userspace() {
-    echo "==> userspace is a Phase 3 deliverable; not yet implemented."
+build_sysroot() {
+    echo "==> sysroot (Linux-compat musl) is a Phase 6 deliverable."
+    echo "    Native Thylacine userspace lives in usr/ — use 'build.sh userspace'."
     exit 1
 }
 
@@ -152,8 +179,8 @@ build_disk() {
 }
 
 build_all() {
+    # build_kernel calls build_userspace + build_ramfs internally.
     build_kernel
-    # Other components will be enabled as their phases land.
 }
 
 clean() {

@@ -202,6 +202,7 @@ void test_virtio_pci_find_unknown_returns_null(void);
 void test_virtio_pci_cfg_read_bounds(void);
 void test_userspace_first_iteration(void);
 void test_userspace_second_iteration(void);
+void test_userspace_ramfs_hello(void);
 
 // ---------------------------------------------------------------------------
 // Registry. Sentinel-terminated.
@@ -433,6 +434,7 @@ struct test_case g_tests[] = {
     { "virtio_pci.cfg_read_bounds",    test_virtio_pci_cfg_read_bounds,    false, NULL },
     { "userspace.first_iteration",     test_userspace_first_iteration,     false, NULL },
     { "userspace.second_iteration",    test_userspace_second_iteration,    false, NULL },
+    { "userspace.ramfs_hello",         test_userspace_ramfs_hello,         false, NULL },
     { NULL, NULL, false, NULL },          // sentinel
 };
 

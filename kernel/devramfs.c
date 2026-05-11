@@ -26,6 +26,7 @@
 
 #include <thylacine/cpio.h>
 #include <thylacine/dev.h>
+#include <thylacine/devramfs.h>
 #include <thylacine/dtb.h>
 #include <thylacine/extinction.h>
 #include <thylacine/page.h>
@@ -140,6 +141,21 @@ static int ramfs_find_by_name(const char *name) {
         if (f[j] == '\0' && name[j] == '\0') return i;
     }
     return -1;
+}
+
+// Public API. Returns 0 on success and populates *out_data / *out_size
+// with pointers into the initrd blob (kernel-owned for boot lifetime;
+// caller must not modify or free). Returns -1 if devramfs hasn't been
+// initialized, the file isn't in the table, or out_data / out_size /
+// name is NULL.
+int devramfs_lookup(const char *name, const void **out_data, size_t *out_size) {
+    if (!name || !out_data || !out_size)        return -1;
+    if (!g_ramfs_initialized)                   return -1;
+    int idx = ramfs_find_by_name(name);
+    if (idx < 0)                                return -1;
+    *out_data = (const void *)g_ramfs_files[idx].data;
+    *out_size = g_ramfs_files[idx].size;
+    return 0;
 }
 
 // =============================================================================
