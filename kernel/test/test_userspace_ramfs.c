@@ -36,6 +36,7 @@
 #include "../../arch/arm64/uart.h"
 
 void test_userspace_ramfs_hello(void);
+void test_userspace_ramfs_hello_rs(void);
 
 // The cpio newc format aligns data to 4 bytes; the kernel ELF loader
 // requires 8-byte alignment for the Ehdr cast (UBSan -fsanitize=alignment
@@ -61,13 +62,13 @@ static void ramfs_exec_thunk(void *arg) {
     u64 entry = 0, sp = 0;
     int rc = exec_setup(p, ea->blob, ea->size, &entry, &sp);
     if (rc != 0) {
-        uart_puts("    /hello: exec_setup rc=");
+        uart_puts("    exec_setup rc=");
         uart_putdec((u64)rc);
         uart_puts(" → exits(fail-exec)\n");
         exits("fail-exec");
     }
 
-    uart_puts("    /hello: exec_setup ok entry=");
+    uart_puts("    exec_setup ok entry=");
     uart_puthex64(entry);
     uart_puts(" sp=");
     uart_puthex64(sp);
@@ -76,23 +77,34 @@ static void ramfs_exec_thunk(void *arg) {
     userland_enter(entry, sp);
 }
 
-void test_userspace_ramfs_hello(void) {
+// Shared body: load `name` from devramfs, exec it, verify clean exit.
+// Returns 0 on success, -1 on TEST_ASSERT/EXPECT failure (caller has
+// already called test_fail via the macros), 1 on "not in ramfs" (skip).
+static int run_ramfs_binary(const char *name) {
     const void *cpio_blob = NULL;
     size_t size = 0;
 
-    int rc = devramfs_lookup("hello", &cpio_blob, &size);
+    int rc = devramfs_lookup(name, &cpio_blob, &size);
     if (rc != 0) {
-        uart_puts("    [skip] /hello not in ramfs (build with: tools/build.sh all)\n");
-        return;
+        uart_puts("    [skip] /");
+        uart_puts(name);
+        uart_puts(" not in ramfs (build with: tools/build.sh all)\n");
+        return 1;
     }
 
-    TEST_ASSERT(size <= RAMFS_EXEC_BLOB_MAX, "/hello too large for static buffer");
+    if (size > RAMFS_EXEC_BLOB_MAX) {
+        test_fail("ramfs binary too large for static buffer");
+        return -1;
+    }
 
-    // Copy into 8-aligned static buffer (cpio data is only 4-aligned).
+    // Copy into 8-aligned static buffer (cpio data is only 4-aligned;
+    // ELF Ehdr cast requires 8 — UBSan -fsanitize=alignment / R5-G F61).
     const u8 *src = (const u8 *)cpio_blob;
     for (size_t i = 0; i < size; i++) g_ramfs_blob[i] = src[i];
 
-    uart_puts("    /hello cpio=");
+    uart_puts("    /");
+    uart_puts(name);
+    uart_puts(" cpio=");
     uart_puthex64((u64)(uintptr_t)cpio_blob);
     uart_puts(" → aligned=");
     uart_puthex64((u64)(uintptr_t)g_ramfs_blob);
@@ -103,16 +115,40 @@ void test_userspace_ramfs_hello(void) {
     struct ramfs_exec_args args = { .blob = g_ramfs_blob, .size = size };
 
     int pid = rfork(RFPROC, ramfs_exec_thunk, &args);
-    TEST_ASSERT(pid > 0, "rfork failed for /hello");
+    if (pid <= 0) {
+        test_fail("rfork failed for ramfs binary");
+        return -1;
+    }
 
     int status = -42;
     int reaped = wait_pid(&status);
-    TEST_EXPECT_EQ(reaped, pid, "wait_pid pid mismatch for /hello");
-    TEST_EXPECT_EQ(status, 0, "/hello exited non-zero");
+    if (reaped != pid) {
+        test_fail("wait_pid returned wrong pid for ramfs binary");
+        return -1;
+    }
+    if (status != 0) {
+        test_fail("ramfs binary exited non-zero");
+        return -1;
+    }
 
-    uart_puts("    /hello reaped pid=");
+    uart_puts("    /");
+    uart_puts(name);
+    uart_puts(" reaped pid=");
     uart_putdec((u64)pid);
     uart_puts(" status=");
     uart_putdec((u64)status);
-    uart_puts(" (sysroot build path verified)\n");
+    uart_puts(" (build path verified)\n");
+    return 0;
+}
+
+// /hello — C-side runtime (libt) + first hello binary (P4-Ia1).
+void test_userspace_ramfs_hello(void) {
+    run_ramfs_binary("hello");
+}
+
+// /hello-rs — Rust nostd userspace + first Rust hello binary (P4-Ia2).
+// Verifies the cargo + rust-lld + global_asm! _start path through the
+// same exec_setup pipeline. Different binary, same kernel-side machinery.
+void test_userspace_ramfs_hello_rs(void) {
+    run_ramfs_binary("hello-rs");
 }

@@ -29,24 +29,31 @@ syscall ABI (Plan 9 / 9P / namespace-aware, not Linux).
 
 ```
 usr/
-├── CMakeLists.txt                 # toplevel project(thylacine_userspace)
+├── CMakeLists.txt                 # C-side toplevel: project(thylacine_userspace)
+├── Cargo.toml                     # Rust-side workspace (members: hello-rs)
+├── .cargo/config.toml             # Rust target + linker flag pinning
 ├── scripts/
-│   └── aarch64-userspace.ld       # linker script: two PT_LOAD (RX, RW)
+│   └── aarch64-userspace.ld       # linker script: two PT_LOAD (RX, RW); shared C+Rust
 ├── lib/
-│   └── libt/
-│       ├── CMakeLists.txt         # static lib `t` (libt.a)
+│   └── libt/                      # C runtime (libt.a)
+│       ├── CMakeLists.txt
 │       ├── include/thyla/
 │       │   └── syscall.h          # SVC wrappers (header-only)
 │       └── src/
 │           └── start.S            # _start + stack-canary stubs
-└── hello/
-    ├── CMakeLists.txt             # add_executable(hello hello.c) + link t
-    └── hello.c                    # int main(void) { t_putstr(...); return 0; }
+├── hello/                         # C binary
+│   ├── CMakeLists.txt
+│   └── hello.c
+└── hello-rs/                      # Rust binary (no_std, no_main)
+    ├── Cargo.toml
+    └── src/
+        └── main.rs                # SVC wrappers (inline) + _start (global_asm) + panic_handler
 ```
 
 Build outputs:
 - `build/usr/lib/libt.a` — static archive (only object: `start.S`)
-- `build/usr/hello/hello` — static-PIE-style ELF, ~74 KB unstripped
+- `build/usr/hello/hello` — C-side ELF, ~74 KB unstripped
+- `build/usr-rs/aarch64-unknown-none/release/hello-rs` — Rust-side ELF, ~65 KB
 
 ---
 
@@ -80,7 +87,36 @@ except `x0` (return value), so the inline-asm clobber list is just
 
 ## Implementation
 
-### `_start` (`usr/lib/libt/src/start.S`)
+### Rust-side `_start` (`usr/hello-rs/src/main.rs` — global_asm!)
+
+Rust's `#![no_main]` forbids using an external `_start` from a `.a`
+library, so the Rust binary defines its own via `core::arch::global_asm!`:
+
+```rust
+global_asm!(
+    ".section .text._start, \"ax\"",
+    ".globl _start",
+    "_start:",
+    "    bti     c",
+    "    bl      rs_main",     // x0 := rs_main() (extern "C" return)
+    "    mov     x8, #0",      // T_SYS_EXITS
+    "    svc     #0",
+    "1:  wfe; b 1b",
+);
+```
+
+Same contract as the C side: kernel delivers control with sp set, x0..x30
+unspecified; `_start` calls Rust-side `rs_main()` and SYS_EXITS with its
+return value. The `rs_main` symbol is declared `#[no_mangle] pub extern "C"`
+so the AArch64 PCS applies (x0 = return).
+
+SVC wrappers live in the same file as inline `asm!` calls — at v1.0
+P4-Ia2 there's only one Rust binary, so factoring out a `libthyla-rs`
+crate would be premature. The factoring happens when the second Rust
+binary (the virtio-blk driver crate, P4-Ic) lands and needs the same
+wrappers.
+
+### C-side `_start` (`usr/lib/libt/src/start.S`)
 
 ```asm
 _start:
@@ -152,7 +188,7 @@ relocations; at v1.0 the base is fixed.
 
 ## Build pipeline
 
-### Toolchain (`cmake/Toolchain-aarch64-userspace.cmake`)
+### C-side toolchain (`cmake/Toolchain-aarch64-userspace.cmake`)
 
 Sibling of `cmake/Toolchain-aarch64-thylacine.cmake`. Same `clang` +
 `ld.lld`, same triple `aarch64-none-elf`, but with differences:
@@ -164,19 +200,48 @@ Sibling of `cmake/Toolchain-aarch64-thylacine.cmake`. Same `clang` +
 | `-fpie` | YES | NO | Userspace v1.0 is static-fixed-base; PIE arrives with ASLR Phase 5+ |
 | Hardening (`-fstack-protector-strong`, PAC, BTI, canaries) | YES | YES | Same posture both sides |
 
+### Rust-side toolchain (`usr/.cargo/config.toml`)
+
+Target: `aarch64-unknown-none` (built-in Rust target for bare-metal
+aarch64; no_std required, no libc, no host OS assumptions). Custom
+target specs are an option for true Thylacine-native syscall ABI
+integration in Phase 5+, but at v1.0 the syscall surface is small
+enough that inline `asm!` suffices.
+
+Linker: `rust-lld` (Rust-bundled lld). Same `usr/scripts/aarch64-userspace.ld`
+linker script as the C side — both sides produce ELFs with identical
+PT_LOAD layout (and the same kernel ELF loader path handles both).
+
+Posture matches the C side: static, no PIE, code-model=small,
+target-feature `+lse,+paca,+pacg,+bti`. `panic = "abort"` in the
+release profile so panics don't unwind (no_std has no unwinder anyway).
+`opt-level = "z"`, `lto = "fat"`, `codegen-units = 1` — size-first
+posture appropriate for embedded-style binaries.
+
+`target-dir` is set to `../build/usr-rs` to keep `usr/` git-clean and
+to mirror the kernel's `build/kernel/` convention.
+
 ### Wrapper (`tools/build.sh`)
 
 ```bash
-tools/build.sh userspace    # build usr/ → build/usr/...
+tools/build.sh userspace    # build usr/ → build/usr/... + build/usr-rs/...
 tools/build.sh kernel       # also runs build_userspace + build_ramfs
 tools/build.sh all          # alias for kernel (which chains the rest)
 ```
 
-`build_ramfs` curates a list of userspace binaries to ship in the cpio
-(currently `hello`); each is copied from `build/usr/<name>/<name>` into
+`build_userspace` invokes both:
+1. CMake on `usr/` (C side) → `build/usr/`
+2. `cargo build --release` from `usr/` (Rust side) → `build/usr-rs/aarch64-unknown-none/release/`
+
+Rust is skipped with a notice (not an error) if `rustup target add
+aarch64-unknown-none` hasn't been run, so the C-only build path stays
+usable on fresh checkouts.
+
+`build_ramfs` curates two lists of userspace binaries to ship in the
+cpio (`usr_bins` for C; `usr_rs_bins` for Rust); each is copied into
 `build/ramfs-src/` before `mkcpio.py` assembles `build/ramfs.cpio`.
-Curated rather than glob to prevent accidental shipment of CMake
-byproducts. New binaries get added to the `usr_bins` array in
+Curated rather than glob to prevent accidental shipment of CMake /
+cargo byproducts. New binaries get added to the appropriate array in
 `tools/build.sh::build_ramfs`.
 
 ---
@@ -237,7 +302,8 @@ syscall return) are pinned by:
 
 | Test | File | What |
 |---|---|---|
-| `userspace.ramfs_hello` | `kernel/test/test_userspace_ramfs.c` | Loads `/hello` via `devramfs_lookup`, copies to 8-aligned buffer, rforks child, `exec_setup` + `userland_enter`, `wait_pid` verifies clean exit. Gracefully skips (PASS) if `/hello` not in ramfs. |
+| `userspace.ramfs_hello` | `kernel/test/test_userspace_ramfs.c` | Loads `/hello` (C-side libt) via `devramfs_lookup`, copies to 8-aligned buffer, rforks child, `exec_setup` + `userland_enter`, `wait_pid` verifies clean exit. Gracefully skips (PASS) if `/hello` not in ramfs. |
+| `userspace.ramfs_hello_rs` | `kernel/test/test_userspace_ramfs.c` | Same as above for `/hello-rs` (Rust no_std + cargo). Same kernel-side machinery; different binary. Validates the Rust toolchain path end-to-end. Skips PASS if `/hello-rs` not in ramfs. |
 
 The test memcpy's the cpio data into an 8-byte-aligned static buffer
 before calling `exec_setup` because cpio newc only mandates 4-byte
@@ -271,7 +337,10 @@ in-test blob for the P4-Fix157 regression — they test the kernel
 | `/hello` build (cold cache) | ~0.9 s | clang + lld, one .c + one .S + link |
 | `/hello` ELF size | 73,776 B | unstripped (debug info dominates) |
 | `/hello` text-segment size | 0x88 (136 B) | actual runtime footprint after load |
-| Boot pipeline overhead | ~0 ms | binary loads from initrd-resident cpio; no I/O |
+| `/hello-rs` build (cold cache) | ~2.7 s | cargo + rustc + rust-lld first build; warm cache <100 ms |
+| `/hello-rs` ELF size | 66,336 B | unstripped (smaller than C because rust-lld strips harder) |
+| `/hello-rs` text-segment size | 0x74 (116 B) | smaller than C because no canary stubs |
+| Boot pipeline overhead | ~0 ms | binaries load from initrd-resident cpio; no I/O |
 
 Stripped binary would be ~2 KB; debug retained for development. Strip
 step lands when release builds appear (Phase 7+).
@@ -281,15 +350,20 @@ step lands when release builds appear (Phase 7+).
 ## Status
 
 - **P4-Ia1 — landed**. `usr/` tree, `libt` runtime, `/hello` binary,
-  toolchain file, build wrapper, ramfs integration, kernel test.
-  179/179 tests PASS × default + UBSan; 4/4 fault; 5/5 KASLR.
-- **P4-Ia2 — next**. Rust nostd userspace (custom target spec, cargo
-  workspace, Rust hello binary; same ramfs integration pattern).
-- **P4-Ib — after Ia2**. `KObj_MMIO` + `KObj_IRQ` handle-table
-  integration with syscall surface; **spec-first** (extends
-  `specs/handles.tla`).
-- **P4-Ic — after Ib**. The actual virtio-blk driver crate.
+  C toolchain file, build wrapper, ramfs integration, kernel test.
+- **P4-Ia2 — landed**. Rust nostd userspace: cargo workspace at
+  `usr/`, `aarch64-unknown-none` target, `/hello-rs` binary,
+  `usr/.cargo/config.toml` toolchain pinning, build wrapper extended,
+  `userspace.ramfs_hello_rs` kernel test. Inline SVC wrappers in
+  `hello-rs/src/main.rs`; runtime crate extraction held until second
+  Rust binary lands.
+- **P4-Ib — next**. `KObj_MMIO` + `KObj_IRQ` handle-table integration
+  with syscall surface; **spec-first** (extends `specs/handles.tla`).
+- **P4-Ic — after Ib**. The actual virtio-blk driver crate. Factors
+  the SVC wrappers from hello-rs into a shared `libthyla-rs` crate.
 - **P4-Id — after Ic**. Driver exposed as 9P server.
+
+180/180 tests PASS × default + UBSan; 4/4 fault; 5/5 KASLR (P4-Ia2 tip).
 
 `kernel/joey.c` remains as the boot-time embedded "hello" blob until
 the disk-loaded `/joey` refactor (post-Phase 5+ when stratum is
@@ -341,3 +415,34 @@ Held proposals for future thematic renames:
    debug. Strip yields ~2 KB. Production builds (post-v1.0) will
    strip; v1.0 debug keeps stack traces useful when something goes
    wrong.
+
+6. **Cargo runs in `usr/`**. The `usr/.cargo/config.toml`'s
+   `link-arg=-Tscripts/aarch64-userspace.ld` resolves the linker
+   script path relative to cargo's CWD, which is the workspace root
+   (`usr/`). `tools/build.sh::build_userspace` does
+   `( cd "$REPO_ROOT/usr" && cargo build --release )` to ensure this
+   stays correct.
+
+7. **Cargo build dir is `build/usr-rs/`** (not `build/usr/rs/`) — a
+   sibling of `build/usr/` rather than nested under it. Keeps cargo's
+   target structure (which has its own `aarch64-unknown-none/release/`
+   sub-tree) cleanly separated from CMake's flat output structure.
+
+8. **Rust target `aarch64-unknown-none` requires `rustup target add`
+   on a fresh dev machine**. `tools/build.sh::build_userspace` skips
+   the Rust path gracefully (with a notice) if the target isn't
+   installed — the C-only build still works. CI environments + the
+   intended dev posture both install the target during initial setup.
+
+9. **No userspace ASan / TSan / MSan at v1.0**. Rust's debug profile
+   has overflow checks; release has them too (we set
+   `overflow-checks = true` in `usr/Cargo.toml`'s `[profile.release]`).
+   ASan-style memory safety for Rust userspace gets infrastructure
+   in Phase 5+ when the std-like crate ecosystem solidifies.
+
+10. **`rs_main` not `main` in the Rust binary** — chosen to avoid
+    confusion with Rust's `fn main()` (which `#![no_main]` disables).
+    `_start` calls `rs_main` via `bl` and the global_asm! string
+    references the symbol by that name. Rename to `main` is possible
+    but would shadow the disabled-yet-special name; the explicit
+    rename keeps the intent visible.

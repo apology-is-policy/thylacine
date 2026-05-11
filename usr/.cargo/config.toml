@@ -1,0 +1,45 @@
+# Thylacine userspace Rust toolchain config.
+#
+# Pins the default target + linker flags so `cargo build` from usr/
+# produces a ready-to-cpio binary without per-crate boilerplate.
+#
+# Target choice: aarch64-unknown-none is the built-in Rust target for
+# bare-metal aarch64 (no_std, no libc, no host OS assumptions). Custom
+# target specs are an option for true Thylacine-native syscall ABI
+# integration in Phase 5+, but at v1.0 the syscall surface is small
+# enough that inline asm! suffices.
+#
+# Linker: rust-lld (Rust-bundled). We pass our W^X linker script
+# (scripts/aarch64-userspace.ld) — the same one the C side uses, so
+# both produce ELFs with identical PT_LOAD layout.
+#
+# target-dir: places build artifacts under build/usr-rs/ instead of
+# the cargo-default target/ inside usr/. Keeps `usr/` git-clean.
+
+[build]
+target = "aarch64-unknown-none"
+target-dir = "../build/usr-rs"
+
+[target.aarch64-unknown-none]
+rustflags = [
+    # W^X linker script — same one as the C side. Path is resolved
+    # by rust-lld relative to where cargo invokes it, which is the
+    # workspace root (usr/).
+    "-C", "link-arg=-Tscripts/aarch64-userspace.ld",
+
+    # Match the C side's hardening + layout posture.
+    "-C", "link-arg=--no-dynamic-linker",
+    "-C", "link-arg=--build-id=none",
+    "-C", "link-arg=-z",
+    "-C", "link-arg=noexecstack",
+
+    # Static binaries only at v1.0 (no PIE / no shared libs / no
+    # dynamic linker). Phase 5+ ASLR introduces userspace PIE.
+    "-C", "relocation-model=static",
+    "-C", "code-model=small",
+
+    # ARMv8-A baseline + LSE atomics + PAC/BTI hardening to match the
+    # C side's `-march=armv8-a+lse+pauth+bti`. Rust's target-feature
+    # syntax is independent of clang's -march.
+    "-C", "target-feature=+lse,+paca,+pacg,+bti",
+]

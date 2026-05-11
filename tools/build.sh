@@ -26,8 +26,10 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD_DIR="$REPO_ROOT/build"
 KERNEL_BUILD="$BUILD_DIR/kernel"
 USR_BUILD="$BUILD_DIR/usr"
+USR_RS_BUILD="$BUILD_DIR/usr-rs"
 TOOLCHAIN_FILE="$REPO_ROOT/cmake/Toolchain-aarch64-thylacine.cmake"
 USR_TOOLCHAIN_FILE="$REPO_ROOT/cmake/Toolchain-aarch64-userspace.cmake"
+USR_RS_TARGET="aarch64-unknown-none"
 
 target="${1:-all}"
 shift || true
@@ -139,13 +141,26 @@ EOF
 Thylacine v0.1-dev
 EOF
 
-    # P4-Ia1: copy any built userspace binaries from build/usr into the
-    # cpio root. The list is curated below (not glob) so an accidental
-    # CMake byproduct doesn't get shipped. Each binary's source-of-truth
-    # comment lives in usr/<name>/CMakeLists.txt.
+    # P4-Ia1: copy any built C-side userspace binaries from build/usr
+    # into the cpio root. The list is curated below (not glob) so an
+    # accidental CMake byproduct doesn't get shipped. Each binary's
+    # source-of-truth comment lives in usr/<name>/CMakeLists.txt.
     local usr_bins=( "hello" )
     for bin in "${usr_bins[@]}"; do
         local src="$USR_BUILD/$bin/$bin"
+        if [[ -f "$src" ]]; then
+            cp "$src" "$ramfs_src/$bin"
+            chmod 0755 "$ramfs_src/$bin"
+        fi
+    done
+
+    # P4-Ia2: copy any built Rust-side userspace binaries from
+    # build/usr-rs/<target>/release/. Same curation discipline.
+    # Binary name = crate's [[bin]] name = directory under usr/.
+    local usr_rs_bins=( "hello-rs" )
+    local rs_release="$USR_RS_BUILD/$USR_RS_TARGET/release"
+    for bin in "${usr_rs_bins[@]}"; do
+        local src="$rs_release/$bin"
         if [[ -f "$src" ]]; then
             cp "$src" "$ramfs_src/$bin"
             chmod 0755 "$ramfs_src/$bin"
@@ -157,14 +172,29 @@ EOF
 }
 
 build_userspace() {
-    echo "==> Building userspace (dir=$USR_BUILD)"
+    # C side — CMake.
+    echo "==> Building userspace C (dir=$USR_BUILD)"
     cmake -S "$REPO_ROOT/usr" -B "$USR_BUILD" \
         -DCMAKE_TOOLCHAIN_FILE="$USR_TOOLCHAIN_FILE" \
         -DCMAKE_BUILD_TYPE="$build_type" \
         ${extra_cmake_args[@]+"${extra_cmake_args[@]}"}
     cmake --build "$USR_BUILD" $verbose
-    echo "==> Userspace built under $USR_BUILD"
+    echo "==> Userspace C built under $USR_BUILD"
     ls -la "$USR_BUILD/hello/hello" 2>/dev/null || true
+
+    # Rust side — cargo. Optional: if rustup hasn't installed the
+    # aarch64-unknown-none target, skip with a notice rather than
+    # erroring. Native Thylacine binaries still ship via the C path;
+    # Rust binaries (hello-rs, future driver crates) need the target.
+    if rustup target list --installed 2>/dev/null | grep -q "^$USR_RS_TARGET$"; then
+        echo "==> Building userspace Rust (target=$USR_RS_TARGET, dir=$USR_RS_BUILD)"
+        ( cd "$REPO_ROOT/usr" && cargo build --release $verbose )
+        echo "==> Userspace Rust built under $USR_RS_BUILD"
+        ls -la "$USR_RS_BUILD/$USR_RS_TARGET/release/hello-rs" 2>/dev/null || true
+    else
+        echo "==> Skipping userspace Rust: rustup target $USR_RS_TARGET not installed."
+        echo "    Install via: rustup target add $USR_RS_TARGET"
+    fi
 }
 
 build_sysroot() {

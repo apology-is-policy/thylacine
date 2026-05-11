@@ -1,0 +1,32 @@
+# Thylacine native userspace — Rust side.
+#
+# Workspace root for all Rust userspace crates. Sibling of the C side
+# (usr/lib/libt + usr/hello). At P4-Ia2 the only crate is hello-rs;
+# subsequent sub-chunks add the virtio-blk driver crate (P4-Ic) and a
+# proper runtime/syscall crate (extracted from the inline syscalls
+# in hello-rs when the third Rust binary justifies it).
+#
+# Build via tools/build.sh userspace (preferred) or directly from this
+# directory:
+#   cargo build --release
+#
+# Default target (aarch64-unknown-none) + linker flags are pinned in
+# usr/.cargo/config.toml. Output lands at build/usr-rs/aarch64-unknown-none/release/.
+
+[workspace]
+resolver = "2"
+members = ["hello-rs"]
+
+[workspace.package]
+edition = "2021"
+publish = false
+license = "0BSD"
+
+[profile.release]
+opt-level = "z"        # size-optimize; no FP / no SIMD in hello path
+debug = false
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = false          # keep symbols for kernel-side addr2line; .debug_* discarded by ld script
+overflow-checks = true # cheap; surface integer bugs in any future crate

@@ -1,0 +1,14 @@
+[package]
+name = "hello-rs"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "hello-rs"
+path = "src/main.rs"
+
+# No dependencies — pure core. P4-Ic introduces virtio-blk and may
+# pull in a small set of audited crates (no_std-compatible, no proc-macro,
+# pinned versions per ARCH §3.5 vendoring policy).
