@@ -338,15 +338,6 @@ static void reserve_compat(const char *compat) {
     reserve_kernel_range(pa, (size_t)size, compat);
 }
 
-// Callback for dtb_for_each_compat_reg used to enumerate all VirtIO MMIO
-// transports. match_idx unused (we name each slot uniformly).
-static int reserve_virtio_mmio_cb(u32 match_idx, u64 reg_base,
-                                  u64 reg_size, void *arg) {
-    (void)match_idx; (void)arg;
-    reserve_kernel_range(reg_base, (size_t)reg_size, "virtio,mmio");
-    return 0;
-}
-
 void kobj_mmio_reserve_kernel_ranges(void) {
     if (!g_mmio_initialized) {
         extinction("kobj_mmio_reserve_kernel_ranges before kobj_mmio_init");
@@ -383,20 +374,52 @@ void kobj_mmio_reserve_kernel_ranges(void) {
     // device handles, not raw ECAM.
     reserve_compat("pci-host-ecam-generic");
 
-    // VirtIO MMIO transports: enumerate all matching nodes. QEMU virt
-    // publishes 32 virtio_mmio@<addr> nodes; the kernel probes them
-    // in P4-F (virtio.c). User drivers should NOT raw-claim these PA
-    // ranges; the P4-Ic5+ driver model will lift specific
-    // VirtIO-device claims out of this reservation via a higher-level
-    // API (KOBJ_VIRTIO_DEV or similar).
+    // VirtIO MMIO transports — DELIBERATELY NOT RESERVED at P4-Ic5b1a
+    // (refinement of R10 F154).
     //
-    // NOTE: dtb_get_compat_reg_n's idx selects the n-th reg PAIR
-    // WITHIN one node, not the n-th matching node. For per-node
-    // enumeration we use dtb_for_each_compat_reg (P4-F's helper),
-    // which calls a callback per matching node.
-    (void)dtb_for_each_compat_reg("virtio,mmio",
-                                   reserve_virtio_mmio_cb,
-                                   NULL);
+    // R10 F154 originally reserved every `virtio,mmio` compatible in
+    // DTB as part of the kernel-MMIO defense. The rationale matched the
+    // GIC/PL011/ECAM ones: a userspace driver could otherwise claim a
+    // PA range the kernel actively uses, creating undefined-behavior
+    // overlap. The reservation was correct in spirit but over-broad in
+    // application: the kernel touches virtio-mmio only during
+    // `virtio_init` boot probe (reads `MagicValue` / `Version` /
+    // `DeviceID` / `VendorID` to enumerate transports). After
+    // `virtio_init` returns, the kernel holds the `mmu_map_mmio`
+    // kernel-VA mapping but issues no further reads or writes — the
+    // entire virtio-mmio register surface is dormant from the kernel's
+    // perspective and exists for driver-process consumption.
+    //
+    // Leaving the reservation in place meant the legitimate Phase 4
+    // driver-process consumer (P4-Ic5b2 virtio-blk driver) could not
+    // claim its own device's MMIO without first un-reserving it — a
+    // delegation API. At v1.0 trust boundary (only kproc grants
+    // `CAP_HW_CREATE`, and kproc is the project root of trust for
+    // hardware access) the delegation API adds complexity without
+    // adding protection: any `CAP_HW_CREATE` holder is already trusted
+    // by kproc, and we want them to claim virtio-mmio.
+    //
+    // The relaxation: virtio-mmio slots are NOT in
+    // `g_mmio_claims[i].owner == KOBJ_MMIO_KERNEL_RESERVED`. A
+    // `CAP_HW_CREATE` holder can claim any virtio-mmio PA. Multi-driver
+    // contention on the same PA is still rejected by
+    // `kobj_mmio_create`'s overlap check (HwResourceExclusive).
+    //
+    // What this DOES NOT cover: cross-trust-boundary leakage in Phase
+    // 5+ when cap-grant becomes more permissive. If a non-kproc Proc
+    // can grant `CAP_HW_CREATE` (currently impossible — only kproc has
+    // `CAP_ALL` and rfork can only AND-down per `RforkWithCaps`), the
+    // un-reserved virtio-mmio slots become a wider attack surface.
+    // Phase 5+ that adds general cap-grant SHOULD revisit this: either
+    // re-reserve and add a per-slot delegation API, or add a
+    // KObj_VIRTIO_DEV intermediate kobj that's claimable only via a
+    // higher-level mechanism that enforces "you must own this VirtIO
+    // device" semantics.
+    //
+    // GIC / PL011 / ECAM reservations stay — those are actively
+    // accessed by the running kernel and a userspace claim would
+    // produce real concurrent-access bugs (UART register clobber, GIC
+    // configuration drift, ECAM enumeration interference).
 }
 
 int kobj_mmio_kernel_reserved_count(void) {

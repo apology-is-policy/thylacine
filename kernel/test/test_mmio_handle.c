@@ -28,6 +28,7 @@ void test_mmio_handle_create_adjacent_ok(void);
 void test_mmio_handle_create_unref_releases_slot(void);
 void test_mmio_handle_double_unref_extincts(void);
 void test_mmio_handle_create_kernel_reserved_rejected(void);
+void test_mmio_handle_virtio_mmio_claimable(void);
 void test_mmio_handle_create_out_of_ips_rejected(void);
 
 // Synthetic PA range used by the tests. Page-aligned. Picked
@@ -110,11 +111,16 @@ void test_mmio_handle_create_unref_releases_slot(void) {
 }
 
 // R10 F154 (P1) regression: kobj_mmio_create rejects PAs that overlap
-// kernel-reserved MMIO ranges (GIC, PL011, ECAM, VirtIO MMIO). Without
-// this, a userspace driver with CAP_HW_CREATE could claim the GIC
-// distributor + map it into userspace + scribble on kernel IRQ state.
+// kernel-reserved MMIO ranges (GIC, PL011, ECAM). Without this, a
+// userspace driver with CAP_HW_CREATE could claim the GIC distributor
+// + map it into userspace + scribble on kernel IRQ state.
 // kobj_mmio_reserve_kernel_ranges() at boot pre-populates g_mmio_claims;
 // this test verifies the rejection at the user-create path.
+//
+// VirtIO MMIO was originally also reserved by F154 but the reservation
+// was refined at P4-Ic5b1a (kernel doesn't actively use virtio-mmio
+// after `virtio_init` boot probe; the F154 close was over-broad). See
+// `test_mmio_handle_virtio_mmio_claimable` for the positive-case test.
 void test_mmio_handle_create_kernel_reserved_rejected(void) {
     // GIC distributor on QEMU virt: PA 0x08000000, 64 KiB. The
     // reservation is page-aligned outward so the entire range is
@@ -134,6 +140,33 @@ void test_mmio_handle_create_kernel_reserved_rejected(void) {
     struct KObj_MMIO *k3 = kobj_mmio_create(0x08090000ull, 0x20000ull);
     TEST_ASSERT(k3 == NULL,
                 "kobj_mmio_create overlapping GIC redist must be rejected");
+}
+
+// P4-Ic5b1a refinement of R10 F154: virtio-mmio slots are NOT in the
+// kernel-reserved list. QEMU virt publishes 32 virtio-mmio nodes at
+// PA 0x0a000000 + 0x200 × n; the kernel `virtio_init` probes them
+// (reads MagicValue/Version/DeviceID/VendorID) but doesn't keep any
+// active access. A driver-process holder of CAP_HW_CREATE can claim
+// any virtio-mmio slot for its own use.
+//
+// Test: confirm a virtio-mmio PA range is claimable. Pick the last
+// slot's page (0x0a003000 → 0x0a004000 covers slots 24..31; the
+// virtio_init mmu_map_mmio mapping coexists fine with the userspace
+// kobj because they're separate L3 entries — kernel KVA in vmalloc
+// and user VA in a user-mapped Burrow). Cleanup via unref.
+void test_mmio_handle_virtio_mmio_claimable(void) {
+    // Last virtio-mmio page on QEMU virt. Page-aligned, full page span.
+    struct KObj_MMIO *k = kobj_mmio_create(0x0a003000ull, PAGE_SIZE);
+    TEST_ASSERT(k != NULL,
+                "virtio-mmio PA must be claimable post-P4-Ic5b1a "
+                "(was rejected pre-refinement due to over-broad R10 F154)");
+    kobj_mmio_unref(k);
+
+    // First virtio-mmio page (covers slots 0..7). Same expectation.
+    struct KObj_MMIO *k2 = kobj_mmio_create(0x0a000000ull, PAGE_SIZE);
+    TEST_ASSERT(k2 != NULL,
+                "first virtio-mmio slot page must also be claimable");
+    kobj_mmio_unref(k2);
 }
 
 // R10 F156 (P2) regression: kobj_mmio_create rejects PA that exceeds

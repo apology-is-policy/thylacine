@@ -311,6 +311,8 @@ All 8 buggy cfgs produce expected counterexamples under TLC; correct cfg explore
 | `mmio_handle.create_adjacent_ok` | adjacent non-overlapping ranges both succeed |
 | `mmio_handle.create_unref_releases_slot` | re-claim same PA after unref succeeds |
 | `mmio_handle.live_count_round_trip` | `total_created` + `live_count` instrumentation works |
+| `mmio_handle.kernel_reserved_rejected` | R10 F154 regression: GIC dist/redist + PL011 + ECAM ranges in `g_mmio_claims[i].owner == KOBJ_MMIO_KERNEL_RESERVED` reject `kobj_mmio_create`. virtio-mmio is NOT in the list post-P4-Ic5b1a refinement. |
+| `mmio_handle.virtio_mmio_claimable` | P4-Ic5b1a refinement: virtio-mmio PA ranges (0x0a000000 first slot, 0x0a003000 last slot on QEMU virt) are claimable from `kobj_mmio_create` — the R10 F154 reservation was over-broad and is relaxed for virtio-mmio (kernel doesn't actively use these post-`virtio_init` probe). |
 | `handle_hw.mmio_dup_rejected` | `handle_dup` on KOBJ_MMIO returns -1 (NoHwDup) |
 | `handle_hw.irq_dup_rejected` | `handle_dup` on KOBJ_IRQ returns -1 (NoHwDup) |
 | `handle_hw.mmio_close_releases_claim` | `handle_close` → claim returns to pool |
@@ -363,6 +365,7 @@ All 15 PASS at P4-Ib tip; 180 → 195 total in-kernel tests. After P4-Ic5a + P4-
 | `libt` syscall wrappers | **Landed (P4-Ib + extended P4-Ic2 with `t_mmio_map`)** |
 | `SYS_MMIO_MAP` syscall + `kobj_mmio_map_into_user` semantics | **Landed (P4-Ic2)** — `BURROW_TYPE_MMIO` (P4-Ic1) + `userland_demand_page` dispatch (P4-Ic2) + device-memory PTE attrs (P4-Ic2) |
 | Userspace SVC-path tests (all four hw-handle syscalls) | **Landed (P4-Ic5a + P4-Ic5-IRQ-probe)** — `mmio-probe` (PL031 RTC live read) + `irq-probe` (pre-pended SPI 96 wait). Closes R10 F159 in full. |
+| virtio-mmio reservation policy | **Refined (P4-Ic5b1a)** — virtio-mmio slots REMOVED from `kobj_mmio_reserve_kernel_ranges` (kernel doesn't actively use them post-`virtio_init` probe). GIC/PL011/ECAM reservations stay (kernel-active). Boot reports 4 reserved ranges (was 8). Unblocks P4-Ic5b2 driver-process MMIO claim. |
 | `mmu_install_user_pte(device_memory)` flag | **Landed (P4-Ic2)** |
 | Cap-grant syscall (parent → child userspace-callable) | **Phase 5+** — kernel-internal grant path lands at P4-Ic3 via `rfork_with_caps`; userspace surface deferred |
 | Cap-drop syscall (with hw-handle interlock) | **Phase 5+** |

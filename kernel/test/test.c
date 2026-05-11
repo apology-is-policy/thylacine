@@ -221,6 +221,7 @@ void test_mmio_handle_create_adjacent_ok(void);
 void test_mmio_handle_create_unref_releases_slot(void);
 void test_mmio_handle_double_unref_extincts(void);
 void test_mmio_handle_create_kernel_reserved_rejected(void);
+void test_mmio_handle_virtio_mmio_claimable(void);
 void test_mmio_handle_create_out_of_ips_rejected(void);
 void test_handle_hw_mmio_dup_rejected(void);
 void test_handle_hw_irq_dup_rejected(void);
@@ -509,6 +510,9 @@ struct test_case g_tests[] = {
                                                                            false, NULL },
     { "mmio_handle.kernel_reserved_rejected",
                                        test_mmio_handle_create_kernel_reserved_rejected,
+                                                                           false, NULL },
+    { "mmio_handle.virtio_mmio_claimable",
+                                       test_mmio_handle_virtio_mmio_claimable,
                                                                            false, NULL },
     { "mmio_handle.out_of_ips_rejected",
                                        test_mmio_handle_create_out_of_ips_rejected,
