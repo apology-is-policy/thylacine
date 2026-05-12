@@ -41,9 +41,11 @@ void test_virtio_net_probe_rfork_with_caps(void);
 
 // 8-aligned static buffer. virtio-net-probe is sibling-sized to
 // virtio-blk-probe (same libthyla-rs base + similar device init flow);
-// 128 KiB matches the per-blob ceiling P4-Ic7 established to keep
-// image_size + firmware ≤ 2 MiB under the L3 kernel-image mapping.
-#define VIRTIO_NET_PROBE_BLOB_MAX 131072
+// 96 KiB per blob. P4-Jc shrank from 128 → 96 KiB across all 8
+// test-binary blobs to keep image_size + firmware ≤ 2 MiB under the
+// L3 kernel-image mapping; the largest userspace binary
+// (virtio-net-arp at ~76 KiB) still has ~20 KiB headroom.
+#define VIRTIO_NET_PROBE_BLOB_MAX 98304
 static _Alignas(16) u8 g_virtio_net_probe_blob[VIRTIO_NET_PROBE_BLOB_MAX];
 
 struct virtio_net_probe_exec_args {

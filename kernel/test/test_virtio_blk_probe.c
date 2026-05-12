@@ -86,7 +86,9 @@ void test_virtio_blk_probe_rfork_with_caps(void);
 // avoid 256 KiB to keep the cumulative .bss across mmio-probe +
 // irq-probe + virtio-blk-probe under the image_size envelope QEMU
 // uses to compute the -initrd placement on the ARM virt machine.
-#define VIRTIO_BLK_PROBE_BLOB_MAX 131072
+// P4-Jc shrank further to 96 KiB to keep image+firmware ≤ 2 MiB
+// after adding the virtio-net-loop blob.
+#define VIRTIO_BLK_PROBE_BLOB_MAX 98304
 static _Alignas(16) u8 g_virtio_blk_probe_blob[VIRTIO_BLK_PROBE_BLOB_MAX];
 
 struct virtio_blk_probe_exec_args {

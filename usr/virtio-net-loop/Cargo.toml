@@ -1,0 +1,26 @@
+[package]
+name = "virtio-net-loop"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "virtio-net-loop"
+path = "src/main.rs"
+
+[dependencies]
+# Successor to virtio-net-arp (P4-Jb). Adds the missing steady-state
+# halves of a real driver:
+#   - RX descriptor recycling: each consumed RX buffer is re-published
+#     to the avail ring after the frame is parsed, so N > QUEUE_SIZE
+#     frames flow through 16 buffers.
+#   - TX descriptor reuse: 16 pre-built TX descriptors with static
+#     descriptor[k] → buffer[k] mapping; the device round-robins as we
+#     advance avail.idx; > QUEUE_SIZE outbound packets prove TX slots
+#     get reused as the device drains them.
+#
+# Target volume: N = 24 ARP request/reply round-trips with QUEUE_SIZE
+# = 16 on both TX and RX, which guarantees descriptor wraparound on
+# both sides. Same composed hw-handle SVC surface as virtio-net-arp.
+libthyla-rs = { path = "../lib/libthyla-rs" }

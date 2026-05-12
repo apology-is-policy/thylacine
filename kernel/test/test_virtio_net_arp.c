@@ -26,7 +26,7 @@
 
 void test_virtio_net_arp_rfork_with_caps(void);
 
-#define VIRTIO_NET_ARP_BLOB_MAX 131072
+#define VIRTIO_NET_ARP_BLOB_MAX 98304
 static _Alignas(16) u8 g_virtio_net_arp_blob[VIRTIO_NET_ARP_BLOB_MAX];
 
 struct virtio_net_arp_exec_args {

@@ -120,8 +120,8 @@ void test_irq_probe_rfork_with_caps(void);
 // requirement on the Ehdr cast in exec_setup). P4-Ic7 shrunk 256 → 128 KiB
 // so cumulative kernel-image .bss + firmware reserve fits the 2 MiB
 // L3 mapping (arch/arm64/mmu.c::mmu_map_kernel). irq-probe compiles
-// to ~67 KiB; 128 KiB leaves ample headroom.
-#define IRQ_PROBE_BLOB_MAX 131072
+// to ~67 KiB; 96 KiB (P4-Jc shrink) leaves ~29 KiB headroom.
+#define IRQ_PROBE_BLOB_MAX 98304
 static _Alignas(16) u8 g_irq_probe_blob[IRQ_PROBE_BLOB_MAX];
 
 struct irq_probe_exec_args {

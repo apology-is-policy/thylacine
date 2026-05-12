@@ -49,6 +49,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "virtio-net-loop"
+version = "0.1.0"
+dependencies = [
+ "libthyla-rs",
+]
+
+[[package]]
 name = "virtio-net-probe"
 version = "0.1.0"
 dependencies = [

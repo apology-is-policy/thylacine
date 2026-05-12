@@ -64,7 +64,9 @@
 
 void test_virtio_blk_rw_rfork_with_caps(void);
 
-#define VIRTIO_BLK_RW_BLOB_MAX 131072
+// 96 KiB per blob. P4-Jc shrank from 128 → 96 KiB to keep image +
+// firmware ≤ 2 MiB after adding the virtio-net-loop blob.
+#define VIRTIO_BLK_RW_BLOB_MAX 98304
 static _Alignas(16) u8 g_virtio_blk_rw_blob[VIRTIO_BLK_RW_BLOB_MAX];
 
 struct virtio_blk_rw_exec_args {
