@@ -56,6 +56,13 @@ pub const T_RIGHT_SIGNAL: u32   = 1 << 5;
 // stay within the bound at compile time (Phase 5+ rights expansion).
 pub const T_RIGHT_ALL: u32      = 0x3f;
 
+// The right-bit subset that the kernel will accept on a fresh hw-handle
+// (MMIO / IRQ / DMA). I-5 forbids transfer; the kernel rejects
+// RIGHT_TRANSFER on hw handles at create time. Drivers should pass a
+// subset of this when constructing hw handles.
+pub const T_RIGHT_HW_ALLOWED: u32 =
+    T_RIGHT_READ | T_RIGHT_WRITE | T_RIGHT_MAP | T_RIGHT_SIGNAL;
+
 // =============================================================================
 // Prot bits — MUST mirror VMA_PROT_* in kernel/include/thylacine/vma.h.
 // =============================================================================
@@ -169,8 +176,11 @@ pub unsafe fn t_irq_create(intid: u32, rights: u32) -> i64 {
 }
 
 // t_irq_wait — block until the KObj_IRQ has fired one or more times.
-// Returns the (collapsed) pending count consumed; 0 on spurious wake;
-// -1 on validation failure (bad handle, missing RIGHT_SIGNAL).
+// Returns the (collapsed) pending count consumed (always ≥ 1 on the
+// success path — `kobj_irq_wait` blocks on a rendez until pending_count
+// strictly exceeds zero, then atomically reads-and-clears under the
+// rendez lock); -1 on validation failure (bad handle, missing
+// RIGHT_SIGNAL).
 //
 // Edge-triggered: multiple fires while the waiter is blocked collapse
 // to a single counter increment per actual GIC dispatch, but the
@@ -230,6 +240,31 @@ pub unsafe fn t_dma_map(handle: i64, vaddr: u64, prot: u32) -> i64 {
         options(nostack)
     );
     x0
+}
+
+// =============================================================================
+// VIRTIO memory-ordering helpers.
+// =============================================================================
+//
+// virtio_rmb — read-side barrier for the driver's view of the used ring.
+// VIRTIO 1.2 §2.7.13.2 mandates the driver execute a barrier of this
+// shape between observing `used.idx` advance and reading `used.ring[k]`
+// or the data buffer the descriptor pointed at. Without it, an
+// out-of-order ARM core may speculatively issue the data-buffer reads
+// before the used.idx load, returning stale (pre-advance) bytes.
+//
+// `dmb ishld` is the LoadLoad barrier scoped to the Inner Shareable
+// domain — the minimum sufficient for guest-CPU-vs-guest-CPU ordering of
+// Normal-WB memory backing the virtqueue. Matches what Linux's
+// `virtio_rmb()` compiles to on AArch64.
+//
+// Today on QEMU TCG (in-order execution) this is a no-op in practice,
+// but emitting it preserves correctness on real ARM cores (the v1.0
+// deployment target). The cost is one barrier instruction per used.idx
+// read.
+#[inline(always)]
+pub fn virtio_rmb() {
+    unsafe { asm!("dmb ishld", options(nostack, preserves_flags)) }
 }
 
 // =============================================================================

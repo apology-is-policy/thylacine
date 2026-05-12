@@ -54,7 +54,7 @@ use core::arch::asm;
 use libthyla_rs::{
     T_PROT_READ, T_PROT_WRITE, T_RIGHT_MAP, T_RIGHT_READ, T_RIGHT_SIGNAL,
     T_RIGHT_WRITE, t_dma_create, t_dma_map, t_exits, t_irq_create, t_irq_wait,
-    t_mmio_create, t_mmio_map, t_puts, t_putstr,
+    t_mmio_create, t_mmio_map, t_puts, t_putstr, virtio_rmb,
 };
 
 // =============================================================================
@@ -152,6 +152,10 @@ const INPUT_QUEUE_EVENT: u32 = 0;
 //     __le32 value;
 // } = 8 bytes per record.
 const VIRTIO_INPUT_EVENT_LEN: u32 = 8;
+
+// VIRTIO 1.2 §4.2.5 InterruptStatus bits.
+const INT_USED_BUFFER:  u32 = 1 << 0;
+const INT_CONFIG_CHANGE: u32 = 1 << 1;
 
 // =============================================================================
 // DMA layout (single 4 KiB page; eventq only).
@@ -492,7 +496,16 @@ fn drain_used(dma_va: u64, last_used_idx: u16, mut avail_idx: u16,
     let avail_va = dma_va + AVAIL_OFF;
     let event_pool_va = dma_va + EVENT_POOL_OFF;
 
+    let avail_idx_at_entry = avail_idx;
     let cur_used_idx = unsafe { read16(used_va + 2) };
+    // VIRTIO 1.2 §2.7.13.2: barrier between observing used.idx advance
+    // and reading used.ring[k] / the event pool the descriptor backed.
+    // Without it, an out-of-order ARM core may speculate event-pool
+    // reads before the used.idx load, returning pre-advance bytes (in
+    // virtio-input that surfaces as a phantom EV_SYN classification —
+    // zero type/code/value because populate_eventq pre-zeroed the
+    // event slots — silently dropping the real key event).
+    virtio_rmb();
     let mut idx = last_used_idx;
     let mut saw_target = false;
 
@@ -501,15 +514,23 @@ fn drain_used(dma_va: u64, last_used_idx: u16, mut avail_idx: u16,
         // struct virtq_used_elem { le32 id; le32 len; } at used + 4 + slot*8
         let elem_va = used_va + 4 + slot * 8;
         let desc_id = unsafe { read32(elem_va + 0) };
-        // used_len is informational; we don't validate against
-        // VIRTIO_INPUT_EVENT_LEN because the device may set it to <=
-        // the descriptor's advertised len.
-        let _used_len = unsafe { read32(elem_va + 4) };
+        let used_len = unsafe { read32(elem_va + 4) };
 
         if (desc_id as u16) >= QUEUE_SIZE {
             // Malformed used entry — desc_id out of range. Log + skip.
             log("virtio-input: WARN — used.elem.id out of range: ");
             log_dec(desc_id);
+            log("\n");
+            idx = idx.wrapping_add(1);
+            total_consumed += 1;
+            continue;
+        }
+        if used_len != VIRTIO_INPUT_EVENT_LEN {
+            // Malformed used entry — len != 8 bytes (one full event).
+            // QEMU's virtio-input-pci always writes 8; a host that
+            // writes 0 or a non-multiple-of-8 here is mis-protocol.
+            log("virtio-input: WARN — used.elem.len != 8: ");
+            log_dec(used_len);
             log("\n");
             idx = idx.wrapping_add(1);
             total_consumed += 1;
@@ -545,9 +566,12 @@ fn drain_used(dma_va: u64, last_used_idx: u16, mut avail_idx: u16,
         total_consumed += 1;
     }
 
-    if avail_idx != unsafe { read16(avail_va + 2) } {
+    if avail_idx != avail_idx_at_entry {
         // Make recycled descriptor publications visible before the
-        // idx bump (VIRTIO 1.2 §2.7.13.1).
+        // idx bump (VIRTIO 1.2 §2.7.13.1). The captured entry value is
+        // the source of truth — comparing against `read16(avail_va + 2)`
+        // would work today (single-thread driver, no other writer) but
+        // becomes racy under any future multi-threaded refactor.
         dsb_sy();
         unsafe { write16(avail_va + 2, avail_idx) };
         dsb_sy();
@@ -665,11 +689,22 @@ pub extern "C" fn rs_main() -> i64 {
     // device-side InterruptStatus (clearing any latched device bits)
     // and confirm used.idx == 0 (no events yet — kernel-side pre-fire
     // didn't go through the device).
-    let _ = unsafe { t_irq_wait(irq_handle) };
+    let prefire_count = unsafe { t_irq_wait(irq_handle) };
+    if prefire_count < 0 {
+        // Defensive log: handle is fresh from t_irq_create above, so
+        // this shouldn't happen, but a corrupted handle table or
+        // missing RIGHT_SIGNAL would surface here as a silent stall
+        // otherwise. The busy-poll below proceeds either way since it
+        // reads used.idx directly, but surfacing the anomaly aids
+        // debugging.
+        log("virtio-input: WARN — pre-fire t_irq_wait returned error\n");
+    }
     let int_status = unsafe { read32(slot_va + REG_INTERRUPT_STATUS) };
     if int_status != 0 {
         unsafe { write32(slot_va + REG_INTERRUPT_ACK, int_status) };
     }
+    let _ = INT_USED_BUFFER;     // referenced for symmetry with other drivers
+    let _ = INT_CONFIG_CHANGE;   // ditto; busy-poll path doesn't branch on bit shape
 
     // Sentinel: tools/test.sh polls for this line and triggers QMP
     // `send-key` upon match. The interactive `tools/run-vm.sh` path

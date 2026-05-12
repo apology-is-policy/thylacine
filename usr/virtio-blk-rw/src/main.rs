@@ -69,7 +69,7 @@ use core::arch::asm;
 use libthyla_rs::{
     T_PROT_READ, T_PROT_WRITE, T_RIGHT_MAP, T_RIGHT_READ, T_RIGHT_SIGNAL,
     T_RIGHT_WRITE, t_dma_create, t_dma_map, t_exits, t_irq_create, t_irq_wait,
-    t_mmio_create, t_mmio_map, t_puts, t_putstr,
+    t_mmio_create, t_mmio_map, t_puts, t_putstr, virtio_rmb,
 };
 
 // =============================================================================
@@ -156,6 +156,21 @@ const AVAIL_OFF: u64  = 0x100;   // 4 + 16*2 = 36 B
 const USED_OFF: u64   = 0x200;   // 4 + 16*8 = 132 B
 const REQ_OFF: u64    = 0x300;   // 16 B
 const STATUS_OFF: u64 = 0x310;   // 1 B
+
+// Pin the ring DMA layout at compile time. Catches drift if any of the
+// region offsets shift without bumping RING_DMA_SIZE.
+const _: () = {
+    assert!(DESC_OFF  + (QUEUE_SIZE as u64) * 16 <= AVAIL_OFF);
+    assert!(AVAIL_OFF + 4 + (QUEUE_SIZE as u64) * 2 <= USED_OFF);
+    assert!(USED_OFF  + 4 + (QUEUE_SIZE as u64) * 8 <= REQ_OFF);
+    assert!(REQ_OFF   + 16 <= STATUS_OFF);
+    assert!(STATUS_OFF + 1 <= RING_DMA_SIZE);
+};
+
+// VirtIO 1.2 §4.2.5 InterruptStatus bits.
+const INT_USED_BUFFER:  u32 = 1 << 0;
+#[allow(dead_code)] // referenced for spec-shape documentation
+const INT_CONFIG_CHANGE: u32 = 1 << 1;
 
 // =============================================================================
 // Data DMA layout (1 MiB).
@@ -293,6 +308,10 @@ fn init_device(slot_va: u64, ring_pa: u64) -> bool {
     unsafe { write32(slot_va + REG_STATUS, STATUS_ACKNOWLEDGE | STATUS_DRIVER) };
 
     unsafe { write32(slot_va + REG_DEVICE_FEATURES_SEL, 0) };
+    // Intentional discard: VIRTIO 1.2 §3.1.1 step 4 requires we READ
+    // bank-0 device features even when we only depend on a bank-1 bit
+    // (VIRTIO_F_VERSION_1). Some devices treat a missing bank-0 read as
+    // a protocol error.
     let _dev_feat_lo = unsafe { read32(slot_va + REG_DEVICE_FEATURES) };
     unsafe { write32(slot_va + REG_DEVICE_FEATURES_SEL, 1) };
     let dev_feat_hi = unsafe { read32(slot_va + REG_DEVICE_FEATURES) };
@@ -422,7 +441,10 @@ fn submit_request(
     // Update desc[1] length + flags. addr/next are stable. data_len varies
     // only if the LAST request is partial, but we round test_bytes down
     // to SECTORS_PER_REQUEST-multiples, so it's always SECTORS_PER_REQUEST.
-    let _ = sectors;  // assertable: sectors == SECTORS_PER_REQUEST today
+    // The `sectors` arg is asserted by run_pass to equal SECTORS_PER_REQUEST;
+    // discarded here because the descriptor's stored `len` already
+    // reflects DATA_DMA_SIZE = SECTORS_PER_REQUEST * SECTOR_SIZE.
+    let _ = sectors;
     let desc_va = ring_va + DESC_OFF;
     let data_flags = match direction {
         Direction::Read  => VIRTQ_DESC_F_NEXT | VIRTQ_DESC_F_WRITE,
@@ -455,20 +477,40 @@ enum CompletionError {
     StatusByte,
 }
 
+// Cap on consecutive non-used-buffer IRQ wakes (config-change only) we
+// tolerate before declaring the IRQ surface broken. 16 is well above
+// any rate at which QEMU virt would burst config-change events.
+const MAX_NON_USED_BUFFER_WAKES: u32 = 16;
+
 fn wait_completion(
     irq_handle: i64,
     slot_va: u64,
     ring_va: u64,
     expected_used_idx: u16,
 ) -> Result<(), CompletionError> {
-    let count = unsafe { t_irq_wait(irq_handle) };
-    if count < 0 { return Err(CompletionError::IrqError); }
+    // VIRTIO 1.2 §4.2.5 — IRQ may carry only INT_CONFIG_CHANGE without
+    // INT_USED_BUFFER (live-migration / hot-replug / feature change on
+    // some host backends). Tolerate up to MAX_NON_USED_BUFFER_WAKES
+    // such wakes before treating it as a real fault.
+    let mut wakes = 0u32;
+    loop {
+        if wakes >= MAX_NON_USED_BUFFER_WAKES {
+            return Err(CompletionError::IrqError);
+        }
+        let count = unsafe { t_irq_wait(irq_handle) };
+        if count < 0 { return Err(CompletionError::IrqError); }
 
-    let int_status = unsafe { read32(slot_va + REG_INTERRUPT_STATUS) };
-    unsafe { write32(slot_va + REG_INTERRUPT_ACK, int_status) };
+        let int_status = unsafe { read32(slot_va + REG_INTERRUPT_STATUS) };
+        unsafe { write32(slot_va + REG_INTERRUPT_ACK, int_status) };
+        if int_status & INT_USED_BUFFER != 0 { break; }
+        wakes += 1;
+    }
 
     let used_va = ring_va + USED_OFF;
     let used_idx = unsafe { read16(used_va + 2) };
+    // VIRTIO 1.2 §2.7.13.2: barrier between observing used.idx advance
+    // and reading the used-ring entry / data buffer the device wrote.
+    virtio_rmb();
     if used_idx != expected_used_idx { return Err(CompletionError::UsedIdxMismatch); }
 
     let slot = ((expected_used_idx as u64).wrapping_sub(1)) % (QUEUE_SIZE as u64);

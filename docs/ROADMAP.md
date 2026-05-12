@@ -361,7 +361,7 @@ None. This is the foundation phase.
 - [ ] **Hardware handle non-transferability**: attempt to transfer `KObj_MMIO` panics with explicit "non-transferable type" message. Verified by deliberate test.
 - [ ] IRQ-to-userspace handler latency p99 < 5µs (VISION §4.5 budget). Measured via dedicated benchmark.
 - [ ] `specs/burrow.tla` clean under TLC. `SPEC-TO-CODE.md` maintained.
-- [ ] No P0/P1 audit findings on driver model.
+- [x] No P0/P1 audit findings on driver model. *(P4-Z: R14 cumulative driver-model audit across 4 composed userspace drivers (virtio-blk-rw, virtio-net-loop, virtio-input, virtio-gpu) + libthyla-rs surfaced 0 P0 + 1 P1 + 3 P2 + 6 P3; F217 (P1) — missing VIRTIO 1.2 §2.7.13.2 LoadLoad barrier — closed via `libthyla_rs::virtio_rmb()` (`dmb ishld`) uniformly applied; F218-F220 (P2) + 6 P3 closed in the same audit-close commit; 2 cosmetic P3 deferred. Closed list at `memory/audit_r14_p4z_closed_list.md`; phase4-status.md row carries the full narrative.)*
 
 ### 6.3 Specs landing this phase
 

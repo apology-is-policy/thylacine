@@ -44,7 +44,7 @@ use core::arch::asm;
 use libthyla_rs::{
     T_PROT_READ, T_PROT_WRITE, T_RIGHT_MAP, T_RIGHT_READ, T_RIGHT_SIGNAL,
     T_RIGHT_WRITE, t_dma_create, t_dma_map, t_exits, t_irq_create, t_irq_wait,
-    t_mmio_create, t_mmio_map, t_puts, t_putstr,
+    t_mmio_create, t_mmio_map, t_puts, t_putstr, virtio_rmb,
 };
 
 // =============================================================================
@@ -182,14 +182,33 @@ const ARP_LEN: u32     = 28;
 const TX_FRAME_LEN: u32 = ETH_HDR_LEN + ARP_LEN;
 const TX_BUF_USED_LEN: u32 = VIRTIO_NET_HDR_LEN + TX_FRAME_LEN; // 54
 
-// Compile-time sanity: TX pool must fit in the ring DMA region.
+// Compile-time sanity: TX pool must fit in the ring DMA region, and
+// every queue region must be non-overlapping in monotonic order
+// (TX desc < TX avail < TX used < RX desc < RX avail < RX used < pool).
 const _: () = {
     let pool_end = TX_BUF_POOL_OFF + (QUEUE_SIZE as u64) * TX_BUF_STRIDE;
     assert!(pool_end <= RING_DMA_SIZE,
             "TX buffer pool overflows ring DMA region");
     assert!(TX_BUF_USED_LEN as u64 <= TX_BUF_STRIDE,
             "TX frame + virtio_net_hdr does not fit in one TX_BUF_STRIDE");
+    assert!(TX_DESC_OFF + (QUEUE_SIZE as u64) * 16 <= TX_AVAIL_OFF);
+    assert!(TX_AVAIL_OFF + 4 + (QUEUE_SIZE as u64) * 2 <= TX_USED_OFF);
+    assert!(TX_USED_OFF + 4 + (QUEUE_SIZE as u64) * 8 <= RX_DESC_OFF);
+    assert!(RX_DESC_OFF + (QUEUE_SIZE as u64) * 16 <= RX_AVAIL_OFF);
+    assert!(RX_AVAIL_OFF + 4 + (QUEUE_SIZE as u64) * 2 <= RX_USED_OFF);
+    assert!(RX_USED_OFF + 4 + (QUEUE_SIZE as u64) * 8 <= TX_BUF_POOL_OFF);
 };
+
+// VirtIO 1.2 §4.2.5 InterruptStatus bits.
+const INT_USED_BUFFER:  u32 = 1 << 0;
+const INT_CONFIG_CHANGE: u32 = 1 << 1;
+
+// Cap on consecutive used-ring drain iterations to keep a hypothetical
+// out-of-sync `cur_used / *_seen_used` pair from running up to ~65535
+// iterations before terminating. Back-pressure (in-flight ≤ QUEUE_SIZE)
+// prevents real drift today; the cap is defense in depth + survives a
+// future driver that relaxes back-pressure.
+const MAX_DRAIN_PER_BATCH: u16 = QUEUE_SIZE;
 
 // =============================================================================
 // Volatile MMIO + DMA accessors.
@@ -577,14 +596,21 @@ fn drain_rx_used_with_recycle(slot_va: u64, ring_dma_va: u64,
     let rx_used_va = ring_dma_va + RX_USED_OFF;
     let rx_avail_va = ring_dma_va + RX_AVAIL_OFF;
     let cur_used = unsafe { read16(rx_used_va + 2) };
+    // VIRTIO 1.2 §2.7.13.2: barrier between observing used.idx advance
+    // and reading used.ring[k] / the data buffer the descriptor pointed
+    // at. Without it, an out-of-order ARM core may speculate the data
+    // reads before the used.idx load, returning pre-advance bytes.
+    virtio_rmb();
 
     let mut any_recycled = false;
-    while *rx_seen_used != cur_used {
+    let mut iters: u16 = 0;
+    while *rx_seen_used != cur_used && iters < MAX_DRAIN_PER_BATCH {
         let used_slot = (*rx_seen_used as u64) % QUEUE_SIZE as u64;
         let entry_va = rx_used_va + 4 + used_slot * 8;
         let desc_id = unsafe { read32(entry_va) } as u16;
         let len = unsafe { read32(entry_va + 4) };
         *rx_seen_used = rx_seen_used.wrapping_add(1);
+        iters += 1;
 
         if parse_arp_reply(rxpool_dma_va, desc_id as u32, len) {
             *rx_validated += 1;
@@ -641,13 +667,20 @@ fn parse_arp_reply(rxpool_dma_va: u64, desc_idx: u32, frame_len: u32) -> bool {
 fn drain_tx_used(ring_dma_va: u64, tx_seen_used: &mut u16, tx_completed: &mut u32) {
     let tx_used_va = ring_dma_va + TX_USED_OFF;
     let cur_used = unsafe { read16(tx_used_va + 2) };
-    while *tx_seen_used != cur_used {
+    // VIRTIO 1.2 §2.7.13.2: barrier after observing used.idx advance.
+    // The TX-side drain doesn't read used.ring[k] data, but emitting
+    // the barrier preserves the discipline for any future TX path that
+    // does (e.g. reading used.ring[k].len to count bytes-flushed).
+    virtio_rmb();
+    let mut iters: u16 = 0;
+    while *tx_seen_used != cur_used && iters < MAX_DRAIN_PER_BATCH {
         // We don't read used.ring[k].id — we don't need the specific
         // descriptor index. The send_pending_tx in-flight check uses
         // (tx_avail_idx - tx_seen_used) which gives us free-slot
         // count regardless of which specific descriptor finished.
         *tx_seen_used = tx_seen_used.wrapping_add(1);
         *tx_completed += 1;
+        iters += 1;
     }
 }
 
@@ -681,6 +714,16 @@ fn run_round_trips(slot_va: u64, irq_handle: i64, ring_dma_va: u64,
         }
         let int_status = unsafe { read32(slot_va + REG_INTERRUPT_STATUS) };
         unsafe { write32(slot_va + REG_INTERRUPT_ACK, int_status) };
+        // VIRTIO 1.2 §4.2.5: a config-change-only wake (INT_CONFIG_CHANGE
+        // without INT_USED_BUFFER) signals device-config state shift,
+        // not used-ring progress. We ACK + continue without draining
+        // (the next wake delivers the real ring update); the drain
+        // calls below would no-op anyway since cur_used wouldn't have
+        // advanced, but the explicit skip documents the intent.
+        if int_status & INT_USED_BUFFER == 0 {
+            continue;
+        }
+        let _ = INT_CONFIG_CHANGE; // referenced for symmetry; ACKed via int_status
 
         drain_tx_used(ring_dma_va, &mut tx_seen_used, &mut tx_completed);
         drain_rx_used_with_recycle(slot_va, ring_dma_va, rxpool_dma_va,

@@ -57,7 +57,7 @@ use core::arch::asm;
 use libthyla_rs::{
     T_PROT_READ, T_PROT_WRITE, T_RIGHT_MAP, T_RIGHT_READ, T_RIGHT_SIGNAL,
     T_RIGHT_WRITE, t_dma_create, t_dma_map, t_exits, t_irq_create, t_irq_wait,
-    t_mmio_create, t_mmio_map, t_puts, t_putstr,
+    t_mmio_create, t_mmio_map, t_puts, t_putstr, virtio_rmb,
 };
 
 // =============================================================================
@@ -124,6 +124,16 @@ const STATUS_FAILED: u32      = 128;
 
 // VIRTIO_F_VERSION_1 = bit 32 → bank-1 bit 0.
 const VIRTIO_F_VERSION_1_BIT_BANK1: u32 = 1 << 0;
+
+// VIRTIO 1.2 §4.2.5 InterruptStatus bits.
+const INT_USED_BUFFER:  u32 = 1 << 0;
+const INT_CONFIG_CHANGE: u32 = 1 << 1;
+
+// Cap on consecutive non-used-buffer wakes (config-change only) we
+// tolerate per submit_and_wait call. QEMU's virtio-gpu can issue
+// config-change events on display geometry shifts (rare in -nographic
+// CI, possible interactively); 16 is well above any reasonable burst.
+const MAX_NON_USED_BUFFER_WAKES: u32 = 16;
 
 // Descriptor flags (§2.7.5).
 const VIRTQ_DESC_F_NEXT: u16  = 1;
@@ -515,17 +525,36 @@ impl Controlq {
         // Kick controlq.
         unsafe { write32(self.slot_va + REG_QUEUE_NOTIFY, GPU_QUEUE_CONTROL) };
 
-        // Wait for completion.
-        let count = unsafe { t_irq_wait(self.irq_handle) };
-        if count < 0 {
-            log("virtio-gpu: FAIL — SYS_IRQ_WAIT returned error\n");
-            return Err(());
+        // Wait for completion. Tolerate INT_CONFIG_CHANGE-only wakes
+        // (host display geometry shifts, etc.) by retrying until the
+        // device's INT_USED_BUFFER bit fires or we exhaust the cap.
+        let mut wakes = 0u32;
+        loop {
+            if wakes >= MAX_NON_USED_BUFFER_WAKES {
+                log("virtio-gpu: FAIL — too many non-used-buffer wakes\n");
+                return Err(());
+            }
+            let count = unsafe { t_irq_wait(self.irq_handle) };
+            if count < 0 {
+                log("virtio-gpu: FAIL — SYS_IRQ_WAIT returned error\n");
+                return Err(());
+            }
+            let int_status = unsafe { read32(self.slot_va + REG_INTERRUPT_STATUS) };
+            unsafe { write32(self.slot_va + REG_INTERRUPT_ACK, int_status) };
+            if int_status & INT_USED_BUFFER != 0 { break; }
+            wakes += 1;
         }
-        let int_status = unsafe { read32(self.slot_va + REG_INTERRUPT_STATUS) };
-        unsafe { write32(self.slot_va + REG_INTERRUPT_ACK, int_status) };
+        let _ = INT_CONFIG_CHANGE; // referenced for symmetry; ACKed via int_status
 
         let used_va = self.dma_va + CTRL_USED_OFF;
         let used_idx = unsafe { read16(used_va + 2) };
+        // VIRTIO 1.2 §2.7.13.2: barrier between observing used.idx
+        // advance and reading the response buffer the descriptor
+        // pointed at. Without it, an out-of-order ARM core may
+        // speculate the resp.hdr.type read before the used.idx load,
+        // returning the pre-advance zero (which would mis-classify the
+        // OK response as a hardware fault).
+        virtio_rmb();
         if used_idx != next_seq {
             log("virtio-gpu: FAIL — used.idx != expected (got ");
             log_dec(used_idx as u32);
