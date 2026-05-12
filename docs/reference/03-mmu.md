@@ -268,6 +268,14 @@ After P1-C-extras Part B, TTBR1 holds the kernel high-half mapping but TTBR0 kee
 
 The same `l3_kernel` page-grain table is referenced by L2 entries in both TTBR0 (via `l2_ttbr0[gib][idx]`) and TTBR1 (via `l2_ttbr1[l2_idx]`). This works because the L3 PTEs map specific physical addresses (PAs) — the two paths reach the same memory through different VAs. Saves 4 KiB of BSS and ensures both translation roots see identical kernel-image semantics.
 
+### Kernel image + firmware reservation must fit in a single 2 MiB L3 block
+
+The L3 mapping covers exactly `[kernel_2mib_pa, kernel_2mib_pa + 2 MiB)` where `kernel_2mib_pa = pa_kernel_start & ~(BLOCK_SIZE_L2 - 1)`. With `KERNEL_LOAD_PA = 0x40080000` on QEMU virt, that's `[0x40000000, 0x40200000)`. The 512 KiB firmware reservation at `[0x40000000, 0x40080000)` is mapped invalid (R6-B F114); the kernel image follows. Any kernel section past `0x40200000` is **not mapped at all** — any post-MMU access (read or write, via either the high-VA or direct-map alias) takes an unhandled translation fault.
+
+The image-only assert in `kernel.ld` was conservative-low: it checked `image_size < 2 MiB` without accounting for the firmware offset. A P4-Ic7 commit briefly fell off the cliff by pushing image_size from 1440 → 1572 KiB while the firmware reservation was still 512 KiB — total 2080 KiB > 2 MiB — and the kernel silently faulted on post-MMU accesses past the L3-mapped region. R12-bss-2mib (`docs/phase4-status.md` deferred-audit row) tightened the assert to express the actual constraint: `image_size + (KERNEL_LOAD_PA & (2 MiB - 1)) < 2 MiB`. With the current 512 KiB firmware offset, that caps image_size at 1.5 MiB.
+
+If a future image legitimately needs more than 1.5 MiB, the fix is one of: (a) reduce the firmware reservation (move `KERNEL_LOAD_PA` closer to `0x40000000`); (b) extend `build_page_tables` to map a second 2 MiB block adjacent to the first; (c) demote the L2 entry covering the kernel-image GiB to multiple page-grain L3 tables. The bundled blob-cap shrink at P4-Jc (test-binary blob caps 128 → 96 KiB) is a stopgap, not the canonical fix.
+
 ---
 
 ## See also

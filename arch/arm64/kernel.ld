@@ -186,5 +186,19 @@ ASSERT((_boot_stack_top - _boot_stack_bottom) == BOOT_STACK_SIZE,
        "Boot stack size mismatch")
 ASSERT((_boot_stack_bottom - _boot_stack_guard) == PAGE_SIZE,
        "Boot stack guard page must be exactly 4 KiB")
-ASSERT((_kernel_end - _kernel_start) < 0x200000,
-       "Kernel image > 2 MiB; the L3 kernel mapping covers exactly 2 MiB")
+
+/* The kernel image is mapped by a single page-grain L3 table covering
+ * exactly the 2 MiB block starting at the 2 MiB-aligned PA below the
+ * load PA — i.e. [KERNEL_LOAD_PA & ~(2 MiB - 1), that + 2 MiB) — per
+ * arch/arm64/mmu.c::build_page_tables. The firmware reservation
+ * [kernel_2mib_pa, KERNEL_LOAD_PA) sits in front of the image inside
+ * that same 2 MiB block (typically 512 KiB on QEMU virt, since
+ * KERNEL_LOAD_PA = 0x40080000 and the 2 MiB block starts at
+ * 0x40000000). The L3 has no entries past + 2 MiB; any access to a
+ * higher PA from the kernel high-VA or direct-map alias takes an
+ * unhandled translation fault. The image-only assert is therefore
+ * conservative-low: the real constraint is image_size + firmware
+ * offset within the 2 MiB block. */
+ASSERT((_kernel_end - _kernel_start)
+       + (KERNEL_LOAD_PA & (0x200000 - 1)) < 0x200000,
+       "Kernel image + firmware reservation overflow the 2 MiB L3 block at kernel_2mib_pa (= KERNEL_LOAD_PA & ~(2 MiB - 1)). Either shrink the image, move KERNEL_LOAD_PA to a 2 MiB boundary, or extend the L3 mapping in arch/arm64/mmu.c::build_page_tables.")
