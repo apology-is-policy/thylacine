@@ -183,7 +183,7 @@ The bench INFRASTRUCTURE is portable; the per-iteration cost is platform-depende
 
 ## Status
 
-- **Landed**: P4-Ic-latency (commit pending). New `arch/arm64/timer.{h,c}` helper + `usr/irq-bench/` crate (~150 LOC Rust) + `kernel/test/test_irq_latency_bench.c` (~250 LOC C). 239 → 240 tests; PASS × default + UBSan.
+- **Landed**: P4-Ic-latency at commit `308ac55`. New `arch/arm64/timer.{h,c}` helper + `usr/irq-bench/` crate (~120 LOC Rust) + `kernel/test/test_irq_latency_bench.c` (~280 LOC C). 239 → 240 tests; PASS × default + UBSan.
 - **ROADMAP §6.2 exit criterion**: CLOSED on the infrastructure side. Bare-metal authoritative verification deferred to Phase 5+ hardware bring-up.
 
 ## Known caveats
