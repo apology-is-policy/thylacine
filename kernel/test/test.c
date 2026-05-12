@@ -209,6 +209,7 @@ void test_irq_probe_rfork_with_caps(void);
 void test_virtio_blk_probe_rfork_with_caps(void);
 void test_virtio_blk_rw_rfork_with_caps(void);
 void test_virtio_net_probe_rfork_with_caps(void);
+void test_virtio_net_arp_rfork_with_caps(void);
 void test_caps_kproc_has_all(void);
 void test_caps_kproc_has_hw_create(void);
 void test_caps_rfork_child_has_none(void);
@@ -497,6 +498,9 @@ struct test_case g_tests[] = {
                                        test_virtio_blk_rw_rfork_with_caps, false, NULL },
     { "userspace.virtio_net_probe_rfork_with_caps",
                                        test_virtio_net_probe_rfork_with_caps,
+                                                                           false, NULL },
+    { "userspace.virtio_net_arp_rfork_with_caps",
+                                       test_virtio_net_arp_rfork_with_caps,
                                                                            false, NULL },
     { "caps.kproc_has_all",            test_caps_kproc_has_all,            false, NULL },
     { "caps.kproc_has_hw_create",      test_caps_kproc_has_hw_create,      false, NULL },

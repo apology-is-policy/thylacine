@@ -1,0 +1,27 @@
+[package]
+name = "virtio-net-arp"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "virtio-net-arp"
+path = "src/main.rs"
+
+[dependencies]
+# Successor to virtio-net-probe (P4-Ja). Adds RX virtqueue setup + a
+# full ARP request/reply round-trip:
+#   - Pre-publish 16 RX descriptors with 2 KiB buffers each on queue 0.
+#   - Run init + DRIVER_OK with BOTH queues live.
+#   - Send the same broadcast ARP request as P4-Ja over TX (queue 1).
+#   - Wait on SYS_IRQ_WAIT; drain BOTH used rings on every wake.
+#   - Parse the first RX completion as an Ethernet frame; verify it's
+#     an ARP reply (opcode=2) from 10.0.2.2 (slirp's gateway IP).
+#
+# Same composed hw-handle SVC surface as P4-Ja:
+#   - t_mmio_create + t_mmio_map  (virtio-mmio transport)
+#   - t_dma_create  + t_dma_map   (two allocations: 4 KiB rings + 32 KiB
+#                                  RX buffer pool)
+#   - t_irq_create  + t_irq_wait  (queue completions)
+libthyla-rs = { path = "../lib/libthyla-rs" }
