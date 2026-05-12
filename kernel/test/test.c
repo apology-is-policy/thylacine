@@ -83,6 +83,7 @@ void test_proc_pgtable_destroy_walk_releases_subtables(void);
 void test_vmo_map_proc_smoke(void);
 void test_vmo_map_proc_constraints(void);
 void test_vmo_map_proc_overlap_rejected(void);
+void test_vmo_map_proc_user_va_top_boundary(void);
 void test_vmo_unmap_proc_smoke(void);
 void test_vmo_unmap_proc_no_match(void);
 void test_pgtable_install_user_pte_smoke(void);
@@ -334,6 +335,9 @@ struct test_case g_tests[] = {
     { "burrow.map_proc_smoke",            test_vmo_map_proc_smoke,            false, NULL },
     { "burrow.map_proc_constraints",      test_vmo_map_proc_constraints,      false, NULL },
     { "burrow.map_proc_overlap_rejected", test_vmo_map_proc_overlap_rejected, false, NULL },
+    { "burrow.map_proc_user_va_top_boundary",
+                                          test_vmo_map_proc_user_va_top_boundary,
+                                                                              false, NULL },
     { "burrow.unmap_proc_smoke",          test_vmo_unmap_proc_smoke,          false, NULL },
     { "burrow.unmap_proc_no_match",       test_vmo_unmap_proc_no_match,       false, NULL },
     { "pgtable.install_user_pte_smoke",

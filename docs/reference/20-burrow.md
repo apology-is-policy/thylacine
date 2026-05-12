@@ -85,7 +85,9 @@ After the last unref/release that brings BOTH counts to 0, the v pointer is **in
 | Return | Meaning |
 |---|---|
 | `0` | success: a Vma was allocated, takes a `burrow_acquire_mapping` ref, and was inserted into Proc's sorted list. |
-| `-1` | failure: NULL inputs, zero length, unaligned `vaddr` or `length`, W+X prot, vaddr+length overflow, VMA SLUB OOM, or VMA overlap with an existing entry. mapping_count UNCHANGED on failure (overlap rejection's `vma_free` reverses the `burrow_acquire_mapping` taken by `vma_alloc`). |
+| `-1` | failure: NULL inputs, zero length, unaligned `vaddr` or `length`, W+X prot, vaddr+length overflow, vaddr+length > `USER_VA_TOP` (= 1 << 47; R12-vaddr close of F180), VMA SLUB OOM, or VMA overlap with an existing entry. mapping_count UNCHANGED on failure (overlap rejection's `vma_free` reverses the `burrow_acquire_mapping` taken by `vma_alloc`). |
+
+The upper-bound check `vaddr + length > USER_VA_TOP` (added at R12-vaddr) enforces the TTBR0 user-half bound at the VMA layer. The same bit-47 reject in `mmu_install_user_pte` (R10 F158) remains as per-page defense-in-depth on the demand-page path. A `_Static_assert` in `burrow_map` pins `USER_VA_TOP == (1ull << 47)` to the mmu.c bound — if either bound shifts (e.g., a port to 52-bit VAs), both must move together.
 
 ### `burrow_unmap(Proc*, vaddr, length)` — return semantics
 

@@ -163,6 +163,15 @@
 
 #define VMALLOC_BASE  0xFFFF800000000000ull
 
+// User-half VA upper bound (exclusive). ARM IHI 0487 D5.2.4: with 48-bit
+// VAs and no TBI, valid TTBR0 addresses occupy bits [46:0]; bits 63..47
+// must be all-0 (bit 47 is the TTBR selector — set for TTBR1, clear for
+// TTBR0). The highest legal user page begins at USER_VA_TOP - PAGE_SIZE.
+// burrow_map enforces [vaddr, vaddr + length) <= USER_VA_TOP as a VMA-
+// layer reject; mmu_install_user_pte enforces (vaddr >> 47) == 0 per-page
+// as defense-in-depth (R10 F158 close; R12-vaddr extends to VMA layer).
+#define USER_VA_TOP   (1ull << 47)
+
 // Map a device-region MMIO range into the vmalloc area. Returns a kernel
 // VA that the caller can pass to MMIO accessors (mmio_w32 etc.). The
 // mapping is Device-nGnRnE attribute (per ARM ARM B2.7.2 — strongly-

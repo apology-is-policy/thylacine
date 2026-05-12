@@ -1110,7 +1110,10 @@ int mmu_install_user_pte(paddr_t pgtable_root, u16 asid,
     // or all-1 for TTBR1). R10 F158 (P3) close: tightened from
     // `vaddr >> 48 != 0` (which let bit-47=1 vaddrs through, producing
     // PTEs in the per-Proc tree at addresses the MMU would never walk
-    // → fault storm on first access) to `vaddr >> 47 != 0`.
+    // → fault storm on first access) to `vaddr >> 47 != 0`. R12-vaddr
+    // (P4) adds the matching reject at burrow_map's VMA layer so callers
+    // fail fast before any per-Proc tree mutation; this check remains as
+    // per-page defense-in-depth for the demand-page path.
     if (vaddr >> 47)                     return -1;
     // PA must fit in TCR.IPS = 40-bit (mirrors mmu_map_mmio's R6-B F118).
     if (pa >> 40)                        return -1;

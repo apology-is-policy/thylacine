@@ -35,6 +35,7 @@
 //     via the user-mode fault path lands at P3-Dc.
 //   - Single-CPU lifecycle; Phase 5+ adds atomic ops.
 
+#include "../arch/arm64/mmu.h"        // R12-vaddr: USER_VA_TOP for burrow_map upper bound
 #include <thylacine/extinction.h>
 #include <thylacine/mmio_handle.h>   // P4-Ic1: kobj_mmio_ref/unref for MMIO Burrows
 #include <thylacine/dma_handle.h>    // P4-Ic5b1b: kobj_dma_ref/unref for DMA Burrows
@@ -331,6 +332,14 @@ int burrow_map(struct Proc *p, struct Burrow *v, u64 vaddr, size_t length, u32 p
     // but a sufficiently large `vaddr` near the top of the user-VA space
     // could still wrap.
     if (vaddr + length < vaddr) return -1;
+    // R12-vaddr close of F180 (R12-DMA deferred): SYS_DMA_MAP accepted
+    // vaddr ≥ 2^47, deferring rejection to mmu_install_user_pte (R10 F158
+    // MMU-layer reject) — too late, because by then vma_alloc + vma_insert
+    // had already populated the per-Proc tree. Reject at the VMA layer so
+    // MMIO + DMA + anon callers fail uniformly before any state changes.
+    _Static_assert(USER_VA_TOP == (1ull << 47),
+        "USER_VA_TOP must equal mmu_install_user_pte's (vaddr >> 47) bound");
+    if (vaddr + length > USER_VA_TOP) return -1;
 
     // Delegate constraint validation (W+X reject, prot value) to vma_alloc.
     // It returns NULL on any constraint violation OR on SLUB OOM, and

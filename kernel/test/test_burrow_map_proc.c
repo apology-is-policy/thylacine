@@ -26,6 +26,7 @@
 
 #include "test.h"
 
+#include "../../arch/arm64/mmu.h"     // R12-vaddr: USER_VA_TOP
 #include <thylacine/page.h>
 #include <thylacine/proc.h>
 #include <thylacine/types.h>
@@ -35,6 +36,7 @@
 void test_vmo_map_proc_smoke(void);
 void test_vmo_map_proc_constraints(void);
 void test_vmo_map_proc_overlap_rejected(void);
+void test_vmo_map_proc_user_va_top_boundary(void);
 void test_vmo_unmap_proc_smoke(void);
 void test_vmo_unmap_proc_no_match(void);
 
@@ -116,10 +118,50 @@ void test_vmo_map_proc_constraints(void) {
                            VMA_PROT_READ | VMA_PROT_WRITE | VMA_PROT_EXEC), -1,
         "W+X prot rejected");
 
+    // R12-vaddr (F180): vaddr at USER_VA_TOP — first non-user page.
+    TEST_EXPECT_EQ(burrow_map(p, v, USER_VA_TOP, ONE_PAGE, VMA_PROT_RW), -1,
+        "vaddr == USER_VA_TOP rejected");
+
+    // R12-vaddr (F180): vaddr clearly past USER_VA_TOP.
+    TEST_EXPECT_EQ(burrow_map(p, v, USER_VA_TOP + ONE_PAGE, ONE_PAGE,
+                              VMA_PROT_RW), -1,
+        "vaddr > USER_VA_TOP rejected");
+
+    // R12-vaddr (F180): range straddling USER_VA_TOP (last page lands at top).
+    TEST_EXPECT_EQ(burrow_map(p, v, USER_VA_TOP - ONE_PAGE, TWO_PAGES,
+                              VMA_PROT_RW), -1,
+        "range straddling USER_VA_TOP rejected");
+
     TEST_EXPECT_EQ(burrow_mapping_count(v), mapping_before,
         "rejected map calls must NOT touch mapping_count");
     TEST_ASSERT(p->vmas == NULL, "rejected map calls must NOT install a VMA");
 
+    drop_proc(p);
+    burrow_unref(v);
+}
+
+// R12-vaddr positive boundary: the highest legal page begins at
+// USER_VA_TOP - PAGE_SIZE. burrow_map must accept this exact corner —
+// rejecting it would falsely block legitimate top-of-user-VA mappings.
+void test_vmo_map_proc_user_va_top_boundary(void) {
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc failed");
+    struct Burrow *v = burrow_create_anon(ONE_PAGE);
+    TEST_ASSERT(v != NULL, "burrow_create_anon failed");
+
+    int mapping_before = burrow_mapping_count(v);
+
+    u64 va = USER_VA_TOP - ONE_PAGE;
+    TEST_EXPECT_EQ(burrow_map(p, v, va, ONE_PAGE, VMA_PROT_RW), 0,
+        "highest-legal user page accepted");
+    TEST_EXPECT_EQ(burrow_mapping_count(v), mapping_before + 1,
+        "accepted map increments mapping_count");
+
+    struct Vma *vma = vma_lookup(p, va);
+    TEST_ASSERT(vma != NULL, "vma_lookup at USER_VA_TOP - PAGE_SIZE");
+    TEST_EXPECT_EQ(vma->vaddr_end, USER_VA_TOP, "vaddr_end == USER_VA_TOP");
+
+    vma_drain(p);
     drop_proc(p);
     burrow_unref(v);
 }
