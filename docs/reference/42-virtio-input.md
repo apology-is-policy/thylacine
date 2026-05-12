@@ -174,7 +174,7 @@ Total: well under 5 ms on QEMU TCG. Boot-time impact is negligible compared to t
 
 ## Status
 
-- **Landed**: P4-K substantive at commit `eecb43f`. New `usr/virtio-input/` crate (~310 LOC Rust) + `kernel/test/test_virtio_input_probe.c` (~110 LOC C) + reference doc + `tools/run-vm.sh` wires `-device virtio-keyboard-device` + `usr/.cargo/config.toml` adds `-z max-page-size=4096` (bonus: shrinks every Rust userspace ELF by ~60 KiB). 240 → 241 tests; PASS × default + UBSan.
+- **Landed**: P4-K substantive at commit `7a72617`. New `usr/virtio-input/` crate (~310 LOC Rust) + `kernel/test/test_virtio_input_probe.c` (~110 LOC C) + reference doc + `tools/run-vm.sh` wires `-device virtio-keyboard-device` + `usr/.cargo/config.toml` adds `-z max-page-size=4096` (bonus: shrinks every Rust userspace ELF by ~60 KiB). 240 → 241 tests; PASS × default + UBSan.
 - **Exit criterion partial**: ROADMAP §6.2 `Userspace virtio-input: keyboard input from VirtIO console reaches user processes via /dev/cons` is NOT closed by this chunk — the `/dev/cons` integration depends on FS-namespace + 9P client (Phase 5+). What this chunk closes: the substrate-side proof that the INPUT device class composes the same hw-handle surface as blk/net.
 
 ## Known caveats
