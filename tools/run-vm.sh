@@ -128,6 +128,33 @@ if [[ -f "$DISK_IMG" ]]; then
     )
 fi
 
+# P4-Ja: virtio-net-device backing. QEMU's user-mode network (slirp)
+# binds a host-side userspace TCP/UDP relay to a guest-visible NIC; no
+# privilege needed (vs. -netdev tap which needs root + bridge config).
+# The slirp gateway lives at 10.0.2.2; guest gets a DHCP-issued IP of
+# 10.0.2.15; DNS at 10.0.2.3. The virtio-net-probe binary issues a
+# broadcast ARP request "who-has 10.0.2.2 tell 10.0.2.15" purely to
+# exercise the TX virtqueue path — it doesn't process the RX response.
+#
+# A network filter (-object filter-dump) is NOT installed by default;
+# add via THYLACINE_NET_DUMP=path to capture frames for debugging.
+#
+# Slot assignment: this -device sits AFTER disk_flags in the exec
+# invocation (QEMU virt assigns virtio-mmio slots in reverse creation
+# order, so virtio-blk-device stays at slot 31; virtio-net lands at
+# slot 30; virtio-rng-device drops to slot 29). The probe scans all
+# 32 slots, so order is informational.
+net_flags=()
+if [[ "${THYLACINE_NO_NET:-0}" != "1" ]]; then
+    net_flags=(
+        -netdev "user,id=net0"
+        -device "virtio-net-device,netdev=net0,mac=52:54:00:12:34:56"
+    )
+fi
+if [[ -n "${THYLACINE_NET_DUMP:-}" ]]; then
+    net_flags+=(-object "filter-dump,id=netdump0,netdev=net0,file=$THYLACINE_NET_DUMP")
+fi
+
 # 9P host share — appears at /host inside the guest once the 9P client lands
 # (P1-A: no client yet, so the QEMU virtfs entry is benign overhead). Per
 # TOOLING.md §4 (the hot-reload mechanism). Default-on; --no-share disables.
@@ -159,6 +186,7 @@ exec qemu-system-aarch64 \
     -kernel "$KERNEL_BIN" \
     ${ramfs_flags[@]+"${ramfs_flags[@]}"} \
     ${disk_flags[@]+"${disk_flags[@]}"} \
+    ${net_flags[@]+"${net_flags[@]}"} \
     -device virtio-rng-device,id=rng0 \
     -device virtio-rng-pci,id=rng_pci0 \
     -nographic \

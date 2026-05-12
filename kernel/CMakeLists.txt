@@ -105,6 +105,7 @@ set(KERNEL_SRCS
     test/test_irq_probe.c
     test/test_virtio_blk_probe.c
     test/test_virtio_blk_rw.c
+    test/test_virtio_net_probe.c
 )
 
 set(KERNEL_LD_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/../arch/arm64/kernel.ld)

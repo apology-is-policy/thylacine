@@ -1,0 +1,23 @@
+[package]
+name = "virtio-net-probe"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "virtio-net-probe"
+path = "src/main.rs"
+
+[dependencies]
+# Same composed hw-handle surface as virtio-blk-probe (P4-Ic5b2):
+#   - t_mmio_create + t_mmio_map (P4-Ib + P4-Ic2): claim + map the
+#     virtio-mmio slot's transport registers.
+#   - t_dma_create + t_dma_map  (P4-Ic5b1b):     allocate + map a
+#     contiguous pinned DMA buffer for the TX virtqueue rings +
+#     virtio_net_hdr + Ethernet frame.
+#   - t_irq_create + t_irq_wait (P4-Ib + P4-G):  subscribe to the
+#     device's TX-completion IRQ; sleep until the used-ring idx
+#     advances after the device DMAs our frame.
+# Plus t_puts / t_putstr / t_exits for diagnostics.
+libthyla-rs = { path = "../lib/libthyla-rs" }
