@@ -165,14 +165,37 @@ fi
 #
 # Slot assignment: this -device sits AFTER net_flags in the exec
 # invocation. With QEMU's reverse-creation slot allocation, disk stays
-# at slot 31, net at slot 30, keyboard lands at slot 29, virtio-rng
-# drops to slot 28. The probe scans all 32 slots so order is
-# informational. THYLACINE_NO_INPUT=1 disables for environments where
-# the device isn't desired.
+# at slot 31, net at slot 30, keyboard lands at slot 29, gpu drops to
+# slot 28, virtio-rng drops to slot 27. The probe scans all 32 slots
+# so order is informational. THYLACINE_NO_INPUT=1 disables for
+# environments where the device isn't desired.
 input_flags=()
 if [[ "${THYLACINE_NO_INPUT:-0}" != "1" ]]; then
     input_flags=(
         -device "virtio-keyboard-device,id=kbd0"
+    )
+fi
+
+# P4-L: virtio-gpu-device on the MMIO transport, for the virtio-gpu
+# probe. QEMU virt exposes a virtio-gpu whose DeviceID=16 on the
+# virtio bus. With -nographic + -display none (the default test
+# environment), the device still enumerates a scanout (num_scanouts
+# >= 1) and responds to GET_DISPLAY_INFO with OK_DISPLAY_INFO; the
+# pmodes[0].enabled bit may be 0 if no display backend is attached.
+# The probe exercises (a) DeviceID=16 dispatch, (b) two-virtqueue
+# configuration (controlq idx 0 + cursorq idx 1; first driver to use
+# REG_QUEUE_SEL=1), and (c) the controlq command/response chain
+# pattern (req+resp via two descriptors with NEXT linkage). This is
+# the substrate gate for Phase 8 Halcyon.
+#
+# Slot assignment: this -device sits AFTER input_flags in the exec
+# invocation. With QEMU's reverse-creation slot allocation: disk=31,
+# net=30, kbd=29, gpu=28, rng=27, rng-pci doesn't count (PCI bus, not
+# virtio-mmio). THYLACINE_NO_GPU=1 disables.
+gpu_flags=()
+if [[ "${THYLACINE_NO_GPU:-0}" != "1" ]]; then
+    gpu_flags=(
+        -device "virtio-gpu-device,id=gpu0"
     )
 fi
 
@@ -209,6 +232,7 @@ exec qemu-system-aarch64 \
     ${disk_flags[@]+"${disk_flags[@]}"} \
     ${net_flags[@]+"${net_flags[@]}"} \
     ${input_flags[@]+"${input_flags[@]}"} \
+    ${gpu_flags[@]+"${gpu_flags[@]}"} \
     -device virtio-rng-device,id=rng0 \
     -device virtio-rng-pci,id=rng_pci0 \
     -nographic \

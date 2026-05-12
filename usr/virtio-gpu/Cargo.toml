@@ -1,0 +1,26 @@
+[package]
+name = "virtio-gpu"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "virtio-gpu"
+path = "src/main.rs"
+
+[dependencies]
+# Fourth device class to compose the hw-handle SVC substrate (after
+# virtio-blk + virtio-net + virtio-input). DeviceID = 16 (GPU). Two new
+# mechanisms beyond predecessors: (1) two-queue device (controlq idx 0
+# + cursorq idx 1; the spec requires both to be configured even if the
+# probe only drives controlq); (2) controlq command/response chain via
+# split descriptor: descriptor 0 = device-readable request header,
+# descriptor 1 = device-writable response payload.
+#
+# Probe-only (P4-L): inits the device, configures both virtqueues, sends
+# VIRTIO_GPU_CMD_GET_DISPLAY_INFO, waits on IRQ, parses the response
+# header (verifies type == OK_DISPLAY_INFO) + pmodes[0] dimensions,
+# exits clean. Halcyon (Phase 8) prep: this is the substrate gate the
+# graphical shell will compose against.
+libthyla-rs = { path = "../lib/libthyla-rs" }

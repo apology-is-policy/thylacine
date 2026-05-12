@@ -219,6 +219,7 @@ void test_virtio_net_probe_rfork_with_caps(void);
 void test_virtio_net_arp_rfork_with_caps(void);
 void test_virtio_net_loop_rfork_with_caps(void);
 void test_virtio_input_probe_rfork_with_caps(void);
+void test_virtio_gpu_probe_rfork_with_caps(void);
 void test_irq_latency_bench(void);
 void test_caps_kproc_has_all(void);
 void test_caps_kproc_has_hw_create(void);
@@ -534,6 +535,9 @@ struct test_case g_tests[] = {
                                                                            false, NULL },
     { "userspace.virtio_input_probe_rfork_with_caps",
                                        test_virtio_input_probe_rfork_with_caps,
+                                                                           false, NULL },
+    { "userspace.virtio_gpu_probe_rfork_with_caps",
+                                       test_virtio_gpu_probe_rfork_with_caps,
                                                                            false, NULL },
     { "userspace.irq_latency_bench",   test_irq_latency_bench,             false, NULL },
     { "caps.kproc_has_all",            test_caps_kproc_has_all,            false, NULL },

@@ -49,6 +49,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "virtio-gpu"
+version = "0.1.0"
+dependencies = [
+ "libthyla-rs",
+]
+
+[[package]]
 name = "virtio-input"
 version = "0.1.0"
 dependencies = [
