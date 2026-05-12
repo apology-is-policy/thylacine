@@ -191,7 +191,7 @@ Integration coverage comes from the existing userspace tests — `virtio-blk-rw`
 
 ## Status
 
-- **Landed** at R12-uaccess (substantive commit pending; hash fixup pending). 235 → 239 tests.
+- **Landed** at R12-uaccess (`32367d1` substantive; hash fixup pending). 235 → 239 tests.
 - **Audit-bearing per CLAUDE.md trigger surfaces (Exception entry + Page fault / mprotect / mmap + Capability checks).** Self-audit clean across the 10 adversarial categories enumerated in the landed-chunk row (false-positive on non-uaccess kernel-mode faults, recursion if uaccess primitive faults again, demand-page side effects on synthetic from_user=true, ctx->elr overwrite race, user-VA boundary check correctness, fixup table PIE encoding correctness, SP_EL1 vs SP_EL0 SPSel discipline through `.Lexception_return`, struct uaccess_fixup_entry layout drift, linker section placement R-only enforcement, kproc-context test correctness). Formal R12-uaccess prosecutor pass deferred-or-on-finding.
 
 ## Known caveats / footguns
