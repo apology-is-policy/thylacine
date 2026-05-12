@@ -35,7 +35,7 @@ enum burrow_type {
 struct page;
 
 struct Burrow {
-    u64            magic;          // VMO_MAGIC; clobbered by SLUB on free
+    u64            magic;          // VMO_MAGIC; clobbered to 0 in burrow_free_internal before kmem_cache_free (R9 F148; R13 F213)
     enum burrow_type  type;
     size_t         size;           // rounded up to page_count * PAGE_SIZE
     size_t         page_count;
@@ -78,7 +78,7 @@ u64           burrow_total_destroyed(void);
 
 ### `burrow_unref` / `burrow_release_mapping` — invalidation
 
-After the last unref/release that brings BOTH counts to 0, the v pointer is **invalid**. The SLUB freelist clobbers magic; the memory may be reused. Callers must not dereference v after that point. The high-level `burrow_unmap(Proc*, ...)` entry routes through `vma_free` → `burrow_release_mapping`; the same caveat applies, with the additional note that the VMA itself is also freed.
+After the last unref/release that brings BOTH counts to 0, the v pointer is **invalid**. `burrow_free_internal` clobbers `v->magic = 0` immediately before `kmem_cache_free` (R9 F148 discipline; closed at R13 F213 / P4-N); SLUB's freelist write may then overwrite the slot's first 8 bytes with its next-pointer. Either way, the slot's first qword is no longer `VMO_MAGIC`. A subsequent stale-pointer `burrow_ref` / `burrow_acquire_mapping` extincts via the magic check rather than masking the UAF. Callers must not dereference v after the free transition. The high-level `burrow_unmap(Proc*, ...)` entry routes through `vma_free` → `burrow_release_mapping`; the same caveat applies, with the additional note that the VMA itself is also freed.
 
 ### `burrow_map(Proc*, Burrow*, vaddr, length, prot)` — return semantics
 
@@ -250,7 +250,7 @@ Mapping (canonical at `specs/SPEC-TO-CODE.md`):
 
 ### `v` becomes invalid after the unref/unmap that frees the pages
 
-After `burrow_unref` or `burrow_unmap` triggers the free transition (both counts == 0), the v pointer is invalid. The SLUB freelist write at `kmem_cache_free` clobbers the magic at offset 0; subsequent dereference may see a zero/garbage magic and extinct, OR (if SLUB recycles the slot for another BURROW) may see a valid VMO_MAGIC and return wrong data.
+After `burrow_unref` or `burrow_unmap` triggers the free transition (both counts == 0), the v pointer is invalid. `burrow_free_internal` clobbers `v->magic = 0` immediately before `kmem_cache_free` (R9 F148 discipline; R13 F213 / P4-N close). Subsequent stale-pointer access either sees `0` (if SLUB hasn't repurposed the slot) or SLUB's freelist next-pointer — neither matches `VMO_MAGIC`, so `burrow_ref` / `burrow_acquire_mapping` / `burrow_get_size` / `burrow_handle_count` / `burrow_mapping_count` all reject. The narrow remaining UAF window (SLUB recycles the same Burrow slot for *another* Burrow before the stale dereference) is bounded by the magic check's mismatch on `VMO_MAGIC` once the new constructor has overwritten the qword — at which point the stale pointer reads valid-but-different Burrow state. The handle-table layer's own magic check on the kobj guards against this composing into wrong semantics (see `kernel/handle.c::handle_acquire_obj`).
 
 Tests use cumulative counters (`burrow_total_destroyed`) to verify free transitions rather than dereferencing the freed pointer.
 
@@ -278,7 +278,7 @@ Partial unmap (a sub-range of an existing VMA) is post-v1.0. The v1.0 entry comp
 
 ### `_Static_assert` on `struct Burrow` size is intentionally absent
 
-The struct contains `enum burrow_type` whose underlying integer type is implementation-defined (typically int). To avoid an unnecessarily fragile assert that would fail under different compiler defaults, we don't pin the size. The `_Static_assert(__builtin_offsetof(struct Burrow, magic) == 0)` IS pinned because the SLUB freelist write defense depends on it.
+The struct contains `enum burrow_type` whose underlying integer type is implementation-defined (typically int). To avoid an unnecessarily fragile assert that would fail under different compiler defaults, we don't pin the size. The `_Static_assert(__builtin_offsetof(struct Burrow, magic) == 0)` IS pinned because `burrow_free_internal`'s clobber (`v->magic = 0`) targets offset 0, and any post-free stale-pointer read of offset 0 needs to land on `magic` (not some other field) for the magic-check defense to detect the UAF. SLUB's own freelist next-pointer write (which on most allocators also lands at offset 0 of a freed slot) is a defense-in-depth backup, not the primary mechanism.
 
 ---
 
@@ -296,7 +296,8 @@ The struct contains `enum burrow_type` whose underlying integer type is implemen
 | In-kernel tests | 6 (P2-Fd) + 5 (P3-Db) = 11 covering refcount lifecycle + new VMA-installing entry points + overlap rollback. |
 | Spec `burrow.tla` + 3 buggy configs | Landed (P2-Fb); covers `MapVmo` / `UnmapVmo` actions. P3-Db's high-level entry is a thin orchestrator over the spec-modeled refcount + `vma_insert` overlap; no spec extension needed at this sub-chunk. |
 | `burrow_create_mmio(struct KObj_MMIO *)` (BURROW_TYPE_MMIO) | **Landed (P4-Ic1)** — wraps KObj_MMIO; holds a ref on the underlying kobj for the Burrow's lifetime; pages=NULL; burrow_free_internal type-dispatches between free_pages (ANON) and kobj_mmio_unref (MMIO). |
-| `burrow_create_physical` (BURROW_TYPE_PHYS) for DMA buffers | Post-v1.0 (separate from MMIO) |
+| `burrow_create_dma(struct KObj_DMA *)` (BURROW_TYPE_DMA) | **Landed (P4-Ic5b1b)** — wraps KObj_DMA; holds a ref on the underlying kobj for the Burrow's lifetime; pages=NULL (the contiguous page chunk lives on the KObj_DMA itself); burrow_free_internal type-switch adds DMA → `kobj_dma_unref`. Used by `SYS_DMA_MAP` + the IRQ-latency-bench's shared-memory mechanism. |
+| Magic clobber on `burrow_free_internal` (R9 F148 discipline) | **Landed (P4-N / R13 F213)** — `v->magic = 0` immediately before `kmem_cache_free`. Sibling kobjs (kobj_mmio, kobj_dma) had this discipline since R9; burrow.c was the outlier until P4-N. |
 | `BURROW_TYPE_FILE` (Stratum page cache) | Post-v1.0 |
 | PTE installation (demand paging) for ANON | **Landed (P3-Dc)** — `userland_demand_page` in arch/arm64/fault.c |
 | PTE installation for MMIO (device-memory PTE attrs) | **Landed (P4-Ic2)** — `userland_demand_page` dispatches on `vma->burrow->type`; `mmu_install_user_pte` accepts `bool device_memory` flag |
@@ -321,3 +322,31 @@ Tests at P4-Ic1:
 - `burrow_mmio.unref_releases_kobj_ref` — symmetric path
 - `burrow_mmio.acquire_mapping_works` — dual-count mechanics work for MMIO
 - `burrow_mmio.lifecycle_round_trip` — full create → map → unmap → unref → kobj_unref
+
+### P4-Ic5b1b DMA Burrow details
+
+A DMA Burrow has the same dual-count NoUseAfterFree lifecycle as ANON + MMIO — the spec's type-agnostic refcount model covers all three. Differences from MMIO:
+
+- **`kobj_dma` cross-reference instead of `kobj_mmio`**: the Burrow holds a `kobj_dma_ref(kd)` for its lifetime; released in `burrow_free_internal`.
+- **`pa` field**: buddy-chosen PA (page-aligned, matches `kobj_dma->pa`). Read by the demand-page handler to construct Normal-cacheable PTEs (vs MMIO's device-nGnRnE).
+- **`burrow_free_internal` type switch**: DMA → `kobj_dma_unref` + struct kfree. The `kobj_dma_unref` cascades into `free_pages` on the buddy chunk when the last KObj_DMA ref drops.
+
+Tests at P4-Ic5b1b (in `kernel/test/test_burrow.c`):
+- `burrow_dma.create_basic` — round trip
+- `burrow_dma.create_null_rejected` — NULL kobj_dma rejected
+- `burrow_dma.holds_kobj_ref` — Burrow's ref keeps kobj alive after caller's unref
+- `burrow_dma.lifecycle_round_trip` — full create → map → unmap → unref → kobj_unref
+
+### P4-N — R13 audit close (BURROW spec finalize)
+
+This chunk closes the BURROW audit-trigger surface in preparation for Phase 4 close. Adversarial self-audit against ARCH §28 I-7 found **0 P0 + 0 P1 + 1 P2 + 3 P3**, all closed in this chunk:
+
+- **F213 (P2)**: `burrow_free_internal` lacked the `v->magic = 0` clobber that sibling kobjs (kobj_mmio, kobj_dma) established at R9 F148. Without it, a stale-pointer dereference between `kmem_cache_free` and SLUB's next-pointer write would read a valid `VMO_MAGIC` and pass `burrow_ref` / `burrow_acquire_mapping`'s magic check, masking the UAF. **Fix**: added `v->magic = 0;` immediately before `kmem_cache_free(g_vmo_cache, v);` with a comment block explaining the discipline. Inspection-verified; no new test (the regression is structural — any post-free magic-checked access on the slot extincts before SLUB has had a chance to reuse the slot).
+
+- **F214 (P3)**: SPEC-TO-CODE.md's burrow.tla section pointed at outdated symbols (`burrow_map` / `burrow_unmap` for MapVmo/UnmapVmo when the actual increment lives in `burrow_acquire_mapping` / `burrow_release_mapping`) and didn't mention `burrow_create_mmio` (P4-Ic1) + `burrow_create_dma` (P4-Ic5b1b) as VmoCreate variants. **Fix**: refreshed the table to enumerate all three constructors + correct MapVmo/UnmapVmo callsites; refreshed buggy-config state counts (TLC2 v1.8.0 produces 66 / 54 / 43 distinct states; prior recorded 56 / 58 / 43).
+
+- **F215 (P3)**: `specs/burrow.tla`'s commentary at lines 18-28 enumerated `BURROW_TYPE_ANON` + `BURROW_TYPE_MMIO` but not `BURROW_TYPE_DMA` (added at P4-Ic5b1b). **Fix**: extended the type list with DMA + adjusted "Both share..." to "All three share..."; cross-reference to handles.tla's HwResourceExclusive updated.
+
+- **F216 (P3)**: `kernel/include/thylacine/burrow.h` + `docs/reference/20-burrow.md` had four "SLUB clobbers magic on free" claims that were factually wrong (SLUB's `kmem_cache_free` doesn't zero the slot's data — it writes a freelist next-pointer at some offset, which on most allocators is offset 0 but is not architecturally a magic clobber). **Fix**: corrected all four sites to attribute the magic clobber to `burrow_free_internal`'s explicit `v->magic = 0;` per F213.
+
+**TLC verification**: all 4 burrow configs re-run at P4-N. burrow.cfg clean (100 distinct states / depth 9, matching the P2-Fb baseline). The three buggy configs each produce expected `NoUseAfterFree` violations.

@@ -256,55 +256,46 @@ TLC-clean at `Procs = {p1, p2}, TxKObjs = {kx}, HwKObjs = {kh}, Rights = {R, T},
 - **Per-Proc handle-table growth (Phase 5+)**: v1.0 P2-Fc has a fixed-size table (PROC_HANDLE_MAX); Phase 5+ refactors to growable. The spec is agnostic to the table representation — handles[p] is just a set.
 - **Cross-Proc handle accounting under transfer (Phase 4)**: the spec's HandleTransferVia9P creates a fresh dst handle without affecting src; impl-side, the kobj's refcount is incremented per fresh handle. Phase 4 audit verifies the refcount math.
 
-## burrow.tla — P2-Fb spec (impl at P2-Fd)
+## burrow.tla — P2-Fb spec (impl at P2-Fd; finalized at P4-N)
 
-Status: **BURROW refcount + mapping lifecycle proven; impl deferred to P2-Fd.** Models the dual-refcount discipline for Virtual Memory Objects per ARCH §19. Pins ARCH §28 invariant I-7 (pages live until last handle closed AND last mapping unmapped).
+Status: **BURROW refcount + mapping lifecycle proven across ANON + MMIO + DMA; impl finalized at P4-N (R13 audit close).** Models the dual-refcount discipline for Virtual Memory Objects per ARCH §19. Pins ARCH §28 invariant I-7 (pages live until last handle closed AND last mapping unmapped). The dual-count semantics are type-independent; the spec models the abstract domain that all three backing types (ANON / MMIO / DMA) share — each type's distinct backing-resource discipline (alloc_pages / KObj_MMIO / KObj_DMA) is impl-level and converges on the same NoUseAfterFree invariant at the spec level.
 
-TLC-clean at `VmoIds = {v1, v2}, MaxRefs = 2` — 100 distinct states explored; depth 9. Buggy configs:
+TLC-clean at `VmoIds = {v1, v2}, MaxRefs = 2` — 100 distinct states explored; depth 9. Buggy configs (state counts re-verified at P4-N with TLC2 v1.8.0):
 
-| Config | Flag | Invariant violated | Depth | Distinct states |
-|---|---|---|---|---|
-| `burrow_buggy_free_on_close.cfg` | `BUGGY_FREE_ON_HANDLE_CLOSE = TRUE` | `NoUseAfterFree` (premature) | 6 | 56 |
-| `burrow_buggy_free_on_unmap.cfg` | `BUGGY_FREE_ON_UNMAP = TRUE`        | `NoUseAfterFree` (premature) | 6 | 58 |
-| `burrow_buggy_never_free.cfg`    | `BUGGY_NEVER_FREE = TRUE`           | `NoUseAfterFree` (delayed)   | 6 | 43 |
+| Config | Flag | Invariant violated | Distinct states |
+|---|---|---|---|
+| `burrow_buggy_free_on_close.cfg` | `BUGGY_FREE_ON_HANDLE_CLOSE = TRUE` | `NoUseAfterFree` (premature) | 66 |
+| `burrow_buggy_free_on_unmap.cfg` | `BUGGY_FREE_ON_UNMAP = TRUE`        | `NoUseAfterFree` (premature) | 54 |
+| `burrow_buggy_never_free.cfg`    | `BUGGY_NEVER_FREE = TRUE`           | `NoUseAfterFree` (delayed)   | 43 |
 
 | Spec action | Source location | Notes |
 |---|---|---|
 | `Init` | `kernel/burrow.c::burrow_init` (P2-Fd) | SLUB cache for struct Burrow. No VMOs alive at boot. |
-| `VmoCreate(v)` | `kernel/burrow.c::burrow_create_anon(size)` (P2-Fd) | Allocates struct Burrow; allocates `size / PAGE_SIZE` pages from buddy; sets handle_count=1, mapping_count=0. Returns the new BURROW; the caller's `handle_alloc` wraps it in a Handle. |
-| `HandleOpen(v)` | `kernel/burrow.c::burrow_ref(struct Burrow *)` (P2-Fd) | Atomic increment of handle_count. Called from `handle_dup` (intra-Proc) and (Phase 4) `handle_transfer_via_9p` (cross-Proc). |
-| `HandleClose(v)` | `kernel/burrow.c::burrow_unref(struct Burrow *)` (P2-Fd) | Atomic decrement of handle_count. If both counts reach 0, calls `burrow_free_pages` + `kmem_cache_free`. |
-| `BuggyFreeOnHandleClose(v)` | (none — bug class statically prevented) | The impl's `burrow_unref` checks BOTH counts before freeing: `if (h_count == 0 && m_count == 0) burrow_free_pages(...)`. A future caller that bypasses the check would re-introduce the bug. |
-| `MapVmo(v)` | `kernel/burrow.c::burrow_map(struct Burrow *)` (P2-Fd) | Atomic increment of mapping_count. Called from mmap_handle for BURROW-backed VMAs. |
-| `UnmapVmo(v)` | `kernel/burrow.c::burrow_unmap(struct Burrow *)` (P2-Fd) | Atomic decrement of mapping_count. Same dual-check on free as burrow_unref. |
+| `VmoCreate(v)` | `kernel/burrow.c::burrow_create_anon(size)` (P2-Fd) <br> `kernel/burrow.c::burrow_create_mmio(struct KObj_MMIO *)` (P4-Ic1) <br> `kernel/burrow.c::burrow_create_dma(struct KObj_DMA *)` (P4-Ic5b1b) | Three type-specific constructors; all set `handle_count = 1` + `mapping_count = 0` + `magic = VMO_MAGIC`. ANON allocates buddy pages; MMIO + DMA each `kobj_*_ref` the underlying hw-backed kobj for the Burrow's lifetime. Returns the new BURROW; the caller's `handle_alloc` wraps it in a Handle. |
+| `HandleOpen(v)` | `kernel/burrow.c::burrow_ref(struct Burrow *)` (P2-Fd) | Increments handle_count. Called from `handle_acquire_obj` + `handle_dup` (intra-Proc). Type-agnostic. Single-CPU at v1.0 (Phase 5+ adds atomics per `handles.tla`'s ConcurrencyExtension). |
+| `HandleClose(v)` | `kernel/burrow.c::burrow_unref(struct Burrow *)` (P2-Fd) | Decrements handle_count. If both counts reach 0, calls `burrow_free_internal` which type-dispatches: ANON → `free_pages`; MMIO → `kobj_mmio_unref`; DMA → `kobj_dma_unref`. Clobbers `magic = 0` before `kmem_cache_free` (R9 F148 discipline; closed at R13 F213 / P4-N). |
+| `BuggyFreeOnHandleClose(v)` | (none — bug class statically prevented) | The impl's `burrow_unref` checks BOTH counts before calling `burrow_free_internal`: `if (h_count == 0 && m_count == 0)`. `burrow_free_internal` additionally asserts both counts == 0 on entry (extincts on violation). A future caller that bypasses the check fails fast at the inner assertion. |
+| `MapVmo(v)` | `kernel/burrow.c::burrow_acquire_mapping(struct Burrow *)` (P3-Db) | Increments mapping_count. Called from `vma_alloc` (which is called by `burrow_map` — the high-level entry from `SYS_MMIO_MAP` / `SYS_DMA_MAP` / `exec.c`). Type-dispatched liveness check ensures the backing resource (pages / kobj_mmio / kobj_dma) is still alive. |
+| `UnmapVmo(v)` | `kernel/burrow.c::burrow_release_mapping(struct Burrow *)` (P3-Db) | Decrements mapping_count. Called from `vma_free`. Same dual-check on free as `burrow_unref`. |
 | `BuggyFreeOnUnmap(v)` | (none — bug class statically prevented) | Same dual-check as BuggyFreeOnHandleClose; structural guarantee. |
-| `BuggyNoFreeHandleClose(v) / BuggyNoFreeUnmap(v)` | (none — bug class statically prevented) | The impl's `burrow_unref` and `burrow_unmap` always evaluate the dual-check at decrement time; no codepath skips the free transition when both counts reach 0. |
+| `BuggyNoFreeHandleClose(v) / BuggyNoFreeUnmap(v)` | (none — bug class statically prevented) | The impl's `burrow_unref` and `burrow_release_mapping` always evaluate the dual-check at decrement time; no codepath skips the free transition when both counts reach 0. |
 
 | Spec invariant | Source enforcement |
 |---|---|
-| `RefcountConsistent` (counts = 0 if not in vmos) | The impl's struct Burrow is allocated/freed via SLUB; counts are part of the struct. Before allocation: no struct Burrow exists, so counts are not addressable; "not in vmos" maps to "no Burrow struct allocated yet." |
-| `NoUseAfterFree` (pages alive iff at least one count > 0) | `burrow_unref` and `burrow_unmap` both check `(handle_count == 0 AND mapping_count == 0)` after their decrement; if true, free pages. The dual check is the runtime enforcement of I-7. |
+| `RefcountConsistent` (counts = 0 if not in vmos) | The impl's struct Burrow is allocated/freed via SLUB; counts are part of the struct. Before allocation: no struct Burrow exists, so counts are not addressable; "not in vmos" maps to "no Burrow struct allocated yet." After `burrow_free_internal` (counts reach 0 + magic clobbered), subsequent `burrow_ref` / `burrow_acquire_mapping` extincts via the magic check (`v->magic != VMO_MAGIC`), pinning the "freed Burrows must not be referenced" half of `RefcountConsistent`. |
+| `NoUseAfterFree` (pages alive iff at least one count > 0) | `burrow_unref` and `burrow_release_mapping` both check `(handle_count == 0 AND mapping_count == 0)` after their decrement; if true, free via `burrow_free_internal`. The dual check is the runtime enforcement of I-7. `burrow_free_internal` additionally asserts both counts == 0 at entry — defense-in-depth against a hypothetical bypassing caller. The type-dispatched switch in `burrow_free_internal` releases the per-type backing resource (free_pages / kobj_mmio_unref / kobj_dma_unref) symmetrically with `burrow_create_*`'s ref-acquire. |
 
-### P2-Fb landed (this chunk)
+### Files
 
-- `burrow.tla` (~290 LOC TLA+) + 4 cfg files (1 clean + 3 buggy variants).
-- BURROW state: `vmos`, `handle_count[v]`, `mapping_count[v]`, `pages_alive`.
-- Per-BURROW refcounts bounded by `MaxRefs` (CONSTANT) for TLC tractability.
-- Five spec actions: `VmoCreate`, `HandleOpen`, `HandleClose`, `MapVmo`, `UnmapVmo`.
-- Three buggy actions: premature-on-close, premature-on-unmap, never-free (with two delayed-free variants — close + unmap).
-- Two state invariants: `RefcountConsistent` + `NoUseAfterFree` (iff form catches both premature AND delayed free).
+- `specs/burrow.tla` (~310 LOC TLA+) + 4 cfg files (1 clean + 3 buggy variants).
+- `kernel/include/thylacine/burrow.h` — `struct Burrow` (magic + type + size + page_count + handle_count + mapping_count + pages + order + kobj_mmio + kobj_dma + pa); `enum burrow_type` (ANON / MMIO / DMA / INVALID).
+- `kernel/burrow.c` — `burrow_init`, `burrow_create_anon`, `burrow_create_mmio`, `burrow_create_dma`, `burrow_ref`, `burrow_unref`, `burrow_acquire_mapping`, `burrow_release_mapping`, `burrow_map`, `burrow_unmap`, `burrow_free_internal` (static; clobbers magic before `kmem_cache_free`), diagnostic accessors.
+- `kernel/test/test_burrow.c` + `kernel/test/test_burrow_mmio.c` + `kernel/test/test_burrow_map_proc.c` — 30+ tests covering refcount lifecycle, map/unmap, dual-count interleavings, magic-check rejection paths, MMIO/DMA type dispatch.
 
-### P2-Fd impl targets (next chunk)
+### Deferred / Phase 5+
 
-- `kernel/include/thylacine/burrow.h` — struct Burrow (size + type + handle_count + mapping_count + pages); inline `burrow_ref` / `burrow_unref` (atomic ops).
-- `kernel/burrow.c` — `burrow_init`, `burrow_create_anon(size)`, `burrow_map`, `burrow_unmap`, `burrow_free_pages`. SLUB cache. Anonymous VMOs only at v1.0 (VMO_PHYS deferred to Phase 3 with the device tree's reserved-memory handling; VMO_FILE deferred post-v1.0).
-- New tests: `burrow.create_close_round_trip`, `burrow.refcount_lifecycle`, `burrow.map_unmap_lifecycle`, `burrow.handles_x_mappings_matrix` (combinations of close-before-unmap, unmap-before-close, etc., verifying pages free at the correct boundary).
-
-### Deferred
-
-- **Physical VMOs (VMO_PHYS) at Phase 3**: when the device tree's reserved-memory regions are exposed, drivers will need physical VMOs over fixed PA ranges (DMA buffers, framebuffer). Spec is agnostic to the backing type — refcount mechanics are identical.
 - **File-backed VMOs (VMO_FILE) post-v1.0**: integration with Stratum's page cache. Spec extension: VmoCreate variants per backing type; refcount mechanics unchanged.
-- **Concurrent map/unmap and ref/unref (Phase 5+)**: at v1.0 P2-F, the impl runs single-CPU; Phase 5+ adds a per-Burrow lock OR atomic-only operations. The spec is single-stepping (atomic transitions); Phase 5+ refinement may need finer-grained atomicity modeling.
+- **Concurrent map/unmap and ref/unref (Phase 5+)**: at v1.0 the impl runs effectively single-CPU per Proc; Phase 5+ adds a per-Burrow lock OR atomic-only operations. The spec is single-stepping (atomic transitions); Phase 5+ refinement may need finer-grained atomicity modeling. Cross-reference: `handles.tla`'s ConcurrencyExtension section.
 
 
 

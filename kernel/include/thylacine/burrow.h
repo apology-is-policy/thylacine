@@ -95,7 +95,7 @@ struct KObj_MMIO;
 struct KObj_DMA;
 
 struct Burrow {
-    u64            magic;          // VMO_MAGIC; clobbered by SLUB on free
+    u64            magic;          // VMO_MAGIC; clobbered to 0 in burrow_free_internal before kmem_cache_free (R9 F148 discipline; R13 F213)
     enum burrow_type  type;
     size_t         size;           // rounded-up to page_count * PAGE_SIZE
     size_t         page_count;

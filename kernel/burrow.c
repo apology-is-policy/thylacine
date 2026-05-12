@@ -240,6 +240,15 @@ static void burrow_free_internal(struct Burrow *v) {
         extinction("burrow_free_internal: invalid burrow type");
     }
 
+    // P4-N R13 F213 close: clobber magic before returning the slot to
+    // SLUB. Sibling kobjs (kobj_mmio, kobj_dma) clobber per R9 F148.
+    // SLUB's free path does NOT zero the slot; any stale-pointer read
+    // between this kmem_cache_free and the next allocator-side write
+    // would otherwise see a valid VMO_MAGIC and pass burrow_ref's /
+    // burrow_acquire_mapping's magic check, masking the UAF. With
+    // magic = 0 the same UAF extincts loudly.
+    v->magic = 0;
+
     kmem_cache_free(g_vmo_cache, v);
     g_vmo_destroyed++;
 }
