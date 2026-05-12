@@ -1,57 +1,54 @@
-// /virtio-gpu — fourth composed userspace driver (P4-L).
+// /virtio-gpu — fourth composed userspace driver.
 //
-// Probe scope for the VirtIO GPU device class (DeviceID = 16). Proves
-// the composed-hw-handle SVC substrate (MMIO + DMA + IRQ) generalizes
-// to a device class with:
-//   - two virtqueues (controlq idx 0 + cursorq idx 1; spec §5.7.2),
-//   - a controlq command/response pattern (driver writes request to a
-//     device-readable descriptor + device writes response to a
-//     device-writable descriptor),
-//   - a flat le32 config-space (events_read + events_clear +
-//     num_scanouts + num_capsets per spec §5.7.4),
-//   - VIRTIO_GPU_CMD_GET_DISPLAY_INFO (spec §5.7.6.1) — the canonical
-//     "what scanouts does this device expose" command. Used by every
-//     real virtio-gpu driver before any 2D surface setup.
+// Two-stage scope:
 //
-// Scope (intentionally narrow):
-//   - Init transport: RESET → ACK → DRIVER → DeviceFeatures (require
-//     VIRTIO_F_VERSION_1; decline EDID + VIRGL + RESOURCE_UUID +
-//     RESOURCE_BLOB + CONTEXT_INIT — none of those are needed for
-//     GET_DISPLAY_INFO) → FEATURES_OK → configure BOTH queues
-//     (controlq idx 0 + cursorq idx 1; cursorq stays empty but the
-//     spec lists it as one of the two required virtqueues) →
-//     DRIVER_OK.
-//   - Send VIRTIO_GPU_CMD_GET_DISPLAY_INFO via controlq (2-descriptor
-//     chain: 24-byte req hdr OUT + 408-byte resp payload IN).
-//   - Wait on IRQ, ACK InterruptStatus, parse the response: verify
-//     resp.hdr.type == VIRTIO_GPU_RESP_OK_DISPLAY_INFO (= 0x1101).
-//   - Log num_scanouts from config space + pmodes[0] dimensions +
-//     enabled flag (informational; QEMU virt with -nographic still
-//     reports num_scanouts >= 1 — virtio-gpu's scanout count is a
-//     device capability, not a runtime backend state). Exit clean.
-//   - Do NOT call any RESOURCE_CREATE_2D / SET_SCANOUT / TRANSFER /
-//     FLUSH — those belong to a Phase 8 Halcyon-prep sub-chunk that
-//     actually puts pixels on a scanout.
+//   P4-L (probe; previously landed): RESET → DRIVER_OK → controlq
+//   GET_DISPLAY_INFO → verify OK_DISPLAY_INFO. Proves the substrate
+//   generalizes to DeviceID=16 + two-virtqueue MMIO config + the
+//   controlq command/response chain shape.
 //
-// What this test specifically guards against (beyond blk/net/input):
-//   - DeviceID=16 dispatch in virtio_mmio_find_by_device_id.
-//   - Configuring TWO virtqueues before DRIVER_OK (every prior driver
-//     configured exactly one; cursorq is the second-queue setup the
-//     virtio-mmio register surface exposes via REG_QUEUE_SEL=1).
-//   - controlq command/response chain pattern: descriptor 0 is OUT
-//     (NEXT flag, no WRITE), descriptor 1 is IN (WRITE flag, no NEXT).
-//     The descriptor.next field linkage is symmetric to virtio-blk's
-//     3-descriptor chain but with a different shape (no separate
-//     status byte; virtio-gpu response embeds status in resp.hdr.type).
-//   - Selector-less flat config-space (offset 0x100..0x110 contains
-//     four le32 fields with no selector mechanism — distinct from
-//     virtio-input's select+subsel+size+u indirection).
+//   P4-L-scanout (this chunk): adds the full 2D resource lifecycle
+//   that puts pixels on a scanout (Halcyon-prep gate):
 //
-// Future P4-L-scanout: requires a 2D resource lifecycle
-// (RESOURCE_CREATE_2D → ATTACH_BACKING → TRANSFER_TO_HOST_2D →
-// SET_SCANOUT → RESOURCE_FLUSH), guest-physical backing pages, and
-// either a real display backend (so the pixels are observable) or a
-// host-side capture path. Halcyon-prep work.
+//     RESOURCE_CREATE_2D     → allocate host-side resource
+//     RESOURCE_ATTACH_BACKING → bind guest framebuffer pages
+//     SET_SCANOUT            → bind scanout 0 to the resource
+//     TRANSFER_TO_HOST_2D    → copy guest backing into host resource
+//     RESOURCE_FLUSH         → present the resource on the scanout
+//
+//   Each of the five new commands returns OK_NODATA (0x1100); the
+//   probe asserts this for every step. The verifying signal is the
+//   chain of OK_NODATAs — QEMU's virtio-gpu device validates resource
+//   ID + format + dimensions + backing length + scanout id + rect
+//   bounds and answers with ERR_INVALID_* on any mismatch, so the
+//   five OK responses constitute a tight contract that the host
+//   actually built, backed, bound, transferred, and flushed.
+//
+// Visual verification (pixels reaching a real framebuffer) is not in
+// CI scope — `tools/run-vm.sh` runs `-nographic` so QEMU's gl-on-egl
+// back-end isn't active. A future P4-L-screencap chunk could wire QMP
+// `screendump` + a Python verifier for pixel-perfect verification.
+//
+// What this chunk specifically guards against (beyond the probe):
+//   - Multi-command controlq flow: each command bumps avail.idx by 1;
+//     each waits on its own IRQ; each ACKs InterruptStatus. used.idx
+//     tracks monotonically; the per-command resp.hdr.type is read at
+//     RESP_OFF and validated against OK_NODATA.
+//   - Second DMA allocation pattern: 4 KiB ring + 64 KiB framebuffer
+//     as two distinct KObj_DMA handles. Each maps into its own
+//     user-VA window; the framebuffer's PA is the value handed to the
+//     device in the ATTACH_BACKING mem_entry.
+//   - virtio_gpu_mem_entry layout: { le64 addr; le32 length; le32
+//     padding } = 16 B. Single entry suffices because the kernel-side
+//     buddy allocator backs each kobj_dma_create with one physically
+//     contiguous chunk (KOBJ_DMA_MAX_SIZE = 1 MiB; we use 64 KiB).
+//   - Format encoding: VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM = 1; pixel
+//     bytes [B, G, R, A] in memory = u32 little-endian 0xAARRGGBB on
+//     AArch64.
+//
+// Framebuffer test pattern: 128×128, four solid-color quadrants
+// (red TL, green TR, blue BL, white BR). Deterministic and
+// orientation-revealing if anyone screencaps later.
 
 #![no_std]
 #![no_main]
@@ -83,6 +80,7 @@ const VIRTIO_MMIO_GIC_INTID_BASE: u32 = 32 + 16; // = 48
 
 const MMIO_USER_VA: u64 = 0x0090_0000;
 const DMA_USER_VA: u64  = 0x00a0_0000;
+const FB_USER_VA: u64   = 0x00b0_0000;
 
 // =============================================================================
 // VirtIO MMIO register offsets (per VIRTIO 1.2 §4.2.2).
@@ -141,9 +139,6 @@ const VIRTQ_DESC_F_WRITE: u16 = 2;
 //   4       le32      events_clear
 //   8       le32      num_scanouts
 //   12      le32      num_capsets
-//
-// The config space is flat le32s — there's no selector indirection
-// (contrast virtio-input's select+subsel+size+u union at §5.8.4).
 const GPU_CFG_NUM_SCANOUTS: u64 = 8;
 const GPU_CFG_NUM_CAPSETS: u64  = 12;
 
@@ -152,10 +147,20 @@ const GPU_QUEUE_CONTROL: u32 = 0;
 const GPU_QUEUE_CURSOR: u32  = 1;
 
 // controlq command types (§5.7.6.7).
-const VIRTIO_GPU_CMD_GET_DISPLAY_INFO: u32 = 0x0100;
+const VIRTIO_GPU_CMD_GET_DISPLAY_INFO: u32        = 0x0100;
+const VIRTIO_GPU_CMD_RESOURCE_CREATE_2D: u32      = 0x0101;
+const VIRTIO_GPU_CMD_SET_SCANOUT: u32             = 0x0103;
+const VIRTIO_GPU_CMD_RESOURCE_FLUSH: u32          = 0x0104;
+const VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D: u32     = 0x0105;
+const VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING: u32 = 0x0106;
 
 // controlq response types (§5.7.6.7).
+const VIRTIO_GPU_RESP_OK_NODATA: u32       = 0x1100;
 const VIRTIO_GPU_RESP_OK_DISPLAY_INFO: u32 = 0x1101;
+
+// Pixel format (§5.7.3). B8G8R8A8_UNORM = bytes [B, G, R, A] in memory
+// = u32 little-endian 0xAARRGGBB on AArch64.
+const VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM: u32 = 1;
 
 // struct virtio_gpu_ctrl_hdr (§5.7.6.6):
 //   le32 type;        // offset 0
@@ -182,19 +187,35 @@ const GPU_RESP_DISPLAY_INFO_LEN: u32 =
     GPU_CTRL_HDR_LEN + GPU_MAX_SCANOUTS * GPU_DISPLAY_ONE_LEN; // 24 + 384 = 408
 
 // =============================================================================
-// DMA layout (single 4 KiB page).
+// Framebuffer dimensions + DMA size.
+// =============================================================================
+//
+// 128 × 128 × 4 B = 64 KiB. Comfortably below KOBJ_DMA_MAX_SIZE
+// (1 MiB at v1.0) and exactly 16 contiguous 4-KiB pages — single
+// mem_entry suffices in ATTACH_BACKING.
+
+const FB_WIDTH: u32 = 128;
+const FB_HEIGHT: u32 = 128;
+const FB_BPP: u32 = 4;
+const FB_SIZE: u64 = (FB_WIDTH as u64) * (FB_HEIGHT as u64) * (FB_BPP as u64);
+const FB_RESOURCE_ID: u32 = 1; // any non-zero u32 (0 is reserved)
+const FB_SCANOUT_ID: u32 = 0;
+
+// =============================================================================
+// DMA layout (single 4 KiB ring page).
 // =============================================================================
 //
 //   0x000..0x100   controlq desc[0..16]   (16 × 16 B)
 //   0x100..0x200   controlq avail         (header + ring + used_event)
 //   0x200..0x300   controlq used          (header + ring + avail_event)
-//   0x300..0x400   cursorq desc[0..16]    (16 × 16 B — unused but configured)
-//   0x400..0x500   cursorq avail          (idx stays 0)
-//   0x500..0x600   cursorq used           (unused)
-//   0x600..0x620   request header         (virtio_gpu_ctrl_hdr; 24 B)
-//   0x620..0x7c0   response payload       (resp_display_info; 408 B)
-//
-// Total: 0x7c0 = 1984 B; fits in PAGE_SIZE = 4096.
+//   0x300..0x400   cursorq desc[0..16]    (configured but unused)
+//   0x400..0x500   cursorq avail
+//   0x500..0x600   cursorq used
+//   0x600..0x700   request region         (256 B; largest body = TRANSFER_TO_HOST_2D
+//                                          at 24 + 32 = 56 B)
+//   0x700..0xa00   response region        (768 B; covers display_info at 408 B
+//                                          + 24-B OK_NODATA replies)
+//   0xa00..0x1000  unused
 
 const QUEUE_SIZE: u16 = 16;
 const DMA_BUFSIZE: u64 = PAGE_SIZE;
@@ -206,11 +227,16 @@ const CURSOR_DESC_OFF: u64 = 0x300;
 const CURSOR_AVAIL_OFF: u64 = 0x400;
 const CURSOR_USED_OFF: u64 = 0x500;
 const REQ_OFF: u64         = 0x600;
-const RESP_OFF: u64        = 0x620;
+const RESP_OFF: u64        = 0x700;
 
-// Compile-time sanity: layout fits within the 4 KiB DMA buffer.
+const REQ_REGION_LEN: u32 = 0x100;   // 256 B
+const RESP_REGION_LEN: u32 = 0x300;  // 768 B
+
+// Compile-time sanity: regions don't overlap and fit within DMA buffer.
 const _: () = {
-    assert!(RESP_OFF + (GPU_RESP_DISPLAY_INFO_LEN as u64) <= DMA_BUFSIZE);
+    assert!(REQ_OFF + (REQ_REGION_LEN as u64) <= RESP_OFF);
+    assert!(RESP_OFF + (RESP_REGION_LEN as u64) <= DMA_BUFSIZE);
+    assert!(GPU_RESP_DISPLAY_INFO_LEN <= RESP_REGION_LEN);
 };
 
 // =============================================================================
@@ -336,12 +362,7 @@ fn find_gpu_slot(mmio_base_va: u64) -> Option<(u32, u64)> {
 // =============================================================================
 // Configure a single virtqueue (controlq or cursorq).
 // =============================================================================
-//
-// Writes the PA tuple (desc + driver + device) to the slot's registers
-// after Queue_SEL has been written. Used twice: once for controlq with
-// pre-populated descriptor 0 (the request) + descriptor 1 (the
-// response), once for cursorq with avail.idx left at 0 (the queue
-// exists but the driver never submits anything to it).
+
 fn configure_queue(slot_va: u64, dma_pa: u64,
                    desc_off: u64, avail_off: u64, used_off: u64) -> bool {
     let num_max = unsafe { read32(slot_va + REG_QUEUE_NUM_MAX) };
@@ -373,21 +394,10 @@ fn configure_queue(slot_va: u64, dma_pa: u64,
 // =============================================================================
 
 fn init_device(slot_va: u64, dma_pa: u64) -> bool {
-    // Step 1: RESET.
     unsafe { write32(slot_va + REG_STATUS, 0) };
-
-    // Step 2: ACKNOWLEDGE.
     unsafe { write32(slot_va + REG_STATUS, STATUS_ACKNOWLEDGE) };
-
-    // Step 3: DRIVER.
     unsafe { write32(slot_va + REG_STATUS, STATUS_ACKNOWLEDGE | STATUS_DRIVER) };
 
-    // Step 4: read DeviceFeatures; require VIRTIO_F_VERSION_1.
-    // bank-0 may advertise EDID / VIRGL / RESOURCE_UUID / RESOURCE_BLOB
-    // / CONTEXT_INIT; we decline all of them — none are needed for
-    // GET_DISPLAY_INFO, and accepting them would change the device's
-    // expected request/response framing (RESOURCE_BLOB in particular
-    // forces a different config-space layout).
     unsafe { write32(slot_va + REG_DEVICE_FEATURES_SEL, 1) };
     let dev_feat_hi = unsafe { read32(slot_va + REG_DEVICE_FEATURES) };
     if dev_feat_hi & VIRTIO_F_VERSION_1_BIT_BANK1 == 0 {
@@ -401,7 +411,6 @@ fn init_device(slot_va: u64, dma_pa: u64) -> bool {
     unsafe { write32(slot_va + REG_DRIVER_FEATURES_SEL, 1) };
     unsafe { write32(slot_va + REG_DRIVER_FEATURES, VIRTIO_F_VERSION_1_BIT_BANK1) };
 
-    // Step 5: FEATURES_OK + readback.
     unsafe {
         write32(slot_va + REG_STATUS,
                 STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK);
@@ -414,14 +423,6 @@ fn init_device(slot_va: u64, dma_pa: u64) -> bool {
         return false;
     }
 
-    // Step 6: configure BOTH virtqueues. Per VIRTIO 1.2 §5.7.2 the GPU
-    // device exposes controlq (idx 0) + cursorq (idx 1). The spec
-    // doesn't strictly mandate both be active before DRIVER_OK, but
-    // QEMU's virtio-gpu refuses to accept commands if cursorq is
-    // left at QueueReady=0 — the device walks its queue list on
-    // DRIVER_OK transitions and treats an unset cursorq as a config
-    // error. Mirror Linux's drm/virtio_gpu init order (controlq then
-    // cursorq).
     unsafe { write32(slot_va + REG_QUEUE_SEL, GPU_QUEUE_CONTROL) };
     if !configure_queue(slot_va, dma_pa, CTRL_DESC_OFF, CTRL_AVAIL_OFF, CTRL_USED_OFF) {
         unsafe { write32(slot_va + REG_STATUS, STATUS_FAILED) };
@@ -433,7 +434,6 @@ fn init_device(slot_va: u64, dma_pa: u64) -> bool {
         return false;
     }
 
-    // Step 7: DRIVER_OK.
     unsafe {
         write32(slot_va + REG_STATUS,
                 STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK | STATUS_DRIVER_OK);
@@ -443,161 +443,277 @@ fn init_device(slot_va: u64, dma_pa: u64) -> bool {
 }
 
 // =============================================================================
-// Submit VIRTIO_GPU_CMD_GET_DISPLAY_INFO on controlq.
+// Per-command submit + wait + verify (controlq).
 // =============================================================================
 //
-// 2-descriptor chain (head = 0):
-//   desc[0]: req header (24 B; OUT → device reads)        next=1
-//   desc[1]: resp payload (408 B; IN → device writes)     last
+// Each invocation:
+//   - assumes the caller has populated REQ_OFF with the full request
+//     (24-B ctrl_hdr at REQ_OFF + body at REQ_OFF + 24) over `req_len` bytes.
+//   - rebuilds the 2-descriptor chain at desc head 0:
+//       desc[0]: REQ_OFF, req_len, NEXT,  next=1
+//       desc[1]: RESP_OFF, resp_len, WRITE, next=0
+//   - zeroes resp.hdr.type so a no-response surfaces as 0 instead of stale.
+//   - updates avail.ring[seq % QUEUE_SIZE] = 0 (desc head is always 0).
+//   - DSB; avail.idx = seq + 1; DSB.
+//   - kicks controlq (QueueNotify=0).
+//   - waits IRQ; ACKs InterruptStatus.
+//   - asserts used.idx == seq + 1.
+//   - reads resp.hdr.type and returns it.
 //
-// avail.ring[0] = 0; avail.idx = 1 after barriers; kick QueueNotify=0.
+// `seq` is the avail.idx value BEFORE the bump (0 for the first
+// command, 1 for the second, etc.). After the call returns, the
+// caller's monotonic counter advances by 1.
 
-fn submit_get_display_info(slot_va: u64, dma_va: u64, dma_pa: u64) {
-    // Zero the response header so a missing device write surfaces as
-    // type=0 rather than uninitialized.
-    for i in 0..(GPU_CTRL_HDR_LEN as u64) {
-        unsafe { write_u8(dma_va + RESP_OFF + i, 0) };
+struct Controlq {
+    slot_va: u64,
+    dma_va: u64,
+    dma_pa: u64,
+    irq_handle: i64,
+    seq: u16, // next avail.idx to use (also the count of completed commands)
+}
+
+impl Controlq {
+    fn submit_and_wait(&mut self, req_len: u32, resp_len: u32) -> Result<u32, ()> {
+        let next_seq = self.seq.wrapping_add(1);
+
+        // Zero resp ctrl_hdr (24 B) so missed response surfaces as
+        // type=0 rather than uninitialized.
+        for i in 0..(GPU_CTRL_HDR_LEN as u64) {
+            unsafe { write_u8(self.dma_va + RESP_OFF + i, 0) };
+        }
+
+        // Build descriptor chain. Each descriptor is 16 bytes:
+        //   le64 addr; le32 len; le16 flags; le16 next;
+        let desc_va = self.dma_va + CTRL_DESC_OFF;
+
+        unsafe {
+            write64(desc_va + 0,  self.dma_pa + REQ_OFF);
+            write32(desc_va + 8,  req_len);
+            write16(desc_va + 12, VIRTQ_DESC_F_NEXT);
+            write16(desc_va + 14, 1);
+
+            write64(desc_va + 16, self.dma_pa + RESP_OFF);
+            write32(desc_va + 24, resp_len);
+            write16(desc_va + 28, VIRTQ_DESC_F_WRITE);
+            write16(desc_va + 30, 0);
+        };
+
+        // avail.ring[seq % QUEUE_SIZE] = 0 (desc head 0 reused per command).
+        let avail_va = self.dma_va + CTRL_AVAIL_OFF;
+        let ring_slot = (self.seq % QUEUE_SIZE) as u64;
+        unsafe {
+            write16(avail_va + 0, 0); // flags
+            write16(avail_va + 4 + ring_slot * 2, 0);
+        };
+
+        // VIRTIO 1.2 §2.7.13.1: descriptor + ring slot writes MUST be
+        // visible before the idx bump.
+        dsb_sy();
+        unsafe { write16(avail_va + 2, next_seq) };
+        dsb_sy();
+
+        // Kick controlq.
+        unsafe { write32(self.slot_va + REG_QUEUE_NOTIFY, GPU_QUEUE_CONTROL) };
+
+        // Wait for completion.
+        let count = unsafe { t_irq_wait(self.irq_handle) };
+        if count < 0 {
+            log("virtio-gpu: FAIL — SYS_IRQ_WAIT returned error\n");
+            return Err(());
+        }
+        let int_status = unsafe { read32(self.slot_va + REG_INTERRUPT_STATUS) };
+        unsafe { write32(self.slot_va + REG_INTERRUPT_ACK, int_status) };
+
+        let used_va = self.dma_va + CTRL_USED_OFF;
+        let used_idx = unsafe { read16(used_va + 2) };
+        if used_idx != next_seq {
+            log("virtio-gpu: FAIL — used.idx != expected (got ");
+            log_dec(used_idx as u32);
+            log(", expected ");
+            log_dec(next_seq as u32);
+            log(")\n");
+            return Err(());
+        }
+
+        let resp_va = self.dma_va + RESP_OFF;
+        let resp_type = unsafe { read32(resp_va + 0) };
+
+        self.seq = next_seq;
+        Ok(resp_type)
     }
-
-    // Populate the request header at REQ_OFF (virtio_gpu_ctrl_hdr).
-    let req_va = dma_va + REQ_OFF;
-    unsafe {
-        write32(req_va + 0,  VIRTIO_GPU_CMD_GET_DISPLAY_INFO); // type
-        write32(req_va + 4,  0);                               // flags
-        write64(req_va + 8,  0);                               // fence_id
-        write32(req_va + 16, 0);                               // ctx_id
-        write_u8(req_va + 20, 0);                              // ring_idx
-        write_u8(req_va + 21, 0);                              // padding[0]
-        write_u8(req_va + 22, 0);                              // padding[1]
-        write_u8(req_va + 23, 0);                              // padding[2]
-    };
-
-    // Populate the descriptor chain. Each descriptor is 16 bytes:
-    //   le64 addr; le32 len; le16 flags; le16 next;
-    let desc_va = dma_va + CTRL_DESC_OFF;
-
-    // desc[0]: request header (OUT to device).
-    unsafe {
-        write64(desc_va + 0,  dma_pa + REQ_OFF);
-        write32(desc_va + 8,  GPU_CTRL_HDR_LEN);
-        write16(desc_va + 12, VIRTQ_DESC_F_NEXT);
-        write16(desc_va + 14, 1);
-    };
-
-    // desc[1]: response payload (IN; device writes the full
-    // virtio_gpu_resp_display_info struct here).
-    unsafe {
-        write64(desc_va + 16, dma_pa + RESP_OFF);
-        write32(desc_va + 24, GPU_RESP_DISPLAY_INFO_LEN);
-        write16(desc_va + 28, VIRTQ_DESC_F_WRITE);
-        write16(desc_va + 30, 0);
-    };
-
-    // controlq avail ring: flags=0, ring[0]=0, idx=1.
-    let avail_va = dma_va + CTRL_AVAIL_OFF;
-    unsafe {
-        write16(avail_va + 0, 0);   // flags
-        write16(avail_va + 4, 0);   // ring[0] = desc head 0
-    };
-
-    // VIRTIO 1.2 §2.7.13.1: descriptor + ring[0] writes MUST be
-    // visible before the idx bump.
-    dsb_sy();
-    unsafe { write16(avail_va + 2, 1) }; // idx = 1
-    dsb_sy();
-
-    // Kick controlq (queue index 0).
-    unsafe { write32(slot_va + REG_QUEUE_NOTIFY, GPU_QUEUE_CONTROL) };
 }
 
 // =============================================================================
-// Wait + parse + verify.
+// Request-body builders.
 // =============================================================================
 //
-// Success criteria:
-//   - SYS_IRQ_WAIT returns >= 0.
-//   - InterruptStatus has the buffer-used bit set (bit 0); ACK it.
-//   - controlq used.idx advanced to 1.
-//   - used.ring[0].id == 0 (the descriptor head we submitted).
-//   - resp.hdr.type == VIRTIO_GPU_RESP_OK_DISPLAY_INFO (0x1101).
+// All builders write the 24-byte ctrl_hdr at REQ_OFF followed by the
+// command-specific body. The Controlq submit picks up `req_len` from
+// here.
+
+unsafe fn write_ctrl_hdr(req_va: u64, cmd_type: u32) {
+    // type, flags=0, fence_id=0, ctx_id=0, ring_idx=0, padding[3]=0
+    write32(req_va + 0,  cmd_type);
+    write32(req_va + 4,  0);
+    write64(req_va + 8,  0);
+    write32(req_va + 16, 0);
+    write_u8(req_va + 20, 0);
+    write_u8(req_va + 21, 0);
+    write_u8(req_va + 22, 0);
+    write_u8(req_va + 23, 0);
+}
+
+unsafe fn write_rect(va: u64, x: u32, y: u32, w: u32, h: u32) {
+    write32(va + 0,  x);
+    write32(va + 4,  y);
+    write32(va + 8,  w);
+    write32(va + 12, h);
+}
+
+// Body layouts per VIRTIO 1.2 §5.7.6.
 //
-// Diagnostics: log num_scanouts (config-space le32 at offset 0x108)
-// and pmodes[0] rectangle + enabled flag. These are informational —
-// QEMU virt with -nographic still reports num_scanouts >= 1, but
-// pmodes[0].enabled may be 0 (no scanout backend) or 1 (default
-// 1024x768). The probe doesn't fail on either case; the OK response
-// header is the load-bearing assertion.
+// Body length (excluding the 24-B ctrl_hdr):
+//   GET_DISPLAY_INFO         : 0 B
+//   RESOURCE_CREATE_2D       : 16 B (resource_id, format, width, height)
+//   RESOURCE_ATTACH_BACKING  : 8 + 16*nr_entries B
+//   SET_SCANOUT              : 24 B (rect, scanout_id, resource_id)
+//   TRANSFER_TO_HOST_2D      : 32 B (rect, offset, resource_id, padding)
+//   RESOURCE_FLUSH           : 24 B (rect, resource_id, padding)
 
-fn wait_and_verify(irq_handle: i64, slot_va: u64, dma_va: u64,
-                   slot: u32, intid: u32) -> Result<(), ()> {
-    let count = unsafe { t_irq_wait(irq_handle) };
-    if count < 0 {
-        log("virtio-gpu: FAIL — SYS_IRQ_WAIT returned error\n");
-        return Err(());
-    }
+fn req_get_display_info(dma_va: u64) -> u32 {
+    let req_va = dma_va + REQ_OFF;
+    unsafe { write_ctrl_hdr(req_va, VIRTIO_GPU_CMD_GET_DISPLAY_INFO) };
+    GPU_CTRL_HDR_LEN
+}
 
-    let int_status = unsafe { read32(slot_va + REG_INTERRUPT_STATUS) };
-    unsafe { write32(slot_va + REG_INTERRUPT_ACK, int_status) };
-
-    let used_va = dma_va + CTRL_USED_OFF;
-    let used_idx = unsafe { read16(used_va + 2) };
-    if used_idx != 1 {
-        log("virtio-gpu: FAIL — controlq used.idx != 1 (got ");
-        log_dec(used_idx as u32);
-        log(")\n");
-        return Err(());
-    }
-
-    let used_id = unsafe { read32(used_va + 4) };
-    if used_id != 0 {
-        log("virtio-gpu: FAIL — used.ring[0].id != 0 (got id=");
-        log_dec(used_id);
-        log(")\n");
-        return Err(());
-    }
-
-    let resp_va = dma_va + RESP_OFF;
-    let resp_type = unsafe { read32(resp_va + 0) };
-    if resp_type != VIRTIO_GPU_RESP_OK_DISPLAY_INFO {
-        log("virtio-gpu: FAIL — response type=");
-        log_hex(resp_type);
-        log(" (expected 0x");
-        log_hex(VIRTIO_GPU_RESP_OK_DISPLAY_INFO);
-        log(" = OK_DISPLAY_INFO)\n");
-        return Err(());
-    }
-
-    // Read config space for num_scanouts (informational).
-    let num_scanouts = unsafe {
-        read32(slot_va + REG_CONFIG_BASE + GPU_CFG_NUM_SCANOUTS)
+fn req_resource_create_2d(dma_va: u64, resource_id: u32, format: u32,
+                          width: u32, height: u32) -> u32 {
+    let req_va = dma_va + REQ_OFF;
+    unsafe {
+        write_ctrl_hdr(req_va, VIRTIO_GPU_CMD_RESOURCE_CREATE_2D);
+        write32(req_va + 24, resource_id);
+        write32(req_va + 28, format);
+        write32(req_va + 32, width);
+        write32(req_va + 36, height);
     };
-    let num_capsets = unsafe {
-        read32(slot_va + REG_CONFIG_BASE + GPU_CFG_NUM_CAPSETS)
+    GPU_CTRL_HDR_LEN + 16
+}
+
+fn req_resource_attach_backing(dma_va: u64, resource_id: u32,
+                               entry_addr: u64, entry_len: u32) -> u32 {
+    let req_va = dma_va + REQ_OFF;
+    unsafe {
+        write_ctrl_hdr(req_va, VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING);
+        write32(req_va + 24, resource_id);
+        write32(req_va + 28, 1); // nr_entries
+        // virtio_gpu_mem_entry: { le64 addr; le32 length; le32 padding }
+        write64(req_va + 32, entry_addr);
+        write32(req_va + 40, entry_len);
+        write32(req_va + 44, 0);
     };
+    GPU_CTRL_HDR_LEN + 8 + 16
+}
 
-    // pmodes[0] is at resp_va + GPU_CTRL_HDR_LEN (= 24).
-    let pm0_va = resp_va + (GPU_CTRL_HDR_LEN as u64);
-    let pm0_width   = unsafe { read32(pm0_va + 8) };
-    let pm0_height  = unsafe { read32(pm0_va + 12) };
-    let pm0_enabled = unsafe { read32(pm0_va + 16) };
+fn req_set_scanout(dma_va: u64, scanout_id: u32, resource_id: u32,
+                   x: u32, y: u32, w: u32, h: u32) -> u32 {
+    let req_va = dma_va + REQ_OFF;
+    unsafe {
+        write_ctrl_hdr(req_va, VIRTIO_GPU_CMD_SET_SCANOUT);
+        write_rect(req_va + 24, x, y, w, h);
+        write32(req_va + 40, scanout_id);
+        write32(req_va + 44, resource_id);
+    };
+    GPU_CTRL_HDR_LEN + 24
+}
 
-    log("virtio-gpu: slot=");
-    log_dec(slot);
-    log(" intid=");
-    log_dec(intid);
-    log(" num_scanouts=");
-    log_dec(num_scanouts);
-    log(" num_capsets=");
-    log_dec(num_capsets);
-    log(" pmodes[0]=");
-    log_dec(pm0_width);
-    log("x");
-    log_dec(pm0_height);
-    log(" enabled=");
-    log_dec(pm0_enabled);
-    log("\n");
+fn req_transfer_to_host_2d(dma_va: u64, resource_id: u32, offset: u64,
+                           x: u32, y: u32, w: u32, h: u32) -> u32 {
+    let req_va = dma_va + REQ_OFF;
+    unsafe {
+        write_ctrl_hdr(req_va, VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D);
+        write_rect(req_va + 24, x, y, w, h);
+        write64(req_va + 40, offset);
+        write32(req_va + 48, resource_id);
+        write32(req_va + 52, 0); // padding
+    };
+    GPU_CTRL_HDR_LEN + 32
+}
 
-    Ok(())
+fn req_resource_flush(dma_va: u64, resource_id: u32,
+                      x: u32, y: u32, w: u32, h: u32) -> u32 {
+    let req_va = dma_va + REQ_OFF;
+    unsafe {
+        write_ctrl_hdr(req_va, VIRTIO_GPU_CMD_RESOURCE_FLUSH);
+        write_rect(req_va + 24, x, y, w, h);
+        write32(req_va + 40, resource_id);
+        write32(req_va + 44, 0); // padding
+    };
+    GPU_CTRL_HDR_LEN + 24
+}
+
+// =============================================================================
+// Framebuffer test pattern.
+// =============================================================================
+//
+// 4 quadrants × 64×64 pixels each. Solid colors:
+//   TL: red   (B=00, G=00, R=FF, A=FF) → u32 LE 0xFFFF0000
+//   TR: green (B=00, G=FF, R=00, A=FF) → u32 LE 0xFF00FF00
+//   BL: blue  (B=FF, G=00, R=00, A=FF) → u32 LE 0xFF0000FF
+//   BR: white (B=FF, G=FF, R=FF, A=FF) → u32 LE 0xFFFFFFFF
+//
+// Each row is FB_WIDTH (= 128) u32s. The split is at column 64 and row 64.
+
+const COLOR_RED: u32   = 0xFFFF_0000;
+const COLOR_GREEN: u32 = 0xFF00_FF00;
+const COLOR_BLUE: u32  = 0xFF00_00FF;
+const COLOR_WHITE: u32 = 0xFFFF_FFFF;
+
+fn fill_framebuffer(fb_va: u64) {
+    let half_w = FB_WIDTH / 2;
+    let half_h = FB_HEIGHT / 2;
+    for y in 0..FB_HEIGHT {
+        for x in 0..FB_WIDTH {
+            let c = match (x < half_w, y < half_h) {
+                (true,  true)  => COLOR_RED,
+                (false, true)  => COLOR_GREEN,
+                (true,  false) => COLOR_BLUE,
+                (false, false) => COLOR_WHITE,
+            };
+            let off = (y * FB_WIDTH + x) as u64 * (FB_BPP as u64);
+            unsafe { write32(fb_va + off, c) };
+        }
+    }
+}
+
+// =============================================================================
+// Step driver — wraps Controlq with per-step logging and resp.hdr.type
+// verification. On a wrong resp, prints what was expected.
+// =============================================================================
+
+fn step(ctrl: &mut Controlq, label: &str,
+        req_len: u32, resp_len: u32, expected: u32) -> Result<(), ()> {
+    match ctrl.submit_and_wait(req_len, resp_len) {
+        Ok(resp_type) => {
+            if resp_type != expected {
+                log("virtio-gpu: FAIL — ");
+                log(label);
+                log(" resp_type=");
+                log_hex(resp_type);
+                log(" (expected ");
+                log_hex(expected);
+                log(")\n");
+                Err(())
+            } else {
+                Ok(())
+            }
+        }
+        Err(()) => {
+            log("virtio-gpu: FAIL — ");
+            log(label);
+            log(" submit_and_wait error\n");
+            Err(())
+        }
+    }
 }
 
 // =============================================================================
@@ -632,51 +748,176 @@ pub extern "C" fn rs_main() -> i64 {
         unsafe { t_exits(1) };
     }
 
-    // Subscribe to the IRQ BEFORE issuing the request (so gic_attach +
-    // gic_enable_irq are in place by the time the device fires).
     let irq_handle = unsafe { t_irq_create(intid, T_RIGHT_SIGNAL) };
     if irq_handle < 0 {
         log("virtio-gpu: FAIL — SYS_IRQ_CREATE failed\n");
         unsafe { t_exits(1) };
     }
 
-    let dma_handle = unsafe {
+    // Ring DMA: 4 KiB for desc + avail + used + req + resp.
+    let ring_handle = unsafe {
         t_dma_create(DMA_BUFSIZE, T_RIGHT_READ | T_RIGHT_WRITE | T_RIGHT_MAP)
     };
-    if dma_handle < 0 {
-        log("virtio-gpu: FAIL — SYS_DMA_CREATE failed\n");
+    if ring_handle < 0 {
+        log("virtio-gpu: FAIL — SYS_DMA_CREATE failed for ring\n");
         unsafe { t_exits(1) };
     }
-    let dma_pa = unsafe {
-        t_dma_map(dma_handle, DMA_USER_VA, T_PROT_READ | T_PROT_WRITE)
+    let ring_pa = unsafe {
+        t_dma_map(ring_handle, DMA_USER_VA, T_PROT_READ | T_PROT_WRITE)
     };
-    if dma_pa < 0 {
-        log("virtio-gpu: FAIL — SYS_DMA_MAP failed\n");
+    if ring_pa < 0 {
+        log("virtio-gpu: FAIL — SYS_DMA_MAP failed for ring\n");
         unsafe { t_exits(1) };
     }
-
-    // Pre-warm the DMA page so userland_demand_page installs the
-    // Normal-WB PTE before any device-side write would otherwise
-    // race with the first CPU-side store.
+    // Pre-warm so userland_demand_page installs the Normal-WB PTE
+    // before any device-side write races a CPU-side store.
     for off in (0..DMA_BUFSIZE).step_by(PAGE_SIZE as usize) {
         unsafe { write_u8(DMA_USER_VA + off, 0) };
     }
 
-    if !init_device(slot_va, dma_pa as u64) {
+    // Framebuffer DMA: 64 KiB (FB_SIZE) for backing pages.
+    let fb_handle = unsafe {
+        t_dma_create(FB_SIZE, T_RIGHT_READ | T_RIGHT_WRITE | T_RIGHT_MAP)
+    };
+    if fb_handle < 0 {
+        log("virtio-gpu: FAIL — SYS_DMA_CREATE failed for framebuffer\n");
+        unsafe { t_exits(1) };
+    }
+    let fb_pa = unsafe {
+        t_dma_map(fb_handle, FB_USER_VA, T_PROT_READ | T_PROT_WRITE)
+    };
+    if fb_pa < 0 {
+        log("virtio-gpu: FAIL — SYS_DMA_MAP failed for framebuffer\n");
+        unsafe { t_exits(1) };
+    }
+    // Pre-warm every framebuffer page (16 pages at 64 KiB).
+    for off in (0..FB_SIZE).step_by(PAGE_SIZE as usize) {
+        unsafe { write_u8(FB_USER_VA + off, 0) };
+    }
+
+    if !init_device(slot_va, ring_pa as u64) {
         unsafe { t_exits(1) };
     }
 
-    submit_get_display_info(slot_va, DMA_USER_VA, dma_pa as u64);
+    let mut ctrl = Controlq {
+        slot_va,
+        dma_va: DMA_USER_VA,
+        dma_pa: ring_pa as u64,
+        irq_handle,
+        seq: 0,
+    };
 
-    match wait_and_verify(irq_handle, slot_va, DMA_USER_VA, slot, intid) {
-        Ok(()) => {
-            log("virtio-gpu: PASS — controlq GET_DISPLAY_INFO round-trip ok (slot=");
-            log_dec(slot);
-            log(" intid=");
-            log_dec(intid);
-            log(")\n");
-            0
-        }
-        Err(()) => unsafe { t_exits(1) },
+    // 1. GET_DISPLAY_INFO — proves the controlq still works under the
+    //    new submit_and_wait machinery; verifies the substrate.
+    let req_len = req_get_display_info(DMA_USER_VA);
+    if step(&mut ctrl, "GET_DISPLAY_INFO",
+            req_len, GPU_RESP_DISPLAY_INFO_LEN,
+            VIRTIO_GPU_RESP_OK_DISPLAY_INFO).is_err() {
+        unsafe { t_exits(1) };
     }
+
+    // Log informational config-space + pmodes[0] (carried over from
+    // the P4-L probe — pmodes[0].enabled is QEMU-backend-dependent
+    // and not load-bearing).
+    let num_scanouts = unsafe {
+        read32(slot_va + REG_CONFIG_BASE + GPU_CFG_NUM_SCANOUTS)
+    };
+    let num_capsets = unsafe {
+        read32(slot_va + REG_CONFIG_BASE + GPU_CFG_NUM_CAPSETS)
+    };
+    let pm0_va = DMA_USER_VA + RESP_OFF + (GPU_CTRL_HDR_LEN as u64);
+    let pm0_width   = unsafe { read32(pm0_va + 8) };
+    let pm0_height  = unsafe { read32(pm0_va + 12) };
+    let pm0_enabled = unsafe { read32(pm0_va + 16) };
+    log("virtio-gpu: display_info slot=");
+    log_dec(slot);
+    log(" intid=");
+    log_dec(intid);
+    log(" num_scanouts=");
+    log_dec(num_scanouts);
+    log(" num_capsets=");
+    log_dec(num_capsets);
+    log(" pmodes[0]=");
+    log_dec(pm0_width);
+    log("x");
+    log_dec(pm0_height);
+    log(" enabled=");
+    log_dec(pm0_enabled);
+    log("\n");
+
+    // 2. RESOURCE_CREATE_2D — host-side resource (no backing yet).
+    let req_len = req_resource_create_2d(DMA_USER_VA, FB_RESOURCE_ID,
+                                         VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM,
+                                         FB_WIDTH, FB_HEIGHT);
+    if step(&mut ctrl, "RESOURCE_CREATE_2D",
+            req_len, GPU_CTRL_HDR_LEN,
+            VIRTIO_GPU_RESP_OK_NODATA).is_err() {
+        unsafe { t_exits(1) };
+    }
+
+    // 3. Fill the guest framebuffer with the 4-quadrant test pattern
+    //    BEFORE ATTACH_BACKING. The device only reads from the
+    //    backing during TRANSFER_TO_HOST_2D, but doing the fill here
+    //    means the host's first observation reflects the intended
+    //    pattern (no torn state).
+    fill_framebuffer(FB_USER_VA);
+    // DMB to ensure all framebuffer stores are visible before the
+    // device-side read kicked off by TRANSFER_TO_HOST_2D.
+    dsb_sy();
+
+    // 4. RESOURCE_ATTACH_BACKING — single mem_entry pointing at the
+    //    framebuffer DMA PA. The kernel-side buddy allocator backs
+    //    kobj_dma_create with one physically contiguous chunk, so a
+    //    single (addr, length) pair describes the whole 64 KiB.
+    let req_len = req_resource_attach_backing(DMA_USER_VA, FB_RESOURCE_ID,
+                                              fb_pa as u64, FB_SIZE as u32);
+    if step(&mut ctrl, "RESOURCE_ATTACH_BACKING",
+            req_len, GPU_CTRL_HDR_LEN,
+            VIRTIO_GPU_RESP_OK_NODATA).is_err() {
+        unsafe { t_exits(1) };
+    }
+
+    // 5. SET_SCANOUT — bind scanout 0 to FB_RESOURCE_ID over the
+    //    full framebuffer rect.
+    let req_len = req_set_scanout(DMA_USER_VA, FB_SCANOUT_ID, FB_RESOURCE_ID,
+                                  0, 0, FB_WIDTH, FB_HEIGHT);
+    if step(&mut ctrl, "SET_SCANOUT",
+            req_len, GPU_CTRL_HDR_LEN,
+            VIRTIO_GPU_RESP_OK_NODATA).is_err() {
+        unsafe { t_exits(1) };
+    }
+
+    // 6. TRANSFER_TO_HOST_2D — copy guest backing → host resource
+    //    over the full rect, offset 0.
+    let req_len = req_transfer_to_host_2d(DMA_USER_VA, FB_RESOURCE_ID, 0,
+                                          0, 0, FB_WIDTH, FB_HEIGHT);
+    if step(&mut ctrl, "TRANSFER_TO_HOST_2D",
+            req_len, GPU_CTRL_HDR_LEN,
+            VIRTIO_GPU_RESP_OK_NODATA).is_err() {
+        unsafe { t_exits(1) };
+    }
+
+    // 7. RESOURCE_FLUSH — present the host resource on the bound
+    //    scanout. The device's display backend (QEMU's gl-on-egl or
+    //    sdl/gtk/vnc when one is configured) picks up the rect.
+    let req_len = req_resource_flush(DMA_USER_VA, FB_RESOURCE_ID,
+                                     0, 0, FB_WIDTH, FB_HEIGHT);
+    if step(&mut ctrl, "RESOURCE_FLUSH",
+            req_len, GPU_CTRL_HDR_LEN,
+            VIRTIO_GPU_RESP_OK_NODATA).is_err() {
+        unsafe { t_exits(1) };
+    }
+
+    log("virtio-gpu: PASS — scanout pipeline (CREATE_2D + ATTACH_BACKING + SET_SCANOUT + TRANSFER + FLUSH) on ");
+    log_dec(FB_WIDTH);
+    log("x");
+    log_dec(FB_HEIGHT);
+    log(" B8G8R8A8 framebuffer; slot=");
+    log_dec(slot);
+    log(" intid=");
+    log_dec(intid);
+    log(" cmds=");
+    log_dec(ctrl.seq as u32);
+    log("\n");
+    0
 }

@@ -1,29 +1,42 @@
-// /virtio-gpu regression test (P4-L).
+// /virtio-gpu regression test (P4-L + P4-L-scanout).
 //
 // Fourth composed-driver test. Symmetric to test_virtio_{blk,net,input}_probe.c:
 // spawns a userspace child with CAP_HW_CREATE; child claims its
 // virtio-mmio slot via SYS_MMIO_CREATE + SYS_MMIO_MAP; subscribes to
-// the slot's IRQ via SYS_IRQ_CREATE; allocates a DMA buffer via
-// SYS_DMA_CREATE + SYS_DMA_MAP; runs VirtIO 1.2 init for the GPU
-// device class (configuring BOTH controlq + cursorq); sends
-// VIRTIO_GPU_CMD_GET_DISPLAY_INFO via controlq; waits IRQ; verifies
-// resp.hdr.type == VIRTIO_GPU_RESP_OK_DISPLAY_INFO; exits 0.
+// the slot's IRQ via SYS_IRQ_CREATE; allocates two DMA buffers via
+// SYS_DMA_CREATE + SYS_DMA_MAP (4 KiB ring + 64 KiB framebuffer);
+// runs VirtIO 1.2 init for the GPU device class (configuring BOTH
+// controlq + cursorq); drives the full 2D scanout pipeline via six
+// controlq commands; exits 0 iff every command returns its expected
+// OK response type.
 //
-// What this test specifically guards against (beyond blk+net+input):
+// What this test guards against:
 //   - DeviceID dispatch for ID=16 in find_by_device_id.
 //   - Two-queue virtio-mmio configuration: REG_QUEUE_SEL=0 → set up
 //     controlq; REG_QUEUE_SEL=1 → set up cursorq; both reach
-//     QueueReady=1 before DRIVER_OK. Every prior driver configured
-//     exactly one queue; this is the first to drive the multi-queue
-//     register surface.
-//   - controlq command/response chain: descriptor 0 OUT (req hdr) +
-//     descriptor 1 IN (resp payload). Symmetric in shape to virtio-blk's
-//     3-descriptor chain (req + data + status) but without the
-//     separate status byte — virtio-gpu folds status into resp.hdr.type.
+//     QueueReady=1 before DRIVER_OK.
+//   - controlq command/response chain: descriptor 0 OUT (req hdr +
+//     body) + descriptor 1 IN (resp payload). virtio-gpu folds
+//     status into resp.hdr.type (no separate status byte).
 //   - Flat le32 config-space at offset 0x100..0x110 (events_read,
-//     events_clear, num_scanouts, num_capsets) — distinct from
-//     virtio-input's selector-based config-space and from virtio-net's
-//     MAC+status struct layout.
+//     events_clear, num_scanouts, num_capsets).
+//   - Multi-command controlq flow: each command bumps avail.idx by 1
+//     and waits its own IRQ; used.idx tracks monotonically; descriptor
+//     head 0 is rebuilt + reused between commands.
+//   - Two-DMA composition pattern: a small (4 KiB) ring DMA + a
+//     larger (64 KiB) framebuffer DMA, each its own KObj_DMA handle
+//     mapped at a distinct user-VA window.
+//   - Full 2D scanout pipeline (Halcyon-prep gate):
+//       GET_DISPLAY_INFO       → OK_DISPLAY_INFO (0x1101)
+//       RESOURCE_CREATE_2D     → OK_NODATA (0x1100)
+//       RESOURCE_ATTACH_BACKING → OK_NODATA
+//       SET_SCANOUT            → OK_NODATA
+//       TRANSFER_TO_HOST_2D    → OK_NODATA
+//       RESOURCE_FLUSH         → OK_NODATA
+//     The six OK responses are a tight contract: QEMU's virtio-gpu
+//     device validates resource_id + format + dimensions + backing
+//     length + scanout id + rect bounds and answers ERR_INVALID_*
+//     on any mismatch.
 //
 // SKIP behavior: if /virtio-gpu is absent from the ramfs (the
 // userspace crate wasn't built) OR no virtio-mmio slot reports
@@ -139,5 +152,5 @@ void test_virtio_gpu_probe_rfork_with_caps(void) {
     uart_putdec((u64)pid);
     uart_puts(" status=");
     uart_putdec((u64)status);
-    uart_puts(" — two-queue setup + controlq command/response end-to-end\n");
+    uart_puts(" — full 2D scanout pipeline end-to-end (6 controlq commands)\n");
 }
