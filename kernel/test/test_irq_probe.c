@@ -117,10 +117,11 @@ void test_irq_probe_rfork_with_caps(void);
 #define IRQ_PROBE_TEST_INTID  96u
 
 // 8-aligned static buffer for the loaded ELF blob (R5-G F61 alignment
-// requirement on the Ehdr cast in exec_setup). 256 KiB headroom —
-// irq-probe is a tiny no_std binary (< 1 KiB at v1.0) but we size for
-// future growth.
-#define IRQ_PROBE_BLOB_MAX 262144
+// requirement on the Ehdr cast in exec_setup). P4-Ic7 shrunk 256 → 128 KiB
+// so cumulative kernel-image .bss + firmware reserve fits the 2 MiB
+// L3 mapping (arch/arm64/mmu.c::mmu_map_kernel). irq-probe compiles
+// to ~67 KiB; 128 KiB leaves ample headroom.
+#define IRQ_PROBE_BLOB_MAX 131072
 static _Alignas(16) u8 g_irq_probe_blob[IRQ_PROBE_BLOB_MAX];
 
 struct irq_probe_exec_args {

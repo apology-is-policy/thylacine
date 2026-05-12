@@ -33,3 +33,10 @@ version = "0.1.0"
 dependencies = [
  "libthyla-rs",
 ]
+
+[[package]]
+name = "virtio-blk-rw"
+version = "0.1.0"
+dependencies = [
+ "libthyla-rs",
+]

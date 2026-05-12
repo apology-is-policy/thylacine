@@ -163,7 +163,7 @@ EOF
     # P4-Ia2: copy any built Rust-side userspace binaries from
     # build/usr-rs/<target>/release/. Same curation discipline.
     # Binary name = crate's [[bin]] name = directory under usr/.
-    local usr_rs_bins=( "hello-rs" "mmio-probe" "irq-probe" "virtio-blk-probe" )
+    local usr_rs_bins=( "hello-rs" "mmio-probe" "irq-probe" "virtio-blk-probe" "virtio-blk-rw" )
     local rs_release="$USR_RS_BUILD/$USR_RS_TARGET/release"
     for bin in "${usr_rs_bins[@]}"; do
         local src="$rs_release/$bin"
@@ -210,27 +210,52 @@ build_sysroot() {
 }
 
 build_disk() {
-    # P4-Ic5b2: deterministic raw disk image backing QEMU's virtio-blk-device.
-    # Block 0 carries a fixed 16-byte ASCII signature the userspace
-    # virtio-blk-probe verifies after issuing VIRTIO_BLK_T_IN(sector=0).
-    # Total size 1 MiB (2048 blocks) — large enough that the device
-    # negotiates a multi-block range but small enough that "wipe + recreate"
-    # is essentially free on every build.
+    # P4-Ic5b2 / P4-Ic7: deterministic raw disk image backing QEMU's
+    # virtio-blk-device.
+    #
+    # Layout (mirrored verbatim in tools/mkdisk.py + the userspace
+    # verifier in usr/virtio-blk-rw/src/main.rs):
+    #   - sector 0  : bytes [0..16) = "THYLACINE-DISK-1" + zeros.
+    #                 P4-Ic5b2's virtio-blk-probe verifies sector 0.
+    #   - sector k>0: bytes [0..512) = pattern_a(k), the per-sector
+    #                 LCG-A stream. P4-Ic7's virtio-blk-rw verifies a
+    #                 prefix of sectors and writes a distinct pattern_b
+    #                 to a non-overlapping region.
+    #
+    # Size (via THYLACINE_DISK_SIZE, default 16M):
+    #   - 16M default = ample multi-sector range without slowing
+    #     `tools/test.sh` (mkdisk.py runtime <500ms).
+    #   - Stress (ROADMAP §6.2 exit criterion = read 1 GiB + write 1 GiB
+    #     + verify bit-exact): THYLACINE_DISK_SIZE=1G tools/build.sh kernel
+    #     + THYLACINE_DISK_SIZE=1G BOOT_TIMEOUT=120 tools/test.sh.
+    #     mkdisk.py runtime ~30s for 1 GiB.
     local disk="$BUILD_DIR/disk.img"
-    local signature='THYLACINE-DISK-1'   # 16 bytes; matches DISK_SIGNATURE in usr/virtio-blk-probe/src/main.rs
-    echo "==> Building disk image: $disk"
+    local size_spec="${THYLACINE_DISK_SIZE:-16M}"
+    # Parse units (M = MiB, G = GiB). Bytes-only if no suffix.
+    local size_bytes
+    case "$size_spec" in
+        *M) size_bytes=$(( ${size_spec%M} * 1024 * 1024 )) ;;
+        *G) size_bytes=$(( ${size_spec%G} * 1024 * 1024 * 1024 )) ;;
+        *K) size_bytes=$(( ${size_spec%K} * 1024 )) ;;
+        *)  size_bytes="$size_spec" ;;
+    esac
+    echo "==> Building disk image: $disk (THYLACINE_DISK_SIZE=$size_spec → $size_bytes bytes)"
     mkdir -p "$BUILD_DIR"
-    : > "$disk"
-    truncate -s 1M "$disk"
-    printf '%s' "$signature" | dd of="$disk" bs=16 count=1 conv=notrunc status=none
+    python3 "$REPO_ROOT/tools/mkdisk.py" "$disk" "$size_bytes"
+    local actual_size
+    actual_size="$(wc -c < "$disk" | tr -d ' ')"
+    if [[ "$actual_size" != "$size_bytes" ]]; then
+        echo "    ERROR: size mismatch (wanted $size_bytes, got $actual_size)" >&2
+        exit 1
+    fi
     local readback
     readback="$(head -c 16 "$disk")"
-    if [[ "$readback" != "$signature" ]]; then
+    if [[ "$readback" != "THYLACINE-DISK-1" ]]; then
         echo "    ERROR: block 0 signature mismatch (got '$readback')" >&2
         exit 1
     fi
     echo "    block 0 signature: '$readback' (16 bytes)"
-    echo "    size: $(wc -c < "$disk") bytes"
+    echo "    size: $actual_size bytes"
 }
 
 build_all() {

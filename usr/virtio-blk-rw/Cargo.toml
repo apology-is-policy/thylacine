@@ -1,0 +1,20 @@
+[package]
+name = "virtio-blk-rw"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "virtio-blk-rw"
+path = "src/main.rs"
+
+[dependencies]
+# libthyla-rs provides _start + #[panic_handler] + SVC wrappers (P4-Ic4).
+# virtio-blk-rw is the multi-sector successor to virtio-blk-probe
+# (P4-Ic5b2). Same hw-handle syscall composition; the additional work
+# is the per-request descriptor chain reuse + a deterministic pattern
+# generator (LCG-A read-verify, LCG-B write-then-readback-verify)
+# that exercises ROADMAP §6.2's "read 1 GiB / write 1 GiB / verify
+# bit-exact" exit criterion when paired with a 1 GiB disk image.
+libthyla-rs = { path = "../lib/libthyla-rs" }

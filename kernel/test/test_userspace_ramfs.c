@@ -41,9 +41,11 @@ void test_userspace_ramfs_hello_rs(void);
 // The cpio newc format aligns data to 4 bytes; the kernel ELF loader
 // requires 8-byte alignment for the Ehdr cast (UBSan -fsanitize=alignment
 // would otherwise trap; see R5-G F61). Copy into an 8-aligned static
-// buffer before handing the blob to exec_setup. 256 KiB headroom covers
-// any reasonable v1.0 userspace binary.
-#define RAMFS_EXEC_BLOB_MAX 262144
+// buffer before handing the blob to exec_setup. P4-Ic7 shrunk 256 → 128
+// KiB so cumulative kernel-image .bss + firmware reserve fits the 2 MiB
+// L3 mapping (arch/arm64/mmu.c::mmu_map_kernel). 128 KiB still covers
+// every userspace binary in usr/* by ~50 KiB.
+#define RAMFS_EXEC_BLOB_MAX 131072
 static _Alignas(16) u8 g_ramfs_blob[RAMFS_EXEC_BLOB_MAX];
 
 struct ramfs_exec_args {
