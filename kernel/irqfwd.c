@@ -52,9 +52,21 @@ static bool        g_intid_claimed[GIC_NUM_INTIDS];
 static spin_lock_t g_intid_lock = SPIN_LOCK_INIT;
 
 // Try to claim `intid`. Returns true on success (caller now owns it),
-// false if already claimed.
+// false if already claimed or out of range.
+//
+// R12-gic-edge audit close (F205 P3): bound against runtime
+// g_max_intid (from GICD_TYPER.ITLinesNumber) rather than the
+// architectural GIC_NUM_INTIDS = 1020. ICFGR / ISENABLER writes
+// beyond the implementation's actual line count are UNPREDICTABLE
+// per IHI 0069 §12.9.7. Without this tighter bound, a syscall caller
+// with CAP_HW_CREATE could pass intid in (g_max_intid, GIC_NUM_INTIDS]
+// and reach the GIC helpers with an unimplemented INTID. The
+// architectural-max bound is preserved as defense-in-depth (against
+// gic_max_intid() returning > GIC_NUM_INTIDS - 1, which dist_init's
+// clamp at gic.c:234 already prevents).
 static bool intid_try_claim(u32 intid) {
     if (intid >= GIC_NUM_INTIDS) return false;
+    if (intid > gic_max_intid()) return false;
     irq_state_t s = spin_lock_irqsave(&g_intid_lock);
     if (g_intid_claimed[intid]) {
         spin_unlock_irqrestore(&g_intid_lock, s);

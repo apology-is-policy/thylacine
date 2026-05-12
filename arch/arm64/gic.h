@@ -98,6 +98,13 @@ u64 gic_redist_base(void);
 u64 gic_dist_pa(void);
 u64 gic_redist_pa(void);
 
+// R12-gic-edge audit close (F205): runtime-discovered maximum
+// dispatchable INTID, from GICD_TYPER.ITLinesNumber at gic_init.
+// Returns 0 before gic_init runs. Callers (intid_try_claim) bound
+// INTID claims against this rather than GIC_NUM_INTIDS so out-of-range
+// intids are rejected before reaching ICFGR / ISENABLER writes.
+u32 gic_max_intid(void);
+
 // Attach a handler for an INTID. The handler runs in IRQ context with
 // IRQs masked at PSTATE, on the existing SP_EL1 (boot stack at P1-G;
 // per-CPU exception stack at Phase 2). Replacing an existing handler
@@ -179,8 +186,15 @@ bool gic_set_pending_spi(u32 intid);
 // §12.9.7 (always edge anyway); PPIs live in the redistributor's
 // GICR_ICFGR1 and are out of scope at v1.0.
 //
-// Returns false if intid is out of SPI range or GIC isn't initialized.
-bool gic_set_spi_edge_triggered(u32 intid);
+// R12-gic-edge audit close (F200 + F201): function returns void and
+// extincts on its two failure preconditions (intid outside
+// [GIC_SPI_MIN, g_max_intid], OR GIC not initialized). Both indicate
+// a kernel-internal-bug if reached — callers MUST honor them via
+// kobj_irq_create's `intid >= 32` guard + intid_try_claim's
+// g_max_intid bound + boot ordering. The body also issues a `dsb sy`
+// after the ICFGR write so the distributor's internal latching is
+// observable to a subsequent GICD_ISENABLER<n> write.
+void gic_set_spi_edge_triggered(u32 intid);
 
 // P2-Cdc: send a Software Generated Interrupt (SGI) to a target CPU.
 // SGIs are GIC INTIDs 0..15 — used as cross-CPU IPI vectors. Target

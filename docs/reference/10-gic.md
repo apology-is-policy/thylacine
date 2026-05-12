@@ -47,10 +47,14 @@ bool          gic_init(void);
 gic_version_t gic_version(void);
 u64           gic_dist_base(void);
 u64           gic_redist_base(void);
+u32           gic_max_intid(void);          // R12-gic-edge audit close
 
 bool gic_attach(u32 intid, gic_irq_handler_t handler, void *arg);
 bool gic_enable_irq(u32 intid);
 bool gic_disable_irq(u32 intid);
+
+bool gic_set_pending_spi(u32 intid);                  // P4-Ic5-IRQ-probe
+void gic_set_spi_edge_triggered(u32 intid);           // P4-Ic5b2 + R12-gic-edge
 
 u32  gic_acknowledge(void);
 void gic_eoi(u32 intid);
@@ -66,6 +70,12 @@ void gic_dispatch(u32 intid);   // called by exception_irq_curr_el
 `gic_acknowledge` reads `ICC_IAR1_EL1` and returns the INTID portion (low 24 bits). `gic_eoi(intid)` writes `ICC_EOIR1_EL1` (one-step priority drop + deactivate, since `ICC_CTLR_EL1.EOImode = 0`). For spurious INTID (1023) the caller MUST NOT EOI per GICv3 SR conventions; `exception_irq_curr_el` handles this.
 
 `gic_dispatch(intid)` is called by `exception_irq_curr_el` after `gic_acknowledge`; it looks up the handler and invokes it. If no handler is registered or `intid` is out of range, it extincts with the diagnostic.
+
+`gic_set_pending_spi(intid)` (P4-Ic5-IRQ-probe) writes `GICD_ISPENDR<n>.bit` to manually pend an SPI — test-harness mechanism for simulating an IRQ fire without driving the device wire. SPI-only.
+
+`gic_set_spi_edge_triggered(intid)` (P4-Ic5b2; **audit-closed at R12-gic-edge**) flips `GICD_ICFGR<n>` to `0b10` (edge) for the given SPI. Returns void; extincts on a precondition violation (intid outside `[GIC_SPI_MIN, gic_max_intid()]` OR GIC not initialized). Both conditions indicate a kernel-internal-bug at v1.0 — callers must enforce them via `kobj_irq_create`'s `intid >= 32` guard + `intid_try_claim`'s `g_max_intid` bound + boot ordering (`gic_init` before any caller). The body issues `dsb sy` after the ICFGR write so the distributor's internal latching is observable to a subsequent `GICD_ISENABLER<n>` write in `gic_enable_irq` — without this barrier, ARM IHI 0069 §3.4.2 + Linux's GICv3 driver pattern would allow the ENABLE to race the configuration change.
+
+`gic_max_intid()` (R12-gic-edge audit close) returns the runtime-discovered maximum dispatchable INTID, sourced from `GICD_TYPER.ITLinesNumber` at `gic_init`. Returns 0 before `gic_init` runs. Used by `intid_try_claim` to bound INTID claims against the actual distributor implementation rather than the architectural `GIC_NUM_INTIDS` upper bound, so a CAP_HW_CREATE userspace caller cannot reach the GIC helpers with intids in `(g_max_intid, GIC_NUM_INTIDS]` that would produce UNPREDICTABLE register writes per IHI 0069 §12.9.7.
 
 ---
 
@@ -301,6 +311,12 @@ VISION §4.5's IRQ-to-userspace handler p99 budget is < 5 µs. Kernel-internal I
 
 **Landed**: P1-G at commit `39eafb4`.
 
+**Extended at P4-Ic5-IRQ-probe** (`0c7a51b` / `221cd18`): `gic_set_pending_spi(intid)` for test-harness IRQ injection.
+
+**Extended at P4-Ic5b2** (`fe40f1b` / `542f2a6`): `gic_set_spi_edge_triggered(intid)` for SPI ICFGR transition; called unconditionally by `kobj_irq_create` for SPIs ≥ 32 because QEMU virt's virtio-mmio + most real-ARM device IRQs are edge-triggered per DTB.
+
+**Audit-closed at R12-gic-edge** (this round): added `dsb sy` after ICFGR write (F200); converted `gic_set_spi_edge_triggered` to void + extinction on precondition violations (F201); exposed `gic_max_intid()` accessor + tightened `intid_try_claim` to bound against runtime line count (F205); added `_Static_assert`s for the ICFGR 0b10 / 0b00 encoding to pin SBZ discipline (F204). Two P3s deferred: F202 (ICFGR RMW SMP-safety — v1.0 serial-claim discipline holds; Phase 5+ concurrent driver-init revisit) and F203 (stale `GICD_ICPENDR` not cleared on edge-trigger transition — re-claim cycles not exercised at v1.0).
+
 ---
 
 ## Caveats
@@ -324,6 +340,14 @@ Pi 5's GICv3 distributor sits at PA ~0x107FFF8000 — above 4 GiB. Our TTBR0 ide
 P1-G's IRQ handler runs on the existing SP_EL1 (boot stack at v1.0). Same recursive-fault hazard as the sync handler — a stack overflow inside a handler wedges QEMU. Mitigation: per-CPU exception stack at Phase 2.
 
 PSTATE.I is set on IRQ entry; we don't clear it. Nested IRQs (high-priority preempting low-priority handler) are a Phase 2+ feature.
+
+### Distributor RMW SMP-safety (R12-gic-edge F202 deferred)
+
+The `gic_set_spi_edge_triggered` helper performs a read-modify-write on `GICD_ICFGR<n>` (one 32-bit register covers 16 INTIDs at 2 bits each). Two concurrent `kobj_irq_create` calls on different SPIs in the same ICFGR word could in principle race the RMW. At v1.0 this is not reachable: `intid_try_claim` takes `g_intid_lock` per-claim, but only for the claim-table mutation — the lock is dropped before `gic_set_spi_edge_triggered` runs. The de-facto serialization at v1.0 is that all driver bring-up is serialized (test sequence + virtio-* probes run one at a time). Phase 5+ concurrent driver-init would expose the race; the fix is to lift `g_intid_lock` to cover the GIC RMW or introduce a dedicated `g_gic_dist_lock`. Tracked as R12-gic-edge F202.
+
+### Stale `GICD_ICPENDR` after edge-trigger re-claim (R12-gic-edge F203 deferred)
+
+`kobj_irq_free_internal` calls `gic_disable_irq` (clears ENABLE) but does NOT clear `GICD_ICPENDR<n>.bit`. A subsequent `kobj_irq_create` for the same SPI flips ICFGR to edge + enables it; if the SPI had a stale pending bit from a previous level-triggered configuration, the GIC delivers a phantom IRQ on the next ENABLE transition into the new driver's `kobj_irq_dispatch`. At v1.0 the test that exercises edge-trigger transition (virtio-blk-probe) runs once per boot, so the stale-pending hazard isn't reached. Phase 5+ re-claim cycles (driver supervision / restart, kexec) would surface it. Fix: clear `GICD_ICPENDR(intid/32)` between ICFGR write and ENABLE write. Tracked as R12-gic-edge F203.
 
 ### `gic_attach` does not return the previous handler
 

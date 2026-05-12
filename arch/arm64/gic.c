@@ -519,7 +519,7 @@ bool gic_enable_irq(u32 intid) {
     return true;
 }
 
-bool gic_set_spi_edge_triggered(u32 intid) {
+void gic_set_spi_edge_triggered(u32 intid) {
     // P4-Ic5b2: configure a specific SPI to be edge-triggered (rising
     // edge). GIC init defaults all SPIs to level-triggered (ICFGR = 0,
     // per gic_init), which is the safer default for unknown signalling
@@ -543,15 +543,57 @@ bool gic_set_spi_edge_triggered(u32 intid) {
     // SPI-only because ICFGR for SGIs (intid 0..15) is RAZ/WI per ARM
     // IHI 0069 §12.9.7 (SGIs are always edge); PPIs (16..31) live in
     // the redistributor's GICR_ICFGR1 and are out of scope.
-    if (intid < GIC_SPI_MIN || intid >= GIC_NUM_INTIDS) return false;
-    if (g_dist_base == 0)                              return false;
+    //
+    // R12-gic-edge audit close (F201 P2): converted from bool return
+    // to void + extinction. Preconditions: (a) GIC_SPI_MIN <= intid
+    // <= g_max_intid, (b) g_dist_base != 0. Both are kernel-internal-
+    // bug indicators if violated — callers must enforce them via
+    // kobj_irq_create's `if (intid >= 32)` guard + intid_try_claim's
+    // g_max_intid bound + boot-ordering invariant (gic_init runs
+    // before any kobj_irq_create path). Reaching this function with
+    // either condition violated means the INTID-bounds or boot-order
+    // discipline broke.
+    if (intid < GIC_SPI_MIN || intid > g_max_intid)
+        extinction("gic_set_spi_edge_triggered: intid out of SPI range "
+                   "(precondition broken — kernel-internal bug)");
+    if (g_dist_base == 0)
+        extinction("gic_set_spi_edge_triggered: GIC not initialized "
+                   "(precondition broken — boot-order discipline)");
+
+    // R12-gic-edge audit close (F204 P3): pin ICFGR encoding constants
+    // against drift. Per IHI 0069 §12.9.7, bit 0 of each 2-bit pair is
+    // SBZ (Should Be Zero) on writes; bit 1 selects level (0) vs.
+    // edge (1). 0b10 = edge. Future refactor flipping the constants
+    // (e.g., to 0b11 mistakenly) would write SBZ=1 — UNPREDICTABLE on
+    // strict GIC implementations.
+    _Static_assert((0x2u & 0x1u) == 0,
+                   "ICFGR edge encoding 0b10 must keep SBZ bit clear");
+    _Static_assert((0x0u & 0x1u) == 0,
+                   "ICFGR level encoding 0b00 must keep SBZ bit clear");
+
     u32 reg     = GICD_ICFGR(intid / 16);
     u32 bit_off = (intid % 16) * 2;
     u32 mask    = 0x3u << bit_off;
     u32 val     = 0x2u << bit_off;  // 0b10 = edge-triggered
     u32 cur     = mmio_r32(g_dist_base, reg);
     mmio_w32(g_dist_base, reg, (cur & ~mask) | val);
-    return true;
+
+    // R12-gic-edge audit close (F200 P2): ensure the ICFGR write has
+    // been observed by the GIC distributor's internal state BEFORE any
+    // subsequent MMIO write to GICD_ISENABLER<n> in gic_enable_irq.
+    // ARM IHI 0069 §3.4.2 + Linux's GICv3 driver pattern wrap
+    // distributor RMWs in dsb + GICD_CTLR.RWP polling — without a
+    // barrier here, a strict GIC implementation could process the
+    // subsequent ENABLE write before the edge configuration has
+    // latched, causing the first IRQ to fire as level-triggered
+    // (mis-asserting until device deassert — which the v1.0 KObj_IRQ
+    // layer never does, so the IRQ storm is unrecoverable).
+    //
+    // QEMU virt's GIC model latches in zero time; this barrier is
+    // forward-looking for real-hardware Phase 5+ targets (Pi 5, etc.).
+    // The full Linux pattern adds GICD_CTLR.RWP polling — deferred to
+    // Phase 5+ real-hardware bring-up.
+    __asm__ __volatile__("dsb sy" ::: "memory");
 }
 
 bool gic_set_pending_spi(u32 intid) {
@@ -609,3 +651,13 @@ u64 gic_dist_base(void)         { return g_dist_base; }
 u64 gic_redist_base(void)       { return g_redist_base; }
 u64 gic_dist_pa(void)           { return g_dist_pa; }
 u64 gic_redist_pa(void)         { return g_redist_pa; }
+
+// R12-gic-edge audit close (F205 P3): expose the runtime-discovered
+// maximum dispatchable INTID, sourced from GICD_TYPER.ITLinesNumber at
+// gic_init. Returns 0 before gic_init runs. Used by intid_try_claim to
+// bound INTID claims against the actual distributor implementation
+// rather than the architectural GIC_NUM_INTIDS upper bound (1020), so
+// CAP_HW_CREATE userspace cannot reach the GIC helpers with intids in
+// (g_max_intid, GIC_NUM_INTIDS] that would produce UNPREDICTABLE
+// register writes per IHI 0069 §12.9.7.
+u32 gic_max_intid(void)         { return g_max_intid; }

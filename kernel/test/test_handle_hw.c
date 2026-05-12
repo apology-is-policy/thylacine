@@ -19,12 +19,14 @@
 
 #include "../../arch/arm64/uart.h"
 #include "../../arch/arm64/timer.h" // TIMER_INTID_EL1_PHYS_NS (R9 F142 test)
+#include "../../arch/arm64/gic.h"   // gic_max_intid (R12-gic-edge F205 test)
 
 void test_handle_hw_mmio_dup_rejected(void);
 void test_handle_hw_irq_dup_rejected(void);
 void test_handle_hw_mmio_close_releases_claim(void);
 void test_handle_hw_irq_close_releases_intid(void);
 void test_handle_hw_irq_kernel_reserved_rejected(void);
+void test_handle_hw_irq_out_of_range_rejected(void);
 
 #define TEST_PA_C   0x100020000ull
 #define TEST_PA_D   0x100030000ull
@@ -133,4 +135,22 @@ void test_handle_hw_irq_close_releases_intid(void) {
     struct KObj_IRQ *k2 = kobj_irq_create(IPI_IRQFWD_TEST);
     TEST_ASSERT(k2 != NULL, "create after close should succeed");
     kobj_irq_unref(k2);
+}
+
+// R12-gic-edge audit close (F205 P3): intid > g_max_intid (runtime
+// distributor line count from GICD_TYPER.ITLinesNumber) must be
+// rejected by intid_try_claim before reaching ICFGR / ISENABLER
+// writes. Without this tighter bound, a syscall caller with
+// CAP_HW_CREATE could pass intid in (g_max_intid, GIC_NUM_INTIDS]
+// and the helpers would issue UNPREDICTABLE register writes for
+// unimplemented INTIDs per IHI 0069 §12.9.7.
+void test_handle_hw_irq_out_of_range_rejected(void) {
+    u32 max = gic_max_intid();
+    TEST_ASSERT(max > 0,
+                "gic_max_intid() must be > 0 after gic_init");
+    TEST_ASSERT(max + 1u < GIC_NUM_INTIDS,
+                "test requires g_max_intid < GIC_NUM_INTIDS - 1 headroom");
+    struct KObj_IRQ *k = kobj_irq_create(max + 1u);
+    TEST_ASSERT(k == NULL,
+                "kobj_irq_create(g_max_intid + 1) must be rejected by intid_try_claim");
 }

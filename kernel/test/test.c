@@ -246,6 +246,7 @@ void test_handle_hw_irq_dup_rejected(void);
 void test_handle_hw_mmio_close_releases_claim(void);
 void test_handle_hw_irq_close_releases_intid(void);
 void test_handle_hw_irq_kernel_reserved_rejected(void);
+void test_handle_hw_irq_out_of_range_rejected(void);
 void test_burrow_mmio_create_basic(void);
 void test_burrow_mmio_create_null_rejected(void);
 void test_burrow_mmio_create_holds_kobj_ref(void);
@@ -559,6 +560,9 @@ struct test_case g_tests[] = {
                                                                            false, NULL },
     { "handle_hw.irq_kernel_reserved_rejected",
                                        test_handle_hw_irq_kernel_reserved_rejected,
+                                                                           false, NULL },
+    { "handle_hw.irq_out_of_range_rejected",
+                                       test_handle_hw_irq_out_of_range_rejected,
                                                                            false, NULL },
     { "burrow_mmio.create_basic",      test_burrow_mmio_create_basic,      false, NULL },
     { "burrow_mmio.create_null_rejected",
