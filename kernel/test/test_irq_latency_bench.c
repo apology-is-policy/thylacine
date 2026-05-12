@@ -99,9 +99,9 @@ void test_irq_latency_bench(void);
 #define IRQ_BENCH_NUM_ITER    128u
 
 // Static ELF blob buffer (R5-G F61 alignment requirement on Ehdr cast).
-// P4-Jc shrunk per-binary cap 128 → 96 KiB to fit image+firmware ≤ 2 MiB.
-// irq-bench compiles to ~65 KiB; 96 KiB leaves ~31 KiB headroom.
-#define IRQ_BENCH_BLOB_MAX    98304
+// 16 KiB per blob (P4-image-shrink convention; every userspace binary
+// fits under 16 KiB with -z max-page-size=4096 on both Rust + C sides).
+#define IRQ_BENCH_BLOB_MAX    16384
 static _Alignas(16) u8 g_irq_bench_blob[IRQ_BENCH_BLOB_MAX];
 
 // VISION §4.5 bare-metal target: IRQ-to-userspace handler p99 < 5 µs.

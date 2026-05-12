@@ -62,11 +62,10 @@
 void test_mmio_probe_rfork_with_caps(void);
 
 // 8-aligned static buffer for the loaded ELF blob (R5-G F61 alignment
-// requirement on the Ehdr cast in exec_setup). P4-Ic7 shrunk 256 → 128 KiB
-// so the cumulative kernel-image .bss + firmware reserve fits the 2 MiB
-// L3 mapping (arch/arm64/mmu.c::mmu_map_kernel). mmio-probe compiles
-// to ~67 KiB; 96 KiB (P4-Jc shrink) still leaves ~29 KiB headroom.
-#define MMIO_PROBE_BLOB_MAX 98304
+// requirement on the Ehdr cast in exec_setup). Sized to match the P4-K
+// convention (16 KiB) after every userspace binary dropped under 16 KiB
+// with -z max-page-size=4096 applied to both Rust and C toolchains.
+#define MMIO_PROBE_BLOB_MAX 16384
 static _Alignas(16) u8 g_mmio_probe_blob[MMIO_PROBE_BLOB_MAX];
 
 struct mmio_probe_exec_args {

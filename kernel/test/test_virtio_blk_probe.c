@@ -80,15 +80,10 @@
 void test_virtio_blk_probe_rfork_with_caps(void);
 
 // 8-aligned static buffer for the loaded ELF blob (R5-G F61 alignment
-// requirement on the Ehdr cast in exec_setup). 128 KiB headroom —
-// virtio-blk-probe is small (~16 KiB even with the VirtIO state
-// machine + libthyla-rs). 128 KiB is double the current binary; we
-// avoid 256 KiB to keep the cumulative .bss across mmio-probe +
-// irq-probe + virtio-blk-probe under the image_size envelope QEMU
-// uses to compute the -initrd placement on the ARM virt machine.
-// P4-Jc shrank further to 96 KiB to keep image+firmware ≤ 2 MiB
-// after adding the virtio-net-loop blob.
-#define VIRTIO_BLK_PROBE_BLOB_MAX 98304
+// requirement on the Ehdr cast in exec_setup). Sized to match the P4-K
+// convention (16 KiB) after every userspace binary dropped under 16 KiB
+// with -z max-page-size=4096 applied to both Rust and C toolchains.
+#define VIRTIO_BLK_PROBE_BLOB_MAX 16384
 static _Alignas(16) u8 g_virtio_blk_probe_blob[VIRTIO_BLK_PROBE_BLOB_MAX];
 
 struct virtio_blk_probe_exec_args {

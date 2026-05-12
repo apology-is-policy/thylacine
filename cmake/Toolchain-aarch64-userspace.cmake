@@ -84,6 +84,12 @@ set(THYLACINE_USERSPACE_C_FLAGS
 # -Wl,--no-undefined: surface missing-symbol errors at link time.
 # -Wl,-z,noexecstack: NX stack.
 # -Wl,-z,text: forbid text relocations (forces PIC code generation).
+# -Wl,-z,max-page-size=4096: ld.lld defaults to MAXPAGESIZE 0x10000 on
+#   aarch64, which forces a 64-KiB zero-filled gap between the text and
+#   data PT_LOAD segments in the file image. The kernel maps userspace
+#   at 4-KiB granularity (arch/arm64/mmu.c PAGE_SIZE) so the 64-KiB
+#   alignment delivers no runtime benefit while bloating every userspace
+#   binary by ~64 KiB. Mirror of the Rust-side flag in usr/.cargo/config.toml.
 set(THYLACINE_USERSPACE_LD_FLAGS
     "--target=${THYLACINE_USERSPACE_TARGET_TRIPLE}"
     "-fuse-ld=lld"
@@ -93,6 +99,7 @@ set(THYLACINE_USERSPACE_LD_FLAGS
     "-static"
     "-Wl,-z,text"
     "-Wl,-z,noexecstack"
+    "-Wl,-z,max-page-size=4096"
     "-Wl,--no-dynamic-linker"
     "-Wl,--build-id=none"
     "-Wl,--no-undefined"

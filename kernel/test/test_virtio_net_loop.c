@@ -26,7 +26,9 @@
 
 void test_virtio_net_loop_rfork_with_caps(void);
 
-#define VIRTIO_NET_LOOP_BLOB_MAX 98304
+// 16 KiB per blob (P4-image-shrink convention; every userspace binary
+// fits under 16 KiB with -z max-page-size=4096 on both Rust + C sides).
+#define VIRTIO_NET_LOOP_BLOB_MAX 16384
 static _Alignas(16) u8 g_virtio_net_loop_blob[VIRTIO_NET_LOOP_BLOB_MAX];
 
 struct virtio_net_loop_exec_args {
