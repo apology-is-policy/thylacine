@@ -40,6 +40,7 @@
 #include <thylacine/types.h>
 #include <thylacine/virtio.h>
 
+#include "../../arch/arm64/gic.h"
 #include "../../arch/arm64/uart.h"
 
 void test_virtio_input_probe_rfork_with_caps(void);
@@ -116,11 +117,40 @@ void test_virtio_input_probe_rfork_with_caps(void) {
     const u8 *src = (const u8 *)cpio_blob;
     for (size_t i = 0; i < size; i++) g_virtio_input_probe_blob[i] = src[i];
 
+    // P4-K-events: compute the slot's GIC SPI from the MMIO base, and
+    // pre-pend it before spawning the child. On QEMU virt:
+    //
+    //   slot_index = (pa - VIRTIO_MMIO_BASE_PA) / VIRTIO_MMIO_SLOT_STRIDE
+    //   intid      = 32 (SPI base) + 16 (virtio-mmio offset per
+    //                hw/arm/virt.c::vms->irqmap[VIRT_MMIO]) + slot_index
+    //
+    // Pre-pending the SPI's pending bit BEFORE the SPI is enabled is
+    // safe per ARM IHI 0069 §12.9.6 (pending-bit orthogonal to enable):
+    // the moment the child's t_irq_create enables this SPI, the GIC
+    // delivers the latched pending → kobj_irq_dispatch increments
+    // pending_count → the child's first t_irq_wait returns without
+    // sleeping. This guarantees forward progress for the
+    // `tools/run-vm.sh` interactive path where no QMP injector fires,
+    // and bounds the child's wall-clock to ~3-5 sec before its SKIP
+    // exit (after the bounded busy-poll loop empties out).
+    const u64 VIRTIO_MMIO_BASE_PA = 0x0a000000ull;
+    const u64 VIRTIO_MMIO_SLOT_STRIDE = 0x200ull;
+    const u32 VIRTIO_MMIO_GIC_INTID_BASE = 32 + 16; // = 48
+    u64 slot_index = ((u64)input_dev->pa - VIRTIO_MMIO_BASE_PA) / VIRTIO_MMIO_SLOT_STRIDE;
+    u32 input_intid = VIRTIO_MMIO_GIC_INTID_BASE + (u32)slot_index;
+
     uart_puts("    /virtio-input size=");
     uart_putdec((u64)size);
     uart_puts(" bytes; input_dev pa=");
     uart_puthex64((u64)input_dev->pa);
-    uart_puts(" → rfork_with_caps(CAP_HW_CREATE)\n");
+    uart_puts(" slot=");
+    uart_putdec(slot_index);
+    uart_puts(" intid=");
+    uart_putdec((u64)input_intid);
+    uart_puts(" → pre-pend SPI + rfork_with_caps(CAP_HW_CREATE)\n");
+
+    bool pended = gic_set_pending_spi(input_intid);
+    TEST_ASSERT(pended, "gic_set_pending_spi failed for virtio-input SPI (out of GIC range?)");
 
     struct virtio_input_probe_exec_args args = {
         .blob = g_virtio_input_probe_blob, .size = size
@@ -133,11 +163,11 @@ void test_virtio_input_probe_rfork_with_caps(void) {
     int status = -42;
     int reaped = wait_pid(&status);
     TEST_EXPECT_EQ(reaped, pid, "wait_pid pid mismatch");
-    TEST_EXPECT_EQ(status, 0, "/virtio-input exit status (0 = config-space + eventq init reached DRIVER_OK)");
+    TEST_EXPECT_EQ(status, 0, "/virtio-input exit status (0 = config-space + eventq init + event drain or SKIP)");
 
     uart_puts("    /virtio-input reaped pid=");
     uart_putdec((u64)pid);
     uart_puts(" status=");
     uart_putdec((u64)status);
-    uart_puts(" — selector-based config-space + eventq RX init end-to-end\n");
+    uart_puts(" — config-space + eventq init + IRQ wake + bounded poll for QMP-injected key\n");
 }

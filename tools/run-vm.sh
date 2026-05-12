@@ -199,6 +199,24 @@ if [[ "${THYLACINE_NO_GPU:-0}" != "1" ]]; then
     )
 fi
 
+# P4-K-events: QMP control socket for test-harness key injection.
+# tools/test.sh polls the boot log for the userspace virtio-input
+# probe's "AWAITING_QMP_KEY" sentinel and, upon match, connects to
+# this socket and sends `send-key` for the target keycode. QEMU's
+# virtio-keyboard-device translates that into eventq writes; the
+# driver drains + validates.
+#
+# Disabled by THYLACINE_NO_QMP=1. The socket path lives under build/
+# alongside other build artifacts; it's overwritten per run (server
+# mode), so stale sockets from a previous run don't accumulate.
+qmp_flags=()
+if [[ "${THYLACINE_NO_QMP:-0}" != "1" ]]; then
+    qmp_sock="${THYLACINE_QMP_SOCK:-$REPO_ROOT/build/qmp.sock}"
+    mkdir -p "$(dirname "$qmp_sock")"
+    rm -f "$qmp_sock"
+    qmp_flags=(-qmp "unix:$qmp_sock,server,nowait")
+fi
+
 # 9P host share — appears at /host inside the guest once the 9P client lands
 # (P1-A: no client yet, so the QEMU virtfs entry is benign overhead). Per
 # TOOLING.md §4 (the hot-reload mechanism). Default-on; --no-share disables.
@@ -237,6 +255,7 @@ exec qemu-system-aarch64 \
     -device virtio-rng-pci,id=rng_pci0 \
     -nographic \
     -serial mon:stdio \
+    ${qmp_flags[@]+"${qmp_flags[@]}"} \
     ${gdb_flags[@]+"${gdb_flags[@]}"} \
     ${share_flags[@]+"${share_flags[@]}"} \
     ${extra_qemu_args[@]+"${extra_qemu_args[@]}"}

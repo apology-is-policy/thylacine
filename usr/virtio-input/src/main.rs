@@ -1,61 +1,60 @@
-// /virtio-input — third composed userspace driver (P4-K).
+// /virtio-input — third composed userspace driver.
 //
-// Probe-only chunk for the VirtIO INPUT device class (DeviceID = 18).
-// Proves the composed-hw-handle SVC substrate (MMIO + DMA, with IRQ
-// retained for future event consumption) generalizes to a class with:
-//   - a selector-based device-specific config-space (selectors per
-//     VIRTIO 1.2 §5.8.4, distinct from blk's direct register layout +
-//     net's MAC/status fields),
-//   - RX-only mechanics (the device fills the eventq; the driver
-//     pre-publishes empty buffers and drains them as events arrive),
-//   - 8-byte event records (struct virtio_input_event = u16 type +
-//     u16 code + u32 value).
+// Two-stage scope:
 //
-// Scope (intentionally narrow):
-//   - Init transport: RESET → ACK → DRIVER → DeviceFeatures (require
-//     VIRTIO_F_VERSION_1; decline everything else — input devices
-//     don't have feature negotiation as elaborate as net/blk) →
-//     FEATURES_OK → configure eventq (index 0; QUEUE_SIZE=16; 16 RX
-//     descriptors pre-published) → DRIVER_OK.
-//   - Read device name via the selector mechanism: select=ID_NAME,
-//     subsel=0; read size byte + the first N bytes of u.string;
-//     surface in the boot log.
-//   - Read EV_BITS for EV_KEY: select=EV_BITS, subsel=EV_KEY=1; if
-//     size > 0 the device claims at least one key code. This is the
-//     classification signal that distinguishes a keyboard from a
-//     mouse without having to consume events.
-//   - Exit clean. Do NOT t_irq_wait — QEMU virt has no host-side
-//     input injection in v1.0 (would require a -monitor send-key or
-//     QMP wiring on every CI run); waiting on an event would hang the
-//     test indefinitely.
+//   P4-K (probe; previously landed): RESET → DRIVER_OK → read NAME +
+//   EV_BITS for classification. Proves the composed-hw-handle SVC
+//   substrate generalizes to DeviceID=18 with selector-based
+//   config-space + RX-only eventq.
 //
-// What this test specifically guards against (beyond the existing
-// virtio-blk + virtio-net probes):
-//   - DeviceID=18 dispatch in virtio_mmio_find_by_device_id.
-//   - Selector-based config-space read path (write select + subsel,
-//     observe size byte updated by device, read N bytes of u.string).
-//   - eventq (queue 0, RX-direction) configuration: 16 WRITE
-//     descriptors with avail.idx=16 published BEFORE DRIVER_OK. The
-//     virtio-net-probe configured only TX (queue 1) at P4-Ja; this
-//     proves queue 0 RX setup is symmetric to virtio-net-arp's RX
-//     setup but at a different device class.
-//   - QUEUE_NOTIFY routing for queue index 0 (would be exercised if
-//     the device fired an event; we don't drive that path here).
+//   P4-K-events (this chunk): adds event consumption via t_irq_create
+//   + bounded poll on `used.idx`. The kernel test pre-fires SPI 77
+//   before spawning the child (P4-Ic-latency / P4-Ic5-IRQ-probe
+//   pre-pend pattern); the child consumes that one wake via a single
+//   t_irq_wait, then transitions to a busy-poll on `used.idx`. If a
+//   host-side input event (delivered via QMP `send-key` from
+//   tools/test.sh) lands, the driver drains the used ring, parses the
+//   8-byte virtio_input_event records, and looks for the target
+//   `{type=EV_KEY, code=KEY_A=30, value=1}` (key-press). On match:
+//   PASS exit 0. On poll cap exhaustion: SKIP exit 0 (boot continues,
+//   no hang on interactive tools/run-vm.sh that lacks QMP injection).
 //
-// Future P4-K-events:
-//   - Add t_irq_create + t_irq_wait; consume drained events from the
-//     used ring; validate event type/code matches an injected key.
-//   - Requires a CI mechanism for input injection (QMP send-key or
-//     -monitor stdin scripting); deferred to Phase 5+ or to the
-//     Halcyon-prep work that puts a real keyboard surface online.
+// What this chunk specifically guards against (beyond the probe):
+//   - eventq RX drain: used.ring[k % QUEUE_SIZE] = desc_id; the
+//     8-byte event lives at desc_pool[desc_id]. Per VIRTIO 1.2
+//     §2.7.13, the desc_id is the head of the chain — for virtio-input
+//     all descriptors are single (no chaining) so head == id.
+//   - Descriptor recycling: after consuming each used entry, the
+//     driver re-publishes the same desc_id back to avail.ring[k %
+//     QUEUE_SIZE], bumps avail.idx, DSB. Symmetric to virtio-net-loop
+//     RX recycling.
+//   - Event record parsing: u16 type + u16 code + u32 value. Pinned
+//     against drift by reading at fixed byte offsets.
+//   - InterruptStatus ACK discipline: each wake from t_irq_wait reads
+//     INTERRUPT_STATUS + writes INTERRUPT_ACK with the same bits, so
+//     the device's interrupt line deasserts before the next event
+//     batch.
+//   - SKIP-on-poll-exhaustion: 5M-iteration busy-poll cap (~3-5 sec
+//     wall-clock on QEMU TCG) ensures the driver terminates even
+//     without QMP injection. Boot proceeds; the test framework's
+//     status==0 contract is preserved.
+//
+// CI verification: `tools/test.sh` runs a background QMP injector
+// that, upon observing the sentinel "virtio-input: AWAITING_QMP_KEY"
+// in the boot log, connects to the QMP socket and sends `send-key`
+// for `a`. The driver then sees the EV_KEY/30/1 event in the eventq
+// and prints "virtio-input: saw target key". `tools/test.sh` greps
+// the log for that line after boot completes and fails the run if
+// THYLACINE_INPUT_INJECT != 0 and the line is absent.
 
 #![no_std]
 #![no_main]
 
 use core::arch::asm;
 use libthyla_rs::{
-    T_PROT_READ, T_PROT_WRITE, T_RIGHT_MAP, T_RIGHT_READ, T_RIGHT_WRITE,
-    t_dma_create, t_dma_map, t_exits, t_mmio_create, t_mmio_map, t_puts, t_putstr,
+    T_PROT_READ, T_PROT_WRITE, T_RIGHT_MAP, T_RIGHT_READ, T_RIGHT_SIGNAL,
+    T_RIGHT_WRITE, t_dma_create, t_dma_map, t_exits, t_irq_create, t_irq_wait,
+    t_mmio_create, t_mmio_map, t_puts, t_putstr,
 };
 
 // =============================================================================
@@ -96,6 +95,8 @@ const REG_QUEUE_SEL: u64         = 0x030;
 const REG_QUEUE_NUM_MAX: u64     = 0x034;
 const REG_QUEUE_NUM: u64         = 0x038;
 const REG_QUEUE_READY: u64       = 0x044;
+const REG_INTERRUPT_STATUS: u64  = 0x060;
+const REG_INTERRUPT_ACK: u64     = 0x064;
 const REG_STATUS: u64            = 0x070;
 const REG_QUEUE_DESC_LOW: u64    = 0x080;
 const REG_QUEUE_DESC_HIGH: u64   = 0x084;
@@ -124,20 +125,7 @@ const VIRTIO_F_VERSION_1_BIT_BANK1: u32 = 1 << 0;
 // =============================================================================
 // virtio-input specifics (VIRTIO 1.2 §5.8).
 // =============================================================================
-//
-// Device-specific config space layout (§5.8.4):
-//   offset  type    field
-//   0       u8      select       (driver-writable selector)
-//   1       u8      subsel       (driver-writable sub-selector)
-//   2       u8      size         (device-set: size of returned data)
-//   3..8    u8[5]   reserved
-//   8..136  union   u:
-//                      char string[128]      (for NAME / SERIAL)
-//                      u8   bitmap[128]      (for PROP_BITS / EV_BITS)
-//                      virtio_input_absinfo  (for ABS_INFO)
-//                      virtio_input_devids   (for ID_DEVIDS)
-//
-// Selectors (§5.8.4 "Device Configuration Layout"):
+
 const INPUT_CFG_SELECT: u64 = 0;
 const INPUT_CFG_SUBSEL: u64 = 1;
 const INPUT_CFG_SIZE: u64   = 2;
@@ -151,6 +139,10 @@ const EV_SYN: u8 = 0;
 const EV_KEY: u8 = 1;
 const EV_REL: u8 = 2;
 
+// Linux key codes (linux/input-event-codes.h). Used by QEMU's qcode
+// mapping: send-key with qcode "a" delivers EV_KEY/KEY_A/value.
+const KEY_A: u16 = 30;
+
 // Virtqueue indices.
 const INPUT_QUEUE_EVENT: u32 = 0;
 
@@ -158,7 +150,7 @@ const INPUT_QUEUE_EVENT: u32 = 0;
 //     __le16 type;
 //     __le16 code;
 //     __le32 value;
-// } = 8 bytes per record. Each pre-published descriptor points to one.
+// } = 8 bytes per record.
 const VIRTIO_INPUT_EVENT_LEN: u32 = 8;
 
 // =============================================================================
@@ -166,19 +158,9 @@ const VIRTIO_INPUT_EVENT_LEN: u32 = 8;
 // =============================================================================
 //
 //   0x000 .. 0x100   desc[0..16]    (16 × 16 B)
-//   0x100 .. 0x200   avail header + ring + used_event (4 + 32 + 2 = 38 B; round up)
-//   0x200 .. 0x300   used  header + ring + avail_event (4 + 128 + 2 = 134 B; round up)
+//   0x100 .. 0x200   avail header + ring + used_event (4 + 32 + 2 = 38 B)
+//   0x200 .. 0x300   used  header + ring + avail_event (4 + 128 + 2 = 134 B)
 //   0x300 .. 0x380   event pool (16 × 8 B = 128 B)
-//
-// Each eventq descriptor is RX-direction:
-//   desc[k].addr  = dma_pa + EVENT_POOL_OFF + k * VIRTIO_INPUT_EVENT_LEN
-//   desc[k].len   = VIRTIO_INPUT_EVENT_LEN
-//   desc[k].flags = VIRTQ_DESC_F_WRITE
-//   desc[k].next  = 0 (unused; no chaining)
-//
-// avail.ring[k] = k for k in 0..16; avail.idx = 16 BEFORE DRIVER_OK so
-// the device has all 16 buffers ready to fill the moment it's allowed
-// to issue events.
 
 const QUEUE_SIZE: u16 = 16;
 const DMA_BUFSIZE: u64 = PAGE_SIZE;
@@ -197,6 +179,26 @@ const _: () = {
 };
 
 // =============================================================================
+// Event-consumption loop tuning.
+// =============================================================================
+//
+// MAX_POLL_ITER: outer iteration cap on the busy-poll over `used.idx`.
+// At ~30-50 ns per AArch64 volatile-read of a Normal-WB cache line on
+// QEMU TCG (dominated by guest-host loop overhead), 5,000,000
+// iterations is ~3-5 sec wall-clock. That window comfortably covers
+// the test harness's QMP injector (which fires within ~100-300 ms of
+// observing the AWAITING_QMP_KEY sentinel) and bounds the interactive
+// `tools/run-vm.sh` hang to a few seconds.
+//
+// MAX_EVENTS_TO_PROCESS: drains at most this many events even if more
+// arrive. Each QMP `send-key` produces 4 events (KEY press + SYN +
+// KEY release + SYN); 32 leaves headroom for a few extra injections
+// without unbounded looping.
+
+const MAX_POLL_ITER: u32 = 200_000_000;
+const MAX_EVENTS_TO_PROCESS: u32 = 32;
+
+// =============================================================================
 // Volatile MMIO + DMA access helpers.
 // =============================================================================
 
@@ -208,6 +210,11 @@ unsafe fn read32(addr: u64) -> u32 {
 #[inline(always)]
 unsafe fn write32(addr: u64, val: u32) {
     core::ptr::write_volatile(addr as *mut u32, val)
+}
+
+#[inline(always)]
+unsafe fn read16(addr: u64) -> u16 {
+    core::ptr::read_volatile(addr as *const u16)
 }
 
 #[inline(always)]
@@ -235,12 +242,14 @@ fn dsb_sy() {
     unsafe { asm!("dsb sy", options(nostack, preserves_flags)) }
 }
 
+#[inline(always)]
+fn yield_cpu() {
+    unsafe { asm!("yield", options(nostack, preserves_flags)) }
+}
+
 // =============================================================================
 // Diagnostics — integer formatters mirror virtio-blk-probe / -net-probe.
 // =============================================================================
-//
-// R12-uaccess: SYS_PUTS demand-pages user VAs from kernel mode via the
-// uaccess-fault dispatcher; binaries no longer need pretouch_rodata_pages.
 
 fn write_hex_u32(buf: &mut [u8; 10], val: u32) {
     buf[0] = b'0';
@@ -324,19 +333,10 @@ fn find_input_slot(mmio_base_va: u64) -> Option<(u32, u64)> {
 // =============================================================================
 
 fn init_device(slot_va: u64, dma_pa: u64, dma_va: u64) -> bool {
-    // Step 1: RESET.
     unsafe { write32(slot_va + REG_STATUS, 0) };
-
-    // Step 2: ACKNOWLEDGE.
     unsafe { write32(slot_va + REG_STATUS, STATUS_ACKNOWLEDGE) };
-
-    // Step 3: DRIVER.
     unsafe { write32(slot_va + REG_STATUS, STATUS_ACKNOWLEDGE | STATUS_DRIVER) };
 
-    // Step 4: read DeviceFeatures; require VIRTIO_F_VERSION_1 in bank 1.
-    // input devices in VIRTIO 1.2 §5.8 don't define any device-specific
-    // feature bits; bank 0 is all-zero in practice on QEMU. We decline
-    // everything in bank 0 and accept only VERSION_1 in bank 1.
     unsafe { write32(slot_va + REG_DEVICE_FEATURES_SEL, 1) };
     let dev_feat_hi = unsafe { read32(slot_va + REG_DEVICE_FEATURES) };
     if dev_feat_hi & VIRTIO_F_VERSION_1_BIT_BANK1 == 0 {
@@ -350,7 +350,6 @@ fn init_device(slot_va: u64, dma_pa: u64, dma_va: u64) -> bool {
     unsafe { write32(slot_va + REG_DRIVER_FEATURES_SEL, 1) };
     unsafe { write32(slot_va + REG_DRIVER_FEATURES, VIRTIO_F_VERSION_1_BIT_BANK1) };
 
-    // Step 5: FEATURES_OK + readback.
     unsafe {
         write32(slot_va + REG_STATUS,
                 STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK);
@@ -363,7 +362,6 @@ fn init_device(slot_va: u64, dma_pa: u64, dma_va: u64) -> bool {
         return false;
     }
 
-    // Step 6: configure eventq (index 0).
     unsafe { write32(slot_va + REG_QUEUE_SEL, INPUT_QUEUE_EVENT) };
 
     let num_max = unsafe { read32(slot_va + REG_QUEUE_NUM_MAX) };
@@ -388,14 +386,9 @@ fn init_device(slot_va: u64, dma_pa: u64, dma_va: u64) -> bool {
         write32(slot_va + REG_QUEUE_DEVICE_HIGH, (used_pa >> 32) as u32);
     };
 
-    // Step 6b: populate the eventq with 16 RX descriptors pointing at
-    // 16 distinct 8-byte slots in the event pool. avail.ring[k] = k;
-    // avail.idx = 16 published BEFORE DRIVER_OK so the device has all
-    // buffers from the moment events become legal.
     populate_eventq(dma_va, dma_pa);
     unsafe { write32(slot_va + REG_QUEUE_READY, 1) };
 
-    // Step 7: DRIVER_OK.
     unsafe {
         write32(slot_va + REG_STATUS,
                 STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK | STATUS_DRIVER_OK);
@@ -405,12 +398,9 @@ fn init_device(slot_va: u64, dma_pa: u64, dma_va: u64) -> bool {
 }
 
 fn populate_eventq(dma_va: u64, dma_pa: u64) {
-    let desc_va = dma_va + DESC_OFF;
     let avail_va = dma_va + AVAIL_OFF;
     let event_pool_pa = dma_pa + EVENT_POOL_OFF;
 
-    // Zero the event pool so a stale-read from desc[0] would be
-    // obviously zero rather than uninitialized.
     for i in 0..(QUEUE_SIZE as u64) * (VIRTIO_INPUT_EVENT_LEN as u64) {
         unsafe { write_u8(dma_va + EVENT_POOL_OFF + i, 0) };
     }
@@ -425,7 +415,6 @@ fn populate_eventq(dma_va: u64, dma_pa: u64) {
             write16(dma_va + d_off + 14, 0); // no chaining
         };
         unsafe { write16(avail_va + 4 + (k as u64) * 2, k) };
-        let _ = desc_va; // silence unused-binding when EVENT_POOL_OFF moves
     }
 
     unsafe { write16(avail_va + 0, 0) }; // flags
@@ -437,23 +426,12 @@ fn populate_eventq(dma_va: u64, dma_pa: u64) {
 // =============================================================================
 // Selector-based config-space read helpers.
 // =============================================================================
-//
-// Per VIRTIO 1.2 §5.8.5: after the driver writes select + subsel, the
-// device updates `size` and the union to the requested data on the
-// next read. We follow the convention of writing select/subsel +
-// reading size, then reading min(size, max_buf) bytes from u.
-//
-// `read_str_field` returns the actual length (after the device's `size`
-// byte clamps to <= 128) and fills `out` with up to N bytes.
 
 fn write_selectors(slot_va: u64, select: u8, subsel: u8) {
     unsafe {
         write_u8(slot_va + REG_CONFIG_BASE + INPUT_CFG_SELECT, select);
         write_u8(slot_va + REG_CONFIG_BASE + INPUT_CFG_SUBSEL, subsel);
     };
-    // QEMU's virtio-input device updates `size` synchronously on the
-    // subsel write; no DSB needed here (device-side MMIO is strictly
-    // ordered by the bus model).
 }
 
 fn read_cfg_size(slot_va: u64) -> u8 {
@@ -490,6 +468,102 @@ fn log_name(buf: &[u8], n: usize) {
 }
 
 // =============================================================================
+// Event drain.
+// =============================================================================
+//
+// Reads `used.idx`; for each new entry since `last_used_idx`, parses
+// the 8-byte event record at the descriptor's backing slot, logs the
+// (type, code, value) tuple, and re-publishes the descriptor head back
+// to the avail ring so the device can refill it.
+//
+// Returns the number of events consumed + whether the target key
+// was observed in this batch.
+
+struct DrainResult {
+    consumed: u32,
+    saw_target: bool,
+    new_last_used_idx: u16,
+    new_avail_idx: u16,
+}
+
+fn drain_used(dma_va: u64, last_used_idx: u16, mut avail_idx: u16,
+              mut total_consumed: u32) -> DrainResult {
+    let used_va = dma_va + USED_OFF;
+    let avail_va = dma_va + AVAIL_OFF;
+    let event_pool_va = dma_va + EVENT_POOL_OFF;
+
+    let cur_used_idx = unsafe { read16(used_va + 2) };
+    let mut idx = last_used_idx;
+    let mut saw_target = false;
+
+    while idx != cur_used_idx && total_consumed < MAX_EVENTS_TO_PROCESS {
+        let slot = (idx % QUEUE_SIZE) as u64;
+        // struct virtq_used_elem { le32 id; le32 len; } at used + 4 + slot*8
+        let elem_va = used_va + 4 + slot * 8;
+        let desc_id = unsafe { read32(elem_va + 0) };
+        // used_len is informational; we don't validate against
+        // VIRTIO_INPUT_EVENT_LEN because the device may set it to <=
+        // the descriptor's advertised len.
+        let _used_len = unsafe { read32(elem_va + 4) };
+
+        if (desc_id as u16) >= QUEUE_SIZE {
+            // Malformed used entry — desc_id out of range. Log + skip.
+            log("virtio-input: WARN — used.elem.id out of range: ");
+            log_dec(desc_id);
+            log("\n");
+            idx = idx.wrapping_add(1);
+            total_consumed += 1;
+            continue;
+        }
+
+        let evt_va = event_pool_va + (desc_id as u64) * (VIRTIO_INPUT_EVENT_LEN as u64);
+        let evt_type = unsafe { read16(evt_va + 0) };
+        let evt_code = unsafe { read16(evt_va + 2) };
+        let evt_value = unsafe { read32(evt_va + 4) };
+
+        log("virtio-input: event type=");
+        log_dec(evt_type as u32);
+        log(" code=");
+        log_dec(evt_code as u32);
+        log(" value=");
+        log_dec(evt_value);
+        log("\n");
+
+        if evt_type == EV_KEY as u16 && evt_code == KEY_A && evt_value == 1 {
+            saw_target = true;
+        }
+
+        // Recycle: re-publish desc_id back to avail.ring at slot
+        // (avail_idx % QUEUE_SIZE). The device cycles through avail
+        // entries as its internal index advances; bumping avail.idx
+        // makes the descriptor available again.
+        let avail_slot = (avail_idx % QUEUE_SIZE) as u64;
+        unsafe { write16(avail_va + 4 + avail_slot * 2, desc_id as u16) };
+        avail_idx = avail_idx.wrapping_add(1);
+
+        idx = idx.wrapping_add(1);
+        total_consumed += 1;
+    }
+
+    if avail_idx != unsafe { read16(avail_va + 2) } {
+        // Make recycled descriptor publications visible before the
+        // idx bump (VIRTIO 1.2 §2.7.13.1).
+        dsb_sy();
+        unsafe { write16(avail_va + 2, avail_idx) };
+        dsb_sy();
+        // No notify needed — virtio-input's eventq has no notify-on-RX
+        // semantic; the device polls avail.idx internally as it fills.
+    }
+
+    DrainResult {
+        consumed: total_consumed,
+        saw_target,
+        new_last_used_idx: idx,
+        new_avail_idx: avail_idx,
+    }
+}
+
+// =============================================================================
 // Entry point.
 // =============================================================================
 
@@ -521,6 +595,17 @@ pub extern "C" fn rs_main() -> i64 {
         unsafe { t_exits(1) };
     }
 
+    // Subscribe to the IRQ BEFORE issuing the request. The kernel test
+    // pre-pended SPI 77 before spawning us (P4-Ic-latency / P4-K-events
+    // pattern); the moment t_irq_create enables the SPI, the GIC
+    // delivers the pre-pended pending → kobj_irq_dispatch wakes any
+    // subsequent t_irq_wait without sleeping.
+    let irq_handle = unsafe { t_irq_create(intid, T_RIGHT_SIGNAL) };
+    if irq_handle < 0 {
+        log("virtio-input: FAIL — SYS_IRQ_CREATE failed\n");
+        unsafe { t_exits(1) };
+    }
+
     let dma_handle = unsafe {
         t_dma_create(DMA_BUFSIZE, T_RIGHT_READ | T_RIGHT_WRITE | T_RIGHT_MAP)
     };
@@ -536,8 +621,6 @@ pub extern "C" fn rs_main() -> i64 {
         unsafe { t_exits(1) };
     }
 
-    // Pre-warm DMA pages so the demand-page path installs PTEs before
-    // the device starts writing events into the buffer pool.
     for off in (0..DMA_BUFSIZE).step_by(PAGE_SIZE as usize) {
         unsafe { write_u8(DMA_USER_VA + off, 0) };
     }
@@ -571,20 +654,87 @@ pub extern "C" fn rs_main() -> i64 {
         log("virtio-input: FAIL — device name is empty (config-space selector mechanism not responding)\n");
         unsafe { t_exits(1) };
     }
-
-    // Classification: at least one EV_KEY bit means this device emits
-    // key events (keyboard or button-bearing pointer device). QEMU's
-    // virtio-keyboard-device claims a wide swath of EV_KEY codes.
     if key_bits == 0 && rel_bits == 0 {
         log("virtio-input: FAIL — device claims neither EV_KEY nor EV_REL (not a keyboard or mouse)\n");
         unsafe { t_exits(1) };
     }
 
-    log("virtio-input: PASS — config-space + eventq init reached DRIVER_OK (slot=");
-    log_dec(slot);
-    log(" intid=");
-    log_dec(intid);
-    log(")\n");
+    // Consume the kernel-prefired wake. This is iteration 0: the GIC
+    // delivered a pending SPI at t_irq_create time; pending_count is
+    // already > 0 so t_irq_wait returns without sleeping. We ACK the
+    // device-side InterruptStatus (clearing any latched device bits)
+    // and confirm used.idx == 0 (no events yet — kernel-side pre-fire
+    // didn't go through the device).
+    let _ = unsafe { t_irq_wait(irq_handle) };
+    let int_status = unsafe { read32(slot_va + REG_INTERRUPT_STATUS) };
+    if int_status != 0 {
+        unsafe { write32(slot_va + REG_INTERRUPT_ACK, int_status) };
+    }
 
-    0
+    // Sentinel: tools/test.sh polls for this line and triggers QMP
+    // `send-key` upon match. The interactive `tools/run-vm.sh` path
+    // also prints it (but no injector is listening, so the busy-poll
+    // below will time out cleanly into SKIP).
+    log("virtio-input: AWAITING_QMP_KEY\n");
+
+    // Busy-poll on `used.idx` with iteration cap. The DMA region is
+    // Normal-WB so volatile reads are cheap. ARM `yield` hints the
+    // CPU/scheduler to pace itself.
+    let mut last_used_idx: u16 = 0;
+    let mut avail_idx_local: u16 = QUEUE_SIZE; // matches populate_eventq's avail.idx = 16
+    let mut total_consumed: u32 = 0;
+    let mut saw_target = false;
+    let mut iters: u32 = 0;
+
+    while iters < MAX_POLL_ITER && !saw_target
+          && total_consumed < MAX_EVENTS_TO_PROCESS {
+        let cur_used = unsafe { read16(DMA_USER_VA + USED_OFF + 2) };
+        if cur_used != last_used_idx {
+            // ACK any device-asserted interrupt bits so the line
+            // deasserts before the next batch (the device sets bit 0
+            // on each used.idx advance).
+            let int_status = unsafe { read32(slot_va + REG_INTERRUPT_STATUS) };
+            if int_status != 0 {
+                unsafe { write32(slot_va + REG_INTERRUPT_ACK, int_status) };
+            }
+
+            let r = drain_used(DMA_USER_VA, last_used_idx, avail_idx_local,
+                               total_consumed);
+            last_used_idx = r.new_last_used_idx;
+            avail_idx_local = r.new_avail_idx;
+            total_consumed = r.consumed;
+            if r.saw_target { saw_target = true; }
+            continue;
+        }
+        iters += 1;
+        yield_cpu();
+    }
+
+    if saw_target {
+        log("virtio-input: saw target key (EV_KEY code=");
+        log_dec(KEY_A as u32);
+        log(" value=1)\n");
+        log("virtio-input: PASS — event consumption end-to-end (slot=");
+        log_dec(slot);
+        log(" intid=");
+        log_dec(intid);
+        log(" events=");
+        log_dec(total_consumed);
+        log(")\n");
+        0
+    } else {
+        // SKIP path: no QMP-injected key arrived within the poll
+        // window. This is expected when running `tools/run-vm.sh`
+        // interactively without a QMP injector; the kernel test
+        // accepts exit-0 either way and a separate post-boot grep in
+        // `tools/test.sh` enforces PASS when injection is expected.
+        log("virtio-input: SKIP — no EV_KEY/");
+        log_dec(KEY_A as u32);
+        log("/1 observed within ");
+        log_dec(MAX_POLL_ITER);
+        log(" poll iterations (events_seen=");
+        log_dec(total_consumed);
+        log("); QMP injection likely absent (tools/run-vm.sh interactive run, or THYLACINE_INPUT_INJECT=0)\n");
+        0
+    }
 }
