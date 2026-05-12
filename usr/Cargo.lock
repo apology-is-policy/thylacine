@@ -10,6 +10,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "irq-bench"
+version = "0.1.0"
+dependencies = [
+ "libthyla-rs",
+]
+
+[[package]]
 name = "irq-probe"
 version = "0.1.0"
 dependencies = [

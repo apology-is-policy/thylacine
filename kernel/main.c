@@ -81,6 +81,11 @@ void boot_main(void) {
     // Idempotent and < 10 cycles; safe to call first thing.
     fp_enable_this_cpu();
 
+    // P4-Ic-latency: enable EL0 reads of CNTPCT_EL0 via CNTKCTL_EL1.
+    // Required for the IRQ-to-userspace latency benchmark + future
+    // vDSO clock_gettime. Per-CPU; secondaries set it in per_cpu_main.
+    timer_enable_el0_counter_access();
+
     // Phase 1: parse the DTB (early prints use the fallback PL011 base
     // 0x09000000 from uart.c; if the DTB places PL011 elsewhere,
     // uart_set_base() below will update it before the banner prints).

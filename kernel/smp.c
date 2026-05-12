@@ -288,6 +288,11 @@ void per_cpu_main(int cpu_idx) {
     // banked per-CPU on AArch64.
     fp_enable_this_cpu();
 
+    // P4-Ic-latency: enable EL0 reads of CNTPCT_EL0 via CNTKCTL_EL1
+    // on this secondary. Boot CPU does it in boot_main. Per-CPU
+    // register (banked) → must be set independently on each CPU.
+    timer_enable_el0_counter_access();
+
     // VBAR_EL1 — install the kernel exception vector table. ISB so
     // any subsequent exception sees the new VBAR.
     u64 vbar = (u64)(uintptr_t)_exception_vectors;

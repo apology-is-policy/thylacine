@@ -169,3 +169,18 @@ void timer_busy_wait_ticks(u64 n) {
         __asm__ __volatile__("wfi" ::: "memory");
     }
 }
+
+// CNTKCTL_EL1.EL0PCTEN — bit 0. Reset value undefined; ARM ARM D13.2.34
+// reset to 0 on warm reset means EL0 reads of CNTPCT_EL0 trap to EL1
+// (EC=0x18 trapped MSR/MRS). EL0VCTEN (bit 1) gates CNTVCT_EL0
+// similarly; we enable physical only since CNTVOFF_EL2 = 0 on direct-
+// EL1 boot makes virtual == physical, and the kernel side uses
+// cntpct_el0 for `timer_get_counter`. Single source of truth.
+#define CNTKCTL_EL0PCTEN  (1ull << 0)
+
+void timer_enable_el0_counter_access(void) {
+    u64 v;
+    __asm__ __volatile__("mrs %0, cntkctl_el1" : "=r"(v));
+    v |= CNTKCTL_EL0PCTEN;
+    __asm__ __volatile__("msr cntkctl_el1, %0\nisb\n" :: "r"(v));
+}

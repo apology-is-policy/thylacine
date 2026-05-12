@@ -66,4 +66,13 @@ u32 timer_get_freq(void);
 // the loop so the CPU sleeps until the next IRQ rather than spin-hot.
 void timer_busy_wait_ticks(u64 n);
 
+// P4-Ic-latency: enable EL0 reads of CNTPCT_EL0 via CNTKCTL_EL1.EL0PCTEN.
+// Without this bit, an EL0 `mrs x, cntpct_el0` traps to EL1 with
+// EC=0x18 (trapped MSR/MRS). With it, userspace can read the
+// architectural counter directly — required for the IRQ-to-userspace
+// latency benchmark + future vDSO clock_gettime. Per-CPU register;
+// must be set on every CPU at bringup. Idempotent + <10 cycles; safe
+// to call from boot_main + per_cpu_main alongside fp_enable_this_cpu.
+void timer_enable_el0_counter_access(void);
+
 #endif // THYLACINE_ARCH_ARM64_TIMER_H
