@@ -192,7 +192,7 @@ Integration coverage comes from the existing userspace tests — `virtio-blk-rw`
 ## Status
 
 - **Landed** at R12-uaccess (`32367d1` substantive; `b5de03f` hash fixup). 235 → 239 tests.
-- **Formal R12-uaccess prosecutor pass closed** (audit-close commit pending). 0 P0 + 1 P1 + 0 P2 + 2 P3 — all 3 closed in the audit-close commit; 0 deferred. F210 P1 was a real bug: SYS_PUTS_USER_VA_TOP (2^48) and UACCESS_USER_VA_TOP (2^47) disagreed; EL0 could extinct the kernel via SYS_PUTS in `[2^47, 2^48)`. F211 + F212 were forward-compat hygiene (from_user synthesis inconsistency + asm-side layout discipline). See `memory/audit_r12_uaccess_closed_list.md` for the full closed list. SYS_PUTS now reads `UACCESS_USER_VA_TOP` from `arch/arm64/uaccess.h` so the three surfaces (burrow_map, dispatcher, SYS_PUTS) all converge on `1ull << 47` from one source.
+- **Formal R12-uaccess prosecutor pass closed** at `d1106af` (audit-close substantive). 0 P0 + 1 P1 + 0 P2 + 2 P3 — all 3 closed in the audit-close commit; 0 deferred. F210 P1 was a real bug: SYS_PUTS_USER_VA_TOP (2^48) and UACCESS_USER_VA_TOP (2^47) disagreed; EL0 could extinct the kernel via SYS_PUTS in `[2^47, 2^48)`. F211 + F212 were forward-compat hygiene (from_user synthesis inconsistency + asm-side layout discipline). See `memory/audit_r12_uaccess_closed_list.md` for the full closed list. SYS_PUTS now reads `UACCESS_USER_VA_TOP` from `arch/arm64/uaccess.h` so the three surfaces (burrow_map, dispatcher, SYS_PUTS) all converge on `1ull << 47` from one source.
 - **Audit-bearing per CLAUDE.md trigger surfaces (Exception entry + Page fault / mprotect / mmap + Capability checks).**
 
 ## Known caveats / footguns
