@@ -130,6 +130,7 @@ void test_elf_policy_rejection(void);
 void test_dev_boot_registration_smoke(void);
 void test_dev_lookup_unknown(void);
 void test_dev_devnone_ops_smoke(void);
+void test_dev_vtable_slot_coverage(void);
 void test_spoor_alloc_unref_round_trip(void);
 void test_spoor_ref_lifecycle(void);
 void test_spoor_clone_lifecycle(void);
@@ -421,6 +422,7 @@ struct test_case g_tests[] = {
     { "dev.boot_registration_smoke",   test_dev_boot_registration_smoke,   false, NULL },
     { "dev.lookup_unknown",            test_dev_lookup_unknown,            false, NULL },
     { "dev.devnone_ops_smoke",         test_dev_devnone_ops_smoke,         false, NULL },
+    { "dev.vtable_slot_coverage",      test_dev_vtable_slot_coverage,      false, NULL },
     { "spoor.alloc_unref_round_trip",  test_spoor_alloc_unref_round_trip,  false, NULL },
     { "spoor.ref_lifecycle",           test_spoor_ref_lifecycle,           false, NULL },
     { "spoor.clone_lifecycle",         test_spoor_clone_lifecycle,         false, NULL },

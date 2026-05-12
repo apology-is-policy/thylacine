@@ -35,6 +35,7 @@
 void test_dev_boot_registration_smoke(void);
 void test_dev_lookup_unknown(void);
 void test_dev_devnone_ops_smoke(void);
+void test_dev_vtable_slot_coverage(void);
 void test_spoor_alloc_unref_round_trip(void);
 void test_spoor_ref_lifecycle(void);
 void test_spoor_clone_lifecycle(void);
@@ -172,6 +173,76 @@ void test_dev_devnone_ops_smoke(void) {
     devnone.close(c);
 
     spoor_unref(c);
+}
+
+// dev.vtable_slot_coverage — every Dev in the bestiary fills all 16
+// op slots of the struct (ARCH §9.2). Closes the ROADMAP §6.2 exit
+// criterion "Dev vtable: all N ops dispatch correctly for cons, null,
+// zero, random, proc, ctl, ramfs" by pinning the structural property
+// that the function-pointer table is fully populated. A NULL slot on
+// any registered Dev would extinct the kernel the first time a Spoor
+// rooted at that Dev hit the missing op.
+//
+// 16 ops (ARCH §9.2 enumeration; ROADMAP wording "17 ops" is a
+// counting drift to reconcile in the status doc):
+//   3 lifecycle:   reset, init, shutdown
+//   3 namespace:   attach, walk, stat
+//   3 lifecycle2:  open, create, close
+//   4 I/O:         read, bread, write, bwrite
+//   3 admin:       remove, wstat, power
+//
+// Every registered Dev (devnone + every dev_register'd Dev) must have
+// all 16 slots non-NULL. devnone is the audit-guard stub; the rest
+// are real Devs that dispatch to their bodies.
+void test_dev_vtable_slot_coverage(void) {
+    int devs_checked = 0;
+    for (int i = 0; i < BESTIARY_MAX + 1; i++) {
+        struct Dev *d = bestiary[i];
+        if (!d) break;        // sentinel-terminated
+
+        // dc + name are metadata, not vtable ops, but we check non-empty
+        // name as a sanity guard against zero-init Devs.
+        TEST_ASSERT(d->name != NULL,
+                    "every Dev in bestiary has a non-NULL name");
+        TEST_ASSERT(d->name[0] != '\0',
+                    "every Dev's name is non-empty");
+
+        // 3 lifecycle ops.
+        TEST_ASSERT(d->reset != NULL,    "Dev has .reset");
+        TEST_ASSERT(d->init != NULL,     "Dev has .init");
+        TEST_ASSERT(d->shutdown != NULL, "Dev has .shutdown");
+
+        // 3 namespace ops.
+        TEST_ASSERT(d->attach != NULL,   "Dev has .attach");
+        TEST_ASSERT(d->walk != NULL,     "Dev has .walk");
+        TEST_ASSERT(d->stat != NULL,     "Dev has .stat");
+
+        // 3 lifecycle2 ops (open/create/close).
+        TEST_ASSERT(d->open != NULL,     "Dev has .open");
+        TEST_ASSERT(d->create != NULL,   "Dev has .create");
+        TEST_ASSERT(d->close != NULL,    "Dev has .close");
+
+        // 4 I/O ops.
+        TEST_ASSERT(d->read != NULL,     "Dev has .read");
+        TEST_ASSERT(d->bread != NULL,    "Dev has .bread");
+        TEST_ASSERT(d->write != NULL,    "Dev has .write");
+        TEST_ASSERT(d->bwrite != NULL,   "Dev has .bwrite");
+
+        // 3 admin ops.
+        TEST_ASSERT(d->remove != NULL,   "Dev has .remove");
+        TEST_ASSERT(d->wstat != NULL,    "Dev has .wstat");
+        TEST_ASSERT(d->power != NULL,    "Dev has .power");
+
+        devs_checked++;
+    }
+
+    // ARCH §9.4 enumerates v1.0's expected Devs: cons, null, zero,
+    // random, proc, ctl, ramfs + devnone. P4-A registered devnone;
+    // P4-B added cons/null/zero/random; P4-C added proc; P4-D added
+    // ctl; P4-E added ramfs. Anything less means a Dev didn't land
+    // or dev_register failed silently.
+    TEST_ASSERT(devs_checked >= 8,
+                "bestiary contains at least 8 Devs (none + cons + null + zero + random + proc + ctl + ramfs)");
 }
 
 void test_spoor_alloc_unref_round_trip(void) {
