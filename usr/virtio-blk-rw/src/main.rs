@@ -609,38 +609,13 @@ fn run_pass(
 // Entry point.
 // =============================================================================
 
-// Pre-touch the second page of our LOAD segment.
-//
-// The v1.0 kernel does not yet implement uaccess-fault recovery:
-// SYS_PUTS dereferences the user-VA pointer directly in kernel mode
-// (kernel/syscall.c::sys_puts_handler). If a .rodata string lives at
-// user-VA 0x401XXX and that page hasn't been demand-paged yet, the
-// kernel dereference takes an UNHANDLED translation fault.
-//
-// Forcing the page to fault from user mode (where userland_demand_page
-// maps it) before any SYS_PUTS makes the kernel-side dereferences hit
-// already-mapped PTEs.
-//
-// We touch ONLY 0x401000 (page 1 of the LOAD segment) because the
-// current binary's memsz rounds to 0x2000 (2 pages). Touching 0x402000
-// would land past the BURROW and SIGSEGV. If the binary later grows
-// past 0x402000 (memsz > 0x2000), extend this loop.
-//
-// Underlying fix lives in Phase 5 (uaccess-emulation in kernel syscall
-// handlers); until then, this is the per-binary discipline.
-#[inline(never)]
-fn pretouch_rodata_pages() {
-    const ROD_PAGE_1: u64 = 0x401000;
-    unsafe { let _ = core::ptr::read_volatile(ROD_PAGE_1 as *const u8); }
-}
-
 #[no_mangle]
 pub extern "C" fn rs_main() -> i64 {
-    // Pre-touch our LOAD segment's pages so SYS_PUTS doesn't kernel-
-    // fault on .rodata strings beyond page 0. (See pretouch_rodata_pages
-    // comment.)
-    pretouch_rodata_pages();
-
+    // R12-uaccess (kernel `7f78820`+): SYS_PUTS now demand-pages user
+    // VAs from kernel mode via the uaccess-fault dispatcher (see
+    // arch/arm64/uaccess.{S,c,h}). The per-binary `pretouch_rodata_pages`
+    // workaround that preceded P4-Ic7→P4-Jc is retired.
+    //
     // Phase 1: claim + map virtio-mmio bank.
     let mmio_base = match claim_virtio_mmio_bank() {
         Some(va) => va,

@@ -182,7 +182,13 @@ _exception_vectors:
     KERNEL_ENTRY
     mov     x0, sp
     bl      exception_sync_curr_el
-    b       _torpor                        /* unreached if extinction took over */
+    b       .Lexception_return           /* R12-uaccess: kernel-mode user-VA
+                                          * fault recovery returns normally; ERET
+                                          * resumes either the faulting load (on
+                                          * demand-page success) or the fixup
+                                          * label (on no-VMA/perm-deny). Pre-R12
+                                          * this slot fell through to _torpor
+                                          * because every sync extincted. */
 
     .org _exception_vectors + 0x080      /* IRQ — recoverable */
     KERNEL_ENTRY
@@ -214,7 +220,7 @@ _exception_vectors:
     KERNEL_ENTRY
     mov     x0, sp
     bl      exception_sync_curr_el
-    b       _torpor                        /* unreached if extinction took over */
+    b       .Lexception_return           /* R12-uaccess: see 0x000 slot. */
 
     .org _exception_vectors + 0x280      /* IRQ — recoverable */
     KERNEL_ENTRY

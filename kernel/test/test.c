@@ -103,6 +103,10 @@ void test_syscall_dispatch_puts_smoke(void);
 void test_syscall_dispatch_exits_ok(void);
 void test_syscall_dispatch_exits_fail(void);
 void test_syscall_dispatch_args_in_x0_to_x5(void);
+void test_uaccess_fixup_table_well_formed(void);
+void test_uaccess_fixup_lookup_known(void);
+void test_uaccess_fixup_lookup_unknown_returns_zero(void);
+void test_uaccess_load_u8_unmapped_user_va_returns_minus1(void);
 void test_fault_decode_kernel_data_translation_l2(void);
 void test_fault_decode_kernel_data_permission_write(void);
 void test_fault_decode_user_data_translation(void);
@@ -370,6 +374,16 @@ struct test_case g_tests[] = {
     { "syscall.dispatch_exits_fail",   test_syscall_dispatch_exits_fail,   false, NULL },
     { "syscall.dispatch_args_in_x0_to_x5",
                                        test_syscall_dispatch_args_in_x0_to_x5,
+                                                                           false, NULL },
+    { "uaccess.fixup_table_well_formed",
+                                       test_uaccess_fixup_table_well_formed,
+                                                                           false, NULL },
+    { "uaccess.fixup_lookup_known",    test_uaccess_fixup_lookup_known,    false, NULL },
+    { "uaccess.fixup_lookup_unknown_returns_zero",
+                                       test_uaccess_fixup_lookup_unknown_returns_zero,
+                                                                           false, NULL },
+    { "uaccess.load_u8_unmapped_user_va_returns_minus1",
+                                       test_uaccess_load_u8_unmapped_user_va_returns_minus1,
                                                                            false, NULL },
     { "fault.decode_kernel_data_translation_l2",
                                        test_fault_decode_kernel_data_translation_l2,

@@ -21,9 +21,12 @@
 #include "exception.h"
 #include "fault.h"                    // P3-C: arch_fault_handle / fault_info_decode
 #include "gic.h"
+#include "uaccess.h"                  // R12-uaccess: kernel-mode user-VA fault-fixup
 
 #include <thylacine/extinction.h>
+#include <thylacine/proc.h>           // R12-uaccess: struct Proc for demand-page synth
 #include <thylacine/syscall.h>        // P3-Ec: syscall_dispatch
+#include <thylacine/thread.h>         // R12-uaccess: current_thread()
 #include <thylacine/types.h>
 
 // Vector table from vectors.S.
@@ -108,6 +111,53 @@ void exception_sync_curr_el(struct exception_context *ctx) {
         // with the same dispatcher and the user-mode handling.
         struct fault_info fi;
         fault_info_decode(esr, far, ctx->elr, &fi);
+
+        // R12-uaccess: kernel-mode user-VA fault recovery. SYS_PUTS
+        // and similar kernel-mode user-VA dereferences may fault on
+        // a translation if the user page is in a VMA but not yet
+        // PTE-installed (lazy demand-paging hasn't fired). Pre-R12,
+        // these reached arch_fault_handle's "unhandled kernel
+        // translation fault" extinction. Now we:
+        //   1. Recognize FAR in user half + faulting PC in fixup table.
+        //   2. Synthesize a from_user=true fault_info + call
+        //      userland_demand_page on the current Proc. On success
+        //      the PTE is installed and ERET re-executes the load.
+        //   3. On demand-page failure (no VMA / perm denied / OOM),
+        //      transfer control to the fixup label by overwriting
+        //      ctx->elr — the fixup label returns -1 to the caller
+        //      (e.g. uaccess_load_u8 → -1 → SYS_PUTS returns -1).
+        // FAR's user-half check is the only thing distinguishing
+        // uaccess from a genuine kernel-pointer-corruption fault
+        // (which still extincts via arch_fault_handle below).
+        if (!fi.from_user && fi.vaddr < UACCESS_USER_VA_TOP &&
+            (fi.is_translation || fi.is_permission || fi.is_access_flag)) {
+            u64 fixup_pc = uaccess_fixup_lookup(fi.elr);
+            if (fixup_pc != 0) {
+                struct Thread *t = current_thread();
+                if (t && t->magic == THREAD_MAGIC &&
+                    t->proc && t->proc->magic == PROC_MAGIC &&
+                    t->proc->pgtable_root != 0) {
+                    // Drive demand-page on behalf of the kernel-mode
+                    // access. userland_demand_page reads vaddr +
+                    // is_write + is_instruction; from_user is not
+                    // inspected. Synthesizing the fault as
+                    // from_user=true keeps any future inspector
+                    // semantically correct.
+                    struct fault_info uf = fi;
+                    uf.from_user = true;
+                    if (userland_demand_page(t->proc, &uf) == FAULT_HANDLED) {
+                        return;   // ERET re-executes the faulting load.
+                    }
+                }
+                // Demand-page failed (no thread / no proc / no VMA /
+                // perm denied / OOM). Hand off to the primitive's
+                // fixup label so the syscall surface returns -1
+                // instead of extincting.
+                ctx->elr = fixup_pc;
+                return;
+            }
+        }
+
         enum fault_result r = arch_fault_handle(&fi);
 
         switch (r) {

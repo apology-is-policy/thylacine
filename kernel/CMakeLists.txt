@@ -21,6 +21,8 @@ set(KERNEL_SRCS
     ../arch/arm64/kaslr.c
     ../arch/arm64/exception.c
     ../arch/arm64/fault.c
+    ../arch/arm64/uaccess.c
+    ../arch/arm64/uaccess.S
     ../arch/arm64/vectors.S
     ../arch/arm64/gic.c
     ../arch/arm64/timer.c
@@ -109,6 +111,7 @@ set(KERNEL_SRCS
     test/test_virtio_net_probe.c
     test/test_virtio_net_arp.c
     test/test_virtio_net_loop.c
+    test/test_uaccess.c
 )
 
 set(KERNEL_LD_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/../arch/arm64/kernel.ld)

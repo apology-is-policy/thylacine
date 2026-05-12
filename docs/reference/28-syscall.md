@@ -54,9 +54,9 @@ Never returns.
 | `x0`  | pointer to bytes (user VA) |
 | `x1`  | byte count |
 
-Returns `len` on success; `-1` on validation failure (NULL buf, `len > 4096`).
+Returns `len` on success; `-1` on validation failure (NULL buf, `len > 4096`, kernel-half VA per R7 F127, or `vaddr + length > USER_VA_TOP` per R12-vaddr) or on uaccess fault (no VMA covers the user page / permission denied / OOM during demand-page sub-table alloc).
 
-The kernel reads `len` bytes one at a time via `uart_putc`. Reads pass through demand paging — user pages get installed if not yet present. v1.0 doesn't validate that `buf` is in a VMA; if it isn't, `userland_demand_page` returns `FAULT_UNHANDLED_USER` and `exception_sync_lower_el` extincts. Phase 5+ adds copy_from_user-style bounds + fault-recovery that translates the fault into a `-EFAULT` return.
+The kernel reads `len` bytes one at a time via `uaccess_load_u8` (`arch/arm64/uaccess.S`). Each byte read may fault if the user page is in the VMA tree but not yet PTE-installed — the kernel-mode sync fault dispatcher (`exception_sync_curr_el`) catches the fault, demand-pages the user page via `userland_demand_page`, and ERETs back to retry the `ldrb`. If demand-paging fails (no VMA / permission denied), the dispatcher transfers control to `uaccess_load_u8`'s fixup label which returns -1 to `sys_puts_handler`, which then returns -1 as the syscall result. See `docs/reference/40-uaccess.md` for the full mechanism. Pre-R12-uaccess, each userspace binary that spilled `.rodata` past page 0 had to `pretouch_rodata_pages()` from EL0 before the first SYS_PUTS — that discipline is retired.
 
 ## Implementation
 

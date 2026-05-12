@@ -19,6 +19,7 @@
 #include <thylacine/vma.h>
 
 #include "../arch/arm64/exception.h"
+#include "../arch/arm64/uaccess.h"
 #include "../arch/arm64/uart.h"
 
 // =============================================================================
@@ -68,12 +69,17 @@ static void sys_exits_handler(u64 status) {
 //     out the UART. PAN/SPAN are not configured at v1.0; the bound
 //     check is the privilege boundary on this surface.
 //
-// Bytes are written one at a time via uart_putc. v1.0 doesn't validate
-// the buffer's VMA presence within user-VA — if buf points outside any
-// VMA, the read faults in the demand-paging path; if no VMA covers it,
-// userland_demand_page returns FAULT_UNHANDLED_USER and the kernel
-// extincts at exception_sync_lower_el. Phase 5+ adds copy_from_user-
-// style validators that translate the fault into a -EFAULT return.
+// R12-uaccess: bytes are read one at a time via uaccess_load_u8, the
+// kernel-side fault-recoverable primitive (arch/arm64/uaccess.S). The
+// asm primitive's ldrb fires a translation fault if the user page is
+// in a VMA but not yet PTE-installed; exception_sync_curr_el catches
+// the fault, calls userland_demand_page to install the PTE, and
+// resumes the load. If no VMA covers the page (or any other
+// unrecoverable condition), the fault dispatcher transfers control
+// to the primitive's fixup label which returns -1, and SYS_PUTS
+// propagates that as its overall -1 return. Pre-R12, userspace
+// crates carried pretouch_rodata_pages() to read each .rodata page
+// from EL0 before calling SYS_PUTS — that workaround is now retired.
 
 // User-VA top bound for syscall pointer validation. ARM64 4-KiB granule
 // at v1.0 uses 48-bit VAs; user half is TTBR0-anchored at low VA. The
@@ -93,9 +99,19 @@ static s64 sys_puts_handler(u64 buf_va, u64 len) {
     if (buf_va + len < buf_va)                        return -1;
     if (buf_va + len > SYS_PUTS_USER_VA_TOP)          return -1;
 
-    const char *buf = (const char *)(uintptr_t)buf_va;
+    // R12-uaccess: read one byte at a time via uaccess_load_u8. The
+    // asm primitive returns 0 on success (byte in `c`) or -1 if the
+    // fault dispatcher couldn't demand-page the user VA (no VMA /
+    // perm denied / OOM during sub-table alloc). On -1 we propagate
+    // the failure to the SYS_PUTS caller and report how many bytes
+    // were successfully written via the return path's negative
+    // convention. v1.0 reports -1 (EFAULT-equivalent) regardless of
+    // partial progress; Phase 5+ may refine to a partial-write byte
+    // count once the syscall ABI gains a richer error/return surface.
     for (u64 i = 0; i < len; i++) {
-        uart_putc(buf[i]);
+        u8 c;
+        if (uaccess_load_u8(buf_va + i, &c) != 0) return -1;
+        uart_putc((char)c);
     }
     return (s64)len;
 }

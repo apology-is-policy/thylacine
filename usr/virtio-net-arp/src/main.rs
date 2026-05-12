@@ -177,18 +177,10 @@ fn dsb_sy() { unsafe { asm!("dsb sy", options(nostack, preserves_flags)) } }
 // =============================================================================
 //
 // This binary is larger than virtio-net-probe and its LOAD segment
-// spans pages 0 + 1 (objdump-confirmed at ~5.4 KiB; .text + .rodata).
-// Pre-fault page 1 from EL0 so subsequent SYS_PUTS kernel-mode reads
-// on .rodata strings past 0x401000 don't take an unhandled
-// translation fault. Touching beyond the LOAD segment is itself a
-// fault, so the touch is bounded to what we know is mapped — if a
-// future expansion pushes LOAD past 0x402000, extend this in lockstep.
-
-#[inline(never)]
-fn pretouch_rodata_pages() {
-    const ROD_PAGE_1: u64 = 0x401000;
-    unsafe { let _ = core::ptr::read_volatile(ROD_PAGE_1 as *const u8); }
-}
+// R12-uaccess (kernel `7f78820`+): SYS_PUTS demand-pages user VAs from
+// kernel mode via the uaccess-fault dispatcher (arch/arm64/uaccess.*).
+// The `pretouch_rodata_pages()` discipline that this binary used to
+// carry is retired; the kernel-side fixup is now the single mechanism.
 
 // =============================================================================
 // Diagnostics.
@@ -582,8 +574,8 @@ fn wait_and_round_trip(irq_handle: i64, slot_va: u64, ring_dma_va: u64,
 
 #[no_mangle]
 pub extern "C" fn rs_main() -> i64 {
-    pretouch_rodata_pages();
-
+    // R12-uaccess removed the pretouch_rodata_pages() workaround;
+    // SYS_PUTS handles user-VA demand-paging itself.
     let mmio_base = match claim_virtio_mmio_bank() {
         Some(va) => va,
         None => {

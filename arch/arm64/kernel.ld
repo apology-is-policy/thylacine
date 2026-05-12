@@ -78,6 +78,25 @@ SECTIONS
     /* .rodata — read-only data. MMU mapping: R. */
     .rodata : ALIGN(PAGE_SIZE) {
         *(.rodata .rodata.*)
+
+        /* R12-uaccess: kernel-mode user-VA fault-fixup table. Each
+         * entry is two s32 PC-relative offsets (op_rel, fixup_rel);
+         * arch/arm64/uaccess.c walks the
+         * [_uaccess_fixup_start, _uaccess_fixup_end) range on every
+         * kernel-mode sync fault whose FAR is in the user half.
+         * Lives in .rodata for R-only protection — the table is
+         * read at exception-time but never mutated. PC-relative
+         * encoding (cf. Linux __ex_table) keeps the table PIE-clean
+         * — no R_AARCH64_ABS64 relocs that the PIE linker rejects,
+         * and no R_AARCH64_RELATIVE entries needing a runtime
+         * fixup pass. KEEP() is defensive: even with --gc-sections
+         * off today, the section carries no symbol references from
+         * C and would otherwise be eligible for stripping by future
+         * toolchain configurations. */
+        . = ALIGN(4);
+        _uaccess_fixup_start = .;
+        KEEP(*(.uaccess_fixup))
+        _uaccess_fixup_end = .;
     }
     . = ALIGN(PAGE_SIZE);
     _rodata_end = .;

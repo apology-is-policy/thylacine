@@ -308,6 +308,12 @@ P1-F is reactive — no per-tick overhead. Cost is paid only on exceptions:
 - IRQ-driven PL011 TX (still polled). The mechanism is in place; routing the UART IRQ through `gic_attach` is post-v1.0 (the polled path is fine for the boot-and-shutdown windows; userspace consoles at Phase 5 use `/dev/cons` regardless).
 - Per-CPU exception stack — handler runs on the existing SP_EL1 (boot stack at v1.0). A stack-overflow recursion wedges the kernel without producing diagnostic output. Phase 2 introduces per-thread + per-CPU exception stacks.
 - Recoverable sync faults — Phase 2 page-fault handler with BURROW backing. `KERNEL_EXIT` and `.Lexception_return` are ready.
+
+**Implemented at R12-uaccess (Phase 4)**:
+
+- Kernel-mode user-VA fault recovery via `arch/arm64/uaccess.{S,c,h}` + `.uaccess_fixup` table. `exception_sync_curr_el` recognizes faults whose FAR is in the user half AND whose ELR is in the fixup table, demand-pages the user page via `userland_demand_page`, and either retries the load (success) or transfers control to a fault-recovery label (failure → -1 return).
+- Vector slots 0x000 + 0x200 (Sync at current EL) switched from `b _torpor` to `b .Lexception_return` so the recovery path can ERET back to the faulting (or fixup) PC. Pre-R12-uaccess, both slots assumed every kernel-mode sync extincted; the uaccess machinery is the first recoverable kernel-mode sync from current EL.
+- See `docs/reference/40-uaccess.md` for the full design.
 - Userspace exception entry — Phase 2 (lower-EL Sync becomes the syscall + page-fault path).
 - Deliberate-fault test target — P1-I.
 - SError handler at Current-EL-SPx — Phase 2 (currently extinctions; design-wise SError is for hardware-uncorrectable errors and panic is the right answer until there's a recovery story).

@@ -222,14 +222,10 @@ fn dsb_sy() {
 // Diagnostics — integer formatters mirror virtio-blk-probe.
 // =============================================================================
 //
-// NOTE: no pretouch_rodata_pages() here. The LOAD segment for this
-// binary fits within a single page (objdump confirms .text + .rodata
-// = ~3.2 KiB < 4 KiB), so every string literal lives in page 0 and
-// the kernel-mode SYS_PUTS reads are backed by the same VMA that
-// covers the entry point (page 0 is faulted in on first execution).
-// If a future virtio-net binary grows past page 0, see P4-Ic7
-// surprise #2 — the pretouch loop covers the gap until Phase 5+
-// adds uaccess-emulation.
+// R12-uaccess: SYS_PUTS demand-pages user VAs from kernel mode via the
+// uaccess-fault dispatcher (kernel `7f78820`+). The pretouch_rodata_pages
+// discipline that earlier binaries carried is retired; binaries no
+// longer need to know their own LOAD layout.
 
 fn write_hex_u32(buf: &mut [u8; 10], val: u32) {
     buf[0] = b'0';
