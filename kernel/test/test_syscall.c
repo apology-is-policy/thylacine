@@ -103,13 +103,45 @@ void test_syscall_dispatch_puts_smoke(void) {
     TEST_EXPECT_EQ(ctx.regs[0], 0ull,
         "SYS_PUTS accepts user-half VAs (R7 F127 positive case)");
 
-    // Boundary: exactly USER_VA_TOP rejected.
+    // R12-uaccess F210 close: SYS_PUTS now rejects any buf_va >=
+    // UACCESS_USER_VA_TOP (= 1<<47), matching the uaccess fault
+    // dispatcher's recovery range and burrow_map's USER_VA_TOP.
+    // Pre-F210 the bound was 1<<48 — EL0 could pass buf_va in
+    // [2^47, 2^48), pass the syscall's bound check, then take an
+    // unrecoverable kernel translation fault inside uaccess_load_u8
+    // (because the dispatcher's `fi.vaddr < UACCESS_USER_VA_TOP`
+    // check fails at that range), extincting the kernel.
+
+    // Boundary: exactly UACCESS_USER_VA_TOP rejected.
     ctx.regs[8] = SYS_PUTS;
-    ctx.regs[0] = 0x0001000000000000ull;     // = USER_VA_TOP
+    ctx.regs[0] = 0x0000800000000000ull;     // = 1<<47 = USER_VA_TOP
     ctx.regs[1] = 1;
     syscall_dispatch(&ctx);
     TEST_EXPECT_EQ((s64)ctx.regs[0], (s64)-1,
         "USER_VA_TOP itself is out-of-range (closed half-interval)");
+
+    // F210 regression: mid-gap VA in [2^47, 2^48) rejected at the
+    // syscall layer. Without the fix this passed the bound check
+    // and extincted the kernel via the dispatcher's user-VA-half
+    // check failing inside uaccess_load_u8's translation fault.
+    ctx.regs[8] = SYS_PUTS;
+    ctx.regs[0] = 0x4000000000000000ull;     // mid [2^47, 2^48)
+    ctx.regs[1] = 1;
+    syscall_dispatch(&ctx);
+    TEST_EXPECT_EQ((s64)ctx.regs[0], (s64)-1,
+        "F210: buf_va in [2^47, 2^48) must be syscall-layer rejected "
+        "(would extinct kernel via uaccess fault pre-fix)");
+
+    // F210 positive corner: the highest legal byte (last byte before
+    // USER_VA_TOP) must still be accepted at the syscall layer. We
+    // use len=0 so the validator path runs without dereferencing.
+    ctx.regs[8] = SYS_PUTS;
+    ctx.regs[0] = 0x00007FFFFFFFFFFFull;     // = USER_VA_TOP - 1
+    ctx.regs[1] = 0;                          // zero-len short-circuit
+    syscall_dispatch(&ctx);
+    TEST_EXPECT_EQ(ctx.regs[0], 0ull,
+        "F210: highest legal user byte (UACCESS_USER_VA_TOP - 1) "
+        "accepted with len=0");
 }
 
 // Child for exits_ok: calls SYS_EXITS(0) via syscall_dispatch.

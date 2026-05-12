@@ -119,9 +119,12 @@ void exception_sync_curr_el(struct exception_context *ctx) {
         // these reached arch_fault_handle's "unhandled kernel
         // translation fault" extinction. Now we:
         //   1. Recognize FAR in user half + faulting PC in fixup table.
-        //   2. Synthesize a from_user=true fault_info + call
-        //      userland_demand_page on the current Proc. On success
-        //      the PTE is installed and ERET re-executes the load.
+        //   2. Call userland_demand_page on the current Proc.
+        //      userland_demand_page reads vaddr + is_write +
+        //      is_instruction only — `from_user` is not inspected,
+        //      so the kernel-mode fi is passed through unchanged.
+        //      On success the PTE is installed and ERET re-executes
+        //      the load.
         //   3. On demand-page failure (no VMA / perm denied / OOM),
         //      transfer control to the fixup label by overwriting
         //      ctx->elr — the fixup label returns -1 to the caller
@@ -137,15 +140,17 @@ void exception_sync_curr_el(struct exception_context *ctx) {
                 if (t && t->magic == THREAD_MAGIC &&
                     t->proc && t->proc->magic == PROC_MAGIC &&
                     t->proc->pgtable_root != 0) {
-                    // Drive demand-page on behalf of the kernel-mode
-                    // access. userland_demand_page reads vaddr +
-                    // is_write + is_instruction; from_user is not
-                    // inspected. Synthesizing the fault as
-                    // from_user=true keeps any future inspector
-                    // semantically correct.
-                    struct fault_info uf = fi;
-                    uf.from_user = true;
-                    if (userland_demand_page(t->proc, &uf) == FAULT_HANDLED) {
+                    // R12-uaccess F211 close: pass `fi` (kernel-mode
+                    // fault) through unchanged rather than
+                    // synthesizing from_user=true. userland_demand_page
+                    // intentionally ignores from_user; a synthesis
+                    // here would leave fi.ec mismatched against
+                    // fi.from_user (EC_DATA_ABORT_SAME vs the
+                    // EC_DATA_ABORT_LOWER that the rest of the
+                    // fault_info contract implies for user-mode
+                    // faults). Less synthesis = less to keep
+                    // consistent.
+                    if (userland_demand_page(t->proc, &fi) == FAULT_HANDLED) {
                         return;   // ERET re-executes the faulting load.
                     }
                 }

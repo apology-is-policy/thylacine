@@ -191,8 +191,9 @@ Integration coverage comes from the existing userspace tests — `virtio-blk-rw`
 
 ## Status
 
-- **Landed** at R12-uaccess (`32367d1` substantive; hash fixup pending). 235 → 239 tests.
-- **Audit-bearing per CLAUDE.md trigger surfaces (Exception entry + Page fault / mprotect / mmap + Capability checks).** Self-audit clean across the 10 adversarial categories enumerated in the landed-chunk row (false-positive on non-uaccess kernel-mode faults, recursion if uaccess primitive faults again, demand-page side effects on synthetic from_user=true, ctx->elr overwrite race, user-VA boundary check correctness, fixup table PIE encoding correctness, SP_EL1 vs SP_EL0 SPSel discipline through `.Lexception_return`, struct uaccess_fixup_entry layout drift, linker section placement R-only enforcement, kproc-context test correctness). Formal R12-uaccess prosecutor pass deferred-or-on-finding.
+- **Landed** at R12-uaccess (`32367d1` substantive; `b5de03f` hash fixup). 235 → 239 tests.
+- **Formal R12-uaccess prosecutor pass closed** (audit-close commit pending). 0 P0 + 1 P1 + 0 P2 + 2 P3 — all 3 closed in the audit-close commit; 0 deferred. F210 P1 was a real bug: SYS_PUTS_USER_VA_TOP (2^48) and UACCESS_USER_VA_TOP (2^47) disagreed; EL0 could extinct the kernel via SYS_PUTS in `[2^47, 2^48)`. F211 + F212 were forward-compat hygiene (from_user synthesis inconsistency + asm-side layout discipline). See `memory/audit_r12_uaccess_closed_list.md` for the full closed list. SYS_PUTS now reads `UACCESS_USER_VA_TOP` from `arch/arm64/uaccess.h` so the three surfaces (burrow_map, dispatcher, SYS_PUTS) all converge on `1ull << 47` from one source.
+- **Audit-bearing per CLAUDE.md trigger surfaces (Exception entry + Page fault / mprotect / mmap + Capability checks).**
 
 ## Known caveats / footguns
 

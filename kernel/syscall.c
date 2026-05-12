@@ -81,23 +81,33 @@ static void sys_exits_handler(u64 status) {
 // crates carried pretouch_rodata_pages() to read each .rodata page
 // from EL0 before calling SYS_PUTS — that workaround is now retired.
 
-// User-VA top bound for syscall pointer validation. ARM64 4-KiB granule
-// at v1.0 uses 48-bit VAs; user half is TTBR0-anchored at low VA. The
-// EXEC_USER_STACK_TOP (0x8000_0000) sits well below this bound. Any VA
-// >= USER_VA_TOP is in the kernel-VA-only region (TTBR1 range or
-// reserved hole) and MUST NOT be dereferenced from a syscall handler.
-#define SYS_PUTS_USER_VA_TOP    0x0001000000000000ull
+// R12-uaccess F210 close: SYS_PUTS now uses the canonical
+// UACCESS_USER_VA_TOP (= USER_VA_TOP = 1ull << 47) as the syscall-layer
+// bound, matching the dispatcher's user-VA recovery range. Pre-fix,
+// SYS_PUTS_USER_VA_TOP was 0x0001000000000000ull (= 1ull << 48): EL0
+// could pass buf_va in [2^47, 2^48), pass the syscall-level check,
+// fault inside uaccess_load_u8's ldrb, and the dispatcher's
+// `fi.vaddr < UACCESS_USER_VA_TOP` check would FAIL (since the FAR
+// was ≥ 2^47), routing to arch_fault_handle's "unhandled kernel
+// translation fault" extinction. EL0 thus extincted the kernel
+// without any capability. Closes also R7 F127 with the tighter
+// bound. ARM IHI 0487 D5.2.4: with 48-bit VAs and no TBI, valid
+// TTBR0 addresses occupy bits [46:0]; bit 47 is the TTBR selector.
 
 static s64 sys_puts_handler(u64 buf_va, u64 len) {
     if (len == 0)            return 0;
     if (len > 4096)          return -1;
     if (buf_va == 0)         return -1;
 
-    // R7 F127 close: reject kernel-half VA arguments. Overflow-safe:
-    // if buf_va + len wraps past UINT64_MAX, that's also a reject.
-    if (buf_va >= SYS_PUTS_USER_VA_TOP)              return -1;
+    // R7 F127 close + R12-uaccess F210 close: reject any VA outside
+    // the user half. Overflow-safe: if buf_va + len wraps past
+    // UINT64_MAX, that's also a reject. The bound is identical to
+    // burrow_map's USER_VA_TOP and the uaccess dispatcher's
+    // UACCESS_USER_VA_TOP; if any of the three drift, the
+    // _Static_assert in arch/arm64/uaccess.c trips at build time.
+    if (buf_va >= UACCESS_USER_VA_TOP)               return -1;
     if (buf_va + len < buf_va)                        return -1;
-    if (buf_va + len > SYS_PUTS_USER_VA_TOP)          return -1;
+    if (buf_va + len > UACCESS_USER_VA_TOP)           return -1;
 
     // R12-uaccess: read one byte at a time via uaccess_load_u8. The
     // asm primitive returns 0 on success (byte in `c`) or -1 if the

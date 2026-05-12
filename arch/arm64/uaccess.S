@@ -77,6 +77,17 @@ uaccess_load_u8_fault:
 // and matches Linux's __ex_table convention. Walker decodes via
 // `(u64)&slot + (s64)slot` per slot. uaccess_fixup_lookup consults
 // this table on every kernel-mode user-VA fault.
+//
+// R12-uaccess F212 (P3) close: entry format is two .long (= 8 bytes)
+// — MUST match `sizeof(struct uaccess_fixup_entry) == 8` pinned in
+// arch/arm64/uaccess.c. If a future primitive needs a third field
+// (Linux added a u8 type discriminant in 5.x's __ex_table), update
+// the C struct + the asm emit pattern + the kernel.ld ALIGN
+// directive in the same commit. The runtime test
+// `uaccess.fixup_table_well_formed` checks `(end - start) % sizeof
+// == 0` which catches a partial-entry drift but not a uniform
+// per-entry size change — the format discipline is the primary
+// protection.
 .pushsection .uaccess_fixup, "a", @progbits
 .balign 4
 .long   uaccess_load_u8_op    - .
