@@ -43,6 +43,7 @@ set(KERNEL_SRCS
     test/test_timer.c
     test/test_hardening.c
     test/test_context.c
+    test/test_fp.c
     test/test_sched.c
     test/test_rendez.c
     test/test_smp.c

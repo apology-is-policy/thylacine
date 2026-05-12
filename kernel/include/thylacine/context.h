@@ -127,6 +127,14 @@ extern void thread_trampoline(void);
 static inline void fp_enable_this_cpu(void) {
     u64 cpacr;
     __asm__ __volatile__("mrs %0, CPACR_EL1" : "=r"(cpacr));
+    // R12-FP audit close (F168 P3): defensive masking of trap fields we
+    // don't enable. ZEN[17:16] (SVE), SMEN[25:24] (SME), TTA[28]
+    // (trace-access trap) all forced clear so SVE / SME / EL1 trace
+    // accesses TRAP at EL0+EL1 — the kernel emits neither (toolchain
+    // config), and a permissive firmware/PSCI inheriting a non-zero
+    // ZEN would let a stray SVE instruction succeed silently with
+    // uninitialized SVE state. Forward-proof at trivial cost.
+    cpacr &= ~((3ull << 16) | (3ull << 24) | (1ull << 28));
     cpacr |= (3ull << 20);  // FPEN = 0b11
     __asm__ __volatile__("msr CPACR_EL1, %0\nisb\n" :: "r"(cpacr));
 }

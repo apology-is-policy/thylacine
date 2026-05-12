@@ -169,6 +169,16 @@ cpu_switch_context:
     ldr     w11, [x1, #644]
     msr     S3_3_C4_C4_1, x10       // FPSR
     msr     S3_3_C4_C4_0, x11       // FPCR
+    // R12-FP audit close (F167 P3): isb after FPCR write so subsequent
+    // FP instructions observe the new rounding-mode / trap-enable bits.
+    // ARM ARM D8.7.5: "Direct writes to FPCR can be synchronized using
+    // an ISB instruction." Without ISB, post-switch FP instructions
+    // (in-kernel: none today; out-to-EL0 via eret: context-synchronizing
+    // by D7.1.3 K11.2.1 so unaffected) could observe stale FPCR until
+    // the next context-synchronizing event. Forward-defense for Phase 5+
+    // in-kernel FP usage (NEON memcpy variants, NEON checksums, AES
+    // intrinsics) — would otherwise produce subtle wrong-rounding bugs.
+    isb
 
     ret
 .size cpu_switch_context, . - cpu_switch_context

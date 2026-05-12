@@ -35,6 +35,8 @@ void test_timer_tick_increments(void);
 void test_hardening_detect_smoke(void);
 void test_context_create_destroy(void);
 void test_context_round_trip(void);
+void test_fp_cpacr_enabled(void);
+void test_fp_round_trip_v_regs_fpsr_fpcr(void);
 void test_sched_dispatch_smoke(void);
 void test_sched_runnable_count(void);
 void test_sched_preemption_smoke(void);
@@ -273,6 +275,9 @@ struct test_case g_tests[] = {
     { "hardening.detect_smoke",        test_hardening_detect_smoke,        false, NULL },
     { "context.create_destroy",        test_context_create_destroy,        false, NULL },
     { "context.round_trip",            test_context_round_trip,            false, NULL },
+    { "fp.cpacr_enabled",              test_fp_cpacr_enabled,              false, NULL },
+    { "fp.round_trip_v_regs_fpsr_fpcr",
+                                       test_fp_round_trip_v_regs_fpsr_fpcr, false, NULL },
     { "scheduler.dispatch_smoke",      test_sched_dispatch_smoke,          false, NULL },
     { "scheduler.runnable_count",      test_sched_runnable_count,          false, NULL },
     { "scheduler.preemption_smoke",    test_sched_preemption_smoke,        false, NULL },

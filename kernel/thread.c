@@ -69,9 +69,18 @@ void thread_init(void) {
     if (g_thread_cache) extinction("thread_init called twice");
     if (!kproc())       extinction("thread_init before proc_init");
 
+    // R12-FP audit close (F165 P2): align via `_Alignof(struct Thread)`
+    // rather than the prior hardcoded 8. struct Thread's `_Alignas(16)`
+    // on its embedded Context.fp_v requires alignof=16 for the STP/LDP-Q
+    // pairs in cpu_switch_context (ARM ARM C7.2.348: STP/LDP-Q at
+    // [Xn, #offset] require Xn + offset to be 16-aligned). With align=8,
+    // adjacent SLUB slab objects work today only because sizeof(struct
+    // Thread)=784 happens to be a multiple of 16 — a future field
+    // addition that produces a non-multiple-of-16 sizeof would silently
+    // misalign object N>0 and corrupt the first context switch.
     g_thread_cache = kmem_cache_create("thread",
                                        sizeof(struct Thread),
-                                       8,
+                                       _Alignof(struct Thread),
                                        KMEM_CACHE_PANIC_ON_FAIL);
     if (!g_thread_cache) extinction("kmem_cache_create(thread) returned NULL");
 
