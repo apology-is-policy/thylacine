@@ -217,7 +217,7 @@ Total: well under 5 ms on QEMU TCG. Boot-time impact is similar to the existing 
 
 ## Status
 
-- **Landed**: P4-L substantive at commit `(pending)`. New `usr/virtio-gpu/` crate (~430 LOC Rust) + `kernel/test/test_virtio_gpu_probe.c` (~115 LOC C) + reference doc + `tools/run-vm.sh` wires `-device virtio-gpu-device`. 241 → 242 tests; PASS × default + UBSan.
+- **Landed**: P4-L substantive at commit `e66c033`. New `usr/virtio-gpu/` crate (~430 LOC Rust) + `kernel/test/test_virtio_gpu_probe.c` (~115 LOC C) + reference doc + `tools/run-vm.sh` wires `-device virtio-gpu-device`. 241 → 242 tests; PASS × default + UBSan.
 - **Halcyon dependency closed (substrate-side)**: ROADMAP §6.2's GPU-related deliverables — "Userspace virtio-gpu driver" plus the substrate-side proof that the GPU device class composes the same hw-handle surface as blk/net/input — are now landed. The scanout-side deliverable (actually putting pixels on a framebuffer + observing them) remains open and is a Phase 8 Halcyon-prep sub-chunk.
 
 ## Known caveats
