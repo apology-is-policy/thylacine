@@ -155,6 +155,27 @@ if [[ -n "${THYLACINE_NET_DUMP:-}" ]]; then
     net_flags+=(-object "filter-dump,id=netdump0,netdev=net0,file=$THYLACINE_NET_DUMP")
 fi
 
+# P4-K: virtio-keyboard-device on the MMIO transport, for the
+# virtio-input probe. QEMU virt exposes a HID keyboard whose
+# DeviceID=18 on the virtio bus; we don't actually consume events
+# (would require -monitor send-key or QMP wiring on every CI run), but
+# initializing it to DRIVER_OK + reading config-space + classifying via
+# EV_BITS exercises a third VirtIO device class on the same composed
+# substrate.
+#
+# Slot assignment: this -device sits AFTER net_flags in the exec
+# invocation. With QEMU's reverse-creation slot allocation, disk stays
+# at slot 31, net at slot 30, keyboard lands at slot 29, virtio-rng
+# drops to slot 28. The probe scans all 32 slots so order is
+# informational. THYLACINE_NO_INPUT=1 disables for environments where
+# the device isn't desired.
+input_flags=()
+if [[ "${THYLACINE_NO_INPUT:-0}" != "1" ]]; then
+    input_flags=(
+        -device "virtio-keyboard-device,id=kbd0"
+    )
+fi
+
 # 9P host share — appears at /host inside the guest once the 9P client lands
 # (P1-A: no client yet, so the QEMU virtfs entry is benign overhead). Per
 # TOOLING.md §4 (the hot-reload mechanism). Default-on; --no-share disables.
@@ -187,6 +208,7 @@ exec qemu-system-aarch64 \
     ${ramfs_flags[@]+"${ramfs_flags[@]}"} \
     ${disk_flags[@]+"${disk_flags[@]}"} \
     ${net_flags[@]+"${net_flags[@]}"} \
+    ${input_flags[@]+"${input_flags[@]}"} \
     -device virtio-rng-device,id=rng0 \
     -device virtio-rng-pci,id=rng_pci0 \
     -nographic \

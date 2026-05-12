@@ -1,0 +1,22 @@
+[package]
+name = "virtio-input"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "virtio-input"
+path = "src/main.rs"
+
+[dependencies]
+# Third device class to compose the hw-handle SVC substrate (after
+# virtio-blk + virtio-net). Same surface, different DeviceID (18 =
+# input) + selector-based config-space + RX-only eventq.
+#
+# Probe-only (P4-K): inits the device, walks the config-space
+# selector, configures eventq with 16 pre-published RX buffers, reaches
+# DRIVER_OK, exits clean. Does NOT consume events — QEMU virt has no
+# host-side input injection wired in v1.0 (would require -monitor
+# send-key); event consumption is a future P4-K-events sub-chunk.
+libthyla-rs = { path = "../lib/libthyla-rs" }

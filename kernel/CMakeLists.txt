@@ -111,6 +111,7 @@ set(KERNEL_SRCS
     test/test_virtio_net_probe.c
     test/test_virtio_net_arp.c
     test/test_virtio_net_loop.c
+    test/test_virtio_input_probe.c
     test/test_uaccess.c
     test/test_irq_latency_bench.c
 )

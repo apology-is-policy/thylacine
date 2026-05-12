@@ -33,6 +33,18 @@ rustflags = [
     "-C", "link-arg=-z",
     "-C", "link-arg=noexecstack",
 
+    # max-page-size=4096: kernel maps userspace at 4 KiB granularity
+    # (arch/arm64/mmu.c PAGE_SIZE). rust-lld defaults to MAXPAGESIZE
+    # 0x10000 (64 KiB) on aarch64, which forces a 64 KiB zero-filled
+    # gap at the start of every PT_LOAD segment's file image. Override
+    # to 4 KiB so .text starts at file-offset 0x1000 instead of
+    # 0x10000 — shrinks every userspace Rust ELF by ~60 KiB without
+    # affecting runtime semantics. Reduces ramfs.cpio + per-blob
+    # kernel .bss reservations (the size-bound that pushed P4-K's
+    # UBSan build past the kernel.ld image+firmware ≤ 2 MiB assert).
+    "-C", "link-arg=-z",
+    "-C", "link-arg=max-page-size=4096",
+
     # Static binaries only at v1.0 (no PIE / no shared libs / no
     # dynamic linker). Phase 5+ ASLR introduces userspace PIE.
     "-C", "relocation-model=static",
