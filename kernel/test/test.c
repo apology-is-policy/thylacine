@@ -251,6 +251,14 @@ void test_9p_wire_dirent_unpack(void);
 void test_9p_wire_tstatfs_round_trip(void);
 void test_9p_wire_tfsync_round_trip(void);
 void test_9p_wire_rreaddir_data_cap_enforced(void);
+void test_9p_wire_tsymlink_round_trip(void);
+void test_9p_wire_tmknod_round_trip(void);
+void test_9p_wire_trename_round_trip(void);
+void test_9p_wire_treadlink_round_trip(void);
+void test_9p_wire_tlink_round_trip(void);
+void test_9p_wire_tmkdir_round_trip(void);
+void test_9p_wire_trenameat_round_trip(void);
+void test_9p_wire_tunlinkat_round_trip(void);
 void test_9p_session_init_destroy(void);
 void test_9p_session_version_handshake(void);
 void test_9p_session_attach_handshake(void);
@@ -284,6 +292,17 @@ void test_9p_session_fsync_round_trip(void);
 void test_9p_session_setattr_with_inflight_on_fid_refused(void);
 void test_9p_session_getattr_permits_concurrent(void);
 void test_9p_session_meta_from_unbound_fid_refused(void);
+void test_9p_session_symlink_round_trip(void);
+void test_9p_session_mknod_round_trip(void);
+void test_9p_session_rename_round_trip(void);
+void test_9p_session_readlink_round_trip(void);
+void test_9p_session_link_round_trip(void);
+void test_9p_session_mkdir_round_trip(void);
+void test_9p_session_renameat_round_trip(void);
+void test_9p_session_unlinkat_round_trip(void);
+void test_9p_session_rename_with_inflight_on_fid_refused(void);
+void test_9p_session_unlinkat_permits_concurrent(void);
+void test_9p_session_mutation_from_unbound_fid_refused(void);
 void test_9p_transport_init_destroy(void);
 void test_9p_transport_round_trip(void);
 void test_9p_transport_send_frame_size_mismatch_rejected(void);
@@ -658,6 +677,14 @@ struct test_case g_tests[] = {
     { "9p_wire.rreaddir_data_cap_enforced",
                                        test_9p_wire_rreaddir_data_cap_enforced,
                                                                            false, NULL },
+    { "9p_wire.tsymlink_round_trip",   test_9p_wire_tsymlink_round_trip,   false, NULL },
+    { "9p_wire.tmknod_round_trip",     test_9p_wire_tmknod_round_trip,     false, NULL },
+    { "9p_wire.trename_round_trip",    test_9p_wire_trename_round_trip,    false, NULL },
+    { "9p_wire.treadlink_round_trip",  test_9p_wire_treadlink_round_trip,  false, NULL },
+    { "9p_wire.tlink_round_trip",      test_9p_wire_tlink_round_trip,      false, NULL },
+    { "9p_wire.tmkdir_round_trip",     test_9p_wire_tmkdir_round_trip,     false, NULL },
+    { "9p_wire.trenameat_round_trip",  test_9p_wire_trenameat_round_trip,  false, NULL },
+    { "9p_wire.tunlinkat_round_trip",  test_9p_wire_tunlinkat_round_trip,  false, NULL },
     { "9p_session.init_destroy",       test_9p_session_init_destroy,       false, NULL },
     { "9p_session.version_handshake",  test_9p_session_version_handshake,  false, NULL },
     { "9p_session.attach_handshake",   test_9p_session_attach_handshake,   false, NULL },
@@ -724,6 +751,23 @@ struct test_case g_tests[] = {
                                                                            false, NULL },
     { "9p_session.meta_from_unbound_fid_refused",
                                        test_9p_session_meta_from_unbound_fid_refused,
+                                                                           false, NULL },
+    { "9p_session.symlink_round_trip", test_9p_session_symlink_round_trip, false, NULL },
+    { "9p_session.mknod_round_trip",   test_9p_session_mknod_round_trip,   false, NULL },
+    { "9p_session.rename_round_trip",  test_9p_session_rename_round_trip,  false, NULL },
+    { "9p_session.readlink_round_trip",test_9p_session_readlink_round_trip,false, NULL },
+    { "9p_session.link_round_trip",    test_9p_session_link_round_trip,    false, NULL },
+    { "9p_session.mkdir_round_trip",   test_9p_session_mkdir_round_trip,   false, NULL },
+    { "9p_session.renameat_round_trip",test_9p_session_renameat_round_trip,false, NULL },
+    { "9p_session.unlinkat_round_trip",test_9p_session_unlinkat_round_trip,false, NULL },
+    { "9p_session.rename_with_inflight_on_fid_refused",
+                                       test_9p_session_rename_with_inflight_on_fid_refused,
+                                                                           false, NULL },
+    { "9p_session.unlinkat_permits_concurrent",
+                                       test_9p_session_unlinkat_permits_concurrent,
+                                                                           false, NULL },
+    { "9p_session.mutation_from_unbound_fid_refused",
+                                       test_9p_session_mutation_from_unbound_fid_refused,
                                                                            false, NULL },
     { "9p_transport.init_destroy",     test_9p_transport_init_destroy,     false, NULL },
     { "9p_transport.round_trip",       test_9p_transport_round_trip,       false, NULL },

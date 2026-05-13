@@ -50,6 +50,17 @@ void test_9p_session_fsync_round_trip(void);
 void test_9p_session_setattr_with_inflight_on_fid_refused(void);
 void test_9p_session_getattr_permits_concurrent(void);
 void test_9p_session_meta_from_unbound_fid_refused(void);
+void test_9p_session_symlink_round_trip(void);
+void test_9p_session_mknod_round_trip(void);
+void test_9p_session_rename_round_trip(void);
+void test_9p_session_readlink_round_trip(void);
+void test_9p_session_link_round_trip(void);
+void test_9p_session_mkdir_round_trip(void);
+void test_9p_session_renameat_round_trip(void);
+void test_9p_session_unlinkat_round_trip(void);
+void test_9p_session_rename_with_inflight_on_fid_refused(void);
+void test_9p_session_unlinkat_permits_concurrent(void);
+void test_9p_session_mutation_from_unbound_fid_refused(void);
 
 // 4 KiB scratch buffer.
 static u8 g_buf[4096];
@@ -940,4 +951,280 @@ void test_9p_session_meta_from_unbound_fid_refused(void) {
     TEST_EXPECT_EQ(rc, -1, "statfs on unbound fid refused");
     rc = p9_session_send_fsync(&s, g_buf, sizeof(g_buf), 88, 0);
     TEST_EXPECT_EQ(rc, -1, "fsync on unbound fid refused");
+}
+
+// =============================================================================
+// Mutation family (P5-wire-mutation): end-to-end tests.
+// =============================================================================
+
+static int synth_empty_r2(u8 *out, size_t cap, u8 type, u16 tag) {
+    return synth_rmsg(out, cap, type, tag, NULL, 0);
+}
+
+static int synth_qid_r2(u8 *out, size_t cap, u8 type, u16 tag,
+                          u8 qtype, u32 qver, u64 qpath) {
+    u8 body[P9_QID_LEN];
+    body[0] = qtype;
+    for (int i = 0; i < 4; i++) body[1 + i] = (u8)((qver >> (i * 8)) & 0xff);
+    for (int i = 0; i < 8; i++) body[5 + i] = (u8)((qpath >> (i * 8)) & 0xff);
+    return synth_rmsg(out, cap, type, tag, body, sizeof(body));
+}
+
+static int synth_readlink(u8 *out, size_t cap, u16 tag,
+                            const u8 *target, u16 target_len) {
+    u8 body[256];
+    if ((size_t)target_len + 2 > sizeof(body)) return -1;
+    body[0] = (u8)(target_len & 0xff);
+    body[1] = (u8)((target_len >> 8) & 0xff);
+    for (u16 i = 0; i < target_len; i++) body[2 + i] = target[i];
+    return synth_rmsg(out, cap, P9_RREADLINK, tag, body, (size_t)(2 + target_len));
+}
+
+void test_9p_session_symlink_round_trip(void) {
+    struct p9_session s;
+    drive_session_open(&s, 0);
+    TEST_EXPECT_EQ(walk_to(&s, 40), 0, "walk to fid 40");
+
+    const u8 name[]   = {'a'};
+    const u8 symtgt[] = {'t', 'g', 't'};
+    int len = p9_session_send_symlink(&s, g_buf, sizeof(g_buf),
+                                       40, name, sizeof(name),
+                                       symtgt, sizeof(symtgt), /*gid*/ 0);
+    TEST_ASSERT(len > 0, "send_symlink ok");
+    u32 sz; u8 ty; u16 tag;
+    p9_peek_header(g_buf, (size_t)len, &sz, &ty, &tag);
+    TEST_EXPECT_EQ((u64)ty, (u64)P9_TSYMLINK, "Tsymlink type");
+
+    len = synth_qid_r2(g_buf, sizeof(g_buf), P9_RSYMLINK, tag,
+                        P9_QTSYMLINK, 0, 100);
+    struct p9_dispatch_result r;
+    int rc = p9_session_dispatch_rmsg(&s, g_buf, (size_t)len, &r);
+    TEST_EXPECT_EQ(rc, 0,                                "dispatch Rsymlink ok");
+    TEST_EXPECT_EQ((u64)r.kind, (u64)P9_TSYMLINK,        "result kind = TSYMLINK");
+    TEST_EXPECT_EQ((u64)r.created_qid.type, (u64)P9_QTSYMLINK,
+                                                         "Rsymlink created_qid.type");
+    TEST_EXPECT_EQ(r.created_qid.path, (u64)100,         "Rsymlink created_qid.path");
+}
+
+void test_9p_session_mknod_round_trip(void) {
+    struct p9_session s;
+    drive_session_open(&s, 0);
+    TEST_EXPECT_EQ(walk_to(&s, 41), 0, "walk to fid 41");
+
+    const u8 name[] = {'n'};
+    int len = p9_session_send_mknod(&s, g_buf, sizeof(g_buf),
+                                     41, name, sizeof(name),
+                                     /*mode*/ 020666u, 1, 3, /*gid*/ 0);
+    TEST_ASSERT(len > 0, "send_mknod ok");
+    u32 sz; u8 ty; u16 tag;
+    p9_peek_header(g_buf, (size_t)len, &sz, &ty, &tag);
+    TEST_EXPECT_EQ((u64)ty, (u64)P9_TMKNOD, "Tmknod type");
+
+    len = synth_qid_r2(g_buf, sizeof(g_buf), P9_RMKNOD, tag,
+                        P9_QTFILE, 0, 200);
+    struct p9_dispatch_result r;
+    int rc = p9_session_dispatch_rmsg(&s, g_buf, (size_t)len, &r);
+    TEST_EXPECT_EQ(rc, 0,                          "dispatch Rmknod ok");
+    TEST_EXPECT_EQ((u64)r.kind, (u64)P9_TMKNOD,    "result kind = TMKNOD");
+    TEST_EXPECT_EQ(r.created_qid.path, (u64)200,   "Rmknod created_qid.path");
+}
+
+void test_9p_session_rename_round_trip(void) {
+    struct p9_session s;
+    drive_session_open(&s, 0);
+    TEST_EXPECT_EQ(walk_to(&s, 42), 0, "walk to fid 42");
+    TEST_EXPECT_EQ(walk_to(&s, 43), 0, "walk to fid 43 (target dir)");
+
+    const u8 name[] = {'n', 'e', 'w'};
+    int len = p9_session_send_rename(&s, g_buf, sizeof(g_buf),
+                                      /*fid*/ 42, /*dfid*/ 43,
+                                      name, sizeof(name));
+    TEST_ASSERT(len > 0, "send_rename ok");
+    u32 sz; u8 ty; u16 tag;
+    p9_peek_header(g_buf, (size_t)len, &sz, &ty, &tag);
+    TEST_EXPECT_EQ((u64)ty, (u64)P9_TRENAME, "Trename type");
+
+    len = synth_empty_r2(g_buf, sizeof(g_buf), P9_RRENAME, tag);
+    struct p9_dispatch_result r;
+    int rc = p9_session_dispatch_rmsg(&s, g_buf, (size_t)len, &r);
+    TEST_EXPECT_EQ(rc, 0,                          "dispatch Rrename ok");
+    TEST_EXPECT_EQ((u64)r.kind, (u64)P9_TRENAME,   "result kind = TRENAME");
+    TEST_ASSERT(p9_session_fid_bound(&s, 42),      "fid 42 still bound after Rrename");
+}
+
+void test_9p_session_readlink_round_trip(void) {
+    struct p9_session s;
+    drive_session_open(&s, 0);
+    TEST_EXPECT_EQ(walk_to(&s, 44), 0, "walk to fid 44");
+
+    int len = p9_session_send_readlink(&s, g_buf, sizeof(g_buf), 44);
+    TEST_ASSERT(len > 0, "send_readlink ok");
+    u32 sz; u8 ty; u16 tag;
+    p9_peek_header(g_buf, (size_t)len, &sz, &ty, &tag);
+    TEST_EXPECT_EQ((u64)ty, (u64)P9_TREADLINK, "Treadlink type");
+
+    const u8 tgt[] = {'/', 't', 'g', 't'};
+    len = synth_readlink(g_buf, sizeof(g_buf), tag, tgt, (u16)sizeof(tgt));
+    struct p9_dispatch_result r;
+    int rc = p9_session_dispatch_rmsg(&s, g_buf, (size_t)len, &r);
+    TEST_EXPECT_EQ(rc, 0,                                          "dispatch Rreadlink ok");
+    TEST_EXPECT_EQ((u64)r.kind, (u64)P9_TREADLINK,                 "result kind = TREADLINK");
+    TEST_EXPECT_EQ((u64)r.readlink_target_len, (u64)sizeof(tgt),   "Rreadlink target len");
+    TEST_ASSERT(r.readlink_target != NULL,                         "Rreadlink target non-null");
+    for (size_t i = 0; i < sizeof(tgt); i++) {
+        TEST_ASSERT(r.readlink_target[i] == tgt[i], "Rreadlink target byte mismatch");
+    }
+}
+
+void test_9p_session_link_round_trip(void) {
+    struct p9_session s;
+    drive_session_open(&s, 0);
+    TEST_EXPECT_EQ(walk_to(&s, 45), 0, "walk to fid 45");
+    TEST_EXPECT_EQ(walk_to(&s, 46), 0, "walk to fid 46");
+
+    const u8 name[] = {'a'};
+    int len = p9_session_send_link(&s, g_buf, sizeof(g_buf),
+                                    /*dfid*/ 45, /*fid*/ 46,
+                                    name, sizeof(name));
+    TEST_ASSERT(len > 0, "send_link ok");
+    u32 sz; u8 ty; u16 tag;
+    p9_peek_header(g_buf, (size_t)len, &sz, &ty, &tag);
+    TEST_EXPECT_EQ((u64)ty, (u64)P9_TLINK, "Tlink type");
+
+    len = synth_empty_r2(g_buf, sizeof(g_buf), P9_RLINK, tag);
+    struct p9_dispatch_result r;
+    int rc = p9_session_dispatch_rmsg(&s, g_buf, (size_t)len, &r);
+    TEST_EXPECT_EQ(rc, 0,                       "dispatch Rlink ok");
+    TEST_EXPECT_EQ((u64)r.kind, (u64)P9_TLINK,  "result kind = TLINK");
+}
+
+void test_9p_session_mkdir_round_trip(void) {
+    struct p9_session s;
+    drive_session_open(&s, 0);
+    TEST_EXPECT_EQ(walk_to(&s, 47), 0, "walk to fid 47");
+
+    const u8 name[] = {'d'};
+    int len = p9_session_send_mkdir(&s, g_buf, sizeof(g_buf),
+                                     47, name, sizeof(name),
+                                     /*mode*/ 0755, /*gid*/ 0);
+    TEST_ASSERT(len > 0, "send_mkdir ok");
+    u32 sz; u8 ty; u16 tag;
+    p9_peek_header(g_buf, (size_t)len, &sz, &ty, &tag);
+    TEST_EXPECT_EQ((u64)ty, (u64)P9_TMKDIR, "Tmkdir type");
+
+    len = synth_qid_r2(g_buf, sizeof(g_buf), P9_RMKDIR, tag,
+                        P9_QTDIR, 0, 300);
+    struct p9_dispatch_result r;
+    int rc = p9_session_dispatch_rmsg(&s, g_buf, (size_t)len, &r);
+    TEST_EXPECT_EQ(rc, 0,                                "dispatch Rmkdir ok");
+    TEST_EXPECT_EQ((u64)r.kind, (u64)P9_TMKDIR,          "result kind = TMKDIR");
+    TEST_EXPECT_EQ((u64)r.created_qid.type, (u64)P9_QTDIR, "Rmkdir created_qid.type");
+    TEST_EXPECT_EQ(r.created_qid.path, (u64)300,         "Rmkdir created_qid.path");
+}
+
+void test_9p_session_renameat_round_trip(void) {
+    struct p9_session s;
+    drive_session_open(&s, 0);
+    TEST_EXPECT_EQ(walk_to(&s, 48), 0, "walk to fid 48");
+    TEST_EXPECT_EQ(walk_to(&s, 49), 0, "walk to fid 49");
+
+    const u8 oldn[] = {'o'};
+    const u8 newn[] = {'n'};
+    int len = p9_session_send_renameat(&s, g_buf, sizeof(g_buf),
+                                        48, oldn, sizeof(oldn),
+                                        49, newn, sizeof(newn));
+    TEST_ASSERT(len > 0, "send_renameat ok");
+    u32 sz; u8 ty; u16 tag;
+    p9_peek_header(g_buf, (size_t)len, &sz, &ty, &tag);
+    TEST_EXPECT_EQ((u64)ty, (u64)P9_TRENAMEAT, "Trenameat type");
+
+    len = synth_empty_r2(g_buf, sizeof(g_buf), P9_RRENAMEAT, tag);
+    struct p9_dispatch_result r;
+    int rc = p9_session_dispatch_rmsg(&s, g_buf, (size_t)len, &r);
+    TEST_EXPECT_EQ(rc, 0,                              "dispatch Rrenameat ok");
+    TEST_EXPECT_EQ((u64)r.kind, (u64)P9_TRENAMEAT,     "result kind = TRENAMEAT");
+}
+
+void test_9p_session_unlinkat_round_trip(void) {
+    struct p9_session s;
+    drive_session_open(&s, 0);
+    TEST_EXPECT_EQ(walk_to(&s, 50), 0, "walk to fid 50");
+
+    const u8 name[] = {'x'};
+    int len = p9_session_send_unlinkat(&s, g_buf, sizeof(g_buf),
+                                        50, name, sizeof(name), /*flags*/ 0);
+    TEST_ASSERT(len > 0, "send_unlinkat ok");
+    u32 sz; u8 ty; u16 tag;
+    p9_peek_header(g_buf, (size_t)len, &sz, &ty, &tag);
+    TEST_EXPECT_EQ((u64)ty, (u64)P9_TUNLINKAT, "Tunlinkat type");
+
+    len = synth_empty_r2(g_buf, sizeof(g_buf), P9_RUNLINKAT, tag);
+    struct p9_dispatch_result r;
+    int rc = p9_session_dispatch_rmsg(&s, g_buf, (size_t)len, &r);
+    TEST_EXPECT_EQ(rc, 0,                              "dispatch Runlinkat ok");
+    TEST_EXPECT_EQ((u64)r.kind, (u64)P9_TUNLINKAT,     "result kind = TUNLINKAT");
+}
+
+void test_9p_session_rename_with_inflight_on_fid_refused(void) {
+    struct p9_session s;
+    drive_session_open(&s, 0);
+    TEST_EXPECT_EQ(walk_to(&s, 51), 0, "walk to fid 51");
+    TEST_EXPECT_EQ(walk_to(&s, 52), 0, "walk to fid 52");
+
+    const u8 name[] = {'a'};
+    int len = p9_session_send_rename(&s, g_buf, sizeof(g_buf),
+                                      51, 52, name, sizeof(name));
+    TEST_ASSERT(len > 0, "first rename accepted");
+    int rc = p9_session_send_rename(&s, g_buf, sizeof(g_buf),
+                                     51, 52, name, sizeof(name));
+    TEST_EXPECT_EQ(rc, -1, "concurrent rename on same fid refused");
+}
+
+void test_9p_session_unlinkat_permits_concurrent(void) {
+    struct p9_session s;
+    drive_session_open(&s, 0);
+    TEST_EXPECT_EQ(walk_to(&s, 53), 0, "walk to fid 53");
+
+    const u8 n1[] = {'a'};
+    const u8 n2[] = {'b'};
+    int len1 = p9_session_send_unlinkat(&s, g_buf, sizeof(g_buf),
+                                         53, n1, sizeof(n1), 0);
+    TEST_ASSERT(len1 > 0, "first unlinkat accepted");
+    static u8 buf2[1024];
+    int len2 = p9_session_send_unlinkat(&s, buf2, sizeof(buf2),
+                                         53, n2, sizeof(n2), 0);
+    TEST_ASSERT(len2 > 0, "concurrent unlinkat on same dfid (different name) accepted");
+    TEST_EXPECT_EQ((u64)p9_session_inflight(&s), (u64)2, "two unlinkats inflight");
+}
+
+void test_9p_session_mutation_from_unbound_fid_refused(void) {
+    struct p9_session s;
+    drive_session_open(&s, 0);
+    // Fid 88 never bound.
+    const u8 name[] = {'x'};
+    int rc;
+    rc = p9_session_send_symlink(&s, g_buf, sizeof(g_buf), 88,
+                                   name, sizeof(name), name, sizeof(name), 0);
+    TEST_EXPECT_EQ(rc, -1, "symlink on unbound fid refused");
+    rc = p9_session_send_mknod(&s, g_buf, sizeof(g_buf), 88,
+                                name, sizeof(name), 0, 0, 0, 0);
+    TEST_EXPECT_EQ(rc, -1, "mknod on unbound dfid refused");
+    rc = p9_session_send_rename(&s, g_buf, sizeof(g_buf), 88, 0,
+                                 name, sizeof(name));
+    TEST_EXPECT_EQ(rc, -1, "rename on unbound fid refused");
+    rc = p9_session_send_readlink(&s, g_buf, sizeof(g_buf), 88);
+    TEST_EXPECT_EQ(rc, -1, "readlink on unbound fid refused");
+    rc = p9_session_send_link(&s, g_buf, sizeof(g_buf), 88, 0,
+                               name, sizeof(name));
+    TEST_EXPECT_EQ(rc, -1, "link on unbound dfid refused");
+    rc = p9_session_send_mkdir(&s, g_buf, sizeof(g_buf), 88,
+                                name, sizeof(name), 0, 0);
+    TEST_EXPECT_EQ(rc, -1, "mkdir on unbound dfid refused");
+    rc = p9_session_send_renameat(&s, g_buf, sizeof(g_buf),
+                                    88, name, sizeof(name),
+                                    88, name, sizeof(name));
+    TEST_EXPECT_EQ(rc, -1, "renameat on unbound olddirfid refused");
+    rc = p9_session_send_unlinkat(&s, g_buf, sizeof(g_buf), 88,
+                                    name, sizeof(name), 0);
+    TEST_EXPECT_EQ(rc, -1, "unlinkat on unbound dfid refused");
 }

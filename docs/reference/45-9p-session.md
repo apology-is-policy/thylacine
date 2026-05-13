@@ -41,7 +41,10 @@ CLOSED  (terminal)
 | `SendIO(t, fid)` — read/write | `p9_session_send_read` + `p9_session_send_write` — Send-time precondition: fid bound. Concurrent ops on same fid permitted (offset is explicit on the wire). |
 | `SendIO(t, fid)` — getattr/statfs/readdir/fsync | `p9_session_send_getattr` / `_statfs` / `_readdir` / `_fsync` — Send-time precondition: fid bound. Concurrent ops on same fid permitted (read-shaped; no server-side fid state mutation on canonical identity). |
 | `SendIO(t, fid)` — setattr | `p9_session_send_setattr` — Send-time precondition: fid bound + no other in-flight op on fid (mutation-shaped: server-side attribute write is exclusive). |
-| `ReceiveOp(t)` | `p9_session_dispatch_rmsg` — tag-indexed lookup pairs Rmsg with correct outstanding op; Rlerror surfacing; type-mismatch rejected. IO + metadata R-msgs (Rlopen/Rlcreate/Rread/Rwrite/Rgetattr/Rsetattr/Rreaddir/Rstatfs/Rfsync) populate the corresponding fields in `struct p9_dispatch_result` without mutating the fid table. |
+| `SendIO(t, fid)` — symlink / mknod / link / mkdir / unlinkat / renameat | `p9_session_send_symlink` / `_mknod` / `_link` / `_mkdir` / `_unlinkat` / `_renameat` — Send-time precondition: dfid (and fid for link) bound. Concurrent ops on same dfid permitted (server serializes per-entry internally). Dispatcher: qid-shape Rmsgs (Rsymlink/Rmknod/Rmkdir) populate `out->created_qid`; empty-body Rmsgs (Rlink/Runlinkat/Rrenameat) are header-only validation. |
+| `SendIO(t, fid)` — readlink | `p9_session_send_readlink` — Send-time precondition: fid bound. Concurrent permitted (read-shaped). Dispatcher: surfaces zero-copy `out->readlink_target` + `out->readlink_target_len`. |
+| `SendIO(t, fid)` — rename | `p9_session_send_rename` — Send-time precondition: fid + dfid bound + no other in-flight op on fid (mutation-shaped: server-side identity of fid moves). |
+| `ReceiveOp(t)` | `p9_session_dispatch_rmsg` — tag-indexed lookup pairs Rmsg with correct outstanding op; Rlerror surfacing; type-mismatch rejected. IO + metadata + mutation R-msgs (Rlopen/Rlcreate/Rread/Rwrite/Rgetattr/Rsetattr/Rreaddir/Rstatfs/Rfsync/Rsymlink/Rmknod/Rrename/Rreadlink/Rlink/Rmkdir/Rrenameat/Runlinkat) populate the corresponding fields in `struct p9_dispatch_result` without mutating the client-side fid table. |
 
 ## Invariants the module upholds
 
@@ -93,6 +96,31 @@ int  p9_session_send_statfs (struct p9_session *s, u8 *out, size_t cap,
                               u32 fid);
 int  p9_session_send_fsync  (struct p9_session *s, u8 *out, size_t cap,
                               u32 fid, u32 datasync);
+// Mutation family (P5-wire-mutation).
+int  p9_session_send_symlink (struct p9_session *s, u8 *out, size_t cap,
+                               u32 fid, const u8 *name, size_t name_len,
+                               const u8 *symtgt, size_t symtgt_len, u32 gid);
+int  p9_session_send_mknod   (struct p9_session *s, u8 *out, size_t cap,
+                               u32 dfid, const u8 *name, size_t name_len,
+                               u32 mode, u32 major, u32 minor, u32 gid);
+int  p9_session_send_rename  (struct p9_session *s, u8 *out, size_t cap,
+                               u32 fid, u32 dfid,
+                               const u8 *name, size_t name_len);
+int  p9_session_send_readlink(struct p9_session *s, u8 *out, size_t cap, u32 fid);
+int  p9_session_send_link    (struct p9_session *s, u8 *out, size_t cap,
+                               u32 dfid, u32 fid,
+                               const u8 *name, size_t name_len);
+int  p9_session_send_mkdir   (struct p9_session *s, u8 *out, size_t cap,
+                               u32 dfid, const u8 *name, size_t name_len,
+                               u32 mode, u32 gid);
+int  p9_session_send_renameat(struct p9_session *s, u8 *out, size_t cap,
+                               u32 olddirfid,
+                               const u8 *oldname, size_t oldname_len,
+                               u32 newdirfid,
+                               const u8 *newname, size_t newname_len);
+int  p9_session_send_unlinkat(struct p9_session *s, u8 *out, size_t cap,
+                               u32 dfid, const u8 *name, size_t name_len,
+                               u32 flags);
 
 // Receive-side: dispatch by tag, apply state mutation, surface result.
 int  p9_session_dispatch_rmsg(struct p9_session *s,
@@ -136,7 +164,10 @@ struct p9_outstanding {
     u8   kind;     // P9_TVERSION / P9_TATTACH / P9_TWALK / P9_TCLUNK /
                    // P9_TLOPEN / P9_TLCREATE / P9_TREAD / P9_TWRITE /
                    // P9_TGETATTR / P9_TSETATTR / P9_TREADDIR /
-                   // P9_TSTATFS / P9_TFSYNC
+                   // P9_TSTATFS / P9_TFSYNC /
+                   // P9_TSYMLINK / P9_TMKNOD / P9_TRENAME /
+                   // P9_TREADLINK / P9_TLINK / P9_TMKDIR /
+                   // P9_TRENAMEAT / P9_TUNLINKAT
     u32  fid;      // primary target
     u32  new_fid;  // walk dest (== fid for non-walk)
     u32  op_id;    // spec op_id
@@ -147,7 +178,7 @@ Allocation: caller-managed. The kernel handle-table layer (P5-attach) wraps each
 
 ## Tests
 
-33 tests in `kernel/test/test_9p_session.c`:
+44 tests in `kernel/test/test_9p_session.c`:
 
 | Test | Covers |
 |---|---|
@@ -184,6 +215,17 @@ Allocation: caller-managed. The kernel handle-table layer (P5-attach) wraps each
 | `9p_session.setattr_with_inflight_on_fid_refused` | concurrent Tsetattr on same fid → `-1` (mutation-exclusive) |
 | `9p_session.getattr_permits_concurrent` | two Tgetattr on same fid → both accepted (read-shaped) |
 | `9p_session.meta_from_unbound_fid_refused` | all 5 metadata ops on unbound fid → `-1` |
+| `9p_session.symlink_round_trip` | Tsymlink→Rsymlink; created_qid surfaced |
+| `9p_session.mknod_round_trip` | Tmknod→Rmknod; created_qid surfaced |
+| `9p_session.rename_round_trip` | Trename→Rrename (header-only); fid stays bound |
+| `9p_session.readlink_round_trip` | Treadlink→Rreadlink; zero-copy target surfaced |
+| `9p_session.link_round_trip` | Tlink→Rlink (header-only) |
+| `9p_session.mkdir_round_trip` | Tmkdir→Rmkdir; created_qid surfaced |
+| `9p_session.renameat_round_trip` | Trenameat→Rrenameat (header-only) |
+| `9p_session.unlinkat_round_trip` | Tunlinkat→Runlinkat (header-only) |
+| `9p_session.rename_with_inflight_on_fid_refused` | concurrent Trename on same fid → `-1` |
+| `9p_session.unlinkat_permits_concurrent` | two Tunlinkat on same dfid (different names) → both accepted |
+| `9p_session.mutation_from_unbound_fid_refused` | all 8 mutation ops on unbound fid → `-1` |
 
 The tests use synthesized Rmsg buffers (helper `synth_*` functions in the test file) to drive the dispatcher without an actual server. P5-transport will provide the actual byte-pipeline.
 
@@ -211,6 +253,7 @@ The tests use synthesized Rmsg buffers (helper `synth_*` functions in the test f
 | Spec invariants I-10 + I-11 + OutOfOrderCorrectness + FlowControl | **Pinned (P5-session)** |
 | IO family Send/Receive (Tlopen / Tlcreate / Tread / Twrite) | **Landed (P5-wire-io)** |
 | Metadata family Send/Receive (Tgetattr / Tsetattr / Treaddir / Tstatfs / Tfsync) | **Landed (P5-wire-meta)** |
+| Mutation family Send/Receive (Tsymlink / Tmknod / Trename / Treadlink / Tlink / Tmkdir / Trenameat / Tunlinkat) | **Landed (P5-wire-mutation)** |
 | Mutation family | Phase 5+ (with P5-wire-mutation) |
 | Lock family + Xattr family | Phase 5+ (with P5-wire-lock / -xattr) |
 | Stratum extensions (Tsync / Treflink / Tbind / Tunbind / Tfallocate / Tfadvise) | Phase 5+ (with P5-wire-stratum-ext) |

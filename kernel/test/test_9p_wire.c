@@ -41,6 +41,14 @@ void test_9p_wire_dirent_unpack(void);
 void test_9p_wire_tstatfs_round_trip(void);
 void test_9p_wire_tfsync_round_trip(void);
 void test_9p_wire_rreaddir_data_cap_enforced(void);
+void test_9p_wire_tsymlink_round_trip(void);
+void test_9p_wire_tmknod_round_trip(void);
+void test_9p_wire_trename_round_trip(void);
+void test_9p_wire_treadlink_round_trip(void);
+void test_9p_wire_tlink_round_trip(void);
+void test_9p_wire_tmkdir_round_trip(void);
+void test_9p_wire_trenameat_round_trip(void);
+void test_9p_wire_tunlinkat_round_trip(void);
 
 // 4 KiB scratch buffer; every message we build at v1.0 fits in this
 // (Tattach with full-length uname+aname stays under 600 bytes;
@@ -895,4 +903,197 @@ void test_9p_wire_rreaddir_data_cap_enforced(void) {
     const u8 *data_ptr = NULL;
     int rc = p9_parse_rreaddir(g_buf, r_total, &tag_out, &count_out, &data_ptr, 512u);
     TEST_EXPECT_EQ(rc, -1, "Rreaddir count > data_cap rejected (R111)");
+}
+
+// =============================================================================
+// Mutation family (P5-wire-mutation): round-trips for each of the 8 ops.
+// =============================================================================
+
+// Helper: synthesize a header-only response (Rrename / Rrenameat / Rlink /
+// Runlinkat). Writes a 7-byte frame.
+static void synth_empty_r(u8 *buf, u8 type, u16 tag) {
+    buf[0] = 7; buf[1] = 0; buf[2] = 0; buf[3] = 0;
+    buf[4] = type;
+    buf[5] = (u8)(tag & 0xff);
+    buf[6] = (u8)((tag >> 8) & 0xff);
+}
+
+// Helper: synthesize a qid-only response (Rsymlink / Rmknod / Rmkdir).
+static void synth_qid_r(u8 *buf, u8 type, u16 tag,
+                         u8 qtype, u32 qver, u64 qpath) {
+    size_t total = P9_HDR_LEN + P9_QID_LEN;
+    buf[0] = (u8)(total & 0xff);
+    buf[1] = 0; buf[2] = 0; buf[3] = 0;
+    buf[4] = type;
+    buf[5] = (u8)(tag & 0xff);
+    buf[6] = (u8)((tag >> 8) & 0xff);
+    buf[7] = qtype;
+    for (int i = 0; i < 4; i++) buf[8 + i] = (u8)((qver >> (i * 8)) & 0xff);
+    for (int i = 0; i < 8; i++) buf[12 + i] = (u8)((qpath >> (i * 8)) & 0xff);
+}
+
+void test_9p_wire_tsymlink_round_trip(void) {
+    const u8 name[]   = {'l', 'i', 'n', 'k'};
+    const u8 symtgt[] = {'.', '.', '/', 't', 'g', 't'};
+    int total = p9_build_tsymlink(g_buf, sizeof(g_buf), 0x0030,
+                                   /*fid*/ 5,
+                                   name, sizeof(name),
+                                   symtgt, sizeof(symtgt),
+                                   /*gid*/ 1000);
+    // hdr(7) + fid(4) + name(2+4) + symtgt(2+6) + gid(4) = 29
+    TEST_EXPECT_EQ(total, 29, "Tsymlink total len");
+    TEST_EXPECT_EQ((u64)g_buf[4], (u64)P9_TSYMLINK, "Tsymlink type");
+
+    synth_qid_r(g_buf, P9_RSYMLINK, 0x0030, P9_QTSYMLINK, 0, 444);
+    u16 tag_out = 0;
+    struct p9_qid q = { 0 };
+    int rc = p9_parse_rsymlink(g_buf, P9_HDR_LEN + P9_QID_LEN, &tag_out, &q);
+    TEST_EXPECT_EQ(rc, 0,                            "Rsymlink parse ok");
+    TEST_EXPECT_EQ((u64)tag_out, (u64)0x0030,        "Rsymlink tag");
+    TEST_EXPECT_EQ((u64)q.type, (u64)P9_QTSYMLINK,   "Rsymlink qid.type");
+    TEST_EXPECT_EQ(q.path, (u64)444,                 "Rsymlink qid.path");
+}
+
+void test_9p_wire_tmknod_round_trip(void) {
+    const u8 name[] = {'n', 'u', 'l', 'l'};
+    int total = p9_build_tmknod(g_buf, sizeof(g_buf), 0x0031,
+                                 /*dfid*/ 5,
+                                 name, sizeof(name),
+                                 /*mode*/  020666u,    // S_IFCHR | 0666
+                                 /*major*/ 1, /*minor*/ 3,
+                                 /*gid*/   0);
+    // hdr(7) + dfid(4) + name(2+4) + mode(4) + major(4) + minor(4) + gid(4) = 33
+    TEST_EXPECT_EQ(total, 33, "Tmknod total len");
+    TEST_EXPECT_EQ((u64)g_buf[4], (u64)P9_TMKNOD, "Tmknod type");
+
+    synth_qid_r(g_buf, P9_RMKNOD, 0x0031, P9_QTFILE, 0, 555);
+    u16 tag_out = 0;
+    struct p9_qid q = { 0 };
+    int rc = p9_parse_rmknod(g_buf, P9_HDR_LEN + P9_QID_LEN, &tag_out, &q);
+    TEST_EXPECT_EQ(rc, 0,                          "Rmknod parse ok");
+    TEST_EXPECT_EQ(q.path, (u64)555,               "Rmknod qid.path");
+}
+
+void test_9p_wire_trename_round_trip(void) {
+    const u8 name[] = {'n', 'e', 'w'};
+    int total = p9_build_trename(g_buf, sizeof(g_buf), 0x0032,
+                                  /*fid*/ 7, /*dfid*/ 5,
+                                  name, sizeof(name));
+    // hdr(7) + fid(4) + dfid(4) + name(2+3) = 20
+    TEST_EXPECT_EQ(total, 20, "Trename total len");
+    TEST_EXPECT_EQ((u64)g_buf[4], (u64)P9_TRENAME, "Trename type");
+
+    synth_empty_r(g_buf, P9_RRENAME, 0x0032);
+    u16 tag_out = 0;
+    int rc = p9_parse_rrename(g_buf, 7, &tag_out);
+    TEST_EXPECT_EQ(rc, 0,                          "Rrename parse ok");
+    TEST_EXPECT_EQ((u64)tag_out, (u64)0x0032,      "Rrename tag");
+}
+
+void test_9p_wire_treadlink_round_trip(void) {
+    int total = p9_build_treadlink(g_buf, sizeof(g_buf), 0x0033, /*fid*/ 9);
+    // hdr(7) + fid(4) = 11
+    TEST_EXPECT_EQ(total, 11, "Treadlink total len");
+    TEST_EXPECT_EQ((u64)g_buf[4], (u64)P9_TREADLINK, "Treadlink type");
+
+    // Synthesize Rreadlink: header + str("/etc/hostname") = 7 + 2 + 13 = 22.
+    const u8 tgt[] = {'/', 'e', 't', 'c', '/', 'h', 'o', 's', 't', 'n', 'a', 'm', 'e'};
+    size_t r_total = P9_HDR_LEN + 2 + sizeof(tgt);
+    g_buf[0] = (u8)(r_total & 0xff);
+    g_buf[1] = 0; g_buf[2] = 0; g_buf[3] = 0;
+    g_buf[4] = P9_RREADLINK;
+    g_buf[5] = 0x33; g_buf[6] = 0;
+    int rc = p9_pack_str(g_buf + P9_HDR_LEN, sizeof(g_buf) - P9_HDR_LEN, tgt, sizeof(tgt));
+    TEST_EXPECT_EQ(rc, 2 + (int)sizeof(tgt), "synth Rreadlink target");
+
+    u16 tag_out = 0;
+    const u8 *target_ptr = NULL;
+    u16 target_len = 0;
+    rc = p9_parse_rreadlink(g_buf, r_total, &tag_out, &target_ptr, &target_len);
+    TEST_EXPECT_EQ(rc, 0,                                    "Rreadlink parse ok");
+    TEST_EXPECT_EQ((u64)tag_out, (u64)0x0033,                "Rreadlink tag");
+    TEST_EXPECT_EQ((u64)target_len, (u64)sizeof(tgt),        "Rreadlink target len");
+    TEST_ASSERT(target_ptr != NULL,                          "Rreadlink target non-null");
+    for (size_t i = 0; i < sizeof(tgt); i++) {
+        TEST_ASSERT(target_ptr[i] == tgt[i], "Rreadlink target byte mismatch");
+    }
+}
+
+void test_9p_wire_tlink_round_trip(void) {
+    const u8 name[] = {'a', 'l', 'i', 'a', 's'};
+    int total = p9_build_tlink(g_buf, sizeof(g_buf), 0x0034,
+                                /*dfid*/ 5, /*fid*/ 11,
+                                name, sizeof(name));
+    // hdr(7) + dfid(4) + fid(4) + name(2+5) = 22
+    TEST_EXPECT_EQ(total, 22, "Tlink total len");
+    TEST_EXPECT_EQ((u64)g_buf[4], (u64)P9_TLINK, "Tlink type");
+
+    synth_empty_r(g_buf, P9_RLINK, 0x0034);
+    u16 tag_out = 0;
+    int rc = p9_parse_rlink(g_buf, 7, &tag_out);
+    TEST_EXPECT_EQ(rc, 0,                          "Rlink parse ok");
+    TEST_EXPECT_EQ((u64)tag_out, (u64)0x0034,      "Rlink tag");
+}
+
+void test_9p_wire_tmkdir_round_trip(void) {
+    const u8 name[] = {'s', 'u', 'b'};
+    int total = p9_build_tmkdir(g_buf, sizeof(g_buf), 0x0035,
+                                 /*dfid*/ 5,
+                                 name, sizeof(name),
+                                 /*mode*/ 0755, /*gid*/ 0);
+    // hdr(7) + dfid(4) + name(2+3) + mode(4) + gid(4) = 24
+    TEST_EXPECT_EQ(total, 24, "Tmkdir total len");
+    TEST_EXPECT_EQ((u64)g_buf[4], (u64)P9_TMKDIR, "Tmkdir type");
+
+    synth_qid_r(g_buf, P9_RMKDIR, 0x0035, P9_QTDIR, 0, 666);
+    u16 tag_out = 0;
+    struct p9_qid q = { 0 };
+    int rc = p9_parse_rmkdir(g_buf, P9_HDR_LEN + P9_QID_LEN, &tag_out, &q);
+    TEST_EXPECT_EQ(rc, 0,                          "Rmkdir parse ok");
+    TEST_EXPECT_EQ((u64)q.type, (u64)P9_QTDIR,     "Rmkdir qid.type");
+    TEST_EXPECT_EQ(q.path, (u64)666,               "Rmkdir qid.path");
+}
+
+void test_9p_wire_trenameat_round_trip(void) {
+    const u8 oldn[] = {'o', 'l', 'd'};
+    const u8 newn[] = {'n', 'e', 'w'};
+    int total = p9_build_trenameat(g_buf, sizeof(g_buf), 0x0036,
+                                    /*olddirfid*/ 5,
+                                    oldn, sizeof(oldn),
+                                    /*newdirfid*/ 6,
+                                    newn, sizeof(newn));
+    // hdr(7) + olddirfid(4) + oldname(2+3) + newdirfid(4) + newname(2+3) = 25
+    TEST_EXPECT_EQ(total, 25, "Trenameat total len");
+    TEST_EXPECT_EQ((u64)g_buf[4], (u64)P9_TRENAMEAT, "Trenameat type");
+
+    synth_empty_r(g_buf, P9_RRENAMEAT, 0x0036);
+    u16 tag_out = 0;
+    int rc = p9_parse_rrenameat(g_buf, 7, &tag_out);
+    TEST_EXPECT_EQ(rc, 0,                          "Rrenameat parse ok");
+    TEST_EXPECT_EQ((u64)tag_out, (u64)0x0036,      "Rrenameat tag");
+}
+
+void test_9p_wire_tunlinkat_round_trip(void) {
+    const u8 name[] = {'r', 'm'};
+    int total = p9_build_tunlinkat(g_buf, sizeof(g_buf), 0x0037,
+                                    /*dfid*/ 5,
+                                    name, sizeof(name),
+                                    /*flags*/ 0);
+    // hdr(7) + dfid(4) + name(2+2) + flags(4) = 19
+    TEST_EXPECT_EQ(total, 19, "Tunlinkat total len");
+    TEST_EXPECT_EQ((u64)g_buf[4], (u64)P9_TUNLINKAT, "Tunlinkat type");
+
+    synth_empty_r(g_buf, P9_RUNLINKAT, 0x0037);
+    u16 tag_out = 0;
+    int rc = p9_parse_runlinkat(g_buf, 7, &tag_out);
+    TEST_EXPECT_EQ(rc, 0,                          "Runlinkat parse ok");
+    TEST_EXPECT_EQ((u64)tag_out, (u64)0x0037,      "Runlinkat tag");
+
+    // Verify P9_UNLINK_AT_REMOVEDIR flag encodes correctly: build with
+    // the flag and inspect the body's flags field offset (7+4+2+2=15).
+    total = p9_build_tunlinkat(g_buf, sizeof(g_buf), 0x0038,
+                                5, name, sizeof(name),
+                                P9_UNLINK_AT_REMOVEDIR);
+    TEST_EXPECT_EQ((u64)g_buf[15], (u64)0x00, "flags byte 0");
+    TEST_EXPECT_EQ((u64)g_buf[16], (u64)0x02, "flags byte 1 = 0x200 high half");
 }

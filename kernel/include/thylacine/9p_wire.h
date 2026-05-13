@@ -8,7 +8,8 @@
 // baseline. Stratum's `<stratum/9p.h>` is the cross-project ABI reference
 // for opcodes and limits; this header mirrors those numerically.
 //
-// SCOPE OF P5-WIRE + P5-WIRE-IO + P5-WIRE-META (cumulative through this chunk):
+// SCOPE OF P5-WIRE + P5-WIRE-IO + P5-WIRE-META + P5-WIRE-MUTATION (cumulative
+// through this chunk):
 //
 //   - Common header (size + type + tag); pack/peek/unpack.
 //   - Primitive marshalers/unmarshalers: u8, u16, u32, u64, str, qid.
@@ -28,12 +29,19 @@
 //       Treaddir / Rreaddir (40 / 41)
 //       Tstatfs  / Rstatfs  (8 / 9)
 //       Tfsync   / Rfsync   (50 / 51)
+//   - Mutation family (P5-wire-mutation extension):
+//       Tsymlink   / Rsymlink   (16 / 17)
+//       Tmknod     / Rmknod     (18 / 19)
+//       Trename    / Rrename    (20 / 21)
+//       Treadlink  / Rreadlink  (22 / 23)
+//       Tlink      / Rlink      (70 / 71)
+//       Tmkdir     / Rmkdir     (72 / 73)
+//       Trenameat  / Rrenameat  (74 / 75)
+//       Tunlinkat  / Runlinkat  (76 / 77)
 //   - Rlerror parse (7) — every R-message can be replaced by Rlerror.
 //
-// OUT OF P5-WIRE-META (deferred to follow-up chunks):
+// OUT OF P5-WIRE-MUTATION (deferred to follow-up chunks):
 //
-//   - Mutation family: Tunlinkat / Trename / Trenameat / Tsymlink /
-//     Tmknod / Tlink / Treadlink / Tmkdir.
 //   - Lock family: Tlock / Tgetlock.
 //   - Xattr family: Txattrwalk / Txattrcreate.
 //   - Stratum extensions: Tsync / Treflink / Tbind / Tunbind.
@@ -539,5 +547,109 @@ int p9_build_tfsync(u8 *out, size_t cap, u16 tag, u32 fid, u32 datasync);
 
 // Rfsync parse: header-only (no body).
 int p9_parse_rfsync(const u8 *in, size_t len, u16 *tag);
+
+// =============================================================================
+// Mutation family (P5-wire-mutation extension).
+//
+// Directory-mutation surface: rename / unlink / link / symlink / mknod /
+// mkdir / readlink. Together with the metadata + IO families, these
+// complete the codec's coverage of the standard 9P2000.L filesystem
+// surface. Stratum extensions (Tsync / Treflink / Tbind / Tunbind /
+// Tfallocate / Tfadvise) + lock + xattr remain deferred.
+//
+// Three response shapes:
+//
+//   - Empty body (Runlinkat, Rrename, Rrenameat, Rlink) — header-only.
+//   - Single qid (Rsymlink, Rmknod, Rmkdir) — server returns the qid
+//     of the newly-created entry.
+//   - String (Rreadlink) — server returns the symlink target.
+//
+// All mutation ops at the wire layer accept concurrent ops on the same
+// fid EXCEPT Trename — it mutates the named binding of `fid` server-
+// side, so the canonical client discipline is to refuse other in-flight
+// ops on the same fid (mirrors the setattr discipline from P5-wire-meta).
+//
+// Tunlinkat AT_REMOVEDIR flag (Linux unlinkat(2) convention):
+#define P9_UNLINK_AT_REMOVEDIR   0x200u
+
+// Tsymlink: create symlink `name` in directory `fid`, pointing at
+// `symtgt`. `gid` is the creator's primary group (Linux v9fs convention).
+//   Tsymlink body: [fid: u32][name: str][symtgt: str][gid: u32]
+//   Rsymlink body: [qid: 13]
+int p9_build_tsymlink(u8 *out, size_t cap, u16 tag, u32 fid,
+                      const u8 *name, size_t name_len,
+                      const u8 *symtgt, size_t symtgt_len,
+                      u32 gid);
+int p9_parse_rsymlink(const u8 *in, size_t len,
+                      u16 *tag, struct p9_qid *qid);
+
+// Tmknod: create a device node (or fifo/socket) `name` in directory
+// `dfid`. `mode` is Linux mknod(2) mode bits; `major` / `minor` are
+// device numbers (ignored for fifo/socket); `gid` is the creator's gid.
+//   Tmknod body: [dfid: u32][name: str][mode: u32][major: u32][minor: u32][gid: u32]
+//   Rmknod body: [qid: 13]
+int p9_build_tmknod(u8 *out, size_t cap, u16 tag, u32 dfid,
+                    const u8 *name, size_t name_len,
+                    u32 mode, u32 major, u32 minor, u32 gid);
+int p9_parse_rmknod(const u8 *in, size_t len,
+                    u16 *tag, struct p9_qid *qid);
+
+// Trename: rename the file referenced by `fid` to `name` in directory
+// `dfid`. After Rrename the server-side fid still refers to the same
+// inode but at a different path.
+//   Trename body: [fid: u32][dfid: u32][name: str]
+//   Rrename body: (empty body; 7-byte msg)
+int p9_build_trename(u8 *out, size_t cap, u16 tag,
+                     u32 fid, u32 dfid,
+                     const u8 *name, size_t name_len);
+int p9_parse_rrename(const u8 *in, size_t len, u16 *tag);
+
+// Treadlink: read the target of the symlink referenced by `fid`.
+//   Treadlink body: [fid: u32]
+//   Rreadlink body: [target: str]
+// `target_ptr` / `target_len` are zero-copy pointers INTO `in`. The
+// caller must not free the input buffer while consuming them.
+int p9_build_treadlink(u8 *out, size_t cap, u16 tag, u32 fid);
+int p9_parse_rreadlink(const u8 *in, size_t len,
+                       u16 *tag,
+                       const u8 **target_ptr, u16 *target_len);
+
+// Tlink: create a hard link to the file referenced by `fid`, with name
+// `name`, in directory `dfid`.
+//   Tlink body: [dfid: u32][fid: u32][name: str]
+//   Rlink body: (empty body; 7-byte msg)
+int p9_build_tlink(u8 *out, size_t cap, u16 tag,
+                   u32 dfid, u32 fid,
+                   const u8 *name, size_t name_len);
+int p9_parse_rlink(const u8 *in, size_t len, u16 *tag);
+
+// Tmkdir: create directory `name` in directory `dfid` with mode bits
+// `mode` (Linux v9fs convention). `gid` is the creator's gid.
+//   Tmkdir body: [dfid: u32][name: str][mode: u32][gid: u32]
+//   Rmkdir body: [qid: 13]
+int p9_build_tmkdir(u8 *out, size_t cap, u16 tag, u32 dfid,
+                    const u8 *name, size_t name_len,
+                    u32 mode, u32 gid);
+int p9_parse_rmkdir(const u8 *in, size_t len,
+                    u16 *tag, struct p9_qid *qid);
+
+// Trenameat: rename `oldname` in directory `olddirfid` to `newname` in
+// directory `newdirfid`. Pure path-based; no fid is rebound.
+//   Trenameat body: [olddirfid: u32][oldname: str][newdirfid: u32][newname: str]
+//   Rrenameat body: (empty body; 7-byte msg)
+int p9_build_trenameat(u8 *out, size_t cap, u16 tag,
+                       u32 olddirfid,
+                       const u8 *oldname, size_t oldname_len,
+                       u32 newdirfid,
+                       const u8 *newname, size_t newname_len);
+int p9_parse_rrenameat(const u8 *in, size_t len, u16 *tag);
+
+// Tunlinkat: unlink `name` from directory `dfid`. `flags` may include
+// P9_UNLINK_AT_REMOVEDIR for rmdir-equivalent.
+//   Tunlinkat body: [dfid: u32][name: str][flags: u32]
+//   Runlinkat body: (empty body; 7-byte msg)
+int p9_build_tunlinkat(u8 *out, size_t cap, u16 tag, u32 dfid,
+                       const u8 *name, size_t name_len, u32 flags);
+int p9_parse_runlinkat(const u8 *in, size_t len, u16 *tag);
 
 #endif  // THYLACINE_9P_WIRE_H

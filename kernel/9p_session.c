@@ -494,6 +494,179 @@ int p9_session_send_fsync(struct p9_session *s,
 }
 
 // =============================================================================
+// Send: mutation family. All ops require state OPEN + fid_bound on the
+// targeting fid. Trename is fid-exclusive (server-side identity mutation);
+// other mutation ops permit concurrent ops on the same fid (server
+// serializes per directory entry internally).
+// =============================================================================
+
+int p9_session_send_symlink(struct p9_session *s,
+                            u8 *out, size_t cap,
+                            u32 fid,
+                            const u8 *name, size_t name_len,
+                            const u8 *symtgt, size_t symtgt_len,
+                            u32 gid) {
+    if (!s) return -1;
+    if (s->magic != P9_SESSION_MAGIC) return -1;
+    if (s->state != P9_SESS_OPEN) return -1;
+    if (!out) return -1;
+    if (!fid_bound(s, fid)) return -1;
+    if (name_len == 0 || name_len > P9_NAME_MAX) return -1;
+    if (!name) return -1;
+    int t = alloc_tag(s);
+    if (t < 0) return -1;
+    int rc = p9_build_tsymlink(out, cap, (u16)t, fid,
+                               name, name_len, symtgt, symtgt_len, gid);
+    if (rc < 0) return -1;
+    mark_outstanding(s, (u16)t, P9_TSYMLINK, fid, fid);
+    return rc;
+}
+
+int p9_session_send_mknod(struct p9_session *s,
+                          u8 *out, size_t cap,
+                          u32 dfid,
+                          const u8 *name, size_t name_len,
+                          u32 mode, u32 major, u32 minor, u32 gid) {
+    if (!s) return -1;
+    if (s->magic != P9_SESSION_MAGIC) return -1;
+    if (s->state != P9_SESS_OPEN) return -1;
+    if (!out) return -1;
+    if (!fid_bound(s, dfid)) return -1;
+    if (name_len == 0 || name_len > P9_NAME_MAX) return -1;
+    if (!name) return -1;
+    int t = alloc_tag(s);
+    if (t < 0) return -1;
+    int rc = p9_build_tmknod(out, cap, (u16)t, dfid,
+                             name, name_len, mode, major, minor, gid);
+    if (rc < 0) return -1;
+    mark_outstanding(s, (u16)t, P9_TMKNOD, dfid, dfid);
+    return rc;
+}
+
+int p9_session_send_rename(struct p9_session *s,
+                           u8 *out, size_t cap,
+                           u32 fid, u32 dfid,
+                           const u8 *name, size_t name_len) {
+    if (!s) return -1;
+    if (s->magic != P9_SESSION_MAGIC) return -1;
+    if (s->state != P9_SESS_OPEN) return -1;
+    if (!out) return -1;
+    if (!fid_bound(s, fid)) return -1;
+    if (!fid_bound(s, dfid)) return -1;
+    if (name_len == 0 || name_len > P9_NAME_MAX) return -1;
+    if (!name) return -1;
+    // Trename mutates server-side identity of fid; refuse concurrent ops.
+    if (any_outstanding_on_fid(s, fid)) return -1;
+    int t = alloc_tag(s);
+    if (t < 0) return -1;
+    int rc = p9_build_trename(out, cap, (u16)t, fid, dfid, name, name_len);
+    if (rc < 0) return -1;
+    mark_outstanding(s, (u16)t, P9_TRENAME, fid, fid);
+    return rc;
+}
+
+int p9_session_send_readlink(struct p9_session *s,
+                             u8 *out, size_t cap,
+                             u32 fid) {
+    if (!s) return -1;
+    if (s->magic != P9_SESSION_MAGIC) return -1;
+    if (s->state != P9_SESS_OPEN) return -1;
+    if (!out) return -1;
+    if (!fid_bound(s, fid)) return -1;
+    int t = alloc_tag(s);
+    if (t < 0) return -1;
+    int rc = p9_build_treadlink(out, cap, (u16)t, fid);
+    if (rc < 0) return -1;
+    mark_outstanding(s, (u16)t, P9_TREADLINK, fid, fid);
+    return rc;
+}
+
+int p9_session_send_link(struct p9_session *s,
+                         u8 *out, size_t cap,
+                         u32 dfid, u32 fid,
+                         const u8 *name, size_t name_len) {
+    if (!s) return -1;
+    if (s->magic != P9_SESSION_MAGIC) return -1;
+    if (s->state != P9_SESS_OPEN) return -1;
+    if (!out) return -1;
+    if (!fid_bound(s, dfid)) return -1;
+    if (!fid_bound(s, fid)) return -1;
+    if (name_len == 0 || name_len > P9_NAME_MAX) return -1;
+    if (!name) return -1;
+    int t = alloc_tag(s);
+    if (t < 0) return -1;
+    int rc = p9_build_tlink(out, cap, (u16)t, dfid, fid, name, name_len);
+    if (rc < 0) return -1;
+    mark_outstanding(s, (u16)t, P9_TLINK, dfid, fid);
+    return rc;
+}
+
+int p9_session_send_mkdir(struct p9_session *s,
+                          u8 *out, size_t cap,
+                          u32 dfid,
+                          const u8 *name, size_t name_len,
+                          u32 mode, u32 gid) {
+    if (!s) return -1;
+    if (s->magic != P9_SESSION_MAGIC) return -1;
+    if (s->state != P9_SESS_OPEN) return -1;
+    if (!out) return -1;
+    if (!fid_bound(s, dfid)) return -1;
+    if (name_len == 0 || name_len > P9_NAME_MAX) return -1;
+    if (!name) return -1;
+    int t = alloc_tag(s);
+    if (t < 0) return -1;
+    int rc = p9_build_tmkdir(out, cap, (u16)t, dfid, name, name_len, mode, gid);
+    if (rc < 0) return -1;
+    mark_outstanding(s, (u16)t, P9_TMKDIR, dfid, dfid);
+    return rc;
+}
+
+int p9_session_send_renameat(struct p9_session *s,
+                             u8 *out, size_t cap,
+                             u32 olddirfid,
+                             const u8 *oldname, size_t oldname_len,
+                             u32 newdirfid,
+                             const u8 *newname, size_t newname_len) {
+    if (!s) return -1;
+    if (s->magic != P9_SESSION_MAGIC) return -1;
+    if (s->state != P9_SESS_OPEN) return -1;
+    if (!out) return -1;
+    if (!fid_bound(s, olddirfid)) return -1;
+    if (!fid_bound(s, newdirfid)) return -1;
+    if (oldname_len == 0 || oldname_len > P9_NAME_MAX) return -1;
+    if (newname_len == 0 || newname_len > P9_NAME_MAX) return -1;
+    if (!oldname || !newname) return -1;
+    int t = alloc_tag(s);
+    if (t < 0) return -1;
+    int rc = p9_build_trenameat(out, cap, (u16)t,
+                                olddirfid, oldname, oldname_len,
+                                newdirfid, newname, newname_len);
+    if (rc < 0) return -1;
+    mark_outstanding(s, (u16)t, P9_TRENAMEAT, olddirfid, newdirfid);
+    return rc;
+}
+
+int p9_session_send_unlinkat(struct p9_session *s,
+                             u8 *out, size_t cap,
+                             u32 dfid,
+                             const u8 *name, size_t name_len,
+                             u32 flags) {
+    if (!s) return -1;
+    if (s->magic != P9_SESSION_MAGIC) return -1;
+    if (s->state != P9_SESS_OPEN) return -1;
+    if (!out) return -1;
+    if (!fid_bound(s, dfid)) return -1;
+    if (name_len == 0 || name_len > P9_NAME_MAX) return -1;
+    if (!name) return -1;
+    int t = alloc_tag(s);
+    if (t < 0) return -1;
+    int rc = p9_build_tunlinkat(out, cap, (u16)t, dfid, name, name_len, flags);
+    if (rc < 0) return -1;
+    mark_outstanding(s, (u16)t, P9_TUNLINKAT, dfid, dfid);
+    return rc;
+}
+
+// =============================================================================
 // Receive: dispatch by tag, apply state mutation.
 // =============================================================================
 
@@ -557,6 +730,11 @@ static void zero_result(struct p9_dispatch_result *out) {
     out->statfs.namelen   = 0;
     out->readdir_count    = 0;
     out->readdir_data     = NULL;
+    out->created_qid.type    = 0;
+    out->created_qid.version = 0;
+    out->created_qid.path    = 0;
+    out->readlink_target     = NULL;
+    out->readlink_target_len = 0;
 }
 
 // Special path for Rversion: tag is NOTAG; not from outstanding[];
@@ -739,6 +917,56 @@ int p9_session_dispatch_rmsg(struct p9_session *s,
         rc = p9_parse_rfsync(rmsg, len, &tag_check);
         if (rc < 0) return -1;
         if (tag_check != tag) return -1;
+    } else if (op->kind == P9_TSYMLINK) {
+        u16 tag_check;
+        struct p9_qid qid;
+        rc = p9_parse_rsymlink(rmsg, len, &tag_check, &qid);
+        if (rc < 0) return -1;
+        if (tag_check != tag) return -1;
+        out->created_qid = qid;
+    } else if (op->kind == P9_TMKNOD) {
+        u16 tag_check;
+        struct p9_qid qid;
+        rc = p9_parse_rmknod(rmsg, len, &tag_check, &qid);
+        if (rc < 0) return -1;
+        if (tag_check != tag) return -1;
+        out->created_qid = qid;
+    } else if (op->kind == P9_TMKDIR) {
+        u16 tag_check;
+        struct p9_qid qid;
+        rc = p9_parse_rmkdir(rmsg, len, &tag_check, &qid);
+        if (rc < 0) return -1;
+        if (tag_check != tag) return -1;
+        out->created_qid = qid;
+    } else if (op->kind == P9_TRENAME) {
+        u16 tag_check;
+        rc = p9_parse_rrename(rmsg, len, &tag_check);
+        if (rc < 0) return -1;
+        if (tag_check != tag) return -1;
+    } else if (op->kind == P9_TRENAMEAT) {
+        u16 tag_check;
+        rc = p9_parse_rrenameat(rmsg, len, &tag_check);
+        if (rc < 0) return -1;
+        if (tag_check != tag) return -1;
+    } else if (op->kind == P9_TLINK) {
+        u16 tag_check;
+        rc = p9_parse_rlink(rmsg, len, &tag_check);
+        if (rc < 0) return -1;
+        if (tag_check != tag) return -1;
+    } else if (op->kind == P9_TUNLINKAT) {
+        u16 tag_check;
+        rc = p9_parse_runlinkat(rmsg, len, &tag_check);
+        if (rc < 0) return -1;
+        if (tag_check != tag) return -1;
+    } else if (op->kind == P9_TREADLINK) {
+        u16 tag_check;
+        const u8 *target;
+        u16 target_len;
+        rc = p9_parse_rreadlink(rmsg, len, &tag_check, &target, &target_len);
+        if (rc < 0) return -1;
+        if (tag_check != tag) return -1;
+        out->readlink_target     = target;
+        out->readlink_target_len = target_len;
     } else {
         // Unknown / unsupported kind.
         return -1;

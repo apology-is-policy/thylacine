@@ -65,6 +65,23 @@ _Static_assert(P9_TSTATFS  == 8,                "Tstatfs type drift");
 _Static_assert(P9_RSTATFS  == P9_TSTATFS + 1,   "Rstatfs type drift");
 _Static_assert(P9_TFSYNC   == 50,               "Tfsync type drift");
 _Static_assert(P9_RFSYNC   == P9_TFSYNC + 1,    "Rfsync type drift");
+// Mutation family (P5-wire-mutation):
+_Static_assert(P9_TSYMLINK   == 16,               "Tsymlink type drift");
+_Static_assert(P9_RSYMLINK   == P9_TSYMLINK + 1,  "Rsymlink type drift");
+_Static_assert(P9_TMKNOD     == 18,               "Tmknod type drift");
+_Static_assert(P9_RMKNOD     == P9_TMKNOD + 1,    "Rmknod type drift");
+_Static_assert(P9_TRENAME    == 20,               "Trename type drift");
+_Static_assert(P9_RRENAME    == P9_TRENAME + 1,   "Rrename type drift");
+_Static_assert(P9_TREADLINK  == 22,               "Treadlink type drift");
+_Static_assert(P9_RREADLINK  == P9_TREADLINK + 1, "Rreadlink type drift");
+_Static_assert(P9_TLINK      == 70,               "Tlink type drift");
+_Static_assert(P9_RLINK      == P9_TLINK + 1,     "Rlink type drift");
+_Static_assert(P9_TMKDIR     == 72,               "Tmkdir type drift");
+_Static_assert(P9_RMKDIR     == P9_TMKDIR + 1,    "Rmkdir type drift");
+_Static_assert(P9_TRENAMEAT  == 74,               "Trenameat type drift");
+_Static_assert(P9_RRENAMEAT  == P9_TRENAMEAT + 1, "Rrenameat type drift");
+_Static_assert(P9_TUNLINKAT  == 76,               "Tunlinkat type drift");
+_Static_assert(P9_RUNLINKAT  == P9_TUNLINKAT + 1, "Runlinkat type drift");
 
 // Sanity check on struct p9_qid: the in-memory shape is callee-defined
 // (we always serialize field-by-field per p9_pack_qid), so its sizeof()
@@ -814,4 +831,234 @@ int p9_parse_rfsync(const u8 *in, size_t len, u16 *tag) {
     if (hdr < 0) return -1;
     if ((size_t)hdr != len) return -1;       // Rfsync has no body
     return 0;
+}
+
+// =============================================================================
+// Mutation family — Tsymlink / Rsymlink, Tmknod / Rmknod, Trename /
+// Rrename, Treadlink / Rreadlink, Tlink / Rlink, Tmkdir / Rmkdir,
+// Trenameat / Rrenameat, Tunlinkat / Runlinkat.
+//
+// Three response shapes:
+//   - Empty body (Runlinkat, Rrename, Rrenameat, Rlink)
+//   - Single qid (Rsymlink, Rmknod, Rmkdir)
+//   - String (Rreadlink)
+// =============================================================================
+
+// Shared: empty-body parser (header-only validation). Used by Rrename,
+// Rrenameat, Rlink, Runlinkat.
+static int parse_empty_body(const u8 *in, size_t len, u8 expected_type, u16 *tag) {
+    if (!tag) return -1;
+    int hdr = validate_rmsg_header(in, len, expected_type, tag);
+    if (hdr < 0) return -1;
+    if ((size_t)hdr != len) return -1;
+    return 0;
+}
+
+// Shared: qid-only parser. Used by Rsymlink, Rmknod, Rmkdir.
+static int parse_qid_body(const u8 *in, size_t len, u8 expected_type,
+                            u16 *tag, struct p9_qid *qid) {
+    if (!tag || !qid) return -1;
+    int hdr = validate_rmsg_header(in, len, expected_type, tag);
+    if (hdr < 0) return -1;
+    size_t off = (size_t)hdr;
+    size_t rem = len - off;
+    int rc = p9_unpack_qid(in + off, rem, qid);
+    if (rc < 0) return -1; off += (size_t)rc;
+    if (off != len) return -1;
+    return 0;
+}
+
+// Tsymlink body: [fid: u32][name: str][symtgt: str][gid: u32]
+int p9_build_tsymlink(u8 *out, size_t cap, u16 tag, u32 fid,
+                      const u8 *name, size_t name_len,
+                      const u8 *symtgt, size_t symtgt_len,
+                      u32 gid) {
+    if (name_len == 0 || name_len > P9_NAME_MAX) return -1;
+    if (!name) return -1;
+    if (symtgt_len > 0xFFFFu) return -1;
+    if (symtgt_len > 0 && !symtgt) return -1;
+    size_t body_len = 4 + 2 + name_len + 2 + symtgt_len + 4;
+    size_t total = P9_HDR_LEN + body_len;
+    if (total > 0xFFFFFFFFull) return -1;
+    if (cap < total) return -1;
+    int rc = write_header(out, cap, (u32)total, P9_TSYMLINK, tag);
+    if (rc < 0) return -1;
+    size_t off = P9_HDR_LEN;
+    rc = p9_pack_u32(out + off, cap - off, fid);                       if (rc < 0) return -1; off += (size_t)rc;
+    rc = p9_pack_str(out + off, cap - off, name, name_len);            if (rc < 0) return -1; off += (size_t)rc;
+    rc = p9_pack_str(out + off, cap - off, symtgt, symtgt_len);        if (rc < 0) return -1; off += (size_t)rc;
+    rc = p9_pack_u32(out + off, cap - off, gid);                       if (rc < 0) return -1; off += (size_t)rc;
+    return (int)off;
+}
+
+int p9_parse_rsymlink(const u8 *in, size_t len,
+                      u16 *tag, struct p9_qid *qid) {
+    return parse_qid_body(in, len, P9_RSYMLINK, tag, qid);
+}
+
+// Tmknod body: [dfid: u32][name: str][mode: u32][major: u32][minor: u32][gid: u32]
+int p9_build_tmknod(u8 *out, size_t cap, u16 tag, u32 dfid,
+                    const u8 *name, size_t name_len,
+                    u32 mode, u32 major, u32 minor, u32 gid) {
+    if (name_len == 0 || name_len > P9_NAME_MAX) return -1;
+    if (!name) return -1;
+    size_t body_len = 4 + 2 + name_len + 4 + 4 + 4 + 4;
+    size_t total = P9_HDR_LEN + body_len;
+    if (cap < total) return -1;
+    int rc = write_header(out, cap, (u32)total, P9_TMKNOD, tag);
+    if (rc < 0) return -1;
+    size_t off = P9_HDR_LEN;
+    rc = p9_pack_u32(out + off, cap - off, dfid);                      if (rc < 0) return -1; off += (size_t)rc;
+    rc = p9_pack_str(out + off, cap - off, name, name_len);            if (rc < 0) return -1; off += (size_t)rc;
+    rc = p9_pack_u32(out + off, cap - off, mode);                      if (rc < 0) return -1; off += (size_t)rc;
+    rc = p9_pack_u32(out + off, cap - off, major);                     if (rc < 0) return -1; off += (size_t)rc;
+    rc = p9_pack_u32(out + off, cap - off, minor);                     if (rc < 0) return -1; off += (size_t)rc;
+    rc = p9_pack_u32(out + off, cap - off, gid);                       if (rc < 0) return -1; off += (size_t)rc;
+    return (int)off;
+}
+
+int p9_parse_rmknod(const u8 *in, size_t len,
+                    u16 *tag, struct p9_qid *qid) {
+    return parse_qid_body(in, len, P9_RMKNOD, tag, qid);
+}
+
+// Trename body: [fid: u32][dfid: u32][name: str]
+int p9_build_trename(u8 *out, size_t cap, u16 tag,
+                     u32 fid, u32 dfid,
+                     const u8 *name, size_t name_len) {
+    if (name_len == 0 || name_len > P9_NAME_MAX) return -1;
+    if (!name) return -1;
+    size_t body_len = 4 + 4 + 2 + name_len;
+    size_t total = P9_HDR_LEN + body_len;
+    if (cap < total) return -1;
+    int rc = write_header(out, cap, (u32)total, P9_TRENAME, tag);
+    if (rc < 0) return -1;
+    size_t off = P9_HDR_LEN;
+    rc = p9_pack_u32(out + off, cap - off, fid);                       if (rc < 0) return -1; off += (size_t)rc;
+    rc = p9_pack_u32(out + off, cap - off, dfid);                      if (rc < 0) return -1; off += (size_t)rc;
+    rc = p9_pack_str(out + off, cap - off, name, name_len);            if (rc < 0) return -1; off += (size_t)rc;
+    return (int)off;
+}
+
+int p9_parse_rrename(const u8 *in, size_t len, u16 *tag) {
+    return parse_empty_body(in, len, P9_RRENAME, tag);
+}
+
+// Treadlink body: [fid: u32]
+int p9_build_treadlink(u8 *out, size_t cap, u16 tag, u32 fid) {
+    size_t total = P9_HDR_LEN + 4;
+    if (cap < total) return -1;
+    int rc = write_header(out, cap, (u32)total, P9_TREADLINK, tag);
+    if (rc < 0) return -1;
+    rc = p9_pack_u32(out + P9_HDR_LEN, cap - P9_HDR_LEN, fid);
+    if (rc < 0) return -1;
+    return (int)total;
+}
+
+// Rreadlink body: [target: str]  (zero-copy pointer into `in`)
+int p9_parse_rreadlink(const u8 *in, size_t len,
+                       u16 *tag,
+                       const u8 **target_ptr, u16 *target_len) {
+    if (!tag || !target_ptr || !target_len) return -1;
+    int hdr = validate_rmsg_header(in, len, P9_RREADLINK, tag);
+    if (hdr < 0) return -1;
+    size_t off = (size_t)hdr;
+    size_t rem = len - off;
+    int rc = p9_unpack_str(in + off, rem, target_ptr, target_len);
+    if (rc < 0) return -1; off += (size_t)rc;
+    if (off != len) return -1;
+    return 0;
+}
+
+// Tlink body: [dfid: u32][fid: u32][name: str]
+int p9_build_tlink(u8 *out, size_t cap, u16 tag,
+                   u32 dfid, u32 fid,
+                   const u8 *name, size_t name_len) {
+    if (name_len == 0 || name_len > P9_NAME_MAX) return -1;
+    if (!name) return -1;
+    size_t body_len = 4 + 4 + 2 + name_len;
+    size_t total = P9_HDR_LEN + body_len;
+    if (cap < total) return -1;
+    int rc = write_header(out, cap, (u32)total, P9_TLINK, tag);
+    if (rc < 0) return -1;
+    size_t off = P9_HDR_LEN;
+    rc = p9_pack_u32(out + off, cap - off, dfid);                      if (rc < 0) return -1; off += (size_t)rc;
+    rc = p9_pack_u32(out + off, cap - off, fid);                       if (rc < 0) return -1; off += (size_t)rc;
+    rc = p9_pack_str(out + off, cap - off, name, name_len);            if (rc < 0) return -1; off += (size_t)rc;
+    return (int)off;
+}
+
+int p9_parse_rlink(const u8 *in, size_t len, u16 *tag) {
+    return parse_empty_body(in, len, P9_RLINK, tag);
+}
+
+// Tmkdir body: [dfid: u32][name: str][mode: u32][gid: u32]
+int p9_build_tmkdir(u8 *out, size_t cap, u16 tag, u32 dfid,
+                    const u8 *name, size_t name_len,
+                    u32 mode, u32 gid) {
+    if (name_len == 0 || name_len > P9_NAME_MAX) return -1;
+    if (!name) return -1;
+    size_t body_len = 4 + 2 + name_len + 4 + 4;
+    size_t total = P9_HDR_LEN + body_len;
+    if (cap < total) return -1;
+    int rc = write_header(out, cap, (u32)total, P9_TMKDIR, tag);
+    if (rc < 0) return -1;
+    size_t off = P9_HDR_LEN;
+    rc = p9_pack_u32(out + off, cap - off, dfid);                      if (rc < 0) return -1; off += (size_t)rc;
+    rc = p9_pack_str(out + off, cap - off, name, name_len);            if (rc < 0) return -1; off += (size_t)rc;
+    rc = p9_pack_u32(out + off, cap - off, mode);                      if (rc < 0) return -1; off += (size_t)rc;
+    rc = p9_pack_u32(out + off, cap - off, gid);                       if (rc < 0) return -1; off += (size_t)rc;
+    return (int)off;
+}
+
+int p9_parse_rmkdir(const u8 *in, size_t len,
+                    u16 *tag, struct p9_qid *qid) {
+    return parse_qid_body(in, len, P9_RMKDIR, tag, qid);
+}
+
+// Trenameat body: [olddirfid: u32][oldname: str][newdirfid: u32][newname: str]
+int p9_build_trenameat(u8 *out, size_t cap, u16 tag,
+                       u32 olddirfid,
+                       const u8 *oldname, size_t oldname_len,
+                       u32 newdirfid,
+                       const u8 *newname, size_t newname_len) {
+    if (oldname_len == 0 || oldname_len > P9_NAME_MAX) return -1;
+    if (newname_len == 0 || newname_len > P9_NAME_MAX) return -1;
+    if (!oldname || !newname) return -1;
+    size_t body_len = 4 + 2 + oldname_len + 4 + 2 + newname_len;
+    size_t total = P9_HDR_LEN + body_len;
+    if (cap < total) return -1;
+    int rc = write_header(out, cap, (u32)total, P9_TRENAMEAT, tag);
+    if (rc < 0) return -1;
+    size_t off = P9_HDR_LEN;
+    rc = p9_pack_u32(out + off, cap - off, olddirfid);                 if (rc < 0) return -1; off += (size_t)rc;
+    rc = p9_pack_str(out + off, cap - off, oldname, oldname_len);      if (rc < 0) return -1; off += (size_t)rc;
+    rc = p9_pack_u32(out + off, cap - off, newdirfid);                 if (rc < 0) return -1; off += (size_t)rc;
+    rc = p9_pack_str(out + off, cap - off, newname, newname_len);      if (rc < 0) return -1; off += (size_t)rc;
+    return (int)off;
+}
+
+int p9_parse_rrenameat(const u8 *in, size_t len, u16 *tag) {
+    return parse_empty_body(in, len, P9_RRENAMEAT, tag);
+}
+
+// Tunlinkat body: [dfid: u32][name: str][flags: u32]
+int p9_build_tunlinkat(u8 *out, size_t cap, u16 tag, u32 dfid,
+                       const u8 *name, size_t name_len, u32 flags) {
+    if (name_len == 0 || name_len > P9_NAME_MAX) return -1;
+    if (!name) return -1;
+    size_t body_len = 4 + 2 + name_len + 4;
+    size_t total = P9_HDR_LEN + body_len;
+    if (cap < total) return -1;
+    int rc = write_header(out, cap, (u32)total, P9_TUNLINKAT, tag);
+    if (rc < 0) return -1;
+    size_t off = P9_HDR_LEN;
+    rc = p9_pack_u32(out + off, cap - off, dfid);                      if (rc < 0) return -1; off += (size_t)rc;
+    rc = p9_pack_str(out + off, cap - off, name, name_len);            if (rc < 0) return -1; off += (size_t)rc;
+    rc = p9_pack_u32(out + off, cap - off, flags);                     if (rc < 0) return -1; off += (size_t)rc;
+    return (int)off;
+}
+
+int p9_parse_runlinkat(const u8 *in, size_t len, u16 *tag) {
+    return parse_empty_body(in, len, P9_RUNLINKAT, tag);
 }

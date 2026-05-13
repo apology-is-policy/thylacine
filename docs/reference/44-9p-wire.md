@@ -59,6 +59,27 @@ int p9_build_treaddir(u8 *out, size_t cap, u16 tag,
                       u32 fid, u64 offset, u32 count);
 int p9_build_tstatfs (u8 *out, size_t cap, u16 tag, u32 fid);
 int p9_build_tfsync  (u8 *out, size_t cap, u16 tag, u32 fid, u32 datasync);
+// Mutation family (P5-wire-mutation).
+int p9_build_tsymlink (u8 *out, size_t cap, u16 tag, u32 fid,
+                       const u8 *name, size_t name_len,
+                       const u8 *symtgt, size_t symtgt_len, u32 gid);
+int p9_build_tmknod   (u8 *out, size_t cap, u16 tag, u32 dfid,
+                       const u8 *name, size_t name_len,
+                       u32 mode, u32 major, u32 minor, u32 gid);
+int p9_build_trename  (u8 *out, size_t cap, u16 tag, u32 fid, u32 dfid,
+                       const u8 *name, size_t name_len);
+int p9_build_treadlink(u8 *out, size_t cap, u16 tag, u32 fid);
+int p9_build_tlink    (u8 *out, size_t cap, u16 tag, u32 dfid, u32 fid,
+                       const u8 *name, size_t name_len);
+int p9_build_tmkdir   (u8 *out, size_t cap, u16 tag, u32 dfid,
+                       const u8 *name, size_t name_len,
+                       u32 mode, u32 gid);
+int p9_build_trenameat(u8 *out, size_t cap, u16 tag, u32 olddirfid,
+                       const u8 *oldname, size_t oldname_len,
+                       u32 newdirfid,
+                       const u8 *newname, size_t newname_len);
+int p9_build_tunlinkat(u8 *out, size_t cap, u16 tag, u32 dfid,
+                       const u8 *name, size_t name_len, u32 flags);
 
 // Rmsg parsers.
 int p9_parse_rversion(const u8 *in, size_t len, u16 *tag, u32 *msize,
@@ -88,6 +109,16 @@ int p9_parse_rfsync  (const u8 *in, size_t len, u16 *tag);
 int p9_unpack_dirent (const u8 *in, size_t remaining,
                       struct p9_qid *out_qid, u64 *out_offset, u8 *out_type,
                       const u8 **out_name_ptr, u16 *out_name_len);
+// Mutation family (P5-wire-mutation).
+int p9_parse_rsymlink (const u8 *in, size_t len, u16 *tag, struct p9_qid *qid);
+int p9_parse_rmknod   (const u8 *in, size_t len, u16 *tag, struct p9_qid *qid);
+int p9_parse_rrename  (const u8 *in, size_t len, u16 *tag);
+int p9_parse_rreadlink(const u8 *in, size_t len, u16 *tag,
+                       const u8 **target_ptr, u16 *target_len);
+int p9_parse_rlink    (const u8 *in, size_t len, u16 *tag);
+int p9_parse_rmkdir   (const u8 *in, size_t len, u16 *tag, struct p9_qid *qid);
+int p9_parse_rrenameat(const u8 *in, size_t len, u16 *tag);
+int p9_parse_runlinkat(const u8 *in, size_t len, u16 *tag);
 ```
 
 ### Error convention
@@ -154,6 +185,22 @@ Per-message bodies (the cumulative codec subset through P5-wire-io):
 | Tfsync (50) | `[fid: u32][datasync: u32]` |
 | Rfsync (51) | (empty body; 7-byte msg) |
 | Dirent record (within Rreaddir's data) | `[qid: 13][offset: u64][type: u8][name: str]` |
+| Tsymlink (16) | `[fid: u32][name: str][symtgt: str][gid: u32]` |
+| Rsymlink (17) | `[qid: 13]` |
+| Tmknod (18) | `[dfid: u32][name: str][mode: u32][major: u32][minor: u32][gid: u32]` |
+| Rmknod (19) | `[qid: 13]` |
+| Trename (20) | `[fid: u32][dfid: u32][name: str]` |
+| Rrename (21) | (empty body; 7-byte msg) |
+| Treadlink (22) | `[fid: u32]` |
+| Rreadlink (23) | `[target: str]` |
+| Tlink (70) | `[dfid: u32][fid: u32][name: str]` |
+| Rlink (71) | (empty body; 7-byte msg) |
+| Tmkdir (72) | `[dfid: u32][name: str][mode: u32][gid: u32]` |
+| Rmkdir (73) | `[qid: 13]` |
+| Trenameat (74) | `[olddirfid: u32][oldname: str][newdirfid: u32][newname: str]` |
+| Rrenameat (75) | (empty body; 7-byte msg) |
+| Tunlinkat (76) | `[dfid: u32][name: str][flags: u32]` |
+| Runlinkat (77) | (empty body; 7-byte msg) |
 
 All integers little-endian (matches Thylacine's AArch64 host endianness; encoding is still explicit byte-shift to remain portable).
 
@@ -168,6 +215,7 @@ All integers little-endian (matches Thylacine's AArch64 host endianness; encodin
 - `P9_TVERSION == 100`; `P9_RVERSION == P9_TVERSION + 1`; same for ATTACH/WALK/CLUNK pairs.
 - `P9_TLOPEN == 12`, `P9_TLCREATE == 14`, `P9_TREAD == 116`, `P9_TWRITE == 118`; each `RX = TX + 1` (IO family, P5-wire-io).
 - `P9_TGETATTR == 24`, `P9_TSETATTR == 26`, `P9_TREADDIR == 40`, `P9_TSTATFS == 8`, `P9_TFSYNC == 50`; each `RX = TX + 1` (metadata family, P5-wire-meta).
+- `P9_TSYMLINK == 16`, `P9_TMKNOD == 18`, `P9_TRENAME == 20`, `P9_TREADLINK == 22`, `P9_TLINK == 70`, `P9_TMKDIR == 72`, `P9_TRENAMEAT == 74`, `P9_TUNLINKAT == 76`; each `RX = TX + 1` (mutation family, P5-wire-mutation).
 - `P9_RLERROR == 7`.
 - `sizeof(struct p9_qid) >= P9_QID_LEN` (in-memory shape doesn't shrink below the wire shape).
 
@@ -177,13 +225,13 @@ All integers little-endian (matches Thylacine's AArch64 host endianness; encodin
 |---|---|
 | `kernel/include/thylacine/9p_wire.h` | Public API + constants + `struct p9_qid` |
 | `kernel/9p_wire.c` | Byte-level codec; static `write_header` + `validate_rmsg_header` helpers |
-| `kernel/test/test_9p_wire.c` | 29 unit tests (round-trip + malformed-input rejection; covers handshake/walk/clunk + IO + metadata family) |
+| `kernel/test/test_9p_wire.c` | 37 unit tests (round-trip + malformed-input rejection; covers handshake/walk/clunk + IO + metadata + mutation families) |
 
 The codec is purely procedural — no callbacks, no state, no allocation. Every function is freestanding.
 
 ## Tests
 
-29 tests in `kernel/test/test_9p_wire.c`:
+37 tests in `kernel/test/test_9p_wire.c`:
 
 | Test | Covers |
 |---|---|
@@ -216,6 +264,14 @@ The codec is purely procedural — no callbacks, no state, no allocation. Every 
 | `9p_wire.tstatfs_round_trip` | Build Tstatfs + synthesize 60-byte Rstatfs + parse statfs record |
 | `9p_wire.tfsync_round_trip` | Build Tfsync (with datasync) + synthesize header-only Rfsync |
 | `9p_wire.rreaddir_data_cap_enforced` | R111 caller-cap-bound on Rreaddir `count > data_cap` |
+| `9p_wire.tsymlink_round_trip` | Build Tsymlink + synthesize Rsymlink (qid-only) + parse |
+| `9p_wire.tmknod_round_trip` | Build Tmknod (mode/major/minor) + synthesize Rmknod (qid-only) + parse |
+| `9p_wire.trename_round_trip` | Build Trename + synthesize header-only Rrename |
+| `9p_wire.treadlink_round_trip` | Build Treadlink + synthesize Rreadlink (target string) + zero-copy parse |
+| `9p_wire.tlink_round_trip` | Build Tlink + synthesize header-only Rlink |
+| `9p_wire.tmkdir_round_trip` | Build Tmkdir + synthesize Rmkdir (qid-only) + parse |
+| `9p_wire.trenameat_round_trip` | Build Trenameat (old/new dir + names) + synthesize header-only Rrenameat |
+| `9p_wire.tunlinkat_round_trip` | Build Tunlinkat + synthesize header-only Runlinkat + flag encoding check |
 
 ## Error paths
 

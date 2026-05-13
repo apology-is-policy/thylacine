@@ -20,6 +20,14 @@
 //                                  | p9_session_send_readdir
 //                                  | p9_session_send_statfs
 //                                  | p9_session_send_fsync
+//   SendIO   (mutation)            | p9_session_send_symlink
+//                                  | p9_session_send_mknod
+//                                  | p9_session_send_rename
+//                                  | p9_session_send_readlink
+//                                  | p9_session_send_link
+//                                  | p9_session_send_mkdir
+//                                  | p9_session_send_renameat
+//                                  | p9_session_send_unlinkat
 //   SendWalk                       | p9_session_send_walk
 //   SendClunk                      | p9_session_send_clunk
 //   ReceiveOp                      | p9_session_dispatch_rmsg
@@ -112,7 +120,10 @@ struct p9_outstanding {
     u8   kind;       // P9_TVERSION / P9_TATTACH / P9_TWALK / P9_TCLUNK /
                      // P9_TLOPEN / P9_TLCREATE / P9_TREAD / P9_TWRITE /
                      // P9_TGETATTR / P9_TSETATTR / P9_TREADDIR /
-                     // P9_TSTATFS / P9_TFSYNC
+                     // P9_TSTATFS / P9_TFSYNC /
+                     // P9_TSYMLINK / P9_TMKNOD / P9_TRENAME /
+                     // P9_TREADLINK / P9_TLINK / P9_TMKDIR /
+                     // P9_TRENAMEAT / P9_TUNLINKAT
     u32  fid;        // primary target fid; equals root_fid for version/attach
     u32  new_fid;    // walk's destination; equals fid otherwise
     u32  op_id;      // monotonic spec-side identifier (for diagnostics)
@@ -306,6 +317,81 @@ int p9_session_send_fsync(struct p9_session *s,
                           u32 fid, u32 datasync);
 
 // =============================================================================
+// Mutation-family send APIs (P5-wire-mutation).
+//
+// Fid-exclusivity rules:
+//   - send_rename mutates the server-side identity of `fid` (the named
+//     binding moves). Requires no other in-flight op on fid (mutation-
+//     exclusive, mirroring setattr from P5-wire-meta).
+//   - send_symlink / send_mknod / send_link / send_mkdir / send_unlinkat /
+//     send_renameat operate on dfid (parent dir) as a target slot; the
+//     server serializes concurrent ops on the same dfid internally.
+//     The client permits concurrent ops at the wire layer.
+//   - send_readlink reads the target of a symlink fid; concurrent
+//     readlinks permitted (read-shaped).
+//
+// None mutate the client-side fid table. (Trename mutates server-side
+// path binding; the fid stays bound to the same inode at the client
+// level. Trenameat doesn't touch any fid.)
+// =============================================================================
+
+// Tsymlink: create symlink `name` in directory `fid`, target `symtgt`.
+int p9_session_send_symlink(struct p9_session *s,
+                            u8 *out, size_t cap,
+                            u32 fid,
+                            const u8 *name, size_t name_len,
+                            const u8 *symtgt, size_t symtgt_len,
+                            u32 gid);
+
+// Tmknod: create device-node / fifo / socket `name` in directory `dfid`.
+int p9_session_send_mknod(struct p9_session *s,
+                          u8 *out, size_t cap,
+                          u32 dfid,
+                          const u8 *name, size_t name_len,
+                          u32 mode, u32 major, u32 minor, u32 gid);
+
+// Trename: rename the file at `fid` to `name` in directory `dfid`.
+// Fid-exclusive on `fid` (server-side identity mutation).
+int p9_session_send_rename(struct p9_session *s,
+                           u8 *out, size_t cap,
+                           u32 fid, u32 dfid,
+                           const u8 *name, size_t name_len);
+
+// Treadlink: read the symlink target of `fid`.
+int p9_session_send_readlink(struct p9_session *s,
+                             u8 *out, size_t cap,
+                             u32 fid);
+
+// Tlink: hard-link `fid` as `name` in directory `dfid`.
+int p9_session_send_link(struct p9_session *s,
+                         u8 *out, size_t cap,
+                         u32 dfid, u32 fid,
+                         const u8 *name, size_t name_len);
+
+// Tmkdir: create directory `name` in directory `dfid`.
+int p9_session_send_mkdir(struct p9_session *s,
+                          u8 *out, size_t cap,
+                          u32 dfid,
+                          const u8 *name, size_t name_len,
+                          u32 mode, u32 gid);
+
+// Trenameat: pure path-based rename across directories.
+int p9_session_send_renameat(struct p9_session *s,
+                             u8 *out, size_t cap,
+                             u32 olddirfid,
+                             const u8 *oldname, size_t oldname_len,
+                             u32 newdirfid,
+                             const u8 *newname, size_t newname_len);
+
+// Tunlinkat: unlink `name` from directory `dfid`. `flags` may include
+// P9_UNLINK_AT_REMOVEDIR for rmdir semantics.
+int p9_session_send_unlinkat(struct p9_session *s,
+                             u8 *out, size_t cap,
+                             u32 dfid,
+                             const u8 *name, size_t name_len,
+                             u32 flags);
+
+// =============================================================================
 // Receive-side API.
 // =============================================================================
 
@@ -345,6 +431,15 @@ struct p9_dispatch_result {
     // — consumer parses entries via p9_unpack_dirent).
     u32            readdir_count;
     const u8      *readdir_data;
+    // For mutation-create ops (Tsymlink / Tmknod / Tmkdir), the qid of
+    // the newly-created entry. Kept distinct from `open_qid` (which
+    // surfaces Tlopen / Tlcreate's open-side qid) to avoid semantic
+    // confusion at the consumer.
+    struct p9_qid  created_qid;
+    // For Treadlink, the parsed target string (zero-copy pointer into
+    // the input rmsg buffer; caller must not free rmsg while consuming).
+    const u8      *readlink_target;
+    u16            readlink_target_len;
 };
 
 // Dispatch one received Rmsg. The Rmsg's tag is looked up in
