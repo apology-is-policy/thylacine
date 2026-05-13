@@ -45,6 +45,15 @@ _Static_assert(P9_RWALK    == P9_TWALK + 1,     "Rwalk type drift");
 _Static_assert(P9_TCLUNK   == 120,              "Tclunk type drift");
 _Static_assert(P9_RCLUNK   == P9_TCLUNK + 1,    "Rclunk type drift");
 _Static_assert(P9_RLERROR  == 7,                "Rlerror type drift");
+// IO family (P5-wire-io):
+_Static_assert(P9_TLOPEN   == 12,               "Tlopen type drift");
+_Static_assert(P9_RLOPEN   == P9_TLOPEN + 1,    "Rlopen type drift");
+_Static_assert(P9_TLCREATE == 14,               "Tlcreate type drift");
+_Static_assert(P9_RLCREATE == P9_TLCREATE + 1,  "Rlcreate type drift");
+_Static_assert(P9_TREAD    == 116,              "Tread type drift");
+_Static_assert(P9_RREAD    == P9_TREAD + 1,     "Rread type drift");
+_Static_assert(P9_TWRITE   == 118,              "Twrite type drift");
+_Static_assert(P9_RWRITE   == P9_TWRITE + 1,    "Rwrite type drift");
 
 // Sanity check on struct p9_qid: the in-memory shape is callee-defined
 // (we always serialize field-by-field per p9_pack_qid), so its sizeof()
@@ -433,6 +442,142 @@ int p9_parse_rlerror(const u8 *in, size_t len, u16 *tag, u32 *ecode) {
     size_t off = (size_t)hdr;
     size_t rem = len - off;
     int rc = p9_unpack_u32(in + off, rem, ecode);
+    if (rc < 0) return -1; off += (size_t)rc;
+    if (off != len) return -1;
+    return 0;
+}
+
+// =============================================================================
+// IO family — Tlopen / Rlopen, Tlcreate / Rlcreate, Tread / Rread,
+// Twrite / Rwrite. Wire shapes documented at the declarations in
+// `kernel/include/thylacine/9p_wire.h`.
+//
+// Rlopen and Rlcreate share an identical body shape (qid + iounit); a
+// single shared parser would conflate the two semantic operations, so
+// each has its own thin wrapper that validates the expected R-type.
+// =============================================================================
+
+int p9_build_tlopen(u8 *out, size_t cap, u16 tag, u32 fid, u32 flags) {
+    size_t total = P9_HDR_LEN + 4 + 4;     // fid(4) + flags(4)
+    if (cap < total) return -1;
+    int rc = write_header(out, cap, (u32)total, P9_TLOPEN, tag);
+    if (rc < 0) return -1;
+    size_t off = P9_HDR_LEN;
+    rc = p9_pack_u32(out + off, cap - off, fid);    if (rc < 0) return -1; off += (size_t)rc;
+    rc = p9_pack_u32(out + off, cap - off, flags);  if (rc < 0) return -1; off += (size_t)rc;
+    return (int)off;
+}
+
+// Shared body shape for Rlopen + Rlcreate: qid (13) + iounit (4).
+static int parse_open_create_body(const u8 *in, size_t len, u8 expected_type,
+                                   u16 *tag, struct p9_qid *qid, u32 *iounit) {
+    if (!tag || !qid || !iounit) return -1;
+    int hdr = validate_rmsg_header(in, len, expected_type, tag);
+    if (hdr < 0) return -1;
+    size_t off = (size_t)hdr;
+    size_t rem = len - off;
+    int rc = p9_unpack_qid(in + off, rem, qid);
+    if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+    rc = p9_unpack_u32(in + off, rem, iounit);
+    if (rc < 0) return -1; off += (size_t)rc;
+    if (off != len) return -1;
+    return 0;
+}
+
+int p9_parse_rlopen(const u8 *in, size_t len,
+                    u16 *tag, struct p9_qid *qid, u32 *iounit) {
+    return parse_open_create_body(in, len, P9_RLOPEN, tag, qid, iounit);
+}
+
+int p9_build_tlcreate(u8 *out, size_t cap, u16 tag, u32 fid,
+                      const u8 *name, size_t name_len,
+                      u32 flags, u32 mode, u32 gid) {
+    if (name_len > 0 && !name) return -1;
+    if (name_len > P9_NAME_MAX) return -1;
+    // Body: fid(4) + name(2 + name_len) + flags(4) + mode(4) + gid(4)
+    size_t body_len = 4 + 2 + name_len + 4 + 4 + 4;
+    size_t total = P9_HDR_LEN + body_len;
+    if (total > 0xFFFFFFFFull) return -1;
+    if (cap < total) return -1;
+    int rc = write_header(out, cap, (u32)total, P9_TLCREATE, tag);
+    if (rc < 0) return -1;
+    size_t off = P9_HDR_LEN;
+    rc = p9_pack_u32(out + off, cap - off, fid);    if (rc < 0) return -1; off += (size_t)rc;
+    rc = p9_pack_str(out + off, cap - off, name, name_len);
+                                                    if (rc < 0) return -1; off += (size_t)rc;
+    rc = p9_pack_u32(out + off, cap - off, flags);  if (rc < 0) return -1; off += (size_t)rc;
+    rc = p9_pack_u32(out + off, cap - off, mode);   if (rc < 0) return -1; off += (size_t)rc;
+    rc = p9_pack_u32(out + off, cap - off, gid);    if (rc < 0) return -1; off += (size_t)rc;
+    return (int)off;
+}
+
+int p9_parse_rlcreate(const u8 *in, size_t len,
+                      u16 *tag, struct p9_qid *qid, u32 *iounit) {
+    return parse_open_create_body(in, len, P9_RLCREATE, tag, qid, iounit);
+}
+
+int p9_build_tread(u8 *out, size_t cap, u16 tag,
+                   u32 fid, u64 offset, u32 count) {
+    size_t total = P9_HDR_LEN + 4 + 8 + 4;     // fid + offset + count
+    if (cap < total) return -1;
+    int rc = write_header(out, cap, (u32)total, P9_TREAD, tag);
+    if (rc < 0) return -1;
+    size_t off = P9_HDR_LEN;
+    rc = p9_pack_u32(out + off, cap - off, fid);    if (rc < 0) return -1; off += (size_t)rc;
+    rc = p9_pack_u64(out + off, cap - off, offset); if (rc < 0) return -1; off += (size_t)rc;
+    rc = p9_pack_u32(out + off, cap - off, count);  if (rc < 0) return -1; off += (size_t)rc;
+    return (int)off;
+}
+
+int p9_parse_rread(const u8 *in, size_t len,
+                   u16 *tag, u32 *count,
+                   const u8 **data_ptr, u32 data_cap) {
+    if (!tag || !count || !data_ptr) return -1;
+    int hdr = validate_rmsg_header(in, len, P9_RREAD, tag);
+    if (hdr < 0) return -1;
+    size_t off = (size_t)hdr;
+    size_t rem = len - off;
+    u32 c = 0;
+    int rc = p9_unpack_u32(in + off, rem, &c);
+    if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+    // R111 doctrine: bound server-supplied count against caller cap BEFORE
+    // exposing data pointer. The strict-equality check below also catches
+    // gross size mismatches, but bounding first defends the caller against
+    // buffers smaller than what the server claims to be returning.
+    if (c > data_cap) return -1;
+    if ((size_t)c != rem) return -1;
+    *count    = c;
+    *data_ptr = (c > 0) ? (in + off) : NULL;
+    return 0;
+}
+
+int p9_build_twrite(u8 *out, size_t cap, u16 tag,
+                    u32 fid, u64 offset, u32 count,
+                    const u8 *data) {
+    if (count > 0 && !data) return -1;
+    // Body: fid(4) + offset(8) + count(4) + data(count)
+    size_t body_len = 4 + 8 + 4 + (size_t)count;
+    size_t total = P9_HDR_LEN + body_len;
+    if (total > 0xFFFFFFFFull) return -1;
+    if (cap < total) return -1;
+    int rc = write_header(out, cap, (u32)total, P9_TWRITE, tag);
+    if (rc < 0) return -1;
+    size_t off = P9_HDR_LEN;
+    rc = p9_pack_u32(out + off, cap - off, fid);    if (rc < 0) return -1; off += (size_t)rc;
+    rc = p9_pack_u64(out + off, cap - off, offset); if (rc < 0) return -1; off += (size_t)rc;
+    rc = p9_pack_u32(out + off, cap - off, count);  if (rc < 0) return -1; off += (size_t)rc;
+    for (u32 i = 0; i < count; i++) out[off + i] = data[i];
+    off += (size_t)count;
+    return (int)off;
+}
+
+int p9_parse_rwrite(const u8 *in, size_t len, u16 *tag, u32 *count) {
+    if (!tag || !count) return -1;
+    int hdr = validate_rmsg_header(in, len, P9_RWRITE, tag);
+    if (hdr < 0) return -1;
+    size_t off = (size_t)hdr;
+    size_t rem = len - off;
+    int rc = p9_unpack_u32(in + off, rem, count);
     if (rc < 0) return -1; off += (size_t)rc;
     if (off != len) return -1;
     return 0;

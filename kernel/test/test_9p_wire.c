@@ -27,6 +27,13 @@ void test_9p_wire_rmsg_size_mismatch_rejected(void);
 void test_9p_wire_rmsg_wrong_type_rejected(void);
 void test_9p_wire_rwalk_count_cap_enforced(void);
 void test_9p_wire_pack_str_overflow(void);
+void test_9p_wire_tlopen_round_trip(void);
+void test_9p_wire_tlcreate_round_trip(void);
+void test_9p_wire_tread_round_trip(void);
+void test_9p_wire_twrite_round_trip(void);
+void test_9p_wire_rread_data_cap_enforced(void);
+void test_9p_wire_rread_size_mismatch_rejected(void);
+void test_9p_wire_rlopen_vs_rlcreate_type_strict(void);
 
 // 4 KiB scratch buffer; every message we build at v1.0 fits in this
 // (Tattach with full-length uname+aname stays under 600 bytes;
@@ -393,4 +400,231 @@ void test_9p_wire_rwalk_count_cap_enforced(void) {
     struct p9_qid qids[2] = { 0 };
     int rc = p9_parse_rwalk(g_buf, r_total, &tag_out, &nwqid_out, qids, 2);
     TEST_EXPECT_EQ(rc, -1, "Rwalk nwqid > qid_cap rejected (R111 caller-cap-bound)");
+}
+
+// =============================================================================
+// IO family (P5-wire-io): round-trips for Tlopen/Rlopen, Tlcreate/Rlcreate,
+// Tread/Rread, Twrite/Rwrite.
+// =============================================================================
+
+void test_9p_wire_tlopen_round_trip(void) {
+    int total = p9_build_tlopen(g_buf, sizeof(g_buf), 0x0010, 42, 0x8000u /* O_LARGEFILE */);
+    // hdr(7) + fid(4) + flags(4) = 15
+    TEST_EXPECT_EQ(total, 15, "Tlopen total len");
+    TEST_EXPECT_EQ((u64)g_buf[4], (u64)P9_TLOPEN, "Tlopen type");
+
+    // Synthesize Rlopen: header (size=24, type=P9_RLOPEN, tag=0x0010) +
+    // qid(13) + iounit(4) = 17 bytes body.
+    size_t r_total = P9_HDR_LEN + P9_QID_LEN + 4;            // 24
+    g_buf[0] = (u8)(r_total & 0xff);
+    g_buf[1] = (u8)((r_total >> 8) & 0xff);
+    g_buf[2] = 0; g_buf[3] = 0;
+    g_buf[4] = P9_RLOPEN;
+    g_buf[5] = 0x10; g_buf[6] = 0;
+    struct p9_qid q = { .type = P9_QTFILE, .version = 7, .path = 0xDEADBEEFull };
+    int rc = p9_pack_qid(g_buf + P9_HDR_LEN, sizeof(g_buf) - P9_HDR_LEN, &q);
+    TEST_EXPECT_EQ(rc, (int)P9_QID_LEN, "synth Rlopen qid");
+    rc = p9_pack_u32(g_buf + P9_HDR_LEN + P9_QID_LEN,
+                     sizeof(g_buf) - P9_HDR_LEN - P9_QID_LEN, 4096u);
+    TEST_EXPECT_EQ(rc, 4, "synth Rlopen iounit");
+
+    u16 tag_out = 0;
+    struct p9_qid q_out = { 0 };
+    u32 iounit_out = 0;
+    rc = p9_parse_rlopen(g_buf, r_total, &tag_out, &q_out, &iounit_out);
+    TEST_EXPECT_EQ(rc, 0,                            "Rlopen parse ok");
+    TEST_EXPECT_EQ((u64)tag_out, (u64)0x0010,        "Rlopen tag");
+    TEST_EXPECT_EQ((u64)q_out.type, (u64)P9_QTFILE,  "Rlopen qid.type");
+    TEST_EXPECT_EQ((u64)q_out.version, (u64)7,       "Rlopen qid.version");
+    TEST_EXPECT_EQ(q_out.path, (u64)0xDEADBEEFull,   "Rlopen qid.path");
+    TEST_EXPECT_EQ((u64)iounit_out, (u64)4096,       "Rlopen iounit");
+}
+
+void test_9p_wire_tlcreate_round_trip(void) {
+    const u8 name[] = {'h', 'e', 'l', 'l', 'o'};
+    int total = p9_build_tlcreate(g_buf, sizeof(g_buf), 0x0011,
+                                  /*fid*/      99,
+                                  name, sizeof(name),
+                                  /*flags*/    0x42u,         // O_CREAT|O_WRONLY
+                                  /*mode*/     0644u,
+                                  /*gid*/      1000u);
+    // hdr(7) + fid(4) + name(2 + 5) + flags(4) + mode(4) + gid(4) = 30
+    TEST_EXPECT_EQ(total, 30, "Tlcreate total len");
+    TEST_EXPECT_EQ((u64)g_buf[4], (u64)P9_TLCREATE, "Tlcreate type");
+
+    // Synthesize Rlcreate (same body shape as Rlopen).
+    size_t r_total = P9_HDR_LEN + P9_QID_LEN + 4;            // 24
+    g_buf[0] = (u8)(r_total & 0xff);
+    g_buf[1] = (u8)((r_total >> 8) & 0xff);
+    g_buf[2] = 0; g_buf[3] = 0;
+    g_buf[4] = P9_RLCREATE;
+    g_buf[5] = 0x11; g_buf[6] = 0;
+    struct p9_qid q = { .type = P9_QTFILE, .version = 0, .path = 12345ull };
+    int rc = p9_pack_qid(g_buf + P9_HDR_LEN, sizeof(g_buf) - P9_HDR_LEN, &q);
+    TEST_EXPECT_EQ(rc, (int)P9_QID_LEN, "synth Rlcreate qid");
+    rc = p9_pack_u32(g_buf + P9_HDR_LEN + P9_QID_LEN,
+                     sizeof(g_buf) - P9_HDR_LEN - P9_QID_LEN, 8192u);
+    TEST_EXPECT_EQ(rc, 4, "synth Rlcreate iounit");
+
+    u16 tag_out = 0;
+    struct p9_qid q_out = { 0 };
+    u32 iounit_out = 0;
+    rc = p9_parse_rlcreate(g_buf, r_total, &tag_out, &q_out, &iounit_out);
+    TEST_EXPECT_EQ(rc, 0,                            "Rlcreate parse ok");
+    TEST_EXPECT_EQ((u64)tag_out, (u64)0x0011,        "Rlcreate tag");
+    TEST_EXPECT_EQ(q_out.path, (u64)12345ull,        "Rlcreate qid.path");
+    TEST_EXPECT_EQ((u64)iounit_out, (u64)8192,       "Rlcreate iounit");
+}
+
+void test_9p_wire_tread_round_trip(void) {
+    int total = p9_build_tread(g_buf, sizeof(g_buf), 0x0012, 0xABCDu,
+                                /*offset*/ 0x100000000ull,
+                                /*count*/  4096u);
+    // hdr(7) + fid(4) + offset(8) + count(4) = 23
+    TEST_EXPECT_EQ(total, 23, "Tread total len");
+    TEST_EXPECT_EQ((u64)g_buf[4], (u64)P9_TREAD, "Tread type");
+
+    // Synthesize Rread with a 4-byte data payload.
+    const u8 payload[] = {0xDE, 0xAD, 0xBE, 0xEF};
+    size_t r_total = P9_HDR_LEN + 4 + sizeof(payload);       // 7+4+4 = 15
+    g_buf[0] = (u8)(r_total & 0xff);
+    g_buf[1] = (u8)((r_total >> 8) & 0xff);
+    g_buf[2] = 0; g_buf[3] = 0;
+    g_buf[4] = P9_RREAD;
+    g_buf[5] = 0x12; g_buf[6] = 0;
+    int rc = p9_pack_u32(g_buf + P9_HDR_LEN, sizeof(g_buf) - P9_HDR_LEN,
+                          (u32)sizeof(payload));
+    TEST_EXPECT_EQ(rc, 4, "synth Rread count");
+    for (size_t i = 0; i < sizeof(payload); i++) {
+        g_buf[P9_HDR_LEN + 4 + i] = payload[i];
+    }
+
+    u16 tag_out = 0;
+    u32 count_out = 0;
+    const u8 *data_ptr = NULL;
+    rc = p9_parse_rread(g_buf, r_total, &tag_out, &count_out, &data_ptr, 8192u);
+    TEST_EXPECT_EQ(rc, 0,                                "Rread parse ok");
+    TEST_EXPECT_EQ((u64)tag_out, (u64)0x0012,            "Rread tag");
+    TEST_EXPECT_EQ((u64)count_out, (u64)sizeof(payload), "Rread count");
+    TEST_ASSERT(data_ptr != NULL,                        "Rread data_ptr non-null");
+    for (size_t i = 0; i < sizeof(payload); i++) {
+        TEST_ASSERT(data_ptr[i] == payload[i],           "Rread data byte mismatch");
+    }
+}
+
+void test_9p_wire_twrite_round_trip(void) {
+    const u8 payload[] = {'h', 'e', 'l', 'l', 'o'};
+    int total = p9_build_twrite(g_buf, sizeof(g_buf), 0x0013, 7,
+                                 /*offset*/ 0,
+                                 /*count*/  (u32)sizeof(payload),
+                                 payload);
+    // hdr(7) + fid(4) + offset(8) + count(4) + data(5) = 28
+    TEST_EXPECT_EQ(total, 28, "Twrite total len");
+    TEST_EXPECT_EQ((u64)g_buf[4], (u64)P9_TWRITE, "Twrite type");
+    // Verify the payload landed at the expected offset.
+    for (size_t i = 0; i < sizeof(payload); i++) {
+        TEST_ASSERT(g_buf[P9_HDR_LEN + 4 + 8 + 4 + i] == payload[i],
+                    "Twrite payload byte mismatch");
+    }
+
+    // Synthesize Rwrite (count-only body).
+    size_t r_total = P9_HDR_LEN + 4;                          // 11
+    g_buf[0] = (u8)(r_total & 0xff);
+    g_buf[1] = (u8)((r_total >> 8) & 0xff);
+    g_buf[2] = 0; g_buf[3] = 0;
+    g_buf[4] = P9_RWRITE;
+    g_buf[5] = 0x13; g_buf[6] = 0;
+    int rc = p9_pack_u32(g_buf + P9_HDR_LEN, sizeof(g_buf) - P9_HDR_LEN,
+                          (u32)sizeof(payload));
+    TEST_EXPECT_EQ(rc, 4, "synth Rwrite count");
+
+    u16 tag_out = 0;
+    u32 count_out = 0;
+    rc = p9_parse_rwrite(g_buf, r_total, &tag_out, &count_out);
+    TEST_EXPECT_EQ(rc, 0,                                "Rwrite parse ok");
+    TEST_EXPECT_EQ((u64)tag_out, (u64)0x0013,            "Rwrite tag");
+    TEST_EXPECT_EQ((u64)count_out, (u64)sizeof(payload), "Rwrite count");
+}
+
+// =============================================================================
+// R111 doctrine on Rread: server-claimed count exceeding caller-supplied
+// data_cap must be refused before any data byte is exposed.
+// =============================================================================
+
+void test_9p_wire_rread_data_cap_enforced(void) {
+    // Synthesize Rread claiming count=1024 in a frame that's only 11+1024
+    // bytes. Pass data_cap=512. Parser must refuse.
+    size_t r_total = P9_HDR_LEN + 4 + 1024;
+    g_buf[0] = (u8)(r_total & 0xff);
+    g_buf[1] = (u8)((r_total >> 8) & 0xff);
+    g_buf[2] = 0; g_buf[3] = 0;
+    g_buf[4] = P9_RREAD;
+    g_buf[5] = 0; g_buf[6] = 0;
+    // count = 1024 (LE)
+    g_buf[P9_HDR_LEN]     = 0x00;
+    g_buf[P9_HDR_LEN + 1] = 0x04;
+    g_buf[P9_HDR_LEN + 2] = 0x00;
+    g_buf[P9_HDR_LEN + 3] = 0x00;
+    // Data bytes don't matter — the cap check fires first.
+
+    u16 tag_out = 0;
+    u32 count_out = 0;
+    const u8 *data_ptr = NULL;
+    int rc = p9_parse_rread(g_buf, r_total, &tag_out, &count_out, &data_ptr, 512u);
+    TEST_EXPECT_EQ(rc, -1, "Rread count > data_cap rejected (R111 caller-cap-bound)");
+}
+
+// =============================================================================
+// Strict-equality on Rread: header.size != P9_HDR_LEN + 4 + count must be
+// rejected. We craft an Rread claiming count=4 but in a frame of size
+// 11+8 (extra trailing bytes).
+// =============================================================================
+
+void test_9p_wire_rread_size_mismatch_rejected(void) {
+    size_t r_total = P9_HDR_LEN + 4 + 8;
+    g_buf[0] = (u8)(r_total & 0xff);
+    g_buf[1] = (u8)((r_total >> 8) & 0xff);
+    g_buf[2] = 0; g_buf[3] = 0;
+    g_buf[4] = P9_RREAD;
+    g_buf[5] = 0; g_buf[6] = 0;
+    g_buf[P9_HDR_LEN]     = 0x04;       // count = 4
+    g_buf[P9_HDR_LEN + 1] = 0x00;
+    g_buf[P9_HDR_LEN + 2] = 0x00;
+    g_buf[P9_HDR_LEN + 3] = 0x00;
+
+    u16 tag_out = 0;
+    u32 count_out = 0;
+    const u8 *data_ptr = NULL;
+    int rc = p9_parse_rread(g_buf, r_total, &tag_out, &count_out, &data_ptr, 8192u);
+    TEST_EXPECT_EQ(rc, -1, "Rread header.size > 11 + count rejected");
+}
+
+// =============================================================================
+// Rlopen vs Rlcreate type strict: feeding an Rlopen frame to parse_rlcreate
+// must fail (and vice versa). Body shapes are identical but the types are
+// strictly distinct.
+// =============================================================================
+
+void test_9p_wire_rlopen_vs_rlcreate_type_strict(void) {
+    // Build a valid Rlopen frame.
+    size_t r_total = P9_HDR_LEN + P9_QID_LEN + 4;
+    g_buf[0] = (u8)(r_total & 0xff);
+    g_buf[1] = (u8)((r_total >> 8) & 0xff);
+    g_buf[2] = 0; g_buf[3] = 0;
+    g_buf[4] = P9_RLOPEN;
+    g_buf[5] = 1; g_buf[6] = 0;
+    struct p9_qid q = { .type = P9_QTFILE, .version = 0, .path = 0 };
+    (void)p9_pack_qid(g_buf + P9_HDR_LEN, sizeof(g_buf) - P9_HDR_LEN, &q);
+    (void)p9_pack_u32(g_buf + P9_HDR_LEN + P9_QID_LEN,
+                       sizeof(g_buf) - P9_HDR_LEN - P9_QID_LEN, 0);
+
+    u16 tag_out = 0;
+    struct p9_qid q_out = { 0 };
+    u32 iounit_out = 0;
+    int rc = p9_parse_rlcreate(g_buf, r_total, &tag_out, &q_out, &iounit_out);
+    TEST_EXPECT_EQ(rc, -1, "parse_rlcreate rejects Rlopen frame");
+    // And vice versa: build an Rlcreate frame, feed to parse_rlopen.
+    g_buf[4] = P9_RLCREATE;
+    rc = p9_parse_rlopen(g_buf, r_total, &tag_out, &q_out, &iounit_out);
+    TEST_EXPECT_EQ(rc, -1, "parse_rlopen rejects Rlcreate frame");
 }

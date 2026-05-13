@@ -30,7 +30,7 @@ int p9_unpack_str(const u8 *in, size_t remaining,
 // Header — extract size + type + tag without consuming the body.
 int p9_peek_header(const u8 *in, size_t len, u32 *size, u8 *type, u16 *tag);
 
-// Tmsg builders (P5-wire subset).
+// Tmsg builders.
 int p9_build_tversion(u8 *out, size_t cap, u16 tag, u32 msize,
                       const u8 *version, size_t version_len);
 int p9_build_tattach (u8 *out, size_t cap, u16 tag,
@@ -42,8 +42,17 @@ int p9_build_twalk   (u8 *out, size_t cap, u16 tag,
                       u32 fid, u32 newfid, u16 nwname,
                       const u8 *const *names, const size_t *name_lens);
 int p9_build_tclunk  (u8 *out, size_t cap, u16 tag, u32 fid);
+// IO family (P5-wire-io).
+int p9_build_tlopen  (u8 *out, size_t cap, u16 tag, u32 fid, u32 flags);
+int p9_build_tlcreate(u8 *out, size_t cap, u16 tag, u32 fid,
+                      const u8 *name, size_t name_len,
+                      u32 flags, u32 mode, u32 gid);
+int p9_build_tread   (u8 *out, size_t cap, u16 tag,
+                      u32 fid, u64 offset, u32 count);
+int p9_build_twrite  (u8 *out, size_t cap, u16 tag,
+                      u32 fid, u64 offset, u32 count, const u8 *data);
 
-// Rmsg parsers (P5-wire subset).
+// Rmsg parsers.
 int p9_parse_rversion(const u8 *in, size_t len, u16 *tag, u32 *msize,
                       const u8 **version, u16 *version_len);
 int p9_parse_rattach (const u8 *in, size_t len, u16 *tag, struct p9_qid *qid);
@@ -51,6 +60,14 @@ int p9_parse_rwalk   (const u8 *in, size_t len, u16 *tag,
                       u16 *nwqid, struct p9_qid *qids, size_t qid_cap);
 int p9_parse_rclunk  (const u8 *in, size_t len, u16 *tag);
 int p9_parse_rlerror (const u8 *in, size_t len, u16 *tag, u32 *ecode);
+// IO family (P5-wire-io).
+int p9_parse_rlopen  (const u8 *in, size_t len,
+                      u16 *tag, struct p9_qid *qid, u32 *iounit);
+int p9_parse_rlcreate(const u8 *in, size_t len,
+                      u16 *tag, struct p9_qid *qid, u32 *iounit);
+int p9_parse_rread   (const u8 *in, size_t len,
+                      u16 *tag, u32 *count, const u8 **data_ptr, u32 data_cap);
+int p9_parse_rwrite  (const u8 *in, size_t len, u16 *tag, u32 *count);
 ```
 
 ### Error convention
@@ -67,11 +84,12 @@ All parsers enforce `header.size == frame_length` AND `body offset == frame_leng
 
 ### R111 caller-cap-bound discipline
 
-For server-supplied counts that get written into caller buffers, the bound is enforced BEFORE the write. In P5-wire's surface, this applies to:
+For server-supplied counts that get written into caller buffers, the bound is enforced BEFORE the write. In the codec's surface, this applies to:
 
 - `p9_parse_rwalk`: the server-supplied `nwqid` is bounded against the caller's `qid_cap` BEFORE any qid is unpacked into the buffer. An out-of-spec `Rwalk(nwqid=99)` on a 2-qid caller buffer is rejected; the buffer is not touched.
+- `p9_parse_rread`: the server-supplied `count` is bounded against the caller's `data_cap` BEFORE the data pointer is exposed. An out-of-spec `Rread(count=4096)` against a 512-byte caller cap is rejected; `*data_ptr` stays `NULL` and the caller never observes the oversize buffer.
 
-The `p9_unpack_str` function returns a pointer INTO the input buffer (zero-copy), so caller-cap-bound is the caller's responsibility there: the caller checks `out_len <= ENFORCED_MAX` before consuming `out_ptr[0..out_len)`.
+The `p9_unpack_str` function returns a pointer INTO the input buffer (zero-copy), so caller-cap-bound is the caller's responsibility there: the caller checks `out_len <= ENFORCED_MAX` before consuming `out_ptr[0..out_len)`. The same zero-copy discipline applies to `p9_parse_rread`'s `*data_ptr` output — the caller must not free the input buffer while consuming it.
 
 ## Wire-format crib
 
@@ -83,7 +101,7 @@ Per `https://github.com/chaos/diod/blob/master/protocol.md` + `stratum/v2/docs/r
 | 9P-string | `[slen: u16 LE][bytes: u8 * slen]` (NOT NUL-terminated) |
 | QID | `[type: u8][version: u32 LE][path: u64 LE]` (13 bytes) |
 
-Per-message bodies (for the P5-wire subset):
+Per-message bodies (the cumulative codec subset through P5-wire-io):
 
 | Msg | Body |
 |---|---|
@@ -96,6 +114,14 @@ Per-message bodies (for the P5-wire subset):
 | Tclunk (120) | `[fid: u32]` |
 | Rclunk (121) | (empty body; 7-byte msg) |
 | Rlerror (7) | `[ecode: u32]` (Linux errno) |
+| Tlopen (12) | `[fid: u32][flags: u32]` |
+| Rlopen (13) | `[qid: 13][iounit: u32]` |
+| Tlcreate (14) | `[fid: u32][name: str][flags: u32][mode: u32][gid: u32]` |
+| Rlcreate (15) | `[qid: 13][iounit: u32]` |
+| Tread (116) | `[fid: u32][offset: u64][count: u32]` |
+| Rread (117) | `[count: u32][data: u8 * count]` |
+| Twrite (118) | `[fid: u32][offset: u64][count: u32][data: u8 * count]` |
+| Rwrite (119) | `[count: u32]` |
 
 All integers little-endian (matches Thylacine's AArch64 host endianness; encoding is still explicit byte-shift to remain portable).
 
@@ -108,6 +134,7 @@ All integers little-endian (matches Thylacine's AArch64 host endianness; encodin
 - `P9_NOFID == 0xFFFFFFFFu` (NOFID sentinel).
 - `P9_NOTAG == 0xFFFFu` (NOTAG sentinel).
 - `P9_TVERSION == 100`; `P9_RVERSION == P9_TVERSION + 1`; same for ATTACH/WALK/CLUNK pairs.
+- `P9_TLOPEN == 12`, `P9_TLCREATE == 14`, `P9_TREAD == 116`, `P9_TWRITE == 118`; each `RX = TX + 1` (IO family, P5-wire-io).
 - `P9_RLERROR == 7`.
 - `sizeof(struct p9_qid) >= P9_QID_LEN` (in-memory shape doesn't shrink below the wire shape).
 
@@ -117,13 +144,13 @@ All integers little-endian (matches Thylacine's AArch64 host endianness; encodin
 |---|---|
 | `kernel/include/thylacine/9p_wire.h` | Public API + constants + `struct p9_qid` |
 | `kernel/9p_wire.c` | Byte-level codec; static `write_header` + `validate_rmsg_header` helpers |
-| `kernel/test/test_9p_wire.c` | 15 unit tests (round-trip + malformed-input rejection) |
+| `kernel/test/test_9p_wire.c` | 22 unit tests (round-trip + malformed-input rejection; covers handshake/walk/clunk + IO family) |
 
 The codec is purely procedural — no callbacks, no state, no allocation. Every function is freestanding.
 
 ## Tests
 
-15 tests in `kernel/test/test_9p_wire.c`:
+22 tests in `kernel/test/test_9p_wire.c`:
 
 | Test | Covers |
 |---|---|
@@ -142,6 +169,13 @@ The codec is purely procedural — no callbacks, no state, no allocation. Every 
 | `9p_wire.rmsg_size_mismatch_rejected` | `header.size != frame_length` rejected |
 | `9p_wire.rmsg_wrong_type_rejected` | Parser refuses wrong opcode |
 | `9p_wire.rwalk_count_cap_enforced` | R111 caller-cap-bound on `nwqid > qid_cap` |
+| `9p_wire.tlopen_round_trip` | Build Tlopen + synthesize Rlopen + parse (qid + iounit) |
+| `9p_wire.tlcreate_round_trip` | Build Tlcreate (with name) + synthesize Rlcreate + parse |
+| `9p_wire.tread_round_trip` | Build Tread + synthesize Rread + parse (zero-copy data) |
+| `9p_wire.twrite_round_trip` | Build Twrite (with payload) + synthesize Rwrite + parse count |
+| `9p_wire.rread_data_cap_enforced` | R111 caller-cap-bound on Rread `count > data_cap` |
+| `9p_wire.rread_size_mismatch_rejected` | Strict-equality: header.size != 11 + count rejected |
+| `9p_wire.rlopen_vs_rlcreate_type_strict` | Identical body shapes but parser type-strict |
 
 ## Error paths
 
@@ -172,9 +206,9 @@ Every public function returns negative on:
 | Twalk / Rwalk | **Landed (P5-wire)** |
 | Tclunk / Rclunk | **Landed (P5-wire)** |
 | Rlerror parse | **Landed (P5-wire)** |
-| Tlopen / Rlopen | Phase 5+ (P5-wire-io) |
-| Tread / Rread + Twrite / Rwrite | Phase 5+ (P5-wire-io) |
-| Tlcreate / Rlcreate | Phase 5+ (P5-wire-io) |
+| Tlopen / Rlopen | **Landed (P5-wire-io)** |
+| Tread / Rread + Twrite / Rwrite | **Landed (P5-wire-io)** |
+| Tlcreate / Rlcreate | **Landed (P5-wire-io)** |
 | Tgetattr / Rgetattr + Tsetattr / Rsetattr | Phase 5+ (P5-wire-meta) |
 | Treaddir / Rreaddir | Phase 5+ (P5-wire-meta) |
 | Tstatfs / Rstatfs | Phase 5+ (P5-wire-meta) |

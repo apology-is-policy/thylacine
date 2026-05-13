@@ -34,6 +34,14 @@ void test_9p_session_dispatch_wrong_tag_rejected(void);
 void test_9p_session_dispatch_wrong_type_rejected(void);
 void test_9p_session_close_with_inflight_refused(void);
 void test_9p_session_state_gate_send_walk_before_open(void);
+void test_9p_session_lopen_round_trip(void);
+void test_9p_session_lcreate_round_trip(void);
+void test_9p_session_read_round_trip(void);
+void test_9p_session_write_round_trip(void);
+void test_9p_session_lopen_with_inflight_on_fid_refused(void);
+void test_9p_session_read_permits_concurrent(void);
+void test_9p_session_io_from_unbound_fid_refused(void);
+void test_9p_session_io_before_open_refused(void);
 
 // 4 KiB scratch buffer.
 static u8 g_buf[4096];
@@ -469,4 +477,216 @@ void test_9p_session_state_gate_send_walk_before_open(void) {
     // Still refused in VERSIONED.
     rc = p9_session_send_walk(&s, g_buf, sizeof(g_buf), 0, 1, 0, NULL, NULL);
     TEST_EXPECT_EQ(rc, -1, "send_walk in VERSIONED state refused");
+}
+
+// =============================================================================
+// IO family (P5-wire-io): end-to-end tests for Tlopen, Tlcreate, Tread,
+// Twrite + their R-messages. Each drives a session to OPEN, walks a fid,
+// then exercises the IO op + dispatch.
+// =============================================================================
+
+// Synthesize Rlopen / Rlcreate (identical body shape: qid + iounit).
+static int synth_ropen_create(u8 *out, size_t cap, u8 type, u16 tag,
+                                u8 qtype, u32 qver, u64 qpath, u32 iounit) {
+    u8 body[P9_QID_LEN + 4];
+    body[0] = qtype;
+    for (int i = 0; i < 4; i++) body[1 + i] = (u8)((qver >> (i * 8)) & 0xff);
+    for (int i = 0; i < 8; i++) body[5 + i] = (u8)((qpath >> (i * 8)) & 0xff);
+    for (int i = 0; i < 4; i++) body[P9_QID_LEN + i] = (u8)((iounit >> (i * 8)) & 0xff);
+    return synth_rmsg(out, cap, type, tag, body, sizeof(body));
+}
+
+// Synthesize Rread with the given payload bytes. count is encoded as the
+// payload length.
+static int synth_rread(u8 *out, size_t cap, u16 tag,
+                        const u8 *payload, u32 payload_len) {
+    u8 body[1024];
+    if ((size_t)payload_len + 4 > sizeof(body)) return -1;
+    for (int i = 0; i < 4; i++) body[i] = (u8)((payload_len >> (i * 8)) & 0xff);
+    for (u32 i = 0; i < payload_len; i++) body[4 + i] = payload[i];
+    return synth_rmsg(out, cap, P9_RREAD, tag, body, (size_t)(4 + payload_len));
+}
+
+// Synthesize Rwrite with the given accepted-count.
+static int synth_rwrite(u8 *out, size_t cap, u16 tag, u32 count) {
+    u8 body[4];
+    for (int i = 0; i < 4; i++) body[i] = (u8)((count >> (i * 8)) & 0xff);
+    return synth_rmsg(out, cap, P9_RWRITE, tag, body, sizeof(body));
+}
+
+// Walk root → new_fid + dispatch Rwalk, leaving new_fid bound + ready
+// for IO. Returns 0 on success, -1 on failure.
+static int walk_to(struct p9_session *s, u32 new_fid) {
+    int len = p9_session_send_walk(s, g_buf, sizeof(g_buf),
+                                    /*src=*/s->root_fid, new_fid,
+                                    /*nwname=*/0, NULL, NULL);
+    if (len < 0) return -1;
+    u32 sz; u8 ty; u16 tag;
+    if (p9_peek_header(g_buf, (size_t)len, &sz, &ty, &tag) < 0) return -1;
+    len = synth_rwalk_single(g_buf, sizeof(g_buf), tag, P9_QTFILE, 0, 0);
+    if (len < 0) return -1;
+    struct p9_dispatch_result r;
+    return p9_session_dispatch_rmsg(s, g_buf, (size_t)len, &r);
+}
+
+void test_9p_session_lopen_round_trip(void) {
+    struct p9_session s;
+    drive_session_open(&s, /*root_fid=*/0);
+    TEST_EXPECT_EQ(walk_to(&s, 11), 0, "walk to fid 11");
+
+    int len = p9_session_send_lopen(&s, g_buf, sizeof(g_buf), 11, /*flags=*/0);
+    TEST_ASSERT(len > 0, "send_lopen ok");
+    u32 sz; u8 ty; u16 tag;
+    p9_peek_header(g_buf, (size_t)len, &sz, &ty, &tag);
+    TEST_EXPECT_EQ((u64)ty, (u64)P9_TLOPEN, "Tlopen type");
+    TEST_EXPECT_EQ((u64)p9_session_inflight(&s), (u64)1, "lopen inflight = 1");
+
+    // Synthesize Rlopen.
+    len = synth_ropen_create(g_buf, sizeof(g_buf), P9_RLOPEN, tag,
+                              P9_QTFILE, 5, 555ull, 4096u);
+    struct p9_dispatch_result r;
+    int rc = p9_session_dispatch_rmsg(&s, g_buf, (size_t)len, &r);
+    TEST_EXPECT_EQ(rc, 0,                            "dispatch Rlopen ok");
+    TEST_EXPECT_EQ((u64)r.kind, (u64)P9_TLOPEN,      "result kind = TLOPEN");
+    TEST_EXPECT_EQ(r.open_qid.path, (u64)555,        "Rlopen qid.path");
+    TEST_EXPECT_EQ((u64)r.open_iounit, (u64)4096,    "Rlopen iounit");
+    // Fid stays bound.
+    TEST_ASSERT(p9_session_fid_bound(&s, 11),        "fid 11 still bound after Rlopen");
+    TEST_EXPECT_EQ((u64)p9_session_inflight(&s), (u64)0, "no inflight post-dispatch");
+}
+
+void test_9p_session_lcreate_round_trip(void) {
+    struct p9_session s;
+    drive_session_open(&s, 0);
+    TEST_EXPECT_EQ(walk_to(&s, 12), 0, "walk to fid 12 (parent dir)");
+
+    const u8 name[] = {'n','e','w'};
+    int len = p9_session_send_lcreate(&s, g_buf, sizeof(g_buf),
+                                       12, name, sizeof(name),
+                                       /*flags=*/0x42u, /*mode=*/0644u, /*gid=*/0);
+    TEST_ASSERT(len > 0, "send_lcreate ok");
+    u32 sz; u8 ty; u16 tag;
+    p9_peek_header(g_buf, (size_t)len, &sz, &ty, &tag);
+    TEST_EXPECT_EQ((u64)ty, (u64)P9_TLCREATE, "Tlcreate type");
+
+    len = synth_ropen_create(g_buf, sizeof(g_buf), P9_RLCREATE, tag,
+                              P9_QTFILE, 1, 777ull, 0);
+    struct p9_dispatch_result r;
+    int rc = p9_session_dispatch_rmsg(&s, g_buf, (size_t)len, &r);
+    TEST_EXPECT_EQ(rc, 0,                            "dispatch Rlcreate ok");
+    TEST_EXPECT_EQ((u64)r.kind, (u64)P9_TLCREATE,    "result kind = TLCREATE");
+    TEST_EXPECT_EQ(r.open_qid.path, (u64)777,        "Rlcreate qid.path");
+    TEST_ASSERT(p9_session_fid_bound(&s, 12),        "fid 12 still bound (now to new file)");
+}
+
+void test_9p_session_read_round_trip(void) {
+    struct p9_session s;
+    drive_session_open(&s, 0);
+    TEST_EXPECT_EQ(walk_to(&s, 13), 0, "walk to fid 13");
+
+    int len = p9_session_send_read(&s, g_buf, sizeof(g_buf),
+                                    13, /*offset=*/0, /*count=*/256);
+    TEST_ASSERT(len > 0, "send_read ok");
+    u32 sz; u8 ty; u16 tag;
+    p9_peek_header(g_buf, (size_t)len, &sz, &ty, &tag);
+    TEST_EXPECT_EQ((u64)ty, (u64)P9_TREAD, "Tread type");
+
+    const u8 payload[] = {'h','i','!'};
+    len = synth_rread(g_buf, sizeof(g_buf), tag, payload, (u32)sizeof(payload));
+    struct p9_dispatch_result r;
+    int rc = p9_session_dispatch_rmsg(&s, g_buf, (size_t)len, &r);
+    TEST_EXPECT_EQ(rc, 0,                                "dispatch Rread ok");
+    TEST_EXPECT_EQ((u64)r.kind, (u64)P9_TREAD,           "result kind = TREAD");
+    TEST_EXPECT_EQ((u64)r.read_count, (u64)sizeof(payload), "Rread count");
+    TEST_ASSERT(r.read_data != NULL,                     "Rread data non-null");
+    for (size_t i = 0; i < sizeof(payload); i++) {
+        TEST_ASSERT(r.read_data[i] == payload[i],        "Rread data byte mismatch");
+    }
+}
+
+void test_9p_session_write_round_trip(void) {
+    struct p9_session s;
+    drive_session_open(&s, 0);
+    TEST_EXPECT_EQ(walk_to(&s, 14), 0, "walk to fid 14");
+
+    const u8 payload[] = {'b','y','t','e','s'};
+    int len = p9_session_send_write(&s, g_buf, sizeof(g_buf),
+                                     14, /*offset=*/0,
+                                     (u32)sizeof(payload), payload);
+    TEST_ASSERT(len > 0, "send_write ok");
+    u32 sz; u8 ty; u16 tag;
+    p9_peek_header(g_buf, (size_t)len, &sz, &ty, &tag);
+    TEST_EXPECT_EQ((u64)ty, (u64)P9_TWRITE, "Twrite type");
+
+    len = synth_rwrite(g_buf, sizeof(g_buf), tag, (u32)sizeof(payload));
+    struct p9_dispatch_result r;
+    int rc = p9_session_dispatch_rmsg(&s, g_buf, (size_t)len, &r);
+    TEST_EXPECT_EQ(rc, 0,                                "dispatch Rwrite ok");
+    TEST_EXPECT_EQ((u64)r.kind, (u64)P9_TWRITE,          "result kind = TWRITE");
+    TEST_EXPECT_EQ((u64)r.write_count, (u64)sizeof(payload), "Rwrite count");
+}
+
+// Tlopen on a fid with another op in flight on it: refused.
+void test_9p_session_lopen_with_inflight_on_fid_refused(void) {
+    struct p9_session s;
+    drive_session_open(&s, 0);
+    TEST_EXPECT_EQ(walk_to(&s, 15), 0, "walk to fid 15");
+
+    // First lopen: accepted.
+    int len = p9_session_send_lopen(&s, g_buf, sizeof(g_buf), 15, 0);
+    TEST_ASSERT(len > 0, "first lopen accepted");
+
+    // Second lopen on same fid while first is in flight: refused.
+    int rc = p9_session_send_lopen(&s, g_buf, sizeof(g_buf), 15, 0);
+    TEST_EXPECT_EQ(rc, -1, "concurrent lopen on same fid refused");
+}
+
+// Tread permits concurrent ops on the same fid (offset is explicit).
+void test_9p_session_read_permits_concurrent(void) {
+    struct p9_session s;
+    drive_session_open(&s, 0);
+    TEST_EXPECT_EQ(walk_to(&s, 16), 0, "walk to fid 16");
+
+    int len1 = p9_session_send_read(&s, g_buf, sizeof(g_buf),
+                                     16, /*offset=*/0, /*count=*/256);
+    TEST_ASSERT(len1 > 0, "first read accepted");
+
+    // Need separate buffer for the second message (g_buf is shared).
+    static u8 buf2[1024];
+    int len2 = p9_session_send_read(&s, buf2, sizeof(buf2),
+                                     16, /*offset=*/256, /*count=*/256);
+    TEST_ASSERT(len2 > 0, "concurrent read on same fid accepted");
+    TEST_EXPECT_EQ((u64)p9_session_inflight(&s), (u64)2, "two reads inflight");
+}
+
+void test_9p_session_io_from_unbound_fid_refused(void) {
+    struct p9_session s;
+    drive_session_open(&s, 0);
+    // Fid 99 is never bound.
+    int rc = p9_session_send_lopen(&s, g_buf, sizeof(g_buf), 99, 0);
+    TEST_EXPECT_EQ(rc, -1, "lopen on unbound fid refused");
+    rc = p9_session_send_read(&s, g_buf, sizeof(g_buf), 99, 0, 1);
+    TEST_EXPECT_EQ(rc, -1, "read on unbound fid refused");
+    rc = p9_session_send_write(&s, g_buf, sizeof(g_buf), 99, 0, 1, (const u8 *)"x");
+    TEST_EXPECT_EQ(rc, -1, "write on unbound fid refused");
+    const u8 name[] = {'x'};
+    rc = p9_session_send_lcreate(&s, g_buf, sizeof(g_buf), 99,
+                                  name, sizeof(name), 0, 0, 0);
+    TEST_EXPECT_EQ(rc, -1, "lcreate on unbound fid refused");
+}
+
+void test_9p_session_io_before_open_refused(void) {
+    struct p9_session s;
+    p9_session_init(&s, /*root_fid=*/0, 8192);
+    // In INIT state: every IO send refused.
+    int rc = p9_session_send_lopen(&s, g_buf, sizeof(g_buf), 0, 0);
+    TEST_EXPECT_EQ(rc, -1, "lopen in INIT state refused");
+    rc = p9_session_send_read(&s, g_buf, sizeof(g_buf), 0, 0, 1);
+    TEST_EXPECT_EQ(rc, -1, "read in INIT state refused");
+    rc = p9_session_send_write(&s, g_buf, sizeof(g_buf), 0, 0, 1, (const u8 *)"x");
+    TEST_EXPECT_EQ(rc, -1, "write in INIT state refused");
+    const u8 name[] = {'x'};
+    rc = p9_session_send_lcreate(&s, g_buf, sizeof(g_buf), 0,
+                                  name, sizeof(name), 0, 0, 0);
+    TEST_EXPECT_EQ(rc, -1, "lcreate in INIT state refused");
 }

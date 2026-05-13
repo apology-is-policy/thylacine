@@ -315,6 +315,91 @@ int p9_session_send_clunk(struct p9_session *s,
 }
 
 // =============================================================================
+// Send: IO family (Tlopen / Tlcreate / Tread / Twrite). Each shares the
+// OPEN-state + fid-bound preconditions; mutation-shaped ops (lopen,
+// lcreate) additionally require no other in-flight op on fid.
+// =============================================================================
+
+int p9_session_send_lopen(struct p9_session *s,
+                          u8 *out, size_t cap,
+                          u32 fid, u32 flags) {
+    if (!s) return -1;
+    if (s->magic != P9_SESSION_MAGIC) return -1;
+    if (s->state != P9_SESS_OPEN) return -1;
+    if (!out) return -1;
+    if (!fid_bound(s, fid)) return -1;
+    // Tlopen mutates server-side fid state; refuse concurrent ops on fid.
+    if (any_outstanding_on_fid(s, fid)) return -1;
+    int t = alloc_tag(s);
+    if (t < 0) return -1;
+    int rc = p9_build_tlopen(out, cap, (u16)t, fid, flags);
+    if (rc < 0) return -1;
+    mark_outstanding(s, (u16)t, P9_TLOPEN, fid, fid);
+    return rc;
+}
+
+int p9_session_send_lcreate(struct p9_session *s,
+                            u8 *out, size_t cap,
+                            u32 fid,
+                            const u8 *name, size_t name_len,
+                            u32 flags, u32 mode, u32 gid) {
+    if (!s) return -1;
+    if (s->magic != P9_SESSION_MAGIC) return -1;
+    if (s->state != P9_SESS_OPEN) return -1;
+    if (!out) return -1;
+    if (!fid_bound(s, fid)) return -1;
+    if (name_len == 0 || name_len > P9_NAME_MAX) return -1;
+    if (!name) return -1;
+    // Tlcreate rebinds fid to the new file at server-side; refuse
+    // concurrent ops on fid (the binding is observable as soon as the
+    // server processes the request).
+    if (any_outstanding_on_fid(s, fid)) return -1;
+    int t = alloc_tag(s);
+    if (t < 0) return -1;
+    int rc = p9_build_tlcreate(out, cap, (u16)t, fid,
+                               name, name_len, flags, mode, gid);
+    if (rc < 0) return -1;
+    mark_outstanding(s, (u16)t, P9_TLCREATE, fid, fid);
+    return rc;
+}
+
+int p9_session_send_read(struct p9_session *s,
+                         u8 *out, size_t cap,
+                         u32 fid, u64 offset, u32 count) {
+    if (!s) return -1;
+    if (s->magic != P9_SESSION_MAGIC) return -1;
+    if (s->state != P9_SESS_OPEN) return -1;
+    if (!out) return -1;
+    if (!fid_bound(s, fid)) return -1;
+    // Tread permits concurrent ops on fid (offset is explicit on the wire).
+    int t = alloc_tag(s);
+    if (t < 0) return -1;
+    int rc = p9_build_tread(out, cap, (u16)t, fid, offset, count);
+    if (rc < 0) return -1;
+    mark_outstanding(s, (u16)t, P9_TREAD, fid, fid);
+    return rc;
+}
+
+int p9_session_send_write(struct p9_session *s,
+                          u8 *out, size_t cap,
+                          u32 fid, u64 offset,
+                          u32 count, const u8 *data) {
+    if (!s) return -1;
+    if (s->magic != P9_SESSION_MAGIC) return -1;
+    if (s->state != P9_SESS_OPEN) return -1;
+    if (!out) return -1;
+    if (!fid_bound(s, fid)) return -1;
+    if (count > 0 && !data) return -1;
+    // Twrite permits concurrent ops on fid (offset is explicit on the wire).
+    int t = alloc_tag(s);
+    if (t < 0) return -1;
+    int rc = p9_build_twrite(out, cap, (u16)t, fid, offset, count, data);
+    if (rc < 0) return -1;
+    mark_outstanding(s, (u16)t, P9_TWRITE, fid, fid);
+    return rc;
+}
+
+// =============================================================================
 // Receive: dispatch by tag, apply state mutation.
 // =============================================================================
 
@@ -337,6 +422,13 @@ static void zero_result(struct p9_dispatch_result *out) {
         out->qids[i].version = 0;
         out->qids[i].path    = 0;
     }
+    out->open_qid.type    = 0;
+    out->open_qid.version = 0;
+    out->open_qid.path    = 0;
+    out->open_iounit      = 0;
+    out->read_count       = 0;
+    out->read_data        = NULL;
+    out->write_count      = 0;
 }
 
 // Special path for Rversion: tag is NOTAG; not from outstanding[];
@@ -438,6 +530,53 @@ int p9_session_dispatch_rmsg(struct p9_session *s,
         if (rc < 0) return -1;
         if (tag_check != tag) return -1;
         // Send-time already unbound; no further action.
+    } else if (op->kind == P9_TLOPEN) {
+        u16 tag_check;
+        struct p9_qid qid;
+        u32 iounit;
+        rc = p9_parse_rlopen(rmsg, len, &tag_check, &qid, &iounit);
+        if (rc < 0) return -1;
+        if (tag_check != tag) return -1;
+        // No fid table mutation: fid stays bound; server's view shifts
+        // from "walked (closed)" to "opened-with-mode".
+        out->open_qid    = qid;
+        out->open_iounit = iounit;
+    } else if (op->kind == P9_TLCREATE) {
+        u16 tag_check;
+        struct p9_qid qid;
+        u32 iounit;
+        rc = p9_parse_rlcreate(rmsg, len, &tag_check, &qid, &iounit);
+        if (rc < 0) return -1;
+        if (tag_check != tag) return -1;
+        // No fid table mutation: fid stays bound; server's view shifts
+        // from "parent dir" to "newly opened file". The client-app caller
+        // is responsible for understanding the semantic rebind.
+        out->open_qid    = qid;
+        out->open_iounit = iounit;
+    } else if (op->kind == P9_TREAD) {
+        u16 tag_check;
+        u32 count;
+        const u8 *data;
+        // Use the session's negotiated_msize as the upper bound on the
+        // server-supplied count (R111 doctrine). msize - 11 is the
+        // theoretical max single-read count (msize - header - count
+        // field), but the parser only needs to refuse oversize claims;
+        // strict-equality below catches the rest.
+        u32 data_cap = (s->negotiated_msize > P9_HDR_LEN + 4)
+            ? (s->negotiated_msize - P9_HDR_LEN - 4)
+            : 0;
+        rc = p9_parse_rread(rmsg, len, &tag_check, &count, &data, data_cap);
+        if (rc < 0) return -1;
+        if (tag_check != tag) return -1;
+        out->read_count = count;
+        out->read_data  = data;
+    } else if (op->kind == P9_TWRITE) {
+        u16 tag_check;
+        u32 count;
+        rc = p9_parse_rwrite(rmsg, len, &tag_check, &count);
+        if (rc < 0) return -1;
+        if (tag_check != tag) return -1;
+        out->write_count = count;
     } else {
         // Unknown / unsupported kind.
         return -1;

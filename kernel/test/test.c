@@ -237,6 +237,13 @@ void test_9p_wire_rmsg_size_mismatch_rejected(void);
 void test_9p_wire_rmsg_wrong_type_rejected(void);
 void test_9p_wire_rwalk_count_cap_enforced(void);
 void test_9p_wire_pack_str_overflow(void);
+void test_9p_wire_tlopen_round_trip(void);
+void test_9p_wire_tlcreate_round_trip(void);
+void test_9p_wire_tread_round_trip(void);
+void test_9p_wire_twrite_round_trip(void);
+void test_9p_wire_rread_data_cap_enforced(void);
+void test_9p_wire_rread_size_mismatch_rejected(void);
+void test_9p_wire_rlopen_vs_rlcreate_type_strict(void);
 void test_9p_session_init_destroy(void);
 void test_9p_session_version_handshake(void);
 void test_9p_session_attach_handshake(void);
@@ -254,6 +261,14 @@ void test_9p_session_dispatch_wrong_tag_rejected(void);
 void test_9p_session_dispatch_wrong_type_rejected(void);
 void test_9p_session_close_with_inflight_refused(void);
 void test_9p_session_state_gate_send_walk_before_open(void);
+void test_9p_session_lopen_round_trip(void);
+void test_9p_session_lcreate_round_trip(void);
+void test_9p_session_read_round_trip(void);
+void test_9p_session_write_round_trip(void);
+void test_9p_session_lopen_with_inflight_on_fid_refused(void);
+void test_9p_session_read_permits_concurrent(void);
+void test_9p_session_io_from_unbound_fid_refused(void);
+void test_9p_session_io_before_open_refused(void);
 void test_irq_latency_bench(void);
 void test_caps_kproc_has_all(void);
 void test_caps_kproc_has_hw_create(void);
@@ -597,6 +612,19 @@ struct test_case g_tests[] = {
     { "9p_wire.rwalk_count_cap_enforced",
                                        test_9p_wire_rwalk_count_cap_enforced,
                                                                            false, NULL },
+    { "9p_wire.tlopen_round_trip",     test_9p_wire_tlopen_round_trip,     false, NULL },
+    { "9p_wire.tlcreate_round_trip",   test_9p_wire_tlcreate_round_trip,   false, NULL },
+    { "9p_wire.tread_round_trip",      test_9p_wire_tread_round_trip,      false, NULL },
+    { "9p_wire.twrite_round_trip",     test_9p_wire_twrite_round_trip,     false, NULL },
+    { "9p_wire.rread_data_cap_enforced",
+                                       test_9p_wire_rread_data_cap_enforced,
+                                                                           false, NULL },
+    { "9p_wire.rread_size_mismatch_rejected",
+                                       test_9p_wire_rread_size_mismatch_rejected,
+                                                                           false, NULL },
+    { "9p_wire.rlopen_vs_rlcreate_type_strict",
+                                       test_9p_wire_rlopen_vs_rlcreate_type_strict,
+                                                                           false, NULL },
     { "9p_session.init_destroy",       test_9p_session_init_destroy,       false, NULL },
     { "9p_session.version_handshake",  test_9p_session_version_handshake,  false, NULL },
     { "9p_session.attach_handshake",   test_9p_session_attach_handshake,   false, NULL },
@@ -633,6 +661,22 @@ struct test_case g_tests[] = {
                                                                            false, NULL },
     { "9p_session.state_gate_send_walk_before_open",
                                        test_9p_session_state_gate_send_walk_before_open,
+                                                                           false, NULL },
+    { "9p_session.lopen_round_trip",   test_9p_session_lopen_round_trip,   false, NULL },
+    { "9p_session.lcreate_round_trip", test_9p_session_lcreate_round_trip, false, NULL },
+    { "9p_session.read_round_trip",    test_9p_session_read_round_trip,    false, NULL },
+    { "9p_session.write_round_trip",   test_9p_session_write_round_trip,   false, NULL },
+    { "9p_session.lopen_with_inflight_on_fid_refused",
+                                       test_9p_session_lopen_with_inflight_on_fid_refused,
+                                                                           false, NULL },
+    { "9p_session.read_permits_concurrent",
+                                       test_9p_session_read_permits_concurrent,
+                                                                           false, NULL },
+    { "9p_session.io_from_unbound_fid_refused",
+                                       test_9p_session_io_from_unbound_fid_refused,
+                                                                           false, NULL },
+    { "9p_session.io_before_open_refused",
+                                       test_9p_session_io_before_open_refused,
                                                                            false, NULL },
     { "userspace.irq_latency_bench",   test_irq_latency_bench,             false, NULL },
     { "caps.kproc_has_all",            test_caps_kproc_has_all,            false, NULL },

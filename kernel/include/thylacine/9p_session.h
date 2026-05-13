@@ -11,7 +11,10 @@
 //                                  | p9_session_send_attach
 //                                  | (post-Rversion + Rattach dispatch)
 //   CloseSession                   | p9_session_close
-//   SendIO   (deferred P5-session-io) | future p9_session_send_read/write/...
+//   SendIO   (open / create)       | p9_session_send_lopen
+//                                  | p9_session_send_lcreate
+//   SendIO   (read / write)        | p9_session_send_read
+//                                  | p9_session_send_write
 //   SendWalk                       | p9_session_send_walk
 //   SendClunk                      | p9_session_send_clunk
 //   ReceiveOp                      | p9_session_dispatch_rmsg
@@ -101,7 +104,8 @@ enum p9_session_state {
 
 struct p9_outstanding {
     bool active;
-    u8   kind;       // P9_TVERSION / P9_TATTACH / P9_TWALK / P9_TCLUNK
+    u8   kind;       // P9_TVERSION / P9_TATTACH / P9_TWALK / P9_TCLUNK /
+                     // P9_TLOPEN / P9_TLCREATE / P9_TREAD / P9_TWRITE
     u32  fid;        // primary target fid; equals root_fid for version/attach
     u32  new_fid;    // walk's destination; equals fid otherwise
     u32  op_id;      // monotonic spec-side identifier (for diagnostics)
@@ -206,6 +210,51 @@ int p9_session_send_clunk(struct p9_session *s,
                           u32 fid);
 
 // =============================================================================
+// IO send-side API (P5-wire-io extension; spec's SendIO action).
+//
+// Preconditions shared by all four:
+//   - state == OPEN
+//   - fid is bound
+//
+// Fid-exclusivity rules:
+//   - send_lopen + send_lcreate REQUIRE no other in-flight op on fid
+//     (Tlopen mutates server-side fid state from "walked" to "opened";
+//     Tlcreate rebinds fid to the new file; concurrent ops are undefined).
+//   - send_read + send_write PERMIT concurrent in-flight ops on fid (the
+//     wire passes offset explicitly, so the server is stateless wrt
+//     position; client-app callers serialize logically).
+//
+// None of these mutate the client-side fid table — fid_bound stays true
+// across all four operations + their R-message dispatch.
+// =============================================================================
+
+// Tlopen: open the file currently bound to `fid` with Linux O_* flags.
+int p9_session_send_lopen(struct p9_session *s,
+                          u8 *out, size_t cap,
+                          u32 fid, u32 flags);
+
+// Tlcreate: create `name` in directory `fid` and rebind fid to the new
+// file. flags / mode / gid carry the standard Linux semantics.
+int p9_session_send_lcreate(struct p9_session *s,
+                            u8 *out, size_t cap,
+                            u32 fid,
+                            const u8 *name, size_t name_len,
+                            u32 flags, u32 mode, u32 gid);
+
+// Tread: read `count` bytes at `offset` from `fid`. Concurrent reads on
+// the same fid with different offsets are permitted.
+int p9_session_send_read(struct p9_session *s,
+                         u8 *out, size_t cap,
+                         u32 fid, u64 offset, u32 count);
+
+// Twrite: write `count` bytes from `data` at `offset` to `fid`. Concurrent
+// writes on the same fid are permitted.
+int p9_session_send_write(struct p9_session *s,
+                          u8 *out, size_t cap,
+                          u32 fid, u64 offset,
+                          u32 count, const u8 *data);
+
+// =============================================================================
 // Receive-side API.
 // =============================================================================
 
@@ -228,6 +277,15 @@ struct p9_dispatch_result {
     u32            version_msize;  // valid iff kind == P9_TVERSION
     u16            version_len;
     const u8      *version_ptr;    // aliases the input buffer
+    // For lopen + lcreate, the parsed qid + iounit.
+    struct p9_qid  open_qid;
+    u32            open_iounit;
+    // For read, the parsed count + zero-copy data pointer aliasing rmsg.
+    u32            read_count;
+    const u8      *read_data;      // aliases the input buffer; caller must
+                                   // not free rmsg while consuming
+    // For write, the parsed accepted count.
+    u32            write_count;
 };
 
 // Dispatch one received Rmsg. The Rmsg's tag is looked up in

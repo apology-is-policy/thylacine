@@ -8,7 +8,7 @@
 // baseline. Stratum's `<stratum/9p.h>` is the cross-project ABI reference
 // for opcodes and limits; this header mirrors those numerically.
 //
-// SCOPE OF P5-WIRE (this chunk):
+// SCOPE OF P5-WIRE + P5-WIRE-IO (cumulative through this chunk):
 //
 //   - Common header (size + type + tag); pack/peek/unpack.
 //   - Primitive marshalers/unmarshalers: u8, u16, u32, u64, str, qid.
@@ -17,11 +17,15 @@
 //       Tattach  / Rattach  (104 / 105)
 //       Twalk    / Rwalk    (110 / 111)
 //       Tclunk   / Rclunk   (120 / 121)
+//   - IO family (P5-wire-io extension):
+//       Tlopen   / Rlopen   (12 / 13)
+//       Tlcreate / Rlcreate (14 / 15)
+//       Tread    / Rread    (116 / 117)
+//       Twrite   / Rwrite   (118 / 119)
 //   - Rlerror parse (7) — every R-message can be replaced by Rlerror.
 //
-// OUT OF P5-WIRE (deferred to follow-up chunks):
+// OUT OF P5-WIRE-IO (deferred to follow-up chunks):
 //
-//   - IO family: Tlopen / Tread / Twrite / Tlcreate (P5-wire-io).
 //   - Metadata family: Tgetattr / Tsetattr / Treaddir / Tstatfs / Tfsync
 //     (P5-wire-meta).
 //   - Mutation family: Tunlinkat / Trename / Trenameat / Tsymlink /
@@ -285,5 +289,84 @@ int p9_parse_rclunk(const u8 *in, size_t len, u16 *tag);
 // Rlerror: u32 LE Linux errno. Used in lieu of any expected Rxx when the
 // server cannot fulfill the request.
 int p9_parse_rlerror(const u8 *in, size_t len, u16 *tag, u32 *ecode);
+
+// =============================================================================
+// IO family (P5-wire-io extension).
+//
+// Tlopen / Rlopen — open an existing fid (post-walk) with Linux open(2)
+// semantics. After Rlopen the fid retains its binding but the server-side
+// state transitions from "walked" to "opened-with-mode".
+//
+//   Tlopen body: [fid: u32][flags: u32]
+//   Rlopen body: [qid: 13][iounit: u32]
+//
+// Tlcreate / Rlcreate — create a new file in the directory `fid` and bind
+// `fid` to the new file (NOT to the parent). Per 9P2000.L: after Rlcreate,
+// the same fid number refers to the new file's inode; the client's fid
+// table doesn't shift because the fid is already bound to "the same fid
+// number, different inode after this op." Caller responsible for
+// understanding the binding change.
+//
+//   Tlcreate body: [fid: u32][name: str][flags: u32][mode: u32][gid: u32]
+//   Rlcreate body: [qid: 13][iounit: u32]
+//
+// Tread / Rread — read up to `count` bytes from offset `offset` of fid's
+// open data stream. Returns the actual count read (may be < requested at
+// EOF). 9P2000.L explicit-offset model means concurrent Tread on the same
+// fid with different offsets is legal at the wire layer.
+//
+//   Tread body: [fid: u32][offset: u64][count: u32]
+//   Rread body: [count: u32][data: u8 * count]
+//
+// Twrite / Rwrite — write `count` bytes at offset `offset` of fid's open
+// data stream. Returns the actual count accepted (may be < requested
+// under back-pressure).
+//
+//   Twrite body: [fid: u32][offset: u64][count: u32][data: u8 * count]
+//   Rwrite body: [count: u32]
+// =============================================================================
+
+// Tlopen: build a Tlopen Tmsg targeting `fid` with Linux O_* flags.
+int p9_build_tlopen(u8 *out, size_t cap, u16 tag, u32 fid, u32 flags);
+
+// Rlopen parse: extract qid + iounit. iounit is the server's recommended
+// max single-Tread/Twrite count (0 means "no recommendation").
+int p9_parse_rlopen(const u8 *in, size_t len,
+                    u16 *tag, struct p9_qid *qid, u32 *iounit);
+
+// Tlcreate: create file `name` in directory `fid` with `flags` + `mode`
+// + `gid`. After the server processes this, fid binds to the new file.
+int p9_build_tlcreate(u8 *out, size_t cap, u16 tag, u32 fid,
+                      const u8 *name, size_t name_len,
+                      u32 flags, u32 mode, u32 gid);
+
+// Rlcreate parse: same shape as Rlopen.
+int p9_parse_rlcreate(const u8 *in, size_t len,
+                      u16 *tag, struct p9_qid *qid, u32 *iounit);
+
+// Tread: read `count` bytes at `offset` from `fid`.
+int p9_build_tread(u8 *out, size_t cap, u16 tag,
+                   u32 fid, u64 offset, u32 count);
+
+// Rread parse: returns the actual count + a zero-copy pointer to data
+// bytes INTO the input buffer. Caller MUST not free the input buffer
+// while consuming *data_ptr.
+//
+// R111 doctrine: `data_cap` is the caller's expected upper bound on count
+// (typically negotiated_msize - 11 for a single-message read). If the
+// server's reported count exceeds data_cap, the parser refuses BEFORE
+// touching the data buffer.
+int p9_parse_rread(const u8 *in, size_t len,
+                   u16 *tag, u32 *count,
+                   const u8 **data_ptr, u32 data_cap);
+
+// Twrite: write `count` bytes from `data` at `offset` to `fid`. The data
+// bytes are copied into the output buffer.
+int p9_build_twrite(u8 *out, size_t cap, u16 tag,
+                    u32 fid, u64 offset, u32 count,
+                    const u8 *data);
+
+// Rwrite parse: returns the actual byte count accepted.
+int p9_parse_rwrite(const u8 *in, size_t len, u16 *tag, u32 *count);
 
 #endif  // THYLACINE_9P_WIRE_H

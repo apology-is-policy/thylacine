@@ -37,7 +37,9 @@ CLOSED  (terminal)
 | `CloseSession` | `p9_session_close` (refuses while `Inflight ≠ {}`) |
 | `SendWalk(t, src, new)` | `p9_session_send_walk` — Send-time precondition: src bound, new not bound, new ≠ root, no other in-flight op on new |
 | `SendClunk(t, fid)` | `p9_session_send_clunk` — Send-time precondition: fid bound, fid ≠ root, no other in-flight op on fid. **Send-time-unbinds** fid (the spec's canonical client discipline). |
-| `ReceiveOp(t)` | `p9_session_dispatch_rmsg` — tag-indexed lookup pairs Rmsg with correct outstanding op; Rlerror surfacing; type-mismatch rejected. |
+| `SendIO(t, fid)` — open/create | `p9_session_send_lopen` + `p9_session_send_lcreate` — Send-time precondition: fid bound, no other in-flight op on fid (server-side fid state mutation is exclusive). |
+| `SendIO(t, fid)` — read/write | `p9_session_send_read` + `p9_session_send_write` — Send-time precondition: fid bound. Concurrent ops on same fid permitted (offset is explicit on the wire). |
+| `ReceiveOp(t)` | `p9_session_dispatch_rmsg` — tag-indexed lookup pairs Rmsg with correct outstanding op; Rlerror surfacing; type-mismatch rejected. IO R-msgs (Rlopen/Rlcreate/Rread/Rwrite) populate the corresponding fields in `struct p9_dispatch_result` without mutating the fid table. |
 
 ## Invariants the module upholds
 
@@ -67,6 +69,17 @@ int  p9_session_send_walk   (struct p9_session *s, u8 *out, size_t cap,
                               u32 src_fid, u32 new_fid, u16 nwname,
                               const u8 *const *names, const size_t *name_lens);
 int  p9_session_send_clunk  (struct p9_session *s, u8 *out, size_t cap, u32 fid);
+// IO family (P5-wire-io).
+int  p9_session_send_lopen  (struct p9_session *s, u8 *out, size_t cap,
+                              u32 fid, u32 flags);
+int  p9_session_send_lcreate(struct p9_session *s, u8 *out, size_t cap,
+                              u32 fid, const u8 *name, size_t name_len,
+                              u32 flags, u32 mode, u32 gid);
+int  p9_session_send_read   (struct p9_session *s, u8 *out, size_t cap,
+                              u32 fid, u64 offset, u32 count);
+int  p9_session_send_write  (struct p9_session *s, u8 *out, size_t cap,
+                              u32 fid, u64 offset,
+                              u32 count, const u8 *data);
 
 // Receive-side: dispatch by tag, apply state mutation, surface result.
 int  p9_session_dispatch_rmsg(struct p9_session *s,
@@ -107,7 +120,8 @@ struct p9_session {
 
 struct p9_outstanding {
     bool active;
-    u8   kind;     // P9_TVERSION / P9_TATTACH / P9_TWALK / P9_TCLUNK
+    u8   kind;     // P9_TVERSION / P9_TATTACH / P9_TWALK / P9_TCLUNK /
+                   // P9_TLOPEN / P9_TLCREATE / P9_TREAD / P9_TWRITE
     u32  fid;      // primary target
     u32  new_fid;  // walk dest (== fid for non-walk)
     u32  op_id;    // spec op_id
@@ -118,7 +132,7 @@ Allocation: caller-managed. The kernel handle-table layer (P5-attach) wraps each
 
 ## Tests
 
-17 tests in `kernel/test/test_9p_session.c`:
+25 tests in `kernel/test/test_9p_session.c`:
 
 | Test | Covers |
 |---|---|
@@ -139,6 +153,14 @@ Allocation: caller-managed. The kernel handle-table layer (P5-attach) wraps each
 | `9p_session.dispatch_wrong_type_rejected` | type-mismatch (e.g., Rclunk dispatched against outstanding Twalk) → `-1` |
 | `9p_session.close_with_inflight_refused` | close() while Inflight ≠ {} → `-1` |
 | `9p_session.state_gate_send_walk_before_open` | send_walk in INIT or VERSIONED → `-1` |
+| `9p_session.lopen_round_trip` | Tlopen→Rlopen; qid + iounit surfaced; fid stays bound |
+| `9p_session.lcreate_round_trip` | Tlcreate(name)→Rlcreate; qid + iounit surfaced |
+| `9p_session.read_round_trip` | Tread→Rread; zero-copy data pointer + count surfaced |
+| `9p_session.write_round_trip` | Twrite(payload)→Rwrite; accepted count surfaced |
+| `9p_session.lopen_with_inflight_on_fid_refused` | concurrent Tlopen on same fid → `-1` (server-side state mutation exclusive) |
+| `9p_session.read_permits_concurrent` | two Tread on same fid, different offsets → both accepted (offset is explicit) |
+| `9p_session.io_from_unbound_fid_refused` | all four IO ops on unbound fid → `-1` |
+| `9p_session.io_before_open_refused` | all four IO ops in INIT state → `-1` |
 
 The tests use synthesized Rmsg buffers (helper `synth_*` functions in the test file) to drive the dispatcher without an actual server. P5-transport will provide the actual byte-pipeline.
 
@@ -164,7 +186,8 @@ The tests use synthesized Rmsg buffers (helper `synth_*` functions in the test f
 | Version + Attach handshake | **Landed (P5-session)** |
 | Walk + Clunk + Rlerror | **Landed (P5-session)** |
 | Spec invariants I-10 + I-11 + OutOfOrderCorrectness + FlowControl | **Pinned (P5-session)** |
-| IO family Send/Receive (Tread/Twrite/Tlopen/Tgetattr/Tsetattr/Treaddir/Tstatfs/Tfsync) | Phase 5+ (extends with P5-wire-io / -meta) |
+| IO family Send/Receive (Tlopen / Tlcreate / Tread / Twrite) | **Landed (P5-wire-io)** |
+| Metadata family Send/Receive (Tgetattr / Tsetattr / Treaddir / Tstatfs / Tfsync) | Phase 5+ (P5-wire-meta) |
 | Mutation family | Phase 5+ (with P5-wire-mutation) |
 | Lock family + Xattr family | Phase 5+ (with P5-wire-lock / -xattr) |
 | Stratum extensions (Tsync / Treflink / Tbind / Tunbind / Tfallocate / Tfadvise) | Phase 5+ (with P5-wire-stratum-ext) |
