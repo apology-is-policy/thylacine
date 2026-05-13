@@ -344,14 +344,14 @@ small (<200 distinct) but every bug class reaches its violation in ≤ 6 steps
 
 ### State machine
 
-| Spec action | Wire-level event | Will map to (Phase 5 impl) |
+| Spec action | Wire-level event | Impl |
 |---|---|---|
-| `OpenSession` | `Tversion` + `Tattach` (handshake) | `kernel/9p_attach.c::session_attach` (P5-attach) |
-| `CloseSession` | connection close + per-Proc cleanup | `kernel/9p_attach.c::session_detach` (P5-attach) |
-| `SendIO(t, fid)` | Send `Tread` / `Twrite` / `Tgetattr` / `Tsetattr` / `Tlock` / `Tstatfs` / `Tsync` / `Treflink` / `Tfallocate` / `Tfadvise` / xattr family on tag `t` for `fid` | `kernel/9p_session.c::session_send_io` (P5-session) |
-| `SendWalk(t, src, new)` | Send `Twalk(fid=src, newfid=new, n_names=0)` (fid clone) on tag `t` | `kernel/9p_session.c::session_send_walk` (P5-session) |
-| `SendClunk(t, fid)` | Send `Tclunk(fid)` on tag `t`; Send-time unbind | `kernel/9p_session.c::session_send_clunk` (P5-session) |
-| `ReceiveOp(t)` | Receive `Rmsg.tag == t`; apply mutation per stored op kind | `kernel/9p_session.c::session_dispatch_rmsg` (P5-session) |
+| `OpenSession` | `Tversion` + `Tattach` (handshake) | `kernel/9p_session.c::p9_session_send_version` + `p9_session_send_attach` + `p9_session_dispatch_rmsg` (Rversion → VERSIONED; Rattach → OPEN + bind root_fid). **Landed at P5-session.** |
+| `CloseSession` | connection close + per-Proc cleanup | `kernel/9p_session.c::p9_session_close` (refuses while Inflight ≠ {}). **Landed at P5-session.** |
+| `SendIO(t, fid)` | Send `Tread` / `Twrite` / `Tgetattr` / `Tsetattr` / `Tlock` / `Tstatfs` / `Tsync` / `Treflink` / `Tfallocate` / `Tfadvise` / xattr family on tag `t` for `fid` | Wire builders deferred to P5-wire-io / -meta / -mutation / -lock / -xattr / -stratum-ext; session-side dispatch handlers extend `p9_session_dispatch_rmsg` at each landing. |
+| `SendWalk(t, src, new)` | Send `Twalk(fid=src, newfid=new, n_names=N)` on tag `t` | `kernel/9p_session.c::p9_session_send_walk` (uses `p9_build_twalk`). Send-time precondition: src bound, new not bound, new ≠ root, no other in-flight op on new. **Landed at P5-session.** |
+| `SendClunk(t, fid)` | Send `Tclunk(fid)` on tag `t`; Send-time unbind | `kernel/9p_session.c::p9_session_send_clunk` (uses `p9_build_tclunk`). Send-time-unbinds fid from `bound_fids` BEFORE storing the outstanding entry. Send-time precondition: fid bound, fid ≠ root, no other in-flight op on fid. **Landed at P5-session.** |
+| `ReceiveOp(t)` | Receive `Rmsg.tag == t`; apply mutation per stored op kind | `kernel/9p_session.c::p9_session_dispatch_rmsg` (uses `p9_peek_header` + per-type `p9_parse_*`). Tag-indexed lookup pairs Rmsg with the correct outstanding op; Rlerror handled as a generic error response without fid mutation; type-mismatch rejected. **Landed at P5-session.** |
 
 ### Modeling abstractions
 
@@ -383,16 +383,13 @@ small (<200 distinct) but every bug class reaches its violation in ≤ 6 steps
 | Buggy: out-of-order match | `specs/9p_client_buggy_ooo_match.cfg` |
 | Buggy: unbounded outstanding | `specs/9p_client_buggy_unbounded.cfg` |
 
-### Phase 5 impl targets (next chunks)
+### Phase 5 impl progress
 
-- **P5-wire** — `kernel/9p_wire.c` — 9P2000.L codec.
-- **P5-session** — `kernel/9p_session.c` — tag pool, fid table,
-  outstanding-request table, send / receive loops. Each transition
-  cross-references the spec action it implements.
-- **P5-transport** — `kernel/9p_transport.c` — Spoor-over-Unix-socket
-  transport.
-- **P5-attach** — `kernel/9p_attach.c` — mount syscall integration +
-  per-Proc connection lifecycle.
+- ✅ **P5-wire** (landed `1aa4826` / `42e87ed`) — `kernel/9p_wire.c` 9P2000.L codec (handshake + navigation + clunk bring-up subset). 15 unit tests.
+- ✅ **P5-session** (landed this chunk) — `kernel/9p_session.c` state machine: tag pool (bitmap over `outstanding[64]`), fid table (linear array, swap-with-last unbind), state-machine INIT→VERSIONED→OPEN→CLOSED, Send-side preconditions enforcing every spec discipline, Receive-side tag-indexed dispatch with type-match validation + Rlerror surfacing. 17 unit tests covering bug-class shapes that match the spec's 4 buggy cfgs (TagCollision attacked indirectly via flow-control; FidAfterClunk + OOO-match + UnboundedOutstanding directly).
+- ⬜ **P5-wire-io / -meta / -mutation / -lock / -xattr / -stratum-ext** — extends the wire codec with the remaining message families. Each wave adds session-side dispatch handlers.
+- ⬜ **P5-transport** — `kernel/9p_transport.c` — Spoor-over-Unix-socket transport (the layer above session).
+- ⬜ **P5-attach** — `kernel/9p_attach.c` — mount syscall integration + per-Proc connection lifecycle.
 
 ### Reference
 

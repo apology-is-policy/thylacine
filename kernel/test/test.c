@@ -237,6 +237,23 @@ void test_9p_wire_rmsg_size_mismatch_rejected(void);
 void test_9p_wire_rmsg_wrong_type_rejected(void);
 void test_9p_wire_rwalk_count_cap_enforced(void);
 void test_9p_wire_pack_str_overflow(void);
+void test_9p_session_init_destroy(void);
+void test_9p_session_version_handshake(void);
+void test_9p_session_attach_handshake(void);
+void test_9p_session_walk_round_trip(void);
+void test_9p_session_clunk_round_trip(void);
+void test_9p_session_clunk_send_time_unbinds(void);
+void test_9p_session_dispatch_rlerror(void);
+void test_9p_session_walk_to_root_refused(void);
+void test_9p_session_walk_to_bound_fid_refused(void);
+void test_9p_session_walk_from_unbound_fid_refused(void);
+void test_9p_session_clunk_root_refused(void);
+void test_9p_session_clunk_with_inflight_on_fid_refused(void);
+void test_9p_session_fid_after_clunk_refused(void);
+void test_9p_session_dispatch_wrong_tag_rejected(void);
+void test_9p_session_dispatch_wrong_type_rejected(void);
+void test_9p_session_close_with_inflight_refused(void);
+void test_9p_session_state_gate_send_walk_before_open(void);
 void test_irq_latency_bench(void);
 void test_caps_kproc_has_all(void);
 void test_caps_kproc_has_hw_create(void);
@@ -579,6 +596,43 @@ struct test_case g_tests[] = {
                                                                            false, NULL },
     { "9p_wire.rwalk_count_cap_enforced",
                                        test_9p_wire_rwalk_count_cap_enforced,
+                                                                           false, NULL },
+    { "9p_session.init_destroy",       test_9p_session_init_destroy,       false, NULL },
+    { "9p_session.version_handshake",  test_9p_session_version_handshake,  false, NULL },
+    { "9p_session.attach_handshake",   test_9p_session_attach_handshake,   false, NULL },
+    { "9p_session.walk_round_trip",    test_9p_session_walk_round_trip,    false, NULL },
+    { "9p_session.clunk_round_trip",   test_9p_session_clunk_round_trip,   false, NULL },
+    { "9p_session.clunk_send_time_unbinds",
+                                       test_9p_session_clunk_send_time_unbinds,
+                                                                           false, NULL },
+    { "9p_session.dispatch_rlerror",   test_9p_session_dispatch_rlerror,   false, NULL },
+    { "9p_session.walk_to_root_refused",
+                                       test_9p_session_walk_to_root_refused,
+                                                                           false, NULL },
+    { "9p_session.walk_to_bound_fid_refused",
+                                       test_9p_session_walk_to_bound_fid_refused,
+                                                                           false, NULL },
+    { "9p_session.walk_from_unbound_fid_refused",
+                                       test_9p_session_walk_from_unbound_fid_refused,
+                                                                           false, NULL },
+    { "9p_session.clunk_root_refused", test_9p_session_clunk_root_refused, false, NULL },
+    { "9p_session.clunk_with_inflight_on_fid_refused",
+                                       test_9p_session_clunk_with_inflight_on_fid_refused,
+                                                                           false, NULL },
+    { "9p_session.fid_after_clunk_refused",
+                                       test_9p_session_fid_after_clunk_refused,
+                                                                           false, NULL },
+    { "9p_session.dispatch_wrong_tag_rejected",
+                                       test_9p_session_dispatch_wrong_tag_rejected,
+                                                                           false, NULL },
+    { "9p_session.dispatch_wrong_type_rejected",
+                                       test_9p_session_dispatch_wrong_type_rejected,
+                                                                           false, NULL },
+    { "9p_session.close_with_inflight_refused",
+                                       test_9p_session_close_with_inflight_refused,
+                                                                           false, NULL },
+    { "9p_session.state_gate_send_walk_before_open",
+                                       test_9p_session_state_gate_send_walk_before_open,
                                                                            false, NULL },
     { "userspace.irq_latency_bench",   test_irq_latency_bench,             false, NULL },
     { "caps.kproc_has_all",            test_caps_kproc_has_all,            false, NULL },
