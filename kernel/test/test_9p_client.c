@@ -1,0 +1,495 @@
+// 9P client high-level API tests (P5-client).
+//
+// The wire + session + transport layers each have their own test
+// suites; these tests verify the COMPOSITION — that each high-level
+// op correctly chains session.send + transport.exchange + result
+// extraction + error mapping.
+//
+// One representative test per op category + lifecycle + handshake +
+// error-propagation through Rlerror.
+
+#include "test.h"
+
+#include <thylacine/9p_client.h>
+#include <thylacine/9p_session.h>
+#include <thylacine/9p_transport.h>
+#include <thylacine/9p_transport_loopback.h>
+#include <thylacine/9p_wire.h>
+#include <thylacine/types.h>
+
+void test_9p_client_init_destroy(void);
+void test_9p_client_handshake(void);
+void test_9p_client_walk_and_clunk(void);
+void test_9p_client_lopen_read(void);
+void test_9p_client_write(void);
+void test_9p_client_getattr(void);
+void test_9p_client_readdir(void);
+void test_9p_client_statfs(void);
+void test_9p_client_mkdir(void);
+void test_9p_client_unlinkat(void);
+void test_9p_client_readlink(void);
+void test_9p_client_rlerror_propagates_to_negative_errno(void);
+void test_9p_client_op_before_handshake_returns_ebusy(void);
+
+// File-scope buffers (kernel test stack is 16 KiB — client struct is
+// ~4 KiB; multiple in one frame is fine but file-scope is cleaner).
+static u8 g_recv_buf[4096];
+static u8 g_loopback_resp[4096];
+
+// Reusable responder that handles every Tmsg type with a sensible
+// canned response. Tests choose which fid path / qid the server
+// returns by reading the request opcode + tag.
+static int canonical_responder(void *ctx, const u8 *req, size_t req_len,
+                                 u8 *resp, size_t resp_cap) {
+    (void)ctx;
+    if (req_len < P9_HDR_LEN) return -1;
+    u32 size; u8 type; u16 tag;
+    if (p9_peek_header(req, req_len, &size, &type, &tag) < 0) return -1;
+
+    if (type == P9_TVERSION) {
+        size_t total = P9_HDR_LEN + 4 + 2 + 8;
+        if (resp_cap < total) return -1;
+        resp[0] = (u8)(total & 0xff); resp[1] = (u8)((total >> 8) & 0xff);
+        resp[2] = 0; resp[3] = 0;
+        resp[4] = P9_RVERSION;
+        resp[5] = 0xff; resp[6] = 0xff;     // NOTAG
+        resp[7] = 0; resp[8] = 0x20; resp[9] = 0; resp[10] = 0;   // msize=8192
+        resp[11] = 8; resp[12] = 0;
+        const char *v = "9P2000.L";
+        for (int i = 0; i < 8; i++) resp[13 + i] = (u8)v[i];
+        return (int)total;
+    }
+    if (type == P9_TATTACH) {
+        size_t total = P9_HDR_LEN + P9_QID_LEN;
+        if (resp_cap < total) return -1;
+        resp[0] = (u8)(total & 0xff); resp[1] = 0; resp[2] = 0; resp[3] = 0;
+        resp[4] = P9_RATTACH;
+        resp[5] = (u8)(tag & 0xff); resp[6] = (u8)((tag >> 8) & 0xff);
+        resp[7] = P9_QTDIR;
+        for (int i = 0; i < 4; i++) resp[8 + i] = 0;
+        resp[12] = 42; for (int i = 1; i < 8; i++) resp[12 + i] = 0;
+        return (int)total;
+    }
+    if (type == P9_TWALK) {
+        // Always 1 qid back regardless of nwname requested.
+        size_t total = P9_HDR_LEN + 2 + P9_QID_LEN;
+        if (resp_cap < total) return -1;
+        resp[0] = (u8)(total & 0xff); resp[1] = 0; resp[2] = 0; resp[3] = 0;
+        resp[4] = P9_RWALK;
+        resp[5] = (u8)(tag & 0xff); resp[6] = (u8)((tag >> 8) & 0xff);
+        resp[7] = 1; resp[8] = 0;            // nwqid = 1
+        resp[9] = P9_QTFILE;
+        for (int i = 0; i < 4; i++) resp[10 + i] = 0;
+        resp[14] = 77; for (int i = 1; i < 8; i++) resp[14 + i] = 0;
+        return (int)total;
+    }
+    if (type == P9_TCLUNK || type == P9_TSETATTR || type == P9_TFSYNC ||
+        type == P9_TRENAME || type == P9_TRENAMEAT || type == P9_TLINK ||
+        type == P9_TUNLINKAT) {
+        // Empty body.
+        size_t total = P9_HDR_LEN;
+        if (resp_cap < total) return -1;
+        resp[0] = 7; resp[1] = 0; resp[2] = 0; resp[3] = 0;
+        resp[4] = (u8)(type + 1);
+        resp[5] = (u8)(tag & 0xff); resp[6] = (u8)((tag >> 8) & 0xff);
+        return (int)total;
+    }
+    if (type == P9_TLOPEN || type == P9_TLCREATE) {
+        // qid + iounit.
+        size_t total = P9_HDR_LEN + P9_QID_LEN + 4;
+        if (resp_cap < total) return -1;
+        resp[0] = (u8)(total & 0xff); resp[1] = 0; resp[2] = 0; resp[3] = 0;
+        resp[4] = (u8)(type + 1);
+        resp[5] = (u8)(tag & 0xff); resp[6] = (u8)((tag >> 8) & 0xff);
+        resp[7] = P9_QTFILE;
+        for (int i = 0; i < 4; i++) resp[8 + i] = 0;
+        resp[12] = 99; for (int i = 1; i < 8; i++) resp[12 + i] = 0;
+        resp[20] = 0x00; resp[21] = 0x10; resp[22] = 0; resp[23] = 0;  // iounit=4096
+        return (int)total;
+    }
+    if (type == P9_TREAD) {
+        // count=5 with payload "hello".
+        const u8 payload[] = {'h','e','l','l','o'};
+        size_t total = P9_HDR_LEN + 4 + sizeof(payload);
+        if (resp_cap < total) return -1;
+        resp[0] = (u8)(total & 0xff); resp[1] = 0; resp[2] = 0; resp[3] = 0;
+        resp[4] = P9_RREAD;
+        resp[5] = (u8)(tag & 0xff); resp[6] = (u8)((tag >> 8) & 0xff);
+        resp[7] = (u8)sizeof(payload); resp[8] = 0; resp[9] = 0; resp[10] = 0;
+        for (size_t i = 0; i < sizeof(payload); i++) resp[11 + i] = payload[i];
+        return (int)total;
+    }
+    if (type == P9_TWRITE) {
+        // Echo the requested count back as accepted-count.
+        // Request body: fid(4) + offset(8) + count(4) + data(count).
+        if (req_len < P9_HDR_LEN + 4 + 8 + 4) return -1;
+        u32 count = (u32)req[P9_HDR_LEN + 4 + 8]
+                  | ((u32)req[P9_HDR_LEN + 4 + 8 + 1] << 8)
+                  | ((u32)req[P9_HDR_LEN + 4 + 8 + 2] << 16)
+                  | ((u32)req[P9_HDR_LEN + 4 + 8 + 3] << 24);
+        size_t total = P9_HDR_LEN + 4;
+        if (resp_cap < total) return -1;
+        resp[0] = 11; resp[1] = 0; resp[2] = 0; resp[3] = 0;
+        resp[4] = P9_RWRITE;
+        resp[5] = (u8)(tag & 0xff); resp[6] = (u8)((tag >> 8) & 0xff);
+        resp[7] = (u8)(count & 0xff);
+        resp[8] = (u8)((count >> 8) & 0xff);
+        resp[9] = (u8)((count >> 16) & 0xff);
+        resp[10] = (u8)((count >> 24) & 0xff);
+        return (int)total;
+    }
+    if (type == P9_TGETATTR) {
+        // Minimum statx-shape response (153-byte body).
+        size_t body_len = 8 + P9_QID_LEN + 4 * 3 + 8 * 15;
+        size_t total = P9_HDR_LEN + body_len;
+        if (resp_cap < total) return -1;
+        resp[0] = (u8)(total & 0xff);
+        resp[1] = (u8)((total >> 8) & 0xff);
+        resp[2] = 0; resp[3] = 0;
+        resp[4] = P9_RGETATTR;
+        resp[5] = (u8)(tag & 0xff); resp[6] = (u8)((tag >> 8) & 0xff);
+        size_t off = P9_HDR_LEN;
+        // valid = P9_GETATTR_BASIC
+        u64 valid = P9_GETATTR_BASIC;
+        for (int i = 0; i < 8; i++) resp[off + i] = (u8)((valid >> (i * 8)) & 0xff);
+        off += 8;
+        // qid: type / version / path
+        resp[off] = P9_QTFILE; off += 1;
+        for (int i = 0; i < 4; i++) resp[off + i] = 0;  off += 4;     // version
+        resp[off] = 55; for (int i = 1; i < 8; i++) resp[off + i] = 0; off += 8;  // path=55
+        // mode/uid/gid = 0644 / 0 / 0
+        resp[off] = 0xA4; resp[off+1] = 0x01; resp[off+2] = 0; resp[off+3] = 0; off += 4;
+        for (int i = 0; i < 8; i++) resp[off + i] = 0; off += 8;       // uid + gid
+        // 5 u64 mid + 8 u64 times + 2 u64 trailing = 15 u64 (120 bytes)
+        for (int i = 0; i < 120; i++) resp[off + i] = 0;
+        // size at offset 16 of mid block; just set size=128
+        size_t size_off = P9_HDR_LEN + 8 + P9_QID_LEN + 12 + 16;
+        resp[size_off] = 0x80; for (int i = 1; i < 8; i++) resp[size_off + i] = 0;
+        return (int)total;
+    }
+    if (type == P9_TREADDIR) {
+        // Empty dirent stream (count=0).
+        size_t total = P9_HDR_LEN + 4;
+        if (resp_cap < total) return -1;
+        resp[0] = 11; resp[1] = 0; resp[2] = 0; resp[3] = 0;
+        resp[4] = P9_RREADDIR;
+        resp[5] = (u8)(tag & 0xff); resp[6] = (u8)((tag >> 8) & 0xff);
+        resp[7] = 0; resp[8] = 0; resp[9] = 0; resp[10] = 0;
+        return (int)total;
+    }
+    if (type == P9_TSTATFS) {
+        size_t total = P9_HDR_LEN + 60;
+        if (resp_cap < total) return -1;
+        resp[0] = (u8)(total & 0xff); resp[1] = 0; resp[2] = 0; resp[3] = 0;
+        resp[4] = P9_RSTATFS;
+        resp[5] = (u8)(tag & 0xff); resp[6] = (u8)((tag >> 8) & 0xff);
+        for (int i = 0; i < 60; i++) resp[P9_HDR_LEN + i] = 0;
+        // type (4) + bsize (4) -- set bsize = 4096
+        resp[P9_HDR_LEN + 4] = 0; resp[P9_HDR_LEN + 5] = 0x10;
+        return (int)total;
+    }
+    if (type == P9_TSYMLINK || type == P9_TMKNOD || type == P9_TMKDIR) {
+        // Qid-only response.
+        size_t total = P9_HDR_LEN + P9_QID_LEN;
+        if (resp_cap < total) return -1;
+        resp[0] = (u8)(total & 0xff); resp[1] = 0; resp[2] = 0; resp[3] = 0;
+        resp[4] = (u8)(type + 1);
+        resp[5] = (u8)(tag & 0xff); resp[6] = (u8)((tag >> 8) & 0xff);
+        u8 qt = (type == P9_TMKDIR) ? P9_QTDIR :
+                (type == P9_TSYMLINK) ? P9_QTSYMLINK : P9_QTFILE;
+        resp[7] = qt;
+        for (int i = 0; i < 4; i++) resp[8 + i] = 0;
+        resp[12] = 88; for (int i = 1; i < 8; i++) resp[12 + i] = 0;
+        return (int)total;
+    }
+    if (type == P9_TREADLINK) {
+        const u8 tgt[] = {'/','t','m','p'};
+        size_t total = P9_HDR_LEN + 2 + sizeof(tgt);
+        if (resp_cap < total) return -1;
+        resp[0] = (u8)(total & 0xff); resp[1] = 0; resp[2] = 0; resp[3] = 0;
+        resp[4] = P9_RREADLINK;
+        resp[5] = (u8)(tag & 0xff); resp[6] = (u8)((tag >> 8) & 0xff);
+        resp[7] = (u8)sizeof(tgt); resp[8] = 0;
+        for (size_t i = 0; i < sizeof(tgt); i++) resp[9 + i] = tgt[i];
+        return (int)total;
+    }
+    return -1;
+}
+
+// Responder that always returns Rlerror with a fixed ecode.
+static int rlerror_responder(void *ctx, const u8 *req, size_t req_len,
+                               u8 *resp, size_t resp_cap) {
+    (void)ctx;
+    if (req_len < P9_HDR_LEN) return -1;
+    u32 size; u8 type; u16 tag;
+    if (p9_peek_header(req, req_len, &size, &type, &tag) < 0) return -1;
+    if (type == P9_TVERSION) {
+        // Special-case: Tversion is out-of-band; can't Rlerror it.
+        // Return a normal Rversion.
+        return canonical_responder(ctx, req, req_len, resp, resp_cap);
+    }
+    if (type == P9_TATTACH) {
+        // Same — give Rattach so handshake completes.
+        return canonical_responder(ctx, req, req_len, resp, resp_cap);
+    }
+    // Anything else: Rlerror with ecode = 2 (ENOENT).
+    size_t total = P9_HDR_LEN + 4;
+    if (resp_cap < total) return -1;
+    resp[0] = 11; resp[1] = 0; resp[2] = 0; resp[3] = 0;
+    resp[4] = P9_RLERROR;
+    resp[5] = (u8)(tag & 0xff); resp[6] = (u8)((tag >> 8) & 0xff);
+    resp[7] = 2; resp[8] = 0; resp[9] = 0; resp[10] = 0;
+    return (int)total;
+}
+
+// Helper: initialize a client with the canonical responder, drive
+// handshake, leave the client ready for ops. Caller-provided storage.
+static int drive_client_open(struct p9_client *c, struct p9_loopback *lb) {
+    int rc = p9_loopback_init(lb, g_loopback_resp, sizeof(g_loopback_resp),
+                                canonical_responder, NULL);
+    if (rc < 0) return -1;
+    rc = p9_client_init(c, /*root_fid=*/0, /*msize=*/8192,
+                         p9_loopback_ops_for(lb),
+                         g_recv_buf, sizeof(g_recv_buf));
+    if (rc < 0) return -1;
+    const u8 uname[] = {'r','o','o','t'};
+    const u8 aname[] = {'/'};
+    return p9_client_handshake(c, uname, sizeof(uname), aname, sizeof(aname), 0);
+}
+
+// =============================================================================
+// Tests.
+// =============================================================================
+
+// Static client storage at file scope — struct p9_client is ~4 KiB +
+// the embedded session is ~4 KiB; declaring on the stack risks
+// overflow on the 16 KiB test thread stack.
+static struct p9_client g_client;
+static struct p9_loopback g_loopback;
+
+void test_9p_client_init_destroy(void) {
+    int rc = p9_loopback_init(&g_loopback, g_loopback_resp,
+                                sizeof(g_loopback_resp),
+                                canonical_responder, NULL);
+    TEST_EXPECT_EQ(rc, 0, "loopback init");
+
+    rc = p9_client_init(&g_client, 0, 8192,
+                         p9_loopback_ops_for(&g_loopback),
+                         g_recv_buf, sizeof(g_recv_buf));
+    TEST_EXPECT_EQ(rc, 0, "client init");
+    TEST_ASSERT(!p9_client_is_open(&g_client),
+                 "client not open before handshake (session in INIT)");
+
+    p9_client_destroy(&g_client);
+    TEST_EXPECT_EQ((u32)g_client.magic, (u32)0, "destroy clobbers magic");
+    p9_loopback_destroy(&g_loopback);
+
+    // Invalid args refused.
+    rc = p9_client_init(NULL, 0, 8192, p9_loopback_ops_for(&g_loopback),
+                         g_recv_buf, sizeof(g_recv_buf));
+    TEST_EXPECT_EQ(rc, -P9_E_INVAL, "init NULL refused");
+}
+
+void test_9p_client_handshake(void) {
+    TEST_EXPECT_EQ(drive_client_open(&g_client, &g_loopback), 0,
+                    "handshake completes");
+    TEST_ASSERT(p9_client_is_open(&g_client), "client is OPEN after handshake");
+    TEST_EXPECT_EQ((u64)g_client.total_ops, (u64)2,
+                    "handshake = 2 ops (version + attach)");
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}
+
+void test_9p_client_walk_and_clunk(void) {
+    drive_client_open(&g_client, &g_loopback);
+
+    // Walk root → fid 5 (clone, no names).
+    struct p9_qid qids[P9_MAX_WALK];
+    u16 nwqid;
+    int rc = p9_client_walk(&g_client, /*src=*/0, /*new=*/5,
+                              /*nwname=*/0, NULL, NULL, &nwqid, qids);
+    TEST_EXPECT_EQ(rc, 0, "walk(0→5, clone) ok");
+    TEST_EXPECT_EQ((u64)nwqid, (u64)1, "1 qid returned");
+
+    // Walk-one convenience.
+    const u8 name[] = {'a'};
+    struct p9_qid q;
+    rc = p9_client_walk_one(&g_client, /*src=*/0, /*new=*/6,
+                              name, sizeof(name), &q);
+    TEST_EXPECT_EQ(rc, 0,                              "walk_one(0→6) ok");
+    TEST_EXPECT_EQ(q.path, (u64)77,                    "walked qid.path = 77");
+
+    rc = p9_client_clunk(&g_client, 5);
+    TEST_EXPECT_EQ(rc, 0, "clunk fid 5 ok");
+
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}
+
+void test_9p_client_lopen_read(void) {
+    drive_client_open(&g_client, &g_loopback);
+    p9_client_walk_one(&g_client, 0, 10, (const u8 *)"f", 1, NULL);
+
+    struct p9_qid q;
+    u32 iounit;
+    int rc = p9_client_lopen(&g_client, 10, /*flags=*/0, &q, &iounit);
+    TEST_EXPECT_EQ(rc, 0,                          "lopen ok");
+    TEST_EXPECT_EQ((u64)iounit, (u64)4096,         "iounit round-trip");
+
+    u8 data[64];
+    u32 n;
+    rc = p9_client_read(&g_client, 10, /*offset=*/0, /*count=*/64, data, &n);
+    TEST_EXPECT_EQ(rc, 0,                          "read ok");
+    TEST_EXPECT_EQ((u64)n, (u64)5,                 "read count = 5 (hello)");
+    TEST_ASSERT(data[0] == 'h' && data[4] == 'o',  "read payload matches");
+
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}
+
+void test_9p_client_write(void) {
+    drive_client_open(&g_client, &g_loopback);
+    p9_client_walk_one(&g_client, 0, 11, (const u8 *)"f", 1, NULL);
+
+    const u8 payload[] = {'w', 'r', 'i', 't', 'e'};
+    u32 accepted;
+    int rc = p9_client_write(&g_client, 11, 0,
+                               (u32)sizeof(payload), payload, &accepted);
+    TEST_EXPECT_EQ(rc, 0,                                  "write ok");
+    TEST_EXPECT_EQ((u64)accepted, (u64)sizeof(payload),    "accepted = sent");
+
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}
+
+void test_9p_client_getattr(void) {
+    drive_client_open(&g_client, &g_loopback);
+    p9_client_walk_one(&g_client, 0, 12, (const u8 *)"f", 1, NULL);
+
+    struct p9_attr attr;
+    int rc = p9_client_getattr(&g_client, 12, P9_GETATTR_BASIC, &attr);
+    TEST_EXPECT_EQ(rc, 0,                         "getattr ok");
+    TEST_EXPECT_EQ((u64)attr.mode, (u64)0644,     "mode round-trip");
+    TEST_EXPECT_EQ(attr.size, (u64)128,           "size round-trip");
+
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}
+
+void test_9p_client_readdir(void) {
+    drive_client_open(&g_client, &g_loopback);
+    p9_client_walk_one(&g_client, 0, 13, (const u8 *)"d", 1, NULL);
+
+    u8 buf[256];
+    u32 n;
+    int rc = p9_client_readdir(&g_client, 13, 0, sizeof(buf), buf, &n);
+    TEST_EXPECT_EQ(rc, 0,            "readdir ok");
+    TEST_EXPECT_EQ((u64)n, (u64)0,   "empty dir → count 0");
+
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}
+
+void test_9p_client_statfs(void) {
+    drive_client_open(&g_client, &g_loopback);
+    p9_client_walk_one(&g_client, 0, 14, (const u8 *)"d", 1, NULL);
+
+    struct p9_statfs sf;
+    int rc = p9_client_statfs(&g_client, 14, &sf);
+    TEST_EXPECT_EQ(rc, 0,                       "statfs ok");
+    TEST_EXPECT_EQ((u64)sf.bsize, (u64)4096,    "bsize round-trip");
+
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}
+
+void test_9p_client_mkdir(void) {
+    drive_client_open(&g_client, &g_loopback);
+    p9_client_walk_one(&g_client, 0, 15, (const u8 *)"d", 1, NULL);
+
+    const u8 name[] = {'s', 'u', 'b'};
+    struct p9_qid q;
+    int rc = p9_client_mkdir(&g_client, 15, name, sizeof(name),
+                              /*mode=*/0755, /*gid=*/0, &q);
+    TEST_EXPECT_EQ(rc, 0,                          "mkdir ok");
+    TEST_EXPECT_EQ((u64)q.type, (u64)P9_QTDIR,     "mkdir qid.type = DIR");
+    TEST_EXPECT_EQ(q.path, (u64)88,                "mkdir qid.path = 88");
+
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}
+
+void test_9p_client_unlinkat(void) {
+    drive_client_open(&g_client, &g_loopback);
+    p9_client_walk_one(&g_client, 0, 16, (const u8 *)"d", 1, NULL);
+
+    const u8 name[] = {'r', 'm'};
+    int rc = p9_client_unlinkat(&g_client, 16, name, sizeof(name), 0);
+    TEST_EXPECT_EQ(rc, 0, "unlinkat ok");
+
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}
+
+void test_9p_client_readlink(void) {
+    drive_client_open(&g_client, &g_loopback);
+    p9_client_walk_one(&g_client, 0, 17, (const u8 *)"s", 1, NULL);
+
+    u8 target[256];
+    u16 target_len = sizeof(target);
+    int rc = p9_client_readlink(&g_client, 17, target, &target_len);
+    TEST_EXPECT_EQ(rc, 0,                          "readlink ok");
+    TEST_EXPECT_EQ((u64)target_len, (u64)4,        "target len = 4 (/tmp)");
+    TEST_ASSERT(target[0] == '/' && target[3] == 'p', "target = /tmp");
+
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}
+
+// Rlerror responder returns ecode=2 (ENOENT) for every op except
+// version/attach. The client must surface -2.
+void test_9p_client_rlerror_propagates_to_negative_errno(void) {
+    int rc = p9_loopback_init(&g_loopback, g_loopback_resp,
+                                sizeof(g_loopback_resp),
+                                rlerror_responder, NULL);
+    TEST_EXPECT_EQ(rc, 0, "loopback init (rlerror)");
+
+    rc = p9_client_init(&g_client, 0, 8192,
+                         p9_loopback_ops_for(&g_loopback),
+                         g_recv_buf, sizeof(g_recv_buf));
+    TEST_EXPECT_EQ(rc, 0, "client init");
+
+    const u8 uname[] = {'r'};
+    const u8 aname[] = {'/'};
+    rc = p9_client_handshake(&g_client, uname, sizeof(uname),
+                               aname, sizeof(aname), 0);
+    TEST_EXPECT_EQ(rc, 0, "handshake ok (server gives normal Rversion + Rattach)");
+
+    // Now any op should surface -ENOENT (= -2).
+    rc = p9_client_walk_one(&g_client, 0, 5, (const u8 *)"x", 1, NULL);
+    TEST_EXPECT_EQ(rc, -2, "walk Rlerror → -ENOENT");
+
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}
+
+// Calling an op before handshake (session in INIT state) should
+// return -EBUSY since p9_client_is_open returns false.
+void test_9p_client_op_before_handshake_returns_ebusy(void) {
+    int rc = p9_loopback_init(&g_loopback, g_loopback_resp,
+                                sizeof(g_loopback_resp),
+                                canonical_responder, NULL);
+    TEST_EXPECT_EQ(rc, 0, "loopback init");
+
+    rc = p9_client_init(&g_client, 0, 8192,
+                         p9_loopback_ops_for(&g_loopback),
+                         g_recv_buf, sizeof(g_recv_buf));
+    TEST_EXPECT_EQ(rc, 0, "client init");
+
+    // No handshake yet; client.session.state == INIT.
+    rc = p9_client_walk_one(&g_client, 0, 5, (const u8 *)"x", 1, NULL);
+    TEST_EXPECT_EQ(rc, -P9_E_BUSY, "walk before handshake → -EBUSY");
+
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}

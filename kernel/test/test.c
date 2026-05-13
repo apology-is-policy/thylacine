@@ -312,6 +312,19 @@ void test_9p_transport_backend_error_transitions_to_error(void);
 void test_9p_transport_close_idempotent(void);
 void test_9p_transport_exchange_drives_session_handshake(void);
 void test_9p_transport_exchange_drives_session_walk(void);
+void test_9p_client_init_destroy(void);
+void test_9p_client_handshake(void);
+void test_9p_client_walk_and_clunk(void);
+void test_9p_client_lopen_read(void);
+void test_9p_client_write(void);
+void test_9p_client_getattr(void);
+void test_9p_client_readdir(void);
+void test_9p_client_statfs(void);
+void test_9p_client_mkdir(void);
+void test_9p_client_unlinkat(void);
+void test_9p_client_readlink(void);
+void test_9p_client_rlerror_propagates_to_negative_errno(void);
+void test_9p_client_op_before_handshake_returns_ebusy(void);
 void test_irq_latency_bench(void);
 void test_caps_kproc_has_all(void);
 void test_caps_kproc_has_hw_create(void);
@@ -789,6 +802,23 @@ struct test_case g_tests[] = {
                                                                            false, NULL },
     { "9p_transport.exchange_drives_session_walk",
                                        test_9p_transport_exchange_drives_session_walk,
+                                                                           false, NULL },
+    { "9p_client.init_destroy",        test_9p_client_init_destroy,        false, NULL },
+    { "9p_client.handshake",           test_9p_client_handshake,           false, NULL },
+    { "9p_client.walk_and_clunk",      test_9p_client_walk_and_clunk,      false, NULL },
+    { "9p_client.lopen_read",          test_9p_client_lopen_read,          false, NULL },
+    { "9p_client.write",               test_9p_client_write,               false, NULL },
+    { "9p_client.getattr",             test_9p_client_getattr,             false, NULL },
+    { "9p_client.readdir",             test_9p_client_readdir,             false, NULL },
+    { "9p_client.statfs",              test_9p_client_statfs,              false, NULL },
+    { "9p_client.mkdir",               test_9p_client_mkdir,               false, NULL },
+    { "9p_client.unlinkat",            test_9p_client_unlinkat,            false, NULL },
+    { "9p_client.readlink",            test_9p_client_readlink,            false, NULL },
+    { "9p_client.rlerror_propagates_to_negative_errno",
+                                       test_9p_client_rlerror_propagates_to_negative_errno,
+                                                                           false, NULL },
+    { "9p_client.op_before_handshake_returns_ebusy",
+                                       test_9p_client_op_before_handshake_returns_ebusy,
                                                                            false, NULL },
     { "userspace.irq_latency_bench",   test_irq_latency_bench,             false, NULL },
     { "caps.kproc_has_all",            test_caps_kproc_has_all,            false, NULL },
