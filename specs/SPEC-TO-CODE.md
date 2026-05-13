@@ -299,9 +299,111 @@ TLC-clean at `VmoIds = {v1, v2}, MaxRefs = 2` — 100 distinct states explored; 
 
 
 
-## 9p_client.tla — Phase 4 (planned)
+## 9p_client.tla — P5-spec (Phase 5 entry; spec-first)
 
-(Stub. Will pin: tag uniqueness per session, fid lifecycle — ARCH §28 I-10, I-11.)
+Pins ARCH §28 invariants:
+
+- **I-10** — Per-9P-session tag uniqueness.
+- **I-11** — Per-9P-session fid identity is stable for fid's open lifetime.
+
+Plus two composition-layer properties from ROADMAP §7 + Stratum's
+`OS-INTEGRATION.md` §3 (pipelined client correctness):
+
+- **OutOfOrderCorrectness** — Rmessages match Tmessages by tag, not by
+  arrival order. Captured via the `TagAndOpAccounting` invariant: the
+  set of op_ids in `outstanding[]` equals `sent_ops \ completed_ops`.
+  A misordered receive (BuggyOOOReceive) breaks the bijection.
+- **FlowControl** — Outstanding-request cardinality bounded by
+  `MaxWindow`. Back-pressure surfaces as Send-side blocking
+  (precondition refusal), never as silent drop. Captured via
+  `BoundedOutstanding`.
+
+### Bug classes covered (executable counterexamples)
+
+| Buggy cfg | Bug class | Invariant that catches |
+|---|---|---|
+| `9p_client_buggy_tag_collision.cfg` | Tag reuse before Rmsg arrival (alloc_tag returns in-use tag) | `TagAndOpAccounting` |
+| `9p_client_buggy_fid_after_clunk.cfg` | IO on fid not in `bound_fids` (use after Tclunk) | `FidStability` (I-11) |
+| `9p_client_buggy_ooo_match.cfg` | Rmsg with tag T paired with `outstanding[fake_t]`'s op (wrong-tag mis-match) | `TagAndOpAccounting` |
+| `9p_client_buggy_unbounded.cfg` | Send fires past `MaxWindow` (no back-pressure) | `BoundedOutstanding` |
+
+### TLC posture
+
+| cfg | Verdict | States generated / distinct / depth |
+|---|---|---|
+| `9p_client.cfg` (correct) | **Model checking completed. No error has been found.** | 462 / 197 / 9 |
+| `9p_client_buggy_tag_collision.cfg` | Invariant violated (expected) | 50 / 42 / depth 5 |
+| `9p_client_buggy_fid_after_clunk.cfg` | Invariant violated (expected) | 68 / 52 / depth 6 |
+| `9p_client_buggy_ooo_match.cfg` | Invariant violated (expected) | 60 / 45 / depth 5 |
+| `9p_client_buggy_unbounded.cfg` | Invariant violated (expected) | 64 / 47 / depth 5 |
+
+Bounded model: `TagIds = {t1, t2, t3}` (3 tags); `FidIds = {root, f1}`
+(2 fids); `RootFid = root`; `MaxWindow = 2`; `MaxOps = 3`. State space is
+small (<200 distinct) but every bug class reaches its violation in ≤ 6 steps
+— the spec's invariants catch each bug at the buggy-action step.
+
+### State machine
+
+| Spec action | Wire-level event | Will map to (Phase 5 impl) |
+|---|---|---|
+| `OpenSession` | `Tversion` + `Tattach` (handshake) | `kernel/9p_attach.c::session_attach` (P5-attach) |
+| `CloseSession` | connection close + per-Proc cleanup | `kernel/9p_attach.c::session_detach` (P5-attach) |
+| `SendIO(t, fid)` | Send `Tread` / `Twrite` / `Tgetattr` / `Tsetattr` / `Tlock` / `Tstatfs` / `Tsync` / `Treflink` / `Tfallocate` / `Tfadvise` / xattr family on tag `t` for `fid` | `kernel/9p_session.c::session_send_io` (P5-session) |
+| `SendWalk(t, src, new)` | Send `Twalk(fid=src, newfid=new, n_names=0)` (fid clone) on tag `t` | `kernel/9p_session.c::session_send_walk` (P5-session) |
+| `SendClunk(t, fid)` | Send `Tclunk(fid)` on tag `t`; Send-time unbind | `kernel/9p_session.c::session_send_clunk` (P5-session) |
+| `ReceiveOp(t)` | Receive `Rmsg.tag == t`; apply mutation per stored op kind | `kernel/9p_session.c::session_dispatch_rmsg` (P5-session) |
+
+### Modeling abstractions
+
+- One 9P session modeled. Cross-session isolation is the server's
+  responsibility (Stratum's `namespace.tla` + `fid.tla`); Thylacine's
+  client has nothing to enforce there.
+- Op kinds collapsed to `{walk, clunk, io}`. The 9P2000.L baseline ops
+  (`Tlopen`, `Tlcreate`, `Tsymlink`, `Tmknod`, `Trename`, `Treaddir`,
+  `Tstatfs`, `Tgetattr`, `Tsetattr`, `Treadlink`, `Tlock`, `Tgetlock`,
+  `Tlink`, `Tmkdir`, `Trenameat`, `Tunlinkat`) plus Stratum extensions
+  (`Tsync`, `Treflink`, `Tbind`/`Tunbind`, `Txattrwalk` family) all
+  collapse into the `io` kind for spec purposes — the invariants don't
+  depend on per-op semantics.
+- `SendClunk` requires no other in-flight op on the same fid (canonical
+  client discipline). Tclunk's Send-time unbind models the client's
+  intent: no further ops on this fid even while the Rmsg is in flight.
+- Tracking per-op `op_id` (monotonic, distinct across all sends) lets
+  the spec's invariants distinguish two ops on the same fid + tag-slot
+  reuse pattern.
+
+### Files
+
+| Spec | File |
+|---|---|
+| Module | `specs/9p_client.tla` |
+| Correct cfg | `specs/9p_client.cfg` |
+| Buggy: tag collision | `specs/9p_client_buggy_tag_collision.cfg` |
+| Buggy: fid after clunk | `specs/9p_client_buggy_fid_after_clunk.cfg` |
+| Buggy: out-of-order match | `specs/9p_client_buggy_ooo_match.cfg` |
+| Buggy: unbounded outstanding | `specs/9p_client_buggy_unbounded.cfg` |
+
+### Phase 5 impl targets (next chunks)
+
+- **P5-wire** — `kernel/9p_wire.c` — 9P2000.L codec.
+- **P5-session** — `kernel/9p_session.c` — tag pool, fid table,
+  outstanding-request table, send / receive loops. Each transition
+  cross-references the spec action it implements.
+- **P5-transport** — `kernel/9p_transport.c` — Spoor-over-Unix-socket
+  transport.
+- **P5-attach** — `kernel/9p_attach.c` — mount syscall integration +
+  per-Proc connection lifecycle.
+
+### Reference
+
+- `stratum/v2/docs/reference/20-9p.md` — Stratum's 9P2000.L server wire
+  semantics (the canonical contract Thylacine binds to).
+- `stratum/v2/docs/reference/23-9p_client.md` — Stratum's reference
+  C-side client (sync, one-op-at-a-time; Thylacine's kernel client
+  pipelines per `ARCH §21`).
+- `stratum/v2/docs/OS-INTEGRATION.md` — OS-side integration manual.
+- `ARCHITECTURE.md §10.2` + `§14` + `§28` — Thylacine-side dialect +
+  integration + invariants.
 
 ## poll.tla — Phase 5 (planned)
 
