@@ -65,6 +65,12 @@ struct p9_client {
     struct p9_session    session;
     struct p9_transport  transport;
     u8                   out_buf[P9_CLIENT_OUT_BUF_MAX];
+    // Monotonic fid allocator. Starts at root_fid + 1; each
+    // p9_client_alloc_fid returns next_fid then increments. Burned
+    // fids are not reclaimed at v1.0 (32-bit space; plenty for any
+    // realistic session lifetime). Used by dev9p when allocating
+    // fresh fids for walk-derived Spoors.
+    u32                  next_fid;
     // Diagnostics.
     u32                  total_ops;
     u32                  total_errors;
@@ -207,6 +213,17 @@ int  p9_client_renameat(struct p9_client *c, u32 olddirfid,
 
 int  p9_client_unlinkat(struct p9_client *c, u32 dfid,
                          const u8 *name, size_t name_len, u32 flags);
+
+// =============================================================================
+// Fid allocator (P5-attach-dev consumer).
+// =============================================================================
+
+// Allocate a fresh fid for a walk-derived Spoor. Returns a u32 fid
+// value that has not been previously returned by this allocator on
+// this client. Caller uses it as the `new_fid` arg to walk. v1.0
+// monotonic; no reclaim. Returns P9_NOFID if the 32-bit space is
+// exhausted (in practice, never).
+u32 p9_client_alloc_fid(struct p9_client *c);
 
 // =============================================================================
 // Query helpers.

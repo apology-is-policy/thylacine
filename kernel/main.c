@@ -47,6 +47,7 @@
 #include <thylacine/vma.h>      // vma_init (P3-Da)
 #include <thylacine/burrow.h>
 #include <thylacine/dev.h>
+#include <thylacine/dev9p.h>
 #include <thylacine/types.h>
 #include <thylacine/virtio.h>
 #include <thylacine/virtio_pci.h>
@@ -343,6 +344,12 @@ void boot_main(void) {
     // sched_init so that any future driver-side dev->init that allocates
     // a Spoor + walks has a working scheduler context.
     dev_init();
+
+    // P5-attach-dev: register the dev9p proxy Dev. After dev_init so
+    // dev_register's bestiary array is initialized. The 9P stack itself
+    // (codec / session / transport / client) needs no init — each
+    // p9_client is caller-allocated and initialized per-mount.
+    dev9p_init();
 
     // P4-F: VirtIO MMIO transport probe. Walks DTB for "virtio,mmio"
     // nodes; maps each MMIO range; reads transport identity. Order:

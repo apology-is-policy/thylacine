@@ -325,6 +325,15 @@ void test_9p_client_unlinkat(void);
 void test_9p_client_readlink(void);
 void test_9p_client_rlerror_propagates_to_negative_errno(void);
 void test_9p_client_op_before_handshake_returns_ebusy(void);
+void test_dev9p_registered(void);
+void test_dev9p_attach_client_root_spoor(void);
+void test_dev9p_walk_one_component(void);
+void test_dev9p_walk_clone(void);
+void test_dev9p_open_lopens_fid(void);
+void test_dev9p_read_routes_through_client(void);
+void test_dev9p_write_routes_through_client(void);
+void test_dev9p_close_clunks_owned_fid(void);
+void test_dev9p_close_does_not_clunk_root_fid(void);
 void test_irq_latency_bench(void);
 void test_caps_kproc_has_all(void);
 void test_caps_kproc_has_hw_create(void);
@@ -819,6 +828,21 @@ struct test_case g_tests[] = {
                                                                            false, NULL },
     { "9p_client.op_before_handshake_returns_ebusy",
                                        test_9p_client_op_before_handshake_returns_ebusy,
+                                                                           false, NULL },
+    { "dev9p.registered",              test_dev9p_registered,              false, NULL },
+    { "dev9p.attach_client_root_spoor",test_dev9p_attach_client_root_spoor,false, NULL },
+    { "dev9p.walk_one_component",      test_dev9p_walk_one_component,      false, NULL },
+    { "dev9p.walk_clone",              test_dev9p_walk_clone,              false, NULL },
+    { "dev9p.open_lopens_fid",         test_dev9p_open_lopens_fid,         false, NULL },
+    { "dev9p.read_routes_through_client",
+                                       test_dev9p_read_routes_through_client,
+                                                                           false, NULL },
+    { "dev9p.write_routes_through_client",
+                                       test_dev9p_write_routes_through_client,
+                                                                           false, NULL },
+    { "dev9p.close_clunks_owned_fid",  test_dev9p_close_clunks_owned_fid,  false, NULL },
+    { "dev9p.close_does_not_clunk_root_fid",
+                                       test_dev9p_close_does_not_clunk_root_fid,
                                                                            false, NULL },
     { "userspace.irq_latency_bench",   test_irq_latency_bench,             false, NULL },
     { "caps.kproc_has_all",            test_caps_kproc_has_all,            false, NULL },

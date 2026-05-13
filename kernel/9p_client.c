@@ -100,6 +100,9 @@ int p9_client_init(struct p9_client *c,
         return -P9_E_INVAL;
     }
     c->magic        = P9_CLIENT_MAGIC;
+    // Fid allocator starts at root_fid + 1; dev9p (and other callers)
+    // pull fresh fids monotonically via p9_client_alloc_fid.
+    c->next_fid     = (root_fid < P9_NOFID - 1) ? (root_fid + 1) : 1;
     c->total_ops    = 0;
     c->total_errors = 0;
     return 0;
@@ -583,6 +586,15 @@ int p9_client_unlinkat(struct p9_client *c, u32 dfid,
 // =============================================================================
 // Query helpers.
 // =============================================================================
+
+u32 p9_client_alloc_fid(struct p9_client *c) {
+    if (!c) return P9_NOFID;
+    if (c->magic != P9_CLIENT_MAGIC) return P9_NOFID;
+    if (c->next_fid == P9_NOFID) return P9_NOFID;       // exhausted
+    u32 fid = c->next_fid;
+    c->next_fid++;
+    return fid;
+}
 
 bool p9_client_is_open(const struct p9_client *c) {
     if (!c) return false;
