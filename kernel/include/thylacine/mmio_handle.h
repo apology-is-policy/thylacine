@@ -110,4 +110,13 @@ void kobj_mmio_destroy(struct KObj_MMIO *k);
 u64 kobj_mmio_total_created(void);
 u64 kobj_mmio_live_count(void);
 
+// Diagnostic: is any byte of the PA range [pa, pa+size) currently
+// claimed by a live KObj_MMIO (or by a kernel-reserved sentinel)?
+// Used by driver-crash-recovery tests to verify the release path
+// emptied the claim table after a driver process exited.
+//
+// Returns true if at least one byte overlaps an existing claim;
+// false if the range is fully free. Acquires g_mmio_lock internally.
+bool kobj_mmio_pa_claimed(u64 pa, size_t size);
+
 #endif  // THYLACINE_MMIO_HANDLE_H

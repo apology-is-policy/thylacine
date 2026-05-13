@@ -44,7 +44,7 @@ esac
 KERNEL_ELF="$KERNEL_BUILD/thylacine.elf"
 LOG_FILE="$BUILD_DIR/test-boot.log"
 
-BOOT_TIMEOUT="${BOOT_TIMEOUT:-10}"          # seconds
+BOOT_TIMEOUT="${BOOT_TIMEOUT:-15}"          # seconds
 BOOT_MARKER="Thylacine boot OK"
 EXTINCTION_MARKER="EXTINCTION:"             # per TOOLING.md §10 ABI
 

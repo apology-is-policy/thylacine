@@ -431,3 +431,12 @@ int kobj_mmio_kernel_reserved_count(void) {
     spin_unlock_irqrestore(&g_mmio_lock, s);
     return n;
 }
+
+bool kobj_mmio_pa_claimed(u64 pa, size_t size) {
+    if (size == 0) return false;
+    if (size > (u64)-1 - pa) return false;  // overflow ⇒ caller mis-use
+    irq_state_t s = spin_lock_irqsave(&g_mmio_lock);
+    bool claimed = ranges_overlap(pa, size);
+    spin_unlock_irqrestore(&g_mmio_lock, s);
+    return claimed;
+}

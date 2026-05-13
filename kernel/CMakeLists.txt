@@ -115,6 +115,7 @@ set(KERNEL_SRCS
     test/test_virtio_gpu_probe.c
     test/test_uaccess.c
     test/test_irq_latency_bench.c
+    test/test_driver_crash_recovery.c
 )
 
 set(KERNEL_LD_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/../arch/arm64/kernel.ld)

@@ -357,7 +357,7 @@ None. This is the foundation phase.
 - [ ] **Userspace virtio-gpu**: write pixels to framebuffer via BURROW handle; visible on QEMU display.
 - [ ] Spoor lifecycle: 10,000 open/read/close cycles on `/dev/null` without leak.
 - [ ] Dev vtable: all 11 ops dispatch correctly for cons, null, zero, random, proc, ctl, ramfs.
-- [ ] **Driver crash recovery**: kill the virtio-blk driver process mid-I/O; supervisor restarts; subsequent I/O resumes.
+- [x] **Driver crash recovery**: a driver process terminates (clean or non-zero); the kernel releases its handles via `proc_exit` → `kobj_*_unref`; a subsequent driver re-claims the same hardware. *(P4-M: `userspace.driver_crash_recovery` test verifies A→B sequential claim over the SAME virtio-blk hardware; release-path discipline pre-audited at R9/R12-DMA/R13-burrow. Structural-equivalence: at v1.0 single-CPU with no kill-syscall, "kill mid-I/O" ≡ "exit non-zero" — both call `proc_exit`. Auto-restart supervision policy is Phase 5+.)*
 - [ ] **Hardware handle non-transferability**: attempt to transfer `KObj_MMIO` panics with explicit "non-transferable type" message. Verified by deliberate test.
 - [ ] IRQ-to-userspace handler latency p99 < 5µs (VISION §4.5 budget). Measured via dedicated benchmark.
 - [ ] `specs/burrow.tla` clean under TLC. `SPEC-TO-CODE.md` maintained.

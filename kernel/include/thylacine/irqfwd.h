@@ -101,4 +101,11 @@ u32 kobj_irq_wait(struct KObj_IRQ *k);
 u64 kobj_irq_total_fires(void);
 u64 kobj_irq_live_count(void);
 
+// Diagnostic: is `intid` currently claimed (by a live KObj_IRQ OR by
+// kernel-reserved pre-claim from irqfwd_init)? Used by
+// driver-crash-recovery tests to verify the release path cleared the
+// intid claim after a driver process exited. Returns false for
+// out-of-range intid.
+bool kobj_irq_intid_claimed(u32 intid);
+
 #endif  // THYLACINE_IRQFWD_H

@@ -124,6 +124,14 @@ u64 kobj_irq_live_count(void) {
     return __atomic_load_n(&g_kobj_irq_live, __ATOMIC_RELAXED);
 }
 
+bool kobj_irq_intid_claimed(u32 intid) {
+    if (intid >= GIC_NUM_INTIDS) return false;
+    irq_state_t s = spin_lock_irqsave(&g_intid_lock);
+    bool claimed = g_intid_claimed[intid];
+    spin_unlock_irqrestore(&g_intid_lock, s);
+    return claimed;
+}
+
 // =============================================================================
 // GIC dispatch hook.
 // =============================================================================
