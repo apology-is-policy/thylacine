@@ -222,6 +222,21 @@ void test_virtio_net_loop_rfork_with_caps(void);
 void test_virtio_input_probe_rfork_with_caps(void);
 void test_virtio_gpu_probe_rfork_with_caps(void);
 void test_driver_crash_recovery(void);
+void test_9p_wire_primitives_round_trip(void);
+void test_9p_wire_primitives_overflow(void);
+void test_9p_wire_str_round_trip(void);
+void test_9p_wire_qid_round_trip(void);
+void test_9p_wire_header_peek(void);
+void test_9p_wire_tversion_round_trip(void);
+void test_9p_wire_tattach_round_trip(void);
+void test_9p_wire_twalk_round_trip(void);
+void test_9p_wire_twalk_zero_names_clone(void);
+void test_9p_wire_tclunk_round_trip(void);
+void test_9p_wire_rlerror_parse(void);
+void test_9p_wire_rmsg_size_mismatch_rejected(void);
+void test_9p_wire_rmsg_wrong_type_rejected(void);
+void test_9p_wire_rwalk_count_cap_enforced(void);
+void test_9p_wire_pack_str_overflow(void);
 void test_irq_latency_bench(void);
 void test_caps_kproc_has_all(void);
 void test_caps_kproc_has_hw_create(void);
@@ -544,6 +559,27 @@ struct test_case g_tests[] = {
                                                                            false, NULL },
     { "userspace.driver_crash_recovery",
                                        test_driver_crash_recovery,         false, NULL },
+    { "9p_wire.primitives_round_trip", test_9p_wire_primitives_round_trip, false, NULL },
+    { "9p_wire.primitives_overflow",   test_9p_wire_primitives_overflow,   false, NULL },
+    { "9p_wire.str_round_trip",        test_9p_wire_str_round_trip,        false, NULL },
+    { "9p_wire.pack_str_overflow",     test_9p_wire_pack_str_overflow,     false, NULL },
+    { "9p_wire.qid_round_trip",        test_9p_wire_qid_round_trip,        false, NULL },
+    { "9p_wire.header_peek",           test_9p_wire_header_peek,           false, NULL },
+    { "9p_wire.tversion_round_trip",   test_9p_wire_tversion_round_trip,   false, NULL },
+    { "9p_wire.tattach_round_trip",    test_9p_wire_tattach_round_trip,    false, NULL },
+    { "9p_wire.twalk_round_trip",      test_9p_wire_twalk_round_trip,      false, NULL },
+    { "9p_wire.twalk_zero_names_clone",test_9p_wire_twalk_zero_names_clone,false, NULL },
+    { "9p_wire.tclunk_round_trip",     test_9p_wire_tclunk_round_trip,     false, NULL },
+    { "9p_wire.rlerror_parse",         test_9p_wire_rlerror_parse,         false, NULL },
+    { "9p_wire.rmsg_size_mismatch_rejected",
+                                       test_9p_wire_rmsg_size_mismatch_rejected,
+                                                                           false, NULL },
+    { "9p_wire.rmsg_wrong_type_rejected",
+                                       test_9p_wire_rmsg_wrong_type_rejected,
+                                                                           false, NULL },
+    { "9p_wire.rwalk_count_cap_enforced",
+                                       test_9p_wire_rwalk_count_cap_enforced,
+                                                                           false, NULL },
     { "userspace.irq_latency_bench",   test_irq_latency_bench,             false, NULL },
     { "caps.kproc_has_all",            test_caps_kproc_has_all,            false, NULL },
     { "caps.kproc_has_hw_create",      test_caps_kproc_has_hw_create,      false, NULL },

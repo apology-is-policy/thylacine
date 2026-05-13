@@ -1,0 +1,289 @@
+// 9P2000.L wire codec (P5-wire bring-up subset).
+//
+// Per ARCH §10.2 (9P dialect) + `specs/9p_client.tla` (the spec this codec
+// will eventually service) + `stratum/v2/docs/reference/20-9p.md` (the
+// canonical server's wire-format reference). 9P2000.L is the Linux-extended
+// 9P dialect that v9fs speaks; the diod project's protocol description
+// (https://github.com/chaos/diod/blob/master/protocol.md) defines the
+// baseline. Stratum's `<stratum/9p.h>` is the cross-project ABI reference
+// for opcodes and limits; this header mirrors those numerically.
+//
+// SCOPE OF P5-WIRE (this chunk):
+//
+//   - Common header (size + type + tag); pack/peek/unpack.
+//   - Primitive marshalers/unmarshalers: u8, u16, u32, u64, str, qid.
+//   - Handshake + navigation + clunk message family:
+//       Tversion / Rversion (100 / 101)
+//       Tattach  / Rattach  (104 / 105)
+//       Twalk    / Rwalk    (110 / 111)
+//       Tclunk   / Rclunk   (120 / 121)
+//   - Rlerror parse (7) — every R-message can be replaced by Rlerror.
+//
+// OUT OF P5-WIRE (deferred to follow-up chunks):
+//
+//   - IO family: Tlopen / Tread / Twrite / Tlcreate (P5-wire-io).
+//   - Metadata family: Tgetattr / Tsetattr / Treaddir / Tstatfs / Tfsync
+//     (P5-wire-meta).
+//   - Mutation family: Tunlinkat / Trename / Trenameat / Tsymlink /
+//     Tmknod / Tlink / Treadlink / Tmkdir.
+//   - Lock family: Tlock / Tgetlock.
+//   - Xattr family: Txattrwalk / Txattrcreate.
+//   - Stratum extensions: Tsync / Treflink / Tbind / Tunbind.
+//
+// Wire conventions:
+//
+//   - All multi-byte integers are LITTLE-ENDIAN.
+//   - Strings are 16-bit-length-prefixed, NOT NUL-terminated. The codec
+//     hands out POINTERS INTO the source buffer; the caller is responsible
+//     for copying out OR keeping the buffer alive.
+//   - The common header is 7 bytes: [size: u32][type: u8][tag: u16].
+//     `size` is the TOTAL message length INCLUDING the size field itself.
+//
+// Error convention:
+//
+//   - All pack/unpack/build/parse functions return either a non-negative
+//     byte count (or 0 for success on parse) or a NEGATIVE value on error.
+//   - There is no errno-style separate channel; errors are coarse-grained
+//     ("buffer too small / message malformed / unexpected type").
+//   - The caller short-circuits on the first negative return; subsequent
+//     calls on the same buffer are no-ops.
+//
+// Audit posture: spec-bearing per CLAUDE.md §"Audit-triggering changes".
+// Per `specs/9p_client.tla`, this codec is the wire-level realization of
+// SendIO / SendWalk / SendClunk / ReceiveOp. Bugs in framing or
+// length-bound checks can break I-10 (tag uniqueness if a malformed Rmsg's
+// tag is mis-decoded) and I-11 (fid stability if a Twalk's newfid is
+// corrupted). The unit-test suite at `kernel/test/test_9p_wire.c` covers
+// round-trip + every malformed-input shape.
+
+#ifndef THYLACINE_9P_WIRE_H
+#define THYLACINE_9P_WIRE_H
+
+#include <thylacine/types.h>
+
+// =============================================================================
+// 9P2000.L message types (P5-wire subset; deferred messages enumerated as
+// constants for forward reference but not encoded/decoded here).
+// =============================================================================
+
+// Subset implemented at P5-wire:
+#define P9_TVERSION    100u
+#define P9_RVERSION    101u
+#define P9_TATTACH     104u
+#define P9_RATTACH     105u
+#define P9_TWALK       110u
+#define P9_RWALK       111u
+#define P9_TCLUNK      120u
+#define P9_RCLUNK      121u
+#define P9_RLERROR     7u
+
+// Deferred — encoded/decoded in follow-up chunks (P5-wire-io / -meta /
+// -mutation / -xattr / -lock / -stratum-ext). Listed here for forward
+// reference + to keep the dispatcher's switch exhaustive when P5-session
+// lands.
+#define P9_TSTATFS     8u
+#define P9_RSTATFS     9u
+#define P9_TLOPEN      12u
+#define P9_RLOPEN      13u
+#define P9_TLCREATE    14u
+#define P9_RLCREATE    15u
+#define P9_TSYMLINK    16u
+#define P9_RSYMLINK    17u
+#define P9_TMKNOD      18u
+#define P9_RMKNOD      19u
+#define P9_TRENAME     20u
+#define P9_RRENAME     21u
+#define P9_TREADLINK   22u
+#define P9_RREADLINK   23u
+#define P9_TGETATTR    24u
+#define P9_RGETATTR    25u
+#define P9_TSETATTR    26u
+#define P9_RSETATTR    27u
+#define P9_TXATTRWALK  30u
+#define P9_RXATTRWALK  31u
+#define P9_TXATTRCREATE 32u
+#define P9_RXATTRCREATE 33u
+#define P9_TREADDIR    40u
+#define P9_RREADDIR    41u
+#define P9_TFSYNC      50u
+#define P9_RFSYNC      51u
+#define P9_TLOCK       52u
+#define P9_RLOCK       53u
+#define P9_TGETLOCK    54u
+#define P9_RGETLOCK    55u
+#define P9_TLINK       70u
+#define P9_RLINK       71u
+#define P9_TMKDIR      72u
+#define P9_RMKDIR      73u
+#define P9_TRENAMEAT   74u
+#define P9_RRENAMEAT   75u
+#define P9_TUNLINKAT   76u
+#define P9_RUNLINKAT   77u
+#define P9_TFLUSH      108u
+#define P9_RFLUSH      109u
+#define P9_TREAD       116u
+#define P9_RREAD       117u
+#define P9_TWRITE      118u
+#define P9_RWRITE      119u
+// Stratum extensions (per stratum/v2/include/stratum/9p.h):
+#define P9_TBIND       124u
+#define P9_RBIND       125u
+#define P9_TUNBIND     126u
+#define P9_RUNBIND     127u
+#define P9_TSYNC       128u
+#define P9_RSYNC       129u
+#define P9_TREFLINK    130u
+#define P9_RREFLINK    131u
+#define P9_TFALLOCATE  132u
+#define P9_RFALLOCATE  133u
+
+// =============================================================================
+// Wire-format constants.
+// =============================================================================
+
+// The common header on every 9P message: u32 size + u8 type + u16 tag.
+#define P9_HDR_LEN     7u
+
+// A qid is exactly 13 bytes on the wire: u8 type + u32 version + u64 path.
+#define P9_QID_LEN     13u
+
+// Sentinels (canonical per 9P2000 + 9P2000.L).
+#define P9_NOFID       ((u32)0xFFFFFFFFu)
+#define P9_NOTAG       ((u16)0xFFFFu)
+
+// Walk caps (matches Stratum + Linux v9fs convention).
+#define P9_MAX_WALK    16u            // per-Twalk wname-count cap
+#define P9_NAME_MAX    255u           // per-name byte cap (matches Linux NAME_MAX)
+
+// =============================================================================
+// QID struct (in-memory shape; wire shape is the 13-byte little-endian
+// encoding).
+// =============================================================================
+
+struct p9_qid {
+    u8  type;       // QID type bits (P9_QT* below)
+    u32 version;    // server-managed monotonic version
+    u64 path;       // inode-like identifier
+};
+
+// QID type bits (mirrors Stratum's STM_9P_QT*).
+#define P9_QTDIR        0x80u
+#define P9_QTFILE       0x00u
+#define P9_QTSYMLINK    0x02u
+#define P9_QTAUTH       0x08u
+#define P9_QTTMP        0x04u         // O_TMPFILE-shape
+
+// =============================================================================
+// Primitive packers — write a value at `out`, return bytes written, or
+// -1 if cap is insufficient. Each is a thin shift-and-byte-store.
+// =============================================================================
+
+int p9_pack_u8 (u8 *out, size_t cap, u8  v);
+int p9_pack_u16(u8 *out, size_t cap, u16 v);
+int p9_pack_u32(u8 *out, size_t cap, u32 v);
+int p9_pack_u64(u8 *out, size_t cap, u64 v);
+int p9_pack_qid(u8 *out, size_t cap, const struct p9_qid *q);
+
+// 9P-strings: u16 LE length prefix + UTF-8 bytes (NOT NUL-terminated).
+// `s` is the byte source; `slen` is its byte length. Returns 2 + slen on
+// success, -1 on overflow OR slen > UINT16_MAX. Caller responsible for
+// enforcing per-spec caps (e.g., P9_NAME_MAX = 255 for path components).
+int p9_pack_str(u8 *out, size_t cap, const u8 *s, size_t slen);
+
+// =============================================================================
+// Primitive unpackers — read from `in`, advance, return bytes consumed,
+// or -1 on underflow. Caller short-circuits on negative.
+// =============================================================================
+
+int p9_unpack_u8 (const u8 *in, size_t remaining, u8  *out);
+int p9_unpack_u16(const u8 *in, size_t remaining, u16 *out);
+int p9_unpack_u32(const u8 *in, size_t remaining, u32 *out);
+int p9_unpack_u64(const u8 *in, size_t remaining, u64 *out);
+int p9_unpack_qid(const u8 *in, size_t remaining, struct p9_qid *q);
+
+// 9P-string unpack: sets *out_ptr to point INTO `in` (zero-copy);
+// sets *out_len to the string's byte length. Returns 2 + *out_len on
+// success, -1 on underflow / malformed. The caller MUST not free `in`
+// before consuming *out_ptr.
+int p9_unpack_str(const u8 *in, size_t remaining,
+                  const u8 **out_ptr, u16 *out_len);
+
+// =============================================================================
+// Header peek: extract size + type + tag without consuming the body.
+// Returns 0 on success, -1 on underflow (< 7 bytes available).
+// =============================================================================
+
+int p9_peek_header(const u8 *in, size_t len,
+                   u32 *size, u8 *type, u16 *tag);
+
+// =============================================================================
+// High-level Tmsg builders. Each returns the total Tmsg length (including
+// the 7-byte header), or -1 on overflow / arg violation. Caller passes a
+// buffer of at least the expected Tmsg length; the function writes the
+// complete framed Tmsg. `tag` may be P9_NOTAG only for Tversion (per spec).
+// =============================================================================
+
+// Tversion: handshake. version is the dialect string (typically
+// "9P2000.L"). version_len is its byte length (excluding NUL).
+int p9_build_tversion(u8 *out, size_t cap,
+                      u16 tag, u32 msize,
+                      const u8 *version, size_t version_len);
+
+// Tattach: bind a fid to a server-side root for this connection. afid is
+// the auth fid (P9_NOFID for no auth). uname/aname are 9P-strings.
+// n_uname is the numeric Linux uid.
+int p9_build_tattach(u8 *out, size_t cap, u16 tag,
+                     u32 fid, u32 afid,
+                     const u8 *uname, size_t uname_len,
+                     const u8 *aname, size_t aname_len,
+                     u32 n_uname);
+
+// Twalk: walk from `fid` along `nwname` path components, binding the
+// destination into `newfid`. `nwname == 0` clones `fid` into `newfid`.
+// `names` is an array of `nwname` pointers; `name_lens` is the matching
+// byte length for each name. Caller enforces P9_NAME_MAX per name and
+// P9_MAX_WALK total names.
+int p9_build_twalk(u8 *out, size_t cap, u16 tag,
+                   u32 fid, u32 newfid,
+                   u16 nwname,
+                   const u8 *const *names, const size_t *name_lens);
+
+// Tclunk: release the fid. The server-side fid table entry is cleared.
+int p9_build_tclunk(u8 *out, size_t cap, u16 tag, u32 fid);
+
+// =============================================================================
+// High-level Rmsg parsers. Each validates the header (size matches body
+// length AND type is as expected) and extracts the body fields. Returns 0
+// on success, -1 on malformed (wrong type, truncated, oversize, internal
+// length mismatch). The caller should peek the header first to dispatch on
+// type (which may be P9_RLERROR even where an Rxx was expected).
+// =============================================================================
+
+// Rversion: server's negotiated msize + dialect version.
+int p9_parse_rversion(const u8 *in, size_t len,
+                      u16 *tag, u32 *msize,
+                      const u8 **version, u16 *version_len);
+
+// Rattach: server-supplied qid for the bound root.
+int p9_parse_rattach(const u8 *in, size_t len,
+                     u16 *tag, struct p9_qid *qid);
+
+// Rwalk: array of qids for each walked component. Caller passes a qid
+// buffer of capacity `qid_cap` (typically P9_MAX_WALK). nwqid is set to
+// the actual count returned; *nwqid <= qid_cap is enforced by the parser.
+// Per the protocol, *nwqid <= nwname from the matching Twalk; the parser
+// doesn't see Twalk, so the caller-cap-bound (R111 doctrine from
+// stratum/v2/docs/reference/23-9p_client.md §"Five trust boundaries")
+// is the load-bearing check here.
+int p9_parse_rwalk(const u8 *in, size_t len,
+                   u16 *tag, u16 *nwqid,
+                   struct p9_qid *qids, size_t qid_cap);
+
+// Rclunk: no body. Just header validation.
+int p9_parse_rclunk(const u8 *in, size_t len, u16 *tag);
+
+// Rlerror: u32 LE Linux errno. Used in lieu of any expected Rxx when the
+// server cannot fulfill the request.
+int p9_parse_rlerror(const u8 *in, size_t len, u16 *tag, u32 *ecode);
+
+#endif  // THYLACINE_9P_WIRE_H
