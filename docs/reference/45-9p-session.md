@@ -39,7 +39,9 @@ CLOSED  (terminal)
 | `SendClunk(t, fid)` | `p9_session_send_clunk` — Send-time precondition: fid bound, fid ≠ root, no other in-flight op on fid. **Send-time-unbinds** fid (the spec's canonical client discipline). |
 | `SendIO(t, fid)` — open/create | `p9_session_send_lopen` + `p9_session_send_lcreate` — Send-time precondition: fid bound, no other in-flight op on fid (server-side fid state mutation is exclusive). |
 | `SendIO(t, fid)` — read/write | `p9_session_send_read` + `p9_session_send_write` — Send-time precondition: fid bound. Concurrent ops on same fid permitted (offset is explicit on the wire). |
-| `ReceiveOp(t)` | `p9_session_dispatch_rmsg` — tag-indexed lookup pairs Rmsg with correct outstanding op; Rlerror surfacing; type-mismatch rejected. IO R-msgs (Rlopen/Rlcreate/Rread/Rwrite) populate the corresponding fields in `struct p9_dispatch_result` without mutating the fid table. |
+| `SendIO(t, fid)` — getattr/statfs/readdir/fsync | `p9_session_send_getattr` / `_statfs` / `_readdir` / `_fsync` — Send-time precondition: fid bound. Concurrent ops on same fid permitted (read-shaped; no server-side fid state mutation on canonical identity). |
+| `SendIO(t, fid)` — setattr | `p9_session_send_setattr` — Send-time precondition: fid bound + no other in-flight op on fid (mutation-shaped: server-side attribute write is exclusive). |
+| `ReceiveOp(t)` | `p9_session_dispatch_rmsg` — tag-indexed lookup pairs Rmsg with correct outstanding op; Rlerror surfacing; type-mismatch rejected. IO + metadata R-msgs (Rlopen/Rlcreate/Rread/Rwrite/Rgetattr/Rsetattr/Rreaddir/Rstatfs/Rfsync) populate the corresponding fields in `struct p9_dispatch_result` without mutating the fid table. |
 
 ## Invariants the module upholds
 
@@ -80,6 +82,17 @@ int  p9_session_send_read   (struct p9_session *s, u8 *out, size_t cap,
 int  p9_session_send_write  (struct p9_session *s, u8 *out, size_t cap,
                               u32 fid, u64 offset,
                               u32 count, const u8 *data);
+// Metadata family (P5-wire-meta).
+int  p9_session_send_getattr(struct p9_session *s, u8 *out, size_t cap,
+                              u32 fid, u64 request_mask);
+int  p9_session_send_setattr(struct p9_session *s, u8 *out, size_t cap,
+                              u32 fid, const struct p9_setattr *attr);
+int  p9_session_send_readdir(struct p9_session *s, u8 *out, size_t cap,
+                              u32 fid, u64 offset, u32 count);
+int  p9_session_send_statfs (struct p9_session *s, u8 *out, size_t cap,
+                              u32 fid);
+int  p9_session_send_fsync  (struct p9_session *s, u8 *out, size_t cap,
+                              u32 fid, u32 datasync);
 
 // Receive-side: dispatch by tag, apply state mutation, surface result.
 int  p9_session_dispatch_rmsg(struct p9_session *s,
@@ -121,7 +134,9 @@ struct p9_session {
 struct p9_outstanding {
     bool active;
     u8   kind;     // P9_TVERSION / P9_TATTACH / P9_TWALK / P9_TCLUNK /
-                   // P9_TLOPEN / P9_TLCREATE / P9_TREAD / P9_TWRITE
+                   // P9_TLOPEN / P9_TLCREATE / P9_TREAD / P9_TWRITE /
+                   // P9_TGETATTR / P9_TSETATTR / P9_TREADDIR /
+                   // P9_TSTATFS / P9_TFSYNC
     u32  fid;      // primary target
     u32  new_fid;  // walk dest (== fid for non-walk)
     u32  op_id;    // spec op_id
@@ -132,7 +147,7 @@ Allocation: caller-managed. The kernel handle-table layer (P5-attach) wraps each
 
 ## Tests
 
-25 tests in `kernel/test/test_9p_session.c`:
+33 tests in `kernel/test/test_9p_session.c`:
 
 | Test | Covers |
 |---|---|
@@ -161,6 +176,14 @@ Allocation: caller-managed. The kernel handle-table layer (P5-attach) wraps each
 | `9p_session.read_permits_concurrent` | two Tread on same fid, different offsets → both accepted (offset is explicit) |
 | `9p_session.io_from_unbound_fid_refused` | all four IO ops on unbound fid → `-1` |
 | `9p_session.io_before_open_refused` | all four IO ops in INIT state → `-1` |
+| `9p_session.getattr_round_trip` | Tgetattr→Rgetattr; struct p9_attr surfaced; fid stays bound |
+| `9p_session.setattr_round_trip` | Tsetattr→Rsetattr (header-only) |
+| `9p_session.readdir_round_trip` | Treaddir→Rreaddir; zero-copy dirent stream + p9_unpack_dirent traversal |
+| `9p_session.statfs_round_trip` | Tstatfs→Rstatfs; struct p9_statfs surfaced |
+| `9p_session.fsync_round_trip` | Tfsync→Rfsync (header-only) |
+| `9p_session.setattr_with_inflight_on_fid_refused` | concurrent Tsetattr on same fid → `-1` (mutation-exclusive) |
+| `9p_session.getattr_permits_concurrent` | two Tgetattr on same fid → both accepted (read-shaped) |
+| `9p_session.meta_from_unbound_fid_refused` | all 5 metadata ops on unbound fid → `-1` |
 
 The tests use synthesized Rmsg buffers (helper `synth_*` functions in the test file) to drive the dispatcher without an actual server. P5-transport will provide the actual byte-pipeline.
 
@@ -187,7 +210,7 @@ The tests use synthesized Rmsg buffers (helper `synth_*` functions in the test f
 | Walk + Clunk + Rlerror | **Landed (P5-session)** |
 | Spec invariants I-10 + I-11 + OutOfOrderCorrectness + FlowControl | **Pinned (P5-session)** |
 | IO family Send/Receive (Tlopen / Tlcreate / Tread / Twrite) | **Landed (P5-wire-io)** |
-| Metadata family Send/Receive (Tgetattr / Tsetattr / Treaddir / Tstatfs / Tfsync) | Phase 5+ (P5-wire-meta) |
+| Metadata family Send/Receive (Tgetattr / Tsetattr / Treaddir / Tstatfs / Tfsync) | **Landed (P5-wire-meta)** |
 | Mutation family | Phase 5+ (with P5-wire-mutation) |
 | Lock family + Xattr family | Phase 5+ (with P5-wire-lock / -xattr) |
 | Stratum extensions (Tsync / Treflink / Tbind / Tunbind / Tfallocate / Tfadvise) | Phase 5+ (with P5-wire-stratum-ext) |

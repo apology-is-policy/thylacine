@@ -42,6 +42,14 @@ void test_9p_session_lopen_with_inflight_on_fid_refused(void);
 void test_9p_session_read_permits_concurrent(void);
 void test_9p_session_io_from_unbound_fid_refused(void);
 void test_9p_session_io_before_open_refused(void);
+void test_9p_session_getattr_round_trip(void);
+void test_9p_session_setattr_round_trip(void);
+void test_9p_session_readdir_round_trip(void);
+void test_9p_session_statfs_round_trip(void);
+void test_9p_session_fsync_round_trip(void);
+void test_9p_session_setattr_with_inflight_on_fid_refused(void);
+void test_9p_session_getattr_permits_concurrent(void);
+void test_9p_session_meta_from_unbound_fid_refused(void);
 
 // 4 KiB scratch buffer.
 static u8 g_buf[4096];
@@ -689,4 +697,247 @@ void test_9p_session_io_before_open_refused(void) {
     rc = p9_session_send_lcreate(&s, g_buf, sizeof(g_buf), 0,
                                   name, sizeof(name), 0, 0, 0);
     TEST_EXPECT_EQ(rc, -1, "lcreate in INIT state refused");
+}
+
+// =============================================================================
+// Metadata family (P5-wire-meta): end-to-end tests for Tgetattr / Tsetattr
+// / Treaddir / Tstatfs / Tfsync.
+// =============================================================================
+
+// Synthesize Rgetattr with a small but distinguishable attribute record.
+// Body shape: 8 (valid) + 13 (qid) + 12 (3 u32) + 15*8 (15 u64) = 153 bytes.
+static int synth_rgetattr(u8 *out, size_t cap, u16 tag) {
+    u8 body[8 + P9_QID_LEN + 4 * 3 + 8 * 15];
+    size_t off = 0;
+    int rc;
+    rc = p9_pack_u64(body + off, sizeof(body) - off, P9_GETATTR_BASIC); off += (size_t)rc;
+    struct p9_qid q = { .type = P9_QTFILE, .version = 3, .path = 808 };
+    rc = p9_pack_qid(body + off, sizeof(body) - off, &q);  off += (size_t)rc;
+    rc = p9_pack_u32(body + off, sizeof(body) - off, 0644u); off += (size_t)rc;  // mode
+    rc = p9_pack_u32(body + off, sizeof(body) - off, 0u);    off += (size_t)rc;  // uid
+    rc = p9_pack_u32(body + off, sizeof(body) - off, 0u);    off += (size_t)rc;  // gid
+    rc = p9_pack_u64(body + off, sizeof(body) - off, 1ull);  off += (size_t)rc;  // nlink
+    rc = p9_pack_u64(body + off, sizeof(body) - off, 0ull);  off += (size_t)rc;  // rdev
+    rc = p9_pack_u64(body + off, sizeof(body) - off, 999ull);off += (size_t)rc;  // size
+    rc = p9_pack_u64(body + off, sizeof(body) - off, 4096ull);off += (size_t)rc; // blksize
+    rc = p9_pack_u64(body + off, sizeof(body) - off, 2ull);  off += (size_t)rc;  // blocks
+    for (int i = 0; i < 8; i++) {
+        rc = p9_pack_u64(body + off, sizeof(body) - off, (u64)(0x200 + i));
+        off += (size_t)rc;
+    }
+    rc = p9_pack_u64(body + off, sizeof(body) - off, 0ull);  off += (size_t)rc;  // gen
+    rc = p9_pack_u64(body + off, sizeof(body) - off, 0ull);  off += (size_t)rc;  // data_version
+    return synth_rmsg(out, cap, P9_RGETATTR, tag, body, off);
+}
+
+static int synth_rsetattr(u8 *out, size_t cap, u16 tag) {
+    return synth_rmsg(out, cap, P9_RSETATTR, tag, NULL, 0);
+}
+
+static int synth_rreaddir(u8 *out, size_t cap, u16 tag,
+                           const u8 *payload, u32 payload_len) {
+    u8 body[256];
+    if ((size_t)payload_len + 4 > sizeof(body)) return -1;
+    for (int i = 0; i < 4; i++) body[i] = (u8)((payload_len >> (i * 8)) & 0xff);
+    for (u32 i = 0; i < payload_len; i++) body[4 + i] = payload[i];
+    return synth_rmsg(out, cap, P9_RREADDIR, tag, body, (size_t)(4 + payload_len));
+}
+
+static int synth_rstatfs(u8 *out, size_t cap, u16 tag) {
+    u8 body[60];
+    size_t off = 0;
+    int rc;
+    rc = p9_pack_u32(body + off, sizeof(body) - off, 0x53544D31u); off += (size_t)rc;
+    rc = p9_pack_u32(body + off, sizeof(body) - off, 4096u);       off += (size_t)rc;
+    rc = p9_pack_u64(body + off, sizeof(body) - off, 1000ull);     off += (size_t)rc;
+    rc = p9_pack_u64(body + off, sizeof(body) - off, 500ull);      off += (size_t)rc;
+    rc = p9_pack_u64(body + off, sizeof(body) - off, 250ull);      off += (size_t)rc;
+    rc = p9_pack_u64(body + off, sizeof(body) - off, 64ull);       off += (size_t)rc;
+    rc = p9_pack_u64(body + off, sizeof(body) - off, 16ull);       off += (size_t)rc;
+    rc = p9_pack_u64(body + off, sizeof(body) - off, 0xCAFEull);   off += (size_t)rc;
+    rc = p9_pack_u32(body + off, sizeof(body) - off, 255u);        off += (size_t)rc;
+    return synth_rmsg(out, cap, P9_RSTATFS, tag, body, off);
+}
+
+static int synth_rfsync(u8 *out, size_t cap, u16 tag) {
+    return synth_rmsg(out, cap, P9_RFSYNC, tag, NULL, 0);
+}
+
+void test_9p_session_getattr_round_trip(void) {
+    struct p9_session s;
+    drive_session_open(&s, /*root_fid=*/0);
+    TEST_EXPECT_EQ(walk_to(&s, 30), 0, "walk to fid 30");
+
+    int len = p9_session_send_getattr(&s, g_buf, sizeof(g_buf),
+                                       30, P9_GETATTR_BASIC);
+    TEST_ASSERT(len > 0, "send_getattr ok");
+    u32 sz; u8 ty; u16 tag;
+    p9_peek_header(g_buf, (size_t)len, &sz, &ty, &tag);
+    TEST_EXPECT_EQ((u64)ty, (u64)P9_TGETATTR, "Tgetattr type");
+
+    len = synth_rgetattr(g_buf, sizeof(g_buf), tag);
+    struct p9_dispatch_result r;
+    int rc = p9_session_dispatch_rmsg(&s, g_buf, (size_t)len, &r);
+    TEST_EXPECT_EQ(rc, 0,                                "dispatch Rgetattr ok");
+    TEST_EXPECT_EQ((u64)r.kind, (u64)P9_TGETATTR,        "result kind = TGETATTR");
+    TEST_EXPECT_EQ(r.attr.valid, (u64)P9_GETATTR_BASIC,  "Rgetattr valid round-trip");
+    TEST_EXPECT_EQ(r.attr.qid.path, (u64)808,            "Rgetattr qid.path");
+    TEST_EXPECT_EQ((u64)r.attr.mode, (u64)0644,          "Rgetattr mode");
+    TEST_EXPECT_EQ(r.attr.size, (u64)999,                "Rgetattr size");
+}
+
+void test_9p_session_setattr_round_trip(void) {
+    struct p9_session s;
+    drive_session_open(&s, 0);
+    TEST_EXPECT_EQ(walk_to(&s, 31), 0, "walk to fid 31");
+
+    struct p9_setattr sa = {
+        .valid = P9_SETATTR_MODE,
+        .mode  = 0755u,
+    };
+    int len = p9_session_send_setattr(&s, g_buf, sizeof(g_buf), 31, &sa);
+    TEST_ASSERT(len > 0, "send_setattr ok");
+    u32 sz; u8 ty; u16 tag;
+    p9_peek_header(g_buf, (size_t)len, &sz, &ty, &tag);
+    TEST_EXPECT_EQ((u64)ty, (u64)P9_TSETATTR, "Tsetattr type");
+
+    len = synth_rsetattr(g_buf, sizeof(g_buf), tag);
+    struct p9_dispatch_result r;
+    int rc = p9_session_dispatch_rmsg(&s, g_buf, (size_t)len, &r);
+    TEST_EXPECT_EQ(rc, 0,                          "dispatch Rsetattr ok");
+    TEST_EXPECT_EQ((u64)r.kind, (u64)P9_TSETATTR,  "result kind = TSETATTR");
+    TEST_ASSERT(p9_session_fid_bound(&s, 31),      "fid 31 still bound after Rsetattr");
+}
+
+void test_9p_session_readdir_round_trip(void) {
+    struct p9_session s;
+    drive_session_open(&s, 0);
+    TEST_EXPECT_EQ(walk_to(&s, 32), 0, "walk to fid 32");
+
+    int len = p9_session_send_readdir(&s, g_buf, sizeof(g_buf),
+                                       32, /*offset*/ 0, /*count*/ 4096);
+    TEST_ASSERT(len > 0, "send_readdir ok");
+    u32 sz; u8 ty; u16 tag;
+    p9_peek_header(g_buf, (size_t)len, &sz, &ty, &tag);
+    TEST_EXPECT_EQ((u64)ty, (u64)P9_TREADDIR, "Treaddir type");
+
+    // Dirent stream: one entry "x"
+    u8 ent[64];
+    size_t epos = 0;
+    int rc;
+    struct p9_qid q = { .type = P9_QTFILE, .version = 0, .path = 7 };
+    rc = p9_pack_qid(ent + epos, sizeof(ent) - epos, &q);   epos += (size_t)rc;
+    rc = p9_pack_u64(ent + epos, sizeof(ent) - epos, 1ull); epos += (size_t)rc;
+    rc = p9_pack_u8 (ent + epos, sizeof(ent) - epos, 8u);   epos += (size_t)rc;  // DT_REG
+    rc = p9_pack_str(ent + epos, sizeof(ent) - epos, (const u8 *)"x", 1);
+    epos += (size_t)rc;
+
+    len = synth_rreaddir(g_buf, sizeof(g_buf), tag, ent, (u32)epos);
+    struct p9_dispatch_result r;
+    rc = p9_session_dispatch_rmsg(&s, g_buf, (size_t)len, &r);
+    TEST_EXPECT_EQ(rc, 0,                                  "dispatch Rreaddir ok");
+    TEST_EXPECT_EQ((u64)r.kind, (u64)P9_TREADDIR,          "result kind = TREADDIR");
+    TEST_EXPECT_EQ((u64)r.readdir_count, (u64)epos,        "readdir count");
+    TEST_ASSERT(r.readdir_data != NULL,                    "readdir data non-null");
+    // Parse the first dirent.
+    struct p9_qid dq = { 0 };
+    u64 dent_off = 0;
+    u8 dent_type = 0;
+    const u8 *name_ptr = NULL;
+    u16 name_len = 0;
+    int dn = p9_unpack_dirent(r.readdir_data, (size_t)r.readdir_count,
+                                &dq, &dent_off, &dent_type, &name_ptr, &name_len);
+    TEST_EXPECT_EQ((u64)dn, (u64)epos,             "dirent total len");
+    TEST_EXPECT_EQ(dq.path, (u64)7,                "dirent qid.path");
+    TEST_EXPECT_EQ((u64)name_len, (u64)1,          "dirent name len");
+    TEST_ASSERT(name_ptr != NULL && name_ptr[0] == 'x', "dirent name byte");
+}
+
+void test_9p_session_statfs_round_trip(void) {
+    struct p9_session s;
+    drive_session_open(&s, 0);
+    TEST_EXPECT_EQ(walk_to(&s, 33), 0, "walk to fid 33");
+
+    int len = p9_session_send_statfs(&s, g_buf, sizeof(g_buf), 33);
+    TEST_ASSERT(len > 0, "send_statfs ok");
+    u32 sz; u8 ty; u16 tag;
+    p9_peek_header(g_buf, (size_t)len, &sz, &ty, &tag);
+    TEST_EXPECT_EQ((u64)ty, (u64)P9_TSTATFS, "Tstatfs type");
+
+    len = synth_rstatfs(g_buf, sizeof(g_buf), tag);
+    struct p9_dispatch_result r;
+    int rc = p9_session_dispatch_rmsg(&s, g_buf, (size_t)len, &r);
+    TEST_EXPECT_EQ(rc, 0,                                "dispatch Rstatfs ok");
+    TEST_EXPECT_EQ((u64)r.kind, (u64)P9_TSTATFS,         "result kind = TSTATFS");
+    TEST_EXPECT_EQ((u64)r.statfs.type, (u64)0x53544D31u, "statfs.type round-trip");
+    TEST_EXPECT_EQ((u64)r.statfs.bsize, (u64)4096,       "statfs.bsize");
+    TEST_EXPECT_EQ(r.statfs.blocks, (u64)1000,           "statfs.blocks");
+    TEST_EXPECT_EQ(r.statfs.fsid, (u64)0xCAFE,           "statfs.fsid");
+}
+
+void test_9p_session_fsync_round_trip(void) {
+    struct p9_session s;
+    drive_session_open(&s, 0);
+    TEST_EXPECT_EQ(walk_to(&s, 34), 0, "walk to fid 34");
+
+    int len = p9_session_send_fsync(&s, g_buf, sizeof(g_buf),
+                                     34, /*datasync*/ 1);
+    TEST_ASSERT(len > 0, "send_fsync ok");
+    u32 sz; u8 ty; u16 tag;
+    p9_peek_header(g_buf, (size_t)len, &sz, &ty, &tag);
+    TEST_EXPECT_EQ((u64)ty, (u64)P9_TFSYNC, "Tfsync type");
+
+    len = synth_rfsync(g_buf, sizeof(g_buf), tag);
+    struct p9_dispatch_result r;
+    int rc = p9_session_dispatch_rmsg(&s, g_buf, (size_t)len, &r);
+    TEST_EXPECT_EQ(rc, 0,                       "dispatch Rfsync ok");
+    TEST_EXPECT_EQ((u64)r.kind, (u64)P9_TFSYNC, "result kind = TFSYNC");
+}
+
+void test_9p_session_setattr_with_inflight_on_fid_refused(void) {
+    struct p9_session s;
+    drive_session_open(&s, 0);
+    TEST_EXPECT_EQ(walk_to(&s, 35), 0, "walk to fid 35");
+
+    // First setattr in flight.
+    struct p9_setattr sa = { .valid = P9_SETATTR_MODE, .mode = 0644u };
+    int len = p9_session_send_setattr(&s, g_buf, sizeof(g_buf), 35, &sa);
+    TEST_ASSERT(len > 0, "first setattr accepted");
+
+    // Second setattr on same fid: refused.
+    int rc = p9_session_send_setattr(&s, g_buf, sizeof(g_buf), 35, &sa);
+    TEST_EXPECT_EQ(rc, -1, "concurrent setattr on same fid refused");
+}
+
+void test_9p_session_getattr_permits_concurrent(void) {
+    struct p9_session s;
+    drive_session_open(&s, 0);
+    TEST_EXPECT_EQ(walk_to(&s, 36), 0, "walk to fid 36");
+
+    int len1 = p9_session_send_getattr(&s, g_buf, sizeof(g_buf),
+                                        36, P9_GETATTR_BASIC);
+    TEST_ASSERT(len1 > 0, "first getattr accepted");
+
+    static u8 buf2[1024];
+    int len2 = p9_session_send_getattr(&s, buf2, sizeof(buf2),
+                                        36, P9_GETATTR_ALL);
+    TEST_ASSERT(len2 > 0, "concurrent getattr on same fid accepted");
+    TEST_EXPECT_EQ((u64)p9_session_inflight(&s), (u64)2, "two getattrs inflight");
+}
+
+void test_9p_session_meta_from_unbound_fid_refused(void) {
+    struct p9_session s;
+    drive_session_open(&s, 0);
+    // Fid 88 never bound.
+    int rc = p9_session_send_getattr(&s, g_buf, sizeof(g_buf), 88, 0);
+    TEST_EXPECT_EQ(rc, -1, "getattr on unbound fid refused");
+    struct p9_setattr sa = { .valid = 0 };
+    rc = p9_session_send_setattr(&s, g_buf, sizeof(g_buf), 88, &sa);
+    TEST_EXPECT_EQ(rc, -1, "setattr on unbound fid refused");
+    rc = p9_session_send_readdir(&s, g_buf, sizeof(g_buf), 88, 0, 4096);
+    TEST_EXPECT_EQ(rc, -1, "readdir on unbound fid refused");
+    rc = p9_session_send_statfs(&s, g_buf, sizeof(g_buf), 88);
+    TEST_EXPECT_EQ(rc, -1, "statfs on unbound fid refused");
+    rc = p9_session_send_fsync(&s, g_buf, sizeof(g_buf), 88, 0);
+    TEST_EXPECT_EQ(rc, -1, "fsync on unbound fid refused");
 }

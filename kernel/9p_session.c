@@ -400,6 +400,100 @@ int p9_session_send_write(struct p9_session *s,
 }
 
 // =============================================================================
+// Send: metadata family (Tgetattr / Tsetattr / Treaddir / Tstatfs / Tfsync).
+// Read-shaped ops permit concurrent fids; setattr is mutation-shaped and
+// requires fid-exclusion.
+// =============================================================================
+
+int p9_session_send_getattr(struct p9_session *s,
+                            u8 *out, size_t cap,
+                            u32 fid, u64 request_mask) {
+    if (!s) return -1;
+    if (s->magic != P9_SESSION_MAGIC) return -1;
+    if (s->state != P9_SESS_OPEN) return -1;
+    if (!out) return -1;
+    if (!fid_bound(s, fid)) return -1;
+    // Tgetattr is read-shaped — concurrent ops on fid permitted.
+    int t = alloc_tag(s);
+    if (t < 0) return -1;
+    int rc = p9_build_tgetattr(out, cap, (u16)t, fid, request_mask);
+    if (rc < 0) return -1;
+    mark_outstanding(s, (u16)t, P9_TGETATTR, fid, fid);
+    return rc;
+}
+
+int p9_session_send_setattr(struct p9_session *s,
+                            u8 *out, size_t cap,
+                            u32 fid, const struct p9_setattr *attr) {
+    if (!s) return -1;
+    if (s->magic != P9_SESSION_MAGIC) return -1;
+    if (s->state != P9_SESS_OPEN) return -1;
+    if (!out) return -1;
+    if (!fid_bound(s, fid)) return -1;
+    if (!attr) return -1;
+    // Tsetattr mutates server-side metadata; refuse concurrent ops on fid.
+    if (any_outstanding_on_fid(s, fid)) return -1;
+    int t = alloc_tag(s);
+    if (t < 0) return -1;
+    int rc = p9_build_tsetattr(out, cap, (u16)t, fid, attr);
+    if (rc < 0) return -1;
+    mark_outstanding(s, (u16)t, P9_TSETATTR, fid, fid);
+    return rc;
+}
+
+int p9_session_send_readdir(struct p9_session *s,
+                            u8 *out, size_t cap,
+                            u32 fid, u64 offset, u32 count) {
+    if (!s) return -1;
+    if (s->magic != P9_SESSION_MAGIC) return -1;
+    if (s->state != P9_SESS_OPEN) return -1;
+    if (!out) return -1;
+    if (!fid_bound(s, fid)) return -1;
+    // Treaddir permits concurrent ops on fid (offset is explicit on the wire).
+    int t = alloc_tag(s);
+    if (t < 0) return -1;
+    int rc = p9_build_treaddir(out, cap, (u16)t, fid, offset, count);
+    if (rc < 0) return -1;
+    mark_outstanding(s, (u16)t, P9_TREADDIR, fid, fid);
+    return rc;
+}
+
+int p9_session_send_statfs(struct p9_session *s,
+                           u8 *out, size_t cap,
+                           u32 fid) {
+    if (!s) return -1;
+    if (s->magic != P9_SESSION_MAGIC) return -1;
+    if (s->state != P9_SESS_OPEN) return -1;
+    if (!out) return -1;
+    if (!fid_bound(s, fid)) return -1;
+    // Tstatfs is read-only at the fid — concurrent permitted.
+    int t = alloc_tag(s);
+    if (t < 0) return -1;
+    int rc = p9_build_tstatfs(out, cap, (u16)t, fid);
+    if (rc < 0) return -1;
+    mark_outstanding(s, (u16)t, P9_TSTATFS, fid, fid);
+    return rc;
+}
+
+int p9_session_send_fsync(struct p9_session *s,
+                          u8 *out, size_t cap,
+                          u32 fid, u32 datasync) {
+    if (!s) return -1;
+    if (s->magic != P9_SESSION_MAGIC) return -1;
+    if (s->state != P9_SESS_OPEN) return -1;
+    if (!out) return -1;
+    if (!fid_bound(s, fid)) return -1;
+    // Tfsync is a barrier; concurrent calls on the same fid are wasteful
+    // but not undefined (idempotent). Permitted.
+    int t = alloc_tag(s);
+    if (t < 0) return -1;
+    int rc = p9_build_tfsync(out, cap, (u16)t, fid, datasync);
+    if (rc < 0) return -1;
+    mark_outstanding(s, (u16)t, P9_TFSYNC, fid, fid);
+    return rc;
+}
+
+// =============================================================================
 // Receive: dispatch by tag, apply state mutation.
 // =============================================================================
 
@@ -429,6 +523,40 @@ static void zero_result(struct p9_dispatch_result *out) {
     out->read_count       = 0;
     out->read_data        = NULL;
     out->write_count      = 0;
+    // Metadata family zero-init.
+    out->attr.valid       = 0;
+    out->attr.qid.type    = 0;
+    out->attr.qid.version = 0;
+    out->attr.qid.path    = 0;
+    out->attr.mode        = 0;
+    out->attr.uid         = 0;
+    out->attr.gid         = 0;
+    out->attr.nlink       = 0;
+    out->attr.rdev        = 0;
+    out->attr.size        = 0;
+    out->attr.blksize     = 0;
+    out->attr.blocks      = 0;
+    out->attr.atime_sec   = 0;
+    out->attr.atime_nsec  = 0;
+    out->attr.mtime_sec   = 0;
+    out->attr.mtime_nsec  = 0;
+    out->attr.ctime_sec   = 0;
+    out->attr.ctime_nsec  = 0;
+    out->attr.btime_sec   = 0;
+    out->attr.btime_nsec  = 0;
+    out->attr.gen         = 0;
+    out->attr.data_version = 0;
+    out->statfs.type      = 0;
+    out->statfs.bsize     = 0;
+    out->statfs.blocks    = 0;
+    out->statfs.bfree     = 0;
+    out->statfs.bavail    = 0;
+    out->statfs.files     = 0;
+    out->statfs.ffree     = 0;
+    out->statfs.fsid      = 0;
+    out->statfs.namelen   = 0;
+    out->readdir_count    = 0;
+    out->readdir_data     = NULL;
 }
 
 // Special path for Rversion: tag is NOTAG; not from outstanding[];
@@ -577,6 +705,40 @@ int p9_session_dispatch_rmsg(struct p9_session *s,
         if (rc < 0) return -1;
         if (tag_check != tag) return -1;
         out->write_count = count;
+    } else if (op->kind == P9_TGETATTR) {
+        u16 tag_check;
+        rc = p9_parse_rgetattr(rmsg, len, &tag_check, &out->attr);
+        if (rc < 0) return -1;
+        if (tag_check != tag) return -1;
+    } else if (op->kind == P9_TSETATTR) {
+        u16 tag_check;
+        rc = p9_parse_rsetattr(rmsg, len, &tag_check);
+        if (rc < 0) return -1;
+        if (tag_check != tag) return -1;
+    } else if (op->kind == P9_TREADDIR) {
+        u16 tag_check;
+        u32 count;
+        const u8 *data;
+        // Same R111 cap-derivation as Tread: max single-message readdir
+        // count is negotiated_msize - 11 (header + count field).
+        u32 data_cap = (s->negotiated_msize > P9_HDR_LEN + 4)
+            ? (s->negotiated_msize - P9_HDR_LEN - 4)
+            : 0;
+        rc = p9_parse_rreaddir(rmsg, len, &tag_check, &count, &data, data_cap);
+        if (rc < 0) return -1;
+        if (tag_check != tag) return -1;
+        out->readdir_count = count;
+        out->readdir_data  = data;
+    } else if (op->kind == P9_TSTATFS) {
+        u16 tag_check;
+        rc = p9_parse_rstatfs(rmsg, len, &tag_check, &out->statfs);
+        if (rc < 0) return -1;
+        if (tag_check != tag) return -1;
+    } else if (op->kind == P9_TFSYNC) {
+        u16 tag_check;
+        rc = p9_parse_rfsync(rmsg, len, &tag_check);
+        if (rc < 0) return -1;
+        if (tag_check != tag) return -1;
     } else {
         // Unknown / unsupported kind.
         return -1;

@@ -15,6 +15,11 @@
 //                                  | p9_session_send_lcreate
 //   SendIO   (read / write)        | p9_session_send_read
 //                                  | p9_session_send_write
+//   SendIO   (metadata)            | p9_session_send_getattr
+//                                  | p9_session_send_setattr
+//                                  | p9_session_send_readdir
+//                                  | p9_session_send_statfs
+//                                  | p9_session_send_fsync
 //   SendWalk                       | p9_session_send_walk
 //   SendClunk                      | p9_session_send_clunk
 //   ReceiveOp                      | p9_session_dispatch_rmsg
@@ -105,7 +110,9 @@ enum p9_session_state {
 struct p9_outstanding {
     bool active;
     u8   kind;       // P9_TVERSION / P9_TATTACH / P9_TWALK / P9_TCLUNK /
-                     // P9_TLOPEN / P9_TLCREATE / P9_TREAD / P9_TWRITE
+                     // P9_TLOPEN / P9_TLCREATE / P9_TREAD / P9_TWRITE /
+                     // P9_TGETATTR / P9_TSETATTR / P9_TREADDIR /
+                     // P9_TSTATFS / P9_TFSYNC
     u32  fid;        // primary target fid; equals root_fid for version/attach
     u32  new_fid;    // walk's destination; equals fid otherwise
     u32  op_id;      // monotonic spec-side identifier (for diagnostics)
@@ -255,6 +262,50 @@ int p9_session_send_write(struct p9_session *s,
                           u32 count, const u8 *data);
 
 // =============================================================================
+// Metadata-family send APIs (P5-wire-meta).
+//
+// Fid-exclusivity rules:
+//   - send_getattr / send_statfs / send_readdir / send_fsync: read-shaped
+//     (no server-side fid state mutation on the canonical fid identity).
+//     Concurrent ops on same fid are permitted at the wire layer; client-
+//     app callers serialize logically when needed.
+//   - send_setattr: mutates server-side metadata (mode / uid / size /
+//     atime / mtime). Requires no other in-flight op on fid (mutation-
+//     shaped; concurrent ops are undefined behavior).
+//
+// None mutate the client-side fid table.
+// =============================================================================
+
+// Tgetattr: query attributes for `fid`. `request_mask` is a hint; the
+// server's response carries the authoritative valid mask.
+int p9_session_send_getattr(struct p9_session *s,
+                            u8 *out, size_t cap,
+                            u32 fid, u64 request_mask);
+
+// Tsetattr: set attributes for `fid`. `attr->valid` says which fields are
+// being set; only those are honored by the server. Fid-exclusive.
+int p9_session_send_setattr(struct p9_session *s,
+                            u8 *out, size_t cap,
+                            u32 fid, const struct p9_setattr *attr);
+
+// Treaddir: read `count` bytes of dirent data from `fid` at `offset`. Same
+// concurrency profile as Tread (concurrent permitted; offset explicit).
+int p9_session_send_readdir(struct p9_session *s,
+                            u8 *out, size_t cap,
+                            u32 fid, u64 offset, u32 count);
+
+// Tstatfs: filesystem statistics for `fid`.
+int p9_session_send_statfs(struct p9_session *s,
+                           u8 *out, size_t cap,
+                           u32 fid);
+
+// Tfsync: barrier — block until prior writes on `fid` are durable.
+// `datasync` per Linux fdatasync(2): 0 = sync data + metadata, 1 = data only.
+int p9_session_send_fsync(struct p9_session *s,
+                          u8 *out, size_t cap,
+                          u32 fid, u32 datasync);
+
+// =============================================================================
 // Receive-side API.
 // =============================================================================
 
@@ -286,6 +337,14 @@ struct p9_dispatch_result {
                                    // not free rmsg while consuming
     // For write, the parsed accepted count.
     u32            write_count;
+    // For getattr, the parsed Linux statx-shaped record.
+    struct p9_attr attr;
+    // For statfs, the parsed filesystem statistics.
+    struct p9_statfs statfs;
+    // For readdir, the parsed count + zero-copy data pointer (dirent stream
+    // — consumer parses entries via p9_unpack_dirent).
+    u32            readdir_count;
+    const u8      *readdir_data;
 };
 
 // Dispatch one received Rmsg. The Rmsg's tag is looked up in

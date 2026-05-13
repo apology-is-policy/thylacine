@@ -51,6 +51,14 @@ int p9_build_tread   (u8 *out, size_t cap, u16 tag,
                       u32 fid, u64 offset, u32 count);
 int p9_build_twrite  (u8 *out, size_t cap, u16 tag,
                       u32 fid, u64 offset, u32 count, const u8 *data);
+// Metadata family (P5-wire-meta).
+int p9_build_tgetattr(u8 *out, size_t cap, u16 tag, u32 fid, u64 request_mask);
+int p9_build_tsetattr(u8 *out, size_t cap, u16 tag, u32 fid,
+                      const struct p9_setattr *attr);
+int p9_build_treaddir(u8 *out, size_t cap, u16 tag,
+                      u32 fid, u64 offset, u32 count);
+int p9_build_tstatfs (u8 *out, size_t cap, u16 tag, u32 fid);
+int p9_build_tfsync  (u8 *out, size_t cap, u16 tag, u32 fid, u32 datasync);
 
 // Rmsg parsers.
 int p9_parse_rversion(const u8 *in, size_t len, u16 *tag, u32 *msize,
@@ -68,6 +76,18 @@ int p9_parse_rlcreate(const u8 *in, size_t len,
 int p9_parse_rread   (const u8 *in, size_t len,
                       u16 *tag, u32 *count, const u8 **data_ptr, u32 data_cap);
 int p9_parse_rwrite  (const u8 *in, size_t len, u16 *tag, u32 *count);
+// Metadata family (P5-wire-meta).
+int p9_parse_rgetattr(const u8 *in, size_t len,
+                      u16 *tag, struct p9_attr *out_attr);
+int p9_parse_rsetattr(const u8 *in, size_t len, u16 *tag);
+int p9_parse_rreaddir(const u8 *in, size_t len,
+                      u16 *tag, u32 *count, const u8 **data_ptr, u32 data_cap);
+int p9_parse_rstatfs (const u8 *in, size_t len, u16 *tag, struct p9_statfs *out);
+int p9_parse_rfsync  (const u8 *in, size_t len, u16 *tag);
+// Dirent record unpack (consumed from Rreaddir's data stream).
+int p9_unpack_dirent (const u8 *in, size_t remaining,
+                      struct p9_qid *out_qid, u64 *out_offset, u8 *out_type,
+                      const u8 **out_name_ptr, u16 *out_name_len);
 ```
 
 ### Error convention
@@ -88,8 +108,9 @@ For server-supplied counts that get written into caller buffers, the bound is en
 
 - `p9_parse_rwalk`: the server-supplied `nwqid` is bounded against the caller's `qid_cap` BEFORE any qid is unpacked into the buffer. An out-of-spec `Rwalk(nwqid=99)` on a 2-qid caller buffer is rejected; the buffer is not touched.
 - `p9_parse_rread`: the server-supplied `count` is bounded against the caller's `data_cap` BEFORE the data pointer is exposed. An out-of-spec `Rread(count=4096)` against a 512-byte caller cap is rejected; `*data_ptr` stays `NULL` and the caller never observes the oversize buffer.
+- `p9_parse_rreaddir`: identical discipline to Rread — server-supplied dirent-stream count bounded against caller's `data_cap` BEFORE the data pointer is exposed.
 
-The `p9_unpack_str` function returns a pointer INTO the input buffer (zero-copy), so caller-cap-bound is the caller's responsibility there: the caller checks `out_len <= ENFORCED_MAX` before consuming `out_ptr[0..out_len)`. The same zero-copy discipline applies to `p9_parse_rread`'s `*data_ptr` output — the caller must not free the input buffer while consuming it.
+The `p9_unpack_str` function returns a pointer INTO the input buffer (zero-copy), so caller-cap-bound is the caller's responsibility there: the caller checks `out_len <= ENFORCED_MAX` before consuming `out_ptr[0..out_len)`. The same zero-copy discipline applies to `p9_parse_rread`'s `*data_ptr` output AND `p9_parse_rreaddir`'s `*data_ptr` — the caller must not free the input buffer while consuming either. `p9_unpack_dirent` likewise hands out pointers into the dirent stream for the `name` field.
 
 ## Wire-format crib
 
@@ -122,6 +143,17 @@ Per-message bodies (the cumulative codec subset through P5-wire-io):
 | Rread (117) | `[count: u32][data: u8 * count]` |
 | Twrite (118) | `[fid: u32][offset: u64][count: u32][data: u8 * count]` |
 | Rwrite (119) | `[count: u32]` |
+| Tgetattr (24) | `[fid: u32][request_mask: u64]` |
+| Rgetattr (25) | `[valid: u64][qid: 13][mode: u32][uid: u32][gid: u32][nlink: u64][rdev: u64][size: u64][blksize: u64][blocks: u64][atime_sec: u64][atime_nsec: u64][mtime_sec: u64][mtime_nsec: u64][ctime_sec: u64][ctime_nsec: u64][btime_sec: u64][btime_nsec: u64][gen: u64][data_version: u64]` (153 bytes body) |
+| Tsetattr (26) | `[fid: u32][valid: u32][mode: u32][uid: u32][gid: u32][size: u64][atime_sec: u64][atime_nsec: u64][mtime_sec: u64][mtime_nsec: u64]` (60 bytes body) |
+| Rsetattr (27) | (empty body; 7-byte msg) |
+| Treaddir (40) | `[fid: u32][offset: u64][count: u32]` |
+| Rreaddir (41) | `[count: u32][data: u8 * count]` (dirent stream) |
+| Tstatfs (8) | `[fid: u32]` |
+| Rstatfs (9) | `[type: u32][bsize: u32][blocks: u64][bfree: u64][bavail: u64][files: u64][ffree: u64][fsid: u64][namelen: u32]` (60 bytes body) |
+| Tfsync (50) | `[fid: u32][datasync: u32]` |
+| Rfsync (51) | (empty body; 7-byte msg) |
+| Dirent record (within Rreaddir's data) | `[qid: 13][offset: u64][type: u8][name: str]` |
 
 All integers little-endian (matches Thylacine's AArch64 host endianness; encoding is still explicit byte-shift to remain portable).
 
@@ -135,6 +167,7 @@ All integers little-endian (matches Thylacine's AArch64 host endianness; encodin
 - `P9_NOTAG == 0xFFFFu` (NOTAG sentinel).
 - `P9_TVERSION == 100`; `P9_RVERSION == P9_TVERSION + 1`; same for ATTACH/WALK/CLUNK pairs.
 - `P9_TLOPEN == 12`, `P9_TLCREATE == 14`, `P9_TREAD == 116`, `P9_TWRITE == 118`; each `RX = TX + 1` (IO family, P5-wire-io).
+- `P9_TGETATTR == 24`, `P9_TSETATTR == 26`, `P9_TREADDIR == 40`, `P9_TSTATFS == 8`, `P9_TFSYNC == 50`; each `RX = TX + 1` (metadata family, P5-wire-meta).
 - `P9_RLERROR == 7`.
 - `sizeof(struct p9_qid) >= P9_QID_LEN` (in-memory shape doesn't shrink below the wire shape).
 
@@ -144,13 +177,13 @@ All integers little-endian (matches Thylacine's AArch64 host endianness; encodin
 |---|---|
 | `kernel/include/thylacine/9p_wire.h` | Public API + constants + `struct p9_qid` |
 | `kernel/9p_wire.c` | Byte-level codec; static `write_header` + `validate_rmsg_header` helpers |
-| `kernel/test/test_9p_wire.c` | 22 unit tests (round-trip + malformed-input rejection; covers handshake/walk/clunk + IO family) |
+| `kernel/test/test_9p_wire.c` | 29 unit tests (round-trip + malformed-input rejection; covers handshake/walk/clunk + IO + metadata family) |
 
 The codec is purely procedural — no callbacks, no state, no allocation. Every function is freestanding.
 
 ## Tests
 
-22 tests in `kernel/test/test_9p_wire.c`:
+29 tests in `kernel/test/test_9p_wire.c`:
 
 | Test | Covers |
 |---|---|
@@ -176,6 +209,13 @@ The codec is purely procedural — no callbacks, no state, no allocation. Every 
 | `9p_wire.rread_data_cap_enforced` | R111 caller-cap-bound on Rread `count > data_cap` |
 | `9p_wire.rread_size_mismatch_rejected` | Strict-equality: header.size != 11 + count rejected |
 | `9p_wire.rlopen_vs_rlcreate_type_strict` | Identical body shapes but parser type-strict |
+| `9p_wire.tgetattr_round_trip` | Build Tgetattr + synthesize 153-byte Rgetattr + parse statx-shaped record |
+| `9p_wire.tsetattr_round_trip` | Build Tsetattr (60-byte body) + synthesize header-only Rsetattr |
+| `9p_wire.treaddir_round_trip` | Build Treaddir + synthesize Rreaddir with `.` + `..` dirent stream + parse |
+| `9p_wire.dirent_unpack` | Hand-construct one dirent + p9_unpack_dirent zero-copy name |
+| `9p_wire.tstatfs_round_trip` | Build Tstatfs + synthesize 60-byte Rstatfs + parse statfs record |
+| `9p_wire.tfsync_round_trip` | Build Tfsync (with datasync) + synthesize header-only Rfsync |
+| `9p_wire.rreaddir_data_cap_enforced` | R111 caller-cap-bound on Rreaddir `count > data_cap` |
 
 ## Error paths
 

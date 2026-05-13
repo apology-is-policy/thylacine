@@ -8,7 +8,7 @@
 // baseline. Stratum's `<stratum/9p.h>` is the cross-project ABI reference
 // for opcodes and limits; this header mirrors those numerically.
 //
-// SCOPE OF P5-WIRE + P5-WIRE-IO (cumulative through this chunk):
+// SCOPE OF P5-WIRE + P5-WIRE-IO + P5-WIRE-META (cumulative through this chunk):
 //
 //   - Common header (size + type + tag); pack/peek/unpack.
 //   - Primitive marshalers/unmarshalers: u8, u16, u32, u64, str, qid.
@@ -22,12 +22,16 @@
 //       Tlcreate / Rlcreate (14 / 15)
 //       Tread    / Rread    (116 / 117)
 //       Twrite   / Rwrite   (118 / 119)
+//   - Metadata family (P5-wire-meta extension):
+//       Tgetattr / Rgetattr (24 / 25)
+//       Tsetattr / Rsetattr (26 / 27)
+//       Treaddir / Rreaddir (40 / 41)
+//       Tstatfs  / Rstatfs  (8 / 9)
+//       Tfsync   / Rfsync   (50 / 51)
 //   - Rlerror parse (7) — every R-message can be replaced by Rlerror.
 //
-// OUT OF P5-WIRE-IO (deferred to follow-up chunks):
+// OUT OF P5-WIRE-META (deferred to follow-up chunks):
 //
-//   - Metadata family: Tgetattr / Tsetattr / Treaddir / Tstatfs / Tfsync
-//     (P5-wire-meta).
 //   - Mutation family: Tunlinkat / Trename / Trenameat / Tsymlink /
 //     Tmknod / Tlink / Treadlink / Tmkdir.
 //   - Lock family: Tlock / Tgetlock.
@@ -368,5 +372,172 @@ int p9_build_twrite(u8 *out, size_t cap, u16 tag,
 
 // Rwrite parse: returns the actual byte count accepted.
 int p9_parse_rwrite(const u8 *in, size_t len, u16 *tag, u32 *count);
+
+// =============================================================================
+// Metadata family (P5-wire-meta extension).
+//
+// Tgetattr / Rgetattr — Linux statx-shaped attribute query. Caller supplies a
+// `request_mask` u64 of which fields it wants; server's Rgetattr returns a
+// `valid` u64 of which fields it filled. Mirrors the Linux statx mask.
+//
+//   Tgetattr body: [fid: u32][request_mask: u64]
+//   Rgetattr body: [valid: u64][qid: 13][mode: u32][uid: u32][gid: u32]
+//                  [nlink: u64][rdev: u64][size: u64][blksize: u64][blocks: u64]
+//                  [atime_sec: u64][atime_nsec: u64]
+//                  [mtime_sec: u64][mtime_nsec: u64]
+//                  [ctime_sec: u64][ctime_nsec: u64]
+//                  [btime_sec: u64][btime_nsec: u64]
+//                  [gen: u64][data_version: u64]
+//
+// Tsetattr / Rsetattr — set Linux attributes (chmod / chown / truncate /
+// futimens). Caller supplies a `valid` u32 mask of which fields are present.
+//
+//   Tsetattr body: [fid: u32][valid: u32][mode: u32][uid: u32][gid: u32]
+//                  [size: u64][atime_sec: u64][atime_nsec: u64]
+//                  [mtime_sec: u64][mtime_nsec: u64]
+//   Rsetattr body: (empty body; 7-byte msg)
+//
+// Treaddir / Rreaddir — directory enumeration. Same on-wire shape as Tread /
+// Rread (offset + count), but the returned data is a packed sequence of
+// dirent records: [qid: 13][offset: u64][type: u8][name: str].
+//
+//   Treaddir body: [fid: u32][offset: u64][count: u32]
+//   Rreaddir body: [count: u32][data: u8 * count]  (consumer parses dirents)
+//
+// Tstatfs / Rstatfs — filesystem statistics. Linux statfs(2)-shaped.
+//
+//   Tstatfs body: [fid: u32]
+//   Rstatfs body: [type: u32][bsize: u32][blocks: u64][bfree: u64]
+//                 [bavail: u64][files: u64][ffree: u64][fsid: u64][namelen: u32]
+//
+// Tfsync / Rfsync — barrier: block until prior writes on `fid` are durable.
+// `datasync` (u32) is 0 for "sync everything" or 1 for "data only" (Linux
+// fdatasync semantics).
+//
+//   Tfsync body: [fid: u32][datasync: u32]
+//   Rfsync body: (empty body; 7-byte msg)
+// =============================================================================
+
+// Linux statx-like attribute record. Used by both Tgetattr's response and
+// Tsetattr's payload (the latter via `struct p9_setattr` below).
+struct p9_attr {
+    u64 valid;          // Rgetattr: which fields the server filled
+    struct p9_qid qid;
+    u32 mode;
+    u32 uid;
+    u32 gid;
+    u64 nlink;
+    u64 rdev;
+    u64 size;
+    u64 blksize;
+    u64 blocks;
+    u64 atime_sec;
+    u64 atime_nsec;
+    u64 mtime_sec;
+    u64 mtime_nsec;
+    u64 ctime_sec;
+    u64 ctime_nsec;
+    u64 btime_sec;
+    u64 btime_nsec;
+    u64 gen;
+    u64 data_version;
+};
+
+// Tsetattr payload (smaller than p9_attr; only the fields the protocol
+// allows to set). The `valid` mask says which fields are present in the
+// message; the others are ignored by the server.
+struct p9_setattr {
+    u32 valid;          // bit mask: see P9_SETATTR_* below
+    u32 mode;
+    u32 uid;
+    u32 gid;
+    u64 size;
+    u64 atime_sec;
+    u64 atime_nsec;
+    u64 mtime_sec;
+    u64 mtime_nsec;
+};
+
+// Tsetattr valid-mask bits (Linux v9fs convention).
+#define P9_SETATTR_MODE       (1u << 0)
+#define P9_SETATTR_UID        (1u << 1)
+#define P9_SETATTR_GID        (1u << 2)
+#define P9_SETATTR_SIZE       (1u << 3)
+#define P9_SETATTR_ATIME      (1u << 4)
+#define P9_SETATTR_MTIME      (1u << 5)
+#define P9_SETATTR_CTIME      (1u << 6)
+#define P9_SETATTR_ATIME_SET  (1u << 7)
+#define P9_SETATTR_MTIME_SET  (1u << 8)
+
+// Rstatfs payload.
+struct p9_statfs {
+    u32 type;
+    u32 bsize;
+    u64 blocks;
+    u64 bfree;
+    u64 bavail;
+    u64 files;
+    u64 ffree;
+    u64 fsid;
+    u32 namelen;
+};
+
+// Tgetattr request-mask convention (Linux v9fs STATX_*); the server may
+// return fewer fields than requested (its `valid` reports which it filled).
+#define P9_GETATTR_BASIC      0x000007FFull
+#define P9_GETATTR_ALL        0x00003FFFull
+
+// Tgetattr: request attributes for `fid`. `request_mask` is a hint; the
+// server's response carries the authoritative `valid` mask.
+int p9_build_tgetattr(u8 *out, size_t cap, u16 tag,
+                      u32 fid, u64 request_mask);
+
+// Rgetattr parse: extract the full attribute record. `out_attr->valid`
+// tells the caller which fields are actually meaningful.
+int p9_parse_rgetattr(const u8 *in, size_t len,
+                      u16 *tag, struct p9_attr *out_attr);
+
+// Tsetattr: set attributes for `fid`. The `attr->valid` mask says which
+// fields are being set; only those should be honored by the server.
+int p9_build_tsetattr(u8 *out, size_t cap, u16 tag,
+                      u32 fid, const struct p9_setattr *attr);
+
+// Rsetattr parse: header-only validation (no body).
+int p9_parse_rsetattr(const u8 *in, size_t len, u16 *tag);
+
+// Treaddir: read up to `count` bytes of dirent data from `fid` at `offset`.
+// Same on-wire shape as Tread.
+int p9_build_treaddir(u8 *out, size_t cap, u16 tag,
+                      u32 fid, u64 offset, u32 count);
+
+// Rreaddir parse: zero-copy data pointer into the input buffer. The caller
+// parses dirent records via p9_unpack_dirent (below). Same R111
+// caller-cap-bound discipline as Rread.
+int p9_parse_rreaddir(const u8 *in, size_t len,
+                      u16 *tag, u32 *count,
+                      const u8 **data_ptr, u32 data_cap);
+
+// Unpack one 9P2000.L dirent record from the dirent stream.
+//   record: [qid: 13][offset: u64][type: u8][name: str]
+// `out_name_ptr` points INTO `in` (zero-copy); caller copies if needed.
+// Returns bytes consumed (>0) on success, -1 on underflow.
+int p9_unpack_dirent(const u8 *in, size_t remaining,
+                     struct p9_qid *out_qid, u64 *out_offset,
+                     u8 *out_type,
+                     const u8 **out_name_ptr, u16 *out_name_len);
+
+// Tstatfs: filesystem statistics for `fid`.
+int p9_build_tstatfs(u8 *out, size_t cap, u16 tag, u32 fid);
+
+// Rstatfs parse.
+int p9_parse_rstatfs(const u8 *in, size_t len,
+                     u16 *tag, struct p9_statfs *out);
+
+// Tfsync: barrier for `fid`. `datasync` per Linux fdatasync(2): 0 = sync
+// data + metadata, 1 = sync data only.
+int p9_build_tfsync(u8 *out, size_t cap, u16 tag, u32 fid, u32 datasync);
+
+// Rfsync parse: header-only (no body).
+int p9_parse_rfsync(const u8 *in, size_t len, u16 *tag);
 
 #endif  // THYLACINE_9P_WIRE_H

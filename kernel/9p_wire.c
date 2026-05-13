@@ -54,6 +54,17 @@ _Static_assert(P9_TREAD    == 116,              "Tread type drift");
 _Static_assert(P9_RREAD    == P9_TREAD + 1,     "Rread type drift");
 _Static_assert(P9_TWRITE   == 118,              "Twrite type drift");
 _Static_assert(P9_RWRITE   == P9_TWRITE + 1,    "Rwrite type drift");
+// Metadata family (P5-wire-meta):
+_Static_assert(P9_TGETATTR == 24,               "Tgetattr type drift");
+_Static_assert(P9_RGETATTR == P9_TGETATTR + 1,  "Rgetattr type drift");
+_Static_assert(P9_TSETATTR == 26,               "Tsetattr type drift");
+_Static_assert(P9_RSETATTR == P9_TSETATTR + 1,  "Rsetattr type drift");
+_Static_assert(P9_TREADDIR == 40,               "Treaddir type drift");
+_Static_assert(P9_RREADDIR == P9_TREADDIR + 1,  "Rreaddir type drift");
+_Static_assert(P9_TSTATFS  == 8,                "Tstatfs type drift");
+_Static_assert(P9_RSTATFS  == P9_TSTATFS + 1,   "Rstatfs type drift");
+_Static_assert(P9_TFSYNC   == 50,               "Tfsync type drift");
+_Static_assert(P9_RFSYNC   == P9_TFSYNC + 1,    "Rfsync type drift");
 
 // Sanity check on struct p9_qid: the in-memory shape is callee-defined
 // (we always serialize field-by-field per p9_pack_qid), so its sizeof()
@@ -580,5 +591,227 @@ int p9_parse_rwrite(const u8 *in, size_t len, u16 *tag, u32 *count) {
     int rc = p9_unpack_u32(in + off, rem, count);
     if (rc < 0) return -1; off += (size_t)rc;
     if (off != len) return -1;
+    return 0;
+}
+
+// =============================================================================
+// Metadata family — Tgetattr / Rgetattr, Tsetattr / Rsetattr, Treaddir /
+// Rreaddir, Tstatfs / Rstatfs, Tfsync / Rfsync. Wire shapes documented at
+// the declarations in `kernel/include/thylacine/9p_wire.h`.
+// =============================================================================
+
+// Tgetattr body: [fid: u32][request_mask: u64]
+int p9_build_tgetattr(u8 *out, size_t cap, u16 tag,
+                      u32 fid, u64 request_mask) {
+    size_t total = P9_HDR_LEN + 4 + 8;
+    if (cap < total) return -1;
+    int rc = write_header(out, cap, (u32)total, P9_TGETATTR, tag);
+    if (rc < 0) return -1;
+    size_t off = P9_HDR_LEN;
+    rc = p9_pack_u32(out + off, cap - off, fid);          if (rc < 0) return -1; off += (size_t)rc;
+    rc = p9_pack_u64(out + off, cap - off, request_mask); if (rc < 0) return -1; off += (size_t)rc;
+    return (int)off;
+}
+
+// Rgetattr body: valid(8) + qid(13) + mode(4) + uid(4) + gid(4) + nlink(8)
+//   + rdev(8) + size(8) + blksize(8) + blocks(8) + atime{sec,nsec}(16)
+//   + mtime{sec,nsec}(16) + ctime{sec,nsec}(16) + btime{sec,nsec}(16)
+//   + gen(8) + data_version(8) = 8 + 13 + 12 + 15*8 = 153 bytes
+//   (15 u64s after qid: 5 mid + 8 times + 2 trailing.)
+int p9_parse_rgetattr(const u8 *in, size_t len,
+                      u16 *tag, struct p9_attr *out_attr) {
+    if (!tag || !out_attr) return -1;
+    int hdr = validate_rmsg_header(in, len, P9_RGETATTR, tag);
+    if (hdr < 0) return -1;
+    size_t off = (size_t)hdr;
+    size_t rem = len - off;
+    int rc;
+
+    rc = p9_unpack_u64(in + off, rem, &out_attr->valid);
+    if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+
+    rc = p9_unpack_qid(in + off, rem, &out_attr->qid);
+    if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+
+    rc = p9_unpack_u32(in + off, rem, &out_attr->mode);
+    if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+    rc = p9_unpack_u32(in + off, rem, &out_attr->uid);
+    if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+    rc = p9_unpack_u32(in + off, rem, &out_attr->gid);
+    if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+
+    rc = p9_unpack_u64(in + off, rem, &out_attr->nlink);
+    if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+    rc = p9_unpack_u64(in + off, rem, &out_attr->rdev);
+    if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+    rc = p9_unpack_u64(in + off, rem, &out_attr->size);
+    if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+    rc = p9_unpack_u64(in + off, rem, &out_attr->blksize);
+    if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+    rc = p9_unpack_u64(in + off, rem, &out_attr->blocks);
+    if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+
+    rc = p9_unpack_u64(in + off, rem, &out_attr->atime_sec);
+    if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+    rc = p9_unpack_u64(in + off, rem, &out_attr->atime_nsec);
+    if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+    rc = p9_unpack_u64(in + off, rem, &out_attr->mtime_sec);
+    if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+    rc = p9_unpack_u64(in + off, rem, &out_attr->mtime_nsec);
+    if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+    rc = p9_unpack_u64(in + off, rem, &out_attr->ctime_sec);
+    if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+    rc = p9_unpack_u64(in + off, rem, &out_attr->ctime_nsec);
+    if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+    rc = p9_unpack_u64(in + off, rem, &out_attr->btime_sec);
+    if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+    rc = p9_unpack_u64(in + off, rem, &out_attr->btime_nsec);
+    if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+
+    rc = p9_unpack_u64(in + off, rem, &out_attr->gen);
+    if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+    rc = p9_unpack_u64(in + off, rem, &out_attr->data_version);
+    if (rc < 0) return -1; off += (size_t)rc;
+
+    if (off != len) return -1;       // strict body-length equality
+    return 0;
+}
+
+// Tsetattr body: fid(4) + valid(4) + mode(4) + uid(4) + gid(4)
+//   + size(8) + atime{sec,nsec}(16) + mtime{sec,nsec}(16) = 60 bytes
+int p9_build_tsetattr(u8 *out, size_t cap, u16 tag,
+                      u32 fid, const struct p9_setattr *attr) {
+    if (!attr) return -1;
+    size_t total = P9_HDR_LEN + 4 + 4 + 4 + 4 + 4 + 8 + 16 + 16;
+    if (cap < total) return -1;
+    int rc = write_header(out, cap, (u32)total, P9_TSETATTR, tag);
+    if (rc < 0) return -1;
+    size_t off = P9_HDR_LEN;
+    rc = p9_pack_u32(out + off, cap - off, fid);            if (rc < 0) return -1; off += (size_t)rc;
+    rc = p9_pack_u32(out + off, cap - off, attr->valid);    if (rc < 0) return -1; off += (size_t)rc;
+    rc = p9_pack_u32(out + off, cap - off, attr->mode);     if (rc < 0) return -1; off += (size_t)rc;
+    rc = p9_pack_u32(out + off, cap - off, attr->uid);      if (rc < 0) return -1; off += (size_t)rc;
+    rc = p9_pack_u32(out + off, cap - off, attr->gid);      if (rc < 0) return -1; off += (size_t)rc;
+    rc = p9_pack_u64(out + off, cap - off, attr->size);     if (rc < 0) return -1; off += (size_t)rc;
+    rc = p9_pack_u64(out + off, cap - off, attr->atime_sec);  if (rc < 0) return -1; off += (size_t)rc;
+    rc = p9_pack_u64(out + off, cap - off, attr->atime_nsec); if (rc < 0) return -1; off += (size_t)rc;
+    rc = p9_pack_u64(out + off, cap - off, attr->mtime_sec);  if (rc < 0) return -1; off += (size_t)rc;
+    rc = p9_pack_u64(out + off, cap - off, attr->mtime_nsec); if (rc < 0) return -1; off += (size_t)rc;
+    return (int)off;
+}
+
+int p9_parse_rsetattr(const u8 *in, size_t len, u16 *tag) {
+    if (!tag) return -1;
+    int hdr = validate_rmsg_header(in, len, P9_RSETATTR, tag);
+    if (hdr < 0) return -1;
+    if ((size_t)hdr != len) return -1;       // Rsetattr has no body
+    return 0;
+}
+
+// Treaddir body: [fid: u32][offset: u64][count: u32]  (same as Tread)
+int p9_build_treaddir(u8 *out, size_t cap, u16 tag,
+                      u32 fid, u64 offset, u32 count) {
+    size_t total = P9_HDR_LEN + 4 + 8 + 4;
+    if (cap < total) return -1;
+    int rc = write_header(out, cap, (u32)total, P9_TREADDIR, tag);
+    if (rc < 0) return -1;
+    size_t off = P9_HDR_LEN;
+    rc = p9_pack_u32(out + off, cap - off, fid);    if (rc < 0) return -1; off += (size_t)rc;
+    rc = p9_pack_u64(out + off, cap - off, offset); if (rc < 0) return -1; off += (size_t)rc;
+    rc = p9_pack_u32(out + off, cap - off, count);  if (rc < 0) return -1; off += (size_t)rc;
+    return (int)off;
+}
+
+// Rreaddir body: [count: u32][data: u8 * count]  (same on-wire shape as Rread)
+int p9_parse_rreaddir(const u8 *in, size_t len,
+                      u16 *tag, u32 *count,
+                      const u8 **data_ptr, u32 data_cap) {
+    if (!tag || !count || !data_ptr) return -1;
+    int hdr = validate_rmsg_header(in, len, P9_RREADDIR, tag);
+    if (hdr < 0) return -1;
+    size_t off = (size_t)hdr;
+    size_t rem = len - off;
+    u32 c = 0;
+    int rc = p9_unpack_u32(in + off, rem, &c);
+    if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+    // R111: bound server-supplied count BEFORE exposing data pointer.
+    if (c > data_cap) return -1;
+    if ((size_t)c != rem) return -1;     // strict body-length equality
+    *count    = c;
+    *data_ptr = (c > 0) ? (in + off) : NULL;
+    return 0;
+}
+
+// Dirent record (within a Rreaddir data stream):
+//   [qid: 13][offset: u64][type: u8][name: str]
+int p9_unpack_dirent(const u8 *in, size_t remaining,
+                     struct p9_qid *out_qid, u64 *out_offset,
+                     u8 *out_type,
+                     const u8 **out_name_ptr, u16 *out_name_len) {
+    if (!out_qid || !out_offset || !out_type || !out_name_ptr || !out_name_len) return -1;
+    size_t off = 0;
+    int rc;
+    rc = p9_unpack_qid(in + off, remaining - off, out_qid);
+    if (rc < 0) return -1; off += (size_t)rc;
+    rc = p9_unpack_u64(in + off, remaining - off, out_offset);
+    if (rc < 0) return -1; off += (size_t)rc;
+    rc = p9_unpack_u8(in + off, remaining - off, out_type);
+    if (rc < 0) return -1; off += (size_t)rc;
+    rc = p9_unpack_str(in + off, remaining - off, out_name_ptr, out_name_len);
+    if (rc < 0) return -1; off += (size_t)rc;
+    return (int)off;
+}
+
+// Tstatfs body: [fid: u32]
+int p9_build_tstatfs(u8 *out, size_t cap, u16 tag, u32 fid) {
+    size_t total = P9_HDR_LEN + 4;
+    if (cap < total) return -1;
+    int rc = write_header(out, cap, (u32)total, P9_TSTATFS, tag);
+    if (rc < 0) return -1;
+    rc = p9_pack_u32(out + P9_HDR_LEN, cap - P9_HDR_LEN, fid);
+    if (rc < 0) return -1;
+    return (int)total;
+}
+
+// Rstatfs body: type(4) + bsize(4) + blocks(8) + bfree(8) + bavail(8)
+//   + files(8) + ffree(8) + fsid(8) + namelen(4) = 60 bytes
+int p9_parse_rstatfs(const u8 *in, size_t len,
+                     u16 *tag, struct p9_statfs *out) {
+    if (!tag || !out) return -1;
+    int hdr = validate_rmsg_header(in, len, P9_RSTATFS, tag);
+    if (hdr < 0) return -1;
+    size_t off = (size_t)hdr;
+    size_t rem = len - off;
+    int rc;
+    rc = p9_unpack_u32(in + off, rem, &out->type);    if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+    rc = p9_unpack_u32(in + off, rem, &out->bsize);   if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+    rc = p9_unpack_u64(in + off, rem, &out->blocks);  if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+    rc = p9_unpack_u64(in + off, rem, &out->bfree);   if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+    rc = p9_unpack_u64(in + off, rem, &out->bavail);  if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+    rc = p9_unpack_u64(in + off, rem, &out->files);   if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+    rc = p9_unpack_u64(in + off, rem, &out->ffree);   if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+    rc = p9_unpack_u64(in + off, rem, &out->fsid);    if (rc < 0) return -1; off += (size_t)rc; rem -= (size_t)rc;
+    rc = p9_unpack_u32(in + off, rem, &out->namelen); if (rc < 0) return -1; off += (size_t)rc;
+    if (off != len) return -1;
+    return 0;
+}
+
+// Tfsync body: [fid: u32][datasync: u32]
+int p9_build_tfsync(u8 *out, size_t cap, u16 tag, u32 fid, u32 datasync) {
+    size_t total = P9_HDR_LEN + 4 + 4;
+    if (cap < total) return -1;
+    int rc = write_header(out, cap, (u32)total, P9_TFSYNC, tag);
+    if (rc < 0) return -1;
+    size_t off = P9_HDR_LEN;
+    rc = p9_pack_u32(out + off, cap - off, fid);      if (rc < 0) return -1; off += (size_t)rc;
+    rc = p9_pack_u32(out + off, cap - off, datasync); if (rc < 0) return -1; off += (size_t)rc;
+    return (int)off;
+}
+
+int p9_parse_rfsync(const u8 *in, size_t len, u16 *tag) {
+    if (!tag) return -1;
+    int hdr = validate_rmsg_header(in, len, P9_RFSYNC, tag);
+    if (hdr < 0) return -1;
+    if ((size_t)hdr != len) return -1;       // Rfsync has no body
     return 0;
 }

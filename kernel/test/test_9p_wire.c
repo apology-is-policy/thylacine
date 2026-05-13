@@ -34,6 +34,13 @@ void test_9p_wire_twrite_round_trip(void);
 void test_9p_wire_rread_data_cap_enforced(void);
 void test_9p_wire_rread_size_mismatch_rejected(void);
 void test_9p_wire_rlopen_vs_rlcreate_type_strict(void);
+void test_9p_wire_tgetattr_round_trip(void);
+void test_9p_wire_tsetattr_round_trip(void);
+void test_9p_wire_treaddir_round_trip(void);
+void test_9p_wire_dirent_unpack(void);
+void test_9p_wire_tstatfs_round_trip(void);
+void test_9p_wire_tfsync_round_trip(void);
+void test_9p_wire_rreaddir_data_cap_enforced(void);
 
 // 4 KiB scratch buffer; every message we build at v1.0 fits in this
 // (Tattach with full-length uname+aname stays under 600 bytes;
@@ -627,4 +634,265 @@ void test_9p_wire_rlopen_vs_rlcreate_type_strict(void) {
     g_buf[4] = P9_RLCREATE;
     rc = p9_parse_rlopen(g_buf, r_total, &tag_out, &q_out, &iounit_out);
     TEST_EXPECT_EQ(rc, -1, "parse_rlopen rejects Rlcreate frame");
+}
+
+// =============================================================================
+// Metadata family (P5-wire-meta): Tgetattr / Tsetattr / Treaddir / Tstatfs
+// / Tfsync round-trips + dirent unpack + R111 caller-cap-bound.
+// =============================================================================
+
+void test_9p_wire_tgetattr_round_trip(void) {
+    int total = p9_build_tgetattr(g_buf, sizeof(g_buf), 0x0020,
+                                   /*fid*/ 7,
+                                   /*request_mask*/ P9_GETATTR_BASIC);
+    // hdr(7) + fid(4) + request_mask(8) = 19
+    TEST_EXPECT_EQ(total, 19, "Tgetattr total len");
+    TEST_EXPECT_EQ((u64)g_buf[4], (u64)P9_TGETATTR, "Tgetattr type");
+
+    // Synthesize an Rgetattr with all-zero-but-distinguishable values.
+    // Body: valid(8) + qid(13) + mode(4) + uid(4) + gid(4)
+    //       + 5*u64(nlink/rdev/size/blksize/blocks) = 40
+    //       + 4*(sec+nsec) = 8 u64 = 64
+    //       + gen(8) + data_version(8)
+    //   = 8 + 13 + 12 + 40 + 64 + 16 = 153 bytes.
+    //   Equivalently: 8 (valid) + 13 (qid) + 12 (3 u32) + 15*8 (15 u64).
+    size_t body_len = 8 + P9_QID_LEN + 4 * 3 + 8 * 15;
+    size_t r_total = P9_HDR_LEN + body_len;
+    g_buf[0] = (u8)(r_total & 0xff);
+    g_buf[1] = (u8)((r_total >> 8) & 0xff);
+    g_buf[2] = 0; g_buf[3] = 0;
+    g_buf[4] = P9_RGETATTR;
+    g_buf[5] = 0x20; g_buf[6] = 0;
+    size_t off = P9_HDR_LEN;
+    int rc;
+    rc = p9_pack_u64(g_buf + off, sizeof(g_buf) - off, P9_GETATTR_BASIC);
+    TEST_EXPECT_EQ(rc, 8, "synth Rgetattr valid"); off += (size_t)rc;
+    struct p9_qid q = { .type = P9_QTFILE, .version = 9, .path = 42 };
+    rc = p9_pack_qid(g_buf + off, sizeof(g_buf) - off, &q);
+    TEST_EXPECT_EQ(rc, (int)P9_QID_LEN, "synth Rgetattr qid"); off += (size_t)rc;
+    // mode/uid/gid:
+    rc = p9_pack_u32(g_buf + off, sizeof(g_buf) - off, 0644u);  TEST_EXPECT_EQ(rc, 4, "synth mode");  off += (size_t)rc;
+    rc = p9_pack_u32(g_buf + off, sizeof(g_buf) - off, 1000u);  TEST_EXPECT_EQ(rc, 4, "synth uid");   off += (size_t)rc;
+    rc = p9_pack_u32(g_buf + off, sizeof(g_buf) - off, 100u);   TEST_EXPECT_EQ(rc, 4, "synth gid");   off += (size_t)rc;
+    // nlink/rdev/size/blksize/blocks:
+    rc = p9_pack_u64(g_buf + off, sizeof(g_buf) - off, 1ull);       off += (size_t)rc;
+    rc = p9_pack_u64(g_buf + off, sizeof(g_buf) - off, 0ull);       off += (size_t)rc;
+    rc = p9_pack_u64(g_buf + off, sizeof(g_buf) - off, 12345ull);   off += (size_t)rc;
+    rc = p9_pack_u64(g_buf + off, sizeof(g_buf) - off, 4096ull);    off += (size_t)rc;
+    rc = p9_pack_u64(g_buf + off, sizeof(g_buf) - off, 24ull);      off += (size_t)rc;
+    // 4 × (sec + nsec) — atime/mtime/ctime/btime:
+    for (int i = 0; i < 8; i++) {
+        rc = p9_pack_u64(g_buf + off, sizeof(g_buf) - off,
+                          (u64)(0x100 + i));
+        off += (size_t)rc;
+    }
+    // gen + data_version:
+    rc = p9_pack_u64(g_buf + off, sizeof(g_buf) - off, 7ull);   off += (size_t)rc;
+    rc = p9_pack_u64(g_buf + off, sizeof(g_buf) - off, 99ull);  off += (size_t)rc;
+    TEST_EXPECT_EQ((u64)off, (u64)r_total, "synth Rgetattr body length");
+
+    u16 tag_out = 0;
+    struct p9_attr a = { 0 };
+    rc = p9_parse_rgetattr(g_buf, r_total, &tag_out, &a);
+    TEST_EXPECT_EQ(rc, 0,                          "Rgetattr parse ok");
+    TEST_EXPECT_EQ((u64)tag_out, (u64)0x0020,      "Rgetattr tag");
+    TEST_EXPECT_EQ(a.valid, (u64)P9_GETATTR_BASIC, "Rgetattr valid");
+    TEST_EXPECT_EQ(a.qid.path, (u64)42,            "Rgetattr qid.path");
+    TEST_EXPECT_EQ((u64)a.mode, (u64)0644,         "Rgetattr mode");
+    TEST_EXPECT_EQ((u64)a.uid, (u64)1000,          "Rgetattr uid");
+    TEST_EXPECT_EQ(a.size, (u64)12345,             "Rgetattr size");
+    TEST_EXPECT_EQ(a.blocks, (u64)24,              "Rgetattr blocks");
+    TEST_EXPECT_EQ(a.atime_sec, (u64)0x100,        "Rgetattr atime_sec");
+    TEST_EXPECT_EQ(a.btime_nsec, (u64)0x107,       "Rgetattr btime_nsec");
+    TEST_EXPECT_EQ(a.gen, (u64)7,                  "Rgetattr gen");
+    TEST_EXPECT_EQ(a.data_version, (u64)99,        "Rgetattr data_version");
+}
+
+void test_9p_wire_tsetattr_round_trip(void) {
+    struct p9_setattr sa = {
+        .valid       = P9_SETATTR_MODE | P9_SETATTR_SIZE,
+        .mode        = 0755u,
+        .uid         = 0,
+        .gid         = 0,
+        .size        = 4096ull,
+        .atime_sec   = 0,
+        .atime_nsec  = 0,
+        .mtime_sec   = 0,
+        .mtime_nsec  = 0,
+    };
+    int total = p9_build_tsetattr(g_buf, sizeof(g_buf), 0x0021,
+                                   /*fid*/ 11, &sa);
+    // hdr(7) + fid(4) + valid(4) + mode(4) + uid(4) + gid(4)
+    //   + size(8) + 2 * 16 = 67
+    TEST_EXPECT_EQ(total, 67, "Tsetattr total len");
+    TEST_EXPECT_EQ((u64)g_buf[4], (u64)P9_TSETATTR, "Tsetattr type");
+
+    // Synthesize Rsetattr (header-only, body empty).
+    g_buf[0] = 7; g_buf[1] = 0; g_buf[2] = 0; g_buf[3] = 0;
+    g_buf[4] = P9_RSETATTR;
+    g_buf[5] = 0x21; g_buf[6] = 0;
+    u16 tag_out = 0;
+    int rc = p9_parse_rsetattr(g_buf, 7, &tag_out);
+    TEST_EXPECT_EQ(rc, 0,                     "Rsetattr parse ok");
+    TEST_EXPECT_EQ((u64)tag_out, (u64)0x0021, "Rsetattr tag");
+}
+
+void test_9p_wire_treaddir_round_trip(void) {
+    int total = p9_build_treaddir(g_buf, sizeof(g_buf), 0x0022,
+                                   /*fid*/ 5, /*offset*/ 0, /*count*/ 4096);
+    // hdr(7) + fid(4) + offset(8) + count(4) = 23
+    TEST_EXPECT_EQ(total, 23, "Treaddir total len");
+    TEST_EXPECT_EQ((u64)g_buf[4], (u64)P9_TREADDIR, "Treaddir type");
+
+    // Synthesize Rreaddir with a small dirent stream: "." + ".."
+    // Dirent body: qid(13) + offset(8) + type(1) + name-str(2+len)
+    // "." : 24 + 1 = 25 bytes; ".." : 24 + 2 = 26 bytes. Total: 51 bytes.
+    u8 dirent_data[51];
+    size_t dpos = 0;
+    int rc;
+    // Entry 1: "."
+    struct p9_qid q0 = { .type = P9_QTDIR, .version = 0, .path = 100 };
+    rc = p9_pack_qid(dirent_data + dpos, sizeof(dirent_data) - dpos, &q0); dpos += (size_t)rc;
+    rc = p9_pack_u64(dirent_data + dpos, sizeof(dirent_data) - dpos, 1);   dpos += (size_t)rc;
+    rc = p9_pack_u8 (dirent_data + dpos, sizeof(dirent_data) - dpos, 4);   dpos += (size_t)rc;  // DT_DIR
+    rc = p9_pack_str(dirent_data + dpos, sizeof(dirent_data) - dpos,
+                      (const u8 *)".", 1);
+    dpos += (size_t)rc;
+    // Entry 2: ".."
+    struct p9_qid q1 = { .type = P9_QTDIR, .version = 0, .path = 101 };
+    rc = p9_pack_qid(dirent_data + dpos, sizeof(dirent_data) - dpos, &q1); dpos += (size_t)rc;
+    rc = p9_pack_u64(dirent_data + dpos, sizeof(dirent_data) - dpos, 2);   dpos += (size_t)rc;
+    rc = p9_pack_u8 (dirent_data + dpos, sizeof(dirent_data) - dpos, 4);   dpos += (size_t)rc;
+    rc = p9_pack_str(dirent_data + dpos, sizeof(dirent_data) - dpos,
+                      (const u8 *)"..", 2);
+    dpos += (size_t)rc;
+    TEST_EXPECT_EQ((u64)dpos, (u64)51, "dirent stream size");
+
+    size_t r_total = P9_HDR_LEN + 4 + dpos;
+    g_buf[0] = (u8)(r_total & 0xff);
+    g_buf[1] = (u8)((r_total >> 8) & 0xff);
+    g_buf[2] = 0; g_buf[3] = 0;
+    g_buf[4] = P9_RREADDIR;
+    g_buf[5] = 0x22; g_buf[6] = 0;
+    rc = p9_pack_u32(g_buf + P9_HDR_LEN, sizeof(g_buf) - P9_HDR_LEN, (u32)dpos);
+    TEST_EXPECT_EQ(rc, 4, "synth Rreaddir count");
+    for (size_t i = 0; i < dpos; i++) g_buf[P9_HDR_LEN + 4 + i] = dirent_data[i];
+
+    u16 tag_out = 0;
+    u32 count_out = 0;
+    const u8 *data_ptr = NULL;
+    rc = p9_parse_rreaddir(g_buf, r_total, &tag_out, &count_out, &data_ptr, 8192u);
+    TEST_EXPECT_EQ(rc, 0,                              "Rreaddir parse ok");
+    TEST_EXPECT_EQ((u64)tag_out, (u64)0x0022,          "Rreaddir tag");
+    TEST_EXPECT_EQ((u64)count_out, (u64)dpos,          "Rreaddir count");
+    TEST_ASSERT(data_ptr != NULL,                      "Rreaddir data non-null");
+    // Spot-check first byte is qid.type (P9_QTDIR = 0x80).
+    TEST_EXPECT_EQ((u64)data_ptr[0], (u64)P9_QTDIR,    "Rreaddir first byte = qid.type");
+}
+
+void test_9p_wire_dirent_unpack(void) {
+    // Hand-construct one dirent (qid + offset + type + name).
+    u8 buf[64];
+    size_t pos = 0;
+    int rc;
+    struct p9_qid q = { .type = P9_QTFILE, .version = 0, .path = 500 };
+    rc = p9_pack_qid(buf + pos, sizeof(buf) - pos, &q); pos += (size_t)rc;
+    rc = p9_pack_u64(buf + pos, sizeof(buf) - pos, 12345ull); pos += (size_t)rc;
+    rc = p9_pack_u8 (buf + pos, sizeof(buf) - pos, 8);  pos += (size_t)rc;  // DT_REG
+    rc = p9_pack_str(buf + pos, sizeof(buf) - pos, (const u8 *)"hello.txt", 9);
+    pos += (size_t)rc;
+    // Expected size: 13 + 8 + 1 + 2 + 9 = 33
+
+    struct p9_qid q_out = { 0 };
+    u64 off_out = 0;
+    u8 type_out = 0;
+    const u8 *name_ptr = NULL;
+    u16 name_len = 0;
+    rc = p9_unpack_dirent(buf, pos, &q_out, &off_out, &type_out,
+                           &name_ptr, &name_len);
+    TEST_EXPECT_EQ(rc, 33,                           "dirent total len");
+    TEST_EXPECT_EQ(q_out.path, (u64)500,             "dirent qid.path");
+    TEST_EXPECT_EQ(off_out, (u64)12345,              "dirent offset");
+    TEST_EXPECT_EQ((u64)type_out, (u64)8,            "dirent type = DT_REG");
+    TEST_EXPECT_EQ((u64)name_len, (u64)9,            "dirent name len");
+    TEST_ASSERT(name_ptr != NULL,                    "dirent name non-null");
+    for (size_t i = 0; i < 9; i++) {
+        TEST_ASSERT(name_ptr[i] == (u8)"hello.txt"[i], "dirent name byte");
+    }
+}
+
+void test_9p_wire_tstatfs_round_trip(void) {
+    int total = p9_build_tstatfs(g_buf, sizeof(g_buf), 0x0023, /*fid*/ 0);
+    // hdr(7) + fid(4) = 11
+    TEST_EXPECT_EQ(total, 11, "Tstatfs total len");
+    TEST_EXPECT_EQ((u64)g_buf[4], (u64)P9_TSTATFS, "Tstatfs type");
+
+    // Synthesize Rstatfs: type(4) + bsize(4) + 6×u64(48) + namelen(4) = 60 B
+    size_t body_len = 4 + 4 + 6 * 8 + 4;
+    size_t r_total = P9_HDR_LEN + body_len;
+    g_buf[0] = (u8)(r_total & 0xff);
+    g_buf[1] = (u8)((r_total >> 8) & 0xff);
+    g_buf[2] = 0; g_buf[3] = 0;
+    g_buf[4] = P9_RSTATFS;
+    g_buf[5] = 0x23; g_buf[6] = 0;
+    size_t off = P9_HDR_LEN;
+    int rc;
+    rc = p9_pack_u32(g_buf + off, sizeof(g_buf) - off, 0x53544D31u); off += (size_t)rc;  // "STM1"
+    rc = p9_pack_u32(g_buf + off, sizeof(g_buf) - off, 4096u);       off += (size_t)rc;
+    rc = p9_pack_u64(g_buf + off, sizeof(g_buf) - off, 1024ull);     off += (size_t)rc;
+    rc = p9_pack_u64(g_buf + off, sizeof(g_buf) - off, 512ull);      off += (size_t)rc;
+    rc = p9_pack_u64(g_buf + off, sizeof(g_buf) - off, 256ull);      off += (size_t)rc;
+    rc = p9_pack_u64(g_buf + off, sizeof(g_buf) - off, 64ull);       off += (size_t)rc;
+    rc = p9_pack_u64(g_buf + off, sizeof(g_buf) - off, 16ull);       off += (size_t)rc;
+    rc = p9_pack_u64(g_buf + off, sizeof(g_buf) - off, 0xCAFEBABEull); off += (size_t)rc;
+    rc = p9_pack_u32(g_buf + off, sizeof(g_buf) - off, 255u);        off += (size_t)rc;
+
+    u16 tag_out = 0;
+    struct p9_statfs sf = { 0 };
+    rc = p9_parse_rstatfs(g_buf, r_total, &tag_out, &sf);
+    TEST_EXPECT_EQ(rc, 0,                              "Rstatfs parse ok");
+    TEST_EXPECT_EQ((u64)tag_out, (u64)0x0023,          "Rstatfs tag");
+    TEST_EXPECT_EQ((u64)sf.type, (u64)0x53544D31u,     "Rstatfs type");
+    TEST_EXPECT_EQ((u64)sf.bsize, (u64)4096,           "Rstatfs bsize");
+    TEST_EXPECT_EQ(sf.blocks, (u64)1024,               "Rstatfs blocks");
+    TEST_EXPECT_EQ(sf.bavail, (u64)256,                "Rstatfs bavail");
+    TEST_EXPECT_EQ(sf.fsid, (u64)0xCAFEBABEull,        "Rstatfs fsid");
+    TEST_EXPECT_EQ((u64)sf.namelen, (u64)255,          "Rstatfs namelen");
+}
+
+void test_9p_wire_tfsync_round_trip(void) {
+    int total = p9_build_tfsync(g_buf, sizeof(g_buf), 0x0024,
+                                 /*fid*/ 1, /*datasync*/ 1);
+    // hdr(7) + fid(4) + datasync(4) = 15
+    TEST_EXPECT_EQ(total, 15, "Tfsync total len");
+    TEST_EXPECT_EQ((u64)g_buf[4], (u64)P9_TFSYNC, "Tfsync type");
+
+    // Synthesize Rfsync (header-only).
+    g_buf[0] = 7; g_buf[1] = 0; g_buf[2] = 0; g_buf[3] = 0;
+    g_buf[4] = P9_RFSYNC;
+    g_buf[5] = 0x24; g_buf[6] = 0;
+    u16 tag_out = 0;
+    int rc = p9_parse_rfsync(g_buf, 7, &tag_out);
+    TEST_EXPECT_EQ(rc, 0,                     "Rfsync parse ok");
+    TEST_EXPECT_EQ((u64)tag_out, (u64)0x0024, "Rfsync tag");
+}
+
+void test_9p_wire_rreaddir_data_cap_enforced(void) {
+    // Same shape attack as Rread: server claims count > caller's data_cap.
+    size_t r_total = P9_HDR_LEN + 4 + 1024;
+    g_buf[0] = (u8)(r_total & 0xff);
+    g_buf[1] = (u8)((r_total >> 8) & 0xff);
+    g_buf[2] = 0; g_buf[3] = 0;
+    g_buf[4] = P9_RREADDIR;
+    g_buf[5] = 0; g_buf[6] = 0;
+    g_buf[P9_HDR_LEN]     = 0x00;
+    g_buf[P9_HDR_LEN + 1] = 0x04;
+    g_buf[P9_HDR_LEN + 2] = 0x00;
+    g_buf[P9_HDR_LEN + 3] = 0x00;
+
+    u16 tag_out = 0;
+    u32 count_out = 0;
+    const u8 *data_ptr = NULL;
+    int rc = p9_parse_rreaddir(g_buf, r_total, &tag_out, &count_out, &data_ptr, 512u);
+    TEST_EXPECT_EQ(rc, -1, "Rreaddir count > data_cap rejected (R111)");
 }
