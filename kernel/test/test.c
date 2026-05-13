@@ -345,6 +345,15 @@ void test_p9_attached_create_destroy(void);
 void test_p9_attached_handshake_failure_returns_null(void);
 void test_p9_attached_root_spoor_walk_read(void);
 void test_p9_attached_query_helpers(void);
+void test_spoor_transport_init_destroy(void);
+void test_spoor_transport_init_null_rejected(void);
+void test_spoor_transport_send_routes_to_tx_dev_write(void);
+void test_spoor_transport_recv_routes_to_rx_dev_read(void);
+void test_spoor_transport_recv_empty_returns_zero(void);
+void test_spoor_transport_close_clunks_when_owned(void);
+void test_spoor_transport_close_preserves_when_unowned(void);
+void test_spoor_transport_transport_core_round_trip(void);
+void test_spoor_transport_end_to_end_handshake(void);
 void test_irq_latency_bench(void);
 void test_caps_kproc_has_all(void);
 void test_caps_kproc_has_hw_create(void);
@@ -870,6 +879,15 @@ struct test_case g_tests[] = {
                                        test_p9_attached_root_spoor_walk_read,
                                                                            false, NULL },
     { "p9_attached.query_helpers",     test_p9_attached_query_helpers,     false, NULL },
+    { "spoor_transport.init_destroy",                       test_spoor_transport_init_destroy,                       false, NULL },
+    { "spoor_transport.init_null_rejected",                 test_spoor_transport_init_null_rejected,                 false, NULL },
+    { "spoor_transport.send_routes_to_tx_dev_write",        test_spoor_transport_send_routes_to_tx_dev_write,        false, NULL },
+    { "spoor_transport.recv_routes_to_rx_dev_read",         test_spoor_transport_recv_routes_to_rx_dev_read,         false, NULL },
+    { "spoor_transport.recv_empty_returns_zero",            test_spoor_transport_recv_empty_returns_zero,            false, NULL },
+    { "spoor_transport.close_clunks_when_owned",            test_spoor_transport_close_clunks_when_owned,            false, NULL },
+    { "spoor_transport.close_preserves_when_unowned",       test_spoor_transport_close_preserves_when_unowned,       false, NULL },
+    { "spoor_transport.transport_core_round_trip",          test_spoor_transport_transport_core_round_trip,          false, NULL },
+    { "spoor_transport.end_to_end_handshake",               test_spoor_transport_end_to_end_handshake,               false, NULL },
     { "userspace.irq_latency_bench",   test_irq_latency_bench,             false, NULL },
     { "caps.kproc_has_all",            test_caps_kproc_has_all,            false, NULL },
     { "caps.kproc_has_hw_create",      test_caps_kproc_has_hw_create,      false, NULL },
