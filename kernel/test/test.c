@@ -334,6 +334,10 @@ void test_dev9p_read_routes_through_client(void);
 void test_dev9p_write_routes_through_client(void);
 void test_dev9p_close_clunks_owned_fid(void);
 void test_dev9p_close_does_not_clunk_root_fid(void);
+void test_p9_attached_create_destroy(void);
+void test_p9_attached_handshake_failure_returns_null(void);
+void test_p9_attached_root_spoor_walk_read(void);
+void test_p9_attached_query_helpers(void);
 void test_irq_latency_bench(void);
 void test_caps_kproc_has_all(void);
 void test_caps_kproc_has_hw_create(void);
@@ -844,6 +848,14 @@ struct test_case g_tests[] = {
     { "dev9p.close_does_not_clunk_root_fid",
                                        test_dev9p_close_does_not_clunk_root_fid,
                                                                            false, NULL },
+    { "p9_attached.create_destroy",    test_p9_attached_create_destroy,    false, NULL },
+    { "p9_attached.handshake_failure_returns_null",
+                                       test_p9_attached_handshake_failure_returns_null,
+                                                                           false, NULL },
+    { "p9_attached.root_spoor_walk_read",
+                                       test_p9_attached_root_spoor_walk_read,
+                                                                           false, NULL },
+    { "p9_attached.query_helpers",     test_p9_attached_query_helpers,     false, NULL },
     { "userspace.irq_latency_bench",   test_irq_latency_bench,             false, NULL },
     { "caps.kproc_has_all",            test_caps_kproc_has_all,            false, NULL },
     { "caps.kproc_has_hw_create",      test_caps_kproc_has_hw_create,      false, NULL },
