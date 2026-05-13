@@ -60,6 +60,13 @@ void test_proc_orphan_reparent_smoke(void);
 void test_namespace_bind_smoke(void);
 void test_namespace_cycle_rejected(void);
 void test_namespace_fork_isolated(void);
+void test_territory_mount_smoke(void);
+void test_territory_mount_idempotent_same_source(void);
+void test_territory_mount_mrepl_replaces(void);
+void test_territory_mount_unmount_missing_returns_error(void);
+void test_territory_mount_table_full(void);
+void test_territory_mount_clone_bumps_refs(void);
+void test_territory_mount_destroy_drops_all_refs(void);
 void test_handles_alloc_close_smoke(void);
 void test_handles_rights_monotonic(void);
 void test_handles_dup_lifecycle(void);
@@ -435,6 +442,13 @@ struct test_case g_tests[] = {
     { "territory.bind_smoke",          test_namespace_bind_smoke,          false, NULL },
     { "territory.cycle_rejected",      test_namespace_cycle_rejected,      false, NULL },
     { "territory.fork_isolated",       test_namespace_fork_isolated,       false, NULL },
+    { "territory_mount.smoke",                            test_territory_mount_smoke,                            false, NULL },
+    { "territory_mount.idempotent_same_source",           test_territory_mount_idempotent_same_source,           false, NULL },
+    { "territory_mount.mrepl_replaces",                   test_territory_mount_mrepl_replaces,                   false, NULL },
+    { "territory_mount.unmount_missing_returns_error",    test_territory_mount_unmount_missing_returns_error,    false, NULL },
+    { "territory_mount.table_full",                       test_territory_mount_table_full,                       false, NULL },
+    { "territory_mount.clone_bumps_refs",                 test_territory_mount_clone_bumps_refs,                 false, NULL },
+    { "territory_mount.destroy_drops_all_refs",           test_territory_mount_destroy_drops_all_refs,           false, NULL },
     { "handles.alloc_close_smoke",     test_handles_alloc_close_smoke,     false, NULL },
     { "handles.rights_monotonic",      test_handles_rights_monotonic,      false, NULL },
     { "handles.dup_lifecycle",         test_handles_dup_lifecycle,         false, NULL },

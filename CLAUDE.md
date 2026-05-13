@@ -114,7 +114,7 @@ Any change to the surfaces below MUST spawn a focused adversarial soundness audi
 | Page fault + COW + W^X | `arch/arm64/fault.c`, `mm/vm.c`, `mm/wxe.c` | Lifetime, demand-page, COW, W^X invariant (I-12) |
 | Allocator | `mm/buddy.c`, `mm/slub.c`, `mm/magazines.c` | Allocation correctness, lock-free invariants |
 | Scheduler | `kernel/sched.c`, `kernel/eevdf.c`, `arch/arm64/context.c`, `arch/arm64/ipi.c` | EEVDF correctness, SMP, wakeup atomicity (I-8, I-9, I-17, I-18) |
-| Namespace | `kernel/namespace.c` | Cycle-freedom (I-3), isolation (I-1) |
+| Territory | `kernel/territory.c` | Cycle-freedom (I-3), isolation (I-1), mount-refcount consistency (§9.6.6) |
 | Handle table | `kernel/handle.c` | Rights monotonicity (I-2, I-6), transfer-via-9P (I-4), hardware-handle non-transferability (I-5) |
 | VMO | `kernel/vmo.c`, `mm/vmo_pages.c` | Refcount, mapping lifecycle (I-7) |
 | 9P client | `kernel/9p_client.c`, `kernel/9p_session.c`, `kernel/9p_attach.c` | Wire protocol, fid lifecycle (I-11), tag uniqueness (I-10), pipelining |

@@ -1,35 +1,53 @@
-// Territory primitives — Plan 9 bind/unmount + Territory lifecycle (P2-Eb).
+// Territory primitives — Plan 9 bind/unbind/mount/unmount + Territory
+// lifecycle (P2-Eb + P5-attach-mount).
 //
-// Per ARCHITECTURE.md §9.1 + specs/territory.tla. Implements the spec's
-// Bind / Unbind / ForkClone actions on a SLUB-allocated Territory struct
-// holding a fixed-size bind-table.
+// Per ARCHITECTURE.md §9.1 + §9.6 + specs/territory.tla. Implements the
+// spec's Bind / Unbind / Mount / Unmount / ForkClone actions on a
+// SLUB-allocated Territory struct holding fixed-size bind + mount
+// tables.
 //
-// State invariant (NoCycle, ARCH §28 I-3): for every Territory `p` and every
-// path `x`, `x` is not reachable from its own binding set via the
-// transitive closure. Enforced by `would_create_cycle` (DFS over the
-// existing binds) called from `bind()` BEFORE inserting; if a cycle
-// would form, bind returns -1.
+// State invariants:
 //
-// At v1.0 P2-Eb the territory has no real path resolution — `path_id_t`
-// is `u32` and callers pick numeric IDs. When the 9P client lands at
-// Phase 4, path_id_t becomes `struct Spoor *` (or qid_t for the RB-tree
-// key per ARCH §9.1 design intent), and `walk` traverses the bind graph
-// from a starting Spoor.
+//   NoCycle (ARCH §28 I-3): for every Territory `p` and every path `x`,
+//   `x` is not reachable from its own binding set via the transitive
+//   closure. Enforced by `would_create_cycle` (DFS over existing edges)
+//   called from `bind()` BEFORE inserting; if a cycle would form, bind
+//   returns -1.
+//
+//   MountRefcountConsistency (ARCH §9.6.6): every mount entry holds one
+//   refcount on its source Spoor. Maintained by:
+//     - mount(): spoor_ref(source) before insert.
+//     - unmount(): spoor_unref(source) after remove.
+//     - territory_clone(): spoor_ref(source) per cloned entry.
+//     - territory_unref() final release: spoor_unref(source) for each
+//       entry BEFORE kmem_cache_free.
+//
+//   Isolation (ARCH §28 I-1): all operations take a single Territory *.
+//   Two Territories' tables are never modified in the same call.
 //
 // Bootstrap order (kernel/main.c calls):
 //   1. slub_init
-//   2. territory_init        — territory SLUB cache + kproc's empty Territory
-//   3. proc_init        — kproc; assigns kproc->territory = kpgrp()
-//   4. thread_init      — kthread
+//   2. territory_init       — Territory SLUB cache + kproc's empty Territory
+//   3. proc_init            — kproc; assigns kproc->territory = kpgrp()
+//   4. thread_init          — kthread
+//   5. dev_init             — which internally calls spoor_init (Spoor cache)
+//
+// territory_init runs BEFORE spoor_init. Safe because territory_init
+// only allocates EMPTY Territories (nmounts = 0); the territory_unref
+// final-release path only calls spoor_unref when nmounts > 0, which
+// requires mount() to have been called first, which requires a Spoor,
+// which requires spoor_init. The dependency is therefore satisfied
+// automatically by call ordering, not by init ordering.
 
 #include <thylacine/extinction.h>
+#include <thylacine/spoor.h>
 #include <thylacine/territory.h>
 #include <thylacine/types.h>
 
 #include "../mm/slub.h"
 
 static struct kmem_cache *g_pgrp_cache;
-static struct Territory       *g_kpgrp;
+static struct Territory  *g_kpgrp;
 static u64                g_pgrp_created;
 static u64                g_pgrp_destroyed;
 
@@ -38,10 +56,11 @@ static u64                g_pgrp_destroyed;
 // =============================================================================
 
 static void territory_init_fields(struct Territory *p) {
-    p->magic  = PGRP_MAGIC;
-    p->ref    = 1;
-    p->nbinds = 0;
-    // KP_ZERO already cleared binds[]; nothing more to do.
+    p->magic   = PGRP_MAGIC;
+    p->ref     = 1;
+    p->nbinds  = 0;
+    p->nmounts = 0;
+    // KP_ZERO already cleared binds[] and mounts[]; nothing more to do.
 }
 
 void territory_init(void) {
@@ -79,25 +98,37 @@ struct Territory *territory_clone(struct Territory *parent) {
     if (parent->magic != PGRP_MAGIC)
         extinction("territory_clone of corrupted Territory");
     // R5-H F92: defense-in-depth against single-bit-flip / partial-
-    // corruption that leaves magic intact but corrupts nbinds. The bound
-    // is fixed at PGRP_MAX_BINDS; validating here catches a torn nbinds
-    // before the read past binds[]. Same defense lands in bind() /
-    // unmount() implicitly via PGRP_MAX_BINDS bounds checks at each
-    // operation; territory_clone is the only single-pass-loop-on-trusted-
-    // length path, so it gets an explicit check.
+    // corruption that leaves magic intact but corrupts the count
+    // fields. The bound is fixed at compile time; validating here
+    // catches a torn nbinds/nmounts before the deep-copy loop reads
+    // past the array.
     if ((unsigned)parent->nbinds > PGRP_MAX_BINDS)
         extinction("territory_clone: parent->nbinds out of range (corrupted Territory)");
+    if ((unsigned)parent->nmounts > PGRP_MAX_MOUNTS)
+        extinction("territory_clone: parent->nmounts out of range (corrupted Territory)");
 
     struct Territory *child = territory_alloc();
     if (!child) return NULL;
 
-    // Deep-copy the bind table. Models the spec's ForkClone action: the
-    // child gets an independent function value (in C terms: a separate
-    // copy of the binds[] array; subsequent modifications to either are
-    // independent because the arrays don't alias).
+    // Deep-copy the bind table. Models the spec's ForkClone action's
+    // bindings update: the child gets an independent function value.
     child->nbinds = parent->nbinds;
     for (int i = 0; i < parent->nbinds; i++) {
         child->binds[i] = parent->binds[i];
+    }
+
+    // Deep-copy the mount table. For each cloned entry, spoor_ref(source)
+    // — each Territory holding an entry contributes one reference per
+    // entry. Models the spec's ForkClone refcount update:
+    //   refcount' = refcount + Cardinality(entries-in-parent-pointing-at-s)
+    //
+    // spoor_ref extincts on a NULL or corrupted source — that's a kernel
+    // invariant violation (we put a corrupted Spoor into the mount table)
+    // and the extinct is the correct response.
+    child->nmounts = parent->nmounts;
+    for (int i = 0; i < parent->nmounts; i++) {
+        child->mounts[i] = parent->mounts[i];
+        spoor_ref(child->mounts[i].source);
     }
     return child;
 }
@@ -105,12 +136,6 @@ struct Territory *territory_clone(struct Territory *parent) {
 void territory_ref(struct Territory *p) {
     if (!p) return;
     if (p->magic != PGRP_MAGIC)   extinction("territory_ref of corrupted Territory");
-    // R5-H F80: atomic refcount. v1.0 P2-Eb has each Proc owning a
-    // private Territory (refcount = 1; never shared) so contention is zero;
-    // RFNAMEG (Phase 5+) introduces sharing across Procs running on
-    // different CPUs, at which point this primitive must be atomic.
-    // Landing the discipline now closes the latent hazard before the
-    // first sharing test would expose it.
     __atomic_fetch_add(&p->ref, 1, __ATOMIC_RELAXED);
 }
 
@@ -118,16 +143,32 @@ void territory_unref(struct Territory *p) {
     if (!p) return;
     if (p->magic != PGRP_MAGIC)   extinction("territory_unref of corrupted Territory");
     if (p == g_kpgrp)             extinction("territory_unref attempted on kpgrp");
-    // R5-H F80: atomic decrement-and-check. Single fetch_sub returns the
-    // pre-decrement value; if it was 1, the decrement reached 0 and we
-    // own the free. Acquire ordering on the zero-transition load pairs
-    // with the release store of the last reference's mutator (matches
-    // the std::shared_ptr discipline). pre <= 0 indicates underflow —
-    // an unref-of-zero, distinct from the previous "post-decrement is
-    // negative" check (which was racy under SMP).
     int pre = __atomic_fetch_sub(&p->ref, 1, __ATOMIC_ACQ_REL);
     if (pre <= 0)                 extinction("territory_unref of zero-ref Territory");
     if (pre == 1) {
+        // Final release. Drop each mount entry's source refcount BEFORE
+        // freeing the Territory's storage. Models the spec's
+        // "DestroyTerritory requires mounts[p] = {}" precondition: the
+        // impl satisfies it by iterating + spoor_unref'ing each entry
+        // here, which is equivalent to a sequence of Unmount actions
+        // immediately preceding the destroy.
+        //
+        // If this loop is skipped (the BUGGY_DESTROY_LEAK class), each
+        // source's refcount stays bumped while the entries vanish from
+        // mounts[] — the Spoor's storage is leaked. The spec's
+        // MountRefcountConsistency invariant catches that desync.
+        //
+        // Walk in reverse so the array indexing stays valid even if we
+        // ever add side-effects that clear the slot during the unref
+        // path; current spoor_unref doesn't touch the Territory, so the
+        // direction is cosmetic.
+        for (int i = p->nmounts - 1; i >= 0; i--) {
+            spoor_unref(p->mounts[i].source);
+        }
+        // Clear nmounts so a post-free read (UAF) sees consistent state
+        // (zero entries) — SLUB's freelist write will clobber magic but
+        // not the count fields immediately; defensive.
+        p->nmounts = 0;
         kmem_cache_free(g_pgrp_cache, p);
         __atomic_fetch_add(&g_pgrp_destroyed, 1u, __ATOMIC_RELAXED);
     }
@@ -138,11 +179,16 @@ int territory_nbinds(struct Territory *p) {
     return p->nbinds;
 }
 
+int territory_nmounts(struct Territory *p) {
+    if (!p) return 0;
+    return p->nmounts;
+}
+
 u64 territory_total_created(void)   { return __atomic_load_n(&g_pgrp_created, __ATOMIC_RELAXED); }
 u64 territory_total_destroyed(void) { return __atomic_load_n(&g_pgrp_destroyed, __ATOMIC_RELAXED); }
 
 // =============================================================================
-// bind / unmount.
+// bind / unbind.
 // =============================================================================
 
 // Path-in-set helper. Linear scan; PGRP_MAX_BINDS+1 is the worst-case
@@ -163,20 +209,11 @@ static bool path_in(const path_id_t *arr, int n, path_id_t p) {
 // whether `dst` is reachable from `src`. If yes, the new edge `dst ->
 // src` would close a cycle: src -> ... -> dst -> (new) -> src.
 //
-// Maps directly to the spec's WouldCreateCycle:
-//   WouldCreateCycle(p, src, dst) ==
-//     \/ src = dst
-//     \/ dst \in Reachable(p, {src})
-//
-// O(N²) worst case (N = territory->nbinds); for v1.0's PGRP_MAX_BINDS=32
-// that's 32×32 = 1024 inner iterations, well under any latency budget.
+// Maps directly to the spec's WouldCreateCycle.
 static bool would_create_cycle(const struct Territory *territory,
                                path_id_t src, path_id_t dst) {
     if (src == dst) return true;
 
-    // reachable[] holds path IDs reachable from `src` via 0+ existing
-    // edges. Sized PGRP_MAX_BINDS+1 — at most one entry per existing
-    // edge can be added, plus the initial `src`.
     path_id_t reachable[PGRP_MAX_BINDS + 1];
     int n = 0;
     reachable[n++] = src;
@@ -187,12 +224,9 @@ static bool would_create_cycle(const struct Territory *territory,
         for (int i = 0; i < territory->nbinds; i++) {
             path_id_t e_src = territory->binds[i].src;
             path_id_t e_dst = territory->binds[i].dst;
-            // Edge (e_src, e_dst) means: walking e_dst yields e_src.
-            // For reachability via walking, if e_dst is reachable, so is
-            // e_src.
             if (path_in(reachable, n, e_dst) &&
                 !path_in(reachable, n, e_src)) {
-                if (n >= PGRP_MAX_BINDS + 1) break;   // safety bound
+                if (n >= PGRP_MAX_BINDS + 1) break;
                 reachable[n++] = e_src;
                 changed = true;
             }
@@ -210,7 +244,6 @@ int bind(struct Territory *territory, path_id_t src, path_id_t dst) {
     if (src == dst)                       return -4;
     if (would_create_cycle(territory, src, dst)) return -1;
 
-    // Idempotency: same (src, dst) edge already exists.
     for (int i = 0; i < territory->nbinds; i++) {
         if (territory->binds[i].src == src && territory->binds[i].dst == dst) {
             return -2;
@@ -225,16 +258,115 @@ int bind(struct Territory *territory, path_id_t src, path_id_t dst) {
     return 0;
 }
 
-int unmount(struct Territory *territory, path_id_t src, path_id_t dst) {
-    if (!territory)                    extinction("unmount(NULL territory)");
+int unbind(struct Territory *territory, path_id_t src, path_id_t dst) {
+    if (!territory)                    extinction("unbind(NULL territory)");
     if (territory->magic != PGRP_MAGIC)
-        extinction("unmount on corrupted Territory");
+        extinction("unbind on corrupted Territory");
 
     for (int i = 0; i < territory->nbinds; i++) {
         if (territory->binds[i].src == src && territory->binds[i].dst == dst) {
-            // Remove by swapping with the last element.
             territory->binds[i] = territory->binds[territory->nbinds - 1];
             territory->nbinds--;
+            return 0;
+        }
+    }
+    return -1;
+}
+
+// =============================================================================
+// mount / unmount.
+// =============================================================================
+
+// Spoor magic check helper. The Spoor's magic is at offset 0; we read it
+// without dereferencing through the type (would require <spoor.h>'s full
+// struct knowledge — already included). spoor_ref does its own check
+// and extincts on mismatch, so we just need to reject NULL early.
+//
+// Defined inline as a function — caller does:
+//   if (!source_is_valid(source)) return -1;
+// before any ref-affecting op.
+static bool source_is_valid(struct Spoor *s) {
+    if (!s) return false;
+    // SPOOR_MAGIC check is encapsulated by spoor_ref's own invariant;
+    // testing it here would duplicate. Rely on spoor_ref's extinct
+    // discipline — if the Spoor is corrupted, the spoor_ref call below
+    // will extinct cleanly with a precise message.
+    return true;
+}
+
+int mount(struct Territory *territory, struct Spoor *source,
+          path_id_t target, u32 flags) {
+    if (!territory)                    extinction("mount(NULL territory)");
+    if (territory->magic != PGRP_MAGIC) extinction("mount on corrupted Territory");
+
+    if (!source_is_valid(source))       return -1;
+
+    // Idempotency: (target, source) pair already in the table → no-op.
+    // Spec: <<path, s>> \notin mounts[p] precondition. Caller doesn't
+    // see a refcount bump; the existing entry's refcount is unchanged.
+    for (int i = 0; i < territory->nmounts; i++) {
+        if (territory->mounts[i].target == target &&
+            territory->mounts[i].source == source) {
+            return 0;
+        }
+    }
+
+    // MREPL semantics at v1.0: if `flags & MREPL` and an entry at the
+    // same target exists (with a different source — we already checked
+    // for idempotent same-source above), replace the FIRST matching
+    // entry. Drop the old source's refcount; install the new source
+    // with a fresh ref.
+    //
+    // MBEFORE/MAFTER/MCREATE union semantics are recorded but treated
+    // as "append a new entry" at v1.0; union walking is Phase 5+ once
+    // the walk algorithm grows union support.
+    if (flags & MREPL) {
+        for (int i = 0; i < territory->nmounts; i++) {
+            if (territory->mounts[i].target == target) {
+                struct Spoor *old = territory->mounts[i].source;
+                territory->mounts[i].source = source;
+                territory->mounts[i].flags  = flags;
+                spoor_ref(source);
+                spoor_unref(old);
+                return 0;
+            }
+        }
+        // MREPL with no existing entry: fall through to append.
+    }
+
+    if (territory->nmounts >= PGRP_MAX_MOUNTS)  return -2;
+
+    // Take the per-entry reference BEFORE installing the entry. If the
+    // ref bump succeeds, the entry is committed; if installation fails
+    // (it can't here — we already validated nmounts), we'd need to
+    // un-ref. Since the path below is infallible after the ref, no
+    // rollback is needed.
+    spoor_ref(source);
+
+    territory->mounts[territory->nmounts].target = target;
+    territory->mounts[territory->nmounts].source = source;
+    territory->mounts[territory->nmounts].flags  = flags;
+    territory->nmounts++;
+    return 0;
+}
+
+int unmount(struct Territory *territory, path_id_t target_path) {
+    if (!territory)                    extinction("unmount(NULL territory)");
+    if (territory->magic != PGRP_MAGIC) extinction("unmount on corrupted Territory");
+
+    for (int i = 0; i < territory->nmounts; i++) {
+        if (territory->mounts[i].target == target_path) {
+            struct Spoor *source = territory->mounts[i].source;
+            // Remove by swapping with the last element. Order within
+            // mounts[] is not load-bearing at v1.0; MBEFORE/MAFTER union
+            // walking (Phase 5+) will introduce an ordering invariant
+            // and the removal will switch to shift-down at that point.
+            territory->mounts[i] = territory->mounts[territory->nmounts - 1];
+            territory->nmounts--;
+            // Drop the per-entry refcount LAST. If spoor_unref ever
+            // grows side-effects that touch the Territory (it doesn't
+            // today), the table is already consistent before the call.
+            spoor_unref(source);
             return 0;
         }
     }

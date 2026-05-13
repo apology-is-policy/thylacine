@@ -4,7 +4,7 @@
 //
 //   territory.bind_smoke
 //     Allocate a fresh Territory; bind a few non-cyclic edges; verify
-//     territory_nbinds tracks the count and unmount removes correctly.
+//     territory_nbinds tracks the count and unbind removes correctly.
 //
 //   territory.cycle_rejected
 //     Bind two non-cyclic edges; attempt a third bind that would close
@@ -53,15 +53,15 @@ void test_namespace_bind_smoke(void) {
     TEST_EXPECT_EQ(bind(p, 1u, 2u), -2,
         "duplicate bind must return -2 (already bound)");
 
-    // unmount: remove the second edge.
-    TEST_EXPECT_EQ(unmount(p, 2u, 3u), 0,
-        "unmount of existing edge should succeed");
+    // unbind: remove the second edge.
+    TEST_EXPECT_EQ(unbind(p, 2u, 3u), 0,
+        "unbind of existing edge should succeed");
     TEST_EXPECT_EQ(territory_nbinds(p), 1,
-        "nbinds back to 1 after unmount");
+        "nbinds back to 1 after unbind");
 
-    // unmount of non-existent edge returns -1.
-    TEST_EXPECT_EQ(unmount(p, 99u, 100u), -1,
-        "unmount of non-existent edge must return -1");
+    // unbind of non-existent edge returns -1.
+    TEST_EXPECT_EQ(unbind(p, 99u, 100u), -1,
+        "unbind of non-existent edge must return -1");
 
     territory_unref(p);
 }

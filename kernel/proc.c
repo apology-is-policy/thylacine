@@ -498,10 +498,12 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
     caps_t parent_caps = __atomic_load_n(&parent->caps, __ATOMIC_ACQUIRE);
     child->caps = parent_caps & caps_mask;
 
-    // P2-Eb: clone parent's territory into the child. Maps to the spec's
-    // ForkClone action — child gets a deep copy of parent's bindings;
-    // subsequent bind/unmount on either is independent. RFNAMEG (shared
-    // territory) is unsupported at v1.0; the parent ALWAYS gets a clone.
+    // P2-Eb + P5-attach-mount: clone parent's territory into the child.
+    // Maps to the spec's ForkClone action — child gets a deep copy of
+    // parent's bindings AND mounts; each cloned mount entry takes a
+    // fresh spoor_ref(source). Subsequent bind/unbind/mount/unmount on
+    // either is independent. RFNAMEG (shared territory) is unsupported
+    // at v1.0; the parent ALWAYS gets a clone.
     struct Territory *child_pgrp = territory_clone(parent->territory);
     if (!child_pgrp) {
         child->state = PROC_STATE_ZOMBIE;
