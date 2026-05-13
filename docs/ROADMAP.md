@@ -447,12 +447,28 @@ Thylacine binds to Stratum the same way Linux v9fs does, with adjustments for Th
 
 ### 7.2 Deliverables
 
-**9P client (kernel)** — `kernel/9p_*`:
-- `kernel/9p_wire.c`: 9P2000.L wire codec — message framing, marshalling, demarshalling per `stratum/v2/docs/reference/20-9p.md`. Supports the 9P2000.L baseline (`Tlopen`, `Tlcreate`, `Tsymlink`, `Tmknod`, `Trename`, `Treaddir`, `Tstatfs`, `Tgetattr`, `Tsetattr`, `Treadlink`, `Tlock`, `Tgetlock`, `Tlink`, `Tmkdir`, `Trenameat`, `Tunlinkat`) + Stratum extensions (`Tsync`, `Treflink`, `Tbind`, `Tunbind`, `Txattrwalk`, `Txattrcreate`, `Tgetxattr`, `Tsetxattr`, `Tlistxattr`, `Tremovexattr`).
-- `kernel/9p_session.c`: per-session state — tag pool (`I-10` per-session tag uniqueness, monotonic generation), fid table (`I-11` per-session fid identity stable across open lifetime), outstanding-request table, send queue, receive loop. Pipelined per `ARCHITECTURE.md §21` (out-of-order completion + flow control).
-- `kernel/9p_transport.c`: Unix-socket transport on top of the Spoor layer. Thylacine's "Unix socket" inside a guest VM is a Spoor that the kernel routes between the client process's address space and `stratumd`'s. Phase 5 may also expose an in-VM virtio-socket variant for performance.
-- `kernel/9p_attach.c`: `mount` syscall integration. `Tattach` with subvolume name as `aname`. Connection setup at process-creation time per `VISION.md §11` (one connection per Proc at v1.0).
-- Per-process 9P connection management: connection established at `rfork`; closed at `exits`. Cleanup walks the fid table.
+**9P client stack (kernel)** — `kernel/9p_*`:
+
+The Phase 5 9P stack lands as a sequence of bounded sub-chunks, each tightly scoped + testable + revertable. The decomposition mirrors the architectural layering described in ARCH §9.6 and §10.
+
+Codec + session + transport + client (the byte-pipe layer):
+- `kernel/9p_wire.c` (**P5-wire / -io / -meta / -mutation**): 9P2000.L wire codec — message framing, marshalling, demarshalling per `stratum/v2/docs/reference/20-9p.md`. Covers the 9P2000.L standard surface (handshake + walk + clunk + IO + metadata + mutation). Stratum extensions (`Tsync`, `Treflink`, `Tbind`, `Tunbind`, `Txattrwalk`, `Txattrcreate`, `Tgetxattr`, `Tsetxattr`, `Tlistxattr`, `Tremovexattr`) land in `-stratum-ext` and `-xattr` sub-chunks; lock family in `-lock`. **All landed except `-lock` / `-xattr` / `-stratum-ext`** (deferred low-priority).
+- `kernel/9p_session.c` (**P5-session**): per-session state — tag pool (`I-10` per-session tag uniqueness), fid table (`I-11` per-session fid identity stable across open lifetime), outstanding-request table, send/receive dispatch. Pipelined per ARCH §10 (out-of-order completion + flow control). **Landed.**
+- `kernel/9p_transport.c` + `kernel/9p_transport_loopback.c` (**P5-transport**): frame-aware byte pipe + vtable-based backend abstraction (initially loopback for testing; future Spoor-over-Unix-socket implements the same vtable). State machine INIT → OPEN → CLOSED + ERROR sink. Partial-read aggregation. Session composition helper (`p9_transport_exchange`). **Landed.**
+- `kernel/9p_client.c` (**P5-client**): high-level wrapper consolidating codec + session + transport into 25 op functions (lifecycle / handshake / walk / clunk / IO / metadata / mutation). Signed-errno return convention (0 / -EINVAL / -EBUSY / -EIO / -ecode). **Landed.**
+
+Attach + mount integration (per ARCH §9.6 "filesystem-as-Spoor" design):
+
+The Plan 9 `mount(fd, afid, mountpoint, flags, spec)` syscall is decomposed in Thylacine into two small primitives that compose. The decomposition keeps the kernel out of transport setup, makes `dev9p`-backed Spoors first-class kernel objects, and lets the Linux-compat layer live purely in userspace as a libc shim. See ARCH §9.6 for the full rationale.
+
+- `kernel/dev9p.c` (**P5-attach-dev**): the `dev9p` Dev vtable — every kernel Dev op (walk / open / read / write / clunk / stat / etc.) routes through a `p9_client` instance. Spoor private state carries `(p9_client *, fid)`. Tested kernel-internal against the loopback transport: spawn a client, wrap it in a dev9p Spoor, exercise the full Dev surface, verify the calls land on the right p9_client functions.
+- `kernel/sys_attach_9p.c` (**P5-attach-syscall**): the `attach_9p(transport_fd, aname, n_uname) → spoor_fd` syscall. Wraps a transport Spoor in a `p9_client`, drives handshake, returns a new `dev9p`-backed Spoor representing the 9P tree's root. Caller owns the resulting fd (can mount it, walk it directly, or close it).
+- `kernel/sys_mount.c` (**P5-attach-mount**): the `mount(source_spoor_fd, target_path, flags) → 0` syscall + Territory mount table + `specs/namespace.tla` extension for mount-lifecycle invariants. Source Spoor can be any Spoor — `dev9p`-backed from attach_9p, kernel-Dev-backed (e.g., devramfs root), or a sub-tree. Mount table refcounting + rfork sharing + Territory destruction release per ARCH §9.6.6.
+
+Stratum + janus + init lifecycle (the boot path that uses the above):
+
+- `kernel/9p_attach.c` (LEGACY NAME; deprecated by §9.6 decomposition. The boot-side integration that drives initramfs → attach_9p → mount is owned by `init/joey.c` + `init/stratumd-launch.c`.)
+- Per-process / per-Territory connection management: a Territory holds the mount table; mounts hold Spoor refs to attach_9p results; refcounting handles cleanup.
 
 **`stratumd` lifecycle** (`init/joey.c` + new helpers):
 1. ramfs holds `stratumd`, `janus`, `init` binaries + the wrapped `.key` sidecar.
@@ -507,7 +523,8 @@ POSIX coverage on Stratum:
 
 ### 7.4 Specs landing this phase
 
-- `specs/9p_client.tla` (mandatory; spec-first).
+- `specs/9p_client.tla` (mandatory; spec-first; **landed at P5-spec** — `ce4fa31`/`f1aadfc`).
+- `specs/namespace.tla` extended with mount-lifecycle invariants at **P5-attach-mount** per ARCH §9.6.6: mount table is a finite set of (path, Spoor) pairs; refcount accounting; rfork sharing semantics; Territory destruction release.
 
 ### 7.5 Audit-trigger surfaces introduced or modified
 
@@ -515,8 +532,11 @@ POSIX coverage on Stratum:
 |---|---|---|
 | 9P wire codec | `kernel/9p_wire.c` | Wire-protocol correctness; malformed-message defense; integer overflow on length fields |
 | 9P session state | `kernel/9p_session.c` | I-10 tag uniqueness, I-11 fid lifecycle, out-of-order completion, flow control |
-| 9P transport | `kernel/9p_transport.c` | Unix-socket Spoor wiring + transport-layer message framing |
-| Mount + attach path | `kernel/9p_attach.c` | `mount` syscall integration; per-process connection setup at rfork |
+| 9P transport | `kernel/9p_transport.c` + backend impls | Frame-aware byte-pipe state machine; partial-read aggregation; backend vtable |
+| 9P client wrapper | `kernel/9p_client.c` | High-level API surface; error mapping; struct-copy discipline |
+| dev9p Dev vtable | `kernel/dev9p.c` | Proxy from kernel Dev surface to `p9_client` ops; Spoor private state lifecycle |
+| `attach_9p` syscall | `kernel/sys_attach_9p.c` | Wrap transport Spoor in p9_client; handshake; return root Spoor; fd lifecycle |
+| `mount` syscall + Territory mount table | `kernel/sys_mount.c` | Mount table representation; refcounting; rfork sharing; namespace integration; spec extension |
 | Boot transition | `init/joey.c`, `init/stratumd-launch.c` | Initramfs → pivot → post-pivot ordering; `.key` lifetime; stratumd readiness probe |
 | Key unwrap | `init/janus-client.c` or libthyla-rs janus wrapper | `.key` sidecar handling, `mlock` + `MADV_DONTDUMP`, shred-after-consume |
 

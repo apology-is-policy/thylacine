@@ -1049,13 +1049,121 @@ Process A's territory:
 
 The Plan 9 walk algorithm: walk from `/` to each path component; at each component, check the mount table for that path. If multiple mounts (union), check each in declared order until one succeeds. If a path component creates (in `MCREATE`-flagged union), create in the first writable mount.
 
-### 9.6 Open design questions
+### 9.6 Mount: the filesystem-as-Spoor principle
+
+**The unifying observation**: every filesystem entity in Thylacine is a Spoor. There is no separate notion of "filesystem" distinct from "the Spoor abstraction." This is true both for kernel-internal filesystems (devcons, devnull, devramfs, /proc, /ctl) and for remote 9P filesystems (Stratum, future userspace 9P servers, network 9P).
+
+Two kinds of Spoor backing exist, distinguished only by which Dev vtable they invoke:
+
+- **Kernel-Dev-backed Spoors**: vtable operations dispatch directly to a C implementation. The Dev struct (§9.2) implements walk/open/read/write/clunk in kernel code. Used by all the v1.0 in-kernel synthetic filesystems.
+- **`dev9p`-backed Spoors**: vtable operations route through a `kernel/9p_client.c` instance to a remote 9P server. Each Spoor carries a (`p9_client *`, `u32 fid`) pair as private state; walk → `p9_client_walk_one`, read → `p9_client_read`, write → `p9_client_write`, clunk → `p9_client_clunk`, etc. The `dev9p` Dev vtable IS the proxy.
+
+Above this layer the kernel sees only Spoors. The walk algorithm (§9.5) doesn't know which backing a Spoor uses; it just dispatches the vtable.
+
+#### 9.6.1 Mount decomposed
+
+The Plan 9 `mount(fd, afid, mountpoint, flags, spec)` syscall conflates two operations:
+1. **Establishing a 9P session** over a byte-pipe fd (handshake + attach).
+2. **Grafting** the resulting filesystem tree onto a path in the namespace.
+
+Thylacine decomposes these into two small syscalls:
+
+- **`attach_9p(transport_spoor_fd, aname, n_uname) → new_spoor_fd`**: wraps a byte-pipe Spoor (Unix socket, virtio-vsock, pipe, etc.) in a kernel-internal `p9_client`, drives the Tversion + Tattach handshake, and returns a new Spoor backed by `dev9p` whose root fid is the bound attach. The returned Spoor IS the 9P tree's root. Walk it, read it, or mount it — all work identically.
+- **`mount(source_spoor_fd, target_path, flags) → 0`**: grafts the source Spoor's tree at `target_path` in the caller's Territory. The source Spoor can be ANY Spoor — a `dev9p`-backed one from attach_9p, a kernel-internal Dev's root (e.g., the devramfs root), or even a sub-tree of an existing mount. `flags` mirror Plan 9: `MREPL`, `MBEFORE`, `MAFTER`, `MCREATE`.
+
+The existing `bind(source_path, target_path, flags)` syscall (§9.1) handles path-to-path symbolic mappings — that's the Plan 9 `bind`, unchanged.
+
+#### 9.6.2 Why decomposed
+
+| Property | Combined Plan 9 `mount` | Linux NFS `mount` | Decomposed `attach_9p + mount` |
+|---|---|---|---|
+| Transport-setup in kernel | No | Yes | No |
+| Connection management in kernel | No | Yes | No |
+| One syscall per "mount a server" action | Yes | Yes | No (two) |
+| Composable (mount a sub-tree of a mount) | Harder | No | Yes |
+| Linux-compat shim location | userspace (translates to attach+mount) | kernel | userspace |
+| Adding new transport types | No kernel change | Per-type kernel code | No kernel change |
+| Spoor representing an open 9P session is a first-class kernel object | No (mount is the only way to use 9P) | No | Yes |
+
+The decomposition trades one syscall for two and gains: kernel stays out of connection management, the attach_9p result is usable without a mount (ad-hoc 9P RPCs, future agent-style daemons), composition works across mounts, Linux-vs-Plan9 lives purely in userspace as a libc shim.
+
+Modern Linux arrived at the same conclusion (independently): `fsopen` + `fsconfig` + `fsmount` + `move_mount` decompose `mount(2)` into 4 syscalls. Thylacine's 2-syscall decomposition is the same idea with less surface area, because attach_9p is the only transport-setup the kernel knows about.
+
+#### 9.6.3 Plan 9 native programs
+
+A Plan 9 program calling `mount(fd, afid, mountpoint, flags, spec)`:
+
+```c
+// musl/Plan9-libc shim, on Thylacine:
+int mount(int fd, int afid, char *mountpoint, int flags, char *spec) {
+    int t = attach_9p(fd, spec, /*n_uname=*/0);   // afid handling: see §9.6.5
+    if (t < 0) return t;
+    int rc = mount_syscall(t, mountpoint, flags);
+    close(t);                                      // mount holds its own ref
+    return rc;
+}
+```
+
+The shim is 5 lines; the kernel sees only the decomposed primitives.
+
+#### 9.6.4 Linux compat
+
+A Linux program calling `mount(source, target, "9p", flags, "trans=fd,rfdno=N,...")`:
+
+```c
+// musl shim on Thylacine (Phase 6+):
+int mount(const char *source, const char *target, const char *type,
+          unsigned long flags, const void *data) {
+    if (strcmp(type, "9p") == 0) {
+        int rfdno = parse_rfdno(data);              // from option string
+        int aname_len; const char *aname = parse_aname(data);
+        int t = attach_9p(rfdno, aname, aname_len, /*n_uname=*/0);
+        if (t < 0) { errno = -t; return -1; }
+        int rc = mount_syscall(t, target, flags_to_mflags(flags));
+        close(t);
+        return rc;
+    }
+    // Other fstypes: ENODEV at v1.0; FUSE-style proxy at v1.x.
+    errno = ENODEV;
+    return -1;
+}
+```
+
+The kernel has **zero** Linux-specific code. v9fs option parsing happens in the shim; the shim composes attach_9p + mount.
+
+#### 9.6.5 Authentication (afid)
+
+Plan 9's `mount` takes a separate auth fd. At v1.0 Thylacine ships no-auth (matches the Stratum-internal-trust model — Stratum's threat model is offline-attack-resistance via the `.key` sidecar; live-protocol auth is out of v1.0 scope). The `n_uname` arg is preserved so Linux v9fs `uname=`/`access=` options propagate.
+
+v1.1+ adds `attach_9p_auth(transport_spoor_fd, auth_spoor_fd, aname, n_uname) → new_spoor_fd` as a second flavor when authentication backends land. No kernel ABI break — additive syscall.
+
+#### 9.6.6 Lifecycle
+
+The mount lifecycle composes naturally with existing refcounting:
+
+- **`attach_9p`** allocates a `p9_client` + a `dev9p`-backed Spoor referencing it. The Spoor holds the only ref to the client. Caller gets an fd referencing the Spoor.
+- **`mount`** adds a `(target_path, Spoor_ref)` entry to the Territory's mount table; this bumps the Spoor's refcount.
+- **Caller can close the attach_9p fd** after `mount` — the mount table holds the ref. Caller can also keep the fd to do ad-hoc 9P walks on the same session without going through the namespace.
+- **`unmount(target_path)`** removes the mount-table entry; drops the Spoor ref.
+- **When the Spoor's refcount hits 0**, its dev9p vtable's close path destroys the `p9_client` (which closes the transport).
+- **`rfork(RFNAMEG=0)`** shares the Territory → shares the mount table → all Spoors keep their existing refs.
+- **`rfork(RFNAMEG=1)`** clones the Territory → clones the mount table → bumps each mount Spoor's refcount. Procs in the new Territory see the same backing clients but can mount/unmount independently.
+- **Territory destruction** releases each mount entry, decrementing Spoor refs.
+
+Mount-lifecycle invariants extend `specs/namespace.tla` (the existing bind / cycle-freedom / isolation spec) with:
+- A mount table is a finite set of `(path, Spoor)` pairs.
+- Every Spoor in the table has refcount ≥ 1 contributed by the table.
+- `mount` is idempotent under (path, Spoor) equality.
+- `unmount` removes one entry; the Spoor's refcount drops by 1.
+- Territory destroy releases all entries.
+
+### 9.7 Open design questions
 
 None at Gate 3.
 
-### 9.7 Summary
+### 9.8 Summary
 
-Per-process territory, `bind` / `mount` / `unmount` as the only composition operations. `Dev` vtable for kernel devices; userspace drivers as 9P servers. Standard `/dev/`, `/proc/`, `/ctl/` paths. Driver crash recovery via process supervision.
+Per-process territory, `bind` / `attach_9p` / `mount` / `unmount` as the only composition operations. `Dev` vtable for kernel devices; `dev9p` is a Dev whose vtable proxies to the kernel 9P client — userspace drivers and remote filesystems both present as Spoors with no semantic distinction. Standard `/dev/`, `/proc/`, `/ctl/` paths. Driver crash recovery via process supervision.
 
 ---
 
@@ -1145,9 +1253,10 @@ The syscall interface is Plan 9-heritage, not POSIX. The syscall table is small 
 | `fstat(fd, buf, n)` | Stat an open fd |
 | `create(name, mode, perm)` | Create a file |
 | `remove(name)` | Remove a file |
-| `bind(old, new, flags)` | Bind in territory |
-| `mount(fd, afd, old, flags, aname)` | Mount 9P server |
-| `unmount(name, old)` | Unmount |
+| `bind(old, new, flags)` | Bind path-to-path in territory (Plan 9 symbolic bind) |
+| `attach_9p(transport_fd, aname, n_uname) → spoor_fd` | Wrap a byte-pipe Spoor in a kernel 9P client; return a Spoor representing the 9P tree's root (§9.6) |
+| `mount(source_spoor_fd, target_path, flags) → 0` | Graft a Spoor's tree at `target_path`. Source can be any Spoor — `dev9p`-backed from `attach_9p`, kernel-Dev-backed, or a sub-tree (§9.6) |
+| `unmount(target_path)` | Remove a mount entry; release the Spoor ref |
 | `rfork(flags)` | Create process/thread |
 | `exec(name, argv)` | Replace process image |
 | `exits(msg)` | Terminate process |
