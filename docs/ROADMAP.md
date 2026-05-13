@@ -29,32 +29,58 @@ Phase 1  ─ Kernel skeleton                      [foundation]
             Boot, memory, exception vectors, UART, hardening defaults
 
 Phase 2  ─ Process model + scheduler + handles  [core kernel]
-            rfork, exec, territory, EEVDF, handle table, BURROW manager
+            rfork, exec, territory, EEVDF, handle table
 
-Phase 3  ─ Device model + userspace drivers     [device layer]
-            Dev vtable, VirtIO core, userspace virtio-blk/net/input/gpu
+Phase 3  ─ Address spaces + page faults + exec  [userspace ramp]
+            Per-Proc TTBR0, fault handler, BURROW mapping, /init in EL0
 
-Phase 4  ─ 9P client + Stratum integration      [storage]
-            Pipelined 9P client, Stratum mount, janus, ramfs → Stratum
+Phase 4  ─ Device model + userspace drivers     [device layer]
+            Dev vtable, VirtIO core, userspace virtio-blk/net/input/gpu,
+            hw-handle SVC surface (MMIO + IRQ + DMA + BURROW + rfork-w-caps)
 
-Phase 5  ─ Syscall surface + musl + Utopia      [userspace milestone]
+Phase 5  ─ 9P client + Stratum integration      [storage] ★ THIS DOC'S §7
+            Pipelined 9P client (specs/9p_client.tla first); kernel mounts
+            stratumd's Unix socket; .key sidecar unwrap; janus key agent;
+            /ctl/ admin synthetic FS consumed; ramfs → Stratum pivot.
+            Stratum v2 is shipping; binds to its stable 9P2000.L wire +
+            libstratum-9p ABIs per stratum/v2/docs/OS-INTEGRATION.md.
+
+Phase 6  ─ Syscall surface + musl + Utopia      [userspace milestone]
             Full syscall table, musl port, uutils-coreutils, rc, bash,
             poll, futex, pty, signals, /proc, /dev/pts/, Utopia ships
 
-Phase 6  ─ Linux compat + network               [practical OS]
+Phase 7  ─ Linux compat + network               [practical OS]
             Linux ARM64 binary shim, container runner, network stack,
             polished Utopia + binary shims = practical working OS
 
-Phase 7  ─ Hardening + audit + v1.0-rc          [stable substrate]
+Phase 8  ─ Hardening + audit + v1.0-rc          [stable substrate]
             Fuzz, audit, benchmarks, 8-CPU stress, docs, v1.0-rc tag.
-            If Halcyon (Phase 8) slips, this v1.0-rc ships as v1.0.
+            If Halcyon (Phase 9) slips, this v1.0-rc ships as v1.0.
 
-Phase 8  ─ Halcyon + v1.0 final                 [graphical layer]
+Phase 9  ─ Halcyon + v1.0 final                 [graphical layer]
             Framebuffer driver extensions, scroll-buffer shell, image,
             video, Halcyon-surface audit, v1.0 final release.
 
 Post-v1.0 (v1.1, v1.2, v2.0+) — see §16
 ```
+
+### 2.1 Section ↔ phase mapping
+
+The execution numbering above reflects what status docs use (`docs/phaseN-status.md`). This document's section headers in §4-§11 are stale by one phase relative to execution numbering — they were written before Phase 3 (address spaces + exec + /init) was added as a distinct phase. The Stratum amendment landing alongside this revision updates content but does NOT yet renumber the headers; doing so is a follow-up doc-only churn pass. Until then:
+
+| Execution phase | This doc's section | This doc's header label (stale) |
+|---|---|---|
+| Phase 1 — Kernel skeleton | §4 | "Phase 1: Kernel skeleton" |
+| Phase 2 — Process model + scheduler + handles | §5 | "Phase 2: Process model + scheduler + handles" |
+| Phase 3 — Address spaces + page faults + exec | (no section yet — see `docs/phase3-status.md`) | — |
+| Phase 4 — Device model + userspace drivers | §6 | "Phase 3: Device model + userspace drivers" |
+| **Phase 5 — 9P client + Stratum integration** | **§7** | **"Phase 4: 9P client + Stratum integration"** |
+| Phase 6 — Syscall surface + musl + Utopia | §8 | "Phase 5: Syscall surface + musl + Utopia" |
+| Phase 7 — Linux compat + network | §9 | "Phase 6: Linux compat + network" |
+| Phase 8 — Hardening + audit + v1.0-rc | §10 | "Phase 7: Hardening + audit + v1.0-rc" |
+| Phase 9 — Halcyon + v1.0 final | §11 | "Phase 8: Halcyon + v1.0 final" |
+
+When in doubt, the **execution phase** is what `docs/phaseN-status.md`, `memory/project_active.md`, and commit messages use. This doc's section headers are the *original* Phase 0 plan; the content has been updated continuously but the header renumber has been deferred.
 
 ---
 
@@ -79,9 +105,9 @@ If TLC fails, the merge fails — the spec is fixed first, then the implementati
 
 Pre-commit: full test suite on default build. Pre-merge for invariant-bearing changes: all matrices + all specs.
 
-### 3.4 Stratum is the reference deployment environment from Phase 4 onward
+### 3.4 Stratum is the reference deployment environment from Phase 5 onward
 
-Once Phase 4 lands, all development work happens inside a Thylacine QEMU VM with Stratum as the root filesystem. **Eating the dog food** from Phase 4 onward.
+Once Phase 5 (= §7 by header label) lands, all development work happens inside a Thylacine QEMU VM with Stratum as the root filesystem. **Eating the dog food** from Phase 5 onward. Stratum v2 is shipping today (2026 Q2) — the integration binds to its stable 9P2000.L wire surface + Unix-socket-bound `stratumd` daemon, exactly as documented in `stratum/v2/docs/OS-INTEGRATION.md`.
 
 ### 3.5 No in-kernel drivers (with bounded exceptions)
 
@@ -402,85 +428,134 @@ None. This is the foundation phase.
 
 ---
 
-## 7. Phase 4: 9P client + Stratum integration
+## 7. Phase 5 (= header label "Phase 4"): 9P client + Stratum integration
 
-**Goal**: kernel speaks 9P2000.L + Stratum extensions. Stratum mounts as `/`. janus runs as userspace 9P server. The system boots from Stratum. Pipelined 9P client achieves throughput-budget targets.
+> **Phase-numbering note**: this section's header label is stale by one — see §2.1. The chunk-tracking name and the status-doc filename are **Phase 5** (`docs/phase5-status.md`). This section's content is the binding plan; the renumber is a future doc-only churn pass.
 
-### 7.1 Deliverables
+**Goal**: Thylacine's kernel speaks 9P2000.L + Stratum extensions; mounts Stratum at `/`; `stratumd` runs as a userspace driver-as-9P-server within Thylacine's process model; the `.key` sidecar is unwrapped via janus during boot; Stratum's `/ctl/` admin synthetic FS is consumed by Thylacine userspace; the system boots from a real Stratum pool. Pipelined 9P client achieves the latency + throughput budgets per VISION §4.5.
 
-**9P client (kernel)**:
-- `kernel/9p_client.c`: 9P2000.L wire protocol implementation. Stratum extensions (`Tbind`, `Tunbind`, `Tpin`, `Tunpin`, `Tsync`, `Treflink`, `Tfallocate`).
-- `kernel/9p_session.c`: per-session state (tag pool, outstanding-request table, send queue, receive loop). Pipelined per `ARCHITECTURE.md §21`.
-- `kernel/9p_attach.c`: `mount` syscall integration. `Tattach` with subvolume name as `aname`.
-- Per-process 9P connection management: connection established at `rfork`; closed at `exits`.
+**Stratum v2 status**: feature-complete and shipping (2026 Q2). The 9P2000.L wire surface + Stratum extensions + libstratum-9p ABIs are stable per `stratum/v2/docs/OS-INTEGRATION.md`. **No external delivery dependency** — Phase 5 entry consumes a known-stable integration target.
 
-**Stratum daemon integration**:
-- `init/joey.c` (extend): after Phase 2's UART shell:
-  1. Mount ramfs at `/`.
-  2. Start `stratum` daemon (reads from VirtIO block; presents 9P server at `/var/run/stratum.sock`).
-  3. Start `janus` daemon (key agent at `/dev/janus/`).
-  4. Remount `/` from Stratum (kernel umounts ramfs from `/`; mounts Stratum 9P).
-  5. Drop into UART debug shell (replaced by Halcyon at Phase 8 — the final phase of v1.0).
-- `init/janus-client.c`: kernel-level janus client for cryptographic key unwrap during boot.
+### 7.1 The integration model
 
-**Stratum coordination**:
-- Phase 4 of Thylacine depends on Stratum Phase 9 (9P server + Stratum extensions). Stratum is on Phase 8 currently; Phase 9 is queued.
-- Integration testing: mount a Stratum volume produced by Stratum's reference test suite; verify all standard FS operations.
+Thylacine binds to Stratum the same way Linux v9fs does, with adjustments for Thylacine's userspace-driver-everything posture:
+
+- **`stratumd` is a userspace daemon under Thylacine's process model**. One process per Stratum pool. Bound to a Unix socket (Thylacine's equivalent: a 9P endpoint reachable inside the territory). Started early in the boot sequence as one of the first non-kernel procs; survives root pivot.
+- **Two sockets per stratumd**: the FS socket (Thylacine's kernel 9P client mounts this at `/`) and the `/ctl/` socket (admin / observability synthetic FS; mounted at `/srv/stratum-ctl/` by userspace tools).
+- **`.key` sidecar is a separate-factor security boundary**. Stored separately from the pool block device — initramfs unwraps it before `stratumd` consumes it. Key-delivery options per `stratum/v2/docs/OS-INTEGRATION.md §5`: passphrase + Argon2id, TPM-sealed, hardware token, network keyserver, Shamir split. Thylacine v1.0 ships passphrase + Argon2id as the default; janus handles the unwrap.
+- **`stratum` unified CLI** lives in `/sbin/stratum` (carried in the ramfs initially, lives on Stratum-mounted `/sbin/` post-pivot).
+
+### 7.2 Deliverables
+
+**9P client (kernel)** — `kernel/9p_*`:
+- `kernel/9p_wire.c`: 9P2000.L wire codec — message framing, marshalling, demarshalling per `stratum/v2/docs/reference/20-9p.md`. Supports the 9P2000.L baseline (`Tlopen`, `Tlcreate`, `Tsymlink`, `Tmknod`, `Trename`, `Treaddir`, `Tstatfs`, `Tgetattr`, `Tsetattr`, `Treadlink`, `Tlock`, `Tgetlock`, `Tlink`, `Tmkdir`, `Trenameat`, `Tunlinkat`) + Stratum extensions (`Tsync`, `Treflink`, `Tbind`, `Tunbind`, `Txattrwalk`, `Txattrcreate`, `Tgetxattr`, `Tsetxattr`, `Tlistxattr`, `Tremovexattr`).
+- `kernel/9p_session.c`: per-session state — tag pool (`I-10` per-session tag uniqueness, monotonic generation), fid table (`I-11` per-session fid identity stable across open lifetime), outstanding-request table, send queue, receive loop. Pipelined per `ARCHITECTURE.md §21` (out-of-order completion + flow control).
+- `kernel/9p_transport.c`: Unix-socket transport on top of the Spoor layer. Thylacine's "Unix socket" inside a guest VM is a Spoor that the kernel routes between the client process's address space and `stratumd`'s. Phase 5 may also expose an in-VM virtio-socket variant for performance.
+- `kernel/9p_attach.c`: `mount` syscall integration. `Tattach` with subvolume name as `aname`. Connection setup at process-creation time per `VISION.md §11` (one connection per Proc at v1.0).
+- Per-process 9P connection management: connection established at `rfork`; closed at `exits`. Cleanup walks the fid table.
+
+**`stratumd` lifecycle** (`init/joey.c` + new helpers):
+1. ramfs holds `stratumd`, `janus`, `init` binaries + the wrapped `.key` sidecar.
+2. init prompts for passphrase (UART at Phase 5; Halcyon prompt at Phase 9).
+3. init invokes `janus unwrap < /run/stratum.key.wrapped > /run/stratum.key` (Argon2id-derived; `mlock`'d).
+4. init forks `stratumd --pool /dev/vblk0 --key /run/stratum.key --fs-listen /run/stratum/fs.sock --ctl-listen /run/stratum/ctl.sock`.
+5. init waits until `/run/stratum/fs.sock` binds (readiness signal per OS-INTEGRATION.md §4).
+6. init mounts the FS socket at `/sysroot` over 9P2000.L (`mount -t 9p -o trans=unix,version=9p2000.L,uname=root,access=user,msize=8388608 /run/stratum/fs.sock /sysroot`).
+7. init pivots root into `/sysroot`. Ramfs detached, freed.
+8. Inside the new namespace, `/run/stratum/{fs,ctl}.sock` are accessible (the post-pivot `/run/` is the same backing store; the socket fds are preserved). `stratumd` survives the pivot.
+9. Post-pivot init mounts `/srv/stratum-ctl/` from the `/ctl/` socket so userspace tools can read pool/dataset/snapshot state.
+
+**janus key agent** (Stratum's binary, runs unchanged):
+- Runs as another userspace 9P server. Spoor at `/srv/janus/`.
+- Wraps the typed passphrase through Argon2id (or whatever backend is configured).
+- Authentication backends portable across Linux/macOS/Thylacine: passphrase, TPM 2.0, YubiKey, PKCS#11.
+
+**Boot-failure paths** (must surface clearly):
+- `STM_ECORRUPT` (Merkle mismatch) → refuse to boot, drop to UART recovery shell.
+- `STM_EBADTAG` (AEAD MAC failure on superblock read) → refuse to boot.
+- `STM_EBADKEY` (wrong `.key`) → prompt for re-unlock.
+- `STM_EWEDGED` (pool marked wedged at prior unmount) → refuse to boot, drop to UART recovery shell with `stratum fs verify` available.
 
 **Specs**:
-- `specs/9p_client.tla`: tag uniqueness, fid lifecycle, out-of-order completion, flow control.
+- `specs/9p_client.tla`: tag uniqueness (`I-10`), fid lifecycle (`I-11`), out-of-order completion, flow control. **Spec-first per CLAUDE.md** — written before `kernel/9p_*.c` lands.
 
-### 7.2 Exit criteria
+### 7.3 Exit criteria
 
-- [ ] `stratum` daemon starts from initramfs, mounts a Stratum volume on VirtIO block.
-- [ ] Kernel mounts Stratum 9P server at `/`.
-- [ ] `ls /`, `cat /etc/hostname`, `mkdir /tmp/test` work via Stratum.
-- [ ] `janus` starts and successfully unwraps a passphrase-protected dataset key.
-- [ ] **Reboot test**: data written before reboot is present after reboot (Stratum crash safety verified at OS boundary).
+Substrate + integration:
+- [ ] `specs/9p_client.tla` clean under TLC. At least 4 buggy `.cfg` variants exist demonstrating I-10 / I-11 / out-of-order / flow-control violations under buggy assumptions.
+- [ ] `stratumd` boots from initramfs against a real Stratum pool on virtio-blk.
+- [ ] Kernel mounts the FS socket at `/`. `ls /`, `cat /etc/hostname`, `mkdir /tmp/test`, `echo hello > /tmp/test/h && cat /tmp/test/h` all work via Stratum end-to-end.
+- [ ] janus successfully unwraps a passphrase-protected pool key.
+- [ ] **Reboot test**: data written before reboot is present after reboot. Stratum's three-phase sync + Merkle-rooted metadata verifies at-boot. No data loss across abrupt power cycle.
+- [ ] **Pull-the-plug test** (per OS-INTEGRATION.md §19): kill `stratumd` with SIGKILL mid-write; verify next mount succeeds and state is consistent post-recovery.
 - [ ] 9P session: 10,000 open/read/write/close cycles on a Stratum file without protocol error or leak.
-- [ ] **Pipelined throughput**: process issuing 32 concurrent reads on a Stratum file achieves throughput ≥ 90% of the session's bandwidth limit (vs naive serialized 9P).
+- [ ] **Pipelined throughput**: a process issuing 32 concurrent reads on a Stratum file achieves throughput ≥ 90% of the session's bandwidth limit (vs the ~3% naive serialized 9P would deliver at typical RTT).
 - [ ] **9P round-trip latency** (loopback Stratum): p99 < 500µs (VISION §4.5).
-- [ ] Per-process 9P connections: 100 processes each with their own connection to Stratum work without leaks.
-- [ ] Stratum extensions verified: `Tbind` composes a subvolume into a connection's territory; `Tpin` pins a snapshot; `Tsync` commits.
-- [ ] `specs/9p_client.tla` clean under TLC.
-- [ ] No P0/P1 audit findings on the 9P client.
+- [ ] Per-process 9P connections: 100 processes each with their own connection to Stratum work without leaks; total fid count + kernel memory tracked.
+- [ ] Stratum extensions verified end-to-end: `Tbind` composes a subvolume into a connection's territory; `Tsync` returns after the dirty buffer drains; `Treflink` produces a shared-block clone with `STAT_NLINK` accounting correct; xattr family round-trips a `security.selinux` value bit-exact.
+- [ ] No P0/P1 audit findings on the 9P client (R-series prosecutor pass scoped to `kernel/9p_*.c`).
 
-### 7.3 Specs landing this phase
+Admin + observability:
+- [ ] `/srv/stratum-ctl/` mounted; `cat /srv/stratum-ctl/version` reports the running stratumd build.
+- [ ] `echo start > /srv/stratum-ctl/pools/<uuid>/scrub-trigger` initiates a scrub; `cat /srv/stratum-ctl/pools/<uuid>/scrub` reports progress.
+- [ ] **Atomic-snapshot upgrade smoke test** (per OS-INTEGRATION.md §8): take a snapshot via `/srv/stratum-ctl/datasets/<root-id>/create-snapshot`; intentionally write garbage to a tracked file; rollback via `/srv/stratum-ctl/datasets/<root-id>/rollback-snapshot`; verify the file is restored bit-exact.
+- [ ] Prometheus exposition reachable at `/srv/stratum-ctl/pools/<uuid>/metrics/prometheus`; scraped values include `stratum_pool_total_bytes`, `stratum_pool_used_bytes`, `stratum_scrub_state`.
+- [ ] `/srv/stratum-ctl/events` append-only log surfaces every admin verb fired during the boot.
 
-- `specs/9p_client.tla` (mandatory).
+POSIX coverage on Stratum:
+- [ ] All Stratum v2 live POSIX features (per OS-INTEGRATION.md §6: inodes / dirents / xattrs / file seals / advisory locks / statx / name_to_handle_at / copy_file_range / single-dataset reflink / rename family / fallocate family / symlinks / hard links / O_TMPFILE / posix_fadvise / inline-data optimization / snapshots) exercise correctly through Thylacine's 9P client + syscall layer. The bound is "Stratum's v2 POSIX test surface that runs against the Linux v9fs client passes equivalently against Thylacine's kernel 9P client."
 
-### 7.4 Audit-trigger surfaces introduced or modified
+### 7.4 Specs landing this phase
+
+- `specs/9p_client.tla` (mandatory; spec-first).
+
+### 7.5 Audit-trigger surfaces introduced or modified
 
 | Surface | Files | Why |
 |---|---|---|
-| 9P client | `kernel/9p_client.c`, `kernel/9p_session.c`, `kernel/9p_attach.c` | Wire protocol correctness, fid lifecycle, tag uniqueness, pipelining |
-| Boot transition | `init/joey.c` | ramfs → Stratum handoff correctness |
+| 9P wire codec | `kernel/9p_wire.c` | Wire-protocol correctness; malformed-message defense; integer overflow on length fields |
+| 9P session state | `kernel/9p_session.c` | I-10 tag uniqueness, I-11 fid lifecycle, out-of-order completion, flow control |
+| 9P transport | `kernel/9p_transport.c` | Unix-socket Spoor wiring + transport-layer message framing |
+| Mount + attach path | `kernel/9p_attach.c` | `mount` syscall integration; per-process connection setup at rfork |
+| Boot transition | `init/joey.c`, `init/stratumd-launch.c` | Initramfs → pivot → post-pivot ordering; `.key` lifetime; stratumd readiness probe |
+| Key unwrap | `init/janus-client.c` or libthyla-rs janus wrapper | `.key` sidecar handling, `mlock` + `MADV_DONTDUMP`, shred-after-consume |
 
-### 7.5 Risks
+### 7.6 Risks
 
-- **9P client correctness**: fid management, walk chains, clunk on close — these are subtle. Stratum's server is strict (it's been audit-loop-hardened). Mitigation: spec first; integrate-with-Stratum testing from day one.
-- **Stratum dependency**: Stratum Phase 9 is the integration target. If Stratum's Phase 9 timeline slips, Thylacine Phase 4 waits. Mitigation: coordinate timelines; communicate any Stratum-side issues immediately. Phases 1-3 of Thylacine can proceed in parallel with Stratum's Phase 8-9 work.
-- **Stratum 9P extensions**: `Tbind` etc. are Stratum-specific; their semantics must be exactly aligned. Mitigation: exhaustive integration tests; spec the extensions in `9p_client.tla`.
-- **janus integration**: janus is a userspace 9P server with its own protocol details. Mitigation: janus runs unchanged from its Linux/macOS deployment; the integration is just "mount and use."
-- **Boot sequencing**: ramfs → Stratum transition is a one-shot operation that must be correct. Mitigation: documented sequence; failure means recovery boot (BusyBox fallback).
+- **9P client correctness**: fid management, walk chains, clunk on close — these are subtle. Stratum's server is strict (it's been audit-loop-hardened through Stratum's R0..R136+ series). Mitigation: spec first; integrate-with-Stratum testing from day one — `tools/test.sh` boots Thylacine against a real Stratum pool produced by `stratum/v2/tools/stratum/`.
+- **Stratum extensions semantics**: `Tsync` / `Treflink` / `Tbind` / `Txattrwalk` are Stratum-specific; their semantics must be exactly aligned with `stratum/v2/docs/reference/20-9p.md`. Mitigation: exhaustive bidirectional integration tests; spec the extensions in `9p_client.tla`.
+- **Boot sequencing**: ramfs → Stratum transition is a one-shot operation that must be correct. Mitigation: documented sequence (this section + OS-INTEGRATION.md §4); failure path drops to UART recovery shell with `stratum fs verify` available; the recovery shell is also where `STM_ECORRUPT` / `STM_EBADTAG` / `STM_EBADKEY` / `STM_EWEDGED` get surfaced and resolved.
+- **Key lifetime**: the unwrapped key sits in RAM between janus-unwrap and stratumd-consume. Mitigation: `mlock` + `MADV_DONTDUMP` per OS-INTEGRATION.md §5; `explicit_bzero` the ramfs copy after `stratumd` acknowledges consumption.
+- **Pipelining bug surface**: out-of-order completion is the load-bearing throughput claim; bugs here are subtle (e.g., a fid clunked on session A is reused on session B before the server confirms; a stale Rread arrives after the fid is recycled). Mitigation: `9p_client.tla` covers it; integration tests stress it.
+- **Per-process connection scaling**: 100 procs × 1 connection = 100 sockets + ~100 KB session state. Mitigation: bounded; tracked; v2.x will multiplex if it becomes a constraint (deferred per VISION §11).
 
-### 7.6 Dependencies
+### 7.7 Dependencies
 
-- Phase 3 (kernel virtio-blk userspace driver — Stratum reads from it).
 - Phase 2 (handle table, BURROW manager — for BURROW transfer over 9P).
-- **External**: Stratum Phase 9 (9P server + extensions).
+- Phase 4 (kernel virtio-blk userspace driver — stratumd reads through it).
+- **External (READY)**: Stratum v2 stable ABIs + binaries (`stratumd`, `stratum`, `janus`). All shipping today.
 
-### 7.7 Parallel opportunities
+### 7.8 Parallel opportunities
 
-- 9P wire protocol implementation + session state can be developed in parallel.
-- Stratum extension messages can be added incrementally; baseline 9P2000.L lands first.
-- janus integration is independent of the rest of Phase 4; can land any time after Stratum mounts.
+- 9P wire codec implementation + session state can be developed in parallel.
+- Stratum extension messages can be added incrementally; the 9P2000.L baseline lands first.
+- janus integration is independent of the rest of Phase 5; can land any time after Stratum mounts.
+- `specs/9p_client.tla` proceeds in parallel with early `kernel/9p_*.c` skeleton.
 
-### 7.8 Performance budget contribution
+### 7.9 Performance budget contribution
 
-- 9P round-trip latency (loopback Stratum): p99 < 500µs.
+- 9P round-trip latency (loopback Stratum, Unix-socket transport): p99 < 500µs at Phase 5 exit; bare-metal target tightened to p99 < 50µs in Phase 8 hardening per VISION §4.5.
 - 9P pipelined throughput: ≥ 90% of session bandwidth at 32 concurrent ops.
-- Reboot time (Stratum mount + key unwrap + remount): < 5s (contributes to total boot-to-login budget).
+- Reboot time (Stratum mount + key unwrap + remount): < 5s (contributes to total boot-to-login budget; bare-metal target is < 1s).
+
+### 7.10 What Phase 5 deliberately does NOT do
+
+- **In-kernel Stratum driver bypassing 9P**: designed in `ARCHITECTURE.md §14.4`; implemented post-v1.0. v1.0 mounts via the kernel's 9P client; the discipline is "Thylacine talks to Stratum exactly as any 9P client would."
+- **Multi-pool composition**: today, one pool per kernel mount. Multiple pools = multiple `stratumd` instances + multiple mounts at distinct paths (e.g., `/var/data` from one pool, `/home/legacy` from another).
+- **Cross-dataset reflink**: gated on Stratum's rekeying primitive (Stratum-upstream roadmap).
+- **inotify/fanotify**: Stratum-upstream roadmap; until then, polling is the fallback.
+- **OTLP exposition**: Prometheus is the v2.x baseline; OTLP is a sidecar translator if needed.
+- **Cross-phase pulls**: P4-Id (virtio-net `/dev/ether0` 9P surface) and virtio-input `/dev/cons` 9P surface were the remaining Phase 4 §6.2 boxes; they're naturally absorbed by Phase 5 once the kernel learns to host a userspace 9P server (the symmetric mechanism to mounting one). Both close as Phase 5 side effects.
 
 ---
 

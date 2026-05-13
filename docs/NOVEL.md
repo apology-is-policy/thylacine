@@ -23,7 +23,7 @@ The goal is to make `ARCHITECTURE.md` easier to write: each angle becomes a know
 | 2 | Userspace drivers via typed handles + BURROW zero-copy | Medium | 7–10 KLOC C99 + 8–12 KLOC Rust | Phase 2-3 |
 | 3 | Pipelined 9P client with out-of-order completion | Low-medium | 3–5 KLOC C99 | Phase 4 (foundational for 4+) |
 | 4 | Halcyon: shell as the graphical environment | Medium-high | 8–12 KLOC Rust | Phase 8 (final) |
-| 5 | Stratum as native FS with territory coupling | Low | 4–6 KLOC C99 (kernel side) | Phase 4 |
+| 5 | Stratum as native FS with territory coupling | Low | 4–6 KLOC C99 (kernel side) | Phase 5 |
 | 6 | EEVDF scheduler on Plan 9-heritage kernel | Medium | 4–6 KLOC C99 | Phase 2 |
 | 7 | SOTA security hardening from day one | Low-medium | 3–5 KLOC C99 (mostly compiler/linker config + targeted code) | Phase 1-2 |
 | 8 | Formal verification cadence: nine TLA+ specs | Low-medium | 4–6 KLOC TLA+ | Continuous |
@@ -77,7 +77,7 @@ Thylacine's totalization:
 **Dependencies**:
 - Kernel `Dev` infrastructure (Phase 2-3).
 - 9P client in kernel (Phase 4).
-- Stratum 9P server up at Phase 4 (external dependency on Stratum Phase 9).
+- Stratum v2 is feature-complete and shipping; Phase 5 consumes the stable 9P2000.L wire surface + libstratum-9p ABIs. No external delivery dependency remains.
 - Userspace 9P server framework (Phase 4-5; libraries for Rust + C).
 
 **Complexity**:
@@ -90,7 +90,7 @@ Thylacine's totalization:
 **Risk — Low**:
 - Plan 9 / 9Front have proven the model works.
 - 9P2000.L is well-documented and stable.
-- Stratum's 9P server is the integration target; Stratum already speaks the dialect we need.
+- Stratum v2's 9P2000.L server is the integration target; Stratum already speaks the dialect we need (and its OS-integration manual at `stratum/v2/docs/OS-INTEGRATION.md` is the canonical guide for the Thylacine binding).
 - Risk is in totalization rigor — it's tempting to ad-hoc a small subsystem instead of writing a 9P interface for it. The audit policy (CLAUDE.md) catches this.
 
 **Alternative approaches considered**:
@@ -341,19 +341,20 @@ The Rust implementation matters: parsing bash-subset syntax, managing the scroll
 
 The model:
 
-- Stratum runs as a userspace daemon. The kernel mounts it at `/` via `mount(stratum_fd, "/", ...)` after the initramfs phase.
-- The kernel's 9P client speaks 9P2000.L + Stratum extensions (Tbind, Tunbind, Tpin, Tunpin, Tsync, Treflink, Tfallocate) to Stratum.
-- Each Thylacine process gets its own 9P connection to Stratum (one connection per Proc; at v1.0 — see VISION §11 for the rationale).
+- Stratum runs as a userspace daemon (`stratumd`, one process per pool, bound to a Unix socket). The kernel mounts it at `/` via Thylacine's `mount` syscall, which translates to a 9P `Tattach` over the socket — the v9fs-equivalent integration model recommended in `stratum/v2/docs/OS-INTEGRATION.md §3-4`.
+- The kernel's 9P client speaks **9P2000.L + Stratum extensions** to Stratum: `Tsync` (explicit sync barrier on a fid), `Treflink` (single-dataset reflink; cross-dataset gated on Stratum's rekeying primitive, deferred upstream), `Tbind` / `Tunbind` (per-connection subvolume composition), `Txattrwalk` family (POSIX xattrs end-to-end), plus the full 9P2000.L baseline (`Tlopen`, `Tlcreate`, `Tsymlink`, `Tmknod`, `Trename`, `Treaddir`, `Tstatfs`, `Tgetattr`, `Tsetattr`, `Treadlink`, `Tlock`, `Tgetlock`, `Tlink`, `Tmkdir`, `Trenameat`, `Tunlinkat`).
+- Each Thylacine process gets its own 9P connection to Stratum (one connection per Proc; at v1.0 — see VISION §11 for the rationale). Stratum's per-connection fid namespace per `stratum/v2/docs/reference/20-9p.md` handles the isolation.
 - Per-connection Stratum territory = per-process Thylacine territory inside Stratum's purview. Composition within Stratum (multiple subvolumes overlaid) uses Stratum's `Tbind` / `Tunbind`. Composition across servers (Stratum + a network FS) uses Thylacine's `bind` / `mount` (kernel-level).
-- Stratum's per-extent encryption, Merkle integrity, lock-free metadata, snapshots, clones, send/recv, dedup — all transparent to the kernel. The kernel sees: 9P operations succeed or fail; when they succeed, the data is integrity-verified.
-- Stratum's `janus` key agent runs as another userspace 9P server (`/dev/janus/`). Halcyon, programs needing key-mediated operations, interact with janus over 9P.
+- Stratum's per-extent encryption (ML-KEM-768 + XChaCha20-Poly1305 hybrid), Merkle integrity, lock-free Bε-tree metadata, snapshots / hold / release / rollback, send/recv, dedup, tiered storage — all transparent to the kernel. The kernel sees: 9P operations succeed or fail; when they succeed, the data is integrity-verified.
+- Stratum's `janus` key agent runs as another userspace 9P server (`/srv/janus/`). Thylacine's boot path unwraps the `.key` sidecar via janus (passphrase / TPM / Argon2id / hardware token) before forking `stratumd`; programs needing key-mediated operations interact with janus over 9P just like any other server.
+- Stratum's admin synthetic 9P filesystem (`/ctl/`, served by `stratumd` on a second Unix socket) is consumed by Thylacine's userspace admin tools as a mounted 9P tree (typically at `/srv/stratum-ctl/`). Topology — pools / datasets / snapshots / scrub / events / Prometheus metrics — documented in `stratum/v2/docs/reference/22-ctl.md`.
 
 **Scope — in**:
-- Kernel 9P client speaking 9P2000.L + Stratum extensions (Phase 4).
+- Kernel 9P client speaking 9P2000.L + Stratum extensions (Phase 5, the integration phase).
 - `mount` syscall integration: `mount(fd, path, "subvol_name")` translates to `Tattach` with the subvolume name as `aname`.
 - Per-process 9P connection establishment at process creation (`rfork`).
 - Connection cleanup at process termination.
-- Initramfs → Stratum boot transition: ramfs holds `stratum`, `janus`, `init` binaries; init starts `stratum` + `janus`; kernel remounts root from Stratum.
+- Initramfs → Stratum boot transition per `stratum/v2/docs/OS-INTEGRATION.md §4`: ramfs holds `stratum`, `janus`, `init` binaries; init unwraps the `.key` sidecar; init forks `stratumd --pool ... --key ... --fs-listen ... --ctl-listen ...`; init waits for FS socket bind (readiness signal); init mounts `/sysroot` over 9P; init pivots root.
 - Stratum's authentication via janus 9P session at mount time.
 
 **Scope — deferred** (post-v1.0):
@@ -364,13 +365,14 @@ The model:
 - Stratum-specific kernel APIs that bypass 9P. The discipline: Thylacine talks to Stratum exactly as any 9P client would. If we need to bypass 9P for performance, we add a 9P extension or build the in-kernel driver — not a Stratum-specific syscall.
 
 **Done definition**:
-- Phase 4: kernel mounts Stratum at `/`; `ls`, `cat`, `mkdir`, `rm`, `cp` all work.
+- Phase 5: kernel mounts Stratum at `/`; `ls`, `cat`, `mkdir`, `rm`, `cp` all work.
 - Reboot test: data written before reboot is present after reboot, integrity-verified by Stratum's Merkle layer.
 - Per-process territory test: process A binds `/home/alice` from one subvolume, process B binds `/home/alice` from another; both succeed without interference.
 - janus integration: a passphrase-protected dataset can be unwrapped via janus and become readable.
 - 9P round-trip latency (Stratum loopback) p99 < 500µs.
 - Stress: 1000 concurrent file operations across 10 connections without leak or protocol error.
-- Encryption / snapshot / clone / send-recv operations tested at the Stratum-CLI level inside Thylacine.
+- Encryption / snapshot / clone / send-recv operations tested via the `stratum` CLI inside Thylacine.
+- Atomic-snapshot upgrade test (per `stratum/v2/docs/OS-INTEGRATION.md §8`): snapshot root dataset → simulate broken upgrade → rollback via `/ctl/datasets/<id>/rollback-snapshot` → reboot succeeds.
 
 **Dependencies**:
 - Stratum at Phase 9 (9P server + extensions). External dependency, coordinated.

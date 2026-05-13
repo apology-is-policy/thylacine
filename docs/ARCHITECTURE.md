@@ -1071,18 +1071,20 @@ This is the Plan 9 model, adopted unchanged.
 
 ### 10.2 9P dialect: 9P2000.L + Stratum extensions
 
-**Dialect**: 9P2000.L (the Linux-extended dialect). Includes the L-extension messages: `Tgetattr`, `Tsetattr`, `Treaddir`, `Tlock`, `Tlink`, `Tsymlink`, `Tmknod`, `Trename`, `Tflush`, `Trenameat`, `Tunlinkat`, `Txattrwalk`, `Txattrcreate`, `Tfsync`, `Tlcreate`, `Tmkdir`. Also covers POSIX file modes properly (vs vanilla 9P2000's restricted set).
+**Dialect**: 9P2000.L (the Linux-extended dialect; the `.L` distinguishes it from Plan 9's 9P2000). Includes the L-extension messages: `Tlopen`, `Tlcreate`, `Tsymlink`, `Tmknod`, `Trename`, `Treaddir`, `Tlock`, `Tgetlock`, `Tlink`, `Tmkdir`, `Trenameat`, `Tunlinkat`, `Tgetattr`, `Tsetattr`, `Treadlink`, `Tstatfs`, `Tfsync`, `Tflush`, `Txattrwalk`, `Txattrcreate`. Covers POSIX file modes properly (vs vanilla 9P2000's restricted set); the `.L` is what Linux's v9fs speaks to userspace 9P servers and what Stratum's `stratumd` exposes per `stratum/v2/docs/reference/20-9p.md`.
 
-**Stratum extensions** (committed at Stratum's Phase 9):
-- `Tbind` / `Rbind` — per-connection subvolume composition (within the Stratum connection's territory).
+**Stratum extensions** (committed in Stratum v2; stable per `stratum/v2/docs/OS-INTEGRATION.md §13` ABI envelope):
+- `Tsync` / `Rsync` — explicit sync barrier on a fid. Drains the dirty buffer through the three-phase commit; returns when durability is established. Maps to Linux's `fsync(2)` for files and `syncfs(2)` for the connection.
+- `Treflink` / `Rreflink` — `copy_file_range` with reflink semantics. **Single-dataset only at v2.x**; cross-dataset is gated on Stratum's per-dataset rekeying primitive (Stratum-upstream roadmap, returns `STM_EXDEV` until then).
+- `Tbind` / `Rbind` — per-connection subvolume composition (within the Stratum connection's territory). Composes a Stratum subvolume into the connection's view; the Thylacine territory layer composes ACROSS Stratum connections (e.g., Stratum + a network FS).
 - `Tunbind` / `Runbind` — undo the above.
-- `Tpin` / `Rpin` — pin a snapshot for the connection (prevents reclamation).
-- `Tunpin` / `Runpin` — release the pin.
-- `Tsync` / `Rsync` — explicit fsync.
-- `Treflink` / `Rreflink` — `copy_file_range` with reflink semantics.
-- `Tfallocate` / `Rfallocate` — `fallocate` with all FALLOC_FL_* flags.
+- `Txattrwalk`, `Txattrcreate`, `Tgetxattr`, `Tsetxattr`, `Tlistxattr`, `Tremovexattr` — POSIX xattr surface end-to-end. Sufficient to carry SELinux contexts (`security.selinux`), IMA signatures (`security.ima`), and arbitrary user xattrs.
 
-These are negotiated at session establishment; clients that don't support them fall back to the L-baseline.
+Extensions Thylacine does NOT speak at v1.0 (deferred per Stratum upstream or out-of-scope):
+- `Tpin` / `Tunpin` — snapshot pin/release for the connection. Pinning is currently handled via `/ctl/datasets/<id>/{hold,release}-snapshot` admin verbs on the `/ctl/` socket, which Thylacine consumes through `/srv/stratum-ctl/`. The protocol-level `T(un)pin` may land in a later Stratum release.
+- `Tfallocate` — `fallocate` with `FALLOC_FL_*` flags. Stratum exposes the full set (PUNCH/COLLAPSE/INSERT/ZERO/UNSHARE) via POSIX `fallocate(2)` on the v9fs layer; the protocol-level `Tfallocate` is not currently a distinct message in Stratum v2's wire surface — POSIX `fallocate` is plumbed through the standard 9P2000.L attribute paths. If a future Stratum release introduces a dedicated `Tfallocate` for richer semantics, Thylacine adds it then.
+
+These are negotiated at session establishment via the standard 9P2000.L `Tversion` capability-flag mechanism; clients that don't support them fall back to the L-baseline. Thylacine's kernel 9P client negotiates the full Stratum extension set at every session attach.
 
 ### 10.3 Pipes
 
@@ -1385,27 +1387,108 @@ In-kernel VirtIO transport core; userspace VirtIO device drivers from day one. P
 
 ### 14.1 Stratum as native filesystem
 
-Stratum is the native filesystem. It runs as a userspace daemon, exposing a 9P server (Stratum's Phase 9 deliverable). The kernel mounts it at `/` (or specified mount point) via the standard `mount` syscall.
+Stratum is the native filesystem. It runs as a userspace daemon (`stratumd`, one process per pool) bound to a Unix socket (within the Thylacine guest VM the socket is a Spoor that the kernel 9P client routes through). The kernel mounts it at `/` (or specified mount point) via the standard `mount` syscall, which translates to a 9P `Tattach` over the FS socket.
 
-Stratum is internally feature-complete (Phases 1-7 done; Phase 8 POSIX surface in progress; Phase 9 is the integration target). See `VISION.md §11` for the coordination story.
+**Stratum v2 is feature-complete and shipping** (2026 Q2). The integration consumes Stratum's stable ABIs documented in `stratum/v2/docs/OS-INTEGRATION.md`:
+
+| Stratum ABI | Thylacine consumer |
+|---|---|
+| 9P2000.L wire + Stratum extensions (Unix socket) | Kernel 9P client at `kernel/9p_*` (the primary integration; recommended path per OS-INTEGRATION.md §3) |
+| `libstratum-9p` C ABI | Userspace tools that need direct 9P access (typically reach the same data via the kernel's mount; the library is optional for Thylacine) |
+| `libstm_fs` in-process C ABI | NOT consumed (UNSTABLE per Stratum's ABI envelope; the in-process bypass is reserved for the case where the process is provably the sole writer — not applicable to Thylacine's mount model) |
+
+See `VISION.md §11` for the coordination story.
 
 ### 14.2 9P client (kernel)
 
-The kernel implements a 9P2000.L client with Stratum extensions (`Tbind`, `Tunbind`, `Tpin`, `Tunpin`, `Tsync`, `Treflink`, `Tfallocate`). Pipelined from day one (§21).
+The kernel implements a 9P2000.L client with the Stratum extensions enumerated in §10.2 above. Pipelined from day one (§21).
 
-Implementation (`kernel/9p_client.c`): wire protocol encode/decode, fid management, tag pool, outstanding-request table, dispatch loop. Spec: `9p_client.tla`.
+Implementation (`kernel/9p_*` — split across `9p_wire.c`, `9p_session.c`, `9p_transport.c`, `9p_attach.c`): wire protocol encode/decode, fid management, tag pool, outstanding-request table, dispatch loop, Unix-socket transport. Spec: `specs/9p_client.tla`.
 
 ### 14.3 Per-process 9P session
 
 At process creation, if the process inherits a Stratum mount, a fresh 9P connection is established. (Per VISION §11, one connection per Proc at v1.0; multiplexing is a v2.x optimization.) The connection is kept alive for the process's lifetime; closed at exit.
 
-Stratum sees N connections, one per Thylacine process, and gives each its own per-connection territory (Stratum's NOVEL angle #8). Thylacine's per-process territory and Stratum's per-connection territory are complementary layers (VISION §11).
+Stratum sees N connections, one per Thylacine process, and gives each its own per-connection territory (Stratum's per-connection fid namespace per `stratum/v2/docs/reference/20-9p.md`). Thylacine's per-process territory and Stratum's per-connection territory are complementary layers (VISION §11).
+
+### 14.3a Boot lifecycle (Stratum-mounted root)
+
+Canonical boot sequence per `stratum/v2/docs/OS-INTEGRATION.md §4`:
+
+```
+1. Boot firmware → kernel + initramfs.
+2. initramfs:
+   a. Find the pool device. e.g. /dev/vblk0 (virtio-blk) or the bare-metal NVMe.
+   b. Locate the wrapped .key sidecar. ramfs-shipped at v1.0;
+      tpm-sealed or hardware-token-stored at v1.x; Argon2id-from-typed-input
+      via janus.
+   c. Unwrap the master key via janus (passphrase + Argon2id default).
+   d. fork stratumd:
+        stratumd --pool /dev/<…> \
+                 --key /run/stratum.key \
+                 --fs-listen  /run/stratum/fs.sock \
+                 --ctl-listen /run/stratum/ctl.sock
+   e. Wait until /run/stratum/fs.sock binds (the readiness signal — do
+      NOT read the socket before it binds).
+   f. mount -t 9p -o trans=unix,version=9p2000.L,uname=root,access=user,msize=8388608 \
+        /run/stratum/fs.sock /sysroot
+   g. Pivot root into /sysroot.
+   h. Shred the in-memory unwrapped-key copy (explicit_bzero).
+3. Post-pivot: stratumd survives, reparented to PID 1 inside the new namespace.
+   - Optionally mount /run/stratum/ctl.sock at /srv/stratum-ctl/.
+   - Optionally start slate as system or per-user daemon (see §14.5).
+4. Long-running operations:
+   - Periodic snapshot via /srv/stratum-ctl/datasets/<id>/create-snapshot.
+   - Periodic scrub via /srv/stratum-ctl/pools/<uuid>/scrub-trigger.
+```
+
+**Failure-mode discipline** (the initramfs must surface these clearly):
+- `STM_ECORRUPT` (Merkle mismatch) → refuse to boot, recovery shell.
+- `STM_EBADTAG` (AEAD MAC failure) → refuse to boot.
+- `STM_EBADKEY` (wrong .key) → prompt for re-unlock.
+- `STM_EWEDGED` (fs marked wedged at prior unmount) → refuse to boot, run `stratum fs verify`.
+
+**`.key` sidecar lifetime**: between unwrap and stratumd-consume, the key is `mlock`'d + `MADV_DONTDUMP`'d (hibernation-leak defense). After `stratumd` acknowledges, the initramfs shreds its copy.
+
+### 14.3b Stratum `/ctl/` admin synthetic FS
+
+Stratum exposes a second 9P surface (admin / observability) per `stratum/v2/docs/reference/22-ctl.md`. Thylacine consumes it as just another 9P tree, typically mounted at `/srv/stratum-ctl/`:
+
+```
+/srv/stratum-ctl/
+├── version                            — daemon build info
+├── state                              — fs counter dump
+├── events                             — append-only audit log
+├── pools/<pool-uuid>/
+│   ├── status                         — Healthy / Degraded / Faulted
+│   ├── scrub                          — scrub state + counters
+│   ├── scrub-trigger                  — start / pause / resume / abort
+│   ├── metrics/prometheus             — Prometheus exposition
+│   └── devices/<id>/status            — per-device state
+├── datasets/<dataset-id>/
+│   ├── properties                     — effective properties
+│   ├── set-property                   — set a property
+│   ├── snapshots/<snap-id>            — per-snapshot info
+│   ├── create-snapshot                — admin verb
+│   ├── delete-snapshot                — admin verb
+│   ├── hold-snapshot                  — admin verb
+│   ├── release-snapshot               — admin verb
+│   └── rollback-snapshot              — admin verb
+├── debug/allocator-state/<device-id>  — diagnostic dump
+└── admin/
+    ├── peer                           — caller credentials (SO_PEERCRED)
+    └── clear-events                   — clear audit log
+```
+
+Auth is via `SO_PEERCRED` on the Unix socket (stratumd reads the connecting process's UID and gates admin verbs server-side). Thylacine's kernel preserves this credential through the 9P attach path so the trust boundary is intact.
+
+Coordination with Thylacine's `/ctl` (kernel admin Dev introduced at Phase 4 P4-D): the two surfaces are distinct namespaces. Thylacine's `/ctl` is OS-level (procs, memory, devices, kernel-base, sched); Stratum's `/ctl/` is storage-level (pools, datasets, snapshots, scrub). Userspace tools dial both as needed.
 
 ### 14.4 In-kernel Stratum driver — DESIGNED-NOT-IMPLEMENTED for v2.0
 
 **Status**: design committed at Phase 0; implementation is post-v1.0.
 
-**Motivation**: 9P-client mount adds one round-trip per FS operation. For root FS operations (where Stratum is the bottleneck), the round-trip is measurable. An in-kernel Stratum driver bypasses the 9P client by linking part of `libstratum.a` into the kernel.
+**Motivation**: 9P-client mount adds one round-trip per FS operation. For root FS operations (where Stratum is the bottleneck), the round-trip is measurable. An in-kernel Stratum driver bypasses the 9P client by linking part of `libstratum.a` into the kernel — corresponding to Stratum's UNSTABLE `libstm_fs` C ABI per `stratum/v2/docs/OS-INTEGRATION.md §2`. The same caveat applies: this ABI is `STM_UB_VERSION`-bound; bypassing 9P trades portability + ABI stability for performance.
 
 **Design**: Stratum's `libstratum.a` exposes a `stm_fs_*` C API. An in-kernel Stratum driver wraps this API as a kernel `Dev` registration:
 
@@ -1440,6 +1523,18 @@ Operations bypass the 9P round-trip; they're function calls into the linked-in `
 **Open at v2.0 entry**:
 - Whether the in-kernel Stratum runs in kernel context (full speed) or in a "kernel container" (a separate kernel VA region with restricted privileges).
 - Whether VMOs and direct mapping pass through unchanged or get a Stratum-specific fast path.
+
+### 14.4a Slate integration (Halcyon-side consideration; v1.0 evaluation)
+
+Stratum ships **slate** — a Plan-9-shaped TUI daemon that is itself a synthetic 9P filesystem (`stratum/v2/src/slate/`; design at `stratum/v2/docs/SLATE-DESIGN.md`). Clients interact with slate by reading/writing files in a virtual tree; the bundled `stratum tui` renderer is one consumer, but the substrate is intentionally programmable for AI agents and alternative renderers.
+
+What slate provides:
+- A FAR-Commander dual-pane file manager.
+- Per-pane editor (RW at `/editor/`; save / quit / revert verbs).
+- Snapshot graph view, integrity dashboard, volume map.
+- A programmable surface: any client that can read/write files can drive slate. This is the substrate for AI-driven system administration.
+
+**Open question for Halcyon (Thylacine Phase 9)**: adopt slate directly, OR build a Thylacine-native equivalent? Adoption gets a Plan-9-aesthetic system file manager with zero additional code; the slate schema contract is `stratum/v2/docs/SLATE-DESIGN.md`. Building a native equivalent gives more control over the visual contract but duplicates effort. The Halcyon design pass at Phase 9 entry should weigh the two — both options are scaffolded by the 9P-as-universal-composition thesis. **Deferral note**: this decision is Phase 9 work; the v1.0-rc.1 fallback (per `ROADMAP.md §10` / §11) does not depend on either path.
 
 ### 14.5 ramfs (early boot)
 
