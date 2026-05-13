@@ -89,6 +89,8 @@ set(KERNEL_SRCS
     dma_handle.c
     9p_wire.c
     9p_session.c
+    9p_transport.c
+    9p_transport_loopback.c
     test/test_dev.c
     test/test_trivial_devs.c
     test/test_devproc.c
@@ -120,6 +122,7 @@ set(KERNEL_SRCS
     test/test_driver_crash_recovery.c
     test/test_9p_wire.c
     test/test_9p_session.c
+    test/test_9p_transport.c
 )
 
 set(KERNEL_LD_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/../arch/arm64/kernel.ld)

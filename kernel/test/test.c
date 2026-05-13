@@ -284,6 +284,15 @@ void test_9p_session_fsync_round_trip(void);
 void test_9p_session_setattr_with_inflight_on_fid_refused(void);
 void test_9p_session_getattr_permits_concurrent(void);
 void test_9p_session_meta_from_unbound_fid_refused(void);
+void test_9p_transport_init_destroy(void);
+void test_9p_transport_round_trip(void);
+void test_9p_transport_send_frame_size_mismatch_rejected(void);
+void test_9p_transport_recv_frame_too_large_rejected(void);
+void test_9p_transport_partial_read_aggregation(void);
+void test_9p_transport_backend_error_transitions_to_error(void);
+void test_9p_transport_close_idempotent(void);
+void test_9p_transport_exchange_drives_session_handshake(void);
+void test_9p_transport_exchange_drives_session_walk(void);
 void test_irq_latency_bench(void);
 void test_caps_kproc_has_all(void);
 void test_caps_kproc_has_hw_create(void);
@@ -715,6 +724,27 @@ struct test_case g_tests[] = {
                                                                            false, NULL },
     { "9p_session.meta_from_unbound_fid_refused",
                                        test_9p_session_meta_from_unbound_fid_refused,
+                                                                           false, NULL },
+    { "9p_transport.init_destroy",     test_9p_transport_init_destroy,     false, NULL },
+    { "9p_transport.round_trip",       test_9p_transport_round_trip,       false, NULL },
+    { "9p_transport.send_frame_size_mismatch_rejected",
+                                       test_9p_transport_send_frame_size_mismatch_rejected,
+                                                                           false, NULL },
+    { "9p_transport.recv_frame_too_large_rejected",
+                                       test_9p_transport_recv_frame_too_large_rejected,
+                                                                           false, NULL },
+    { "9p_transport.partial_read_aggregation",
+                                       test_9p_transport_partial_read_aggregation,
+                                                                           false, NULL },
+    { "9p_transport.backend_error_transitions_to_error",
+                                       test_9p_transport_backend_error_transitions_to_error,
+                                                                           false, NULL },
+    { "9p_transport.close_idempotent", test_9p_transport_close_idempotent, false, NULL },
+    { "9p_transport.exchange_drives_session_handshake",
+                                       test_9p_transport_exchange_drives_session_handshake,
+                                                                           false, NULL },
+    { "9p_transport.exchange_drives_session_walk",
+                                       test_9p_transport_exchange_drives_session_walk,
                                                                            false, NULL },
     { "userspace.irq_latency_bench",   test_irq_latency_bench,             false, NULL },
     { "caps.kproc_has_all",            test_caps_kproc_has_all,            false, NULL },
