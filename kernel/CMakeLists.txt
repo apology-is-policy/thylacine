@@ -141,6 +141,7 @@ set(KERNEL_SRCS
     test/test_sys_spawn.c
     test/test_pipe_probe.c
     test/test_attach_probe.c
+    test/test_stratumd_stub.c
 )
 
 set(KERNEL_LD_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/../arch/arm64/kernel.ld)
