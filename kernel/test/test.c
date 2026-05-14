@@ -387,6 +387,7 @@ void test_sys_mount_rejects_null_territory(void);
 void test_sys_unmount_removes_entry_and_drops_ref(void);
 void test_sys_unmount_rejects_nonexistent_target(void);
 void test_sys_mount_caller_close_keeps_mount_alive(void);
+void test_attach_probe_round_trip(void);
 void test_irq_latency_bench(void);
 void test_caps_kproc_has_all(void);
 void test_caps_kproc_has_hw_create(void);
@@ -954,6 +955,7 @@ struct test_case g_tests[] = {
     { "sys_unmount.removes_entry_and_drops_ref",       test_sys_unmount_removes_entry_and_drops_ref,       false, NULL },
     { "sys_unmount.rejects_nonexistent_target",        test_sys_unmount_rejects_nonexistent_target,        false, NULL },
     { "sys_mount.caller_close_keeps_mount_alive",      test_sys_mount_caller_close_keeps_mount_alive,      false, NULL },
+    { "userspace.attach_probe_round_trip",             test_attach_probe_round_trip,                       false, NULL },
     { "userspace.irq_latency_bench",   test_irq_latency_bench,             false, NULL },
     { "caps.kproc_has_all",            test_caps_kproc_has_all,            false, NULL },
     { "caps.kproc_has_hw_create",      test_caps_kproc_has_hw_create,      false, NULL },

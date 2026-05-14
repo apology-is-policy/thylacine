@@ -138,6 +138,7 @@ set(KERNEL_SRCS
     test/test_sys_pipe.c
     test/test_sys_mount.c
     test/test_pipe_probe.c
+    test/test_attach_probe.c
 )
 
 set(KERNEL_LD_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/../arch/arm64/kernel.ld)
