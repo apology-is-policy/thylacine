@@ -68,6 +68,18 @@ enum {
     // valid PA; negative return is unambiguously an error.
     SYS_DMA_CREATE  = 6,    // arg: size (x0), rights (x1)
     SYS_DMA_MAP     = 7,    // arg: handle (x0), vaddr (x1), prot (x2)
+
+    // P5-fd-pipe: create a connected Spoor pair via `pipe_create()`,
+    // install both as KOBJ_SPOOR handles in the caller's HandleTable.
+    // No arguments; returns the read-end fd in x0 and the write-end fd
+    // in x1. On failure (handle table full, OOM) returns x0 = -1 and
+    // both Spoors are clunked on the way out.
+    //
+    // This is the first userspace consumer of KOBJ_SPOOR. The handle-
+    // table release path (handle_release_obj at P5-fd-pipe) calls
+    // spoor_clunk on KOBJ_SPOOR, so closing the handle (or the Proc
+    // exiting) tears down the underlying Spoor end-to-end.
+    SYS_PIPE        = 8,    // no args; returns rd in x0, wr in x1
 };
 
 struct exception_context;

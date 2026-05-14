@@ -35,6 +35,7 @@
 #include <thylacine/irqfwd.h>
 #include <thylacine/mmio_handle.h>
 #include <thylacine/proc.h>
+#include <thylacine/spoor.h>
 #include <thylacine/types.h>
 #include <thylacine/burrow.h>
 
@@ -130,17 +131,24 @@ static void handle_release_obj(enum kobj_kind kind, void *obj) {
         // last triggers the free.
         kobj_dma_unref((struct KObj_DMA *)obj);
         break;
+    case KOBJ_SPOOR:
+        // P5-fd-pipe: KOBJ_SPOOR release drops the Spoor's per-handle
+        // reference. spoor_clunk runs the Dev's close hook (which sets
+        // pipe EOF + wakes the other side per P5-pipe-blocking) and
+        // then unrefs the Spoor; ref hits 0 → underlying Spoor freed.
+        // Closing one end of a pipe through the handle table now
+        // exercises the full lifecycle end-to-end.
+        spoor_clunk((struct Spoor *)obj);
+        break;
     case KOBJ_INVALID:
     case KOBJ_PROCESS:
     case KOBJ_THREAD:
-    case KOBJ_SPOOR:
     case KOBJ_INTERRUPT:
     case KOBJ_KIND_COUNT:
-        // No refcount integration yet for these. KOBJ_SPOOR lands at
-        // Phase 4 (9P client spoor_unref); KOBJ_PROCESS / KOBJ_THREAD
-        // wait for struct Proc / Thread to gain refs (Phase 5+);
-        // KOBJ_INTERRUPT lands with the Phase 5+ interrupt-eventfd
-        // surface.
+        // No refcount integration yet for these. KOBJ_PROCESS /
+        // KOBJ_THREAD wait for struct Proc / Thread to gain refs
+        // (Phase 5+); KOBJ_INTERRUPT lands with the Phase 5+
+        // interrupt-eventfd surface.
         break;
     default:
         extinction("handle_release_obj: out-of-enum kobj_kind (memory corruption?)");
@@ -178,10 +186,15 @@ static void handle_acquire_obj(enum kobj_kind kind, void *obj) {
         // assert on KIND_COUNT doesn't have to be revisited).
         kobj_dma_ref((struct KObj_DMA *)obj);
         break;
+    case KOBJ_SPOOR:
+        // P5-fd-pipe: KOBJ_SPOOR acquire bumps the Spoor refcount so
+        // the dup'd handle has its own reference. Each holder
+        // independently releases via spoor_clunk on close.
+        spoor_ref((struct Spoor *)obj);
+        break;
     case KOBJ_INVALID:
     case KOBJ_PROCESS:
     case KOBJ_THREAD:
-    case KOBJ_SPOOR:
     case KOBJ_INTERRUPT:
     case KOBJ_KIND_COUNT:
         break;

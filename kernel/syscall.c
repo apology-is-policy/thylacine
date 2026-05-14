@@ -13,7 +13,9 @@
 #include <thylacine/handle.h>
 #include <thylacine/irqfwd.h>
 #include <thylacine/mmio_handle.h>
+#include <thylacine/pipe.h>
 #include <thylacine/proc.h>
+#include <thylacine/spoor.h>
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 #include <thylacine/vma.h>
@@ -501,6 +503,79 @@ static s64 sys_dma_map_handler(u64 hraw, u64 vaddr, u64 prot_raw) {
 }
 
 // =============================================================================
+// SYS_PIPE — create a connected Spoor pair, install both as KOBJ_SPOOR
+// handles in the caller's HandleTable (P5-fd-pipe).
+// =============================================================================
+//
+// No userspace arguments. Returns the read-end fd in x0 and the
+// write-end fd in x1. On failure returns x0 = -1 (and x1 unmodified;
+// callers check x0 only).
+//
+// Discipline:
+//   1. pipe_create() allocates the ring + two Spoors with ref=1 each.
+//   2. handle_alloc takes ownership of each Spoor's ref. On success
+//      the handle holds the ref; on Proc-exit / handle_close, the
+//      handle-release path runs spoor_clunk (P5-fd-pipe wired
+//      KOBJ_SPOOR into handle_release_obj).
+//   3. On partial failure (second handle_alloc fails), the first
+//      handle is closed (release-path spoor_clunks the first Spoor)
+//      and the second Spoor is spoor_clunk'd directly.
+//
+// Rights: RIGHT_READ | RIGHT_WRITE | RIGHT_TRANSFER. v1.0 grants
+// the union so the caller can read, write, and pass the fds across
+// 9P sessions when the transfer-via-9P path lands. Future
+// implementations may pre-narrow rights per end (read-only for the
+// read end; write-only for the write end) — at v1.0 the dev9p_read /
+// dev9p_write checks (which look at is_read_end) provide the actual
+// gating; handle rights are an additional gate, not the primary one.
+//
+// Exposed (non-static) for kernel-internal tests in test_sys_pipe.c.
+// Returns 0 on success with *out_rd / *out_wr populated; -1 on
+// failure with both Spoors clunked.
+int sys_pipe_for_proc(struct Proc *p, hidx_t *out_rd, hidx_t *out_wr) {
+    if (!p || !out_rd || !out_wr)                    return -1;
+
+    struct Spoor *rd = NULL;
+    struct Spoor *wr = NULL;
+    if (pipe_create(&rd, &wr) < 0)                   return -1;
+
+    rights_t r = RIGHT_READ | RIGHT_WRITE | RIGHT_TRANSFER;
+
+    hidx_t fd_rd = handle_alloc(p, KOBJ_SPOOR, r, rd);
+    if (fd_rd < 0) {
+        spoor_clunk(rd);
+        spoor_clunk(wr);
+        return -1;
+    }
+    hidx_t fd_wr = handle_alloc(p, KOBJ_SPOOR, r, wr);
+    if (fd_wr < 0) {
+        // The first handle owns `rd` via handle_release_obj's
+        // spoor_clunk. Closing it returns the Spoor to ref=0.
+        handle_close(p, fd_rd);
+        // The second Spoor was never installed — clunk directly.
+        spoor_clunk(wr);
+        return -1;
+    }
+
+    *out_rd = fd_rd;
+    *out_wr = fd_wr;
+    return 0;
+}
+
+static s64 sys_pipe_handler(u64 *out_rd, u64 *out_wr) {
+    struct Thread *t = current_thread();
+    if (!t)                                          return -1;
+    struct Proc *p = t->proc;
+    if (!p)                                          return -1;
+
+    hidx_t rd, wr;
+    if (sys_pipe_for_proc(p, &rd, &wr) < 0)          return -1;
+    *out_rd = (u64)rd;
+    *out_wr = (u64)wr;
+    return 0;
+}
+
+// =============================================================================
 // Dispatch entry.
 // =============================================================================
 
@@ -549,6 +624,21 @@ void syscall_dispatch(struct exception_context *ctx) {
                                                 ctx->regs[1],
                                                 ctx->regs[2]);
         return;
+
+    case SYS_PIPE: {
+        // sys_pipe_handler writes the read-end fd to *out_rd and the
+        // write-end fd to *out_wr on success. On error, returns -1 and
+        // both Spoors are clunked; ctx->regs[1] is unmodified.
+        u64 rd_fd = 0, wr_fd = 0;
+        s64 rc = sys_pipe_handler(&rd_fd, &wr_fd);
+        if (rc < 0) {
+            ctx->regs[0] = (u64)(s64)-1;
+        } else {
+            ctx->regs[0] = rd_fd;
+            ctx->regs[1] = wr_fd;
+        }
+        return;
+    }
 
     default:
         // Unknown syscall. Phase 5+ delivers SIGSYS-equivalent note;

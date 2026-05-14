@@ -368,6 +368,9 @@ void test_pipe_blocking_write_wakes_sleeping_reader(void);
 void test_pipe_blocking_read_wakes_sleeping_writer(void);
 void test_pipe_blocking_close_write_end_wakes_reader_with_eof(void);
 void test_pipe_blocking_close_read_end_wakes_writer_with_epipe(void);
+void test_sys_pipe_allocates_two_distinct_spoor_handles(void);
+void test_sys_pipe_proc_free_releases_handles(void);
+void test_sys_pipe_handle_close_releases_one_end(void);
 void test_irq_latency_bench(void);
 void test_caps_kproc_has_all(void);
 void test_caps_kproc_has_hw_create(void);
@@ -916,6 +919,9 @@ struct test_case g_tests[] = {
     { "pipe_blocking.read_wakes_sleeping_writer",           test_pipe_blocking_read_wakes_sleeping_writer,           false, NULL },
     { "pipe_blocking.close_write_end_wakes_reader_with_eof", test_pipe_blocking_close_write_end_wakes_reader_with_eof, false, NULL },
     { "pipe_blocking.close_read_end_wakes_writer_with_epipe", test_pipe_blocking_close_read_end_wakes_writer_with_epipe, false, NULL },
+    { "sys_pipe.allocates_two_distinct_spoor_handles", test_sys_pipe_allocates_two_distinct_spoor_handles, false, NULL },
+    { "sys_pipe.proc_free_releases_handles",           test_sys_pipe_proc_free_releases_handles,           false, NULL },
+    { "sys_pipe.handle_close_releases_one_end",        test_sys_pipe_handle_close_releases_one_end,        false, NULL },
     { "userspace.irq_latency_bench",   test_irq_latency_bench,             false, NULL },
     { "caps.kproc_has_all",            test_caps_kproc_has_all,            false, NULL },
     { "caps.kproc_has_hw_create",      test_caps_kproc_has_hw_create,      false, NULL },
