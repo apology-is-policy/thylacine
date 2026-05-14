@@ -47,7 +47,15 @@ enum {
     T_SYS_ATTACH_9P   = 13, // P5-attach-syscall: 9P client attach over Spoor pair
     T_SYS_MOUNT       = 14, // P5-mount-syscall: graft Spoor at target_path_id
     T_SYS_UNMOUNT     = 15, // P5-mount-syscall: remove mount entry at target_path_id
+    T_SYS_MLOCKALL    = 16, // P5-corvus-syscalls: pin pages (CAP_LOCK_PAGES)
+    T_SYS_SET_DUMPABLE = 17, // P5-corvus-syscalls: set NODUMP flag (one-way to 0)
+    T_SYS_SET_TRACEABLE = 18, // P5-corvus-syscalls: set NOTRACE flag (one-way to 0)
+    T_SYS_EXPLICIT_BZERO = 19, // P5-corvus-syscalls: barrier'd zeroize user-VA buf
+    T_SYS_GETRANDOM   = 20, // P5-corvus-syscalls: read kernel CSPRNG (CAP_CSPRNG_READ)
 };
+
+// SYS_GETRANDOM flags (mirror kernel/include/thylacine/syscall.h).
+#define T_GRND_NONBLOCK   1u
 
 // Mount flags — mirror kernel/include/thylacine/territory.h (Plan 9
 // MREPL / MBEFORE / MAFTER / MCREATE). At v1.0 only MREPL has
@@ -391,6 +399,96 @@ static inline long t_dup(long oldfd, unsigned long new_rights) {
         "svc #0"
         : "+r"(x0)
         : "r"(x1), "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
+// =============================================================================
+// P5-corvus-syscalls: v1.0 hardening syscalls (CORVUS-DESIGN.md §4.1.1).
+// =============================================================================
+
+// t_mlockall — pin all currently-mapped + future-mapped pages. Caller
+// must hold T_RIGHT-equivalent CAP_LOCK_PAGES. Returns 0 on success,
+// -1 on missing cap. Sets PROC_FLAG_MLOCKED on the calling Proc.
+__attribute__((always_inline))
+static inline long t_mlockall(unsigned long flags) {
+    register long x0 __asm__("x0") = (long)flags;
+    register long x8 __asm__("x8") = T_SYS_MLOCKALL;
+    __asm__ volatile (
+        "svc #0"
+        : "+r"(x0)
+        : "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
+// t_set_dumpable — control core-dump permission. One-way to 0:
+// t_set_dumpable(0) sets PROC_FLAG_NODUMP; t_set_dumpable(1) on a
+// Proc that has the flag set is REFUSED. Returns 0 / -1.
+__attribute__((always_inline))
+static inline long t_set_dumpable(unsigned long dumpable) {
+    register long x0 __asm__("x0") = (long)dumpable;
+    register long x8 __asm__("x8") = T_SYS_SET_DUMPABLE;
+    __asm__ volatile (
+        "svc #0"
+        : "+r"(x0)
+        : "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
+// t_set_traceable — control debug-Spoor attach permission. One-way to 0.
+__attribute__((always_inline))
+static inline long t_set_traceable(unsigned long traceable) {
+    register long x0 __asm__("x0") = (long)traceable;
+    register long x8 __asm__("x8") = T_SYS_SET_TRACEABLE;
+    __asm__ volatile (
+        "svc #0"
+        : "+r"(x0)
+        : "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
+// t_explicit_bzero — compiler-barrier'd memset to zero of `len` bytes
+// starting at `buf`. Per-call cap is SYS_RW_MAX (4096); loop for
+// larger buffers. Returns 0 on success, -1 on user-VA validation
+// failure. The kernel's per-byte uaccess_store_u8 path is the
+// barrier — the compiler cannot elide the writes across the syscall
+// boundary.
+__attribute__((always_inline))
+static inline long t_explicit_bzero(void *buf, size_t len) {
+    register long x0 __asm__("x0") = (long)(unsigned long)buf;
+    register long x1 __asm__("x1") = (long)len;
+    register long x8 __asm__("x8") = T_SYS_EXPLICIT_BZERO;
+    __asm__ volatile (
+        "svc #0"
+        : "+r"(x0)
+        : "r"(x1), "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
+// t_getrandom — read `len` random bytes into `buf` from the kernel
+// CSPRNG. Caller must hold CAP_CSPRNG_READ. Per-call cap is SYS_RW_MAX
+// (4096); loop for larger buffers. Returns bytes read (= len on
+// success) or -1 on: missing cap / bad user-VA / CSPRNG unseeded /
+// CSPRNG hardware fault.
+__attribute__((always_inline))
+static inline long t_getrandom(void *buf, size_t len, unsigned long flags) {
+    register long x0 __asm__("x0") = (long)(unsigned long)buf;
+    register long x1 __asm__("x1") = (long)len;
+    register long x2 __asm__("x2") = (long)flags;
+    register long x8 __asm__("x8") = T_SYS_GETRANDOM;
+    __asm__ volatile (
+        "svc #0"
+        : "+r"(x0)
+        : "r"(x1), "r"(x2), "r"(x8)
         : "memory", "cc"
     );
     return x0;

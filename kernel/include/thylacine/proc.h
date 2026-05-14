@@ -141,11 +141,44 @@ struct Proc {
     //     p still holds any hw handle (v1.0 doesn't expose a drop
     //     syscall; this is structural).
     u64                caps;
+
+    // P5-corvus-syscalls: per-Proc flags set by the v1.0 hardening
+    // syscalls (CORVUS-DESIGN.md §4.1.1). Each is a one-way bit:
+    // userspace can SET (via the relevant syscall) but never clear.
+    // Zero-initialized at proc_alloc; defaults to "all permissions
+    // allowed, no mlock" — the bits are no-op-restrictions.
+    //
+    // PROC_FLAG_NODUMP   (bit 0) — set by SYS_SET_DUMPABLE(0). When set,
+    //                              future core-dump paths must refuse
+    //                              to dump this Proc. v1.0 has no core
+    //                              dumps; the flag is forward-compat
+    //                              scaffolding consumed by corvus +
+    //                              per-user stratumd at startup.
+    // PROC_FLAG_NOTRACE  (bit 1) — set by SYS_SET_TRACEABLE(0). When
+    //                              set, future debug-Spoor attach paths
+    //                              must refuse to attach to this Proc.
+    //                              v1.0 has no debug Spoors; same
+    //                              scaffolding pattern.
+    // PROC_FLAG_MLOCKED  (bit 2) — set by SYS_MLOCKALL. When set,
+    //                              future swap-out paths must skip
+    //                              this Proc's pages. v1.0 has no
+    //                              swap; same scaffolding pattern.
+    //
+    // Per CORVUS-DESIGN.md C-2 enforcement: corvus (and per-user
+    // stratumd) call all three at startup; the flags are visible via
+    // future debug surfaces for audit verification.
+    u32                proc_flags;
+    u32                _pad_flags;        // explicit padding to 8-byte align
 };
 
-_Static_assert(sizeof(struct Proc) == 128,
-               "struct Proc size pinned at 128 bytes (P3-Bcb baseline 112 "
-               "+ vmas 8 + caps 8 = 128). Adding a field grows the SLUB cache; "
+#define PROC_FLAG_NODUMP    (1u << 0)
+#define PROC_FLAG_NOTRACE   (1u << 1)
+#define PROC_FLAG_MLOCKED   (1u << 2)
+
+_Static_assert(sizeof(struct Proc) == 136,
+               "struct Proc size pinned at 136 bytes (P3-Bcb baseline 112 "
+               "+ vmas 8 + caps 8 + proc_flags+pad 8 = 136; bumped from 128 "
+               "at P5-corvus-syscalls). Adding a field grows the SLUB cache; "
                "update this assert deliberately so the change is intentional.");
 _Static_assert(__builtin_offsetof(struct Proc, magic) == 0,
                "magic must be at offset 0 so SLUB's freelist write on "

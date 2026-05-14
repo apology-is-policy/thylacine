@@ -15,6 +15,7 @@
 // (caller should retry; usually succeeds within a few attempts).
 
 #include <thylacine/dev.h>
+#include <thylacine/random.h>
 #include <thylacine/spoor.h>
 #include <thylacine/types.h>
 
@@ -117,8 +118,11 @@ static void devrandom_close(struct Spoor *c) {
 //        retry to get more)
 //   -1 if RNDR is unavailable AND no bytes produced
 //   0  if n == 0 (legal no-op)
-static long devrandom_read(struct Spoor *c, void *buf, long n, s64 off) {
-    (void)c; (void)off;
+//
+// P5-corvus-syscalls: public surface for SYS_GETRANDOM. The 9P
+// devrandom_read below is now a thin wrapper. Per CORVUS-DESIGN
+// §4.1.1 + C-15.
+long kern_random_bytes(void *buf, long n) {
     if (!buf) return -1;
     if (n < 0) return -1;
     if (n == 0) return 0;
@@ -130,7 +134,10 @@ static long devrandom_read(struct Spoor *c, void *buf, long n, s64 off) {
     while (produced < n) {
         u64 chunk;
         if (!rndr64(&chunk)) {
-            return produced;        // partial fill; caller can retry
+            // partial fill; SYS_GETRANDOM treats partial as failure
+            // (returns -1 to the user) since the syscall surface prefers
+            // atomic results; devrandom_read passes the partial through.
+            return produced;
         }
         long need = n - produced;
         long copy = need >= 8 ? 8 : need;
@@ -140,6 +147,15 @@ static long devrandom_read(struct Spoor *c, void *buf, long n, s64 off) {
         produced += copy;
     }
     return produced;
+}
+
+bool kern_random_seeded(void) {
+    return g_rndr_available;
+}
+
+static long devrandom_read(struct Spoor *c, void *buf, long n, s64 off) {
+    (void)c; (void)off;
+    return kern_random_bytes(buf, n);
 }
 
 static struct Block *devrandom_bread(struct Spoor *c, long n, s64 off) {

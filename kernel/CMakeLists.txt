@@ -137,6 +137,7 @@ set(KERNEL_SRCS
     test/test_pipe_blocking.c
     test/test_sys_pipe.c
     test/test_sys_mount.c
+    test/test_sys_corvus.c
     test/test_pipe_probe.c
     test/test_attach_probe.c
 )

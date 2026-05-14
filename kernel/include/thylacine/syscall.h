@@ -173,7 +173,64 @@ enum {
     // Drops the per-entry Spoor ref; the Spoor's Dev close runs if
     // this was the last ref.
     SYS_UNMOUNT     = 15,   // arg: target_path_id
+
+    // P5-corvus-syscalls: v1.0 hardening syscalls per CORVUS-DESIGN.md
+    // §4.1.1 + ARCH §11.2b. corvus + per-user stratumd call these at
+    // startup; ordinary user procs use them at discretion. Each sets
+    // a one-way per-Proc flag (PROC_FLAG_*) or performs a one-shot
+    // action (explicit_bzero, getrandom).
+
+    // SYS_MLOCKALL(flags) → 0/-1
+    //   x0 = flags (u32; currently unused, reserved for MCL_CURRENT /
+    //                MCL_FUTURE distinction at v1.x when swap exists)
+    // Pin all currently-mapped and future-mapped pages. Caller must
+    // hold CAP_LOCK_PAGES. Sets PROC_FLAG_MLOCKED on the Proc. v1.0
+    // has no swap; the flag is forward-compat scaffolding consumed by
+    // corvus + per-user stratumd at startup. Returns 0 on success, -1
+    // on missing cap.
+    SYS_MLOCKALL     = 16,   // arg: flags (x0)
+
+    // SYS_SET_DUMPABLE(dumpable) → 0/-1
+    //   x0 = dumpable (u32; 0 = disable core dump, 1 = enable [default])
+    // One-way: setting to 0 sets PROC_FLAG_NODUMP. Setting to 1 from a
+    // Proc that already has PROC_FLAG_NODUMP set is REFUSED (-1). v1.0
+    // has no core dumps; the flag is forward-compat scaffolding.
+    SYS_SET_DUMPABLE = 17,   // arg: dumpable (x0)
+
+    // SYS_SET_TRACEABLE(traceable) → 0/-1
+    //   x0 = traceable (u32; 0 = refuse future debug-Spoor attach,
+    //                       1 = allow [default])
+    // One-way: setting to 0 sets PROC_FLAG_NOTRACE. Setting to 1 from
+    // a Proc that has PROC_FLAG_NOTRACE set is REFUSED. v1.0 has no
+    // debug Spoors; the flag is forward-compat scaffolding.
+    SYS_SET_TRACEABLE = 18,  // arg: traceable (x0)
+
+    // SYS_EXPLICIT_BZERO(buf_va, len) → 0/-1
+    //   x0 = buf_va (user-VA; same bound checks as SYS_PUTS)
+    //   x1 = len (bytes; ≤ SYS_RW_MAX = 4096 per call)
+    // Compiler-barrier'd memset of the user-VA buffer to zero. Used by
+    // corvus + per-user stratumd to wipe secrets without the optimizer
+    // eliding the memset. Returns 0 on success, -1 on user-VA bound
+    // violation. Length cap matches SYS_PUTS / SYS_RW_MAX; userspace
+    // loops for larger buffers.
+    SYS_EXPLICIT_BZERO = 19, // arg: buf_va (x0), len (x1)
+
+    // SYS_GETRANDOM(buf_va, len, flags) → bytes_read / -1
+    //   x0 = buf_va (user-VA destination)
+    //   x1 = len (bytes; ≤ SYS_RW_MAX = 4096 per call)
+    //   x2 = flags (u32; 0 = block until kernel CSPRNG seeded [default];
+    //                    GRND_NONBLOCK (= 1) = return -1 if not seeded)
+    // Read `len` bytes from the kernel CSPRNG into the user-VA buffer.
+    // Caller must hold CAP_CSPRNG_READ. Returns bytes read (= len on
+    // success) or -1 on: missing cap / bad user-VA / CSPRNG not seeded
+    // (when GRND_NONBLOCK set) / CSPRNG hardware fault. v1.0 backend
+    // is ARM RNDR (FEAT_RNG); always-seeded if available. Each call is
+    // a fresh CSPRNG read — no caching.
+    SYS_GETRANDOM    = 20,   // arg: buf_va (x0), len (x1), flags (x2)
 };
+
+// SYS_GETRANDOM flags.
+#define GRND_NONBLOCK    1u
 
 // Maximum aname length per SYS_ATTACH_9P call. The aname is a server-
 // side path or capability string (typically short — "/", "tcp!host!port",

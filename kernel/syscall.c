@@ -19,6 +19,7 @@
 #include <thylacine/mmio_handle.h>
 #include <thylacine/pipe.h>
 #include <thylacine/proc.h>
+#include <thylacine/random.h>
 #include <thylacine/spoor.h>
 #include <thylacine/territory.h>
 #include <thylacine/thread.h>
@@ -980,6 +981,135 @@ static s64 sys_unmount_handler(u64 target_raw) {
 }
 
 // =============================================================================
+// P5-corvus-syscalls: v1.0 hardening syscalls (CORVUS-DESIGN.md §4.1.1).
+// =============================================================================
+//
+// Each syscall sets a one-way per-Proc flag (PROC_FLAG_*) or performs
+// a one-shot action. Consumed by corvus + per-user stratumd at startup
+// to satisfy CORVUS-DESIGN invariants C-2 (mlock + dumpable) and the
+// CSPRNG-seeded discipline C-15.
+
+// SYS_MLOCKALL — pin pages. CAP_LOCK_PAGES required. Sets PROC_FLAG_MLOCKED.
+// v1.0 has no swap; the flag is forward-compat scaffolding.
+int sys_mlockall_for_proc(struct Proc *p, u32 flags) {
+    if (!p)                                          return -1;
+    (void)flags;       // unused at v1.0; reserved for MCL_CURRENT/MCL_FUTURE
+    if ((__atomic_load_n(&p->caps, __ATOMIC_ACQUIRE) & CAP_LOCK_PAGES) == 0)
+        return -1;
+    p->proc_flags |= PROC_FLAG_MLOCKED;
+    return 0;
+}
+
+static s64 sys_mlockall_handler(u64 flags_raw) {
+    struct Thread *t = current_thread();
+    if (!t)                                          return -1;
+    struct Proc *p = t->proc;
+    if (!p)                                          return -1;
+    if (flags_raw > (u64)0xFFFFFFFFu)                 return -1;
+    return (s64)sys_mlockall_for_proc(p, (u32)flags_raw);
+}
+
+// SYS_SET_DUMPABLE — control core-dump permission. One-way to 0.
+// Setting to 1 from a Proc that already has PROC_FLAG_NODUMP is REFUSED.
+int sys_set_dumpable_for_proc(struct Proc *p, u32 dumpable) {
+    if (!p)                                          return -1;
+    if (dumpable == 0) {
+        p->proc_flags |= PROC_FLAG_NODUMP;
+        return 0;
+    }
+    if (dumpable == 1) {
+        // Refuse re-enable: corvus's no-coredump posture is one-way.
+        if (p->proc_flags & PROC_FLAG_NODUMP)        return -1;
+        return 0;                                     // already dumpable
+    }
+    return -1;                                       // bad arg
+}
+
+static s64 sys_set_dumpable_handler(u64 dumpable_raw) {
+    struct Thread *t = current_thread();
+    if (!t)                                          return -1;
+    struct Proc *p = t->proc;
+    if (!p)                                          return -1;
+    if (dumpable_raw > (u64)0xFFFFFFFFu)              return -1;
+    return (s64)sys_set_dumpable_for_proc(p, (u32)dumpable_raw);
+}
+
+// SYS_SET_TRACEABLE — control debug-Spoor attach permission. One-way to 0.
+int sys_set_traceable_for_proc(struct Proc *p, u32 traceable) {
+    if (!p)                                          return -1;
+    if (traceable == 0) {
+        p->proc_flags |= PROC_FLAG_NOTRACE;
+        return 0;
+    }
+    if (traceable == 1) {
+        if (p->proc_flags & PROC_FLAG_NOTRACE)       return -1;
+        return 0;
+    }
+    return -1;
+}
+
+static s64 sys_set_traceable_handler(u64 traceable_raw) {
+    struct Thread *t = current_thread();
+    if (!t)                                          return -1;
+    struct Proc *p = t->proc;
+    if (!p)                                          return -1;
+    if (traceable_raw > (u64)0xFFFFFFFFu)              return -1;
+    return (s64)sys_set_traceable_for_proc(p, (u32)traceable_raw);
+}
+
+// SYS_EXPLICIT_BZERO — compiler-barrier'd memset of a user-VA buffer.
+// Bounce through a kernel-stack scratch + uaccess_store_u8 per byte.
+// The "compiler barrier" property is delivered by the per-byte
+// uaccess_store_u8 path — the compiler cannot prove the writes are
+// dead because they cross the kernel/user boundary.
+static s64 sys_explicit_bzero_handler(u64 buf_va, u64 len) {
+    struct Thread *t = current_thread();
+    if (!t)                                          return -1;
+    struct Proc *p = t->proc;
+    if (!p)                                          return -1;
+    if (!sys_validate_user_buf(buf_va, len))         return -1;
+    if (len > SYS_RW_MAX) len = SYS_RW_MAX;
+    if (len == 0)                                    return 0;
+
+    for (u64 i = 0; i < len; i++) {
+        if (uaccess_store_u8(buf_va + i, 0) != 0)    return -1;
+    }
+    return 0;
+}
+
+// SYS_GETRANDOM — read kernel CSPRNG bytes into a user-VA buffer.
+// CAP_CSPRNG_READ required. Caller's user-VA buffer is filled via
+// 4 KiB kernel-stack scratch + uaccess_store_u8 per byte (mirrors
+// SYS_READ's bounce pattern).
+//
+// CSPRNG-seeded check (C-15): if kern_random_seeded() is false, returns
+// -1 immediately. The GRND_NONBLOCK flag is effectively v1.0's only
+// mode — v1.x adds a real blocking primitive if/when software-CSPRNG
+// mixing introduces an unseeded state.
+static s64 sys_getrandom_handler(u64 buf_va, u64 len, u64 flags_raw) {
+    struct Thread *t = current_thread();
+    if (!t)                                          return -1;
+    struct Proc *p = t->proc;
+    if (!p)                                          return -1;
+    if ((__atomic_load_n(&p->caps, __ATOMIC_ACQUIRE) & CAP_CSPRNG_READ) == 0)
+        return -1;
+    if (flags_raw > (u64)0xFFFFFFFFu)                 return -1;
+    if (!sys_validate_user_buf(buf_va, len))         return -1;
+    if (len > SYS_RW_MAX) len = SYS_RW_MAX;
+    if (len == 0)                                    return 0;
+    if (!kern_random_seeded())                       return -1;
+
+    u8 scratch[SYS_RW_MAX];
+    long got = kern_random_bytes(scratch, (long)len);
+    if (got != (long)len)                            return -1;
+
+    for (u64 i = 0; i < len; i++) {
+        if (uaccess_store_u8(buf_va + i, scratch[i]) != 0) return -1;
+    }
+    return (s64)len;
+}
+
+// =============================================================================
 // Dispatch entry.
 // =============================================================================
 
@@ -1080,6 +1210,28 @@ void syscall_dispatch(struct exception_context *ctx) {
 
     case SYS_UNMOUNT:
         ctx->regs[0] = (u64)sys_unmount_handler(ctx->regs[0]);
+        return;
+
+    case SYS_MLOCKALL:
+        ctx->regs[0] = (u64)sys_mlockall_handler(ctx->regs[0]);
+        return;
+
+    case SYS_SET_DUMPABLE:
+        ctx->regs[0] = (u64)sys_set_dumpable_handler(ctx->regs[0]);
+        return;
+
+    case SYS_SET_TRACEABLE:
+        ctx->regs[0] = (u64)sys_set_traceable_handler(ctx->regs[0]);
+        return;
+
+    case SYS_EXPLICIT_BZERO:
+        ctx->regs[0] = (u64)sys_explicit_bzero_handler(ctx->regs[0], ctx->regs[1]);
+        return;
+
+    case SYS_GETRANDOM:
+        ctx->regs[0] = (u64)sys_getrandom_handler(ctx->regs[0],
+                                                  ctx->regs[1],
+                                                  ctx->regs[2]);
         return;
 
     default:

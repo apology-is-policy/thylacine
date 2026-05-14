@@ -388,6 +388,12 @@ void test_sys_unmount_removes_entry_and_drops_ref(void);
 void test_sys_unmount_rejects_nonexistent_target(void);
 void test_sys_mount_caller_close_keeps_mount_alive(void);
 void test_attach_probe_round_trip(void);
+void test_sys_mlockall_cap_gate(void);
+void test_sys_set_dumpable_one_way_to_zero(void);
+void test_sys_set_traceable_one_way_to_zero(void);
+void test_sys_corvus_caps_kproc_has_new_caps(void);
+void test_kern_random_seeded_returns_true_on_qemu(void);
+void test_kern_random_bytes_produces_nonzero(void);
 void test_irq_latency_bench(void);
 void test_caps_kproc_has_all(void);
 void test_caps_kproc_has_hw_create(void);
@@ -956,6 +962,12 @@ struct test_case g_tests[] = {
     { "sys_unmount.rejects_nonexistent_target",        test_sys_unmount_rejects_nonexistent_target,        false, NULL },
     { "sys_mount.caller_close_keeps_mount_alive",      test_sys_mount_caller_close_keeps_mount_alive,      false, NULL },
     { "userspace.attach_probe_round_trip",             test_attach_probe_round_trip,                       false, NULL },
+    { "sys_mlockall.cap_gate",                         test_sys_mlockall_cap_gate,                         false, NULL },
+    { "sys_set_dumpable.one_way_to_zero",              test_sys_set_dumpable_one_way_to_zero,              false, NULL },
+    { "sys_set_traceable.one_way_to_zero",             test_sys_set_traceable_one_way_to_zero,             false, NULL },
+    { "sys_corvus_caps.kproc_has_new_caps",            test_sys_corvus_caps_kproc_has_new_caps,            false, NULL },
+    { "kern_random.seeded_returns_true_on_qemu",       test_kern_random_seeded_returns_true_on_qemu,       false, NULL },
+    { "kern_random.bytes_produces_nonzero",            test_kern_random_bytes_produces_nonzero,            false, NULL },
     { "userspace.irq_latency_bench",   test_irq_latency_bench,             false, NULL },
     { "caps.kproc_has_all",            test_caps_kproc_has_all,            false, NULL },
     { "caps.kproc_has_hw_create",      test_caps_kproc_has_hw_create,      false, NULL },

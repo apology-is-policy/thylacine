@@ -26,7 +26,25 @@ typedef u64 caps_t;
 // ranges, INTIDs, DMA channels). Maps to specs/handles.tla::CapHwCreate.
 #define CAP_HW_CREATE   (1ull << 0)
 
+// CAP_LOCK_PAGES — required to call SYS_MLOCKALL (P5-corvus-syscalls;
+// CORVUS-DESIGN.md §4.1.1). Holders can pin pages to prevent swap-out.
+// v1.0 has no swap; the cap + syscall are forward-looking scaffolding
+// consumed by corvus + per-user stratumd at startup. kproc + corvus
+// + per-user stratumd hold this cap; ordinary user procs do not.
+#define CAP_LOCK_PAGES  (1ull << 1)
+
+// CAP_CSPRNG_READ — required to call SYS_GETRANDOM (P5-corvus-syscalls;
+// CORVUS-DESIGN.md §4.1.1). Holders can read from the kernel CSPRNG.
+// Granted broadly at v1.0 (most userspace processes have legitimate
+// use for randomness — session tokens, AEAD nonces, salts). The cap
+// exists for forward-compat (a future hardened-deployment may revoke
+// it from specific procs).
+#define CAP_CSPRNG_READ (1ull << 2)
+
 // Reserved for Phase 5+ (one bit per capability domain):
+//   CAP_HOSTOWNER    — admin authority (CORVUS-DESIGN §3 D5); granted
+//                      only after corvus verifies the system passphrase
+//                      from a console-attached Proc. Lands at P5-hostowner.
 //   CAP_NS_MOUNT     — bind/mount in /proc and /ctl (kernel admin Devs).
 //   CAP_NS_BIND      — bind in any namespace (forward-looking).
 //   CAP_SIGNAL_ANY   — signal any Proc (vs. signal-children-only default).
@@ -38,11 +56,11 @@ typedef u64 caps_t;
 // CAP_ALL — bitmask of every defined capability. kproc gets this at
 // proc_init; future updates that add bits MUST be added here too (the
 // static_assert below catches drift).
-#define CAP_ALL         (CAP_HW_CREATE)
+#define CAP_ALL         (CAP_HW_CREATE | CAP_LOCK_PAGES | CAP_CSPRNG_READ)
 
 // _Static_assert pins CAP_ALL — adding a new CAP_* bit requires bumping
 // this expression so kproc's initial mask includes it.
-_Static_assert(CAP_ALL == CAP_HW_CREATE,
+_Static_assert(CAP_ALL == (CAP_HW_CREATE | CAP_LOCK_PAGES | CAP_CSPRNG_READ),
                "caps.h drift: when adding a new CAP_* bit, update CAP_ALL "
                "so kproc's initial mask reflects the new capability domain");
 
