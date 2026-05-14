@@ -15,6 +15,8 @@
 #include <thylacine/dev.h>
 #include <thylacine/extinction.h>
 #include <thylacine/pipe.h>
+#include <thylacine/rendez.h>
+#include <thylacine/spinlock.h>
 #include <thylacine/spoor.h>
 #include <thylacine/types.h>
 
@@ -25,12 +27,17 @@
 // =============================================================================
 
 struct pipe_ring {
-    u32     magic;          // PIPE_RING_MAGIC
-    int     ref;            // 2 at creation; per-endpoint close drops by 1
-    size_t  count;          // bytes in buffer; 0..PIPE_BUF_SIZE
-    size_t  head;           // next write position; mod PIPE_BUF_SIZE
-    size_t  tail;           // next read position; mod PIPE_BUF_SIZE
-    u8      buf[PIPE_BUF_SIZE];
+    u32             magic;          // PIPE_RING_MAGIC
+    int             ref;            // 2 at creation; per-endpoint close drops by 1
+    size_t          count;          // bytes in buffer; 0..PIPE_BUF_SIZE
+    size_t          head;           // next write position; mod PIPE_BUF_SIZE
+    size_t          tail;           // next read position; mod PIPE_BUF_SIZE
+    bool            read_eof;       // read end closed → writes return -1 (EPIPE)
+    bool            write_eof;      // write end closed → reads return 0 (EOF)
+    spin_lock_t     lock;           // protects count/head/tail/{read,write}_eof
+    struct Rendez   read_rendez;    // single reader sleeps here on empty
+    struct Rendez   write_rendez;   // single writer sleeps here on full
+    u8              buf[PIPE_BUF_SIZE];
 };
 
 struct pipe_endpoint {
@@ -39,8 +46,21 @@ struct pipe_endpoint {
     bool               is_read_end;
 };
 
-_Static_assert(sizeof(struct pipe_ring) == 32 + PIPE_BUF_SIZE,
-               "pipe_ring size pinned (32-byte header + 4 KiB buf)");
+// 72 bytes header — derived layout:
+//   offset  0:  u32  magic           (4)
+//   offset  4:  int  ref             (4)
+//   offset  8:  size_t count         (8)
+//   offset 16:  size_t head          (8)
+//   offset 24:  size_t tail          (8)
+//   offset 32:  bool read_eof        (1)
+//   offset 33:  bool write_eof       (1)
+//   offset 34-35: pad
+//   offset 36:  spin_lock_t lock     (4; u32)
+//   offset 40:  struct Rendez read_rendez  (16: spin_lock+pad+Thread*)
+//   offset 56:  struct Rendez write_rendez (16)
+//   offset 72:  u8 buf[PIPE_BUF_SIZE]
+_Static_assert(sizeof(struct pipe_ring) == 72 + PIPE_BUF_SIZE,
+               "pipe_ring size pinned (72-byte header + 4 KiB buf)");
 
 // The ring is ~4 KiB — above the SLUB max-object threshold, so kmalloc
 // routes it through alloc_pages (same path the p9_client uses). The
@@ -151,6 +171,25 @@ static void devpipe_create(struct Spoor *c, const char *name, int omode, u32 per
     (void)c; (void)name; (void)omode; (void)perm;
 }
 
+// Cond functions used by sleep().
+//
+// Per CLAUDE.md spec-first discipline: these match `specs/pipe.tla`'s
+// CanRead / CanWrite predicates. They read shared state (count, eof
+// flags) under rendez->lock (sleep's discipline). Synchronization
+// between producer mutations (under r->lock) and these reads is via
+// rendez->lock acquired by wakeup(); see the comment in devpipe_close
+// for the discipline.
+
+static int cond_can_read(void *arg) {
+    struct pipe_ring *r = (struct pipe_ring *)arg;
+    return (r->count > 0) || r->write_eof;
+}
+
+static int cond_can_write(void *arg) {
+    struct pipe_ring *r = (struct pipe_ring *)arg;
+    return (r->count < PIPE_BUF_SIZE) || r->read_eof;
+}
+
 static void devpipe_close(struct Spoor *c) {
     struct pipe_endpoint *p = priv_of(c);
     if (!p) return;
@@ -158,6 +197,29 @@ static void devpipe_close(struct Spoor *c) {
     if (!r || r->magic != PIPE_RING_MAGIC) {
         extinction("pipe: close on endpoint with corrupted ring");
     }
+
+    // EOF propagation: closing the read end sets read_eof + wakes any
+    // sleeping writer (so it can return -EPIPE). Closing the write end
+    // sets write_eof + wakes any sleeping reader (so it can return 0
+    // for EOF). Per specs/pipe.tla CloseRead / CloseWrite + their buggy
+    // variants — the wake is REQUIRED for missed-wakeup-freedom.
+    //
+    // Discipline: set EOF flag under r->lock; release r->lock; call
+    // wakeup() which takes the rendez's own lock. The rendez API
+    // documents that the wakeup's lock acquisition provides the
+    // synchronization between this producer write and the reader's
+    // cond evaluation (which runs under rendez->lock at sleep entry).
+    spin_lock(&r->lock);
+    if (p->is_read_end) {
+        r->read_eof = true;
+        spin_unlock(&r->lock);
+        wakeup(&r->write_rendez);
+    } else {
+        r->write_eof = true;
+        spin_unlock(&r->lock);
+        wakeup(&r->read_rendez);
+    }
+
     // Drop this endpoint's ring ref. When both endpoints have been
     // closed, the ring is freed. ref is signed int — defensive
     // underflow check.
@@ -185,7 +247,32 @@ static long devpipe_read(struct Spoor *c, void *buf, long n, s64 off) {
     if (!p->is_read_end)         return -1;     // wrong end
     if (n < 0 || !buf)           return -1;
     if (!p->ring)                return -1;
-    return ring_read(p->ring, (u8 *)buf, n);
+    struct pipe_ring *r = p->ring;
+
+    // Blocking read. Loop:
+    //   - take lock; if data → drain + drop lock + wake writer + return.
+    //   - if writeEof + empty → drop lock + return 0 (EOF).
+    //   - else → drop lock + sleep on read_rendez until cond_can_read.
+    //
+    // The sleep's cond re-check makes the protocol miss-wakeup-free per
+    // specs/pipe.tla NoStuckReader (composed with scheduler.tla's
+    // NoMissedWakeup at the rendez layer).
+    for (;;) {
+        spin_lock(&r->lock);
+        if (r->count > 0) {
+            long got = ring_read(r, (u8 *)buf, n);
+            spin_unlock(&r->lock);
+            if (got > 0) wakeup(&r->write_rendez);
+            return got;
+        }
+        if (r->write_eof) {
+            spin_unlock(&r->lock);
+            return 0;       // EOF
+        }
+        spin_unlock(&r->lock);
+        sleep(&r->read_rendez, cond_can_read, r);
+        // Loop: re-check state with the lock held.
+    }
 }
 
 static long devpipe_write(struct Spoor *c, const void *buf, long n, s64 off) {
@@ -195,7 +282,30 @@ static long devpipe_write(struct Spoor *c, const void *buf, long n, s64 off) {
     if (p->is_read_end)          return -1;     // wrong end
     if (n < 0 || !buf)           return -1;
     if (!p->ring)                return -1;
-    return ring_write(p->ring, (const u8 *)buf, n);
+    struct pipe_ring *r = p->ring;
+
+    // Blocking write. Loop:
+    //   - take lock; if readEof → drop lock + return -1 (EPIPE).
+    //   - if space → append + drop lock + wake reader + return.
+    //   - else → drop lock + sleep on write_rendez until cond_can_write.
+    //
+    // Discipline matches devpipe_read's read side; specs/pipe.tla
+    // NoStuckWriter is the invariant.
+    for (;;) {
+        spin_lock(&r->lock);
+        if (r->read_eof) {
+            spin_unlock(&r->lock);
+            return -1;      // EPIPE
+        }
+        if (r->count < PIPE_BUF_SIZE) {
+            long put = ring_write(r, (const u8 *)buf, n);
+            spin_unlock(&r->lock);
+            if (put > 0) wakeup(&r->read_rendez);
+            return put;
+        }
+        spin_unlock(&r->lock);
+        sleep(&r->write_rendez, cond_can_write, r);
+    }
 }
 
 static struct Block *devpipe_bread(struct Spoor *c, long n, s64 off) {
@@ -267,11 +377,16 @@ int pipe_create(struct Spoor **out_read_end, struct Spoor **out_write_end) {
 
     struct pipe_ring *r = kmalloc(sizeof(*r), KP_ZERO);
     if (!r) return -1;
-    r->magic = PIPE_RING_MAGIC;
-    r->ref   = 2;
-    r->count = 0;
-    r->head  = 0;
-    r->tail  = 0;
+    r->magic     = PIPE_RING_MAGIC;
+    r->ref       = 2;
+    r->count     = 0;
+    r->head      = 0;
+    r->tail      = 0;
+    r->read_eof  = false;
+    r->write_eof = false;
+    spin_lock_init(&r->lock);
+    rendez_init(&r->read_rendez);
+    rendez_init(&r->write_rendez);
     // buf[] already zero from KP_ZERO.
 
     struct pipe_endpoint *rd_priv = kmem_cache_alloc(g_endpoint_cache, KP_ZERO);

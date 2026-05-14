@@ -14,16 +14,16 @@ A pipe is the simplest IPC primitive: one process writes bytes, another reads th
 
 ---
 
-## Semantics at v1.0 (non-blocking)
+## Semantics (blocking; P5-pipe-blocking)
 
-- **read** returns bytes available (0..n); **0 on empty buffer** (no blocking).
-- **write** returns bytes accepted (0..n); **0 on full buffer** (no blocking).
+- **read** drains bytes from the buffer (1..n returned) when data is available; **blocks** (sleeps on `read_rendez`) when empty AND write end open; **returns 0 (EOF)** when empty AND write end closed.
+- **write** appends bytes (1..n returned, may be < n if buffer fills mid-write) when space is available; **blocks** (sleeps on `write_rendez`) when full AND read end open; **returns -1 (EPIPE)** when read end closed.
 - read on the **write** end → `-1` (wrong end).
 - write on the **read** end → `-1` (wrong end).
 
-The non-blocking discipline is sufficient for all v1.0 in-kernel uses (single-CPU, synchronous test sequencing, pre-staged frame writes through the 9P client). Blocking semantics (read sleeps until data arrives; write sleeps until space frees) land at **P5-pipe-blocking** with rendez integration — that chunk needs a spec extension because the missed-wakeup hazard (ARCH §28 I-9) enters scope.
+The wait/wake protocol is modeled in `specs/pipe.tla` and pinned by `NoStuckReader` / `NoStuckWriter` invariants (specializations of ARCH §28 I-9 to the pipe's two-direction state machine). The TLC matrix is 1 clean cfg + 4 buggy cfgs; each buggy variant elides the wake-after-mutation step and produces a counterexample.
 
-EOF/closed-end semantics are **not** modeled at v1.0. Callers know the lifetime of both ends because they hold the Spoor pointers. POSIX `read returns 0 on writer close` is a Phase 5+ extension (when the pipe(2) syscall surfaces these endpoints to userspace).
+**Single-waiter discipline**: at most one thread sleeps on each direction at a time. Mirrors the impl's `struct Rendez` (single-waiter; see `kernel/include/thylacine/rendez.h`). Multi-waiter wait queues are Phase 5+ (poll, futex).
 
 ---
 
@@ -70,7 +70,7 @@ struct pipe_endpoint {
 };
 ```
 
-`_Static_assert` pins `sizeof(struct pipe_ring) == 32 + 4096`. The ring is heap-allocated (kmalloc routes 4 KiB+ through alloc_pages; same path as p9_client). The endpoint is 16 bytes; SLUB-cached for compactness.
+`_Static_assert` pins `sizeof(struct pipe_ring) == 72 + 4096` (was 32 + 4096 in the non-blocking pre-image; P5-pipe-blocking added `read_eof` + `write_eof` flags, a `spin_lock_t lock`, and two `struct Rendez` wait queues, growing the header from 32 to 72 bytes). The ring is heap-allocated (kmalloc routes 4 KiB+ through alloc_pages; same path as p9_client). The endpoint is 16 bytes; SLUB-cached for compactness.
 
 Two endpoints share one ring. Each Spoor's `aux` is its own `pipe_endpoint`. The Dev vtable's read / write dispatch on `is_read_end`.
 
@@ -82,46 +82,94 @@ Standard mod-arithmetic two-segment copy. `ring_write` copies up to `PIPE_BUF_SI
 
 `devpipe` is registered in the bestiary by `pipe_init` (called from `kernel/main.c` after `dev9p_init`).
 
-- `read` checks `is_read_end`; calls `ring_read`. Wrong-end → -1.
-- `write` checks `!is_read_end`; calls `ring_write`. Wrong-end → -1.
-- `close` drops the ring's per-endpoint refcount. When the ring's ref hits 0, the ring is freed; the endpoint struct is always freed (it's per-Spoor).
+- `read` is a blocking loop: take `r->lock`; if `count > 0` → drain (via `ring_read`) → drop lock → `wakeup(write_rendez)` → return bytes drained. If `write_eof` + empty → drop lock → return 0 (EOF). Else → drop lock → `sleep(read_rendez, cond_can_read, r)`; on wake, loop.
+- `write` is symmetric: take lock; if `read_eof` → return -1 (EPIPE). If space → append (via `ring_write`) → drop lock → `wakeup(read_rendez)` → return bytes written. Else → sleep on `write_rendez`.
+- `close` sets the appropriate EOF flag (`read_eof` or `write_eof`) under `r->lock`, drops the lock, **calls `wakeup` on the OTHER side's rendez** (the buggy variant skips this — caught by `BUGGY_CLOSE_*_NO_WAKE_*` spec configs). Then drops the ring's per-endpoint refcount; ring freed at 0; endpoint struct always freed.
 - Other slots: stubs (attach returns NULL — Plan 9's `/srv` posting model isn't wired at v1.0; the Phase 5+ syscall surface lands it).
+
+### Wait/wake discipline
+
+The atomic check-then-sleep protocol is provided by `<thylacine/rendez.h>`. The pipe's contribution is:
+1. State mutation (count++, count--, eof := true) happens under `r->lock`.
+2. After dropping `r->lock`, call `wakeup(rendez)` to deliver the wake to any sleeper.
+3. The rendez's wakeup acquires its own lock, which pairs (release/acquire) with the next sleeper's cond evaluation at sleep entry — ensuring the cond reads the post-mutation state.
+
+The discipline maps to `specs/pipe.tla` actions:
+- `ReadDrain(t)` ↔ devpipe_read's drain branch + `wakeup(write_rendez)`.
+- `WriteAppend(t)` ↔ devpipe_write's append branch + `wakeup(read_rendez)`.
+- `CloseRead` ↔ devpipe_close's read-side branch (set read_eof + `wakeup(write_rendez)`).
+- `CloseWrite` ↔ devpipe_close's write-side branch (set write_eof + `wakeup(read_rendez)`).
+
+The `BuggyXxxNoWake` variants elide the wakeup call → `NoStuckReader` / `NoStuckWriter` violated.
 
 ### Lifecycle
 
-1. `pipe_create` allocates the ring (ref=2) + two endpoints + two Spoors. Each Spoor's aux is set to its endpoint.
-2. Caller uses read/write through `Spoor->dev->{read,write}`.
-3. `spoor_clunk` on either end → `devpipe_close` → drop ring ref to 1; endpoint freed; Spoor's `c->aux` cleared.
+1. `pipe_create` allocates the ring (ref=2; lock + rendezes initialized) + two endpoints + two Spoors. Each Spoor's aux is set to its endpoint.
+2. Caller uses read/write through `Spoor->dev->{read,write}`. Read on empty / write on full sleeps until woken.
+3. `spoor_clunk` on either end → `devpipe_close` → set EOF flag + wake the other side's rendez (so any sleeper exits) → drop ring ref to 1; endpoint freed; Spoor's `c->aux` cleared.
 4. `spoor_clunk` on the other end → drop ring ref to 0; ring's magic clobbered; `kfree(ring)`; endpoint freed.
 
 ---
 
 ## Spec posture
 
-**No new TLA+ module at v1.0.** The non-blocking pipe's correctness is local + structural:
-- Ring buffer invariant (count = bytes-written - bytes-read; head / tail / count consistency) is tested directly.
-- No wait/wake → no missed-wakeup hazard → I-9 doesn't apply at this chunk.
+`specs/pipe.tla` (landed at P5-pipe-blocking) models the wait/wake protocol with 7 actions:
 
-The blocking variant (P5-pipe-blocking) WILL need a spec extension — at minimum to compose with `specs/scheduler.tla`'s wait/wake state machine. Reader's wait condition is "buffer has data"; writer's is "buffer has space"; wake signals on the other side's mutation. This is the canonical missed-wakeup hazard and gets formal modeling when the impl lands.
+- Clean: `ReadDrain` / `ReadEof` / `ReadSleep` / `WriteAppend` / `WriteEpipe` / `WriteSleep` / `CloseRead` / `CloseWrite` (8 — symmetric pairs).
+- Buggy: `BuggyWriteAppendNoWake` / `BuggyReadDrainNoWake` / `BuggyCloseWriteNoWake` / `BuggyCloseReadNoWake` (4 — each elides the wake after a state-enabling mutation).
+
+5 invariants:
+- `TypeOk` — state space type-safety.
+- `SingleWaiter` — at most one thread in `WAITING_READ`; at most one in `WAITING_WRITE`. Mirrors the rendez API.
+- `EofMonotonic` — once set, never cleared.
+- `NoStuckReader` — `NOT ∃t : threadState[t] = "WAITING_READ" AND CanRead`. I-9 specialized to the read side.
+- `NoStuckWriter` — symmetric.
+
+TLC verdicts at `Threads = {t1, t2}, CAP = 2`:
+
+| Config | Verdict |
+|---|---|
+| `pipe.cfg` | Model checking completed; no error. |
+| `pipe_buggy_write_no_wake_reader.cfg` | NoStuckReader violated. |
+| `pipe_buggy_read_no_wake_writer.cfg` | NoStuckWriter violated. |
+| `pipe_buggy_close_write_no_wake_reader.cfg` | NoStuckReader violated. |
+| `pipe_buggy_close_read_no_wake_writer.cfg` | NoStuckWriter violated. |
+
+The clean cfg models the impl discipline; each buggy cfg captures the bug class of "forgot to wake on a state-enabling mutation."
+
+**Composition with `specs/scheduler.tla`**: `scheduler.tla::NoMissedWakeup` proves the atomic cond-check + sleep transition at the rendez API surface. `specs/pipe.tla::NoStuckReader/Writer` proves the pipe-side discipline of "every mutation that COULD enable a waiter MUST issue a wakeup." Together they close the missed-wakeup hazard end-to-end for the pipe.
 
 ---
 
 ## Tests
 
-10 tests in `kernel/test/test_pipe.c`:
+10 single-thread tests in `kernel/test/test_pipe.c` + 4 multi-thread tests in `kernel/test/test_pipe_blocking.c`:
+
+### Single-thread (sequential write/read; no sleep)
 
 | Test | Covers |
 |---|---|
 | `pipe.smoke` | Create pair; write payload; read it back; FIFO order. |
-| `pipe.read_on_empty_returns_zero` | Read with empty ring → 0 (non-blocking). |
-| `pipe.write_to_full_returns_zero` | Fill ring (PIPE_BUF_SIZE bytes); next write → 0. |
+| `pipe.read_on_empty_returns_zero` | (Repurposed for blocking semantics:) close write end FIRST, then read on empty → 0 (EOF). |
+| `pipe.write_to_full_returns_zero` | (Repurposed for blocking semantics:) close read end FIRST, then write → -1 (EPIPE). |
 | `pipe.write_short_when_partially_full` | Buffer has K free; write N>K → returns K. |
 | `pipe.wraparound` | Write 3000 / read 2500 / write 3000 / read 3500 → all bytes in order across the wrap. |
 | `pipe.read_on_write_end_rejected` | Write end's `dev->read` → -1. |
 | `pipe.write_on_read_end_rejected` | Read end's `dev->write` → -1. |
 | `pipe.close_one_end_keeps_other_alive` | Clunk read end; write end's Spoor still alive; ring still alive. |
 | `pipe.close_both_ends_frees_ring` | Clunk both ends; `pipe_total_freed` increments. |
-| `pipe.compose_with_spoor_transport` | Two pipe pairs wired into a `p9_spoor_transport` adapter; full Tversion + Tattach handshake through real pipes. **This is the canonical e2e test — proves the entire 9P stack composes against the production byte-pipe primitive.** |
+| `pipe.compose_with_spoor_transport` | Two pipe pairs wired into a `p9_spoor_transport` adapter; full Tversion + Tattach handshake through real pipes. The canonical 9P-stack-composition test. |
+
+### Multi-thread (sleep/wake protocol; P5-pipe-blocking)
+
+Each test spawns a consumer thread that performs a blocking op; the boot thread then triggers the wake. Pattern matches `test_rendez_basic_handoff`.
+
+| Test | Covers |
+|---|---|
+| `pipe_blocking.write_wakes_sleeping_reader` | Consumer reads on empty → sleeps. Boot writes → reader wakes + drains. |
+| `pipe_blocking.read_wakes_sleeping_writer` | Boot fills buffer. Consumer writes 1 more → sleeps. Boot drains → writer wakes + appends. |
+| `pipe_blocking.close_write_end_wakes_reader_with_eof` | Consumer reads on empty → sleeps. Boot closes write end → reader wakes + returns 0 (EOF). |
+| `pipe_blocking.close_read_end_wakes_writer_with_epipe` | Boot fills buffer. Consumer writes → sleeps. Boot closes read end → writer wakes + returns -1 (EPIPE). |
 
 ---
 
@@ -145,21 +193,27 @@ The blocking variant (P5-pipe-blocking) WILL need a spec extension — at minimu
 
 | Component | State |
 |---|---|
-| Non-blocking ring + Dev + Spoor pair | **Landed (P5-pipe)** |
+| Ring + Dev + Spoor pair | **Landed (P5-pipe)** |
 | `pipe_init` bestiary registration | **Landed (P5-pipe)** |
-| 10 unit tests including e2e composition with spoor-transport | **Landed (P5-pipe)** |
-| Blocking semantics + rendez integration + spec extension | Deferred to **P5-pipe-blocking** |
+| Per-pipe spin lock + 2 rendez wait queues + EOF flags | **Landed (P5-pipe-blocking)** |
+| Blocking read / write / close-wakes-other-side | **Landed (P5-pipe-blocking)** |
+| `specs/pipe.tla` + 4 buggy cfgs (NoStuckReader / NoStuckWriter) | **Landed (P5-pipe-blocking)** |
+| 14 unit tests (10 sequential + 4 multi-thread blocking) | **Landed (P5-pipe-blocking)** |
 | Userspace `pipe(2)` syscall | Deferred to **P5-fd-syscalls** |
 | Plan 9 `/srv` posting (named pipes via the namespace) | Phase 5+ |
-| Multi-CPU safety (per-pipe lock) | Deferred to P5-pipe-blocking |
+| Multi-waiter wait queues (more than one reader / writer sleeping at once) | Phase 5+ when poll / futex land |
 
 ---
 
 ## Known caveats / footguns
 
-### Non-blocking semantics
+### Blocking semantics — read returning 0 means EOF
 
-`read` returning 0 means "empty buffer right now," NOT "EOF." Callers that need EOF must track the lifetime of the write end through some out-of-band mechanism (e.g., the Spoor pointer's existence). When the blocking variant lands, EOF becomes the standard "writer closed, buffer drained" signal.
+`read` returning 0 unambiguously means "write end closed AND buffer drained" (EOF). Empty buffer with write end still open → reader sleeps. Symmetric for write: -1 means EPIPE (read end closed). Both signals are POSIX-shaped.
+
+### Single-waiter discipline
+
+At most one thread sleeps on each direction at a time. A second thread attempting to sleep extincts (rendez.h's `single-waiter` invariant). For v1.0 in-kernel uses (single consumer + single producer per pipe), this is fine. Multi-waiter wait queues (multiple consumers competing for one pipe end, or multiple producers blocking on full) need poll / futex extensions; not in v1.0 scope.
 
 ### Wrong-end calls return -1, not extinct
 

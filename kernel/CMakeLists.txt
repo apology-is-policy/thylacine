@@ -134,6 +134,7 @@ set(KERNEL_SRCS
     test/test_9p_attach.c
     test/test_9p_spoor_transport.c
     test/test_pipe.c
+    test/test_pipe_blocking.c
 )
 
 set(KERNEL_LD_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/../arch/arm64/kernel.ld)

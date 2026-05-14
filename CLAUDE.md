@@ -118,6 +118,7 @@ Any change to the surfaces below MUST spawn a focused adversarial soundness audi
 | Handle table | `kernel/handle.c` | Rights monotonicity (I-2, I-6), transfer-via-9P (I-4), hardware-handle non-transferability (I-5) |
 | VMO | `kernel/vmo.c`, `mm/vmo_pages.c` | Refcount, mapping lifecycle (I-7) |
 | 9P client | `kernel/9p_client.c`, `kernel/9p_session.c`, `kernel/9p_attach.c` | Wire protocol, fid lifecycle (I-11), tag uniqueness (I-10), pipelining |
+| Pipe wait/wake | `kernel/pipe.c` | Missed-wakeup-freedom (I-9 specialized to pipe two-direction state machine); per-pipe lock + rendez discipline. Modeled in `specs/pipe.tla`. |
 | Notes / signals | `kernel/notes.c`, `compat/signals.c` | Delivery ordering (I-19), async safety |
 | Capability checks | All syscall entry points | Privilege correctness |
 | KASLR / ASLR | `arch/arm64/start.S`, `arch/arm64/kaslr.c` | Entropy quality, layout correctness (I-16) |

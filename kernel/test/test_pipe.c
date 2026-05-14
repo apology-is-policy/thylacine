@@ -108,34 +108,37 @@ void test_pipe_smoke(void) {
 }
 
 void test_pipe_read_on_empty_returns_zero(void) {
+    // Renamed semantics under P5-pipe-blocking: read on empty WOULD
+    // sleep; to test the non-sleeping path we close the write end first,
+    // which sets write_eof so read returns 0 (EOF) immediately.
     struct Spoor *rd = NULL, *wr = NULL;
     TEST_EXPECT_EQ(pipe_create(&rd, &wr), 0, "create");
+
+    // Close write end first → write_eof = true.
+    spoor_clunk(wr);
 
     u8 got[16];
     TEST_EXPECT_EQ(dev_read(rd, got, (long)sizeof(got)), 0L,
-        "read on empty returns 0");
+        "read on empty + write_eof returns 0 (EOF)");
 
     spoor_clunk(rd);
-    spoor_clunk(wr);
 }
 
 void test_pipe_write_to_full_returns_zero(void) {
+    // Renamed semantics under P5-pipe-blocking: write to full WOULD
+    // sleep; to test the non-sleeping path we close the read end first,
+    // which sets read_eof so write returns -1 (EPIPE) immediately.
     struct Spoor *rd = NULL, *wr = NULL;
     TEST_EXPECT_EQ(pipe_create(&rd, &wr), 0, "create");
 
-    // Fill the buffer completely.
-    static u8 fill[PIPE_BUF_SIZE];
-    for (size_t i = 0; i < PIPE_BUF_SIZE; i++) fill[i] = (u8)(i & 0xff);
-    TEST_EXPECT_EQ(dev_write(wr, fill, (long)PIPE_BUF_SIZE),
-                   (long)PIPE_BUF_SIZE,
-        "first write fills the buffer");
-
-    // Next write returns 0 (no space).
-    u8 extra = 0xAB;
-    TEST_EXPECT_EQ(dev_write(wr, &extra, 1L), 0L,
-        "write on full returns 0");
-
+    // Close read end first → read_eof = true.
     spoor_clunk(rd);
+
+    // Write returns -1 (EPIPE) regardless of buffer state.
+    u8 extra = 0xAB;
+    TEST_EXPECT_EQ(dev_write(wr, &extra, 1L), -1L,
+        "write with read_eof returns -1 (EPIPE)");
+
     spoor_clunk(wr);
 }
 
