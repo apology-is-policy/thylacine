@@ -108,7 +108,36 @@ enum {
     // spoor_ref so the dup'd handle has its own reference.
     SYS_CLOSE       = 11,   // arg: fd (x0)
     SYS_DUP         = 12,   // arg: oldfd (x0), new_rights (x1)
+
+    // P5-attach-syscall: wrap a byte-pipe Spoor pair (tx + rx) in a
+    // p9_client + drive the Tversion + Tattach handshake; return a
+    // KOBJ_SPOOR fd for the resulting 9P tree's root (a dev9p Spoor
+    // whose close tears down the entire attach session).
+    //
+    // For duplex byte pipes (Unix socket, vsock — Phase 5+), userspace
+    // passes the same fd as both tx_fd and rx_fd. For half-duplex
+    // (Plan 9 pipes from SYS_PIPE), userspace creates two pipe pairs
+    // and passes the matching write-end and read-end.
+    //
+    // SYS_ATTACH_9P(tx_fd, rx_fd, aname_va, aname_len, n_uname)
+    //   x0 = tx_fd (client→server byte pipe)
+    //   x1 = rx_fd (server→client byte pipe)
+    //   x2 = aname_va (user-VA pointer to the attach name string)
+    //   x3 = aname_len
+    //   x4 = n_uname (u32; 0 for no-auth attach at v1.0)
+    // Returns: x0 = new fd (>=0) on success; -1 on:
+    //   - invalid tx_fd or rx_fd (not KOBJ_SPOOR / out-of-range)
+    //   - missing RIGHT_READ on rx_fd / RIGHT_WRITE on tx_fd
+    //   - aname_va outside user-VA bound / aname_len > SYS_ATTACH_ANAME_MAX
+    //   - kmalloc OOM for adapter / p9_attached_create handshake failure
+    //   - handle table full
+    SYS_ATTACH_9P   = 13,   // arg: tx_fd, rx_fd, aname_va, aname_len, n_uname
 };
+
+// Maximum aname length per SYS_ATTACH_9P call. The aname is a server-
+// side path or capability string (typically short — "/", "tcp!host!port",
+// "pool/data"). 256 bytes is generous.
+#define SYS_ATTACH_ANAME_MAX  256u
 
 // Maximum bytes transferred per SYS_READ / SYS_WRITE call. Userspace
 // loops for larger transfers. Kept at PIPE_BUF_SIZE (4 KiB) to match

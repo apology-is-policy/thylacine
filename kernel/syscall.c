@@ -6,9 +6,12 @@
 // surface; each syscall lands in its own TU.
 
 #include <thylacine/syscall.h>
+#include <thylacine/9p_attach.h>
+#include <thylacine/9p_spoor_transport.h>
 #include <thylacine/burrow.h>
 #include <thylacine/caps.h>
 #include <thylacine/dev.h>
+#include <thylacine/dev9p.h>
 #include <thylacine/dma_handle.h>
 #include <thylacine/extinction.h>
 #include <thylacine/handle.h>
@@ -24,6 +27,7 @@
 #include "../arch/arm64/exception.h"
 #include "../arch/arm64/uaccess.h"
 #include "../arch/arm64/uart.h"
+#include "../mm/slub.h"
 
 // =============================================================================
 // SYS_EXITS — terminate calling process.
@@ -724,6 +728,151 @@ static s64 sys_close_handler(u64 hraw) {
     return (s64)handle_close(p, (hidx_t)hraw);
 }
 
+// =============================================================================
+// SYS_ATTACH_9P — wrap a Spoor pair in a 9P client + return root fd
+// (P5-attach-syscall).
+// =============================================================================
+//
+// User-visible body of `attach_9p(tx_fd, rx_fd, aname, n_uname)` per
+// ARCH §9.6.1. Composes:
+//   - SYS_PIPE-style KOBJ_SPOOR fd inputs (tx + rx — caller picks
+//     whether they're the same Spoor for duplex byte pipes, or two
+//     distinct Spoors for half-duplex like the pipe(fd[2]) primitive).
+//   - p9_spoor_transport adapter (binds the Spoor pair to the
+//     transport_ops vtable).
+//   - p9_attached_create (drives Tversion + Tattach handshake;
+//     allocates the p9_client + recv_buf).
+//   - p9_attached_root_spoor (constructs the dev9p root Spoor).
+//   - dev9p_priv extension: stash the attached_owner + adapter so
+//     spoor_clunk on the returned fd tears down the entire session.
+//   - handle_alloc as KOBJ_SPOOR with RIGHT_READ|WRITE|TRANSFER.
+//
+// On any failure, ALL partial state is cleaned up (rollback).
+//
+// Rights gate: tx_fd needs RIGHT_WRITE; rx_fd needs RIGHT_READ.
+//
+// Aname validation: aname_va is a user-VA buffer of aname_len bytes
+// (max SYS_ATTACH_ANAME_MAX = 256). Copied into kernel scratch via
+// per-byte uaccess_load_u8. NULL with len=0 is allowed (empty aname).
+
+// Default 9P handshake parameters for SYS_ATTACH_9P at v1.0. msize
+// must match what dev9p / sys_read_handler scratch buffers can hold.
+// 4 KiB matches PIPE_BUF_SIZE + SYS_RW_MAX; aligns with the design.
+#define SYS_ATTACH_DEFAULT_MSIZE     4096u
+#define SYS_ATTACH_DEFAULT_ROOT_FID  1u
+
+static s64 sys_attach_9p_handler(u64 tx_fd_raw, u64 rx_fd_raw,
+                                 u64 aname_va, u64 aname_len, u64 n_uname) {
+    struct Thread *t = current_thread();
+    if (!t)                                          return -1;
+    struct Proc *p = t->proc;
+    if (!p)                                          return -1;
+
+    // Validate aname length cap.
+    if (aname_len > SYS_ATTACH_ANAME_MAX)             return -1;
+    // Validate user-VA range when aname_len > 0; zero-length aname
+    // is permitted (a zero-length attach name is legal per 9P2000.L).
+    if (aname_len > 0 && !sys_validate_user_buf(aname_va, aname_len))
+                                                     return -1;
+
+    // Look up the transport handles. Take INDEPENDENT references so
+    // userspace closing the original fds doesn't free Spoors out from
+    // under the attach. The original fds keep their own ref via the
+    // handle table; we add ours on top.
+    struct Spoor *tx = sys_lookup_spoor(p, (hidx_t)tx_fd_raw, RIGHT_WRITE);
+    if (!tx)                                         return -1;
+    struct Spoor *rx = sys_lookup_spoor(p, (hidx_t)rx_fd_raw, RIGHT_READ);
+    if (!rx)                                         return -1;
+    spoor_ref(tx);
+    if (rx != tx) spoor_ref(rx);
+
+    // Copy aname into kernel scratch. SYS_ATTACH_ANAME_MAX byte stack
+    // buffer; per-byte uaccess_load_u8 (same shape as SYS_WRITE).
+    u8 aname_scratch[SYS_ATTACH_ANAME_MAX];
+    for (u64 i = 0; i < aname_len; i++) {
+        if (uaccess_load_u8(aname_va + i, &aname_scratch[i]) != 0) {
+            spoor_unref(tx);
+            if (rx != tx) spoor_unref(rx);
+            return -1;
+        }
+    }
+
+    // Allocate the adapter on the heap so its lifetime is tied to
+    // the attached (dev9p_close frees it via priv->adapter_to_free).
+    struct p9_spoor_transport *adapter = kmalloc(sizeof(*adapter), KP_ZERO);
+    if (!adapter) {
+        spoor_unref(tx);
+        if (rx != tx) spoor_unref(rx);
+        return -1;
+    }
+    // owns_spoors=false: the SVC handler manages the Spoor refs
+    // explicitly. dev9p_close's attach-teardown branch (which fires
+    // after p9_attached_destroy / p9_client_close → adapter close →
+    // no-op since owns=false) does the spoor_unref's.
+    if (p9_spoor_transport_init(adapter, tx, rx, false) != 0) {
+        spoor_unref(tx);
+        if (rx != tx) spoor_unref(rx);
+        kfree(adapter);
+        return -1;
+    }
+
+    struct p9_transport_ops ops = p9_spoor_transport_ops(adapter);
+    struct p9_attached *att = p9_attached_create(
+        ops,
+        SYS_ATTACH_DEFAULT_MSIZE,            // recv_cap (= msize at v1.0)
+        SYS_ATTACH_DEFAULT_ROOT_FID,         // root_fid
+        SYS_ATTACH_DEFAULT_MSIZE,            // msize (client proposal)
+        NULL, 0,                             // uname (empty at v1.0; no-auth)
+        aname_len > 0 ? aname_scratch : NULL, aname_len,
+        (u32)n_uname);
+    if (!att) {
+        spoor_unref(tx);
+        if (rx != tx) spoor_unref(rx);
+        kfree(adapter);
+        return -1;
+    }
+
+    struct Spoor *root = p9_attached_root_spoor(att);
+    if (!root) {
+        p9_attached_destroy(att);
+        spoor_unref(tx);
+        if (rx != tx) spoor_unref(rx);
+        kfree(adapter);
+        return -1;
+    }
+
+    // Patch the root Spoor's dev9p_priv with the attach-session
+    // ownership pointers. dev9p_close on this Spoor will then run the
+    // full teardown sequence (destroy attached → unref transport
+    // Spoors → kfree adapter).
+    struct dev9p_priv *root_priv = (struct dev9p_priv *)root->aux;
+    if (!root_priv || root_priv->magic != DEV9P_PRIV_MAGIC) {
+        // Shouldn't happen — p9_attached_root_spoor's dev9p Spoor
+        // always has a valid priv. Defensive rollback.
+        spoor_clunk(root);
+        p9_attached_destroy(att);
+        spoor_unref(tx);
+        if (rx != tx) spoor_unref(rx);
+        kfree(adapter);
+        return -1;
+    }
+    root_priv->attached_owner  = att;
+    root_priv->adapter_to_free = adapter;
+
+    // Install root Spoor as a KOBJ_SPOOR handle. handle_alloc takes
+    // ownership of root's ref (the one from spoor_alloc inside
+    // p9_attached_root_spoor).
+    rights_t r = RIGHT_READ | RIGHT_WRITE | RIGHT_TRANSFER;
+    hidx_t fd = handle_alloc(p, KOBJ_SPOOR, r, root);
+    if (fd < 0) {
+        // Roll back: clunking root triggers dev9p_close, which sees
+        // attached_owner non-NULL and tears down the entire session.
+        spoor_clunk(root);
+        return -1;
+    }
+    return (s64)fd;
+}
+
 static s64 sys_dup_handler(u64 hraw, u64 new_rights_raw) {
     struct Thread *t = current_thread();
     if (!t)                                          return -1;
@@ -819,6 +968,14 @@ void syscall_dispatch(struct exception_context *ctx) {
 
     case SYS_DUP:
         ctx->regs[0] = (u64)sys_dup_handler(ctx->regs[0], ctx->regs[1]);
+        return;
+
+    case SYS_ATTACH_9P:
+        ctx->regs[0] = (u64)sys_attach_9p_handler(ctx->regs[0],
+                                                  ctx->regs[1],
+                                                  ctx->regs[2],
+                                                  ctx->regs[3],
+                                                  ctx->regs[4]);
         return;
 
     default:

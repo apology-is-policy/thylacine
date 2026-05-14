@@ -44,6 +44,7 @@ enum {
     T_SYS_WRITE       = 10, // P5-fd-rw: write(fd, buf, len)
     T_SYS_CLOSE       = 11, // P5-fd-syscalls: close(fd)
     T_SYS_DUP         = 12, // P5-fd-syscalls: dup(oldfd, new_rights) → newfd
+    T_SYS_ATTACH_9P   = 13, // P5-attach-syscall: 9P client attach over Spoor pair
 };
 
 // VMA prot bits — MUST mirror kernel/include/thylacine/vma.h's
@@ -202,6 +203,40 @@ static inline long t_dma_create(unsigned long size, unsigned long rights) {
         "svc #0"
         : "+r"(x0)
         : "r"(x1), "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
+// t_attach_9p — wrap a Spoor pair (tx, rx) in a 9P client + drive the
+// Tversion + Tattach handshake; return a KOBJ_SPOOR fd for the 9P
+// tree's root. For duplex transports (Unix socket, vsock — Phase 5+),
+// pass the same fd for both tx_fd and rx_fd. For half-duplex pipes,
+// pass the matching write-end + read-end.
+//
+// aname is a server-side path or capability string (up to 256 bytes
+// at v1.0). n_uname is 0 for no-auth attach at v1.0; Phase 5+
+// authentication backends will use it as the per-user identifier.
+//
+// Returns the new fd (>=0) on success, -1 on:
+//   - invalid tx_fd / rx_fd or missing R/W rights
+//   - aname out of user-VA bound / aname_len > 256
+//   - server-side Rlerror on Tversion or Tattach
+//   - kmalloc OOM / handle table full
+__attribute__((always_inline))
+static inline long t_attach_9p(long tx_fd, long rx_fd,
+                               const char *aname, size_t aname_len,
+                               unsigned long n_uname) {
+    register long x0 __asm__("x0") = tx_fd;
+    register long x1 __asm__("x1") = rx_fd;
+    register long x2 __asm__("x2") = (long)(unsigned long)aname;
+    register long x3 __asm__("x3") = (long)aname_len;
+    register long x4 __asm__("x4") = (long)n_uname;
+    register long x8 __asm__("x8") = T_SYS_ATTACH_9P;
+    __asm__ volatile (
+        "svc #0"
+        : "+r"(x0)
+        : "r"(x1), "r"(x2), "r"(x3), "r"(x4), "r"(x8)
         : "memory", "cc"
     );
     return x0;

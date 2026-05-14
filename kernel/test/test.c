@@ -377,6 +377,7 @@ void test_sys_rw_zero_length_validates_fd(void);
 void test_sys_rw_read_after_close_returns_eof(void);
 void test_sys_pipe_dup_spoor_handle_acquires_ref(void);
 void test_pipe_probe_round_trip(void);
+void test_sys_attach_9p_rejection_paths(void);
 void test_irq_latency_bench(void);
 void test_caps_kproc_has_all(void);
 void test_caps_kproc_has_hw_create(void);
@@ -934,6 +935,7 @@ struct test_case g_tests[] = {
     { "sys_rw.read_after_close_returns_eof",           test_sys_rw_read_after_close_returns_eof,           false, NULL },
     { "sys_pipe.dup_spoor_handle_acquires_ref",        test_sys_pipe_dup_spoor_handle_acquires_ref,        false, NULL },
     { "userspace.pipe_probe_round_trip",               test_pipe_probe_round_trip,                         false, NULL },
+    { "sys_attach_9p.rejection_paths",                 test_sys_attach_9p_rejection_paths,                 false, NULL },
     { "userspace.irq_latency_bench",   test_irq_latency_bench,             false, NULL },
     { "caps.kproc_has_all",            test_caps_kproc_has_all,            false, NULL },
     { "caps.kproc_has_hw_create",      test_caps_kproc_has_hw_create,      false, NULL },

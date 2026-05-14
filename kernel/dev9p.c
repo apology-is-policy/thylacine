@@ -4,7 +4,9 @@
 // dev9p-backed Spoor carries a (`p9_client *`, `fid`) pair in its aux;
 // Dev vtable ops route through the high-level p9_client API.
 
+#include <thylacine/9p_attach.h>
 #include <thylacine/9p_client.h>
+#include <thylacine/9p_spoor_transport.h>
 #include <thylacine/9p_wire.h>
 #include <thylacine/dev.h>
 #include <thylacine/dev9p.h>
@@ -233,12 +235,42 @@ static void dev9p_create(struct Spoor *c, const char *name, int omode, u32 perm)
 static void dev9p_close(struct Spoor *c) {
     struct dev9p_priv *p = priv_of(c);
     if (!p) return;
-    if (p->fid_owned) {
-        // Clunk the fid. We ignore the result — close-then-error has
-        // no good recovery; the fid is gone from the client's table
-        // either way per the wire spec.
+
+    // P5-attach-syscall: SYS_ATTACH_9P-created root Spoors carry
+    // attach-session ownership. Closing the Spoor tears down:
+    //   1. p9_attached_destroy → clunks root_fid + p9_client_destroy
+    //      (which calls our adapter's close — a no-op since the
+    //      adapter is configured owns_spoors=false) + frees the
+    //      client + recv_buf + p9_attached struct itself.
+    //   2. spoor_unref the transport Spoor(s) the SVC handler ref'd.
+    //   3. kfree the kmalloc'd adapter.
+    //
+    // Walk-derived Spoors AND kernel-internal callers (where the
+    // client is owned externally) leave these fields NULL and skip
+    // this branch entirely.
+    if (p->attached_owner) {
+        struct p9_spoor_transport *adp = p->adapter_to_free;
+        p9_attached_destroy(p->attached_owner);
+        if (adp) {
+            // The SVC handler took independent refs on the transport
+            // Spoors (so userspace closing the original transport_fd
+            // doesn't free them out from under us). Release those
+            // refs now. The adapter's owns_spoors=false means
+            // adapter close (called by p9_client_close above) didn't
+            // touch them — we own the unref.
+            struct Spoor *tx = adp->tx_spoor;
+            struct Spoor *rx = adp->rx_spoor;
+            if (tx) spoor_unref(tx);
+            if (rx && rx != tx) spoor_unref(rx);
+            kfree(adp);
+        }
+    } else if (p->fid_owned) {
+        // Walk-derived Spoor: clunk the fid. Ignore the result —
+        // close-then-error has no good recovery; the fid is gone
+        // from the client's table either way per the wire spec.
         (void)p9_client_clunk(p->client, p->fid);
     }
+
     // Release the priv allocation. SLUB's freelist write clobbers
     // offset 0 (magic) on free; subsequent priv_of will see the
     // wrong magic and return NULL (UAF defense).

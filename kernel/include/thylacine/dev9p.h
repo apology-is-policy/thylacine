@@ -50,6 +50,8 @@
 #include <thylacine/types.h>
 
 struct p9_client;
+struct p9_attached;
+struct p9_spoor_transport;
 struct Spoor;
 struct Dev;
 
@@ -70,6 +72,14 @@ struct dev9p_priv {
     bool               fid_owned;  // true iff close should clunk; root Spoor's fid
                                    // (the one from p9_client_handshake) is NOT clunked
                                    // by dev9p — the higher layer manages it.
+    // P5-attach-syscall: when SYS_ATTACH_9P creates a root Spoor, it
+    // stashes the attach owner here so that closing this Spoor tears
+    // down the entire attach session (client + transport refs +
+    // allocated adapter). For walk-derived Spoors AND for kernel-
+    // internal callers (tests that own the client externally), these
+    // remain NULL.
+    struct p9_attached       *attached_owner;
+    struct p9_spoor_transport *adapter_to_free;
 };
 
 #define DEV9P_PRIV_MAGIC 0x44395050u   // "D9PP" little-endian
