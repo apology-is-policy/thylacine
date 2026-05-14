@@ -1,161 +1,67 @@
-// /joey — first userspace process (P3-F).
+// /joey — first userspace process; the long-running init.
 //
-// At v1.0 P3-F, /joey is a tiny embedded AArch64 program: prints
-// "hello\n" via SYS_PUTS, exits via SYS_EXITS(0). Validates the full
-// kernel→exec→userspace→syscall→kernel chain WITHOUT the test-harness
-// scaffolding that the prior `userspace.exec_exits_ok` test required.
+// At P5-joey-from-ramfs (this chunk), /joey is loaded from the initrd
+// cpio via devramfs_lookup instead of an embedded 9-instruction blob in
+// the kernel image. The orchestration is unchanged: kernel rforks a
+// child, exec_setup's the joey ELF, userland_enter into EL0, wait_pid
+// for completion. What changed is the source of the ELF — and therefore
+// what /joey can do: an arbitrary userspace binary instead of a
+// hand-encoded SVC SYS_PUTS+SYS_EXITS sequence.
 //
-// Embedded user program (9 instructions; 36 bytes):
-//
-//   0x10000:  movz x0, #0x40        d2800800   x0[15:0] = 0x40
-//   0x10004:  movk x0, #1, lsl #16  f2a00020   x0 = 0x10040 (msg addr)
-//   0x10008:  movz x1, #6           d28000c1   x1 = 6 (msg length)
-//   0x1000c:  movz x8, #1           d2800028   x8 = SYS_PUTS
-//   0x10010:  svc  #0               d4000001   trap → SYS_PUTS dispatch
-//   0x10014:  movz x0, #0           d2800000   status 0 ("ok")
-//   0x10018:  movz x8, #0           d2800008   x8 = SYS_EXITS
-//   0x1001c:  svc  #0               d4000001   trap → SYS_EXITS dispatch
-//   0x10020:  b    .                14000000   defensive (unreachable)
-//   0x10024..0x1003F:  zeros        (padding)
-//   0x10040..0x10045:  "hello\n"    msg
-//
-// Synthetic ELF wrapper: ET_EXEC, EM_AARCH64, single PT_LOAD segment
-// at vaddr 0x10000 covering one page (filesz = 0x46 = 70 bytes; memsz
-// = PAGE_SIZE = 4096). Headers occupy file_offset 0..end-of-headers;
-// segment data starts at file_offset = PAGE_SIZE.
-//
-// Why hand-encoded + synthetic ELF rather than a cross-compiled C
-// binary: at v1.0 P3-F there's no userspace toolchain integration in
-// the build (sysroot is Phase 5; userspace tooling is Phase 3+ Rust);
-// the in-tree blob is the smallest viable demonstrator. P3-F's
-// successor (Phase 4 ramfs / Phase 5 toolchain) will replace this
-// with a real binary build pipeline.
+// The blob is owned by the devramfs file table for the kernel's
+// lifetime; exec_setup copies what it needs into the child's address
+// space, so the pointer's lifetime is comfortably longer than the
+// child Proc's reference to it.
 //
 // Boot flow:
-//   boot_main() … all bring-up …
-//     test_run_all()                    in-kernel tests (kproc context)
-//     fault_test_run()                  hardening proof (production no-op)
-//     joey_run()                        ← P3-F
-//       build_init_elf()                construct synthetic ELF blob
-//       rfork(RFPROC, joey_thunk, args) child Proc on kthread kstack
+//   boot_main() ... all bring-up ...
+//     test_run_all()                       in-kernel tests (kproc context)
+//     fault_test_run()                     hardening proof
+//     joey_run()                           ← P5-joey-from-ramfs
+//       devramfs_lookup("joey")            obtain ELF bytes from initrd
+//       rfork(RFPROC, joey_thunk, args)    child Proc on kthread kstack
 //         joey_thunk:
-//           exec_setup(p, blob, size)   populate child's address space
-//           userland_enter(entry, sp)   eret to EL0 (never returns)
+//           exec_setup(p, blob, size)      populate child's address space
+//           userland_enter(entry, sp)      eret to EL0 (never returns)
 //         child user code runs:
-//           SVC SYS_PUTS("hello\n", 6)  prints to UART
-//           SVC SYS_EXITS(0)            kernel exits("ok")
-//       wait_pid(&status)               block; reap child
-//     "Thylacine boot OK"               TOOLING.md §10 ABI
+//           t_putstr(...)                  → SYS_PUTS to UART
+//           main returns 0 → _start        → SVC SYS_EXITS
+//       wait_pid(&status)                  block; reap child
+//     "Thylacine boot OK"                  TOOLING.md §10 ABI
 //
-// Spec posture: no new TLA+ at P3-F. /joey is impl-orchestration over
-// already-spec'd primitives (rfork from proc model; exec_setup from
-// burrow.tla mapping lifecycle; userland_enter is a single-instruction
-// EL transition). Phase 5+ /joey-as-server (long-running supervisor)
-// will warrant a spec extension covering the supervisor/child
-// reaping protocol.
+// At later chunks /joey becomes the long-running supervisor (per
+// ARCHITECTURE.md §5.1 + CORVUS-DESIGN.md §3 D4): forks stratumd-system,
+// mounts /sysroot via 9P, pivots root, starts /sbin/corvus and login.
+// joey_run keeps its current shape (one-call, wait-and-extinct) only
+// until the orchestrator extension lands.
+//
+// Spec posture: no new TLA+ at P5-joey-from-ramfs. The change is the
+// source of the ELF, not the orchestration shape; the prior invariants
+// (rfork → exec_setup → userland_enter → wait_pid) hold unchanged.
 
 #include <thylacine/joey.h>
 
+#include <thylacine/devramfs.h>
 #include <thylacine/elf.h>
 #include <thylacine/exec.h>
 #include <thylacine/extinction.h>
-#include <thylacine/page.h>
 #include <thylacine/proc.h>
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 
 #include "../arch/arm64/uart.h"
 
-// User program — 9 hand-encoded AArch64 instructions, little-endian u32.
-// Verified against `clang --target=aarch64-none-elf -c` disassembly.
-static const u32 g_joey_program[] = {
-    0xd2800800,  // movz x0, #0x40        ; x0[15:0] = 0x40
-    0xf2a00020,  // movk x0, #1, lsl #16  ; x0 = 0x10040 (msg addr)
-    0xd28000c1,  // movz x1, #6           ; x1 = 6 (msg length)
-    0xd2800028,  // movz x8, #1           ; x8 = SYS_PUTS
-    0xd4000001,  // svc  #0
-    0xd2800000,  // movz x0, #0           ; status 0 → "ok"
-    0xd2800008,  // movz x8, #0           ; x8 = SYS_EXITS
-    0xd4000001,  // svc  #0               ; never returns
-    0x14000000,  // b    .                ; defensive (unreachable)
-};
+// File name in the initrd cpio. Built by usr/joey/CMakeLists.txt and
+// copied into the cpio root by tools/build.sh::build_ramfs.
+#define JOEY_RAMFS_NAME "joey"
 
-// User program embedded in the same RX page as the message. Code
-// lives at byte offset 0..0x23; message at byte offset 0x40..0x45.
-static const char g_joey_msg[] = "hello\n";
-
-// In-segment offset of the message. Code occupies the first 36 bytes;
-// rounded to 0x40 to give the program a clean address to load.
-#define JOEY_MSG_SEGMENT_OFF   0x40
-
-// Single PT_LOAD segment vaddr (must match g_joey_program's adrp/movz
-// computation: x0 = 0x10040 = JOEY_SEGMENT_VADDR + JOEY_MSG_SEGMENT_OFF).
-#define JOEY_SEGMENT_VADDR     0x10000ull
-
-// ELF blob: header page + segment page = 8 KiB. Sized to host one ELF
-// header + one PT_LOAD program header + segment data.
-#define JOEY_ELF_BLOB_SIZE     8192
-static _Alignas(struct Elf64_Ehdr) u8 g_joey_elf_blob[JOEY_ELF_BLOB_SIZE];
-
-// Build the synthetic ELF in g_joey_elf_blob. Returns the populated
-// blob size (bytes from offset 0 to one past the last meaningful byte).
-static size_t build_init_elf(void) {
-    // Zero everything so trailing bytes (including post-message padding)
-    // are clean, deterministic, KASLR-stable.
-    for (size_t i = 0; i < JOEY_ELF_BLOB_SIZE; i++) {
-        g_joey_elf_blob[i] = 0;
-    }
-
-    struct Elf64_Ehdr *eh = (struct Elf64_Ehdr *)g_joey_elf_blob;
-    eh->e_ident[EI_MAG0]    = ELFMAG0;
-    eh->e_ident[EI_MAG1]    = ELFMAG1;
-    eh->e_ident[EI_MAG2]    = ELFMAG2;
-    eh->e_ident[EI_MAG3]    = ELFMAG3;
-    eh->e_ident[EI_CLASS]   = ELFCLASS64;
-    eh->e_ident[EI_DATA]    = ELFDATA2LSB;
-    eh->e_ident[EI_VERSION] = EV_CURRENT;
-    eh->e_ident[EI_OSABI]   = ELFOSABI_NONE;
-    eh->e_type      = ET_EXEC;
-    eh->e_machine   = EM_AARCH64;
-    eh->e_version   = EV_CURRENT;
-    eh->e_entry     = JOEY_SEGMENT_VADDR;
-    eh->e_phoff     = sizeof(struct Elf64_Ehdr);
-    eh->e_ehsize    = sizeof(struct Elf64_Ehdr);
-    eh->e_phentsize = sizeof(struct Elf64_Phdr);
-    eh->e_phnum     = 1;
-
-    struct Elf64_Phdr *ph = (struct Elf64_Phdr *)(g_joey_elf_blob + eh->e_phoff);
-    ph[0].p_type   = PT_LOAD;
-    ph[0].p_flags  = PF_R | PF_X;
-    ph[0].p_offset = (u64)PAGE_SIZE;            // segment data at second page
-    ph[0].p_vaddr  = JOEY_SEGMENT_VADDR;
-    ph[0].p_paddr  = JOEY_SEGMENT_VADDR;
-    // filesz spans code + padding + message: JOEY_MSG_SEGMENT_OFF + 6 bytes.
-    // sizeof(g_joey_msg) is 7 (includes the implicit trailing NUL); we
-    // copy 6 to match the SYS_PUTS length arg (movz x1, #6) so the NUL
-    // doesn't reach UART.
-    ph[0].p_filesz = (u64)(JOEY_MSG_SEGMENT_OFF + sizeof(g_joey_msg) - 1);
-    ph[0].p_memsz  = (u64)PAGE_SIZE;
-    ph[0].p_align  = (u64)PAGE_SIZE;
-
-    // Copy the program code at file_offset = PAGE_SIZE (segment vaddr 0x10000).
-    u32 *code_dst = (u32 *)(g_joey_elf_blob + PAGE_SIZE);
-    for (size_t i = 0; i < sizeof(g_joey_program) / sizeof(u32); i++) {
-        code_dst[i] = g_joey_program[i];
-    }
-
-    // Copy the message at file_offset = PAGE_SIZE + JOEY_MSG_SEGMENT_OFF
-    // (segment vaddr 0x10040). The 6 bytes match the SYS_PUTS length arg.
-    u8 *msg_dst = g_joey_elf_blob + PAGE_SIZE + JOEY_MSG_SEGMENT_OFF;
-    for (size_t i = 0; i < sizeof(g_joey_msg) - 1; i++) {
-        msg_dst[i] = (u8)g_joey_msg[i];
-    }
-
-    // Total blob size = header page + segment page (one full PAGE_SIZE
-    // each, even though the meaningful data ends earlier — exec_setup
-    // reads only [p_offset, p_offset+p_filesz) from the segment).
-    return (size_t)PAGE_SIZE * 2;
-}
+// Cpio newc data is only 4-byte-aligned, but the ELF Ehdr cast in
+// elf_load (kernel/elf.c::elf_load — R5-G F61) requires 8-byte
+// alignment. Copy into an 8-aligned static buffer before handing the
+// blob to exec_setup. Sized to match the userspace static-PIE binary
+// budget (each binary fits in 16 KiB with headroom; see P4-image-shrink).
+#define JOEY_BLOB_MAX 32768
+static _Alignas(struct Elf64_Ehdr) u8 g_joey_elf_blob[JOEY_BLOB_MAX];
 
 // Arguments passed via rfork's `arg` to the child entry. Lives on the
 // caller (boot CPU) stack for the duration of joey_run(); the child
@@ -182,6 +88,9 @@ static void joey_thunk(void *arg) {
     u64 entry = 0, sp = 0;
     int rc = exec_setup(p, ia->blob, ia->blob_size, &entry, &sp);
     if (rc != 0) {
+        uart_puts("  joey: exec_setup failed rc=");
+        uart_putdec((u64)rc);
+        uart_puts("; exits(fail-exec)\n");
         exits("fail-exec");
     }
 
@@ -191,23 +100,38 @@ static void joey_thunk(void *arg) {
 
 void joey_run(void) {
     // One-call guard. v1.0 invariant — joey_run is called exactly once
-    // per boot from boot_main. g_joey_elf_blob is single-use BSS;
-    // concurrent rebuilds would race the build_init_elf zero-fill +
-    // header writes against a peer reader. The guard catches accidental
-    // double-call (e.g., a future Phase 5+ supervisor refactor that
-    // tries to re-run joey_run instead of re-execing). Originally
-    // landed at R7 F136 as a #157 mitigation; with #157 fixed (P4-Fix157
-    // — SPSel discipline in userland_enter), the guard is retained for
-    // its structural role.
+    // per boot from boot_main. The guard catches accidental double-call
+    // (e.g., a future supervisor refactor that tries to re-run joey_run
+    // instead of re-execing).
     static bool g_joey_run_called = false;
     if (g_joey_run_called) {
         extinction("joey_run: double call (v1.0 single-use invariant)");
     }
     g_joey_run_called = true;
 
-    uart_puts("  joey: rforking child for /joey (9-instr hello blob)\n");
+    const void *cpio_blob = NULL;
+    size_t blob_size = 0;
+    if (devramfs_lookup(JOEY_RAMFS_NAME, &cpio_blob, &blob_size) != 0) {
+        // Missing /joey is unrecoverable at v1.0: boot path requires
+        // it. Surfaces as EXTINCTION: in the boot log so tools/test.sh
+        // reports failure.
+        extinction("joey: /joey not found in initrd (devramfs_lookup failed)");
+    }
+    if (blob_size == 0) {
+        extinction("joey: /joey in initrd has zero size");
+    }
+    if (blob_size > JOEY_BLOB_MAX) {
+        extinction_with_addr("joey: /joey ELF exceeds JOEY_BLOB_MAX", (u64)blob_size);
+    }
 
-    size_t blob_size = build_init_elf();
+    // Copy cpio's 4-aligned bytes into the 8-aligned static buffer the
+    // ELF loader requires.
+    const u8 *src = (const u8 *)cpio_blob;
+    for (size_t i = 0; i < blob_size; i++) g_joey_elf_blob[i] = src[i];
+
+    uart_puts("  joey: rforking child for /joey (");
+    uart_putdec((u64)blob_size);
+    uart_puts(" byte ELF from initrd)\n");
 
     struct joey_args args = {
         .blob      = g_joey_elf_blob,
