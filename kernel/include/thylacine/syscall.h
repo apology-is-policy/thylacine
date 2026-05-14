@@ -301,6 +301,23 @@ enum {
     //   - cap_mask outside the u64 range of caps_t (validation already
     //     happens via the cast; no separate rejection)
     SYS_SPAWN_WITH_CAPS = 24, // arg: name_va, name_len, cap_mask
+
+    // SYS_SPAWN_FULL(name_va, name_len, fd_list_va, fd_count, cap_mask)
+    //   x0 = name_va
+    //   x1 = name_len
+    //   x2 = fd_list_va    user-VA to u32[fd_count] (or 0 if fd_count==0)
+    //   x3 = fd_count      0..SYS_SPAWN_MAX_FDS = 16
+    //   x4 = cap_mask      caps_t bitmask; child gets parent->caps & mask
+    // Combination of SYS_SPAWN_WITH_FDS + SYS_SPAWN_WITH_CAPS: child gets
+    // both the listed Spoor fds (slots 0..fd_count-1) AND the cap-subset.
+    // Needed at P5-corvus-bringup where joey spawns /sbin/corvus with a
+    // pipe pair (for login communication) AND CAP_LOCK_PAGES +
+    // CAP_CSPRNG_READ. The previous variants stay because each call site
+    // expresses intent more clearly than passing zeros to SYS_SPAWN_FULL.
+    //
+    // Returns -1 on the union of SYS_SPAWN_WITH_FDS and SYS_SPAWN_WITH_CAPS
+    // failure conditions.
+    SYS_SPAWN_FULL   = 25,   // arg: name_va, name_len, fd_list_va, fd_count, cap_mask
 };
 
 // SYS_GETRANDOM flags.

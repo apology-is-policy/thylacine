@@ -56,6 +56,7 @@ enum {
     T_SYS_WAIT_PID    = 22, // P5-spawn-wait: reap one ZOMBIE child; write status if non-NULL
     T_SYS_SPAWN_WITH_FDS = 23, // P5-stratumd-stub-b: spawn + pre-install fds in child
     T_SYS_SPAWN_WITH_CAPS = 24, // P5-spawn-caps: spawn + grant cap-subset to child
+    T_SYS_SPAWN_FULL  = 25, // P5-spawn-full: spawn + inherit fds + grant cap-subset
 };
 
 // SYS_GETRANDOM flags (mirror kernel/include/thylacine/syscall.h).
@@ -594,6 +595,34 @@ static inline long t_spawn_with_caps(const char *name, size_t name_len,
         "svc #0"
         : "+r"(x0)
         : "r"(x1), "r"(x2), "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
+// t_spawn_full — combination of t_spawn_with_fds + t_spawn_with_caps:
+// child inherits the listed Spoor fds at slots 0..fd_count-1 AND gets
+// cap-subset (caller's caps & cap_mask). Both inheritance modes apply
+// independently with the same constraints and refcount discipline as
+// the single-purpose variants. Used at P5-corvus-bringup where joey
+// spawns /sbin/corvus with a pipe pair + CAP_LOCK_PAGES + CAP_CSPRNG_READ.
+//
+// Returns the child PID (>0) on success, -1 on the union of conditions
+// from t_spawn_with_fds + t_spawn_with_caps.
+__attribute__((always_inline))
+static inline long t_spawn_full(const char *name, size_t name_len,
+                                const unsigned int *fds, size_t fd_count,
+                                unsigned long cap_mask) {
+    register long x0 __asm__("x0") = (long)(unsigned long)name;
+    register long x1 __asm__("x1") = (long)name_len;
+    register long x2 __asm__("x2") = (long)(unsigned long)fds;
+    register long x3 __asm__("x3") = (long)fd_count;
+    register long x4 __asm__("x4") = (long)cap_mask;
+    register long x8 __asm__("x8") = T_SYS_SPAWN_FULL;
+    __asm__ volatile (
+        "svc #0"
+        : "+r"(x0)
+        : "r"(x1), "r"(x2), "r"(x3), "r"(x4), "r"(x8)
         : "memory", "cc"
     );
     return x0;

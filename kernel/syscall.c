@@ -1454,6 +1454,131 @@ static s64 sys_spawn_with_caps_handler(u64 name_va, u64 name_len_raw, u64 cap_ma
                                               (caps_t)cap_mask_raw);
 }
 
+// =============================================================================
+// SYS_SPAWN_FULL — combined fds + caps (P5-spawn-full).
+// =============================================================================
+//
+// Unions SYS_SPAWN_WITH_FDS (fd inheritance, KOBJ_SPOOR-only at v1.0) with
+// SYS_SPAWN_WITH_CAPS (cap-subset via rfork_with_caps). Reuses the existing
+// sys_spawn_with_fds_thunk + spawn_with_fds_args; only difference vs
+// SYS_SPAWN_WITH_FDS is rfork_with_caps instead of rfork.
+//
+// Needed at P5-corvus-bringup where joey spawns /sbin/corvus with a
+// pipe pair (login communication) AND CAP_LOCK_PAGES + CAP_CSPRNG_READ.
+
+int sys_spawn_full_for_proc(struct Proc *p, const char *name, size_t name_len,
+                            const u32 *fds, u32 fd_count, caps_t cap_mask) {
+    if (!p)                                            return -1;
+    if (!name)                                         return -1;
+    if (name_len == 0 || name_len > SYS_SPAWN_NAME_MAX) return -1;
+    for (size_t i = 0; i < name_len; i++) {
+        if (name[i] == '\0')                            return -1;
+    }
+    if (name[name_len] != '\0')                         return -1;
+    if (fd_count > SYS_SPAWN_MAX_FDS)                   return -1;
+    if (fd_count > 0 && !fds)                           return -1;
+
+    struct Spoor *bumped[SYS_SPAWN_MAX_FDS];
+    u32 bumped_count = 0;
+    for (u32 i = 0; i < fd_count; i++) {
+        struct Handle *slot = handle_get(p, (hidx_t)fds[i]);
+        if (!slot || slot->kind != KOBJ_SPOOR) {
+            for (u32 j = 0; j < bumped_count; j++) spoor_unref(bumped[j]);
+            return -1;
+        }
+        struct Spoor *s = (struct Spoor *)slot->obj;
+        spoor_ref(s);
+        bumped[bumped_count++] = s;
+    }
+
+    const void *cpio_blob = NULL;
+    size_t      cpio_size = 0;
+    if (devramfs_lookup(name, &cpio_blob, &cpio_size) != 0) {
+        for (u32 j = 0; j < bumped_count; j++) spoor_unref(bumped[j]);
+        return -1;
+    }
+    if (cpio_size == 0 || cpio_size > SYS_SPAWN_BLOB_MAX) {
+        for (u32 j = 0; j < bumped_count; j++) spoor_unref(bumped[j]);
+        return -1;
+    }
+
+    void *blob_copy = kmalloc(cpio_size, 0);
+    if (!blob_copy) {
+        for (u32 j = 0; j < bumped_count; j++) spoor_unref(bumped[j]);
+        return -1;
+    }
+    if (((uintptr_t)blob_copy & 0x7) != 0) {
+        kfree(blob_copy);
+        for (u32 j = 0; j < bumped_count; j++) spoor_unref(bumped[j]);
+        return -1;
+    }
+    const u8 *src = (const u8 *)cpio_blob;
+    u8 *dst = (u8 *)blob_copy;
+    for (size_t i = 0; i < cpio_size; i++) dst[i] = src[i];
+
+    struct spawn_with_fds_args *sa = kmalloc(sizeof(*sa), KP_ZERO);
+    if (!sa) {
+        kfree(blob_copy);
+        for (u32 j = 0; j < bumped_count; j++) spoor_unref(bumped[j]);
+        return -1;
+    }
+    sa->blob      = blob_copy;
+    sa->blob_size = cpio_size;
+    sa->fd_count  = fd_count;
+    for (u32 i = 0; i < fd_count; i++) sa->spoors[i] = bumped[i];
+
+    int pid = rfork_with_caps(RFPROC, sys_spawn_with_fds_thunk, sa, cap_mask);
+    if (pid < 0) {
+        kfree(sa);
+        kfree(blob_copy);
+        for (u32 j = 0; j < bumped_count; j++) spoor_unref(bumped[j]);
+        return -1;
+    }
+    return pid;
+}
+
+static s64 sys_spawn_full_handler(u64 name_va, u64 name_len_raw,
+                                  u64 fd_list_va, u64 fd_count_raw,
+                                  u64 cap_mask_raw) {
+    struct Thread *t = current_thread();
+    if (!t)                                            return -1;
+    struct Proc *p = t->proc;
+    if (!p)                                            return -1;
+
+    if (name_len_raw == 0 || name_len_raw > SYS_SPAWN_NAME_MAX) return -1;
+    if (!sys_validate_user_buf(name_va, name_len_raw)) return -1;
+    if (fd_count_raw > SYS_SPAWN_MAX_FDS)               return -1;
+
+    char name[SYS_SPAWN_NAME_MAX + 1];
+    for (u64 i = 0; i < name_len_raw; i++) {
+        u8 b = 0;
+        if (uaccess_load_u8(name_va + i, &b) != 0)     return -1;
+        if (b == 0)                                    return -1;
+        name[i] = (char)b;
+    }
+    name[name_len_raw] = '\0';
+
+    u32 fds_kbuf[SYS_SPAWN_MAX_FDS] = { 0 };
+    if (fd_count_raw > 0) {
+        u64 list_bytes = fd_count_raw * sizeof(u32);
+        if (!sys_validate_user_buf(fd_list_va, list_bytes)) return -1;
+        for (u64 i = 0; i < fd_count_raw; i++) {
+            u32 v = 0;
+            for (u64 b = 0; b < sizeof(u32); b++) {
+                u8 byte = 0;
+                if (uaccess_load_u8(fd_list_va + i * sizeof(u32) + b, &byte) != 0)
+                    return -1;
+                v |= (u32)byte << (b * 8);
+            }
+            fds_kbuf[i] = v;
+        }
+    }
+
+    return (s64)sys_spawn_full_for_proc(p, name, (size_t)name_len_raw,
+                                        fds_kbuf, (u32)fd_count_raw,
+                                        (caps_t)cap_mask_raw);
+}
+
 static s64 sys_spawn_with_fds_handler(u64 name_va, u64 name_len_raw,
                                       u64 fd_list_va, u64 fd_count_raw) {
     struct Thread *t = current_thread();
@@ -1684,6 +1809,14 @@ void syscall_dispatch(struct exception_context *ctx) {
         ctx->regs[0] = (u64)sys_spawn_with_caps_handler(ctx->regs[0],
                                                         ctx->regs[1],
                                                         ctx->regs[2]);
+        return;
+
+    case SYS_SPAWN_FULL:
+        ctx->regs[0] = (u64)sys_spawn_full_handler(ctx->regs[0],
+                                                   ctx->regs[1],
+                                                   ctx->regs[2],
+                                                   ctx->regs[3],
+                                                   ctx->regs[4]);
         return;
 
     default:
