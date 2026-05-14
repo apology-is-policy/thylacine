@@ -1160,6 +1160,33 @@ static void sys_spawn_thunk(void *arg) {
     userland_enter(entry, sp);
 }
 
+// R15 F231 close: helper used by both spawn-with-fds and spawn-full to
+// look up each fd, verify KOBJ_SPOOR, bump spoor_ref, and CAPTURE the
+// parent slot's rights for the child-side install. Returns 0 on
+// success with bumped[] + bumped_rights[] populated (bumped_count = fd_count);
+// returns -1 on any failure with all in-flight bumps dropped.
+//
+// Note: bumped[] and bumped_rights[] are caller-allocated arrays of
+// SYS_SPAWN_MAX_FDS entries each.
+static int sys_bump_inherit_fds(struct Proc *p, const u32 *fds, u32 fd_count,
+                                struct Spoor *bumped[SYS_SPAWN_MAX_FDS],
+                                rights_t bumped_rights[SYS_SPAWN_MAX_FDS]) {
+    u32 bumped_count = 0;
+    for (u32 i = 0; i < fd_count; i++) {
+        struct Handle *slot = handle_get(p, (hidx_t)fds[i]);
+        if (!slot || slot->kind != KOBJ_SPOOR) {
+            for (u32 j = 0; j < bumped_count; j++) spoor_unref(bumped[j]);
+            return -1;
+        }
+        struct Spoor *s = (struct Spoor *)slot->obj;
+        spoor_ref(s);
+        bumped[bumped_count]        = s;
+        bumped_rights[bumped_count] = slot->rights;
+        bumped_count++;
+    }
+    return 0;
+}
+
 // Kernel-side body: takes a kernel-resident NUL-terminated name and the
 // caller's Proc (used for context; the rfork creates a fresh child Proc
 // regardless of the caller). Exported (non-static) for kernel-internal
@@ -1253,6 +1280,14 @@ struct spawn_with_fds_args {
     size_t         blob_size;
     u32            fd_count;
     struct Spoor  *spoors[SYS_SPAWN_MAX_FDS];
+    // R15 F231 close: capture parent's slot rights at spawn time so
+    // the child's handle_alloc preserves I-6 (rights monotonically
+    // reduce on transfer). Without this capture, the child's handle
+    // would get hardcoded RIGHT_READ|WRITE|TRANSFER regardless of the
+    // parent's actual rights — a privilege elevation across the spawn
+    // boundary that violates spec/handles.tla's RforkWithCaps
+    // monotonicity expectation as extended for fd inheritance.
+    rights_t       rights[SYS_SPAWN_MAX_FDS];
 };
 
 __attribute__((noreturn))
@@ -1262,7 +1297,11 @@ static void sys_spawn_with_fds_thunk(void *arg) {
     size_t  blob_size  = sa->blob_size;
     u32     fd_count   = sa->fd_count;
     struct Spoor *spoors_local[SYS_SPAWN_MAX_FDS];
-    for (u32 i = 0; i < fd_count; i++) spoors_local[i] = sa->spoors[i];
+    rights_t      rights_local[SYS_SPAWN_MAX_FDS];
+    for (u32 i = 0; i < fd_count; i++) {
+        spoors_local[i] = sa->spoors[i];
+        rights_local[i] = sa->rights[i];
+    }
     kfree(sa);
 
     struct Thread *t = current_thread();
@@ -1276,10 +1315,14 @@ static void sys_spawn_with_fds_thunk(void *arg) {
     // we bumped on the parent's side; if it fails partway, the child's
     // proc_free → handle_table_free will release the installed handles,
     // and the un-installed spoors need explicit spoor_clunk.
+    //
+    // R15 F231 close: rights are inherited from the parent's slot, NOT
+    // hardcoded. This preserves I-6 (rights monotonically reduce on
+    // transfer): the child can never have rights the parent didn't
+    // hold for the same Spoor.
     u32 installed = 0;
     for (u32 i = 0; i < fd_count; i++) {
-        hidx_t fd = handle_alloc(p, KOBJ_SPOOR,
-                                 RIGHT_READ | RIGHT_WRITE | RIGHT_TRANSFER,
+        hidx_t fd = handle_alloc(p, KOBJ_SPOOR, rights_local[i],
                                  spoors_local[i]);
         if (fd != (hidx_t)i) {
             // Drop refs on the un-installed remainder; the installed
@@ -1318,40 +1361,32 @@ int sys_spawn_with_fds_for_proc(struct Proc *p, const char *name, size_t name_le
     if (fd_count > SYS_SPAWN_MAX_FDS)                   return -1;
     if (fd_count > 0 && !fds)                           return -1;
 
-    // Look up each fd + bump its spoor_ref. On any failure, drop all
-    // bumped refs and return -1.
+    // Look up each fd, bump its spoor_ref, and capture the parent
+    // slot's rights for the child-side install (R15 F231 close).
     struct Spoor *bumped[SYS_SPAWN_MAX_FDS];
-    u32 bumped_count = 0;
-    for (u32 i = 0; i < fd_count; i++) {
-        struct Handle *slot = handle_get(p, (hidx_t)fds[i]);
-        if (!slot || slot->kind != KOBJ_SPOOR) {
-            for (u32 j = 0; j < bumped_count; j++) spoor_unref(bumped[j]);
-            return -1;
-        }
-        struct Spoor *s = (struct Spoor *)slot->obj;
-        spoor_ref(s);
-        bumped[bumped_count++] = s;
-    }
+    rights_t      bumped_rights[SYS_SPAWN_MAX_FDS];
+    if (sys_bump_inherit_fds(p, fds, fd_count, bumped, bumped_rights) != 0)
+        return -1;
 
     const void *cpio_blob = NULL;
     size_t      cpio_size = 0;
     if (devramfs_lookup(name, &cpio_blob, &cpio_size) != 0) {
-        for (u32 j = 0; j < bumped_count; j++) spoor_unref(bumped[j]);
+        for (u32 j = 0; j < fd_count; j++) spoor_unref(bumped[j]);
         return -1;
     }
     if (cpio_size == 0 || cpio_size > SYS_SPAWN_BLOB_MAX) {
-        for (u32 j = 0; j < bumped_count; j++) spoor_unref(bumped[j]);
+        for (u32 j = 0; j < fd_count; j++) spoor_unref(bumped[j]);
         return -1;
     }
 
     void *blob_copy = kmalloc(cpio_size, 0);
     if (!blob_copy) {
-        for (u32 j = 0; j < bumped_count; j++) spoor_unref(bumped[j]);
+        for (u32 j = 0; j < fd_count; j++) spoor_unref(bumped[j]);
         return -1;
     }
     if (((uintptr_t)blob_copy & 0x7) != 0) {
         kfree(blob_copy);
-        for (u32 j = 0; j < bumped_count; j++) spoor_unref(bumped[j]);
+        for (u32 j = 0; j < fd_count; j++) spoor_unref(bumped[j]);
         return -1;
     }
     const u8 *src = (const u8 *)cpio_blob;
@@ -1361,19 +1396,22 @@ int sys_spawn_with_fds_for_proc(struct Proc *p, const char *name, size_t name_le
     struct spawn_with_fds_args *sa = kmalloc(sizeof(*sa), KP_ZERO);
     if (!sa) {
         kfree(blob_copy);
-        for (u32 j = 0; j < bumped_count; j++) spoor_unref(bumped[j]);
+        for (u32 j = 0; j < fd_count; j++) spoor_unref(bumped[j]);
         return -1;
     }
     sa->blob      = blob_copy;
     sa->blob_size = cpio_size;
     sa->fd_count  = fd_count;
-    for (u32 i = 0; i < fd_count; i++) sa->spoors[i] = bumped[i];
+    for (u32 i = 0; i < fd_count; i++) {
+        sa->spoors[i] = bumped[i];
+        sa->rights[i] = bumped_rights[i];
+    }
 
     int pid = rfork(RFPROC, sys_spawn_with_fds_thunk, sa);
     if (pid < 0) {
         kfree(sa);
         kfree(blob_copy);
-        for (u32 j = 0; j < bumped_count; j++) spoor_unref(bumped[j]);
+        for (u32 j = 0; j < fd_count; j++) spoor_unref(bumped[j]);
         return -1;
     }
     return pid;
@@ -1478,38 +1516,32 @@ int sys_spawn_full_for_proc(struct Proc *p, const char *name, size_t name_len,
     if (fd_count > SYS_SPAWN_MAX_FDS)                   return -1;
     if (fd_count > 0 && !fds)                           return -1;
 
+    // Look up each fd, bump its spoor_ref, and capture the parent
+    // slot's rights for the child-side install (R15 F231 close).
     struct Spoor *bumped[SYS_SPAWN_MAX_FDS];
-    u32 bumped_count = 0;
-    for (u32 i = 0; i < fd_count; i++) {
-        struct Handle *slot = handle_get(p, (hidx_t)fds[i]);
-        if (!slot || slot->kind != KOBJ_SPOOR) {
-            for (u32 j = 0; j < bumped_count; j++) spoor_unref(bumped[j]);
-            return -1;
-        }
-        struct Spoor *s = (struct Spoor *)slot->obj;
-        spoor_ref(s);
-        bumped[bumped_count++] = s;
-    }
+    rights_t      bumped_rights[SYS_SPAWN_MAX_FDS];
+    if (sys_bump_inherit_fds(p, fds, fd_count, bumped, bumped_rights) != 0)
+        return -1;
 
     const void *cpio_blob = NULL;
     size_t      cpio_size = 0;
     if (devramfs_lookup(name, &cpio_blob, &cpio_size) != 0) {
-        for (u32 j = 0; j < bumped_count; j++) spoor_unref(bumped[j]);
+        for (u32 j = 0; j < fd_count; j++) spoor_unref(bumped[j]);
         return -1;
     }
     if (cpio_size == 0 || cpio_size > SYS_SPAWN_BLOB_MAX) {
-        for (u32 j = 0; j < bumped_count; j++) spoor_unref(bumped[j]);
+        for (u32 j = 0; j < fd_count; j++) spoor_unref(bumped[j]);
         return -1;
     }
 
     void *blob_copy = kmalloc(cpio_size, 0);
     if (!blob_copy) {
-        for (u32 j = 0; j < bumped_count; j++) spoor_unref(bumped[j]);
+        for (u32 j = 0; j < fd_count; j++) spoor_unref(bumped[j]);
         return -1;
     }
     if (((uintptr_t)blob_copy & 0x7) != 0) {
         kfree(blob_copy);
-        for (u32 j = 0; j < bumped_count; j++) spoor_unref(bumped[j]);
+        for (u32 j = 0; j < fd_count; j++) spoor_unref(bumped[j]);
         return -1;
     }
     const u8 *src = (const u8 *)cpio_blob;
@@ -1519,19 +1551,22 @@ int sys_spawn_full_for_proc(struct Proc *p, const char *name, size_t name_len,
     struct spawn_with_fds_args *sa = kmalloc(sizeof(*sa), KP_ZERO);
     if (!sa) {
         kfree(blob_copy);
-        for (u32 j = 0; j < bumped_count; j++) spoor_unref(bumped[j]);
+        for (u32 j = 0; j < fd_count; j++) spoor_unref(bumped[j]);
         return -1;
     }
     sa->blob      = blob_copy;
     sa->blob_size = cpio_size;
     sa->fd_count  = fd_count;
-    for (u32 i = 0; i < fd_count; i++) sa->spoors[i] = bumped[i];
+    for (u32 i = 0; i < fd_count; i++) {
+        sa->spoors[i] = bumped[i];
+        sa->rights[i] = bumped_rights[i];
+    }
 
     int pid = rfork_with_caps(RFPROC, sys_spawn_with_fds_thunk, sa, cap_mask);
     if (pid < 0) {
         kfree(sa);
         kfree(blob_copy);
-        for (u32 j = 0; j < bumped_count; j++) spoor_unref(bumped[j]);
+        for (u32 j = 0; j < fd_count; j++) spoor_unref(bumped[j]);
         return -1;
     }
     return pid;

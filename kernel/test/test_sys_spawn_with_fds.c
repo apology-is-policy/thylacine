@@ -32,6 +32,7 @@
 #include <thylacine/handle.h>
 #include <thylacine/pipe.h>
 #include <thylacine/proc.h>
+#include <thylacine/sched.h>
 #include <thylacine/spoor.h>
 #include <thylacine/syscall.h>
 #include <thylacine/thread.h>
@@ -46,6 +47,7 @@ void test_sys_spawn_with_fds_rejects_bad_fd(void);
 void test_sys_spawn_with_fds_rejects_non_spoor_fd(void);
 void test_sys_spawn_with_fds_rejects_missing_binary(void);
 void test_sys_spawn_with_fds_zero_count_succeeds(void);
+void test_sys_spawn_with_fds_child_rights_subset_of_parent(void);
 
 static void drain_zombies(void) {
     int status = 0;
@@ -122,4 +124,67 @@ void test_sys_spawn_with_fds_zero_count_succeeds(void) {
     int reaped = wait_pid(&status);
     TEST_EXPECT_EQ(reaped, pid, "wait_pid reaps the spawned child");
     TEST_EXPECT_EQ(status, 0, "/hello exits status=0 even without inherited fds");
+}
+
+// R15 F231 close: regression for the rights-elevation bug.
+// Pre-fix, the child's handle_alloc hardcoded RIGHT_READ|WRITE|TRANSFER
+// regardless of the parent's slot rights. This test creates a Spoor
+// with RIGHT_READ only in the parent, spawns /hello with that fd in
+// the inheritance list, and inspects the child's slot rights via
+// proc_find_by_pid + polling for the thunk's handle_alloc to complete.
+//
+// The poll-loop is bounded; if the child finishes its handle_alloc on
+// another CPU before we observe it, we still see the installed slot
+// (handle table isn't freed until wait_pid). The test inspects the
+// child BEFORE wait_pid so the handle table is live.
+void test_sys_spawn_with_fds_child_rights_subset_of_parent(void) {
+    drain_zombies();
+    struct Thread *t = current_thread();
+    TEST_ASSERT(t && t->proc, "current thread has Proc");
+
+    // Create a pipe pair; install the read end in kproc's handle
+    // table with RIGHT_READ only (the explicit narrowing).
+    struct Spoor *rd = NULL, *wr = NULL;
+    TEST_EXPECT_EQ(pipe_create(&rd, &wr), 0, "pipe_create");
+
+    const rights_t parent_rights = RIGHT_READ;
+    hidx_t parent_fd = handle_alloc(t->proc, KOBJ_SPOOR, parent_rights, rd);
+    TEST_ASSERT(parent_fd >= 0, "handle_alloc with RIGHT_READ only");
+
+    u32 fds[1] = { (u32)parent_fd };
+    int pid = sys_spawn_with_fds_for_proc(t->proc, "hello", 5, fds, 1);
+    TEST_ASSERT(pid > 0, "spawn with 1 inherited fd returns pid");
+
+    struct Proc *child = proc_find_by_pid(pid);
+    TEST_ASSERT(child != NULL, "proc_find_by_pid for spawned child");
+
+    // Poll for the child's slot to appear (thunk's handle_alloc runs
+    // async on child's CPU). Bounded to 1024 sched yields; in practice
+    // the child reaches its handle_alloc within a handful of yields.
+    struct Handle *child_slot = NULL;
+    for (int i = 0; i < 1024; i++) {
+        child_slot = handle_get(child, 0);
+        if (child_slot != NULL) break;
+        sched();
+    }
+    TEST_ASSERT(child_slot != NULL,
+        "child has handle at fd 0 after bounded poll");
+    TEST_EXPECT_EQ((u64)child_slot->kind, (u64)KOBJ_SPOOR,
+        "child fd 0 is KOBJ_SPOOR");
+
+    // The critical invariant: child's rights must equal parent's rights
+    // (or be a strict subset). Pre-fix, this would be
+    // RIGHT_READ|WRITE|TRANSFER (hardcoded), which is a SUPERSET of the
+    // parent's RIGHT_READ — an I-6 violation.
+    TEST_EXPECT_EQ((u64)child_slot->rights, (u64)parent_rights,
+        "child slot rights == parent slot rights (R15 F231)");
+
+    int status = -1;
+    int reaped = wait_pid(&status);
+    TEST_EXPECT_EQ(reaped, pid, "wait_pid reaps the spawned child");
+    TEST_EXPECT_EQ(status, 0, "/hello exits status=0");
+
+    // Clean up parent-side handle + boot's pointer on wr.
+    handle_close(t->proc, parent_fd);
+    spoor_clunk(wr);
 }
