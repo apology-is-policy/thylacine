@@ -221,13 +221,18 @@ static void devpipe_close(struct Spoor *c) {
     }
 
     // Drop this endpoint's ring ref. When both endpoints have been
-    // closed, the ring is freed. ref is signed int — defensive
-    // underflow check.
-    r->ref--;
-    if (r->ref < 0) {
+    // closed, the ring is freed.
+    //
+    // R15 F234 close: atomic decrement under ACQ_REL ordering. Without
+    // atomics, concurrent close of two endpoints on two CPUs would
+    // race on r->ref → lost-update or both-see-zero hazards. fetch_sub
+    // returns PRE; pre == 1 means we were the last endpoint (post == 0)
+    // and own the free. pre <= 0 is the underflow diagnostic case.
+    int pre = __atomic_fetch_sub(&r->ref, 1, __ATOMIC_ACQ_REL);
+    if (pre <= 0) {
         extinction("pipe: ring refcount underflow");
     }
-    if (r->ref == 0) {
+    if (pre == 1) {
         r->magic = 0;       // UAF defense — readers see magic clobber
         kfree(r);
         __atomic_fetch_add(&g_pipe_freed, 1u, __ATOMIC_RELAXED);
@@ -378,7 +383,9 @@ int pipe_create(struct Spoor **out_read_end, struct Spoor **out_write_end) {
     struct pipe_ring *r = kmalloc(sizeof(*r), KP_ZERO);
     if (!r) return -1;
     r->magic     = PIPE_RING_MAGIC;
-    r->ref       = 2;
+    // R15 F234 close: relaxed init — ring isn't published to other
+    // CPUs until pipe_create stores the endpoints into caller pointers.
+    __atomic_store_n(&r->ref, 2, __ATOMIC_RELAXED);
     r->count     = 0;
     r->head      = 0;
     r->tail      = 0;

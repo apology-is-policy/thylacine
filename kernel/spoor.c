@@ -47,7 +47,10 @@ static struct Spoor *spoor_alloc_internal(struct Dev *d) {
     c->dc    = d->dc;
     c->dev   = d;
     spin_lock_init(&c->lock);
-    c->ref    = 1;
+    // R15 F233 close: ref is updated atomically. Init is safe with a
+    // relaxed store — the Spoor isn't published to any other CPU until
+    // we return + the caller stores the pointer somewhere observable.
+    __atomic_store_n(&c->ref, 1, __ATOMIC_RELAXED);
     c->flag   = 0;
     c->mode   = 0;
     c->offset = 0;
@@ -66,7 +69,10 @@ struct Spoor *spoor_alloc(struct Dev *d) {
 static void spoor_free_internal(struct Spoor *c) {
     if (c->magic != SPOOR_MAGIC)
         extinction("spoor_free_internal of corrupted Spoor");
-    if (c->ref != 0)
+    // R15 F233 close: atomic load. By contract this is only called on
+    // a Spoor whose last drop already brought ref to 0; the load is
+    // for diagnostic detection of a premature-free bug.
+    if (__atomic_load_n(&c->ref, __ATOMIC_ACQUIRE) != 0)
         extinction("spoor_free_internal with ref > 0 (premature free)");
 
     // Clobber magic explicitly so a stale-pointer dereference between
@@ -81,10 +87,15 @@ static void spoor_free_internal(struct Spoor *c) {
 void spoor_ref(struct Spoor *c) {
     if (!c)                       extinction("spoor_ref(NULL)");
     if (c->magic != SPOOR_MAGIC)  extinction("spoor_ref of corrupted Spoor");
-    if (c->ref <= 0)
-        extinction("spoor_ref of zero-ref Spoor (already freed?)");
 
-    c->ref++;
+    // R15 F233 close: atomic increment. fetch_add returns the PRE
+    // value; pre == 0 means the Spoor was already last-dropped (a
+    // use-after-free in the caller — extinct). The increment has
+    // already happened by the time we extinct, but that's fine since
+    // extinction halts.
+    int pre = __atomic_fetch_add(&c->ref, 1, __ATOMIC_ACQ_REL);
+    if (pre <= 0)
+        extinction("spoor_ref of zero-ref Spoor (already freed?)");
 }
 
 // Pure refcount drop. If the ref hits 0 the Spoor's storage is freed
@@ -98,11 +109,14 @@ void spoor_unref(struct Spoor *c) {
     if (!c) return;                                  // NULL-safe (mirrors burrow_unref)
     if (c->magic != SPOOR_MAGIC)
         extinction("spoor_unref of corrupted Spoor (use-after-free?)");
-    if (c->ref <= 0)
-        extinction("spoor_unref of zero-ref Spoor");
 
-    c->ref--;
-    if (c->ref == 0) {
+    // R15 F233 close: atomic decrement. fetch_sub returns the PRE
+    // value; pre == 1 means we were the last holder (post == 0) and
+    // own the free. pre <= 0 is the use-after-free diagnostic case.
+    int pre = __atomic_fetch_sub(&c->ref, 1, __ATOMIC_ACQ_REL);
+    if (pre <= 0)
+        extinction("spoor_unref of zero-ref Spoor");
+    if (pre == 1) {
         spoor_free_internal(c);
     }
 }
@@ -111,7 +125,10 @@ struct Spoor *spoor_clone(struct Spoor *c) {
     if (!c)                       return NULL;
     if (c->magic != SPOOR_MAGIC)
         extinction("spoor_clone of corrupted Spoor");
-    if (c->ref <= 0)
+    // R15 F233 close: atomic load. This is diagnostic only (clone
+    // doesn't mutate the source ref); the caller is responsible for
+    // keeping a hold on c across this call.
+    if (__atomic_load_n(&c->ref, __ATOMIC_ACQUIRE) <= 0)
         extinction("spoor_clone of zero-ref Spoor (already freed?)");
 
     struct Spoor *nc = spoor_alloc_internal(c->dev);
@@ -141,8 +158,6 @@ void spoor_clunk(struct Spoor *c) {
     if (!c) return;
     if (c->magic != SPOOR_MAGIC)
         extinction("spoor_clunk of corrupted Spoor (use-after-free?)");
-    if (c->ref <= 0)
-        extinction("spoor_clunk of zero-ref Spoor");
 
     // Plan 9 cclose semantics: drop a ref; the Dev's close hook runs
     // ONLY on the last drop (ref hits 0). This is what ARCH §9.6.6's
@@ -159,20 +174,24 @@ void spoor_clunk(struct Spoor *c) {
     // Dev close hooks need NOT be idempotent under this contract;
     // they may assume one-shot semantics + that no other clunk will
     // call them again on the same Spoor.
-    if (c->ref == 1) {
+    //
+    // R15 F233 close: atomic decrement under ACQ_REL ordering. The
+    // PRE value determines whether this CPU owns the last-drop close;
+    // exactly one CPU sees pre == 1 even under concurrent spoor_clunk
+    // from two CPUs. The dev->close runs AFTER the decrement (so
+    // post == 0); the storage is still valid (no spoor_free_internal
+    // yet), the hook can safely inspect c->aux, c->dev, c->qid.
+    int pre = __atomic_fetch_sub(&c->ref, 1, __ATOMIC_ACQ_REL);
+    if (pre <= 0)
+        extinction("spoor_clunk of zero-ref Spoor");
+    if (pre == 1) {
         // Last drop. Run Dev close hook (releases per-Spoor aux),
-        // then drop ref to 0 + free. The order matters: close runs
-        // with the Spoor still valid (ref still 1) so the hook can
-        // safely inspect c->aux, c->dev, c->qid, etc.
+        // then free. The close hook sees ref=0 but storage is intact.
         if (c->dev && c->dev->close) {
             c->dev->close(c);
         }
-        c->ref = 0;
         spoor_free_internal(c);
-        return;
     }
-
-    c->ref--;
 }
 
 u64 spoor_total_allocated(void) { return g_spoor_allocated; }
