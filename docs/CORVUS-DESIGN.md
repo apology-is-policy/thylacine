@@ -860,7 +860,9 @@ Resolved during draft (no longer open):
 
 ## 13. Stratum API additions required
 
-For corvus to compose with Stratum, Stratum needs the following changes. Michal will architect the Stratum side; this document specifies the requirements.
+For corvus to compose with Stratum, Stratum needs the following changes. Michal will architect the Stratum side; this document specifies the requirements at design level.
+
+**The detailed Thylacine-side spec — including concrete CLI shapes, wire frame layouts, error codes, behavioural contracts, test matrices, and open questions — lives in `docs/STRATUM-API-V1.md`.** This section is the high-level summary; the detailed spec is the source of truth for cross-project coordination.
 
 ### 13.1 Multi-stratumd-per-pool
 
@@ -899,6 +901,7 @@ For v1.x cryptographic forward secrecy (audit F14): Stratum's planned rekeying p
 
 ## 14. Cross-references
 
+- `STRATUM-API-V1.md` — Thylacine-side detailed spec of the Stratum API additions enumerated in §13 of this doc. The detailed version with CLI shapes, wire frames, error codes, test matrices, and open questions.
 - ARCHITECTURE.md §5 — boot sequence (this doc updates).
 - ARCHITECTURE.md §11 — syscall surface (this doc adds: sys_mlockall, sys_set_dumpable, sys_set_traceable, sys_explicit_bzero, sys_getrandom).
 - ARCHITECTURE.md §14.3a — Stratum mount lifecycle (this doc updates: system pool is integrity-only at v1.0; corvus + per-user stratumd post-pivot).
