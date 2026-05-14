@@ -227,6 +227,33 @@ enum {
     // is ARM RNDR (FEAT_RNG); always-seeded if available. Each call is
     // a fresh CSPRNG read — no caching.
     SYS_GETRANDOM    = 20,   // arg: buf_va (x0), len (x1), flags (x2)
+
+    // SYS_SPAWN(name_va, name_len) → child_pid / -1
+    //   x0 = name_va (user-VA; NUL not required — name_len authoritative)
+    //   x1 = name_len (bytes; 1..SYS_SPAWN_NAME_MAX = 64)
+    // Look up the binary by name in the boot initrd (devramfs), allocate
+    // a fresh child Proc via rfork(RFPROC, ...), exec_setup the binary
+    // into the child, and return its PID. Returns -1 on:
+    //   - name_len out of range / name_va bound violation
+    //   - binary not found in devramfs
+    //   - blob exceeds SYS_SPAWN_BLOB_MAX (32 KiB)
+    //   - kmalloc / rfork OOM
+    //   - exec_setup failure (child exits "fail-exec" → parent's
+    //     SYS_WAIT_PID observes non-zero status)
+    // The child inherits no capabilities (CAP_ALL & 0u = 0). v1.0 model
+    // is "the child fully describes its needs"; future SYS_RFORK with a
+    // cap-mask argument lands at P5-spawn-caps when needed.
+    SYS_SPAWN        = 21,   // arg: name_va (x0), name_len (x1)
+
+    // SYS_WAIT_PID(status_out_va) → reaped_pid / -1
+    //   x0 = status_out_va (user-VA; 4-byte int destination, or 0 to
+    //                       skip the write)
+    // Block until a child Proc enters ZOMBIE, then reap. Writes the
+    // child's exit_status to *status_out_va if non-zero. Returns the
+    // reaped PID. Returns -1 immediately if the caller has no children.
+    // Mirrors kernel/proc.c::wait_pid (Plan 9 wait(2) shape; no waitpid
+    // selector at v1.0).
+    SYS_WAIT_PID     = 22,   // arg: status_out_va (x0)
 };
 
 // SYS_GETRANDOM flags.
@@ -242,6 +269,17 @@ enum {
 // the kernel pipe ring buffer; longer single calls would either need
 // a heap scratch (avoidable for v1.0) or per-call segmented copy.
 #define SYS_RW_MAX  4096u
+
+// Maximum binary name length for SYS_SPAWN. Names are devramfs entries
+// ("hello", "stratumd-stub", "corvus" — all short). 64 bytes is more
+// than enough; bounds the kernel-stack scratch buffer at a small cap.
+#define SYS_SPAWN_NAME_MAX  64u
+
+// Maximum ELF blob size for SYS_SPAWN. v1.0 userspace binaries fit
+// comfortably under 32 KiB (joey: 12744, hello: 12752, pipe-probe:
+// 16760, attach-probe: 15096). Bump if needed; kmalloc routes >2 KiB
+// requests through alloc_pages so larger sizes are merely heavier.
+#define SYS_SPAWN_BLOB_MAX  32768u
 
 struct exception_context;
 

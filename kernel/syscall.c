@@ -12,7 +12,10 @@
 #include <thylacine/caps.h>
 #include <thylacine/dev.h>
 #include <thylacine/dev9p.h>
+#include <thylacine/devramfs.h>
 #include <thylacine/dma_handle.h>
+#include <thylacine/elf.h>
+#include <thylacine/exec.h>
 #include <thylacine/extinction.h>
 #include <thylacine/handle.h>
 #include <thylacine/irqfwd.h>
@@ -1110,6 +1113,173 @@ static s64 sys_getrandom_handler(u64 buf_va, u64 len, u64 flags_raw) {
 }
 
 // =============================================================================
+// SYS_SPAWN — combined rfork(RFPROC) + exec on a devramfs binary (P5-spawn-wait).
+// =============================================================================
+//
+// ABI: x0 = name_va, x1 = name_len → child_pid (>0) / -1.
+//
+// The kernel-internal rfork(RFPROC, entry, arg) takes a C entry function;
+// the child runs entry(arg) on a kthread kstack and (for userspace
+// children) is expected to call exec_setup + userland_enter before
+// returning. SYS_SPAWN is the smallest user-facing primitive that fits
+// that mold: name-by-devramfs + child runs the named binary. v1.0 has
+// no SYS_RFORK (which would require COW + child-context restoration);
+// adding it later is a separate chunk.
+//
+// Lifetime of the ELF blob copy: kmalloc'd by the SYS_SPAWN handler,
+// freed by the child's spawn_thunk after exec_setup. The args struct is
+// also kmalloc'd + freed (lives across the rfork boundary, so it can't
+// be on the caller's kernel stack — the caller may return to userspace
+// before the child's thunk runs).
+
+struct spawn_args {
+    void   *blob;       // kmalloc'd 8-aligned copy of the ELF; thunk frees
+    size_t  blob_size;
+};
+
+__attribute__((noreturn))
+static void sys_spawn_thunk(void *arg) {
+    struct spawn_args *sa = (struct spawn_args *)arg;
+    void *blob       = sa->blob;
+    size_t blob_size = sa->blob_size;
+    kfree(sa);
+
+    struct Thread *t = current_thread();
+    if (!t) extinction("sys_spawn_thunk: no current_thread");
+    struct Proc *p = t->proc;
+    if (!p) extinction("sys_spawn_thunk: no proc");
+
+    u64 entry = 0, sp = 0;
+    int rc = exec_setup(p, blob, blob_size, &entry, &sp);
+    kfree(blob);
+    if (rc != 0) {
+        // Surfaces as exit_status=1 in the parent's SYS_WAIT_PID.
+        exits("fail-exec");
+    }
+
+    userland_enter(entry, sp);
+}
+
+// Kernel-side body: takes a kernel-resident NUL-terminated name and the
+// caller's Proc (used for context; the rfork creates a fresh child Proc
+// regardless of the caller). Exported (non-static) for kernel-internal
+// tests in kernel/test/test_sys_spawn.c.
+int sys_spawn_for_proc(struct Proc *p, const char *name, size_t name_len) {
+    if (!p)                                            return -1;
+    if (!name)                                         return -1;
+    if (name_len == 0 || name_len > SYS_SPAWN_NAME_MAX) return -1;
+    // Reject embedded NUL in the in-band range: name_len bytes must all
+    // be non-NUL; name[name_len] must be NUL (caller's contract).
+    for (size_t i = 0; i < name_len; i++) {
+        if (name[i] == '\0')                            return -1;
+    }
+    if (name[name_len] != '\0')                         return -1;
+
+    const void *cpio_blob = NULL;
+    size_t      cpio_size = 0;
+    if (devramfs_lookup(name, &cpio_blob, &cpio_size) != 0) return -1;
+    if (cpio_size == 0 || cpio_size > SYS_SPAWN_BLOB_MAX)   return -1;
+
+    // 8-aligned copy of the cpio bytes. The cpio data is 4-aligned but
+    // elf_load demands 8 (R5-G F61). kmalloc returns naturally aligned
+    // memory for power-of-two requests; >2 KiB routes through alloc_pages,
+    // which is page-aligned (4096 → 8-aligned).
+    void *blob_copy = kmalloc(cpio_size, 0);
+    if (!blob_copy)                                    return -1;
+    if (((uintptr_t)blob_copy & 0x7) != 0) {
+        // Shouldn't happen given kmalloc's contract, but assert defensively.
+        kfree(blob_copy);
+        return -1;
+    }
+    const u8 *src = (const u8 *)cpio_blob;
+    u8 *dst = (u8 *)blob_copy;
+    for (size_t i = 0; i < cpio_size; i++) dst[i] = src[i];
+
+    struct spawn_args *sa = kmalloc(sizeof(*sa), KP_ZERO);
+    if (!sa) {
+        kfree(blob_copy);
+        return -1;
+    }
+    sa->blob      = blob_copy;
+    sa->blob_size = cpio_size;
+
+    int pid = rfork(RFPROC, sys_spawn_thunk, sa);
+    if (pid < 0) {
+        kfree(sa);
+        kfree(blob_copy);
+        return -1;
+    }
+    return pid;
+}
+
+static s64 sys_spawn_handler(u64 name_va, u64 name_len_raw) {
+    struct Thread *t = current_thread();
+    if (!t)                                            return -1;
+    struct Proc *p = t->proc;
+    if (!p)                                            return -1;
+
+    if (name_len_raw == 0 || name_len_raw > SYS_SPAWN_NAME_MAX) return -1;
+    if (!sys_validate_user_buf(name_va, name_len_raw)) return -1;
+
+    char name[SYS_SPAWN_NAME_MAX + 1];
+    for (u64 i = 0; i < name_len_raw; i++) {
+        u8 b = 0;
+        if (uaccess_load_u8(name_va + i, &b) != 0)     return -1;
+        if (b == 0)                                    return -1;  // embedded NUL
+        name[i] = (char)b;
+    }
+    name[name_len_raw] = '\0';
+
+    return (s64)sys_spawn_for_proc(p, name, (size_t)name_len_raw);
+}
+
+// =============================================================================
+// SYS_WAIT_PID — reap one ZOMBIE child (P5-spawn-wait).
+// =============================================================================
+//
+// ABI: x0 = status_out_va (0 to skip) → reaped_pid / -1.
+//
+// Thin wrapper over kernel/proc.c::wait_pid. The kernel side blocks if
+// the caller has live but not-yet-zombie children, returns -1 if no
+// children at all, and reaps + returns the PID on a successful wait.
+//
+// On success, writes the child's exit_status (sizeof(int) = 4 bytes)
+// via per-byte uaccess_store_u8 if status_out_va is non-zero.
+
+static s64 sys_wait_pid_handler(u64 status_out_va) {
+    struct Thread *t = current_thread();
+    if (!t)                                            return -1;
+    struct Proc *p = t->proc;
+    if (!p)                                            return -1;
+
+    // Validate the destination buffer up-front (skipping if NULL) so a
+    // bad user-VA doesn't cause a reap-then-fault hazard.
+    if (status_out_va != 0) {
+        if (!sys_validate_user_buf(status_out_va, sizeof(int))) return -1;
+    }
+
+    int status = 0;
+    int reaped = wait_pid(&status);
+    if (reaped < 0)                                    return -1;
+
+    if (status_out_va != 0) {
+        // exit_status is int (4 bytes); host endianness on AArch64 is LE.
+        const u8 *bytes = (const u8 *)&status;
+        for (u64 i = 0; i < sizeof(int); i++) {
+            if (uaccess_store_u8(status_out_va + i, bytes[i]) != 0) {
+                // Status write failed but the child is already reaped —
+                // the PID return is still correct. Return -1 so userspace
+                // observes the partial-fault explicitly rather than
+                // silently dropping the status.
+                return -1;
+            }
+        }
+    }
+
+    return (s64)reaped;
+}
+
+// =============================================================================
 // Dispatch entry.
 // =============================================================================
 
@@ -1232,6 +1402,14 @@ void syscall_dispatch(struct exception_context *ctx) {
         ctx->regs[0] = (u64)sys_getrandom_handler(ctx->regs[0],
                                                   ctx->regs[1],
                                                   ctx->regs[2]);
+        return;
+
+    case SYS_SPAWN:
+        ctx->regs[0] = (u64)sys_spawn_handler(ctx->regs[0], ctx->regs[1]);
+        return;
+
+    case SYS_WAIT_PID:
+        ctx->regs[0] = (u64)sys_wait_pid_handler(ctx->regs[0]);
         return;
 
     default:

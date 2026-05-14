@@ -52,10 +52,15 @@ enum {
     T_SYS_SET_TRACEABLE = 18, // P5-corvus-syscalls: set NOTRACE flag (one-way to 0)
     T_SYS_EXPLICIT_BZERO = 19, // P5-corvus-syscalls: barrier'd zeroize user-VA buf
     T_SYS_GETRANDOM   = 20, // P5-corvus-syscalls: read kernel CSPRNG (CAP_CSPRNG_READ)
+    T_SYS_SPAWN       = 21, // P5-spawn-wait: rfork RFPROC + exec on a devramfs binary
+    T_SYS_WAIT_PID    = 22, // P5-spawn-wait: reap one ZOMBIE child; write status if non-NULL
 };
 
 // SYS_GETRANDOM flags (mirror kernel/include/thylacine/syscall.h).
 #define T_GRND_NONBLOCK   1u
+
+// Maximum binary name length for t_spawn (mirror SYS_SPAWN_NAME_MAX).
+#define T_SPAWN_NAME_MAX  64u
 
 // Mount flags — mirror kernel/include/thylacine/territory.h (Plan 9
 // MREPL / MBEFORE / MAFTER / MCREATE). At v1.0 only MREPL has
@@ -489,6 +494,45 @@ static inline long t_getrandom(void *buf, size_t len, unsigned long flags) {
         "svc #0"
         : "+r"(x0)
         : "r"(x1), "r"(x2), "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
+// t_spawn — load the named binary from the boot initrd (devramfs) and
+// rfork(RFPROC) a child Proc that exec_setup's it. `name` need not be
+// NUL-terminated; `name_len` is authoritative and must be in
+// 1..T_SPAWN_NAME_MAX. The child inherits no capabilities at v1.0.
+// Returns the child PID (>0) on success, -1 on: bad name buffer /
+// missing binary / blob too large / OOM. Parent uses t_wait_pid to
+// reap when the child exits.
+__attribute__((always_inline))
+static inline long t_spawn(const char *name, size_t name_len) {
+    register long x0 __asm__("x0") = (long)(unsigned long)name;
+    register long x1 __asm__("x1") = (long)name_len;
+    register long x8 __asm__("x8") = T_SYS_SPAWN;
+    __asm__ volatile (
+        "svc #0"
+        : "+r"(x0)
+        : "r"(x1), "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
+// t_wait_pid — block until one of the caller's children enters ZOMBIE
+// and reap it. If `status_out` is non-NULL, the child's exit_status is
+// written there. Returns the reaped PID on success, -1 immediately if
+// the caller has no children at all. Plan 9 wait(2) shape (no PID
+// selector at v1.0).
+__attribute__((always_inline))
+static inline long t_wait_pid(int *status_out) {
+    register long x0 __asm__("x0") = (long)(unsigned long)status_out;
+    register long x8 __asm__("x8") = T_SYS_WAIT_PID;
+    __asm__ volatile (
+        "svc #0"
+        : "+r"(x0)
+        : "r"(x8)
         : "memory", "cc"
     );
     return x0;
