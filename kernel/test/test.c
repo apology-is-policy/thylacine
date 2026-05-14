@@ -378,6 +378,15 @@ void test_sys_rw_read_after_close_returns_eof(void);
 void test_sys_pipe_dup_spoor_handle_acquires_ref(void);
 void test_pipe_probe_round_trip(void);
 void test_sys_attach_9p_rejection_paths(void);
+void test_sys_mount_happy_path_grafts_pipe_spoor(void);
+void test_sys_mount_idempotent_on_duplicate(void);
+void test_sys_mount_rejects_bad_fd(void);
+void test_sys_mount_rejects_missing_right_read(void);
+void test_sys_mount_rejects_invalid_flags(void);
+void test_sys_mount_rejects_null_territory(void);
+void test_sys_unmount_removes_entry_and_drops_ref(void);
+void test_sys_unmount_rejects_nonexistent_target(void);
+void test_sys_mount_caller_close_keeps_mount_alive(void);
 void test_irq_latency_bench(void);
 void test_caps_kproc_has_all(void);
 void test_caps_kproc_has_hw_create(void);
@@ -936,6 +945,15 @@ struct test_case g_tests[] = {
     { "sys_pipe.dup_spoor_handle_acquires_ref",        test_sys_pipe_dup_spoor_handle_acquires_ref,        false, NULL },
     { "userspace.pipe_probe_round_trip",               test_pipe_probe_round_trip,                         false, NULL },
     { "sys_attach_9p.rejection_paths",                 test_sys_attach_9p_rejection_paths,                 false, NULL },
+    { "sys_mount.happy_path_grafts_pipe_spoor",        test_sys_mount_happy_path_grafts_pipe_spoor,        false, NULL },
+    { "sys_mount.idempotent_on_duplicate",             test_sys_mount_idempotent_on_duplicate,             false, NULL },
+    { "sys_mount.rejects_bad_fd",                      test_sys_mount_rejects_bad_fd,                      false, NULL },
+    { "sys_mount.rejects_missing_right_read",          test_sys_mount_rejects_missing_right_read,          false, NULL },
+    { "sys_mount.rejects_invalid_flags",               test_sys_mount_rejects_invalid_flags,               false, NULL },
+    { "sys_mount.rejects_null_territory",              test_sys_mount_rejects_null_territory,              false, NULL },
+    { "sys_unmount.removes_entry_and_drops_ref",       test_sys_unmount_removes_entry_and_drops_ref,       false, NULL },
+    { "sys_unmount.rejects_nonexistent_target",        test_sys_unmount_rejects_nonexistent_target,        false, NULL },
+    { "sys_mount.caller_close_keeps_mount_alive",      test_sys_mount_caller_close_keeps_mount_alive,      false, NULL },
     { "userspace.irq_latency_bench",   test_irq_latency_bench,             false, NULL },
     { "caps.kproc_has_all",            test_caps_kproc_has_all,            false, NULL },
     { "caps.kproc_has_hw_create",      test_caps_kproc_has_hw_create,      false, NULL },

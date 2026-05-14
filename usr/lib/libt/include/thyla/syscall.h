@@ -45,7 +45,18 @@ enum {
     T_SYS_CLOSE       = 11, // P5-fd-syscalls: close(fd)
     T_SYS_DUP         = 12, // P5-fd-syscalls: dup(oldfd, new_rights) → newfd
     T_SYS_ATTACH_9P   = 13, // P5-attach-syscall: 9P client attach over Spoor pair
+    T_SYS_MOUNT       = 14, // P5-mount-syscall: graft Spoor at target_path_id
+    T_SYS_UNMOUNT     = 15, // P5-mount-syscall: remove mount entry at target_path_id
 };
+
+// Mount flags — mirror kernel/include/thylacine/territory.h (Plan 9
+// MREPL / MBEFORE / MAFTER / MCREATE). At v1.0 only MREPL has
+// distinguished semantics (replace existing entry at the same target);
+// MBEFORE / MAFTER / MCREATE are stored for future union-mount work.
+#define T_MREPL    0x0001u
+#define T_MBEFORE  0x0002u
+#define T_MAFTER   0x0004u
+#define T_MCREATE  0x0008u
 
 // VMA prot bits — MUST mirror kernel/include/thylacine/vma.h's
 // VMA_PROT_* values. Used as the 3rd argument to t_mmio_map.
@@ -237,6 +248,58 @@ static inline long t_attach_9p(long tx_fd, long rx_fd,
         "svc #0"
         : "+r"(x0)
         : "r"(x1), "r"(x2), "r"(x3), "r"(x4), "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
+// t_mount — graft the Spoor at `source_spoor_fd` at `target_path_id`
+// in the caller's Territory mount table. Plan 9 `mount` semantics:
+// the mount entry holds its OWN refcount on the source Spoor (per
+// ARCH §9.6.6), so the caller can `t_close(source_spoor_fd)` after a
+// successful mount; the mount table keeps the Spoor alive until
+// `t_unmount` or Territory destruction.
+//
+// `target_path_id` is a u32 abstract path token at v1.0 — the same
+// numeric ID used by bind/unbind. String-path resolution lands with
+// the fd-syscall walk subsystem in a later chunk.
+//
+// `flags` is T_MREPL / T_MBEFORE / T_MAFTER / T_MCREATE (bit-or'd).
+//
+// Returns 0 on success, -1 on:
+//   - invalid source_spoor_fd (not KOBJ_SPOOR or out-of-range)
+//   - source handle missing T_RIGHT_READ
+//   - flags has bits outside the valid set
+//   - Territory mount table full (8 entries at v1.0)
+__attribute__((always_inline))
+static inline long t_mount(long source_spoor_fd, unsigned long target_path_id,
+                           unsigned long flags) {
+    register long x0 __asm__("x0") = source_spoor_fd;
+    register long x1 __asm__("x1") = (long)target_path_id;
+    register long x2 __asm__("x2") = (long)flags;
+    register long x8 __asm__("x8") = T_SYS_MOUNT;
+    __asm__ volatile (
+        "svc #0"
+        : "+r"(x0)
+        : "r"(x1), "r"(x2), "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
+// t_unmount — remove the FIRST mount entry at `target_path_id` from
+// the caller's Territory mount table; drop the source's per-entry
+// refcount. (Union mounts with multiple entries at the same target
+// require multiple t_unmount calls — Phase 5+ once walk-side union
+// support lands.) Returns 0 on success, -1 if no entry exists.
+__attribute__((always_inline))
+static inline long t_unmount(unsigned long target_path_id) {
+    register long x0 __asm__("x0") = (long)target_path_id;
+    register long x8 __asm__("x8") = T_SYS_UNMOUNT;
+    __asm__ volatile (
+        "svc #0"
+        : "+r"(x0)
+        : "r"(x8)
         : "memory", "cc"
     );
     return x0;

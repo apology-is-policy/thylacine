@@ -20,6 +20,7 @@
 #include <thylacine/pipe.h>
 #include <thylacine/proc.h>
 #include <thylacine/spoor.h>
+#include <thylacine/territory.h>
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 #include <thylacine/vma.h>
@@ -886,6 +887,99 @@ static s64 sys_dup_handler(u64 hraw, u64 new_rights_raw) {
 }
 
 // =============================================================================
+// SYS_MOUNT / SYS_UNMOUNT — graft / remove a Spoor in the caller's Territory
+// mount table (P5-mount-syscall).
+// =============================================================================
+//
+// User-visible body of `mount(source_spoor_fd, target_path, flags) → 0`
+// and `unmount(target_path)` per ARCH §9.6.1 + §11.2. Thin SVC wrappers
+// over `kernel/territory.c::mount` and `::unmount`.
+//
+// The mount-table primitive does the per-entry spoor_ref / spoor_unref
+// + the MountRefcountConsistency invariant (specs/territory.tla). The
+// SVC handlers' job is the user-facing checks: look up the KOBJ_SPOOR
+// fd, validate flags + rights, and route into the C-API.
+//
+// Composition with SYS_ATTACH_9P: a dev9p-backed root Spoor from
+// SYS_ATTACH_9P has its dev9p_priv.attached_owner populated; closing
+// its last fd tears down the 9P session. SYS_MOUNT bumps the Spoor's
+// refcount, so even if the caller closes their attach_9p fd after
+// mounting, the mount-table entry's ref keeps the session alive. The
+// session is torn down only when unmount() (or Territory destruction)
+// drops the LAST reference.
+
+// MREPL / MBEFORE / MAFTER / MCREATE are 0x0001 / 0x0002 / 0x0004 /
+// 0x0008 per territory.h. Mask out everything else — userspace
+// supplying junk bits is rejected at the syscall layer (mount() in
+// territory.c is silent on extra bits, but we want a tight contract
+// at the boundary).
+#define SYS_MOUNT_VALID_FLAGS  ((u32)(MREPL | MBEFORE | MAFTER | MCREATE))
+
+// Inner — testable kernel-internally with a Proc handle. Returns 0 on
+// success, -1 on any failure. Mirrors the sys_pipe_for_proc /
+// sys_write_for_proc shape.
+//
+// `target` is a path_id_t (u32 abstract token at v1.0). Future
+// string-path resolution lands with the fd-syscall walk subsystem;
+// when it does, this inner gains a kernel-resolved path_id_t arg and
+// the SVC wrapper does the walk + copy.
+int sys_mount_for_proc(struct Proc *p, hidx_t source_fd,
+                       path_id_t target, u32 flags) {
+    if (!p)                                          return -1;
+    if (!p->territory)                               return -1;
+    if (flags & ~SYS_MOUNT_VALID_FLAGS)               return -1;
+
+    // RIGHT_READ on the source: a mount holder consumes the source's
+    // tree (walks it, reads files through it). A handle without READ
+    // is structurally useless as a mount source. RIGHT_TRANSFER is
+    // separately required for cross-Proc transfer surfaces (Phase 5+),
+    // not for the mount installation itself.
+    struct Spoor *source = sys_lookup_spoor(p, source_fd, RIGHT_READ);
+    if (!source)                                     return -1;
+
+    // territory.c::mount handles: idempotency (no-op on duplicate),
+    // MREPL (replace existing entry), full-table rejection, and the
+    // per-entry spoor_ref. Returns 0 / -1 (NULL source — already
+    // ruled out above) / -2 (table full). We collapse to 0 / -1.
+    if (mount(p->territory, source, target, flags) != 0) return -1;
+    return 0;
+}
+
+// Inner — testable kernel-internally. Returns 0 on success, -1 if no
+// entry exists at target_path.
+int sys_unmount_for_proc(struct Proc *p, path_id_t target) {
+    if (!p)                                          return -1;
+    if (!p->territory)                               return -1;
+    if (unmount(p->territory, target) != 0)           return -1;
+    return 0;
+}
+
+static s64 sys_mount_handler(u64 source_fd_raw, u64 target_raw, u64 flags_raw) {
+    struct Thread *t = current_thread();
+    if (!t)                                          return -1;
+    struct Proc *p = t->proc;
+    if (!p)                                          return -1;
+    // path_id_t is u32; reject values that don't fit so a buggy
+    // caller's misuse of x1 (e.g., a stray VA) doesn't quietly
+    // alias to a small u32. mount-table entries keyed on path_id_t
+    // must round-trip through u32 unchanged.
+    if (target_raw > (u64)0xFFFFFFFFu)                return -1;
+    if (flags_raw  > (u64)0xFFFFFFFFu)                return -1;
+    return (s64)sys_mount_for_proc(p, (hidx_t)source_fd_raw,
+                                   (path_id_t)target_raw,
+                                   (u32)flags_raw);
+}
+
+static s64 sys_unmount_handler(u64 target_raw) {
+    struct Thread *t = current_thread();
+    if (!t)                                          return -1;
+    struct Proc *p = t->proc;
+    if (!p)                                          return -1;
+    if (target_raw > (u64)0xFFFFFFFFu)                return -1;
+    return (s64)sys_unmount_for_proc(p, (path_id_t)target_raw);
+}
+
+// =============================================================================
 // Dispatch entry.
 // =============================================================================
 
@@ -976,6 +1070,16 @@ void syscall_dispatch(struct exception_context *ctx) {
                                                   ctx->regs[2],
                                                   ctx->regs[3],
                                                   ctx->regs[4]);
+        return;
+
+    case SYS_MOUNT:
+        ctx->regs[0] = (u64)sys_mount_handler(ctx->regs[0],
+                                              ctx->regs[1],
+                                              ctx->regs[2]);
+        return;
+
+    case SYS_UNMOUNT:
+        ctx->regs[0] = (u64)sys_unmount_handler(ctx->regs[0]);
         return;
 
     default:

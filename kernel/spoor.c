@@ -87,6 +87,13 @@ void spoor_ref(struct Spoor *c) {
     c->ref++;
 }
 
+// Pure refcount drop. If the ref hits 0 the Spoor's storage is freed
+// but `dev->close` is NOT invoked — use this entry point only when the
+// caller knows the per-Spoor Dev state has already been torn down, OR
+// when the Spoor was never "opened" (e.g., spoor_alloc + early
+// rollback before any device-side state was wired up). The general
+// "release my hold on this Spoor" entry point is spoor_clunk, which
+// runs the Dev close hook on last drop.
 void spoor_unref(struct Spoor *c) {
     if (!c) return;                                  // NULL-safe (mirrors burrow_unref)
     if (c->magic != SPOOR_MAGIC)
@@ -137,17 +144,35 @@ void spoor_clunk(struct Spoor *c) {
     if (c->ref <= 0)
         extinction("spoor_clunk of zero-ref Spoor");
 
-    // Drive dev->close before dropping the ref. The dev's close hook
-    // may release per-Spoor aux state that lives outside the Spoor
-    // struct (e.g., a 9P fid under Phase 4's userspace-driver path).
-    // close hooks are responsible for being idempotent + safe-on-not-
-    // yet-opened (devnone's close is a no-op; the cons / null / proc
-    // hooks gate work on (c->flag & COPEN)).
-    if (c->dev && c->dev->close) {
-        c->dev->close(c);
+    // Plan 9 cclose semantics: drop a ref; the Dev's close hook runs
+    // ONLY on the last drop (ref hits 0). This is what ARCH §9.6.6's
+    // "Caller can close the attach_9p fd after mount — the mount
+    // table holds the ref" lifecycle requires: extra refs (dup'd
+    // handles, mount-table entries) keep the underlying Dev state
+    // alive even after some holders clunk. P5-mount-syscall exposed
+    // that the prior "run dev->close on every clunk" design tore
+    // down Dev state too eagerly — closing one of two handle holders
+    // freed the pipe endpoint while the other holder still observed
+    // an alive Spoor with a dangling aux. Now: dev->close is invoked
+    // strictly when the last holder relinquishes.
+    //
+    // Dev close hooks need NOT be idempotent under this contract;
+    // they may assume one-shot semantics + that no other clunk will
+    // call them again on the same Spoor.
+    if (c->ref == 1) {
+        // Last drop. Run Dev close hook (releases per-Spoor aux),
+        // then drop ref to 0 + free. The order matters: close runs
+        // with the Spoor still valid (ref still 1) so the hook can
+        // safely inspect c->aux, c->dev, c->qid, etc.
+        if (c->dev && c->dev->close) {
+            c->dev->close(c);
+        }
+        c->ref = 0;
+        spoor_free_internal(c);
+        return;
     }
 
-    spoor_unref(c);     // may invalidate `c`
+    c->ref--;
 }
 
 u64 spoor_total_allocated(void) { return g_spoor_allocated; }

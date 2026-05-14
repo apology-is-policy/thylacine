@@ -158,12 +158,21 @@ void territory_unref(struct Territory *p) {
         // mounts[] — the Spoor's storage is leaked. The spec's
         // MountRefcountConsistency invariant catches that desync.
         //
+        // Use spoor_clunk (Plan 9 cclose) not spoor_unref: if this is
+        // the Spoor's LAST holder (e.g., the user already closed any
+        // attach_9p fd; this Territory was the last mount-table entry
+        // for it), the Dev's close hook needs to run to release
+        // per-Spoor Dev state (pipe endpoints, 9P sessions, etc.).
+        // P5-mount-syscall closed this gap; pre-fix, spoor_unref's
+        // close-less last-drop would have leaked Dev state on
+        // Territory destruction.
+        //
         // Walk in reverse so the array indexing stays valid even if we
-        // ever add side-effects that clear the slot during the unref
-        // path; current spoor_unref doesn't touch the Territory, so the
-        // direction is cosmetic.
+        // ever add side-effects that clear the slot during the close
+        // path; current Dev close hooks don't touch the Territory, so
+        // the direction is cosmetic.
         for (int i = p->nmounts - 1; i >= 0; i--) {
-            spoor_unref(p->mounts[i].source);
+            spoor_clunk(p->mounts[i].source);
         }
         // Clear nmounts so a post-free read (UAF) sees consistent state
         // (zero entries) — SLUB's freelist write will clobber magic but
@@ -327,7 +336,11 @@ int mount(struct Territory *territory, struct Spoor *source,
                 territory->mounts[i].source = source;
                 territory->mounts[i].flags  = flags;
                 spoor_ref(source);
-                spoor_unref(old);
+                // spoor_clunk (not spoor_unref): MREPL displaces a
+                // holder; if this was the last ref on `old`, the
+                // Dev's close hook must run to release per-Spoor
+                // state. P5-mount-syscall fix.
+                spoor_clunk(old);
                 return 0;
             }
         }
@@ -363,10 +376,13 @@ int unmount(struct Territory *territory, path_id_t target_path) {
             // and the removal will switch to shift-down at that point.
             territory->mounts[i] = territory->mounts[territory->nmounts - 1];
             territory->nmounts--;
-            // Drop the per-entry refcount LAST. If spoor_unref ever
-            // grows side-effects that touch the Territory (it doesn't
-            // today), the table is already consistent before the call.
-            spoor_unref(source);
+            // Drop the per-entry refcount LAST. spoor_clunk (not
+            // spoor_unref) so the Dev's close hook runs if this is
+            // the last holder — required for the ARCH §9.6.6
+            // lifecycle where a user has already closed the
+            // attach_9p fd and the mount-table was the only holder
+            // keeping the 9P session alive. P5-mount-syscall fix.
+            spoor_clunk(source);
             return 0;
         }
     }

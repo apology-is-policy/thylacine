@@ -132,6 +132,47 @@ enum {
     //   - kmalloc OOM for adapter / p9_attached_create handshake failure
     //   - handle table full
     SYS_ATTACH_9P   = 13,   // arg: tx_fd, rx_fd, aname_va, aname_len, n_uname
+
+    // P5-mount-syscall: graft a Spoor's tree at a target path in the
+    // caller's Territory mount table. The source Spoor can be ANY
+    // KOBJ_SPOOR — a dev9p-backed root from SYS_ATTACH_9P, a kernel
+    // synthetic Dev root, a pipe end (degenerate but legal — walking
+    // a pipe-as-mount mostly produces -1, but the lifetime discipline
+    // composes regardless), or a future cross-territory share.
+    //
+    // SYS_MOUNT(source_spoor_fd, target_path_id, flags) → 0/-1
+    //   x0 = source_spoor_fd (hidx_t; must be a KOBJ_SPOOR handle)
+    //   x1 = target_path_id (u32; abstract path token at v1.0 — the
+    //        same numeric ID used by bind/unbind in the existing
+    //        PgrpBind / PgrpMount C-API. String-path resolution lands
+    //        with the fd-syscall walk subsystem in a later chunk.)
+    //   x2 = flags (u32; MREPL / MBEFORE / MAFTER / MCREATE)
+    // Returns: 0 on success, -1 on:
+    //   - invalid source_spoor_fd (not KOBJ_SPOOR, out-of-range)
+    //   - missing RIGHT_READ (the mount holder needs to be able to
+    //     consume the source's tree — without READ, a mount has no
+    //     value at v1.0; this is a defense-in-depth check, not a
+    //     deep correctness requirement)
+    //   - flags has bits outside the MREPL|MBEFORE|MAFTER|MCREATE set
+    //   - territory mount table full (PGRP_MAX_MOUNTS reached)
+    //
+    // Lifecycle (per ARCH §9.6.6): `mount` bumps the Spoor's refcount
+    // (the mount-table entry holds its own ref). The caller can close
+    // their source_spoor_fd afterward; the mount table keeps the Spoor
+    // alive. unmount() (or Territory destruction) drops the per-entry
+    // ref; if it was the last ref, the Spoor's Dev close runs (which,
+    // for dev9p-backed Spoors set up by SYS_ATTACH_9P, tears down the
+    // entire 9P session).
+    SYS_MOUNT       = 14,   // arg: source_spoor_fd, target_path_id, flags
+
+    // SYS_UNMOUNT(target_path_id) → 0/-1
+    //   x0 = target_path_id (u32; same abstract token as SYS_MOUNT)
+    // Returns: 0 on success, -1 on:
+    //   - no entry at target_path_id in the caller's Territory
+    //
+    // Drops the per-entry Spoor ref; the Spoor's Dev close runs if
+    // this was the last ref.
+    SYS_UNMOUNT     = 15,   // arg: target_path_id
 };
 
 // Maximum aname length per SYS_ATTACH_9P call. The aname is a server-

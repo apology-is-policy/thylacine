@@ -257,11 +257,20 @@ static void dev9p_close(struct Spoor *c) {
             // doesn't free them out from under us). Release those
             // refs now. The adapter's owns_spoors=false means
             // adapter close (called by p9_client_close above) didn't
-            // touch them — we own the unref.
+            // touch them — dev9p owns the release.
+            //
+            // spoor_clunk (not spoor_unref): if userspace already
+            // closed their transport fd before this dev9p Spoor's
+            // last clunk, dev9p's ref is the LAST one. spoor_clunk
+            // runs devpipe_close (or whatever Dev backs the
+            // transport) to set EOF + drop ring refcount. Under the
+            // prior spoor_unref-no-close semantics that pipe ring +
+            // endpoint priv leaked when the user-fd had already
+            // gone away. P5-mount-syscall companion fix.
             struct Spoor *tx = adp->tx_spoor;
             struct Spoor *rx = adp->rx_spoor;
-            if (tx) spoor_unref(tx);
-            if (rx && rx != tx) spoor_unref(rx);
+            if (tx) spoor_clunk(tx);
+            if (rx && rx != tx) spoor_clunk(rx);
             kfree(adp);
         }
     } else if (p->fid_owned) {
