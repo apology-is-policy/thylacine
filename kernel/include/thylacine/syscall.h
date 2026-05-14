@@ -80,7 +80,28 @@ enum {
     // spoor_clunk on KOBJ_SPOOR, so closing the handle (or the Proc
     // exiting) tears down the underlying Spoor end-to-end.
     SYS_PIPE        = 8,    // no args; returns rd in x0, wr in x1
+
+    // P5-fd-rw: read / write through a KOBJ_SPOOR fd. Each routes
+    // through the Spoor's Dev vtable (`dev->read` / `dev->write`)
+    // after validating the user-VA buffer and the handle's rights
+    // (RIGHT_READ for SYS_READ; RIGHT_WRITE for SYS_WRITE).
+    //
+    // SYS_READ(fd, buf_va, len)  → bytes read (>=0), 0 on EOF, -1 on error
+    // SYS_WRITE(fd, buf_va, len) → bytes written (>=0), -1 on error
+    //
+    // Length is capped at SYS_RW_MAX (4096) per call — userspace
+    // loops for larger transfers. Bouncing through a 4 KiB kernel
+    // stack scratch buffer; uaccess_load_u8 / uaccess_store_u8 do
+    // the per-byte user-VA copy with fault-fixup.
+    SYS_READ        = 9,    // arg: fd (x0), buf_va (x1), len (x2)
+    SYS_WRITE       = 10,   // arg: fd (x0), buf_va (x1), len (x2)
 };
+
+// Maximum bytes transferred per SYS_READ / SYS_WRITE call. Userspace
+// loops for larger transfers. Kept at PIPE_BUF_SIZE (4 KiB) to match
+// the kernel pipe ring buffer; longer single calls would either need
+// a heap scratch (avoidable for v1.0) or per-call segmented copy.
+#define SYS_RW_MAX  4096u
 
 struct exception_context;
 

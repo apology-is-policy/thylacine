@@ -8,6 +8,7 @@
 #include <thylacine/syscall.h>
 #include <thylacine/burrow.h>
 #include <thylacine/caps.h>
+#include <thylacine/dev.h>
 #include <thylacine/dma_handle.h>
 #include <thylacine/extinction.h>
 #include <thylacine/handle.h>
@@ -576,6 +577,129 @@ static s64 sys_pipe_handler(u64 *out_rd, u64 *out_wr) {
 }
 
 // =============================================================================
+// SYS_READ / SYS_WRITE — byte I/O through a KOBJ_SPOOR fd (P5-fd-rw).
+// =============================================================================
+//
+// AArch64 ABI: x0 = fd (hidx_t), x1 = buf_va (user-VA pointer),
+//              x2 = len (bytes).
+//
+// SYS_READ:  routes through dev->read; copies kernel-scratch bytes
+//            back to user-VA via uaccess_store_u8. Returns bytes read
+//            (>=0; 0 on EOF), -1 on error.
+// SYS_WRITE: copies user-VA bytes into kernel scratch via uaccess_load_u8;
+//            routes through dev->write. Returns bytes written (>=0),
+//            -1 on error.
+//
+// Length is capped at SYS_RW_MAX per call (4096 bytes; matches
+// PIPE_BUF_SIZE). Userspace loops for larger transfers.
+//
+// Rights gate: SYS_READ requires RIGHT_READ on the handle; SYS_WRITE
+// requires RIGHT_WRITE.
+
+// Helper: look up an open KOBJ_SPOOR handle, validate rights. Returns
+// the Spoor pointer or NULL on any failure.
+static struct Spoor *sys_lookup_spoor(struct Proc *p, hidx_t h, rights_t required) {
+    struct Handle *slot = handle_get(p, h);
+    if (!slot)                                       return NULL;
+    if (slot->kind != KOBJ_SPOOR)                    return NULL;
+    if ((slot->rights & required) != required)       return NULL;
+    return (struct Spoor *)slot->obj;
+}
+
+// Common user-VA range check (NULL / overflow / past UACCESS bound).
+static bool sys_validate_user_buf(u64 buf_va, u64 len) {
+    if (len == 0)                                    return true;
+    if (buf_va == 0)                                 return false;
+    if (buf_va >= UACCESS_USER_VA_TOP)                return false;
+    if (buf_va + len < buf_va)                        return false;
+    if (buf_va + len > UACCESS_USER_VA_TOP)           return false;
+    return true;
+}
+
+// Inner — testable with kernel-side buf. Returns bytes written (>=0)
+// or -1 on bad handle / wrong kind / missing rights / dev error.
+s64 sys_write_for_proc(struct Proc *p, hidx_t h, const u8 *kbuf, u64 len) {
+    if (!p || (!kbuf && len > 0))                    return -1;
+    struct Spoor *c = sys_lookup_spoor(p, h, RIGHT_WRITE);
+    if (!c)                                          return -1;
+    if (!c->dev || !c->dev->write)                   return -1;
+    if (len == 0)                                    return 0;
+
+    long n = c->dev->write(c, kbuf, (long)len, c->offset);
+    if (n < 0)                                       return -1;
+    c->offset += n;
+    return (s64)n;
+}
+
+// Inner — testable with kernel-side buf. Returns bytes read (>=0; 0
+// on EOF) or -1 on bad handle / wrong kind / missing rights / dev error.
+s64 sys_read_for_proc(struct Proc *p, hidx_t h, u8 *kbuf, u64 len) {
+    if (!p || (!kbuf && len > 0))                    return -1;
+    struct Spoor *c = sys_lookup_spoor(p, h, RIGHT_READ);
+    if (!c)                                          return -1;
+    if (!c->dev || !c->dev->read)                    return -1;
+    if (len == 0)                                    return 0;
+
+    long n = c->dev->read(c, kbuf, (long)len, c->offset);
+    if (n < 0)                                       return -1;
+    c->offset += n;
+    return (s64)n;
+}
+
+static s64 sys_write_handler(u64 hraw, u64 buf_va, u64 len) {
+    struct Thread *t = current_thread();
+    if (!t)                                          return -1;
+    struct Proc *p = t->proc;
+    if (!p)                                          return -1;
+    if (!sys_validate_user_buf(buf_va, len))         return -1;
+    if (len > SYS_RW_MAX) len = SYS_RW_MAX;
+
+    if (len == 0) {
+        // Validate the handle even for zero-length writes (POSIX
+        // discipline: bad fd should return -EBADF regardless of
+        // len). Returns 0 if the handle is good.
+        struct Spoor *c = sys_lookup_spoor(p, (hidx_t)hraw, RIGHT_WRITE);
+        if (!c)                                      return -1;
+        return 0;
+    }
+
+    // Bounce buffer on the kernel stack. 4 KiB cap → 4 KiB stack
+    // frame; kernel test thread stack is 16 KiB, leaves headroom.
+    u8 scratch[SYS_RW_MAX];
+    for (u64 i = 0; i < len; i++) {
+        if (uaccess_load_u8(buf_va + i, &scratch[i]) != 0) return -1;
+    }
+    return sys_write_for_proc(p, (hidx_t)hraw, scratch, len);
+}
+
+static s64 sys_read_handler(u64 hraw, u64 buf_va, u64 len) {
+    struct Thread *t = current_thread();
+    if (!t)                                          return -1;
+    struct Proc *p = t->proc;
+    if (!p)                                          return -1;
+    if (!sys_validate_user_buf(buf_va, len))         return -1;
+    if (len > SYS_RW_MAX) len = SYS_RW_MAX;
+
+    if (len == 0) {
+        struct Spoor *c = sys_lookup_spoor(p, (hidx_t)hraw, RIGHT_READ);
+        if (!c)                                      return -1;
+        return 0;
+    }
+
+    u8 scratch[SYS_RW_MAX];
+    s64 got = sys_read_for_proc(p, (hidx_t)hraw, scratch, len);
+    if (got <= 0)                                    return got;
+
+    // Copy what was read back to user-VA. Per-byte; on fault, return
+    // -1 — partial bytes already in user-VA are not "uncopied" but
+    // bytes consumed beyond the fault are LOST. Documented caveat.
+    for (s64 i = 0; i < got; i++) {
+        if (uaccess_store_u8(buf_va + (u64)i, scratch[i]) != 0) return -1;
+    }
+    return got;
+}
+
+// =============================================================================
 // Dispatch entry.
 // =============================================================================
 
@@ -639,6 +763,18 @@ void syscall_dispatch(struct exception_context *ctx) {
         }
         return;
     }
+
+    case SYS_READ:
+        ctx->regs[0] = (u64)sys_read_handler(ctx->regs[0],
+                                             ctx->regs[1],
+                                             ctx->regs[2]);
+        return;
+
+    case SYS_WRITE:
+        ctx->regs[0] = (u64)sys_write_handler(ctx->regs[0],
+                                              ctx->regs[1],
+                                              ctx->regs[2]);
+        return;
 
     default:
         // Unknown syscall. Phase 5+ delivers SIGSYS-equivalent note;

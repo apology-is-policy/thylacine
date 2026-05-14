@@ -32,6 +32,15 @@
 // the byte's state after a -1 return.
 extern s64 uaccess_load_u8(u64 user_va, u8 *out);
 
+// Write a single byte to a user VA. Returns 0 on success or -1 on
+// translation/permission fault. On -1 the fault was caught by the
+// fixup table; the kernel does NOT extinct. Caller MUST treat -1 as
+// an EFAULT-equivalent error code on the syscall surface.
+//
+// Symmetric to uaccess_load_u8; added at P5-fd-rw for SYS_READ's
+// per-byte copy from kernel scratch into the user-VA buffer.
+extern s64 uaccess_store_u8(u64 user_va, u8 value);
+
 // Look up the fixup PC for a faulting instruction PC. Returns 0 if
 // `fault_pc` is not in the table (the fault is not a uaccess fault).
 // Otherwise returns the fixup PC to which the dispatcher must

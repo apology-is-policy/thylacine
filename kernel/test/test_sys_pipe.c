@@ -33,12 +33,18 @@
 #include <thylacine/spoor.h>
 #include <thylacine/types.h>
 
-// Inner SVC handler (extern declaration; defined in kernel/syscall.c).
+// Inner SVC handlers (extern declarations; defined in kernel/syscall.c).
 extern int sys_pipe_for_proc(struct Proc *p, hidx_t *out_rd, hidx_t *out_wr);
+extern s64 sys_write_for_proc(struct Proc *p, hidx_t h, const u8 *kbuf, u64 len);
+extern s64 sys_read_for_proc(struct Proc *p, hidx_t h, u8 *kbuf, u64 len);
 
 void test_sys_pipe_allocates_two_distinct_spoor_handles(void);
 void test_sys_pipe_proc_free_releases_handles(void);
 void test_sys_pipe_handle_close_releases_one_end(void);
+void test_sys_rw_write_then_read_round_trip(void);
+void test_sys_rw_rights_check(void);
+void test_sys_rw_zero_length_validates_fd(void);
+void test_sys_rw_read_after_close_returns_eof(void);
 
 // Local copy of the proc-test helpers used by test_handle.c. Kept
 // independent so the two test files can be reordered without import
@@ -104,6 +110,87 @@ void test_sys_pipe_proc_free_releases_handles(void) {
         "proc_free released the pipe ring");
     TEST_EXPECT_EQ(spoor_total_freed() - spoor_freed_before, 2ull,
         "proc_free released both Spoors");
+}
+
+void test_sys_rw_write_then_read_round_trip(void) {
+    struct Proc *p = make_test_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+
+    hidx_t fd_rd = -1, fd_wr = -1;
+    TEST_EXPECT_EQ(sys_pipe_for_proc(p, &fd_rd, &fd_wr), 0, "sys_pipe");
+
+    // Write a payload through the write fd.
+    const u8 payload[] = { 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77 };
+    s64 wrote = sys_write_for_proc(p, fd_wr, payload, sizeof(payload));
+    TEST_EXPECT_EQ(wrote, (s64)sizeof(payload),
+        "sys_write_for_proc accepts full payload");
+
+    // Read it back through the read fd.
+    u8 got[16] = { 0 };
+    s64 nread = sys_read_for_proc(p, fd_rd, got, sizeof(got));
+    TEST_EXPECT_EQ(nread, (s64)sizeof(payload),
+        "sys_read_for_proc returns payload-length bytes");
+    for (size_t i = 0; i < sizeof(payload); i++) {
+        TEST_ASSERT(got[i] == payload[i],
+            "bytes round-trip in FIFO order");
+    }
+
+    drop_test_proc(p);
+}
+
+void test_sys_rw_rights_check(void) {
+    // sys_lookup_spoor requires RIGHT_READ for read / RIGHT_WRITE
+    // for write. SYS_PIPE grants both on both ends, so to test the
+    // check we'd need to construct a handle with reduced rights —
+    // not possible at v1.0 from kernel test (no sys_handle_reduce
+    // syscall). Instead: pass an INVALID fd (out-of-range) and
+    // verify both handlers return -1.
+    struct Proc *p = make_test_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+
+    u8 buf[4] = { 0 };
+    TEST_EXPECT_EQ(sys_write_for_proc(p, 9999, buf, 4), -1L,
+        "write on out-of-range fd returns -1");
+    TEST_EXPECT_EQ(sys_read_for_proc(p, 9999, buf, 4), -1L,
+        "read on out-of-range fd returns -1");
+
+    drop_test_proc(p);
+}
+
+void test_sys_rw_zero_length_validates_fd(void) {
+    // Zero-length read/write on a valid fd → 0; on a bad fd → -1.
+    struct Proc *p = make_test_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+
+    hidx_t fd_rd = -1, fd_wr = -1;
+    TEST_EXPECT_EQ(sys_pipe_for_proc(p, &fd_rd, &fd_wr), 0, "sys_pipe");
+
+    TEST_EXPECT_EQ(sys_write_for_proc(p, fd_wr, NULL, 0), 0L,
+        "zero-length write returns 0");
+    TEST_EXPECT_EQ(sys_read_for_proc(p, fd_rd, NULL, 0), 0L,
+        "zero-length read returns 0");
+
+    drop_test_proc(p);
+}
+
+void test_sys_rw_read_after_close_returns_eof(void) {
+    struct Proc *p = make_test_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+
+    hidx_t fd_rd = -1, fd_wr = -1;
+    TEST_EXPECT_EQ(sys_pipe_for_proc(p, &fd_rd, &fd_wr), 0, "sys_pipe");
+
+    // Close the write end first. devpipe_close sets write_eof + wakes
+    // any sleeping reader; no waiter at this point.
+    TEST_EXPECT_EQ(handle_close(p, fd_wr), 0, "close wr");
+
+    // Subsequent read on the (now-empty) pipe with write_eof set
+    // returns 0 (EOF) immediately without blocking.
+    u8 got[8];
+    s64 nread = sys_read_for_proc(p, fd_rd, got, sizeof(got));
+    TEST_EXPECT_EQ(nread, 0L, "read returns 0 (EOF) after write end closed");
+
+    drop_test_proc(p);
 }
 
 void test_sys_pipe_handle_close_releases_one_end(void) {

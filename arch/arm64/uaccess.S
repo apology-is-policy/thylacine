@@ -93,3 +93,41 @@ uaccess_load_u8_fault:
 .long   uaccess_load_u8_op    - .
 .long   uaccess_load_u8_fault - .
 .popsection
+
+// uaccess_store_u8 — write a single byte to a user VA. The store
+// equivalent of uaccess_load_u8; added at P5-fd-rw for SYS_READ's
+// per-byte copy from kernel scratch into the user-VA buffer.
+//
+// AArch64 ABI: x0 = user VA, x1 = value to store (low byte of x1).
+// Returns: x0 = 0 on success; x0 = -1 on fault (no VMA / perm denied /
+//          OOM during demand-page sub-table alloc).
+//
+// On entry x0 must satisfy UACCESS_USER_VA_TOP bound checks; the
+// caller is responsible for VA-range validation. This primitive
+// assumes x0 is a syntactically valid user VA.
+//
+// Implementation mirrors uaccess_load_u8: a single strb is the
+// fault point; the fixup-table entry maps it to the .L fault label
+// below. The fault dispatcher (arch/arm64/fault.c) recognizes the
+// kernel-mode user-VA write at this PC, calls userland_demand_page
+// to install the PTE if a VMA permits writes, and either resumes
+// the instruction or transfers control to the fault label.
+.global uaccess_store_u8
+.type uaccess_store_u8, @function
+uaccess_store_u8:
+.global uaccess_store_u8_op
+uaccess_store_u8_op:
+    strb    w1, [x0]                // FAULT POINT — table entry below
+    mov     x0, xzr
+    ret
+.global uaccess_store_u8_fault
+uaccess_store_u8_fault:
+    mov     x0, #-1
+    ret
+.size uaccess_store_u8, . - uaccess_store_u8
+
+.pushsection .uaccess_fixup, "a", @progbits
+.balign 4
+.long   uaccess_store_u8_op    - .
+.long   uaccess_store_u8_fault - .
+.popsection
