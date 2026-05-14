@@ -151,7 +151,7 @@ EOF
     # into the cpio root. The list is curated below (not glob) so an
     # accidental CMake byproduct doesn't get shipped. Each binary's
     # source-of-truth comment lives in usr/<name>/CMakeLists.txt.
-    local usr_bins=( "hello" "joey" "pipe-probe" "attach-probe" "stratumd-stub" )
+    local usr_bins=( "hello" "joey" "pipe-probe" "attach-probe" "stratumd-stub" "stub-driver" )
     for bin in "${usr_bins[@]}"; do
         local src="$USR_BUILD/$bin/$bin"
         if [[ -f "$src" ]]; then

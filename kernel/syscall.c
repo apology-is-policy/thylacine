@@ -1234,6 +1234,192 @@ static s64 sys_spawn_handler(u64 name_va, u64 name_len_raw) {
 }
 
 // =============================================================================
+// SYS_SPAWN_WITH_FDS — spawn with inherited Spoor fds (P5-stratumd-stub-b).
+// =============================================================================
+//
+// Extends SYS_SPAWN with explicit fd inheritance: the named fds (each
+// must be KOBJ_SPOOR at v1.0) are installed in the child's handle table
+// at slots 0..fd_count-1 BEFORE exec_setup. The parent retains its own
+// holds; this is "give the child its own ref," not "transfer."
+//
+// Lifetime: for each inherited fd, the handler takes an additional
+// spoor_ref. Those bumped refs are owned by the spawn_args struct
+// until the child thunk consumes them via handle_alloc. On rfork
+// failure (or before rfork on validation failure), the handler drops
+// all bumped refs.
+
+struct spawn_with_fds_args {
+    void          *blob;
+    size_t         blob_size;
+    u32            fd_count;
+    struct Spoor  *spoors[SYS_SPAWN_MAX_FDS];
+};
+
+__attribute__((noreturn))
+static void sys_spawn_with_fds_thunk(void *arg) {
+    struct spawn_with_fds_args *sa = (struct spawn_with_fds_args *)arg;
+    void   *blob       = sa->blob;
+    size_t  blob_size  = sa->blob_size;
+    u32     fd_count   = sa->fd_count;
+    struct Spoor *spoors_local[SYS_SPAWN_MAX_FDS];
+    for (u32 i = 0; i < fd_count; i++) spoors_local[i] = sa->spoors[i];
+    kfree(sa);
+
+    struct Thread *t = current_thread();
+    if (!t) extinction("sys_spawn_with_fds_thunk: no current_thread");
+    struct Proc *p = t->proc;
+    if (!p) extinction("sys_spawn_with_fds_thunk: no proc");
+
+    // Install each Spoor in the child's handle table at the lowest
+    // free slot. Post-rfork, the table is empty, so the first install
+    // is fd 0, then 1, then 2, etc. handle_alloc consumes the spoor_ref
+    // we bumped on the parent's side; if it fails partway, the child's
+    // proc_free → handle_table_free will release the installed handles,
+    // and the un-installed spoors need explicit spoor_clunk.
+    u32 installed = 0;
+    for (u32 i = 0; i < fd_count; i++) {
+        hidx_t fd = handle_alloc(p, KOBJ_SPOOR,
+                                 RIGHT_READ | RIGHT_WRITE | RIGHT_TRANSFER,
+                                 spoors_local[i]);
+        if (fd != (hidx_t)i) {
+            // Drop refs on the un-installed remainder; the installed
+            // prefix gets cleaned up by proc_free.
+            for (u32 j = i; j < fd_count; j++) spoor_clunk(spoors_local[j]);
+            kfree(blob);
+            exits("fail-fd-install");
+        }
+        installed++;
+    }
+    (void)installed;
+
+    u64 entry = 0, sp = 0;
+    int rc = exec_setup(p, blob, blob_size, &entry, &sp);
+    kfree(blob);
+    if (rc != 0) {
+        // Installed handles cleaned by proc_free.
+        exits("fail-exec");
+    }
+
+    userland_enter(entry, sp);
+}
+
+// Kernel-side body. Exported (non-static) for kernel-internal tests.
+// fds is a kernel-resident array of fd_count entries; each must refer
+// to an open KOBJ_SPOOR handle in `p`.
+int sys_spawn_with_fds_for_proc(struct Proc *p, const char *name, size_t name_len,
+                                const u32 *fds, u32 fd_count) {
+    if (!p)                                            return -1;
+    if (!name)                                         return -1;
+    if (name_len == 0 || name_len > SYS_SPAWN_NAME_MAX) return -1;
+    for (size_t i = 0; i < name_len; i++) {
+        if (name[i] == '\0')                            return -1;
+    }
+    if (name[name_len] != '\0')                         return -1;
+    if (fd_count > SYS_SPAWN_MAX_FDS)                   return -1;
+    if (fd_count > 0 && !fds)                           return -1;
+
+    // Look up each fd + bump its spoor_ref. On any failure, drop all
+    // bumped refs and return -1.
+    struct Spoor *bumped[SYS_SPAWN_MAX_FDS];
+    u32 bumped_count = 0;
+    for (u32 i = 0; i < fd_count; i++) {
+        struct Handle *slot = handle_get(p, (hidx_t)fds[i]);
+        if (!slot || slot->kind != KOBJ_SPOOR) {
+            for (u32 j = 0; j < bumped_count; j++) spoor_unref(bumped[j]);
+            return -1;
+        }
+        struct Spoor *s = (struct Spoor *)slot->obj;
+        spoor_ref(s);
+        bumped[bumped_count++] = s;
+    }
+
+    const void *cpio_blob = NULL;
+    size_t      cpio_size = 0;
+    if (devramfs_lookup(name, &cpio_blob, &cpio_size) != 0) {
+        for (u32 j = 0; j < bumped_count; j++) spoor_unref(bumped[j]);
+        return -1;
+    }
+    if (cpio_size == 0 || cpio_size > SYS_SPAWN_BLOB_MAX) {
+        for (u32 j = 0; j < bumped_count; j++) spoor_unref(bumped[j]);
+        return -1;
+    }
+
+    void *blob_copy = kmalloc(cpio_size, 0);
+    if (!blob_copy) {
+        for (u32 j = 0; j < bumped_count; j++) spoor_unref(bumped[j]);
+        return -1;
+    }
+    if (((uintptr_t)blob_copy & 0x7) != 0) {
+        kfree(blob_copy);
+        for (u32 j = 0; j < bumped_count; j++) spoor_unref(bumped[j]);
+        return -1;
+    }
+    const u8 *src = (const u8 *)cpio_blob;
+    u8 *dst = (u8 *)blob_copy;
+    for (size_t i = 0; i < cpio_size; i++) dst[i] = src[i];
+
+    struct spawn_with_fds_args *sa = kmalloc(sizeof(*sa), KP_ZERO);
+    if (!sa) {
+        kfree(blob_copy);
+        for (u32 j = 0; j < bumped_count; j++) spoor_unref(bumped[j]);
+        return -1;
+    }
+    sa->blob      = blob_copy;
+    sa->blob_size = cpio_size;
+    sa->fd_count  = fd_count;
+    for (u32 i = 0; i < fd_count; i++) sa->spoors[i] = bumped[i];
+
+    int pid = rfork(RFPROC, sys_spawn_with_fds_thunk, sa);
+    if (pid < 0) {
+        kfree(sa);
+        kfree(blob_copy);
+        for (u32 j = 0; j < bumped_count; j++) spoor_unref(bumped[j]);
+        return -1;
+    }
+    return pid;
+}
+
+static s64 sys_spawn_with_fds_handler(u64 name_va, u64 name_len_raw,
+                                      u64 fd_list_va, u64 fd_count_raw) {
+    struct Thread *t = current_thread();
+    if (!t)                                            return -1;
+    struct Proc *p = t->proc;
+    if (!p)                                            return -1;
+
+    if (name_len_raw == 0 || name_len_raw > SYS_SPAWN_NAME_MAX) return -1;
+    if (!sys_validate_user_buf(name_va, name_len_raw)) return -1;
+    if (fd_count_raw > SYS_SPAWN_MAX_FDS)               return -1;
+
+    char name[SYS_SPAWN_NAME_MAX + 1];
+    for (u64 i = 0; i < name_len_raw; i++) {
+        u8 b = 0;
+        if (uaccess_load_u8(name_va + i, &b) != 0)     return -1;
+        if (b == 0)                                    return -1;
+        name[i] = (char)b;
+    }
+    name[name_len_raw] = '\0';
+
+    u32 fds_kbuf[SYS_SPAWN_MAX_FDS] = { 0 };
+    if (fd_count_raw > 0) {
+        u64 list_bytes = fd_count_raw * sizeof(u32);
+        if (!sys_validate_user_buf(fd_list_va, list_bytes)) return -1;
+        for (u64 i = 0; i < fd_count_raw; i++) {
+            u32 v = 0;
+            for (u64 b = 0; b < sizeof(u32); b++) {
+                u8 byte = 0;
+                if (uaccess_load_u8(fd_list_va + i * sizeof(u32) + b, &byte) != 0)
+                    return -1;
+                v |= (u32)byte << (b * 8);
+            }
+            fds_kbuf[i] = v;
+        }
+    }
+
+    return (s64)sys_spawn_with_fds_for_proc(p, name, (size_t)name_len_raw,
+                                            fds_kbuf, (u32)fd_count_raw);
+}
+
+// =============================================================================
 // SYS_WAIT_PID — reap one ZOMBIE child (P5-spawn-wait).
 // =============================================================================
 //
@@ -1410,6 +1596,13 @@ void syscall_dispatch(struct exception_context *ctx) {
 
     case SYS_WAIT_PID:
         ctx->regs[0] = (u64)sys_wait_pid_handler(ctx->regs[0]);
+        return;
+
+    case SYS_SPAWN_WITH_FDS:
+        ctx->regs[0] = (u64)sys_spawn_with_fds_handler(ctx->regs[0],
+                                                       ctx->regs[1],
+                                                       ctx->regs[2],
+                                                       ctx->regs[3]);
         return;
 
     default:

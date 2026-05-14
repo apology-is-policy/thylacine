@@ -54,6 +54,7 @@ enum {
     T_SYS_GETRANDOM   = 20, // P5-corvus-syscalls: read kernel CSPRNG (CAP_CSPRNG_READ)
     T_SYS_SPAWN       = 21, // P5-spawn-wait: rfork RFPROC + exec on a devramfs binary
     T_SYS_WAIT_PID    = 22, // P5-spawn-wait: reap one ZOMBIE child; write status if non-NULL
+    T_SYS_SPAWN_WITH_FDS = 23, // P5-stratumd-stub-b: spawn + pre-install fds in child
 };
 
 // SYS_GETRANDOM flags (mirror kernel/include/thylacine/syscall.h).
@@ -61,6 +62,9 @@ enum {
 
 // Maximum binary name length for t_spawn (mirror SYS_SPAWN_NAME_MAX).
 #define T_SPAWN_NAME_MAX  64u
+
+// Maximum inherited-fd count for t_spawn_with_fds (mirror SYS_SPAWN_MAX_FDS).
+#define T_SPAWN_MAX_FDS   16u
 
 // Mount flags — mirror kernel/include/thylacine/territory.h (Plan 9
 // MREPL / MBEFORE / MAFTER / MCREATE). At v1.0 only MREPL has
@@ -533,6 +537,32 @@ static inline long t_wait_pid(int *status_out) {
         "svc #0"
         : "+r"(x0)
         : "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
+// t_spawn_with_fds — like t_spawn, but pre-install the listed fds in
+// the child's handle table at slots 0..fd_count-1. Each fd must be an
+// open KOBJ_SPOOR handle in the caller; fd_count ≤ T_SPAWN_MAX_FDS.
+// The parent retains its own holds on each fd; the child gets its own
+// independent ref (caller-side refcount unchanged).
+//
+// Returns the child PID (>0) on success, -1 on: bad name buffer /
+// missing binary / blob too large / fd_count > T_SPAWN_MAX_FDS /
+// fd_list bound violation / any listed fd is not KOBJ_SPOOR / OOM.
+__attribute__((always_inline))
+static inline long t_spawn_with_fds(const char *name, size_t name_len,
+                                    const unsigned int *fds, size_t fd_count) {
+    register long x0 __asm__("x0") = (long)(unsigned long)name;
+    register long x1 __asm__("x1") = (long)name_len;
+    register long x2 __asm__("x2") = (long)(unsigned long)fds;
+    register long x3 __asm__("x3") = (long)fd_count;
+    register long x8 __asm__("x8") = T_SYS_SPAWN_WITH_FDS;
+    __asm__ volatile (
+        "svc #0"
+        : "+r"(x0)
+        : "r"(x1), "r"(x2), "r"(x3), "r"(x8)
         : "memory", "cc"
     );
     return x0;

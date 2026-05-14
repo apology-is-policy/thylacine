@@ -401,7 +401,13 @@ void test_sys_spawn_rejects_oversize_name(void);
 void test_sys_spawn_rejects_missing_binary(void);
 void test_sys_spawn_rejects_embedded_nul(void);
 void test_sys_wait_pid_no_children_returns_neg1(void);
+void test_sys_spawn_with_fds_rejects_oversize_fd_count(void);
+void test_sys_spawn_with_fds_rejects_bad_fd(void);
+void test_sys_spawn_with_fds_rejects_non_spoor_fd(void);
+void test_sys_spawn_with_fds_rejects_missing_binary(void);
+void test_sys_spawn_with_fds_zero_count_succeeds(void);
 void test_stratumd_stub_round_trip(void);
+void test_stub_driver_round_trip(void);
 void test_irq_latency_bench(void);
 void test_caps_kproc_has_all(void);
 void test_caps_kproc_has_hw_create(void);
@@ -983,7 +989,13 @@ struct test_case g_tests[] = {
     { "sys_spawn.rejects_missing_binary",              test_sys_spawn_rejects_missing_binary,              false, NULL },
     { "sys_spawn.rejects_embedded_nul",                test_sys_spawn_rejects_embedded_nul,                false, NULL },
     { "sys_wait_pid.no_children_returns_neg1",         test_sys_wait_pid_no_children_returns_neg1,         false, NULL },
+    { "sys_spawn_with_fds.rejects_oversize_fd_count",  test_sys_spawn_with_fds_rejects_oversize_fd_count,  false, NULL },
+    { "sys_spawn_with_fds.rejects_bad_fd",             test_sys_spawn_with_fds_rejects_bad_fd,             false, NULL },
+    { "sys_spawn_with_fds.rejects_non_spoor_fd",       test_sys_spawn_with_fds_rejects_non_spoor_fd,       false, NULL },
+    { "sys_spawn_with_fds.rejects_missing_binary",     test_sys_spawn_with_fds_rejects_missing_binary,     false, NULL },
+    { "sys_spawn_with_fds.zero_count_succeeds",        test_sys_spawn_with_fds_zero_count_succeeds,        false, NULL },
     { "userspace.stratumd_stub_round_trip",            test_stratumd_stub_round_trip,                      false, NULL },
+    { "userspace.stub_driver_round_trip",              test_stub_driver_round_trip,                        false, NULL },
     { "userspace.irq_latency_bench",   test_irq_latency_bench,             false, NULL },
     { "caps.kproc_has_all",            test_caps_kproc_has_all,            false, NULL },
     { "caps.kproc_has_hw_create",      test_caps_kproc_has_hw_create,      false, NULL },

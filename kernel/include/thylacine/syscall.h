@@ -254,6 +254,32 @@ enum {
     // Mirrors kernel/proc.c::wait_pid (Plan 9 wait(2) shape; no waitpid
     // selector at v1.0).
     SYS_WAIT_PID     = 22,   // arg: status_out_va (x0)
+
+    // SYS_SPAWN_WITH_FDS(name_va, name_len, fd_list_va, fd_count) → child_pid / -1
+    //   x0 = name_va        user-VA pointer to the binary name
+    //   x1 = name_len       bytes; 1..SYS_SPAWN_NAME_MAX = 64
+    //   x2 = fd_list_va     user-VA pointer to u32[fd_count] array (or 0 if fd_count==0)
+    //   x3 = fd_count       0..SYS_SPAWN_MAX_FDS = 16
+    // Like SYS_SPAWN, but with explicit fd inheritance: the listed fds
+    // (which must all be KOBJ_SPOOR in the caller's handle table at
+    // v1.0) are installed in the spawned child's handle table at
+    // slots 0..fd_count-1 BEFORE exec_setup. The child's main() finds
+    // those fds pre-populated. The parent retains its own holds on the
+    // same handles (caller-side refcount unchanged); the inheritance
+    // is "give the child its own ref," not "transfer."
+    //
+    // KOBJ_SPOOR-only at v1.0 because (a) it covers the production
+    // use case (pipes + 9P transports) and (b) ARCH I-5 prohibits
+    // KOBJ_MMIO / KOBJ_IRQ / KOBJ_DMA from cross-Proc transfer.
+    // KOBJ_BURROW inheritance lands when a v1.x workload needs it.
+    //
+    // Returns -1 on:
+    //   - same as SYS_SPAWN (name validation / binary lookup / blob size / OOM)
+    //   - fd_count > SYS_SPAWN_MAX_FDS
+    //   - fd_list_va bound violation (when fd_count > 0)
+    //   - any fd in the list is not a valid open handle in the caller
+    //   - any fd in the list is not KOBJ_SPOOR
+    SYS_SPAWN_WITH_FDS = 23, // arg: name_va, name_len, fd_list_va, fd_count
 };
 
 // SYS_GETRANDOM flags.
@@ -280,6 +306,12 @@ enum {
 // 16760, attach-probe: 15096). Bump if needed; kmalloc routes >2 KiB
 // requests through alloc_pages so larger sizes are merely heavier.
 #define SYS_SPAWN_BLOB_MAX  32768u
+
+// Maximum number of fds that can be inherited via SYS_SPAWN_WITH_FDS
+// per call. 16 is generous for the v1.0 use case (joey passes 2 to
+// stratumd-stub; future per-user stratumd takes 2-3). Bounds the
+// kernel-stack scratch for the fd-list copy.
+#define SYS_SPAWN_MAX_FDS   16u
 
 struct exception_context;
 
