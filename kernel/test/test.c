@@ -354,6 +354,16 @@ void test_spoor_transport_close_clunks_when_owned(void);
 void test_spoor_transport_close_preserves_when_unowned(void);
 void test_spoor_transport_transport_core_round_trip(void);
 void test_spoor_transport_end_to_end_handshake(void);
+void test_pipe_smoke(void);
+void test_pipe_read_on_empty_returns_zero(void);
+void test_pipe_write_to_full_returns_zero(void);
+void test_pipe_write_short_when_partially_full(void);
+void test_pipe_wraparound(void);
+void test_pipe_read_on_write_end_rejected(void);
+void test_pipe_write_on_read_end_rejected(void);
+void test_pipe_close_one_end_keeps_other_alive(void);
+void test_pipe_close_both_ends_frees_ring(void);
+void test_pipe_compose_with_spoor_transport(void);
 void test_irq_latency_bench(void);
 void test_caps_kproc_has_all(void);
 void test_caps_kproc_has_hw_create(void);
@@ -888,6 +898,16 @@ struct test_case g_tests[] = {
     { "spoor_transport.close_preserves_when_unowned",       test_spoor_transport_close_preserves_when_unowned,       false, NULL },
     { "spoor_transport.transport_core_round_trip",          test_spoor_transport_transport_core_round_trip,          false, NULL },
     { "spoor_transport.end_to_end_handshake",               test_spoor_transport_end_to_end_handshake,               false, NULL },
+    { "pipe.smoke",                                         test_pipe_smoke,                                         false, NULL },
+    { "pipe.read_on_empty_returns_zero",                    test_pipe_read_on_empty_returns_zero,                    false, NULL },
+    { "pipe.write_to_full_returns_zero",                    test_pipe_write_to_full_returns_zero,                    false, NULL },
+    { "pipe.write_short_when_partially_full",               test_pipe_write_short_when_partially_full,               false, NULL },
+    { "pipe.wraparound",                                    test_pipe_wraparound,                                    false, NULL },
+    { "pipe.read_on_write_end_rejected",                    test_pipe_read_on_write_end_rejected,                    false, NULL },
+    { "pipe.write_on_read_end_rejected",                    test_pipe_write_on_read_end_rejected,                    false, NULL },
+    { "pipe.close_one_end_keeps_other_alive",               test_pipe_close_one_end_keeps_other_alive,               false, NULL },
+    { "pipe.close_both_ends_frees_ring",                    test_pipe_close_both_ends_frees_ring,                    false, NULL },
+    { "pipe.compose_with_spoor_transport",                  test_pipe_compose_with_spoor_transport,                  false, NULL },
     { "userspace.irq_latency_bench",   test_irq_latency_bench,             false, NULL },
     { "caps.kproc_has_all",            test_caps_kproc_has_all,            false, NULL },
     { "caps.kproc_has_hw_create",      test_caps_kproc_has_hw_create,      false, NULL },

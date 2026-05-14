@@ -96,6 +96,7 @@ set(KERNEL_SRCS
     dev9p.c
     9p_attach.c
     9p_spoor_transport.c
+    pipe.c
     test/test_dev.c
     test/test_trivial_devs.c
     test/test_devproc.c
@@ -132,6 +133,7 @@ set(KERNEL_SRCS
     test/test_dev9p.c
     test/test_9p_attach.c
     test/test_9p_spoor_transport.c
+    test/test_pipe.c
 )
 
 set(KERNEL_LD_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/../arch/arm64/kernel.ld)

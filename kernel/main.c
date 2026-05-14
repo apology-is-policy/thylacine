@@ -48,6 +48,7 @@
 #include <thylacine/burrow.h>
 #include <thylacine/dev.h>
 #include <thylacine/dev9p.h>
+#include <thylacine/pipe.h>
 #include <thylacine/types.h>
 #include <thylacine/virtio.h>
 #include <thylacine/virtio_pci.h>
@@ -350,6 +351,12 @@ void boot_main(void) {
     // (codec / session / transport / client) needs no init — each
     // p9_client is caller-allocated and initialized per-mount.
     dev9p_init();
+
+    // P5-pipe: register devpipe + allocate SLUB caches for the pipe
+    // ring + endpoint structs. After dev9p_init for grouping with the
+    // 9P-adjacent registrations; both are post-dev_init since they
+    // need spoor_init to have run.
+    pipe_init();
 
     // P4-F: VirtIO MMIO transport probe. Walks DTB for "virtio,mmio"
     // nodes; maps each MMIO range; reads transport identity. Order:
