@@ -1379,6 +1379,81 @@ int sys_spawn_with_fds_for_proc(struct Proc *p, const char *name, size_t name_le
     return pid;
 }
 
+// =============================================================================
+// SYS_SPAWN_WITH_CAPS — spawn with explicit cap_mask (P5-spawn-caps).
+// =============================================================================
+//
+// Like SYS_SPAWN, but uses rfork_with_caps instead of rfork: the child's
+// caps are `parent->caps & cap_mask`. ARCH I-2 / I-6 monotonicity is
+// preserved structurally (the AND can only reduce, never elevate).
+//
+// Reuses the existing sys_spawn_thunk + spawn_args from SYS_SPAWN —
+// the only difference is whether rfork or rfork_with_caps is used.
+
+int sys_spawn_with_caps_for_proc(struct Proc *p, const char *name, size_t name_len,
+                                 caps_t cap_mask) {
+    if (!p)                                            return -1;
+    if (!name)                                         return -1;
+    if (name_len == 0 || name_len > SYS_SPAWN_NAME_MAX) return -1;
+    for (size_t i = 0; i < name_len; i++) {
+        if (name[i] == '\0')                            return -1;
+    }
+    if (name[name_len] != '\0')                         return -1;
+
+    const void *cpio_blob = NULL;
+    size_t      cpio_size = 0;
+    if (devramfs_lookup(name, &cpio_blob, &cpio_size) != 0) return -1;
+    if (cpio_size == 0 || cpio_size > SYS_SPAWN_BLOB_MAX)   return -1;
+
+    void *blob_copy = kmalloc(cpio_size, 0);
+    if (!blob_copy)                                    return -1;
+    if (((uintptr_t)blob_copy & 0x7) != 0) {
+        kfree(blob_copy);
+        return -1;
+    }
+    const u8 *src = (const u8 *)cpio_blob;
+    u8 *dst = (u8 *)blob_copy;
+    for (size_t i = 0; i < cpio_size; i++) dst[i] = src[i];
+
+    struct spawn_args *sa = kmalloc(sizeof(*sa), KP_ZERO);
+    if (!sa) {
+        kfree(blob_copy);
+        return -1;
+    }
+    sa->blob      = blob_copy;
+    sa->blob_size = cpio_size;
+
+    int pid = rfork_with_caps(RFPROC, sys_spawn_thunk, sa, cap_mask);
+    if (pid < 0) {
+        kfree(sa);
+        kfree(blob_copy);
+        return -1;
+    }
+    return pid;
+}
+
+static s64 sys_spawn_with_caps_handler(u64 name_va, u64 name_len_raw, u64 cap_mask_raw) {
+    struct Thread *t = current_thread();
+    if (!t)                                            return -1;
+    struct Proc *p = t->proc;
+    if (!p)                                            return -1;
+
+    if (name_len_raw == 0 || name_len_raw > SYS_SPAWN_NAME_MAX) return -1;
+    if (!sys_validate_user_buf(name_va, name_len_raw)) return -1;
+
+    char name[SYS_SPAWN_NAME_MAX + 1];
+    for (u64 i = 0; i < name_len_raw; i++) {
+        u8 b = 0;
+        if (uaccess_load_u8(name_va + i, &b) != 0)     return -1;
+        if (b == 0)                                    return -1;
+        name[i] = (char)b;
+    }
+    name[name_len_raw] = '\0';
+
+    return (s64)sys_spawn_with_caps_for_proc(p, name, (size_t)name_len_raw,
+                                              (caps_t)cap_mask_raw);
+}
+
 static s64 sys_spawn_with_fds_handler(u64 name_va, u64 name_len_raw,
                                       u64 fd_list_va, u64 fd_count_raw) {
     struct Thread *t = current_thread();
@@ -1603,6 +1678,12 @@ void syscall_dispatch(struct exception_context *ctx) {
                                                        ctx->regs[1],
                                                        ctx->regs[2],
                                                        ctx->regs[3]);
+        return;
+
+    case SYS_SPAWN_WITH_CAPS:
+        ctx->regs[0] = (u64)sys_spawn_with_caps_handler(ctx->regs[0],
+                                                        ctx->regs[1],
+                                                        ctx->regs[2]);
         return;
 
     default:

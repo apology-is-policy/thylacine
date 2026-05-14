@@ -280,6 +280,27 @@ enum {
     //   - any fd in the list is not a valid open handle in the caller
     //   - any fd in the list is not KOBJ_SPOOR
     SYS_SPAWN_WITH_FDS = 23, // arg: name_va, name_len, fd_list_va, fd_count
+
+    // SYS_SPAWN_WITH_CAPS(name_va, name_len, cap_mask) → child_pid / -1
+    //   x0 = name_va        user-VA pointer to the binary name
+    //   x1 = name_len       bytes; 1..SYS_SPAWN_NAME_MAX = 64
+    //   x2 = cap_mask       caps_t bitmask of caps to grant the child
+    // Like SYS_SPAWN, but the child's caps are `parent->caps & cap_mask`
+    // (not zero). Wraps the existing kernel-internal `rfork_with_caps`
+    // which enforces ARCH I-2 / I-6 monotonic-reduction: even if
+    // cap_mask sets bits the parent doesn't hold, the AND clamps to
+    // the parent's actual caps. v1.0 use case: joey spawns corvus
+    // with cap_mask = CAP_LOCK_PAGES | CAP_CSPRNG_READ (a subset of
+    // joey's CAP_ALL).
+    //
+    // The child inherits no Spoor handles (use SYS_SPAWN_WITH_FDS
+    // or future SYS_SPAWN_FULL if both inheritance modes are needed).
+    //
+    // Returns -1 on:
+    //   - same as SYS_SPAWN (name validation / binary lookup / blob / OOM)
+    //   - cap_mask outside the u64 range of caps_t (validation already
+    //     happens via the cast; no separate rejection)
+    SYS_SPAWN_WITH_CAPS = 24, // arg: name_va, name_len, cap_mask
 };
 
 // SYS_GETRANDOM flags.

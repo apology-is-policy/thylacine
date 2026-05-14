@@ -55,6 +55,7 @@ enum {
     T_SYS_SPAWN       = 21, // P5-spawn-wait: rfork RFPROC + exec on a devramfs binary
     T_SYS_WAIT_PID    = 22, // P5-spawn-wait: reap one ZOMBIE child; write status if non-NULL
     T_SYS_SPAWN_WITH_FDS = 23, // P5-stratumd-stub-b: spawn + pre-install fds in child
+    T_SYS_SPAWN_WITH_CAPS = 24, // P5-spawn-caps: spawn + grant cap-subset to child
 };
 
 // SYS_GETRANDOM flags (mirror kernel/include/thylacine/syscall.h).
@@ -563,6 +564,36 @@ static inline long t_spawn_with_fds(const char *name, size_t name_len,
         "svc #0"
         : "+r"(x0)
         : "r"(x1), "r"(x2), "r"(x3), "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
+// t_spawn_with_caps — like t_spawn, but the child's caps are
+// `caller's caps & cap_mask`. ARCH I-2 / I-6 monotonic-reduction is
+// enforced structurally (the kernel-internal rfork_with_caps's AND
+// can only reduce, never elevate). Setting bits in cap_mask that the
+// caller doesn't hold has no effect — those bits are silently
+// dropped at the AND.
+//
+// v1.0 cap bits (mirror kernel/include/thylacine/caps.h):
+//   CAP_HW_CREATE   (1<<0) — hardware resource creation
+//   CAP_LOCK_PAGES  (1<<1) — SYS_MLOCKALL
+//   CAP_CSPRNG_READ (1<<2) — SYS_GETRANDOM
+//
+// Returns the child PID (>0) on success, -1 on the same conditions
+// as t_spawn (bad name / missing binary / blob too large / OOM).
+__attribute__((always_inline))
+static inline long t_spawn_with_caps(const char *name, size_t name_len,
+                                     unsigned long cap_mask) {
+    register long x0 __asm__("x0") = (long)(unsigned long)name;
+    register long x1 __asm__("x1") = (long)name_len;
+    register long x2 __asm__("x2") = (long)cap_mask;
+    register long x8 __asm__("x8") = T_SYS_SPAWN_WITH_CAPS;
+    __asm__ volatile (
+        "svc #0"
+        : "+r"(x0)
+        : "r"(x1), "r"(x2), "r"(x8)
         : "memory", "cc"
     );
     return x0;

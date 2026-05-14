@@ -406,6 +406,11 @@ void test_sys_spawn_with_fds_rejects_bad_fd(void);
 void test_sys_spawn_with_fds_rejects_non_spoor_fd(void);
 void test_sys_spawn_with_fds_rejects_missing_binary(void);
 void test_sys_spawn_with_fds_zero_count_succeeds(void);
+void test_sys_spawn_with_caps_happy_path_zero_mask(void);
+void test_sys_spawn_with_caps_happy_path_subset_of_parent(void);
+void test_sys_spawn_with_caps_clamps_to_parent(void);
+void test_sys_spawn_with_caps_rejects_missing_binary(void);
+void test_sys_spawn_with_caps_rejects_oversize_name(void);
 void test_stratumd_stub_round_trip(void);
 void test_stub_driver_round_trip(void);
 void test_irq_latency_bench(void);
@@ -994,6 +999,11 @@ struct test_case g_tests[] = {
     { "sys_spawn_with_fds.rejects_non_spoor_fd",       test_sys_spawn_with_fds_rejects_non_spoor_fd,       false, NULL },
     { "sys_spawn_with_fds.rejects_missing_binary",     test_sys_spawn_with_fds_rejects_missing_binary,     false, NULL },
     { "sys_spawn_with_fds.zero_count_succeeds",        test_sys_spawn_with_fds_zero_count_succeeds,        false, NULL },
+    { "sys_spawn_with_caps.happy_path_zero_mask",      test_sys_spawn_with_caps_happy_path_zero_mask,      false, NULL },
+    { "sys_spawn_with_caps.happy_path_subset_of_parent", test_sys_spawn_with_caps_happy_path_subset_of_parent, false, NULL },
+    { "sys_spawn_with_caps.clamps_to_parent",          test_sys_spawn_with_caps_clamps_to_parent,          false, NULL },
+    { "sys_spawn_with_caps.rejects_missing_binary",    test_sys_spawn_with_caps_rejects_missing_binary,    false, NULL },
+    { "sys_spawn_with_caps.rejects_oversize_name",     test_sys_spawn_with_caps_rejects_oversize_name,     false, NULL },
     { "userspace.stratumd_stub_round_trip",            test_stratumd_stub_round_trip,                      false, NULL },
     { "userspace.stub_driver_round_trip",              test_stub_driver_round_trip,                        false, NULL },
     { "userspace.irq_latency_bench",   test_irq_latency_bench,             false, NULL },
