@@ -193,6 +193,51 @@ void test_sys_rw_read_after_close_returns_eof(void) {
     drop_test_proc(p);
 }
 
+void test_sys_pipe_dup_spoor_handle_acquires_ref(void) {
+    // P5-fd-syscalls: verify handle_dup of a KOBJ_SPOOR exercises the
+    // acquire path (spoor_ref) — the dup'd handle has its own
+    // reference; closing one doesn't free the underlying Spoor while
+    // the other is alive.
+    struct Proc *p = make_test_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+
+    hidx_t fd_rd = -1, fd_wr = -1;
+    TEST_EXPECT_EQ(sys_pipe_for_proc(p, &fd_rd, &fd_wr), 0, "sys_pipe");
+
+    struct Handle *h_rd = handle_get(p, fd_rd);
+    TEST_ASSERT(h_rd != NULL, "handle_get(rd)");
+    struct Spoor *rd_spoor = (struct Spoor *)h_rd->obj;
+    int ref_before = rd_spoor->ref;
+
+    // Dup the read end with reduced rights (RIGHT_READ only — subset
+    // of READ|WRITE|TRANSFER granted by SYS_PIPE).
+    hidx_t dup_fd = handle_dup(p, fd_rd, RIGHT_READ);
+    TEST_ASSERT(dup_fd >= 0 && dup_fd != fd_rd, "handle_dup returned new fd");
+    TEST_EXPECT_EQ(rd_spoor->ref, ref_before + 1,
+        "handle_dup bumped the Spoor refcount via handle_acquire_obj");
+
+    // Verify the dup'd handle is a KOBJ_SPOOR pointing at the same Spoor.
+    struct Handle *h_dup = handle_get(p, dup_fd);
+    TEST_ASSERT(h_dup != NULL, "handle_get(dup)");
+    TEST_EXPECT_EQ((int)h_dup->kind, (int)KOBJ_SPOOR, "dup'd handle is KOBJ_SPOOR");
+    TEST_ASSERT(h_dup->obj == rd_spoor, "dup'd handle points at same Spoor");
+    TEST_EXPECT_EQ(h_dup->rights, (rights_t)RIGHT_READ,
+        "dup'd handle has reduced rights");
+
+    // Rights elevation must be rejected: dup the reduced-rights dup
+    // back to READ|WRITE → -1.
+    hidx_t bad = handle_dup(p, dup_fd, RIGHT_READ | RIGHT_WRITE);
+    TEST_EXPECT_EQ(bad, -1, "rights elevation in handle_dup is rejected");
+
+    // Close the dup'd handle. The Spoor's ref drops by 1 but stays
+    // alive (the original handle still holds a ref).
+    TEST_EXPECT_EQ(handle_close(p, dup_fd), 0, "close dup");
+    TEST_EXPECT_EQ(rd_spoor->ref, ref_before,
+        "close of dup'd handle dropped refcount back to original");
+
+    drop_test_proc(p);
+}
+
 void test_sys_pipe_handle_close_releases_one_end(void) {
     struct Proc *p = make_test_proc();
     TEST_ASSERT(p != NULL, "proc_alloc");

@@ -42,3 +42,4 @@ add_link_options(-T${USR_LINKER_SCRIPT})
 
 add_subdirectory(lib/libt)
 add_subdirectory(hello)
+add_subdirectory(pipe-probe)

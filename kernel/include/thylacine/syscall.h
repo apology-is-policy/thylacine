@@ -95,6 +95,19 @@ enum {
     // the per-byte user-VA copy with fault-fixup.
     SYS_READ        = 9,    // arg: fd (x0), buf_va (x1), len (x2)
     SYS_WRITE       = 10,   // arg: fd (x0), buf_va (x1), len (x2)
+
+    // P5-fd-close: thin wrapper over handle_close. Returns 0 on
+    // success or -1 if the fd is invalid / not present. For
+    // KOBJ_SPOOR handles, handle_release_obj (wired at P5-fd-pipe)
+    // routes to spoor_clunk → frees the underlying Spoor on last ref.
+    //
+    // P5-fd-dup: wraps handle_dup; allocates a new handle slot
+    // pointing at the same kobj as `oldfd` with `new_rights`
+    // (subset of the original's rights — elevation is rejected).
+    // For KOBJ_SPOOR, handle_acquire_obj (wired at P5-fd-pipe) calls
+    // spoor_ref so the dup'd handle has its own reference.
+    SYS_CLOSE       = 11,   // arg: fd (x0)
+    SYS_DUP         = 12,   // arg: oldfd (x0), new_rights (x1)
 };
 
 // Maximum bytes transferred per SYS_READ / SYS_WRITE call. Userspace

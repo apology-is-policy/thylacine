@@ -39,6 +39,11 @@ enum {
     T_SYS_MMIO_MAP    = 5,  // P4-Ic2: map KObj_MMIO into user-VA
     T_SYS_DMA_CREATE  = 6,  // P4-Ic5b1b: allocate KObj_DMA handle
     T_SYS_DMA_MAP     = 7,  // P4-Ic5b1b: map KObj_DMA into user-VA, returns PA
+    T_SYS_PIPE        = 8,  // P5-fd-pipe: create connected pair; rd in x0, wr in x1
+    T_SYS_READ        = 9,  // P5-fd-rw: read(fd, buf, len)
+    T_SYS_WRITE       = 10, // P5-fd-rw: write(fd, buf, len)
+    T_SYS_CLOSE       = 11, // P5-fd-syscalls: close(fd)
+    T_SYS_DUP         = 12, // P5-fd-syscalls: dup(oldfd, new_rights) → newfd
 };
 
 // VMA prot bits — MUST mirror kernel/include/thylacine/vma.h's
@@ -193,6 +198,97 @@ static inline long t_dma_create(unsigned long size, unsigned long rights) {
     register long x0 __asm__("x0") = (long)size;
     register long x1 __asm__("x1") = (long)rights;
     register long x8 __asm__("x8") = T_SYS_DMA_CREATE;
+    __asm__ volatile (
+        "svc #0"
+        : "+r"(x0)
+        : "r"(x1), "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
+// t_pipe — create a connected Spoor pair, install both as KOBJ_SPOOR
+// handles in the calling process's table. Returns 0 on success with
+// *out_rd_fd / *out_wr_fd populated; -1 on table-full / OOM.
+__attribute__((always_inline))
+static inline long t_pipe(long *out_rd_fd, long *out_wr_fd) {
+    register long x0 __asm__("x0");
+    register long x1 __asm__("x1");
+    register long x8 __asm__("x8") = T_SYS_PIPE;
+    __asm__ volatile (
+        "svc #0"
+        : "=r"(x0), "=r"(x1)
+        : "r"(x8)
+        : "memory", "cc"
+    );
+    if (x0 < 0) return -1;
+    *out_rd_fd = x0;
+    *out_wr_fd = x1;
+    return 0;
+}
+
+// t_read — read up to `len` bytes from `fd` into `buf`. Returns bytes
+// read (>0), 0 on EOF, -1 on error. Per-call cap is 4096 bytes
+// (kernel-side SYS_RW_MAX); userspace loops for larger transfers.
+__attribute__((always_inline))
+static inline long t_read(long fd, void *buf, size_t len) {
+    register long x0 __asm__("x0") = fd;
+    register long x1 __asm__("x1") = (long)(unsigned long)buf;
+    register long x2 __asm__("x2") = (long)len;
+    register long x8 __asm__("x8") = T_SYS_READ;
+    __asm__ volatile (
+        "svc #0"
+        : "+r"(x0)
+        : "r"(x1), "r"(x2), "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
+// t_write — write up to `len` bytes from `buf` to `fd`. Returns bytes
+// written (>=0), -1 on error.
+__attribute__((always_inline))
+static inline long t_write(long fd, const void *buf, size_t len) {
+    register long x0 __asm__("x0") = fd;
+    register long x1 __asm__("x1") = (long)(unsigned long)buf;
+    register long x2 __asm__("x2") = (long)len;
+    register long x8 __asm__("x8") = T_SYS_WRITE;
+    __asm__ volatile (
+        "svc #0"
+        : "+r"(x0)
+        : "r"(x1), "r"(x2), "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
+// t_close — release the handle at `fd`. For KOBJ_SPOOR handles the
+// kernel's release path routes through spoor_clunk (sets pipe EOF +
+// wakes the other side per P5-pipe-blocking). Returns 0 on success,
+// -1 on invalid fd.
+__attribute__((always_inline))
+static inline long t_close(long fd) {
+    register long x0 __asm__("x0") = fd;
+    register long x8 __asm__("x8") = T_SYS_CLOSE;
+    __asm__ volatile (
+        "svc #0"
+        : "+r"(x0)
+        : "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
+// t_dup — duplicate `oldfd` with possibly-reduced rights into a new
+// handle slot. `new_rights` MUST be a subset of oldfd's rights —
+// elevation is rejected by the kernel's RightsCeiling enforcement.
+// Returns the new fd (>=0) on success, -1 on invalid oldfd / rights
+// elevation / table-full.
+__attribute__((always_inline))
+static inline long t_dup(long oldfd, unsigned long new_rights) {
+    register long x0 __asm__("x0") = oldfd;
+    register long x1 __asm__("x1") = (long)new_rights;
+    register long x8 __asm__("x8") = T_SYS_DUP;
     __asm__ volatile (
         "svc #0"
         : "+r"(x0)

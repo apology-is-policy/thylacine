@@ -700,6 +700,43 @@ static s64 sys_read_handler(u64 hraw, u64 buf_va, u64 len) {
 }
 
 // =============================================================================
+// SYS_CLOSE / SYS_DUP — handle table operations (P5-fd-syscalls).
+// =============================================================================
+//
+// SYS_CLOSE(fd) → 0 on success, -1 on invalid fd. Thin wrapper over
+//                 handle_close. For KOBJ_SPOOR handles, the release
+//                 path (wired at P5-fd-pipe) routes to spoor_clunk.
+//
+// SYS_DUP(oldfd, new_rights) → new fd (>=0) on success, -1 on bad
+//                              oldfd / rights elevation / table-full.
+//                              handle_dup's RightsCeiling check
+//                              rejects new_rights that aren't a
+//                              subset of oldfd's rights. For
+//                              KOBJ_SPOOR the acquire path calls
+//                              spoor_ref so each handle independently
+//                              holds a reference.
+
+static s64 sys_close_handler(u64 hraw) {
+    struct Thread *t = current_thread();
+    if (!t)                                          return -1;
+    struct Proc *p = t->proc;
+    if (!p)                                          return -1;
+    return (s64)handle_close(p, (hidx_t)hraw);
+}
+
+static s64 sys_dup_handler(u64 hraw, u64 new_rights_raw) {
+    struct Thread *t = current_thread();
+    if (!t)                                          return -1;
+    struct Proc *p = t->proc;
+    if (!p)                                          return -1;
+    // handle_dup validates rights subset internally; the static_assert
+    // on RIGHT_ALL bounds the legal bit-set range.
+    if (new_rights_raw & ~(u64)RIGHT_ALL)             return -1;
+    hidx_t nh = handle_dup(p, (hidx_t)hraw, (rights_t)new_rights_raw);
+    return (s64)nh;
+}
+
+// =============================================================================
 // Dispatch entry.
 // =============================================================================
 
@@ -774,6 +811,14 @@ void syscall_dispatch(struct exception_context *ctx) {
         ctx->regs[0] = (u64)sys_write_handler(ctx->regs[0],
                                               ctx->regs[1],
                                               ctx->regs[2]);
+        return;
+
+    case SYS_CLOSE:
+        ctx->regs[0] = (u64)sys_close_handler(ctx->regs[0]);
+        return;
+
+    case SYS_DUP:
+        ctx->regs[0] = (u64)sys_dup_handler(ctx->regs[0], ctx->regs[1]);
         return;
 
     default:
