@@ -241,14 +241,16 @@ boot_main()
     ↓ dev_init(): kernel-internal Devs (cons, null, zero, random, proc, ctl, ramfs)
     ↓ proc_init(): bootstrap proc (PID 0); idle thread
     ↓ irq_init(): GIC distributor + CPU interface; attach timer IRQ
-    ↓ mount_initramfs(): cpio archive at /; contains stratum, janus, init binaries
+    ↓ mount_initramfs(): cpio archive at /; contains stratumd-system, joey, system.key
     ↓ create init process; exec("/sbin/joey")
     ↓ idle loop: WFI on each CPU
-init (userspace, /sbin/joey)
-    ↓ start stratum (mounts VirtIO block; presents 9P server)
-    ↓ start janus (mounts /dev/janus/; key agent)
-    ↓ remount / from Stratum (kernel umounts ramfs from /)
-    ↓ exec /sbin/joey-stage2 if present, else /bin/sh
+init (userspace, /sbin/joey) — full sequence in CORVUS-DESIGN.md §3 D4
+    ↓ fork stratumd-system (file-key from ESP; verifies pool serial per CORVUS-DESIGN.md C-14)
+    ↓ kernel-side 9P mount /sysroot via stratumd-system's Spoor
+    ↓ pivot root to /sysroot; explicit_bzero the in-memory system.key
+    ↓ start /sbin/corvus (Thylacine's key agent; CORVUS-DESIGN.md)
+    ↓ start /sbin/login (or Halcyon login at Phase 8)
+    ↓ (per-user stratumd processes spawned on login; CORVUS-DESIGN.md §5.1)
 ```
 
 ### 5.2 Bootloader contract
@@ -1277,6 +1279,18 @@ The syscall interface is Plan 9-heritage, not POSIX. The syscall table is small 
 | `gettid()` | Thread ID |
 | `errstr(buf, n)` | Read per-thread errstr |
 
+### 11.2b Corvus hardening syscalls (v1.0, per CORVUS-DESIGN.md §4.1.1)
+
+Required by `corvus` and per-user `stratumd` at startup; land at P5-corvus-syscalls.
+
+| Syscall | Description |
+|---|---|
+| `mlockall(flags)` | Pin all current + future-mapped pages. Caller must hold `CAP_LOCK_PAGES`. |
+| `set_dumpable(0)` | Disable core-dump for this Proc. Idempotent; no-op if already 0. |
+| `set_traceable(0)` | Refuse any future debug-Spoor attach to this Proc. One-way (no re-enable). |
+| `explicit_bzero(ptr, len)` | Compiler-barrier'd memset that the optimizer can't elide. Userspace can call its own; this syscall is the libc-portable equivalent for non-musl callers. |
+| `getrandom(buf, len, flags)` | Read from kernel CSPRNG. Blocks until seeded; non-blocking via `GRND_NONBLOCK` flag. Caller must hold `CAP_CSPRNG_READ`. |
+
 ### 11.3 Handle syscalls
 
 Per §18:
@@ -1522,6 +1536,8 @@ Stratum sees N connections, one per Thylacine process, and gives each its own pe
 
 ### 14.3a Boot lifecycle (Stratum-mounted root)
 
+**v1.0 commitment (per CORVUS-DESIGN.md §3 D2)**: the **system pool** is integrity-only (Stratum Merkle, no AEAD); the `.key` sidecar uses the file backend, **cryptographically bound to the pool device's unique serial** (C-14). User datasets are AEAD-encrypted with corvus-managed per-user wrap chains, mounted post-pivot by **per-user stratumd processes** (one process per logged-in user; CORVUS-DESIGN §3 D4). The text below describes the OS-INTEGRATION.md-style sequence; CORVUS-DESIGN §3 D4 is the authoritative version for v1.0 Thylacine.
+
 Canonical boot sequence per `stratum/v2/docs/OS-INTEGRATION.md §4`:
 
 ```
@@ -1710,13 +1726,21 @@ File access control: standard Unix DAC (owner/group/other × rwx bits). This mat
 
 Capabilities can only be reduced via `rfork`. Elevation requires the v2.0 factotum mechanism (§15.4).
 
+**No UID 0 in v1.0** (per CORVUS-DESIGN.md §3 D5). Admin authority ("hostowner") is held by whoever holds the system passphrase + is console-attached. Privileged operations gate on `CAP_HOSTOWNER` — granted to a Proc only after corvus verifies the system passphrase from a console-attached session. No process runs as UID 0 by default; numeric UIDs are still allocated per user but no UID has implicit elevated privilege.
+
 ### 15.3 Capability set (v1.0)
 
-Per §7.7. Coarse-grained.
+Per §7.7. Coarse-grained. v1.0 adds (per CORVUS-DESIGN.md §3 D5 + §4.1):
+- `CAP_HOSTOWNER` — granted only after corvus verifies the system passphrase from a console-attached Proc; required for admin verbs (user-create, snapshot, kernel-update).
+- `CAP_LOCK_PAGES` — required for `sys_mlockall`. Granted to corvus + per-user stratumd processes.
+- `CAP_CSPRNG_READ` — required for `sys_getrandom`. Granted broadly (most userspace processes have legitimate use for randomness).
+- Console-attachment bit on the Proc capability set — set by joey for console-login chains; never propagated across territory boundaries.
 
 ### 15.4 Capability elevation via factotum — DESIGNED-NOT-IMPLEMENTED for v2.0
 
 **Status**: design committed at Phase 0; implementation is post-v1.0.
+
+**Relationship to corvus (v1.0)**: corvus handles **key management** (passphrases, DEKs, per-user authentication) per CORVUS-DESIGN.md. The factotum-style **capability elevation** described below is a separate v2.0 concern. The v1.0 hostowner model (CORVUS-DESIGN §3 D5) covers the elevated-admin case via console + system passphrase; factotum extends to fine-grained per-syscall capability grants.
 
 **Motivation**: setuid is a security disaster — Plan 9 didn't have it; modern security thinking (capability-based, polkit-style) all agrees. But POSIX programs sometimes need elevation (e.g., `sudo`, `mount`, `ping` historically). v1.0 has no elevation; v2.0 adds factotum-mediated elevation.
 
@@ -2860,6 +2884,8 @@ The complete list of load-bearing invariants. Source for `VISION.md §8`. Each m
 
 These are the project's promises. Every one has a spec or a runtime check or a compile-time assertion. None are policy-only.
 
+**Corvus invariants (C-1..C-20)** are enumerated separately in `CORVUS-DESIGN.md §9` — they govern the key agent's runtime + audit guarantees (mlock'd pages, session ownership monotonicity, audit log encryption, etc.). Cross-referenced here so the global invariant surface is discoverable; the canonical text lives in CORVUS-DESIGN.
+
 ---
 
 ## 29. Glossary
@@ -2880,8 +2906,10 @@ These are the project's promises. Every one has a spec or a runtime check or a c
 | GIC | Generic Interrupt Controller (ARM) |
 | Halcyon | Thylacine's graphical scroll-buffer shell |
 | Handle | Typed unforgeable token referencing a kernel object |
+| Hostowner | Thylacine's admin-authority model (no UID 0). See CORVUS-DESIGN.md §3 D5. |
 | IPI | Inter-Processor Interrupt |
-| janus | Stratum's key agent (also runs on Thylacine) |
+| janus | Stratum's key agent; design influence on corvus but not ported. See CORVUS-DESIGN.md §2. |
+| corvus | Thylacine's key agent (v1.0); userspace daemon serving `/srv/corvus/`. See CORVUS-DESIGN.md. |
 | KASLR | Kernel ASLR |
 | KObj | Kernel Object (e.g., `KObj_MMIO`, `KObj_Burrow`) |
 | LSE | Large System Extensions (ARMv8.1+ atomic instructions) |
