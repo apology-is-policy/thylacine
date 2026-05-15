@@ -436,6 +436,74 @@ small (<200 distinct) but every bug class reaches its violation in ≤ 6 steps
 - `ARCHITECTURE.md §10.2` + `§14` + `§28` — Thylacine-side dialect +
   integration + invariants.
 
+## corvus.tla — P5-corvus-spec (Phase 5 corvus daemon; spec-first)
+
+Status: **landed at P5-corvus-spec**. Models the corvus key-agent
+daemon's session state machine + capability arithmetic + authorization
+surface. Pins CORVUS-DESIGN.md §9 invariants C-3 (session user-binding
+immutable), C-7 (unwrap refused for non-owner), C-11 (session-cap ×
+Proc-cap orthogonal authorization), and the §5.5
+HostownerRequiresConsole rule. Implementation lands at P5-corvus-
+bringup-a onward; this spec is the contract.
+
+State universe at the model's cfg: Procs={p1,p2}, Users={u1,u2}, one
+ProcCap (CapHostowner). Datasets identified by their owner user
+(`Datasets == Users`, `DatasetOwner(d) == d`) — sidesteps TLC's config-
+file limitation on record/function constants; the convention matches
+the live system (`thylacine/users/<name>` dataset path).
+
+Safety: TLC-clean — 141109 states generated, 23652 distinct, depth 18,
+<1s wall time.
+
+| Config | Flag | Invariant | Result | Distinct | Depth |
+|---|---|---|---|---|---|
+| `corvus.cfg`                              | all flags FALSE | `Invariants` | clean | 23652 | 18 |
+| `corvus_buggy_unwrap_cross_user.cfg`      | `BUGGY_UNWRAP_CROSS_USER`       | `UnwrapOwnerOnly`        | violation | 32 | 4 |
+| `corvus_buggy_auth_binding_mutate.cfg`    | `BUGGY_AUTH_BINDING_MUTATE`     | `SessionUserImmutable`   | violation | 34 | 4 |
+| `corvus_buggy_admin_without_proc_cap.cfg` | `BUGGY_ADMIN_WITHOUT_PROC_CAP`  | `AdminRequiresProcCap`   | violation | 34 | 4 |
+| `corvus_buggy_elevate_without_console.cfg`| `BUGGY_ELEVATE_WITHOUT_CONSOLE` | `HostownerRequiresConsole` | violation | 44 | 4 |
+| `corvus_buggy_transfer_rebind.cfg`        | `BUGGY_TRANSFER_REBIND`         | `SessionUserImmutable`   | violation | 32 | 4 |
+
+The session identity model uses (creation_proc, bound_user) as the
+immutable pair, with owner_proc as a separate field that mutates on
+SessionTransfer. This separation lets SessionUserImmutable catch BOTH
+in-place mutation (BuggyAuthBindingMutate) AND mutation-during-transfer
+(BuggyTransferRebind) by checking the immutable pair has a matching
+origin record, regardless of which Proc currently owns the session
+Spoor.
+
+Spec actions ↔ impl mapping (impl filled in at P5-corvus-bringup):
+
+| Spec action | Source location (target) | Notes |
+|---|---|---|
+| `MarkConsoleAttached(p)` | `kernel/proc.c::proc_alloc` (joey-spawn path; bit set on console-login child) | The kernel-side console-attachment bit is set at fork time by joey when forking /sbin/login and only /sbin/login. Per CORVUS-DESIGN §5.5 last paragraph: not propagatable across rfork to a different territory. |
+| `AuthSuccess(p, u)` | `usr/corvus/src/verbs/auth.rs::handle_auth_success` | AUTH verb (verb_id=1). Argon2id → KEK → unwrap hybrid keypair → session token mint + bind to peer Proc identity. Spec models the resulting session record; in-RAM secret discipline (C-1/C-2/C-5) is runtime, not state-machine. |
+| `SessionClose(p)` | `usr/corvus/src/verbs/session.rs::handle_session_close` + Proc-exit cleanup path | SESSION_CLOSE verb (verb_id=3) or Spoor-close-driven cleanup. Clears in-RAM secrets. |
+| `SessionTransfer(src, dst)` | `usr/corvus/src/transport/spoor_peer.rs::on_peer_change` | Triggered when the kernel reports a new peer Proc identity on /srv/corvus/'s Spoor (9P RIGHT_TRANSFER). MUST copy bound_user from existing session; MUST NOT take user from request fields. |
+| `AdminElevate(p)` | `usr/corvus/src/verbs/admin.rs::handle_admin_elevate` | ADMIN_ELEVATE verb (verb_id=7). Reads /srv/corvus/peer/proc for console-attachment bit; argon2id system passphrase; on success grants CapHostowner via kernel cap-bump syscall. |
+| `Unwrap(p, d)` | `usr/corvus/src/verbs/unwrap.rs::handle_unwrap` | UNWRAP verb (verb_id=4). Reads session.bound_user, dataset-ownership table, compares; refuses with PermissionDenied if mismatch. |
+| `AdminVerb(p)` | `usr/corvus/src/verbs/admin.rs::dispatch_admin_verb` | USER_CREATE / USER_DELETE / ROTATE_KEY (verb_id=5,6,9). Reads peer Proc cap set via kernel; refuses without CapHostowner. NO session.bound_user check. |
+| `BuggyUnwrapCrossUser` | (none — bug class statically prevented by `assert!(session.bound_user == owner)` in unwrap.rs) | Impl-side: the equality check is a single condition; bug shapes are short-circuit, wrong-direction, or wrong-fields. Code review + audit catches; spec models the consequence. |
+| `BuggyAuthBindingMutate` | (none — bug class prevented by struct's immutable bound_user field) | Impl-side: Session struct's bound_user is `final` / non-`mut`; bug requires changing the API surface. |
+| `BuggyAdminWithoutProcCap` | (none — bug class prevented by `kernel.has_cap(peer_pid, CapHostowner)` gate) | Same shape as BuggyUnwrapCrossUser: single check; bug shapes are missing-check or wrong-cap. |
+| `BuggyElevateWithoutConsole` | (none — bug class prevented by `peer_console_bit?` precondition) | Same shape; bug = missing precondition. |
+| `BuggyTransferRebind` | (none — bug class prevented by the SessionTransfer impl COPYING bound_user from src) | Critical impl discipline: the transfer path MUST take bound_user from the existing session by reference, not from any request-supplied field. |
+
+Spec invariants ↔ impl enforcement:
+
+| Spec invariant | Source enforcement |
+|---|---|
+| `SessionUserImmutable` (C-3) | Session struct's bound_user is non-mut after construction. SessionTransfer copies the field, never accepts an override. |
+| `UnwrapOwnerOnly` (C-7) | The single comparison `session.bound_user == dataset_ownership_table.owner_of(dataset)` in handle_unwrap. |
+| `AdminRequiresProcCap` (C-11 Proc-cap path) | The single check `kernel.peer_has_cap(CapHostowner)` in dispatch_admin_verb. |
+| `HostownerRequiresConsole` (§5.5) | The single check `peer_proc.console_attached?` in handle_admin_elevate. Combined with the kernel-side discipline that console_attached is never propagatable across rfork. |
+
+References:
+- `docs/CORVUS-DESIGN.md` — full design + invariant numbering.
+- `docs/STRATUM-API-V1.md` — bilateral contract with Stratum (A3
+  corvus-validated UNWRAP wire is the wire used by Spec UNWRAP).
+- `docs/ARCHITECTURE.md §15` — capabilities + CAP_HOSTOWNER addition.
+
 ## poll.tla — Phase 5 (planned)
 
 (Stub. Will pin: wait/wake state machine, missed-wakeup-freedom — ARCH §28 I-9.)
