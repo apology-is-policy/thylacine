@@ -3,6 +3,13 @@
 version = 4
 
 [[package]]
+name = "corvus"
+version = "0.1.0"
+dependencies = [
+ "libthyla-rs",
+]
+
+[[package]]
 name = "hello-rs"
 version = "0.1.0"
 dependencies = [

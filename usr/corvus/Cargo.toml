@@ -1,0 +1,17 @@
+[package]
+name = "corvus"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "corvus"
+path = "src/main.rs"
+
+[dependencies]
+# libthyla-rs provides _start + #[panic_handler] + SVC wrappers. corvus
+# uses t_putstr (banner) + t_mlockall + t_set_dumpable + t_set_traceable
+# + t_getrandom + t_explicit_bzero (the P5-corvus-syscalls hardening
+# surface).
+libthyla-rs = { path = "../lib/libthyla-rs" }

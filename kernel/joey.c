@@ -138,9 +138,17 @@ void joey_run(void) {
         .blob_size = blob_size,
     };
 
-    int pid = rfork(RFPROC, joey_thunk, &args);
+    // P5-corvus-bringup-a: joey is init; it needs to grant
+    // CAP_LOCK_PAGES + CAP_CSPRNG_READ to /sbin/corvus (and similarly
+    // delegated caps to future child Procs). Plain rfork() would give
+    // joey CAP_NONE; spawn-with-caps's AND would then return 0 for
+    // every cap bit. rfork_with_caps(CAP_ALL) gives joey the full v1.0
+    // capability ceiling so it can grant any subset to children. This
+    // matches the production-init pattern: joey is the trusted
+    // delegate that distributes caps per child's role.
+    int pid = rfork_with_caps(RFPROC, joey_thunk, &args, CAP_ALL);
     if (pid < 0) {
-        extinction("joey: rfork(RFPROC, joey_thunk) failed");
+        extinction("joey: rfork_with_caps(RFPROC, joey_thunk) failed");
     }
 
     int status = -42;

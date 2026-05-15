@@ -62,6 +62,12 @@ enum {
 // SYS_GETRANDOM flags (mirror kernel/include/thylacine/syscall.h).
 #define T_GRND_NONBLOCK   1u
 
+// CAP_* bits — MUST mirror kernel/include/thylacine/caps.h. Used as
+// `cap_mask` arg to t_spawn_with_caps / t_spawn_full.
+#define T_CAP_HW_CREATE   (1UL << 0)
+#define T_CAP_LOCK_PAGES  (1UL << 1)
+#define T_CAP_CSPRNG_READ (1UL << 2)
+
 // Maximum binary name length for t_spawn (mirror SYS_SPAWN_NAME_MAX).
 #define T_SPAWN_NAME_MAX  64u
 

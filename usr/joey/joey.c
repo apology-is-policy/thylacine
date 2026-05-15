@@ -62,5 +62,49 @@ int main(void) {
     }
 
     t_putstr("joey: /hello reaped status=0; orchestration verified\n");
+
+    // P5-corvus-bringup-a: spawn /sbin/corvus (skeleton) with the v1.0
+    // corvus cap subset. The cap_mask is AND'd with joey's caps inside
+    // rfork_with_caps; joey was forked from kproc with CAP_ALL, so the
+    // mask passes through unchanged. The skeleton runs the four
+    // hardening syscalls (mlockall + set_dumpable + set_traceable +
+    // getrandom-seeded probe), wipes its probe entropy, prints
+    // readiness, and exits 0. Non-zero exit signals a hardening
+    // failure that joey surfaces.
+    //
+    // At later sub-chunks corvus becomes a long-lived daemon serving
+    // /srv/corvus/. The orchestration contract here — joey provides
+    // CAP_LOCK_PAGES + CAP_CSPRNG_READ, corvus does its own hardening
+    // — is the production shape. The skeleton just exits early so
+    // joey can be wait_pid'd and the boot test framework can verify
+    // the whole composition.
+    const char corvus_name[] = "corvus";
+    long corvus_pid = t_spawn_with_caps(
+        corvus_name, sizeof(corvus_name) - 1,
+        T_CAP_LOCK_PAGES | T_CAP_CSPRNG_READ);
+    if (corvus_pid <= 0) {
+        t_putstr("joey: t_spawn_with_caps(\"corvus\") FAILED\n");
+        return 1;
+    }
+    t_putstr("joey: spawned /sbin/corvus pid=");
+    t_putstr(itoa_dec(corvus_pid, buf, sizeof(buf)));
+    t_putstr("\n");
+
+    int corvus_status = -1;
+    long corvus_reaped = t_wait_pid(&corvus_status);
+    if (corvus_reaped != corvus_pid) {
+        t_putstr("joey: t_wait_pid(corvus) returned wrong pid=");
+        t_putstr(itoa_dec(corvus_reaped, buf, sizeof(buf)));
+        t_putstr("\n");
+        return 1;
+    }
+    if (corvus_status != 0) {
+        t_putstr("joey: /sbin/corvus exited non-zero status=");
+        t_putstr(itoa_dec(corvus_status, buf, sizeof(buf)));
+        t_putstr("\n");
+        return 1;
+    }
+    t_putstr("joey: /sbin/corvus reaped status=0; hardening verified\n");
+
     return 0;
 }

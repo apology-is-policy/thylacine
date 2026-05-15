@@ -32,14 +32,29 @@ use core::panic::PanicInfo;
 // Syscall numbers — MUST mirror kernel/include/thylacine/syscall.h.
 // =============================================================================
 
-pub const T_SYS_EXITS: u64        = 0;
-pub const T_SYS_PUTS: u64         = 1;
-pub const T_SYS_MMIO_CREATE: u64  = 2;
-pub const T_SYS_IRQ_CREATE: u64   = 3;
-pub const T_SYS_IRQ_WAIT: u64     = 4;
-pub const T_SYS_MMIO_MAP: u64     = 5;
-pub const T_SYS_DMA_CREATE: u64   = 6;
-pub const T_SYS_DMA_MAP: u64      = 7;
+pub const T_SYS_EXITS: u64           = 0;
+pub const T_SYS_PUTS: u64            = 1;
+pub const T_SYS_MMIO_CREATE: u64     = 2;
+pub const T_SYS_IRQ_CREATE: u64      = 3;
+pub const T_SYS_IRQ_WAIT: u64        = 4;
+pub const T_SYS_MMIO_MAP: u64        = 5;
+pub const T_SYS_DMA_CREATE: u64      = 6;
+pub const T_SYS_DMA_MAP: u64         = 7;
+// P5-corvus-syscalls (kernel side at 0db0dcf/d10d4ee). v1.0 hardening
+// syscalls used by /sbin/corvus startup.
+pub const T_SYS_MLOCKALL: u64        = 16;
+pub const T_SYS_SET_DUMPABLE: u64    = 17;
+pub const T_SYS_SET_TRACEABLE: u64   = 18;
+pub const T_SYS_EXPLICIT_BZERO: u64  = 19;
+pub const T_SYS_GETRANDOM: u64       = 20;
+
+// =============================================================================
+// Caps — MUST mirror CAP_* bits in kernel/include/thylacine/caps.h.
+// =============================================================================
+
+pub const T_CAP_HW_CREATE: u64   = 1 << 0;
+pub const T_CAP_LOCK_PAGES: u64  = 1 << 1;
+pub const T_CAP_CSPRNG_READ: u64 = 1 << 2;
 
 // =============================================================================
 // Rights — MUST mirror RIGHT_* bits in kernel/include/thylacine/handle.h.
@@ -237,6 +252,130 @@ pub unsafe fn t_dma_map(handle: i64, vaddr: u64, prot: u32) -> i64 {
         in("x1") vaddr,
         in("x2") prot as u64,
         in("x8") T_SYS_DMA_MAP,
+        options(nostack)
+    );
+    x0
+}
+
+// =============================================================================
+// P5-corvus-syscalls — v1.0 hardening syscalls.
+// =============================================================================
+//
+// Implemented at P5-corvus-syscalls (commit 0db0dcf/d10d4ee). These five
+// wrappers are the Rust mirror of the C-side stubs in
+// usr/lib/libt/include/thyla/syscall.h. Used by /sbin/corvus (and any
+// future security-sensitive daemon) at startup.
+
+// t_mlockall — pin all currently-mapped and future-mapped pages so they
+// cannot be evicted to swap or any future paging tier. `flags` is
+// reserved at v1.0 (must be 0). Sets PROC_FLAG_MLOCKED on the Proc.
+//
+// Requires CAP_LOCK_PAGES in proc->caps. Returns 0 on success, -1 on
+// missing cap or non-zero flags. Once set, the flag is permanent for
+// the Proc's lifetime — there's no t_munlockall at v1.0.
+#[inline(always)]
+pub unsafe fn t_mlockall(flags: u64) -> i64 {
+    let mut x0: i64 = flags as i64;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x8") T_SYS_MLOCKALL,
+        options(nostack)
+    );
+    x0
+}
+
+// t_set_dumpable — control core-dump permission for the calling Proc.
+// One-way to 0: t_set_dumpable(0) sets PROC_FLAG_NODUMP (permanent);
+// t_set_dumpable(1) on a Proc that already has the flag is REFUSED
+// (kernel returns -1). Returns 0 on first successful set-to-0; -1 on
+// any other input or attempted re-enable.
+//
+// Core dumps don't exist at v1.0 — the flag is forward-compat
+// scaffolding. When core dumps land, the kernel-side dump path must
+// check this flag and refuse to dump a Proc with NODUMP set.
+#[inline(always)]
+pub unsafe fn t_set_dumpable(dumpable: u64) -> i64 {
+    let mut x0: i64 = dumpable as i64;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x8") T_SYS_SET_DUMPABLE,
+        options(nostack)
+    );
+    x0
+}
+
+// t_set_traceable — control debug-Spoor attach permission. Same
+// one-way-to-0 semantics as t_set_dumpable. Sets PROC_FLAG_NOTRACE.
+//
+// Debug Spoors don't exist at v1.0 — the flag is forward-compat
+// scaffolding. When debug-Spoor attach lands, the kernel-side attach
+// path must check this flag and refuse to attach to a Proc with
+// NOTRACE set.
+#[inline(always)]
+pub unsafe fn t_set_traceable(traceable: u64) -> i64 {
+    let mut x0: i64 = traceable as i64;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x8") T_SYS_SET_TRACEABLE,
+        options(nostack)
+    );
+    x0
+}
+
+// t_explicit_bzero — compiler-barrier'd memset to zero of `len` bytes at
+// `buf`. The kernel performs a per-byte uaccess_store_u8 loop which the
+// optimizer cannot elide. Returns 0 on success, -1 on validation
+// failure (buf in kernel-VA, len > SYS_RW_MAX, mid-stream fault).
+//
+// Use this for in-RAM secrets immediately after they're consumed —
+// passphrase buffers, derived KEKs, unwrapped DEKs. Without it, the
+// compiler's dead-store elimination can remove a plain `*buf = 0; *buf
+// = 0; ...` loop entirely.
+//
+// Safety: caller must ensure `buf` points to at least `len` writable
+// bytes in valid user-VA memory.
+#[inline(always)]
+pub unsafe fn t_explicit_bzero(buf: *mut u8, len: usize) -> i64 {
+    let mut x0: i64 = buf as i64;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") len as u64,
+        in("x8") T_SYS_EXPLICIT_BZERO,
+        options(nostack)
+    );
+    x0
+}
+
+// t_getrandom — read `len` random bytes into `buf` from the kernel
+// CSPRNG. `flags` is reserved at v1.0 (must be 0). Caller must hold
+// CAP_CSPRNG_READ. Per-call cap is SYS_RW_MAX (4 KiB) at v1.0.
+//
+// Returns `len` on success, -1 on cap missing / non-zero flags /
+// oversized len / mid-stream uaccess fault. The kernel CSPRNG is
+// seeded from ARM RNDR at boot; if RNDR is unavailable or returns
+// failure, getrandom returns -1 (caller must NOT proceed with
+// guessable entropy).
+//
+// On mid-stream uaccess failure (kernel/syscall.c::sys_getrandom_handler
+// per R15-d F237 close), the kernel best-effort zeros the partial range
+// before returning -1, so a caller seeing -1 should still NOT trust the
+// buffer's prior contents.
+//
+// Safety: caller must ensure `buf` points to at least `len` writable
+// bytes in valid user-VA memory + hold CAP_CSPRNG_READ.
+#[inline(always)]
+pub unsafe fn t_getrandom(buf: *mut u8, len: usize, flags: u64) -> i64 {
+    let mut x0: i64 = buf as i64;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") len as u64,
+        in("x2") flags,
+        in("x8") T_SYS_GETRANDOM,
         options(nostack)
     );
     x0
