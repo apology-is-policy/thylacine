@@ -775,6 +775,10 @@ static s64 sys_attach_9p_handler(u64 tx_fd_raw, u64 rx_fd_raw,
 
     // Validate aname length cap.
     if (aname_len > SYS_ATTACH_ANAME_MAX)             return -1;
+    // F239: n_uname is 9P2000.L's u32 numeric uid field; reject values
+    // that would silently truncate to u32. Pre-fix the syscall did
+    // `(u32)n_uname` blindly, masking high bits.
+    if (n_uname > (u64)0xFFFFFFFFu)                   return -1;
     // Validate user-VA range when aname_len > 0; zero-length aname
     // is permitted (a zero-length attach name is legal per 9P2000.L).
     if (aname_len > 0 && !sys_validate_user_buf(aname_va, aname_len))
@@ -1107,7 +1111,19 @@ static s64 sys_getrandom_handler(u64 buf_va, u64 len, u64 flags_raw) {
     if (got != (long)len)                            return -1;
 
     for (u64 i = 0; i < len; i++) {
-        if (uaccess_store_u8(buf_va + i, scratch[i]) != 0) return -1;
+        if (uaccess_store_u8(buf_va + i, scratch[i]) != 0) {
+            // F237: partial-fault scrubbing. Entropy was already written
+            // for bytes [0..i); a caller observing -1 must not be able
+            // to read those bytes as valid CSPRNG output. Zero the
+            // partial range (best-effort — same uaccess path could fail
+            // again; the kernel's discipline is best-effort, not atomic).
+            // Also zero the scratch to drop kernel-side state.
+            for (u64 j = 0; j < i; j++) {
+                (void)uaccess_store_u8(buf_va + j, 0);
+            }
+            for (u64 j = 0; j < len; j++) scratch[j] = 0;
+            return -1;
+        }
     }
     return (s64)len;
 }
@@ -1688,10 +1704,15 @@ static s64 sys_wait_pid_handler(u64 status_out_va) {
         const u8 *bytes = (const u8 *)&status;
         for (u64 i = 0; i < sizeof(int); i++) {
             if (uaccess_store_u8(status_out_va + i, bytes[i]) != 0) {
-                // Status write failed but the child is already reaped —
-                // the PID return is still correct. Return -1 so userspace
-                // observes the partial-fault explicitly rather than
-                // silently dropping the status.
+                // F240: status write failed after reap; the child is
+                // gone but partial bytes may be visible to userspace.
+                // Best-effort scrub the partial range to zero so the
+                // caller doesn't read torn status (uaccess_store_u8 of
+                // zero may itself fail; ignore — the caller saw -1 and
+                // must not trust the status buffer either way).
+                for (u64 j = 0; j < i; j++) {
+                    (void)uaccess_store_u8(status_out_va + j, 0);
+                }
                 return -1;
             }
         }

@@ -73,7 +73,11 @@ struct Spoor *dev9p_attach_client(struct p9_client *client, u32 root_fid) {
     if (!c) return NULL;
     struct dev9p_priv *p = priv_alloc(client, root_fid, /*fid_owned=*/false);
     if (!p) {
-        spoor_unref(c);
+        // F238: uniform clunk-on-error (dev9p_close handles NULL c->aux
+        // safely via priv_of's magic check). Pre-fix used spoor_unref;
+        // both paths drop ref=1 → free in this case, but clunk is the
+        // canonical Plan-9-shape teardown.
+        spoor_clunk(c);
         return NULL;
     }
     c->aux = p;
