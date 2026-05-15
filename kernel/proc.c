@@ -498,6 +498,17 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
     caps_t parent_caps = __atomic_load_n(&parent->caps, __ATOMIC_ACQUIRE);
     child->caps = parent_caps & caps_mask;
 
+    // P5-hostowner-a: child->proc_flags stays 0 (KP_ZERO from
+    // proc_alloc) — deliberately NOT copied from the parent. In
+    // particular PROC_FLAG_CONSOLE_ATTACHED is never conferred by
+    // rfork: console-attachment grows ONLY via an explicit
+    // proc_mark_console_attached (specs/corvus.tla — console_attached
+    // grows solely via the MarkConsoleAttached action). A child of a
+    // console-attached Proc is therefore NOT console-attached unless
+    // something marks it explicitly; this is what stops a future
+    // remote-login (sshd) chain from inheriting the local-console
+    // trust anchor that gates hostowner elevation.
+
     // P2-Eb + P5-attach-mount: clone parent's territory into the child.
     // Maps to the spec's ForkClone action — child gets a deep copy of
     // parent's bindings AND mounts; each cloned mount entry takes a
@@ -547,6 +558,40 @@ int rfork(unsigned flags, void (*entry)(void *), void *arg) {
 int rfork_with_caps(unsigned flags, void (*entry)(void *), void *arg,
                     caps_t caps_mask) {
     return rfork_internal(flags, entry, arg, caps_mask);
+}
+
+// =============================================================================
+// P5-hostowner-a: console attachment.
+// =============================================================================
+
+void proc_mark_console_attached(struct Proc *p) {
+    if (!p)                    extinction("proc_mark_console_attached(NULL)");
+    if (p->magic != PROC_MAGIC)
+        extinction("proc_mark_console_attached on corrupted Proc");
+    // Console-attachment is trust-conferring — it is the gate a future
+    // CAP_HOSTOWNER grant checks. Refuse to stamp a Proc that is not
+    // ALIVE so a caller bug (marking a dying/zombie descriptor) surfaces
+    // loudly rather than silently stamping trust on it.
+    if (p->state != PROC_STATE_ALIVE)
+        extinction("proc_mark_console_attached on non-ALIVE Proc");
+    // One-way set, idempotent — the console bit is never cleared (a Proc
+    // once in the console-login chain stays marked for life;
+    // specs/corvus.tla: console_attached only grows). Maps to the spec's
+    // MarkConsoleAttached action. The |= is non-atomic: sound under the
+    // v1.0 single-thread-per-Proc invariant — a Proc's proc_flags is
+    // written only by that Proc's own thread/chain (here, and the
+    // SYS_SET_DUMPABLE / SYS_SET_TRACEABLE / SYS_MLOCKALL handlers). The
+    // multi-threaded-Proc lift must convert every proc_flags writer to
+    // __atomic_or_fetch.
+    p->proc_flags |= PROC_FLAG_CONSOLE_ATTACHED;
+}
+
+bool proc_is_console_attached(const struct Proc *p) {
+    // Fail-closed: a NULL or corrupted Proc reads as NOT console-
+    // attached — this query gates hostowner elevation, so the safe
+    // default on a bad pointer is "no console, no elevation."
+    if (!p || p->magic != PROC_MAGIC) return false;
+    return (p->proc_flags & PROC_FLAG_CONSOLE_ATTACHED) != 0;
 }
 
 void exits(const char *msg) {

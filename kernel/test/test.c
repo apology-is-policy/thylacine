@@ -58,6 +58,7 @@ void test_proc_rfork_stress_1000(void);
 void test_proc_cascading_rfork_wait_smoke(void);
 void test_proc_cascading_rfork_stress(void);
 void test_proc_orphan_reparent_smoke(void);
+void test_proc_console_attached_smoke(void);
 void test_namespace_bind_smoke(void);
 void test_namespace_cycle_rejected(void);
 void test_namespace_fork_isolated(void);
@@ -519,6 +520,7 @@ struct test_case g_tests[] = {
                                                                            false, NULL },
     { "proc.cascading_rfork_stress",   test_proc_cascading_rfork_stress,   false, NULL },
     { "proc.orphan_reparent_smoke",    test_proc_orphan_reparent_smoke,    false, NULL },
+    { "proc.console_attached_smoke",   test_proc_console_attached_smoke,   false, NULL },
     { "territory.bind_smoke",          test_namespace_bind_smoke,          false, NULL },
     { "territory.cycle_rejected",      test_namespace_cycle_rejected,      false, NULL },
     { "territory.fork_isolated",       test_namespace_fork_isolated,       false, NULL },

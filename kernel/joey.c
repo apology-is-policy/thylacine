@@ -88,6 +88,17 @@ static void joey_thunk(void *arg) {
     struct Proc *p = t->proc;
     if (!p) extinction("joey_thunk: no proc");
 
+    // P5-hostowner-a: joey is the root of the console-login chain — it
+    // owns /dev/cons and is the local-console trust anchor. Stamp the
+    // console-attachment bit here, in joey's own context, before exec
+    // (race-free: joey's own thread setting joey's own Proc flag). joey
+    // is the sole console-attached Proc at v1.0; P5-login will extend
+    // the chain by marking the per-user shells it spawns. Maps to
+    // specs/corvus.tla MarkConsoleAttached.
+    proc_mark_console_attached(p);
+    if (!proc_is_console_attached(p))
+        extinction("joey_thunk: console-attachment stamp did not take");
+
     u64 entry = 0, sp = 0;
     int rc = exec_setup(p, ia->blob, ia->blob_size, &entry, &sp);
     if (rc != 0) {

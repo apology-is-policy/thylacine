@@ -8,11 +8,13 @@
 // them post-creation.
 //
 // Initial allocation: kproc (PID 0) starts with CAP_ALL — the kernel
-// is the root of trust. rfork'd children inherit the empty mask at
-// v1.0 (Phase 5+ adds a capability-grant syscall for parent→child
-// delegation). Drivers (P4-Ic) will be granted CAP_HW_CREATE via that
-// future syscall; at v1.0 the only proc that creates hw handles is
-// kproc-context kernel test code.
+// is the root of trust. Plain rfork() confers CAP_NONE; rfork_with_caps
+// confers (parent->caps & caps_mask) — a subset of the parent's caps
+// (the v1.0 boot path uses it to hand joey CAP_ALL so joey can delegate
+// caps to the children it spawns). A userspace capability-grant syscall
+// for parent→child delegation is a Phase 5+ item. Drivers (P4-Ic) are
+// spawned with CAP_HW_CREATE via rfork_with_caps; at v1.0 the only proc
+// that creates hw handles is kproc-context kernel test code.
 
 #ifndef THYLACINE_CAPS_H
 #define THYLACINE_CAPS_H
@@ -41,10 +43,21 @@ typedef u64 caps_t;
 // it from specific procs).
 #define CAP_CSPRNG_READ (1ull << 2)
 
+// CAP_HOSTOWNER — admin authority (CORVUS-DESIGN.md §3 D5). Gates the
+// corvus admin verbs (user-create / user-delete / snapshot / kernel-
+// update). Unlike the caps above, CAP_HOSTOWNER is *elevation-only*:
+// it is deliberately NOT part of CAP_ALL, so no Proc — not even kproc —
+// holds it at creation, and rfork's mask-AND can never confer it. The
+// only path to CAP_HOSTOWNER is corvus's ADMIN_ELEVATE verb, which
+// grants it to a Proc after verifying the system passphrase from a
+// console-attached session (specs/corvus.tla AdminElevate; the
+// HostownerRequiresConsole invariant ties it to the kernel-stamped
+// PROC_FLAG_CONSOLE_ATTACHED bit — see <thylacine/proc.h>).
+// P5-hostowner-a defines the bit + the console-attachment gate; the
+// grant mechanism + the ADMIN_ELEVATE verb land at P5-hostowner-b.
+#define CAP_HOSTOWNER   (1ull << 3)
+
 // Reserved for Phase 5+ (one bit per capability domain):
-//   CAP_HOSTOWNER    — admin authority (CORVUS-DESIGN §3 D5); granted
-//                      only after corvus verifies the system passphrase
-//                      from a console-attached Proc. Lands at P5-hostowner.
 //   CAP_NS_MOUNT     — bind/mount in /proc and /ctl (kernel admin Devs).
 //   CAP_NS_BIND      — bind in any namespace (forward-looking).
 //   CAP_SIGNAL_ANY   — signal any Proc (vs. signal-children-only default).
@@ -53,16 +66,20 @@ typedef u64 caps_t;
 //   CAP_REBOOT       — initiate kernel reboot / extinction.
 // Each lands when the corresponding subsystem matures.
 
-// CAP_ALL — bitmask of every defined capability. kproc gets this at
-// proc_init; future updates that add bits MUST be added here too (the
-// static_assert below catches drift).
+// CAP_ALL — the FORK-GRANTABLE capability ceiling: every capability a
+// Proc may legitimately hold from creation, and the mask kproc gets at
+// proc_init. Elevation-only capabilities (CAP_HOSTOWNER) are
+// deliberately excluded — see CAP_HOSTOWNER above. A new fork-grantable
+// CAP_* bit MUST be added here; an elevation-only one MUST NOT.
 #define CAP_ALL         (CAP_HW_CREATE | CAP_LOCK_PAGES | CAP_CSPRNG_READ)
 
-// _Static_assert pins CAP_ALL — adding a new CAP_* bit requires bumping
-// this expression so kproc's initial mask includes it.
+// _Static_assert pins CAP_ALL — adding a new fork-grantable CAP_* bit
+// requires bumping this expression so kproc's initial mask includes it.
 _Static_assert(CAP_ALL == (CAP_HW_CREATE | CAP_LOCK_PAGES | CAP_CSPRNG_READ),
-               "caps.h drift: when adding a new CAP_* bit, update CAP_ALL "
-               "so kproc's initial mask reflects the new capability domain");
+               "caps.h drift: when adding a new FORK-GRANTABLE CAP_* bit, "
+               "update CAP_ALL so kproc's initial mask reflects it. "
+               "Elevation-only caps (CAP_HOSTOWNER) are deliberately "
+               "excluded from CAP_ALL.");
 
 // CAP_NONE — empty capability mask. The default for rfork'd children
 // at v1.0 (Phase 5+ inherits parent's mask AND'd with rfork's caps_mask

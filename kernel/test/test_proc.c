@@ -47,12 +47,15 @@ void test_proc_rfork_stress_1000(void);
 void test_proc_cascading_rfork_wait_smoke(void);
 void test_proc_cascading_rfork_stress(void);
 void test_proc_orphan_reparent_smoke(void);
+void test_proc_console_attached_smoke(void);
 
 static volatile u32 g_proc_test_ran;
 static volatile u64 g_cpu_run_count[DTB_MAX_CPUS];
 static volatile u32 g_grandchild_ran;
 static volatile u32 g_grandchild_status_seen;
 static volatile u32 g_orphan_grandchild_ran;
+static volatile u32 g_console_child_attached;
+static volatile u32 g_console_parent_attached;
 
 static void proc_test_child_ok(void *arg) {
     (void)arg;
@@ -399,4 +402,106 @@ void test_proc_cascading_rfork_stress(void) {
         "cascading-stress: thread_total_created mismatch");
     TEST_ASSERT(thread_total_destroyed() - t_destroyed_before == 2 * ITERS,
         "cascading-stress: thread_total_destroyed mismatch (leak?)");
+}
+
+// =============================================================================
+// P5-hostowner-a: console attachment.
+// =============================================================================
+
+// rfork'd child entry: record whether this child inherited console-
+// attachment. It must NOT — PROC_FLAG_CONSOLE_ATTACHED is conferred
+// only by an explicit proc_mark_console_attached, never by rfork
+// (specs/corvus.tla: console_attached grows solely via MarkConsole-
+// Attached).
+static void console_attach_child_entry(void *arg) {
+    (void)arg;
+    struct Thread *t = current_thread();
+    struct Proc *self = t ? t->proc : NULL;
+    g_console_child_attached = proc_is_console_attached(self) ? 1u : 0u;
+    exits("ok");
+}
+
+// rfork'd intermediate entry: mark SELF console-attached, then rfork a
+// grandchild. The grandchild (console_attach_child_entry) must NOT
+// inherit the bit — proving rfork never propagates console-attachment
+// even from a parent that genuinely holds it. A buggy rfork_internal
+// that copied parent->proc_flags would fail this case (the kproc-rooted
+// case alone would not: kproc is un-attached, so a buggy copy of 0
+// still yields 0).
+static void console_attach_parent_entry(void *arg) {
+    (void)arg;
+    struct Thread *t = current_thread();
+    struct Proc *self = t ? t->proc : NULL;
+    if (!self) extinction("test: console parent has no proc");
+    proc_mark_console_attached(self);
+    g_console_parent_attached = proc_is_console_attached(self) ? 1u : 0u;
+
+    int gc_pid = rfork(RFPROC, console_attach_child_entry, NULL);
+    if (gc_pid <= 0) extinction("test: console grandchild rfork failed");
+    int gc_status = -1;
+    int reaped = wait_pid(&gc_status);
+    if (reaped != gc_pid)
+        extinction("test: console parent wait_pid returned wrong pid");
+    exits("ok");
+}
+
+// proc.console_attached_smoke
+//   Verifies the P5-hostowner-a console-attachment mechanism:
+//     * proc_is_console_attached(NULL) is false (fail-closed).
+//     * A fresh Proc is not console-attached.
+//     * proc_mark_console_attached sets the bit; it is idempotent.
+//     * A rfork'd child does NOT inherit the bit.
+void test_proc_console_attached_smoke(void) {
+    // Fail-closed: NULL reads as not-attached.
+    TEST_ASSERT(!proc_is_console_attached(NULL),
+        "proc_is_console_attached(NULL) must be false (fail-closed)");
+
+    // A fresh Proc is unattached; the mark sets it; the mark is a
+    // one-way set — idempotent, never cleared.
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    TEST_ASSERT(!proc_is_console_attached(p),
+        "a fresh Proc must not be console-attached");
+    proc_mark_console_attached(p);
+    TEST_ASSERT(proc_is_console_attached(p),
+        "proc_mark_console_attached must set the console bit");
+    proc_mark_console_attached(p);
+    TEST_ASSERT(proc_is_console_attached(p),
+        "proc_mark_console_attached must be idempotent (one-way set)");
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+
+    // rfork must NOT propagate the console bit. The child of the
+    // current (kproc-context) thread starts un-attached — pinning the
+    // spec rule that console_attached grows only via an explicit
+    // MarkConsoleAttached, so a future remote-login chain cannot
+    // inherit the local-console trust anchor.
+    g_console_child_attached = 0xFFu;
+    int child_pid = rfork(RFPROC, console_attach_child_entry, NULL);
+    TEST_ASSERT(child_pid > 0, "rfork failed");
+    int status = -1;
+    int reaped = wait_pid(&status);
+    TEST_EXPECT_EQ(reaped, child_pid, "wait_pid returned wrong pid");
+    TEST_EXPECT_EQ(status, 0, "console-attach child should exit clean");
+    TEST_EXPECT_EQ(g_console_child_attached, 0u,
+        "a rfork'd child must NOT inherit console-attachment");
+
+    // Non-propagation from a CONSOLE-ATTACHED parent. An intermediate
+    // Proc marks ITSELF console-attached, then rforks a grandchild; the
+    // grandchild must start un-attached. This is the case that fails
+    // against a buggy rfork_internal copying parent->proc_flags — the
+    // kproc-rooted case above would not (kproc is un-attached).
+    g_console_parent_attached = 0xFFu;
+    g_console_child_attached  = 0xFFu;
+    int parent_pid = rfork(RFPROC, console_attach_parent_entry, NULL);
+    TEST_ASSERT(parent_pid > 0, "rfork (console-attached parent) failed");
+    int pstatus = -1;
+    int preaped = wait_pid(&pstatus);
+    TEST_EXPECT_EQ(preaped, parent_pid,
+        "wait_pid returned wrong pid (console parent)");
+    TEST_EXPECT_EQ(pstatus, 0, "console-attached parent should exit clean");
+    TEST_EXPECT_EQ(g_console_parent_attached, 1u,
+        "the intermediate parent must be console-attached after self-mark");
+    TEST_EXPECT_EQ(g_console_child_attached, 0u,
+        "a grandchild of a console-attached parent must NOT inherit the bit");
 }

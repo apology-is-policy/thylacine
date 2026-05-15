@@ -142,11 +142,10 @@ struct Proc {
     //     syscall; this is structural).
     u64                caps;
 
-    // P5-corvus-syscalls: per-Proc flags set by the v1.0 hardening
-    // syscalls (CORVUS-DESIGN.md §4.1.1). Each is a one-way bit:
-    // userspace can SET (via the relevant syscall) but never clear.
-    // Zero-initialized at proc_alloc; defaults to "all permissions
-    // allowed, no mlock" — the bits are no-op-restrictions.
+    // P5-corvus-syscalls / P5-hostowner-a: per-Proc one-way flag bits.
+    // Zero-initialized at proc_alloc; once set, never cleared. Bits 0-2
+    // are set by the v1.0 hardening syscalls (CORVUS-DESIGN.md §4.1.1);
+    // bit 3 is kernel-stamped at fork time (not a syscall).
     //
     // PROC_FLAG_NODUMP   (bit 0) — set by SYS_SET_DUMPABLE(0). When set,
     //                              future core-dump paths must refuse
@@ -163,17 +162,32 @@ struct Proc {
     //                              future swap-out paths must skip
     //                              this Proc's pages. v1.0 has no
     //                              swap; same scaffolding pattern.
+    // PROC_FLAG_CONSOLE_ATTACHED (bit 3) — kernel-stamped (NOT a
+    //                              syscall) via proc_mark_console_-
+    //                              attached() on a Proc spawned through
+    //                              joey's console-login chain. The
+    //                              local-console trust anchor for
+    //                              hostowner elevation: corvus's
+    //                              ADMIN_ELEVATE grants CAP_HOSTOWNER
+    //                              only to a console-attached peer
+    //                              (CORVUS-DESIGN §5.5; specs/corvus.tla
+    //                              HostownerRequiresConsole). NOT
+    //                              propagated by rfork (see
+    //                              rfork_internal) — only an explicit
+    //                              proc_mark_console_attached confers
+    //                              it (corvus.tla MarkConsoleAttached).
     //
-    // Per CORVUS-DESIGN.md C-2 enforcement: corvus (and per-user
-    // stratumd) call all three at startup; the flags are visible via
-    // future debug surfaces for audit verification.
+    // Bits 0-2: per CORVUS-DESIGN.md C-2, corvus (and per-user stratumd)
+    // call all three hardening syscalls at startup; the flags are
+    // visible via future debug surfaces for audit verification.
     u32                proc_flags;
     u32                _pad_flags;        // explicit padding to 8-byte align
 };
 
-#define PROC_FLAG_NODUMP    (1u << 0)
-#define PROC_FLAG_NOTRACE   (1u << 1)
-#define PROC_FLAG_MLOCKED   (1u << 2)
+#define PROC_FLAG_NODUMP            (1u << 0)
+#define PROC_FLAG_NOTRACE           (1u << 1)
+#define PROC_FLAG_MLOCKED           (1u << 2)
+#define PROC_FLAG_CONSOLE_ATTACHED  (1u << 3)
 
 _Static_assert(sizeof(struct Proc) == 136,
                "struct Proc size pinned at 136 bytes (P3-Bcb baseline 112 "
@@ -342,5 +356,29 @@ struct Proc *proc_find_by_pid(int pid);
 // Not called at v1.0 P4-C; declared here so the API is stable for
 // the future caller.
 int proc_for_each(int (*callback)(struct Proc *p, void *arg), void *arg);
+
+// =============================================================================
+// P5-hostowner-a: console attachment.
+// =============================================================================
+//
+// PROC_FLAG_CONSOLE_ATTACHED marks a Proc spawned through joey's
+// console-login chain — the local-console trust anchor for hostowner
+// elevation (CORVUS-DESIGN.md §5.5). corvus's ADMIN_ELEVATE verb
+// (P5-hostowner-b) grants CAP_HOSTOWNER only to a console-attached
+// peer; specs/corvus.tla pins this as the HostownerRequiresConsole
+// invariant.
+
+// proc_mark_console_attached — stamp PROC_FLAG_CONSOLE_ATTACHED on `p`.
+// One-way: idempotent, never cleared. Maps to specs/corvus.tla's
+// MarkConsoleAttached action. v1.0 caller: joey (the console-login
+// chain root) marks itself at boot; P5-login's login process will mark
+// the per-user shells it spawns. The bit is NEVER conferred by rfork —
+// every console-attached Proc is the result of an explicit call here.
+// Extincts on a NULL or corrupted Proc.
+void proc_mark_console_attached(struct Proc *p);
+
+// proc_is_console_attached — true iff `p` carries
+// PROC_FLAG_CONSOLE_ATTACHED. Returns false for a NULL `p`.
+bool proc_is_console_attached(const struct Proc *p);
 
 #endif // THYLACINE_PROC_H

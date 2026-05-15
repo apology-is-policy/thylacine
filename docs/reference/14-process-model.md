@@ -386,6 +386,23 @@ Future appends:
 
 ---
 
+### Console attachment + `CAP_HOSTOWNER` (P5-hostowner-a)
+
+`CAP_HOSTOWNER` (`<thylacine/caps.h>`, bit 3) gates the corvus admin verbs. Unlike `CAP_HW_CREATE` / `CAP_LOCK_PAGES` / `CAP_CSPRNG_READ`, it is **elevation-only** — deliberately excluded from `CAP_ALL`, so no Proc (not even kproc) holds it at creation, and `rfork`'s mask-AND can never confer it. The sole grant path is corvus's `ADMIN_ELEVATE` verb (P5-hostowner-b).
+
+`PROC_FLAG_CONSOLE_ATTACHED` (`<thylacine/proc.h>`, `proc_flags` bit 3) marks a Proc spawned through joey's console-login chain — the local-console trust anchor. corvus's `ADMIN_ELEVATE` grants `CAP_HOSTOWNER` only to a console-attached peer (CORVUS-DESIGN §5.5; `specs/corvus.tla` `HostownerRequiresConsole`).
+
+| Function (`kernel/proc.c`) | Contract |
+|---|---|
+| `proc_mark_console_attached(p)` | One-way set of the console bit — idempotent, never cleared. Extincts on a NULL/corrupted Proc. Materializes `corvus.tla`'s `MarkConsoleAttached` action. |
+| `proc_is_console_attached(p)` | True iff `p` carries the bit. **Fail-closed**: a NULL or corrupted Proc reads as false — a bad pointer must never read as elevatable. |
+
+Propagation: the console bit is **never** conferred by `rfork`. `proc_alloc` zeroes `proc_flags` and `rfork_internal` does not copy it, so a console-attached Proc's `rfork` children start un-attached; only an explicit `proc_mark_console_attached` confers the bit. This keeps a future remote-login (sshd) chain from inheriting the local-console trust anchor (`corvus.tla`: `console_attached` grows solely via `MarkConsoleAttached`).
+
+At v1.0 the sole console-attached Proc is **joey** — `joey_thunk` (`kernel/joey.c`) marks joey at boot, in joey's own context, before exec, with a boot-path self-check. P5-login extends the chain by marking the per-user shells it spawns.
+
+---
+
 ## State machines
 
 ### Thread state transitions (P2-A subset)
