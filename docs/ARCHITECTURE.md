@@ -1367,6 +1367,34 @@ Exception types handled:
 - **FIQ**: fast interrupts (used for secure world only; not used at v1.0).
 - **SError**: system errors (async, hardware-specific). v1.0 logs and panics.
 
+**Stack-pointer discipline (SPSel) — the kernel runs uniformly at EL1h.** The
+kernel executes with `PSTATE.SPSel = 1` at all times; the active stack pointer
+is always `SP_EL1`. Each thread's `SP_EL1` is its own kernel stack — an
+exception taken while in the kernel builds its register frame on that same
+per-thread stack, and an exception taken from EL0 hardware-switches to the
+(per-thread) kernel `SP_EL1`. `SP_EL0` is therefore *exclusively the userspace
+stack*; the kernel never executes with `SP_EL0` selected. This is invariant
+**I-21** (§28).
+
+This is a deliberate single-mode discipline. The alternative — running normal
+kernel code at **EL1t** (`SPSel=0`, `sp = SP_EL0`) and entering EL1h only
+transiently inside exception handlers — was implemented during early SMP
+bring-up (P2-Cc) and proved unsound. With two modes, a thread's execution mode
+becomes a function of scheduling history rather than a fixed property:
+`cpu_switch_context` saves/restores `SP` but not `SPSel`, so a thread resumes
+in whatever mode the *outgoing* thread left the CPU in. Under SMP work-stealing
+this let a thread resume an exception-return path (`KERNEL_EXIT`) in the wrong
+mode, where `MSR SP_EL0` against the *currently-selected* stack pointer is
+CONSTRAINED UNPREDICTABLE — observed as an `EC=0` Undefined-instruction trap on
+the QEMU target, silently killing a secondary CPU on every boot. A per-CPU
+exception stack is also fundamentally incompatible with migrating a thread that
+is mid-exception (its frame cannot follow it across CPUs). Running uniformly at
+EL1h removes the mode entirely: one stack bank, exception frames travel with
+the thread (migration-safe), and `MSR SP_EL0` is always a write to the
+non-current bank (architecturally well-defined). The P2-Cc EL1t implementation
+was corrected to this model in Phase 5 (`P5-el1h-kernel`); §12.2's vector table
+already reflected the EL1h-kernel intent.
+
 ### 12.2 Exception vector table
 
 Standard ARM64 exception vector layout (`arch/arm64/vectors.S`):
@@ -1404,6 +1432,14 @@ vectors:
   .org 0x580  ; SError EL0
     b serror_handler
 ```
+
+Because the kernel runs uniformly at EL1h (§12.1), the **current EL with
+SP_EL0** group (`0x000`–`0x180`, the "EL1t" slots) is never the entry path for
+a kernel exception — those slots route to an `unexpected`-vector diagnostic
+that extincts (a kernel exception arriving on the EL1t group means `SPSel` was
+somehow cleared, which is a soundness violation). Kernel exceptions always
+enter via the **current EL with SP_ELx** group (`0x200`–`0x380`); userspace
+exceptions via the **lower EL** group (`0x400`–`0x580`).
 
 ### 12.3 Interrupt controller
 
@@ -2881,6 +2917,7 @@ The complete list of load-bearing invariants. Source for `VISION.md §8`. Each m
 | I-18 | IPIs from CPU A to CPU B are processed in send order | GIC SGI ordering | `scheduler.tla` |
 | I-19 | Note delivery preserves causal order within a process | Note queue per Proc | `notes.tla` |
 | I-20 | PTY master ↔ slave atomicity | PTY data path locked | `pty.tla` |
+| I-21 | Kernel executes uniformly at EL1h (`SPSel=1`); `SP_EL0` is exclusively the userspace stack | Boot sets `SPSel=1` and never lowers it; per-thread kernel stack carries exception frames; `test_smp` asserts `SPSel==1` | `sched_ctxsw.tla` |
 
 These are the project's promises. Every one has a spec or a runtime check or a compile-time assertion. None are policy-only.
 

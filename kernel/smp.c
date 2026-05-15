@@ -53,21 +53,18 @@ u64 g_pac_keys[8];
 __attribute__((aligned(16)))
 char g_secondary_boot_stacks[DTB_MAX_CPUS - 1][SECONDARY_STACK_SIZE];
 
-// P2-Cc: per-CPU exception stacks. See smp.h for design rationale.
+// Per-CPU stack buffer — RESERVED. See smp.h for rationale.
 // 8 CPUs × 4 KiB = 32 KiB BSS. 16-byte aligned for AAPCS64 SP.
 //
-// Each CPU's start-of-init asm sets SP_EL1 = &this[cpu_idx + 1] (i.e.,
-// the top of slot cpu_idx) and msr SPSel, #0 to switch to SP_EL0 for
-// normal kernel work. From that point on, hardware exception entry
-// switches SP to SP_EL1 = this per-CPU stack automatically; KERNEL_EXIT
-// + ERET restore SPSel from SPSR_EL1.M[0] = 0 (EL1t), back to SP_EL0.
+// P5-el1h-kernel: the kernel runs uniformly at EL1h and builds every
+// exception frame on the interrupted thread's own kernel stack, so this
+// buffer is NOT the live exception stack. It is retained as the
+// pre-allocated per-CPU landing pad for the future dedicated
+// stack-overflow / SError handler stack (a vector-side SP_EL0 check
+// would switch to it). Until that hardening item lands the buffer is
+// unused at runtime; the layout is still asserted by test_smp.
 __attribute__((aligned(16)))
 char g_exception_stacks[DTB_MAX_CPUS][EXCEPTION_STACK_SIZE];
-
-// P2-Cc: per-CPU SP-at-exception observability slot. timer_irq_handler
-// writes &local on its first invocation per CPU; smp.exception_stack_smoke
-// reads to verify the address falls inside g_exception_stacks[cpu_idx].
-volatile uintptr_t g_exception_stack_observed[DTB_MAX_CPUS];
 
 // P2-Cdc: IPI_RESCHED receive counter per CPU. Incremented by the
 // IPI handler on every receive; tests read to verify cross-CPU

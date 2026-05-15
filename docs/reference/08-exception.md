@@ -285,6 +285,18 @@ P1-F is reactive — no per-tick overhead. Cost is paid only on exceptions:
 
 ## Status
 
+> **P5-el1h-kernel update.** The SPSel / stack-pointer discipline in
+> this document reflects the as-built post-P5 model: the kernel runs
+> **uniformly at EL1h** (`SPSel=1`, `sp = SP_EL1` = the running thread's
+> own kernel stack), kernel exceptions enter via the SP_ELx group
+> (`0x200`/`0x280`), and the SP_EL0 group (`0x000`/`0x080`) routes to
+> `VEC_UNEXPECTED`. There is no separate per-CPU exception stack — the
+> forward-looking "per-CPU exception stack at Phase 2" notes below
+> describe the P2-Cc design that P5-el1h-kernel reverted. See
+> `docs/reference/67-el1h-kernel.md` for the full model + invariant
+> I-21. The rest of this document is otherwise Phase-1-era and stale on
+> axes unrelated to this update (it predates Phase 3 userspace onward).
+
 **Implemented at P1-F**:
 
 - 16-entry exception vector table at `_exception_vectors` (page-aligned; 0x800 bytes total).

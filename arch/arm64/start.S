@@ -172,7 +172,14 @@ _real_start:
     // 2. Stash DTB pointer in x19 (callee-saved; survives the BSS clear).
     mov     x19, x0
 
-    // 3. Set up boot stack. SP grows down from _boot_stack_top.
+    // 3. Set up the kernel stack. P5-el1h-kernel: the kernel runs
+    //    uniformly at EL1h (SPSel=1) — assert SPSel=1 BEFORE the `mov sp`
+    //    so the write lands SP_EL1 (the kernel stack) regardless of the
+    //    firmware/EL2-drop entry SPSel. `msr SPSel,#1` is a no-op if
+    //    already 1; isb drains it so the `mov sp` observes the new bank.
+    //    SP grows down from _boot_stack_top.
+    msr     SPSel, #1
+    isb
     adrp    x0, _boot_stack_top
     add     x0, x0, :lo12:_boot_stack_top
     mov     sp, x0
@@ -209,58 +216,32 @@ _real_start:
     msr     tpidr_el0, xzr
     msr     tpidr_el1, xzr
 
-    // 4.6. P2-Cc: split kernel/exception stacks via SPSel=0 + per-CPU
-    //              SP_EL1 = exception stack.
+    // 4.6. P5-el1h-kernel: assert the uniform-EL1h kernel mode.
     //
-    // Background. ARM64 PSTATE.SPSel selects which stack pointer the
-    // current EL uses: SPSel=1 → SP_ELx (here SP_EL1); SPSel=0 →
-    // SP_EL0. On any exception entry hardware sets SPSel=1, so SP_EL1
-    // is the stack the exception handler runs on. By splitting the
-    // kernel's "normal mode" stack (SP_EL0) from its "exception
-    // handling" stack (SP_EL1), we get:
-    //   - Per-CPU isolation. Each CPU's SP_EL1 is its own slot in
-    //     g_exception_stacks; concurrent IRQs on different CPUs do
-    //     not share an exception stack.
-    //   - Stack-overflow safety. If a kernel thread overruns its
-    //     SP_EL0 stack into the guard page, the resulting fault's
-    //     KERNEL_ENTRY runs on SP_EL1 (a known-good stack), not on
-    //     the dying SP_EL0. Without this, KERNEL_ENTRY's
-    //     `sub sp, sp, #EXCEPTION_CTX_SIZE` would itself fault and
-    //     wedge the CPU before exception_sync_curr_el could print
-    //     the diagnostic. (This is the P1-F "KNOWN LIMITATION"
-    //     comment in vectors.S, now closed.)
+    // The kernel runs uniformly at EL1h — PSTATE.SPSel = 1 at all times,
+    // the active stack pointer is always SP_EL1, and SP_EL1 is the
+    // running thread's own kernel stack (the boot stack here; a per-Proc
+    // kstack once threads exist). Exception entry keeps SPSel=1 and
+    // builds its register frame on that same stack. There is NO separate
+    // EL1t kernel mode and NO separate per-CPU exception stack.
     //
-    // Access discipline (ARM ARM B6.2):
-    //   - SP_EL0 is accessible from EL1 via MSR/MRS regardless of SPSel.
-    //   - SP_EL1 is UNDEFINED via MSR/MRS at EL1 — write it through
-    //     `mov sp, ...` while SPSel=1 so `sp` refers to SP_EL1.
+    // Rationale (ARCHITECTURE.md §12.1, invariant I-21): the earlier
+    // P2-Cc design ran normal kernel code at EL1t (SPSel=0, sp = SP_EL0)
+    // and entered EL1h only transiently in handlers, with SP_EL1 a
+    // per-CPU exception stack. That made a thread's execution mode a
+    // function of scheduling history — cpu_switch_context carries SP but
+    // not SPSel — and under SMP work-stealing a thread could resume the
+    // KERNEL_EXIT path in the wrong mode, where `msr SP_EL0` against the
+    // selected SP is CONSTRAINED UNPREDICTABLE (EC=0 trap, dead CPU). A
+    // per-CPU exception stack is also incompatible with migrating a
+    // mid-exception thread. The uniform-EL1h model removes the mode.
     //
-    // Sequence:
-    //   1. Copy current sp (= SP_EL1 = boot-stack top, set in step 3)
-    //      to SP_EL0 via msr — kernel keeps the same stack value
-    //      addressable through SP_EL0.
-    //   2. Compute g_exception_stacks[0]'s top, then `mov sp, x0`
-    //      (still SPSel=1) to install SP_EL1 := exception-stack top.
-    //   3. msr SPSel, #0 — `sp` now refers to SP_EL0 (= boot-stack top).
-    //   4. isb — drain the SPSel change so subsequent stack accesses
-    //      target the new SP register, not the prior one.
-    //
-    // Once we ERET back from any exception, SPSR_EL1.M[0]=0 (EL1t,
-    // which hardware records on entry from SPSel=0) restores SPSel=0
-    // → kernel resumes on SP_EL0 transparently.
-    //
-    // Total cost: 8 instructions, executed once per CPU at boot.
-    mov     x0, sp                        // x0 = SP_EL1 = boot-stack top
-    msr     sp_el0, x0                    // SP_EL0 := boot-stack top
-
-    adrp    x0, g_exception_stacks
-    add     x0, x0, :lo12:g_exception_stacks
-    add     x0, x0, #4096                 // EXCEPTION_STACK_SIZE; CPU 0 top
-    mov     sp, x0                        // SP_EL1 := exception-stack top
-                                          // (still SPSel=1 → sp = SP_EL1)
-
-    msr     SPSel, #0                     // sp now refers to SP_EL0
-    isb
+    // step 3 already asserted SPSel=1 and set sp = SP_EL1 = the kernel
+    // stack. Here we only zero SP_EL0 — it is the userspace stack and
+    // must not carry a kernel-VA leftover into the first eret-to-EL0.
+    // At SPSel=1, SP_EL0 is the non-current bank, so `msr sp_el0` is
+    // the architecturally well-defined write.
+    msr     sp_el0, xzr
 
     // 5. Save DTB pointer. BSS is now cleared; this write sticks.
     adrp    x0, _saved_dtb_ptr
@@ -325,55 +306,30 @@ _real_start:
     mov     x0, x21
     bl      mmu_enable
 
-    // 8.5. P2-Cc: re-anchor SP_EL1 at the post-KASLR HIGH VA of
-    //      g_exception_stacks[0]'s top.
+    // 8.5. P5-el1h-kernel: re-anchor the kernel stack (SP_EL1) at the
+    //      post-KASLR HIGH VA of _boot_stack_top.
     //
-    // Step 4.6 set SP_EL1 to a LOW PA (the pre-MMU PC-relative
-    // resolution of g_exception_stacks). After mmu_enable, the kernel
-    // runs at high VA via TTBR1; for exception handlers to operate on
-    // addresses that match the rest of the kernel's view, SP_EL1 needs
-    // to point at the HIGH VA. We compute it via kaslr_high_va_addr
-    // (PA → high-VA accessor) and write it via the SPSel-dance: msr
-    // SP_EL1 from EL1 is UNDEFINED, so transiently switch SPSel=1 to
-    // make sp = SP_EL1, mov sp, write the new value, then switch back
-    // to SPSel=0.
+    // step 3 set SP_EL1 to a LOW PA (the pre-MMU PC-relative resolution
+    // of _boot_stack_top). After mmu_enable the kernel runs at high VA
+    // via TTBR1; SP_EL1 must point at the high VA so exception frames
+    // and stack walks match the kernel's view — and so a stack access
+    // survives P3-Bda's mmu_retire_ttbr0_identity, after which the
+    // load-PA mapping is gone and any load-PA access faults.
     //
-    // Computing the PA: adrp+add gives the symbol's PC-relative
-    // address. PC is currently at LOW PA (we haven't long-branched
-    // yet — that's step 9). So the computed value is the same LOW PA
-    // we used at step 4.6 — kaslr_high_va_addr(pa) converts to high VA.
-    adrp    x0, g_exception_stacks
-    add     x0, x0, :lo12:g_exception_stacks
-    add     x0, x0, #4096                   // EXCEPTION_STACK_SIZE
-    bl      kaslr_high_va_addr              // x0 = HIGH VA of slot 0 top
-    msr     SPSel, #1                       // sp now refers to SP_EL1
-    isb
-    mov     sp, x0                          // SP_EL1 := HIGH VA top
-    msr     SPSel, #0                       // sp back to SP_EL0
-    isb
-
-    // 8.6. P3-Bda: re-anchor SP_EL0 at the post-KASLR HIGH VA of
-    //      _boot_stack_top.
-    //
-    // Step 4.6 set SP_EL0 = load PA of _boot_stack_top (PC-relative
-    // adrp+add at PC=load_PA). That works while TTBR0 identity covers
-    // the kernel image's GiB. After P3-Bda's mmu_retire_ttbr0_identity,
-    // any stack access at load PA faults. Switching sp = SP_EL0 to the
-    // HIGH VA of _boot_stack_top routes future kernel-stack accesses
-    // through TTBR1's kernel-image mapping (l3_kernel), which is alive
-    // forever.
-    //
-    // The boot_stack at load PA and at high VA map to the same physical
+    // The boot stack at load PA and at high VA are the SAME physical
     // memory (l3_kernel covers the kernel image's 2 MiB block under
-    // both TTBR0 identity and TTBR1 high-VA — same L3 table); so
-    // switching sp from one to the other doesn't lose data. We move sp
-    // to the TOP of the boot stack: _real_start has no live stack
-    // frame at this point (all bl calls have returned + popped their
-    // saved lr), so resetting sp is safe.
+    // both TTBR0 identity and TTBR1 high-VA — same L3 table), so moving
+    // sp loses no data. _real_start has no live stack frame here (all
+    // bl calls have returned + popped their saved lr), so resetting sp
+    // to the stack top is safe. The kernel runs at SPSel=1 (§4.6), so
+    // `mov sp` writes SP_EL1 directly — no SPSel dance, no separate
+    // per-CPU exception stack. This single re-anchor replaces the
+    // former P2-Cc SP_EL1-exception-stack + P3-Bda SP_EL0-boot-stack
+    // pair.
     adrp    x0, _boot_stack_top
     add     x0, x0, :lo12:_boot_stack_top
     bl      kaslr_high_va_addr              // x0 = HIGH VA of _boot_stack_top
-    mov     sp, x0                          // sp = SP_EL0 := HIGH VA top
+    mov     sp, x0                          // SP_EL1 := HIGH VA boot-stack top
     isb
 
     // 9. Long-branch to high VA. Compute the runtime high VA of
@@ -529,9 +485,10 @@ pac_apply_this_cpu:
 //
 // P2-Cb extension: the trampoline now does full per-CPU init —
 //   1. Validate idx in [1, DTB_MAX_CPUS).
-//   2. Set SP_EL0 from g_secondary_boot_stacks[idx-1] (16 KiB/CPU)
-//      and msr SPSel #0 (P2-Cc); set SP_EL1 from g_exception_stacks
-//      [idx] (4 KiB/CPU; hardware-switched-to on exception entry).
+//   2. Set SP_EL1 = this CPU's kernel stack from g_secondary_boot_stacks
+//      [idx-1] (16 KiB/CPU); keep SPSel=1 (P5-el1h-kernel — the kernel
+//      runs uniformly at EL1h, exception frames on the per-thread
+//      kernel stack, no separate exception stack).
 //   3. Flip g_cpu_online[idx] (early "trampoline reached" signal).
 //   4. bl pac_apply_this_cpu — load shared keys + enable PAC.
 //   5. bl mmu_program_this_cpu — enable MMU using primary's tables.
@@ -577,17 +534,18 @@ secondary_entry:
     // pac_apply_this_cpu / bl mmu_program_this_cpu calls.
     mov     x19, x0
 
-    // P2-Cc stack split. Mirror primary's _real_start step 4.6. The
-    // sequence MUST run while SPSel=1 (PSCI default) so we can write
-    // SP_EL1 via `mov sp, ...` — `msr sp_el1` from EL1 is UNDEFINED
-    // (ARM ARM B6.2 SP_EL1 access rules).
-    //
-    //   1. Compute & write SP_EL0 = per-CPU boot-stack top via msr.
-    //   2. Compute & write SP_EL1 = per-CPU exception-stack top via
-    //      `mov sp, ...` (sp refers to SP_EL1 while SPSel=1).
-    //   3. Switch SPSel=0 — sp now refers to the SP_EL0 we set above.
-    //
-    // Set SP_EL0 from g_secondary_boot_stacks[idx-1]:
+    // P5-el1h-kernel: set up this secondary's single kernel stack.
+    // Mirror primary's _real_start: the kernel runs uniformly at EL1h
+    // (SPSel=1), sp = SP_EL1 = this CPU's kernel stack. PSCI hands the
+    // secondary off at SPSel=1 with SP undefined; assert SPSel=1 BEFORE
+    // the `mov sp` so the write lands SP_EL1 regardless of the entry
+    // SPSel (`msr sp_el1` from EL1 is UNDEFINED — ARM ARM B6.2 — so SP_EL1
+    // must be written via `mov sp` while SPSel=1). isb drains the SPSel
+    // change so the `mov sp` observes the new bank.
+    msr     SPSel, #1
+    isb
+
+    // Set SP_EL1 from g_secondary_boot_stacks[idx-1] (16 KiB/CPU):
     //   base = &g_secondary_boot_stacks[idx-1]
     //   top  = base + SECONDARY_STACK_SIZE (16384)
     sub     x20, x19, #1                    // idx0 = idx - 1
@@ -596,23 +554,12 @@ secondary_entry:
     mov     x10, #16384                     // SECONDARY_STACK_SIZE
     madd    x9, x10, x20, x9                // base = stacks + idx0 * 16384
     add     x9, x9, x10                     // top = base + 16384
-    msr     sp_el0, x9                      // SP_EL0 := boot-stack top
+    mov     sp, x9                          // sp = SP_EL1 := kernel-stack top
 
-    // Set SP_EL1 from g_exception_stacks[idx] (one slot per CPU,
-    // including CPU 0 which the primary owns). Hardware switches to
-    // SP_EL1 on every subsequent exception entry on this CPU.
-    //   base = &g_exception_stacks[idx]
-    //   top  = base + EXCEPTION_STACK_SIZE (4096)
-    adrp    x9, g_exception_stacks
-    add     x9, x9, :lo12:g_exception_stacks
-    mov     x10, #4096                      // EXCEPTION_STACK_SIZE
-    madd    x9, x10, x19, x9                // base = stacks + idx * 4096
-    add     x9, x9, x10                     // top = base + 4096
-    mov     sp, x9                          // sp = SP_EL1 := exc-stack top
-
-    // Switch to SPSel=0 — sp now refers to SP_EL0 (= boot-stack top).
-    msr     SPSel, #0
-    isb
+    // Zero SP_EL0 (the userspace stack; must not carry a kernel-VA
+    // leftover into the first eret-to-EL0). SP_EL0 is the non-current
+    // bank at SPSel=1, so `msr sp_el0` is the well-defined write.
+    msr     sp_el0, xzr
 
     // Flip g_cpu_online[idx] — early "trampoline reached" signal
     // (primary's smp_init also waits for g_cpu_alive set in per_cpu_main).
@@ -633,30 +580,15 @@ secondary_entry:
     // its paciasp/autiasp work correctly.
     bl      mmu_program_this_cpu
 
-    // P2-Cc: re-anchor SP_EL1 at the post-KASLR HIGH VA of this CPU's
-    // exception-stack slot top. See primary's _real_start step 8.5
-    // for rationale. Must run AFTER mmu_program_this_cpu (we need
-    // TTBR1 to resolve high VAs) and BEFORE the long-branch to
-    // per_cpu_main (so any subsequent fault has SP_EL1 in high VA).
-    adrp    x0, g_exception_stacks
-    add     x0, x0, :lo12:g_exception_stacks
-    mov     x9, #4096                       // EXCEPTION_STACK_SIZE
-    madd    x0, x9, x19, x0                 // base = stacks + idx * 4096
-    add     x0, x0, x9                      // top = base + 4096
-    bl      kaslr_high_va_addr              // x0 = HIGH VA of slot[idx] top
-    msr     SPSel, #1                       // sp now refers to SP_EL1
-    isb
-    mov     sp, x0                          // SP_EL1 := HIGH VA top
-    msr     SPSel, #0                       // sp back to SP_EL0
-    isb
-
-    // P3-Bda: re-anchor SP_EL0 at the post-KASLR HIGH VA of this CPU's
-    // boot-stack-slot top. Mirrors primary's _real_start step 8.6 —
-    // required because P3-Bda retires TTBR0 identity, after which the
-    // load-PA stack pointer would fault on every kernel access. The
-    // boot stack at load PA and at high VA map to the same physical
-    // memory (l3_kernel covers the kernel image's 2 MiB block under
-    // both translations); switching sp doesn't lose data.
+    // P5-el1h-kernel: re-anchor this CPU's kernel stack (SP_EL1) at the
+    // post-KASLR HIGH VA of its g_secondary_boot_stacks slot top. See
+    // primary's _real_start step 8.5 for rationale. Must run AFTER
+    // mmu_program_this_cpu (we need TTBR1 to resolve high VAs) and
+    // BEFORE the long-branch to per_cpu_main (so any subsequent fault
+    // has SP_EL1 in high VA). The kernel runs at SPSel=1, so `mov sp`
+    // writes SP_EL1 directly — one re-anchor, no SPSel dance, no
+    // separate per-CPU exception stack (the former P2-Cc SP_EL1-exc /
+    // P3-Bda SP_EL0-boot pair collapses to this).
     sub     x20, x19, #1                    // idx0 = idx - 1
     adrp    x0, g_secondary_boot_stacks
     add     x0, x0, :lo12:g_secondary_boot_stacks
@@ -664,7 +596,7 @@ secondary_entry:
     madd    x0, x9, x20, x0                 // base = stacks + idx0 * 16384
     add     x0, x0, x9                      // top = base + 16384
     bl      kaslr_high_va_addr              // x0 = HIGH VA of slot top
-    mov     sp, x0                          // sp = SP_EL0 := HIGH VA top
+    mov     sp, x0                          // SP_EL1 := HIGH VA kernel-stack top
     isb
 
     // Long-branch to per_cpu_main(idx) at the kernel's high VA.

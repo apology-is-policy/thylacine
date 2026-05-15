@@ -14,6 +14,22 @@
 //
 // Register cleanup before eret: every GPR is zeroed so the kernel
 // doesn't leak state to userspace.
+//
+// P5-el1h-kernel: the kernel runs uniformly at EL1h (PSTATE.SPSel=1;
+// ARCHITECTURE.md §12.1, invariant I-21). userland_enter therefore
+// executes at EL1h with the live `sp` being SP_EL1 (the calling
+// thread's kernel stack). The user stack pointer is installed by
+// writing the *non-current* bank directly — `msr sp_el0, user_sp` —
+// which at EL1h is the architecturally well-defined form (SP_EL0 is
+// not the selected stack pointer, so this is not the CONSTRAINED
+// UNPREDICTABLE write-the-current-SP case). The kernel `sp` (SP_EL1)
+// is left untouched; the eret to EL0 makes SP_EL0 active.
+//
+// This replaces the former P4-Fix157 `msr SPSel,#0; mov sp` dance:
+// that band-aid existed only because the pre-P5 EL1t/EL1h dual-mode
+// kernel could arrive here at either SPSel value, so `mov sp` wrote an
+// unpredictable bank. Under the uniform-EL1h model the mode is fixed
+// and the dance is unnecessary — `msr sp_el0` is unambiguous.
 
 .section ".text", "ax"
 
@@ -22,35 +38,23 @@
 userland_enter:
     bti     c
 
-    // SP-write strategy: `mov sp, x17` (encoded `add sp, x17, #0`) updates
-    // whichever SP register `sp` aliases under the current PSTATE.SPSel
-    // (SP_EL0 at SPSel=0; SP_EL1 at SPSel=1). The fix block below at line
-    // 102 explicitly forces SPSel=0 immediately before this write, so
-    // `mov sp, x17` always lands SP_EL0 := user_sp regardless of the
-    // entry-side SPSel — closing trip-hazard #157 (P4-Fix157).
-    //
-    // The `mov sp` form is preserved over the alternative `msr sp_el0,
-    // x17` for backward compatibility with older QEMU virt versions: the
-    // `msr sp_el0, x17` form was empirically observed to raise a
-    // synchronous EC=0 ("Unknown reason") on the QEMU virt version we
-    // shipped against during P3-Ed bring-up (R7 F135 reclassified that as
-    // a QEMU quirk, not an architectural issue — newer QEMU versions
-    // accept the `msr` form correctly). Switching to `msr sp_el0, x17`
-    // would let us drop the SPSel dance entirely; tracked as a future
-    // simplification once the test-infrastructure QEMU baseline is past
-    // the affected version.
-    //
-    // Park entry + user_sp in x16/x17 (caller-saved scratch; this
-    // routine is __noreturn), zero every other GPR, then write SP
-    // LAST — after that point we execute only register-to-register
-    // ops (no stack touches) until eret.
+    // Park entry_pc (x0) + user_sp (x1) in caller-saved scratch
+    // (x16/x17) so the GPR-zeroing sweep below can clobber x0/x1.
     mov     x16, x0
     mov     x17, x1
 
-    msr     elr_el1,  x16
-    msr     spsr_el1, xzr        // PSTATE: EL0t, all DAIF clear
+    // PSTATE for the eret target: EL0t, all DAIF clear.
+    msr     elr_el1,  x16            // ELR_EL1 := entry_pc
+    msr     spsr_el1, xzr            // SPSR_EL1 := 0 (EL0t, DAIF clear)
 
-    // Zero every GPR except x16/x17 (still parked).
+    // Install the user stack pointer. At EL1h, SP_EL0 is the non-current
+    // bank — `msr sp_el0` is the well-defined write and does NOT disturb
+    // the live kernel `sp` (SP_EL1). After the eret drops to EL0, SP_EL0
+    // becomes the active stack pointer.
+    msr     sp_el0,   x17            // SP_EL0 := user_sp
+
+    // Zero every GPR — including the x16/x17 scratch, now consumed — so
+    // no kernel register state leaks across the EL1→EL0 boundary.
     mov     x0,  xzr
     mov     x1,  xzr
     mov     x2,  xzr
@@ -67,6 +71,8 @@ userland_enter:
     mov     x13, xzr
     mov     x14, xzr
     mov     x15, xzr
+    mov     x16, xzr
+    mov     x17, xzr
     mov     x18, xzr
     mov     x19, xzr
     mov     x20, xzr
@@ -80,42 +86,6 @@ userland_enter:
     mov     x28, xzr
     mov     x29, xzr             // FP
     mov     x30, xzr             // LR
-
-    // [#157 fix] Force SPSel=0 before writing sp.
-    //
-    // The prior code path assumed `sp` always aliases SP_EL0, but that
-    // only holds when PSTATE.SPSel=0. When userland_enter is called from
-    // a kthread that was dispatched in SPSel=1 state (e.g., the parent
-    // got preempted by a timer IRQ → preempt_check_irq → sched →
-    // cpu_switch_context, all running at SPSel=1, and the new thread's
-    // trampoline never lowered SPSel back to 0), `mov sp, x17` writes
-    // SP_EL1 — not SP_EL0. After eret to EL0 the user stack is unset
-    // (SP_EL0 retains stale state) AND every subsequent EL1 exception
-    // entry uses the corrupt SP_EL1 (= 0x80000000 user VA), which lives
-    // in TTBR0 territory; KERNEL_ENTRY's first stp faults, fault
-    // handler re-enters at the same vector, decrements SP_EL1 by
-    // EXCEPTION_CTX_SIZE (0x120), faults again, ad infinitum. This is
-    // the trip-hazard #157 root cause (deferred from R7).
-    //
-    // Why iter 1 worked: iter 1's child happened to be dispatched at
-    // SPSel=0 (parent's wait_pid sleep path). Iter 2's dispatch went
-    // through an IRQ-driven sched (timer preempt of the parent's busy
-    // wait), arriving at SPSel=1.
-    //
-    // The fix: explicitly switch to SPSel=0 before writing sp.
-    // ISB serializes the SPSel update so subsequent `mov sp, ...`
-    // observes the new SPSel value (and thus aliases SP_EL0).
-    msr     SPSel, #0
-    isb
-
-    // LAST step before eret: set SP. Live SP changes from kernel
-    // kstack to user_sp here. Subsequent instructions (mov + eret)
-    // do NOT touch the stack — pure register ops.
-    mov     sp, x17
-
-    // Zero the parked scratch.
-    mov     x17, xzr
-    mov     x16, xzr
 
     eret
 

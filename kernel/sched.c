@@ -461,10 +461,26 @@ static struct Thread *try_steal(struct CpuSched *cs, bool *contended_out) {
         }
 
         // Pick the highest-priority runnable thread from peer.
+        //
+        // P5-el1h-kernel (audit F2 / invariant I-21): never steal a
+        // thread whose kstack_base is NULL. Such a thread is a bootstrap
+        // context — kthread, or a per-CPU idle thread from
+        // thread_init_per_cpu_idle — that runs on a CPU's *boot* stack,
+        // not on a portable per-thread kstack. Under the uniform-EL1h
+        // model exception frames are built on the running thread's
+        // stack; migrating a boot-stack thread to another CPU would run
+        // it (and build its exception frames) on a stack its origin CPU
+        // still owns — cross-CPU stack corruption. Boot-stack threads
+        // are therefore CPU-pinned. The realistic case is a per-CPU idle
+        // thread sitting in run_tree[BAND_IDLE]; skipping it there costs
+        // nothing (an idle thread is not work worth stealing).
         struct Thread *stolen = NULL;
         for (unsigned b = 0; b < SCHED_BAND_COUNT && !stolen; b++) {
-            stolen = peer->run_tree[b];
-            if (stolen) unlink(peer, stolen);
+            struct Thread *cand = peer->run_tree[b];
+            if (cand && cand->kstack_base != NULL) {
+                stolen = cand;
+                unlink(peer, stolen);
+            }
         }
 
         spin_unlock(&peer->lock);
@@ -559,15 +575,23 @@ void sched(void) {
             // this was an unconditional ELE because no idle thread
             // existed distinct from kthread (kthread doubled as
             // cs->idle); kthread blocking with no peer meant the
-            // kernel had nothing to switch to. The boot CPU now has
-            // g_bootcpu_idle (allocated in boot_main, kept off the
-            // run tree to avoid preempt-time SpSel=1 context switches
-            // that would clobber the per-CPU exception stack pointer);
-            // sched() switches to it explicitly on the deadlock path,
-            // which fires only from VOLUNTARY callers (sleep, exits)
-            // at SpSel=0. The idle thread WFI loops until an IRQ
-            // arrives that makes some thread RUNNABLE; its own sched()
-            // then picks that thread up.
+            // kernel had nothing to switch to. The boot CPU has
+            // g_bootcpu_idle (allocated in boot_main); sched() switches
+            // to it explicitly on the deadlock path. The idle thread
+            // WFI loops until an IRQ arrives that makes some thread
+            // RUNNABLE; its own sched() then picks that thread up.
+            //
+            // g_bootcpu_idle is kept OFF the run tree. P4-Ic6 did this
+            // to dodge preempt-time context switches that, under the
+            // pre-P5 EL1t/EL1h dual-mode kernel, could clobber the
+            // per-CPU exception-stack pointer. P5-el1h-kernel removed
+            // that hazard entirely (uniform EL1h, no separate exception
+            // stack — ARCHITECTURE.md §12.1, I-21), so the off-run-tree
+            // arrangement is now just an artifact; folding g_bootcpu_idle
+            // into cs->run_tree[BAND_IDLE] like the secondaries' idles
+            // is a deferred scheduler-cleanup item, not a correctness
+            // fix. The explicit deadlock-path switch here works either
+            // way.
             //
             // Only the boot CPU has g_bootcpu_idle registered. For
             // secondaries this path is unreachable in practice: their

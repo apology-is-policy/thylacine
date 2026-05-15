@@ -433,9 +433,7 @@ void boot_main(void) {
     }
     uart_puts(")\n");
 
-    uart_puts("  exception: per-CPU SP_EL1 (");
-    uart_putdec((u64)EXCEPTION_STACK_SIZE);
-    uart_puts(" B/CPU; SPSel=0 kernel mode)\n");
+    uart_puts("  exception: uniform EL1h (SPSel=1; exception frames on the per-thread kernel stack)\n");
 
     uart_puts("  ipi:  GICv3 SGIs live (IPI_RESCHED=SGI 0; per-CPU GIC redist + IRQ unmask on secondaries)\n");
 
@@ -451,15 +449,20 @@ void boot_main(void) {
 
     // P4-Ic6-impl (R12-sched): allocate the boot CPU's dedicated idle
     // thread, distinct from kthread, AND register it as the boot CPU's
-    // sched-deadlock-path fallback via sched_set_bootcpu_idle. NOT
-    // ready()'d into the run tree — preempt's pick_next would otherwise
-    // switch to it at SpSel=1 (preempt is hardware-set to SpSel=1 on
-    // entry), and cpu_switch_context's `mov sp` would clobber SP_EL1
-    // (= exception stack) with bootcpu_idle's kstack. Instead, sched()
-    // explicitly switches to it ONLY in the deadlock path — which fires
-    // exclusively from VOLUNTARY sched() callers (sleep, exits) at
-    // SpSel=0, where cpu_switch_context naturally writes SP_EL0. SP_EL1
-    // stays as the per-CPU exception stack throughout.
+    // sched-deadlock-path fallback via sched_set_bootcpu_idle. It is
+    // NOT ready()'d into the run tree; sched() switches to it only on
+    // the explicit deadlock path.
+    //
+    // The off-run-tree arrangement was a P4-Ic6 workaround for the
+    // pre-P5 EL1t/EL1h dual-mode kernel, where a preempt-time switch
+    // (SPSel=1) into a run-tree idle would have made cpu_switch_context's
+    // `mov sp` clobber SP_EL1 (then a separate per-CPU exception stack).
+    // P5-el1h-kernel removed that hazard — the kernel runs uniformly at
+    // EL1h with one stack bank and no separate exception stack
+    // (ARCHITECTURE.md §12.1, I-21) — so the workaround is now an inert
+    // artifact (folding bootcpu_idle into the run tree is a deferred
+    // scheduler-cleanup item). The explicit deadlock-path switch is
+    // correct regardless.
     //
     // Scenarios where the deadlock path now resolves cleanly (was ELE
     // pre-fix):

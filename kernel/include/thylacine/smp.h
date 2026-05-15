@@ -63,22 +63,24 @@ extern u64 g_pac_keys[8];
 #define SECONDARY_STACK_SIZE  16384u
 extern char g_secondary_boot_stacks[DTB_MAX_CPUS - 1][SECONDARY_STACK_SIZE];
 
-// P2-Cc: per-CPU exception stacks. SP_EL1 on each CPU points at the
-// top of its own slot; the kernel runs in SPSel=0 mode (SP=SP_EL0) for
-// normal work, and ARM exception entry hardware-switches to SP_EL1 =
-// this per-CPU stack. Closes the P1-F shared-stack limitation: a
-// stack-overflow fault on the kernel SP_EL0 stack now lands on a
-// distinct SP_EL1 buffer, so KERNEL_ENTRY's `sub sp, sp, #...` runs
-// on a known-good stack and exception_sync_curr_el's stack-overflow
-// diagnostic is reachable instead of recursively faulting.
+// Per-CPU stack buffer — RESERVED (P5-el1h-kernel).
 //
-// 4 KiB per CPU × DTB_MAX_CPUS (8) = 32 KiB BSS. 4 KiB exceeds
-// EXCEPTION_CTX_SIZE (288 B) by ~14× — generous headroom for handler
-// frames + nested exceptions if they ever land. Sized to one page so
-// the linker's stack alignment costs nothing extra.
+// The kernel runs uniformly at EL1h (ARCHITECTURE.md §12.1, invariant
+// I-21): SPSel=1 always, sp = SP_EL1 = the running thread's own kernel
+// stack, and an exception builds its register frame on that same
+// per-thread stack. There is NO separate live per-CPU exception stack.
 //
-// Indexed by cpu_idx (0 = boot, 1..N-1 = secondaries). Set up by
-// start.S _real_start (CPU 0) and start.S secondary_entry (CPU 1+).
+// This buffer is retained — but currently unused at runtime — as the
+// pre-allocated per-CPU landing pad for a FUTURE dedicated
+// stack-overflow / SError handler stack. Under the uniform-EL1h model
+// a kernel-stack overflow into the guard page faults recursively
+// (KERNEL_ENTRY builds the frame on the same overflowing stack); a
+// vector-side check (the 0x200 slot inspecting SP against the guard)
+// could switch to this buffer to recover cleanly. That hardening item
+// is deferred; the buffer is kept so it lands without a layout change.
+//
+// 4 KiB per CPU × DTB_MAX_CPUS (8) = 32 KiB BSS. Indexed by cpu_idx
+// (0 = boot, 1..N-1 = secondaries). The layout is asserted by test_smp.
 #define EXCEPTION_STACK_SIZE  4096u
 extern char g_exception_stacks[DTB_MAX_CPUS][EXCEPTION_STACK_SIZE];
 
@@ -116,15 +118,6 @@ unsigned smp_cpu_count(void);
 // Number of CPUs currently online (= 1 + # secondaries that came up).
 unsigned smp_cpu_online_count(void);
 
-// P2-Cc: observability hook for the per-CPU exception-stack discipline.
-// timer_irq_handler captures `&local` (the SP at C handler entry) into
-// this slot on its first call from each CPU. The test
-// smp.exception_stack_smoke checks that the captured address falls
-// inside the corresponding g_exception_stacks[idx] slot.
-//
-// One slot per CPU. Indexed by smp_cpu_idx_self() at write time;
-// readers also index by cpu_idx. Initial value 0 = "not yet observed."
-extern volatile uintptr_t g_exception_stack_observed[DTB_MAX_CPUS];
 
 // Returns this CPU's index from MPIDR_EL1.Aff0 (low 8 bits). Boot CPU
 // reports 0; secondaries report 1..N-1. Valid at any context where

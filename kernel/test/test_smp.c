@@ -9,11 +9,11 @@
 //   smp_cpu_online_count() == 4 (boot + 3 secondaries). g_cpu_online[1..3]
 //   all true. Online[0] (boot) also true (set by smp_init unconditionally).
 //
-// smp.exception_stack_smoke (P2-Cc)
-//   Verifies the boot CPU is running in SPSel=0 mode with SP_EL1 set
-//   to the top of g_exception_stacks[0]. This confirms the per-CPU
-//   exception-stack discipline that start.S installs in the SPSel=0
-//   transition (step 4.6).
+// smp.exception_stack_smoke (P5-el1h-kernel)
+//   Verifies the kernel runs uniformly at EL1h — PSTATE.SPSel == 1
+//   (invariant I-21). Also sanity-checks the layout of the reserved
+//   g_exception_stacks buffer (kept for a future dedicated overflow
+//   stack; see smp.h).
 //
 // smp.per_cpu_idle_smoke (P2-Cd)
 //   Verifies each CPU has its sched state initialized + an idle thread
@@ -96,19 +96,24 @@ void test_smp_bringup_smoke(void) {
 }
 
 void test_smp_exception_stack_smoke(void) {
-    // PSTATE.SPSel must be 0 (kernel mode SP = SP_EL0). start.S
-    // _real_start step 4.6 sets this; an exception entry transiently
-    // sets SPSel=1 but eret restores from SPSR.M[0]=0 → back to 0.
-    // (We're in normal kernel context here, no live exception, so 0.)
+    // P5-el1h-kernel: the kernel runs uniformly at EL1h — PSTATE.SPSel
+    // must be 1 at all times (sp = SP_EL1 = the running thread's own
+    // kernel stack; ARCHITECTURE.md §12.1, invariant I-21). start.S
+    // asserts SPSel=1 at boot and never lowers it; exception entry
+    // keeps SPSel=1 and KERNEL_EXIT's eret restores it from
+    // SPSR.M[0]=1 for a kernel→kernel return. A SPSel of 0 observed in
+    // normal kernel context would be I-21 violated.
     u64 spsel;
     __asm__ __volatile__("mrs %0, SPSel" : "=r"(spsel));
-    TEST_EXPECT_EQ(spsel, (u64)0,
-        "kernel must run in SPSel=0 mode (SP_EL0 active)");
+    TEST_EXPECT_EQ(spsel, (u64)1,
+        "kernel must run uniformly at EL1h (SPSel=1) — invariant I-21");
 
-    // BSS allocation sanity. The compile-time size is fixed by the
-    // declaration, but verify the bound is consistent with the per-CPU
-    // EXCEPTION_STACK_SIZE × DTB_MAX_CPUS layout. Spot-check that
-    // slots are contiguous (no padding inserted by the linker).
+    // g_exception_stacks is the RESERVED per-CPU buffer kept for a
+    // future dedicated stack-overflow / SError handler stack (smp.h).
+    // It is NOT the live exception stack under the uniform-EL1h model
+    // (exception frames are built on the per-thread kernel stack), but
+    // the BSS layout is still asserted so the future hardening item
+    // lands without a layout surprise.
     TEST_EXPECT_EQ((u64)sizeof(g_exception_stacks),
                    (u64)(DTB_MAX_CPUS * EXCEPTION_STACK_SIZE),
         "g_exception_stacks BSS size must equal NCPUS * EXCEPTION_STACK_SIZE");
@@ -116,25 +121,8 @@ void test_smp_exception_stack_smoke(void) {
     for (unsigned i = 0; i < DTB_MAX_CPUS; i++) {
         uintptr_t slot_base = (uintptr_t)&g_exception_stacks[i][0];
         TEST_EXPECT_EQ((u64)slot_base, (u64)(base + i * EXCEPTION_STACK_SIZE),
-            "per-CPU exception stack slot must be contiguous");
+            "per-CPU exception-stack slot must be contiguous");
     }
-
-    // Runtime evidence: timer_irq_handler captures &local on its
-    // first invocation per CPU into g_exception_stack_observed[cpu].
-    // For the boot CPU we expect this to fall inside slot 0's range
-    // — the SP at handler entry was hardware-switched to SP_EL1 =
-    // top of g_exception_stacks[0]. (Direct mrs SP_EL1 from EL1 is
-    // UNDEFINED per ARM ARM, so we observe via this hook instead.)
-    //
-    // Slots [1..N-1] remain zero at v1.0 P2-Cc — secondaries don't
-    // unmask IRQs yet (P2-Cd lands their per-CPU GIC + idle threads).
-    uintptr_t observed_boot = g_exception_stack_observed[0];
-    TEST_ASSERT(observed_boot != 0,
-        "timer IRQ on boot CPU must have captured an SP value by now");
-    uintptr_t slot0_base = (uintptr_t)&g_exception_stacks[0][0];
-    uintptr_t slot0_top  = slot0_base + EXCEPTION_STACK_SIZE;
-    TEST_ASSERT(observed_boot >= slot0_base && observed_boot < slot0_top,
-        "boot CPU's SP at IRQ entry must fall inside g_exception_stacks[0]");
 }
 
 void test_smp_per_cpu_idle_smoke(void) {

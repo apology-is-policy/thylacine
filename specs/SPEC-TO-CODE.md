@@ -504,6 +504,34 @@ References:
   corvus-validated UNWRAP wire is the wire used by Spec UNWRAP).
 - `docs/ARCHITECTURE.md §15` — capabilities + CAP_HOSTOWNER addition.
 
+## sched_ctxsw.tla — P5-el1h-kernel (uniform-EL1h kernel model)
+
+Status: **invariant I-21 pinned.** Models the relationship between a
+CPU's live SPSel and the execution mode the running thread requires.
+The constant `DUAL_MODE` selects the kernel model: `FALSE` = Model 1
+(uniform EL1h — the fix), `TRUE` = Model 2 (the pre-P5 EL1t/EL1h
+dual-mode bug). `CtxSwitchModeConsistent` (`cpu_mode =
+thread_mode[mode_running]`) holds by construction under Model 1;
+`BuggyModeSwitch` violates it under Model 2 — the executable
+counterexample for the secondary-CPU `msr SP_EL0` crash.
+
+| Spec action | Impl target | Notes |
+|---|---|---|
+| `Init` (all `el1h`) | `arch/arm64/start.S` `_real_start`/`secondary_entry` | Boot asserts `SPSel=1`, sets `SP_EL1` = kernel stack. |
+| `ModePreempt` / `ModeReturn` | `arch/arm64/vectors.S` `KERNEL_ENTRY` / `KERNEL_EXIT` | Exception entry/exit; EL1h→EL1h for a kernel-mode exception. |
+| `ModeSwitch(next)` | `arch/arm64/context.S` `cpu_switch_context` | One SP bank (`SP_EL1`); no SPSel to mis-restore. |
+| `BuggyModeSwitch(next)` | (none — bug class statically eliminated) | The pre-P5 `cpu_switch_context` carried SP not SPSel; the uniform-EL1h model removes the second mode entirely. |
+| `CtxSwitchModeConsistent` | runtime: `test_smp.exception_stack_smoke` asserts `SPSel==1` | ARCH §28 I-21. |
+
+cfgs: `sched_ctxsw.cfg` (`DUAL_MODE=FALSE`) clean; `sched_ctxsw_buggy.cfg`
+(`DUAL_MODE=TRUE`) expected-violation. Companion sibling module to
+`scheduler.tla` (the `pipe.tla` / `corvus.tla` precedent). See
+`docs/reference/67-el1h-kernel.md`.
+
+The model is single-CPU: it captures the *essence* of the bug (a switch
+retargeting the CPU across a thread-mode boundary) as the sound
+abstraction of the cross-CPU work-stealing case.
+
 ## poll.tla — Phase 5 (planned)
 
 (Stub. Will pin: wait/wake state machine, missed-wakeup-freedom — ARCH §28 I-9.)

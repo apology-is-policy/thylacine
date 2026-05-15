@@ -143,9 +143,15 @@ struct Thread *thread_init_per_cpu_idle(unsigned cpu_idx) {
 
     // Same skeleton as thread_init's kthread setup. KP_ZERO already
     // cleared kstack_base (NULL — this thread runs on the per-CPU
-    // boot stack from start.S, already-current SP_EL0), ctx (zero;
-    // first cpu_switch_context save fills it in), runnable_{next,prev}
+    // secondary boot stack from start.S, the current SP_EL1; the
+    // kernel runs uniformly at EL1h, so SP_EL1 is the live kernel
+    // stack — ARCHITECTURE.md §12.1, I-21), ctx (zero; first
+    // cpu_switch_context save fills it in), runnable_{next,prev}
     // (NULL; not in any tree until the idle loop yields once).
+    //
+    // kstack_base == NULL marks this as a CPU-pinned bootstrap thread:
+    // it has no portable per-thread kstack, so try_steal must never
+    // migrate it (sched.c, audit F2 / I-21).
     t->magic  = THREAD_MAGIC;
     t->tid    = g_next_tid++;
     t->state  = THREAD_RUNNING;

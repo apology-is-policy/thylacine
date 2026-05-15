@@ -222,6 +222,7 @@ Verbatim from `ARCHITECTURE.md §28`. These are the TLA+ proof obligations AND t
 | I-18 | IPIs from CPU A to CPU B are processed in send order | GIC SGI ordering | `scheduler.tla` |
 | I-19 | Note delivery preserves causal order within a process | Note queue per Proc | `notes.tla` |
 | I-20 | PTY master ↔ slave atomicity | PTY data path locked | `pty.tla` |
+| I-21 | Kernel executes uniformly at EL1h (`SPSel=1`); `SP_EL0` is exclusively the userspace stack | Boot sets `SPSel=1`, never lowered; per-thread kernel stack carries exception frames | `sched_ctxsw.tla` |
 
 ---
 
