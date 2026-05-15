@@ -69,9 +69,12 @@
 // clunk / out-of-order match / unbounded outstanding).
 //
 // Concurrency: this module is NOT thread-safe internally. Callers
-// holding multiple references to the same session must coordinate.
-// At v1.0 the kernel 9P client owns sessions per-Proc and serializes
-// access via the Proc lock; this matches `stratum/v2/docs/reference/23-9p_client.md`
+// must serialize externally. The wrapping `struct p9_client`
+// (kernel/9p_client.c) provides the v1.0 discipline — a per-client
+// spin_lock_t held across every send/dispatch sequence (R15-c F230
+// close). Direct callers of p9_session_* below the client layer
+// (typically test code) are responsible for their own serialization.
+// This matches `stratum/v2/docs/reference/23-9p_client.md`
 // §"Concurrency model" — "One client = one connection = one fid namespace."
 
 #ifndef THYLACINE_9P_SESSION_H

@@ -29,10 +29,15 @@
 //      │                              │
 //   p9_wire     (codec)           {loopback, Spoor-over-Unix-socket, ...}
 //
-// Concurrency: NOT thread-safe internally. Per-Proc serialization is
-// the caller's responsibility (matches the session + transport
-// contract). Future async dispatch (multiple in-flight on the session
-// tag pool) would require redesign here.
+// Concurrency: thread-safe at the public p9_client_* API surface. Each
+// public op acquires `c->lock` (a spin_lock_t) for the entire duration
+// of build + transport-exchange + dispatch + bookkeeping, then releases
+// it. Cross-Proc sharing of a single client (typically via inherited
+// dev9p Spoors after SYS_SPAWN_WITH_FDS) is correct under SMP. The lock
+// also covers `c->next_fid`, the monotonic fid allocator. Direct callers
+// of `kernel/9p_session.c` p9_session_* functions are responsible for
+// their own serialization — those are below the client's locked surface
+// and are typically only invoked by test code. R15-c F230 close.
 //
 // Buffer ownership:
 //
@@ -52,6 +57,7 @@
 #include <thylacine/9p_session.h>
 #include <thylacine/9p_transport.h>
 #include <thylacine/9p_wire.h>
+#include <thylacine/spinlock.h>
 #include <thylacine/types.h>
 
 // Inline outbound Tmsg buffer. 8 KiB is plenty for handshake / meta /
@@ -62,6 +68,11 @@
 
 struct p9_client {
     u32                  magic;
+    // Per-client lock. Acquired by every public p9_client_* op for the
+    // duration of build + transport-exchange + dispatch + bookkeeping.
+    // Protects session.outstanding[], session.bound_fids[], out_buf,
+    // next_fid, and total_ops/total_errors counters. R15-c F230 close.
+    spin_lock_t          lock;
     struct p9_session    session;
     struct p9_transport  transport;
     u8                   out_buf[P9_CLIENT_OUT_BUF_MAX];
@@ -69,7 +80,8 @@ struct p9_client {
     // p9_client_alloc_fid returns next_fid then increments. Burned
     // fids are not reclaimed at v1.0 (32-bit space; plenty for any
     // realistic session lifetime). Used by dev9p when allocating
-    // fresh fids for walk-derived Spoors.
+    // fresh fids for walk-derived Spoors. Mutated only under
+    // c->lock.
     u32                  next_fid;
     // Diagnostics.
     u32                  total_ops;

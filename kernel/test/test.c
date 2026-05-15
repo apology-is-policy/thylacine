@@ -332,6 +332,7 @@ void test_9p_client_unlinkat(void);
 void test_9p_client_readlink(void);
 void test_9p_client_rlerror_propagates_to_negative_errno(void);
 void test_9p_client_op_before_handshake_returns_ebusy(void);
+void test_9p_client_lock_released_between_ops(void);
 void test_dev9p_registered(void);
 void test_dev9p_attach_client_root_spoor(void);
 void test_dev9p_walk_one_component(void);
@@ -920,6 +921,9 @@ struct test_case g_tests[] = {
                                                                            false, NULL },
     { "9p_client.op_before_handshake_returns_ebusy",
                                        test_9p_client_op_before_handshake_returns_ebusy,
+                                                                           false, NULL },
+    { "9p_client.lock_released_between_ops",
+                                       test_9p_client_lock_released_between_ops,
                                                                            false, NULL },
     { "dev9p.registered",              test_dev9p_registered,              false, NULL },
     { "dev9p.attach_client_root_spoor",test_dev9p_attach_client_root_spoor,false, NULL },

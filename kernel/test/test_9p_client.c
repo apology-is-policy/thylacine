@@ -30,6 +30,7 @@ void test_9p_client_unlinkat(void);
 void test_9p_client_readlink(void);
 void test_9p_client_rlerror_propagates_to_negative_errno(void);
 void test_9p_client_op_before_handshake_returns_ebusy(void);
+void test_9p_client_lock_released_between_ops(void);
 
 // File-scope buffers (kernel test stack is 16 KiB — client struct is
 // ~4 KiB; multiple in one frame is fine but file-scope is cleaner).
@@ -489,6 +490,59 @@ void test_9p_client_op_before_handshake_returns_ebusy(void) {
     // No handshake yet; client.session.state == INIT.
     rc = p9_client_walk_one(&g_client, 0, 5, (const u8 *)"x", 1, NULL);
     TEST_EXPECT_EQ(rc, -P9_E_BUSY, "walk before handshake → -EBUSY");
+
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}
+
+// R15-c F230 regression: verify the per-client spin_lock is properly
+// acquired and released around every public op. Single-CPU at v1.0 so
+// the spin part is a no-op, but the acquire/release plumbing matters:
+// a missed release would leave c->lock.value at 1 after the op, which
+// would deadlock the NEXT op (assuming SMP). The clean state between
+// ops is the structural witness. SMP race detection awaits TSan.
+void test_9p_client_lock_released_between_ops(void) {
+    int rc = p9_loopback_init(&g_loopback, g_loopback_resp,
+                                sizeof(g_loopback_resp),
+                                canonical_responder, NULL);
+    TEST_EXPECT_EQ(rc, 0, "loopback init");
+
+    rc = p9_client_init(&g_client, 0, 8192,
+                         p9_loopback_ops_for(&g_loopback),
+                         g_recv_buf, sizeof(g_recv_buf));
+    TEST_EXPECT_EQ(rc, 0, "client init");
+    TEST_EXPECT_EQ((u64)g_client.lock.value, (u64)0,
+                    "lock unlocked at init");
+
+    drive_client_open(&g_client, &g_loopback);
+    TEST_EXPECT_EQ((u64)g_client.lock.value, (u64)0,
+                    "lock released after handshake");
+
+    // Walk + clunk sequence — exercises walk + clunk lock paths.
+    p9_client_walk_one(&g_client, 0, 5, (const u8 *)"a", 1, NULL);
+    TEST_EXPECT_EQ((u64)g_client.lock.value, (u64)0,
+                    "lock released after walk");
+
+    p9_client_clunk(&g_client, 5);
+    TEST_EXPECT_EQ((u64)g_client.lock.value, (u64)0,
+                    "lock released after clunk");
+
+    // alloc_fid path also acquires + releases.
+    u32 fid1 = p9_client_alloc_fid(&g_client);
+    TEST_EXPECT_EQ((u64)g_client.lock.value, (u64)0,
+                    "lock released after alloc_fid");
+    u32 fid2 = p9_client_alloc_fid(&g_client);
+    TEST_EXPECT_EQ((u64)g_client.lock.value, (u64)0,
+                    "lock released after second alloc_fid");
+    TEST_ASSERT(fid2 == fid1 + 1, "alloc_fid is monotonic under lock");
+
+    // Diagnostic read path.
+    (void)p9_client_is_open(&g_client);
+    TEST_EXPECT_EQ((u64)g_client.lock.value, (u64)0,
+                    "lock released after is_open");
+    (void)p9_client_inflight(&g_client);
+    TEST_EXPECT_EQ((u64)g_client.lock.value, (u64)0,
+                    "lock released after inflight");
 
     p9_client_destroy(&g_client);
     p9_loopback_destroy(&g_loopback);

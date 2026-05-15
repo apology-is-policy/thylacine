@@ -100,6 +100,13 @@
 (*                                BUGGY_RFORK_ELEVATE=TRUE — counter-    *)
 (*                                example where rfork grants child more  *)
 (*                                caps than the parent currently holds.  *)
+(*   handles_buggy_spawn_fds_elevate.cfg                                   *)
+(*                                BUGGY_SPAWN_FDS_ELEVATE=TRUE — R15-c   *)
+(*                                counterexample where SYS_SPAWN_WITH_FDS*)
+(*                                installs a child handle with rights NOT*)
+(*                                a subset of the parent slot's rights   *)
+(*                                (the F231 bug class). Caught by the    *)
+(*                                new SpawnFdsRightsMonotonic invariant. *)
 (*                                                                         *)
 (* Invariants enforced (TLC-checked):                                      *)
 (*                                                                         *)
@@ -120,6 +127,17 @@
 (*                        rfork time for child=proc_caps[parent]).      *)
 (*                        ARCH §28 I-2 (capability monotonic reduction). *)
 (*                                                                         *)
+(*   SpawnFdsRightsMonotonic                                              *)
+(*                      — every handle in a child Proc with via="spawn"  *)
+(*                        carries rights \subseteq the parent's rights   *)
+(*                        on the same kobj AT spawn time. R15-c F232:    *)
+(*                        spec-level companion to F231's impl close. The *)
+(*                        spawn_inherits ghost variable records the      *)
+(*                        parent's rights snapshot at RforkWithFds time;  *)
+(*                        the invariant cross-checks every child handle  *)
+(*                        against that record. Bug class BuggySpawnFds-  *)
+(*                        Elevate skips the rights-subset guard.         *)
+(*                                                                         *)
 (* See ARCHITECTURE.md §13 (capabilities), §18 (handles), §28 invariants. *)
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets
@@ -139,7 +157,8 @@ CONSTANTS
     BUGGY_HW_DUP,           \* P4-Ib: enables BuggyHwDup (dup of hw kobj)
     BUGGY_HW_OVERLAP,       \* P4-Ib: enables BuggyHwOverlap (double-alloc of hw kobj)
     BUGGY_HW_CREATE_NO_CAP, \* P4-Ib: enables BuggyHwCreateNoCap (hw alloc without cap)
-    BUGGY_RFORK_ELEVATE     \* P4-Ic3: enables BuggyRforkElevate (rfork grants > parent)
+    BUGGY_RFORK_ELEVATE,    \* P4-Ic3: enables BuggyRforkElevate (rfork grants > parent)
+    BUGGY_SPAWN_FDS_ELEVATE \* R15-c F232: enables BuggySpawnFdsElevate (spawn-with-fds installs child rights > parent slot rights)
 
 KObjs == TxKObjs \cup HwKObjs
 
@@ -157,6 +176,7 @@ ASSUME BUGGY_HW_DUP \in BOOLEAN
 ASSUME BUGGY_HW_OVERLAP \in BOOLEAN
 ASSUME BUGGY_HW_CREATE_NO_CAP \in BOOLEAN
 ASSUME BUGGY_RFORK_ELEVATE \in BOOLEAN
+ASSUME BUGGY_SPAWN_FDS_ELEVATE \in BOOLEAN
 
 (***************************************************************************)
 (* ProcRoot is the proc that starts with full capabilities (Caps). All   *)
@@ -174,12 +194,20 @@ InitialCapsOf(p) == IF p = ProcRoot THEN Caps ELSE {}
 (*   "orig"   — kernel grant via HandleAlloc.                             *)
 (*   "dup"    — duplicated within the proc via HandleDup.                 *)
 (*   "9p"     — transferred via a 9P session (HandleTransferVia9P).       *)
+(*   "spawn"  — installed at spawn-with-fds time (RforkWithFds; R15-c).   *)
 (*   "direct" — BUGGY only: cross-proc transfer with no session.          *)
 (***************************************************************************)
 HandleRecord == [kobj : KObjs,
                  rights : SUBSET Rights,
                  origin_proc : Procs,
-                 via : {"orig", "dup", "9p", "direct"}]
+                 via : {"orig", "dup", "9p", "spawn", "direct"}]
+
+(***************************************************************************)
+(* SpawnInherit ghost record: persists the parent's rights AT THE TIME a   *)
+(* spawn-fd handle is installed in a child. The SpawnFdsRightsMonotonic    *)
+(* invariant cross-checks every "spawn"-via handle against the record.    *)
+(***************************************************************************)
+SpawnInherit == [child : Procs, kobj : KObjs, parent_rights : SUBSET Rights]
 
 VARIABLES
     handles,        \* [Procs -> SUBSET HandleRecord]
@@ -187,9 +215,10 @@ VARIABLES
     kobjs_alive,    \* SUBSET KObjs — kobjs that have been HandleAlloc'd
     proc_caps,      \* [Procs -> SUBSET Caps]
     proc_ceiling,   \* [Procs -> SUBSET Caps] — P4-Ic3 dynamic cap ceiling
-    sessions        \* SUBSET (Procs \X Procs) — directional 9P session pairs
+    sessions,       \* SUBSET (Procs \X Procs) — directional 9P session pairs
+    spawn_inherits  \* SUBSET SpawnInherit — R15-c F232 ghost ledger
 
-vars == <<handles, origin_rights, kobjs_alive, proc_caps, proc_ceiling, sessions>>
+vars == <<handles, origin_rights, kobjs_alive, proc_caps, proc_ceiling, sessions, spawn_inherits>>
 
 TypeOk ==
     /\ handles \in [Procs -> SUBSET HandleRecord]
@@ -198,11 +227,13 @@ TypeOk ==
     /\ proc_caps \in [Procs -> SUBSET Caps]
     /\ proc_ceiling \in [Procs -> SUBSET Caps]
     /\ sessions \subseteq (Procs \X Procs)
+    /\ spawn_inherits \subseteq SpawnInherit
 
 (***************************************************************************)
 (* Init: no kobjs alive; no handles; origin_rights all-empty placeholder; *)
 (* proc_caps initialized per InitialCapsOf; proc_ceiling matches initial  *)
-(* caps (ProcRoot=Caps universe, non-root=empty); no 9P sessions open.    *)
+(* caps (ProcRoot=Caps universe, non-root=empty); no 9P sessions open;    *)
+(* no spawn-fd inheritances recorded.                                      *)
 (***************************************************************************)
 Init ==
     /\ handles = [p \in Procs |-> {}]
@@ -211,6 +242,7 @@ Init ==
     /\ proc_caps = [p \in Procs |-> InitialCapsOf(p)]
     /\ proc_ceiling = [p \in Procs |-> InitialCapsOf(p)]
     /\ sessions = {}
+    /\ spawn_inherits = {}
 
 (***************************************************************************)
 (* HandleAlloc(p, k, granted) — kernel creates kobj k (of its statically *)
@@ -244,7 +276,7 @@ HandleAlloc(p, k, granted) ==
                                                   rights |-> granted,
                                                   origin_proc |-> p,
                                                   via |-> "orig"]}]
-    /\ UNCHANGED <<proc_caps, proc_ceiling, sessions>>
+    /\ UNCHANGED <<proc_caps, proc_ceiling, sessions, spawn_inherits>>
 
 (***************************************************************************)
 (* HandleClose(p, h) — releases h from p's table.                         *)
@@ -254,7 +286,7 @@ HandleAlloc(p, k, granted) ==
 HandleClose(p, h) ==
     /\ h \in handles[p]
     /\ handles' = [handles EXCEPT ![p] = @ \ {h}]
-    /\ UNCHANGED <<origin_rights, kobjs_alive, proc_caps, proc_ceiling, sessions>>
+    /\ UNCHANGED <<origin_rights, kobjs_alive, proc_caps, proc_ceiling, sessions, spawn_inherits>>
 
 (***************************************************************************)
 (* HandleDup(p, h, new_rights) — creates a fresh handle in p's table     *)
@@ -282,7 +314,7 @@ HandleDup(p, h, new_rights) ==
                                                   rights |-> new_rights,
                                                   origin_proc |-> h.origin_proc,
                                                   via |-> "dup"]}]
-    /\ UNCHANGED <<origin_rights, kobjs_alive, proc_caps, proc_ceiling, sessions>>
+    /\ UNCHANGED <<origin_rights, kobjs_alive, proc_caps, proc_ceiling, sessions, spawn_inherits>>
 
 (***************************************************************************)
 (* BuggyDupElevate(p, h, new_rights) — bug class: dup creates a handle  *)
@@ -304,7 +336,7 @@ BuggyDupElevate(p, h, new_rights) ==
                                                   rights |-> new_rights,
                                                   origin_proc |-> h.origin_proc,
                                                   via |-> "dup"]}]
-    /\ UNCHANGED <<origin_rights, kobjs_alive, proc_caps, proc_ceiling, sessions>>
+    /\ UNCHANGED <<origin_rights, kobjs_alive, proc_caps, proc_ceiling, sessions, spawn_inherits>>
 
 (***************************************************************************)
 (* OpenSession / CloseSession — 9P session lifecycle modeled abstractly. *)
@@ -318,12 +350,12 @@ OpenSession(src, dst) ==
     /\ src # dst
     /\ <<src, dst>> \notin sessions
     /\ sessions' = sessions \cup {<<src, dst>>}
-    /\ UNCHANGED <<handles, origin_rights, kobjs_alive, proc_caps, proc_ceiling>>
+    /\ UNCHANGED <<handles, origin_rights, kobjs_alive, proc_caps, proc_ceiling, spawn_inherits>>
 
 CloseSession(src, dst) ==
     /\ <<src, dst>> \in sessions
     /\ sessions' = sessions \ {<<src, dst>>}
-    /\ UNCHANGED <<handles, origin_rights, kobjs_alive, proc_caps, proc_ceiling>>
+    /\ UNCHANGED <<handles, origin_rights, kobjs_alive, proc_caps, proc_ceiling, spawn_inherits>>
 
 (***************************************************************************)
 (* HandleTransferVia9P(src, dst, h, new_rights) — copies h from src to   *)
@@ -354,7 +386,7 @@ HandleTransferVia9P(src, dst, h, new_rights) ==
                                                     rights |-> new_rights,
                                                     origin_proc |-> h.origin_proc,
                                                     via |-> "9p"]}]
-    /\ UNCHANGED <<origin_rights, kobjs_alive, proc_caps, proc_ceiling, sessions>>
+    /\ UNCHANGED <<origin_rights, kobjs_alive, proc_caps, proc_ceiling, sessions, spawn_inherits>>
 
 (***************************************************************************)
 (* BuggyHwTransfer(src, dst, h, new_rights) — bug class: a hardware-typed*)
@@ -380,7 +412,7 @@ BuggyHwTransfer(src, dst, h, new_rights) ==
                                                     rights |-> new_rights,
                                                     origin_proc |-> h.origin_proc,
                                                     via |-> "9p"]}]
-    /\ UNCHANGED <<origin_rights, kobjs_alive, proc_caps, proc_ceiling, sessions>>
+    /\ UNCHANGED <<origin_rights, kobjs_alive, proc_caps, proc_ceiling, sessions, spawn_inherits>>
 
 (***************************************************************************)
 (* BuggyDirectTransfer(src, dst, h, new_rights) — bug class: a syscall  *)
@@ -406,7 +438,7 @@ BuggyDirectTransfer(src, dst, h, new_rights) ==
                                                     rights |-> new_rights,
                                                     origin_proc |-> h.origin_proc,
                                                     via |-> "direct"]}]
-    /\ UNCHANGED <<origin_rights, kobjs_alive, proc_caps, proc_ceiling, sessions>>
+    /\ UNCHANGED <<origin_rights, kobjs_alive, proc_caps, proc_ceiling, sessions, spawn_inherits>>
 
 (***************************************************************************)
 (* ReduceCaps(p, lost) — proc voluntarily drops capability bits.          *)
@@ -430,7 +462,7 @@ ReduceCaps(p, lost) ==
     /\ (CapHwCreate \in lost) =>
            ~(\E h \in handles[p] : h.kobj \in HwKObjs)
     /\ proc_caps' = [proc_caps EXCEPT ![p] = @ \ lost]
-    /\ UNCHANGED <<handles, origin_rights, kobjs_alive, proc_ceiling, sessions>>
+    /\ UNCHANGED <<handles, origin_rights, kobjs_alive, proc_ceiling, sessions, spawn_inherits>>
 
 (***************************************************************************)
 (* BuggyCapsElevate(p, gained) — bug class: rfork raises a proc's caps  *)
@@ -461,7 +493,7 @@ BuggyCapsElevate(p, gained) ==
     /\ gained \cap proc_caps[p] = {}
     /\ gained # {}
     /\ proc_caps' = [proc_caps EXCEPT ![p] = @ \cup gained]
-    /\ UNCHANGED <<handles, origin_rights, kobjs_alive, proc_ceiling, sessions>>
+    /\ UNCHANGED <<handles, origin_rights, kobjs_alive, proc_ceiling, sessions, spawn_inherits>>
 
 (***************************************************************************)
 (* BuggyHwDup(p, h, new_rights) — P4-Ib bug class: dup creates a second  *)
@@ -485,7 +517,7 @@ BuggyHwDup(p, h, new_rights) ==
                                                   rights |-> new_rights,
                                                   origin_proc |-> h.origin_proc,
                                                   via |-> "dup"]}]
-    /\ UNCHANGED <<origin_rights, kobjs_alive, proc_caps, proc_ceiling, sessions>>
+    /\ UNCHANGED <<origin_rights, kobjs_alive, proc_caps, proc_ceiling, sessions, spawn_inherits>>
 
 (***************************************************************************)
 (* BuggyHwOverlap(p, k, granted) — P4-Ib bug class: kernel allocates a   *)
@@ -523,7 +555,7 @@ BuggyHwOverlap(p, k, granted) ==
                                                   rights |-> granted,
                                                   origin_proc |-> p,
                                                   via |-> "orig"]}]
-    /\ UNCHANGED <<origin_rights, kobjs_alive, proc_caps, proc_ceiling, sessions>>
+    /\ UNCHANGED <<origin_rights, kobjs_alive, proc_caps, proc_ceiling, sessions, spawn_inherits>>
 
 (***************************************************************************)
 (* BuggyHwCreateNoCap(p, k, granted) — P4-Ib bug class: kernel grants a *)
@@ -551,7 +583,7 @@ BuggyHwCreateNoCap(p, k, granted) ==
                                                   rights |-> granted,
                                                   origin_proc |-> p,
                                                   via |-> "orig"]}]
-    /\ UNCHANGED <<proc_caps, proc_ceiling, sessions>>
+    /\ UNCHANGED <<proc_caps, proc_ceiling, sessions, spawn_inherits>>
 
 (***************************************************************************)
 (* RforkWithCaps(parent, child, granted) — P4-Ic3 kernel-internal       *)
@@ -580,7 +612,7 @@ RforkWithCaps(parent, child, granted) ==
     /\ handles[child] = {}
     /\ proc_ceiling' = [proc_ceiling EXCEPT ![child] = proc_caps[parent]]
     /\ proc_caps' = [proc_caps EXCEPT ![child] = granted]
-    /\ UNCHANGED <<handles, origin_rights, kobjs_alive, sessions>>
+    /\ UNCHANGED <<handles, origin_rights, kobjs_alive, sessions, spawn_inherits>>
 
 (***************************************************************************)
 (* BuggyRforkElevate(parent, child, gained) — P4-Ic3 bug class: kernel  *)
@@ -609,7 +641,89 @@ BuggyRforkElevate(parent, child, gained) ==
     /\ ~(gained \subseteq proc_caps[parent])
     /\ proc_ceiling' = [proc_ceiling EXCEPT ![child] = proc_caps[parent]]
     /\ proc_caps' = [proc_caps EXCEPT ![child] = gained]
-    /\ UNCHANGED <<handles, origin_rights, kobjs_alive, sessions>>
+    /\ UNCHANGED <<handles, origin_rights, kobjs_alive, sessions, spawn_inherits>>
+
+(***************************************************************************)
+(* RforkWithFds(parent, child, h, new_rights) — R15-c F232. Models the     *)
+(* SYS_SPAWN_WITH_FDS / SYS_SPAWN_FULL fd-inheritance pattern: parent's    *)
+(* handle h is replicated into child with rights == h.rights's subset.     *)
+(*                                                                         *)
+(* This is distinct from HandleTransferVia9P in three ways:                *)
+(*                                                                         *)
+(*   1. No session precondition. Spawn-with-fds is kernel-internal — the   *)
+(*      kernel inherits fds during rfork's thunk, no 9P round-trip. The    *)
+(*      I-4 invariant ("transfer only via 9P sessions") doesn't apply      *)
+(*      here because no inter-process boundary is crossed at the syscall   *)
+(*      surface — the kernel ITSELF acts as the trusted carrier (the same  *)
+(*      idiom POSIX exec uses for FD inheritance from one Proc image to    *)
+(*      the next).                                                          *)
+(*                                                                         *)
+(*   2. No RIGHT_TRANSFER precondition. Parent does not need to mark the   *)
+(*      slot as transferable — every slot in parent is eligible. (The      *)
+(*      orthogonal CAP_SPAWN gate at the syscall surface is not modeled    *)
+(*      here; capability gates are a separate concern from rights flow.)   *)
+(*                                                                         *)
+(*   3. Provenance via="spawn" (not "9p"). The SpawnFdsRightsMonotonic      *)
+(*      invariant treats spawn-via handles specifically, cross-checking    *)
+(*      against the spawn_inherits ledger.                                  *)
+(*                                                                         *)
+(* Maps to `kernel/syscall.c::sys_bump_inherit_fds` + the spawn-with-fds   *)
+(* thunk's per-fd `handle_alloc` loop. The R15-a F231 fix made the         *)
+(* thunk use the PARENT'S CAPTURED slot rights (struct                     *)
+(* spawn_with_fds_args::rights[]) rather than hardcoded                    *)
+(* RIGHT_READ|RIGHT_WRITE|RIGHT_TRANSFER; this spec action pins the same   *)
+(* discipline at the model level.                                          *)
+(*                                                                         *)
+(* Note: the action fires per-handle (matches the impl's per-fd loop). A   *)
+(* single spawn-with-fds call can fire RforkWithFds N times if N fds are   *)
+(* inherited; each call inserts one spawn_inherits ledger entry.           *)
+(***************************************************************************)
+RforkWithFds(parent, child, h, new_rights) ==
+    /\ parent # child
+    /\ h \in handles[parent]
+    /\ h.kobj \in TxKObjs                       \* hw kobjs cannot inherit (I-5)
+    /\ new_rights \subseteq h.rights            \* THE KEY GUARD (F231 closed)
+    /\ new_rights # {}
+    /\ handles' = [handles EXCEPT ![child] = @ \cup {[kobj |-> h.kobj,
+                                                      rights |-> new_rights,
+                                                      origin_proc |-> h.origin_proc,
+                                                      via |-> "spawn"]}]
+    /\ spawn_inherits' = spawn_inherits \cup {[child |-> child,
+                                                kobj |-> h.kobj,
+                                                parent_rights |-> h.rights]}
+    /\ UNCHANGED <<origin_rights, kobjs_alive, proc_caps, proc_ceiling, sessions>>
+
+(***************************************************************************)
+(* BuggySpawnFdsElevate(parent, child, h, fabricated_rights) — R15-c F232  *)
+(* bug class. The spawn-with-fds handler installs a child handle with      *)
+(* rights NOT a subset of the parent slot's rights. Captures the pre-      *)
+(* R15-a F231 bug shape (handle_alloc hardcoded RIGHT_READ|WRITE|TRANSFER  *)
+(* regardless of what the parent had).                                      *)
+(*                                                                         *)
+(* Differs from RforkWithFds by skipping the `new_rights \subseteq         *)
+(* h.rights` precondition. The spawn_inherits ledger still records the     *)
+(* parent's ACTUAL rights at fork time (the bug fabricates only on the     *)
+(* child side, not in the ledger), so SpawnFdsRightsMonotonic catches the  *)
+(* divergence.                                                              *)
+(*                                                                         *)
+(* Caught by `SpawnFdsRightsMonotonic` invariant.                          *)
+(***************************************************************************)
+BuggySpawnFdsElevate(parent, child, h, fabricated_rights) ==
+    /\ BUGGY_SPAWN_FDS_ELEVATE
+    /\ parent # child
+    /\ h \in handles[parent]
+    /\ h.kobj \in TxKObjs
+    /\ fabricated_rights \subseteq Rights
+    /\ fabricated_rights # {}
+    /\ ~(fabricated_rights \subseteq h.rights)  \* THE BUG: skips subset
+    /\ handles' = [handles EXCEPT ![child] = @ \cup {[kobj |-> h.kobj,
+                                                      rights |-> fabricated_rights,
+                                                      origin_proc |-> h.origin_proc,
+                                                      via |-> "spawn"]}]
+    /\ spawn_inherits' = spawn_inherits \cup {[child |-> child,
+                                                kobj |-> h.kobj,
+                                                parent_rights |-> h.rights]}
+    /\ UNCHANGED <<origin_rights, kobjs_alive, proc_caps, proc_ceiling, sessions>>
 
 (***************************************************************************)
 (* Next: disjunction of all actions. \E ranges over actual handles in a  *)
@@ -638,8 +752,30 @@ Next ==
            RforkWithCaps(parent, child, granted)
     \/ \E parent \in Procs : \E child \in Procs : \E gained \in SUBSET Caps :
            BuggyRforkElevate(parent, child, gained)
+    \/ \E parent \in Procs : \E child \in Procs : \E h \in handles[parent] : \E nr \in SUBSET Rights :
+           RforkWithFds(parent, child, h, nr)
+    \/ \E parent \in Procs : \E child \in Procs : \E h \in handles[parent] : \E fr \in SUBSET Rights :
+           BuggySpawnFdsElevate(parent, child, h, fr)
 
 Spec == Init /\ [][Next]_vars
+
+(***************************************************************************)
+(* State constraint: bounds TLC's exploration. R15-c added the              *)
+(* RforkWithFds + BuggySpawnFdsElevate actions and the spawn_inherits      *)
+(* ghost ledger, which multiplied the reachable state space (every dup or  *)
+(* spawn-fd inheritance can fire on every prior handle, accumulating       *)
+(* per-Proc handle tables with combinatorially many rights subsets).      *)
+(*                                                                         *)
+(* The constraint bounds per-Proc handle count and ledger size. Bug-class  *)
+(* cfgs find counterexamples at very small depths (BuggySpawnFdsElevate    *)
+(* surfaces at depth 4), so the bound doesn't compromise buggy-cfg         *)
+(* coverage. The clean cfg explores millions of states under the bound;   *)
+(* tighter than that is unrealistic and looser is impractical at the      *)
+(* current spec dimensions.                                                 *)
+(***************************************************************************)
+StateConstraint ==
+    /\ \A p \in Procs : Cardinality(handles[p]) <= 2
+    /\ Cardinality(spawn_inherits) <= 2
 
 (***************************************************************************)
 (* ============================== INVARIANTS ============================== *)
@@ -727,6 +863,38 @@ HwHandleImpliesCap ==
     \A p \in Procs : \A h \in handles[p] :
         (h.kobj \in HwKObjs) => CapHwCreate \in proc_caps[p]
 
+(***************************************************************************)
+(* SpawnFdsRightsMonotonic — R15-c F232. For every "spawn"-via handle in   *)
+(* a child Proc, the child's rights must be a subset of the parent's      *)
+(* rights AT THE TIME OF INHERITANCE (recorded in spawn_inherits).         *)
+(*                                                                         *)
+(* The ghost ledger spawn_inherits records (child, kobj, parent_rights)   *)
+(* triples written atomically by RforkWithFds. The invariant requires the *)
+(* child handle's rights to be a subset of the recorded parent_rights.    *)
+(*                                                                         *)
+(* Captures the R15-a F231 closure at the spec level. Pre-fix, the         *)
+(* kernel's spawn-with-fds handler hardcoded                                *)
+(* RIGHT_READ|RIGHT_WRITE|RIGHT_TRANSFER for every child slot regardless  *)
+(* of the parent slot's actual rights — a child whose parent had only     *)
+(* RIGHT_READ would emerge with RIGHT_READ|WRITE|TRANSFER, violating       *)
+(* this invariant under BuggySpawnFdsElevate.                              *)
+(*                                                                         *)
+(* Why distinct from RightsCeiling: RightsCeiling bounds rights by         *)
+(* origin_rights[k] — adequate for the BuggyDupElevate / BuggyHwTransfer   *)
+(* shapes that fabricate beyond ORIGINAL grant. F231's shape fabricates   *)
+(* WITHIN origin (parent had {R}, child got {R,W} where origin_rights had *)
+(* {R,W,T}) so RightsCeiling does NOT catch it. SpawnFdsRightsMonotonic    *)
+(* bounds by parent's CURRENT rights (at fork) instead — which is the     *)
+(* discipline the impl enforces.                                            *)
+(***************************************************************************)
+SpawnFdsRightsMonotonic ==
+    \A p \in Procs : \A h \in handles[p] :
+        h.via = "spawn" =>
+            \E sr \in spawn_inherits :
+                /\ sr.child = p
+                /\ sr.kobj = h.kobj
+                /\ h.rights \subseteq sr.parent_rights
+
 Invariants ==
     /\ TypeOk
     /\ RightsCeiling
@@ -736,5 +904,6 @@ Invariants ==
     /\ NoHwDup
     /\ HwResourceExclusive
     /\ HwHandleImpliesCap
+    /\ SpawnFdsRightsMonotonic
 
 ====
