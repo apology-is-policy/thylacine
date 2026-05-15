@@ -40,6 +40,11 @@ pub const T_SYS_IRQ_WAIT: u64        = 4;
 pub const T_SYS_MMIO_MAP: u64        = 5;
 pub const T_SYS_DMA_CREATE: u64      = 6;
 pub const T_SYS_DMA_MAP: u64         = 7;
+// P5-fd-* family — byte I/O surface used by corvus's Spoor server loop.
+pub const T_SYS_PIPE: u64            = 8;
+pub const T_SYS_READ: u64            = 9;
+pub const T_SYS_WRITE: u64           = 10;
+pub const T_SYS_CLOSE: u64           = 11;
 // P5-corvus-syscalls (kernel side at 0db0dcf/d10d4ee). v1.0 hardening
 // syscalls used by /sbin/corvus startup.
 pub const T_SYS_MLOCKALL: u64        = 16;
@@ -47,6 +52,7 @@ pub const T_SYS_SET_DUMPABLE: u64    = 17;
 pub const T_SYS_SET_TRACEABLE: u64   = 18;
 pub const T_SYS_EXPLICIT_BZERO: u64  = 19;
 pub const T_SYS_GETRANDOM: u64       = 20;
+pub const T_SYS_SPAWN_FULL: u64      = 25;
 
 // =============================================================================
 // Caps — MUST mirror CAP_* bits in kernel/include/thylacine/caps.h.
@@ -252,6 +258,97 @@ pub unsafe fn t_dma_map(handle: i64, vaddr: u64, prot: u32) -> i64 {
         in("x1") vaddr,
         in("x2") prot as u64,
         in("x8") T_SYS_DMA_MAP,
+        options(nostack)
+    );
+    x0
+}
+
+// =============================================================================
+// P5-fd-* family — byte I/O surface.
+// =============================================================================
+//
+// Mirror of usr/lib/libt/include/thyla/syscall.h::t_pipe / t_read /
+// t_write / t_close. The kernel-side handlers landed at P5-fd-pipe
+// (0f66f5c/65293f5), P5-fd-rw (54d900b/a134782), P5-fd-syscalls
+// (5fd72f6/3948bd4).
+
+// t_pipe — create a connected Spoor pair. On success, returns the
+// (rd_fd, wr_fd) tuple. On failure (table full / OOM), returns
+// (-1, 0).
+//
+// Both fds are KOBJ_SPOOR handles installed in the caller's table.
+// The 4 KiB ring buffer is shared between them; spoor_clunk on either
+// side propagates EOF to the other.
+#[inline(always)]
+pub unsafe fn t_pipe() -> (i64, i64) {
+    let mut x0: i64;
+    let mut x1: i64;
+    asm!(
+        "svc #0",
+        out("x0") x0,
+        out("x1") x1,
+        in("x8") T_SYS_PIPE,
+        options(nostack)
+    );
+    (x0, x1)
+}
+
+// t_read — read up to `len` bytes from `fd` into `buf`. Returns:
+//   > 0  : bytes actually read (may be < len; caller loops for full reads)
+//   = 0  : EOF (peer closed write side)
+//   < 0  : error (-1 on invalid fd / bad buf / fault)
+//
+// Per-call cap is 4 KiB (kernel-side SYS_RW_MAX); userspace loops for
+// larger transfers.
+//
+// Safety: caller must ensure `buf` points to at least `len` writable
+// bytes in valid user-VA memory.
+#[inline(always)]
+pub unsafe fn t_read(fd: i64, buf: *mut u8, len: usize) -> i64 {
+    let mut x0: i64 = fd;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") buf as u64,
+        in("x2") len as u64,
+        in("x8") T_SYS_READ,
+        options(nostack)
+    );
+    x0
+}
+
+// t_write — write up to `len` bytes from `buf` to `fd`. Returns:
+//   > 0  : bytes actually written (may be < len)
+//   = 0  : peer's read side closed (EOF on write)
+//   < 0  : error (-1)
+//
+// Safety: caller must ensure `buf` points to at least `len` readable
+// bytes in valid user-VA memory.
+#[inline(always)]
+pub unsafe fn t_write(fd: i64, buf: *const u8, len: usize) -> i64 {
+    let mut x0: i64 = fd;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") buf as u64,
+        in("x2") len as u64,
+        in("x8") T_SYS_WRITE,
+        options(nostack)
+    );
+    x0
+}
+
+// t_close — release the handle at `fd`. For KOBJ_SPOOR handles the
+// kernel's release path routes through spoor_clunk (atomic refcount
+// drop; sets pipe EOF + wakes the other side per P5-pipe-blocking).
+// Returns 0 on success, -1 on invalid fd.
+#[inline(always)]
+pub unsafe fn t_close(fd: i64) -> i64 {
+    let mut x0: i64 = fd;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x8") T_SYS_CLOSE,
         options(nostack)
     );
     x0
