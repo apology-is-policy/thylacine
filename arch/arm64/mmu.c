@@ -48,6 +48,7 @@
 #include <stddef.h>           // size_t (P3-Bb mmu_map_mmio)
 #include <stdint.h>
 #include <thylacine/extinction.h>   // extinction (P3-Bb mmu_map_mmio guards)
+#include <thylacine/smp.h>          // g_secondary_boot_stacks (P5-secondary-stack-guard)
 #include <thylacine/types.h>
 
 // ---------------------------------------------------------------------------
@@ -344,6 +345,19 @@ static void build_page_tables(u64 slide) {
         u64 guard_pa = (u64)(uintptr_t)_boot_stack_guard;
         u32 guard_idx = (u32)((guard_pa - kernel_2mib_pa) >> PAGE_SHIFT);
         l3_kernel[guard_idx] = 0;
+
+        // P5-secondary-stack-guard: the leading guard page of every
+        // secondary boot-stack slot → non-present, mirroring the boot
+        // CPU's _boot_stack_guard above. g_secondary_boot_stacks is a
+        // page-aligned BSS array inside this 2 MiB kernel block; slot c's
+        // guard is its first page. A secondary CPU's stack overflow
+        // lands here and faults instead of corrupting the adjacent slot
+        // or BSS (fault.c addr_is_stack_guard → "kernel stack overflow").
+        for (unsigned c = 0; c < DTB_MAX_CPUS - 1; c++) {
+            u64 sg_pa  = (u64)(uintptr_t)&g_secondary_boot_stacks[c].guard[0];
+            u32 sg_idx = (u32)((sg_pa - kernel_2mib_pa) >> PAGE_SHIFT);
+            l3_kernel[sg_idx] = 0;
+        }
     }
 
     // TTBR0: link the kernel L3 into the appropriate L2 entry of the
@@ -458,6 +472,15 @@ static void build_page_tables(u64 slide) {
                 u64 guard_pa = (u64)(uintptr_t)_boot_stack_guard;
                 u32 guard_idx = (u32)((guard_pa - kernel_2mib_pa) >> PAGE_SHIFT);
                 l3_directmap_kernel[guard_idx] = 0;
+
+                // P5-secondary-stack-guard: secondary boot-stack guard
+                // pages — invalid in the direct-map alias too, so a
+                // direct-map probe cannot sidestep the guard.
+                for (unsigned c = 0; c < DTB_MAX_CPUS - 1; c++) {
+                    u64 sg_pa  = (u64)(uintptr_t)&g_secondary_boot_stacks[c].guard[0];
+                    u32 sg_idx = (u32)((sg_pa - kernel_2mib_pa) >> PAGE_SHIFT);
+                    l3_directmap_kernel[sg_idx] = 0;
+                }
 
                 // Wire the kernel-image 2 MiB → l3_directmap_kernel.
                 l2_directmap_kernel[kernel_l2_idx] =

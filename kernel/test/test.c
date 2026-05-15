@@ -51,6 +51,7 @@ void test_smp_exception_stack_smoke(void);
 void test_smp_per_cpu_idle_smoke(void);
 void test_smp_ipi_resched_smoke(void);
 void test_smp_work_stealing_smoke(void);
+void test_smp_secondary_stack_guard_layout(void);
 void test_proc_rfork_basic_smoke(void);
 void test_proc_rfork_exits_status(void);
 void test_proc_rfork_stress_1000(void);
@@ -105,6 +106,7 @@ void test_exec_setup_segment_data_copied(void);
 void test_exec_setup_constraints(void);
 void test_exec_setup_multi_segment(void);
 void test_exec_setup_lifecycle_round_trip(void);
+void test_exec_user_stack_guard(void);
 void test_syscall_dispatch_unknown(void);
 void test_syscall_dispatch_puts_smoke(void);
 void test_syscall_dispatch_exits_ok(void);
@@ -506,6 +508,9 @@ struct test_case g_tests[] = {
     { "smp.per_cpu_idle_smoke",        test_smp_per_cpu_idle_smoke,        false, NULL },
     { "smp.ipi_resched_smoke",         test_smp_ipi_resched_smoke,         false, NULL },
     { "smp.work_stealing_smoke",       test_smp_work_stealing_smoke,       false, NULL },
+    { "smp.secondary_stack_guard_layout",
+                                       test_smp_secondary_stack_guard_layout,
+                                                                           false, NULL },
     { "proc.rfork_basic_smoke",        test_proc_rfork_basic_smoke,        false, NULL },
     { "proc.rfork_exits_status",       test_proc_rfork_exits_status,       false, NULL },
     { "proc.rfork_stress_1000",        test_proc_rfork_stress_1000,        false, NULL },
@@ -578,6 +583,7 @@ struct test_case g_tests[] = {
     { "exec.setup_lifecycle_round_trip",
                                        test_exec_setup_lifecycle_round_trip,
                                                                            false, NULL },
+    { "exec.user_stack_guard",         test_exec_user_stack_guard,         false, NULL },
     { "syscall.dispatch_unknown",      test_syscall_dispatch_unknown,      false, NULL },
     { "syscall.dispatch_puts_smoke",   test_syscall_dispatch_puts_smoke,   false, NULL },
     { "syscall.dispatch_exits_ok",     test_syscall_dispatch_exits_ok,     false, NULL },

@@ -134,25 +134,25 @@ under Model 2 (`DUAL_MODE = TRUE`, `sched_ctxsw_buggy.cfg`) violates it
 Landed at `P5-el1h-kernel`. Verified: 442/442 PASS × default + UBSan, 0
 `EXTINCTION` lines, `sched_ctxsw.tla` clean + buggy verified. Adversarial
 audit of the exception-entry + boot + scheduler surfaces: no P0; F2/F3
-fixed in-chunk; F1 deferred (below).
+fixed in-chunk; F1 closed by P5-secondary-stack-guard (see Known
+caveats).
 
 ## Known caveats
 
-- **Secondary-CPU boot-stack guard pages (audit F1, deferred).**
-  `_boot_stack_top` (the boot CPU's stack) has a 4 KiB guard page;
-  `g_secondary_boot_stacks` does not. Under the uniform-EL1h model a
-  secondary CPU's idle-thread exception frames are built on its
-  unguarded boot stack, so a stack overflow there corrupts adjacent BSS
-  silently rather than faulting. This is a pre-existing gap (the P2-Cc
-  per-CPU exception stacks were also unguarded) with bounded risk — the
-  per-CPU idle threads' stack usage is shallow (idle loop + one IRQ
-  frame + `sched()`); stolen threads run on their own guarded kstacks;
-  a 16 KiB overflow needs an independent runaway-recursion bug. The fix
-  — guard pages below each `g_secondary_boot_stacks` slot — re-touches
-  the boot path and is deferred to a focused follow-up (it pairs
-  naturally with the dedicated stack-overflow / SError handler-stack
-  hardening item, for which `g_exception_stacks` is the reserved
-  buffer).
+- **Secondary-CPU boot-stack guard pages (audit F1 — CLOSED by
+  P5-secondary-stack-guard).** `_boot_stack_top` (the boot CPU's stack)
+  has had a 4 KiB guard page since P1; `g_secondary_boot_stacks` did
+  not, so a secondary CPU's idle-thread stack overflow corrupted
+  adjacent BSS silently rather than faulting. P5-secondary-stack-guard
+  closed this: each `g_secondary_boot_stacks` slot is now a 4 KiB guard
+  page + 16 KiB usable stack, the guard page mapped no-access by
+  `build_page_tables` (mmu.c) in both the kernel-image L3 and the
+  direct-map alias. An overflow now faults — `addr_is_stack_guard`
+  recognizes the FAR → `extinction("kernel stack overflow")`. See
+  `docs/reference/17-smp-bringup.md` §"Secondary boot-stack guard
+  pages". (The dedicated stack-overflow / SError handler-stack on
+  `g_exception_stacks` remains a separate, still-deferred item — see
+  the next caveat.)
 - **Stack-overflow recovery.** With one stack bank, a kernel-stack
   overflow into the guard page faults recursively (`KERNEL_ENTRY`
   builds its frame on the same overflowing stack). A dedicated

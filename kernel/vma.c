@@ -85,6 +85,33 @@ struct Vma *vma_alloc(u64 vaddr_start, u64 vaddr_end, u32 prot,
     return v;
 }
 
+struct Vma *vma_alloc_guard(u64 vaddr_start, u64 vaddr_end) {
+    if (!g_vma_cache) extinction("vma_alloc_guard before vma_init");
+
+    if (vaddr_start >= vaddr_end)       return NULL;
+    if (vaddr_start & (PAGE_SIZE - 1))  return NULL;
+    if (vaddr_end   & (PAGE_SIZE - 1))  return NULL;
+
+    struct Vma *v = kmem_cache_alloc(g_vma_cache, KP_ZERO);
+    if (!v) return NULL;
+
+    v->magic         = VMA_MAGIC;
+    v->vaddr_start   = vaddr_start;
+    v->vaddr_end     = vaddr_end;
+    v->prot          = 0;       // no R/W/X — every fault into it is rejected
+    v->burrow        = NULL;    // no backing object: a guard owns no pages
+    v->burrow_offset = 0;
+    // next/prev left NULL via KP_ZERO; vma_insert wires them.
+
+    // No burrow_acquire_mapping: a guard VMA has no BURROW and thus does
+    // not participate in the BURROW dual-refcount lifecycle (specs/
+    // burrow.tla). vma_free's burrow_release_mapping is guarded by
+    // v->burrow != NULL, so the alloc/free pair stays balanced.
+
+    __atomic_fetch_add(&g_vma_allocated, 1u, __ATOMIC_RELAXED);
+    return v;
+}
+
 void vma_free(struct Vma *v) {
     if (!v)                     extinction("vma_free(NULL)");
     if (v->magic != VMA_MAGIC)  extinction("vma_free of corrupted/already-freed Vma");

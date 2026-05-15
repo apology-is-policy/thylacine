@@ -46,12 +46,19 @@ volatile u8 g_cpu_alive[DTB_MAX_CPUS];
 // by pac_apply_this_cpu (asm in start.S, called by every CPU).
 u64 g_pac_keys[8];
 
-// P2-Cb: per-secondary boot stacks. 7 secondaries × 16 KiB = 112 KiB BSS.
-// 16-byte aligned (AAPCS64 SP requirement). Used by secondary_entry
-// asm trampoline; later (P2-Cd+) replaced by per-CPU idle thread
-// stacks once the scheduler picks them.
-__attribute__((aligned(16)))
-char g_secondary_boot_stacks[DTB_MAX_CPUS - 1][SECONDARY_STACK_SIZE];
+// P2-Cb / P5-secondary-stack-guard: per-secondary boot stacks. 7
+// secondaries × 20 KiB slots (4 KiB guard + 16 KiB usable) = 140 KiB
+// BSS. Page-aligned so each slot's leading guard page is page-aligned
+// for mmu.c's L3-PTE zeroing. Used by the secondary_entry asm
+// trampoline and thereafter by each CPU's idle thread (idle threads
+// run on this stack — they do not own a per-thread kstack).
+//
+// The guard page of each slot is mapped no-access by build_page_tables
+// (mmu.c) so a secondary's stack overflow faults instead of silently
+// corrupting the adjacent slot or BSS. See smp.h + arch/arm64/mmu.c +
+// arch/arm64/fault.c.
+__attribute__((aligned(4096)))
+struct secondary_stack g_secondary_boot_stacks[DTB_MAX_CPUS - 1];
 
 // Per-CPU stack buffer — RESERVED. See smp.h for rationale.
 // 8 CPUs × 4 KiB = 32 KiB BSS. 16-byte aligned for AAPCS64 SP.

@@ -16,6 +16,9 @@
 #                     "EXTINCTION: BTI fault (...)"
 #   kstack_overflow — per-thread kstack guard page fires (P2-Dc) →
 #                     "EXTINCTION: kernel stack overflow"
+#   secondary_stack_guard — secondary-CPU boot-stack guard page fires
+#                     (P5-secondary-stack-guard) →
+#                     "EXTINCTION: kernel stack overflow"
 #
 # Deferred at v1.0 (post-v1.0 hardening pass):
 #   pac_mismatch — needs forged-LR inline asm; the resulting fault
@@ -38,7 +41,7 @@ BOOT_TIMEOUT="${BOOT_TIMEOUT:-10}"
 
 # variant → expected extinction substring (case-sensitive prefix match
 # against the EXTINCTION: line). Keep the case below in sync with this.
-ALL_VARIANTS="canary_smash wxe_violation bti_fault kstack_overflow"
+ALL_VARIANTS="canary_smash wxe_violation bti_fault kstack_overflow secondary_stack_guard"
 
 expected_for() {
     case "$1" in
@@ -46,6 +49,7 @@ expected_for() {
         wxe_violation)   echo "EXTINCTION: PTE violates W^X" ;;
         bti_fault)       echo "EXTINCTION: BTI fault" ;;
         kstack_overflow) echo "EXTINCTION: kernel stack overflow" ;;
+        secondary_stack_guard) echo "EXTINCTION: kernel stack overflow" ;;
         *)               echo "" ;;
     esac
 }
@@ -56,11 +60,11 @@ selected=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -v|--verbose) verbose=1; shift ;;
-        canary_smash|wxe_violation|bti_fault|kstack_overflow)
+        canary_smash|wxe_violation|bti_fault|kstack_overflow|secondary_stack_guard)
             selected="$selected $1"; shift ;;
         -h|--help)
             echo "Usage: $0 [-v] [variant...]"
-            echo "Variants: canary_smash wxe_violation bti_fault kstack_overflow"
+            echo "Variants: canary_smash wxe_violation bti_fault kstack_overflow secondary_stack_guard"
             exit 0
             ;;
         *) echo "Unknown arg: $1" >&2; exit 2 ;;

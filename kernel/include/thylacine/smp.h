@@ -54,14 +54,53 @@ extern volatile u8 g_cpu_alive[DTB_MAX_CPUS];
 //   [6]  apdb_hi   [7]  apdb_lo
 extern u64 g_pac_keys[8];
 
-// P2-Cb: per-secondary boot stacks. Used by the asm trampoline before
-// per_cpu_main switches to a real per-CPU thread stack (P2-Cd or
-// later when the scheduler picks an idle thread for this CPU).
+// P2-Cb: per-secondary boot stacks. Used by the asm trampoline and,
+// thereafter, by the per-CPU idle thread (idle threads do not own a
+// per-thread kstack — they run on this boot stack indefinitely).
 //
-// One stack per secondary (DTB_MAX_CPUS - 1 = 7). 16 KiB each. 16-byte
-// aligned (AAPCS64 SP requirement).
-#define SECONDARY_STACK_SIZE  16384u
-extern char g_secondary_boot_stacks[DTB_MAX_CPUS - 1][SECONDARY_STACK_SIZE];
+// P5-secondary-stack-guard: each per-CPU slot is a 4 KiB guard page
+// (mapped no-access) followed by the 16 KiB usable stack. The slot is
+// page-aligned; the stack grows DOWN from the top of `usable`, so an
+// overflow past the usable bottom crosses into `guard` and faults —
+// build_page_tables (mmu.c) zeroes the guard's L3 PTE, and
+// addr_is_stack_guard (fault.c) recognizes the FAR and extincts with
+// "kernel stack overflow". This mirrors the boot CPU's
+// `_boot_stack_guard` (kernel.ld + mmu.c). Before P5-secondary-stack-
+// guard the slots were a bare 16 KiB each with no guard — an overflow
+// silently corrupted the adjacent slot or BSS (el1h audit F1).
+//
+// One slot per secondary (DTB_MAX_CPUS - 1 = 7). SECONDARY_STACK_SLOT_
+// SIZE is ALSO hardcoded as a literal in arch/arm64/start.S's
+// secondary_entry trampoline (asm cannot include this header) — keep
+// the two in sync; the _Static_assert below pins the C side.
+#define SECONDARY_STACK_GUARD_SIZE   4096u
+#define SECONDARY_STACK_USABLE_SIZE  16384u
+#define SECONDARY_STACK_SLOT_SIZE \
+    (SECONDARY_STACK_GUARD_SIZE + SECONDARY_STACK_USABLE_SIZE)
+
+struct secondary_stack {
+    char guard[SECONDARY_STACK_GUARD_SIZE];     // no-access; overflow lands here
+    char usable[SECONDARY_STACK_USABLE_SIZE];   // SP grows down from usable end
+};
+
+_Static_assert(sizeof(struct secondary_stack) == SECONDARY_STACK_SLOT_SIZE,
+               "secondary_stack must be exactly guard + usable, no padding");
+_Static_assert(__builtin_offsetof(struct secondary_stack, guard) == 0,
+               "guard must lead the slot so the slot base IS the guard page");
+_Static_assert(SECONDARY_STACK_GUARD_SIZE == 4096u,
+               "guard is exactly one 4 KiB page — build_page_tables (mmu.c) "
+               "zeroes a single L3 PTE per secondary guard");
+_Static_assert(SECONDARY_STACK_SLOT_SIZE % SECONDARY_STACK_GUARD_SIZE == 0,
+               "slot must be a page-multiple so every slot base — and thus "
+               "every guard page — is page-aligned when the array is");
+_Static_assert(SECONDARY_STACK_SLOT_SIZE == 20480u,
+               "SECONDARY_STACK_SLOT_SIZE is mirrored as a literal in "
+               "arch/arm64/start.S secondary_entry — keep the two in sync");
+_Static_assert(DTB_MAX_CPUS == 8u,
+               "arch/arm64/start.S secondary_entry hardcodes the idx upper "
+               "bound as a literal #8 — keep it in sync with DTB_MAX_CPUS");
+
+extern struct secondary_stack g_secondary_boot_stacks[DTB_MAX_CPUS - 1];
 
 // Per-CPU stack buffer — RESERVED (P5-el1h-kernel).
 //

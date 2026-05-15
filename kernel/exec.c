@@ -141,7 +141,8 @@ static int exec_map_segment(struct Proc *p, const void *blob,
     return 0;
 }
 
-// Map the user stack — a 256 KiB anonymous VMA at the fixed top-of-user-VA.
+// Map the user stack — a 256 KiB anonymous VMA at the fixed top-of-
+// user-VA — plus a one-page guard VMA directly below it.
 static int exec_map_user_stack(struct Proc *p) {
     struct Burrow *burrow = burrow_create_anon(EXEC_USER_STACK_SIZE);
     if (!burrow)                               return -1;
@@ -153,6 +154,22 @@ static int exec_map_user_stack(struct Proc *p) {
         return -1;
     }
     burrow_unref(burrow);
+
+    // P5-secondary-stack-guard: install a one-page guard VMA directly
+    // below the stack. It is a reserved, prot==0, no-BURROW range — an
+    // overflow past EXEC_USER_STACK_BASE faults (userland_demand_page
+    // rejects prot==0) instead of corrupting a lower VMA, and
+    // vma_insert's overlap rejection keeps a future mapping out of the
+    // page. On vma_insert failure (an ELF segment already occupies the
+    // range — correctly rejected) the guard is freed and exec_setup
+    // disposes the partially-built Proc.
+    struct Vma *guard = vma_alloc_guard(EXEC_USER_STACK_GUARD_BASE,
+                                        EXEC_USER_STACK_BASE);
+    if (!guard)                                return -1;
+    if (vma_insert(p, guard) != 0) {
+        vma_free(guard);
+        return -1;
+    }
     return 0;
 }
 

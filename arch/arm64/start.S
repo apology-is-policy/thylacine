@@ -486,7 +486,8 @@ pac_apply_this_cpu:
 // P2-Cb extension: the trampoline now does full per-CPU init —
 //   1. Validate idx in [1, DTB_MAX_CPUS).
 //   2. Set SP_EL1 = this CPU's kernel stack from g_secondary_boot_stacks
-//      [idx-1] (16 KiB/CPU); keep SPSel=1 (P5-el1h-kernel — the kernel
+//      [idx-1] (20 KiB slot: 4 KiB guard page + 16 KiB usable); keep
+//      SPSel=1 (P5-el1h-kernel — the kernel
 //      runs uniformly at EL1h, exception frames on the per-thread
 //      kernel stack, no separate exception stack).
 //   3. Flip g_cpu_online[idx] (early "trampoline reached" signal).
@@ -545,15 +546,23 @@ secondary_entry:
     msr     SPSel, #1
     isb
 
-    // Set SP_EL1 from g_secondary_boot_stacks[idx-1] (16 KiB/CPU):
-    //   base = &g_secondary_boot_stacks[idx-1]
-    //   top  = base + SECONDARY_STACK_SIZE (16384)
+    // Set SP_EL1 to the top of this secondary's kernel stack. Each slot
+    // in g_secondary_boot_stacks is SECONDARY_STACK_SLOT_SIZE bytes —
+    // a 4 KiB guard page followed by 16 KiB of usable stack. The guard
+    // leads the slot, so SP starts at the slot top and grows DOWN
+    // through the 16 KiB usable region; an overflow past the usable
+    // bottom crosses into the (no-access) guard page and faults.
+    //   slot_base = &g_secondary_boot_stacks[idx-1]   (= the guard page)
+    //   sp        = slot_base + SECONDARY_STACK_SLOT_SIZE
+    // The #20480 literal mirrors SECONDARY_STACK_SLOT_SIZE in
+    // thylacine/smp.h (asm cannot include that header); the header's
+    // _Static_assert pins the C side. Keep the two in sync.
     sub     x20, x19, #1                    // idx0 = idx - 1
     adrp    x9, g_secondary_boot_stacks
     add     x9, x9, :lo12:g_secondary_boot_stacks
-    mov     x10, #16384                     // SECONDARY_STACK_SIZE
-    madd    x9, x10, x20, x9                // base = stacks + idx0 * 16384
-    add     x9, x9, x10                     // top = base + 16384
+    mov     x10, #20480                     // SECONDARY_STACK_SLOT_SIZE
+    madd    x9, x10, x20, x9                // slot_base = stacks + idx0 * 20480
+    add     x9, x9, x10                     // sp = slot_base + 20480 (slot top)
     mov     sp, x9                          // sp = SP_EL1 := kernel-stack top
 
     // Zero SP_EL0 (the userspace stack; must not carry a kernel-VA
@@ -592,9 +601,9 @@ secondary_entry:
     sub     x20, x19, #1                    // idx0 = idx - 1
     adrp    x0, g_secondary_boot_stacks
     add     x0, x0, :lo12:g_secondary_boot_stacks
-    mov     x9, #16384                      // SECONDARY_STACK_SIZE
-    madd    x0, x9, x20, x0                 // base = stacks + idx0 * 16384
-    add     x0, x0, x9                      // top = base + 16384
+    mov     x9, #20480                      // SECONDARY_STACK_SLOT_SIZE
+    madd    x0, x9, x20, x0                 // slot_base = stacks + idx0 * 20480
+    add     x0, x0, x9                      // slot top = slot_base + 20480
     bl      kaslr_high_va_addr              // x0 = HIGH VA of slot top
     mov     sp, x0                          // SP_EL1 := HIGH VA kernel-stack top
     isb

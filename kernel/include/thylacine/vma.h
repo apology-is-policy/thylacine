@@ -80,6 +80,25 @@ void vma_init(void);
 struct Vma *vma_alloc(u64 vaddr_start, u64 vaddr_end, u32 prot,
                      struct Burrow *burrow, u64 burrow_offset);
 
+// Allocate a guard VMA — a reserved address range with NO backing
+// BURROW and prot == 0. It exists purely to occupy address space:
+//   - vma_insert's overlap rejection keeps any future mapping out of
+//     the range, so a stack/heap guard region stays reliably unmapped.
+//   - userland_demand_page rejects every fault into it: the prot == 0
+//     permission check fails for read, write, AND instruction faults
+//     alike, returning before the (NULL) BURROW is ever dereferenced.
+// Used for the unmapped guard page directly below the user stack
+// (exec.c) so an overflow faults instead of corrupting a lower VMA.
+//
+// A guard VMA owns no BURROW, so it does not participate in the BURROW
+// dual-refcount lifecycle (no burrow_acquire_mapping); vma_free is
+// NULL-burrow-safe and mirrors this.
+//
+// Constraints: vaddr_start < vaddr_end, both page-aligned (4 KiB).
+// Returns NULL on OOM or constraint violation. The caller inserts via
+// vma_insert and, on overlap rejection, frees the VMA via vma_free.
+struct Vma *vma_alloc_guard(u64 vaddr_start, u64 vaddr_end);
+
 // Free a Vma descriptor. Releases the BURROW ref. Caller MUST have
 // removed it from any per-Proc list (extincts otherwise — magic check
 // + next/prev != NULL detection).

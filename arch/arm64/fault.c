@@ -19,6 +19,7 @@
 #include <thylacine/extinction.h>
 #include <thylacine/page.h>
 #include <thylacine/proc.h>
+#include <thylacine/smp.h>
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 #include <thylacine/vma.h>
@@ -144,6 +145,22 @@ static bool addr_is_stack_guard(u64 addr) {
     u64 guard_va  = (u64)(uintptr_t)_boot_stack_guard;
     u64 bottom_va = (u64)(uintptr_t)_boot_stack_bottom;
     if (addr >= guard_va && addr < bottom_va) return true;
+
+    // P5-secondary-stack-guard: secondary boot-stack guard pages. Each
+    // slot's leading page is mapped no-access by mmu.c. A secondary's
+    // idle thread runs on its boot stack (it owns no per-thread kstack),
+    // so an overflow there lands in that slot's guard page. FAR_EL1 is
+    // the kernel-image high VA of the guard (post-MMU) — the PA form is
+    // checked defensively. Checked globally: any access into any
+    // secondary guard page is a stack overflow.
+    for (unsigned c = 0; c < DTB_MAX_CPUS - 1; c++) {
+        u64 sg_va = (u64)(uintptr_t)&g_secondary_boot_stacks[c].guard[0];
+        if (addr >= sg_va && addr < sg_va + SECONDARY_STACK_GUARD_SIZE)
+            return true;
+        u64 sg_pa = sym_to_pa(&g_secondary_boot_stacks[c].guard[0]);
+        if (addr >= sg_pa && addr < sg_pa + SECONDARY_STACK_GUARD_SIZE)
+            return true;
+    }
 
     // Per-thread kstack guard. P3-Bca: t->kstack_base is a direct-map KVA;
     // the lower THREAD_KSTACK_GUARD_SIZE bytes are mapped no-access via

@@ -46,6 +46,7 @@ void test_exec_setup_segment_data_copied(void);
 void test_exec_setup_constraints(void);
 void test_exec_setup_multi_segment(void);
 void test_exec_setup_lifecycle_round_trip(void);
+void test_exec_user_stack_guard(void);
 
 #define ELF_BLOB_SIZE 8192
 // 8-byte aligned per elf_load's R5-G F61 alignment precondition. We use
@@ -282,4 +283,60 @@ void test_exec_setup_lifecycle_round_trip(void) {
         "segment VMOs freed via vma_drain → burrow_release_mapping → "
         "mapping_count→0 + handle_count==0 → burrow_free_internal; sub-tables "
         "freed by proc_pgtable_destroy walker)");
+}
+
+// P5-secondary-stack-guard / corvus-bringup-d audit F7: exec_map_user_
+// stack installs a one-page guard VMA directly below the user stack —
+// a prot==0, no-BURROW reserved range. Verifies the guard is present,
+// correctly shaped, distinct from the stack VMA, and reserves the
+// address range against a future mapping (vma_insert overlap rejection).
+void test_exec_user_stack_guard(void) {
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+
+    u32 flags[1] = { PF_R | PF_X };
+    size_t size = build_elf(flags, 1, /*filesz=*/0);
+
+    u64 entry = 0, sp = 0;
+    int rc = exec_setup(p, g_elf_blob, size, &entry, &sp);
+    TEST_EXPECT_EQ(rc, 0, "exec_setup should succeed");
+
+    // The guard VMA sits at [GUARD_BASE, STACK_BASE).
+    struct Vma *guard = vma_lookup(p, EXEC_USER_STACK_GUARD_BASE);
+    TEST_ASSERT(guard != NULL, "guard VMA visible at EXEC_USER_STACK_GUARD_BASE");
+    TEST_EXPECT_EQ(guard->vaddr_start, EXEC_USER_STACK_GUARD_BASE,
+        "guard VMA starts at EXEC_USER_STACK_GUARD_BASE");
+    TEST_EXPECT_EQ(guard->vaddr_end, EXEC_USER_STACK_BASE,
+        "guard VMA ends flush against the user stack base");
+    TEST_EXPECT_EQ((u64)guard->prot, (u64)0,
+        "guard VMA has prot==0 (userland_demand_page rejects every fault)");
+    TEST_ASSERT(guard->burrow == NULL,
+        "guard VMA has no backing BURROW");
+
+    // The guard covers the whole page up to the stack base; nothing is
+    // mapped one byte below the guard base.
+    TEST_ASSERT(vma_lookup(p, EXEC_USER_STACK_BASE - 1) == guard,
+        "guard VMA covers up to (but not including) the stack base");
+    TEST_ASSERT(vma_lookup(p, EXEC_USER_STACK_GUARD_BASE - 1) == NULL,
+        "nothing is mapped immediately below the guard");
+
+    // The guard is a distinct VMA from the stack itself.
+    struct Vma *stack = vma_lookup(p, EXEC_USER_STACK_BASE);
+    TEST_ASSERT(stack != NULL && stack != guard,
+        "the user stack VMA is distinct from, and above, the guard");
+
+    // Reservation: a VMA overlapping the guard is rejected by
+    // vma_insert — a future mapping allocator cannot fill the guard.
+    struct Burrow *b = burrow_create_anon(PAGE_SIZE);
+    TEST_ASSERT(b != NULL, "burrow_create_anon for the overlap probe");
+    struct Vma *intruder = vma_alloc(EXEC_USER_STACK_GUARD_BASE,
+                                     EXEC_USER_STACK_GUARD_BASE + PAGE_SIZE,
+                                     VMA_PROT_RW, b, 0);
+    TEST_ASSERT(intruder != NULL, "vma_alloc for the overlap probe");
+    TEST_EXPECT_EQ(vma_insert(p, intruder), -1,
+        "a VMA overlapping the guard is rejected — the guard reserves the range");
+    vma_free(intruder);          // rejected → never linked → safe to free
+    burrow_unref(b);
+
+    drop_proc(p);                // proc_free → vma_drain frees the NULL-burrow guard
 }

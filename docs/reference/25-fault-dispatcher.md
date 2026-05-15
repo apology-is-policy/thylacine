@@ -165,7 +165,7 @@ case EC_INST_ABORT_SAME: {
 
 ### Address-range classifiers
 
-- `addr_is_stack_guard(addr)` checks: boot-stack guard PA range, boot-stack guard high VA range, and current-thread kstack guard region (direct-map KVA via `t->kstack_base`). Defense-in-depth: all three forms because FAR_EL1 may carry the PA OR the VA depending on which translation root caught the fault.
+- `addr_is_stack_guard(addr)` checks: the boot-stack guard (PA + high-VA ranges), each secondary boot-stack guard page (PA + high-VA forms — P5-secondary-stack-guard, one per `g_secondary_boot_stacks` slot), and the current-thread kstack guard region (direct-map KVA via `t->kstack_base`). Defense-in-depth: multiple address forms because FAR_EL1 may carry the PA OR the VA depending on which translation root caught the fault. A secondary CPU's idle thread runs on its boot stack, so an overflow there lands in that slot's guard page.
 - `addr_is_kernel_image(addr)` checks: kernel-image PA range, kernel-image high VA range, and direct-map alias of kernel-image PA range (P3-Bca added the third).
 
 ## Data structures

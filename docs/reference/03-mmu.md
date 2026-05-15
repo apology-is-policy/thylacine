@@ -85,7 +85,7 @@ VA[11:0]   page offset
   - Override: the 2 MiB block containing `0x09000000` (PL011) → Device-nGnRnE block.
   - Override: the 2 MiB block containing the kernel image → table descriptor pointing at the SHARED `l3_kernel`.
 - 1× **shared L3 table** `l3_kernel` for the kernel-image 2 MiB region (page-granular permissions).
-  - One PTE — the slot for `_boot_stack_guard` — is left at zero (PTE_VALID=0). Stack overflow into the guard page faults synchronously rather than corrupting prior BSS (P1-C-extras Part A).
+  - PTEs left at zero (PTE_VALID=0): the slot for `_boot_stack_guard`, and — since P5-secondary-stack-guard — the leading guard page of each `g_secondary_boot_stacks` slot. A stack overflow into any guard page faults synchronously rather than corrupting prior BSS (P1-C-extras Part A; secondary guards P5-secondary-stack-guard).
   - The L3 is **shared** between TTBR0 and TTBR1 — same physical kernel image accessed via both.
 
 **TTBR1 — kernel high-half at `KASLR_LINK_VA + slide`** (P1-C-extras Part B):
@@ -232,7 +232,7 @@ P1-C measurements on QEMU virt under Hypervisor.framework:
 
 **Implemented at P1-C-extras Part A**:
 
-- Boot-stack guard page: 4 KiB non-present mapping at `_boot_stack_guard` (immediately below `_boot_stack_bottom`). `build_page_tables()` zeroes the L3 PTE for the guard slot after laying down the per-section mappings. Stack overflow now faults synchronously instead of silently corrupting BSS. The fault diagnostic ("kernel stack overflow") gets wired in P1-F when exception vectors land.
+- Boot-stack guard page: 4 KiB non-present mapping at `_boot_stack_guard` (immediately below `_boot_stack_bottom`). `build_page_tables()` zeroes the L3 PTE for the guard slot after laying down the per-section mappings. Stack overflow now faults synchronously instead of silently corrupting BSS. The fault diagnostic ("kernel stack overflow") gets wired in P1-F when exception vectors land. P5-secondary-stack-guard extends the same `build_page_tables()` step to zero the leading guard page of every `g_secondary_boot_stacks` slot — in both `l3_kernel` and the direct-map alias `l3_directmap_kernel` — so secondary-CPU boot-stack overflows fault too (closes el1h audit F1).
 - EL2 → EL1 drop diagnostic. (Lives in `arch/arm64/start.S`, not `mmu.c`. Cross-referenced from `docs/reference/01-boot.md`.)
 
 **Implemented at P1-C-extras Part B**:

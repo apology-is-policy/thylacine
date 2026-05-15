@@ -176,6 +176,34 @@ static void provoke_kstack_overflow(void) {
 #endif
 
 // ---------------------------------------------------------------------------
+// secondary_stack_guard — write into a secondary CPU's boot-stack guard
+// page. P5-secondary-stack-guard maps the leading page of every
+// g_secondary_boot_stacks slot no-access (build_page_tables, mmu.c); the
+// write raises a data abort with FAR inside the guard, and the exception
+// handler's addr_is_stack_guard() recognizes it → extinction("kernel
+// stack overflow"). Pre-fix the slot was bare RW BSS and the write
+// landed silently → provoker returns → test FAIL.
+//
+// The guard PTEs are established at mmu_enable time, so this needs no
+// secondary CPU to be running; the boot CPU writes via the guard page's
+// kernel-image high VA. Targets slot 0 (CPU 1's boot stack).
+// ---------------------------------------------------------------------------
+
+#ifdef THYLACINE_FAULT_TEST_secondary_stack_guard
+#include <thylacine/smp.h>
+
+__attribute__((noinline))
+__attribute__((no_stack_protector))
+static void provoke_secondary_stack_guard(void) {
+    // Launder the pointer through inline asm so clang cannot prove the
+    // store targets a known BSS object and elide it.
+    volatile char *g = (volatile char *)&g_secondary_boot_stacks[0].guard[0];
+    __asm__ __volatile__("" : "+r"(g));
+    *g = (char)0xA5;
+}
+#endif
+
+// ---------------------------------------------------------------------------
 // Public entry point. Called from boot_main before the success line.
 //
 // In a production build, evaluates to a single return.
@@ -198,6 +226,10 @@ void fault_test_run(void) {
     uart_puts("FAIL: provoke_bti_fault returned (BTI did not fire)\n");
 #elif defined(THYLACINE_FAULT_TEST_kstack_overflow)
     provoke_kstack_overflow();
+#elif defined(THYLACINE_FAULT_TEST_secondary_stack_guard)
+    uart_puts("  fault-test: invoking secondary_stack_guard...\n");
+    provoke_secondary_stack_guard();
+    uart_puts("FAIL: provoke_secondary_stack_guard returned (guard did not fire)\n");
 #else
     // No fault test selected — production build.
 #endif

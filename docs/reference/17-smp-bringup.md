@@ -201,7 +201,7 @@ Bare metal will be slower (PSCI calls go to TF-A/EL3 firmware which programs the
 
 P2-Cb extends the trampoline so secondaries reach a real C entry point at the kernel's high VA. After the minimal P2-Ca trampoline (online flag + WFI), the trampoline now:
 
-1. **Sets SP** from `g_secondary_boot_stacks[idx-1]` (16 KiB per secondary, BSS, `aligned(16)`).
+1. **Sets SP** to the top of `g_secondary_boot_stacks[idx-1]` — a 20 KiB slot (4 KiB guard page + 16 KiB usable stack), page-aligned BSS. See "Secondary boot-stack guard pages" below.
 2. **Flips `g_cpu_online[idx]`** with caches off — early "trampoline reached" signal (kept for diagnostic distinction from `g_cpu_alive`).
 3. **`bl pac_apply_this_cpu`** — leaf asm function (start.S) loads `g_pac_keys[8]` into `AP*KEY*_EL1` + sets SCTLR.EnIA/EnIB/EnDA/EnDB/BT0. Cross-CPU PAC consistency is REQUIRED for thread migration (P2-Ce work-stealing): a thread's signed return address on its kstack must auth-validate against APIA on whichever CPU resumes it.
 4. **`bl mmu_program_this_cpu`** — re-uses primary's already-built page tables; programs MAIR/TCR/TTBR0/TTBR1/SCTLR.M.
@@ -284,6 +284,18 @@ FIQ and SError slots in both groups remain `VEC_UNEXPECTED` — neither is unmas
 `g_secondary_boot_stacks` (the per-secondary "normal mode" stack used as `SP_EL0` initially) is set by `secondary_entry` to its low-PA address pre-MMU. After `mmu_program_this_cpu`, `SP_EL1` is re-anchored to high VA but `SP_EL0` is NOT — secondaries continue executing on the low-PA boot stack until P2-Cd assigns each one a per-CPU idle thread (which has its own kstack at high VA). This is a deliberate v1.0 P2-Cc choice: the SP_EL0-side address space transition is part of the per-CPU idle-thread bring-up, not the exception-stack bring-up.
 
 ---
+
+## Secondary boot-stack guard pages (P5-secondary-stack-guard)
+
+Each secondary CPU runs — first its `secondary_entry` trampoline, then permanently its idle thread — on a slot of `g_secondary_boot_stacks`. Under the uniform-EL1h model (see `docs/reference/67-el1h-kernel.md`) that slot is `SP_EL1`, the kernel's single stack bank on that CPU; the idle thread owns no per-thread kstack, so the boot stack is its *only* stack. An overflow there would silently corrupt the adjacent slot or BSS. The boot CPU's stack has had a guard page since P1 (`_boot_stack_guard`, kernel.ld); P5-secondary-stack-guard extends the same protection to the secondaries — closing el1h audit F1.
+
+`g_secondary_boot_stacks` is now `struct secondary_stack[DTB_MAX_CPUS-1]`, each slot a `{ char guard[4096]; char usable[16384]; }` — the guard page LEADS the slot — and the whole array is `aligned(4096)` so every slot base, and thus every guard page, is page-aligned. `secondary_entry` sets `SP` to `slot_base + SECONDARY_STACK_SLOT_SIZE` (20480) — the top of `usable` — so the stack grows DOWN through the 16 KiB usable region, and an overflow past its bottom crosses into the guard page.
+
+`build_page_tables` (mmu.c) zeroes the L3 PTE of every slot's guard page in BOTH `l3_kernel` (the kernel-image L3 — shared by the TTBR0 identity map and the TTBR1 high-VA map) and `l3_directmap_kernel` (the direct-map alias), mirroring its handling of `_boot_stack_guard`. A secondary's `SP` is a kernel-image high VA (re-anchored to high VA after MMU enable), so an overflow store faults via the zeroed `l3_kernel` entry. `addr_is_stack_guard` (fault.c) recognizes a FAR inside any secondary guard page (PA and high-VA forms) → `extinction("kernel stack overflow")`.
+
+The slot stride `SECONDARY_STACK_SLOT_SIZE` (20480) is mirrored as a literal in `secondary_entry` (asm cannot include `smp.h`); smp.h's `_Static_assert`s pin the C side — including a tripwire on the literal value. The `secondary_stack_guard` fault-test variant (`tools/test-fault.sh`) writes into a guard page and asserts the `EXTINCTION: kernel stack overflow` diagnostic; `smp.secondary_stack_guard_layout` (test_smp.c) pins the slot layout.
+
+A 1-page guard (matching the boot CPU's `_boot_stack_guard`) is sufficient for the boot/idle code that runs on these stacks — shallow, controlled usage with no deep recursion. The per-thread kstack guard is wider (4 pages); boot stacks deliberately match the boot-CPU precedent.
 
 ## Status
 

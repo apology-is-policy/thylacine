@@ -125,6 +125,44 @@ void test_smp_exception_stack_smoke(void) {
     }
 }
 
+void test_smp_secondary_stack_guard_layout(void) {
+    // P5-secondary-stack-guard: each per-CPU boot-stack slot is a 4 KiB
+    // guard page followed by a 16 KiB usable stack. The guard LEADS the
+    // slot — so the slot base is itself the (page-aligned, no-access)
+    // guard page — and an overflow past the usable bottom faults into
+    // it. The whole array is page-aligned so every slot base, and thus
+    // every guard page, is page-aligned for mmu.c's L3-PTE zeroing.
+    TEST_EXPECT_EQ((u64)sizeof(struct secondary_stack),
+                   (u64)SECONDARY_STACK_SLOT_SIZE,
+        "struct secondary_stack must be exactly guard + usable, no padding");
+    TEST_EXPECT_EQ((u64)SECONDARY_STACK_SLOT_SIZE,
+                   (u64)(SECONDARY_STACK_GUARD_SIZE + SECONDARY_STACK_USABLE_SIZE),
+        "slot size = guard size + usable size");
+    TEST_EXPECT_EQ((u64)sizeof(g_secondary_boot_stacks),
+                   (u64)((DTB_MAX_CPUS - 1) * SECONDARY_STACK_SLOT_SIZE),
+        "g_secondary_boot_stacks holds DTB_MAX_CPUS-1 slots");
+
+    uintptr_t base = (uintptr_t)&g_secondary_boot_stacks[0];
+    TEST_EXPECT_EQ((u64)(base & (SECONDARY_STACK_GUARD_SIZE - 1)), (u64)0,
+        "g_secondary_boot_stacks must be page-aligned");
+
+    for (unsigned i = 0; i < DTB_MAX_CPUS - 1; i++) {
+        uintptr_t slot  = (uintptr_t)&g_secondary_boot_stacks[i];
+        uintptr_t guard = (uintptr_t)&g_secondary_boot_stacks[i].guard[0];
+        uintptr_t use   = (uintptr_t)&g_secondary_boot_stacks[i].usable[0];
+
+        TEST_EXPECT_EQ((u64)slot,
+                       (u64)(base + (uintptr_t)i * SECONDARY_STACK_SLOT_SIZE),
+            "slot bases are contiguous at SECONDARY_STACK_SLOT_SIZE stride");
+        TEST_EXPECT_EQ((u64)guard, (u64)slot,
+            "the guard page leads the slot (slot base IS the guard page)");
+        TEST_EXPECT_EQ((u64)(guard & (SECONDARY_STACK_GUARD_SIZE - 1)), (u64)0,
+            "each guard page is page-aligned");
+        TEST_EXPECT_EQ((u64)use, (u64)(slot + SECONDARY_STACK_GUARD_SIZE),
+            "usable region starts exactly one guard page above the slot base");
+    }
+}
+
 void test_smp_per_cpu_idle_smoke(void) {
     unsigned cpus = smp_cpu_count();
     TEST_ASSERT(cpus >= 1, "smp_cpu_count is positive");

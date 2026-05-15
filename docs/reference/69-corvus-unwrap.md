@@ -165,10 +165,13 @@ ROTATE_KEY) are later sub-chunks.
   `MAX_USERS` (256) bounds the in-memory user table so the ungated
   verb cannot OOM the daemon; per-user rate-limiting (C-16) is also
   deferred.
-- **No userspace-stack guard page.** The 256 KiB user-stack VMA has no
-  unmapped guard page below it — an ML-KEM stack overflow past 256 KiB
-  would corrupt lower frames before faulting. Deferred hardening item
-  (sibling of the kernel-side P5-secondary-stack-guard).
+- **Userspace-stack guard page (audit F7 — CLOSED by
+  P5-secondary-stack-guard).** The 256 KiB user-stack VMA now has a
+  one-page guard VMA directly below it (`prot==0`, no BURROW, installed
+  by `exec_map_user_stack`). An overflow past 256 KiB faults instead of
+  corrupting a lower VMA, and `vma_insert`'s overlap rejection reserves
+  the page against a future mapping allocator. See
+  `docs/reference/27-exec.md` §"User-stack guard page".
 - **State + ownership table are in-memory.** They do not survive a
   corvus restart; FS persistence lands with `/var/lib/corvus/`.
 - **WRAP is C-7-gated** — a session can only wrap for datasets it owns.

@@ -35,6 +35,7 @@ struct Vma {
 void vma_init(void);
 struct Vma *vma_alloc(u64 vaddr_start, u64 vaddr_end, u32 prot,
                      struct Burrow *burrow, u64 burrow_offset);
+struct Vma *vma_alloc_guard(u64 vaddr_start, u64 vaddr_end);
 void vma_free(struct Vma *v);
 int  vma_insert(struct Proc *p, struct Vma *v);
 void vma_remove(struct Proc *p, struct Vma *v);
@@ -55,6 +56,17 @@ u64 vma_total_freed(void);
 Returns NULL on any constraint violation without partial allocation. Calls `burrow_acquire_mapping` (mapping_count++) on success; `vma_free` calls `burrow_release_mapping` symmetrically.
 
 (Pre-P3-Db, the refcount-only ops were named `burrow_map` / `burrow_unmap`; they were renamed when the public `burrow_map(Proc*, ...)` entry point arrived. The new high-level entry calls `vma_alloc + vma_insert`; on `vma_insert` overlap, the entry calls `vma_free` to roll back the acquire.)
+
+#### Guard VMAs — `vma_alloc_guard` (P5-secondary-stack-guard)
+
+`vma_alloc_guard(start, end)` allocates a **guard VMA**: `prot == 0`, `burrow == NULL`. It reserves an address range without backing it:
+
+- `vma_insert`'s overlap rejection keeps any future mapping out of the range — the *reservation* property.
+- `userland_demand_page` rejects every fault into it: a `prot == 0` VMA fails the read, write, AND instruction permission checks alike (dispatcher step 2), returning `FAULT_UNHANDLED_USER` *before* the NULL `burrow` is dereferenced (step 3).
+
+A guard VMA owns no BURROW, so — unlike `vma_alloc` — `vma_alloc_guard` does NOT call `burrow_acquire_mapping`; it stands outside the BURROW dual-refcount lifecycle (`specs/burrow.tla`). `vma_free` is symmetric: its `burrow_release_mapping` is already guarded by `v->burrow != NULL`, so a guard VMA frees cleanly (including via `vma_drain` at `proc_free`).
+
+Constraints: `start < end`, both page-aligned. Returns NULL on OOM or constraint violation. The sole v1.0 caller is `exec_map_user_stack` (exec.c), which installs a one-page guard directly below the user stack — see `docs/reference/27-exec.md`. Closes corvus-bringup-d audit F7.
 
 #### Insertion + lookup
 
@@ -177,6 +189,7 @@ Phase 5+ RB-tree converts insert/lookup to O(log N).
 - **Implemented at P3-Db**: `burrow_map(Proc*, Burrow*, vaddr, length, prot)` + `burrow_unmap(Proc*, vaddr, length)` route through `vma_alloc + vma_insert` / `vma_remove + vma_free`. Refcount-only ops renamed to `burrow_acquire_mapping` / `burrow_release_mapping`. New tests: `burrow.map_proc_smoke / burrow.map_proc_constraints / burrow.map_proc_overlap_rejected / burrow.unmap_proc_smoke / burrow.unmap_proc_no_match`. Plus `proc_pgtable_destroy` sub-table walk lands at P3-Db (closes trip-hazard #116).
 - **Stubbed**: arch_fault_handle's user-mode dispatch path → vma_lookup → demand paging (P3-Dc).
 - **Stubbed**: partial unmap (sub-VMA range) — post-v1.0.
+- **P5-secondary-stack-guard**: `vma_alloc_guard` — the no-BURROW, `prot==0` reserved guard VMA. `exec_map_user_stack` installs one as the user-stack guard page; closes corvus-bringup-d audit F7. Regression: `exec.user_stack_guard` (test_exec.c).
 
 ## Known caveats / footguns
 
@@ -193,6 +206,8 @@ Phase 5+ RB-tree converts insert/lookup to O(log N).
 6. **`vma_alloc` always takes `burrow_acquire_mapping`** (mapping_count++). Callers that pre-incremented mapping_count externally would over-count. The vma layer is the only place that takes mapping_count at v1.0; future direct mapping_count manipulation must be coordinated.
 
 7. **High-level `burrow_map(Proc*, ...)` rolls back on overlap rejection.** When `vma_insert` returns -1, the path calls `vma_free` which fires `burrow_release_mapping` to symmetrically reverse the `vma_alloc`-time acquire. mapping_count ends UNCHANGED on rejection. The order matters — if you wrote `vma_alloc + vma_insert + (no rollback)`, you'd leak a mapping_count++ on every overlap rejection.
+
+8. **A guard VMA has `burrow == NULL`.** Only `vma_alloc_guard` produces one. Every VMA consumer that dereferences `burrow` (`vma_free`, `userland_demand_page`) already guards the deref; a guard VMA never reaches a burrow-dependent path at runtime because `prot == 0` rejects every fault before the burrow is touched. Any NEW `burrow`-dereferencing VMA code must NULL-check.
 
 ## Naming rationale
 

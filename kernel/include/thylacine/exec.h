@@ -38,7 +38,9 @@ struct Proc;
 //   0x0000_0000_0001_0000          User code/data (per ELF e_entry +
 //   ...                             per-segment vaddr).
 //   ...
-//   0x0000_0000_8000_0000 - 256 KiB User stack base.
+//   0x0000_0000_7FFB_F000          User stack GUARD page (4 KiB —
+//                                   reserved, unmapped, prot==0).
+//   0x0000_0000_7FFC_0000          User stack base (EXEC_USER_STACK_BASE).
 //   0x0000_0000_8000_0000          User stack TOP (initial SP_EL0).
 //
 // The user-stack region is well below the TTBR1 split (0x0001_0000_*)
@@ -47,13 +49,19 @@ struct Proc;
 // FO-transform working set is tens of KiB of stack — the prior 16 KiB
 // overflowed. 256 KiB is generous headroom for every userspace Proc;
 // Phase 5+ replaces the fixed size with demand-grow on stack faults.
-// NOTE: there is no guard page below EXEC_USER_STACK_BASE — an overflow
-// past 256 KiB corrupts lower stack frames silently until SP crosses
-// into the unmapped gap and faults. A dedicated guard page is a deferred
-// hardening item (sibling of the kernel-side P5-secondary-stack-guard).
-#define EXEC_USER_STACK_SIZE   (256ull * 1024)
-#define EXEC_USER_STACK_TOP    0x0000000080000000ull
-#define EXEC_USER_STACK_BASE   (EXEC_USER_STACK_TOP - EXEC_USER_STACK_SIZE)
+//
+// P5-secondary-stack-guard: a 4 KiB guard page sits directly below
+// EXEC_USER_STACK_BASE, installed by exec_map_user_stack as a prot==0
+// / no-BURROW guard VMA (vma_alloc_guard). An overflow past the 256 KiB
+// stack crosses into it and faults — userland_demand_page rejects the
+// prot==0 VMA — and vma_insert's overlap rejection reserves the page so
+// a future mapping allocator (Phase 5+ mmap / heap) cannot place
+// anything flush against the stack. Closes corvus-bringup-d audit F7.
+#define EXEC_USER_STACK_SIZE         (256ull * 1024)
+#define EXEC_USER_STACK_TOP          0x0000000080000000ull
+#define EXEC_USER_STACK_BASE         (EXEC_USER_STACK_TOP - EXEC_USER_STACK_SIZE)
+#define EXEC_USER_STACK_GUARD_SIZE   0x1000ull
+#define EXEC_USER_STACK_GUARD_BASE   (EXEC_USER_STACK_BASE - EXEC_USER_STACK_GUARD_SIZE)
 
 // exec_setup — parse the ELF blob, populate `p`'s VMA tree, set up the
 // user stack mapping.

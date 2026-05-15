@@ -13,13 +13,17 @@ ARCH §16: "exec is the boundary between the kernel-internal Proc/Thread model a
 ### `<thylacine/exec.h>`
 
 ```c
-#define EXEC_USER_STACK_SIZE   (16ull * 1024)
-#define EXEC_USER_STACK_TOP    0x0000000080000000ull
-#define EXEC_USER_STACK_BASE   (EXEC_USER_STACK_TOP - EXEC_USER_STACK_SIZE)
+#define EXEC_USER_STACK_SIZE         (256ull * 1024)
+#define EXEC_USER_STACK_TOP          0x0000000080000000ull
+#define EXEC_USER_STACK_BASE         (EXEC_USER_STACK_TOP - EXEC_USER_STACK_SIZE)
+#define EXEC_USER_STACK_GUARD_SIZE   0x1000ull
+#define EXEC_USER_STACK_GUARD_BASE   (EXEC_USER_STACK_BASE - EXEC_USER_STACK_GUARD_SIZE)
 
 int exec_setup(struct Proc *p, const void *blob, size_t blob_size,
                u64 *entry_out, u64 *sp_out);
 ```
+
+The user stack is 256 KiB (since corvus-bringup-d — ML-KEM-768's FO-transform working set is tens of KiB; the prior 16 KiB overflowed) with a one-page guard VMA directly below it (P5-secondary-stack-guard — see "User-stack guard page").
 
 #### Constraints (v1.0)
 
@@ -30,7 +34,7 @@ int exec_setup(struct Proc *p, const void *blob, size_t blob_size,
 #### Side effects on success
 
 - One VMA per PT_LOAD segment, backed by a fresh anonymous BURROW. The BURROW's pages contain the segment's bytes from `blob[file_offset..]` (filesz bytes); the tail (memsz - filesz) is zero.
-- One user-stack VMA at `[EXEC_USER_STACK_BASE, EXEC_USER_STACK_TOP)` backed by a fresh zeroed anonymous BURROW.
+- One user-stack VMA at `[EXEC_USER_STACK_BASE, EXEC_USER_STACK_TOP)` (256 KiB) backed by a fresh zeroed anonymous BURROW, plus a one-page **guard VMA** at `[EXEC_USER_STACK_GUARD_BASE, EXEC_USER_STACK_BASE)` directly below it (`prot==0`, no BURROW — see "User-stack guard page").
 - All caller-held BURROW handles dropped via `burrow_unref`. The mapping_count (held by the VMA) keeps each BURROW alive until `proc_free`'s `vma_drain`.
 - `*entry_out = img.entry`, `*sp_out = EXEC_USER_STACK_TOP`.
 
@@ -64,7 +68,9 @@ static int exec_map_segment(struct Proc *p, const void *blob,
     // 6. burrow_unref(burrow) — drop caller-held handle.
 
 static int exec_map_user_stack(struct Proc *p);
-    // Same shape as exec_map_segment but for the fixed stack range.
+    // 1. burrow_create_anon + burrow_map for the 256 KiB stack range.
+    // 2. vma_alloc_guard + vma_insert for the one-page guard VMA
+    //    directly below the stack (P5-secondary-stack-guard).
 ```
 
 `exec_setup` orchestrates: validates args, calls `elf_load`, iterates segments, then maps the user stack.
@@ -100,6 +106,16 @@ proc_free
 ```
 
 The `burrow_unref` in `exec_setup` is the key step that lets the VMA-only-keeps-it-alive lifecycle work. Without it, the VMOs would have `handle_count=1` forever (no handle table entry to close), and `proc_free`'s `vma_drain` would only bring `mapping_count` to 0 — leaving `handle_count=1` and the pages alive. The burrow_unref drops handle_count to 0 immediately, so the eventual `mapping_count→0` triggers free.
+
+### User-stack guard page (P5-secondary-stack-guard)
+
+`exec_map_user_stack` installs, directly below the 256 KiB user stack, a one-page **guard VMA** at `[EXEC_USER_STACK_GUARD_BASE, EXEC_USER_STACK_BASE)` via `vma_alloc_guard` — a `prot==0`, no-BURROW reserved range (see `docs/reference/26-vma.md`).
+
+Two properties:
+- **Fault on overflow.** A stack overflow past `EXEC_USER_STACK_BASE` crosses into the guard VMA; `userland_demand_page` rejects the `prot==0` VMA (`FAULT_UNHANDLED_USER`) instead of the access silently corrupting a lower VMA.
+- **Reservation.** `vma_insert`'s overlap rejection keeps the page unmapped: a future mapping allocator (Phase 5+ `mmap` / heap) cannot place anything flush against the stack.
+
+The guard owns no physical page (no BURROW) — it costs one `struct Vma` and nothing else; `vma_drain` at `proc_free` frees it cleanly (the NULL-BURROW path). If an ELF segment's VMA already occupies the guard range, `vma_insert` rejects the guard and `exec_map_user_stack` returns -1 — `exec_setup` then fails and the caller disposes the partial Proc, the correct outcome for a binary mapping over its own stack guard. Closes corvus-bringup-d audit F7.
 
 ## Data structures
 
@@ -151,13 +167,14 @@ Phase 5+ exec(2) syscall semantics — exec replaces the calling Proc's image at
 
 ## Tests
 
-`kernel/test/test_exec.c` — five tests:
+`kernel/test/test_exec.c` — six tests:
 
 - `exec.setup_smoke`: minimal valid ELF; verify single segment VMA at vaddr + user stack VMA + entry/sp out params.
 - `exec.setup_segment_data_copied`: ELF with 256 bytes of recognizable data; verify bytes are copied into BURROW backing pages (read via direct map); tail of page is zero.
 - `exec.setup_constraints`: NULL inputs / NULL out params / kproc-rejected (covered indirectly by p->vmas check) / corrupt ELF magic / unaligned segment vaddr — all return -1.
 - `exec.setup_multi_segment`: text RX + rodata R + data RW; verify all three VMA prot bits + user stack.
 - `exec.setup_lifecycle_round_trip`: 2-segment exec + proc_free → `phys_free_pages` returns to baseline (all VMOs + sub-tables freed).
+- `exec.user_stack_guard`: verify the user-stack guard VMA — present at `[GUARD_BASE, STACK_BASE)`, `prot==0`, `burrow==NULL`, distinct from the stack VMA — and that a VMA overlapping the guard is rejected by `vma_insert` (the reservation property). Closes corvus-bringup-d audit F7.
 
 Each test synthesizes an ELF in a static aligned buffer (`g_elf_blob`); the same idiom as `test_elf.c::build_elf`.
 
@@ -171,7 +188,7 @@ Each test synthesizes an ELF in a static aligned buffer (`g_elf_blob`); the same
 
 - ELF parse: ~tens of microseconds for typical (≤ 16) PT_LOAD segments.
 - Per-segment cost: one `burrow_create_anon` (one `alloc_pages(order)`) + one byte-copy of `filesz` bytes + one `burrow_map`. For a 4 KiB segment with 4 KiB filesz: roughly 10 µs (allocation) + 4 µs (memcpy) + 5 µs (burrow_map's vma_alloc + vma_insert). Larger segments scale linearly with filesz for the memcpy.
-- User stack: one `burrow_create_anon(16 KiB)` + one `burrow_map`. Roughly 15 µs.
+- User stack: one `burrow_create_anon(256 KiB)` + one `burrow_map`, plus a `vma_alloc_guard` + `vma_insert` for the guard VMA (no allocation — negligible). Roughly 30 µs.
 
 Total exec_setup for a small static ELF: ~50–200 µs. The largest cost is the byte-copy for segments with large filesz; Phase 5+ may switch to mmap-style "borrow" semantics for read-only segments to avoid the copy.
 
@@ -197,7 +214,7 @@ Commit landing point: `9f0d1b6`.
 
 5. **No copy-on-write (COW) for shared text**. Two execs of the same binary each allocate fresh VMOs + copy bytes. Phase 5+ COW lets multiple Procs share read-only segment VMOs.
 
-6. **User stack is fixed-size 16 KiB at fixed VA**. Phase 5+ adds growable stack via demand-page-on-fault below stack base, plus per-Proc stack VA randomization (ASLR for stack).
+6. **User stack is fixed-size 256 KiB at a fixed VA**, with a one-page guard VMA directly below it (P5-secondary-stack-guard). Phase 5+ adds growable stack via demand-page-on-fault below stack base, plus per-Proc stack VA randomization (ASLR for stack).
 
 7. **Caller is responsible for partial-state cleanup**. On `exec_setup` failure (non-zero return), the Proc is in a partial state with some VMAs installed and some not. Caller (test code at v1.0; future exec syscall handler) calls `proc_free` with `state=ZOMBIE` to clean up.
 
