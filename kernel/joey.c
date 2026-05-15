@@ -58,9 +58,12 @@
 // Cpio newc data is only 4-byte-aligned, but the ELF Ehdr cast in
 // elf_load (kernel/elf.c::elf_load — R5-G F61) requires 8-byte
 // alignment. Copy into an 8-aligned static buffer before handing the
-// blob to exec_setup. Sized to match the userspace static-PIE binary
-// budget (each binary fits in 16 KiB with headroom; see P4-image-shrink).
-#define JOEY_BLOB_MAX 32768
+// blob to exec_setup. Sized to comfortably cover joey's growing
+// orchestration surface: at P5-corvus-bringup-c joey embeds inline
+// USER_CREATE + AUTH(bad) + AUTH(good) + SESSION_CLOSE wire codec
+// (~36 KiB total). 64 KiB gives headroom for the next several chunks
+// (UNWRAP + admin-elevate + recovery-phrase orchestration).
+#define JOEY_BLOB_MAX 65536
 static _Alignas(struct Elf64_Ehdr) u8 g_joey_elf_blob[JOEY_BLOB_MAX];
 
 // Arguments passed via rfork's `arg` to the child entry. Lives on the

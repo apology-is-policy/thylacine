@@ -13,5 +13,39 @@ path = "src/main.rs"
 # libthyla-rs provides _start + #[panic_handler] + SVC wrappers. corvus
 # uses t_putstr (banner) + t_mlockall + t_set_dumpable + t_set_traceable
 # + t_getrandom + t_explicit_bzero (the P5-corvus-syscalls hardening
-# surface).
+# surface) + t_pipe/t_read/t_write/t_close (Spoor server I/O).
 libthyla-rs = { path = "../lib/libthyla-rs" }
+
+# Heap allocator — required by Argon2id's working-memory matrix.
+# linked_list_allocator is the no_std-standard. We back it with a
+# static 24 MiB BSS buffer at startup; m_cost up to 16 MiB fits with
+# headroom for state vec + ciphertext bookkeeping. Larger m_cost
+# (sensitive preset = 1 GiB) is a future tuning move that requires
+# re-sizing the BSS buffer.
+# `use_spin` enables the LockedHeap wrapper (Heap + spinning_top mutex).
+# Required for the #[global_allocator] static. UP corvus is single-Proc /
+# single-thread at v1.0; the spinlock is uncontended in practice but the
+# interface is what `LockedHeap` exposes.
+linked_list_allocator = { version = "0.10", default-features = false, features = ["use_spin"] }
+
+# Argon2id — passphrase → KEK. RustCrypto pure-Rust impl. `alloc`
+# feature pulls in the heap-using parts of the crate; we provide the
+# allocator above. No default features to keep the build lean (drops
+# std, drops password-hash string format support which we don't need —
+# we drive Argon2id at the raw `Argon2::hash_password_into` API).
+argon2 = { version = "0.5", default-features = false, features = ["alloc"] }
+
+# AEGIS-256 AEAD — wraps the hybrid keypair per CORVUS-DESIGN §4.3.
+# The `aegis` crate provides AEGIS-256 (32-byte key, 32-byte nonce,
+# 32-byte tag — matches the state file layout exactly).
+#
+# `pure-rust` feature is REQUIRED: the default build.rs compiles a C
+# reference implementation (libaegis), which fails on
+# aarch64-unknown-none because it needs <errno.h> / libc headers we
+# don't have. The `pure-rust` feature short-circuits build.rs and
+# enables `softaes` — a pure-Rust AES backend that works on any
+# target. On real ARMv8 hardware this gives up the FEAT_AES hardware
+# acceleration; v1.x can revisit if Argon2id rate-limiting becomes
+# bypassable via the AEAD-bound work factor (unlikely — AEGIS itself
+# is fast either way; the rate limit is at the corvus layer).
+aegis = { version = "0.9", default-features = false, features = ["pure-rust"] }

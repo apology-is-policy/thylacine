@@ -123,13 +123,118 @@ int main(void) {
     // bytes are transferred or EOF/error; the kernel's SYS_READ /
     // SYS_WRITE may return short.
     unsigned char rx[3 + 33];   // worst case: status + len + 33-byte token
-    unsigned char tx[3 + 1 + 32 + 2 + 256];  // worst case: AUTH frame
+    unsigned char tx[3 + 1 + 32 + 2 + 256 + 1];  // worst case: USER_CREATE frame
 
-    // === AUTH ===
+    // === USER_CREATE === (P5-corvus-bringup-c)
+    // Build USER_CREATE frame: verb_id=5 + payload_len + (user_len + user +
+    // pass_len + pass + backend). Backend=0 (passphrase).
+    //
+    // This forces corvus through: Argon2id(passphrase, fresh salt) →
+    // KEK, generate placeholder keypair, AEGIS-256-wrap, store in
+    // in-memory vec. The wall-clock cost is dominated by Argon2id
+    // (~few hundred ms for the v1.0 interactive preset).
+    const char ucr_user[] = "michael";
+    const char ucr_pass[] = "correct-horse-battery-staple-v1";
+    unsigned int ucr_user_len = (unsigned int)(sizeof(ucr_user) - 1);
+    unsigned int ucr_pass_len = (unsigned int)(sizeof(ucr_pass) - 1);
+    unsigned int ucr_payload_len = 1 + ucr_user_len + 2 + ucr_pass_len + 1;
+    if (ucr_payload_len > sizeof(tx) - 3) {
+        t_putstr("joey: USER_CREATE frame too large for tx buffer\n");
+        return 1;
+    }
+    size_t off = 0;
+    tx[off++] = 5;                                       // verb_id = USER_CREATE
+    tx[off++] = (unsigned char)(ucr_payload_len & 0xff);
+    tx[off++] = (unsigned char)(ucr_payload_len >> 8);
+    tx[off++] = (unsigned char)ucr_user_len;
+    for (size_t i = 0; i < ucr_user_len; i++) tx[off++] = (unsigned char)ucr_user[i];
+    tx[off++] = (unsigned char)(ucr_pass_len & 0xff);
+    tx[off++] = (unsigned char)(ucr_pass_len >> 8);
+    for (size_t i = 0; i < ucr_pass_len; i++) tx[off++] = (unsigned char)ucr_pass[i];
+    tx[off++] = 0;                                       // backend = 0 (passphrase)
+
+    size_t sent = 0;
+    while (sent < off) {
+        long n = t_write(c2s_wr, &tx[sent], off - sent);
+        if (n <= 0) { t_putstr("joey: t_write(USER_CREATE) FAILED\n"); return 1; }
+        sent += (size_t)n;
+    }
+
+    size_t got = 0;
+    while (got < 3) {
+        long n = t_read(s2c_rd, &rx[got], 3 - got);
+        if (n <= 0) { t_putstr("joey: t_read(USER_CREATE header) FAILED/EOF\n"); return 1; }
+        got += (size_t)n;
+    }
+    unsigned char ucr_status  = rx[0];
+    unsigned int  ucr_rsp_len = (unsigned int)rx[1] | ((unsigned int)rx[2] << 8);
+    if (ucr_rsp_len > sizeof(rx) - 3) {
+        t_putstr("joey: USER_CREATE response payload too large\n");
+        return 1;
+    }
+    while (got < (size_t)(3 + ucr_rsp_len)) {
+        long n = t_read(s2c_rd, &rx[got], (size_t)(3 + ucr_rsp_len) - got);
+        if (n <= 0) { t_putstr("joey: t_read(USER_CREATE payload) FAILED/EOF\n"); return 1; }
+        got += (size_t)n;
+    }
+    if (ucr_status != 0 || ucr_rsp_len != 0) {
+        t_putstr("joey: USER_CREATE returned non-OK status=");
+        t_putstr(itoa_dec(ucr_status, buf, sizeof(buf)));
+        t_putstr("\n");
+        return 1;
+    }
+    t_putstr("joey: USER_CREATE michael ok\n");
+
+    // === AUTH (wrong passphrase) ===
+    // Should return BadAuth (status=1) because the stored AEGIS-256 wrap
+    // won't decrypt under a KEK derived from the wrong passphrase.
+    // Exercises the AEAD tag-mismatch branch.
+    const char bad_user[] = "michael";
+    const char bad_pass[] = "wrong-passphrase";
+    unsigned int bad_user_len = (unsigned int)(sizeof(bad_user) - 1);
+    unsigned int bad_pass_len = (unsigned int)(sizeof(bad_pass) - 1);
+    unsigned int bad_payload_len = 1 + bad_user_len + 2 + bad_pass_len;
+    off = 0;
+    tx[off++] = 1;                                       // verb_id = AUTH
+    tx[off++] = (unsigned char)(bad_payload_len & 0xff);
+    tx[off++] = (unsigned char)(bad_payload_len >> 8);
+    tx[off++] = (unsigned char)bad_user_len;
+    for (size_t i = 0; i < bad_user_len; i++) tx[off++] = (unsigned char)bad_user[i];
+    tx[off++] = (unsigned char)(bad_pass_len & 0xff);
+    tx[off++] = (unsigned char)(bad_pass_len >> 8);
+    for (size_t i = 0; i < bad_pass_len; i++) tx[off++] = (unsigned char)bad_pass[i];
+
+    sent = 0;
+    while (sent < off) {
+        long n = t_write(c2s_wr, &tx[sent], off - sent);
+        if (n <= 0) { t_putstr("joey: t_write(AUTH-bad) FAILED\n"); return 1; }
+        sent += (size_t)n;
+    }
+    got = 0;
+    while (got < 3) {
+        long n = t_read(s2c_rd, &rx[got], 3 - got);
+        if (n <= 0) { t_putstr("joey: t_read(AUTH-bad header) FAILED/EOF\n"); return 1; }
+        got += (size_t)n;
+    }
+    if (rx[0] != 1) {  // STATUS_BAD_AUTH = 1
+        t_putstr("joey: AUTH(wrong pass) expected BadAuth(1), got status=");
+        t_putstr(itoa_dec(rx[0], buf, sizeof(buf)));
+        t_putstr("\n");
+        return 1;
+    }
+    unsigned int bad_rsp_len = (unsigned int)rx[1] | ((unsigned int)rx[2] << 8);
+    while (got < (size_t)(3 + bad_rsp_len)) {
+        long n = t_read(s2c_rd, &rx[got], (size_t)(3 + bad_rsp_len) - got);
+        if (n <= 0) { t_putstr("joey: t_read(AUTH-bad drain) FAILED/EOF\n"); return 1; }
+        got += (size_t)n;
+    }
+    t_putstr("joey: AUTH(wrong pass) returned BadAuth (expected)\n");
+
+    // === AUTH === (correct passphrase)
     // Build AUTH frame: verb_id=1 + payload_len + (user_len + user + pass_len + pass).
-    // Skeleton placeholder credentials; -c lands real Argon2id verify.
+    // Real crypto: Argon2id + AEGIS-256-unwrap. Reuses USER_CREATE's credentials.
     const char auth_user[] = "michael";
-    const char auth_pass[] = "skeleton-passphrase-do-not-use";
+    const char auth_pass[] = "correct-horse-battery-staple-v1";
     unsigned int auth_user_len  = (unsigned int)(sizeof(auth_user)  - 1);
     unsigned int auth_pass_len  = (unsigned int)(sizeof(auth_pass)  - 1);
     unsigned int auth_payload_len = 1 + auth_user_len + 2 + auth_pass_len;
@@ -137,7 +242,7 @@ int main(void) {
         t_putstr("joey: AUTH frame too large for tx buffer\n");
         return 1;
     }
-    size_t off = 0;
+    off = 0;
     tx[off++] = 1;                                   // verb_id = AUTH
     tx[off++] = (unsigned char)(auth_payload_len & 0xff);
     tx[off++] = (unsigned char)(auth_payload_len >> 8);
@@ -148,7 +253,7 @@ int main(void) {
     for (size_t i = 0; i < auth_pass_len; i++) tx[off++] = (unsigned char)auth_pass[i];
 
     // write_all to c2s_wr
-    size_t sent = 0;
+    sent = 0;
     while (sent < off) {
         long n = t_write(c2s_wr, &tx[sent], off - sent);
         if (n <= 0) { t_putstr("joey: t_write(AUTH) FAILED\n"); return 1; }
@@ -156,7 +261,7 @@ int main(void) {
     }
 
     // read_exact 3-byte response header from s2c_rd
-    size_t got = 0;
+    got = 0;
     while (got < 3) {
         long n = t_read(s2c_rd, &rx[got], 3 - got);
         if (n <= 0) { t_putstr("joey: t_read(AUTH header) FAILED/EOF\n"); return 1; }

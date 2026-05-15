@@ -339,11 +339,14 @@ enum {
 // than enough; bounds the kernel-stack scratch buffer at a small cap.
 #define SYS_SPAWN_NAME_MAX  64u
 
-// Maximum ELF blob size for SYS_SPAWN. v1.0 userspace binaries fit
-// comfortably under 32 KiB (joey: 12744, hello: 12752, pipe-probe:
-// 16760, attach-probe: 15096). Bump if needed; kmalloc routes >2 KiB
-// requests through alloc_pages so larger sizes are merely heavier.
-#define SYS_SPAWN_BLOB_MAX  32768u
+// Maximum ELF blob size for SYS_SPAWN. v1.0 userspace binaries that
+// stay near the cap: corvus = 111440 bytes at P5-corvus-bringup-c
+// (Argon2id + AEGIS-256 + heap allocator pull in ~100 KiB of compiled
+// crypto). Future daemons embedding hybrid PQC primitives (ML-KEM-768)
+// will continue growing; 256 KiB gives several chunks of headroom.
+// kmalloc routes >2 KiB requests through alloc_pages so larger sizes
+// just allocate more pages — no algorithmic cost.
+#define SYS_SPAWN_BLOB_MAX  262144u
 
 // Maximum number of fds that can be inherited via SYS_SPAWN_WITH_FDS
 // per call. 16 is generous for the v1.0 use case (joey passes 2 to
