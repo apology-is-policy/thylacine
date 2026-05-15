@@ -6,8 +6,9 @@
 // backing pages) populated with blob bytes via the kernel direct map,
 // then mapped into the per-Proc TTBR0 tree via burrow_map.
 //
-// The user stack is a dedicated 16 KiB VMA at `[EXEC_USER_STACK_BASE,
-// EXEC_USER_STACK_TOP)`. v1.0 doesn't grow the stack; Phase 5+ adds
+// The user stack is a dedicated 256 KiB VMA at `[EXEC_USER_STACK_BASE,
+// EXEC_USER_STACK_TOP)` (sized for ML-KEM-768's stack-heavy FO transform
+// in corvus — see exec.h). v1.0 doesn't grow the stack; Phase 5+ adds
 // demand-grow on faults below stack base.
 //
 // At v1.0 P3-Eb the function does NOT transition to EL0 — it only
@@ -140,7 +141,7 @@ static int exec_map_segment(struct Proc *p, const void *blob,
     return 0;
 }
 
-// Map the user stack — a 16 KiB anonymous VMA at the fixed top-of-user-VA.
+// Map the user stack — a 256 KiB anonymous VMA at the fixed top-of-user-VA.
 static int exec_map_user_stack(struct Proc *p) {
     struct Burrow *burrow = burrow_create_anon(EXEC_USER_STACK_SIZE);
     if (!burrow)                               return -1;

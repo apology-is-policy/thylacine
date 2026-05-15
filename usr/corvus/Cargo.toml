@@ -35,7 +35,8 @@ linked_list_allocator = { version = "0.10", default-features = false, features =
 # we drive Argon2id at the raw `Argon2::hash_password_into` API).
 argon2 = { version = "0.5", default-features = false, features = ["alloc"] }
 
-# AEGIS-256 AEAD — wraps the hybrid keypair per CORVUS-DESIGN §4.3.
+# AEGIS-256 AEAD — wraps the hybrid keypair per CORVUS-DESIGN §4.3, and
+# (P5-corvus-bringup-d) the DEK envelope's DEM layer.
 # The `aegis` crate provides AEGIS-256 (32-byte key, 32-byte nonce,
 # 32-byte tag — matches the state file layout exactly).
 #
@@ -49,3 +50,38 @@ argon2 = { version = "0.5", default-features = false, features = ["alloc"] }
 # bypassable via the AEAD-bound work factor (unlikely — AEGIS itself
 # is fast either way; the rate limit is at the corvus layer).
 aegis = { version = "0.9", default-features = false, features = ["pure-rust"] }
+
+# ML-KEM-768 (FIPS 203) — the post-quantum half of the hybrid keypair
+# (P5-corvus-bringup-d). RustCrypto pure-Rust impl; same ecosystem as
+# `argon2`. Takes an explicit RNG (no `getrandom` dep — important: the
+# `getrandom` crate has no aarch64-unknown-none backend). No default
+# features → drops `std`. The `zeroize` feature gives `DecapsulationKey`
+# a `ZeroizeOnDrop` impl — the typed secret keys wipe on drop.
+ml-kem = { version = "0.2", default-features = false, features = ["zeroize"] }
+
+# `kem` — the Encapsulate / Decapsulate traits ml-kem's keys implement.
+# ml-kem does NOT re-export them, so calling `.encapsulate()` /
+# `.decapsulate()` requires the traits in scope ⇒ direct dep. Pinned
+# `=` because 0.3.0-pre.0 is a pre-release (cargo needs the exact
+# pre-release pin to select it).
+kem = { version = "=0.3.0-pre.0", default-features = false }
+
+# X25519 — the classical half of the hybrid keypair. `static_secrets`
+# feature provides `StaticSecret` (reusable secret; corvus reconstructs
+# it per-call from the session-slab bytes). `zeroize` makes
+# StaticSecret / EphemeralSecret / SharedSecret wipe on drop — secret
+# hygiene defence-in-depth on top of corvus's explicit wipes. pure-Rust
+# (curve25519-dalek u64 serial backend on aarch64); no_std with
+# default-features off.
+x25519-dalek = { version = "2", default-features = false, features = ["static_secrets", "zeroize"] }
+
+# SHA-256 — the KEK combiner for the hybrid-PKE DEK envelope: the
+# 32-byte DEK-wrapping key is SHA-256 over the two KEM shared secrets
+# plus the ciphertext transcript. RustCrypto; no_std with std off.
+sha2 = { version = "0.10", default-features = false }
+
+# rand_core 0.6 — the RNG trait both `ml-kem` and `x25519-dalek` 2.x
+# consume. corvus implements the trait over the kernel CSPRNG
+# (`t_getrandom`). Declared explicitly so the adapter impl has the
+# trait in scope; default-features off so no `getrandom` is pulled.
+rand_core = { version = "0.6", default-features = false }

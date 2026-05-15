@@ -443,8 +443,12 @@ daemon's session state machine + capability arithmetic + authorization
 surface. Pins CORVUS-DESIGN.md §9 invariants C-3 (session user-binding
 immutable), C-7 (unwrap refused for non-owner), C-11 (session-cap ×
 Proc-cap orthogonal authorization), and the §5.5
-HostownerRequiresConsole rule. Implementation lands at P5-corvus-
-bringup-a onward; this spec is the contract.
+HostownerRequiresConsole rule. Implementation: P5-corvus-bringup-a
+through -d landed (skeleton → wire → crypto → WRAP/UNWRAP); AUTH /
+SESSION_CLOSE / UNWRAP are as-built; the AdminElevate / SessionTransfer
+surface is later sub-chunks. The impl is a single `usr/corvus/src/
+main.rs` — the `verbs/*.rs` paths below are the original intended
+layout, not yet split out.
 
 State universe at the model's cfg: Procs={p1,p2}, Users={u1,u2}, one
 ProcCap (CapHostowner). Datasets identified by their owner user
@@ -477,11 +481,11 @@ Spec actions ↔ impl mapping (impl filled in at P5-corvus-bringup):
 | Spec action | Source location (target) | Notes |
 |---|---|---|
 | `MarkConsoleAttached(p)` | `kernel/proc.c::proc_alloc` (joey-spawn path; bit set on console-login child) | The kernel-side console-attachment bit is set at fork time by joey when forking /sbin/login and only /sbin/login. Per CORVUS-DESIGN §5.5 last paragraph: not propagatable across rfork to a different territory. |
-| `AuthSuccess(p, u)` | `usr/corvus/src/verbs/auth.rs::handle_auth_success` | AUTH verb (verb_id=1). Argon2id → KEK → unwrap hybrid keypair → session token mint + bind to peer Proc identity. Spec models the resulting session record; in-RAM secret discipline (C-1/C-2/C-5) is runtime, not state-machine. |
-| `SessionClose(p)` | `usr/corvus/src/verbs/session.rs::handle_session_close` + Proc-exit cleanup path | SESSION_CLOSE verb (verb_id=3) or Spoor-close-driven cleanup. Clears in-RAM secrets. |
+| `AuthSuccess(p, u)` | `usr/corvus/src/main.rs::handle_auth` (as-built) | AUTH verb (verb_id=1). Argon2id → KEK → unwrap hybrid keypair → session token mint + bind to peer Proc identity. Spec models the resulting session record; in-RAM secret discipline (C-1/C-2/C-5) is runtime, not state-machine. |
+| `SessionClose(p)` | `usr/corvus/src/main.rs::handle_session_close` (as-built) + Proc-exit cleanup path | SESSION_CLOSE verb (verb_id=3) or Spoor-close-driven cleanup. Clears in-RAM secrets. |
 | `SessionTransfer(src, dst)` | `usr/corvus/src/transport/spoor_peer.rs::on_peer_change` | Triggered when the kernel reports a new peer Proc identity on /srv/corvus/'s Spoor (9P RIGHT_TRANSFER). MUST copy bound_user from existing session; MUST NOT take user from request fields. |
 | `AdminElevate(p)` | `usr/corvus/src/verbs/admin.rs::handle_admin_elevate` | ADMIN_ELEVATE verb (verb_id=7). Reads /srv/corvus/peer/proc for console-attachment bit; argon2id system passphrase; on success grants CapHostowner via kernel cap-bump syscall. |
-| `Unwrap(p, d)` | `usr/corvus/src/verbs/unwrap.rs::handle_unwrap` | UNWRAP verb (verb_id=4). Reads session.bound_user, dataset-ownership table, compares; refuses with PermissionDenied if mismatch. |
+| `Unwrap(p, d)` | `usr/corvus/src/main.rs::handle_unwrap` (as-built; landed P5-corvus-bringup-d) | UNWRAP verb (verb_id=4). Reads session.bound_user, the dataset-ownership table, compares; refuses `PermissionDenied` on mismatch (`NotFound` if the dataset is unknown). The C-7 gate fires before any crypto. WRAP (verb_id=10) is the inverse and shares the gate. |
 | `AdminVerb(p)` | `usr/corvus/src/verbs/admin.rs::dispatch_admin_verb` | USER_CREATE / USER_DELETE / ROTATE_KEY (verb_id=5,6,9). Reads peer Proc cap set via kernel; refuses without CapHostowner. NO session.bound_user check. |
 | `BuggyUnwrapCrossUser` | (none — bug class statically prevented by `assert!(session.bound_user == owner)` in unwrap.rs) | Impl-side: the equality check is a single condition; bug shapes are short-circuit, wrong-direction, or wrong-fields. Code review + audit catches; spec models the consequence. |
 | `BuggyAuthBindingMutate` | (none — bug class prevented by struct's immutable bound_user field) | Impl-side: Session struct's bound_user is `final` / non-`mut`; bug requires changing the API surface. |
@@ -494,7 +498,7 @@ Spec invariants ↔ impl enforcement:
 | Spec invariant | Source enforcement |
 |---|---|
 | `SessionUserImmutable` (C-3) | Session struct's bound_user is non-mut after construction. SessionTransfer copies the field, never accepts an override. |
-| `UnwrapOwnerOnly` (C-7) | The single comparison `session.bound_user == dataset_ownership_table.owner_of(dataset)` in handle_unwrap. |
+| `UnwrapOwnerOnly` (C-7) | The comparison of `session.bound_user` against the dataset-ownership table in `main.rs::handle_unwrap` and `handle_wrap` — C-7-gated, fires before any crypto. Landed P5-corvus-bringup-d. |
 | `AdminRequiresProcCap` (C-11 Proc-cap path) | The single check `kernel.peer_has_cap(CapHostowner)` in dispatch_admin_verb. |
 | `HostownerRequiresConsole` (§5.5) | The single check `peer_proc.console_attached?` in handle_admin_elevate. Combined with the kernel-side discipline that console_attached is never propagatable across rfork. |
 

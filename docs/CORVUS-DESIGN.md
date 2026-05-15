@@ -223,6 +223,7 @@ corvus serves a 9P tree at `/srv/corvus/`:
 │   └── caps                  (R)   peer Proc's capability bits
 └── ops/                                   ← admin / control verbs
     ├── unwrap                (RW)  per-user-stratumd → corvus DEK unwrap (BINARY FRAMES)
+    ├── wrap                  (RW)  DEK wrap under a user's hybrid keypair (BINARY FRAMES)
     ├── change-passphrase     (W)   per-user passphrase rotation (BINARY FRAMES)
     ├── user-create           (W)   admin op
     ├── user-delete           (W)   admin op
@@ -233,7 +234,7 @@ corvus serves a 9P tree at `/srv/corvus/`:
 The `/ops/unwrap` verb replaces what was previously called "Stratum janus wire compatibility." It is a Thylacine-native verb that carries:
 - Session token (so corvus can verify session → user → dataset chain).
 - Dataset ID + key_id (the targeting).
-- Wrapped DEK blob (passed through from Stratum's keyschema).
+- Wrapped DEK blob — corvus's hybrid-PKE DEK envelope (§6.5), produced by the WRAP verb. Not Stratum's keyschema: Stratum stores corvus-format envelopes verbatim.
 
 Returns the unwrapped DEK if the session-user owns the dataset; refuses otherwise. **C-7 ("corvus refuses unwrap for users not currently logged in") is achievable here**: the session token in the request maps to a user; corvus's dataset-ownership table maps the dataset to a user; corvus refuses if they don't match.
 
@@ -462,7 +463,8 @@ hostowner authenticated session, has CAP_HOSTOWNER
        v
 [stratumd]
        |  generate DEK (CSPRNG)
-       |  ask corvus to wrap it under new user's keypair → wrapped_dek
+       |  ask corvus to wrap it (WRAP verb, §6.4 / §6.5) under the new
+       |    user's keypair → wrapped_dek (the DEK envelope)
        |  store wrapped_dek in dataset metadata
 done. user can now log in.
 ```
@@ -560,6 +562,7 @@ Verb table:
 | 7 | ADMIN_ELEVATE | `token` + `sys_pass_len u16` + `sys_passphrase` |
 | 8 | RECOVER | `phrase_len u16` + `phrase` + `new_sys_pass_len u16` + `new_sys_passphrase` |
 | 9 | ROTATE_KEY | `token` + `dataset_len u8` + `dataset` |
+| 10 | WRAP | `token` (33) + `dataset_len u8` + `dataset` + `key_id u64 LE` + `dek_len u16` + `dek` |
 
 Response frame:
 
@@ -572,6 +575,30 @@ Response frame:
 The recv buffer for any frame carrying a passphrase / DEK is mlock'd. Corvus calls `sys_explicit_bzero` on the buffer immediately after parsing the relevant fields into typed storage and again after the typed storage is consumed.
 
 **No newline / shell-injection hazards**: binary frames don't parse text; passphrases can contain any byte except length-overflow. A passphrase containing `\n` or `\0` or `=` works fine.
+
+### 6.5 WRAP and the DEK envelope
+
+WRAP (verb_id=10) is the inverse of UNWRAP: it wraps a 32-byte dataset DEK under a user's hybrid keypair, producing the **DEK envelope** — the `wrapped` blob UNWRAP later consumes. WRAP realizes the "ask corvus to wrap it under [the] user's keypair" step of §5.4 (dataset creation). Like UNWRAP it is **C-7-gated**: the session user must own the target dataset, so a session cannot mint an envelope tagged for a dataset it does not own.
+
+The DEK envelope is a **Thylacine-native KEM-DEM hybrid owned by corvus** — not Stratum's keyschema. Stratum stores corvus-produced envelopes verbatim in dataset metadata; the blob is corvus's format end to end. It binds a post-quantum and a classical KEM so it stays secure if *either* primitive holds:
+
+```
+[0]            envelope_version  u8 = 1
+[1..1089)      mlkem_ct          1088 B   ML-KEM-768 ciphertext
+[1089..1121)   x25519_eph_pk     32 B     X25519 ephemeral public key
+[1121..1153)   aead_nonce        32 B     AEGIS-256 nonce
+[1153..1185)   dek_ct            32 B     AEGIS-256(DEK) ciphertext
+[1185..1217)   dek_tag           32 B     AEGIS-256 tag
+```
+
+Construction:
+- **KEM**: ML-KEM-768 (FIPS 203) encapsulation to the recipient's encapsulation key yields `(mlkem_ct, ss_pq)`; a fresh X25519 ephemeral → recipient-static ECDH yields `ss_cl`.
+- **KEK combiner**: `kek = SHA-256("thylacine-corvus-dek-kdf-v1" || ss_pq || ss_cl || x25519_eph_pk || mlkem_ct)`. The transcript bind ties the KEK to the exact ciphertext.
+- **DEM**: AEGIS-256 encrypts the 32-byte DEK under `kek`, AD = `"thylacine-corvus-dek-v1" || dataset || key_id` (`key_id` is the LE u64 from the WRAP/UNWRAP frame) — so a wrapped DEK cannot be replayed against a different dataset or key generation.
+
+UNWRAP reverses this: ML-KEM-768 decapsulate (FIPS 203 implicit rejection — a bad ciphertext yields a wrong shared secret, not an error) + X25519 ECDH reproduce `kek`; the AEGIS-256 tag check is the integrity gate. UNWRAP's C-7 ownership check fires *before* any crypto.
+
+WRAP's OK-response payload is the 1217-byte envelope; UNWRAP's OK-response payload is the 32-byte DEK.
 
 ---
 
@@ -748,7 +775,7 @@ Scope:
 - v1.0 hardening syscalls applied at startup: mlockall, set_dumpable(0), set_traceable(0), getrandom-seeded probe.
 - State file format with magic `CRVS` (§4.3).
 - Binary frame wire codec (§6.4).
-- Verbs: AUTH, CHANGE_PASSPHRASE, SESSION_CLOSE, UNWRAP, USER_CREATE, USER_DELETE, ADMIN_ELEVATE, RECOVER, ROTATE_KEY.
+- Verbs: AUTH, CHANGE_PASSPHRASE, SESSION_CLOSE, UNWRAP, WRAP, USER_CREATE, USER_DELETE, ADMIN_ELEVATE, RECOVER, ROTATE_KEY.
 - Passphrase backend with zxcvbn-entropy gate.
 - File backend (for system pool).
 - Encrypted audit log.

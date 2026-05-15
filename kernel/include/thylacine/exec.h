@@ -38,13 +38,20 @@ struct Proc;
 //   0x0000_0000_0001_0000          User code/data (per ELF e_entry +
 //   ...                             per-segment vaddr).
 //   ...
-//   0x0000_0000_8000_0000 - 16 KiB User stack base (16 KiB stack).
+//   0x0000_0000_8000_0000 - 256 KiB User stack base.
 //   0x0000_0000_8000_0000          User stack TOP (initial SP_EL0).
 //
-// The user-stack region is well below the TTBR1 split (0x0001_0000_*),
-// well above typical ELF segment vaddrs, and small (16 KiB) at v1.0.
-// Phase 5+ adds growable stack via demand paging on stack-grow faults.
-#define EXEC_USER_STACK_SIZE   (16ull * 1024)
+// The user-stack region is well below the TTBR1 split (0x0001_0000_*)
+// and well above typical ELF segment vaddrs + BSS heaps. Sized 256 KiB
+// at v1.0: corvus runs ML-KEM-768 (FIPS 203) keygen/decapsulate, whose
+// FO-transform working set is tens of KiB of stack — the prior 16 KiB
+// overflowed. 256 KiB is generous headroom for every userspace Proc;
+// Phase 5+ replaces the fixed size with demand-grow on stack faults.
+// NOTE: there is no guard page below EXEC_USER_STACK_BASE — an overflow
+// past 256 KiB corrupts lower stack frames silently until SP crosses
+// into the unmapped gap and faults. A dedicated guard page is a deferred
+// hardening item (sibling of the kernel-side P5-secondary-stack-guard).
+#define EXEC_USER_STACK_SIZE   (256ull * 1024)
 #define EXEC_USER_STACK_TOP    0x0000000080000000ull
 #define EXEC_USER_STACK_BASE   (EXEC_USER_STACK_TOP - EXEC_USER_STACK_SIZE)
 
