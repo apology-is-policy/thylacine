@@ -36,7 +36,7 @@ Ordered by Thylacine's critical path: the smallest item ships first and unblocks
 |---|---|---|---|---|
 | **A1** | `--bind-pool-serial` + `pool_serial` superblock field | P5-stratumd-bringup (boot into real Stratum root; not stub) | tiny | YES — boot security regression without it |
 | **A2** | Multi-stratumd-per-pool (datasets-allowed scoping) | P5-login (per-user stratumd spawning) | medium | YES — single-user fallback otherwise |
-| **A3** | corvus-validated UNWRAP wire | P5-corvus-bringup | medium | YES — no encrypted user datasets otherwise |
+| **A3** | corvus UNWRAP + WRAP wire | P5-corvus-bringup | medium | YES — no encrypted user datasets otherwise |
 | **A4** | Session-close → DEK eviction notify | P5-login (logout flow + crash recovery) | small | YES — logout integrity hole otherwise |
 | **A5** | Snapshot rollback compromise marking | P5-corvus-bringup (closes C-13) | medium | NO — defence in depth; can ship after v1.0 |
 | **A6** | Per-dataset key rotation hooks (cryptographic forward secrecy) | v1.x corvus ROTATE_KEY verb | large | NO — explicitly v1.x per CORVUS-DESIGN §11 |
@@ -274,7 +274,7 @@ Adversarial categories: cross-stratumd race (one process commits while another i
 
 ---
 
-## 5. A3 — corvus UNWRAP wire
+## 5. A3 — corvus UNWRAP + WRAP wire
 
 ### 5.1 Motivation
 
@@ -282,7 +282,7 @@ Per `CORVUS-DESIGN.md §6.4` (binary frame wire format) + §13.2: per-user strat
 
 Stratum's existing janus integration (in `stratum/v2/src/janus/`) speaks janus's binary format. Corvus speaks a **different** wire — Thylacine-native binary frames with state-file magic `CRVS` (distinct from janus's `JPAS`). Stratum needs a "key agent client" library that can speak corvus's wire when stratumd runs under Thylacine.
 
-The wire is fully specified in `CORVUS-DESIGN.md §6.4`. This section restates the parts Stratum implements.
+The wire is fully specified in `CORVUS-DESIGN.md §6.4`/`§6.5`. This section restates the parts Stratum implements: the **UNWRAP** verb (Stratum requests a DEK from a corvus-sealed envelope) and the **WRAP** verb (Stratum asks corvus to *produce* the sealed envelope at dataset-provisioning time — §5.10 below). corvus owns the envelope format end to end; Stratum stores the opaque blob verbatim.
 
 ### 5.2 Wire frames Stratum sends
 
@@ -309,6 +309,23 @@ Total frame size: 3 + 33 + 1 + dataset_len + 8 + 2 + wrapped_len bytes. Max ~256
 [3..)     payload            on status=0: 32 bytes = unwrapped DEK
                              on status≠0: 0 bytes
 ```
+
+**WRAP** (verb_id = 10) — Stratum sends this at dataset-provisioning time (`CORVUS-DESIGN.md §5.4`) to obtain the sealed envelope it will store:
+
+```
+[0]       verb_id            u8  = 10
+[1..3)    payload_len        u16 LE
+[3..36)   token              33 bytes ("s" + 32-char hex)
+[36]      dataset_len        u8
+[37..)    dataset            dataset_len bytes (utf-8; e.g., "users/michael")
+[37+dl..) key_id             u64 LE
+[..]      dek_len            u16 LE  (must be 32)
+[..]      dek                32 bytes (the plaintext DEK to seal)
+```
+
+**WRAP response**: the same `status / payload_len / payload` header; on `status=0` the payload is the **1217-byte DEK envelope** (the `wrapped` blob a later UNWRAP consumes); on `status≠0`, 0 bytes.
+
+WRAP's authorization differs from UNWRAP's — see §5.10.
 
 ### 5.3 Where Stratum needs to send UNWRAP
 
@@ -374,6 +391,23 @@ Stratum-side: a new audit-trigger surface around the corvus key-agent client:
 - DEK caching discipline (mlock; don't write to swap; don't log).
 
 Adversarial categories: wire-format injection (malformed frame from a hostile corvus impersonator), session token leak (logs, core dumps, swap), DEK lifetime (cached after user logout if eviction notify doesn't arrive — see A4).
+
+### 5.10 WRAP — provisioning-time DEK sealing
+
+**WRAP exists, and it is corvus's verb — not "Stratum encrypts locally."** corvus exposes a WRAP verb (verb_id=10); it produces the 1217-byte DEK envelope, a Thylacine-native ML-KEM-768 + X25519 KEM-DEM hybrid (full format: `CORVUS-DESIGN.md §6.5`). The model is **not** "Stratum encrypts the DEK to a corvus-published public key" — corvus owns the seal end to end, and Stratum stores the opaque envelope verbatim in dataset metadata. WRAP landed in Thylacine's `corvus` at the P5-corvus-bringup-d chunk.
+
+**Who sends WRAP, and when.** At dataset creation (`CORVUS-DESIGN.md §5.4`): the hostowner creates a user + that user's dataset; stratumd generates a fresh DEK and sends WRAP `{ token, dataset, key_id, dek }` to corvus; corvus returns the envelope; stratumd stores it. WRAP is sent **once per dataset, at provisioning**; thereafter the dataset's slot is read-only until rotation (§8 / A6, v1.x).
+
+**Auth — WRAP requires a stronger credential than UNWRAP.** UNWRAP is C-7-gated (the session must *own* the dataset); that suffices because UNWRAP only *consumes* an existing seal. WRAP *creates* a seal, and at provisioning time the target user is **not yet logged in** — no session for them exists, and the hostowner's session does not own `users/<newuser>`. So WRAP has two paths:
+
+- **Normal path** — a session WRAPing for a dataset it *owns*: C-7-gated, identical to UNWRAP. (Use case: a logged-in user re-sealing their own dataset's DEK.)
+- **Admin path** — a session holding **`CAP_HOSTOWNER`** may WRAP for *any* dataset, bypassing C-7. This is the provisioning path: the hostowner (a console-attached, system-passphrase-verified operator — `CORVUS-DESIGN.md §5.5`) seals the new user's DEK before that user's first login.
+
+`CAP_HOSTOWNER` is a Thylacine kernel capability granted only via corvus's ADMIN_ELEVATE verb after system-passphrase verification from a console-attached Proc. **From Stratum's side this changes nothing on the wire** — the WRAP frame above is unchanged; the credential is the calling *session's* authority, which corvus evaluates. Stratum simply relays whatever session token the provisioning flow supplies and does not itself evaluate the credential. (Thylacine-side status: the kernel `CAP_HOSTOWNER` + console-attachment foundation landed at P5-hostowner-a; the ADMIN_ELEVATE verb that grants it, and corvus's WRAP admin-path check, land at P5-hostowner-b. The WRAP *normal* C-7 path is already as-built since P5-corvus-bringup-d.)
+
+**Dataset binding.** The stable identifier is the **UTF-8 dataset path string** (`users/<name>`) — the same string the UNWRAP frame in §5.2 already carries. There is **no decimal `dataset_id` on the corvus wire**; the envelope's AEAD AD binds the path string + the `u64 key_id`. If Stratum's keyschema keys slots by an internal numeric id, it must carry the corvus dataset-path string alongside it (or key directly on the path) — the path is the cryptographically-bound identity and the value corvus authorizes against.
+
+**Rotation interplay.** Two distinct cases. (a) corvus rotating a *user's* KEK (passphrase change, `CORVUS-DESIGN.md §5.3`) rewrites only that user's *keypair* wrap — existing DEK envelopes stay valid, **no re-WRAP of dataset slots is needed**. (b) Per-dataset DEK *rekeying* is the `ROTATE_KEY` verb (verb_id=9), explicitly **v1.x** (§8 / A6 of this doc; `CORVUS-DESIGN.md §11`). The envelope is already rotation-ready — `key_id` is bound into the AD — but who re-WRAPs slots on rotation, and the `USER_KEY_ROTATED` notify (`notify_kind=2`, §6.2 — a stub on both sides today), are deliberately undecided until `ROTATE_KEY` lands; the contract for them is written then.
 
 ---
 
@@ -626,6 +660,7 @@ The asks above are what Stratum provides; the following is what Thylacine guaran
 - Stratumd is supplied the token file path via `--corvus-session-token-file`.
 - The token file is mode 0400 owned by the stratumd's user.
 - corvus's wire is **the** wire — Thylacine doesn't expect Stratum to speak janus's wire when running under Thylacine.
+- corvus owns both the UNWRAP and WRAP halves of the DEK-envelope wire (§5). The 1217-byte envelope format is corvus's; Stratum stores it verbatim and never parses it. WRAP's provisioning-time admin path is gated by `CAP_HOSTOWNER` (a Thylacine kernel capability) — Stratum relays the session token unchanged and does not itself evaluate the credential.
 
 ### 10.4 Eviction discipline
 

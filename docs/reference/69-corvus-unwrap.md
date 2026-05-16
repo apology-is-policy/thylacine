@@ -174,9 +174,13 @@ ROTATE_KEY) are later sub-chunks.
   `docs/reference/27-exec.md` §"User-stack guard page".
 - **State + ownership table are in-memory.** They do not survive a
   corvus restart; FS persistence lands with `/var/lib/corvus/`.
-- **WRAP is C-7-gated** — a session can only wrap for datasets it owns.
-  Real dataset provisioning (§5.4) may later need an admin WRAP path
-  for not-yet-logged-in users — a future verb refinement.
+- **WRAP authorization.** The implemented path is **C-7-gated** — a
+  session can only WRAP for datasets it owns. The provisioning path
+  (CORVUS-DESIGN §5.4 — sealing a DEK for a not-yet-logged-in user) is
+  now spec'd as an **admin path gated by `CAP_HOSTOWNER`** (CORVUS-DESIGN
+  §6.5; STRATUM-API-V1.md §5.10); its implementation lands with
+  ADMIN_ELEVATE at P5-hostowner-b (and needs corvus to retain each
+  user's public key independent of that user's session).
 - **`key_id`** is bound into the DEK-envelope AAD (so the v1 envelope
   is rotation-safe), but is not yet used to *select* among multiple
   keys for a dataset — multi-key datasets / rotation are v1.x.

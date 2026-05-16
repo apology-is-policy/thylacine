@@ -463,8 +463,9 @@ hostowner authenticated session, has CAP_HOSTOWNER
        v
 [stratumd]
        |  generate DEK (CSPRNG)
-       |  ask corvus to wrap it (WRAP verb, §6.4 / §6.5) under the new
-       |    user's keypair → wrapped_dek (the DEK envelope)
+       |  ask corvus to wrap it (WRAP verb, §6.4 / §6.5; the hostowner's
+       |    CAP_HOSTOWNER authorizes the admin WRAP path — the new user
+       |    has no session yet) under the new user's keypair → wrapped_dek
        |  store wrapped_dek in dataset metadata
 done. user can now log in.
 ```
@@ -578,7 +579,11 @@ The recv buffer for any frame carrying a passphrase / DEK is mlock'd. Corvus cal
 
 ### 6.5 WRAP and the DEK envelope
 
-WRAP (verb_id=10) is the inverse of UNWRAP: it wraps a 32-byte dataset DEK under a user's hybrid keypair, producing the **DEK envelope** — the `wrapped` blob UNWRAP later consumes. WRAP realizes the "ask corvus to wrap it under [the] user's keypair" step of §5.4 (dataset creation). Like UNWRAP it is **C-7-gated**: the session user must own the target dataset, so a session cannot mint an envelope tagged for a dataset it does not own.
+WRAP (verb_id=10) is the inverse of UNWRAP: it wraps a 32-byte dataset DEK under a user's hybrid keypair, producing the **DEK envelope** — the `wrapped` blob UNWRAP later consumes. WRAP realizes the "ask corvus to wrap it under [the] user's keypair" step of §5.4 (dataset creation).
+
+WRAP has two authorization paths. Its **normal path** is **C-7-gated** like UNWRAP — a session may WRAP only for a dataset it owns (use case: a logged-in user re-sealing their own dataset's DEK). But WRAP *creates* a seal, and dataset provisioning (§5.4) must seal a DEK for a user not yet logged in — no session for them exists, and the hostowner's session does not own `users/<newuser>`. So WRAP also has an **admin path**: a session holding `CAP_HOSTOWNER` may WRAP for any dataset, bypassing C-7. This is the provisioning path — the hostowner (console-attached + system-passphrase-verified, §5.5) seals the new user's DEK. The admin path requires corvus to hold the recipient's *public* key independent of that user's session — the public half of each user's hybrid keypair is retained accessible, while the private half stays passphrase-wrapped. The `CAP_HOSTOWNER` gate materializes the `AdminVerb` authorization shape of `specs/corvus.tla`.
+
+Status: the C-7 normal path is as-built since P5-corvus-bringup-d. `CAP_HOSTOWNER` + the console-attachment foundation landed at P5-hostowner-a; the WRAP admin-path check lands with ADMIN_ELEVATE at P5-hostowner-b. The bilateral contract for WRAP is `STRATUM-API-V1.md §5.10`.
 
 The DEK envelope is a **Thylacine-native KEM-DEM hybrid owned by corvus** — not Stratum's keyschema. Stratum stores corvus-produced envelopes verbatim in dataset metadata; the blob is corvus's format end to end. It binds a post-quantum and a classical KEM so it stays secure if *either* primitive holds:
 
