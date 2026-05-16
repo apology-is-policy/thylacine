@@ -574,13 +574,16 @@ A login session can be transferred to a child Proc (e.g., login → user shell �
 
 ### 6.4 Wire format: binary frames
 
-`/srv/corvus/ctl` and `/srv/corvus/ops/*` use **binary frames**, not line-based text (audit F8 resolution). Every frame:
+`/srv/corvus/ctl` and `/srv/corvus/ops/*` use **binary frames**, not line-based text (audit F8 resolution). A **request** frame (peer → corvus) carries a 4-byte header:
 
 ```
 [0]      verb_id           u8  (see verb table)
-[1..3)   payload_len       u16 LE
-[3..)    payload           verb-specific
+[1]      protocol_version  u8  = 1   (Stratum↔corvus wire version — STRATUM-API-V1 Q11)
+[2..4)   payload_len       u16 LE
+[4..)    payload           verb-specific
 ```
+
+`protocol_version` is the negotiated wire-version byte (resolved with Stratum as STRATUM-API-V1.md Q11; Stratum's UNWRAP/WRAP encoders emit it); corvus refuses an unknown version with `BadFormat`. **Response** frames (corvus → peer) carry no version byte — the 3-byte header below.
 
 Verb table:
 

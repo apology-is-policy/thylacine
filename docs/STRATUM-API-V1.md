@@ -6,6 +6,8 @@ This document is the Thylacine-side spec — it states what Thylacine *needs*. S
 
 The Thylacine-side commitments are also enumerated (§10) so the contract is bilateral.
 
+> **Stratum response — DELIVERED (2026-05-16, Stratum tip `6bfdbbc`).** All five v1.0 hard-dependency asks **A1–A5 are delivered and audited** Stratum-side (audit rounds R137–R148); A6 is v1.x by §8, not started by agreement. Stratum's full point-by-point response — as-built CLI / wire / error surfaces, deviations + rationale, verification — is **`STRATUM-API-V1-RESPONSE.md`** (this directory, copied from Stratum's tree per §11). Two as-built deviations to carry into Thylacine code: (1) A2 surfaces a disallowed-dataset refusal as wire-level `Rlerror(EACCES)` at `Tattach` — no custom `STM_EDATASETNOTALLOWED`, and `STM_EPOOLLOCKED` is designed out by the single-writer coordinator — so the kernel 9P client treats a `Tattach` `EACCES` as the dataset-scope refusal; (2) A5's rollback *marker* is fully live, the rollback *mechanism* is stubbed pending Stratum's post-Thylacine Phase 9.7 (does not block v1.0 — C-13 was already impl-v1.x). **One open cross-repo seam gates *live* corvus interop**: Q11 resolved to a **4-byte request header** (`protocol_version u8 = 1` after `verb_id`) — corvus's request decoder must move 3→4 bytes (Thylacine-side; `CORVUS-DESIGN.md §6.4`). The §5.2 request frames below are updated to the resolved 4-byte form.
+
 ---
 
 ## 1. Mission
@@ -286,22 +288,23 @@ The wire is fully specified in `CORVUS-DESIGN.md §6.4`/`§6.5`. This section re
 
 ### 5.2 Wire frames Stratum sends
 
-**UNWRAP** (verb_id = 4):
+**UNWRAP** (verb_id = 4) — 4-byte request header (Q11):
 
 ```
 [0]       verb_id            u8  = 4
-[1..3)    payload_len        u16 LE
-[3..36)   token              33 bytes ("s" + 32-char hex; 128 bits CSPRNG)
-[36]      dataset_len        u8
-[37..)    dataset            dataset_len bytes (utf-8; e.g., "users/michael")
-[37+dl..) key_id             u64 LE
+[1]       protocol_version   u8  = 1   (Q11 — Stratum↔corvus wire version)
+[2..4)    payload_len        u16 LE
+[4..37)   token              33 bytes ("s" + 32-char hex; 128 bits CSPRNG)
+[37]      dataset_len        u8
+[38..)    dataset            dataset_len bytes (utf-8; e.g., "users/michael")
+[38+dl..) key_id             u64 LE
 [..]      wrapped_len        u16 LE
 [..]      wrapped            wrapped_len bytes (the AEAD-wrapped DEK blob; opaque to corvus)
 ```
 
-Total frame size: 3 + 33 + 1 + dataset_len + 8 + 2 + wrapped_len bytes. Max ~256 bytes for typical sizes.
+Total frame size: 4 + 33 + 1 + dataset_len + 8 + 2 + wrapped_len bytes. Max ~256 bytes for typical sizes.
 
-**Response**:
+**Response** (3-byte header — corvus → Stratum responses carry no version byte):
 
 ```
 [0]       status             u8  (0=OK, 1=BadAuth, 2=PermissionDenied, 3=NotFound, 4=RateLimited, 5=BadFormat, 6=InternalError)
@@ -310,15 +313,16 @@ Total frame size: 3 + 33 + 1 + dataset_len + 8 + 2 + wrapped_len bytes. Max ~256
                              on status≠0: 0 bytes
 ```
 
-**WRAP** (verb_id = 10) — Stratum sends this at dataset-provisioning time (`CORVUS-DESIGN.md §5.4`) to obtain the sealed envelope it will store:
+**WRAP** (verb_id = 10) — 4-byte request header (Q11) — Stratum sends this at dataset-provisioning time (`CORVUS-DESIGN.md §5.4`) to obtain the sealed envelope it will store:
 
 ```
 [0]       verb_id            u8  = 10
-[1..3)    payload_len        u16 LE
-[3..36)   token              33 bytes ("s" + 32-char hex)
-[36]      dataset_len        u8
-[37..)    dataset            dataset_len bytes (utf-8; e.g., "users/michael")
-[37+dl..) key_id             u64 LE
+[1]       protocol_version   u8  = 1   (Q11 — Stratum↔corvus wire version)
+[2..4)    payload_len        u16 LE
+[4..37)   token              33 bytes ("s" + 32-char hex)
+[37]      dataset_len        u8
+[38..)    dataset            dataset_len bytes (utf-8; e.g., "users/michael")
+[38+dl..) key_id             u64 LE
 [..]      dek_len            u16 LE  (must be 32)
 [..]      dek                32 bytes (the plaintext DEK to seal)
 ```
@@ -382,6 +386,8 @@ The UNWRAP request is sent **once per dataset mount**. The DEK is cached in stra
 - **Q9**: What's Stratum's per-mount retry policy if corvus is briefly unavailable (e.g., during a restart)? Suggested: 3 retries with 100ms / 500ms / 2s backoff, then exit.
 - **Q10**: Does Stratum need a corvus-side health check before sending UNWRAP? Or is the request itself the check? Recommendation: request is the check; no separate ping.
 - **Q11**: Wire protocol versioning — should the UNWRAP frame carry a version byte for future evolution? Recommendation: yes. Add `protocol_version u8 = 1` after `verb_id`. corvus refuses unknown versions with BadFormat.
+
+**Q8–Q11 resolved** (Stratum response, 2026-05-16): Q8 — token opaque to Stratum (read + replay unparsed). Q9 — retry backoff [100, 500, 2000] ms, clamped to 3. Q10 — no health-check verb; the UNWRAP request is the check. **Q11 — yes**: `protocol_version u8 = 1` after `verb_id` (the 4-byte request header, §5.2); responses stay unversioned; corvus refuses an unknown version with `BadFormat`. corvus's request decoder must move 3→4 bytes to match. Detail: `STRATUM-API-V1-RESPONSE.md §3.5`.
 
 ### 5.9 Audit posture
 
