@@ -203,7 +203,7 @@ Verbatim from `ARCHITECTURE.md §28`. These are the TLA+ proof obligations AND t
 | # | Invariant | Enforcement | Spec |
 |---|---|---|---|
 | I-1 | Namespace operations in process A don't affect process B | Kernel namespace isolation | `namespace.tla` |
-| I-2 | Capability set monotonically reduces (`rfork` only reduces) | Syscall gate | `handles.tla` |
+| I-2 | Fork-grantable capability set monotonically reduces (`rfork` only reduces). Elevation-only capabilities (`CAP_HOSTOWNER`) are the sole sanctioned growth — conferred only via the `cap` device for a console-attached Proc, never by `rfork` (CORVUS-DESIGN.md §5.5.1 / C-21) | Syscall gate; `cap` device redemption | `handles.tla` |
 | I-3 | Mount points form a DAG, never a cycle | Kernel mount validation | `namespace.tla` |
 | I-4 | Handles transfer between processes only via 9P sessions | Syscall surface (no direct-transfer syscall exists) | `handles.tla` |
 | I-5 | `KObj_MMIO`, `KObj_IRQ`, `KObj_DMA` cannot be transferred | Transfer syscall has no code path; static_assert | `handles.tla` |

@@ -498,15 +498,16 @@ Stratum + janus + init lifecycle (the boot path that uses the above):
 
 ### 7.2a Corvus arc (key agent, hostowner, login — per `docs/CORVUS-DESIGN.md`)
 
-CORVUS-DESIGN.md (landed at P5-corvus-design) is the binding scripture for the post-pivot stack: corvus key agent, per-user stratumd processes, login manager, hostowner model, kernel-update flow. The seven implementation chunks from CORVUS-DESIGN §10:
+CORVUS-DESIGN.md (landed at P5-corvus-design) is the binding scripture for the post-pivot stack: corvus key agent, per-user stratumd processes, login manager, hostowner model, kernel-update flow. The eight implementation chunks from CORVUS-DESIGN §10:
 
 - **P5-corvus-design** (this doc + ARCH/ROADMAP cross-refs; no code). **Landed.**
 - **P5-stratumd-multi** (Stratum-side; Michal-owned): multi-stratumd-per-pool support — multiple stratumd processes share one pool's block device, each restricted to specific datasets. Per CORVUS-DESIGN §13.1. Required before P5-login can spawn per-user stratumd processes.
 - **P5-corvus-syscalls** (Thylacine-side): land `sys_mlockall`, `sys_set_dumpable`, `sys_set_traceable`, `sys_explicit_bzero`, `sys_getrandom` in the kernel + libt stubs + tests. Per ARCH §11.2b + CORVUS-DESIGN §4.1.1. **Critical-path foundation** — corvus + per-user stratumd both depend on these.
 - **P5-stratumd-bringup**: joey forks stratumd-system against the system pool with file-backed key + pool-serial verification (C-14); kernel-side 9P mount of /sysroot; pivot root; explicit_bzero the in-memory key.
 - **P5-corvus-bringup**: implement `/sbin/corvus` from scratch (NOT a port; Thylacine-native using Stratum's libstratum-crypto primitives). State file format with magic `CRVS`. Binary frame wire codec. All v1.0 verbs. Encrypted audit log. Per CORVUS-DESIGN §4 + §6.
+- **P5-corvus-srv**: the `/srv/corvus/` transport — a kernel-mediated tree backed by corvus's userspace Dev (the Spoor-pair transport built for stratumd), giving every connection a kernel-stamped, unforgeable peer identity (PID, capability set, console-attachment bit, 64-bit per-Proc identity tag). Per CORVUS-DESIGN §6.1/§6.2. Prerequisite for P5-login and P5-hostowner — corvus-bringup left corvus on a joey-driven pipe harness; login and hostowner both gate on the peer Proc.
 - **P5-login**: `/sbin/login` — console-based login that drives corvus + spawns per-user stratumd processes + binds user dataset Spoor into user's territory.
-- **P5-hostowner**: `CAP_HOSTOWNER` capability + ADMIN_ELEVATE verb + console-attachment kernel bit + RECOVER verb (paper recovery phrase). Per CORVUS-DESIGN §3 D5 + §5.5 + §5.6.
+- **P5-hostowner** (sub-chunks a/b/c): -a *(landed)* — `CAP_HOSTOWNER` (elevation-only) + the console-attachment kernel bit; -b — the kernel `cap` device + `CAP_GRANT_HOSTOWNER` + the `rfork` elevation-only strip + ADMIN_ELEVATE + admin-verb gating; -c — the RECOVER verb (paper recovery phrase). Per CORVUS-DESIGN §3 D5 + §5.5/§5.5.1 + §5.6.
 - **P5-kernel-update**: `thyla-pkg kernel-update` script + 5-min ok-marker discipline + two-kernel rotation on ESP. Per CORVUS-DESIGN §7.
 
 The previously-listed `kernel/sys_attach_9p.c` (P5-attach-syscall) **landed at `ae0746e`** (handled SVC dispatch + dev9p_priv extension); CORVUS-DESIGN.md supersedes the speculative parts of the earlier §7.2 about janus running unchanged (corvus replaces janus for v1.0 Thylacine; design influence retained).

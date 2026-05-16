@@ -474,25 +474,57 @@ User deletion is symmetric. The dataset destruction is a Stratum operation; corv
 
 ### 5.5 Hostowner elevation
 
+Elevation confers `CAP_HOSTOWNER` on a console session's Proc once the system passphrase is verified. corvus cannot mutate a Proc's capability set directly — corvus is userspace. Elevation is therefore a **two-phase, file-mediated grant** through a kernel **capability device** (`cap`), modelled on Plan 9's `cap(3)` — the `caphash` / `capuse` device through which factotum conferred authority on a process. corvus is the factotum-pattern agent; the `cap` device is its kernel-side counterpart.
+
 ```
 [console user] runs: corvus admin elevate
        |
        v
 [client]  BINARY-FRAME admin-elevate { session_token, system_passphrase }
        v
-[corvus]
-       |  verify session is from a console-attached Proc
+[corvus]  verify session is from a console-attached Proc (peer identity, §6.2)
        |  argon2id(system_passphrase, system_salt) → system_KEK
-       |  AEAD-unwrap system-wrap → verify magic + tag (cheap admin-keypair unwrap)
+       |  AEAD-unwrap system-wrap → verify magic + tag
        |  explicit_bzero passphrase + KEK + admin-keypair
-       |  grant CAP_HOSTOWNER to session (capability set bumped on the Spoor)
-       |  audit-log: admin-elevate sid=... user=...
-       |  return OK
+       |  ── PHASE 1: register the grant ──
+       |  write { cap: CAP_HOSTOWNER, tag: T } → `cap` device, `grant` file
+       |     [kernel gate: writer holds CAP_GRANT_HOSTOWNER]
+       |     kernel records a pending grant keyed by peer identity tag T
+       |  audit-log: admin-elevate sid=... tag=T
+       v  return OK
+[client]  ── PHASE 2: redeem the grant ──
+       |  write { cap: CAP_HOSTOWNER } → `cap` device, `use` file
+       |     [kernel gate: a pending grant exists for the WRITER's own
+       |      identity tag, AND the writer holds PROC_FLAG_CONSOLE_ATTACHED]
+       |  kernel: current->caps |= CAP_HOSTOWNER ; consume the pending grant
+       v
+done — the console Proc (identity tag T) now holds CAP_HOSTOWNER
 ```
 
-A session WITHOUT CAP_HOSTOWNER (i.e., any session not elevated) cannot execute admin verbs. The verb authorization is checked **per-call** on the session's current cap set.
+The Proc that issues ADMIN_ELEVATE is the Proc that redeems and is elevated: corvus registers the grant against that Proc's kernel-stamped identity tag, and only that Proc can redeem it. The capability lands on the **Proc**, not on corvus's session record (the session is a userspace abstraction; `CAP_HOSTOWNER` is a kernel Proc capability). Because the target redeems on its own behalf, the kernel writes `current->caps` — there is no cross-Proc capability write.
 
-**Console-attachment check**: corvus reads the peer Proc's identity from the kernel-stamped `/srv/corvus/peer/proc`; the kernel marks a Proc as "console-attached" iff it was spawned from joey's console-login chain. Future sshd / remote-login chains do not get this mark. (Implementation: a console-bit in the Proc's capability set, set at fork-time by joey and never propagatable across an rfork to a different territory.)
+#### 5.5.1 The `cap` device
+
+A kernel device, `cap`, exposes two write-only files:
+
+- **`grant`** — corvus writes `{ cap, identity_tag }`. The kernel gates the write on the writer holding `CAP_GRANT_HOSTOWNER` and records a *pending grant* in a small bounded table keyed by identity tag. At most one pending grant per tag (a re-register replaces it); pending grants carry a short expiry and are dropped on the target Proc's death. v1.0 accepts only `cap == CAP_HOSTOWNER`; the device is general so future elevation-only capabilities can reuse it.
+- **`use`** — any Proc writes a redeem request. The kernel looks up a pending grant for *the writer's own* kernel-stamped identity tag; if one exists **and** the writer holds `PROC_FLAG_CONSOLE_ATTACHED`, it ORs the granted capability into `current->caps` and consumes the pending grant. One-shot.
+
+**Two capabilities, two roles.**
+
+- `CAP_GRANT_HOSTOWNER` — an ordinary *fork-grantable* capability (a member of `CAP_ALL`). It authorizes writing the `grant` file. joey holds it via `CAP_ALL` and confers it on corvus in corvus's spawn mask; ordinary user Procs never receive it. This is the kernel-enforced "only corvus may register grants."
+- `CAP_HOSTOWNER` — an *elevation-only* capability, deliberately excluded from `CAP_ALL` (§3 D5; P5-hostowner-a). It is the authority the admin verbs check. It enters a Proc's capability set **only** by redeeming a pending grant through `use`, and it is **never** conferred by `rfork`: `rfork` strips every elevation-only capability from the child. (Without the strip, a `CAP_HOSTOWNER` Proc that spawns a child would leak the capability to a child that does not carry `PROC_FLAG_CONSOLE_ATTACHED` — a Proc holding `CAP_HOSTOWNER` without console attachment, which `specs/corvus.tla`'s `HostownerRequiresConsole` forbids.)
+
+**Defense in depth.** The two authorization gates are deliberately independent and enforced in different trust domains:
+
+- corvus verifies the **system passphrase** — a check only corvus can perform; the kernel has no notion of the passphrase.
+- the kernel verifies **console attachment** at `use`-redemption — a check that holds even if corvus is buggy or compromised. A compromised corvus can register grants for arbitrary identity tags, but the kernel only lets a *console-attached* Proc redeem. corvus elevating a network process is therefore structurally impossible; a corvus compromise is bounded to the local physical console. This is why the console gate is kernel-enforced rather than left to corvus — it is what makes `HostownerRequiresConsole` robust against corvus's own correctness.
+
+A session without `CAP_HOSTOWNER` cannot execute admin verbs; verb authorization is checked **per-call** on the Proc's current capability set.
+
+**Console attachment.** The kernel marks a Proc console-attached iff it was spawned through joey's console-login chain (`PROC_FLAG_CONSOLE_ATTACHED`, P5-hostowner-a); the bit is never propagated across `rfork`, so a future sshd / remote-login chain cannot inherit the trust anchor. corvus reads the peer Proc's console bit via the kernel-stamped peer identity (§6.2) to fail fast on a non-console session; the kernel re-checks it at `use`-redemption as the load-bearing gate.
+
+**Heritage and originality.** The two-phase register/redeem shape is Plan 9's `cap(3)`. The Thylacine adaptation is substantive: Plan 9's device changed a process's *user identity* (uid strings), but Thylacine has no uid 0 (D5) — the `cap` device grants a *capability bit* and binds the grant to the unforgeable per-Proc identity tag (§6.2). And Plan 9 used an HMAC over a factotum↔kernel shared secret because factotum's registration channel was untrusted; here the `grant` write is itself `CAP_GRANT_HOSTOWNER`-gated, so the kernel trusts the channel directly — no token and no kernel-side cryptography.
 
 ### 5.6 Recovery phrase
 
@@ -731,12 +763,13 @@ These are runtime + audit guarantees at v1.0. A future `specs/corvus.tla` formal
 | C-18 | Per-user stratumd processes only mount datasets owned by their user; multi-stratumd-per-pool block-device access is dataset-restricted (audit F1 + new) | stratumd multi-mode + corvus ownership check |
 | C-19 | corvus's audit log is encrypted under a system-passphrase-derived KEK; physical-disk read yields ciphertext only (audit F9) | audit-log encryption discipline |
 | C-20 | Recovery phrase is generated at install, displayed once, never persisted; loss of both system passphrase and recovery phrase requires reinstall (audit F6) | install flow + recovery verb |
+| C-21 | `CAP_HOSTOWNER` is elevation-only: it enters a Proc's capability set solely by redeeming a pending grant through the `cap` device's `use` file (for a console-attached Proc), and is never conferred by `rfork` | `cap` device + `rfork` elevation-only strip; `specs/handles.tla` |
 
 ---
 
 ## 10. Implementation arc
 
-Seven chunks for v1.0, plus a v1.x deferral for Secure Boot. Roughly in order:
+Eight chunks for v1.0, plus a v1.x deferral for Secure Boot. Roughly in order:
 
 ### P5-corvus-design (this chunk)
 
@@ -804,6 +837,20 @@ Implement the v1.0 hardening syscalls in the kernel: mlockall, set_dumpable, set
 
 Exit criteria: each syscall has kernel impl + libt stub + 3-5 kernel-internal tests (success, rejection, edge cases).
 
+### P5-corvus-srv
+
+The `/srv/corvus/` transport. P5-corvus-bringup brought corvus up over a direct joey-driven pipe harness; this chunk builds the real transport that §6.1 / §6.2 specify. Without it corvus has no kernel-stamped peer identity, and neither login nor hostowner can gate on a peer Proc.
+
+Scope:
+- `/srv/corvus/` as a kernel-mediated tree backed by the corvus daemon's userspace Dev, using the Spoor-pair transport built for stratumd.
+- Per-connection kernel-stamped peer identity: PID, capability set, console-attachment bit, and the 64-bit per-Proc identity tag (§6.2).
+- The peer-identity readout corvus uses to bind sessions and gate verbs.
+- corvus moves off the pipe harness onto `/srv/corvus/`.
+
+Exit criteria: a client opening `/srv/corvus/` reaches corvus; corvus reads the client's kernel-stamped identity; the identity cannot be rewritten by userspace, including across a 9P RIGHT_TRANSFER (§6.2).
+
+Audit-bearing (new Dev, Spoor mediation, Proc-identity stamping).
+
 ### P5-login
 
 Login manager that drives corvus + spawns per-user stratumd.
@@ -822,19 +869,23 @@ Not directly audit-bearing; depends on audit-bearing components.
 
 ### P5-hostowner
 
-System passphrase + admin capability flow.
+System passphrase + admin capability flow. Split into sub-chunks; depends on P5-corvus-srv for kernel-stamped peer identity.
 
-Scope:
-- Define `CAP_HOSTOWNER`; add to caps.h.
-- corvus ADMIN_ELEVATE verb.
-- Console-attached login can elevate via system passphrase.
-- Console-attachment kernel bit on Proc capability set.
-- Recovery flow (RECOVER verb) implemented.
-- Admin verbs (user-create, snapshot, kernel-update) require CAP_HOSTOWNER.
+**P5-hostowner-a** *(landed)* — kernel foundation: `CAP_HOSTOWNER` (elevation-only, excluded from `CAP_ALL`) + `PROC_FLAG_CONSOLE_ATTACHED` + the console-attachment marker, stamped on joey at boot.
 
-Exit criteria: non-hostowner session cannot call user-create; console session that runs `corvus admin elevate` can. Audit log records elevation. Recovery phrase generated at install displays once; recovery verb successfully resets passphrase using paper-recovery-phrase.
+**P5-hostowner-b** — the elevation mechanism:
+- The kernel `cap` device (§5.5.1) — `grant` and `use` files.
+- `CAP_GRANT_HOSTOWNER` (fork-grantable; added to `CAP_ALL`); joey confers it on corvus at spawn.
+- `rfork` strips elevation-only capabilities from the child.
+- corvus ADMIN_ELEVATE verb: passphrase verify → register the grant.
+- Admin-verb gating: USER_CREATE / USER_DELETE / ROTATE_KEY require the peer Proc to hold `CAP_HOSTOWNER` (closes the deferred P5-corvus-bringup-d finding that USER_CREATE was ungated).
+- WRAP admin path: a `CAP_HOSTOWNER` peer may WRAP for any dataset (§6.5; STRATUM-API-V1.md §5.10).
 
-Audit-bearing (capability gates, recovery surface).
+**P5-hostowner-c** — the RECOVER verb + recovery-phrase flow (§5.6).
+
+Exit criteria: a non-hostowner session cannot call USER_CREATE; a console session that runs `corvus admin elevate` registers a grant, redeems it through `cap`/`use`, and emerges holding `CAP_HOSTOWNER`; a Proc that obtains a registered grant but lacks console attachment cannot redeem it; `rfork` of an elevated Proc yields a child without `CAP_HOSTOWNER`. Audit log records elevation. The RECOVER verb resets the system passphrase from the paper recovery phrase.
+
+Audit-bearing (the `cap` device, capability gates, the `rfork` strip, recovery surface).
 
 ### P5-kernel-update
 
@@ -937,9 +988,9 @@ For v1.x cryptographic forward secrecy (audit F14): Stratum's planned rekeying p
 - ARCHITECTURE.md §5 — boot sequence (this doc updates).
 - ARCHITECTURE.md §11 — syscall surface (this doc adds: sys_mlockall, sys_set_dumpable, sys_set_traceable, sys_explicit_bzero, sys_getrandom).
 - ARCHITECTURE.md §14.3a — Stratum mount lifecycle (this doc updates: system pool is integrity-only at v1.0; corvus + per-user stratumd post-pivot).
-- ARCHITECTURE.md §15 — capabilities (this doc adds CAP_HOSTOWNER, CAP_LOCK_PAGES, CAP_CSPRNG_READ, plus console-attachment bit).
-- ARCHITECTURE.md §28 — global invariants list (this doc adds C-1..C-20; cross-reference from §28).
-- ROADMAP.md §7 — Phase 5 chunk list (this doc adds seven chunks; v1.x extensions in §11 here become future-phase entries in ROADMAP).
+- ARCHITECTURE.md §15 — capabilities (this doc adds CAP_HOSTOWNER, CAP_GRANT_HOSTOWNER, CAP_LOCK_PAGES, CAP_CSPRNG_READ, the console-attachment bit, and the `cap` device).
+- ARCHITECTURE.md §28 — global invariants list (this doc adds C-1..C-21; cross-reference from §28).
+- ROADMAP.md §7 — Phase 5 chunk list (this doc adds eight chunks; v1.x extensions in §11 here become future-phase entries in ROADMAP).
 - `stratum/v2/docs/OS-INTEGRATION.md` — Stratum's expectations.
 - `stratum/v2/src/janus/backend_passphrase.c` — design influence (not a port).
 - Plan 9 manual: factotum(4), secstore(1), authsrv(8) — historical reference.
@@ -966,3 +1017,5 @@ State directory: `/var/lib/corvus/`.
 Audit log: `/var/log/corvus.audit.gz`.
 State file magic: `CRVS` (LE u32 = 0x53565243; distinct from Stratum janus's `JPAS` to prevent cross-loading).
 Three-letter abbreviation in code: `crv` (matches `stm` for Stratum).
+
+**The `cap` device** (§5.5.1, P5-hostowner-b) keeps its Plan 9 name. `cap` / `capability` is Plan 9-derived (the `cap(3)` device); per CLAUDE.md's naming discipline, Plan 9-derived concepts are not thematically renamed. Its files are `grant` (register) and `use` (redeem) — `use` mirrors Plan 9's `capuse`; `grant` replaces `caphash` because the Thylacine device carries no hash (the `grant` write is capability-gated, §5.5.1). `CAP_GRANT_HOSTOWNER` follows the established `CAP_*` convention.

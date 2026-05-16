@@ -676,7 +676,7 @@ Each `Proc` has a coarse-grained capability bitmask:
 | `CAP_NET_ADMIN` | Configure network interfaces |
 | `CAP_SYS_ADMIN` | Mount filesystems other than into own territory |
 
-Capabilities can only be reduced via `rfork`, never elevated, except via the v2.0 factotum-mediated capability elevation (§15.4 — designed-not-implemented at v1.0).
+Capabilities can only be reduced via `rfork`, never elevated — with two sanctioned exceptions: the v1.0 `cap` device, which confers the elevation-only `CAP_HOSTOWNER` on a console session (§15.3; CORVUS-DESIGN.md §5.5.1), and the v2.0 factotum-mediated per-syscall capability elevation (§15.4 — designed-not-implemented at v1.0).
 
 Default at process creation: empty set. Drivers receive `CAP_HW_HANDLE` from kernel at startup; they immediately drop after retrieving their handles.
 
@@ -1766,11 +1766,20 @@ Capabilities can only be reduced via `rfork`. Elevation requires the v2.0 factot
 
 ### 15.3 Capability set (v1.0)
 
-Per §7.7. Coarse-grained. v1.0 adds (per CORVUS-DESIGN.md §3 D5 + §4.1):
-- `CAP_HOSTOWNER` — granted only after corvus verifies the system passphrase from a console-attached Proc; required for admin verbs (user-create, snapshot, kernel-update).
+Per §7.7. Coarse-grained, on two axes (per CORVUS-DESIGN.md §3 D5, §5.5.1):
+
+**Fork-grantable capabilities** — members of `CAP_ALL`; conferred at Proc creation and monotonically reduced thereafter (I-2). kproc starts with `CAP_ALL`; `rfork_with_caps` confers a subset.
+- `CAP_HW_CREATE` — required to create hardware handles (MMIO / IRQ / DMA). Phase 4 surface.
 - `CAP_LOCK_PAGES` — required for `sys_mlockall`. Granted to corvus + per-user stratumd processes.
 - `CAP_CSPRNG_READ` — required for `sys_getrandom`. Granted broadly (most userspace processes have legitimate use for randomness).
-- Console-attachment bit on the Proc capability set — set by joey for console-login chains; never propagated across territory boundaries.
+- `CAP_GRANT_HOSTOWNER` — authorizes writing the `cap` device's `grant` file. Held by corvus alone (joey confers it at corvus's spawn).
+
+**Elevation-only capabilities** — deliberately excluded from `CAP_ALL`; no Proc holds one at creation, and `rfork` strips every elevation-only bit from the child, so one can never be conferred by fork.
+- `CAP_HOSTOWNER` — admin authority; required for the corvus admin verbs (user-create, etc.). It enters a Proc's capability set only by redeeming a grant through the kernel `cap` device's `use` file, and only for a console-attached Proc.
+
+**The `cap` device** — the kernel device through which the userspace key agent (corvus) confers `CAP_HOSTOWNER` on a console session, after corvus verifies the system passphrase. corvus writes a pending grant to `grant` (kernel-gated on `CAP_GRANT_HOSTOWNER`); the target Proc redeems it through `use` (kernel-gated on `PROC_FLAG_CONSOLE_ATTACHED`). Two-phase and file-mediated, modelled on Plan 9's `cap(3)`. The console-attachment check is kernel-enforced at redemption, so a compromised corvus still cannot elevate a non-console process. Canonical detail: CORVUS-DESIGN.md §5.5.1.
+
+**Console attachment** — `PROC_FLAG_CONSOLE_ATTACHED`, a Proc flag set by joey for console-login chains, never propagated across `rfork`. The kernel trust anchor for hostowner elevation.
 
 ### 15.4 Capability elevation via factotum — DESIGNED-NOT-IMPLEMENTED for v2.0
 
@@ -2898,7 +2907,7 @@ The complete list of load-bearing invariants. Source for `VISION.md §8`. Each m
 | # | Invariant | Enforcement | Spec |
 |---|---|---|---|
 | I-1 | Territory operations in process A don't affect process B | Kernel territory isolation | `territory.tla` |
-| I-2 | Capability set monotonically reduces (`rfork` only reduces) | Syscall gate | `handles.tla` |
+| I-2 | Fork-grantable capability set monotonically reduces (`rfork` only reduces). Elevation-only capabilities (`CAP_HOSTOWNER`) are the sole sanctioned growth — conferred only via the `cap` device for a console-attached Proc, never by `rfork` (CORVUS-DESIGN.md §5.5.1 / C-21) | Syscall gate; `cap` device redemption | `handles.tla` |
 | I-3 | Mount points form a DAG, never a cycle | Kernel mount validation | `territory.tla` |
 | I-4 | Handles transfer between processes only via 9P sessions | Syscall surface (no direct-transfer syscall exists) | `handles.tla` |
 | I-5 | `KObj_MMIO`, `KObj_IRQ`, `KObj_DMA` cannot be transferred | Transfer syscall has no code path; static_assert | `handles.tla` |
@@ -2921,7 +2930,7 @@ The complete list of load-bearing invariants. Source for `VISION.md §8`. Each m
 
 These are the project's promises. Every one has a spec or a runtime check or a compile-time assertion. None are policy-only.
 
-**Corvus invariants (C-1..C-20)** are enumerated separately in `CORVUS-DESIGN.md §9` — they govern the key agent's runtime + audit guarantees (mlock'd pages, session ownership monotonicity, audit log encryption, etc.). Cross-referenced here so the global invariant surface is discoverable; the canonical text lives in CORVUS-DESIGN.
+**Corvus invariants (C-1..C-21)** are enumerated separately in `CORVUS-DESIGN.md §9` — they govern the key agent's runtime + audit guarantees (mlock'd pages, session ownership monotonicity, audit log encryption, etc.). Cross-referenced here so the global invariant surface is discoverable; the canonical text lives in CORVUS-DESIGN.
 
 ---
 

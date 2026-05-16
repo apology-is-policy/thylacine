@@ -57,6 +57,18 @@ typedef u64 caps_t;
 // grant mechanism + the ADMIN_ELEVATE verb land at P5-hostowner-b.
 #define CAP_HOSTOWNER   (1ull << 3)
 
+// CAP_GRANT_HOSTOWNER — authorizes writing the `cap` device's `grant`
+// file (registering a pending CAP_HOSTOWNER grant for a peer Proc).
+// Unlike CAP_HOSTOWNER — the elevation *result* — this is an ordinary
+// FORK-GRANTABLE capability, a member of CAP_ALL. joey holds it (via
+// CAP_ALL) and confers it on corvus alone in corvus's spawn mask; no
+// ordinary user Proc receives it. The two-capability split keeps "who
+// may register a grant" (CAP_GRANT_HOSTOWNER — corvus) distinct from
+// "who has been elevated" (CAP_HOSTOWNER — a console session). See
+// CORVUS-DESIGN.md §5.5.1 + specs/handles.tla. P5-hostowner-b adds the
+// `cap` device that consumes it; the bit is defined here as foundation.
+#define CAP_GRANT_HOSTOWNER (1ull << 4)
+
 // Reserved for Phase 5+ (one bit per capability domain):
 //   CAP_NS_MOUNT     — bind/mount in /proc and /ctl (kernel admin Devs).
 //   CAP_NS_BIND      — bind in any namespace (forward-looking).
@@ -66,16 +78,24 @@ typedef u64 caps_t;
 //   CAP_REBOOT       — initiate kernel reboot / extinction.
 // Each lands when the corresponding subsystem matures.
 
+// CAP_ELEVATION_ONLY — the set of elevation-only capability bits: those
+// excluded from CAP_ALL that no Proc holds at creation and that rfork
+// MUST strip from every child, so an elevated parent cannot leak
+// elevation across a fork. rfork_internal ANDs the child's caps with
+// ~CAP_ELEVATION_ONLY (P5-hostowner-b). At v1.0 the only such cap is
+// CAP_HOSTOWNER. Maps to specs/handles.tla::ElevationOnly.
+#define CAP_ELEVATION_ONLY  (CAP_HOSTOWNER)
+
 // CAP_ALL — the FORK-GRANTABLE capability ceiling: every capability a
 // Proc may legitimately hold from creation, and the mask kproc gets at
 // proc_init. Elevation-only capabilities (CAP_HOSTOWNER) are
 // deliberately excluded — see CAP_HOSTOWNER above. A new fork-grantable
 // CAP_* bit MUST be added here; an elevation-only one MUST NOT.
-#define CAP_ALL         (CAP_HW_CREATE | CAP_LOCK_PAGES | CAP_CSPRNG_READ)
+#define CAP_ALL         (CAP_HW_CREATE | CAP_LOCK_PAGES | CAP_CSPRNG_READ | CAP_GRANT_HOSTOWNER)
 
 // _Static_assert pins CAP_ALL — adding a new fork-grantable CAP_* bit
 // requires bumping this expression so kproc's initial mask includes it.
-_Static_assert(CAP_ALL == (CAP_HW_CREATE | CAP_LOCK_PAGES | CAP_CSPRNG_READ),
+_Static_assert(CAP_ALL == (CAP_HW_CREATE | CAP_LOCK_PAGES | CAP_CSPRNG_READ | CAP_GRANT_HOSTOWNER),
                "caps.h drift: when adding a new FORK-GRANTABLE CAP_* bit, "
                "update CAP_ALL so kproc's initial mask reflects it. "
                "Elevation-only caps (CAP_HOSTOWNER) are deliberately "

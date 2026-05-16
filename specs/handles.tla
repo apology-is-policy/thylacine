@@ -107,6 +107,13 @@
 (*                                a subset of the parent slot's rights   *)
 (*                                (the F231 bug class). Caught by the    *)
 (*                                new SpawnFdsRightsMonotonic invariant. *)
+(*   handles_buggy_rfork_hostowner.cfg                                     *)
+(*                                BUGGY_RFORK_HOSTOWNER=TRUE — P5-        *)
+(*                                hostowner counterexample where rfork    *)
+(*                                fails to strip the elevation-only       *)
+(*                                CapHostowner from a forked child, so    *)
+(*                                the child's caps escape its (correctly  *)
+(*                                stripped) ceiling. Caught by CapsCeiling*)
 (*                                                                         *)
 (* Invariants enforced (TLC-checked):                                      *)
 (*                                                                         *)
@@ -150,6 +157,7 @@ CONSTANTS
     RightTransfer,          \* the "RIGHT_TRANSFER" element of Rights
     Caps,                   \* set of capability labels (must include CapHwCreate)
     CapHwCreate,            \* P4-Ib: capability required to create hw kobjs
+    CapHostowner,           \* P5-hostowner: the elevation-only capability
     BUGGY_ELEVATE,          \* BOOLEAN — enables BuggyDupElevate
     BUGGY_HW_TRANSFER,      \* BOOLEAN — enables BuggyHwTransfer
     BUGGY_DIRECT_TRANSFER,  \* BOOLEAN — enables BuggyDirectTransfer
@@ -158,7 +166,8 @@ CONSTANTS
     BUGGY_HW_OVERLAP,       \* P4-Ib: enables BuggyHwOverlap (double-alloc of hw kobj)
     BUGGY_HW_CREATE_NO_CAP, \* P4-Ib: enables BuggyHwCreateNoCap (hw alloc without cap)
     BUGGY_RFORK_ELEVATE,    \* P4-Ic3: enables BuggyRforkElevate (rfork grants > parent)
-    BUGGY_SPAWN_FDS_ELEVATE \* R15-c F232: enables BuggySpawnFdsElevate (spawn-with-fds installs child rights > parent slot rights)
+    BUGGY_SPAWN_FDS_ELEVATE,\* R15-c F232: enables BuggySpawnFdsElevate (spawn-with-fds installs child rights > parent slot rights)
+    BUGGY_RFORK_HOSTOWNER   \* P5-hostowner: enables BuggyRforkNoStrip (rfork omits the elevation-only-cap strip)
 
 KObjs == TxKObjs \cup HwKObjs
 
@@ -177,15 +186,35 @@ ASSUME BUGGY_HW_OVERLAP \in BOOLEAN
 ASSUME BUGGY_HW_CREATE_NO_CAP \in BOOLEAN
 ASSUME BUGGY_RFORK_ELEVATE \in BOOLEAN
 ASSUME BUGGY_SPAWN_FDS_ELEVATE \in BOOLEAN
+ASSUME BUGGY_RFORK_HOSTOWNER \in BOOLEAN
+ASSUME CapHostowner \in Caps
+ASSUME CapHostowner # CapHwCreate
 
 (***************************************************************************)
-(* ProcRoot is the proc that starts with full capabilities (Caps). All   *)
-(* other procs start with no capabilities ({}). CHOOSE is deterministic — *)
-(* TLC picks one root proc per spec invocation.                            *)
+(* ProcRoot is the proc that starts with the FORK-GRANTABLE capability     *)
+(* universe (Caps \ ElevationOnly — the model's CAP_ALL). All other procs  *)
+(* start with no capabilities ({}). CHOOSE is deterministic — TLC picks    *)
+(* one root proc per spec invocation.                                       *)
 (***************************************************************************)
 ProcRoot == CHOOSE p \in Procs : TRUE
 
-InitialCapsOf(p) == IF p = ProcRoot THEN Caps ELSE {}
+(***************************************************************************)
+(* ElevationOnly — the elevation-only capability axis (P5-hostowner).      *)
+(* These caps are NOT fork-grantable: no Proc holds one at creation        *)
+(* (ProcRoot's initial set excludes them) and RforkWithCaps strips them    *)
+(* from every child. The sole action admitting CapHostowner into a         *)
+(* proc_caps is HostownerGrant. Models caps.h::CAP_ELEVATION_ONLY;         *)
+(* CapHostowner is v1.0's only member.                                      *)
+(***************************************************************************)
+ElevationOnly == {CapHostowner}
+
+(***************************************************************************)
+(* InitialCapsOf — ProcRoot gets the fork-grantable universe (the model's  *)
+(* CAP_ALL = Caps \ ElevationOnly); every other proc starts empty.         *)
+(* ProcRoot deliberately does NOT start with CapHostowner — an             *)
+(* elevation-only cap is never held at creation, only via HostownerGrant.  *)
+(***************************************************************************)
+InitialCapsOf(p) == IF p = ProcRoot THEN Caps \ ElevationOnly ELSE {}
 
 (***************************************************************************)
 (* Per-handle record. The `via` field encodes provenance — how this      *)
@@ -610,8 +639,37 @@ RforkWithCaps(parent, child, granted) ==
     /\ proc_caps[child] = {}
     /\ proc_ceiling[child] = {}
     /\ handles[child] = {}
-    /\ proc_ceiling' = [proc_ceiling EXCEPT ![child] = proc_caps[parent]]
-    /\ proc_caps' = [proc_caps EXCEPT ![child] = granted]
+    \* P5-hostowner: rfork strips ElevationOnly from BOTH the child's caps
+    \* and its ceiling. Models rfork_internal's `& ~CAP_ELEVATION_ONLY`
+    \* (P5-hostowner-b). A forked child is never authorized to hold an
+    \* elevation-only cap, so its ceiling excludes ElevationOnly; only a
+    \* later HostownerGrant on the child can confer one.
+    /\ proc_ceiling' = [proc_ceiling EXCEPT ![child] = proc_caps[parent] \ ElevationOnly]
+    /\ proc_caps' = [proc_caps EXCEPT ![child] = granted \ ElevationOnly]
+    /\ UNCHANGED <<handles, origin_rights, kobjs_alive, sessions, spawn_inherits>>
+
+(***************************************************************************)
+(* HostownerGrant(p) — P5-hostowner. p is conferred the elevation-only     *)
+(* capability CapHostowner. Models the kernel `cap` device's `use`-file    *)
+(* redemption: a console-attached Proc redeems a pending grant and the     *)
+(* kernel ORs CapHostowner into its capability set (CORVUS-DESIGN §5.5.1). *)
+(*                                                                         *)
+(* The console-attachment gate and corvus's passphrase check are NOT       *)
+(* modeled here — they live in corvus.tla (AdminElevate). handles.tla's    *)
+(* concern is the cap arithmetic: the grant raises BOTH proc_caps AND      *)
+(* proc_ceiling for p, so CapsCeiling is preserved (the elevation          *)
+(* legitimately raises p's authorization envelope). This is the SOLE       *)
+(* action that admits CapHostowner into any proc_caps; RforkWithCaps       *)
+(* strips it — the spec-level statement of CORVUS-DESIGN C-21.             *)
+(*                                                                         *)
+(* Precondition CapHostowner \notin proc_caps[p] models the device's       *)
+(* one-shot consumption: a second redeem on an already-elevated Proc is    *)
+(* a no-op.                                                                 *)
+(***************************************************************************)
+HostownerGrant(p) ==
+    /\ CapHostowner \notin proc_caps[p]
+    /\ proc_caps' = [proc_caps EXCEPT ![p] = @ \cup {CapHostowner}]
+    /\ proc_ceiling' = [proc_ceiling EXCEPT ![p] = @ \cup {CapHostowner}]
     /\ UNCHANGED <<handles, origin_rights, kobjs_alive, sessions, spawn_inherits>>
 
 (***************************************************************************)
@@ -641,6 +699,37 @@ BuggyRforkElevate(parent, child, gained) ==
     /\ ~(gained \subseteq proc_caps[parent])
     /\ proc_ceiling' = [proc_ceiling EXCEPT ![child] = proc_caps[parent]]
     /\ proc_caps' = [proc_caps EXCEPT ![child] = gained]
+    /\ UNCHANGED <<handles, origin_rights, kobjs_alive, sessions, spawn_inherits>>
+
+(***************************************************************************)
+(* BuggyRforkNoStrip(parent, child, granted) — P5-hostowner bug class.     *)
+(* rfork fails to strip the elevation-only cap from the child: the child   *)
+(* receives `granted` verbatim, NOT `granted \ ElevationOnly`. Models an   *)
+(* rfork_internal that ANDs parent caps with the mask but omits the        *)
+(* `& ~CAP_ELEVATION_ONLY` strip.                                          *)
+(*                                                                         *)
+(* The child's CEILING is set CORRECTLY (proc_caps[parent] \ ElevationOnly *)
+(* — a forked child is never authorized to hold an elevation-only cap).    *)
+(* The bug is purely in the caps assignment. Once `granted` contains       *)
+(* CapHostowner — reachable after a parent has been HostownerGrant'd —     *)
+(* the child ends with CapHostowner in proc_caps but not proc_ceiling, and *)
+(* the existing CapsCeiling invariant catches it. No dedicated invariant   *)
+(* is needed: the ceiling discipline already pins "no elevation-only cap   *)
+(* via fork."                                                               *)
+(*                                                                         *)
+(* Counterexample (handles_buggy_rfork_hostowner.cfg): HostownerGrant      *)
+(* (ProcRoot) then BuggyRforkNoStrip(ProcRoot, child, {CapHostowner}) —    *)
+(* depth 2.                                                                 *)
+(***************************************************************************)
+BuggyRforkNoStrip(parent, child, granted) ==
+    /\ BUGGY_RFORK_HOSTOWNER
+    /\ parent # child
+    /\ granted \subseteq proc_caps[parent]
+    /\ proc_caps[child] = {}
+    /\ proc_ceiling[child] = {}
+    /\ handles[child] = {}
+    /\ proc_ceiling' = [proc_ceiling EXCEPT ![child] = proc_caps[parent] \ ElevationOnly]
+    /\ proc_caps' = [proc_caps EXCEPT ![child] = granted]
     /\ UNCHANGED <<handles, origin_rights, kobjs_alive, sessions, spawn_inherits>>
 
 (***************************************************************************)
@@ -756,6 +845,9 @@ Next ==
            RforkWithFds(parent, child, h, nr)
     \/ \E parent \in Procs : \E child \in Procs : \E h \in handles[parent] : \E fr \in SUBSET Rights :
            BuggySpawnFdsElevate(parent, child, h, fr)
+    \/ \E p \in Procs : HostownerGrant(p)
+    \/ \E parent \in Procs : \E child \in Procs : \E granted \in SUBSET Caps :
+           BuggyRforkNoStrip(parent, child, granted)
 
 Spec == Init /\ [][Next]_vars
 
