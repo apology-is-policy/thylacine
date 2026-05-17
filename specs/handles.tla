@@ -12,6 +12,17 @@
 (*   I-5 — KObj_MMIO, KObj_IRQ, KObj_DMA cannot be transferred.            *)
 (*   I-6 — Handle rights monotonically reduce on transfer.                 *)
 (*                                                                         *)
+(* P5-corvus-srv additional coverage: KObj_Srv — the kobj kind for        *)
+(* /srv/<name> connection Spoors (CORVUS-DESIGN.md §6) — is modeled as a  *)
+(* third, non-transferable kobj partition (SrvKObjs) alongside the hw     *)
+(* kobjs. It is non-transferable I-5-style (structural: not in TxKObjs,   *)
+(* so HandleDup / HandleTransferVia9P / RforkWithFds cannot move it). The *)
+(* WalkDerive action models /srv's own-Dev walk producing a structurally- *)
+(* KObj_Srv child Spoor; bug class BuggySrvWalkTx mints the child in the  *)
+(* transferable partition instead. Invariants WalkChildIsSrv +            *)
+(* SrvHandlesAtOrigin pin CORVUS-DESIGN.md C-22 (a connection's kernel-   *)
+(* stamped identity cannot be forged across a 9P walk).                   *)
+(*                                                                         *)
 (* P4-Ic5b1b additional impl coverage (no new spec actions/invariants     *)
 (* needed): KObj_DMA reuses the HwKObjs partition introduced at P4-Ib.    *)
 (* The five hw-kobj invariants enumerated below (HwHandlesAtOrigin,      *)
@@ -33,10 +44,11 @@
 (*                                                                         *)
 (* Modeling decisions:                                                     *)
 (*                                                                         *)
-(*   Kobj universe is partitioned into TxKObjs (transferable: Process,   *)
-(*   Thread, BURROW, Spoor) and HwKObjs (non-transferable: MMIO, IRQ, DMA,   *)
-(*   Interrupt). The partition is a CONSTANT — no function-valued        *)
-(*   constants, simpler for TLC.                                          *)
+(*   Kobj universe is partitioned three ways: TxKObjs (transferable:     *)
+(*   Process, Thread, BURROW, Spoor), HwKObjs (non-transferable: MMIO,   *)
+(*   IRQ, DMA, Interrupt), and SrvKObjs (non-transferable: Srv — /srv    *)
+(*   connection Spoors, P5-corvus-srv). The partition is a CONSTANT — no *)
+(*   function-valued constants, simpler for TLC.                          *)
 (*                                                                         *)
 (*   handles[p] is the SET of HandleRecords held by Proc p. Each record   *)
 (*   is [kobj, rights, origin_proc, via]. We model as a set rather than a *)
@@ -114,6 +126,19 @@
 (*                                CapHostowner from a forked child, so    *)
 (*                                the child's caps escape its (correctly  *)
 (*                                stripped) ceiling. Caught by CapsCeiling*)
+(*   handles_srv.cfg              SrvKObjs non-empty, all bug flags FALSE  *)
+(*                                — TLC proves WalkChildIsSrv +           *)
+(*                                SrvHandlesAtOrigin under the KObj_Srv    *)
+(*                                walk-derivation mechanism. The main      *)
+(*                                handles.cfg keeps SrvKObjs empty, so     *)
+(*                                its state space and runtime are          *)
+(*                                unchanged by P5-corvus-srv.              *)
+(*   handles_buggy_srv_walk_tx.cfg                                         *)
+(*                                BUGGY_SRV_WALK_TX=TRUE — P5-corvus-srv   *)
+(*                                counterexample where a KObj_Srv handle   *)
+(*                                walked to a child mints the child in     *)
+(*                                the transferable partition. Caught by    *)
+(*                                WalkChildIsSrv.                          *)
 (*                                                                         *)
 (* Invariants enforced (TLC-checked):                                      *)
 (*                                                                         *)
@@ -145,6 +170,17 @@
 (*                        against that record. Bug class BuggySpawnFds-  *)
 (*                        Elevate skips the rights-subset guard.         *)
 (*                                                                         *)
+(*   WalkChildIsSrv     — every walk-derived handle (via="walk") points   *)
+(*                        at a KObj_Srv kobj. Pins that a child Spoor     *)
+(*                        walked from a /srv connection inherits the      *)
+(*                        KObj_Srv kind structurally (CORVUS-DESIGN.md    *)
+(*                        C-22). Bug class BuggySrvWalkTx violates it.    *)
+(*                                                                         *)
+(*   SrvHandlesAtOrigin — every KObj_Srv handle is held by its origin     *)
+(*                        proc — the I-5-style non-transferability        *)
+(*                        statement for /srv connection Spoors. Proven    *)
+(*                        structurally (parallels HwHandlesAtOrigin).     *)
+(*                                                                         *)
 (* See ARCHITECTURE.md §13 (capabilities), §18 (handles), §28 invariants. *)
 (***************************************************************************)
 EXTENDS Naturals, FiniteSets
@@ -153,6 +189,7 @@ CONSTANTS
     Procs,                  \* set of process identifiers (>= 2)
     TxKObjs,                \* SUBSET KObjs — transferable kobjs (Tx universe)
     HwKObjs,                \* SUBSET KObjs — hardware/non-transferable kobjs
+    SrvKObjs,               \* SUBSET KObjs — /srv connection kobjs (KObj_Srv; non-transferable)
     Rights,                 \* set of right labels (must include RightTransfer)
     RightTransfer,          \* the "RIGHT_TRANSFER" element of Rights
     Caps,                   \* set of capability labels (must include CapHwCreate)
@@ -167,9 +204,10 @@ CONSTANTS
     BUGGY_HW_CREATE_NO_CAP, \* P4-Ib: enables BuggyHwCreateNoCap (hw alloc without cap)
     BUGGY_RFORK_ELEVATE,    \* P4-Ic3: enables BuggyRforkElevate (rfork grants > parent)
     BUGGY_SPAWN_FDS_ELEVATE,\* R15-c F232: enables BuggySpawnFdsElevate (spawn-with-fds installs child rights > parent slot rights)
-    BUGGY_RFORK_HOSTOWNER   \* P5-hostowner: enables BuggyRforkNoStrip (rfork omits the elevation-only-cap strip)
+    BUGGY_RFORK_HOSTOWNER,  \* P5-hostowner: enables BuggyRforkNoStrip (rfork omits the elevation-only-cap strip)
+    BUGGY_SRV_WALK_TX       \* P5-corvus-srv: enables BuggySrvWalkTx (KObj_Srv walk-child minted transferable)
 
-KObjs == TxKObjs \cup HwKObjs
+KObjs == TxKObjs \cup HwKObjs \cup SrvKObjs
 
 ASSUME Cardinality(Procs) >= 2
 ASSUME Cardinality(KObjs) >= 1
@@ -177,6 +215,8 @@ ASSUME Cardinality(Rights) >= 2
 ASSUME RightTransfer \in Rights
 ASSUME CapHwCreate \in Caps
 ASSUME TxKObjs \cap HwKObjs = {}
+ASSUME TxKObjs \cap SrvKObjs = {}
+ASSUME HwKObjs \cap SrvKObjs = {}
 ASSUME BUGGY_ELEVATE \in BOOLEAN
 ASSUME BUGGY_HW_TRANSFER \in BOOLEAN
 ASSUME BUGGY_DIRECT_TRANSFER \in BOOLEAN
@@ -187,6 +227,7 @@ ASSUME BUGGY_HW_CREATE_NO_CAP \in BOOLEAN
 ASSUME BUGGY_RFORK_ELEVATE \in BOOLEAN
 ASSUME BUGGY_SPAWN_FDS_ELEVATE \in BOOLEAN
 ASSUME BUGGY_RFORK_HOSTOWNER \in BOOLEAN
+ASSUME BUGGY_SRV_WALK_TX \in BOOLEAN
 ASSUME CapHostowner \in Caps
 ASSUME CapHostowner # CapHwCreate
 
@@ -224,12 +265,13 @@ InitialCapsOf(p) == IF p = ProcRoot THEN Caps \ ElevationOnly ELSE {}
 (*   "dup"    — duplicated within the proc via HandleDup.                 *)
 (*   "9p"     — transferred via a 9P session (HandleTransferVia9P).       *)
 (*   "spawn"  — installed at spawn-with-fds time (RforkWithFds; R15-c).   *)
+(*   "walk"   — derived by walking a KObj_Srv handle (WalkDerive).        *)
 (*   "direct" — BUGGY only: cross-proc transfer with no session.          *)
 (***************************************************************************)
 HandleRecord == [kobj : KObjs,
                  rights : SUBSET Rights,
                  origin_proc : Procs,
-                 via : {"orig", "dup", "9p", "spawn", "direct"}]
+                 via : {"orig", "dup", "9p", "spawn", "walk", "direct"}]
 
 (***************************************************************************)
 (* SpawnInherit ghost record: persists the parent's rights AT THE TIME a   *)
@@ -815,6 +857,63 @@ BuggySpawnFdsElevate(parent, child, h, fabricated_rights) ==
     /\ UNCHANGED <<origin_rights, kobjs_alive, proc_caps, proc_ceiling, sessions>>
 
 (***************************************************************************)
+(* WalkDerive(p, h, k) — P5-corvus-srv. A KObj_Srv handle (a /srv/<name>   *)
+(* connection Spoor) is walked to a child path. Because /srv is served by  *)
+(* its own kernel Dev (`devsrv`, ARCH §9.4), the walk-derived child Spoor  *)
+(* is structurally KObj_Srv: the child kobj k is allocated in the SrvKObjs *)
+(* partition. via="walk".                                                  *)
+(*                                                                         *)
+(* The child inherits the parent handle's rights as its origin_rights      *)
+(* ceiling — a walk narrows or preserves access, never widens it — so the  *)
+(* child satisfies RightsCeiling by construction.                          *)
+(*                                                                         *)
+(* Maps to `kernel/devsrv.c`'s walk op. The clean-spec proof of            *)
+(* WalkChildIsSrv + SrvHandlesAtOrigin under this action runs in           *)
+(* handles_srv.cfg (SrvKObjs non-empty).                                   *)
+(***************************************************************************)
+WalkDerive(p, h, k) ==
+    /\ h \in handles[p]
+    /\ h.kobj \in SrvKObjs
+    /\ k \in SrvKObjs
+    /\ k \notin kobjs_alive
+    /\ kobjs_alive' = kobjs_alive \cup {k}
+    /\ origin_rights' = [origin_rights EXCEPT ![k] = h.rights]
+    /\ handles' = [handles EXCEPT ![p] = @ \cup {[kobj |-> k,
+                                                  rights |-> h.rights,
+                                                  origin_proc |-> p,
+                                                  via |-> "walk"]}]
+    /\ UNCHANGED <<proc_caps, proc_ceiling, sessions, spawn_inherits>>
+
+(***************************************************************************)
+(* BuggySrvWalkTx(p, h, k) — P5-corvus-srv bug class. The walk of a        *)
+(* KObj_Srv handle mints the child Spoor in the TRANSFERABLE partition     *)
+(* (k \in TxKObjs) instead of KObj_Srv. Real-world analogue: `devsrv`'s    *)
+(* walk op constructing the child Spoor with a transferable kobj kind, or  *)
+(* a /srv walk routed through `dev9p` rather than its own Dev so the       *)
+(* structural KObj_Srv stamping is lost.                                   *)
+(*                                                                         *)
+(* The consequence is a connection Spoor that 9P-transfers between Procs:  *)
+(* a client could hand its kernel-attested corvus connection to another   *)
+(* Proc, defeating C-22 (per-connection kernel-stamped identity). The      *)
+(* child handle has via="walk" but h.kobj \in TxKObjs.                     *)
+(*                                                                         *)
+(* Caught by WalkChildIsSrv (depth 2, handles_buggy_srv_walk_tx.cfg).      *)
+(***************************************************************************)
+BuggySrvWalkTx(p, h, k) ==
+    /\ BUGGY_SRV_WALK_TX
+    /\ h \in handles[p]
+    /\ h.kobj \in SrvKObjs
+    /\ k \in TxKObjs
+    /\ k \notin kobjs_alive
+    /\ kobjs_alive' = kobjs_alive \cup {k}
+    /\ origin_rights' = [origin_rights EXCEPT ![k] = h.rights]
+    /\ handles' = [handles EXCEPT ![p] = @ \cup {[kobj |-> k,
+                                                  rights |-> h.rights,
+                                                  origin_proc |-> p,
+                                                  via |-> "walk"]}]
+    /\ UNCHANGED <<proc_caps, proc_ceiling, sessions, spawn_inherits>>
+
+(***************************************************************************)
 (* Next: disjunction of all actions. \E ranges over actual handles in a  *)
 (* proc (h \in handles[p]) rather than over the full HandleRecord type, *)
 (* keeping TLC's exploration tight.                                        *)
@@ -848,6 +947,8 @@ Next ==
     \/ \E p \in Procs : HostownerGrant(p)
     \/ \E parent \in Procs : \E child \in Procs : \E granted \in SUBSET Caps :
            BuggyRforkNoStrip(parent, child, granted)
+    \/ \E p \in Procs : \E h \in handles[p] : \E k \in KObjs : WalkDerive(p, h, k)
+    \/ \E p \in Procs : \E h \in handles[p] : \E k \in KObjs : BuggySrvWalkTx(p, h, k)
 
 Spec == Init /\ [][Next]_vars
 
@@ -987,6 +1088,33 @@ SpawnFdsRightsMonotonic ==
                 /\ sr.kobj = h.kobj
                 /\ h.rights \subseteq sr.parent_rights
 
+(***************************************************************************)
+(* WalkChildIsSrv — P5-corvus-srv. Every walk-derived handle (via="walk")  *)
+(* points at a KObj_Srv kobj. Pins that a child Spoor walked from a /srv   *)
+(* connection inherits the KObj_Srv kind structurally — the property that  *)
+(* keeps the connection's kernel-stamped peer identity unforgeable across  *)
+(* a 9P walk (CORVUS-DESIGN.md C-22; ARCH §18.2 KObj_Srv).                 *)
+(*                                                                         *)
+(* BuggySrvWalkTx mints a walk-child in TxKObjs, producing a via="walk"    *)
+(* handle whose kobj is not in SrvKObjs — violated.                        *)
+(***************************************************************************)
+WalkChildIsSrv ==
+    \A p \in Procs : \A h \in handles[p] :
+        h.via = "walk" => h.kobj \in SrvKObjs
+
+(***************************************************************************)
+(* SrvHandlesAtOrigin — P5-corvus-srv. Every KObj_Srv handle is held by    *)
+(* its origin proc. KObj_Srv is in the non-transferable partition: it is   *)
+(* not in TxKObjs, so HandleDup / HandleTransferVia9P / RforkWithFds       *)
+(* structurally cannot move it. This is the I-5-style statement for /srv   *)
+(* connection Spoors (ARCH §18.2). Proven structurally — parallels         *)
+(* HwHandlesAtOrigin; no bug class transfers a KObj_Srv handle, so it      *)
+(* holds in every cfg.                                                     *)
+(***************************************************************************)
+SrvHandlesAtOrigin ==
+    \A p \in Procs : \A h \in handles[p] :
+        (h.kobj \in SrvKObjs) => h.origin_proc = p
+
 Invariants ==
     /\ TypeOk
     /\ RightsCeiling
@@ -997,5 +1125,7 @@ Invariants ==
     /\ HwResourceExclusive
     /\ HwHandleImpliesCap
     /\ SpawnFdsRightsMonotonic
+    /\ WalkChildIsSrv
+    /\ SrvHandlesAtOrigin
 
 ====

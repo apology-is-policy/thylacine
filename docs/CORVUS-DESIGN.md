@@ -38,7 +38,7 @@ What's *not* reused from Stratum's janus:
 - The single-pool, single-user daemon discipline. Corvus is multi-user from day one (see §3 D3).
 - The Stratum janus state file layout (magic `JPAS`). Corvus uses its own state file format (magic `CRVS`, version 1, similar structure but Thylacine-tagged). Different magic prevents accidental cross-loading.
 
-Stratum needs new APIs to compose with corvus (per-user stratumd; corvus-validated `Tattach.afid` — but actually superseded by Option A per §3 D4; etc.). Those are enumerated in §13. The user explicitly committed to evolving Stratum to fit Thylacine's needs.
+Stratum needs new APIs to compose with corvus (per-user stratumd; etc.). Those are enumerated in §13. The user explicitly committed to evolving Stratum to fit Thylacine's needs.
 
 ---
 
@@ -218,9 +218,9 @@ corvus serves a 9P tree at `/srv/corvus/`:
 │       ├── exists            (R)   "1" if user exists
 │       ├── backends          (R)   newline-separated ("passphrase", "file", ...)
 │       └── state             (R)   wrap-state path (admin-only)
-├── peer/                                  ← kernel-stamped, unforgeable (§6.2)
-│   ├── proc                  (R)   peer Proc's PID + identity tag
-│   └── caps                  (R)   peer Proc's capability bits
+├── peer/                                  ← optional client-facing introspection (§6.3)
+│   ├── proc                  (R)   this Proc's PID + identity tag (stripes)
+│   └── caps                  (R)   this Proc's capability bits
 └── ops/                                   ← admin / control verbs
     ├── unwrap                (RW)  per-user-stratumd → corvus DEK unwrap (BINARY FRAMES)
     ├── wrap                  (RW)  DEK wrap under a user's hybrid keypair (BINARY FRAMES)
@@ -552,25 +552,75 @@ The recovery phrase is a printed-paper instrument. Loss of both system passphras
 
 ---
 
-## 6. Transport: Spoor with Proc identity
+## 6. Transport: the `/srv` service and per-connection sessions
 
-### 6.1 corvus listens on a Spoor
+corvus is a full **9P2000.L server** in userspace, reached **per-connection**: every client Proc that opens `/srv/corvus` gets its own kernel↔corvus 9P session. The transport is created and owned by the kernel; the per-caller identity corvus authorizes against is stamped by the kernel and read through a syscall, never sourced from the client. The design converged across four adversarial design-audit rounds (r1–r5); this section is r5.
 
-corvus owns `/srv/corvus/` — a kernel-mediated 9P tree backed by a userspace Dev hosted by the corvus daemon. The kernel uses the same Spoor-pair-as-transport mechanism that Phase 5 built for stratumd: corvus is a 9P *server* in userspace; clients reach it via dev9p-shape mediation.
+### 6.1 The `/srv` device and service registration
 
-### 6.2 Proc identity binding
+`/srv` is a kernel device — a new `Dev`, **`devsrv`** (Plan 9's `#s` heritage; ARCH §9.4). It is deliberately a *distinct* `Dev` from `dev9p` (the Dev that backs kernel-mounted 9P trees). The separation is structural, not cosmetic: every Spoor walked out of `/srv` carries `devsrv`'s device character, so a `/srv/corvus` connection Spoor is a **`KObj_Srv`** kernel object — a kind that is **non-transferable** (ARCH §18.2; the same I-5-style structural rule as `KObj_MMIO`). A client cannot 9P-transfer its corvus connection to another Proc — the connection is pinned to the Proc that opened it. That non-transferability is what makes the kernel-stamped peer identity (§6.3) unforgeable across a 9P walk.
 
-Each Spoor open to `/srv/corvus/` carries a kernel-stamped peer identity: PID, capability set, console-attachment bit, plus an unforgeable per-Proc identity tag generated at Proc creation. Corvus reads these via the synthetic file `/srv/corvus/peer/`. The identity is set by the kernel when the Spoor is created and **cannot be rewritten by userspace** — including by cross-Proc transfer via 9P (the new holder gets THEIR own identity, not the prior holder's).
+corvus posts its service exactly once at startup:
 
-The Proc identity tag (a 64-bit value) is the kernel's distinct-Proc identifier; corvus uses it as the binding key for sessions. A session is "owned by" the Proc with identity tag T; only T can issue close. If T's Proc exits, the session is auto-closed (corvus listens on Proc-death notifications via a kernel admin Spoor).
+```
+SYS_POST_SERVICE(name) → service_handle
+```
 
-### 6.3 Cross-Proc session transfer
+registers the calling Proc as the 9P *server* for `/srv/<name>`. corvus calls `SYS_POST_SERVICE("corvus")`. The **kernel creates and owns all transport** — corvus never allocates or holds a transport pipe (invariant **C-23**).
 
-A login session can be transferred to a child Proc (e.g., login → user shell → user app). The 9P RIGHT_TRANSFER mechanism (ARCH I-4) governs this. On transfer:
-- The new holder Proc inherits the session's **user identity binding** (so corvus's owner check passes for that user's datasets).
-- The new holder's **capability set is its own** — NOT the parent's session caps. The session's caps + the Proc's caps are **orthogonal** (audit F10 resolution).
+Posting *or rebinding* the name `corvus` is gated on a one-way `proc_flags` bit that **joey** stamps on the corvus Proc it spawns (and re-stamps on every corvus restart). joey is the sole setter; the bit is never propagated across `rfork` (the same discipline as `PROC_FLAG_CONSOLE_ATTACHED`, §5.5). An ordinary Proc cannot post or hijack `/srv/corvus`. When corvus dies, the kernel **tombstones** the name rather than freeing it: only a Proc carrying joey's marker may rebind it, so a malicious Proc cannot race corvus's restart to claim `/srv/corvus`. (One mechanism, not two: the marker *is* the rebind authority.)
 
-**Authorization rule** (audit F10 + new C-11): for any operation against corvus, the auth check is "does this operation require Proc capability X? Then check the Proc has X. Does this operation require session ownership over user Y? Then check the session's bound user == Y." Operations check the auth they need; they do not check the cross-product. A CAP_HOSTOWNER Proc that inherits michael's session can execute admin verbs (because it has CAP_HOSTOWNER) AND unwrap michael's DEKs (because the session owns michael). **This is feature, not bug** — admins can read user data on Plan-9-style systems; we make this property explicit.
+### 6.2 Per-connection sessions
+
+Every client Proc that opens `/srv/corvus` gets **its own kernel↔corvus 9P session** — a connection. There is no shared session.
+
+When client Proc P opens `/srv/corvus/<path>`:
+1. The kernel mints a fresh transport pair (a pipe pair) — kernel-owned, never placed in any handle table.
+2. The kernel builds a dedicated *synchronous* `p9_client` over that transport.
+3. The kernel enqueues the new connection on corvus's bounded accept queue.
+4. corvus accepts it (`SYS_SRV_ACCEPT`, below).
+5. The kernel drives `Tversion` + `Tattach` + `Twalk(<path>)` on the connection.
+6. The kernel records the connection→P binding and installs a non-transferable `KObj_Srv` Spoor in P's handle table.
+7. `open` returns to P.
+
+The connection is created on P's first open and reused for P's lifetime; the create is guarded by a per-Proc lock (check-then-create, so two threads of P racing the first open get one connection). One connection per Proc — a per-Proc cap of 1, plus a global cap on live `/srv/corvus` connections (~256, corvus's `MAX_USERS` order); past the global cap, `open` fails fast.
+
+**Why per-connection and not a shared session.** Thylacine's kernel 9P client (`kernel/9p_client.c`) is synchronous — it holds the per-client lock across the blocking `p9_transport_exchange`. A *single shared* `p9_client` for all corvus clients would serialize every client behind that one lock: one slow corvus operation (an Argon2id verify) would wedge every other client, and a client blocked in corvus would hold the lock indefinitely. Per-connection sidesteps this entirely — each connection has its own `p9_client` and its own private lock, so connections are independent. It is also the shape stratumd's server is built for (concurrent accept; per-connection handling). Async/pipelined 9P (ARCH §21) is real owed work but is **not** a prerequisite here: per-connection parallelism is connection-level, and stratumd's own client library is itself one-op-at-a-time at v2.0.
+
+```
+SYS_SRV_ACCEPT(service_handle) → connection_handle
+```
+
+corvus blocks until a client opens `/srv/corvus`, then receives the server end of one fresh kernel-minted connection. The accept queue is bounded; past it a client's `open` fails fast rather than queueing unboundedly.
+
+**`tsleep`.** The kernel's blocking 9P ops on a `/srv` connection must be deadline-bounded — a corvus that hangs (deadlock, livelock) must not wedge its clients forever. The kernel's `Rendez` `sleep()` is indefinite; r5 adds **`tsleep`** — a `Rendez` sleep with a deadline, woken by `wakeup` or by the timer (ARCH §8.8). A hung corvus → the client's wait expires → `open` (or the in-flight op) fails `-ETIMEDOUT`; the client is never wedged. `tsleep` is owed for the Phase-5 `poll`/`futex` work regardless; it lands as its own small prerequisite chunk, **P5-tsleep**.
+
+**Teardown ordering.** On corvus death (or a connection close) the kernel (1) sets every affected connection's transport to `ERROR` and EOFs both pipe ends, so any kernel thread blocked in `do_recv` / `tsleep` on that connection wakes and returns `-EIO`; (2) fences client threads out of the dead connection; (3) frees the `p9_client` and the transport pipes. A corvus *crash* wakes blocked clients immediately via the EOF/ERROR path — the `tsleep` deadline is the backstop for a corvus *hang*, where no EOF is forthcoming.
+
+**corvus is single-threaded.** corvus `poll`s its listener plus its N accepted connection fds and serves one 9P message at a time, each connection's protocol state held in a strictly isolated per-connection arena (a fid bug on one connection cannot reach another). A slow operation (Argon2id) adds latency to other connections; this is accepted for the infrequent login path and documented — a v1.x corvus may multi-thread. Per-connection arena isolation is the load-bearing property; single-threadedness is an implementation simplification, not a security boundary.
+
+### 6.3 Kernel-stamped peer identity
+
+corvus must know *who* is on the other end of each connection — to bind sessions, gate admin verbs, refuse cross-user unwraps. That identity is **stamped by the kernel** and read by corvus through a syscall; it never comes from the client and is never cached on corvus's own fid state. This is invariant **C-22**.
+
+**`stripes`.** Every Proc carries a `stripes` value — a `u64`, the kernel's per-Proc identity tag (the thylacine's stripe pattern: every animal's is unique). It is drawn from a monotonic kernel counter at `proc_alloc`, fresh for every Proc — an `rfork` child gets a *different* `stripes` from its parent, so it is structurally distinct, not inherited. `stripes == 0` is a reserved fail-closed sentinel (an unstamped or torn read reads 0 and authorizes nothing). `stripes` is immutable for the Proc's life. It is the kernel's answer to "is this the same Proc?" — stable, unforgeable, not recycled while the Proc is alive.
+
+**`SYS_SRV_PEER`.** corvus reads a connection's peer identity with:
+
+```
+SYS_SRV_PEER(connection_handle) → { stripes, console, caps }
+```
+
+- `stripes` and the `console`-attachment bit are the peer Proc's **immutable** identity. The kernel-side connection object captures them **by value at bind time** — it holds no raw `Proc*` for the immutable fields, so a peer that exits cannot turn a later read into a use-after-free.
+- `caps` is the peer's **mutable** capability set. The kernel reads it **live** on each call, under the process-table lock, with a dead-Proc guard: if the peer Proc has exited (zombie / reaped), `SYS_SRV_PEER` returns a **fail-closed** result — never stale `caps`, never a UAF.
+
+The call is gated to the service's poster — only corvus may query peers of `/srv/corvus` connections.
+
+corvus calls `SYS_SRV_PEER` **per request**; it never caches the result on its own fid state. For an admin verb, corvus re-queries `caps` immediately before the irreversible effect, closing the TOCTOU window between "decided to allow" and "performed." (At v1.0 there is no cap-drop syscall, so `caps` only grows and the unsafe direction is unreachable; the v1.x obligation — when cap-drop lands, keep the re-query — is recorded here so it is not lost.)
+
+**Session reach across Procs.** A corvus *session* (the post-AUTH auth state) is identified by its opaque bearer token (§4.2; `s` + 128 bits). The token is data, not a handle: `login` authenticates over *its* connection, receives token S, and passes S — as plain bytes, in a request payload — to the per-user `stratumd` it spawns. `stratumd-michael` opens *its own* `/srv/corvus` connection (its own `stripes`, its own kernel-stamped identity) and presents S in its UNWRAP frame. corvus validates S → michael, checks michael owns the dataset, and serves. The session moved between Procs **by bearer token**, not by transferring a connection Spoor — `KObj_Srv` is non-transferable, so there is no handle to transfer.
+
+**Authorization orthogonality** (audit F10; **C-11**) is unchanged by r5: every operation checks exactly the authority it needs. A verb that needs Proc capability X checks the connection peer's live `caps` for X (via `SYS_SRV_PEER`); a verb that needs session ownership of user Y checks the bound token's user. The two are orthogonal — corvus does not check the cross-product. A `CAP_HOSTOWNER` Proc presenting michael's token may run admin verbs (it has the cap) *and* unwrap michael's DEKs (the token owns michael); on a Plan-9-heritage system an admin reading user data is a feature, made explicit here.
 
 ### 6.4 Wire format: binary frames
 
@@ -742,7 +792,7 @@ For v1.x hardened mode: `/boot/system.key` becomes `/boot/system.key.wrap`, wrap
 
 ## 9. Invariants
 
-These are runtime + audit guarantees at v1.0. A future `specs/corvus.tla` formalizes the session state machine + capability arithmetic.
+These are runtime + audit guarantees at v1.0. `specs/corvus.tla` formalizes the session state machine, the capability arithmetic, and (P5-corvus-srv) the connection-transport layer.
 
 | ID | Invariant | Enforced by |
 |---|---|---|
@@ -767,12 +817,14 @@ These are runtime + audit guarantees at v1.0. A future `specs/corvus.tla` formal
 | C-19 | corvus's audit log is encrypted under a system-passphrase-derived KEK; physical-disk read yields ciphertext only (audit F9) | audit-log encryption discipline |
 | C-20 | Recovery phrase is generated at install, displayed once, never persisted; loss of both system passphrase and recovery phrase requires reinstall (audit F6) | install flow + recovery verb |
 | C-21 | `CAP_HOSTOWNER` is elevation-only: it enters a Proc's capability set solely by redeeming a pending grant through the `cap` device's `use` file (for a console-attached Proc), and is never conferred by `rfork` | `cap` device + `rfork` elevation-only strip; `specs/handles.tla` |
+| C-22 | Every `/srv/corvus` connection carries its peer Proc's kernel-stamped identity (`stripes`, console bit, caps); corvus obtains it via `SYS_SRV_PEER` per request — never from the client, never cached on corvus's fid state | `devsrv` kernel-stamped identity + `KObj_Srv` non-transferability; `specs/corvus.tla` (`ConnOpIdentityIsKernelTruth` / `ConnOpPeerWasLive`), `specs/handles.tla` (`WalkChildIsSrv`) |
+| C-23 | The kernel is corvus's sole 9P client; every `/srv/corvus` connection's transport is kernel-created and kernel-owned, never in any handle table | `SYS_POST_SERVICE` (kernel owns all transport); `specs/corvus.tla` (`ConnTransportKernelOwned`), `specs/handles.tla` (`KObj_Srv` / `SrvHandlesAtOrigin`) |
 
 ---
 
 ## 10. Implementation arc
 
-Eight chunks for v1.0, plus a v1.x deferral for Secure Boot. Roughly in order:
+The implementation chunks for v1.0, plus a v1.x deferral for Secure Boot. Roughly in order:
 
 ### P5-corvus-design (this chunk)
 
@@ -842,17 +894,17 @@ Exit criteria: each syscall has kernel impl + libt stub + 3-5 kernel-internal te
 
 ### P5-corvus-srv
 
-The `/srv/corvus/` transport. P5-corvus-bringup brought corvus up over a direct joey-driven pipe harness; this chunk builds the real transport that §6.1 / §6.2 specify. Without it corvus has no kernel-stamped peer identity, and neither login nor hostowner can gate on a peer Proc.
+The `/srv/corvus/` transport (§6). P5-corvus-bringup brought corvus up over a direct joey-driven pipe harness; this macro-chunk builds the real transport. Without it corvus has no kernel-stamped peer identity, and neither login nor hostowner can gate on a peer Proc. The design (r5) converged across four adversarial design-audit rounds; it decomposes into:
 
-Scope:
-- `/srv/corvus/` as a kernel-mediated tree backed by the corvus daemon's userspace Dev, using the Spoor-pair transport built for stratumd.
-- Per-connection kernel-stamped peer identity: PID, capability set, console-attachment bit, and the 64-bit per-Proc identity tag (§6.2).
-- The peer-identity readout corvus uses to bind sessions and gate verbs.
-- corvus moves off the pipe harness onto `/srv/corvus/`.
+**P5-corvus-srv-design** *(this sub-chunk)* — r5 into scripture (§6 rewrite + C-22 / C-23) and the two TLA+ specs (`corvus.tla` connection layer + `handles.tla` `KObj_Srv` partition), TLC-verified clean + buggy. No code. Not audit-bearing.
 
-Exit criteria: a client opening `/srv/corvus/` reaches corvus; corvus reads the client's kernel-stamped identity; the identity cannot be rewritten by userspace, including across a 9P RIGHT_TRANSFER (§6.2).
+**P5-tsleep** — the timeout-bearing `Rendez` sleep primitive (`tsleep`, ARCH §8.8). A small kernel prerequisite: the per-connection blocking 9P ops need a deadline so a hung corvus cannot wedge its clients (§6.2). Owed for the Phase-5 `poll` / `futex` work regardless.
 
-Audit-bearing (new Dev, Spoor mediation, Proc-identity stamping).
+**P5-corvus-srv-impl-a** — the kernel side: the `devsrv` Dev + `/srv`, the service registry, `SYS_POST_SERVICE` / `SYS_SRV_ACCEPT` / `SYS_SRV_PEER`, per-connection setup, the `KObj_Srv` kobj kind, and `stripes`. Audit-bearing (new Dev, transport mediation, Proc-identity stamping).
+
+**P5-corvus-srv-impl-b** — the corvus side: corvus becomes a full 9P2000.L server over `/srv/corvus`, retiring the joey pipe harness. Audit-bearing.
+
+Exit criteria: a client opening `/srv/corvus/` reaches corvus; corvus reads the client's kernel-stamped identity via `SYS_SRV_PEER`; the identity is per-connection and cannot be rewritten by userspace, including across a 9P walk (`KObj_Srv` is non-transferable); a hung corvus fails a client's `open` with `-ETIMEDOUT` rather than wedging it.
 
 ### P5-login
 
@@ -989,11 +1041,14 @@ For v1.x cryptographic forward secrecy (audit F14): Stratum's planned rekeying p
 
 - `STRATUM-API-V1.md` — Thylacine-side detailed spec of the Stratum API additions enumerated in §13 of this doc. The detailed version with CLI shapes, wire frames, error codes, test matrices, and open questions.
 - ARCHITECTURE.md §5 — boot sequence (this doc updates).
-- ARCHITECTURE.md §11 — syscall surface (this doc adds: sys_mlockall, sys_set_dumpable, sys_set_traceable, sys_explicit_bzero, sys_getrandom).
+- ARCHITECTURE.md §11 — syscall surface (this doc adds: sys_mlockall, sys_set_dumpable, sys_set_traceable, sys_explicit_bzero, sys_getrandom; and §11.2c SYS_POST_SERVICE, SYS_SRV_ACCEPT, SYS_SRV_PEER for the §6 transport).
+- ARCHITECTURE.md §8.8 — `tsleep`, the deadline-bounded `Rendez` sleep this doc's §6.2 transport depends on.
+- ARCHITECTURE.md §9.4 — the `devsrv` Dev + `/srv` (this doc's §6.1).
 - ARCHITECTURE.md §14.3a — Stratum mount lifecycle (this doc updates: system pool is integrity-only at v1.0; corvus + per-user stratumd post-pivot).
 - ARCHITECTURE.md §15 — capabilities (this doc adds CAP_HOSTOWNER, CAP_GRANT_HOSTOWNER, CAP_LOCK_PAGES, CAP_CSPRNG_READ, the console-attachment bit, and the `cap` device).
-- ARCHITECTURE.md §28 — global invariants list (this doc adds C-1..C-21; cross-reference from §28).
-- ROADMAP.md §7 — Phase 5 chunk list (this doc adds eight chunks; v1.x extensions in §11 here become future-phase entries in ROADMAP).
+- ARCHITECTURE.md §18 — kernel object kinds (this doc's §6.1 adds `KObj_Srv`, non-transferable).
+- ARCHITECTURE.md §28 — global invariants list (this doc adds C-1..C-23; cross-reference from §28).
+- ROADMAP.md §7 — Phase 5 chunk list (this doc adds the corvus-arc chunks; v1.x extensions in §11 here become future-phase entries in ROADMAP).
 - `stratum/v2/docs/OS-INTEGRATION.md` — Stratum's expectations.
 - `stratum/v2/src/janus/backend_passphrase.c` — design influence (not a port).
 - Plan 9 manual: factotum(4), secstore(1), authsrv(8) — historical reference.

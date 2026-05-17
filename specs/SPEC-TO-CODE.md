@@ -196,11 +196,11 @@ TLC verdicts at `Procs = {p1, p2}, Paths = {a, b, c}, Spoors = {s1, s2}`:
 
 ## handles.tla — P2-Fa + P4-Ib + P4-Ic3 + P4-Ic5b1b spec (impl at P2-Fc + P4-Ib + P4-Ic3 + P4-Ic5b1b)
 
-Status: **rights ceiling proven; hardware-handle non-transferability proven; transfer-only-via-9P proven; capability monotonicity proven; hw-handle non-duplicability proven; hw-resource exclusivity proven; hw-handle-implies-cap proven; rfork-capability-grant ceiling proven; elevation-only-cap axis + rfork-strip discipline proven (P5-hostowner); impl landed at P2-Fc + P4-Ib + P4-Ic3 + P4-Ic5b1b (DMA-side now wired).** Models the kernel handle table with typed kobjs partitioned into transferable + hardware sets, per-handle provenance tags, abstract 9P sessions, per-Proc coarse capabilities, and dynamic per-Proc capability ceilings (rfork-time inheritance). ARCH §28 invariants pinned: I-2 (capability monotonic reduction), I-4 (transfer only via 9P), I-5 (hardware handles non-transferable — covers MMIO + IRQ + DMA), I-6 (rights monotonic on transfer). I-7 (BURROW refcount + mapping lifecycle) is OUT OF SCOPE — covered by `burrow.tla`.
+Status: **rights ceiling proven; hardware-handle non-transferability proven; transfer-only-via-9P proven; capability monotonicity proven; hw-handle non-duplicability proven; hw-resource exclusivity proven; hw-handle-implies-cap proven; rfork-capability-grant ceiling proven; elevation-only-cap axis + rfork-strip discipline proven (P5-hostowner); KObj_Srv non-transferability + walk-derivation proven (P5-corvus-srv); impl landed at P2-Fc + P4-Ib + P4-Ic3 + P4-Ic5b1b (DMA-side now wired).** Models the kernel handle table with typed kobjs partitioned into transferable + hardware sets, per-handle provenance tags, abstract 9P sessions, per-Proc coarse capabilities, and dynamic per-Proc capability ceilings (rfork-time inheritance). ARCH §28 invariants pinned: I-2 (capability monotonic reduction), I-4 (transfer only via 9P), I-5 (hardware handles non-transferable — covers MMIO + IRQ + DMA), I-6 (rights monotonic on transfer). I-7 (BURROW refcount + mapping lifecycle) is OUT OF SCOPE — covered by `burrow.tla`.
 
 P4-Ic5b1b adds no new spec state, actions, or invariants — the existing `HwKObjs` partition + the 5 hw-kobj invariants (HwHandlesAtOrigin, NoHwDup, HwResourceExclusive, HwHandleImpliesCap, RightsCeiling) apply uniformly to KObj_DMA. PA stability is a structural impl property (no kernel code path mutates KObj_DMA's `pa` after `kobj_dma_create`). The kernel-allocates-PA discipline (vs MMIO's user-specifies-PA) is a syscall-surface design choice that doesn't surface in the abstract handle-table model. See the `HandleAlloc` row below for the DMA-side impl cross-reference.
 
-TLC-clean at `Procs = {p1, p2}, TxKObjs = {kx}, HwKObjs = {kh}, Rights = {R, T}, Caps = {C, HW}, CapHwCreate = HW, CapHostowner = C` — **51,744,096 distinct states explored / 1,179,332,587 generated; depth 28; ~56 min on 8 cores** (P5-hostowner's `HostownerGrant` action ~4.4×'d the state space vs. the prior 11.7M baseline — each Proc gains a reachable elevation-only-capability dimension). Buggy configs:
+The main `handles.cfg` keeps `SrvKObjs = {}`, so the P5-corvus-srv additions (the `WalkDerive` / `BuggySrvWalkTx` actions never fire) leave its reachable state graph — and TLC verdict — unchanged: TLC-clean at `Procs = {p1, p2}, TxKObjs = {kx}, HwKObjs = {kh}, SrvKObjs = {}, Rights = {R, T}, Caps = {C, HW}, CapHwCreate = HW, CapHostowner = C` — **51,744,096 distinct states / depth 28; ~56 min on 8 cores**. P5-corvus-srv's `KObj_Srv` walk-derivation mechanism is proven in a focused clean cfg `handles_srv.cfg` (`SrvKObjs = {ks1, ks2}`, Tx/Hw partitions empty) — clean, **26,784 distinct / depth 12 / 2s**. Buggy configs:
 
 | Config | Flag | Invariant violated | Depth | Distinct states |
 |---|---|---|---|---|
@@ -214,6 +214,7 @@ TLC-clean at `Procs = {p1, p2}, TxKObjs = {kx}, HwKObjs = {kh}, Rights = {R, T},
 | `handles_buggy_rfork_elevate.cfg`  | `BUGGY_RFORK_ELEVATE = TRUE`     | `CapsCeiling` (dynamic ceiling) | 5 | 534 |
 | `handles_buggy_spawn_fds_elevate.cfg` | `BUGGY_SPAWN_FDS_ELEVATE = TRUE` | `SpawnFdsRightsMonotonic` | 3 | 133 |
 | `handles_buggy_rfork_hostowner.cfg` | `BUGGY_RFORK_HOSTOWNER = TRUE` | `CapsCeiling` (elevation-only strip) | 5 | 553 |
+| `handles_buggy_srv_walk_tx.cfg`     | `BUGGY_SRV_WALK_TX = TRUE`       | `WalkChildIsSrv`       | 3 | 330 |
 
 | Spec action | Source location | Notes |
 |---|---|---|
@@ -235,6 +236,8 @@ TLC-clean at `Procs = {p1, p2}, TxKObjs = {kx}, HwKObjs = {kh}, Rights = {R, T},
 | `BuggyRforkElevate(parent, child, gained)` | (none — bug class statically prevented at P4-Ic3) | The AND with `parent_caps` at line 499 of `rfork_internal` makes it impossible for the caller to elevate the child's caps above the parent's. A future refactor that replaces `&` with `=` or `\|` would re-introduce the bug. |
 | `HostownerGrant(p)` | (P5-hostowner-b — the kernel `cap` device, not yet implemented) | Models the `cap` device's `use`-file redemption: a console-attached Proc redeems a pending grant and the kernel ORs `CAP_HOSTOWNER` into its `caps` (the spec also raises `proc_ceiling`, modeling the legitimate authorization growth). corvus's passphrase + console gates are modeled in `corvus.tla::AdminElevate`; this action is the cap arithmetic only. The SOLE action admitting `CapHostowner` into any `proc_caps`. |
 | `BuggyRforkNoStrip(parent, child, granted)` | (P5-hostowner-b — statically prevented once `rfork_internal` ANDs the child's caps with `~CAP_ELEVATION_ONLY`) | The bug: `rfork` omits the elevation-only strip, so an elevated parent leaks `CAP_HOSTOWNER` to a forked child that lacks `PROC_FLAG_CONSOLE_ATTACHED`. Caught by `CapsCeiling` — the child's ceiling is correctly stripped, its caps are not. |
+| `WalkDerive(p, h, k)` | (P5-corvus-srv-impl-a — `kernel/devsrv.c` walk op) | Walking a `KObj_Srv` handle yields a fresh child Spoor; because `/srv` is its own Dev, the child kobj is structurally `KObj_Srv` (allocated in the `SrvKObjs` partition), via="walk", inheriting the parent handle's rights as its ceiling. |
+| `BuggySrvWalkTx(p, h, k)` | (none — bug class prevented once `devsrv`'s walk op mints the child Spoor with the `KObj_Srv` kind) | The bug: the walk op constructs the child Spoor with a transferable kobj kind (or routes `/srv` through `dev9p`), so the child can 9P-transfer between Procs. Caught by `WalkChildIsSrv`. |
 
 | Spec invariant | Source enforcement |
 |---|---|
@@ -245,6 +248,8 @@ TLC-clean at `Procs = {p1, p2}, TxKObjs = {kx}, HwKObjs = {kh}, Rights = {R, T},
 | `NoHwDup` (no hw-kobj handle has via="dup") | `handle_dup` rejects when `h->obj->kind` is hw-kobj-kind via `handle_kind_is_hw_kobj()`. P4-Ib. |
 | `HwResourceExclusive` (at most one alive handle per hw kobj across all procs) | `kobj_mmio_create`'s `g_mmio_claims` overlap scan + `kobj_irq_create`'s `g_intid_claimed` bitmap. P4-Ib + P4-Ic2 kernel-MMIO-reservation. **DMA case (P4-Ic5b1b)**: `kobj_dma_create` calls `alloc_pages` which returns a fresh contiguous page chunk per allocation; the buddy allocator's free-list partitioning structurally prevents two live `KObj_DMA` from sharing PA. No explicit claim table is needed because the page allocator IS the claim layer. |
 | `HwHandleImpliesCap` (every hw-handle holder has CAP_HW_CREATE) | Syscall handlers gate on `__atomic_load_n(&p->caps, __ATOMIC_ACQUIRE) & CAP_HW_CREATE` before allocating. `ReduceCaps` (spec; future syscall) refuses to drop CAP_HW_CREATE while holding hw handles (R9 F150 implementer note). |
+| `WalkChildIsSrv` (every via="walk" handle points at a `KObj_Srv` kobj) | `devsrv`'s walk op allocates the child Spoor with the `KObj_Srv` kind; `/srv` being its own Dev makes this structural. Pins CORVUS-DESIGN.md C-22 (the connection's kernel-stamped identity is unforgeable across a 9P walk). P5-corvus-srv-impl-a. |
+| `SrvHandlesAtOrigin` (every `KObj_Srv` handle held by its origin proc) | `KObj_Srv` is non-transferable: `handle_transfer_via_9p`'s switch has no `KObj_Srv` case (the I-5-style structural rule; `_Static_assert` over the kobj_kind enum), and `handle_dup` rejects it. P5-corvus-srv-impl-a. |
 
 ### P2-Fa landed
 
@@ -446,8 +451,9 @@ Status: **landed at P5-corvus-spec**. Models the corvus key-agent
 daemon's session state machine + capability arithmetic + authorization
 surface. Pins CORVUS-DESIGN.md §9 invariants C-3 (session user-binding
 immutable), C-7 (unwrap refused for non-owner), C-11 (session-cap ×
-Proc-cap orthogonal authorization), and the §5.5
-HostownerRequiresConsole rule. Implementation: P5-corvus-bringup-a
+Proc-cap orthogonal authorization), C-22 + C-23 (P5-corvus-srv: the
+/srv per-connection transport — kernel-stamped peer identity), and the
+§5.5 HostownerRequiresConsole rule. Implementation: P5-corvus-bringup-a
 through -d landed (skeleton → wire → crypto → WRAP/UNWRAP); AUTH /
 SESSION_CLOSE / UNWRAP are as-built; the AdminElevate / SessionTransfer
 surface is later sub-chunks. The impl is a single `usr/corvus/src/
@@ -460,8 +466,10 @@ ProcCap (CapHostowner). Datasets identified by their owner user
 file limitation on record/function constants; the convention matches
 the live system (`thylacine/users/<name>` dataset path).
 
-Safety: TLC-clean — 141109 states generated, 23652 distinct, depth 18,
-<1s wall time.
+Safety: TLC-clean — 24,968,209 states generated, 3,027,456 distinct,
+depth 27, ~1min20s wall time (the P5-corvus-srv connection layer
+~128×'d the distinct-state count vs. the prior 23,652 baseline — each
+Proc gains a connection, accept, peer-op, and exit dimension).
 
 | Config | Flag | Invariant | Result | Distinct | Depth |
 |---|---|---|---|---|---|
@@ -471,6 +479,8 @@ Safety: TLC-clean — 141109 states generated, 23652 distinct, depth 18,
 | `corvus_buggy_admin_without_proc_cap.cfg` | `BUGGY_ADMIN_WITHOUT_PROC_CAP`  | `AdminRequiresProcCap`   | violation | 34 | 4 |
 | `corvus_buggy_elevate_without_console.cfg`| `BUGGY_ELEVATE_WITHOUT_CONSOLE` | `HostownerRequiresConsole` | violation | 44 | 4 |
 | `corvus_buggy_transfer_rebind.cfg`        | `BUGGY_TRANSFER_REBIND`         | `SessionUserImmutable`   | violation | 32 | 4 |
+| `corvus_buggy_identity_cached_on_fid.cfg` | `BUGGY_IDENTITY_CACHED_ON_FID`  | `ConnOpIdentityIsKernelTruth` | violation | 8501 | 8 |
+| `corvus_buggy_dead_proc_stale.cfg`        | `BUGGY_DEAD_PROC_STALE`         | `ConnOpPeerWasLive`      | violation | 6767 | 7 |
 
 The session identity model uses (creation_proc, bound_user) as the
 immutable pair, with owner_proc as a separate field that mutates on
@@ -496,6 +506,13 @@ Spec actions ↔ impl mapping (impl filled in at P5-corvus-bringup):
 | `BuggyAdminWithoutProcCap` | (none — bug class prevented by `kernel.has_cap(peer_pid, CapHostowner)` gate) | Same shape as BuggyUnwrapCrossUser: single check; bug shapes are missing-check or wrong-cap. |
 | `BuggyElevateWithoutConsole` | (none — bug class prevented by `peer_console_bit?` precondition) | Same shape; bug = missing precondition. |
 | `BuggyTransferRebind` | (none — bug class prevented by the SessionTransfer impl COPYING bound_user from src) | Critical impl discipline: the transfer path MUST take bound_user from the existing session by reference, not from any request-supplied field. |
+| `PostService` | (P5-corvus-srv-impl-a — kernel `/srv` registry; corvus startup `SYS_POST_SERVICE("corvus")`) | corvus registers as the 9P server for `/srv/corvus`. The kernel creates and owns all transport (C-23); posting/rebinding gated on a joey-stamped `proc_flags` bit. |
+| `SrvBind(cn, p)` | (P5-corvus-srv-impl-a — `kernel/devsrv.c` open path) | The kernel mints a fresh per-Proc connection (transport pair + dedicated synchronous `p9_client`) when Proc p opens `/srv/corvus`, stamping the peer identity. One connection per Proc. |
+| `SrvAccept(cn)` | (P5-corvus-srv-impl-a — `SYS_SRV_ACCEPT` handler; -impl-b corvus accept loop) | corvus accepts a kernel-bound connection; it never mints transport itself. |
+| `SrvPeerOp(cn)` | (P5-corvus-srv-impl-b — corvus per-request `SYS_SRV_PEER` call) | corvus resolves a connection's peer FRESH via `SYS_SRV_PEER` on every identity-gated op; never caches identity on fid state (C-22). |
+| `ProcExit(p)` | `kernel/proc.c` Proc-exit path (as-built) + P5-corvus-srv-impl-a connection teardown | A peer Proc exits; `SYS_SRV_PEER` thereafter fail-closes for that connection until teardown. |
+| `BuggyIdentityCachedOnFid(cn1, cn2)` | (none — bug class prevented by corvus calling `SYS_SRV_PEER(cn)` per request rather than caching peer identity on fid state) | The bug: corvus credits an op on one connection to another connection's peer. Caught by `ConnOpIdentityIsKernelTruth`. |
+| `BuggyDeadProcStale(cn)` | (none — bug class prevented by `SYS_SRV_PEER`'s dead-Proc guard, which reads `caps` live under the process-table lock and fail-closes for an exited peer) | The bug: `SYS_SRV_PEER` returns an exited peer's stale identity. Caught by `ConnOpPeerWasLive`. |
 
 Spec invariants ↔ impl enforcement:
 
@@ -505,6 +522,9 @@ Spec invariants ↔ impl enforcement:
 | `UnwrapOwnerOnly` (C-7) | The comparison of `session.bound_user` against the dataset-ownership table in `main.rs::handle_unwrap` and `handle_wrap` — C-7-gated, fires before any crypto. Landed P5-corvus-bringup-d. |
 | `AdminRequiresProcCap` (C-11 Proc-cap path) | The single check `kernel.peer_has_cap(CapHostowner)` in dispatch_admin_verb. |
 | `HostownerRequiresConsole` (§5.5) | The single check `peer_proc.console_attached?` in handle_admin_elevate. Combined with the kernel-side discipline that console_attached is never propagatable across rfork. |
+| `ConnOpIdentityIsKernelTruth` (C-22) | corvus calls `SYS_SRV_PEER(connection_handle)` per request; the kernel returns the connection's bind-time-stamped peer. corvus never sources peer identity from the client nor caches it on fid state. |
+| `ConnOpPeerWasLive` (C-22) | `SYS_SRV_PEER`'s dead-Proc guard — an exited / zombie / reaped peer yields a fail-closed result, so no op is authorized against a dead peer. |
+| `ConnTransportKernelOwned` (C-23) | `SYS_POST_SERVICE`: the kernel creates and owns every `/srv/corvus` connection's transport; corvus only accepts kernel-bound connections. `KObj_Srv` (handles.tla) keeps the transport out of any handle table. |
 
 References:
 - `docs/CORVUS-DESIGN.md` — full design + invariant numbering.

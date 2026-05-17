@@ -19,6 +19,11 @@
 (*   C-11 — Session-cap and Proc-cap authorization are orthogonal;        *)
 (*          operations check the auth they need, not the cross-product    *)
 (*          (audit F10).                                                   *)
+(*   C-22 — Every /srv connection carries its peer Proc's kernel-stamped  *)
+(*          identity; corvus reads it via SYS_SRV_PEER per request, never *)
+(*          from the client, never cached on its own fid state.           *)
+(*   C-23 — The kernel is corvus's sole 9P client; /srv transport is      *)
+(*          kernel-created and kernel-owned.                               *)
 (*                                                                         *)
 (* Secondary discipline captured (not directly part of §9 numbering but   *)
 (* binding behaviour per §5.5):                                            *)
@@ -54,8 +59,10 @@
 (*   Sessions are identified by the Proc that owns them. One session per *)
 (*   Proc — corvus's design is single-session-per-Proc at v1.0; multi-   *)
 (*   session-per-user-per-Proc is v1.x. Cross-Proc session transfer       *)
-(*   models the §6.3 9P RIGHT_TRANSFER mechanism: the src session is     *)
-(*   torn down and a derivative is created at dst preserving bound_user. *)
+(*   models §6.3 — the session's bearer token presented from a different *)
+(*   Proc's connection; a derivative is created at dst preserving         *)
+(*   bound_user. The /srv connection Spoor is KObj_Srv (non-transferable);*)
+(*   the session moves by token, not by a 9P handle transfer.             *)
 (*                                                                         *)
 (*   sessions is SUBSET [owner_proc, bound_user]. session_origin is a    *)
 (*   ghost SUBSET of the same shape recording every session ever created *)
@@ -85,6 +92,17 @@
 (*   CapHostowner — since proc caps in this spec only grow (no reduce    *)
 (*   modeled), "currently" is equivalent to "ever".                       *)
 (*                                                                         *)
+(*   CONNECTION LAYER (P5-corvus-srv): the /srv/corvus transport. corvus *)
+(*   is a 9P2000.L server reached per-connection — one kernel-minted      *)
+(*   connection per client Proc; the connection Spoor is KObj_Srv, non-  *)
+(*   transferable (handles.tla). `connections` is the append-only set of *)
+(*   kernel-bound [conn, peer] records; `peer` is the kernel-stamped     *)
+(*   per-Proc identity tag (stripes). corvus resolves a connection's     *)
+(*   peer FRESH via SYS_SRV_PEER on every op (SrvPeerOp) — it never      *)
+(*   caches identity on fid state. completed_conn_ops is a ghost log;    *)
+(*   C-22 + C-23 are checked over it and connections. The layer is       *)
+(*   orthogonal to the session layer (corevars vs connvars).             *)
+(*                                                                         *)
 (* BUGGY-CONFIG MATRIX (executable documentation per CLAUDE.md spec-first*)
 (* policy):                                                                *)
 (*                                                                         *)
@@ -108,15 +126,19 @@
 (*                                           ElevateWithoutConsole grants*)
 (*                                           CapHostowner to a non-      *)
 (*                                           console-attached Proc.      *)
-(*   corvus_buggy_transfer_elevate.cfg       catches SessionCapsBounded  *)
-(*                                           violation: cross-Proc       *)
-(*                                           session transfer ELEVATES   *)
-(*                                           the derivative session's    *)
-(*                                           bound_user (re-binds to a   *)
-(*                                           different user) — captures *)
-(*                                           the spec-level shape of     *)
-(*                                           "session derivative does NOT*)
-(*                                           preserve user binding."     *)
+(*   corvus_buggy_transfer_rebind.cfg        catches C-3 violation:      *)
+(*                                           BuggyTransferRebind re-binds*)
+(*                                           the derivative session to a *)
+(*                                           different bound_user.        *)
+(*   corvus_buggy_identity_cached_on_fid.cfg catches C-22 violation:     *)
+(*                                           BuggyIdentityCachedOnFid    *)
+(*                                           credits a connection's op   *)
+(*                                           to another connection's     *)
+(*                                           peer (stale fid-cache).      *)
+(*   corvus_buggy_dead_proc_stale.cfg        catches C-22 violation:     *)
+(*                                           BuggyDeadProcStale runs an  *)
+(*                                           op on a connection whose    *)
+(*                                           peer Proc has exited.        *)
 (*                                                                         *)
 (* INVARIANTS (TLC-checked):                                               *)
 (*                                                                         *)
@@ -136,6 +158,19 @@
 (*                             with CapHostowner in proc_caps is in      *)
 (*                             console_attached.                          *)
 (*                                                                         *)
+(*   ConnOpIdentityIsKernelTruth                                          *)
+(*                           — C-22. Every connection-op credits the     *)
+(*                             connection's kernel-bound peer; never a    *)
+(*                             client-sourced or fid-cached value.        *)
+(*                                                                         *)
+(*   ConnOpPeerWasLive      — C-22. Every connection-op was authorized   *)
+(*                             while its peer Proc was alive (the         *)
+(*                             SYS_SRV_PEER dead-Proc guard).             *)
+(*                                                                         *)
+(*   ConnTransportKernelOwned                                             *)
+(*                           — C-23. Every connection corvus serves was  *)
+(*                             created by the kernel.                     *)
+(*                                                                         *)
 (* See docs/CORVUS-DESIGN.md §6.3 (Proc identity binding), §5.5 (host-   *)
 (* owner elevation), §9 (invariant numbering).                            *)
 (***************************************************************************)
@@ -144,13 +179,16 @@ EXTENDS Naturals, FiniteSets
 CONSTANTS
     Procs,                              \* set of Procs (>= 2)
     Users,                              \* set of Users (>= 2)
+    Conns,                              \* set of /srv connection-slot ids (>= 2)
     ProcCaps,                           \* set of Proc-cap labels
     CapHostowner,                       \* \in ProcCaps — the admin gate
     BUGGY_UNWRAP_CROSS_USER,            \* bug: skip session-owns-dataset check
     BUGGY_AUTH_BINDING_MUTATE,          \* bug: mutate session.bound_user post-auth
     BUGGY_ADMIN_WITHOUT_PROC_CAP,       \* bug: admin verb accepts without CapHostowner
     BUGGY_ELEVATE_WITHOUT_CONSOLE,      \* bug: AdminElevate skips console check
-    BUGGY_TRANSFER_REBIND               \* bug: session transfer re-binds bound_user
+    BUGGY_TRANSFER_REBIND,              \* bug: session transfer re-binds bound_user
+    BUGGY_IDENTITY_CACHED_ON_FID,       \* bug: corvus credits a connection op from a stale fid-cached peer
+    BUGGY_DEAD_PROC_STALE               \* bug: SYS_SRV_PEER returns stale identity for an exited peer
 
 (***************************************************************************)
 (* Datasets and DatasetOwner — modeling decision: one dataset per user,    *)
@@ -177,12 +215,15 @@ DatasetOwner(d)  == d
 
 ASSUME Cardinality(Procs) >= 2
 ASSUME Cardinality(Users) >= 2
+ASSUME Cardinality(Conns) >= 2
 ASSUME CapHostowner \in ProcCaps
 ASSUME BUGGY_UNWRAP_CROSS_USER \in BOOLEAN
 ASSUME BUGGY_AUTH_BINDING_MUTATE \in BOOLEAN
 ASSUME BUGGY_ADMIN_WITHOUT_PROC_CAP \in BOOLEAN
 ASSUME BUGGY_ELEVATE_WITHOUT_CONSOLE \in BOOLEAN
 ASSUME BUGGY_TRANSFER_REBIND \in BOOLEAN
+ASSUME BUGGY_IDENTITY_CACHED_ON_FID \in BOOLEAN
+ASSUME BUGGY_DEAD_PROC_STALE \in BOOLEAN
 
 (***************************************************************************)
 (* Session record. Three fields:                                           *)
@@ -232,15 +273,60 @@ UnwrapRecord == [owner_proc : Procs, dataset : Datasets, bound_user : Users]
 (***************************************************************************)
 AdminRecord == [owner_proc : Procs]
 
+(***************************************************************************)
+(* ===================== CONNECTION LAYER (P5-corvus-srv) ================ *)
+(*                                                                         *)
+(* The /srv/corvus transport. corvus is a 9P2000.L server; each client    *)
+(* Proc reaches it over its OWN kernel-minted connection (one connection  *)
+(* per Proc; the connection Spoor is KObj_Srv — non-transferable, see     *)
+(* handles.tla). This layer models the kernel-attested per-caller         *)
+(* identity corvus reads via SYS_SRV_PEER, and pins CORVUS-DESIGN.md C-22 *)
+(* (identity is kernel-sourced, never client-sourced, never cached on     *)
+(* corvus's fid state) and C-23 (the kernel is corvus's sole 9P client;   *)
+(* transport is kernel-created and kernel-owned).                          *)
+(***************************************************************************)
+
+(***************************************************************************)
+(* Connection record. A kernel-minted /srv connection: a slot id `conn`   *)
+(* and the kernel-stamped peer Proc. The `peer` field models the kernel's *)
+(* per-Proc identity tag (`stripes`, CORVUS-DESIGN.md §6.2) — distinct    *)
+(* per Proc, immutable for the connection's life (KObj_Srv is non-        *)
+(* transferable, so a connection's peer never changes once bound).         *)
+(***************************************************************************)
+ConnRecord == [conn : Conns, peer : Procs]
+
+(***************************************************************************)
+(* Connection-op record. Ghost append-only log: every identity-gated      *)
+(* operation corvus performs on a connection appends one. `attributed_    *)
+(* peer` is the peer corvus credited the op to; `peer_live` records       *)
+(* whether that peer was alive AT op time (proc_alive shrinks, so the     *)
+(* liveness must be captured, not re-derived post-hoc).                    *)
+(***************************************************************************)
+ConnOpRecord == [conn : Conns, attributed_peer : Procs, peer_live : BOOLEAN]
+
 VARIABLES
     sessions,           \* SUBSET SessionRecord — currently-active sessions
     session_origin,     \* SUBSET OriginRecord — ghost append-only creation log
     proc_caps,          \* [Procs -> SUBSET ProcCaps]
     console_attached,   \* SUBSET Procs — joey-stamped console-login Procs
     completed_unwraps,  \* SUBSET UnwrapRecord — ghost log
-    completed_admins    \* SUBSET AdminRecord — ghost log
+    completed_admins,   \* SUBSET AdminRecord — ghost log
+    service_posted,     \* BOOLEAN — corvus has posted /srv/corvus (SYS_POST_SERVICE)
+    connections,        \* SUBSET ConnRecord — kernel-bound /srv connections (append-only)
+    corvus_accepted,    \* SUBSET Conns — connections corvus has SYS_SRV_ACCEPT'd
+    proc_alive,         \* SUBSET Procs — Procs that have not exited
+    completed_conn_ops  \* SUBSET ConnOpRecord — ghost log of identity-gated ops
 
-vars == <<sessions, session_origin, proc_caps, console_attached, completed_unwraps, completed_admins>>
+\* corevars is the P5-corvus-spec session state; connvars is the
+\* P5-corvus-srv connection-transport state. Each Next step advances
+\* exactly one layer and UNCHANGEs the other (see Next).
+corevars == <<sessions, session_origin, proc_caps, console_attached,
+              completed_unwraps, completed_admins>>
+connvars == <<service_posted, connections, corvus_accepted, proc_alive,
+              completed_conn_ops>>
+vars == <<sessions, session_origin, proc_caps, console_attached,
+          completed_unwraps, completed_admins, service_posted, connections,
+          corvus_accepted, proc_alive, completed_conn_ops>>
 
 TypeOk ==
     /\ sessions \subseteq SessionRecord
@@ -249,6 +335,11 @@ TypeOk ==
     /\ console_attached \subseteq Procs
     /\ completed_unwraps \subseteq UnwrapRecord
     /\ completed_admins \subseteq AdminRecord
+    /\ service_posted \in BOOLEAN
+    /\ connections \subseteq ConnRecord
+    /\ corvus_accepted \subseteq Conns
+    /\ proc_alive \subseteq Procs
+    /\ completed_conn_ops \subseteq ConnOpRecord
 
 (***************************************************************************)
 (* Init: no sessions, no origins, no proc caps, no console-attached Procs, *)
@@ -261,6 +352,11 @@ Init ==
     /\ console_attached = {}
     /\ completed_unwraps = {}
     /\ completed_admins = {}
+    /\ service_posted = FALSE
+    /\ connections = {}
+    /\ corvus_accepted = {}
+    /\ proc_alive = Procs
+    /\ completed_conn_ops = {}
 
 (***************************************************************************)
 (* MarkConsoleAttached(p) — joey spawns p through the console-login chain. *)
@@ -303,20 +399,23 @@ SessionClose(p) ==
     /\ UNCHANGED <<session_origin, proc_caps, console_attached, completed_unwraps, completed_admins>>
 
 (***************************************************************************)
-(* SessionTransfer(src, dst) — 9P RIGHT_TRANSFER of the session Spoor from*)
-(* src to dst. The src session is torn down; a derivative is created at   *)
-(* dst preserving bound_user (§6.3 audit F10 resolution). dst's proc_caps *)
-(* are dst's own — NOT inherited from src.                                *)
+(* SessionTransfer(src, dst) — the src session's bearer token (§6.4) is   *)
+(* presented from dst's connection. The src session is torn down; a       *)
+(* derivative is created at dst preserving creation_proc AND bound_user   *)
+(* (§6.3 audit F10 resolution). dst's proc_caps are dst's own — NOT       *)
+(* inherited from src.                                                     *)
 (*                                                                         *)
-(* Recording: a new session_origin entry is appended for dst, since the   *)
-(* (dst, bound_user) pair is a NEW active session record (origin from     *)
-(* dst's perspective is the moment of transfer). This is intentional —    *)
-(* C-3's invariant requires the active session match SOME origin for the  *)
-(* owner_proc, and the transfer is the legitimate origin point for dst's  *)
-(* session.                                                                *)
+(* session_origin is NOT extended: the derivative keeps src's             *)
+(* creation_proc, and the (creation_proc, bound_user) pair already has a  *)
+(* matching origin record from src's AuthSuccess. SessionUserImmutable    *)
+(* (C-3) checks the active session against that pair, so it survives the  *)
+(* transfer with no new origin row.                                        *)
 (*                                                                         *)
-(* Maps to the 9P session-handle transfer path; no direct corvus verb     *)
-(* (corvus observes the Spoor reopen with a new peer Proc identity).       *)
+(* The /srv connection Spoor is KObj_Srv — non-transferable (handles.tla):*)
+(* a session moves between Procs by its bearer token travelling in        *)
+(* request payloads, NOT by a 9P handle transfer of the connection.       *)
+(* corvus observes the same token presented on a different connection     *)
+(* whose kernel-stamped peer (§6.2) is the new Proc.                       *)
 (***************************************************************************)
 SessionTransfer(src, dst) ==
     /\ src # dst
@@ -484,8 +583,8 @@ BuggyElevateWithoutConsole(p) ==
 
 (***************************************************************************)
 (* BuggyTransferRebind(src, dst, new_u) — C-3 violation through transfer. *)
-(* The 9P session-handle transfer path is supposed to PRESERVE bound_user *)
-(* (the new dst Proc inherits the same user-identity binding). The bug   *)
+(* The session-transfer path (the bearer token, §6.3) must PRESERVE       *)
+(* bound_user — the dst Proc inherits src's user-identity binding. The bug*)
 (* re-binds: the derivative session at dst has bound_user = new_u != src's*)
 (* original bound_user.                                                    *)
 (*                                                                         *)
@@ -536,21 +635,152 @@ BuggyTransferRebind(src, dst, new_u) ==
     /\ UNCHANGED <<session_origin, proc_caps, console_attached, completed_unwraps, completed_admins>>
 
 (***************************************************************************)
-(* Next — disjunction of all actions.                                      *)
+(* ================ CONNECTION-LAYER ACTIONS (P5-corvus-srv) ============= *)
+(***************************************************************************)
+
+(***************************************************************************)
+(* PeerOf(cn) — the kernel-stamped peer Proc of connection slot cn.        *)
+(* Total only where cn has a connection record; every caller establishes   *)
+(* (\E c \in connections : c.conn = cn) first. `connections` is append-    *)
+(* only and conn-ids are unique, so PeerOf is a stable function.           *)
+(***************************************************************************)
+PeerOf(cn) == (CHOOSE c \in connections : c.conn = cn).peer
+
+(***************************************************************************)
+(* PostService — corvus registers /srv/corvus (SYS_POST_SERVICE). One-     *)
+(* shot; the kernel binds connections only to a posted service. Maps to    *)
+(* corvus's startup SYS_POST_SERVICE("corvus") call (CORVUS-DESIGN §6).    *)
+(***************************************************************************)
+PostService ==
+    /\ ~service_posted
+    /\ service_posted' = TRUE
+    /\ UNCHANGED <<connections, corvus_accepted, proc_alive, completed_conn_ops>>
+
+(***************************************************************************)
+(* SrvBind(cn, p) — the kernel mints a connection for client Proc p when   *)
+(* p opens /srv/corvus. The kernel stamps the peer identity; corvus has    *)
+(* no part in it (C-23). One connection per Proc; conn-slot ids unique.    *)
+(* `connections` is append-only — KObj_Srv non-transferability means a     *)
+(* connection's (conn, peer) binding never changes once minted.            *)
+(***************************************************************************)
+SrvBind(cn, p) ==
+    /\ service_posted
+    /\ p \in proc_alive
+    /\ ~(\E c \in connections : c.conn = cn)
+    /\ ~(\E c \in connections : c.peer = p)
+    /\ connections' = connections \cup {[conn |-> cn, peer |-> p]}
+    /\ UNCHANGED <<service_posted, corvus_accepted, proc_alive, completed_conn_ops>>
+
+(***************************************************************************)
+(* SrvAccept(cn) — corvus accepts a kernel-bound connection                *)
+(* (SYS_SRV_ACCEPT). corvus can accept only a connection the kernel        *)
+(* already bound — it never mints transport itself (C-23).                 *)
+(***************************************************************************)
+SrvAccept(cn) ==
+    /\ \E c \in connections : c.conn = cn
+    /\ cn \notin corvus_accepted
+    /\ corvus_accepted' = corvus_accepted \cup {cn}
+    /\ UNCHANGED <<service_posted, connections, proc_alive, completed_conn_ops>>
+
+(***************************************************************************)
+(* SrvPeerOp(cn) — corvus performs an identity-gated operation on an       *)
+(* accepted connection. It resolves the peer FRESH via SYS_SRV_PEER        *)
+(* (modeled as reading `connections` — kernel ground truth) every time;    *)
+(* it never caches identity on fid state (C-22). SYS_SRV_PEER fail-closes  *)
+(* for a dead peer, so the op requires PeerOf(cn) \in proc_alive.          *)
+(***************************************************************************)
+SrvPeerOp(cn) ==
+    /\ cn \in corvus_accepted
+    /\ PeerOf(cn) \in proc_alive
+    /\ completed_conn_ops' = completed_conn_ops
+           \cup {[conn |-> cn, attributed_peer |-> PeerOf(cn), peer_live |-> TRUE]}
+    /\ UNCHANGED <<service_posted, connections, corvus_accepted, proc_alive>>
+
+(***************************************************************************)
+(* ProcExit(p) — client Proc p exits. proc_alive shrinks. The connection   *)
+(* record persists (the kernel's connection teardown is a separate, later  *)
+(* event) — the window between exit and teardown is exactly where the      *)
+(* dead-Proc-stale bug can bite.                                           *)
+(***************************************************************************)
+ProcExit(p) ==
+    /\ p \in proc_alive
+    /\ proc_alive' = proc_alive \ {p}
+    /\ UNCHANGED <<service_posted, connections, corvus_accepted, completed_conn_ops>>
+
+(***************************************************************************)
+(* ============== CONNECTION-LAYER BUG CLASSES (P5-corvus-srv) =========== *)
+(***************************************************************************)
+
+(***************************************************************************)
+(* BuggyIdentityCachedOnFid(cn1, cn2) — C-22 violation. corvus performs an *)
+(* op on connection cn1 but credits it to cn2's peer — it used an identity *)
+(* CACHED on its own fid state for a different fid rather than re-querying *)
+(* SYS_SRV_PEER(cn1). Real-world analogue: corvus keying peer identity off *)
+(* a 9P fid it walked, then reusing the cache for an unrelated request.    *)
+(*                                                                         *)
+(* The op is credited to the wrong Proc; if cn2's peer owns a dataset      *)
+(* cn1's peer does not, that is a cross-peer authorization. Caught by      *)
+(* ConnOpIdentityIsKernelTruth.                                            *)
+(***************************************************************************)
+BuggyIdentityCachedOnFid(cn1, cn2) ==
+    /\ BUGGY_IDENTITY_CACHED_ON_FID
+    /\ cn1 # cn2
+    /\ cn1 \in corvus_accepted
+    /\ \E c \in connections : c.conn = cn1
+    /\ \E c \in connections : c.conn = cn2
+    /\ PeerOf(cn1) # PeerOf(cn2)
+    /\ completed_conn_ops' = completed_conn_ops
+           \cup {[conn |-> cn1,
+                  attributed_peer |-> PeerOf(cn2),
+                  peer_live |-> PeerOf(cn2) \in proc_alive]}
+    /\ UNCHANGED <<service_posted, connections, corvus_accepted, proc_alive>>
+
+(***************************************************************************)
+(* BuggyDeadProcStale(cn) — C-22 violation (kernel side). corvus performs  *)
+(* an op on connection cn whose peer Proc has EXITED. The kernel's         *)
+(* SYS_SRV_PEER dead-Proc guard should fail-close; the bug returns the     *)
+(* exited peer's last-known (stale) identity, so corvus authorizes the op  *)
+(* against a dead peer. Real-world analogue: SYS_SRV_PEER reading a        *)
+(* zombie / reaped Proc's cap snapshot instead of fail-closing.            *)
+(*                                                                         *)
+(* peer_live is recorded FALSE — the honest at-op-time fact. Caught by     *)
+(* ConnOpPeerWasLive.                                                       *)
+(***************************************************************************)
+BuggyDeadProcStale(cn) ==
+    /\ BUGGY_DEAD_PROC_STALE
+    /\ cn \in corvus_accepted
+    /\ PeerOf(cn) \notin proc_alive
+    /\ completed_conn_ops' = completed_conn_ops
+           \cup {[conn |-> cn, attributed_peer |-> PeerOf(cn), peer_live |-> FALSE]}
+    /\ UNCHANGED <<service_posted, connections, corvus_accepted, proc_alive>>
+
+(***************************************************************************)
+(* Next — disjunction of all actions. The session layer (corevars) and the *)
+(* connection layer (connvars) are orthogonal: each step advances exactly  *)
+(* one layer and UNCHANGEs the other.                                      *)
 (***************************************************************************)
 Next ==
-    \/ \E p \in Procs : MarkConsoleAttached(p)
-    \/ \E p \in Procs : \E u \in Users : AuthSuccess(p, u)
-    \/ \E p \in Procs : SessionClose(p)
-    \/ \E src \in Procs : \E dst \in Procs : SessionTransfer(src, dst)
-    \/ \E p \in Procs : AdminElevate(p)
-    \/ \E p \in Procs : \E d \in Datasets : Unwrap(p, d)
-    \/ \E p \in Procs : AdminVerb(p)
-    \/ \E p \in Procs : \E d \in Datasets : BuggyUnwrapCrossUser(p, d)
-    \/ \E p \in Procs : \E u \in Users : BuggyAuthBindingMutate(p, u)
-    \/ \E p \in Procs : BuggyAdminWithoutProcCap(p)
-    \/ \E p \in Procs : BuggyElevateWithoutConsole(p)
-    \/ \E src \in Procs : \E dst \in Procs : \E u \in Users : BuggyTransferRebind(src, dst, u)
+    \/ /\ \/ \E p \in Procs : MarkConsoleAttached(p)
+          \/ \E p \in Procs : \E u \in Users : AuthSuccess(p, u)
+          \/ \E p \in Procs : SessionClose(p)
+          \/ \E src \in Procs : \E dst \in Procs : SessionTransfer(src, dst)
+          \/ \E p \in Procs : AdminElevate(p)
+          \/ \E p \in Procs : \E d \in Datasets : Unwrap(p, d)
+          \/ \E p \in Procs : AdminVerb(p)
+          \/ \E p \in Procs : \E d \in Datasets : BuggyUnwrapCrossUser(p, d)
+          \/ \E p \in Procs : \E u \in Users : BuggyAuthBindingMutate(p, u)
+          \/ \E p \in Procs : BuggyAdminWithoutProcCap(p)
+          \/ \E p \in Procs : BuggyElevateWithoutConsole(p)
+          \/ \E src \in Procs : \E dst \in Procs : \E u \in Users : BuggyTransferRebind(src, dst, u)
+       /\ UNCHANGED connvars
+    \/ /\ \/ PostService
+          \/ \E cn \in Conns : \E p \in Procs : SrvBind(cn, p)
+          \/ \E cn \in Conns : SrvAccept(cn)
+          \/ \E cn \in Conns : SrvPeerOp(cn)
+          \/ \E p \in Procs : ProcExit(p)
+          \/ \E cn1 \in Conns : \E cn2 \in Conns : BuggyIdentityCachedOnFid(cn1, cn2)
+          \/ \E cn \in Conns : BuggyDeadProcStale(cn)
+       /\ UNCHANGED corevars
 
 Spec == Init /\ [][Next]_vars
 
@@ -564,6 +794,7 @@ StateConstraint ==
     /\ Cardinality(session_origin) <= 3
     /\ Cardinality(completed_unwraps) <= 3
     /\ Cardinality(completed_admins) <= 3
+    /\ Cardinality(completed_conn_ops) <= 3
 
 (***************************************************************************)
 (* ============================== INVARIANTS ============================== *)
@@ -644,11 +875,61 @@ HostownerRequiresConsole ==
     \A p \in Procs :
         (CapHostowner \in proc_caps[p]) => p \in console_attached
 
+(***************************************************************************)
+(* ConnOpIdentityIsKernelTruth — C-22. Every identity-gated operation      *)
+(* corvus performed on a connection credited it to the peer Proc the       *)
+(* KERNEL bound for that connection — never a client-sourced value, never  *)
+(* a value cached on corvus's own fid state.                               *)
+(*                                                                         *)
+(* `connections` is append-only with unique conn-ids and an immutable peer *)
+(* per connection (KObj_Srv is non-transferable — handles.tla              *)
+(* SrvHandlesAtOrigin), so the (conn, peer) binding is stable and this     *)
+(* post-hoc check over the ghost log is sound.                             *)
+(*                                                                         *)
+(* BuggyIdentityCachedOnFid credits an op on cn1 to cn2's peer: no         *)
+(* connection record pairs cn1 with that peer — violated.                  *)
+(***************************************************************************)
+ConnOpIdentityIsKernelTruth ==
+    \A o \in completed_conn_ops :
+        \E c \in connections :
+            /\ c.conn = o.conn
+            /\ c.peer = o.attributed_peer
+
+(***************************************************************************)
+(* ConnOpPeerWasLive — C-22. Every identity-gated operation was authorized *)
+(* while its peer Proc was alive. SYS_SRV_PEER fail-closes for an exited / *)
+(* zombie / reaped peer (the kernel's dead-Proc guard); a dead peer must   *)
+(* never authorize anything.                                               *)
+(*                                                                         *)
+(* peer_live is captured at op time — proc_alive shrinks, so a post-hoc    *)
+(* check of the current proc_alive would false-positive on a legitimate    *)
+(* op whose peer later exited. BuggyDeadProcStale records peer_live=FALSE  *)
+(* (the kernel returned a stale identity for an exited peer) — violated.   *)
+(***************************************************************************)
+ConnOpPeerWasLive ==
+    \A o \in completed_conn_ops : o.peer_live
+
+(***************************************************************************)
+(* ConnTransportKernelOwned — C-23. Every connection corvus serves was     *)
+(* created by the kernel (SrvBind). corvus's own actions (SrvAccept,       *)
+(* SrvPeerOp) never mint a connection — the kernel is corvus's sole 9P     *)
+(* client and owns all transport. Proven structurally: `connections` is    *)
+(* extended only by SrvBind, and SrvAccept gates on an existing kernel-    *)
+(* bound connection. handles.tla's KObj_Srv non-transferability pins the   *)
+(* companion fact that the transport is never in a handle table.           *)
+(***************************************************************************)
+ConnTransportKernelOwned ==
+    \A cn \in corvus_accepted :
+        \E c \in connections : c.conn = cn
+
 Invariants ==
     /\ TypeOk
     /\ SessionUserImmutable
     /\ UnwrapOwnerOnly
     /\ AdminRequiresProcCap
     /\ HostownerRequiresConsole
+    /\ ConnOpIdentityIsKernelTruth
+    /\ ConnOpPeerWasLive
+    /\ ConnTransportKernelOwned
 
 ====

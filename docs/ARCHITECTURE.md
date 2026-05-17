@@ -843,11 +843,14 @@ The kernel exposes the Plan 9 idiom on top of EEVDF:
 void sched(void);                  /* yield to scheduler */
 void ready(struct Thread *t);      /* mark thread runnable */
 void sleep(struct Rendez *r, int (*cond)(void *), void *arg);  /* wait */
+int  tsleep(struct Rendez *r, int (*cond)(void *), void *arg, uint64_t deadline_ns);  /* wait, deadline-bounded */
 int  wakeup(struct Rendez *r);     /* wake one waiter */
 void rendezvous(void *tag, void *value);  /* cross-thread synchronous handoff */
 ```
 
 These are familiar to anyone who's read Plan 9 kernel source. Underneath, they map to EEVDF + wait queue + IPI machinery.
+
+`tsleep` is `sleep` with a deadline: the waiter wakes on `wakeup`, on its condition becoming true, or when the deadline passes — the return value distinguishes a timeout from a condition wake. It is the primitive behind every bounded kernel wait: a `/srv` client blocked on a possibly-hung 9P server (CORVUS-DESIGN.md §6.2), `poll` / `select` timeouts, `futex` with a timeout. Plain `sleep` is `tsleep` with no deadline. Lands at P5-tsleep.
 
 ### 8.9 Open design questions
 
@@ -1020,6 +1023,8 @@ This is the same shape as MINIX 3's reincarnation server. Implemented as a users
 │   ├── ipifc/
 │   ├── tcp/
 │   └── udp/
+├── srv/                 ← service registry (devsrv kernel Dev; Plan 9 #s)
+│   └── corvus/          ← corvus key agent's 9P server (CORVUS-DESIGN.md §6)
 ├── ctl/                 ← kernel admin (kernel Dev)
 │   ├── procs            ← list of processes
 │   ├── memory           ← memory stats
@@ -1036,6 +1041,8 @@ This is the same shape as MINIX 3's reincarnation server. Implemented as a users
 ├── run/                 ← tmpfs (fast volatile state)
 └── (root from Stratum)
 ```
+
+`/srv` is served by **`devsrv`**, a kernel `Dev` distinct from `dev9p`: a userspace 9P server registers a name with `SYS_POST_SERVICE` (§11.2c) and the kernel mediates per-connection client access, stamping each connection with the peer Proc's kernel identity. A `/srv/<name>` connection Spoor is a `KObj_Srv` handle (§18.2), non-transferable — so a connection's peer identity cannot be forged by transferring the handle. `corvus` (CORVUS-DESIGN.md §6) is the v1.0 consumer; the separate Dev keeps `KObj_Srv` structural.
 
 ### 9.5 Interactions with the per-process territory
 
@@ -1290,6 +1297,18 @@ Required by `corvus` and per-user `stratumd` at startup; land at P5-corvus-sysca
 | `set_traceable(0)` | Refuse any future debug-Spoor attach to this Proc. One-way (no re-enable). |
 | `explicit_bzero(ptr, len)` | Compiler-barrier'd memset that the optimizer can't elide. Userspace can call its own; this syscall is the libc-portable equivalent for non-musl callers. |
 | `getrandom(buf, len, flags)` | Read from kernel CSPRNG. Blocks until seeded; non-blocking via `GRND_NONBLOCK` flag. Caller must hold `CAP_CSPRNG_READ`. |
+
+### 11.2c Service-registry syscalls (v1.0, per CORVUS-DESIGN.md §6)
+
+The `/srv` transport (`devsrv`, §9.4) by which a userspace 9P server — `corvus` at v1.0 — is reached per-connection with a kernel-stamped peer identity. Land at P5-corvus-srv-impl-a.
+
+| Syscall | Description |
+|---|---|
+| `post_service(name) → service_handle` | Register the caller as the 9P server for `/srv/<name>`. The kernel creates and owns all transport. Posting/rebinding a name is gated on a one-way joey-stamped `proc_flags` bit; on server death the name is tombstoned, not freed. |
+| `srv_accept(service_handle) → connection_handle` | Block until a client opens `/srv/<name>`; receive the server end of one fresh kernel-minted per-client connection. Bounded accept queue. |
+| `srv_peer(connection_handle) → {stripes, console, caps}` | Read the connection's kernel-stamped peer identity: the immutable `stripes` tag + console-attachment bit (captured by value at bind), and the live `caps` (read under the process-table lock, fail-closed for an exited peer). Gated to the service's poster. |
+
+`stripes` is a `u64` per-Proc identity tag — a monotonic counter assigned fresh at `proc_alloc`, immutable for the Proc's life, `0` reserved as a fail-closed sentinel. A `/srv` connection Spoor is a `KObj_Srv` handle (§18.2), non-transferable.
 
 ### 11.3 Handle syscalls
 
@@ -2012,6 +2031,7 @@ Every resource the kernel manages is a **kernel object**. Kernel objects are acc
 | `KObj_IRQ` | The right to receive a specific interrupt | **No (typed)** |
 | `KObj_DMA` | A DMA-capable physically contiguous buffer | **No (typed)** |
 | `KObj_Interrupt` | An eventfd-like fd that fires on IRQ delivery | **No (typed)** |
+| `KObj_Srv` | A `/srv/<name>` per-connection channel to a userspace 9P server | **No (typed)** |
 
 Handles carry **rights** — a bitmask of what the holder can do:
 
@@ -2041,7 +2061,7 @@ long handle_transfer_via_9p(struct Spoor *9p_chan, int handle_idx) {
     case KObj_Spoor:
         if (!(h->rights & RIGHT_TRANSFER)) return -EPERM;
         return do_transfer_via_9p(9p_chan, h);
-    /* No code path for KObj_MMIO, KObj_IRQ, KObj_DMA, KObj_Interrupt. */
+    /* No code path for KObj_MMIO, KObj_IRQ, KObj_DMA, KObj_Interrupt, KObj_Srv. */
     default:
         panic("transfer of non-transferable handle type %d", h->type);
     }
@@ -2101,7 +2121,7 @@ None at Gate 3.
 
 ### 18.8 Summary
 
-Eight kernel object types, four transferable, four non-transferable. Subordination invariant: transfer only via 9P; hardware handles never. Typed enforcement at the syscall site.
+Nine kernel object types, four transferable, five non-transferable. Subordination invariant: transfer only via 9P; hardware handles and `/srv` connection handles never. Typed enforcement at the syscall site.
 
 ---
 
@@ -2930,7 +2950,7 @@ The complete list of load-bearing invariants. Source for `VISION.md §8`. Each m
 
 These are the project's promises. Every one has a spec or a runtime check or a compile-time assertion. None are policy-only.
 
-**Corvus invariants (C-1..C-21)** are enumerated separately in `CORVUS-DESIGN.md §9` — they govern the key agent's runtime + audit guarantees (mlock'd pages, session ownership monotonicity, audit log encryption, etc.). Cross-referenced here so the global invariant surface is discoverable; the canonical text lives in CORVUS-DESIGN.
+**Corvus invariants (C-1..C-23)** are enumerated separately in `CORVUS-DESIGN.md §9` — they govern the key agent's runtime + audit guarantees (mlock'd pages, session ownership monotonicity, audit log encryption, the kernel-stamped per-connection `/srv` transport identity, etc.). Cross-referenced here so the global invariant surface is discoverable; the canonical text lives in CORVUS-DESIGN.
 
 ---
 
