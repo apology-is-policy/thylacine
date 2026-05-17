@@ -51,6 +51,7 @@ void test_tsleep_no_deadline_degrades(void);
 void test_tsleep_past_deadline_immediate(void);
 void test_tsleep_woken_before_deadline(void);
 void test_tsleep_timeout_via_tick(void);
+void test_tsleep_herd_timeout(void);
 void test_smp_bringup_smoke(void);
 void test_smp_exception_stack_smoke(void);
 void test_smp_per_cpu_idle_smoke(void);
@@ -523,6 +524,9 @@ struct test_case g_tests[] = {
                                                                            false, NULL },
     { "tsleep.timeout_via_tick",
                                        test_tsleep_timeout_via_tick,
+                                                                           false, NULL },
+    { "tsleep.herd_timeout",
+                                       test_tsleep_herd_timeout,
                                                                            false, NULL },
     { "smp.bringup_smoke",             test_smp_bringup_smoke,             false, NULL },
     { "smp.exception_stack_smoke",     test_smp_exception_stack_smoke,     false, NULL },

@@ -248,3 +248,71 @@ void test_tsleep_timeout_via_tick(void) {
     TEST_EXPECT_EQ(sched_runnable_count(), 0u,
         "run tree empty after consumer freed");
 }
+
+// ---------------------------------------------------------------------------
+// tsleep.herd_timeout
+// ---------------------------------------------------------------------------
+//
+// Several consumers, each in a deadlined tsleep on its own Rendez with a
+// common deadline, all time out on the same tick — exercising
+// timerwait_tick's one-at-a-time wake loop across multiple iterations
+// (P5-tsleep-scale / audit F6: the scan wakes a herd one thread per
+// g_timerwait.lock acquisition, not all under one hold).
+
+#define TSL_HERD_N 3
+
+static struct Rendez g_tsl_herd_rendez[TSL_HERD_N];
+static volatile int  g_tsl_herd_ret[TSL_HERD_N];
+static volatile u32  g_tsl_herd_done;
+static u64           g_tsl_herd_deadline;
+
+static void tsl_herd_consumer(void *arg) {
+    unsigned i = (unsigned)(uintptr_t)arg;
+    g_tsl_herd_ret[i] = tsleep(&g_tsl_herd_rendez[i], tsl_cond_false, NULL,
+                               g_tsl_herd_deadline);
+    __atomic_fetch_add(&g_tsl_herd_done, 1u, __ATOMIC_RELAXED);
+    for (;;) sched();                                  // park safely
+}
+
+void test_tsleep_herd_timeout(void) {
+    g_tsl_herd_done = 0;
+    for (unsigned i = 0; i < TSL_HERD_N; i++) {
+        rendez_init(&g_tsl_herd_rendez[i]);
+        g_tsl_herd_ret[i] = -1;
+    }
+    g_tsl_herd_deadline = timer_now_ns() + 10ull * 1000000ull;   // +10 ms
+
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u,
+        "run tree must be empty at test entry");
+
+    struct Thread *c[TSL_HERD_N];
+    for (unsigned i = 0; i < TSL_HERD_N; i++) {
+        c[i] = thread_create_with_arg(kproc(), tsl_herd_consumer,
+                                      (void *)(uintptr_t)i);
+        TEST_ASSERT(c[i] != NULL,
+            "thread_create_with_arg(herd consumer) failed");
+        ready(c[i]);
+    }
+
+    // Yield until every consumer has run, tsleeped, been timed out by
+    // timerwait_tick once the common deadline passes, and run to
+    // completion. The cap turns a stuck herd into a clean test failure.
+    for (u64 spin = 0;
+         spin < 100000000ull && g_tsl_herd_done < (u32)TSL_HERD_N;
+         spin++) {
+        sched();
+    }
+
+    TEST_EXPECT_EQ(g_tsl_herd_done, (u32)TSL_HERD_N,
+        "every herd consumer must have timed out and finished");
+    for (unsigned i = 0; i < TSL_HERD_N; i++) {
+        TEST_EXPECT_EQ(g_tsl_herd_ret[i], TSLEEP_TIMEDOUT,
+            "each herd consumer's tsleep must return TSLEEP_TIMEDOUT");
+    }
+
+    for (unsigned i = 0; i < TSL_HERD_N; i++) {
+        thread_free(c[i]);
+    }
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u,
+        "run tree empty after the herd is freed");
+}

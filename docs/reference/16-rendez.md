@@ -347,11 +347,13 @@ The shared wake step is `wake_rendez_waiter(r, t, timed_out)`, which runs under 
 
 ### `timerwait_tick` — the scan
 
-Runs from `sched_tick()` on every timer fire, on every CPU, in IRQ context (IRQs already masked). It holds `g_timerwait.lock` across the whole scan, so no `wakeup` can run concurrently — every thread still on the list is genuinely SLEEPING on its Rendez. For each thread whose deadline has passed it takes the thread's `r->lock`, re-validates `state == SLEEPING && r->waiter == t` (defence in depth), `timerwait_unlink`s it, and calls `wake_rendez_waiter(r, t, true)`. The successor pointer is captured before the unlink.
+Runs from `sched_tick()` on every timer fire, on every CPU, in IRQ context (IRQs already masked). It wakes expired sleepers **one at a time**: each iteration acquires `g_timerwait.lock`, rescans from the list head for one thread whose deadline has passed (and that is not `on_cpu`), unlinks it and — under that thread's `r->lock` — wakes it via `wake_rendez_waiter`, then releases `g_timerwait.lock` before the next iteration. `now` is sampled once, so the set of expired threads is fixed and the loop terminates (each iteration unlinks exactly one).
 
-A thread that is expired but still mid-context-switch (`on_cpu` set) is **skipped** — left linked — rather than spun on: an unbounded busy-wait in the timer IRQ handler is a hazard. The next tick, by which `on_cpu` is surely clear, expires it — within the 1 ms granularity above.
+Each thread is still unlinked and woken **atomically**: `g_timerwait.lock` and `r->lock` are held continuously from finding the thread through its wake, so no `wakeup` can interleave a given thread's wake and the thread cannot re-enter `tsleep` mid-wake — there is no ABA window. But the global lock is **not** held across a whole herd of wakes: a burst of simultaneous timeouts is drained one `g_timerwait.lock` acquisition per thread, so it cannot stall other CPUs' ticks behind one long hold. The selected thread is `timerwait_unlink`'d unconditionally — even on the (impossible, since the lock is held throughout) `state == SLEEPING && r->waiter == t` re-check miss — so the rescan-from-head cannot re-select it and spin.
 
-Every CPU's tick scans the one global list; whichever CPU's `timerwait_tick` wins the lock wakes the expired threads, the others find them already unlinked. The scan holds `g_timerwait.lock` across the per-thread `ready()`, so a thundering herd of simultaneous timeouts briefly stalls other CPUs' ticks; narrowing that — a generation-counted batch, or per-CPU sharding of the list — is a tracked follow-up (it changes the concurrency structure and so wants its own spec pass). The redundant per-CPU scans are cheap (a short list).
+A thread that is expired but still mid-context-switch (`on_cpu` set) is not selected — left linked, woken the next tick — so the wake never spins in the timer IRQ handler.
+
+The rescan-from-head is O(n²) for n threads expiring on one tick (n bounded by the count of live deadlined sleepers — small; and the loop releases the global lock between iterations, so other CPUs interleave and can co-drain). Per-CPU sharding of the list would make it O(n) and remove the already-cheap redundant per-CPU empty-list scan — a possible future optimization, not a correctness need.
 
 ### Data structures — `struct Thread` extension
 
@@ -424,7 +426,7 @@ TLC posture: `tsleep.cfg` / `tsleep_nodeadline.cfg` / `tsleep_liveness.cfg` clea
 
 1. **`cond` runs under two locks.** `tsleep` evaluates `cond` holding both `g_timerwait.lock` and `r->lock`. A slow `cond` holds the global lock longer — keep it a quick predicate.
 2. **`wakeup` now takes a global lock.** Every `wakeup` — including for plain `sleep` waiters — acquires `g_timerwait.lock`, held only for the timer-wait unlink (a few pointer writes); the wake itself runs under `r->lock`. Per-CPU sharding of the timer-wait list is the future optimization if contention is ever measured.
-3. **All CPUs scan every tick; a timeout herd stalls ticks.** `timerwait_tick` runs on each CPU's tick against the one global list (redundant but cheap), and holds `g_timerwait.lock` across the per-thread `ready()` — so many threads timing out on the same tick briefly stalls other CPUs' ticks. A generation-counted batch or per-CPU sharding addresses both; tracked as a follow-up.
+3. **All CPUs scan every tick.** `timerwait_tick` runs on each CPU's tick against the one global list. A herd of simultaneous timeouts is drained one thread per `g_timerwait.lock` acquisition (the lock is released between threads), so it does not stall other CPUs' ticks; an empty-list scan is O(1) and a non-empty list is co-drained by whichever CPUs tick. The rescan-from-head is O(n²) in the per-tick herd size — bounded and cheap. Per-CPU sharding of the list (O(n), no redundant scans) is a possible future optimization, not a correctness need.
 4. **1 ms granularity.** A deadline is observed at the next tick, so a `tsleep` may overshoot by up to one tick period. Fine for the hung-server backstop and for `poll`/`futex`; `tsleep` is not a high-resolution timer.
 
 ---

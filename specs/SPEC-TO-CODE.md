@@ -592,7 +592,7 @@ Spec action ↔ impl mapping:
 |---|---|---|
 | `Commit` | `kernel/sched.c::tsleep()` loop body | The cond-first-then-deadline evaluation + the enqueue (`timerwait_link` + `r->waiter` + `SLEEPING`). Both first entry and every resume. |
 | `Wakeup` | `kernel/sched.c::wakeup()` → `wake_rendez_waiter(…, false)` | `wakeup` does the `timerwait_unlink` under `g_timerwait.lock`, releases it, then `wake_rendez_waiter` runs the transition under `r->lock`. |
-| `Timeout` | `kernel/sched.c::timerwait_tick()` → `wake_rendez_waiter(…, true)` | The `sched_tick` scan: `timerwait_unlink` + the `state==SLEEPING && r->waiter==t` re-check + the wake. Skips an `on_cpu` thread (woken next tick). |
+| `Timeout` | `kernel/sched.c::timerwait_tick()` → `wake_rendez_waiter(…, true)` | The `sched_tick` scan, one thread per `g_timerwait.lock` acquisition (P5-tsleep-scale): `timerwait_unlink` + the `state==SLEEPING && r->waiter==t` re-check + the wake, all under `g_timerwait.lock` + `r->lock` held continuously. Skips an `on_cpu` thread (woken next tick). |
 | `SetCond` / `AdvanceTime` | the producer's cond mutation / the monotonic counter | Environment actions — not kernel code. |
 | `BuggyLazyUnlink` | (none — `wakeup` + `timerwait_tick` both `timerwait_unlink` before readying) | Eager unlink is the discipline; lazy removal is the bug. |
 | `BuggyTimeoutStale` | (none — `timerwait_tick` re-checks `state==SLEEPING && r->waiter==t`) | The scan re-validates before waking. |
@@ -615,6 +615,14 @@ lumps **two** impl mechanisms that `Commit` consults: `t->sleep_timedout`
 / spurious-resume path — no dedicated spec action; modeled implicitly by
 `AdvanceTime` + `Commit`). Both yield `TIMEDOUT` only with `cond` false,
 so `TimeoutSound` covers both.
+
+P5-tsleep-scale (audit F6) reworked `timerwait_tick` to wake a herd of
+expired sleepers one thread per `g_timerwait.lock` acquisition rather
+than under one hold. No spec change: each thread is still unlinked +
+woken atomically (both locks held continuously across its wake), which
+is exactly what the single-waiter `Timeout` action models — the
+inter-thread lock release is below the one-sleeper model's resolution
+and introduces no race (independent per-thread processing composes).
 
 cfgs run with `-deadlock`; `tsleep.tla`'s `Done` self-loop keeps a
 legitimate terminal state from tripping the deadlock check. See

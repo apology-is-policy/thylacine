@@ -1037,48 +1037,70 @@ int tsleep(struct Rendez *r, int (*cond)(void *arg), void *arg,
 // within sched() is prevented by sched()'s irq_save (set above).
 // ============================================================================
 
-// P5-tsleep: scan the timer-wait list and wake every thread whose
-// deadline has passed. Called from sched_tick() on every timer fire
-// (IRQ context, IRQs already masked). Maps to specs/tsleep.tla Timeout.
+// P5-tsleep: wake every thread whose deadline has passed. Called from
+// sched_tick() on every timer fire (IRQ context, IRQs already masked).
+// Maps to specs/tsleep.tla Timeout.
 //
-// g_timerwait.lock is held across the whole scan, so no wakeup() can run
-// concurrently (it needs the same lock) — every thread still on the list
-// is genuinely SLEEPING on its Rendez. The state re-check under r->lock
-// is defence in depth (tsleep.tla's correct Timeout re-validates), and
-// becomes load-bearing if g_timerwait.lock is ever sharded per-CPU.
+// Threads are woken ONE AT A TIME: each iteration acquires
+// g_timerwait.lock, finds one expired sleeper, unlinks + wakes it under
+// g_timerwait.lock + r->lock, then RELEASES g_timerwait.lock before the
+// next. Each thread is still unlinked + woken atomically — the two locks
+// are held continuously across its wake, so no wakeup can interleave a
+// given wake and there is no re-enqueue (ABA) window — but the global
+// lock is no longer held across a whole herd of wakes, so a burst of
+// simultaneous timeouts cannot stall other CPUs' ticks behind one long
+// hold (P5-tsleep audit F6). `now` is sampled once, so the set of
+// threads THIS invocation wakes is fixed and the loop terminates — each
+// iteration unlinks exactly one. (A thread whose deadline lapses later,
+// or that is skipped below for on_cpu, is caught by a later tick's
+// fresh `now`.)
+//
+// The rescan-from-head is O(n^2) in the per-tick herd size — bounded and
+// cheap for the cold deadlined-wait path; per-CPU sharding of the list
+// would make it O(n), a future optimization, not a correctness need.
+//
+// A thread that is expired but still mid-context-switch (on_cpu set) is
+// not selected — left linked, woken a later tick — so the wake never
+// spins in the timer IRQ handler.
 static void timerwait_tick(void) {
     u64 now = timer_get_counter();
 
-    spin_lock(&g_timerwait.lock);
-    struct Thread *t = g_timerwait.head;
-    while (t) {
-        // Capture the successor BEFORE timerwait_unlink clears t's links.
-        struct Thread *next = t->timerwait_next;
-        // Wake t iff its deadline has passed AND it is not still mid-
-        // switch-out. A thread with on_cpu set is skipped — left linked
-        // — rather than spun on: an unbounded spin in the timer IRQ
-        // handler is a hazard, and the next tick (on_cpu surely clear by
-        // then) expires it, within the 1 ms granularity tsleep already
-        // documents.
-        if (now >= t->sleep_deadline &&
-            !__atomic_load_n(&t->on_cpu, __ATOMIC_ACQUIRE)) {
-            struct Rendez *r = t->rendez_blocked_on;
-            // r is non-NULL for any thread on the list: tsleep sets
-            // rendez_blocked_on and links the thread in one
-            // g_timerwait.lock + r->lock section, and this scan holds
-            // g_timerwait.lock throughout. The guard is defensive.
-            if (r) {
-                spin_lock(&r->lock);
-                if (t->state == THREAD_SLEEPING && r->waiter == t) {
-                    timerwait_unlink(t);
-                    wake_rendez_waiter(r, t, true);
-                }
-                spin_unlock(&r->lock);
+    for (;;) {
+        spin_lock(&g_timerwait.lock);
+
+        struct Thread *t = NULL;
+        for (struct Thread *p = g_timerwait.head; p; p = p->timerwait_next) {
+            if (now >= p->sleep_deadline &&
+                !__atomic_load_n(&p->on_cpu, __ATOMIC_ACQUIRE)) {
+                t = p;
+                break;
             }
         }
-        t = next;
+        if (!t) {
+            spin_unlock(&g_timerwait.lock);
+            break;
+        }
+
+        // Unlink the selected thread unconditionally — even on the
+        // (impossible, since g_timerwait.lock is held continuously from
+        // the find through the wake) re-check miss — so the rescan from
+        // head cannot re-select it and spin. r is non-NULL for any
+        // listed thread: tsleep sets rendez_blocked_on and links it in
+        // one g_timerwait.lock + r->lock section.
+        struct Rendez *r = t->rendez_blocked_on;
+        if (r) {
+            spin_lock(&r->lock);
+            timerwait_unlink(t);
+            if (t->state == THREAD_SLEEPING && r->waiter == t) {
+                wake_rendez_waiter(r, t, true);
+            }
+            spin_unlock(&r->lock);
+        } else {
+            timerwait_unlink(t);
+        }
+
+        spin_unlock(&g_timerwait.lock);
     }
-    spin_unlock(&g_timerwait.lock);
 }
 
 void sched_tick(void) {
