@@ -148,6 +148,25 @@ u64 timer_get_ticks(void)   { return g_ticks; }
 u64 timer_get_counter(void) { return read_cntpct_el0(); }
 u32 timer_get_freq(void)    { return (u32)g_freq; }
 
+// P5-tsleep: counter <-> nanosecond conversion. Both use the split
+// (quotient, remainder) form: a flat `value * 1e9` would overflow u64
+// within ~5 minutes at a 62.5 MHz counter, but the whole-units term
+// stays small for centuries and the remainder term is bounded well
+// below 2^63 (the remainder is < g_freq or < 1e9, times the other
+// factor). g_freq == 0 only before timer_init — fail soft to 0.
+u64 timer_now_ns(void) {
+    if (g_freq == 0) return 0;
+    u64 cnt = read_cntpct_el0();
+    return (cnt / g_freq) * 1000000000ull
+         + (cnt % g_freq) * 1000000000ull / g_freq;
+}
+
+u64 timer_ns_to_counter(u64 ns) {
+    if (g_freq == 0) return 0;
+    return (ns / 1000000000ull) * g_freq
+         + (ns % 1000000000ull) * g_freq / 1000000000ull;
+}
+
 void timer_busy_wait_ticks(u64 n) {
     u64 target = g_ticks + n;
     while (g_ticks < target) {

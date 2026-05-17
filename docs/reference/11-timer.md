@@ -31,6 +31,8 @@ void timer_irq_handler(u32 intid, void *arg);
 u64  timer_get_ticks(void);          // monotonic; 0 before timer_init
 u64  timer_get_counter(void);        // CNTPCT_EL0 (architectural counter)
 u32  timer_get_freq(void);           // CNTFRQ_EL0 cached at init
+u64  timer_now_ns(void);             // monotonic time in ns (P5-tsleep)
+u64  timer_ns_to_counter(u64 ns);    // absolute ns → CNTPCT value (P5-tsleep)
 
 void timer_busy_wait_ticks(u64 n);   // WFI loop until N ticks elapsed
 ```
@@ -42,6 +44,8 @@ void timer_busy_wait_ticks(u64 n);   // WFI loop until N ticks elapsed
 `timer_get_ticks()` is monotonic and lock-free at v1.0 (single CPU; the increment-and-reload is non-preemptable since IRQs are masked at PSTATE during the handler). Phase 2 adds atomic semantics for SMP.
 
 `timer_get_counter()` reads `CNTPCT_EL0` directly — useful for fine-grained delta measurements (sub-millisecond) where the 1 ms tick granularity is too coarse.
+
+`timer_now_ns()` (P5-tsleep) converts the architectural counter to nanoseconds — the monotonic timebase for `tsleep` / `poll` / `futex` deadlines; a caller computes a deadline as `timer_now_ns() + timeout_ns`. `timer_ns_to_counter()` is the inverse, mapping an absolute-ns timestamp back to a `CNTPCT_EL0` value so a deadline check can compare raw counter reads without a per-call division. Both use the split (quotient, remainder) form — a flat `value × 1e9` would overflow `u64` within ~5 minutes at a 62.5 MHz counter — and both return 0 before `timer_init`.
 
 `timer_busy_wait_ticks(n)` is a WFI-based busy wait. The CPU sleeps until the next IRQ arrives (typically the next timer tick); the loop exits when `g_ticks` has advanced by at least `n`.
 
@@ -246,9 +250,9 @@ The timer fires unconditionally at 1 kHz. A modern Linux kernel suppresses the p
 
 It WFIs until the next IRQ arrives — fine on UP. On SMP it would block the CPU from work-stealing other threads. Phase 2's `msleep` is the proper API for "wait N ms"; `timer_busy_wait_ticks` survives at v1.0 only as a boot-path observation tool.
 
-### No high-resolution counter exported
+### Nanosecond conversion
 
-`timer_get_counter` returns `CNTPCT_EL0` directly. Conversion to nanoseconds (×1e9 / freq) isn't provided — callers do it themselves. Phase 2 will add a `timer_ns()` wrapper.
+`timer_get_counter` returns `CNTPCT_EL0` directly. P5-tsleep added `timer_now_ns()` (counter → ns) and `timer_ns_to_counter()` (ns → counter) for deadline arithmetic — see the Public API section. Both are overflow-safe (split quotient/remainder form). A flat `counter × 1e9 / freq` is NOT — it overflows `u64` within ~5 minutes at a 62.5 MHz counter; callers must use the provided helpers, not hand-roll the conversion.
 
 ### Reload race on IRQ entry
 

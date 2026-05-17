@@ -127,15 +127,29 @@ struct Thread {
     // release ordering so cross-CPU readers see the consistent
     // monotonic transitions.
     volatile bool      on_cpu;
+
+    // P5-tsleep: deadline-bounded Rendez sleep. A thread inside a
+    // deadlined tsleep() is linked onto the global timer-wait list
+    // (kernel/sched.c) via timerwait_{next,prev}; sched_tick() scans
+    // that list on every timer fire and wakes any thread whose
+    // sleep_deadline has passed. sleep_deadline is an architectural-
+    // counter value (timer_get_counter units, 0 = unset); sleep_timedout
+    // is set by the timeout wake so tsleep's resume can return
+    // TSLEEP_TIMEDOUT. All four fields are touched only under the
+    // timer-wait lock and r->lock; both links NULL when the thread is
+    // not in a deadlined tsleep. Modeled by specs/tsleep.tla.
+    struct Thread     *timerwait_next;
+    struct Thread     *timerwait_prev;
+    u64                sleep_deadline;
+    bool               sleep_timedout;
 };
 
-_Static_assert(sizeof(struct Thread) == 784,
-               "struct Thread size pinned at 784 bytes (P4-Ic5-FP: previous "
-               "232 bytes + 8 bytes pad before embedded Context (Context "
-               "needs 16-byte alignment for fp_v[]) + 536 bytes Context "
-               "delta (120 → 656) + 8 bytes trailing pad to keep struct "
-               "16-aligned = 232 + 8 + 536 + 8 = 784). Adding a field "
-               "grows the SLUB cache; update this assert deliberately "
+_Static_assert(sizeof(struct Thread) == 816,
+               "struct Thread size pinned at 816 bytes (was 784; P5-tsleep "
+               "adds the timer-wait fields: timerwait_next + timerwait_prev "
+               "(2 x 8) + sleep_deadline (8) + sleep_timedout (1) + 7 bytes "
+               "pad to keep the struct 16-aligned = +32 = 816). Adding a "
+               "field grows the SLUB cache; update this assert deliberately "
                "so the change is intentional.");
 _Static_assert(__builtin_offsetof(struct Thread, magic) == 0,
                "magic must be at offset 0 (P2-A audit R4 F42)");

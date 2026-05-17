@@ -48,6 +48,7 @@ set(KERNEL_SRCS
     test/test_fp.c
     test/test_sched.c
     test/test_rendez.c
+    test/test_tsleep.c
     test/test_smp.c
     test/test_proc.c
     test/test_territory.c

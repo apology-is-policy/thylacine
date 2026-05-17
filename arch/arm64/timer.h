@@ -61,6 +61,24 @@ u64 timer_get_counter(void);
 // Read CNTFRQ_EL0 (counter frequency in Hz). Cached after timer_init.
 u32 timer_get_freq(void);
 
+// P5-tsleep: current monotonic time in nanoseconds, derived from the
+// architectural counter (CNTPCT_EL0). The timebase for tsleep / poll /
+// futex deadlines — a caller computes its deadline as
+// `timer_now_ns() + timeout_ns`. Returns 0 before timer_init runs.
+u64 timer_now_ns(void);
+
+// P5-tsleep: convert an absolute timer_now_ns nanosecond timestamp to
+// an architectural-counter value, comparable against
+// timer_get_counter(). tsleep stores the converted deadline so the
+// scheduler-tick scan compares raw counter values (no per-tick
+// division). Returns 0 before timer_init runs.
+//
+// Exact while (ns / 1e9) * CNTFRQ stays within u64 — at a 62.5 MHz
+// counter that is the entire u64 ns range; only a hypothetical counter
+// above ~1 GHz could overflow for a near-UINT64_MAX ns and wrap. v1.0
+// targets (QEMU virt, Pi 5) stay well within range.
+u64 timer_ns_to_counter(u64 ns);
+
 // Spin-wait until at least N ticks have elapsed. Used at boot to
 // observe the timer firing before printing the tick count. WFI inside
 // the loop so the CPU sleeps until the next IRQ rather than spin-hot.

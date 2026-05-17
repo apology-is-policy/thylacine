@@ -268,7 +268,7 @@ Phase 5 measured numbers go here when fuzz/stress harness lands.
 
 Implemented: P2-Bb at `<commit-pending>`. Stubbed: nothing. Deferred:
 - **Multi-waiter wait queues** — Phase 5 (poll + futex). Single-waiter Rendez sufficient for v1.0 internal kernel uses (timer expiry, simple producer/consumer).
-- **Timeout (`sleep_timeout`)** — when the timer wheel lands at P2-C / Phase 5; currently `sleep` is unbounded.
+- **Timeout** — landed at P5-tsleep as `tsleep` (deadline-bounded sleep); see the `tsleep` section above. Plain `sleep` remains unbounded by design.
 - **Interruptible sleep** — when notes (Plan 9 signals) land at Phase 5.
 
 ---
@@ -286,6 +286,146 @@ Implemented: P2-Bb at `<commit-pending>`. Stubbed: nothing. Deferred:
 5. **SMP race not yet closed (P2-Bb is UP-only).** Between `spin_unlock(&r->lock)` and entering `sched()`, on SMP a peer wakeup can fire on another CPU, transition `current` to RUNNABLE, and insert it into a runqueue. When `current` then enters `sched()`, `pick_next` may pull `current` (now RUNNABLE) out of its own runqueue. The sched() refactor's `prev == next` check (re-insert + return-without-switch) defends against this; the proper fix is the `finish_task_switch` pattern at P2-C where the runqueue lock is dropped only after the context switch completes.
 
 6. **`sched()` block-path with no runnable peer extincts.** The deadlock detection assumes some other thread will become runnable while `current` is sleeping. At v1.0 P2-Bb single-CPU UP this is enforced — every kernel thread eventually yields. P2-C makes idle-WFI the legitimate "no runnable" path; the extinction path then narrows to genuine deadlocks.
+
+---
+
+## tsleep — deadline-bounded sleep (P5-tsleep)
+
+`sleep` is unbounded: a thread blocked on a condition that never becomes true, with a `wakeup` that never fires, sleeps forever. `tsleep` adds a deadline — the wait also ends when monotonic time reaches a caller-supplied absolute timestamp, and the return value says which happened. It is the primitive behind every bounded kernel wait: a `/srv` client blocked on a possibly-hung 9P server (`CORVUS-DESIGN.md §6.2`), and the Phase-5 `poll` / `futex` timeouts.
+
+Scope: `kernel/sched.c` (the `g_timerwait` list + `timerwait_*` helpers + `wake_rendez_waiter` + `tsleep` + `timerwait_tick` + the `sched_tick` hook + the rewritten `wakeup`), `arch/arm64/timer.{c,h}` (`timer_now_ns` + `timer_ns_to_counter`), `kernel/include/thylacine/thread.h` (four new fields), `kernel/include/thylacine/rendez.h` (the `tsleep` declaration), `kernel/test/test_tsleep.c` (new).
+
+Reference: `ARCHITECTURE.md §8.8` (the Plan 9 idiom layer — `tsleep` listed alongside `sleep`/`wakeup`); `§28` invariant **I-9**. Spec: `specs/tsleep.tla` — a focused sibling of `scheduler.tla`, on the `sched_ctxsw.tla` precedent.
+
+### Public API
+
+```c
+#define TSLEEP_AWOKEN     1
+#define TSLEEP_TIMEDOUT   0
+
+int tsleep(struct Rendez *r, int (*cond)(void *arg), void *arg,
+           u64 deadline_ns);
+```
+
+`deadline_ns` is an absolute timestamp on the `timer_now_ns()` monotonic timebase — a caller computes it as `timer_now_ns() + timeout_ns`. `deadline_ns == 0` means "no deadline": `tsleep` is then exactly `sleep()` and always returns `TSLEEP_AWOKEN`.
+
+Returns `TSLEEP_AWOKEN` if the wait ended because `cond` became true (a `wakeup`, or `cond` already true at entry / on a resume); `TSLEEP_TIMEDOUT` if it ended because the deadline passed. `cond` has precedence: a wait satisfied at the instant the deadline lapses returns `TSLEEP_AWOKEN`. Preconditions are `sleep`'s, plus: `cond` is evaluated under `r->lock` AND the global timer-wait lock — keep it a quick predicate.
+
+### The deadline-delivery mechanism
+
+Thylacine has no per-deadline hardware timer and no callout queue — only the fixed 1 kHz scheduler tick. `tsleep` delivers the deadline off that tick, exactly as Plan 9's own `tsleep` rides the clock interrupt:
+
+- A **global timer-wait list** (`g_timerwait` in `sched.c`) — a doubly-linked list, threaded through `struct Thread`'s `timerwait_next`/`timerwait_prev`, of every thread currently inside a *deadlined* `tsleep`. Guarded by `g_timerwait.lock`.
+- On every timer fire, `sched_tick()` calls `timerwait_tick()`, which scans the list and wakes every thread whose `sleep_deadline` has passed.
+
+Granularity is the tick period (1 ms) — ample for the hung-server backstop and for `poll`/`futex`. A deadlined wait is the cold path, so the list is short and a single global lock + an O(timed-sleepers) scan is the right tradeoff; the global lock is what `tsleep.tla` verifies. Per-CPU sharding is a documented future optimization.
+
+### Lock order
+
+`tsleep` introduces a lock that must nest with the existing `Rendez` lock and per-CPU run-tree lock. The global order is:
+
+```
+g_timerwait.lock  →  Rendez.lock  →  CpuSched.lock
+```
+
+Every path obeys it: `tsleep` takes `g_timerwait.lock` then `r->lock` (and drops both before `sched()`); `timerwait_tick` takes `g_timerwait.lock` then, per victim, `r->lock`; `wakeup` takes `g_timerwait.lock` then `r->lock`; `ready` (reached from all wake paths) takes `CpuSched.lock` innermost. `sleep` takes only `r->lock` — a consistent subset.
+
+`wakeup` takes `g_timerwait.lock` **unconditionally**, even when waking a plain `sleep` waiter that was never on the timer-wait list. It has to: `wakeup` cannot tell whether the waiter is a deadlined sleeper until it holds `r->lock` and reads the waiter, and by then taking `g_timerwait.lock` would invert the order. But it holds the global lock only for the one piece of timer-wait work — the unlink — and releases it immediately; the `on_cpu` spin and `ready()` run under `r->lock` alone. The global-lock critical section is a few pointer writes.
+
+### Eager unlink
+
+A thread is on the timer-wait list **iff** it is currently in a deadlined `tsleep` and SLEEPING. Both wake paths — `wakeup` and the `timerwait_tick` scan — unlink the thread *before* readying it: `wakeup` unlinks under `g_timerwait.lock` and then releases that lock; `timerwait_tick` unlinks under the `g_timerwait.lock` it holds across its scan. There is never a stale entry — a thread is off the list before any other code can ready it or let it re-`tsleep`. This is `tsleep.tla`'s `NoStaleTimerEntry`; the alternative — lazy removal — opens an ABA window where a re-sleeping thread is timed out against a previous episode's deadline (`tsleep.tla`'s `tsleep_buggy_lazy_unlink.cfg`).
+
+The shared wake step is `wake_rendez_waiter(r, t, timed_out)`, which runs under `r->lock` alone: it spins out the `on_cpu` SMP race (as `wakeup` always has), clears `r->waiter` + `rendez_blocked_on`, records `timed_out` in `t->sleep_timedout`, sets `THREAD_RUNNABLE`, and `ready()`s the thread — the caller has already done the timer-wait unlink. `wakeup` calls it with `timed_out = false`; `timerwait_tick` with `true`. Keeping the `on_cpu` spin and `ready()` off `g_timerwait.lock` is deliberate: a `wakeup` racing a context switch must not stall every CPU's `timerwait_tick`.
+
+### The three-way wake race
+
+`sleep` has two wake sources (the condition; `wakeup`). `tsleep` adds a third — the timer. All three are serialized by `g_timerwait.lock` + `r->lock`, so the waiter is woken **exactly once** per sleep episode:
+
+- `wakeup` and the timeout scan are mutually exclusive via `r->waiter`: whichever fires first clears `r->waiter` (and unlinks the thread); the other then finds `r->waiter == NULL` (or the thread off the list) and no-ops.
+- On resume, `tsleep` re-checks `cond` **first**. If true → `TSLEEP_AWOKEN`, whatever the timeout flag says (success precedence). Only if `cond` is false does it consult `sleep_timedout` / the deadline → `TSLEEP_TIMEDOUT`. Checking the flag before `cond` would mis-report a wait satisfied at the deadline (`tsleep.tla`'s `tsleep_buggy_recheck_order.cfg`).
+
+### `timerwait_tick` — the scan
+
+Runs from `sched_tick()` on every timer fire, on every CPU, in IRQ context (IRQs already masked). It holds `g_timerwait.lock` across the whole scan, so no `wakeup` can run concurrently — every thread still on the list is genuinely SLEEPING on its Rendez. For each thread whose deadline has passed it takes the thread's `r->lock`, re-validates `state == SLEEPING && r->waiter == t` (defence in depth), `timerwait_unlink`s it, and calls `wake_rendez_waiter(r, t, true)`. The successor pointer is captured before the unlink.
+
+A thread that is expired but still mid-context-switch (`on_cpu` set) is **skipped** — left linked — rather than spun on: an unbounded busy-wait in the timer IRQ handler is a hazard. The next tick, by which `on_cpu` is surely clear, expires it — within the 1 ms granularity above.
+
+Every CPU's tick scans the one global list; whichever CPU's `timerwait_tick` wins the lock wakes the expired threads, the others find them already unlinked. The scan holds `g_timerwait.lock` across the per-thread `ready()`, so a thundering herd of simultaneous timeouts briefly stalls other CPUs' ticks; narrowing that — a generation-counted batch, or per-CPU sharding of the list — is a tracked follow-up (it changes the concurrency structure and so wants its own spec pass). The redundant per-CPU scans are cheap (a short list).
+
+### Data structures — `struct Thread` extension
+
+Four fields, all touched only under `g_timerwait.lock` + `r->lock`:
+
+```c
+struct Thread *timerwait_next;   /* timer-wait list links; both NULL when */
+struct Thread *timerwait_prev;   /*   the thread is not in a deadlined tsleep */
+u64            sleep_deadline;   /* deadline as a timer_get_counter() value */
+bool           sleep_timedout;   /* set by the timeout wake; read by tsleep's resume */
+```
+
+`sleep_deadline` is stored as an architectural-counter value (not nanoseconds) so the `timerwait_tick` scan compares raw `timer_get_counter()` with no per-tick division. `struct Thread` grew 784 → 816 bytes; the `_Static_assert` in `thread.h` is bumped.
+
+### `tsleep` impl
+
+```
+if deadline_ns == 0:  sleep(r, cond, arg); return TSLEEP_AWOKEN     /* degrade */
+deadline_cnt = timer_ns_to_counter(deadline_ns)
+
+spin_lock_irqsave(&g_timerwait.lock); spin_lock(&r->lock)
+validate current (magic, RUNNING, not already blocked)
+current->sleep_timedout = false
+loop:
+    if cond(arg):                              ret = AWOKEN;   break
+    if sleep_timedout or now >= deadline_cnt:  ret = TIMEDOUT; break
+    enqueue: r->waiter = current; rendez_blocked_on = r;
+             sleep_deadline = deadline_cnt; timerwait_link(current);
+             state = SLEEPING
+    drop both locks (IRQ mask remains); sched(); re-take both locks
+spin_unlock(&r->lock); spin_unlock_irqrestore(&g_timerwait.lock)
+return ret
+```
+
+The structure mirrors `sleep`'s loop: `cond` re-checked under the lock on every (re-)evaluation; the IRQ mask spans the whole call including the `sched()` yields. The no-deadline fast path delegates to `sleep` rather than re-deriving the wait loop — `sleep` is the spec-proven (`scheduler.tla NoMissedWakeup`) path, and routing through it keeps the proven hot path untouched.
+
+### Spec cross-reference
+
+`tsleep` is modeled by `specs/tsleep.tla` — a focused sibling of `scheduler.tla`, on the `sched_ctxsw.tla` precedent. `scheduler.tla` proves the check-then-sleep atomicity for `sleep` (and `tsleep`'s no-deadline path *is* `sleep`); `tsleep.tla` proves the new surface — the deadline race.
+
+| `tsleep.tla` element | Impl site | Pins |
+|---|---|---|
+| `Commit` | `tsleep()` loop body | cond-first-then-deadline evaluation; the enqueue. |
+| `Wakeup` | `wakeup()` → `wake_rendez_waiter(…, false)` | producer wake + eager unlink. |
+| `Timeout` | `timerwait_tick()` → `wake_rendez_waiter(…, true)` | deadline wake + eager unlink + state re-check. |
+| `NoStaleTimerEntry` | the eager `timerwait_unlink` in `wake_rendez_waiter` | a thread off the list iff not in a timed sleep. |
+| `NoDoubleWake` | the `r->waiter` / SLEEPING-recheck mutual exclusion | exactly one wake per episode. |
+| `WokenSound` / `TimeoutSound` | the cond-first resume order | the return value is sound. |
+| `TsleepTerminates` | the deadline + the tick scan | a hung producer cannot wedge the waiter. |
+
+TLC posture: `tsleep.cfg` / `tsleep_nodeadline.cfg` / `tsleep_liveness.cfg` clean; `tsleep_buggy_lazy_unlink` / `_double_wake` / `_recheck_order` / `_wedge` counterexample their target invariants. The canonical action↔code mapping is in `specs/SPEC-TO-CODE.md`.
+
+### Tests
+
+`kernel/test/test_tsleep.c` — five tests:
+
+| Test | What it verifies |
+|---|---|
+| `tsleep.fast_path_cond_true` | `cond` true at entry → `TSLEEP_AWOKEN`, no enqueue. |
+| `tsleep.no_deadline_degrades` | `deadline_ns == 0` → degrades to `sleep`, `TSLEEP_AWOKEN`. |
+| `tsleep.past_deadline_immediate` | a past deadline + `cond` false → `TSLEEP_TIMEDOUT` immediately, no enqueue. |
+| `tsleep.woken_before_deadline` | two-thread handoff; `wakeup` before a far deadline → `TSLEEP_AWOKEN`. Exercises the eager unlink in `wakeup`. |
+| `tsleep.timeout_via_tick` | two-thread handoff; no wakeup, short deadline → the tick scan times the waiter out → `TSLEEP_TIMEDOUT`. The end-to-end hung-producer backstop. |
+
+### Error paths
+
+`tsleep`'s `extinction` checks mirror `sleep`'s (NULL rendez, NULL cond, no current thread, corrupted current, current not RUNNING, current already blocked, rendez already has a waiter) plus one: `tsleep: current already on the timer-wait list` — a defensive guard against a thread re-enqueuing while still linked.
+
+### Caveats
+
+1. **`cond` runs under two locks.** `tsleep` evaluates `cond` holding both `g_timerwait.lock` and `r->lock`. A slow `cond` holds the global lock longer — keep it a quick predicate.
+2. **`wakeup` now takes a global lock.** Every `wakeup` — including for plain `sleep` waiters — acquires `g_timerwait.lock`, held only for the timer-wait unlink (a few pointer writes); the wake itself runs under `r->lock`. Per-CPU sharding of the timer-wait list is the future optimization if contention is ever measured.
+3. **All CPUs scan every tick; a timeout herd stalls ticks.** `timerwait_tick` runs on each CPU's tick against the one global list (redundant but cheap), and holds `g_timerwait.lock` across the per-thread `ready()` — so many threads timing out on the same tick briefly stalls other CPUs' ticks. A generation-counted batch or per-CPU sharding addresses both; tracked as a follow-up.
+4. **1 ms granularity.** A deadline is observed at the next tick, so a `tsleep` may overshoot by up to one tick period. Fine for the hung-server backstop and for `poll`/`futex`; `tsleep` is not a high-resolution timer.
 
 ---
 

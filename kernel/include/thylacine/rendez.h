@@ -83,4 +83,36 @@ void sleep(struct Rendez *r, int (*cond)(void *arg), void *arg);
 // May be called from IRQ context (the lock is irqsave).
 int wakeup(struct Rendez *r);
 
+// P5-tsleep return values.
+#define TSLEEP_AWOKEN     1     // cond became true (a wakeup, or cond
+                                //   already true at entry / on resume).
+#define TSLEEP_TIMEDOUT   0     // the deadline passed; cond never true.
+
+// sleep, bounded by an absolute deadline. Identical to sleep() except
+// the wait ALSO ends when monotonic time (timer_now_ns) reaches
+// `deadline_ns`: the waiter is then woken with TSLEEP_TIMEDOUT even
+// though cond never became true.
+//
+// `deadline_ns` is an ABSOLUTE timestamp on the timer_now_ns() timebase
+// — a caller computes it as `timer_now_ns() + timeout_ns` and must keep
+// that sum from wrapping u64 (a wrapped, now-in-the-past deadline times
+// out at once; a wrap to exactly 0 reads as "no deadline"). `deadline_ns
+// == 0` means "no deadline": tsleep is then exactly sleep() and returns
+// TSLEEP_AWOKEN.
+//
+// The deadline is delivered off the 1 kHz scheduler tick, so it is
+// observed at ~1 ms granularity — a tsleep may overshoot its deadline by
+// up to one tick. tsleep is a coarse backstop (a hung-server timeout;
+// poll / futex deadlines), not a high-resolution timer.
+//
+// Returns TSLEEP_AWOKEN if the wait ended on the condition, or
+// TSLEEP_TIMEDOUT if it ended on the deadline. cond has precedence: a
+// wait satisfied right as the deadline lapses returns TSLEEP_AWOKEN.
+//
+// Same preconditions as sleep() (single-waiter, not IRQ context). cond
+// is evaluated under r->lock AND the global timer-wait lock — keep it
+// quick. Modeled by specs/tsleep.tla.
+int tsleep(struct Rendez *r, int (*cond)(void *arg), void *arg,
+           u64 deadline_ns);
+
 #endif // THYLACINE_RENDEZ_H

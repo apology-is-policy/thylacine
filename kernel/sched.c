@@ -40,6 +40,7 @@
 #include <thylacine/types.h>
 
 #include "../arch/arm64/gic.h"      // P3-G: gic_send_ipi for ready/wakeup wake-idle-peer.
+#include "../arch/arm64/timer.h"    // P5-tsleep: counter read + ns->counter conversion.
 
 // P2-Cd: per-CPU sched state. Each CPU owns its own band-indexed run
 // tree, monotonic vd_counter, init flag, and idle-thread pointer. This
@@ -782,6 +783,88 @@ unsigned sched_runnable_count_band(unsigned band) {
 // (poll, futex).
 // ============================================================================
 
+// P5-tsleep: the global timer-wait list. Every thread inside a
+// deadlined tsleep() is linked here; sched_tick() scans the list on
+// each timer fire and wakes any thread whose deadline has passed.
+//
+// Lock order: g_timerwait.lock -> Rendez.lock -> CpuSched.lock. wakeup()
+// takes g_timerwait.lock as its OUTER lock even for a plain sleep()
+// waiter (which is never on the list) — it cannot know whether the
+// waiter is a deadlined sleeper until it holds the Rendez lock, and the
+// order forbids taking g_timerwait.lock second.
+//
+// One global lock, not per-CPU: a deadlined wait is the cold path (a
+// hung-server backstop; poll/futex timeouts), the scan is O(timed
+// sleepers) which is small, and the global lock is what specs/tsleep.tla
+// verifies. Per-CPU sharding is a documented future optimization.
+static struct {
+    spin_lock_t    lock;
+    struct Thread *head;
+} g_timerwait = { SPIN_LOCK_INIT, NULL };
+
+// True iff t is on the timer-wait list. Caller holds g_timerwait.lock.
+// Three-way check mirrors in_run_tree: a sole list element has both
+// links NULL but is the head.
+static bool timerwait_is_linked(struct Thread *t) {
+    return t->timerwait_next != NULL || t->timerwait_prev != NULL ||
+           g_timerwait.head == t;
+}
+
+// Prepend t to the timer-wait list. Caller holds g_timerwait.lock and
+// has confirmed t is not already linked.
+static void timerwait_link(struct Thread *t) {
+    t->timerwait_prev = NULL;
+    t->timerwait_next = g_timerwait.head;
+    if (g_timerwait.head) g_timerwait.head->timerwait_prev = t;
+    g_timerwait.head = t;
+}
+
+// Remove t from the timer-wait list. Caller holds g_timerwait.lock and
+// has confirmed t is linked.
+static void timerwait_unlink(struct Thread *t) {
+    if (t->timerwait_prev) {
+        t->timerwait_prev->timerwait_next = t->timerwait_next;
+    } else {
+        g_timerwait.head = t->timerwait_next;
+    }
+    if (t->timerwait_next) {
+        t->timerwait_next->timerwait_prev = t->timerwait_prev;
+    }
+    t->timerwait_next = NULL;
+    t->timerwait_prev = NULL;
+}
+
+// P5-tsleep: the wake transition shared by wakeup() and the sched_tick
+// timeout scan. Transitions the SLEEPING waiter t of r to RUNNABLE and
+// readies it. `timed_out` records the cause in t->sleep_timedout for
+// tsleep's resume.
+//
+// Caller holds r->lock, has validated r->waiter == t with t SLEEPING on
+// r, AND has already unlinked t from the timer-wait list (under
+// g_timerwait.lock) if it was a deadlined sleeper. This runs under
+// r->lock ONLY — never g_timerwait.lock: the on_cpu spin and ready() are
+// deliberately kept off the global lock so a wakeup racing a context
+// switch cannot stall every CPU's timerwait_tick.
+//
+// Maps to the wake effect shared by tsleep.tla's Wakeup and Timeout.
+static void wake_rendez_waiter(struct Rendez *r, struct Thread *t,
+                               bool timed_out) {
+    // P2-Cf SMP race: if t is still mid-switch-out on its previous CPU
+    // (cpu_switch_context still saving regs to t->ctx), readying it
+    // would let a peer pick it from a half-saved context. Spin until
+    // the previous CPU's resume path clears on_cpu. wakeup() can hit
+    // this window; timerwait_tick() pre-filters on_cpu, so the spin is
+    // a no-op when the caller is the timeout scan.
+    while (__atomic_load_n(&t->on_cpu, __ATOMIC_ACQUIRE)) {
+        __asm__ __volatile__("yield" ::: "memory");
+    }
+    r->waiter            = NULL;
+    t->rendez_blocked_on = NULL;
+    t->sleep_timedout    = timed_out;
+    t->state             = THREAD_RUNNABLE;
+    ready(t);
+}
+
 void sleep(struct Rendez *r, int (*cond)(void *arg), void *arg) {
     if (!r)    extinction("sleep(NULL rendez)");
     if (!cond) extinction("sleep with NULL cond");
@@ -838,6 +921,93 @@ void sleep(struct Rendez *r, int (*cond)(void *arg), void *arg) {
     spin_unlock_irqrestore(&r->lock, s);
 }
 
+// P5-tsleep: sleep bounded by an absolute deadline. See rendez.h for the
+// contract. Modeled by specs/tsleep.tla; the action names in the
+// comments below cross-reference that spec.
+//
+// The deadline adds a third wake source (the timer, via timerwait_tick)
+// to sleep's two (cond + wakeup). g_timerwait.lock + r->lock serialize
+// all three so the waiter is woken exactly once; cond is re-checked
+// first on every (re-)evaluation so a wait satisfied at the deadline
+// reports AWOKEN (tsleep.tla WokenSound / TimeoutSound).
+int tsleep(struct Rendez *r, int (*cond)(void *arg), void *arg,
+           u64 deadline_ns) {
+    if (!r)    extinction("tsleep(NULL rendez)");
+    if (!cond) extinction("tsleep with NULL cond");
+
+    // No deadline: tsleep degrades to plain sleep (ARCH §8.8). sleep is
+    // the spec-proven path (scheduler.tla NoMissedWakeup); route through
+    // it rather than re-deriving the wait loop.
+    if (deadline_ns == 0) {
+        sleep(r, cond, arg);
+        return TSLEEP_AWOKEN;
+    }
+
+    u64 deadline_cnt = timer_ns_to_counter(deadline_ns);
+
+    // g_timerwait.lock is the OUTER lock; r->lock nests inside. The
+    // irqsave on the outer lock carries the IRQ mask across the whole
+    // call including the sched() yields — mirrors sleep()'s discipline.
+    irq_state_t s = spin_lock_irqsave(&g_timerwait.lock);
+    spin_lock(&r->lock);
+
+    struct Thread *t = current_thread();
+    if (!t)                       extinction("tsleep: no current thread");
+    if (t->magic != THREAD_MAGIC) extinction("tsleep: corrupted current");
+    if (t->state != THREAD_RUNNING)
+        extinction("tsleep: current is not RUNNING");
+    if (t->rendez_blocked_on)
+        extinction("tsleep: current already blocked on a rendez");
+
+    // Fresh wait: clear any timeout flag a prior tsleep left set.
+    t->sleep_timedout = false;
+
+    int ret;
+    for (;;) {
+        // cond has precedence — tsleep.tla's correct Commit checks cond
+        // first, so a wait satisfied at (or past) the deadline still
+        // reports AWOKEN.
+        if (cond(arg)) { ret = TSLEEP_AWOKEN; break; }
+
+        // Timed out: the tick scan flagged us (sleep_timedout), or the
+        // deadline already lay in the past at this (re-)evaluation.
+        // cond is false above, so the wait genuinely timed out.
+        if (t->sleep_timedout || timer_get_counter() >= deadline_cnt) {
+            ret = TSLEEP_TIMEDOUT;
+            break;
+        }
+
+        if (r->waiter)
+            extinction("tsleep: rendez already has a waiter (single-waiter discipline)");
+        if (timerwait_is_linked(t))
+            extinction("tsleep: current already on the timer-wait list");
+
+        // Atomic under g_timerwait.lock + r->lock: enqueue on the Rendez
+        // AND the timer-wait list, then transition to SLEEPING.
+        r->waiter            = t;
+        t->rendez_blocked_on = r;
+        t->sleep_deadline    = deadline_cnt;
+        timerwait_link(t);
+        t->state             = THREAD_SLEEPING;
+
+        // Drop both locks (the IRQ mask stays — outer irqsave). sched()
+        // sees SLEEPING and keeps t out of the run tree; wakeup() or the
+        // tick scan transitions t back, eagerly unlinking it.
+        spin_unlock(&r->lock);
+        spin_unlock(&g_timerwait.lock);
+
+        sched();
+
+        // Resumed: re-acquire both locks in order, re-evaluate.
+        spin_lock(&g_timerwait.lock);
+        spin_lock(&r->lock);
+    }
+
+    spin_unlock(&r->lock);
+    spin_unlock_irqrestore(&g_timerwait.lock, s);
+    return ret;
+}
+
 // ============================================================================
 // Scheduler-tick preemption (P2-Bc).
 //
@@ -867,11 +1037,60 @@ void sleep(struct Rendez *r, int (*cond)(void *arg), void *arg) {
 // within sched() is prevented by sched()'s irq_save (set above).
 // ============================================================================
 
+// P5-tsleep: scan the timer-wait list and wake every thread whose
+// deadline has passed. Called from sched_tick() on every timer fire
+// (IRQ context, IRQs already masked). Maps to specs/tsleep.tla Timeout.
+//
+// g_timerwait.lock is held across the whole scan, so no wakeup() can run
+// concurrently (it needs the same lock) — every thread still on the list
+// is genuinely SLEEPING on its Rendez. The state re-check under r->lock
+// is defence in depth (tsleep.tla's correct Timeout re-validates), and
+// becomes load-bearing if g_timerwait.lock is ever sharded per-CPU.
+static void timerwait_tick(void) {
+    u64 now = timer_get_counter();
+
+    spin_lock(&g_timerwait.lock);
+    struct Thread *t = g_timerwait.head;
+    while (t) {
+        // Capture the successor BEFORE timerwait_unlink clears t's links.
+        struct Thread *next = t->timerwait_next;
+        // Wake t iff its deadline has passed AND it is not still mid-
+        // switch-out. A thread with on_cpu set is skipped — left linked
+        // — rather than spun on: an unbounded spin in the timer IRQ
+        // handler is a hazard, and the next tick (on_cpu surely clear by
+        // then) expires it, within the 1 ms granularity tsleep already
+        // documents.
+        if (now >= t->sleep_deadline &&
+            !__atomic_load_n(&t->on_cpu, __ATOMIC_ACQUIRE)) {
+            struct Rendez *r = t->rendez_blocked_on;
+            // r is non-NULL for any thread on the list: tsleep sets
+            // rendez_blocked_on and links the thread in one
+            // g_timerwait.lock + r->lock section, and this scan holds
+            // g_timerwait.lock throughout. The guard is defensive.
+            if (r) {
+                spin_lock(&r->lock);
+                if (t->state == THREAD_SLEEPING && r->waiter == t) {
+                    timerwait_unlink(t);
+                    wake_rendez_waiter(r, t, true);
+                }
+                spin_unlock(&r->lock);
+            }
+        }
+        t = next;
+    }
+    spin_unlock(&g_timerwait.lock);
+}
+
 void sched_tick(void) {
     // P2-Cd: per-CPU need_resched + this CPU's sched state.
     unsigned cpu = smp_cpu_idx_self();
     if (cpu >= DTB_MAX_CPUS) return;
     if (!g_cpu_sched[cpu].initialized) return;
+
+    // P5-tsleep: expire deadlined tsleep() waiters. Independent of the
+    // current thread's slice accounting below — runs on every CPU's
+    // tick regardless of what current_thread() is doing.
+    timerwait_tick();
 
     struct Thread *t = current_thread();
     if (!t) return;
@@ -919,15 +1138,26 @@ void preempt_check_irq(void) {
 int wakeup(struct Rendez *r) {
     if (!r) extinction("wakeup(NULL rendez)");
 
-    irq_state_t s = spin_lock_irqsave(&r->lock);
+    // P5-tsleep: g_timerwait.lock is the OUTER lock (order g_timerwait
+    // -> r->lock). wakeup takes it because it must unlink a deadlined
+    // tsleep() sleeper from the timer-wait list, and cannot tell whether
+    // the waiter is one until it holds r->lock — by which point taking
+    // g_timerwait.lock would invert the order. It is released the moment
+    // the unlink is done: the on_cpu spin + ready() then run under
+    // r->lock alone, off the global lock, so a wakeup racing a context
+    // switch cannot stall every CPU's timerwait_tick.
+    irq_state_t s = spin_lock_irqsave(&g_timerwait.lock);
+    spin_lock(&r->lock);
 
     struct Thread *t = r->waiter;
     if (!t) {
         // No waiter — caller's cond mutation may still be useful if a
         // future sleeper checks it; nothing to do here. This is the
         // intended idempotency: wakeup is a no-op when no thread is
-        // sleeping on r.
-        spin_unlock_irqrestore(&r->lock, s);
+        // sleeping on r. (After a tsleep timeout the tick scan has
+        // already cleared r->waiter, so wakeup correctly no-ops here.)
+        spin_unlock(&r->lock);
+        spin_unlock_irqrestore(&g_timerwait.lock, s);
         return 0;
     }
 
@@ -938,28 +1168,19 @@ int wakeup(struct Rendez *r) {
     if (t->rendez_blocked_on != r)
         extinction("wakeup: waiter rendez backref mismatch");
 
-    // P2-Cf: SMP wait/wake race close. If t is still mid-switch-out
-    // on its previous CPU (cpu_switch_context still saving regs to
-    // t->ctx), transitioning t to RUNNABLE + ready() would let a
-    // peer pick t before its ctx is canonical — concurrent execution
-    // on two CPUs from a half-saved context. Spin until t->on_cpu
-    // becomes false, signaling that the previous CPU's resume path
-    // cleared the flag (= cpu_switch_context completed).
-    //
-    // On UP / single-CPU rendez tests this is a no-op: t is already
-    // off-CPU when wakeup runs (t entered sched() inside sleep()
-    // and was switched out before any wakeup observer could run).
-    while (__atomic_load_n(&t->on_cpu, __ATOMIC_ACQUIRE)) {
-        __asm__ __volatile__("yield" ::: "memory");
-    }
+    // The only g_timerwait.lock work: unlink a deadlined tsleep sleeper.
+    // Then release the global lock — r->lock alone covers the wake. t
+    // cannot re-enter tsleep mid-wake (it is not readied until
+    // wake_rendez_waiter's tail, all under r->lock), so dropping the
+    // global lock here is race-free, and a concurrent timerwait_tick can
+    // no longer see t (it is already off the list).
+    if (timerwait_is_linked(t)) timerwait_unlink(t);
+    spin_unlock(&g_timerwait.lock);
 
-    // Atomic under r->lock: clear the waiter + transition state +
-    // ready. After this step, sleep's resume re-checks cond (which
+    // Under r->lock only: clear the waiter, transition to RUNNABLE, ready
+    // it. After this step, sleep/tsleep's resume re-checks cond (which
     // the caller set TRUE before calling wakeup) and exits the loop.
-    r->waiter = NULL;
-    t->rendez_blocked_on = NULL;
-    t->state = THREAD_RUNNABLE;
-    ready(t);
+    wake_rendez_waiter(r, t, false);
 
     spin_unlock_irqrestore(&r->lock, s);
     return 1;

@@ -46,6 +46,11 @@ void test_sched_notify_disabled_no_ipi(void);
 void test_rendez_sleep_immediate_cond_true(void);
 void test_rendez_basic_handoff(void);
 void test_rendez_wakeup_no_waiter(void);
+void test_tsleep_fast_path_cond_true(void);
+void test_tsleep_no_deadline_degrades(void);
+void test_tsleep_past_deadline_immediate(void);
+void test_tsleep_woken_before_deadline(void);
+void test_tsleep_timeout_via_tick(void);
 void test_smp_bringup_smoke(void);
 void test_smp_exception_stack_smoke(void);
 void test_smp_per_cpu_idle_smoke(void);
@@ -504,6 +509,21 @@ struct test_case g_tests[] = {
                                                                            false, NULL },
     { "rendez.basic_handoff",          test_rendez_basic_handoff,          false, NULL },
     { "rendez.wakeup_no_waiter",       test_rendez_wakeup_no_waiter,       false, NULL },
+    { "tsleep.fast_path_cond_true",
+                                       test_tsleep_fast_path_cond_true,
+                                                                           false, NULL },
+    { "tsleep.no_deadline_degrades",
+                                       test_tsleep_no_deadline_degrades,
+                                                                           false, NULL },
+    { "tsleep.past_deadline_immediate",
+                                       test_tsleep_past_deadline_immediate,
+                                                                           false, NULL },
+    { "tsleep.woken_before_deadline",
+                                       test_tsleep_woken_before_deadline,
+                                                                           false, NULL },
+    { "tsleep.timeout_via_tick",
+                                       test_tsleep_timeout_via_tick,
+                                                                           false, NULL },
     { "smp.bringup_smoke",             test_smp_bringup_smoke,             false, NULL },
     { "smp.exception_stack_smoke",     test_smp_exception_stack_smoke,     false, NULL },
     { "smp.per_cpu_idle_smoke",        test_smp_per_cpu_idle_smoke,        false, NULL },
