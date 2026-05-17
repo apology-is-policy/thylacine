@@ -46,6 +46,13 @@ static u32                g_next_pid = 0;
 static u64                g_proc_created;
 static u64                g_proc_destroyed;
 
+// P5-corvus-srv: monotonic source of per-Proc `stripes` identity tags.
+// A u64 — incremented once per Proc creation, it cannot wrap in any
+// physically realizable runtime (unlike g_next_pid's u32, which carries
+// an explicit INT_MAX guard). Value 0 is never handed out: stripes == 0
+// is the reserved fail-closed sentinel. proc_init seeds it to 1.
+static u64                g_next_stripes;
+
 // P3-A (R5-H F75 close): global proc-table lock guarding the Proc-
 // lineage state machine on SMP.
 //
@@ -209,6 +216,14 @@ void proc_init(void) {
     // post-bring-up; using atomic ops uniformly avoids torn-read hazards.
     __atomic_fetch_add(&g_proc_created, 1u, __ATOMIC_RELAXED);
     g_next_pid = 1u;       // R6-A F107: u32 (was int).
+
+    // P5-corvus-srv: seed the stripes counter at 1 (0 is the reserved
+    // fail-closed sentinel) and stamp kproc with the first tag. kproc
+    // never opens /srv, but a real non-zero `stripes` keeps the tag
+    // total over every Proc — no zero-stripes special case to reason
+    // about. Drawn from the same counter rfork's children draw from.
+    g_next_stripes = 1u;
+    g_kproc->stripes = __atomic_fetch_add(&g_next_stripes, 1u, __ATOMIC_RELAXED);
 }
 
 struct Proc *kproc(void) {
@@ -288,6 +303,15 @@ struct Proc *proc_alloc(void) {
     u32 next = __atomic_fetch_add(&g_next_pid, 1u, __ATOMIC_RELAXED);
     if (next >= 0x7fffffffu) extinction("proc_alloc: g_next_pid would overflow INT_MAX");
     p->pid = (int)next;
+
+    // P5-corvus-srv: stamp the per-Proc identity tag. Consumed HERE,
+    // alongside the PID — late, after every fallible alloc step has
+    // succeeded — so a rolled-back proc_alloc (handle-table / pgtable
+    // OOM) never burns a `stripes` value (the R5-H F89 discipline that
+    // keeps the PID space dense, applied to the tag space). The tag is
+    // immutable hereafter; an rfork child gets its own fresh value via
+    // its own proc_alloc, never the parent's (CORVUS-DESIGN.md §6.3).
+    p->stripes = __atomic_fetch_add(&g_next_stripes, 1u, __ATOMIC_RELAXED);
 
     return p;
 }
@@ -592,6 +616,19 @@ bool proc_is_console_attached(const struct Proc *p) {
     // default on a bad pointer is "no console, no elevation."
     if (!p || p->magic != PROC_MAGIC) return false;
     return (p->proc_flags & PROC_FLAG_CONSOLE_ATTACHED) != 0;
+}
+
+// =============================================================================
+// P5-corvus-srv: per-Proc identity tag.
+// =============================================================================
+
+u64 proc_stripes(const struct Proc *p) {
+    // Fail-closed: a NULL or corrupted Proc reads as `stripes` 0 — the
+    // reserved sentinel that authorizes nothing. SYS_SRV_PEER reads a
+    // connection peer's identity through here, so a bad pointer must
+    // degrade to "no identity," never to a stale or fabricated tag.
+    if (!p || p->magic != PROC_MAGIC) return 0;
+    return p->stripes;
 }
 
 void exits(const char *msg) {

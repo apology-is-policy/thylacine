@@ -48,6 +48,7 @@ void test_proc_cascading_rfork_wait_smoke(void);
 void test_proc_cascading_rfork_stress(void);
 void test_proc_orphan_reparent_smoke(void);
 void test_proc_console_attached_smoke(void);
+void test_proc_stripes_smoke(void);
 
 static volatile u32 g_proc_test_ran;
 static volatile u64 g_cpu_run_count[DTB_MAX_CPUS];
@@ -56,6 +57,7 @@ static volatile u32 g_grandchild_status_seen;
 static volatile u32 g_orphan_grandchild_ran;
 static volatile u32 g_console_child_attached;
 static volatile u32 g_console_parent_attached;
+static volatile u64 g_stripes_child;
 
 static void proc_test_child_ok(void *arg) {
     (void)arg;
@@ -504,4 +506,75 @@ void test_proc_console_attached_smoke(void) {
         "the intermediate parent must be console-attached after self-mark");
     TEST_EXPECT_EQ(g_console_child_attached, 0u,
         "a grandchild of a console-attached parent must NOT inherit the bit");
+}
+
+// =============================================================================
+// P5-corvus-srv: per-Proc identity tag (`stripes`).
+// =============================================================================
+
+// rfork'd child entry: record this child's own `stripes` tag. It must
+// be non-zero AND differ from the parent's — proc_alloc mints a fresh
+// tag for every Proc, so an rfork child's stripes is never the
+// parent's (CORVUS-DESIGN.md §6.3; specs/corvus.tla: a Proc's identity
+// is per-Proc distinct, never inherited).
+static void stripes_child_entry(void *arg) {
+    (void)arg;
+    struct Thread *t = current_thread();
+    struct Proc *self = t ? t->proc : NULL;
+    __atomic_store_n(&g_stripes_child, proc_stripes(self), __ATOMIC_RELAXED);
+    exits("ok");
+}
+
+// proc.stripes_smoke
+//   Verifies the P5-corvus-srv per-Proc identity tag:
+//     * proc_stripes(NULL) is 0 — the fail-closed sentinel.
+//     * kproc carries a non-zero tag.
+//     * proc_alloc mints a fresh, non-zero, mutually-distinct tag per
+//       Proc, none aliasing kproc's.
+//     * an rfork'd child's tag is non-zero and differs from its
+//       parent's — the tag is minted, never inherited.
+void test_proc_stripes_smoke(void) {
+    // Fail-closed: a NULL Proc reads as stripes 0.
+    TEST_EXPECT_EQ(proc_stripes(NULL), (u64)0,
+        "proc_stripes(NULL) must be 0 (fail-closed sentinel)");
+
+    // kproc carries a real, non-zero tag (0 is reserved).
+    u64 kp = proc_stripes(kproc());
+    TEST_ASSERT(kp != 0, "kproc must carry a non-zero stripes tag");
+
+    // proc_alloc mints fresh, non-zero, mutually-distinct tags.
+    struct Proc *a = proc_alloc();
+    TEST_ASSERT(a != NULL, "proc_alloc(a) returned NULL");
+    struct Proc *b = proc_alloc();
+    TEST_ASSERT(b != NULL, "proc_alloc(b) returned NULL");
+    u64 sa = proc_stripes(a);
+    u64 sb = proc_stripes(b);
+    TEST_ASSERT(sa != 0, "Proc a must carry a non-zero stripes tag");
+    TEST_ASSERT(sb != 0, "Proc b must carry a non-zero stripes tag");
+    TEST_ASSERT(sa != sb, "distinct Procs must carry distinct stripes tags");
+    TEST_ASSERT(sa != kp && sb != kp,
+        "a proc_alloc'd Proc must not alias kproc's stripes tag");
+    a->state = PROC_STATE_ZOMBIE;
+    proc_free(a);
+    b->state = PROC_STATE_ZOMBIE;
+    proc_free(b);
+
+    // An rfork'd child gets a minted tag, NOT the parent's. The parent
+    // is the current (kproc-context) thread; the child's recorded tag
+    // must differ from kproc's. The counter is monotonic and the child
+    // is created after kproc, so a buggy rfork that copied
+    // parent->stripes would yield exactly kp — caught here.
+    __atomic_store_n(&g_stripes_child, 0, __ATOMIC_RELAXED);
+    int child_pid = rfork(RFPROC, stripes_child_entry, NULL);
+    TEST_ASSERT(child_pid > 0, "rfork failed");
+    int status = -1;
+    int reaped = wait_pid(&status);
+    TEST_EXPECT_EQ(reaped, child_pid, "wait_pid returned wrong pid");
+    TEST_EXPECT_EQ(status, 0, "stripes child should exit clean");
+    u64 child_stripes = __atomic_load_n(&g_stripes_child, __ATOMIC_RELAXED);
+    TEST_ASSERT(child_stripes != 0,
+        "an rfork'd child must carry a non-zero stripes tag");
+    TEST_ASSERT(child_stripes != kp,
+        "an rfork'd child's stripes must differ from the parent's "
+        "(minted fresh, never inherited)");
 }

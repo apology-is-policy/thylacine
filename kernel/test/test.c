@@ -65,6 +65,7 @@ void test_proc_cascading_rfork_wait_smoke(void);
 void test_proc_cascading_rfork_stress(void);
 void test_proc_orphan_reparent_smoke(void);
 void test_proc_console_attached_smoke(void);
+void test_proc_stripes_smoke(void);
 void test_namespace_bind_smoke(void);
 void test_namespace_cycle_rejected(void);
 void test_namespace_fork_isolated(void);
@@ -80,6 +81,7 @@ void test_handles_rights_monotonic(void);
 void test_handles_dup_lifecycle(void);
 void test_handles_full_table_oom(void);
 void test_handles_kind_classifiers(void);
+void test_handles_srv_kind(void);
 void test_vmo_create_close_round_trip(void);
 void test_vmo_refcount_lifecycle(void);
 void test_vmo_map_unmap_lifecycle(void);
@@ -545,6 +547,7 @@ struct test_case g_tests[] = {
     { "proc.cascading_rfork_stress",   test_proc_cascading_rfork_stress,   false, NULL },
     { "proc.orphan_reparent_smoke",    test_proc_orphan_reparent_smoke,    false, NULL },
     { "proc.console_attached_smoke",   test_proc_console_attached_smoke,   false, NULL },
+    { "proc.stripes_smoke",            test_proc_stripes_smoke,            false, NULL },
     { "territory.bind_smoke",          test_namespace_bind_smoke,          false, NULL },
     { "territory.cycle_rejected",      test_namespace_cycle_rejected,      false, NULL },
     { "territory.fork_isolated",       test_namespace_fork_isolated,       false, NULL },
@@ -560,6 +563,7 @@ struct test_case g_tests[] = {
     { "handles.dup_lifecycle",         test_handles_dup_lifecycle,         false, NULL },
     { "handles.full_table_oom",        test_handles_full_table_oom,        false, NULL },
     { "handles.kind_classifiers",      test_handles_kind_classifiers,      false, NULL },
+    { "handles.srv_kind",              test_handles_srv_kind,              false, NULL },
     { "burrow.create_close_round_trip",   test_vmo_create_close_round_trip,   false, NULL },
     { "burrow.refcount_lifecycle",        test_vmo_refcount_lifecycle,        false, NULL },
     { "burrow.map_unmap_lifecycle",       test_vmo_map_unmap_lifecycle,       false, NULL },

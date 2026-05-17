@@ -403,6 +403,25 @@ At v1.0 the sole console-attached Proc is **joey** — `joey_thunk` (`kernel/joe
 
 ---
 
+### Per-Proc identity tag (`stripes`) (P5-corvus-srv-impl-a1)
+
+Every Proc carries a `stripes` value (`<thylacine/proc.h>`, `struct Proc`, `u64`) — the kernel's per-Proc identity tag (the thylacine's stripe pattern; every animal's is unique). It is the kernel's unforgeable answer to "is this the same Proc?", read by `SYS_SRV_PEER` (P5-corvus-srv-impl-a3) to stamp a `/srv/corvus` connection's peer identity (CORVUS-DESIGN.md §6.3; `specs/corvus.tla` `ConnRecord.peer`).
+
+| Property | Mechanism |
+|---|---|
+| Fresh per Proc | Drawn from a monotonic `u64` kernel counter (`g_next_stripes`, `kernel/proc.c`). kproc draws the first tag in `proc_init`; every `proc_alloc` draws the next. An `rfork` child's `stripes` therefore *differs* from its parent's — minted, never inherited (`proc.stripes_smoke` pins this against a buggy copy of `parent->stripes`). |
+| `stripes == 0` reserved | The fail-closed sentinel. The counter is seeded at 1 and never hands out 0, so an unstamped or torn-read Proc reads 0 and authorizes nothing. `proc_stripes(NULL)` / a corrupted Proc also returns 0. |
+| Immutable | Written once — `proc_init` (kproc) or `proc_alloc` (every other Proc) — and never again. No API mutates it. |
+| Dense (no rollback burn) | Consumed *late* in `proc_alloc`, alongside the PID, after every fallible alloc step has succeeded — a rolled-back `proc_alloc` (handle-table / pgtable OOM) burns no tag. Mirrors the R5-H F89 PID-density discipline. |
+
+| Function (`kernel/proc.c`) | Contract |
+|---|---|
+| `proc_stripes(p)` | Return `p`'s `stripes` tag. **Fail-closed**: a NULL or corrupted Proc reads as 0 — never a stale or fabricated tag. |
+
+`struct Proc` grew **136 → 144 bytes** (`u64 stripes` appended after `proc_flags` / `_pad_flags`; the `_Static_assert` on the size is bumped deliberately). Tested by `proc.stripes_smoke`.
+
+---
+
 ## State machines
 
 ### Thread state transitions (P2-A subset)

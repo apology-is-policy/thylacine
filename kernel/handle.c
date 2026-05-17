@@ -59,6 +59,11 @@ bool kobj_kind_is_hw(enum kobj_kind k) {
     return ((1u << (unsigned)k) & KOBJ_KIND_HW_MASK) != 0;
 }
 
+bool kobj_kind_is_srv(enum kobj_kind k) {
+    if (k <= KOBJ_INVALID || k >= KOBJ_KIND_COUNT) return false;
+    return ((1u << (unsigned)k) & KOBJ_KIND_SRV_MASK) != 0;
+}
+
 // =============================================================================
 // HandleTable lifecycle.
 // =============================================================================
@@ -140,6 +145,14 @@ static void handle_release_obj(enum kobj_kind kind, void *obj) {
         // exercises the full lifecycle end-to-end.
         spoor_clunk((struct Spoor *)obj);
         break;
+    case KOBJ_SRV:
+        // P5-corvus-srv-impl-a1: the KObj_Srv kind exists; the /srv
+        // connection + service objects it points at are built in
+        // -impl-a3, which wires their teardown here. Until then no
+        // KObj_Srv handle carries a non-NULL obj (the !obj guard at
+        // the top of this function short-circuits test-path srv
+        // handles), so the no-op is correct.
+        break;
     case KOBJ_INVALID:
     case KOBJ_PROCESS:
     case KOBJ_THREAD:
@@ -191,6 +204,12 @@ static void handle_acquire_obj(enum kobj_kind kind, void *obj) {
         // the dup'd handle has its own reference. Each holder
         // independently releases via spoor_clunk on close.
         spoor_ref((struct Spoor *)obj);
+        break;
+    case KOBJ_SRV:
+        // P5-corvus-srv: handle_dup rejects KObj_Srv (see handle_dup,
+        // NoSrvDup), so handle_acquire_obj is never reached for it.
+        // The case is present so the switch stays exhaustive over
+        // kobj_kind — the KOBJ_KIND_COUNT _Static_assert's discipline.
         break;
     case KOBJ_INVALID:
     case KOBJ_PROCESS:
@@ -322,14 +341,19 @@ hidx_t handle_dup(struct Proc *p, hidx_t h, rights_t new_rights) {
     struct Handle *parent = handle_get(p, h);
     if (!parent) return -1;
 
-    // P4-Ib NoHwDup: dup is forbidden for hardware kinds (KOBJ_MMIO,
-    // KOBJ_IRQ, KOBJ_DMA, KOBJ_INTERRUPT). Maps to specs/handles.tla
-    // HandleDup precondition `h.kobj \in TxKObjs` + the new NoHwDup
-    // invariant. Extends I-5 from "non-transferable across procs" to
-    // "non-duplicable at all" — drivers hold exactly one handle per
-    // hw resource. The bug class is BuggyHwDup in the spec; the
-    // runtime check rejects it.
-    if (kobj_kind_is_hw(parent->kind)) return -1;
+    // P4-Ib NoHwDup + P5-corvus-srv NoSrvDup: dup is forbidden for
+    // every NON-transferable kind. Maps to specs/handles.tla's
+    // HandleDup precondition `h.kobj \in TxKObjs` — the runtime guard
+    // is its exact negation, `!kobj_kind_is_transferable`.
+    //   - Hardware (MMIO / IRQ / DMA / Interrupt): drivers hold exactly
+    //     one handle per hw resource — extends I-5 from "non-
+    //     transferable across procs" to "non-duplicable at all". Bug
+    //     class BuggyHwDup.
+    //   - Srv (a /srv connection Spoor): exactly one connection Spoor
+    //     per Proc (CORVUS-DESIGN.md §6.2) — a dup would be a second
+    //     handle naming the one connection, blurring the unambiguous
+    //     origin that handles.tla's SrvHandlesAtOrigin wants.
+    if (!kobj_kind_is_transferable(parent->kind)) return -1;
 
     // Rights monotonic reduction: new_rights MUST be a subset of
     // parent->rights. Models the spec's HandleDup precondition.

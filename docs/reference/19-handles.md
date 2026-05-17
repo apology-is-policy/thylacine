@@ -6,17 +6,18 @@ The kernel handle table — typed unforgeable tokens that name kernel objects a 
 
 ## Purpose
 
-Eight typed kobj kinds (Process / Thread / BURROW / Spoor / MMIO / IRQ / DMA / Interrupt) form Thylacine's kernel-object universe. Each is named by a `struct Handle` (kobj_kind + rights + obj pointer); each Proc owns a fixed-size `struct HandleTable` of these. Handles cannot be forged — a Proc receives them only via kernel grant or 9P transfer (Phase 4).
+Nine typed kobj kinds (Process / Thread / BURROW / Spoor / MMIO / IRQ / DMA / Interrupt / Srv) form Thylacine's kernel-object universe. Each is named by a `struct Handle` (kobj_kind + rights + obj pointer); each Proc owns a fixed-size `struct HandleTable` of these. Handles cannot be forged — a Proc receives them only via kernel grant or 9P transfer (Phase 4).
 
 Key invariants (proven in `specs/handles.tla`):
 
 - **Rights monotonic reduction (ARCH §28 I-6)**: `dup` and (Phase 4) `transfer-via-9P` reject elevation. `RightsCeiling` invariant: every handle's rights are a subset of `origin_rights[its kobj]`.
-- **Hardware non-transferability (ARCH §28 I-5)**: `KObj_MMIO`, `KObj_IRQ`, `KObj_DMA`, `KObj_Interrupt` cannot transfer. The 9P transfer codepath has no case for these kinds; `_Static_assert(KOBJ_KIND_COUNT == 9)` pins the enum so the type partition can't drift silently.
+- **Hardware non-transferability (ARCH §28 I-5)**: `KObj_MMIO`, `KObj_IRQ`, `KObj_DMA`, `KObj_Interrupt` cannot transfer. The 9P transfer codepath has no case for these kinds; `_Static_assert(KOBJ_KIND_COUNT == 10)` pins the enum so the type partition can't drift silently.
 - **Transfer only via 9P (ARCH §28 I-4)**: no syscall exists for direct cross-Proc transfer. The only public path is `handle_transfer_via_9p` (Phase 4).
 - **Capability monotonic reduction (ARCH §28 I-2)**: per-Proc coarse capabilities only reduce. Forward-looking; `rfork`'s capability mask uses bitwise AND (Phase 5+ syscall surface).
 - **P4-Ib NoHwDup**: `handle_dup` of `KObj_MMIO`/`IRQ`/`DMA`/`Interrupt` is rejected — extends I-5's "non-transferable across procs" to "non-duplicable at all". Drivers hold exactly one handle per hw resource.
 - **P4-Ib HwResourceExclusive**: at most one alive handle per hw kobj across all procs. Two drivers can't claim the same MMIO range / INTID. Enforced impl-side by `g_mmio_claims` overlap rejection (`kernel/mmio_handle.c`) + `g_intid_claimed` (`kernel/irqfwd.c`).
 - **P4-Ib HwHandleImpliesCap**: every alive hw-handle holder has `CAP_HW_CREATE` in `proc->caps`. Enforced by `sys_mmio_create_handler` / `sys_irq_create_handler` cap check before allocation.
+- **P5-corvus-srv SrvHandlesAtOrigin / NoSrvDup**: `KObj_Srv` — a `/srv/<name>` connection Spoor — is a *third* partition, non-transferable AND non-hardware. Absent from `KOBJ_KIND_TRANSFERABLE_MASK`, so it never crosses Procs; `handle_dup` rejects it (exactly one connection Spoor per Proc, CORVUS-DESIGN.md §6.2). `specs/handles.tla` pins `SrvHandlesAtOrigin` (every `KObj_Srv` handle held by its origin Proc).
 
 ---
 
@@ -35,9 +36,10 @@ enum kobj_kind {
     KOBJ_IRQ        = 6,
     KOBJ_DMA        = 7,
     KOBJ_INTERRUPT  = 8,
-    KOBJ_KIND_COUNT = 9,
+    KOBJ_SRV        = 9,    // a /srv/<name> connection Spoor (P5-corvus-srv)
+    KOBJ_KIND_COUNT = 10,
 };
-_Static_assert(KOBJ_KIND_COUNT == 9, ...);
+_Static_assert(KOBJ_KIND_COUNT == 10, ...);
 
 #define KOBJ_KIND_TRANSFERABLE_MASK \
     ((1u << KOBJ_PROCESS) | (1u << KOBJ_THREAD) |
@@ -45,7 +47,12 @@ _Static_assert(KOBJ_KIND_COUNT == 9, ...);
 #define KOBJ_KIND_HW_MASK \
     ((1u << KOBJ_MMIO) | (1u << KOBJ_IRQ) |
      (1u << KOBJ_DMA)  | (1u << KOBJ_INTERRUPT))
+#define KOBJ_KIND_SRV_MASK  (1u << KOBJ_SRV)
+// Three pairwise-disjoint asserts + a completeness assert pin the
+// Tx / Hw / Srv partition (every kind but KOBJ_INVALID classified).
 _Static_assert((KOBJ_KIND_TRANSFERABLE_MASK & KOBJ_KIND_HW_MASK) == 0, ...);
+_Static_assert((KOBJ_KIND_TRANSFERABLE_MASK & KOBJ_KIND_SRV_MASK) == 0, ...);
+_Static_assert((KOBJ_KIND_HW_MASK & KOBJ_KIND_SRV_MASK) == 0, ...);
 
 typedef u32 rights_t;
 #define RIGHT_NONE      0u
@@ -83,6 +90,7 @@ hidx_t handle_dup(struct Proc *, hidx_t, rights_t new_rights);
 
 bool kobj_kind_is_transferable(enum kobj_kind);
 bool kobj_kind_is_hw(enum kobj_kind);
+bool kobj_kind_is_srv(enum kobj_kind);          // P5-corvus-srv
 
 u64 handle_total_allocated(void);
 u64 handle_total_freed(void);
@@ -100,7 +108,7 @@ u64 handle_total_freed(void);
 | Return | Meaning |
 |---|---|
 | `>= 0` | success; new slot index |
-| `-1`   | rejection: h out-of-range or empty / rights elevation (`new_rights ⊄ parent.rights`) / new_rights == 0 / table full |
+| `-1`   | rejection: h out-of-range or empty / **non-transferable kind — hw (NoHwDup) or srv (NoSrvDup)** / rights elevation (`new_rights ⊄ parent.rights`) / new_rights == 0 / table full |
 
 `handle_dup`'s subset check is the runtime enforcement of the spec's `RightsCeiling` invariant. The check is `(new_rights & parent->rights) == new_rights` — a bit elevation produces `≠`, returning -1. This is exactly the bug class the spec's `BuggyDupElevate` action models.
 
@@ -145,9 +153,14 @@ bool kobj_kind_is_hw(enum kobj_kind k) {
     if (k <= KOBJ_INVALID || k >= KOBJ_KIND_COUNT) return false;
     return ((1u << (unsigned)k) & KOBJ_KIND_HW_MASK) != 0;
 }
+
+bool kobj_kind_is_srv(enum kobj_kind k) {       // P5-corvus-srv
+    if (k <= KOBJ_INVALID || k >= KOBJ_KIND_COUNT) return false;
+    return ((1u << (unsigned)k) & KOBJ_KIND_SRV_MASK) != 0;
+}
 ```
 
-The disjoint `_Static_assert` on the masks is the compile-time guarantee that no kind is in both partitions — adding a new kind requires bumping `KOBJ_KIND_COUNT` AND extending one of the masks; if both, the static assert fires.
+The three masks implement `specs/handles.tla`'s `TxKObjs` / `HwKObjs` / `SrvKObjs` partition. Four `_Static_assert`s pin it: three pairwise-disjoint checks (no kind in two partitions) plus a completeness check (`TRANSFERABLE | HW | SRV` equals every kind except `KOBJ_INVALID`). Adding a new kind without classifying it into exactly one partition fails the completeness assert at compile time — stronger than the prior single disjointness check.
 
 ### Rights subset check
 
@@ -214,7 +227,8 @@ Mapping (canonical at `specs/SPEC-TO-CODE.md`):
 - `handles.rights_monotonic` — dup with subset succeeds; dup with elevated rights or disjoint rights fails (-1); dup with empty rights fails.
 - `handles.dup_lifecycle` — dup; close parent; dup remains. Dup again; close child; original dup remains. Independent close ordering.
 - `handles.full_table_oom` — alloc to PROC_HANDLE_MAX; verify all distinct slots + (-1) on overflow + slot reuse after partial close.
-- `handles.kind_classifiers` — truth table: PROCESS/THREAD/BURROW/CHAN are transferable; MMIO/IRQ/DMA/INTERRUPT are hw; KOBJ_INVALID is neither; out-of-range rejected by both classifiers (defensive).
+- `handles.kind_classifiers` — truth table: PROCESS/THREAD/BURROW/SPOOR are transferable; MMIO/IRQ/DMA/INTERRUPT are hw; SRV is srv; KOBJ_INVALID is none; out-of-range rejected by all three classifiers (defensive).
+- `handles.srv_kind` (P5-corvus-srv) — `KObj_Srv` classifies into the srv partition (non-transferable, non-hardware); a `KObj_Srv` handle allocs / looks up / closes like any kind; `handle_dup` of it returns -1 (NoSrvDup), even at same-or-subset rights — the kind, not the rights, forbids the dup.
 
 ---
 
@@ -284,14 +298,15 @@ Per ARCH §15.4, factotum-mediated capability elevation grants short-lived `KObj
 | `struct Proc.handles` field | Landed (P2-Fc) |
 | `proc_alloc`/`proc_init`/`proc_free` integration | Landed (P2-Fc) |
 | `handle_init` bootstrap | Landed (P2-Fc; between `territory_init` and `proc_init`) |
-| Type classifiers (`is_transferable` / `is_hw`) | Landed (P2-Fc) |
-| In-kernel tests | 5 added at P2-Fc + 7 added at P4-Ib (caps + mmio_handle + handle_hw) |
+| Type classifiers (`is_transferable` / `is_hw` / `is_srv`) | Landed (P2-Fc; `is_srv` added P5-corvus-srv-impl-a1) |
+| `KObj_Srv` kobj kind (ninth kind — non-transferable, non-hardware third partition) | **Landed (P5-corvus-srv-impl-a1)** — `KOBJ_SRV` enum value + `KOBJ_KIND_SRV_MASK` + the three pairwise-disjoint + completeness `_Static_assert`s; `handle_release_obj` / `handle_acquire_obj` switch cases present (no-op until the connection object lands in -impl-a3) |
+| In-kernel tests | 5 added at P2-Fc + 7 added at P4-Ib (caps + mmio_handle + handle_hw) + 1 at P5-corvus-srv-impl-a1 (`handles.srv_kind`) |
 | Spec `handles.tla` + 4 buggy configs | Landed (P2-Fa); extended at P4-Ib (+3 invariants, +3 buggy cfgs) |
 | KOBJ_BURROW underlying-obj integration | Landed (P2-Fd) |
 | KOBJ_SPOOR underlying-obj integration | Phase 4 (9P client) |
 | KOBJ_MMIO / IRQ underlying-obj integration | **Landed (P4-Ib)** — `kobj_mmio_unref` + `kobj_irq_unref` wired into `handle_release_obj` |
 | KOBJ_DMA underlying-obj integration | Deferred (no DMA-buffer surface yet) |
-| `handle_dup` hw-rejection | **Landed (P4-Ib)** — `kobj_kind_is_hw(parent->kind) → return -1` |
+| `handle_dup` non-transferable-kind rejection | **Landed** — `!kobj_kind_is_transferable(parent->kind) → return -1`: hardware kinds (P4-Ib NoHwDup) + `KObj_Srv` (P5-corvus-srv-impl-a1 NoSrvDup) |
 | `handle_transfer_via_9p` impl | Phase 4 (with 9P client) |
 | Per-Proc handle-table lock | Phase 5+ |
 | Growable RB-tree (replacing fixed slots) | Phase 5+ when bind count justifies |

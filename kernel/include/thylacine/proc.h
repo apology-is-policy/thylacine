@@ -182,6 +182,20 @@ struct Proc {
     // visible via future debug surfaces for audit verification.
     u32                proc_flags;
     u32                _pad_flags;        // explicit padding to 8-byte align
+
+    // P5-corvus-srv: the kernel's per-Proc identity tag — the
+    // thylacine's stripe pattern; every animal's is unique. Drawn from
+    // a monotonic kernel counter at proc_alloc (kproc + every rfork
+    // child get a fresh value — an rfork child's `stripes` DIFFERS from
+    // its parent's, so a child is structurally distinct, never an
+    // inherited identity). Immutable for the Proc's life — no API
+    // mutates it after proc_alloc. `stripes == 0` is a reserved fail-
+    // closed sentinel: an unstamped or torn-read Proc reads 0 and
+    // authorizes nothing. It is the kernel's unforgeable answer to
+    // "is this the same Proc?" — read via proc_stripes by SYS_SRV_PEER
+    // (P5-corvus-srv-impl-a3) to stamp a /srv connection's peer
+    // identity (CORVUS-DESIGN.md §6.3; specs/corvus.tla ConnRecord.peer).
+    u64                stripes;
 };
 
 #define PROC_FLAG_NODUMP            (1u << 0)
@@ -189,11 +203,11 @@ struct Proc {
 #define PROC_FLAG_MLOCKED           (1u << 2)
 #define PROC_FLAG_CONSOLE_ATTACHED  (1u << 3)
 
-_Static_assert(sizeof(struct Proc) == 136,
-               "struct Proc size pinned at 136 bytes (P3-Bcb baseline 112 "
-               "+ vmas 8 + caps 8 + proc_flags+pad 8 = 136; bumped from 128 "
-               "at P5-corvus-syscalls). Adding a field grows the SLUB cache; "
-               "update this assert deliberately so the change is intentional.");
+_Static_assert(sizeof(struct Proc) == 144,
+               "struct Proc size pinned at 144 bytes (P5-corvus-syscalls "
+               "baseline 136 + stripes 8 = 144, bumped at P5-corvus-srv-"
+               "impl-a1). Adding a field grows the SLUB cache; update this "
+               "assert deliberately so the change is intentional.");
 _Static_assert(__builtin_offsetof(struct Proc, magic) == 0,
                "magic must be at offset 0 so SLUB's freelist write on "
                "kmem_cache_free clobbers it (double-free defense — "
@@ -380,5 +394,19 @@ void proc_mark_console_attached(struct Proc *p);
 // proc_is_console_attached — true iff `p` carries
 // PROC_FLAG_CONSOLE_ATTACHED. Returns false for a NULL `p`.
 bool proc_is_console_attached(const struct Proc *p);
+
+// =============================================================================
+// P5-corvus-srv: per-Proc identity tag.
+// =============================================================================
+//
+// `stripes` (see the struct field) is the kernel's unforgeable per-Proc
+// identity, set fresh at proc_alloc. proc_stripes is the read API
+// SYS_SRV_PEER (P5-corvus-srv-impl-a3) uses to stamp a /srv connection's
+// peer identity; specs/corvus.tla pins it as ConnRecord.peer.
+
+// proc_stripes — return `p`'s `stripes` tag. Fail-closed: a NULL or
+// corrupted Proc reads as 0 — the reserved sentinel that authorizes
+// nothing (never a stale or fabricated tag).
+u64 proc_stripes(const struct Proc *p);
 
 #endif // THYLACINE_PROC_H

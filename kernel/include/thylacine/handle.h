@@ -6,8 +6,10 @@
 // (e.g., as the return of `burrow_create`) or transferred via 9P (Phase 4).
 //
 // At v1.0 P2-Fc:
-//   - Eight kobj kinds (per §18.2): Process / Thread / BURROW / Spoor
-//     (transferable) + MMIO / IRQ / DMA / Interrupt (non-transferable).
+//   - Nine kobj kinds (per §18.2): Process / Thread / BURROW / Spoor
+//     (transferable) + MMIO / IRQ / DMA / Interrupt (hardware, non-
+//     transferable) + Srv (a /srv connection Spoor, non-transferable;
+//     P5-corvus-srv-impl-a1).
 //   - Six rights (per §18.2): READ / WRITE / MAP / TRANSFER / DMA / SIGNAL.
 //   - Per-Proc HandleTable is a fixed-size array (PROC_HANDLE_MAX = 64).
 //     Phase 5+ refactors to growable RB-tree when the syscall surface
@@ -27,6 +29,9 @@
 //   I-4 (OnlyTransferVia9P)  — no direct cross-Proc transfer syscall.
 //   I-5 (HwHandlesAtOrigin)  — hw handles never transfer.
 //   I-6 (RightsCeiling)      — handle rights only reduce on dup/transfer.
+//   SrvHandlesAtOrigin       — KObj_Srv handles never transfer — the
+//                              I-5-style structural rule for /srv
+//                              connection Spoors (P5-corvus-srv).
 
 #ifndef THYLACINE_HANDLE_H
 #define THYLACINE_HANDLE_H
@@ -52,26 +57,31 @@ enum kobj_kind {
     KOBJ_IRQ        = 6,    // an IRQ subscription, non-transferable
     KOBJ_DMA        = 7,    // a DMA buffer, non-transferable
     KOBJ_INTERRUPT  = 8,    // an eventfd-like interrupt, non-transferable
-    KOBJ_KIND_COUNT = 9,
+    KOBJ_SRV        = 9,    // a /srv/<name> connection Spoor, non-transferable (P5-corvus-srv)
+    KOBJ_KIND_COUNT = 10,
 };
 
 // _Static_assert pins KIND_COUNT — adding a new kind requires bumping
 // this constant + extending the transferable/hw masks below + reviewing
 // every switch over kobj_kind in the kernel (per ARCH §18.3 typed
 // transferability).
-_Static_assert(KOBJ_KIND_COUNT == 9,
+_Static_assert(KOBJ_KIND_COUNT == 10,
                "kobj_kind drift: when adding a new kind, update "
-               "KOBJ_KIND_TRANSFERABLE_MASK / KOBJ_KIND_HW_MASK + every "
-               "switch over kobj_kind (handle_transfer_via_9p, etc.)");
+               "KOBJ_KIND_TRANSFERABLE_MASK / KOBJ_KIND_HW_MASK / "
+               "KOBJ_KIND_SRV_MASK + every switch over kobj_kind "
+               "(handle_release_obj, handle_acquire_obj).");
 
-// Per ARCH §28 I-4 + I-5: handles are partitioned into transferable
-// (Process / Thread / BURROW / Spoor — pass-able via 9P) and hardware
-// (MMIO / IRQ / DMA / Interrupt — non-transferable). KOBJ_INVALID is
-// neither.
+// Per ARCH §28 I-4 + I-5 + §18.2: handles are partitioned into three
+// disjoint sets — transferable (Process / Thread / BURROW / Spoor —
+// pass-able via 9P), hardware (MMIO / IRQ / DMA / Interrupt — pinned to
+// the origin Proc), and srv (Srv — a /srv connection Spoor, likewise
+// pinned to its origin Proc). KOBJ_INVALID is in none.
 //
-// Implementing the spec's TxKObjs / HwKObjs partition. The disjoint
-// _Static_assert is the runtime guarantee that no kind ever appears
-// in both sets — a violation would silently let a hw handle transfer.
+// Implementing specs/handles.tla's TxKObjs / HwKObjs / SrvKObjs
+// partition (its three pairwise-disjoint ASSUMEs). The _Static_asserts
+// below are the runtime guarantee that no kind ever appears in two
+// sets — a violation would silently let a non-transferable handle
+// transfer.
 #define KOBJ_KIND_TRANSFERABLE_MASK \
     ((1u << KOBJ_PROCESS) | (1u << KOBJ_THREAD) | \
      (1u << KOBJ_BURROW)     | (1u << KOBJ_SPOOR))
@@ -80,10 +90,24 @@ _Static_assert(KOBJ_KIND_COUNT == 9,
     ((1u << KOBJ_MMIO) | (1u << KOBJ_IRQ) | \
      (1u << KOBJ_DMA)  | (1u << KOBJ_INTERRUPT))
 
+// P5-corvus-srv: KObj_Srv is non-transferable but NOT hardware — a
+// distinct third partition. A /srv connection Spoor is pinned to the
+// Proc that opened it, so the kernel-stamped peer identity behind it
+// (CORVUS-DESIGN.md §6.3) is unforgeable across a 9P walk.
+#define KOBJ_KIND_SRV_MASK \
+    (1u << KOBJ_SRV)
+
 _Static_assert((KOBJ_KIND_TRANSFERABLE_MASK & KOBJ_KIND_HW_MASK) == 0,
-               "transferable + hw kind masks must be disjoint — every "
-               "kind is either passable via 9P or pinned to its origin "
-               "Proc, never both");
+               "transferable + hw kind masks must be disjoint");
+_Static_assert((KOBJ_KIND_TRANSFERABLE_MASK & KOBJ_KIND_SRV_MASK) == 0,
+               "transferable + srv kind masks must be disjoint");
+_Static_assert((KOBJ_KIND_HW_MASK & KOBJ_KIND_SRV_MASK) == 0,
+               "hw + srv kind masks must be disjoint");
+_Static_assert((KOBJ_KIND_TRANSFERABLE_MASK | KOBJ_KIND_HW_MASK |
+                KOBJ_KIND_SRV_MASK)
+                   == (((1u << KOBJ_KIND_COUNT) - 1u) & ~(1u << KOBJ_INVALID)),
+               "every kobj_kind except KOBJ_INVALID must be classified "
+               "into exactly one of the three partitions");
 
 // Per ARCH §18.2. Handle rights — bitmask of what the holder can do.
 typedef u32 rights_t;
@@ -189,12 +213,15 @@ struct Handle *handle_get(struct Proc *p, hidx_t h);
 // Maps to specs/handles.tla::HandleDup(p, h, new_rights).
 hidx_t handle_dup(struct Proc *p, hidx_t h, rights_t new_rights);
 
-// Type classifiers. Map to the spec's TxKObjs / HwKObjs partitions.
-// kobj_kind_is_transferable returns true for Process / Thread / BURROW /
-// Spoor; kobj_kind_is_hw returns true for MMIO / IRQ / DMA / Interrupt.
-// KOBJ_INVALID returns false from both.
+// Type classifiers. Map to specs/handles.tla's TxKObjs / HwKObjs /
+// SrvKObjs partitions. kobj_kind_is_transferable returns true for
+// Process / Thread / BURROW / Spoor; kobj_kind_is_hw for MMIO / IRQ /
+// DMA / Interrupt; kobj_kind_is_srv for Srv. Exactly one is true for
+// every kind except KOBJ_INVALID (and any out-of-range value), for
+// which all three return false.
 bool kobj_kind_is_transferable(enum kobj_kind k);
 bool kobj_kind_is_hw(enum kobj_kind k);
+bool kobj_kind_is_srv(enum kobj_kind k);
 
 // Per-Proc count of in-use handle slots (linear scan; for tests +
 // diagnostics, not perf-critical).

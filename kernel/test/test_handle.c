@@ -1,6 +1,6 @@
 // Handle table tests (P2-Fc).
 //
-// Five tests:
+// Six tests:
 //
 //   handles.alloc_close_smoke
 //     Allocate a fresh Proc; alloc several handles of different kinds;
@@ -24,9 +24,16 @@
 //     again; verify the freed slot is reused.
 //
 //   handles.kind_classifiers
-//     Truth table: kobj_kind_is_transferable / kobj_kind_is_hw for every
-//     enum value (KOBJ_INVALID, PROCESS, THREAD, BURROW, CHAN, MMIO, IRQ,
-//     DMA, INTERRUPT). Pins the spec's TxKObjs / HwKObjs partition.
+//     Truth table: kobj_kind_is_transferable / kobj_kind_is_hw /
+//     kobj_kind_is_srv for every enum value (KOBJ_INVALID, PROCESS,
+//     THREAD, BURROW, SPOOR, MMIO, IRQ, DMA, INTERRUPT, SRV). Pins the
+//     spec's TxKObjs / HwKObjs / SrvKObjs partition.
+//
+//   handles.srv_kind
+//     KObj_Srv (P5-corvus-srv): classifies into the srv partition
+//     (non-transferable, non-hardware); a KObj_Srv handle allocs +
+//     closes normally but cannot be dup'd (NoSrvDup — exactly one /srv
+//     connection Spoor per Proc, CORVUS-DESIGN.md §6.2).
 //
 // Maps to specs/handles.tla state invariants:
 //   - RightsCeiling: rights_monotonic
@@ -35,6 +42,9 @@
 //     truth table)
 //   - HandleAlloc / HandleClose / HandleDup mechanics: alloc_close_smoke
 //     + dup_lifecycle + full_table_oom
+//   - SrvHandlesAtOrigin: srv_kind (the runtime side of KObj_Srv non-
+//     transferability is the classifier truth table + the NoSrvDup
+//     rejection in handle_dup)
 
 #include "test.h"
 
@@ -48,6 +58,7 @@ void test_handles_rights_monotonic(void);
 void test_handles_dup_lifecycle(void);
 void test_handles_full_table_oom(void);
 void test_handles_kind_classifiers(void);
+void test_handles_srv_kind(void);
 
 // Shared test helper: allocate a Proc, exercise it, then transition to
 // ZOMBIE + free. proc_alloc has already allocated a fresh empty handle
@@ -275,6 +286,19 @@ void test_handles_kind_classifiers(void) {
     TEST_ASSERT(kobj_kind_is_hw(KOBJ_DMA),        "DMA must be hw");
     TEST_ASSERT(kobj_kind_is_hw(KOBJ_INTERRUPT),  "INTERRUPT must be hw");
 
+    // Srv: the /srv connection-Spoor partition (P5-corvus-srv) — a
+    // third disjoint set, non-transferable AND non-hardware.
+    TEST_ASSERT(kobj_kind_is_srv(KOBJ_SRV),       "SRV must classify as srv");
+    TEST_ASSERT(!kobj_kind_is_transferable(KOBJ_SRV),
+        "SRV must NOT be transferable");
+    TEST_ASSERT(!kobj_kind_is_hw(KOBJ_SRV),       "SRV must NOT be hw");
+    TEST_ASSERT(!kobj_kind_is_srv(KOBJ_PROCESS),  "PROCESS must NOT be srv");
+    TEST_ASSERT(!kobj_kind_is_srv(KOBJ_SPOOR),    "SPOOR must NOT be srv");
+    TEST_ASSERT(!kobj_kind_is_srv(KOBJ_MMIO),     "MMIO must NOT be srv");
+    TEST_ASSERT(!kobj_kind_is_srv(KOBJ_INVALID),  "KOBJ_INVALID must NOT be srv");
+    TEST_ASSERT(!kobj_kind_is_srv((enum kobj_kind)99),
+        "out-of-range kind must NOT be srv");
+
     // Disjoint: nothing is both.
     TEST_ASSERT(!kobj_kind_is_hw(KOBJ_PROCESS),
         "PROCESS must NOT be hw");
@@ -292,4 +316,56 @@ void test_handles_kind_classifiers(void) {
         "out-of-range kind must NOT be transferable");
     TEST_ASSERT(!kobj_kind_is_hw((enum kobj_kind)99),
         "out-of-range kind must NOT be hw");
+}
+
+// handles.srv_kind — KObj_Srv (P5-corvus-srv-impl-a1).
+//
+// KObj_Srv is the kobj kind for a /srv/<name> connection Spoor. It is
+// non-transferable and non-hardware — specs/handles.tla's third
+// partition, SrvKObjs. This test pins:
+//   - classification: srv, not transferable, not hw;
+//   - a KObj_Srv handle allocs, looks up, and closes like any kind;
+//   - NoSrvDup: handle_dup of a KObj_Srv handle returns -1 — the
+//     runtime side of SrvHandlesAtOrigin (one connection Spoor per
+//     Proc; handles.tla's HandleDup precondition `h.kobj \in TxKObjs`).
+void test_handles_srv_kind(void) {
+    // Classification: KObj_Srv is in exactly the srv partition.
+    TEST_ASSERT(kobj_kind_is_srv(KOBJ_SRV),
+        "KOBJ_SRV must classify as srv");
+    TEST_ASSERT(!kobj_kind_is_transferable(KOBJ_SRV),
+        "KOBJ_SRV must NOT be transferable (SrvHandlesAtOrigin)");
+    TEST_ASSERT(!kobj_kind_is_hw(KOBJ_SRV),
+        "KOBJ_SRV is non-transferable but NOT hardware");
+
+    struct Proc *p = test_proc_make();
+    TEST_ASSERT(p != NULL, "test_proc_make returned NULL");
+
+    // A KObj_Srv handle allocates + looks up like any kind. obj is
+    // NULL here (the underlying /srv connection object lands in
+    // -impl-a3); handle_alloc accepts NULL obj on test paths.
+    hidx_t h = handle_alloc(p, KOBJ_SRV, RIGHT_READ | RIGHT_WRITE, NULL);
+    TEST_ASSERT(h >= 0, "handle_alloc(KOBJ_SRV) must succeed");
+    TEST_EXPECT_EQ(handle_table_count(p->handles), 1, "count should be 1");
+
+    struct Handle *got = handle_get(p, h);
+    TEST_ASSERT(got != NULL, "handle_get(srv) returned NULL");
+    TEST_EXPECT_EQ((int)got->kind, (int)KOBJ_SRV, "srv handle kind mismatch");
+
+    // NoSrvDup: dup of a KObj_Srv handle is rejected — exactly as a
+    // hardware handle's dup is. A subset-rights request is still
+    // rejected: the kind, not the rights, is what forbids the dup.
+    hidx_t dup = handle_dup(p, h, RIGHT_READ);
+    TEST_EXPECT_EQ(dup, -1,
+        "handle_dup of a KObj_Srv handle must return -1 (NoSrvDup)");
+    hidx_t dup_same = handle_dup(p, h, RIGHT_READ | RIGHT_WRITE);
+    TEST_EXPECT_EQ(dup_same, -1,
+        "handle_dup of a KObj_Srv handle must return -1 even at same rights");
+    TEST_EXPECT_EQ(handle_table_count(p->handles), 1,
+        "a rejected dup must not consume a slot");
+
+    // Close releases the slot cleanly.
+    TEST_EXPECT_EQ(handle_close(p, h), 0, "handle_close(srv)");
+    TEST_EXPECT_EQ(handle_table_count(p->handles), 0, "srv handle closed");
+
+    test_proc_drop(p);
 }
