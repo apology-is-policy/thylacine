@@ -208,6 +208,12 @@ void test_devramfs_read_version(void);
 void test_devramfs_read_partial_offset(void);
 void test_devramfs_read_dir_returns_neg1(void);
 void test_devramfs_write_rejected(void);
+void test_devsrv_registered(void);
+void test_devsrv_post_gate(void);
+void test_devsrv_post_basic(void);
+void test_devsrv_tombstone(void);
+void test_devsrv_registry_full(void);
+void test_devsrv_post_rollback(void);
 void test_virtio_mmio_probe(void);
 void test_virtio_magic_value(void);
 void test_virtio_version_modern(void);
@@ -732,6 +738,12 @@ struct test_case g_tests[] = {
     { "devramfs.read_dir_returns_neg1",
                                        test_devramfs_read_dir_returns_neg1, false, NULL },
     { "devramfs.write_rejected",       test_devramfs_write_rejected,       false, NULL },
+    { "devsrv.registered",             test_devsrv_registered,             false, NULL },
+    { "devsrv.post_gate",              test_devsrv_post_gate,              false, NULL },
+    { "devsrv.post_basic",             test_devsrv_post_basic,             false, NULL },
+    { "devsrv.tombstone",              test_devsrv_tombstone,              false, NULL },
+    { "devsrv.registry_full",          test_devsrv_registry_full,          false, NULL },
+    { "devsrv.post_rollback",          test_devsrv_post_rollback,          false, NULL },
     { "virtio.mmio_probe",             test_virtio_mmio_probe,             false, NULL },
     { "virtio.magic_value",            test_virtio_magic_value,            false, NULL },
     { "virtio.version_modern",         test_virtio_version_modern,         false, NULL },

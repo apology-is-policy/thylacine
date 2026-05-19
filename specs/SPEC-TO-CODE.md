@@ -466,21 +466,25 @@ ProcCap (CapHostowner). Datasets identified by their owner user
 file limitation on record/function constants; the convention matches
 the live system (`thylacine/users/<name>` dataset path).
 
-Safety: TLC-clean — 24,968,209 states generated, 3,027,456 distinct,
-depth 27, ~1min20s wall time (the P5-corvus-srv connection layer
-~128×'d the distinct-state count vs. the prior 23,652 baseline — each
-Proc gains a connection, accept, peer-op, and exit dimension).
+Safety: TLC-clean — `corvus.cfg` explores 186,493,573 states /
+21,641,580 distinct, depth 32, ~3min36s wall time on 8 cores. The
+P5-corvus-srv-impl-a2 post-gate extension added the connection-layer
+variables `service_marked` / `service_poster` (replacing the prior
+one-shot `service_posted` BOOLEAN) / `service_posters`, the actions
+`MarkMayPost` / `PostService(p)` / `ServiceTombstone`, the invariant
+`ServicePosterEverMarked`, and the bug class `BuggyPostWithoutMarker`.
 
 | Config | Flag | Invariant | Result | Distinct | Depth |
 |---|---|---|---|---|---|
-| `corvus.cfg`                              | all flags FALSE | `Invariants` | clean | 23652 | 18 |
-| `corvus_buggy_unwrap_cross_user.cfg`      | `BUGGY_UNWRAP_CROSS_USER`       | `UnwrapOwnerOnly`        | violation | 32 | 4 |
-| `corvus_buggy_auth_binding_mutate.cfg`    | `BUGGY_AUTH_BINDING_MUTATE`     | `SessionUserImmutable`   | violation | 34 | 4 |
-| `corvus_buggy_admin_without_proc_cap.cfg` | `BUGGY_ADMIN_WITHOUT_PROC_CAP`  | `AdminRequiresProcCap`   | violation | 34 | 4 |
-| `corvus_buggy_elevate_without_console.cfg`| `BUGGY_ELEVATE_WITHOUT_CONSOLE` | `HostownerRequiresConsole` | violation | 44 | 4 |
-| `corvus_buggy_transfer_rebind.cfg`        | `BUGGY_TRANSFER_REBIND`         | `SessionUserImmutable`   | violation | 32 | 4 |
-| `corvus_buggy_identity_cached_on_fid.cfg` | `BUGGY_IDENTITY_CACHED_ON_FID`  | `ConnOpIdentityIsKernelTruth` | violation | 8501 | 8 |
-| `corvus_buggy_dead_proc_stale.cfg`        | `BUGGY_DEAD_PROC_STALE`         | `ConnOpPeerWasLive`      | violation | 6767 | 7 |
+| `corvus.cfg`                              | all flags FALSE | `Invariants` | clean | 21641580 | 32 |
+| `corvus_buggy_unwrap_cross_user.cfg`      | `BUGGY_UNWRAP_CROSS_USER`       | `UnwrapOwnerOnly`        | violation | 82 | 4 |
+| `corvus_buggy_auth_binding_mutate.cfg`    | `BUGGY_AUTH_BINDING_MUTATE`     | `SessionUserImmutable`   | violation | 85 | 5 |
+| `corvus_buggy_admin_without_proc_cap.cfg` | `BUGGY_ADMIN_WITHOUT_PROC_CAP`  | `AdminRequiresProcCap`   | violation | 83 | 5 |
+| `corvus_buggy_elevate_without_console.cfg`| `BUGGY_ELEVATE_WITHOUT_CONSOLE` | `HostownerRequiresConsole` | violation | 105 | 4 |
+| `corvus_buggy_transfer_rebind.cfg`        | `BUGGY_TRANSFER_REBIND`         | `SessionUserImmutable`   | violation | 83 | 5 |
+| `corvus_buggy_identity_cached_on_fid.cfg` | `BUGGY_IDENTITY_CACHED_ON_FID`  | `ConnOpIdentityIsKernelTruth` | violation | 17372 | 9 |
+| `corvus_buggy_dead_proc_stale.cfg`        | `BUGGY_DEAD_PROC_STALE`         | `ConnOpPeerWasLive`      | violation | 25819 | 9 |
+| `corvus_buggy_post_without_marker.cfg`    | `BUGGY_POST_WITHOUT_MARKER`     | `ServicePosterEverMarked` | violation | 79 | 4 |
 
 The session identity model uses (creation_proc, bound_user) as the
 immutable pair, with owner_proc as a separate field that mutates on
@@ -495,6 +499,7 @@ Spec actions ↔ impl mapping (impl filled in at P5-corvus-bringup):
 | Spec action | Source location (target) | Notes |
 |---|---|---|
 | `MarkConsoleAttached(p)` | `kernel/proc.c::proc_mark_console_attached` (as-built; landed P5-hostowner-a), called from `kernel/joey.c::joey_thunk` | One-way set of `PROC_FLAG_CONSOLE_ATTACHED` (`proc_flags` bit 3). At v1.0 joey marks itself — the console-login chain root; P5-login extends the chain to per-user shells. `rfork` never propagates the bit (`proc_alloc` zeroes `proc_flags`; `rfork_internal` does not copy it), so it is conferred ONLY by an explicit call — the impl form of "console_attached grows solely via MarkConsoleAttached." `proc_is_console_attached` is the fail-closed query. |
+| `MarkMayPost(p)` | `kernel/proc.c::proc_mark_may_post_service` (as-built; landed P5-corvus-srv-impl-a2) | One-way set of `PROC_FLAG_MAY_POST_SERVICE` (`proc_flags` bit 4) — same one-way-marker discipline as `MarkConsoleAttached` (never cleared, never `rfork`-propagated). joey stamps the corvus Proc it spawns; the joey→corvus call site lands at P5-corvus-srv-impl-b. `proc_may_post_service` is the fail-closed query. |
 | `AuthSuccess(p, u)` | `usr/corvus/src/main.rs::handle_auth` (as-built) | AUTH verb (verb_id=1). Argon2id → KEK → unwrap hybrid keypair → session token mint + bind to peer Proc identity. Spec models the resulting session record; in-RAM secret discipline (C-1/C-2/C-5) is runtime, not state-machine. |
 | `SessionClose(p)` | `usr/corvus/src/main.rs::handle_session_close` (as-built) + Proc-exit cleanup path | SESSION_CLOSE verb (verb_id=3) or Spoor-close-driven cleanup. Clears in-RAM secrets. |
 | `SessionTransfer(src, dst)` | `usr/corvus/src/transport/spoor_peer.rs::on_peer_change` | Triggered when the kernel reports a new peer Proc identity on /srv/corvus/'s Spoor (9P RIGHT_TRANSFER). MUST copy bound_user from existing session; MUST NOT take user from request fields. |
@@ -506,13 +511,15 @@ Spec actions ↔ impl mapping (impl filled in at P5-corvus-bringup):
 | `BuggyAdminWithoutProcCap` | (none — bug class prevented by `kernel.has_cap(peer_pid, CapHostowner)` gate) | Same shape as BuggyUnwrapCrossUser: single check; bug shapes are missing-check or wrong-cap. |
 | `BuggyElevateWithoutConsole` | (none — bug class prevented by `peer_console_bit?` precondition) | Same shape; bug = missing precondition. |
 | `BuggyTransferRebind` | (none — bug class prevented by the SessionTransfer impl COPYING bound_user from src) | Critical impl discipline: the transfer path MUST take bound_user from the existing session by reference, not from any request-supplied field. |
-| `PostService` | (P5-corvus-srv-impl-a — kernel `/srv` registry; corvus startup `SYS_POST_SERVICE("corvus")`) | corvus registers as the 9P server for `/srv/corvus`. The kernel creates and owns all transport (C-23); posting/rebinding gated on a joey-stamped `proc_flags` bit. |
+| `PostService(p)` | `kernel/syscall.c::sys_post_service_for_proc` + `kernel/devsrv.c::srv_reserve`/`srv_commit` (as-built; landed P5-corvus-srv-impl-a2) | `SYS_POST_SERVICE` registers the caller as the `/srv/<name>` server. Gated on `proc_may_post_service` (spec precondition `p \in service_marked`). Reserve-then-commit two-phase so a failed `handle_alloc` rolls back (`srv_abort`). The kernel owns all transport (C-23). corvus's startup `SYS_POST_SERVICE("corvus")` call lands at P5-corvus-srv-impl-b. |
+| `ServiceTombstone` | `kernel/devsrv.c::srv_proc_exit_notify`, called from `kernel/proc.c::exits` (as-built; landed P5-corvus-srv-impl-a2) | On poster exit the kernel flips the service `LIVE → TOMBSTONED`: the name stays reserved, re-postable only by a joey-marked Proc. Poster identity is held by value (`stripes`), so a reaped poster is no UAF. |
 | `SrvBind(cn, p)` | (P5-corvus-srv-impl-a — `kernel/devsrv.c` open path) | The kernel mints a fresh per-Proc connection (transport pair + dedicated synchronous `p9_client`) when Proc p opens `/srv/corvus`, stamping the peer identity. One connection per Proc. |
 | `SrvAccept(cn)` | (P5-corvus-srv-impl-a — `SYS_SRV_ACCEPT` handler; -impl-b corvus accept loop) | corvus accepts a kernel-bound connection; it never mints transport itself. |
 | `SrvPeerOp(cn)` | (P5-corvus-srv-impl-b — corvus per-request `SYS_SRV_PEER` call) | corvus resolves a connection's peer FRESH via `SYS_SRV_PEER` on every identity-gated op; never caches identity on fid state (C-22). |
 | `ProcExit(p)` | `kernel/proc.c` Proc-exit path (as-built) + P5-corvus-srv-impl-a connection teardown | A peer Proc exits; `SYS_SRV_PEER` thereafter fail-closes for that connection until teardown. |
 | `BuggyIdentityCachedOnFid(cn1, cn2)` | (none — bug class prevented by corvus calling `SYS_SRV_PEER(cn)` per request rather than caching peer identity on fid state) | The bug: corvus credits an op on one connection to another connection's peer. Caught by `ConnOpIdentityIsKernelTruth`. |
 | `BuggyDeadProcStale(cn)` | (none — bug class prevented by `SYS_SRV_PEER`'s dead-Proc guard, which reads `caps` live under the process-table lock and fail-closes for an exited peer) | The bug: `SYS_SRV_PEER` returns an exited peer's stale identity. Caught by `ConnOpPeerWasLive`. |
+| `BuggyPostWithoutMarker(p)` | (none — bug class prevented by the `proc_may_post_service` gate in `sys_post_service_for_proc`, the first check before any registry mutation) | The bug: `SYS_POST_SERVICE` skips the post-gate, letting an unmarked Proc claim `/srv/corvus` and impersonate the key agent. Caught by `ServicePosterEverMarked`. |
 
 Spec invariants ↔ impl enforcement:
 
@@ -525,6 +532,7 @@ Spec invariants ↔ impl enforcement:
 | `ConnOpIdentityIsKernelTruth` (C-22) | corvus calls `SYS_SRV_PEER(connection_handle)` per request; the kernel returns the connection's bind-time-stamped peer. corvus never sources peer identity from the client nor caches it on fid state. |
 | `ConnOpPeerWasLive` (C-22) | `SYS_SRV_PEER`'s dead-Proc guard — an exited / zombie / reaped peer yields a fail-closed result, so no op is authorized against a dead peer. |
 | `ConnTransportKernelOwned` (C-23) | `SYS_POST_SERVICE`: the kernel creates and owns every `/srv/corvus` connection's transport; corvus only accepts kernel-bound connections. `KObj_Srv` (handles.tla) keeps the transport out of any handle table. |
+| `ServicePosterEverMarked` (§6.1 post-gate) | `sys_post_service_for_proc` calls `proc_may_post_service` before any registry mutation; the bit is one-way + never `rfork`-propagated, so a tombstoned name is re-postable only by a joey-marked Proc — no malicious rebind race on corvus restart. Landed P5-corvus-srv-impl-a2. |
 
 References:
 - `docs/CORVUS-DESIGN.md` — full design + invariant numbering.

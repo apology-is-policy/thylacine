@@ -318,6 +318,29 @@ enum {
     // Returns -1 on the union of SYS_SPAWN_WITH_FDS and SYS_SPAWN_WITH_CAPS
     // failure conditions.
     SYS_SPAWN_FULL   = 25,   // arg: name_va, name_len, fd_list_va, fd_count, cap_mask
+
+    // P5-corvus-srv-impl-a2: SYS_POST_SERVICE(name_va, name_len) →
+    // service_handle / -1
+    //   x0 = name_va    user-VA pointer to the service-name bytes
+    //   x1 = name_len   bytes; 1..SRV_NAME_MAX (32; <thylacine/devsrv.h>)
+    // Register the calling Proc as the 9P server for /srv/<name> in the
+    // kernel service registry (CORVUS-DESIGN.md §6.1; ARCH §9.4 / §11.2c)
+    // and return a KObj_Srv service handle. The kernel creates and owns
+    // all transport (invariant C-23). corvus calls SYS_POST_SERVICE
+    // ("corvus") at startup.
+    //
+    // Gated on the one-way joey-stamped PROC_FLAG_MAY_POST_SERVICE bit:
+    // an unmarked Proc cannot post or hijack a name. A name with a live
+    // server is not displaceable; a TOMBSTONED name (its prior poster
+    // exited) is re-postable only by a marked Proc.
+    //
+    // Returns the service handle (hidx ≥ 0) on success, -1 on:
+    //   - caller lacks PROC_FLAG_MAY_POST_SERVICE
+    //   - name_len out of range / name_va bound violation
+    //   - name contains a non-identifier byte (allowed: 0x21..0x7e, no '/')
+    //   - the name already has a live or in-flight server
+    //   - the service registry is full / handle table full
+    SYS_POST_SERVICE = 26,   // arg: name_va (x0), name_len (x1)
 };
 
 // SYS_GETRANDOM flags.

@@ -17,6 +17,7 @@
 //   3. thread_init    — kthread (TID 0) appears, parented to kproc
 
 #include <thylacine/caps.h>
+#include <thylacine/devsrv.h>
 #include <thylacine/extinction.h>
 #include <thylacine/handle.h>
 #include <thylacine/page.h>
@@ -619,6 +620,44 @@ bool proc_is_console_attached(const struct Proc *p) {
 }
 
 // =============================================================================
+// P5-corvus-srv-impl-a2: the /srv service-registry post-gate.
+// =============================================================================
+//
+// PROC_FLAG_MAY_POST_SERVICE marks a Proc allowed to register a name in
+// the /srv service registry via SYS_POST_SERVICE. joey is the sole
+// stamper — it marks the corvus Proc it spawns (CORVUS-DESIGN.md §6.1) —
+// so an ordinary Proc cannot post or hijack /srv/corvus, and a
+// tombstoned name is re-postable only by a marked Proc. Same one-way
+// discipline as console-attachment: kernel-stamped, never cleared, never
+// propagated by rfork. specs/corvus.tla pins it as MarkMayPost gating
+// PostService.
+
+void proc_mark_may_post_service(struct Proc *p) {
+    if (!p)                    extinction("proc_mark_may_post_service(NULL)");
+    if (p->magic != PROC_MAGIC)
+        extinction("proc_mark_may_post_service on corrupted Proc");
+    // The post-gate is trust-conferring — refuse to stamp a dying/zombie
+    // descriptor so a caller bug surfaces loudly (mirrors
+    // proc_mark_console_attached).
+    if (p->state != PROC_STATE_ALIVE)
+        extinction("proc_mark_may_post_service on non-ALIVE Proc");
+    // One-way, idempotent — never cleared, never propagated by rfork
+    // (rfork_internal does not copy proc_flags). The |= is non-atomic:
+    // sound under the v1.0 single-thread-per-Proc invariant (see the
+    // proc_mark_console_attached note); the multi-threaded-Proc lift must
+    // convert every proc_flags writer to __atomic_or_fetch.
+    p->proc_flags |= PROC_FLAG_MAY_POST_SERVICE;
+}
+
+bool proc_may_post_service(const struct Proc *p) {
+    // Fail-closed: a NULL or corrupted Proc reads as NOT permitted — this
+    // query gates SYS_POST_SERVICE, so the safe default on a bad pointer
+    // is "may not post."
+    if (!p || p->magic != PROC_MAGIC) return false;
+    return (p->proc_flags & PROC_FLAG_MAY_POST_SERVICE) != 0;
+}
+
+// =============================================================================
 // P5-corvus-srv: per-Proc identity tag.
 // =============================================================================
 
@@ -650,6 +689,16 @@ void exits(const char *msg) {
     // explicitly.
     if (p->thread_count != 1)
         extinction("exits with thread_count != 1 (multi-thread Procs not supported at P2-D)");
+
+    // P5-corvus-srv-impl-a2: tombstone any /srv service this Proc posted
+    // (specs/corvus.tla ServiceTombstone). Done here — p still ALIVE,
+    // still this thread's own valid Proc — and BEFORE the g_proc_table_-
+    // lock acquire: srv_proc_exit_notify takes only the leaf registry
+    // lock, so it never enters a lock-ordering relation with
+    // g_proc_table_lock. exits() is the sole termination path at v1.0
+    // (proc.c: state reaches ZOMBIE only through here); a future async-
+    // kill path must call srv_proc_exit_notify too.
+    srv_proc_exit_notify(p);
 
     // P3-A (R5-H F75 close): all lineage mutations + parent wakeup
     // happen UNDER g_proc_table_lock atomically. The previous code did

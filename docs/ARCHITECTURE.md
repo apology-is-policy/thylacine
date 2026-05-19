@@ -2031,7 +2031,7 @@ Every resource the kernel manages is a **kernel object**. Kernel objects are acc
 | `KObj_IRQ` | The right to receive a specific interrupt | **No (typed)** |
 | `KObj_DMA` | A DMA-capable physically contiguous buffer | **No (typed)** |
 | `KObj_Interrupt` | An eventfd-like fd that fires on IRQ delivery | **No (typed)** |
-| `KObj_Srv` | A `/srv/<name>` per-connection channel to a userspace 9P server | **No (typed)** |
+| `KObj_Srv` | A `/srv/<name>` service registration (held by the server) or per-connection channel (held by a client) to a userspace 9P server | **No (typed)** |
 
 Handles carry **rights** — a bitmask of what the holder can do:
 

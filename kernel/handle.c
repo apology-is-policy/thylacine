@@ -146,12 +146,13 @@ static void handle_release_obj(enum kobj_kind kind, void *obj) {
         spoor_clunk((struct Spoor *)obj);
         break;
     case KOBJ_SRV:
-        // P5-corvus-srv-impl-a1: the KObj_Srv kind exists; the /srv
-        // connection + service objects it points at are built in
-        // -impl-a3, which wires their teardown here. Until then no
-        // KObj_Srv handle carries a non-NULL obj (the !obj guard at
-        // the top of this function short-circuits test-path srv
-        // handles), so the no-op is correct.
+        // P5-corvus-srv: a KObj_Srv handle's obj is a /srv kernel
+        // object. For a service object (SYS_POST_SERVICE; -impl-a2) the
+        // no-op is correct — a service is a registry entry whose
+        // lifetime is the poster Proc's (tombstoned by exits() ->
+        // srv_proc_exit_notify, never freed), NOT the handle's, so
+        // closing the handle must not touch it. -impl-a3 adds connection
+        // objects, whose transport teardown is wired into this case.
         break;
     case KOBJ_INVALID:
     case KOBJ_PROCESS:

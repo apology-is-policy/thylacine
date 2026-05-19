@@ -142,10 +142,12 @@ struct Proc {
     //     syscall; this is structural).
     u64                caps;
 
-    // P5-corvus-syscalls / P5-hostowner-a: per-Proc one-way flag bits.
-    // Zero-initialized at proc_alloc; once set, never cleared. Bits 0-2
-    // are set by the v1.0 hardening syscalls (CORVUS-DESIGN.md §4.1.1);
-    // bit 3 is kernel-stamped at fork time (not a syscall).
+    // P5-corvus-syscalls / P5-hostowner-a / P5-corvus-srv: per-Proc
+    // one-way flag bits. Zero-initialized at proc_alloc; once set, never
+    // cleared. Bits 0-2 are set by the v1.0 hardening syscalls
+    // (CORVUS-DESIGN.md §4.1.1); bits 3-4 are kernel-stamped (not
+    // syscalls). Like every proc_flags bit, none is propagated by rfork
+    // (rfork_internal deliberately does not copy proc_flags).
     //
     // PROC_FLAG_NODUMP   (bit 0) — set by SYS_SET_DUMPABLE(0). When set,
     //                              future core-dump paths must refuse
@@ -176,6 +178,19 @@ struct Proc {
     //                              rfork_internal) — only an explicit
     //                              proc_mark_console_attached confers
     //                              it (corvus.tla MarkConsoleAttached).
+    // PROC_FLAG_MAY_POST_SERVICE (bit 4) — kernel-stamped (NOT a
+    //                              syscall) via proc_mark_may_post_-
+    //                              service(). The post-gate for the
+    //                              /srv service registry: SYS_POST_-
+    //                              SERVICE refuses a Proc that does not
+    //                              carry this bit (CORVUS-DESIGN §6.1;
+    //                              specs/corvus.tla MarkMayPost /
+    //                              PostService). joey stamps it on the
+    //                              corvus Proc it spawns — so an
+    //                              ordinary Proc cannot post or hijack
+    //                              /srv/corvus, and a tombstoned name is
+    //                              re-postable only by a marked Proc.
+    //                              NOT propagated by rfork.
     //
     // Bits 0-2: per CORVUS-DESIGN.md C-2, corvus (and per-user stratumd)
     // call all three hardening syscalls at startup; the flags are
@@ -202,6 +217,7 @@ struct Proc {
 #define PROC_FLAG_NOTRACE           (1u << 1)
 #define PROC_FLAG_MLOCKED           (1u << 2)
 #define PROC_FLAG_CONSOLE_ATTACHED  (1u << 3)
+#define PROC_FLAG_MAY_POST_SERVICE  (1u << 4)
 
 _Static_assert(sizeof(struct Proc) == 144,
                "struct Proc size pinned at 144 bytes (P5-corvus-syscalls "
@@ -408,5 +424,25 @@ bool proc_is_console_attached(const struct Proc *p);
 // corrupted Proc reads as 0 — the reserved sentinel that authorizes
 // nothing (never a stale or fabricated tag).
 u64 proc_stripes(const struct Proc *p);
+
+// =============================================================================
+// P5-corvus-srv-impl-a2: the /srv service-registry post-gate.
+// =============================================================================
+//
+// PROC_FLAG_MAY_POST_SERVICE gates SYS_POST_SERVICE: only a Proc carrying
+// it may register a name in the /srv service registry. joey stamps it on
+// the corvus Proc it spawns (CORVUS-DESIGN.md §6.1); specs/corvus.tla
+// pins this as MarkMayPost gating PostService.
+
+// proc_mark_may_post_service — stamp PROC_FLAG_MAY_POST_SERVICE on `p`.
+// One-way: idempotent, never cleared, never conferred by rfork. v1.0
+// caller: joey, on the /sbin/corvus Proc it spawns (wired at
+// P5-corvus-srv-impl-b, when corvus posts /srv/corvus for real).
+// Extincts on a NULL / corrupted / non-ALIVE Proc.
+void proc_mark_may_post_service(struct Proc *p);
+
+// proc_may_post_service — true iff `p` carries PROC_FLAG_MAY_POST_SERVICE.
+// Returns false for a NULL / corrupted `p` (fail-closed).
+bool proc_may_post_service(const struct Proc *p);
 
 #endif // THYLACINE_PROC_H

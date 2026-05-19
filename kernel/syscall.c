@@ -13,6 +13,7 @@
 #include <thylacine/dev.h>
 #include <thylacine/dev9p.h>
 #include <thylacine/devramfs.h>
+#include <thylacine/devsrv.h>
 #include <thylacine/dma_handle.h>
 #include <thylacine/elf.h>
 #include <thylacine/exec.h>
@@ -1722,6 +1723,82 @@ static s64 sys_wait_pid_handler(u64 status_out_va) {
 }
 
 // =============================================================================
+// SYS_POST_SERVICE — register the caller as a /srv service (P5-corvus-srv).
+// =============================================================================
+//
+// Registers the calling Proc as the 9P server for /srv/<name> and returns
+// a KObj_Srv service handle. CORVUS-DESIGN.md §6.1; spec contract
+// specs/corvus.tla::PostService (the marked-poster gate + the reserve/
+// commit two-phase).
+//
+// Returns the service handle (hidx ≥ 0) on success, -1 on failure.
+int sys_post_service_for_proc(struct Proc *p, const char *name,
+                              size_t name_len) {
+    if (!p)                                            return -1;
+    if (!name)                                         return -1;
+    if (name_len == 0 || name_len > SRV_NAME_MAX)       return -1;
+
+    // Post-gate (corvus.tla PostService precondition `p \in service_-
+    // marked`): the caller must carry the one-way joey-stamped bit.
+    // Fail-closed — proc_may_post_service returns false for a bad Proc.
+    if (!proc_may_post_service(p))                      return -1;
+
+    // Service names are short identifiers: printable ASCII, no '/' (a
+    // path separator the P5-corvus-srv-impl-a3 walk splits on), no
+    // control bytes. Reject anything else so a name can never be
+    // mis-parsed once it is a /srv path component.
+    for (size_t i = 0; i < name_len; i++) {
+        unsigned char c = (unsigned char)name[i];
+        if (c < 0x21u || c > 0x7eu || c == '/')         return -1;
+    }
+
+    // Phase 1: reserve a registry slot. The entry goes RESERVING — it is
+    // never observably LIVE until the handle below exists.
+    struct SrvService *svc = NULL;
+    enum srv_state     prior = SRV_STATE_FREE;
+    if (srv_reserve(name, (u8)name_len, p, &svc, &prior) != 0) return -1;
+
+    // Install the KObj_Srv service handle. The handle's obj is the
+    // registry entry; the entry outlives the handle (its lifetime is the
+    // poster Proc's, via the exits() tombstone), so handle close does not
+    // free it — handle_release_obj's KOBJ_SRV case is a no-op for a
+    // service object.
+    hidx_t h = handle_alloc(p, KOBJ_SRV, RIGHT_READ | RIGHT_WRITE, svc);
+    if (h < 0) {
+        // Phase 2 (failure): roll the reservation back to its prior state
+        // (FREE for a fresh post, TOMBSTONED for a rebind) so a retry —
+        // or another poster — can still claim the name.
+        srv_abort(svc, prior);
+        return -1;
+    }
+
+    // Phase 2 (success): RESERVING -> LIVE. Infallible.
+    srv_commit(svc);
+    return (int)h;
+}
+
+static s64 sys_post_service_handler(u64 name_va, u64 name_len_raw) {
+    struct Thread *t = current_thread();
+    if (!t)                                            return -1;
+    struct Proc *p = t->proc;
+    if (!p)                                            return -1;
+
+    if (name_len_raw == 0 || name_len_raw > SRV_NAME_MAX) return -1;
+
+    // Copy the name from user-VA into kernel scratch, per-byte
+    // uaccess_load_u8 (same shape as SYS_SPAWN's name copy). name_len_raw
+    // ≤ SRV_NAME_MAX is the buffer bound.
+    char name[SRV_NAME_MAX];
+    for (u64 i = 0; i < name_len_raw; i++) {
+        u8 b;
+        if (uaccess_load_u8(name_va + i, &b) != 0)      return -1;
+        name[i] = (char)b;
+    }
+
+    return (s64)sys_post_service_for_proc(p, name, (size_t)name_len_raw);
+}
+
+// =============================================================================
 // Dispatch entry.
 // =============================================================================
 
@@ -1873,6 +1950,11 @@ void syscall_dispatch(struct exception_context *ctx) {
                                                    ctx->regs[2],
                                                    ctx->regs[3],
                                                    ctx->regs[4]);
+        return;
+
+    case SYS_POST_SERVICE:
+        ctx->regs[0] = (u64)sys_post_service_handler(ctx->regs[0],
+                                                     ctx->regs[1]);
         return;
 
     default:

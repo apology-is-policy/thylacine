@@ -182,13 +182,15 @@ CONSTANTS
     Conns,                              \* set of /srv connection-slot ids (>= 2)
     ProcCaps,                           \* set of Proc-cap labels
     CapHostowner,                       \* \in ProcCaps — the admin gate
+    NoProc,                             \* sentinel: /srv/corvus has no live poster (UNPOSTED / TOMBSTONED)
     BUGGY_UNWRAP_CROSS_USER,            \* bug: skip session-owns-dataset check
     BUGGY_AUTH_BINDING_MUTATE,          \* bug: mutate session.bound_user post-auth
     BUGGY_ADMIN_WITHOUT_PROC_CAP,       \* bug: admin verb accepts without CapHostowner
     BUGGY_ELEVATE_WITHOUT_CONSOLE,      \* bug: AdminElevate skips console check
     BUGGY_TRANSFER_REBIND,              \* bug: session transfer re-binds bound_user
     BUGGY_IDENTITY_CACHED_ON_FID,       \* bug: corvus credits a connection op from a stale fid-cached peer
-    BUGGY_DEAD_PROC_STALE               \* bug: SYS_SRV_PEER returns stale identity for an exited peer
+    BUGGY_DEAD_PROC_STALE,              \* bug: SYS_SRV_PEER returns stale identity for an exited peer
+    BUGGY_POST_WITHOUT_MARKER           \* bug: SYS_POST_SERVICE skips the joey-marker post-gate
 
 (***************************************************************************)
 (* Datasets and DatasetOwner — modeling decision: one dataset per user,    *)
@@ -217,6 +219,7 @@ ASSUME Cardinality(Procs) >= 2
 ASSUME Cardinality(Users) >= 2
 ASSUME Cardinality(Conns) >= 2
 ASSUME CapHostowner \in ProcCaps
+ASSUME NoProc \notin Procs
 ASSUME BUGGY_UNWRAP_CROSS_USER \in BOOLEAN
 ASSUME BUGGY_AUTH_BINDING_MUTATE \in BOOLEAN
 ASSUME BUGGY_ADMIN_WITHOUT_PROC_CAP \in BOOLEAN
@@ -224,6 +227,7 @@ ASSUME BUGGY_ELEVATE_WITHOUT_CONSOLE \in BOOLEAN
 ASSUME BUGGY_TRANSFER_REBIND \in BOOLEAN
 ASSUME BUGGY_IDENTITY_CACHED_ON_FID \in BOOLEAN
 ASSUME BUGGY_DEAD_PROC_STALE \in BOOLEAN
+ASSUME BUGGY_POST_WITHOUT_MARKER \in BOOLEAN
 
 (***************************************************************************)
 (* Session record. Three fields:                                           *)
@@ -311,7 +315,9 @@ VARIABLES
     console_attached,   \* SUBSET Procs — joey-stamped console-login Procs
     completed_unwraps,  \* SUBSET UnwrapRecord — ghost log
     completed_admins,   \* SUBSET AdminRecord — ghost log
-    service_posted,     \* BOOLEAN — corvus has posted /srv/corvus (SYS_POST_SERVICE)
+    service_marked,     \* SUBSET Procs — joey-stamped "may post /srv/corvus" Procs
+    service_poster,     \* Procs \cup {NoProc} — current live poster, NoProc = none
+    service_posters,    \* SUBSET Procs — ghost append-only log of every Proc that posted
     connections,        \* SUBSET ConnRecord — kernel-bound /srv connections (append-only)
     corvus_accepted,    \* SUBSET Conns — connections corvus has SYS_SRV_ACCEPT'd
     proc_alive,         \* SUBSET Procs — Procs that have not exited
@@ -322,11 +328,12 @@ VARIABLES
 \* exactly one layer and UNCHANGEs the other (see Next).
 corevars == <<sessions, session_origin, proc_caps, console_attached,
               completed_unwraps, completed_admins>>
-connvars == <<service_posted, connections, corvus_accepted, proc_alive,
-              completed_conn_ops>>
+connvars == <<service_marked, service_poster, service_posters, connections,
+              corvus_accepted, proc_alive, completed_conn_ops>>
 vars == <<sessions, session_origin, proc_caps, console_attached,
-          completed_unwraps, completed_admins, service_posted, connections,
-          corvus_accepted, proc_alive, completed_conn_ops>>
+          completed_unwraps, completed_admins, service_marked, service_poster,
+          service_posters, connections, corvus_accepted, proc_alive,
+          completed_conn_ops>>
 
 TypeOk ==
     /\ sessions \subseteq SessionRecord
@@ -335,7 +342,9 @@ TypeOk ==
     /\ console_attached \subseteq Procs
     /\ completed_unwraps \subseteq UnwrapRecord
     /\ completed_admins \subseteq AdminRecord
-    /\ service_posted \in BOOLEAN
+    /\ service_marked \subseteq Procs
+    /\ service_poster \in Procs \cup {NoProc}
+    /\ service_posters \subseteq Procs
     /\ connections \subseteq ConnRecord
     /\ corvus_accepted \subseteq Conns
     /\ proc_alive \subseteq Procs
@@ -352,7 +361,9 @@ Init ==
     /\ console_attached = {}
     /\ completed_unwraps = {}
     /\ completed_admins = {}
-    /\ service_posted = FALSE
+    /\ service_marked = {}
+    /\ service_poster = NoProc
+    /\ service_posters = {}
     /\ connections = {}
     /\ corvus_accepted = {}
     /\ proc_alive = Procs
@@ -647,14 +658,64 @@ BuggyTransferRebind(src, dst, new_u) ==
 PeerOf(cn) == (CHOOSE c \in connections : c.conn = cn).peer
 
 (***************************************************************************)
-(* PostService — corvus registers /srv/corvus (SYS_POST_SERVICE). One-     *)
-(* shot; the kernel binds connections only to a posted service. Maps to    *)
-(* corvus's startup SYS_POST_SERVICE("corvus") call (CORVUS-DESIGN §6).    *)
+(* MarkMayPost(p) — joey stamps p's Proc with the one-way "may post        *)
+(* /srv/corvus" bit (PROC_FLAG_MAY_POST_SERVICE). Monotonic: once set,     *)
+(* never cleared, never propagated by rfork — the same one-way-marker      *)
+(* discipline as MarkConsoleAttached. joey is the sole stamper; it marks   *)
+(* the corvus Proc it spawns (CORVUS-DESIGN.md §6.1).                      *)
 (***************************************************************************)
-PostService ==
-    /\ ~service_posted
-    /\ service_posted' = TRUE
-    /\ UNCHANGED <<connections, corvus_accepted, proc_alive, completed_conn_ops>>
+MarkMayPost(p) ==
+    /\ p \notin service_marked
+    /\ service_marked' = service_marked \cup {p}
+    /\ UNCHANGED <<service_poster, service_posters, connections,
+                   corvus_accepted, proc_alive, completed_conn_ops>>
+
+(***************************************************************************)
+(* PostService(p) — Proc p registers itself as the /srv/corvus server      *)
+(* (SYS_POST_SERVICE). Two gates:                                          *)
+(*                                                                         *)
+(*   p \in service_marked      — the joey-stamped post-gate. An unmarked   *)
+(*                               Proc cannot post or hijack /srv/corvus.   *)
+(*   service_poster = NoProc   — no live poster: the service is either     *)
+(*                               UNPOSTED (never posted) or TOMBSTONED     *)
+(*                               (prior poster exited, name reserved). A   *)
+(*                               TOMBSTONED name is re-postable; an        *)
+(*                               already-LIVE one is not (no displacing a  *)
+(*                               running server).                          *)
+(*                                                                         *)
+(* service_posters is a ghost append-only log of every Proc that ever      *)
+(* posted — ServicePosterEverMarked checks every entry was marked, so a    *)
+(* buggy post survives in the evidence trail even after a later tombstone. *)
+(*                                                                         *)
+(* Maps to SYS_POST_SERVICE (kernel/syscall.c sys_post_service_for_proc +  *)
+(* kernel/devsrv.c srv_post; CORVUS-DESIGN.md §6.1).                       *)
+(***************************************************************************)
+PostService(p) ==
+    /\ p \in service_marked
+    /\ service_poster = NoProc
+    /\ p \in proc_alive
+    /\ service_poster'  = p
+    /\ service_posters' = service_posters \cup {p}
+    /\ UNCHANGED <<service_marked, connections, corvus_accepted, proc_alive,
+                   completed_conn_ops>>
+
+(***************************************************************************)
+(* ServiceTombstone — the live poster's Proc has exited. The kernel        *)
+(* TOMBSTONES the name (service_poster := NoProc): the name stays reserved *)
+(* — only a joey-marked Proc may rebind it via PostService — but no live   *)
+(* server backs it, so SrvBind cannot mint new connections to it. Models   *)
+(* kernel/proc.c exits() -> srv_proc_exit_notify (CORVUS-DESIGN.md §6.1).  *)
+(*                                                                         *)
+(* Modeled as a step distinct from ProcExit so TLC explores the window     *)
+(* between the poster's exit and the tombstone — a stale-LIVE service must *)
+(* never authorize a connection.                                          *)
+(***************************************************************************)
+ServiceTombstone ==
+    /\ service_poster \in Procs
+    /\ service_poster \notin proc_alive
+    /\ service_poster' = NoProc
+    /\ UNCHANGED <<service_marked, service_posters, connections,
+                   corvus_accepted, proc_alive, completed_conn_ops>>
 
 (***************************************************************************)
 (* SrvBind(cn, p) — the kernel mints a connection for client Proc p when   *)
@@ -664,12 +725,13 @@ PostService ==
 (* connection's (conn, peer) binding never changes once minted.            *)
 (***************************************************************************)
 SrvBind(cn, p) ==
-    /\ service_posted
+    /\ service_poster \in Procs
     /\ p \in proc_alive
     /\ ~(\E c \in connections : c.conn = cn)
     /\ ~(\E c \in connections : c.peer = p)
     /\ connections' = connections \cup {[conn |-> cn, peer |-> p]}
-    /\ UNCHANGED <<service_posted, corvus_accepted, proc_alive, completed_conn_ops>>
+    /\ UNCHANGED <<service_marked, service_poster, service_posters,
+                   corvus_accepted, proc_alive, completed_conn_ops>>
 
 (***************************************************************************)
 (* SrvAccept(cn) — corvus accepts a kernel-bound connection                *)
@@ -680,7 +742,8 @@ SrvAccept(cn) ==
     /\ \E c \in connections : c.conn = cn
     /\ cn \notin corvus_accepted
     /\ corvus_accepted' = corvus_accepted \cup {cn}
-    /\ UNCHANGED <<service_posted, connections, proc_alive, completed_conn_ops>>
+    /\ UNCHANGED <<service_marked, service_poster, service_posters,
+                   connections, proc_alive, completed_conn_ops>>
 
 (***************************************************************************)
 (* SrvPeerOp(cn) — corvus performs an identity-gated operation on an       *)
@@ -694,7 +757,8 @@ SrvPeerOp(cn) ==
     /\ PeerOf(cn) \in proc_alive
     /\ completed_conn_ops' = completed_conn_ops
            \cup {[conn |-> cn, attributed_peer |-> PeerOf(cn), peer_live |-> TRUE]}
-    /\ UNCHANGED <<service_posted, connections, corvus_accepted, proc_alive>>
+    /\ UNCHANGED <<service_marked, service_poster, service_posters,
+                   connections, corvus_accepted, proc_alive>>
 
 (***************************************************************************)
 (* ProcExit(p) — client Proc p exits. proc_alive shrinks. The connection   *)
@@ -705,7 +769,8 @@ SrvPeerOp(cn) ==
 ProcExit(p) ==
     /\ p \in proc_alive
     /\ proc_alive' = proc_alive \ {p}
-    /\ UNCHANGED <<service_posted, connections, corvus_accepted, completed_conn_ops>>
+    /\ UNCHANGED <<service_marked, service_poster, service_posters,
+                   connections, corvus_accepted, completed_conn_ops>>
 
 (***************************************************************************)
 (* ============== CONNECTION-LAYER BUG CLASSES (P5-corvus-srv) =========== *)
@@ -733,7 +798,8 @@ BuggyIdentityCachedOnFid(cn1, cn2) ==
            \cup {[conn |-> cn1,
                   attributed_peer |-> PeerOf(cn2),
                   peer_live |-> PeerOf(cn2) \in proc_alive]}
-    /\ UNCHANGED <<service_posted, connections, corvus_accepted, proc_alive>>
+    /\ UNCHANGED <<service_marked, service_poster, service_posters,
+                   connections, corvus_accepted, proc_alive>>
 
 (***************************************************************************)
 (* BuggyDeadProcStale(cn) — C-22 violation (kernel side). corvus performs  *)
@@ -752,7 +818,30 @@ BuggyDeadProcStale(cn) ==
     /\ PeerOf(cn) \notin proc_alive
     /\ completed_conn_ops' = completed_conn_ops
            \cup {[conn |-> cn, attributed_peer |-> PeerOf(cn), peer_live |-> FALSE]}
-    /\ UNCHANGED <<service_posted, connections, corvus_accepted, proc_alive>>
+    /\ UNCHANGED <<service_marked, service_poster, service_posters,
+                   connections, corvus_accepted, proc_alive>>
+
+(***************************************************************************)
+(* BuggyPostWithoutMarker(p) — post-gate violation. SYS_POST_SERVICE's     *)
+(* handler SKIPS the proc_may_post_service() check: a Proc with no joey-   *)
+(* stamped PROC_FLAG_MAY_POST_SERVICE bit registers as the /srv/corvus     *)
+(* server anyway. Real-world analogue: kernel/syscall.c                    *)
+(* sys_post_service_for_proc omitting the gate, letting any Proc claim     *)
+(* /srv/corvus and impersonate the key agent to its clients.               *)
+(*                                                                         *)
+(* The bug still appends p to the service_posters ghost log (the post      *)
+(* really happened); ServicePosterEverMarked finds p \notin service_marked *)
+(* — violated. The evidence survives a later ServiceTombstone.             *)
+(***************************************************************************)
+BuggyPostWithoutMarker(p) ==
+    /\ BUGGY_POST_WITHOUT_MARKER
+    /\ p \notin service_marked
+    /\ service_poster = NoProc
+    /\ p \in proc_alive
+    /\ service_poster'  = p
+    /\ service_posters' = service_posters \cup {p}
+    /\ UNCHANGED <<service_marked, connections, corvus_accepted, proc_alive,
+                   completed_conn_ops>>
 
 (***************************************************************************)
 (* Next — disjunction of all actions. The session layer (corevars) and the *)
@@ -773,13 +862,16 @@ Next ==
           \/ \E p \in Procs : BuggyElevateWithoutConsole(p)
           \/ \E src \in Procs : \E dst \in Procs : \E u \in Users : BuggyTransferRebind(src, dst, u)
        /\ UNCHANGED connvars
-    \/ /\ \/ PostService
+    \/ /\ \/ \E p \in Procs : MarkMayPost(p)
+          \/ \E p \in Procs : PostService(p)
+          \/ ServiceTombstone
           \/ \E cn \in Conns : \E p \in Procs : SrvBind(cn, p)
           \/ \E cn \in Conns : SrvAccept(cn)
           \/ \E cn \in Conns : SrvPeerOp(cn)
           \/ \E p \in Procs : ProcExit(p)
           \/ \E cn1 \in Conns : \E cn2 \in Conns : BuggyIdentityCachedOnFid(cn1, cn2)
           \/ \E cn \in Conns : BuggyDeadProcStale(cn)
+          \/ \E p \in Procs : BuggyPostWithoutMarker(p)
        /\ UNCHANGED corevars
 
 Spec == Init /\ [][Next]_vars
@@ -922,6 +1014,23 @@ ConnTransportKernelOwned ==
     \A cn \in corvus_accepted :
         \E c \in connections : c.conn = cn
 
+(***************************************************************************)
+(* ServicePosterEverMarked — CORVUS-DESIGN.md §6.1 post-gate. Every Proc   *)
+(* that ever posted /srv/corvus was joey-marked (PROC_FLAG_MAY_POST_       *)
+(* SERVICE). service_posters is the append-only ledger of posters;         *)
+(* service_marked only grows — so a legitimately-posted service's poster   *)
+(* is always in service_marked.                                            *)
+(*                                                                         *)
+(* This pins the anti-impersonation property: an unmarked Proc cannot      *)
+(* claim /srv/corvus — neither on the cold UNPOSTED name nor by racing a   *)
+(* corvus restart for the TOMBSTONED name (PostService's marker gate is    *)
+(* the rebind authority — one mechanism, not two). BuggyPostWithoutMarker  *)
+(* posts unmarked; its ghost-log entry has no service_marked match —       *)
+(* violated. The evidence persists through a later ServiceTombstone.       *)
+(***************************************************************************)
+ServicePosterEverMarked ==
+    \A p \in service_posters : p \in service_marked
+
 Invariants ==
     /\ TypeOk
     /\ SessionUserImmutable
@@ -931,5 +1040,6 @@ Invariants ==
     /\ ConnOpIdentityIsKernelTruth
     /\ ConnOpPeerWasLive
     /\ ConnTransportKernelOwned
+    /\ ServicePosterEverMarked
 
 ====

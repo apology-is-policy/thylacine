@@ -8,8 +8,8 @@
 // At v1.0 P2-Fc:
 //   - Nine kobj kinds (per §18.2): Process / Thread / BURROW / Spoor
 //     (transferable) + MMIO / IRQ / DMA / Interrupt (hardware, non-
-//     transferable) + Srv (a /srv connection Spoor, non-transferable;
-//     P5-corvus-srv-impl-a1).
+//     transferable) + Srv (a /srv service or connection object, non-
+//     transferable; P5-corvus-srv).
 //   - Six rights (per §18.2): READ / WRITE / MAP / TRANSFER / DMA / SIGNAL.
 //   - Per-Proc HandleTable is a fixed-size array (PROC_HANDLE_MAX = 64).
 //     Phase 5+ refactors to growable RB-tree when the syscall surface
@@ -57,7 +57,7 @@ enum kobj_kind {
     KOBJ_IRQ        = 6,    // an IRQ subscription, non-transferable
     KOBJ_DMA        = 7,    // a DMA buffer, non-transferable
     KOBJ_INTERRUPT  = 8,    // an eventfd-like interrupt, non-transferable
-    KOBJ_SRV        = 9,    // a /srv/<name> connection Spoor, non-transferable (P5-corvus-srv)
+    KOBJ_SRV        = 9,    // a /srv service or connection object, non-transferable (P5-corvus-srv)
     KOBJ_KIND_COUNT = 10,
 };
 
