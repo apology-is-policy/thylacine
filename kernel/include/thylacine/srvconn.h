@@ -30,6 +30,12 @@
 // registry). SYS_SRV_PEER's live `caps` read (a3c) re-finds the Proc
 // by `stripes` under the process-table lock.
 //
+// The connection also captures the SERVER's identity by value — the
+// stripes of the service poster (corvus) at mint time. SYS_SRV_PEER
+// (a3c) gates on it: only the poster may query a connection's peer
+// (CORVUS-DESIGN §6.3). A by-value tag, not a `SrvService *` back-
+// pointer, keeps the SrvConn free of cross-object lifetime coupling.
+//
 // Spec: no new module. The s2c blocking drain is a Rendez consumer
 // with a deadline — the wait/wake protocol `specs/tsleep.tla` /
 // `specs/scheduler.tla` (NoMissedWakeup) already pin; teardown's
@@ -110,6 +116,11 @@ struct SrvConn {
     int                 peer_pid;          // the peer Proc's pid (diagnostics)
     bool                peer_console;      // peer's console-attachment bit
 
+    // Server identity — the service poster's (corvus's) stripes tag at
+    // mint, by value. SYS_SRV_PEER's poster gate compares it against the
+    // caller's stripes (CORVUS-DESIGN §6.3).
+    u64                 server_stripes;
+
     // Kernel-client-side blocking-recv deadline. Absolute ns on the
     // timer_now_ns timebase; 0 = no deadline (blocks indefinitely,
     // woken only by data or EOF). The op-driving path sets this before
@@ -138,17 +149,18 @@ _Static_assert(__builtin_offsetof(struct SrvConn, magic) == 0,
 // =============================================================================
 
 // srvconn_create — mint a connection. `peer_stripes` / `peer_pid` /
-// `peer_console` are the opening client Proc's kernel-stamped identity,
-// captured by value. Allocates the SrvConn, its receive buffer, and the
-// embedded synchronous p9_client (configured over this connection's
-// transport). The connection is born LIVE with refcount 1 — the caller
-// owns that reference and drops it via srvconn_unref.
+// `peer_console` are the opening client Proc's kernel-stamped identity;
+// `server_stripes` is the service poster's (corvus's) stripes tag. All
+// four are captured by value. Allocates the SrvConn, its receive buffer,
+// and the embedded synchronous p9_client (configured over this
+// connection's transport). The connection is born LIVE with refcount 1 —
+// the caller owns that reference and drops it via srvconn_unref.
 //
 // Returns NULL on allocation failure (all-or-nothing — no partial
 // state remains). The p9_client is initialized but NOT handshaken;
 // driving Tversion/Tattach is the open path's job (a3b).
 struct SrvConn *srvconn_create(u64 peer_stripes, int peer_pid,
-                               bool peer_console);
+                               bool peer_console, u64 server_stripes);
 
 // srvconn_ref — take a reference. Extincts on a NULL / corrupted conn.
 void srvconn_ref(struct SrvConn *cn);
@@ -191,6 +203,25 @@ void srvconn_set_client_deadline(struct SrvConn *cn, u64 deadline_ns);
 // op-driving path map a transport failure to -ETIMEDOUT (corvus hung)
 // vs -EIO (corvus crashed). Returns false for a NULL / corrupted conn.
 bool srvconn_client_timed_out(const struct SrvConn *cn);
+
+// =============================================================================
+// Peer identity (SYS_SRV_PEER — P5-corvus-srv-impl-a3c).
+//
+// The connection's kernel-stamped identity fields, captured by value at
+// mint (CORVUS-DESIGN §6.3). Each accessor revalidates SRV_CONN_MAGIC and
+// fail-closes (0 / false) on a NULL or corrupted conn — a torn read can
+// never produce a stale or fabricated identity.
+// =============================================================================
+
+// srvconn_peer_stripes — the peer (client) Proc's immutable stripes tag.
+u64 srvconn_peer_stripes(const struct SrvConn *cn);
+
+// srvconn_peer_console — the peer Proc's console-attachment bit at mint.
+bool srvconn_peer_console(const struct SrvConn *cn);
+
+// srvconn_server_stripes — the service poster's (corvus's) stripes tag at
+// mint. SYS_SRV_PEER's poster gate compares this against the caller.
+u64 srvconn_server_stripes(const struct SrvConn *cn);
 
 // =============================================================================
 // Raw byte transport.

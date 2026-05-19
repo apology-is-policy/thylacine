@@ -89,7 +89,7 @@ void test_srvconn_create_destroy(void) {
     u64 want_stripes = proc_stripes(p);
     int want_pid     = p->pid;
 
-    struct SrvConn *cn = srvconn_create(want_stripes, want_pid, false);
+    struct SrvConn *cn = srvconn_create(want_stripes, want_pid, false, 0);
     TEST_ASSERT(cn != NULL, "srvconn_create");
     TEST_EXPECT_EQ(srvconn_total_created(), created0 + 1,
         "create bumps the created counter");
@@ -119,7 +119,7 @@ void test_srvconn_create_destroy(void) {
 // ---------------------------------------------------------------------------
 
 void test_srvconn_roundtrip(void) {
-    struct SrvConn *cn = srvconn_create(0x1111u, 11, false);
+    struct SrvConn *cn = srvconn_create(0x1111u, 11, false, 0);
     TEST_ASSERT(cn != NULL, "srvconn_create");
 
     u8 out[64];
@@ -188,7 +188,7 @@ static bool sc_recv_verify_chunked(struct SrvConn *cn, long total, u8 seed) {
 }
 
 void test_srvconn_ring_capacity(void) {
-    struct SrvConn *cn = srvconn_create(0x2222u, 22, false);
+    struct SrvConn *cn = srvconn_create(0x2222u, 22, false, 0);
     TEST_ASSERT(cn != NULL, "srvconn_create");
 
     // Fill c2s to capacity; one further byte is refused (0 accepted —
@@ -241,7 +241,7 @@ static void sc_recv_consumer(void) {
 // ---------------------------------------------------------------------------
 
 void test_srvconn_recv_blocks_then_wakes(void) {
-    struct SrvConn *cn = srvconn_create(0x3333u, 33, false);
+    struct SrvConn *cn = srvconn_create(0x3333u, 33, false, 0);
     TEST_ASSERT(cn != NULL, "srvconn_create");
 
     g_sc_conn = cn;
@@ -285,7 +285,7 @@ void test_srvconn_recv_blocks_then_wakes(void) {
 // ---------------------------------------------------------------------------
 
 void test_srvconn_recv_deadline_timeout(void) {
-    struct SrvConn *cn = srvconn_create(0x4444u, 44, false);
+    struct SrvConn *cn = srvconn_create(0x4444u, 44, false, 0);
     TEST_ASSERT(cn != NULL, "srvconn_create");
 
     // deadline_ns == 1 — a timestamp long in the past. The s2c ring is
@@ -313,7 +313,7 @@ void test_srvconn_recv_deadline_timeout(void) {
 // ---------------------------------------------------------------------------
 
 void test_srvconn_teardown_eofs(void) {
-    struct SrvConn *cn = srvconn_create(0x5555u, 55, false);
+    struct SrvConn *cn = srvconn_create(0x5555u, 55, false, 0);
     TEST_ASSERT(cn != NULL, "srvconn_create");
 
     // Buffer residual bytes in BOTH directions, then tear down. The
@@ -361,7 +361,7 @@ void test_srvconn_teardown_eofs(void) {
 // ---------------------------------------------------------------------------
 
 void test_srvconn_teardown_wakes_blocked(void) {
-    struct SrvConn *cn = srvconn_create(0x6666u, 66, false);
+    struct SrvConn *cn = srvconn_create(0x6666u, 66, false, 0);
     TEST_ASSERT(cn != NULL, "srvconn_create");
 
     g_sc_conn = cn;

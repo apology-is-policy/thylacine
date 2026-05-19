@@ -175,7 +175,7 @@ static struct p9_transport_ops srvconn_transport_ops(struct SrvConn *cn) {
 // =============================================================================
 
 struct SrvConn *srvconn_create(u64 peer_stripes, int peer_pid,
-                               bool peer_console) {
+                               bool peer_console, u64 server_stripes) {
     struct SrvConn *cn = kmalloc(sizeof(*cn), KP_ZERO);
     if (!cn) return NULL;
 
@@ -212,6 +212,7 @@ struct SrvConn *srvconn_create(u64 peer_stripes, int peer_pid,
     cn->peer_stripes       = peer_stripes;
     cn->peer_pid           = peer_pid;
     cn->peer_console       = peer_console;
+    cn->server_stripes     = server_stripes;
     cn->client_deadline_ns = 0;
     cn->client_timed_out   = false;
     __atomic_store_n(&cn->ref, 1, __ATOMIC_RELAXED);
@@ -303,6 +304,30 @@ void srvconn_set_client_deadline(struct SrvConn *cn, u64 deadline_ns) {
 bool srvconn_client_timed_out(const struct SrvConn *cn) {
     if (!cn || cn->magic != SRV_CONN_MAGIC) return false;
     return cn->client_timed_out;
+}
+
+// =============================================================================
+// Peer identity accessors (SYS_SRV_PEER).
+// =============================================================================
+//
+// The identity fields are immutable for the SrvConn's life — set once by
+// srvconn_create, never rewritten. Each accessor revalidates the magic so
+// a torn / freed-object read fail-closes (0 / false) rather than yielding
+// a stale tag.
+
+u64 srvconn_peer_stripes(const struct SrvConn *cn) {
+    if (!cn || cn->magic != SRV_CONN_MAGIC) return 0;
+    return cn->peer_stripes;
+}
+
+bool srvconn_peer_console(const struct SrvConn *cn) {
+    if (!cn || cn->magic != SRV_CONN_MAGIC) return false;
+    return cn->peer_console;
+}
+
+u64 srvconn_server_stripes(const struct SrvConn *cn) {
+    if (!cn || cn->magic != SRV_CONN_MAGIC) return 0;
+    return cn->server_stripes;
 }
 
 // =============================================================================

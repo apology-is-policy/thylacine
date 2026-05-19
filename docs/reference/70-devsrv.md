@@ -1,13 +1,13 @@
 # 70 — devsrv: the `/srv` service registry
 
-**Status**: as-built at P5-corvus-srv-impl-a3b. The service registry, the
+**Status**: as-built at P5-corvus-srv-impl-a3c. The service registry, the
 `devsrv` Dev, the `SYS_POST_SERVICE` syscall, the `proc_flags` post-gate,
 and poster-exit tombstoning landed at a2; the **per-connection layer** —
 the `devsrv` walk op, the client-connect path (`srv_conn_open_for_proc`),
 the bounded accept backlog, `SYS_SRV_ACCEPT`, and the connection-Spoor
-read/write/close — landed at a3b. What remains: `SYS_SRV_PEER` (the
-peer-identity read; P5-corvus-srv-impl-a3c) and the corvus 9P server with
-the §6.2 step-5 handshake drive plus the production client-open syscall
+read/write/close — landed at a3b; `SYS_SRV_PEER` (the peer-identity read)
+landed at a3c. What remains: the corvus 9P server with the §6.2 step-5
+handshake drive plus the production client-open syscall
 (P5-corvus-srv-impl-b).
 
 ---
@@ -46,8 +46,9 @@ syscall, `SYS_POST_SERVICE`.
 ### Syscalls
 
 ```
-SYS_POST_SERVICE(name_va, name_len)  → service_handle / -1
-SYS_SRV_ACCEPT(service_handle)       → connection_handle / -1
+SYS_POST_SERVICE(name_va, name_len)        → service_handle / -1
+SYS_SRV_ACCEPT(service_handle)             → connection_handle / -1
+SYS_SRV_PEER(connection_handle, out_va)    → 0 / -1
 ```
 
 `SYS_POST_SERVICE` (syscall 26) registers the calling Proc as the 9P
@@ -80,8 +81,26 @@ corvus reads client→server 9P frame bytes off the accepted endpoint with
 `SYS_READ`, writes server→client bytes with `SYS_WRITE`, and `SYS_CLOSE`
 tears the connection down — no syscall-surface addition for the byte I/O.
 
-Both `_for_proc` cores return the handle (`hidx ≥ 0`) on success, `-1` on
-any failure (see Error paths).
+`SYS_SRV_PEER` (syscall 28) reads a `/srv` connection's
+kernel-stamped peer identity (CORVUS-DESIGN.md §6.3; invariant C-22).
+`connection_handle` is the `KObj_Spoor` connection endpoint from
+`SYS_SRV_ACCEPT`; `out_va` is a user-VA pointer to a 24-byte
+`struct srv_peer_info` (see Data structures) the kernel fills on success.
+The peer identity is stamped by the kernel, never supplied by the client
+and never cached on corvus's fid state — corvus calls `SYS_SRV_PEER` per
+request to learn who is on the other end. Gated to the service's poster:
+the caller's `stripes` must match the connection's recorded poster.
+Defined in `kernel/syscall.c` as the thin wrapper `sys_srv_peer_handler`
+over the testable core:
+
+```c
+int sys_srv_peer_for_proc(struct Proc *p, hidx_t conn_h,
+                          struct srv_peer_info *out);
+```
+
+`sys_srv_peer_for_proc` returns `0` on success (`*out` filled), `-1` on
+any failure. Both `_for_proc` cores above return the handle (`hidx ≥ 0`)
+on success, `-1` on any failure (see Error paths).
 
 ### Registry API — `<thylacine/devsrv.h>`
 
@@ -110,6 +129,7 @@ only** — it is not declared in `devsrv.h` and has no production caller.
 int  srv_conn_open_for_proc(struct Proc *p, const char *name, u8 name_len);
 struct SrvConn *srv_accept_blocking(struct SrvService *svc);
 struct Spoor *devsrv_make_conn_spoor(struct SrvConn *conn);
+struct SrvConn *devsrv_conn_of(struct Spoor *c);
 int  srv_backlog_depth(struct SrvService *svc);
 ```
 
@@ -129,6 +149,12 @@ single-waiter (corvus is single-threaded).
 connection Spoor (`dc='s'`, pre-opened) — corvus's server endpoint; the
 Spoor's read/write route to the `SrvConn` server side, its close drops
 the `SrvConn` reference.
+
+`devsrv_conn_of` is the inverse: it resolves a `devsrv` connection Spoor
+back to its `SrvConn`, returning `NULL` for a `NULL` / non-`devsrv` Spoor
+or for a `devsrv` *root* / *service* Spoor (discriminated by `dc` and the
+`aux`'s first `u64`). It was made non-static at a3c — `SYS_SRV_PEER`
+resolves corvus's accepted endpoint handle to its `SrvConn` through it.
 
 `srv_backlog_depth` returns the current accept-backlog depth (tests +
 diagnostics).
@@ -345,6 +371,64 @@ first); a connection Spoor (`SRV_CONN_MAGIC`) does `srvconn_teardown`
 then `srvconn_unref`. Closing a connection Spoor *is* a connection close
 (CORVUS-DESIGN.md §6.2: teardown EOFs both rings so the peer wakes).
 
+### `SYS_SRV_PEER` — the peer-identity read
+
+`SYS_SRV_PEER` (a3c, `kernel/syscall.c`) is corvus's read of a `/srv`
+connection's kernel-stamped peer identity (CORVUS-DESIGN.md §6.3;
+invariant C-22). It is the kernel's unforgeable answer to "who is on the
+other end of this connection" — corvus never trusts a client's
+self-report and never caches the identity on its fid state; it calls
+`SYS_SRV_PEER` per request. The spec contract is `specs/corvus.tla`
+`SrvPeerOp` (resolve the peer *fresh* every op) plus `ConnOpPeerWasLive`
+(a dead peer fail-closes).
+
+`sys_srv_peer_for_proc(p, conn_h, out)` is the testable core:
+
+1. `sys_lookup_spoor(p, conn_h, RIGHT_READ)` — resolve `conn_h` to a
+   `KObj_Spoor` handle the caller holds. `RIGHT_READ` is
+   defense-in-depth: `SYS_SRV_ACCEPT` installs `READ | WRITE` on the
+   endpoint, so the check is redundant with that path but pins the
+   contract — `SYS_SRV_PEER` reads a connection, and the endpoint a
+   reader holds is a `READ`-righted handle.
+2. `devsrv_conn_of(sp)` — the `SrvConn` behind the Spoor. It returns
+   `NULL` for a pipe, a `dev9p` Spoor, or a `devsrv` *root* / *service*
+   Spoor, so a handle that is a Spoor but not a `/srv` *connection*
+   endpoint fails here.
+3. **Poster gate** — `proc_stripes(p)` must be non-zero **and** equal
+   `srvconn_server_stripes(cn)`. The `SrvConn` captured the service
+   poster's `stripes` by value at mint; only that poster (corvus) may
+   query the connection's peer. A `stripes` of `0` (an unstamped or
+   torn-read caller) fails the gate fail-closed.
+4. **Immutable identity** — `srvconn_peer_stripes(cn)` and
+   `srvconn_peer_console(cn)`. These come straight off the `SrvConn`,
+   where they were captured by value at mint. No Proc lookup — so they
+   are knowable even after the peer Proc exits and is reaped, with no
+   use-after-free.
+5. **Live caps + the dead-Proc guard** — `proc_caps_by_stripes(
+   peer_stripes, &peer_caps)` (reference 14) re-finds the peer by
+   `stripes` under `g_proc_table_lock` and snapshots its live `caps`. If
+   no `ALIVE` Proc carries that `stripes` (the peer exited / is a zombie
+   / was reaped), it returns `false` and `out->caps` / `out->alive` both
+   fail-close to `0` — never a stale capability snapshot. This is the
+   kernel half of `corvus.tla` `ConnOpPeerWasLive`.
+
+On success the core fills `*out` (`stripes`, `caps`, `console`, `alive`)
+and returns `0`. A **dead peer is not an error**: the syscall still
+returns `0`, with `alive` = `0` and `caps` = `0` — the immutable
+`stripes` / `console` are still knowable; only the mutable caps
+fail-close.
+
+`sys_srv_peer_handler(conn_h_raw, out_va)` is the user-VA wrapper. It
+validates `out_va` with `sys_validate_user_buf(out_va, sizeof(struct
+srv_peer_info))` **before** any store (`uaccess_store_u8` does not
+range-check), calls the core into a zero-initialized stack `struct
+srv_peer_info`, then stores the 24-byte struct to `out_va` per-byte via
+`uaccess_store_u8` with fault fixup. On a partial-write fault it scrubs
+the bytes already written back to `0` before returning `-1` — so
+userspace can never read a torn peer identity (the
+`sys_wait_pid_handler` torn-write discipline). `case SYS_SRV_PEER` in
+`syscall_dispatch` routes `x0` / `x1` into it.
+
 ### `handle_release_obj` `KOBJ_SRV` magic discriminator
 
 A `KObj_Srv` handle's `obj` is one of two `/srv` kernel objects, and
@@ -489,6 +573,28 @@ connection Spoor's `aux` (a `SrvConn *`, `SRV_CONN_MAGIC`) — that is how
 a connection Spoor. `kmalloc`'d by `devsrv_walk`, `kfree`'d by
 `devsrv_close`.
 
+### `struct srv_peer_info` — `<thylacine/syscall.h>`
+
+```c
+struct srv_peer_info {
+    u64 stripes;     // peer Proc's identity tag (0 → unidentifiable peer)
+    u64 caps;        // peer's live capability set; 0 when alive == 0
+    u32 console;     // 1 iff the peer is console-attached, else 0
+    u32 alive;       // 1 iff an ALIVE Proc still carries `stripes`, else 0
+};
+```
+
+The `SYS_SRV_PEER` result — the kernel writes one of these to the
+syscall's `out_va` buffer. Unlike `struct SrvService` / `struct
+devsrv_svc_ref` (kernel-internal), this is a **syscall-ABI type**: a
+userspace consumer (corvus, at P5-corvus-srv-impl-b) decodes a fixed
+24-byte record, so the layout is pinned by `_Static_assert`s on the
+total size (24) and every field offset (`stripes` 0, `caps` 8, `console`
+16, `alive` 20 — naturally aligned, no implicit padding). `stripes` /
+`console` are the peer's **immutable** identity (captured by value on
+the `SrvConn` at mint); `caps` / `alive` are the **mutable** part — read
+live, fail-closed to `0` when the peer is no longer an `ALIVE` Proc.
+
 ### `enum srv_state`
 
 | State | Value | Meaning |
@@ -540,7 +646,7 @@ poster's accept; an accept or a poster-exit drain empties it.
 ## Spec cross-reference
 
 `specs/corvus.tla` already models the connection layer — no spec change
-was needed for a3b. The action↔code map:
+was needed for a3b or a3c. The action↔code map:
 
 | Spec action / invariant | Code |
 |---|---|
@@ -549,14 +655,21 @@ was needed for a3b. The action↔code map:
 | `ServiceTombstone` | `srv_proc_exit_notify`, called from `exits()` |
 | `SrvBind` | `srv_conn_open_for_proc` (mint + enqueue the connection) |
 | `SrvAccept` | `srv_accept_blocking` / `sys_srv_accept_for_proc` |
+| `SrvPeerOp` | `sys_srv_peer_for_proc` / `sys_srv_peer_handler` |
 | `ProcExit` | the accept-backlog drain in `srv_proc_exit_notify` |
 | `ServicePosterEverMarked` | the `proc_may_post_service` gate in `sys_post_service_for_proc` |
+| `ConnOpIdentityIsKernelTruth` | `SYS_SRV_PEER` reads the `SrvConn`'s by-value `peer_stripes` / `peer_console`, never a client report |
+| `ConnOpPeerWasLive` | `proc_caps_by_stripes`' dead-Proc guard (`alive` / `caps` fail-close to `0`) |
 | `BuggyPostWithoutMarker` | `corvus_buggy_post_without_marker.cfg` counterexample |
 
-`SrvPeerOp` (the peer-identity read) is **not yet implemented** — it is
-P5-corvus-srv-impl-a3c (`SYS_SRV_PEER`). `specs/handles.tla`'s
-`WalkDerive` / `WalkChildIsSrv` / `SrvHandlesAtOrigin` pin the
-non-transferability of the walked-out `KObj_Srv` connection handle.
+`SrvPeerOp` (the peer-identity read) is **as-built at a3c** — `SYS_SRV_PEER`,
+`kernel/syscall.c`. The two invariants `ConnOpIdentityIsKernelTruth` (the
+peer identity is the kernel's record, not the client's word) and
+`ConnOpPeerWasLive` (a dead peer authorizes nothing) are implemented by
+the immutable-by-value read and the `proc_caps_by_stripes` dead-Proc
+guard respectively. `specs/handles.tla`'s `WalkDerive` /
+`WalkChildIsSrv` / `SrvHandlesAtOrigin` pin the non-transferability of
+the walked-out `KObj_Srv` connection handle.
 
 `corvus.cfg` is TLC-clean (all 8 invariants); the buggy cfg drives a
 `ServicePosterEverMarked` counterexample. The canonical action↔code map
@@ -582,8 +695,8 @@ is `specs/SPEC-TO-CODE.md`.
 - `devsrv.post_rollback` — a `handle_alloc` failure after `srv_reserve`
   leaves no stale registry entry (the `srv_abort` rollback path).
 
-`kernel/test/test_devsrv_conn.c` — 7 tests (the a3b per-connection
-layer):
+`kernel/test/test_devsrv_conn.c` — 11 tests (the a3b per-connection
+layer + the a3c `SYS_SRV_PEER` tests):
 
 - `devsrv.walk_service` — a `/srv` root walk of a posted name yields a
   `QTFILE` service Spoor with a `devsrv_svc_ref` aux; a walk of an
@@ -610,9 +723,26 @@ layer):
 - `devsrv.poster_exit_drains_backlog` — `srv_proc_exit_notify` on the
   poster tombstones the service **and** tears down + drains every pending
   backlog connection.
+- `devsrv.srv_peer_identity` — `SYS_SRV_PEER` on an accepted connection
+  returns the kernel-stamped peer identity: `stripes`, `console`, `caps`,
+  and `alive` are all correct. The `caps` read is **live** — a mutation
+  of the peer's capability set shows on the next `SYS_SRV_PEER` call.
+- `devsrv.srv_peer_dead_peer` — the dead-Proc guard: against a `ZOMBIE`
+  peer, then a reaped peer, `SYS_SRV_PEER` returns `0` with `alive` = `0`
+  and `caps` = `0` (fail-closed) while the immutable `stripes` still
+  survives.
+- `devsrv.srv_peer_gate` — only the service poster may query a
+  connection's peer: a non-poster — even one holding the connection
+  endpoint Spoor — is refused; a `KObj_Srv` handle is rejected as the
+  wrong kind.
+- `devsrv.srv_peer_bad_args` — argument validation: a NULL Proc, a NULL
+  `out`, or a bad handle each return `-1`.
 
-Each test calls `srv_registry_reset()` first for isolation. Suite:
-473/473 PASS × default + UBSan.
+Each test calls `srv_registry_reset()` first for isolation; the
+`SYS_SRV_PEER` tests additionally splice their bare-allocated peer Procs
+into the process table with `proc_test_link` (so `proc_caps_by_stripes`
+can see them) and `proc_test_unlink` before freeing. Suite: 477/477 PASS
+× default + UBSan.
 
 ---
 
@@ -659,6 +789,26 @@ half-installed handle.
 | service stopped being LIVE | `srv_accept_blocking` woke to find the service tombstoned (poster exited / registry reset) |
 | endpoint build failed | `devsrv_make_conn_spoor` OOM or `handle_alloc` failure — the accepted connection is torn down |
 
+`sys_srv_peer_for_proc` returns `-1` on:
+
+| Cause | Detail |
+|---|---|
+| bad args | `p == NULL` or `out == NULL` |
+| bad connection handle | `conn_h` is not a `KObj_Spoor` handle the caller holds with `RIGHT_READ` |
+| not a `/srv` connection Spoor | `devsrv_conn_of` returned `NULL` — the Spoor is a pipe, a `dev9p` Spoor, or a `devsrv` root / service Spoor, not a connection endpoint |
+| caller not the poster | the caller's `stripes` is `0`, or it does not equal the connection's `server_stripes` |
+
+`sys_srv_peer_handler` / `SYS_SRV_PEER` returns `-1` additionally on:
+
+| Cause | Detail |
+|---|---|
+| bad user-VA | `out_va` is outside the readable user range (`sys_validate_user_buf`) |
+| store fault | a per-byte `uaccess_store_u8` faulted — the bytes already written are scrubbed to `0` first |
+
+A **dead peer is not an error**: `SYS_SRV_PEER` returns `0` with `alive`
+= `0` and `caps` = `0` — the immutable `stripes` / `console` are still
+filled. Only the dead-Proc guard fail-closes the mutable fields.
+
 ---
 
 ## Status
@@ -674,7 +824,7 @@ half-installed handle.
 | client-connect path (`srv_conn_open_for_proc`) | landed (a3b) |
 | `SYS_SRV_ACCEPT` (syscall 27) + `handle_release_obj` `KOBJ_SRV` | landed (a3b) |
 | poster-exit backlog drain | landed (a3b) |
-| `SYS_SRV_PEER` (peer-identity read) | deferred to P5-corvus-srv-impl-a3c |
+| `SYS_SRV_PEER` (syscall 28) peer-identity read + poster gate | landed (a3c) |
 | corvus 9P server + §6.2 step-5 handshake drive | deferred to P5-corvus-srv-impl-b |
 | production client-open syscall + joey `/srv` mount | deferred to P5-corvus-srv-impl-b |
 | per-Proc-one-connection cap | deferred to P5-corvus-srv-impl-b |

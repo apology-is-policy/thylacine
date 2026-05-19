@@ -228,6 +228,10 @@ void test_devsrv_accept_blocks_then_wakes(void);
 void test_devsrv_conn_io(void);
 void test_devsrv_conn_release(void);
 void test_devsrv_poster_exit_drains_backlog(void);
+void test_devsrv_srv_peer_identity(void);
+void test_devsrv_srv_peer_dead_peer(void);
+void test_devsrv_srv_peer_gate(void);
+void test_devsrv_srv_peer_bad_args(void);
 void test_virtio_mmio_probe(void);
 void test_virtio_magic_value(void);
 void test_virtio_version_modern(void);
@@ -781,6 +785,10 @@ struct test_case g_tests[] = {
     { "devsrv.poster_exit_drains_backlog",
                                        test_devsrv_poster_exit_drains_backlog,
                                                                            false, NULL },
+    { "devsrv.srv_peer_identity",      test_devsrv_srv_peer_identity,      false, NULL },
+    { "devsrv.srv_peer_dead_peer",     test_devsrv_srv_peer_dead_peer,     false, NULL },
+    { "devsrv.srv_peer_gate",          test_devsrv_srv_peer_gate,          false, NULL },
+    { "devsrv.srv_peer_bad_args",      test_devsrv_srv_peer_bad_args,      false, NULL },
     { "virtio.mmio_probe",             test_virtio_mmio_probe,             false, NULL },
     { "virtio.magic_value",            test_virtio_magic_value,            false, NULL },
     { "virtio.version_modern",         test_virtio_version_modern,         false, NULL },

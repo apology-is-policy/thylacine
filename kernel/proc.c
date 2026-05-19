@@ -670,6 +670,42 @@ u64 proc_stripes(const struct Proc *p) {
     return p->stripes;
 }
 
+// proc_for_each context for proc_caps_by_stripes: match an ALIVE Proc by
+// its stripes tag and snapshot its capability set.
+struct caps_by_stripes_ctx {
+    u64    stripes;     // IN  — the tag to match
+    caps_t caps;        // OUT — the matched Proc's live caps
+    bool   found;       // OUT — set once an ALIVE Proc matched
+};
+
+static int caps_by_stripes_cb(struct Proc *p, void *arg) {
+    struct caps_by_stripes_ctx *c = arg;
+    if (p->state == PROC_STATE_ALIVE && p->stripes == c->stripes) {
+        c->caps  = p->caps;
+        c->found = true;
+        return 1;                 // first match wins — stop the walk
+    }
+    return 0;
+}
+
+bool proc_caps_by_stripes(u64 stripes, caps_t *caps_out) {
+    // 0 is the reserved fail-closed sentinel; no Proc is ever stamped 0,
+    // so it can never match. Reject it (and a NULL out) before the scan.
+    if (stripes == 0 || !caps_out) return false;
+
+    struct caps_by_stripes_ctx ctx = { .stripes = stripes,
+                                       .caps    = 0,
+                                       .found   = false };
+    // proc_for_each holds g_proc_table_lock across the whole DFS, so the
+    // callback's "is this Proc ALIVE" test and its p->caps read are one
+    // snapshot under the lock. Only the caps VALUE escapes — never the
+    // Proc pointer — so a peer reaped after the scan is not a UAF.
+    proc_for_each(caps_by_stripes_cb, &ctx);
+    if (!ctx.found) return false;
+    *caps_out = ctx.caps;
+    return true;
+}
+
 void exits(const char *msg) {
     struct Thread *t = current_thread();
     if (!t)                  extinction("exits with no current thread");
@@ -878,4 +914,40 @@ int wait_pid(int *status_out) {
         spin_unlock_irqrestore(&g_proc_table_lock, s);
         sleep(&p->child_done, wait_pid_cond, p);
     }
+}
+
+// =============================================================================
+// Test support — NOT a production API; deliberately absent from proc.h.
+// =============================================================================
+//
+// A production Proc is spliced into the kproc-rooted process table by
+// rfork (proc_link_child); a Proc the in-kernel test harness allocates
+// directly with proc_alloc is not. proc_for_each / proc_find_by_pid only
+// see linked Procs, so a test exercising proc_caps_by_stripes against a
+// bare proc_alloc'd Proc must link it first. The harness extern-declares
+// these; they have no production caller.
+
+// proc_test_link — splice `p` in as a child of kproc.
+void proc_test_link(struct Proc *p) {
+    if (!p || p->magic != PROC_MAGIC)
+        extinction("proc_test_link: NULL or corrupted Proc");
+    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    proc_link_child(kproc(), p);
+    spin_unlock_irqrestore(&g_proc_table_lock, s);
+}
+
+// proc_test_unlink — remove `p` from kproc's children list. The test MUST
+// call this before freeing `p` so the table holds no dangling pointer.
+void proc_test_unlink(struct Proc *p) {
+    if (!p) return;
+    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    for (struct Proc **pp = &kproc()->children; *pp; pp = &(*pp)->sibling) {
+        if (*pp == p) {
+            *pp = p->sibling;
+            break;
+        }
+    }
+    p->parent  = NULL;
+    p->sibling = NULL;
+    spin_unlock_irqrestore(&g_proc_table_lock, s);
 }

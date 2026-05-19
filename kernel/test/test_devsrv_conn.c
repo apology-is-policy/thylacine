@@ -1,7 +1,7 @@
-// P5-corvus-srv-impl-a3b — kernel-internal tests for the /srv
+// P5-corvus-srv-impl-a3b / -a3c — kernel-internal tests for the /srv
 // per-connection layer: the devsrv walk op, the client-connect path, the
-// accept backlog + SYS_SRV_ACCEPT, the connection-Spoor I/O ops, and
-// connection teardown.
+// accept backlog + SYS_SRV_ACCEPT, the connection-Spoor I/O ops,
+// connection teardown (a3b), and SYS_SRV_PEER (a3c).
 //
 // Coverage:
 //
@@ -39,11 +39,31 @@
 //     srv_proc_exit_notify on the poster tombstones the service AND tears
 //     down + drains every pending backlog connection.
 //
+//   devsrv.srv_peer_identity
+//     SYS_SRV_PEER returns the connection's kernel-stamped peer identity
+//     (stripes, console bit, caps); the caps read is live — a mutation of
+//     the peer's caps shows on the next call.
+//
+//   devsrv.srv_peer_dead_peer
+//     The dead-Proc guard: a zombie / reaped peer fail-closes caps and the
+//     alive bit to 0, while the immutable stripes survives.
+//
+//   devsrv.srv_peer_gate
+//     Only the service poster may query a connection's peer — a non-poster,
+//     even one holding the connection endpoint, is refused; the endpoint
+//     must be a KObj_Spoor.
+//
+//   devsrv.srv_peer_bad_args
+//     SYS_SRV_PEER rejects a NULL Proc / NULL out / bad handle.
+//
 // Each test calls srv_registry_reset() first so it starts from an empty
 // registry (the harness runs tests sequentially in one address space).
+// The srv_peer tests link their client Proc into the process table
+// (make_linked_test_proc) so the live-caps scan can find it.
 
 #include "test.h"
 
+#include <thylacine/caps.h>
 #include <thylacine/dev.h>
 #include <thylacine/devsrv.h>
 #include <thylacine/handle.h>
@@ -51,6 +71,7 @@
 #include <thylacine/sched.h>
 #include <thylacine/spoor.h>
 #include <thylacine/srvconn.h>
+#include <thylacine/syscall.h>
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 
@@ -58,6 +79,8 @@
 extern int sys_post_service_for_proc(struct Proc *p, const char *name,
                                      size_t name_len);
 extern int sys_srv_accept_for_proc(struct Proc *p, hidx_t service_h);
+extern int sys_srv_peer_for_proc(struct Proc *p, hidx_t conn_h,
+                                 struct srv_peer_info *out);
 extern s64 sys_read_for_proc(struct Proc *p, hidx_t h, u8 *kbuf, u64 len);
 extern s64 sys_write_for_proc(struct Proc *p, hidx_t h, const u8 *kbuf,
                               u64 len);
@@ -66,6 +89,13 @@ extern s64 sys_write_for_proc(struct Proc *p, hidx_t h, const u8 *kbuf,
 // deliberately not in devsrv.h — no production caller).
 extern void srv_registry_reset(void);
 
+// Test-support process-table linkage (non-static; defined in kernel/proc.c;
+// deliberately not in proc.h). proc_caps_by_stripes — the SYS_SRV_PEER
+// live-caps scan — only sees Procs spliced into the kproc-rooted table;
+// these link / unlink a bare proc_alloc'd test Proc.
+extern void proc_test_link(struct Proc *p);
+extern void proc_test_unlink(struct Proc *p);
+
 void test_devsrv_walk_service(void);
 void test_devsrv_conn_open(void);
 void test_devsrv_accept_immediate(void);
@@ -73,6 +103,10 @@ void test_devsrv_accept_blocks_then_wakes(void);
 void test_devsrv_conn_io(void);
 void test_devsrv_conn_release(void);
 void test_devsrv_poster_exit_drains_backlog(void);
+void test_devsrv_srv_peer_identity(void);
+void test_devsrv_srv_peer_dead_peer(void);
+void test_devsrv_srv_peer_gate(void);
+void test_devsrv_srv_peer_bad_args(void);
 
 // ---------------------------------------------------------------------------
 // Helpers.
@@ -91,6 +125,26 @@ static struct Proc *make_marked_test_proc(void) {
 
 static void drop_test_proc(struct Proc *p) {
     if (!p) return;
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+}
+
+// A test Proc spliced into the process table so proc_caps_by_stripes
+// (the SYS_SRV_PEER live-caps scan) can find it — a bare proc_alloc'd
+// Proc is invisible to the kproc-rooted table walk.
+static struct Proc *make_linked_test_proc(void) {
+    struct Proc *p = proc_alloc();
+    if (!p) return NULL;
+    proc_test_link(p);
+    return p;
+}
+
+// Tear down a make_linked_test_proc Proc: unlink from the table first so
+// no dangling pointer remains, then free. proc_test_unlink is idempotent,
+// so a test that already unlinked `p` may still call this.
+static void drop_linked_test_proc(struct Proc *p) {
+    if (!p) return;
+    proc_test_unlink(p);
     p->state = PROC_STATE_ZOMBIE;
     proc_free(p);
 }
@@ -484,5 +538,195 @@ void test_devsrv_poster_exit_drains_backlog(void) {
 
     srv_registry_reset();
     drop_test_proc(client);
+    drop_test_proc(corvus);
+}
+
+// ---------------------------------------------------------------------------
+// devsrv.srv_peer_identity — SYS_SRV_PEER returns the kernel-stamped peer
+// identity; the caps read is live.
+// ---------------------------------------------------------------------------
+
+void test_devsrv_srv_peer_identity(void) {
+    srv_registry_reset();
+
+    struct Proc *corvus = make_marked_test_proc();
+    TEST_ASSERT(corvus != NULL, "corvus proc");
+    int svc_h = sys_post_service_for_proc(corvus, "corvus", 6);
+    TEST_ASSERT(svc_h >= 0, "post \"corvus\"");
+
+    // A console-attached client with a known capability set, spliced into
+    // the process table so the live-caps scan can find it.
+    struct Proc *client = make_linked_test_proc();
+    TEST_ASSERT(client != NULL, "client proc");
+    proc_mark_console_attached(client);
+    client->caps = CAP_CSPRNG_READ;
+
+    int client_h = srv_conn_open_for_proc(client, "corvus", 6);
+    TEST_ASSERT(client_h >= 0, "the client connects");
+    int conn_h = sys_srv_accept_for_proc(corvus, (hidx_t)svc_h);
+    TEST_ASSERT(conn_h >= 0, "corvus accepts");
+
+    // corvus reads the connection's kernel-stamped peer identity.
+    struct srv_peer_info info = {0};
+    TEST_EXPECT_EQ(sys_srv_peer_for_proc(corvus, (hidx_t)conn_h, &info), 0,
+        "SYS_SRV_PEER succeeds for the service poster");
+    TEST_EXPECT_EQ(info.stripes, proc_stripes(client),
+        "the peer stripes is the client's kernel identity");
+    TEST_EXPECT_EQ((u64)info.caps, (u64)CAP_CSPRNG_READ,
+        "the peer caps is the client's live capability set");
+    TEST_EXPECT_EQ(info.console, 1u, "the peer console bit is set");
+    TEST_EXPECT_EQ(info.alive, 1u, "an ALIVE peer reports alive");
+
+    // The caps read is LIVE — a mutation of the client's caps is visible
+    // on the next call, never a stale capture on the connection.
+    client->caps = CAP_CSPRNG_READ | CAP_LOCK_PAGES;
+    struct srv_peer_info info2 = {0};
+    TEST_EXPECT_EQ(sys_srv_peer_for_proc(corvus, (hidx_t)conn_h, &info2), 0,
+        "SYS_SRV_PEER succeeds on the re-query");
+    TEST_EXPECT_EQ((u64)info2.caps, (u64)(CAP_CSPRNG_READ | CAP_LOCK_PAGES),
+        "the re-query reflects the client's mutated caps (a live read)");
+
+    handle_close(corvus, (hidx_t)conn_h);
+    srv_registry_reset();
+    drop_linked_test_proc(client);
+    drop_test_proc(corvus);
+}
+
+// ---------------------------------------------------------------------------
+// devsrv.srv_peer_dead_peer — the dead-Proc guard: a zombie / reaped peer
+// fail-closes caps + alive while the immutable identity survives.
+// ---------------------------------------------------------------------------
+
+void test_devsrv_srv_peer_dead_peer(void) {
+    srv_registry_reset();
+
+    struct Proc *corvus = make_marked_test_proc();
+    TEST_ASSERT(corvus != NULL, "corvus proc");
+    int svc_h = sys_post_service_for_proc(corvus, "corvus", 6);
+    TEST_ASSERT(svc_h >= 0, "post \"corvus\"");
+
+    struct Proc *client = make_linked_test_proc();
+    TEST_ASSERT(client != NULL, "client proc");
+    client->caps = CAP_CSPRNG_READ;
+    u64 client_stripes = proc_stripes(client);
+
+    int client_h = srv_conn_open_for_proc(client, "corvus", 6);
+    TEST_ASSERT(client_h >= 0, "the client connects");
+    int conn_h = sys_srv_accept_for_proc(corvus, (hidx_t)svc_h);
+    TEST_ASSERT(conn_h >= 0, "corvus accepts");
+
+    // Baseline: the peer is ALIVE.
+    struct srv_peer_info info = {0};
+    TEST_EXPECT_EQ(sys_srv_peer_for_proc(corvus, (hidx_t)conn_h, &info), 0,
+        "SYS_SRV_PEER succeeds");
+    TEST_EXPECT_EQ(info.alive, 1u, "the ALIVE peer reports alive");
+
+    // A ZOMBIE peer — the dead-Proc guard fail-closes caps + alive, but
+    // the immutable identity (captured at mint) still reads truthfully.
+    client->state = PROC_STATE_ZOMBIE;
+    struct srv_peer_info zinfo = {0};
+    TEST_EXPECT_EQ(sys_srv_peer_for_proc(corvus, (hidx_t)conn_h, &zinfo), 0,
+        "SYS_SRV_PEER still returns 0 for a dead peer");
+    TEST_EXPECT_EQ(zinfo.alive, 0u, "a zombie peer reports not-alive");
+    TEST_EXPECT_EQ((u64)zinfo.caps, 0ull,
+        "a zombie peer's caps fail-close to 0 (never a stale snapshot)");
+    TEST_EXPECT_EQ(zinfo.stripes, client_stripes,
+        "the immutable peer stripes survives the peer's death");
+
+    // A reaped peer — gone from the process table entirely. Same result.
+    proc_test_unlink(client);
+    struct srv_peer_info rinfo = {0};
+    TEST_EXPECT_EQ(sys_srv_peer_for_proc(corvus, (hidx_t)conn_h, &rinfo), 0,
+        "SYS_SRV_PEER returns 0 for a reaped peer");
+    TEST_EXPECT_EQ(rinfo.alive, 0u, "a reaped peer reports not-alive");
+    TEST_EXPECT_EQ((u64)rinfo.caps, 0ull, "a reaped peer's caps are 0");
+
+    handle_close(corvus, (hidx_t)conn_h);
+    srv_registry_reset();
+    drop_linked_test_proc(client);          // proc_test_unlink is idempotent
+    drop_test_proc(corvus);
+}
+
+// ---------------------------------------------------------------------------
+// devsrv.srv_peer_gate — only the service poster may query a connection's
+// peer; the connection endpoint must be a KObj_Spoor.
+// ---------------------------------------------------------------------------
+
+void test_devsrv_srv_peer_gate(void) {
+    srv_registry_reset();
+
+    struct Proc *corvus = make_marked_test_proc();
+    TEST_ASSERT(corvus != NULL, "corvus proc");
+    int svc_h = sys_post_service_for_proc(corvus, "corvus", 6);
+    TEST_ASSERT(svc_h >= 0, "post \"corvus\"");
+
+    struct Proc *client = make_linked_test_proc();
+    TEST_ASSERT(client != NULL, "client proc");
+    int client_h = srv_conn_open_for_proc(client, "corvus", 6);
+    TEST_ASSERT(client_h >= 0, "the client connects");
+    int conn_h = sys_srv_accept_for_proc(corvus, (hidx_t)svc_h);
+    TEST_ASSERT(conn_h >= 0, "corvus accepts");
+
+    // Baseline: the poster may query.
+    struct srv_peer_info info = {0};
+    TEST_EXPECT_EQ(sys_srv_peer_for_proc(corvus, (hidx_t)conn_h, &info), 0,
+        "the poster may query its connection's peer");
+
+    // A stranger that does NOT hold the connection handle cannot query —
+    // conn_h indexes the stranger's (empty) handle table.
+    struct Proc *stranger = make_test_proc();
+    TEST_ASSERT(stranger != NULL, "stranger proc");
+    TEST_EXPECT_EQ(sys_srv_peer_for_proc(stranger, (hidx_t)conn_h, &info),
+        -1, "a Proc without the connection handle cannot query");
+
+    // The poster gate proper: a Proc that DOES hold a handle resolving to
+    // the connection endpoint — but is not the service poster — is still
+    // refused. Install the same endpoint Spoor in the stranger's table;
+    // a spoor_ref balances the extra handle slot's release.
+    struct Spoor *endpoint =
+        (struct Spoor *)handle_get(corvus, (hidx_t)conn_h)->obj;
+    spoor_ref(endpoint);
+    hidx_t shared = handle_alloc(stranger, KOBJ_SPOOR,
+                                 RIGHT_READ | RIGHT_WRITE, endpoint);
+    TEST_ASSERT(shared >= 0, "the endpoint Spoor installs in the stranger");
+    TEST_EXPECT_EQ(sys_srv_peer_for_proc(stranger, shared, &info), -1,
+        "a non-poster holding the connection endpoint is still refused");
+    handle_close(stranger, shared);             // drops the spoor_ref above
+
+    // The client's own KObj_Srv connection handle is not a SYS_SRV_PEER
+    // argument — the syscall requires a KObj_Spoor endpoint.
+    TEST_EXPECT_EQ(sys_srv_peer_for_proc(client, (hidx_t)client_h, &info),
+        -1, "a KObj_Srv connection handle is rejected (wrong kind)");
+
+    handle_close(corvus, (hidx_t)conn_h);
+    srv_registry_reset();
+    drop_test_proc(stranger);
+    drop_linked_test_proc(client);
+    drop_test_proc(corvus);
+}
+
+// ---------------------------------------------------------------------------
+// devsrv.srv_peer_bad_args — SYS_SRV_PEER argument validation.
+// ---------------------------------------------------------------------------
+
+void test_devsrv_srv_peer_bad_args(void) {
+    srv_registry_reset();
+
+    struct Proc *corvus = make_marked_test_proc();
+    TEST_ASSERT(corvus != NULL, "corvus proc");
+    int svc_h = sys_post_service_for_proc(corvus, "corvus", 6);
+    TEST_ASSERT(svc_h >= 0, "post \"corvus\"");
+
+    struct srv_peer_info info = {0};
+    TEST_EXPECT_EQ(sys_srv_peer_for_proc(NULL, 0, &info), -1,
+        "a NULL Proc → -1");
+    TEST_EXPECT_EQ(sys_srv_peer_for_proc(corvus, 0, NULL), -1,
+        "a NULL out pointer → -1");
+    TEST_EXPECT_EQ(sys_srv_peer_for_proc(corvus, -1, &info), -1,
+        "a negative handle index → -1");
+    TEST_EXPECT_EQ(sys_srv_peer_for_proc(corvus, (hidx_t)svc_h, &info), -1,
+        "the KObj_Srv service handle is not a SYS_SRV_PEER argument");
+
+    srv_registry_reset();
     drop_test_proc(corvus);
 }

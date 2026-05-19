@@ -425,6 +425,20 @@ bool proc_is_console_attached(const struct Proc *p);
 // nothing (never a stale or fabricated tag).
 u64 proc_stripes(const struct Proc *p);
 
+// proc_caps_by_stripes — the SYS_SRV_PEER live-caps lookup
+// (P5-corvus-srv-impl-a3c). Scan the process table for an ALIVE Proc
+// carrying `stripes` and snapshot its capability set into *caps_out.
+// Returns true iff such a Proc exists.
+//
+// Returns false — fail-closed, *caps_out untouched — when `stripes` is
+// the 0 sentinel, `caps_out` is NULL, or no ALIVE Proc matches (the peer
+// has exited / is a zombie / was reaped). The table scan and the caps
+// read run under g_proc_table_lock, so the result is a coherent snapshot
+// — never a torn read, never a use-after-free of a Proc being reaped.
+// The kernel half of specs/corvus.tla ConnOpPeerWasLive: a dead peer
+// authorizes nothing.
+bool proc_caps_by_stripes(u64 stripes, caps_t *caps_out);
+
 // =============================================================================
 // P5-corvus-srv-impl-a2: the /srv service-registry post-gate.
 // =============================================================================

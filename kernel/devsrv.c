@@ -347,18 +347,28 @@ int srv_conn_open_for_proc(struct Proc *p, const char *name, u8 name_len) {
     // gate.
     struct SrvService *svc = srv_lookup(name, name_len);
     if (!svc) return -1;
+
+    // Capture the poster's stripes under the registry lock, atomically
+    // with the LIVE check: poster_stripes is stable while LIVE (set at
+    // reserve, zeroed only by the tombstone). It becomes the connection's
+    // server identity — SYS_SRV_PEER's poster gate (a3c).
+    u64 poster_stripes;
     {
         irq_state_t s = spin_lock_irqsave(&g_srv_registry.lock);
-        bool live = (svc->state == SRV_STATE_LIVE);
+        bool live      = (svc->state == SRV_STATE_LIVE);
+        poster_stripes = svc->poster_stripes;
         spin_unlock_irqrestore(&g_srv_registry.lock, s);
         if (!live) return -1;
     }
 
-    // Mint the connection — the peer identity is captured BY VALUE here
-    // (CORVUS-DESIGN.md §6.3): the SrvConn holds no raw Proc* for p, so a
-    // p that exits and is reaped never turns a connection read into a UAF.
+    // Mint the connection — the peer AND server identity are captured BY
+    // VALUE here (CORVUS-DESIGN.md §6.3): the SrvConn holds no raw Proc*
+    // for p and no SrvService* for the poster, so neither a p that exits
+    // and is reaped nor a tombstone-then-rebind turns a later connection
+    // read into a UAF.
     struct SrvConn *cn = srvconn_create(proc_stripes(p), p->pid,
-                                        proc_is_console_attached(p));
+                                        proc_is_console_attached(p),
+                                        poster_stripes);
     if (!cn) return -1;
 
     // Install the client's KObj_Srv connection handle. handle_alloc does
@@ -476,7 +486,9 @@ static struct Spoor *devsrv_attach(const char *spec) {
 // is not one. A devsrv Spoor's aux discriminates its flavor: NULL for the
 // /srv root, a struct devsrv_svc_ref (DEVSRV_SVC_MAGIC) for a service
 // Spoor, or a struct SrvConn (SRV_CONN_MAGIC) for an accepted connection.
-static struct SrvConn *devsrv_conn_of(struct Spoor *c) {
+// Non-static — SYS_SRV_PEER (kernel/syscall.c) resolves a connection
+// endpoint handle through here; declared in <thylacine/devsrv.h>.
+struct SrvConn *devsrv_conn_of(struct Spoor *c) {
     if (!c || c->dc != 's' || !c->aux)         return NULL;
     if (*(const u64 *)c->aux != SRV_CONN_MAGIC) return NULL;
     return (struct SrvConn *)c->aux;

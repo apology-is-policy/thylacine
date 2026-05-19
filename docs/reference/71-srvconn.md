@@ -1,14 +1,15 @@
 # 71 — srvconn: the `/srv` per-connection transport
 
-**Status**: as-built at P5-corvus-srv-impl-a3a, with its first consumer
-landed at P5-corvus-srv-impl-a3b. The `SrvConn` connection object, its
-bidirectional `tsleep`-bounded byte transport, and the lifecycle/teardown
-path are landed (a3a). As of a3b the `devsrv` per-connection layer
-(reference 70) is the real consumer: `srv_conn_open_for_proc` mints a
-`SrvConn` on a client connect, `SYS_SRV_ACCEPT` hands corvus the server
-endpoint, and `devsrv_read` / `devsrv_write` route to
-`srvconn_server_recv` / `srvconn_server_send`. `SYS_SRV_PEER` (the
-peer-identity read) is P5-corvus-srv-impl-a3c — not yet built.
+**Status**: as-built at P5-corvus-srv-impl-a3a, extended at a3c. The
+`SrvConn` connection object, its bidirectional `tsleep`-bounded byte
+transport, and the lifecycle/teardown path landed at a3a. As of a3b the
+`devsrv` per-connection layer (reference 70) is the real consumer:
+`srv_conn_open_for_proc` mints a `SrvConn` on a client connect,
+`SYS_SRV_ACCEPT` hands corvus the server endpoint, and `devsrv_read` /
+`devsrv_write` route to `srvconn_server_recv` / `srvconn_server_send`.
+a3c added the `server_stripes` field (the poster's identity, by value)
+and the three peer/server accessors that back `SYS_SRV_PEER` (the
+peer-identity read; reference 70).
 
 ---
 
@@ -32,9 +33,12 @@ A `SrvConn` carries two things:
   Dev read/write ops (wired at a3b).
 - **The kernel-stamped peer identity** — the opening client Proc's
   `stripes`, console-attachment bit, and pid, captured *by value* at
-  mint time. corvus reads it back through `SYS_SRV_PEER` (a3c). Because
-  the identity is a value copy, a peer that exits and is reaped never
-  turns a `SrvConn` read into a use-after-free.
+  mint time. The service poster's (corvus's) own `stripes` is captured
+  the same way (`server_stripes`, a3c) — the `SYS_SRV_PEER` poster gate
+  compares it against the caller. corvus reads the peer identity back
+  through `SYS_SRV_PEER` (reference 70). Because every identity field is
+  a value copy, a peer that exits and is reaped never turns a `SrvConn`
+  read into a use-after-free.
 
 This layer sits below `corvus.tla`'s connection-identity model and
 above the 9P client/transport (`kernel/9p_client.c`,
@@ -51,7 +55,7 @@ All declarations are in `<thylacine/srvconn.h>`.
 
 ```c
 struct SrvConn *srvconn_create(u64 peer_stripes, int peer_pid,
-                               bool peer_console);
+                               bool peer_console, u64 server_stripes);
 void srvconn_ref(struct SrvConn *cn);
 void srvconn_unref(struct SrvConn *cn);
 void srvconn_teardown(struct SrvConn *cn);
@@ -59,8 +63,12 @@ bool srvconn_is_live(const struct SrvConn *cn);
 ```
 
 `srvconn_create` mints a connection from the opening client Proc's
-identity (captured by value), born `LIVE` with refcount 1; returns
-`NULL` on allocation failure with no partial state. `srvconn_ref` /
+identity — `peer_stripes` / `peer_pid` / `peer_console`, captured by
+value — plus `server_stripes`, the service poster's (corvus's) `stripes`
+tag, also by value (the a3c parameter; the caller is
+`srv_conn_open_for_proc`, which reads it from the registry entry under
+the registry lock). Born `LIVE` with refcount 1; returns `NULL` on
+allocation failure with no partial state. `srvconn_ref` /
 `srvconn_unref` are the refcount; the last `unref` tears down, destroys
 the 9P client, and frees all storage. `srvconn_teardown` transitions
 the connection to `TORN` — EOF on both rings, blocked consumer woken —
@@ -95,6 +103,23 @@ long srvconn_server_recv(struct SrvConn *cn, u8 *buf, long n);
 `client_send` writes the `c2s` ring; `server_recv` drains it.
 `server_send` writes the `s2c` ring; `client_recv` drains it.
 `client_recv` is the one blocking call — see Implementation.
+
+### Peer / server identity
+
+```c
+u64  srvconn_peer_stripes(const struct SrvConn *cn);
+bool srvconn_peer_console(const struct SrvConn *cn);
+u64  srvconn_server_stripes(const struct SrvConn *cn);
+```
+
+The three by-value identity reads, added at a3c to back `SYS_SRV_PEER`
+(reference 70). `srvconn_peer_stripes` / `srvconn_peer_console` return
+the opening client Proc's immutable `stripes` tag and console-attachment
+bit as captured at mint; `srvconn_server_stripes` returns the service
+poster's `stripes` tag, which `SYS_SRV_PEER`'s poster gate compares
+against the caller. Each accessor revalidates `SRV_CONN_MAGIC` and
+**fail-closes** — `0` / `false` — on a `NULL` or corrupted `cn`, so a
+bad pointer degrades to "no identity," never a fabricated tag.
 
 ### Diagnostics
 
@@ -226,6 +251,7 @@ struct SrvConn {
     u64                 peer_stripes;      // peer Proc's stripes (by value)
     int                 peer_pid;          // peer Proc's pid (by value)
     bool                peer_console;      // peer's console-attachment bit
+    u64                 server_stripes;    // poster (corvus) stripes (by value)
     u64                 client_deadline_ns;// next blocking-recv deadline; 0 = none
     bool                client_timed_out;  // last client recv hit the deadline
     struct srvconn_chan c2s;               // kernel client → corvus
@@ -234,6 +260,15 @@ struct SrvConn {
     u8                 *recv_buf;          // the client's 9P receive buffer
 };
 ```
+
+`peer_stripes` / `peer_pid` / `peer_console` are the *client* side of
+the connection's identity; `server_stripes` (a3c) is the *server*
+(poster) side — the poster's `stripes` tag at mint. Carrying the poster
+identity as a bare `u64` value, rather than a `struct SrvService *`
+back-pointer into the registry, deliberately keeps the `SrvConn` free of
+cross-object lifetime coupling: the poster can exit and its registry
+slot be reused without the `SrvConn` holding a stale pointer.
+`SYS_SRV_PEER`'s poster gate is the only reader.
 
 `magic` (`SRV_CONN_MAGIC == 0x535256434F4E4E00`, `'SRVCONN'\0`) sits at
 offset 0 — pinned by `_Static_assert`. It is distinct from
@@ -295,9 +330,14 @@ already-checked specs:
 
 `specs/corvus.tla`'s connection layer — `SrvBind` / `SrvAccept` /
 `SrvPeerOp` — models connection *identity and lifecycle*, a level above
-these bytes; it is implemented by P5-corvus-srv-impl-a3b / -a3c, which
-will extend `specs/SPEC-TO-CODE.md` with the action↔code map. a3a
-introduces no spec action, so it adds no `SPEC-TO-CODE.md` row.
+these bytes; it is implemented by the `devsrv` layer (reference 70) at
+P5-corvus-srv-impl-a3b / -a3c. a3c's `server_stripes` and the three
+peer/server accessors are the by-value identity store that
+`SYS_SRV_PEER` reads — the `ConnOpIdentityIsKernelTruth` invariant
+(the peer identity is the kernel's record, not the client's word) rests
+on them. a3a / a3c introduce no spec *action* of their own, so they add
+no `SPEC-TO-CODE.md` row; the `SrvPeerOp` row is owned by `SYS_SRV_PEER`
+in `kernel/syscall.c` (reference 70's Spec cross-reference).
 
 ---
 
@@ -363,7 +403,8 @@ rejects its arguments — with no partial state left behind.
 | dedicated synchronous `p9_client` per connection | landed (init only — handshake drive deferred to P5-corvus-srv-impl-b) |
 | `devsrv` walk + connection mint + accept backlog + `SYS_SRV_ACCEPT` | landed (P5-corvus-srv-impl-a3b) |
 | `KObj_Srv` connection consumer + `handle_release_obj` teardown | landed (a3b) |
-| `SYS_SRV_PEER` (peer identity read) | deferred to P5-corvus-srv-impl-a3c |
+| `server_stripes` field + `srvconn_peer_stripes` / `_peer_console` / `_server_stripes` accessors | landed (P5-corvus-srv-impl-a3c) |
+| `SYS_SRV_PEER` peer-identity read (consumes the accessors) | landed (a3c; `kernel/syscall.c`, reference 70) |
 
 ---
 

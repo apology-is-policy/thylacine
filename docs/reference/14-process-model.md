@@ -417,8 +417,19 @@ Every Proc carries a `stripes` value (`<thylacine/proc.h>`, `struct Proc`, `u64`
 | Function (`kernel/proc.c`) | Contract |
 |---|---|
 | `proc_stripes(p)` | Return `p`'s `stripes` tag. **Fail-closed**: a NULL or corrupted Proc reads as 0 — never a stale or fabricated tag. |
+| `proc_caps_by_stripes(stripes, caps_out)` | Find the **ALIVE** Proc carrying `stripes`, snapshot its `caps` into `*caps_out`, return true. **Fail-closed**: returns false (`*caps_out` untouched) for the 0 sentinel, a NULL `caps_out`, or no ALIVE match. (P5-corvus-srv-impl-a3c.) |
 
 `struct Proc` grew **136 → 144 bytes** (`u64 stripes` appended after `proc_flags` / `_pad_flags`; the `_Static_assert` on the size is bumped deliberately). Tested by `proc.stripes_smoke`.
+
+#### `proc_caps_by_stripes` — the live-caps lookup (P5-corvus-srv-impl-a3c)
+
+`proc_caps_by_stripes` is the kernel side of `SYS_SRV_PEER`'s "what capabilities does the peer hold *right now*" question (reference 70). Where `stripes` and the console bit are a `/srv` connection's *immutable* identity — captured by value on the `SrvConn` at mint, knowable even after the peer exits — a Proc's capability set is *mutable*, so it cannot be cached; `SYS_SRV_PEER` re-resolves it through this function on every call.
+
+The lookup scans the process table via `proc_for_each` (a DFS from kproc) with the callback `caps_by_stripes_cb`, which matches `state == PROC_STATE_ALIVE && stripes == X` and stops at the first match. `proc_for_each` holds `g_proc_table_lock` across the *entire* walk, so the callback's "is this Proc ALIVE" test and its `p->caps` read are **one coherent snapshot** under the lock — never a torn read of a Proc whose state is changing. Only the caps *value* escapes the locked region (copied into the caller's `caps_t`); no `struct Proc *` ever does — so a peer that is reaped immediately after the scan cannot turn the result into a use-after-free.
+
+The fail-closed contract is load-bearing. `proc_caps_by_stripes` returns false — leaving `*caps_out` untouched — in three cases: `stripes` is the reserved `0` sentinel (no Proc is ever stamped `0`, so it can never match; rejected before the scan), `caps_out` is NULL, or no `ALIVE` Proc carries the tag (the peer has exited, is a zombie awaiting reap, or was already reaped). That last case is the **dead-Proc guard**: a connection whose peer has died reports `alive` = 0 and `caps` = 0 out of `SYS_SRV_PEER`, never a stale capability snapshot. This is the kernel half of `specs/corvus.tla`'s `ConnOpPeerWasLive` invariant — *a dead peer authorizes nothing*.
+
+`kernel/proc.c` also gained two **test seams** for the a3c tests — `proc_test_link` / `proc_test_unlink`. A production Proc is spliced into the kproc-rooted process table by `rfork`; a Proc the in-kernel test harness builds directly with `proc_alloc` is not, and `proc_for_each` only visits *linked* Procs. So a test exercising `proc_caps_by_stripes` against a bare-allocated peer must `proc_test_link` it first (splice it in as a child of kproc, under `g_proc_table_lock`) and `proc_test_unlink` it before freeing. They are deliberately **absent from `proc.h`** and have no production caller — the harness extern-declares them, the same discipline as `devsrv.c`'s `srv_registry_reset`.
 
 ---
 

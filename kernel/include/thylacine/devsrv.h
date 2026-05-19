@@ -227,6 +227,13 @@ struct SrvConn *srv_accept_blocking(struct SrvService *svc);
 // Returns NULL on OOM (the caller still owns `conn`'s reference).
 struct Spoor *devsrv_make_conn_spoor(struct SrvConn *conn);
 
+// devsrv_conn_of — the SrvConn behind a connection Spoor, or NULL if `c`
+// is not a devsrv connection Spoor (a NULL / non-devsrv Spoor, or a devsrv
+// root / service Spoor — discriminated by dc and the aux's first u64).
+// SYS_SRV_PEER (P5-corvus-srv-impl-a3c) resolves corvus's accepted
+// endpoint handle to its SrvConn through here.
+struct SrvConn *devsrv_conn_of(struct Spoor *c);
+
 // srv_backlog_depth — current accept-backlog depth of `svc`. Tests +
 // diagnostics; takes the registry lock.
 int srv_backlog_depth(struct SrvService *svc);

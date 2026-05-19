@@ -362,7 +362,62 @@ enum {
     //   - the service ceased to be LIVE while the accept blocked
     //   - kmalloc OOM for the connection Spoor / handle table full
     SYS_SRV_ACCEPT   = 27,   // arg: service_handle (x0)
+
+    // P5-corvus-srv-impl-a3c: SYS_SRV_PEER(connection_handle, out_va) → 0/-1
+    //   x0 = connection_handle  the KObj_Spoor endpoint from SYS_SRV_ACCEPT
+    //   x1 = out_va             user-VA pointer to a struct srv_peer_info
+    // Read a /srv connection's kernel-stamped peer identity (CORVUS-DESIGN
+    // §6.3; invariant C-22). corvus calls this per request to learn who is
+    // on the other end of a connection — the identity is stamped by the
+    // kernel, never supplied by the client, never cached on corvus's fid
+    // state.
+    //
+    // The kernel writes a struct srv_peer_info to *out_va:
+    //   - `stripes` + `console` are the peer Proc's IMMUTABLE identity,
+    //     captured by value on the connection at mint — available even
+    //     after the peer exits (no Proc lookup, no use-after-free).
+    //   - `caps` is the peer's MUTABLE capability set, read LIVE under the
+    //     process-table lock. `alive` is 1 iff an ALIVE Proc still carries
+    //     `stripes`; when the peer has exited (zombie / reaped) the
+    //     dead-Proc guard fail-closes — `alive` = 0 and `caps` = 0, never
+    //     a stale snapshot (specs/corvus.tla ConnOpPeerWasLive).
+    //
+    // Gated to the service's poster: the connection captured the poster's
+    // identity at mint, and the caller's stripes must match it — only
+    // corvus may query its own connections' peers.
+    //
+    // Returns 0 on success, -1 on:
+    //   - connection_handle is not a KObj_Spoor /srv connection endpoint
+    //     the caller holds (with RIGHT_READ)
+    //   - the caller is not the connection's service poster
+    //   - out_va is outside the user-VA bound
+    SYS_SRV_PEER     = 28,   // arg: connection_handle (x0), out_va (x1)
 };
+
+// SYS_SRV_PEER result — the kernel-stamped peer identity of a /srv
+// connection (CORVUS-DESIGN.md §6.3). The kernel writes one of these to
+// the SYS_SRV_PEER out_va buffer. A syscall-ABI type: the layout is
+// pinned by the _Static_asserts so a userspace consumer (corvus, at
+// P5-corvus-srv-impl-b) decodes a fixed 24-byte record.
+struct srv_peer_info {
+    u64 stripes;     // peer Proc's identity tag (0 → unidentifiable peer)
+    u64 caps;        // peer's live capability set; 0 when alive == 0
+    u32 console;     // 1 iff the peer is console-attached, else 0
+    u32 alive;       // 1 iff an ALIVE Proc still carries `stripes`, else 0
+};
+
+_Static_assert(sizeof(struct srv_peer_info) == 24,
+               "struct srv_peer_info is a SYS_SRV_PEER ABI type — pinned "
+               "at 24 bytes (u64 stripes + u64 caps + u32 console + u32 "
+               "alive), naturally aligned with no implicit padding");
+_Static_assert(__builtin_offsetof(struct srv_peer_info, stripes) == 0,
+               "srv_peer_info.stripes at ABI offset 0");
+_Static_assert(__builtin_offsetof(struct srv_peer_info, caps) == 8,
+               "srv_peer_info.caps at ABI offset 8");
+_Static_assert(__builtin_offsetof(struct srv_peer_info, console) == 16,
+               "srv_peer_info.console at ABI offset 16");
+_Static_assert(__builtin_offsetof(struct srv_peer_info, alive) == 20,
+               "srv_peer_info.alive at ABI offset 20");
 
 // SYS_GETRANDOM flags.
 #define GRND_NONBLOCK    1u

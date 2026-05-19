@@ -1875,6 +1875,88 @@ static s64 sys_srv_accept_handler(u64 service_h_raw) {
 }
 
 // =============================================================================
+// SYS_SRV_PEER — read a /srv connection's kernel-stamped peer identity.
+// =============================================================================
+//
+// corvus calls SYS_SRV_PEER per request to learn who is on the other end
+// of a connection (CORVUS-DESIGN.md §6.3; invariant C-22). The peer
+// identity is stamped by the kernel — never supplied by the client,
+// never cached on corvus's fid state. Spec contract specs/corvus.tla:
+// SrvPeerOp resolves the peer FRESH every op; ConnOpPeerWasLive — a dead
+// peer fail-closes.
+//
+// Returns 0 on success (*out filled), -1 on failure.
+int sys_srv_peer_for_proc(struct Proc *p, hidx_t conn_h,
+                          struct srv_peer_info *out) {
+    if (!p || !out) return -1;
+
+    // Resolve the connection handle: a KObj_Spoor endpoint the caller
+    // holds (SYS_SRV_ACCEPT minted it). RIGHT_READ is defense-in-depth —
+    // the accept installs READ|WRITE on the endpoint.
+    struct Spoor *sp = sys_lookup_spoor(p, conn_h, RIGHT_READ);
+    if (!sp) return -1;
+
+    // The Spoor must be a devsrv connection Spoor; devsrv_conn_of returns
+    // NULL for a pipe / dev9p / devsrv-root / devsrv-service Spoor.
+    struct SrvConn *cn = devsrv_conn_of(sp);
+    if (!cn) return -1;
+
+    // Poster gate (CORVUS-DESIGN §6.3): only the service's poster may
+    // query a connection's peer. The SrvConn captured the poster's
+    // stripes by value at mint; the caller's stripes must match.
+    u64 caller = proc_stripes(p);
+    if (caller == 0)                            return -1;
+    if (srvconn_server_stripes(cn) != caller)   return -1;
+
+    // Immutable identity — captured by value on the SrvConn at mint, so
+    // it is available even after the peer exits (no Proc lookup, no UAF).
+    u64  peer_stripes = srvconn_peer_stripes(cn);
+    bool peer_console = srvconn_peer_console(cn);
+
+    // Live caps + the dead-Proc guard: re-find the peer by stripes under
+    // the process-table lock. A peer that exited / is a zombie / was
+    // reaped has no ALIVE Proc carrying its stripes — `caps` and `alive`
+    // both fail-close to 0 (never a stale snapshot).
+    caps_t peer_caps  = 0;
+    bool   peer_alive = proc_caps_by_stripes(peer_stripes, &peer_caps);
+
+    out->stripes = peer_stripes;
+    out->caps    = peer_alive ? (u64)peer_caps : 0u;
+    out->console = peer_console ? 1u : 0u;
+    out->alive   = peer_alive ? 1u : 0u;
+    return 0;
+}
+
+static s64 sys_srv_peer_handler(u64 conn_h_raw, u64 out_va) {
+    struct Thread *t = current_thread();
+    if (!t)                                            return -1;
+    struct Proc *p = t->proc;
+    if (!p)                                            return -1;
+
+    // The result crosses to a user-VA buffer; validate the range before
+    // the per-byte store (uaccess_store_u8 does not range-check).
+    if (!sys_validate_user_buf(out_va, sizeof(struct srv_peer_info)))
+        return -1;
+
+    struct srv_peer_info info = {0};
+    if (sys_srv_peer_for_proc(p, (hidx_t)conn_h_raw, &info) != 0)
+        return -1;
+
+    // Store the struct per-byte with fault fixup (the sys_wait_pid_handler
+    // pattern). On a partial-write fault, scrub the bytes already written
+    // so userspace can never read a torn peer identity, then fail.
+    const u8 *bytes = (const u8 *)&info;
+    for (u64 i = 0; i < sizeof(info); i++) {
+        if (uaccess_store_u8(out_va + i, bytes[i]) != 0) {
+            for (u64 j = 0; j < i; j++)
+                (void)uaccess_store_u8(out_va + j, 0);
+            return -1;
+        }
+    }
+    return 0;
+}
+
+// =============================================================================
 // Dispatch entry.
 // =============================================================================
 
@@ -2035,6 +2117,11 @@ void syscall_dispatch(struct exception_context *ctx) {
 
     case SYS_SRV_ACCEPT:
         ctx->regs[0] = (u64)sys_srv_accept_handler(ctx->regs[0]);
+        return;
+
+    case SYS_SRV_PEER:
+        ctx->regs[0] = (u64)sys_srv_peer_handler(ctx->regs[0],
+                                                 ctx->regs[1]);
         return;
 
     default:
