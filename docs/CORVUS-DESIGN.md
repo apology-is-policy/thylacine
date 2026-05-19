@@ -597,7 +597,7 @@ corvus blocks until a client opens `/srv/corvus`, then receives the server end o
 
 **Teardown ordering.** On corvus death (or a connection close) the kernel (1) sets every affected connection's transport to `ERROR` and EOFs both pipe ends, so any kernel thread blocked in `do_recv` / `tsleep` on that connection wakes and returns `-EIO`; (2) fences client threads out of the dead connection; (3) frees the `p9_client` and the transport pipes. A corvus *crash* wakes blocked clients immediately via the EOF/ERROR path — the `tsleep` deadline is the backstop for a corvus *hang*, where no EOF is forthcoming.
 
-**corvus is single-threaded.** corvus `poll`s its listener plus its N accepted connection fds and serves one 9P message at a time, each connection's protocol state held in a strictly isolated per-connection arena (a fid bug on one connection cannot reach another). A slow operation (Argon2id) adds latency to other connections; this is accepted for the infrequent login path and documented — a v1.x corvus may multi-thread. Per-connection arena isolation is the load-bearing property; single-threadedness is an implementation simplification, not a security boundary.
+**corvus is single-threaded.** corvus `poll`s its listener plus its N accepted connection fds and serves one 9P message at a time, each connection's protocol state held in a strictly isolated per-connection arena (a fid bug on one connection cannot reach another). (`poll` is the multi-fd wait syscall — the **P5-poll** chunk, ARCH §23.3; a prerequisite of P5-corvus-srv-impl-b, since Thylacine has no kernel "wait on N sources" primitive otherwise.) A slow operation (Argon2id) adds latency to other connections; this is accepted for the infrequent login path and documented — a v1.x corvus may multi-thread. Per-connection arena isolation is the load-bearing property; single-threadedness is an implementation simplification, not a security boundary.
 
 ### 6.3 Kernel-stamped peer identity
 
@@ -902,7 +902,9 @@ The `/srv/corvus/` transport (§6). P5-corvus-bringup brought corvus up over a d
 
 **P5-corvus-srv-impl-a** — the kernel side: the `devsrv` Dev + `/srv`, the service registry, `SYS_POST_SERVICE` / `SYS_SRV_ACCEPT` / `SYS_SRV_PEER`, per-connection setup, the `KObj_Srv` kobj kind, and `stripes`. Audit-bearing (new Dev, transport mediation, Proc-identity stamping).
 
-**P5-corvus-srv-impl-b** — the corvus side: corvus becomes a full 9P2000.L server over `/srv/corvus`, retiring the joey pipe harness. Audit-bearing.
+**P5-poll** — the multi-fd wait syscall (`SYS_POLL`; ARCH §23.3). A general Phase-5 primitive, not strictly part of this transport, but its prerequisite: corvus is single-threaded (§6.2) and `poll`s its `/srv/corvus` listener plus its accepted connections, and Thylacine has no other kernel "wait on N sources" primitive. Spec-first — `poll.tla`, the gate-tied Phase-5 spec; the poller sleeps on its own private `Rendez` and registers a `poll_waiter` hook per fd. Audit-bearing.
+
+**P5-corvus-srv-impl-b** — the corvus side: corvus becomes a full 9P2000.L server over `/srv/corvus`, retiring the joey pipe harness. Depends on P5-poll. Audit-bearing.
 
 Exit criteria: a client opening `/srv/corvus/` reaches corvus; corvus reads the client's kernel-stamped identity via `SYS_SRV_PEER`; the identity is per-connection and cannot be rewritten by userspace, including across a 9P walk (`KObj_Srv` is non-transferable); a hung corvus fails a client's `open` with `-ETIMEDOUT` rather than wedging it.
 

@@ -636,9 +636,46 @@ cfgs run with `-deadlock`; `tsleep.tla`'s `Done` self-loop keeps a
 legitimate terminal state from tripping the deadlock check. See
 `docs/reference/16-rendez.md` (the `tsleep` section).
 
-## poll.tla — Phase 5 (planned)
+## poll.tla — P5-poll-spec (spec landed; impl at P5-poll-a / -b)
 
-(Stub. Will pin: wait/wake state machine, missed-wakeup-freedom — ARCH §28 I-9.)
+Status: **spec landed at P5-poll-spec; kernel impl pending — P5-poll-a
+(the poll mechanism + `SYS_POLL` + `devpipe` poll) and P5-poll-b
+(`devsrv` poll).** Models `poll` — one thread waiting on N readiness
+sources whose state lives behind N different locks. `scheduler.tla`
+already proves the single-`Rendez` check-then-sleep atomicity and
+`tsleep.tla` the deadline race; `poll.tla` models the surface neither
+covers — the cross-lock `poll_waiter` hand-off and the
+register-then-observe discipline.
+
+State universe: one poller, N fds (`Fds`), one timeout. One poller
+exercises the missed-wakeup-across-N-fds race fully; multiple pollers on
+one fd's hook list compose (each has its own private `Rendez` +
+`poll_waiter`, no shared mutable state). CONSTANTS: `HAS_TIMEOUT`
+(FALSE = poll(-1)), `BUGGY_CHECK_BEFORE_REGISTER`, `BUGGY_NO_WAKE`,
+`BUGGY_LAZY_UNREGISTER`.
+
+| Config | Flags | Checked | Result | Distinct |
+|---|---|---|---|---|
+| `poll.cfg`                             | all FALSE, `HAS_TIMEOUT`      | `Invariants` | clean | 25 |
+| `poll_notimeout.cfg`                   | `HAS_TIMEOUT=FALSE`           | `Invariants` | clean | 12 |
+| `poll_liveness.cfg`                    | all FALSE, `Spec_Live`        | `Invariants` + `PollTerminates` + `PollReturnsWhenReady` | clean | 25 |
+| `poll_buggy_check_before_register.cfg` | `BUGGY_CHECK_BEFORE_REGISTER` | `NoMissedPoll` | violation (depth 5) | — |
+| `poll_buggy_no_wake.cfg`               | `BUGGY_NO_WAKE`               | `NoMissedPoll` | violation (depth 4) | — |
+| `poll_buggy_lazy_unregister.cfg`       | `BUGGY_LAZY_UNREGISTER`       | `NoStaleHook`  | violation (depth 4) | — |
+
+Spec action ↔ impl mapping (impl pending — file:line filled when
+P5-poll-a / -b land):
+
+| Spec action | Source location | Notes |
+|---|---|---|
+| `Register` / `CommitOrSleep` | `kernel/poll.c` `SYS_POLL` (P5-poll-a) | The per-fd `dev->poll(spoor, events, pw)` loop, then `tsleep` on the poller's private `Rendez`. |
+| `MakeReady` | `kernel/pipe.c` (P5-poll-a) + `kernel/srvconn.c` / `kernel/devsrv.c` (P5-poll-b) | Every existing readiness `wakeup` site also walks the object's poll-hook list. |
+| `Timeout` | `kernel/sched.c::tsleep` deadline (landed, P5-tsleep) | poll's timeout IS a `tsleep` deadline. |
+| `BuggyCheckBeforeRegister` / `BuggyNoWake` / `BuggyLazyUnregister` | (none — register-then-observe; every readiness site wakes; `SYS_POLL` unhooks before return) | The three disciplines the impl must uphold. |
+
+cfgs run with `-deadlock`; `poll.tla`'s `Done` self-loop keeps a
+legitimate terminal state from tripping the deadlock check. See
+ARCH §23.3.
 
 ## futex.tla — Phase 5 (planned)
 

@@ -945,6 +945,7 @@ struct Dev {
     struct Block* (*bread)(struct Spoor *c, long n, int64_t off);
     long   (*write)(struct Spoor *c, void *buf, long n, int64_t off);
     long   (*bwrite)(struct Spoor *c, struct Block *bp, int64_t off);
+    short  (*poll)(struct Spoor *c, short events, struct poll_waiter *pw);
     void   (*remove)(struct Spoor *c);
     int    (*wstat)(struct Spoor *c, uint8_t *dp, int n);
     struct Spoor*  (*power)(struct Spoor *c, int on);
@@ -953,7 +954,7 @@ struct Dev {
 
 All kernel devices — including synthetic ones like `/dev/cons`, `/dev/null`, `/proc` — implement this interface. Userspace devices implement it remotely via 9P.
 
-The interface is preserved verbatim from Plan 9 (with C99 typing) for two reasons: (a) it's right; (b) it makes porting from 9Front straightforward when we want to.
+The interface is Plan 9's `Dev` vtable (with C99 typing), preserved for two reasons: (a) it's right; (b) it makes porting from 9Front straightforward when we want to. The one Thylacine addition is `poll` — the readiness query backing `SYS_POLL` (§23.3); a device with no readiness state leaves the slot NULL, and `poll` then treats the fd as always ready (POSIX-correct for a regular file).
 
 ### 9.3 Userspace drivers as 9P servers
 
@@ -1279,6 +1280,7 @@ The syscall interface is Plan 9-heritage, not POSIX. The syscall table is small 
 | `munmap(addr, len)` | Unmap memory |
 | `pipe(fd[2])` | Create pipe |
 | `dup(oldfd, newfd)` | Duplicate fd |
+| `poll(fds, nfds, timeout) → ready count` | Wait until ≥1 of `nfds` descriptors is ready, or `timeout` (ms) elapses; the multi-fd wait primitive (§23.3) |
 | `noted(v)` | Note handler return |
 | `notify(fn)` | Register note handler |
 | `postnote(pid, msg)` | Post a note to a process |
@@ -2537,15 +2539,37 @@ Plus Plan 9 userland (Tier 1): `rc`, `mk`, `awk`, `troff`, `tbl`, `eqn`, `9` lau
 
 ### 23.3 `poll` / `select` / `epoll`
 
-**Status**: `poll` and `select` are must-have for Phase 5 (Utopia). Without `poll`, interactive bash, curl, Python asyncio, and essentially all non-trivial programs are broken.
+**Status**: COMMITTED. `poll` is must-have for Phase 5 (Utopia) — without it interactive bash, curl, Python asyncio, and essentially every non-trivial program are broken — and it is the wait primitive a single-threaded userspace 9P server (`corvus`, CORVUS-DESIGN.md §6.2) uses to serve N connections. It lands as the **P5-poll** chunk (sub-chunks spec / -a / -b), a prerequisite of P5-corvus-srv-impl-b.
 
-**`poll(fds, nfds, timeout)`**: park the calling thread with a wait list across N fds. The first fd to become ready wakes the thread. For 9P-backed fds, the server signals readiness via a synthetic notification on the 9P session. For pipes and kernel fds, readiness is tracked in the kernel's Spoor structures.
+**ABI.** `SYS_POLL` (syscall 29): `poll(fds, nfds, timeout_ms) → ready-fd count` (`≥0`; `0` on timeout; `-1` on error). `fds` is a user-VA array of `nfds` (`1..64`, the per-Proc handle-table bound) `struct pollfd`:
 
-**`select()`**: implemented on top of `poll()`. Trivial.
+```c
+struct pollfd {       /* 8 bytes; Linux-shaped — the future musl shim is a no-op */
+    int32_t fd;       /* a handle index (hidx_t) — Thylacine has no separate fd layer */
+    int16_t events;   /* requested:  POLLIN | POLLOUT | ... */
+    int16_t revents;  /* returned:   the subset currently ready */
+};
+```
 
-**`epoll`**: Linux-specific scalable multiplexing. **Deferred to v1.1**. Designed as an extension of `poll` semantics, not a separate subsystem. Most programs degrade gracefully to `poll` when `epoll` is absent; those that don't are in the Linux binary compat tier anyway.
+Event bits take the Linux values: `POLLIN 0x001`, `POLLOUT 0x004`, `POLLERR 0x008`, `POLLHUP 0x010`, `POLLNVAL 0x020`. `timeout_ms`: `-1` blocks indefinitely, `0` returns immediately (a non-blocking scan), `>0` bounds the wait. `_Static_assert` pins `sizeof(struct pollfd) == 8` and the field offsets.
 
-`poll` is an audit-trigger surface: the wakeup race between a thread parking on multiple fds simultaneously is a classic source of missed wakeups and spurious returns. `specs/poll.tla` covers it; spec is mandated before merge.
+**Mechanism.** A Thylacine thread waits on exactly one `Rendez` (single-waiter; `rendez.h` extincts on a second). `poll` does **not** make `Rendez` multi-waiter. The poller sleeps on its **own private `Rendez`** via `tsleep` (§8.8 — `timeout_ms` is the deadline), and registers a lightweight `struct poll_waiter` hook on each polled object's **poll-hook list**. The `Dev` vtable gains one op (§9.2):
+
+```c
+short (*poll)(struct Spoor *c, short events, struct poll_waiter *pw);
+```
+
+`dev->poll` returns the fd's currently-ready `revents` and, if `pw` is non-NULL, registers `pw` on the object's hook list — atomically, under the object's own lock. A NULL `.poll` slot means *always ready* for the requested events: the POSIX-correct answer for a regular file, so only objects with genuine readiness state (`devpipe`, `devsrv`) implement a real `.poll`. When an object becomes ready, its existing wakeup site also walks its poll-hook list, sets each registered `poll_waiter`'s flag, and signals that poller's private `Rendez`.
+
+The load-bearing discipline is **register-then-observe**: `dev->poll` installs the hook and samples readiness in one locked step, so no readiness event between the sample and the sleep is lost. The poller's `tsleep` commit re-checks "any of my `poll_waiter` flags set" under its `Rendez` lock; a producer that readied an fd took that lock to signal — the happens-before that closes the missed-wakeup race across N fds. `poll` unregisters every hook before it returns.
+
+**`select()`**: implemented on top of `poll()`; lands with the broader Phase-5 syscall surface, not in P5-poll.
+
+**`epoll`**: Linux-specific scalable multiplexing. **Deferred to v1.1** — an extension of `poll` semantics, not a separate subsystem. Most programs degrade gracefully to `poll` when `epoll` is absent; those that don't are in the Linux binary compat tier anyway.
+
+**Scope at v1.0.** P5-poll covers readiness for **kernel-fd Spoor kinds** — `devpipe` and the `devsrv` connection + listener (the `corvus` consumer). A 9P-*mounted* file polls always-ready (a regular file is); polling a 9P-served FIFO/device via a synthetic 9P-session readiness notification is a separable follow-on, deferred — no v1.0 consumer needs it.
+
+`poll` is an audit-trigger surface (§25.4): the wakeup race between a thread parking on multiple fds and the poll-hook list lifetime are classic missed-wakeup / use-after-free sources. `specs/poll.tla` proves missed-wakeup-freedom across N fds (I-9) and no-stale-hook; the spec is mandated before merge.
 
 ### 23.4 Threading — `pthread` and `futex`
 
@@ -2844,6 +2868,7 @@ Every change to a file or function listed below spawns an adversarial soundness 
 | Handle table | `kernel/handle.c` | Rights monotonicity, transfer rules, hardware-handle non-transferability |
 | BURROW | `kernel/burrow.c`, `mm/burrow_pages.c` | Refcount, mapping lifecycle |
 | 9P client | `kernel/9p_client.c`, `kernel/9p_session.c` | Tag uniqueness, fid lifecycle, pipelining |
+| poll | `kernel/poll.c` | Wait/wake across N fds, missed-wakeup-freedom (I-9), poll-hook list lifetime |
 | Notes / signals | `kernel/notes.c`, `compat/signals.c` | Delivery ordering, async safety |
 | Capability checks | All syscall entry points | Privilege correctness |
 | KASLR / ASLR | `arch/arm64/start.S`, `kernel/aslr.c` | Entropy quality, layout correctness |
