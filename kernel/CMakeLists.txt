@@ -99,6 +99,7 @@ set(KERNEL_SRCS
     9p_attach.c
     9p_spoor_transport.c
     pipe.c
+    srvconn.c
     test/test_dev.c
     test/test_trivial_devs.c
     test/test_devproc.c
@@ -138,6 +139,7 @@ set(KERNEL_SRCS
     test/test_9p_spoor_transport.c
     test/test_pipe.c
     test/test_pipe_blocking.c
+    test/test_srvconn.c
     test/test_sys_pipe.c
     test/test_sys_mount.c
     test/test_sys_corvus.c

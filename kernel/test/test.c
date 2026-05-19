@@ -214,6 +214,13 @@ void test_devsrv_post_basic(void);
 void test_devsrv_tombstone(void);
 void test_devsrv_registry_full(void);
 void test_devsrv_post_rollback(void);
+void test_srvconn_create_destroy(void);
+void test_srvconn_roundtrip(void);
+void test_srvconn_ring_capacity(void);
+void test_srvconn_recv_blocks_then_wakes(void);
+void test_srvconn_recv_deadline_timeout(void);
+void test_srvconn_teardown_eofs(void);
+void test_srvconn_teardown_wakes_blocked(void);
 void test_virtio_mmio_probe(void);
 void test_virtio_magic_value(void);
 void test_virtio_version_modern(void);
@@ -744,6 +751,18 @@ struct test_case g_tests[] = {
     { "devsrv.tombstone",              test_devsrv_tombstone,              false, NULL },
     { "devsrv.registry_full",          test_devsrv_registry_full,          false, NULL },
     { "devsrv.post_rollback",          test_devsrv_post_rollback,          false, NULL },
+    { "srvconn.create_destroy",        test_srvconn_create_destroy,        false, NULL },
+    { "srvconn.roundtrip",             test_srvconn_roundtrip,             false, NULL },
+    { "srvconn.ring_capacity",         test_srvconn_ring_capacity,         false, NULL },
+    { "srvconn.recv_blocks_then_wakes",
+                                       test_srvconn_recv_blocks_then_wakes,
+                                                                           false, NULL },
+    { "srvconn.recv_deadline_timeout",
+                                       test_srvconn_recv_deadline_timeout, false, NULL },
+    { "srvconn.teardown_eofs",         test_srvconn_teardown_eofs,         false, NULL },
+    { "srvconn.teardown_wakes_blocked",
+                                       test_srvconn_teardown_wakes_blocked,
+                                                                           false, NULL },
     { "virtio.mmio_probe",             test_virtio_mmio_probe,             false, NULL },
     { "virtio.magic_value",            test_virtio_magic_value,            false, NULL },
     { "virtio.version_modern",         test_virtio_version_modern,         false, NULL },
