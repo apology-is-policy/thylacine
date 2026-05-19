@@ -7,8 +7,8 @@
 # banner, and PASSes iff:
 #   - All N boots reach "Thylacine boot OK" (no extinctions / crashes).
 #   - The set of distinct offsets has size ≥ floor(N * 0.7) — allowing
-#     for the rare collision (with 8192 buckets at 13 bits and 10 boots,
-#     probability of a collision is ~0.55%, but we don't want to fail
+#     for the rare collision (with 4096 buckets at 12 bits and 10 boots,
+#     probability of a collision is ~1.1%, but we don't want to fail
 #     PASS criteria over a single accidental collision in CI).
 #
 # Per CLAUDE.md verify-step pattern. Stricter than tools/test.sh (which

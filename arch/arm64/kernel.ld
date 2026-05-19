@@ -221,3 +221,18 @@ ASSERT((_boot_stack_bottom - _boot_stack_guard) == PAGE_SIZE,
 ASSERT((_kernel_end - _kernel_start)
        + (KERNEL_LOAD_PA & (0x400000 - 1)) < 0x400000,
        "Kernel image + firmware reservation overflow the 4 MiB L3 mapping at kernel_2mib_pa (= KERNEL_LOAD_PA & ~(2 MiB - 1)). Either shrink the image, move KERNEL_LOAD_PA to a 4 MiB boundary, or widen the L3 mapping in arch/arm64/mmu.c::build_page_tables.")
+
+/* The 4 MiB L3 region must lie within a single 1 GiB L2 table.
+ * build_page_tables wires its two 2 MiB halves as L2 entries `idx` and
+ * `idx + 1` of one per-GiB table (l2_ttbr0[gib] for TTBR0; the single
+ * l2_directmap_kernel for the direct-map alias). If kernel_2mib_pa
+ * (= KERNEL_LOAD_PA & ~(2 MiB - 1)) were the last 2 MiB block of a 1 GiB
+ * block, `idx` would be 511 and `idx + 1` would index 512 — one entry
+ * past the 512-entry table (an out-of-bounds write) — and the second
+ * 2 MiB would land in the next GiB. The TTBR1 high-half path is guarded
+ * at runtime instead (its index derives from the KASLR slide, a runtime
+ * value); this ASSERT pins the fixed-PA TTBR0 + direct-map paths at link
+ * time. The current KERNEL_LOAD_PA = 0x40080000 puts the region at
+ * [0x40000000, 0x40400000) — comfortably inside GiB 1. */
+ASSERT(((KERNEL_LOAD_PA & ~(0x200000 - 1)) & (0x40000000 - 1)) + 0x400000 <= 0x40000000,
+       "The kernel image's 4 MiB L3 region straddles a 1 GiB boundary: kernel_2mib_pa (= KERNEL_LOAD_PA & ~(2 MiB - 1)) is in the last 2 MiB of a 1 GiB block, so build_page_tables' `idx + 1` L2 wiring overruns l2_ttbr0 / l2_directmap_kernel. Move KERNEL_LOAD_PA so kernel_2mib_pa + 4 MiB stays within one 1 GiB block.")

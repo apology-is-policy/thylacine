@@ -282,6 +282,8 @@ Before P5-kernel-l3-4mib the mapping was a single 2 MiB L3 block ending at `0x40
 
 The 2 MiB era ended at P5-kernel-l3-4mib: the UBSan-instrumented image grew past the 1.5 MiB usable ceiling, so `build_page_tables` was extended to map a second 2 MiB block adjacent to the first (the option-(b) fix that earlier revisions of this section anticipated). `l3_kernel` and `l3_directmap_kernel` are now each `[ENTRIES_PER_TABLE * 2]`, and the `kernel.ld` assert checks `image_size + (KERNEL_LOAD_PA & (0x400000 - 1)) < 0x400000` — capping image_size at **3.5 MiB** with the 512 KiB firmware offset. The current UBSan-instrumented image is ~1.51 MiB, leaving ~2 MiB of headroom under the new cap. If a future image outgrows 3.5 MiB, the remaining options are (a) reduce the firmware reservation (move `KERNEL_LOAD_PA` closer to `0x40000000`) or (c) extend the L3 region again with more contiguous tables.
 
+A companion `kernel.ld` assert pins that the 4 MiB region lies **within a single 1 GiB L2 table** — `((KERNEL_LOAD_PA & ~(2 MiB - 1)) & (1 GiB - 1)) + 4 MiB <= 1 GiB`. `build_page_tables` wires the region's two 2 MiB halves as L2 entries `idx` and `idx + 1` of one per-GiB table (`l2_ttbr0[gib]`, and the single `l2_directmap_kernel`); were `kernel_2mib_pa` in the last 2 MiB of a GiB, `idx + 1` would overrun the 512-entry table. The TTBR1 high-half path guards the same condition at *runtime* (its L2 index derives from the KASLR slide, not a link-time constant); the fixed-PA TTBR0 + direct-map paths are pinned at *link time* by this assert. Added at the P5-kernel-l3-4mib MMU/KASLR audit close (finding F1).
+
 ---
 
 ## See also

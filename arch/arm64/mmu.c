@@ -386,9 +386,13 @@ static void build_page_tables(u64 slide) {
     // TTBR0: link the two kernel L3 tables into the identity map (so the
     // kernel image is reachable at PA pre-branch). The image spans a
     // 4 MiB region = two contiguous 2 MiB L2 entries; wire each to its
-    // L3 half. kernel_2mib_pa is the fixed load PA's 2 MiB base
-    // (0x40000000 on QEMU virt), so both halves land in the same per-GiB
-    // l2_ttbr0 table.
+    // L3 half. kernel_2mib_pa derives from the fixed KERNEL_LOAD_PA, so
+    // `idx` and `idx + 1` (the two halves) stay inside one per-GiB
+    // l2_ttbr0 table — that the 4 MiB region does not straddle a 1 GiB
+    // (L2-table) boundary is pinned at link time by kernel.ld's "4 MiB
+    // L3 region within a 1 GiB L2 table" ASSERT. (The TTBR1 path below is
+    // guarded at runtime instead — its index derives from the KASLR
+    // slide, a runtime value, not a link-time constant.)
     for (int half = 0; half < 2; half++) {
         u64 sub_pa = kernel_2mib_pa + (u64)half * BLOCK_SIZE_L2;
         u32 gib = (u32)(sub_pa >> BLOCK_SHIFT_L1);
@@ -400,14 +404,15 @@ static void build_page_tables(u64 slide) {
     // TTBR1: kernel high-half mapping at KASLR_LINK_VA + slide.
     //
     // The high VA we want to land at is KASLR_LINK_VA + slide. Compute
-    // the L0 / L1 / L2 indices for that VA. Slide is page-block-aligned
-    // (2 MiB) and bounded so L0 stays fixed inside the kernel-modules
-    // KASLR region (per ARCH §6.2: 0xFFFF_A000_*).
+    // the L0 / L1 / L2 indices for that VA. Slide is 4 MiB-aligned
+    // (kaslr.h KASLR_ALIGN_BITS) and bounded so L0 stays fixed inside the
+    // kernel-modules KASLR region (per ARCH §6.2: 0xFFFF_A000_*).
     //
     // The 2 MiB block containing KASLR_LINK_VA + slide is always
-    // kernel_2mib_va_base + slide_2mib (where kernel_2mib_va_base is
+    // kernel_2mib_va_base + slide (where kernel_2mib_va_base is
     // KASLR_LINK_VA & ~(2 MiB - 1) = 0xFFFFA00000000000), because slide
-    // is itself 2 MiB-aligned. Equivalently: high_va & ~(2 MiB - 1).
+    // is itself 4 MiB-aligned (hence 2 MiB-aligned). Equivalently:
+    // high_va & ~(2 MiB - 1).
     {
         u64 kernel_high_va = KASLR_LINK_VA + slide;
         u64 high_va_2mib   = kernel_high_va & ~(BLOCK_SIZE_L2 - 1);
@@ -523,9 +528,13 @@ static void build_page_tables(u64 slide) {
                 }
 
                 // Wire the kernel-image 4 MiB → l3_directmap_kernel's
-                // two L3 tables (two contiguous L2 entries; kernel_l2_idx
-                // is the fixed load PA's L2 index, so both stay inside
-                // this per-GiB l2_directmap_kernel table).
+                // two L3 tables (two contiguous L2 entries). kernel_l2_idx
+                // derives from the fixed KERNEL_LOAD_PA, so kernel_l2_idx
+                // and kernel_l2_idx + 1 stay inside this per-GiB
+                // l2_directmap_kernel table — that the 4 MiB region does
+                // not straddle a 1 GiB boundary is pinned at link time by
+                // kernel.ld's "4 MiB L3 region within a 1 GiB L2 table"
+                // ASSERT (the same pin as the TTBR0 path).
                 l2_directmap_kernel[kernel_l2_idx] =
                     make_table_pte(&l3_directmap_kernel[0]);
                 l2_directmap_kernel[kernel_l2_idx + 1] =
