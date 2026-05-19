@@ -202,12 +202,12 @@ void *mmu_map_mmio(paddr_t pa, size_t size);
 //      then on, code runs through TTBR1.
 //
 // Per-section permissions (W^X invariant I-12) apply to BOTH mappings —
-// the L3 table covering the kernel's 2 MiB block is shared between
-// TTBR0 and TTBR1. The boot-stack guard page is non-present in this
-// shared L3, so a stack overflow faults via either translation root.
+// the two L3 tables covering the kernel's 4 MiB region are shared
+// between TTBR0 and TTBR1. The boot-stack guard page is non-present in
+// the shared L3, so a stack overflow faults via either translation root.
 //
-// `slide` is the KASLR offset (page-block aligned, < 1 GiB), as chosen
-// by kaslr_init(). Pass 0 to disable KASLR (used for debug builds; not
+// `slide` is the KASLR offset (4 MiB-aligned, < 16 GiB), as chosen by
+// kaslr_init(). Pass 0 to disable KASLR (used for debug builds; not
 // recommended for normal operation).
 //
 // Called from arch/arm64/start.S after BSS clear, DTB save, and

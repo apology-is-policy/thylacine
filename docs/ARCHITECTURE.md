@@ -349,6 +349,8 @@ Kernel VA breakdown:
 
 KASLR randomizes kernel image placement within `0xFFFF_A000_*` region. Direct map and vmalloc regions are fixed (the direct map's virtual base = its physical base + a known offset, simplifying physical address computation).
 
+The kernel image itself is mapped page-grained (4 KiB PTEs, for per-section W^X) across a **4 MiB region** built from two contiguous L3 tables, shared between the TTBR0 identity and TTBR1 high-half walks. The KASLR slide is **4 MiB-aligned** so that 4 MiB region never straddles a 1 GiB (L2-table) boundary — it always maps to two consecutive entries of one L2 table. The slide spans a 16 GiB window in 4 MiB steps: **12 bits** of kernel-base entropy (invariant **I-16**). The region was 2 MiB (a single L3 table) through Phase 4; P5-kernel-l3-4mib widened it to 4 MiB when the UBSan-instrumented kernel image outgrew the 1.5 MiB usable ceiling.
+
 Page table walks via standard ARMv8 PTE format. `nG` bit set in user mappings (no global TLB entry); kernel mappings global with ASID 0.
 
 ### 6.3 Physical frame allocator: buddy + per-CPU magazines

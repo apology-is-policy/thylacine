@@ -2,8 +2,8 @@
 //
 // At P1-C-extras Part B, the kernel is linked at high VA
 // KASLR_LINK_VA (0xFFFFA00000080000) and randomized at boot by a
-// page-block-aligned offset. mmu.c builds TWO mappings sharing one
-// L3 page-grain table:
+// 4 MiB-aligned offset. mmu.c builds TWO mappings sharing two
+// contiguous L3 page-grain tables (a 4 MiB kernel-image span):
 //
 //   - TTBR0 identity for the low 4 GiB. Required for early boot
 //     (PC = load PA pre-branch), DTB access (DTB at PA 0x48000000),
@@ -15,8 +15,8 @@
 //     then on, kernel code runs through TTBR1.
 //
 // Per-section permissions (W^X invariant I-12) live in the shared L3
-// table — same memory under either translation. The boot-stack guard
-// page is non-present in this L3, so a stack overflow faults via
+// tables — same memory under either translation. The boot-stack guard
+// page is non-present in the L3, so a stack overflow faults via
 // either translation root.
 //
 // Memory layout for 48-bit VA / 4 KiB granule / 4-level page tables:
@@ -89,13 +89,13 @@ extern char _boot_stack_guard[];
 //   TTBR1 (kernel high-half):
 //     - 1 L0 table (only one entry used — KASLR_L0_IDX).
 //     - 1 L1 table (one entry used — L1 index of slide).
-//     - 1 L2 table (one entry used — L2 index of slide; points at
-//       the SHARED l3_kernel below).
+//     - 1 L2 table (two consecutive entries used — L2 index of slide
+//       and slide+2 MiB; point at the two SHARED l3_kernel tables).
 //   Shared:
-//     - 1 L3 table for the kernel-image 2 MiB region (fine-grained
-//       perms; serves both TTBR0 and TTBR1 mappings).
+//     - 2 L3 tables for the kernel-image 4 MiB region (fine-grained
+//       perms; serve both TTBR0 and TTBR1 mappings).
 //
-// Memory cost: 10 × 4 KiB = 40 KiB. Negligible.
+// Memory cost: 11 × 4 KiB = 44 KiB. Negligible.
 // ---------------------------------------------------------------------------
 
 #define ENTRIES_PER_TABLE 512
@@ -118,9 +118,23 @@ static u64 l0_ttbr1[ENTRIES_PER_TABLE]    __attribute__((aligned(PAGE_SIZE)));
 static u64 l1_ttbr1[ENTRIES_PER_TABLE]    __attribute__((aligned(PAGE_SIZE)));
 static u64 l2_ttbr1[ENTRIES_PER_TABLE]    __attribute__((aligned(PAGE_SIZE)));
 
-// Shared L3 table for the kernel-image 2 MiB region. Both TTBR0 and
-// TTBR1 walks land here for kernel-image accesses.
-static u64 l3_kernel[ENTRIES_PER_TABLE]   __attribute__((aligned(PAGE_SIZE)));
+// Shared L3 tables for the kernel-image 4 MiB region — two contiguous
+// 512-entry L3 tables: l3_kernel[0..511] maps the first 2 MiB,
+// l3_kernel[512..1023] the second. Both TTBR0 and TTBR1 walks land here
+// for kernel-image accesses. The 4 MiB span (P5-kernel-l3-4mib; was
+// 2 MiB) gives headroom as the kernel image grows — notably the
+// UBSan-instrumented build, which crossed the 2 MiB ceiling.
+static u64 l3_kernel[ENTRIES_PER_TABLE * 2] __attribute__((aligned(PAGE_SIZE)));
+
+// The kernel's 4 MiB region occupies two consecutive 2 MiB L2 entries.
+// The TTBR1 high-VA wiring relies on those two entries living in one
+// l2_ttbr1 table — i.e. on the KASLR slide being 4 MiB-aligned, so the
+// 4 MiB region never straddles a 1 GiB (L2-table) boundary. Pin the
+// kaslr.h constant the wiring depends on.
+_Static_assert(KASLR_ALIGN_BITS >= 22,
+               "KASLR slide must be >= 4 MiB-aligned so the kernel's "
+               "4 MiB L3 region maps to two consecutive same-table L2 "
+               "entries (build_page_tables TTBR1 wiring)");
 
 // =============================================================================
 // P3-Bb: Direct map + vmalloc tables (TTBR1 high half).
@@ -167,8 +181,10 @@ static u64 l3_vmalloc[ENTRIES_PER_TABLE]   __attribute__((aligned(PAGE_SIZE)));
 //
 // Other 2 MiB blocks within the kernel's GiB remain default R/W + XN
 // (struct_pages, free RAM for buddy/SLUB).
-static u64 l2_directmap_kernel[ENTRIES_PER_TABLE] __attribute__((aligned(PAGE_SIZE)));
-static u64 l3_directmap_kernel[ENTRIES_PER_TABLE] __attribute__((aligned(PAGE_SIZE)));
+static u64 l2_directmap_kernel[ENTRIES_PER_TABLE]   __attribute__((aligned(PAGE_SIZE)));
+// Two contiguous L3 tables — the direct-map alias of the kernel-image
+// 4 MiB region, matching l3_kernel's two-table span (P5-kernel-l3-4mib).
+static u64 l3_directmap_kernel[ENTRIES_PER_TABLE * 2] __attribute__((aligned(PAGE_SIZE)));
 
 // vmalloc bump-allocator cursor. Tracks the next free L3 entry index in
 // l3_vmalloc. Each mmu_map_mmio call advances by ceil(size / PAGE_SIZE).
@@ -259,6 +275,10 @@ static void build_page_tables(u64 slide) {
     // PA of kernel start. In PIC mode this is PC-relative — gives the
     // runtime load PA when called pre-MMU-on with PC = load PA.
     u64 pa_kernel_start = (u64)(uintptr_t)_kernel_start;
+    // The 2 MiB-aligned PA below the load PA. It is also the base of the
+    // kernel image's 4 MiB L3-mapped region [kernel_2mib_pa, +4 MiB):
+    // the load PA is fixed (0x40080000 on QEMU virt) so this is likewise
+    // 4 MiB-aligned, and per-page L3 overrides index off it linearly.
     u64 kernel_2mib_pa  = pa_kernel_start & ~(BLOCK_SIZE_L2 - 1);
 
     // P3-Bdb: capture the PA of l0_ttbr0 — used as the kernel-only
@@ -290,10 +310,13 @@ static void build_page_tables(u64 slide) {
         l2_ttbr0[gib][idx] = make_block_pte_l2(pa, PTE_DEVICE_RW_BLOCK);
     }
 
-    // Build the SHARED kernel L3 table — covers the 2 MiB region
-    // containing the kernel image. Same content under TTBR0 (low VA)
-    // and TTBR1 (high VA): page descriptors mapping to PA.
-    for (int j = 0; j < ENTRIES_PER_TABLE; j++) {
+    // Build the SHARED kernel L3 tables — two contiguous 512-entry L3
+    // tables covering the 4 MiB region containing the kernel image. Same
+    // content under TTBR0 (low VA) and TTBR1 (high VA): page descriptors
+    // mapping to PA. Per-section perm overrides below index l3_kernel[]
+    // linearly by page offset from kernel_2mib_pa, so an offset in the
+    // second 2 MiB lands in l3_kernel[512..1023] with no special-casing.
+    for (int j = 0; j < ENTRIES_PER_TABLE * 2; j++) {
         paddr_t pa = kernel_2mib_pa + ((paddr_t)j << PAGE_SHIFT);
         l3_kernel[j] = make_page_pte_l3(pa, PTE_KERN_RW);
     }
@@ -360,12 +383,18 @@ static void build_page_tables(u64 slide) {
         }
     }
 
-    // TTBR0: link the kernel L3 into the appropriate L2 entry of the
-    // identity map (so the kernel image is reachable at PA pre-branch).
-    {
-        u32 gib = (u32)(kernel_2mib_pa >> BLOCK_SHIFT_L1);
-        u32 idx = (u32)((kernel_2mib_pa >> BLOCK_SHIFT_L2) & 0x1ff);
-        l2_ttbr0[gib][idx] = make_table_pte(l3_kernel);
+    // TTBR0: link the two kernel L3 tables into the identity map (so the
+    // kernel image is reachable at PA pre-branch). The image spans a
+    // 4 MiB region = two contiguous 2 MiB L2 entries; wire each to its
+    // L3 half. kernel_2mib_pa is the fixed load PA's 2 MiB base
+    // (0x40000000 on QEMU virt), so both halves land in the same per-GiB
+    // l2_ttbr0 table.
+    for (int half = 0; half < 2; half++) {
+        u64 sub_pa = kernel_2mib_pa + (u64)half * BLOCK_SIZE_L2;
+        u32 gib = (u32)(sub_pa >> BLOCK_SHIFT_L1);
+        u32 idx = (u32)((sub_pa >> BLOCK_SHIFT_L2) & 0x1ff);
+        l2_ttbr0[gib][idx] =
+            make_table_pte(&l3_kernel[half * ENTRIES_PER_TABLE]);
     }
 
     // TTBR1: kernel high-half mapping at KASLR_LINK_VA + slide.
@@ -387,9 +416,19 @@ static void build_page_tables(u64 slide) {
         u32 l1_idx = (u32)((high_va_2mib >> BLOCK_SHIFT_L1) & 0x1ff);
         u32 l2_idx = (u32)((high_va_2mib >> BLOCK_SHIFT_L2) & 0x1ff);
 
+        // The kernel image spans a 4 MiB region — two contiguous 2 MiB
+        // L2 entries. The KASLR slide is 4 MiB-aligned (kaslr.h
+        // KASLR_ALIGN_BITS = 22), so high_va_2mib is 4 MiB-aligned,
+        // l2_idx is even, and l2_idx + 1 stays inside this same l2_ttbr1
+        // table — the pair never straddles a 1 GiB (L2-table) boundary.
+        if ((l2_idx & 1u) != 0 || l2_idx + 1 >= ENTRIES_PER_TABLE)
+            extinction("kernel 4 MiB region misaligned in the L2 table "
+                       "(KASLR slide not 4 MiB-aligned — kaslr.h drift)");
+
         l0_ttbr1[l0_idx] = make_table_pte(l1_ttbr1);
         l1_ttbr1[l1_idx] = make_table_pte(l2_ttbr1);
-        l2_ttbr1[l2_idx] = make_table_pte(l3_kernel);     // shared L3
+        l2_ttbr1[l2_idx]     = make_table_pte(&l3_kernel[0]);                 // first 2 MiB
+        l2_ttbr1[l2_idx + 1] = make_table_pte(&l3_kernel[ENTRIES_PER_TABLE]); // second 2 MiB
     }
 
     // P3-Bb: TTBR1 direct map at base KERNEL_DIRECT_MAP_BASE
@@ -436,8 +475,9 @@ static void build_page_tables(u64 slide) {
 
                 // Build l3_directmap_kernel: mirror l3_kernel's per-
                 // section perms but force PTE_PXN | PTE_UXN. Default
-                // R/W + XN; sections override below.
-                for (u32 j = 0; j < ENTRIES_PER_TABLE; j++) {
+                // R/W + XN; sections override below. Two contiguous L3
+                // tables span the 4 MiB kernel region (P5-kernel-l3-4mib).
+                for (u32 j = 0; j < ENTRIES_PER_TABLE * 2; j++) {
                     paddr_t page_pa = kernel_2mib_pa + ((paddr_t)j << PAGE_SHIFT);
                     l3_directmap_kernel[j] = make_page_pte_l3(page_pa, PTE_KERN_RW);
                 }
@@ -482,9 +522,14 @@ static void build_page_tables(u64 slide) {
                     l3_directmap_kernel[sg_idx] = 0;
                 }
 
-                // Wire the kernel-image 2 MiB → l3_directmap_kernel.
+                // Wire the kernel-image 4 MiB → l3_directmap_kernel's
+                // two L3 tables (two contiguous L2 entries; kernel_l2_idx
+                // is the fixed load PA's L2 index, so both stay inside
+                // this per-GiB l2_directmap_kernel table).
                 l2_directmap_kernel[kernel_l2_idx] =
-                    make_table_pte(l3_directmap_kernel);
+                    make_table_pte(&l3_directmap_kernel[0]);
+                l2_directmap_kernel[kernel_l2_idx + 1] =
+                    make_table_pte(&l3_directmap_kernel[ENTRIES_PER_TABLE]);
 
                 l1_directmap[gib] = make_table_pte(l2_directmap_kernel);
             } else {

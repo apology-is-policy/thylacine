@@ -10,7 +10,7 @@ Reference: `ARCHITECTURE.md §5.3` (KASLR design intent), `§6.2` (kernel VA lay
 
 ## Purpose
 
-The kernel image is linked at a fixed high VA (`KASLR_LINK_VA = 0xFFFFA00000080000`) inside TTBR1's "kernel modules + KASLR" region (0xFFFF_A000_*). At boot, the kernel chooses a random page-block-aligned (2 MiB) offset from the best available entropy source, applies any `R_AARCH64_RELATIVE` relocations in the embedded `.rela.dyn` section, builds a TTBR1 page-table mapping at `KASLR_LINK_VA + offset`, and long-branches into the runtime VA. From then on, kernel code executes through TTBR1; data accesses to PAs (DTB, MMIO) continue to go through TTBR0's identity map.
+The kernel image is linked at a fixed high VA (`KASLR_LINK_VA = 0xFFFFA00000080000`) inside TTBR1's "kernel modules + KASLR" region (0xFFFF_A000_*). At boot, the kernel chooses a random 4 MiB-aligned offset from the best available entropy source, applies any `R_AARCH64_RELATIVE` relocations in the embedded `.rela.dyn` section, builds a TTBR1 page-table mapping at `KASLR_LINK_VA + offset`, and long-branches into the runtime VA. From then on, kernel code executes through TTBR1; data accesses to PAs (DTB, MMIO) continue to go through TTBR0's identity map.
 
 The runtime kernel base differs at every boot. An attacker that can leak a single kernel pointer learns the slide (and therefore the kernel base) but only for that boot — the next boot's slide is independent.
 
@@ -57,20 +57,22 @@ The chosen value passes through a SipHash-style avalanche mix (`mix64`) — XOR 
 ### Offset choice
 
 ```c
-#define KASLR_OFFSET_MASK   0x3FFE00000ull  // bits 33..21 set
-#define KASLR_ALIGN_BITS    21              // 2 MiB alignment
+#define KASLR_OFFSET_MASK   0x3FFC00000ull  // bits 33..22 set
+#define KASLR_ALIGN_BITS    22              // 4 MiB alignment
 
 u64 offset = mixed & KASLR_OFFSET_MASK;
-if (offset == 0) offset = 1ull << KASLR_ALIGN_BITS;   // minimum 2 MiB
+if (offset == 0) offset = 1ull << KASLR_ALIGN_BITS;   // minimum 4 MiB
 ```
 
-The mask preserves bits 33..21 = **13 bits of entropy = 8192 distinct 2 MiB-aligned offsets** in `[0, 16 GiB)`. We enforce a non-zero minimum (one 2 MiB block) so KASLR never trivially returns slide=0.
+The mask preserves bits 33..22 = **12 bits of entropy = 4096 distinct 4 MiB-aligned offsets** in `[0, 16 GiB)`. We enforce a non-zero minimum (one 4 MiB block) so KASLR never trivially returns slide=0.
 
 The 16 GiB upper bound is conservative compared to ARCH §6.2's allowable 32 TiB range. Two reasons:
 - The TTBR1 page-table builder uses a single L0 entry (kernel is in one 512 GiB L0 slot). Capping well below 512 GiB keeps the table code linear.
-- 13 bits is comparable to Linux ARM64 KASLR's effective entropy on most platforms (also bounded by L1 walk constraints).
+- 12 bits is comparable to Linux ARM64 KASLR's effective entropy on most platforms (also bounded by L1 walk constraints).
 
-A future bump to 18 bits (256 K offsets, ~512 GiB range) is mechanical — change the mask + verify the L0 carry math in `mmu.c`.
+The 4 MiB alignment (`KASLR_ALIGN_BITS = 22`, raised from 21 at P5-kernel-l3-4mib) keeps the kernel's 4 MiB L3 region — its two consecutive 2 MiB L2 entries — inside a single `l2_ttbr1` table, avoiding a 1 GiB-boundary straddle special-case at boot. `mmu.c` carries a `_Static_assert(KASLR_ALIGN_BITS >= 22, ...)` pinning that dependency. The cost is one entropy bit (13 → 12). Invariant **I-16** still holds: 12 bits over a 16 GiB window is still strong randomization.
+
+A future bump to 17 bits (128 K offsets, ~512 GiB range) is mechanical — change the mask + verify the L0 carry math in `mmu.c`.
 
 ### .rela.dyn relocation walker
 
@@ -113,7 +115,7 @@ The relocator is therefore a no-op walker today. The infrastructure is in place 
 - TTBR0 identity for low 4 GiB (unchanged from P1-C).
 - TTBR1 high-half mapping at `KASLR_LINK_VA + slide`.
 
-The TTBR1 walk uses three new BSS tables (`l0_ttbr1`, `l1_ttbr1`, `l2_ttbr1`) plus the **shared** `l3_kernel` page-grain table (the same L3 used by TTBR0's identity-map override for the kernel-image 2 MiB block). Because the kernel image stays at the same PA across boots and only the L0/L1/L2 indices into it change, sharing the L3 is safe and saves 4 KiB.
+The TTBR1 walk uses three new BSS tables (`l0_ttbr1`, `l1_ttbr1`, `l2_ttbr1`) plus the **shared** `l3_kernel` page-grain region — two contiguous L3 tables since P5-kernel-l3-4mib, the same L3 region used by TTBR0's identity-map override for the kernel-image 4 MiB region. Because the kernel image stays at the same PA across boots and only the L0/L1/L2 indices into it change, sharing the two L3 tables is safe and saves 8 KiB. The 4 MiB-aligned slide guarantees the kernel's two 2 MiB L2 entries are always consecutive in this one `l2_ttbr1` table — no 1 GiB-boundary straddle to special-case.
 
 L0/L1/L2 indices for the high VA:
 
@@ -125,16 +127,17 @@ u32 l0_idx = (high_va_2mib >> 39) & 0x1FF;   // always 0x140 for KASLR slot
 u32 l1_idx = (high_va_2mib >> 30) & 0x1FF;   // varies with slide
 u32 l2_idx = (high_va_2mib >> 21) & 0x1FF;   // varies with slide
 
-l0_ttbr1[l0_idx] = make_table_pte(l1_ttbr1);
-l1_ttbr1[l1_idx] = make_table_pte(l2_ttbr1);
-l2_ttbr1[l2_idx] = make_table_pte(l3_kernel);   // shared L3
+l0_ttbr1[l0_idx]     = make_table_pte(l1_ttbr1);
+l1_ttbr1[l1_idx]     = make_table_pte(l2_ttbr1);
+l2_ttbr1[l2_idx]     = make_table_pte(&l3_kernel[0]);     // first 2 MiB
+l2_ttbr1[l2_idx + 1] = make_table_pte(&l3_kernel[512]);   // second 2 MiB
 ```
 
 Page-table footprint after KASLR:
 - TTBR0: 1 L0 + 1 L1 + 4 L2 = 24 KiB.
 - TTBR1: 1 L0 + 1 L1 + 1 L2 = 12 KiB.
-- Shared: 1 L3 = 4 KiB.
-- **Total: 40 KiB BSS-allocated.**
+- Shared: `l3_kernel` = 2 contiguous L3 tables = 8 KiB.
+- **Total: 44 KiB BSS-allocated.**
 
 ### Long-branch into high VA
 
@@ -184,7 +187,7 @@ Both are BSS (zero-cleared at boot). `kaslr_init()` sets them; `kaslr_get_offset
 ## Spec cross-reference
 
 No formal spec at P1-C-extras. A future `kaslr.tla` could prove:
-- The slide is always 2 MiB-aligned.
+- The slide is always 4 MiB-aligned.
 - The slide is bounded such that the L0 walk never crosses a slot boundary.
 - The .rela.dyn walker terminates and applies each entry exactly once.
 
@@ -204,7 +207,7 @@ for i in $(seq 1 10); do
 done
 ```
 
-Expected: 10 distinct offsets ranging across [0x200000, 0x3FFE00000) (2 MiB to 16 GiB - 2 MiB), 2 MiB-aligned.
+Expected: 10 distinct offsets ranging across [0x400000, 0x3FFC00000] (4 MiB to 16 GiB - 4 MiB), 4 MiB-aligned.
 
 ---
 
@@ -212,10 +215,10 @@ Expected: 10 distinct offsets ranging across [0x200000, 0x3FFE00000) (2 MiB to 1
 
 | Condition | Behavior |
 |---|---|
-| All seed sources return 0 | `g_kaslr_seed_source = KASLR_SEED_NONE`; `mixed = 0` after mix64; offset becomes the 2 MiB minimum (slide == 1 << 21). Banner shows `seed: none`. **Boot continues** — KASLR is degenerate but the kernel still runs at a non-trivial high VA. |
+| All seed sources return 0 | `g_kaslr_seed_source = KASLR_SEED_NONE`; `mixed = 0` after mix64; offset becomes the 4 MiB minimum (slide == 1 << 22). Banner shows `seed: none`. **Boot continues** — KASLR is degenerate but the kernel still runs at a non-trivial high VA. |
 | `.rela.dyn` malformed | Walker reads `r_info` field as native-endian; if the entry's type isn't `R_AARCH64_RELATIVE`, the walker silently skips. With our build flags, no other types should appear. |
 | TTBR1 page-table walk hits an unmapped region | Synchronous data abort. Pre-P1-F this wedges QEMU; P1-F's fault handler will route to `extinction()`. |
-| The kernel crosses the 2 MiB block during link-time growth | Linker `ASSERT()` `_kernel_end - _kernel_start < 0x200000` fails the build. |
+| The kernel crosses the 4 MiB L3 mapping during link-time growth | Linker `ASSERT()` `(_kernel_end - _kernel_start) + (KERNEL_LOAD_PA & (0x400000 - 1)) < 0x400000` fails the build (image cap 3.5 MiB with the 512 KiB firmware offset). |
 
 ---
 
@@ -225,7 +228,7 @@ Expected: 10 distinct offsets ranging across [0x200000, 0x3FFE00000) (2 MiB to 1
 |---|---|---|
 | Kernel ELF size (debug) | ~117 KB | +18 KB from P1-C-extras Part A; PIE adds dynamic-section family + extra GOT + alignment slack. |
 | Kernel flat binary | 16 KB | +8 KB from Part A. The `.dynamic` / `.dynsym` / `.gnu.hash` / `.hash` / `.got` family adds ~3 KB; alignment to PAGE_SIZE adds ~5 KB. |
-| Page-table footprint | 40 KiB | +12 KiB from P1-C (which had 28 KiB). Three new tables for TTBR1 (`l0_ttbr1`, `l1_ttbr1`, `l2_ttbr1`). |
+| Page-table footprint | 44 KiB | +16 KiB from P1-C (which had 28 KiB). Three new tables for TTBR1 (`l0_ttbr1`, `l1_ttbr1`, `l2_ttbr1`); since P5-kernel-l3-4mib `l3_kernel` is 2 contiguous L3 tables (8 KiB, was 4 KiB). |
 | `kaslr_init` total cost | ~5 µs | Dominated by `dtb_get_chosen_*` walks; mix64 + offset compute is sub-µs. |
 | `mmu_enable` total cost | ~0.05 ms | Unchanged from P1-C. |
 | Boot to UART banner | ~50 ms (informal) | Unchanged from P1-C. KASLR adds < 0.01 ms. |
@@ -241,10 +244,16 @@ Expected: 10 distinct offsets ranging across [0x200000, 0x3FFE00000) (2 MiB to 1
 - Linker script links at `KERNEL_LINK_VA = 0xFFFFA00000080000` with `AT(KERNEL_LOAD_PA = 0x40080000)`.
 - `.rela.dyn` section retained in loaded image (currently empty).
 - `arch/arm64/kaslr.{h,c}` (~150 LOC) — entropy chain, mix function, offset choice, R_AARCH64_RELATIVE walker, slide accessors.
-- `arch/arm64/mmu.c` extended with TTBR1 mapping at `KASLR_LINK_VA + slide` using the shared `l3_kernel` table. `mmu_enable(u64 slide)` signature change.
+- `arch/arm64/mmu.c` extended with TTBR1 mapping at `KASLR_LINK_VA + slide` using the shared `l3_kernel` region. `mmu_enable(u64 slide)` signature change.
 - `arch/arm64/start.S` calls `kaslr_init()` after BSS clear, passes slide to `mmu_enable()`, then long-branches to high VA `boot_main` via `kaslr_high_va_addr`.
 - `lib/dtb.c` split `dtb_get_chosen_kaslr_seed` (kaslr-seed only) from `dtb_get_chosen_rng_seed` (rng-seed only); `kaslr.c` tries them in priority order.
 - Boot banner shows `kernel base: 0x...`, `KASLR offset 0x...`, `seed: <source>`.
+
+**Changed at P5-kernel-l3-4mib**:
+
+- Slide alignment 2 MiB → 4 MiB: `KASLR_ALIGN_BITS` 21 → 22, `KASLR_OFFSET_MASK` `0x3FFE00000` → `0x3FFC00000` (bits 33..22). Entropy 13 → 12 bits (8192 → 4096 distinct offsets); non-zero minimum slide one 4 MiB block.
+- The 4 MiB-aligned slide keeps the kernel's 4 MiB L3 region (its two consecutive 2 MiB L2 entries) inside one `l2_ttbr1` table — no 1 GiB-boundary straddle. Pinned by `_Static_assert(KASLR_ALIGN_BITS >= 22, ...)` in `mmu.c`.
+- Invariant **I-16** still holds — 12 bits over a 16 GiB window remains strong.
 
 **Verified**:
 
@@ -285,9 +294,9 @@ After KASLR, TTBR0 still holds the low-4-GiB identity map. Kernel data accesses 
 
 A linker `ASSERT()` enforces equality. Both must change together.
 
-### KASLR offset entropy is 13 bits
+### KASLR offset entropy is 12 bits
 
-8192 distinct offsets is reasonable for a v1.0 baseline but lower than e.g. desktop Linux ARM64 (which gets ~17-18 bits depending on platform). Future hardening pass can bump the mask to bits 38..21 (18 bits, ~256 K offsets, ~512 GiB range) — the only constraint is keeping the L0 index fixed (true up to ~512 GiB - text_offset ≈ 512 GiB).
+4096 distinct offsets is reasonable for a v1.0 baseline but lower than e.g. desktop Linux ARM64 (which gets ~17-18 bits depending on platform). The entropy dropped from 13 to 12 bits at P5-kernel-l3-4mib when the slide alignment widened 2 MiB → 4 MiB (so the kernel's 4 MiB L3 region maps cleanly inside one `l2_ttbr1` table); I-16 still holds. Future hardening pass can bump the mask to bits 38..22 (17 bits, ~128 K offsets, ~512 GiB range) — the only constraint is keeping the L0 index fixed (true up to ~512 GiB - text_offset ≈ 512 GiB).
 
 ---
 

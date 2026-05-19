@@ -1,6 +1,6 @@
 # 03 — MMU + W^X (as-built reference)
 
-The kernel's MMU bring-up. After P1-C-extras, the kernel runs with TWO live mappings sharing one L3 page-grain table: TTBR0 identity for the low 4 GiB (DTB and MMIO access) and TTBR1 kernel high-half at `KASLR_LINK_VA + slide`. Per-section permissions for the kernel image enforce W^X (invariant **I-12**) at PTE bit level. P1-C delivered the TTBR0 identity + W^X enforcement; P1-C-extras Part A added the boot-stack guard page; P1-C-extras Part B added the KASLR slide-aware TTBR1 mapping (see `docs/reference/05-kaslr.md`).
+The kernel's MMU bring-up. After P1-C-extras, the kernel runs with TWO live mappings sharing the kernel-image page-grain L3 tables: TTBR0 identity for the low 4 GiB (DTB and MMIO access) and TTBR1 kernel high-half at `KASLR_LINK_VA + slide`. Since P5-kernel-l3-4mib the kernel image is mapped page-grained across a **4 MiB region** by **two contiguous L3 tables** (was a single 2 MiB L3 block). Per-section permissions for the kernel image enforce W^X (invariant **I-12**) at PTE bit level. P1-C delivered the TTBR0 identity + W^X enforcement; P1-C-extras Part A added the boot-stack guard page; P1-C-extras Part B added the KASLR slide-aware TTBR1 mapping (see `docs/reference/05-kaslr.md`).
 
 Scope: `arch/arm64/mmu.h`, `arch/arm64/mmu.c`, plus `_text_end` / `_rodata_end` / `_data_end` symbols added to `arch/arm64/kernel.ld` and the `bl mmu_enable` call inserted between BSS clear and `boot_main()` in `arch/arm64/start.S`.
 
@@ -83,18 +83,18 @@ VA[11:0]   page offset
 - 4× **L2 tables** `l2_ttbr0[0..3]` (one per GiB; 512 entries × 2 MiB = 1 GiB each).
   - Default: 2 MiB Normal-WB RW blocks.
   - Override: the 2 MiB block containing `0x09000000` (PL011) → Device-nGnRnE block.
-  - Override: the 2 MiB block containing the kernel image → table descriptor pointing at the SHARED `l3_kernel`.
-- 1× **shared L3 table** `l3_kernel` for the kernel-image 2 MiB region (page-granular permissions).
+  - Override: the **two consecutive 2 MiB blocks** covering the kernel-image 4 MiB region → table descriptors, one pointing at `l3_kernel[0..511]` (first 2 MiB) and one at `l3_kernel[512..1023]` (second 2 MiB).
+- 1× **shared L3 region** `l3_kernel`, declared `[ENTRIES_PER_TABLE * 2]` (1024 entries = two contiguous page-aligned 512-entry L3 tables) for the kernel-image 4 MiB region (page-granular permissions). `l3_kernel[0..511]` maps the first 2 MiB, `[512..1023]` the second; each half is wired as its own L3 table.
   - PTEs left at zero (PTE_VALID=0): the slot for `_boot_stack_guard`, and — since P5-secondary-stack-guard — the leading guard page of each `g_secondary_boot_stacks` slot. A stack overflow into any guard page faults synchronously rather than corrupting prior BSS (P1-C-extras Part A; secondary guards P5-secondary-stack-guard).
-  - The L3 is **shared** between TTBR0 and TTBR1 — same physical kernel image accessed via both.
+  - `l3_kernel` is **shared** between TTBR0 and TTBR1 — same physical kernel image accessed via both.
 
 **TTBR1 — kernel high-half at `KASLR_LINK_VA + slide`** (P1-C-extras Part B):
 
 - 1× **L0 table** `l0_ttbr1` (only one entry used — `L0[KASLR_L0_IDX = 0x140]` for the `0xFFFFA000_*` slot).
 - 1× **L1 table** `l1_ttbr1` (one entry used — index = bits 38..30 of `KASLR_LINK_VA + slide`).
-- 1× **L2 table** `l2_ttbr1` (one entry used — index = bits 29..21 of `KASLR_LINK_VA + slide`; points at the SHARED `l3_kernel` above).
+- 1× **L2 table** `l2_ttbr1` (**two consecutive entries used** — indices = bits 29..21 of `KASLR_LINK_VA + slide` and the next, one per `l3_kernel` half; the 4 MiB-aligned KASLR slide keeps both inside this one table).
 
-Total page-table footprint: **10 × 4 KiB = 40 KiB**, BSS-allocated and zeroed by `start.S`. (Up from 28 KiB at P1-C; +12 KiB for TTBR1's L0/L1/L2.)
+Total page-table footprint: **11 × 4 KiB = 44 KiB**, BSS-allocated and zeroed by `start.S`. (Up from 28 KiB at P1-C; +12 KiB for TTBR1's L0/L1/L2, +4 KiB for the second `l3_kernel` table at P5-kernel-l3-4mib.)
 
 ### MAIR_EL1 (memory attribute encodings)
 
@@ -237,10 +237,16 @@ P1-C measurements on QEMU virt under Hypervisor.framework:
 
 **Implemented at P1-C-extras Part B**:
 
-- TTBR1 high-half mapping at `KASLR_LINK_VA + slide` using new BSS tables (`l0_ttbr1`, `l1_ttbr1`, `l2_ttbr1`) and the SHARED `l3_kernel` page-grain table.
+- TTBR1 high-half mapping at `KASLR_LINK_VA + slide` using new BSS tables (`l0_ttbr1`, `l1_ttbr1`, `l2_ttbr1`) and the SHARED `l3_kernel` page-grain region.
 - `mmu_enable(u64 slide)` signature change. Boot stub passes the slide from `kaslr_init()`. mmu.c is now KASLR-aware.
-- Page table footprint grew from 28 KiB to 40 KiB.
+- Page table footprint grew from 28 KiB to 40 KiB (later 44 KiB at P5-kernel-l3-4mib's second `l3_kernel` table).
 - KASLR slide-aware kernel high-VA mapping invariant **I-16** satisfied. See `docs/reference/05-kaslr.md` for the entropy chain, .rela.dyn walker, and long-branch.
+
+**Implemented at P5-kernel-l3-4mib**:
+
+- Kernel-image L3 mapping extended 2 MiB → 4 MiB: `l3_kernel` and `l3_directmap_kernel` are each declared `[ENTRIES_PER_TABLE * 2]` (two contiguous 512-entry L3 tables). TTBR0 identity, TTBR1 high-half, and the direct-map alias each now wire two consecutive 2 MiB L2 entries (one per L3-table half).
+- The `kernel.ld` image assert widened to `image_size + (KERNEL_LOAD_PA & (0x400000 - 1)) < 0x400000` — cap raised from 1.5 MiB to 3.5 MiB. Driven by the UBSan-instrumented image (~1.51 MiB) outgrowing the old 1.5 MiB ceiling.
+- The KASLR slide is now 4 MiB-aligned so the kernel's two 2 MiB L2 entries always land consecutively in a single `l2_ttbr1` table; pinned by a `_Static_assert(KASLR_ALIGN_BITS >= 22, ...)` in `mmu.c`. See `docs/reference/05-kaslr.md`.
 
 **Landed**: P1-C at commit `6462227`; P1-C-extras Part A at commit `ff22ca3`; P1-C-extras Part B at commit `74fd391`.
 
@@ -264,17 +270,17 @@ At P1-C-extras the page tables are fixed-size BSS arrays. This is fine for ident
 
 After P1-C-extras Part B, TTBR1 holds the kernel high-half mapping but TTBR0 keeps the low 4 GiB identity map. Kernel data accesses to absolute PAs (the saved DTB pointer, PL011 MMIO, future MMIO regions) translate through TTBR0. Phase 2 will retire TTBR0 when user territories start to live there; until then, the kernel can read low PAs by absolute addressing. The trade-off is a wider attack surface (TTBR0 has the kernel's full RAM mapped); the mitigation is that nothing in user code runs during this period.
 
-### L3 table is shared between TTBR0 and TTBR1
+### L3 tables are shared between TTBR0 and TTBR1
 
-The same `l3_kernel` page-grain table is referenced by L2 entries in both TTBR0 (via `l2_ttbr0[gib][idx]`) and TTBR1 (via `l2_ttbr1[l2_idx]`). This works because the L3 PTEs map specific physical addresses (PAs) — the two paths reach the same memory through different VAs. Saves 4 KiB of BSS and ensures both translation roots see identical kernel-image semantics.
+The same `l3_kernel` page-grain region (two contiguous L3 tables since P5-kernel-l3-4mib) is referenced by L2 entries in both TTBR0 (via `l2_ttbr0[gib][idx]` and the next) and TTBR1 (via `l2_ttbr1[l2_idx]` and the next). This works because the L3 PTEs map specific physical addresses (PAs) — the two paths reach the same memory through different VAs. Saves 8 KiB of BSS and ensures both translation roots see identical kernel-image semantics.
 
-### Kernel image + firmware reservation must fit in a single 2 MiB L3 block
+### Kernel image must fit in the 4 MiB L3 mapping
 
-The L3 mapping covers exactly `[kernel_2mib_pa, kernel_2mib_pa + 2 MiB)` where `kernel_2mib_pa = pa_kernel_start & ~(BLOCK_SIZE_L2 - 1)`. With `KERNEL_LOAD_PA = 0x40080000` on QEMU virt, that's `[0x40000000, 0x40200000)`. The 512 KiB firmware reservation at `[0x40000000, 0x40080000)` is mapped invalid (R6-B F114); the kernel image follows. Any kernel section past `0x40200000` is **not mapped at all** — any post-MMU access (read or write, via either the high-VA or direct-map alias) takes an unhandled translation fault.
+The L3 mapping covers exactly `[kernel_2mib_pa, kernel_2mib_pa + 4 MiB)` where `kernel_2mib_pa = pa_kernel_start & ~(BLOCK_SIZE_L2 - 1)`. With `KERNEL_LOAD_PA = 0x40080000` on QEMU virt, that's `[0x40000000, 0x40400000)`. The 512 KiB firmware reservation at `[0x40000000, 0x40080000)` is mapped invalid (R6-B F114); the kernel image follows. Any kernel section past `0x40400000` is **not mapped at all** — any post-MMU access (read or write, via either the high-VA or direct-map alias) takes an unhandled translation fault.
 
-The image-only assert in `kernel.ld` was conservative-low: it checked `image_size < 2 MiB` without accounting for the firmware offset. A P4-Ic7 commit briefly fell off the cliff by pushing image_size from 1440 → 1572 KiB while the firmware reservation was still 512 KiB — total 2080 KiB > 2 MiB — and the kernel silently faulted on post-MMU accesses past the L3-mapped region. R12-bss-2mib (`docs/phase4-status.md` deferred-audit row) tightened the assert to express the actual constraint: `image_size + (KERNEL_LOAD_PA & (2 MiB - 1)) < 2 MiB`. With the current 512 KiB firmware offset, that caps image_size at 1.5 MiB.
+Before P5-kernel-l3-4mib the mapping was a single 2 MiB L3 block ending at `0x40200000`, and history shows that ceiling was a real cliff. The image-only assert in `kernel.ld` was once conservative-low: it checked `image_size < 2 MiB` without accounting for the firmware offset. A P4-Ic7 commit briefly fell off the cliff by pushing image_size from 1440 → 1572 KiB while the firmware reservation was still 512 KiB — total 2080 KiB > 2 MiB — and the kernel silently faulted on post-MMU accesses past the L3-mapped region. R12-bss-2mib (`docs/phase4-status.md` deferred-audit row) tightened the assert to express the actual constraint: `image_size + (KERNEL_LOAD_PA & (BLOCK_SIZE_L2 - 1)) < 2 MiB`, capping image_size at 1.5 MiB under the 512 KiB firmware offset.
 
-If a future image legitimately needs more than 1.5 MiB, the fix is one of: (a) reduce the firmware reservation (move `KERNEL_LOAD_PA` closer to `0x40000000`); (b) extend `build_page_tables` to map a second 2 MiB block adjacent to the first; (c) demote the L2 entry covering the kernel-image GiB to multiple page-grain L3 tables. The bundled blob-cap shrink at P4-Jc (test-binary blob caps 128 → 96 KiB) is a stopgap, not the canonical fix.
+The 2 MiB era ended at P5-kernel-l3-4mib: the UBSan-instrumented image grew past the 1.5 MiB usable ceiling, so `build_page_tables` was extended to map a second 2 MiB block adjacent to the first (the option-(b) fix that earlier revisions of this section anticipated). `l3_kernel` and `l3_directmap_kernel` are now each `[ENTRIES_PER_TABLE * 2]`, and the `kernel.ld` assert checks `image_size + (KERNEL_LOAD_PA & (0x400000 - 1)) < 0x400000` — capping image_size at **3.5 MiB** with the 512 KiB firmware offset. The current UBSan-instrumented image is ~1.51 MiB, leaving ~2 MiB of headroom under the new cap. If a future image outgrows 3.5 MiB, the remaining options are (a) reduce the firmware reservation (move `KERNEL_LOAD_PA` closer to `0x40000000`) or (c) extend the L3 region again with more contiguous tables.
 
 ---
 

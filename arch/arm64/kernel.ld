@@ -206,18 +206,18 @@ ASSERT((_boot_stack_top - _boot_stack_bottom) == BOOT_STACK_SIZE,
 ASSERT((_boot_stack_bottom - _boot_stack_guard) == PAGE_SIZE,
        "Boot stack guard page must be exactly 4 KiB")
 
-/* The kernel image is mapped by a single page-grain L3 table covering
- * exactly the 2 MiB block starting at the 2 MiB-aligned PA below the
- * load PA — i.e. [KERNEL_LOAD_PA & ~(2 MiB - 1), that + 2 MiB) — per
- * arch/arm64/mmu.c::build_page_tables. The firmware reservation
- * [kernel_2mib_pa, KERNEL_LOAD_PA) sits in front of the image inside
- * that same 2 MiB block (typically 512 KiB on QEMU virt, since
- * KERNEL_LOAD_PA = 0x40080000 and the 2 MiB block starts at
- * 0x40000000). The L3 has no entries past + 2 MiB; any access to a
- * higher PA from the kernel high-VA or direct-map alias takes an
- * unhandled translation fault. The image-only assert is therefore
- * conservative-low: the real constraint is image_size + firmware
- * offset within the 2 MiB block. */
+/* The kernel image is mapped by two contiguous page-grain L3 tables
+ * covering exactly the 4 MiB region starting at the 2 MiB-aligned PA
+ * below the load PA — i.e. [KERNEL_LOAD_PA & ~(2 MiB - 1), that + 4 MiB)
+ * — per arch/arm64/mmu.c::build_page_tables (P5-kernel-l3-4mib; was a
+ * single 2 MiB L3 table). The firmware reservation [kernel_2mib_pa,
+ * KERNEL_LOAD_PA) sits in front of the image inside that same 4 MiB
+ * region (typically 512 KiB on QEMU virt, since KERNEL_LOAD_PA =
+ * 0x40080000 and the region starts at 0x40000000). The L3 tables have
+ * no entries past + 4 MiB; any access to a higher PA from the kernel
+ * high-VA or direct-map alias takes an unhandled translation fault. The
+ * image-only assert is therefore conservative-low: the real constraint
+ * is image_size + firmware offset within the 4 MiB region. */
 ASSERT((_kernel_end - _kernel_start)
-       + (KERNEL_LOAD_PA & (0x200000 - 1)) < 0x200000,
-       "Kernel image + firmware reservation overflow the 2 MiB L3 block at kernel_2mib_pa (= KERNEL_LOAD_PA & ~(2 MiB - 1)). Either shrink the image, move KERNEL_LOAD_PA to a 2 MiB boundary, or extend the L3 mapping in arch/arm64/mmu.c::build_page_tables.")
+       + (KERNEL_LOAD_PA & (0x400000 - 1)) < 0x400000,
+       "Kernel image + firmware reservation overflow the 4 MiB L3 mapping at kernel_2mib_pa (= KERNEL_LOAD_PA & ~(2 MiB - 1)). Either shrink the image, move KERNEL_LOAD_PA to a 4 MiB boundary, or widen the L3 mapping in arch/arm64/mmu.c::build_page_tables.")
