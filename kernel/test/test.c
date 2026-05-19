@@ -221,6 +221,13 @@ void test_srvconn_recv_blocks_then_wakes(void);
 void test_srvconn_recv_deadline_timeout(void);
 void test_srvconn_teardown_eofs(void);
 void test_srvconn_teardown_wakes_blocked(void);
+void test_devsrv_walk_service(void);
+void test_devsrv_conn_open(void);
+void test_devsrv_accept_immediate(void);
+void test_devsrv_accept_blocks_then_wakes(void);
+void test_devsrv_conn_io(void);
+void test_devsrv_conn_release(void);
+void test_devsrv_poster_exit_drains_backlog(void);
 void test_virtio_mmio_probe(void);
 void test_virtio_magic_value(void);
 void test_virtio_version_modern(void);
@@ -762,6 +769,17 @@ struct test_case g_tests[] = {
     { "srvconn.teardown_eofs",         test_srvconn_teardown_eofs,         false, NULL },
     { "srvconn.teardown_wakes_blocked",
                                        test_srvconn_teardown_wakes_blocked,
+                                                                           false, NULL },
+    { "devsrv.walk_service",           test_devsrv_walk_service,           false, NULL },
+    { "devsrv.conn_open",              test_devsrv_conn_open,              false, NULL },
+    { "devsrv.accept_immediate",       test_devsrv_accept_immediate,       false, NULL },
+    { "devsrv.accept_blocks_then_wakes",
+                                       test_devsrv_accept_blocks_then_wakes,
+                                                                           false, NULL },
+    { "devsrv.conn_io",                test_devsrv_conn_io,                false, NULL },
+    { "devsrv.conn_release",           test_devsrv_conn_release,           false, NULL },
+    { "devsrv.poster_exit_drains_backlog",
+                                       test_devsrv_poster_exit_drains_backlog,
                                                                            false, NULL },
     { "virtio.mmio_probe",             test_virtio_mmio_probe,             false, NULL },
     { "virtio.magic_value",            test_virtio_magic_value,            false, NULL },

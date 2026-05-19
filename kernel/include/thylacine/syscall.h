@@ -341,6 +341,27 @@ enum {
     //   - the name already has a live or in-flight server
     //   - the service registry is full / handle table full
     SYS_POST_SERVICE = 26,   // arg: name_va (x0), name_len (x1)
+
+    // P5-corvus-srv-impl-a3b: SYS_SRV_ACCEPT(service_handle) →
+    // connection_handle / -1
+    //   x0 = service_handle   the KObj_Srv handle from SYS_POST_SERVICE
+    // Accept one kernel-minted /srv connection for the service the caller
+    // posted (CORVUS-DESIGN.md §6.2). BLOCKS until a client opens the
+    // service — corvus calls SYS_SRV_ACCEPT in a loop, one accept per
+    // client connection. Returns a KObj_Spoor connection handle: the
+    // server endpoint, on which corvus reads client→server 9P frame bytes
+    // with SYS_READ and writes server→client bytes with SYS_WRITE; close
+    // tears the connection down.
+    //
+    // Gated to the service's poster — the caller must hold the service
+    // handle AND its stripes must match the registry entry's poster.
+    //
+    // Returns the connection handle (hidx ≥ 0) on success, -1 on:
+    //   - service_handle is not a KObj_Srv service handle the caller holds
+    //   - the caller is not the service's current poster
+    //   - the service ceased to be LIVE while the accept blocked
+    //   - kmalloc OOM for the connection Spoor / handle table full
+    SYS_SRV_ACCEPT   = 27,   // arg: service_handle (x0)
 };
 
 // SYS_GETRANDOM flags.

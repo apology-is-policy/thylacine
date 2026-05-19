@@ -34,10 +34,13 @@
 #ifndef THYLACINE_DEVSRV_H
 #define THYLACINE_DEVSRV_H
 
+#include <thylacine/rendez.h>
 #include <thylacine/types.h>
 
 struct Dev;
 struct Proc;
+struct Spoor;
+struct SrvConn;
 
 // Maximum service-name length. Service names are short identifiers
 // ("corvus"); 32 is generous and bounds the registry entry + the
@@ -49,10 +52,41 @@ struct Proc;
 #define SRV_MAX_SERVICES  8u
 
 // SRV_SERVICE_MAGIC — sentinel at offset 0 of struct SrvService. Lets the
-// KObj_Srv handle-release path (P5-corvus-srv-impl-a3, when connection
-// objects also become KObj_Srv) discriminate a service object from a
-// connection object by the magic word.
+// KObj_Srv handle-release path discriminate a service object from a
+// connection object (SRV_CONN_MAGIC, <thylacine/srvconn.h>) by the magic
+// word: a KObj_Srv handle's obj is a SrvService for a SYS_POST_SERVICE
+// handle, a SrvConn for a client connection handle.
 #define SRV_SERVICE_MAGIC  0x53525653564300ULL    // 'SRVSVC' || 0x00
+
+// Per-service accept backlog depth — the count of kernel-minted-but-not-
+// yet-accepted /srv connections held for the poster. A client open past
+// the backlog fails fast rather than queueing unboundedly (CORVUS-DESIGN
+// §6.2). corvus accepts promptly, so a short backlog suffices.
+#define SRV_ACCEPT_BACKLOG  16u
+
+// Global cap on live /srv connections. Each SrvConn pins ~32 KiB of
+// kernel heap (two rings + the dedicated p9_client); the cap bounds the
+// worst-case exposure. CORVUS-DESIGN §6.2 sizes this at corvus's
+// MAX_USERS order (~256); v1.0 caps at 64 (~2 MiB worst case) — a
+// tunable, raised when a multi-user workload needs the headroom.
+#define SRV_MAX_CONNS  64u
+
+// DEVSRV_SVC_MAGIC — sentinel at offset 0 of struct devsrv_svc_ref, the
+// aux of a service Spoor (a /srv root walked to a service name). Lets
+// devsrv's read/write/close ops discriminate a service Spoor's aux from
+// a connection Spoor's aux (a SrvConn *, SRV_CONN_MAGIC) by the first u64.
+#define DEVSRV_SVC_MAGIC  0x5352564E4F444500ULL   // 'SRVNODE' || 0x00
+
+// devsrv_svc_ref — the aux of a service Spoor (devsrv_walk's product). It
+// names a posted service by value; devsrv_open / srv_conn_open resolve it
+// fresh via srv_lookup (no raw SrvService * — a tombstone-then-rebind
+// reuses the registry slot, so a cached pointer could name a different
+// service).
+struct devsrv_svc_ref {
+    u64  magic;                      // DEVSRV_SVC_MAGIC
+    u8   name_len;                   // 1..SRV_NAME_MAX
+    char name[SRV_NAME_MAX];
+};
 
 // Service-entry lifecycle.
 //
@@ -82,6 +116,16 @@ struct SrvService {
     char           name[SRV_NAME_MAX];
     u64            poster_stripes;   // poster Proc's stripes tag (by value)
     int            poster_pid;       // poster Proc's PID (by value; diagnostics)
+
+    // Accept backlog — a bounded FIFO ring of kernel-minted connections
+    // awaiting SYS_SRV_ACCEPT. A client open enqueues one (holding a
+    // srvconn_ref); the poster's accept dequeues it (the ref transfers to
+    // the accepted connection Spoor). Mutated under the registry lock.
+    struct SrvConn *backlog[SRV_ACCEPT_BACKLOG];
+    u32            backlog_head;     // next-push index;  mod SRV_ACCEPT_BACKLOG
+    u32            backlog_tail;     // next-pop  index;  mod SRV_ACCEPT_BACKLOG
+    u32            backlog_count;    // entries buffered; 0..SRV_ACCEPT_BACKLOG
+    struct Rendez  accept_rendez;    // the poster blocks here in SYS_SRV_ACCEPT
 };
 
 // The devsrv Dev. dc='s' (Plan 9 #s); registered by dev_init().
@@ -140,5 +184,51 @@ void srv_proc_exit_notify(struct Proc *p);
 // srv_registry_count — number of non-FREE registry entries. Tests +
 // diagnostics; takes the registry lock.
 int srv_registry_count(void);
+
+// =============================================================================
+// Per-connection layer (P5-corvus-srv-impl-a3b).
+// =============================================================================
+//
+// A client Proc reaches corvus over its own kernel-minted connection (a
+// SrvConn, <thylacine/srvconn.h>). The kernel mints + owns all transport
+// (invariant C-23). CORVUS-DESIGN.md §6.2.
+
+// srv_conn_open_for_proc — the client-connect path: mint a /srv connection
+// for `p` to the LIVE service `name`, enqueue it on the service's accept
+// backlog, and install a non-transferable KObj_Srv connection handle
+// (obj = the SrvConn) in p's handle table. Wakes a poster blocked in
+// SYS_SRV_ACCEPT.
+//
+// Returns the connection handle (hidx >= 0) on success, -1 on: bad args /
+// no LIVE service of that name / the global live-connection cap
+// (SRV_MAX_CONNS) is reached / the service's accept backlog is full /
+// kmalloc OOM / p's handle table is full.
+//
+// The Dev `open` vtable slot cannot host this — it returns a Spoor, but a
+// client connection handle is KObj_Srv with a SrvConn obj (the magic
+// discriminator, <thylacine/srvconn.h>), not a Spoor. The production
+// client-open syscall (P5-corvus-srv-impl-b, once joey mounts /srv) wraps
+// this core; at a3b it is exercised directly by tests.
+int srv_conn_open_for_proc(struct Proc *p, const char *name, u8 name_len);
+
+// srv_accept_blocking — the poster's accept: block until a connection is
+// on `svc`'s accept backlog, then dequeue and return it. The returned
+// SrvConn carries the one reference the backlog held — ownership passes
+// to the caller. Returns NULL if `svc` ceased to be LIVE while blocked
+// (the poster exited, or a test reset the registry).
+//
+// PRECONDITION: at most one thread accepts on a given service at a time
+// (corvus is single-threaded; the accept Rendez is single-waiter).
+struct SrvConn *srv_accept_blocking(struct SrvService *svc);
+
+// devsrv_make_conn_spoor — wrap an accepted SrvConn in a devsrv connection
+// Spoor (dc='s', pre-opened). The Spoor's read/write route to the SrvConn
+// server side; its close drops the SrvConn reference the caller passed.
+// Returns NULL on OOM (the caller still owns `conn`'s reference).
+struct Spoor *devsrv_make_conn_spoor(struct SrvConn *conn);
+
+// srv_backlog_depth — current accept-backlog depth of `svc`. Tests +
+// diagnostics; takes the registry lock.
+int srv_backlog_depth(struct SrvService *svc);
 
 #endif  // THYLACINE_DEVSRV_H

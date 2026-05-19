@@ -25,6 +25,7 @@
 #include <thylacine/proc.h>
 #include <thylacine/random.h>
 #include <thylacine/spoor.h>
+#include <thylacine/srvconn.h>
 #include <thylacine/territory.h>
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
@@ -1799,6 +1800,81 @@ static s64 sys_post_service_handler(u64 name_va, u64 name_len_raw) {
 }
 
 // =============================================================================
+// SYS_SRV_ACCEPT — accept a kernel-minted /srv connection (P5-corvus-srv).
+// =============================================================================
+//
+// The poster of a /srv service blocks here until a client opens the
+// service, then receives the server endpoint of one fresh kernel-minted
+// connection as a KObj_Spoor handle (CORVUS-DESIGN.md §6.2; spec contract
+// specs/corvus.tla::SrvAccept — corvus accepts only a connection the
+// kernel already bound). The connection transport is kernel-created and
+// kernel-owned throughout (invariant C-23).
+//
+// Returns the connection handle (hidx ≥ 0) on success, -1 on failure.
+int sys_srv_accept_for_proc(struct Proc *p, hidx_t service_h) {
+    if (!p) return -1;
+
+    // Resolve the service handle: a KObj_Srv handle the caller holds whose
+    // obj is a service registry entry. The first u64 discriminates a
+    // service object (SRV_SERVICE_MAGIC) from a connection object
+    // (SRV_CONN_MAGIC) — accept requires a service.
+    struct Handle *slot = handle_get(p, service_h);
+    if (!slot)                                          return -1;
+    if (slot->kind != KOBJ_SRV)                         return -1;
+    if ((slot->rights & RIGHT_READ) != RIGHT_READ)      return -1;
+    if (!slot->obj)                                     return -1;
+    if (*(const u64 *)slot->obj != SRV_SERVICE_MAGIC)   return -1;
+    struct SrvService *svc = (struct SrvService *)slot->obj;
+
+    // Poster gate: only the Proc currently posting this service may accept
+    // its connections. Holding the service handle is already evidence; the
+    // stripes match additionally rejects a stale handle into a service
+    // that was tombstoned and rebound by a different poster.
+    u64 caller = proc_stripes(p);
+    if (caller == 0)                                    return -1;
+    if (svc->poster_stripes != caller)                  return -1;
+
+    // Block until a connection is on the backlog. NULL means the service
+    // stopped being LIVE while we blocked (the poster exited / a test
+    // reset the registry) — fail closed.
+    struct SrvConn *cn = srv_accept_blocking(svc);
+    if (!cn) return -1;
+
+    // Wrap the accepted SrvConn in a devsrv connection Spoor — corvus's
+    // server endpoint. The SrvConn reference held by the backlog passes
+    // to the Spoor.
+    struct Spoor *conn_spoor = devsrv_make_conn_spoor(cn);
+    if (!conn_spoor) {
+        // Could not build the endpoint: tear the connection down so the
+        // client wakes with EOF rather than waiting on a server it will
+        // never reach, then drop the (now sole) backlog reference.
+        srvconn_teardown(cn);
+        srvconn_unref(cn);
+        return -1;
+    }
+
+    // Install the server endpoint as a KObj_Spoor handle. handle_alloc
+    // takes ownership of conn_spoor's reference (from spoor_alloc inside
+    // devsrv_make_conn_spoor); close runs spoor_clunk → devsrv_close →
+    // srvconn_unref.
+    hidx_t ch = handle_alloc(p, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE,
+                             conn_spoor);
+    if (ch < 0) {
+        spoor_clunk(conn_spoor);   // → devsrv_close → srvconn_unref
+        return -1;
+    }
+    return (int)ch;
+}
+
+static s64 sys_srv_accept_handler(u64 service_h_raw) {
+    struct Thread *t = current_thread();
+    if (!t)                                            return -1;
+    struct Proc *p = t->proc;
+    if (!p)                                            return -1;
+    return (s64)sys_srv_accept_for_proc(p, (hidx_t)service_h_raw);
+}
+
+// =============================================================================
 // Dispatch entry.
 // =============================================================================
 
@@ -1955,6 +2031,10 @@ void syscall_dispatch(struct exception_context *ctx) {
     case SYS_POST_SERVICE:
         ctx->regs[0] = (u64)sys_post_service_handler(ctx->regs[0],
                                                      ctx->regs[1]);
+        return;
+
+    case SYS_SRV_ACCEPT:
+        ctx->regs[0] = (u64)sys_srv_accept_handler(ctx->regs[0]);
         return;
 
     default:

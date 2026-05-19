@@ -29,6 +29,7 @@
 //   - Refcount integration via burrow_ref/unref (P2-Fd is the first step).
 //   - Capability-handle elevation via factotum (per ARCH §15.4).
 
+#include <thylacine/devsrv.h>
 #include <thylacine/dma_handle.h>
 #include <thylacine/extinction.h>
 #include <thylacine/handle.h>
@@ -36,6 +37,7 @@
 #include <thylacine/mmio_handle.h>
 #include <thylacine/proc.h>
 #include <thylacine/spoor.h>
+#include <thylacine/srvconn.h>
 #include <thylacine/types.h>
 #include <thylacine/burrow.h>
 
@@ -145,15 +147,29 @@ static void handle_release_obj(enum kobj_kind kind, void *obj) {
         // exercises the full lifecycle end-to-end.
         spoor_clunk((struct Spoor *)obj);
         break;
-    case KOBJ_SRV:
-        // P5-corvus-srv: a KObj_Srv handle's obj is a /srv kernel
-        // object. For a service object (SYS_POST_SERVICE; -impl-a2) the
-        // no-op is correct — a service is a registry entry whose
-        // lifetime is the poster Proc's (tombstoned by exits() ->
-        // srv_proc_exit_notify, never freed), NOT the handle's, so
-        // closing the handle must not touch it. -impl-a3 adds connection
-        // objects, whose transport teardown is wired into this case.
+    case KOBJ_SRV: {
+        // P5-corvus-srv: a KObj_Srv handle's obj is one of two /srv
+        // kernel objects, discriminated by the magic word at offset 0:
+        //   SRV_SERVICE_MAGIC — a service registry entry (SYS_POST_
+        //     SERVICE). Its lifetime is the poster Proc's (tombstoned by
+        //     exits() -> srv_proc_exit_notify, never freed), NOT the
+        //     handle's — closing the handle must not touch it. No-op.
+        //   SRV_CONN_MAGIC — a SrvConn (the client side of a /srv
+        //     connection, from srv_conn_open_for_proc). Closing the
+        //     handle is a connection close (CORVUS-DESIGN.md §6.2): tear
+        //     the connection down — EOF both rings so the peer (corvus)
+        //     wakes — then release the handle's reference. teardown is
+        //     idempotent; the last srvconn_unref frees (a3b).
+        u64 m = *(const u64 *)obj;
+        if (m == SRV_CONN_MAGIC) {
+            srvconn_teardown((struct SrvConn *)obj);
+            srvconn_unref((struct SrvConn *)obj);
+        } else if (m != SRV_SERVICE_MAGIC) {
+            extinction("handle_release_obj(KOBJ_SRV): obj has neither "
+                       "service nor connection magic (corruption / UAF)");
+        }
         break;
+    }
     case KOBJ_INVALID:
     case KOBJ_PROCESS:
     case KOBJ_THREAD:

@@ -140,6 +140,7 @@ set(KERNEL_SRCS
     test/test_pipe.c
     test/test_pipe_blocking.c
     test/test_srvconn.c
+    test/test_devsrv_conn.c
     test/test_sys_pipe.c
     test/test_sys_mount.c
     test/test_sys_corvus.c

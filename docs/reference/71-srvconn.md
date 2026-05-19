@@ -1,11 +1,14 @@
 # 71 — srvconn: the `/srv` per-connection transport
 
-**Status**: as-built at P5-corvus-srv-impl-a3a. The `SrvConn` connection
-object, its bidirectional `tsleep`-bounded byte transport, and the
-lifecycle/teardown path are landed. The `devsrv` walk/open path that
-mints a `SrvConn` on a client open, the bounded accept queue, and
-`SYS_SRV_ACCEPT` are P5-corvus-srv-impl-a3b; `SYS_SRV_PEER` is
-P5-corvus-srv-impl-a3c — not yet built.
+**Status**: as-built at P5-corvus-srv-impl-a3a, with its first consumer
+landed at P5-corvus-srv-impl-a3b. The `SrvConn` connection object, its
+bidirectional `tsleep`-bounded byte transport, and the lifecycle/teardown
+path are landed (a3a). As of a3b the `devsrv` per-connection layer
+(reference 70) is the real consumer: `srv_conn_open_for_proc` mints a
+`SrvConn` on a client connect, `SYS_SRV_ACCEPT` hands corvus the server
+endpoint, and `devsrv_read` / `devsrv_write` route to
+`srvconn_server_recv` / `srvconn_server_send`. `SYS_SRV_PEER` (the
+peer-identity read) is P5-corvus-srv-impl-a3c — not yet built.
 
 ---
 
@@ -186,7 +189,9 @@ thread drains `s2c` at a time.
 `p9_transport_ops` whose `send` / `recv` / `close` wrap
 `srvconn_client_send` / `srvconn_client_recv` / `srvconn_teardown`, with
 `ctx` the `SrvConn` itself. The `p9_client` is initialized (no I/O); the
-`Tversion`/`Tattach` handshake is driven later by the open path (a3b).
+`Tversion`/`Tattach` handshake is driven later by the op-driving path
+(the CORVUS-DESIGN §6.2 step-5 drive — P5-corvus-srv-impl-b, once corvus
+is a real 9P server that can answer it).
 
 ### Teardown ordering
 
@@ -355,20 +360,26 @@ rejects its arguments — with no partial state left behind.
 | `SrvConn` object + bidirectional transport | landed (P5-corvus-srv-impl-a3a) |
 | `tsleep`-bounded blocking client recv | landed |
 | teardown (EOF both rings + wake) + refcount | landed |
-| dedicated synchronous `p9_client` per connection | landed (init only — handshake at a3b) |
-| `devsrv` walk/open (connection mint) + accept queue + `SYS_SRV_ACCEPT` | deferred to P5-corvus-srv-impl-a3b |
-| `KObj_Srv` connection-Spoor + `handle_release_obj` teardown | deferred to a3b |
+| dedicated synchronous `p9_client` per connection | landed (init only — handshake drive deferred to P5-corvus-srv-impl-b) |
+| `devsrv` walk + connection mint + accept backlog + `SYS_SRV_ACCEPT` | landed (P5-corvus-srv-impl-a3b) |
+| `KObj_Srv` connection consumer + `handle_release_obj` teardown | landed (a3b) |
 | `SYS_SRV_PEER` (peer identity read) | deferred to P5-corvus-srv-impl-a3c |
 
 ---
 
 ## Known caveats / footguns
 
-- **No production caller yet.** a3a lands the connection primitive
-  ahead of its consumer — the same land-the-foundation pattern as a1
-  (`stripes` / `KObj_Srv`) and a2 (the registry). The exerciser is
-  `test_srvconn.c`; the `devsrv` walk/open path that mints a `SrvConn`
-  on a real client open is a3b.
+- **The consumer is the `devsrv` per-connection layer.** a3a landed the
+  connection primitive ahead of its consumer; as of a3b the `devsrv`
+  layer (reference 70) is that consumer — `srv_conn_open_for_proc` mints
+  a `SrvConn` on a client connect and installs the client's `KObj_Srv`
+  handle (obj = the `SrvConn`); `SYS_SRV_ACCEPT` hands corvus a
+  `KObj_Spoor` server endpoint; `devsrv_read` / `devsrv_write` route to
+  `srvconn_server_recv` / `srvconn_server_send`; and closing either end's
+  handle does `srvconn_teardown` + `srvconn_unref`. Direct exercise of
+  the primitive remains in `test_srvconn.c`. A production *client-open
+  syscall* (a namespace open routed into `srv_conn_open_for_proc`) is
+  still deferred to P5-corvus-srv-impl-b.
 - **The no-writer-block design assumes the synchronous, single-frame-
   in-flight kernel 9P client.** It holds because `kernel/9p_client.c`
   serializes a whole exchange under `p9_client.lock`. A future
@@ -380,10 +391,11 @@ rejects its arguments — with no partial state left behind.
   ring. A second concurrent blocking consumer would extinct on the
   `Rendez` single-waiter assertion.
 - **`client_timed_out` is sticky** until the next
-  `srvconn_set_client_deadline` clears it. The op-driving path (a3b)
-  sets the deadline immediately before each blocking op, so each op
-  reads a fresh signal; a timeout is in practice terminal for the
-  connection (the op-driving path tears it down).
+  `srvconn_set_client_deadline` clears it. The op-driving path (the
+  §6.2 step-5 handshake/op drive — P5-corvus-srv-impl-b) sets the
+  deadline immediately before each blocking op, so each op reads a fresh
+  signal; a timeout is in practice terminal for the connection (the
+  op-driving path tears it down).
 - **The deadline must be set before the locked 9P op.** `client_recv`
   reads `client_deadline_ns` with no lock; it is safe because the
   op-driving path sets the deadline before entering the `p9_client`'s
