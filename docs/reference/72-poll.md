@@ -356,7 +356,7 @@ section. Summary:
 
 ## Tests
 
-`kernel/test/test_poll.c` — 12 tests, all PASS × default + UBSan:
+`kernel/test/test_poll.c` — 20 tests, all PASS × default + UBSan:
 
 | Test | What |
 |---|---|
@@ -372,10 +372,17 @@ section. Summary:
 | `poll.always_ready_null_dev_poll` | devnull Spoor (NULL .poll slot) → revents = POLLIN\|POLLOUT immediately. |
 | `poll.pollerr_on_write_after_read_close` | Read end closed; write end's revents includes POLLERR. |
 | `poll.unregister_after_fast_path` | Two consecutive polls on the same fd succeed identically — verifies the fast-path sweep unregistered the first call's hooks. |
+| `poll.devsrv_listener_immediate_pollin` | Backlogged listener (KObj_Srv handle with SrvService obj) → POLLIN ready immediately, no sleep. The headline corvus-pattern fast-path test. |
+| `poll.devsrv_listener_empty_not_ready` | Empty backlog + timeout=0 → return 0; never sleeps. |
+| `poll.devsrv_listener_block_then_wake` | Polling thread sleeps on an empty listener; second thread connects → first thread wakes with POLLIN. |
+| `poll.devsrv_listener_pollhup_on_tombstone` | Polling thread sleeps; service is reset (tombstones) → wakes with POLLHUP. |
+| `poll.devsrv_conn_pollin_on_send` | Connection Spoor + c2s send → POLLIN ready immediately. |
+| `poll.devsrv_conn_pollout_immediate` | Empty s2c ring → POLLOUT ready immediately. |
+| `poll.devsrv_conn_pollhup_on_teardown` | Client closes its connection handle → corvus's server endpoint poll surfaces POLLHUP + POLLERR. |
+| `poll.devsrv_conn_block_then_wake_pollin` | Corvus polls connection on empty c2s → SLEEPING; kernel-client side sends → wakes with POLLIN. |
 
 What the suite **explicitly does NOT cover at v1.0**:
 
-- `devsrv` poll (lands with the P5-poll-b test set).
 - 9P-mounted-file readiness (deferred — synthetic-9P readiness
   notification is a separable follow-on).
 - `select()` (deferred — implemented on top of `poll`).
@@ -395,11 +402,20 @@ What the suite **explicitly does NOT cover at v1.0**:
 Per-pollfd (`revents` filled; the call as a whole still returns a
 non-negative count):
 
-- `fd < 0` → `revents |= POLLNVAL`.
+- `fd < 0` → `revents = POLLNVAL`.
 - `handle_get(p, fd) == NULL` (out-of-range or unallocated slot) →
-  `revents |= POLLNVAL`.
-- `slot->kind != KOBJ_SPOOR` → `revents |= POLLNVAL` (poll is fd-shaped;
-  non-Spoor handles have no readiness semantics).
+  `revents = POLLNVAL`.
+- `slot->kind == KOBJ_SPOOR`:
+  - `dev->poll` non-NULL → call it.
+  - `dev->poll` NULL → `revents = events & (POLLIN | POLLOUT)` (POSIX
+    regular-file "always ready").
+- `slot->kind == KOBJ_SRV`: route through `srv_handle_poll(slot->obj,
+  events, pw)` — which discriminates SrvService (listener) vs SrvConn
+  (client connection) by the obj's first u64 (its magic). An unknown
+  magic returns `POLLNVAL`.
+- Any other handle kind (KObj_Burrow / KObj_Mmio / KObj_Irq / KObj_Dma /
+  KObj_Interrupt / KObj_Process / KObj_Thread) → `revents = POLLNVAL`
+  (no readiness semantics in v1.0).
 
 `sys_poll_handler` (the user-VA wrapper):
 
@@ -430,7 +446,7 @@ There is no allocation in the hot path — `waiters[]` is stack-resident
 
 ## Status
 
-Implemented today (P5-poll-a):
+Implemented at P5-poll-a (the mechanism + devpipe):
 - `struct poll_waiter` + `struct poll_waiter_list` mechanism, with
   list-internal lock and the register/unregister/wake operations.
 - `Dev.poll` vtable slot, between `bwrite` and `remove`.
@@ -440,15 +456,34 @@ Implemented today (P5-poll-a):
   and the wake callouts on every existing wakeup site
   (`devpipe_close`, `devpipe_read`, `devpipe_write`).
 - `usr/lib/libthyla-rs::t_poll` + `TPollFd` libt stub.
-- 12 tests in `kernel/test/test_poll.c`; **489/489 PASS × default +
-  UBSan** (477 → 489 = 12 new poll tests).
 
-Pending (P5-poll-b):
-- `devsrv` connection Spoor's `.poll` (POLLIN when `c2s` has bytes,
-  POLLHUP on teardown).
-- `KObj_Srv` service handle's `.poll` (POLLIN when the accept queue
-  is non-empty — corvus's listener).
-- The P5-poll formal audit (`#538`).
+Added at P5-poll-b (devsrv as the second `.poll` implementor):
+- `devsrv_poll` Dev vtable slot dispatching by Spoor flavor (root /
+  service-ref / connection) — the connection Spoor case routes to
+  `srvconn_poll`. The `.poll` slot was added to the `devsrv` struct
+  Dev between `bwrite` and `remove`, mirroring devpipe's placement.
+- `srvconn_poll` in `kernel/srvconn.c` — atomic register-then-observe
+  under both channel locks (c2s → s2c, fixed order). POLLIN/POLLHUP
+  off c2s; POLLOUT/POLLERR off s2c. Wake callouts in
+  `srvconn_client_send`, `srvconn_server_send`, `srvconn_teardown`.
+- `srv_handle_poll` in `kernel/devsrv.c` — the KObj_Srv dispatch entry
+  point. Reads the obj's first u64 and routes to `svc_listener_poll`
+  (SrvService) or `srvconn_poll` (SrvConn). Atomic register-then-
+  observe for the listener path under `g_srv_registry.lock`.
+- Wake callouts in `srv_conn_open_for_proc` (push), `srv_proc_exit_
+  notify` (tombstone), `srv_registry_reset` (test-only drain). The
+  `poll_waiter_list_wake` happens AFTER the registry lock is released,
+  mirroring the existing `wakeup(&svc->accept_rendez)` discipline.
+- `kernel/poll.c::poll_scan_one` refactored to switch on handle kind:
+  KOBJ_SPOOR → existing path; KOBJ_SRV → `srv_handle_poll`; default →
+  POLLNVAL.
+- 8 new tests in `kernel/test/test_poll.c`; **497/497 PASS × default +
+  UBSan** (489 → 497 = 8 new devsrv-poll tests).
+
+Pending:
+- The P5-poll formal audit (`#538`) — one prosecutor round over
+  `kernel/poll.c` + both `.poll` implementors (devpipe + devsrv) +
+  every readiness site.
 
 ---
 

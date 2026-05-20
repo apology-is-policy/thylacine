@@ -34,6 +34,7 @@
 #ifndef THYLACINE_DEVSRV_H
 #define THYLACINE_DEVSRV_H
 
+#include <thylacine/poll.h>
 #include <thylacine/rendez.h>
 #include <thylacine/types.h>
 
@@ -41,6 +42,7 @@ struct Dev;
 struct Proc;
 struct Spoor;
 struct SrvConn;
+struct poll_waiter;
 
 // Maximum service-name length. Service names are short identifiers
 // ("corvus"); 32 is generous and bounds the registry entry + the
@@ -126,6 +128,15 @@ struct SrvService {
     u32            backlog_tail;     // next-pop  index;  mod SRV_ACCEPT_BACKLOG
     u32            backlog_count;    // entries buffered; 0..SRV_ACCEPT_BACKLOG
     struct Rendez  accept_rendez;    // the poster blocks here in SYS_SRV_ACCEPT
+
+    // Pollers registered on the listener KObj_Srv handle (P5-poll-b). The
+    // listener-ready signal is POLLIN when backlog_count > 0 (corvus has
+    // a client waiting to accept); a tombstone surfaces POLLHUP.
+    // Producers (srv_backlog_push_locked on a successful enqueue,
+    // srv_proc_exit_notify on the tombstone, srv_registry_reset on a
+    // drain) wake this list AFTER releasing the registry lock — the
+    // accept_rendez wake's discipline (specs/poll.tla MakeReady).
+    struct poll_waiter_list poll_list;
 };
 
 // The devsrv Dev. dc='s' (Plan 9 #s); registered by dev_init().
@@ -237,5 +248,23 @@ struct SrvConn *devsrv_conn_of(struct Spoor *c);
 // srv_backlog_depth — current accept-backlog depth of `svc`. Tests +
 // diagnostics; takes the registry lock.
 int srv_backlog_depth(struct SrvService *svc);
+
+// =============================================================================
+// poll — readiness probe on a KObj_Srv handle (P5-poll-b).
+// =============================================================================
+//
+// poll.c routes any KObj_Srv handle to this entry point. The KObj_Srv obj
+// is either a SrvService (the listener — the handle SYS_POST_SERVICE
+// returned) or a SrvConn (the client-side connection handle); the magic
+// at offset 0 discriminates. SrvService is the corvus accept-listener
+// case at v1.0; SrvConn handling is fail-closed POLLNVAL until the client
+// connection poll story lands (no v1.0 caller polls its client handle —
+// the client either drives 9P synchronously or, in joey's case, is the
+// kernel-9P-client itself, neither of which uses poll on the KObj_Srv).
+//
+// Returns the masked revents. POLLNVAL is reported for a NULL / unknown-
+// magic obj — a memory corruption or an unsupported KObj_Srv flavor.
+
+short srv_handle_poll(void *obj, short events, struct poll_waiter *pw);
 
 #endif  // THYLACINE_DEVSRV_H

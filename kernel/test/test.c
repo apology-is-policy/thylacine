@@ -416,6 +416,14 @@ void test_poll_bad_args_rejected(void);
 void test_poll_always_ready_null_dev_poll(void);
 void test_poll_pollerr_on_write_after_read_close(void);
 void test_poll_unregister_after_fast_path(void);
+void test_poll_devsrv_listener_immediate_pollin(void);
+void test_poll_devsrv_listener_empty_not_ready(void);
+void test_poll_devsrv_listener_block_then_wake(void);
+void test_poll_devsrv_listener_pollhup_on_tombstone(void);
+void test_poll_devsrv_conn_pollin_on_send(void);
+void test_poll_devsrv_conn_pollout_immediate(void);
+void test_poll_devsrv_conn_pollhup_on_teardown(void);
+void test_poll_devsrv_conn_block_then_wake_pollin(void);
 void test_sys_pipe_allocates_two_distinct_spoor_handles(void);
 void test_sys_pipe_proc_free_releases_handles(void);
 void test_sys_pipe_handle_close_releases_one_end(void);
@@ -1088,6 +1096,14 @@ struct test_case g_tests[] = {
     { "poll.always_ready_null_dev_poll",        test_poll_always_ready_null_dev_poll,        false, NULL },
     { "poll.pollerr_on_write_after_read_close", test_poll_pollerr_on_write_after_read_close, false, NULL },
     { "poll.unregister_after_fast_path",        test_poll_unregister_after_fast_path,        false, NULL },
+    { "poll.devsrv_listener_immediate_pollin",  test_poll_devsrv_listener_immediate_pollin,  false, NULL },
+    { "poll.devsrv_listener_empty_not_ready",   test_poll_devsrv_listener_empty_not_ready,   false, NULL },
+    { "poll.devsrv_listener_block_then_wake",   test_poll_devsrv_listener_block_then_wake,   false, NULL },
+    { "poll.devsrv_listener_pollhup_on_tombstone", test_poll_devsrv_listener_pollhup_on_tombstone, false, NULL },
+    { "poll.devsrv_conn_pollin_on_send",        test_poll_devsrv_conn_pollin_on_send,        false, NULL },
+    { "poll.devsrv_conn_pollout_immediate",     test_poll_devsrv_conn_pollout_immediate,     false, NULL },
+    { "poll.devsrv_conn_pollhup_on_teardown",   test_poll_devsrv_conn_pollhup_on_teardown,   false, NULL },
+    { "poll.devsrv_conn_block_then_wake_pollin", test_poll_devsrv_conn_block_then_wake_pollin, false, NULL },
     { "sys_pipe.allocates_two_distinct_spoor_handles", test_sys_pipe_allocates_two_distinct_spoor_handles, false, NULL },
     { "sys_pipe.proc_free_releases_handles",           test_sys_pipe_proc_free_releases_handles,           false, NULL },
     { "sys_pipe.handle_close_releases_one_end",        test_sys_pipe_handle_close_releases_one_end,        false, NULL },

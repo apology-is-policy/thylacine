@@ -22,17 +22,26 @@
 #include "test.h"
 
 #include <thylacine/dev.h>
+#include <thylacine/devsrv.h>
 #include <thylacine/handle.h>
 #include <thylacine/pipe.h>
 #include <thylacine/poll.h>
 #include <thylacine/proc.h>
 #include <thylacine/sched.h>
 #include <thylacine/spoor.h>
+#include <thylacine/srvconn.h>
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 
 extern s64 sys_poll_for_proc(struct Proc *p, struct pollfd *kfds,
                              u64 nfds, s32 timeout_ms);
+
+// devsrv test-support — non-static cores of the SYS_POST_SERVICE +
+// SYS_SRV_ACCEPT syscalls + the test-only registry reset.
+extern int sys_post_service_for_proc(struct Proc *p, const char *name,
+                                     size_t name_len);
+extern int sys_srv_accept_for_proc(struct Proc *p, hidx_t service_h);
+extern void srv_registry_reset(void);
 
 void test_poll_ready_immediately_pollin(void);
 void test_poll_ready_immediately_pollout(void);
@@ -46,6 +55,15 @@ void test_poll_bad_args_rejected(void);
 void test_poll_always_ready_null_dev_poll(void);
 void test_poll_pollerr_on_write_after_read_close(void);
 void test_poll_unregister_after_fast_path(void);
+
+void test_poll_devsrv_listener_immediate_pollin(void);
+void test_poll_devsrv_listener_empty_not_ready(void);
+void test_poll_devsrv_listener_block_then_wake(void);
+void test_poll_devsrv_listener_pollhup_on_tombstone(void);
+void test_poll_devsrv_conn_pollin_on_send(void);
+void test_poll_devsrv_conn_pollout_immediate(void);
+void test_poll_devsrv_conn_pollhup_on_teardown(void);
+void test_poll_devsrv_conn_block_then_wake_pollin(void);
 
 // =============================================================================
 // Helpers: test Proc + per-test Spoor → fd installation.
@@ -409,4 +427,336 @@ void test_poll_unregister_after_fast_path(void) {
         "second poll's revents = POLLIN");
 
     drop_test_proc(p);
+}
+
+// =============================================================================
+// devsrv .poll — the second .poll implementor (P5-poll-b).
+//
+// Two surfaces:
+//   - The listener: a KObj_Srv handle whose obj is a SrvService (the
+//     handle SYS_POST_SERVICE returned). POLLIN ↔ backlog non-empty,
+//     POLLHUP ↔ service tombstoned. The poll routes through
+//     srv_handle_poll (which discriminates by the obj's magic).
+//   - The connection Spoor: corvus's KObj_Spoor server endpoint, with
+//     POLLIN/POLLOUT/POLLHUP/POLLERR. Routes through devsrv_poll →
+//     srvconn_poll.
+// =============================================================================
+
+// Helper: a Proc joey-marked so it can SYS_POST_SERVICE.
+static struct Proc *make_marked_test_proc(void) {
+    struct Proc *p = proc_alloc();
+    if (!p) return NULL;
+    proc_mark_may_post_service(p);
+    return p;
+}
+
+void test_poll_devsrv_listener_immediate_pollin(void) {
+    srv_registry_reset();
+
+    struct Proc *corvus = make_marked_test_proc();
+    TEST_ASSERT(corvus != NULL, "corvus proc");
+    int svc_h = sys_post_service_for_proc(corvus, "corvus", 6);
+    TEST_ASSERT(svc_h >= 0, "post \"corvus\"");
+
+    // A client opens — one entry on the listener's accept backlog.
+    struct Proc *client = make_test_proc();
+    TEST_ASSERT(client != NULL, "client proc");
+    int client_h = srv_conn_open_for_proc(client, "corvus", 6);
+    TEST_ASSERT(client_h >= 0, "client connects");
+
+    // corvus polls its listener handle (the KObj_Srv from SYS_POST_SERVICE).
+    // Backlog non-empty → POLLIN ready immediately, no sleep.
+    struct pollfd pfds[1] = {
+        { .fd = svc_h, .events = POLLIN, .revents = 0 },
+    };
+    u64 before_slept = poll_total_slept();
+    s64 ret = sys_poll_for_proc(corvus, pfds, 1, 0);
+    TEST_EXPECT_EQ(ret, 1L, "listener-poll returns 1 (POLLIN ready)");
+    TEST_EXPECT_EQ((s64)pfds[0].revents, (s64)POLLIN,
+        "listener revents = POLLIN");
+    TEST_EXPECT_EQ(poll_total_slept(), before_slept,
+        "fast path — no tsleep");
+
+    srv_registry_reset();
+    drop_test_proc(client);
+    drop_test_proc(corvus);
+}
+
+void test_poll_devsrv_listener_empty_not_ready(void) {
+    srv_registry_reset();
+
+    struct Proc *corvus = make_marked_test_proc();
+    TEST_ASSERT(corvus != NULL, "corvus proc");
+    int svc_h = sys_post_service_for_proc(corvus, "corvus", 6);
+    TEST_ASSERT(svc_h >= 0, "post \"corvus\"");
+
+    // Empty backlog + timeout=0 → return 0, no sleep.
+    struct pollfd pfds[1] = {
+        { .fd = svc_h, .events = POLLIN, .revents = 0 },
+    };
+    u64 before_slept = poll_total_slept();
+    s64 ret = sys_poll_for_proc(corvus, pfds, 1, 0);
+    TEST_EXPECT_EQ(ret, 0L, "empty listener not ready");
+    TEST_EXPECT_EQ((s64)pfds[0].revents, 0L, "revents = 0");
+    TEST_EXPECT_EQ(poll_total_slept(), before_slept,
+        "timeout=0 did not sleep");
+
+    srv_registry_reset();
+    drop_test_proc(corvus);
+}
+
+// Block-then-wake harness state for the listener-poll thread.
+static volatile s64 g_listener_poll_result;
+static volatile s16 g_listener_poll_revents;
+static struct Proc *g_listener_proc;
+static hidx_t       g_listener_fd;
+
+static void listener_poll_forever_entry(void) {
+    struct pollfd pfds[1] = {
+        { .fd = g_listener_fd, .events = POLLIN, .revents = 0 },
+    };
+    g_listener_poll_result  = sys_poll_for_proc(g_listener_proc, pfds, 1, -1);
+    g_listener_poll_revents = pfds[0].revents;
+    sched();    // park
+}
+
+void test_poll_devsrv_listener_block_then_wake(void) {
+    srv_registry_reset();
+
+    struct Proc *corvus = make_marked_test_proc();
+    TEST_ASSERT(corvus != NULL, "corvus proc");
+    int svc_h = sys_post_service_for_proc(corvus, "corvus", 6);
+    TEST_ASSERT(svc_h >= 0, "post \"corvus\"");
+
+    g_listener_proc         = corvus;
+    g_listener_fd           = (hidx_t)svc_h;
+    g_listener_poll_result  = -999;
+    g_listener_poll_revents = 0;
+
+    struct Thread *poller = thread_create(kproc(), listener_poll_forever_entry);
+    TEST_ASSERT(poller != NULL, "thread_create");
+    ready(poller);
+    sched();
+    TEST_EXPECT_EQ(poller->state, THREAD_SLEEPING,
+        "listener-poll is SLEEPING on its private rendez");
+
+    // Boot side: a client connects → srv_conn_open_for_proc enqueues +
+    // wakes the listener poll list.
+    struct Proc *client = make_test_proc();
+    TEST_ASSERT(client != NULL, "client proc");
+    int client_h = srv_conn_open_for_proc(client, "corvus", 6);
+    TEST_ASSERT(client_h >= 0, "client connects → wakes the poll list");
+    TEST_EXPECT_EQ(poller->state, THREAD_RUNNABLE,
+        "listener-poll wakes after the connect");
+
+    sched();
+    TEST_EXPECT_EQ(g_listener_poll_result, 1L, "listener-poll returns 1");
+    TEST_EXPECT_EQ((s64)g_listener_poll_revents, (s64)POLLIN,
+        "wakeup revents = POLLIN");
+
+    srv_registry_reset();
+    drop_test_proc(client);
+    drop_test_proc(corvus);
+}
+
+void test_poll_devsrv_listener_pollhup_on_tombstone(void) {
+    srv_registry_reset();
+
+    struct Proc *corvus = make_marked_test_proc();
+    TEST_ASSERT(corvus != NULL, "corvus proc");
+    int svc_h = sys_post_service_for_proc(corvus, "corvus", 6);
+    TEST_ASSERT(svc_h >= 0, "post \"corvus\"");
+
+    g_listener_proc         = corvus;
+    g_listener_fd           = (hidx_t)svc_h;
+    g_listener_poll_result  = -999;
+    g_listener_poll_revents = 0;
+
+    struct Thread *poller = thread_create(kproc(), listener_poll_forever_entry);
+    TEST_ASSERT(poller != NULL, "thread_create");
+    ready(poller);
+    sched();
+    TEST_EXPECT_EQ(poller->state, THREAD_SLEEPING,
+        "listener-poll is SLEEPING");
+
+    // Boot side: reset the registry, which tombstones every service and
+    // wakes every listener poll list (the regression that proves
+    // tombstone-as-readiness-edge — corvus's listener-poll should not
+    // hang past its service's death).
+    srv_registry_reset();
+    TEST_EXPECT_EQ(poller->state, THREAD_RUNNABLE,
+        "listener-poll wakes on the tombstone");
+
+    sched();
+    TEST_EXPECT_EQ(g_listener_poll_result, 1L, "listener-poll returns 1");
+    TEST_ASSERT((g_listener_poll_revents & POLLHUP) != 0,
+        "tombstone revents includes POLLHUP");
+
+    drop_test_proc(corvus);
+}
+
+void test_poll_devsrv_conn_pollin_on_send(void) {
+    srv_registry_reset();
+
+    struct Proc *corvus = make_marked_test_proc();
+    TEST_ASSERT(corvus != NULL, "corvus proc");
+    int svc_h = sys_post_service_for_proc(corvus, "corvus", 6);
+    TEST_ASSERT(svc_h >= 0, "post \"corvus\"");
+
+    struct Proc *client = make_test_proc();
+    TEST_ASSERT(client != NULL, "client proc");
+    int client_h = srv_conn_open_for_proc(client, "corvus", 6);
+    TEST_ASSERT(client_h >= 0, "client connects");
+    struct SrvConn *cn = (struct SrvConn *)handle_get(client, client_h)->obj;
+    int conn_h = sys_srv_accept_for_proc(corvus, (hidx_t)svc_h);
+    TEST_ASSERT(conn_h >= 0, "corvus accepts");
+
+    // The kernel-client side queues bytes on c2s → corvus's endpoint
+    // becomes POLLIN-ready.
+    static const u8 frame[4] = { 0x05, 0x00, 0x00, 0x00 };
+    TEST_EXPECT_EQ(srvconn_client_send(cn, frame, 4), 4L,
+        "client-side queues 4 bytes on c2s");
+
+    struct pollfd pfds[1] = {
+        { .fd = conn_h, .events = POLLIN, .revents = 0 },
+    };
+    u64 before_slept = poll_total_slept();
+    s64 ret = sys_poll_for_proc(corvus, pfds, 1, 0);
+    TEST_EXPECT_EQ(ret, 1L, "connection poll returns 1");
+    TEST_EXPECT_EQ((s64)pfds[0].revents, (s64)POLLIN,
+        "revents = POLLIN");
+    TEST_EXPECT_EQ(poll_total_slept(), before_slept,
+        "fast path — no tsleep");
+
+    srv_registry_reset();
+    drop_test_proc(client);
+    drop_test_proc(corvus);
+}
+
+void test_poll_devsrv_conn_pollout_immediate(void) {
+    srv_registry_reset();
+
+    struct Proc *corvus = make_marked_test_proc();
+    TEST_ASSERT(corvus != NULL, "corvus proc");
+    int svc_h = sys_post_service_for_proc(corvus, "corvus", 6);
+    TEST_ASSERT(svc_h >= 0, "post \"corvus\"");
+
+    struct Proc *client = make_test_proc();
+    TEST_ASSERT(client != NULL, "client proc");
+    int client_h = srv_conn_open_for_proc(client, "corvus", 6);
+    TEST_ASSERT(client_h >= 0, "client connects");
+    int conn_h = sys_srv_accept_for_proc(corvus, (hidx_t)svc_h);
+    TEST_ASSERT(conn_h >= 0, "corvus accepts");
+
+    // An empty s2c ring → POLLOUT immediately. corvus can write.
+    struct pollfd pfds[1] = {
+        { .fd = conn_h, .events = POLLOUT, .revents = 0 },
+    };
+    s64 ret = sys_poll_for_proc(corvus, pfds, 1, 0);
+    TEST_EXPECT_EQ(ret, 1L, "empty-s2c POLLOUT returns 1");
+    TEST_EXPECT_EQ((s64)pfds[0].revents, (s64)POLLOUT,
+        "revents = POLLOUT");
+
+    handle_close(corvus, (hidx_t)conn_h);
+    srv_registry_reset();
+    drop_test_proc(client);
+    drop_test_proc(corvus);
+}
+
+void test_poll_devsrv_conn_pollhup_on_teardown(void) {
+    srv_registry_reset();
+
+    struct Proc *corvus = make_marked_test_proc();
+    TEST_ASSERT(corvus != NULL, "corvus proc");
+    int svc_h = sys_post_service_for_proc(corvus, "corvus", 6);
+    TEST_ASSERT(svc_h >= 0, "post \"corvus\"");
+
+    struct Proc *client = make_test_proc();
+    TEST_ASSERT(client != NULL, "client proc");
+    int client_h = srv_conn_open_for_proc(client, "corvus", 6);
+    TEST_ASSERT(client_h >= 0, "client connects");
+    struct SrvConn *cn = (struct SrvConn *)handle_get(client, client_h)->obj;
+    int conn_h = sys_srv_accept_for_proc(corvus, (hidx_t)svc_h);
+    TEST_ASSERT(conn_h >= 0, "corvus accepts");
+
+    // The client closes its handle → connection torn down → POLLHUP and
+    // POLLERR latch on both directions.
+    TEST_EXPECT_EQ(handle_close(client, (hidx_t)client_h), 0,
+        "client closes — teardown latches EOF on both rings");
+    TEST_ASSERT(srvconn_is_live(cn) == false, "connection torn down");
+
+    struct pollfd pfds[1] = {
+        { .fd = conn_h, .events = POLLIN | POLLOUT, .revents = 0 },
+    };
+    s64 ret = sys_poll_for_proc(corvus, pfds, 1, 0);
+    TEST_EXPECT_EQ(ret, 1L, "torn-connection poll returns 1");
+    TEST_ASSERT((pfds[0].revents & POLLHUP) != 0,
+        "torn-connection revents includes POLLHUP");
+    TEST_ASSERT((pfds[0].revents & POLLERR) != 0,
+        "torn-connection revents includes POLLERR (s2c.eof)");
+
+    handle_close(corvus, (hidx_t)conn_h);
+    srv_registry_reset();
+    drop_test_proc(corvus);
+}
+
+// Block-then-wake harness state for the connection-poll thread.
+static volatile s64 g_conn_poll_result;
+static volatile s16 g_conn_poll_revents;
+static struct Proc *g_conn_poll_proc;
+static hidx_t       g_conn_poll_fd;
+
+static void conn_poll_forever_entry(void) {
+    struct pollfd pfds[1] = {
+        { .fd = g_conn_poll_fd, .events = POLLIN, .revents = 0 },
+    };
+    g_conn_poll_result  = sys_poll_for_proc(g_conn_poll_proc, pfds, 1, -1);
+    g_conn_poll_revents = pfds[0].revents;
+    sched();    // park
+}
+
+void test_poll_devsrv_conn_block_then_wake_pollin(void) {
+    srv_registry_reset();
+
+    struct Proc *corvus = make_marked_test_proc();
+    TEST_ASSERT(corvus != NULL, "corvus proc");
+    int svc_h = sys_post_service_for_proc(corvus, "corvus", 6);
+    TEST_ASSERT(svc_h >= 0, "post \"corvus\"");
+
+    struct Proc *client = make_test_proc();
+    TEST_ASSERT(client != NULL, "client proc");
+    int client_h = srv_conn_open_for_proc(client, "corvus", 6);
+    TEST_ASSERT(client_h >= 0, "client connects");
+    struct SrvConn *cn = (struct SrvConn *)handle_get(client, client_h)->obj;
+    int conn_h = sys_srv_accept_for_proc(corvus, (hidx_t)svc_h);
+    TEST_ASSERT(conn_h >= 0, "corvus accepts");
+
+    g_conn_poll_proc    = corvus;
+    g_conn_poll_fd      = (hidx_t)conn_h;
+    g_conn_poll_result  = -999;
+    g_conn_poll_revents = 0;
+
+    struct Thread *poller = thread_create(kproc(), conn_poll_forever_entry);
+    TEST_ASSERT(poller != NULL, "thread_create");
+    ready(poller);
+    sched();
+    TEST_EXPECT_EQ(poller->state, THREAD_SLEEPING,
+        "connection-poll is SLEEPING — c2s empty");
+
+    // Boot side: the kernel-client side queues bytes → POLLIN edge wakes
+    // the poller.
+    static const u8 frame[3] = { 0xDE, 0xAD, 0xBE };
+    TEST_EXPECT_EQ(srvconn_client_send(cn, frame, 3), 3L,
+        "client-side queues 3 bytes");
+    TEST_EXPECT_EQ(poller->state, THREAD_RUNNABLE,
+        "connection-poll wakes on the send");
+
+    sched();
+    TEST_EXPECT_EQ(g_conn_poll_result, 1L, "connection-poll returns 1");
+    TEST_EXPECT_EQ((s64)g_conn_poll_revents, (s64)POLLIN,
+        "wakeup revents = POLLIN");
+
+    srv_registry_reset();
+    drop_test_proc(client);
+    drop_test_proc(corvus);
 }

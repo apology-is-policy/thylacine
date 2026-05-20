@@ -636,16 +636,16 @@ cfgs run with `-deadlock`; `tsleep.tla`'s `Done` self-loop keeps a
 legitimate terminal state from tripping the deadlock check. See
 `docs/reference/16-rendez.md` (the `tsleep` section).
 
-## poll.tla — P5-poll-spec (spec landed); P5-poll-a (mechanism + SYS_POLL + devpipe poll landed)
+## poll.tla — P5-poll-spec (spec landed); P5-poll-a (mechanism + SYS_POLL + devpipe poll); P5-poll-b (devsrv poll)
 
 Status: **spec landed at P5-poll-spec; the poll mechanism + `SYS_POLL`
-+ `devpipe` poll landed at P5-poll-a; `devsrv` poll pending at
-P5-poll-b.** Models `poll` — one thread waiting on N readiness sources
-whose state lives behind N different locks. `scheduler.tla` already
-proves the single-`Rendez` check-then-sleep atomicity and `tsleep.tla`
-the deadline race; `poll.tla` models the surface neither covers — the
-cross-lock `poll_waiter` hand-off and the register-then-observe
-discipline.
++ `devpipe` poll landed at P5-poll-a; `devsrv` poll (connection
+endpoint + KObj_Srv listener) landed at P5-poll-b.** Models `poll` —
+one thread waiting on N readiness sources whose state lives behind N
+different locks. `scheduler.tla` already proves the single-`Rendez`
+check-then-sleep atomicity and `tsleep.tla` the deadline race;
+`poll.tla` models the surface neither covers — the cross-lock
+`poll_waiter` hand-off and the register-then-observe discipline.
 
 State universe: one poller, N fds (`Fds`), one timeout. One poller
 exercises the missed-wakeup-across-N-fds race fully; multiple pollers on
@@ -667,12 +667,12 @@ Spec action ↔ impl mapping:
 
 | Spec action | Source location | Notes |
 |---|---|---|
-| `Register` | `kernel/poll.c:229-237` (the per-fd first scan in `sys_poll_for_proc`); `kernel/pipe.c:206-219` (`devpipe_poll`) | `dev->poll(spoor, events, pw)` — installs the hook AND samples readiness in one locked step under `r->lock`. devsrv equivalent lands at P5-poll-b. |
-| `CommitOrSleep` | `kernel/poll.c:239-265` | Post-scan fast-path return (`ready_count > 0` or `timeout_ms == 0`); else compute `deadline_ns` + `tsleep` on the poller's private rendez with the `poll_cond_any_flagged` predicate. |
-| `MakeReady(f)` | `kernel/pipe.c:231` (close), `kernel/pipe.c:285` (read), `kernel/pipe.c:328` (write); devsrv equivalents land at P5-poll-b | Every existing readiness `wakeup` site also calls `poll_waiter_list_wake` — sets each registered `pw->ready` AND signals each `pw->rendez`. |
+| `Register` | `kernel/poll.c::poll_scan_one` (first scan); `kernel/pipe.c::devpipe_poll`; `kernel/srvconn.c::srvconn_poll`; `kernel/devsrv.c::svc_listener_poll` + `devsrv_poll` + `srv_handle_poll` | `dev->poll(spoor, events, pw)` for KObj_Spoor; `srv_handle_poll(obj, events, pw)` for KObj_Srv (magic-discriminated SrvService/SrvConn dispatch). Each installs the hook AND samples readiness in one locked step under the object's lock(s) (`r->lock` for pipe; `c2s.lock` + `s2c.lock` for SrvConn; `g_srv_registry.lock` for SrvService). |
+| `CommitOrSleep` | `kernel/poll.c::sys_poll_for_proc` (post-scan fast-path + `tsleep`) | Fast-path return on `ready_count > 0` or `timeout_ms == 0`; else compute `deadline_ns` + `tsleep` on the poller's private rendez with `poll_cond_any_flagged`. |
+| `MakeReady(f)` | devpipe: `kernel/pipe.c::devpipe_close` + `devpipe_read` (drain) + `devpipe_write` (append). srvconn: `kernel/srvconn.c::srvconn_teardown` + `srvconn_client_send` + `srvconn_server_send`. devsrv listener: `kernel/devsrv.c::srv_conn_open_for_proc` (push) + `srv_proc_exit_notify` (tombstone) + `srv_registry_reset`. | Every existing readiness `wakeup` site also calls `poll_waiter_list_wake` — sets each registered `pw->ready` AND signals each `pw->rendez`. |
 | `Timeout` | `kernel/sched.c::tsleep` deadline (landed, P5-tsleep) | poll's timeout IS a `tsleep` deadline; the cond re-check at resume has precedence over the deadline (tsleep.tla TimeoutSound). |
-| `NoStaleHook` (unregister sweep) | `kernel/poll.c:271-275` | Every exit path from `sys_poll_for_proc` goes through the `unregister_and_return:` sweep; idempotent on already-unregistered hooks; scribbles `pw->magic = 0` for defense-in-depth. |
-| `BuggyCheckBeforeRegister` / `BuggyNoWake` / `BuggyLazyUnregister` | (none — register-then-observe lives in `devpipe_poll`; every readiness site calls `poll_waiter_list_wake`; the sweep above is unconditional) | The three disciplines the impl uphold. |
+| `NoStaleHook` (unregister sweep) | `kernel/poll.c::sys_poll_for_proc` (the `unregister_and_return:` label) | Every exit path from `sys_poll_for_proc` goes through the sweep; idempotent on already-unregistered hooks; scribbles `pw->magic = 0` for defense-in-depth. |
+| `BuggyCheckBeforeRegister` / `BuggyNoWake` / `BuggyLazyUnregister` | (none — register-then-observe lives in every `.poll` impl; every readiness site calls `poll_waiter_list_wake`; the sweep above is unconditional) | The three disciplines the impl uphold. |
 
 cfgs run with `-deadlock`; `poll.tla`'s `Done` self-loop keeps a
 legitimate terminal state from tripping the deadlock check. See

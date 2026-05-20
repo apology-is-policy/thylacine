@@ -11,6 +11,7 @@
 #include <thylacine/9p_client.h>
 #include <thylacine/extinction.h>
 #include <thylacine/page.h>
+#include <thylacine/poll.h>
 #include <thylacine/rendez.h>
 #include <thylacine/spinlock.h>
 #include <thylacine/srvconn.h>
@@ -193,6 +194,7 @@ struct SrvConn *srvconn_create(u64 peer_stripes, int peer_pid,
 
     chan_init(&cn->c2s);
     chan_init(&cn->s2c);
+    poll_waiter_list_init(&cn->poll_list);
 
     // Configure the dedicated synchronous 9P client over this
     // connection's transport. p9_client_init performs no I/O — the
@@ -276,6 +278,13 @@ void srvconn_teardown(struct SrvConn *cn) {
     // there is no lock-ordering relation to honor.
     chan_set_eof(&cn->c2s);
     chan_set_eof(&cn->s2c);
+
+    // Teardown is a single readiness edge for every server-endpoint
+    // poller: POLLHUP latches off c2s.eof, POLLERR off s2c.eof. ONE wake
+    // walks every registered hook (the chan_set_eof wakeups above target
+    // the Rendez waiters; the poll list is independent). specs/poll.tla
+    // MakeReady.
+    poll_waiter_list_wake(&cn->poll_list);
 }
 
 bool srvconn_is_live(const struct SrvConn *cn) {
@@ -338,7 +347,15 @@ long srvconn_client_send(struct SrvConn *cn, const u8 *buf, long n) {
     if (!cn || cn->magic != SRV_CONN_MAGIC) return -1;
     if (!buf || n < 0) return -1;
     if (n == 0) return 0;
-    return chan_produce(&cn->c2s, buf, n);
+    long put = chan_produce(&cn->c2s, buf, n);
+    if (put > 0) {
+        // A non-empty c2s ring becomes POLLIN-ready for every poller
+        // registered on the server endpoint. chan_produce already woke
+        // the (single) blocking-recv Rendez; this wakes the poll list.
+        // specs/poll.tla MakeReady.
+        poll_waiter_list_wake(&cn->poll_list);
+    }
+    return put;
 }
 
 long srvconn_client_recv(struct SrvConn *cn, u8 *buf, long n) {
@@ -378,7 +395,19 @@ long srvconn_server_send(struct SrvConn *cn, const u8 *buf, long n) {
     if (!cn || cn->magic != SRV_CONN_MAGIC) return -1;
     if (!buf || n < 0) return -1;
     if (n == 0) return 0;
-    return chan_produce(&cn->s2c, buf, n);
+    long put = chan_produce(&cn->s2c, buf, n);
+    if (put > 0) {
+        // s2c.count went up — but the server poller already had POLLOUT
+        // ready before the put (s2c had room). The interesting edge for
+        // a server-endpoint poller is when s2c DRAINS, which the kernel
+        // client side does in srvconn_client_recv — but that drain is
+        // never observed via poll (the kernel client doesn't poll; it
+        // tsleep-blocks). The wake here is correct-by-symmetry with the
+        // c2s direction and lets a future client-side poller observe a
+        // non-empty s2c ring.
+        poll_waiter_list_wake(&cn->poll_list);
+    }
+    return put;
 }
 
 long srvconn_server_recv(struct SrvConn *cn, u8 *buf, long n) {
@@ -386,6 +415,46 @@ long srvconn_server_recv(struct SrvConn *cn, u8 *buf, long n) {
     if (!buf || n < 0) return -1;
     if (n == 0) return 0;
     return chan_consume_nonblock(&cn->c2s, buf, n);
+}
+
+// =============================================================================
+// poll — readiness probe on the server endpoint Spoor (P5-poll-b).
+// =============================================================================
+//
+// Both channel locks are taken in a fixed order (c2s → s2c) across the
+// sample-and-register critical section, matching kernel/pipe.c's r->lock-
+// across-sample-and-register discipline. No other path takes both locks
+// (chan_produce / chan_consume_nonblock / chan_set_eof each take a single
+// ch->lock), so this dual-lock acquire cannot deadlock with itself or with
+// any producer.
+//
+// pw == NULL is the post-wake sample-only call (sys_poll_for_proc's
+// second scan); pw != NULL atomically registers the hook with the sample
+// under the same locks — the register-then-observe step.
+
+short srvconn_poll(struct SrvConn *cn, short events, struct poll_waiter *pw) {
+    if (!cn || cn->magic != SRV_CONN_MAGIC) return POLLERR;
+
+    spin_lock(&cn->c2s.lock);
+    spin_lock(&cn->s2c.lock);
+
+    short revents = 0;
+    if (cn->c2s.count > 0) revents |= POLLIN;     // bytes for corvus to read
+    if (cn->c2s.eof)       revents |= POLLHUP;    // teardown latched it
+    if (!cn->s2c.eof && cn->s2c.count < SRVCONN_RING_CAP) {
+        revents |= POLLOUT;                       // room for corvus to write
+    }
+    if (cn->s2c.eof)       revents |= POLLERR;    // server-side writes EPIPE
+
+    if (pw) {
+        poll_waiter_list_register(&cn->poll_list, pw);
+    }
+
+    spin_unlock(&cn->s2c.lock);
+    spin_unlock(&cn->c2s.lock);
+
+    // POSIX: POLLIN/POLLOUT only when requested; POLLHUP/POLLERR always.
+    return (short)(revents & (events | POLL_OUTPUT_ONLY));
 }
 
 // =============================================================================

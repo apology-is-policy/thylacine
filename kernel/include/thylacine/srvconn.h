@@ -48,11 +48,13 @@
 #ifndef THYLACINE_SRVCONN_H
 #define THYLACINE_SRVCONN_H
 
+#include <thylacine/poll.h>
 #include <thylacine/rendez.h>
 #include <thylacine/spinlock.h>
 #include <thylacine/types.h>
 
 struct p9_client;
+struct poll_waiter;
 
 // SRV_CONN_MAGIC — sentinel at offset 0 of struct SrvConn. Distinct
 // from SRV_SERVICE_MAGIC (<thylacine/devsrv.h>) so the KObj_Srv
@@ -131,6 +133,16 @@ struct SrvConn {
 
     struct srvconn_chan c2s;               // kernel client → corvus
     struct srvconn_chan s2c;               // corvus → kernel client
+
+    // Pollers registered on this connection's server endpoint (P5-poll-b).
+    // The hook list is connection-wide because the server endpoint Spoor
+    // is bidirectional — POLLIN watches c2s, POLLOUT watches s2c, and a
+    // teardown surfaces POLLHUP/POLLERR on both. Every producer site
+    // (srvconn_client_send + srvconn_server_send into chan_produce,
+    // srvconn_teardown's chan_set_eof on both directions) calls
+    // poll_waiter_list_wake(&poll_list) after releasing the channel lock,
+    // mirroring kernel/pipe.c's discipline (specs/poll.tla MakeReady).
+    struct poll_waiter_list poll_list;
 
     // The dedicated synchronous kernel 9P client + its receive buffer.
     // Heap-allocated (the p9_client is large); owned by this SrvConn,
@@ -259,6 +271,24 @@ long srvconn_server_send(struct SrvConn *cn, const u8 *buf, long n);
 //    0  — the ring is empty but the connection is live (poll again).
 //   -1  — the connection is torn down (and the ring is drained): EOF.
 long srvconn_server_recv(struct SrvConn *cn, u8 *buf, long n);
+
+// =============================================================================
+// poll — readiness probe on the server endpoint Spoor (P5-poll-b).
+//
+// The Dev `.poll` slot for a devsrv connection Spoor (devsrv_poll) routes
+// to here. Server-endpoint semantics: POLLIN is c2s.count > 0 (bytes to
+// read), POLLOUT is !s2c.eof && s2c.count < SRVCONN_RING_CAP (room to
+// write), POLLHUP is c2s.eof, POLLERR is s2c.eof. Both EOFs latch
+// together at srvconn_teardown so HUP and ERR fire on the same edge.
+// POLLIN may coexist with POLLHUP — POSIX: buffered bytes plus EOF.
+//
+// Atomic register-then-sample under both channel locks (c2s then s2c —
+// fixed order, no path takes them in reverse). pw == NULL is the post-
+// wake sample-only call. Returns the masked revents (POLLIN/POLLOUT
+// gated by `events`, output-only bits always returned).
+// =============================================================================
+
+short srvconn_poll(struct SrvConn *cn, short events, struct poll_waiter *pw);
 
 // =============================================================================
 // Diagnostics.

@@ -26,6 +26,7 @@
 #include <thylacine/extinction.h>
 #include <thylacine/handle.h>
 #include <thylacine/page.h>
+#include <thylacine/poll.h>
 #include <thylacine/proc.h>
 #include <thylacine/rendez.h>
 #include <thylacine/spinlock.h>
@@ -267,8 +268,12 @@ void srv_proc_exit_notify(struct Proc *p) {
     // Wake any thread blocked accepting on a tombstoned service — it sees
     // state != LIVE and srv_accept_blocking returns NULL. Defensive: the
     // exiting poster is normally its service's only accepter.
+    //
+    // Also wake every listener poller (P5-poll-b): a tombstone surfaces
+    // POLLHUP on the listener. specs/poll.tla MakeReady.
     for (u32 i = 0; i < n_tombed; i++) {
         wakeup(&tombed[i]->accept_rendez);
+        poll_waiter_list_wake(&tombed[i]->poll_list);
     }
 }
 
@@ -298,10 +303,11 @@ int srv_backlog_depth(struct SrvService *svc) {
 void srv_registry_reset(void) {
     struct SrvConn *drained[SRV_MAX_SERVICES * SRV_ACCEPT_BACKLOG];
     u32             n_drained = 0;
-    // Snapshot the per-entry accept Rendez pointers BEFORE clearing — a
-    // thread blocked in srv_accept_blocking must be woken so it observes
-    // state != LIVE and returns NULL.
-    struct Rendez  *waked[SRV_MAX_SERVICES];
+    // Snapshot the per-entry accept Rendez + poll-list pointers BEFORE
+    // clearing — a thread blocked in srv_accept_blocking or polling the
+    // listener must be woken so it observes state != LIVE and returns.
+    struct Rendez           *waked[SRV_MAX_SERVICES];
+    struct poll_waiter_list *poll_waked[SRV_MAX_SERVICES];
 
     irq_state_t s = spin_lock_irqsave(&g_srv_registry.lock);
     for (u32 i = 0; i < SRV_MAX_SERVICES; i++) {
@@ -312,7 +318,8 @@ void srv_registry_reset(void) {
             drained[n_drained++] = cn;
         }
         srv_clear_locked(e);
-        waked[i] = &e->accept_rendez;
+        waked[i]      = &e->accept_rendez;
+        poll_waked[i] = &e->poll_list;
     }
     spin_unlock_irqrestore(&g_srv_registry.lock, s);
 
@@ -322,6 +329,7 @@ void srv_registry_reset(void) {
     }
     for (u32 i = 0; i < SRV_MAX_SERVICES; i++) {
         wakeup(waked[i]);
+        poll_waiter_list_wake(poll_waked[i]);
     }
 }
 
@@ -402,6 +410,12 @@ int srv_conn_open_for_proc(struct Proc *p, const char *name, u8 name_len) {
     // wakeup takes the Rendez lock; the producer-mutates-then-wakeup
     // ordering is the srvconn.c chan_produce discipline.
     wakeup(&svc->accept_rendez);
+
+    // Also wake every listener poller (P5-poll-b): backlog_count went 0→1+
+    // (or stayed >0). specs/poll.tla MakeReady — the push committed under
+    // the registry lock above, the wake walks the poll list under its own
+    // lock, the lock chain registry → poll_list is acyclic.
+    poll_waiter_list_wake(&svc->poll_list);
     return (int)h;
 }
 
@@ -463,13 +477,18 @@ struct Spoor *devsrv_make_conn_spoor(struct SrvConn *cn) {
 
 static void devsrv_reset(void)    { /* no-op */ }
 
-// init — stamp the type tag on every (static, zero-initialized) registry
-// entry. A SrvService's magic is permanent: it identifies the struct for
-// the KObj_Srv handle-release discriminator and is never cleared (see
-// srv_clear_locked). dev_init calls this once at boot.
+// init — stamp the type tag + initialize the listener poll list on every
+// (static, zero-initialized) registry entry. A SrvService's magic is
+// permanent: it identifies the struct for the KObj_Srv handle-release
+// discriminator and is never cleared (see srv_clear_locked). poll_list
+// is similarly permanent (the list lock is the all-zero SPIN_LOCK_INIT
+// from BSS so the explicit init is the documented contract, mirroring
+// kernel/pipe.c::pipe_create's poll_waiter_list_init). dev_init calls
+// this once at boot.
 static void devsrv_init(void) {
     for (u32 i = 0; i < SRV_MAX_SERVICES; i++) {
         g_srv_registry.entries[i].magic = SRV_SERVICE_MAGIC;
+        poll_waiter_list_init(&g_srv_registry.entries[i].poll_list);
     }
 }
 
@@ -645,6 +664,98 @@ static struct Spoor *devsrv_power(struct Spoor *c, int on) {
     return NULL;
 }
 
+// =============================================================================
+// poll — readiness probe (P5-poll-b).
+// =============================================================================
+//
+// devsrv_poll (the Dev vtable slot) routes a connection Spoor's poll to
+// srvconn_poll; the root / service-ref Spoors are not readable directly,
+// so they report no readiness state (return 0 — POSIX-equivalent to "this
+// fd never has data" so a poller with timeout will block until timeout).
+// The corvus listener-poll path goes through srv_handle_poll, NOT here:
+// the listener is a KObj_Srv handle whose obj is a SrvService, not a
+// Spoor — poll.c's KObj_Srv branch resolves it through srv_handle_poll.
+
+// svc_listener_poll — listener-readiness probe on a SrvService. POLLIN
+// when the accept backlog has one or more waiting connections (corvus
+// has something to accept); POLLHUP when the service is no longer LIVE
+// (tombstoned by srv_proc_exit_notify or wiped by srv_registry_reset).
+//
+// The sample-and-register are both atomic under the registry lock; the
+// producer side (srv_conn_open_for_proc → srv_backlog_push_locked under
+// the registry lock, then poll_waiter_list_wake after release;
+// srv_proc_exit_notify under the registry lock, then poll_waiter_list_
+// wake after release) commits the readiness change under the same lock.
+static short svc_listener_poll(struct SrvService *svc, short events,
+                               struct poll_waiter *pw) {
+    if (!svc) return POLLERR;
+    if (svc->magic != SRV_SERVICE_MAGIC) {
+        extinction("svc_listener_poll: bad service magic (UAF / wild ptr?)");
+    }
+
+    short revents = 0;
+
+    irq_state_t s = spin_lock_irqsave(&g_srv_registry.lock);
+    if (svc->backlog_count > 0)        revents |= POLLIN;
+    if (svc->state != SRV_STATE_LIVE)  revents |= POLLHUP;
+    if (pw) {
+        poll_waiter_list_register(&svc->poll_list, pw);
+    }
+    spin_unlock_irqrestore(&g_srv_registry.lock, s);
+
+    // POSIX: POLLIN/POLLOUT only when requested; POLLHUP always. POLLOUT
+    // is undefined for a listener — never set.
+    return (short)(revents & (events | POLL_OUTPUT_ONLY));
+}
+
+short srv_handle_poll(void *obj, short events, struct poll_waiter *pw) {
+    if (!obj) return POLLNVAL;
+    // The first u64 of a KObj_Srv obj is its struct's magic word — see
+    // SRV_SERVICE_MAGIC / SRV_CONN_MAGIC. Read once: a torn UAF would
+    // observe 0 here (the freed-object scrubs clear magic before kfree).
+    u64 magic = *(const u64 *)obj;
+    if (magic == SRV_SERVICE_MAGIC) {
+        return svc_listener_poll((struct SrvService *)obj, events, pw);
+    }
+    if (magic == SRV_CONN_MAGIC) {
+        // Client-side connection handle. No v1.0 caller polls this (corvus
+        // polls its accept-side Spoor; joey doesn't poll its client
+        // connection — it drives 9P synchronously through the kernel
+        // client). The connection IS a real pollable object via
+        // srvconn_poll; expose it for forward-compat — a client wanting
+        // multiplexed I/O on a /srv connection can poll the KObj_Srv.
+        return srvconn_poll((struct SrvConn *)obj, events, pw);
+    }
+    // Unknown magic — corruption, or a future KObj_Srv flavor.
+    return POLLNVAL;
+}
+
+// devsrv_poll — the Dev `.poll` slot. Dispatches by Spoor flavor (root /
+// service-ref / connection — discriminated by the aux's first u64; see
+// devsrv_conn_of's comment).
+static short devsrv_poll(struct Spoor *c, short events,
+                         struct poll_waiter *pw) {
+    if (!c || c->dc != 's') return POLLERR;
+    if (!c->aux) {
+        // /srv root Spoor — no readiness state. The caller is asking
+        // about a directory; a poll on a directory has no real meaning
+        // here. Report no events (the caller's poll blocks until timeout).
+        return 0;
+    }
+    u64 m = *(const u64 *)c->aux;
+    if (m == SRV_CONN_MAGIC) {
+        return srvconn_poll((struct SrvConn *)c->aux, events, pw);
+    }
+    if (m == DEVSRV_SVC_MAGIC) {
+        // Service-ref Spoor — the result of walking /srv/<name>. Used by
+        // the client-open path (P5-corvus-srv-impl-b) to mint a SrvConn;
+        // not a pollable transport itself. No events.
+        return 0;
+    }
+    extinction("devsrv_poll: Spoor aux has unknown magic (corruption)");
+    return POLLERR;   // unreachable
+}
+
 struct Dev devsrv = {
     .dc       = 's',          // Plan 9 #s
     .name     = "srv",
@@ -665,6 +776,8 @@ struct Dev devsrv = {
     .bread    = devsrv_bread,
     .write    = devsrv_write,
     .bwrite   = devsrv_bwrite,
+
+    .poll     = devsrv_poll,        // P5-poll-b
 
     .remove   = devsrv_remove,
     .wstat    = devsrv_wstat,

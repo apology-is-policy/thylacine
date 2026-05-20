@@ -393,6 +393,64 @@ rejects its arguments — with no partial state left behind.
 
 ---
 
+## poll (P5-poll-b)
+
+A `SrvConn` is bidirectional and is held by both endpoints (the client
+via a `KObj_Srv` handle, corvus via a `KObj_Spoor` server-endpoint Spoor
+returned by `SYS_SRV_ACCEPT`). At v1.0 the server endpoint is the
+caller that polls — corvus multiplexes its accept listener against
+its accepted connection Spoors via `SYS_POLL`. The poll routes
+through `devsrv_poll` → `srvconn_poll`.
+
+The struct gained a connection-wide `poll_waiter_list poll_list`
+(see 70-devsrv.md "poll" for the cross-module wiring). One list serves
+both directions because the polled object IS the connection — every
+readiness edge (c2s data arrival, s2c room available, teardown EOF on
+either ring) is a single wake of every registered poller.
+
+**Register-then-observe** under dual channel locks. `srvconn_poll`:
+1. Acquires `cn->c2s.lock`, then `cn->s2c.lock` (fixed order — no other
+   path takes both, so the dual-lock acquisition is safe).
+2. Samples readiness:
+   - `c2s.count > 0` → POLLIN (bytes for corvus to read);
+   - `c2s.eof` → POLLHUP (teardown latched it);
+   - `!s2c.eof && s2c.count < SRVCONN_RING_CAP` → POLLOUT (corvus can write);
+   - `s2c.eof` → POLLERR (server-side writes EPIPE).
+3. If `pw != NULL`, registers `pw` on `poll_list` — atomic with the
+   sample under both channel locks (specs/poll.tla `Register`).
+4. Releases s2c.lock, then c2s.lock.
+5. Returns `revents & (events | POLL_OUTPUT_ONLY)` — POSIX-correct
+   filtering (POLLIN/POLLOUT gated by `events`; POLLHUP/POLLERR always
+   surfaced).
+
+`pw == NULL` is the post-wake sample-only call (the second scan in
+`sys_poll_for_proc` after `tsleep` returns).
+
+**Producer wake sites**. Three places latch readiness and wake the
+poll list (specs/poll.tla `MakeReady`):
+
+- `srvconn_client_send` after a successful `chan_produce(&cn->c2s, …)`
+  — c2s grew (POLLIN edge for corvus).
+- `srvconn_server_send` after a successful `chan_produce(&cn->s2c, …)`
+  — s2c grew (POLLOUT edge for any future client-side poller; corvus
+  itself doesn't poll this).
+- `srvconn_teardown` after `chan_set_eof` on both directions — both
+  POLLHUP (off c2s.eof) and POLLERR (off s2c.eof) latch at once.
+
+Each wake call happens AFTER the relevant channel lock(s) are
+released (the same discipline as `chan_produce`'s `wakeup(&ch->rendez)`
+or `chan_set_eof`'s wakeup). Lock chain: object → list → rendez,
+acyclic.
+
+**No deadlock with concurrent producers**. Although `srvconn_poll`
+holds both channel locks at once, no producer ever takes both:
+`chan_produce` / `chan_consume_nonblock` / `chan_set_eof` each take one
+`ch->lock`. So a producer holding (say) `c2s.lock` while a poller is
+already holding `c2s.lock + s2c.lock` is a normal contention case
+(serialized on `c2s.lock`), not a deadlock.
+
+---
+
 ## Status
 
 | Item | State |
@@ -405,6 +463,7 @@ rejects its arguments — with no partial state left behind.
 | `KObj_Srv` connection consumer + `handle_release_obj` teardown | landed (a3b) |
 | `server_stripes` field + `srvconn_peer_stripes` / `_peer_console` / `_server_stripes` accessors | landed (P5-corvus-srv-impl-a3c) |
 | `SYS_SRV_PEER` peer-identity read (consumes the accessors) | landed (a3c; `kernel/syscall.c`, reference 70) |
+| `poll_list` field + `srvconn_poll` + wake callouts at every readiness mutation | landed (P5-poll-b) |
 
 ---
 

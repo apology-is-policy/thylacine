@@ -811,6 +811,60 @@ filled. Only the dead-Proc guard fail-closes the mutable fields.
 
 ---
 
+## poll (P5-poll-b)
+
+`devsrv` is the second `.poll` implementor in the kernel (after
+`devpipe` at P5-poll-a). Two distinct surfaces are pollable:
+
+**The listener** (a KObj_Srv handle whose obj is a SrvService — the
+handle `SYS_POST_SERVICE` returned). corvus polls it to learn when a
+client has connected. The KObj_Srv handle kind is NOT a Spoor — the
+Dev `.poll` vtable can't reach it. `kernel/poll.c::poll_scan_one`
+recognizes `slot->kind == KOBJ_SRV` and routes through
+`srv_handle_poll(obj, events, pw)` — a parallel-handle-kind dispatch
+that reads the obj's first u64 (its magic) and forwards to
+`svc_listener_poll` (SrvService) or `srvconn_poll` (SrvConn).
+
+The listener-readiness signal is `backlog_count > 0` (POLLIN) and
+`state != LIVE` (POLLHUP). `svc_listener_poll` samples both under the
+registry lock + registers the `poll_waiter` under the same lock — the
+register-then-observe step. The producer side wakes the listener
+`poll_list` at:
+- `srv_conn_open_for_proc` after a successful `srv_backlog_push`
+  (backlog grew → POLLIN edge);
+- `srv_proc_exit_notify` after the poster's services are tombstoned
+  (POLLHUP edge);
+- `srv_registry_reset` after the registry is wiped (test-only).
+
+Every wake site fires `poll_waiter_list_wake(&svc->poll_list)` AFTER
+the registry lock is released, mirroring the existing
+`wakeup(&svc->accept_rendez)` discipline (the lock-then-mutate /
+release / wake pattern from `kernel/pipe.c`).
+
+**The connection Spoor** (the KObj_Spoor handle corvus gets from
+`SYS_SRV_ACCEPT`). corvus polls it for POLLIN (bytes to read) and
+POLLOUT (room to write); a teardown surfaces POLLHUP + POLLERR.
+`devsrv_poll` (the Dev vtable slot) dispatches by aux:
+- aux == NULL → `/srv` root Spoor: returns 0 (no readiness).
+- aux's first u64 == DEVSRV_SVC_MAGIC → service-ref Spoor (the result
+  of walking `/srv/<name>`): returns 0 (not pollable as transport).
+- aux's first u64 == SRV_CONN_MAGIC → connection Spoor: delegates to
+  `srvconn_poll` in `kernel/srvconn.c`.
+
+The connection-Spoor `.poll` mechanics live in
+`docs/reference/71-srvconn.md` (the SrvConn owns the transport state).
+
+**Lock ordering**. The poll-list lock is internal to
+`struct poll_waiter_list` and last in the order: for the listener,
+the chain is `g_srv_registry.lock` → `svc->poll_list.lock` →
+`pw->rendez->lock`; for the connection, the chain is
+`cn->c2s.lock` → `cn->s2c.lock` → `cn->poll_list.lock` →
+`pw->rendez->lock`. Producers acquire and release the readiness-state
+lock(s) BEFORE calling `poll_waiter_list_wake`, so the wake's
+list-lock acquisition cannot deadlock with the producer's state lock.
+
+---
+
 ## Status
 
 | Item | State |
@@ -825,6 +879,8 @@ filled. Only the dead-Proc guard fail-closes the mutable fields.
 | `SYS_SRV_ACCEPT` (syscall 27) + `handle_release_obj` `KOBJ_SRV` | landed (a3b) |
 | poster-exit backlog drain | landed (a3b) |
 | `SYS_SRV_PEER` (syscall 28) peer-identity read + poster gate | landed (a3c) |
+| `devsrv_poll` Dev vtable slot + connection-Spoor `.poll` | landed (P5-poll-b) |
+| `srv_handle_poll` KObj_Srv dispatch + listener `.poll` | landed (P5-poll-b) |
 | corvus 9P server + §6.2 step-5 handshake drive | deferred to P5-corvus-srv-impl-b |
 | production client-open syscall + joey `/srv` mount | deferred to P5-corvus-srv-impl-b |
 | per-Proc-one-connection cap | deferred to P5-corvus-srv-impl-b |

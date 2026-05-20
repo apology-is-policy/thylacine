@@ -25,6 +25,7 @@
 #include <thylacine/poll.h>
 
 #include <thylacine/dev.h>
+#include <thylacine/devsrv.h>      // srv_handle_poll — KObj_Srv dispatch
 #include <thylacine/extinction.h>
 #include <thylacine/handle.h>
 #include <thylacine/proc.h>
@@ -153,53 +154,51 @@ static int poll_cond_any_flagged(void *arg) {
     return 0;
 }
 
-// Resolve a pollfd's fd to a Spoor under the caller's HandleTable.
-// Sets POLLNVAL on `*revents_out` for any failure (invalid fd, bad
-// kind, no Spoor). Returns NULL on failure, the Spoor on success.
+// Per-fd scan step: either REGISTER + SAMPLE (pw != NULL on first
+// scan) or SAMPLE-ONLY (pw == NULL on post-wake re-scan and on
+// timeout=0 fast path). Sets `kfds[i].revents` and returns 1 iff the
+// fd is "ready" (revents != 0).
 //
 // We deliberately do NOT require RIGHT_READ/RIGHT_WRITE: poll's
 // semantics are "is this fd ready for the requested event", and a
 // reader without RIGHT_READ can still observe POLLHUP/POLLERR (POSIX
 // permits polling a write-only fd for POLLIN — revents=0).
-static struct Spoor *poll_lookup_spoor(struct Proc *p, s32 fd,
-                                       s16 *revents_out) {
-    if (fd < 0) {
-        *revents_out |= POLLNVAL;
-        return NULL;
-    }
-    struct Handle *slot = handle_get(p, (hidx_t)fd);
-    if (!slot) {
-        *revents_out |= POLLNVAL;
-        return NULL;
-    }
-    if (slot->kind != KOBJ_SPOOR) {
-        // POLL is fd-shaped — only Spoor handles. A KObj_Burrow /
-        // KObj_Mmio / etc. has no readiness semantics here.
-        *revents_out |= POLLNVAL;
-        return NULL;
-    }
-    return (struct Spoor *)slot->obj;
-}
-
-// Per-fd scan step: either REGISTER + SAMPLE (pw != NULL on first
-// scan) or SAMPLE-ONLY (pw == NULL on post-wake re-scan and on
-// timeout=0 fast path). Sets `kfds[i].revents` and returns 1 iff the
-// fd is "ready" (revents != 0).
 static int poll_scan_one(struct Proc *p, struct pollfd *pfd,
                          struct poll_waiter *pw_or_null) {
     s16 revents = 0;
-    struct Spoor *sp = poll_lookup_spoor(p, pfd->fd, &revents);
-    if (sp) {
-        if (sp->dev && sp->dev->poll) {
-            short rv = sp->dev->poll(sp, pfd->events, pw_or_null);
-            revents = (s16)rv;
+    if (pfd->fd < 0) {
+        pfd->revents = POLLNVAL;
+        return 1;
+    }
+    struct Handle *slot = handle_get(p, (hidx_t)pfd->fd);
+    if (!slot) {
+        pfd->revents = POLLNVAL;
+        return 1;
+    }
+
+    switch (slot->kind) {
+    case KOBJ_SPOOR: {
+        struct Spoor *sp = (struct Spoor *)slot->obj;
+        if (sp && sp->dev && sp->dev->poll) {
+            revents = (s16)sp->dev->poll(sp, pfd->events, pw_or_null);
         } else {
-            // Always-ready: regular file. POSIX-correct — a regular
-            // file's read/write never blocks. Return only the
-            // requested POLLIN/POLLOUT bits; output-only POLLERR/
-            // POLLHUP have no meaning for a regular file.
+            // Always-ready: a Dev without a .poll slot is POSIX-regular-
+            // file (read/write never blocks). Return only the requested
+            // POLLIN/POLLOUT; output-only POLLHUP/POLLERR are meaningless.
             revents = (s16)(pfd->events & POLL_REQUESTABLE);
         }
+        break;
+    }
+    case KOBJ_SRV:
+        // The KObj_Srv flavor (listener SrvService vs client SrvConn) is
+        // discriminated inside srv_handle_poll via the obj's magic.
+        revents = (s16)srv_handle_poll(slot->obj, pfd->events, pw_or_null);
+        break;
+    default:
+        // Every other kobj kind (Burrow / Mmio / Irq / Dma / Interrupt /
+        // Process / Thread) lacks readiness semantics in v1.0.
+        revents = POLLNVAL;
+        break;
     }
     pfd->revents = revents;
     return (revents != 0) ? 1 : 0;
