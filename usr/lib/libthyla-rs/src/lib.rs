@@ -544,6 +544,153 @@ pub unsafe fn t_getrandom(buf: *mut u8, len: usize, flags: u64) -> i64 {
 }
 
 // =============================================================================
+// P5-corvus-srv-impl-b3b — /srv service syscall wrappers.
+// =============================================================================
+//
+// Used by corvus (server side) and joey (client side) to consume the
+// kernel-owned /srv transport landed at P5-corvus-srv-impl-a/-b2.
+
+// TSrvPeerInfo — SYS_SRV_PEER's writeback buffer. Layout pinned by
+// kernel-side struct srv_peer_info (kernel/include/thylacine/syscall.h)
+// to a fixed 24-byte ABI record. Repr-C + the kernel's static asserts
+// pin both sides.
+#[repr(C)]
+#[derive(Copy, Clone, Default, Debug)]
+pub struct TSrvPeerInfo {
+    pub stripes: u64,
+    pub caps: u64,
+    pub console: u32,
+    pub alive: u32,
+}
+
+// t_post_service — register the calling Proc as the server for service
+// `name`. Requires PROC_FLAG_MAY_POST_SERVICE (the joey-stamped post
+// gate; see t_spawn_with_perms below). Returns a non-negative KObj_Srv
+// listener handle on success, -1 on:
+//   - gate missing (no PROC_FLAG_MAY_POST_SERVICE)
+//   - bad name (zero len, >SRV_NAME_MAX, NUL bytes)
+//   - registry full / name already posted by a live Proc / OOM
+//
+// On success, future client SYS_SRV_CONNECT(name, ...) calls flow
+// through this listener and become t_srv_accept-able. The listener
+// handle is NON-TRANSFERABLE (KObj_Srv partition of handles.tla).
+//
+// Safety: `name` must point to `name_len` readable bytes in valid
+// user-VA memory.
+#[inline(always)]
+pub unsafe fn t_post_service(name: *const u8, name_len: usize) -> i64 {
+    let mut x0: i64 = name as i64;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") name_len as u64,
+        in("x8") T_SYS_POST_SERVICE,
+        options(nostack)
+    );
+    x0
+}
+
+// t_srv_accept — block until a client connects, return the server-side
+// endpoint as a KObj_Spoor handle (byte I/O — plain t_read/t_write). The
+// handshake (Tversion + Tattach + Twalk + Tlopen) was driven by the
+// kernel before the client's SYS_SRV_CONNECT returned, so the very first
+// t_read on the returned handle observes a fully-attached client.
+//
+// Each accepted connection has its own kernel-stamped peer identity;
+// fetch it via t_srv_peer on the returned handle. The Spoor returned is
+// transferable (KObj_Spoor) — corvus can hand it to a worker thread once
+// concurrency lands at v1.x. At v1.0 corvus serves all conns single-
+// threaded via t_poll.
+//
+// Returns the connection Spoor fd (>=0) on success, -1 on:
+//   - service_handle is not a KObj_Srv listener
+//   - listener torn down (poster exited / unposted)
+//   - blocked accept woken by signal (v1.x — at v1.0 there are none)
+#[inline(always)]
+pub unsafe fn t_srv_accept(service_handle: i64) -> i64 {
+    let mut x0: i64 = service_handle;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x8") T_SYS_SRV_ACCEPT,
+        options(nostack)
+    );
+    x0
+}
+
+// t_srv_peer — read the kernel-stamped peer identity of a /srv
+// connection into `out`. The fields are:
+//   - stripes : the peer Proc's identity tag (immutable by-value capture
+//               at mint; 0 means "the peer never had stripes assigned" —
+//               unreachable at v1.0).
+//   - caps    : the peer's LIVE capability set (looked up under the
+//               proc table lock at call time). If the peer Proc has
+//               exited/been reaped (`alive == 0`), caps is 0.
+//   - console : 1 iff the peer was console-attached at mint (immutable).
+//   - alive   : 1 iff an ALIVE Proc still carries this stripes value at
+//               call time, else 0. Use this to decide whether to honor
+//               caps; an alive==0 peer's caps is fail-closed.
+//
+// Refuses any caller whose stripes differ from the connection's poster
+// (the gate prevents a non-server Proc from reading peer identity off a
+// connection it just SYS_SRV_ACCEPT'd onto someone else's listener —
+// which can't happen at v1.0 but is structurally pinned).
+//
+// Returns 0 on success, -1 on bad handle / wrong kind / SrvConn
+// gate violation / bad user-VA.
+//
+// Safety: `out` must point to a writable TSrvPeerInfo (24 bytes) in
+// valid user-VA memory.
+#[inline(always)]
+pub unsafe fn t_srv_peer(connection_handle: i64, out: *mut TSrvPeerInfo) -> i64 {
+    let mut x0: i64 = connection_handle;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") out as u64,
+        in("x8") T_SYS_SRV_PEER,
+        options(nostack)
+    );
+    x0
+}
+
+// t_srv_connect — open a client-side connection to `name` and walk one
+// path component `path` (typically `"ctl"` for the Stratum-style 9P
+// /srv pattern). The kernel mints a SrvConn, drives the full handshake
+// (Tversion + Tattach + Twalk(path) + Tlopen) on the caller's behalf,
+// and returns a KObj_Srv client handle. Subsequent t_read / t_write on
+// the returned handle translate to Tread / Twrite at the open fid.
+//
+// Per-Proc cap: at v1.0 a Proc may hold at most ONE concurrent /srv
+// client connection (kernel/srvconn.c SRV_CONN_PER_PROC_MAX=1). A
+// second t_srv_connect from a Proc that already holds one returns -1
+// until t_close releases the prior handle.
+//
+// Returns the client KObj_Srv fd (>=0) on success, -1 on:
+//   - service unposted (no LIVE service named `name`)
+//   - cap exhausted (this Proc already holds a connection)
+//   - handshake refused by the server (bad Rversion/Rattach/Rwalk/Rlopen)
+//   - kernel-side OOM / handle table full
+//
+// Safety: `name` / `path` must point to `name_len` / `path_len`
+// readable bytes in valid user-VA memory.
+#[inline(always)]
+pub unsafe fn t_srv_connect(name: *const u8, name_len: usize,
+                            path: *const u8, path_len: usize) -> i64 {
+    let mut x0: i64 = name as i64;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") name_len as u64,
+        in("x2") path as u64,
+        in("x3") path_len as u64,
+        in("x8") T_SYS_SRV_CONNECT,
+        options(nostack)
+    );
+    x0
+}
+
+// =============================================================================
 // P5-corvus-srv-impl-b3a — t_spawn_with_perms.
 // =============================================================================
 //

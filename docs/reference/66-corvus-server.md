@@ -186,13 +186,16 @@ No dedicated kernel-internal tests added — the existing P5-fd-* and P5-spawn-f
 
 ## Status
 
-Implemented. Default + UBSan suites both pass 442/442; the corvus AUTH + SESSION_CLOSE round-trip runs end-to-end on every boot.
+**Transport superseded at P5-corvus-srv-impl-b3b.** The pipe-pair harness (corvus's fd 0/1) is retired; corvus is now a real 9P2000.L server reached via `/srv/corvus`. See `docs/reference/74-corvus-9p-server.md` for the current transport. **The wire format + verb semantics + session table documented above are unchanged and still in force** — only the I/O delivery moved from pipes to `KObj_Srv` connection handles backed by the kernel-side `SrvConn` ring transport.
 
-Out of scope for this chunk (deferred to subsequent sub-chunks):
-- Argon2id passphrase verification in AUTH (deferred to P5-corvus-bringup-c).
-- State file format (magic `CRVS`) for hybrid keypair storage.
-- Multi-peer support (multiple per-user-stratumd peers over distinct Spoor pairs; requires kernel-side `/srv/corvus/peer/` surface).
-- UNWRAP / CHANGE_PASSPHRASE / USER_CREATE / USER_DELETE / ADMIN_ELEVATE / RECOVER / ROTATE_KEY verbs.
+Verb implementations beyond this chunk's two-verb skeleton:
+- AUTH crypto verification: Argon2id added at P5-corvus-bringup-c (`docs/reference/68-corvus-crypto.md`).
+- USER_CREATE + state file (`CRVS` magic): P5-corvus-bringup-c.
+- WRAP + UNWRAP (hybrid PKE DEK envelope): P5-corvus-bringup-d (`docs/reference/69-corvus-unwrap.md`).
+- /srv/corvus 9P transport: P5-corvus-srv-impl-b3b (`docs/reference/74-corvus-9p-server.md`).
+
+Still out of scope (deferred beyond b3b):
+- CHANGE_PASSPHRASE / USER_DELETE / ADMIN_ELEVATE / RECOVER / ROTATE_KEY verbs.
 - Encrypted audit log.
 - Rate limiter.
 - Idle / absolute session timeouts.

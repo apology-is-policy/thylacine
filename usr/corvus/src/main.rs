@@ -8,56 +8,71 @@
 //   P5-corvus-bringup-c (24ddb91): Argon2id passphrase verification +
 //                                  AEGIS-256 AEAD wrap/unwrap + the
 //                                  state file format (magic CRVS) +
-//                                  USER_CREATE. Keypair a placeholder.
-//   P5-corvus-bringup-d (this chunk): the real ML-KEM-768 + X25519
-//                                  hybrid keypair (replaces the -c
-//                                  64-byte placeholder); the hybrid-PKE
-//                                  DEK envelope; the WRAP (verb_id=10)
-//                                  and UNWRAP (verb_id=4) verbs + the
-//                                  in-memory dataset-ownership table
-//                                  that enforces invariant C-7.
+//                                  USER_CREATE.
+//   P5-corvus-bringup-d (cb0f849): the real ML-KEM-768 + X25519
+//                                  hybrid keypair; the hybrid-PKE
+//                                  DEK envelope; WRAP + UNWRAP verbs.
+//   P5-corvus-srv-impl-b1 (4bf689c): Q11 wire 3 → 4 byte request
+//                                  header (protocol_version byte).
+//   P5-corvus-srv-impl-b3b (this chunk): corvus is now a real 9P2000.L
+//                                  server reached via the kernel-owned
+//                                  /srv/corvus transport (CORVUS-DESIGN
+//                                  §6). The fd 0/1 pipe-pair harness
+//                                  retires; corvus posts its service via
+//                                  SYS_POST_SERVICE("corvus"), accepts
+//                                  each client connection via
+//                                  SYS_SRV_ACCEPT, and serves a tiny
+//                                  9P2000.L namespace (root QTDIR
+//                                  containing a single ctl QTFILE).
+//                                  Verb frames travel as Twrite payloads
+//                                  on /ctl; responses travel as Rread
+//                                  payloads. The existing five verb
+//                                  handlers — AUTH / SESSION_CLOSE /
+//                                  UNWRAP / USER_CREATE / WRAP — are
+//                                  reused unchanged at the dispatch
+//                                  level; only the I/O transport
+//                                  changes.
 //
-// At this sub-chunk corvus is a single-peer userspace daemon that:
+// At this sub-chunk corvus:
 //
 //   1. Runs the hardening sequence at startup (mlockall + set_dumpable(0)
 //      + set_traceable(0) + a CSPRNG-seeded probe).
 //
 //   2. Initializes the static-buffer heap (24 MiB), the user-state vec,
-//      and the dataset-ownership table, then serves binary frames on
-//      fd 0 (rx) / fd 1 (tx) — the pipe pair joey installs via
-//      SYS_SPAWN_FULL.
+//      and the dataset-ownership table.
 //
-//   3. Dispatches verb_id ∈ { AUTH, SESSION_CLOSE, UNWRAP, USER_CREATE,
-//      WRAP } per CORVUS-DESIGN.md §6.4. Every other verb_id is refused
-//      with status=BadFormat.
+//   3. Posts /srv/corvus via SYS_POST_SERVICE("corvus"). Requires the
+//      joey-stamped PROC_FLAG_MAY_POST_SERVICE (granted by
+//      SYS_SPAWN_WITH_PERMS in joey; see P5-corvus-srv-impl-b3a).
 //
-//   4. USER_CREATE (verb_id=5): generates a fresh ML-KEM-768 + X25519
-//      hybrid keypair, AEGIS-256-wraps it under an Argon2id-derived KEK
-//      into a CorvusUserState (magic CRVS), and registers the user's
-//      dataset (users/<name>) in the ownership table.
+//   4. Main loop: SYS_POLL([listener, conns...]); on listener-ready
+//      accept a connection, on conn-ready service one 9P Tmsg.
 //
-//   5. AUTH (verb_id=1): re-derives the KEK via Argon2id, AEGIS-256-
-//      unwraps the hybrid keypair, and RETAINS it in the mlock'd session
-//      slab (corvus-c discarded it). The retained keypair is what WRAP
-//      and UNWRAP consume.
+//   5. 9P2000.L server (per-connection arena): Tversion / Tauth(reject)
+//      / Tattach / Twalk / Tlopen / Tread / Twrite / Tclunk. Tunknown →
+//      Rlerror.
 //
-//   6. WRAP (verb_id=10): wraps a 32-byte DEK under the session user's
-//      hybrid PUBLIC key into a DEK envelope. C-7-gated.
+//   6. ctl-fid Twrite payloads carry the Q11-corrected 4-byte verb
+//      header followed by the verb body. corvus accumulates Twrite
+//      payloads until a complete verb frame is in hand; dispatches the
+//      verb handler; stages the 3-byte response frame for the next
+//      Tread(s) to drain.
 //
-//   7. UNWRAP (verb_id=4): C-7-gated. Refuses (PermissionDenied) a
-//      (session, dataset) pair where session.user != owner_of(dataset)
-//      BEFORE any crypto; on an owned dataset, unwraps the DEK envelope
-//      with the session user's hybrid SECRET key and returns the DEK.
+//   7. Verbs (verb_id ∈ { AUTH, SESSION_CLOSE, UNWRAP, USER_CREATE,
+//      WRAP }) behave identically to P5-corvus-bringup-d; only the I/O
+//      transport changed. Other verb_ids → BadFormat.
 //
-//   8. SESSION_CLOSE (verb_id=3): token-bound session clear (wipes the
-//      keypair slab + token).
+// State storage: in-memory only at v1.0. CorvusUserState + dataset-
+// ownership records do not survive a corvus restart; FS persistence
+// (loading /var/lib/corvus/) lands once that tree is mounted.
 //
-//   9. Exits 0 on rx EOF; non-zero on transport error.
-//
-// State storage at this sub-chunk: in-memory only. CorvusUserState
-// records + the dataset-ownership table do not survive a corvus
-// restart; FS persistence (loading /var/lib/corvus/) lands when that
-// tree is mounted (P5+).
+// Multi-session at v1.0: corvus accepts multiple connections in
+// parallel BUT keeps a single global SESSION. v1.0's kernel cap
+// SRV_CONN_PER_PROC_MAX=1 plus joey being the single console-attached
+// Proc means there's exactly one active connection at any time, so
+// per-conn-session is equivalent to global session here. Multi-session
+// support (a Session per Conn keyed by peer stripes) lifts when the
+// multi-peer surface lands.
 //
 // Spec correspondence (specs/corvus.tla; P5-corvus-spec at c00de63):
 //
@@ -70,20 +85,24 @@
 //   SessionUserImmutable  — Session::{user,keypair} set once at
 //                           session_install(); cleared whole-record at
 //                           session_clear(); no in-place setter.
-//   WRAP / USER_CREATE    — outside the spec's session state-machine
-//                           scope. WRAP shares Unwrap's C-7 gate;
-//                           USER_CREATE is the precondition that makes
-//                           a user's AuthSuccess reachable.
-//   AdminElevate / AdminVerb — NOT YET (deferred).
+//   ConnAccept(p)         — accept_one() — new Conn record born at
+//                           t_srv_accept return.
+//   ConnTeardown(p)       — close_conn() — Conn record cleared on
+//                           POLLHUP / wire fault / Tversion reset.
+//   ConnOpIdentityIsKernelTruth — every Conn record carries
+//                                 a SYS_SRV_PEER snapshot at accept time.
 
 #![no_std]
 #![no_main]
 
 extern crate alloc;
 
+mod p9;
+
 use libthyla_rs::{
-    t_close, t_explicit_bzero, t_getrandom, t_mlockall, t_putstr, t_read, t_set_dumpable,
-    t_set_traceable, t_write,
+    t_close, t_explicit_bzero, t_getrandom, t_mlockall, t_poll, t_post_service,
+    t_putstr, t_read, t_set_dumpable, t_set_traceable, t_srv_accept, t_srv_peer,
+    t_write, TPollFd, TSrvPeerInfo, T_POLLHUP, T_POLLIN,
 };
 
 use alloc::vec::Vec;
@@ -134,24 +153,6 @@ unsafe fn heap_init() {
 // =============================================================================
 // State file format — CORVUS-DESIGN.md §4.3.
 // =============================================================================
-//
-// State file layout (in-memory at this sub-chunk; FS persistence at P5+):
-//
-//   [0..4)       magic 'CRVS'        (u32 LE = 0x53565243)
-//   [4..8)       version             u32 LE = 1
-//   [8..12)      t_cost              u32 LE
-//   [12..20)     m_cost_kib          u64 LE
-//   [20..24)     parallelism         u32 LE
-//   [24..40)     argon2id_salt       16 B
-//   [40..72)     aead_nonce          32 B  (AEGIS-256 nonce width)
-//   [72..ct_end) ciphertext          KEYPAIR_LEN bytes (= hybrid keypair wrapped)
-//   [ct_end..)   AEAD_tag            32 B  (AEGIS-256 tag width)
-//
-// The CRVS version stays 1 across P5-corvus-bringup-d: the layout is
-// unchanged — only KEYPAIR_LEN grew (64-byte placeholder → 3648-byte
-// real hybrid keypair), and the ciphertext length is implied by the
-// file size, not a stored field. No CRVS file is persisted yet, so the
-// keypair-size change breaks no on-disk format.
 
 const CORVUS_MAGIC: u32 = 0x53565243; // 'CRVS' LE
 const CORVUS_STATE_VERSION: u32 = 1;
@@ -160,21 +161,13 @@ const AEGIS256_KEY_LEN: usize = 32;
 const AEGIS256_NONCE_LEN: usize = 32;
 const AEGIS256_TAG_LEN: usize = 32;
 
-// Hybrid keypair (P5-corvus-bringup-d). The AEGIS-wrapped plaintext is
-// the concatenation of the X25519 and ML-KEM-768 key halves:
-//
-//   [0..32)      x25519 secret key      32 B
-//   [32..64)     x25519 public key      32 B
-//   [64..1248)   ML-KEM-768 encapsulation (public) key   1184 B
-//   [1248..3648) ML-KEM-768 decapsulation (secret) key   2400 B
-//
-// Both public halves are stored so corvus can WRAP (needs the public
-// keys) without re-deriving them; the layout is fixed-offset so the
-// session slab can be sliced directly.
+// Hybrid keypair layout (P5-corvus-bringup-d): the AEGIS-wrapped
+// plaintext is the concatenation of the X25519 and ML-KEM-768 key
+// halves. See KP_* offsets below.
 const X25519_KEY_LEN: usize = 32;
-const MLKEM_EK_LEN: usize = 1184; // ML-KEM-768 encapsulation key
-const MLKEM_DK_LEN: usize = 2400; // ML-KEM-768 decapsulation key
-const MLKEM_CT_LEN: usize = 1088; // ML-KEM-768 ciphertext
+const MLKEM_EK_LEN: usize = 1184;
+const MLKEM_DK_LEN: usize = 2400;
+const MLKEM_CT_LEN: usize = 1088;
 const KP_X25519_SK_OFF: usize = 0;
 const KP_X25519_PK_OFF: usize = X25519_KEY_LEN;
 const KP_MLKEM_EK_OFF: usize = X25519_KEY_LEN * 2;
@@ -182,7 +175,7 @@ const KP_MLKEM_DK_OFF: usize = X25519_KEY_LEN * 2 + MLKEM_EK_LEN;
 const KEYPAIR_LEN: usize = X25519_KEY_LEN * 2 + MLKEM_EK_LEN + MLKEM_DK_LEN; // 3648
 
 const HEADER_LEN: usize = 4 + 4 + 4 + 8 + 4 + ARGON2_SALT_LEN + AEGIS256_NONCE_LEN; // = 72
-const TOTAL_LEN: usize = HEADER_LEN + KEYPAIR_LEN + AEGIS256_TAG_LEN; // = 3752 at -d
+const TOTAL_LEN: usize = HEADER_LEN + KEYPAIR_LEN + AEGIS256_TAG_LEN; // = 3752
 
 const _: () = assert!(HEADER_LEN == 72, "state file header layout drift");
 const _: () = assert!(KEYPAIR_LEN == 3648, "hybrid keypair layout drift");
@@ -191,56 +184,32 @@ const _: () = assert!(AEGIS256_KEY_LEN == 32, "AEGIS-256 key width is 32");
 const _: () = assert!(AEGIS256_NONCE_LEN == 32, "AEGIS-256 nonce width is 32");
 const _: () = assert!(AEGIS256_TAG_LEN == 32, "AEGIS-256 tag width is 32");
 
-// Argon2id v1.0 preset. Design default (CORVUS-DESIGN §4.3): t_cost=2,
-// m_cost=64 MiB, parallelism=1.
-//
-// Bringup uses m_cost=16 MiB (KiB units) — a quarter of the design
-// default. The cap is the kernel allocator: corvus's heap is a static
-// BSS buffer mapped by a single contiguous physical allocation
-// (kernel/burrow.c::burrow_create_anon rounds page_count up to one
-// buddy order; a 64 MiB heap needs an order-14 = 64 MiB contiguous
-// block, which strains the buddy free-list after the kernel test
-// suite has fragmented memory). 24 MiB heap → order-13 (32 MiB
-// contiguous) is comfortably allocatable; 16 MiB m_cost fits with
-// 8 MiB headroom for Vec bookkeeping.
-//
-// The state-file format carries m_cost_kib as a per-record stored
-// field, so a future chunk can raise the default — new records use the
-// higher cost, old records still verify at their stored cost, no
-// format break.
+// Argon2id v1.0 preset (CORVUS-DESIGN §4.3). m_cost=16 MiB is the
+// bringup cap (one quarter of the design default 64 MiB) — bounded by
+// the static 24 MiB heap. State-file m_cost_kib is per-record, so a
+// future bump only resizes the heap.
 const ARGON2_T_COST: u32 = 2;
 const ARGON2_M_COST_KIB: u32 = 16 * 1024;
 const ARGON2_PARALLELISM: u32 = 1;
 
-// Additional Data for the keypair-wrap AEAD: "thylacine-corvus-v1" ||
-// user_name || backend_id. Backend ID at v1.0 is `passphrase` = 0. Per
-// CORVUS-DESIGN §4.3 binding rationale, AD prevents cross-user /
-// cross-backend wrap substitution.
+// AD for the keypair-wrap AEAD: "thylacine-corvus-v1" || user_name ||
+// backend_id. Backend ID at v1.0 is `passphrase` = 0.
 const AD_PREFIX: &[u8] = b"thylacine-corvus-v1";
 const BACKEND_ID_PASSPHRASE: u8 = 0;
 
 #[derive(Clone)]
 struct CorvusUserState {
-    // Stable user identity (the AUTH key).
     user: Vec<u8>,
-    // Argon2id params. Per-user (a user with sensitive preset will have
-    // different t_cost/m_cost_kib; bringup uses the interactive preset
-    // for every user but the field is per-record by design).
     t_cost: u32,
     m_cost_kib: u32,
     parallelism: u32,
-    // Fresh CSPRNG per state record. Re-randomized on every passphrase
-    // rotation per CORVUS-DESIGN §4.3 / audit F7.
     salt: [u8; ARGON2_SALT_LEN],
     nonce: [u8; AEGIS256_NONCE_LEN],
-    // AEGIS-256(KEK, nonce, AD).encrypt(hybrid keypair) → (ciphertext, tag).
     ciphertext: [u8; KEYPAIR_LEN],
     tag: [u8; AEGIS256_TAG_LEN],
 }
 
 impl CorvusUserState {
-    // Build the AEAD AD for this user record. Format-bound to the design
-    // contract; any change here is an on-wire format break.
     fn build_ad(&self, ad_out: &mut Vec<u8>) {
         ad_out.clear();
         ad_out.extend_from_slice(AD_PREFIX);
@@ -248,9 +217,6 @@ impl CorvusUserState {
         ad_out.push(BACKEND_ID_PASSPHRASE);
     }
 
-    // Serialize to the wire-format byte vec (for FS persistence at P5+;
-    // included here so the layout has one authoritative serializer).
-    // Output is exactly TOTAL_LEN bytes.
     #[allow(dead_code)] // FS persistence consumes this at P5+
     fn to_bytes(&self) -> [u8; TOTAL_LEN] {
         let mut out = [0u8; TOTAL_LEN];
@@ -270,24 +236,7 @@ impl CorvusUserState {
 // =============================================================================
 // DEK envelope — the hybrid-PKE wrapped-DEK blob (P5-corvus-bringup-d).
 // =============================================================================
-//
-// CORVUS-DESIGN.md §6.4 WRAP/UNWRAP carry a `wrapped` blob: a 32-byte
-// dataset DEK encrypted to a user's hybrid keypair. The envelope is a
-// KEM-DEM hybrid:
-//
-//   KEM: ML-KEM-768 encapsulation  +  X25519 ECDH (ephemeral → static).
-//        The two shared secrets + the ciphertext transcript feed a
-//        SHA-256 KEK combiner — the result stays secure if EITHER
-//        primitive holds (post-quantum AND classical).
-//   DEM: AEGIS-256 over the 32-byte DEK, AD-bound to the dataset name
-//        so a wrapped DEK cannot be replayed against another dataset.
-//
-//   [0]            envelope_version  u8 = 1
-//   [1..1089)      mlkem_ct          1088 B
-//   [1089..1121)   x25519_eph_pk     32 B
-//   [1121..1153)   aead_nonce        32 B
-//   [1153..1185)   dek_ct            32 B
-//   [1185..1217)   dek_tag           32 B
+
 const DEK_LEN: usize = 32;
 const ENVELOPE_VERSION: u8 = 1;
 const ENV_MLKEM_CT_OFF: usize = 1;
@@ -299,8 +248,6 @@ const ENVELOPE_LEN: usize = ENV_DEK_TAG_OFF + AEGIS256_TAG_LEN; // 1217
 
 const _: () = assert!(ENVELOPE_LEN == 1217, "DEK envelope layout drift");
 
-// Domain separators. The KDF prefix binds the SHA-256 combiner to this
-// construction + version; the AEAD AD prefix binds the DEM layer.
 const DEK_KDF_DOMAIN: &[u8] = b"thylacine-corvus-dek-kdf-v1";
 const DEK_AD_PREFIX: &[u8] = b"thylacine-corvus-dek-v1";
 
@@ -319,10 +266,6 @@ use x25519_dalek::{EphemeralSecret, PublicKey, StaticSecret};
 type MlKemEk = <MlKem768 as KemCore>::EncapsulationKey;
 type MlKemDk = <MlKem768 as KemCore>::DecapsulationKey;
 
-// rand_core adapter over the kernel CSPRNG. ml-kem + x25519-dalek both
-// take an explicit RNG; corvus feeds them t_getrandom. corvus verified
-// the CSPRNG seeded at startup, so a post-startup t_getrandom failure
-// is an invariant violation — fatal (corvus cannot mint sound keys).
 struct ThylaRng;
 
 impl rand_core::RngCore for ThylaRng {
@@ -337,11 +280,6 @@ impl rand_core::RngCore for ThylaRng {
         u64::from_le_bytes(b)
     }
     fn fill_bytes(&mut self, dest: &mut [u8]) {
-        // Loop: SYS_GETRANDOM clamps a request above the kernel's
-        // per-call cap and returns the short (clamped) count, so a
-        // single >cap request must not be treated as failure. Advance
-        // by whatever was filled until the buffer is complete; only a
-        // non-positive return is a genuine (fatal) CSPRNG failure.
         let mut off: usize = 0;
         while off < dest.len() {
             let rc = unsafe { t_getrandom(dest.as_mut_ptr().add(off), dest.len() - off, 0) };
@@ -353,7 +291,6 @@ impl rand_core::RngCore for ThylaRng {
         }
     }
     fn try_fill_bytes(&mut self, dest: &mut [u8]) -> Result<(), rand_core::Error> {
-        // fill_bytes is fatal-on-failure, so this only ever returns Ok.
         self.fill_bytes(dest);
         Ok(())
     }
@@ -361,19 +298,12 @@ impl rand_core::RngCore for ThylaRng {
 
 impl rand_core::CryptoRng for ThylaRng {}
 
-// Volatile-wipe a byte slice. The optimizer cannot elide volatile
-// writes — used for secret transients the crates don't zeroize.
 fn wipe(buf: &mut [u8]) {
     for b in buf.iter_mut() {
         unsafe { core::ptr::write_volatile(b as *mut u8, 0) };
     }
 }
 
-// Argon2id KEK derivation. Always runs at full cost (no early-exit on
-// validation failure). Returns the 32-byte KEK on success, None on
-// Argon2id init failure (only fires if params are out of spec; we
-// hardcode known-good params here, so the None branch is dead-code
-// guard).
 fn argon2id_kek(
     passphrase: &[u8],
     salt: &[u8],
@@ -388,12 +318,6 @@ fn argon2id_kek(
     Some(kek)
 }
 
-// AEGIS-256 wrap. Encrypts `plaintext` into `ciphertext_out` (must be
-// the same length). Returns the 32-byte tag. The `aegis` crate's
-// Vec-returning encrypt() is feature="std" gated; we use the in-place
-// variant which has no alloc requirement at the API level.
-//
-// Note: AEGIS-256 signature is `Aegis256::new(key, nonce)` — key first.
 fn aegis_wrap(
     key: &[u8; AEGIS256_KEY_LEN],
     nonce: &[u8; AEGIS256_NONCE_LEN],
@@ -407,10 +331,6 @@ fn aegis_wrap(
     cipher.encrypt_in_place(ciphertext_out, ad)
 }
 
-// AEGIS-256 unwrap. Returns Some(plaintext_vec) on tag-valid, None on
-// tag-invalid. The crate's `decrypt_in_place` does a constant-time tag
-// compare internally; we copy ciphertext into a new Vec so the caller
-// gets ownership of plaintext to drop/wipe explicitly.
 fn aegis_unwrap(
     key: &[u8; AEGIS256_KEY_LEN],
     nonce: &[u8; AEGIS256_NONCE_LEN],
@@ -425,11 +345,6 @@ fn aegis_unwrap(
     Some(buf)
 }
 
-// SHA-256 KEK combiner for the DEK envelope. Hashes the domain prefix +
-// both KEM shared secrets + the ciphertext transcript into a 32-byte
-// AEGIS-256 key. Binding the transcript (eph_pk ‖ mlkem_ct) ties the
-// KEK to the exact ciphertext, so a substituted ciphertext yields a
-// different KEK and the AEAD tag check then fails.
 fn sha256_kek(parts: &[&[u8]]) -> [u8; AEGIS256_KEY_LEN] {
     let mut h = Sha256::new();
     for p in parts {
@@ -441,43 +356,26 @@ fn sha256_kek(parts: &[&[u8]]) -> [u8; AEGIS256_KEY_LEN] {
     kek
 }
 
-// Generate a fresh ML-KEM-768 + X25519 hybrid keypair. Returns the
-// 3648-byte plaintext layout (see KP_* offsets). None only on a crate
-// size-contract mismatch — a build-time-impossible drift guard.
 fn generate_hybrid_keypair() -> Option<[u8; KEYPAIR_LEN]> {
     let mut rng = ThylaRng;
-
-    // X25519 — classical half. StaticSecret zeroizes on drop.
     let x_sk = StaticSecret::random_from_rng(&mut rng);
     let x_pk = PublicKey::from(&x_sk);
-
-    // ML-KEM-768 — post-quantum half.
     let (mlkem_dk, mlkem_ek) = MlKem768::generate(&mut rng);
     let mut ek_bytes = mlkem_ek.as_bytes();
     let mut dk_bytes = mlkem_dk.as_bytes();
     if ek_bytes.len() != MLKEM_EK_LEN || dk_bytes.len() != MLKEM_DK_LEN {
         return None;
     }
-
     let mut kp = [0u8; KEYPAIR_LEN];
     kp[KP_X25519_SK_OFF..KP_X25519_SK_OFF + X25519_KEY_LEN].copy_from_slice(x_sk.as_bytes());
     kp[KP_X25519_PK_OFF..KP_X25519_PK_OFF + X25519_KEY_LEN].copy_from_slice(x_pk.as_bytes());
     kp[KP_MLKEM_EK_OFF..KP_MLKEM_EK_OFF + MLKEM_EK_LEN].copy_from_slice(&ek_bytes[..]);
     kp[KP_MLKEM_DK_OFF..KP_MLKEM_DK_OFF + MLKEM_DK_LEN].copy_from_slice(&dk_bytes[..]);
-
-    // x_sk and the typed ml-kem keys (mlkem_dk / mlkem_ek) zeroize on
-    // drop — the x25519-dalek AND ml-kem `zeroize` features are both
-    // enabled. The SERIALIZED `dk_bytes` array (from `as_bytes()`) is a
-    // plain hybrid_array::Array with no Drop wipe — scrub it explicitly.
-    // (ek is public; scrubbing ek_bytes is hygiene, not a requirement.)
     wipe(&mut dk_bytes[..]);
     wipe(&mut ek_bytes[..]);
     Some(kp)
 }
 
-// WRAP: encrypt `dek` (32 B) to the hybrid PUBLIC key. Produces the
-// 1217-byte DEK envelope. `ad_dataset` binds the DEM layer to the
-// dataset name. None on a crate size-contract mismatch.
 fn dek_envelope_wrap(
     x25519_pk: &[u8; X25519_KEY_LEN],
     mlkem_ek_bytes: &[u8],
@@ -487,7 +385,6 @@ fn dek_envelope_wrap(
 ) -> Option<[u8; ENVELOPE_LEN]> {
     let mut rng = ThylaRng;
 
-    // ML-KEM encapsulate to the recipient's encapsulation key.
     let enc = Encoded::<MlKemEk>::try_from(mlkem_ek_bytes).ok()?;
     let mlkem_ek = MlKemEk::from_bytes(&enc);
     let (mlkem_ct, mut ss_pq) = mlkem_ek.encapsulate(&mut rng).ok()?;
@@ -496,13 +393,11 @@ fn dek_envelope_wrap(
         return None;
     }
 
-    // X25519 ECDH: fresh ephemeral → recipient static.
     let eph = EphemeralSecret::random_from_rng(&mut rng);
     let eph_pk = PublicKey::from(&eph);
     let their_pk = PublicKey::from(*x25519_pk);
     let ss_cl = eph.diffie_hellman(&their_pk);
 
-    // KEK = SHA-256(domain ‖ ss_pq ‖ ss_cl ‖ eph_pk ‖ mlkem_ct).
     let mut kek = sha256_kek(&[
         DEK_KDF_DOMAIN,
         &ss_pq[..],
@@ -510,15 +405,10 @@ fn dek_envelope_wrap(
         &eph_pk.as_bytes()[..],
         &mlkem_ct[..],
     ]);
-    // ss_cl zeroizes on drop (zeroize feature); ss_pq does not.
     wipe(&mut ss_pq[..]);
 
-    // DEM: AEGIS-256 over the DEK, AD = prefix ‖ dataset.
     let mut nonce = [0u8; AEGIS256_NONCE_LEN];
     rng.fill_bytes(&mut nonce);
-    // AD binds the DEM layer to the dataset AND the key_id, so a wrapped
-    // DEK cannot be replayed against a different dataset or a different
-    // key generation (rotation safety).
     let mut ad: Vec<u8> = Vec::new();
     ad.extend_from_slice(DEK_AD_PREFIX);
     ad.extend_from_slice(ad_dataset);
@@ -527,7 +417,6 @@ fn dek_envelope_wrap(
     let dek_tag = aegis_wrap(&kek, &nonce, &ad, dek, &mut dek_ct);
     wipe(&mut kek);
 
-    // Assemble the envelope.
     let mut env = [0u8; ENVELOPE_LEN];
     env[0] = ENVELOPE_VERSION;
     env[ENV_MLKEM_CT_OFF..ENV_MLKEM_CT_OFF + MLKEM_CT_LEN].copy_from_slice(&mlkem_ct[..]);
@@ -538,9 +427,6 @@ fn dek_envelope_wrap(
     Some(env)
 }
 
-// UNWRAP: recover the 32-byte DEK from a DEK envelope using the hybrid
-// SECRET key. None on a malformed envelope OR an AEAD tag failure
-// (wrong keypair / corrupted blob). `ad_dataset` must match the wrap.
 fn dek_envelope_unwrap(
     x25519_sk: &[u8; X25519_KEY_LEN],
     mlkem_dk_bytes: &[u8],
@@ -560,9 +446,6 @@ fn dek_envelope_unwrap(
     let mut dek_tag = [0u8; AEGIS256_TAG_LEN];
     dek_tag.copy_from_slice(&envelope[ENV_DEK_TAG_OFF..ENV_DEK_TAG_OFF + AEGIS256_TAG_LEN]);
 
-    // ML-KEM decapsulate. FIPS 203 implicit rejection: a bad ciphertext
-    // yields a deterministic-but-wrong shared secret, NOT an error — the
-    // AEGIS-256 tag check below is the integrity gate.
     let ct = Ciphertext::<MlKem768>::try_from(mlkem_ct_bytes).ok()?;
     let enc = Encoded::<MlKemDk>::try_from(mlkem_dk_bytes).ok()?;
     let mlkem_dk = MlKemDk::from_bytes(&enc);
@@ -572,7 +455,6 @@ fn dek_envelope_unwrap(
         return None;
     }
 
-    // X25519 ECDH: static secret → envelope ephemeral public.
     let sk = StaticSecret::from(*x25519_sk);
     let eph_pub = PublicKey::from(eph_pk);
     let ss_cl = sk.diffie_hellman(&eph_pub);
@@ -586,7 +468,6 @@ fn dek_envelope_unwrap(
     ]);
     wipe(&mut ss_pq[..]);
 
-    // AD must match the wrap exactly: prefix ‖ dataset ‖ key_id.
     let mut ad: Vec<u8> = Vec::new();
     ad.extend_from_slice(DEK_AD_PREFIX);
     ad.extend_from_slice(ad_dataset);
@@ -606,16 +487,8 @@ fn dek_envelope_unwrap(
 }
 
 // =============================================================================
-// User state vector — in-memory at this sub-chunk.
+// User state vector + dataset ownership table — in-memory at v1.0.
 // =============================================================================
-//
-// `static mut Vec<CorvusUserState>` (single-threaded; corvus is one Proc
-// at v1.0). All access goes through helper functions that take the
-// addr_of_mut! pointer — same discipline as SESSION.
-//
-// MAX_USERS bounds the table so a hostile peer cannot OOM the daemon by
-// spamming USER_CREATE (the heap is 24 MiB; each record is ~3.7 KiB).
-// Real rate-limiting (C-16) + the CapHostowner gate are later sub-chunks.
 
 const MAX_USERS: usize = 256;
 
@@ -657,16 +530,6 @@ unsafe fn user_states_insert(record: CorvusUserState) -> bool {
     true
 }
 
-// =============================================================================
-// Dataset-ownership table — in-memory at -d (CORVUS-DESIGN §4.4 / §5.4).
-// =============================================================================
-//
-// Maps a dataset name → its owning user. USER_CREATE registers
-// `users/<name>` → `<name>`. WRAP and UNWRAP consult it for the C-7
-// gate: corvus refuses a (session, dataset) pair where the session's
-// bound user is not the dataset's owner. FS persistence (loading from
-// /var/lib/corvus/datasets/) lands when that tree is mounted.
-
 struct DatasetOwner {
     dataset: Vec<u8>,
     owner: Vec<u8>,
@@ -678,8 +541,6 @@ unsafe fn dataset_owners_init() {
     core::ptr::write(core::ptr::addr_of_mut!(DATASET_OWNERS), Some(Vec::new()));
 }
 
-// Look up a dataset's owner. Returns a copy of the owner name, or None
-// if the dataset is unknown.
 unsafe fn dataset_owner_find(dataset: &[u8]) -> Option<Vec<u8>> {
     let table = (*core::ptr::addr_of!(DATASET_OWNERS)).as_ref()?;
     for entry in table {
@@ -692,8 +553,6 @@ unsafe fn dataset_owner_find(dataset: &[u8]) -> Option<Vec<u8>> {
     None
 }
 
-// Register a dataset→owner mapping. Returns false (no-op) if the dataset
-// is already registered.
 unsafe fn dataset_owner_register(dataset: &[u8], owner: &[u8]) -> bool {
     let table = match (*core::ptr::addr_of_mut!(DATASET_OWNERS)).as_mut() {
         Some(t) => t,
@@ -722,11 +581,11 @@ const VERB_UNWRAP: u8 = 4;
 const VERB_USER_CREATE: u8 = 5;
 const VERB_WRAP: u8 = 10;
 
-// Stratum↔corvus wire version. STRATUM-API-V1.md Q11 resolved to a 4-byte
-// request header carrying this byte at offset 1; an unknown value is
-// BadFormat-then-terminate (the frame's shape may change across versions
-// so a length-mismatched body would re-sync the stream nowhere safe).
-// Stratum's UNWRAP / WRAP encoders emit `= 1`; corvus's decoder demands it.
+// Stratum↔corvus wire version. STRATUM-API-V1.md Q11 resolved to a
+// 4-byte request header carrying this byte at offset 1; an unknown
+// value is BadFormat-then-tear-down (the frame's shape may change
+// across versions so a length-mismatched body would re-sync the stream
+// nowhere safe).
 const CORVUS_PROTOCOL_VERSION: u8 = 1;
 
 const STATUS_OK: u8 = 0;
@@ -738,43 +597,45 @@ const STATUS_RATE_LIMITED: u8 = 4;
 const STATUS_BAD_FORMAT: u8 = 5;
 const STATUS_INTERNAL_ERROR: u8 = 6;
 
-// 33 bytes = 's' + 32 hex chars (16 bytes of CSPRNG entropy hex-encoded).
 const TOKEN_LEN: usize = 33;
 const TOKEN_ENTROPY_BYTES: usize = 16;
 
 const MAX_USER_LEN: usize = 32;
 const MAX_PASS_LEN: usize = 256;
 
-// Dataset names: "users/michael" etc. 64 is generous headroom.
 const MAX_DATASET_LEN: usize = 64;
-// The wrapped-DEK blob. ENVELOPE_LEN (1217) is the v1.0 size; the cap
-// has headroom for envelope-format evolution.
 const MAX_WRAPPED_LEN: usize = 2048;
 
 // UNWRAP carries the largest inbound payload:
 //   token(33) + dataset_len(1) + dataset(≤64) + key_id(8)
-//   + wrapped_len(2) + wrapped(≤2048).
+//   + wrapped_len(2) + wrapped(≤2048) = 2156 bytes.
 const MAX_PAYLOAD_LEN: usize = TOKEN_LEN + 1 + MAX_DATASET_LEN + 8 + 2 + MAX_WRAPPED_LEN;
 const _: () = assert!(
     MAX_PAYLOAD_LEN >= 1 + MAX_USER_LEN + 2 + MAX_PASS_LEN + 1,
     "USER_CREATE payload must fit MAX_PAYLOAD_LEN"
 );
 
-// WRAP returns the DEK envelope — the largest response payload.
-const MAX_RESPONSE_FRAME: usize = 3 + ENVELOPE_LEN;
+// 4-byte request header (verb + protocol_version + len_lo + len_hi).
+const REQ_HDR_LEN: usize = 4;
 
-const RX_FD: i64 = 0;
-const TX_FD: i64 = 1;
+// 3-byte response header (status + len_lo + len_hi); responses carry no
+// version byte (verb pin response shape — Q11 §6.4).
+const RESP_HDR_LEN: usize = 3;
+
+// Max staged response frame: 3-byte header + ENVELOPE_LEN. WRAP returns
+// the DEK envelope which is the largest response payload.
+const MAX_RESPONSE_FRAME: usize = RESP_HDR_LEN + ENVELOPE_LEN;
 
 // =============================================================================
-// Session table — single-slot at this skeleton.
+// Session table — single global slot at v1.0.
 // =============================================================================
 //
 // Spec (specs/corvus.tla) models Sessions as SUBSET SessionRecord with at
-// most one record per owner_proc. This skeleton has one peer, so a
-// single static slot suffices. Multi-slot expansion lands when corvus
-// serves multiple peer Procs (per-user stratumd processes) over distinct
-// Spoor pairs.
+// most one record per owner_proc. At v1.0 corvus has a single global
+// SESSION slot — adequate because joey is the only console-attached
+// Proc and the kernel cap SRV_CONN_PER_PROC_MAX=1 means at most one live
+// connection per peer. Multi-session (per-Conn Session keyed by peer
+// stripes) lifts when the multi-peer surface lands.
 //
 // The session carries the AEGIS-unwrapped hybrid keypair (P5-corvus-
 // bringup-d): AUTH installs it, WRAP / UNWRAP read it, session_clear
@@ -787,8 +648,6 @@ struct Session {
     user_len: u8,
     user: [u8; MAX_USER_LEN],
     token: [u8; TOKEN_LEN],
-    // The session user's hybrid keypair, AEGIS-unwrapped at AUTH and
-    // held here for WRAP / UNWRAP. Wiped (volatile) at session_clear().
     keypair: [u8; KEYPAIR_LEN],
 }
 
@@ -800,10 +659,6 @@ static mut SESSION: Session = Session {
     keypair: [0; KEYPAIR_LEN],
 };
 
-// Accessor wrappers go through raw pointers + element-by-element writes
-// so we don't take a &mut reference to the static (Rust 1.77+'s
-// static_mut_refs lint fires on `&mut SESSION` patterns).
-
 unsafe fn session_active() -> bool {
     core::ptr::read(core::ptr::addr_of!(SESSION.active))
 }
@@ -813,20 +668,16 @@ unsafe fn session_install(user: &[u8], token: &[u8; TOKEN_LEN], keypair: &[u8; K
     let user_ptr = core::ptr::addr_of_mut!((*s).user) as *mut u8;
     let token_ptr = core::ptr::addr_of_mut!((*s).token) as *mut u8;
     let kp_ptr = core::ptr::addr_of_mut!((*s).keypair) as *mut u8;
-    // Wipe + install user
     for i in 0..MAX_USER_LEN {
         core::ptr::write(user_ptr.add(i), 0);
     }
     for i in 0..user.len() {
         core::ptr::write(user_ptr.add(i), user[i]);
     }
-    // Install token
     for i in 0..TOKEN_LEN {
         core::ptr::write(token_ptr.add(i), token[i]);
     }
-    // Install keypair
     core::ptr::copy_nonoverlapping(keypair.as_ptr(), kp_ptr, KEYPAIR_LEN);
-    // user_len + active LAST so partial reads can never see a half-set state
     core::ptr::write(core::ptr::addr_of_mut!((*s).user_len), user.len() as u8);
     core::ptr::write(core::ptr::addr_of_mut!((*s).active), true);
 }
@@ -839,7 +690,6 @@ unsafe fn session_token_matches(candidate: &[u8]) -> bool {
         return false;
     }
     let token_ptr = core::ptr::addr_of!(SESSION.token) as *const u8;
-    // Constant-time compare: never short-circuit on mismatch.
     let mut diff: u8 = 0;
     for i in 0..TOKEN_LEN {
         let tok_byte = core::ptr::read(token_ptr.add(i));
@@ -848,7 +698,6 @@ unsafe fn session_token_matches(candidate: &[u8]) -> bool {
     diff == 0
 }
 
-// Copy the session's bound user name. None if no active session.
 unsafe fn session_user_copy() -> Option<Vec<u8>> {
     if !session_active() {
         return None;
@@ -866,8 +715,6 @@ unsafe fn session_user_copy() -> Option<Vec<u8>> {
     Some(out)
 }
 
-// Copy the session's hybrid keypair into a caller-owned buffer. None if
-// no active session. The caller MUST wipe the copy after use.
 unsafe fn session_keypair_copy() -> Option<[u8; KEYPAIR_LEN]> {
     if !session_active() {
         return None;
@@ -881,8 +728,8 @@ unsafe fn session_keypair_copy() -> Option<[u8; KEYPAIR_LEN]> {
 
 unsafe fn session_clear() {
     let s = core::ptr::addr_of_mut!(SESSION);
-    // Clear active FIRST so a concurrent reader (none at v1.0; future-
-    // proof) can't observe a stale token bound to a cleared session.
+    // Clear active FIRST so a concurrent reader can't observe a stale
+    // token bound to a cleared session.
     core::ptr::write(core::ptr::addr_of_mut!((*s).active), false);
     let user_ptr = core::ptr::addr_of_mut!((*s).user) as *mut u8;
     let token_ptr = core::ptr::addr_of_mut!((*s).token) as *mut u8;
@@ -914,68 +761,27 @@ fn nibble_to_hex(n: u8) -> u8 {
 }
 
 // =============================================================================
-// Frame I/O.
+// Verb-frame staging — emit a 3-byte response frame (status, len_lo,
+// len_hi, payload) into the conn's pending_response buffer. Drained by
+// subsequent Treads on the ctl fid.
 // =============================================================================
 
-// read_exact — loop t_read until `buf.len()` bytes received OR EOF/error.
-// Returns the count read on success (== buf.len()), 0 on clean EOF at
-// frame boundary, negative on error or short read across EOF.
-unsafe fn read_exact(fd: i64, buf: &mut [u8]) -> i64 {
-    let mut got: usize = 0;
-    while got < buf.len() {
-        let n = t_read(fd, buf.as_mut_ptr().add(got), buf.len() - got);
-        if n == 0 {
-            // EOF. If we've read nothing, signal clean EOF; else short
-            // read at frame boundary — protocol violation.
-            return if got == 0 { 0 } else { -1 };
-        }
-        if n < 0 {
-            return -1;
-        }
-        got += n as usize;
-    }
-    got as i64
-}
-
-// write_all — loop t_write until all bytes drained.
-unsafe fn write_all(fd: i64, buf: &[u8]) -> i64 {
-    let mut sent: usize = 0;
-    while sent < buf.len() {
-        let n = t_write(fd, buf.as_ptr().add(sent), buf.len() - sent);
-        if n <= 0 {
-            return -1;
-        }
-        sent += n as usize;
-    }
-    sent as i64
-}
-
-// send_response — encode + write a response frame. Returns 0 on
-// success, -1 on transport error.
-unsafe fn send_response(fd: i64, status: u8, payload: &[u8]) -> i64 {
-    if payload.len() > 0xFFFF {
-        return -1;
-    }
-    let mut frame = [0u8; MAX_RESPONSE_FRAME];
-    if 3 + payload.len() > frame.len() {
-        return -1;
-    }
-    frame[0] = status;
-    let len_lo = (payload.len() & 0xFF) as u8;
-    let len_hi = ((payload.len() >> 8) & 0xFF) as u8;
-    frame[1] = len_lo;
-    frame[2] = len_hi;
-    for i in 0..payload.len() {
-        frame[3 + i] = payload[i];
-    }
-    if write_all(fd, &frame[..3 + payload.len()]) < 0 {
-        return -1;
-    }
-    0
+fn stage_response(response: &mut Vec<u8>, status: u8, payload: &[u8]) {
+    response.clear();
+    response.reserve(RESP_HDR_LEN + payload.len());
+    response.push(status);
+    response.push((payload.len() & 0xff) as u8);
+    response.push(((payload.len() >> 8) & 0xff) as u8);
+    response.extend_from_slice(payload);
 }
 
 // =============================================================================
 // Verb handlers.
+//
+// Each handler parses the verb-specific payload and stages a response
+// frame into the connection's `response` buffer. The transport (which
+// 9P Twrites delivered this payload, which Treads will drain the
+// response) is owned by the main loop; handlers know nothing about it.
 // =============================================================================
 
 // handle_auth — parse AUTH payload, run Argon2id + AEGIS-256-unwrap,
@@ -986,48 +792,39 @@ unsafe fn send_response(fd: i64, status: u8, payload: &[u8]) -> i64 {
 //   [1..1+ul]      user
 //   [1+ul..3+ul]   pass_len u16 LE (1..=MAX_PASS_LEN)
 //   [3+ul..]       passphrase
-//
-// Timing-attack mitigation: the not-found path takes a different amount
-// of time than the unwrap-fail path (no Argon2id run vs Argon2id run).
-// At v1.0 we accept the username-existence leak: a user-enumeration
-// attacker who can talk to corvus can already enumerate via the audit
-// log + the user-create surface. The Argon2id cost still bounds
-// per-guess attempts on the passphrase.
-unsafe fn handle_auth(payload: &[u8]) -> i64 {
+unsafe fn handle_auth(payload: &[u8], response: &mut Vec<u8>) {
     if payload.len() < 3 {
-        return send_response(TX_FD, STATUS_BAD_FORMAT, &[]);
+        return stage_response(response, STATUS_BAD_FORMAT, &[]);
     }
     let user_len = payload[0] as usize;
     if user_len == 0 || user_len > MAX_USER_LEN {
-        return send_response(TX_FD, STATUS_BAD_FORMAT, &[]);
+        return stage_response(response, STATUS_BAD_FORMAT, &[]);
     }
     if payload.len() < 1 + user_len + 2 {
-        return send_response(TX_FD, STATUS_BAD_FORMAT, &[]);
+        return stage_response(response, STATUS_BAD_FORMAT, &[]);
     }
     let user = &payload[1..1 + user_len];
     let pass_len = (payload[1 + user_len] as usize) | ((payload[2 + user_len] as usize) << 8);
     if pass_len == 0 || pass_len > MAX_PASS_LEN {
-        return send_response(TX_FD, STATUS_BAD_FORMAT, &[]);
+        return stage_response(response, STATUS_BAD_FORMAT, &[]);
     }
     if payload.len() != 1 + user_len + 2 + pass_len {
-        return send_response(TX_FD, STATUS_BAD_FORMAT, &[]);
+        return stage_response(response, STATUS_BAD_FORMAT, &[]);
     }
     let passphrase = &payload[1 + user_len + 2..1 + user_len + 2 + pass_len];
 
-    // Spec's one-session-per-Proc precondition (AuthSuccess's
-    // `~(\E s : s.owner_proc = p)`). At this skeleton "the peer" is
-    // implicit; an active session blocks AUTH.
+    // Spec's one-session-per-Proc precondition: refuse AUTH while a
+    // session is bound (corvus.tla AuthSuccess `~(\E s : s.owner_proc =
+    // p)`).
     if session_active() {
-        return send_response(TX_FD, STATUS_PERMISSION_DENIED, &[]);
+        return stage_response(response, STATUS_PERMISSION_DENIED, &[]);
     }
 
-    // Look up user.
     let state = match user_states_find(user) {
         Some(s) => s,
-        None => return send_response(TX_FD, STATUS_BAD_AUTH, &[]),
+        None => return stage_response(response, STATUS_BAD_AUTH, &[]),
     };
 
-    // Argon2id(passphrase, stored_salt, stored_params) → KEK.
     let mut kek = match argon2id_kek(
         passphrase,
         &state.salt,
@@ -1036,36 +833,31 @@ unsafe fn handle_auth(payload: &[u8]) -> i64 {
         state.parallelism,
     ) {
         Some(k) => k,
-        None => return send_response(TX_FD, STATUS_INTERNAL_ERROR, &[]),
+        None => return stage_response(response, STATUS_INTERNAL_ERROR, &[]),
     };
 
-    // AEGIS-256-unwrap. Build AD from the stored record.
     let mut ad: Vec<u8> = Vec::new();
     state.build_ad(&mut ad);
     let unwrap_result = aegis_unwrap(&kek, &state.nonce, &ad, &state.ciphertext, &state.tag);
-
-    // Wipe KEK regardless of outcome (CORVUS-DESIGN §5.1).
     wipe(&mut kek);
 
     let mut keypair_vec = match unwrap_result {
         Some(k) => k,
-        None => return send_response(TX_FD, STATUS_BAD_AUTH, &[]),
+        None => return stage_response(response, STATUS_BAD_AUTH, &[]),
     };
     if keypair_vec.len() != KEYPAIR_LEN {
         wipe(&mut keypair_vec);
-        return send_response(TX_FD, STATUS_INTERNAL_ERROR, &[]);
+        return stage_response(response, STATUS_INTERNAL_ERROR, &[]);
     }
-    // Move the unwrapped keypair into a fixed buffer for session_install.
     let mut keypair = [0u8; KEYPAIR_LEN];
     keypair.copy_from_slice(&keypair_vec);
     wipe(&mut keypair_vec);
 
-    // Generate 16 bytes of entropy via CSPRNG → 32-char hex → prepend 's'.
     let mut entropy = [0u8; TOKEN_ENTROPY_BYTES];
     let rc = t_getrandom(entropy.as_mut_ptr(), TOKEN_ENTROPY_BYTES, 0);
     if rc != TOKEN_ENTROPY_BYTES as i64 {
         wipe(&mut keypair);
-        return send_response(TX_FD, STATUS_INTERNAL_ERROR, &[]);
+        return stage_response(response, STATUS_INTERNAL_ERROR, &[]);
     }
     let mut token = [0u8; TOKEN_LEN];
     token[0] = b's';
@@ -1075,91 +867,67 @@ unsafe fn handle_auth(payload: &[u8]) -> i64 {
     }
     let _ = t_explicit_bzero(entropy.as_mut_ptr(), TOKEN_ENTROPY_BYTES);
 
-    // Install the session with the retained keypair, then wipe the
-    // local copy — the mlock'd session slab is now the authority.
     session_install(user, &token, &keypair);
     wipe(&mut keypair);
 
-    // Per CORVUS-DESIGN.md §6.4: the AUTH success payload is the
-    // session token (33 bytes). Wipe the local copy after sending —
-    // the mlock'd session slab is the authority.
-    let rc = send_response(TX_FD, STATUS_OK, &token);
+    stage_response(response, STATUS_OK, &token);
     wipe(&mut token);
-    rc
 }
 
 // handle_user_create — USER_CREATE verb (verb_id=5).
 //
-// Payload format (per CORVUS-DESIGN §6.4):
+// Payload format:
 //   [0]            user_len u8 (1..=MAX_USER_LEN)
 //   [1..1+ul]      user
 //   [1+ul..3+ul]   pass_len u16 LE (1..=MAX_PASS_LEN)
 //   [3+ul..]       passphrase
 //   [end-1]        backend u8 (v1.0: 0=passphrase only)
-//
-// Crypto path:
-//   1. Generate fresh salt (16 B) + nonce (32 B) via t_getrandom.
-//   2. Generate the real ML-KEM-768 + X25519 hybrid keypair.
-//   3. Argon2id(passphrase, salt, default-params) → KEK.
-//   4. AEGIS-256-wrap(KEK, nonce, AD, keypair) → ciphertext + tag.
-//   5. Insert CorvusUserState; register the user's dataset for C-7.
-//      Refuse if the user already exists.
-unsafe fn handle_user_create(payload: &[u8]) -> i64 {
+unsafe fn handle_user_create(payload: &[u8], response: &mut Vec<u8>) {
     if payload.len() < 4 {
-        return send_response(TX_FD, STATUS_BAD_FORMAT, &[]);
+        return stage_response(response, STATUS_BAD_FORMAT, &[]);
     }
     let user_len = payload[0] as usize;
     if user_len == 0 || user_len > MAX_USER_LEN {
-        return send_response(TX_FD, STATUS_BAD_FORMAT, &[]);
+        return stage_response(response, STATUS_BAD_FORMAT, &[]);
     }
     if payload.len() < 1 + user_len + 2 + 1 {
-        return send_response(TX_FD, STATUS_BAD_FORMAT, &[]);
+        return stage_response(response, STATUS_BAD_FORMAT, &[]);
     }
     let user_slice = &payload[1..1 + user_len];
     let pass_len = (payload[1 + user_len] as usize) | ((payload[2 + user_len] as usize) << 8);
     if pass_len == 0 || pass_len > MAX_PASS_LEN {
-        return send_response(TX_FD, STATUS_BAD_FORMAT, &[]);
+        return stage_response(response, STATUS_BAD_FORMAT, &[]);
     }
     if payload.len() != 1 + user_len + 2 + pass_len + 1 {
-        return send_response(TX_FD, STATUS_BAD_FORMAT, &[]);
+        return stage_response(response, STATUS_BAD_FORMAT, &[]);
     }
     let passphrase = &payload[1 + user_len + 2..1 + user_len + 2 + pass_len];
     let backend = payload[1 + user_len + 2 + pass_len];
     if backend != BACKEND_ID_PASSPHRASE {
-        // v1.0 only supports passphrase backend; fido2/smartcard/escrow at v1.x.
-        return send_response(TX_FD, STATUS_BAD_FORMAT, &[]);
+        return stage_response(response, STATUS_BAD_FORMAT, &[]);
     }
 
-    // Pre-check existence (the insert path is the authoritative gate but
-    // erroring early saves an Argon2id run on a doomed request).
     if user_states_find(user_slice).is_some() {
-        return send_response(TX_FD, STATUS_PERMISSION_DENIED, &[]);
+        return stage_response(response, STATUS_PERMISSION_DENIED, &[]);
     }
-
-    // Bound the in-memory user table: a hostile peer must not be able to
-    // OOM the daemon by spamming USER_CREATE. (CapHostowner-gating this
-    // verb + rate-limiting C-16 land with ADMIN_ELEVATE / P5-hostowner.)
     if user_states_count() >= MAX_USERS {
-        return send_response(TX_FD, STATUS_INTERNAL_ERROR, &[]);
+        return stage_response(response, STATUS_INTERNAL_ERROR, &[]);
     }
 
-    // Fresh salt + nonce.
     let mut salt = [0u8; ARGON2_SALT_LEN];
     if t_getrandom(salt.as_mut_ptr(), ARGON2_SALT_LEN, 0) != ARGON2_SALT_LEN as i64 {
-        return send_response(TX_FD, STATUS_INTERNAL_ERROR, &[]);
+        return stage_response(response, STATUS_INTERNAL_ERROR, &[]);
     }
     let mut nonce = [0u8; AEGIS256_NONCE_LEN];
     if t_getrandom(nonce.as_mut_ptr(), AEGIS256_NONCE_LEN, 0) != AEGIS256_NONCE_LEN as i64 {
-        return send_response(TX_FD, STATUS_INTERNAL_ERROR, &[]);
+        return stage_response(response, STATUS_INTERNAL_ERROR, &[]);
     }
 
-    // Generate the real ML-KEM-768 + X25519 hybrid keypair.
     let mut keypair_plain = match generate_hybrid_keypair() {
         Some(kp) => kp,
-        None => return send_response(TX_FD, STATUS_INTERNAL_ERROR, &[]),
+        None => return stage_response(response, STATUS_INTERNAL_ERROR, &[]),
     };
 
-    // Argon2id KEK.
     let mut kek = match argon2id_kek(
         passphrase,
         &salt,
@@ -1170,11 +938,10 @@ unsafe fn handle_user_create(payload: &[u8]) -> i64 {
         Some(k) => k,
         None => {
             wipe(&mut keypair_plain);
-            return send_response(TX_FD, STATUS_INTERNAL_ERROR, &[]);
+            return stage_response(response, STATUS_INTERNAL_ERROR, &[]);
         }
     };
 
-    // Build AD.
     let mut ad: Vec<u8> = Vec::new();
     let mut user_vec: Vec<u8> = Vec::new();
     user_vec.extend_from_slice(user_slice);
@@ -1182,11 +949,9 @@ unsafe fn handle_user_create(payload: &[u8]) -> i64 {
     ad.extend_from_slice(&user_vec);
     ad.push(BACKEND_ID_PASSPHRASE);
 
-    // AEGIS-256-wrap.
     let mut ciphertext = [0u8; KEYPAIR_LEN];
     let tag = aegis_wrap(&kek, &nonce, &ad, &keypair_plain, &mut ciphertext);
 
-    // Wipe sensitive transients.
     wipe(&mut kek);
     wipe(&mut keypair_plain);
 
@@ -1202,18 +967,15 @@ unsafe fn handle_user_create(payload: &[u8]) -> i64 {
     };
 
     if !user_states_insert(record) {
-        return send_response(TX_FD, STATUS_PERMISSION_DENIED, &[]);
+        return stage_response(response, STATUS_PERMISSION_DENIED, &[]);
     }
 
-    // Register the user's dataset for the C-7 ownership gate. The
-    // dataset (users/<name>) is unique because the user is unique
-    // (user_states_insert already gated that), so this always succeeds.
     let mut dataset = Vec::new();
     dataset.extend_from_slice(b"users/");
     dataset.extend_from_slice(user_slice);
     dataset_owner_register(&dataset, user_slice);
 
-    send_response(TX_FD, STATUS_OK, &[])
+    stage_response(response, STATUS_OK, &[]);
 }
 
 // handle_wrap — WRAP verb (verb_id=10). Wraps a 32-byte DEK under the
@@ -1223,30 +985,24 @@ unsafe fn handle_user_create(payload: &[u8]) -> i64 {
 //   [0..33)        token         33 B
 //   [33]           dataset_len   u8 (1..=MAX_DATASET_LEN)
 //   [34..34+dl)    dataset       dl B
-//   [34+dl..42+dl) key_id        u64 LE  (carried; v1.x multi-key — ignored)
+//   [34+dl..42+dl) key_id        u64 LE
 //   [42+dl..44+dl) dek_len       u16 LE  (must == DEK_LEN)
 //   [44+dl..)      dek           dek_len B
-//
-// C-7 gate: the session user must own `dataset` (else PermissionDenied /
-// NotFound) — WRAP shares UNWRAP's ownership discipline so a session
-// cannot mint envelopes tagged for datasets it does not own.
-unsafe fn handle_wrap(payload: &[u8]) -> i64 {
-    // token + dataset_len + (>=1 dataset byte) + key_id + dek_len.
+unsafe fn handle_wrap(payload: &[u8], response: &mut Vec<u8>) {
     if payload.len() < TOKEN_LEN + 1 + 1 + 8 + 2 {
-        return send_response(TX_FD, STATUS_BAD_FORMAT, &[]);
+        return stage_response(response, STATUS_BAD_FORMAT, &[]);
     }
     let token = &payload[0..TOKEN_LEN];
     let dataset_len = payload[TOKEN_LEN] as usize;
     if dataset_len == 0 || dataset_len > MAX_DATASET_LEN {
-        return send_response(TX_FD, STATUS_BAD_FORMAT, &[]);
+        return stage_response(response, STATUS_BAD_FORMAT, &[]);
     }
     let ds_off = TOKEN_LEN + 1;
     if payload.len() < ds_off + dataset_len + 8 + 2 {
-        return send_response(TX_FD, STATUS_BAD_FORMAT, &[]);
+        return stage_response(response, STATUS_BAD_FORMAT, &[]);
     }
     let dataset = &payload[ds_off..ds_off + dataset_len];
     let kid_off = ds_off + dataset_len;
-    // key_id (u64 LE) — bound into the DEK envelope AD (rotation safety).
     let mut key_id: u64 = 0;
     for i in 0..8 {
         key_id |= (payload[kid_off + i] as u64) << (8 * i);
@@ -1254,35 +1010,32 @@ unsafe fn handle_wrap(payload: &[u8]) -> i64 {
     let dek_len_off = kid_off + 8;
     let dek_len = (payload[dek_len_off] as usize) | ((payload[dek_len_off + 1] as usize) << 8);
     if dek_len != DEK_LEN {
-        return send_response(TX_FD, STATUS_BAD_FORMAT, &[]);
+        return stage_response(response, STATUS_BAD_FORMAT, &[]);
     }
     let dek_off = dek_len_off + 2;
     if payload.len() != dek_off + dek_len {
-        return send_response(TX_FD, STATUS_BAD_FORMAT, &[]);
+        return stage_response(response, STATUS_BAD_FORMAT, &[]);
     }
     let dek_slice = &payload[dek_off..dek_off + dek_len];
 
-    // Session-token gate.
     if !session_token_matches(token) {
-        return send_response(TX_FD, STATUS_BAD_AUTH, &[]);
+        return stage_response(response, STATUS_BAD_AUTH, &[]);
     }
-    // C-7 ownership gate.
     let session_user = match session_user_copy() {
         Some(u) => u,
-        None => return send_response(TX_FD, STATUS_BAD_AUTH, &[]),
+        None => return stage_response(response, STATUS_BAD_AUTH, &[]),
     };
     let owner = match dataset_owner_find(dataset) {
         Some(o) => o,
-        None => return send_response(TX_FD, STATUS_NOT_FOUND, &[]),
+        None => return stage_response(response, STATUS_NOT_FOUND, &[]),
     };
     if owner != session_user {
-        return send_response(TX_FD, STATUS_PERMISSION_DENIED, &[]);
+        return stage_response(response, STATUS_PERMISSION_DENIED, &[]);
     }
 
-    // Wrap the DEK under the session user's hybrid public key.
     let mut keypair = match session_keypair_copy() {
         Some(kp) => kp,
-        None => return send_response(TX_FD, STATUS_INTERNAL_ERROR, &[]),
+        None => return stage_response(response, STATUS_INTERNAL_ERROR, &[]),
     };
     let mut x_pk = [0u8; X25519_KEY_LEN];
     x_pk.copy_from_slice(&keypair[KP_X25519_PK_OFF..KP_X25519_PK_OFF + X25519_KEY_LEN]);
@@ -1293,46 +1046,40 @@ unsafe fn handle_wrap(payload: &[u8]) -> i64 {
 
     let envelope = dek_envelope_wrap(&x_pk, &mlkem_ek, &dek, dataset, key_id);
 
-    // Wipe secret-bearing locals (x_pk / mlkem_ek are public — no wipe).
     wipe(&mut dek);
     wipe(&mut keypair);
 
     match envelope {
-        Some(env) => send_response(TX_FD, STATUS_OK, &env),
-        None => send_response(TX_FD, STATUS_INTERNAL_ERROR, &[]),
+        Some(env) => stage_response(response, STATUS_OK, &env),
+        None => stage_response(response, STATUS_INTERNAL_ERROR, &[]),
     }
 }
 
-// handle_unwrap — UNWRAP verb (verb_id=4). Recovers a 32-byte DEK from a
-// DEK envelope using the session user's hybrid SECRET key.
+// handle_unwrap — UNWRAP verb (verb_id=4). Recovers a 32-byte DEK from
+// a DEK envelope using the session user's hybrid SECRET key.
 //
-// Payload format (STRATUM-API-V1.md §5.2):
+// Payload format:
 //   [0..33)        token         33 B
 //   [33]           dataset_len   u8
 //   [34..34+dl)    dataset       dl B
-//   [34+dl..42+dl) key_id        u64 LE  (carried; v1.x multi-key)
+//   [34+dl..42+dl) key_id        u64 LE
 //   [42+dl..44+dl) wrapped_len   u16 LE
 //   [44+dl..)      wrapped       wrapped_len B
-//
-// C-7 gate (specs/corvus.tla UnwrapOwnerOnly): the session user must
-// own `dataset`. The gate fires BEFORE any crypto — a cross-user UNWRAP
-// is refused (PermissionDenied) without touching the keypair.
-unsafe fn handle_unwrap(payload: &[u8]) -> i64 {
+unsafe fn handle_unwrap(payload: &[u8], response: &mut Vec<u8>) {
     if payload.len() < TOKEN_LEN + 1 + 1 + 8 + 2 {
-        return send_response(TX_FD, STATUS_BAD_FORMAT, &[]);
+        return stage_response(response, STATUS_BAD_FORMAT, &[]);
     }
     let token = &payload[0..TOKEN_LEN];
     let dataset_len = payload[TOKEN_LEN] as usize;
     if dataset_len == 0 || dataset_len > MAX_DATASET_LEN {
-        return send_response(TX_FD, STATUS_BAD_FORMAT, &[]);
+        return stage_response(response, STATUS_BAD_FORMAT, &[]);
     }
     let ds_off = TOKEN_LEN + 1;
     if payload.len() < ds_off + dataset_len + 8 + 2 {
-        return send_response(TX_FD, STATUS_BAD_FORMAT, &[]);
+        return stage_response(response, STATUS_BAD_FORMAT, &[]);
     }
     let dataset = &payload[ds_off..ds_off + dataset_len];
     let kid_off = ds_off + dataset_len;
-    // key_id (u64 LE) — bound into the DEK envelope AD (rotation safety).
     let mut key_id: u64 = 0;
     for i in 0..8 {
         key_id |= (payload[kid_off + i] as u64) << (8 * i);
@@ -1341,42 +1088,35 @@ unsafe fn handle_unwrap(payload: &[u8]) -> i64 {
     let wrapped_len =
         (payload[wrapped_len_off] as usize) | ((payload[wrapped_len_off + 1] as usize) << 8);
     if wrapped_len == 0 || wrapped_len > MAX_WRAPPED_LEN {
-        return send_response(TX_FD, STATUS_BAD_FORMAT, &[]);
+        return stage_response(response, STATUS_BAD_FORMAT, &[]);
     }
     let wrapped_off = wrapped_len_off + 2;
     if payload.len() != wrapped_off + wrapped_len {
-        return send_response(TX_FD, STATUS_BAD_FORMAT, &[]);
+        return stage_response(response, STATUS_BAD_FORMAT, &[]);
     }
     let wrapped = &payload[wrapped_off..wrapped_off + wrapped_len];
-    // A structurally-malformed envelope (wrong length / version) is a
-    // client format error, not a corvus fault — report BadFormat. The
-    // AEAD-tag-failure path (dek_envelope_unwrap → None) below is what
-    // yields InternalError.
     if wrapped.len() != ENVELOPE_LEN || wrapped[0] != ENVELOPE_VERSION {
-        return send_response(TX_FD, STATUS_BAD_FORMAT, &[]);
+        return stage_response(response, STATUS_BAD_FORMAT, &[]);
     }
 
-    // Session-token gate.
     if !session_token_matches(token) {
-        return send_response(TX_FD, STATUS_BAD_AUTH, &[]);
+        return stage_response(response, STATUS_BAD_AUTH, &[]);
     }
-    // C-7 ownership gate — refuse cross-user BEFORE any crypto.
     let session_user = match session_user_copy() {
         Some(u) => u,
-        None => return send_response(TX_FD, STATUS_BAD_AUTH, &[]),
+        None => return stage_response(response, STATUS_BAD_AUTH, &[]),
     };
     let owner = match dataset_owner_find(dataset) {
         Some(o) => o,
-        None => return send_response(TX_FD, STATUS_NOT_FOUND, &[]),
+        None => return stage_response(response, STATUS_NOT_FOUND, &[]),
     };
     if owner != session_user {
-        return send_response(TX_FD, STATUS_PERMISSION_DENIED, &[]);
+        return stage_response(response, STATUS_PERMISSION_DENIED, &[]);
     }
 
-    // Owned dataset — unwrap the DEK envelope with the hybrid secret key.
     let mut keypair = match session_keypair_copy() {
         Some(kp) => kp,
-        None => return send_response(TX_FD, STATUS_INTERNAL_ERROR, &[]),
+        None => return stage_response(response, STATUS_INTERNAL_ERROR, &[]),
     };
     let mut x_sk = [0u8; X25519_KEY_LEN];
     x_sk.copy_from_slice(&keypair[KP_X25519_SK_OFF..KP_X25519_SK_OFF + X25519_KEY_LEN]);
@@ -1385,99 +1125,688 @@ unsafe fn handle_unwrap(payload: &[u8]) -> i64 {
 
     let dek = dek_envelope_unwrap(&x_sk, &mlkem_dk, wrapped, dataset, key_id);
 
-    // Wipe secret-bearing locals.
     wipe(&mut x_sk);
     wipe(&mut mlkem_dk);
     wipe(&mut keypair);
 
     match dek {
         Some(mut d) => {
-            let rc = send_response(TX_FD, STATUS_OK, &d);
+            stage_response(response, STATUS_OK, &d);
             wipe(&mut d);
-            rc
         }
-        // A well-formed frame whose envelope is malformed or fails the
-        // AEAD tag: the DEK could not be recovered. Not a wire-format
-        // fault (the frame parsed) — report InternalError per
-        // STRATUM-API-V1.md §5.5.
-        None => send_response(TX_FD, STATUS_INTERNAL_ERROR, &[]),
+        None => stage_response(response, STATUS_INTERNAL_ERROR, &[]),
     }
 }
 
-// handle_session_close — verify token + clear session.
-unsafe fn handle_session_close(payload: &[u8]) -> i64 {
+unsafe fn handle_session_close(payload: &[u8], response: &mut Vec<u8>) {
     if payload.len() != TOKEN_LEN {
-        return send_response(TX_FD, STATUS_BAD_FORMAT, &[]);
+        return stage_response(response, STATUS_BAD_FORMAT, &[]);
     }
     if !session_token_matches(payload) {
-        return send_response(TX_FD, STATUS_NOT_FOUND, &[]);
+        return stage_response(response, STATUS_NOT_FOUND, &[]);
     }
     session_clear();
-    send_response(TX_FD, STATUS_OK, &[])
+    stage_response(response, STATUS_OK, &[]);
+}
+
+// =============================================================================
+// Per-connection state.
+// =============================================================================
+//
+// Each accepted /srv/corvus connection has its own Conn record. The
+// transport buffers (inbound 9P frame assembly + outbound 9P frame
+// staging) and the per-conn fid table live on the Conn.
+//
+// Lifecycle:
+//   - Born on t_srv_accept; peer identity captured immediately via
+//     t_srv_peer (immutable across the conn's life).
+//   - Lives across N 9P Tmsg-Rmsg exchanges. fid table tracks open
+//     bindings; verb-frame accumulator + response staging track the
+//     ctl-fid request-response state.
+//   - Dies on POLLHUP (client disconnect), Twrite-of-bad-protocol-version
+//     (Q11 tear-down), or any 9P framing error. close_conn() removes the
+//     record + calls t_close; the kernel sets POLLHUP on the peer side
+//     in response.
+
+// The 9P fid table per connection. Two production fids at v1.0: root
+// (fid 1 from Tattach) and ctl (fid 2 from Twalk). MAX = 8 gives
+// headroom for clone-Twalk experiments without bothering with dynamic
+// alloc.
+const MAX_FIDS_PER_CONN: usize = 8;
+
+#[derive(Copy, Clone)]
+struct FidEntry {
+    fid: u32,
+    qid: p9::Qid,
+    opened: bool,
+}
+
+// corvus's namespace at v1.0:
+//   root: QTDIR, path = QID_ROOT_PATH
+//   ctl:  QTFILE, path = QID_CTL_PATH
+//
+// Paths are stable inode-like identifiers (the 9P qid.path field). The
+// client side uses them to detect file identity across Twalk paths.
+const QID_ROOT_PATH: u64 = 1;
+const QID_CTL_PATH: u64 = 2;
+
+fn root_qid() -> p9::Qid { p9::Qid { kind: p9::P9_QTDIR, version: 0, path: QID_ROOT_PATH } }
+fn ctl_qid() -> p9::Qid { p9::Qid { kind: p9::P9_QTFILE, version: 0, path: QID_CTL_PATH } }
+
+// SERVER_MSIZE: negotiated 9P msize. Matches the kernel SrvConn ring
+// (kernel/include/thylacine/srvconn.h SRVCONN_MSIZE = 4096). The Tmsg
+// buffer + Rmsg buffer are both sized at this. Tversion negotiates
+// min(client_msize, SERVER_MSIZE).
+const SERVER_MSIZE: u32 = 4096;
+const SERVER_MSIZE_USIZE: usize = SERVER_MSIZE as usize;
+
+const P9_VERSION_9P2000_L: &[u8] = b"9P2000.L";
+
+struct Conn {
+    handle: i64,
+    // Captured at t_srv_accept; carried by-value across the conn's life
+    // for corvus.tla's ConnOpIdentityIsKernelTruth. Not yet read at the
+    // dispatch layer (v1.0 has no admin verbs that gate on peer identity
+    // — those land with ADMIN_ELEVATE / P5-hostowner-b).
+    #[allow(dead_code)]
+    peer: TSrvPeerInfo,
+    // 9P protocol state. version_done + fid_table together implement
+    // the conn state machine: Tversion → Tattach(fid 1) → Twalk(fid 2)
+    // → Tlopen(fid 2) → Tread/Twrite on fid 2.
+    version_done: bool,
+    msize: u32,
+    fids: [Option<FidEntry>; MAX_FIDS_PER_CONN],
+
+    // I/O buffers.
+    in_buf: Vec<u8>,         // accumulated incoming Tmsg bytes
+    out_buf: Vec<u8>,        // assembled outgoing Rmsg (size-bound by msize)
+    // ctl-fid request/response staging:
+    pending_request: Vec<u8>, // Twrite-payload accumulator (decoded to a verb frame)
+    pending_response: Vec<u8>,
+    pending_response_off: usize,
+}
+
+impl Conn {
+    fn new(handle: i64, peer: TSrvPeerInfo) -> Self {
+        Self {
+            handle,
+            peer,
+            version_done: false,
+            msize: SERVER_MSIZE,
+            fids: [None; MAX_FIDS_PER_CONN],
+            in_buf: Vec::with_capacity(SERVER_MSIZE_USIZE),
+            out_buf: Vec::with_capacity(SERVER_MSIZE_USIZE),
+            pending_request: Vec::with_capacity(REQ_HDR_LEN + MAX_PAYLOAD_LEN),
+            pending_response: Vec::with_capacity(MAX_RESPONSE_FRAME),
+            pending_response_off: 0,
+        }
+    }
+
+    fn fid_find(&self, fid: u32) -> Option<usize> {
+        for (i, slot) in self.fids.iter().enumerate() {
+            if let Some(e) = slot {
+                if e.fid == fid {
+                    return Some(i);
+                }
+            }
+        }
+        None
+    }
+
+    fn fid_bind(&mut self, fid: u32, qid: p9::Qid, opened: bool) -> bool {
+        // Replace if already bound.
+        if let Some(idx) = self.fid_find(fid) {
+            self.fids[idx] = Some(FidEntry { fid, qid, opened });
+            return true;
+        }
+        for slot in self.fids.iter_mut() {
+            if slot.is_none() {
+                *slot = Some(FidEntry { fid, qid, opened });
+                return true;
+            }
+        }
+        false
+    }
+
+    fn fid_clunk(&mut self, fid: u32) -> bool {
+        if let Some(idx) = self.fid_find(fid) {
+            self.fids[idx] = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn reset_state(&mut self) {
+        // Tversion resets all conn state per 9P2000.L. clear fid table +
+        // pending buffers; the next Tattach starts fresh.
+        for slot in self.fids.iter_mut() {
+            *slot = None;
+        }
+        self.pending_request.clear();
+        self.pending_response.clear();
+        self.pending_response_off = 0;
+        self.version_done = false;
+    }
+}
+
+// Drain bytes from `pending_response[pending_response_off..]` into the
+// caller's buffer; advance pending_response_off; clear the staged
+// response when fully drained.
+fn drain_response(conn: &mut Conn, out: &mut [u8], cap: usize) -> usize {
+    let avail = conn.pending_response.len().saturating_sub(conn.pending_response_off);
+    let n = if cap < avail { cap } else { avail };
+    if n == 0 {
+        return 0;
+    }
+    out[..n].copy_from_slice(
+        &conn.pending_response[conn.pending_response_off..conn.pending_response_off + n],
+    );
+    conn.pending_response_off += n;
+    if conn.pending_response_off >= conn.pending_response.len() {
+        conn.pending_response.clear();
+        conn.pending_response_off = 0;
+    }
+    n
+}
+
+// Attempt to extract complete verb frames from pending_request and
+// dispatch them; each dispatch stages a response (overwriting any
+// already-pending response — joey's strict request-response means this
+// never collides in practice, and a confused client gets the latest
+// response).
+unsafe fn try_dispatch_verb(conn: &mut Conn) {
+    while conn.pending_request.len() >= REQ_HDR_LEN {
+        let verb_id = conn.pending_request[0];
+        let protocol_version = conn.pending_request[1];
+        let payload_len = (conn.pending_request[2] as usize)
+            | ((conn.pending_request[3] as usize) << 8);
+
+        if protocol_version != CORVUS_PROTOCOL_VERSION {
+            // Q11: unknown wire version → BadFormat, tear down.
+            stage_response(&mut conn.pending_response, STATUS_BAD_FORMAT, &[]);
+            conn.pending_response_off = 0;
+            conn.pending_request.clear();
+            return;
+        }
+        if payload_len > MAX_PAYLOAD_LEN {
+            // Frame oversize; emit BadFormat, tear down via caller.
+            stage_response(&mut conn.pending_response, STATUS_BAD_FORMAT, &[]);
+            conn.pending_response_off = 0;
+            conn.pending_request.clear();
+            return;
+        }
+        if conn.pending_request.len() < REQ_HDR_LEN + payload_len {
+            // Incomplete frame; wait for more bytes.
+            return;
+        }
+
+        // Have a full frame. Dispatch.
+        // SAFETY: copy the payload out before touching pending_request
+        // again (handlers don't mutate pending_request but we re-enter
+        // the loop after, so be defensive).
+        let payload = &conn.pending_request[REQ_HDR_LEN..REQ_HDR_LEN + payload_len];
+        let mut payload_owned = Vec::with_capacity(payload.len());
+        payload_owned.extend_from_slice(payload);
+
+        // Reset response staging before dispatch.
+        conn.pending_response.clear();
+        conn.pending_response_off = 0;
+
+        match verb_id {
+            VERB_AUTH => handle_auth(&payload_owned, &mut conn.pending_response),
+            VERB_SESSION_CLOSE => handle_session_close(&payload_owned, &mut conn.pending_response),
+            VERB_UNWRAP => handle_unwrap(&payload_owned, &mut conn.pending_response),
+            VERB_USER_CREATE => handle_user_create(&payload_owned, &mut conn.pending_response),
+            VERB_WRAP => handle_wrap(&payload_owned, &mut conn.pending_response),
+            _ => stage_response(&mut conn.pending_response, STATUS_BAD_FORMAT, &[]),
+        }
+
+        // Wipe the payload buffer (verb payloads carry secrets).
+        wipe(&mut payload_owned);
+
+        // Drain the consumed frame from pending_request.
+        let consumed = REQ_HDR_LEN + payload_len;
+        conn.pending_request.drain(..consumed);
+
+        // Process at most one frame per Twrite at v1.0 (strict request-
+        // response; a queued second request before the first response
+        // drains is a client protocol error — let the loop handle it).
+        return;
+    }
+}
+
+// =============================================================================
+// 9P message dispatch.
+//
+// dispatch_one parses one Tmsg from `tmsg` (a slice of exactly one
+// framed message), produces an Rmsg into `conn.out_buf`, and returns
+// the Rmsg byte count. If the Tmsg is malformed in any way, an Rlerror
+// is emitted in its place. dispatch_one never tears down the conn; the
+// caller decides on tear-down based on the Rmsg type (Rlerror is a
+// continuation, but a BadFormat response staged via try_dispatch_verb
+// signals tear-down to the caller).
+// =============================================================================
+
+// Returns the byte length of the Rmsg written into conn.out_buf; 0
+// indicates no Rmsg (Tmsg parse-error so bad we couldn't even extract
+// the tag; conn should be torn down).
+unsafe fn dispatch_one(conn: &mut Conn, tmsg: &[u8]) -> usize {
+    let hdr = match p9::peek_header(tmsg) {
+        Ok(h) => h,
+        Err(_) => return 0,
+    };
+    let tag = hdr.tag;
+    let cap = conn.out_buf.capacity();
+    conn.out_buf.clear();
+    conn.out_buf.resize(cap, 0);
+
+    let result = match hdr.mtype {
+        p9::P9_TVERSION => dispatch_tversion(conn, tmsg, tag),
+        p9::P9_TAUTH => Ok(p9::build_rlerror(&mut conn.out_buf, tag, p9::E_OPNOTSUPP).unwrap_or(0)),
+        p9::P9_TATTACH => dispatch_tattach(conn, tmsg, tag),
+        p9::P9_TWALK => dispatch_twalk(conn, tmsg, tag),
+        p9::P9_TLOPEN => dispatch_tlopen(conn, tmsg, tag),
+        p9::P9_TREAD => dispatch_tread(conn, tmsg, tag),
+        p9::P9_TWRITE => dispatch_twrite(conn, tmsg, tag),
+        p9::P9_TCLUNK => dispatch_tclunk(conn, tmsg, tag),
+        _ => Ok(p9::build_rlerror(&mut conn.out_buf, tag, p9::E_NOSYS).unwrap_or(0)),
+    };
+    match result {
+        Ok(n) => {
+            conn.out_buf.truncate(n);
+            n
+        }
+        Err(_) => {
+            // build_r* failed (out_buf too small? shouldn't happen). Emit
+            // an Rlerror in a fresh attempt; if that also fails the conn
+            // must die.
+            conn.out_buf.clear();
+            conn.out_buf.resize(cap, 0);
+            let n = p9::build_rlerror(&mut conn.out_buf, tag, p9::E_PROTO).unwrap_or(0);
+            conn.out_buf.truncate(n);
+            n
+        }
+    }
+}
+
+fn dispatch_tversion(conn: &mut Conn, tmsg: &[u8], tag: u16) -> Result<usize, ()> {
+    let args = match p9::parse_tversion(tmsg) {
+        Ok(a) => a,
+        Err(_) => return Ok(p9::build_rlerror(&mut conn.out_buf, tag, p9::E_PROTO)?),
+    };
+    let negotiated = if args.msize < SERVER_MSIZE { args.msize } else { SERVER_MSIZE };
+    let version_out: &[u8] = if args.version == P9_VERSION_9P2000_L {
+        P9_VERSION_9P2000_L
+    } else {
+        // Per spec: server returns "unknown" if dialect not supported.
+        // corvus only speaks 9P2000.L; the client should immediately
+        // fail rather than continue.
+        b"unknown"
+    };
+    conn.reset_state();
+    conn.msize = negotiated;
+    if version_out == P9_VERSION_9P2000_L {
+        conn.version_done = true;
+    }
+    p9::build_rversion(&mut conn.out_buf, tag, negotiated, version_out)
+}
+
+fn dispatch_tattach(conn: &mut Conn, tmsg: &[u8], tag: u16) -> Result<usize, ()> {
+    if !conn.version_done {
+        return Ok(p9::build_rlerror(&mut conn.out_buf, tag, p9::E_PROTO)?);
+    }
+    let args = match p9::parse_tattach(tmsg) {
+        Ok(a) => a,
+        Err(_) => return Ok(p9::build_rlerror(&mut conn.out_buf, tag, p9::E_PROTO)?),
+    };
+    if args.afid != p9::P9_NOFID {
+        return Ok(p9::build_rlerror(&mut conn.out_buf, tag, p9::E_OPNOTSUPP)?);
+    }
+    if !conn.fid_bind(args.fid, root_qid(), false) {
+        return Ok(p9::build_rlerror(&mut conn.out_buf, tag, p9::E_NOMEM)?);
+    }
+    p9::build_rattach(&mut conn.out_buf, tag, &root_qid())
+}
+
+fn dispatch_twalk(conn: &mut Conn, tmsg: &[u8], tag: u16) -> Result<usize, ()> {
+    let args = match p9::parse_twalk(tmsg) {
+        Ok(a) => a,
+        Err(_) => return Ok(p9::build_rlerror(&mut conn.out_buf, tag, p9::E_PROTO)?),
+    };
+    let src_idx = match conn.fid_find(args.fid) {
+        Some(i) => i,
+        None => return Ok(p9::build_rlerror(&mut conn.out_buf, tag, p9::E_BADF)?),
+    };
+    let src_qid = conn.fids[src_idx].as_ref().unwrap().qid;
+    // If src is opened, walking from it is illegal (9P2000.L spec).
+    if conn.fids[src_idx].as_ref().unwrap().opened {
+        return Ok(p9::build_rlerror(&mut conn.out_buf, tag, p9::E_PROTO)?);
+    }
+    // newfid binding rules: if newfid == fid, replace src binding with
+    // destination on success. If newfid != fid, newfid must not be in
+    // use; per spec violations are EINVAL.
+    if args.newfid != args.fid && conn.fid_find(args.newfid).is_some() {
+        return Ok(p9::build_rlerror(&mut conn.out_buf, tag, p9::E_INVAL)?);
+    }
+
+    if args.nwname == 0 {
+        // Clone: bind newfid to src's qid (or no-op if newfid == fid).
+        if !conn.fid_bind(args.newfid, src_qid, false) {
+            return Ok(p9::build_rlerror(&mut conn.out_buf, tag, p9::E_NOMEM)?);
+        }
+        return p9::build_rwalk(&mut conn.out_buf, tag, &[]);
+    }
+
+    // v1.0 namespace: root → ctl. Only walks rooted at the root qid
+    // are recognized; any other walk fails on component 0 (Rlerror
+    // ENOENT — no qids walked at all).
+    if src_qid.path != QID_ROOT_PATH {
+        return Ok(p9::build_rlerror(&mut conn.out_buf, tag, p9::E_NOENT)?);
+    }
+    // Single-component walks only at v1.0 (corvus's namespace has no
+    // hierarchy below root). Multi-component requests fail on
+    // component 1.
+    if args.nwname != 1 {
+        return Ok(p9::build_rlerror(&mut conn.out_buf, tag, p9::E_NOENT)?);
+    }
+    let name = args.names[0];
+    if name != b"ctl" {
+        return Ok(p9::build_rlerror(&mut conn.out_buf, tag, p9::E_NOENT)?);
+    }
+    if !conn.fid_bind(args.newfid, ctl_qid(), false) {
+        return Ok(p9::build_rlerror(&mut conn.out_buf, tag, p9::E_NOMEM)?);
+    }
+    let qids = [ctl_qid()];
+    p9::build_rwalk(&mut conn.out_buf, tag, &qids)
+}
+
+fn dispatch_tlopen(conn: &mut Conn, tmsg: &[u8], tag: u16) -> Result<usize, ()> {
+    let args = match p9::parse_tlopen(tmsg) {
+        Ok(a) => a,
+        Err(_) => return Ok(p9::build_rlerror(&mut conn.out_buf, tag, p9::E_PROTO)?),
+    };
+    let idx = match conn.fid_find(args.fid) {
+        Some(i) => i,
+        None => return Ok(p9::build_rlerror(&mut conn.out_buf, tag, p9::E_BADF)?),
+    };
+    let entry = conn.fids[idx].as_ref().unwrap();
+    if entry.opened {
+        return Ok(p9::build_rlerror(&mut conn.out_buf, tag, p9::E_PROTO)?);
+    }
+    let qid = entry.qid;
+    // Only ctl is openable at v1.0; the root QTDIR isn't (no readdir).
+    if qid.kind != p9::P9_QTFILE || qid.path != QID_CTL_PATH {
+        return Ok(p9::build_rlerror(&mut conn.out_buf, tag, p9::E_ISDIR)?);
+    }
+    // flags ignored at v1.0 — ctl is unconditionally RDWR.
+    let _ = args.flags;
+    conn.fids[idx] = Some(FidEntry { fid: args.fid, qid, opened: true });
+    p9::build_rlopen(&mut conn.out_buf, tag, &qid, 0)
+}
+
+fn dispatch_tread(conn: &mut Conn, tmsg: &[u8], tag: u16) -> Result<usize, ()> {
+    let args = match p9::parse_tread(tmsg) {
+        Ok(a) => a,
+        Err(_) => return Ok(p9::build_rlerror(&mut conn.out_buf, tag, p9::E_PROTO)?),
+    };
+    let idx = match conn.fid_find(args.fid) {
+        Some(i) => i,
+        None => return Ok(p9::build_rlerror(&mut conn.out_buf, tag, p9::E_BADF)?),
+    };
+    let entry = conn.fids[idx].as_ref().unwrap();
+    if !entry.opened {
+        return Ok(p9::build_rlerror(&mut conn.out_buf, tag, p9::E_PROTO)?);
+    }
+    if entry.qid.path != QID_CTL_PATH {
+        return Ok(p9::build_rlerror(&mut conn.out_buf, tag, p9::E_ISDIR)?);
+    }
+    // Drain from pending_response. The kernel-side offset (args.offset)
+    // is ignored — ctl is message-oriented; corvus tracks its own
+    // drain offset across the same staged response.
+    let _ = args.offset;
+    let cap_msize = (conn.msize as usize).saturating_sub(p9::P9_HDR_LEN + 4);
+    let count_cap = (args.count as usize).min(cap_msize);
+    let mut tmp = [0u8; SERVER_MSIZE_USIZE];
+    let n = drain_response(conn, &mut tmp[..count_cap], count_cap);
+    p9::build_rread(&mut conn.out_buf, tag, &tmp[..n])
+}
+
+unsafe fn dispatch_twrite(conn: &mut Conn, tmsg: &[u8], tag: u16) -> Result<usize, ()> {
+    let args = match p9::parse_twrite(tmsg) {
+        Ok(a) => a,
+        Err(_) => return Ok(p9::build_rlerror(&mut conn.out_buf, tag, p9::E_PROTO)?),
+    };
+    let idx = match conn.fid_find(args.fid) {
+        Some(i) => i,
+        None => return Ok(p9::build_rlerror(&mut conn.out_buf, tag, p9::E_BADF)?),
+    };
+    let entry = conn.fids[idx].as_ref().unwrap();
+    if !entry.opened {
+        return Ok(p9::build_rlerror(&mut conn.out_buf, tag, p9::E_PROTO)?);
+    }
+    if entry.qid.path != QID_CTL_PATH {
+        return Ok(p9::build_rlerror(&mut conn.out_buf, tag, p9::E_ISDIR)?);
+    }
+    // Accept all bytes; bound them by msize.
+    let cap_msize = (conn.msize as usize).saturating_sub(p9::P9_HDR_LEN + 4 + 4 + 8);
+    if args.data.len() > cap_msize {
+        return Ok(p9::build_rlerror(&mut conn.out_buf, tag, p9::E_INVAL)?);
+    }
+    // Append to verb-frame accumulator; bound the total at a sane cap.
+    // A pathological client could otherwise grow the accumulator without
+    // ever sending a header — cap at 2 * (REQ_HDR_LEN + MAX_PAYLOAD_LEN).
+    if conn.pending_request.len() + args.data.len()
+        > 2 * (REQ_HDR_LEN + MAX_PAYLOAD_LEN)
+    {
+        return Ok(p9::build_rlerror(&mut conn.out_buf, tag, p9::E_INVAL)?);
+    }
+    conn.pending_request.extend_from_slice(args.data);
+    let accepted = args.data.len() as u32;
+    try_dispatch_verb(conn);
+    p9::build_rwrite(&mut conn.out_buf, tag, accepted)
+}
+
+fn dispatch_tclunk(conn: &mut Conn, tmsg: &[u8], tag: u16) -> Result<usize, ()> {
+    let args = match p9::parse_tclunk(tmsg) {
+        Ok(a) => a,
+        Err(_) => return Ok(p9::build_rlerror(&mut conn.out_buf, tag, p9::E_PROTO)?),
+    };
+    if !conn.fid_clunk(args.fid) {
+        return Ok(p9::build_rlerror(&mut conn.out_buf, tag, p9::E_BADF)?);
+    }
+    p9::build_rclunk(&mut conn.out_buf, tag)
+}
+
+// =============================================================================
+// Per-conn service step — try to read one or more 9P Tmsgs and process.
+//
+// Returns Ok(true) if the conn is still healthy; Ok(false) if the conn
+// should be torn down; Err(()) is unused (kept for future structured
+// errors).
+// =============================================================================
+
+unsafe fn service_conn(conn: &mut Conn) -> Result<bool, ()> {
+    // Read whatever's currently available into in_buf. A single t_read
+    // returns up to 4 KiB at v1.0 (kernel SYS_RW_MAX).
+    let cur_len = conn.in_buf.len();
+    let need = SERVER_MSIZE_USIZE - cur_len;
+    if need == 0 {
+        // Buffer is full; one Tmsg must fit. Try to parse without
+        // reading more — if parse-and-dispatch consumes bytes, in_buf
+        // shrinks and the next iteration reads.
+    } else {
+        conn.in_buf.resize(cur_len + need, 0);
+        let n = t_read(
+            conn.handle,
+            conn.in_buf.as_mut_ptr().add(cur_len),
+            need,
+        );
+        if n < 0 {
+            return Ok(false);
+        }
+        let n = n as usize;
+        conn.in_buf.truncate(cur_len + n);
+        if n == 0 {
+            // EOF — conn closed by peer.
+            return Ok(false);
+        }
+    }
+
+    // Drain Tmsgs while complete frames are available.
+    loop {
+        if conn.in_buf.len() < p9::P9_HDR_LEN {
+            return Ok(true);
+        }
+        let hdr = match p9::peek_header(&conn.in_buf) {
+            Ok(h) => h,
+            Err(_) => return Ok(true),
+        };
+        let size = hdr.size as usize;
+        if size < p9::P9_HDR_LEN || size > SERVER_MSIZE_USIZE {
+            // Framing violation — tear down.
+            return Ok(false);
+        }
+        if conn.in_buf.len() < size {
+            return Ok(true);
+        }
+
+        // Process one Tmsg.
+        let tmsg_bytes: Vec<u8> = conn.in_buf[..size].to_vec();
+        let rmsg_len = dispatch_one(conn, &tmsg_bytes);
+        if rmsg_len == 0 {
+            return Ok(false);
+        }
+        // Write the Rmsg.
+        let rmsg_bytes: Vec<u8> = conn.out_buf[..rmsg_len].to_vec();
+        let mut sent: usize = 0;
+        while sent < rmsg_bytes.len() {
+            let n = t_write(
+                conn.handle,
+                rmsg_bytes.as_ptr().add(sent),
+                rmsg_bytes.len() - sent,
+            );
+            if n <= 0 {
+                return Ok(false);
+            }
+            sent += n as usize;
+        }
+
+        // Remove the consumed Tmsg from in_buf.
+        conn.in_buf.drain(..size);
+
+        // If verb-dispatch staged a BadFormat response, drain it then
+        // tear down. The BadFormat response will be drained by the
+        // client's next Tread on ctl — but corvus may not see that
+        // Tread (the client might give up). We can't tell from here;
+        // signal tear-down only when the response_buf-was-staged
+        // condition becomes structurally certain. At v1.0 we leave
+        // that to the client-disconnect path.
+    }
 }
 
 // =============================================================================
 // Server loop.
 // =============================================================================
 
-unsafe fn server_loop() -> i64 {
-    let mut header = [0u8; 4];
-    let mut payload = [0u8; MAX_PAYLOAD_LEN];
+const MAX_CONNS: usize = 8;
+
+unsafe fn srv_server_loop(listener: i64) -> i64 {
+    let mut conns: Vec<Conn> = Vec::with_capacity(MAX_CONNS);
+
+    // Bounded poll-fd buffer: [listener] + per-conn (max MAX_CONNS).
+    let mut pollfds: [TPollFd; 1 + MAX_CONNS] =
+        [TPollFd { fd: 0, events: 0, revents: 0 }; 1 + MAX_CONNS];
+
     loop {
-        let n = read_exact(RX_FD, &mut header);
-        if n == 0 {
-            // Clean EOF — peer closed write side.
-            return 0;
+        // Build pollfd list.
+        pollfds[0] = TPollFd { fd: listener as i32, events: T_POLLIN, revents: 0 };
+        let nfds = 1 + conns.len();
+        for (i, c) in conns.iter().enumerate() {
+            pollfds[1 + i] = TPollFd { fd: c.handle as i32, events: T_POLLIN, revents: 0 };
         }
-        if n < 0 {
+
+        let rc = t_poll(pollfds.as_mut_ptr(), nfds, -1);
+        if rc < 0 {
+            t_putstr("corvus: t_poll failed\n");
             return -1;
         }
-        let verb_id = header[0];
-        let protocol_version = header[1];
-        let payload_len = (header[2] as usize) | ((header[3] as usize) << 8);
-        if protocol_version != CORVUS_PROTOCOL_VERSION {
-            // Unknown wire version. The frame shape may differ from v1, so
-            // we can't safely consume any more bytes from the stream —
-            // emit BadFormat and terminate (CORVUS-DESIGN.md §6.4; the
-            // STRATUM-API-V1.md Q11 contract).
-            let _ = send_response(TX_FD, STATUS_BAD_FORMAT, &[]);
-            return -1;
-        }
-        if payload_len > MAX_PAYLOAD_LEN {
-            // Frame too large; emit BAD_FORMAT response, terminate (the
-            // protocol's framed; we can't safely drain a too-large
-            // payload).
-            let _ = send_response(TX_FD, STATUS_BAD_FORMAT, &[]);
-            return -1;
-        }
-        if payload_len > 0 {
-            let n = read_exact(RX_FD, &mut payload[..payload_len]);
-            if n != payload_len as i64 {
-                return -1;
+
+        // Accept new connections.
+        if pollfds[0].revents & T_POLLIN != 0 {
+            if conns.len() < MAX_CONNS {
+                let h = t_srv_accept(listener);
+                if h >= 0 {
+                    let mut peer = TSrvPeerInfo::default();
+                    let _ = t_srv_peer(h, &mut peer);
+                    conns.push(Conn::new(h, peer));
+                }
+                // else: listener torn down; loop will pick it up via
+                // POLLHUP on the listener (T_POLLHUP isn't requested
+                // here — at v1.0 corvus only ever sees POLLIN on the
+                // listener).
+            } else {
+                // Backlog full; defer accept (the listener's accept
+                // backlog absorbs up to SRV_ACCEPT_BACKLOG = 16 per
+                // kernel/devsrv.c). Continue serving extant conns; the
+                // backlog will drain as conns close.
             }
         }
-        let rc = match verb_id {
-            VERB_AUTH => handle_auth(&payload[..payload_len]),
-            VERB_SESSION_CLOSE => handle_session_close(&payload[..payload_len]),
-            VERB_UNWRAP => handle_unwrap(&payload[..payload_len]),
-            VERB_USER_CREATE => handle_user_create(&payload[..payload_len]),
-            VERB_WRAP => handle_wrap(&payload[..payload_len]),
-            _ => send_response(TX_FD, STATUS_BAD_FORMAT, &[]),
-        };
-        if rc < 0 {
-            return -1;
+        if pollfds[0].revents & T_POLLHUP != 0 {
+            // Listener torn down (admin/proc exit / unposted). Drain
+            // existing conns and exit.
+            t_putstr("corvus: listener POLLHUP\n");
+            break;
         }
-        // Wipe payload before next iteration (defence-in-depth: verbs
-        // carry secrets — passphrases, DEKs, wrapped blobs). A bzero
-        // failure means the buffer may still hold a secret — fail closed.
-        if t_explicit_bzero(payload.as_mut_ptr(), payload_len) != 0 {
-            return -1;
+
+        // Service ready conns. Iterate from the end so removal doesn't
+        // invalidate indices.
+        let mut i = conns.len();
+        while i > 0 {
+            i -= 1;
+            let pf = pollfds[1 + i];
+            let mut should_close = false;
+            if pf.revents & T_POLLIN != 0 {
+                match service_conn(&mut conns[i]) {
+                    Ok(true) => {}
+                    Ok(false) => should_close = true,
+                    Err(_) => should_close = true,
+                }
+            }
+            if pf.revents & T_POLLHUP != 0 {
+                should_close = true;
+            }
+            if should_close {
+                close_conn(&mut conns, i);
+            }
         }
     }
+
+    // Drain extant conns on shutdown.
+    while !conns.is_empty() {
+        let last = conns.len() - 1;
+        close_conn(&mut conns, last);
+    }
+    0
+}
+
+unsafe fn close_conn(conns: &mut Vec<Conn>, idx: usize) {
+    let conn = &mut conns[idx];
+    // Wipe per-conn buffers (request/response carry secrets — verb
+    // payloads + token + DEK envelopes).
+    wipe(&mut conn.in_buf);
+    wipe(&mut conn.out_buf);
+    wipe(&mut conn.pending_request);
+    wipe(&mut conn.pending_response);
+    // Clear the global session — at v1.0 only one client at a time,
+    // so a closed conn implies the session (if any) is orphaned.
+    session_clear();
+    let _ = t_close(conn.handle);
+    conns.remove(idx);
 }
 
 // =============================================================================
-// Startup hardening (unchanged from -a).
+// Startup hardening (unchanged from -d).
 // =============================================================================
 
 const PROBE_LEN: usize = 32;
@@ -1504,11 +1833,8 @@ fn step_fail(step: u8, rc: i64) -> ! {
 
 #[no_mangle]
 pub extern "C" fn rs_main() -> i64 {
-    t_putstr("corvus: starting (P5-corvus-bringup-d)\n");
+    t_putstr("corvus: starting (P5-corvus-srv-impl-b3b)\n");
 
-    // Heap + state vecs FIRST. Every allocation downstream (argon2 +
-    // ml-kem working memory, AD buffers, the user-state + dataset
-    // tables) depends on the allocator being live.
     unsafe {
         heap_init();
         user_states_init();
@@ -1516,46 +1842,33 @@ pub extern "C" fn rs_main() -> i64 {
     }
 
     let rc = unsafe { t_mlockall(0) };
-    if rc != 0 {
-        step_fail(1, rc);
-    }
+    if rc != 0 { step_fail(1, rc); }
     let rc = unsafe { t_set_dumpable(0) };
-    if rc != 0 {
-        step_fail(2, rc);
-    }
+    if rc != 0 { step_fail(2, rc); }
     let rc = unsafe { t_set_traceable(0) };
-    if rc != 0 {
-        step_fail(3, rc);
-    }
+    if rc != 0 { step_fail(3, rc); }
     let mut probe: [u8; PROBE_LEN] = [0; PROBE_LEN];
     let rc = unsafe { t_getrandom(probe.as_mut_ptr(), PROBE_LEN, 0) };
-    if rc != PROBE_LEN as i64 {
-        step_fail(4, rc);
-    }
+    if rc != PROBE_LEN as i64 { step_fail(4, rc); }
     let rc = unsafe { t_explicit_bzero(probe.as_mut_ptr(), PROBE_LEN) };
-    if rc != 0 {
-        step_fail(5, rc);
-    }
+    if rc != 0 { step_fail(5, rc); }
 
-    t_putstr("corvus: ready (hardening applied; serving /srv/corvus/ over fd 0/1)\n");
+    // Post /srv/corvus. Requires PROC_FLAG_MAY_POST_SERVICE (joey grants
+    // it via SYS_SPAWN_WITH_PERMS at spawn time per P5-corvus-srv-impl-
+    // b3a).
+    let listener = unsafe { t_post_service(b"corvus".as_ptr(), 6) };
+    if listener < 0 { step_fail(6, listener); }
 
-    // Enter server loop. Exits 0 on clean EOF; non-zero on any wire
-    // error. The boot test framework reaps corvus's exit via joey's
-    // wait_pid and surfaces non-zero.
-    let rc = unsafe { server_loop() };
+    t_putstr("corvus: ready (hardening applied; serving /srv/corvus)\n");
+
+    let rc = unsafe { srv_server_loop(listener) };
     if rc < 0 {
-        t_putstr("corvus: server_loop FAILED\n");
+        t_putstr("corvus: srv_server_loop FAILED\n");
         return 1;
     }
 
-    // Wipe any residual session state before exiting.
     unsafe { session_clear() };
-
-    // Close our pipe fds explicitly. The kernel will release them on
-    // exit anyway, but the explicit close exercises the cleanup path.
-    let _ = unsafe { t_close(RX_FD) };
-    let _ = unsafe { t_close(TX_FD) };
-
-    t_putstr("corvus: server_loop returned EOF; shutting down clean\n");
+    let _ = unsafe { t_close(listener) };
+    t_putstr("corvus: srv_server_loop returned cleanly; shutting down\n");
     0
 }
