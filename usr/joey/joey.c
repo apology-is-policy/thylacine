@@ -69,19 +69,24 @@ static int read_exact(long fd, unsigned char *buf, size_t len) {
     return 0;
 }
 
-// corvus_exchange — write a [verb|len|payload] frame, read the response.
-// On transport success returns 0 and fills *status + *resp_len; the
-// response payload lands in rx[3 .. 3+*resp_len]. -1 on transport error.
+// corvus_exchange — write a [verb|version|len_lo|len_hi|payload] request
+// frame (4-byte header per CORVUS-DESIGN.md §6.4 + STRATUM-API-V1.md Q11),
+// read a [status|len_lo|len_hi|payload] response frame (3-byte header —
+// responses carry no version byte). On transport success returns 0 and
+// fills *status + *resp_len; the response payload lands in
+// rx[3 .. 3+*resp_len]. -1 on transport error.
+#define CORVUS_PROTOCOL_VERSION 1
 static int corvus_exchange(long wfd, long rfd,
                            unsigned char verb,
                            const unsigned char *payload, size_t payload_len,
                            unsigned char *rx, size_t rx_cap,
                            unsigned char *status, size_t *resp_len) {
-    unsigned char hdr[3];
+    unsigned char hdr[4];
     hdr[0] = verb;
-    hdr[1] = (unsigned char)(payload_len & 0xff);
-    hdr[2] = (unsigned char)(payload_len >> 8);
-    if (write_all(wfd, hdr, 3) != 0) return -1;
+    hdr[1] = CORVUS_PROTOCOL_VERSION;
+    hdr[2] = (unsigned char)(payload_len & 0xff);
+    hdr[3] = (unsigned char)(payload_len >> 8);
+    if (write_all(wfd, hdr, 4) != 0) return -1;
     if (payload_len > 0 && write_all(wfd, payload, payload_len) != 0) return -1;
     if (read_exact(rfd, rx, 3) != 0) return -1;
     *status = rx[0];

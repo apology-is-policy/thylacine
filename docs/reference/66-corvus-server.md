@@ -14,9 +14,12 @@ Per CORVUS-DESIGN.md §6.4.
 
 ```
 offset 0     verb_id           u8
-offset 1     payload_len       u16 little-endian
-offset 3..   payload           verb-specific
+offset 1     protocol_version  u8   = 1   (STRATUM-API-V1.md Q11)
+offset 2     payload_len       u16 little-endian
+offset 4..   payload           verb-specific
 ```
+
+A frame carrying `protocol_version != 1` is refused with `BadFormat` and the connection terminates — the frame's shape may change across versions, so the stream cannot be safely re-synced. Landed at P5-corvus-srv-impl-b1 (was a 3-byte header at -b through -d).
 
 ### Response frame
 
@@ -79,9 +82,10 @@ Spec correspondence (specs/corvus.tla):
 ## Server loop
 
 ```
-read_exact 3-byte header from fd 0
+read_exact 4-byte header from fd 0
   ↓ if EOF → exit 0
-  ↓ parse verb_id + payload_len
+  ↓ parse verb_id + protocol_version + payload_len
+  ↓ refuse protocol_version != CORVUS_PROTOCOL_VERSION (BadFormat + terminate)
   ↓ refuse payload_len > MAX_PAYLOAD_LEN
 read_exact `payload_len` bytes
 dispatch by verb_id:

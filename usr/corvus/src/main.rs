@@ -722,6 +722,13 @@ const VERB_UNWRAP: u8 = 4;
 const VERB_USER_CREATE: u8 = 5;
 const VERB_WRAP: u8 = 10;
 
+// Stratum↔corvus wire version. STRATUM-API-V1.md Q11 resolved to a 4-byte
+// request header carrying this byte at offset 1; an unknown value is
+// BadFormat-then-terminate (the frame's shape may change across versions
+// so a length-mismatched body would re-sync the stream nowhere safe).
+// Stratum's UNWRAP / WRAP encoders emit `= 1`; corvus's decoder demands it.
+const CORVUS_PROTOCOL_VERSION: u8 = 1;
+
 const STATUS_OK: u8 = 0;
 const STATUS_BAD_AUTH: u8 = 1;
 const STATUS_PERMISSION_DENIED: u8 = 2;
@@ -1414,7 +1421,7 @@ unsafe fn handle_session_close(payload: &[u8]) -> i64 {
 // =============================================================================
 
 unsafe fn server_loop() -> i64 {
-    let mut header = [0u8; 3];
+    let mut header = [0u8; 4];
     let mut payload = [0u8; MAX_PAYLOAD_LEN];
     loop {
         let n = read_exact(RX_FD, &mut header);
@@ -1426,7 +1433,16 @@ unsafe fn server_loop() -> i64 {
             return -1;
         }
         let verb_id = header[0];
-        let payload_len = (header[1] as usize) | ((header[2] as usize) << 8);
+        let protocol_version = header[1];
+        let payload_len = (header[2] as usize) | ((header[3] as usize) << 8);
+        if protocol_version != CORVUS_PROTOCOL_VERSION {
+            // Unknown wire version. The frame shape may differ from v1, so
+            // we can't safely consume any more bytes from the stream —
+            // emit BadFormat and terminate (CORVUS-DESIGN.md §6.4; the
+            // STRATUM-API-V1.md Q11 contract).
+            let _ = send_response(TX_FD, STATUS_BAD_FORMAT, &[]);
+            return -1;
+        }
         if payload_len > MAX_PAYLOAD_LEN {
             // Frame too large; emit BAD_FORMAT response, terminate (the
             // protocol's framed; we can't safely drain a too-large
