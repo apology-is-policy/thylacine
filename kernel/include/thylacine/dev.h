@@ -39,6 +39,7 @@
 struct Spoor;
 struct Walkqid;
 struct Block;       // 9P-style block I/O carrier; defined when bread/bwrite-using devs land
+struct poll_waiter; // <thylacine/poll.h>; the hook a polling thread installs on .poll
 
 // The Plan 9 Dev vtable. ARCH §9.2 verbatim with C99 const additions on
 // input strings (read-only inputs that were `char *` in 9front; we
@@ -92,6 +93,20 @@ struct Dev {
     struct Block  *(*bread)(struct Spoor *c, long n, s64 off);
     long           (*write)(struct Spoor *c, const void *buf, long n, s64 off);
     long           (*bwrite)(struct Spoor *c, struct Block *bp, s64 off);
+
+    // Readiness probe — the SYS_POLL plumbing (§23.3; specs/poll.tla).
+    //   poll(c, events, pw)
+    //     Returns the subset of `events` currently ready on c. If `pw`
+    //     is non-NULL, atomically registers it on the object's poll-
+    //     hook list under the object's own lock — the load-bearing
+    //     register-then-observe step. If `pw` is NULL the call is
+    //     sample-only (the post-wake re-scan).
+    //
+    // A NULL .poll slot means the fd is always ready for the requested
+    // events — the POSIX-correct answer for a regular file. Only Devs
+    // with genuine readiness state (devpipe at v1.0; devsrv at
+    // P5-poll-b) implement a real .poll.
+    short         (*poll)(struct Spoor *c, short events, struct poll_waiter *pw);
 
     // Admin.
     //   remove — delete the file represented by c.

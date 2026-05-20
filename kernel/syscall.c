@@ -22,6 +22,7 @@
 #include <thylacine/irqfwd.h>
 #include <thylacine/mmio_handle.h>
 #include <thylacine/pipe.h>
+#include <thylacine/poll.h>
 #include <thylacine/proc.h>
 #include <thylacine/random.h>
 #include <thylacine/spoor.h>
@@ -1957,6 +1958,81 @@ static s64 sys_srv_peer_handler(u64 conn_h_raw, u64 out_va) {
 }
 
 // =============================================================================
+// SYS_POLL — the multi-fd wait/wake primitive (P5-poll-a).
+//
+// Per ARCH §23.3 + specs/poll.tla + <thylacine/poll.h>. The user
+// passes a `struct pollfd[nfds]` array via user-VA; the handler copies
+// the array in (so `fd` + `events` are read once before any sleep),
+// hands it to `sys_poll_for_proc`, and writes back the `revents`
+// field of each pollfd. The unchanged `fd`/`events` bytes are not
+// rewritten — only `revents` (the kernel's output) crosses back to
+// user-VA. On a partial-write fault, already-written revents bytes
+// are scrubbed to 0 so userspace can never observe a torn revents
+// state.
+// =============================================================================
+
+static s64 sys_poll_handler(u64 fds_va, u64 nfds_raw, u64 timeout_ms_raw) {
+    struct Thread *t = current_thread();
+    if (!t)                                                  return -1;
+    struct Proc *p = t->proc;
+    if (!p)                                                  return -1;
+
+    // nfds bound — same as the testable core's check, but also the
+    // stack-array bound on `kfds[]` below. Reject before touching
+    // user-VA.
+    if (nfds_raw == 0 || nfds_raw > PROC_HANDLE_MAX)         return -1;
+    u64 nfds = nfds_raw;
+
+    // User-VA range check on the entire pollfd[] array.
+    u64 buf_bytes = nfds * sizeof(struct pollfd);
+    if (!sys_validate_user_buf(fds_va, buf_bytes))           return -1;
+
+    // Copy in: read all 8 bytes per pollfd. The kfds[] array is the
+    // canonical fd+events the kernel operates on; this snapshot is
+    // taken once at entry so the values can't change mid-sleep under
+    // a concurrent userspace mutation.
+    struct pollfd kfds[PROC_HANDLE_MAX];
+    u8 *kbytes = (u8 *)kfds;
+    for (u64 i = 0; i < buf_bytes; i++) {
+        if (uaccess_load_u8(fds_va + i, &kbytes[i]) != 0)    return -1;
+    }
+
+    // s32 cast for timeout — Linux semantics: negative = block forever,
+    // 0 = non-blocking, positive = ms. The raw u64 we get from x2
+    // truncates to s32 here.
+    s32 timeout_ms = (s32)(s64)timeout_ms_raw;
+
+    s64 result = sys_poll_for_proc(p, kfds, nfds, timeout_ms);
+    if (result < 0) return result;
+
+    // Write back: only the `revents` field (2 bytes at offset 6 per
+    // pollfd). Per-byte uaccess_store_u8 with fault fixup; on a partial
+    // fault, scrub the bytes already written back to zero so userspace
+    // can't observe a torn revents (sys_srv_peer_handler pattern).
+    for (u64 i = 0; i < nfds; i++) {
+        u64 rev_va  = fds_va + i * sizeof(struct pollfd)
+                              + __builtin_offsetof(struct pollfd, revents);
+        const u8 *rb = (const u8 *)&kfds[i].revents;
+        for (u64 j = 0; j < sizeof(kfds[i].revents); j++) {
+            if (uaccess_store_u8(rev_va + j, rb[j]) != 0) {
+                // Scrub everything we've written so far — this pollfd
+                // plus every earlier one.
+                for (u64 ii = 0; ii <= i; ii++) {
+                    u64 sva = fds_va + ii * sizeof(struct pollfd)
+                                       + __builtin_offsetof(struct pollfd, revents);
+                    u64 lim = (ii == i) ? j : sizeof(kfds[ii].revents);
+                    for (u64 jj = 0; jj < lim; jj++) {
+                        (void)uaccess_store_u8(sva + jj, 0);
+                    }
+                }
+                return -1;
+            }
+        }
+    }
+    return result;
+}
+
+// =============================================================================
 // Dispatch entry.
 // =============================================================================
 
@@ -2122,6 +2198,12 @@ void syscall_dispatch(struct exception_context *ctx) {
     case SYS_SRV_PEER:
         ctx->regs[0] = (u64)sys_srv_peer_handler(ctx->regs[0],
                                                  ctx->regs[1]);
+        return;
+
+    case SYS_POLL:
+        ctx->regs[0] = (u64)sys_poll_handler(ctx->regs[0],
+                                             ctx->regs[1],
+                                             ctx->regs[2]);
         return;
 
     default:

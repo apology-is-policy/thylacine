@@ -1,4 +1,5 @@
-// Kernel pipe — connected Spoor pair over a shared ring buffer (P5-pipe).
+// Kernel pipe — connected Spoor pair over a shared ring buffer
+// (P5-pipe-blocking; .poll added at P5-poll-a).
 //
 // Per ARCH §10.3 + docs/reference/51-pipe.md. The ring is a fixed-size
 // PIPE_BUF_SIZE buffer (4 KiB; POSIX PIPE_BUF guarantee) with separate
@@ -6,15 +7,17 @@
 // per-endpoint `struct pipe_endpoint` aux records; the Dev vtable
 // dispatches based on each endpoint's `is_read_end` flag.
 //
-// v1.0 is single-CPU, non-blocking, and synchronous. No locking, no
-// wait/wake. Concurrent multi-CPU access lands at P5-pipe-blocking;
-// the rendez integration there will close ARCH §28 I-9 (missed-wakeup
-// freedom) by composing with `specs/scheduler.tla`'s wait/wake state
-// machine.
+// Wait/wake: the ring carries `read_rendez` / `write_rendez` for the
+// single-waiter reader/writer paths (specs/pipe.tla NoStuckReader /
+// NoStuckWriter). A `poll_list` on the ring is the multi-fd poller
+// callback set — populated by devpipe_poll, walked under r->lock at
+// every readiness mutation (data arrival, EOF). specs/poll.tla
+// MakeReady ↔ poll_waiter_list_wake calls below.
 
 #include <thylacine/dev.h>
 #include <thylacine/extinction.h>
 #include <thylacine/pipe.h>
+#include <thylacine/poll.h>
 #include <thylacine/rendez.h>
 #include <thylacine/spinlock.h>
 #include <thylacine/spoor.h>
@@ -27,17 +30,18 @@
 // =============================================================================
 
 struct pipe_ring {
-    u32             magic;          // PIPE_RING_MAGIC
-    int             ref;            // 2 at creation; per-endpoint close drops by 1
-    size_t          count;          // bytes in buffer; 0..PIPE_BUF_SIZE
-    size_t          head;           // next write position; mod PIPE_BUF_SIZE
-    size_t          tail;           // next read position; mod PIPE_BUF_SIZE
-    bool            read_eof;       // read end closed → writes return -1 (EPIPE)
-    bool            write_eof;      // write end closed → reads return 0 (EOF)
-    spin_lock_t     lock;           // protects count/head/tail/{read,write}_eof
-    struct Rendez   read_rendez;    // single reader sleeps here on empty
-    struct Rendez   write_rendez;   // single writer sleeps here on full
-    u8              buf[PIPE_BUF_SIZE];
+    u32                       magic;          // PIPE_RING_MAGIC
+    int                       ref;            // 2 at creation; per-endpoint close drops by 1
+    size_t                    count;          // bytes in buffer; 0..PIPE_BUF_SIZE
+    size_t                    head;           // next write position; mod PIPE_BUF_SIZE
+    size_t                    tail;           // next read position; mod PIPE_BUF_SIZE
+    bool                      read_eof;       // read end closed → writes return -1 (EPIPE)
+    bool                      write_eof;      // write end closed → reads return 0 (EOF)
+    spin_lock_t               lock;           // protects count/head/tail/{read,write}_eof
+    struct Rendez             read_rendez;    // single reader sleeps here on empty
+    struct Rendez             write_rendez;   // single writer sleeps here on full
+    struct poll_waiter_list   poll_list;      // P5-poll-a: pollers registered for any readiness change
+    u8                        buf[PIPE_BUF_SIZE];
 };
 
 struct pipe_endpoint {
@@ -46,7 +50,7 @@ struct pipe_endpoint {
     bool               is_read_end;
 };
 
-// 72 bytes header — derived layout:
+// 88 bytes header — derived layout (16 B added at P5-poll-a for poll_list):
 //   offset  0:  u32  magic           (4)
 //   offset  4:  int  ref             (4)
 //   offset  8:  size_t count         (8)
@@ -58,9 +62,10 @@ struct pipe_endpoint {
 //   offset 36:  spin_lock_t lock     (4; u32)
 //   offset 40:  struct Rendez read_rendez  (16: spin_lock+pad+Thread*)
 //   offset 56:  struct Rendez write_rendez (16)
-//   offset 72:  u8 buf[PIPE_BUF_SIZE]
-_Static_assert(sizeof(struct pipe_ring) == 72 + PIPE_BUF_SIZE,
-               "pipe_ring size pinned (72-byte header + 4 KiB buf)");
+//   offset 72:  struct poll_waiter_list poll_list  (16: spin_lock+pad+ptr)
+//   offset 88:  u8 buf[PIPE_BUF_SIZE]
+_Static_assert(sizeof(struct pipe_ring) == 88 + PIPE_BUF_SIZE,
+               "pipe_ring size pinned (88-byte header + 4 KiB buf)");
 
 // The ring is ~4 KiB — above the SLUB max-object threshold, so kmalloc
 // routes it through alloc_pages (same path the p9_client uses). The
@@ -219,6 +224,11 @@ static void devpipe_close(struct Spoor *c) {
         spin_unlock(&r->lock);
         wakeup(&r->read_rendez);
     }
+    // P5-poll-a: closing either end is a readiness edge — the surviving
+    // end becomes POLLHUP-ready (read end) or POLLERR-ready (write end).
+    // poll_waiter_list_wake walks every registered poller; the poller's
+    // post-wake .poll sample picks up the new EOF flag.
+    poll_waiter_list_wake(&r->poll_list);
 
     // Drop this endpoint's ring ref. When both endpoints have been
     // closed, the ring is freed.
@@ -267,7 +277,13 @@ static long devpipe_read(struct Spoor *c, void *buf, long n, s64 off) {
         if (r->count > 0) {
             long got = ring_read(r, (u8 *)buf, n);
             spin_unlock(&r->lock);
-            if (got > 0) wakeup(&r->write_rendez);
+            if (got > 0) {
+                wakeup(&r->write_rendez);
+                // A drained ring may have just become POLLOUT-ready for
+                // a poller registered on the write end. Wake every
+                // poller; their post-wake .poll re-sample filters.
+                poll_waiter_list_wake(&r->poll_list);
+            }
             return got;
         }
         if (r->write_eof) {
@@ -305,7 +321,12 @@ static long devpipe_write(struct Spoor *c, const void *buf, long n, s64 off) {
         if (r->count < PIPE_BUF_SIZE) {
             long put = ring_write(r, (const u8 *)buf, n);
             spin_unlock(&r->lock);
-            if (put > 0) wakeup(&r->read_rendez);
+            if (put > 0) {
+                wakeup(&r->read_rendez);
+                // A non-empty ring has just become POLLIN-ready for any
+                // poller registered on the read end.
+                poll_waiter_list_wake(&r->poll_list);
+            }
             return put;
         }
         spin_unlock(&r->lock);
@@ -321,6 +342,47 @@ static struct Block *devpipe_bread(struct Spoor *c, long n, s64 off) {
 static long devpipe_bwrite(struct Spoor *c, struct Block *bp, s64 off) {
     (void)c; (void)bp; (void)off;
     return -1;
+}
+
+// Compute the current revents bitmask for endpoint `p` on ring `r` under
+// r->lock. Filters POLLIN/POLLOUT by `events`; output-only POLLHUP/POLLERR
+// always returned. The read-end gets POLLIN when bytes are buffered and
+// POLLHUP when the write side has closed (matching cond_can_read's two
+// wake conditions). The write-end gets POLLOUT when space is available
+// and POLLERR when the read side has closed (the EPIPE condition).
+static short devpipe_revents_under_lock(struct pipe_ring *r,
+                                        struct pipe_endpoint *p,
+                                        short events) {
+    short revents = 0;
+    if (p->is_read_end) {
+        if (r->count > 0)     revents |= POLLIN;
+        if (r->write_eof)     revents |= POLLHUP;
+    } else {
+        if (!r->read_eof && r->count < PIPE_BUF_SIZE) revents |= POLLOUT;
+        if (r->read_eof)      revents |= POLLERR;
+    }
+    // POSIX: POLLIN/POLLOUT only set when requested; POLLERR/POLLHUP/
+    // POLLNVAL always returned regardless of `events`.
+    return (short)((revents & (events | POLL_OUTPUT_ONLY)));
+}
+
+// .poll — register-then-observe per specs/poll.tla. Takes r->lock,
+// computes revents from the current ring state, and (if pw != NULL)
+// registers pw on r->poll_list — atomic with the sample under r->lock.
+// pw == NULL is the post-wake sample-only call.
+static short devpipe_poll(struct Spoor *c, short events,
+                          struct poll_waiter *pw) {
+    struct pipe_endpoint *p = priv_of(c);
+    if (!p || !p->ring) return POLLERR;
+    struct pipe_ring *r = p->ring;
+
+    spin_lock(&r->lock);
+    short revents = devpipe_revents_under_lock(r, p, events);
+    if (pw) {
+        poll_waiter_list_register(&r->poll_list, pw);
+    }
+    spin_unlock(&r->lock);
+    return revents;
 }
 
 static void devpipe_remove(struct Spoor *c) { (void)c; }
@@ -345,6 +407,7 @@ struct Dev devpipe = {
     .bread    = devpipe_bread,
     .write    = devpipe_write,
     .bwrite   = devpipe_bwrite,
+    .poll     = devpipe_poll,
     .remove   = devpipe_remove,
     .wstat    = devpipe_wstat,
     .power    = devpipe_power,
@@ -394,6 +457,7 @@ int pipe_create(struct Spoor **out_read_end, struct Spoor **out_write_end) {
     spin_lock_init(&r->lock);
     rendez_init(&r->read_rendez);
     rendez_init(&r->write_rendez);
+    poll_waiter_list_init(&r->poll_list);
     // buf[] already zero from KP_ZERO.
 
     struct pipe_endpoint *rd_priv = kmem_cache_alloc(g_endpoint_cache, KP_ZERO);

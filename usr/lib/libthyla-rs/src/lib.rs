@@ -53,6 +53,18 @@ pub const T_SYS_SET_TRACEABLE: u64   = 18;
 pub const T_SYS_EXPLICIT_BZERO: u64  = 19;
 pub const T_SYS_GETRANDOM: u64       = 20;
 pub const T_SYS_SPAWN_FULL: u64      = 25;
+// P5-poll-a: the multi-fd wait/wake primitive. Backs corvus's main loop
+// (a single thread serving N /srv/corvus connections) and the future
+// musl `poll(2)` shim. ABI matches Linux event values for shim triviality.
+pub const T_SYS_POLL: u64            = 29;
+
+// poll event bits — MUST mirror POLL* in kernel/include/thylacine/poll.h.
+// Linux values; the future musl shim is a no-op.
+pub const T_POLLIN: i16   = 0x001;
+pub const T_POLLOUT: i16  = 0x004;
+pub const T_POLLERR: i16  = 0x008;
+pub const T_POLLHUP: i16  = 0x010;
+pub const T_POLLNVAL: i16 = 0x020;
 
 // =============================================================================
 // Caps — MUST mirror CAP_* bits in kernel/include/thylacine/caps.h.
@@ -333,6 +345,47 @@ pub unsafe fn t_write(fd: i64, buf: *const u8, len: usize) -> i64 {
         in("x1") buf as u64,
         in("x2") len as u64,
         in("x8") T_SYS_WRITE,
+        options(nostack)
+    );
+    x0
+}
+
+// pollfd — userspace ABI of SYS_POLL. The kernel struct pollfd is
+// `{ i32 fd; i16 events; i16 revents }` (8 bytes). `#[repr(C)]` pins
+// the layout; the static asserts in <thylacine/poll.h> pin the kernel
+// side. fd is an i32 handle index; events is a bitmask of T_POLL*;
+// revents is kernel-filled.
+#[repr(C)]
+#[derive(Copy, Clone, Default, Debug)]
+pub struct TPollFd {
+    pub fd: i32,
+    pub events: i16,
+    pub revents: i16,
+}
+
+// t_poll — block until at least one of `fds` (a slice of `TPollFd`)
+// becomes ready, or `timeout_ms` elapses. `timeout_ms`:
+//   < 0 → block indefinitely (poll(-1));
+//   = 0 → return immediately after the first scan (non-blocking probe);
+//   > 0 → block for at most `timeout_ms` milliseconds.
+//
+// Returns the number of pollfds with `revents != 0` (≥ 0), or -1 on
+// error (nfds == 0 or > 64, or fds points outside user-VA).
+//
+// `nfds` is bounded by the kernel at PROC_HANDLE_MAX (64). The kernel
+// writes `revents` back to each pollfd in `fds` in place.
+//
+// Safety: `fds` must point to `nfds` writable `TPollFd` records in
+// valid user-VA memory.
+#[inline(always)]
+pub unsafe fn t_poll(fds: *mut TPollFd, nfds: usize, timeout_ms: i32) -> i64 {
+    let mut x0: i64 = fds as i64;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") nfds as u64,
+        in("x2") timeout_ms as i64 as u64,
+        in("x8") T_SYS_POLL,
         options(nostack)
     );
     x0

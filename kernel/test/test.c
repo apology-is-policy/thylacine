@@ -404,6 +404,18 @@ void test_pipe_blocking_write_wakes_sleeping_reader(void);
 void test_pipe_blocking_read_wakes_sleeping_writer(void);
 void test_pipe_blocking_close_write_end_wakes_reader_with_eof(void);
 void test_pipe_blocking_close_read_end_wakes_writer_with_epipe(void);
+void test_poll_ready_immediately_pollin(void);
+void test_poll_ready_immediately_pollout(void);
+void test_poll_timeout_zero_not_ready(void);
+void test_poll_timeout_positive_fires(void);
+void test_poll_block_then_wake_pollin(void);
+void test_poll_pollhup_on_close_write_end(void);
+void test_poll_multi_fd_one_ready(void);
+void test_poll_bad_fd_revents_pollnval(void);
+void test_poll_bad_args_rejected(void);
+void test_poll_always_ready_null_dev_poll(void);
+void test_poll_pollerr_on_write_after_read_close(void);
+void test_poll_unregister_after_fast_path(void);
 void test_sys_pipe_allocates_two_distinct_spoor_handles(void);
 void test_sys_pipe_proc_free_releases_handles(void);
 void test_sys_pipe_handle_close_releases_one_end(void);
@@ -1064,6 +1076,18 @@ struct test_case g_tests[] = {
     { "pipe_blocking.read_wakes_sleeping_writer",           test_pipe_blocking_read_wakes_sleeping_writer,           false, NULL },
     { "pipe_blocking.close_write_end_wakes_reader_with_eof", test_pipe_blocking_close_write_end_wakes_reader_with_eof, false, NULL },
     { "pipe_blocking.close_read_end_wakes_writer_with_epipe", test_pipe_blocking_close_read_end_wakes_writer_with_epipe, false, NULL },
+    { "poll.ready_immediately_pollin",          test_poll_ready_immediately_pollin,          false, NULL },
+    { "poll.ready_immediately_pollout",         test_poll_ready_immediately_pollout,         false, NULL },
+    { "poll.timeout_zero_not_ready",            test_poll_timeout_zero_not_ready,            false, NULL },
+    { "poll.timeout_positive_fires",            test_poll_timeout_positive_fires,            false, NULL },
+    { "poll.block_then_wake_pollin",            test_poll_block_then_wake_pollin,            false, NULL },
+    { "poll.pollhup_on_close_write_end",        test_poll_pollhup_on_close_write_end,        false, NULL },
+    { "poll.multi_fd_one_ready",                test_poll_multi_fd_one_ready,                false, NULL },
+    { "poll.bad_fd_revents_pollnval",           test_poll_bad_fd_revents_pollnval,           false, NULL },
+    { "poll.bad_args_rejected",                 test_poll_bad_args_rejected,                 false, NULL },
+    { "poll.always_ready_null_dev_poll",        test_poll_always_ready_null_dev_poll,        false, NULL },
+    { "poll.pollerr_on_write_after_read_close", test_poll_pollerr_on_write_after_read_close, false, NULL },
+    { "poll.unregister_after_fast_path",        test_poll_unregister_after_fast_path,        false, NULL },
     { "sys_pipe.allocates_two_distinct_spoor_handles", test_sys_pipe_allocates_two_distinct_spoor_handles, false, NULL },
     { "sys_pipe.proc_free_releases_handles",           test_sys_pipe_proc_free_releases_handles,           false, NULL },
     { "sys_pipe.handle_close_releases_one_end",        test_sys_pipe_handle_close_releases_one_end,        false, NULL },

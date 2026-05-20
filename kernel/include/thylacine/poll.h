@@ -1,0 +1,235 @@
+// poll — the multi-fd wait/wake primitive (P5-poll-a).
+//
+// Per ARCHITECTURE.md §23.3 + specs/poll.tla. `poll(fds, nfds,
+// timeout_ms)` parks the caller until at least one of N fds is ready,
+// or a timeout elapses. Thylacine has no separate fd layer — an `fd` is
+// a handle index (hidx_t) — and a thread can wait on only ONE `Rendez`
+// (single-waiter; rendez.h extincts on a second). poll therefore does
+// NOT make `Rendez` multi-waiter: the poller sleeps on its OWN private
+// `Rendez` via `tsleep`, and registers a lightweight `struct
+// poll_waiter` hook on each polled object's poll-hook list.
+//
+// LOAD-BEARING DISCIPLINE
+//
+//   REGISTER-THEN-OBSERVE. `dev->poll(spoor, events, pw)` installs the
+//   hook AND samples readiness in ONE locked step under the object's
+//   own lock. No readiness event between the sample and the sleep can
+//   reach a still-empty hook list. specs/poll.tla `Register` ↔
+//   `dev->poll(c, events, pw)` is the binding spec action.
+//
+//   Producer side: every existing wakeup site (the existing
+//   `wakeup(&r->X)` in devpipe; future devsrv) ALSO walks the object's
+//   poll-hook list, sets each registered `poll_waiter`'s `ready` flag,
+//   and signals that poller's private `Rendez`. specs/poll.tla
+//   `MakeReady(f)` ↔ `poll_waiter_list_wake`.
+//
+// HOOK LIFETIME — STACK-ALLOCATED FOR ONE poll CALL
+//
+//   The hook is stack-allocated in `sys_poll_for_proc` — one slot per
+//   pollfd, `nfds ≤ PROC_HANDLE_MAX = 64`. The hook MUST be
+//   unregistered before the poll returns; a leftover hook is a
+//   dangling stack pointer the next readiness event will walk.
+//   specs/poll.tla `NoStaleHook` is the invariant.
+//
+// PER-OBJECT LIST OWNS ITS OWN LOCK
+//
+//   `struct poll_waiter_list` carries its own spinlock — separate from
+//   the polled object's lock. The Dev's `.poll` implementation takes
+//   the object lock for the readiness sample, then calls
+//   `poll_waiter_list_register` (which takes the list lock internally)
+//   to install the hook ATOMICALLY with the sample under the object
+//   lock. The producer's wakeup site takes the object lock, mutates
+//   readiness, then calls `poll_waiter_list_wake` (which takes the
+//   list lock internally) — under the object lock so any concurrent
+//   register's "sample" sees this mutation.
+//
+//   `poll_waiter_list_unregister(pw)` takes ONLY the list lock — no
+//   object lock. Lock order globally: object → list → rendez (wakeup);
+//   unregister takes only list, so no inversion. The hook stores a
+//   back-pointer `pw->list` set at register time so the kernel-side
+//   unregister sweep knows which list each hook is on without consulting
+//   the Dev.
+//
+// THE Dev.poll vtable op (declared in <thylacine/dev.h>)
+//
+//   short (*poll)(struct Spoor *c, short events, struct poll_waiter *pw);
+//
+//   Returns the currently-ready `revents` (POLLIN/POLLOUT subset of
+//   `events`, plus output-only POLLERR/POLLHUP if the device sees an
+//   error / hangup). If `pw` is non-NULL, atomically registers `pw` on
+//   the object's hook list under the object's lock. If `pw` is NULL,
+//   the call is sample-only (used by the post-wake re-scan and the
+//   timeout=0 non-blocking probe).
+//
+//   A NULL `Dev.poll` slot means the fd is always ready for the
+//   requested events — the POSIX-correct answer for a regular file, so
+//   only objects with genuine readiness state (devpipe at v1.0; devsrv
+//   at P5-poll-b) implement a real `.poll`.
+
+#ifndef THYLACINE_POLL_H
+#define THYLACINE_POLL_H
+
+#include <thylacine/spinlock.h>
+#include <thylacine/types.h>
+
+struct Rendez;
+struct Proc;
+
+// =============================================================================
+// User-facing ABI: struct pollfd + event constants.
+// =============================================================================
+//
+// The userspace ABI of SYS_POLL (syscall 29). Linux-shaped so the
+// future musl shim is a no-op — pollfd has the same layout and event
+// values as Linux's <poll.h>.
+
+struct pollfd {
+    s32 fd;            // a handle index (hidx_t); negative ⇒ POLLNVAL
+    s16 events;        // requested events bitmask
+    s16 revents;       // returned events bitmask (kernel-filled)
+};
+
+_Static_assert(sizeof(struct pollfd) == 8,
+               "struct pollfd is a SYS_POLL ABI type — pinned at 8 bytes");
+_Static_assert(__builtin_offsetof(struct pollfd, fd) == 0,
+               "pollfd.fd at ABI offset 0");
+_Static_assert(__builtin_offsetof(struct pollfd, events) == 4,
+               "pollfd.events at ABI offset 4");
+_Static_assert(__builtin_offsetof(struct pollfd, revents) == 6,
+               "pollfd.revents at ABI offset 6");
+
+// Event bits — Linux values, the future musl shim is a no-op.
+#define POLLIN     0x001    // data may be read without blocking
+#define POLLOUT    0x004    // writing will not block
+#define POLLERR    0x008    // error condition (output-only)
+#define POLLHUP    0x010    // hang up — peer closed (output-only)
+#define POLLNVAL   0x020    // fd not open / invalid handle (output-only)
+
+// The subset of bits a caller may request in `events`. POLLERR /
+// POLLHUP / POLLNVAL are output-only — the kernel sets them regardless
+// of `events`. POLLIN / POLLOUT are gated by request.
+#define POLL_REQUESTABLE     (POLLIN | POLLOUT)
+#define POLL_OUTPUT_ONLY     (POLLERR | POLLHUP | POLLNVAL)
+
+// =============================================================================
+// kernel-internal poll_waiter hook + per-object hook list.
+// =============================================================================
+
+struct poll_waiter_list;
+
+// A poll_waiter is the kernel-side hook a polling thread installs on a
+// pollable object's hook list. The poller stack-allocates one per fd.
+// The producer (a wakeup site) walks the object's list, sets `ready`,
+// and signals `rendez` to wake the sleeping poller.
+//
+// Lifetime: stack-allocated in `sys_poll_for_proc`; valid only for the
+// duration of one poll call. MUST be unregistered before the poll
+// returns (specs/poll.tla NoStaleHook).
+//
+// `magic` is a defense-in-depth check: a walk that hits a non-magic
+// link is a use-after-free of a leftover hook (or a memory
+// corruption). `extinction`-asserted by `poll_waiter_list_wake`.
+//
+// `list` is set by `poll_waiter_list_register` and cleared by
+// `poll_waiter_list_unregister`. A non-NULL `list` means "this hook is
+// currently on `*list`"; the kernel-side unregister sweep uses this
+// back-pointer to find each hook's home without a Dev vtable op.
+struct poll_waiter {
+    u32                       magic;   // POLL_WAITER_MAGIC
+    bool                      ready;   // set under list->lock by a producer
+    struct Rendez            *rendez;  // back-ref to the poller's private Rendez
+    struct poll_waiter_list  *list;    // non-NULL while listed; NULL otherwise
+    struct poll_waiter       *next;    // singly-linked; valid only while listed
+};
+
+#define POLL_WAITER_MAGIC  0x504F4C57u   // "POLW" little-endian
+
+// A pollable object embeds one of these — `struct pipe_ring` at v1.0,
+// `struct SrvService` + `struct SrvConn` at P5-poll-b. The list lock
+// is internal: register / unregister / wake all take it. The polled
+// object's existing lock serializes readiness mutations; the list lock
+// serializes hook-list mutations. They compose by lock order object →
+// list — see this header's preamble.
+struct poll_waiter_list {
+    spin_lock_t         lock;
+    struct poll_waiter *head;     // singly-linked; NULL when empty
+};
+
+// Initialize a poll_waiter for one poll call. Sets `magic`, `rendez`,
+// clears `ready`, `list`, `next`. Does NOT touch any list.
+void poll_waiter_init(struct poll_waiter *pw, struct Rendez *r);
+
+// Initialize a per-object hook list. Idempotent; safe at registration
+// boot order. Static init via `POLL_WAITER_LIST_INIT` works for
+// file-scope or struct-embedded lists when an explicit zero-init isn't
+// otherwise guaranteed.
+void poll_waiter_list_init(struct poll_waiter_list *l);
+#define POLL_WAITER_LIST_INIT  { SPIN_LOCK_INIT, NULL }
+
+// Register `pw` on `l`. Takes `l->lock` internally. The caller
+// (typically a Dev's `.poll`) holds the object's lock when calling so
+// the install is atomic with the same call's readiness sample under
+// the object lock — this is the register-then-observe step.
+//
+// Extincts on: `pw->magic` corrupted, `pw->list != NULL` (a double-
+// register — the caller missed an unregister).
+void poll_waiter_list_register(struct poll_waiter_list *l,
+                               struct poll_waiter *pw);
+
+// Unregister `pw` from its list. Takes `pw->list->lock` internally;
+// requires NO outer lock. Idempotent: a hook that is already
+// unregistered (`pw->list == NULL`) is a no-op. Used by
+// `sys_poll_for_proc` on return.
+void poll_waiter_list_unregister(struct poll_waiter *pw);
+
+// Wake every registered poller: walk `l` (under `l->lock`), set each
+// hook's `ready` flag, then signal each hook's `rendez`. Called from
+// the producer's existing wakeup site UNDER the object's lock — so the
+// readiness change the producer just made is visible to any concurrent
+// register's sample (which also runs under the object's lock).
+//
+// `wakeup()` takes the rendez's own lock; the lock chain (object →
+// list → rendez) is acyclic. Idempotent: walking an empty list is a
+// no-op.
+//
+// Extincts on a corrupted `pw->magic` mid-walk (UAF on a stale hook).
+void poll_waiter_list_wake(struct poll_waiter_list *l);
+
+// =============================================================================
+// The SYS_POLL testable core. The user-VA wrapper sys_poll_handler
+// lives in kernel/syscall.c.
+// =============================================================================
+
+// sys_poll_for_proc — the kernel-side `poll(fds, nfds, timeout_ms)`.
+// Operates on a kernel-side `kfds[]` array (the handler copies user-VA
+// in, then back). Returns:
+//   ≥ 0 — number of pollfds with revents != 0
+//   -1  — error (nfds out of range; p NULL).
+//
+// `timeout_ms`:
+//   < 0 — block indefinitely (no deadline).
+//   = 0 — return immediately after the first scan (a non-blocking
+//         readiness probe). No tsleep.
+//   > 0 — block for at most `timeout_ms` milliseconds.
+//
+// `nfds` MUST be 1..PROC_HANDLE_MAX = 64. The `struct poll_waiter
+// waiters[64]` array lives on this routine's kernel stack. specs/
+// poll.tla `Register` ↔ the first scan; `CommitOrSleep` ↔ the flag-
+// check + tsleep; `MakeReady` ↔ a producer's `poll_waiter_list_wake`.
+s64 sys_poll_for_proc(struct Proc *p, struct pollfd *kfds, u64 nfds,
+                      s32 timeout_ms);
+
+// =============================================================================
+// Diagnostics.
+// =============================================================================
+
+// Monotonic counter of poll calls that returned (including timeout
+// returns at 0). Tests assert this increments to confirm the syscall
+// path executed.
+u64 poll_total_calls(void);
+
+// Monotonic counter of poll calls that slept on tsleep. Distinguishes
+// the fast path (any fd ready at first scan) from the slow path.
+u64 poll_total_slept(void);
+
+#endif // THYLACINE_POLL_H

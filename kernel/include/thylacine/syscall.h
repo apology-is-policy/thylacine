@@ -392,6 +392,27 @@ enum {
     //   - the caller is not the connection's service poster
     //   - out_va is outside the user-VA bound
     SYS_SRV_PEER     = 28,   // arg: connection_handle (x0), out_va (x1)
+
+    // P5-poll-a: SYS_POLL(fds_va, nfds, timeout_ms) → ready-fd count / -1
+    //   x0 = fds_va        user-VA pointer to a `struct pollfd[nfds]` array
+    //                      (8 B each; layout pinned by <thylacine/poll.h>)
+    //   x1 = nfds          1..PROC_HANDLE_MAX = 64
+    //   x2 = timeout_ms    s32: <0 = block indefinitely, 0 = non-blocking,
+    //                           >0 = block at most this many milliseconds
+    // The multi-fd wait primitive (ARCH §23.3; specs/poll.tla). Parks the
+    // caller until at least one of the listed fds becomes ready, or the
+    // timeout elapses. Returns the number of pollfds with revents != 0
+    // (≥ 0) or -1 on error. `revents` is written back to the user array
+    // per pollfd; a partial write fault scrubs already-written bytes.
+    //
+    // Returns -1 on:
+    //   - nfds == 0 or > PROC_HANDLE_MAX
+    //   - fds_va outside the user-VA bound (or fds_va == 0 with nfds > 0)
+    //   - a partial-write fault on the revents writeback
+    //
+    // POLLNVAL is set in revents (kernel-filled) for a per-pollfd invalid
+    // fd; the call as a whole still returns a non-negative count.
+    SYS_POLL         = 29,   // arg: fds_va (x0), nfds (x1), timeout_ms (x2)
 };
 
 // SYS_SRV_PEER result — the kernel-stamped peer identity of a /srv

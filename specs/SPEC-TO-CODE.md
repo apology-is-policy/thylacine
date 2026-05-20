@@ -636,16 +636,16 @@ cfgs run with `-deadlock`; `tsleep.tla`'s `Done` self-loop keeps a
 legitimate terminal state from tripping the deadlock check. See
 `docs/reference/16-rendez.md` (the `tsleep` section).
 
-## poll.tla — P5-poll-spec (spec landed; impl at P5-poll-a / -b)
+## poll.tla — P5-poll-spec (spec landed); P5-poll-a (mechanism + SYS_POLL + devpipe poll landed)
 
-Status: **spec landed at P5-poll-spec; kernel impl pending — P5-poll-a
-(the poll mechanism + `SYS_POLL` + `devpipe` poll) and P5-poll-b
-(`devsrv` poll).** Models `poll` — one thread waiting on N readiness
-sources whose state lives behind N different locks. `scheduler.tla`
-already proves the single-`Rendez` check-then-sleep atomicity and
-`tsleep.tla` the deadline race; `poll.tla` models the surface neither
-covers — the cross-lock `poll_waiter` hand-off and the
-register-then-observe discipline.
+Status: **spec landed at P5-poll-spec; the poll mechanism + `SYS_POLL`
++ `devpipe` poll landed at P5-poll-a; `devsrv` poll pending at
+P5-poll-b.** Models `poll` — one thread waiting on N readiness sources
+whose state lives behind N different locks. `scheduler.tla` already
+proves the single-`Rendez` check-then-sleep atomicity and `tsleep.tla`
+the deadline race; `poll.tla` models the surface neither covers — the
+cross-lock `poll_waiter` hand-off and the register-then-observe
+discipline.
 
 State universe: one poller, N fds (`Fds`), one timeout. One poller
 exercises the missed-wakeup-across-N-fds race fully; multiple pollers on
@@ -663,15 +663,16 @@ one fd's hook list compose (each has its own private `Rendez` +
 | `poll_buggy_no_wake.cfg`               | `BUGGY_NO_WAKE`               | `NoMissedPoll` | violation (depth 4) | — |
 | `poll_buggy_lazy_unregister.cfg`       | `BUGGY_LAZY_UNREGISTER`       | `NoStaleHook`  | violation (depth 4) | — |
 
-Spec action ↔ impl mapping (impl pending — file:line filled when
-P5-poll-a / -b land):
+Spec action ↔ impl mapping:
 
 | Spec action | Source location | Notes |
 |---|---|---|
-| `Register` / `CommitOrSleep` | `kernel/poll.c` `SYS_POLL` (P5-poll-a) | The per-fd `dev->poll(spoor, events, pw)` loop, then `tsleep` on the poller's private `Rendez`. |
-| `MakeReady` | `kernel/pipe.c` (P5-poll-a) + `kernel/srvconn.c` / `kernel/devsrv.c` (P5-poll-b) | Every existing readiness `wakeup` site also walks the object's poll-hook list. |
-| `Timeout` | `kernel/sched.c::tsleep` deadline (landed, P5-tsleep) | poll's timeout IS a `tsleep` deadline. |
-| `BuggyCheckBeforeRegister` / `BuggyNoWake` / `BuggyLazyUnregister` | (none — register-then-observe; every readiness site wakes; `SYS_POLL` unhooks before return) | The three disciplines the impl must uphold. |
+| `Register` | `kernel/poll.c:229-237` (the per-fd first scan in `sys_poll_for_proc`); `kernel/pipe.c:206-219` (`devpipe_poll`) | `dev->poll(spoor, events, pw)` — installs the hook AND samples readiness in one locked step under `r->lock`. devsrv equivalent lands at P5-poll-b. |
+| `CommitOrSleep` | `kernel/poll.c:239-265` | Post-scan fast-path return (`ready_count > 0` or `timeout_ms == 0`); else compute `deadline_ns` + `tsleep` on the poller's private rendez with the `poll_cond_any_flagged` predicate. |
+| `MakeReady(f)` | `kernel/pipe.c:231` (close), `kernel/pipe.c:285` (read), `kernel/pipe.c:328` (write); devsrv equivalents land at P5-poll-b | Every existing readiness `wakeup` site also calls `poll_waiter_list_wake` — sets each registered `pw->ready` AND signals each `pw->rendez`. |
+| `Timeout` | `kernel/sched.c::tsleep` deadline (landed, P5-tsleep) | poll's timeout IS a `tsleep` deadline; the cond re-check at resume has precedence over the deadline (tsleep.tla TimeoutSound). |
+| `NoStaleHook` (unregister sweep) | `kernel/poll.c:271-275` | Every exit path from `sys_poll_for_proc` goes through the `unregister_and_return:` sweep; idempotent on already-unregistered hooks; scribbles `pw->magic = 0` for defense-in-depth. |
+| `BuggyCheckBeforeRegister` / `BuggyNoWake` / `BuggyLazyUnregister` | (none — register-then-observe lives in `devpipe_poll`; every readiness site calls `poll_waiter_list_wake`; the sweep above is unconditional) | The three disciplines the impl uphold. |
 
 cfgs run with `-deadlock`; `poll.tla`'s `Done` self-loop keeps a
 legitimate terminal state from tripping the deadlock check. See
