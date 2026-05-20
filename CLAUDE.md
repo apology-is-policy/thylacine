@@ -75,6 +75,12 @@ Features that usually don't (pure computation, test helpers, config parsing, CLI
 
 **If you cannot articulate the invariant formally, you don't understand it well enough to implement it.**
 
+### Corvus exception (user-authorized, 2026-05-20)
+
+The exhaustive clean-cfg run of `specs/corvus.tla` (`corvus.cfg`) is **no longer a per-chunk pre-commit gate**. After the F5 spec change (P5-corvus-srv-impl audit close) added `ConnTeardown` + the parallel append-only `connections_history` variable, the state space grew ~3× and the queue stabilized at ~14M states/diameter 22 with no convergence in budget. The 8 `corvus_buggy_*.cfg` runs remain required (they terminate fast on counterexample and verify invariant-detection behavior). Corvus spec edits must still keep the buggy cfgs producing the expected counterexamples; the clean-cfg run becomes a best-effort background verification when the user's budget allows.
+
+This exception applies **only to `corvus.tla`**. Every other invariant-bearing spec keeps its full pre-commit gate (scheduler, namespace, handles, vmo, 9p_client, poll, futex, notes, pty, tsleep, sched_ctxsw, pipe, burrow).
+
 ### TLA+ setup
 
 Install OpenJDK (`/opt/homebrew/opt/openjdk/bin` on macOS; `apt-get install default-jdk` on Linux).

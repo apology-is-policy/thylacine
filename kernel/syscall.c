@@ -33,6 +33,7 @@
 #include <thylacine/vma.h>
 
 #include "../arch/arm64/exception.h"
+#include "../arch/arm64/timer.h"
 #include "../arch/arm64/uaccess.h"
 #include "../arch/arm64/uart.h"
 #include "../mm/slub.h"
@@ -676,9 +677,12 @@ s64 sys_write_for_proc(struct Proc *p, hidx_t h, const u8 *kbuf, u64 len) {
         return (s64)n;
     }
     case KOBJ_SRV: {
-        // sys_lookup_rw_handle validated SRV_CONN_MAGIC.
-        long n = srvconn_client_write((struct SrvConn *)slot->obj,
-                                       kbuf, (long)len);
+        // sys_lookup_rw_handle validated SRV_CONN_MAGIC. F1 close
+        // (P5-corvus-srv-impl audit): refresh the deadline before
+        // each blocking op — same discipline as the read path.
+        struct SrvConn *cn = (struct SrvConn *)slot->obj;
+        srvconn_set_client_deadline(cn, timer_now_ns() + SRVCONN_OP_DEADLINE_NS);
+        long n = srvconn_client_write(cn, kbuf, (long)len);
         if (n < 0)                                   return -1;
         return (s64)n;
     }
@@ -709,8 +713,13 @@ s64 sys_read_for_proc(struct Proc *p, hidx_t h, u8 *kbuf, u64 len) {
         return (s64)n;
     }
     case KOBJ_SRV: {
-        long n = srvconn_client_read((struct SrvConn *)slot->obj,
-                                      kbuf, (long)len);
+        // F1 close (P5-corvus-srv-impl audit): refresh the deadline
+        // before each blocking op — same discipline as the handshake.
+        // Without this `srvconn_client_recv` would tsleep with
+        // deadline=0 and a hung corvus would wedge the caller.
+        struct SrvConn *cn = (struct SrvConn *)slot->obj;
+        srvconn_set_client_deadline(cn, timer_now_ns() + SRVCONN_OP_DEADLINE_NS);
+        long n = srvconn_client_read(cn, kbuf, (long)len);
         if (n < 0)                                   return -1;
         return (s64)n;
     }
@@ -1965,6 +1974,15 @@ static s64 sys_post_service_handler(u64 name_va, u64 name_len_raw) {
 
     if (name_len_raw == 0 || name_len_raw > SRV_NAME_MAX) return -1;
 
+    // F6 close (P5-corvus-srv-impl audit): validate the full user-VA
+    // range BEFORE the per-byte copy, matching every other syscall
+    // surface that takes a user buffer (sys_spawn_*, sys_srv_peer,
+    // sys_srv_connect). The per-byte uaccess_load_u8 IS fault-safe
+    // (returns -1 on a bad address), but a pre-validated range fails
+    // a bad name_va before any byte is read into kernel scratch —
+    // matches the pattern documented in sys_validate_user_buf.
+    if (!sys_validate_user_buf(name_va, name_len_raw)) return -1;
+
     // Copy the name from user-VA into kernel scratch, per-byte
     // uaccess_load_u8 (same shape as SYS_SPAWN's name copy). name_len_raw
     // ≤ SRV_NAME_MAX is the buffer bound.
@@ -2190,10 +2208,19 @@ int sys_srv_connect_for_proc(struct Proc *p,
     }
     struct SrvConn *cn = (struct SrvConn *)slot->obj;
 
+    // F1 close (P5-corvus-srv-impl audit): bound the handshake on the
+    // wall clock. Without this every Tversion/Tattach/Twalk/Tlopen
+    // recv falls through to a deadline-0 tsleep — "no deadline" —
+    // wedging this Proc indefinitely on a corvus that posted but is
+    // crashed / spinning / not draining. With the deadline a hung
+    // corvus returns -1 here, the handle teardown fires, and the
+    // caller can retry or surface the error to userspace.
+    srvconn_set_client_deadline(cn, timer_now_ns() + SRVCONN_HANDSHAKE_DEADLINE_NS);
     if (srvconn_drive_client_handshake(cn, p->pid, path, path_len) != 0) {
-        // Handshake failed — corvus crashed / hung / refused / OOM. Tear
-        // the just-installed handle down. handle_close's KOBJ_SRV path
-        // teardowns + unrefs the SrvConn AND decrements srv_conn_count.
+        // Handshake failed — corvus crashed / hung / refused / OOM /
+        // deadline-elapsed. Tear the just-installed handle down.
+        // handle_close's KOBJ_SRV path teardowns + unrefs the SrvConn
+        // AND decrements srv_conn_count.
         handle_close(p, (hidx_t)h);
         return -1;
     }
@@ -2210,6 +2237,16 @@ static s64 sys_srv_connect_handler(u64 name_va, u64 name_len_raw,
 
     if (name_len_raw == 0 || name_len_raw > SRV_NAME_MAX) return -1;
     if (path_len_raw > SRVCONN_PATH_MAX)                  return -1;
+
+    // F6 close (P5-corvus-srv-impl audit): pre-validate the full user-
+    // VA range for each buffer BEFORE the per-byte copy loops. Matches
+    // the discipline of every other handler that takes a user buffer
+    // (sys_spawn_*, sys_srv_peer). The per-byte uaccess_load_u8 IS
+    // fault-safe, but pre-validation catches a bad address before
+    // any byte lands in kernel scratch.
+    if (!sys_validate_user_buf(name_va, name_len_raw)) return -1;
+    if (path_len_raw > 0 && !sys_validate_user_buf(path_va, path_len_raw))
+        return -1;
 
     // Service name copy-in (per-byte uaccess_load_u8; same shape as
     // SYS_POST_SERVICE).

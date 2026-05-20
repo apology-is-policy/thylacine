@@ -1224,6 +1224,14 @@ struct Conn {
     pending_request: Vec<u8>, // Twrite-payload accumulator (decoded to a verb frame)
     pending_response: Vec<u8>,
     pending_response_off: usize,
+    // F3 close (P5-corvus-srv-impl audit): when set, the conn is torn
+    // down by the server loop after `pending_response` is fully drained
+    // by the next Tread. The Q11-violating + oversize-payload paths in
+    // `try_dispatch_verb` set this so the BadFormat reply actually
+    // reaches the client BEFORE the EOF — matching the
+    // STRATUM-API-V1.md Q11 contract that the stream cannot be safely
+    // re-synced across a version mismatch.
+    tear_down_after_drain: bool,
 }
 
 impl Conn {
@@ -1239,6 +1247,7 @@ impl Conn {
             pending_request: Vec::with_capacity(REQ_HDR_LEN + MAX_PAYLOAD_LEN),
             pending_response: Vec::with_capacity(MAX_RESPONSE_FRAME),
             pending_response_off: 0,
+            tear_down_after_drain: false,
         }
     }
 
@@ -1323,17 +1332,29 @@ unsafe fn try_dispatch_verb(conn: &mut Conn) {
             | ((conn.pending_request[3] as usize) << 8);
 
         if protocol_version != CORVUS_PROTOCOL_VERSION {
-            // Q11: unknown wire version → BadFormat, tear down.
+            // Q11 close (P5-corvus-srv-impl audit F3): unknown wire
+            // version → BadFormat then ACTUALLY tear down. The flag is
+            // checked in `service_conn` after the next Tread drains
+            // `pending_response` — so the client observes the
+            // BadFormat reply BEFORE the EOF. Pre-audit this only
+            // staged the reply and relied on the client to disconnect,
+            // which the joey test happened to do but the wire contract
+            // (STRATUM-API-V1.md Q11: "stream cannot be safely
+            // re-synced across a version mismatch") explicitly forbids.
             stage_response(&mut conn.pending_response, STATUS_BAD_FORMAT, &[]);
             conn.pending_response_off = 0;
             conn.pending_request.clear();
+            conn.tear_down_after_drain = true;
             return;
         }
         if payload_len > MAX_PAYLOAD_LEN {
-            // Frame oversize; emit BadFormat, tear down via caller.
+            // Frame oversize — same fail-stop discipline as the Q11 path:
+            // the body length can no longer be re-synced safely, so tear
+            // down after delivering the BadFormat reply.
             stage_response(&mut conn.pending_response, STATUS_BAD_FORMAT, &[]);
             conn.pending_response_off = 0;
             conn.pending_request.clear();
+            conn.tear_down_after_drain = true;
             return;
         }
         if conn.pending_request.len() < REQ_HDR_LEN + payload_len {
@@ -1596,9 +1617,14 @@ unsafe fn dispatch_twrite(conn: &mut Conn, tmsg: &[u8], tag: u16) -> Result<usiz
     // Append to verb-frame accumulator; bound the total at a sane cap.
     // A pathological client could otherwise grow the accumulator without
     // ever sending a header — cap at 2 * (REQ_HDR_LEN + MAX_PAYLOAD_LEN).
+    // F9 close (P5-corvus-srv-impl audit): on overflow, reset the
+    // accumulator (drop the garbage) so a subsequent well-formed
+    // Twrite can recover; without the reset the conn was wedged on
+    // every future Twrite.
     if conn.pending_request.len() + args.data.len()
         > 2 * (REQ_HDR_LEN + MAX_PAYLOAD_LEN)
     {
+        conn.pending_request.clear();
         return Ok(p9::build_rlerror(&mut conn.out_buf, tag, p9::E_INVAL)?);
     }
     conn.pending_request.extend_from_slice(args.data);
@@ -1695,13 +1721,18 @@ unsafe fn service_conn(conn: &mut Conn) -> Result<bool, ()> {
         // Remove the consumed Tmsg from in_buf.
         conn.in_buf.drain(..size);
 
-        // If verb-dispatch staged a BadFormat response, drain it then
-        // tear down. The BadFormat response will be drained by the
-        // client's next Tread on ctl — but corvus may not see that
-        // Tread (the client might give up). We can't tell from here;
-        // signal tear-down only when the response_buf-was-staged
-        // condition becomes structurally certain. At v1.0 we leave
-        // that to the client-disconnect path.
+        // F3 close (P5-corvus-srv-impl audit): the conn is in fail-stop
+        // state — try_dispatch_verb staged a Q11 (or oversize-payload)
+        // BadFormat reply and set `tear_down_after_drain`. Tear down
+        // once the staged reply has been fully drained by Treads;
+        // `pending_response` becomes empty after the last Tread on the
+        // ctl fid. The reply is delivered to the client BEFORE the
+        // tear-down EOF, matching STRATUM-API-V1.md Q11.
+        if conn.tear_down_after_drain
+            && conn.pending_response.is_empty()
+        {
+            return Ok(false);
+        }
     }
 }
 
@@ -1738,8 +1769,25 @@ unsafe fn srv_server_loop(listener: i64) -> i64 {
                 let h = t_srv_accept(listener);
                 if h >= 0 {
                     let mut peer = TSrvPeerInfo::default();
-                    let _ = t_srv_peer(h, &mut peer);
-                    conns.push(Conn::new(h, peer));
+                    // F4 close (P5-corvus-srv-impl audit): fail-closed
+                    // on a non-zero `t_srv_peer` rc. The pre-audit code
+                    // discarded the return and left `peer` at zeros —
+                    // future admin verbs (P5-hostowner-b) that read
+                    // `caps`/`stripes` for gating would have aliased a
+                    // failed-read with a fail-closed value rather than
+                    // explicitly catching it. Better to refuse the
+                    // accept now than to admit an unknown-identity
+                    // conn into the loop. The handle is closed so the
+                    // kernel-side SrvConn tears down promptly.
+                    if t_srv_peer(h, &mut peer) != 0 {
+                        let _ = t_close(h);
+                        // Continue — the kernel's tear-down on
+                        // `t_close` will surface to a subsequent
+                        // listener-side state; corvus's loop will
+                        // re-poll.
+                    } else {
+                        conns.push(Conn::new(h, peer));
+                    }
                 }
                 // else: listener torn down; loop will pick it up via
                 // POLLHUP on the listener (T_POLLHUP isn't requested

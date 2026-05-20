@@ -84,6 +84,31 @@ _Static_assert(SRVCONN_RING_CAP >= SRVCONN_MSIZE,
 // (sys_srv_connect_handler) is sized to this.
 #define SRVCONN_PATH_MAX  64u
 
+// Per-op client-side deadlines (ns). The kernel's synchronous p9_client
+// dispatches every blocking 9P op through `srvconn_client_recv`, which
+// is `tsleep`-bounded by `cn->client_deadline_ns`. Each production site
+// that initiates a blocking op MUST set a fresh deadline first
+// (`srvconn_set_client_deadline(cn, timer_now_ns() + DEADLINE_NS)`) —
+// otherwise the default 0 reads as "no deadline" and a hung corvus
+// wedges the caller indefinitely.
+//
+// Handshake (Tversion + Tattach + optional Twalk + Tlopen on a brand-
+// new connection): the kernel does no userspace crypto on this path;
+// every op is small (≤ msize) and corvus's server side just shuffles
+// 9P frames. 5 seconds is comfortable headroom over QEMU-emulated
+// AArch64's worst-case scheduling jitter without papering over a
+// legitimately-hung server. Caller path:
+// `sys_srv_connect_for_proc`.
+#define SRVCONN_HANDSHAKE_DEADLINE_NS  (5ull * 1000ull * 1000ull * 1000ull)
+
+// Steady-state read/write (after handshake): corvus may run Argon2id
+// (m_cost=16 MiB) + AEGIS-256 + ML-KEM-768 in a single verb dispatch
+// before staging the response. 30 seconds covers the worst-case
+// userspace crypto budget on emulated targets; on hardware verb
+// dispatch completes in well under a second. Caller paths:
+// `sys_read_for_proc` / `sys_write_for_proc` KOBJ_SRV arms.
+#define SRVCONN_OP_DEADLINE_NS  (30ull * 1000ull * 1000ull * 1000ull)
+
 // Connection lifecycle. A SrvConn is born LIVE and transitions once,
 // to TORN, at teardown — a corvus crash/exit, a connection close, or a
 // client-side deadline expiry. TORN is terminal; both byte rings carry

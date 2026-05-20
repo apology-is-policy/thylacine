@@ -90,6 +90,15 @@ struct devsrv_svc_ref {
     char name[SRV_NAME_MAX];
 };
 
+// F2 close (P5-corvus-srv-impl audit): pin the magic to offset 0. Read
+// by `devsrv_close` / `devsrv_poll` to discriminate the aux's owning
+// object kind; a field reorder that buries `magic` elsewhere would
+// silently misread garbage at offset 0 — undetected at build time,
+// extinction at runtime.
+_Static_assert(__builtin_offsetof(struct devsrv_svc_ref, magic) == 0,
+               "magic at offset 0 — devsrv_close / devsrv_poll discriminate "
+               "by the aux's first u64");
+
 // Service-entry lifecycle.
 //
 // FREE       — slot unused. Zero-initialized storage reads as FREE.
@@ -138,6 +147,16 @@ struct SrvService {
     // accept_rendez wake's discipline (specs/poll.tla MakeReady).
     struct poll_waiter_list poll_list;
 };
+
+// F2 close (P5-corvus-srv-impl audit): pin the magic to offset 0. Read
+// by `handle_release_obj` / `srv_handle_poll` / `devsrv_poll` /
+// `sys_lookup_rw_handle` / `sys_srv_accept_for_proc` / `handle_close`
+// to discriminate SrvService from SrvConn at a KObj_Srv handle's obj
+// pointer. SrvConn's matching pin lives in `srvconn.h`.
+_Static_assert(__builtin_offsetof(struct SrvService, magic) == 0,
+               "magic at offset 0 — KObj_Srv handle-release / poll / accept "
+               "paths read the first u64 of the obj to discriminate "
+               "SrvService vs SrvConn");
 
 // The devsrv Dev. dc='s' (Plan 9 #s); registered by dev_init().
 extern struct Dev devsrv;

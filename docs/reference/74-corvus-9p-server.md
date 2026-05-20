@@ -335,9 +335,16 @@ No new kernel-internal unit tests added — every kernel surface b3b touches (de
 
 ## Status
 
-Implemented + green at the b3b commit. Default + UBSan suites both pass 511/511; corvus's USER_CREATE × 2 + AUTH × 2 + WRAP + UNWRAP × 5 + SESSION_CLOSE + Q11 negative + reconnect round-trip runs end-to-end on every boot, all over the `/srv/corvus` transport.
+Implemented + green at the b3b commit + the P5-corvus-srv-impl audit close. Default + UBSan suites both pass 511/511; corvus's USER_CREATE × 2 + AUTH × 2 + WRAP + UNWRAP × 5 + SESSION_CLOSE + Q11 negative + reconnect round-trip runs end-to-end on every boot, all over the `/srv/corvus` transport.
 
 The pipe-pair harness (corvus's fd 0/1 + joey's `t_spawn_full` with inherited fds) is **retired**. corvus no longer has fd 0 / fd 1 — its handle table at startup is empty; only `t_post_service`'s returned listener inhabits it. joey's `t_spawn_with_perms("corvus", ..., perm_flags=T_SPAWN_PERM_MAY_POST_SERVICE)` passes 0 inherited fds.
+
+### Audit-close changes (P5-corvus-srv-impl audit)
+
+- **F1 (P1) — deadline-bounded production path**. The kernel-side production-path `sys_srv_connect_for_proc` + the KOBJ_SRV arms of `sys_read_for_proc` / `sys_write_for_proc` now call `srvconn_set_client_deadline` before each blocking op. Two new constants in `<thylacine/srvconn.h>`: `SRVCONN_HANDSHAKE_DEADLINE_NS = 5s` (Tversion + Tattach + Twalk + Tlopen — kernel-only 9P shuffling, no corvus crypto on this path) and `SRVCONN_OP_DEADLINE_NS = 30s` (steady-state ops can stir Argon2id + AEGIS + ML-KEM on emulated targets). Pre-fix the production paths skipped the deadline-setting step the kernel-internal test correctly demonstrated, leaving `client_deadline_ns = 0` which `tsleep` reads as "no deadline" — a hung corvus wedged its peer indefinitely.
+- **F3 (P2) — Q11 BadFormat actually tears down**. New per-Conn `tear_down_after_drain: bool` set by `try_dispatch_verb` on both the Q11 (unknown `protocol_version`) and the oversize-payload paths. After the BadFormat reply has been fully drained by the next Tread, `service_conn` returns `Ok(false)` and the conn closes. Pre-fix the reply was staged but no tear-down fired; the joey test passed only because joey explicitly closed the conn. STRATUM-API-V1.md Q11 contract (stream cannot be safely re-synced across a version mismatch) is now enforced from both sides.
+- **F4 (P2) — fail-closed on `t_srv_peer` failure**. In `srv_server_loop` after `t_srv_accept`, corvus checks `t_srv_peer`'s return value. On non-zero it closes the just-accepted handle and continues — does NOT push a Conn with zero-initialized peer identity. Forward-compat for the admin verbs landing at P5-hostowner-b.
+- **F9 (P3) — accumulator reset on overflow**. `dispatch_twrite` now clears `pending_request` on the bound-exceeded path, allowing recovery from a pathological client. Pre-fix the conn was wedged on every subsequent Twrite.
 
 ---
 

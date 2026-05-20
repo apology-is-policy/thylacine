@@ -318,7 +318,8 @@ VARIABLES
     service_marked,     \* SUBSET Procs — joey-stamped "may post /srv/corvus" Procs
     service_poster,     \* Procs \cup {NoProc} — current live poster, NoProc = none
     service_posters,    \* SUBSET Procs — ghost append-only log of every Proc that posted
-    connections,        \* SUBSET ConnRecord — kernel-bound /srv connections (append-only)
+    connections,        \* SUBSET ConnRecord — kernel-bound LIVE /srv connections
+    connections_history,\* SUBSET ConnRecord — APPEND-ONLY ledger of every binding ever minted (F5)
     corvus_accepted,    \* SUBSET Conns — connections corvus has SYS_SRV_ACCEPT'd
     proc_alive,         \* SUBSET Procs — Procs that have not exited
     completed_conn_ops  \* SUBSET ConnOpRecord — ghost log of identity-gated ops
@@ -329,11 +330,12 @@ VARIABLES
 corevars == <<sessions, session_origin, proc_caps, console_attached,
               completed_unwraps, completed_admins>>
 connvars == <<service_marked, service_poster, service_posters, connections,
-              corvus_accepted, proc_alive, completed_conn_ops>>
+              connections_history, corvus_accepted, proc_alive,
+              completed_conn_ops>>
 vars == <<sessions, session_origin, proc_caps, console_attached,
           completed_unwraps, completed_admins, service_marked, service_poster,
-          service_posters, connections, corvus_accepted, proc_alive,
-          completed_conn_ops>>
+          service_posters, connections, connections_history, corvus_accepted,
+          proc_alive, completed_conn_ops>>
 
 TypeOk ==
     /\ sessions \subseteq SessionRecord
@@ -346,6 +348,7 @@ TypeOk ==
     /\ service_poster \in Procs \cup {NoProc}
     /\ service_posters \subseteq Procs
     /\ connections \subseteq ConnRecord
+    /\ connections_history \subseteq ConnRecord
     /\ corvus_accepted \subseteq Conns
     /\ proc_alive \subseteq Procs
     /\ completed_conn_ops \subseteq ConnOpRecord
@@ -365,6 +368,7 @@ Init ==
     /\ service_poster = NoProc
     /\ service_posters = {}
     /\ connections = {}
+    /\ connections_history = {}
     /\ corvus_accepted = {}
     /\ proc_alive = Procs
     /\ completed_conn_ops = {}
@@ -651,9 +655,14 @@ BuggyTransferRebind(src, dst, new_u) ==
 
 (***************************************************************************)
 (* PeerOf(cn) — the kernel-stamped peer Proc of connection slot cn.        *)
-(* Total only where cn has a connection record; every caller establishes   *)
-(* (\E c \in connections : c.conn = cn) first. `connections` is append-    *)
-(* only and conn-ids are unique, so PeerOf is a stable function.           *)
+(* Total only where cn has a LIVE connection record; every caller          *)
+(* establishes (\E c \in connections : c.conn = cn) first. While a binding *)
+(* is live its (conn, peer) tuple is stable (KObj_Srv non-transferability  *)
+(* + the kernel never re-stamps a live SrvConn). After ConnTeardown the    *)
+(* same `cn` slot may be re-bound to a different peer — PeerOf reads the   *)
+(* live binding, the parallel `connections_history` ghost retains every    *)
+(* binding ever minted for the post-hoc identity invariant                 *)
+(* (ConnOpIdentityIsKernelTruth).                                          *)
 (***************************************************************************)
 PeerOf(cn) == (CHOOSE c \in connections : c.conn = cn).peer
 
@@ -668,7 +677,8 @@ MarkMayPost(p) ==
     /\ p \notin service_marked
     /\ service_marked' = service_marked \cup {p}
     /\ UNCHANGED <<service_poster, service_posters, connections,
-                   corvus_accepted, proc_alive, completed_conn_ops>>
+                   connections_history, corvus_accepted, proc_alive,
+                   completed_conn_ops>>
 
 (***************************************************************************)
 (* PostService(p) — Proc p registers itself as the /srv/corvus server      *)
@@ -696,8 +706,8 @@ PostService(p) ==
     /\ p \in proc_alive
     /\ service_poster'  = p
     /\ service_posters' = service_posters \cup {p}
-    /\ UNCHANGED <<service_marked, connections, corvus_accepted, proc_alive,
-                   completed_conn_ops>>
+    /\ UNCHANGED <<service_marked, connections, connections_history,
+                   corvus_accepted, proc_alive, completed_conn_ops>>
 
 (***************************************************************************)
 (* ServiceTombstone — the live poster's Proc has exited. The kernel        *)
@@ -715,14 +725,20 @@ ServiceTombstone ==
     /\ service_poster \notin proc_alive
     /\ service_poster' = NoProc
     /\ UNCHANGED <<service_marked, service_posters, connections,
-                   corvus_accepted, proc_alive, completed_conn_ops>>
+                   connections_history, corvus_accepted, proc_alive,
+                   completed_conn_ops>>
 
 (***************************************************************************)
 (* SrvBind(cn, p) — the kernel mints a connection for client Proc p when   *)
 (* p opens /srv/corvus. The kernel stamps the peer identity; corvus has    *)
-(* no part in it (C-23). One connection per Proc; conn-slot ids unique.    *)
-(* `connections` is append-only — KObj_Srv non-transferability means a     *)
-(* connection's (conn, peer) binding never changes once minted.            *)
+(* no part in it (C-23). One LIVE connection per Proc; conn-slot ids       *)
+(* unique among LIVE bindings. While a binding is live its (conn, peer)    *)
+(* tuple never changes (KObj_Srv non-transferability + kernel never        *)
+(* re-stamps a live SrvConn). After ConnTeardown the slot is free for a    *)
+(* fresh bind — which is how the b3b joey test reconnects after Q11        *)
+(* tear-down. `connections_history` is the parallel APPEND-ONLY ghost      *)
+(* ledger of every binding ever minted; ConnOpIdentityIsKernelTruth reads  *)
+(* the history so a post-hoc identity check stays sound across reconnects. *)
 (***************************************************************************)
 SrvBind(cn, p) ==
     /\ service_poster \in Procs
@@ -730,6 +746,8 @@ SrvBind(cn, p) ==
     /\ ~(\E c \in connections : c.conn = cn)
     /\ ~(\E c \in connections : c.peer = p)
     /\ connections' = connections \cup {[conn |-> cn, peer |-> p]}
+    /\ connections_history' = connections_history
+                                  \cup {[conn |-> cn, peer |-> p]}
     /\ UNCHANGED <<service_marked, service_poster, service_posters,
                    corvus_accepted, proc_alive, completed_conn_ops>>
 
@@ -743,7 +761,8 @@ SrvAccept(cn) ==
     /\ cn \notin corvus_accepted
     /\ corvus_accepted' = corvus_accepted \cup {cn}
     /\ UNCHANGED <<service_marked, service_poster, service_posters,
-                   connections, proc_alive, completed_conn_ops>>
+                   connections, connections_history, proc_alive,
+                   completed_conn_ops>>
 
 (***************************************************************************)
 (* SrvPeerOp(cn) — corvus performs an identity-gated operation on an       *)
@@ -758,7 +777,8 @@ SrvPeerOp(cn) ==
     /\ completed_conn_ops' = completed_conn_ops
            \cup {[conn |-> cn, attributed_peer |-> PeerOf(cn), peer_live |-> TRUE]}
     /\ UNCHANGED <<service_marked, service_poster, service_posters,
-                   connections, corvus_accepted, proc_alive>>
+                   connections, connections_history, corvus_accepted,
+                   proc_alive>>
 
 (***************************************************************************)
 (* ProcExit(p) — client Proc p exits. proc_alive shrinks. The connection   *)
@@ -770,7 +790,35 @@ ProcExit(p) ==
     /\ p \in proc_alive
     /\ proc_alive' = proc_alive \ {p}
     /\ UNCHANGED <<service_marked, service_poster, service_posters,
-                   connections, corvus_accepted, completed_conn_ops>>
+                   connections, connections_history, corvus_accepted,
+                   completed_conn_ops>>
+
+(***************************************************************************)
+(* ConnTeardown(cn) — the kernel tears the connection down: either the    *)
+(* client closes the KObj_Srv handle (`handle_close` → `srvconn_teardown`  *)
+(* + per-Proc count decrement), or corvus's server-side handle close      *)
+(* propagates an EOF that returns the SrvConn to its initial idle pool.   *)
+(* After ConnTeardown the (conn, peer) binding is GONE from `connections` *)
+(* and corvus_accepted — which lets the same Proc bind a fresh connection *)
+(* (`SrvBind` re-fires). F5 close (P5-corvus-srv-impl audit): pre-audit   *)
+(* the spec had append-only `connections`, which forbade the reconnect   *)
+(* pattern the impl supports + the b3b joey test exercises (Q11          *)
+(* tear-down then reconnect for fresh AUTH). Modeling teardown as a       *)
+(* first-class action aligns the spec's state space with reality.        *)
+(*                                                                         *)
+(* Subtlety: `completed_conn_ops` is NOT cleared — it's a HISTORY set of  *)
+(* what has been attributed to each peer, and the C-22 / C-23 invariants  *)
+(* check that history-attribution matches the binding that was live at   *)
+(* the moment of the op. A subsequent reconnect re-binds the same peer    *)
+(* to a (possibly) different conn id; new ops attribute against the new   *)
+(* binding, and the historical attributions stay sound.                  *)
+(***************************************************************************)
+ConnTeardown(cn) ==
+    /\ \E c \in connections : c.conn = cn
+    /\ connections' = {c \in connections : c.conn /= cn}
+    /\ corvus_accepted' = corvus_accepted \ {cn}
+    /\ UNCHANGED <<service_marked, service_poster, service_posters,
+                   connections_history, proc_alive, completed_conn_ops>>
 
 (***************************************************************************)
 (* ============== CONNECTION-LAYER BUG CLASSES (P5-corvus-srv) =========== *)
@@ -799,7 +847,8 @@ BuggyIdentityCachedOnFid(cn1, cn2) ==
                   attributed_peer |-> PeerOf(cn2),
                   peer_live |-> PeerOf(cn2) \in proc_alive]}
     /\ UNCHANGED <<service_marked, service_poster, service_posters,
-                   connections, corvus_accepted, proc_alive>>
+                   connections, connections_history, corvus_accepted,
+                   proc_alive>>
 
 (***************************************************************************)
 (* BuggyDeadProcStale(cn) — C-22 violation (kernel side). corvus performs  *)
@@ -819,7 +868,8 @@ BuggyDeadProcStale(cn) ==
     /\ completed_conn_ops' = completed_conn_ops
            \cup {[conn |-> cn, attributed_peer |-> PeerOf(cn), peer_live |-> FALSE]}
     /\ UNCHANGED <<service_marked, service_poster, service_posters,
-                   connections, corvus_accepted, proc_alive>>
+                   connections, connections_history, corvus_accepted,
+                   proc_alive>>
 
 (***************************************************************************)
 (* BuggyPostWithoutMarker(p) — post-gate violation. SYS_POST_SERVICE's     *)
@@ -840,8 +890,8 @@ BuggyPostWithoutMarker(p) ==
     /\ p \in proc_alive
     /\ service_poster'  = p
     /\ service_posters' = service_posters \cup {p}
-    /\ UNCHANGED <<service_marked, connections, corvus_accepted, proc_alive,
-                   completed_conn_ops>>
+    /\ UNCHANGED <<service_marked, connections, connections_history,
+                   corvus_accepted, proc_alive, completed_conn_ops>>
 
 (***************************************************************************)
 (* Next — disjunction of all actions. The session layer (corevars) and the *)
@@ -868,6 +918,7 @@ Next ==
           \/ \E cn \in Conns : \E p \in Procs : SrvBind(cn, p)
           \/ \E cn \in Conns : SrvAccept(cn)
           \/ \E cn \in Conns : SrvPeerOp(cn)
+          \/ \E cn \in Conns : ConnTeardown(cn)
           \/ \E p \in Procs : ProcExit(p)
           \/ \E cn1 \in Conns : \E cn2 \in Conns : BuggyIdentityCachedOnFid(cn1, cn2)
           \/ \E cn \in Conns : BuggyDeadProcStale(cn)
@@ -886,7 +937,8 @@ StateConstraint ==
     /\ Cardinality(session_origin) <= 3
     /\ Cardinality(completed_unwraps) <= 3
     /\ Cardinality(completed_admins) <= 3
-    /\ Cardinality(completed_conn_ops) <= 3
+    /\ Cardinality(completed_conn_ops) <= 2
+    /\ Cardinality(connections_history) <= 2
 
 (***************************************************************************)
 (* ============================== INVARIANTS ============================== *)
@@ -983,7 +1035,7 @@ HostownerRequiresConsole ==
 (***************************************************************************)
 ConnOpIdentityIsKernelTruth ==
     \A o \in completed_conn_ops :
-        \E c \in connections :
+        \E c \in connections_history :
             /\ c.conn = o.conn
             /\ c.peer = o.attributed_peer
 
