@@ -448,7 +448,51 @@ enum {
     //   - handle-table full
     //   - 9P handshake failure (server crashed / hung / Rlerror)
     SYS_SRV_CONNECT  = 30,   // arg: name_va, name_len, path_va, path_len
+
+    // P5-corvus-srv-impl-b3a: SYS_SPAWN_WITH_PERMS(name_va, name_len,
+    //                                              fd_list_va, fd_count,
+    //                                              cap_mask, perm_flags)
+    //                                              → pid / -1
+    //   x0..x4 — name + fd_list + cap_mask, identical to SYS_SPAWN_FULL.
+    //   x5 = perm_flags — bitmask of SPAWN_PERM_* bits stamped on the
+    //                     child Proc atomically inside the spawn thunk
+    //                     (BEFORE the child's exec_setup, so the child
+    //                     never observes the un-stamped intermediate
+    //                     state — race-free vs. a stamp-after-spawn race
+    //                     where the child might call SYS_POST_SERVICE
+    //                     before the parent's mark lands).
+    //
+    // PROC_FLAG_MAY_POST_SERVICE is the design's "kernel-stamped" gate
+    // for the /srv service registry (CORVUS-DESIGN.md §6.1; the flag is
+    // NOT a cap_mask bit because rfork must not propagate it across the
+    // OS-internal trust chain). SYS_SPAWN_WITH_PERMS is the production
+    // path joey uses to confer the bit on /sbin/corvus at spawn time.
+    //
+    // Granting any SPAWN_PERM_* bit requires the caller to be
+    // console-attached (the local-console trust anchor — joey is, an
+    // ordinary Proc is not). The check fires per-bit: a call with
+    // perm_flags=0 behaves identically to SYS_SPAWN_FULL.
+    //
+    // Returns -1 on:
+    //   - perm_flags contains an unknown SPAWN_PERM_* bit
+    //   - any SPAWN_PERM_* bit is set AND the caller is not console-
+    //     attached
+    //   - any condition that SYS_SPAWN_FULL itself returns -1 on
+    //     (bad fds / missing binary / oversized name / OOM / etc.)
+    SYS_SPAWN_WITH_PERMS = 31,  // arg: name_va, name_len, fd_list_va, fd_count,
+                                //      cap_mask, perm_flags
 };
+
+// SYS_SPAWN_WITH_PERMS perm_flags bits — must mirror the libt / libthyla-rs
+// constants. New bits add atomically without an ABI break (a Proc spawned
+// by a parent that did not know the new bit behaves identically to today).
+//
+// SPAWN_PERM_MAY_POST_SERVICE stamps PROC_FLAG_MAY_POST_SERVICE on the
+// spawned child (CORVUS-DESIGN.md §6.1). joey grants this to /sbin/corvus
+// so corvus may call SYS_POST_SERVICE("corvus") and become the /srv/corvus
+// 9P server. NOT a cap because rfork does not propagate it.
+#define SPAWN_PERM_MAY_POST_SERVICE  (1u << 0)
+#define SPAWN_PERM_ALL               (SPAWN_PERM_MAY_POST_SERVICE)
 
 // SYS_SRV_PEER result — the kernel-stamped peer identity of a /srv
 // connection (CORVUS-DESIGN.md §6.3). The kernel writes one of these to

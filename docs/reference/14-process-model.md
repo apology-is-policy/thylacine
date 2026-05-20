@@ -403,6 +403,27 @@ At v1.0 the sole console-attached Proc is **joey** — `joey_thunk` (`kernel/joe
 
 ---
 
+### Service-post authority (`PROC_FLAG_MAY_POST_SERVICE`) (P5-corvus-srv-impl-a2/b3a)
+
+`PROC_FLAG_MAY_POST_SERVICE` (`<thylacine/proc.h>`, `proc_flags` bit 4) gates `SYS_POST_SERVICE` — only a Proc carrying this bit can register itself as the 9P server for a `/srv/<name>`. The bit is kernel-stamped, NOT a cap: `rfork` does not propagate it (the kernel never copies it across the boundary), so it cannot be passed down a process tree by inheritance. The design's intent is that joey grants the bit *only* to `/sbin/corvus` (and future privileged daemons that explicitly need it), making `/srv/corvus` un-hijackable by any other Proc.
+
+| Function (`kernel/proc.c`) | Contract |
+|---|---|
+| `proc_mark_may_post_service(p)` | One-way set — idempotent, never cleared. Extincts on a NULL/corrupted/non-ALIVE Proc. Materializes `corvus.tla`'s `MarkMayPost` action. |
+| `proc_may_post_service(p)` | True iff `p` carries the bit. Fail-closed for a NULL Proc. |
+
+**The race-free stamp mechanism: `SYS_SPAWN_WITH_PERMS`.** A post-spawn `mark(child_pid)` syscall leaves a window in which the child could reach `SYS_POST_SERVICE` before the parent's mark lands (worst case on SMP — the child runs on another CPU between spawn-return and the next syscall). Closing the window structurally requires baking the stamp into the spawn path itself. `SYS_SPAWN_WITH_PERMS` (reference [73](73-sys-spawn-with-perms.md); syscall 31) does this: it extends `SYS_SPAWN_FULL` with a `perm_flags` argument that the kernel applies to the child Proc atomically inside the spawn thunk, BEFORE `exec_setup` — so the child's very first user-mode instruction observes the final `proc_flags`. The v1.0 bit is `SPAWN_PERM_MAY_POST_SERVICE`, which calls `proc_mark_may_post_service(child)` on the new Proc.
+
+Granting any `SPAWN_PERM_*` bit requires the calling Proc to be console-attached: the local-console trust anchor (joey, above) is the sole v1.0 grantor. A non-console-attached caller passing `perm_flags != 0` is rejected at the public `sys_spawn_with_perms_for_proc` entry before any user-VA reads.
+
+| Production caller | Mechanism |
+|---|---|
+| joey → `/sbin/corvus` | `t_spawn_with_perms(..., cap_mask, T_SPAWN_PERM_MAY_POST_SERVICE)` at P5-corvus-srv-impl-b3b. corvus then calls `SYS_POST_SERVICE("corvus")` from `rs_main` and becomes the `/srv/corvus` 9P server. |
+
+A tombstone-rebind protection (CORVUS-DESIGN.md §6.1) leverages the same bit: when corvus dies the registry entry is tombstoned (not freed), and rebinding it requires a `PROC_FLAG_MAY_POST_SERVICE`-holding Proc. So even if a malicious Proc spawned after corvus's death tries to claim `/srv/corvus`, it lacks the bit and is rejected — only joey's next `spawn_with_perms` of corvus can rebind.
+
+---
+
 ### Per-Proc identity tag (`stripes`) (P5-corvus-srv-impl-a1)
 
 Every Proc carries a `stripes` value (`<thylacine/proc.h>`, `struct Proc`, `u64`) — the kernel's per-Proc identity tag (the thylacine's stripe pattern; every animal's is unique). It is the kernel's unforgeable answer to "is this the same Proc?", read by `SYS_SRV_PEER` (P5-corvus-srv-impl-a3) to stamp a `/srv/corvus` connection's peer identity (CORVUS-DESIGN.md §6.3; `specs/corvus.tla` `ConnRecord.peer`).

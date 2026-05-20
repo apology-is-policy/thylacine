@@ -1369,6 +1369,12 @@ struct spawn_with_fds_args {
     // boundary that violates spec/handles.tla's RforkWithCaps
     // monotonicity expectation as extended for fd inheritance.
     rights_t       rights[SYS_SPAWN_MAX_FDS];
+    // P5-corvus-srv-impl-b3a: SPAWN_PERM_* bits the spawn thunk applies
+    // to the child Proc BEFORE exec_setup, atomically inside the new
+    // Proc's first thread context. 0 for SYS_SPAWN_WITH_FDS / SYS_SPAWN_FULL;
+    // SYS_SPAWN_WITH_PERMS carries the parent's vetted permission flags
+    // here. See SPAWN_PERM_* in <thylacine/syscall.h>.
+    u32            perm_flags;
 };
 
 __attribute__((noreturn))
@@ -1377,6 +1383,7 @@ static void sys_spawn_with_fds_thunk(void *arg) {
     void   *blob       = sa->blob;
     size_t  blob_size  = sa->blob_size;
     u32     fd_count   = sa->fd_count;
+    u32     perm_flags = sa->perm_flags;
     struct Spoor *spoors_local[SYS_SPAWN_MAX_FDS];
     rights_t      rights_local[SYS_SPAWN_MAX_FDS];
     for (u32 i = 0; i < fd_count; i++) {
@@ -1389,6 +1396,22 @@ static void sys_spawn_with_fds_thunk(void *arg) {
     if (!t) extinction("sys_spawn_with_fds_thunk: no current_thread");
     struct Proc *p = t->proc;
     if (!p) extinction("sys_spawn_with_fds_thunk: no proc");
+
+    // P5-corvus-srv-impl-b3a: apply parent-vetted SPAWN_PERM_* bits BEFORE
+    // anything user-observable. Done here (in the child thread's context,
+    // before exec_setup) rather than in the parent path so the child
+    // never sees an un-stamped intermediate state — its very first user-
+    // mode instruction observes the final proc_flags. The parent already
+    // gate-checked every bit (sys_spawn_with_perms_for_proc); the thunk
+    // just translates each bit to the kernel mark function. Fail-closed:
+    // an unknown bit at this point is a kernel invariant violation (the
+    // parent must have stripped it).
+    if (perm_flags & SPAWN_PERM_MAY_POST_SERVICE) {
+        proc_mark_may_post_service(p);
+    }
+    if (perm_flags & ~SPAWN_PERM_ALL) {
+        extinction("sys_spawn_with_fds_thunk: unknown SPAWN_PERM_* bit");
+    }
 
     // Install each Spoor in the child's handle table at the lowest
     // free slot. Post-rfork, the table is empty, so the first install
@@ -1584,9 +1607,21 @@ static s64 sys_spawn_with_caps_handler(u64 name_va, u64 name_len_raw, u64 cap_ma
 //
 // Needed at P5-corvus-bringup where joey spawns /sbin/corvus with a
 // pipe pair (login communication) AND CAP_LOCK_PAGES + CAP_CSPRNG_READ.
+//
+// SYS_SPAWN_WITH_PERMS (P5-corvus-srv-impl-b3a) extends this with a
+// `perm_flags` parameter that the child's spawn thunk applies as one-way
+// PROC_FLAG_* stamps BEFORE exec_setup. The shared implementation lives in
+// `sys_spawn_full_with_perms_for_proc`; sys_spawn_full_for_proc + sys_spawn
+// _with_perms_for_proc are thin wrappers that fix perm_flags to 0 or the
+// caller's vetted bitmask respectively. Keeping one implementation avoids
+// the per-variant drift the earlier copy-paste pattern accumulated.
 
-int sys_spawn_full_for_proc(struct Proc *p, const char *name, size_t name_len,
-                            const u32 *fds, u32 fd_count, caps_t cap_mask) {
+// Internal: the unified spawn body. perm_flags MUST be vetted (callers
+// gate-check console-attachment before passing nonzero bits).
+static int sys_spawn_full_with_perms_for_proc(struct Proc *p,
+                                              const char *name, size_t name_len,
+                                              const u32 *fds, u32 fd_count,
+                                              caps_t cap_mask, u32 perm_flags) {
     if (!p)                                            return -1;
     if (!name)                                         return -1;
     if (name_len == 0 || name_len > SYS_SPAWN_NAME_MAX) return -1;
@@ -1596,6 +1631,10 @@ int sys_spawn_full_for_proc(struct Proc *p, const char *name, size_t name_len,
     if (name[name_len] != '\0')                         return -1;
     if (fd_count > SYS_SPAWN_MAX_FDS)                   return -1;
     if (fd_count > 0 && !fds)                           return -1;
+    // perm_flags arrives already gate-checked by the public wrappers; the
+    // bit-mask validation here is a defense-in-depth guard so a future
+    // caller that bypasses the wrappers still fails closed on garbage bits.
+    if (perm_flags & ~SPAWN_PERM_ALL)                   return -1;
 
     // Look up each fd, bump its spoor_ref, and capture the parent
     // slot's rights for the child-side install (R15 F231 close).
@@ -1635,9 +1674,10 @@ int sys_spawn_full_for_proc(struct Proc *p, const char *name, size_t name_len,
         for (u32 j = 0; j < fd_count; j++) spoor_unref(bumped[j]);
         return -1;
     }
-    sa->blob      = blob_copy;
-    sa->blob_size = cpio_size;
-    sa->fd_count  = fd_count;
+    sa->blob       = blob_copy;
+    sa->blob_size  = cpio_size;
+    sa->fd_count   = fd_count;
+    sa->perm_flags = perm_flags;
     for (u32 i = 0; i < fd_count; i++) {
         sa->spoors[i] = bumped[i];
         sa->rights[i] = bumped_rights[i];
@@ -1651,6 +1691,29 @@ int sys_spawn_full_for_proc(struct Proc *p, const char *name, size_t name_len,
         return -1;
     }
     return pid;
+}
+
+int sys_spawn_full_for_proc(struct Proc *p, const char *name, size_t name_len,
+                            const u32 *fds, u32 fd_count, caps_t cap_mask) {
+    return sys_spawn_full_with_perms_for_proc(p, name, name_len, fds, fd_count,
+                                              cap_mask, /*perm_flags=*/0u);
+}
+
+// SYS_SPAWN_WITH_PERMS — P5-corvus-srv-impl-b3a kernel body. Gates any
+// nonzero SPAWN_PERM_* bit on the caller being console-attached (joey is
+// the v1.0 console anchor; an ordinary Proc that wandered into this call
+// has no path to confer the bit). Setting perm_flags=0 is identical to
+// SYS_SPAWN_FULL — kept as a single entry point so callers that grant no
+// permissions do not need a separate code path.
+int sys_spawn_with_perms_for_proc(struct Proc *p,
+                                  const char *name, size_t name_len,
+                                  const u32 *fds, u32 fd_count,
+                                  caps_t cap_mask, u32 perm_flags) {
+    if (!p)                                             return -1;
+    if (perm_flags & ~SPAWN_PERM_ALL)                   return -1;
+    if (perm_flags != 0u && !proc_is_console_attached(p)) return -1;
+    return sys_spawn_full_with_perms_for_proc(p, name, name_len, fds, fd_count,
+                                              cap_mask, perm_flags);
 }
 
 static s64 sys_spawn_full_handler(u64 name_va, u64 name_len_raw,
@@ -1693,6 +1756,59 @@ static s64 sys_spawn_full_handler(u64 name_va, u64 name_len_raw,
     return (s64)sys_spawn_full_for_proc(p, name, (size_t)name_len_raw,
                                         fds_kbuf, (u32)fd_count_raw,
                                         (caps_t)cap_mask_raw);
+}
+
+// SYS_SPAWN_WITH_PERMS handler — same shape as sys_spawn_full_handler but
+// reads a sixth argument (perm_flags) and routes to the perms-bearing core.
+// Sharing the parser body via copy-and-extend rather than an internal
+// helper keeps the user-VA validation visibly local to each entry point
+// (every syscall handler reads its own args under the same audit lens).
+static s64 sys_spawn_with_perms_handler(u64 name_va, u64 name_len_raw,
+                                        u64 fd_list_va, u64 fd_count_raw,
+                                        u64 cap_mask_raw, u64 perm_flags_raw) {
+    struct Thread *t = current_thread();
+    if (!t)                                            return -1;
+    struct Proc *p = t->proc;
+    if (!p)                                            return -1;
+
+    // perm_flags is a u32 over the wire; reject any bits past the
+    // documented SPAWN_PERM_* set BEFORE any user-VA copy so a hostile
+    // caller cannot probe for fault behavior with high bits set.
+    if (perm_flags_raw & ~(u64)SPAWN_PERM_ALL)         return -1;
+
+    if (name_len_raw == 0 || name_len_raw > SYS_SPAWN_NAME_MAX) return -1;
+    if (!sys_validate_user_buf(name_va, name_len_raw)) return -1;
+    if (fd_count_raw > SYS_SPAWN_MAX_FDS)               return -1;
+
+    char name[SYS_SPAWN_NAME_MAX + 1];
+    for (u64 i = 0; i < name_len_raw; i++) {
+        u8 b = 0;
+        if (uaccess_load_u8(name_va + i, &b) != 0)     return -1;
+        if (b == 0)                                    return -1;
+        name[i] = (char)b;
+    }
+    name[name_len_raw] = '\0';
+
+    u32 fds_kbuf[SYS_SPAWN_MAX_FDS] = { 0 };
+    if (fd_count_raw > 0) {
+        u64 list_bytes = fd_count_raw * sizeof(u32);
+        if (!sys_validate_user_buf(fd_list_va, list_bytes)) return -1;
+        for (u64 i = 0; i < fd_count_raw; i++) {
+            u32 v = 0;
+            for (u64 b = 0; b < sizeof(u32); b++) {
+                u8 byte = 0;
+                if (uaccess_load_u8(fd_list_va + i * sizeof(u32) + b, &byte) != 0)
+                    return -1;
+                v |= (u32)byte << (b * 8);
+            }
+            fds_kbuf[i] = v;
+        }
+    }
+
+    return (s64)sys_spawn_with_perms_for_proc(p, name, (size_t)name_len_raw,
+                                              fds_kbuf, (u32)fd_count_raw,
+                                              (caps_t)cap_mask_raw,
+                                              (u32)perm_flags_raw);
 }
 
 static s64 sys_spawn_with_fds_handler(u64 name_va, u64 name_len_raw,
@@ -2369,6 +2485,15 @@ void syscall_dispatch(struct exception_context *ctx) {
                                                      ctx->regs[1],
                                                      ctx->regs[2],
                                                      ctx->regs[3]);
+        return;
+
+    case SYS_SPAWN_WITH_PERMS:
+        ctx->regs[0] = (u64)sys_spawn_with_perms_handler(ctx->regs[0],
+                                                          ctx->regs[1],
+                                                          ctx->regs[2],
+                                                          ctx->regs[3],
+                                                          ctx->regs[4],
+                                                          ctx->regs[5]);
         return;
 
     default:

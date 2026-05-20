@@ -483,6 +483,10 @@ void test_sys_spawn_full_zero_count_zero_mask_succeeds(void);
 void test_sys_spawn_full_rejects_oversize_fd_count(void);
 void test_sys_spawn_full_rejects_bad_fd(void);
 void test_sys_spawn_full_rejects_missing_binary(void);
+void test_sys_spawn_with_perms_zero_perm_is_spawn_full(void);
+void test_sys_spawn_with_perms_console_attached_grants_may_post(void);
+void test_sys_spawn_with_perms_rejects_non_console_attached_parent(void);
+void test_sys_spawn_with_perms_rejects_unknown_perm_bits(void);
 void test_stratumd_stub_round_trip(void);
 void test_stub_driver_round_trip(void);
 void test_irq_latency_bench(void);
@@ -1185,6 +1189,10 @@ struct test_case g_tests[] = {
     { "sys_spawn_full.rejects_oversize_fd_count",      test_sys_spawn_full_rejects_oversize_fd_count,      false, NULL },
     { "sys_spawn_full.rejects_bad_fd",                 test_sys_spawn_full_rejects_bad_fd,                 false, NULL },
     { "sys_spawn_full.rejects_missing_binary",         test_sys_spawn_full_rejects_missing_binary,         false, NULL },
+    { "sys_spawn_with_perms.zero_perm_is_spawn_full",  test_sys_spawn_with_perms_zero_perm_is_spawn_full,  false, NULL },
+    { "sys_spawn_with_perms.console_attached_grants_may_post", test_sys_spawn_with_perms_console_attached_grants_may_post, false, NULL },
+    { "sys_spawn_with_perms.rejects_non_console_attached_parent", test_sys_spawn_with_perms_rejects_non_console_attached_parent, false, NULL },
+    { "sys_spawn_with_perms.rejects_unknown_perm_bits", test_sys_spawn_with_perms_rejects_unknown_perm_bits, false, NULL },
     { "userspace.stratumd_stub_round_trip",            test_stratumd_stub_round_trip,                      false, NULL },
     { "userspace.stub_driver_round_trip",              test_stub_driver_round_trip,                        false, NULL },
     { "userspace.irq_latency_bench",   test_irq_latency_bench,             false, NULL },

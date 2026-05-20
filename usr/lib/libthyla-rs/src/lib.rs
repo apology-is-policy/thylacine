@@ -53,10 +53,22 @@ pub const T_SYS_SET_TRACEABLE: u64   = 18;
 pub const T_SYS_EXPLICIT_BZERO: u64  = 19;
 pub const T_SYS_GETRANDOM: u64       = 20;
 pub const T_SYS_SPAWN_FULL: u64      = 25;
+// P5-corvus-srv-impl-a/b: /srv mechanism — kernel-owned 9P transport.
+pub const T_SYS_POST_SERVICE: u64    = 26;
+pub const T_SYS_SRV_ACCEPT: u64      = 27;
+pub const T_SYS_SRV_PEER: u64        = 28;
 // P5-poll-a: the multi-fd wait/wake primitive. Backs corvus's main loop
 // (a single thread serving N /srv/corvus connections) and the future
 // musl `poll(2)` shim. ABI matches Linux event values for shim triviality.
 pub const T_SYS_POLL: u64            = 29;
+pub const T_SYS_SRV_CONNECT: u64     = 30;
+// P5-corvus-srv-impl-b3a: spawn_full + perm_flags (atomic kernel stamp
+// of PROC_FLAG_* bits on the spawned child, gated on caller console-attach).
+pub const T_SYS_SPAWN_WITH_PERMS: u64 = 31;
+
+// SYS_SPAWN_WITH_PERMS perm_flags — must mirror SPAWN_PERM_* in
+// kernel/include/thylacine/syscall.h.
+pub const T_SPAWN_PERM_MAY_POST_SERVICE: u64 = 1 << 0;
 
 // poll event bits — MUST mirror POLL* in kernel/include/thylacine/poll.h.
 // Linux values; the future musl shim is a no-op.
@@ -526,6 +538,49 @@ pub unsafe fn t_getrandom(buf: *mut u8, len: usize, flags: u64) -> i64 {
         in("x1") len as u64,
         in("x2") flags,
         in("x8") T_SYS_GETRANDOM,
+        options(nostack)
+    );
+    x0
+}
+
+// =============================================================================
+// P5-corvus-srv-impl-b3a — t_spawn_with_perms.
+// =============================================================================
+//
+// SYS_SPAWN_WITH_PERMS extends SYS_SPAWN_FULL with a sixth argument
+// `perm_flags` carrying T_SPAWN_PERM_* bits. The kernel stamps each set
+// bit as the corresponding PROC_FLAG_* on the spawned child atomically
+// inside the spawn thunk (BEFORE the child's exec_setup), so the child's
+// very first user-mode instruction observes the final proc_flags.
+//
+// Any nonzero perm_flags bit requires the calling Proc to be console-
+// attached. Designed for joey (the v1.0 console anchor): joey grants
+// /sbin/corvus T_SPAWN_PERM_MAY_POST_SERVICE so corvus may call
+// SYS_POST_SERVICE("corvus"). Bits are NOT propagated by rfork (the
+// design's "kernel-stamped" gate, not a cap).
+//
+// Returns the child PID (>0) on success, -1 on:
+//   - perm_flags has unknown bits
+//   - any perm_flags bit set AND caller is not console-attached
+//   - any condition that t_spawn_full would return -1 on
+//
+// Safety: `name` must point to `name_len` readable bytes; `fds` (if
+// fd_count > 0) must point to `fd_count` u32 entries; all in valid
+// user-VA.
+#[inline(always)]
+pub unsafe fn t_spawn_with_perms(name: *const u8, name_len: usize,
+                                 fds: *const u32, fd_count: usize,
+                                 cap_mask: u64, perm_flags: u64) -> i64 {
+    let mut x0: i64 = name as i64;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") name_len as u64,
+        in("x2") fds as u64,
+        in("x3") fd_count as u64,
+        in("x4") cap_mask,
+        in("x5") perm_flags,
+        in("x8") T_SYS_SPAWN_WITH_PERMS,
         options(nostack)
     );
     x0

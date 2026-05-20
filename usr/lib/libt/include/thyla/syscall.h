@@ -57,7 +57,18 @@ enum {
     T_SYS_SPAWN_WITH_FDS = 23, // P5-stratumd-stub-b: spawn + pre-install fds in child
     T_SYS_SPAWN_WITH_CAPS = 24, // P5-spawn-caps: spawn + grant cap-subset to child
     T_SYS_SPAWN_FULL  = 25, // P5-spawn-full: spawn + inherit fds + grant cap-subset
+    // 26..30 — registered in <thylacine/syscall.h> (P5-corvus-srv + P5-poll);
+    // libt has no C-side wrappers for them at v1.0 (corvus and joey reach
+    // them via libthyla-rs / direct SVC respectively).
+    T_SYS_SPAWN_WITH_PERMS = 31, // P5-corvus-srv-impl-b3a: spawn_full + perm_flags
 };
+
+// SYS_SPAWN_WITH_PERMS perm_flags — must mirror SPAWN_PERM_* in
+// kernel/include/thylacine/syscall.h. SPAWN_PERM_MAY_POST_SERVICE stamps
+// PROC_FLAG_MAY_POST_SERVICE on the spawned child so it may call
+// SYS_POST_SERVICE; granting it requires the parent to be console-
+// attached.
+#define T_SPAWN_PERM_MAY_POST_SERVICE  (1u << 0)
 
 // SYS_GETRANDOM flags (mirror kernel/include/thylacine/syscall.h).
 #define T_GRND_NONBLOCK   1u
@@ -629,6 +640,46 @@ static inline long t_spawn_full(const char *name, size_t name_len,
         "svc #0"
         : "+r"(x0)
         : "r"(x1), "r"(x2), "r"(x3), "r"(x4), "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
+// t_spawn_with_perms — extends t_spawn_full with a `perm_flags` bitmask
+// that the kernel stamps on the child Proc atomically inside the spawn
+// thunk (BEFORE the child's exec_setup, so the child never observes the
+// un-stamped intermediate state). `perm_flags` is the bitwise-OR of
+// T_SPAWN_PERM_* bits.
+//
+// Any nonzero perm_flags bit requires the calling Proc to be console-
+// attached (the v1.0 local-console trust anchor). joey IS console-
+// attached; an ordinary Proc that wandered into this call is rejected.
+//
+// At v1.0 the only defined bit is T_SPAWN_PERM_MAY_POST_SERVICE, used
+// by joey to grant /sbin/corvus the right to call SYS_POST_SERVICE
+// ("corvus"). The bit is NOT a cap (rfork would propagate caps); kernel-
+// stamped at spawn so it cannot cross an rfork boundary.
+//
+// Returns the child PID (>0) on success, -1 on:
+//   - perm_flags has unknown bits
+//   - any perm_flags bit set AND caller is not console-attached
+//   - any condition that t_spawn_full returns -1 on
+__attribute__((always_inline))
+static inline long t_spawn_with_perms(const char *name, size_t name_len,
+                                      const unsigned int *fds, size_t fd_count,
+                                      unsigned long cap_mask,
+                                      unsigned long perm_flags) {
+    register long x0 __asm__("x0") = (long)(unsigned long)name;
+    register long x1 __asm__("x1") = (long)name_len;
+    register long x2 __asm__("x2") = (long)(unsigned long)fds;
+    register long x3 __asm__("x3") = (long)fd_count;
+    register long x4 __asm__("x4") = (long)cap_mask;
+    register long x5 __asm__("x5") = (long)perm_flags;
+    register long x8 __asm__("x8") = T_SYS_SPAWN_WITH_PERMS;
+    __asm__ volatile (
+        "svc #0"
+        : "+r"(x0)
+        : "r"(x1), "r"(x2), "r"(x3), "r"(x4), "r"(x5), "r"(x8)
         : "memory", "cc"
     );
     return x0;

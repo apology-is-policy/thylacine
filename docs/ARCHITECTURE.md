@@ -1308,11 +1308,15 @@ The `/srv` transport (`devsrv`, §9.4) by which a userspace 9P server — `corvu
 
 | Syscall | Description |
 |---|---|
-| `post_service(name) → service_handle` | Register the caller as the 9P server for `/srv/<name>`. The kernel creates and owns all transport. Posting/rebinding a name is gated on a one-way joey-stamped `proc_flags` bit; on server death the name is tombstoned, not freed. |
+| `post_service(name) → service_handle` | Register the caller as the 9P server for `/srv/<name>`. The kernel creates and owns all transport. Posting/rebinding a name is gated on a one-way joey-stamped `proc_flags` bit (`PROC_FLAG_MAY_POST_SERVICE`); on server death the name is tombstoned, not freed. |
 | `srv_accept(service_handle) → connection_handle` | Block until a client opens `/srv/<name>`; receive the server end of one fresh kernel-minted per-client connection. Bounded accept queue. |
 | `srv_peer(connection_handle) → {stripes, console, caps}` | Read the connection's kernel-stamped peer identity: the immutable `stripes` tag + console-attachment bit (captured by value at bind), and the live `caps` (read under the process-table lock, fail-closed for an exited peer). Gated to the service's poster. |
+| `srv_connect(name, path) → connection_handle` | Client-side open of `/srv/<name>/<path>`. Composes the kernel-side connection mint + the synchronous `Tversion + Tattach + optional Twalk + Tlopen` handshake. Returns a non-transferable `KObj_Srv` handle whose `client_fid` is ready for `SYS_READ` / `SYS_WRITE`. Per-Proc cap = 1. |
+| `spawn_with_perms(name, fds, fd_count, cap_mask, perm_flags)` | Spawn variant that atomically stamps `SPAWN_PERM_*` bits on the child Proc inside the spawn thunk (before `exec_setup`). The v1.0 bit is `SPAWN_PERM_MAY_POST_SERVICE`, which stamps `PROC_FLAG_MAY_POST_SERVICE`. Granting any bit requires the caller to be console-attached (the local-console trust anchor — joey). This is joey's race-free path to confer post-service authority on `/sbin/corvus`. |
 
 `stripes` is a `u64` per-Proc identity tag — a monotonic counter assigned fresh at `proc_alloc`, immutable for the Proc's life, `0` reserved as a fail-closed sentinel. A `/srv` connection Spoor is a `KObj_Srv` handle (§18.2), non-transferable.
+
+`PROC_FLAG_MAY_POST_SERVICE` is structurally NOT a cap: it is **kernel-stamped only at spawn time** (the `spawn_with_perms` thunk above) so the bit cannot be propagated by `rfork` — the same discipline as `PROC_FLAG_CONSOLE_ATTACHED` (§5.5 of CORVUS-DESIGN). The pre-spawn stamp is what avoids the race window a post-spawn `mark()` syscall would open between the parent's mark and the child's first `SYS_POST_SERVICE` call.
 
 ### 11.3 Handle syscalls
 
