@@ -273,17 +273,29 @@ void srvconn_teardown(struct SrvConn *cn) {
     cn->state = SRVCONN_STATE_TORN;
     spin_unlock(&cn->lock);
 
-    // Latch EOF on both directions + wake any blocked consumer. cn->lock
-    // is already released; the two channels are independent leaves, so
-    // there is no lock-ordering relation to honor.
-    chan_set_eof(&cn->c2s);
-    chan_set_eof(&cn->s2c);
+    // Latch EOF on BOTH directions inside ONE dual-lock critical section,
+    // so a poller (srvconn_poll holds c2s.lock + s2c.lock simultaneously
+    // — same fixed order) cannot observe c2s.eof=true with s2c.eof=false:
+    // a mid-teardown poll otherwise sees POLLHUP without POLLERR, which
+    // the documentation forbids. Lock order c2s → s2c matches srvconn_poll
+    // — no other path takes both, so the nested acquire is safe.
+    spin_lock(&cn->c2s.lock);
+    spin_lock(&cn->s2c.lock);
+    cn->c2s.eof = true;
+    cn->s2c.eof = true;
+    spin_unlock(&cn->s2c.lock);
+    spin_unlock(&cn->c2s.lock);
+
+    // Wake every blocked consumer + every registered poller. Wakes happen
+    // outside the channel locks (the wakeup / poll-list paths take the
+    // rendez / list locks; producer-mutates-then-wakes is the chan_produce
+    // discipline). Both EOFs are visible to any wake observer.
+    wakeup(&cn->c2s.rendez);
+    wakeup(&cn->s2c.rendez);
 
     // Teardown is a single readiness edge for every server-endpoint
     // poller: POLLHUP latches off c2s.eof, POLLERR off s2c.eof. ONE wake
-    // walks every registered hook (the chan_set_eof wakeups above target
-    // the Rendez waiters; the poll list is independent). specs/poll.tla
-    // MakeReady.
+    // walks every registered hook. specs/poll.tla MakeReady.
     poll_waiter_list_wake(&cn->poll_list);
 }
 
@@ -395,19 +407,15 @@ long srvconn_server_send(struct SrvConn *cn, const u8 *buf, long n) {
     if (!cn || cn->magic != SRV_CONN_MAGIC) return -1;
     if (!buf || n < 0) return -1;
     if (n == 0) return 0;
-    long put = chan_produce(&cn->s2c, buf, n);
-    if (put > 0) {
-        // s2c.count went up — but the server poller already had POLLOUT
-        // ready before the put (s2c had room). The interesting edge for
-        // a server-endpoint poller is when s2c DRAINS, which the kernel
-        // client side does in srvconn_client_recv — but that drain is
-        // never observed via poll (the kernel client doesn't poll; it
-        // tsleep-blocks). The wake here is correct-by-symmetry with the
-        // c2s direction and lets a future client-side poller observe a
-        // non-empty s2c ring.
-        poll_waiter_list_wake(&cn->poll_list);
-    }
-    return put;
+    // No poll wake here at v1.0. srvconn_poll's server-endpoint POLLOUT is
+    // `!s2c.eof && s2c.count < SRVCONN_RING_CAP`: increasing s2c.count can
+    // only REDUCE POLLOUT-ready space, never make it more ready. The
+    // POLLOUT-becomes-ready edge is the kernel-client drain in
+    // srvconn_client_recv — and the kernel client doesn't poll (it
+    // tsleep-blocks). Restoring the wake belongs with the future client-
+    // side poll path (cn->client_poll_list), which would observe s2c FILL
+    // as a POLLIN edge.
+    return chan_produce(&cn->s2c, buf, n);
 }
 
 long srvconn_server_recv(struct SrvConn *cn, u8 *buf, long n) {

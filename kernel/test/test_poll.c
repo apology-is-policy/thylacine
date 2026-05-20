@@ -64,6 +64,10 @@ void test_poll_devsrv_conn_pollin_on_send(void);
 void test_poll_devsrv_conn_pollout_immediate(void);
 void test_poll_devsrv_conn_pollhup_on_teardown(void);
 void test_poll_devsrv_conn_block_then_wake_pollin(void);
+void test_poll_null_obj_spoor_pollnval(void);
+void test_poll_client_srv_handle_pollnval(void);
+void test_poll_mixed_spoor_and_srv(void);
+void test_poll_max_nfds(void);
 
 // =============================================================================
 // Helpers: test Proc + per-test Spoor → fd installation.
@@ -759,4 +763,137 @@ void test_poll_devsrv_conn_block_then_wake_pollin(void) {
     srv_registry_reset();
     drop_test_proc(client);
     drop_test_proc(corvus);
+}
+
+// =============================================================================
+// Regression + coverage (P5-poll audit close #538).
+// =============================================================================
+
+void test_poll_null_obj_spoor_pollnval(void) {
+    // F4 regression: a KObj_Spoor handle with NULL obj must report POLLNVAL,
+    // not "always-ready." Allocating a malformed handle exercises the
+    // poll_scan_one NULL-Spoor branch.
+    struct Proc *p = make_test_proc();
+    TEST_ASSERT(p != NULL, "test proc");
+
+    hidx_t h = handle_alloc(p, KOBJ_SPOOR, RIGHT_READ, NULL);
+    TEST_ASSERT(h >= 0, "NULL-obj spoor handle allocated");
+
+    struct pollfd pfds[1] = {
+        { .fd = h, .events = POLLIN | POLLOUT, .revents = 0 },
+    };
+    s64 ret = sys_poll_for_proc(p, pfds, 1, 0);
+    TEST_EXPECT_EQ(ret, 1L, "POLLNVAL counts as ready");
+    TEST_EXPECT_EQ((s64)pfds[0].revents, (s64)POLLNVAL,
+        "NULL-obj KObj_Spoor → POLLNVAL (not always-ready)");
+
+    drop_test_proc(p);
+}
+
+void test_poll_client_srv_handle_pollnval(void) {
+    // F1 regression: a client-side KObj_Srv handle (obj = SrvConn) is NOT
+    // pollable at v1.0 — `srv_handle_poll`'s SRV_CONN_MAGIC arm fails
+    // closed to POLLNVAL. (The server-endpoint poll lives on the
+    // KOBJ_SPOOR handle returned by SYS_SRV_ACCEPT.) Routes the client
+    // handle's KOBJ_SRV dispatch through srv_handle_poll.
+    srv_registry_reset();
+
+    struct Proc *corvus = make_marked_test_proc();
+    TEST_ASSERT(corvus != NULL, "corvus proc");
+    TEST_ASSERT(sys_post_service_for_proc(corvus, "corvus", 6) >= 0,
+        "post \"corvus\"");
+
+    struct Proc *client = make_test_proc();
+    TEST_ASSERT(client != NULL, "client proc");
+    int client_h = srv_conn_open_for_proc(client, "corvus", 6);
+    TEST_ASSERT(client_h >= 0, "client connects → KObj_Srv handle");
+
+    struct Handle *slot = handle_get(client, (hidx_t)client_h);
+    TEST_ASSERT(slot != NULL, "handle resolves");
+    TEST_EXPECT_EQ((int)slot->kind, (int)KOBJ_SRV,
+        "client connection handle is KOBJ_SRV");
+
+    struct pollfd pfds[1] = {
+        { .fd = client_h, .events = POLLIN | POLLOUT, .revents = 0 },
+    };
+    s64 ret = sys_poll_for_proc(client, pfds, 1, 0);
+    TEST_EXPECT_EQ(ret, 1L, "POLLNVAL counts as ready");
+    TEST_EXPECT_EQ((s64)pfds[0].revents, (s64)POLLNVAL,
+        "client-side KObj_Srv handle → POLLNVAL (no v1.0 client poll)");
+
+    srv_registry_reset();
+    drop_test_proc(client);
+    drop_test_proc(corvus);
+}
+
+void test_poll_mixed_spoor_and_srv(void) {
+    // Cross-kobj-kind coverage: poll one KObj_Spoor (a pipe read end) +
+    // one KObj_Srv (corvus's listener) in a single call. Both unready
+    // → returns 0 with no sleep; then make the listener ready via a
+    // client connect → re-poll returns 1 with only the listener flagged.
+    srv_registry_reset();
+
+    struct Proc *corvus = make_marked_test_proc();
+    TEST_ASSERT(corvus != NULL, "corvus proc");
+    int svc_h = sys_post_service_for_proc(corvus, "corvus", 6);
+    TEST_ASSERT(svc_h >= 0, "post \"corvus\"");
+
+    struct Spoor *rd = NULL, *wr = NULL;
+    TEST_EXPECT_EQ(pipe_create(&rd, &wr), 0, "pipe_create");
+    hidx_t hrd = install_spoor(corvus, rd, RIGHT_READ);
+    hidx_t hwr = install_spoor(corvus, wr, RIGHT_WRITE);
+    TEST_ASSERT(hrd >= 0 && hwr >= 0, "pipe fds installed");
+    (void)hwr;
+
+    struct pollfd pfds[2] = {
+        { .fd = hrd,   .events = POLLIN, .revents = 0 },
+        { .fd = svc_h, .events = POLLIN, .revents = 0 },
+    };
+    s64 ret = sys_poll_for_proc(corvus, pfds, 2, 0);
+    TEST_EXPECT_EQ(ret, 0L, "both unready → 0");
+    TEST_EXPECT_EQ((s64)pfds[0].revents, 0L, "spoor not ready");
+    TEST_EXPECT_EQ((s64)pfds[1].revents, 0L, "listener not ready");
+
+    // Make the listener ready (client connects).
+    struct Proc *client = make_test_proc();
+    TEST_ASSERT(client != NULL, "client proc");
+    TEST_ASSERT(srv_conn_open_for_proc(client, "corvus", 6) >= 0,
+        "client connects");
+
+    pfds[0].revents = 0;
+    pfds[1].revents = 0;
+    ret = sys_poll_for_proc(corvus, pfds, 2, 0);
+    TEST_EXPECT_EQ(ret, 1L, "one ready → 1");
+    TEST_EXPECT_EQ((s64)pfds[0].revents, 0L, "spoor still not ready");
+    TEST_EXPECT_EQ((s64)pfds[1].revents, (s64)POLLIN,
+        "listener POLLIN ready (backlog non-empty)");
+
+    srv_registry_reset();
+    drop_test_proc(client);
+    drop_test_proc(corvus);
+}
+
+void test_poll_max_nfds(void) {
+    // Boundary coverage: nfds = PROC_HANDLE_MAX = 64. Exercises the
+    // stack allocation of `waiters[64]` and the per-fd scan loop's
+    // bound. All-POLLNVAL (cheapest setup) — the sweep walks all 64.
+    struct Proc *p = make_test_proc();
+    TEST_ASSERT(p != NULL, "test proc");
+
+    struct pollfd pfds[PROC_HANDLE_MAX];
+    for (u32 i = 0; i < PROC_HANDLE_MAX; i++) {
+        pfds[i].fd      = (s32)i;       // unallocated → POLLNVAL
+        pfds[i].events  = POLLIN;
+        pfds[i].revents = 0;
+    }
+    s64 ret = sys_poll_for_proc(p, pfds, PROC_HANDLE_MAX, 0);
+    TEST_EXPECT_EQ(ret, (s64)PROC_HANDLE_MAX,
+        "every fd POLLNVAL → 64 ready");
+    bool all_pollnval = true;
+    for (u32 i = 0; i < PROC_HANDLE_MAX; i++) {
+        if (pfds[i].revents != POLLNVAL) { all_pollnval = false; break; }
+    }
+    TEST_ASSERT(all_pollnval, "every revents = POLLNVAL");
+
+    drop_test_proc(p);
 }

@@ -424,6 +424,10 @@ void test_poll_devsrv_conn_pollin_on_send(void);
 void test_poll_devsrv_conn_pollout_immediate(void);
 void test_poll_devsrv_conn_pollhup_on_teardown(void);
 void test_poll_devsrv_conn_block_then_wake_pollin(void);
+void test_poll_null_obj_spoor_pollnval(void);
+void test_poll_client_srv_handle_pollnval(void);
+void test_poll_mixed_spoor_and_srv(void);
+void test_poll_max_nfds(void);
 void test_sys_pipe_allocates_two_distinct_spoor_handles(void);
 void test_sys_pipe_proc_free_releases_handles(void);
 void test_sys_pipe_handle_close_releases_one_end(void);
@@ -1104,6 +1108,10 @@ struct test_case g_tests[] = {
     { "poll.devsrv_conn_pollout_immediate",     test_poll_devsrv_conn_pollout_immediate,     false, NULL },
     { "poll.devsrv_conn_pollhup_on_teardown",   test_poll_devsrv_conn_pollhup_on_teardown,   false, NULL },
     { "poll.devsrv_conn_block_then_wake_pollin", test_poll_devsrv_conn_block_then_wake_pollin, false, NULL },
+    { "poll.null_obj_spoor_pollnval",           test_poll_null_obj_spoor_pollnval,           false, NULL },
+    { "poll.client_srv_handle_pollnval",        test_poll_client_srv_handle_pollnval,        false, NULL },
+    { "poll.mixed_spoor_and_srv",               test_poll_mixed_spoor_and_srv,               false, NULL },
+    { "poll.max_nfds",                          test_poll_max_nfds,                          false, NULL },
     { "sys_pipe.allocates_two_distinct_spoor_handles", test_sys_pipe_allocates_two_distinct_spoor_handles, false, NULL },
     { "sys_pipe.proc_free_releases_handles",           test_sys_pipe_proc_free_releases_handles,           false, NULL },
     { "sys_pipe.handle_close_releases_one_end",        test_sys_pipe_handle_close_releases_one_end,        false, NULL },

@@ -38,17 +38,43 @@
 //   the object lock for the readiness sample, then calls
 //   `poll_waiter_list_register` (which takes the list lock internally)
 //   to install the hook ATOMICALLY with the sample under the object
-//   lock. The producer's wakeup site takes the object lock, mutates
-//   readiness, then calls `poll_waiter_list_wake` (which takes the
-//   list lock internally) — under the object lock so any concurrent
-//   register's "sample" sees this mutation.
+//   lock. The producer's wakeup site mutates readiness under the
+//   object lock; after releasing it the site calls
+//   `poll_waiter_list_wake` (which takes the list lock internally) —
+//   any concurrent register's "sample" either happens-before the
+//   producer's mutation (and sees the un-mutated state, OK because the
+//   producer's wake will then find the hook and set ready) or after
+//   (and the sample sees the mutation directly).
 //
 //   `poll_waiter_list_unregister(pw)` takes ONLY the list lock — no
-//   object lock. Lock order globally: object → list → rendez (wakeup);
-//   unregister takes only list, so no inversion. The hook stores a
-//   back-pointer `pw->list` set at register time so the kernel-side
-//   unregister sweep knows which list each hook is on without consulting
-//   the Dev.
+//   object lock. Lock order globally:
+//     object → list → g_timerwait → rendez → cpu_sched
+//   The list lock is non-irqsave (held with IRQs ON during the wake
+//   walk); the wake's inner `wakeup(pw->rendez)` enters wakeup which
+//   takes `g_timerwait.lock` (irqsave) then the `rendez.lock` then the
+//   per-CPU `cs->lock` (in ready()). No IRQ handler enters
+//   `poll_list.lock`. Unregister takes only list, so no inversion. The
+//   hook stores a back-pointer `pw->list` set at register time so the
+//   kernel-side unregister sweep knows which list each hook is on
+//   without consulting the Dev.
+//
+// HANDLE-SLOT LIFETIME (v1.0 INVARIANT)
+//
+//   `sys_poll_for_proc` resolves each fd to its `struct Handle` slot
+//   via `handle_get` once per scan (first scan + post-wake re-scan),
+//   then dereferences `slot->kind` and `slot->obj`. The slot pointer
+//   itself is a BORROW into the caller's table — valid only while the
+//   caller holds it. At v1.0, `struct Proc` is single-thread-per-Proc,
+//   so the poller's own thread is the only one mutating its handle
+//   table. The borrow is sound.
+//
+//   A future multi-thread-per-Proc lift breaks this: a sibling thread
+//   could call `handle_close` between the first scan and the post-wake
+//   re-scan, freeing the obj. The fix at that lift is to bump the
+//   kobj's refcount at the first scan (per-kind operation: Spoor →
+//   `spoor_ref`; Srv → `srvconn_ref` / inherent SrvService lifetime)
+//   and drop at the unregister sweep. Until then this comment is the
+//   invariant declaration.
 //
 // THE Dev.poll vtable op (declared in <thylacine/dev.h>)
 //

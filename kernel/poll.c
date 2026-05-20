@@ -47,6 +47,14 @@ u64 poll_total_calls(void) {
     return __atomic_load_n(&g_poll_calls, __ATOMIC_RELAXED);
 }
 
+// g_poll_slept counts callers that ENTERED the slow path — incremented
+// just before `tsleep`. The counter is "slow path entered" rather than
+// "actually parked": if a producer races the first scan + register and
+// flips a `pw->ready=true` between register-and-tsleep, tsleep's pre-sleep
+// cond-check returns TSLEEP_AWOKEN without ever transitioning the thread
+// to SLEEPING. The counter still increments — its semantic is "we
+// committed to the slow path," useful for test assertions like
+// "timeout=10ms with no immediate ready took the tsleep branch."
 u64 poll_total_slept(void) {
     return __atomic_load_n(&g_poll_slept, __ATOMIC_RELAXED);
 }
@@ -179,12 +187,18 @@ static int poll_scan_one(struct Proc *p, struct pollfd *pfd,
     switch (slot->kind) {
     case KOBJ_SPOOR: {
         struct Spoor *sp = (struct Spoor *)slot->obj;
-        if (sp && sp->dev && sp->dev->poll) {
+        if (!sp || !sp->dev) {
+            // Malformed Spoor handle (test path or wild slot). Symmetric
+            // with the KOBJ_SRV NULL-obj path in `srv_handle_poll` —
+            // POLLNVAL, not "always-ready," so a buggy caller polling a
+            // NULL-obj fd doesn't spin observing fake readiness.
+            revents = POLLNVAL;
+        } else if (sp->dev->poll) {
             revents = (s16)sp->dev->poll(sp, pfd->events, pw_or_null);
         } else {
-            // Always-ready: a Dev without a .poll slot is POSIX-regular-
-            // file (read/write never blocks). Return only the requested
-            // POLLIN/POLLOUT; output-only POLLHUP/POLLERR are meaningless.
+            // Dev with NO .poll slot is POSIX-regular-file (read/write
+            // never blocks). Return only the requested POLLIN/POLLOUT;
+            // output-only POLLHUP/POLLERR/POLLNVAL are meaningless here.
             revents = (s16)(pfd->events & POLL_REQUESTABLE);
         }
         break;
@@ -276,7 +290,13 @@ s64 sys_poll_for_proc(struct Proc *p, struct pollfd *kfds, u64 nfds,
 unregister_and_return:
     // Sweep: unregister every still-listed hook. Idempotent for any
     // hook that wasn't registered (e.g., POLLNVAL'd fds where
-    // poll_lookup_spoor returned NULL). specs/poll.tla NoStaleHook.
+    // poll_scan_one returned early). specs/poll.tla NoStaleHook.
+    //
+    // Order is load-bearing: unregister FIRST (removes pw from the list
+    // under list->lock; after release no producer walk can find pw),
+    // THEN scribble magic = 0. Reversing would expose a magic=0 hook
+    // to a concurrent producer walker that holds list->lock — the
+    // wake's magic check would extinct.
     for (u64 i = 0; i < nfds; i++) {
         poll_waiter_list_unregister(&waiters[i]);
         waiters[i].magic = 0;   // defense-in-depth: scribble before stack pops

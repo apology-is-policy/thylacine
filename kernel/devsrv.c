@@ -709,6 +709,7 @@ static short svc_listener_poll(struct SrvService *svc, short events,
 }
 
 short srv_handle_poll(void *obj, short events, struct poll_waiter *pw) {
+    (void)events; (void)pw;
     if (!obj) return POLLNVAL;
     // The first u64 of a KObj_Srv obj is its struct's magic word — see
     // SRV_SERVICE_MAGIC / SRV_CONN_MAGIC. Read once: a torn UAF would
@@ -718,13 +719,17 @@ short srv_handle_poll(void *obj, short events, struct poll_waiter *pw) {
         return svc_listener_poll((struct SrvService *)obj, events, pw);
     }
     if (magic == SRV_CONN_MAGIC) {
-        // Client-side connection handle. No v1.0 caller polls this (corvus
-        // polls its accept-side Spoor; joey doesn't poll its client
-        // connection — it drives 9P synchronously through the kernel
-        // client). The connection IS a real pollable object via
-        // srvconn_poll; expose it for forward-compat — a client wanting
-        // multiplexed I/O on a /srv connection can poll the KObj_Srv.
-        return srvconn_poll((struct SrvConn *)obj, events, pw);
+        // Client-side connection handle. `srvconn_poll`'s semantics are
+        // SERVER-endpoint (POLLIN ↔ c2s.count > 0 — bytes corvus reads;
+        // POLLOUT ↔ s2c room — room corvus writes). A client polling its
+        // OWN handle expects mirror-image semantics (POLLIN ↔ s2c has a
+        // reply; POLLOUT ↔ c2s has room) — delegating here would return
+        // misleading revents. No v1.0 caller polls this (joey drives 9P
+        // synchronously through the kernel client; corvus polls its
+        // accept-side Spoor, not its KObj_Srv). Fail-closed until the
+        // client-side poll story lands (its own SrvConn `client_poll`
+        // entry with mirrored semantics + a separate hook list).
+        return POLLNVAL;
     }
     // Unknown magic — corruption, or a future KObj_Srv flavor.
     return POLLNVAL;
