@@ -413,6 +413,41 @@ enum {
     // POLLNVAL is set in revents (kernel-filled) for a per-pollfd invalid
     // fd; the call as a whole still returns a non-negative count.
     SYS_POLL         = 29,   // arg: fds_va (x0), nfds (x1), timeout_ms (x2)
+
+    // P5-corvus-srv-impl-b2: SYS_SRV_CONNECT(name_va, name_len, path_va,
+    //                                        path_len) → KObj_Srv handle
+    //   x0 = name_va        user-VA pointer to the service name bytes
+    //                       (e.g. "corvus")
+    //   x1 = name_len       1..SRV_NAME_MAX = 31
+    //   x2 = path_va        user-VA pointer to the path bytes within the
+    //                       service's 9P namespace (e.g. "ctl"). May be 0
+    //                       (with path_len == 0) to leave the kernel-side
+    //                       open at the 9P root fid (Tversion + Tattach
+    //                       only, no Twalk).
+    //   x3 = path_len       0..SRVCONN_PATH_MAX = 64
+    //
+    // The client-open path for the `/srv` mechanism (CORVUS-DESIGN.md §6.2).
+    // Composes the existing srv_conn_open_for_proc (which mints the SrvConn,
+    // enqueues it on the service's accept backlog, and installs a non-
+    // transferable KObj_Srv handle in the caller's table) with the new
+    // srvconn_drive_client_handshake (Tversion + Tattach + optional Twalk
+    // + Tlopen on the SrvConn's kernel-owned p9_client). On success, the
+    // returned fd has the open `client_fid` ready for SYS_READ / SYS_WRITE
+    // (the kernel translates those to Tread / Twrite at that fid).
+    //
+    // Per-Proc cap: a Proc may hold at most one /srv client connection at
+    // v1.0 (CORVUS-DESIGN.md §6.2 — "One connection per Proc"). A second
+    // SYS_SRV_CONNECT from a Proc that still holds one returns -1.
+    //
+    // Returns -1 on:
+    //   - bad name_len / path_len bounds
+    //   - the caller already holds a /srv client connection
+    //   - global SRV_MAX_CONNS cap reached
+    //   - the named service is not LIVE (missing / RESERVING / TOMBSTONED)
+    //   - accept-backlog full
+    //   - handle-table full
+    //   - 9P handshake failure (server crashed / hung / Rlerror)
+    SYS_SRV_CONNECT  = 30,   // arg: name_va, name_len, path_va, path_len
 };
 
 // SYS_SRV_PEER result — the kernel-stamped peer identity of a /srv

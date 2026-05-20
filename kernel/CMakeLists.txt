@@ -143,6 +143,7 @@ set(KERNEL_SRCS
     test/test_poll.c
     test/test_srvconn.c
     test/test_devsrv_conn.c
+    test/test_srv_client.c
     test/test_sys_pipe.c
     test/test_sys_mount.c
     test/test_sys_corvus.c

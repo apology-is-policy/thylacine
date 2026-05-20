@@ -196,7 +196,21 @@ struct Proc {
     // call all three hardening syscalls at startup; the flags are
     // visible via future debug surfaces for audit verification.
     u32                proc_flags;
-    u32                _pad_flags;        // explicit padding to 8-byte align
+
+    // P5-corvus-srv-impl-b2: count of LIVE `/srv` *client* connection
+    // handles owned by this Proc (KObj_Srv handles whose obj is a
+    // SrvConn). At v1.0 the per-Proc cap is 1 (CORVUS-DESIGN.md §6.2 —
+    // "One connection per Proc"); srv_conn_open_for_proc rejects when
+    // this is already nonzero. Incremented at handle install, decremented
+    // at handle_close (the KObj_Srv SRV_CONN_MAGIC arm). At v1.0 single-
+    // thread-per-Proc makes non-atomic r-m-w safe; a future multi-thread-
+    // per-Proc lift needs `__atomic_compare_exchange` on this field.
+    //
+    // NOT propagated by rfork (it counts live handles, not a transferable
+    // property — and KObj_Srv connection handles are non-transferable,
+    // pinned to the origin Proc).
+    u8                 srv_conn_count;
+    u8                 _pad_srv[3];       // explicit padding to 8-byte align
 
     // P5-corvus-srv: the kernel's per-Proc identity tag — the
     // thylacine's stripe pattern; every animal's is unique. Drawn from

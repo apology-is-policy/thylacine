@@ -464,22 +464,31 @@ already holding `c2s.lock + s2c.lock` is a normal contention case
 | `server_stripes` field + `srvconn_peer_stripes` / `_peer_console` / `_server_stripes` accessors | landed (P5-corvus-srv-impl-a3c) |
 | `SYS_SRV_PEER` peer-identity read (consumes the accessors) | landed (a3c; `kernel/syscall.c`, reference 70) |
 | `poll_list` field + `srvconn_poll` + wake callouts at every readiness mutation | landed (P5-poll-b) |
+| `client_fid` + `client_handshake_done` + `client_offset` fields | landed (P5-corvus-srv-impl-b2) |
+| `srvconn_drive_client_handshake` — Tversion + Tattach + (optional) Twalk + Tlopen | landed (b2) |
+| `srvconn_client_read` / `srvconn_client_write` — Tread / Twrite on `client_fid`, gated on `handshake_done` | landed (b2) |
+| `SYS_SRV_CONNECT(name, path)` composing `srv_conn_open_for_proc` + the handshake drive | landed (b2; `kernel/syscall.c`, reference 28) |
+| per-Proc one-connection cap (`Proc.srv_conn_count`; SRV_CONN_PER_PROC_MAX = 1) | landed (b2; enforced in `srv_conn_open_for_proc`, decremented in `handle_close`) |
+| KOBJ_SRV r/w dispatch in `sys_read_for_proc` / `sys_write_for_proc` | landed (b2; SRV_CONN_MAGIC routes through `srvconn_client_read/write`) |
 
 ---
 
 ## Known caveats / footguns
 
-- **The consumer is the `devsrv` per-connection layer.** a3a landed the
-  connection primitive ahead of its consumer; as of a3b the `devsrv`
-  layer (reference 70) is that consumer — `srv_conn_open_for_proc` mints
-  a `SrvConn` on a client connect and installs the client's `KObj_Srv`
-  handle (obj = the `SrvConn`); `SYS_SRV_ACCEPT` hands corvus a
-  `KObj_Spoor` server endpoint; `devsrv_read` / `devsrv_write` route to
-  `srvconn_server_recv` / `srvconn_server_send`; and closing either end's
-  handle does `srvconn_teardown` + `srvconn_unref`. Direct exercise of
-  the primitive remains in `test_srvconn.c`. A production *client-open
-  syscall* (a namespace open routed into `srv_conn_open_for_proc`) is
-  still deferred to P5-corvus-srv-impl-b.
+- **The consumer is the `devsrv` per-connection layer + the `SYS_SRV_CONNECT`
+  client-open path.** a3a landed the connection primitive ahead of its
+  consumer; as of a3b the `devsrv` layer (reference 70) is that consumer
+  on the server side — `srv_conn_open_for_proc` mints a `SrvConn` on a
+  client connect and installs the client's `KObj_Srv` handle (obj = the
+  `SrvConn`); `SYS_SRV_ACCEPT` hands corvus a `KObj_Spoor` server
+  endpoint; `devsrv_read` / `devsrv_write` route to
+  `srvconn_server_recv` / `srvconn_server_send`; closing either end's
+  handle does `srvconn_teardown` + `srvconn_unref`. b2 then added the
+  production *client-open syscall* (`SYS_SRV_CONNECT` — composes
+  `srv_conn_open_for_proc` with `srvconn_drive_client_handshake`); the
+  KObj_Srv handle that returns to the client has its `client_fid` open,
+  and SYS_READ / SYS_WRITE on it route through `srvconn_client_read` /
+  `_write` (a Tread / Twrite on the SrvConn's kernel-owned p9_client).
 - **The no-writer-block design assumes the synchronous, single-frame-
   in-flight kernel 9P client.** It holds because `kernel/9p_client.c`
   serializes a whole exchange under `p9_client.lock`. A future

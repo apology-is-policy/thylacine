@@ -618,6 +618,31 @@ static struct Spoor *sys_lookup_spoor(struct Proc *p, hidx_t h, rights_t require
     return (struct Spoor *)slot->obj;
 }
 
+// Helper: look up an open r/w-capable handle (KOBJ_SPOOR or KOBJ_SRV
+// with SRV_CONN_MAGIC) + validate rights. Returns the slot pointer or
+// NULL. P5-corvus-srv-impl-b2 — bridges SYS_READ / SYS_WRITE between
+// Spoor-vtable I/O (KOBJ_SPOOR) and the SrvConn-mediated 9P Tread /
+// Twrite (KOBJ_SRV connection handles); the SRV_SERVICE_MAGIC handles
+// are not r/w-able (a service registry slot is not a transport).
+static struct Handle *sys_lookup_rw_handle(struct Proc *p, hidx_t h,
+                                             rights_t required) {
+    struct Handle *slot = handle_get(p, h);
+    if (!slot)                                       return NULL;
+    if ((slot->rights & required) != required)       return NULL;
+    switch (slot->kind) {
+    case KOBJ_SPOOR:
+        return slot;
+    case KOBJ_SRV: {
+        if (!slot->obj)                              return NULL;
+        u64 m = *(const u64 *)slot->obj;
+        if (m != SRV_CONN_MAGIC)                     return NULL;
+        return slot;
+    }
+    default:
+        return NULL;
+    }
+}
+
 // Common user-VA range check (NULL / overflow / past UACCESS bound).
 static bool sys_validate_user_buf(u64 buf_va, u64 len) {
     if (len == 0)                                    return true;
@@ -630,32 +655,68 @@ static bool sys_validate_user_buf(u64 buf_va, u64 len) {
 
 // Inner — testable with kernel-side buf. Returns bytes written (>=0)
 // or -1 on bad handle / wrong kind / missing rights / dev error.
+//
+// Dispatches by handle kind: KOBJ_SPOOR routes through the Dev `.write`
+// vtable (Spoor.offset); KOBJ_SRV (a SrvConn client handle) routes
+// through srvconn_client_write — a Twrite on the SrvConn's kernel-owned
+// p9_client (using cn->client_offset). P5-corvus-srv-impl-b2.
 s64 sys_write_for_proc(struct Proc *p, hidx_t h, const u8 *kbuf, u64 len) {
     if (!p || (!kbuf && len > 0))                    return -1;
-    struct Spoor *c = sys_lookup_spoor(p, h, RIGHT_WRITE);
-    if (!c)                                          return -1;
-    if (!c->dev || !c->dev->write)                   return -1;
+    struct Handle *slot = sys_lookup_rw_handle(p, h, RIGHT_WRITE);
+    if (!slot)                                       return -1;
     if (len == 0)                                    return 0;
 
-    long n = c->dev->write(c, kbuf, (long)len, c->offset);
-    if (n < 0)                                       return -1;
-    c->offset += n;
-    return (s64)n;
+    switch (slot->kind) {
+    case KOBJ_SPOOR: {
+        struct Spoor *c = (struct Spoor *)slot->obj;
+        if (!c || !c->dev || !c->dev->write)         return -1;
+        long n = c->dev->write(c, kbuf, (long)len, c->offset);
+        if (n < 0)                                   return -1;
+        c->offset += n;
+        return (s64)n;
+    }
+    case KOBJ_SRV: {
+        // sys_lookup_rw_handle validated SRV_CONN_MAGIC.
+        long n = srvconn_client_write((struct SrvConn *)slot->obj,
+                                       kbuf, (long)len);
+        if (n < 0)                                   return -1;
+        return (s64)n;
+    }
+    default:
+        return -1;   // unreachable — sys_lookup_rw_handle filters
+    }
 }
 
 // Inner — testable with kernel-side buf. Returns bytes read (>=0; 0
 // on EOF) or -1 on bad handle / wrong kind / missing rights / dev error.
+//
+// Dispatches by handle kind: KOBJ_SPOOR routes through the Dev `.read`
+// vtable (Spoor.offset); KOBJ_SRV routes through srvconn_client_read
+// (a Tread on the SrvConn's kernel-owned p9_client). P5-corvus-srv-impl-b2.
 s64 sys_read_for_proc(struct Proc *p, hidx_t h, u8 *kbuf, u64 len) {
     if (!p || (!kbuf && len > 0))                    return -1;
-    struct Spoor *c = sys_lookup_spoor(p, h, RIGHT_READ);
-    if (!c)                                          return -1;
-    if (!c->dev || !c->dev->read)                    return -1;
+    struct Handle *slot = sys_lookup_rw_handle(p, h, RIGHT_READ);
+    if (!slot)                                       return -1;
     if (len == 0)                                    return 0;
 
-    long n = c->dev->read(c, kbuf, (long)len, c->offset);
-    if (n < 0)                                       return -1;
-    c->offset += n;
-    return (s64)n;
+    switch (slot->kind) {
+    case KOBJ_SPOOR: {
+        struct Spoor *c = (struct Spoor *)slot->obj;
+        if (!c || !c->dev || !c->dev->read)          return -1;
+        long n = c->dev->read(c, kbuf, (long)len, c->offset);
+        if (n < 0)                                   return -1;
+        c->offset += n;
+        return (s64)n;
+    }
+    case KOBJ_SRV: {
+        long n = srvconn_client_read((struct SrvConn *)slot->obj,
+                                      kbuf, (long)len);
+        if (n < 0)                                   return -1;
+        return (s64)n;
+    }
+    default:
+        return -1;
+    }
 }
 
 static s64 sys_write_handler(u64 hraw, u64 buf_va, u64 len) {
@@ -669,9 +730,10 @@ static s64 sys_write_handler(u64 hraw, u64 buf_va, u64 len) {
     if (len == 0) {
         // Validate the handle even for zero-length writes (POSIX
         // discipline: bad fd should return -EBADF regardless of
-        // len). Returns 0 if the handle is good.
-        struct Spoor *c = sys_lookup_spoor(p, (hidx_t)hraw, RIGHT_WRITE);
-        if (!c)                                      return -1;
+        // len). Accepts both KOBJ_SPOOR + KOBJ_SRV (SrvConn) so a
+        // zero-length write to a /srv client handle still validates.
+        if (!sys_lookup_rw_handle(p, (hidx_t)hraw, RIGHT_WRITE))
+                                                     return -1;
         return 0;
     }
 
@@ -693,8 +755,8 @@ static s64 sys_read_handler(u64 hraw, u64 buf_va, u64 len) {
     if (len > SYS_RW_MAX) len = SYS_RW_MAX;
 
     if (len == 0) {
-        struct Spoor *c = sys_lookup_spoor(p, (hidx_t)hraw, RIGHT_READ);
-        if (!c)                                      return -1;
+        if (!sys_lookup_rw_handle(p, (hidx_t)hraw, RIGHT_READ))
+                                                     return -1;
         return 0;
     }
 
@@ -1958,6 +2020,102 @@ static s64 sys_srv_peer_handler(u64 conn_h_raw, u64 out_va) {
 }
 
 // =============================================================================
+// SYS_SRV_CONNECT — client-open the /srv mechanism (P5-corvus-srv-impl-b2).
+//
+// Per CORVUS-DESIGN.md §6.2. Composes srv_conn_open_for_proc (which
+// already mints + enqueues the SrvConn and installs a non-transferable
+// KObj_Srv handle in the caller's table — landed at -a3b) with the new
+// srvconn_drive_client_handshake (Tversion + Tattach + optional Twalk +
+// Tlopen on the SrvConn's kernel-owned p9_client). On success, the
+// returned KObj_Srv handle has an OPEN client_fid; SYS_READ / SYS_WRITE
+// on the handle translate to Tread / Twrite at that fid.
+//
+// Per-Proc cap: srv_conn_open_for_proc rejects when p->srv_conn_count
+// is already at SRV_CONN_PER_PROC_MAX (1 at v1.0). A subsequent
+// SYS_SRV_CONNECT from the same Proc must wait until the existing
+// handle is SYS_CLOSE'd (which decrements the count via handle_close's
+// KOBJ_SRV SRV_CONN_MAGIC arm).
+//
+// On any handshake failure (server crashed / hung / Rlerror / OOM), the
+// handler closes the just-installed handle — handle_close's release
+// arm tears the SrvConn down + drops both the create reference and the
+// backlog-side reference (via srv_proc_exit_notify on the SERVER side
+// when the backlog is drained, or directly when the accept thread
+// pops it and finds it torn).
+// =============================================================================
+
+int sys_srv_connect_for_proc(struct Proc *p,
+                              const char *name, size_t name_len,
+                              const u8 *path, size_t path_len) {
+    if (!p)                                              return -1;
+    if (!name || name_len == 0 || name_len > SRV_NAME_MAX) return -1;
+    if (path_len > SRVCONN_PATH_MAX)                     return -1;
+    if (path_len > 0 && !path)                           return -1;
+
+    // Phase 1: mint + install the KObj_Srv handle + bump p->srv_conn_count.
+    // The cap check + per-Proc bump happen inside srv_conn_open_for_proc;
+    // a failure here leaves no state behind.
+    int h = srv_conn_open_for_proc(p, name, (u8)name_len);
+    if (h < 0) return -1;
+
+    // Phase 2: drive the kernel-side 9P handshake against the now-installed
+    // SrvConn. Look the handle up to reach the SrvConn — srv_conn_open_for_
+    // proc just installed it under the caller's lock, so the handle is
+    // observable here. handle_get validates HANDLE_MAGIC + bounds.
+    struct Handle *slot = handle_get(p, (hidx_t)h);
+    if (!slot || slot->kind != KOBJ_SRV || !slot->obj) {
+        // Should not happen — srv_conn_open_for_proc just installed it.
+        handle_close(p, (hidx_t)h);
+        return -1;
+    }
+    if (*(const u64 *)slot->obj != SRV_CONN_MAGIC) {
+        handle_close(p, (hidx_t)h);
+        return -1;
+    }
+    struct SrvConn *cn = (struct SrvConn *)slot->obj;
+
+    if (srvconn_drive_client_handshake(cn, p->pid, path, path_len) != 0) {
+        // Handshake failed — corvus crashed / hung / refused / OOM. Tear
+        // the just-installed handle down. handle_close's KOBJ_SRV path
+        // teardowns + unrefs the SrvConn AND decrements srv_conn_count.
+        handle_close(p, (hidx_t)h);
+        return -1;
+    }
+
+    return h;
+}
+
+static s64 sys_srv_connect_handler(u64 name_va, u64 name_len_raw,
+                                    u64 path_va, u64 path_len_raw) {
+    struct Thread *t = current_thread();
+    if (!t)                                              return -1;
+    struct Proc *p = t->proc;
+    if (!p)                                              return -1;
+
+    if (name_len_raw == 0 || name_len_raw > SRV_NAME_MAX) return -1;
+    if (path_len_raw > SRVCONN_PATH_MAX)                  return -1;
+
+    // Service name copy-in (per-byte uaccess_load_u8; same shape as
+    // SYS_POST_SERVICE).
+    char name[SRV_NAME_MAX];
+    for (u64 i = 0; i < name_len_raw; i++) {
+        u8 b;
+        if (uaccess_load_u8(name_va + i, &b) != 0)        return -1;
+        name[i] = (char)b;
+    }
+
+    // Path copy-in. path_len_raw == 0 is the "no Twalk" case
+    // (Tversion + Tattach only, open at root_fid).
+    u8 path[SRVCONN_PATH_MAX];
+    for (u64 i = 0; i < path_len_raw; i++) {
+        if (uaccess_load_u8(path_va + i, &path[i]) != 0)  return -1;
+    }
+
+    return (s64)sys_srv_connect_for_proc(p, name, (size_t)name_len_raw,
+                                          path, (size_t)path_len_raw);
+}
+
+// =============================================================================
 // SYS_POLL — the multi-fd wait/wake primitive (P5-poll-a).
 //
 // Per ARCH §23.3 + specs/poll.tla + <thylacine/poll.h>. The user
@@ -2204,6 +2362,13 @@ void syscall_dispatch(struct exception_context *ctx) {
         ctx->regs[0] = (u64)sys_poll_handler(ctx->regs[0],
                                              ctx->regs[1],
                                              ctx->regs[2]);
+        return;
+
+    case SYS_SRV_CONNECT:
+        ctx->regs[0] = (u64)sys_srv_connect_handler(ctx->regs[0],
+                                                     ctx->regs[1],
+                                                     ctx->regs[2],
+                                                     ctx->regs[3]);
         return;
 
     default:

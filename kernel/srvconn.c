@@ -352,6 +352,110 @@ u64 srvconn_server_stripes(const struct SrvConn *cn) {
 }
 
 // =============================================================================
+// Client-side 9P session (P5-corvus-srv-impl-b2).
+//
+// SrvConn's embedded p9_client connects this client's bytes to the 9P
+// server (corvus); these helpers drive the handshake + the per-op
+// Tread/Twrite on behalf of SYS_READ / SYS_WRITE.
+// =============================================================================
+
+// Linux open flags. p9_client_lopen takes a u32 of Linux O_* bits (the
+// dev9p mapping uses these directly; CORVUS-DESIGN's /ctl + /ops/* are
+// bidirectional request/response, so the client opens RDWR).
+#define SRVCONN_OPEN_RDWR  2u
+
+// The handshake-derived client fid. Root is SRVCONN_ROOT_FID = 1; a
+// Twalk lands the child fid at 2 (no concurrent walks at v1.0 — single-
+// thread-per-Proc means one walked fid per SrvConn).
+#define SRVCONN_CLIENT_WALK_FID  2u
+
+// uname for the kernel-driven Tattach. Identifies the kernel-side
+// originator; corvus does NOT trust this for authorization (the
+// authoritative peer identity is SYS_SRV_PEER), but it's the wire-
+// visible name. "thylacine" matches the OS identity.
+static const u8 SRVCONN_TATTACH_UNAME[] = "thylacine";
+
+int srvconn_drive_client_handshake(struct SrvConn *cn, int peer_pid,
+                                    const u8 *path, size_t path_len) {
+    if (!cn || cn->magic != SRV_CONN_MAGIC)             return -1;
+    if (cn->client_handshake_done)                       return -1;
+    if (!cn->client)                                     return -1;
+    if (!srvconn_is_live(cn))                            return -1;
+    if (path_len > 0 && !path)                           return -1;
+
+    // n_uname conveys the peer Proc's pid in Tattach. negative pid maps
+    // to ~0u sentinel (corvus is expected to ignore n_uname for auth).
+    u32 n_uname = (peer_pid >= 0) ? (u32)peer_pid : ~0u;
+
+    int rc = p9_client_handshake(cn->client,
+                                  SRVCONN_TATTACH_UNAME,
+                                  sizeof(SRVCONN_TATTACH_UNAME) - 1,
+                                  NULL, 0,
+                                  n_uname);
+    if (rc != 0) return -1;
+
+    u32 open_fid = SRVCONN_ROOT_FID;
+    if (path_len > 0) {
+        // Walk root → walk_fid along `path` (one component), then Tlopen
+        // it for RDWR — the wire-frame request/response on /ctl + /ops/*.
+        struct p9_qid qid;
+        rc = p9_client_walk_one(cn->client,
+                                 SRVCONN_ROOT_FID, SRVCONN_CLIENT_WALK_FID,
+                                 path, path_len, &qid);
+        if (rc != 0) return -1;
+        u32 iounit;
+        rc = p9_client_lopen(cn->client, SRVCONN_CLIENT_WALK_FID,
+                              SRVCONN_OPEN_RDWR, &qid, &iounit);
+        if (rc != 0) return -1;
+        open_fid = SRVCONN_CLIENT_WALK_FID;
+    } else {
+        // No path: leave the open at root_fid. Useful for tests + for
+        // future syscalls that walk explicitly after connect.
+        struct p9_qid qid;
+        u32 iounit;
+        rc = p9_client_lopen(cn->client, SRVCONN_ROOT_FID,
+                              SRVCONN_OPEN_RDWR, &qid, &iounit);
+        if (rc != 0) return -1;
+    }
+
+    cn->client_fid             = open_fid;
+    cn->client_offset          = 0;
+    cn->client_handshake_done  = true;
+    return 0;
+}
+
+long srvconn_client_read(struct SrvConn *cn, u8 *buf, long n) {
+    if (!cn || cn->magic != SRV_CONN_MAGIC)             return -1;
+    if (!buf || n < 0)                                   return -1;
+    if (n == 0)                                          return 0;
+    if (!cn->client_handshake_done)                      return -1;
+    if (!srvconn_is_live(cn))                            return -1;
+    // p9_client_read takes a u32 count; cap before passing.
+    u32 count = (n > 0x7fffffffL) ? 0x7fffffffu : (u32)n;
+    u32 got = 0;
+    int rc = p9_client_read(cn->client, cn->client_fid,
+                             cn->client_offset, count, buf, &got);
+    if (rc != 0) return -1;
+    cn->client_offset += (u64)got;
+    return (long)got;
+}
+
+long srvconn_client_write(struct SrvConn *cn, const u8 *buf, long n) {
+    if (!cn || cn->magic != SRV_CONN_MAGIC)             return -1;
+    if (!buf || n < 0)                                   return -1;
+    if (n == 0)                                          return 0;
+    if (!cn->client_handshake_done)                      return -1;
+    if (!srvconn_is_live(cn))                            return -1;
+    u32 count = (n > 0x7fffffffL) ? 0x7fffffffu : (u32)n;
+    u32 accepted = 0;
+    int rc = p9_client_write(cn->client, cn->client_fid,
+                              cn->client_offset, count, buf, &accepted);
+    if (rc != 0) return -1;
+    cn->client_offset += (u64)accepted;
+    return (long)accepted;
+}
+
+// =============================================================================
 // Raw byte transport.
 // =============================================================================
 
