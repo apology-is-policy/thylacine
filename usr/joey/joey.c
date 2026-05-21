@@ -183,6 +183,97 @@ static size_t build_unwrap(unsigned char *pl,
     return o;
 }
 
+// =============================================================================
+// stratumd-stub boot pivot demo (P5-stratumd-stub-bringup-c). Production-
+// shape orchestration on joey's boot path: t_pipe × 2 → t_spawn_with_fds →
+// t_attach_9p → t_mount → t_unmount → t_close × N → t_wait_pid. This is
+// the same sequence /stub-driver runs (P5-stratumd-stub-bringup-b), now
+// inline in joey so the boot log carries production-shape evidence of the
+// 9P attach + mount lifecycle. Real stratumd swaps in for /stratumd-stub
+// when the musl sysroot lands (Phase 6 dependency). target_path_id 99
+// matches the existing /stub-driver convention to keep the kernel test +
+// boot-path numbers aligned.
+//
+// Failure semantics: any sub-step failure returns -1 with a diagnostic;
+// joey's main treats that as a boot regression (return 1).
+static int do_stratumd_stub_bringup(void) {
+    long c2s_rd = -1, c2s_wr = -1;
+    if (t_pipe(&c2s_rd, &c2s_wr) < 0) {
+        t_putstr("joey: stub-bringup t_pipe c2s FAILED\n");
+        return -1;
+    }
+    long s2c_rd = -1, s2c_wr = -1;
+    if (t_pipe(&s2c_rd, &s2c_wr) < 0) {
+        t_putstr("joey: stub-bringup t_pipe s2c FAILED\n");
+        return -1;
+    }
+
+    const char stub_name[] = "stratumd-stub";
+    unsigned int stub_fds[2] = { (unsigned int)c2s_rd, (unsigned int)s2c_wr };
+    long stub_pid = t_spawn_with_fds(stub_name, sizeof(stub_name) - 1,
+                                     stub_fds, 2);
+    if (stub_pid <= 0) {
+        t_putstr("joey: stub-bringup t_spawn_with_fds FAILED\n");
+        return -1;
+    }
+
+    // Drop joey-side refs on the stub's transport fds. Without this,
+    // the stub never sees EOF on c2s_rd because joey would still hold
+    // an alive reader on the c2s ring.
+    if (t_close(c2s_rd) != 0) {
+        t_putstr("joey: stub-bringup t_close c2s_rd FAILED\n");
+        return -1;
+    }
+    if (t_close(s2c_wr) != 0) {
+        t_putstr("joey: stub-bringup t_close s2c_wr FAILED\n");
+        return -1;
+    }
+
+    static const char aname[] = "/";
+    long attach_fd = t_attach_9p(c2s_wr, s2c_rd, aname, 1, 0);
+    if (attach_fd < 0) {
+        t_putstr("joey: stub-bringup t_attach_9p FAILED\n");
+        return -1;
+    }
+
+    if (t_mount(attach_fd, 99, 0) < 0) {
+        t_putstr("joey: stub-bringup t_mount FAILED\n");
+        return -1;
+    }
+    if (t_unmount(99) < 0) {
+        t_putstr("joey: stub-bringup t_unmount FAILED\n");
+        return -1;
+    }
+
+    if (t_close(attach_fd) != 0) {
+        t_putstr("joey: stub-bringup t_close(attach_fd) FAILED\n");
+        return -1;
+    }
+
+    // Drop the last joey-side transport refs; c2s_wr last-drop fires
+    // write_eof on the c2s ring so the stub's next read returns 0.
+    if (t_close(c2s_wr) != 0) {
+        t_putstr("joey: stub-bringup t_close c2s_wr FAILED\n");
+        return -1;
+    }
+    if (t_close(s2c_rd) != 0) {
+        t_putstr("joey: stub-bringup t_close s2c_rd FAILED\n");
+        return -1;
+    }
+
+    int status = -1;
+    long reaped = t_wait_pid(&status);
+    if (reaped != stub_pid) {
+        t_putstr("joey: stub-bringup t_wait_pid wrong pid\n");
+        return -1;
+    }
+    if (status != 0) {
+        t_putstr("joey: stub-bringup stratumd-stub exited non-zero\n");
+        return -1;
+    }
+    return 0;
+}
+
 // connect_corvus — bounded retry to t_srv_connect("corvus", "ctl"),
 // yielding between attempts so corvus's startup can race in.
 //
@@ -581,5 +672,10 @@ int main(void) {
     // service cleanup).
 
     t_putstr("joey: corvus-d hybrid-PKE round-trip verified via /srv/corvus (b3b)\n");
+
+    // === stratumd-stub boot pivot demo (P5-stratumd-stub-bringup-c) ===
+    if (do_stratumd_stub_bringup() != 0) return 1;
+    t_putstr("joey: stub-bringup ok (pipe + spawn + attach + mount + unmount)\n");
+
     return 0;
 }

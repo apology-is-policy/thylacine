@@ -6,11 +6,12 @@ This is the first of the P5-stratumd-stub-bringup arc. The full arc is:
 
 | Sub-chunk | Scope | Status |
 |---|---|---|
-| **a** (this) | Userspace responder + 2-userspace-Proc demo via kernel-supervised setup | LANDED |
-| b (future) | RFFDG / SYS_SPAWN_WITH_FDS so joey can drive the orchestration from userspace | DEFERRED |
-| c (future) | Long-running stratumd-stub serving multiple sequential clients | DEFERRED |
-| d (future) | Pivot/chroot kernel mechanism so the stub's tree becomes Territory root | DEFERRED |
-| e (future) | Full joey-in-production orchestration end-to-end | DEFERRED |
+| **a** | Userspace responder + 2-userspace-Proc demo via kernel-supervised setup | LANDED (`479d997`) |
+| **b** | `SYS_SPAWN_WITH_FDS` + `/stub-driver` userspace orchestrator (production shape, separate binary) | LANDED (`73784b4`) |
+| **c** | Joey runs the `/stub-driver` orchestration inline on the production boot path | LANDED (`*(pending)*`) |
+| d (future) | Long-running stratumd-stub serving Twalk / Tlopen / Tread (real synthetic FS) | DEFERRED |
+| e (future) | Pivot/territory-root mechanism so the stub's tree becomes joey's `/` | DEFERRED |
+| f (future) | Real stratumd swap-in (after Phase 6 musl sysroot) | DEFERRED |
 
 ---
 
@@ -163,11 +164,47 @@ Earlier tests still covered (P5-attach-probe's `userspace.attach_probe_round_tri
 
 ---
 
+## P5-stratumd-stub-bringup-c — joey runs the orchestration inline
+
+Sub-chunk **c** moved the `/stub-driver` orchestration from a standalone test binary onto joey's production boot path. After the corvus arc finishes (Q11 recovery verified, line `corvus-d hybrid-PKE round-trip verified via /srv/corvus (b3b)`), joey calls a new `do_stratumd_stub_bringup()` static (`usr/joey/joey.c`) that runs the same sequence `/stub-driver` does:
+
+1. `t_pipe × 2` — four KOBJ_SPOOR fds (c2s + s2c rings, half-duplex).
+2. `t_spawn_with_fds("stratumd-stub", 13, [c2s_rd, s2c_wr], 2)` — spawns the stub with the server-side ends pre-installed at its fd 0 (rx) and fd 1 (tx). Parent retains own holds.
+3. `t_close(c2s_rd) + t_close(s2c_wr)` — drop joey-side refs on the stub's transport fds. Without this, the stub never sees EOF (joey would still be an alive reader/writer on the rings).
+4. `t_attach_9p(c2s_wr, s2c_rd, "/", 1, 0)` — drive Tversion + Tattach over the byte-pipe pair.
+5. `t_mount(attach_fd, 99, 0) + t_unmount(99)` — graft + ungraft at `target_path_id = 99` (matches `/stub-driver`'s convention to keep the kernel-test and boot-path numbers aligned).
+6. `t_close(attach_fd) + t_close(c2s_wr) + t_close(s2c_rd)` — last drops; c2s_wr write_eof propagates so the stub's next read returns 0.
+7. `t_wait_pid(&status)` — reaps the stub; asserts `status==0`.
+
+Failure semantics: any sub-step prints a `joey: stub-bringup ... FAILED` diagnostic and returns -1; joey's main treats that as a boot regression and exits 1.
+
+Boot log on success:
+
+```
+joey: corvus-d hybrid-PKE round-trip verified via /srv/corvus (b3b)
+stratumd-stub: serving on fd 0 (rx) + fd 1 (tx)
+stratumd-stub: EOF on rx; exit 0
+joey: stub-bringup ok (pipe + spawn + attach + mount + unmount)
+  joey: /joey pid=N exited cleanly (status=0)
+Thylacine boot OK
+```
+
+Value-add over `/stub-driver` (b):
+- Production-shape evidence on the actual boot path (not a separate test binary).
+- Joey now exercises `SYS_ATTACH_9P` + `SYS_MOUNT` on every boot — any regression in those surfaces becomes a boot-time signal.
+- The line that says "boot pivot is possible" moves from a self-contained kernel-test artifact onto the same boot path that runs corvus.
+
+What it does **not** yet do (sub-chunks d/e):
+- Reads through the mount — the stub returns Rlerror on Twalk, so `dev_walk` into the mount fails. Sub-chunk d adds Twalk + Tlopen + Tread to the stub.
+- Doesn't make `/sysroot` joey's namespace root — that's sub-chunk e (territory-root pivot).
+
+---
+
 ## Composition with future chunks
 
-- **RFFDG / SYS_SPAWN_WITH_FDS**: lets `/joey` (userspace) drive the orchestration that the kernel test currently does. Joey opens pipes, spawns stratumd-stub with the pipe ends pre-installed, spawns a client (or runs attach-probe directly), drives the 9P traffic.
-- **Long-running stratumd-stub**: today the stub exits on first EOF. For real `stratumd-system`, the responder serves the entire lifetime of the mount; multiple attach sessions, walks, opens, reads.
-- **Pivot/chroot**: once a stratumd-stub-served Spoor is `SYS_MOUNT`'d, no current mechanism lets a process treat that tree as its namespace root. Pivot makes joey's `/` resolve through the mount.
+- **Long-running stratumd-stub serving content (d)**: today the stub handles Tversion / Tattach / Tclunk. Sub-chunk d adds Twalk to a small synthetic tree + Tlopen + Tread of one or two files, so `dev_walk` through the mount can resolve real content. Each addition is a small extension to `build_response` in `usr/stratumd-stub/stratumd-stub.c`.
+- **Pivot / territory-root (e)**: once the stub serves walkable content, the next architectural step is making the mounted Spoor the joey territory's root (or a child territory's root). Today joey's `/` resolves through devramfs; sub-chunk e adds the kernel mechanism to substitute a different Spoor as `/`.
+- **Real stratumd swap-in (f)**: sub-chunks a–e prove the architecture with the stub. Real stratumd swap-in replaces `t_spawn_with_fds("stratumd-stub", ...)` with `t_spawn_with_fds("stratumd-system", ...)` once Phase 6's musl sysroot lets stratumd compile for Thylacine's userspace ABI.
 
 ---
 
@@ -175,19 +212,20 @@ Earlier tests still covered (P5-attach-probe's `userspace.attach_probe_round_tri
 
 | Item | State |
 |---|---|
-| `usr/stratumd-stub/stratumd-stub.c` (userspace responder) | LANDED |
-| `kernel/test/test_stratumd_stub.c` (2-Proc kernel demo) | LANDED |
-| Build pipeline (`usr/CMakeLists.txt`, `tools/build.sh` usr_bins, `kernel/CMakeLists.txt`) | LANDED |
-| Test registry entry | LANDED |
-| Joey-as-orchestrator using SYS_SPAWN (this is kernel-supervised, not joey-driven) | DEFERRED |
-| Long-running stub serving multiple clients | DEFERRED |
-| Pivot/chroot mechanism | DEFERRED |
+| `usr/stratumd-stub/stratumd-stub.c` (userspace responder) | LANDED (a) |
+| `kernel/test/test_stratumd_stub.c` (2-Proc kernel demo) | LANDED (a) |
+| `SYS_SPAWN_WITH_FDS` + `/stub-driver` userspace orchestrator | LANDED (b) |
+| `usr/joey/joey.c::do_stratumd_stub_bringup` (inline production-boot orchestration) | LANDED (c) |
+| Long-running stub serving Twalk / Tlopen / Tread (synthetic FS) | DEFERRED (d) |
+| Pivot/territory-root mechanism (stub's tree becomes joey's `/`) | DEFERRED (e) |
+| Real stratumd swap-in (post-Phase-6 musl sysroot) | DEFERRED (f) |
 
 ---
 
 ## Known caveats
 
-1. **Kernel-supervised setup, not joey-driven.** The kernel test framework wires the two Procs together; in production, joey would do this from userspace. RFFDG or SYS_SPAWN_WITH_FDS unblocks joey-driven orchestration in a future chunk.
-2. **Stub exits on first EOF.** Real stratumd serves the entire mount lifetime. The stub's `for(;;) { read; respond }` loop handles arbitrary message counts, but if the client closes its tx, the stub exits — single-session.
-3. **No walk support.** Stub responds to Tversion / Tattach / Tclunk only. Real stratumd needs Twalk, Tlopen, Tread, Twrite, etc. Each is a small extension to the dispatch in `build_response`.
-4. **No spec extension.** This is pure composition over the already-spec'd 9P client + pipe + handle layers. The two-userspace-Proc pattern doesn't introduce new invariants.
+1. **Stub exits on first EOF.** Real stratumd serves the entire mount lifetime. The stub's `for(;;) { read; respond }` loop handles arbitrary message counts, but if the client closes its tx, the stub exits — single-session. Each invocation in joey's boot path is a fresh stub Proc.
+2. **No walk support.** Stub responds to Tversion / Tattach / Tclunk only. After joey mounts the stub at `target_path_id=99`, `dev_walk` into the mount would receive Rlerror. Sub-chunk d adds Twalk / Tlopen / Tread.
+3. **Stub-bringup runs once per boot.** Joey runs it after corvus's exit, mounts + unmounts in a single sweep. There's no long-lived stub holding the mount across the boot's lifetime — that's the production model for real stratumd, not the stub.
+4. **`target_path_id = 99` is a placeholder constant.** No string-path resolution yet for mount targets at v1.0; the abstract u32 token doesn't correspond to a visible directory in any namespace tree. Real `/sysroot` semantics land with sub-chunk e (territory-root pivot) + the path-resolution syscall work in Phase 6.
+5. **No spec extension.** This is pure composition over the already-spec'd 9P client + pipe + handle + mount layers. The stub-bringup pattern doesn't introduce new invariants.
