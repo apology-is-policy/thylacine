@@ -75,11 +75,25 @@ Features that usually don't (pure computation, test helpers, config parsing, CLI
 
 **If you cannot articulate the invariant formally, you don't understand it well enough to implement it.**
 
-### Corvus exception (user-authorized, 2026-05-20)
+### Spec-to-code suspended until further notice (user-authorized, 2026-05-21)
 
-The exhaustive clean-cfg run of `specs/corvus.tla` (`corvus.cfg`) is **no longer a per-chunk pre-commit gate**. After the F5 spec change (P5-corvus-srv-impl audit close) added `ConnTeardown` + the parallel append-only `connections_history` variable, the state space grew ~3× and the queue stabilized at ~14M states/diameter 22 with no convergence in budget. The 8 `corvus_buggy_*.cfg` runs remain required (they terminate fast on counterexample and verify invariant-detection behavior). Corvus spec edits must still keep the buggy cfgs producing the expected counterexamples; the clean-cfg run becomes a best-effort background verification when the user's budget allows.
+The exhaustive clean-cfg TLC run is **no longer a per-chunk pre-commit gate** for any spec in `specs/`. Spec-first design discipline still applies (write the spec before the impl; iterate the model until you can articulate the invariant precisely) — that's a thinking aid, not a gate. The per-chunk runtime gate is now: buggy-cfg counterexamples confirmed + all tests pass.
 
-This exception applies **only to `corvus.tla`**. Every other invariant-bearing spec keeps its full pre-commit gate (scheduler, namespace, handles, vmo, 9p_client, poll, futex, notes, pty, tsleep, sched_ctxsw, pipe, burrow).
+Why: clean-cfg TLC runs across the spec inventory have grown to wall-clock budgets that are no longer practical pre-commit. The corvus precedent (initially recorded 2026-05-20 as a corvus-only exception, broadened to project-wide on 2026-05-21) makes the trade-off explicit — the buggy cfgs are the load-bearing artifact for invariant-detection regressions; the clean cfgs are exhaustive coverage that we defer to a best-effort background verification when the budget allows. When a clean cfg does land GREEN (full convergence or a documented partial-explored frontier with no violation), note it in the relevant audit closed-list or status doc.
+
+What stays binding:
+- **Spec-first design**: every invariant-bearing feature still gets a TLA+ module BEFORE the impl. Articulating the invariant in formal syntax is a hard requirement; failing to means you don't understand it well enough yet.
+- **Buggy-cfg counterexamples**: every existing buggy cfg must continue to produce its expected counterexample after any spec or impl change. These terminate fast and remain pre-commit gates.
+- **Audit-trigger surfaces** (CLAUDE.md §"Audit-triggering changes") are unchanged; the formal-audit discipline still applies before each invariant-bearing merge.
+- **The 21 enumerated invariants** in `ARCHITECTURE.md §28` remain proof obligations; the suspension affects HOW exhaustively we verify them per chunk, not WHETHER they hold.
+
+What gets deferred:
+- Per-chunk clean-cfg TLC runs.
+- Coverage claims of the form "spec re-verified clean GREEN" — replace with "buggy cfgs re-verified" or "partial clean exploration through N distinct states / diameter D without violation".
+
+When to re-enable: at user direction, or when a spec change can articulate a clear, narrow re-verification scope that fits the per-chunk budget. Until then, plan work accordingly.
+
+Cross-link: `memory/feedback_spec_to_code_suspended.md` (project-wide policy record).
 
 ### TLA+ setup
 
