@@ -10,7 +10,7 @@ This is the first of the P5-stratumd-stub-bringup arc. The full arc is:
 | **b** | `SYS_SPAWN_WITH_FDS` + `/stub-driver` userspace orchestrator (production shape, separate binary) | LANDED (`73784b4`) |
 | **c** | Joey runs the `/stub-driver` orchestration inline on the production boot path | LANDED (`6c1c816`) |
 | **d** | Stub serves Twalk + Tlopen + Tread over a synthetic FS (`/hello`) — `/stub-fs-probe` validates | LANDED (`cde54e8`) |
-| **e1** | `SYS_WALK_OPEN` syscall + `t_walk_open` libt wrapper + `/stub-walk-probe` end-to-end via kernel 9P client; joey-inline content check on every boot | LANDED (*(pending)*) |
+| **e1** | `SYS_WALK_OPEN` syscall + `t_walk_open` libt wrapper + `/stub-walk-probe` end-to-end via kernel 9P client; joey-inline content check on every boot | LANDED (`f37748b`) |
 | e2 (future) | Territory-root pivot mechanism so the mounted Spoor becomes the joey territory's `/` | DEFERRED |
 | f (future) | Real stratumd swap-in (after Phase 6 musl sysroot) | DEFERRED |
 
