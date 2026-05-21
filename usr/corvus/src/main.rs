@@ -100,9 +100,10 @@ extern crate alloc;
 mod p9;
 
 use libthyla_rs::{
-    t_close, t_explicit_bzero, t_getrandom, t_mlockall, t_poll, t_post_service,
-    t_putstr, t_read, t_set_dumpable, t_set_traceable, t_srv_accept, t_srv_peer,
-    t_write, TPollFd, TSrvPeerInfo, T_POLLHUP, T_POLLIN,
+    t_cap_grant, t_close, t_explicit_bzero, t_getrandom, t_mlockall, t_poll,
+    t_post_service, t_putstr, t_read, t_set_dumpable, t_set_traceable,
+    t_srv_accept, t_srv_peer, t_write, TPollFd, TSrvPeerInfo, T_CAP_HOSTOWNER,
+    T_POLLHUP, T_POLLIN,
 };
 
 use alloc::vec::Vec;
@@ -579,7 +580,18 @@ const VERB_AUTH: u8 = 1;
 const VERB_SESSION_CLOSE: u8 = 3;
 const VERB_UNWRAP: u8 = 4;
 const VERB_USER_CREATE: u8 = 5;
+const VERB_ADMIN_ELEVATE: u8 = 7;
 const VERB_WRAP: u8 = 10;
+
+// System passphrase — verified by ADMIN_ELEVATE before the kernel `cap`
+// grant is registered (CORVUS-DESIGN.md §5.5). v1.0 PLACEHOLDER: a
+// hardcoded byte string shared with joey's boot sequence. Real
+// installer-driven first-boot setup (argon2id(passphrase, salt) →
+// system_KEK + AEAD-wrapped magic, persisted across reboots) lands when
+// CRVS persistence does. The current scheme is functionally equivalent
+// to "the system passphrase is `thylacine`" — sufficient to exercise
+// the elevation mechanism end-to-end in the boot test.
+const SYSTEM_PASSPHRASE: &[u8] = b"thylacine";
 
 // Stratum↔corvus wire version. STRATUM-API-V1.md Q11 resolved to a
 // 4-byte request header carrying this byte at offset 1; an unknown
@@ -882,7 +894,46 @@ unsafe fn handle_auth(payload: &[u8], response: &mut Vec<u8>) {
 //   [1+ul..3+ul]   pass_len u16 LE (1..=MAX_PASS_LEN)
 //   [3+ul..]       passphrase
 //   [end-1]        backend u8 (v1.0: 0=passphrase only)
-unsafe fn handle_user_create(payload: &[u8], response: &mut Vec<u8>) {
+// peer_live_caps — fresh SYS_SRV_PEER read of the connection peer's
+// current capability set. C-22 (CORVUS-DESIGN.md §6.3): the peer's caps
+// are mutable (elevated by /cap/use mid-conversation), so admin-verb
+// gating must re-query LIVE caps before each call, never relying on the
+// at-accept snapshot in conn.peer.
+//
+// Returns 0 on any failure (dead peer / syscall error / etc.) — the
+// fail-closed sentinel. A caller that requires CAP_HOSTOWNER bit-tests
+// the returned mask; a 0 return necessarily fails the gate.
+unsafe fn peer_live_caps(handle: i64) -> u64 {
+    let mut info = TSrvPeerInfo::default();
+    if t_srv_peer(handle, &mut info) != 0 {
+        return 0;
+    }
+    if info.alive == 0 {
+        return 0;
+    }
+    info.caps
+}
+
+// handle_user_create — USER_CREATE verb (verb_id=5). Admin-gated as of
+// P5-hostowner-b-b: the caller's connection peer must hold CAP_HOSTOWNER
+// (the corvus-d audit's deferred F2-gate-half now closes here), unless
+// no users yet exist — the first USER_CREATE bootstraps the initial
+// hostowner candidate (otherwise no user could authenticate to call
+// ADMIN_ELEVATE, a chicken-and-egg). Live caps re-query per C-22.
+unsafe fn handle_user_create(handle: i64, payload: &[u8], response: &mut Vec<u8>) {
+    // P5-hostowner-b-b: admin gate. Bootstrap exception: the first
+    // user creation is free (the hostowner candidate is the first user
+    // — they AUTH, ADMIN_ELEVATE, then create subsequent users while
+    // holding CAP_HOSTOWNER). After the first user exists, every
+    // USER_CREATE requires the peer to hold CAP_HOSTOWNER via fresh
+    // SYS_SRV_PEER. Single-threaded corvus → no TOCTOU on the count.
+    if user_states_count() > 0 {
+        let caps = peer_live_caps(handle);
+        if (caps & T_CAP_HOSTOWNER) == 0 {
+            return stage_response(response, STATUS_PERMISSION_DENIED, &[]);
+        }
+    }
+
     if payload.len() < 4 {
         return stage_response(response, STATUS_BAD_FORMAT, &[]);
     }
@@ -974,6 +1025,83 @@ unsafe fn handle_user_create(payload: &[u8], response: &mut Vec<u8>) {
     dataset.extend_from_slice(b"users/");
     dataset.extend_from_slice(user_slice);
     dataset_owner_register(&dataset, user_slice);
+
+    stage_response(response, STATUS_OK, &[]);
+}
+
+// handle_admin_elevate — ADMIN_ELEVATE verb (verb_id=7). Verifies the
+// peer is console-attached + the system passphrase is correct, then
+// registers a pending CAP_HOSTOWNER grant against the peer's stripes
+// via SYS_CAP_GRANT. The peer redeems via SYS_CAP_USE (joey-side).
+//
+// CORVUS-DESIGN.md §5.5. Two gates in two trust domains: corvus
+// verifies the system passphrase (a check the kernel has no notion of);
+// the kernel verifies PROC_FLAG_CONSOLE_ATTACHED at /use redemption.
+// A compromised corvus could try to register grants for arbitrary
+// stripes, but only a console-attached writer can actually redeem.
+//
+// Payload format (CORVUS-DESIGN.md §6.4):
+//   [0..33)         token             33 B
+//   [33..35)        sys_pass_len      u16 LE (1..=MAX_PASS_LEN)
+//   [35..35+spl)    sys_passphrase    spl B
+//
+// Returns:
+//   STATUS_OK                no payload
+//   STATUS_BAD_FORMAT        malformed length / over-sized passphrase
+//   STATUS_BAD_AUTH          unknown token OR wrong system passphrase
+//   STATUS_PERMISSION_DENIED peer is not console-attached
+//   STATUS_INTERNAL_ERROR    cap grant registration failed (e.g., table
+//                            full; the kernel rejected the syscall)
+unsafe fn handle_admin_elevate(peer: &TSrvPeerInfo, payload: &[u8],
+                               response: &mut Vec<u8>) {
+    if payload.len() < TOKEN_LEN + 2 {
+        return stage_response(response, STATUS_BAD_FORMAT, &[]);
+    }
+    let token = &payload[0..TOKEN_LEN];
+    let sys_pass_len = (payload[TOKEN_LEN] as usize)
+        | ((payload[TOKEN_LEN + 1] as usize) << 8);
+    if sys_pass_len == 0 || sys_pass_len > MAX_PASS_LEN {
+        return stage_response(response, STATUS_BAD_FORMAT, &[]);
+    }
+    if payload.len() != TOKEN_LEN + 2 + sys_pass_len {
+        return stage_response(response, STATUS_BAD_FORMAT, &[]);
+    }
+    let sys_passphrase = &payload[TOKEN_LEN + 2..TOKEN_LEN + 2 + sys_pass_len];
+
+    // Token validity — any logged-in session may attempt elevation; the
+    // console + passphrase gates are the access controls.
+    if !session_token_matches(token) {
+        return stage_response(response, STATUS_BAD_AUTH, &[]);
+    }
+
+    // Console-attached check via the cached peer info — console
+    // attachment is immutable (one-way kernel-stamped, never propagated
+    // by rfork), so the at-accept snapshot is authoritative. The kernel
+    // re-verifies at /cap/use redemption as the load-bearing gate.
+    if peer.console == 0 {
+        return stage_response(response, STATUS_PERMISSION_DENIED, &[]);
+    }
+
+    // System passphrase verification — v1.0 PLACEHOLDER (byte-compare
+    // against SYSTEM_PASSPHRASE; argon2id + AEAD-wrap lands when CRVS
+    // persistence does). The check still fails closed for any mismatch.
+    if sys_passphrase.len() != SYSTEM_PASSPHRASE.len() {
+        return stage_response(response, STATUS_BAD_AUTH, &[]);
+    }
+    let mut diff: u8 = 0;
+    for i in 0..SYSTEM_PASSPHRASE.len() {
+        diff |= sys_passphrase[i] ^ SYSTEM_PASSPHRASE[i];
+    }
+    if diff != 0 {
+        return stage_response(response, STATUS_BAD_AUTH, &[]);
+    }
+
+    // Register the pending grant for the peer's stripes. The kernel's
+    // cap_register_grant_for_writer gate-checks CAP_GRANT_HOSTOWNER (set
+    // on corvus by joey's t_spawn_with_perms mask).
+    if t_cap_grant(T_CAP_HOSTOWNER, peer.stripes) != 0 {
+        return stage_response(response, STATUS_INTERNAL_ERROR, &[]);
+    }
 
     stage_response(response, STATUS_OK, &[]);
 }
@@ -1374,11 +1502,23 @@ unsafe fn try_dispatch_verb(conn: &mut Conn) {
         conn.pending_response.clear();
         conn.pending_response_off = 0;
 
+        // Snapshot the bits the gated verbs need before re-borrowing
+        // conn.pending_response. The handle is a primitive; the peer
+        // snapshot is Copy (TSrvPeerInfo is repr-C with primitive
+        // fields). C-22: peer_live_caps inside the gated handlers does
+        // the fresh SYS_SRV_PEER query — these are just stable inputs
+        // (immutable identity + the handle for re-query).
+        let conn_handle = conn.handle;
+        let conn_peer = conn.peer;
+
         match verb_id {
             VERB_AUTH => handle_auth(&payload_owned, &mut conn.pending_response),
             VERB_SESSION_CLOSE => handle_session_close(&payload_owned, &mut conn.pending_response),
             VERB_UNWRAP => handle_unwrap(&payload_owned, &mut conn.pending_response),
-            VERB_USER_CREATE => handle_user_create(&payload_owned, &mut conn.pending_response),
+            VERB_USER_CREATE => handle_user_create(conn_handle, &payload_owned,
+                                                   &mut conn.pending_response),
+            VERB_ADMIN_ELEVATE => handle_admin_elevate(&conn_peer, &payload_owned,
+                                                       &mut conn.pending_response),
             VERB_WRAP => handle_wrap(&payload_owned, &mut conn.pending_response),
             _ => stage_response(&mut conn.pending_response, STATUS_BAD_FORMAT, &[]),
         }

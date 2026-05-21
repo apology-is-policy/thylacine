@@ -481,6 +481,26 @@ enum {
     //     (bad fds / missing binary / oversized name / OOM / etc.)
     SYS_SPAWN_WITH_PERMS = 31,  // arg: name_va, name_len, fd_list_va, fd_count,
                                 //      cap_mask, perm_flags
+
+    // P5-hostowner-b-b: SYS_CAP_GRANT(cap_mask, target_stripes) and
+    // SYS_CAP_USE(cap_mask) — userspace bridges to the kernel `cap` device
+    // (CORVUS-DESIGN.md §5.5.1). The Dev write op (devcap_write on
+    // /cap/grant or /cap/use) is the eventual production path through a
+    // future namespace-aware open syscall; at v1.0 we lack t_open, so the
+    // two writers (corvus → grant, the console-attached redeemer → use)
+    // reach the cores directly via these syscalls. Same gate semantics
+    // as the Dev op (CAP_GRANT_HOSTOWNER for grant; PROC_FLAG_CONSOLE_-
+    // ATTACHED + matching stripes + matching cap_mask for use).
+    //
+    // SYS_CAP_GRANT returns 0 on success (a synthetic "wrote frame" ack;
+    // we don't echo the byte count the file-write op returns since this
+    // is a syscall, not a fd write). -1 on any gate fail / bad args /
+    // table full.
+    //
+    // SYS_CAP_USE returns 0 on success; -1 on gate fail / no pending
+    // grant / mismatched cap / writer stripes == 0.
+    SYS_CAP_GRANT    = 32,   // arg: cap_mask (x0), target_stripes (x1)
+    SYS_CAP_USE      = 33,   // arg: cap_mask (x0)
 };
 
 // SYS_SPAWN_WITH_PERMS perm_flags bits — must mirror the libt / libthyla-rs

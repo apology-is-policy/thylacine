@@ -62,6 +62,8 @@ enum {
     // via libthyla-rs; joey uses only the client-side wrapper below).
     T_SYS_SRV_CONNECT = 30,      // P5-corvus-srv-impl-b2: client-side /srv open
     T_SYS_SPAWN_WITH_PERMS = 31, // P5-corvus-srv-impl-b3a: spawn_full + perm_flags
+    T_SYS_CAP_GRANT   = 32,      // P5-hostowner-b-b: register pending cap grant
+    T_SYS_CAP_USE     = 33,      // P5-hostowner-b-b: redeem pending cap grant
 };
 
 // SYS_SPAWN_WITH_PERMS perm_flags — must mirror SPAWN_PERM_* in
@@ -75,10 +77,13 @@ enum {
 #define T_GRND_NONBLOCK   1u
 
 // CAP_* bits — MUST mirror kernel/include/thylacine/caps.h. Used as
-// `cap_mask` arg to t_spawn_with_caps / t_spawn_full.
-#define T_CAP_HW_CREATE   (1UL << 0)
-#define T_CAP_LOCK_PAGES  (1UL << 1)
-#define T_CAP_CSPRNG_READ (1UL << 2)
+// `cap_mask` arg to t_spawn_with_caps / t_spawn_full / t_cap_grant /
+// t_cap_use.
+#define T_CAP_HW_CREATE       (1UL << 0)
+#define T_CAP_LOCK_PAGES      (1UL << 1)
+#define T_CAP_CSPRNG_READ     (1UL << 2)
+#define T_CAP_HOSTOWNER       (1UL << 3)   // elevation-only; not in CAP_ALL
+#define T_CAP_GRANT_HOSTOWNER (1UL << 4)   // fork-grantable; joey → corvus
 
 // Maximum binary name length for t_spawn (mirror SYS_SPAWN_NAME_MAX).
 #define T_SPAWN_NAME_MAX  64u
@@ -766,6 +771,43 @@ static inline long t_srv_connect(const char *name, size_t name_len,
         "svc #0"
         : "+r"(x0)
         : "r"(x1), "r"(x2), "r"(x3), "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
+// t_cap_grant — register a pending CAP_HOSTOWNER grant for `target_stripes`
+// with the kernel `cap` device (CORVUS-DESIGN.md §5.5.1; P5-hostowner-b-b).
+// Caller must hold CAP_GRANT_HOSTOWNER. Returns 0 on success, -1 on gate
+// fail / bad args / table full. At v1.0 only CAP_HOSTOWNER is grantable.
+__attribute__((always_inline))
+static inline long t_cap_grant(unsigned long cap_mask,
+                               unsigned long target_stripes) {
+    register long x0 __asm__("x0") = (long)cap_mask;
+    register long x1 __asm__("x1") = (long)target_stripes;
+    register long x8 __asm__("x8") = T_SYS_CAP_GRANT;
+    __asm__ volatile (
+        "svc #0"
+        : "+r"(x0)
+        : "r"(x1), "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
+// t_cap_use — redeem a pending cap grant for the caller's own stripes.
+// Caller must hold PROC_FLAG_CONSOLE_ATTACHED and have a non-expired
+// pending grant for its stripes with a matching cap_mask. On success the
+// caller's caps gains `cap_mask`; the grant is consumed (one-shot).
+// Returns 0 on success, -1 on gate fail / no pending grant / mismatch.
+__attribute__((always_inline))
+static inline long t_cap_use(unsigned long cap_mask) {
+    register long x0 __asm__("x0") = (long)cap_mask;
+    register long x8 __asm__("x8") = T_SYS_CAP_USE;
+    __asm__ volatile (
+        "svc #0"
+        : "+r"(x0)
+        : "r"(x8)
         : "memory", "cc"
     );
     return x0;

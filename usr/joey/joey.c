@@ -134,6 +134,19 @@ static size_t build_auth(unsigned char *pl,
     return o;
 }
 
+// build_admin_elevate — ADMIN_ELEVATE payload (verb 7; P5-hostowner-b-b).
+//   token(33) + sys_pass_len(2 LE) + sys_passphrase
+static size_t build_admin_elevate(unsigned char *pl,
+                                  const unsigned char *token,
+                                  const char *sys_pass, size_t sys_pass_len) {
+    size_t o = 0;
+    for (int i = 0; i < 33; i++) pl[o++] = token[i];
+    pl[o++] = (unsigned char)(sys_pass_len & 0xff);
+    pl[o++] = (unsigned char)(sys_pass_len >> 8);
+    for (size_t i = 0; i < sys_pass_len; i++) pl[o++] = (unsigned char)sys_pass[i];
+    return o;
+}
+
 // build_wrap — WRAP payload (verb 10).
 //   token(33) + dataset_len(1) + dataset + key_id(8) + dek_len(2) + dek
 static size_t build_wrap(unsigned char *pl,
@@ -235,10 +248,14 @@ int main(void) {
     // the spawn thunk (BEFORE exec_setup; P5-corvus-srv-impl-b3a).
     const char corvus_name[] = "corvus";
     unsigned int no_fds[1] = { 0 };
+    // P5-hostowner-b-b: joey grants corvus T_CAP_GRANT_HOSTOWNER so
+    // corvus may write /cap/grant on ADMIN_ELEVATE (the kernel cap
+    // device gates the grant write on this fork-grantable bit). joey
+    // holds it via CAP_ALL; corvus inherits it through the spawn mask.
     long corvus_pid = t_spawn_with_perms(
         corvus_name, sizeof(corvus_name) - 1,
         no_fds, 0,
-        T_CAP_LOCK_PAGES | T_CAP_CSPRNG_READ,
+        T_CAP_LOCK_PAGES | T_CAP_CSPRNG_READ | T_CAP_GRANT_HOSTOWNER,
         T_SPAWN_PERM_MAY_POST_SERVICE);
     if (corvus_pid <= 0) {
         t_putstr("joey: t_spawn_with_perms(\"corvus\") FAILED\n");
@@ -268,7 +285,11 @@ int main(void) {
     const char pass_michael[] = "correct-horse-battery-staple-v1";
     const char pass_susan[]   = "anatomy-trombone-glacier-velvet-42";
 
-    // === USER_CREATE michael ===
+    // === USER_CREATE michael === (first user; bootstrap exception
+    // — corvus allows USER_CREATE with no caller cap while the user
+    // table is empty so the initial hostowner candidate can exist; once
+    // any user is created, subsequent USER_CREATEs require the caller
+    // to hold CAP_HOSTOWNER, which lands via ADMIN_ELEVATE below.)
     pl = build_user_create(tx, "michael", 7, pass_michael, sizeof(pass_michael) - 1);
     if (corvus_exchange(conn_fd, 5, tx, pl, rx, sizeof(rx), &st, &rlen) != 0) {
         t_putstr("joey: USER_CREATE michael transport FAILED\n");
@@ -280,21 +301,7 @@ int main(void) {
         t_putstr("\n");
         return 1;
     }
-    t_putstr("joey: USER_CREATE michael ok\n");
-
-    // === USER_CREATE susan === (gives the cross-user C-7 test a real owner)
-    pl = build_user_create(tx, "susan", 5, pass_susan, sizeof(pass_susan) - 1);
-    if (corvus_exchange(conn_fd, 5, tx, pl, rx, sizeof(rx), &st, &rlen) != 0) {
-        t_putstr("joey: USER_CREATE susan transport FAILED\n");
-        return 1;
-    }
-    if (st != 0 || rlen != 0) {
-        t_putstr("joey: USER_CREATE susan returned non-OK status=");
-        t_putstr(itoa_dec(st, buf, sizeof(buf)));
-        t_putstr("\n");
-        return 1;
-    }
-    t_putstr("joey: USER_CREATE susan ok\n");
+    t_putstr("joey: USER_CREATE michael ok (bootstrap)\n");
 
     // === AUTH michael (wrong passphrase) → BadAuth (1) ===
     pl = build_auth(tx, "michael", 7, "wrong-passphrase", 16);
@@ -330,6 +337,46 @@ int main(void) {
         t_putstr(c);
     }
     t_putstr("...)\n");
+
+    // === ADMIN_ELEVATE michael (P5-hostowner-b-b) === verify console +
+    // system passphrase; corvus writes /cap/grant for joey's stripes,
+    // returns OK. Then joey redeems via t_cap_use → joey's Proc gets
+    // CAP_HOSTOWNER. After this, joey can call admin-gated verbs
+    // (USER_CREATE et al.).
+    pl = build_admin_elevate(tx, token, "thylacine", 9);
+    if (corvus_exchange(conn_fd, 7, tx, pl, rx, sizeof(rx), &st, &rlen) != 0) {
+        t_putstr("joey: ADMIN_ELEVATE transport FAILED\n");
+        return 1;
+    }
+    if (st != 0 || rlen != 0) {
+        t_putstr("joey: ADMIN_ELEVATE returned non-OK status=");
+        t_putstr(itoa_dec(st, buf, sizeof(buf)));
+        t_putstr("\n");
+        return 1;
+    }
+    t_putstr("joey: ADMIN_ELEVATE ok\n");
+
+    if (t_cap_use(T_CAP_HOSTOWNER) != 0) {
+        t_putstr("joey: t_cap_use(CAP_HOSTOWNER) FAILED\n");
+        return 1;
+    }
+    t_putstr("joey: t_cap_use(CAP_HOSTOWNER) ok (joey now hostowner)\n");
+
+    // === USER_CREATE susan === (gives the cross-user C-7 test a real
+    // owner). Now gated on CAP_HOSTOWNER — joey just elevated, so
+    // peer_live_caps for joey's conn includes CAP_HOSTOWNER.
+    pl = build_user_create(tx, "susan", 5, pass_susan, sizeof(pass_susan) - 1);
+    if (corvus_exchange(conn_fd, 5, tx, pl, rx, sizeof(rx), &st, &rlen) != 0) {
+        t_putstr("joey: USER_CREATE susan transport FAILED\n");
+        return 1;
+    }
+    if (st != 0 || rlen != 0) {
+        t_putstr("joey: USER_CREATE susan (post-elevate) returned non-OK status=");
+        t_putstr(itoa_dec(st, buf, sizeof(buf)));
+        t_putstr("\n");
+        return 1;
+    }
+    t_putstr("joey: USER_CREATE susan ok (gated on CAP_HOSTOWNER)\n");
 
     // === WRAP users/michael — wrap a known 32-byte DEK ===
     unsigned char dek[32];

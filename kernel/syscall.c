@@ -13,6 +13,7 @@
 #include <thylacine/dev.h>
 #include <thylacine/dev9p.h>
 #include <thylacine/devramfs.h>
+#include <thylacine/devcap.h>
 #include <thylacine/devsrv.h>
 #include <thylacine/dma_handle.h>
 #include <thylacine/elf.h>
@@ -2269,6 +2270,38 @@ static s64 sys_srv_connect_handler(u64 name_va, u64 name_len_raw,
 }
 
 // =============================================================================
+// SYS_CAP_GRANT / SYS_CAP_USE — userspace bridges to the `cap` device
+// (P5-hostowner-b-b; CORVUS-DESIGN.md §5.5.1).
+//
+// The cap device exposes /cap/grant + /cap/use through the Dev write op
+// (devcap_write), the eventual production path through a future
+// namespace-aware open syscall. At v1.0 there is no t_open in userspace,
+// so the two writers (corvus → grant; the console-attached redeemer →
+// use) reach the cores directly via these syscalls. Same gate semantics
+// as the Dev op — the cores (cap_register_grant_for_writer /
+// cap_redeem_grant_for_writer) enforce both.
+//
+// Both syscalls return 0 on success (a synthetic "wrote frame" ack; we
+// don't echo the byte count since this is a syscall, not an fd write)
+// and -1 on any gate fail / bad args / table full / no pending grant.
+// =============================================================================
+
+static s64 sys_cap_grant_handler(u64 cap_mask, u64 target_stripes) {
+    struct Thread *t = current_thread();
+    if (!t || !t->proc)                                    return -1;
+    long rc = cap_register_grant_for_writer(t->proc, (caps_t)cap_mask,
+                                             target_stripes);
+    return (rc >= 0) ? 0 : -1;
+}
+
+static s64 sys_cap_use_handler(u64 cap_mask) {
+    struct Thread *t = current_thread();
+    if (!t || !t->proc)                                    return -1;
+    long rc = cap_redeem_grant_for_writer(t->proc, (caps_t)cap_mask);
+    return (rc >= 0) ? 0 : -1;
+}
+
+// =============================================================================
 // SYS_POLL — the multi-fd wait/wake primitive (P5-poll-a).
 //
 // Per ARCH §23.3 + specs/poll.tla + <thylacine/poll.h>. The user
@@ -2531,6 +2564,14 @@ void syscall_dispatch(struct exception_context *ctx) {
                                                           ctx->regs[3],
                                                           ctx->regs[4],
                                                           ctx->regs[5]);
+        return;
+
+    case SYS_CAP_GRANT:
+        ctx->regs[0] = (u64)sys_cap_grant_handler(ctx->regs[0], ctx->regs[1]);
+        return;
+
+    case SYS_CAP_USE:
+        ctx->regs[0] = (u64)sys_cap_use_handler(ctx->regs[0]);
         return;
 
     default:

@@ -65,6 +65,11 @@ pub const T_SYS_SRV_CONNECT: u64     = 30;
 // P5-corvus-srv-impl-b3a: spawn_full + perm_flags (atomic kernel stamp
 // of PROC_FLAG_* bits on the spawned child, gated on caller console-attach).
 pub const T_SYS_SPAWN_WITH_PERMS: u64 = 31;
+// P5-hostowner-b-b: register / redeem a pending cap grant via the `cap`
+// device (CORVUS-DESIGN.md §5.5.1). Bridges the kernel cap-grant table
+// to userspace until a generic t_open lands.
+pub const T_SYS_CAP_GRANT: u64        = 32;
+pub const T_SYS_CAP_USE: u64          = 33;
 
 // SYS_SPAWN_WITH_PERMS perm_flags — must mirror SPAWN_PERM_* in
 // kernel/include/thylacine/syscall.h.
@@ -82,9 +87,11 @@ pub const T_POLLNVAL: i16 = 0x020;
 // Caps — MUST mirror CAP_* bits in kernel/include/thylacine/caps.h.
 // =============================================================================
 
-pub const T_CAP_HW_CREATE: u64   = 1 << 0;
-pub const T_CAP_LOCK_PAGES: u64  = 1 << 1;
-pub const T_CAP_CSPRNG_READ: u64 = 1 << 2;
+pub const T_CAP_HW_CREATE: u64       = 1 << 0;
+pub const T_CAP_LOCK_PAGES: u64      = 1 << 1;
+pub const T_CAP_CSPRNG_READ: u64     = 1 << 2;
+pub const T_CAP_HOSTOWNER: u64       = 1 << 3;   // elevation-only; not in CAP_ALL
+pub const T_CAP_GRANT_HOSTOWNER: u64 = 1 << 4;   // fork-grantable; joey → corvus
 
 // =============================================================================
 // Rights — MUST mirror RIGHT_* bits in kernel/include/thylacine/handle.h.
@@ -728,6 +735,48 @@ pub unsafe fn t_spawn_with_perms(name: *const u8, name_len: usize,
         in("x4") cap_mask,
         in("x5") perm_flags,
         in("x8") T_SYS_SPAWN_WITH_PERMS,
+        options(nostack)
+    );
+    x0
+}
+
+// =============================================================================
+// P5-hostowner-b-b — t_cap_grant / t_cap_use.
+// =============================================================================
+//
+// Userspace bridges to the kernel `cap` elevation device
+// (CORVUS-DESIGN.md §5.5.1). The Dev write op (devcap_write) is the
+// eventual production path via a future namespace-aware open; at v1.0
+// we lack t_open, so the two writers reach the cores directly.
+//
+// t_cap_grant — register a pending grant for `target_stripes`. Caller
+// must hold CAP_GRANT_HOSTOWNER. Returns 0 on success, -1 on gate fail /
+// bad args / table full. At v1.0 only CAP_HOSTOWNER is grantable.
+#[inline(always)]
+pub unsafe fn t_cap_grant(cap_mask: u64, target_stripes: u64) -> i64 {
+    let mut x0: i64 = cap_mask as i64;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") target_stripes,
+        in("x8") T_SYS_CAP_GRANT,
+        options(nostack)
+    );
+    x0
+}
+
+// t_cap_use — redeem a pending grant for the caller's own stripes.
+// Caller must hold PROC_FLAG_CONSOLE_ATTACHED and have a non-expired
+// pending grant with matching cap_mask. On success, caller's caps gains
+// `cap_mask`; the grant is consumed (one-shot). Returns 0 on success,
+// -1 on gate fail / no pending grant / mismatch.
+#[inline(always)]
+pub unsafe fn t_cap_use(cap_mask: u64) -> i64 {
+    let mut x0: i64 = cap_mask as i64;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x8") T_SYS_CAP_USE,
         options(nostack)
     );
     x0
