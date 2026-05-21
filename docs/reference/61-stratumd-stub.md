@@ -8,7 +8,7 @@ This is the first of the P5-stratumd-stub-bringup arc. The full arc is:
 |---|---|---|
 | **a** | Userspace responder + 2-userspace-Proc demo via kernel-supervised setup | LANDED (`479d997`) |
 | **b** | `SYS_SPAWN_WITH_FDS` + `/stub-driver` userspace orchestrator (production shape, separate binary) | LANDED (`73784b4`) |
-| **c** | Joey runs the `/stub-driver` orchestration inline on the production boot path | LANDED (`*(pending)*`) |
+| **c** | Joey runs the `/stub-driver` orchestration inline on the production boot path | LANDED (`6c1c816`) |
 | d (future) | Long-running stratumd-stub serving Twalk / Tlopen / Tread (real synthetic FS) | DEFERRED |
 | e (future) | Pivot/territory-root mechanism so the stub's tree becomes joey's `/` | DEFERRED |
 | f (future) | Real stratumd swap-in (after Phase 6 musl sysroot) | DEFERRED |
