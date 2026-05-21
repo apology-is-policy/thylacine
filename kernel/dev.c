@@ -11,6 +11,7 @@
 // to a small hash or RB-tree.
 
 #include <thylacine/dev.h>
+#include <thylacine/devcap.h>
 #include <thylacine/devsrv.h>
 #include <thylacine/extinction.h>
 #include <thylacine/spinlock.h>
@@ -118,6 +119,7 @@ void dev_init(void) {
     dev_register(&devctl);
     dev_register(&devramfs);
     dev_register(&devsrv);          // P5-corvus-srv: /srv service registry (dc='s')
+    dev_register(&devcap);          // P5-hostowner-b: /cap elevation device (dc='C')
 
     // Walk bestiary: dev->init() may itself dev_register additional
     // devs (e.g., a virtio probe that fans out to multiple instances).

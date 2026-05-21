@@ -214,6 +214,20 @@ void test_devsrv_post_basic(void);
 void test_devsrv_tombstone(void);
 void test_devsrv_registry_full(void);
 void test_devsrv_post_rollback(void);
+void test_devcap_registered(void);
+void test_devcap_walk_grant_use(void);
+void test_devcap_walk_unknown(void);
+void test_devcap_open_writeonly(void);
+void test_devcap_grant_gate_no_cap(void);
+void test_devcap_grant_gate_bad_args(void);
+void test_devcap_grant_replace(void);
+void test_devcap_grant_table_full(void);
+void test_devcap_use_gate_no_console(void);
+void test_devcap_use_no_pending(void);
+void test_devcap_use_basic(void);
+void test_devcap_use_one_shot(void);
+void test_devcap_use_mismatched_cap(void);
+void test_devcap_exit_clears_grant(void);
 void test_srvconn_create_destroy(void);
 void test_srvconn_roundtrip(void);
 void test_srvconn_ring_capacity(void);
@@ -796,6 +810,20 @@ struct test_case g_tests[] = {
     { "devsrv.tombstone",              test_devsrv_tombstone,              false, NULL },
     { "devsrv.registry_full",          test_devsrv_registry_full,          false, NULL },
     { "devsrv.post_rollback",          test_devsrv_post_rollback,          false, NULL },
+    { "devcap.registered",             test_devcap_registered,             false, NULL },
+    { "devcap.walk_grant_use",         test_devcap_walk_grant_use,         false, NULL },
+    { "devcap.walk_unknown",           test_devcap_walk_unknown,           false, NULL },
+    { "devcap.open_writeonly",         test_devcap_open_writeonly,         false, NULL },
+    { "devcap.grant_gate_no_cap",      test_devcap_grant_gate_no_cap,      false, NULL },
+    { "devcap.grant_gate_bad_args",    test_devcap_grant_gate_bad_args,    false, NULL },
+    { "devcap.grant_replace",          test_devcap_grant_replace,          false, NULL },
+    { "devcap.grant_table_full",       test_devcap_grant_table_full,       false, NULL },
+    { "devcap.use_gate_no_console",    test_devcap_use_gate_no_console,    false, NULL },
+    { "devcap.use_no_pending",         test_devcap_use_no_pending,         false, NULL },
+    { "devcap.use_basic",              test_devcap_use_basic,              false, NULL },
+    { "devcap.use_one_shot",           test_devcap_use_one_shot,           false, NULL },
+    { "devcap.use_mismatched_cap",     test_devcap_use_mismatched_cap,     false, NULL },
+    { "devcap.exit_clears_grant",      test_devcap_exit_clears_grant,      false, NULL },
     { "srvconn.create_destroy",        test_srvconn_create_destroy,        false, NULL },
     { "srvconn.roundtrip",             test_srvconn_roundtrip,             false, NULL },
     { "srvconn.ring_capacity",         test_srvconn_ring_capacity,         false, NULL },

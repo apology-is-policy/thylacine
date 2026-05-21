@@ -17,6 +17,7 @@
 //   3. thread_init    — kthread (TID 0) appears, parented to kproc
 
 #include <thylacine/caps.h>
+#include <thylacine/devcap.h>
 #include <thylacine/devsrv.h>
 #include <thylacine/extinction.h>
 #include <thylacine/handle.h>
@@ -735,6 +736,13 @@ void exits(const char *msg) {
     // (proc.c: state reaches ZOMBIE only through here); a future async-
     // kill path must call srv_proc_exit_notify too.
     srv_proc_exit_notify(p);
+
+    // P5-hostowner-b-a: drop any pending /cap grant targeting this Proc.
+    // Same discipline as srv_proc_exit_notify — leaf grant-table lock,
+    // no relation with g_proc_table_lock. Safety doesn't strictly need
+    // this (stripes are fresh per Proc — a recycled pid gets a fresh
+    // stripes, no accidental elevation), but cleanup frees the table slot.
+    cap_proc_exit_notify(p);
 
     // P3-A (R5-H F75 close): all lineage mutations + parent wakeup
     // happen UNDER g_proc_table_lock atomically. The previous code did
