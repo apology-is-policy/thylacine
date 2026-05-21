@@ -11,7 +11,7 @@ This is the first of the P5-stratumd-stub-bringup arc. The full arc is:
 | **c** | Joey runs the `/stub-driver` orchestration inline on the production boot path | LANDED (`6c1c816`) |
 | **d** | Stub serves Twalk + Tlopen + Tread over a synthetic FS (`/hello`) — `/stub-fs-probe` validates | LANDED (`cde54e8`) |
 | **e1** | `SYS_WALK_OPEN` syscall + `t_walk_open` libt wrapper + `/stub-walk-probe` end-to-end via kernel 9P client; joey-inline content check on every boot | LANDED (`f37748b`) |
-| **e2** | `SYS_CHROOT` syscall + `Territory.root_spoor` + `SYS_WALK_OPEN_FROM_ROOT` sentinel; v1.0 chroot mechanism per `CORVUS-DESIGN.md §10.1`; chroot path exercised via `/stub-walk-probe` (child Proc) + 6 dedicated kernel tests | LANDED (*(pending)*) |
+| **e2** | `SYS_CHROOT` syscall + `Territory.root_spoor` + `SYS_WALK_OPEN_FROM_ROOT` sentinel; v1.0 chroot mechanism per `CORVUS-DESIGN.md §10.1`; chroot path exercised via `/stub-walk-probe` (child Proc) + 6 dedicated kernel tests | LANDED (`d1e012c`) |
 | f (future) | Real stratumd swap-in (after Phase 6 musl sysroot) | DEFERRED |
 
 ---
