@@ -407,6 +407,8 @@ void test_p9_attached_create_destroy(void);
 void test_p9_attached_handshake_failure_returns_null(void);
 void test_p9_attached_root_spoor_walk_read(void);
 void test_p9_attached_query_helpers(void);
+void test_p9_attached_walked_outlives_root_no_uaf(void);
+void test_sys_walk_open_max_length_name_nul_terminated(void);
 void test_spoor_transport_init_destroy(void);
 void test_spoor_transport_init_null_rejected(void);
 void test_spoor_transport_send_routes_to_tx_dev_write(void);
@@ -1135,6 +1137,12 @@ struct test_case g_tests[] = {
                                        test_p9_attached_root_spoor_walk_read,
                                                                            false, NULL },
     { "p9_attached.query_helpers",     test_p9_attached_query_helpers,     false, NULL },
+    { "p9_attached.walked_outlives_root_no_uaf",
+                                       test_p9_attached_walked_outlives_root_no_uaf,
+                                                                           false, NULL },
+    { "sys_walk_open.max_length_name_nul_terminated",
+                                       test_sys_walk_open_max_length_name_nul_terminated,
+                                                                           false, NULL },
     { "spoor_transport.init_destroy",                       test_spoor_transport_init_destroy,                       false, NULL },
     { "spoor_transport.init_null_rejected",                 test_spoor_transport_init_null_rejected,                 false, NULL },
     { "spoor_transport.send_routes_to_tx_dev_write",        test_spoor_transport_send_routes_to_tx_dev_write,        false, NULL },

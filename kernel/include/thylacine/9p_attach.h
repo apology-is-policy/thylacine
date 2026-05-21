@@ -68,17 +68,46 @@
 
 struct p9_client;
 struct Spoor;
+struct p9_spoor_transport;
 
 #define P9_ATTACHED_MAGIC  0x50394154u  // "P9AT" little-endian
 
+// P5-stratumd-stub-bringup audit close F2 (F236 deferred close): refcounted
+// so the underlying p9_client + recv_buf + adapter + transport spoor refs
+// stay alive until ALL derived dev9p_priv (root + every walked Spoor) have
+// dropped their references. Pre-fix the root Spoor's close ran
+// p9_attached_destroy immediately, leaving walked dev9p_priv pointers
+// dangling and producing a UAF on subsequent walked Spoor closes (R15 F236).
+//
+// ref discipline:
+//   - p9_attached_create returns ref = 1 (the caller's hold).
+//   - p9_attached_ref bumps; every walked dev9p_priv allocated from a Spoor
+//     whose priv carries attached_owner takes one such ref.
+//   - p9_attached_unref drops; on the LAST ref the destroy logic runs
+//     (clunk root_fid + p9_client_close + p9_client_destroy + free buffers
+//     + spoor_clunk transport_tx/rx + kfree adapter + kfree(a)).
+//
+// Transport ownership (the SYS_ATTACH_9P path):
+//   - sys_attach_9p_handler calls p9_attached_install_transport(a, adapter,
+//     tx, rx) once, AFTER p9_attached_create succeeds, transferring ownership
+//     of the kmalloc'd adapter + the syscall's transport-Spoor refs into the
+//     attached. The last unref releases them.
+//   - For test paths that use a loopback transport (no Spoor-backed adapter),
+//     install_transport is never called and adapter/tx/rx stay NULL —
+//     unref's destroy path skips them.
 struct p9_attached {
-    u32                  magic;
-    struct p9_client    *client;       // heap-allocated by create
-    u8                  *recv_buf;     // heap-allocated; sized to msize
-    size_t               recv_cap;
-    u32                  root_fid;     // the bound fid from Tattach
-    u32                  msize;        // negotiated
-    bool                 handshake_ok; // true once create succeeds; gates destroy's clunk
+    u32                          magic;
+    int                          ref;          // F2: refcount; init 1; last-unref destroys
+    struct p9_client            *client;       // heap-allocated by create
+    u8                          *recv_buf;     // heap-allocated; sized to msize
+    size_t                       recv_cap;
+    u32                          root_fid;     // the bound fid from Tattach
+    u32                          msize;        // negotiated
+    bool                         handshake_ok; // true once create succeeds; gates destroy's clunk
+    // F2 (SYS_ATTACH_9P-path transport ownership). NULL for test-loopback.
+    struct p9_spoor_transport   *adapter;
+    struct Spoor                *transport_tx;
+    struct Spoor                *transport_rx;
 };
 
 // Create + handshake + return ownership. `transport_ops` is the byte-
@@ -106,16 +135,40 @@ struct p9_attached *p9_attached_create(
 // (clone) and clunk derived fids in the normal way.
 struct Spoor *p9_attached_root_spoor(struct p9_attached *a);
 
-// Tear down. Must be called AFTER all Spoors derived from this attached
-// (the root Spoor + any walk-derived ones) have been spoor_clunk'd.
-// Calling destroy while Spoors are still alive will leave them with
-// dangling client pointers (read/write would observe magic-mismatch and
-// fail; the priv's `client` field is not refcounted at v1.0).
+// Refcount API (P5-stratumd-stub-bringup audit close F2 / F236).
 //
-// At v1.0 the ordering discipline is by convention; the future
-// attach_9p syscall handler will enforce it via the syscall-side
-// supervisor that pairs the returned spoor_fd with the attached's
-// teardown.
+// p9_attached_ref: increment ref. Safe on NULL (no-op). Bumps the ref by 1.
+// p9_attached_unref: decrement ref. Safe on NULL (no-op). On the LAST drop:
+//   - clunks root_fid via the client (if handshake completed),
+//   - p9_client_close + p9_client_destroy,
+//   - kfree(recv_buf) + kfree(client),
+//   - if a transport was installed: spoor_clunk(transport_tx [+ rx]) and
+//     kfree(adapter),
+//   - kfree(a) itself.
+//
+// Walked dev9p_priv carries an attached_owner pointer and holds one ref;
+// each walked Spoor's dev9p_close drops it. The root dev9p_priv (created
+// by SYS_ATTACH_9P) also holds one ref. The construction ref (the one
+// returned by p9_attached_create) is the caller's; for SYS_ATTACH_9P it
+// is transferred to the root dev9p_priv's attached_owner stash.
+void p9_attached_ref(struct p9_attached *a);
+void p9_attached_unref(struct p9_attached *a);
+
+// Install transport ownership (P5-stratumd-stub-bringup audit close F2).
+// Transfers ownership of `adapter` (which will be kfree'd on last unref)
+// and the syscall's references on `tx` / `rx` (which will be spoor_clunk'd
+// on last unref). `tx` and `rx` may alias (same Spoor → only one clunk).
+// First-call-wins: returns 0 on the first install, -1 on subsequent calls
+// or on bad args (NULL a, NULL adapter).
+int p9_attached_install_transport(struct p9_attached *a,
+                                   struct p9_spoor_transport *adapter,
+                                   struct Spoor *tx,
+                                   struct Spoor *rx);
+
+// Legacy alias: equivalent to p9_attached_unref. Retained because callers
+// who construct an attached + tear it down with no walks ever existing
+// (tests, attach-create failure paths) read more naturally as "destroy."
+// Drop in a future refactor once no caller depends on the name.
 void p9_attached_destroy(struct p9_attached *a);
 
 // Query: is this attached's session OPEN?

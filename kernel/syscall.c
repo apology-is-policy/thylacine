@@ -881,18 +881,19 @@ static s64 sys_attach_9p_handler(u64 tx_fd_raw, u64 rx_fd_raw,
         }
     }
 
-    // Allocate the adapter on the heap so its lifetime is tied to
-    // the attached (dev9p_close frees it via priv->adapter_to_free).
+    // Allocate the adapter on the heap. Transport ownership transfers
+    // into the p9_attached via p9_attached_install_transport below, so
+    // the LAST p9_attached_unref (after every walked Spoor closes — F2)
+    // is what kfree's the adapter and spoor_clunks the transport Spoors.
     struct p9_spoor_transport *adapter = kmalloc(sizeof(*adapter), KP_ZERO);
     if (!adapter) {
         spoor_unref(tx);
         if (rx != tx) spoor_unref(rx);
         return -1;
     }
-    // owns_spoors=false: the SVC handler manages the Spoor refs
-    // explicitly. dev9p_close's attach-teardown branch (which fires
-    // after p9_attached_destroy / p9_client_close → adapter close →
-    // no-op since owns=false) does the spoor_unref's.
+    // owns_spoors=false: dev9p (not the adapter) is the holder. The
+    // attached's last unref releases tx/rx via spoor_clunk and kfree's
+    // the adapter; the adapter's own close hook stays a no-op.
     if (p9_spoor_transport_init(adapter, tx, rx, false) != 0) {
         spoor_unref(tx);
         if (rx != tx) spoor_unref(rx);
@@ -910,38 +911,55 @@ static s64 sys_attach_9p_handler(u64 tx_fd_raw, u64 rx_fd_raw,
         aname_len > 0 ? aname_scratch : NULL, aname_len,
         (u32)n_uname);
     if (!att) {
+        // p9_attached_create's failure leaves the adapter untouched
+        // (the create's transport_ops.close runs on rollback, which is
+        // a no-op for owns=false). We must still kfree the adapter +
+        // release transport refs since they never transferred.
         spoor_unref(tx);
         if (rx != tx) spoor_unref(rx);
         kfree(adapter);
         return -1;
     }
 
-    struct Spoor *root = p9_attached_root_spoor(att);
-    if (!root) {
-        p9_attached_destroy(att);
+    // F2: transfer adapter + transport Spoor refs into the attached.
+    // From now on the attached owns them; failure-path rollbacks use
+    // p9_attached_unref (which is the path that kfree's the adapter +
+    // spoor_clunks the transports).
+    if (p9_attached_install_transport(att, adapter, tx, rx) != 0) {
+        // Shouldn't happen — first install on a fresh attached. If it
+        // does, the attached doesn't own the adapter; rollback manually.
+        p9_attached_unref(att);
         spoor_unref(tx);
         if (rx != tx) spoor_unref(rx);
         kfree(adapter);
+        return -1;
+    }
+    // From here on, FAILURE paths just unref `att`. The attached's
+    // last-ref destroy handles adapter + transport cleanup.
+
+    struct Spoor *root = p9_attached_root_spoor(att);
+    if (!root) {
+        p9_attached_unref(att);
         return -1;
     }
 
     // Patch the root Spoor's dev9p_priv with the attach-session
-    // ownership pointers. dev9p_close on this Spoor will then run the
-    // full teardown sequence (destroy attached → unref transport
-    // Spoors → kfree adapter).
+    // ownership pointer (F2: attached_owner is the refcounted holder;
+    // adapter_to_free is gone — adapter is inside attached now). The
+    // root contributes one p9_attached_ref; we own the construction
+    // ref from p9_attached_create + transfer it here, so the bump+drop
+    // sequence becomes: bump for root's hold, drop the construction ref.
     struct dev9p_priv *root_priv = (struct dev9p_priv *)root->aux;
     if (!root_priv || root_priv->magic != DEV9P_PRIV_MAGIC) {
         // Shouldn't happen — p9_attached_root_spoor's dev9p Spoor
         // always has a valid priv. Defensive rollback.
         spoor_clunk(root);
-        p9_attached_destroy(att);
-        spoor_unref(tx);
-        if (rx != tx) spoor_unref(rx);
-        kfree(adapter);
+        p9_attached_unref(att);
         return -1;
     }
-    root_priv->attached_owner  = att;
-    root_priv->adapter_to_free = adapter;
+    root_priv->attached_owner = att;
+    // The root holds its own ref now.
+    p9_attached_ref(att);
 
     // Install root Spoor as a KOBJ_SPOOR handle. handle_alloc takes
     // ownership of root's ref (the one from spoor_alloc inside
@@ -949,11 +967,16 @@ static s64 sys_attach_9p_handler(u64 tx_fd_raw, u64 rx_fd_raw,
     rights_t r = RIGHT_READ | RIGHT_WRITE | RIGHT_TRANSFER;
     hidx_t fd = handle_alloc(p, KOBJ_SPOOR, r, root);
     if (fd < 0) {
-        // Roll back: clunking root triggers dev9p_close, which sees
-        // attached_owner non-NULL and tears down the entire session.
+        // Roll back: clunking root triggers dev9p_close, which unrefs
+        // root's hold. Then we drop the construction ref. Last unref
+        // tears down the session (adapter + transports + client).
         spoor_clunk(root);
+        p9_attached_unref(att);
         return -1;
     }
+    // Drop the construction ref — root's hold + walked privs' future
+    // holds are what keep the attached alive going forward.
+    p9_attached_unref(att);
     return (s64)fd;
 }
 
@@ -1030,7 +1053,19 @@ static s64 sys_walk_open_handler(u64 spoor_fd_raw, u64 name_va,
     // ".." (parent traversal — only meaningful with a multi-component
     // path resolver). The component-shape check is intentionally strict
     // at v1.0; if a caller needs '.' it can pass a clone-walk later.
-    char name_scratch[SYS_WALK_OPEN_NAME_MAX];
+    //
+    // F1 close (P5-stratumd-stub-bringup-e1+e2 audit): the scratch is
+    // SYS_WALK_OPEN_NAME_MAX + 1 bytes so the NUL terminator below can
+    // ALWAYS be written, even when name_len_raw == SYS_WALK_OPEN_NAME_MAX.
+    // The Dev `walk` vtable (`<thylacine/dev.h>`) signature is
+    // `(*walk)(c, nc, names, nname)` — there is NO length array; the
+    // dev9p_walk impl scans for '\0' to discover each name's length
+    // (kernel/dev9p.c, the `while (s[l] != '\0') l++;` loop). NUL
+    // termination is REQUIRED, not "defense-in-depth": without it,
+    // a max-length name causes dev9p_walk to walk past the scratch's
+    // end into adjacent kernel-stack bytes and ship them on the wire,
+    // leaking saved registers / return addresses / KASLR slide.
+    char name_scratch[SYS_WALK_OPEN_NAME_MAX + 1];
     for (u64 i = 0; i < name_len_raw; i++) {
         u8 b;
         if (uaccess_load_u8(name_va + i, &b) != 0)    return -1;
@@ -1040,11 +1075,8 @@ static s64 sys_walk_open_handler(u64 spoor_fd_raw, u64 name_va,
     if (name_len_raw == 1 && name_scratch[0] == '.')  return -1;
     if (name_len_raw == 2 && name_scratch[0] == '.' &&
                               name_scratch[1] == '.') return -1;
-    // NUL-terminate for the dev9p walk path (it uses strlen-like length
-    // discovery on the names[] array, paired with the length array). At
-    // v1.0 we pack a single name; the terminator is defense-in-depth.
-    if (name_len_raw < SYS_WALK_OPEN_NAME_MAX)
-        name_scratch[name_len_raw] = '\0';
+    // Unconditional NUL terminator — REQUIRED for dev9p_walk's strlen scan.
+    name_scratch[name_len_raw] = '\0';
 
     // Clone the source Spoor — gives us an independent cursor whose aux
     // dev->walk will replace with a freshly-allocated priv (carrying the
@@ -1071,6 +1103,24 @@ static s64 sys_walk_open_handler(u64 spoor_fd_raw, u64 name_va,
         spoor_unref(nc);
         return -1;
     }
+    // F4 close (P5-stratumd-stub-bringup audit): the Dev `walk` vtable
+    // is documented as permissive ("Either reuses nc OR ignores it and
+    // returns a fresh Spoor"; <thylacine/dev.h>). This handler depends
+    // on the reuse-nc shape — it calls `nc->dev->open(nc, ...)` and
+    // `handle_alloc(p, KOBJ_SPOOR, r, nc)`. A Dev whose walk allocates
+    // its own Spoor (e.g., devramfs_walk's `cur = spoor_clone(c)` shape)
+    // would cause the handler to: (a) open the unwalked nc (wrong qid);
+    // (b) leak w->spoor with no caller knowing to free it. Reject any
+    // Dev whose walk violates the reuse-nc convention. At v1.0 only
+    // dev9p is user-reachable here, so this check is defense-in-depth
+    // against a future Dev that exposes user-walkable Spoors with a
+    // self-cloning walk impl.
+    if (w->spoor != nc) {
+        walkqid_free(w);
+        nc->aux = NULL;
+        spoor_unref(nc);
+        return -1;
+    }
     // dev9p's walkqid carrier has nc as its spoor; we own + free it
     // now that we've consumed the walk result (we don't need the qids
     // returned in w->qid[] — the next open() will refresh nc->qid).
@@ -1091,6 +1141,17 @@ static s64 sys_walk_open_handler(u64 spoor_fd_raw, u64 name_va,
     // return Rlerror, not -EPERM here). handle_alloc takes ownership
     // of the ref from spoor_clone; on full-table failure we spoor_clunk
     // (running dev->close to clunk the fid).
+    //
+    // F7 close (P5-stratumd-stub-bringup audit): the R|W|TRANSFER mask
+    // delegates write/transfer gating to the underlying Dev. For dev9p
+    // — the only user-reachable walk source at v1.0 — the 9P server is
+    // the authority; the kernel rights envelope is a hint, not the
+    // enforcement gate. A future Dev whose walk requires kernel rights
+    // for enforcement MUST derive returned rights from the source slot
+    // (e.g., slot->rights), not from this hardcoded mask, OR sit behind
+    // a per-Dev policy hook that intersects this mask with Dev-defined
+    // upper bounds. At v1.0 the policy is "9P-server-mediated"; this
+    // comment is the contract for future walkable Devs.
     rights_t r = RIGHT_READ | RIGHT_WRITE | RIGHT_TRANSFER;
     hidx_t fd = handle_alloc(p, KOBJ_SPOOR, r, nc);
     if (fd < 0) {

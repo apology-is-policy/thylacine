@@ -65,6 +65,21 @@ extern struct Dev dev9p;
 
 // Per-Spoor private state. Allocated by dev9p_attach_client and by
 // dev9p_walk; freed by dev9p_close.
+//
+// P5-stratumd-stub-bringup audit close F2 (F236 deferred close):
+// `attached_owner` semantics extended — EVERY dev9p_priv derived from
+// a SYS_ATTACH_9P session now carries a non-NULL attached_owner and
+// holds one ref via p9_attached_ref. dev9p_close drops the ref; the
+// last unref runs the attached's full teardown (client + transport +
+// adapter). Walked privs propagate the parent's attached_owner pointer
+// and bump the ref at priv_alloc. Pre-fix only the root carried this
+// pointer, leaving walked privs dangling after the root's close ran
+// p9_attached_destroy immediately (R15 F236).
+//
+// For test paths that construct a Spoor via dev9p_attach_client(client,
+// root_fid) directly (no p9_attached wrapper), attached_owner stays
+// NULL and dev9p_close skips the unref. The fid_owned semantics still
+// apply: walks from those test roots clunk their fid as today.
 struct dev9p_priv {
     u32                magic;
     struct p9_client  *client;     // pointer to the client; lifecycle managed externally
@@ -72,14 +87,11 @@ struct dev9p_priv {
     bool               fid_owned;  // true iff close should clunk; root Spoor's fid
                                    // (the one from p9_client_handshake) is NOT clunked
                                    // by dev9p — the higher layer manages it.
-    // P5-attach-syscall: when SYS_ATTACH_9P creates a root Spoor, it
-    // stashes the attach owner here so that closing this Spoor tears
-    // down the entire attach session (client + transport refs +
-    // allocated adapter). For walk-derived Spoors AND for kernel-
-    // internal callers (tests that own the client externally), these
-    // remain NULL.
+    // F2: attached_owner is the session-resource holder. NULL when the
+    // p9_client is externally owned (test path); non-NULL for every priv
+    // derived from a SYS_ATTACH_9P session (root + walks). Each non-NULL
+    // owner contributes one p9_attached_ref; dev9p_close drops it.
     struct p9_attached       *attached_owner;
-    struct p9_spoor_transport *adapter_to_free;
 };
 
 #define DEV9P_PRIV_MAGIC 0x44395050u   // "D9PP" little-endian

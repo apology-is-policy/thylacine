@@ -123,6 +123,19 @@ _Static_assert(sizeof(struct Territory)
 _Static_assert(__builtin_offsetof(struct Territory, magic) == 0,
                "magic must be at offset 0 (SLUB freelist write "
                "clobbers it on free, double-free defense)");
+// F5 close (P5-stratumd-stub-bringup audit): pin every load-bearing
+// field offset, not just the size. A future field-reorder that shifts
+// root_spoor / binds / mounts without changing the total size would
+// silently break syscall.c::sys_walk_open_handler's FROM_ROOT path,
+// territory_chroot's ref discipline, and the mount-table iteration.
+_Static_assert(__builtin_offsetof(struct Territory, root_spoor) == 24,
+               "root_spoor pinned at offset 24 (after 8B magic + "
+               "4B ref + 4B nbinds + 4B nmounts + 4B _pad)");
+_Static_assert(__builtin_offsetof(struct Territory, binds) == 32,
+               "binds[] pinned at offset 32 (after the 32B header)");
+_Static_assert(__builtin_offsetof(struct Territory, mounts)
+               == 32 + 8 * PGRP_MAX_BINDS,
+               "mounts[] pinned after binds[]");
 
 // Bring up the territory subsystem. Allocates the Territory SLUB cache
 // and kproc's initial Territory (empty bindings, empty mounts; ref=1).

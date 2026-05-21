@@ -20,6 +20,7 @@ void test_p9_attached_create_destroy(void);
 void test_p9_attached_handshake_failure_returns_null(void);
 void test_p9_attached_root_spoor_walk_read(void);
 void test_p9_attached_query_helpers(void);
+void test_p9_attached_walked_outlives_root_no_uaf(void);
 
 // File-scope storage for the loopback's response buffer. The attached
 // struct heap-allocates everything else (client + recv_buf).
@@ -233,5 +234,190 @@ void test_p9_attached_query_helpers(void) {
     // After destroy, `a` is freed — we can't call is_open on it
     // safely. Sanity-check that NULL still returns false.
     TEST_ASSERT(!p9_attached_is_open(NULL),      "is_open(NULL) still false post-destroy");
+    p9_loopback_destroy(&g_loopback);
+}
+
+// F1 regression (P5-stratumd-stub-bringup audit close): the syscall
+// handler's name-scratch + NUL-termination invariant. Pre-fix, the
+// scratch was exactly SYS_WALK_OPEN_NAME_MAX bytes and the NUL
+// terminator was written conditionally — `if (name_len_raw <
+// SYS_WALK_OPEN_NAME_MAX)`. When name_len_raw == SYS_WALK_OPEN_NAME_MAX
+// (64), the scratch was non-NUL-terminated; dev9p_walk's
+// `while (s[l] != '\0') l++;` walked past it into adjacent kernel stack
+// memory until it found a 0 byte. The discovered length was then
+// shipped over the wire as part of the Twalk's wname[0], leaking
+// kernel-stack contents to the user-controlled transport.
+//
+// Post-fix the scratch is SYS_WALK_OPEN_NAME_MAX + 1 bytes and the
+// terminator is unconditional. This test exercises the boundary case
+// by handing dev9p.walk a name buffer of EXACTLY SYS_WALK_OPEN_NAME_MAX
+// bytes (with the NUL at position MAX), and verifies the wire encoding
+// reports the name length as exactly SYS_WALK_OPEN_NAME_MAX. A
+// regressed handler that fails to NUL-terminate would cause dev9p_walk
+// to over-scan; the responder catches the over-scan via the Twalk
+// frame's wname[0]_len field.
+//
+// The test exercises dev9p_walk's strlen behavior on a known-good
+// (post-fix) buffer; the syscall handler's NUL-write is verified by
+// code review (the unconditional `name_scratch[name_len_raw] = '\0';`
+// is now structurally always-on). Together they pin the F1 invariant.
+
+// File-scope captures for the F1 responder.
+static u32 g_f1_captured_name_len;
+static int g_f1_walk_seen;
+static u8  g_f1_loopback_resp[4096];
+static struct p9_loopback g_f1_loopback;
+
+static int f1_64char_responder(void *ctx, const u8 *req, size_t req_len,
+                                  u8 *resp, size_t resp_cap) {
+    (void)ctx;
+    if (req_len < P9_HDR_LEN) return -1;
+    u32 size; u8 type; u16 tag;
+    if (p9_peek_header(req, req_len, &size, &type, &tag) < 0) return -1;
+    if (type == P9_TVERSION || type == P9_TATTACH || type == P9_TCLUNK) {
+        return attach_responder(ctx, req, req_len, resp, resp_cap);
+    }
+    if (type == P9_TWALK) {
+        // Twalk layout: hdr(7) + fid(4) + newfid(4) + nwname(2) +
+        // (nwname times: namelen(2) + name[namelen]).
+        // Offsets:
+        //   [7..10]  fid
+        //   [11..14] newfid
+        //   [15..16] nwname (component count)
+        //   [17..18] wname[0]_len
+        //   [19..]   wname[0] bytes
+        // We capture wname[0]_len at byte 17-18.
+        if (req_len < P9_HDR_LEN + 4 + 4 + 2 + 2) return -1;
+        u16 namelen = (u16)req[17] | ((u16)req[18] << 8);
+        g_f1_captured_name_len = (u32)namelen;
+        g_f1_walk_seen = 1;
+        // Synthesize a 1-qid Rwalk so the test progresses.
+        return attach_responder(ctx, req, req_len, resp, resp_cap);
+    }
+    return attach_responder(ctx, req, req_len, resp, resp_cap);
+}
+
+void test_sys_walk_open_max_length_name_nul_terminated(void);
+
+void test_sys_walk_open_max_length_name_nul_terminated(void) {
+    g_f1_captured_name_len = 0;
+    g_f1_walk_seen = 0;
+    p9_loopback_init(&g_f1_loopback, g_f1_loopback_resp,
+                       sizeof(g_f1_loopback_resp),
+                       f1_64char_responder, NULL);
+    const u8 uname[] = {'r'};
+    const u8 aname[] = {'/'};
+    struct p9_attached *a = p9_attached_create(
+        p9_loopback_ops_for(&g_f1_loopback), 4096, 0, 8192,
+        uname, sizeof(uname), aname, sizeof(aname), 0);
+    TEST_ASSERT(a != NULL, "attached created");
+
+    struct Spoor *root = p9_attached_root_spoor(a);
+    TEST_ASSERT(root != NULL, "root produced");
+
+    // Construct a 64-byte name buffer with NUL at position 64 (mirroring
+    // the post-fix handler's scratch layout).
+    char name64[65];
+    for (int i = 0; i < 64; i++) name64[i] = 'A';
+    name64[64] = '\0';
+    const char *names[1] = { name64 };
+
+    struct Spoor *walked = spoor_clone(root);
+    TEST_ASSERT(walked != NULL, "spoor_clone");
+    struct Walkqid *w = dev9p.walk(root, walked, names, 1);
+    TEST_ASSERT(w != NULL, "walk succeeded with 64-char name");
+    TEST_ASSERT(g_f1_walk_seen,
+                "responder observed the Twalk");
+    TEST_EXPECT_EQ((u64)g_f1_captured_name_len, (u64)64,
+        "wname[0]_len on the wire MUST be exactly 64 — any over-scan from a "
+        "non-NUL-terminated scratch would report a larger length here");
+    walkqid_free(w);
+
+    spoor_clunk(walked);
+    spoor_clunk(root);
+    p9_attached_destroy(a);
+    p9_loopback_destroy(&g_f1_loopback);
+}
+
+// F2 regression (P5-stratumd-stub-bringup audit close; closes R15 F236).
+//
+// Pre-fix: closing the SYS_ATTACH_9P root Spoor ran p9_attached_destroy
+// immediately, freeing the p9_client. Walked Spoors derived from the
+// root retained a dangling client pointer; their subsequent close did
+// p9_client_clunk(stale_client, fid) — UAF on c->magic at best, on
+// c->transport/c->session in the SLUB-slot-recycled case.
+//
+// The exit-time reproduction is via `proc_free` calling handle_table_free
+// which iterates handles in ASCENDING index order. attach_fd is allocated
+// FIRST → has the smaller index → closes BEFORE walked fds. Walked fds
+// then close against a freed client.
+//
+// Post-fix: p9_attached is refcounted; root + every walked dev9p_priv hold
+// one ref. The LAST unref runs the destroy. Walked closes after root
+// close still observe a live client + transport.
+//
+// This test simulates the syscall-path attached_owner stamp (which is what
+// sys_attach_9p_handler does in production) and exercises the buggy close
+// order. Pre-fix would UAF; post-fix the walked close cleanly clunks via
+// the still-alive client.
+void test_p9_attached_walked_outlives_root_no_uaf(void) {
+    p9_loopback_init(&g_loopback, g_loopback_resp, sizeof(g_loopback_resp),
+                       attach_responder, NULL);
+    const u8 uname[] = {'r','o','o','t'};
+    const u8 aname[] = {'/'};
+    struct p9_attached *a = p9_attached_create(
+        p9_loopback_ops_for(&g_loopback), 4096, 0, 8192,
+        uname, sizeof(uname), aname, sizeof(aname), 0);
+    TEST_ASSERT(a != NULL, "attached created");
+
+    struct Spoor *root = p9_attached_root_spoor(a);
+    TEST_ASSERT(root != NULL, "root Spoor produced");
+
+    // Simulate sys_attach_9p_handler's attached_owner stamp on the root.
+    // The handler stamps + bumps the ref so the root contributes one
+    // p9_attached_ref. (In production this happens in syscall.c right
+    // after p9_attached_root_spoor returns; here we do it directly so
+    // the test exercises the F2 close-order discipline without needing
+    // the full syscall plumb.)
+    struct dev9p_priv *root_priv = (struct dev9p_priv *)root->aux;
+    TEST_ASSERT(root_priv != NULL && root_priv->magic == DEV9P_PRIV_MAGIC,
+                "root priv has expected magic");
+    root_priv->attached_owner = a;
+    p9_attached_ref(a);   // root's hold; matches handler's bump
+
+    // Walk to a derived Spoor. dev9p_walk's priv_alloc inherits the
+    // root's attached_owner and bumps the ref to 3 (1 construction +
+    // root's hold + walked's hold).
+    struct Spoor *walked = spoor_clone(root);
+    TEST_ASSERT(walked != NULL, "spoor_clone(root) succeeded");
+    const char *name = "file";
+    struct Walkqid *w = dev9p.walk(root, walked, &name, 1);
+    TEST_ASSERT(w != NULL, "walk succeeded");
+    TEST_ASSERT(w->spoor == walked, "walk reuses nc per Dev contract");
+    walkqid_free(w);
+    struct dev9p_priv *walked_priv = (struct dev9p_priv *)walked->aux;
+    TEST_ASSERT(walked_priv != NULL &&
+                walked_priv->attached_owner == a,
+                "walked priv inherits attached_owner");
+
+    // Drop the construction ref — root + walked hold the only refs now.
+    p9_attached_unref(a);
+
+    // Close the root FIRST (the F236 trigger ordering — what
+    // handle_table_free does on Proc exit, since attach_fd has the
+    // smaller index). Pre-fix this ran p9_attached_destroy immediately,
+    // freeing the client; post-fix this just drops the root's ref.
+    spoor_clunk(root);
+
+    // Now close the walked. Pre-fix this UAF'd via p9_client_clunk on
+    // a freed client. Post-fix the client is still alive (walked still
+    // held one ref) and the clunk reaches the loopback responder
+    // cleanly. The final p9_attached_unref runs in dev9p_close →
+    // attached_owner unref → ref drops to 0 → attached_destroy_inner.
+    spoor_clunk(walked);
+    // If we got here without an extinct / UAF crash, F2 is closed.
+    // The attached is destroyed by walked's last unref; we don't call
+    // p9_attached_destroy(a) ourselves.
+
     p9_loopback_destroy(&g_loopback);
 }

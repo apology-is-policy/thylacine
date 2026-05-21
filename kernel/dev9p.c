@@ -22,14 +22,28 @@ _Static_assert(DEV9P_PRIV_MAGIC == 0x44395050u, "dev9p priv magic drift");
 // Internal: priv allocation + lookup.
 // =============================================================================
 
+// F2: priv_alloc takes an `attached_owner` so the new priv contributes
+// one p9_attached_ref. Pre-fix the walked dev9p_priv had no link to the
+// attached, so the root's close could destroy the attached while walked
+// privs were still alive — R15 F236 UAF. The bump-on-alloc / drop-on-close
+// discipline is the F236 close.
+//
+// `attached_owner` may be NULL for the test-path (dev9p_attach_client called
+// with an externally-owned p9_client and no p9_attached wrapper). In that
+// case the priv carries no ref and dev9p_close skips the unref.
 static struct dev9p_priv *priv_alloc(struct p9_client *client, u32 fid,
-                                       bool fid_owned) {
+                                       bool fid_owned,
+                                       struct p9_attached *attached_owner) {
     struct dev9p_priv *p = kmalloc(sizeof(*p), KP_ZERO);
     if (!p) return NULL;
-    p->magic     = DEV9P_PRIV_MAGIC;
-    p->client    = client;
-    p->fid       = fid;
-    p->fid_owned = fid_owned;
+    p->magic          = DEV9P_PRIV_MAGIC;
+    p->client         = client;
+    p->fid            = fid;
+    p->fid_owned      = fid_owned;
+    p->attached_owner = attached_owner;
+    if (attached_owner) {
+        p9_attached_ref(attached_owner);
+    }
     return p;
 }
 
@@ -71,7 +85,12 @@ struct Spoor *dev9p_attach_client(struct p9_client *client, u32 root_fid) {
     if (!p9_client_is_open(client)) return NULL;
     struct Spoor *c = spoor_alloc(&dev9p);
     if (!c) return NULL;
-    struct dev9p_priv *p = priv_alloc(client, root_fid, /*fid_owned=*/false);
+    // F2: test-path constructor — external p9_client lifecycle, no
+    // p9_attached wrapper; attached_owner stays NULL. SYS_ATTACH_9P's
+    // root Spoor goes through this constructor too, then gets its
+    // attached_owner stamped in by sys_attach_9p_handler.
+    struct dev9p_priv *p = priv_alloc(client, root_fid, /*fid_owned=*/false,
+                                       /*attached_owner=*/NULL);
     if (!p) {
         // F238: uniform clunk-on-error (dev9p_close handles NULL c->aux
         // safely via priv_of's magic check). Pre-fix used spoor_unref;
@@ -113,15 +132,22 @@ static struct Walkqid *dev9p_walk(struct Spoor *c, struct Spoor *nc,
     if (!src_priv) return NULL;
     if (nname < 0 || nname > P9_MAX_WALK) return NULL;
 
-    // Allocate a fresh fid for the destination.
-    u32 new_fid = p9_client_alloc_fid(src_priv->client);
-    if (new_fid == P9_NOFID) return NULL;
-
-    // Allocate the Walkqid carrier (room for at most nname qids; we
-    // allocate the upper bound + filter the actual count after walk).
+    // F3 close (P5-stratumd-stub-bringup audit): allocate the Walkqid
+    // carrier FIRST so a SLUB OOM here doesn't consume a fid number
+    // from the client's monotonic allocator. (The fid pool wrap-around
+    // is benign at v1.0 — the counter is monotonic over a u32 range —
+    // but the discipline of "consume resources in the order they can
+    // be released" is the right shape.)
     int max_qids = (nname == 0) ? 1 : nname;
     struct Walkqid *w = walkqid_alloc(max_qids);
     if (!w) return NULL;
+
+    // Allocate a fresh fid for the destination.
+    u32 new_fid = p9_client_alloc_fid(src_priv->client);
+    if (new_fid == P9_NOFID) {
+        walkqid_free(w);
+        return NULL;
+    }
 
     // Issue the 9P walk. nname=0 → clone; nname>0 → walk path.
     int rc;
@@ -178,8 +204,15 @@ static struct Walkqid *dev9p_walk(struct Spoor *c, struct Spoor *nc,
     // its aux is currently a shallow copy of src's aux (which we
     // must NOT free — src still uses it). Replace nc's aux with a
     // freshly allocated priv.
+    // F2: walked priv inherits the source's attached_owner so the
+    // walked Spoor's lifetime contributes a p9_attached_ref. dev9p_close
+    // drops it; the last unref runs the attached's full teardown.
+    // Pre-fix the walked priv had NO link to the attached → the root's
+    // dev9p_close ran p9_attached_destroy immediately, leaving walked
+    // privs dangling (R15 F236 UAF on subsequent walked Spoor close).
     struct dev9p_priv *new_priv = priv_alloc(src_priv->client, new_fid,
-                                                /*fid_owned=*/true);
+                                                /*fid_owned=*/true,
+                                                src_priv->attached_owner);
     if (!new_priv) {
         // Best-effort: clunk the fid we just allocated. Ignore the
         // result — if the clunk fails, we still need to fail the walk.
@@ -240,48 +273,37 @@ static void dev9p_close(struct Spoor *c) {
     struct dev9p_priv *p = priv_of(c);
     if (!p) return;
 
-    // P5-attach-syscall: SYS_ATTACH_9P-created root Spoors carry
-    // attach-session ownership. Closing the Spoor tears down:
-    //   1. p9_attached_destroy → clunks root_fid + p9_client_destroy
-    //      (which calls our adapter's close — a no-op since the
-    //      adapter is configured owns_spoors=false) + frees the
-    //      client + recv_buf + p9_attached struct itself.
-    //   2. spoor_unref the transport Spoor(s) the SVC handler ref'd.
-    //   3. kfree the kmalloc'd adapter.
+    // F2 (F236 close) discipline — order matters:
     //
-    // Walk-derived Spoors AND kernel-internal callers (where the
-    // client is owned externally) leave these fields NULL and skip
-    // this branch entirely.
-    if (p->attached_owner) {
-        struct p9_spoor_transport *adp = p->adapter_to_free;
-        p9_attached_destroy(p->attached_owner);
-        if (adp) {
-            // The SVC handler took independent refs on the transport
-            // Spoors (so userspace closing the original transport_fd
-            // doesn't free them out from under us). Release those
-            // refs now. The adapter's owns_spoors=false means
-            // adapter close (called by p9_client_close above) didn't
-            // touch them — dev9p owns the release.
-            //
-            // spoor_clunk (not spoor_unref): if userspace already
-            // closed their transport fd before this dev9p Spoor's
-            // last clunk, dev9p's ref is the LAST one. spoor_clunk
-            // runs devpipe_close (or whatever Dev backs the
-            // transport) to set EOF + drop ring refcount. Under the
-            // prior spoor_unref-no-close semantics that pipe ring +
-            // endpoint priv leaked when the user-fd had already
-            // gone away. P5-mount-syscall companion fix.
-            struct Spoor *tx = adp->tx_spoor;
-            struct Spoor *rx = adp->rx_spoor;
-            if (tx) spoor_clunk(tx);
-            if (rx && rx != tx) spoor_clunk(rx);
-            kfree(adp);
-        }
-    } else if (p->fid_owned) {
+    //   1. fid_owned: clunk the walked-fid via the client BEFORE the
+    //      attached_owner unref. The unref might be the last drop and
+    //      trigger p9_client_destroy; we need the client alive for the
+    //      wire round-trip. (Test paths with attached_owner==NULL still
+    //      hit this branch; their client lifecycle is externally
+    //      managed and stays valid.)
+    //
+    //   2. attached_owner unref: drops this priv's hold on the
+    //      session-resource holder. On the LAST drop (when the root +
+    //      every walked Spoor have closed) attached_destroy_inner
+    //      runs the full teardown (clunk root_fid + p9_client_close +
+    //      p9_client_destroy + free buffers + spoor_clunk transports +
+    //      kfree adapter + kfree(attached)).
+    //
+    //   3. magic clobber + kfree priv as today.
+    //
+    // Pre-fix the root branch ran p9_attached_destroy IMMEDIATELY and
+    // tore down the adapter — walked privs closing afterward UAF'd via
+    // their stale client pointer (R15 F236).
+    if (p->fid_owned) {
         // Walk-derived Spoor: clunk the fid. Ignore the result —
         // close-then-error has no good recovery; the fid is gone
         // from the client's table either way per the wire spec.
         (void)p9_client_clunk(p->client, p->fid);
+    }
+
+    if (p->attached_owner) {
+        p9_attached_unref(p->attached_owner);
+        p->attached_owner = NULL;
     }
 
     // Release the priv allocation. SLUB's freelist write clobbers

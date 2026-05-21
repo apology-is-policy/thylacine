@@ -43,6 +43,19 @@ struct p9_attached *p9_attached_create(
 
 struct Spoor *p9_attached_root_spoor(struct p9_attached *a);
 
+// P5-stratumd-stub-bringup audit close (F236 deferred close): refcount API.
+void          p9_attached_ref(struct p9_attached *a);
+void          p9_attached_unref(struct p9_attached *a);
+
+// Transfer adapter + transport-Spoor ownership into the attached. First-
+// call-wins; the last `p9_attached_unref` releases all of them.
+int           p9_attached_install_transport(struct p9_attached *a,
+                                             struct p9_spoor_transport *adapter,
+                                             struct Spoor *tx,
+                                             struct Spoor *rx);
+
+// Legacy alias for `p9_attached_unref` (semantically identical when the
+// caller holds the single construction ref).
 void          p9_attached_destroy(struct p9_attached *a);
 
 bool          p9_attached_is_open(const struct p9_attached *a);
@@ -64,13 +77,17 @@ If any allocation or the handshake fails, `p9_attached_create` cleans up all int
    - `p9_client_handshake` (drives `Tversion + Tattach`; transport activity happens here).
    - On success, returns ownership of the heap-resident `struct p9_attached`.
 2. **Use**: `p9_attached_root_spoor(a)` returns a dev9p Spoor wrapping `(client, root_fid)` with `fid_owned=false`. Caller exercises walk/open/read/write/clunk on it as a normal Spoor.
-3. **Destroy**: caller has released all dev9p Spoors derived from `a->client` (including the root + any walk-derived) — at v1.0 enforced by convention. `p9_attached_destroy`:
+3. **Destroy**: ref-counted. Closing the SYS_ATTACH_9P root fd OR any walked fd unrefs the attached. The **last unref** runs `attached_destroy_inner`:
    - Clunks `root_fid` via the client (Tclunk over the transport).
-   - `p9_client_close` (graceful close of the transport).
+   - `p9_client_close` (graceful close of the transport — calls `ops.close(adapter_ctx)` while adapter is alive).
    - `p9_client_destroy` (clobbers magic, tears down session + transport).
-   - Frees recv_buf, client, attached wrapper.
+   - Frees recv_buf, client.
+   - If a transport was installed: `spoor_clunk(transport_tx)` + `spoor_clunk(transport_rx)` (if distinct) + `kfree(adapter)`.
+   - Frees the attached wrapper itself.
 
-The ordering discipline ("destroy attached AFTER all Spoors are clunked") is by convention at v1.0; a future spec extension (P5-attach-mount's namespace.tla extension) will formalize.
+P5-stratumd-stub-bringup audit close (F236 close, was deferred to "the SYS_WALK chunk"): pre-fix the destroy ran immediately on root close, leaving walked dev9p_priv with dangling client pointers (R15 F236 UAF). Post-fix every dev9p_priv (root + walks) carries an `attached_owner` ref; the last unref tears down. Adapter + transport-Spoor ownership lives INSIDE the attached now (was: stashed in `dev9p_priv.adapter_to_free`), so the destroy ordering — `p9_client_close` calls `ops.close(adapter_ctx)` while the adapter is alive — holds even when the walked-Spoor close is what triggers the destroy.
+
+For test paths that construct an attached without an `install_transport` call (loopback-backed; no Spoor-backend adapter), the adapter / tx / rx fields stay NULL and the destroy skips them.
 
 ## Implementation
 
@@ -95,6 +112,8 @@ The ordering discipline ("destroy attached AFTER all Spoors are clunked") is by 
 | `p9_attached.handshake_failure_returns_null` | Server Rlerror on Tattach; create returns NULL with all intermediate allocations cleaned up |
 | `p9_attached.root_spoor_walk_read` | root_spoor → walk → open → read end-to-end through the attached wrapper |
 | `p9_attached.query_helpers` | is_open NULL-safety; basic state queries |
+| `p9_attached.walked_outlives_root_no_uaf` | F2 / R15 F236 regression. Simulates the sys_attach_9p_handler attached_owner stamp + walks via dev9p.walk + closes root BEFORE walked. Pre-fix this UAF'd on the walked clunk's `p9_client_clunk(stale_client, fid)`; post-fix the walked clunk runs cleanly against the still-alive client + the walked's last unref triggers attached_destroy_inner. |
+| `sys_walk_open.max_length_name_nul_terminated` | F1 regression. Drives `dev9p.walk` with a 64-byte name + custom loopback responder that asserts the wire Twalk's wname[0]_len is EXACTLY 64. A regressed sys_walk_open_handler producing non-NUL-terminated scratch would cause dev9p_walk to over-scan; the responder catches the wider length. |
 
 The handshake-failure test specifically exercises the cleanup path on partial-init failure — if the bug were a leak of the half-built client or buffers, the heap would grow across test runs (caught by future leak-tracking; here verified by completion).
 
@@ -126,7 +145,7 @@ All NULL-return paths clean up partial state.
 
 ## Known caveats / footguns
 
-1. **Ordering discipline**: `p9_attached_destroy` must be called AFTER all dev9p Spoors derived from this attached have been `spoor_clunk`'d. Walk-derived Spoors clunk their own fids on close; the root Spoor's `fid_owned=false` means its close doesn't touch root_fid (the attached owns it). Destroy then clunks root_fid + tears down. Calling destroy with live Spoors leaves dangling client pointers in their privs — subsequent ops will see magic mismatch and fail, but the failure mode is messy. Future spec extension formalizes.
+1. **Ordering discipline (now refcounted)**: pre-fix the caveat said `p9_attached_destroy` must be called AFTER all dev9p Spoors derived from this attached have been `spoor_clunk`'d, lest dangling client pointers UAF on later walked-Spoor close. The P5-stratumd-stub-bringup audit close (F236) refcounted the attached: every dev9p_priv (root + walks) holds one ref via `attached_owner`; the LAST unref runs the destroy. Userspace can close fds in any order; the kernel teardown is correct regardless. `p9_attached_destroy` is now an alias for `p9_attached_unref` — semantically identical when the caller holds the single construction ref (the common test path). The "messy failure mode" caveat is closed.
 
 2. **The user-visible syscall is deferred.** The body of `attach_9p` is implemented here; the SVC dispatch + handle-table glue is not. At v1.0 the only callers are kernel-internal (tests + future boot path). Userspace 9P mounts are gated on fd-syscall infrastructure.
 

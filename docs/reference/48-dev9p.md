@@ -50,11 +50,13 @@ The standard Dev `attach(spec)` slot is implemented as a stub returning NULL —
 
 ## Lifecycle
 
-dev9p does NOT own `p9_client` lifetime. The client is allocated + destroyed by a higher layer (P5-attach-syscall will eventually be the user-visible owner; for now, tests construct it manually).
+dev9p does NOT own `p9_client` lifetime when constructed via `dev9p_attach_client` directly (the test path; the client is externally allocated + destroyed). For Spoors created through `SYS_ATTACH_9P` the client is wrapped in a refcounted `p9_attached` (see `49-9p-attach.md`); every dev9p_priv carries an `attached_owner` pointer + holds one ref via `p9_attached_ref`; dev9p_close drops the ref via `p9_attached_unref`. The LAST unref runs the full session teardown.
 
-The root Spoor (constructed via `dev9p_attach_client`) has `fid_owned = false` — closing it does NOT clunk root_fid. The higher layer (attach_9p syscall) is responsible for orderly teardown: close all walk-derived child Spoors first, then destroy the client (which closes the transport).
+P5-stratumd-stub-bringup audit close (F2 / R15 F236): pre-fix the root Spoor's close ran `p9_attached_destroy` immediately, freeing the client while walked dev9p_priv still pointed at it — UAF on subsequent walked clunk. Post-fix `dev9p_close` is uniform: clunk fid (fid_owned branch) THEN `p9_attached_unref(attached_owner)`. The walked Spoor's `attached_owner` is inherited from the parent's `src_priv->attached_owner` at `priv_alloc` time. Adapter + transport-Spoor ownership lives INSIDE `p9_attached` now (was: `dev9p_priv.adapter_to_free`); the LAST unref releases them. The pre-fix discipline ("close walks first, then root") is no longer load-bearing — userspace can close fds in any order; the kernel teardown is correct regardless.
 
-Walk-derived Spoors have `fid_owned = true` — their close DOES clunk their fid. The priv struct is `kmalloc`'d per Spoor; `kfree`'d in close. Magic is clobbered before free for UAF defense (mirrors `kobj_*` discipline at §39 caveat #2).
+The root Spoor (constructed via `dev9p_attach_client`) has `fid_owned = false` — closing it does NOT clunk root_fid. For SYS_ATTACH_9P-created roots, `root_fid` is clunked by the attached_destroy_inner path at the LAST unref. For test-path roots (dev9p_attach_client with externally-owned client), `root_fid` is owned by the external caller.
+
+Walk-derived Spoors have `fid_owned = true` — their close DOES clunk their fid (via the client, before the attached unref). The priv struct is `kmalloc`'d per Spoor; `kfree`'d in close. Magic is clobbered before free for UAF defense (mirrors `kobj_*` discipline at §39 caveat #2).
 
 ## Compile-time invariants
 
@@ -108,7 +110,7 @@ Every vtable op returns the Dev-vtable failure convention (NULL or -1):
 
 ## Known caveats / footguns
 
-1. **dev9p does NOT own client lifecycle.** Closing the root Spoor does NOT destroy the client. The higher layer (eventually the attach_9p syscall's cleanup path) must destroy the client in order: close all walk-derived Spoors → close root Spoor → destroy client.
+1. **Client lifecycle is refcounted for SYS_ATTACH_9P-backed Spoors.** Pre-fix (P5-stratumd-stub-bringup audit close F2 / R15 F236), closing the root Spoor ran `p9_attached_destroy` immediately, requiring the higher layer to close all walks BEFORE the root. Post-fix every dev9p_priv (root + walks) carries an `attached_owner` ref; the LAST unref runs the destroy. The kernel handles arbitrary close orders correctly; the prior "close-walks-then-root" discipline is no longer required. Test-path Spoors (dev9p_attach_client with externally-owned client) still have NULL attached_owner and rely on external lifecycle management.
 
 2. **`fid_owned` is the load-bearing flag.** The root Spoor has it false; walk-derived Spoors have it true. Getting this wrong causes either double-clunk of the root_fid (if root is mis-flagged true) or leaked fids (walk-derived is mis-flagged false).
 
