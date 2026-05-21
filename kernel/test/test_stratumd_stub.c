@@ -71,6 +71,7 @@
 
 void test_stratumd_stub_round_trip(void);
 void test_stratumd_stub_fs_round_trip(void);
+void test_stratumd_stub_walk_round_trip(void);
 
 // Each userspace binary at this chunk is well under 32 KiB.
 // (attach-probe ≈ 15 KiB; stratumd-stub similar.)
@@ -337,4 +338,91 @@ void test_stratumd_stub_fs_round_trip(void) {
     uart_puts(" status=");
     uart_putdec((u64)probe_status);
     uart_puts(" — synthetic FS walk + open + read end-to-end verified\n");
+}
+
+// P5-stratumd-stub-bringup-e1: walk-through-mount via SYS_WALK_OPEN.
+//
+// Structurally identical to test_stratumd_stub_fs_round_trip, but the
+// client is /stub-walk-probe — which uses t_attach_9p + t_walk_open +
+// t_read (production kernel surfaces: kernel 9P client + dev9p Dev
+// vtable + SYS_WALK_OPEN) instead of the raw-9P wire driver. Validates
+// that the same synthetic FS content is reachable through the kernel
+// path, not just through raw-wire mirroring.
+void test_stratumd_stub_walk_round_trip(void) {
+    size_t stub_size = 0, probe_size = 0;
+    int rc;
+
+    rc = load_binary("stratumd-stub", g_stub_blob, STUB_BLOB_MAX, &stub_size);
+    if (rc != 0) {
+        uart_puts("    [skip] /stratumd-stub not in ramfs "
+                  "(build with: tools/build.sh all)\n");
+        return;
+    }
+    rc = load_binary("stub-walk-probe", g_client_blob, STUB_BLOB_MAX, &probe_size);
+    if (rc != 0) {
+        uart_puts("    [skip] /stub-walk-probe not in ramfs "
+                  "(build with: tools/build.sh all)\n");
+        return;
+    }
+
+    uart_puts("    /stratumd-stub size=");
+    uart_putdec((u64)stub_size);
+    uart_puts(" + /stub-walk-probe size=");
+    uart_putdec((u64)probe_size);
+    uart_puts(" — wiring 2 userspace Procs for t_attach_9p + t_walk_open + t_read\n");
+
+    struct Spoor *c2s_rd = NULL, *c2s_wr = NULL;
+    TEST_EXPECT_EQ(pipe_create(&c2s_rd, &c2s_wr), 0,
+        "pipe_create c2s (probe → stub)");
+    struct Spoor *s2c_rd = NULL, *s2c_wr = NULL;
+    TEST_EXPECT_EQ(pipe_create(&s2c_rd, &s2c_wr), 0,
+        "pipe_create s2c (stub → probe)");
+
+    struct stub_exec_args stub_args = {
+        .blob       = g_stub_blob,
+        .size       = stub_size,
+        .fd0_spoor  = c2s_rd,
+        .fd1_spoor  = s2c_wr,
+        .diag_label = "stratumd-stub",
+    };
+    int stub_pid = rfork(RFPROC, stub_exec_thunk, &stub_args);
+    TEST_ASSERT(stub_pid > 0, "rfork for /stratumd-stub failed");
+
+    struct stub_exec_args probe_args = {
+        .blob       = g_client_blob,
+        .size       = probe_size,
+        .fd0_spoor  = c2s_wr,
+        .fd1_spoor  = s2c_rd,
+        .diag_label = "stub-walk-probe",
+    };
+    int probe_pid = rfork(RFPROC, stub_exec_thunk, &probe_args);
+    TEST_ASSERT(probe_pid > 0, "rfork for /stub-walk-probe failed");
+
+    int first_pid = -1,  first_status  = -42;
+    int second_pid = -1, second_status = -42;
+    TEST_EXPECT_EQ(reap_one(&first_pid,  &first_status),  0, "reap first child");
+    TEST_EXPECT_EQ(reap_one(&second_pid, &second_status), 0, "reap second child");
+
+    bool got_stub  = (first_pid == stub_pid)  || (second_pid == stub_pid);
+    bool got_probe = (first_pid == probe_pid) || (second_pid == probe_pid);
+    TEST_ASSERT(got_stub,  "stratumd-stub child reaped");
+    TEST_ASSERT(got_probe, "stub-walk-probe child reaped");
+
+    int stub_status  = (first_pid == stub_pid)  ? first_status  : second_status;
+    int probe_status = (first_pid == probe_pid) ? first_status  : second_status;
+
+    TEST_EXPECT_EQ(probe_status, 0,
+        "/stub-walk-probe exited 0 (SYS_WALK_OPEN content verified through kernel 9P client)");
+    TEST_EXPECT_EQ(stub_status, 0,
+        "/stratumd-stub exited 0 (clean EOF on rx after probe finished)");
+
+    uart_puts("    stratumd-stub pid=");
+    uart_putdec((u64)stub_pid);
+    uart_puts(" status=");
+    uart_putdec((u64)stub_status);
+    uart_puts(" + stub-walk-probe pid=");
+    uart_putdec((u64)probe_pid);
+    uart_puts(" status=");
+    uart_putdec((u64)probe_status);
+    uart_puts(" — walk-through-mount via SYS_WALK_OPEN end-to-end verified\n");
 }

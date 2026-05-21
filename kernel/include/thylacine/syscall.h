@@ -501,6 +501,44 @@ enum {
     // grant / mismatched cap / writer stripes == 0.
     SYS_CAP_GRANT    = 32,   // arg: cap_mask (x0), target_stripes (x1)
     SYS_CAP_USE      = 33,   // arg: cap_mask (x0)
+
+    // P5-stratumd-stub-bringup-e1: walk-and-open a single path component
+    // through a Spoor's Dev vtable; the v1.0 minimal walk-through-mount
+    // primitive. Composes spoor_clone + dev->walk + dev->open + handle_
+    // alloc to give userspace a way to reach a file under an attached /
+    // mounted root without going through the (still-absent) Plan-9-style
+    // open(name, mode) namec walker. Single-component-only at v1.0 — no
+    // '/' splitting, no '.' / '..', no leading or trailing slashes; the
+    // multi-component walker lands with the production open() syscall.
+    //
+    // SYS_WALK_OPEN(spoor_fd, name_va, name_len, omode) → opened_fd / -1
+    //   x0 = spoor_fd   (hidx_t; must be KOBJ_SPOOR with RIGHT_READ)
+    //   x1 = name_va    (user-VA pointer to the component name)
+    //   x2 = name_len   (bytes; > 0, ≤ SYS_WALK_OPEN_NAME_MAX)
+    //   x3 = omode      (u32; Plan 9 OREAD=0 / OWRITE=1 / ORDWR=2 / OEXEC=3
+    //                    in the low 2 bits, optionally OTRUNC=0x10. Bits
+    //                    outside SYS_WALK_OPEN_OMODE_VALID are rejected.)
+    // Returns: x0 = opened KOBJ_SPOOR fd (>=0) on success, or -1 on:
+    //   - spoor_fd not KOBJ_SPOOR / out-of-range / missing RIGHT_READ
+    //   - the backing Dev has no walk or no open vtable op
+    //   - name_va outside user-VA / name_len == 0 / > 64
+    //   - name contains '/' or '\0'
+    //   - omode has bits outside the SYS_WALK_OPEN_OMODE_VALID mask
+    //   - dev->walk fails (file not found / 9P Rlerror / OOM)
+    //   - dev->open fails (Rlerror / permission)
+    //   - handle table full
+    //
+    // The returned handle has RIGHT_READ | RIGHT_WRITE | RIGHT_TRANSFER —
+    // matching SYS_ATTACH_9P's envelope. The underlying fid's omode is
+    // what the server actually enforces; a SYS_WRITE on an OREAD-only fid
+    // gets -1 from the server's Rlerror, not from a rights gate here.
+    //
+    // Lifecycle: dev9p_walk allocates a fresh fid + populates the new
+    // Spoor's priv with fid_owned=true. dev9p_close on the new Spoor
+    // clunks that fid. A failed walk OR open spoor_clunks the new Spoor
+    // (which clunks the fid if walk had succeeded, or no-ops if it
+    // hadn't). The source Spoor's fid is untouched.
+    SYS_WALK_OPEN    = 34,   // arg: spoor_fd, name_va, name_len, omode
 };
 
 // SYS_SPAWN_WITH_PERMS perm_flags bits — must mirror the libt / libthyla-rs
@@ -572,6 +610,19 @@ _Static_assert(__builtin_offsetof(struct srv_peer_info, alive) == 20,
 // stratumd-stub; future per-user stratumd takes 2-3). Bounds the
 // kernel-stack scratch for the fd-list copy.
 #define SYS_SPAWN_MAX_FDS   16u
+
+// Maximum single-component name length for SYS_WALK_OPEN. Matches the
+// Plan 9 + 9P2000.L practical cap for a single path element; bounds the
+// kernel-stack scratch + the per-byte uaccess loop. The wire codec's
+// per-name cap is larger; we choose the smaller bound here because v1.0
+// callers (joey, the bringup probes) all walk short server-stamped names.
+#define SYS_WALK_OPEN_NAME_MAX  64u
+
+// Permitted omode bits for SYS_WALK_OPEN. Plan 9 modes: OREAD=0,
+// OWRITE=1, ORDWR=2, OEXEC=3 (low 2 bits) plus the OTRUNC modifier
+// (0x10). Phase 5+ may extend (OCEXEC=0x20, ORCLOSE=0x40, OEXCL=0x1000)
+// as callers materialize. Any bit outside this mask → -1.
+#define SYS_WALK_OPEN_OMODE_VALID  0x13u
 
 struct exception_context;
 

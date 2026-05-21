@@ -245,6 +245,37 @@ static int do_stratumd_stub_bringup(void) {
         return -1;
     }
 
+    // P5-stratumd-stub-bringup-e1: walk-through-mount via SYS_WALK_OPEN.
+    // While attach_fd is still alive, walk one component ("hello") and
+    // open it, then read + content-check the synthetic FS payload. This
+    // exercises the full kernel 9P client + dev9p Dev vtable path on
+    // every boot, so a regression in SYS_WALK_OPEN surfaces immediately.
+    static const char hello_name[] = "hello";
+    static const unsigned char hello_expect[] = "hello from stratumd-stub\n";
+    long hello_fd = t_walk_open(attach_fd, hello_name, 5, T_OREAD);
+    if (hello_fd < 0) {
+        t_putstr("joey: stub-bringup t_walk_open FAILED\n");
+        return -1;
+    }
+    unsigned char hello_buf[32];
+    long hello_n = t_read(hello_fd, hello_buf, sizeof(hello_buf));
+    if (hello_n != 25) {
+        t_putstr("joey: stub-bringup t_read length mismatch\n");
+        (void)t_close(hello_fd);
+        return -1;
+    }
+    for (long i = 0; i < hello_n; i++) {
+        if (hello_buf[i] != hello_expect[i]) {
+            t_putstr("joey: stub-bringup t_read content mismatch\n");
+            (void)t_close(hello_fd);
+            return -1;
+        }
+    }
+    if (t_close(hello_fd) != 0) {
+        t_putstr("joey: stub-bringup t_close(hello_fd) FAILED\n");
+        return -1;
+    }
+
     if (t_close(attach_fd) != 0) {
         t_putstr("joey: stub-bringup t_close(attach_fd) FAILED\n");
         return -1;
@@ -675,7 +706,7 @@ int main(void) {
 
     // === stratumd-stub boot pivot demo (P5-stratumd-stub-bringup-c) ===
     if (do_stratumd_stub_bringup() != 0) return 1;
-    t_putstr("joey: stub-bringup ok (pipe + spawn + attach + mount + unmount)\n");
+    t_putstr("joey: stub-bringup ok (pipe + spawn + attach + mount + unmount + walk_open + read)\n");
 
     return 0;
 }

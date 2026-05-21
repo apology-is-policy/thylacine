@@ -10,7 +10,8 @@ This is the first of the P5-stratumd-stub-bringup arc. The full arc is:
 | **b** | `SYS_SPAWN_WITH_FDS` + `/stub-driver` userspace orchestrator (production shape, separate binary) | LANDED (`73784b4`) |
 | **c** | Joey runs the `/stub-driver` orchestration inline on the production boot path | LANDED (`6c1c816`) |
 | **d** | Stub serves Twalk + Tlopen + Tread over a synthetic FS (`/hello`) — `/stub-fs-probe` validates | LANDED (`cde54e8`) |
-| e (future) | Pivot/territory-root mechanism so the stub's tree becomes joey's `/` | DEFERRED |
+| **e1** | `SYS_WALK_OPEN` syscall + `t_walk_open` libt wrapper + `/stub-walk-probe` end-to-end via kernel 9P client; joey-inline content check on every boot | LANDED (*(pending)*) |
+| e2 (future) | Territory-root pivot mechanism so the mounted Spoor becomes the joey territory's `/` | DEFERRED |
 | f (future) | Real stratumd swap-in (after Phase 6 musl sysroot) | DEFERRED |
 
 ---
@@ -253,9 +254,88 @@ The new `userspace.stratumd_stub_fs_round_trip` brings total tests 525 → 526 P
 
 ---
 
+## P5-stratumd-stub-bringup-e1 — walk-through-mount via `SYS_WALK_OPEN`
+
+Sub-chunk **e1** lands the v1.0 minimum walk-through-mount primitive: a new syscall `SYS_WALK_OPEN(spoor_fd, name, omode) → opened_fd` that composes `spoor_clone` + `dev->walk` + `dev->open` + `handle_alloc` atomically. With this in hand, joey (and any test probe) can reach files served by a 9P server through the kernel 9P client + dev9p Dev vtable — no raw-wire bypass.
+
+### Scope (minimum-surface)
+
+Single-component walks only at v1.0:
+
+- `name` must not contain `/`, `\0`, equal `.`, or equal `..` — multi-component path resolution and traversal land with the production `open(name, mode)` namec walker.
+- `omode` is the Plan-9 low-2-bit envelope (`OREAD=0`, `OWRITE=1`, `ORDWR=2`, `OEXEC=3`) optionally OR'd with `OTRUNC=0x10`. Bits outside `SYS_WALK_OPEN_OMODE_VALID` are rejected.
+- Dev-agnostic: any Dev with non-NULL `.walk` and `.open` works. v1.0 callers exercise dev9p (the attach root from `SYS_ATTACH_9P`). devramfs walks are kernel-internal at v1.0; nothing prevents userspace from calling `SYS_WALK_OPEN` on a devramfs Spoor when one becomes reachable.
+
+### Kernel surface (`kernel/syscall.c::sys_walk_open_handler`)
+
+```
+SYS_WALK_OPEN(spoor_fd, name_va, name_len, omode) → fd or -1
+```
+
+1. Validate `name_len ∈ (0, 64]`, user-VA range, `omode` bit set.
+2. Look up source Spoor (`KOBJ_SPOOR` + `RIGHT_READ`).
+3. Confirm `src->dev->walk` + `src->dev->open` are both non-NULL.
+4. Copy-in name + validate component shape (no `/`, no `\0`, no `.`, no `..`).
+5. `spoor_clone(src)` → new Spoor `nc`.
+6. `src->dev->walk(src, nc, &name, 1)`:
+   - On failure: detach `nc->aux` (it's still the shallow copy of src's aux from `spoor_clone` — dev9p_walk replaces aux only on success; closing nc would clunk src's fid through the shared pointer). `spoor_unref(nc)`. Return -1.
+   - On success: dev9p_walk has replaced `nc->aux` with a fresh `dev9p_priv` carrying the walk-allocated fid (`fid_owned=true`). `walkqid_free` the carrier.
+7. `nc->dev->open(nc, omode)`:
+   - On failure: `spoor_clunk(nc)` (runs `dev9p_close` → `p9_client_clunk` on the walk fid + frees the priv).
+8. `handle_alloc(p, KOBJ_SPOOR, R|W|TRANSFER, nc)` → fd. On full-table: `spoor_clunk(nc)`.
+
+The rights envelope matches `SYS_ATTACH_9P` (R|W|TRANSFER). The server enforces actual omode semantics — writing through an `OREAD`-only fid returns an Rlerror at IO time, not a rights gate failure at syscall time.
+
+### libt surface (`usr/lib/libt/include/thyla/syscall.h`)
+
+```
+long t_walk_open(long spoor_fd, const char *name, size_t name_len, unsigned long omode);
+```
+
+With omode constants `T_OREAD`, `T_OWRITE`, `T_ORDWR`, `T_OEXEC`, `T_OTRUNC` and the `T_WALK_OPEN_NAME_MAX = 64u` cap.
+
+### Userspace probe (`usr/stub-walk-probe/stub-walk-probe.c`)
+
+A `~85`-line probe that drives the production kernel path:
+
+1. `t_attach_9p(0, 1, "/", 1, 0)` → attach_fd.
+2. `t_walk_open(attach_fd, "hello", 5, T_OREAD)` → hello_fd.
+3. `t_read(hello_fd, buf, 64)` — must return 25, content must match `"hello from stratumd-stub\n"`.
+4. Second `t_read` at offset 25 → EOF (count 0).
+5. `t_close(hello_fd)` + `t_close(attach_fd)`; `t_exits(0)`.
+
+Failure at any step prints `stub-walk-probe: <op> FAIL\n` and exits 1.
+
+### Joey-inline (production boot path)
+
+`do_stratumd_stub_bringup` in `usr/joey/joey.c` now does a `t_walk_open` + `t_read` + content-check between the `t_unmount(99)` and the `t_close(attach_fd)` calls. So every boot of Thylacine exercises `SYS_WALK_OPEN` end-to-end: a regression in the syscall — kernel or wire — surfaces as a joey boot failure, not just a test failure.
+
+The joey success diagnostic widens to `pipe + spawn + attach + mount + unmount + walk_open + read`.
+
+### Kernel test wiring
+
+`kernel/test/test_stratumd_stub.c::test_stratumd_stub_walk_round_trip` is structurally identical to the `fs_round_trip` test, but the client is `/stub-walk-probe`:
+
+1. Load `/stratumd-stub` + `/stub-walk-probe` via `devramfs_lookup`.
+2. `pipe_create × 2` → c2s + s2c rings.
+3. `rfork × 2` with `stub_exec_thunk` installing fds 0+1 in each child.
+4. `wait_pid × 2`; assert both `status==0`.
+
+Coexists with `fs_round_trip` — they cover orthogonal slices of the same stub: raw-wire mirror (fs_round_trip) vs kernel 9P client + Dev vtable + new syscall (walk_round_trip).
+
+### Test count
+
+The new `userspace.stratumd_stub_walk_round_trip` brings total tests 526 → 527 PASS × default + UBSan.
+
+### Audit-trigger surfaces touched
+
+`SYS_WALK_OPEN` is a new syscall entry point (capability checks; per CLAUDE.md trigger list) and routes through the 9P client (via dev9p_walk + dev9p_open). The handle table is touched at the install. Territory + VMO + scheduler + poll + notes + KASLR + ELF + mprotect + boot are NOT touched. A focused audit round is appropriate before promoting the syscall to non-stub callers.
+
+---
+
 ## Composition with future chunks
 
-- **Pivot / territory-root (e)**: with the stub now serving walkable content, the next architectural step is making the mounted Spoor the joey territory's root (or a child territory's root). Today joey's `/` resolves through devramfs; sub-chunk e adds the kernel mechanism to substitute a different Spoor as `/`. Also the natural place to land a userspace walk-through-mount primitive so joey can read `/sysroot/hello` directly without raw 9P encoding.
+- **Territory-root pivot (e2)**: with `SYS_WALK_OPEN` in place, the remaining piece for "the stub's tree IS joey's `/`" is the kernel mechanism that substitutes a mounted Spoor as the territory root. Three design options: `t_chroot(spoor_fd)`, a `t_bind(spoor_fd, target_path_id, MREPL_BEFORE)` variant, or spawning a child Proc whose initial root is the mounted Spoor. All three cross `territory.c` (audit-trigger), so e2 lands as its own sub-chunk with a focused audit.
 - **Real stratumd swap-in (f)**: sub-chunks a–e prove the architecture with the stub. Real stratumd swap-in replaces `t_spawn_with_fds("stratumd-stub", ...)` with `t_spawn_with_fds("stratumd-system", ...)` once Phase 6's musl sysroot lets stratumd compile for Thylacine's userspace ABI.
 
 ---
@@ -271,7 +351,11 @@ The new `userspace.stratumd_stub_fs_round_trip` brings total tests 525 → 526 P
 | Stub serves Twalk / Tlopen / Tread over synthetic FS (`/hello`) | LANDED (d) |
 | `usr/stub-fs-probe/stub-fs-probe.c` (raw-9P client driving walk + open + read) | LANDED (d) |
 | `kernel/test/test_stratumd_stub.c::test_stratumd_stub_fs_round_trip` | LANDED (d) |
-| Pivot/territory-root mechanism (stub's tree becomes joey's `/`) | DEFERRED (e) |
+| `SYS_WALK_OPEN` syscall + `t_walk_open` libt wrapper (walk-through-mount primitive) | LANDED (e1) |
+| `usr/stub-walk-probe/stub-walk-probe.c` (t_attach_9p + t_walk_open + t_read probe) | LANDED (e1) |
+| `kernel/test/test_stratumd_stub.c::test_stratumd_stub_walk_round_trip` | LANDED (e1) |
+| Joey's `do_stratumd_stub_bringup` exercises `t_walk_open` on every boot | LANDED (e1) |
+| Territory-root pivot (stub's tree becomes joey's `/`) | DEFERRED (e2) |
 | Real stratumd swap-in (post-Phase-6 musl sysroot) | DEFERRED (f) |
 
 ---
@@ -280,7 +364,7 @@ The new `userspace.stratumd_stub_fs_round_trip` brings total tests 525 → 526 P
 
 1. **Stub exits on first EOF.** Real stratumd serves the entire mount lifetime. The stub's `for(;;) { read; respond }` loop handles arbitrary message counts, but if the client closes its tx, the stub exits — single-session. Each invocation in joey's boot path is a fresh stub Proc.
 2. **Tiny synthetic FS only.** As of sub-chunk d, the stub serves exactly one root + one file (`/hello`). No subdirectories, no Twrite, no Treaddir, no Tgetattr, no extended ops. Sufficient to validate the Twalk + Tlopen + Tread wire path; expanding the synthetic tree is a small extension to the `build_response` dispatch.
-3. **No userspace walk-through-mount yet.** After joey mounts the stub at `target_path_id=99`, joey can't `t_read /sysroot/hello` because Thylacine has no userspace walk primitive for dev9p-backed Spoors at v1.0. The `/stub-fs-probe` validates the stub's wire surface via raw 9P over pipes (bypassing the kernel client + mount table); the joey-side read-through-mount story lands with sub-chunk e (territory-root pivot + the walk primitive that follows).
+3. **Walk-through-mount is by source `spoor_fd`, not mount table.** Sub-chunk e1's `SYS_WALK_OPEN(spoor_fd, name, omode)` takes the source Spoor handle directly (the value returned by `t_attach_9p`). Resolving `/sysroot/hello` through the namespace mount table — i.e., starting from the territory root and walking past a `mount` entry — needs the territory-root pivot (e2) plus a name-resolving variant of walk. Joey demonstrates walk-through-mount today by holding `attach_fd` past `t_mount` and calling `t_walk_open(attach_fd, "hello", ...)` directly; the user-facing path-resolving syscall lands later.
 4. **Stub-bringup runs once per boot.** Joey runs it after corvus's exit, mounts + unmounts in a single sweep. There's no long-lived stub holding the mount across the boot's lifetime — that's the production model for real stratumd, not the stub.
 5. **`target_path_id = 99` is a placeholder constant.** No string-path resolution yet for mount targets at v1.0; the abstract u32 token doesn't correspond to a visible directory in any namespace tree. Real `/sysroot` semantics land with sub-chunk e + the path-resolution syscall work in Phase 6.
 6. **Fid table is per-process-lifetime, not per-session.** The stub runs once per spawn (a single client; one Tversion + Tattach + walks + reads + Tclunks + EOF). A multi-session model would need a session reset on Tversion; trivial to add when needed.

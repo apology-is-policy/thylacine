@@ -957,6 +957,127 @@ static s64 sys_attach_9p_handler(u64 tx_fd_raw, u64 rx_fd_raw,
     return (s64)fd;
 }
 
+// =============================================================================
+// SYS_WALK_OPEN — single-component walk-and-open through a Spoor's Dev
+// vtable (P5-stratumd-stub-bringup-e1). Plan-9 namec() in miniature:
+// spoor_clone + dev->walk + dev->open + handle_alloc, composed atomically.
+//
+// The v1.0 minimum primitive to reach a file under an attached / mounted
+// 9P root before the full open(name, mode) namec walker lands. Single
+// component only (no '/' splitting, no '.' / '..') — keeps the path-
+// validation surface tiny + the audit envelope narrow. Multi-component
+// + path-traversal handling defer to the production open() chunk.
+//
+// Dev-agnostic: any Dev that implements both .walk and .open works. v1.0
+// callers exercise dev9p (the attach_9p root) + transitively any walked
+// dev9p subtree. devramfs Spoors are mostly directory-walked from the
+// kernel side at v1.0, but the syscall does not gatekeep on `dc`.
+// =============================================================================
+
+static s64 sys_walk_open_handler(u64 spoor_fd_raw, u64 name_va,
+                                  u64 name_len_raw, u64 omode_raw) {
+    struct Thread *t = current_thread();
+    if (!t)                                          return -1;
+    struct Proc *p = t->proc;
+    if (!p)                                          return -1;
+
+    // Validate name length cap. name_len_raw == 0 is rejected: a zero-
+    // length name is a clone-walk (nname=0 in the 9P sense), which has
+    // no userspace use case for an opened fd at v1.0 — the attach root
+    // is already opened.
+    if (name_len_raw == 0)                            return -1;
+    if (name_len_raw > SYS_WALK_OPEN_NAME_MAX)        return -1;
+    if (!sys_validate_user_buf(name_va, name_len_raw)) return -1;
+
+    // Validate omode bit set. Rejecting unknown bits lets future bits be
+    // added without ambiguity (an old kernel rejects a new bit; a new
+    // kernel accepts both old + new bits).
+    if (omode_raw & ~(u64)SYS_WALK_OPEN_OMODE_VALID)  return -1;
+
+    // Look up the source Spoor. RIGHT_READ is the gate: a walk-and-open
+    // requires the ability to read the directory namespace (the walk
+    // itself reads server-side qids), and v1.0 has no "execute" right
+    // for directories.
+    struct Spoor *src = sys_lookup_spoor(p, (hidx_t)spoor_fd_raw, RIGHT_READ);
+    if (!src)                                         return -1;
+    if (!src->dev || !src->dev->walk || !src->dev->open) return -1;
+
+    // Copy the name into kernel scratch + validate component shape.
+    // Reject '/' (multi-component path — defer to production open()),
+    // '\0' (truncation attack), and the special entries "." (no-op) +
+    // ".." (parent traversal — only meaningful with a multi-component
+    // path resolver). The component-shape check is intentionally strict
+    // at v1.0; if a caller needs '.' it can pass a clone-walk later.
+    char name_scratch[SYS_WALK_OPEN_NAME_MAX];
+    for (u64 i = 0; i < name_len_raw; i++) {
+        u8 b;
+        if (uaccess_load_u8(name_va + i, &b) != 0)    return -1;
+        if (b == '/' || b == '\0')                    return -1;
+        name_scratch[i] = (char)b;
+    }
+    if (name_len_raw == 1 && name_scratch[0] == '.')  return -1;
+    if (name_len_raw == 2 && name_scratch[0] == '.' &&
+                              name_scratch[1] == '.') return -1;
+    // NUL-terminate for the dev9p walk path (it uses strlen-like length
+    // discovery on the names[] array, paired with the length array). At
+    // v1.0 we pack a single name; the terminator is defense-in-depth.
+    if (name_len_raw < SYS_WALK_OPEN_NAME_MAX)
+        name_scratch[name_len_raw] = '\0';
+
+    // Clone the source Spoor — gives us an independent cursor whose aux
+    // dev->walk will replace with a freshly-allocated priv (carrying the
+    // new fid). The clone starts at ref=1; spoor_clunk on failure runs
+    // dev->close (clunks the fid if walk had progressed) + drops the ref.
+    struct Spoor *nc = spoor_clone(src);
+    if (!nc)                                          return -1;
+
+    // Issue the walk. Pack the single name + length into one-element
+    // arrays for the dev vtable's nname-style signature. dev9p_walk
+    // allocates a fresh fid + drives p9_client_walk + replaces nc->aux
+    // with new_priv (fid_owned=true); on failure it clunks the fid + frees
+    // the Walkqid carrier itself.
+    const char *names[1] = { name_scratch };
+    struct Walkqid *w = src->dev->walk(src, nc, names, 1);
+    if (!w) {
+        // Walk failed — nc->aux is still the shallow copy of src->aux
+        // (dev9p_walk replaces aux only on success). Calling dev->close
+        // on nc would clunk src's fid through the shared aux — wrong.
+        // Bypass close: detach aux + spoor_unref. The walkqid_free is
+        // dev9p_walk's responsibility on its own failure path (it frees
+        // the Walkqid before returning NULL).
+        nc->aux = NULL;
+        spoor_unref(nc);
+        return -1;
+    }
+    // dev9p's walkqid carrier has nc as its spoor; we own + free it
+    // now that we've consumed the walk result (we don't need the qids
+    // returned in w->qid[] — the next open() will refresh nc->qid).
+    walkqid_free(w);
+
+    // Issue the open. dev9p_open returns nc itself (state mutated:
+    // COPEN flag set, mode + offset reset, qid refreshed from Rlopen).
+    // On failure nc still has its own walk-allocated fid; spoor_clunk
+    // runs dev->close → p9_client_clunk on that fid + frees the priv.
+    if (!nc->dev->open(nc, (int)omode_raw)) {
+        spoor_clunk(nc);
+        return -1;
+    }
+
+    // Install the now-opened nc in the caller's handle table. The
+    // rights envelope matches SYS_ATTACH_9P: R | W | TRANSFER. The
+    // server enforces the actual omode (writes to an OREAD-only fid
+    // return Rlerror, not -EPERM here). handle_alloc takes ownership
+    // of the ref from spoor_clone; on full-table failure we spoor_clunk
+    // (running dev->close to clunk the fid).
+    rights_t r = RIGHT_READ | RIGHT_WRITE | RIGHT_TRANSFER;
+    hidx_t fd = handle_alloc(p, KOBJ_SPOOR, r, nc);
+    if (fd < 0) {
+        spoor_clunk(nc);
+        return -1;
+    }
+    return (s64)fd;
+}
+
 static s64 sys_dup_handler(u64 hraw, u64 new_rights_raw) {
     struct Thread *t = current_thread();
     if (!t)                                          return -1;
@@ -2572,6 +2693,13 @@ void syscall_dispatch(struct exception_context *ctx) {
 
     case SYS_CAP_USE:
         ctx->regs[0] = (u64)sys_cap_use_handler(ctx->regs[0]);
+        return;
+
+    case SYS_WALK_OPEN:
+        ctx->regs[0] = (u64)sys_walk_open_handler(ctx->regs[0],
+                                                  ctx->regs[1],
+                                                  ctx->regs[2],
+                                                  ctx->regs[3]);
         return;
 
     default:

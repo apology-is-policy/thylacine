@@ -64,7 +64,21 @@ enum {
     T_SYS_SPAWN_WITH_PERMS = 31, // P5-corvus-srv-impl-b3a: spawn_full + perm_flags
     T_SYS_CAP_GRANT   = 32,      // P5-hostowner-b-b: register pending cap grant
     T_SYS_CAP_USE     = 33,      // P5-hostowner-b-b: redeem pending cap grant
+    T_SYS_WALK_OPEN   = 34,      // P5-stratumd-stub-bringup-e1: walk-and-open one path component
 };
+
+// SYS_WALK_OPEN omode bits — must mirror SYS_WALK_OPEN_OMODE_VALID in
+// kernel/include/thylacine/syscall.h. Plan-9 modes: OREAD=0, OWRITE=1,
+// ORDWR=2, OEXEC=3 in the low 2 bits, optional OTRUNC=0x10 modifier.
+#define T_OREAD    0u
+#define T_OWRITE   1u
+#define T_ORDWR    2u
+#define T_OEXEC    3u
+#define T_OTRUNC   0x10u
+
+// Maximum single-component name length for t_walk_open (matches the
+// kernel cap; passing longer returns -1 from the syscall).
+#define T_WALK_OPEN_NAME_MAX  64u
 
 // SYS_SPAWN_WITH_PERMS perm_flags — must mirror SPAWN_PERM_* in
 // kernel/include/thylacine/syscall.h. SPAWN_PERM_MAY_POST_SERVICE stamps
@@ -790,6 +804,44 @@ static inline long t_cap_grant(unsigned long cap_mask,
         "svc #0"
         : "+r"(x0)
         : "r"(x1), "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
+// t_walk_open — walk a single path component from `spoor_fd` and open
+// the result, returning a new opened KOBJ_SPOOR fd. The minimum walk-
+// through-mount primitive at v1.0; composes with t_attach_9p to read a
+// file served by a 9P server (P5-stratumd-stub-bringup-e1).
+//
+// Single component only — `name` must not contain '/' or '\0', and must
+// not be "." or "..". Multi-component path resolution lands with the
+// production open() syscall. Pass omode = T_OREAD / T_OWRITE / T_ORDWR
+// (optionally OR'd with T_OTRUNC); other bits are rejected.
+//
+// The caller must hold RIGHT_READ on spoor_fd. The returned fd has
+// R | W | TRANSFER — the server enforces the actual omode envelope.
+//
+// Returns the new fd (>=0) on success, -1 on:
+//   - spoor_fd not KOBJ_SPOOR / missing RIGHT_READ
+//   - the backing Dev has no walk or no open vtable op
+//   - name_len == 0 or > 64
+//   - name contains '/' / '\0' / equals "." / equals ".."
+//   - omode has unrecognized bits
+//   - server-side Rlerror on Twalk or Tlopen
+//   - kernel-side OOM / handle table full
+__attribute__((always_inline))
+static inline long t_walk_open(long spoor_fd, const char *name,
+                                size_t name_len, unsigned long omode) {
+    register long x0 __asm__("x0") = spoor_fd;
+    register long x1 __asm__("x1") = (long)(unsigned long)name;
+    register long x2 __asm__("x2") = (long)name_len;
+    register long x3 __asm__("x3") = (long)omode;
+    register long x8 __asm__("x8") = T_SYS_WALK_OPEN;
+    __asm__ volatile (
+        "svc #0"
+        : "+r"(x0)
+        : "r"(x1), "r"(x2), "r"(x3), "r"(x8)
         : "memory", "cc"
     );
     return x0;
