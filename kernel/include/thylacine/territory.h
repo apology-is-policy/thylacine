@@ -103,7 +103,13 @@ struct Territory {
     int                  ref;        // refcount; rfork(RFNAMEG) shares (Phase 5+)
     int                  nbinds;
     int                  nmounts;
-    u32                  _pad;       // 8-byte alignment for binds[]
+    u32                  _pad;       // 8-byte alignment for root_spoor + binds[]
+    // P5-stratumd-stub-bringup-e2: the pivoted root Spoor (NULL until the
+    // first territory_chroot). When SYS_WALK_OPEN is called with the
+    // spoor_fd == -1 sentinel, the handler uses this Spoor as the walk
+    // source. Holds one refcount on its target Spoor (taken at chroot,
+    // dropped at re-chroot OR at territory_unref final release).
+    struct Spoor        *root_spoor;
     struct PgrpBind      binds[PGRP_MAX_BINDS];
     struct PgrpMount     mounts[PGRP_MAX_MOUNTS];
 };
@@ -111,9 +117,9 @@ struct Territory {
 _Static_assert(sizeof(struct PgrpMount) == 16,
                "struct PgrpMount pinned at 16 bytes (8 ptr + 4 target + 4 flags)");
 _Static_assert(sizeof(struct Territory)
-               == 24 + 8 * PGRP_MAX_BINDS + 16 * PGRP_MAX_MOUNTS,
-               "struct Territory size pinned (P5-attach-mount baseline: "
-               "24 header + 8*PGRP_MAX_BINDS + 16*PGRP_MAX_MOUNTS).");
+               == 32 + 8 * PGRP_MAX_BINDS + 16 * PGRP_MAX_MOUNTS,
+               "struct Territory size pinned (P5-stratumd-stub-bringup-e2: "
+               "24 header + 8 root_spoor + 8*PGRP_MAX_BINDS + 16*PGRP_MAX_MOUNTS).");
 _Static_assert(__builtin_offsetof(struct Territory, magic) == 0,
                "magic must be at offset 0 (SLUB freelist write "
                "clobbers it on free, double-free defense)");
@@ -206,6 +212,35 @@ int mount(struct Territory *territory, struct Spoor *source,
 //    0   success (entry removed; refcount dropped).
 //   -1   no entry exists at `target_path`.
 int unmount(struct Territory *territory, path_id_t target_path);
+
+// =============================================================================
+// Chroot (root-Spoor pivot) — P5-stratumd-stub-bringup-e2.
+// =============================================================================
+
+// territory_chroot: stamp `source` as `territory`'s pivoted root Spoor.
+// The root is the Spoor at which name resolution starts when a userspace
+// SYS_WALK_OPEN is called with the spoor_fd == -1 sentinel — i.e., when
+// the caller asks the kernel to walk "from my root" rather than from an
+// explicitly-named handle.
+//
+// Lifecycle: bumps source's refcount (the Territory holds one reference
+// until either a subsequent territory_chroot replaces it OR Territory
+// destruction releases it). If a previous root was set, its refcount is
+// dropped via spoor_clunk (so the Dev's close hook runs if this was the
+// last holder — same lifecycle discipline as mount()/MREPL displacement).
+//
+// Idempotency: territory_chroot(territory, S) where root_spoor == S is a
+// no-op success (returns 0; refcount not bumped). Mirrors mount()'s
+// idempotent-same-source semantics.
+//
+// Spec: maps to `specs/territory.tla::Chroot(p, s)`. Refcount discipline
+// pinned by MountRefcountConsistency (refcount[s] = mount-table-count +
+// |{p : root_spoor[p] = s}|).
+//
+// Return values:
+//    0   success (root stamped or idempotent no-op).
+//   -1   source is NULL.
+int territory_chroot(struct Territory *territory, struct Spoor *source);
 
 // Diagnostic.
 int  territory_nbinds(struct Territory *territory);

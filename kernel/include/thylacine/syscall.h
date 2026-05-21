@@ -512,7 +512,11 @@ enum {
     // multi-component walker lands with the production open() syscall.
     //
     // SYS_WALK_OPEN(spoor_fd, name_va, name_len, omode) → opened_fd / -1
-    //   x0 = spoor_fd   (hidx_t; must be KOBJ_SPOOR with RIGHT_READ)
+    //   x0 = spoor_fd   (hidx_t; must be KOBJ_SPOOR with RIGHT_READ — OR
+    //                    the SYS_WALK_OPEN_FROM_ROOT sentinel == (u64)-1,
+    //                    in which case the kernel uses the caller's
+    //                    territory's root_spoor as the walk source.
+    //                    P5-stratumd-stub-bringup-e2.)
     //   x1 = name_va    (user-VA pointer to the component name)
     //   x2 = name_len   (bytes; > 0, ≤ SYS_WALK_OPEN_NAME_MAX)
     //   x3 = omode      (u32; Plan 9 OREAD=0 / OWRITE=1 / ORDWR=2 / OEXEC=3
@@ -520,6 +524,8 @@ enum {
     //                    outside SYS_WALK_OPEN_OMODE_VALID are rejected.)
     // Returns: x0 = opened KOBJ_SPOOR fd (>=0) on success, or -1 on:
     //   - spoor_fd not KOBJ_SPOOR / out-of-range / missing RIGHT_READ
+    //     (excluding the FROM_ROOT sentinel)
+    //   - FROM_ROOT sentinel used but the caller has no pivoted root_spoor
     //   - the backing Dev has no walk or no open vtable op
     //   - name_va outside user-VA / name_len == 0 / > 64
     //   - name contains '/' or '\0'
@@ -537,9 +543,41 @@ enum {
     // Spoor's priv with fid_owned=true. dev9p_close on the new Spoor
     // clunks that fid. A failed walk OR open spoor_clunks the new Spoor
     // (which clunks the fid if walk had succeeded, or no-ops if it
-    // hadn't). The source Spoor's fid is untouched.
+    // hadn't). The source Spoor's fid is untouched. For the FROM_ROOT
+    // sentinel path the source is the Territory's root_spoor (held by
+    // the Territory; not freed by the syscall).
     SYS_WALK_OPEN    = 34,   // arg: spoor_fd, name_va, name_len, omode
+
+    // P5-stratumd-stub-bringup-e2: stamp the calling Proc's Territory
+    // root_spoor to the given Spoor. The pivoted root is the Spoor at
+    // which name resolution starts for the SYS_WALK_OPEN_FROM_ROOT
+    // sentinel (spoor_fd == -1). Maps to specs/territory.tla::Chroot.
+    //
+    // SYS_CHROOT(spoor_fd) → 0 / -1
+    //   x0 = spoor_fd   (hidx_t; must be KOBJ_SPOOR with RIGHT_READ)
+    // Lifecycle: the Territory takes its own refcount on the source Spoor
+    // (via territory_chroot → spoor_ref). The caller MAY close their
+    // spoor_fd afterward; the Territory keeps the Spoor alive until a
+    // subsequent SYS_CHROOT replaces it (spoor_clunk on the displaced
+    // root) OR until Territory destruction (proc_free → territory_unref
+    // → spoor_clunk on root_spoor). Idempotent: SYS_CHROOT to the same
+    // Spoor returns 0 without bumping refcount.
+    //
+    // Returns 0 on success, -1 on:
+    //   - spoor_fd not KOBJ_SPOOR / out-of-range / missing RIGHT_READ
+    //   - the caller has no Territory (kernel invariant; structurally
+    //     impossible for a userspace Proc, defense-in-depth)
+    //
+    // Audit-bearing: touches `kernel/territory.c` (CLAUDE.md §25.4 trigger
+    // surface — cycle-freedom, isolation, mount-refcount consistency).
+    SYS_CHROOT       = 35,   // arg: spoor_fd
 };
+
+// SYS_WALK_OPEN's FROM_ROOT sentinel: when passed as the spoor_fd, the
+// kernel uses the caller's Territory's root_spoor as the walk source
+// instead of looking up a handle. (u64)-1 chosen because hidx_t fds are
+// non-negative; the cast is unambiguous.
+#define SYS_WALK_OPEN_FROM_ROOT  ((u64)(-1))
 
 // SYS_SPAWN_WITH_PERMS perm_flags bits — must mirror the libt / libthyla-rs
 // constants. New bits add atomically without an ABI break (a Proc spawned

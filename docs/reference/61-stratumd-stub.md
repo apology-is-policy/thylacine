@@ -11,7 +11,7 @@ This is the first of the P5-stratumd-stub-bringup arc. The full arc is:
 | **c** | Joey runs the `/stub-driver` orchestration inline on the production boot path | LANDED (`6c1c816`) |
 | **d** | Stub serves Twalk + Tlopen + Tread over a synthetic FS (`/hello`) — `/stub-fs-probe` validates | LANDED (`cde54e8`) |
 | **e1** | `SYS_WALK_OPEN` syscall + `t_walk_open` libt wrapper + `/stub-walk-probe` end-to-end via kernel 9P client; joey-inline content check on every boot | LANDED (`f37748b`) |
-| e2 (future) | Territory-root pivot mechanism so the mounted Spoor becomes the joey territory's `/` | DEFERRED |
+| **e2** | `SYS_CHROOT` syscall + `Territory.root_spoor` + `SYS_WALK_OPEN_FROM_ROOT` sentinel; v1.0 chroot mechanism per `CORVUS-DESIGN.md §10.1`; chroot path exercised via `/stub-walk-probe` (child Proc) + 6 dedicated kernel tests | LANDED (*(pending)*) |
 | f (future) | Real stratumd swap-in (after Phase 6 musl sysroot) | DEFERRED |
 
 ---
@@ -333,10 +333,86 @@ The new `userspace.stratumd_stub_walk_round_trip` brings total tests 526 → 527
 
 ---
 
+## P5-stratumd-stub-bringup-e2 — territory-root pivot via `SYS_CHROOT`
+
+Sub-chunk **e2** lands the v1.0 chroot mechanism per `CORVUS-DESIGN.md §10.1` (`"pivot_root (or chroot at v1.0; full pivot at v1.x)"`). The 3-option pickup-doc speculation was settled by the existing scripture in CORVUS-DESIGN: chroot at v1.0; pivot at v1.x.
+
+The mechanism is two complementary changes:
+
+1. **`struct Territory.root_spoor`** field + **`territory_chroot(p, source)`** kernel-internal API. Per-Territory; refcounted; cloned across rfork; clunked at Territory destruction. Spec: `specs/territory.tla::Chroot(p, s)`.
+2. **`SYS_CHROOT(spoor_fd)`** syscall (= 35) + **`SYS_WALK_OPEN_FROM_ROOT == (u64)-1`** sentinel extension to `SYS_WALK_OPEN`. After `SYS_CHROOT`, a `SYS_WALK_OPEN(-1, "name", ...)` walks from the pivoted root instead of an explicit handle.
+
+The full reference for the syscall lives in `docs/reference/77-sys-chroot.md`. The Territory-side mechanism + lifecycle + spec mapping is in `docs/reference/18-territory.md`.
+
+### Why the pivot path runs in `/stub-walk-probe`, not joey
+
+joey is the long-running init Proc that never exits during boot. A `t_chroot` in joey would stamp its Territory's `root_spoor` with a ref on the attach Spoor — that ref persists past joey's `t_close(attach_fd)`, holding the `p9_attached` (and its transport-Spoor refs) alive forever. stratumd-stub would never see EOF on `c2s_rd`, and joey's `t_wait_pid` would deadlock. (Confirmed empirically during e2 implementation: a chroot in joey's bringup made the test boot hang past 60 s.)
+
+The fix: **`/stub-walk-probe` is the test vehicle for the chroot path**. The probe is a short-lived child Proc; its `t_exits(0)` triggers `territory_unref` → `spoor_clunk(root_spoor)` → `dev9p_close` on the attach Spoor → adapter teardown → transport EOF → stub sees EOF → exits cleanly. Plus the six `territory.chroot_*` kernel-internal tests cover the lifecycle in isolation.
+
+v1.x adds `pivot_root` (or `chroot(NULL)`-clear) so a long-running Proc CAN release a chroot mid-life. Until then: chroot is one-way at v1.0; joey-as-init does not pivot.
+
+### Stub-walk-probe extension (`usr/stub-walk-probe/stub-walk-probe.c`)
+
+```c
+// e1: walk-via-fd (preserved for regression coverage)
+attach_fd = t_attach_9p(0, 1, "/", 1, 0)
+hello_fd  = t_walk_open(attach_fd, "hello", 5, T_OREAD)
+t_read(hello_fd, ...) → 25 bytes; assert content; t_read(...) → 0 (EOF)
+t_close(hello_fd)
+
+// e2: chroot + walk-via-root
+t_chroot(attach_fd)                                          // 0
+root_hello_fd = t_walk_open(T_WALK_OPEN_FROM_ROOT,           // -1 sentinel
+                             "hello", 5, T_OREAD)
+t_read(root_hello_fd, ...) → 25 bytes; assert content; t_read(...) → 0 (EOF)
+t_close(root_hello_fd)
+
+t_close(attach_fd)  // handle drops; territory's root_spoor still holds the Spoor
+t_exits(0)          // exit releases the chroot → adapter teardown → stub EOF
+```
+
+Same kernel test `userspace.stratumd_stub_walk_round_trip` wires the extended probe.
+
+### Joey-side change
+
+joey does NOT exercise `t_chroot`. The existing e1 sequence (attach + mount + unmount + walk_open(attach_fd, "hello", ...)) is preserved unchanged. An explanatory `NOTE` comment in `do_stratumd_stub_bringup` documents the trap.
+
+### Joey blob cap bump
+
+The new chroot-related code (libt wrapper inlined elsewhere; plus the explanatory comment) is small, but it pushed joey's ELF over its 65 KiB cap (`JOEY_BLOB_MAX`). Cap raised to 128 KiB in `kernel/joey.c`, with a comment explaining the trajectory (room for several more chunks: RECOVER, USER_DELETE, ROTATE_KEY orchestration, stratumd-real swap).
+
+### Kernel tests
+
+6 new tests in `kernel/test/test_territory_chroot.c` (533 total — see `18-territory.md` Tests for the per-test scope):
+
+| Test | Scope |
+|---|---|
+| `territory.chroot_smoke` | bump+drop refcount roundtrip |
+| `territory.chroot_idempotent_same_spoor` | no-op on same-source re-chroot |
+| `territory.chroot_replace_clunks_old` | MREPL-style displacement refcount |
+| `territory.chroot_clone_bumps_ref` | territory_clone propagates root_spoor + bumps ref |
+| `territory.chroot_destroy_drops_ref` | final-release drops root_spoor ref |
+| `territory.chroot_null_returns_error` | NULL source returns -1 |
+
+### Spec extension
+
+`specs/territory.tla` extended with `root_spoor` state, `NONE` sentinel (string), `Chroot` / `BuggyChrootNoRefbump` actions, `ForkClone` + `BuggyDestroyLeak` updates to handle root_spoor, and `MountRefcountConsistency` formula extended to `|MountEntriesForSpoor(s)| + |{p : root_spoor[p] = s}|`. New cfg `territory_buggy_chroot_no_refbump.cfg` produces the expected counterexample (BuggyChrootNoRefbump stamps without ref bump → MountRefcountConsistency violation at depth 2 / 205 states). All 4 existing buggy cfgs still violate as expected — no regression.
+
+### Test count
+
+The 6 chroot tests bring total tests 527 → 533 PASS × default + UBSan, 0 UBSan runtime errors.
+
+### Audit-trigger surfaces touched
+
+`SYS_CHROOT` is a new syscall entry point (CLAUDE.md trigger). `kernel/territory.c` is touched (cycle-freedom, isolation, mount-refcount consistency — Territory in the trigger list). `kernel/syscall.c::sys_walk_open_handler` extended for the FROM_ROOT sentinel. Handle table touched for the source lookup. VMO + scheduler + poll + notes + KASLR + ELF + mprotect NOT touched. A focused audit round bundling SYS_WALK_OPEN (e1 deferred) + SYS_CHROOT is appropriate as the next deliverable.
+
+---
+
 ## Composition with future chunks
 
-- **Territory-root pivot (e2)**: with `SYS_WALK_OPEN` in place, the remaining piece for "the stub's tree IS joey's `/`" is the kernel mechanism that substitutes a mounted Spoor as the territory root. Three design options: `t_chroot(spoor_fd)`, a `t_bind(spoor_fd, target_path_id, MREPL_BEFORE)` variant, or spawning a child Proc whose initial root is the mounted Spoor. All three cross `territory.c` (audit-trigger), so e2 lands as its own sub-chunk with a focused audit.
 - **Real stratumd swap-in (f)**: sub-chunks a–e prove the architecture with the stub. Real stratumd swap-in replaces `t_spawn_with_fds("stratumd-stub", ...)` with `t_spawn_with_fds("stratumd-system", ...)` once Phase 6's musl sysroot lets stratumd compile for Thylacine's userspace ABI.
+- **`pivot_root` / `SYS_UNCHROOT` (v1.x)**: lets a long-running Proc release a chroot. With it, joey's stub-bringup could exercise chroot + revert in the same boot phase. Tracked in `CORVUS-DESIGN.md §10.1 Q2`.
 
 ---
 
@@ -355,7 +431,10 @@ The new `userspace.stratumd_stub_walk_round_trip` brings total tests 526 → 527
 | `usr/stub-walk-probe/stub-walk-probe.c` (t_attach_9p + t_walk_open + t_read probe) | LANDED (e1) |
 | `kernel/test/test_stratumd_stub.c::test_stratumd_stub_walk_round_trip` | LANDED (e1) |
 | Joey's `do_stratumd_stub_bringup` exercises `t_walk_open` on every boot | LANDED (e1) |
-| Territory-root pivot (stub's tree becomes joey's `/`) | DEFERRED (e2) |
+| `SYS_CHROOT` syscall + `Territory.root_spoor` + `SYS_WALK_OPEN_FROM_ROOT` sentinel | LANDED (e2) |
+| `t_chroot` libt wrapper + 6 `territory.chroot_*` kernel tests + spec `Chroot` action + buggy cfg | LANDED (e2) |
+| `/stub-walk-probe` exercises chroot + walk-from-root on every kernel test | LANDED (e2) |
+| Joey exercises chroot (blocked by one-way v1.0 chroot semantics; see caveat) | DEFERRED to v1.x `pivot_root` |
 | Real stratumd swap-in (post-Phase-6 musl sysroot) | DEFERRED (f) |
 
 ---
@@ -364,7 +443,7 @@ The new `userspace.stratumd_stub_walk_round_trip` brings total tests 526 → 527
 
 1. **Stub exits on first EOF.** Real stratumd serves the entire mount lifetime. The stub's `for(;;) { read; respond }` loop handles arbitrary message counts, but if the client closes its tx, the stub exits — single-session. Each invocation in joey's boot path is a fresh stub Proc.
 2. **Tiny synthetic FS only.** As of sub-chunk d, the stub serves exactly one root + one file (`/hello`). No subdirectories, no Twrite, no Treaddir, no Tgetattr, no extended ops. Sufficient to validate the Twalk + Tlopen + Tread wire path; expanding the synthetic tree is a small extension to the `build_response` dispatch.
-3. **Walk-through-mount is by source `spoor_fd`, not mount table.** Sub-chunk e1's `SYS_WALK_OPEN(spoor_fd, name, omode)` takes the source Spoor handle directly (the value returned by `t_attach_9p`). Resolving `/sysroot/hello` through the namespace mount table — i.e., starting from the territory root and walking past a `mount` entry — needs the territory-root pivot (e2) plus a name-resolving variant of walk. Joey demonstrates walk-through-mount today by holding `attach_fd` past `t_mount` and calling `t_walk_open(attach_fd, "hello", ...)` directly; the user-facing path-resolving syscall lands later.
+3. **Walk-through-root is via the `SYS_WALK_OPEN_FROM_ROOT` sentinel (e2).** Sub-chunk e2 added the `Territory.root_spoor` pivot + the `SYS_WALK_OPEN(-1, ...)` sentinel that walks from it. The walk is still single-component at v1.0 — `t_walk_open(-1, "hello", ...)` works after `t_chroot(spoor_fd)`, but `t_walk_open(-1, "subdir/hello", ...)` does not (the production multi-component walker is a Phase 5+ separate chunk). The mount table still exists in parallel; the production walker (when it lands) will resolve through both `root_spoor` and `mounts[]`.
 4. **Stub-bringup runs once per boot.** Joey runs it after corvus's exit, mounts + unmounts in a single sweep. There's no long-lived stub holding the mount across the boot's lifetime — that's the production model for real stratumd, not the stub.
 5. **`target_path_id = 99` is a placeholder constant.** No string-path resolution yet for mount targets at v1.0; the abstract u32 token doesn't correspond to a visible directory in any namespace tree. Real `/sysroot` semantics land with sub-chunk e + the path-resolution syscall work in Phase 6.
 6. **Fid table is per-process-lifetime, not per-session.** The stub runs once per spawn (a single client; one Tversion + Tattach + walks + reads + Tclunks + EOF). A multi-session model would need a session reset on Tversion; trivial to add when needed.

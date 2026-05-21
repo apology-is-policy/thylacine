@@ -105,8 +105,13 @@ CONSTANTS
     BUGGY_CYCLE,               \* BOOLEAN — BuggyBind skips cycle check
     BUGGY_MOUNT_NO_REFBUMP,    \* BOOLEAN — BuggyMount skips refcount bump
     BUGGY_UNMOUNT_NO_REFDROP,  \* BOOLEAN — BuggyUnmount skips refcount drop
-    BUGGY_DESTROY_LEAK         \* BOOLEAN — BuggyDestroy clears mounts[p]
+    BUGGY_DESTROY_LEAK,        \* BOOLEAN — BuggyDestroy clears mounts[p]
                                \*           without dropping refcounts.
+    BUGGY_CHROOT_NO_REFBUMP    \* BOOLEAN — BuggyChroot stamps root_spoor[p]
+                               \*           without bumping refcount[s] (or
+                               \*           dropping the previous root's
+                               \*           refcount). P5-stratumd-stub-
+                               \*           bringup-e2.
 
 ASSUME Cardinality(Procs) >= 1
 ASSUME Cardinality(Paths) >= 2
@@ -115,6 +120,18 @@ ASSUME BUGGY_CYCLE \in BOOLEAN
 ASSUME BUGGY_MOUNT_NO_REFBUMP \in BOOLEAN
 ASSUME BUGGY_UNMOUNT_NO_REFDROP \in BOOLEAN
 ASSUME BUGGY_DESTROY_LEAK \in BOOLEAN
+ASSUME BUGGY_CHROOT_NO_REFBUMP \in BOOLEAN
+
+(***************************************************************************)
+(* NONE — sentinel for "this Proc has no pivoted root_spoor" (the Init    *)
+(* state, before any Chroot). Modeled as a string so it is guaranteed     *)
+(* distinct from the symbolic Spoor model values (s1, s2, ...) passed in  *)
+(* via the cfg. Maps to the impl's `root_spoor = NULL`                    *)
+(* (P5-stratumd-stub-bringup-e2). Encoded as a string rather than via an  *)
+(* unbounded CHOOSE because TLC cannot evaluate `CHOOSE x : x \notin S`   *)
+(* for unbounded x.                                                       *)
+(***************************************************************************)
+NONE == "NONE"
 
 VARIABLES
     bindings,      \* [Procs -> [Paths -> SUBSET Paths]]
@@ -123,18 +140,29 @@ VARIABLES
     mounts,        \* [Procs -> SUBSET (Paths \X Spoors)]
                    \*   mounts[p] = set of <<path, Spoor>> grafts in
                    \*   proc p's territory.
+    root_spoor,    \* [Procs -> Spoors \cup {NONE}]
+                   \*   root_spoor[p] = the Spoor at which name resolution
+                   \*   starts in proc p's territory (the impl uses this
+                   \*   when SYS_WALK_OPEN is called with the spoor_fd ==
+                   \*   -1 sentinel). NONE before the first Chroot. Each
+                   \*   non-NONE root_spoor[p] contributes one to
+                   \*   refcount[root_spoor[p]] (in addition to any
+                   \*   mount-table contributions).
+                   \*   P5-stratumd-stub-bringup-e2.
     refcount       \* [Spoors -> Nat]
-                   \*   refcount[s] = kernel's mount-contribution refcount
-                   \*   for Spoor s. Should equal the cardinality of (p,
-                   \*   path) pairs across all procs with <<path, s>> \in
-                   \*   mounts[p]; tracked separately so the impl bug
-                   \*   "forgot to bump/drop refcount" is catchable.
+                   \*   refcount[s] = kernel's mount-contribution +
+                   \*   root_spoor-contribution refcount for Spoor s.
+                   \*   Should equal Cardinality(MountEntriesForSpoor(s)) +
+                   \*   |{p : root_spoor[p] = s}|; tracked separately so
+                   \*   the impl bug "forgot to bump/drop refcount" is
+                   \*   catchable on either contribution.
 
-vars == <<bindings, mounts, refcount>>
+vars == <<bindings, mounts, root_spoor, refcount>>
 
 TypeOk ==
     /\ bindings \in [Procs -> [Paths -> SUBSET Paths]]
     /\ mounts \in [Procs -> SUBSET (Paths \X Spoors)]
+    /\ root_spoor \in [Procs -> Spoors \cup {NONE}]
     /\ refcount \in [Spoors -> Nat]
 
 (***************************************************************************)
@@ -189,6 +217,7 @@ MountEntriesForSpoor(s) ==
 Init ==
     /\ bindings = [p \in Procs |-> [path \in Paths |-> {}]]
     /\ mounts = [p \in Procs |-> {}]
+    /\ root_spoor = [p \in Procs |-> NONE]
     /\ refcount = [s \in Spoors |-> 0]
 
 (***************************************************************************)
@@ -204,7 +233,7 @@ Bind(p, src, dst) ==
     /\ ~WouldCreateCycle(p, src, dst)
     /\ src \notin bindings[p][dst]
     /\ bindings' = [bindings EXCEPT ![p][dst] = @ \cup {src}]
-    /\ UNCHANGED <<mounts, refcount>>
+    /\ UNCHANGED <<mounts, root_spoor, refcount>>
 
 (***************************************************************************)
 (* BuggyBind(p, src, dst) — bug class: cycle check elided.                *)
@@ -214,7 +243,7 @@ BuggyBind(p, src, dst) ==
     /\ src # dst
     /\ src \notin bindings[p][dst]
     /\ bindings' = [bindings EXCEPT ![p][dst] = @ \cup {src}]
-    /\ UNCHANGED <<mounts, refcount>>
+    /\ UNCHANGED <<mounts, root_spoor, refcount>>
 
 (***************************************************************************)
 (* Unbind(p, src, dst) — removes the edge `dst -> src` from proc p. Maps  *)
@@ -225,7 +254,7 @@ BuggyBind(p, src, dst) ==
 Unbind(p, src, dst) ==
     /\ src \in bindings[p][dst]
     /\ bindings' = [bindings EXCEPT ![p][dst] = @ \ {src}]
-    /\ UNCHANGED <<mounts, refcount>>
+    /\ UNCHANGED <<mounts, root_spoor, refcount>>
 
 (***************************************************************************)
 (* ================================ MOUNT ================================== *)
@@ -248,7 +277,7 @@ Mount(p, s, path) ==
     /\ <<path, s>> \notin mounts[p]
     /\ mounts' = [mounts EXCEPT ![p] = @ \cup {<<path, s>>}]
     /\ refcount' = [refcount EXCEPT ![s] = @ + 1]
-    /\ UNCHANGED bindings
+    /\ UNCHANGED <<bindings, root_spoor>>
 
 (***************************************************************************)
 (* BuggyMountNoRefbump(p, s, path) — bug class: mount adds the entry but  *)
@@ -262,7 +291,7 @@ BuggyMountNoRefbump(p, s, path) ==
     /\ BUGGY_MOUNT_NO_REFBUMP
     /\ <<path, s>> \notin mounts[p]
     /\ mounts' = [mounts EXCEPT ![p] = @ \cup {<<path, s>>}]
-    /\ UNCHANGED <<bindings, refcount>>
+    /\ UNCHANGED <<bindings, root_spoor, refcount>>
 
 (***************************************************************************)
 (* Unmount(p, s, path) — CORRECT unmount. Removes <<path, s>> from        *)
@@ -276,7 +305,7 @@ Unmount(p, s, path) ==
     /\ <<path, s>> \in mounts[p]
     /\ mounts' = [mounts EXCEPT ![p] = @ \ {<<path, s>>}]
     /\ refcount' = [refcount EXCEPT ![s] = @ - 1]
-    /\ UNCHANGED bindings
+    /\ UNCHANGED <<bindings, root_spoor>>
 
 (***************************************************************************)
 (* BuggyUnmountNoRefdrop(p, s, path) — bug class: unmount removes the     *)
@@ -288,24 +317,76 @@ BuggyUnmountNoRefdrop(p, s, path) ==
     /\ BUGGY_UNMOUNT_NO_REFDROP
     /\ <<path, s>> \in mounts[p]
     /\ mounts' = [mounts EXCEPT ![p] = @ \ {<<path, s>>}]
-    /\ UNCHANGED <<bindings, refcount>>
+    /\ UNCHANGED <<bindings, root_spoor, refcount>>
+
+(***************************************************************************)
+(* ================================ CHROOT ================================= *)
+(***************************************************************************)
+
+(***************************************************************************)
+(* Chroot(p, s) — CORRECT chroot. Stamp root_spoor[p] to s; bump          *)
+(* refcount[s]. If p already had a (different) root_spoor, drop that      *)
+(* refcount as part of the same atomic step. Maps to                      *)
+(* `kernel/territory.c::territory_chroot` (P5-stratumd-stub-bringup-e2).  *)
+(*                                                                         *)
+(* Precondition `root_spoor[p] # s` keeps the action away from the no-op  *)
+(* re-chroot to the same Spoor (the impl returns 0 without ref-bumping;   *)
+(* the spec mirrors by simply not firing — a non-event in the model).     *)
+(*                                                                         *)
+(* The refcount update fires in a single TLA+ EXCEPT step:                *)
+(*   - if old was NONE: just bump refcount[s].                            *)
+(*   - if old was some s' # s: drop refcount[s'] AND bump refcount[s].    *)
+(* The two-key EXCEPT relies on s # s' (guaranteed by                     *)
+(* `root_spoor[p] # s` + `old = root_spoor[p]`).                          *)
+(***************************************************************************)
+Chroot(p, s) ==
+    /\ root_spoor[p] # s
+    /\ root_spoor' = [root_spoor EXCEPT ![p] = s]
+    /\ refcount' = IF root_spoor[p] = NONE
+                   THEN [refcount EXCEPT ![s] = @ + 1]
+                   ELSE [refcount EXCEPT ![s] = @ + 1,
+                                        ![root_spoor[p]] = @ - 1]
+    /\ UNCHANGED <<bindings, mounts>>
+
+(***************************************************************************)
+(* BuggyChrootNoRefbump(p, s) — bug class: chroot stamps root_spoor[p]    *)
+(* but skips the refcount bump (AND the drop-of-old, if applicable). The  *)
+(* impl pattern that violates this:                                       *)
+(*                                                                         *)
+(*   p->root_spoor = src;       // missing spoor_ref(src); missing        *)
+(*                              // spoor_clunk(old)                       *)
+(*                                                                         *)
+(* After this fires, refcount[s] is less than the kernel's actual         *)
+(* root_spoor + mount-table contribution; subsequent unref drops the      *)
+(* Spoor's storage while root_spoor[p] still points at it (UAF on next    *)
+(* root-relative walk_open). MountRefcountConsistency catches it at the   *)
+(* spec level.                                                            *)
+(***************************************************************************)
+BuggyChrootNoRefbump(p, s) ==
+    /\ BUGGY_CHROOT_NO_REFBUMP
+    /\ root_spoor[p] # s
+    /\ root_spoor' = [root_spoor EXCEPT ![p] = s]
+    /\ UNCHANGED <<bindings, mounts, refcount>>
 
 (***************************************************************************)
 (* ForkClone(parent, child) — copies parent's territory (bindings AND     *)
-(* mounts) into child's. Each cloned mount entry contributes a new        *)
-(* reference; refcount is bumped for every Spoor that appears in          *)
-(* mounts[parent].                                                         *)
+(* mounts AND root_spoor) into child's. Each cloned mount entry           *)
+(* contributes a new reference; refcount is bumped for every Spoor that   *)
+(* appears in mounts[parent]. The cloned root_spoor (if non-NONE) ALSO    *)
+(* contributes one new reference — each cloned territory is its own       *)
+(* holder of the parent's root_spoor.                                     *)
 (*                                                                         *)
-(* The refcount update bumps `refcount[s] += k` where k is the number of  *)
-(* mount entries in parent referencing s. Models the impl's               *)
-(* `territory_clone`: iterate over parent's mount entries, copy each,     *)
-(* call spoor_ref for each.                                                *)
+(* The refcount update bumps `refcount[s] += k + r` where k is the number *)
+(* of mount entries in parent referencing s and r is 1 iff                *)
+(* root_spoor[parent] = s (else 0). Models the impl's                     *)
+(* `territory_clone`: iterate over parent's mount entries, spoor_ref      *)
+(* each, then spoor_ref the parent's root_spoor if non-NULL.              *)
 (*                                                                         *)
 (* Precondition: child's territory must be in Init state (empty bindings, *)
-(* empty mounts). This mirrors the impl: `territory_clone` is called on a *)
-(* freshly-allocated Territory; cloning over a live one would overwrite   *)
-(* its mount entries WITHOUT decrementing their refcounts (leak) AND lose *)
-(* the bindings. The impl never does this — the kernel calls              *)
+(* empty mounts, NONE root_spoor). This mirrors the impl: territory_clone *)
+(* is called on a freshly-allocated Territory; cloning over a live one    *)
+(* would overwrite without decrementing refcounts (leak) AND lose the     *)
+(* bindings + root_spoor. The impl never does this — the kernel calls     *)
 (* territory_alloc to get a fresh slot, then territory_clone to populate. *)
 (*                                                                         *)
 (* Maps to `kernel/territory.c::territory_clone`. RFNAMEG (shared         *)
@@ -315,11 +396,14 @@ ForkClone(parent, child) ==
     /\ parent # child
     /\ bindings[child] = [path \in Paths |-> {}]
     /\ mounts[child] = {}
+    /\ root_spoor[child] = NONE
     /\ bindings' = [bindings EXCEPT ![child] = bindings[parent]]
     /\ mounts' = [mounts EXCEPT ![child] = mounts[parent]]
+    /\ root_spoor' = [root_spoor EXCEPT ![child] = root_spoor[parent]]
     /\ refcount' = [s \in Spoors |->
-                       refcount[s] +
-                       Cardinality({path \in Paths : <<path, s>> \in mounts[parent]})]
+                       refcount[s]
+                       + Cardinality({path \in Paths : <<path, s>> \in mounts[parent]})
+                       + (IF root_spoor[parent] = s THEN 1 ELSE 0)]
 
 (***************************************************************************)
 (* BuggyDestroyLeak(p) — bug class: Territory destruction clears mounts[p]*)
@@ -338,8 +422,9 @@ ForkClone(parent, child) ==
 (***************************************************************************)
 BuggyDestroyLeak(p) ==
     /\ BUGGY_DESTROY_LEAK
-    /\ mounts[p] # {}
+    /\ (mounts[p] # {} \/ root_spoor[p] # NONE)
     /\ mounts' = [mounts EXCEPT ![p] = {}]
+    /\ root_spoor' = [root_spoor EXCEPT ![p] = NONE]
     /\ UNCHANGED <<bindings, refcount>>
 
 Next ==
@@ -350,6 +435,8 @@ Next ==
     \/ \E p \in Procs, s \in Spoors, path \in Paths : BuggyMountNoRefbump(p, s, path)
     \/ \E p \in Procs, s \in Spoors, path \in Paths : Unmount(p, s, path)
     \/ \E p \in Procs, s \in Spoors, path \in Paths : BuggyUnmountNoRefdrop(p, s, path)
+    \/ \E p \in Procs, s \in Spoors                 : Chroot(p, s)
+    \/ \E p \in Procs, s \in Spoors                 : BuggyChrootNoRefbump(p, s)
     \/ \E parent, child \in Procs                   : ForkClone(parent, child)
     \/ \E p \in Procs                               : BuggyDestroyLeak(p)
 
@@ -381,6 +468,7 @@ NoCycle ==
 MountRefcountConsistency ==
     \A s \in Spoors :
         refcount[s] = Cardinality(MountEntriesForSpoor(s))
+                    + Cardinality({p \in Procs : root_spoor[p] = s})
 
 (***************************************************************************)
 (* MountRefcountNonNegative — refcount never underflows. Buggy variants   *)

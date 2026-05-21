@@ -1,11 +1,12 @@
-# 18 — Territory primitives (P2-E + P5-attach-mount)
+# 18 — Territory primitives (P2-E + P5-attach-mount + P5-stratumd-stub-bringup-e2)
 
-The Plan 9 territory — a process's view of the resource tree, composed via `bind` / `unbind` / `mount` / `unmount`. Per `ARCHITECTURE.md §9.1` + `§9.6`. v1.0 lands the kernel-internal API; the syscall surface is deferred until fd-syscall infrastructure exists (P5-fd-syscalls / P6).
+The Plan 9 territory — a process's view of the resource tree, composed via `bind` / `unbind` / `mount` / `unmount` + the v1.0 `chroot` root-pivot. Per `ARCHITECTURE.md §9.1` + `§9.6` + `CORVUS-DESIGN.md §10.1`. v1.0 lands the kernel-internal API; the user-visible `mount` / `unmount` / `chroot` syscalls were added P5-mount-syscall + P5-stratumd-stub-bringup-e2.
 
-The Territory carries two parallel tables:
+The Territory carries two parallel tables + one root pointer:
 
 - **`binds[]`** — Plan 9 path-to-path bindings. Walking `dst` yields `src`. Cycle-checked.
 - **`mounts[]`** — filesystem-as-Spoor grafts. Walking `target_path` dispatches through the Spoor's Dev vtable. Each entry holds one refcount on the source Spoor.
+- **`root_spoor`** — the pivoted root Spoor (the v1.0 chroot mechanism per `CORVUS-DESIGN.md §10.1`). `NULL` by default; stamped via `territory_chroot`. Consumed by `SYS_WALK_OPEN(spoor_fd == -1, ...)` ("walk from my root"). Holds one refcount on its target Spoor (taken at `chroot`, dropped at re-`chroot` displacement OR at `territory_unref` final release). Spec: `root_spoor[p]` ∈ `Spoors ∪ {NONE}` in `specs/territory.tla`.
 
 ---
 
@@ -16,8 +17,8 @@ A `Territory` (process group, Plan 9 idiom) holds one process's namespace. Each 
 Key invariants (proven in `specs/territory.tla`):
 
 - **Cycle-freedom (I-3)**: the bind graph is acyclic. Adding a bind that would close a cycle is rejected.
-- **MountRefcountConsistency (§9.6.6)**: for every Spoor `s`, the kernel's refcount equals the cardinality of mount entries referencing `s` across all Territories. Maintained by `mount` (bump) / `unmount` (drop) / `territory_clone` (bump per cloned entry) / `territory_unref` (drop per remaining entry at final release).
-- **Isolation (I-1)**: structural — `bindings[p]` / `mounts[p]` for different Territories are independent.
+- **MountRefcountConsistency (§9.6.6, extended P5-stratumd-stub-bringup-e2)**: for every Spoor `s`, the kernel's refcount equals `|MountEntriesForSpoor(s)| + |{p : root_spoor[p] = s}|` — the per-Territory contribution now includes both mount-table entries AND `root_spoor` pivots. Maintained by `mount` (bump) / `unmount` (drop) / `territory_clone` (bump per cloned entry + bump for cloned root_spoor) / `territory_chroot` (bump new + drop displaced) / `territory_unref` (drop per remaining entry + drop root_spoor at final release).
+- **Isolation (I-1)**: structural — `bindings[p]` / `mounts[p]` / `root_spoor[p]` for different Territories are independent.
 
 ---
 
@@ -52,12 +53,13 @@ struct Territory {
     int                 ref;                    // refcount; rfork(RFNAMEG) shares (Phase 5+)
     int                 nbinds;
     int                 nmounts;
-    u32                 _pad;
+    u32                 _pad;                   // 8-byte alignment for root_spoor + binds[]
+    struct Spoor       *root_spoor;             // P5-stratumd-stub-bringup-e2; NULL until first chroot
     struct PgrpBind     binds[PGRP_MAX_BINDS];
     struct PgrpMount    mounts[PGRP_MAX_MOUNTS];
 };
 _Static_assert(sizeof(struct Territory)
-               == 24 + 8 * PGRP_MAX_BINDS + 16 * PGRP_MAX_MOUNTS, ...);
+               == 32 + 8 * PGRP_MAX_BINDS + 16 * PGRP_MAX_MOUNTS, ...);
 
 void               territory_init(void);
 struct Territory  *kpgrp(void);
@@ -74,6 +76,8 @@ int                unbind(struct Territory *p,
 int                mount(struct Territory *p, struct Spoor *source,
                          path_id_t target, u32 flags);
 int                unmount(struct Territory *p, path_id_t target_path);
+
+int                territory_chroot(struct Territory *p, struct Spoor *source);
 
 int                territory_nbinds(struct Territory *p);
 int                territory_nmounts(struct Territory *p);
@@ -121,6 +125,20 @@ u64                territory_total_destroyed(void);
 
 Removes the FIRST entry at `target_path`. For union mounts with multiple entries, call repeatedly.
 
+### `territory_chroot(p, source)` — return semantics
+
+| Return | Meaning |
+|---|---|
+| `0`  | success; `root_spoor` stamped (or idempotent no-op if already pointing at `source`) |
+| `-1` | `source` is NULL |
+
+Lifecycle:
+- **Bump-before-swap** discipline: `spoor_ref(source)` runs before the pointer assignment, so a corrupted source (which would extinct in `spoor_ref`) leaves `root_spoor` unchanged.
+- **`spoor_clunk` on displaced root**: if a prior `root_spoor` exists, it is `spoor_clunk`'d after the new pointer is installed — same discipline as `mount()`'s MREPL displacement, so the Dev's close hook fires when this was the Spoor's last holder.
+- **Idempotent same-source**: `territory_chroot(p, S)` where `root_spoor == S` is a no-op success; refcount unchanged.
+
+Spec: `specs/territory.tla::Chroot(p, s)`.
+
 ---
 
 ## Implementation
@@ -157,26 +175,49 @@ int unmount(struct Territory *p, path_id_t target_path) {
 }
 ```
 
+### Chroot (root-pivot) — P5-stratumd-stub-bringup-e2
+
+```c
+int territory_chroot(struct Territory *p, struct Spoor *source) {
+    // Validate source. Idempotent same-pointer → 0. Else:
+    //   spoor_ref(source);  (bump BEFORE swap)
+    //   old = p->root_spoor;
+    //   p->root_spoor = source;
+    //   if (old) spoor_clunk(old);  (MREPL-style displacement)
+    //   return 0;
+}
+```
+
+Refcount discipline:
+
+| Step | Old | New |
+|---|---|---|
+| First chroot (`old == NULL`) | n/a | `spoor_ref(new)`; +1 to `refcount[new]` |
+| Idempotent (`old == new`) | unchanged | unchanged; no ref bump |
+| Replace (`old != NULL`, `old != new`) | `spoor_clunk(old)`; -1 | `spoor_ref(new)`; +1 |
+
 ### Integration with rfork
 
-`kernel/proc.c::rfork` calls `territory_clone(parent->territory)` which now ALSO deep-copies the mount table and bumps each source's refcount. No change at the rfork call site; the discipline is inside `territory_clone`.
+`kernel/proc.c::rfork` calls `territory_clone(parent->territory)` which deep-copies the mount table AND `root_spoor`, bumping a fresh `spoor_ref` on each cloned mount entry and on the cloned `root_spoor` (if non-NULL). No change at the rfork call site; the discipline is inside `territory_clone`.
 
-`kernel/proc.c::proc_free` calls `territory_unref(p->territory)`. The unref's final-release path drops each mount entry's per-entry refcount BEFORE freeing the Territory.
+`kernel/proc.c::proc_free` calls `territory_unref(p->territory)`. The unref's final-release path drops each mount entry's per-entry refcount AND drops `root_spoor`'s refcount (via `spoor_clunk` so the Dev's close hook runs if this was the last holder), BEFORE freeing the Territory.
 
 ---
 
 ## Spec cross-reference
 
-`specs/territory.tla` at P5-attach-mount:
+`specs/territory.tla` at P5-stratumd-stub-bringup-e2:
 
-- **Actions**: `Init`, `Bind`, `BuggyBind`, `Unbind`, `Mount`, `BuggyMountNoRefbump`, `Unmount`, `BuggyUnmountNoRefdrop`, `ForkClone`, `BuggyDestroyLeak`.
-- **Invariants**: `TypeOk`, `NoCycle`, `MountRefcountConsistency`, `MountRefcountNonNegative`.
-- **Configs**: 1 clean + 4 buggy:
-  - `territory.cfg` — TLC explores 2,560,000 distinct states; no error.
-  - `territory_buggy.cfg` (BUGGY_CYCLE) — NoCycle violated at depth 4 / 106 states.
-  - `territory_buggy_mount_no_refbump.cfg` — MountRefcountConsistency violated at depth 2 / 172 states.
-  - `territory_buggy_unmount_no_refdrop.cfg` — MountRefcountConsistency violated at depth 3 / 884 states.
-  - `territory_buggy_destroy_leak.cfg` — MountRefcountConsistency violated at depth 3 / 855 states.
+- **State**: `bindings`, `mounts`, `root_spoor`, `refcount`. `NONE == "NONE"` (string sentinel; guaranteed distinct from the symbolic Spoor model values).
+- **Actions**: `Init`, `Bind`, `BuggyBind`, `Unbind`, `Mount`, `BuggyMountNoRefbump`, `Unmount`, `BuggyUnmountNoRefdrop`, `Chroot`, `BuggyChrootNoRefbump`, `ForkClone`, `BuggyDestroyLeak`.
+- **Invariants**: `TypeOk`, `NoCycle`, `MountRefcountConsistency` (extended: `refcount[s] = |MountEntriesForSpoor(s)| + |{p : root_spoor[p] = s}|`), `MountRefcountNonNegative`.
+- **Configs**: 1 clean + 5 buggy:
+  - `territory.cfg` — clean.
+  - `territory_buggy.cfg` (BUGGY_CYCLE) — NoCycle violated.
+  - `territory_buggy_mount_no_refbump.cfg` — MountRefcountConsistency violated.
+  - `territory_buggy_unmount_no_refdrop.cfg` — MountRefcountConsistency violated.
+  - `territory_buggy_destroy_leak.cfg` — MountRefcountConsistency violated.
+  - `territory_buggy_chroot_no_refbump.cfg` (P5-stratumd-stub-bringup-e2) — MountRefcountConsistency violated at depth 2 / 205 states (BuggyChrootNoRefbump stamps `root_spoor[p]` without bumping `refcount[s]` or dropping the old root's contribution).
 
 | Spec action | Source location |
 |---|---|
@@ -185,20 +226,21 @@ int unmount(struct Territory *p, path_id_t target_path) {
 | `Unbind(p, src, dst)` | `kernel/territory.c::unbind` |
 | `Mount(p, s, path)` | `kernel/territory.c::mount` |
 | `Unmount(p, s, path)` | `kernel/territory.c::unmount` |
+| `Chroot(p, s)` | `kernel/territory.c::territory_chroot` |
 | `ForkClone(parent, child)` | `kernel/territory.c::territory_clone` |
-| `BuggyBind` / `BuggyMountNoRefbump` / `BuggyUnmountNoRefdrop` / `BuggyDestroyLeak` | none (bug classes statically prevented by impl discipline) |
+| `BuggyBind` / `BuggyMountNoRefbump` / `BuggyUnmountNoRefdrop` / `BuggyChrootNoRefbump` / `BuggyDestroyLeak` | none (bug classes statically prevented by impl discipline) |
 
 | Spec invariant | Source enforcement |
 |---|---|
 | `NoCycle` | `bind`'s `would_create_cycle` precondition |
-| `MountRefcountConsistency` | spoor_ref/spoor_unref discipline at every mount-table mutation site (mount/unmount/territory_clone/territory_unref) |
+| `MountRefcountConsistency` (extended) | `spoor_ref`/`spoor_clunk` discipline at every mount-table + root_spoor mutation site (`mount` / `unmount` / `territory_chroot` / `territory_clone` / `territory_unref`) |
 | `MountRefcountNonNegative` | `spoor_unref`'s own underflow extinct |
 
 ---
 
 ## Tests
 
-10 tests total (3 bind-table + 7 mount-table):
+16 tests total (3 bind-table + 7 mount-table + 6 chroot):
 
 ### Bind-table (P2-Eb)
 
@@ -215,6 +257,15 @@ int unmount(struct Territory *p, path_id_t target_path) {
 - `territory_mount.table_full`: fill `PGRP_MAX_MOUNTS` entries; next mount returns -2; overflow source's ref is NOT bumped.
 - `territory_mount.clone_bumps_refs`: mount source; territory_clone parent → child; verify ref bumped to test+parent+child=3; destroy each Territory drops one ref.
 - `territory_mount.destroy_drops_all_refs`: mount two sources; territory_unref → both refs dropped.
+
+### Chroot (P5-stratumd-stub-bringup-e2)
+
+- `territory.chroot_smoke`: chroot one Spoor; verify root_spoor + ref bumped 1→2 (test + Territory); territory_unref drops back to 1.
+- `territory.chroot_idempotent_same_spoor`: chroot same Spoor twice; second call is 0 no-op; ref unchanged.
+- `territory.chroot_replace_clunks_old`: chroot s1 then chroot s2; verify s1's per-Territory ref dropped, s2's bumped.
+- `territory.chroot_clone_bumps_ref`: chroot, then territory_clone parent → child; verify root_spoor ref += 1 (test + parent + child). Destroy each → drops 1.
+- `territory.chroot_destroy_drops_ref`: chroot + territory_unref → root ref dropped (final-release path's `spoor_clunk` on root_spoor).
+- `territory.chroot_null_returns_error`: territory_chroot(p, NULL) returns -1; no state change.
 
 ---
 
@@ -248,9 +299,13 @@ bind / unbind / mount / unmount / territory_clone are not internally synchronize
 
 If `spoor_ref` were to ever fail (it extincts instead), the partial state during the deep-copy loop would have incremented refs on entries `[0..i]` but not `[i+1..]`. Since `spoor_ref` extincts on corruption (rather than returning an error), this is structurally impossible in well-formed state. The audit-trigger surface for `kernel/territory.c` covers the failure-injection case.
 
-### Mount-syscall surface is deferred
+### Mount-syscall surface
 
-ARCH §9.6 specifies `mount(source_spoor_fd, target_path, flags)` as a user-visible syscall. At v1.0 the fd-syscall infrastructure (open/close/read/write/dup → KOBJ_SPOOR handles) doesn't exist, so the SVC handler is deferred. Kernel-internal callers (this chunk's tests + future P5-stratumd boot path) call `mount` directly with a Spoor pointer.
+ARCH §9.6 specifies `mount(source_spoor_fd, target_path, flags)` as a user-visible syscall. At v1.0 it landed at P5-mount-syscall (`SYS_MOUNT` = 14, `SYS_UNMOUNT` = 15). Kernel-internal callers (tests + the joey stub-bringup path) call `mount`/`unmount` directly with a Spoor pointer.
+
+### `chroot` is one-way at v1.0 (no `unchroot`)
+
+`SYS_CHROOT` stamps `root_spoor`; there is no `SYS_UNCHROOT` (or `chroot(NULL)`-clear) at v1.0. A long-running Proc that pivots cannot un-pivot mid-life — the `root_spoor` reference is released only at Proc exit (via `territory_unref`'s final-release path). This is the load-bearing reason joey does NOT exercise `chroot` in its stub-bringup phase: joey is the init Proc that never exits during boot, so an in-flight chroot on the attach Spoor would hold the underlying `p9_attached` + transport-Spoors alive past joey's `t_close(attach_fd)`, the stratumd-stub would never see EOF on its `c2s_rd`, and `t_wait_pid` would deadlock. P5-stratumd-stub-bringup-e2 routes the chroot path through `stub-walk-probe` (a child Proc whose exit naturally releases the chroot) + the six `territory.chroot_*` kernel-internal tests. v1.x adds proper `pivot_root` semantics (per `CORVUS-DESIGN.md §10.1 Q2`).
 
 ---
 
@@ -265,11 +320,16 @@ ARCH §9.6 specifies `mount(source_spoor_fd, target_path, flags)` as a user-visi
 | `rfork(RFPROC)` clones mount table | **Landed (P5-attach-mount)** via territory_clone |
 | `proc_free` releases mount table | **Landed (P5-attach-mount)** via territory_unref |
 | Cycle detection in `bind` | Landed (P2-Eb) |
-| In-kernel tests | 10 total (3 bind + 7 mount) |
-| Spec `territory.tla` + buggy configs | **Landed (P5-attach-mount)** — 1 clean + 4 buggy cfgs |
+| `struct Territory.root_spoor` field + `territory_chroot` | **Landed (P5-stratumd-stub-bringup-e2)** |
+| `territory_clone` deep-copies root_spoor + bumps refcount | **Landed (P5-stratumd-stub-bringup-e2)** |
+| `territory_unref` final-release drops root_spoor ref | **Landed (P5-stratumd-stub-bringup-e2)** |
+| `mount` / `unmount` user-visible syscalls (SYS_MOUNT / SYS_UNMOUNT) | **Landed (P5-mount-syscall)** |
+| `chroot` user-visible syscall (SYS_CHROOT) | **Landed (P5-stratumd-stub-bringup-e2)** |
+| In-kernel tests | 16 total (3 bind + 7 mount + 6 chroot) |
+| Spec `territory.tla` + buggy configs | **Landed (P5-stratumd-stub-bringup-e2)** — 1 clean + 5 buggy cfgs |
 | Per-Territory lock | Phase 5+ |
 | RFNAMEG shared territory | Phase 5+ |
 | Mount-union walk (MBEFORE/MAFTER ordering at walk time) | Phase 5+ |
-| `mount` user-visible syscall (SVC handler) | Deferred to P5-fd-syscalls |
+| `pivot_root` / `unchroot` (replace one-way chroot) | v1.x per CORVUS-DESIGN §10.1 Q2 |
 | RB tree key=qid (replacing flat arrays) | Phase 5+ when count growth justifies |
-| Walk through mount entries | Phase 5+ alongside path resolution |
+| Multi-component walker consuming mount table | Phase 5+ alongside path resolution |

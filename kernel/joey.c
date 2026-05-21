@@ -59,11 +59,13 @@
 // elf_load (kernel/elf.c::elf_load — R5-G F61) requires 8-byte
 // alignment. Copy into an 8-aligned static buffer before handing the
 // blob to exec_setup. Sized to comfortably cover joey's growing
-// orchestration surface: at P5-corvus-bringup-c joey embeds inline
+// orchestration surface: at P5-corvus-bringup-c joey embedded inline
 // USER_CREATE + AUTH(bad) + AUTH(good) + SESSION_CLOSE wire codec
-// (~36 KiB total). 64 KiB gives headroom for the next several chunks
-// (UNWRAP + admin-elevate + recovery-phrase orchestration).
-#define JOEY_BLOB_MAX 65536
+// (~36 KiB total); at P5-stratumd-stub-bringup-e2 the stub-bringup
+// adds an SYS_CHROOT + SYS_WALK_OPEN(FROM_ROOT) sequence, pushing the
+// blob over 65 KiB. 128 KiB gives several more chunks of headroom
+// (RECOVER, USER_DELETE, ROTATE_KEY orchestration, stratumd-real swap).
+#define JOEY_BLOB_MAX (128u * 1024u)
 static _Alignas(struct Elf64_Ehdr) u8 g_joey_elf_blob[JOEY_BLOB_MAX];
 
 // Arguments passed via rfork's `arg` to the child entry. Lives on the

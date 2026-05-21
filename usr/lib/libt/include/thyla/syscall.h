@@ -65,7 +65,13 @@ enum {
     T_SYS_CAP_GRANT   = 32,      // P5-hostowner-b-b: register pending cap grant
     T_SYS_CAP_USE     = 33,      // P5-hostowner-b-b: redeem pending cap grant
     T_SYS_WALK_OPEN   = 34,      // P5-stratumd-stub-bringup-e1: walk-and-open one path component
+    T_SYS_CHROOT      = 35,      // P5-stratumd-stub-bringup-e2: stamp territory root_spoor
 };
+
+// t_walk_open's FROM_ROOT sentinel — pass as spoor_fd to walk from the
+// caller's pivoted territory root_spoor instead of a handle.
+// P5-stratumd-stub-bringup-e2. Matches SYS_WALK_OPEN_FROM_ROOT.
+#define T_WALK_OPEN_FROM_ROOT  ((long)(-1))
 
 // SYS_WALK_OPEN omode bits — must mirror SYS_WALK_OPEN_OMODE_VALID in
 // kernel/include/thylacine/syscall.h. Plan-9 modes: OREAD=0, OWRITE=1,
@@ -842,6 +848,36 @@ static inline long t_walk_open(long spoor_fd, const char *name,
         "svc #0"
         : "+r"(x0)
         : "r"(x1), "r"(x2), "r"(x3), "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
+// t_chroot — stamp the calling Proc's Territory root_spoor to the Spoor
+// named by `spoor_fd`. After this call, t_walk_open(T_WALK_OPEN_FROM_ROOT,
+// name, ...) walks from this Spoor. The caller may close `spoor_fd`
+// afterward; the Territory keeps its own ref on the underlying Spoor
+// until a subsequent t_chroot replaces it (releasing the old) or until
+// the calling Proc exits (Territory destruction releases it).
+// P5-stratumd-stub-bringup-e2.
+//
+// Idempotent — t_chroot to the same Spoor a second time is a 0 no-op.
+//
+// Caller must hold T_RIGHT_READ on spoor_fd (the same gate SYS_MOUNT
+// applies — a chroot target's only purpose is to serve as a walk
+// source).
+//
+// Returns 0 on success, -1 on:
+//   - spoor_fd not KOBJ_SPOOR / out-of-range / missing T_RIGHT_READ
+//   - caller has no Territory (kernel invariant; defense-in-depth)
+__attribute__((always_inline))
+static inline long t_chroot(long spoor_fd) {
+    register long x0 __asm__("x0") = spoor_fd;
+    register long x8 __asm__("x8") = T_SYS_CHROOT;
+    __asm__ volatile (
+        "svc #0"
+        : "+r"(x0)
+        : "r"(x8)
         : "memory", "cc"
     );
     return x0;

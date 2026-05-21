@@ -994,12 +994,34 @@ static s64 sys_walk_open_handler(u64 spoor_fd_raw, u64 name_va,
     // kernel accepts both old + new bits).
     if (omode_raw & ~(u64)SYS_WALK_OPEN_OMODE_VALID)  return -1;
 
-    // Look up the source Spoor. RIGHT_READ is the gate: a walk-and-open
-    // requires the ability to read the directory namespace (the walk
-    // itself reads server-side qids), and v1.0 has no "execute" right
-    // for directories.
-    struct Spoor *src = sys_lookup_spoor(p, (hidx_t)spoor_fd_raw, RIGHT_READ);
-    if (!src)                                         return -1;
+    // Resolve the source Spoor. Two source paths share the rest of the
+    // handler:
+    //
+    //   (1) handle-based (the default): spoor_fd_raw names a KOBJ_SPOOR
+    //       handle the caller holds; RIGHT_READ is the gate for that
+    //       handle. This is the e1 path used by /stub-walk-probe with
+    //       its attach_fd, by /stub-fs-probe, etc.
+    //
+    //   (2) FROM_ROOT sentinel (the e2 extension): spoor_fd_raw ==
+    //       SYS_WALK_OPEN_FROM_ROOT means "walk from my territory's
+    //       pivoted root_spoor". No handle lookup; the territory's
+    //       own ref keeps the Spoor alive across the syscall. Failure
+    //       mode: caller has not called SYS_CHROOT yet (root_spoor ==
+    //       NULL) → -1.
+    //
+    // Both paths converge on src; src is NOT spoor_ref'd here — the
+    // syscall's source ownership stays with the caller (handle table or
+    // Territory). spoor_clone(src) below is what mints the new Spoor for
+    // the result fd.
+    struct Spoor *src;
+    if (spoor_fd_raw == SYS_WALK_OPEN_FROM_ROOT) {
+        if (!p->territory)                            return -1;
+        src = p->territory->root_spoor;
+        if (!src)                                     return -1;
+    } else {
+        src = sys_lookup_spoor(p, (hidx_t)spoor_fd_raw, RIGHT_READ);
+        if (!src)                                     return -1;
+    }
     if (!src->dev || !src->dev->walk || !src->dev->open) return -1;
 
     // Copy the name into kernel scratch + validate component shape.
@@ -1076,6 +1098,45 @@ static s64 sys_walk_open_handler(u64 spoor_fd_raw, u64 name_va,
         return -1;
     }
     return (s64)fd;
+}
+
+// =============================================================================
+// SYS_CHROOT — stamp the caller's territory root_spoor (P5-stratumd-stub-
+// bringup-e2). Per CORVUS-DESIGN.md §10.1 ("chroot at v1.0; full pivot at
+// v1.x") + ARCH §11.2.
+//
+// Thin SVC wrapper over territory_chroot. The kernel-internal C-API does
+// the source_is_valid check, the idempotent same-pointer short-circuit,
+// the spoor_ref-before-swap + spoor_clunk-after-swap ordering, and the
+// MountRefcountConsistency invariant maintenance (specs/territory.tla::
+// Chroot).
+//
+// Audit-trigger: touches `kernel/territory.c` (CLAUDE.md §25.4 — Territory).
+// Adds no new mount-table edge (no I-3 / I-1 implications); the only
+// invariant in play is MountRefcountConsistency, extended in the spec
+// for this chunk to include the root_spoor contribution.
+// =============================================================================
+
+static s64 sys_chroot_handler(u64 spoor_fd_raw) {
+    struct Thread *t = current_thread();
+    if (!t)                                          return -1;
+    struct Proc *p = t->proc;
+    if (!p)                                          return -1;
+    if (!p->territory)                               return -1;
+
+    // RIGHT_READ on the source: a chroot target's only purpose is to
+    // serve as a walk source for SYS_WALK_OPEN(FROM_ROOT, ...). Without
+    // READ the pivot is structurally inert (you cannot walk from it).
+    // Mirrors SYS_MOUNT's source-rights gate exactly.
+    struct Spoor *source = sys_lookup_spoor(p, (hidx_t)spoor_fd_raw, RIGHT_READ);
+    if (!source)                                     return -1;
+
+    // territory_chroot handles: idempotent same-pointer (returns 0
+    // without ref bump), prior-root displacement (spoor_clunk the old),
+    // spoor_ref of the new source. NULL source is rejected by
+    // territory_chroot's own check (returns -1).
+    if (territory_chroot(p->territory, source) != 0) return -1;
+    return 0;
 }
 
 static s64 sys_dup_handler(u64 hraw, u64 new_rights_raw) {
@@ -2700,6 +2761,10 @@ void syscall_dispatch(struct exception_context *ctx) {
                                                   ctx->regs[1],
                                                   ctx->regs[2],
                                                   ctx->regs[3]);
+        return;
+
+    case SYS_CHROOT:
+        ctx->regs[0] = (u64)sys_chroot_handler(ctx->regs[0]);
         return;
 
     default:

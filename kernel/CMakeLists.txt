@@ -53,6 +53,7 @@ set(KERNEL_SRCS
     test/test_proc.c
     test/test_territory.c
     test/test_territory_mount.c
+    test/test_territory_chroot.c
     test/test_handle.c
     test/test_burrow.c
     test/test_elf.c

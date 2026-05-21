@@ -276,6 +276,19 @@ static int do_stratumd_stub_bringup(void) {
         return -1;
     }
 
+    // P5-stratumd-stub-bringup-e2 NOTE: joey does NOT exercise SYS_CHROOT
+    // here. The discipline trap: chroot bumps a Territory ref on the
+    // attach Spoor; that ref outlives joey's t_close(attach_fd) below;
+    // joey is the long-running init Proc that never exits during boot —
+    // so the attach Spoor (and the underlying p9_attached + adapter +
+    // transport-Spoors) would never tear down, and the stub would never
+    // see EOF on c2s_rd, deadlocking t_wait_pid. The chroot+root-walk
+    // path IS exercised by stub-walk-probe (a child Proc whose exit
+    // naturally releases the chroot via territory_unref) and by the six
+    // territory.chroot_* kernel-internal tests. v1.x adds SYS_UNCHROOT
+    // (or a proper pivot_root) so a long-running Proc can release a
+    // chroot mid-life.
+
     if (t_close(attach_fd) != 0) {
         t_putstr("joey: stub-bringup t_close(attach_fd) FAILED\n");
         return -1;

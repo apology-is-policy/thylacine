@@ -56,10 +56,11 @@ static u64                g_pgrp_destroyed;
 // =============================================================================
 
 static void territory_init_fields(struct Territory *p) {
-    p->magic   = PGRP_MAGIC;
-    p->ref     = 1;
-    p->nbinds  = 0;
-    p->nmounts = 0;
+    p->magic      = PGRP_MAGIC;
+    p->ref        = 1;
+    p->nbinds     = 0;
+    p->nmounts    = 0;
+    p->root_spoor = NULL;
     // KP_ZERO already cleared binds[] and mounts[]; nothing more to do.
 }
 
@@ -130,6 +131,16 @@ struct Territory *territory_clone(struct Territory *parent) {
         child->mounts[i] = parent->mounts[i];
         spoor_ref(child->mounts[i].source);
     }
+
+    // Deep-copy the root_spoor pivot (P5-stratumd-stub-bringup-e2). Each
+    // clone is its own holder; spoor_ref(parent->root_spoor) here is the
+    // analog of the per-mount-entry ref bump above. Models the spec's
+    // ForkClone refcount update: + (IF root_spoor[parent] = s THEN 1
+    // ELSE 0).
+    child->root_spoor = parent->root_spoor;
+    if (child->root_spoor) {
+        spoor_ref(child->root_spoor);
+    }
     return child;
 }
 
@@ -178,6 +189,20 @@ void territory_unref(struct Territory *p) {
         // (zero entries) — SLUB's freelist write will clobber magic but
         // not the count fields immediately; defensive.
         p->nmounts = 0;
+
+        // Drop the root_spoor pivot's per-Territory ref. Mirrors the
+        // mount-entry discipline above: spoor_clunk (not spoor_unref) so
+        // the Dev's close hook runs if this was the last holder
+        // (e.g., the user already closed any attach_9p fd; this Territory
+        // was the only remaining holder of the pivoted root). Same
+        // rationale as P5-mount-syscall's mount-table-drop fix.
+        // P5-stratumd-stub-bringup-e2.
+        if (p->root_spoor) {
+            struct Spoor *r = p->root_spoor;
+            p->root_spoor = NULL;
+            spoor_clunk(r);
+        }
+
         kmem_cache_free(g_pgrp_cache, p);
         __atomic_fetch_add(&g_pgrp_destroyed, 1u, __ATOMIC_RELAXED);
     }
@@ -387,4 +412,51 @@ int unmount(struct Territory *territory, path_id_t target_path) {
         }
     }
     return -1;
+}
+
+// =============================================================================
+// chroot (root-Spoor pivot) — P5-stratumd-stub-bringup-e2.
+// =============================================================================
+
+// Maps to specs/territory.tla::Chroot(p, s). Refcount discipline:
+//
+//   - if old == NULL: spoor_ref(new); root_spoor = new. (single bump)
+//   - if old == new: idempotent no-op; no ref change.
+//   - if old != new, old != NULL: spoor_ref(new); root_spoor = new;
+//     spoor_clunk(old). (one bump, one drop — matches the spec's
+//     two-key EXCEPT update in Chroot.)
+//
+// spoor_ref BEFORE the pointer swap so a failure (spoor_ref extincts on
+// corruption; doesn't fail-soft) leaves root_spoor unchanged. After the
+// swap, the old pointer is still locally referenced for the spoor_clunk.
+// spoor_clunk (not spoor_unref) for the displaced root: if the previous
+// root held its last ref via this Territory's root_spoor, the Dev's
+// close hook needs to run to release per-Spoor Dev state — same
+// discipline as MREPL displacement in mount().
+int territory_chroot(struct Territory *territory, struct Spoor *source) {
+    if (!territory)                    extinction("territory_chroot(NULL territory)");
+    if (territory->magic != PGRP_MAGIC) extinction("territory_chroot on corrupted Territory");
+
+    if (!source_is_valid(source))       return -1;
+
+    // Idempotent same-pointer: same Spoor reasserted as root → no-op
+    // success; refcount unchanged. Matches spec precondition
+    // `root_spoor[p] # s` (the action simply doesn't fire when s ==
+    // old).
+    if (territory->root_spoor == source) return 0;
+
+    struct Spoor *old = territory->root_spoor;
+
+    // Bump BEFORE swap. spoor_ref extincts on a corrupted source; under
+    // a clean Spoor the swap is then infallible.
+    spoor_ref(source);
+    territory->root_spoor = source;
+
+    if (old) {
+        // spoor_clunk (not spoor_unref) — see header comment + mount()
+        // MREPL precedent. If this Territory was the last holder of
+        // `old`, the Dev's close hook runs here.
+        spoor_clunk(old);
+    }
+    return 0;
 }
