@@ -70,6 +70,7 @@
 #include "../../arch/arm64/uart.h"
 
 void test_stratumd_stub_round_trip(void);
+void test_stratumd_stub_fs_round_trip(void);
 
 // Each userspace binary at this chunk is well under 32 KiB.
 // (attach-probe ≈ 15 KiB; stratumd-stub similar.)
@@ -241,4 +242,99 @@ void test_stratumd_stub_round_trip(void) {
     uart_puts(" status=");
     uart_putdec((u64)client_status);
     uart_puts(" — userspace 9P server end-to-end verified\n");
+}
+
+// =============================================================================
+// stratumd_stub_fs_round_trip — P5-stratumd-stub-bringup-d.
+//
+// Same two-userspace-Proc shape as stratumd_stub_round_trip, but the
+// CLIENT is /stub-fs-probe instead of /attach-probe. /stub-fs-probe
+// drives raw Tversion + Tattach + Twalk("hello") + Tlopen + Tread +
+// Tread@EOF + Tclunk×2 against the stub, asserting Rread bytes match
+// the stub's synthetic /hello content. Validates the stub's full
+// Twalk/Tlopen/Tread implementation end-to-end across the kernel-
+// owned pipe transport.
+//
+// The existing stub_round_trip test (Tversion + Tattach + EOF only)
+// continues to live alongside this one — they cover orthogonal
+// surfaces of the same stub binary.
+// =============================================================================
+
+void test_stratumd_stub_fs_round_trip(void) {
+    size_t stub_size = 0, probe_size = 0;
+    int rc;
+
+    rc = load_binary("stratumd-stub", g_stub_blob, STUB_BLOB_MAX, &stub_size);
+    if (rc != 0) {
+        uart_puts("    [skip] /stratumd-stub not in ramfs "
+                  "(build with: tools/build.sh all)\n");
+        return;
+    }
+    rc = load_binary("stub-fs-probe", g_client_blob, STUB_BLOB_MAX, &probe_size);
+    if (rc != 0) {
+        uart_puts("    [skip] /stub-fs-probe not in ramfs "
+                  "(build with: tools/build.sh all)\n");
+        return;
+    }
+
+    uart_puts("    /stratumd-stub size=");
+    uart_putdec((u64)stub_size);
+    uart_puts(" + /stub-fs-probe size=");
+    uart_putdec((u64)probe_size);
+    uart_puts(" — wiring 2 userspace Procs for walk/open/read\n");
+
+    struct Spoor *c2s_rd = NULL, *c2s_wr = NULL;
+    TEST_EXPECT_EQ(pipe_create(&c2s_rd, &c2s_wr), 0,
+        "pipe_create c2s (probe → stub)");
+    struct Spoor *s2c_rd = NULL, *s2c_wr = NULL;
+    TEST_EXPECT_EQ(pipe_create(&s2c_rd, &s2c_wr), 0,
+        "pipe_create s2c (stub → probe)");
+
+    struct stub_exec_args stub_args = {
+        .blob       = g_stub_blob,
+        .size       = stub_size,
+        .fd0_spoor  = c2s_rd,
+        .fd1_spoor  = s2c_wr,
+        .diag_label = "stratumd-stub",
+    };
+    int stub_pid = rfork(RFPROC, stub_exec_thunk, &stub_args);
+    TEST_ASSERT(stub_pid > 0, "rfork for /stratumd-stub failed");
+
+    struct stub_exec_args probe_args = {
+        .blob       = g_client_blob,
+        .size       = probe_size,
+        .fd0_spoor  = c2s_wr,
+        .fd1_spoor  = s2c_rd,
+        .diag_label = "stub-fs-probe",
+    };
+    int probe_pid = rfork(RFPROC, stub_exec_thunk, &probe_args);
+    TEST_ASSERT(probe_pid > 0, "rfork for /stub-fs-probe failed");
+
+    int first_pid = -1,  first_status  = -42;
+    int second_pid = -1, second_status = -42;
+    TEST_EXPECT_EQ(reap_one(&first_pid,  &first_status),  0, "reap first child");
+    TEST_EXPECT_EQ(reap_one(&second_pid, &second_status), 0, "reap second child");
+
+    bool got_stub  = (first_pid == stub_pid)  || (second_pid == stub_pid);
+    bool got_probe = (first_pid == probe_pid) || (second_pid == probe_pid);
+    TEST_ASSERT(got_stub,  "stratumd-stub child reaped");
+    TEST_ASSERT(got_probe, "stub-fs-probe child reaped");
+
+    int stub_status  = (first_pid == stub_pid)  ? first_status  : second_status;
+    int probe_status = (first_pid == probe_pid) ? first_status  : second_status;
+
+    TEST_EXPECT_EQ(probe_status, 0,
+        "/stub-fs-probe exited 0 (walk + open + read content verified)");
+    TEST_EXPECT_EQ(stub_status, 0,
+        "/stratumd-stub exited 0 (clean EOF on rx after probe finished)");
+
+    uart_puts("    stratumd-stub pid=");
+    uart_putdec((u64)stub_pid);
+    uart_puts(" status=");
+    uart_putdec((u64)stub_status);
+    uart_puts(" + stub-fs-probe pid=");
+    uart_putdec((u64)probe_pid);
+    uart_puts(" status=");
+    uart_putdec((u64)probe_status);
+    uart_puts(" — synthetic FS walk + open + read end-to-end verified\n");
 }

@@ -502,6 +502,7 @@ void test_sys_spawn_with_perms_console_attached_grants_may_post(void);
 void test_sys_spawn_with_perms_rejects_non_console_attached_parent(void);
 void test_sys_spawn_with_perms_rejects_unknown_perm_bits(void);
 void test_stratumd_stub_round_trip(void);
+void test_stratumd_stub_fs_round_trip(void);
 void test_stub_driver_round_trip(void);
 void test_irq_latency_bench(void);
 void test_caps_kproc_has_all(void);
@@ -1222,6 +1223,7 @@ struct test_case g_tests[] = {
     { "sys_spawn_with_perms.rejects_non_console_attached_parent", test_sys_spawn_with_perms_rejects_non_console_attached_parent, false, NULL },
     { "sys_spawn_with_perms.rejects_unknown_perm_bits", test_sys_spawn_with_perms_rejects_unknown_perm_bits, false, NULL },
     { "userspace.stratumd_stub_round_trip",            test_stratumd_stub_round_trip,                      false, NULL },
+    { "userspace.stratumd_stub_fs_round_trip",         test_stratumd_stub_fs_round_trip,                   false, NULL },
     { "userspace.stub_driver_round_trip",              test_stub_driver_round_trip,                        false, NULL },
     { "userspace.irq_latency_bench",   test_irq_latency_bench,             false, NULL },
     { "caps.kproc_has_all",            test_caps_kproc_has_all,            false, NULL },

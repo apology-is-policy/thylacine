@@ -9,7 +9,7 @@ This is the first of the P5-stratumd-stub-bringup arc. The full arc is:
 | **a** | Userspace responder + 2-userspace-Proc demo via kernel-supervised setup | LANDED (`479d997`) |
 | **b** | `SYS_SPAWN_WITH_FDS` + `/stub-driver` userspace orchestrator (production shape, separate binary) | LANDED (`73784b4`) |
 | **c** | Joey runs the `/stub-driver` orchestration inline on the production boot path | LANDED (`6c1c816`) |
-| d (future) | Long-running stratumd-stub serving Twalk / Tlopen / Tread (real synthetic FS) | DEFERRED |
+| **d** | Stub serves Twalk + Tlopen + Tread over a synthetic FS (`/hello`) — `/stub-fs-probe` validates | LANDED (`*(pending)*`) |
 | e (future) | Pivot/territory-root mechanism so the stub's tree becomes joey's `/` | DEFERRED |
 | f (future) | Real stratumd swap-in (after Phase 6 musl sysroot) | DEFERRED |
 
@@ -200,10 +200,62 @@ What it does **not** yet do (sub-chunks d/e):
 
 ---
 
+## P5-stratumd-stub-bringup-d — stub serves a synthetic FS
+
+Sub-chunk **d** extends the stub from a Tversion/Tattach/Tclunk shell into a real (tiny) 9P file server. The stub now responds to:
+
+- **Twalk** — walks from a fid to a new fid via 0-or-1 name components. `nwname=0` clones the source binding; `nwname=1, name="hello"` from root walks to `/hello`. Anything else → Rlerror ENOENT.
+- **Tlopen** — marks a fid open. Flags ignored (synthetic FS is read-only).
+- **Tread** — for `/hello` only: returns the requested slice of `HELLO_CONTENT = "hello from stratumd-stub\n"`. EOF returns `count=0` (NOT an error). Other paths → Rlerror EISDIR.
+- **Tclunk** — extended to free the fid-table slot (idempotent for unbound fids).
+- **Tattach** — extended to parse `fid` and bind it to the root.
+
+Synthetic FS layout (compile-time fixed; paths double as qid path values):
+
+| Path | qid path | qid type | Content |
+|---|---|---|---|
+| `/` | 1 | QTDIR (`0x80`) | (directory; readdir not implemented at this sub-chunk) |
+| `/hello` | 2 | QTFILE (`0x00`) | `"hello from stratumd-stub\n"` (25 bytes) |
+
+**Per-session fid table** (`usr/stratumd-stub/stratumd-stub.c`): 16-slot fixed array. Each entry: `{fid_id, path, opened}`. `path=0` means free. Helpers: `fid_find`, `fid_alloc`, `fid_free`. Tattach + Twalk allocate slots; Tclunk frees. Same-fid walks (`newfid == fid`) replace the binding in place per 9P semantics.
+
+**Companion userspace binary `/stub-fs-probe`** (`usr/stub-fs-probe/stub-fs-probe.c`, ~280 LOC): the mirror-image client. Where `/stratumd-stub` responds to Tmsgs, `/stub-fs-probe` drives them. The kernel test framework pre-installs `c2s_wr` at probe's fd 0 (tx) and `s2c_rd` at fd 1 (rx). Probe sequence:
+
+1. Tversion(NOTAG, msize=4096, "9P2000.L") → Rversion
+2. Tattach(fid=0, afid=NOFID, uname="", aname="/", n_uname=0) → Rattach
+3. Twalk(fid=0, newfid=1, nwname=1, ["hello"]) → Rwalk(nwqid=1) — assert qid type == QTFILE
+4. Tlopen(fid=1, flags=0) → Rlopen
+5. Tread(fid=1, offset=0, count=64) → Rread(count=25, data=HELLO_CONTENT) — assert content bytewise
+6. Tread(fid=1, offset=25, count=64) → Rread(count=0) — EOF validation
+7. Tclunk(fid=1) + Tclunk(fid=0)
+8. `t_putstr("stub-fs-probe: PASS\n") + exit 0`
+
+Each step that fails prints a `stub-fs-probe: <op> FAIL` diagnostic and exits 1.
+
+### Why a raw-9P userspace client (not t_attach_9p + walk-through-mount)?
+
+At this sub-chunk Thylacine has no userspace walk/open syscall that reaches into a dev9p-backed Spoor's underlying 9P fid table. Only `t_srv_connect` drives walk-and-open, and that's `/srv`-specific (the connection returns a pre-opened KObj_Srv fd, not a walked-9P fid). Driving raw bytes through pipes is the minimum-scope path to exercise the stub's Twalk / Tlopen / Tread handlers end-to-end without inventing a new syscall. Sub-chunk **e** (the territory-root pivot, which will need an analogous walk primitive for the mount-side path) is the natural place to land userspace walk-through-mount semantics.
+
+### Kernel test wiring
+
+`kernel/test/test_stratumd_stub.c::test_stratumd_stub_fs_round_trip` is structurally identical to the existing `stratumd_stub_round_trip` test, but the client is `/stub-fs-probe` instead of `/attach-probe`:
+
+1. Load `/stratumd-stub` + `/stub-fs-probe` via `devramfs_lookup`.
+2. `pipe_create × 2` → c2s + s2c rings.
+3. `rfork × 2` with the existing `stub_exec_thunk` installing fds 0+1 in each child before `exec_setup`.
+4. `wait_pid × 2`; assert both `status==0`.
+
+The two tests coexist — they cover orthogonal slices of the same stub binary (handshake-only vs full walk/open/read).
+
+### Test count
+
+The new `userspace.stratumd_stub_fs_round_trip` brings total tests 525 → 526 PASS × default + UBSan.
+
+---
+
 ## Composition with future chunks
 
-- **Long-running stratumd-stub serving content (d)**: today the stub handles Tversion / Tattach / Tclunk. Sub-chunk d adds Twalk to a small synthetic tree + Tlopen + Tread of one or two files, so `dev_walk` through the mount can resolve real content. Each addition is a small extension to `build_response` in `usr/stratumd-stub/stratumd-stub.c`.
-- **Pivot / territory-root (e)**: once the stub serves walkable content, the next architectural step is making the mounted Spoor the joey territory's root (or a child territory's root). Today joey's `/` resolves through devramfs; sub-chunk e adds the kernel mechanism to substitute a different Spoor as `/`.
+- **Pivot / territory-root (e)**: with the stub now serving walkable content, the next architectural step is making the mounted Spoor the joey territory's root (or a child territory's root). Today joey's `/` resolves through devramfs; sub-chunk e adds the kernel mechanism to substitute a different Spoor as `/`. Also the natural place to land a userspace walk-through-mount primitive so joey can read `/sysroot/hello` directly without raw 9P encoding.
 - **Real stratumd swap-in (f)**: sub-chunks a–e prove the architecture with the stub. Real stratumd swap-in replaces `t_spawn_with_fds("stratumd-stub", ...)` with `t_spawn_with_fds("stratumd-system", ...)` once Phase 6's musl sysroot lets stratumd compile for Thylacine's userspace ABI.
 
 ---
@@ -213,10 +265,12 @@ What it does **not** yet do (sub-chunks d/e):
 | Item | State |
 |---|---|
 | `usr/stratumd-stub/stratumd-stub.c` (userspace responder) | LANDED (a) |
-| `kernel/test/test_stratumd_stub.c` (2-Proc kernel demo) | LANDED (a) |
+| `kernel/test/test_stratumd_stub.c::test_stratumd_stub_round_trip` (handshake-only demo) | LANDED (a) |
 | `SYS_SPAWN_WITH_FDS` + `/stub-driver` userspace orchestrator | LANDED (b) |
 | `usr/joey/joey.c::do_stratumd_stub_bringup` (inline production-boot orchestration) | LANDED (c) |
-| Long-running stub serving Twalk / Tlopen / Tread (synthetic FS) | DEFERRED (d) |
+| Stub serves Twalk / Tlopen / Tread over synthetic FS (`/hello`) | LANDED (d) |
+| `usr/stub-fs-probe/stub-fs-probe.c` (raw-9P client driving walk + open + read) | LANDED (d) |
+| `kernel/test/test_stratumd_stub.c::test_stratumd_stub_fs_round_trip` | LANDED (d) |
 | Pivot/territory-root mechanism (stub's tree becomes joey's `/`) | DEFERRED (e) |
 | Real stratumd swap-in (post-Phase-6 musl sysroot) | DEFERRED (f) |
 
@@ -225,7 +279,9 @@ What it does **not** yet do (sub-chunks d/e):
 ## Known caveats
 
 1. **Stub exits on first EOF.** Real stratumd serves the entire mount lifetime. The stub's `for(;;) { read; respond }` loop handles arbitrary message counts, but if the client closes its tx, the stub exits — single-session. Each invocation in joey's boot path is a fresh stub Proc.
-2. **No walk support.** Stub responds to Tversion / Tattach / Tclunk only. After joey mounts the stub at `target_path_id=99`, `dev_walk` into the mount would receive Rlerror. Sub-chunk d adds Twalk / Tlopen / Tread.
-3. **Stub-bringup runs once per boot.** Joey runs it after corvus's exit, mounts + unmounts in a single sweep. There's no long-lived stub holding the mount across the boot's lifetime — that's the production model for real stratumd, not the stub.
-4. **`target_path_id = 99` is a placeholder constant.** No string-path resolution yet for mount targets at v1.0; the abstract u32 token doesn't correspond to a visible directory in any namespace tree. Real `/sysroot` semantics land with sub-chunk e (territory-root pivot) + the path-resolution syscall work in Phase 6.
-5. **No spec extension.** This is pure composition over the already-spec'd 9P client + pipe + handle + mount layers. The stub-bringup pattern doesn't introduce new invariants.
+2. **Tiny synthetic FS only.** As of sub-chunk d, the stub serves exactly one root + one file (`/hello`). No subdirectories, no Twrite, no Treaddir, no Tgetattr, no extended ops. Sufficient to validate the Twalk + Tlopen + Tread wire path; expanding the synthetic tree is a small extension to the `build_response` dispatch.
+3. **No userspace walk-through-mount yet.** After joey mounts the stub at `target_path_id=99`, joey can't `t_read /sysroot/hello` because Thylacine has no userspace walk primitive for dev9p-backed Spoors at v1.0. The `/stub-fs-probe` validates the stub's wire surface via raw 9P over pipes (bypassing the kernel client + mount table); the joey-side read-through-mount story lands with sub-chunk e (territory-root pivot + the walk primitive that follows).
+4. **Stub-bringup runs once per boot.** Joey runs it after corvus's exit, mounts + unmounts in a single sweep. There's no long-lived stub holding the mount across the boot's lifetime — that's the production model for real stratumd, not the stub.
+5. **`target_path_id = 99` is a placeholder constant.** No string-path resolution yet for mount targets at v1.0; the abstract u32 token doesn't correspond to a visible directory in any namespace tree. Real `/sysroot` semantics land with sub-chunk e + the path-resolution syscall work in Phase 6.
+6. **Fid table is per-process-lifetime, not per-session.** The stub runs once per spawn (a single client; one Tversion + Tattach + walks + reads + Tclunks + EOF). A multi-session model would need a session reset on Tversion; trivial to add when needed.
+7. **No spec extension.** Pure composition over the already-spec'd 9P client + pipe + handle + mount layers. The stub-bringup pattern doesn't introduce new invariants.
