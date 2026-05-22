@@ -405,7 +405,7 @@ The top-level entry points (thin wrappers around CMake + Cargo per `ARCHITECTURE
 
 ```
 tools/build.sh kernel       ← cmake + make for kernel ELF (C99, ARM64 cross-compile)
-tools/build.sh sysroot      ← build musl + CRT + compiler-rt + libc++ sysroot
+tools/build.sh sysroot      ← build the pouch POSIX sysroot (Phase 6 — POUCH-DESIGN.md)
 tools/build.sh userspace    ← cargo build --release --workspace for Rust components
 tools/build.sh disk         ← assemble build/disk.img (Stratum volume + initramfs)
 tools/build.sh all          ← kernel + sysroot + userspace + disk
@@ -417,11 +417,16 @@ tools/build.sh clean        ← remove build artifacts
 A top-level `Makefile` provides `make kernel`, `make all`, `make test`, etc. as conventional aliases for the above.
 
 Cross-compilation toolchain (installed on host macOS):
-- `clang` with `--target=aarch64-unknown-thylacine` + `--sysroot=build/sysroot`
-- `lld` as the linker
-- Cargo with `aarch64-unknown-thylacine` target (custom target JSON)
+- Kernel + native freestanding userspace: `clang` with `--target=aarch64-none-elf`.
+- Pouch POSIX userspace (Phase 6): `clang` with `--target=aarch64-thylacine`
+  + `--sysroot=build/sysroot`, via `cmake/Toolchain-aarch64-pouch.cmake`
+  (CMake projects) or the `tools/pouch-clang` wrapper (plain-Makefile /
+  autotools projects — musl, libsodium, stratumd). See `POUCH-DESIGN.md §9`.
+- `lld` as the linker.
 
-The sysroot is built once and cached. `tools/build.sh sysroot` only reruns if musl or kernel headers change.
+`tools/build.sh sysroot` creates `build/sysroot/{include,lib}` and runs a
+toolchain self-check; the sysroot is populated by Pouch sub-chunks 2-5
+(musl headers + libc.a + CRT). See `docs/phase6-status.md`.
 
 The kernel build uses Clang (not GCC) per `ARCHITECTURE.md §3` for CFI + ARMv8.5 feature support.
 

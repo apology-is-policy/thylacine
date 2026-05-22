@@ -240,7 +240,7 @@ stratumd uses pthreads + (per the research) no `clone3`/`unshare`/`fork` — so 
 - **Toolchain**: clang-based — the kernel build already uses clang; clang's `--target=` + `--sysroot=` is a single-binary cross-compiler with no separate GCC build. A `pouch-clang` wrapper script pins `--target` + `--sysroot` + the pouch link flags, so plain-Makefile projects (musl-style builds, autotools) work without CMake.
 - **Triple**: **[OPEN Q 9.1]** — `aarch64-thylacine` (clean; OS-named, libc implied) vs. `aarch64-thylacine-pouch` (libc-explicit, conventional 4-tuple) vs. `aarch64-unknown-thylacine`. Lean: `aarch64-thylacine`.
 - **Sysroot**: `build/sysroot/{include,lib,bin}` — pouch headers, `libc.a`, `crt1.o`/`crti.o`/`crtn.o`. `tools/build.sh sysroot` (today a placeholder) becomes the real builder.
-- **Integration**: a CMake toolchain file (`cmake/Toolchain-aarch64-thylacine.cmake`) + the `pouch-clang` wrapper. Stratum builds with CMake; the wrapper covers everything else.
+- **Integration**: a CMake toolchain file (`cmake/Toolchain-aarch64-pouch.cmake` — the name `Toolchain-aarch64-thylacine.cmake` is already the kernel toolchain, so the pouch file is role-named `-pouch`, parallel to the existing `-userspace`) + the `pouch-clang` wrapper. Stratum builds with CMake; the wrapper covers everything else.
 
 ---
 

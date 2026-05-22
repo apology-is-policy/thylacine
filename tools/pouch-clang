@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# tools/pouch-clang — the Thylacine pouch cross-compiler wrapper.
+#
+# Phase 6 (Pouch). A drop-in `clang` pinned to the aarch64-thylacine
+# target + the pouch sysroot, so plain-Makefile / autotools projects
+# (musl itself, libsodium, stratumd) cross-compile for Thylacine without
+# a CMake toolchain file:  CC=tools/pouch-clang ./configure && make.
+#
+# CMake-based consumers use cmake/Toolchain-aarch64-pouch.cmake instead;
+# both converge on the same target + sysroot.
+#
+# The wrapper pins only what DEFINES "compiling for Thylacine" — the
+# target triple, the sysroot, the hardware ISA baseline. Codegen policy
+# (hardening, optimization, warnings, -std) is left to the consuming
+# project (or, for projects we own, to the CMake toolchain file), so the
+# wrapper does not fight a third-party project's own build flags.
+#
+# The sysroot (build/sysroot) is created by `tools/build.sh sysroot` and
+# populated by Pouch sub-chunks 2-5 (musl headers + libc.a + CRT). Until
+# then this wrapper compiles -nostdinc / header-less translation units.
+#
+# Environment overrides:
+#   POUCH_SYSROOT  — sysroot path (default: <repo>/build/sysroot)
+#   LLVM_PREFIX    — LLVM install prefix (default: /opt/homebrew/opt/llvm)
+#
+# See docs/POUCH-DESIGN.md §9.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+POUCH_SYSROOT="${POUCH_SYSROOT:-$REPO_ROOT/build/sysroot}"
+LLVM_PREFIX="${LLVM_PREFIX:-/opt/homebrew/opt/llvm}"
+
+exec "$LLVM_PREFIX/bin/clang" \
+    --target=aarch64-thylacine \
+    --sysroot="$POUCH_SYSROOT" \
+    -march=armv8-a+lse+pauth+bti \
+    "$@"

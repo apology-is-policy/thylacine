@@ -9,7 +9,7 @@
 #   tools/build.sh kernel        — build the kernel ELF
 #   tools/build.sh userspace     — build native userspace binaries from usr/ (P4-Ia1+)
 #   tools/build.sh ramfs         — assemble build/ramfs.cpio
-#   tools/build.sh sysroot       — build musl + Linux-compat sysroot (Phase 6+)
+#   tools/build.sh sysroot       — build the pouch POSIX sysroot (Phase 6)
 #   tools/build.sh disk          — assemble build/disk.img (Phase 4+)
 #   tools/build.sh all           — kernel + userspace + ramfs
 #   tools/build.sh clean         — remove build artifacts
@@ -204,9 +204,36 @@ build_userspace() {
 }
 
 build_sysroot() {
-    echo "==> sysroot (Linux-compat musl) is a Phase 6 deliverable."
-    echo "    Native Thylacine userspace lives in usr/ — use 'build.sh userspace'."
-    exit 1
+    # Phase 6 (Pouch) — the cross-compilation sysroot for the pouch POSIX
+    # libc. Sub-chunk 1 (pouch-toolchain): create the sysroot skeleton +
+    # run a toolchain self-check. The sysroot is POPULATED by later
+    # sub-chunks — pouch-musl-vendor + pouch-kernel-auxv install headers
+    # into include/; the musl build installs libc.a + CRT objects into
+    # lib/. See docs/POUCH-DESIGN.md §14 + docs/phase6-status.md.
+    local sysroot="$BUILD_DIR/sysroot"
+    echo "==> pouch sysroot: $sysroot"
+    mkdir -p "$sysroot/include" "$sysroot/lib"
+
+    # Toolchain self-check: the pouch cross-toolchain must produce an
+    # aarch64 object. No libc / headers needed — a header-less -c compile
+    # verifies cmake/Toolchain-aarch64-pouch.cmake + tools/pouch-clang are
+    # wired up before any sub-chunk depends on them.
+    echo "==> pouch toolchain self-check"
+    local probe_c="$sysroot/.toolchain-probe.c"
+    local probe_o="$sysroot/.toolchain-probe.o"
+    printf 'int pouch_toolchain_probe(void){return 42;}\n' > "$probe_c"
+    "$REPO_ROOT/tools/pouch-clang" -c "$probe_c" -o "$probe_o"
+    if ! file "$probe_o" | grep -qi 'aarch64'; then
+        echo "    ERROR: pouch-clang did not produce an aarch64 object:" >&2
+        file "$probe_o" >&2
+        rm -f "$probe_c" "$probe_o"
+        exit 1
+    fi
+    echo "    ok: $(file -b "$probe_o")"
+    rm -f "$probe_c" "$probe_o"
+
+    echo "==> pouch sysroot skeleton ready (include/ + lib/)."
+    echo "    Populated by Pouch sub-chunks 2-5 — see docs/phase6-status.md."
 }
 
 build_disk() {

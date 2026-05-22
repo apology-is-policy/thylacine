@@ -4,7 +4,7 @@ Authoritative pickup guide for **Phase 6: Pouch — POSIX libc + cross-compilati
 
 ## TL;DR
 
-**Phase 6 is OPEN — design landed, implementation not yet started.** The design session (3 rounds, 2026-05-22) converged; `POUCH-DESIGN.md` is binding scripture.
+**Phase 6 is OPEN — implementation underway.** The design session (3 rounds, 2026-05-22) converged; `POUCH-DESIGN.md` is binding scripture. **Sub-chunk 1 (`pouch-toolchain`) has landed** — the `aarch64-thylacine` cross-compilation toolchain scaffolding (the `cmake/Toolchain-aarch64-pouch.cmake` toolchain file + the `tools/pouch-clang` wrapper + a real `tools/build.sh sysroot`). Next: sub-chunk 2 (`pouch-musl-vendor`).
 
 Phase 6 builds **pouch** — the Thylacine-native POSIX libc (a musl derivative: musl's portable upper half + a Thylacine-native lower half, split at musl's syscall seam) — plus the `aarch64-thylacine` cross-compilation toolchain + sysroot, plus the POSIX runtime layer that translates POSIX abstractions into Thylacine primitives (`AF_UNIX`→`/srv`, `poll(2)`→`t_poll`, `sigaction`→notes, pthreads→Thylacine threads + the `torpor` wait-on-address primitive). The proving binary is real **stratumd**; the durable deliverable is the cross-compilation path itself.
 
@@ -25,7 +25,8 @@ Why a whole phase: Thylacine's practicality as a real OS depends on POSIX/Linux/
 
 | Commit SHA | What | Tests |
 |---|---|---|
-| *(none yet — implementation begins at sub-chunk 1)* | | |
+| *(pending)* | **pouch-toolchain: hash fixup** | (placeholder fill) |
+| *(pending)* | **P6-pouch-toolchain (sub-chunk 1/15): the `aarch64-thylacine` cross-compilation toolchain scaffolding.** New `cmake/Toolchain-aarch64-pouch.cmake` — clang + ld.lld (Homebrew LLVM); target `aarch64-thylacine` via `CMAKE_C_COMPILER_TARGET`; `CMAKE_SYSROOT` → `build/sysroot`; `-march=armv8-a+lse+pauth+bti` + hardening (stack protector, stack-clash, PAC+BTI) + `-nostdinc -isystem <sysroot>/include` via `CMAKE_C_FLAGS_INIT`; W^X + `-static` link flags via `CMAKE_EXE_LINKER_FLAGS_INIT`; compiler probes skipped (no libc to link against yet). New `tools/pouch-clang` — a drop-in `clang` wrapper pinned to `--target=aarch64-thylacine --sysroot=build/sysroot -march=...`, for plain-Makefile / autotools projects (musl, libsodium, stratumd); pins only what *defines* the target, leaving codegen policy to the consumer. `tools/build.sh sysroot` made real — creates the `build/sysroot/{include,lib}` skeleton + runs a toolchain self-check (`pouch-clang` must produce an aarch64 object). **Deviation from POUCH-DESIGN.md §9** (corrected in the same commit): the CMake toolchain file is named `Toolchain-aarch64-pouch.cmake`, not `-thylacine` — `Toolchain-aarch64-thylacine.cmake` is already the kernel toolchain; `-pouch` is role-named, parallel to the existing `-userspace`. TOOLING.md cross-compile section corrected (the stale `aarch64-unknown-thylacine` triple → `aarch64-thylacine`). Not audit-bearing (build scaffolding; no kernel code, no invariant surface). The sysroot is an empty skeleton — populated by sub-chunks 2-5. | `build.sh sysroot` exit 0 + toolchain self-check PASS (pouch-clang → aarch64 ELF object); the CMake toolchain configures a trivial project cleanly (Clang 22.1.4 resolved). No kernel-test-suite change — build scaffolding. |
 
 ## Remaining work — the 15 sub-chunks
 
