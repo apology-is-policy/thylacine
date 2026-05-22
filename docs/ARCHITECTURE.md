@@ -449,16 +449,26 @@ struct vma {
 - Translates BURROW-backed faults to BURROW page lookups.
 - Panics on kernel faults outside the direct map / vmalloc / fixmap regions (a kernel page fault is a bug, not a recoverable condition).
 
-**`mmap` and `mprotect`**:
-- `mmap(addr, len, prot, flags, fd, off)` creates a vma. Anonymous if `fd == -1`; file-backed if `fd` references a Spoor; BURROW-backed if `fd` is a BURROW handle wrapped in a Spoor.
-- `mprotect(addr, len, prot)` updates the vma's flags. **Rejects W^X violations**: a transition from `R+W` to `R+X` (or `R+W+X`) returns `-EPERM`. Once a page is writable, it cannot become executable without a separate kernel-mediated path (none at v1.0; future JIT support will define one).
+**User memory growth: the two-tier native interface**
+
+A Proc's address space is established at `exec_setup` (segments + stack) and grown at runtime through a deliberately small native interface. Plan 9 conflated "the heap" (`sbrk`) and "a memory region as a thing" (`segattach`) into segments; Thylacine separates them, because they are different kinds of object.
+
+- **Tier 1 — anonymous regions.** `burrow_attach(length) → vaddr` attaches an anonymous, RW, demand-zero Burrow into the caller's address space at a kernel-chosen address; `burrow_detach(vaddr, length)` releases it (exact-match — no partial detach at v1.0). No handle: private heap memory is not a named, shared, or transferable thing — its owner is the VMA, its name is its address (as Plan 9's `sbrk` / `segattach` returned raw addresses). This is the substrate for both `libt`'s and pouch's `malloc`. It is `segattach` without `brk`'s single-cursor rigidity: many independent regions, individually releasable, kernel-placed (no `MAP_FIXED`). Lifecycle: the audited `burrow_create_anon → burrow_map → burrow_unref` sequence (§19; invariant I-7) — the VMA's `mapping_count` holds the Burrow alive, `handle_count` is 0; `burrow_detach` drops the last `mapping_count` and the pages are freed. VMA-list mutation is serialized under a per-Proc lock (uncontended at v1.0's single-threaded Procs; correct-by-construction when threads land).
+
+- **Tier 2 — Burrow handles.** A Burrow created as a first-class object with a `KObj_Burrow` handle (§11.3) — for *shared*, *named*, or *transferable* memory: handed to a child for shared memory, or sent over a 9P / `/srv` connection. This is the part that goes beyond Plan 9, whose segments could not be passed around. Design intent; lands when a native workload needs it.
+
+`brk` is **not provided** — a single process-global linear cursor is ASLR-hostile, thread-hostile, and cannot host multiple arenas; every modern allocator is arena-based (musl's own `mallocng` treats `brk` as a removable optimization). `mprotect` is **not provided** at v1.0 — Tier 1 is RW, and the only planned W↔X transition is the JIT-future `pkey`-shaped path (§6.6).
+
+**File-backed `mmap` is refused — deliberately, permanently.** A mapped file cannot be 9P-network-transparent: there is no coherent way to demand-page a file served over the network, and a mapping aliases the read/write model 9P composes with. This is Plan 9's deliberate refusal, kept as a Thylacine conviction — "the filesystem is the OS" depends on files being read and written, not mapped. The substitute for working with a large file is read/write against a 9P-served page cache (Stratum's). pouch surfaces file-backed `mmap` as a documented `ENOSYS` (POUCH-DESIGN.md §8.2).
+
+The `struct vma` sketch above predates the Burrow subsystem: the as-built VMA is the sorted, Burrow-backed list in `kernel/vma.c` (see `docs/reference/`), and carries no file-backed variant.
 
 ### 6.6 W^X enforcement
 
 W^X is enumerated invariant I-12. Enforcement layered:
 
 - **PTE bit layer**: ARM64 page table entry has separate `AP[2:1]` (access permissions) and `XN` (execute-never) bits. The kernel page table writer rejects any PTE that has both `AP[2:1] != 0b11` (writable) AND `XN == 0` (executable). Compile-time `_Static_assert` on a sanity bit pattern.
-- **`mmap` / `mprotect` layer**: as above.
+- **Memory-syscall layer**: `burrow_attach` (§6.5) produces only RW (never executable) mappings, and v1.0 exposes no `mprotect` — no userspace runtime path can request a W+X page at all. W^X holds by construction on the memory-growth surface.
 - **ELF loader layer**: rejects ELF segments with `PF_W | PF_X` flags set together. `.text` segments are RX, `.rodata` is R, `.data` is RW.
 - **Audit layer**: `/ctl/security/wx-violations` counter exposed; non-zero implies a kernel bug.
 
@@ -1274,10 +1284,8 @@ The syscall interface is Plan 9-heritage, not POSIX. The syscall table is small 
 | `exits(msg)` | Terminate process |
 | `wait(waitmsg)` | Wait for child |
 | `sleep(ms)` | Sleep milliseconds |
-| `brk(addr)` | Adjust data segment |
-| `mmap(addr, len, prot, flags, fd, off)` | Map memory |
-| `mprotect(addr, len, prot)` | Change page protection (rejects W^X violations) |
-| `munmap(addr, len)` | Unmap memory |
+| `burrow_attach(length) → vaddr` | Attach an anonymous Burrow of `length` bytes (page-rounded) into the caller's address space at a kernel-chosen address; RW, demand-zero. The v1.0 native memory primitive — the substrate for `libt`'s and pouch's `malloc` (§6.5, Tier 1). `brk` and Linux-shaped / file-backed `mmap` are not provided. |
+| `burrow_detach(vaddr, length) → 0` | Detach a region returned by `burrow_attach`. Exact-match — no partial detach at v1.0. |
 | `pipe(fd[2])` | Create pipe |
 | `dup(oldfd, newfd)` | Duplicate fd |
 | `poll(fds, nfds, timeout) → ready count` | Wait until ≥1 of `nfds` descriptors is ready, or `timeout` (ms) elapses; the multi-fd wait primitive (§23.3) |
@@ -1337,6 +1345,8 @@ Per §18:
 | `burrow_get_size(h)` | Query BURROW size |
 | `burrow_read(h, buf, off, len)` | Read from BURROW without mapping |
 | `burrow_write(h, buf, off, len)` | Write to BURROW without mapping |
+
+The `burrow_*` rows above are the **Tier 2** memory surface (§6.5): a Burrow held as a first-class `KObj_Burrow` handle, for *shared*, *named*, or *transferable* memory — distinct from the handle-free Tier 1 `burrow_attach` / `burrow_detach` (§11.2). Tier 2 is design intent; it lands when a native workload needs shared memory, not at v1.0.
 
 ### 11.4 POSIX compat surface
 
@@ -2885,7 +2895,7 @@ Every change to a file or function listed below spawns an adversarial soundness 
 | KASLR / ASLR | `arch/arm64/start.S`, `kernel/aslr.c` | Entropy quality, layout correctness |
 | Crypto code | None in v1.0 kernel; janus in userspace | Side-channel, key handling |
 | ELF loader | `kernel/elf.c` | RWX rejection, relocation correctness |
-| `mprotect` / `mmap` | `mm/vm.c` syscall handlers | W^X enforcement |
+| `burrow_attach` / `burrow_detach` | `kernel/syscall.c` handlers, `kernel/burrow.c`, `kernel/vma.c` | Anonymous-memory syscalls (§6.5 Tier 1) — VMA + Burrow refcount lifecycle, VA placement, per-Proc lock, W^X (RW-only) |
 | Initial bringup | `kernel/main.c`, `init/joey.c` | Boot ordering correctness |
 | pouch lower half + kernel additions | `usr/lib/pouch/` (the syscall seam; socket / thread / signal translation), `kernel/` auxv population + the `torpor` wait-on-address syscall + the allocator-backend call | The POSIX→Thylacine boundary; invariants P-1..P-4 (POUCH-DESIGN.md §11); the `torpor` wait/wake (`futex.tla`). Phase 6 surface — rows enumerated per sub-chunk in POUCH-DESIGN.md §14. |
 

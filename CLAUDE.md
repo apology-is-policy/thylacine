@@ -144,7 +144,7 @@ Any change to the surfaces below MUST spawn a focused adversarial soundness audi
 | Capability checks | All syscall entry points | Privilege correctness |
 | KASLR / ASLR | `arch/arm64/start.S`, `arch/arm64/kaslr.c` | Entropy quality, layout correctness (I-16) |
 | ELF loader | `kernel/elf.c` | RWX rejection, relocation correctness |
-| `mprotect` / `mmap` | `mm/vm.c` syscall handlers | W^X enforcement at runtime (I-12) |
+| `burrow_attach` / `burrow_detach` | `kernel/syscall.c` handlers, `kernel/burrow.c`, `kernel/vma.c` | Anonymous-memory syscalls (§6.5 Tier 1) — VMA + Burrow refcount lifecycle, VA placement, per-Proc lock, W^X (RW-only) |
 | Initial bringup | `kernel/main.c`, `init/init.c` | Boot ordering correctness |
 | Boot banner | `kernel/main.c` | Tooling ABI per `TOOLING.md §10` |
 

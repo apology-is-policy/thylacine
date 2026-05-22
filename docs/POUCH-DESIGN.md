@@ -217,13 +217,13 @@ The synchronization primitives are the real design content:
 - **ANSI C, in full** — `string.h`, `stdio.h`, `stdlib.h`, `math.h`, `ctype.h`, `time.h` (the computational parts). Near-free from musl's upper half.
 - **File I/O** — the surface in §6.1.
 - **The POSIX runtime layer** — §6 in full (the supported subset of sockets / poll / signals; §7 threads).
-- **Memory** — `malloc` family via musl's allocator, resting on an anonymous-memory primitive (`mmap(MAP_ANONYMOUS)` or `brk` — **[OPEN Q 8.1]**: Thylacine has Burrow-backed VMAs; pouch's allocator backend is a Thylacine anonymous-VMA call. Whether pouch exposes a POSIX `mmap` shape or a leaner Thylacine call internally is a small decision).
+- **Memory** — the `malloc` family via musl's `mallocng`, resting on the native `burrow_attach` / `burrow_detach` syscalls (ARCHITECTURE.md §6.5, Tier 1). [RESOLVED 8.1: the lower half retargets musl's `__mmap` / `__munmap` onto the burrow-attach pair; `brk` / `madvise` / `mprotect` / `mremap` are tolerated no-ops — `mallocng` needs none of them.]
 - **`clock_gettime`, `nanosleep`** — map onto Thylacine timer syscalls.
 - **`mlock` / `munlock`** — stratumd pins its passphrase; maps onto `SYS_MLOCKALL` / a future per-range lock.
 
 ### 8.2 Unsupported — documented errors, never silent-wrong
 
-`AF_INET`, dynamic linking, file-backed `mmap`, real-time signals, `epoll`/`io_uring`/`inotify`/`signalfd`/`eventfd`/`timerfd`, locale beyond `C`, `fork()` (§8.3), `exec` of a Linux binary, System V IPC. Each: a documented `errno` (`ENOSYS` / `EAFNOSUPPORT` / `EINVAL`) and a manual-page note.
+`AF_INET`, dynamic linking, file-backed `mmap` (refused by design — ARCHITECTURE.md §6.5), real-time signals, `epoll`/`io_uring`/`inotify`/`signalfd`/`eventfd`/`timerfd`, locale beyond `C`, `fork()` (§8.3), `exec` of a Linux binary, System V IPC. Each: a documented `errno` (`ENOSYS` / `EAFNOSUPPORT` / `EINVAL`) and a manual-page note.
 
 ### 8.3 `fork()` — a deliberate decline
 
@@ -279,7 +279,7 @@ A deliberately *bounded* list — most of pouch is userspace. The kernel needs:
 
 1. **auxv population in `exec_setup`** — argc / argv / envp / auxv on the initial user stack, with at minimum `AT_PAGESZ`, `AT_RANDOM` (16 bytes), `AT_PHDR`/`AT_PHENT`/`AT_PHNUM`, `AT_NULL`. (The research pinned the minimum.) This is owed to the future `exec` syscall regardless.
 2. **The wait-on-address primitive** — the futex-equivalent syscall, spec'd by `futex.tla` (#7). Already on the spec roadmap.
-3. **An anonymous-memory call for the allocator backend** — Thylacine has Burrow-backed VMAs; pouch's `malloc` needs a stable anonymous-VMA syscall. May already be substantially present via the Burrow surface — **[OPEN Q 12.1]** confirm the gap.
+3. **The anonymous-memory syscalls** — `burrow_attach(length) → vaddr` / `burrow_detach(vaddr, length)` (ARCHITECTURE.md §6.5 Tier 1, §11.2). [RESOLVED 12.1: the gap is real — the Burrow + VMA + demand-paging machinery exists and is audited (`burrow.tla` / I-7) but had no userspace entry point. The two syscalls are thin skins over the existing `burrow_create_anon → burrow_map → burrow_unref` discipline; `brk` is declined (the model drops it). Implemented at sub-chunk 7 (`pouch-mem`); the `0003-pouch-mman` patch retargets musl's `mman/` lower half onto them.]
 4. **`set_tid_address` semantics** — return the tid; the clear-on-exit futex semantics matter only once threads use robust lists (deferred). Small.
 5. **notes** — if `notes.tla`'s implementation has not yet landed, pouch's signal layer needs it. **[OPEN Q 12.2]** confirm notes implementation status.
 6. **Thread-spawn surface** — confirm Thylacine's thread-creation syscall accepts a caller-provided stack + entry (§7 [OPEN Q 7.3]).
