@@ -4,7 +4,7 @@ Authoritative pickup guide for **Phase 6: Pouch — POSIX libc + cross-compilati
 
 ## TL;DR
 
-**Phase 6 is OPEN — implementation underway.** The design session (3 rounds, 2026-05-22) converged; `POUCH-DESIGN.md` is binding scripture. **Sub-chunk 1 (`pouch-toolchain`) has landed** — the `aarch64-thylacine` cross-compilation toolchain scaffolding (the `cmake/Toolchain-aarch64-pouch.cmake` toolchain file + the `tools/pouch-clang` wrapper + a real `tools/build.sh sysroot`). Next: sub-chunk 2 (`pouch-musl-vendor`).
+**Phase 6 is OPEN — implementation underway.** The design session (3 rounds, 2026-05-22) converged; `POUCH-DESIGN.md` is binding scripture. **Sub-chunks 1-2 have landed** — sub-chunk 1 (`pouch-toolchain`) the `aarch64-thylacine` cross toolchain scaffolding; sub-chunk 2 (`pouch-musl-vendor`) vendored musl 1.2.5 at `third_party/musl/`, scaffolded the boundary-line patch series at `usr/lib/pouch/patches/`, and ran the R2 probe — musl compiles end-to-end for `aarch64-thylacine` (1345 TUs, 0 errors), so the boundary line is compile-clean. Next: sub-chunk 3 (`pouch-kernel-auxv` — `exec_setup` auxv population; audit-bearing).
 
 Phase 6 builds **pouch** — the Thylacine-native POSIX libc (a musl derivative: musl's portable upper half + a Thylacine-native lower half, split at musl's syscall seam) — plus the `aarch64-thylacine` cross-compilation toolchain + sysroot, plus the POSIX runtime layer that translates POSIX abstractions into Thylacine primitives (`AF_UNIX`→`/srv`, `poll(2)`→`t_poll`, `sigaction`→notes, pthreads→Thylacine threads + the `torpor` wait-on-address primitive). The proving binary is real **stratumd**; the durable deliverable is the cross-compilation path itself.
 
@@ -25,7 +25,9 @@ Why a whole phase: Thylacine's practicality as a real OS depends on POSIX/Linux/
 
 | Commit SHA | What | Tests |
 |---|---|---|
-| *(pending)* | **pouch-toolchain: hash fixup** | (placeholder fill) |
+| *(pending)* | **pouch-musl-vendor: hash fixup** | (placeholder fill) |
+| *(pending)* | **P6-pouch-musl-vendor (sub-chunk 2/15): vendor musl 1.2.5; scaffold the boundary-line patch series; the R2 upper-half cross-compile probe.** musl 1.2.5 (sha256 `a9a118bb…c75e4`, MIT) vendored pristine + byte-identical at `third_party/musl/` (2697 files); new `third_party/README.md` records the vendoring policy + the per-package record. New `usr/lib/pouch/` is pouch's own tree: `patches/series` (quilt-style, empty), `patches/README.md` (the boundary-line discipline — invariant P-4), `README.md`. New `docs/reference/78-pouch.md` — the pouch subsystem reference: the boundary-line architecture + the full UPPER / LOWER / SEAM inventory of every musl `src/` subdir + `crt/` + `arch/aarch64/`. **R2 probe** (POUCH-DESIGN.md risk R2 — does musl take a clean seam): musl's `configure` accepts the `aarch64-thylacine` triple; out-of-tree `make lib/libc.a` compiles 1345 TUs, 0 errors / 0 warnings → a 2.4 MB `libc.a` of aarch64 ELF objects. The boundary line is compile-clean — the patch series' burden is semantic (replace what the lower half *does*), not a compile fight. **Vendor path resolved** (POUCH-DESIGN.md §4 left it open): `third_party/musl/`, not `usr/lib/pouch/musl/` — `third_party/` is the conventional pristine-upstream home; `usr/lib/pouch/` stays pouch's own code. `loc.sh` now excludes `third_party/`. Not audit-bearing — vendoring + docs + build scaffolding, no kernel code, no invariant surface. | No kernel-test-suite change (vendoring + scaffolding; no kernel code, test count stays 535/535). Verification: out-of-tree musl `make lib/libc.a` exit 0 — 1345 TUs, 0 errors / 0 warnings, 2.4 MB `libc.a`; `tools/build.sh sysroot` still exit 0 + toolchain self-check PASS. |
+| `e03be8d` | **pouch-toolchain: hash fixup** | (placeholder fill) |
 | `90b5333` | **P6-pouch-toolchain (sub-chunk 1/15): the `aarch64-thylacine` cross-compilation toolchain scaffolding.** New `cmake/Toolchain-aarch64-pouch.cmake` — clang + ld.lld (Homebrew LLVM); target `aarch64-thylacine` via `CMAKE_C_COMPILER_TARGET`; `CMAKE_SYSROOT` → `build/sysroot`; `-march=armv8-a+lse+pauth+bti` + hardening (stack protector, stack-clash, PAC+BTI) + `-nostdinc -isystem <sysroot>/include` via `CMAKE_C_FLAGS_INIT`; W^X + `-static` link flags via `CMAKE_EXE_LINKER_FLAGS_INIT`; compiler probes skipped (no libc to link against yet). New `tools/pouch-clang` — a drop-in `clang` wrapper pinned to `--target=aarch64-thylacine --sysroot=build/sysroot -march=...`, for plain-Makefile / autotools projects (musl, libsodium, stratumd); pins only what *defines* the target, leaving codegen policy to the consumer. `tools/build.sh sysroot` made real — creates the `build/sysroot/{include,lib}` skeleton + runs a toolchain self-check (`pouch-clang` must produce an aarch64 object). **Deviation from POUCH-DESIGN.md §9** (corrected in the same commit): the CMake toolchain file is named `Toolchain-aarch64-pouch.cmake`, not `-thylacine` — `Toolchain-aarch64-thylacine.cmake` is already the kernel toolchain; `-pouch` is role-named, parallel to the existing `-userspace`. TOOLING.md cross-compile section corrected (the stale `aarch64-unknown-thylacine` triple → `aarch64-thylacine`). Not audit-bearing (build scaffolding; no kernel code, no invariant surface). The sysroot is an empty skeleton — populated by sub-chunks 2-5. | `build.sh sysroot` exit 0 + toolchain self-check PASS (pouch-clang → aarch64 ELF object); the CMake toolchain configures a trivial project cleanly (Clang 22.1.4 resolved). No kernel-test-suite change — build scaffolding. |
 
 ## Remaining work — the 15 sub-chunks
@@ -66,7 +68,7 @@ Full list in `POUCH-DESIGN.md §13`. None met yet (implementation not started). 
 - [ ] stratumd boots, binds its `/srv` FS socket, serves 9P; the Phase-5 stub is retired.
 - [ ] joey mounts `/sysroot` from real stratumd; ramfs→Stratum pivot completes.
 - [ ] No P0/P1 audit findings on pouch's lower half or the kernel additions.
-- [ ] The patch series against vendored musl is documented + reproducible.
+- [ ] The patch series against vendored musl is documented + reproducible. *(sub-chunk 2: musl 1.2.5 vendored at `third_party/musl/`; the series is scaffolded + documented at `usr/lib/pouch/patches/`; the patches themselves land across sub-chunks 3-12.)*
 
 ## Build + verify commands
 
@@ -75,13 +77,13 @@ Standard (per `CLAUDE.md`): `tools/build.sh kernel [--sanitize=ubsan]` then `too
 ## Trip hazards
 
 - **Chunks 7–8 are the hardest.** The `torpor` wait-on-address primitive + the pthread mutex/condvar layer. Spec-first (`futex.tla`); TSan from the start. Either may split.
-- **musl's lower half may resist a clean seam** (POUCH-DESIGN.md risk R2). Chunk 2 is exploratory; if the seam is dirtier than the upper/lower model assumes, the patch series grows.
+- **musl's lower half may resist a clean seam** (POUCH-DESIGN.md risk R2). **Sub-chunk 2 probed this and R2 is substantially de-risked**: musl 1.2.5 compiles end-to-end for `aarch64-thylacine` (1345 TUs, 0 errors / 0 warnings → a valid `libc.a`), so the boundary line is *compile-clean*. The residual risk is not the compile — it is lower-half *behavior* complexity (the thread model, chunks 7-8), where the work is genuinely hard regardless of the seam.
 - **Invariant P-1**: no foreign syscall number ever enters the kernel. Every kernel addition this phase is a *native Thylacine* syscall designed on Thylacine's terms — never "the Linux futex ported."
 - **Stratum-side coordination** (chunks 14–15): the Thylacine `peer_creds` arm + possibly the block-layer arm are Stratum-repo changes.
 
 ## Known deltas from POUCH-DESIGN.md
 
-None yet — implementation has not started. Deltas surfaced during implementation are recorded here per the deviation-tracking discipline.
+No deviations. Sub-chunk 2 *resolved* an open question POUCH-DESIGN.md §4 left for the implementing chunk — the vendor path is `third_party/musl/` (not `usr/lib/pouch/musl/`); recorded in POUCH-DESIGN.md §4 + `docs/reference/78-pouch.md`. Deltas surfaced during implementation are recorded here per the deviation-tracking discipline.
 
 ## References
 

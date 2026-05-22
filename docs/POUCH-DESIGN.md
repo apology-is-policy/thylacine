@@ -85,7 +85,7 @@ The boundary line is the load-bearing architectural commitment: **above it, port
 
 ## 4. The pouch libc — vendoring & the patch series  *(Decision 2)*
 
-**Recommendation**: vendor a pinned musl release into the tree (`third_party/musl/` or `usr/lib/pouch/musl/` — **[OPEN Q]** path), with the Thylacine delta as a **patch series concentrated at the boundary line**. pouch is openly a *musl derivative*, not musl.
+**Recommendation**: vendor a pinned musl release into the tree (`third_party/musl/` — **[RESOLVED 4.3]** path), with the Thylacine delta as a **patch series concentrated at the boundary line**. pouch is openly a *musl derivative*, not musl.
 
 Rationale:
 
@@ -96,6 +96,8 @@ Rationale:
 **[OPEN Q 4.1]** musl vs. building pouch's portable half from a different source. musl is the right call (lean, static-friendly, clean seam), but worth a sentence of confirmation.
 
 **[OPEN Q 4.2]** Vendoring mechanism: in-tree copy + patch series, or a git submodule + patch series. In-tree copy is simpler for a hermetic build; submodule tracks upstream more visibly. Lean: in-tree copy.
+
+**[RESOLVED 4.3]** (2026-05-22, sub-chunk 2 `pouch-musl-vendor`) The vendored-tree path is **`third_party/musl/`**, not `usr/lib/pouch/musl/`. `third_party/` is the conventional, instantly-recognizable home for pristine vendored upstream code under its own license, and it keeps a clean boundary — `usr/lib/pouch/` holds *pouch's own* code (the patch series, and later the lower half), `third_party/` holds the unmodified upstream input. The patch series lives at `usr/lib/pouch/patches/`. See `third_party/README.md` + `docs/reference/78-pouch.md`.
 
 ---
 

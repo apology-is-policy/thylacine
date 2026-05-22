@@ -1,0 +1,14 @@
+# pouch — boundary-line patch series against vendored musl 1.2.5.
+#
+# quilt-style ordered list: one patch file per line, applied top-to-bottom
+# from the musl tree root. Lines starting with '#' are comments; blank lines
+# are ignored. See README.md in this directory for the discipline.
+#
+# Invariant P-4 (POUCH-DESIGN.md §11): every patch touches ONLY musl's lower
+# half + the syscall seam — never the portable upper half (string / stdio /
+# stdlib / math / ...). See docs/reference/78-pouch.md for the per-directory
+# UPPER / LOWER / SEAM boundary-line inventory.
+#
+# The series is empty at sub-chunk 2 (pouch-musl-vendor). The boundary-line
+# replacement lands across Phase 6 sub-chunks 3-12 (pouch-kernel-auxv through
+# pouch-signals) — see docs/POUCH-DESIGN.md §14.

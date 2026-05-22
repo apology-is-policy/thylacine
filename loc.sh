@@ -21,7 +21,7 @@ fi
 # Refresh
 result=$(cloc . \
     --include-lang="C,C/C++ Header,Rust,Assembly,TLA+,CMake" \
-    --exclude-dir=build,cmake-build-debug,cmake-build-release,CMakeFiles,.cache \
+    --exclude-dir=build,third_party,cmake-build-debug,cmake-build-release,CMakeFiles,.cache \
     --not-match-d='(^|/)\.(git|idea|vscode)$' \
     --csv --quiet 2>/dev/null \
     | awk -F',' '$2 == "SUM" { print $5 }')
