@@ -239,9 +239,9 @@ stratumd uses pthreads + (per the research) no `clone3`/`unshare`/`fork` — so 
 
 ## 9. The cross-compilation toolchain & sysroot  *(Decision 8)*
 
-- **Toolchain**: clang-based — the kernel build already uses clang; clang's `--target=` + `--sysroot=` is a single-binary cross-compiler with no separate GCC build. A `pouch-clang` wrapper script pins `--target` + `--sysroot` + the pouch link flags, so plain-Makefile projects (musl-style builds, autotools) work without CMake.
+- **Toolchain**: clang-based — the kernel build already uses clang; clang's `--target=` + `--sysroot=` is a single-binary cross-*compiler* with no separate GCC build. **Linking is a separate step**: for the unknown `thylacine` OS on a macOS host, clang's *link driver* mis-selects the host Darwin toolchain and emits Mach-O linker arguments — so the pouch link step invokes the ELF linker `ld.lld` directly. A `pouch-clang` wrapper pins `--target` + `--sysroot` for compilation; a `pouch-ld` wrapper drives `ld.lld` with the pouch ELF link line. Plain-Makefile / autotools / CMake projects use the pair without fighting the clang link driver. (Surfaced by `pouch-hello-smoke`; deep-dive in `docs/reference/78-pouch.md`.)
 - **Triple**: **[OPEN Q 9.1]** — `aarch64-thylacine` (clean; OS-named, libc implied) vs. `aarch64-thylacine-pouch` (libc-explicit, conventional 4-tuple) vs. `aarch64-unknown-thylacine`. Lean: `aarch64-thylacine`.
-- **Sysroot**: `build/sysroot/{include,lib,bin}` — pouch headers, `libc.a`, `crt1.o`/`crti.o`/`crtn.o`. `tools/build.sh sysroot` (today a placeholder) becomes the real builder.
+- **Sysroot**: `build/sysroot/{include,lib,bin}` — pouch headers, `libc.a`, the CRT objects (`crt1.o`/`crti.o`/`crtn.o`), and the **compiler runtime** `libclang_rt.builtins.a` (the compiler-rt builtins — a complete C toolchain needs them; e.g. `vfprintf` formats `long double` = aarch64 `binary128`, whose soft-float requires `__eqtf2`/`__extenddftf2`/… builtins). `tools/build.sh sysroot` (today a placeholder) becomes the real builder.
 - **Integration**: a CMake toolchain file (`cmake/Toolchain-aarch64-pouch.cmake` — the name `Toolchain-aarch64-thylacine.cmake` is already the kernel toolchain, so the pouch file is role-named `-pouch`, parallel to the existing `-userspace`) + the `pouch-clang` wrapper. Stratum builds with CMake; the wrapper covers everything else.
 
 ---
@@ -290,7 +290,7 @@ Everything else pouch needs already exists: Spoors + 9P client (files), `/srv` (
 
 ## 13. Exit criteria
 
-- [ ] `aarch64-thylacine` cross-toolchain builds; `tools/build.sh sysroot` produces a populated sysroot.
+- [ ] `aarch64-thylacine` cross-toolchain is complete — compiler, libc, CRT objects, **and the compiler-rt builtins** — and links via `ld.lld`; `tools/build.sh sysroot` produces a populated sysroot.
 - [ ] A static "hello" C program, compiled with the cross-toolchain against pouch, runs in Thylacine — prints, exits 0, leaves no leak.
 - [ ] `printf`-shaped hello (buffered stdio path) also works.
 - [ ] A multithreaded test program — N threads, a shared mutex-protected counter, join — runs correctly under default + TSan.
@@ -316,19 +316,20 @@ Each sub-chunk lands independently with the two-commit pattern; audit-bearing on
 | 2 | **pouch-musl-vendor** | Vendor pinned musl; the boundary-line patch series scaffold; build the portable upper half | no |
 | 3 | **pouch-kernel-auxv** | `exec_setup` auxv population; `set_tid_address` | **yes** (exec / boot) |
 | 4 | **pouch-syscall-seam** | Retarget `bits/syscall.h`; pouch's 1:1 syscall wrappers; the rc→errno mapping | **yes** (syscall surface) |
-| 5 | **pouch-hello-smoke** | Static hello + printf-hello build + run; the first milestone | no |
-| 6 | **pouch-mem** | Allocator backend (anonymous-memory call); confirm/fill the kernel gap | **yes** (mm) |
-| 7 | **pouch-wait-addr** | The wait-on-address kernel primitive; `futex.tla` implementation | **yes** (scheduler / wait-wake) |
-| 8 | **pouch-threads** | pthread create/join/detach + mutex/cond/rwlock/once + TLS errno | **yes** (concurrency) |
-| 9 | **pouch-poll** | `poll`/`select`/`ppoll` over fds → `t_poll` | no |
-| 10 | **pouch-devnodes** | The minimal synthetic-FS namespace (§6.6): trivial `/dev` nodes (`null`/`zero`/`full`) as tiny kernel Devs; the `getrandom`-syscall path libsodium needs | no |
-| 11 | **pouch-sockets** | `AF_UNIX` `SOCK_STREAM` → `/srv`; `SO_PEERCRED` → `t_srv_peer` | **yes** (capability surface) |
-| 12 | **pouch-signals** | The supported signal subset → notes | **yes** (notes / async safety) |
-| 13 | **pouch-libsodium** | Cross-compile libsodium; self-test | no |
-| 14 | **pouch-stratumd-build** | Build stratumd against the sysroot; Thylacine `peer_creds` arm | no (Stratum-side) |
-| 15 | **pouch-stratumd-boot** | joey spawns real stratumd; `/sysroot` mount; ramfs pivot; retire the stub | **yes** (boot ordering) |
+| 5 | **pouch-hello-smoke** | Static hello + buffered-stdio hello build + run; the first milestone | no |
+| 6 | **pouch-compiler-rt** | Vendor + build the compiler-rt builtins for `aarch64-thylacine` (the compiler runtime a complete toolchain needs — `binary128` soft-float et al.); the `pouch-ld` link-driver wrapper; the real `printf` hello | no |
+| 7 | **pouch-mem** | Allocator backend (anonymous-memory call); confirm/fill the kernel gap | **yes** (mm) |
+| 8 | **pouch-wait-addr** | The wait-on-address kernel primitive; `futex.tla` implementation | **yes** (scheduler / wait-wake) |
+| 9 | **pouch-threads** | pthread create/join/detach + mutex/cond/rwlock/once + TLS errno | **yes** (concurrency) |
+| 10 | **pouch-poll** | `poll`/`select`/`ppoll` over fds → `t_poll` | no |
+| 11 | **pouch-devnodes** | The minimal synthetic-FS namespace (§6.6): trivial `/dev` nodes (`null`/`zero`/`full`) as tiny kernel Devs; the `getrandom`-syscall path libsodium needs | no |
+| 12 | **pouch-sockets** | `AF_UNIX` `SOCK_STREAM` → `/srv`; `SO_PEERCRED` → `t_srv_peer` | **yes** (capability surface) |
+| 13 | **pouch-signals** | The supported signal subset → notes | **yes** (notes / async safety) |
+| 14 | **pouch-libsodium** | Cross-compile libsodium; self-test | no |
+| 15 | **pouch-stratumd-build** | Build stratumd against the sysroot; Thylacine `peer_creds` arm | no (Stratum-side) |
+| 16 | **pouch-stratumd-boot** | joey spawns real stratumd; `/sysroot` mount; ramfs pivot; retire the stub | **yes** (boot ordering) |
 
-Chunks 7–8 (wait-on-address + threads) are the critical path and the highest risk; they may each split. Chunk 7 is spec-first (`futex.tla`).
+`pouch-compiler-rt` was inserted as sub-chunk 6 — `pouch-hello-smoke` surfaced that the sysroot had no compiler runtime (POUCH-DESIGN.md §9 originally enumerated only headers + libc + CRT) and that clang cannot drive the ELF link on macOS. It executes next and is a hard prerequisite for the `pouch-libsodium` + `pouch-stratumd-build` sub-chunks. The `pouch-wait-addr` + `pouch-threads` sub-chunks are the critical path and the highest risk; they may each split. `pouch-wait-addr` is spec-first (`futex.tla`).
 
 ---
 
@@ -336,9 +337,9 @@ Chunks 7–8 (wait-on-address + threads) are the critical path and the highest r
 
 - **R1 — the thread model is genuinely hard.** Mutex/condvar correctness under contention, TLS init ordering, the wait-on-address race surface. Mitigation: spec-first (`futex.tla`), TSan from the start, the chunk may split.
 - **R2 — musl's lower half resists clean replacement.** musl's internals may be more entangled with Linux than the clean-seam model assumes. Mitigation: chunk 2 is exploratory; if the seam is dirtier than hoped, the patch series grows and we re-assess vendoring (§4).
-- **R3 — Stratum-side coordination.** Chunks 13–14 need Stratum changes (the `peer_creds` Thylacine arm, possibly the block-layer arm). User-owned; sequencing risk if Stratum and Thylacine drift.
+- **R3 — Stratum-side coordination.** The `pouch-libsodium` + `pouch-stratumd-build` sub-chunks need Stratum changes (the `peer_creds` Thylacine arm, possibly the block-layer arm). User-owned; sequencing risk if Stratum and Thylacine drift.
 - **R4 — scope creep into the renamed Phase 7 (Utopia).** A working pouch *invites* "let's port bash too." Discipline: this phase's proving set is hello + libsodium + stratumd. Utopia stays the next phase.
-- **R5 — the `mmap`/anonymous-memory gap is larger than estimated.** If Thylacine's Burrow surface needs real extension for a malloc backend, chunk 6 grows. Mitigation: [OPEN Q 12.1] resolved early.
+- **R5 — the `mmap`/anonymous-memory gap is larger than estimated.** If Thylacine's Burrow surface needs real extension for a malloc backend, the `pouch-mem` sub-chunk grows. Mitigation: [OPEN Q 12.1] resolved early.
 
 ---
 
@@ -385,14 +386,14 @@ All twenty round-1 open questions resolved to the drafted leans (user signoff, 2
 | 6.6 | minimal-namespace scope + Devs-vs-servers split for trivial nodes | ✅ confirmed (round 3) — minimal namespace this phase; trivial nodes as kernel Devs; richer namespace → Utopia |
 | 7.1 | wait-on-address: absolute deadline / relative / both | ✅ absolute deadline (reuse `tsleep`) |
 | 7.2 | wait-on-address spec is `futex.tla` | ✅ yes |
-| 7.3 | Thylacine thread-spawn accepts caller stack+entry | ✅ approach settled; verify kernel detail in chunk 8 |
+| 7.3 | Thylacine thread-spawn accepts caller stack+entry | ✅ approach settled; verify kernel detail in the `pouch-threads` sub-chunk |
 | 8.1 | allocator backend: POSIX `mmap` shape vs. leaner Thylacine call | ✅ leaner internal call |
 | 8.2 | `fork()` decline confirmed | ✅ decline; ship `posix_spawn` |
 | 9.1 | Triple name | ✅ `aarch64-thylacine` |
 | 10.1 | Thylacine-first software: native extensions vs. portable+arms | ✅ portable + thin per-OS arms |
 | 11.1 | Invariant numbers in ARCH §28 | ✅ P-numbered; canonical in §11; cross-ref'd from ARCH §28 (mirrors the corvus C-invariant treatment) |
-| 12.1 | anonymous-memory kernel gap size | ✅ approach settled; size it in chunk 6 |
-| 12.2 | `notes` implementation status | ✅ verify before chunk 12 |
+| 12.1 | anonymous-memory kernel gap size | ✅ approach settled; size it in the `pouch-mem` sub-chunk |
+| 12.2 | `notes` implementation status | ✅ verify before the `pouch-signals` sub-chunk |
 | 16.1 | `torpor` for both `_hang` and the futex — muddle? | ✅ distinct mechanisms; acceptable |
 | 17.1 | Phase numbering scheme | ✅ Pouch = Phase 6; renumber the tail |
 

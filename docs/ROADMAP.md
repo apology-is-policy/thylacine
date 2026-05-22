@@ -629,7 +629,7 @@ Thylacine's practicality — its claim to be a real OS, not a toy — depends on
 
 ### 7A.3 Sub-chunk decomposition
 
-15 sub-chunks — see POUCH-DESIGN.md §14. Critical path: chunk 7 (`pouch-wait-addr` — the `torpor` primitive, spec-first against `futex.tla`) and chunk 8 (`pouch-threads`).
+16 sub-chunks — see POUCH-DESIGN.md §14. Critical path: the `pouch-wait-addr` sub-chunk (the `torpor` primitive, spec-first against `futex.tla`) and `pouch-threads`. `pouch-compiler-rt` (#6 — the compiler runtime + the `pouch-ld` link wrapper) was inserted after `pouch-hello-smoke` surfaced the gap.
 
 ### 7A.4 Exit criteria
 

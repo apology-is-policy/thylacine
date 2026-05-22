@@ -4,7 +4,7 @@ Authoritative pickup guide for **Phase 6: Pouch — POSIX libc + cross-compilati
 
 ## TL;DR
 
-**Phase 6 is OPEN — implementation underway.** The design session (3 rounds, 2026-05-22) converged; `POUCH-DESIGN.md` is binding scripture. **Sub-chunks 1-4 have landed** — sub-chunk 1 (`pouch-toolchain`) the `aarch64-thylacine` cross toolchain; sub-chunk 2 (`pouch-musl-vendor`) vendored musl 1.2.5 + the R2 probe (musl compiles end-to-end for `aarch64-thylacine`, so the boundary line is compile-clean); sub-chunk 3 (`pouch-kernel-auxv`, audit-bearing) made `exec_setup` build the System V process-startup frame (argc / argv / envp / auxv) + added `SYS_SET_TID_ADDRESS`; sub-chunk 4 (`pouch-syscall-seam`, audit-bearing) retargeted musl's aarch64 syscall seam to the Thylacine ABI — the syscall-number table (eight 1:1 calls → Thylacine numbers, the rest → a `0xFFFF` unimplemented-syscall sentinel), the sentinel guard on both syscall paths, the flat-`-1`→`errno` decode, the stdio backend — and made `tools/build.sh sysroot` build the real pouch `libc.a` + CRT + headers into `build/sysroot/`. Sub-chunk 5 (`pouch-hello-smoke`) built and ran the first POSIX C programs on Thylacine — `/pouch-hello` (raw `write(2)` + the `0xFFFF` sentinel on both syscall paths) and `/pouch-hello-stdio` (buffered stdio); a POSIX C program now runs on a kernel that knows nothing about POSIX. The literal `printf` format engine is deferred — `vfprintf` needs a compiler runtime the sysroot lacks (owed `pouch-compiler-rt` sub-chunk). Next: sub-chunk 6 (`pouch-mem` — the allocator backend).
+**Phase 6 is OPEN — implementation underway.** The design session (3 rounds, 2026-05-22) converged; `POUCH-DESIGN.md` is binding scripture. **Sub-chunks 1-5 have landed** — sub-chunk 1 (`pouch-toolchain`) the `aarch64-thylacine` cross toolchain; sub-chunk 2 (`pouch-musl-vendor`) vendored musl 1.2.5 + the R2 probe (musl compiles end-to-end for `aarch64-thylacine`, so the boundary line is compile-clean); sub-chunk 3 (`pouch-kernel-auxv`, audit-bearing) made `exec_setup` build the System V process-startup frame (argc / argv / envp / auxv) + added `SYS_SET_TID_ADDRESS`; sub-chunk 4 (`pouch-syscall-seam`, audit-bearing) retargeted musl's aarch64 syscall seam to the Thylacine ABI — the syscall-number table (eight 1:1 calls → Thylacine numbers, the rest → a `0xFFFF` unimplemented-syscall sentinel), the sentinel guard on both syscall paths, the flat-`-1`→`errno` decode, the stdio backend — and made `tools/build.sh sysroot` build the real pouch `libc.a` + CRT + headers into `build/sysroot/`. Sub-chunk 5 (`pouch-hello-smoke`) built and ran the first POSIX C programs on Thylacine — `/pouch-hello` (raw `write(2)` + the `0xFFFF` sentinel on both syscall paths) and `/pouch-hello-stdio` (buffered stdio); a POSIX C program now runs on a kernel that knows nothing about POSIX. The literal `printf` format engine is deferred — `vfprintf` needs a compiler runtime the sysroot lacks. Next: sub-chunk 6 (`pouch-compiler-rt` — vendor + build the compiler runtime; the `pouch-ld` link-driver wrapper; the real `printf` hello).
 
 Phase 6 builds **pouch** — the Thylacine-native POSIX libc (a musl derivative: musl's portable upper half + a Thylacine-native lower half, split at musl's syscall seam) — plus the `aarch64-thylacine` cross-compilation toolchain + sysroot, plus the POSIX runtime layer that translates POSIX abstractions into Thylacine primitives (`AF_UNIX`→`/srv`, `poll(2)`→`t_poll`, `sigaction`→notes, pthreads→Thylacine threads + the `torpor` wait-on-address primitive). The proving binary is real **stratumd**; the durable deliverable is the cross-compilation path itself.
 
@@ -36,7 +36,7 @@ Why a whole phase: Thylacine's practicality as a real OS depends on POSIX/Linux/
 | `e03be8d` | **pouch-toolchain: hash fixup** | (placeholder fill) |
 | `90b5333` | **P6-pouch-toolchain (sub-chunk 1/15): the `aarch64-thylacine` cross-compilation toolchain scaffolding.** New `cmake/Toolchain-aarch64-pouch.cmake` — clang + ld.lld (Homebrew LLVM); target `aarch64-thylacine` via `CMAKE_C_COMPILER_TARGET`; `CMAKE_SYSROOT` → `build/sysroot`; `-march=armv8-a+lse+pauth+bti` + hardening (stack protector, stack-clash, PAC+BTI) + `-nostdinc -isystem <sysroot>/include` via `CMAKE_C_FLAGS_INIT`; W^X + `-static` link flags via `CMAKE_EXE_LINKER_FLAGS_INIT`; compiler probes skipped (no libc to link against yet). New `tools/pouch-clang` — a drop-in `clang` wrapper pinned to `--target=aarch64-thylacine --sysroot=build/sysroot -march=...`, for plain-Makefile / autotools projects (musl, libsodium, stratumd); pins only what *defines* the target, leaving codegen policy to the consumer. `tools/build.sh sysroot` made real — creates the `build/sysroot/{include,lib}` skeleton + runs a toolchain self-check (`pouch-clang` must produce an aarch64 object). **Deviation from POUCH-DESIGN.md §9** (corrected in the same commit): the CMake toolchain file is named `Toolchain-aarch64-pouch.cmake`, not `-thylacine` — `Toolchain-aarch64-thylacine.cmake` is already the kernel toolchain; `-pouch` is role-named, parallel to the existing `-userspace`. TOOLING.md cross-compile section corrected (the stale `aarch64-unknown-thylacine` triple → `aarch64-thylacine`). Not audit-bearing (build scaffolding; no kernel code, no invariant surface). The sysroot is an empty skeleton — populated by sub-chunks 2-5. | `build.sh sysroot` exit 0 + toolchain self-check PASS (pouch-clang → aarch64 ELF object); the CMake toolchain configures a trivial project cleanly (Clang 22.1.4 resolved). No kernel-test-suite change — build scaffolding. |
 
-## Remaining work — the 15 sub-chunks
+## Remaining work — the 16 sub-chunks
 
 Per `POUCH-DESIGN.md §14`. Each lands independently with the two-commit pattern; audit-bearing ones get a focused round.
 
@@ -46,27 +46,28 @@ Per `POUCH-DESIGN.md §14`. Each lands independently with the two-commit pattern
 | 2 | `pouch-musl-vendor` — vendor pinned musl; the boundary-line patch series scaffold | no |
 | 3 | `pouch-kernel-auxv` — `exec_setup` auxv population; `set_tid_address` | yes |
 | 4 | `pouch-syscall-seam` — retarget `bits/syscall.h`; 1:1 wrappers; rc→errno mapping | yes |
-| 5 | `pouch-hello-smoke` — static + printf hello build + run | no |
-| 6 | `pouch-mem` — allocator backend (anonymous-memory call) | yes |
-| 7 | `pouch-wait-addr` — the `torpor` kernel primitive; `futex.tla` (spec-first) | yes |
-| 8 | `pouch-threads` — pthread create/join/detach + mutex/cond/rwlock/once + TLS errno | yes |
-| 9 | `pouch-poll` — `poll`/`select`/`ppoll` → `t_poll` | no |
-| 10 | `pouch-devnodes` — minimal synthetic-FS namespace; trivial `/dev` nodes | no |
-| 11 | `pouch-sockets` — `AF_UNIX` `SOCK_STREAM` → `/srv`; `SO_PEERCRED` → `t_srv_peer` | yes |
-| 12 | `pouch-signals` — the supported signal subset → notes | yes |
-| 13 | `pouch-libsodium` — cross-compile libsodium; self-test | no |
-| 14 | `pouch-stratumd-build` — build stratumd against the sysroot; Thylacine `peer_creds` arm | no (Stratum-side) |
-| 15 | `pouch-stratumd-boot` — joey spawns real stratumd; `/sysroot` mount; ramfs pivot; retire the stub | yes |
+| 5 | `pouch-hello-smoke` — static + buffered-stdio hello build + run | no |
+| 6 | `pouch-compiler-rt` — vendor + build the compiler-rt builtins; the `pouch-ld` link wrapper; the real `printf` hello | no |
+| 7 | `pouch-mem` — allocator backend (anonymous-memory call) | yes |
+| 8 | `pouch-wait-addr` — the `torpor` kernel primitive; `futex.tla` (spec-first) | yes |
+| 9 | `pouch-threads` — pthread create/join/detach + mutex/cond/rwlock/once + TLS errno | yes |
+| 10 | `pouch-poll` — `poll`/`select`/`ppoll` → `t_poll` | no |
+| 11 | `pouch-devnodes` — minimal synthetic-FS namespace; trivial `/dev` nodes | no |
+| 12 | `pouch-sockets` — `AF_UNIX` `SOCK_STREAM` → `/srv`; `SO_PEERCRED` → `t_srv_peer` | yes |
+| 13 | `pouch-signals` — the supported signal subset → notes | yes |
+| 14 | `pouch-libsodium` — cross-compile libsodium; self-test | no |
+| 15 | `pouch-stratumd-build` — build stratumd against the sysroot; Thylacine `peer_creds` arm | no (Stratum-side) |
+| 16 | `pouch-stratumd-boot` — joey spawns real stratumd; `/sysroot` mount; ramfs pivot; retire the stub | yes |
 
-Critical path + highest risk: chunks 7–8 (`torpor` + threads); each may split. Chunk 7 is spec-first.
+`pouch-compiler-rt` (#6) is next — inserted after `pouch-hello-smoke` surfaced the missing compiler runtime + the clang-link-driver gap. Critical path + highest risk: the `pouch-wait-addr` + `pouch-threads` sub-chunks; each may split. `pouch-wait-addr` is spec-first.
 
 ## Exit criteria status
 
 Full list in `POUCH-DESIGN.md §13`. None met yet (implementation not started). Checklist:
 
-- [x] `aarch64-thylacine` cross-toolchain builds; `tools/build.sh sysroot` produces a populated sysroot. *(sub-chunk 4: headers + `libc.a` + CRT objects in `build/sysroot/`.)*
+- [~] `aarch64-thylacine` cross-toolchain is complete — compiler, libc, CRT objects, **and the compiler-rt builtins** — and links via `ld.lld`. *(sub-chunk 4: headers + `libc.a` + CRT in `build/sysroot/`; the compiler-rt builtins + the `pouch-ld` link path land in sub-chunk 6, `pouch-compiler-rt`.)*
 - [x] Static "hello" C program runs in Thylacine — prints, exits 0, no leak. *(sub-chunk 5: `/pouch-hello`.)*
-- [~] `printf`-shaped hello works (buffered stdio path). *(sub-chunk 5: `/pouch-hello-stdio` proves the buffered-stdio path via `puts`/`fwrite`; the literal `printf` format engine is deferred — `vfprintf` needs `binary128` soft-float compiler-rt builtins the sysroot lacks. Owed `pouch-compiler-rt` sub-chunk.)*
+- [~] `printf`-shaped hello works (buffered stdio path). *(sub-chunk 5: `/pouch-hello-stdio` proves the buffered-stdio path via `puts`/`fwrite`; the literal `printf` format engine is deferred to sub-chunk 6 (`pouch-compiler-rt`) — `vfprintf` needs `binary128` soft-float compiler-rt builtins the sysroot lacks.)*
 - [ ] Multithreaded test (N threads, shared mutex-protected counter, join) passes under default + TSan.
 - [ ] `AF_UNIX` `SOCK_STREAM` echo client/server (pure POSIX source) round-trips over `/srv`.
 - [ ] libsodium cross-compiles + self-test passes.
@@ -78,25 +79,25 @@ Full list in `POUCH-DESIGN.md §13`. None met yet (implementation not started). 
 
 ## Build + verify commands
 
-Standard (per `CLAUDE.md`): `tools/build.sh kernel [--sanitize=ubsan]` then `tools/test.sh` (`BOOT_TIMEOUT=420` for UBSan). New for this phase: `tools/build.sh sysroot` (becomes real at sub-chunk 1). TSan matrix matters from chunk 8 (`pouch-threads`) onward.
+Standard (per `CLAUDE.md`): `tools/build.sh kernel [--sanitize=ubsan]` then `tools/test.sh` (`BOOT_TIMEOUT=420` for UBSan). New for this phase: `tools/build.sh sysroot` (becomes real at sub-chunk 1) + `tools/build.sh pouch-progs` (sub-chunk 5). TSan matrix matters from the `pouch-threads` sub-chunk onward.
 
 ## Trip hazards
 
-- **Chunks 7–8 are the hardest.** The `torpor` wait-on-address primitive + the pthread mutex/condvar layer. Spec-first (`futex.tla`); TSan from the start. Either may split.
-- **musl's lower half may resist a clean seam** (POUCH-DESIGN.md risk R2). **Sub-chunk 2 probed this and R2 is substantially de-risked**: musl 1.2.5 compiles end-to-end for `aarch64-thylacine` (1345 TUs, 0 errors / 0 warnings → a valid `libc.a`), so the boundary line is *compile-clean*. The residual risk is not the compile — it is lower-half *behavior* complexity (the thread model, chunks 7-8), where the work is genuinely hard regardless of the seam.
+- **The `pouch-wait-addr` + `pouch-threads` sub-chunks are the hardest.** The `torpor` wait-on-address primitive + the pthread mutex/condvar layer. Spec-first (`futex.tla`); TSan from the start. Either may split.
+- **musl's lower half may resist a clean seam** (POUCH-DESIGN.md risk R2). **Sub-chunk 2 probed this and R2 is substantially de-risked**: musl 1.2.5 compiles end-to-end for `aarch64-thylacine` (1345 TUs, 0 errors / 0 warnings → a valid `libc.a`), so the boundary line is *compile-clean*. The residual risk is not the compile — it is lower-half *behavior* complexity (the thread model — the `pouch-wait-addr` + `pouch-threads` sub-chunks), where the work is genuinely hard regardless of the seam.
 - **Invariant P-1**: no foreign syscall number ever enters the kernel. Every kernel addition this phase is a *native Thylacine* syscall designed on Thylacine's terms — never "the Linux futex ported."
 - **musl issues syscalls down two paths.** The non-cancellable `__syscallN` (`arch/aarch64/syscall_arch.h`) AND the cancellable `__syscall_cp` → `__syscall_cp_asm` (a hand-written `.s`). Both must enforce the `0xFFFF` unimplemented-syscall sentinel — the P6-pouch-syscall-seam audit (F1, P0) caught the cancellable path unguarded. On a musl re-vendor, re-check every `.s` syscall path for the guard.
-- **The cross-toolchain has no compiler runtime** (sub-chunk 5 finding — see "Known deltas"). `printf`/floating-point will not link until the owed `pouch-compiler-rt` sub-chunk lands; it is a hard prerequisite for the libsodium + stratumd chunks. Plan for it before sub-chunk 13.
-- **clang cannot drive the ELF link on macOS** for `aarch64-thylacine` (it falls into the Darwin toolchain). `build_pouch_progs` invokes `ld.lld` directly; the CMake/autotools chunks (13-15) will need a real toolchain-link fix. See `docs/reference/78-pouch.md` "Why linking cannot go through the clang driver".
+- **The cross-toolchain has no compiler runtime yet** (sub-chunk 5 finding). `printf`/floating-point will not link until `pouch-compiler-rt` (sub-chunk 6) lands; it is a hard prerequisite for the `pouch-libsodium` + `pouch-stratumd-build` sub-chunks. It is scheduled next.
+- **clang cannot drive the ELF link on macOS** for `aarch64-thylacine` (it falls into the Darwin toolchain). `build_pouch_progs` invokes `ld.lld` directly; sub-chunk 6 (`pouch-compiler-rt`) adds a `pouch-ld` wrapper so the CMake/autotools chunks link cleanly. See `docs/reference/78-pouch.md` "Why linking cannot go through the clang driver".
 - **A Thylacine zombie holds its handle table until reaped** (`proc_free` drains it, and `proc_free` runs at `wait_pid`). Orchestration that captures a child's pipe output must reap the child *before* draining the pipe — a drain-until-EOF before the reap deadlocks (the write-end never EOFs). `joey`'s `pouch_smoke_one` and `do_stratumd_stub_bringup` both embody this.
-- **Stratum-side coordination** (chunks 14–15): the Thylacine `peer_creds` arm + possibly the block-layer arm are Stratum-repo changes.
+- **Stratum-side coordination** (the `pouch-stratumd-build` + `pouch-stratumd-boot` sub-chunks): the Thylacine `peer_creds` arm + possibly the block-layer arm are Stratum-repo changes.
 
 ## Known deltas from POUCH-DESIGN.md
 
-Sub-chunk 5 surfaced two toolchain gaps the design did not anticipate. Both are recorded here per the deviation-tracking discipline; the POUCH-DESIGN.md updates they imply are binding-scripture changes and need user signoff.
+No open deviations. The two toolchain gaps `pouch-hello-smoke` surfaced have been **folded into the scripture** (the `P6-pouch-compiler-rt-design` update, with user signoff):
 
-- **The cross-toolchain needs a compiler runtime.** POUCH-DESIGN.md §9 enumerated the sysroot as "headers, `libc.a`, CRT objects" — but a complete C cross-toolchain also needs compiler-rt builtins. `aarch64` `binary128` soft-float (`__eqtf2`, `__extenddftf2`, …) is referenced by musl's `vfprintf`, so `printf`/floating-point cannot link until a compiler runtime exists; Homebrew LLVM ships compiler-rt for the Darwin host only. **Owed: a new `pouch-compiler-rt` sub-chunk** — vendor + build the compiler-rt builtins for `aarch64-thylacine`. It should slot before the first chunk that needs `printf`/float for real, and is a hard prerequisite for the libsodium + stratumd chunks (13-15). Sub-chunk 5 landed with `/pouch-hello` (no builtins needed) + `/pouch-hello-stdio` (buffered stdio via `puts`/`fwrite`, no `printf`); the literal `printf`-shaped hello of §13/§14 follows the compiler-rt sub-chunk. *Proposed POUCH-DESIGN.md update: §9 names compiler-rt as a sysroot component; §14 inserts `pouch-compiler-rt`.*
-- **clang cannot drive the link on macOS.** `tools/pouch-clang` + `cmake/Toolchain-aarch64-pouch.cmake` (sub-chunk 1) assume clang drives the link. For the unknown `thylacine` OS on a macOS host clang falls into the Darwin toolchain and emits Mach-O linker arguments. The compiler path (`pouch-clang -c`) is unaffected; only linking is. `build_pouch_progs` works around it by invoking `ld.lld` directly. The CMake/autotools build chunks (13-15) need a real fix — a `pouch-ld` wrapper or a `CMAKE_C_LINK_EXECUTABLE` override. Recorded in `docs/reference/78-pouch.md` "Why linking cannot go through the clang driver".
+- **The cross-toolchain needs a compiler runtime.** POUCH-DESIGN.md §9 originally enumerated the sysroot as headers + `libc.a` + CRT — a complete C toolchain also needs the compiler-rt builtins (`binary128` soft-float for `printf`'s `long double` formatting, etc.; Homebrew LLVM ships Darwin compiler-rt only). §9 now names `libclang_rt.builtins.a` as a sysroot component; §14 inserts `pouch-compiler-rt` as sub-chunk 6.
+- **clang cannot drive the ELF link on macOS.** For the unknown `thylacine` OS clang's driver mis-selects the host Darwin toolchain. §9 now records that linking invokes `ld.lld` directly via a `pouch-ld` wrapper; building that wrapper is part of sub-chunk 6.
 
 Sub-chunk 2 *resolved* an open question POUCH-DESIGN.md §4 left for the implementing chunk — the vendor path is `third_party/musl/` (not `usr/lib/pouch/musl/`); recorded in POUCH-DESIGN.md §4 + `docs/reference/78-pouch.md`. Further deltas surfaced during implementation are recorded here.
 

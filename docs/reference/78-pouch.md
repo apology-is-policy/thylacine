@@ -9,7 +9,7 @@
 > Thylacine error-convention decode, and the stdio backend — and the first
 > pouch binaries running in Thylacine. Sections for pouch's lower-half API,
 > data structures, and state machines are stubbed with forward pointers and
-> filled in by sub-chunks 6-12. The binding design is `docs/POUCH-DESIGN.md`.
+> filled in by sub-chunks 7-13. The binding design is `docs/POUCH-DESIGN.md`.
 
 ---
 
@@ -146,7 +146,7 @@ Classes:
 | `fenv/` (18) | UPPER | floating-point environment (aarch64 asm) | — |
 | `setjmp/` (2) | UPPER | `setjmp` / `longjmp` (aarch64 asm) | — |
 | `stdio/` (116) | MIXED | FILE buffering + `printf`/`scanf` upper; the backend ops (`__stdio_read`/`__stdio_write`, `fopen`→`open`) reach the seam | 4 |
-| `malloc/` (18) | MIXED | the `mallocng` allocator — logic portable; rests on the anonymous-memory backend | 6 |
+| `malloc/` (18) | MIXED | the `mallocng` allocator — logic portable; rests on the anonymous-memory backend | 7 |
 | `time/` (39) | MIXED | `gmtime`/`mktime`/`strftime` upper; `clock_gettime`/`nanosleep` lower | 4 |
 | `locale/` (26) | MIXED | C locale is upper; locale-file loading is lower (v1.0 = `C` locale only) | 4 |
 | `env/` (11) | MIXED | `getenv`/`setenv` upper; `__libc_start_main` / `__init_libc` is the CRT/auxv seam | 3 |
@@ -159,15 +159,15 @@ Classes:
 | `fcntl/` (6) | LOWER | `open`/`openat`/`fcntl`/`creat` | 4 |
 | `stat/` (20) | LOWER | `stat`/`fstat`/`mkdir`/`chmod`/`statx` | 4 |
 | `dirent/` (12) | LOWER | `opendir`/`readdir`/`scandir` (`getdents`) | 4 |
-| `mman/` (13) | LOWER | `mmap`/`mprotect`/`madvise`/`mlock` → Burrow | 6 |
-| `select/` (4) | LOWER | `select`/`poll`/`ppoll` → `t_poll` / `SYS_POLL` | 9 |
-| `thread/` (133) | LOWER | pthreads + atomics + the futex calls → Thylacine threads + `torpor` | 7-8 |
-| `signal/` (40) | LOWER | `sigaction`/`kill`/`raise`/`sigprocmask` → notes | 12 |
-| `network/` (77) | LOWER | sockets, resolution → `/srv` (`AF_UNIX`); `AF_INET` deferred | 11 |
-| `process/` (34) | LOWER | `posix_spawn` → `rfork`; `fork` declined; `exec*`/`wait*` | 11+ |
+| `mman/` (13) | LOWER | `mmap`/`mprotect`/`madvise`/`mlock` → Burrow | 7 |
+| `select/` (4) | LOWER | `select`/`poll`/`ppoll` → `t_poll` / `SYS_POLL` | 10 |
+| `thread/` (133) | LOWER | pthreads + atomics + the futex calls → Thylacine threads + `torpor` | 8-9 |
+| `signal/` (40) | LOWER | `sigaction`/`kill`/`raise`/`sigprocmask` → notes | 13 |
+| `network/` (77) | LOWER | sockets, resolution → `/srv` (`AF_UNIX`); `AF_INET` deferred | 12 |
+| `process/` (34) | LOWER | `posix_spawn` → `rfork`; `fork` declined; `exec*`/`wait*` | 12+ |
 | `sched/` (10) | LOWER | `sched_yield` / affinity | 4+ |
 | `temp/` (7) | LOWER | `mkstemp`/`tmpfile` (uses `open`) | 4 |
-| `errno/` (2) | SEAM | `__errno_location` (TLS-backed) | 8 |
+| `errno/` (2) | SEAM | `__errno_location` (TLS-backed) | 9 |
 | `internal/` (11) | SEAM | `syscall.h`, `libc.h`, `__libc_start_main` plumbing, `version.c` | 3-4 |
 | `aio/` (3) | LOWER | POSIX async I/O — **deferred** (`ENOSYS`) | — |
 | `ipc/` (13) | LOWER | System V IPC — **deferred** (`ENOSYS`) | — |
@@ -229,7 +229,7 @@ the boundary line**, at `usr/lib/pouch/patches/`:
 -p1`, and builds out-of-tree (see "Build" below). At sub-chunk 4 the series
 holds two patches — `0001-pouch-syscall-seam.patch` and
 `0002-pouch-stdio-no-iovec.patch` (see "The syscall seam" next); the
-boundary-line replacement continues across sub-chunks 5-12.
+boundary-line replacement continues across the lower-half sub-chunks 7-13.
 
 The series' size is the honest, reviewable measure of pouch's divergence from
 musl. An upstream musl security release is handled by re-vendoring
@@ -446,17 +446,20 @@ emits Mach-O linker arguments (`-arch arm64`, `-platform_version`,
 `-syslibroot`) that the ELF `ld.lld` rejects. The *compiler* path
 (`pouch-clang -c`) is unaffected — clang compiles `aarch64-thylacine` TUs
 correctly; only the *link-driver* role is broken. `build_pouch_progs` sidesteps
-it by invoking `ld.lld` directly with an explicit ELF link line. The
-CMake/autotools build chunks (libsodium, stratumd — sub-chunks 13-15) will need
-a real fix: a `pouch-ld` wrapper, or a `CMAKE_C_LINK_EXECUTABLE` override in the
-CMake toolchain that calls `ld.lld` directly.
+it by invoking `ld.lld` directly with an explicit ELF link line. **Sub-chunk 6
+(`pouch-compiler-rt`) adds a `pouch-ld` wrapper** that drives `ld.lld` with the
+pouch ELF link line, so the CMake/autotools build chunks (libsodium, stratumd —
+sub-chunks 14-16) link cleanly: the CMake toolchain points
+`CMAKE_C_LINK_EXECUTABLE` at `pouch-ld`.
 
 ### The compiler-runtime gap
 
-The pouch sysroot has **no compiler runtime**. A complete C cross-toolchain is
-compiler + libc + CRT + *compiler-rt builtins*; POUCH-DESIGN.md §9 enumerated
-only the first three. Homebrew LLVM ships compiler-rt for the Darwin host only
-— there is no `aarch64` ELF `libclang_rt.builtins` archive on the system.
+The pouch sysroot has **no compiler runtime** yet. A complete C cross-toolchain
+is compiler + libc + CRT + *compiler-rt builtins*. POUCH-DESIGN.md §9 now names
+all four — it originally enumerated only the first three; the omission was
+exactly the `pouch-hello-smoke` finding. Homebrew LLVM ships compiler-rt for the
+Darwin host only — there is no `aarch64` ELF `libclang_rt.builtins` archive on
+the system, so sub-chunk 6 (`pouch-compiler-rt`) vendors + builds it.
 
 `/pouch-hello` and `/pouch-hello-stdio` link clean because they reference no
 compiler-rt builtin (`aarch64` + `-march=...+lse` makes atomics inline; musl is
@@ -464,8 +467,8 @@ self-contained for `mem*`/`str*`). **`printf(3)` does not**: musl's `vfprintf`
 formats `long double` (aarch64 `binary128`), and `binary128` soft-float —
 `__eqtf2`, `__extenddftf2`, `__addtf3`, … — is exactly what compiler-rt
 builtins provide. The literal `printf`-shaped hello of POUCH-DESIGN.md §13/§14
-is therefore **deferred** to an owed `pouch-compiler-rt` sub-chunk (vendor +
-build the compiler-rt builtins for `aarch64-thylacine`).
+is therefore **deferred** to **sub-chunk 6 (`pouch-compiler-rt`)** — vendor +
+build the compiler-rt builtins for `aarch64-thylacine`.
 `/pouch-hello-stdio` proves the buffered-stdio *path* — identical whether the
 bytes arrive via `puts()` or `printf()` — without the format engine.
 
@@ -488,7 +491,7 @@ any failure — the boot-path regression signal.
 ## Public API
 
 Not yet — pouch exposes no API surface at sub-chunk 2. pouch's lower-half API
-(the POSIX runtime layer) lands across sub-chunks 3-12; this section is filled
+(the POSIX runtime layer) lands across sub-chunks 3-13; this section is filled
 in as each lands. The headers pouch will install into the sysroot are musl's
 (`include/`), retargeted at the seam. See `docs/POUCH-DESIGN.md §6, §8` for the
 POSIX surface pouch commits to and the documented-error surface it does not.
@@ -496,11 +499,11 @@ POSIX surface pouch commits to and the documented-error surface it does not.
 ## Data structures
 
 Not yet — see `docs/POUCH-DESIGN.md §7` for the thread model (the first
-pouch-native data structures land with `pouch-threads`, sub-chunk 8).
+pouch-native data structures land with `pouch-threads`, sub-chunk 9).
 
 ## State machines
 
-Not yet. The `torpor` wait-on-address state machine lands with sub-chunk 7
+Not yet. The `torpor` wait-on-address state machine lands with sub-chunk 8
 (`pouch-wait-addr`), spec-first against `specs/futex.tla`.
 
 ## Spec cross-reference
@@ -509,9 +512,9 @@ pouch's invariant-bearing kernel additions are spec-pinned:
 
 | Sub-chunk | Spec | Invariant |
 |---|---|---|
-| 7 `pouch-wait-addr` (`torpor`) | `specs/futex.tla` (#7) | wait-on-address atomicity (I-9) |
-| 12 `pouch-signals` | `specs/notes.tla` (#8) | note delivery ordering (I-19) |
-| 9 `pouch-poll` | `specs/poll.tla` (#6) | missed-wakeup-freedom (I-9) |
+| 8 `pouch-wait-addr` (`torpor`) | `specs/futex.tla` (#7) | wait-on-address atomicity (I-9) |
+| 13 `pouch-signals` | `specs/notes.tla` (#8) | note delivery ordering (I-19) |
+| 10 `pouch-poll` | `specs/poll.tla` (#6) | missed-wakeup-freedom (I-9) |
 
 Sub-chunk 2 introduces no spec obligation (vendoring + scaffolding).
 
@@ -529,7 +532,7 @@ runtime check that an unimplemented syscall yields `ENOSYS` on both musl
 syscall paths — until sub-chunk 5 the `build_sysroot` structural greps were
 the only regression. The Phase 6 proving set — static hello, the multithreaded
 test, the `AF_UNIX` echo pair, libsodium's self-test, stratumd's boot — lands
-across sub-chunks 5, 8, 11, 13, 15. See `docs/POUCH-DESIGN.md §13` for the
+across sub-chunks 5, 9, 12, 14, 16. See `docs/POUCH-DESIGN.md §13` for the
 exit-criteria checklist.
 
 ## Error paths
@@ -556,7 +559,7 @@ opaque failure, `ENOSYS` for an unimplemented call).
 
 Not yet measured. pouch v1.0 is static-only; the `malloc` backend, the
 uncontended-lock fast path (`torpor`), and the `/srv` socket path are the
-performance-relevant surfaces, sized as sub-chunks 6, 7-8, 11 land.
+performance-relevant surfaces, sized as sub-chunks 7, 8-9, 12 land.
 
 ## Status
 
@@ -567,16 +570,17 @@ performance-relevant surfaces, sized as sub-chunks 6, 7-8, 11 land.
 | 3 `pouch-kernel-auxv` | `exec_setup` builds the System V startup frame (auxv); `SYS_SET_TID_ADDRESS` | landed (`d505e73`/`f2a1130`) |
 | 4 `pouch-syscall-seam` | retarget the syscall table; the sentinel; the errno decode; the stdio backend; `build.sh sysroot` builds the real libc | landed (`dbc6bd3`/`aad33d6`) |
 | 5 `pouch-hello-smoke` | the first pouch binaries — `/pouch-hello` + `/pouch-hello-stdio` build + run in Thylacine | landed (`5c0623d`) |
-| 6-15 | mem → torpor → threads → poll → devnodes → sockets → signals → libsodium → stratumd | pending |
+| 6 `pouch-compiler-rt` | the compiler runtime (compiler-rt builtins) + the `pouch-ld` link wrapper + the real `printf` hello | **next** |
+| 7-16 | mem → torpor → threads → poll → devnodes → sockets → signals → libsodium → stratumd | pending |
 
 At sub-chunk 5: the pouch sysroot (sub-chunks 1-4) compiles + links a pouch
 program, and the first two — `/pouch-hello` and `/pouch-hello-stdio` — build,
 load, and run in Thylacine: they print, exit 0, and joey content-checks them
 on every boot. A POSIX C program now runs on a Plan 9-heritage kernel that
 knows nothing about POSIX. What remains for the toolchain to be complete is a
-compiler runtime (the owed `pouch-compiler-rt` sub-chunk — see "The
+compiler runtime — sub-chunk 6 (`pouch-compiler-rt`), next (see "The
 compiler-runtime gap"); pouch's lower half (sockets, threads, signals, the
-allocator) lands across sub-chunks 6-12.
+allocator) lands across sub-chunks 7-13.
 
 ## Known caveats / footguns
 
@@ -614,8 +618,8 @@ allocator) lands across sub-chunks 6-12.
 - **The sysroot has no compiler runtime.** A complete C cross-toolchain needs
   compiler-rt builtins; the pouch sysroot has none (Homebrew LLVM ships only
   Darwin compiler-rt). Programs that reference a builtin — notably `printf`,
-  whose `vfprintf` needs `binary128` soft-float — will not link until the owed
-  `pouch-compiler-rt` sub-chunk lands. See "The compiler-runtime gap."
+  whose `vfprintf` needs `binary128` soft-float — will not link until sub-chunk
+  6 (`pouch-compiler-rt`) lands. See "The compiler-runtime gap."
 
 ## Naming rationale
 
@@ -625,7 +629,7 @@ develops, sheltered, until it can survive in the open. Foreign POSIX C code
 the kernel beneath is not the one it was written for. Unlike Plan 9's APE (the
 second-class ANSI/POSIX Environment), pouch is a first-class, central,
 nurturing system component. **torpor** — the wait-on-address primitive
-(sub-chunk 7) — is the marsupial deep-sleep state: a thread enters torpor on an
+(sub-chunk 8) — is the marsupial deep-sleep state: a thread enters torpor on an
 address until another thread rouses it. See POUCH-DESIGN.md §16.
 
 ---
