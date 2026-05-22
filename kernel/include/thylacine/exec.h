@@ -42,6 +42,9 @@ struct Proc;
 //                                   reserved, unmapped, prot==0).
 //   0x0000_0000_7FFC_0000          User stack base (EXEC_USER_STACK_BASE).
 //   0x0000_0000_8000_0000          User stack TOP (initial SP_EL0).
+//   0x0000_0001_0000_0000          Burrow-attach window base — the range
+//   ...                             SYS_BURROW_ATTACH places anonymous
+//   0x0000_4000_0000_0000          regions into (first-fit upward).
 //
 // The user-stack region is well below the TTBR1 split (0x0001_0000_*)
 // and well above typical ELF segment vaddrs + BSS heaps. Sized 256 KiB
@@ -62,6 +65,31 @@ struct Proc;
 #define EXEC_USER_STACK_BASE         (EXEC_USER_STACK_TOP - EXEC_USER_STACK_SIZE)
 #define EXEC_USER_STACK_GUARD_SIZE   0x1000ull
 #define EXEC_USER_STACK_GUARD_BASE   (EXEC_USER_STACK_BASE - EXEC_USER_STACK_GUARD_SIZE)
+
+// P6-pouch-mem: the burrow-attach window — the user-VA range SYS_BURROW_
+// ATTACH places anonymous Burrows into (ARCHITECTURE.md §6.5, Tier 1).
+// The base sits at 4 GiB, well above the user stack TOP (0x8000_0000),
+// so an attached region can never collide with the ELF image (low VAs),
+// the stack, or the stack guard. The top (64 TiB) is well under
+// USER_VA_TOP (2^47 = 128 TiB), the hard ceiling burrow_map enforces;
+// the headroom above is reserved for future Tier-2 (handle-backed
+// Burrow) placement. The kernel first-fit-scans the window via
+// vma_find_gap — userspace never chooses an address (no MAP_FIXED).
+#define EXEC_USER_BURROW_BASE   0x0000000100000000ull
+#define EXEC_USER_BURROW_TOP    0x0000400000000000ull
+
+// The burrow window must not overlap the user stack / guard / ELF
+// region — the isolation guarantee that SYS_BURROW_ATTACH never lands
+// on, and SYS_BURROW_DETACH never dismantles, the stack rests on this
+// inequality. And it must stay under USER_VA_TOP (2^47), the hard
+// ceiling burrow_map enforces. Pinned at build time (F3, P6-pouch-mem-a
+// audit) so a future edit to either constant cannot silently break it.
+_Static_assert(EXEC_USER_BURROW_BASE >= EXEC_USER_STACK_TOP,
+               "burrow-attach window must sit above the user stack");
+_Static_assert(EXEC_USER_BURROW_BASE < EXEC_USER_BURROW_TOP,
+               "burrow-attach window must be non-empty");
+_Static_assert(EXEC_USER_BURROW_TOP <= (1ull << 47),
+               "burrow-attach window must stay under USER_VA_TOP (2^47)");
 
 // Initial process stack — the System V process-startup frame exec_setup
 // builds at the very top of the user stack (POUCH-DESIGN.md §12.1). A C

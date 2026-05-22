@@ -125,6 +125,23 @@ void vma_remove(struct Proc *p, struct Vma *v);
 // `vaddr_start <= vaddr < vaddr_end` as the membership predicate.
 struct Vma *vma_lookup(struct Proc *p, u64 vaddr);
 
+// P6-pouch-mem: first-fit free-range finder for SYS_BURROW_ATTACH.
+// Scans Proc `p`'s sorted VMA list for the lowest free gap of at least
+// `length` bytes within [window_start, window_end). On success writes
+// the gap's base VA to *out_vaddr and returns 0; returns -1 if no gap
+// of that size fits (or on a constraint violation).
+//
+// `length` must be > 0 and page-aligned; `window_start <= window_end`,
+// both page-aligned. The returned range [*out_vaddr, *out_vaddr+length)
+// overlaps no existing VMA — vma_insert's overlap rejection is the
+// backstop, but a correct find never trips it.
+//
+// Caller must hold the serializing lock (Proc.vma_lock) across the
+// find AND the subsequent vma_insert — the same single-mutator
+// discipline vma_insert / vma_remove already assume.
+int vma_find_gap(struct Proc *p, u64 length,
+                 u64 window_start, u64 window_end, u64 *out_vaddr);
+
 // Walk every VMA in Proc `p`'s list and free it. Used at proc_free
 // to release all VMAs (and decrement their VMOs' mapping counts).
 // Caller (proc_free) calls this BEFORE handle_table_free — handle

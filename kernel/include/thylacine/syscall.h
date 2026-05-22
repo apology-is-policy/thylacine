@@ -588,6 +588,48 @@ enum {
     // pouch-threads sub-chunk (POUCH-DESIGN.md §12.4); it is wired there
     // alongside the per-thread tid. Never fails for a userspace caller.
     SYS_SET_TID_ADDRESS = 36,  // arg: tidptr (x0)
+
+    // P6-pouch-mem: SYS_BURROW_ATTACH(length) → vaddr
+    //   x0 = length   bytes; 1..BURROW_ATTACH_MAX. Rounded up to a
+    //                 PAGE_SIZE multiple.
+    // Attach an anonymous Burrow of `length` bytes into the calling
+    // Proc's address space and return its base user-VA. The kernel
+    // chooses the address — a first-fit scan (vma_find_gap) of the
+    // burrow-attach window (EXEC_USER_BURROW_BASE..TOP, well above the
+    // user stack). The region is RW, demand-zero. The v1.0 native
+    // memory-growth primitive (ARCHITECTURE.md §6.5 Tier 1) — the
+    // substrate for libt's and pouch's malloc.
+    //
+    // Wraps the audited burrow_create_anon → burrow_map(RW) →
+    // burrow_unref discipline: the installed VMA's mapping_count keeps
+    // the Burrow alive, handle_count is 0 (no handle — Tier 1). Pages
+    // are eagerly allocated by burrow_create_anon (power-of-2 page
+    // rounding); PTEs install on demand via the user-fault path.
+    //
+    // Returns the page-aligned base VA (≥ EXEC_USER_BURROW_BASE, so
+    // never negative) on success, -1 on:
+    //   - length == 0 or length > BURROW_ATTACH_MAX
+    //   - no free range of the rounded length in the burrow window
+    //   - burrow_create_anon / burrow_map OOM
+    SYS_BURROW_ATTACH = 37,  // arg: length (x0)
+
+    // P6-pouch-mem: SYS_BURROW_DETACH(vaddr, length) → 0 / -1
+    //   x0 = vaddr    the base VA a prior SYS_BURROW_ATTACH returned
+    //   x1 = length   the attached length — the caller's original
+    //                 request OR any value that page-rounds to the
+    //                 same span (the match is on the page-rounded
+    //                 [vaddr, vaddr + round_up(length)) range)
+    // Detach a region previously attached by SYS_BURROW_ATTACH. The
+    // (vaddr, rounded length) must match an installed VMA exactly — no
+    // partial detach at v1.0 (mirrors burrow_unmap's constraint). The
+    // VMA is removed and, mapping_count reaching 0 with handle_count
+    // already 0, the Burrow's pages are freed.
+    //
+    // Returns 0 on success, -1 on:
+    //   - length == 0 or length > BURROW_ATTACH_MAX
+    //   - vaddr not page-aligned
+    //   - no VMA matches [vaddr, vaddr + round_up(length)) exactly
+    SYS_BURROW_DETACH = 38,  // arg: vaddr (x0), length (x1)
 };
 
 // SYS_WALK_OPEN's FROM_ROOT sentinel: when passed as the spoor_fd, the
@@ -678,6 +720,17 @@ _Static_assert(__builtin_offsetof(struct srv_peer_info, alive) == 20,
 // (0x10). Phase 5+ may extend (OCEXEC=0x20, ORCLOSE=0x40, OEXCL=0x1000)
 // as callers materialize. Any bit outside this mask → -1.
 #define SYS_WALK_OPEN_OMODE_VALID  0x13u
+
+// Maximum length for a single SYS_BURROW_ATTACH (and the matching
+// SYS_BURROW_DETACH). A v1.0 sanity bound: burrow_create_anon allocates
+// pages eagerly through the buddy allocator (which tops out at order 18
+// = 1 GiB; ARCHITECTURE.md §6.3), so a single attach far larger than any
+// v1.0 workload's arena is almost certainly a bug or an overflow. 256
+// MiB is generous headroom for stratumd / libsodium yet keeps the eager
+// allocation bounded — pouch's mallocng makes many modest attaches,
+// never one enormous one. Being page-aligned, it also bounds the
+// page-rounding so `length + PAGE_SIZE` cannot overflow.
+#define BURROW_ATTACH_MAX  (256u * 1024u * 1024u)
 
 struct exception_context;
 

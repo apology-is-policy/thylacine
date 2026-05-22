@@ -40,6 +40,8 @@ void vma_free(struct Vma *v);
 int  vma_insert(struct Proc *p, struct Vma *v);
 void vma_remove(struct Proc *p, struct Vma *v);
 struct Vma *vma_lookup(struct Proc *p, u64 vaddr);
+int  vma_find_gap(struct Proc *p, u64 length,
+                  u64 window_start, u64 window_end, u64 *out_vaddr);
 void vma_drain(struct Proc *p);
 
 u64 vma_total_allocated(void);
@@ -190,6 +192,7 @@ Phase 5+ RB-tree converts insert/lookup to O(log N).
 - **Stubbed**: arch_fault_handle's user-mode dispatch path → vma_lookup → demand paging (P3-Dc).
 - **Stubbed**: partial unmap (sub-VMA range) — post-v1.0.
 - **P5-secondary-stack-guard**: `vma_alloc_guard` — the no-BURROW, `prot==0` reserved guard VMA. `exec_map_user_stack` installs one as the user-stack guard page; closes corvus-bringup-d audit F7. Regression: `exec.user_stack_guard` (test_exec.c).
+- **P6-pouch-mem-a**: `vma_find_gap` — the first-fit free-range finder for `SYS_BURROW_ATTACH` (the v1.0 anonymous-memory syscall; see `docs/reference/79-sys-burrow.md`). A single forward pass over the sorted list advances a candidate base past every blocking VMA. New per-Proc `vma_lock` serializes the burrow-attach / detach VMA-list mutation. 4 new `vma.find_gap_*` tests.
 
 ## Known caveats / footguns
 
@@ -199,7 +202,7 @@ Phase 5+ RB-tree converts insert/lookup to O(log N).
 
 3. **W+X rejection is layered**. The VMA layer rejects W+X; the PTE constructors reject W+X; the ELF loader rejects W+X. Three layers of defense for ARCH §28 I-12.
 
-4. **Phase 5+ multi-thread Procs need a per-Proc lock** around vma_insert/remove. v1.0 single-thread Procs sidestep the issue. Trip-hazard documented.
+4. **Multi-thread Procs need a per-Proc lock around VMA-list mutation.** P6-pouch-mem-a added the `spin_lock_t vma_lock` field to `struct Proc`; `SYS_BURROW_ATTACH` / `SYS_BURROW_DETACH` hold it across their find-gap + insert / lookup + remove sequences. At v1.0 Procs are single-threaded so it is uncontended; the `pouch-threads` sub-chunk extends the lock's coverage to the remaining mutators (`exec_setup`'s `burrow_map` calls, `vma_drain`) and the page-fault `vma_lookup` reader.
 
 5. **VMA list is sorted**. `vma_insert` relies on this for overlap detection AND lookup early-exit. Direct manipulation of `p->vmas` outside the API risks breaking the invariant; only `vma_insert/remove/drain` should mutate.
 

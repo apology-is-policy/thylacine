@@ -249,3 +249,163 @@ void test_vma_drain_releases_all(void) {
     proc_free(p);
     burrow_unref(burrow);
 }
+
+// =============================================================================
+// P6-pouch-mem: vma_find_gap — first-fit free-range finder.
+// =============================================================================
+
+// A test window well above the VA_BASE test VMAs (256 MiB) — distinct, so a
+// VMA outside the window provably does not perturb the scan.
+#define GAP_WIN_BASE   0x40000000ull                  // 1 GiB
+#define GAP_WIN_END    (GAP_WIN_BASE + 0x100000ull)   // + 1 MiB
+
+void test_vma_find_gap_smoke(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc failed");
+    struct Burrow *burrow = burrow_create_anon(VA_2MIB);
+    TEST_ASSERT(burrow != NULL, "burrow_create_anon failed");
+
+    u64 out = 0;
+
+    // Empty list: the gap is the window base.
+    TEST_EXPECT_EQ(vma_find_gap(p, VA_PAGE, GAP_WIN_BASE, GAP_WIN_END, &out),
+                   0, "find_gap on an empty list");
+    TEST_EXPECT_EQ(out, GAP_WIN_BASE, "empty-list gap == window base");
+
+    // A VMA far below the window must not perturb the scan.
+    struct Vma *below = vma_alloc(VA_BASE, VA_BASE + VA_PAGE,
+                                  VMA_PROT_RW, burrow, 0);
+    TEST_ASSERT(below && vma_insert(p, below) == 0, "insert sub-window VMA");
+    TEST_EXPECT_EQ(vma_find_gap(p, VA_PAGE, GAP_WIN_BASE, GAP_WIN_END, &out),
+                   0, "find_gap ignores a sub-window VMA");
+    TEST_EXPECT_EQ(out, GAP_WIN_BASE, "gap still at window base");
+
+    // A VMA at the window base: the gap moves past it.
+    struct Vma *v1 = vma_alloc(GAP_WIN_BASE, GAP_WIN_BASE + VA_PAGE,
+                               VMA_PROT_RW, burrow, 0);
+    TEST_ASSERT(v1 && vma_insert(p, v1) == 0, "insert v1 at window base");
+    TEST_EXPECT_EQ(vma_find_gap(p, VA_PAGE, GAP_WIN_BASE, GAP_WIN_END, &out),
+                   0, "find_gap past a base VMA");
+    TEST_EXPECT_EQ(out, GAP_WIN_BASE + VA_PAGE, "gap placed after v1");
+
+    // A second VMA leaving a 2-page hole between v1 and v2.
+    struct Vma *v2 = vma_alloc(GAP_WIN_BASE + 3 * VA_PAGE,
+                               GAP_WIN_BASE + 4 * VA_PAGE,
+                               VMA_PROT_RW, burrow, 0);
+    TEST_ASSERT(v2 && vma_insert(p, v2) == 0, "insert v2");
+    TEST_EXPECT_EQ(vma_find_gap(p, 2 * VA_PAGE, GAP_WIN_BASE, GAP_WIN_END, &out),
+                   0, "find_gap fits the 2-page hole");
+    TEST_EXPECT_EQ(out, GAP_WIN_BASE + VA_PAGE, "2-page gap == the hole base");
+    // First-fit: a 1-page request also takes the lowest gap.
+    TEST_EXPECT_EQ(vma_find_gap(p, VA_PAGE, GAP_WIN_BASE, GAP_WIN_END, &out),
+                   0, "find_gap 1-page first-fit");
+    TEST_EXPECT_EQ(out, GAP_WIN_BASE + VA_PAGE, "1-page gap == lowest hole");
+
+    vma_drain(p);
+    p->state = 2;
+    proc_free(p);
+    burrow_unref(burrow);
+}
+
+void test_vma_find_gap_no_fit(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc failed");
+    struct Burrow *burrow = burrow_create_anon(VA_2MIB);
+    TEST_ASSERT(burrow != NULL, "burrow_create_anon failed");
+
+    u64 out = 0;
+
+    // A window too small for the request is rejected up front.
+    TEST_EXPECT_EQ(vma_find_gap(p, 2 * VA_PAGE, GAP_WIN_BASE,
+                                GAP_WIN_BASE + VA_PAGE, &out),
+                   -1, "window smaller than length rejected");
+
+    // A VMA spanning the entire window leaves no gap.
+    struct Vma *full = vma_alloc(GAP_WIN_BASE, GAP_WIN_END,
+                                 VMA_PROT_RW, burrow, 0);
+    TEST_ASSERT(full && vma_insert(p, full) == 0, "insert window-spanning VMA");
+    TEST_EXPECT_EQ(vma_find_gap(p, VA_PAGE, GAP_WIN_BASE, GAP_WIN_END, &out),
+                   -1, "no gap in a fully-occupied window");
+    vma_drain(p);
+
+    // A VMA covering all but the final page: a 2-page request cannot fit,
+    // but a 1-page request takes the tail.
+    struct Vma *most = vma_alloc(GAP_WIN_BASE, GAP_WIN_END - VA_PAGE,
+                                 VMA_PROT_RW, burrow, 0);
+    TEST_ASSERT(most && vma_insert(p, most) == 0, "insert all-but-last-page VMA");
+    TEST_EXPECT_EQ(vma_find_gap(p, 2 * VA_PAGE, GAP_WIN_BASE, GAP_WIN_END, &out),
+                   -1, "2-page request cannot fit a 1-page tail");
+    TEST_EXPECT_EQ(vma_find_gap(p, VA_PAGE, GAP_WIN_BASE, GAP_WIN_END, &out),
+                   0, "1-page request fits the tail");
+    TEST_EXPECT_EQ(out, GAP_WIN_END - VA_PAGE, "tail gap base");
+
+    vma_drain(p);
+    p->state = 2;
+    proc_free(p);
+    burrow_unref(burrow);
+}
+
+void test_vma_find_gap_constraints(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc failed");
+
+    u64 out = 0;
+
+    TEST_EXPECT_EQ(vma_find_gap(NULL, VA_PAGE, GAP_WIN_BASE, GAP_WIN_END, &out),
+                   -1, "NULL Proc rejected");
+    TEST_EXPECT_EQ(vma_find_gap(p, VA_PAGE, GAP_WIN_BASE, GAP_WIN_END, NULL),
+                   -1, "NULL out_vaddr rejected");
+    TEST_EXPECT_EQ(vma_find_gap(p, 0, GAP_WIN_BASE, GAP_WIN_END, &out),
+                   -1, "zero length rejected");
+    TEST_EXPECT_EQ(vma_find_gap(p, VA_PAGE + 1, GAP_WIN_BASE, GAP_WIN_END, &out),
+                   -1, "unaligned length rejected");
+    TEST_EXPECT_EQ(vma_find_gap(p, VA_PAGE, GAP_WIN_BASE + 1, GAP_WIN_END, &out),
+                   -1, "unaligned window_start rejected");
+    TEST_EXPECT_EQ(vma_find_gap(p, VA_PAGE, GAP_WIN_BASE, GAP_WIN_END + 1, &out),
+                   -1, "unaligned window_end rejected");
+    TEST_EXPECT_EQ(vma_find_gap(p, VA_PAGE, GAP_WIN_END, GAP_WIN_BASE, &out),
+                   -1, "inverted window rejected");
+
+    p->state = 2;
+    proc_free(p);
+}
+
+void test_vma_find_gap_straddle(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc failed");
+    struct Burrow *burrow = burrow_create_anon(VA_2MIB);
+    TEST_ASSERT(burrow != NULL, "burrow_create_anon failed");
+
+    u64 out = 0;
+
+    // A VMA straddling the window's lower edge (starts below window_start,
+    // ends inside): the candidate must advance to the VMA's end, not the
+    // window base.
+    struct Vma *lo = vma_alloc(GAP_WIN_BASE - VA_PAGE, GAP_WIN_BASE + VA_PAGE,
+                               VMA_PROT_RW, burrow, 0);
+    TEST_ASSERT(lo && vma_insert(p, lo) == 0, "insert window-start straddler");
+    TEST_EXPECT_EQ(vma_find_gap(p, VA_PAGE, GAP_WIN_BASE, GAP_WIN_END, &out),
+                   0, "find_gap past a window-start straddler");
+    TEST_EXPECT_EQ(out, GAP_WIN_BASE + VA_PAGE,
+                   "gap starts at the straddler's end, not the window base");
+
+    // A VMA straddling the window's upper edge (starts inside, ends past
+    // window_end). The free span is now exactly [base+1p, end-1p); the
+    // scan must jump the candidate across `lo` to find it, accept an
+    // exact-fit request, and reject one a page larger.
+    struct Vma *hi = vma_alloc(GAP_WIN_END - VA_PAGE, GAP_WIN_END + VA_PAGE,
+                               VMA_PROT_RW, burrow, 0);
+    TEST_ASSERT(hi && vma_insert(p, hi) == 0, "insert window-end straddler");
+    u64 free_span = (GAP_WIN_END - VA_PAGE) - (GAP_WIN_BASE + VA_PAGE);
+    TEST_EXPECT_EQ(vma_find_gap(p, free_span, GAP_WIN_BASE, GAP_WIN_END, &out),
+                   0, "exact-fit request between the two straddlers");
+    TEST_EXPECT_EQ(out, GAP_WIN_BASE + VA_PAGE, "exact-fit gap base");
+    TEST_EXPECT_EQ(vma_find_gap(p, free_span + VA_PAGE, GAP_WIN_BASE,
+                                GAP_WIN_END, &out),
+                   -1, "a request one page too large is rejected");
+
+    vma_drain(p);
+    p->state = 2;
+    proc_free(p);
+    burrow_unref(burrow);
+}

@@ -194,6 +194,53 @@ struct Vma *vma_lookup(struct Proc *p, u64 vaddr) {
     return NULL;
 }
 
+// P6-pouch-mem: first-fit free-range finder for SYS_BURROW_ATTACH. The
+// VMA list is sorted by vaddr_start ascending, so a single forward pass
+// — advancing a candidate base past every VMA that blocks it — finds
+// the lowest free gap of `length` bytes in [window_start, window_end).
+int vma_find_gap(struct Proc *p, u64 length,
+                 u64 window_start, u64 window_end, u64 *out_vaddr) {
+    if (!p || !out_vaddr)                          return -1;
+    if (length == 0)                               return -1;
+    if (length        & (PAGE_SIZE - 1))           return -1;
+    if (window_start  & (PAGE_SIZE - 1))           return -1;
+    if (window_end    & (PAGE_SIZE - 1))           return -1;
+    if (window_start > window_end)                 return -1;
+    if (window_end - window_start < length)        return -1;
+
+    // `cand` is the lowest VA not yet ruled out. Every comparison uses
+    // subtraction guarded by an ordering check, so no `cand + length`
+    // sum is ever formed — overflow-free for any window in the 2^47
+    // user-VA space.
+    u64 cand = window_start;
+    for (struct Vma *cur = p->vmas; cur; cur = cur->next) {
+        if (cur->magic != VMA_MAGIC)
+            extinction("vma_find_gap: corrupted list entry");
+        // A VMA entirely at/below `cand` does not constrain it.
+        if (cur->vaddr_end <= cand)                continue;
+        // A VMA starting at/after the window end cannot bound a gap
+        // inside the window; the list is sorted, so neither can any
+        // later VMA — stop.
+        if (cur->vaddr_start >= window_end)        break;
+        // Does [cand, cand + length) fit in the gap before `cur`?
+        if (cur->vaddr_start >= cand &&
+            cur->vaddr_start - cand >= length) {
+            *out_vaddr = cand;
+            return 0;
+        }
+        // No fit before `cur`; it overlaps or abuts `cand`. Jump the
+        // candidate past it — cur->vaddr_end > cand here (the entirely-
+        // below case was filtered by the first check).
+        cand = cur->vaddr_end;
+    }
+    // Past the last constraining VMA — take the tail gap if it fits.
+    if (cand < window_end && window_end - cand >= length) {
+        *out_vaddr = cand;
+        return 0;
+    }
+    return -1;
+}
+
 void vma_drain(struct Proc *p) {
     if (!p) return;
 

@@ -22,10 +22,12 @@
 #include <thylacine/handle.h>
 #include <thylacine/irqfwd.h>
 #include <thylacine/mmio_handle.h>
+#include <thylacine/page.h>
 #include <thylacine/pipe.h>
 #include <thylacine/poll.h>
 #include <thylacine/proc.h>
 #include <thylacine/random.h>
+#include <thylacine/spinlock.h>
 #include <thylacine/spoor.h>
 #include <thylacine/srvconn.h>
 #include <thylacine/territory.h>
@@ -1214,6 +1216,132 @@ static s64 sys_set_tid_address_handler(u64 tidptr_raw) {
     struct Proc *p = t->proc;
     if (!p)         return -1;
     return (s64)p->pid;
+}
+
+// =============================================================================
+// SYS_BURROW_ATTACH / SYS_BURROW_DETACH — the anonymous-memory syscalls
+// (P6-pouch-mem). The v1.0 native memory-growth primitive — ARCHITECTURE.md
+// §6.5 Tier 1. SYS_BURROW_ATTACH picks a free VA in the burrow-attach window
+// and installs an anonymous RW Burrow; SYS_BURROW_DETACH tears one down.
+// =============================================================================
+//
+// Both run their VMA-list work under p->vma_lock. At v1.0 Procs are single-
+// threaded so the lock is uncontended by construction; it is held so the
+// find-gap + vma_insert sequence (attach) and the lookup + vma_remove
+// sequence (detach) are atomic once the pouch-threads sub-chunk makes Procs
+// multi-threaded. Plain spin_lock (not irqsave): no IRQ handler touches a
+// Proc's VMA list, and the critical section never sleeps — burrow_create_anon
+// / vma_alloc are non-blocking allocations (NULL on OOM, never wait).
+//
+// F2 (P6-pouch-mem-a audit, P3, deferred): attach holds vma_lock across
+// burrow_create_anon's eager (up to BURROW_ATTACH_MAX) page allocation.
+// At v1.0 the lock is uncontended so this is free; the pouch-threads
+// sub-chunk — which introduces real contention — narrows the hold (the
+// find-gap result is advisory, re-validated by vma_insert's overlap
+// reject, so burrow_create_anon can move out of the critical section).
+//
+// The _for_proc inners carry the logic with an explicit Proc so the
+// kernel test harness can drive them on a fresh proc_alloc'd Proc; the
+// SVC handlers are the thin current_thread() wrappers (the
+// sys_pipe_for_proc pattern).
+
+s64 sys_burrow_attach_for_proc(struct Proc *p, u64 length_raw) {
+    if (!p)                                          return -1;
+
+    // Bound the request before rounding so length + PAGE_SIZE - 1 below
+    // cannot overflow. BURROW_ATTACH_MAX is page-aligned, so the rounded
+    // length never exceeds it either.
+    if (length_raw == 0)                             return -1;
+    if (length_raw > BURROW_ATTACH_MAX)              return -1;
+
+    // Round up to a whole number of pages — the VMA and the Burrow both
+    // work in page units.
+    u64 length = (length_raw + (PAGE_SIZE - 1)) & ~(u64)(PAGE_SIZE - 1);
+
+    spin_lock(&p->vma_lock);
+
+    // Pick a free VA — first-fit in the burrow-attach window. The gap is
+    // chosen and the VMA installed under one lock hold, so a sibling
+    // thread's concurrent attach cannot claim the same gap.
+    u64 vaddr;
+    if (vma_find_gap(p, length, EXEC_USER_BURROW_BASE,
+                     EXEC_USER_BURROW_TOP, &vaddr) != 0) {
+        spin_unlock(&p->vma_lock);
+        return -1;
+    }
+
+    // burrow_create_anon: handle_count = 1 (the construction reference),
+    // mapping_count = 0; pages allocated eagerly (power-of-2 rounded).
+    struct Burrow *b = burrow_create_anon(length);
+    if (!b) {
+        spin_unlock(&p->vma_lock);
+        return -1;
+    }
+
+    // burrow_map installs the VMA (vma_alloc → burrow_acquire_mapping,
+    // mapping_count → 1). Then drop the construction handle: handle_count
+    // → 0, mapping_count = 1 keeps the Burrow alive — the exec.c
+    // discipline (Tier 1: no handle, the VMA owns the Burrow). On
+    // burrow_map failure the construction handle is the only reference;
+    // burrow_unref frees the Burrow (mapping_count still 0).
+    if (burrow_map(p, b, vaddr, length, VMA_PROT_RW) != 0) {
+        burrow_unref(b);
+        spin_unlock(&p->vma_lock);
+        return -1;
+    }
+    burrow_unref(b);
+
+    spin_unlock(&p->vma_lock);
+
+    // vaddr is in [EXEC_USER_BURROW_BASE, EXEC_USER_BURROW_TOP) — far
+    // below the s64 sign bit, so a valid base is never mistaken for -1.
+    return (s64)vaddr;
+}
+
+static s64 sys_burrow_attach_handler(u64 length_raw) {
+    struct Thread *t = current_thread();
+    if (!t)                                          return -1;
+    return sys_burrow_attach_for_proc(t->proc, length_raw);
+}
+
+s64 sys_burrow_detach_for_proc(struct Proc *p, u64 vaddr_raw, u64 length_raw) {
+    if (!p)                                          return -1;
+    if (length_raw == 0)                             return -1;
+    if (length_raw > BURROW_ATTACH_MAX)              return -1;
+    if (vaddr_raw & (PAGE_SIZE - 1))                 return -1;
+
+    // Same page-rounding as SYS_BURROW_ATTACH, so a caller may pass
+    // either its original request or the rounded length and still match
+    // the installed VMA's span.
+    u64 length = (length_raw + (PAGE_SIZE - 1)) & ~(u64)(PAGE_SIZE - 1);
+
+    // Confine detach to the burrow-attach window (F1, P6-pouch-mem-a
+    // audit). burrow_unmap matches a VMA by geometry alone — without
+    // this bound a caller could pass the coordinates of its own ELF
+    // segment, stack, or stack-guard VMA and have burrow_unmap dismantle
+    // it (removing the stack guard silently retires a security page).
+    // Every burrow_attach region lives in the window and every ELF /
+    // stack / guard VMA sits below it, so the bound structurally
+    // excludes them. Overflow-safe: length <= BURROW_ATTACH_MAX, far
+    // below EXEC_USER_BURROW_TOP, so TOP - length never underflows.
+    if (vaddr_raw < EXEC_USER_BURROW_BASE)           return -1;
+    if (vaddr_raw > EXEC_USER_BURROW_TOP - length)   return -1;
+
+    spin_lock(&p->vma_lock);
+    // burrow_unmap exact-matches [vaddr, vaddr + length) against an
+    // installed VMA (no partial detach at v1.0), removes it, and frees
+    // the Burrow's pages — mapping_count reaches 0 with handle_count
+    // already 0.
+    int rc = burrow_unmap(p, vaddr_raw, length);
+    spin_unlock(&p->vma_lock);
+
+    return (s64)rc;
+}
+
+static s64 sys_burrow_detach_handler(u64 vaddr_raw, u64 length_raw) {
+    struct Thread *t = current_thread();
+    if (!t)                                          return -1;
+    return sys_burrow_detach_for_proc(t->proc, vaddr_raw, length_raw);
 }
 
 static s64 sys_dup_handler(u64 hraw, u64 new_rights_raw) {
@@ -2846,6 +2974,15 @@ void syscall_dispatch(struct exception_context *ctx) {
 
     case SYS_SET_TID_ADDRESS:
         ctx->regs[0] = (u64)sys_set_tid_address_handler(ctx->regs[0]);
+        return;
+
+    case SYS_BURROW_ATTACH:
+        ctx->regs[0] = (u64)sys_burrow_attach_handler(ctx->regs[0]);
+        return;
+
+    case SYS_BURROW_DETACH:
+        ctx->regs[0] = (u64)sys_burrow_detach_handler(ctx->regs[0],
+                                                      ctx->regs[1]);
         return;
 
     default:

@@ -145,6 +145,17 @@ void test_vma_insert_lookup_smoke(void);
 void test_vma_insert_overlap_rejected(void);
 void test_vma_insert_sorted_invariant(void);
 void test_vma_drain_releases_all(void);
+void test_vma_find_gap_smoke(void);
+void test_vma_find_gap_no_fit(void);
+void test_vma_find_gap_constraints(void);
+void test_vma_find_gap_straddle(void);
+void test_sys_burrow_attach_returns_window_va(void);
+void test_sys_burrow_attach_detach_round_trip(void);
+void test_sys_burrow_attach_distinct(void);
+void test_sys_burrow_attach_rounds_up(void);
+void test_sys_burrow_attach_rejects_bad_length(void);
+void test_sys_burrow_detach_rejects(void);
+void test_sys_burrow_detach_window_confined(void);
 void test_directmap_kva_round_trip(void);
 void test_directmap_alloc_through_directmap(void);
 void test_directmap_vmalloc_mmio_smoke(void);
@@ -750,6 +761,17 @@ struct test_case g_tests[] = {
     { "vma.insert_overlap_rejected",   test_vma_insert_overlap_rejected,   false, NULL },
     { "vma.insert_sorted_invariant",   test_vma_insert_sorted_invariant,   false, NULL },
     { "vma.drain_releases_all",        test_vma_drain_releases_all,        false, NULL },
+    { "vma.find_gap_smoke",            test_vma_find_gap_smoke,            false, NULL },
+    { "vma.find_gap_no_fit",           test_vma_find_gap_no_fit,           false, NULL },
+    { "vma.find_gap_constraints",      test_vma_find_gap_constraints,      false, NULL },
+    { "vma.find_gap_straddle",         test_vma_find_gap_straddle,         false, NULL },
+    { "sys_burrow.attach_returns_window_va",  test_sys_burrow_attach_returns_window_va,  false, NULL },
+    { "sys_burrow.attach_detach_round_trip",  test_sys_burrow_attach_detach_round_trip,  false, NULL },
+    { "sys_burrow.attach_distinct",           test_sys_burrow_attach_distinct,           false, NULL },
+    { "sys_burrow.attach_rounds_up",          test_sys_burrow_attach_rounds_up,          false, NULL },
+    { "sys_burrow.attach_rejects_bad_length", test_sys_burrow_attach_rejects_bad_length, false, NULL },
+    { "sys_burrow.detach_rejects",            test_sys_burrow_detach_rejects,            false, NULL },
+    { "sys_burrow.detach_window_confined",    test_sys_burrow_detach_window_confined,    false, NULL },
     { "directmap.kva_round_trip",      test_directmap_kva_round_trip,      false, NULL },
     { "directmap.alloc_through_directmap",
                                        test_directmap_alloc_through_directmap,

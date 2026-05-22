@@ -22,6 +22,7 @@
 #include <thylacine/caps.h>     // caps_t (P4-Ic3 rfork_with_caps signature)
 #include <thylacine/page.h>     // paddr_t (P3-Bcb pgtable_root)
 #include <thylacine/rendez.h>
+#include <thylacine/spinlock.h>
 #include <thylacine/types.h>
 
 struct Thread;
@@ -225,6 +226,19 @@ struct Proc {
     // (P5-corvus-srv-impl-a3) to stamp a /srv connection's peer
     // identity (CORVUS-DESIGN.md §6.3; specs/corvus.tla ConnRecord.peer).
     u64                stripes;
+
+    // P6-pouch-mem: per-Proc lock serializing VMA-list mutation through
+    // the SYS_BURROW_ATTACH / SYS_BURROW_DETACH syscalls (the find-gap +
+    // vma_insert / vma_remove sequences). At v1.0 Procs are single-
+    // threaded, so it is uncontended by construction; it is in place so
+    // the burrow-attach surface is correct when the pouch-threads sub-
+    // chunk makes Procs multi-threaded — that sub-chunk extends the
+    // lock's coverage to the remaining VMA mutators (exec_setup's
+    // burrow_map calls, vma_drain) and the page-fault vma_lookup reader.
+    // KP_ZERO at proc_alloc / proc_init zero-inits it to the valid
+    // unlocked state (SPIN_LOCK_INIT == (spin_lock_t){ 0 }).
+    spin_lock_t        vma_lock;
+    u32                _pad_vma_lock;     // explicit 8-byte-align padding
 };
 
 #define PROC_FLAG_NODUMP            (1u << 0)
@@ -233,11 +247,11 @@ struct Proc {
 #define PROC_FLAG_CONSOLE_ATTACHED  (1u << 3)
 #define PROC_FLAG_MAY_POST_SERVICE  (1u << 4)
 
-_Static_assert(sizeof(struct Proc) == 144,
-               "struct Proc size pinned at 144 bytes (P5-corvus-syscalls "
-               "baseline 136 + stripes 8 = 144, bumped at P5-corvus-srv-"
-               "impl-a1). Adding a field grows the SLUB cache; update this "
-               "assert deliberately so the change is intentional.");
+_Static_assert(sizeof(struct Proc) == 152,
+               "struct Proc size pinned at 152 bytes (P5-corvus-srv-impl-a1 "
+               "baseline 144 + the P6-pouch-mem vma_lock 4 + _pad 4 = 152). "
+               "Adding a field grows the SLUB cache; update this assert "
+               "deliberately so the change is intentional.");
 _Static_assert(__builtin_offsetof(struct Proc, magic) == 0,
                "magic must be at offset 0 so SLUB's freelist write on "
                "kmem_cache_free clobbers it (double-free defense — "
