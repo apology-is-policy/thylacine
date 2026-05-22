@@ -2,14 +2,14 @@
 
 > **Status note.** This document is the as-built reference for **pouch**,
 > Thylacine's POSIX libc (execution Phase 6). It is written incrementally as
-> Phase 6 sub-chunks land. Through sub-chunk 4 it covers the vendoring of musl,
+> Phase 6 sub-chunks land. Through sub-chunk 5 it covers the vendoring of musl,
 > the boundary-line architecture + inventory, the kernel-side process-startup
-> additions (the auxiliary vector, `SYS_SET_TID_ADDRESS`), and the syscall seam
-> — the syscall-number retarget, the unimplemented-syscall sentinel, the
-> Thylacine error-convention decode, and the stdio backend. Sections for
-> pouch's lower-half API, data structures, and state machines are stubbed with
-> forward pointers and filled in by sub-chunks 5-12. The binding design is
-> `docs/POUCH-DESIGN.md`.
+> additions (the auxiliary vector, `SYS_SET_TID_ADDRESS`), the syscall seam —
+> the syscall-number retarget, the unimplemented-syscall sentinel, the
+> Thylacine error-convention decode, and the stdio backend — and the first
+> pouch binaries running in Thylacine. Sections for pouch's lower-half API,
+> data structures, and state machines are stubbed with forward pointers and
+> filled in by sub-chunks 6-12. The binding design is `docs/POUCH-DESIGN.md`.
 
 ---
 
@@ -389,6 +389,102 @@ series applied, the seam retargeted, the libc semantically Thylacine.
 
 ---
 
+## The first pouch binaries
+
+Sub-chunk 5 (`pouch-hello-smoke`) builds and runs the first POSIX C programs on
+Thylacine. Two binaries, both cross-compiled against the pouch sysroot and
+spawned by joey on the boot path:
+
+- **`/pouch-hello`** — the raw-`write(2)` hello. The first runtime exercise of
+  everything sub-chunks 3-4 built: the System V startup frame (auxv) the kernel
+  writes in `exec_setup`, musl's static CRT (`_start` → `__libc_start_main` →
+  `__init_libc` → `main`), `SYS_SET_TID_ADDRESS` (issued by musl's
+  thread-pointer init), the `write(2)` seam (`write` maps 1:1 onto `SYS_WRITE`),
+  and the `exit` seam (`exit` folds onto `SYS_EXITS`). It is also the durable
+  runtime regression for the `0xFFFF` unimplemented-syscall sentinel: it calls
+  `chdir()` (non-cancellable — `SYS_chdir` is the sentinel, caught by the
+  `__syscall0..6` guard) and `open()` (a cancellation point — `SYS_openat` is
+  the sentinel, caught by the `__syscall_cp` guard, the P6-pouch-syscall-seam
+  audit's F1 fix) and asserts each returns `-1` with `errno == ENOSYS`.
+- **`/pouch-hello-stdio`** — the buffered-stdio hello. `puts()` + `fwrite()`
+  copy bytes into `stdout`'s static `FILE` buffer; the exit-time flush drains
+  it through the patched `__stdio_write` backend
+  (`0002-pouch-stdio-no-iovec.patch` — a `SYS_write` loop). `stdout` is fully
+  buffered: the tty probe (`SYS_ioctl`) hits the sentinel, so musl sees "not a
+  tty" and does not line-buffer. This is deliberately *not* `printf(3)` — see
+  "The compiler-runtime gap" below.
+
+### Building — `tools/build.sh pouch-progs`
+
+`build_pouch_progs` (in `tools/build.sh`) cross-compiles the two programs
+against `build/sysroot/` (built on demand if absent). It is a **two-step**
+build, by necessity:
+
+1. **Compile** — `tools/pouch-clang -c` (clang as the compiler). Each `.c`
+   becomes an `aarch64` ELF relocatable. `-nostdinc -isystem
+   <sysroot>/include` so pouch owns the include path; `-fno-pie` for
+   fixed-address codegen.
+2. **Link** — `ld.lld` invoked **directly** (not through the clang driver).
+
+The link line yields a static, non-PIE `ET_EXEC` whose every `PT_LOAD` segment
+has a **page-aligned file offset** — the layout `kernel/elf.c` +
+`exec_map_segment` accept with no kernel change. `-z separate-loadable-segments`
+is what page-aligns each segment's file offset (`exec_map_segment` rejects a
+non-page-aligned `file_offset`); `-z max-page-size=4096` keeps the alignment at
+4 KiB. `kernel/elf.c` requires `ET_EXEC` (rejects `ET_DYN`/PIE), no
+`PT_INTERP`, no `PT_DYNAMIC` — a static non-PIE link emits none.
+`build_pouch_progs` re-checks `ET_EXEC` + no-`PT_DYNAMIC` after each link, so a
+loader-incompatible binary fails the build, not the boot.
+
+### Why linking cannot go through the clang driver
+
+`tools/pouch-clang` and `cmake/Toolchain-aarch64-pouch.cmake` were written
+(sub-chunk 1) assuming clang would drive the link. On a **macOS host that
+assumption is false**: for the unknown OS `thylacine`, clang's driver falls
+into the **Darwin toolchain** — it routes the link "via gcc" (Apple's `cc`) and
+emits Mach-O linker arguments (`-arch arm64`, `-platform_version`,
+`-syslibroot`) that the ELF `ld.lld` rejects. The *compiler* path
+(`pouch-clang -c`) is unaffected — clang compiles `aarch64-thylacine` TUs
+correctly; only the *link-driver* role is broken. `build_pouch_progs` sidesteps
+it by invoking `ld.lld` directly with an explicit ELF link line. The
+CMake/autotools build chunks (libsodium, stratumd — sub-chunks 13-15) will need
+a real fix: a `pouch-ld` wrapper, or a `CMAKE_C_LINK_EXECUTABLE` override in the
+CMake toolchain that calls `ld.lld` directly.
+
+### The compiler-runtime gap
+
+The pouch sysroot has **no compiler runtime**. A complete C cross-toolchain is
+compiler + libc + CRT + *compiler-rt builtins*; POUCH-DESIGN.md §9 enumerated
+only the first three. Homebrew LLVM ships compiler-rt for the Darwin host only
+— there is no `aarch64` ELF `libclang_rt.builtins` archive on the system.
+
+`/pouch-hello` and `/pouch-hello-stdio` link clean because they reference no
+compiler-rt builtin (`aarch64` + `-march=...+lse` makes atomics inline; musl is
+self-contained for `mem*`/`str*`). **`printf(3)` does not**: musl's `vfprintf`
+formats `long double` (aarch64 `binary128`), and `binary128` soft-float —
+`__eqtf2`, `__extenddftf2`, `__addtf3`, … — is exactly what compiler-rt
+builtins provide. The literal `printf`-shaped hello of POUCH-DESIGN.md §13/§14
+is therefore **deferred** to an owed `pouch-compiler-rt` sub-chunk (vendor +
+build the compiler-rt builtins for `aarch64-thylacine`).
+`/pouch-hello-stdio` proves the buffered-stdio *path* — identical whether the
+bytes arrive via `puts()` or `printf()` — without the format engine.
+
+### joey's smoke orchestration
+
+A pouch binary writes to fd 1 via `SYS_WRITE`; a plain `t_spawn`'d child has no
+fds. joey (`usr/joey/joey.c`, `pouch_smoke_one`) makes a pipe and installs its
+write-end as the child's fd 0 + fd 1 via `t_spawn_with_fds` — a POSIX fd *is* a
+Thylacine handle index (POUCH-DESIGN.md §6.1). joey then **reaps the child
+before draining the pipe**: a Thylacine zombie holds its handle table until
+`proc_free`, which runs at reap (`t_wait_pid`), so the child's write-end does
+not reach EOF until joey reaps it — a drain-until-EOF *before* the reap would
+deadlock. The hello output is far under the 4 KiB pipe ring, so the child never
+blocks on `write` and exits on its own; joey reaps, then drains the buffered
+bytes to the boot-log UART and content-checks them. joey returns non-zero on
+any failure — the boot-path regression signal.
+
+---
+
 ## Public API
 
 Not yet — pouch exposes no API surface at sub-chunk 2. pouch's lower-half API
@@ -421,16 +517,19 @@ Sub-chunk 2 introduces no spec obligation (vendoring + scaffolding).
 
 ## Tests
 
-Sub-chunk 2 adds no kernel-test-suite cases (vendoring + scaffolding; no kernel
-code). Sub-chunk 4 (`pouch-syscall-seam`) adds none either — it changes no
-kernel code, so the kernel suite stays **538/538**. Its verification is
-`tools/build.sh sysroot`: the patched musl must build 0 errors / 0 warnings,
-and the build asserts the seam retarget landed (`SYS_write` → 10, `SYS_writev`
-→ the sentinel). The first *runtime* exercise of the seam is sub-chunk 5
-(`pouch-hello-smoke`) — a static hello built against the sysroot. The Phase 6
-proving set — static hello, `printf` hello, the multithreaded test, the
-`AF_UNIX` echo pair, libsodium's self-test, stratumd's boot — lands across
-sub-chunks 5, 8, 11, 13, 15. See `docs/POUCH-DESIGN.md §13` for the
+Sub-chunks 2 and 4 add no kernel-test-suite cases (vendoring, scaffolding, and
+the syscall-seam retarget change no kernel code; the kernel suite stays
+**538/538**). Sub-chunk 5 (`pouch-hello-smoke`) adds none either — it touches
+no kernel code — but it lands the seam's first *runtime* regression: joey
+spawns `/pouch-hello` + `/pouch-hello-stdio` on every boot, relays +
+content-checks their output, and asserts each exits 0 (joey returns non-zero,
+a boot-path regression signal, on any mismatch). `/pouch-hello`'s two sentinel
+assertions (`chdir` non-cancellable, `open` cancellable) are the durable
+runtime check that an unimplemented syscall yields `ENOSYS` on both musl
+syscall paths — until sub-chunk 5 the `build_sysroot` structural greps were
+the only regression. The Phase 6 proving set — static hello, the multithreaded
+test, the `AF_UNIX` echo pair, libsodium's self-test, stratumd's boot — lands
+across sub-chunks 5, 8, 11, 13, 15. See `docs/POUCH-DESIGN.md §13` for the
 exit-criteria checklist.
 
 ## Error paths
@@ -466,17 +565,18 @@ performance-relevant surfaces, sized as sub-chunks 6, 7-8, 11 land.
 | 1 `pouch-toolchain` | the `aarch64-thylacine` cross toolchain | landed (`90b5333`/`e03be8d`) |
 | 2 `pouch-musl-vendor` | vendor musl 1.2.5; patch-series scaffold; upper-half probe | landed (`6f60b7e`/`45e287e`) |
 | 3 `pouch-kernel-auxv` | `exec_setup` builds the System V startup frame (auxv); `SYS_SET_TID_ADDRESS` | landed (`d505e73`/`f2a1130`) |
-| 4 `pouch-syscall-seam` | retarget the syscall table; the sentinel; the errno decode; the stdio backend; `build.sh sysroot` builds the real libc | **this chunk** |
-| 5-15 | hello → mem → torpor → threads → poll → devnodes → sockets → signals → libsodium → stratumd | pending |
+| 4 `pouch-syscall-seam` | retarget the syscall table; the sentinel; the errno decode; the stdio backend; `build.sh sysroot` builds the real libc | landed (`dbc6bd3`/`aad33d6`) |
+| 5 `pouch-hello-smoke` | the first pouch binaries — `/pouch-hello` + `/pouch-hello-stdio` build + run in Thylacine | **this chunk** |
+| 6-15 | mem → torpor → threads → poll → devnodes → sockets → signals → libsodium → stratumd | pending |
 
-At sub-chunk 4: musl 1.2.5 is vendored (sub-chunk 2); `exec_setup` builds the
-System V process-startup frame and `SYS_SET_TID_ADDRESS` is registered
-(sub-chunk 3 — deep-dive `docs/reference/27-exec.md` "Initial process stack").
-This sub-chunk retargets the **syscall seam** (above) and makes
-`tools/build.sh sysroot` build the real pouch `libc.a` — patched, retargeted,
-semantically Thylacine — into `build/sysroot/{include,lib}` (the headers,
-`libc.a`, and CRT objects). The sysroot can now compile + link a pouch
-program; the first one — a static hello — runs at sub-chunk 5.
+At sub-chunk 5: the pouch sysroot (sub-chunks 1-4) compiles + links a pouch
+program, and the first two — `/pouch-hello` and `/pouch-hello-stdio` — build,
+load, and run in Thylacine: they print, exit 0, and joey content-checks them
+on every boot. A POSIX C program now runs on a Plan 9-heritage kernel that
+knows nothing about POSIX. What remains for the toolchain to be complete is a
+compiler runtime (the owed `pouch-compiler-rt` sub-chunk — see "The
+compiler-runtime gap"); pouch's lower half (sockets, threads, signals, the
+allocator) lands across sub-chunks 6-12.
 
 ## Known caveats / footguns
 
@@ -505,6 +605,17 @@ program; the first one — a static hello — runs at sub-chunk 5.
   sentinel is the marker of an un-done lower-half call.
 - **`build/pouch/` and `build/sysroot/` are gitignored** and rebuilt from
   scratch by every `tools/build.sh sysroot` (~1-2 min); they are not committed.
+- **Linking must invoke `ld.lld` directly.** clang as the ELF *link driver*
+  is broken on a macOS host for the `aarch64-thylacine` triple — it falls into
+  the Darwin toolchain and emits Mach-O linker arguments. The compiler path
+  (`pouch-clang -c`) is fine. `build_pouch_progs` links with `ld.lld`
+  directly; the CMake/autotools build chunks will need a real toolchain fix.
+  See "Why linking cannot go through the clang driver."
+- **The sysroot has no compiler runtime.** A complete C cross-toolchain needs
+  compiler-rt builtins; the pouch sysroot has none (Homebrew LLVM ships only
+  Darwin compiler-rt). Programs that reference a builtin — notably `printf`,
+  whose `vfprintf` needs `binary128` soft-float — will not link until the owed
+  `pouch-compiler-rt` sub-chunk lands. See "The compiler-runtime gap."
 
 ## Naming rationale
 

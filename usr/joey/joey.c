@@ -50,6 +50,20 @@ static const char *itoa_dec(long v, char *buf, size_t buf_sz) {
     return buf;
 }
 
+// mem_contains — is `needle` (length nlen) a substring of `hay` (length
+// hlen)? A tiny no-libc helper for content-checking relayed child output.
+static int mem_contains(const unsigned char *hay, size_t hlen,
+                        const char *needle, size_t nlen) {
+    if (nlen == 0) return 1;
+    if (nlen > hlen) return 0;
+    for (size_t i = 0; i + nlen <= hlen; i++) {
+        size_t j = 0;
+        while (j < nlen && hay[i + j] == (unsigned char)needle[j]) j++;
+        if (j == nlen) return 1;
+    }
+    return 0;
+}
+
 // =============================================================================
 // corvus wire helpers — CORVUS-DESIGN.md §6.4 binary frames over a
 // single /srv/corvus connection handle.
@@ -318,6 +332,118 @@ static int do_stratumd_stub_bringup(void) {
     return 0;
 }
 
+// =============================================================================
+// pouch hello smoke (P6-pouch-hello-smoke). The first POSIX C programs
+// Thylacine runs — /pouch-hello and /pouch-hello-stdio, built against the
+// pouch libc (musl's portable upper half + the Thylacine-native syscall
+// seam). They are the first *runtime* exercise of the auxv startup frame,
+// musl's static CRT, SYS_SET_TID_ADDRESS, the write(2) seam, the exit
+// seam, the 0xFFFF unimplemented-syscall sentinel, and the buffered-stdio
+// backend.
+// =============================================================================
+
+// pouch_smoke_one — spawn one pouch test binary with its stdout (fd 1)
+// wired to a pipe, verify it exited 0, then relay its output to the
+// boot-log UART and check it printed `expect`. Returns 0 / -1.
+//
+// A pouch binary is a POSIX C program: it writes via SYS_WRITE to fd 1,
+// which a plain t_spawn'd child does not have. joey makes a pipe and
+// installs its write-end as the child's fd 0 + fd 1 via t_spawn_with_fds
+// (a POSIX fd *is* a Thylacine handle index — POUCH-DESIGN.md §6.1). fd 0
+// is unused — the hello binaries never read stdin.
+//
+// Ordering matters: joey REAPS the child (t_wait_pid) BEFORE draining the
+// pipe. A Thylacine zombie holds its handle table until proc_free, which
+// runs at reap — so the child's write-end stays open (no EOF) until joey
+// reaps it. A read-until-EOF before the reap would deadlock. The child's
+// output is far under the 4 KiB pipe ring, so it never blocks on write
+// and reaches exit on its own; joey reaps, then drains the buffered
+// bytes. (Same lesson as do_stratumd_stub_bringup.)
+static int pouch_smoke_one(const char *name, size_t name_len,
+                           const char *expect, size_t expect_len) {
+    long rd = -1, wr = -1;
+    if (t_pipe(&rd, &wr) < 0) {
+        t_putstr("joey: pouch-smoke t_pipe FAILED\n");
+        return -1;
+    }
+    unsigned int fds[2] = { (unsigned int)wr, (unsigned int)wr };
+    long pid = t_spawn_with_fds(name, name_len, fds, 2);
+    if (pid <= 0) {
+        t_putstr("joey: pouch-smoke t_spawn_with_fds FAILED\n");
+        (void)t_close(rd);
+        (void)t_close(wr);
+        return -1;
+    }
+    // Drop joey's writer ref. The child's two refs remain — released only
+    // when the child is reaped below.
+    if (t_close(wr) != 0) {
+        t_putstr("joey: pouch-smoke t_close(wr) FAILED\n");
+        (void)t_close(rd);
+        return -1;
+    }
+    // Reap the child first. t_wait_pid blocks until it zombies; proc_free
+    // then drains its handle table, closing the pipe write-end.
+    int status = -1;
+    long reaped = t_wait_pid(&status);
+    if (reaped != pid) {
+        t_putstr("joey: pouch-smoke t_wait_pid wrong pid\n");
+        (void)t_close(rd);
+        return -1;
+    }
+    // The write-end is now fully closed: drain the buffered output to the
+    // boot-log UART, accumulating into `acc` for the content check.
+    unsigned char acc[512];
+    size_t acc_len = 0;
+    for (;;) {
+        unsigned char buf[256];
+        long n = t_read(rd, buf, sizeof(buf));
+        if (n < 0) {
+            t_putstr("joey: pouch-smoke t_read FAILED\n");
+            (void)t_close(rd);
+            return -1;
+        }
+        if (n == 0) break;  // EOF — write side closed at reap
+        (void)t_puts((const char *)buf, (size_t)n);
+        for (long i = 0; i < n && acc_len < sizeof(acc); i++)
+            acc[acc_len++] = buf[i];
+    }
+    if (t_close(rd) != 0) {
+        t_putstr("joey: pouch-smoke t_close(rd) FAILED\n");
+        return -1;
+    }
+    if (status != 0) {
+        t_putstr("joey: pouch-smoke child exited non-zero\n");
+        return -1;
+    }
+    if (!mem_contains(acc, acc_len, expect, expect_len)) {
+        t_putstr("joey: pouch-smoke expected marker absent from child output\n");
+        return -1;
+    }
+    return 0;
+}
+
+// do_pouch_hello_smoke — run the two pouch POSIX C binaries and verify
+// each prints + exits 0. /pouch-hello exercises the raw write(2) seam and
+// the 0xFFFF unimplemented-syscall sentinel on both musl syscall paths;
+// /pouch-hello-stdio exercises musl's buffered stdio (the patched
+// __stdio_write backend). Returns 0 on success, -1 on any failure.
+static int do_pouch_hello_smoke(void) {
+    static const char ph_name[]   = "pouch-hello";
+    static const char ph_expect[] = "pouch-hello: exit 0";
+    if (pouch_smoke_one(ph_name, sizeof(ph_name) - 1,
+                        ph_expect, sizeof(ph_expect) - 1) != 0)
+        return -1;
+    t_putstr("joey: pouch-hello smoke ok (write(2) seam + 0xFFFF sentinel both paths)\n");
+
+    static const char ps_name[]   = "pouch-hello-stdio";
+    static const char ps_expect[] = "buffer drains at exit";
+    if (pouch_smoke_one(ps_name, sizeof(ps_name) - 1,
+                        ps_expect, sizeof(ps_expect) - 1) != 0)
+        return -1;
+    t_putstr("joey: pouch-hello-stdio smoke ok (buffered stdio + patched __stdio_write)\n");
+    return 0;
+}
+
 // connect_corvus — bounded retry to t_srv_connect("corvus", "ctl"),
 // yielding between attempts so corvus's startup can race in.
 //
@@ -373,6 +499,12 @@ int main(void) {
         return 1;
     }
     t_putstr("joey: /hello reaped status=0; orchestration verified\n");
+
+    // === pouch hello smoke (P6-pouch-hello-smoke) ===
+    // The first POSIX C programs Thylacine runs, built against the pouch
+    // libc. Placed here, beside the /hello orchestration, so the two
+    // spawn-and-verify milestones sit together on the boot path.
+    if (do_pouch_hello_smoke() != 0) return 1;
 
     // === /sbin/corvus spawn ===
     //

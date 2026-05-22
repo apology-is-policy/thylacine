@@ -10,6 +10,7 @@
 #   tools/build.sh userspace     — build native userspace binaries from usr/ (P4-Ia1+)
 #   tools/build.sh ramfs         — assemble build/ramfs.cpio
 #   tools/build.sh sysroot       — build the pouch POSIX sysroot (Phase 6)
+#   tools/build.sh pouch-progs   — build the pouch POSIX test programs (Phase 6)
 #   tools/build.sh disk          — assemble build/disk.img (Phase 4+)
 #   tools/build.sh all           — kernel + userspace + ramfs
 #   tools/build.sh clean         — remove build artifacts
@@ -33,6 +34,9 @@ USR_RS_TARGET="aarch64-unknown-none"
 # LLVM install prefix for the pouch sysroot build (clang/llvm-ar/llvm-ranlib).
 # Mirrors cmake/Toolchain-aarch64-pouch.cmake + tools/pouch-clang.
 LLVM_PREFIX="${LLVM_PREFIX:-/opt/homebrew/opt/llvm}"
+# lld install prefix — ld.lld links the pouch test programs (Homebrew ships
+# lld as a package separate from llvm). Mirrors the cmake toolchains.
+LLD_PREFIX="${LLD_PREFIX:-/opt/homebrew/opt/lld}"
 
 target="${1:-all}"
 shift || true
@@ -124,7 +128,10 @@ build_kernel() {
     #
     # P4-Ia1: build userspace first so build_ramfs picks up the latest
     # /hello (and future /<bin>) without an extra invocation.
+    # P6-pouch-hello-smoke: build the pouch POSIX test programs too, so
+    # build_ramfs ships /pouch-hello + /pouch-hello-stdio.
     build_userspace
+    build_pouch_progs
     build_ramfs
 
     # P4-Ic5b2: produce build/disk.img alongside the kernel so
@@ -170,6 +177,19 @@ EOF
     local rs_release="$USR_RS_BUILD/$USR_RS_TARGET/release"
     for bin in "${usr_rs_bins[@]}"; do
         local src="$rs_release/$bin"
+        if [[ -f "$src" ]]; then
+            cp "$src" "$ramfs_src/$bin"
+            chmod 0755 "$ramfs_src/$bin"
+        fi
+    done
+
+    # P6-pouch-hello-smoke: copy the pouch POSIX test binaries (built
+    # against the pouch sysroot by build_pouch_progs) into the cpio root.
+    # Same curation discipline — explicit list, not a glob.
+    local pouch_bins=( "pouch-hello" "pouch-hello-stdio" )
+    local pouch_progs="$BUILD_DIR/pouch/progs"
+    for bin in "${pouch_bins[@]}"; do
+        local src="$pouch_progs/$bin"
         if [[ -f "$src" ]]; then
             cp "$src" "$ramfs_src/$bin"
             chmod 0755 "$ramfs_src/$bin"
@@ -322,6 +342,89 @@ build_sysroot() {
     echo "    seam     syscall table retargeted to the Thylacine ABI"
 }
 
+build_pouch_progs() {
+    # Phase 6 (Pouch) — cross-compile the pouch POSIX test programs (the
+    # hello binaries) against the pouch sysroot. These are the first
+    # POSIX C programs Thylacine runs: hosted (musl CRT + libc.a), not
+    # freestanding. See docs/reference/78-pouch.md + docs/POUCH-DESIGN.md §14.
+    #
+    # Two steps, deliberately:
+    #   1. compile each .c with tools/pouch-clang (clang as the compiler).
+    #   2. link directly with ld.lld. clang as the *link driver* cannot be
+    #      used: for the unknown "thylacine" OS on a macOS host clang falls
+    #      into the Darwin toolchain and emits Mach-O linker arguments. The
+    #      compiler path is unaffected. (docs/reference/78-pouch.md "Build".)
+    #
+    # The link line produces a static, non-PIE ET_EXEC with page-aligned
+    # PT_LOAD file offsets — the layout kernel/elf.c + exec_map_segment
+    # accept with no kernel change. -z separate-loadable-segments is what
+    # page-aligns every PT_LOAD's file offset (exec_map_segment requires it).
+    #
+    # The sysroot must exist; it is built on demand here if absent
+    # (build_sysroot, ~1-2 min). A patch-series change needs an explicit
+    # `tools/build.sh sysroot` to refresh it — this step reuses what it finds.
+    local sysroot="$BUILD_DIR/sysroot"
+    local progs_out="$BUILD_DIR/pouch/progs"
+    local src_dir="$REPO_ROOT/usr/pouch-hello"
+    local pouch_clang="$REPO_ROOT/tools/pouch-clang"
+    local lld="$LLD_PREFIX/bin/ld.lld"
+    local readelf="$LLVM_PREFIX/bin/llvm-readelf"
+
+    if [[ ! -x "$lld" ]]; then
+        echo "==> pouch progs: ld.lld not found at $lld" >&2
+        echo "    override with LLD_PREFIX=/path tools/build.sh ..." >&2
+        exit 1
+    fi
+    if [[ ! -f "$sysroot/lib/libc.a" ]]; then
+        echo "==> pouch progs: sysroot absent — building it first"
+        build_sysroot
+    else
+        echo "==> pouch progs: reusing $sysroot (run 'tools/build.sh sysroot' to refresh)"
+    fi
+
+    rm -rf "$progs_out"
+    mkdir -p "$progs_out"
+
+    local prog
+    for prog in pouch-hello pouch-hello-stdio; do
+        echo "==> pouch prog: $prog"
+        # 1. compile (clang). -nostdinc + -isystem: pouch owns the include
+        #    path. -fno-pie: non-PIC codegen for a fixed-address ET_EXEC.
+        "$pouch_clang" -std=gnu11 -O2 -Wall -Wextra \
+            -nostdinc -isystem "$sysroot/include" -fno-pie \
+            -c "$src_dir/$prog.c" -o "$progs_out/$prog.o"
+        # 2. link (ld.lld). Static non-PIE ET_EXEC; the musl CRT objects
+        #    in link order (crt1 crti ... crtn); libc.a via -lc.
+        "$lld" -static -o "$progs_out/$prog" \
+            -z separate-loadable-segments \
+            -z max-page-size=4096 \
+            -z noexecstack \
+            --build-id=none \
+            "$sysroot/lib/crt1.o" "$sysroot/lib/crti.o" \
+            "$progs_out/$prog.o" \
+            -L"$sysroot/lib" -lc \
+            "$sysroot/lib/crtn.o"
+        # verify the layout the kernel ELF loader requires: ET_EXEC, no
+        # PT_DYNAMIC. A loader-incompatible binary fails here, not at boot.
+        # readelf output is captured first (a `grep -q` pipeline would
+        # SIGPIPE the producer and, under pipefail, read as a failure).
+        local elf_hdr elf_phdrs
+        elf_hdr="$("$readelf" -h "$progs_out/$prog")"
+        elf_phdrs="$("$readelf" -l "$progs_out/$prog")"
+        case "$elf_hdr" in
+            *"Type:"*EXEC*) ;;
+            *) echo "    $prog: not ET_EXEC — kernel/elf.c would reject it" >&2
+               exit 1 ;;
+        esac
+        case "$elf_phdrs" in
+            *DYNAMIC*) echo "    $prog: has PT_DYNAMIC — kernel/elf.c would reject it" >&2
+                       exit 1 ;;
+        esac
+        echo "    $prog: $(wc -c < "$progs_out/$prog" | tr -d ' ') bytes (ET_EXEC, static)"
+    done
+    echo "==> pouch progs built under $progs_out"
+}
+
 build_disk() {
     # P4-Ic5b2 / P4-Ic7: deterministic raw disk image backing QEMU's
     # virtio-blk-device.
@@ -382,16 +485,17 @@ clean() {
 }
 
 case "$target" in
-    kernel)    build_kernel    ;;
-    ramfs)     build_ramfs     ;;
-    sysroot)   build_sysroot   ;;
-    userspace) build_userspace ;;
-    disk)      build_disk      ;;
-    all)       build_all       ;;
-    clean)     clean           ;;
+    kernel)      build_kernel      ;;
+    ramfs)       build_ramfs       ;;
+    sysroot)     build_sysroot     ;;
+    pouch-progs) build_pouch_progs ;;
+    userspace)   build_userspace   ;;
+    disk)        build_disk        ;;
+    all)         build_all         ;;
+    clean)       clean             ;;
     *)
         echo "Unknown target: $target" >&2
-        echo "Valid: kernel, ramfs, sysroot, userspace, disk, all, clean" >&2
+        echo "Valid: kernel, ramfs, sysroot, pouch-progs, userspace, disk, all, clean" >&2
         exit 1
         ;;
 esac
