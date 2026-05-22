@@ -574,7 +574,7 @@ performance-relevant surfaces, sized as sub-chunks 7, 8-9, 12 land.
 | 3 `pouch-kernel-auxv` | `exec_setup` builds the System V startup frame (auxv); `SYS_SET_TID_ADDRESS` | landed (`d505e73`/`f2a1130`) |
 | 4 `pouch-syscall-seam` | retarget the syscall table; the sentinel; the errno decode; the stdio backend; `build.sh sysroot` builds the real libc | landed (`dbc6bd3`/`aad33d6`) |
 | 5 `pouch-hello-smoke` | the first pouch binaries — `/pouch-hello` + `/pouch-hello-stdio` build + run in Thylacine | landed (`5c0623d`) |
-| 6a `pouch-ld` | the `pouch-ld` link-driver wrapper; `build_pouch_progs` links through it | **this chunk** |
+| 6a `pouch-ld` | the `pouch-ld` link-driver wrapper; `build_pouch_progs` links through it | landed (`eeaa5ab`) |
 | 6b `pouch-compiler-rt` | vendor + build the compiler-rt builtins; the real `printf` hello | **next** |
 | 7-16 | mem → torpor → threads → poll → devnodes → sockets → signals → libsodium → stratumd | pending |
 
