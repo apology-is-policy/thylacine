@@ -48,3 +48,38 @@ and git honors nested `.gitignore` files — its `config.mak` pattern (line 6)
 shadows the pristine, shipped file `third_party/musl/dist/config.mak`. That one
 file must be force-staged so the vendored tree stays byte-complete:
 `git add -f third_party/musl/dist/config.mak`. Any re-vendor must do the same.
+
+### LLVM compiler-rt builtins 22.1.4 — `third_party/compiler-rt/`
+
+The **compiler runtime** for **pouch** — the LLVM analogue of GCC's `libgcc`.
+A complete C cross-toolchain is four parts: compiler + libc + CRT objects +
+*compiler runtime*. compiler-rt's `builtins` component supplies the low-level
+support routines clang emits calls to when the target ISA lacks an operation —
+notably `binary128` soft-float (`long double` on aarch64 is IEEE `binary128`,
+which has no hardware support), referenced by `printf`'s `vfprintf` path
+(`__addtf3`, `__eqtf2`, `__extenddftf2`, …). Homebrew LLVM ships compiler-rt
+for the Darwin host only, so pouch builds its own for `aarch64-thylacine`:
+`tools/build.sh sysroot` → `build/sysroot/lib/libclang_rt.builtins.a`.
+
+| Field | Value |
+|---|---|
+| Version | LLVM 22.1.4 — matches the pinned `clang` / `llvm-ar` toolchain |
+| Source | `https://github.com/llvm/llvm-project/releases/download/llvmorg-22.1.4/llvm-project-22.1.4.src.tar.xz` |
+| sha256 | `3e68c90dda630c27d41d201e37b8bbf5222e39b273dec5ca880709c69e0a07d4` |
+| Vendored subtree | `compiler-rt/lib/builtins/` → `third_party/compiler-rt/builtins/` (443 files) |
+| License | Apache-2.0 WITH LLVM-exception — see `third_party/compiler-rt/LICENSE.TXT` |
+| Patch series | none — compiler-rt is pure computation; pouch does not patch it |
+| Built by | `tools/build.sh sysroot` (`build_compiler_rt`); see `docs/reference/78-pouch.md` |
+
+The `builtins/` tree is byte-identical to the published release. Unlike musl,
+compiler-rt has **no patch series** — none of it is OS-boundary code, so there
+is nothing to retarget; `build_compiler_rt` compiles the vendored source
+directly, out-of-tree under `build/`.
+
+**Why the monorepo tarball.** LLVM 22 stopped publishing per-component source
+tarballs — `compiler-rt-22.1.4.src.tar.xz` no longer exists. The only source
+tarball the `llvmorg-22.1.4` release ships is the full monorepo
+`llvm-project-22.1.4.src.tar.xz` (159 MiB); pouch vendors only the
+`compiler-rt/lib/builtins/` subtree from it. The pinned sha256 above is the
+**monorepo tarball's** — a re-vendor downloads + verifies it, then re-extracts
+that one subtree.

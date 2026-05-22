@@ -335,11 +335,126 @@ build_sysroot() {
         exit 1
     fi
 
+    # 6. build the compiler runtime — the compiler-rt builtins. A complete C
+    #    cross-toolchain is compiler + libc + CRT + compiler runtime; this
+    #    installs libclang_rt.builtins.a alongside libc.a and the CRT objects.
+    build_compiler_rt
+
     echo "==> pouch sysroot ready:"
     echo "    libc.a   $(wc -c < "$sysroot/lib/libc.a" | tr -d ' ') bytes"
+    echo "    runtime  libclang_rt.builtins.a $(wc -c < "$sysroot/lib/libclang_rt.builtins.a" | tr -d ' ') bytes"
     echo "    CRT      crt1.o crti.o crtn.o"
     echo "    headers  $(find "$sysroot/include" -name '*.h' | wc -l | tr -d ' ') files"
     echo "    seam     syscall table retargeted to the Thylacine ABI"
+}
+
+build_compiler_rt() {
+    # Phase 6 (Pouch) — build the compiler runtime: the compiler-rt builtins,
+    # installed as build/sysroot/lib/libclang_rt.builtins.a.
+    #
+    # A complete C cross-toolchain is four parts — compiler + libc + CRT +
+    # *compiler runtime*. The runtime supplies the low-level support routines
+    # clang emits calls to when the target ISA lacks an operation: aarch64 has
+    # no hardware binary128 float, and `long double` on aarch64 IS binary128,
+    # so printf's vfprintf path references soft-float builtins (__addtf3,
+    # __eqtf2, __extenddftf2, ...). Homebrew LLVM ships compiler-rt for the
+    # Darwin host only, so pouch builds its own for aarch64-thylacine.
+    #
+    # The builtins source is vendored pristine at third_party/compiler-rt/ —
+    # no patch series (compiler-rt is pure computation; nothing to retarget).
+    # The aarch64 source set is the GENERIC_SOURCES + GENERIC_TF_SOURCES +
+    # BF16_SOURCES blocks of the vendored CMakeLists (extracted, not
+    # transcribed — re-vendor-safe; every file in them is compiled for aarch64
+    # by compiler-rt's own build, so it is upstream-guaranteed to compile
+    # cleanly), plus the conditional generic additions and the two
+    # aarch64-specific files. Deliberately excluded:
+    #   - generic fp_mode.c — superseded by aarch64/fp_mode.c, the FPCR-reading
+    #     arch override (compiler-rt's filter_builtin_sources drops it likewise).
+    #   - aarch64/lse.S outline atomics — pouch-clang compiles every TU with
+    #     -march=...+lse, so clang emits LSE atomic instructions inline and the
+    #     __aarch64_{cas,swp,ldadd,...} outline helpers are never called.
+    #   - aarch64/emupac.cpp + the SME files — PAC emulation / SME ABI support,
+    #     referenced only by code built with -mbranch-protection or +sme, which
+    #     pouch's -march baseline does not enable.
+    local sysroot="$BUILD_DIR/sysroot"
+    local crt_src="$REPO_ROOT/third_party/compiler-rt/builtins"
+    local crt_obj="$BUILD_DIR/pouch/compiler-rt-obj"
+    local clang="$LLVM_PREFIX/bin/clang"
+    local archive="$sysroot/lib/libclang_rt.builtins.a"
+
+    if [[ ! -f "$crt_src/CMakeLists.txt" ]]; then
+        echo "==> compiler-rt: vendored source missing at $crt_src" >&2
+        exit 1
+    fi
+
+    echo "==> building compiler-rt builtins (aarch64-thylacine)"
+    rm -rf "$crt_obj"
+    mkdir -p "$crt_obj"
+
+    # The aarch64 source list, derived from the vendored CMakeLists. Generic
+    # fp_mode.c is dropped — aarch64/fp_mode.c supersedes it.
+    local sources=()
+    local f
+    while IFS= read -r f; do
+        if [[ "$f" == "fp_mode.c" ]]; then continue; fi
+        sources+=( "$f" )
+    done < <(awk '/^set\((GENERIC_SOURCES|GENERIC_TF_SOURCES|BF16_SOURCES)$/{c=1;next} c&&/^\)/{c=0;next} c&&$1~/\.c$/{print $1}' "$crt_src/CMakeLists.txt")
+    # Conditional generic additions (CMakeLists: non-Fuchsia / non-baremetal),
+    # then the two aarch64-specific files.
+    sources+=( emutls.c enable_execute_stack.c eprintf.c gcc_personality_v0.c clear_cache.c )
+    sources+=( cpu_model/aarch64.c aarch64/fp_mode.c )
+
+    if [[ "${#sources[@]}" -lt 150 ]]; then
+        echo "    compiler-rt: source list too short (${#sources[@]}) — CMakeLists parse failed" >&2
+        exit 1
+    fi
+
+    # Compile flags. -fno-builtin: a builtin must never be lowered into a call
+    # to itself. -fno-pic / -fno-stack-protector: pouch links static non-PIE,
+    # and the builtins are leaf runtime routines. -nostdlibinc keeps clang's
+    # resource headers (stdint.h / limits.h / stdarg.h / unwind.h — all
+    # compiler-provided) while -isystem supplies pouch's libc headers for the
+    # few OS-touching files (emutls.c, enable_execute_stack.c, ...).
+    local cflags=( --target=aarch64-thylacine -march=armv8-a+lse+pauth+bti
+                   -std=gnu11 -O2 -fno-builtin -fomit-frame-pointer
+                   -fno-stack-protector -fno-pic
+                   -nostdlibinc -isystem "$sysroot/include" -I"$crt_src" )
+
+    local n=0 base obj
+    for f in "${sources[@]}"; do
+        if [[ ! -f "$crt_src/$f" ]]; then
+            echo "    compiler-rt: source $f missing from the vendored tree" >&2
+            exit 1
+        fi
+        base="${f%.c}"
+        obj="$crt_obj/${base//\//-}.o"
+        "$clang" "${cflags[@]}" -c "$crt_src/$f" -o "$obj"
+        n=$((n + 1))
+    done
+    echo "    compiled $n objects"
+
+    # Archive + symbol index.
+    mkdir -p "$sysroot/lib"
+    rm -f "$archive"
+    "$LLVM_PREFIX/bin/llvm-ar" rcs "$archive" "$crt_obj"/*.o
+
+    # Verify the binary128 soft-float builtins printf's vfprintf path needs are
+    # defined in the archive — the toolchain-completeness gate. A sysroot with a
+    # libc but no runtime links a static hello, but not printf.
+    local defined sym fail=0
+    defined="$("$LLVM_PREFIX/bin/llvm-nm" --defined-only "$archive" 2>/dev/null)"$'\n'
+    for sym in __addtf3 __subtf3 __multf3 __divtf3 __eqtf2 __extenddftf2 \
+               __trunctfdf2 __fixtfdi __floatditf; do
+        case "$defined" in
+            *" T $sym"$'\n'*) ;;
+            *) echo "    compiler-rt: builtin $sym not defined in the archive" >&2
+               fail=1 ;;
+        esac
+    done
+    if [[ "$fail" -ne 0 ]]; then
+        echo "==> compiler-rt FAILED verification" >&2
+        exit 1
+    fi
 }
 
 build_pouch_progs() {
@@ -370,8 +485,8 @@ build_pouch_progs() {
     local pouch_ld="$REPO_ROOT/tools/pouch-ld"
     local readelf="$LLVM_PREFIX/bin/llvm-readelf"
 
-    if [[ ! -f "$sysroot/lib/libc.a" ]]; then
-        echo "==> pouch progs: sysroot absent — building it first"
+    if [[ ! -f "$sysroot/lib/libc.a" || ! -f "$sysroot/lib/libclang_rt.builtins.a" ]]; then
+        echo "==> pouch progs: sysroot incomplete — building it first"
         build_sysroot
     else
         echo "==> pouch progs: reusing $sysroot (run 'tools/build.sh sysroot' to refresh)"

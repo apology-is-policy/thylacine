@@ -2,14 +2,16 @@
 
 > **Status note.** This document is the as-built reference for **pouch**,
 > Thylacine's POSIX libc (execution Phase 6). It is written incrementally as
-> Phase 6 sub-chunks land. Through sub-chunk 5 it covers the vendoring of musl,
+> Phase 6 sub-chunks land. Through sub-chunk 6b it covers the vendoring of musl,
 > the boundary-line architecture + inventory, the kernel-side process-startup
 > additions (the auxiliary vector, `SYS_SET_TID_ADDRESS`), the syscall seam —
 > the syscall-number retarget, the unimplemented-syscall sentinel, the
-> Thylacine error-convention decode, and the stdio backend — and the first
-> pouch binaries running in Thylacine. Sections for pouch's lower-half API,
-> data structures, and state machines are stubbed with forward pointers and
-> filled in by sub-chunks 7-13. The binding design is `docs/POUCH-DESIGN.md`.
+> Thylacine error-convention decode, and the stdio backend — the first
+> pouch binaries running in Thylacine, the `pouch-ld` link-driver wrapper, and
+> the compiler runtime (the compiler-rt builtins). Sections for pouch's
+> lower-half API, data structures, and state machines are stubbed with forward
+> pointers and filled in by sub-chunks 7-13. The binding design is
+> `docs/POUCH-DESIGN.md`.
 
 ---
 
@@ -471,8 +473,9 @@ self-contained for `mem*`/`str*`). **`printf(3)` does not**: musl's `vfprintf`
 formats `long double` (aarch64 `binary128`), and `binary128` soft-float —
 `__eqtf2`, `__extenddftf2`, `__addtf3`, … — is exactly what compiler-rt
 builtins provide. The literal `printf`-shaped hello of POUCH-DESIGN.md §13/§14
-is therefore **deferred** to **sub-chunk 6 (`pouch-compiler-rt`)** — vendor +
-build the compiler-rt builtins for `aarch64-thylacine`.
+is therefore delivered by **sub-chunk 6 (`pouch-compiler-rt`)**: sub-chunk 6b
+builds the runtime (see **The compiler runtime** below), and sub-chunk 6c adds
+the literal `printf` hello.
 `/pouch-hello-stdio` proves the buffered-stdio *path* — identical whether the
 bytes arrive via `puts()` or `printf()` — without the format engine.
 
@@ -489,6 +492,112 @@ deadlock. The hello output is far under the 4 KiB pipe ring, so the child never
 blocks on `write` and exits on its own; joey reaps, then drains the buffered
 bytes to the boot-log UART and content-checks them. joey returns non-zero on
 any failure — the boot-path regression signal.
+
+---
+
+## The compiler runtime
+
+Sub-chunk 6b (`pouch-compiler-rt`) builds the fourth and final part of the
+pouch cross-toolchain: the **compiler runtime**. A complete C toolchain is
+compiler + libc + CRT objects + compiler runtime; the pouch sysroot had the
+first three (sub-chunks 1-4) and lacked the fourth. `tools/build.sh sysroot`
+now installs `build/sysroot/lib/libclang_rt.builtins.a` alongside `libc.a`.
+
+### What a compiler runtime is
+
+The compiler runtime — LLVM names it **compiler-rt**, the analogue of GCC's
+`libgcc` — is the set of low-level support routines the compiler emits *calls
+to* when the target ISA cannot do an operation inline. clang is free to lower a
+C operation into `bl __some_helper` rather than inline instructions; the helper
+lives in the runtime. The runtime is not libc — it sits *below* it: it is what
+the compiler itself needs to lower C to a given chip. Every C program depends
+on it implicitly; a hosted toolchain just auto-links it invisibly.
+
+The component pouch needs is compiler-rt's **builtins** library, and the
+routine class that matters here is **soft-float for types the hardware lacks**.
+aarch64 has hardware `float` (binary32) and `double` (binary64), but **not**
+`long double` — the ARM64 ABI defines `long double` as IEEE **`binary128`**
+(quad precision), with no hardware support. Any `long double` arithmetic
+therefore compiles to calls: `__addtf3` / `__subtf3` / `__multf3` / `__divtf3`
+(the `tf` suffix is the 128-bit float machine mode), `__eqtf2` / `__lttf2` / …
+(comparison), `__extenddftf2` (double→binary128), `__trunctfdf2`
+(binary128→double), `__fixtfdi` / `__floatditf` (binary128↔integer). musl's
+`vfprintf` — the engine behind `printf(3)` — formats floating point in
+`long double` for precision, so `vfprintf.o` references these builtins
+unconditionally: without the runtime, linking `printf` fails with
+`undefined symbol: __addtf3`. That is the gap `pouch-hello-smoke` surfaced (see
+"The compiler-runtime gap" above). Homebrew LLVM ships compiler-rt built for
+the Darwin **host** only — there is no `aarch64` ELF `libclang_rt.builtins`
+archive on the system — so pouch builds its own.
+
+### Vendoring
+
+The compiler-rt builtins source is vendored pristine at
+`third_party/compiler-rt/builtins/` (443 files, byte-identical to LLVM 22.1.4 —
+the version of the pinned `clang`). Unlike musl, compiler-rt carries **no patch
+series**: none of it is OS-boundary code — it is pure computation, the layer
+*below* the syscall seam — so there is nothing to retarget. The full vendoring
+record (the monorepo-tarball source, sha256, license — LLVM 22 no longer ships
+per-component tarballs) is in `third_party/README.md`.
+
+### The build — `build_compiler_rt`
+
+`build_compiler_rt` (in `tools/build.sh`, a step of `build_sysroot`) compiles
+the builtins for `aarch64-thylacine` and archives them into
+`libclang_rt.builtins.a`.
+
+**Source selection.** The aarch64 source set is *derived* — not transcribed —
+from the vendored `builtins/CMakeLists.txt`: the `GENERIC_SOURCES`,
+`GENERIC_TF_SOURCES` and `BF16_SOURCES` blocks (every file in them is compiled
+for aarch64 by compiler-rt's own build, so each is upstream-guaranteed to
+compile cleanly on aarch64), plus the conditional generic additions
+(`emutls.c`, `enable_execute_stack.c`, `eprintf.c`, `gcc_personality_v0.c`,
+`clear_cache.c`) and the two aarch64-specific files (`cpu_model/aarch64.c`,
+`aarch64/fp_mode.c`) — 157 translation units. An `awk` extraction over the
+`set(...)` blocks keeps the list re-vendor-safe; a too-short result fails the
+build. Four things are deliberately **excluded**:
+
+- **generic `fp_mode.c`** — superseded by `aarch64/fp_mode.c`, the
+  FPCR-reading arch override (compiler-rt's own `filter_builtin_sources` drops
+  the generic file the same way; compiling both would doubly define
+  `__fe_getround` / `__fe_raise_inexact`).
+- **`aarch64/lse.S` outline atomics** — `lse.S` is compiled ~90 times by
+  compiler-rt's CMake to generate the `__aarch64_{cas,swp,ldadd,…}` outline
+  atomic helpers. pouch-clang compiles every TU with `-march=…+lse`, so clang
+  emits LSE atomic *instructions inline* and never calls the helpers.
+- **`aarch64/emupac.cpp`** — emulated pointer authentication, referenced only
+  by code built with `-mbranch-protection`, which pouch's `-march` baseline
+  does not enable (also the lone C++ file — omitting it keeps the build C-only).
+- **the SME files** (`aarch64/sme-*`) — Scalable Matrix Extension ABI support,
+  referenced only by `+sme` code, outside pouch's `-march` baseline;
+  compiler-rt itself gates them behind a feature check.
+
+**Compile flags.** `--target=aarch64-thylacine -march=armv8-a+lse+pauth+bti`
+(the pouch ISA baseline); `-fno-builtin` (a builtin must never be lowered into
+a call to itself); `-O2 -fomit-frame-pointer`; `-fno-stack-protector` (leaf
+runtime routines); `-fno-pic` (pouch links static non-PIE);
+`-nostdlibinc -isystem build/sysroot/include` — `-nostdlibinc` keeps clang's
+resource headers (`stdint.h` / `limits.h` / `stdarg.h` / `unwind.h`, all
+compiler-provided) while dropping the host's, and `-isystem` supplies pouch's
+own libc headers for the few OS-touching files. The compile runs straight from
+`third_party/compiler-rt/builtins/`; objects land in
+`build/pouch/compiler-rt-obj/` (gitignored) — `third_party/` stays clean.
+
+**Archive + verification.** `llvm-ar rcs` archives the 157 objects with a
+symbol index. `build_compiler_rt` then asserts, with `llvm-nm`, that the
+`binary128` soft-float builtins `printf` needs are defined in the archive
+(`__addtf3`, `__multf3`, `__eqtf2`, `__extenddftf2`, `__fixtfdi`, …) — the
+toolchain-completeness gate: a sysroot with a libc but no runtime links a
+static hello but not `printf`. Output: `libclang_rt.builtins.a`, ~227 KiB,
+157 ELF `aarch64` relocatable objects.
+
+`tools/pouch-ld` (sub-chunk 6a) picks the archive up automatically: when
+`build/sysroot/lib/libclang_rt.builtins.a` is present it links
+`--start-group -lc libclang_rt.builtins.a --end-group`, so the mutual
+references between musl and the soft-float builtins (musl's `vfprintf` →
+`__addtf3`; compiler-rt's `emutls.c` → musl's `malloc`) resolve regardless of
+archive order. With the runtime in place, `build_pouch_progs` treats a sysroot
+that has `libc.a` but no `libclang_rt.builtins.a` as incomplete and rebuilds it.
 
 ---
 
@@ -575,17 +684,19 @@ performance-relevant surfaces, sized as sub-chunks 7, 8-9, 12 land.
 | 4 `pouch-syscall-seam` | retarget the syscall table; the sentinel; the errno decode; the stdio backend; `build.sh sysroot` builds the real libc | landed (`dbc6bd3`/`aad33d6`) |
 | 5 `pouch-hello-smoke` | the first pouch binaries — `/pouch-hello` + `/pouch-hello-stdio` build + run in Thylacine | landed (`5c0623d`) |
 | 6a `pouch-ld` | the `pouch-ld` link-driver wrapper; `build_pouch_progs` links through it | landed (`eeaa5ab`) |
-| 6b `pouch-compiler-rt` | vendor + build the compiler-rt builtins; the real `printf` hello | **next** |
+| 6b `pouch-compiler-rt` | vendor + build the compiler-rt builtins — `libclang_rt.builtins.a` | landed (`*(pending)*`) |
+| 6c `pouch-compiler-rt` | the real `printf` hello | **next** |
 | 7-16 | mem → torpor → threads → poll → devnodes → sockets → signals → libsodium → stratumd | pending |
 
-At sub-chunk 5: the pouch sysroot (sub-chunks 1-4) compiles + links a pouch
-program, and the first two — `/pouch-hello` and `/pouch-hello-stdio` — build,
-load, and run in Thylacine: they print, exit 0, and joey content-checks them
-on every boot. A POSIX C program now runs on a Plan 9-heritage kernel that
-knows nothing about POSIX. What remains for the toolchain to be complete is a
-compiler runtime — sub-chunk 6 (`pouch-compiler-rt`), next (see "The
-compiler-runtime gap"); pouch's lower half (sockets, threads, signals, the
-allocator) lands across sub-chunks 7-13.
+At sub-chunk 6b: the pouch cross-toolchain is **complete** — compiler
+(`pouch-clang`), libc (`libc.a`), CRT objects, and the compiler runtime
+(`libclang_rt.builtins.a`), linked by `pouch-ld`. The first POSIX C programs —
+`/pouch-hello` and `/pouch-hello-stdio` — build, load, and run in Thylacine:
+they print, exit 0, and joey content-checks them on every boot. A POSIX C
+program runs on a Plan 9-heritage kernel that knows nothing about POSIX. Next
+is sub-chunk 6c — the literal `printf` hello, the first program to exercise the
+compiler runtime; then pouch's lower half (sockets, threads, signals, the
+allocator) across sub-chunks 7-13.
 
 ## Known caveats / footguns
 
@@ -620,11 +731,14 @@ allocator) lands across sub-chunks 7-13.
   (`pouch-clang -c`) is fine. `build_pouch_progs` links with `ld.lld`
   directly; the CMake/autotools build chunks will need a real toolchain fix.
   See "Why linking cannot go through the clang driver."
-- **The sysroot has no compiler runtime.** A complete C cross-toolchain needs
-  compiler-rt builtins; the pouch sysroot has none (Homebrew LLVM ships only
-  Darwin compiler-rt). Programs that reference a builtin — notably `printf`,
-  whose `vfprintf` needs `binary128` soft-float — will not link until sub-chunk
-  6 (`pouch-compiler-rt`) lands. See "The compiler-runtime gap."
+- **The compiler runtime carries no unwinder.** `libclang_rt.builtins.a`
+  includes `gcc_personality_v0.o`, which references `_Unwind_*` — a libunwind's
+  symbols, and pouch has no libunwind. The references are dormant for plain C:
+  nothing pulls `gcc_personality_v0.o` from the archive unless
+  `__gcc_personality_v0` is referenced, which only `-fexceptions` / C++ cleanup
+  code does. C++ or `-fexceptions` code therefore cannot link until pouch gains
+  an unwinder — out of scope for v1.0 (static C: `printf`, libsodium,
+  stratumd). See "The compiler runtime."
 
 ## Naming rationale
 
