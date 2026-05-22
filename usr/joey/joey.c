@@ -334,12 +334,13 @@ static int do_stratumd_stub_bringup(void) {
 
 // =============================================================================
 // pouch hello smoke (P6-pouch-hello-smoke). The first POSIX C programs
-// Thylacine runs — /pouch-hello and /pouch-hello-stdio, built against the
-// pouch libc (musl's portable upper half + the Thylacine-native syscall
-// seam). They are the first *runtime* exercise of the auxv startup frame,
-// musl's static CRT, SYS_SET_TID_ADDRESS, the write(2) seam, the exit
-// seam, the 0xFFFF unimplemented-syscall sentinel, and the buffered-stdio
-// backend.
+// Thylacine runs — /pouch-hello, /pouch-hello-stdio and
+// /pouch-hello-printf, built against the pouch libc (musl's portable
+// upper half + the Thylacine-native syscall seam). They are the first
+// *runtime* exercise of the auxv startup frame, musl's static CRT,
+// SYS_SET_TID_ADDRESS, the write(2) seam, the exit seam, the 0xFFFF
+// unimplemented-syscall sentinel, the buffered-stdio backend, and the
+// compiler runtime (libclang_rt.builtins.a — binary128 soft-float).
 // =============================================================================
 
 // pouch_smoke_one — spawn one pouch test binary with its stdout (fd 1)
@@ -422,11 +423,13 @@ static int pouch_smoke_one(const char *name, size_t name_len,
     return 0;
 }
 
-// do_pouch_hello_smoke — run the two pouch POSIX C binaries and verify
+// do_pouch_hello_smoke — run the three pouch POSIX C binaries and verify
 // each prints + exits 0. /pouch-hello exercises the raw write(2) seam and
 // the 0xFFFF unimplemented-syscall sentinel on both musl syscall paths;
 // /pouch-hello-stdio exercises musl's buffered stdio (the patched
-// __stdio_write backend). Returns 0 on success, -1 on any failure.
+// __stdio_write backend); /pouch-hello-printf exercises printf(3), and so
+// the compiler runtime (libclang_rt.builtins.a — binary128 soft-float).
+// Returns 0 on success, -1 on any failure.
 static int do_pouch_hello_smoke(void) {
     static const char ph_name[]   = "pouch-hello";
     static const char ph_expect[] = "pouch-hello: exit 0";
@@ -441,6 +444,13 @@ static int do_pouch_hello_smoke(void) {
                         ps_expect, sizeof(ps_expect) - 1) != 0)
         return -1;
     t_putstr("joey: pouch-hello-stdio smoke ok (buffered stdio + patched __stdio_write)\n");
+
+    static const char pp_name[]   = "pouch-hello-printf";
+    static const char pp_expect[] = "pouch-hello-printf: exit 0";
+    if (pouch_smoke_one(pp_name, sizeof(pp_name) - 1,
+                        pp_expect, sizeof(pp_expect) - 1) != 0)
+        return -1;
+    t_putstr("joey: pouch-hello-printf smoke ok (printf + compiler-rt binary128 soft-float)\n");
     return 0;
 }
 

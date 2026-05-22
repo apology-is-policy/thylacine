@@ -2,13 +2,14 @@
 
 > **Status note.** This document is the as-built reference for **pouch**,
 > Thylacine's POSIX libc (execution Phase 6). It is written incrementally as
-> Phase 6 sub-chunks land. Through sub-chunk 6b it covers the vendoring of musl,
+> Phase 6 sub-chunks land. Through sub-chunk 6c it covers the vendoring of musl,
 > the boundary-line architecture + inventory, the kernel-side process-startup
 > additions (the auxiliary vector, `SYS_SET_TID_ADDRESS`), the syscall seam —
 > the syscall-number retarget, the unimplemented-syscall sentinel, the
 > Thylacine error-convention decode, and the stdio backend — the first
 > pouch binaries running in Thylacine, the `pouch-ld` link-driver wrapper, and
-> the compiler runtime (the compiler-rt builtins). Sections for pouch's
+> the compiler runtime (the compiler-rt builtins), and the `printf` hello.
+> Sections for pouch's
 > lower-half API, data structures, and state machines are stubbed with forward
 > pointers and filled in by sub-chunks 7-13. The binding design is
 > `docs/POUCH-DESIGN.md`.
@@ -599,6 +600,39 @@ references between musl and the soft-float builtins (musl's `vfprintf` →
 archive order. With the runtime in place, `build_pouch_progs` treats a sysroot
 that has `libc.a` but no `libclang_rt.builtins.a` as incomplete and rebuilds it.
 
+### The `printf` hello
+
+Sub-chunk 6c adds `/pouch-hello-printf` (`usr/pouch-hello/pouch-hello-printf.c`)
+— the third pouch binary, and the first to exercise the compiler runtime.
+Where `/pouch-hello` uses the raw `write(2)` seam and `/pouch-hello-stdio` uses
+buffered stdio via `puts()`/`fwrite()`, this one uses `printf(3)` — and
+`printf` pulls musl's `vfprintf`, the first thing in the project to reference
+a compiler-rt builtin.
+
+It is a self-test. It `snprintf()`s an integer and a floating-point value and
+`strcmp()`s the result against the known-correct string:
+
+- the **`%d` check** proves the *link* — any `printf` pulls `vfprintf.o`, which
+  references the `binary128` soft-float builtins unconditionally, so the binary
+  cannot link without `libclang_rt.builtins.a`.
+- the **`%.2f` check** proves the runtime *runs* — `vfprintf`'s `fmt_fp`
+  extracts decimal digits in `binary128` `long double`, so a broken
+  `__subtf3` / `__multf3` / `__fixtfdi` would format the wrong digits.
+  `snprintf("%.2f", 3.140625)` must yield exactly `"3.14"` (3.140625 is exact
+  in binary — no rounding ambiguity).
+
+`main` returns non-zero on any mismatch; joey's `pouch_smoke_one`
+content-checks the output and the exit status, so a regressed compiler runtime
+fails the boot. The binary is ~49 KiB — larger than the `write(2)` / stdio
+helloes because it pulls `vfprintf.o` and the `tf`-mode builtins. It links
+static non-PIE `ET_EXEC` like the others; the kernel ELF loader needs no
+change.
+
+With `/pouch-hello-printf` running — printing via `printf(3)`, its `binary128`
+soft-float verified correct at runtime — the pouch cross-toolchain is **proven**
+end to end: a C program using the full compiler + libc + CRT + compiler runtime
+compiles, links, loads, and runs on Thylacine.
+
 ---
 
 ## Public API
@@ -685,18 +719,20 @@ performance-relevant surfaces, sized as sub-chunks 7, 8-9, 12 land.
 | 5 `pouch-hello-smoke` | the first pouch binaries — `/pouch-hello` + `/pouch-hello-stdio` build + run in Thylacine | landed (`5c0623d`) |
 | 6a `pouch-ld` | the `pouch-ld` link-driver wrapper; `build_pouch_progs` links through it | landed (`eeaa5ab`) |
 | 6b `pouch-compiler-rt` | vendor + build the compiler-rt builtins — `libclang_rt.builtins.a` | landed (`72f45f9`) |
-| 6c `pouch-compiler-rt` | the real `printf` hello | **next** |
+| 6c `pouch-compiler-rt` | the real `printf` hello — `/pouch-hello-printf` | landed (`*(pending)*`) |
 | 7-16 | mem → torpor → threads → poll → devnodes → sockets → signals → libsodium → stratumd | pending |
 
-At sub-chunk 6b: the pouch cross-toolchain is **complete** — compiler
-(`pouch-clang`), libc (`libc.a`), CRT objects, and the compiler runtime
-(`libclang_rt.builtins.a`), linked by `pouch-ld`. The first POSIX C programs —
-`/pouch-hello` and `/pouch-hello-stdio` — build, load, and run in Thylacine:
-they print, exit 0, and joey content-checks them on every boot. A POSIX C
-program runs on a Plan 9-heritage kernel that knows nothing about POSIX. Next
-is sub-chunk 6c — the literal `printf` hello, the first program to exercise the
-compiler runtime; then pouch's lower half (sockets, threads, signals, the
-allocator) across sub-chunks 7-13.
+At sub-chunk 6c: the pouch cross-toolchain is **complete and proven** —
+compiler (`pouch-clang`), libc (`libc.a`), CRT objects, and the compiler
+runtime (`libclang_rt.builtins.a`), linked by `pouch-ld`. Three POSIX C
+programs — `/pouch-hello`, `/pouch-hello-stdio`, `/pouch-hello-printf` —
+build, load, and run in Thylacine: they print, exit 0, and joey
+content-checks them on every boot. `/pouch-hello-printf` exercises the full
+toolchain including the compiler runtime, with its `binary128` soft-float
+verified correct at runtime. A POSIX C program runs on a Plan 9-heritage
+kernel that knows nothing about POSIX. Sub-chunk 6 (`pouch-compiler-rt`) is
+complete; next is sub-chunk 7 (`pouch-mem` — the allocator backend), then
+pouch's lower half (threads, sockets, signals) across sub-chunks 8-13.
 
 ## Known caveats / footguns
 
