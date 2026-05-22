@@ -66,6 +66,7 @@ enum {
     T_SYS_CAP_USE     = 33,      // P5-hostowner-b-b: redeem pending cap grant
     T_SYS_WALK_OPEN   = 34,      // P5-stratumd-stub-bringup-e1: walk-and-open one path component
     T_SYS_CHROOT      = 35,      // P5-stratumd-stub-bringup-e2: stamp territory root_spoor
+    T_SYS_SET_TID_ADDRESS = 36,  // P6-pouch-kernel-auxv: return the calling thread's tid
 };
 
 // t_walk_open's FROM_ROOT sentinel — pass as spoor_fd to walk from the
@@ -892,6 +893,26 @@ __attribute__((always_inline))
 static inline long t_cap_use(unsigned long cap_mask) {
     register long x0 __asm__("x0") = (long)cap_mask;
     register long x8 __asm__("x8") = T_SYS_CAP_USE;
+    __asm__ volatile (
+        "svc #0"
+        : "+r"(x0)
+        : "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
+// t_set_tid_address — register the calling thread's tid address and
+// return its tid. A C runtime (pouch) calls this at thread startup; a
+// Thylacine-native program rarely needs it directly. `tidptr` is
+// accepted but, at v1.0, not acted on — the clear-child-tid semantics
+// land with the pouch-threads sub-chunk (POUCH-DESIGN.md §12.4).
+// Returns the calling thread's tid: a positive value — at v1.0 the
+// single-threaded Proc's main-thread tid equals its pid.
+__attribute__((always_inline))
+static inline long t_set_tid_address(void *tidptr) {
+    register long x0 __asm__("x0") = (long)tidptr;
+    register long x8 __asm__("x8") = T_SYS_SET_TID_ADDRESS;
     __asm__ volatile (
         "svc #0"
         : "+r"(x0)

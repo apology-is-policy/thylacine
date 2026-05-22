@@ -19,6 +19,13 @@ ARCH §16: "exec is the boundary between the kernel-internal Proc/Thread model a
 #define EXEC_USER_STACK_GUARD_SIZE   0x1000ull
 #define EXEC_USER_STACK_GUARD_BASE   (EXEC_USER_STACK_BASE - EXEC_USER_STACK_GUARD_SIZE)
 
+// System V process-startup frame (P6-pouch-kernel-auxv) — see
+// "Initial process stack" below. EXEC_INIT_STACK_SIZE is a 16-aligned
+// computed macro; it resolves to 144 at v1.0.
+#define EXEC_INIT_AUXV_COUNT     6
+#define EXEC_INIT_STACK_SIZE     144   // argc+argv+envp + 6 auxv + 16 random
+#define EXEC_INIT_RANDOM_OFFSET  128   // EXEC_INIT_STACK_SIZE - 16
+
 int exec_setup(struct Proc *p, const void *blob, size_t blob_size,
                u64 *entry_out, u64 *sp_out);
 ```
@@ -36,7 +43,8 @@ The user stack is 256 KiB (since corvus-bringup-d — ML-KEM-768's FO-transform 
 - One VMA per PT_LOAD segment, backed by a fresh anonymous BURROW. The BURROW's pages contain the segment's bytes from `blob[file_offset..]` (filesz bytes); the tail (memsz - filesz) is zero.
 - One user-stack VMA at `[EXEC_USER_STACK_BASE, EXEC_USER_STACK_TOP)` (256 KiB) backed by a fresh zeroed anonymous BURROW, plus a one-page **guard VMA** at `[EXEC_USER_STACK_GUARD_BASE, EXEC_USER_STACK_BASE)` directly below it (`prot==0`, no BURROW — see "User-stack guard page").
 - All caller-held BURROW handles dropped via `burrow_unref`. The mapping_count (held by the VMA) keeps each BURROW alive until `proc_free`'s `vma_drain`.
-- `*entry_out = img.entry`, `*sp_out = EXEC_USER_STACK_TOP`.
+- A System V process-startup frame (argc / argv / envp / auxv) written into the top `EXEC_INIT_STACK_SIZE` bytes of the user stack — see "Initial process stack".
+- `*entry_out = img.entry`; `*sp_out = EXEC_USER_STACK_TOP - EXEC_INIT_STACK_SIZE` (the user VA of the frame's `argc` word).
 
 #### Side effects on failure
 
@@ -71,9 +79,14 @@ static int exec_map_user_stack(struct Proc *p);
     // 1. burrow_create_anon + burrow_map for the 256 KiB stack range.
     // 2. vma_alloc_guard + vma_insert for the one-page guard VMA
     //    directly below the stack (P5-secondary-stack-guard).
+
+static u64 exec_build_init_stack(struct Proc *p, const struct elf_image *img);
+    // P6-pouch-kernel-auxv. Writes the System V startup frame
+    // (argc/argv/envp/auxv) into the top of the user stack; returns
+    // the initial sp. See "Initial process stack".
 ```
 
-`exec_setup` orchestrates: validates args, calls `elf_load`, iterates segments, then maps the user stack.
+`exec_setup` orchestrates: validates args, calls `elf_load`, iterates segments, maps the user stack, then builds the System V startup frame.
 
 ### Lifecycle interaction with BURROW refcount
 
@@ -117,6 +130,45 @@ Two properties:
 
 The guard owns no physical page (no BURROW) — it costs one `struct Vma` and nothing else; `vma_drain` at `proc_free` frees it cleanly (the NULL-BURROW path). If an ELF segment's VMA already occupies the guard range, `vma_insert` rejects the guard and `exec_map_user_stack` returns -1 — `exec_setup` then fails and the caller disposes the partial Proc, the correct outcome for a binary mapping over its own stack guard. Closes corvus-bringup-d audit F7.
 
+### Initial process stack — argc / argv / envp / auxv (P6-pouch-kernel-auxv)
+
+After mapping the segments + the user stack, `exec_setup` calls `exec_build_init_stack` to write a **System V process-startup frame** into the top of the user stack. A C runtime (pouch — the Thylacine POSIX libc; `docs/POUCH-DESIGN.md`) reads `argc`, `argv`, `envp`, and the auxiliary vector from this frame at entry. `*sp_out` points at the frame's `argc` word.
+
+The frame is a fixed `EXEC_INIT_STACK_SIZE` (144) bytes — `argc == 0` at v1.0 (there is no argv source until the exec syscall lands) and a fixed six-entry auxv. Layout, low → high address:
+
+| Offset from sp | Bytes | Contents |
+|---|---|---|
+| 0   | 8  | `argc` — 0 |
+| 8   | 8  | `argv[]` terminator (one NULL) |
+| 16  | 8  | `envp[]` terminator (one NULL) |
+| 24  | 96 | `auxv[]` — six `Elf64_auxv_t` (16 B each) |
+| 120 | 8  | alignment padding (zero, from `KP_ZERO`) |
+| 128 | 16 | `AT_RANDOM` entropy block |
+| 144 | —  | `EXEC_USER_STACK_TOP` |
+
+The six auxv entries (`a_type`, `a_val`):
+
+| a_type | a_val |
+|---|---|
+| `AT_PHDR` (3)    | user VA of the ELF program-header table, or 0 |
+| `AT_PHENT` (4)   | `e_phentsize` (56 — `sizeof(Elf64_Phdr)`) |
+| `AT_PHNUM` (5)   | `e_phnum`, or 0 when `AT_PHDR` is unresolved |
+| `AT_PAGESZ` (6)  | `PAGE_SIZE` (4096) |
+| `AT_RANDOM` (25) | user VA of the 16-byte entropy block (`sp + 128`) |
+| `AT_NULL` (0)    | 0 — vector terminator |
+
+The minimum a static musl process needs (per POUCH-DESIGN.md §12.1). Optional entries with safe defaults (`AT_HWCAP`, `AT_SECURE`, `AT_CLKTCK`, ...) are deliberately omitted — a C runtime supplies its own defaults for absent entries.
+
+**The initial sp** = `EXEC_USER_STACK_TOP - EXEC_INIT_STACK_SIZE`. It is 16-byte aligned — the AArch64 SysV ABI requirement — because `EXEC_INIT_STACK_SIZE` is rounded up to a 16-byte multiple and `EXEC_USER_STACK_TOP` is itself aligned. The header pins this with `_Static_assert(EXEC_INIT_STACK_SIZE % 16 == 0)`.
+
+**AT_PHDR resolution.** The program headers live at file offset `img.phoff` (exposed by `elf_load` — see `docs/reference/21-elf.md`). `exec_build_init_stack` scans the loaded segments for the one whose file range `[file_offset, file_offset + filesz)` covers the entire phdr table, and translates: `AT_PHDR = seg.vaddr + (phoff - seg.file_offset)`. A well-formed static binary's first PT_LOAD spans the ELF header + phdrs, so this resolves to a valid, mapped, readable user VA. If no loaded segment covers the table, `AT_PHDR` and `AT_PHNUM` are reported 0 — a C runtime then skips the phdr walk, which is correct for a program with no `PT_TLS`.
+
+**AT_RANDOM.** 16 bytes of kernel-CSPRNG entropy (`kern_random_bytes`), which a C runtime uses to seed its stack-protector canary + pointer-mangling cookie. The kernel-side scratch buffer is zero-initialised before the CSPRNG call, so a short read can never ship kernel-stack residue into userspace. The 8-byte pad slot is never written — it stays zero from the BURROW's `KP_ZERO` allocation. The frame therefore carries no uninitialised bytes and no kernel addresses.
+
+The frame is written into the stack BURROW's backing pages through the kernel direct map — the BURROW is located via `vma_lookup(p, EXEC_USER_STACK_BASE)` after `exec_map_user_stack` has installed it. This is the same mechanism `exec_map_segment` uses for segment bytes. The frame is data (read by EL0 as data, never executed), so no I-cache maintenance is needed.
+
+**Freestanding binaries are unaffected.** Thylacine-native binaries built against `libt` / `libthyla-rs` have a `_start` that calls `main` directly and never reads the stack frame; the 144-byte frame simply sits above their initial sp, ignored. The frame is consumed only by a SysV-aware C runtime (pouch). Every existing binary (joey, corvus, the bringup probes) boots unchanged with the new sp.
+
 ## Data structures
 
 No new data structures at P3-Eb. `exec_setup` writes to existing surfaces:
@@ -151,7 +203,11 @@ SEGMENT_MAP
 STACK_MAP (burrow_create_anon + burrow_map for the user stack)
    │
    ▼
-RETURN 0; *entry_out = img.entry; *sp_out = EXEC_USER_STACK_TOP
+INIT_STACK (exec_build_init_stack — write the argc/argv/envp/auxv frame)
+   │
+   ▼
+RETURN 0; *entry_out = img.entry
+          *sp_out  = EXEC_USER_STACK_TOP - EXEC_INIT_STACK_SIZE
 ```
 
 Failure at any step returns -1 with the partial state intact (caller's responsibility to dispose).
@@ -167,7 +223,7 @@ Phase 5+ exec(2) syscall semantics — exec replaces the calling Proc's image at
 
 ## Tests
 
-`kernel/test/test_exec.c` — six tests:
+`kernel/test/test_exec.c` — eight tests:
 
 - `exec.setup_smoke`: minimal valid ELF; verify single segment VMA at vaddr + user stack VMA + entry/sp out params.
 - `exec.setup_segment_data_copied`: ELF with 256 bytes of recognizable data; verify bytes are copied into BURROW backing pages (read via direct map); tail of page is zero.
@@ -175,6 +231,8 @@ Phase 5+ exec(2) syscall semantics — exec replaces the calling Proc's image at
 - `exec.setup_multi_segment`: text RX + rodata R + data RW; verify all three VMA prot bits + user stack.
 - `exec.setup_lifecycle_round_trip`: 2-segment exec + proc_free → `phys_free_pages` returns to baseline (all VMOs + sub-tables freed).
 - `exec.user_stack_guard`: verify the user-stack guard VMA — present at `[GUARD_BASE, STACK_BASE)`, `prot==0`, `burrow==NULL`, distinct from the stack VMA — and that a VMA overlapping the guard is rejected by `vma_insert` (the reservation property). Closes corvus-bringup-d audit F7.
+- `exec.setup_auxv` (P6-pouch-kernel-auxv): ELF whose first PT_LOAD covers the program headers; reads the System V startup frame back from the stack BURROW and verifies the argc/argv/envp NULLs, all six auxv entries (types + values), a resolved `AT_PHDR`, `sp == EXEC_USER_STACK_TOP - EXEC_INIT_STACK_SIZE` (16-aligned), and the `AT_RANDOM` block in-range + CSPRNG-populated (non-zero).
+- `exec.setup_auxv_no_phdr_segment` (P6-pouch-kernel-auxv): ELF whose loaded segments do not cover the phdr table; verifies the unresolved-fallback path — `AT_PHDR == 0` / `AT_PHNUM == 0` — with the rest of the frame well-formed.
 
 Each test synthesizes an ELF in a static aligned buffer (`g_elf_blob`); the same idiom as `test_elf.c::build_elf`.
 
@@ -199,8 +257,9 @@ Total exec_setup for a small static ELF: ~50–200 µs. The largest cost is the 
 - **Stubbed**: SVC syscall handler (P3-Ec).
 - **Stubbed**: ELF fixture build infrastructure + end-to-end exec test (P3-Ed).
 - **Stubbed**: exec syscall surface (Phase 5+ syscall layer).
+- **P6-pouch-kernel-auxv landed**: `exec_build_init_stack` writes the System V process-startup frame (argc / argv / envp / auxv) at the top of the user stack; `*sp_out` now points at the frame's `argc` word, 144 bytes below `EXEC_USER_STACK_TOP`. 2 new tests.
 
-Commit landing point: `9f0d1b6`.
+Commit landing point: `9f0d1b6` (P3-Eb); auxv frame at P6-pouch-kernel-auxv.
 
 ## Known caveats / footguns
 

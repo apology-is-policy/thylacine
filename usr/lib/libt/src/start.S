@@ -2,14 +2,16 @@
 //
 // The kernel's exec_setup + userland_enter delivers control to the ELF's
 // e_entry with:
-//   sp           = EXEC_USER_STACK_TOP (page-aligned ⇒ 16-byte aligned)
+//   sp           = the System V startup frame's argc word
+//                  (EXEC_USER_STACK_TOP - EXEC_INIT_STACK_SIZE; 16-aligned)
 //   x0..x30      = unspecified (don't rely on initial values)
 //   PSTATE.M    = EL0t (already at user EL)
 //
 // _start's contract: call main(), then unconditionally exits with main's
-// return value. main() takes no arguments at v1.0 (argc/argv/envp arrive
-// when the exec syscall lands in Phase 5+ and the kernel can populate
-// the auxv).
+// return value. The kernel builds a System V argc/argv/envp/auxv frame
+// at sp (P6-pouch-kernel-auxv; see the kernel's exec.h layout block) —
+// but libt's _start does not consume it: main() takes no arguments. A
+// SysV-aware C runtime (pouch) reads the frame; a libt binary ignores it.
 //
 // BTI marker on _start: the kernel jumps to e_entry via eret (not bl),
 // which doesn't count as a "call" landing pad — so technically no `bti c`

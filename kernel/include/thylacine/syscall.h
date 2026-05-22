@@ -571,6 +571,23 @@ enum {
     // Audit-bearing: touches `kernel/territory.c` (CLAUDE.md §25.4 trigger
     // surface — cycle-freedom, isolation, mount-refcount consistency).
     SYS_CHROOT       = 35,   // arg: spoor_fd
+
+    // P6-pouch-kernel-auxv: SYS_SET_TID_ADDRESS(tidptr) → tid
+    //   x0 = tidptr   user-VA of the calling thread's tid word (the
+    //                 "clear-child-tid" address, per the Linux
+    //                 set_tid_address(2) contract).
+    // A C runtime (pouch — the Thylacine POSIX libc) calls this once at
+    // thread startup (musl's __init_tp) to learn the thread id. Returns
+    // the calling thread's tid. At v1.0 — single-threaded Procs — the
+    // main thread's tid is the Proc's pid, mirroring the Linux
+    // convention that the thread-group leader's tid equals the pid.
+    //
+    // `tidptr` is ACCEPTED but neither stored nor acted on at v1.0: its
+    // only effect — clearing *tidptr + a futex wake on thread exit — is
+    // observable only with multiple threads, which land with the
+    // pouch-threads sub-chunk (POUCH-DESIGN.md §12.4); it is wired there
+    // alongside the per-thread tid. Never fails for a userspace caller.
+    SYS_SET_TID_ADDRESS = 36,  // arg: tidptr (x0)
 };
 
 // SYS_WALK_OPEN's FROM_ROOT sentinel: when passed as the spoor_fd, the

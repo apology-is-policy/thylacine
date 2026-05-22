@@ -74,12 +74,17 @@ struct elf_load_segment {
 
 struct elf_image {
     u64                       entry;
+    u64                       phoff;        // e_phoff — phdr-table file offset
+    u16                       phnum;        // e_phnum
+    u16                       phentsize;    // e_phentsize (== sizeof(Elf64_Phdr))
     int                       n_segments;
     struct elf_load_segment   segments[ELF_MAX_LOAD_SEGMENTS];
 };
 
 int elf_load(const void *blob, size_t size, struct elf_image *out);
 ```
+
+`phoff` / `phnum` / `phentsize` (P6-pouch-kernel-auxv) carry the program-header table's location — `exec_setup` consumes them to build the `AT_PHDR` / `AT_PHENT` / `AT_PHNUM` entries of the process auxiliary vector (see `docs/reference/27-exec.md`). All three are validated by `elf_load` before being stored: `phentsize == sizeof(Elf64_Phdr)`; `phoff + phnum*phentsize ≤ size` (overflow-checked); `phoff` 8-byte aligned. `<thylacine/elf.h>` additionally defines the auxv ABI — the `AT_*` `a_type` constants + `struct Elf64_auxv_t` — consumed by `exec_build_init_stack`.
 
 ### `elf_load(blob, size, out)` — return semantics
 

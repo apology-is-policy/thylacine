@@ -115,6 +115,13 @@ int elf_load(const void *blob, size_t size, struct elf_image *out) {
     // policy.
     // -----------------------------------------------------------------
     out->entry      = eh->e_entry;
+    // Program-header table location — consumed by exec_setup to build the
+    // AT_PHDR / AT_PHENT / AT_PHNUM auxv entries. All three are already
+    // validated above (phentsize == sizeof(Elf64_Phdr); phoff + phnum *
+    // phentsize within `size`; phoff aligned).
+    out->phoff      = eh->e_phoff;
+    out->phnum      = eh->e_phnum;
+    out->phentsize  = eh->e_phentsize;
     out->n_segments = 0;
 
     const struct Elf64_Phdr *ph = (const struct Elf64_Phdr *)(bytes + eh->e_phoff);

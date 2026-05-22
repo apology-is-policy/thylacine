@@ -47,6 +47,8 @@ void test_exec_setup_constraints(void);
 void test_exec_setup_multi_segment(void);
 void test_exec_setup_lifecycle_round_trip(void);
 void test_exec_user_stack_guard(void);
+void test_exec_setup_auxv(void);
+void test_exec_setup_auxv_no_phdr_segment(void);
 
 #define ELF_BLOB_SIZE 8192
 // 8-byte aligned per elf_load's R5-G F61 alignment precondition. We use
@@ -116,6 +118,23 @@ static size_t build_elf(const u32 *flags, int n_loads, u64 filesz_bytes) {
     return (size_t)PAGE_SIZE * (size_t)(n_loads + 1);
 }
 
+// Build a one-segment ELF whose PT_LOAD spans file offset 0 — so it
+// COVERS the ELF header + program-header table. This is the real-binary
+// shape (the first PT_LOAD always includes the headers); it lets
+// exec_build_init_stack resolve a non-zero AT_PHDR. Returns blob size.
+static size_t build_elf_phdrs_loaded(void) {
+    u32 flags[1] = { PF_R | PF_X };
+    size_t size = build_elf(flags, 1, /*filesz=*/0);
+    // Repoint segment 0 to file offset 0 with a filesz that spans the
+    // Ehdr (64) + one Phdr (56) = 120 bytes. (build_elf packs segment 0
+    // at file_offset PAGE_SIZE, which does NOT cover the phdrs.)
+    struct Elf64_Phdr *ph = (struct Elf64_Phdr *)
+        (g_elf_blob + sizeof(struct Elf64_Ehdr));
+    ph[0].p_offset = 0;
+    ph[0].p_filesz = 512;
+    return size;
+}
+
 static struct Proc *make_proc(void) {
     return proc_alloc();
 }
@@ -137,7 +156,8 @@ void test_exec_setup_smoke(void) {
     int rc = exec_setup(p, g_elf_blob, size, &entry, &sp);
     TEST_EXPECT_EQ(rc, 0, "exec_setup smoke should succeed");
     TEST_EXPECT_EQ(entry, (u64)0x10000,            "entry == ELF e_entry");
-    TEST_EXPECT_EQ(sp,    EXEC_USER_STACK_TOP,     "sp == user stack top");
+    TEST_EXPECT_EQ(sp,    EXEC_USER_STACK_TOP - EXEC_INIT_STACK_SIZE,
+        "sp == stack top minus the System V startup frame");
 
     // Segment VMA at vaddr 0x10000.
     struct Vma *seg_vma = vma_lookup(p, 0x10000ull);
@@ -339,4 +359,100 @@ void test_exec_user_stack_guard(void) {
     burrow_unref(b);
 
     drop_proc(p);                // proc_free → vma_drain frees the NULL-burrow guard
+}
+
+// P6-pouch-kernel-auxv: exec_setup builds a System V process-startup
+// frame (argc / argv / envp / auxv) at the top of the user stack.
+// Verifies the exact byte layout against an ELF whose first PT_LOAD
+// covers the program headers, so AT_PHDR resolves to a real user VA.
+void test_exec_setup_auxv(void) {
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+
+    size_t size = build_elf_phdrs_loaded();
+    u64 entry = 0, sp = 0;
+    int rc = exec_setup(p, g_elf_blob, size, &entry, &sp);
+    TEST_EXPECT_EQ(rc, 0, "exec_setup (phdrs-loaded ELF) should succeed");
+
+    // sp sits EXEC_INIT_STACK_SIZE below the stack top and is 16-aligned.
+    TEST_EXPECT_EQ(sp, EXEC_USER_STACK_TOP - EXEC_INIT_STACK_SIZE,
+        "sp == EXEC_USER_STACK_TOP - EXEC_INIT_STACK_SIZE");
+    TEST_EXPECT_EQ(sp & 15ull, 0ull, "sp is 16-byte aligned (AArch64 ABI)");
+
+    // Read the frame back from the stack BURROW via the direct map.
+    struct Vma *sv = vma_lookup(p, EXEC_USER_STACK_BASE);
+    TEST_ASSERT(sv != NULL && sv->burrow != NULL, "stack VMA + BURROW present");
+    u8 *stack_kva = (u8 *)pa_to_kva(page_to_pa(sv->burrow->pages));
+    u64 *w = (u64 *)(stack_kva + EXEC_USER_STACK_SIZE - EXEC_INIT_STACK_SIZE);
+
+    // argc / argv / envp — all empty at v1.0.
+    TEST_EXPECT_EQ(w[0], 0ull, "argc == 0");
+    TEST_EXPECT_EQ(w[1], 0ull, "argv[] terminator is NULL");
+    TEST_EXPECT_EQ(w[2], 0ull, "envp[] terminator is NULL");
+
+    // auxv — six (a_type, a_val) pairs, AT_NULL last.
+    TEST_EXPECT_EQ(w[3],  (u64)AT_PHDR,   "auxv[0].a_type == AT_PHDR");
+    TEST_EXPECT_EQ(w[4],  0x10040ull,     "AT_PHDR == seg0 vaddr + e_phoff");
+    TEST_EXPECT_EQ(w[5],  (u64)AT_PHENT,  "auxv[1].a_type == AT_PHENT");
+    TEST_EXPECT_EQ(w[6],  (u64)sizeof(struct Elf64_Phdr),
+        "AT_PHENT == sizeof(Elf64_Phdr) == 56");
+    TEST_EXPECT_EQ(w[7],  (u64)AT_PHNUM,  "auxv[2].a_type == AT_PHNUM");
+    TEST_EXPECT_EQ(w[8],  1ull,           "AT_PHNUM == e_phnum");
+    TEST_EXPECT_EQ(w[9],  (u64)AT_PAGESZ, "auxv[3].a_type == AT_PAGESZ");
+    TEST_EXPECT_EQ(w[10], (u64)PAGE_SIZE, "AT_PAGESZ == PAGE_SIZE");
+    TEST_EXPECT_EQ(w[11], (u64)AT_RANDOM, "auxv[4].a_type == AT_RANDOM");
+    TEST_EXPECT_EQ(w[13], (u64)AT_NULL,   "auxv[5].a_type == AT_NULL");
+    TEST_EXPECT_EQ(w[14], 0ull,           "AT_NULL.a_val == 0");
+
+    // AT_RANDOM points at the 16-byte entropy block, which must lie
+    // within the user stack region.
+    u64 rand_va = w[12];
+    TEST_EXPECT_EQ(rand_va, sp + EXEC_INIT_RANDOM_OFFSET,
+        "AT_RANDOM a_val == sp + EXEC_INIT_RANDOM_OFFSET");
+    TEST_ASSERT(rand_va >= EXEC_USER_STACK_BASE &&
+                rand_va + 16 <= EXEC_USER_STACK_TOP,
+        "the AT_RANDOM block lies within the user stack");
+
+    // The 16 entropy bytes are CSPRNG-populated — not all zero (a
+    // genuine all-zero 16-byte draw is a 2^-128 event).
+    u8 *rand_bytes = stack_kva + EXEC_USER_STACK_SIZE - 16;
+    u8 rand_or = 0;
+    for (int i = 0; i < 16; i++) rand_or |= rand_bytes[i];
+    TEST_ASSERT(rand_or != 0, "AT_RANDOM block is CSPRNG-populated (non-zero)");
+
+    drop_proc(p);
+}
+
+// P6-pouch-kernel-auxv: when no loaded segment covers the program-header
+// table, exec_build_init_stack reports AT_PHDR == 0 / AT_PHNUM == 0 (a C
+// runtime then skips the phdr walk — safe for a no-TLS program). build_elf
+// packs segment 0 at file_offset PAGE_SIZE, so the phdrs at file offset 64
+// are never within a loaded segment.
+void test_exec_setup_auxv_no_phdr_segment(void) {
+    struct Proc *p = make_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+
+    u32 flags[1] = { PF_R | PF_X };
+    size_t size = build_elf(flags, 1, /*filesz=*/0);
+    u64 entry = 0, sp = 0;
+    int rc = exec_setup(p, g_elf_blob, size, &entry, &sp);
+    TEST_EXPECT_EQ(rc, 0, "exec_setup should succeed");
+
+    struct Vma *sv = vma_lookup(p, EXEC_USER_STACK_BASE);
+    TEST_ASSERT(sv != NULL && sv->burrow != NULL, "stack VMA + BURROW present");
+    u8 *stack_kva = (u8 *)pa_to_kva(page_to_pa(sv->burrow->pages));
+    u64 *w = (u64 *)(stack_kva + EXEC_USER_STACK_SIZE - EXEC_INIT_STACK_SIZE);
+
+    TEST_EXPECT_EQ(w[3], (u64)AT_PHDR,  "auxv still carries an AT_PHDR slot");
+    TEST_EXPECT_EQ(w[4], 0ull,          "AT_PHDR == 0 (no segment covers the phdrs)");
+    TEST_EXPECT_EQ(w[7], (u64)AT_PHNUM, "auxv still carries an AT_PHNUM slot");
+    TEST_EXPECT_EQ(w[8], 0ull,          "AT_PHNUM == 0 when AT_PHDR is unresolved");
+    // The whole phdr triple is zeroed when no segment covers the table —
+    // a coherent "no phdrs" auxv (audit F1).
+    TEST_EXPECT_EQ(w[6], 0ull, "AT_PHENT == 0 when AT_PHDR is unresolved");
+    // The startup frame is otherwise well-formed.
+    TEST_EXPECT_EQ(w[0],  0ull,          "argc == 0");
+    TEST_EXPECT_EQ(w[13], (u64)AT_NULL,  "auxv terminated by AT_NULL");
+
+    drop_proc(p);
 }

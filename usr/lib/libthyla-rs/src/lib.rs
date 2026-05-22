@@ -811,10 +811,12 @@ pub fn virtio_rmb() {
 // _start — entry point.
 // =============================================================================
 //
-// The kernel's userland_enter delivers control here with
-// sp=EXEC_USER_STACK_TOP. Defined in asm for full control over BTI
-// marker + branch sequence; mirrors usr/lib/libt/src/start.S (the C
-// side's _start).
+// The kernel's userland_enter delivers control here with sp pointing at
+// the System V startup frame's argc word (EXEC_USER_STACK_TOP -
+// EXEC_INIT_STACK_SIZE; P6-pouch-kernel-auxv). libthyla-rs's _start does
+// not consume the frame — it calls rs_main() directly. Defined in asm
+// for full control over BTI marker + branch sequence; mirrors
+// usr/lib/libt/src/start.S (the C side's _start).
 //
 // Flow:
 //   bti c                  — BTI landing pad for indirect entry.

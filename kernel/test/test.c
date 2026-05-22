@@ -122,11 +122,14 @@ void test_exec_setup_constraints(void);
 void test_exec_setup_multi_segment(void);
 void test_exec_setup_lifecycle_round_trip(void);
 void test_exec_user_stack_guard(void);
+void test_exec_setup_auxv(void);
+void test_exec_setup_auxv_no_phdr_segment(void);
 void test_syscall_dispatch_unknown(void);
 void test_syscall_dispatch_puts_smoke(void);
 void test_syscall_dispatch_exits_ok(void);
 void test_syscall_dispatch_exits_fail(void);
 void test_syscall_dispatch_args_in_x0_to_x5(void);
+void test_syscall_dispatch_set_tid_address(void);
 void test_uaccess_fixup_table_well_formed(void);
 void test_uaccess_fixup_lookup_known(void);
 void test_uaccess_fixup_lookup_unknown_returns_zero(void);
@@ -702,12 +705,21 @@ struct test_case g_tests[] = {
                                        test_exec_setup_lifecycle_round_trip,
                                                                            false, NULL },
     { "exec.user_stack_guard",         test_exec_user_stack_guard,         false, NULL },
+    { "exec.setup_auxv",
+                                       test_exec_setup_auxv,
+                                                                           false, NULL },
+    { "exec.setup_auxv_no_phdr_segment",
+                                       test_exec_setup_auxv_no_phdr_segment,
+                                                                           false, NULL },
     { "syscall.dispatch_unknown",      test_syscall_dispatch_unknown,      false, NULL },
     { "syscall.dispatch_puts_smoke",   test_syscall_dispatch_puts_smoke,   false, NULL },
     { "syscall.dispatch_exits_ok",     test_syscall_dispatch_exits_ok,     false, NULL },
     { "syscall.dispatch_exits_fail",   test_syscall_dispatch_exits_fail,   false, NULL },
     { "syscall.dispatch_args_in_x0_to_x5",
                                        test_syscall_dispatch_args_in_x0_to_x5,
+                                                                           false, NULL },
+    { "syscall.dispatch_set_tid_address",
+                                       test_syscall_dispatch_set_tid_address,
                                                                            false, NULL },
     { "uaccess.fixup_table_well_formed",
                                        test_uaccess_fixup_table_well_formed,

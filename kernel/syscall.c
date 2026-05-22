@@ -1200,6 +1200,22 @@ static s64 sys_chroot_handler(u64 spoor_fd_raw) {
     return 0;
 }
 
+// SYS_SET_TID_ADDRESS — return the calling thread's tid (P6-pouch-kernel-
+// auxv). A C runtime calls this once at thread startup. At v1.0 a Proc is
+// single-threaded, so the main thread's tid is the Proc's pid (the Linux
+// thread-group-leader convention). `tidptr_raw` (the clear-child-tid
+// address) is accepted but not stored — its exit-time semantics are
+// observable only with multiple threads (POUCH-DESIGN.md §12.4); the
+// pouch-threads sub-chunk wires it alongside the per-thread tid.
+static s64 sys_set_tid_address_handler(u64 tidptr_raw) {
+    (void)tidptr_raw;
+    struct Thread *t = current_thread();
+    if (!t)         return -1;
+    struct Proc *p = t->proc;
+    if (!p)         return -1;
+    return (s64)p->pid;
+}
+
 static s64 sys_dup_handler(u64 hraw, u64 new_rights_raw) {
     struct Thread *t = current_thread();
     if (!t)                                          return -1;
@@ -2826,6 +2842,10 @@ void syscall_dispatch(struct exception_context *ctx) {
 
     case SYS_CHROOT:
         ctx->regs[0] = (u64)sys_chroot_handler(ctx->regs[0]);
+        return;
+
+    case SYS_SET_TID_ADDRESS:
+        ctx->regs[0] = (u64)sys_set_tid_address_handler(ctx->regs[0]);
         return;
 
     default:

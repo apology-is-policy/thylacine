@@ -31,6 +31,7 @@
 #include <thylacine/extinction.h>
 #include <thylacine/proc.h>
 #include <thylacine/syscall.h>
+#include <thylacine/thread.h>
 #include <thylacine/types.h>
 
 void test_syscall_dispatch_unknown(void);
@@ -38,6 +39,7 @@ void test_syscall_dispatch_puts_smoke(void);
 void test_syscall_dispatch_exits_ok(void);
 void test_syscall_dispatch_exits_fail(void);
 void test_syscall_dispatch_args_in_x0_to_x5(void);
+void test_syscall_dispatch_set_tid_address(void);
 
 void test_syscall_dispatch_unknown(void) {
     struct exception_context ctx;
@@ -208,4 +210,32 @@ void test_syscall_dispatch_args_in_x0_to_x5(void) {
     syscall_dispatch(&ctx);
     TEST_EXPECT_EQ(ctx.regs[0], 0ull,
         "SYS_PUTS reads x0 + x1 from ctx; ignores x2..x7 + x9..x30");
+}
+
+// P6-pouch-kernel-auxv: SYS_SET_TID_ADDRESS returns the calling thread's
+// tid — the calling Proc's pid at v1.0 (single-threaded Procs; the Linux
+// thread-group-leader convention). The `tidptr` argument is accepted but
+// not dereferenced (clear-child-tid semantics deferred — POUCH-DESIGN.md
+// §12.4), so even a NULL tidptr neither faults nor changes the result.
+void test_syscall_dispatch_set_tid_address(void) {
+    struct Thread *t = current_thread();
+    TEST_ASSERT(t != NULL && t->proc != NULL,
+        "the test runs inside a Proc context");
+    s64 expect_tid = (s64)t->proc->pid;
+
+    struct exception_context ctx;
+    for (int i = 0; i < 31; i++) ctx.regs[i] = 0;
+    ctx.regs[8] = SYS_SET_TID_ADDRESS;
+    ctx.regs[0] = 0x10040ull;                // a plausible user-VA tidptr
+    syscall_dispatch(&ctx);
+    TEST_EXPECT_EQ((s64)ctx.regs[0], expect_tid,
+        "SYS_SET_TID_ADDRESS returns the calling thread's tid (== Proc pid)");
+
+    // A NULL tidptr is accepted — set_tid_address never dereferences it.
+    for (int i = 0; i < 31; i++) ctx.regs[i] = 0;
+    ctx.regs[8] = SYS_SET_TID_ADDRESS;
+    ctx.regs[0] = 0;
+    syscall_dispatch(&ctx);
+    TEST_EXPECT_EQ((s64)ctx.regs[0], expect_tid,
+        "NULL tidptr is accepted (clear-child-tid deferred — §12.4)");
 }

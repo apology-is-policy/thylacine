@@ -9,7 +9,9 @@
 // The user stack is a dedicated 256 KiB VMA at `[EXEC_USER_STACK_BASE,
 // EXEC_USER_STACK_TOP)` (sized for ML-KEM-768's stack-heavy FO transform
 // in corvus — see exec.h). v1.0 doesn't grow the stack; Phase 5+ adds
-// demand-grow on faults below stack base.
+// demand-grow on faults below stack base. The top EXEC_INIT_STACK_SIZE
+// bytes carry the System V process-startup frame (argc / argv / envp /
+// auxv) a C runtime reads at entry — see exec.h + exec_build_init_stack.
 //
 // At v1.0 P3-Eb the function does NOT transition to EL0 — it only
 // populates the Proc's address space + reports the entry + sp top.
@@ -21,6 +23,7 @@
 #include <thylacine/extinction.h>
 #include <thylacine/page.h>
 #include <thylacine/proc.h>
+#include <thylacine/random.h>
 #include <thylacine/types.h>
 #include <thylacine/vma.h>
 #include <thylacine/burrow.h>
@@ -173,6 +176,82 @@ static int exec_map_user_stack(struct Proc *p) {
     return 0;
 }
 
+// Build the System V initial-process stack frame — argc / argv / envp /
+// auxv — at the top of the user stack. See exec.h for the byte layout.
+//
+// The stack BURROW (installed by exec_map_user_stack) is located via
+// vma_lookup and written through the kernel direct map; offset 0 of the
+// BURROW corresponds to EXEC_USER_STACK_BASE, so the frame's bytes land
+// in the BURROW's last EXEC_INIT_STACK_SIZE bytes. Returns the initial
+// user sp — the user VA of the frame's `argc` word.
+_Static_assert(EXEC_INIT_AUXV_COUNT == 6,
+               "exec_build_init_stack writes exactly 6 auxv entries by "
+               "literal index — adding an entry means editing the w[] "
+               "block below, not just bumping the exec.h macro");
+static u64 exec_build_init_stack(struct Proc *p, const struct elf_image *img) {
+    // exec_map_user_stack returned 0 → the stack VMA + its BURROW exist.
+    // Assert the invariant: a future exec-replaces-in-place path that
+    // tore VMAs down would otherwise NULL-deref here on the boot path.
+    struct Vma *sv = vma_lookup(p, EXEC_USER_STACK_BASE);
+    if (!sv || !sv->burrow)
+        extinction("exec_build_init_stack: stack VMA missing");
+    u8 *stack_kva  = (u8 *)pa_to_kva(page_to_pa(sv->burrow->pages));
+    u8 *frame      = stack_kva + EXEC_USER_STACK_SIZE - EXEC_INIT_STACK_SIZE;
+    u64 sp         = EXEC_USER_STACK_TOP - EXEC_INIT_STACK_SIZE;
+
+    // AT_PHDR — the user VA of the program-header table. The phdrs sit
+    // at file offset img->phoff; find the PT_LOAD segment whose file
+    // range covers the whole table and translate offset → user VA. A
+    // well-formed static binary's first PT_LOAD spans the ELF header +
+    // phdrs. If none covers them, the entire phdr triple (AT_PHDR /
+    // AT_PHENT / AT_PHNUM) is reported 0 — a coherent "no phdrs" auxv;
+    // a C runtime then skips the phdr walk (safe for a no-TLS program).
+    u64 phdr_va = 0;
+    u64 phnum   = 0;
+    u64 phent   = 0;
+    {
+        u64 phtab_bytes = (u64)img->phnum * (u64)img->phentsize;
+        for (int i = 0; i < img->n_segments; i++) {
+            const struct elf_load_segment *s = &img->segments[i];
+            if (img->phoff >= s->file_offset &&
+                (img->phoff - s->file_offset) + phtab_bytes <= s->filesz) {
+                phdr_va = s->vaddr + (img->phoff - s->file_offset);
+                phnum   = img->phnum;
+                phent   = img->phentsize;
+                break;
+            }
+        }
+    }
+
+    // AT_RANDOM — 16 bytes of kernel-CSPRNG entropy. The scratch buffer
+    // is zero-initialised first, so a short or unavailable CSPRNG read
+    // can never ship kernel-stack residue into userspace — at worst the
+    // block is partially or wholly zero (degraded entropy, never a
+    // leak). That mirrors the system-wide CSPRNG posture: a host without
+    // FEAT_RNG degrades devrandom + corvus identically.
+    u8 rand[16] = {0};
+    (void)kern_random_bytes(rand, sizeof(rand));
+
+    // Lay out the frame. The frame base is 16-byte aligned (exec.h
+    // _Static_assert); every field below is u64-aligned.
+    u64 *w = (u64 *)frame;
+    w[0]  = 0;                           // argc
+    w[1]  = 0;                           // argv[0] — NULL terminator
+    w[2]  = 0;                           // envp[0] — NULL terminator
+    w[3]  = AT_PHDR;    w[4]  = phdr_va;
+    w[5]  = AT_PHENT;   w[6]  = phent;
+    w[7]  = AT_PHNUM;   w[8]  = phnum;
+    w[9]  = AT_PAGESZ;  w[10] = PAGE_SIZE;
+    w[11] = AT_RANDOM;  w[12] = sp + EXEC_INIT_RANDOM_OFFSET;
+    w[13] = AT_NULL;    w[14] = 0;
+    // w[15] is the 8-byte alignment pad — left zero (KP_ZERO from alloc).
+
+    u8 *rand_dst = frame + EXEC_INIT_RANDOM_OFFSET;
+    for (size_t i = 0; i < sizeof(rand); i++) rand_dst[i] = rand[i];
+
+    return sp;
+}
+
 // =============================================================================
 // Public entry.
 // =============================================================================
@@ -202,7 +281,9 @@ int exec_setup(struct Proc *p, const void *blob, size_t blob_size,
         return -1;
     }
 
+    // Build the System V startup frame (argc / argv / envp / auxv) at
+    // the top of the user stack; *sp_out points at its `argc` word.
     *entry_out = img.entry;
-    *sp_out    = EXEC_USER_STACK_TOP;
+    *sp_out    = exec_build_init_stack(p, &img);
     return 0;
 }

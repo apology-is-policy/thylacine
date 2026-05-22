@@ -2,11 +2,12 @@
 
 > **Status note.** This document is the as-built reference for **pouch**,
 > Thylacine's POSIX libc (execution Phase 6). It is written incrementally as
-> Phase 6 sub-chunks land. At sub-chunk 2 (`pouch-musl-vendor`) it covers the
-> vendoring of musl, the boundary-line architecture, and the boundary-line
-> inventory. Sections for pouch's lower-half API, data structures, state
-> machines, and error paths are stubbed with forward pointers and filled in by
-> sub-chunks 3-12. The binding design is `docs/POUCH-DESIGN.md`.
+> Phase 6 sub-chunks land. Through sub-chunk 3 it covers the vendoring of musl,
+> the boundary-line architecture + inventory, and the kernel-side
+> process-startup additions (the auxiliary vector, `SYS_SET_TID_ADDRESS`).
+> Sections for pouch's lower-half API, data structures, state machines, and
+> error paths are stubbed with forward pointers and filled in by sub-chunks
+> 4-12. The binding design is `docs/POUCH-DESIGN.md`.
 
 ---
 
@@ -342,14 +343,19 @@ performance-relevant surfaces, sized as sub-chunks 6, 7-8, 11 land.
 | Sub-chunk | What | Status |
 |---|---|---|
 | 1 `pouch-toolchain` | the `aarch64-thylacine` cross toolchain | landed (`90b5333`/`e03be8d`) |
-| 2 `pouch-musl-vendor` | vendor musl 1.2.5; patch-series scaffold; upper-half probe | **this chunk** |
-| 3-15 | auxv → seam → hello → mem → torpor → threads → poll → devnodes → sockets → signals → libsodium → stratumd | pending |
+| 2 `pouch-musl-vendor` | vendor musl 1.2.5; patch-series scaffold; upper-half probe | landed (`6f60b7e`/`45e287e`) |
+| 3 `pouch-kernel-auxv` | `exec_setup` builds the System V startup frame (auxv); `SYS_SET_TID_ADDRESS` | **this chunk** |
+| 4-15 | seam → hello → mem → torpor → threads → poll → devnodes → sockets → signals → libsodium → stratumd | pending |
 
-At sub-chunk 2: musl 1.2.5 is vendored at `third_party/musl/`; the boundary-line
-patch series is scaffolded (empty) at `usr/lib/pouch/patches/`; the R2
-upper-half cross-compile probe is green. The sysroot
-(`build/sysroot/{include,lib}`) is still the empty skeleton from sub-chunk 1 —
-populated by sub-chunks 3-5.
+At sub-chunk 3: musl 1.2.5 is vendored + the boundary-line patch series is
+scaffolded (sub-chunk 2). The kernel side now builds the **System V
+process-startup frame** — argc / argv / envp / auxv — at the top of the user
+stack in `exec_setup` (deep-dive: `docs/reference/27-exec.md` "Initial process
+stack"; the `Elf64_auxv_t` + `AT_*` ABI is in `docs/reference/21-elf.md`), and
+`SYS_SET_TID_ADDRESS` is registered (ARCH §11.2) — the two kernel-side
+primitives a static C runtime needs at startup (POUCH-DESIGN.md §12.1, §12.4).
+The sysroot (`build/sysroot/{include,lib}`) is still the empty skeleton from
+sub-chunk 1 — populated by sub-chunks 4-5 once the syscall seam is retargeted.
 
 ## Known caveats / footguns
 

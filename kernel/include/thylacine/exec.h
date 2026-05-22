@@ -63,6 +63,35 @@ struct Proc;
 #define EXEC_USER_STACK_GUARD_SIZE   0x1000ull
 #define EXEC_USER_STACK_GUARD_BASE   (EXEC_USER_STACK_BASE - EXEC_USER_STACK_GUARD_SIZE)
 
+// Initial process stack — the System V process-startup frame exec_setup
+// builds at the very top of the user stack (POUCH-DESIGN.md §12.1). A C
+// runtime (pouch — the Thylacine POSIX libc) reads argc/argv/envp and
+// the auxiliary vector from here. Layout, low → high address:
+//
+//   sp + 0      argc                  u64 — 0 at v1.0 (no argv source
+//                                      until the exec syscall lands)
+//   sp + 8      argv[] terminator     one NULL pointer
+//   sp + 16     envp[] terminator     one NULL pointer
+//   sp + 24     auxv[]                EXEC_INIT_AUXV_COUNT × Elf64_auxv_t
+//                                      (AT_PHDR, AT_PHENT, AT_PHNUM,
+//                                       AT_PAGESZ, AT_RANDOM, AT_NULL)
+//   sp + 120    (8 bytes padding)
+//   sp + 128    AT_RANDOM entropy     16 kernel-CSPRNG bytes
+//   sp + 144    EXEC_USER_STACK_TOP
+//
+// The frame is a fixed EXEC_INIT_STACK_SIZE bytes at v1.0 (argc == 0,
+// fixed auxv count); the exec syscall makes argv/envp variable-length
+// in a later phase. The initial sp = EXEC_USER_STACK_TOP -
+// EXEC_INIT_STACK_SIZE; it is 16-byte aligned because the frame size is
+// rounded up to a 16-byte multiple and EXEC_USER_STACK_TOP is aligned.
+#define EXEC_INIT_AUXV_COUNT   6
+#define EXEC_INIT_STACK_SIZE \
+    (((8 + 8 + 8 + EXEC_INIT_AUXV_COUNT * 16 + 16) + 15) & ~15ull)
+// Offset (from the frame base / from sp) of the 16-byte AT_RANDOM block.
+#define EXEC_INIT_RANDOM_OFFSET   (EXEC_INIT_STACK_SIZE - 16)
+_Static_assert(EXEC_INIT_STACK_SIZE % 16 == 0,
+               "initial sp must be 16-byte aligned (AArch64 SysV ABI)");
+
 // exec_setup — parse the ELF blob, populate `p`'s VMA tree, set up the
 // user stack mapping.
 //
@@ -100,8 +129,10 @@ struct Proc;
 //
 // `*entry_out`: ELF e_entry (the EL0 entry PC). Caller writes to
 //               ELR_EL1 before the eret to EL0.
-// `*sp_out`:    EXEC_USER_STACK_TOP. Caller writes to SP_EL0 before
-//               the eret to EL0.
+// `*sp_out`:    the initial SP_EL0 — `EXEC_USER_STACK_TOP -
+//               EXEC_INIT_STACK_SIZE`, pointing at the `argc` word of
+//               the System V startup frame (see the layout above).
+//               Caller writes it to SP_EL0 before the eret to EL0.
 int exec_setup(struct Proc *p, const void *blob, size_t blob_size,
                u64 *entry_out, u64 *sp_out);
 

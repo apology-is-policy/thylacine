@@ -148,6 +148,34 @@ _Static_assert(sizeof(struct Elf64_Phdr) == 56,
                "Elf64_Phdr size pinned at 56 bytes (System V gABI)");
 
 // ============================================================================
+// Auxiliary vector (auxv) — the System V process-startup ABI.
+// ============================================================================
+//
+// The kernel hands a freshly exec'd process an auxiliary vector on its
+// initial stack (see kernel/exec.c). A C runtime (pouch's musl-derived
+// libc — POUCH-DESIGN.md) reads it to discover the page size, the
+// program-header table, and startup entropy. Each entry is a
+// (a_type, a_val) pair; the vector ends with an AT_NULL entry.
+
+// a_type values. Only the subset Thylacine populates is defined here
+// (POUCH-DESIGN.md §12.1 — the minimum a static musl process needs).
+#define AT_NULL       0    // end-of-vector marker (a_val ignored)
+#define AT_PHDR       3    // a_val = user VA of the program-header table
+#define AT_PHENT      4    // a_val = size of one program-header entry
+#define AT_PHNUM      5    // a_val = number of program headers
+#define AT_PAGESZ     6    // a_val = system page size in bytes
+#define AT_RANDOM     25   // a_val = user VA of 16 bytes of entropy
+
+// Elf64_auxv_t — one auxiliary-vector entry. 16 bytes; the initial
+// stack carries an array of these terminated by an AT_NULL entry.
+struct Elf64_auxv_t {
+    u64 a_type;
+    u64 a_val;
+};
+_Static_assert(sizeof(struct Elf64_auxv_t) == 16,
+               "Elf64_auxv_t size pinned at 16 bytes (System V gABI)");
+
+// ============================================================================
 // Loader API.
 // ============================================================================
 
@@ -169,6 +197,9 @@ struct elf_load_segment {
 
 struct elf_image {
     u64                       entry;        // start address (e_entry)
+    u64                       phoff;        // e_phoff — file offset of the phdr table
+    u16                       phnum;        // e_phnum — count of program headers
+    u16                       phentsize;    // e_phentsize (== sizeof(struct Elf64_Phdr))
     int                       n_segments;   // count of valid segments[]
     struct elf_load_segment   segments[ELF_MAX_LOAD_SEGMENTS];
 };
@@ -225,6 +256,9 @@ enum elf_load_result {
 //
 // On success:
 //   out->entry         = e_entry
+//   out->phoff         = e_phoff (phdr-table file offset)
+//   out->phnum         = e_phnum
+//   out->phentsize     = e_phentsize
 //   out->n_segments    = number of PT_LOAD segments accepted
 //   out->segments[0..N-1] = PT_LOAD segment metadata
 //
