@@ -35,17 +35,28 @@ UPPER / LOWER / SEAM inventory is in `docs/reference/78-pouch.md`.
 
 ## How the series is applied
 
-`third_party/musl/` stays **pristine**. The build copies the vendored tree to a
-working tree under `build/pouch/` (gitignored), applies this series there, and
-builds out-of-tree from the patched copy — the vendored source is never edited.
+`third_party/musl/` stays **pristine**. `tools/build.sh sysroot` copies the
+vendored tree to `build/pouch/musl-src/` (gitignored), applies this series
+there with `patch -p1`, then configures + builds the pouch libc out-of-tree in
+`build/pouch/musl-obj/` and installs it into `build/sysroot/` — the vendored
+source is never edited.
 
-The exact `tools/build.sh sysroot` wiring lands with sub-chunk 4
-(`pouch-syscall-seam`) — the first sub-chunk that adds a patch. Until then the
-series is empty and the sub-chunk-2 build probe builds pristine musl directly
-(see `docs/reference/78-pouch.md` "Build").
+A patch that fails to apply aborts the `sysroot` build loudly. After
+re-vendoring `third_party/musl/` to a newer release, rebase the series against
+it; each patch carries a preamble describing its intent, and `0001` records the
+exact awk filter that regenerates the syscall-table retarget.
 
 ## Status
 
-Empty at sub-chunk 2 (`pouch-musl-vendor`). The boundary-line replacement lands
-across Phase 6 sub-chunks 3-12 (`pouch-kernel-auxv` through `pouch-signals`).
-See `docs/POUCH-DESIGN.md §14`.
+Two patches, landed at sub-chunk 4 (`pouch-syscall-seam`):
+
+- `0001-pouch-syscall-seam.patch` — retargets musl's aarch64 syscall seam
+  (`bits/syscall.h.in`, `syscall_arch.h`, `syscall_ret.c`) to the Thylacine
+  ABI: Thylacine numbers for the eight 1:1 calls, a `0xFFFF` sentinel →
+  `-ENOSYS` for the rest, and the Thylacine `-1` → `errno` decode.
+- `0002-pouch-stdio-no-iovec.patch` — replaces the `writev`/`readv`-based
+  stdio backend ops (`__stdio_write.c`, `__stdio_read.c`) with `SYS_write` /
+  `SYS_read`.
+
+The boundary-line replacement continues across Phase 6 sub-chunks 5-12
+(`pouch-mem` through `pouch-signals`). See `docs/POUCH-DESIGN.md §14`.

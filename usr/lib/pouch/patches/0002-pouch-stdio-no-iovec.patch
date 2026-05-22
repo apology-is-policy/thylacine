@@ -1,0 +1,118 @@
+pouch boundary-line patch 0002 - stdio backend without iovec.
+
+Phase 6 sub-chunk 4 (pouch-syscall-seam). musl's stdio backend ops issue
+writev / readv; Thylacine has neither. pouch replaces them with SYS_write /
+SYS_read:
+
+  src/stdio/__stdio_write.c  loops SYS_write over the two spans musl would
+      have passed to writev (the stream's pending buffer, then the new
+      data), handling short writes. Same return + F_ERR contract.
+
+  src/stdio/__stdio_read.c   one SYS_read straight into the caller buffer.
+      Drops musl's readahead-into-f->buf (throughput, not semantics).
+
+Binding design: docs/POUCH-DESIGN.md section 5.
+
+--- a/src/stdio/__stdio_write.c
++++ b/src/stdio/__stdio_write.c
+@@ -1,34 +1,38 @@
+ #include "stdio_impl.h"
+-#include <sys/uio.h>
+ 
++/* pouch: musl's __stdio_write issues one writev over {pending-buffer span,
++   new-data span}; Thylacine has no writev. pouch writes the two spans with
++   SYS_write, looping on short writes. The contract matches musl's: on full
++   success the stream's write buffer is reset and `len` is returned; on
++   error F_ERR is set and the count of *new* bytes (those from `buf`)
++   written so far is returned.
++
++   A SYS_write return <= 0 is terminal: a negative value is an error, and a
++   0 (no progress on a non-empty span) is treated as an error too. That is
++   safe against Thylacine's SYS_write contract - a Thylacine write blocks
++   until it can make progress and returns -1 on a dead peer; it does not
++   0-return for flow control - and it avoids the unbounded spin musl's
++   writev-based loop would take on a 0. */
+ size_t __stdio_write(FILE *f, const unsigned char *buf, size_t len)
+ {
+-	struct iovec iovs[2] = {
+-		{ .iov_base = f->wbase, .iov_len = f->wpos-f->wbase },
+-		{ .iov_base = (void *)buf, .iov_len = len }
+-	};
+-	struct iovec *iov = iovs;
+-	size_t rem = iov[0].iov_len + iov[1].iov_len;
+-	int iovcnt = 2;
+-	ssize_t cnt;
+-	for (;;) {
+-		cnt = syscall(SYS_writev, f->fd, iov, iovcnt);
+-		if (cnt == rem) {
+-			f->wend = f->buf + f->buf_size;
+-			f->wpos = f->wbase = f->buf;
+-			return len;
++	const unsigned char *spans[2] = { f->wbase, buf };
++	size_t lens[2] = { (size_t)(f->wpos - f->wbase), len };
++	size_t done_new = 0;
++	for (int i = 0; i < 2; i++) {
++		size_t off = 0;
++		while (off < lens[i]) {
++			long cnt = syscall(SYS_write, f->fd,
++			                   spans[i] + off, lens[i] - off);
++			if (cnt <= 0) {
++				f->wpos = f->wbase = f->wend = 0;
++				f->flags |= F_ERR;
++				return done_new;
++			}
++			off += (size_t)cnt;
++			if (i == 1) done_new += (size_t)cnt;
+ 		}
+-		if (cnt < 0) {
+-			f->wpos = f->wbase = f->wend = 0;
+-			f->flags |= F_ERR;
+-			return iovcnt == 2 ? 0 : len-iov[0].iov_len;
+-		}
+-		rem -= cnt;
+-		if (cnt > iov[0].iov_len) {
+-			cnt -= iov[0].iov_len;
+-			iov++; iovcnt--;
+-		}
+-		iov[0].iov_base = (char *)iov[0].iov_base + cnt;
+-		iov[0].iov_len -= cnt;
+ 	}
++	f->wend = f->buf + f->buf_size;
++	f->wpos = f->wbase = f->buf;
++	return len;
+ }
+--- a/src/stdio/__stdio_read.c
++++ b/src/stdio/__stdio_read.c
+@@ -1,24 +1,17 @@
+ #include "stdio_impl.h"
+-#include <sys/uio.h>
+ 
++/* pouch: musl's __stdio_read issues one readv over {caller buffer, the
++   stream's prefetch buffer}; Thylacine has no readv. pouch does a single
++   SYS_read straight into the caller's buffer. The dropped half is the
++   readahead into f->buf - a throughput optimization, not a semantic one:
++   the stream simply refills on the next read. F_EOF / F_ERR are set
++   exactly as musl's original does (cnt < 0 -> F_ERR, cnt == 0 -> F_EOF). */
+ size_t __stdio_read(FILE *f, unsigned char *buf, size_t len)
+ {
+-	struct iovec iov[2] = {
+-		{ .iov_base = buf, .iov_len = len - !!f->buf_size },
+-		{ .iov_base = f->buf, .iov_len = f->buf_size }
+-	};
+-	ssize_t cnt;
+-
+-	cnt = iov[0].iov_len ? syscall(SYS_readv, f->fd, iov, 2)
+-		: syscall(SYS_read, f->fd, iov[1].iov_base, iov[1].iov_len);
++	long cnt = syscall(SYS_read, f->fd, buf, len);
+ 	if (cnt <= 0) {
+ 		f->flags |= cnt ? F_ERR : F_EOF;
+ 		return 0;
+ 	}
+-	if (cnt <= iov[0].iov_len) return cnt;
+-	cnt -= iov[0].iov_len;
+-	f->rpos = f->buf;
+-	f->rend = f->buf + cnt;
+-	if (f->buf_size) buf[len-1] = *f->rpos++;
+-	return len;
++	return (size_t)cnt;
+ }

@@ -30,6 +30,9 @@ USR_RS_BUILD="$BUILD_DIR/usr-rs"
 TOOLCHAIN_FILE="$REPO_ROOT/cmake/Toolchain-aarch64-thylacine.cmake"
 USR_TOOLCHAIN_FILE="$REPO_ROOT/cmake/Toolchain-aarch64-userspace.cmake"
 USR_RS_TARGET="aarch64-unknown-none"
+# LLVM install prefix for the pouch sysroot build (clang/llvm-ar/llvm-ranlib).
+# Mirrors cmake/Toolchain-aarch64-pouch.cmake + tools/pouch-clang.
+LLVM_PREFIX="${LLVM_PREFIX:-/opt/homebrew/opt/llvm}"
 
 target="${1:-all}"
 shift || true
@@ -204,36 +207,119 @@ build_userspace() {
 }
 
 build_sysroot() {
-    # Phase 6 (Pouch) — the cross-compilation sysroot for the pouch POSIX
-    # libc. Sub-chunk 1 (pouch-toolchain): create the sysroot skeleton +
-    # run a toolchain self-check. The sysroot is POPULATED by later
-    # sub-chunks — pouch-musl-vendor + pouch-kernel-auxv install headers
-    # into include/; the musl build installs libc.a + CRT objects into
-    # lib/. See docs/POUCH-DESIGN.md §14 + docs/phase6-status.md.
+    # Phase 6 (Pouch) — build the pouch POSIX libc + cross-compilation sysroot.
+    #
+    # pouch is a musl derivative: vendored-pristine musl (third_party/musl/)
+    # plus the boundary-line patch series (usr/lib/pouch/patches/). This
+    # target copies the vendored tree to a disposable working copy, applies
+    # the series, cross-builds the libc for aarch64-thylacine, and installs
+    # headers + libc.a + CRT objects into build/sysroot/. third_party/musl/
+    # is never edited. See docs/POUCH-DESIGN.md §4-5 + docs/reference/78-pouch.md.
+    #
+    # The build is from-scratch each run (~1-2 min): the working copy and
+    # object tree are removed and rebuilt so a stale patch never lingers.
     local sysroot="$BUILD_DIR/sysroot"
-    echo "==> pouch sysroot: $sysroot"
-    mkdir -p "$sysroot/include" "$sysroot/lib"
+    local pouch_dir="$BUILD_DIR/pouch"
+    local musl_src="$pouch_dir/musl-src"
+    local musl_obj="$pouch_dir/musl-obj"
+    local vendored="$REPO_ROOT/third_party/musl"
+    local patches_dir="$REPO_ROOT/usr/lib/pouch/patches"
+    local clang="$LLVM_PREFIX/bin/clang"
+    local jobs
+    jobs="$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)"
 
-    # Toolchain self-check: the pouch cross-toolchain must produce an
-    # aarch64 object. No libc / headers needed — a header-less -c compile
-    # verifies cmake/Toolchain-aarch64-pouch.cmake + tools/pouch-clang are
-    # wired up before any sub-chunk depends on them.
-    echo "==> pouch toolchain self-check"
-    local probe_c="$sysroot/.toolchain-probe.c"
-    local probe_o="$sysroot/.toolchain-probe.o"
-    printf 'int pouch_toolchain_probe(void){return 42;}\n' > "$probe_c"
-    "$REPO_ROOT/tools/pouch-clang" -c "$probe_c" -o "$probe_o"
-    if ! file "$probe_o" | grep -qi 'aarch64'; then
-        echo "    ERROR: pouch-clang did not produce an aarch64 object:" >&2
-        file "$probe_o" >&2
-        rm -f "$probe_c" "$probe_o"
+    if [[ ! -x "$clang" ]]; then
+        echo "==> pouch sysroot: clang not found at $clang" >&2
+        echo "    override with LLVM_PREFIX=/path tools/build.sh sysroot" >&2
         exit 1
     fi
-    echo "    ok: $(file -b "$probe_o")"
-    rm -f "$probe_c" "$probe_o"
+    if [[ ! -d "$vendored" ]]; then
+        echo "==> pouch sysroot: vendored musl missing at $vendored" >&2
+        exit 1
+    fi
 
-    echo "==> pouch sysroot skeleton ready (include/ + lib/)."
-    echo "    Populated by Pouch sub-chunks 2-5 — see docs/phase6-status.md."
+    echo "==> pouch sysroot: $sysroot"
+
+    # 1. fresh working copy — third_party/musl/ stays pristine.
+    rm -rf "$pouch_dir" "$sysroot"
+    mkdir -p "$pouch_dir" "$musl_obj" "$sysroot"
+    cp -R "$vendored" "$musl_src"
+
+    # 2. apply the boundary-line patch series. A failed patch aborts the
+    #    build (set -e); a rejected hunk also leaves a .rej file, caught
+    #    below. The read loop's || [[ -n ]] guard handles a final
+    #    newline-less line in series.
+    echo "==> applying pouch patch series"
+    while IFS= read -r patch_line || [[ -n "$patch_line" ]]; do
+        case "$patch_line" in ''|\#*) continue ;; esac
+        echo "    patch: $patch_line"
+        patch -p1 -t -d "$musl_src" -i "$patches_dir/$patch_line"
+    done < "$patches_dir/series"
+    local rej
+    rej="$(find "$musl_src" -name '*.rej')"
+    if [[ -n "$rej" ]]; then
+        echo "==> pouch sysroot: patch series left rejected hunks:" >&2
+        echo "$rej" >&2
+        exit 1
+    fi
+
+    # 3. configure the pouch libc out-of-tree for aarch64-thylacine. Same
+    #    toolchain tools/pouch-clang wraps; clang treats "thylacine" as an
+    #    unknown OS, so pouch drives the target explicitly (invariant P-1).
+    echo "==> configuring musl (aarch64-thylacine)"
+    ( cd "$musl_obj" && sh "$musl_src/configure" \
+        --target=aarch64-thylacine \
+        --prefix="$sysroot" \
+        --disable-shared \
+        CC="$clang --target=aarch64-thylacine" \
+        AR="$LLVM_PREFIX/bin/llvm-ar" \
+        RANLIB="$LLVM_PREFIX/bin/llvm-ranlib" )
+
+    # 4. build, then install headers + libc.a + CRT objects. install-tools
+    #    is skipped — pouch ships tools/pouch-clang, not musl's musl-gcc.
+    echo "==> building pouch libc (-j$jobs)"
+    ( cd "$musl_obj" && make -j"$jobs" )
+    ( cd "$musl_obj" && make install-libs install-headers )
+
+    # 5. verify the install, that the syscall-seam retarget landed (all eight
+    #    1:1 numbers + the sentinel — pins the awk retarget against
+    #    kernel/include/thylacine/syscall.h), and that the cancellable-path
+    #    sentinel guard is present.
+    local syscall_h="$sysroot/include/bits/syscall.h"
+    local fail=0
+    [[ -f "$sysroot/lib/libc.a" ]]   || { echo "    MISSING: lib/libc.a"   >&2; fail=1; }
+    [[ -f "$sysroot/lib/crt1.o" ]]   || { echo "    MISSING: lib/crt1.o"   >&2; fail=1; }
+    [[ -f "$sysroot/lib/crti.o" ]]   || { echo "    MISSING: lib/crti.o"   >&2; fail=1; }
+    [[ -f "$sysroot/lib/crtn.o" ]]   || { echo "    MISSING: lib/crtn.o"   >&2; fail=1; }
+    [[ -f "$sysroot/include/stdio.h" ]] || { echo "    MISSING: include/stdio.h" >&2; fail=1; }
+    if [[ -f "$syscall_h" ]]; then
+        local seam
+        for seam in 'SYS_read 9' 'SYS_write 10' 'SYS_close 11' 'SYS_exit 0' \
+                    'SYS_exit_group 0' 'SYS_mlockall 16' 'SYS_getrandom 20' \
+                    'SYS_set_tid_address 36' 'SYS_writev 0xFFFF' \
+                    'SYS_socket 0xFFFF'; do
+            grep -q "^#define $seam\$" "$syscall_h" || {
+                echo "    SEAM: '#define $seam' missing from bits/syscall.h" >&2
+                fail=1
+            }
+        done
+    else
+        echo "    MISSING: include/bits/syscall.h" >&2; fail=1
+    fi
+    grep -q 'POUCH_SYSCALL_UNIMPL' "$musl_src/src/thread/__syscall_cp.c" || {
+        echo "    SEAM: cancellable-path sentinel guard missing in __syscall_cp.c" >&2
+        fail=1
+    }
+    if [[ "$fail" -ne 0 ]]; then
+        echo "==> pouch sysroot FAILED verification" >&2
+        exit 1
+    fi
+
+    echo "==> pouch sysroot ready:"
+    echo "    libc.a   $(wc -c < "$sysroot/lib/libc.a" | tr -d ' ') bytes"
+    echo "    CRT      crt1.o crti.o crtn.o"
+    echo "    headers  $(find "$sysroot/include" -name '*.h' | wc -l | tr -d ' ') files"
+    echo "    seam     syscall table retargeted to the Thylacine ABI"
 }
 
 build_disk() {

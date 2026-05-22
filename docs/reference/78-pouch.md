@@ -2,12 +2,14 @@
 
 > **Status note.** This document is the as-built reference for **pouch**,
 > Thylacine's POSIX libc (execution Phase 6). It is written incrementally as
-> Phase 6 sub-chunks land. Through sub-chunk 3 it covers the vendoring of musl,
-> the boundary-line architecture + inventory, and the kernel-side
-> process-startup additions (the auxiliary vector, `SYS_SET_TID_ADDRESS`).
-> Sections for pouch's lower-half API, data structures, state machines, and
-> error paths are stubbed with forward pointers and filled in by sub-chunks
-> 4-12. The binding design is `docs/POUCH-DESIGN.md`.
+> Phase 6 sub-chunks land. Through sub-chunk 4 it covers the vendoring of musl,
+> the boundary-line architecture + inventory, the kernel-side process-startup
+> additions (the auxiliary vector, `SYS_SET_TID_ADDRESS`), and the syscall seam
+> — the syscall-number retarget, the unimplemented-syscall sentinel, the
+> Thylacine error-convention decode, and the stdio backend. Sections for
+> pouch's lower-half API, data structures, and state machines are stubbed with
+> forward pointers and filled in by sub-chunks 5-12. The binding design is
+> `docs/POUCH-DESIGN.md`.
 
 ---
 
@@ -222,11 +224,12 @@ the boundary line**, at `usr/lib/pouch/patches/`:
 - `NNNN-<slug>.patch` — the patches, numbered in apply order.
 - `README.md` — the discipline (the P-4 boundary-line rule; the apply model).
 
-`third_party/musl/` stays pristine; the build copies it to a working tree under
-`build/pouch/` (gitignored), applies the series there, and builds out-of-tree.
-The series is **empty at sub-chunk 2** — the boundary-line replacement lands
-across sub-chunks 3-12. The exact `tools/build.sh sysroot` wiring lands with
-sub-chunk 4 (`pouch-syscall-seam`), the first sub-chunk that adds a patch.
+`third_party/musl/` stays pristine; `tools/build.sh sysroot` copies it to
+`build/pouch/musl-src/` (gitignored), applies the series there with `patch
+-p1`, and builds out-of-tree (see "Build" below). At sub-chunk 4 the series
+holds two patches — `0001-pouch-syscall-seam.patch` and
+`0002-pouch-stdio-no-iovec.patch` (see "The syscall seam" next); the
+boundary-line replacement continues across sub-chunks 5-12.
 
 The series' size is the honest, reviewable measure of pouch's divergence from
 musl. An upstream musl security release is handled by re-vendoring
@@ -235,54 +238,154 @@ tree.
 
 ---
 
-## Build — the upper-half cross-compile probe
+## The syscall seam
 
-Sub-chunk 2 verifies the boundary-line architecture against reality: does
-vendored musl take the `aarch64-thylacine` cross toolchain (sub-chunk 1)
-cleanly? This is the POUCH-DESIGN.md **risk R2** probe ("musl's lower half may
-resist a clean seam").
+Sub-chunk 4 (`pouch-syscall-seam`) retargets musl's aarch64 syscall seam from
+the Linux kernel ABI to the Thylacine ABI. Two patches carry it:
+`0001-pouch-syscall-seam.patch` (the seam proper) and
+`0002-pouch-stdio-no-iovec.patch` (the stdio backend). All six touched files
+are SEAM or LOWER-half — invariant **P-4** holds, no UPPER-half file is
+touched.
 
-The probe builds the static archive out-of-tree:
+### The number table
 
-```sh
-mkdir -p build/pouch/musl-obj && cd build/pouch/musl-obj
-sh ../../../third_party/musl/configure \
-    --target=aarch64-thylacine --disable-shared \
-    CC="/opt/homebrew/opt/llvm/bin/clang --target=aarch64-thylacine" \
-    AR=/opt/homebrew/opt/llvm/bin/llvm-ar \
-    RANLIB=/opt/homebrew/opt/llvm/bin/llvm-ranlib
-make -j8 lib/libc.a
-```
+`arch/aarch64/bits/syscall.h.in` is musl's table of `#define __NR_<name>
+<number>` macros (musl's build appends a `SYS_<name>` twin for each). pouch
+rewrites every value:
 
-**Result** (musl 1.2.5, Homebrew Clang 22.1.4):
+| `__NR_*` / `SYS_*` name | Thylacine syscall | number |
+|---|---|---|
+| `read` | `SYS_READ` | 9 |
+| `write` | `SYS_WRITE` | 10 |
+| `close` | `SYS_CLOSE` | 11 |
+| `exit`, `exit_group` | `SYS_EXITS` | 0 |
+| `mlockall` | `SYS_MLOCKALL` | 16 |
+| `getrandom` | `SYS_GETRANDOM` | 20 |
+| `set_tid_address` | `SYS_SET_TID_ADDRESS` | 36 |
+| *every other macro (299 of them)* | — | `0xFFFF` |
 
-- musl's `configure` **accepts the `aarch64-thylacine` triple** — it derives
-  `ARCH=aarch64` and writes `config.mak` without complaint. (The linker-flag
-  probes report "no" — clang has no linker defaults for the unknown
-  "thylacine" OS — but that affects only the *link* of test executables and
-  the shared library, not the compile of `libc.a`. pouch's link lines name the
-  CRT objects + compiler-rt explicitly; that wiring is sub-chunks 4-5.)
-- `make lib/libc.a` **succeeds**: **1345 translation units compiled, 0 errors,
-  0 warnings**, producing a 2.4 MB `lib/libc.a` of valid `ELF 64-bit LSB
-  relocatable, ARM aarch64` objects.
-- musl compiles its own source hermetically — `-std=c99 -nostdinc
-  -ffreestanding` with only musl's own `-I` paths; no host headers leak in.
+The eight retargeted calls are the ones that map **1:1** onto a native
+Thylacine syscall — identical argument shape and semantics, so musl's existing
+wrapper issues an `svc 0` the kernel honours directly. (Thylacine deliberately
+matched the aarch64 ABI and chose POSIX-shaped semantics for these calls, so
+the seam is a number change, not a shim.) `exit` and `exit_group` both fold
+onto `SYS_EXITS`: whole-process exit at v1.0 — the per-thread distinction lands
+with `pouch-threads`.
 
-**R2 verdict** — the boundary line is **compile-clean**. Vendored musl, as
-portable C, cross-compiles end-to-end for `aarch64-thylacine` with the pouch
-toolchain. The seam is as clean as the design assumed: the patch series'
-burden is **semantic** — replacing what the lower half *does* (which syscalls,
-which ABI, which `errno` convention) — not a fight with what it *compiles to*.
+Every other POSIX call has no 1:1 Thylacine syscall: either pouch will
+implement it in C in its lower half as a *sequence* of Thylacine syscalls
+(`open`, `socket`, `poll`, `pthread_create`, ...), or it is genuinely
+unsupported. All such macros are retargeted to **`0xFFFF`**, the
+unimplemented-syscall sentinel. The table keeps **every** musl `__NR_*` name —
+only the values change — so all of musl still compiles end-to-end; a reference
+to an un-retargeted call resolves to a deliberate sentinel, never an undefined
+macro. The retarget is a deterministic awk filter over the pristine table; the
+recipe is recorded in the `0001` patch header, so a musl re-vendor regenerates
+it mechanically.
 
-Caveat: this `libc.a` is built from *unpatched* musl, so it is structurally
-valid but **semantically Linux** — `obj/include/bits/syscall.h` still holds
-Linux `__NR_*` numbers, and the lower half assumes the Linux kernel ABI. It is
-not a runnable pouch libc; it is the R2 evidence that the upper half is sound.
-The semantically-correct pouch `libc.a` — patch series applied, seam
-retargeted, installed into the sysroot — is sub-chunks 4-5.
+### The sentinel
 
-Build artifacts live under `build/pouch/` (gitignored); the vendored source is
-untouched.
+musl issues syscalls down **two** paths, and pouch guards both:
+
+- The **non-cancellable** path — `arch/aarch64/syscall_arch.h`'s
+  `__syscall0..6` inline-asm (loads `x8`, issues `svc 0`). pouch adds, as the
+  **first statement** of each of the seven, the guard `if (n ==
+  POUCH_SYSCALL_UNIMPL) return -ENOSYS;`.
+- The **cancellable** path — taken by cancellation-point calls (`nanosleep`,
+  `poll`, `fcntl`, ...) on a thread with cancellation enabled. It runs the C
+  function `__syscall_cp` (`src/thread/__syscall_cp.c`) into the hand-written
+  asm `__syscall_cp_asm`, which has no guard of its own. `__syscall_cp` is the
+  single C chokepoint for every cancellable call, so pouch adds the same
+  `if (n == POUCH_SYSCALL_UNIMPL) return -ENOSYS;` there. (This touches a file
+  under `src/thread/` — a seam-natured change, not thread semantics; the
+  boundary line, P-4, still holds.)
+
+`POUCH_SYSCALL_UNIMPL` is `0xFFFF`. A call with no Thylacine equivalent
+short-circuits to `-ENOSYS` **without issuing the trap**, on either path. Two
+invariants are made structurally true:
+
+- **P-1** — no foreign syscall number ever reaches the kernel. The only
+  numbers that survive the table are Thylacine numbers (0..36) and the
+  sentinel, and the sentinel reaches neither `svc` instruction.
+- **P-3** — an un-retargeted POSIX call is a clean `ENOSYS`, never silently
+  wrong, and never a stray `svc` the kernel would reject with a flat `-1`.
+
+The sentinel literal lives in two patched files — the `0xFFFF` in the table and
+`POUCH_SYSCALL_UNIMPL` in `syscall_arch.h`. A `_Static_assert` in
+`syscall_ret.c` (`SYS_io_setup == POUCH_SYSCALL_UNIMPL`) pins the two to the
+same value at compile time. `syscall_arch.h` also gains `#include <errno.h>` so
+`-ENOSYS` resolves without depending on the includer's context.
+
+### The error convention
+
+Thylacine's syscall error convention is a **flat `-1`** — on failure the kernel
+returns `-1` in `x0`, with no errno channel. Linux returns `-errno`. musl's
+`__syscall_ret` — the chokepoint every public wrapper funnels through — is
+retargeted to decode Thylacine's convention:
+
+| raw return `r` | meaning | result |
+|---|---|---|
+| `r >= 0` | success | `r` |
+| `r == -1` | a Thylacine syscall error | `errno = EIO`; return `-1` |
+| `r` in `[-4095, -2]` | an explicit `-errno` | `errno = -r`; return `-1` |
+
+Thylacine does not report *which* errno failed a syscall, so a flat `-1` maps
+to the generic **`EIO`**. This is honest, not silently-wrong (P-3): `EIO` is a
+defined POSIX errno for "an I/O-layer operation failed," and it replaces the
+actively-misleading `EPERM` that unmodified musl would synthesise from a `-1`
+(`errno = -(-1) = 1`). The `[-4095, -2]` range carries an *explicit* `-errno`:
+the sentinel's `-ENOSYS`, and — in later sub-chunks — pouch lower-half C
+wrappers that determine a precise errno before returning. The `r == -1` test
+precedes the range test because `-1` also satisfies `r > -4096UL`. A richer
+kernel error channel is possible future work (POUCH-DESIGN.md §5.1), out of
+scope here.
+
+### The stdio backend
+
+musl's `__stdio_write` / `__stdio_read` issue `writev` / `readv` — vectored I/O
+Thylacine does not provide. `0002-pouch-stdio-no-iovec.patch` replaces them:
+
+- `__stdio_write` loops `SYS_write` over the two spans musl would have passed
+  to `writev` (the stream's pending buffer, then the caller's new data),
+  handling short writes. The return + `F_ERR` contract is unchanged: `len` on
+  full success, the count of *new* bytes written on error. A `SYS_write`
+  return `<= 0` is terminal — `0` means no progress, and pouch treats that as
+  an error rather than spinning (musl's `writev` loop could spin).
+- `__stdio_read` does a single `SYS_read` into the caller's buffer. musl's
+  readahead-into-`f->buf` is dropped — a throughput optimisation, not a
+  semantic one; the stream refills on the next read. `F_EOF` / `F_ERR` are set
+  exactly as musl's original does (`cnt < 0` → `F_ERR`, `cnt == 0` → `F_EOF`).
+
+## Build — `tools/build.sh sysroot`
+
+`tools/build.sh sysroot` builds the pouch libc and populates the sysroot:
+
+1. Copies pristine `third_party/musl/` to `build/pouch/musl-src/` (gitignored).
+   `third_party/musl/` is never edited.
+2. Applies the patch series (`usr/lib/pouch/patches/series`) to the copy with
+   `patch -p1`. A patch that fails to apply aborts the build loudly.
+3. Configures musl out-of-tree in `build/pouch/musl-obj/` for the
+   `aarch64-thylacine` target (`--disable-shared`; `CC` = clang
+   `--target=aarch64-thylacine`; `AR` / `RANLIB` = `llvm-ar` / `llvm-ranlib`).
+4. Builds and installs headers + `libc.a` + the CRT objects
+   (`crt1.o` / `crti.o` / `crtn.o`) into `build/sysroot/`. `install-tools` is
+   skipped — pouch ships `tools/pouch-clang`, not musl's `musl-gcc`.
+5. Verifies the install, and that the seam retarget actually landed
+   (`SYS_write` → 10 and `SYS_writev` → the `0xFFFF` sentinel in the generated
+   `bits/syscall.h`).
+
+The build is from-scratch each run (~1-2 min): the working copy and object tree
+are removed and rebuilt so a stale patch never lingers. Output: a 2.4 MB
+`libc.a` (1347 objects, valid `ELF 64-bit LSB relocatable, ARM aarch64`), the
+CRT objects, and 218 headers — all under `build/sysroot/` (gitignored). The
+**patched** musl still compiles **0 errors / 0 warnings**: the seam patches are
+as compile-clean as the upper half.
+
+Sub-chunk 2's **R2 probe** (POUCH-DESIGN.md risk R2 — "musl's lower half may
+resist a clean seam") built *pristine* musl as the boundary-line
+compile-cleanliness check: 1345 TUs, 0 errors, 0 warnings, a structurally valid
+but *semantically Linux* `libc.a`. Sub-chunk 4's build is the real thing — the
+series applied, the seam retargeted, the libc semantically Thylacine.
 
 ---
 
@@ -319,18 +422,36 @@ Sub-chunk 2 introduces no spec obligation (vendoring + scaffolding).
 ## Tests
 
 Sub-chunk 2 adds no kernel-test-suite cases (vendoring + scaffolding; no kernel
-code). Its verification is the build probe above. The Phase 6 proving set —
-static hello, `printf` hello, the multithreaded test, the `AF_UNIX` echo pair,
-libsodium's self-test, stratumd's boot — lands across sub-chunks 5, 8, 11, 13,
-15. See `docs/POUCH-DESIGN.md §13` for the exit-criteria checklist.
+code). Sub-chunk 4 (`pouch-syscall-seam`) adds none either — it changes no
+kernel code, so the kernel suite stays **538/538**. Its verification is
+`tools/build.sh sysroot`: the patched musl must build 0 errors / 0 warnings,
+and the build asserts the seam retarget landed (`SYS_write` → 10, `SYS_writev`
+→ the sentinel). The first *runtime* exercise of the seam is sub-chunk 5
+(`pouch-hello-smoke`) — a static hello built against the sysroot. The Phase 6
+proving set — static hello, `printf` hello, the multithreaded test, the
+`AF_UNIX` echo pair, libsodium's self-test, stratumd's boot — lands across
+sub-chunks 5, 8, 11, 13, 15. See `docs/POUCH-DESIGN.md §13` for the
+exit-criteria checklist.
 
 ## Error paths
 
-Not yet — pouch's Thylacine-rc → POSIX-`errno` mapping lands with the syscall
-seam (sub-chunk 4). Per POUCH-DESIGN.md §5.1, every pouch lower-half wrapper
-carries a per-call mapping from Thylacine's `-1`-on-error convention to a POSIX
-`errno`. Invariant P-3: no POSIX surface is silently wrong — each either maps
-to defined behavior or returns a documented `errno`.
+pouch translates Thylacine's flat-`-1` syscall error convention into the POSIX
+`errno` convention. At sub-chunk 4 the translation has three tiers:
+
+- **`__syscall_ret`** — the chokepoint every musl public wrapper funnels
+  through — maps a raw `-1` to `errno = EIO` and a raw `-errno` in `[-4095,-2]`
+  to that errno. See "The syscall seam — the error convention".
+- **The sentinel** turns any un-retargeted POSIX call into `errno = ENOSYS`
+  (the `0xFFFF` macro → `-ENOSYS` from `syscall_arch.h` → `__syscall_ret`).
+- **Per-call precision** — where `EIO` is too coarse, a pouch lower-half C
+  wrapper (later sub-chunks: sockets, signals, ...) determines a precise errno
+  itself before returning. Sub-chunk 4 establishes the convention; the eight
+  1:1 seam calls use the `EIO` generic, honest for them — a failed
+  `read` / `write` / `close` is a defensible `EIO`.
+
+Invariant **P-3**: no POSIX surface is silently wrong — every call either maps
+to defined Thylacine behaviour or returns a documented `errno` (`EIO` for an
+opaque failure, `ENOSYS` for an unimplemented call).
 
 ## Performance characteristics
 
@@ -344,32 +465,46 @@ performance-relevant surfaces, sized as sub-chunks 6, 7-8, 11 land.
 |---|---|---|
 | 1 `pouch-toolchain` | the `aarch64-thylacine` cross toolchain | landed (`90b5333`/`e03be8d`) |
 | 2 `pouch-musl-vendor` | vendor musl 1.2.5; patch-series scaffold; upper-half probe | landed (`6f60b7e`/`45e287e`) |
-| 3 `pouch-kernel-auxv` | `exec_setup` builds the System V startup frame (auxv); `SYS_SET_TID_ADDRESS` | **this chunk** |
-| 4-15 | seam → hello → mem → torpor → threads → poll → devnodes → sockets → signals → libsodium → stratumd | pending |
+| 3 `pouch-kernel-auxv` | `exec_setup` builds the System V startup frame (auxv); `SYS_SET_TID_ADDRESS` | landed (`d505e73`/`f2a1130`) |
+| 4 `pouch-syscall-seam` | retarget the syscall table; the sentinel; the errno decode; the stdio backend; `build.sh sysroot` builds the real libc | **this chunk** |
+| 5-15 | hello → mem → torpor → threads → poll → devnodes → sockets → signals → libsodium → stratumd | pending |
 
-At sub-chunk 3: musl 1.2.5 is vendored + the boundary-line patch series is
-scaffolded (sub-chunk 2). The kernel side now builds the **System V
-process-startup frame** — argc / argv / envp / auxv — at the top of the user
-stack in `exec_setup` (deep-dive: `docs/reference/27-exec.md` "Initial process
-stack"; the `Elf64_auxv_t` + `AT_*` ABI is in `docs/reference/21-elf.md`), and
-`SYS_SET_TID_ADDRESS` is registered (ARCH §11.2) — the two kernel-side
-primitives a static C runtime needs at startup (POUCH-DESIGN.md §12.1, §12.4).
-The sysroot (`build/sysroot/{include,lib}`) is still the empty skeleton from
-sub-chunk 1 — populated by sub-chunks 4-5 once the syscall seam is retargeted.
+At sub-chunk 4: musl 1.2.5 is vendored (sub-chunk 2); `exec_setup` builds the
+System V process-startup frame and `SYS_SET_TID_ADDRESS` is registered
+(sub-chunk 3 — deep-dive `docs/reference/27-exec.md` "Initial process stack").
+This sub-chunk retargets the **syscall seam** (above) and makes
+`tools/build.sh sysroot` build the real pouch `libc.a` — patched, retargeted,
+semantically Thylacine — into `build/sysroot/{include,lib}` (the headers,
+`libc.a`, and CRT objects). The sysroot can now compile + link a pouch
+program; the first one — a static hello — runs at sub-chunk 5.
 
 ## Known caveats / footguns
 
 - **`third_party/musl/` is pristine — do not edit it.** All Thylacine changes
   go through `usr/lib/pouch/patches/`. A direct edit breaks the re-vendor /
   rebase model and silently violates invariant P-4.
-- **The probe `libc.a` is not a runnable libc.** It is built from unpatched
-  musl and makes Linux syscalls. Do not install it into the sysroot or link a
-  Thylacine program against it. The real pouch `libc.a` is sub-chunks 4-5.
-- **Compiles ≠ correct.** That musl compiles for `aarch64-thylacine` proves the
-  *upper half* is portable; it says nothing about the *lower half's* runtime
-  behavior, which is Linux until the patch series replaces it.
-- **`build/pouch/` is gitignored.** Re-run the probe (above) to regenerate it;
-  it is not committed.
+- **A failed syscall reports the generic `EIO`** — a known, design-sanctioned
+  limitation. Thylacine's flat-`-1` error convention carries no errno, so the
+  eight 1:1 seam calls report `EIO` on any failure — not the precise `EBADF` /
+  `EFAULT` / `EPIPE` a Linux caller might expect. `EIO` is a *documented* POSIX
+  errno (not silently wrong — P-3 holds), but code that branches on a specific
+  `errno` after `read` / `write` / `close` will not get it until either a
+  richer kernel error channel exists or a pouch lower-half wrapper supplies
+  precision (POUCH-DESIGN.md §5.1).
+- **Terminal detection always reports "not a tty."** `ioctl` is a sentinel
+  (Thylacine has no PTY at v1.0), so `isatty()` returns 0 with `errno = ENOTTY`
+  and stdio's tty probe leaves `stdout` fully buffered. Correct for a v1.0
+  system with no terminals; revisited when the PTY work (Phase 7, Utopia)
+  lands.
+- **`exit` and `exit_group` both terminate the whole process.** Both map to
+  `SYS_EXITS`. Correct at v1.0 (single-threaded); the per-thread-exit
+  distinction lands with `pouch-threads`.
+- **The retarget keeps every musl `__NR_*` name.** An un-retargeted POSIX call
+  resolves to the `0xFFFF` sentinel and returns `ENOSYS` at runtime — it does
+  not fail to compile. "Compiles" therefore does not mean "implemented"; the
+  sentinel is the marker of an un-done lower-half call.
+- **`build/pouch/` and `build/sysroot/` are gitignored** and rebuilt from
+  scratch by every `tools/build.sh sysroot` (~1-2 min); they are not committed.
 
 ## Naming rationale
 

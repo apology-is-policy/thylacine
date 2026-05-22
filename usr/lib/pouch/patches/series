@@ -9,6 +9,10 @@
 # stdlib / math / ...). See docs/reference/78-pouch.md for the per-directory
 # UPPER / LOWER / SEAM boundary-line inventory.
 #
-# The series is empty at sub-chunk 2 (pouch-musl-vendor). The boundary-line
-# replacement lands across Phase 6 sub-chunks 3-12 (pouch-kernel-auxv through
-# pouch-signals) — see docs/POUCH-DESIGN.md §14.
+# tools/build.sh sysroot copies third_party/musl/ to build/pouch/musl-src/,
+# applies the patches below in order, then builds the pouch libc out-of-tree.
+# The boundary-line replacement continues across Phase 6 sub-chunks 5-12 —
+# see docs/POUCH-DESIGN.md §14.
+
+0001-pouch-syscall-seam.patch
+0002-pouch-stdio-no-iovec.patch
