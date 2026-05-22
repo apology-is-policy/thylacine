@@ -719,7 +719,7 @@ performance-relevant surfaces, sized as sub-chunks 7, 8-9, 12 land.
 | 5 `pouch-hello-smoke` | the first pouch binaries — `/pouch-hello` + `/pouch-hello-stdio` build + run in Thylacine | landed (`5c0623d`) |
 | 6a `pouch-ld` | the `pouch-ld` link-driver wrapper; `build_pouch_progs` links through it | landed (`eeaa5ab`) |
 | 6b `pouch-compiler-rt` | vendor + build the compiler-rt builtins — `libclang_rt.builtins.a` | landed (`72f45f9`) |
-| 6c `pouch-compiler-rt` | the real `printf` hello — `/pouch-hello-printf` | landed (`*(pending)*`) |
+| 6c `pouch-compiler-rt` | the real `printf` hello — `/pouch-hello-printf` | landed (`aea1ab2`) |
 | 7-16 | mem → torpor → threads → poll → devnodes → sockets → signals → libsodium → stratumd | pending |
 
 At sub-chunk 6c: the pouch cross-toolchain is **complete and proven** —
