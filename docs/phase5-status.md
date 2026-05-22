@@ -4,7 +4,9 @@ Authoritative pickup guide for **Phase 5: 9P client + Stratum integration** (per
 
 ## TL;DR
 
-**Phase 5 is OPEN.** Entry unblocked at Phase 4 close (tip `4f90e62`, P4-M hash fixup). Stratum v2 is feature-complete and shipping; integration binds to its stable 9P2000.L wire + libstratum-9p ABIs per `stratum/v2/docs/OS-INTEGRATION.md`. No external delivery dependency remains.
+**Phase 5 is SUSPENDED, substantially complete (2026-05-22).** Everything through the P5-stratumd-stub-bringup audit close has landed; the remaining tail — real stratumd swap-in (sub-chunk f), P5-hostowner-c, P5-login — is blocked on a real POSIX libc and resumes after **Phase 6 (Pouch)**. Phase 6 was inserted to preempt the Phase 5 close: real stratumd is a conventional POSIX C daemon and cannot run until the `pouch` libc + cross-toolchain exist. Binding design: `POUCH-DESIGN.md`; pickup guide: `docs/phase6-status.md`. Phase 5 resumes once pouch can build + boot stratumd.
+
+**Phase 5 entry** (historical): unblocked at Phase 4 close (tip `4f90e62`, P4-M hash fixup). Stratum v2 is feature-complete and shipping; integration binds to its stable 9P2000.L wire + libstratum-9p ABIs per `stratum/v2/docs/OS-INTEGRATION.md`. No external delivery dependency remains.
 
 Phase 5 lifts the kernel from "drivers expose hardware as composed kobjects" (Phase 4 close) to **"the filesystem is the OS"** — userspace processes interact with persistent storage, the admin surface, and each other entirely through 9P. Major deliverables: the kernel 9P client (`kernel/9p_*`), `specs/9p_client.tla` (the gating spec, written before impl), Unix-socket transport on Spoor, mount path integration, per-Proc 9P connection lifecycle, `.key` sidecar handling via janus, `stratumd` lifecycle inside Thylacine's userspace-driver-as-9P-server pattern, `/srv/stratum-ctl/` consumption, ramfs → Stratum boot pivot. The two §6.2 boxes re-scoped from Phase 4 close as natural side effects: virtio-net `/dev/ether0` 9P surface (P4-Id) + virtio-input `/dev/cons` 9P surface — both depend on the same "userspace driver as 9P server" primitive Phase 5 lands.
 

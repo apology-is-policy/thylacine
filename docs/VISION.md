@@ -347,7 +347,7 @@ The encryption / snapshot / MVCC / multi-device / dedup / cold-tier features of 
 
 Thylacine is not a Linux clone. It is an OS that *runs* a useful subset of Linux software via translation, where translation can be done without compromising the kernel's design.
 
-**Tier 1 — native**: programs compiled for Thylacine against the musl port. Build clean, link clean, run with full functionality. Target: BusyBox coreutils, bash, rc, gcc/clang, vim, ssh, curl, Python, the entire Plan 9 userland (rc, troff, mk, etc.).
+**Tier 1 — native**: programs compiled for Thylacine against **pouch** — the Thylacine-native POSIX libc (a musl derivative; binding design `POUCH-DESIGN.md`, execution Phase 6). Build clean, link clean, run with full functionality. Target: BusyBox coreutils, bash, rc, gcc/clang, vim, ssh, curl, Python, the entire Plan 9 userland (rc, troff, mk, etc.).
 
 **Tier 2 — static Linux ARM64 binary**: pre-built static ARM64 ELF binaries that use a top-50 Linux syscall surface. Run via the kernel's syscall translation shim. Best-effort; works for most CLI tools.
 
@@ -356,6 +356,8 @@ Thylacine is not a Linux clone. It is an OS that *runs* a useful subset of Linux
 **Out of scope at v1.0**: glibc-dynamic binaries (no `/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1`); programs that require `epoll` / `inotify` / `io_uring` (those land post-v1.0); programs that require non-trivial `/sys` parsing.
 
 The compat layer is *additive*: it does not modify the kernel API. The kernel API is Thylacine-native; compat is a userspace library + a thin syscall shim. Removing the compat layer leaves a working OS.
+
+Tier 1 — **pouch** — is the load-bearing tier. Thylacine's practicality as a real OS depends on the reuse of well-written POSIX/Linux/BSD software, and pouch is that path: it carries the entire burden of POSIX translation in userspace so the kernel carries none of it (invariant P-1 — no foreign syscall number ever enters the kernel). pouch is a first-class Thylacine component, not a grudging compat shim — contrast Plan 9's second-class APE. Its execution phase (Phase 6) deliberately preempts the close of Phase 5; binding design in `POUCH-DESIGN.md`.
 
 ---
 

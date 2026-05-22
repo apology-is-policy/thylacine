@@ -40,24 +40,31 @@ Phase 4  ─ Device model + userspace drivers     [device layer]
 
 Phase 5  ─ 9P client + Stratum integration      [storage] ★ THIS DOC'S §7
             Pipelined 9P client (specs/9p_client.tla first); kernel mounts
-            stratumd's Unix socket; .key sidecar unwrap; janus key agent;
+            stratumd's Unix socket; .key sidecar unwrap; corvus key agent;
             /ctl/ admin synthetic FS consumed; ramfs → Stratum pivot.
-            Stratum v2 is shipping; binds to its stable 9P2000.L wire +
-            libstratum-9p ABIs per stratum/v2/docs/OS-INTEGRATION.md.
+            SUSPENDED, substantially complete — the real-stratumd tail
+            resumes after Phase 6 (pouch) provides the libc.
 
-Phase 6  ─ Syscall surface + musl + Utopia      [userspace milestone]
-            Full syscall table, musl port, uutils-coreutils, rc, bash,
-            poll, futex, pty, signals, /proc, /dev/pts/, Utopia ships
+Phase 6  ─ Pouch: POSIX libc + cross-compilation [practicality] ★ §7A
+            The pouch libc (musl-derived); aarch64-thylacine cross-
+            toolchain + sysroot; POSIX runtime layer (sockets→/srv,
+            poll→t_poll, signals→notes, pthreads→Thylacine threads +
+            the torpor wait-on-address primitive); real stratumd built
+            + booted. Binding design: POUCH-DESIGN.md.
 
-Phase 7  ─ Linux compat + network               [practical OS]
+Phase 7  ─ Syscall surface + Utopia              [userspace milestone]
+            Full syscall table, uutils-coreutils, rc, bash, the rich
+            Unix namespace (/proc, /dev/pts/), Utopia ships — on pouch
+
+Phase 8  ─ Linux compat + network               [practical OS]
             Linux ARM64 binary shim, container runner, network stack,
             polished Utopia + binary shims = practical working OS
 
-Phase 8  ─ Hardening + audit + v1.0-rc          [stable substrate]
+Phase 9  ─ Hardening + audit + v1.0-rc           [stable substrate]
             Fuzz, audit, benchmarks, 8-CPU stress, docs, v1.0-rc tag.
-            If Halcyon (Phase 9) slips, this v1.0-rc ships as v1.0.
+            If Halcyon (Phase 10) slips, this v1.0-rc ships as v1.0.
 
-Phase 9  ─ Halcyon + v1.0 final                 [graphical layer]
+Phase 10 ─ Halcyon + v1.0 final                  [graphical layer]
             Framebuffer driver extensions, scroll-buffer shell, image,
             video, Halcyon-surface audit, v1.0 final release.
 
@@ -66,21 +73,22 @@ Post-v1.0 (v1.1, v1.2, v2.0+) — see §16
 
 ### 2.1 Section ↔ phase mapping
 
-The execution numbering above reflects what status docs use (`docs/phaseN-status.md`). This document's section headers in §4-§11 are stale by one phase relative to execution numbering — they were written before Phase 3 (address spaces + exec + /init) was added as a distinct phase. The Stratum amendment landing alongside this revision updates content but does NOT yet renumber the headers; doing so is a follow-up doc-only churn pass. Until then:
+The execution numbering reflects what status docs use (`docs/phaseN-status.md`). This document's section headers in §4-§11 are stale relative to execution numbering — they predate **two** phase insertions: Phase 3 (address spaces + exec + /init) and Phase 6 (Pouch, inserted 2026-05-22 — see `POUCH-DESIGN.md`). A full header + in-body phase-number renumber across ROADMAP / ARCHITECTURE / VISION / CLAUDE.md is a tracked deferred doc-hygiene pass. **This table is the authoritative phase registry**; until the renumber lands:
 
-| Execution phase | This doc's section | This doc's header label (stale) |
+| Execution phase | This doc's section | Header label (stale) |
 |---|---|---|
 | Phase 1 — Kernel skeleton | §4 | "Phase 1: Kernel skeleton" |
 | Phase 2 — Process model + scheduler + handles | §5 | "Phase 2: Process model + scheduler + handles" |
-| Phase 3 — Address spaces + page faults + exec | (no section yet — see `docs/phase3-status.md`) | — |
+| Phase 3 — Address spaces + page faults + exec | (no section — see `docs/phase3-status.md`) | — |
 | Phase 4 — Device model + userspace drivers | §6 | "Phase 3: Device model + userspace drivers" |
-| **Phase 5 — 9P client + Stratum integration** | **§7** | **"Phase 4: 9P client + Stratum integration"** |
-| Phase 6 — Syscall surface + musl + Utopia | §8 | "Phase 5: Syscall surface + musl + Utopia" |
-| Phase 7 — Linux compat + network | §9 | "Phase 6: Linux compat + network" |
-| Phase 8 — Hardening + audit + v1.0-rc | §10 | "Phase 7: Hardening + audit + v1.0-rc" |
-| Phase 9 — Halcyon + v1.0 final | §11 | "Phase 8: Halcyon + v1.0 final" |
+| Phase 5 — 9P client + Stratum integration *(suspended; substantially complete)* | §7 | "Phase 4: 9P client + Stratum integration" |
+| **Phase 6 — Pouch: POSIX libc + cross-compilation** | **§7A** | **"Phase 6: Pouch"** — binding design `POUCH-DESIGN.md` |
+| Phase 7 — Syscall surface + Utopia | §8 | "Phase 5: Syscall surface + musl + Utopia" *(musl moved to Phase 6)* |
+| Phase 8 — Linux compat + network | §9 | "Phase 6: Linux compat + network" |
+| Phase 9 — Hardening + audit + v1.0-rc | §10 | "Phase 7: Hardening + audit + v1.0-rc" |
+| Phase 10 — Halcyon + v1.0 final | §11 | "Phase 8: Halcyon + v1.0 final" |
 
-When in doubt, the **execution phase** is what `docs/phaseN-status.md`, `memory/project_active.md`, and commit messages use. This doc's section headers are the *original* Phase 0 plan; the content has been updated continuously but the header renumber has been deferred.
+When in doubt, the **execution phase** in this table is authoritative — it is what `docs/phaseN-status.md`, `memory/project_active.md`, and commit messages use. Document section headers + in-body "Phase N" references elsewhere lag pending the renumber pass.
 
 ---
 
@@ -117,7 +125,7 @@ There are *no* userspace-as-shortcut deferrals — the priming's "in-kernel virt
 
 ### 3.6 The compat layer is built on top, not baked in
 
-The kernel API is Thylacine-native throughout. POSIX/Linux compatibility is implemented as a userspace library (musl) and a thin syscall translation shim. The kernel is never modified to accommodate POSIX requirements.
+The kernel API is Thylacine-native throughout. POSIX/Linux compatibility is implemented as a userspace library — **pouch**, the Thylacine-native POSIX libc (a musl derivative; binding design `POUCH-DESIGN.md`, execution Phase 6) — and a thin syscall translation shim. The kernel is never modified to accommodate POSIX requirements; this is invariant **P-1** (no foreign syscall number ever enters the kernel — POUCH-DESIGN.md §11).
 
 ### 3.7 Performance is measured continuously
 
@@ -600,6 +608,51 @@ POSIX coverage on Stratum:
 - **inotify/fanotify**: Stratum-upstream roadmap; until then, polling is the fallback.
 - **OTLP exposition**: Prometheus is the v2.x baseline; OTLP is a sidecar translator if needed.
 - **Cross-phase pulls**: P4-Id (virtio-net `/dev/ether0` 9P surface) and virtio-input `/dev/cons` 9P surface were the remaining Phase 4 §6.2 boxes; they're naturally absorbed by Phase 5 once the kernel learns to host a userspace 9P server (the symmetric mechanism to mounting one). Both close as Phase 5 side effects.
+
+---
+
+## 7A. Phase 6: Pouch — POSIX libc + cross-compilation
+
+**Execution Phase 6.** Binding design: **`docs/POUCH-DESIGN.md`** (converged 2026-05-22). This section is the ROADMAP-level summary; POUCH-DESIGN.md is authoritative for scope, architecture, invariants, and sub-chunk detail.
+
+### 7A.1 Why this phase, why here
+
+Thylacine's practicality — its claim to be a real OS, not a toy — depends on the reuse of POSIX/Linux/BSD software. That capability was a single bullet ("musl port") inside the old Phase 6; it is in fact phase-sized and load-bearing for the whole project, so it was extracted, expanded, and made its own phase. It **preempts the Phase 5 close**: Phase 5 (9P client + Stratum integration) is suspended, substantially complete — its remaining tail (real stratumd swap-in, P5-hostowner-c, P5-login) is pouch-dependent and resumes once pouch exists. stratumd is the proving binary; the durable deliverable is the cross-compilation path itself. (Stratum is a Thylacine-native-primary project — written mainly for Thylacine, with Linux/macOS as secondary targets — so making Thylacine a first-class build + run target for it is core, not accommodation.)
+
+### 7A.2 Deliverables
+
+- **pouch** — the Thylacine-native POSIX libc: musl's portable upper half + a Thylacine-native lower half, split at musl's syscall seam. POSIX lives entirely in pouch's userspace; the kernel gains no foreign syscall number (invariant P-1).
+- The **`aarch64-thylacine` cross-toolchain** + **sysroot** — `tools/build.sh sysroot` becomes real; usable from CMake and plain Makefiles.
+- The **POSIX runtime layer** — `AF_UNIX`→`/srv`, `poll(2)`→`t_poll`, `sigaction`→notes, pthreads→Thylacine threads with the **`torpor`** wait-on-address primitive.
+- The **synthetic-filesystem namespace** — the minimal Unix `/dev` set + the convention by which POSIX path-based APIs resolve to Thylacine Devs (POUCH-DESIGN.md §6.6).
+- **Proving artifacts** — a static C "hello", libsodium cross-compiled, **real stratumd built + booted**, the Phase-5 stub retired.
+
+### 7A.3 Sub-chunk decomposition
+
+15 sub-chunks — see POUCH-DESIGN.md §14. Critical path: chunk 7 (`pouch-wait-addr` — the `torpor` primitive, spec-first against `futex.tla`) and chunk 8 (`pouch-threads`).
+
+### 7A.4 Exit criteria
+
+Full list in POUCH-DESIGN.md §13. Headline: the cross-toolchain builds; a static + a printf hello run in Thylacine; a multithreaded test passes under TSan; an `AF_UNIX` echo pair round-trips over `/srv`; libsodium's self-test passes; stratumd boots, serves 9P, the stub is retired; joey completes the ramfs→Stratum pivot. The stratumd criteria **re-open and satisfy the bulk of Phase 5's own exit criteria** — this phase is what unblocks the Phase 5 close.
+
+### 7A.5 Specs
+
+- `futex.tla` (gate-tied spec #7) — the `torpor` wait-on-address primitive. Spec-first per CLAUDE.md.
+- `notes.tla` (#8), `poll.tla` (#6), `pty.tla` (#9) — pouch's signal / poll / (later) PTY layers are consumers; those kernel mechanisms are pre-existing or pre-planned.
+
+### 7A.6 Audit-trigger surfaces
+
+pouch's lower half (the syscall seam, the socket/thread/signal translation) + the kernel additions (auxv population, the `torpor` syscall, the allocator-backend call). Enumerated in POUCH-DESIGN.md §14 (the audit-bearing column); mirrored in `ARCHITECTURE.md §25`.
+
+### 7A.7 Dependencies
+
+- **Inbound**: Phase 5's 9P client + handle table + `/srv` + `SYS_POLL` + Thylacine threads — all landed; pouch rests on them.
+- **Outbound**: the Phase 5 tail (real stratumd, P5-hostowner-c, P5-login) resumes after pouch. The renamed Phase 7 (Utopia) builds its userland on pouch.
+- **Stratum-side**: chunks 13–14 need Stratum changes (the Thylacine `peer_creds` arm). User-owned, coordinated work.
+
+### 7A.8 Naming
+
+`pouch` — the libc (the marsupium; shelters foreign code until it can run native). `torpor` — the wait-on-address primitive (a thread enters torpor on an address until roused). Both signed off 2026-05-22. See POUCH-DESIGN.md §16.
 
 ---
 

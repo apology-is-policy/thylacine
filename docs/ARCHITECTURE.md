@@ -1858,6 +1858,8 @@ Territory isolation primary; standard Unix DAC + coarse capabilities; full SOTA 
 
 **STATUS**: COMMITTED
 
+> **Phase 6 (Pouch) realizes this section.** `POUCH-DESIGN.md` is the binding design for the Tier-1 native compat layer — the **pouch** libc (a musl derivative) + the `aarch64-thylacine` cross-toolchain. §16.1's Tier-1 "musl libc port" *is* pouch. Where this section and POUCH-DESIGN.md describe the same surface, POUCH-DESIGN.md is authoritative for the as-designed Phase-6 detail; this section is the architectural overview.
+
 ### 16.1 Compat strategy (three tiers)
 
 Per `VISION.md §12`:
@@ -2467,6 +2469,8 @@ DTB-driven hardware discovery; platform layers under `arch/arm64/<platform>/`; f
 
 **STATUS**: COMMITTED
 
+> **Phase 6 (Pouch) + Phase 7 (Utopia) realize this section.** `POUCH-DESIGN.md` is the binding design for the pouch POSIX environment; its §6.6 refines §23.1's "POSIX surfaces are 9P servers" principle into the synthetic-filesystem-as-translation model (the synthetic FS *is* the translation layer). The Utopia userland milestone — the rich `/proc` + `/dev/pts` namespace, coreutils, bash, rc — is the renamed execution **Phase 7**, built on pouch. The phase-number references in this section predate the Phase-6 insertion; per `ROADMAP.md §2.1` the execution-phase registry there is authoritative.
+
 ### 23.1 Design principle: POSIX surfaces are 9P servers
 
 Every POSIX surface in Thylacine is a 9P server that speaks a POSIX-shaped interface. There is no separate compat kernel layer. The mechanism is always: a 9P server mounts at a conventional path and serves the expected file tree. Thylacine-native programs use the underlying 9P interface directly; POSIX programs see what they expect; both are served by the same infrastructure.
@@ -2882,6 +2886,7 @@ Every change to a file or function listed below spawns an adversarial soundness 
 | ELF loader | `kernel/elf.c` | RWX rejection, relocation correctness |
 | `mprotect` / `mmap` | `mm/vm.c` syscall handlers | W^X enforcement |
 | Initial bringup | `kernel/main.c`, `init/joey.c` | Boot ordering correctness |
+| pouch lower half + kernel additions | `usr/lib/pouch/` (the syscall seam; socket / thread / signal translation), `kernel/` auxv population + the `torpor` wait-on-address syscall + the allocator-backend call | The POSIX→Thylacine boundary; invariants P-1..P-4 (POUCH-DESIGN.md §11); the `torpor` wait/wake (`futex.tla`). Phase 6 surface — rows enumerated per sub-chunk in POUCH-DESIGN.md §14. |
 
 ### 25.5 The audit round
 
@@ -2984,6 +2989,8 @@ The complete list of load-bearing invariants. Source for `VISION.md §8`. Each m
 These are the project's promises. Every one has a spec or a runtime check or a compile-time assertion. None are policy-only.
 
 **Corvus invariants (C-1..C-23)** are enumerated separately in `CORVUS-DESIGN.md §9` — they govern the key agent's runtime + audit guarantees (mlock'd pages, session ownership monotonicity, audit log encryption, the kernel-stamped per-connection `/srv` transport identity, etc.). Cross-referenced here so the global invariant surface is discoverable; the canonical text lives in CORVUS-DESIGN.
+
+**Pouch invariants (P-1..P-4)** are enumerated separately in `POUCH-DESIGN.md §11` — they govern the Phase-6 POSIX environment's boundary guarantees: **P-1** no foreign syscall number ever enters the kernel (the structural form of `ROADMAP.md §3.6` — the kernel is never modified to accommodate POSIX); **P-2** pouch is the sole POSIX path to the kernel; **P-3** no silently-wrong POSIX surface (every surface either maps to a defined Thylacine behavior or returns a documented errno); **P-4** the pouch upper/lower boundary line holds (vendored musl above, Thylacine-native below). Cross-referenced here so the global invariant surface is discoverable; the canonical text lives in POUCH-DESIGN.
 
 ---
 
