@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# tools/pouch-ld — the Thylacine pouch link driver.
+#
+# Phase 6 (Pouch). clang cannot drive the ELF link for the aarch64-thylacine
+# triple on a macOS host — its driver mis-selects the host Darwin toolchain
+# and emits Mach-O linker arguments the ELF ld.lld rejects (see
+# docs/reference/78-pouch.md "Why linking cannot go through the clang
+# driver"). pouch-ld is the link half of the toolchain: it invokes ld.lld
+# directly with the pouch link line — a static, non-PIE ET_EXEC the kernel
+# ELF loader accepts (kernel/elf.c rejects ET_DYN/PT_DYNAMIC;
+# exec_map_segment requires page-aligned PT_LOAD file offsets, hence
+# -z separate-loadable-segments).
+#
+# pouch-ld supplies the musl CRT objects + libc.a — and, once
+# pouch-compiler-rt has built it, the compiler runtime libclang_rt.builtins.a
+# — automatically. The caller passes only its own objects + `-o <output>`:
+#
+#   pouch-ld <objects...> -o <output> [extra -l libs]
+#
+# The wrapper pins what *defines* linking a pouch executable: the ELF
+# linker, the static/W^X/non-PIE policy, and the CRT + libc. Codegen and
+# the object set are the caller's. Plain-Makefile / autotools projects set
+# their link command to this wrapper; the CMake toolchain points
+# CMAKE_C_LINK_EXECUTABLE at it.
+#
+# Environment overrides:
+#   POUCH_SYSROOT  — sysroot path (default: <repo>/build/sysroot)
+#   LLD_PREFIX     — lld install prefix (default: /opt/homebrew/opt/lld)
+#
+# See docs/POUCH-DESIGN.md §9.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+POUCH_SYSROOT="${POUCH_SYSROOT:-$REPO_ROOT/build/sysroot}"
+LLD_PREFIX="${LLD_PREFIX:-/opt/homebrew/opt/lld}"
+lld="$LLD_PREFIX/bin/ld.lld"
+libdir="$POUCH_SYSROOT/lib"
+
+if [[ ! -x "$lld" ]]; then
+    echo "pouch-ld: ld.lld not found at $lld" >&2
+    echo "    override with LLD_PREFIX=/path" >&2
+    exit 1
+fi
+for o in crt1.o crti.o crtn.o libc.a; do
+    if [[ ! -f "$libdir/$o" ]]; then
+        echo "pouch-ld: $libdir/$o missing — run 'tools/build.sh sysroot'" >&2
+        exit 1
+    fi
+done
+
+# The compiler runtime — present once pouch-compiler-rt (sub-chunk 6) has
+# built it. Group it with libc so the mutual references between musl and the
+# soft-float builtins resolve regardless of archive order.
+rt="$libdir/libclang_rt.builtins.a"
+if [[ -f "$rt" ]]; then
+    libset=( -L"$libdir" --start-group -lc "$rt" --end-group )
+else
+    libset=( -L"$libdir" -lc )
+fi
+
+# crt1+crti before the caller's objects; -lc + the runtime + crtn after.
+exec "$lld" \
+    -static \
+    -z separate-loadable-segments \
+    -z max-page-size=4096 \
+    -z noexecstack \
+    --build-id=none \
+    "$libdir/crt1.o" "$libdir/crti.o" \
+    "$@" \
+    "${libset[@]}" \
+    "$libdir/crtn.o"

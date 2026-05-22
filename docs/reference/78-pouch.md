@@ -424,7 +424,9 @@ build, by necessity:
    becomes an `aarch64` ELF relocatable. `-nostdinc -isystem
    <sysroot>/include` so pouch owns the include path; `-fno-pie` for
    fixed-address codegen.
-2. **Link** — `ld.lld` invoked **directly** (not through the clang driver).
+2. **Link** — `tools/pouch-ld`, the link-driver wrapper, which drives `ld.lld`
+   **directly** (not through the clang driver) and supplies the musl CRT
+   objects + `libc.a` (+ the compiler runtime, once built).
 
 The link line yields a static, non-PIE `ET_EXEC` whose every `PT_LOAD` segment
 has a **page-aligned file offset** — the layout `kernel/elf.c` +
@@ -446,11 +448,13 @@ emits Mach-O linker arguments (`-arch arm64`, `-platform_version`,
 `-syslibroot`) that the ELF `ld.lld` rejects. The *compiler* path
 (`pouch-clang -c`) is unaffected — clang compiles `aarch64-thylacine` TUs
 correctly; only the *link-driver* role is broken. `build_pouch_progs` sidesteps
-it by invoking `ld.lld` directly with an explicit ELF link line. **Sub-chunk 6
-(`pouch-compiler-rt`) adds a `pouch-ld` wrapper** that drives `ld.lld` with the
-pouch ELF link line, so the CMake/autotools build chunks (libsodium, stratumd —
-sub-chunks 14-16) link cleanly: the CMake toolchain points
-`CMAKE_C_LINK_EXECUTABLE` at `pouch-ld`.
+it by invoking `ld.lld` directly. **`tools/pouch-ld`** (Phase 6 sub-chunk 6a)
+is the wrapper that does this: it drives `ld.lld` with the pouch ELF link line
+and supplies the CRT + `libc.a` (+ the compiler runtime, once built).
+`build_pouch_progs` links through it. The CMake/autotools build chunks
+(libsodium, stratumd — sub-chunks 14-16) point their link command
+(`CMAKE_C_LINK_EXECUTABLE`, or `LD`) at `pouch-ld` — that wiring lands with the
+first CMake-built pouch program, where it can be exercised end-to-end.
 
 ### The compiler-runtime gap
 
@@ -570,7 +574,8 @@ performance-relevant surfaces, sized as sub-chunks 7, 8-9, 12 land.
 | 3 `pouch-kernel-auxv` | `exec_setup` builds the System V startup frame (auxv); `SYS_SET_TID_ADDRESS` | landed (`d505e73`/`f2a1130`) |
 | 4 `pouch-syscall-seam` | retarget the syscall table; the sentinel; the errno decode; the stdio backend; `build.sh sysroot` builds the real libc | landed (`dbc6bd3`/`aad33d6`) |
 | 5 `pouch-hello-smoke` | the first pouch binaries — `/pouch-hello` + `/pouch-hello-stdio` build + run in Thylacine | landed (`5c0623d`) |
-| 6 `pouch-compiler-rt` | the compiler runtime (compiler-rt builtins) + the `pouch-ld` link wrapper + the real `printf` hello | **next** |
+| 6a `pouch-ld` | the `pouch-ld` link-driver wrapper; `build_pouch_progs` links through it | **this chunk** |
+| 6b `pouch-compiler-rt` | vendor + build the compiler-rt builtins; the real `printf` hello | **next** |
 | 7-16 | mem → torpor → threads → poll → devnodes → sockets → signals → libsodium → stratumd | pending |
 
 At sub-chunk 5: the pouch sysroot (sub-chunks 1-4) compiles + links a pouch

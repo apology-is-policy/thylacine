@@ -350,15 +350,15 @@ build_pouch_progs() {
     #
     # Two steps, deliberately:
     #   1. compile each .c with tools/pouch-clang (clang as the compiler).
-    #   2. link directly with ld.lld. clang as the *link driver* cannot be
-    #      used: for the unknown "thylacine" OS on a macOS host clang falls
-    #      into the Darwin toolchain and emits Mach-O linker arguments. The
-    #      compiler path is unaffected. (docs/reference/78-pouch.md "Build".)
+    #   2. link with tools/pouch-ld, which invokes ld.lld directly. clang as
+    #      the *link driver* cannot be used: for the unknown "thylacine" OS on
+    #      a macOS host clang falls into the Darwin toolchain and emits Mach-O
+    #      linker arguments. The compiler path is unaffected.
     #
-    # The link line produces a static, non-PIE ET_EXEC with page-aligned
-    # PT_LOAD file offsets — the layout kernel/elf.c + exec_map_segment
-    # accept with no kernel change. -z separate-loadable-segments is what
-    # page-aligns every PT_LOAD's file offset (exec_map_segment requires it).
+    # pouch-ld produces a static, non-PIE ET_EXEC with page-aligned PT_LOAD
+    # file offsets (-z separate-loadable-segments) — the layout kernel/elf.c +
+    # exec_map_segment accept with no kernel change — and supplies the CRT +
+    # libc.a. See docs/reference/78-pouch.md.
     #
     # The sysroot must exist; it is built on demand here if absent
     # (build_sysroot, ~1-2 min). A patch-series change needs an explicit
@@ -367,14 +367,9 @@ build_pouch_progs() {
     local progs_out="$BUILD_DIR/pouch/progs"
     local src_dir="$REPO_ROOT/usr/pouch-hello"
     local pouch_clang="$REPO_ROOT/tools/pouch-clang"
-    local lld="$LLD_PREFIX/bin/ld.lld"
+    local pouch_ld="$REPO_ROOT/tools/pouch-ld"
     local readelf="$LLVM_PREFIX/bin/llvm-readelf"
 
-    if [[ ! -x "$lld" ]]; then
-        echo "==> pouch progs: ld.lld not found at $lld" >&2
-        echo "    override with LLD_PREFIX=/path tools/build.sh ..." >&2
-        exit 1
-    fi
     if [[ ! -f "$sysroot/lib/libc.a" ]]; then
         echo "==> pouch progs: sysroot absent — building it first"
         build_sysroot
@@ -393,17 +388,10 @@ build_pouch_progs() {
         "$pouch_clang" -std=gnu11 -O2 -Wall -Wextra \
             -nostdinc -isystem "$sysroot/include" -fno-pie \
             -c "$src_dir/$prog.c" -o "$progs_out/$prog.o"
-        # 2. link (ld.lld). Static non-PIE ET_EXEC; the musl CRT objects
-        #    in link order (crt1 crti ... crtn); libc.a via -lc.
-        "$lld" -static -o "$progs_out/$prog" \
-            -z separate-loadable-segments \
-            -z max-page-size=4096 \
-            -z noexecstack \
-            --build-id=none \
-            "$sysroot/lib/crt1.o" "$sysroot/lib/crti.o" \
-            "$progs_out/$prog.o" \
-            -L"$sysroot/lib" -lc \
-            "$sysroot/lib/crtn.o"
+        # 2. link via tools/pouch-ld — it drives ld.lld directly with the
+        #    pouch link line and supplies the CRT + libc.a.
+        POUCH_SYSROOT="$sysroot" LLD_PREFIX="$LLD_PREFIX" \
+            "$pouch_ld" "$progs_out/$prog.o" -o "$progs_out/$prog"
         # verify the layout the kernel ELF loader requires: ET_EXEC, no
         # PT_DYNAMIC. A loader-incompatible binary fails here, not at boot.
         # readelf output is captured first (a `grep -q` pipeline would
