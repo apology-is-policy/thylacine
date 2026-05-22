@@ -566,7 +566,7 @@ performance-relevant surfaces, sized as sub-chunks 6, 7-8, 11 land.
 | 2 `pouch-musl-vendor` | vendor musl 1.2.5; patch-series scaffold; upper-half probe | landed (`6f60b7e`/`45e287e`) |
 | 3 `pouch-kernel-auxv` | `exec_setup` builds the System V startup frame (auxv); `SYS_SET_TID_ADDRESS` | landed (`d505e73`/`f2a1130`) |
 | 4 `pouch-syscall-seam` | retarget the syscall table; the sentinel; the errno decode; the stdio backend; `build.sh sysroot` builds the real libc | landed (`dbc6bd3`/`aad33d6`) |
-| 5 `pouch-hello-smoke` | the first pouch binaries — `/pouch-hello` + `/pouch-hello-stdio` build + run in Thylacine | **this chunk** |
+| 5 `pouch-hello-smoke` | the first pouch binaries — `/pouch-hello` + `/pouch-hello-stdio` build + run in Thylacine | landed (`5c0623d`) |
 | 6-15 | mem → torpor → threads → poll → devnodes → sockets → signals → libsodium → stratumd | pending |
 
 At sub-chunk 5: the pouch sysroot (sub-chunks 1-4) compiles + links a pouch
