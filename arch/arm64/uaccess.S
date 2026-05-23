@@ -131,3 +131,43 @@ uaccess_store_u8_fault:
 .long   uaccess_store_u8_op    - .
 .long   uaccess_store_u8_fault - .
 .popsection
+
+// uaccess_load_u32 — read a single 32-bit word from a user VA. Added
+// at P6-pouch-wait-addr for SYS_TORPOR_WAIT's futex-word compare: the
+// kernel reads *user_va (the user's atomic-int) under torpor_lock and
+// compares it against the caller's `expected`.
+//
+// AArch64 ABI: x0 = user VA, x1 = u32 *out (kernel-direct-map pointer).
+// Returns: x0 = 0 on success (*out updated); x0 = -1 on fault.
+//
+// Caller MUST ensure x0 is 4-byte-aligned and < UACCESS_USER_VA_TOP;
+// alignment is not checked here (an unaligned ldr would alignment-fault
+// to the same fault dispatcher, but the fixup table catches only the
+// expected translation/permission fault classes — keep the fast path
+// honest by validating alignment in the C caller).
+//
+// Implementation mirrors uaccess_load_u8: one `ldr w2, [x0]` is the
+// fault point; the fixup-table entry maps it to the `.L` fault label.
+// Plain LDR (not LDAR) — the consumer's torpor_lock acquire pairs with
+// the producer's torpor_lock release on its preceding WAKE to provide
+// the memory ordering. Standard Linux-futex discipline.
+.global uaccess_load_u32
+.type uaccess_load_u32, @function
+uaccess_load_u32:
+.global uaccess_load_u32_op
+uaccess_load_u32_op:
+    ldr     w2, [x0]                // FAULT POINT — table entry below
+    str     w2, [x1]
+    mov     x0, xzr
+    ret
+.global uaccess_load_u32_fault
+uaccess_load_u32_fault:
+    mov     x0, #-1
+    ret
+.size uaccess_load_u32, . - uaccess_load_u32
+
+.pushsection .uaccess_fixup, "a", @progbits
+.balign 4
+.long   uaccess_load_u32_op    - .
+.long   uaccess_load_u32_fault - .
+.popsection

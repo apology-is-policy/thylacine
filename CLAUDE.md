@@ -75,25 +75,28 @@ Features that usually don't (pure computation, test helpers, config parsing, CLI
 
 **If you cannot articulate the invariant formally, you don't understand it well enough to implement it.**
 
-### Spec-to-code suspended until further notice (user-authorized, 2026-05-21)
+### Spec-to-code FULLY suspended until further notice (user-authorized, broadened 2026-05-23)
 
-The exhaustive clean-cfg TLC run is **no longer a per-chunk pre-commit gate** for any spec in `specs/`. Spec-first design discipline still applies (write the spec before the impl; iterate the model until you can articulate the invariant precisely) — that's a thinking aid, not a gate. The per-chunk runtime gate is now: buggy-cfg counterexamples confirmed + all tests pass.
+**This supersedes the 2026-05-21 clean-cfg-only suspension.** The spec-first policy is now **fully suspended** for new sub-chunks: no `specs/*.tla` module is written for an invariant-bearing feature; the invariant is validated by **careful prose reasoning** in the impl's file header + commit message + reference doc, and rigor is provided by the audit round + the runtime test suite. Per the user's 2026-05-23 direction: "let's suspend spec-to-code until further notice, just validate the model by thinking."
 
-Why: clean-cfg TLC runs across the spec inventory have grown to wall-clock budgets that are no longer practical pre-commit. The corvus precedent (initially recorded 2026-05-20 as a corvus-only exception, broadened to project-wide on 2026-05-21) makes the trade-off explicit — the buggy cfgs are the load-bearing artifact for invariant-detection regressions; the clean cfgs are exhaustive coverage that we defer to a best-effort background verification when the budget allows. When a clean cfg does land GREEN (full convergence or a documented partial-explored frontier with no violation), note it in the relevant audit closed-list or status doc.
+The 2026-05-21 record (clean-cfg-only suspension; spec-first design still binding) is preserved as the predecessor; the broadening was triggered at sub-chunk 8 (`pouch-wait-addr`) — the `torpor` wait-on-address primitive — where the I-9-specialized no-lost-wakeup invariant is validated by walking the WAIT/WAKE interleavings with lock-acquire as the serializing event, not by a TLA+ module.
+
+Why broaden: spec-first design served as a thinking aid — the discipline of articulating the invariant in formal syntax. The user has signalled trust that we can validate models by careful prose reasoning. The corvus precedent (a CSPRNG-token verification chunk whose spec wasn't load-bearing in retrospect) was the 2026-05-21 narrow lift; sub-chunk 8 is the explicit broadening.
 
 What stays binding:
-- **Spec-first design**: every invariant-bearing feature still gets a TLA+ module BEFORE the impl. Articulating the invariant in formal syntax is a hard requirement; failing to means you don't understand it well enough yet.
-- **Buggy-cfg counterexamples**: every existing buggy cfg must continue to produce its expected counterexample after any spec or impl change. These terminate fast and remain pre-commit gates.
-- **Audit-trigger surfaces** (CLAUDE.md §"Audit-triggering changes") are unchanged; the formal-audit discipline still applies before each invariant-bearing merge.
-- **The 21 enumerated invariants** in `ARCHITECTURE.md §28` remain proof obligations; the suspension affects HOW exhaustively we verify them per chunk, not WHETHER they hold.
+- **Buggy-cfg counterexamples on EXISTING specs**: any impl change that touches a mechanism modelled in `specs/` must re-run the relevant buggy cfgs (`scheduler.tla`, `namespace.tla`, `handles.tla`, `vmo.tla`, `9p_client.tla`, `pipe.tla`, `poll.tla`, `corvus.tla`, `burrow.tla`, `tsleep.tla`, ...). They terminate fast and remain pre-commit gates for invariant-detection regressions on already-spec'd subsystems.
+- **Audit-trigger surfaces** (CLAUDE.md §"Audit-triggering changes") are unchanged; the formal-audit discipline is now the load-bearing rigor pass for new invariant-bearing work — it does not get suspended.
+- **The 21 enumerated invariants** in `ARCHITECTURE.md §28` remain proof obligations; the suspension affects how we verify them, not whether they must hold. Whatever invariant a new sub-chunk introduces must be articulated (in prose) and audited.
+- **The audit round + runtime test suite are the rigor floor** for new sub-chunks.
 
 What gets deferred:
-- Per-chunk clean-cfg TLC runs.
-- Coverage claims of the form "spec re-verified clean GREEN" — replace with "buggy cfgs re-verified" or "partial clean exploration through N distinct states / diameter D without violation".
+- TLA+ modules for new features. Sub-chunk 8 is the worked example — no `specs/futex.tla` written; the no-lost-wakeup model validated by reasoning in `kernel/torpor.c` + `kernel/include/thylacine/torpor.h` + the audit.
+- Clean-cfg TLC runs (suspended since 2026-05-21).
+- Coverage claims of the form "spec re-verified clean GREEN" per chunk.
 
-When to re-enable: at user direction, or when a spec change can articulate a clear, narrow re-verification scope that fits the per-chunk budget. Until then, plan work accordingly.
+When to re-enable: at user direction. The natural re-enabling points: (a) an invariant-bearing feature that genuinely benefits from machine-checked exploration; (b) when wall-clock budgets allow returning the spec-first DESIGN discipline as a thinking aid.
 
-Cross-link: `memory/feedback_spec_to_code_suspended.md` (project-wide policy record).
+Cross-link: `memory/feedback_spec_to_code_suspended.md` (project-wide policy record; updated 2026-05-23 to reflect the broadening).
 
 ### TLA+ setup
 
@@ -145,6 +148,7 @@ Any change to the surfaces below MUST spawn a focused adversarial soundness audi
 | KASLR / ASLR | `arch/arm64/start.S`, `arch/arm64/kaslr.c` | Entropy quality, layout correctness (I-16) |
 | ELF loader | `kernel/elf.c` | RWX rejection, relocation correctness |
 | `burrow_attach` / `burrow_detach` | `kernel/syscall.c` handlers, `kernel/burrow.c`, `kernel/vma.c` | Anonymous-memory syscalls (§6.5 Tier 1) — VMA + Burrow refcount lifecycle, VA placement, per-Proc lock, W^X (RW-only) |
+| `torpor_wait` / `torpor_wake` | `kernel/torpor.c`, `kernel/syscall.c` handlers, `arch/arm64/uaccess.S` (new `uaccess_load_u32`) | Wait-on-address — no-lost-wakeup (I-9 specialized; register-then-observe under `torpor_lock`), stack-waiter lifetime, uaccess fault routing. **No `specs/futex.tla`** per the 2026-05-23 spec-to-code broadening — prose validation in `torpor.h` + this audit-trigger row is the rigor. |
 | Initial bringup | `kernel/main.c`, `init/init.c` | Boot ordering correctness |
 | Boot banner | `kernel/main.c` | Tooling ABI per `TOOLING.md §10` |
 

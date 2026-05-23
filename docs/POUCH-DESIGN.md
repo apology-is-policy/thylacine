@@ -202,11 +202,11 @@ The synchronization primitives are the real design content:
 
 **Deferred from the pthread surface**: robust mutexes, `pthread_cancel` / cancellation points, priority inheritance, `pthread_atfork`. Implement the **core** stratumd + libsodium need — `create / join / detach / mutex / cond / rwlock / once / key (TLS) / sigmask` — and shape the surface so the rest extends. The deferred calls return a documented error.
 
-**[OPEN Q 7.1]** The wait-on-address primitive's exact contract: does it take an absolute deadline (composing with `tsleep`, which already exists), a relative timeout, or both? Lean: absolute deadline, reusing the `tsleep` timer-wait machinery — `tsleep` already solved the "deadline-bounded sleep delivered off `sched_tick`" problem.
+**[RESOLVED 7.1]** The wait-on-address primitive's exact contract — sub-chunk 8 landed: `SYS_TORPOR_WAIT(addr_va, expected, timeout_us)` takes a **relative microsecond timeout**, converted internally to an absolute `timer_now_ns()`-timebase deadline that composes with `tsleep`. `timeout_us < 0` is "block indefinitely"; `timeout_us == 0` is a probe that returns `ETIMEDOUT` immediately; `> 0` is a finite microsecond timeout up to `TORPOR_MAX_TIMEOUT_US` (1 hour). Userspace passing absolute deadlines (pthread_cond_timedwait's `abstime`) converts to a relative microsecond timeout at the libc layer. See `docs/reference/80-torpor.md`.
 
-**[OPEN Q 7.2]** Whether the wait-on-address spec is `futex.tla` as-already-planned, or a renamed sibling. Lean: it *is* `futex.tla` (#7); this phase is its consumer and likely its implementation driver.
+**[RESOLVED 7.2]** No `specs/futex.tla` is written. CLAUDE.md "Spec-to-code suspended" was broadened on 2026-05-23 to suspend the spec-first DESIGN discipline itself (not only the per-chunk clean-cfg gate); the no-lost-wakeup invariant is validated by **prose reasoning** in `kernel/torpor.c` + `kernel/include/thylacine/torpor.h` + the audit round + the 7 runtime tests. The buggy cfgs of EXISTING specs remain pre-commit gates for impl changes that touch those mechanisms; new sub-chunks don't add to the inventory.
 
-**[OPEN Q 7.3]** `pthread_create` stack allocation: pouch allocates the new Thread's stack (anonymous memory) and passes it to the Thylacine thread-spawn syscall. Confirm Thylacine's thread-spawn surface accepts a caller-provided stack + entry, or note the kernel gap.
+**[OPEN Q 7.3]** `pthread_create` stack allocation: pouch allocates the new Thread's stack (anonymous memory) and passes it to the Thylacine thread-spawn syscall. Confirm Thylacine's thread-spawn surface accepts a caller-provided stack + entry, or note the kernel gap. — sub-chunk 9 (`pouch-threads`).
 
 ---
 
@@ -319,7 +319,7 @@ Each sub-chunk lands independently with the two-commit pattern; audit-bearing on
 | 5 | **pouch-hello-smoke** | Static hello + buffered-stdio hello build + run; the first milestone | no |
 | 6 | **pouch-compiler-rt** | Vendor + build the compiler-rt builtins for `aarch64-thylacine` (the compiler runtime a complete toolchain needs — `binary128` soft-float et al.); the `pouch-ld` link-driver wrapper; the real `printf` hello | no |
 | 7 | **pouch-mem** | Allocator backend (anonymous-memory call); confirm/fill the kernel gap | **yes** (mm) |
-| 8 | **pouch-wait-addr** | The wait-on-address kernel primitive; `futex.tla` implementation | **yes** (scheduler / wait-wake) |
+| 8 | **pouch-wait-addr** | The wait-on-address kernel primitive `torpor`. No `specs/futex.tla` — CLAUDE.md "Spec-to-code suspended" was broadened 2026-05-23 to drop spec-first design itself; the no-lost-wakeup invariant is validated by prose reasoning + audit + runtime tests. | **yes** (scheduler / wait-wake) |
 | 9 | **pouch-threads** | pthread create/join/detach + mutex/cond/rwlock/once + TLS errno | **yes** (concurrency) |
 | 10 | **pouch-poll** | `poll`/`select`/`ppoll` over fds → `t_poll` | no |
 | 11 | **pouch-devnodes** | The minimal synthetic-FS namespace (§6.6): trivial `/dev` nodes (`null`/`zero`/`full`) as tiny kernel Devs; the `getrandom`-syscall path libsodium needs | no |
@@ -329,7 +329,7 @@ Each sub-chunk lands independently with the two-commit pattern; audit-bearing on
 | 15 | **pouch-stratumd-build** | Build stratumd against the sysroot; Thylacine `peer_creds` arm | no (Stratum-side) |
 | 16 | **pouch-stratumd-boot** | joey spawns real stratumd; `/sysroot` mount; ramfs pivot; retire the stub | **yes** (boot ordering) |
 
-`pouch-compiler-rt` was inserted as sub-chunk 6 — `pouch-hello-smoke` surfaced that the sysroot had no compiler runtime (POUCH-DESIGN.md §9 originally enumerated only headers + libc + CRT) and that clang cannot drive the ELF link on macOS. It executes next and is a hard prerequisite for the `pouch-libsodium` + `pouch-stratumd-build` sub-chunks. The `pouch-wait-addr` + `pouch-threads` sub-chunks are the critical path and the highest risk; they may each split. `pouch-wait-addr` is spec-first (`futex.tla`).
+`pouch-compiler-rt` was inserted as sub-chunk 6 — `pouch-hello-smoke` surfaced that the sysroot had no compiler runtime (POUCH-DESIGN.md §9 originally enumerated only headers + libc + CRT) and that clang cannot drive the ELF link on macOS. It executes next and is a hard prerequisite for the `pouch-libsodium` + `pouch-stratumd-build` sub-chunks. The `pouch-wait-addr` + `pouch-threads` sub-chunks are the critical path and the highest risk; `pouch-threads` may split. **`pouch-wait-addr` landed at 2026-05-23 without a TLA+ spec** — CLAUDE.md "Spec-to-code suspended" was broadened the same day to drop spec-first design itself; sub-chunk 8 is the worked example (the no-lost-wakeup invariant validated by reasoning in `kernel/torpor.c` + the audit + 7 runtime tests).
 
 ---
 

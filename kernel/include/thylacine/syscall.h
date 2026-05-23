@@ -630,6 +630,56 @@ enum {
     //   - vaddr not page-aligned
     //   - no VMA matches [vaddr, vaddr + round_up(length)) exactly
     SYS_BURROW_DETACH = 38,  // arg: vaddr (x0), length (x1)
+
+    // P6-pouch-wait-addr (sub-chunk 8): the `torpor` wait-on-address
+    // primitive (POUCH-DESIGN.md §10) — Thylacine's futex-equivalent.
+    // The substrate over which pouch's pthread mutex/condvar
+    // implementation runs (sub-chunk 9 `pouch-threads`).
+    //
+    // SYS_TORPOR_WAIT(addr_va, expected, timeout_us) → 0 / -errno
+    //   x0 = addr_va      user-VA pointer to a 4-byte aligned u32 word
+    //   x1 = expected     compare against *addr_va under the kernel
+    //                     `torpor_lock`; if they don't match, return 0
+    //                     immediately (fast path — userspace re-evaluates)
+    //   x2 = timeout_us   s64 — < 0 = block indefinitely; >= 0 = block
+    //                     at most this many microseconds (TORPOR_MAX_TIMEOUT_US
+    //                     = 1 hour caps the explicit values; 0 is a probe
+    //                     that returns -ETIMEDOUT immediately if the value
+    //                     still matched)
+    //
+    // Returns 0 on success (woken OR value mismatch); explicit -errno on
+    // failure (Linux/musl-numeric, decoded by pouch's syscall_ret.c):
+    //   -EINVAL   (-22)   bad addr_va alignment / outside user VA / null
+    //                     Proc / timeout_us > TORPOR_MAX_TIMEOUT_US
+    //   -EFAULT   (-14)   addr_va in range but unmapped or
+    //                     permission-denied at load
+    //   -ETIMEDOUT (-110) timeout lapsed with no wake
+    //
+    // No-lost-wakeup proof (CLAUDE.md "Spec-to-code suspended" —
+    // validated by reasoning, not specs/futex.tla): the consumer
+    // atomically (under torpor_lock) loads *addr_va and registers
+    // before sleeping; the producer's WAKE takes the same torpor_lock
+    // to walk. Lock-acquire/release pairing handles all interleavings —
+    // either WAKE-unlock precedes WAIT-lock (consumer sees the
+    // producer's store, returns 0 without sleep), or WAIT-lock precedes
+    // WAKE-lock (consumer is registered, WAKE delivers the wakeup).
+    // Spurious wakes are possible; userspace re-checks the atomic word
+    // (standard futex discipline).
+    SYS_TORPOR_WAIT  = 39,   // arg: addr_va, expected, timeout_us
+
+    // SYS_TORPOR_WAKE(addr_va, count) → woken / -errno
+    //   x0 = addr_va      user-VA pointer; same alignment + bound rules
+    //                     as SYS_TORPOR_WAIT. WAKE does NOT load the
+    //                     word — it only hashes the address and walks
+    //                     the wait queue.
+    //   x1 = count        max waiters to wake. 0 is a no-op (returns 0);
+    //                     UINT32_MAX is the "wake all" pattern
+    //                     (pthread_cond_broadcast).
+    // Returns the number of waiters actually woken (`>= 0`), or
+    // -EINVAL on bad args. Cross-Proc shared-futex semantics
+    // deferred to v1.x with Tier-2 burrows (POUCH-DESIGN.md §10);
+    // v1.0 hashing is `(Proc *, addr_va)`-keyed.
+    SYS_TORPOR_WAKE  = 40,   // arg: addr_va, count
 };
 
 // SYS_WALK_OPEN's FROM_ROOT sentinel: when passed as the spoor_fd, the

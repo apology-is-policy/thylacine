@@ -67,7 +67,70 @@ enum {
     T_SYS_WALK_OPEN   = 34,      // P5-stratumd-stub-bringup-e1: walk-and-open one path component
     T_SYS_CHROOT      = 35,      // P5-stratumd-stub-bringup-e2: stamp territory root_spoor
     T_SYS_SET_TID_ADDRESS = 36,  // P6-pouch-kernel-auxv: return the calling thread's tid
+    // 37 + 38 — SYS_BURROW_ATTACH / SYS_BURROW_DETACH (P6-pouch-mem-a).
+    // No libt C-side wrappers yet — pouch's mmap/munmap reaches the
+    // syscalls directly through the musl seam (0003-pouch-mman). Native
+    // C consumers will land a t_burrow_attach / t_burrow_detach pair
+    // when the first one materialises.
+    T_SYS_TORPOR_WAIT = 39,      // P6-pouch-wait-addr: wait on a user-VA word
+    T_SYS_TORPOR_WAKE = 40,      // P6-pouch-wait-addr: wake waiters on a user-VA word
 };
+
+// Torpor error codes — match kernel's TORPOR_ERR_* (Linux/musl-numeric
+// so the pouch syscall seam will decode them as -errno when the pouch
+// pthread layer lands at sub-chunk 9). Native callers can branch on
+// these directly; the value-mismatch fast path returns 0 (TORPOR_OK).
+#define T_TORPOR_OK             0
+#define T_TORPOR_ERR_EINVAL    (-22)
+#define T_TORPOR_ERR_EFAULT    (-14)
+#define T_TORPOR_ERR_ETIMEDOUT (-110)
+
+// t_torpor_wait — wait until *addr_va may have changed and a matching
+// t_torpor_wake arrives, OR the timeout elapses. Returns 0 on success
+// (woken OR value mismatch), or one of the T_TORPOR_ERR_* errnos.
+// `timeout_us < 0` blocks indefinitely. The 4-byte word at addr_va
+// must be aligned and within the user VA bound.
+__attribute__((always_inline))
+static inline long t_torpor_wait(unsigned int *addr_va, unsigned int expected,
+                                 long timeout_us) {
+    register long x0 __asm__("x0") = (long)(unsigned long)addr_va;
+    register long x1 __asm__("x1") = (long)expected;
+    register long x2 __asm__("x2") = timeout_us;
+    register long x8 __asm__("x8") = T_SYS_TORPOR_WAIT;
+    __asm__ volatile (
+        "svc #0"
+        : "+r"(x0)
+        : "r"(x1), "r"(x2), "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
+// t_torpor_wake — wake up to `count` threads waiting on `*addr_va`.
+// Returns the number of waiters actually woken (>= 0), or -EINVAL on
+// bad args. `count == 0` is a no-op (returns 0); UINT32_MAX is the
+// "wake all" pattern.
+//
+// F12 (P3 audit): `count` is `unsigned int` here so the wrapper cannot
+// pass a u64-valued count to the SVC. The kernel SVC handler narrows
+// the raw arg to u32 (`(u32)count_raw` in `sys_torpor_wake_handler`),
+// so a Rust- or asm-side caller passing a u64 > UINT32_MAX would have
+// its high bits silently discarded. UINT32_MAX already means "wake
+// all"; values above it are semantically the same intent, so the
+// narrowing is not a soundness concern, only a slightly-lossy ABI.
+__attribute__((always_inline))
+static inline long t_torpor_wake(unsigned int *addr_va, unsigned int count) {
+    register long x0 __asm__("x0") = (long)(unsigned long)addr_va;
+    register long x1 __asm__("x1") = (long)count;
+    register long x8 __asm__("x8") = T_SYS_TORPOR_WAKE;
+    __asm__ volatile (
+        "svc #0"
+        : "+r"(x0)
+        : "r"(x1), "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
 
 // t_walk_open's FROM_ROOT sentinel — pass as spoor_fd to walk from the
 // caller's pivoted territory root_spoor instead of a handle.

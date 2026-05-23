@@ -41,6 +41,18 @@ extern s64 uaccess_load_u8(u64 user_va, u8 *out);
 // per-byte copy from kernel scratch into the user-VA buffer.
 extern s64 uaccess_store_u8(u64 user_va, u8 value);
 
+// Read a single 32-bit word from a user VA. Returns 0 on success
+// (*out updated) or -1 on translation/permission fault. The user_va
+// MUST be 4-byte aligned and within [0, UACCESS_USER_VA_TOP); the
+// caller is responsible for the validation. On -1 the fault was
+// caught by the fixup table; the kernel does NOT extinct.
+//
+// Added at P6-pouch-wait-addr (sub-chunk 8) for SYS_TORPOR_WAIT's
+// futex-word compare. Plain LDR — relies on the caller holding the
+// torpor_lock for memory ordering against the producer's WAKE-side
+// store-then-WAKE sequence.
+extern s64 uaccess_load_u32(u64 user_va, u32 *out);
+
 // Look up the fixup PC for a faulting instruction PC. Returns 0 if
 // `fault_pc` is not in the table (the fault is not a uaccess fault).
 // Otherwise returns the fixup PC to which the dispatcher must

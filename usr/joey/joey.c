@@ -529,6 +529,34 @@ int main(void) {
     // spawn-and-verify milestones sit together on the boot path.
     if (do_pouch_hello_smoke() != 0) return 1;
 
+    // === torpor SVC-dispatch smoke (P6-pouch-wait-addr, sub-chunk 8) ===
+    // The kernel-side `torpor` wait-on-address primitive (the futex-
+    // equivalent over which pouch's pthread layer will run at sub-chunk
+    // 9). Joey runs single-threaded — the no-lost-wakeup race + the
+    // wake-finds-waiter chain are covered by the kernel test suite's
+    // torpor.* tests — so here we exercise only that the SVC numbers
+    // (39 / 40) are wired and the fast paths return what they should.
+    //
+    // wait: pass an unmapped user VA (joey's heap doesn't include
+    //   0x10000000) → -EFAULT. Validates the SVC entry + arg dispatch
+    //   + uaccess fault routing.
+    // wake: an empty bucket at the same address → 0. Validates the
+    //   WAKE SVC dispatch + the empty-bucket bypass.
+    {
+        unsigned int *probe_addr = (unsigned int *)(unsigned long)0x10000000ul;
+        long wait_rc = t_torpor_wait(probe_addr, 0u, -1);
+        if (wait_rc != (long)T_TORPOR_ERR_EFAULT) {
+            t_putstr("joey: torpor SVC-dispatch FAILED — wait did not return EFAULT\n");
+            return 1;
+        }
+        long wake_rc = t_torpor_wake(probe_addr, 100u);
+        if (wake_rc != 0) {
+            t_putstr("joey: torpor SVC-dispatch FAILED — wake on empty bucket did not return 0\n");
+            return 1;
+        }
+        t_putstr("joey: torpor SVC-dispatch ok (wait→EFAULT, wake→0 on empty bucket)\n");
+    }
+
     // === /sbin/corvus spawn ===
     //
     // No pipes — corvus posts /srv/corvus and joey reaches it via

@@ -32,6 +32,7 @@
 #include <thylacine/srvconn.h>
 #include <thylacine/territory.h>
 #include <thylacine/thread.h>
+#include <thylacine/torpor.h>
 #include <thylacine/types.h>
 #include <thylacine/vma.h>
 
@@ -1342,6 +1343,26 @@ static s64 sys_burrow_detach_handler(u64 vaddr_raw, u64 length_raw) {
     struct Thread *t = current_thread();
     if (!t)                                          return -1;
     return sys_burrow_detach_for_proc(t->proc, vaddr_raw, length_raw);
+}
+
+// P6-pouch-wait-addr (sub-chunk 8): SYS_TORPOR_WAIT / SYS_TORPOR_WAKE
+// SVC handlers — thin `current_thread()` wrappers over the testable
+// `_for_proc` inners in `kernel/torpor.c`. timeout_us is signed s64
+// (negative = block indefinitely); the syscall arg is delivered as u64
+// so we round-trip through (s64) at the wrapper.
+static s64 sys_torpor_wait_handler(u64 addr_va, u64 expected_raw,
+                                   u64 timeout_us_raw) {
+    struct Thread *t = current_thread();
+    if (!t)                                          return TORPOR_ERR_EINVAL;
+    return sys_torpor_wait_for_proc(t->proc, addr_va,
+                                    (u32)expected_raw,
+                                    (s64)timeout_us_raw);
+}
+
+static s64 sys_torpor_wake_handler(u64 addr_va, u64 count_raw) {
+    struct Thread *t = current_thread();
+    if (!t)                                          return TORPOR_ERR_EINVAL;
+    return sys_torpor_wake_for_proc(t->proc, addr_va, (u32)count_raw);
 }
 
 static s64 sys_dup_handler(u64 hraw, u64 new_rights_raw) {
@@ -2983,6 +3004,17 @@ void syscall_dispatch(struct exception_context *ctx) {
     case SYS_BURROW_DETACH:
         ctx->regs[0] = (u64)sys_burrow_detach_handler(ctx->regs[0],
                                                       ctx->regs[1]);
+        return;
+
+    case SYS_TORPOR_WAIT:
+        ctx->regs[0] = (u64)sys_torpor_wait_handler(ctx->regs[0],
+                                                    ctx->regs[1],
+                                                    ctx->regs[2]);
+        return;
+
+    case SYS_TORPOR_WAKE:
+        ctx->regs[0] = (u64)sys_torpor_wake_handler(ctx->regs[0],
+                                                    ctx->regs[1]);
         return;
 
     default:

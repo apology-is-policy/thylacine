@@ -156,6 +156,14 @@ void test_sys_burrow_attach_rounds_up(void);
 void test_sys_burrow_attach_rejects_bad_length(void);
 void test_sys_burrow_detach_rejects(void);
 void test_sys_burrow_detach_window_confined(void);
+void test_torpor_wait_rejects_bad_args(void);
+void test_torpor_wait_rejects_unmapped_va(void);
+void test_torpor_wake_rejects_bad_args(void);
+void test_torpor_wake_empty_bucket_returns_zero(void);
+void test_torpor_wait_value_mismatch_fast_path(void);
+void test_torpor_wait_timeout_zero_returns_etimedout(void);
+void test_torpor_wait_wake_handoff(void);
+void test_torpor_wake_two_waiters_count_bound(void);
 void test_directmap_kva_round_trip(void);
 void test_directmap_alloc_through_directmap(void);
 void test_directmap_vmalloc_mmio_smoke(void);
@@ -772,6 +780,14 @@ struct test_case g_tests[] = {
     { "sys_burrow.attach_rejects_bad_length", test_sys_burrow_attach_rejects_bad_length, false, NULL },
     { "sys_burrow.detach_rejects",            test_sys_burrow_detach_rejects,            false, NULL },
     { "sys_burrow.detach_window_confined",    test_sys_burrow_detach_window_confined,    false, NULL },
+    { "torpor.wait_rejects_bad_args",          test_torpor_wait_rejects_bad_args,          false, NULL },
+    { "torpor.wait_rejects_unmapped_va",       test_torpor_wait_rejects_unmapped_va,       false, NULL },
+    { "torpor.wake_rejects_bad_args",          test_torpor_wake_rejects_bad_args,          false, NULL },
+    { "torpor.wake_empty_bucket_returns_zero", test_torpor_wake_empty_bucket_returns_zero, false, NULL },
+    { "torpor.wait_value_mismatch_fast_path",  test_torpor_wait_value_mismatch_fast_path,  false, NULL },
+    { "torpor.wait_timeout_zero_returns_etimedout", test_torpor_wait_timeout_zero_returns_etimedout, false, NULL },
+    { "torpor.wait_wake_handoff",              test_torpor_wait_wake_handoff,              false, NULL },
+    { "torpor.wake_two_waiters_count_bound",   test_torpor_wake_two_waiters_count_bound,   false, NULL },
     { "directmap.kva_round_trip",      test_directmap_kva_round_trip,      false, NULL },
     { "directmap.alloc_through_directmap",
                                        test_directmap_alloc_through_directmap,
