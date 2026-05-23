@@ -142,15 +142,46 @@ struct Thread {
     struct Thread     *timerwait_prev;
     u64                sleep_deadline;
     bool               sleep_timedout;
+
+    // P6-pouch-threads (sub-chunk 9): clear-child-tid address — the
+    // user-VA of a 4-byte word the kernel atomically zeroes + torpor-
+    // wakes on Thread exit (the SYS_THREAD_EXIT path; the SYS_EXITS path
+    // also runs it for the main thread). 0 means "not set" (the default
+    // from KP_ZERO + the v1.0 SYS_SET_TID_ADDRESS semantics for any
+    // Thread that has not registered one). musl's __pthread_setup wires
+    // it through SYS_SET_TID_ADDRESS — at sub-chunk 9 the syscall stores
+    // the address here so pthread_join's torpor-wait on the same word
+    // observes the exit.
+    //
+    // Concurrency contract (F10 audit close): only the OWNING Thread
+    // writes this field (via SYS_SET_TID_ADDRESS, which validates as
+    // current_thread()->clear_child_tid = tidptr) and only the owning
+    // Thread reads it (at exit time via thread_clear_child_tid_handoff,
+    // which runs synchronously inside SYS_THREAD_EXIT / SYS_EXITS on
+    // the owning Thread's CPU). Same-thread sequential consistency —
+    // no memory-ordering hazard. A FUTURE cross-thread setter (e.g.
+    // SYS_SETTID_ADDRESS_FOR_THREAD writing to a peer's tidptr) would
+    // require atomic store + appropriate memory ordering AND would
+    // need to compose with the alignment-validation gate in
+    // thread_clear_child_tid_handoff (F7 audit close).
+    //
+    // The kernel's exit-time clear+wake is best-effort: if the page is
+    // unmapped at the moment of exit (joiner has munmap'd the worker
+    // stack), uaccess_store_u32 returns -1 and torpor_wake is skipped.
+    // Userspace bug, not ours to fix — but kernel never extincts on it.
+    u64                clear_child_tid;
 };
 
 _Static_assert(sizeof(struct Thread) == 816,
-               "struct Thread size pinned at 816 bytes (was 784; P5-tsleep "
-               "adds the timer-wait fields: timerwait_next + timerwait_prev "
-               "(2 x 8) + sleep_deadline (8) + sleep_timedout (1) + 7 bytes "
-               "pad to keep the struct 16-aligned = +32 = 816). Adding a "
-               "field grows the SLUB cache; update this assert deliberately "
-               "so the change is intentional.");
+               "struct Thread size pinned at 816 bytes. P6-pouch-threads "
+               "added clear_child_tid (8 bytes) after sleep_timedout — it "
+               "consumed the 7 bytes of trailing pad + 1 of the previous "
+               "tail, so sizeof stayed at 816 (no SLUB-cache growth). The "
+               "P5-tsleep math (was 784; +32 for timerwait_next/prev + "
+               "sleep_deadline + sleep_timedout + 7 pad) still applies; "
+               "clear_child_tid now occupies the formerly-padded 8 bytes. "
+               "Adding ANY further field will grow the cache; update this "
+               "assert deliberately so the change is intentional.");
 _Static_assert(__builtin_offsetof(struct Thread, magic) == 0,
                "magic must be at offset 0 (P2-A audit R4 F42)");
 
@@ -243,6 +274,31 @@ struct Thread *thread_create(struct Proc *proc, void (*entry)(void));
 struct Thread *thread_create_with_arg(struct Proc *proc,
                                       void (*entry)(void *),
                                       void *arg);
+
+// P6-pouch-threads (sub-chunk 9): create a USER-mode Thread in `proc`.
+// Sibling of thread_create_with_arg, but instead of running `entry` in
+// EL1 the new thread will eret to EL0 at user_entry_va running on
+// user_sp_va, with x0 = user_arg and TPIDR_EL0 = user_tls_va.
+//
+// SLUB-allocates the Thread descriptor + 16 KiB kstack (same kstack
+// layout as the EL1-side helpers); ctx is laid out so the first
+// cpu_switch_context into the new thread lands at thread_user_trampoline,
+// which release-pairs sched_finish_task_switch + unmasks IRQs + erets
+// to EL0 at user_entry_va.
+//
+// Caller-provided values are NOT validated here — the syscall handler
+// is responsible for the user-VA bound + alignment checks. The kernel
+// trampoline programs them verbatim into ELR_EL1 / SP_EL0 / TPIDR_EL0;
+// a malformed address will fault at EL0 (which translates into a
+// user-mode extinction for the misbehaving Proc, not a kernel issue).
+//
+// Returns the new Thread on success, NULL on OOM (Thread cache or
+// kstack alloc fail).
+struct Thread *thread_create_user(struct Proc *proc,
+                                  u64 user_entry_va,
+                                  u64 user_sp_va,
+                                  u64 user_arg,
+                                  u64 user_tls_va);
 
 // Release a Thread descriptor + its kstack. Caller must ensure the
 // thread is not current (current_thread() != t) and not still on any

@@ -361,6 +361,52 @@ int rfork_with_caps(unsigned flags, void (*entry)(void *), void *arg,
 __attribute__((noreturn))
 void exits(const char *msg);
 
+// P6-pouch-threads (sub-chunk 9): terminate the calling Thread.
+//
+// NEVER returns. Atomically:
+//   1. If t->clear_child_tid != 0, uaccess_store_u32(0) at that user-VA
+//      + torpor_wake(UINT32_MAX). Best-effort; an unmapped tidptr skips
+//      the wake but does not extinct.
+//   2. Mark self THREAD_EXITING under g_proc_table_lock.
+//   3. If this was the last non-EXITING Thread in the Proc, ALSO mark
+//      the Proc ZOMBIE with exit_status = 0 + wake parent's child_done
+//      (mirrors exits("ok")).
+//   4. yield via sched(); never returns.
+//
+// Used by SYS_THREAD_EXIT. Distinct from exits() in two ways:
+//   - exits() requires the caller to be the last live Thread (extincts
+//     if any peer is non-EXITING) and sets a caller-specified
+//     exit_status. thread_exit_self() does not — it cleanly exits a
+//     non-last Thread without touching Proc state, OR cleanly
+//     transitions the Proc to ZOMBIE if this turns out to be the last.
+//   - thread_exit_self() does the clear_child_tid handoff (for
+//     pthread_join). exits() also does it for the calling Thread
+//     (any one of the Proc's threads may carry a tidptr if the
+//     program registered one).
+__attribute__((noreturn))
+void thread_exit_self(void);
+
+// P6-pouch-threads (sub-chunk 9a) audit F1 close: cross-module access to
+// `g_proc_table_lock` (kept static in proc.c). thread.c's
+// thread_link_into_proc / thread_unlink_from_proc must serialize against
+// proc_count_live_peers_locked's walk by holding the same lock; expose
+// the lock as a pair of acquire/release helpers rather than the raw
+// spin_lock_t to keep the lock's storage private to proc.c.
+//
+// Lock-order discipline (per CLAUDE.md §28 + the existing exits/wait_pid
+// commentary): proc_table_lock is at the "lineage" level — acquired
+// BEFORE r->lock-via-wakeup but AFTER any leaf locks the caller already
+// holds. Sound iff no path that holds a per-thread Rendez or per-Proc
+// vma_lock tries to acquire it. The current callers (thread_link /
+// thread_unlink at thread_create_*) hold no other locks; they're safe.
+//
+// The helpers wrap spin_lock_irqsave / spin_unlock_irqrestore so the
+// IRQ-state thread-through stays explicit at the call site (irq_state_t
+// is the public spinlock primitive's typedef from <thylacine/spinlock.h>,
+// already included above).
+irq_state_t proc_table_lock_acquire(void);
+void        proc_table_lock_release(irq_state_t s);
+
 // P2-D: wait_pid — reap a zombie child.
 //
 // Blocks until any child enters ZOMBIE state. On wake, picks the oldest

@@ -28,11 +28,13 @@
 #include <thylacine/sched.h>
 #include <thylacine/spinlock.h>
 #include <thylacine/thread.h>
+#include <thylacine/torpor.h>
 #include <thylacine/types.h>
 #include <thylacine/vma.h>
 
 #include "../arch/arm64/asid.h"
 #include "../arch/arm64/mmu.h"
+#include "../arch/arm64/uaccess.h"
 #include "../mm/slub.h"
 
 static struct kmem_cache *g_proc_cache;
@@ -707,6 +709,104 @@ bool proc_caps_by_stripes(u64 stripes, caps_t *caps_out) {
     return true;
 }
 
+// P6-pouch-threads (sub-chunk 9a) audit F1 close: cross-module
+// acquire/release for g_proc_table_lock. thread.c's thread_link_into_proc
+// / thread_unlink_from_proc need to serialize with proc_count_live_peers_-
+// locked's walk; the lock is `static` here so we expose helpers rather
+// than the symbol.
+irq_state_t proc_table_lock_acquire(void) {
+    return spin_lock_irqsave(&g_proc_table_lock);
+}
+void proc_table_lock_release(irq_state_t s) {
+    spin_unlock_irqrestore(&g_proc_table_lock, s);
+}
+
+// P6-pouch-threads (sub-chunk 9): the clear-child-tid handoff shared by
+// exits() and thread_exit_self(). On thread exit, if this Thread has a
+// non-zero `clear_child_tid` (set via SYS_SET_TID_ADDRESS), atomically
+// zero *clear_child_tid + torpor_wake(UINT32_MAX) on the same VA so a
+// joiner blocked in torpor_wait observes the death. Best-effort — an
+// unmapped tidptr silently skips the wake without extinction.
+//
+// The store-then-wake order matters: the joiner's torpor_wait re-checks
+// the user word inside torpor_lock; the lock acquire pairs with this
+// store's preceding lock-release sequence (the producer side of the
+// Linux-futex discipline). Same as torpor's standard producer pattern.
+static void thread_clear_child_tid_handoff(struct Thread *t, struct Proc *p) {
+    u64 tidptr = t->clear_child_tid;
+    if (tidptr == 0) return;
+    // F7 audit close: defensive re-validation of alignment. tidptr was
+    // validated at SYS_SET_TID_ADDRESS time (alignment + bound), but a
+    // future cross-thread setter (none today — see the clear_child_tid
+    // field comment in thread.h, F10 audit close) could violate the
+    // alignment invariant. An unaligned STR alignment-faults to the
+    // dispatcher; the fault-fixup table catches only translation /
+    // permission fault classes, NOT EC_DATA_ABORT_ALIGN — so unguarded,
+    // an unaligned tidptr would extinct the kernel. The check is cheap
+    // forward-defense.
+    if (tidptr & 0x3u) return;
+    // Defensive: tidptr was validated at SYS_SET_TID_ADDRESS time
+    // (alignment + bound), so this store should succeed. If userspace
+    // munmap'd the page in between, uaccess_store_u32 returns -1; we
+    // skip the wake (no waiter could be blocked on a torn-down page
+    // sanely) and consider it a userspace bug, not ours.
+    if (uaccess_store_u32(tidptr, 0u) != 0) return;
+    (void)sys_torpor_wake_for_proc(p, tidptr, (u32)~0u);
+}
+
+// Internal: common Proc-ZOMBIE transition body shared by exits() and
+// thread_exit_self(). MUST be called UNDER g_proc_table_lock. The Proc
+// must be ALIVE; transitions to ZOMBIE, captures exit_msg/exit_status,
+// re-parents orphan children, wakes parent's child_done.
+//
+// status: 0 = clean exit ("ok"); non-zero = error.
+// msg:    captured by reference; caller-owned (typically a string
+//         literal). NULL becomes "ok".
+static void proc_become_zombie_locked(struct Proc *p, int status, const char *msg) {
+    if (p->children) {
+        proc_reparent_children(p);
+    }
+    p->exit_msg    = msg ? msg : "ok";
+    p->exit_status = status;
+    p->state       = PROC_STATE_ZOMBIE;
+    // Wake parent's child_done UNDER the lock — parent stays alive
+    // through the wakeup (the original P3-A discipline). Lock order:
+    // proc_table_lock → r->lock.
+    if (p->parent) {
+        wakeup(&p->parent->child_done);
+    }
+}
+
+// Internal: count peer Threads that are NOT in THREAD_EXITING state
+// (i.e. still live — RUNNING / RUNNABLE / SLEEPING / etc.) AND are not
+// `self`. MUST be called UNDER g_proc_table_lock.
+//
+// What the lock buys: synchronization with the THREAD_EXITING write
+// path — exits() and thread_exit_self() both write `t->state =
+// THREAD_EXITING` under this lock. Holding the lock here means the
+// `state != THREAD_EXITING` check is sound: an EXITING peer was
+// committed before any reader holding the lock could observe it as
+// non-EXITING.
+//
+// What the lock does NOT buy: synchronization with RUNNING ↔ RUNNABLE
+// ↔ SLEEPING transitions, which run under per-CPU sched cs->lock
+// (sched.c) NOT under g_proc_table_lock. The plain reads here can
+// observe stale RUNNING/RUNNABLE/SLEEPING values — and that's fine,
+// because all three compare-equal as "live" (!= THREAD_EXITING) and
+// the check doesn't distinguish them. F5 audit close: any future
+// check that DOES distinguish them (e.g. RUNNING vs SLEEPING) MUST
+// add its own synchronization; the lock here is NOT sufficient for
+// that. Also: the link/unlink of p->threads itself runs under this
+// lock (F1 audit close), so the list walk is coherent.
+static int proc_count_live_peers_locked(struct Proc *p, struct Thread *self) {
+    int n = 0;
+    for (struct Thread *peer = p->threads; peer; peer = peer->next_in_proc) {
+        if (peer == self) continue;
+        if (peer->state != THREAD_EXITING) n++;
+    }
+    return n;
+}
+
 void exits(const char *msg) {
     struct Thread *t = current_thread();
     if (!t)                  extinction("exits with no current thread");
@@ -720,12 +820,14 @@ void exits(const char *msg) {
     if (p == g_kproc)        extinction("exits from kproc (boot thread)");
     if (p->state != PROC_STATE_ALIVE)
                              extinction("exits from non-ALIVE proc (double exits?)");
-    // v1.0 P2-D: single-thread Procs (rfork creates 1 thread). Multi-
-    // threaded exits requires terminating all sibling threads (Phase 5+
-    // via cross-CPU IPI to halt + reap). Guard so we surface the limit
-    // explicitly.
-    if (p->thread_count != 1)
-        extinction("exits with thread_count != 1 (multi-thread Procs not supported at P2-D)");
+    // v1.0 P6-pouch-threads (sub-chunk 9): multi-thread Procs are now
+    // allowed via SYS_THREAD_SPAWN. exits() declares program-wide
+    // termination, which v1.0 REQUIRES all peer Threads to have already
+    // EXITED — the pthread_join contract guarantees this when the
+    // program is well-formed. A peer in RUNNING / RUNNABLE / SLEEPING
+    // state at this point indicates an un-joined Thread (programmer
+    // error). Cross-thread shootdown (Linux's CLONE_THREAD-style
+    // exit_group) is a v1.x extension.
 
     // P5-corvus-srv-impl-a2: tombstone any /srv service this Proc posted
     // (specs/corvus.tla ServiceTombstone). Done here — p still ALIVE,
@@ -765,36 +867,115 @@ void exits(const char *msg) {
     // observes consistent (p->state == ZOMBIE AND ct->state == EXITING).
     irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
 
-    // Re-parent any orphan children to kproc before transitioning.
-    if (p->children) {
-        proc_reparent_children(p);
+    // Peer-Thread check (multi-thread Proc gate): every peer Thread MUST
+    // be in THREAD_EXITING state already. wait_pid's reap loop later
+    // walks p->threads and frees each, so the count itself is not
+    // restricted — only that none is live.
+    int live_peers = proc_count_live_peers_locked(p, t);
+    if (live_peers != 0) {
+        spin_unlock_irqrestore(&g_proc_table_lock, s);
+        extinction("exits with live peer threads (caller must join all spawned threads)");
     }
 
-    // Capture exit status. At v1.0 the convention is "ok" = clean
-    // exit (status 0); anything else = error (status 1). msg is
-    // captured by reference; caller-owned (typically a string literal).
-    p->exit_msg    = msg ? msg : "ok";
-    p->exit_status = (msg && msg[0] == 'o' && msg[1] == 'k' && msg[2] == 0) ? 0 : 1;
-    p->state       = PROC_STATE_ZOMBIE;
+    int status = (msg && msg[0] == 'o' && msg[1] == 'k' && msg[2] == 0) ? 0 : 1;
+    proc_become_zombie_locked(p, status, msg);
 
     // Mark the executing thread EXITING so sched() leaves it out of the
     // run tree (it will be reaped by the parent's wait_pid).
     t->state = THREAD_EXITING;
 
-    // Wake parent's child_done Rendez UNDER proc_table_lock. The lock
-    // bracketing keeps p->parent alive through the wakeup (lock release
-    // happens AFTER wakeup returns). wakeup() acquires r->lock; lock
-    // order proc_table_lock → r->lock established here.
-    if (p->parent) {
-        wakeup(&p->parent->child_done);
-    }
-
     spin_unlock_irqrestore(&g_proc_table_lock, s);
+
+    // F3 audit close: clear-child-tid handoff runs AFTER the EXITING
+    // commit (and the Proc-zombie transition above) so any joiner woken
+    // by the torpor_wake observes a consistent state — the EXITING write
+    // is visible via the spin_unlock_irqrestore's release pairing with
+    // the joiner's subsequent acquire of any synchronizing lock. Without
+    // this order, a joiner could resume, return from pthread_join, call
+    // exits(), and trip the "exits with live peer threads" extinction
+    // against our still-RUNNING worker self. uaccess_store_u32 may
+    // demand-page (vma_lock + buddy); torpor_wake takes torpor_lock —
+    // both compose with proc_table_lock (no path takes proc_table_lock
+    // while holding either), so doing them AFTER the lock release keeps
+    // the original lock-order discipline.
+    thread_clear_child_tid_handoff(t, p);
 
     // Yield. Will not return — we're EXITING, sched() doesn't re-insert,
     // and there's no future wake target for us.
     sched();
     extinction("exits: returned from sched (impossible)");
+}
+
+// P6-pouch-threads (sub-chunk 9): SYS_THREAD_EXIT body. See proc.h.
+void thread_exit_self(void) {
+    struct Thread *t = current_thread();
+    if (!t)                  extinction("thread_exit with no current thread");
+    if (t->magic != THREAD_MAGIC)
+                             extinction("thread_exit from corrupted current thread");
+
+    struct Proc *p = t->proc;
+    if (!p)                  extinction("thread_exit from thread with no proc");
+    if (p->magic != PROC_MAGIC)
+                             extinction("thread_exit from thread with corrupted proc");
+    if (p == g_kproc)        extinction("thread_exit from kproc (boot thread)");
+    if (p->state != PROC_STATE_ALIVE)
+                             extinction("thread_exit from non-ALIVE proc (race?)");
+    // Defensive: current_thread() always returns the running thread (it
+    // IS t since we just read it via current_thread()), so t->state ==
+    // THREAD_RUNNING is the structural invariant. The check fires only
+    // if kernel state is otherwise corrupted (TPIDR_EL1 pointing at a
+    // freed Thread, scheduler bug, etc.). F6 audit close: documented as
+    // defense-in-depth, not race-related — sched()'s preempt path may
+    // transition prev to RUNNABLE momentarily but always restores RUNNING
+    // before user code resumes; the read here is from the running CPU's
+    // perspective so it always sees RUNNING.
+    if (t->state != THREAD_RUNNING)
+                             extinction("thread_exit from non-RUNNING thread (defensive — kernel state corruption?)");
+
+    // F3 audit close: do NOT run the clear-child-tid handoff yet. The
+    // EXITING transition must commit FIRST so that a joiner woken by
+    // the torpor_wake observes a state-consistent producer (running
+    // → EXITING) before it can resume + call exits(); see the F3
+    // prosecution chain in `memory/audit_p6_pouch_threads_9a_closed_-
+    // list.md`. The handoff happens below, AFTER the spin_unlock.
+
+    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+
+    int live_peers = proc_count_live_peers_locked(p, t);
+    bool become_zombie = (live_peers == 0);
+
+    if (become_zombie) {
+        // This Thread is the last live one. Proc transitions to ZOMBIE
+        // with status 0 (the SYS_THREAD_EXIT convention — no
+        // user-specified status; explicit-status program exit goes
+        // through exits()).
+        proc_become_zombie_locked(p, 0, "ok");
+    }
+
+    t->state = THREAD_EXITING;
+
+    spin_unlock_irqrestore(&g_proc_table_lock, s);
+
+    // F3 audit close: clear-child-tid handoff runs HERE — after the
+    // EXITING commit so a joiner waking from the torpor_wake never
+    // observes us as RUNNING in any subsequent peer-state walk. The
+    // handoff still runs OUTSIDE proc_table_lock to preserve the
+    // existing lock-order discipline (uaccess_store_u32 may
+    // demand-page → vma_lock + buddy; torpor_wake → torpor_lock —
+    // neither composes with proc_table_lock).
+    thread_clear_child_tid_handoff(t, p);
+
+    // If we became zombie, also do the srv / cap notifies (the leaf-lock
+    // discipline allows them outside proc_table_lock — same as exits()).
+    // Skipped on the non-last path: a Proc still ALIVE has live /srv
+    // posts and pending /cap grants that should NOT be tombstoned.
+    if (become_zombie) {
+        srv_proc_exit_notify(p);
+        cap_proc_exit_notify(p);
+    }
+
+    sched();
+    extinction("thread_exit_self: returned from sched (impossible)");
 }
 
 // cond predicate for wait_pid's sleep: any child in ZOMBIE state, OR
@@ -866,47 +1047,64 @@ int wait_pid(int *status_out) {
             int pid    = zombie->pid;
             int status = zombie->exit_status;
 
-            // Capture the (single) thread to reap. Sanity-check state
-            // INSIDE the lock — exits() set ct->state = EXITING under
-            // the same lock, so this is a consistent observation.
-            struct Thread *ct = zombie->threads;
-            if (!ct) {
+            // P6-pouch-threads (sub-chunk 9): multi-thread Procs are
+            // allowed. Every Thread in zombie->threads must be EXITING
+            // (the program-exit gate enforces this — see exits() /
+            // thread_exit_self()). Sanity-check ALL threads INSIDE the
+            // lock; the per-thread state writes happen under the same
+            // lock so the observation is consistent.
+            if (!zombie->threads) {
                 spin_unlock_irqrestore(&g_proc_table_lock, s);
                 extinction("wait_pid: zombie with no threads");
             }
-            if (ct->state != THREAD_EXITING) {
-                spin_unlock_irqrestore(&g_proc_table_lock, s);
-                extinction("wait_pid: zombie thread not in EXITING state");
+            for (struct Thread *ct = zombie->threads; ct; ct = ct->next_in_proc) {
+                if (ct->state != THREAD_EXITING) {
+                    spin_unlock_irqrestore(&g_proc_table_lock, s);
+                    extinction("wait_pid: zombie thread not in EXITING state");
+                }
             }
 
             proc_unlink_child(p, zombie);
 
             spin_unlock_irqrestore(&g_proc_table_lock, s);
 
-            // Outside the lock: spin on on_cpu, then free thread + Proc.
-            // We released the lock to avoid holding it across thread_free's
-            // multi-CPU run-tree walk (which acquires every CPU's
-            // cs->lock). Lock order would be: g_proc_table_lock → cs->lock.
-            // No reverse exists (sched/ready/wakeup never touch lineage
-            // state), so holding both would be safe — but releasing
-            // first reduces lock-hold time and avoids a long-tail latency
-            // contributor.
+            // Outside the lock: spin on on_cpu, then free EVERY Thread in
+            // p->threads + proc_free. We released the lock to avoid
+            // holding it across thread_free's multi-CPU run-tree walk
+            // (which acquires every CPU's cs->lock). Lock order would
+            // be: g_proc_table_lock → cs->lock. No reverse exists
+            // (sched/ready/wakeup never touch lineage state), so holding
+            // both would be safe — but releasing first reduces lock-hold
+            // time.
             //
-            // P2-Dd-pre on_cpu spin: exits() set state=EXITING + called
-            // sched(); the destination CPU's resume code clears
-            // ct->on_cpu via cs->prev_to_clear_on_cpu. Without this
-            // spin, thread_free could race with the destination CPU
-            // still mid-switch (TPIDR_EL1 briefly points at ct).
-            // Mirrors the on_cpu spin in wakeup() (P2-Cf).
-            while (__atomic_load_n(&ct->on_cpu, __ATOMIC_ACQUIRE)) {
-                __asm__ __volatile__("yield" ::: "memory");
+            // P2-Dd-pre on_cpu spin: each EXITING thread had its state
+            // set under proc_table_lock + then yielded via sched(); the
+            // destination CPU's resume code clears on_cpu via
+            // cs->prev_to_clear_on_cpu. Without this spin, thread_free
+            // could race with a destination CPU still mid-switch
+            // (TPIDR_EL1 briefly points at ct). Mirrors the on_cpu
+            // spin in wakeup() (P2-Cf).
+            //
+            // Walk-with-next discipline: thread_free unlinks ct from
+            // zombie->threads + decrements thread_count, so capture
+            // next BEFORE the free. The list is doubly-linked so an
+            // unlinked node's `next_in_proc` stays valid for the
+            // capture-then-free idiom (the unlink resets it to NULL
+            // AFTER we've read it). Loop terminates when zombie->threads
+            // becomes NULL — every thread freed, thread_count reaches 0.
+            struct Thread *ct = zombie->threads;
+            while (ct) {
+                while (__atomic_load_n(&ct->on_cpu, __ATOMIC_ACQUIRE)) {
+                    __asm__ __volatile__("yield" ::: "memory");
+                }
+                struct Thread *next = ct->next_in_proc;
+                thread_free(ct);
+                ct = next;
             }
 
-            thread_free(ct);
-            // thread_free unlinks ct from zombie->threads + decrements
-            // thread_count, so by here zombie has thread_count==0 and
-            // threads==NULL — proc_free's preconditions are met.
-
+            // thread_free walks unlinked every Thread; thread_count == 0
+            // and threads == NULL by here — proc_free's preconditions
+            // are met.
             proc_free(zombie);
 
             if (status_out) *status_out = status;

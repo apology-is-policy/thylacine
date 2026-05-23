@@ -164,6 +164,10 @@ void test_torpor_wait_value_mismatch_fast_path(void);
 void test_torpor_wait_timeout_zero_returns_etimedout(void);
 void test_torpor_wait_wake_handoff(void);
 void test_torpor_wake_two_waiters_count_bound(void);
+void test_thread_create_user_ctx_layout(void);
+void test_thread_exit_self_marks_exiting(void);
+void test_thread_exit_self_last_thread_zombies(void);
+void test_proc_multi_thread_reap(void);
 void test_directmap_kva_round_trip(void);
 void test_directmap_alloc_through_directmap(void);
 void test_directmap_vmalloc_mmio_smoke(void);
@@ -788,6 +792,10 @@ struct test_case g_tests[] = {
     { "torpor.wait_timeout_zero_returns_etimedout", test_torpor_wait_timeout_zero_returns_etimedout, false, NULL },
     { "torpor.wait_wake_handoff",              test_torpor_wait_wake_handoff,              false, NULL },
     { "torpor.wake_two_waiters_count_bound",   test_torpor_wake_two_waiters_count_bound,   false, NULL },
+    { "thread.create_user_ctx_layout",         test_thread_create_user_ctx_layout,         false, NULL },
+    { "thread.exit_self_marks_exiting",        test_thread_exit_self_marks_exiting,        false, NULL },
+    { "thread.exit_self_last_thread_zombies",  test_thread_exit_self_last_thread_zombies,  false, NULL },
+    { "proc.multi_thread_reap",                test_proc_multi_thread_reap,                false, NULL },
     { "directmap.kva_round_trip",      test_directmap_kva_round_trip,      false, NULL },
     { "directmap.alloc_through_directmap",
                                        test_directmap_alloc_through_directmap,

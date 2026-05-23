@@ -37,24 +37,66 @@ _Static_assert(THREAD_KSTACK_GUARD_PAGES * PAGE_SIZE == THREAD_KSTACK_GUARD_SIZE
 
 static struct kmem_cache *g_thread_cache;
 static struct Thread     *g_kthread;
-static int                g_next_tid = 0;
+// P6-pouch-threads (sub-chunk 9a) audit F4 close: atomic u32 (was non-
+// atomic int). Multi-thread Procs now allow concurrent sys_thread_spawn
+// calls from peer Threads on different CPUs; the prior non-atomic `++`
+// races and can yield duplicate tids (R/M/W collision on the counter),
+// breaking pthread_self uniqueness. Mirrors the proc_alloc g_next_pid
+// discipline (P3-A: atomic fetch-add + u32 + INT_MAX guard). The public
+// per-Thread `tid` type stays signed `int` — the cast at assignment is
+// well-defined for u32 < 2^31.
+static u32                g_next_tid = 0;
 static u64                g_thread_created;
 static u64                g_thread_destroyed;
 
+// Allocate the next monotonic tid + extinct on INT_MAX overflow. The
+// overflow path is unreachable at v1.0 thread counts (< 10^5 in any
+// imaginable workload), but the guard fail-closes loudly if it ever
+// approaches — INT_MAX-wrap would alias the (-1) error sentinel.
+static int alloc_next_tid(void) {
+    u32 next = __atomic_fetch_add(&g_next_tid, 1u, __ATOMIC_RELAXED);
+    if (next >= 0x7fffffffu) extinction("alloc_next_tid: g_next_tid would overflow INT_MAX");
+    return (int)next;
+}
+
+// P6-pouch-threads (sub-chunk 9a) audit F1 close: link/unlink under
+// g_proc_table_lock so concurrent walkers (proc_count_live_peers_locked,
+// wait_pid's reap-loop pre-unlink_child snapshot) observe a coherent
+// list. Pre-9a the lock was unnecessary because Procs were single-
+// threaded (only one writer per Proc, ever). Multi-thread Procs at 9a
+// introduce a second writer (sys_thread_spawn from another peer Thread
+// on a peer CPU) — without the lock, a walker can see `p->threads =
+// new_head` published before `new_head->next_in_proc = old_head` is
+// visible (aarch64 weak memory), terminate the walk at the new head,
+// and miss the previously-existing threads. Taking the lock makes the
+// (head, next_in_proc, thread_count) trio a single linearizable
+// observation.
+//
+// Boot ordering: proc_init runs before thread_init (kernel/main.c), so
+// g_proc_table_lock is initialized by the time thread_init's first call
+// arrives. Boot is single-CPU; the lock is uncontended there. SMP arrives
+// later with thread_init_per_cpu_idle, by which point the lock is fully
+// live.
 static void thread_link_into_proc(struct Thread *t, struct Proc *p) {
+    irq_state_t s = proc_table_lock_acquire();
     t->prev_in_proc = NULL;
     t->next_in_proc = p->threads;
     if (p->threads) p->threads->prev_in_proc = t;
     p->threads = t;
     p->thread_count++;
+    proc_table_lock_release(s);
 }
 
 static void thread_unlink_from_proc(struct Thread *t) {
+    irq_state_t s = proc_table_lock_acquire();
     struct Proc *p = t->proc;
     if (t->prev_in_proc) {
         t->prev_in_proc->next_in_proc = t->next_in_proc;
     } else {
-        if (p->threads != t) extinction("thread_unlink: list head mismatch");
+        if (p->threads != t) {
+            proc_table_lock_release(s);
+            extinction("thread_unlink: list head mismatch");
+        }
         p->threads = t->next_in_proc;
     }
     if (t->next_in_proc) {
@@ -63,6 +105,7 @@ static void thread_unlink_from_proc(struct Thread *t) {
     t->next_in_proc = NULL;
     t->prev_in_proc = NULL;
     p->thread_count--;
+    proc_table_lock_release(s);
 }
 
 void thread_init(void) {
@@ -122,7 +165,9 @@ void thread_init(void) {
 
     thread_link_into_proc(g_kthread, kproc());
     __atomic_fetch_add(&g_thread_created, 1u, __ATOMIC_RELAXED);
-    g_next_tid = 1;
+    // Boot-only single-CPU assignment; subsequent allocations use
+    // alloc_next_tid (atomic).
+    __atomic_store_n(&g_next_tid, 1u, __ATOMIC_RELAXED);
 
     // Park kthread in TPIDR_EL1 as the current thread. From now on,
     // current_thread() returns g_kthread (until the first thread_switch).
@@ -153,7 +198,7 @@ struct Thread *thread_init_per_cpu_idle(unsigned cpu_idx) {
     // it has no portable per-thread kstack, so try_steal must never
     // migrate it (sched.c, audit F2 / I-21).
     t->magic  = THREAD_MAGIC;
-    t->tid    = g_next_tid++;
+    t->tid    = alloc_next_tid();
     t->state  = THREAD_RUNNING;
     t->proc   = kproc();
     t->weight = 1;
@@ -237,7 +282,7 @@ static struct Thread *thread_create_internal(struct Proc *proc,
     // ahead of long-running threads whose vd_t has advanced via
     // sched() yields).
     t->magic       = THREAD_MAGIC;
-    t->tid         = g_next_tid++;
+    t->tid         = alloc_next_tid();
     t->state       = THREAD_RUNNABLE;
     t->proc        = proc;
     t->kstack_base = kalloc_base;          // P2-Dc: lowest page (guard)
@@ -285,6 +330,86 @@ struct Thread *thread_create_with_arg(struct Proc *proc,
                                       void (*entry)(void *),
                                       void *arg) {
     return thread_create_internal(proc, (void *)(uintptr_t)entry, arg);
+}
+
+// P6-pouch-threads (sub-chunk 9): create a Thread that on first dispatch
+// erets to EL0 — the substrate for pthread_create.
+//
+// Same body as thread_create_internal but ctx.lr points at
+// thread_user_trampoline (not thread_trampoline) and the four user-mode
+// arguments are parked in the callee-saved ctx slots that
+// cpu_switch_context reloads before `ret`:
+//
+//   ctx.x19 = user_sp_va    — SP_EL0 install before eret
+//   ctx.x20 = user_arg      — moved to x0 (AAPCS64 arg-0) before eret
+//   ctx.x21 = user_entry_va — moved to ELR_EL1 before eret
+//   ctx.x22 = user_tls_va   — written to TPIDR_EL0 before eret
+//
+// thread_user_trampoline (arch/arm64/context.S) consumes those four
+// slots, does the userland_enter dance inline (so x0 = arg survives the
+// GPR-zeroing sweep), and erets. See its asm comment for the discipline.
+//
+// The kstack layout (16 KiB usable + 16 KiB guard) is identical to the
+// EL1-side helpers; trampoline runs at EL1 for the brief window between
+// schedule-in and eret. The kstack stays valid past the eret because
+// every later exception (syscall, IRQ, fault) lands on it.
+//
+// TTBR0 (ASID | pgtable_root) comes from `proc` exactly as in
+// thread_create_internal — a userspace Proc always has pgtable_root != 0
+// post-exec_setup. Kproc would fail with TTBR0 = kernel's, which is the
+// correct fault for a buggy caller; the syscall handler rejects calls
+// from threads not on a userspace Proc upstream.
+struct Thread *thread_create_user(struct Proc *proc,
+                                  u64 user_entry_va,
+                                  u64 user_sp_va,
+                                  u64 user_arg,
+                                  u64 user_tls_va) {
+    if (!g_thread_cache) extinction("thread_create_user before thread_init");
+    if (!proc)           extinction("thread_create_user with NULL proc");
+    if (proc->magic != PROC_MAGIC)
+        extinction("thread_create_user with corrupted proc");
+
+    struct Thread *t = kmem_cache_alloc(g_thread_cache, KP_ZERO);
+    if (!t) return NULL;
+
+    struct page *stack_pg = alloc_pages(THREAD_KSTACK_TOTAL_ORDER, KP_ZERO);
+    if (!stack_pg) {
+        kmem_cache_free(g_thread_cache, t);
+        return NULL;
+    }
+    paddr_t guard_pa = page_to_pa(stack_pg);
+    void *kalloc_base = pa_to_kva(guard_pa);
+
+    if (!mmu_set_no_access_range(guard_pa, THREAD_KSTACK_GUARD_PAGES)) {
+        free_pages(stack_pg, THREAD_KSTACK_TOTAL_ORDER);
+        kmem_cache_free(g_thread_cache, t);
+        return NULL;
+    }
+
+    t->magic       = THREAD_MAGIC;
+    t->tid         = alloc_next_tid();
+    t->state       = THREAD_RUNNABLE;
+    t->proc        = proc;
+    t->kstack_base = kalloc_base;
+    t->kstack_size = THREAD_KSTACK_TOTAL_SIZE;
+    t->weight      = 1;
+    t->band        = SCHED_BAND_NORMAL;
+    t->slice_remaining = THREAD_DEFAULT_SLICE_TICKS;
+
+    // Park the four user-mode args in callee-saved ctx slots.
+    t->ctx.x19 = user_sp_va;
+    t->ctx.x20 = user_arg;
+    t->ctx.x21 = user_entry_va;
+    t->ctx.x22 = user_tls_va;
+    t->ctx.lr  = (u64)(uintptr_t)thread_user_trampoline;
+    t->ctx.sp  = (u64)((uintptr_t)kalloc_base + THREAD_KSTACK_TOTAL_SIZE);
+    t->ctx.ttbr0 = (proc->pgtable_root != 0)
+                 ? (((u64)proc->asid << 48) | (u64)proc->pgtable_root)
+                 : (u64)mmu_kernel_ttbr0_pa();
+
+    thread_link_into_proc(t, proc);
+    __atomic_fetch_add(&g_thread_created, 1u, __ATOMIC_RELAXED);
+    return t;
 }
 
 void thread_free(struct Thread *t) {

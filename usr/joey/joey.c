@@ -557,6 +557,76 @@ int main(void) {
         t_putstr("joey: torpor SVC-dispatch ok (wait→EFAULT, wake→0 on empty bucket)\n");
     }
 
+    // === thread-spawn smoke (P6-pouch-threads sub-chunk 9a) ===
+    // SVC-dispatch fast paths for SYS_THREAD_SPAWN + SYS_THREAD_EXIT.
+    // joey runs single-threaded — the end-to-end spawn-and-join chain
+    // is exercised by /thread-probe below; here we only verify the
+    // kernel rejects bad args.
+    //
+    // entry=0: -EINVAL (-22 — kernel rejects null entry)
+    // entry misaligned: -EINVAL (F2 audit close — prevents EC_PC_ALIGN ELE)
+    // sp_va misaligned: -EINVAL
+    // entry above USER_VA_TOP: -EINVAL
+    {
+        long rc;
+        // entry = 0 → -EINVAL
+        rc = t_thread_spawn((void (*)(void *))0, (void *)0x80000000ul,
+                            (void *)0, (void *)0);
+        if (rc != -22) {
+            t_putstr("joey: thread-spawn SVC-dispatch FAILED — null entry not rejected\n");
+            return 1;
+        }
+        // entry not 4-byte aligned → -EINVAL (F2 regression: without
+        // this gate, the eret would trigger EC_PC_ALIGN at EL1 → ELE).
+        rc = t_thread_spawn((void (*)(void *))0x100001ul,
+                            (void *)0x80000000ul,
+                            (void *)0, (void *)0);
+        if (rc != -22) {
+            t_putstr("joey: thread-spawn SVC-dispatch FAILED — misaligned entry not rejected (F2)\n");
+            return 1;
+        }
+        // sp_va not 16-aligned → -EINVAL
+        rc = t_thread_spawn((void (*)(void *))0x100000ul,
+                            (void *)0x80000008ul,    // 8-aligned but not 16
+                            (void *)0, (void *)0);
+        if (rc != -22) {
+            t_putstr("joey: thread-spawn SVC-dispatch FAILED — misaligned sp not rejected\n");
+            return 1;
+        }
+        // entry above USER_VA_TOP (1<<47) → -EINVAL
+        rc = t_thread_spawn((void (*)(void *))0x800000000000ul,
+                            (void *)0x80000000ul,
+                            (void *)0, (void *)0);
+        if (rc != -22) {
+            t_putstr("joey: thread-spawn SVC-dispatch FAILED — entry above USER_VA_TOP not rejected\n");
+            return 1;
+        }
+        t_putstr("joey: thread-spawn SVC-dispatch ok (null/misaligned entry / misaligned sp / OOB entry rejected)\n");
+    }
+
+    // === /thread-probe end-to-end ===
+    // The thread-spawn + join chain proven at EL0. /thread-probe
+    // (usr/thread-probe/thread-probe.c) does:
+    //   - SYS_THREAD_SPAWN a worker that writes a shared counter
+    //   - kernel exit-time clear+wake the worker's tidptr
+    //   - main joins via t_torpor_wait, verifies the counter
+    // Output goes to the UART via t_putstr; no pipe orchestration.
+    {
+        const char tp_name[] = "thread-probe";
+        long tp_pid = t_spawn(tp_name, sizeof(tp_name) - 1);
+        if (tp_pid <= 0) {
+            t_putstr("joey: t_spawn(\"thread-probe\") FAILED\n");
+            return 1;
+        }
+        int tp_status = -1;
+        long tp_reaped = t_wait_pid(&tp_status);
+        if (tp_reaped != tp_pid || tp_status != 0) {
+            t_putstr("joey: /thread-probe orchestration FAILED\n");
+            return 1;
+        }
+        t_putstr("joey: /thread-probe reaped status=0; SYS_THREAD_SPAWN/EXIT verified\n");
+    }
+
     // === /sbin/corvus spawn ===
     //
     // No pipes — corvus posts /srv/corvus and joey reaches it via

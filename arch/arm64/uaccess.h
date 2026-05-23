@@ -53,6 +53,19 @@ extern s64 uaccess_store_u8(u64 user_va, u8 value);
 // store-then-WAKE sequence.
 extern s64 uaccess_load_u32(u64 user_va, u32 *out);
 
+// Write a single 32-bit word to a user VA. Returns 0 on success or
+// -1 on translation/permission fault. The user_va MUST be 4-byte
+// aligned and within [0, UACCESS_USER_VA_TOP); the caller validates.
+//
+// Added at P6-pouch-threads (sub-chunk 9) for the clear-child-tid
+// handoff: when a Thread exits, the kernel atomically stores 0 to
+// the tidptr the Thread set via SYS_SET_TID_ADDRESS, then issues a
+// torpor wake so a joiner blocked on the word observes the death.
+// Plain STR — the joiner's later torpor_wait load runs under
+// torpor_lock, whose acquire pairs with the producer-side store
+// (the kernel here) for memory ordering. Mirrors uaccess_load_u32.
+extern s64 uaccess_store_u32(u64 user_va, u32 value);
+
 // Look up the fixup PC for a faulting instruction PC. Returns 0 if
 // `fault_pc` is not in the table (the fault is not a uaccess fault).
 // Otherwise returns the fixup PC to which the dispatcher must

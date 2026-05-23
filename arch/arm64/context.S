@@ -240,3 +240,93 @@ thread_trampoline:
 1:  wfe
     b       1b
 .size thread_trampoline, . - thread_trampoline
+
+
+// thread_user_trampoline — user-mode variant of thread_trampoline.
+// P6-pouch-threads (sub-chunk 9). Used as the initial ctx.lr for Threads
+// created by thread_create_user (the kernel-side of SYS_THREAD_SPAWN).
+//
+// Identical sched_finish_task_switch + DAIF unmask discipline as
+// thread_trampoline; differs in the tail: instead of `blr x21` to a
+// kernel entry function, this trampoline performs the userland_enter
+// eret dance inline, consuming four args parked in callee-saved ctx
+// slots that cpu_switch_context loaded just before `ret` into here:
+//
+//   x19 = user_sp_va    — SP_EL0 install (non-current bank write at EL1h)
+//   x20 = user_arg      — moved to x0 (AAPCS64 arg-0) for the user entry
+//   x21 = user_entry_va — ELR_EL1 target
+//   x22 = user_tls_va   — TPIDR_EL0 init value (0 = no TLS yet, valid)
+//
+// PSTATE for the eret target: EL0t, all DAIF clear — same as
+// userland_enter's (SPSR_EL1 = 0). Every GPR except x0 is zeroed so no
+// kernel state leaks across the EL1→EL0 boundary; x0 carries `arg` per
+// AAPCS64 so the user entry function receives it correctly.
+//
+// SP_EL0 install at EL1h: the kernel runs uniformly at EL1h (SPSel=1,
+// invariant I-21), so the live `sp` is SP_EL1 (the calling thread's
+// kstack). Writing SP_EL0 via `msr sp_el0, x19` is the architecturally
+// well-defined non-current-bank write (NOT the CONSTRAINED UNPREDICTABLE
+// write-the-current-SP form, which would only fire at EL1t). Matches
+// the exact discipline arch/arm64/userland.S documents.
+.globl thread_user_trampoline
+.type thread_user_trampoline, %function
+thread_user_trampoline:
+    bti     c
+
+    /* Release the run-tree lock prev held when switching to us — same
+     * discipline as thread_trampoline; mirrors the sched() resume path. */
+    bl      sched_finish_task_switch
+
+    msr     daifclr, #2          /* P2-Bc: unmask IRQs for new thread */
+
+    /* Stage user-mode entry: park entry_pc / sp into scratch x16/x17 so
+     * the GPR-zero sweep below can freely clobber x0..x18. x19..x22 are
+     * read directly so they survive into the msr operands. */
+    msr     elr_el1,   x21        /* ELR_EL1 := user_entry_va */
+    msr     spsr_el1,  xzr        /* SPSR_EL1 := 0 (EL0t, DAIF clear) */
+    msr     sp_el0,    x19        /* SP_EL0 := user_sp_va (non-current bank) */
+    msr     tpidr_el0, x22        /* TPIDR_EL0 := user_tls_va (0 if none) */
+
+    /* x0 := user_arg — AAPCS64 arg-0 for the user entry function.
+     * Established AFTER the msr stack of args so the four msr operands
+     * have already been consumed; safe to clobber x20 in the sweep. */
+    mov     x0, x20
+
+    /* Zero every other GPR — no kernel state crosses EL1→EL0. */
+    mov     x1,  xzr
+    mov     x2,  xzr
+    mov     x3,  xzr
+    mov     x4,  xzr
+    mov     x5,  xzr
+    mov     x6,  xzr
+    mov     x7,  xzr
+    mov     x8,  xzr
+    mov     x9,  xzr
+    mov     x10, xzr
+    mov     x11, xzr
+    mov     x12, xzr
+    mov     x13, xzr
+    mov     x14, xzr
+    mov     x15, xzr
+    mov     x16, xzr
+    mov     x17, xzr
+    mov     x18, xzr
+    mov     x19, xzr
+    mov     x20, xzr
+    mov     x21, xzr
+    mov     x22, xzr
+    mov     x23, xzr
+    mov     x24, xzr
+    mov     x25, xzr
+    mov     x26, xzr
+    mov     x27, xzr
+    mov     x28, xzr
+    mov     x29, xzr             /* FP */
+    mov     x30, xzr             /* LR */
+
+    eret
+
+    /* Defensive infinite loop if eret somehow falls through. */
+1:  wfe
+    b       1b
+.size thread_user_trampoline, . - thread_user_trampoline

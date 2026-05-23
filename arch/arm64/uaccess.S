@@ -171,3 +171,39 @@ uaccess_load_u32_fault:
 .long   uaccess_load_u32_op    - .
 .long   uaccess_load_u32_fault - .
 .popsection
+
+// uaccess_store_u32 — write a single 32-bit word to a user VA. The
+// store equivalent of uaccess_load_u32; added at P6-pouch-threads for
+// the clear-child-tid handoff in SYS_THREAD_EXIT.
+//
+// AArch64 ABI: x0 = user VA, x1 = value (low 32 bits).
+// Returns: x0 = 0 on success; x0 = -1 on fault (no VMA / perm denied /
+//          OOM during demand-page sub-table alloc).
+//
+// Caller MUST ensure x0 is 4-byte-aligned and < UACCESS_USER_VA_TOP;
+// alignment is not checked here (an unaligned STR would alignment-
+// fault, which the fixup table does NOT catch — keep the fast path
+// honest by validating alignment in the C caller).
+//
+// Plain STR (not STLR) — the producer-side store; the consumer's later
+// load runs under torpor_lock whose acquire pairs with the lock-release
+// following this store. Mirrors uaccess_load_u32's discipline.
+.global uaccess_store_u32
+.type uaccess_store_u32, @function
+uaccess_store_u32:
+.global uaccess_store_u32_op
+uaccess_store_u32_op:
+    str     w1, [x0]                // FAULT POINT — table entry below
+    mov     x0, xzr
+    ret
+.global uaccess_store_u32_fault
+uaccess_store_u32_fault:
+    mov     x0, #-1
+    ret
+.size uaccess_store_u32, . - uaccess_store_u32
+
+.pushsection .uaccess_fixup, "a", @progbits
+.balign 4
+.long   uaccess_store_u32_op    - .
+.long   uaccess_store_u32_fault - .
+.popsection

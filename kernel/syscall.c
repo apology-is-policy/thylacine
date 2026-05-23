@@ -27,6 +27,7 @@
 #include <thylacine/poll.h>
 #include <thylacine/proc.h>
 #include <thylacine/random.h>
+#include <thylacine/sched.h>
 #include <thylacine/spinlock.h>
 #include <thylacine/spoor.h>
 #include <thylacine/srvconn.h>
@@ -1203,20 +1204,117 @@ static s64 sys_chroot_handler(u64 spoor_fd_raw) {
     return 0;
 }
 
-// SYS_SET_TID_ADDRESS — return the calling thread's tid (P6-pouch-kernel-
-// auxv). A C runtime calls this once at thread startup. At v1.0 a Proc is
-// single-threaded, so the main thread's tid is the Proc's pid (the Linux
-// thread-group-leader convention). `tidptr_raw` (the clear-child-tid
-// address) is accepted but not stored — its exit-time semantics are
-// observable only with multiple threads (POUCH-DESIGN.md §12.4); the
-// pouch-threads sub-chunk wires it alongside the per-thread tid.
+// SYS_SET_TID_ADDRESS — record the clear-child-tid address on the calling
+// thread + return its tid (P6-pouch-kernel-auxv; storage wired by P6-pouch-
+// threads sub-chunk 9). musl's __pthread_setup calls this once per thread
+// at startup; the kernel stores tidptr on the Thread and, on thread exit
+// (SYS_THREAD_EXIT / SYS_EXITS), atomically clears *tidptr + torpor-wakes
+// on it so a joiner observes the exit.
+//
+// `tidptr_raw == 0` is the "unset" sentinel — clears the field. Any other
+// value passes a user-VA bound + alignment check at storage time; an
+// invalid tidptr causes the syscall to return -1 (caller likely buggy)
+// rather than silently accepting it and faulting at exit time.
+//
+// At v1.0 a Thread's tid equals its kernel struct Thread.tid (per
+// thread_create's monotonic g_next_tid). For the MAIN thread of a Proc
+// this is NOT the pid in general — the main thread's tid is whatever
+// g_next_tid was at proc_alloc-time-spawn (tid 1 for joey, etc.). The
+// older returned-pid pattern (single-threaded Procs) was an aliasing
+// approximation; sub-chunk 9 swaps to the real per-Thread tid, which is
+// the value pthread_self / pthread_join expects to compare against.
 static s64 sys_set_tid_address_handler(u64 tidptr_raw) {
-    (void)tidptr_raw;
     struct Thread *t = current_thread();
     if (!t)         return -1;
     struct Proc *p = t->proc;
     if (!p)         return -1;
-    return (s64)p->pid;
+
+    if (tidptr_raw != 0) {
+        // Must be 4-byte aligned + within user VA bound. The kernel
+        // exit-time store uses uaccess_store_u32, which requires the
+        // alignment.
+        if ((tidptr_raw & 0x3u) != 0)                    return -1;
+        if (tidptr_raw >= UACCESS_USER_VA_TOP)            return -1;
+    }
+    t->clear_child_tid = tidptr_raw;
+    return (s64)t->tid;
+}
+
+// P6-pouch-threads (sub-chunk 9): SYS_THREAD_SPAWN handler.
+//
+// Validates the four user-VA args, creates a new Thread in the caller's
+// Proc via thread_create_user, makes it RUNNABLE via sched_ready, returns
+// its tid. -EINVAL on argument validation failure / kproc caller;
+// -ENOMEM on alloc failure. Linux/musl-numeric errnos so pouch's
+// syscall_ret.c decodes them as -errno.
+//
+// Caller's Proc must have pgtable_root != 0 (i.e. a userspace Proc with
+// an installed address space). Calls FROM kproc are rejected upstream by
+// the very fact that kproc threads never execute SVC instructions; the
+// pgtable_root == 0 check is a defense-in-depth catch.
+static s64 sys_thread_spawn_handler(u64 entry_va, u64 sp_va,
+                                    u64 arg_va, u64 tls_va) {
+    struct Thread *t = current_thread();
+    if (!t)                                          return -22; // -EINVAL
+    struct Proc *p = t->proc;
+    if (!p)                                          return -22;
+    if (p->magic != PROC_MAGIC)                      return -22;
+    if (p == kproc())                                return -22;
+    if (p->pgtable_root == 0)                        return -22;
+
+    // entry_va: must be non-NULL + 4-byte aligned + within user VA.
+    //
+    // The 4-byte alignment is LOAD-BEARING (F2 audit close): aarch64 has
+    // a CPU-mandatory PC alignment check (always-on, no SCTLR bit
+    // disables it) — a misaligned PC at the eret target instantly raises
+    // an EC_PC_ALIGN synchronous exception, which the EL1 dispatcher
+    // routes to extinction_with_addr("EL0 PC alignment fault"). Without
+    // this syscall-layer check, ANY userspace caller could trivially ELE
+    // the kernel by passing a 1- or 2-byte-aligned entry_va — the SVC
+    // returns success, the eret fires, the CPU alignment check trips, the
+    // kernel extincts. Convert to -EINVAL at the gate so misalignment
+    // becomes a clean userspace error instead of a kernel-killing payload.
+    if (entry_va == 0)                               return -22;
+    if (entry_va & 0x3u)                              return -22;
+    if (entry_va >= UACCESS_USER_VA_TOP)              return -22;
+
+    // sp_va: AAPCS64 requires 16-byte stack alignment at function entry.
+    // The pouch pthread layer is responsible for picking an aligned top
+    // (the stack base + size; typical pthread stacks are page-aligned so
+    // the top is too). Non-zero check + alignment + bound.
+    //
+    // F8 audit close: tighten the bound to `>=` (was `>`). Accepting
+    // sp_va == UACCESS_USER_VA_TOP was marginally legal (the first push
+    // writes BELOW the SP, so downward writes stay in user VA) but
+    // created a fragile boundary: any compiler-emitted prologue using
+    // `[sp, #+N]` (rare but ABI-permitted for register-save slots) would
+    // dereference at a TTBR1 address. Matches entry_va's strict `>=`.
+    if (sp_va == 0)                                   return -22;
+    if ((sp_va & 0xFu) != 0)                          return -22;
+    if (sp_va >= UACCESS_USER_VA_TOP)                 return -22;
+
+    // tls_va: 0 is permitted (no TLS yet — the entry can set it
+    // afterward via msr tpidr_el0). Non-zero must be in user VA. No
+    // alignment requirement — TLS layout is libc-defined.
+    if (tls_va != 0 && tls_va >= UACCESS_USER_VA_TOP) return -22;
+
+    struct Thread *nt = thread_create_user(p, entry_va, sp_va, arg_va, tls_va);
+    if (!nt)                                         return -12; // -ENOMEM
+
+    // ready() inserts the new RUNNABLE Thread into the run-tree. From
+    // here it can be picked by any CPU on the next sched() tick.
+    ready(nt);
+    return (s64)nt->tid;
+}
+
+// P6-pouch-threads (sub-chunk 9): SYS_THREAD_EXIT handler. Wraps
+// thread_exit_self (in kernel/proc.c) which never returns.
+__attribute__((noreturn))
+static void sys_thread_exit_handler(void) {
+    thread_exit_self();
+    // thread_exit_self is __noreturn; the wrapper inherits via the
+    // attribute, so the compiler does not emit a fall-through.
+    __builtin_unreachable();
 }
 
 // =============================================================================
@@ -3016,6 +3114,20 @@ void syscall_dispatch(struct exception_context *ctx) {
         ctx->regs[0] = (u64)sys_torpor_wake_handler(ctx->regs[0],
                                                     ctx->regs[1]);
         return;
+
+    case SYS_THREAD_SPAWN:
+        ctx->regs[0] = (u64)sys_thread_spawn_handler(ctx->regs[0],
+                                                     ctx->regs[1],
+                                                     ctx->regs[2],
+                                                     ctx->regs[3]);
+        return;
+
+    case SYS_THREAD_EXIT:
+        // Never returns. Kernel thread_exit_self() runs the
+        // clear_child_tid handoff, marks self EXITING, and yields. The
+        // exception_context stays on the EXITING thread's kstack until
+        // the parent's wait_pid → thread_free.
+        sys_thread_exit_handler();
 
     default:
         // Unknown syscall. Phase 5+ delivers SIGSYS-equivalent note;

@@ -74,6 +74,8 @@ enum {
     // when the first one materialises.
     T_SYS_TORPOR_WAIT = 39,      // P6-pouch-wait-addr: wait on a user-VA word
     T_SYS_TORPOR_WAKE = 40,      // P6-pouch-wait-addr: wake waiters on a user-VA word
+    T_SYS_THREAD_SPAWN = 41,     // P6-pouch-threads: spawn an EL0 Thread in the caller's Proc
+    T_SYS_THREAD_EXIT  = 42,     // P6-pouch-threads: exit the calling Thread; never returns
 };
 
 // Torpor error codes — match kernel's TORPOR_ERR_* (Linux/musl-numeric
@@ -967,11 +969,15 @@ static inline long t_cap_use(unsigned long cap_mask) {
 
 // t_set_tid_address — register the calling thread's tid address and
 // return its tid. A C runtime (pouch) calls this at thread startup; a
-// Thylacine-native program rarely needs it directly. `tidptr` is
-// accepted but, at v1.0, not acted on — the clear-child-tid semantics
-// land with the pouch-threads sub-chunk (POUCH-DESIGN.md §12.4).
-// Returns the calling thread's tid: a positive value — at v1.0 the
-// single-threaded Proc's main-thread tid equals its pid.
+// Thylacine-native program rarely needs it directly. `tidptr` is now
+// STORED on the Thread (P6-pouch-threads sub-chunk 9): on thread exit
+// the kernel atomically zeroes *tidptr + torpor-wakes on it so a
+// joiner observes the death. `tidptr == 0` is the "unset" sentinel.
+//
+// Returns the calling thread's tid (positive int — a per-Thread monotonic
+// allocation; for the main Thread of a Proc this is NOT the pid in
+// general). Returns -1 on user-VA validation failure (non-zero tidptr
+// that is not 4-byte-aligned or outside the user-VA bound).
 __attribute__((always_inline))
 static inline long t_set_tid_address(void *tidptr) {
     register long x0 __asm__("x0") = (long)tidptr;
@@ -983,6 +989,64 @@ static inline long t_set_tid_address(void *tidptr) {
         : "memory", "cc"
     );
     return x0;
+}
+
+// P6-pouch-threads (sub-chunk 9): spawn an EL0 Thread in the caller's Proc.
+//
+// `entry`: function pointer for the new Thread's EL0 entry — invoked with
+//          x0 = arg per AAPCS64. The function must NOT return; it should
+//          call t_thread_exit (or pouch's pthread_exit) to terminate
+//          cleanly.
+// `sp_top`: top of the new Thread's user stack. Must be 16-byte aligned
+//           (AAPCS64 ABI). The Thread runs on this stack until exit.
+// `arg`:    opaque value passed as x0 to `entry`.
+// `tls`:    initial TPIDR_EL0 value (TLS base). 0 = no TLS (entry must
+//           install one before any TLS deref).
+//
+// Returns the new Thread's tid (positive int) on success, or one of the
+// Linux/musl-numeric -errnos:
+//   -EINVAL (-22)   bad alignment / out-of-bound entry / sp / tls
+//   -ENOMEM (-12)   Thread / kstack alloc fail
+__attribute__((always_inline))
+static inline long t_thread_spawn(void (*entry)(void *), void *sp_top,
+                                  void *arg, void *tls) {
+    register long x0 __asm__("x0") = (long)(unsigned long)entry;
+    register long x1 __asm__("x1") = (long)(unsigned long)sp_top;
+    register long x2 __asm__("x2") = (long)(unsigned long)arg;
+    register long x3 __asm__("x3") = (long)(unsigned long)tls;
+    register long x8 __asm__("x8") = T_SYS_THREAD_SPAWN;
+    __asm__ volatile (
+        "svc #0"
+        : "+r"(x0)
+        : "r"(x1), "r"(x2), "r"(x3), "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
+// P6-pouch-threads (sub-chunk 9): exit the calling Thread. NEVER returns.
+//
+// The kernel:
+//   1. If t_set_tid_address registered a non-zero tidptr on this Thread,
+//      atomically zeroes the tidptr word + torpor-wakes UINT32_MAX
+//      threads on it (pthread_join handoff).
+//   2. Marks self EXITING.
+//   3. If this is the LAST live Thread in the Proc, transitions the
+//      Proc to ZOMBIE with exit_status = 0 (mirrors t_exits(0)).
+//   4. sched(); never returns.
+//
+// pouch's pthread_exit wraps this; native callers (rare) can use it
+// directly.
+__attribute__((always_inline, noreturn))
+static inline void t_thread_exit(void) {
+    register long x8 __asm__("x8") = T_SYS_THREAD_EXIT;
+    __asm__ volatile (
+        "svc #0"
+        :
+        : "r"(x8)
+        : "memory", "cc"
+    );
+    __builtin_unreachable();
 }
 
 #endif // THYLA_SYSCALL_H

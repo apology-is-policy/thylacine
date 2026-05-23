@@ -680,6 +680,68 @@ enum {
     // deferred to v1.x with Tier-2 burrows (POUCH-DESIGN.md §10);
     // v1.0 hashing is `(Proc *, addr_va)`-keyed.
     SYS_TORPOR_WAKE  = 40,   // arg: addr_va, count
+
+    // P6-pouch-threads (sub-chunk 9): the kernel-side thread-spawn /
+    // thread-exit pair. The substrate over which pouch's pthread_create
+    // / pthread_exit / pthread_join run. POUCH-DESIGN.md §7 [RESOLVED 7.3].
+    //
+    // SYS_THREAD_SPAWN(entry_va, sp_va, arg, tls_va) → tid / -errno
+    //   x0 = entry_va   user-VA of the entry function (EL0 PC)
+    //   x1 = sp_va      user-VA of the new thread's user stack TOP (the
+    //                   address that will be installed into SP_EL0; must
+    //                   be 16-byte-aligned per AAPCS64)
+    //   x2 = arg        user value passed as x0 (AAPCS64 arg-0) to the
+    //                   entry function. Opaque to the kernel.
+    //   x3 = tls_va     user-VA written to TPIDR_EL0 before eret; 0 is
+    //                   permitted (no TLS yet — musl's __pthread_self is
+    //                   then a faulting deref until the entry function
+    //                   does its own TLS setup).
+    //
+    // Allocates a new Thread + 16 KiB kstack in the CALLING Proc (same
+    // pgtable_root + ASID — the new thread shares the caller's address
+    // space). The new Thread is registered on the run-tree as RUNNABLE;
+    // the first dispatch lands at thread_user_trampoline which erets to
+    // EL0 at entry_va running on sp_va with TPIDR_EL0 = tls_va + x0 = arg.
+    //
+    // Returns the new thread's tid (positive int) on success. Returns
+    // negative -errno on failure (Linux/musl-numeric; pouch's
+    // syscall_ret.c decodes [-4095, -2]):
+    //   -EINVAL  bad alignment / out-of-bound entry_va / out-of-bound
+    //            sp_va / out-of-bound tls_va / caller is kproc
+    //   -ENOMEM  kstack alloc fail / Thread cache alloc fail
+    //
+    // The new Thread inherits no user state from the caller — the entry
+    // function is the responsible adult. fd inheritance is implicit
+    // (single handle table per Proc); register state is the four parked
+    // args + zeros.
+    SYS_THREAD_SPAWN = 41,   // arg: entry_va, sp_va, arg, tls_va
+
+    // SYS_THREAD_EXIT — terminate the calling Thread. NEVER returns.
+    //   (no args)
+    //
+    // Atomically:
+    //   1. If clear_child_tid != 0 on this Thread (set via
+    //      SYS_SET_TID_ADDRESS): uaccess_store_u32(0) at that user-VA +
+    //      torpor_wake(UINT32_MAX) on the same address. Best-effort —
+    //      a failed store (page unmapped) skips the wake but does not
+    //      extinct.
+    //   2. Mark self THREAD_EXITING under g_proc_table_lock.
+    //   3. If this is the LAST non-EXITING thread in the Proc, also
+    //      transition the Proc to ZOMBIE with exit_status = 0 + wake
+    //      parent's child_done (mirrors exits() with status 0).
+    //   4. yield via sched(); never returns.
+    //
+    // After-exit reaping: the Thread descriptor + kstack remain
+    // allocated until the Proc dies (then wait_pid's reap path frees
+    // every Thread in p->threads). v1.0 accepts this — short-lived
+    // programs (libsodium tests) bound the leak; long-running daemons
+    // (stratumd) join their threads at shutdown so the Proc dies
+    // shortly after. Per-Thread reaping is a v1.x extension.
+    //
+    // Never returns to userspace — userspace must treat any return as
+    // a kernel bug. The x0 the SVC dispatch writes on a fall-through
+    // path is undefined; v1.0 reaches sched() unconditionally.
+    SYS_THREAD_EXIT  = 42,   // no args
 };
 
 // SYS_WALK_OPEN's FROM_ROOT sentinel: when passed as the spoor_fd, the

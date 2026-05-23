@@ -158,6 +158,7 @@ set(KERNEL_SRCS
     test/test_sys_spawn_with_perms.c
     test/test_sys_burrow.c
     test/test_torpor.c
+    test/test_thread_spawn.c
     test/test_pipe_probe.c
     test/test_attach_probe.c
     test/test_stratumd_stub.c

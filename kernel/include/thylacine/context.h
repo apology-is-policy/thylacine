@@ -106,6 +106,23 @@ void cpu_switch_context(struct Context *prev, struct Context *next);
 // WFE — Phase 2 close adds the real thread_exit + reap path.
 extern void thread_trampoline(void);
 
+// P6-pouch-threads (sub-chunk 9): user-mode variant of thread_trampoline.
+// Used as the initial ctx.lr for Threads created by thread_create_user;
+// the first cpu_switch_context's `ret` lands here. The trampoline:
+//
+//   1. bti c
+//   2. bl sched_finish_task_switch — release the run-tree lock prev held
+//   3. msr daifclr, #2 — unmask IRQs for the new thread
+//   4. consume the four parked args from ctx (x19=sp, x20=arg, x21=entry,
+//      x22=tls), installs SP_EL0, TPIDR_EL0, ELR_EL1, SPSR_EL1, x0=arg,
+//      zeroes every other GPR
+//   5. eret to EL0 at user_entry_va running on user_sp_va
+//
+// Mirrors userland_enter's discipline (arch/arm64/userland.S) but does
+// it inline from the trampoline so x0 = user_arg survives the GPR-
+// zeroing sweep.
+extern void thread_user_trampoline(void);
+
 // P4-Ic5-FP: enable CPACR_EL1.FPEN = 0b11 (no FP/SIMD trap at any EL)
 // on the calling CPU. Called from boot_main (primary) + per_cpu_main
 // (secondaries) so all CPUs uniformly admit FP/SIMD at both EL1 and
