@@ -73,7 +73,7 @@ Per `POUCH-DESIGN.md §14`. Each lands independently with the two-commit pattern
 | 9 | `pouch-threads` — pthread create/join/detach + mutex/cond/rwlock/once + TLS errno — **LANDED** (9a kernel side + 9b pouch side + /pouch-hello-threads proving binary) | yes (9a + 9b) |
 | 10 | `pouch-poll` — `poll`/`select`/`ppoll` → `SYS_POLL` — **LANDED** (`0005-pouch-poll.patch` + `/pouch-hello-poll` proving binary) | no |
 | 11 | `pouch-devnodes` — minimal synthetic-FS namespace; trivial `/dev` nodes — **LANDED** (`devfull` Dev + `/pouch-hello-getrandom`; path-based `open("/dev/null")` deferred to a future multi-component-walk sub-chunk) | no |
-| 12 | `pouch-sockets` — `AF_UNIX` `SOCK_STREAM` → `/srv` (BYTE mode); new kernel `enum srv_mode` + `SYS_POST_SERVICE_BYTE` (= 43) + `SrvConn.byte_mode` + KOBJ_SRV mode-dispatch. POUCH-DESIGN §6.2 revised in this chunk. **LANDED 2026-05-23** — `<TBD>` substantive, `<TBD>` hash fixup. | yes |
+| 12 | `pouch-sockets` — `AF_UNIX` `SOCK_STREAM` → `/srv` (BYTE mode); new kernel `enum srv_mode` + `SYS_POST_SERVICE_BYTE` (= 43) + `SrvConn.byte_mode` + KOBJ_SRV mode-dispatch. POUCH-DESIGN §6.2 revised in this chunk. **LANDED 2026-05-23** — `df74fe1` substantive, `*(pending)*` hash fixup. | yes |
 | 13 | `pouch-signals` — the supported signal subset → notes | yes |
 | 14 | `pouch-libsodium` — cross-compile libsodium; self-test | no |
 | 15 | `pouch-stratumd-build` — build stratumd against the sysroot; Thylacine `peer_creds` arm | no (Stratum-side) |
