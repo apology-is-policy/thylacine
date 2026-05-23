@@ -2,16 +2,17 @@
 
 > **Status note.** This document is the as-built reference for **pouch**,
 > Thylacine's POSIX libc (execution Phase 6). It is written incrementally as
-> Phase 6 sub-chunks land. Through sub-chunk 6c it covers the vendoring of musl,
+> Phase 6 sub-chunks land. Through sub-chunk 7b it covers the vendoring of musl,
 > the boundary-line architecture + inventory, the kernel-side process-startup
 > additions (the auxiliary vector, `SYS_SET_TID_ADDRESS`), the syscall seam —
 > the syscall-number retarget, the unimplemented-syscall sentinel, the
 > Thylacine error-convention decode, and the stdio backend — the first
-> pouch binaries running in Thylacine, the `pouch-ld` link-driver wrapper, and
-> the compiler runtime (the compiler-rt builtins), and the `printf` hello.
+> pouch binaries running in Thylacine, the `pouch-ld` link-driver wrapper, the
+> compiler runtime (the compiler-rt builtins) and the `printf` hello, and the
+> anonymous-memory backend that puts `malloc` over `SYS_BURROW_ATTACH`.
 > Sections for pouch's
 > lower-half API, data structures, and state machines are stubbed with forward
-> pointers and filled in by sub-chunks 7-13. The binding design is
+> pointers and filled in by sub-chunks 8-13. The binding design is
 > `docs/POUCH-DESIGN.md`.
 
 ---
@@ -149,7 +150,7 @@ Classes:
 | `fenv/` (18) | UPPER | floating-point environment (aarch64 asm) | — |
 | `setjmp/` (2) | UPPER | `setjmp` / `longjmp` (aarch64 asm) | — |
 | `stdio/` (116) | MIXED | FILE buffering + `printf`/`scanf` upper; the backend ops (`__stdio_read`/`__stdio_write`, `fopen`→`open`) reach the seam | 4 |
-| `malloc/` (18) | MIXED | the `mallocng` allocator — logic portable; rests on the anonymous-memory backend | 7 |
+| `malloc/` (18) | MIXED | the `mallocng` allocator — logic portable; rests on the anonymous-memory backend | 7b |
 | `time/` (39) | MIXED | `gmtime`/`mktime`/`strftime` upper; `clock_gettime`/`nanosleep` lower | 4 |
 | `locale/` (26) | MIXED | C locale is upper; locale-file loading is lower (v1.0 = `C` locale only) | 4 |
 | `env/` (11) | MIXED | `getenv`/`setenv` upper; `__libc_start_main` / `__init_libc` is the CRT/auxv seam | 3 |
@@ -162,7 +163,7 @@ Classes:
 | `fcntl/` (6) | LOWER | `open`/`openat`/`fcntl`/`creat` | 4 |
 | `stat/` (20) | LOWER | `stat`/`fstat`/`mkdir`/`chmod`/`statx` | 4 |
 | `dirent/` (12) | LOWER | `opendir`/`readdir`/`scandir` (`getdents`) | 4 |
-| `mman/` (13) | LOWER | `mmap`/`mprotect`/`madvise`/`mlock` → Burrow | 7 |
+| `mman/` (13) | LOWER | `mmap`/`munmap` → `SYS_BURROW_ATTACH` / `_DETACH`; `mprotect`/`madvise`/`mlock`/`mremap` → `ENOSYS` sentinel | 7b |
 | `select/` (4) | LOWER | `select`/`poll`/`ppoll` → `t_poll` / `SYS_POLL` | 10 |
 | `thread/` (133) | LOWER | pthreads + atomics + the futex calls → Thylacine threads + `torpor` | 8-9 |
 | `signal/` (40) | LOWER | `sigaction`/`kill`/`raise`/`sigprocmask` → notes | 13 |
@@ -229,10 +230,11 @@ the boundary line**, at `usr/lib/pouch/patches/`:
 
 `third_party/musl/` stays pristine; `tools/build.sh sysroot` copies it to
 `build/pouch/musl-src/` (gitignored), applies the series there with `patch
--p1`, and builds out-of-tree (see "Build" below). At sub-chunk 4 the series
-holds two patches — `0001-pouch-syscall-seam.patch` and
-`0002-pouch-stdio-no-iovec.patch` (see "The syscall seam" next); the
-boundary-line replacement continues across the lower-half sub-chunks 7-13.
+-p1`, and builds out-of-tree (see "Build" below). At sub-chunk 7b the series
+holds three patches — `0001-pouch-syscall-seam.patch`,
+`0002-pouch-stdio-no-iovec.patch` (see "The syscall seam"), and
+`0003-pouch-mman.patch` (see "The anonymous-memory backend"); the
+boundary-line replacement continues across the remaining lower-half sub-chunks.
 
 The series' size is the honest, reviewable measure of pouch's divergence from
 musl. An upstream musl security release is handled by re-vendoring
@@ -635,6 +637,108 @@ compiles, links, loads, and runs on Thylacine.
 
 ---
 
+## The anonymous-memory backend
+
+Sub-chunk 7b (`pouch-mem`) puts `malloc` over Thylacine's anonymous-memory
+syscalls. After 7a landed the kernel-side primitive (`SYS_BURROW_ATTACH` /
+`SYS_BURROW_DETACH`; docs/reference/79-sys-burrow.md), 7b is the **pouch-side**
+boundary-line patch that routes musl's `mman/` lower half onto it. The patch is
+`0003-pouch-mman.patch`; with it applied the static-`libc.a` mallocng
+allocator works.
+
+### The patch — `0003-pouch-mman`
+
+Three files, one purpose:
+
+- `arch/aarch64/bits/syscall.h.in` — two macros that `0001-syscall-seam`
+  set to the `0xFFFF` sentinel get their Thylacine numbers:
+  `__NR_mmap = 37` (= `SYS_BURROW_ATTACH`) and `__NR_munmap = 38`
+  (= `SYS_BURROW_DETACH`). Future re-vendor awk-filter runs extend
+  `0001`'s `m[]` table with `m["mmap"]="37"; m["munmap"]="38";` (the
+  preamble in `0003` records this for the next re-vendor).
+- `src/mman/mmap.c` — rewritten. The Linux `mmap(start, len, prot, flags,
+  fd, off)` becomes a one-argument call to `SYS_mmap` (= `SYS_BURROW_ATTACH`):
+  the length. `start`, `prot`, `fd`, `off` are accepted for source
+  compatibility and ignored; the kernel chooses the VA, and the region is
+  always demand-zero RW (W^X / I-12 forbids X at attach; PROT bits are
+  silently upgraded). File-backed `mmap` (any flags without `MAP_ANON`) is
+  refused with `ENOSYS` — a permanent Thylacine refusal, not a v1.0 stub
+  (ARCHITECTURE.md §6.5; POUCH-DESIGN.md §8.2). `MAP_FIXED` is rejected too
+  (the v1.0 burrow-attach window is kernel-chosen).
+- `src/mman/munmap.c` — rewritten. The Linux `munmap(start, len)` becomes
+  a direct call to `SYS_munmap` (= `SYS_BURROW_DETACH`). The kernel matches
+  the page-rounded `[start, start + len)` range exactly against an
+  installed VMA; mallocng tracks `needed` losslessly, so the round-trip
+  works.
+
+All other `mman/` files (`madvise`, `mprotect`, `mremap`, `mlock`, `mlockall`,
+`munlock`, `munlockall`, `msync`, `mincore`, `posix_madvise`, `shm_open`) stay
+on the `0xFFFF` sentinel path — invoking them returns `-1` + `errno = ENOSYS`,
+which is the contract this layer wants. None of them is on mallocng's
+correctness path (see "mallocng correctness" below); pouch-side callers see a
+clean ENOSYS.
+
+### mallocng correctness
+
+mallocng (musl's allocator at `src/malloc/mallocng/`) is the consumer this
+patch serves. Verifying it works under the Thylacine reshape required walking
+every memory-management call:
+
+- **`brk`** — `glue.h` has `brk(p) ((uintptr_t)__syscall(SYS_brk, p))`. `SYS_brk`
+  stays `0xFFFF`; on the first allocation mallocng tries `brk(0)` (gets
+  `(uintptr_t)(-ENOSYS)`, a huge value), then `brk(new)` fails, and mallocng
+  sets `ctx.brk = -1` (line `malloc.c:70`) — permanently routing every
+  metadata-area allocation through `mmap`. This is mallocng's *documented*
+  brk-fallback path; correctness is unchanged.
+- **`madvise`** — gated by `USE_MADV_FREE` (= 0 in `glue.h`). Never invoked.
+- **`mremap`** — only called from `realloc.c:34` on a `>= MMAP_THRESHOLD`
+  grow. The sentinel guard makes `mremap` return `MAP_FAILED` + `errno = ENOSYS`;
+  `realloc` falls through to `malloc + memcpy + free` at line 46.
+  Correctness unchanged.
+- **`mprotect`** — called from `malloc.c:92` after a successful `brk`
+  extension. Since `brk` is permanently unusable, this path is never
+  reached; even if reached, `mprotect`'s `errno != ENOSYS` guard tolerates
+  the sentinel failure.
+
+`MMAP_THRESHOLD = 131052` (mallocng's `meta.h`). Allocations smaller than this
+land in mallocng's size-classed slot allocator (one `mmap` per *group*, many
+allocations per group); larger allocations take an *individually-mmapped* path
+— one `SYS_BURROW_ATTACH` per allocation, freed by one `SYS_BURROW_DETACH`.
+
+### Footguns silently swallowed
+
+The `prot` argument to `mmap` is ignored — pouch always hands back RW memory.
+That's a v1.0 security degradation (no `PROT_NONE` guard pages between
+mallocng's meta areas), accepted because mallocng's allocator correctness
+**does not depend on guard inaccessibility** — they are defense-in-depth
+against overruns, not a load-bearing invariant. v1.x can add `mprotect`
+when guard pages are wanted; with `mprotect` working, mallocng's existing
+code installs them as-is.
+
+### Verifying live — `/pouch-hello-malloc`
+
+Sub-chunk 7b lands `/pouch-hello-malloc` (`usr/pouch-hello/pouch-hello-malloc.c`)
+— the fourth pouch binary, exercising mallocng end-to-end:
+
+| Step | What it proves |
+|---|---|
+| small `malloc`/`free` | the slot path; the first call triggers mallocng's first metadata-area mmap (the `brk`-fallback). |
+| `calloc` (zero-initialized) | the demand-zero contract — `SYS_BURROW_ATTACH` returns pages zeroed by `burrow_create_anon`. |
+| `realloc`-grow within a slot | size class transitions inside mallocng (no underlying remap). |
+| large `malloc`/`free` (> `MMAP_THRESHOLD`) | mallocng's individually-mmapped path — one `SYS_BURROW_ATTACH` per allocation, one `SYS_BURROW_DETACH` per free. |
+| large `realloc`-grow | the `mremap`-ENOSYS path → `malloc + memcpy + free` fallback in `realloc.c:46`. |
+
+Every region is filled with a seeded byte sequence and read back; any byte-
+level mismatch returns non-zero from `main`. joey's `pouch_smoke_one` content-
+checks `pouch-hello-malloc: exit 0` and asserts the child reaped with status
+0, so a regressed allocator or a regressed user-fault path fails the boot.
+
+The binary is ~60 KiB — slightly larger than `/pouch-hello-printf` because it
+pulls `realloc.c` + `calloc.c` and the rest of mallocng on top of the
+`printf` machinery it shares with the prior hello.
+
+---
+
 ## Public API
 
 Not yet — pouch exposes no API surface at sub-chunk 2. pouch's lower-half API
@@ -677,10 +781,17 @@ a boot-path regression signal, on any mismatch). `/pouch-hello`'s two sentinel
 assertions (`chdir` non-cancellable, `open` cancellable) are the durable
 runtime check that an unimplemented syscall yields `ENOSYS` on both musl
 syscall paths — until sub-chunk 5 the `build_sysroot` structural greps were
-the only regression. The Phase 6 proving set — static hello, the multithreaded
-test, the `AF_UNIX` echo pair, libsodium's self-test, stratumd's boot — lands
-across sub-chunks 5, 9, 12, 14, 16. See `docs/POUCH-DESIGN.md §13` for the
-exit-criteria checklist.
+the only regression. Sub-chunk 7a added 11 kernel tests for the
+`SYS_BURROW_ATTACH` / `_DETACH` surface and `vma_find_gap` (the kernel suite
+moved from 538/538 to **549/549**). Sub-chunk 7b adds no further kernel
+tests — it touches no kernel code — but it adds a fourth *runtime* regression:
+joey runs `/pouch-hello-malloc`, which exercises mallocng's small-slot path,
+`calloc` zero-init, in-slot realloc-grow, the `>= MMAP_THRESHOLD`
+individually-mmapped path, and the `mremap`-ENOSYS realloc-grow fallback,
+verifying byte-level round-trip on every region. The Phase 6 proving set —
+static hello, the multithreaded test, the `AF_UNIX` echo pair, libsodium's
+self-test, stratumd's boot — lands across sub-chunks 5, 9, 12, 14, 16. See
+`docs/POUCH-DESIGN.md §13` for the exit-criteria checklist.
 
 ## Error paths
 
@@ -720,19 +831,22 @@ performance-relevant surfaces, sized as sub-chunks 7, 8-9, 12 land.
 | 6a `pouch-ld` | the `pouch-ld` link-driver wrapper; `build_pouch_progs` links through it | landed (`eeaa5ab`) |
 | 6b `pouch-compiler-rt` | vendor + build the compiler-rt builtins — `libclang_rt.builtins.a` | landed (`72f45f9`) |
 | 6c `pouch-compiler-rt` | the real `printf` hello — `/pouch-hello-printf` | landed (`aea1ab2`) |
-| 7-16 | mem → torpor → threads → poll → devnodes → sockets → signals → libsodium → stratumd | pending |
+| 7a `pouch-mem` | kernel anonymous-memory syscalls `SYS_BURROW_ATTACH` / `_DETACH` | landed (`198fda1`) |
+| 7b `pouch-mem` | the pouch side — `0003-pouch-mman` + `/pouch-hello-malloc` | landed (this chunk) |
+| 8-16 | torpor → threads → poll → devnodes → sockets → signals → libsodium → stratumd | pending |
 
-At sub-chunk 6c: the pouch cross-toolchain is **complete and proven** —
-compiler (`pouch-clang`), libc (`libc.a`), CRT objects, and the compiler
-runtime (`libclang_rt.builtins.a`), linked by `pouch-ld`. Three POSIX C
-programs — `/pouch-hello`, `/pouch-hello-stdio`, `/pouch-hello-printf` —
-build, load, and run in Thylacine: they print, exit 0, and joey
-content-checks them on every boot. `/pouch-hello-printf` exercises the full
-toolchain including the compiler runtime, with its `binary128` soft-float
-verified correct at runtime. A POSIX C program runs on a Plan 9-heritage
-kernel that knows nothing about POSIX. Sub-chunk 6 (`pouch-compiler-rt`) is
-complete; next is sub-chunk 7 (`pouch-mem` — the allocator backend), then
-pouch's lower half (threads, sockets, signals) across sub-chunks 8-13.
+At sub-chunk 7b: the pouch cross-toolchain is **complete and proven** and
+**`malloc` works**. Four POSIX C programs — `/pouch-hello`,
+`/pouch-hello-stdio`, `/pouch-hello-printf`, `/pouch-hello-malloc` — build,
+load, and run in Thylacine: they print, exit 0, and joey content-checks them
+on every boot. `/pouch-hello-printf` exercises the compiler runtime
+(`binary128` soft-float verified correct at runtime). `/pouch-hello-malloc`
+exercises mallocng end-to-end over `SYS_BURROW_ATTACH` / `SYS_BURROW_DETACH`,
+including the `> MMAP_THRESHOLD` individually-mmapped path and the
+`realloc`-grow `mremap`-ENOSYS fallback. A POSIX C program with a working
+heap runs on a Plan 9-heritage kernel that knows nothing about POSIX. Next
+is sub-chunk 8 (`pouch-wait-addr` — the `torpor` primitive), then threads,
+sockets, signals across the remaining sub-chunks.
 
 ## Known caveats / footguns
 

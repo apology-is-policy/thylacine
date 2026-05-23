@@ -451,6 +451,19 @@ static int do_pouch_hello_smoke(void) {
                         pp_expect, sizeof(pp_expect) - 1) != 0)
         return -1;
     t_putstr("joey: pouch-hello-printf smoke ok (printf + compiler-rt binary128 soft-float)\n");
+
+    // P6-pouch-mem (7b): the heap-exercising hello — exercises mallocng
+    // end-to-end over the 0003-pouch-mman boundary-line patch (which
+    // routes __mmap / __munmap onto SYS_BURROW_ATTACH / SYS_BURROW_DETACH).
+    // Touches small-slot, calloc, realloc-grow (small + large), and the
+    // > MMAP_THRESHOLD individually-mmapped path; verifies byte-level
+    // round-trip on every region.
+    static const char pm_name[]   = "pouch-hello-malloc";
+    static const char pm_expect[] = "pouch-hello-malloc: exit 0";
+    if (pouch_smoke_one(pm_name, sizeof(pm_name) - 1,
+                        pm_expect, sizeof(pm_expect) - 1) != 0)
+        return -1;
+    t_putstr("joey: pouch-hello-malloc smoke ok (mallocng over SYS_BURROW_ATTACH / DETACH)\n");
     return 0;
 }
 

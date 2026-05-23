@@ -48,15 +48,26 @@ exact awk filter that regenerates the syscall-table retarget.
 
 ## Status
 
-Two patches, landed at sub-chunk 4 (`pouch-syscall-seam`):
+Three patches landed:
 
-- `0001-pouch-syscall-seam.patch` — retargets musl's aarch64 syscall seam
-  (`bits/syscall.h.in`, `syscall_arch.h`, `syscall_ret.c`) to the Thylacine
-  ABI: Thylacine numbers for the eight 1:1 calls, a `0xFFFF` sentinel →
-  `-ENOSYS` for the rest, and the Thylacine `-1` → `errno` decode.
-- `0002-pouch-stdio-no-iovec.patch` — replaces the `writev`/`readv`-based
-  stdio backend ops (`__stdio_write.c`, `__stdio_read.c`) with `SYS_write` /
-  `SYS_read`.
+- `0001-pouch-syscall-seam.patch` — sub-chunk 4 (`pouch-syscall-seam`).
+  Retargets musl's aarch64 syscall seam (`bits/syscall.h.in`,
+  `syscall_arch.h`, `syscall_ret.c`) to the Thylacine ABI: Thylacine
+  numbers for the eight 1:1 calls, a `0xFFFF` sentinel → `-ENOSYS` for the
+  rest, and the Thylacine `-1` → `errno` decode.
+- `0002-pouch-stdio-no-iovec.patch` — sub-chunk 4 (`pouch-syscall-seam`).
+  Replaces the `writev`/`readv`-based stdio backend ops
+  (`__stdio_write.c`, `__stdio_read.c`) with `SYS_write` / `SYS_read`.
+- `0003-pouch-mman.patch` — sub-chunk 7b (`pouch-mem`). Retargets musl's
+  `mman/` lower half onto Thylacine's anonymous-memory syscalls.
+  `__NR_mmap` = 37 (= `SYS_BURROW_ATTACH`), `__NR_munmap` = 38 (=
+  `SYS_BURROW_DETACH`); `src/mman/mmap.c` and `src/mman/munmap.c`
+  rewritten to call them with the Thylacine shape. File-backed `mmap` is
+  refused with `ENOSYS` by design (a mapped file cannot be 9P-network-
+  transparent; ARCHITECTURE.md §6.5). All other `mman/` calls (`madvise`,
+  `mprotect`, `mremap`, `mlock`, `msync`, `mincore`, ...) stay at the
+  `0xFFFF` sentinel → `ENOSYS`, which mallocng tolerates by design.
 
-The boundary-line replacement continues across Phase 6 sub-chunks 5-12
-(`pouch-mem` through `pouch-signals`). See `docs/POUCH-DESIGN.md §14`.
+The boundary-line replacement continues across the remaining Phase 6 sub-
+chunks (`pouch-wait-addr` through `pouch-signals`). See
+`docs/POUCH-DESIGN.md §14`.

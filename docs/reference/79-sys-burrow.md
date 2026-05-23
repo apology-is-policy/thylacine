@@ -138,7 +138,7 @@ long t_burrow_attach(unsigned long length);                      // vaddr / -1
 long t_burrow_detach(unsigned long vaddr, unsigned long length);  // 0 / -1
 ```
 
-These are **deferred**: P6-pouch-mem-a ships the kernel ABI (the syscalls) — that *is* the native interface. The `libt` C convenience shim lands when the first native (non-pouch) C program needs it; there is no such consumer yet. pouch does **not** use `libt` — pouch's lower half issues `SYS_BURROW_ATTACH` / `SYS_BURROW_DETACH` directly through musl's syscall seam (the `0003-pouch-mman` patch, sub-chunk 7b).
+These are **deferred**: P6-pouch-mem-a ships the kernel ABI (the syscalls) — that *is* the native interface. The `libt` C convenience shim lands when the first native (non-pouch) C program needs it; there is no such consumer yet. pouch does **not** use `libt` — pouch's lower half issues `SYS_BURROW_ATTACH` / `SYS_BURROW_DETACH` directly through musl's syscall seam (the `0003-pouch-mman` patch, sub-chunk 7b — **landed**; `docs/reference/78-pouch.md` "The anonymous-memory backend").
 
 ---
 
@@ -165,7 +165,7 @@ Drive the `_for_proc` inners on a fresh `proc_alloc`'d Proc.
 | `sys_burrow.attach_rejects_bad_length` | length 0 / `> BURROW_ATTACH_MAX` / NULL Proc → -1; no rejected call installs a VMA |
 | `sys_burrow.detach_rejects` | wrong base / wrong length / unaligned base / zero length / double-detach → -1; the VMA survives every rejected detach |
 
-Suite: 538 → 547, **547/547 PASS × default + UBSan**.
+Suite: 538 → 549 (11 new tests: 7 `sys_burrow.*` + 4 `vma.find_gap_*`), **549/549 PASS × default + UBSan**.
 
 ---
 

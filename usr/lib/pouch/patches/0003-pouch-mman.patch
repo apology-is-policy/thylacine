@@ -1,0 +1,176 @@
+pouch boundary-line patch 0003 - the anonymous-memory backend.
+
+Phase 6 sub-chunk 7b (pouch-mem). Retargets musl's mman/ lower half onto
+Thylacine's anonymous-memory syscalls (SYS_BURROW_ATTACH = 37 /
+SYS_BURROW_DETACH = 38; <thylacine/syscall.h>; landed at sub-chunk 7a -
+docs/reference/79-sys-burrow.md). Three files, one change:
+
+  arch/aarch64/bits/syscall.h.in  Two macros that 0001 set to the 0xFFFF
+      sentinel get their Thylacine numbers: __NR_mmap = 37, __NR_munmap =
+      38. Future awk-filter re-runs after a musl re-vendor extend 0001's
+      m[] table with two entries:
+          m["mmap"]="37"; m["munmap"]="38";
+      All other mman/ macros stay at 0xFFFF - the sentinel guard short-
+      circuits to -ENOSYS, which is the contract pouch wants for
+      madvise / mprotect / mremap / mlock / msync / mincore / ... (none
+      consumed by mallocng's correctness path; pouch-side callers see a
+      clean ENOSYS instead of a kernel-side reject).
+
+  src/mman/mmap.c     Rewritten. Calls SYS_mmap (= SYS_BURROW_ATTACH)
+      with ONE argument: the length. The kernel chooses the VA; the
+      region is always demand-zero RW (W^X invariant I-12 forbids X at
+      attach - the prot argument is silently upgraded to RW, which
+      mallocng tolerates: it asks for PROT_NONE on metadata pages then
+      mprotect()s up to RW, and the mprotect ENOSYS-tolerance path
+      compiled into mallocng's malloc.c keeps the allocator working).
+      File-backed mmap (any flags without MAP_ANON) is refused with
+      ENOSYS - Plan 9's deliberate refusal kept as a Thylacine
+      conviction (a mapped file cannot be 9P-network-transparent;
+      ARCHITECTURE.md sec 6.5 / POUCH-DESIGN.md sec 8.2). MAP_FIXED is
+      similarly refused (v1.0 burrow-attach window is kernel-chosen).
+
+  src/mman/munmap.c   Rewritten. Calls SYS_munmap (= SYS_BURROW_DETACH)
+      with the (start, len) pair the kernel attached. mallocng tracks
+      the rounded length exactly, so the round-trip is lossless.
+
+mallocng-correctness notes (verified in src/malloc/mallocng/):
+  - brk: glue.h has `brk(p) ((uintptr_t)__syscall(SYS_brk, p))`. SYS_brk
+    stays at 0xFFFF; brk(0) returns (uintptr_t)(-ENOSYS) on first call,
+    then brk(new) fails, and mallocng sets ctx.brk = -1 - permanently
+    routing metadata allocation through mmap. Documented mallocng
+    fallback; correctness unchanged.
+  - madvise: gated by USE_MADV_FREE (= 0 in glue.h). Never invoked.
+  - mremap: only called from realloc.c on a >MMAP_THRESHOLD grow. If it
+    returns MAP_FAILED (the sentinel guard guarantees this - syscall_ret
+    maps -ENOSYS to errno=ENOSYS, returns -1; (void *)-1 = MAP_FAILED),
+    realloc falls through to malloc + memcpy + free.
+  - mprotect: called from malloc.c after a successful brk extension.
+    Since brk is permanently unusable (above), this path is never
+    reached. Even if reached, mallocng's `&& errno != ENOSYS` makes the
+    mprotect failure a no-op.
+
+The mmap PROT bits are silently upgraded to RW: a v1.0 security
+degradation (no PROT_NONE guard pages between mallocng's meta areas).
+v1.x can add mprotect when guard pages are wanted; mallocng's
+allocator correctness does not depend on the inaccessibility.
+
+Binding design: docs/POUCH-DESIGN.md sec 8.1, 8.2, 12.1.
+Invariants P-1 (only Thylacine syscall numbers cross the seam),
+P-3 (un-retargeted syscalls clean-fail with ENOSYS),
+P-4 (the boundary line holds - mman/ is lower-half).
+
+--- a/arch/aarch64/bits/syscall.h.in
++++ b/arch/aarch64/bits/syscall.h.in
+@@ -238,14 +238,14 @@
+ #define __NR_recvmsg 0xFFFF
+ #define __NR_readahead 0xFFFF
+ #define __NR_brk 0xFFFF
+-#define __NR_munmap 0xFFFF
++#define __NR_munmap 38
+ #define __NR_mremap 0xFFFF
+ #define __NR_add_key 0xFFFF
+ #define __NR_request_key 0xFFFF
+ #define __NR_keyctl 0xFFFF
+ #define __NR_clone 0xFFFF
+ #define __NR_execve 0xFFFF
+-#define __NR_mmap 0xFFFF
++#define __NR_mmap 37
+ #define __NR_fadvise64 0xFFFF
+ #define __NR_swapon 0xFFFF
+ #define __NR_swapoff 0xFFFF
+--- a/src/mman/mmap.c
++++ b/src/mman/mmap.c
+@@ -2,37 +2,52 @@
+ #include <sys/mman.h>
+ #include <errno.h>
+ #include <stdint.h>
+-#include <limits.h>
+ #include "syscall.h"
+
+-static void dummy(void) { }
+-weak_alias(dummy, __vm_wait);
++/* pouch: musl's __mmap targets Linux mmap(2) with six arguments; Thylacine
++   has no file-backed mmap by design (a mapped file cannot be 9P-network-
++   transparent, a Plan 9 conviction kept as a Thylacine conviction -
++   ARCHITECTURE.md sec 6.5).
+
+-#define UNIT SYSCALL_MMAP2_UNIT
+-#define OFF_MASK ((-0x2000ULL << (8*sizeof(syscall_arg_t)-1)) | (UNIT-1))
++   pouch's __mmap retains the POSIX prototype for source-compatibility but
++   maps only the anonymous subset onto Thylacine's SYS_BURROW_ATTACH and
++   refuses everything else with ENOSYS. The kernel chooses the VA; the
++   region is always demand-zero RW (W^X invariant I-12 forbids X at attach
++   - mmap PROT bits are silently upgraded to RW); an anonymous region has
++   no offset. `start`, `prot`, `fd`, `off` are accepted and ignored.
++   MAP_FIXED is rejected (the v1.0 burrow-attach window is kernel-chosen).
+
++   SYS_mmap is __NR_mmap after the 0001-syscall-seam-retarget aliases it
++   to Thylacine number 37 (= SYS_BURROW_ATTACH; see thylacine/syscall.h).
++   The call passes ONE argument, the length - all other Linux mmap fields
++   are stripped at the seam. */
+ void *__mmap(void *start, size_t len, int prot, int flags, int fd, off_t off)
+ {
+-	long ret;
+-	if (off & OFF_MASK) {
++	(void)start; (void)prot; (void)fd; (void)off;
++
++	/* File-backed mmap is refused. */
++	if (!(flags & MAP_ANON)) {
++		errno = ENOSYS;
++		return MAP_FAILED;
++	}
++
++	/* MAP_FIXED would force a VA - the kernel chooses, so reject. */
++	if (flags & MAP_FIXED) {
++		errno = ENOSYS;
++		return MAP_FAILED;
++	}
++
++	if (len == 0) {
+ 		errno = EINVAL;
+ 		return MAP_FAILED;
+ 	}
++
+ 	if (len >= PTRDIFF_MAX) {
+ 		errno = ENOMEM;
+ 		return MAP_FAILED;
+ 	}
+-	if (flags & MAP_FIXED) {
+-		__vm_wait();
+-	}
+-#ifdef SYS_mmap2
+-	ret = __syscall(SYS_mmap2, start, len, prot, flags, fd, off/UNIT);
+-#else
+-	ret = __syscall(SYS_mmap, start, len, prot, flags, fd, off);
+-#endif
+-	/* Fixup incorrect EPERM from kernel. */
+-	if (ret == -EPERM && !start && (flags&MAP_ANON) && !(flags&MAP_FIXED))
+-		ret = -ENOMEM;
++
++	long ret = __syscall(SYS_mmap, len);
+ 	return (void *)__syscall_ret(ret);
+ }
+
+--- a/src/mman/munmap.c
++++ b/src/mman/munmap.c
+@@ -1,12 +1,17 @@
+ #include <sys/mman.h>
+ #include "syscall.h"
+
+-static void dummy(void) { }
+-weak_alias(dummy, __vm_wait);
++/* pouch: musl's __munmap targets Linux munmap(2); Thylacine's equivalent is
++   SYS_BURROW_DETACH, which takes the same (vaddr, len) shape. The kernel
++   matches against the installed VMA exactly - the page-rounded
++   [start, start + len) range must match what SYS_BURROW_ATTACH (= __mmap)
++   produced. mallocng tracks `needed` exactly as the length it passed to
++   __mmap, so the round-trip is lossless.
+
++   SYS_munmap is __NR_munmap after the 0001-syscall-seam-retarget aliases it
++   to Thylacine number 38 (= SYS_BURROW_DETACH; see thylacine/syscall.h). */
+ int __munmap(void *start, size_t len)
+ {
+-	__vm_wait();
+ 	return syscall(SYS_munmap, start, len);
+ }
+
