@@ -186,7 +186,7 @@ EOF
     # P6-pouch-hello-smoke: copy the pouch POSIX test binaries (built
     # against the pouch sysroot by build_pouch_progs) into the cpio root.
     # Same curation discipline — explicit list, not a glob.
-    local pouch_bins=( "pouch-hello" "pouch-hello-stdio" "pouch-hello-printf" "pouch-hello-malloc" "pouch-hello-threads" )
+    local pouch_bins=( "pouch-hello" "pouch-hello-stdio" "pouch-hello-printf" "pouch-hello-malloc" "pouch-hello-threads" "pouch-hello-poll" )
     local pouch_progs="$BUILD_DIR/pouch/progs"
     for bin in "${pouch_bins[@]}"; do
         local src="$pouch_progs/$bin"
@@ -326,7 +326,9 @@ build_sysroot() {
                     'SYS_set_tid_address 36' 'SYS_writev 0xFFFF' \
                     'SYS_socket 0xFFFF' \
                     'SYS_torpor_wait 39' 'SYS_torpor_wake 40' \
-                    'SYS_thread_spawn 41' 'SYS_thread_exit 42'; do
+                    'SYS_thread_spawn 41' 'SYS_thread_exit 42' \
+                    'SYS_poll 29' 'SYS_ppoll 0xFFFF' \
+                    'SYS_pselect6 0xFFFF'; do
             grep -q "^#define $seam\$" "$syscall_h" || {
                 echo "    SEAM: '#define $seam' missing from bits/syscall.h" >&2
                 fail=1
@@ -505,7 +507,7 @@ build_pouch_progs() {
     mkdir -p "$progs_out"
 
     local prog
-    for prog in pouch-hello pouch-hello-stdio pouch-hello-printf pouch-hello-malloc pouch-hello-threads; do
+    for prog in pouch-hello pouch-hello-stdio pouch-hello-printf pouch-hello-malloc pouch-hello-threads pouch-hello-poll; do
         echo "==> pouch prog: $prog"
         # 1. compile (clang). -nostdinc + -isystem: pouch owns the include
         #    path. -fno-pie: non-PIC codegen for a fixed-address ET_EXEC.

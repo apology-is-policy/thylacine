@@ -1,0 +1,355 @@
+pouch boundary-line patch 0005 - poll / select retarget onto SYS_POLL
+
+Phase 6 sub-chunk 10 (pouch-poll). Retargets musl's src/select/ lower
+half onto Thylacine's SYS_POLL (= 29; kernel/include/thylacine/poll.h)
+- the same kernel primitive audited in P5-poll-a + P5-poll-b. Four
+files change, one file is left untouched but works by virtue of the
+syscall.h.in change.
+
+  arch/aarch64/bits/syscall.h.in  Adds `#define __NR_poll 29`. The
+      pristine musl aarch64 table omits __NR_poll entirely (Linux
+      aarch64 dropped legacy poll(2) in favor of ppoll(2)); reinstating
+      it lets musl's existing src/select/poll.c hit its `#ifdef SYS_poll`
+      branch and route to SYS_POLL directly without the ppoll-
+      conversion fallback. The sed-generated SYS_poll alias picks the
+      value up automatically.
+
+  src/select/ppoll.c              Full rewrite. ppoll's timespec gets
+      folded to int timeout_ms (Linux poll(2) shape), rounded UP so a
+      sub-ms positive timeout doesn't degenerate into a non-blocking
+      probe. The sigset_t argument is IGNORED at v1.0 - Thylacine
+      doesn't yet deliver signals atomically with poll; the race window
+      between sigmask unblock and SYS_POLL park is the same hazard
+      ppoll exists to eliminate, and the v1.0 acknowledgement is that
+      thread-level signals are the supported model. Drops the
+      SYS_ppoll_time64 cascade and the IS32BIT / CLAMP machinery
+      (Thylacine has no Y2038 fallback to manage).
+
+  src/select/select.c             Full rewrite. select's fd_set <->
+      pollfd translation happens in userspace - the kernel speaks only
+      pollfd. Each fd in [0, min(n, 64)) is scanned: rfds -> POLLIN,
+      wfds -> POLLOUT, efds -> POLLPRI; POLLERR / POLLHUP are output-
+      only and the kernel reports them irrespective of the requested
+      events bits. The aggregated pollfd[] is stack-allocated at 64
+      slots (the kernel's PROC_HANDLE_MAX = SYS_POLL ceiling); an fd
+      >= 64 set in any input returns -EBADF (unreachable through any
+      Thylacine syscall). The POSIX "select(0, NULL, NULL, NULL, tv)"
+      portable-sleep pattern returns 0 immediately for tv == 0 and
+      -ENOSYS for positive timeouts (Thylacine has no sleep syscall at
+      v1.0; a future SYS_NANOSLEEP would re-enable). On return the
+      output sets are CLEARED in-place and re-set per the events-mask
+      gate.
+
+  src/select/pselect.c            Full rewrite. Delegates to select()
+      after folding timespec -> timeval (rounding ns up to us so a sub-
+      us timespec doesn't fold to zero). The sigset_t argument is
+      IGNORED for the same reason as in ppoll.
+
+  src/select/poll.c               UNCHANGED. Adding __NR_poll above
+      activates the `#ifdef SYS_poll` branch musl's pristine source
+      already carries, which calls syscall_cp(SYS_poll, fds, n,
+      timeout) directly.
+
+The kernel-side SYS_POLL (P5-poll-a) is fully audited - docs/reference/
+72-poll.md is its as-built reference. This patch is the userspace seam
+mating onto that audited primitive. POSIX poll / ppoll / select /
+pselect work end-to-end against any pollable Thylacine object (devpipe
+at v1.0, devsrv at P5-poll-b).
+
+Binding design: docs/POUCH-DESIGN.md sub-chunk 10 (section 14).
+Invariants P-1, P-3, P-4. Reference: docs/reference/78-pouch.md
+("The polling backend").
+
+Proving binary: /pouch-hello-poll - 4 fds (a single pipe pair),
+exercising poll's timeout (read end empty -> 0), poll's POLLIN
+(read end with byte -> 1), select's translation (the same pipe pair
+through select with the equivalent fd_set), and the v1.0 ENOSYS arm
+of select(0, NULL, NULL, NULL, +tv).
+
+--- a/arch/aarch64/bits/syscall.h.in
++++ b/arch/aarch64/bits/syscall.h.in
+@@ -332,6 +332,16 @@
+ 
+ 
+ /*
++ * pouch: poll is a Linux syscall name absent from the aarch64 table
++ * (Linux aarch64 dropped legacy poll in favor of ppoll). Thylacine's
++ * SYS_POLL = 29 IS the canonical multi-fd wait primitive (kernel poll
++ * header). Adding the poll entry here lets musl pristine poll.c hit
++ * its conditional branch and route to the kernel directly without
++ * the ppoll-conversion fallback.
++ */
++#define __NR_poll 29
++
++/*
+  * pouch / Thylacine extension numbers. These have no Linux equivalent
+  * (Linux's table stops at fchmodat2 = 452). Added here so musl's
+  * build-time sed pass generates SYS_torpor_wait / SYS_torpor_wake /
+--- a/src/select/ppoll.c
++++ b/src/select/ppoll.c
+@@ -1,26 +1,39 @@
++/* pouch: ppoll routed through SYS_POLL (= 29).
++ *
++ * Thylacine's poll uses int timeout_ms (Linux poll(2) shape); ppoll's
++ * timespec gets folded to ms here. The conversion ROUNDS UP — POSIX
++ * permits early wake (a poll firing before its deadline elapses is a
++ * bug; firing later is permitted) but a sub-ms positive timeout that
++ * truncates to zero would degenerate into a non-blocking probe.
++ *
++ * The sigset_t argument is IGNORED at v1.0 — Thylacine does not yet
++ * deliver signals atomically with poll. The race window between sigmask
++ * unblock and a SYS_POLL park is the same hazard ppoll exists to
++ * eliminate; v1.0 callers that depend on the atomic-sigmask semantics
++ * must use a thread-level signal model instead. See docs/POUCH-DESIGN.md
++ * sub-chunk 13 (pouch-signals) for the planned re-enable path.
++ */
+ #define _BSD_SOURCE
+ #include <poll.h>
+ #include <signal.h>
+ #include <errno.h>
+ #include "syscall.h"
+ 
+-#define IS32BIT(x) !((x)+0x80000000ULL>>32)
+-#define CLAMP(x) (int)(IS32BIT(x) ? (x) : 0x7fffffffU+((0ULL+(x))>>63))
+-
+-int ppoll(struct pollfd *fds, nfds_t n, const struct timespec *to, const sigset_t *mask)
++int ppoll(struct pollfd *fds, nfds_t n, const struct timespec *to,
++          const sigset_t *mask)
+ {
+-	time_t s = to ? to->tv_sec : 0;
+-	long ns = to ? to->tv_nsec : 0;
+-#ifdef SYS_ppoll_time64
+-	int r = -ENOSYS;
+-	if (SYS_ppoll == SYS_ppoll_time64 || !IS32BIT(s))
+-		r = __syscall_cp(SYS_ppoll_time64, fds, n,
+-			to ? ((long long[]){s, ns}) : 0,
+-			mask, _NSIG/8);
+-	if (SYS_ppoll == SYS_ppoll_time64 || r != -ENOSYS)
+-		return __syscall_ret(r);
+-	s = CLAMP(s);
+-#endif
+-	return syscall_cp(SYS_ppoll, fds, n,
+-		to ? ((long[]){s, ns}) : 0, mask, _NSIG/8);
++	(void)mask;
++	int timeout_ms;
++	if (!to) {
++		timeout_ms = -1;
++	} else if (to->tv_sec < 0 || to->tv_nsec < 0 ||
++	           to->tv_nsec >= 1000000000L) {
++		return __syscall_ret(-EINVAL);
++	} else {
++		long long ms = (long long)to->tv_sec * 1000LL
++		             + ((long long)to->tv_nsec + 999999LL) / 1000000LL;
++		if (ms > 0x7fffffffLL) ms = 0x7fffffffLL;
++		timeout_ms = (int)ms;
++	}
++	return syscall_cp(SYS_poll, fds, n, timeout_ms);
+ }
+--- a/src/select/pselect.c
++++ b/src/select/pselect.c
+@@ -1,26 +1,36 @@
++/* pouch: pselect routed through select (and thus SYS_POLL).
++ *
++ * Same caveats as ppoll: the sigset_t argument is IGNORED at v1.0 —
++ * Thylacine does not yet deliver signals atomically with poll. The
++ * timespec gets folded to a timeval; sub-µs precision is unobservable
++ * because the kernel's poll deadline is millisecond-grained anyway.
++ * See pselect.c's comment in src/select/select.c for the full
++ * translation contract.
++ */
+ #include <sys/select.h>
+ #include <signal.h>
++#include <stddef.h>
+ #include <stdint.h>
+ #include <errno.h>
+ #include "syscall.h"
+ 
+-#define IS32BIT(x) !((x)+0x80000000ULL>>32)
+-#define CLAMP(x) (int)(IS32BIT(x) ? (x) : 0x7fffffffU+((0ULL+(x))>>63))
+-
+-int pselect(int n, fd_set *restrict rfds, fd_set *restrict wfds, fd_set *restrict efds, const struct timespec *restrict ts, const sigset_t *restrict mask)
++int pselect(int n, fd_set *restrict rfds, fd_set *restrict wfds,
++            fd_set *restrict efds, const struct timespec *restrict ts,
++            const sigset_t *restrict mask)
+ {
+-	syscall_arg_t data[2] = { (uintptr_t)mask, _NSIG/8 };
+-	time_t s = ts ? ts->tv_sec : 0;
+-	long ns = ts ? ts->tv_nsec : 0;
+-#ifdef SYS_pselect6_time64
+-	int r = -ENOSYS;
+-	if (SYS_pselect6 == SYS_pselect6_time64 || !IS32BIT(s))
+-		r = __syscall_cp(SYS_pselect6_time64, n, rfds, wfds, efds,
+-			ts ? ((long long[]){s, ns}) : 0, data);
+-	if (SYS_pselect6 == SYS_pselect6_time64 || r!=-ENOSYS)
+-		return __syscall_ret(r);
+-	s = CLAMP(s);
+-#endif
+-	return syscall_cp(SYS_pselect6, n, rfds, wfds, efds,
+-		ts ? ((long[]){s, ns}) : 0, data);
++	(void)mask;
++	if (!ts) return select(n, rfds, wfds, efds, NULL);
++	if (ts->tv_sec < 0 || ts->tv_nsec < 0 ||
++	    ts->tv_nsec >= 1000000000L) {
++		return __syscall_ret(-EINVAL);
++	}
++	struct timeval tv;
++	tv.tv_sec = ts->tv_sec;
++	/* Round ns up to µs so a sub-µs timespec doesn't fold to zero. */
++	tv.tv_usec = (ts->tv_nsec + 999L) / 1000L;
++	if (tv.tv_usec >= 1000000L) {
++		tv.tv_sec += 1;
++		tv.tv_usec -= 1000000L;
++	}
++	return select(n, rfds, wfds, efds, &tv);
+ }
+--- a/src/select/select.c
++++ b/src/select/select.c
+@@ -1,45 +1,116 @@
++/* pouch: select routed through SYS_POLL (= 29).
++ *
++ * select's fd_set ↔ pollfd translation is done here in userspace — the
++ * kernel only speaks the pollfd ABI. The translation:
++ *
++ *   - Each fd in [0, min(n, POUCH_POLL_NFDS_MAX)) is scanned. If set in
++ *     rfds the fd contributes POLLIN; in wfds → POLLOUT; in efds →
++ *     POLLPRI. POLLERR / POLLHUP are output-only — the kernel reports
++ *     them on any contributing fd irrespective of the events bitmask.
++ *   - The aggregated pollfd[] array is bounded by POUCH_POLL_NFDS_MAX
++ *     (= 64; PROC_HANDLE_MAX, the kernel's SYS_POLL ceiling). An fd
++ *     >= POUCH_POLL_NFDS_MAX set in any input set returns -EBADF —
++ *     the handle would be unreachable through any Thylacine syscall.
++ *   - n == 0 (or no fds set in any input set) with a NULL/positive tv
++ *     returns -ENOSYS at v1.0 — Thylacine has no sleep syscall yet, so
++ *     the "portable nanosleep via select" pattern is unsupported. n == 0
++ *     with tv == {0,0} returns 0 immediately (POSIX-correct).
++ *   - On return the output sets are CLEARED in-place and only fds whose
++ *     revents survived the events-mask gate (POLLIN → rfds, POLLOUT →
++ *     wfds, POLLPRI → efds; POLLERR/POLLHUP forward to whichever sets
++ *     the fd was requested in) have their bit re-set.
++ *
++ * The SYS_pselect6_time64 / CLAMP cascade is dropped — see pselect.c.
++ */
+ #include <sys/select.h>
++#include <poll.h>
+ #include <signal.h>
+ #include <stdint.h>
+ #include <errno.h>
+ #include "syscall.h"
+ 
+-#define IS32BIT(x) !((x)+0x80000000ULL>>32)
+-#define CLAMP(x) (int)(IS32BIT(x) ? (x) : 0x7fffffffU+((0ULL+(x))>>63))
++/* The kernel ceiling on nfds (PROC_HANDLE_MAX). See
++ * kernel/include/thylacine/poll.h. */
++#define POUCH_POLL_NFDS_MAX 64
+ 
+-int select(int n, fd_set *restrict rfds, fd_set *restrict wfds, fd_set *restrict efds, struct timeval *restrict tv)
++int select(int n, fd_set *restrict rfds, fd_set *restrict wfds,
++           fd_set *restrict efds, struct timeval *restrict tv)
+ {
+-	time_t s = tv ? tv->tv_sec : 0;
+-	suseconds_t us = tv ? tv->tv_usec : 0;
+-	long ns;
+-	const time_t max_time = (1ULL<<8*sizeof(time_t)-1)-1;
++	if (n < 0 || n > FD_SETSIZE) return __syscall_ret(-EINVAL);
+ 
+-	if (s<0 || us<0) return __syscall_ret(-EINVAL);
+-	if (us/1000000 > max_time - s) {
+-		s = max_time;
+-		us = 999999;
+-		ns = 999999999;
++	int timeout_ms;
++	if (!tv) {
++		timeout_ms = -1;
++	} else if (tv->tv_sec < 0 || tv->tv_usec < 0 ||
++	           tv->tv_usec >= 1000000L) {
++		return __syscall_ret(-EINVAL);
+ 	} else {
+-		s += us/1000000;
+-		us %= 1000000;
+-		ns = us*1000;
++		long long ms = (long long)tv->tv_sec * 1000LL
++		             + ((long long)tv->tv_usec + 999LL) / 1000LL;
++		if (ms > 0x7fffffffLL) ms = 0x7fffffffLL;
++		timeout_ms = (int)ms;
+ 	}
+ 
+-#ifdef SYS_pselect6_time64
+-	int r = -ENOSYS;
+-	if (SYS_pselect6 == SYS_pselect6_time64 || !IS32BIT(s))
+-		r = __syscall_cp(SYS_pselect6_time64, n, rfds, wfds, efds,
+-			tv ? ((long long[]){s, ns}) : 0,
+-			((syscall_arg_t[]){ 0, _NSIG/8 }));
+-	if (SYS_pselect6 == SYS_pselect6_time64 || r!=-ENOSYS)
+-		return __syscall_ret(r);
+-	s = CLAMP(s);
+-#endif
+-#ifdef SYS_select
+-	return syscall_cp(SYS_select, n, rfds, wfds, efds,
+-		tv ? ((long[]){s, us}) : 0);
+-#else
+-	return syscall_cp(SYS_pselect6, n, rfds, wfds, efds,
+-		tv ? ((long[]){s, ns}) : 0, ((syscall_arg_t[]){ 0, _NSIG/8 }));
+-#endif
++	int cap = n > POUCH_POLL_NFDS_MAX ? POUCH_POLL_NFDS_MAX : n;
++
++	/* Reject high fds the kernel can't represent. */
++	for (int fd = cap; fd < n; fd++) {
++		if ((rfds && FD_ISSET(fd, rfds)) ||
++		    (wfds && FD_ISSET(fd, wfds)) ||
++		    (efds && FD_ISSET(fd, efds))) {
++			return __syscall_ret(-EBADF);
++		}
++	}
++
++	struct pollfd pfds[POUCH_POLL_NFDS_MAX];
++	int npfd = 0;
++	for (int fd = 0; fd < cap; fd++) {
++		short events = 0;
++		if (rfds && FD_ISSET(fd, rfds)) events |= POLLIN;
++		if (wfds && FD_ISSET(fd, wfds)) events |= POLLOUT;
++		if (efds && FD_ISSET(fd, efds)) events |= POLLPRI;
++		if (!events) continue;
++		pfds[npfd].fd = fd;
++		pfds[npfd].events = events;
++		pfds[npfd].revents = 0;
++		npfd++;
++	}
++
++	if (npfd == 0) {
++		/* POSIX: select(n, NULL, NULL, NULL, tv) sleeps for tv then
++		 * returns 0. v1.0: zero-timeout returns 0 immediately; any
++		 * positive timeout returns -ENOSYS (no sleep syscall). */
++		if (timeout_ms == 0) return 0;
++		return __syscall_ret(-ENOSYS);
++	}
++
++	int rc = syscall_cp(SYS_poll, pfds, (unsigned long)npfd, timeout_ms);
++	if (rc < 0) return __syscall_ret(rc);
++
++	if (rfds) FD_ZERO(rfds);
++	if (wfds) FD_ZERO(wfds);
++	if (efds) FD_ZERO(efds);
++
++	int count = 0;
++	for (int i = 0; i < npfd; i++) {
++		if (!pfds[i].revents) continue;
++		int fd = pfds[i].fd;
++		int hit = 0;
++		/* POLLERR / POLLHUP report on the input sets the fd
++		 * contributed to (Linux semantics). */
++		if (rfds && (pfds[i].events & POLLIN) &&
++		    (pfds[i].revents & (POLLIN | POLLERR | POLLHUP))) {
++			FD_SET(fd, rfds); hit = 1;
++		}
++		if (wfds && (pfds[i].events & POLLOUT) &&
++		    (pfds[i].revents & (POLLOUT | POLLERR | POLLHUP))) {
++			FD_SET(fd, wfds); hit = 1;
++		}
++		if (efds && (pfds[i].events & POLLPRI) &&
++		    (pfds[i].revents & POLLPRI)) {
++			FD_SET(fd, efds); hit = 1;
++		}
++		if (hit) count++;
++	}
++	return count;
+ }

@@ -18,3 +18,4 @@
 0002-pouch-stdio-no-iovec.patch
 0003-pouch-mman.patch
 0004-pouch-pthread.patch
+0005-pouch-poll.patch

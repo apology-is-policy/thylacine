@@ -480,6 +480,18 @@ static int do_pouch_hello_smoke(void) {
                         pt_expect, sizeof(pt_expect) - 1) != 0)
         return -1;
     t_putstr("joey: pouch-hello-threads smoke ok (pthread + mutex over SYS_THREAD_* / SYS_TORPOR_*)\n");
+
+    // P6-pouch-poll sub-chunk 10: the polling pouch hello. Exercises the
+    // boundary-line patched src/select/{poll,ppoll,select,pselect}.c.
+    // SYS_PIPE → devpipe; poll on the read end with timeout + with byte;
+    // select() over the same pipe; the zero-fds zero-tv POSIX edge case.
+    // Closes POUCH-DESIGN.md §6.3 / §14 sub-chunk 10's exit criterion.
+    static const char ppl_name[]   = "pouch-hello-poll";
+    static const char ppl_expect[] = "pouch-hello-poll: exit 0";
+    if (pouch_smoke_one(ppl_name, sizeof(ppl_name) - 1,
+                        ppl_expect, sizeof(ppl_expect) - 1) != 0)
+        return -1;
+    t_putstr("joey: pouch-hello-poll smoke ok (poll + select over SYS_POLL via devpipe)\n");
     return 0;
 }
 

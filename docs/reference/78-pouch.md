@@ -739,6 +739,89 @@ pulls `realloc.c` + `calloc.c` and the rest of mallocng on top of the
 
 ---
 
+## The polling backend
+
+Sub-chunk 10 (`pouch-poll`) is the userspace seam mating onto the audited
+kernel `SYS_POLL` (= 29) primitive — the multi-fd wait/wake machine described
+in `docs/reference/72-poll.md` (P5-poll-a / P5-poll-b). It is small, NOT
+audit-bearing — `SYS_POLL`'s correctness was settled in P5; sub-chunk 10
+adds only the boundary-line userspace translation that lets musl-shaped
+callers (`poll`, `ppoll`, `select`, `pselect`) reach it.
+
+### The patch — `0005-pouch-poll`
+
+Five files in musl's source touch this seam; four are rewritten, one is
+left pristine.
+
+| File | Change | Why |
+|---|---|---|
+| `arch/aarch64/bits/syscall.h.in` | `#define __NR_poll 29` added | Linux aarch64 dropped legacy `poll(2)` in favor of `ppoll(2)`; musl's table reflects that. Adding the entry reinstates the `SYS_poll` alias the sed pass generates, and lets pristine `src/select/poll.c` route through `SYS_POLL` without the ppoll-conversion fallback. |
+| `src/select/poll.c` | **unchanged** | musl's source already does `#ifdef SYS_poll → return syscall_cp(SYS_poll, fds, n, timeout)`. Once `SYS_poll = 29` is defined, the conditional fires and the call goes straight to the kernel. |
+| `src/select/ppoll.c` | full rewrite | Folds `timespec → int timeout_ms` (rounded UP per POSIX permitting only early wake); IGNORES `sigset_t` (signals deferred to sub-chunk 13); drops the `SYS_ppoll_time64` cascade and the IS32BIT/CLAMP machinery (no Y2038 fallback to manage). |
+| `src/select/select.c` | full rewrite | The `fd_set ↔ pollfd[]` translation. Scans `[0, min(n, 64))`, builds a stack-allocated `pollfd[64]`, calls `SYS_POLL`, clears + re-fills the output sets. fds `≥ 64` get `-EBADF` (unreachable handles); `select(0, NULL, NULL, NULL, {0,0})` returns 0 immediately; `select(0, ..., +tv)` is `-ENOSYS` at v1.0 (no sleep syscall yet). |
+| `src/select/pselect.c` | full rewrite | Delegates to `select()` after `timespec → timeval` (ns rounded up to µs); ignores `sigset_t`. |
+
+The kernel's `pollfd` ABI (`kernel/include/thylacine/poll.h`) is byte-identical
+to musl's `<poll.h>` (s32 fd / s16 events / s16 revents; POLLIN=0x001,
+POLLOUT=0x004, POLLERR=0x008, POLLHUP=0x010, POLLNVAL=0x020) — the wire
+crossing is a zero-copy header reinterpret.
+
+### Translation contract — `select()`
+
+The fd_set → pollfd contract follows Linux semantics:
+
+| Input | `events` bit |
+|---|---|
+| fd ∈ `rfds` | `POLLIN` |
+| fd ∈ `wfds` | `POLLOUT` |
+| fd ∈ `efds` | `POLLPRI` |
+
+On return, the input sets are CLEARED in place and re-set per the
+events-mask gate:
+
+| `revents` from kernel | Goes into | When |
+|---|---|---|
+| `POLLIN`  / `POLLERR` / `POLLHUP` | `rfds` | the fd contributed `POLLIN` |
+| `POLLOUT` / `POLLERR` / `POLLHUP` | `wfds` | the fd contributed `POLLOUT` |
+| `POLLPRI`                          | `efds` | the fd contributed `POLLPRI` |
+
+`POLLERR` / `POLLHUP` are output-only — the kernel reports them on a
+contributing fd irrespective of the events bitmask, mirroring Linux's
+"hangup on a readable fd shows in rfds" behavior.
+
+### Caveats — what v1.0 doesn't do
+
+| Limitation | Why | Future |
+|---|---|---|
+| `select(0, NULL, NULL, NULL, +tv)` returns `-ENOSYS` | Thylacine has no sleep syscall; the kernel's `SYS_POLL` rejects `nfds=0`. The zero-tv case still returns 0 immediately (POSIX-correct). | A future `SYS_NANOSLEEP` would re-enable; see POUCH-DESIGN §8. |
+| `ppoll` / `pselect`'s `sigset_t` is IGNORED | Signals not delivered atomically with poll at v1.0; the race window the variants exist to close has no analog in the v1.0 signal model. | Sub-chunk 13 (`pouch-signals`) — the kernel-side signal model is a prerequisite. |
+| `select` rejects fds ≥ 64 with `-EBADF` | The kernel's `SYS_POLL` ceiling is `PROC_HANDLE_MAX = 64`. fds above that index are unreachable through any Thylacine syscall — the handle table can't hold them. | Lift only if `PROC_HANDLE_MAX` grows. |
+
+### Verifying live — `/pouch-hello-poll`
+
+Sub-chunk 10 lands `/pouch-hello-poll` (`usr/pouch-hello/pouch-hello-poll.c`)
+— the fifth pouch binary, exercising poll + select end-to-end:
+
+| Step | What it proves |
+|---|---|
+| `SYS_PIPE` via inline asm | The kernel-side pipe pair is reachable; musl's `pipe(2)` calls `SYS_pipe2` (sentinel-blocked), so the test uses inline asm to capture the two-register `rd/wr` return. |
+| `poll(empty, timeout=50ms)` → 0 | The full slow-path: tsleep on the poller's private rendez, register the `poll_waiter` on the pipe's hook list, wait for the timeout, unregister, return 0. |
+| `write(byte)` then `poll(timeout=0)` → 1 / POLLIN | The fast path: first-scan readiness sample picks up the pipe-with-byte state without tsleep. |
+| `read(byte)`, `write(byte)`, `select(rfds, {0,0})` → 1 / fd in rfds | The fd_set ↔ pollfd translation: build a 1-entry pollfd, call `SYS_POLL`, decode the revents back into `rfds`. |
+| `select(0, NULL, NULL, NULL, {0,0})` → 0 | The zero-fds zero-tv short-circuit arm. |
+
+joey's `pouch_smoke_one` content-checks `pouch-hello-poll: exit 0` and
+asserts the child reaped with status 0, so a regressed poll wake/sleep
+path, a regressed fd_set translation, or a regressed `__NR_poll` route
+all fail the boot.
+
+The binary is ~50 KiB — between `/pouch-hello-printf` and
+`/pouch-hello-malloc`. It pulls in `select.c` + `pselect.c` + `printf` +
+the seam wrappers but no mallocng (no dynamic allocation; all pollfd
+state is stack-resident).
+
+---
+
 ## Public API
 
 Not yet — pouch exposes no API surface at sub-chunk 2. pouch's lower-half API
