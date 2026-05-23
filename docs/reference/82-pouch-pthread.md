@@ -260,7 +260,7 @@ Focused opus-prosecutor round (P6-pouch-threads-b): **0 P0 / 2 P1 / 3 P2 / 10 P3
 
 ## Status
 
-**Sub-chunk 9b LANDED** (tip TBD post-commit). The patch series at `usr/lib/pouch/patches/` is now 4 patches (0001-0004). Build target `tools/build.sh sysroot` produces a 2,398,772-byte `libc.a` carrying the patched pthread layer; `tools/build.sh pouch-progs` builds `/pouch-hello-threads` (~60 KiB ET_EXEC).
+**Sub-chunk 9b LANDED** (substantive close `551be97`). The patch series at `usr/lib/pouch/patches/` is now 4 patches (0001-0004). Build target `tools/build.sh sysroot` produces a 2,398,772-byte `libc.a` carrying the patched pthread layer; `tools/build.sh pouch-progs` builds `/pouch-hello-threads` (~60 KiB ET_EXEC).
 
 Boot posture: 561/561 PASS × default + UBSan, 0 UBSan errors, `/pouch-hello-threads` green on every boot.
 
