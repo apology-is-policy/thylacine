@@ -80,6 +80,7 @@ set(KERNEL_SRCS
     cons.c
     null.c
     zero.c
+    full.c
     random.c
     devproc.c
     devctl.c

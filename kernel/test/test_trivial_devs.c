@@ -1,14 +1,18 @@
-// Trivial Dev tests — cons / null / zero / random (P4-B).
+// Trivial Dev tests — cons / null / zero / full / random
+// (P4-B baseline + P6-pouch-devnodes adds devfull).
 //
 // Per ROADMAP §6.2 exit criterion "cat /dev/random produces non-zero
 // bytes" + the implicit per-Dev contract checks. Tests cover:
 //
-//   trivial_devs.bestiary_smoke         — all 4 registered + lookup
+//   trivial_devs.bestiary_smoke         — all 5 registered + lookup
 //   null.attach_open_close              — lifecycle plumbing
 //   null.read_returns_eof               — read returns 0 always
 //   null.write_consumes                 — writes return n
 //   zero.read_fills_zeroes              — read produces all zeroes
 //   zero.write_consumes                 — writes return n
+//   full.attach_open_close              — lifecycle plumbing
+//   full.read_fills_zeroes              — Linux /dev/full read shape
+//   full.write_returns_minus1           — every write fails (-1)
 //   random.rndr_available_or_skipped    — RNDR detection (must be
 //                                          available on QEMU virt
 //                                          -cpu max)
@@ -35,6 +39,9 @@ void test_null_read_returns_eof(void);
 void test_null_write_consumes(void);
 void test_zero_read_fills_zeroes(void);
 void test_zero_write_consumes(void);
+void test_full_attach_open_close(void);
+void test_full_read_fills_zeroes(void);
+void test_full_write_returns_minus1(void);
 void test_random_rndr_available(void);
 void test_random_read_produces_nonzero_bytes(void);
 void test_random_read_varies_across_calls(void);
@@ -64,20 +71,24 @@ static struct Spoor *open_spoor(struct Dev *d, int omode) {
 // =============================================================================
 
 void test_trivial_devs_bestiary_smoke(void) {
-    // dev_init() registered devnone + cons + null + zero + random in
-    // that order. Verify each is reachable by both dc and name.
-    TEST_ASSERT(dev_count() >= 5,
-                "dev_count must be >= 5 after P4-B (devnone + cons + "
-                "null + zero + random)");
+    // dev_init() registered devnone + cons + null + zero + full + random
+    // in that order (P4-B baseline + P6-pouch-devnodes adds devfull
+    // between zero and random for alphabetical insertion). Verify each
+    // is reachable by both dc and name.
+    TEST_ASSERT(dev_count() >= 6,
+                "dev_count must be >= 6 (devnone + cons + null + zero "
+                "+ full + random)");
 
     TEST_EXPECT_EQ(dev_lookup_by_dc('c'),    &devcons,    "dc 'c' = devcons");
     TEST_EXPECT_EQ(dev_lookup_by_dc('0'),    &devnull,    "dc '0' = devnull");
     TEST_EXPECT_EQ(dev_lookup_by_dc('z'),    &devzero,    "dc 'z' = devzero");
+    TEST_EXPECT_EQ(dev_lookup_by_dc('f'),    &devfull,    "dc 'f' = devfull");
     TEST_EXPECT_EQ(dev_lookup_by_dc('r'),    &devrandom,  "dc 'r' = devrandom");
 
     TEST_EXPECT_EQ(dev_lookup_by_name("cons"),   &devcons,   "lookup cons");
     TEST_EXPECT_EQ(dev_lookup_by_name("null"),   &devnull,   "lookup null");
     TEST_EXPECT_EQ(dev_lookup_by_name("zero"),   &devzero,   "lookup zero");
+    TEST_EXPECT_EQ(dev_lookup_by_name("full"),   &devfull,   "lookup full");
     TEST_EXPECT_EQ(dev_lookup_by_name("random"), &devrandom, "lookup random");
 }
 
@@ -158,6 +169,70 @@ void test_zero_write_consumes(void) {
     long n = (long)sizeof(msg) - 1;
     long wrote = devzero.write(c, msg, n, 0);
     TEST_EXPECT_EQ(wrote, n, "devzero.write returns n");
+
+    spoor_clunk(c);
+}
+
+// =============================================================================
+// devfull (P6-pouch-devnodes — sub-chunk 11). Linux man 4 full semantics:
+// reads NUL-fill like /dev/zero; writes always fail.
+// =============================================================================
+
+void test_full_attach_open_close(void) {
+    struct Spoor *c = devfull.attach("");
+    TEST_ASSERT(c != NULL, "devfull.attach succeeds");
+    TEST_EXPECT_EQ(c->dev,      &devfull,  "Spoor.dev = &devfull");
+    TEST_EXPECT_EQ(c->dc,       'f',       "Spoor.dc = 'f'");
+    TEST_EXPECT_EQ(c->qid.type, QTFILE,    "fresh attach: QTFILE");
+    TEST_EXPECT_EQ((u32)0,      c->flag,   "fresh attach: flag=0");
+
+    struct Spoor *opened = devfull.open(c, 0);
+    TEST_EXPECT_EQ(opened, c, "open returns the same Spoor");
+    TEST_ASSERT((c->flag & COPEN) != 0, "open sets COPEN");
+
+    devfull.close(c);
+    TEST_EXPECT_EQ((u32)0, c->flag & COPEN, "close clears COPEN");
+
+    spoor_unref(c);
+}
+
+void test_full_read_fills_zeroes(void) {
+    struct Spoor *c = open_spoor(&devfull, 0);
+    TEST_ASSERT(c != NULL, "open devfull OK");
+
+    u8 buf[32];
+    // Pre-fill with non-zero so we observe the NUL write.
+    for (int i = 0; i < 32; i++) buf[i] = 0xAB;
+
+    long got = devfull.read(c, buf, 32, 0);
+    TEST_EXPECT_EQ(got, (long)32, "devfull.read returns n (NUL-fills like /dev/zero)");
+
+    for (int i = 0; i < 32; i++) {
+        TEST_ASSERT(buf[i] == 0,
+                    "every byte filled by devfull.read must be zero");
+    }
+
+    // n=0 is a legal no-op.
+    TEST_EXPECT_EQ(devfull.read(c, buf, 0, 0), (long)0, "n=0 returns 0");
+    // NULL buf rejected.
+    TEST_EXPECT_EQ(devfull.read(c, NULL, 32, 0), (long)-1, "NULL buf rejected");
+    // Negative n rejected.
+    TEST_EXPECT_EQ(devfull.read(c, buf, -1, 0), (long)-1, "negative n rejected");
+
+    spoor_clunk(c);
+}
+
+void test_full_write_returns_minus1(void) {
+    struct Spoor *c = open_spoor(&devfull, 0);
+    TEST_ASSERT(c != NULL, "open devfull OK");
+
+    const char msg[] = "would-be-written-to-a-full-disk";
+    long n = (long)sizeof(msg) - 1;
+    // Every write fails — the "full disk" contract.
+    TEST_EXPECT_EQ(devfull.write(c, msg, n,   0), (long)-1, "non-empty write fails");
+    TEST_EXPECT_EQ(devfull.write(c, msg, 1,   0), (long)-1, "single-byte write fails");
+    TEST_EXPECT_EQ(devfull.write(c, msg, 0,   0), (long)-1, "n=0 also fails (Linux behavior)");
+    TEST_EXPECT_EQ(devfull.write(c, NULL, 4,  0), (long)-1, "NULL buf write fails");
 
     spoor_clunk(c);
 }

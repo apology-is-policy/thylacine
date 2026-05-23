@@ -822,6 +822,96 @@ state is stack-resident).
 
 ---
 
+## The `/dev/full` Dev + the `getrandom` proving path
+
+Sub-chunk 11 (`pouch-devnodes`) lands the third member of the trivial
+`/dev` Dev trio — `devfull` (dc='f', name="full") — and proves the
+`getrandom` libc surface from a real pouch program. There is no pouch
+boundary-line patch in this chunk: `__NR_getrandom` was already mapped to
+`SYS_GETRANDOM` (= 20) by `0001-pouch-syscall-seam.patch`, and musl's
+`src/linux/getrandom.c` (`syscall_cp(SYS_getrandom, ...)`) is pristine.
+The chunk's two deliverables are independent — a kernel Dev that completes
+POUCH-DESIGN.md §6.6's "trivial nodes" list, and a proving binary that
+asserts the libsodium-grade CSPRNG path the rest of Phase 6 will lean on.
+
+### `devfull` — the "full disk" Dev
+
+`kernel/full.c` mirrors `kernel/null.c` and `kernel/zero.c`: a single-file
+leaf Dev (`dc='f'`, `name="full"`, `qid.type=QTFILE`) registered in
+`dev_init()` between `devzero` and `devrandom` for alphabetical iteration.
+The semantic is Linux's `man 4 full` (the reference POSIX
+implementation):
+
+| Op | Behavior |
+|---|---|
+| `attach(spec)` | Returns a fresh `Spoor` of `qid.type=QTFILE`. Stateless. |
+| `open(omode)` | Standard `dev_simple_open` (sets `COPEN`, records `omode`). |
+| `read(buf, n, off)` | NUL-fills `buf[0..n)` and returns `n` — same shape as `/dev/zero`. The "full" abstraction is asymmetric: full on write, transparent on read. |
+| `write(buf, n, off)` | Always returns `-1`. Every write fails — the "full disk" contract. |
+| `walk` / `stat` / `wstat` / `bread` / `bwrite` / `remove` / `power` | Leaf-Dev no-ops (return `NULL` / `-1`). |
+
+**The v1.0 errno caveat**: `devfull_write` returns flat `-1`, so the
+SYS_WRITE handler (`sys_write_for_proc`) collapses it to a flat `-1`
+syscall return, and pouch's `syscall_ret` decodes that to `errno=EIO` (the
+generic-EIO mapping). Linux returns `errno=ENOSPC` specifically — to
+match that, the SYS_WRITE handler would need to widen its error channel
+to pass dev-supplied `-errno` through (a one-line `return n;` if `n < 0`,
+followed by per-Dev audit of negative-return discipline). That's a
+documented future improvement; the proving binary's contract here is "the
+write returns < 0," which is POSIX-correct under both errno values.
+
+### Kernel tests
+
+`kernel/test/test_trivial_devs.c` gains three devfull tests + the
+bestiary-smoke assertion is extended:
+
+| Test | What it proves |
+|---|---|
+| `full.attach_open_close` | Lifecycle plumbing — Spoor alloc, `dc='f'`, `qid.type=QTFILE`, `COPEN` toggle on open/close. Mirrors the existing `null.attach_open_close`. |
+| `full.read_fills_zeroes` | Reads NUL-fill the buffer; `n=0` is a no-op; `NULL buf` and negative `n` are rejected (return `-1`). |
+| `full.write_returns_minus1` | Every write fails: non-empty, single-byte, `n=0`, and NULL-buf all return `-1`. |
+| `trivial_devs.bestiary_smoke` (extended) | `dev_count() >= 6`; `dev_lookup_by_dc('f') == &devfull`; `dev_lookup_by_name("full") == &devfull`. |
+
+Test count: 561 → **564** (+3 devfull tests). No new regression cases at
+this chunk — devfull is a leaf Dev with no audit-bearing concurrency
+surface; the contract is exercised entirely through the read/write
+return shape.
+
+### Path-based access — deferred
+
+Sub-chunk 11 does NOT make `open("/dev/null")` work from a pouch program.
+That requires either (a) a multi-component `SYS_OPEN_PATH` syscall that
+walks `/dev` then `null`, or (b) a libc-side path decomposer over
+`SYS_WALK_OPEN`'s single-component contract — both larger than this
+sub-chunk's scope. The trivial Devs are reachable today only through
+`dev_lookup_by_dc/name` (kernel-internal) and `dev->attach("")`
+(kernel-internal). Pouch programs that want CSPRNG bytes go through
+`getrandom(2)` (the syscall surface — proven below), not `/dev/random`
+(the path surface — deferred).
+
+### `/pouch-hello-getrandom` — verifying the libsodium CSPRNG path
+
+`usr/pouch-hello/pouch-hello-getrandom.c` is the seventh pouch binary
+(~50 KiB, between the printf and the threads bodies). It calls musl's
+`getrandom(2)` at the libc surface and verifies the round-trip:
+
+| Probe | Expectation |
+|---|---|
+| `getrandom(buf, 32, 0)` | Returns 32 (no flags, blocking-OK). |
+| Buffer contains a non-zero byte | RNDR delivered entropy (`P(all 32 zero) = 2^-256`). |
+| Two consecutive 16-byte reads differ | Basic CSPRNG sanity (`P(equal) = 2^-128`). |
+
+Without `CAP_CSPRNG_READ` the kernel SYS_GETRANDOM handler returns
+-1/EIO. Joey grants the cap explicitly by spawning the binary through a
+new `pouch_smoke_one_caps` helper that uses `t_spawn_full` with
+`cap_mask = T_CAP_CSPRNG_READ` (joey holds `CAP_ALL` post-elevation, so
+the intersection is `CAP_CSPRNG_READ`). The wiring proves both that
+musl's `getrandom(2)` reaches the kernel through the seam AND that the
+cap-grant path through `t_spawn_full` works — both consumed by sub-chunk
+14's libsodium build.
+
+---
+
 ## Public API
 
 Not yet — pouch exposes no API surface at sub-chunk 2. pouch's lower-half API

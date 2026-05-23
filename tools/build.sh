@@ -186,7 +186,7 @@ EOF
     # P6-pouch-hello-smoke: copy the pouch POSIX test binaries (built
     # against the pouch sysroot by build_pouch_progs) into the cpio root.
     # Same curation discipline — explicit list, not a glob.
-    local pouch_bins=( "pouch-hello" "pouch-hello-stdio" "pouch-hello-printf" "pouch-hello-malloc" "pouch-hello-threads" "pouch-hello-poll" )
+    local pouch_bins=( "pouch-hello" "pouch-hello-stdio" "pouch-hello-printf" "pouch-hello-malloc" "pouch-hello-threads" "pouch-hello-poll" "pouch-hello-getrandom" )
     local pouch_progs="$BUILD_DIR/pouch/progs"
     for bin in "${pouch_bins[@]}"; do
         local src="$pouch_progs/$bin"
@@ -507,7 +507,7 @@ build_pouch_progs() {
     mkdir -p "$progs_out"
 
     local prog
-    for prog in pouch-hello pouch-hello-stdio pouch-hello-printf pouch-hello-malloc pouch-hello-threads pouch-hello-poll; do
+    for prog in pouch-hello pouch-hello-stdio pouch-hello-printf pouch-hello-malloc pouch-hello-threads pouch-hello-poll pouch-hello-getrandom; do
         echo "==> pouch prog: $prog"
         # 1. compile (clang). -nostdinc + -isystem: pouch owns the include
         #    path. -fno-pie: non-PIC codegen for a fixed-address ET_EXEC.

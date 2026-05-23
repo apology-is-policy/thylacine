@@ -360,17 +360,25 @@ static int do_stratumd_stub_bringup(void) {
 // output is far under the 4 KiB pipe ring, so it never blocks on write
 // and reaches exit on its own; joey reaps, then drains the buffered
 // bytes. (Same lesson as do_stratumd_stub_bringup.)
-static int pouch_smoke_one(const char *name, size_t name_len,
-                           const char *expect, size_t expect_len) {
+// pouch_smoke_core — pouch_smoke_one's body, parameterized by an optional
+// cap_mask. If cap_mask == 0, uses t_spawn_with_fds (no extra caps);
+// otherwise uses t_spawn_full to also hand the child cap_mask (subset of
+// joey's caps). All other semantics (pipe wiring, reap-before-drain,
+// content check) are identical.
+static int pouch_smoke_core(const char *name, size_t name_len,
+                            const char *expect, size_t expect_len,
+                            unsigned long cap_mask) {
     long rd = -1, wr = -1;
     if (t_pipe(&rd, &wr) < 0) {
         t_putstr("joey: pouch-smoke t_pipe FAILED\n");
         return -1;
     }
     unsigned int fds[2] = { (unsigned int)wr, (unsigned int)wr };
-    long pid = t_spawn_with_fds(name, name_len, fds, 2);
+    long pid = cap_mask
+        ? t_spawn_full(name, name_len, fds, 2, cap_mask)
+        : t_spawn_with_fds(name, name_len, fds, 2);
     if (pid <= 0) {
-        t_putstr("joey: pouch-smoke t_spawn_with_fds FAILED\n");
+        t_putstr("joey: pouch-smoke spawn FAILED\n");
         (void)t_close(rd);
         (void)t_close(wr);
         return -1;
@@ -423,7 +431,24 @@ static int pouch_smoke_one(const char *name, size_t name_len,
     return 0;
 }
 
-// do_pouch_hello_smoke — run the three pouch POSIX C binaries and verify
+// pouch_smoke_one — default-perms variant. Spawns via t_spawn_with_fds;
+// child inherits joey's default cap set (none of the gated caps unless a
+// caps variant is used). Pre-existing API; the pouch hellos use this.
+static int pouch_smoke_one(const char *name, size_t name_len,
+                           const char *expect, size_t expect_len) {
+    return pouch_smoke_core(name, name_len, expect, expect_len, 0);
+}
+
+// pouch_smoke_one_caps — capability-granting variant. Spawns via
+// t_spawn_full so the child gets (joey_caps & cap_mask). Used by the
+// CAP-gated probes (CAP_CSPRNG_READ for /pouch-hello-getrandom).
+static int pouch_smoke_one_caps(const char *name, size_t name_len,
+                                const char *expect, size_t expect_len,
+                                unsigned long cap_mask) {
+    return pouch_smoke_core(name, name_len, expect, expect_len, cap_mask);
+}
+
+// do_pouch_hello_smoke — run the pouch POSIX C binaries and verify
 // each prints + exits 0. /pouch-hello exercises the raw write(2) seam and
 // the 0xFFFF unimplemented-syscall sentinel on both musl syscall paths;
 // /pouch-hello-stdio exercises musl's buffered stdio (the patched
@@ -492,6 +517,19 @@ static int do_pouch_hello_smoke(void) {
                         ppl_expect, sizeof(ppl_expect) - 1) != 0)
         return -1;
     t_putstr("joey: pouch-hello-poll smoke ok (poll + select over SYS_POLL via devpipe)\n");
+
+    // P6-pouch-devnodes (sub-chunk 11): the getrandom proving binary.
+    // Spawned with CAP_CSPRNG_READ so musl's getrandom(2) reaches the
+    // SYS_GETRANDOM kernel handler (gated on the cap). This is the path
+    // libsodium will consume in sub-chunk 14; proving it here ahead of
+    // the libsodium build removes a downstream surprise.
+    static const char pg_name[]   = "pouch-hello-getrandom";
+    static const char pg_expect[] = "pouch-hello-getrandom: exit 0";
+    if (pouch_smoke_one_caps(pg_name, sizeof(pg_name) - 1,
+                             pg_expect, sizeof(pg_expect) - 1,
+                             T_CAP_CSPRNG_READ) != 0)
+        return -1;
+    t_putstr("joey: pouch-hello-getrandom smoke ok (musl getrandom(2) over SYS_GETRANDOM with CAP_CSPRNG_READ)\n");
     return 0;
 }
 

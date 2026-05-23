@@ -102,11 +102,11 @@ void dev_init(void) {
     // Sequence per dev.h:
     //   1. spoor_init() — Spoor SLUB cache.
     //   2. dev_register(&devnone) — devnone is always first.
-    //   3. dev_register the kernel-internal trivial Devs (P4-B).
-    //      Order: cons first (so the boot banner could route through
-    //      it; not yet, but the slot is reserved); then null / zero /
-    //      random in alphabetical order for predictable bestiary
-    //      iteration.
+    //   3. dev_register the kernel-internal trivial Devs (P4-B + P6-pouch-
+    //      devnodes for devfull). Order: cons first (so the boot banner
+    //      could route through it; not yet, but the slot is reserved);
+    //      then null / zero / full / random in alphabetical order for
+    //      predictable bestiary iteration.
     //   4. Walk bestiary[] calling each non-NULL dev->init().
     spoor_init();
 
@@ -114,6 +114,7 @@ void dev_init(void) {
     dev_register(&devcons);
     dev_register(&devnull);
     dev_register(&devzero);
+    dev_register(&devfull);
     dev_register(&devrandom);
     dev_register(&devproc);
     dev_register(&devctl);

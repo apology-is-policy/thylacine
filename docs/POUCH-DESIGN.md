@@ -324,7 +324,7 @@ Each sub-chunk lands independently with the two-commit pattern; audit-bearing on
 | 8 | **pouch-wait-addr** | The wait-on-address kernel primitive `torpor`. No `specs/futex.tla` — CLAUDE.md "Spec-to-code suspended" was broadened 2026-05-23 to drop spec-first design itself; the no-lost-wakeup invariant is validated by prose reasoning + audit + runtime tests. | **yes** (scheduler / wait-wake) |
 | 9 | **pouch-threads** | pthread create/join/detach + mutex/cond/rwlock/once + TLS errno | **yes** (concurrency) |
 | 10 | **pouch-poll** | `poll`/`select`/`ppoll`/`pselect` retargeted onto `SYS_POLL` (kernel poll primitive audited in P5-poll-a/b) — **LANDED 2026-05-23** | no |
-| 11 | **pouch-devnodes** | The minimal synthetic-FS namespace (§6.6): trivial `/dev` nodes (`null`/`zero`/`full`) as tiny kernel Devs; the `getrandom`-syscall path libsodium needs | no |
+| 11 | **pouch-devnodes** | The minimal synthetic-FS namespace (§6.6): trivial `/dev` nodes (`null`/`zero`/`full`) as tiny kernel Devs; the `getrandom`-syscall path libsodium needs — **LANDED 2026-05-23** (devfull Dev + /pouch-hello-getrandom proving binary; path-based `open("/dev/null")` access deferred to a future multi-component-walk sub-chunk) | no |
 | 12 | **pouch-sockets** | `AF_UNIX` `SOCK_STREAM` → `/srv`; `SO_PEERCRED` → `t_srv_peer` | **yes** (capability surface) |
 | 13 | **pouch-signals** | The supported signal subset → notes | **yes** (notes / async safety) |
 | 14 | **pouch-libsodium** | Cross-compile libsodium; self-test | no |

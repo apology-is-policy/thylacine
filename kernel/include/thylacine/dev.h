@@ -142,6 +142,7 @@ extern struct Dev devnone;
 extern struct Dev devcons;        // dc='c'  — UART console (write-only at v1.0)
 extern struct Dev devnull;        // dc='0'  — bit bucket (writes consumed; reads return 0/EOF)
 extern struct Dev devzero;        // dc='z'  — produces zeroes
+extern struct Dev devfull;        // dc='f'  — full disk (writes fail; reads NUL-fill). P6 sub-chunk 11.
 extern struct Dev devrandom;      // dc='r'  — CSPRNG (RNDR-backed at v1.0)
 
 // Kernel-internal directory Devs (P4-C+).

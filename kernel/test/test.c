@@ -193,6 +193,9 @@ void test_null_read_returns_eof(void);
 void test_null_write_consumes(void);
 void test_zero_read_fills_zeroes(void);
 void test_zero_write_consumes(void);
+void test_full_attach_open_close(void);
+void test_full_read_fills_zeroes(void);
+void test_full_write_returns_minus1(void);
 void test_random_rndr_available(void);
 void test_random_read_produces_nonzero_bytes(void);
 void test_random_read_varies_across_calls(void);
@@ -823,6 +826,9 @@ struct test_case g_tests[] = {
     { "null.write_consumes",           test_null_write_consumes,           false, NULL },
     { "zero.read_fills_zeroes",        test_zero_read_fills_zeroes,        false, NULL },
     { "zero.write_consumes",           test_zero_write_consumes,           false, NULL },
+    { "full.attach_open_close",        test_full_attach_open_close,        false, NULL },
+    { "full.read_fills_zeroes",        test_full_read_fills_zeroes,        false, NULL },
+    { "full.write_returns_minus1",     test_full_write_returns_minus1,     false, NULL },
     { "random.rndr_available",         test_random_rndr_available,         false, NULL },
     { "random.read_produces_nonzero",  test_random_read_produces_nonzero_bytes, false, NULL },
     { "random.read_varies",            test_random_read_varies_across_calls, false, NULL },
