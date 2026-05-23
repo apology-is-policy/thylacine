@@ -116,6 +116,36 @@ enum srv_state {
     SRV_STATE_TOMBSTONED = 3,
 };
 
+// Service transport mode — selected by the poster at registration.
+//
+// SRV_MODE_9P    — the 9P-shaped channel (CORVUS-DESIGN.md §6.2). The
+//                  client SYS_srv_connect drives a kernel-internal 9P
+//                  handshake (Tversion+Tattach+Tlopen) over the SrvConn
+//                  before returning; subsequent read/write on the client
+//                  KObj_Srv handle become Tread/Twrite frames via the
+//                  kernel-owned p9_client. The server endpoint Spoor
+//                  reads RAW T-frame bytes from c2s — the userspace
+//                  server is a 9P responder (corvus, future stratumd).
+//                  This is the default / pre-existing mode.
+//
+// SRV_MODE_BYTE  — raw byte stream (P6-pouch-sockets, sub-chunk 12).
+//                  SYS_srv_connect SKIPS the 9P handshake and refuses a
+//                  non-empty path. Client-side read/write route through
+//                  srvconn_client_send/recv — raw chan_produce / chan_
+//                  consume_nonblock against the SrvConn's c2s/s2c rings.
+//                  Server endpoint Spoor reads raw c2s as before. The
+//                  net effect: a POSIX AF_UNIX SOCK_STREAM byte-channel
+//                  with no 9P framing in the data path.
+//
+// The mode is captured by value on the SrvConn at mint (srv_conn_open_
+// for_proc reads the service mode under the registry lock alongside
+// poster_stripes), so a tombstone-then-rebind cannot change the mode
+// of an already-minted connection.
+enum srv_mode {
+    SRV_MODE_9P   = 0,
+    SRV_MODE_BYTE = 1,
+};
+
 // A registered (or tombstoned) service. The poster identity is captured
 // BY VALUE (`poster_stripes`, `poster_pid`) — CORVUS-DESIGN.md §6.3: the
 // registry holds no raw Proc*, so a poster Proc that exits and is reaped
@@ -127,6 +157,9 @@ struct SrvService {
     char           name[SRV_NAME_MAX];
     u64            poster_stripes;   // poster Proc's stripes tag (by value)
     int            poster_pid;       // poster Proc's PID (by value; diagnostics)
+    enum srv_mode  mode;             // transport: 9P (default) or byte stream
+                                     // (P6-pouch-sockets, sub-chunk 12). Set at
+                                     // srv_reserve, immutable through LIVE.
 
     // Accept backlog — a bounded FIFO ring of kernel-minted connections
     // awaiting SYS_SRV_ACCEPT. A client open enqueues one (holding a
@@ -186,7 +219,12 @@ extern struct Dev devsrv;
 //
 // The caller must have already passed the SYS_POST_SERVICE post-gate
 // (proc_may_post_service) — srv_reserve does NOT re-check it.
+//
+// `mode` selects the transport: SRV_MODE_9P (the default; CORVUS-DESIGN
+// §6.2) or SRV_MODE_BYTE (raw byte stream; P6-pouch-sockets). Set
+// immutably on the entry — the mode of a LIVE service does not change.
 int srv_reserve(const char *name, u8 name_len, struct Proc *poster,
+                enum srv_mode mode,
                 struct SrvService **svc_out, enum srv_state *prior_out);
 
 // srv_commit — phase 2 (success). RESERVING -> LIVE. Takes the registry

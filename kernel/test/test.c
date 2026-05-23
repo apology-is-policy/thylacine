@@ -287,6 +287,12 @@ void test_srv_client_read_write_fail_pre_handshake(void);
 void test_srv_client_handshake_times_out_without_responder(void);
 void test_srv_client_sys_srv_connect_unknown_service(void);
 void test_srv_client_sys_srv_connect_per_proc_cap(void);
+void test_srv_client_byte_mode_propagates_to_conn(void);
+void test_srv_client_byte_mode_9p_post_stays_9p(void);
+void test_srv_client_byte_mode_connect_rejects_path(void);
+void test_srv_client_byte_mode_kobj_srv_dispatch(void);
+void test_srv_client_byte_mode_mode_change_rebind_refused(void);
+void test_srv_client_byte_mode_server_recv_blocking_eof(void);
 void test_virtio_mmio_probe(void);
 void test_virtio_magic_value(void);
 void test_virtio_version_modern(void);
@@ -948,6 +954,24 @@ struct test_case g_tests[] = {
                                                                            false, NULL },
     { "srv_client.sys_srv_connect_per_proc_cap",
                                        test_srv_client_sys_srv_connect_per_proc_cap,
+                                                                           false, NULL },
+    { "srv_client.byte_mode_propagates_to_conn",
+                                       test_srv_client_byte_mode_propagates_to_conn,
+                                                                           false, NULL },
+    { "srv_client.byte_mode_9p_post_stays_9p",
+                                       test_srv_client_byte_mode_9p_post_stays_9p,
+                                                                           false, NULL },
+    { "srv_client.byte_mode_connect_rejects_path",
+                                       test_srv_client_byte_mode_connect_rejects_path,
+                                                                           false, NULL },
+    { "srv_client.byte_mode_kobj_srv_dispatch",
+                                       test_srv_client_byte_mode_kobj_srv_dispatch,
+                                                                           false, NULL },
+    { "srv_client.byte_mode_mode_change_rebind_refused",
+                                       test_srv_client_byte_mode_mode_change_rebind_refused,
+                                                                           false, NULL },
+    { "srv_client.byte_mode_server_recv_blocking_eof",
+                                       test_srv_client_byte_mode_server_recv_blocking_eof,
                                                                            false, NULL },
     { "virtio.mmio_probe",             test_virtio_mmio_probe,             false, NULL },
     { "virtio.magic_value",            test_virtio_magic_value,            false, NULL },

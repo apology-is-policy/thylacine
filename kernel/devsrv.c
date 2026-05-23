@@ -125,9 +125,13 @@ static struct SrvConn *srv_backlog_pop_locked(struct SrvService *e) {
 // =============================================================================
 
 int srv_reserve(const char *name, u8 name_len, struct Proc *poster,
+                enum srv_mode mode,
                 struct SrvService **svc_out, enum srv_state *prior_out) {
     if (!name || name_len == 0 || name_len > SRV_NAME_MAX) return -1;
     if (!svc_out || !prior_out)                            return -1;
+    if (mode != SRV_MODE_9P && mode != SRV_MODE_BYTE)      return -1;
+    /* F2 mode_change_on_rebind close (P6-pouch-sockets audit) is in the
+     * TOMBSTONED branch below — see the same-mode check. */
 
     // proc_stripes fail-closes to 0 for a NULL / corrupted poster; a Proc
     // the kernel cannot identify cannot post a service (and 0 would alias
@@ -143,6 +147,18 @@ int srv_reserve(const char *name, u8 name_len, struct Proc *poster,
         // — no stealing a running or in-flight server. Only a TOMBSTONED
         // name (prior poster exited) is re-postable.
         if (e->state != SRV_STATE_TOMBSTONED) {
+            spin_unlock_irqrestore(&g_srv_registry.lock, s);
+            return -1;
+        }
+        // F2 mode_change_on_rebind close (P6-pouch-sockets audit):
+        // a service's mode is part of its identity — refuse a rebind
+        // that flips the mode. Without this, a client A that captured
+        // service_mode under the LIVE check (alongside poster_stripes)
+        // and is about to mint a byte-mode SrvConn could observe a
+        // 9P-mode rebound poster on the accept side, landing a wrong-
+        // mode connection in the new poster's backlog. With this
+        // check, a mode change requires a different service name.
+        if (e->mode != mode) {
             spin_unlock_irqrestore(&g_srv_registry.lock, s);
             return -1;
         }
@@ -169,6 +185,7 @@ int srv_reserve(const char *name, u8 name_len, struct Proc *poster,
     for (u8 i = 0; i < name_len; i++) e->name[i] = name[i];
     e->poster_stripes = stripes;
     e->poster_pid     = poster->pid;
+    e->mode           = mode;
     *svc_out = e;
 
     spin_unlock_irqrestore(&g_srv_registry.lock, s);
@@ -369,15 +386,20 @@ int srv_conn_open_for_proc(struct Proc *p, const char *name, u8 name_len) {
     struct SrvService *svc = srv_lookup(name, name_len);
     if (!svc) return -1;
 
-    // Capture the poster's stripes under the registry lock, atomically
-    // with the LIVE check: poster_stripes is stable while LIVE (set at
-    // reserve, zeroed only by the tombstone). It becomes the connection's
-    // server identity — SYS_SRV_PEER's poster gate (a3c).
-    u64 poster_stripes;
+    // Capture the poster's stripes AND the service's transport mode under
+    // the registry lock, atomically with the LIVE check: both are stable
+    // while LIVE (set at reserve; mode is immutable through LIVE,
+    // poster_stripes is zeroed only by the tombstone). poster_stripes
+    // becomes the connection's server identity — SYS_SRV_PEER's poster
+    // gate (a3c). `service_mode` propagates onto the SrvConn after mint
+    // (P6-pouch-sockets, sub-chunk 12).
+    u64           poster_stripes;
+    enum srv_mode service_mode;
     {
         irq_state_t s = spin_lock_irqsave(&g_srv_registry.lock);
         bool live      = (svc->state == SRV_STATE_LIVE);
         poster_stripes = svc->poster_stripes;
+        service_mode   = svc->mode;
         spin_unlock_irqrestore(&g_srv_registry.lock, s);
         if (!live) return -1;
     }
@@ -391,6 +413,17 @@ int srv_conn_open_for_proc(struct Proc *p, const char *name, u8 name_len) {
                                         proc_is_console_attached(p),
                                         poster_stripes);
     if (!cn) return -1;
+
+    // Propagate the service's transport mode onto the freshly-minted
+    // (and not-yet-published) SrvConn. SRV_MODE_BYTE flips byte_mode on
+    // BEFORE the cn is enqueued in the accept backlog or installed as a
+    // KObj_Srv handle — every observer (sys_srv_connect_for_proc's
+    // handshake gate, sys_read/write_for_proc's KObj_SRV dispatch) reads
+    // the field after publication, so the value is consistent for the
+    // cn's lifetime.
+    if (service_mode == SRV_MODE_BYTE) {
+        srvconn_set_byte_mode(cn);
+    }
 
     // Install the client's KObj_Srv connection handle. handle_alloc does
     // not take a reference (only handle_dup does) — so the SrvConn's
@@ -637,14 +670,35 @@ static void devsrv_close(struct Spoor *c) {
 }
 
 // read — a connection Spoor's read drains the c2s ring (the bytes the
-// kernel 9P client sent toward corvus). Returns >0 bytes, 0 if the ring
-// is empty but the connection is live (corvus polls again), or -1 on EOF
-// (the connection is torn down). The /srv root and service Spoors are not
-// readable. `off` is ignored — a connection is a byte stream.
+// kernel 9P client sent toward corvus, or that the pouch AF_UNIX
+// SOCK_STREAM client sent toward its peer).
+//
+// 9P mode (corvus / stratumd): NON-BLOCKING — returns 0 on empty-but-
+// live. corvus polls-then-reads (t_poll on the listener + per-conn
+// POLLIN before pulling 9P frames off c2s).
+//
+// Byte mode (pouch AF_UNIX SOCK_STREAM, P6-pouch-sockets sub-chunk 12):
+// BLOCKING — POSIX stream-socket read semantics. F1 close of the
+// pouch-sockets audit: the non-blocking variant returned 0 to a POSIX
+// server racing the client's first write across SMP CPUs, which the
+// userspace test interpreted as EOF and failed. Routed through
+// srvconn_server_recv_blocking for byte-mode SrvConns.
+//
+// EOF (return 0 on torn-down conn) is identical in both modes; -1 is
+// bad args / wrong magic. `off` is ignored — a connection is a byte
+// stream. The /srv root and service Spoors are not readable.
 static long devsrv_read(struct Spoor *c, void *buf, long n, s64 off) {
     (void)off;
     struct SrvConn *cn = devsrv_conn_of(c);
     if (!cn) return -1;
+    // Atomic acquire on byte_mode (F5 close): pair the setter's
+    // ATOMIC_RELEASE in srvconn_set_byte_mode so a multi-thread Proc
+    // reading this server-endpoint Spoor sees the mode that was
+    // propagated at SrvConn mint.
+    bool bm = __atomic_load_n(&cn->byte_mode, __ATOMIC_ACQUIRE);
+    if (bm) {
+        return srvconn_server_recv_blocking(cn, (u8 *)buf, n);
+    }
     return srvconn_server_recv(cn, (u8 *)buf, n);
 }
 

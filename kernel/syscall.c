@@ -685,9 +685,17 @@ s64 sys_write_for_proc(struct Proc *p, hidx_t h, const u8 *kbuf, u64 len) {
         // sys_lookup_rw_handle validated SRV_CONN_MAGIC. F1 close
         // (P5-corvus-srv-impl audit): refresh the deadline before
         // each blocking op — same discipline as the read path.
+        // P6-pouch-sockets (sub-chunk 12): byte-mode SrvConns route
+        // through srvconn_client_send (raw chan_produce on c2s) —
+        // no 9P Twrite framing. 9P-mode SrvConns keep the original
+        // srvconn_client_write path. F5 close: ATOMIC_ACQUIRE pairs
+        // srvconn_set_byte_mode's ATOMIC_RELEASE.
         struct SrvConn *cn = (struct SrvConn *)slot->obj;
         srvconn_set_client_deadline(cn, timer_now_ns() + SRVCONN_OP_DEADLINE_NS);
-        long n = srvconn_client_write(cn, kbuf, (long)len);
+        bool bm = __atomic_load_n(&cn->byte_mode, __ATOMIC_ACQUIRE);
+        long n = bm
+            ? srvconn_client_send(cn, kbuf, (long)len)
+            : srvconn_client_write(cn, kbuf, (long)len);
         if (n < 0)                                   return -1;
         return (s64)n;
     }
@@ -722,9 +730,17 @@ s64 sys_read_for_proc(struct Proc *p, hidx_t h, u8 *kbuf, u64 len) {
         // before each blocking op — same discipline as the handshake.
         // Without this `srvconn_client_recv` would tsleep with
         // deadline=0 and a hung corvus would wedge the caller.
+        // P6-pouch-sockets (sub-chunk 12): byte-mode SrvConns route
+        // through srvconn_client_recv (raw chan_consume on s2c) —
+        // the same deadline machinery still bounds the blocking wait
+        // (see srvconn_client_recv's tsleep against client_deadline_ns).
+        // F5 close: ATOMIC_ACQUIRE pairs srvconn_set_byte_mode's RELEASE.
         struct SrvConn *cn = (struct SrvConn *)slot->obj;
         srvconn_set_client_deadline(cn, timer_now_ns() + SRVCONN_OP_DEADLINE_NS);
-        long n = srvconn_client_read(cn, kbuf, (long)len);
+        bool bm = __atomic_load_n(&cn->byte_mode, __ATOMIC_ACQUIRE);
+        long n = bm
+            ? srvconn_client_recv(cn, kbuf, (long)len)
+            : srvconn_client_read(cn, kbuf, (long)len);
         if (n < 0)                                   return -1;
         return (s64)n;
     }
@@ -2419,20 +2435,31 @@ static s64 sys_wait_pid_handler(u64 status_out_va) {
 }
 
 // =============================================================================
-// SYS_POST_SERVICE — register the caller as a /srv service (P5-corvus-srv).
+// SYS_POST_SERVICE / SYS_POST_SERVICE_BYTE — register the caller as a /srv
+// service (P5-corvus-srv; P6-pouch-sockets sub-chunk 12 added byte mode).
 // =============================================================================
 //
-// Registers the calling Proc as the 9P server for /srv/<name> and returns
-// a KObj_Srv service handle. CORVUS-DESIGN.md §6.1; spec contract
-// specs/corvus.tla::PostService (the marked-poster gate + the reserve/
-// commit two-phase).
+// Registers the calling Proc as the server for /srv/<name> and returns a
+// KObj_Srv service handle. CORVUS-DESIGN.md §6.1 + POUCH-DESIGN.md §6.2;
+// spec contract specs/corvus.tla::PostService (the marked-poster gate +
+// the reserve/commit two-phase).
+//
+// Three entry points share one core:
+//   - sys_post_service_for_proc(p, name, len) — the 3-arg legacy path
+//     (default SRV_MODE_9P); kernel tests + corvus depend on this
+//     signature unchanged.
+//   - sys_post_service_byte_for_proc(p, name, len) — the byte-mode
+//     variant (SRV_MODE_BYTE); pouch's AF_UNIX bind() uses this.
+//   - sys_post_service_core(p, name, len, mode) — the shared
+//     implementation. NOT exposed to tests.
 //
 // Returns the service handle (hidx ≥ 0) on success, -1 on failure.
-int sys_post_service_for_proc(struct Proc *p, const char *name,
-                              size_t name_len) {
+static int sys_post_service_core(struct Proc *p, const char *name,
+                                  size_t name_len, enum srv_mode mode) {
     if (!p)                                            return -1;
     if (!name)                                         return -1;
     if (name_len == 0 || name_len > SRV_NAME_MAX)       return -1;
+    if (mode != SRV_MODE_9P && mode != SRV_MODE_BYTE)   return -1;
 
     // Post-gate (corvus.tla PostService precondition `p \in service_-
     // marked`): the caller must carry the one-way joey-stamped bit.
@@ -2452,7 +2479,7 @@ int sys_post_service_for_proc(struct Proc *p, const char *name,
     // never observably LIVE until the handle below exists.
     struct SrvService *svc = NULL;
     enum srv_state     prior = SRV_STATE_FREE;
-    if (srv_reserve(name, (u8)name_len, p, &svc, &prior) != 0) return -1;
+    if (srv_reserve(name, (u8)name_len, p, mode, &svc, &prior) != 0) return -1;
 
     // Install the KObj_Srv service handle. The handle's obj is the
     // registry entry; the entry outlives the handle (its lifetime is the
@@ -2473,7 +2500,27 @@ int sys_post_service_for_proc(struct Proc *p, const char *name,
     return (int)h;
 }
 
-static s64 sys_post_service_handler(u64 name_va, u64 name_len_raw) {
+// Public 3-arg wrapper — the signature kernel tests + the existing
+// SYS_POST_SERVICE handler call. SRV_MODE_9P is the historical default
+// (the only mode pre-P6-pouch-sockets).
+int sys_post_service_for_proc(struct Proc *p, const char *name,
+                              size_t name_len) {
+    return sys_post_service_core(p, name, name_len, SRV_MODE_9P);
+}
+
+// Public 3-arg byte-mode wrapper — used by the SYS_POST_SERVICE_BYTE
+// handler. Same shape; SRV_MODE_BYTE flips the SrvService transport.
+int sys_post_service_byte_for_proc(struct Proc *p, const char *name,
+                                    size_t name_len) {
+    return sys_post_service_core(p, name, name_len, SRV_MODE_BYTE);
+}
+
+// post_service_common — shared handler body for SYS_POST_SERVICE and
+// SYS_POST_SERVICE_BYTE. Forks only on the `mode` arg passed through to
+// sys_post_service_core. All other validation (length, user-VA,
+// per-byte copy) is identical.
+static s64 sys_post_service_common(u64 name_va, u64 name_len_raw,
+                                    enum srv_mode mode) {
     struct Thread *t = current_thread();
     if (!t)                                            return -1;
     struct Proc *p = t->proc;
@@ -2500,7 +2547,15 @@ static s64 sys_post_service_handler(u64 name_va, u64 name_len_raw) {
         name[i] = (char)b;
     }
 
-    return (s64)sys_post_service_for_proc(p, name, (size_t)name_len_raw);
+    return (s64)sys_post_service_core(p, name, (size_t)name_len_raw, mode);
+}
+
+static s64 sys_post_service_handler(u64 name_va, u64 name_len_raw) {
+    return sys_post_service_common(name_va, name_len_raw, SRV_MODE_9P);
+}
+
+static s64 sys_post_service_byte_handler(u64 name_va, u64 name_len_raw) {
+    return sys_post_service_common(name_va, name_len_raw, SRV_MODE_BYTE);
 }
 
 // =============================================================================
@@ -2695,7 +2750,10 @@ int sys_srv_connect_for_proc(struct Proc *p,
 
     // Phase 1: mint + install the KObj_Srv handle + bump p->srv_conn_count.
     // The cap check + per-Proc bump happen inside srv_conn_open_for_proc;
-    // a failure here leaves no state behind.
+    // a failure here leaves no state behind. The mint also propagates
+    // the service's transport mode onto the SrvConn (cn->byte_mode is
+    // set BEFORE Phase 1 enqueues the SrvConn on the accept backlog;
+    // we read it here without a lock).
     int h = srv_conn_open_for_proc(p, name, (u8)name_len);
     if (h < 0) return -1;
 
@@ -2714,6 +2772,20 @@ int sys_srv_connect_for_proc(struct Proc *p,
         return -1;
     }
     struct SrvConn *cn = (struct SrvConn *)slot->obj;
+
+    // P6-pouch-sockets (sub-chunk 12): byte-mode services have no
+    // handshake — the SrvConn is ready for raw byte I/O the moment it
+    // is enqueued. A non-empty path makes no sense in byte mode (there
+    // is no 9P fid to walk against); reject up-front.
+    // F5 close (P6-pouch-sockets audit): atomic acquire pairs the
+    // srvconn_set_byte_mode release in srv_conn_open_for_proc.
+    if (__atomic_load_n(&cn->byte_mode, __ATOMIC_ACQUIRE)) {
+        if (path_len > 0) {
+            handle_close(p, (hidx_t)h);
+            return -1;
+        }
+        return h;
+    }
 
     // F1 close (P5-corvus-srv-impl audit): bound the handshake on the
     // wall clock. Without this every Tversion/Tattach/Twalk/Tlopen
@@ -3039,6 +3111,11 @@ void syscall_dispatch(struct exception_context *ctx) {
     case SYS_POST_SERVICE:
         ctx->regs[0] = (u64)sys_post_service_handler(ctx->regs[0],
                                                      ctx->regs[1]);
+        return;
+
+    case SYS_POST_SERVICE_BYTE:
+        ctx->regs[0] = (u64)sys_post_service_byte_handler(ctx->regs[0],
+                                                           ctx->regs[1]);
         return;
 
     case SYS_SRV_ACCEPT:

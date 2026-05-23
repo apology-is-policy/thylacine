@@ -57,6 +57,8 @@
 // as the other -for_proc helpers).
 extern int sys_post_service_for_proc(struct Proc *p, const char *name,
                                      size_t name_len);
+extern int sys_post_service_byte_for_proc(struct Proc *p, const char *name,
+                                           size_t name_len);
 extern int sys_srv_connect_for_proc(struct Proc *p,
                                     const char *name, size_t name_len,
                                     const u8 *path, size_t path_len);
@@ -74,6 +76,12 @@ void test_srv_client_read_write_fail_pre_handshake(void);
 void test_srv_client_handshake_times_out_without_responder(void);
 void test_srv_client_sys_srv_connect_unknown_service(void);
 void test_srv_client_sys_srv_connect_per_proc_cap(void);
+void test_srv_client_byte_mode_propagates_to_conn(void);
+void test_srv_client_byte_mode_9p_post_stays_9p(void);
+void test_srv_client_byte_mode_connect_rejects_path(void);
+void test_srv_client_byte_mode_kobj_srv_dispatch(void);
+void test_srv_client_byte_mode_mode_change_rebind_refused(void);
+void test_srv_client_byte_mode_server_recv_blocking_eof(void);
 
 // ---------------------------------------------------------------------------
 // Helpers.
@@ -339,5 +347,247 @@ void test_srv_client_sys_srv_connect_per_proc_cap(void) {
     handle_close(client, h1);
     srv_registry_reset();
     drop_test_proc(corvus);
+    drop_test_proc(client);
+}
+
+// =============================================================================
+// P6-pouch-sockets (sub-chunk 12) — SRV_MODE_BYTE byte-stream transport
+// =============================================================================
+//
+//   srv_client.byte_mode_propagates_to_conn
+//     A SrvConn minted against a SYS_POST_SERVICE_BYTE-posted service
+//     carries byte_mode = true.
+//
+//   srv_client.byte_mode_9p_post_stays_9p
+//     A SrvConn minted against the legacy SYS_POST_SERVICE-posted
+//     service carries byte_mode = false. corvus + stratumd unaffected.
+//
+//   srv_client.byte_mode_connect_rejects_path
+//     SYS_srv_connect against a byte-mode service WITH path_len > 0
+//     returns -1. Byte mode has no 9P fid to walk against.
+//
+//   srv_client.byte_mode_kobj_srv_dispatch
+//     sys_read/write_for_proc's KObj_SRV arm dispatches on byte_mode:
+//     a byte-mode write goes through srvconn_client_send (raw chan_
+//     produce on c2s) — server-side read drains byte-identical bytes.
+
+extern int sys_srv_accept_for_proc(struct Proc *p, hidx_t service_h);
+
+void test_srv_client_byte_mode_propagates_to_conn(void) {
+    srv_registry_reset();
+
+    struct Proc *server = make_marked_test_proc();
+    TEST_ASSERT(server != NULL, "server proc");
+    int svc_h = sys_post_service_byte_for_proc(server, "sockd", 5);
+    TEST_ASSERT(svc_h >= 0, "post \"sockd\" in byte mode");
+
+    struct Proc *client = make_test_proc();
+    TEST_ASSERT(client != NULL, "client proc");
+
+    int conn_h = srv_conn_open_for_proc(client, "sockd", 5);
+    TEST_ASSERT(conn_h >= 0, "client opens the byte-mode service");
+
+    struct SrvConn *cn = conn_of(client, conn_h);
+    TEST_ASSERT(cn != NULL, "conn_of recovers the SrvConn");
+    TEST_EXPECT_EQ((int)cn->byte_mode, 1,
+        "byte-mode service produces byte-mode SrvConn");
+    TEST_EXPECT_EQ((int)cn->client_handshake_done, 0,
+        "byte-mode SrvConn has client_handshake_done == false "
+        "(no 9P handshake driven)");
+
+    handle_close(client, conn_h);
+    srv_registry_reset();
+    drop_test_proc(server);
+    drop_test_proc(client);
+}
+
+void test_srv_client_byte_mode_9p_post_stays_9p(void) {
+    srv_registry_reset();
+
+    struct Proc *server = make_marked_test_proc();
+    TEST_ASSERT(server != NULL, "server proc");
+    int svc_h = sys_post_service_for_proc(server, "ninep", 5);
+    TEST_ASSERT(svc_h >= 0, "post \"ninep\" in default (9P) mode");
+
+    struct Proc *client = make_test_proc();
+    TEST_ASSERT(client != NULL, "client proc");
+
+    int conn_h = srv_conn_open_for_proc(client, "ninep", 5);
+    TEST_ASSERT(conn_h >= 0, "client opens the 9P-mode service");
+
+    struct SrvConn *cn = conn_of(client, conn_h);
+    TEST_ASSERT(cn != NULL, "conn_of recovers the SrvConn");
+    TEST_EXPECT_EQ((int)cn->byte_mode, 0,
+        "9P-mode service produces a non-byte-mode SrvConn (legacy path)");
+
+    handle_close(client, conn_h);
+    srv_registry_reset();
+    drop_test_proc(server);
+    drop_test_proc(client);
+}
+
+void test_srv_client_byte_mode_connect_rejects_path(void) {
+    srv_registry_reset();
+
+    struct Proc *server = make_marked_test_proc();
+    TEST_ASSERT(server != NULL, "server proc");
+    int svc_h = sys_post_service_byte_for_proc(server, "sockd", 5);
+    TEST_ASSERT(svc_h >= 0, "post \"sockd\" in byte mode");
+
+    struct Proc *client = make_test_proc();
+    TEST_ASSERT(client != NULL, "client proc");
+
+    const u8 path[] = "ctl";
+    int rc = sys_srv_connect_for_proc(client, "sockd", 5,
+                                       path, sizeof(path) - 1);
+    TEST_EXPECT_EQ(rc, -1, "byte-mode connect rejects non-empty path");
+    TEST_EXPECT_EQ((int)client->srv_conn_count, 0,
+        "cap counter cleaned up on path-rejection");
+
+    srv_registry_reset();
+    drop_test_proc(server);
+    drop_test_proc(client);
+}
+
+void test_srv_client_byte_mode_kobj_srv_dispatch(void) {
+    srv_registry_reset();
+
+    struct Proc *server = make_marked_test_proc();
+    TEST_ASSERT(server != NULL, "server proc");
+    int svc_h = sys_post_service_byte_for_proc(server, "sockd", 5);
+    TEST_ASSERT(svc_h >= 0, "post \"sockd\" in byte mode");
+
+    struct Proc *client = make_test_proc();
+    TEST_ASSERT(client != NULL, "client proc");
+
+    int conn_h = srv_conn_open_for_proc(client, "sockd", 5);
+    TEST_ASSERT(conn_h >= 0, "client opens the byte-mode service");
+
+    struct SrvConn *cn = conn_of(client, conn_h);
+    TEST_ASSERT(cn != NULL, "conn_of recovers the SrvConn");
+    TEST_EXPECT_EQ((int)cn->byte_mode, 1, "byte_mode set");
+
+    int conn_spoor_h = sys_srv_accept_for_proc(server, (hidx_t)svc_h);
+    TEST_ASSERT(conn_spoor_h >= 0, "server accepts the byte-mode conn");
+
+    // Client write via sys_write_for_proc on KObj_SRV. The arm
+    // dispatches on cn->byte_mode and routes through srvconn_client_
+    // send — raw c2s push. NO 9P Twrite framing.
+    const u8 client_msg[5] = { 'P', 'I', 'N', 'G', '\n' };
+    s64 w = sys_write_for_proc(client, (hidx_t)conn_h, client_msg, 5);
+    TEST_EXPECT_EQ(w, 5, "byte-mode client write places 5 bytes on c2s");
+
+    u8 srv_recv[16];
+    s64 r = sys_read_for_proc(server, (hidx_t)conn_spoor_h, srv_recv, 16);
+    TEST_EXPECT_EQ(r, 5,
+        "byte-mode server read returns exactly the 5 bytes (no 9P header)");
+    bool exact = true;
+    for (int i = 0; i < 5; i++) if (srv_recv[i] != client_msg[i]) exact = false;
+    TEST_ASSERT(exact, "byte-mode byte-accuracy: PING\\n round-tripped");
+
+    const u8 server_msg[5] = { 'P', 'O', 'N', 'G', '\n' };
+    s64 sw = sys_write_for_proc(server, (hidx_t)conn_spoor_h, server_msg, 5);
+    TEST_EXPECT_EQ(sw, 5, "byte-mode server write places 5 bytes on s2c");
+    u8 cli_recv[16];
+    s64 cr = sys_read_for_proc(client, (hidx_t)conn_h, cli_recv, 16);
+    TEST_EXPECT_EQ(cr, 5, "byte-mode client read returns exactly 5 bytes");
+    exact = true;
+    for (int i = 0; i < 5; i++) if (cli_recv[i] != server_msg[i]) exact = false;
+    TEST_ASSERT(exact, "byte-mode byte-accuracy: PONG\\n round-tripped");
+
+    handle_close(server, conn_spoor_h);
+    handle_close(client, conn_h);
+    srv_registry_reset();
+    drop_test_proc(server);
+    drop_test_proc(client);
+}
+
+// ---------------------------------------------------------------------------
+// F2 regression (P6-pouch-sockets audit): mode-changing rebind of a
+// tombstoned service is refused. A SrvService's mode is part of its
+// identity; a client that captured `service_mode` under the LIVE check
+// could otherwise observe a wrong-mode connection landing in the new
+// poster's backlog.
+// ---------------------------------------------------------------------------
+
+void test_srv_client_byte_mode_mode_change_rebind_refused(void) {
+    srv_registry_reset();
+
+    // Phase 1: post in byte mode + commit.
+    struct Proc *server1 = make_marked_test_proc();
+    TEST_ASSERT(server1 != NULL, "server1 proc");
+    int svc_h = sys_post_service_byte_for_proc(server1, "sockmix", 7);
+    TEST_ASSERT(svc_h >= 0, "post \"sockmix\" in byte mode");
+
+    // Tombstone via srv_proc_exit_notify (mirrors poster-exit path).
+    srv_proc_exit_notify(server1);
+    struct SrvService *svc = srv_lookup("sockmix", 7);
+    TEST_ASSERT(svc != NULL, "tombstoned entry persists");
+    TEST_EXPECT_EQ((int)svc->state, (int)SRV_STATE_TOMBSTONED,
+        "poster exit tombstoned the entry");
+
+    // Phase 2: a marked Proc tries to rebind in 9P mode — REFUSED.
+    struct Proc *server2 = make_marked_test_proc();
+    TEST_ASSERT(server2 != NULL, "server2 proc");
+    TEST_EXPECT_EQ(sys_post_service_for_proc(server2, "sockmix", 7), -1,
+        "rebind with different mode (9P over byte tombstone) → -1");
+    svc = srv_lookup("sockmix", 7);
+    TEST_EXPECT_EQ((int)svc->state, (int)SRV_STATE_TOMBSTONED,
+        "refused mode-change rebind left tombstone intact");
+
+    // Phase 3: a same-mode rebind (byte → byte) SUCCEEDS — F2 only
+    // refuses MODE CHANGES, not all rebinds.
+    TEST_ASSERT(sys_post_service_byte_for_proc(server2, "sockmix", 7) >= 0,
+        "same-mode rebind (byte → byte) → handle");
+    svc = srv_lookup("sockmix", 7);
+    TEST_EXPECT_EQ((int)svc->state, (int)SRV_STATE_LIVE,
+        "same-mode rebind brought the entry LIVE");
+
+    drop_test_proc(server2);
+    drop_test_proc(server1);
+    srv_registry_reset();
+}
+
+// ---------------------------------------------------------------------------
+// F1 partial regression (P6-pouch-sockets audit): srvconn_server_recv_
+// blocking returns 0 (EOF) when c2s is empty AND eof is latched. The
+// full empty-but-live blocking case requires multi-threaded test infra
+// (the call would block forever); the empty-eof case is the finite
+// regression that confirms the blocking helper teardowns cleanly when
+// a peer closes.
+// ---------------------------------------------------------------------------
+
+void test_srv_client_byte_mode_server_recv_blocking_eof(void) {
+    srv_registry_reset();
+
+    struct Proc *server = make_marked_test_proc();
+    TEST_ASSERT(server != NULL, "server proc");
+    int svc_h = sys_post_service_byte_for_proc(server, "sockeof", 7);
+    TEST_ASSERT(svc_h >= 0, "post \"sockeof\" in byte mode");
+
+    struct Proc *client = make_test_proc();
+    TEST_ASSERT(client != NULL, "client proc");
+
+    int conn_h = srv_conn_open_for_proc(client, "sockeof", 7);
+    TEST_ASSERT(conn_h >= 0, "client opens the byte-mode service");
+
+    struct SrvConn *cn = conn_of(client, conn_h);
+    TEST_ASSERT(cn != NULL, "conn_of recovers the SrvConn");
+    TEST_EXPECT_EQ((int)cn->byte_mode, 1, "byte_mode set");
+
+    // Tear the connection down — chan_set_eof on c2s + s2c.
+    srvconn_teardown(cn);
+
+    // Server endpoint blocking recv on empty + eof should return 0
+    // (EOF) immediately, not block. This is the finite case of the
+    // F1 fix — the eof-latched short-circuit at the top of the loop.
+    u8 buf[16];
+    long r = srvconn_server_recv_blocking(cn, buf, 16);
+    TEST_EXPECT_EQ(r, 0L,
+        "srvconn_server_recv_blocking returns 0 on empty + eof");
+
+    handle_close(client, conn_h);
+    srv_registry_reset();
+    drop_test_proc(server);
     drop_test_proc(client);
 }

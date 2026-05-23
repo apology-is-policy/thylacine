@@ -822,6 +822,138 @@ state is stack-resident).
 
 ---
 
+## The AF_UNIX SOCK_STREAM backend
+
+Sub-chunk 12 (`pouch-sockets`) maps musl's `AF_UNIX` `SOCK_STREAM`
+sockets onto Thylacine's `/srv` registry — the highest-leverage seam
+in Phase 6 because stratumd (sub-chunk 16) needs it. The chunk has
+both a userspace dimension (the boundary-line patch `0006-pouch-
+sockets`) and a kernel dimension (a new transport mode on the
+SrvConn).
+
+### The byte-mode SrvConn — kernel-side
+
+The kernel `/srv` mechanism shipped at P5-corvus-srv as a **9P
+channel**. The client side (KOBJ_SRV) drove `p9_client_read/write`,
+which wrapped user data in Tread/Twrite frames; the server endpoint
+(KOBJ_SPOOR from `accept`) drained raw 9P T-frame bytes from c2s.
+That asymmetry is exactly what a 9P file server like corvus or
+stratumd wants — a `read()` on the server endpoint hands the
+userspace parser a T-frame to dispatch.
+
+But it is **wrong** for raw AF_UNIX SOCK_STREAM. A POSIX userspace
+server reading `read(conn, buf, 5)` to receive `"PING\n"` would
+instead see ~13 bytes of Twrite frame header + payload. The pouch
+sockets layer cannot map onto this 9P-shaped channel without a
+userspace 9P responder.
+
+Sub-chunk 12 adds a second transport mode — **byte mode** — to the
+SrvConn:
+
+| | 9P mode (existing) | Byte mode (new) |
+|---|---|---|
+| Posted via | `SYS_post_service` (= 26) | `SYS_post_service_byte` (= 43) |
+| `enum srv_mode` | `SRV_MODE_9P` | `SRV_MODE_BYTE` |
+| `SYS_srv_connect` Phase 2 | Drives `p9_client_handshake` (Tversion + Tattach + Tlopen) | **Skipped** — `cn->byte_mode` is true, no handshake |
+| Non-empty `path` | Walked via Twalk after Tattach | Refused with `-1` (no 9P fid to walk) |
+| Client `read/write` (KObj_SRV) | `srvconn_client_read/write` → 9P Tread/Twrite frames | `srvconn_client_send/recv` → raw `chan_produce/consume` on c2s/s2c |
+| Server endpoint `read/write` | Raw bytes — userspace is the 9P responder | Raw bytes — userspace sees the *user data*, no framing |
+| Consumer | corvus + future stratumd | pouch `AF_UNIX SOCK_STREAM` |
+
+The mode is captured by value on the SrvConn at mint
+(`srv_conn_open_for_proc` reads the service's mode under the registry
+lock alongside `poster_stripes`), so a tombstone-then-rebind of the
+service does not change the mode of an already-minted connection.
+
+Files (kernel):
+- `kernel/include/thylacine/devsrv.h` — `enum srv_mode` (`SRV_MODE_9P` = 0, `SRV_MODE_BYTE` = 1); `SrvService.mode` field; `srv_reserve` takes `mode`.
+- `kernel/include/thylacine/srvconn.h` — `SrvConn.byte_mode` bool; `srvconn_set_byte_mode(cn)` setter.
+- `kernel/include/thylacine/syscall.h` — `SYS_POST_SERVICE_BYTE` = 43.
+- `kernel/devsrv.c::srv_conn_open_for_proc` — captures `service_mode` under registry lock; calls `srvconn_set_byte_mode(cn)` BEFORE the SrvConn is enqueued in the accept backlog.
+- `kernel/srvconn.c::srvconn_set_byte_mode` — one-way setter; pre-publication, no lock needed.
+- `kernel/syscall.c::sys_post_service_core` — shared body parameterized by mode; `sys_post_service_for_proc` / `sys_post_service_byte_for_proc` are 3-arg public wrappers (the existing 3-arg signature is preserved so kernel tests + corvus's wrapper continue to link).
+- `kernel/syscall.c::sys_srv_connect_for_proc` — if `cn->byte_mode`, skips handshake; refuses non-empty path.
+- `kernel/syscall.c::sys_read/write_for_proc` (KOBJ_SRV arm) — dispatches on `cn->byte_mode`.
+
+### Why a new syscall, not an `int mode` arg
+
+`SYS_post_service` shipped with a 2-arg signature: the dispatcher reads
+`x0`/`x1` only. Adding `x2` for a mode would interpret the calling
+convention's leftover value in `x2` as garbage mode — corvus's existing
+`t_post_service` wrapper passes nothing in `x2`, so the kernel would
+read an arbitrary value. Adding a new syscall number is the safer
+extension: legacy callers stay on `SYS_post_service` (= 26, mode 9P);
+new callers (pouch's `bind`) call `SYS_post_service_byte` (= 43, mode
+BYTE). The two share the post-gate / name-validation / reserve-commit
+core (`sys_post_service_core`).
+
+### The pouch userspace shadow
+
+pouch maintains a per-process socket slot table (`POUCH_SOCK_MAX = 8`).
+`socket()` allocates a slot and returns a fd tagged with bit 30
+(`POUCH_SOCK_TAG = 0x40000000`) — above the kernel's `PROC_HANDLE_MAX`
+so no real kernel fd ever overlaps. The slot tracks
+(`state`, `kernel_fd`):
+
+| Slot state | kernel_fd | Set by |
+|---|---|---|
+| `POUCH_SOCK_FRESH` | -1 | `socket()` |
+| `POUCH_SOCK_LISTENING` | KObj_Srv listener handle | `bind()` calling `SYS_post_service_byte` |
+| `POUCH_SOCK_CONNECTED` | KObj_Srv client SrvConn handle | `connect()` calling `SYS_srv_connect` with `path_len=0` |
+
+POSIX calls dispatch through the slot:
+- `bind(tagged_fd, ...)` extracts `<name>` from `sun_path` (accepts `/srv/<name>` or bare `<name>`) and calls `SYS_post_service_byte`. The kernel post-gate (`PROC_FLAG_MAY_POST_SERVICE`) must be stamped; joey grants it at spawn via `t_spawn_with_perms(... T_SPAWN_PERM_MAY_POST_SERVICE)`.
+- `listen(tagged_fd, backlog)` is a no-op pouch-side validation. `backlog` is ignored.
+- `accept(tagged_fd, ...)` calls `SYS_srv_accept` and returns the **raw kernel Spoor fd** (NOT pouch-tagged). Subsequent `read/write/close` on it bypass the pouch dispatch shim.
+- `connect(tagged_fd, ...)` extracts the name and calls `SYS_srv_connect(name, name_len, NULL, 0)`. `path_len=0` is the kernel's "no Twalk" case; in byte mode the kernel ALSO skips the 9P handshake. Per-Proc cap = 1 outstanding client connection.
+- `getsockopt(fd, SOL_SOCKET, SO_PEERCRED, ...)` calls `SYS_srv_peer` and marshals `srv_peer_info` (stripes/caps/console/alive) into `struct ucred` (pid = peer stripes truncated to pid_t; uid = gid = 0 at v1.0 — Thylacine has no uid model). Other levels/options return `ENOPROTOOPT`.
+
+The dispatch shims in `src/unistd/{read,write,close}.c` test `(fd & POUCH_SOCK_TAG)`; tagged → route through `pouch_sock_kernel_fd(fd)`; untagged → pass straight to `SYS_read/write/close`. Cost: one bit-test on the common path.
+
+### `pouch_sock_kernel_fd` returns
+
+| Input fd | Return |
+|---|---|
+| Untagged (any value without bit 30) | `fd` unchanged — pass-through to kernel |
+| Tagged + slot vacant | `-1` with `errno = EBADF` |
+| Tagged + slot `POUCH_SOCK_FRESH` (post-`socket()`, pre-bind/connect) | `-1` with `errno = ENOTCONN` |
+| Tagged + slot `POUCH_SOCK_LISTENING` or `POUCH_SOCK_CONNECTED` | the slot's kernel handle |
+
+### Refusals at the libc layer
+
+Explicit POSIX errnos rather than ENOSYS at the 0xFFFF sentinel:
+
+| Call shape | errno | Why |
+|---|---|---|
+| `socket(AF_INET, ...)` | `EAFNOSUPPORT` | Network phase, not v1.0 |
+| `socket(AF_UNIX, SOCK_DGRAM, 0)` | `EPROTONOSUPPORT` | Datagram sockets deferred |
+| `socket(AF_UNIX, SOCK_STREAM, 42)` | `EPROTONOSUPPORT` | Non-zero protocol unsupported |
+| `bind(fd, "/usr/foo", ...)` | `EINVAL` | Paths outside `/srv/` aren't AF_UNIX-backed at v1.0 |
+| `bind(fd, ...)` without `PROC_FLAG_MAY_POST_SERVICE` | `EACCES` | Kernel post-gate (corvus.tla `PostService` precondition) |
+| `connect(fd, "/srv/unposted", ...)` | `ECONNREFUSED` | Service not posted (or unknown name) |
+| `socketpair(...)`, `shutdown(...)`, `recv*/send*` other than passthrough, `getsockname/getpeername` | `EIO` (from the 0xFFFF sentinel) at v1.0 — deferred |
+
+### What v1.0 doesn't do
+
+- **`SO_PEERCRED` on a CLIENT-side fd** — the kernel `SYS_SRV_PEER` gate is "caller stripes == poster stripes," which serves a SERVER reading peer identity. A client querying its server's identity would need a kernel extension. v1.0 surfaces `ENOTSOCK` on the client side; the server side works.
+- **Poll on a CONNECTED pouch socket fd** — `poll()` doesn't yet know how to translate tagged fds. Blocking I/O works (the proving binary uses it); nonblocking + multiplexing on AF_UNIX sockets is deferred.
+- **`AF_UNIX` paths outside `/srv/`** — the registry has one namespace; arbitrary filesystem paths can't back a socket at this phase (POUCH-DESIGN.md OPEN Q 6.2).
+- **`SOCK_DGRAM` / `SOCK_SEQPACKET`** — only `SOCK_STREAM`.
+- **`socketpair(2)`** — deferred to v1.x.
+
+### Verifying live — `/pouch-hello-sockets`
+
+The eighth pouch binary. One Proc, two pthreads:
+- **Server thread**: `socket → bind("/srv/pouch-sock-demo") → listen → accept → read PING → write PONG → getsockopt(SO_PEERCRED) → close`.
+- **Main thread** (client): `pthread_barrier_wait → socket → connect → write PING → read PONG → getsockopt(SO_PEERCRED) (expects ENOTSOCK on the client-side fd at v1.0) → close → pthread_join`.
+
+The byte-accurate read counts (5 bytes for `"PING\n"` and `"PONG\n"`)
+are the proving claim: byte mode delivers the user data with no 9P
+framing visible to userspace. The client conn fd `0x40000001` confirms
+the tagged-fd encoding.
+
+---
+
 ## The `/dev/full` Dev + the `getrandom` proving path
 
 Sub-chunk 11 (`pouch-devnodes`) lands the third member of the trivial
@@ -1062,6 +1194,52 @@ sockets, signals across the remaining sub-chunks.
   code does. C++ or `-fexceptions` code therefore cannot link until pouch gains
   an unwinder — out of scope for v1.0 (static C: `printf`, libsodium,
   stratumd). See "The compiler runtime."
+- **AF_UNIX `bind`/`connect` errno is coarse-grained (P6-pouch-sockets F3
+  deferred).** Both calls collapse every kernel-side `SYS_post_service_byte`
+  / `SYS_srv_connect` failure to one POSIX errno — `EACCES` for `bind`,
+  `ECONNREFUSED` for `connect`. The kernel returns flat `-1` with no errno
+  channel; pouch picks the most-likely cause for each call. A program
+  hitting (a) the post-gate, (b) name-already-in-use, (c) registry-full,
+  (d) handle-table-full, or (e) bad-name all sees the same errno for the
+  call. Acceptable at v1.0; a future richer kernel error channel
+  (POUCH-DESIGN.md §5.1) would let pouch surface precision.
+- **Multi-thread bind/connect on the same socket fd is racy (P6-pouch-sockets
+  F4 deferred).** `pouch_sock_resolve` returns a slot pointer under lock,
+  but post-resolve state inspection (FRESH/LISTENING/CONNECTED) and the
+  kernel-handle write happen without re-acquiring `g_lock`. Two pthreads
+  concurrently calling `bind()` on the same fresh fd can each see
+  `state==FRESH`, each post a service, and the second's write overwrites
+  the first — orphaning the first listener handle in the kernel handle
+  table. The proving binary uses one slot per thread; no exposure at
+  v1.0. A real multi-threaded server doing concurrent socket ops on the
+  same fd should serialize at the application layer or wait for the
+  CAS-style transition helper.
+- **`srv_conn_count` is not atomic for multi-thread Procs (P6-pouch-sockets
+  F12 deferred).** Sub-chunks 9a/9b landed multi-threaded Procs, but the
+  per-Proc cap counter `p->srv_conn_count` (kernel/devsrv.c:355-358) is
+  read-then-incremented without atomicity. Two threads in the same Proc
+  concurrently calling `SYS_SRV_CONNECT` can both pass the cap check and
+  both proceed. The cap of 1 is briefly violated. At v1.0 the pouch
+  proving binary issues exactly one client connect; the multi-thread
+  cap violation is dormant. A future atomic-CAS would close it.
+- **Service `mode` persists across TOMBSTONED (P6-pouch-sockets F7
+  documented).** The header text "mode immutable through LIVE" omits
+  the TOMBSTONED case. Behavior: `srv_proc_exit_notify` does NOT clear
+  `e->mode` on tombstone, and `srv_reserve` of a tombstoned entry
+  refuses a mode-changing rebind (F2 close). Net result: mode is in
+  fact immutable across LIVE → TOMBSTONED → LIVE cycles for the same
+  service name — a service identity property. A different mode means
+  a different name.
+- **AF_UNIX SOCK_STREAM server reads are blocking (P6-pouch-sockets F1
+  close).** Unlike corvus's 9P-mode server (non-blocking; poll-then-
+  read pattern), pouch's byte-mode server endpoint Spoor uses
+  `srvconn_server_recv_blocking` (kernel/srvconn.c) — a tsleep on the
+  c2s ring's Rendez until data arrives or the peer closes. This is the
+  fix for the F1 race where a non-blocking `read()` returned 0 (POSIX
+  EOF) when the server thread's accept-wake raced the client's first
+  `write()` across SMP CPUs. A future per-connection idle deadline
+  would extend by setting a `server_deadline_ns` analog to
+  `client_deadline_ns`.
 
 ## Naming rationale
 

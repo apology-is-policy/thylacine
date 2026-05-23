@@ -129,16 +129,27 @@ POSIX `open / read / write / pread / pwrite / lseek / fstat / fsync / ftruncate 
 
 ### 6.2 Sockets → /srv
 
-POSIX `AF_UNIX` `SOCK_STREAM` sockets map onto Thylacine's **`/srv`** mechanism (the `devsrv` registry + `SrvConn` per-connection transport), which already exists and was built for exactly this shape.
+POSIX `AF_UNIX` `SOCK_STREAM` sockets map onto Thylacine's **`/srv`** mechanism (the `devsrv` registry + `SrvConn` per-connection transport).
 
-- `socket(AF_UNIX, SOCK_STREAM, 0)` → allocates a pouch-side socket object; no kernel call yet.
-- `bind(fd, path) + listen(fd, backlog)` → `t_post_service` for the service name derived from `path`.
-- `accept(fd)` → `t_srv_accept` → a `SrvConn` server-endpoint handle.
-- `connect(fd, path)` → `t_srv_connect`.
-- `send / recv` → `write / read` on the connection handle.
-- `getsockopt(SO_PEERCRED)` → `t_srv_peer`. This is **strictly better than SO_PEERCRED**: the peer identity (`stripes`, console bit, live caps) is kernel-stamped and unforgeable.
+**Revised 2026-05-23 at sub-chunk 12 impl time:** the original design statement that `/srv` "was built for exactly this shape" was *almost* correct — it's true for the 9P-shaped servers `/srv` was designed for (corvus, future stratumd), but the kernel SrvConn shipped at P5-corvus-srv as a **9P channel**: the client-side `read/write` uses `srvconn_client_read/write` (Tread/Twrite frames via the kernel-owned `p9_client`), and the server endpoint Spoor reads raw 9P T-frame bytes from c2s. A POSIX userspace server reading `read(conn, buf, 5)` to receive `"PING\n"` would see ~13 bytes of Twrite frame header + payload instead. That asymmetry serves a 9P responder (corvus parses the T-frames) but breaks raw AF_UNIX byte streams.
 
-**The path↔service mapping**: a Unix-socket path *is* a filesystem path, and a `/srv` service *is* reachable in the filesystem at `/srv/<name>`. The clean mapping: an `AF_UNIX` socket bound at path `/srv/<name>` *is* the `/srv` service `<name>`. Unix sockets are not bolted on as a separate namespace — **they are the `/srv` filesystem**, which is the Plan-9-native answer. stratumd's listen paths are configuration; we point them at `/srv/...`.
+Sub-chunk 12 resolves this by adding a **byte transport mode** to the SrvConn (kernel change, audit-bearing):
+
+- `enum srv_mode { SRV_MODE_9P, SRV_MODE_BYTE }` on the SrvService (set at `srv_reserve`; immutable through LIVE).
+- New syscall `SYS_POST_SERVICE_BYTE = 43` — the byte-mode variant of `SYS_POST_SERVICE = 26`. Legacy callers (corvus, stratumd) keep `SYS_POST_SERVICE` (default 9P mode); pouch's `bind` calls `SYS_POST_SERVICE_BYTE`.
+- The SrvConn carries `byte_mode` propagated from the service at mint (`srv_conn_open_for_proc` reads `service->mode` under the registry lock).
+- `SYS_srv_connect` against a byte-mode service skips the 9P handshake and refuses a non-empty path; `sys_read/write_for_proc`'s KOBJ_SRV arm dispatches on `cn->byte_mode` (byte → `srvconn_client_send/recv`, raw c2s/s2c; 9P → `srvconn_client_read/write`, framed).
+
+The pouch-side translation table now reads:
+
+- `socket(AF_UNIX, SOCK_STREAM, 0)` → allocates a pouch-side userspace slot (a tagged fd with `POUCH_SOCK_TAG` = 0x40000000); no kernel call yet.
+- `bind(fd, path) + listen(fd, backlog)` → `SYS_POST_SERVICE_BYTE` for the service name derived from `path`; listen is a no-op pouch-side validation.
+- `accept(fd)` → `SYS_srv_accept` → a `SrvConn` server-endpoint Spoor handle (NOT pouch-tagged — server-side I/O bypasses the dispatch shim).
+- `connect(fd, path)` → `SYS_srv_connect(name, name_len, NULL, 0)` — byte mode skips the kernel 9P handshake.
+- `send / recv` → `write / read` on the connection handle (tagged-fd dispatch shim translates client-side, raw fast path server-side).
+- `getsockopt(SO_PEERCRED)` → `SYS_srv_peer`. **Strictly better than SO_PEERCRED**: the peer identity (`stripes`, `caps`, `console`, `alive`) is kernel-stamped and unforgeable. Marshaled into `struct ucred` for POSIX compat at v1.0; the native richer surface is reserved for Thylacine-native code. CLIENT-SIDE `SO_PEERCRED` returns `ENOTSOCK` at v1.0 (the kernel `SYS_SRV_PEER` gate is server-only — a kernel extension for client-side peer query is a v1.x item).
+
+**The path↔service mapping**: a Unix-socket path *is* a filesystem path, and a `/srv` service *is* reachable in the filesystem at `/srv/<name>`. The clean mapping: an `AF_UNIX` socket bound at path `/srv/<name>` *is* the `/srv` service `<name>`. Unix sockets are not bolted on as a separate namespace — **they are the `/srv` filesystem**, which is the Plan-9-native answer. stratumd's listen paths are configuration; we point them at `/srv/...`. stratumd remains a 9P-mode service (`SYS_POST_SERVICE` = 26) — its users speak 9P over the SrvConn. Pouch sockets are a separate concern, riding the byte-mode path.
 
 **[OPEN Q 6.2]** `AF_UNIX` paths *not* under `/srv/` — unsupported (return an error at `bind`), or backed by a second mechanism. Lean: unsupported at this phase; document it; revisit if a ported app needs filesystem-scattered sockets.
 
@@ -325,7 +336,7 @@ Each sub-chunk lands independently with the two-commit pattern; audit-bearing on
 | 9 | **pouch-threads** | pthread create/join/detach + mutex/cond/rwlock/once + TLS errno | **yes** (concurrency) |
 | 10 | **pouch-poll** | `poll`/`select`/`ppoll`/`pselect` retargeted onto `SYS_POLL` (kernel poll primitive audited in P5-poll-a/b) — **LANDED 2026-05-23** | no |
 | 11 | **pouch-devnodes** | The minimal synthetic-FS namespace (§6.6): trivial `/dev` nodes (`null`/`zero`/`full`) as tiny kernel Devs; the `getrandom`-syscall path libsodium needs — **LANDED 2026-05-23** (devfull Dev + /pouch-hello-getrandom proving binary; path-based `open("/dev/null")` access deferred to a future multi-component-walk sub-chunk) | no |
-| 12 | **pouch-sockets** | `AF_UNIX` `SOCK_STREAM` → `/srv`; `SO_PEERCRED` → `t_srv_peer` | **yes** (capability surface) |
+| 12 | **pouch-sockets** | `AF_UNIX` `SOCK_STREAM` → `/srv`; `SO_PEERCRED` → `t_srv_peer`. Discovery at impl time: /srv shipped as a 9P-shaped channel — raw byte streams need a NEW kernel `SrvService.mode` (SRV_MODE_9P / SRV_MODE_BYTE) + `SYS_POST_SERVICE_BYTE` syscall + KOBJ_SRV read/write mode dispatch. corvus + stratumd stay on 9P mode; pouch sockets use byte mode. **LANDED 2026-05-23** | **yes** (capability surface + new kernel transport mode) |
 | 13 | **pouch-signals** | The supported signal subset → notes | **yes** (notes / async safety) |
 | 14 | **pouch-libsodium** | Cross-compile libsodium; self-test | no |
 | 15 | **pouch-stratumd-build** | Build stratumd against the sysroot; Thylacine `peer_creds` arm | no (Stratum-side) |

@@ -742,6 +742,34 @@ enum {
     // a kernel bug. The x0 the SVC dispatch writes on a fall-through
     // path is undefined; v1.0 reaches sched() unconditionally.
     SYS_THREAD_EXIT  = 42,   // no args
+
+    // SYS_POST_SERVICE_BYTE — register a /srv service in RAW BYTE MODE.
+    // P6-pouch-sockets (sub-chunk 12). Identical wire shape to
+    // SYS_POST_SERVICE (name_va, name_len → KObj_Srv listener handle)
+    // but the service entry's transport mode is SRV_MODE_BYTE instead
+    // of SRV_MODE_9P. Effects propagate to every connection minted
+    // against this listener:
+    //   - SYS_srv_connect SKIPS the 9P handshake (Tversion + Tattach +
+    //     Tlopen) and REFUSES a non-empty path. The kernel returns a
+    //     KObj_Srv handle ready for raw byte I/O the moment the
+    //     SrvConn is enqueued on the accept backlog.
+    //   - sys_read/write_for_proc's KObj_SRV arm routes through
+    //     srvconn_client_send/recv (raw c2s/s2c) instead of
+    //     srvconn_client_read/write (9P Tread/Twrite).
+    //
+    // Why a separate syscall instead of an `int mode` arg on
+    // SYS_POST_SERVICE: the existing svc dispatcher reads x0/x1 only.
+    // Adding x2 for mode would interpret uninitialized x2 (corvus's
+    // wrapper passes nothing) as garbage mode — a latent ABI hazard.
+    // A new syscall number is the safer extension.
+    //
+    // Same post-gate as SYS_POST_SERVICE: PROC_FLAG_MAY_POST_SERVICE
+    // is required.
+    //
+    //   arg: name_va (x0), name_len (x1)
+    //   returns: KObj_Srv listener handle (>=0) on success, -1 on
+    //            gate fail / bad name / duplicate / OOM / registry full
+    SYS_POST_SERVICE_BYTE = 43,
 };
 
 // SYS_WALK_OPEN's FROM_ROOT sentinel: when passed as the spoor_fd, the

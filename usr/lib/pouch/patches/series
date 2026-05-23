@@ -19,3 +19,4 @@
 0003-pouch-mman.patch
 0004-pouch-pthread.patch
 0005-pouch-poll.patch
+0006-pouch-sockets.patch

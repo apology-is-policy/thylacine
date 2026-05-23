@@ -202,6 +202,27 @@ struct SrvConn {
     u32                 client_fid;
     bool                client_handshake_done;
     u64                 client_offset;
+
+    // P6-pouch-sockets (sub-chunk 12): transport mode propagated from
+    // the service at mint (srv_conn_open_for_proc reads service->mode
+    // under the registry lock; srvconn_set_byte_mode is the one-way
+    // setter). FALSE (default) is SRV_MODE_9P — read/write route
+    // through srvconn_client_read/write, the kernel-owned p9_client
+    // driving Tread/Twrite frames. TRUE is SRV_MODE_BYTE — read/write
+    // route through srvconn_client_send/recv, raw chan_produce /
+    // chan_consume against c2s / s2c, no 9P framing. The setter is
+    // called BEFORE the SrvConn is enqueued (so an accepting server
+    // never observes a mode-mid-flight conn).
+    //
+    // F5 close (P6-pouch-sockets audit): the setter uses
+    // __atomic_store_n(.., __ATOMIC_RELEASE) and every reader (devsrv_
+    // read, sys_read/write_for_proc's KOBJ_SRV arm, sys_srv_connect_
+    // for_proc's byte-mode gate) uses __atomic_load_n(.., __ATOMIC_
+    // ACQUIRE). The release-acquire pairing ensures cross-CPU observers
+    // see the field consistently with the SrvConn publication; the
+    // pre-publication property still holds for current observers
+    // (which all reach cn through a lock-paired path).
+    bool                byte_mode;
 };
 
 _Static_assert(__builtin_offsetof(struct SrvConn, magic) == 0,
@@ -226,6 +247,29 @@ _Static_assert(__builtin_offsetof(struct SrvConn, magic) == 0,
 // driving Tversion/Tattach is the open path's job (a3b).
 struct SrvConn *srvconn_create(u64 peer_stripes, int peer_pid,
                                bool peer_console, u64 server_stripes);
+
+// srvconn_server_recv_blocking — F1 close (P6-pouch-sockets audit).
+// Blocking variant of srvconn_server_recv; mirrors srvconn_client_recv
+// against c2s. Used by `devsrv_read` for byte-mode SrvConns (the POSIX
+// AF_UNIX SOCK_STREAM blocking-read expectation). 9P-mode SrvConns
+// keep the non-blocking srvconn_server_recv (corvus's poll-then-read
+// pattern). Returns bytes read (>=0) or -1 on bad args / torn cn.
+long srvconn_server_recv_blocking(struct SrvConn *cn, u8 *buf, long n);
+
+// srvconn_set_byte_mode — one-way setter for cn->byte_mode = true.
+// P6-pouch-sockets (sub-chunk 12). Called from srv_conn_open_for_proc
+// BEFORE the SrvConn is enqueued in the accept backlog and BEFORE
+// sys_srv_connect_for_proc decides whether to drive the 9P handshake
+// — both paths read the flag.
+//
+// Idempotent (sets the flag; never clears). No lock needed: the field
+// is captured at mint (BEFORE any other observer can see the cn) and
+// is then read-only for the cn's lifetime. Subsequent observers see a
+// consistent value.
+//
+// `cn` must be a freshly-minted SrvConn from srvconn_create — undefined
+// behavior on a NULL or already-published SrvConn.
+void srvconn_set_byte_mode(struct SrvConn *cn);
 
 // srvconn_ref — take a reference. Extincts on a NULL / corrupted conn.
 void srvconn_ref(struct SrvConn *cn);

@@ -217,6 +217,8 @@ struct SrvConn *srvconn_create(u64 peer_stripes, int peer_pid,
     cn->server_stripes     = server_stripes;
     cn->client_deadline_ns = 0;
     cn->client_timed_out   = false;
+    /* byte_mode = false by KP_ZERO; srvconn_set_byte_mode flips on after
+     * mint if the service is SRV_MODE_BYTE (P6-pouch-sockets). */
     __atomic_store_n(&cn->ref, 1, __ATOMIC_RELAXED);
 
     // Publish the magic LAST — until this store the struct is not a
@@ -233,6 +235,29 @@ void srvconn_ref(struct SrvConn *cn) {
     int pre = __atomic_fetch_add(&cn->ref, 1, __ATOMIC_RELAXED);
     if (pre <= 0)
         extinction("srvconn_ref: refcount was <= 0 (use-after-free?)");
+}
+
+void srvconn_set_byte_mode(struct SrvConn *cn) {
+    if (!cn || cn->magic != SRV_CONN_MAGIC)
+        extinction("srvconn_set_byte_mode: NULL or corrupted SrvConn");
+    // F6 close (P6-pouch-sockets audit): idempotency assertion. The
+    // setter's contract is one-way (false -> true, never the reverse,
+    // never after publication). A buggy caller that invoked it on an
+    // already-handshaken 9P-mode SrvConn would silently flip the conn
+    // into byte mode mid-flight, bypassing the 9P state. Catching
+    // it here turns a quiet corruption into a clear extinction.
+    if (cn->client_handshake_done)
+        extinction("srvconn_set_byte_mode: 9P handshake already driven "
+                   "(mode flip on a published SrvConn)");
+    // F5 close (P6-pouch-sockets audit): ATOMIC_RELEASE so cross-CPU
+    // observers (sys_read/write_for_proc's KOBJ_SRV arm, devsrv_read)
+    // doing ATOMIC_ACQUIRE see the byte_mode write in the correct
+    // ordering vs the SrvConn publication (handle_alloc + backlog
+    // push). Pre-publication AND release-ordered is belt-and-braces:
+    // current observers are protected by the publication-as-barrier;
+    // future observers that bypass the publication barrier (a planned
+    // cross-CPU peek) still get the right value.
+    __atomic_store_n(&cn->byte_mode, true, __ATOMIC_RELEASE);
 }
 
 void srvconn_unref(struct SrvConn *cn) {
@@ -527,6 +552,55 @@ long srvconn_server_recv(struct SrvConn *cn, u8 *buf, long n) {
     if (!buf || n < 0) return -1;
     if (n == 0) return 0;
     return chan_consume_nonblock(&cn->c2s, buf, n);
+}
+
+// srvconn_server_recv_blocking — F1 close (P6-pouch-sockets audit).
+//
+// The non-blocking srvconn_server_recv above is designed for corvus's
+// 9P-server pattern (poll-then-read; the userspace 9P responder uses
+// t_poll on the listener + per-conn POLLIN signals before pulling
+// frames off c2s). A POSIX userspace server reading SOCK_STREAM bytes
+// — pouch's AF_UNIX consumer — expects blocking semantics: a read on
+// an empty-but-live connection should block until data arrives, not
+// return 0 (POSIX EOF). Returning 0 to a POSIX server is a spurious
+// EOF that breaks the round trip when accept-wake races the client's
+// first write across SMP CPUs.
+//
+// This blocking variant mirrors srvconn_client_recv's discipline
+// against c2s instead of s2c: spin_lock the channel, check count > 0
+// (read) / eof (return 0), else tsleep on the channel's Rendez until
+// chan_produce wakes it or chan_set_eof latches eof. Deadline = 0
+// blocks indefinitely — a future per-connection idle timer would
+// extend by setting a server_deadline_ns analog to client_deadline_ns.
+long srvconn_server_recv_blocking(struct SrvConn *cn, u8 *buf, long n) {
+    if (!cn || cn->magic != SRV_CONN_MAGIC) return -1;
+    if (!buf || n < 0) return -1;
+    if (n == 0) return 0;
+
+    struct srvconn_chan *ch = &cn->c2s;
+    for (;;) {
+        spin_lock(&ch->lock);
+        if (ch->count > 0) {
+            long got = chan_ring_read(ch, buf, n);
+            spin_unlock(&ch->lock);
+            return got;
+        }
+        if (ch->eof) {
+            spin_unlock(&ch->lock);
+            return 0;                        // EOF — connection torn down
+        }
+        spin_unlock(&ch->lock);
+
+        // tsleep with deadline=0 — block indefinitely. wake fires from
+        // srvconn_client_send's chan_produce (data arrived) or
+        // srvconn_teardown's chan_set_eof on c2s (peer closed).
+        int ts = tsleep(&ch->rendez, chan_cond_readable, ch, 0u);
+        if (ts == TSLEEP_TIMEDOUT) {
+            // Unreachable with deadline=0; defense in depth.
+            return -1;
+        }
+        // TSLEEP_AWOKEN — loop, re-check the channel under the lock.
+    }
 }
 
 // =============================================================================

@@ -1,0 +1,1042 @@
+pouch boundary-line patch 0006 - AF_UNIX SOCK_STREAM over /srv byte mode
+
+Phase 6 sub-chunk 12 (pouch-sockets). Maps musl's AF_UNIX SOCK_STREAM
+surface onto Thylacine's /srv registry using the new BYTE-MODE
+transport added to the kernel SrvConn at this sub-chunk. Twelve files,
+one set of related changes.
+
+  PAIRED WITH kernel changes (this commit, not in this patch file):
+    kernel/include/thylacine/devsrv.h adds enum srv_mode {9P, BYTE}
+      + SrvService.mode field. srv_reserve takes the mode.
+    kernel/include/thylacine/srvconn.h adds SrvConn.byte_mode field
+      + srvconn_set_byte_mode setter.
+    kernel/include/thylacine/syscall.h adds SYS_POST_SERVICE_BYTE
+      = 43, the byte-mode variant of SYS_POST_SERVICE = 26.
+    kernel/devsrv.c::srv_conn_open_for_proc propagates the service
+      mode onto every minted SrvConn BEFORE enqueuing it on the
+      accept backlog.
+    kernel/syscall.c::sys_srv_connect_for_proc SKIPS the 9P handshake
+      when the SrvConn is byte-mode (a non-empty path is refused).
+    kernel/syscall.c::sys_read/write_for_proc's KObj_SRV arm dispatches
+      on cn->byte_mode: byte mode -> srvconn_client_send/recv (raw
+      chan_produce/consume on c2s/s2c); 9P mode keeps the original
+      srvconn_client_write/read path. The existing corvus + future
+      stratumd consumers (SRV_MODE_9P, the default) are unaffected.
+
+The translation table (POUCH-DESIGN.md section 6.2; revised at this
+sub-chunk to acknowledge two transport modes):
+  socket(AF_UNIX, SOCK_STREAM, 0)  pouch-side slot alloc; no kernel call
+  bind(fd, /srv/<name>)            SYS_post_service_byte(<name>) -
+                                   registers the service in BYTE mode
+                                   (NOT the 9P mode corvus / stratumd
+                                   use)
+  listen(fd, backlog)              no-op (kernel registry has its own
+                                   bounded accept queue)
+  accept(fd)                       SYS_srv_accept(listener_h) returning
+                                   a RAW kernel Spoor fd (not pouch-
+                                   tagged; server-side I/O stays on
+                                   the syscall-seam fast path)
+  connect(fd, /srv/<name>)         SYS_srv_connect(<name>, NULL, 0) -
+                                   the kernel reads the service mode
+                                   and SKIPS the 9P handshake for
+                                   byte mode, returning a SrvConn
+                                   client handle ready for raw I/O
+  getsockopt(SO_PEERCRED)          SYS_srv_peer(conn_h, &out) marshalled
+                                   into a struct ucred (peer stripes
+                                   -> ucred.pid; uid/gid are 0 at
+                                   v1.0 since Thylacine has no uid
+                                   model)
+  read / write / close             dispatch through pouch_sock_kernel_fd
+                                   (a single bit test on the common
+                                   path), routing tagged fds to their
+                                   slot's stored kernel handle
+
+  arch/aarch64/bits/syscall.h.in   Adds five Thylacine /srv extension
+      numbers - __NR_post_service 26, __NR_srv_accept 27, __NR_srv_peer
+      28, __NR_srv_connect 30, __NR_post_service_byte 43 - so musl's
+      sed pass generates the SYS_post_service / SYS_srv_accept /
+      SYS_srv_peer / SYS_srv_connect / SYS_post_service_byte aliases
+      the replacement socket files reference.
+
+  src/internal/_pouch_socket.h     New header. The slot-table API +
+      tag-bit encoding (POUCH_SOCK_TAG = 0x40000000; sits above the
+      kernel's PROC_HANDLE_MAX so no real kernel fd ever overlaps a
+      pouch socket fd). POUCH_SOCK_MAX = 8 (generous for v1.0 servers;
+      per-Proc concurrent /srv client cap remains 1).
+
+  src/network/_pouch_socket.c      New file. The slot table + the
+      three core helpers (pouch_sock_alloc, pouch_sock_kernel_fd,
+      pouch_sock_close). All structural changes happen under a single
+      LOCK / UNLOCK pair around the static table. pthread peers share
+      the table; serialization is sufficient because the table
+      operations are short (O(POUCH_SOCK_MAX) at worst) and contention
+      is rare (sockets aren't accept-heavy at v1.0).
+
+  src/network/socket.c             Full rewrite. AF_UNIX SOCK_STREAM
+      only; AF_INET / SOCK_DGRAM / etc return EAFNOSUPPORT /
+      EPROTONOSUPPORT per invariant P-3 (no silently-wrong POSIX).
+      SOCK_CLOEXEC / SOCK_NONBLOCK accepted, silently no-op at v1.0.
+
+  src/network/bind.c               Full rewrite. Extracts the service
+      name from sun_path - "/srv/<name>" or relative "<name>" - and
+      calls SYS_post_service_byte (not SYS_post_service - pouch
+      sockets are byte-mode services; the 9P-mode variant is reserved
+      for corvus and stratumd). The kernel post-gate
+      (PROC_FLAG_MAY_POST_SERVICE) must already be stamped on the
+      calling Proc; joey grants it at spawn via t_spawn_with_perms.
+
+  src/network/listen.c             Full rewrite. No-op at v1.0.
+
+  src/network/accept.c             Full rewrite. SYS_srv_accept on
+      the slot's listener handle; returns the kernel-minted Spoor fd
+      DIRECTLY (NOT pouch-tagged). Server-side I/O bypasses the
+      pouch dispatch shim.
+
+  src/network/accept4.c            Full rewrite. Delegates to accept()
+      after flag validation. SOCK_CLOEXEC / SOCK_NONBLOCK no-op;
+      unrecognized flags get EINVAL.
+
+  src/network/connect.c            Full rewrite. Same sun_path -> name
+      extraction as bind. Calls SYS_srv_connect with path_len == 0
+      (the kernel's "no Twalk" case - which the byte-mode kernel
+      handler now uses to also skip the 9P handshake entirely).
+      Per-Proc concurrent client cap = 1 - a second connect() before
+      closing the first gets ECONNREFUSED.
+
+  src/network/getsockopt.c         Full rewrite. SOL_SOCKET +
+      SO_PEERCRED -> SYS_srv_peer -> ucred marshal. All other levels
+      and options return ENOPROTOOPT at v1.0.
+
+  src/unistd/read.c                Patched. Single-bit tag check;
+      tagged fd dispatches through pouch_sock_kernel_fd to the slot's
+      stored kernel handle; untagged passes straight to SYS_read.
+      The cancellable path (syscall_cp) is preserved on both arms.
+
+  src/unistd/write.c               Patched. Same shape as read.c.
+
+  src/unistd/close.c               Patched. Tagged fd routes through
+      pouch_sock_close (frees slot + closes kernel handle if any);
+      untagged falls through to the pristine __aio_close +
+      __syscall_cp(SYS_close) path.
+
+Binding design: docs/POUCH-DESIGN.md sub-chunk 12 (section 14),
+section 6.2 (revised to include the byte-mode transport). Invariants
+P-1, P-3, P-4. Reference: docs/reference/78-pouch.md ("The AF_UNIX
+SOCK_STREAM backend" + "The byte-mode SrvConn").
+
+Proving binary: /pouch-hello-sockets - end-to-end AF_UNIX SOCK_STREAM
+round trip via the byte-mode /srv. Two pthreads in one Proc do the
+full bind / listen / accept / connect / read / write / SO_PEERCRED /
+close dance.
+--- a/arch/aarch64/bits/syscall.h.in
++++ b/arch/aarch64/bits/syscall.h.in
+@@ -352,3 +352,25 @@
+ #define __NR_torpor_wake 40
+ #define __NR_thread_spawn 41
+ #define __NR_thread_exit 42
++
++/*
++ * pouch / Thylacine /srv extension numbers (P6-pouch-sockets, sub-chunk
++ * 12). The pouch-side AF_UNIX SOCK_STREAM layer maps onto Thylacine's
++ * /srv registry per POUCH-DESIGN.md section 6.2:
++ *   socket()           pouch-side slot alloc; no kernel call
++ *   bind()             SYS_post_service(name, name_len)
++ *   listen()           no-op (kernel registry has its own backlog)
++ *   accept()           SYS_srv_accept(listener_h) returns a Spoor fd
++ *   connect()          SYS_srv_connect(name, name_len, NULL, 0)
++ *   getsockopt(SO_PEERCRED)  SYS_srv_peer(conn_h, &out)
++ * These four kernel numbers match kernel/include/thylacine/syscall.h —
++ * audited in P5-corvus-srv-impl-a/-b. The boundary-line patch
++ * 0006-pouch-sockets adds these aliases so socket.c / bind.c / accept.c
++ * / connect.c / getsockopt.c reference SYS_post_service etc. directly
++ * rather than the sentinel-blocked SYS_socket / SYS_bind / ...
++ */
++#define __NR_post_service 26
++#define __NR_srv_accept 27
++#define __NR_srv_peer 28
++#define __NR_srv_connect 30
++#define __NR_post_service_byte 43
+--- a/src/internal/_pouch_socket.h
++++ b/src/internal/_pouch_socket.h
+@@ -0,0 +1,113 @@
++/* pouch — AF_UNIX SOCK_STREAM userspace slot table (P6-pouch-sockets,
++ * sub-chunk 12). Kept entirely in pouch; the kernel knows nothing
++ * about POSIX sockets. socket() returns a tagged fd carrying a slot
++ * index; bind / listen / connect / accept / getsockopt(SO_PEERCRED)
++ * /close / read / write check the tag and dispatch through the slot.
++ *
++ * Design: POUCH-DESIGN.md section 6.2. The translation table —
++ *   socket(AF_UNIX, SOCK_STREAM, 0)  pouch_sock_alloc()
++ *   bind(fd, /srv/<name>)            SYS_post_service(<name>)
++ *   listen(fd, backlog)              no-op (kernel registry backlog)
++ *   accept(fd)                       SYS_srv_accept(listener_h) ->
++ *                                    raw kernel Spoor fd (NOT pouch-
++ *                                    tagged — server-side I/O bypasses
++ *                                    the shim).
++ *   connect(fd, /srv/<name>)         SYS_srv_connect(<name>, NULL, 0)
++ *                                    (path_len == 0 == the "no Twalk"
++ *                                    case in kernel/srvconn.c — Tversion
++ *                                    + Tattach only, byte stream at
++ *                                    root_fid)
++ *   getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &ucred, &len)
++ *                                    SYS_srv_peer(conn_h, &out) ->
++ *                                    ucred-shaped marshal
++ *   read(fd) / write(fd) / close(fd)
++ *                                    pouch_sock_kernel_fd(fd) ->
++ *                                    SYS_read / SYS_write / SYS_close
++ *
++ * Tag encoding: POUCH_SOCK_TAG | slot_idx, with slot_idx in
++ * [0, POUCH_SOCK_MAX). The tag bit (0x40000000) sits above the
++ * kernel's PROC_HANDLE_MAX so no real kernel fd ever overlaps a
++ * pouch socket fd.
++ *
++ * Constraints accepted at v1.0:
++ *   - Per-Proc concurrent /srv client cap = 1 (SRV_CONN_PER_PROC_MAX,
++ *     kernel/srvconn.c). The proving binary uses one client at a time.
++ *   - AF_INET / AF_INET6 unsupported (EAFNOSUPPORT — network phase).
++ *   - SOCK_DGRAM / SOCK_SEQPACKET unsupported (EPROTONOSUPPORT).
++ *   - SOCK_NONBLOCK / O_NONBLOCK silently no-op (v1.0 sockets are
++ *     blocking; nonblocking sockets need POLLOUT plumbing in SYS_POLL,
++ *     deferred).
++ *   - socketpair / shutdown / getpeername / getsockname / recv* /
++ *     send* fall through to the syscall-seam 0xFFFF sentinel —
++ *     ENOSYS at v1.0 (POUCH-DESIGN.md section 6.2).
++ *
++ * Naming: the leading underscore marks this header as pouch-internal
++ * (not for POSIX programs to include).
++ */
++#ifndef _POUCH_SOCKET_H
++#define _POUCH_SOCKET_H
++
++#include <sys/socket.h>
++#include <sys/un.h>
++
++/* Tag bit identifying a pouch-managed socket fd. Sits in the
++ * unused-by-kernel bit range above PROC_HANDLE_MAX. */
++#define POUCH_SOCK_TAG       0x40000000
++
++/* Upper bound on concurrent unbound + listening + connecting sockets
++ * in one Proc. /srv listener count is bounded by the kernel registry;
++ * /srv client count is hard-capped at 1 per Proc. POUCH_SOCK_MAX of 8
++ * is generous for v1.0 servers. */
++#define POUCH_SOCK_MAX       8
++
++enum pouch_sock_state {
++    POUCH_SOCK_FRESH = 0,        /* socket() returned; no bind/connect yet  */
++    POUCH_SOCK_LISTENING,        /* bind() + listen() done; kernel_fd is    */
++                                 /*   a KObj_Srv listener handle            */
++    POUCH_SOCK_CONNECTED,        /* connect() done; kernel_fd is a KObj_Srv */
++                                 /*   client-side SrvConn handle            */
++};
++
++struct pouch_sock_slot {
++    int                       in_use;
++    enum pouch_sock_state     state;
++    int                       kernel_fd;  /* -1 in FRESH */
++};
++
++/* pouch_sock_alloc — claim a fresh slot.
++ *
++ * On success returns a tagged fd >= POUCH_SOCK_TAG; the user of this
++ * value MUST eventually free the slot via close() (which routes
++ * through pouch_sock_close).
++ *
++ * On failure returns -1, errno = EMFILE (no free slot).
++ */
++int pouch_sock_alloc(void);
++
++/* pouch_sock_resolve — fd to slot pointer. NULL if fd is not a
++ * pouch-tagged value, or the slot is vacant. The returned pointer
++ * remains valid until close() (the table entries are static). */
++struct pouch_sock_slot *pouch_sock_resolve(int fd);
++
++/* pouch_sock_kernel_fd — fd to the slot's kernel handle.
++ *
++ * For an UNTAGGED fd: returns fd unchanged (the pass-through case —
++ * read/write/close on a raw kernel handle stays raw).
++ *
++ * For a TAGGED fd: returns the kernel handle if the slot is in
++ * LISTENING or CONNECTED state. Returns -1 if the slot is FRESH (no
++ * kernel handle yet) or vacant. The caller is expected to surface
++ * EBADF / ENOTCONN on -1 per POSIX.
++ *
++ * No lock held across the read; the kernel_fd value is captured.
++ */
++int pouch_sock_kernel_fd(int fd);
++
++/* pouch_sock_close — close a tagged fd's slot. Closes the kernel
++ * handle (if any) via SYS_close and marks the slot vacant. Returns
++ * 0 on success, -1 with errno set on bad fd. The caller (close in
++ * src/unistd/close.c) routes here only for tagged fds; untagged fds
++ * pass straight through to SYS_close. */
++int pouch_sock_close(int fd);
++
++#endif /* _POUCH_SOCKET_H */
+--- a/src/network/_pouch_socket.c
++++ b/src/network/_pouch_socket.c
+@@ -0,0 +1,117 @@
++/* pouch — AF_UNIX SOCK_STREAM userspace slot table implementation
++ * (P6-pouch-sockets, sub-chunk 12). See src/internal/_pouch_socket.h
++ * for the design + the translation table.
++ *
++ * Thread-safety: the table is a process-global resource (pthread peers
++ * share it). All structural changes — slot claim, slot vacate, state
++ * transitions, kernel_fd writes — happen under g_lock. Reads of
++ * kernel_fd value through pouch_sock_kernel_fd() capture the integer
++ * under the lock, so a parallel close() releasing the slot does not
++ * race the read out.
++ */
++#include "_pouch_socket.h"
++#include "syscall.h"
++#include "lock.h"
++#include "libc.h"
++#include <errno.h>
++
++static struct pouch_sock_slot g_table[POUCH_SOCK_MAX];
++static volatile int           g_lock[1];
++
++/* slot_idx — fd to slot index, with bounds + tag check. Returns -1
++ * for any untagged fd or out-of-range slot. */
++static inline int slot_idx(int fd)
++{
++    if ((fd & POUCH_SOCK_TAG) == 0) return -1;
++    int i = fd & ~POUCH_SOCK_TAG;
++    if (i < 0 || i >= POUCH_SOCK_MAX) return -1;
++    return i;
++}
++
++int pouch_sock_alloc(void)
++{
++    LOCK(g_lock);
++    for (int i = 0; i < POUCH_SOCK_MAX; i++) {
++        if (!g_table[i].in_use) {
++            g_table[i].in_use    = 1;
++            g_table[i].state     = POUCH_SOCK_FRESH;
++            g_table[i].kernel_fd = -1;
++            UNLOCK(g_lock);
++            return POUCH_SOCK_TAG | i;
++        }
++    }
++    UNLOCK(g_lock);
++    errno = EMFILE;
++    return -1;
++}
++
++struct pouch_sock_slot *pouch_sock_resolve(int fd)
++{
++    int i = slot_idx(fd);
++    if (i < 0) return 0;
++    LOCK(g_lock);
++    int alive = g_table[i].in_use;
++    UNLOCK(g_lock);
++    if (!alive) return 0;
++    return &g_table[i];
++}
++
++int pouch_sock_kernel_fd(int fd)
++{
++    /* Untagged fd: pass through unchanged (read/write/close on a raw
++     * kernel handle stays raw). */
++    if ((fd & POUCH_SOCK_TAG) == 0) return fd;
++
++    int i = slot_idx(fd);
++    if (i < 0) {
++        errno = EBADF;
++        return -1;
++    }
++
++    /* F8 close (P6-pouch-sockets audit): capture both the slot's
++     * in_use and the kernel_fd INSIDE the locked region, then set
++     * errno from the local. The earlier shape read in_use AGAIN
++     * outside the lock to decide the errno class — a parallel
++     * close() racing the unlock could flip it from 1 to 0, mis-
++     * categorizing the errno as EBADF when it should be ENOTCONN
++     * (or vice versa). User-facing minor weirdness, no data harm. */
++    LOCK(g_lock);
++    int in_use = g_table[i].in_use;
++    int k      = -1;
++    if (in_use && g_table[i].state != POUCH_SOCK_FRESH) {
++        k = g_table[i].kernel_fd;
++    }
++    UNLOCK(g_lock);
++
++    if (k < 0) errno = in_use ? ENOTCONN : EBADF;
++    return k;
++}
++
++int pouch_sock_close(int fd)
++{
++    int i = slot_idx(fd);
++    if (i < 0) {
++        errno = EBADF;
++        return -1;
++    }
++
++    LOCK(g_lock);
++    if (!g_table[i].in_use) {
++        UNLOCK(g_lock);
++        errno = EBADF;
++        return -1;
++    }
++    int k = g_table[i].kernel_fd;
++    g_table[i].in_use    = 0;
++    g_table[i].state     = POUCH_SOCK_FRESH;
++    g_table[i].kernel_fd = -1;
++    UNLOCK(g_lock);
++
++    /* The kernel handle outlives the slot release for one instant — a
++     * peer thread cannot observe the slot as still-alive between the
++     * UNLOCK and the SYS_close, so this is a safe order. SYS_close's
++     * return is not surfaced to the user: POSIX close() returns 0 even
++     * on a kernel-side teardown error (errno-on-close is advisory). */
++    if (k >= 0) __syscall(SYS_close, k);
++    return 0;
++}
+--- a/src/network/accept.c
++++ b/src/network/accept.c
+@@ -1,7 +1,54 @@
++/* pouch — accept(2) for AF_UNIX SOCK_STREAM (P6-pouch-sockets,
++ * sub-chunk 12). Calls SYS_srv_accept on the slot's listener handle
++ * and returns the resulting kernel-minted Spoor fd DIRECTLY.
++ *
++ * The accepted fd is NOT pouch-tagged — subsequent read / write /
++ * close on it route through the syscall-seam directly (no slot
++ * dispatch). This keeps the server-side I/O path on the same
++ * SYS_read / SYS_write fast path as any other Spoor handle.
++ *
++ * The kernel-side sockaddr writeback is minimal: AF_UNIX sockets in
++ * the Thylacine model have no peer path — peer identity is
++ * SO_PEERCRED, kernel-stamped from SYS_srv_peer. If addr/len are
++ * non-NULL we write back a zero-sun_path AF_UNIX sockaddr.
++ */
+ #include <sys/socket.h>
++#include <sys/un.h>
++#include <errno.h>
++#include <string.h>
++#include "_pouch_socket.h"
+ #include "syscall.h"
+ 
+-int accept(int fd, struct sockaddr *restrict addr, socklen_t *restrict len)
++int accept(int fd, struct sockaddr *restrict addr,
++           socklen_t *restrict len)
+ {
+-	return socketcall_cp(accept, fd, addr, len, 0, 0, 0);
++	struct pouch_sock_slot *slot = pouch_sock_resolve(fd);
++	if (!slot) {
++		errno = EBADF;
++		return -1;
++	}
++	if (slot->state != POUCH_SOCK_LISTENING) {
++		errno = EINVAL;
++		return -1;
++	}
++
++	long r = __syscall(SYS_srv_accept, slot->kernel_fd);
++	if (r < 0) {
++		errno = ECONNABORTED;
++		return -1;
++	}
++
++	if (addr && len && *len >= (socklen_t)sizeof(sa_family_t)) {
++		struct sockaddr_un un;
++		memset(&un, 0, sizeof(un));
++		un.sun_family = AF_UNIX;
++		socklen_t copy_len = (*len < (socklen_t)sizeof(un))
++			? *len : (socklen_t)sizeof(un);
++		memcpy(addr, &un, (size_t)copy_len);
++		*len = (socklen_t)sizeof(sa_family_t);
++	} else if (len) {
++		*len = 0;
++	}
++
++	return (int)r;
+ }
+--- a/src/network/accept4.c
++++ b/src/network/accept4.c
+@@ -1,23 +1,19 @@
++/* pouch — accept4(2) for AF_UNIX SOCK_STREAM (P6-pouch-sockets,
++ * sub-chunk 12). Delegates to accept(); the SOCK_CLOEXEC /
++ * SOCK_NONBLOCK flags are accepted but silently no-op at v1.0
++ * (same disposition as in socket()). Unrecognized flags get EINVAL.
++ */
+ #define _GNU_SOURCE
+ #include <sys/socket.h>
+ #include <errno.h>
+ #include <fcntl.h>
+-#include "syscall.h"
+ 
+-int accept4(int fd, struct sockaddr *restrict addr, socklen_t *restrict len, int flg)
++int accept4(int fd, struct sockaddr *restrict addr,
++            socklen_t *restrict len, int flg)
+ {
+-	if (!flg) return accept(fd, addr, len);
+-	int ret = socketcall_cp(accept4, fd, addr, len, flg, 0, 0);
+-	if (ret>=0 || (errno != ENOSYS && errno != EINVAL)) return ret;
+-	if (flg & ~(SOCK_CLOEXEC|SOCK_NONBLOCK)) {
++	if (flg & ~(SOCK_CLOEXEC | SOCK_NONBLOCK)) {
+ 		errno = EINVAL;
+ 		return -1;
+ 	}
+-	ret = accept(fd, addr, len);
+-	if (ret<0) return ret;
+-	if (flg & SOCK_CLOEXEC)
+-		__syscall(SYS_fcntl, ret, F_SETFD, FD_CLOEXEC);
+-	if (flg & SOCK_NONBLOCK)
+-		__syscall(SYS_fcntl, ret, F_SETFL, O_NONBLOCK);
+-	return ret;
++	return accept(fd, addr, len);
+ }
+--- a/src/network/bind.c
++++ b/src/network/bind.c
+@@ -1,7 +1,123 @@
++/* pouch — bind(2) for AF_UNIX SOCK_STREAM (P6-pouch-sockets,
++ * sub-chunk 12). Extracts the service name from sun_path and posts it
++ * to /srv via SYS_post_service.
++ *
++ * sun_path  ->  service name:
++ *   "/srv/<name>"   ->   "<name>"
++ *   "<name>"         ->   "<name>"   (relative; treated as /srv/<name>)
++ *   anything else    ->   EINVAL  (v1.0 only /srv/ paths are servable;
++ *                                  arbitrary filesystem paths are not
++ *                                  AF_UNIX-backed at this phase —
++ *                                  POUCH-DESIGN.md section 6.2 OPEN Q 6.2)
++ *
++ * The kernel-side post-gate (PROC_FLAG_MAY_POST_SERVICE) MUST already
++ * be stamped on the calling Proc — joey grants it at spawn via
++ * t_spawn_with_perms(... T_SPAWN_PERM_MAY_POST_SERVICE). A bind() in
++ * an ungranted Proc returns EACCES.
++ *
++ * The kernel syscall is SYS_post_service_byte (= 43) — the byte-mode
++ * variant of SYS_post_service introduced in P6-pouch-sockets sub-chunk
++ * 12 to mark the service as a raw byte stream. The 9P-mode variant
++ * (SYS_post_service = 26) is used by corvus and stratumd, NOT by
++ * pouch sockets — pouch's AF_UNIX SOCK_STREAM byte semantics are
++ * incompatible with the kernel 9P handshake that the 9P-mode SrvConn
++ * drives. See docs/reference/78-pouch.md for the design.
++ */
+ #include <sys/socket.h>
++#include <sys/un.h>
++#include <errno.h>
++#include <string.h>
++#include "_pouch_socket.h"
+ #include "syscall.h"
+ 
++#define SRV_NAME_MAX 64
++
++static const char *sun_path_to_name(const char *p, size_t maxlen,
++                                    size_t *out_len)
++{
++	static const char prefix[] = "/srv/";
++	const size_t      plen     = sizeof(prefix) - 1;
++
++	if (!p || maxlen == 0) return 0;
++
++	const char *name;
++	size_t      avail;
++
++	if (maxlen >= plen && memcmp(p, prefix, plen) == 0) {
++		name  = p + plen;
++		avail = maxlen - plen;
++	} else if (p[0] == '/') {
++		return 0;
++	} else {
++		name  = p;
++		avail = maxlen;
++	}
++
++	size_t n = 0;
++	while (n < avail && name[n] != '\0') n++;
++
++	if (n == 0)           return 0;
++	if (n > SRV_NAME_MAX) return 0;
++
++	/* F11 close (P6-pouch-sockets audit): require explicit NUL
++	 * termination within avail. Without this check, a sun_path
++	 * filled with non-NUL bytes up to the end of the structure
++	 * would be silently accepted (n == avail), passing fragments
++	 * of caller stack as the service name. The kernel validates
++	 * each byte but the user-facing behavior diverges from POSIX. */
++	if (n == avail) return 0;
++
++	for (size_t i = 0; i < n; i++) {
++		unsigned char c = (unsigned char)name[i];
++		if (c == '/') return 0;
++	}
++
++	*out_len = n;
++	return name;
++}
++
+ int bind(int fd, const struct sockaddr *addr, socklen_t len)
+ {
+-	return socketcall(bind, fd, addr, len, 0, 0, 0);
++	struct pouch_sock_slot *slot = pouch_sock_resolve(fd);
++	if (!slot) {
++		errno = EBADF;
++		return -1;
++	}
++	if (slot->state != POUCH_SOCK_FRESH) {
++		errno = EINVAL;
++		return -1;
++	}
++	if (!addr) {
++		errno = EFAULT;
++		return -1;
++	}
++	if (addr->sa_family != AF_UNIX) {
++		errno = EAFNOSUPPORT;
++		return -1;
++	}
++	if (len < (socklen_t)sizeof(sa_family_t)) {
++		errno = EINVAL;
++		return -1;
++	}
++
++	const struct sockaddr_un *un = (const struct sockaddr_un *)addr;
++	size_t plen = (size_t)len - sizeof(sa_family_t);
++	if (plen > sizeof(un->sun_path)) plen = sizeof(un->sun_path);
++
++	size_t      name_len;
++	const char *name = sun_path_to_name(un->sun_path, plen, &name_len);
++	if (!name) {
++		errno = EINVAL;
++		return -1;
++	}
++
++	long r = __syscall(SYS_post_service_byte, name, name_len);
++	if (r < 0) {
++		errno = EACCES;
++		return -1;
++	}
++
++	slot->kernel_fd = (int)r;
++	slot->state     = POUCH_SOCK_LISTENING;
++	return 0;
+ }
+--- a/src/network/connect.c
++++ b/src/network/connect.c
+@@ -1,7 +1,109 @@
++/* pouch — connect(2) for AF_UNIX SOCK_STREAM (P6-pouch-sockets,
++ * sub-chunk 12). Extracts the service name from sun_path (same
++ * shape as bind) and calls SYS_srv_connect with path_len == 0 — the
++ * kernel's "no Twalk" case in kernel/srvconn.c, yielding a raw byte
++ * stream at the server's root fid.
++ *
++ * Per-Proc concurrent /srv client cap = 1 (SRV_CONN_PER_PROC_MAX,
++ * kernel/srvconn.c). A second connect() from the same Proc whose
++ * prior connection is still open returns -1 / ECONNREFUSED. Closing
++ * the previous tagged fd via close() releases the kernel slot.
++ *
++ * On success the slot transitions to CONNECTED, holding the kernel
++ * KObj_Srv client handle. Subsequent read / write / close / getsockopt
++ * on this same fd dispatch through pouch_sock_kernel_fd().
++ */
+ #include <sys/socket.h>
++#include <sys/un.h>
++#include <errno.h>
++#include <string.h>
++#include "_pouch_socket.h"
+ #include "syscall.h"
+ 
++#define SRV_NAME_MAX 64
++
++static const char *sun_path_to_name(const char *p, size_t maxlen,
++                                    size_t *out_len)
++{
++	static const char prefix[] = "/srv/";
++	const size_t      plen     = sizeof(prefix) - 1;
++
++	if (!p || maxlen == 0) return 0;
++
++	const char *name;
++	size_t      avail;
++
++	if (maxlen >= plen && memcmp(p, prefix, plen) == 0) {
++		name  = p + plen;
++		avail = maxlen - plen;
++	} else if (p[0] == '/') {
++		return 0;
++	} else {
++		name  = p;
++		avail = maxlen;
++	}
++
++	size_t n = 0;
++	while (n < avail && name[n] != '\0') n++;
++
++	if (n == 0)           return 0;
++	if (n > SRV_NAME_MAX) return 0;
++
++	/* F11 close (P6-pouch-sockets audit): require explicit NUL
++	 * termination within avail — same discipline as bind.c. */
++	if (n == avail) return 0;
++
++	for (size_t i = 0; i < n; i++) {
++		unsigned char c = (unsigned char)name[i];
++		if (c == '/') return 0;
++	}
++
++	*out_len = n;
++	return name;
++}
++
+ int connect(int fd, const struct sockaddr *addr, socklen_t len)
+ {
+-	return socketcall_cp(connect, fd, addr, len, 0, 0, 0);
++	struct pouch_sock_slot *slot = pouch_sock_resolve(fd);
++	if (!slot) {
++		errno = EBADF;
++		return -1;
++	}
++	if (slot->state != POUCH_SOCK_FRESH) {
++		errno = EISCONN;
++		return -1;
++	}
++	if (!addr) {
++		errno = EFAULT;
++		return -1;
++	}
++	if (addr->sa_family != AF_UNIX) {
++		errno = EAFNOSUPPORT;
++		return -1;
++	}
++	if (len < (socklen_t)sizeof(sa_family_t)) {
++		errno = EINVAL;
++		return -1;
++	}
++
++	const struct sockaddr_un *un = (const struct sockaddr_un *)addr;
++	size_t plen = (size_t)len - sizeof(sa_family_t);
++	if (plen > sizeof(un->sun_path)) plen = sizeof(un->sun_path);
++
++	size_t      name_len;
++	const char *name = sun_path_to_name(un->sun_path, plen, &name_len);
++	if (!name) {
++		errno = EINVAL;
++		return -1;
++	}
++
++	long r = __syscall(SYS_srv_connect, name, name_len, (const char *)0, 0);
++	if (r < 0) {
++		errno = ECONNREFUSED;
++		return -1;
++	}
++
++	slot->kernel_fd = (int)r;
++	slot->state     = POUCH_SOCK_CONNECTED;
++	return 0;
+ }
+--- a/src/network/getsockopt.c
++++ b/src/network/getsockopt.c
+@@ -1,41 +1,103 @@
++/* pouch — getsockopt(2) for AF_UNIX SOCK_STREAM (P6-pouch-sockets,
++ * sub-chunk 12). SO_PEERCRED maps onto SYS_srv_peer — Thylacine's
++ * kernel-stamped, unforgeable peer-identity primitive.
++ *
++ * The pouch ucred mapping:
++ *   ucred.pid    Thylacine peer stripes (truncated to pid_t)
++ *   ucred.uid    0 at v1.0 (Thylacine has no uid model; programs that
++ *                compare against getuid() see 0 == 0 ok)
++ *   ucred.gid    0 at v1.0 (same)
++ *
++ * The richer kernel-stamped fields (live caps, console bit, alive bit)
++ * are accessible to Thylacine-native code via the pouch native arm —
++ * see docs/reference/78-pouch.md. POSIX programs get the strictly-
++ * better "kernel-stamped pid identity" through this ucred marshal.
++ *
++ * SO_PEERCRED on a NON-pouch fd (raw kernel handle, e.g. one returned
++ * by accept()) is also valid: the fd IS a SrvConn KObj_Spoor, and
++ * SYS_srv_peer works on it directly.
++ *
++ * Other getsockopt levels / options return ENOPROTOOPT at v1.0.
++ */
+ #include <sys/socket.h>
+-#include <sys/time.h>
+ #include <errno.h>
++#include <string.h>
++#include "_pouch_socket.h"
+ #include "syscall.h"
+ 
+-int getsockopt(int fd, int level, int optname, void *restrict optval, socklen_t *restrict optlen)
++/* Mirrors kernel/include/thylacine/srvconn.h::srv_peer_info — 24-byte
++ * record, repr-C-pinned by static asserts on both sides. */
++struct pouch_srv_peer_info {
++	unsigned long stripes;
++	unsigned long caps;
++	unsigned int  console;
++	unsigned int  alive;
++};
++
++int getsockopt(int fd, int level, int optname,
++               void *restrict optval, socklen_t *restrict optlen)
+ {
+-	long tv32[2];
+-	struct timeval *tv;
++	if (level != SOL_SOCKET) {
++		errno = ENOPROTOOPT;
++		return -1;
++	}
++	if (optname != SO_PEERCRED) {
++		errno = ENOPROTOOPT;
++		return -1;
++	}
++	if (!optval || !optlen) {
++		errno = EFAULT;
++		return -1;
++	}
+ 
+-	int r = __socketcall(getsockopt, fd, level, optname, optval, optlen, 0);
++	int kfd;
++	int tagged = ((fd & POUCH_SOCK_TAG) != 0);
+ 
+-	if (r==-ENOPROTOOPT) switch (level) {
+-	case SOL_SOCKET:
+-		switch (optname) {
+-		case SO_RCVTIMEO:
+-		case SO_SNDTIMEO:
+-			if (SO_RCVTIMEO == SO_RCVTIMEO_OLD) break;
+-			if (*optlen < sizeof *tv) return __syscall_ret(-EINVAL);
+-			if (optname==SO_RCVTIMEO) optname=SO_RCVTIMEO_OLD;
+-			if (optname==SO_SNDTIMEO) optname=SO_SNDTIMEO_OLD;
+-			r = __socketcall(getsockopt, fd, level, optname,
+-				tv32, (socklen_t[]){sizeof tv32}, 0);
+-			if (r<0) break;
+-			tv = optval;
+-			tv->tv_sec = tv32[0];
+-			tv->tv_usec = tv32[1];
+-			*optlen = sizeof *tv;
+-			break;
+-		case SO_TIMESTAMP:
+-		case SO_TIMESTAMPNS:
+-			if (SO_TIMESTAMP == SO_TIMESTAMP_OLD) break;
+-			if (optname==SO_TIMESTAMP) optname=SO_TIMESTAMP_OLD;
+-			if (optname==SO_TIMESTAMPNS) optname=SO_TIMESTAMPNS_OLD;
+-			r = __socketcall(getsockopt, fd, level,
+-				optname, optval, optlen, 0);
+-			break;
++	if (tagged) {
++		struct pouch_sock_slot *slot = pouch_sock_resolve(fd);
++		if (!slot) {
++			errno = EBADF;
++			return -1;
+ 		}
++		if (slot->state != POUCH_SOCK_CONNECTED) {
++			errno = ENOTCONN;
++			return -1;
++		}
++		kfd = slot->kernel_fd;
++	} else {
++		kfd = fd;
+ 	}
+-	return __syscall_ret(r);
++
++	struct pouch_srv_peer_info info = {0};
++	long r = __syscall(SYS_srv_peer, kfd, &info);
++	if (r < 0) {
++		errno = ENOTSOCK;
++		return -1;
++	}
++
++	/* Marshal into struct ucred. struct ucred lives behind _GNU_SOURCE
++	 * in sys/socket.h, so spell the layout out inline rather than
++	 * #defining _GNU_SOURCE (the header may be included elsewhere
++	 * without it). */
++	struct {
++		int          pid;
++		unsigned int uid;
++		unsigned int gid;
++	} ucred = {
++		.pid = (int)(info.stripes & 0x7fffffff),
++		.uid = 0,
++		.gid = 0,
++	};
++
++	/* F10 close (P6-pouch-sockets audit): per the Linux man page,
++	 * *optlen on return reflects the ACTUAL bytes written, not the
++	 * canonical size. A caller passing *optlen = 4 (the pid alone)
++	 * must see *optlen = 4 back so it knows only pid landed —
++	 * setting it to sizeof(ucred) would invite reading 8 bytes of
++	 * uninitialized memory past the pid. */
++	socklen_t want = (socklen_t)sizeof(ucred);
++	socklen_t give = (*optlen < want) ? *optlen : want;
++	memcpy(optval, &ucred, (size_t)give);
++	*optlen = give;
++	return 0;
+ }
+--- a/src/network/listen.c
++++ b/src/network/listen.c
+@@ -1,7 +1,25 @@
++/* pouch — listen(2) for AF_UNIX SOCK_STREAM (P6-pouch-sockets,
++ * sub-chunk 12). No-op at v1.0: the kernel /srv registry maintains
++ * its own bounded accept queue; SYS_post_service already established
++ * LISTEN-ness on a successful bind. The `backlog` parameter is
++ * ignored. POSIX-correct: listen() on a bound-but-not-yet-listening
++ * socket returns 0; on a connected one returns EOPNOTSUPP.
++ */
+ #include <sys/socket.h>
+-#include "syscall.h"
++#include <errno.h>
++#include "_pouch_socket.h"
+ 
+ int listen(int fd, int backlog)
+ {
+-	return socketcall(listen, fd, backlog, 0, 0, 0, 0);
++	(void)backlog;
++	struct pouch_sock_slot *slot = pouch_sock_resolve(fd);
++	if (!slot) {
++		errno = EBADF;
++		return -1;
++	}
++	if (slot->state != POUCH_SOCK_LISTENING) {
++		errno = EOPNOTSUPP;
++		return -1;
++	}
++	return 0;
+ }
+--- a/src/network/socket.c
++++ b/src/network/socket.c
+@@ -1,21 +1,54 @@
++/* pouch — socket(2) for AF_UNIX SOCK_STREAM (P6-pouch-sockets,
++ * sub-chunk 12). No kernel call; allocates a pouch-side slot and
++ * returns a tagged fd. See src/internal/_pouch_socket.h.
++ *
++ * Refused families / types — explicit POSIX errnos rather than the
++ * 0xFFFF-sentinel ENOSYS, per invariant P-3 (no silently-wrong POSIX):
++ *   - domain != AF_UNIX                EAFNOSUPPORT
++ *   - type   != SOCK_STREAM            EPROTONOSUPPORT
++ *   - protocol != 0                    EPROTONOSUPPORT
++ *
++ * SOCK_CLOEXEC is implicitly satisfied at v1.0 — pouch has no exec(2)
++ * yet, so the close-on-exec semantic has no consumer. SOCK_NONBLOCK
++ * is silently accepted (v1.0 sockets are blocking; nonblocking I/O
++ * needs POLLOUT plumbing, deferred).
++ */
+ #include <sys/socket.h>
+-#include <fcntl.h>
+ #include <errno.h>
+-#include "syscall.h"
++#include "_pouch_socket.h"
+ 
+ int socket(int domain, int type, int protocol)
+ {
+-	int s = __socketcall(socket, domain, type, protocol, 0, 0, 0);
+-	if ((s==-EINVAL || s==-EPROTONOSUPPORT)
+-	    && (type&(SOCK_CLOEXEC|SOCK_NONBLOCK))) {
+-		s = __socketcall(socket, domain,
+-			type & ~(SOCK_CLOEXEC|SOCK_NONBLOCK),
+-			protocol, 0, 0, 0);
+-		if (s < 0) return __syscall_ret(s);
+-		if (type & SOCK_CLOEXEC)
+-			__syscall(SYS_fcntl, s, F_SETFD, FD_CLOEXEC);
+-		if (type & SOCK_NONBLOCK)
+-			__syscall(SYS_fcntl, s, F_SETFL, O_NONBLOCK);
++	if (domain != AF_UNIX) {
++		errno = EAFNOSUPPORT;
++		return -1;
+ 	}
+-	return __syscall_ret(s);
++
++	int base = type & ~(SOCK_CLOEXEC | SOCK_NONBLOCK);
++	if (base != SOCK_STREAM) {
++		errno = EPROTONOSUPPORT;
++		return -1;
++	}
++
++	if (protocol != 0) {
++		errno = EPROTONOSUPPORT;
++		return -1;
++	}
++
++	/* F9 close (P6-pouch-sockets audit): SOCK_NONBLOCK is rejected
++	 * at v1.0 rather than silently no-op'd. pouch sockets do not
++	 * yet have a non-blocking read/write path (the byte-mode
++	 * SrvConn server-side read is unconditionally blocking, F1).
++	 * P-3 (no silently-wrong POSIX) forbids accepting the flag
++	 * while ignoring its semantic.
++	 *
++	 * SOCK_CLOEXEC is accepted as a no-op — pouch has no exec(2)
++	 * yet, so close-on-exec has no consumer to violate. The
++	 * silent no-op is correct, not silently-wrong. */
++	if (type & SOCK_NONBLOCK) {
++		errno = EOPNOTSUPP;
++		return -1;
++	}
++
++	return pouch_sock_alloc();
+ }
+--- a/src/unistd/close.c
++++ b/src/unistd/close.c
+@@ -1,7 +1,17 @@
++/* pouch — close(2) (P6-pouch-sockets, sub-chunk 12 dispatch shim).
++ *
++ * For untagged fds: the pristine close path — call __aio_close (a no-
++ * op weak alias in the absence of POSIX AIO) then SYS_close.
++ *
++ * For pouch-tagged socket fds: route through pouch_sock_close, which
++ * frees the slot and closes the underlying kernel handle (if any).
++ * POSIX close() returns 0 on close-of-close-on-EINTR — we mirror that.
++ */
+ #include <unistd.h>
+ #include <errno.h>
+ #include "aio_impl.h"
+ #include "syscall.h"
++#include "_pouch_socket.h"
+ 
+ static int dummy(int fd)
+ {
+@@ -12,6 +22,9 @@
+ 
+ int close(int fd)
+ {
++	if ((fd & POUCH_SOCK_TAG) != 0) {
++		return pouch_sock_close(fd);
++	}
+ 	fd = __aio_close(fd);
+ 	int r = __syscall_cp(SYS_close, fd);
+ 	if (r == -EINTR) r = 0;
+--- a/src/unistd/read.c
++++ b/src/unistd/read.c
+@@ -1,7 +1,24 @@
++/* pouch — read(2) (P6-pouch-sockets, sub-chunk 12 dispatch shim).
++ *
++ * For untagged fds: straight pass-through to SYS_read, the original
++ * shape. For pouch-tagged AF_UNIX socket fds (CONNECTED state) the
++ * tag dispatches to the slot's stored kernel handle. FRESH-state
++ * tagged fds (socket()'d but not yet bound/connected) surface
++ * ENOTCONN — POSIX-correct on an unconnected stream socket.
++ *
++ * The dispatch path is a single bit test on common code; uncontended.
++ */
+ #include <unistd.h>
++#include <errno.h>
+ #include "syscall.h"
++#include "_pouch_socket.h"
+ 
+ ssize_t read(int fd, void *buf, size_t count)
+ {
++	if ((fd & POUCH_SOCK_TAG) != 0) {
++		int kfd = pouch_sock_kernel_fd(fd);
++		if (kfd < 0) return -1;  /* errno set by pouch_sock_kernel_fd */
++		return syscall_cp(SYS_read, kfd, buf, count);
++	}
+ 	return syscall_cp(SYS_read, fd, buf, count);
+ }
+--- a/src/unistd/write.c
++++ b/src/unistd/write.c
+@@ -1,7 +1,16 @@
++/* pouch — write(2) (P6-pouch-sockets, sub-chunk 12 dispatch shim).
++ * Same tag-dispatch shape as read.c — see that file for the design. */
+ #include <unistd.h>
++#include <errno.h>
+ #include "syscall.h"
++#include "_pouch_socket.h"
+ 
+ ssize_t write(int fd, const void *buf, size_t count)
+ {
++	if ((fd & POUCH_SOCK_TAG) != 0) {
++		int kfd = pouch_sock_kernel_fd(fd);
++		if (kfd < 0) return -1;
++		return syscall_cp(SYS_write, kfd, buf, count);
++	}
+ 	return syscall_cp(SYS_write, fd, buf, count);
+ }

@@ -360,23 +360,33 @@ static int do_stratumd_stub_bringup(void) {
 // output is far under the 4 KiB pipe ring, so it never blocks on write
 // and reaches exit on its own; joey reaps, then drains the buffered
 // bytes. (Same lesson as do_stratumd_stub_bringup.)
-// pouch_smoke_core — pouch_smoke_one's body, parameterized by an optional
-// cap_mask. If cap_mask == 0, uses t_spawn_with_fds (no extra caps);
-// otherwise uses t_spawn_full to also hand the child cap_mask (subset of
-// joey's caps). All other semantics (pipe wiring, reap-before-drain,
-// content check) are identical.
+// pouch_smoke_core — pouch_smoke_one's body, parameterized by optional
+// cap_mask and optional perm_flags. If both are 0, uses t_spawn_with_fds
+// (no extra caps, no perm stamps). If cap_mask != 0 and perm_flags == 0,
+// uses t_spawn_full to also hand the child cap_mask (subset of joey's
+// caps). If perm_flags != 0, uses t_spawn_with_perms to ALSO stamp the
+// permission bits (T_SPAWN_PERM_MAY_POST_SERVICE for the /pouch-hello-
+// sockets bind() call, which dispatches to SYS_post_service). All other
+// semantics (pipe wiring, reap-before-drain, content check) are
+// identical.
 static int pouch_smoke_core(const char *name, size_t name_len,
                             const char *expect, size_t expect_len,
-                            unsigned long cap_mask) {
+                            unsigned long cap_mask,
+                            unsigned long perm_flags) {
     long rd = -1, wr = -1;
     if (t_pipe(&rd, &wr) < 0) {
         t_putstr("joey: pouch-smoke t_pipe FAILED\n");
         return -1;
     }
     unsigned int fds[2] = { (unsigned int)wr, (unsigned int)wr };
-    long pid = cap_mask
-        ? t_spawn_full(name, name_len, fds, 2, cap_mask)
-        : t_spawn_with_fds(name, name_len, fds, 2);
+    long pid;
+    if (perm_flags != 0) {
+        pid = t_spawn_with_perms(name, name_len, fds, 2, cap_mask, perm_flags);
+    } else if (cap_mask != 0) {
+        pid = t_spawn_full(name, name_len, fds, 2, cap_mask);
+    } else {
+        pid = t_spawn_with_fds(name, name_len, fds, 2);
+    }
     if (pid <= 0) {
         t_putstr("joey: pouch-smoke spawn FAILED\n");
         (void)t_close(rd);
@@ -401,7 +411,13 @@ static int pouch_smoke_core(const char *name, size_t name_len,
     }
     // The write-end is now fully closed: drain the buffered output to the
     // boot-log UART, accumulating into `acc` for the content check.
-    unsigned char acc[512];
+    // 2048 B headroom — pouch-hello-sockets prints ~850 B of test progress
+    // lines and the marker "<bin>: exit 0" must land inside the window.
+    // Earlier 512 B sized for the leaner pre-sub-chunk-12 pouch binaries;
+    // bumped here so the marker is never truncated out (the failure mode
+    // looks like "expected marker absent" even when the child exited
+    // cleanly).
+    unsigned char acc[2048];
     size_t acc_len = 0;
     for (;;) {
         unsigned char buf[256];
@@ -436,7 +452,7 @@ static int pouch_smoke_core(const char *name, size_t name_len,
 // caps variant is used). Pre-existing API; the pouch hellos use this.
 static int pouch_smoke_one(const char *name, size_t name_len,
                            const char *expect, size_t expect_len) {
-    return pouch_smoke_core(name, name_len, expect, expect_len, 0);
+    return pouch_smoke_core(name, name_len, expect, expect_len, 0, 0);
 }
 
 // pouch_smoke_one_caps — capability-granting variant. Spawns via
@@ -445,7 +461,20 @@ static int pouch_smoke_one(const char *name, size_t name_len,
 static int pouch_smoke_one_caps(const char *name, size_t name_len,
                                 const char *expect, size_t expect_len,
                                 unsigned long cap_mask) {
-    return pouch_smoke_core(name, name_len, expect, expect_len, cap_mask);
+    return pouch_smoke_core(name, name_len, expect, expect_len, cap_mask, 0);
+}
+
+// pouch_smoke_one_perms — permission-granting variant. Spawns via
+// t_spawn_with_perms so the child gets (joey_caps & cap_mask) AND has
+// `perm_flags` stamped (PROC_FLAG_MAY_POST_SERVICE for the AF_UNIX
+// bind() in /pouch-hello-sockets). The bit is NOT a cap (rfork would
+// propagate caps); kernel-stamped at spawn.
+static int pouch_smoke_one_perms(const char *name, size_t name_len,
+                                 const char *expect, size_t expect_len,
+                                 unsigned long cap_mask,
+                                 unsigned long perm_flags) {
+    return pouch_smoke_core(name, name_len, expect, expect_len,
+                            cap_mask, perm_flags);
 }
 
 // do_pouch_hello_smoke — run the pouch POSIX C binaries and verify
@@ -530,6 +559,23 @@ static int do_pouch_hello_smoke(void) {
                              T_CAP_CSPRNG_READ) != 0)
         return -1;
     t_putstr("joey: pouch-hello-getrandom smoke ok (musl getrandom(2) over SYS_GETRANDOM with CAP_CSPRNG_READ)\n");
+
+    // P6-pouch-sockets (sub-chunk 12): the AF_UNIX SOCK_STREAM round
+    // trip. Spawned with PROC_FLAG_MAY_POST_SERVICE so the server thread's
+    // bind() can dispatch to SYS_post_service. Exercises every pouch
+    // socket call (socket/bind/listen/accept/connect/getsockopt/close)
+    // + read/write through the tagged-fd dispatch shim. Two pthreads in
+    // a single Proc — server + client — round-trip "PING\n"/"PONG\n" +
+    // verify SO_PEERCRED on both sides. Closes POUCH-DESIGN.md §6.2 /
+    // §14 sub-chunk 12's exit criterion.
+    static const char po_name[]   = "pouch-hello-sockets";
+    static const char po_expect[] = "pouch-hello-sockets: exit 0";
+    if (pouch_smoke_one_perms(po_name, sizeof(po_name) - 1,
+                              po_expect, sizeof(po_expect) - 1,
+                              0,
+                              T_SPAWN_PERM_MAY_POST_SERVICE) != 0)
+        return -1;
+    t_putstr("joey: pouch-hello-sockets smoke ok (AF_UNIX SOCK_STREAM over /srv with SO_PEERCRED)\n");
     return 0;
 }
 
