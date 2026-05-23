@@ -225,6 +225,8 @@ The synchronization primitives are the real design content:
 
 `AF_INET`, dynamic linking, file-backed `mmap` (refused by design — ARCHITECTURE.md §6.5), real-time signals, `epoll`/`io_uring`/`inotify`/`signalfd`/`eventfd`/`timerfd`, locale beyond `C`, `fork()` (§8.3), `exec` of a Linux binary, System V IPC. Each: a documented `errno` (`ENOSYS` / `EAFNOSUPPORT` / `EINVAL`) and a manual-page note.
 
+**Documented v1.0 limitation — stack guard pages on pthread stacks** (P6-pouch-threads-b audit F2). pouch's `__mmap` (0003-pouch-mman boundary-line patch) ignores `prot` and always returns RW; `__mprotect` returns `-ENOSYS`. musl's pthread_create allocates `[map, map+size)` with PROT_NONE then mprotects the writable portion — both calls return RW, so the nominal "guard" region at the stack base is also RW. Stack overflow corrupts guard bytes silently; only an overflow past the entire stack region hits an unmapped page and faults. Stratum-class workloads (no deep recursion) are bounded by this. **The real fix needs a new kernel syscall to flip VMA permissions (PROT_NONE-capable) — deferred to v1.x**; at v1.0, the limitation is documented in `docs/reference/82-pouch-pthread.md` "Known caveats / footguns" and callers can extend their stacks via `pthread_attr_setstacksize` for headroom.
+
 ### 8.3 `fork()` — a deliberate decline
 
 Plan 9 never had `fork()` — it has `rfork`, selective resource sharing, paired with `exec`. Thylacine inherits this (`rfork`). POSIX `fork()` — duplicate the entire address space, COW everything, one return becomes two — is at genuine odds with the model.

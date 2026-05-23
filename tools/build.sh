@@ -186,7 +186,7 @@ EOF
     # P6-pouch-hello-smoke: copy the pouch POSIX test binaries (built
     # against the pouch sysroot by build_pouch_progs) into the cpio root.
     # Same curation discipline — explicit list, not a glob.
-    local pouch_bins=( "pouch-hello" "pouch-hello-stdio" "pouch-hello-printf" "pouch-hello-malloc" )
+    local pouch_bins=( "pouch-hello" "pouch-hello-stdio" "pouch-hello-printf" "pouch-hello-malloc" "pouch-hello-threads" )
     local pouch_progs="$BUILD_DIR/pouch/progs"
     for bin in "${pouch_bins[@]}"; do
         local src="$pouch_progs/$bin"
@@ -314,10 +314,19 @@ build_sysroot() {
     [[ -f "$sysroot/include/stdio.h" ]] || { echo "    MISSING: include/stdio.h" >&2; fail=1; }
     if [[ -f "$syscall_h" ]]; then
         local seam
+        # F5 audit close (P6-pouch-threads-b): the seam list MUST be kept in
+        # sync with the patch series' actual retargets. Adding a Thylacine
+        # number to bits/syscall.h.in without also adding it here would let
+        # a typo (e.g. swapped __NR_torpor_wait and __NR_thread_spawn) compile
+        # and link without error — the kernel would receive the wrong syscall
+        # number and execute the wrong handler. Programs would mysteriously
+        # fail. The seam check IS the structural gate against that.
         for seam in 'SYS_read 9' 'SYS_write 10' 'SYS_close 11' 'SYS_exit 0' \
                     'SYS_exit_group 0' 'SYS_mlockall 16' 'SYS_getrandom 20' \
                     'SYS_set_tid_address 36' 'SYS_writev 0xFFFF' \
-                    'SYS_socket 0xFFFF'; do
+                    'SYS_socket 0xFFFF' \
+                    'SYS_torpor_wait 39' 'SYS_torpor_wake 40' \
+                    'SYS_thread_spawn 41' 'SYS_thread_exit 42'; do
             grep -q "^#define $seam\$" "$syscall_h" || {
                 echo "    SEAM: '#define $seam' missing from bits/syscall.h" >&2
                 fail=1
@@ -496,7 +505,7 @@ build_pouch_progs() {
     mkdir -p "$progs_out"
 
     local prog
-    for prog in pouch-hello pouch-hello-stdio pouch-hello-printf pouch-hello-malloc; do
+    for prog in pouch-hello pouch-hello-stdio pouch-hello-printf pouch-hello-malloc pouch-hello-threads; do
         echo "==> pouch prog: $prog"
         # 1. compile (clang). -nostdinc + -isystem: pouch owns the include
         #    path. -fno-pie: non-PIC codegen for a fixed-address ET_EXEC.

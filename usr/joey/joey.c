@@ -464,6 +464,22 @@ static int do_pouch_hello_smoke(void) {
                         pm_expect, sizeof(pm_expect) - 1) != 0)
         return -1;
     t_putstr("joey: pouch-hello-malloc smoke ok (mallocng over SYS_BURROW_ATTACH / DETACH)\n");
+
+    // P6-pouch-threads (9b): the multi-thread proving binary. Drives
+    // pthread_create + pthread_mutex_lock/unlock + pthread_join end-to-end
+    // through the patched src/thread/ layer (0004-pouch-pthread) — every
+    // boundary-line site exercised in one boot: SYS_THREAD_SPAWN (the
+    // clone-call replacement), SYS_THREAD_EXIT (the per-thread exit +
+    // clear_child_tid handoff), SYS_TORPOR_WAIT/WAKE (the mutex contention
+    // path through __wait/__wake/__timedwait). The race-detector is the
+    // counter: any lost increment trips the "COUNT MISMATCH" return.
+    // Closes POUCH-DESIGN.md §13's multithreaded-test exit criterion.
+    static const char pt_name[]   = "pouch-hello-threads";
+    static const char pt_expect[] = "pouch-hello-threads: exit 0";
+    if (pouch_smoke_one(pt_name, sizeof(pt_name) - 1,
+                        pt_expect, sizeof(pt_expect) - 1) != 0)
+        return -1;
+    t_putstr("joey: pouch-hello-threads smoke ok (pthread + mutex over SYS_THREAD_* / SYS_TORPOR_*)\n");
     return 0;
 }
 

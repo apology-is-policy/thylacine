@@ -1,0 +1,431 @@
+pouch boundary-line patch 0004 - the pthread layer.
+
+Phase 6 sub-chunk 9b (pouch-threads, pouch side). Retargets musl's pthread
+layer onto Thylacine's thread + torpor + burrow-detach syscalls
+(SYS_THREAD_SPAWN = 41 / SYS_THREAD_EXIT = 42 / SYS_TORPOR_WAIT = 39 /
+SYS_TORPOR_WAKE = 40 / SYS_BURROW_DETACH = 38; <thylacine/syscall.h>; the
+kernel substrate landed at sub-chunks 7-9a -
+docs/reference/{79-sys-burrow,80-torpor,81-sys-thread}.md).
+
+Eight files, one mechanical retarget:
+
+  arch/aarch64/bits/syscall.h.in  Adds four Thylacine extension numbers
+      at the end of the table. The musl build's sed pass auto-generates
+      the SYS_torpor_wait / SYS_torpor_wake / SYS_thread_spawn /
+      SYS_thread_exit aliases that the source patches use. After a musl
+      re-vendor, extend 0001's awk filter with four entries:
+          m["torpor_wait"]="39"; m["torpor_wake"]="40";
+          m["thread_spawn"]="41"; m["thread_exit"]="42";
+      None of these are Linux syscall names; awk adds them as new lines.
+
+  src/internal/pthread_impl.h  Patches the static-inline __wake and
+      __futexwait helpers. Both bypass the futex op-code dispatch and
+      call the torpor syscalls directly. __wake -> SYS_TORPOR_WAKE;
+      __futexwait -> SYS_TORPOR_WAIT (indefinite, no timeout). Inline
+      so every translation unit including pthread_impl.h sees the
+      retarget without further file changes.
+
+  src/thread/__timedwait.c  Rewrites __futex4_cp - the FUTEX_WAIT-with-
+      timeout primitive every cond / mutex / rwlock timedwait uses.
+      Translates musl's struct timespec relative deadline into torpor's
+      relative microsecond timeout, clamping at LONG_MAX seconds (torpor
+      further clamps at TORPOR_MAX_TIMEOUT_US = 1 hour per
+      docs/reference/80-torpor.md). Drops the SYS_futex_time64 cascade
+      (Thylacine has one wait-on-address primitive, no 32-bit time_t
+      legacy). __timedwait_cp's clock_gettime + absolute-to-relative
+      conversion above is unchanged.
+
+  src/thread/__wait.c  Replaces the futex spin's SYS_futex FUTEX_WAIT
+      call with SYS_TORPOR_WAIT(addr, val, -1) (indefinite). The 100-
+      iteration spin loop above is pure userspace a_spin / a_cas and
+      stays as-is.
+
+  src/thread/pthread_cond_timedwait.c  Replaces unlock_requeue's
+      FUTEX_REQUEUE call with a plain __wake on the source address. Loses
+      the requeue optimization (waiters wake on l, race for r) but is
+      functionally correct: torpor has no FUTEX_REQUEUE-equivalent and
+      the contention cost is bounded by N waiters. cond_broadcast still
+      serializes waiters on the mutex through pthread_mutex_lock's
+      ownership.
+
+  src/thread/pthread_barrier_wait.c  Same single-site retarget as
+      __wait.c - the one inline FUTEX_WAIT loop moves to SYS_TORPOR_WAIT.
+
+  src/thread/pthread_create.c  The lifecycle retarget. Three sites:
+
+      __pthread_create()'s clone call  __clone() is replaced by
+          SYS_THREAD_SPAWN(entry, sp_top, arg, tls). The new->tid that
+          musl previously set via CLONE_PARENT_SETTID is assigned from
+          the syscall return; the start-args struct lives on the new
+          thread's stack exactly as before; TP_ADJ(new) becomes the tls
+          arg directly (the kernel writes TPIDR_EL0 at thread eret).
+          `stack` is 8-aligned post struct-subtraction; `sp_arg =
+          stack & ~0xFL` aligns it DOWN to 16 bytes for the kernel's
+          strict-16-alignment gate at SYS_THREAD_SPAWN. The clone
+          flags arg is unused
+          (Thylacine has no clone-flag dispatch; all pthreads share VM /
+          FS / FILES / SIGHAND / THREAD group by construction; CLONE_
+          DETACHED is purely userspace bookkeeping).
+
+      start()'s body  Registers &__thread_list_lock as this Thread's
+          clear_child_tid address via SYS_SET_TID_ADDRESS at thread
+          entry. SYS_THREAD_EXIT atomically zeroes that word and torpor-
+          wakes UINT32_MAX threads on it, mirroring Linux's
+          CLONE_CHILD_CLEARTID applied to the __thread_list_lock
+          spinlock. The sched-failure early-exit path (args->control ==
+          3) re-targets clear_child_tid to &args->control before exit
+          so the parent's __wait(&args->control, 0, 3, 0) observes the
+          exit through that word. Replaces the for(;;) SYS_exit loop in
+          that branch with the equivalent SYS_THREAD_EXIT loop.
+
+      __pthread_exit()'s tail  The final for(;;) SYS_exit loop becomes
+          for(;;) SYS_THREAD_EXIT. The main-thread early return - the
+          self->next == self branch - continues to call libc.exit(0)
+          directly (process exit, not thread exit; matches Plan 9
+          exits("ok") via the SYS_EXITS = 0 mapping).
+
+  src/thread/aarch64/__unmapself.s  Retargets the two-svc stack-teardown
+      sequence. mov x8,#215 (SYS_munmap) becomes mov x8,#38
+      (SYS_BURROW_DETACH); mov x8,#93 (SYS_exit) becomes mov x8,#42
+      (SYS_THREAD_EXIT). The C-side ABI is unchanged - __unmapself(base,
+      size); x0/x1 carry the two args; the SYS_BURROW_DETACH handler
+      takes the (vaddr, length) pair the kernel attached. Used by
+      __pthread_exit when a DETACHED thread is reaping its own stack-
+      mmap region; the thread cannot munmap-its-own-stack via the C path
+      because SP would dangle, so this asm primitive does both syscalls
+      without touching the stack mid-flight.
+
+The clone.s file (arch/aarch64/clone.s, the __clone Linux-syscall
+wrapper) is left untouched - it's `hidden` and only called by
+pthread_create.c, which this patch retargets to bypass it. Static-link
+dead-code-elimination drops the unreferenced symbol from libc.a's link
+surface.
+
+Process-shared futex semantics (FUTEX_PRIVATE absent) are NOT implemented
+at v1.0 - torpor is per-Proc by design (every wait/wake is keyed on the
+caller's Proc *). The boundary-line code's `priv` argument is discarded
+in __wake / __futexwait / __wait / __timedwait. pthread_cond_t / mutex /
+barrier all run in process-shared mode by API but their backing storage
+sits in pouch-anonymous memory (PROCESS_SHARED + a region mmap'd before
+fork is Linux-specific; pouch lacks fork() per POUCH-DESIGN sec 8.3).
+Programs using PTHREAD_PROCESS_SHARED attributes on cond/mutex/barrier
+will compile + link but the cross-Proc semantics aren't provided.
+
+PI (priority-inheritance) mutex paths - FUTEX_LOCK_PI / FUTEX_UNLOCK_PI -
+are NOT retargeted in this patch. Those call sites in
+pthread_mutex_{timedlock,trylock,unlock,attr_setprotocol}.c reach the
+SYS_futex sentinel (0xFFFF), which returns -ENOSYS. A program that calls
+pthread_mutexattr_setprotocol(PRIO_INHERIT) will get the failure at that
+attr-set call; runtime PI lock attempts simply degrade. POUCH-DESIGN sec
+7 declines PI as deferred-from-v1.0.
+
+Binding design: docs/POUCH-DESIGN.md sections 7 + 14 (sub-chunk 9b).
+Invariants: P-1 (no Linux syscalls reach the kernel), P-3 (every POSIX
+call either works or returns a documented errno), P-4 (boundary line
+holds - only src/thread/ and src/internal/pthread_impl.h modified; upper
+half untouched). Audit-trigger: thread_spawn / thread_exit row in
+CLAUDE.md 'Audit-triggering changes'.
+
+--- a/arch/aarch64/bits/syscall.h.in
++++ b/arch/aarch64/bits/syscall.h.in
+@@ -330,3 +330,15 @@
+ #define __NR_cachestat 0xFFFF
+ #define __NR_fchmodat2 0xFFFF
+ 
++
++/*
++ * pouch / Thylacine extension numbers. These have no Linux equivalent
++ * (Linux's table stops at fchmodat2 = 452). Added here so musl's
++ * build-time sed pass generates SYS_torpor_wait / SYS_torpor_wake /
++ * SYS_thread_spawn / SYS_thread_exit aliases — the names the patched
++ * pthread layer references.
++ */
++#define __NR_torpor_wait 39
++#define __NR_torpor_wake 40
++#define __NR_thread_spawn 41
++#define __NR_thread_exit 42
+--- a/src/internal/pthread_impl.h
++++ b/src/internal/pthread_impl.h
+@@ -167,16 +167,24 @@
+ hidden void __wait(volatile int *, volatile int *, int, int);
+ static inline void __wake(volatile void *addr, int cnt, int priv)
+ {
+-	if (priv) priv = FUTEX_PRIVATE;
++	/* pouch: retarget to SYS_TORPOR_WAKE. torpor takes a u32 count;
++	 * cnt < 0 (the "wake all" sentinel) maps to INT_MAX which the
++	 * kernel narrows to u32 (kernel/torpor.c). priv is irrelevant on
++	 * Thylacine (no process-shared futex tier at v1.0) and discarded.
++	 * F15 audit close: cast to unsigned int before the syscall arg
++	 * so a future caller that bypasses the cnt<0 normalization above
++	 * doesn't sign-extend to a 64-bit negative the kernel would have
++	 * to narrow. */
++	(void)priv;
+ 	if (cnt<0) cnt = INT_MAX;
+-	__syscall(SYS_futex, addr, FUTEX_WAKE|priv, cnt) != -ENOSYS ||
+-	__syscall(SYS_futex, addr, FUTEX_WAKE, cnt);
++	__syscall(SYS_torpor_wake, addr, (unsigned int)cnt);
+ }
+ static inline void __futexwait(volatile void *addr, int val, int priv)
+ {
+-	if (priv) priv = FUTEX_PRIVATE;
+-	__syscall(SYS_futex, addr, FUTEX_WAIT|priv, val, 0) != -ENOSYS ||
+-	__syscall(SYS_futex, addr, FUTEX_WAIT, val, 0);
++	/* pouch: retarget to SYS_TORPOR_WAIT with timeout_us = -1
++	 * (block indefinitely). Same priv-discarded discipline as __wake. */
++	(void)priv;
++	__syscall(SYS_torpor_wait, addr, val, -1L);
+ }
+ 
+ hidden void __acquire_ptc(void);
+--- a/src/thread/__timedwait.c
++++ b/src/thread/__timedwait.c
+@@ -1,29 +1,64 @@
+ #include <pthread.h>
+ #include <time.h>
+ #include <errno.h>
++#include <limits.h>
+ #include "futex.h"
+ #include "syscall.h"
+ #include "pthread_impl.h"
+ 
+-#define IS32BIT(x) !((x)+0x80000000ULL>>32)
+-#define CLAMP(x) (int)(IS32BIT(x) ? (x) : 0x7fffffffU+((0ULL+(x))>>63))
+-
++/* pouch: torpor-wait wrapper consumed by __timedwait_cp.
++ *
++ * Translates musl's (addr, FUTEX_WAIT, val, struct timespec * relative)
++ * shape into Thylacine's (addr, expected, timeout_us) shape. The relative
++ * timespec already comes from __timedwait_cp's absolute-to-relative
++ * conversion (clock_gettime + subtract); torpor's relative microsecond
++ * timeout is the direct match. timeout = NULL is "block indefinitely"
++ * (timeout_us = -1).
++ *
++ * Returns 0 on success (woken OR value mismatch fast-path), -ETIMEDOUT on
++ * timeout, -EINVAL / -EFAULT on validation failure. The TORPOR_ERR_*
++ * values (kernel/include/thylacine/torpor.h) are Linux/musl-numeric so
++ * __timedwait_cp can branch on them directly.
++ *
++ * No SYS_futex_time64 cascade: Thylacine has one wait-on-address
++ * primitive, not two, and no 32-bit time_t legacy. The op arg (FUTEX_WAIT
++ * vs FUTEX_WAIT|FUTEX_PRIVATE) is discarded — torpor is structurally
++ * per-Proc and the v1.0 process-shared futex isn't implemented anyway.
++ */
+ static int __futex4_cp(volatile void *addr, int op, int val, const struct timespec *to)
+ {
+-	int r;
+-#ifdef SYS_futex_time64
+-	time_t s = to ? to->tv_sec : 0;
+-	long ns = to ? to->tv_nsec : 0;
+-	r = -ENOSYS;
+-	if (SYS_futex == SYS_futex_time64 || !IS32BIT(s))
+-		r = __syscall_cp(SYS_futex_time64, addr, op, val,
+-			to ? ((long long[]){s, ns}) : 0);
+-	if (SYS_futex == SYS_futex_time64 || r!=-ENOSYS) return r;
+-	to = to ? (void *)(long[]){CLAMP(s), ns} : 0;
+-#endif
+-	r = __syscall_cp(SYS_futex, addr, op, val, to);
+-	if (r != -ENOSYS) return r;
+-	return __syscall_cp(SYS_futex, addr, op & ~FUTEX_PRIVATE, val, to);
++	(void)op;
++	long timeout_us;
++	if (!to) {
++		timeout_us = -1L;
++	} else if (to->tv_sec < 0) {
++		/* Negative relative deadline => already past => immediate timeout.
++		 * torpor returns ETIMEDOUT for timeout_us = 0. */
++		timeout_us = 0;
++	} else {
++		/* F1+F3 audit close: clamp at TORPOR_MAX_TIMEOUT_US (= 1 hour in
++		 * microseconds, per kernel/torpor.h). The kernel REJECTS
++		 * timeout_us > TORPOR_MAX_TIMEOUT_US with -EINVAL, which
++		 * __timedwait_cp would then translate to "no error, no wait" via
++		 * the "if (r != EINTR && r != ETIMEDOUT && r != ECANCELED) r = 0"
++		 * dispatch — producing an infinite spin in pthread_cond_timedwait
++		 * when the caller's absolute deadline is far in the future. Cap
++		 * here so torpor returns ETIMEDOUT cleanly; the caller's outer
++		 * loop re-evaluates the absolute deadline and re-enters with a
++		 * fresh sub-1-hour relative timespec.
++		 *
++		 * tv_nsec is normalized to [0, 1e9) upstream so tv_nsec/1000 is
++		 * in [0, 999999); multiplication of tv_sec by 1e6 is bounded by
++		 * 3600 * 1e6 = 3.6e9 (well within signed long range). */
++		long max_us = 3600L * 1000000L;
++		if (to->tv_sec >= 3600L) {
++			timeout_us = max_us;
++		} else {
++			timeout_us = (long)to->tv_sec * 1000000L + (long)(to->tv_nsec / 1000);
++			if (timeout_us > max_us) timeout_us = max_us;
++		}
++	}
++	return __syscall_cp(SYS_torpor_wait, addr, val, timeout_us);
+ }
+ 
+ static volatile int dummy = 0;
+--- a/src/thread/__wait.c
++++ b/src/thread/__wait.c
+@@ -3,15 +3,16 @@
+ void __wait(volatile int *addr, volatile int *waiters, int val, int priv)
+ {
+ 	int spins=100;
+-	if (priv) priv = FUTEX_PRIVATE;
++	/* pouch: priv is irrelevant — torpor is structurally per-Proc. */
++	(void)priv;
+ 	while (spins-- && (!waiters || !*waiters)) {
+ 		if (*addr==val) a_spin();
+ 		else return;
+ 	}
+ 	if (waiters) a_inc(waiters);
+ 	while (*addr==val) {
+-		__syscall(SYS_futex, addr, FUTEX_WAIT|priv, val, 0) != -ENOSYS
+-		|| __syscall(SYS_futex, addr, FUTEX_WAIT, val, 0);
++		/* pouch: SYS_TORPOR_WAIT with timeout_us = -1 (indefinite). */
++		__syscall(SYS_torpor_wait, addr, val, -1L);
+ 	}
+ 	if (waiters) a_dec(waiters);
+ }
+--- a/src/thread/pthread_barrier_wait.c
++++ b/src/thread/pthread_barrier_wait.c
+@@ -83,9 +83,9 @@
+ 		while (spins-- && !inst->finished)
+ 			a_spin();
+ 		a_inc(&inst->finished);
++		/* pouch: SYS_TORPOR_WAIT with timeout_us = -1 (indefinite). */
+ 		while (inst->finished == 1)
+-			__syscall(SYS_futex,&inst->finished,FUTEX_WAIT|FUTEX_PRIVATE,1,0) != -ENOSYS
+-			|| __syscall(SYS_futex,&inst->finished,FUTEX_WAIT,1,0);
++			__syscall(SYS_torpor_wait, &inst->finished, 1, -1L);
+ 		return PTHREAD_BARRIER_SERIAL_THREAD;
+ 	}
+ 
+--- a/src/thread/pthread_cond_timedwait.c
++++ b/src/thread/pthread_cond_timedwait.c
+@@ -47,10 +47,16 @@
+ 
+ static inline void unlock_requeue(volatile int *l, volatile int *r, int w)
+ {
++	/* pouch: torpor has no FUTEX_REQUEUE equivalent (move waiter from
++	 * l to r without waking). Replace the requeue with a plain wake on
++	 * l; the waiter races to acquire r (the mutex) and re-sleeps on it
++	 * if needed. Loses the requeue optimization (avoiding a thundering-
++	 * herd race after broadcast under heavy contention) but is
++	 * functionally correct: cond_broadcast still serializes waiters on
++	 * the mutex. */
++	(void)r; (void)w;
+ 	a_store(l, 0);
+-	if (w) __wake(l, 1, 1);
+-	else __syscall(SYS_futex, l, FUTEX_REQUEUE|FUTEX_PRIVATE, 0, 1, r) != -ENOSYS
+-		|| __syscall(SYS_futex, l, FUTEX_REQUEUE, 0, 1, r);
++	__wake(l, 1, 1);
+ }
+ 
+ enum {
+--- a/src/thread/pthread_create.c
++++ b/src/thread/pthread_create.c
+@@ -169,7 +169,13 @@
+ 	a_store(&self->detach_state, DT_EXITED);
+ 	__wake(&self->detach_state, 1, 1);
+ 
+-	for (;;) __syscall(SYS_exit, 0);
++	/* pouch: SYS_THREAD_EXIT. The kernel atomically zeroes the
++	 * clear_child_tid word (= &__thread_list_lock — registered by
++	 * start() at thread entry) and torpor-wakes UINT32_MAX threads on
++	 * it, releasing the thread-list lock to any spinner. On the last
++	 * live Thread in the Proc, also transitions the Proc to ZOMBIE
++	 * with status 0. */
++	for (;;) __syscall(SYS_thread_exit);
+ }
+ 
+ void __do_cleanup_push(struct __ptcb *cb)
+@@ -194,13 +200,33 @@
+ static int start(void *p)
+ {
+ 	struct start_args *args = p;
++	/* pouch: register &__thread_list_lock as this Thread's
++	 * clear_child_tid address. SYS_THREAD_EXIT (via __pthread_exit's
++	 * tail or the early-exit path below) atomically zeros this word
++	 * and torpor-wakes spinners, releasing the thread-list lock —
++	 * mirrors Linux's CLONE_CHILD_CLEARTID applied to the
++	 * __thread_list_lock spinlock. Kernel side:
++	 * kernel/proc.c::thread_clear_child_tid_handoff.
++	 *
++	 * F4 audit close: the kernel gates tidptr on 4-byte alignment +
++	 * UACCESS_USER_VA_TOP bound. &__thread_list_lock is BSS-resident
++	 * so always satisfies both today, but a future linker-script
++	 * change that lands the symbol at a misaligned address would
++	 * silently disable the clear_child_tid handoff and hang
++	 * pthread_join. Defense-in-depth crash on negative return. */
++	if (__syscall(SYS_set_tid_address, &__thread_list_lock) < 0) a_crash();
+ 	int state = args->control;
+ 	if (state) {
+ 		if (a_cas(&args->control, 1, 2)==1)
+ 			__wait(&args->control, 0, 2, 1);
+ 		if (args->control) {
++			/* pouch: re-target clear_child_tid for the sched-failure
++			 * early-exit path so the parent's __wait observes the
++			 * exit through its own args->control word, not the
++			 * shared __thread_list_lock. The kernel honours an
++			 * in-flight clear_child_tid change. */
+ 			__syscall(SYS_set_tid_address, &args->control);
+-			for (;;) __syscall(SYS_exit, 0);
++			for (;;) __syscall(SYS_thread_exit);
+ 		}
+ 	}
+ 	__syscall(SYS_rt_sigprocmask, SIG_SETMASK, &args->sig_mask, 0, _NSIG/8);
+@@ -352,14 +378,37 @@
+ 
+ 	__tl_lock();
+ 	if (!libc.threads_minus_1++) libc.need_locks = 1;
+-	ret = __clone((c11 ? start_c11 : start), stack, flags, args, &new->tid, TP_ADJ(new), &__thread_list_lock);
++	/* pouch: SYS_THREAD_SPAWN(entry, sp_top, arg, tls) replaces the
++	 * Linux clone path. The kernel's thread_user_trampoline (see
++	 * arch/arm64/context.S) erets into EL0 with x0 = arg (the args
++	 * struct pointer) and TPIDR_EL0 = tls. new->tid is assigned from
++	 * the syscall return (Linux CLONE_PARENT_SETTID counterpart);
++	 * the clear_child_tid wiring happens inside start() via
++	 * SYS_SET_TID_ADDRESS, not at spawn time. The clone flags arg is
++	 * unused — Thylacine has no clone-flag dispatch; all pthreads
++	 * share VM / FS / FILES / SIGHAND / THREAD group by construction.
++	 *
++	 * F7 audit close: `stack` is 8-aligned at this point (post
++	 * start_args subtraction; sizeof(start_args) is 8-aligned but
++	 * not 16-aligned), so `stack & ~0xFL` aligns it DOWN to 16 bytes
++	 * for the kernel's strict-16-alignment gate at SYS_THREAD_SPAWN.
++	 * args lives at [stack, stack+sizeof(start_args)) — ABOVE the
++	 * worker's SP, so the worker's frame writes don't overwrite it. */
++	(void)flags;
++	{
++		long sp_arg = ((long)(uintptr_t)stack) & ~0xFL;
++		ret = __syscall(SYS_thread_spawn,
++			(c11 ? (long)(uintptr_t)start_c11 : (long)(uintptr_t)start),
++			sp_arg, (long)(uintptr_t)args, (long)(uintptr_t)TP_ADJ(new));
++		if (ret >= 0) new->tid = ret;
++	}
+ 
+-	/* All clone failures translate to EAGAIN. If explicit scheduling
+-	 * was requested, attempt it before unlocking the thread list so
+-	 * that the failed thread is never exposed and so that we can
+-	 * clean up all transient resource usage before returning. */
++	/* All clone failures translate to EAGAIN by POSIX, EXCEPT
++	 * kernel EINVAL (bad alignment / out-of-bound entry / sp / tls)
++	 * which we preserve so callers using pthread_attr_setstack with
++	 * a bad stack can diagnose. F8 audit close. */
+ 	if (ret < 0) {
+-		ret = -EAGAIN;
++		ret = (ret == -EINVAL) ? -EINVAL : -EAGAIN;
+ 	} else if (attr._a_sched) {
+ 		ret = __syscall(SYS_sched_setscheduler,
+ 			new->tid, attr._a_policy, &attr._a_prio);
+--- a/src/thread/aarch64/__unmapself.s
++++ b/src/thread/aarch64/__unmapself.s
+@@ -1,7 +1,9 @@
++/* pouch: SYS_munmap (215) → SYS_BURROW_DETACH (38); SYS_exit (93) →
++ * SYS_THREAD_EXIT (42). C-side ABI unchanged: x0 = stack_base, x1 = size. */
+ .global __unmapself
+ .type   __unmapself,%function
+ __unmapself:
+-	mov x8,#215 // SYS_munmap
++	mov x8,#38  // SYS_BURROW_DETACH
+ 	svc 0
+-	mov x8,#93 // SYS_exit
++	mov x8,#42  // SYS_THREAD_EXIT
+ 	svc 0
