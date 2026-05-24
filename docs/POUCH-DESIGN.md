@@ -308,7 +308,7 @@ Everything else pouch needs already exists: Spoors + 9P client (files), `/srv` (
 - [ ] `printf`-shaped hello (buffered stdio path) also works.
 - [ ] A multithreaded test program — N threads, a shared mutex-protected counter, join — runs correctly under default + TSan.
 - [ ] An `AF_UNIX` `SOCK_STREAM` echo client/server pair (pure POSIX source) round-trips over pouch → `/srv`.
-- [ ] **libsodium** cross-compiles against pouch and its self-test passes.
+- [x] **libsodium** cross-compiles against pouch and its self-test passes. *(sub-chunk 14, 2026-05-24 — libsodium 1.0.20 vendored byte-pristine at `third_party/libsodium/`; `tools/build.sh::build_libsodium` archives 97 .c files into `build/sysroot/lib/libsodium.a` (520780 B); `/pouch-hello-sodium` runs 5 primitives — `sodium_init`, SHA-256("abc") FIPS 180-4 KAT, BLAKE2b round-trip, xchacha20-poly1305-IETF AEAD round-trip, ed25519 sign + verify + reject-tampered. Detail: `docs/reference/84-pouch-libsodium.md`.)*
 - [ ] **stratumd** compiles against the sysroot (with a Thylacine `peer_creds` arm) and links.
 - [ ] stratumd **boots** in Thylacine, binds its `/srv` FS socket, and serves 9P — the Phase-5 stub is retired.
 - [ ] joey mounts `/sysroot` from real stratumd; the ramfs→Stratum pivot completes.

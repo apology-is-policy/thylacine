@@ -83,3 +83,31 @@ tarball the `llvmorg-22.1.4` release ships is the full monorepo
 `compiler-rt/lib/builtins/` subtree from it. The pinned sha256 above is the
 **monorepo tarball's** — a re-vendor downloads + verifies it, then re-extracts
 that one subtree.
+
+### libsodium 1.0.20 — `third_party/libsodium/`
+
+The **first cross-compiled C library against pouch** (execution Phase 6,
+sub-chunk 14 — see `docs/POUCH-DESIGN.md §14`). libsodium is a modern
+crypto library — chacha20-poly1305 AEAD, BLAKE2b, SHA-2, ed25519 / x25519,
+argon2 — and is the consumer Stratum's key agent relies on. Sub-chunk 14
+proves the pouch cross-toolchain by building libsodium against pouch's
+sysroot and running a known-answer-test (KAT) round-trip in Thylacine.
+
+| Field | Value |
+|---|---|
+| Version | 1.0.20 (released 2026-01-06) |
+| Source | `https://download.libsodium.org/libsodium/releases/libsodium-1.0.20.tar.gz` |
+| sha256 | `ebb65ef6ca439333c2bb41a0c1990587288da07f6c7fd07cb3a18cc18d30ce19` |
+| License | ISC — see `third_party/libsodium/LICENSE` |
+| Patch series | none — libsodium is portable C; pouch does not patch it |
+| Built by | `tools/build.sh sysroot` (`build_libsodium`); see `docs/reference/84-pouch-libsodium.md` |
+
+The tree is byte-identical to the published release. Like compiler-rt,
+libsodium has **no patch series** — none of it is OS-boundary code, so
+there is nothing to retarget; the OS dependency (the CSPRNG) reaches the
+kernel through `getentropy(3)` / `getrandom(2)` already wired by sub-chunks
+4 + 11. `build_libsodium` compiles the vendored source directly, out-of-tree
+under `build/pouch/libsodium-obj/`, with the `HAVE_*` configuration macros
+that `./configure` would normally generate supplied via `-D` flags on the
+compile command line. `version.h` is generated at build time from
+`version.h.in` (placeholder substitution); the vendored tree stays clean.

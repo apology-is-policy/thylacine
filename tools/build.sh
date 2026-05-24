@@ -186,7 +186,7 @@ EOF
     # P6-pouch-hello-smoke: copy the pouch POSIX test binaries (built
     # against the pouch sysroot by build_pouch_progs) into the cpio root.
     # Same curation discipline — explicit list, not a glob.
-    local pouch_bins=( "pouch-hello" "pouch-hello-stdio" "pouch-hello-printf" "pouch-hello-malloc" "pouch-hello-threads" "pouch-hello-poll" "pouch-hello-getrandom" "pouch-hello-sockets" "pouch-hello-signals" )
+    local pouch_bins=( "pouch-hello" "pouch-hello-stdio" "pouch-hello-printf" "pouch-hello-malloc" "pouch-hello-threads" "pouch-hello-poll" "pouch-hello-getrandom" "pouch-hello-sockets" "pouch-hello-signals" "pouch-hello-sodium" )
     local pouch_progs="$BUILD_DIR/pouch/progs"
     for bin in "${pouch_bins[@]}"; do
         local src="$pouch_progs/$bin"
@@ -357,12 +357,19 @@ build_sysroot() {
     #    installs libclang_rt.builtins.a alongside libc.a and the CRT objects.
     build_compiler_rt
 
+    # 7. build libsodium (sub-chunk 14) — the first cross-compiled C library
+    #    against pouch. Installs libsodium.a + headers alongside libc.a. The
+    #    libsodium build needs the libc + CRT + runtime that steps 1-6 install,
+    #    so it always runs after them.
+    build_libsodium
+
     echo "==> pouch sysroot ready:"
-    echo "    libc.a   $(wc -c < "$sysroot/lib/libc.a" | tr -d ' ') bytes"
-    echo "    runtime  libclang_rt.builtins.a $(wc -c < "$sysroot/lib/libclang_rt.builtins.a" | tr -d ' ') bytes"
-    echo "    CRT      crt1.o crti.o crtn.o"
-    echo "    headers  $(find "$sysroot/include" -name '*.h' | wc -l | tr -d ' ') files"
-    echo "    seam     syscall table retargeted to the Thylacine ABI"
+    echo "    libc.a    $(wc -c < "$sysroot/lib/libc.a" | tr -d ' ') bytes"
+    echo "    runtime   libclang_rt.builtins.a $(wc -c < "$sysroot/lib/libclang_rt.builtins.a" | tr -d ' ') bytes"
+    echo "    libsodium $(wc -c < "$sysroot/lib/libsodium.a" | tr -d ' ') bytes"
+    echo "    CRT       crt1.o crti.o crtn.o"
+    echo "    headers   $(find "$sysroot/include" -name '*.h' | wc -l | tr -d ' ') files"
+    echo "    seam      syscall table retargeted to the Thylacine ABI"
 }
 
 build_compiler_rt() {
@@ -474,6 +481,278 @@ build_compiler_rt() {
     fi
 }
 
+build_libsodium() {
+    # Phase 6 (Pouch) sub-chunk 14 — build libsodium for aarch64-thylacine and
+    # install it into the pouch sysroot as libsodium.a + headers. Per
+    # POUCH-DESIGN.md §14 this proves the cross-toolchain by cross-compiling
+    # a non-trivial real C library against pouch; the proving binary
+    # /pouch-hello-sodium then runs a KAT round-trip in Thylacine.
+    #
+    # libsodium is portable C with autoconf-generated config — pouch has no
+    # patch series for it (the OS-touching parts are getentropy(3) and
+    # getrandom(2), already wired by sub-chunks 4 + 11). build_libsodium
+    # supplies the HAVE_* macros and the version.h that ./configure would
+    # normally generate, without running ./configure (autoconf cross-compile
+    # on macOS for an unknown OS triple is fragile + slow). Source compiled
+    # directly with pouch-clang into build/pouch/libsodium-obj/, archived
+    # into build/sysroot/lib/libsodium.a, headers installed into
+    # build/sysroot/include/. See docs/reference/84-pouch-libsodium.md.
+    local sysroot="$BUILD_DIR/sysroot"
+    local sodium_src="$REPO_ROOT/third_party/libsodium/src/libsodium"
+    local sodium_obj="$BUILD_DIR/pouch/libsodium-obj"
+    local clang="$LLVM_PREFIX/bin/clang"
+    local archive="$sysroot/lib/libsodium.a"
+
+    if [[ ! -f "$sodium_src/Makefile.am" ]]; then
+        echo "==> libsodium: vendored source missing at $sodium_src" >&2
+        exit 1
+    fi
+
+    echo "==> building libsodium 1.0.20 (aarch64-thylacine)"
+    rm -rf "$sodium_obj"
+    mkdir -p "$sodium_obj" "$sodium_obj/gen/sodium"
+
+    # 1. Generate sodium/version.h from version.h.in. ./configure would
+    #    AC_SUBST these four placeholders; pouch substitutes them by hand.
+    #    SODIUM_LIBRARY_MINIMAL_DEF is empty for a non-MINIMAL build (we want
+    #    the full API surface). The generated header is placed FIRST on the
+    #    include path so it shadows the vendored .in.
+    sed -e 's/@VERSION@/1.0.20/g' \
+        -e 's/@SODIUM_LIBRARY_VERSION_MAJOR@/26/g' \
+        -e 's/@SODIUM_LIBRARY_VERSION_MINOR@/2/g' \
+        -e 's|@SODIUM_LIBRARY_MINIMAL_DEF@||g' \
+        "$sodium_src/include/sodium/version.h.in" \
+        > "$sodium_obj/gen/sodium/version.h"
+
+    # 2. The compose-list. Curated from src/libsodium/Makefile.am
+    #    (libsodium_la_SOURCES base + !HAVE_AMD64_ASM ref-salsa20 +
+    #    !EMSCRIPTEN randombytes + !MINIMAL non-minimal arm).
+    #    Excluded: x86 ASM (AESNI, SSE, AVX, sandy2x); ARMv8 crypto extension
+    #    sources (libarmcrypto_la — needs +crypto march, pouch baseline is
+    #    -march=armv8-a+lse+pauth+bti). The portable refs implement every
+    #    primitive; performance is fine for a proving binary.
+    local sources=(
+        crypto_aead/aegis128l/aead_aegis128l.c
+        crypto_aead/aegis128l/aegis128l_soft.c
+        crypto_aead/aegis256/aead_aegis256.c
+        crypto_aead/aegis256/aegis256_soft.c
+        crypto_aead/aes256gcm/aead_aes256gcm.c
+        crypto_aead/chacha20poly1305/aead_chacha20poly1305.c
+        crypto_aead/xchacha20poly1305/aead_xchacha20poly1305.c
+        crypto_auth/crypto_auth.c
+        crypto_auth/hmacsha256/auth_hmacsha256.c
+        crypto_auth/hmacsha512/auth_hmacsha512.c
+        crypto_auth/hmacsha512256/auth_hmacsha512256.c
+        crypto_box/crypto_box.c
+        crypto_box/crypto_box_easy.c
+        crypto_box/crypto_box_seal.c
+        crypto_box/curve25519xchacha20poly1305/box_curve25519xchacha20poly1305.c
+        crypto_box/curve25519xchacha20poly1305/box_seal_curve25519xchacha20poly1305.c
+        crypto_box/curve25519xsalsa20poly1305/box_curve25519xsalsa20poly1305.c
+        crypto_core/ed25519/core_ed25519.c
+        crypto_core/ed25519/core_ristretto255.c
+        crypto_core/ed25519/ref10/ed25519_ref10.c
+        crypto_core/hchacha20/core_hchacha20.c
+        crypto_core/hsalsa20/core_hsalsa20.c
+        crypto_core/hsalsa20/ref2/core_hsalsa20_ref2.c
+        crypto_core/salsa/ref/core_salsa_ref.c
+        crypto_core/softaes/softaes.c
+        crypto_generichash/blake2b/generichash_blake2.c
+        crypto_generichash/blake2b/ref/blake2b-compress-ref.c
+        crypto_generichash/blake2b/ref/blake2b-ref.c
+        crypto_generichash/blake2b/ref/generichash_blake2b.c
+        crypto_generichash/crypto_generichash.c
+        crypto_hash/crypto_hash.c
+        crypto_hash/sha256/cp/hash_sha256_cp.c
+        crypto_hash/sha256/hash_sha256.c
+        crypto_hash/sha512/cp/hash_sha512_cp.c
+        crypto_hash/sha512/hash_sha512.c
+        crypto_kdf/blake2b/kdf_blake2b.c
+        crypto_kdf/crypto_kdf.c
+        crypto_kdf/hkdf/kdf_hkdf_sha256.c
+        crypto_kdf/hkdf/kdf_hkdf_sha512.c
+        crypto_kx/crypto_kx.c
+        crypto_onetimeauth/crypto_onetimeauth.c
+        crypto_onetimeauth/poly1305/donna/poly1305_donna.c
+        crypto_onetimeauth/poly1305/onetimeauth_poly1305.c
+        crypto_pwhash/argon2/argon2-core.c
+        crypto_pwhash/argon2/argon2-encoding.c
+        crypto_pwhash/argon2/argon2-fill-block-ref.c
+        crypto_pwhash/argon2/argon2.c
+        crypto_pwhash/argon2/blake2b-long.c
+        crypto_pwhash/argon2/pwhash_argon2i.c
+        crypto_pwhash/argon2/pwhash_argon2id.c
+        crypto_pwhash/crypto_pwhash.c
+        crypto_pwhash/scryptsalsa208sha256/crypto_scrypt-common.c
+        crypto_pwhash/scryptsalsa208sha256/nosse/pwhash_scryptsalsa208sha256_nosse.c
+        crypto_pwhash/scryptsalsa208sha256/pbkdf2-sha256.c
+        crypto_pwhash/scryptsalsa208sha256/pwhash_scryptsalsa208sha256.c
+        crypto_pwhash/scryptsalsa208sha256/scrypt_platform.c
+        crypto_scalarmult/crypto_scalarmult.c
+        crypto_scalarmult/curve25519/ref10/x25519_ref10.c
+        crypto_scalarmult/curve25519/scalarmult_curve25519.c
+        crypto_scalarmult/ed25519/ref10/scalarmult_ed25519_ref10.c
+        crypto_scalarmult/ristretto255/ref10/scalarmult_ristretto255_ref10.c
+        crypto_secretbox/crypto_secretbox.c
+        crypto_secretbox/crypto_secretbox_easy.c
+        crypto_secretbox/xchacha20poly1305/secretbox_xchacha20poly1305.c
+        crypto_secretbox/xsalsa20poly1305/secretbox_xsalsa20poly1305.c
+        crypto_secretstream/xchacha20poly1305/secretstream_xchacha20poly1305.c
+        crypto_shorthash/crypto_shorthash.c
+        crypto_shorthash/siphash24/ref/shorthash_siphash24_ref.c
+        crypto_shorthash/siphash24/ref/shorthash_siphashx24_ref.c
+        crypto_shorthash/siphash24/shorthash_siphash24.c
+        crypto_shorthash/siphash24/shorthash_siphashx24.c
+        crypto_sign/crypto_sign.c
+        crypto_sign/ed25519/ref10/keypair.c
+        crypto_sign/ed25519/ref10/obsolete.c
+        crypto_sign/ed25519/ref10/open.c
+        crypto_sign/ed25519/ref10/sign.c
+        crypto_sign/ed25519/sign_ed25519.c
+        crypto_stream/chacha20/ref/chacha20_ref.c
+        crypto_stream/chacha20/stream_chacha20.c
+        crypto_stream/crypto_stream.c
+        crypto_stream/salsa20/ref/salsa20_ref.c
+        crypto_stream/salsa20/stream_salsa20.c
+        crypto_stream/salsa2012/ref/stream_salsa2012_ref.c
+        crypto_stream/salsa2012/stream_salsa2012.c
+        crypto_stream/salsa208/ref/stream_salsa208_ref.c
+        crypto_stream/salsa208/stream_salsa208.c
+        crypto_stream/xchacha20/stream_xchacha20.c
+        crypto_stream/xsalsa20/stream_xsalsa20.c
+        crypto_verify/verify.c
+        randombytes/internal/randombytes_internal_random.c
+        randombytes/randombytes.c
+        randombytes/sysrandom/randombytes_sysrandom.c
+        sodium/codecs.c
+        sodium/core.c
+        sodium/runtime.c
+        sodium/utils.c
+        sodium/version.c
+    )
+
+    if [[ "${#sources[@]}" -lt 90 ]]; then
+        echo "    libsodium: source list too short (${#sources[@]}) — list out of sync?" >&2
+        exit 1
+    fi
+
+    # 3. Compile flags. The HAVE_* set mirrors what ./configure would AC_DEFINE
+    #    for aarch64-thylacine: musl-style libc (1.2.5), clang 22.1, no x86
+    #    ASM, no ARMv8 crypto extension, pthreads available. Notes on the
+    #    POUCH-specific choices:
+    #      - HAVE_MPROTECT / HAVE_MLOCK / HAVE_MADVISE NOT defined — pouch's
+    #        sentinel returns ENOSYS for these; libsodium's sodium_mlock would
+    #        try to call them and silently return -1, which is benign but
+    #        defining them would mislead libsodium consumers about what it
+    #        actually does.
+    #      - HAVE_NANOSLEEP / HAVE_CLOCK_GETTIME NOT defined — pouch's sentinel
+    #        returns ENOSYS for these too; libsodium uses them only on retry
+    #        paths and busy-waits adequately without them at v1.0.
+    #      - HAVE_GETPID defined — getpid() in pouch returns -1 (sentinel
+    #        ENOSYS); libsodium uses it only for fork-detection in the
+    #        internal_random path (not the default sysrandom path), where the
+    #        -1 value harmlessly never matches a "new" pid.
+    #      - HAVE_GETRANDOM + HAVE_GETENTROPY defined — sub-chunks 4 + 11
+    #        wired both. The randombytes_sysrandom path picks the getentropy
+    #        branch first; both reach the kernel through SYS_GETRANDOM.
+    #      - HAVE_CATCHABLE_ABRT / HAVE_CATCHABLE_SEGV NOT defined — pouch's
+    #        sigaction surface doesn't support SIGABRT / SIGSEGV (v1.0); the
+    #        macros are unused by libsodium 1.0.20 source anyway.
+    #      - CONFIGURED=1 — kills the "compiled by an undocumented method"
+    #        warning in private/common.h that fires when ./configure didn't
+    #        emit a config.h.
+    #      - SODIUM_STATIC — expands SODIUM_EXPORT to nothing (no
+    #        visibility attribute needed for a static-archive build).
+    local cflags=( --target=aarch64-thylacine -march=armv8-a+lse+pauth+bti
+                   -std=gnu11 -O2 -fno-pic -fomit-frame-pointer
+                   -fno-stack-protector
+                   -nostdinc -isystem "$sysroot/include"
+                   -I"$sodium_obj/gen/sodium"
+                   -I"$sodium_src/include"
+                   -I"$sodium_src/include/sodium"
+                   -D_GNU_SOURCE=1
+                   -DCONFIGURED=1
+                   -DSODIUM_STATIC=1
+                   -DNATIVE_LITTLE_ENDIAN=1
+                   -DHAVE_TI_MODE=1
+                   -DHAVE_C_VARARRAYS=1
+                   -DHAVE_INTTYPES_H=1
+                   -DHAVE_STDINT_H=1
+                   -DHAVE_SYS_MMAN_H=1
+                   -DHAVE_SYS_PARAM_H=1
+                   -DHAVE_SYS_RANDOM_H=1
+                   -DHAVE_SYS_AUXV_H=1
+                   -DHAVE_PTHREAD=1
+                   -DHAVE_WEAK_SYMBOLS=1
+                   -DHAVE_C11_MEMORY_FENCES=1
+                   -DHAVE_GCC_MEMORY_FENCES=1
+                   -DHAVE_ATOMIC_OPS=1
+                   -DHAVE_INLINE_ASM=1
+                   -DHAVE_MMAP=1
+                   -DHAVE_RAISE=1
+                   -DHAVE_SYSCONF=1
+                   -DHAVE_GETRANDOM=1
+                   -DHAVE_GETENTROPY=1
+                   -DHAVE_LINUX_COMPATIBLE_GETRANDOM=1
+                   -DHAVE_GETPID=1
+                   -DHAVE_GETAUXVAL=1
+                   -DHAVE_POSIX_MEMALIGN=1
+                   -DHAVE_EXPLICIT_BZERO=1
+                   -Wno-unknown-pragmas -Wno-unused-function )
+
+    local n=0 base obj
+    for f in "${sources[@]}"; do
+        if [[ ! -f "$sodium_src/$f" ]]; then
+            echo "    libsodium: source $f missing from the vendored tree" >&2
+            exit 1
+        fi
+        base="${f%.c}"
+        obj="$sodium_obj/${base//\//-}.o"
+        "$clang" "${cflags[@]}" -c "$sodium_src/$f" -o "$obj"
+        n=$((n + 1))
+    done
+    echo "    compiled $n objects"
+
+    # 4. Archive + symbol index.
+    rm -f "$archive"
+    "$LLVM_PREFIX/bin/llvm-ar" rcs "$archive" "$sodium_obj"/*.o
+
+    # 5. Install the public headers into the sysroot. sodium.h is the umbrella
+    #    header; sodium/*.h is the per-primitive subset; the generated
+    #    sodium/version.h is installed from $sodium_obj/gen.
+    mkdir -p "$sysroot/include/sodium"
+    cp "$sodium_src/include/sodium.h" "$sysroot/include/sodium.h"
+    local h
+    for h in "$sodium_src/include/sodium/"*.h; do
+        cp "$h" "$sysroot/include/sodium/$(basename "$h")"
+    done
+    cp "$sodium_obj/gen/sodium/version.h" "$sysroot/include/sodium/version.h"
+
+    # 6. Verify the archive contains the symbols pouch-hello-sodium will use.
+    #    These pin the cross-build's correctness: a missing primary symbol
+    #    would surface a vendor / source-list drift before /pouch-hello-sodium
+    #    even links.
+    local defined sym fail=0
+    defined="$("$LLVM_PREFIX/bin/llvm-nm" --defined-only "$archive" 2>/dev/null)"$'\n'
+    for sym in sodium_init randombytes_buf \
+               crypto_aead_xchacha20poly1305_ietf_encrypt \
+               crypto_aead_xchacha20poly1305_ietf_decrypt \
+               crypto_hash_sha256 \
+               crypto_generichash \
+               crypto_sign_keypair crypto_sign_detached crypto_sign_verify_detached \
+               sodium_version_string; do
+        case "$defined" in
+            *" T $sym"$'\n'*) ;;
+            *) echo "    libsodium: symbol $sym not defined in the archive" >&2
+               fail=1 ;;
+        esac
+    done
+    if [[ "$fail" -ne 0 ]]; then
+        echo "==> libsodium FAILED verification" >&2
+        exit 1
+    fi
+}
+
 build_pouch_progs() {
     # Phase 6 (Pouch) — cross-compile the pouch POSIX test programs (the
     # hello binaries) against the pouch sysroot. These are the first
@@ -513,7 +792,7 @@ build_pouch_progs() {
     mkdir -p "$progs_out"
 
     local prog
-    for prog in pouch-hello pouch-hello-stdio pouch-hello-printf pouch-hello-malloc pouch-hello-threads pouch-hello-poll pouch-hello-getrandom pouch-hello-sockets pouch-hello-signals; do
+    for prog in pouch-hello pouch-hello-stdio pouch-hello-printf pouch-hello-malloc pouch-hello-threads pouch-hello-poll pouch-hello-getrandom pouch-hello-sockets pouch-hello-signals pouch-hello-sodium; do
         echo "==> pouch prog: $prog"
         # 1. compile (clang). -nostdinc + -isystem: pouch owns the include
         #    path. -fno-pie: non-PIC codegen for a fixed-address ET_EXEC.
@@ -521,9 +800,21 @@ build_pouch_progs() {
             -nostdinc -isystem "$sysroot/include" -fno-pie \
             -c "$src_dir/$prog.c" -o "$progs_out/$prog.o"
         # 2. link via tools/pouch-ld — it drives ld.lld directly with the
-        #    pouch link line and supplies the CRT + libc.a.
+        #    pouch link line and supplies the CRT + libc.a. Per-binary
+        #    libsets pull in extra archives (e.g., libsodium for the
+        #    sub-chunk 14 proving binary). -L<sysroot>/lib precedes
+        #    -lsodium so the linker finds libsodium.a alongside libc.a.
+        local extra_libs=()
+        case "$prog" in
+            pouch-hello-sodium) extra_libs=( -L"$sysroot/lib" -lsodium ) ;;
+        esac
+        # ${arr[@]+"${arr[@]}"} expands to nothing when arr is empty (which
+        # the default `${arr[@]}` cannot under `set -u`); the if-set guard
+        # is the canonical bash idiom.
         POUCH_SYSROOT="$sysroot" LLD_PREFIX="$LLD_PREFIX" \
-            "$pouch_ld" "$progs_out/$prog.o" -o "$progs_out/$prog"
+            "$pouch_ld" "$progs_out/$prog.o" \
+            ${extra_libs[@]+"${extra_libs[@]}"} \
+            -o "$progs_out/$prog"
         # verify the layout the kernel ELF loader requires: ET_EXEC, no
         # PT_DYNAMIC. A loader-incompatible binary fails here, not at boot.
         # readelf output is captured first (a `grep -q` pipeline would

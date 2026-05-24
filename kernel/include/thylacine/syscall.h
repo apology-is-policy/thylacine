@@ -236,7 +236,7 @@ enum {
     // into the child, and return its PID. Returns -1 on:
     //   - name_len out of range / name_va bound violation
     //   - binary not found in devramfs
-    //   - blob exceeds SYS_SPAWN_BLOB_MAX (32 KiB)
+    //   - blob exceeds SYS_SPAWN_BLOB_MAX (1 MiB)
     //   - kmalloc / rfork OOM
     //   - exec_setup failure (child exits "fail-exec" → parent's
     //     SYS_WAIT_PID observes non-zero status)
@@ -924,13 +924,13 @@ _Static_assert(__builtin_offsetof(struct srv_peer_info, alive) == 20,
 #define SYS_SPAWN_NAME_MAX  64u
 
 // Maximum ELF blob size for SYS_SPAWN. v1.0 userspace binaries that
-// stay near the cap: corvus = 111440 bytes at P5-corvus-bringup-c
-// (Argon2id + AEGIS-256 + heap allocator pull in ~100 KiB of compiled
-// crypto). Future daemons embedding hybrid PQC primitives (ML-KEM-768)
-// will continue growing; 256 KiB gives several chunks of headroom.
-// kmalloc routes >2 KiB requests through alloc_pages so larger sizes
-// just allocate more pages — no algorithmic cost.
-#define SYS_SPAWN_BLOB_MAX  262144u
+// stay near the cap: /pouch-hello-sodium = 276848 bytes at sub-chunk 14
+// (libsodium ed25519 + chacha20-poly1305 + SHA-256 + BLAKE2b pulled in
+// from libsodium.a). stratumd (sub-chunk 16) will pull in libsodium too
+// and is expected to land around 600-800 KiB. kmalloc routes >2 KiB
+// requests through alloc_pages so larger sizes just allocate more pages
+// — no algorithmic cost — bounded by MAX_ORDER (1 GiB).
+#define SYS_SPAWN_BLOB_MAX  1048576u
 
 // Maximum number of fds that can be inherited via SYS_SPAWN_WITH_FDS
 // per call. 16 is generous for the v1.0 use case (joey passes 2 to

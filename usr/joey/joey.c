@@ -593,6 +593,23 @@ static int do_pouch_hello_smoke(void) {
                         psig_expect, sizeof(psig_expect) - 1) != 0)
         return -1;
     t_putstr("joey: pouch-hello-signals smoke ok (sigaction + raise via SYS_NOTIFY/POSTNOTE/NOTED)\n");
+
+    // P6-pouch-libsodium (sub-chunk 14): the libsodium cross-build proving
+    // binary. Cross-compiled against pouch's sysroot (which now ships
+    // libsodium.a) and run inside Thylacine. Five primitives exercised:
+    // sodium_init, SHA-256 KAT, BLAKE2b round-trip, xchacha20-poly1305
+    // AEAD round-trip, ed25519 sign + verify + reject-tampered. The CSPRNG
+    // path reaches the kernel through getentropy(3) -> getrandom(2) ->
+    // SYS_GETRANDOM, which is gated on CAP_CSPRNG_READ — so this binary
+    // spawns with the same cap as /pouch-hello-getrandom. Closes
+    // POUCH-DESIGN.md §13's libsodium exit criterion.
+    static const char psod_name[]   = "pouch-hello-sodium";
+    static const char psod_expect[] = "pouch-hello-sodium: exit 0";
+    if (pouch_smoke_one_caps(psod_name, sizeof(psod_name) - 1,
+                             psod_expect, sizeof(psod_expect) - 1,
+                             T_CAP_CSPRNG_READ) != 0)
+        return -1;
+    t_putstr("joey: pouch-hello-sodium smoke ok (libsodium KATs + AEAD + ed25519)\n");
     return 0;
 }
 

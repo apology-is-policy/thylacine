@@ -39,7 +39,10 @@
 // File table.
 // =============================================================================
 
-#define RAMFS_FILE_MAX 32
+// Sized to hold the ramfs binaries Phase 6 ships (33+ entries by sub-chunk
+// 14) with headroom for sub-chunks 15-16 (stratumd) and Phase 7 (Utopia
+// userspace). 24 bytes per slot; the static array sits in BSS.
+#define RAMFS_FILE_MAX 64
 
 struct ramfs_file {
     const char *name;        // NUL-terminated; lives in the cpio blob
