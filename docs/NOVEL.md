@@ -49,6 +49,7 @@ Thylacine's totalization:
 - **Halcyon mounts 9P servers** for everything it displays (framebuffer, video, fonts, etc.).
 - **Stratum is a 9P server** mounted as the root FS.
 - **janus is a 9P server** mounted as `/dev/janus/`.
+- **Signals as a synthetic filesystem** *(novel inversion vs. Plan 9 and Linux)*. Every Proc has a fd-readable note Spoor (`SYS_NOTE_OPEN`); the fd-first path is the documented default, with async handlers (`SYS_NOTIFY` / `SYS_NOTED`) as an explicit opt-in for libc compatibility. Plan 9 had `/proc/<pid>/note` readable too but kept async-handler as the documented model; Linux's `signalfd(2)` is a bolted-on afterthought. Thylacine inverts the priority — modern daemons (stratumd, libsodium-shaped code) read notes from `poll`'d fds in their normal event loop, never write async-cancel-safe handler code. The historically nastiest part of POSIX signal programming becomes the rare path. Design in ARCH §7.6.1-§7.6.8.
 
 **Scope — in**:
 - Kernel `Dev` vtable + `Spoor` + `Walkqid` + `attach` / `walk` / `open` / `read` / `write` / `clunk` / etc. as the unified resource interface.

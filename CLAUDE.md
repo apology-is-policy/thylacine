@@ -143,7 +143,7 @@ Any change to the surfaces below MUST spawn a focused adversarial soundness audi
 | 9P client | `kernel/9p_client.c`, `kernel/9p_session.c`, `kernel/9p_attach.c` | Wire protocol, fid lifecycle (I-11), tag uniqueness (I-10), pipelining |
 | Pipe wait/wake | `kernel/pipe.c` | Missed-wakeup-freedom (I-9 specialized to pipe two-direction state machine); per-pipe lock + rendez discipline. Modeled in `specs/pipe.tla`. |
 | poll | `kernel/poll.c` | Missed-wakeup-freedom across N fds (I-9); register-then-observe + poll-hook list lifetime. Modeled in `specs/poll.tla`. |
-| Notes / signals | `kernel/notes.c`, `compat/signals.c` | Delivery ordering (I-19), async safety |
+| Notes / signals | `kernel/notes.c`, `kernel/devnotes.c`, `kernel/include/thylacine/notes.h`, `kernel/proc.c` (synthetic `child_exit` post in `exits`), `kernel/pipe.c` (synthetic `pipe` post on write-to-closed), `arch/arm64/exception.c` (EL0-return-tail delivery) | Delivery ordering (I-19); async-safety (delivery only at zero-lock EL0-return tail); N-2 consumed-exactly-once across handler + fd-read paths; N-3 in_handler re-entrancy guard; N-4 `kill` non-catchable. **No `specs/notes.tla`** per the 2026-05-23 spec-to-code broadening — prose validation in `notes.h` + the audit + the runtime test suite are the rigor. See ARCH §7.6.1-§7.6.8 for the design + invariants. |
 | Capability checks | All syscall entry points | Privilege correctness |
 | KASLR / ASLR | `arch/arm64/start.S`, `arch/arm64/kaslr.c` | Entropy quality, layout correctness (I-16) |
 | ELF loader | `kernel/elf.c` | RWX rejection, relocation correctness |

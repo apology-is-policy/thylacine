@@ -161,14 +161,14 @@ POSIX `poll(2)` over fds maps onto Thylacine's `SYS_POLL` — which **already ex
 
 ### 6.4 Signals → notes
 
-POSIX signals map onto Thylacine **notes** (Plan 9 heritage; `notes.tla` is gate-tied spec #8). Notes are a different model — string-named, causally-ordered, no fixed signal numbers — so the mapping is *partial by design*:
+POSIX signals map onto Thylacine **notes** (Plan 9 heritage; kernel substrate designed in ARCH §7.6.1-§7.6.8 + landed at sub-chunk 13a `pouch-signals-design`). Notes are a different model — string-named, causally-ordered, no fixed signal numbers, and **fd-shaped first** (the documented modern path is to read notes from a `SYS_NOTE_OPEN`'d fd in a poll-driven event loop; the async handler is the legacy opt-in for libcs that insist on the POSIX model). The mapping is *partial by design*:
 
 - pouch implements the **small signal surface real daemons need**: `SIGINT`, `SIGTERM`, `SIGPIPE`, `SIGCHLD`, plus `sigaction` / `sigprocmask` / `pthread_sigmask` for those.
-- Each supported signal is a reserved note string; `sigaction` registers a pouch-side handler that the note-delivery path invokes.
-- `SIGPIPE`: a write to a closed `/srv` peer returns `EPIPE`; pouch synthesizes the `SIGPIPE` delivery (or, per POSIX default-ignore-friendly modern practice, pouch can default `SIGPIPE` to ignored and let `write` return `EPIPE` — **[OPEN Q 6.4]**).
-- **Deferred**: real-time signals, `SIGSEGV`/`SIGBUS` userspace handlers (Thylacine faults are extinction-shaped), the full 31-signal surface. Unsupported signals: `sigaction` returns `EINVAL` with a documented list.
+- Each supported signal is a reserved note string; `sigaction` registers a pouch-side handler that the kernel's async-handler delivery path (`SYS_NOTIFY` → EL0-return-tail invoke) calls into. The kernel's fd-shaped path is parallel: `SYS_NOTE_OPEN` returns a fd that delivers `struct note_record` (32-byte fixed format) on `read`. Pouch exposes a thin wrapper (`note_open()`) so daemons can choose the modern path; the existing musl `sigaction` API also works for code that wants it.
+- `SIGPIPE`: a write to a closed `/srv` peer returns `EPIPE`; the kernel synthesizes the `pipe` note delivery, but pouch **defaults `SIGPIPE` to masked** at startup ([RESOLVED 6.4]) — POSIX default-ignore-friendly modern practice. The `write` returns `EPIPE` and that's it. Daemons can opt in to handler delivery via `sigaction(SIGPIPE, …)` (clears the mask bit).
+- **Deferred**: real-time signals, `SIGSEGV`/`SIGBUS` userspace handlers (Thylacine faults are extinction-shaped), `SIGHUP`/`SIGALRM`/`SIGUSR1`/`SIGUSR2`/`SIGSTOP`/`SIGCONT` (each requires a separate kernel hook — `alarm` needs `SYS_ALARM`, `hangup` needs cons close path, `stop`/`cont` need scheduler integration). The full 31-signal surface stays incomplete. Unsupported signals: `sigaction` returns `EINVAL` with a documented list.
 
-**[OPEN Q 6.5]** Notes' causal-ordering guarantee (I-19) is *stronger* than POSIX signal ordering. That is fine (stronger is safe) but the mapping should be stated precisely so future signal-heavy ports know what they get.
+**[RESOLVED 6.5]** (2026-05-24). Notes' causal-ordering guarantee (I-19, refined to N-1..N-5 in ARCH §7.6.7) is *stronger* than POSIX signal ordering — every posted note is consumed exactly once across the handler and fd-read paths, and notes from a single posting source are delivered in post order. POSIX programs receive the stronger guarantee transparently; signal-heavy ports gain reliability they couldn't get on Linux's non-RT signal model.
 
 ### 6.5 Block I/O
 
@@ -294,7 +294,7 @@ A deliberately *bounded* list — most of pouch is userspace. The kernel needs:
 2. **The wait-on-address primitive** — the futex-equivalent syscall, spec'd by `futex.tla` (#7). Already on the spec roadmap.
 3. **The anonymous-memory syscalls** — `burrow_attach(length) → vaddr` / `burrow_detach(vaddr, length)` (ARCHITECTURE.md §6.5 Tier 1, §11.2). [RESOLVED 12.1: the gap is real — the Burrow + VMA + demand-paging machinery exists and is audited (`burrow.tla` / I-7) but had no userspace entry point. The two syscalls are thin skins over the existing `burrow_create_anon → burrow_map → burrow_unref` discipline; `brk` is declined (the model drops it). Implemented at sub-chunk 7 (`pouch-mem`); the `0003-pouch-mman` patch retargets musl's `mman/` lower half onto them.]
 4. **`set_tid_address` semantics** — return the tid; the clear-on-exit futex semantics matter only once threads use robust lists (deferred). Small.
-5. **notes** — if `notes.tla`'s implementation has not yet landed, pouch's signal layer needs it. **[OPEN Q 12.2]** confirm notes implementation status.
+5. **notes** — pouch's signal layer needs the kernel notes substrate. [RESOLVED 12.2] (2026-05-24): confirmed absent at sub-chunk 12 close; designed in ARCH §7.6.1-§7.6.8 as `pouch-signals-design` (the fd-first inversion + the async-handler compat path); implementation lands at sub-chunk 13a (`pouch-signals-impl`); pouch boundary-line patch + proving binary at sub-chunk 13b.
 6. **Thread-spawn surface** — confirm Thylacine's thread-creation syscall accepts a caller-provided stack + entry (§7 [OPEN Q 7.3]).
 
 Everything else pouch needs already exists: Spoors + 9P client (files), `/srv` (sockets), `SYS_POLL` (poll), the handle table (fds), `TPIDR_EL0` save/restore (TLS).
@@ -337,7 +337,7 @@ Each sub-chunk lands independently with the two-commit pattern; audit-bearing on
 | 10 | **pouch-poll** | `poll`/`select`/`ppoll`/`pselect` retargeted onto `SYS_POLL` (kernel poll primitive audited in P5-poll-a/b) — **LANDED 2026-05-23** | no |
 | 11 | **pouch-devnodes** | The minimal synthetic-FS namespace (§6.6): trivial `/dev` nodes (`null`/`zero`/`full`) as tiny kernel Devs; the `getrandom`-syscall path libsodium needs — **LANDED 2026-05-23** (devfull Dev + /pouch-hello-getrandom proving binary; path-based `open("/dev/null")` access deferred to a future multi-component-walk sub-chunk) | no |
 | 12 | **pouch-sockets** | `AF_UNIX` `SOCK_STREAM` → `/srv`; `SO_PEERCRED` → `t_srv_peer`. Discovery at impl time: /srv shipped as a 9P-shaped channel — raw byte streams need a NEW kernel `SrvService.mode` (SRV_MODE_9P / SRV_MODE_BYTE) + `SYS_POST_SERVICE_BYTE` syscall + KOBJ_SRV read/write mode dispatch. corvus + stratumd stay on 9P mode; pouch sockets use byte mode. **LANDED 2026-05-23** | **yes** (capability surface + new kernel transport mode) |
-| 13 | **pouch-signals** | The supported signal subset → notes | **yes** (notes / async safety) |
+| 13 | **pouch-signals** | The supported signal subset → notes. Splits into **13-design** (scripture: ARCH §7.6.1-§7.6.8 — the fd-first kernel notes substrate as a NOVEL.md §3.1 totalization), **13a-impl** (kernel substrate: `kernel/notes.c` + `kernel/devnotes.c` + the syscall surface + synthetic posters), **13b-pouch** (boundary-line patch `0007-pouch-signals.patch` + `/pouch-hello-signals` proving binary). | **yes** (13a kernel substrate; 13b pouch side) |
 | 14 | **pouch-libsodium** | Cross-compile libsodium; self-test | no |
 | 15 | **pouch-stratumd-build** | Build stratumd against the sysroot; Thylacine `peer_creds` arm | no (Stratum-side) |
 | 16 | **pouch-stratumd-boot** | joey spawns real stratumd; `/sysroot` mount; ramfs pivot; retire the stub | **yes** (boot ordering) |
@@ -394,8 +394,8 @@ All twenty round-1 open questions resolved to the drafted leans (user signoff, 2
 | 6.1 | Block device: `/dev` namespace vs. inherited handle | ✅ inherited handle (capability-pure) |
 | 6.2 | `AF_UNIX` paths outside `/srv/` | ✅ unsupported this phase |
 | 6.3 | `SOCK_DGRAM` | ✅ deferred |
-| 6.4 | `SIGPIPE` default-ignore vs. synthesized delivery | ✅ default-ignore + `EPIPE` |
-| 6.5 | Note causal ordering vs. POSIX signal ordering | ✅ stronger; document precisely |
+| 6.4 | `SIGPIPE` default-ignore vs. synthesized delivery | ✅ default-mask + `EPIPE` (kernel still posts the note; pouch's startup mask suppresses delivery; opt-in via sigaction) |
+| 6.5 | Note causal ordering vs. POSIX signal ordering | ✅ stronger — N-1..N-5 in ARCH §7.6.7 |
 | 6.6 | minimal-namespace scope + Devs-vs-servers split for trivial nodes | ✅ confirmed (round 3) — minimal namespace this phase; trivial nodes as kernel Devs; richer namespace → Utopia |
 | 7.1 | wait-on-address: absolute deadline / relative / both | ✅ absolute deadline (reuse `tsleep`) |
 | 7.2 | wait-on-address spec is `futex.tla` | ✅ yes |
@@ -406,7 +406,7 @@ All twenty round-1 open questions resolved to the drafted leans (user signoff, 2
 | 10.1 | Thylacine-first software: native extensions vs. portable+arms | ✅ portable + thin per-OS arms |
 | 11.1 | Invariant numbers in ARCH §28 | ✅ P-numbered; canonical in §11; cross-ref'd from ARCH §28 (mirrors the corvus C-invariant treatment) |
 | 12.1 | anonymous-memory kernel gap size | ✅ approach settled; size it in the `pouch-mem` sub-chunk |
-| 12.2 | `notes` implementation status | ✅ verify before the `pouch-signals` sub-chunk |
+| 12.2 | `notes` implementation status | ✅ confirmed absent 2026-05-24; design landed (ARCH §7.6.1-§7.6.8 + NOVEL.md §3.1); fd-first novel inversion approved by user; impl owed to sub-chunk 13a |
 | 16.1 | `torpor` for both `_hang` and the futex — muddle? | ✅ distinct mechanisms; acceptable |
 | 17.1 | Phase numbering scheme | ✅ Pouch = Phase 6; renumber the tail |
 

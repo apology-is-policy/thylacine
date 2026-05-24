@@ -672,7 +672,155 @@ If no handler is registered, the default action is taken (`kill` for most notes;
 
 POSIX signals are translated to/from notes by musl + a thin kernel shim. `kill(pid, SIGINT)` posts the `interrupt` note; the musl signal handler is invoked by the note dispatcher with a fake `siginfo_t`.
 
-Spec: `notes.tla` proves note delivery ordering, mask correctness, and async-safety properties (handlers don't fire while the kernel is in a critical section).
+Spec: `notes.tla` was the planned formalization. Per CLAUDE.md "Spec-to-code FULLY suspended" (broadened 2026-05-23), the invariants the spec was to prove — delivery ordering (I-19), mask correctness, async-safety (handlers don't fire while the kernel is in a critical section), consumed-exactly-once across handler and fd-read paths — are pinned by the discipline in §7.6.5 + the audit round + the runtime tests.
+
+### 7.6.1 The fd-shaped path  *(novel angle — see NOVEL.md §3.1)*
+
+Notes are **fd-shaped first; async handlers are an explicit opt-in**. Every Proc carries a kernel-owned note Spoor whose read end is mintable into the Proc's handle table via `SYS_NOTE_OPEN()` (idempotent — same fd on every call until the Proc closes it; a subsequent call mints a fresh fd against the same queue). The Spoor is backed by a tiny new Dev (`devnotes`) over the Proc's `struct NoteQueue` — so the queue is the truth; the fd is a view.
+
+The pattern a modern Thylacine daemon writes:
+
+```c
+int notes = note_open();                    /* pouch wrapper over SYS_NOTE_OPEN */
+struct pollfd pfd[2] = {
+    { notes,       POLLIN, 0 },
+    { client_fd,   POLLIN, 0 },
+};
+poll(pfd, 2, -1);
+if (pfd[0].revents & POLLIN) {
+    struct note_record rec;
+    read(notes, &rec, sizeof rec);
+    dispatch(rec.name, rec.arg);            /* synchronous; no async-cancel-safety hell */
+}
+```
+
+Reads from `devnotes` yield fixed-size `struct note_record` (32 bytes — `name[16] + arg + sender_pid + timestamp_ns`). Strongly typed; architecture-independent; no `siginfo_t` ABI nightmare. `read()` returns one record at a time at v1.0 (a multi-record vectored read is a v1.x extension). `poll()` reports `POLLIN` iff the queue has at least one mask-permitted readable note.
+
+This is a deliberate inversion of priority versus Plan 9 (where `/proc/<pid>/note` reads exist but async handlers are the documented default) and Linux (where `signalfd(2)` is an afterthought bolted onto the signal model). Async signal handlers are the **single nastiest part of POSIX signal programming** — only ~30 functions are safe to call in a handler; modern code that genuinely wants robust async event handling either uses `signalfd` or a self-pipe trick. Thylacine commits the fd-shaped path as the documented default; `SYS_NOTIFY`/`SYS_NOTED` exist for compatibility with libcs that insist on the handler model (musl).
+
+### 7.6.2 Kernel data structures
+
+```c
+/* kernel/include/thylacine/notes.h */
+
+#define NOTE_NAME_MAX    16u    /* 15 bytes + NUL; bounds the supported set */
+#define NOTE_QUEUE_DEPTH 16u    /* per-Proc; overflow → -EAGAIN at SYS_POSTNOTE */
+
+#define NOTE_BIT_INTERRUPT   0u
+#define NOTE_BIT_KILL        1u
+#define NOTE_BIT_PIPE        2u
+#define NOTE_BIT_CHILD_EXIT  3u
+#define NOTE_MASK_SUPPORTED  0x0fu   /* grows as supported notes grow */
+
+struct Note {
+    char name[NOTE_NAME_MAX];   /* NUL-terminated note name */
+    u32  arg;                   /* small int slot (child_exit packs pid+status) */
+    u32  sender_pid;            /* posting Proc's pid; 0 for kernel-synthetic */
+    u64  timestamp_ns;          /* monotonic kernel time at post */
+};
+
+struct note_record {            /* SYS_NOTE_OPEN read-side wire format */
+    char name[NOTE_NAME_MAX];
+    u32  arg;
+    u32  sender_pid;
+    u64  timestamp_ns;
+};
+_Static_assert(sizeof(struct note_record) == 32, "ABI-pinned");
+
+struct NoteQueue {
+    spinlock_t       lock;
+    u32              head, tail, count;
+    struct Note      ring[NOTE_QUEUE_DEPTH];
+    struct Rendez    waiters;   /* devnotes_read parks here */
+};
+```
+
+In `struct Proc`:
+- `struct NoteQueue notes;`
+- `u64 handler_va;` — registered async handler (per-Proc; 0 = no handler; inherited across `rfork(RFPROC)`).
+
+In `struct Thread`:
+- `u64 note_mask;` — bit-per-supported-note; bit set = deferred to this Thread.
+- `bool in_handler;` — re-entrancy guard.
+- `u64 note_saved_pc, note_saved_sp;` — handler-restore cross-check (the full `ureg` is on the user stack).
+
+The `RFNOTEG` rfork bit (already reserved in `proc.h`) selects share-vs-copy of the queue. v1.0 always copies (each Proc gets its own); the share semantics land when rfork is properly used (Phase 7).
+
+### 7.6.3 Syscall surface
+
+| # | Syscall | Args | Returns |
+|---|---|---|---|
+| `SYS_NOTE_OPEN` | (none) | fd of the calling Proc's note Spoor read end |
+| `SYS_NOTIFY` | `handler_va` | 0 / -EINVAL — register the async handler (0 clears) |
+| `SYS_NOTED` | `arg` (0 = NCONT, 1 = NDFLT) | NEVER RETURNS NORMALLY (or -EINVAL if outside a handler) |
+| `SYS_POSTNOTE` | `pid`, `name_va`, `name_len` | 0 / -EINVAL / -EPERM / -ESRCH / -EAGAIN |
+| `SYS_NOTE_MASK` | `new_mask`, `old_mask_out_va` | 0 / -EINVAL |
+
+**`SYS_POSTNOTE` permission gate at v1.0**: caller must be the target's parent OR `pid == self_pid`. Future: a `CAP_KILL` cap, plus the long-term composition — posting via the namespace (a Spoor on `/proc/<pid>/note`), where the privilege is "do you have write rights on that Spoor."
+
+### 7.6.4 Delivery discipline
+
+Two delivery paths consume the same queue; **every posted non-`kill` note is consumed exactly once by either the async-handler path or the fd-read path.** Mutual exclusion is enforced by the queue lock: a `peek + pop` under `notes.lock` is the consume.
+
+**Fd-read path** (`devnotes_read`):
+1. Acquire `notes.lock`.
+2. Walk the queue head-to-tail, picking the first note whose `NOTE_BIT_*` is **not** set in the calling Thread's `note_mask`.
+3. If found: copy to a `struct note_record`; remove from the queue; release lock; copy out to user buffer (uaccess with fault fixup).
+4. If empty (or all masked): release lock; `tsleep` on `notes.waiters` (with optional non-blocking via `O_NONBLOCK` on the fd — deferred to v1.x; v1.0 always blocks).
+
+**Async-handler path** (at EL0-return tail in `arch/arm64/exception.c::exception_sync_lower_el`):
+1. Acquire `notes.lock`. If `t->in_handler` is true, release and continue (no nested delivery).
+2. Walk the queue; pick the first non-masked note. If none, release and continue.
+3. Pop the note. If `name == "kill"`: release lock; call `exits("killed")` (non-catchable; bypasses handler regardless of registration).
+4. If `p->handler_va == 0`: this note has no handler; release lock; apply default action — for the v1.0 set, `exits(name)`.
+5. Otherwise: cache `t->note_saved_pc = ctx->elr; t->note_saved_sp = ctx->sp_el0; t->in_handler = true;` — release lock.
+6. Push a `struct ureg` + the note name onto the user stack (sp aligned to 16; sp -= sizeof(ureg) + NOTE_NAME_MAX, with red-zone allowance).
+7. Mutate the exception context: `elr = handler_va; regs[0] = ureg_va; regs[1] = note_name_va; sp_el0 = adjusted_sp`.
+8. `eret` normally; the handler runs in the same Thread's user context.
+
+**`SYS_NOTED(arg)`**:
+- arg == 0 (NCONT): validate `t->in_handler == true`; restore `ctx->elr` and `ctx->sp_el0` from the user-stack `ureg` (via uaccess) — the cached `note_saved_pc/sp` provide cross-checks against tampering; clear `in_handler`; eret to the restored user state.
+- arg == 1 (NDFLT): take the note's default action (for the v1.0 set, `exits(name)`).
+- Anything else → `-EINVAL`.
+
+**Async-safety**: delivery happens only at the EL0-return tail, after `regs[0]` is written and before `eret`. At that point the kernel holds no locks (a syscall acquires-then-releases all locks within its body; an IRQ-return is similar). Handlers therefore can never observe a partial-kernel state. The lock discipline in steps 1-5 above ensures the queue-mutation is atomic w.r.t. concurrent fd-reads from another Thread.
+
+**Multi-thread Procs (post sub-chunk 9a)**: notes are Proc-directed. The EL0-return-tail check fires on each Thread's return; first-eligible Thread wins the delivery (its mask is the gate). If every Thread has the note masked, it stays queued; delivery happens when any Thread clears its mask (the `SYS_NOTE_MASK` syscall re-pumps before returning).
+
+**`kill` is non-catchable**: bypasses mask, handler, and fd-read. Posting `kill` to a Proc terminates it immediately at the next return-to-EL0 (mirrors SIGKILL).
+
+**Queue overflow**: `SYS_POSTNOTE` returns `-EAGAIN` if the queue is full. Kernel-synthetic posters (`exits` for child_exit, pipe-write for `pipe`) coalesce same-name notes when over a soft threshold (e.g., queued `child_exit` count > 4) to keep synthetic delivery infallible. Coalescing preserves the most recent `arg` (latest child).
+
+### 7.6.5 Standard notes (v1.0 supported set)
+
+| Note | NOTE_BIT | Source | Catchable? | Default action |
+|---|---|---|---|---|
+| `interrupt` | 0 | `SYS_POSTNOTE`; future cons ^C | yes | `exits("interrupt")` |
+| `kill` | 1 | `SYS_POSTNOTE` | **no** | `exits("killed")` — handler/mask bypassed |
+| `pipe` | 2 | kernel-synthetic on write to closed pipe peer | yes | `exits("pipe")` (musl can `SIG_IGN` via mask) |
+| `child_exit` | 3 | kernel-synthetic on child `exits()` | yes | `exits("child_exit")` (most Procs handle it) |
+
+`alarm`, `hangup`, `usr1`, `usr2`, `stop`, `cont` — DEFERRED at v1.0; each needs an additional kernel hook (`SYS_ALARM`, cons close path, scheduler stop/cont). `sigaction` on a deferred signal returns `EINVAL`. The supported set can grow per chunk without ABI break.
+
+### 7.6.6 Synthetic posting hooks (v1.0)
+
+- `kernel/proc.c::exits()` — posts `child_exit` to `p->parent->notes` with `arg = (child_pid << 16) | (exit_status & 0xffff)`. Tolerant of queue-full via coalesce.
+- `kernel/pipe.c` write-path — when writing to a pipe whose read end is closed, posts `pipe` to the writing Thread's Proc; the write itself still returns `-EPIPE`. Tolerant of queue-full via coalesce.
+
+### 7.6.7 Invariants
+
+- **N-1 (queue ordering)**: notes are consumed in post order per source. I-19 (causal order within a process) refines to this: each posting source (a specific `SYS_POSTNOTE` caller, the synthetic-`child_exit` hook on `exits`, the synthetic-`pipe` hook) sees its posts consumed in order; ordering between distinct sources is `tsc`-stamped (timestamp_ns is the tiebreaker).
+- **N-2 (consumed exactly once)**: every posted note enters the queue once and is consumed by exactly one path — either the async-handler EL0-return-tail consume, or the `devnotes_read` consume. `kill` is the exception (immediate exits regardless of consume path).
+- **N-3 (handler re-entrancy)**: while `t->in_handler == true`, no further note is delivered to that Thread. Queue state stays consistent across handler nest depth = 1.
+- **N-4 (`kill` non-catchable)**: a `kill` note terminates the target Proc at the next EL0-return, regardless of mask, handler registration, or in_handler state.
+- **N-5 (fd lifecycle)**: a closed note Spoor fd does not affect future `SYS_NOTE_OPEN` calls or queue state. The queue lives with the Proc.
+
+### 7.6.8 Open design questions
+
+- **Cross-Proc posting via namespace**: when path resolution + Spoor-via-walk land (Utopia / Phase 7), `SYS_POSTNOTE` should become a v1.0 shortcut while the long-term API is `write` to `/proc/<pid>/note`. Tracked in §7.6 [OPEN Q 7.6.A].
+- **`CAP_KILL`**: v1.0 has parent + self only. A future capability for tooling (debuggers, supervisors) is owed when there's a user. **[OPEN Q 7.6.B]**.
+- **Vectored read on devnotes**: a single `read(notes, &arr, sizeof(arr))` returning multiple records would let event loops drain efficiently. v1.x. **[OPEN Q 7.6.C]**.
+- **`stop`/`cont`**: needs scheduler integration (the `stop` note suspends run-tree eligibility). Phase 7 work. **[OPEN Q 7.6.D]**.
 
 ### 7.7 Capability set
 
@@ -1938,14 +2086,26 @@ POSIX signals map to Plan 9 notes:
 | `SIGCONT` | `cont` | Job control resume |
 | `SIGWINCH` | synthetic | Terminal resize |
 
-`sigaction`, `sigprocmask`, `sigsuspend`, `sigwaitinfo` implemented in musl + thin kernel shim against note delivery. POSIX programs receive signals normally; the note mechanism is invisible to them.
+`sigaction`, `sigprocmask`, `sigsuspend`, `sigwaitinfo` implemented in musl + thin kernel shim against note delivery (§7.6.3 syscall surface). POSIX programs receive signals normally; the note mechanism is invisible to them.
 
-Hard cases handled:
-- `SIGCHLD` with `SA_NOCLDWAIT` and `waitpid(WNOHANG | WUNTRACED | WCONTINUED)`.
-- Signal masks across `rfork()` (inherited).
-- `SA_RESTART` for syscall restart after signal delivery (kernel-level support).
+**v1.0 supported subset** (POUCH-DESIGN.md §6.4; the proving binary `/pouch-hello-signals` exercises it):
 
-Spec: `notes.tla` covers note delivery and signal-translation atomicity.
+| POSIX | Plan 9 note | NOTE_BIT | Status at v1.0 |
+|---|---|---|---|
+| `SIGINT` | `interrupt` | 0 | supported (handler + fd-read paths) |
+| `SIGTERM` | `kill` | 1 | supported (non-catchable per §7.6.5) |
+| `SIGPIPE` | `pipe` | 2 | supported; pouch default-masks per [RESOLVED 6.4] (write returns EPIPE) |
+| `SIGCHLD` | `child_exit` | 3 | supported (synthetic on child exits()) |
+| `SIGHUP`/`SIGALRM`/`SIGUSR1`/`SIGUSR2`/`SIGSTOP`/`SIGCONT` | (deferred) | n/a | `sigaction` returns EINVAL |
+
+**Modern fd-first path** — daemons that don't want async handlers (libsodium, stratumd) read notes from the SYS_NOTE_OPEN fd in their event loop alongside other fds via `poll`. See ARCH §7.6.1.
+
+Hard cases handled by the supported set:
+- `SIGCHLD`: pouch's `waitpid(WNOHANG)` reads pending `child_exit` notes off the fd; `WUNTRACED`/`WCONTINUED` deferred with `stop`/`cont`.
+- Signal masks across `rfork()`: inherited per `RFNOTEG` (queue + handler; mask is per-Thread, not inherited).
+- `SA_RESTART`: v1.0 does NOT interrupt blocked syscalls (the note stays queued; delivery happens at the syscall's return). Documented limitation; mirrors what most daemons assume anyway.
+
+Spec: `notes.tla` was the planned formalization (per CLAUDE.md "Spec-to-code suspended" — no formal module; prose-reasoning + audit + tests).
 
 ### 16.5 Container as territory
 
@@ -2890,7 +3050,7 @@ Every change to a file or function listed below spawns an adversarial soundness 
 | BURROW | `kernel/burrow.c`, `mm/burrow_pages.c` | Refcount, mapping lifecycle |
 | 9P client | `kernel/9p_client.c`, `kernel/9p_session.c` | Tag uniqueness, fid lifecycle, pipelining |
 | poll | `kernel/poll.c` | Wait/wake across N fds, missed-wakeup-freedom (I-9), poll-hook list lifetime |
-| Notes / signals | `kernel/notes.c`, `compat/signals.c` | Delivery ordering, async safety |
+| Notes / signals | `kernel/notes.c`, `kernel/devnotes.c`, `kernel/include/thylacine/notes.h`, `kernel/proc.c` (synthetic `child_exit` post in `exits`), `kernel/pipe.c` (synthetic `pipe` post on write-to-closed), `arch/arm64/exception.c` (EL0-return-tail delivery) | Delivery ordering (I-19); async-safety (delivery only at zero-lock EL0-return tail); N-2 consumed-exactly-once across handler + fd-read paths; N-3 in_handler re-entrancy guard; N-4 `kill` non-catchable. **No `specs/notes.tla`** per the 2026-05-23 spec-to-code broadening — prose validation in `notes.h` + the audit + the runtime test suite are the rigor. |
 | Capability checks | All syscall entry points | Privilege correctness |
 | KASLR / ASLR | `arch/arm64/start.S`, `kernel/aslr.c` | Entropy quality, layout correctness |
 | Crypto code | None in v1.0 kernel; janus in userspace | Side-channel, key handling |
@@ -2993,7 +3153,7 @@ The complete list of load-bearing invariants. Source for `VISION.md §8`. Each m
 | I-16 | KASLR randomizes kernel image base at boot | Boot init randomizes TTBR1 base | runtime + `/ctl/kernel/base` audit |
 | I-17 | EEVDF latency bound: delay between runnable and running ≤ slice_size × N | EEVDF deadline math | `scheduler.tla` |
 | I-18 | IPIs from CPU A to CPU B are processed in send order | GIC SGI ordering | `scheduler.tla` |
-| I-19 | Note delivery preserves causal order within a process | Note queue per Proc | `notes.tla` |
+| I-19 | Note delivery preserves causal order within a process; every posted non-`kill` note is consumed exactly once across the handler + fd-read paths; `kill` is non-catchable | Per-Proc `NoteQueue` under lock; EL0-return-tail dispatch; `devnotes` Dev. Sub-invariants N-1..N-5 enumerated in §7.6.7 | (`notes.tla` planned then dropped per CLAUDE.md spec-to-code suspension; prose + audit + tests) |
 | I-20 | PTY master ↔ slave atomicity | PTY data path locked | `pty.tla` |
 | I-21 | Kernel executes uniformly at EL1h (`SPSel=1`); `SP_EL0` is exclusively the userspace stack | Boot sets `SPSel=1` and never lowers it; per-thread kernel stack carries exception frames; `test_smp` asserts `SPSel==1` | `sched_ctxsw.tla` |
 

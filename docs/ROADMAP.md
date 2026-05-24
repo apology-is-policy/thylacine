@@ -637,8 +637,9 @@ Full list in POUCH-DESIGN.md §13. Headline: the cross-toolchain builds; a stati
 
 ### 7A.5 Specs
 
-- `futex.tla` (gate-tied spec #7) — the `torpor` wait-on-address primitive. Spec-first per CLAUDE.md.
-- `notes.tla` (#8), `poll.tla` (#6), `pty.tla` (#9) — pouch's signal / poll / (later) PTY layers are consumers; those kernel mechanisms are pre-existing or pre-planned.
+- `futex.tla` (gate-tied spec #7) — was planned for `torpor`; landed without a spec module per the 2026-05-23 spec-to-code broadening (prose + audit + tests).
+- `notes.tla` (#8) — was planned for the kernel notes substrate (sub-chunk 13a); also landed without a spec module per the same broadening. Design + invariants in ARCH §7.6.1-§7.6.8 + NOVEL.md §3.1 (the fd-first inversion is the project's novel contribution vs. Plan 9 + Linux).
+- `poll.tla` (#6), `pty.tla` (#9) — pouch's poll / (later) PTY layers are consumers; those kernel mechanisms are pre-existing or pre-planned.
 
 ### 7A.6 Audit-trigger surfaces
 
