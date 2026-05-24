@@ -819,15 +819,24 @@ enum {
     SYS_NOTED        = 46,
 
     // SYS_POSTNOTE(pid, name_va, name_len) — post a note to another Proc.
-    //   x0 = pid        target Proc's pid (or self_pid for self-post)
+    //   x0 = pid        target Proc's pid, OR the self-post sentinel
+    //                    pid == 0 (P6-pouch-signals sub-chunk 13b — used
+    //                    by pouch's raise() since pouch has no userspace
+    //                    getpid path at v1.0; matches POSIX kill(0, sig)
+    //                    semantics, which says "send to every process in
+    //                    the calling process's group" — Thylacine has
+    //                    no process groups, so the closest equivalent is
+    //                    "self"; the sentinel is the canonical name for
+    //                    that mapping)
     //   x1 = name_va    user-VA pointer to the note name bytes
     //   x2 = name_len   bytes (1..NOTE_NAME_MAX-1; NUL not required —
     //                    name_len is authoritative)
     //
     // Permission gate at v1.0: caller must be the target's parent OR
-    // pid == caller's own pid (self-post is always allowed). Future:
-    // CAP_KILL (ARCH §7.6.8 [OPEN Q 7.6.B]) plus the long-term namespace-
-    // shape (write to /proc/<pid>/note when path resolution arrives).
+    // pid == caller's own pid OR pid == 0 (self-post is always allowed).
+    // Future: CAP_KILL (ARCH §7.6.8 [OPEN Q 7.6.B]) plus the long-term
+    // namespace-shape (write to /proc/<pid>/note when path resolution
+    // arrives).
     //
     // Returns 0 on success, -1 on:
     //   - bad name_len bounds (0 or > NOTE_NAME_MAX - 1)

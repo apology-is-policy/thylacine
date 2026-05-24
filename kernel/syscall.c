@@ -1525,14 +1525,22 @@ static s64 sys_postnote_handler(u64 pid_raw, u64 name_va, u64 name_len_raw) {
     int target_pid = (int)pid_raw;
 
     // Fast-path self-post: we ARE the target. No lookup needed; the Proc
-    // can't be freed while we're running it.
+    // can't be freed while we're running it. pid_raw == 0 is the
+    // self-post sentinel (P6-pouch-signals sub-chunk 13b): pouch's
+    // raise() has no userspace getpid path at v1.0, so it passes 0 and
+    // relies on this kernel-side mapping. POSIX semantics: kill(0, sig)
+    // means "send to every process in the calling process's group" —
+    // Thylacine has no process groups at v1.0, so the closest equivalent
+    // is "send to my own Proc" and the sentinel-shaped collapse is
+    // POSIX-conforming. The sentinel is documented as ABI in
+    // kernel/include/thylacine/syscall.h (SYS_POSTNOTE docblock).
     //
     // R2-F5 audit close: still apply the kill gate. A multi-thread Proc
     // self-posting kill would otherwise enqueue an undeliverable kill
     // (the dispatcher's defense-in-depth check would refuse delivery to
     // multi-thread; the kill would queue forever). Same gate as the
     // walk_cb path: refuse kill when live_threads > 1.
-    if (target_pid == p->pid) {
+    if (target_pid == p->pid || pid_raw == 0) {
         if (notes_name_is_kill(buf)) {
             irq_state_t s = proc_table_lock_acquire();
             int live_threads = proc_count_live_peers_locked(p, NULL);

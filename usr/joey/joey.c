@@ -576,6 +576,23 @@ static int do_pouch_hello_smoke(void) {
                               T_SPAWN_PERM_MAY_POST_SERVICE) != 0)
         return -1;
     t_putstr("joey: pouch-hello-sockets smoke ok (AF_UNIX SOCK_STREAM over /srv with SO_PEERCRED)\n");
+
+    // P6-pouch-signals (sub-chunk 13b): the POSIX signal proving binary.
+    // Exercises every site of the 0007-pouch-signals boundary-line patch:
+    //   - sigaction(SIGINT, &h)       sigaction.c -> __pouch_sigtab + mask adjust
+    //   - raise(SIGINT)               raise.c -> SYS_postnote(pid=0=self,"interrupt",9)
+    //   - bootstrap __pouch_note_handler dispatches via __pouch_note_name_eq
+    //   - SYS_NOTED(NCONT) restores the saved user context, raise() returns 0
+    //   - sigaction(SIGINT, SIG_IGN)  bootstrap fast-paths to NCONT without
+    //                                  invoking the user handler
+    //   - sigaction(SIGUSR1, ...)     -> EINVAL (unsupported signum)
+    // Closes POUCH-DESIGN.md §6.4 / §14 sub-chunk 13b's exit criterion.
+    static const char psig_name[]   = "pouch-hello-signals";
+    static const char psig_expect[] = "pouch-hello-signals: exit 0";
+    if (pouch_smoke_one(psig_name, sizeof(psig_name) - 1,
+                        psig_expect, sizeof(psig_expect) - 1) != 0)
+        return -1;
+    t_putstr("joey: pouch-hello-signals smoke ok (sigaction + raise via SYS_NOTIFY/POSTNOTE/NOTED)\n");
     return 0;
 }
 

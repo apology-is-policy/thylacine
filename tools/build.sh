@@ -186,7 +186,7 @@ EOF
     # P6-pouch-hello-smoke: copy the pouch POSIX test binaries (built
     # against the pouch sysroot by build_pouch_progs) into the cpio root.
     # Same curation discipline — explicit list, not a glob.
-    local pouch_bins=( "pouch-hello" "pouch-hello-stdio" "pouch-hello-printf" "pouch-hello-malloc" "pouch-hello-threads" "pouch-hello-poll" "pouch-hello-getrandom" "pouch-hello-sockets" )
+    local pouch_bins=( "pouch-hello" "pouch-hello-stdio" "pouch-hello-printf" "pouch-hello-malloc" "pouch-hello-threads" "pouch-hello-poll" "pouch-hello-getrandom" "pouch-hello-sockets" "pouch-hello-signals" )
     local pouch_progs="$BUILD_DIR/pouch/progs"
     for bin in "${pouch_bins[@]}"; do
         local src="$pouch_progs/$bin"
@@ -329,7 +329,12 @@ build_sysroot() {
                     'SYS_thread_spawn 41' 'SYS_thread_exit 42' \
                     'SYS_post_service_byte 43' \
                     'SYS_poll 29' 'SYS_ppoll 0xFFFF' \
-                    'SYS_pselect6 0xFFFF'; do
+                    'SYS_pselect6 0xFFFF' \
+                    'SYS_note_open 44' 'SYS_notify 45' 'SYS_noted 46' \
+                    'SYS_postnote 47' 'SYS_note_mask 48' \
+                    'SYS_rt_sigaction 0xFFFF' 'SYS_rt_sigprocmask 0xFFFF' \
+                    'SYS_tkill 0xFFFF' 'SYS_kill 0xFFFF' \
+                    'SYS_rt_sigreturn 0xFFFF'; do
             grep -q "^#define $seam\$" "$syscall_h" || {
                 echo "    SEAM: '#define $seam' missing from bits/syscall.h" >&2
                 fail=1
@@ -508,7 +513,7 @@ build_pouch_progs() {
     mkdir -p "$progs_out"
 
     local prog
-    for prog in pouch-hello pouch-hello-stdio pouch-hello-printf pouch-hello-malloc pouch-hello-threads pouch-hello-poll pouch-hello-getrandom pouch-hello-sockets; do
+    for prog in pouch-hello pouch-hello-stdio pouch-hello-printf pouch-hello-malloc pouch-hello-threads pouch-hello-poll pouch-hello-getrandom pouch-hello-sockets pouch-hello-signals; do
         echo "==> pouch prog: $prog"
         # 1. compile (clang). -nostdinc + -isystem: pouch owns the include
         #    path. -fno-pie: non-PIC codegen for a fixed-address ET_EXEC.

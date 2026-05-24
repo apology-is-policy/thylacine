@@ -1,0 +1,935 @@
+pouch boundary-line patch 0007 - the POSIX signal layer over Thylacine notes.
+
+Phase 6 sub-chunk 13b (pouch-signals, pouch side). Retargets musl's
+src/signal/ from Linux's SYS_rt_sigaction / SYS_rt_sigprocmask /
+SYS_tkill / SYS_kill / SYS_rt_sigreturn onto the five kernel note
+syscalls landed at sub-chunk 13a (P6-pouch-signals-impl; kernel
+substrate audited across 4 rounds, 42 findings dispositioned):
+
+  SYS_note_open = 44   open the per-Proc note Spoor (devnotes fd)
+  SYS_notify    = 45   register the async-handler bootstrap (handler_va)
+  SYS_noted     = 46   return from a running handler (NCONT / NDFLT)
+  SYS_postnote  = 47   post a note to another Proc (pid=0 = self-post)
+  SYS_note_mask = 48   set per-Thread mask (NOTE_BIT_INTERRUPT/KILL/PIPE/CHILD_EXIT)
+
+Nine files. The boundary-line stays at musl's src/signal/ + src/thread/
+pthread_sigmask + src/internal/syscall.h.in. The portable upper half
+(signal.h, sigsetops, sigemptyset etc.) is unchanged.
+
+  PAIRED WITH a one-line kernel change (in the same commit, not in this
+  patch file): sys_postnote_handler in kernel/syscall.c accepts pid_raw
+  == 0 as the self-post sentinel. raise() depends on this — pouch has
+  no userspace getpid path at v1.0 and the kernel post-gate compares
+  target_pid against the caller's p->pid. The sentinel mirrors the
+  existing SYS_WALK_OPEN_FROM_ROOT discipline (a magic value reserved
+  on the syscall ABI).
+
+  arch/aarch64/bits/syscall.h.in   Appends five Thylacine note extension
+      numbers - __NR_note_open 44, __NR_notify 45, __NR_noted 46,
+      __NR_postnote 47, __NR_note_mask 48 - so musl's sed pass
+      generates the SYS_note_open / SYS_notify / SYS_noted /
+      SYS_postnote / SYS_note_mask aliases the replacement files use.
+      After a musl re-vendor, extend 0001's awk filter:
+          m["note_open"]="44"; m["notify"]="45";
+          m["noted"]="46"; m["postnote"]="47"; m["note_mask"]="48";
+
+  src/internal/_pouch_signal.h     New header. The pouch signal layer's
+      public-to-libc-but-private-to-pouch API: __pouch_sigtab[NSIG] (the
+      per-Proc sigaction table; sigaction()'s storage); __pouch_note_-
+      mask_shadow (__thread TLS — pouch's shadow of the kernel note
+      mask, sole writer); __pouch_sig_to_note() (signum -> canonical
+      note name); __pouch_note_handler (the bootstrap registered via
+      SYS_NOTIFY); __pouch_note_name_eq (bounded 16-byte compare —
+      matches the kernel's user-stack push); __pouch_sigset_to_note /
+      __pouch_note_to_sigset (sigset_t <-> NOTE_BIT_* marshalling).
+
+      The v1.0 supported set (POUCH-DESIGN.md section 6.4):
+          SIGINT  -> "interrupt"    catchable; default = exits("interrupt")
+          SIGTERM -> "interrupt"    catchable; SHARED with SIGINT at v1.0
+          SIGPIPE -> "pipe"         catchable; pouch masks at startup
+          SIGCHLD -> "child_exit"   catchable; default = ignore
+          SIGKILL -> "kill"         non-catchable; sigaction() returns EINVAL
+      All other signums return EINVAL at sigaction() time. SIGTERM
+      shares the "interrupt" note with SIGINT at v1.0; the dispatcher
+      prefers SIGINT's handler if installed, falls back to SIGTERM.
+
+  src/signal/_pouch_signal.c       New source. The bootstrap async-
+      handler implementation:
+
+      __pouch_note_handler(name, arg)  Plan-9-style ABI: x0 = user-stack
+          pointer to 16-byte note name; x1 = note arg. Looks up the
+          signum from the name, dispatches by SIG_DFL / SIG_IGN / user
+          handler. Ends with SYS_NOTED(NCONT) on user-handler / SIG_IGN
+          return. SIG_DFL branch issues SYS_NOTED(NDFLT) for terminating
+          signals; F2 audit close adds an NCONT-fallback on NDFLT
+          refusal — a multi-thread Proc's kernel-side R3-F2 gate refuses
+          NDFLT (cross-thread shootdown is v1.x), without the fallback
+          the receiving Thread would drop into for(;;), wedging
+          permanently. NEVER returns normally.
+
+      __pouch_signal_init  Constructor (.init_array entry). Runs once
+          at process startup on the main thread, BEFORE main(). Sets
+          NOTE_BIT_PIPE in the kernel mask (SIGPIPE default-mask per
+          POUCH-DESIGN section 6.4 [RESOLVED 6.4]); registers
+          __pouch_note_handler via SYS_NOTIFY.
+
+      __pouch_note_name_eq  Bounded 16-byte name compare. The kernel
+          pushes exactly POUCH_NOTE_NAME_MAX (= NOTE_NAME_MAX = 16)
+          bytes onto the user stack, NUL-padded; the literal side of
+          every v1.0 supported name is < 16 chars + NUL.
+
+  src/signal/sigaction.c           Full rewrite. Validates signum
+      (refuses everything outside {SIGINT, SIGTERM, SIGPIPE, SIGCHLD}
+      with EINVAL — this implicitly catches SIGKILL / SIGSTOP);
+      F11 audit close rejects sa_handler == SIG_ERR (POSIX-invalid;
+      otherwise the bootstrap would call h(SIGINT) at address -1);
+      records/swaps the user sigaction into __pouch_sigtab[sig];
+      adjusts the kernel mask on SIGPIPE handler install/uninstall
+      (a real handler clears NOTE_BIT_PIPE so the note delivers).
+      Loses musl's SIGABRT/__abort_lock interlock. NOTE on abort():
+      musl's abort.c reaches a_crash() (a deliberate NULL deref)
+      which lands as EL0 fault. At v1.0 the kernel's FAULT_UNHANDLED_-
+      USER policy extincts on EL0 faults from any pouch program —
+      so abort() manifests as kernel extinction rather than clean
+      process termination. This is a PRE-EXISTING v1.0 limitation
+      (NOT introduced by sub-chunk 13b) and is documented in
+      docs/reference/83-pouch-signals.md as a v1.x extension.
+
+  src/signal/raise.c               Full rewrite. Translates sig ->
+      note name via __pouch_sig_to_note, calls syscall(SYS_postnote,
+      0L, name, name_len). The kernel's pid=0 self-post sentinel
+      routes the note to the caller's Proc. The handler runs at the
+      EL0-return tail of the SYS_POSTNOTE itself: raise() returns
+      after the handler executes.
+
+  src/signal/kill.c                Full rewrite. Same shape as raise;
+      passes the user-supplied pid. The kernel's POSTNOTE gate
+      (parent-of-target OR self-post) governs cross-Proc posts;
+      pouch is unchanged by it.
+
+  src/signal/block.c               Full rewrite. __block_all_sigs /
+      __block_app_sigs / __restore_sigs map onto SYS_NOTE_MASK. The
+      sigset_t shape is preserved (callers stash to on-stack
+      storage); marshalling is bounded (4 supported bits).
+
+  src/signal/aarch64/restore.s     Rewrite. The asm restorer stubs
+      __restore / __restore_rt are called only via the legacy Linux
+      sa_restorer mechanism, which pouch's sigaction.c no longer
+      installs — the symbols become dead static-archive references
+      at v1.0. As defense-in-depth, the stubs now call SYS_NOTED
+      (#46) NCONT (#0) instead of SYS_rt_sigreturn (#139); any
+      indirect call lands on the correct kernel handler rather than
+      the 0xFFFF unimplemented-syscall sentinel. F10 audit close
+      adds a `b .` (infinite branch-to-self) after the SVC so that
+      a SYS_NOTED return on -1 (out-of-handler call; should never
+      happen but defense-in-depth) traps rather than falls off the
+      end of __restore_rt into adjacent .text bytes.
+
+  src/thread/pthread_sigmask.c     Full rewrite. Marshals POSIX
+      sigset_t <-> NOTE_BIT_* via the _pouch_signal helpers; reads
+      __pouch_note_mask_shadow for the SIG_BLOCK / SIG_UNBLOCK
+      read-modify-write paths (pouch is the sole writer; shadow stays
+      in sync with the kernel's per-Thread note_mask). sigprocmask()
+      delegates here (UNCHANGED — already a thin wrapper).
+
+Files NOT modified despite referencing Linux signal syscall numbers
+(all hit the 0xFFFF sentinel at runtime via the unchanged 0001 awk
+mapping → -ENOSYS; documented v1.0 limitations):
+
+  src/signal/sigsetjmp_tail.c      SYS_rt_sigprocmask; sigsetjmp's
+      mask-save tail. siglongjmp does not restore signal masks at
+      v1.0 (returns -ENOSYS internally; the longjmp itself still
+      works). v1.x extension.
+
+  src/signal/sigsuspend.c          SYS_rt_sigsuspend; not supported.
+  src/signal/sigaltstack.c         SYS_sigaltstack; alt-stacks not
+                                   supported (proving daemons don't
+                                   use them).
+  src/signal/sigpending.c          SYS_rt_sigpending; not supported.
+  src/signal/sigtimedwait.c        SYS_rt_sigtimedwait; not supported.
+  src/signal/sigqueue.c            SYS_rt_sigqueueinfo; not supported
+                                   (no siginfo_t at v1.0).
+  src/signal/signal.c              UNCHANGED — calls __sigaction which
+                                   we've retargeted; the signal()
+                                   thin-wrapper Just Works.
+  src/signal/sigprocmask.c         UNCHANGED — delegates to
+                                   pthread_sigmask.
+
+Binding design: docs/POUCH-DESIGN.md section 6.4 (the POSIX <-> notes
+mapping); docs/ARCHITECTURE.md sections 7.6.1-7.6.8 (the kernel notes
+substrate, landed at sub-chunk 13a); NOVEL.md section 3.1 (the fd-
+first novel angle as a totalization). Invariants P-1 (no foreign
+syscall numbers), P-3 (no silently-wrong POSIX), P-4 (boundary line
+holds). Reference: docs/reference/83-pouch-signals.md (created at
+sub-chunk 13b).
+
+Proving binary: /pouch-hello-signals - end-to-end sigaction + raise
+round trip via the kernel notes substrate. Single-threaded; installs
+a handler for SIGINT; raises SIGINT; observes handler ran (volatile
+flag set + value verified); exits 0.
+
+--- a/arch/aarch64/bits/syscall.h.in
++++ b/arch/aarch64/bits/syscall.h.in
+@@ -374,3 +374,27 @@
+ #define __NR_srv_peer 28
+ #define __NR_srv_connect 30
+ #define __NR_post_service_byte 43
++
++/*
++ * pouch / Thylacine notes extension numbers (P6-pouch-signals, sub-chunk
++ * 13b). The pouch-side POSIX signal layer maps onto Thylacine's kernel
++ * notes substrate per POUCH-DESIGN.md section 6.4 (the fd-first novel
++ * angle landed at sub-chunk 13a, ARCH section 7.6 + NOVEL.md section 3.1):
++ *   sigaction()             pouch sigtab[NSIG] + SYS_notify(handler_va)
++ *   raise() / pthread_kill  SYS_postnote(pid=0=self, name, name_len)
++ *   kill()                  SYS_postnote(target_pid, name, name_len)
++ *   sigprocmask() /         SYS_note_mask(new_mask, &old_mask)
++ *     pthread_sigmask()
++ *   bootstrap return        SYS_noted(NCONT=0)  (from __pouch_note_handler)
++ *   note fd read            SYS_note_open + SYS_read on the returned fd
++ * Audited in P6-pouch-signals-impl (sub-chunk 13a, 4 rounds: 10 P0 +
++ * 7 P1 + 12 P2 + 13 P3 closed). The boundary-line patch 0007-pouch-signals
++ * adds these aliases so the rewritten src/signal/* references SYS_notify
++ * etc. directly rather than the sentinel-blocked SYS_rt_sigaction /
++ * SYS_rt_sigprocmask / SYS_tkill / SYS_kill / SYS_rt_sigreturn.
++ */
++#define __NR_note_open 44
++#define __NR_notify 45
++#define __NR_noted 46
++#define __NR_postnote 47
++#define __NR_note_mask 48
+--- a/src/internal/_pouch_signal.h
++++ b/src/internal/_pouch_signal.h
+@@ -0,0 +1,122 @@
++/* pouch — POSIX signals over Thylacine notes (P6-pouch-signals, sub-chunk
++ * 13b). The boundary-line layer that retargets musl's src/signal/ from
++ * Linux's rt_sigaction / rt_sigprocmask / tkill / rt_sigreturn onto the
++ * five kernel note syscalls (NOTE_OPEN / NOTIFY / NOTED / POSTNOTE /
++ * NOTE_MASK; numbers 44-48 per kernel/include/thylacine/syscall.h).
++ *
++ * Design: POUCH-DESIGN.md section 6.4 + ARCH section 7.6.1-7.6.8. Plan 9
++ * notes are string-named and causally-ordered; pouch translates the small
++ * set of POSIX signals real daemons need (SIGINT, SIGTERM, SIGPIPE,
++ * SIGCHLD) onto the kernel's v1.0 supported set ("interrupt", "kill",
++ * "pipe", "child_exit"). The translation is many-to-one for INT+TERM
++ * (both map to "interrupt" at v1.0; documented limitation) and one-to-
++ * one for the others. SIGKILL/SIGSTOP cannot be caught; sigaction()
++ * returns EINVAL for them per POSIX. All other signums return EINVAL.
++ *
++ * Per-thread shadow + per-Proc sigtab: the kernel's note_mask is per-
++ * Thread (POSIX pthread_sigmask semantics); pouch keeps a __thread shadow
++ * to support SIG_BLOCK / SIG_UNBLOCK read-modify-write. The sigaction
++ * table is per-Proc (POSIX sigaction semantics); pouch keeps it in a
++ * static array indexed by signum.
++ *
++ * Bootstrap handler: at constructor time we register __pouch_note_handler
++ * via SYS_NOTIFY. The kernel calls it Plan-9-style with x0 = pointer to
++ * 16-byte note name on the user stack + x1 = note arg. We dispatch by
++ * name to the user-registered sigaction handler and end with
++ * SYS_NOTED(NCONT) — the synchronous-handler ABI is hidden from POSIX
++ * source. POSIX programs see standard sigaction + raise + kill.
++ *
++ * SIGPIPE default-mask at startup (POUCH-DESIGN section 6.4 [RESOLVED
++ * 6.4]): the constructor sets the main thread's note_mask to
++ * NOTE_BIT_PIPE so a write-to-closed-pipe returns EPIPE without
++ * delivering a SIGPIPE — modern-daemon-friendly default. A subsequent
++ * sigaction(SIGPIPE, &sa) with a non-default handler clears the mask
++ * bit (so the note is delivered + the handler fires).
++ *
++ * v1.0 limitations documented in docs/reference/83-pouch-signals.md
++ * (created at sub-chunk 13b):
++ *   - SIGINT and SIGTERM share "interrupt" — last-registered-wins for
++ *     mixed sigaction calls. A program registering BOTH gets the SIGINT
++ *     handler preferred (defense-in-depth in the bootstrap dispatcher).
++ *   - Child threads spawned via pthread_create start with note_mask=0;
++ *     parent thread's mask does NOT propagate. POSIX says inheritance;
++ *     v1.0 documented limitation. Programs that need POSIX-correct
++ *     inheritance set the child's mask in the entry function manually.
++ *   - sigsetjmp/siglongjmp do NOT preserve signal masks (the
++ *     sigsetjmp_tail.c path still hits the SYS_rt_sigprocmask = 0xFFFF
++ *     sentinel → -ENOSYS). v1.x extension.
++ *   - sigaltstack returns ENOSYS (alt-stack not supported at v1.0).
++ *   - sigpending / sigtimedwait / sigqueue / sigsuspend return ENOSYS.
++ *   - SIGRT* (real-time signals) and per-signal-info (siginfo_t) not
++ *     supported. sigqueue() returns ENOSYS.
++ *   - SIGABRT not in the v1.0 supported set; abort() falls through to
++ *     its plain-_Exit fallback path (no handler ever fires).
++ */
++
++#ifndef _POUCH_SIGNAL_H
++#define _POUCH_SIGNAL_H
++
++#include <signal.h>
++#include <stdint.h>
++#include <features.h>
++
++/* Mirror NOTE_BIT_* from kernel/include/thylacine/notes.h. The kernel
++ * header isn't pulled into the pouch build (pouch is built against its
++ * own sysroot); these values are part of the SYS_NOTE_MASK ABI and pinned
++ * in ARCH section 7.6.7. */
++#define POUCH_NOTE_BIT_INTERRUPT   (1u << 0)
++#define POUCH_NOTE_BIT_KILL        (1u << 1)
++#define POUCH_NOTE_BIT_PIPE        (1u << 2)
++#define POUCH_NOTE_BIT_CHILD_EXIT  (1u << 3)
++#define POUCH_NOTE_MASK_SUPPORTED  0x0fu
++
++/* SYS_NOTED arg semantics (matches kernel/include/thylacine/notes.h
++ * "SYS_NOTED arg semantics" docblock, R4-F6 audit close). */
++#define POUCH_SYS_NOTED_NCONT  0u   /* restore saved user context + resume */
++#define POUCH_SYS_NOTED_NDFLT  1u   /* take the note's default action (exits) */
++
++/* Kernel pushes exactly NOTE_NAME_MAX (= 16) bytes of the note name onto
++ * the user stack. POSIX programs never reach into this directly; the
++ * bootstrap handler does the bounded compare via __pouch_note_name_eq. */
++#define POUCH_NOTE_NAME_MAX  16
++
++/* The per-Proc sigaction table. v1.0 supported set: SIGINT, SIGTERM,
++ * SIGPIPE, SIGCHLD. Other slots are unused (sigaction returns EINVAL).
++ * Indexed by signum (1..NSIG-1). Slot 0 unused. */
++extern hidden struct sigaction __pouch_sigtab[_NSIG];
++
++/* Per-thread shadow of the kernel note mask. Pouch is the sole writer.
++ * TLS so each thread has its own copy (matches the kernel's per-Thread
++ * note_mask). Initialized to 0; the constructor sets the main thread's
++ * to POUCH_NOTE_BIT_PIPE. */
++extern hidden __thread uint64_t __pouch_note_mask_shadow;
++
++/* Translate POSIX signum -> note name string. Writes the static-storage
++ * canonical name to *out on success. Returns 0 on the v1.0 supported
++ * set (SIGINT/SIGTERM -> "interrupt"; SIGKILL -> "kill"; SIGPIPE ->
++ * "pipe"; SIGCHLD -> "child_exit"), -1 on unsupported. */
++hidden int __pouch_sig_to_note(int sig, const char **out);
++
++/* The bootstrap async-handler. Registered with SYS_NOTIFY at startup;
++ * the kernel calls this at EL0-return tail when a note is dispatched.
++ * Plan-9-style ABI: x0 = pointer to 16-byte note name on user stack;
++ * x1 = note arg. NEVER returns normally — ends with SYS_NOTED. */
++hidden void __pouch_note_handler(const char *name, unsigned int arg);
++
++/* Bounded name compare: the kernel pushes exactly POUCH_NOTE_NAME_MAX
++ * (= 16) bytes onto the user stack, NUL-padded. Returns 1 if `name`'s
++ * bytes match `literal`'s within the bound (the literal is NUL-
++ * terminated), 0 otherwise. */
++hidden int __pouch_note_name_eq(const char *name, const char *literal);
++
++/* Translate a POSIX sigset_t to NOTE_BIT_* mask (only supported bits
++ * survive translation; unsupported signals are silently dropped — POSIX
++ * specifies that pthread_sigmask attempts to block SIGKILL/SIGSTOP are
++ * undefined-behaviour or silently ignored). */
++hidden uint64_t __pouch_sigset_to_note(const sigset_t *s);
++
++/* Reverse: NOTE_BIT_* mask -> POSIX sigset_t. The result is a synthetic
++ * sigset that callers see when reading the "old" mask. */
++hidden void __pouch_note_to_sigset(uint64_t m, sigset_t *out);
++
++#endif
+--- a/src/signal/_pouch_signal.c
++++ b/src/signal/_pouch_signal.c
+@@ -0,0 +1,188 @@
++/* pouch — POSIX signal layer over Thylacine notes (P6-pouch-signals,
++ * sub-chunk 13b). See src/internal/_pouch_signal.h for the design
++ * preamble. This file holds:
++ *   - the per-Proc sigaction table (__pouch_sigtab)
++ *   - the per-thread note-mask shadow (__pouch_note_mask_shadow)
++ *   - the signum<->note name translation helpers
++ *   - the bootstrap async-handler (__pouch_note_handler)
++ *   - the constructor that registers it + sets the SIGPIPE default mask
++ */
++
++#include <signal.h>
++#include <stdint.h>
++#include <string.h>
++
++#include "syscall.h"
++#include "pthread_impl.h"
++#include "libc.h"
++#include "_pouch_signal.h"
++
++hidden struct sigaction __pouch_sigtab[_NSIG];
++hidden __thread uint64_t __pouch_note_mask_shadow;
++
++hidden int __pouch_note_name_eq(const char *name, const char *literal)
++{
++    /* The kernel zero-pads the 16-byte name buffer (struct Note.name) on
++     * the user stack. Bounded compare protects against unterminated
++     * names; the literal is NUL-terminated within 16 bytes for every
++     * v1.0 supported entry ("interrupt"=9, "kill"=4, "pipe"=4,
++     * "child_exit"=10 all fit). */
++    for (int i = 0; i < POUCH_NOTE_NAME_MAX; i++) {
++        char a = name[i];
++        char b = literal[i];
++        if (a != b) return 0;
++        if (b == 0) return 1;
++    }
++    /* Reached end of bound — `name` matched `literal` byte-for-byte up
++     * to the cap without seeing literal's NUL. Defense-in-depth: only
++     * happens for a 16-byte literal which we don't have at v1.0; return
++     * match. */
++    return 1;
++}
++
++hidden int __pouch_sig_to_note(int sig, const char **out)
++{
++    /* v1.0 supported set per POUCH-DESIGN.md section 6.4. SIGINT and
++     * SIGTERM share "interrupt" — a programs-side limitation documented
++     * in docs/reference/83-pouch-signals.md. */
++    switch (sig) {
++    case SIGINT:
++    case SIGTERM:
++        *out = "interrupt";
++        return 0;
++    case SIGKILL:
++        *out = "kill";
++        return 0;
++    case SIGPIPE:
++        *out = "pipe";
++        return 0;
++    case SIGCHLD:
++        *out = "child_exit";
++        return 0;
++    default:
++        return -1;
++    }
++}
++
++hidden uint64_t __pouch_sigset_to_note(const sigset_t *s)
++{
++    uint64_t m = 0;
++    /* sigismember returns 1/0/-1 (-1 on bad arg). Treat -1 as not-set. */
++    if (sigismember(s, SIGINT) == 1 || sigismember(s, SIGTERM) == 1)
++        m |= POUCH_NOTE_BIT_INTERRUPT;
++    /* SIGKILL/SIGSTOP cannot be blocked; we silently drop them. */
++    if (sigismember(s, SIGPIPE) == 1) m |= POUCH_NOTE_BIT_PIPE;
++    if (sigismember(s, SIGCHLD) == 1) m |= POUCH_NOTE_BIT_CHILD_EXIT;
++    return m;
++}
++
++hidden void __pouch_note_to_sigset(uint64_t m, sigset_t *out)
++{
++    sigemptyset(out);
++    if (m & POUCH_NOTE_BIT_INTERRUPT) {
++        sigaddset(out, SIGINT);
++        sigaddset(out, SIGTERM);
++    }
++    if (m & POUCH_NOTE_BIT_PIPE)       sigaddset(out, SIGPIPE);
++    if (m & POUCH_NOTE_BIT_CHILD_EXIT) sigaddset(out, SIGCHLD);
++}
++
++hidden void __pouch_note_handler(const char *name, unsigned int arg)
++{
++    (void)arg;     /* v1.0 doesn't propagate the note arg through to the
++                    * POSIX handler — siginfo_t carries it on Linux but
++                    * pouch's POSIX surface is the legacy `void (int)`
++                    * shape; the modern fd-shaped path (SYS_NOTE_OPEN) is
++                    * the way to access full note records. */
++
++    int sig = -1;
++    if (__pouch_note_name_eq(name, "interrupt")) {
++        /* SIGINT and SIGTERM both map to "interrupt" at v1.0. Prefer
++         * SIGINT's user handler if installed; fall back to SIGTERM.
++         * (Documented limitation; v1.x extension: per-name notes.) */
++        void (*hi)(int) = __pouch_sigtab[SIGINT].sa_handler;
++        void (*ht)(int) = __pouch_sigtab[SIGTERM].sa_handler;
++        if (hi && hi != SIG_DFL && hi != SIG_IGN)        sig = SIGINT;
++        else if (ht && ht != SIG_DFL && ht != SIG_IGN)   sig = SIGTERM;
++        else                                              sig = SIGINT;
++    } else if (__pouch_note_name_eq(name, "pipe")) {
++        sig = SIGPIPE;
++    } else if (__pouch_note_name_eq(name, "child_exit")) {
++        sig = SIGCHLD;
++    } else if (__pouch_note_name_eq(name, "kill")) {
++        /* `kill` is non-catchable per N-4 (notes.h). The kernel calls
++         * exits("killed") directly; this branch is defense-in-depth in
++         * case a future extension routes "kill" through the handler. */
++        sig = SIGKILL;
++    }
++
++    if (sig < 0) {
++        /* Unknown note name (kernel only delivers supported names; this
++         * is defense-in-depth against future ABI drift). NCONT resumes
++         * the interrupted user code. */
++        __syscall(SYS_noted, POUCH_SYS_NOTED_NCONT);
++        for (;;);     /* unreachable — SYS_NOTED(NCONT) never returns */
++    }
++
++    void (*h)(int) = __pouch_sigtab[sig].sa_handler;
++
++    if (h == SIG_DFL || h == 0) {
++        /* Default action for the v1.0 supported set:
++         *   SIGINT / SIGTERM / SIGPIPE: terminate (NDFLT → kernel exits)
++         *   SIGCHLD: ignore (NCONT — child_exit's default per POSIX)
++         *   SIGKILL: terminate (NDFLT; though this branch is unreachable
++         *            because the kernel handles kill before delivery)
++         *
++         * F2 audit close (sub-chunk 13b): NDFLT is refused by the kernel
++         * in a multi-thread Proc (R3-F2 of 13a) because exits() requires
++         * live_peers == 0 — cross-thread shootdown is a v1.x extension.
++         * Without a fallback, a worker Thread receiving a default-action
++         * note (e.g., a SIGPIPE delivered to a worker whose note_mask
++         * doesn't block pipe — documented limitation that child threads
++         * don't inherit the constructor's BIT_PIPE mask) would NDFLT-fail
++         * and drop into for(;;), wedging the Thread. The fallback below
++         * NCONT-resumes on NDFLT refusal so the Thread continues. v1.x
++         * cross-thread shootdown lets NDFLT terminate the whole Proc. */
++        if (sig == SIGCHLD) {
++            __syscall(SYS_noted, POUCH_SYS_NOTED_NCONT);
++        } else {
++            long r = __syscall(SYS_noted, POUCH_SYS_NOTED_NDFLT);
++            if (r < 0) {
++                /* NDFLT refused (live peer Threads exist). Resume
++                 * pre-handler context — see F2 comment above. */
++                __syscall(SYS_noted, POUCH_SYS_NOTED_NCONT);
++            }
++        }
++        for (;;);     /* unreachable — SYS_NOTED(NCONT) never returns */
++    }
++
++    if (h == SIG_IGN) {
++        __syscall(SYS_noted, POUCH_SYS_NOTED_NCONT);
++        for (;;);     /* unreachable */
++    }
++
++    /* User handler. Plain `void (*)(int)` shape (no siginfo_t at v1.0).
++     * The kernel saved the full reg file before invoking us, so AAPCS64
++     * call-preserved regs are restored when we return via SYS_NOTED. */
++    h(sig);
++
++    __syscall(SYS_noted, POUCH_SYS_NOTED_NCONT);
++    for (;;);         /* unreachable */
++}
++
++/* Constructor: runs once at process startup on the main thread, before
++ * main(). Static-init iteration via musl's CRT (.init_array). Sets the
++ * SIGPIPE default-mask and registers the bootstrap handler. */
++static __attribute__((constructor)) void __pouch_signal_init(void)
++{
++    /* SIGPIPE default-mask. POUCH-DESIGN.md section 6.4 [RESOLVED 6.4]:
++     * SIGPIPE is masked at startup so a write to a closed pipe returns
++     * EPIPE without delivering the note. A subsequent sigaction(SIGPIPE)
++     * with a real handler clears the mask bit (sigaction.c). */
++    __pouch_note_mask_shadow = POUCH_NOTE_BIT_PIPE;
++    __syscall(SYS_note_mask, (long)__pouch_note_mask_shadow, 0L);
++
++    /* Register the bootstrap handler. Every async-delivery note from
++     * here on lands at __pouch_note_handler. */
++    __syscall(SYS_notify, (long)(uintptr_t)__pouch_note_handler);
++}
+--- a/src/signal/aarch64/restore.s
++++ b/src/signal/aarch64/restore.s
+@@ -1,3 +1,20 @@
++// __restore / __restore_rt over Thylacine notes (pouch sub-chunk 13b).
++// On Linux, musl's sigaction wires sa_restorer to one of these stubs;
++// the kernel jumps here after the user signal handler returns, and
++// __restore calls SYS_rt_sigreturn to restore the saved register file.
++//
++// On Thylacine, the bootstrap C handler (__pouch_note_handler) calls
++// SYS_NOTED(NCONT) itself — no kernel-driven restorer mechanism. The
++// sa_restorer field is unused; sigaction.c (pouch-rewritten) doesn't
++// reference these symbols. With static-archive deduplication the .o
++// is dropped from libc.a's link surface; with whole-archive linking
++// the symbol exists but is unreferenced.
++//
++// We rewrite the asm to call SYS_NOTED(NCONT) instead of SYS_rt_sigreturn
++// so that ANY indirect call to __restore_rt (defense-in-depth — should
++// never happen at v1.0) does the right thing: restore the saved user
++// context via the notes machinery, never reach the 0xFFFF sentinel.
++
+ .global __restore
+ .hidden __restore
+ .type __restore,%function
+@@ -6,5 +23,12 @@
+ .hidden __restore_rt
+ .type __restore_rt,%function
+ __restore_rt:
+-	mov x8,#139 // SYS_rt_sigreturn
++	mov x8,#46     // SYS_noted (kernel/include/thylacine/syscall.h SYS_NOTED)
++	mov x0,#0      // NCONT — restore saved user context
+ 	svc 0
++	b .            // F10 audit close: SYS_NOTED(NCONT) never returns on
++	               // success. If it does return (-1: not in handler;
++	               // defense-in-depth — this stub is unreferenced at v1.0
++	               // since sigaction.c doesn't install sa_restorer), trap
++	               // execution here rather than fall off the end into
++	               // whatever follows in .text.
+--- a/src/signal/block.c
++++ b/src/signal/block.c
+@@ -1,44 +1,46 @@
++/* internal mask-block helpers over Thylacine notes (pouch sub-chunk
++ * 13b). Replaces musl's SYS_rt_sigprocmask calls. musl callers use
++ * these to temporarily mask app-visible signals around critical paths
++ * (raise's old implementation, abort, sigsetjmp_tail) and restore on
++ * the way out. The contract:
++ *
++ *   __block_all_sigs(set):  block every supported note, save old in *set
++ *   __block_app_sigs(set):  same (at v1.0 every supported note is "app"
++ *                           — Thylacine has no internal SIGTIMER/
++ *                           SIGCANCEL/SIGSYNCCALL)
++ *   __restore_sigs(set):    set kernel mask from sigset_t *set
++ *
++ * The sigset_t shape stays POSIX so callers' on-stack storage is
++ * unchanged. Translation lives here: pouch reads the current note mask
++ * out of the shadow, marshals to/from sigset_t.
++ */
++
+ #include "pthread_impl.h"
+ #include "syscall.h"
++#include "_pouch_signal.h"
+ #include <signal.h>
++#include <stdint.h>
+ 
+-static const unsigned long all_mask[] = {
+-#if ULONG_MAX == 0xffffffff && _NSIG > 65
+-	-1UL, -1UL, -1UL, -1UL
+-#elif ULONG_MAX == 0xffffffff || _NSIG > 65
+-	-1UL, -1UL
+-#else
+-	-1UL
+-#endif
+-};
+-
+-static const unsigned long app_mask[] = {
+-#if ULONG_MAX == 0xffffffff
+-#if _NSIG == 65
+-	0x7fffffff, 0xfffffffc
+-#else
+-	0x7fffffff, 0xfffffffc, -1UL, -1UL
+-#endif
+-#else
+-#if _NSIG == 65
+-	0xfffffffc7fffffff
+-#else
+-	0xfffffffc7fffffff, -1UL
+-#endif
+-#endif
+-};
+-
+ void __block_all_sigs(void *set)
+ {
+-	__syscall(SYS_rt_sigprocmask, SIG_BLOCK, &all_mask, set, _NSIG/8);
++	if (set) __pouch_note_to_sigset(__pouch_note_mask_shadow, (sigset_t *)set);
++	__pouch_note_mask_shadow = POUCH_NOTE_MASK_SUPPORTED;
++	__syscall(SYS_note_mask, (long)__pouch_note_mask_shadow, 0L);
+ }
+ 
+ void __block_app_sigs(void *set)
+ {
+-	__syscall(SYS_rt_sigprocmask, SIG_BLOCK, &app_mask, set, _NSIG/8);
++	/* At v1.0, "app" sigs == every supported note (no internal libc
++	 * signals like SIGTIMER). */
++	if (set) __pouch_note_to_sigset(__pouch_note_mask_shadow, (sigset_t *)set);
++	__pouch_note_mask_shadow = POUCH_NOTE_MASK_SUPPORTED;
++	__syscall(SYS_note_mask, (long)__pouch_note_mask_shadow, 0L);
+ }
+ 
+ void __restore_sigs(void *set)
+ {
+-	__syscall(SYS_rt_sigprocmask, SIG_SETMASK, set, 0, _NSIG/8);
++	if (!set) return;
++	uint64_t m = __pouch_sigset_to_note((const sigset_t *)set);
++	__pouch_note_mask_shadow = m;
++	__syscall(SYS_note_mask, (long)m, 0L);
+ }
+--- a/src/signal/kill.c
++++ b/src/signal/kill.c
+@@ -1,7 +1,29 @@
++/* kill(2) over Thylacine notes (pouch sub-chunk 13b). Replaces musl's
++ * Linux SYS_kill with SYS_postnote(pid, name, name_len). Cross-Proc
++ * post gates: the kernel allows the post if (a) the caller is the
++ * target's parent, OR (b) pid == self_pid (or sentinel pid=0).
++ *
++ * pid == 0 is interpreted by the kernel as self-post (POSIX says it
++ * means "send to every process in the calling process's group"; we
++ * don't have process groups at v1.0, and a target of "all processes in
++ * my group" reduces to "my Proc itself").
++ */
++
+ #include <signal.h>
++#include <errno.h>
++#include <string.h>
++
+ #include "syscall.h"
++#include "_pouch_signal.h"
+ 
+ int kill(pid_t pid, int sig)
+ {
+-	return syscall(SYS_kill, pid, sig);
++	const char *name;
++	if (__pouch_sig_to_note(sig, &name) != 0) {
++		errno = EINVAL;
++		return -1;
++	}
++
++	unsigned long len = (unsigned long)strlen(name);
++	return syscall(SYS_postnote, (long)pid, name, len);
+ }
+--- a/src/signal/raise.c
++++ b/src/signal/raise.c
+@@ -1,13 +1,35 @@
++/* raise(3) over Thylacine notes (pouch sub-chunk 13b). Replaces musl's
++ * Linux SYS_tkill with SYS_postnote(pid=0=self, name, name_len) — the
++ * kernel's self-post sentinel routes the note to the caller's own Proc
++ * without needing a userspace getpid lookup.
++ *
++ * POSIX raise(sig) is equivalent to pthread_kill(pthread_self(), sig).
++ * On Thylacine the SYS_POSTNOTE gate fires synchronously: the kernel
++ * queues the note, then the EL0-return-tail of THIS syscall dispatches
++ * the bootstrap handler. By the time raise() returns 0, the handler has
++ * run.
++ */
++
+ #include <signal.h>
+ #include <stdint.h>
++#include <string.h>
++#include <errno.h>
++
+ #include "syscall.h"
+ #include "pthread_impl.h"
++#include "_pouch_signal.h"
+ 
+ int raise(int sig)
+ {
+-	sigset_t set;
+-	__block_app_sigs(&set);
+-	int ret = syscall(SYS_tkill, __pthread_self()->tid, sig);
+-	__restore_sigs(&set);
+-	return ret;
++	const char *name;
++	if (__pouch_sig_to_note(sig, &name) != 0) {
++		errno = EINVAL;
++		return -1;
++	}
++
++	/* pid = 0 is the kernel's self-post sentinel (sys_postnote_handler
++	 * fast-path; see kernel/syscall.c). The kernel handles the kill-vs-
++	 * multi-thread gate internally. */
++	unsigned long len = (unsigned long)strlen(name);
++	return syscall(SYS_postnote, 0L, name, len);
+ }
+--- a/src/signal/sigaction.c
++++ b/src/signal/sigaction.c
+@@ -1,87 +1,95 @@
++/* sigaction(2) over Thylacine notes (pouch sub-chunk 13b). Replaces
++ * musl's Linux SYS_rt_sigaction path with the pouch per-Proc sigaction
++ * table — the bootstrap handler (__pouch_note_handler) is registered
++ * once at process startup and dispatches by note name to the table.
++ *
++ * v1.0 supported signums: SIGINT, SIGTERM, SIGPIPE, SIGCHLD.
++ * SIGKILL/SIGSTOP/others return EINVAL (POSIX-conformant for SIGKILL/
++ * SIGSTOP; documented v1.0 limitation for the rest).
++ */
++
+ #include <signal.h>
+ #include <errno.h>
+ #include <string.h>
++#include <stdint.h>
++
+ #include "syscall.h"
+ #include "pthread_impl.h"
+ #include "libc.h"
+ #include "lock.h"
+-#include "ksigaction.h"
++#include "_pouch_signal.h"
+ 
+-static int unmask_done;
+-static unsigned long handler_set[_NSIG/(8*sizeof(long))];
++volatile int __eintr_valid_flag;
+ 
+-void __get_handler_set(sigset_t *set)
++int __libc_sigaction(int sig, const struct sigaction *restrict sa,
++                     struct sigaction *restrict old)
+ {
+-	memcpy(set, handler_set, sizeof handler_set);
+-}
++	/* The v1.0 supported subset. SIGKILL = 9 and SIGSTOP = 19 cannot be
++	 * caught per POSIX; we return EINVAL for them. All other signums
++	 * also return EINVAL at v1.0 — the supported set grows per chunk
++	 * without an ABI break. */
++	if (sig != SIGINT && sig != SIGTERM &&
++	    sig != SIGPIPE && sig != SIGCHLD) {
++		errno = EINVAL;
++		return -1;
++	}
+ 
+-volatile int __eintr_valid_flag;
++	/* F11 audit close: reject SIG_ERR as a handler. SIG_ERR ((void(*)(int))-1)
++	 * is the error return from signal(3), not a valid sigaction input. Without
++	 * this check, the bootstrap dispatcher would call h(sig) at address -1 →
++	 * EL0 fault → kernel extinct (FAULT_UNHANDLED_USER policy). POSIX is
++	 * silent on this case; some implementations reject. */
++	if (sa && sa->sa_handler == SIG_ERR) {
++		errno = EINVAL;
++		return -1;
++	}
+ 
+-int __libc_sigaction(int sig, const struct sigaction *restrict sa, struct sigaction *restrict old)
+-{
+-	struct k_sigaction ksa, ksa_old;
++	/* Save old before overwriting. */
++	if (old) *old = __pouch_sigtab[sig];
++
+ 	if (sa) {
+-		if ((uintptr_t)sa->sa_handler > 1UL) {
+-			a_or_l(handler_set+(sig-1)/(8*sizeof(long)),
+-				1UL<<(sig-1)%(8*sizeof(long)));
++		__pouch_sigtab[sig] = *sa;
+ 
+-			/* If pthread_create has not yet been called,
+-			 * implementation-internal signals might not
+-			 * yet have been unblocked. They must be
+-			 * unblocked before any signal handler is
+-			 * installed, so that an application cannot
+-			 * receive an illegal sigset_t (with them
+-			 * blocked) as part of the ucontext_t passed
+-			 * to the signal handler. */
+-			if (!libc.threaded && !unmask_done) {
+-				__syscall(SYS_rt_sigprocmask, SIG_UNBLOCK,
+-					SIGPT_SET, 0, _NSIG/8);
+-				unmask_done = 1;
++		/* SIGPIPE special: installing a real handler clears the kernel's
++		 * NOTE_BIT_PIPE mask so the kernel will deliver pipe notes to
++		 * the bootstrap. Removing the handler (SIG_DFL/SIG_IGN) restores
++		 * the default mask. POUCH-DESIGN section 6.4 [RESOLVED 6.4]:
++		 * masked-by-default is the modern-daemon-friendly behavior. */
++		if (sig == SIGPIPE) {
++			uint64_t cur = __pouch_note_mask_shadow;
++			uint64_t new_m;
++			if (sa->sa_handler == SIG_DFL || sa->sa_handler == SIG_IGN ||
++			    sa->sa_handler == 0) {
++				new_m = cur | (uint64_t)POUCH_NOTE_BIT_PIPE;
++			} else {
++				new_m = cur & ~(uint64_t)POUCH_NOTE_BIT_PIPE;
+ 			}
+-
+-			if (!(sa->sa_flags & SA_RESTART)) {
+-				a_store(&__eintr_valid_flag, 1);
++			if (new_m != cur) {
++				__pouch_note_mask_shadow = new_m;
++				__syscall(SYS_note_mask, (long)new_m, 0L);
+ 			}
+ 		}
+-		ksa.handler = sa->sa_handler;
+-		ksa.flags = sa->sa_flags;
+-#ifdef SA_RESTORER
+-		ksa.flags |= SA_RESTORER;
+-		ksa.restorer = (sa->sa_flags & SA_SIGINFO) ? __restore_rt : __restore;
+-#endif
+-		memcpy(&ksa.mask, &sa->sa_mask, _NSIG/8);
++
++		/* SA_RESTART honored by default at v1.0: every pouch syscall is
++		 * non-cancellable + returns to userspace directly; there's no
++		 * EINTR retry surface to enable. The flag bit just sets the
++		 * advisory. */
++		if (!(sa->sa_flags & SA_RESTART)) {
++			a_store(&__eintr_valid_flag, 1);
++		}
+ 	}
+-	int r = __syscall(SYS_rt_sigaction, sig, sa?&ksa:0, old?&ksa_old:0, _NSIG/8);
+-	if (old && !r) {
+-		old->sa_handler = ksa_old.handler;
+-		old->sa_flags = ksa_old.flags;
+-		memcpy(&old->sa_mask, &ksa_old.mask, _NSIG/8);
+-	}
+-	return __syscall_ret(r);
++
++	return 0;
+ }
+ 
+-int __sigaction(int sig, const struct sigaction *restrict sa, struct sigaction *restrict old)
++int __sigaction(int sig, const struct sigaction *restrict sa,
++                struct sigaction *restrict old)
+ {
+-	unsigned long set[_NSIG/(8*sizeof(long))];
+-
+-	if (sig-32U < 3 || sig-1U >= _NSIG-1) {
+-		errno = EINVAL;
+-		return -1;
+-	}
+-
+-	/* Doing anything with the disposition of SIGABRT requires a lock,
+-	 * so that it cannot be changed while abort is terminating the
+-	 * process and so any change made by abort can't be observed. */
+-	if (sig == SIGABRT) {
+-		__block_all_sigs(&set);
+-		LOCK(__abort_lock);
+-	}
+-	int r = __libc_sigaction(sig, sa, old);
+-	if (sig == SIGABRT) {
+-		UNLOCK(__abort_lock);
+-		__restore_sigs(&set);
+-	}
+-	return r;
++	/* musl preserves a SIGABRT abort-lock interlock here on Linux.
++	 * Thylacine v1.0 does not include SIGABRT in the supported set
++	 * (sigaction(SIGABRT) returns EINVAL above); abort() falls through
++	 * to its plain _Exit path. So no abort-lock branch is needed. */
++	return __libc_sigaction(sig, sa, old);
+ }
+ 
+ weak_alias(__sigaction, sigaction);
+--- a/src/thread/pthread_sigmask.c
++++ b/src/thread/pthread_sigmask.c
+@@ -1,19 +1,55 @@
++/* pthread_sigmask(3) over Thylacine notes (pouch sub-chunk 13b).
++ * Replaces musl's Linux SYS_rt_sigprocmask call with SYS_NOTE_MASK,
++ * translating the POSIX sigset_t to/from a NOTE_BIT_* bitmap.
++ *
++ * Per POSIX, this is per-thread. The kernel's note_mask is per-Thread;
++ * we keep __pouch_note_mask_shadow as a __thread TLS shadow so we can
++ * do SIG_BLOCK / SIG_UNBLOCK read-modify-write without racing with
++ * another thread's mask updates. Pouch is the sole writer to each
++ * thread's note_mask, so the shadow stays in sync.
++ *
++ * Returns 0 on success, or a POSIX errno on failure (matches musl's
++ * convention — pthread_sigmask returns errno directly, not via the
++ * errno variable). The only error path at v1.0 is EINVAL for a bogus
++ * `how` value.
++ */
++
+ #include <signal.h>
+ #include <errno.h>
++#include <stdint.h>
++
+ #include "syscall.h"
++#include "_pouch_signal.h"
+ 
+ int pthread_sigmask(int how, const sigset_t *restrict set, sigset_t *restrict old)
+ {
+-	int ret;
+ 	if (set && (unsigned)how - SIG_BLOCK > 2U) return EINVAL;
+-	ret = -__syscall(SYS_rt_sigprocmask, how, set, old, _NSIG/8);
+-	if (!ret && old) {
+-		if (sizeof old->__bits[0] == 8) {
+-			old->__bits[0] &= ~0x380000000ULL;
+-		} else {
+-			old->__bits[0] &= ~0x80000000UL;
+-			old->__bits[1] &= ~0x3UL;
++
++	uint64_t cur = __pouch_note_mask_shadow;
++
++	/* Translate the proposed sigset (if any) into a NOTE_BIT_* delta
++	 * and compute the new mask under the chosen `how`. */
++	if (set) {
++		uint64_t s = __pouch_sigset_to_note(set);
++		uint64_t new_m;
++		switch (how) {
++		case SIG_BLOCK:   new_m = cur | s;          break;
++		case SIG_UNBLOCK: new_m = cur & ~s;         break;
++		case SIG_SETMASK: new_m = s;                 break;
++		default:          return EINVAL;
+ 		}
++		__pouch_note_mask_shadow = new_m;
++		long r = __syscall(SYS_note_mask, (long)new_m, 0L);
++		if (r < 0) {
++			/* Restore the shadow on failure so callers see a
++			 * consistent state. EAGAIN/EIO from the kernel maps
++			 * to EINVAL at v1.0 — the only realistic failure is
++			 * bad VA, which our 0L out-pointer rules out. */
++			__pouch_note_mask_shadow = cur;
++			return EINVAL;
++		}
+ 	}
+-	return ret;
++
++	if (old) __pouch_note_to_sigset(cur, old);
++	return 0;
+ }
