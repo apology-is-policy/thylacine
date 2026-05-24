@@ -45,6 +45,8 @@ void test_notes_mask_defers(void);
 void test_notes_kill_dequeue_smoke(void);
 void test_notes_kill_bypasses_mask(void);
 void test_notes_reenqueue_head_smoke(void);
+void test_notes_fd_read_skips_kill(void);
+void test_notes_fd_peek_skips_kill(void);
 void test_notes_post_child_exit_helper(void);
 void test_notes_post_pipe_helper(void);
 void test_notes_proc_lifecycle(void);
@@ -314,6 +316,82 @@ void test_notes_kill_bypasses_mask(void) {
     // After kill is popped, the masked interrupt is still queued (since
     // it's masked, this Thread can't dequeue it). count should be 1.
     TEST_EXPECT_EQ(p->notes->count, 1u, "interrupt still queued (masked)");
+
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+}
+
+// ---------------------------------------------------------------------------
+// fd_read_skips_kill (R2-F1 audit regression)
+// ---------------------------------------------------------------------------
+//
+// Per ARCH §7.6.7 N-4: kill is non-catchable AND must bypass the fd-read
+// path. devnotes_read uses notes_dequeue_for_fd_locked which skips kill
+// entries entirely; only the EL0-return-tail dispatcher (which uses
+// notes_dequeue_locked) may pop kill. Without this, a Proc reading
+// /dev/notes could consume its own kill and remain alive.
+
+void test_notes_fd_read_skips_kill(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc succeeded");
+
+    // Queue: [kill, interrupt]. The fd-read dequeue must SKIP kill and
+    // return interrupt.
+    notes_post(p, "kill",      0u, NULL, true);
+    notes_post(p, "interrupt", 5u, NULL, true);
+
+    struct Note got;
+    spin_lock(&p->notes->lock);
+    int popped = notes_dequeue_for_fd_locked(p, NULL, &got);
+    spin_unlock(&p->notes->lock);
+    TEST_EXPECT_EQ(popped, 1, "fd dequeue returned 1 (interrupt; skipped kill)");
+    TEST_ASSERT(got.name[0] == 'i' && got.name[1] == 'n',
+                "fd dequeue popped interrupt, not kill");
+    TEST_EXPECT_EQ(p->notes->count, 1u, "kill remains queued for dispatcher");
+
+    // Queue still has the kill -- second fd-dequeue must return 0 (kill
+    // is the only entry, and fd-read refuses to pop it).
+    spin_lock(&p->notes->lock);
+    popped = notes_dequeue_for_fd_locked(p, NULL, &got);
+    spin_unlock(&p->notes->lock);
+    TEST_EXPECT_EQ(popped, 0, "fd dequeue returns 0 -- kill not popped");
+    TEST_EXPECT_EQ(p->notes->count, 1u, "kill still queued");
+
+    // The dispatcher path CAN pop kill via notes_dequeue_locked.
+    spin_lock(&p->notes->lock);
+    popped = notes_dequeue_locked(p, NULL, &got);
+    spin_unlock(&p->notes->lock);
+    TEST_EXPECT_EQ(popped, 1, "dispatcher dequeue popped kill");
+    TEST_ASSERT(got.name[0] == 'k', "dispatcher popped name is kill");
+
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+}
+
+// ---------------------------------------------------------------------------
+// fd_peek_skips_kill (R2-F6 audit regression)
+// ---------------------------------------------------------------------------
+
+void test_notes_fd_peek_skips_kill(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc succeeded");
+
+    notes_post(p, "kill", 0u, NULL, true);
+
+    struct Note got;
+    spin_lock(&p->notes->lock);
+    int has = notes_peek_for_fd_locked(p, NULL, &got);
+    spin_unlock(&p->notes->lock);
+    TEST_EXPECT_EQ(has, 0,
+                   "fd peek returns 0 when only kill is queued");
+
+    // Add an interrupt; fd peek should return it (kill still skipped).
+    notes_post(p, "interrupt", 7u, NULL, true);
+    spin_lock(&p->notes->lock);
+    has = notes_peek_for_fd_locked(p, NULL, &got);
+    spin_unlock(&p->notes->lock);
+    TEST_EXPECT_EQ(has, 1, "fd peek finds interrupt past kill");
+    TEST_ASSERT(got.name[0] == 'i', "fd peek returned interrupt");
 
     p->state = PROC_STATE_ZOMBIE;
     proc_free(p);

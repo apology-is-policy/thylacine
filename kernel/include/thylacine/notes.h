@@ -177,23 +177,38 @@ void notes_queue_free(struct NoteQueue *q);
 int notes_post(struct Proc *p, const char *name, u32 arg,
                struct Proc *sender, bool synthetic);
 
-// Dequeue the next deliverable note for `t` — the first note whose
-// NOTE_BIT_* is NOT set in t->note_mask. Returns 1 if a note was popped
+// Dequeue the next deliverable note for `t` — the DISPATCHER variant.
+// Two passes: (1) kill-first scan regardless of mask (N-4 non-catchable),
+// (2) first mask-permitted non-kill entry. Returns 1 if a note was popped
 // (written to *out), 0 if no deliverable note is present (queue empty or
-// every entry masked). Caller MUST already hold p->notes->lock.
+// every entry masked AND no kill present). Caller MUST hold
+// p->notes->lock.
 //
-// This is the consume primitive — used by BOTH the EL0-return-tail handler
-// path AND devnotes_read (each calls it under the queue lock). N-2
-// (consumed exactly once) is enforced by the lock: only one path can
-// observe a given note's pop.
+// USED BY THE EL0-RETURN-TAIL DISPATCHER ONLY. The fd-read path uses
+// `notes_dequeue_for_fd_locked` so that `kill` is invisible to fd consumers
+// (R2-F1: a Proc reading /dev/notes would otherwise consume its own kill).
 int notes_dequeue_locked(struct Proc *p, struct Thread *t,
                          struct Note *out);
 
-// Peek the head of the queue without removing it. Returns 1 if an entry
-// exists (copied to *out), 0 if empty. Caller MUST hold p->notes->lock.
-// Used by devnotes_poll for the POLLIN sample.
+// Peek the dispatcher's next deliverable note (kill-first; mask-permitted
+// otherwise). Returns 1 if an entry exists (copied to *out), 0 if empty.
+// Caller MUST hold p->notes->lock. Used by the EL0-return-tail dispatcher.
 int notes_peek_locked(struct Proc *p, struct Thread *t,
                       struct Note *out);
+
+// R2-F1 audit close: fd-read variant of dequeue. Skips kill entirely
+// (kill is non-catchable and only the EL0-return-tail dispatcher may pop
+// it). Returns the first mask-permitted NON-KILL entry. Used by
+// devnotes_read.
+int notes_dequeue_for_fd_locked(struct Proc *p, struct Thread *t,
+                                struct Note *out);
+
+// R2-F1 / R2-F6 audit close: fd-read peek. Same kill-skip semantics as
+// notes_dequeue_for_fd_locked. Used by devnotes_poll for POLLIN sampling
+// (so the fd doesn't advertise readability based on a kill the fd-read
+// would refuse to consume).
+int notes_peek_for_fd_locked(struct Proc *p, struct Thread *t,
+                             struct Note *out);
 
 // F5 + F6 audit close (sub-chunk 13a): re-enqueue a previously-dequeued
 // note at the HEAD of the queue. Used by devnotes_read on uaccess failure

@@ -122,23 +122,26 @@ static long devnotes_read(struct Spoor *c, void *buf, long n, s64 off) {
         // before we register, the queue is non-empty and we dequeue;
         // if it ran after, the wake walks our registered pw and sets
         // pw->ready.
+        //
+        // R2-F1 audit close: uses notes_dequeue_for_fd_locked (the kill-
+        // skipping variant). kill is non-catchable; only the EL0-return-
+        // tail dispatcher may pop it. A Proc reading /dev/notes must NOT
+        // consume its own kill, otherwise SIGKILL is defeated.
+        //
+        // R2-F8 audit close: `buf` is the kernel scratch buffer from
+        // sys_read_for_proc (NOT a user VA). Plain stores; no uaccess;
+        // no fault path; no re-enqueue needed.
         spin_lock(&q->lock);
         struct Note popped;
-        int got = notes_dequeue_locked(p, t, &popped);
+        int got = notes_dequeue_for_fd_locked(p, t, &popped);
         if (got) {
             spin_unlock(&q->lock);
-
-            // Copy out via uaccess byte loop. On any failure, re-enqueue
-            // popped at head (N-2 consumed-exactly-once invariant).
+            // Plain kernel-to-kernel byte copy (buf is the sys_read_-
+            // for_proc scratch on this Thread's kstack).
             u8 *u = (u8 *)buf;
             const u8 *src = (const u8 *)&popped;
             for (u32 i = 0; i < sizeof(struct note_record); i++) {
-                if (uaccess_store_u8((u64)(uintptr_t)(u + i), src[i]) != 0) {
-                    spin_lock(&q->lock);
-                    (void)notes_reenqueue_head_locked(q, &popped);
-                    spin_unlock(&q->lock);
-                    return -1;
-                }
+                u[i] = src[i];
             }
             return (long)sizeof(struct note_record);
         }
@@ -178,10 +181,15 @@ static long devnotes_bwrite(struct Spoor *c, struct Block *bp, s64 off) {
 
 // devnotes_poll — register the calling thread's poll_waiter on the queue's
 // poll_list AND sample current readiness, atomically under q->lock. POLLIN
-// iff the queue has at least one mask-permitted readable note.
+// iff the queue has at least one mask-permitted non-kill readable note.
 //
 // Register-then-observe per the P5-poll audit-bearing discipline (the
 // poll.h preamble + specs/poll.tla).
+//
+// R2-F6 audit close: uses notes_peek_for_fd_locked (the kill-skipping
+// variant). A queued kill must NOT advertise POLLIN — fd-read consumers
+// can't see kill (R2-F1), and advertising POLLIN on kill would draw them
+// into a read() that returns nothing, looking like a phantom event.
 static short devnotes_poll(struct Spoor *c, short events,
                            struct poll_waiter *pw) {
     (void)c;
@@ -195,7 +203,7 @@ static short devnotes_poll(struct Spoor *c, short events,
     spin_lock(&q->lock);
     if (events & POLLIN) {
         struct Note tmp;
-        if (notes_peek_locked(p, t, &tmp)) {
+        if (notes_peek_for_fd_locked(p, t, &tmp)) {
             revents |= POLLIN;
         }
     }

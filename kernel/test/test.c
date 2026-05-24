@@ -178,6 +178,8 @@ void test_notes_mask_defers(void);
 void test_notes_kill_dequeue_smoke(void);
 void test_notes_kill_bypasses_mask(void);
 void test_notes_reenqueue_head_smoke(void);
+void test_notes_fd_read_skips_kill(void);
+void test_notes_fd_peek_skips_kill(void);
 void test_notes_post_child_exit_helper(void);
 void test_notes_post_pipe_helper(void);
 void test_notes_proc_lifecycle(void);
@@ -829,6 +831,8 @@ struct test_case g_tests[] = {
     { "notes.kill_dequeue_smoke",              test_notes_kill_dequeue_smoke,              false, NULL },
     { "notes.kill_bypasses_mask",              test_notes_kill_bypasses_mask,              false, NULL },
     { "notes.reenqueue_head_smoke",            test_notes_reenqueue_head_smoke,            false, NULL },
+    { "notes.fd_read_skips_kill",              test_notes_fd_read_skips_kill,              false, NULL },
+    { "notes.fd_peek_skips_kill",              test_notes_fd_peek_skips_kill,              false, NULL },
     { "notes.post_child_exit_helper",          test_notes_post_child_exit_helper,          false, NULL },
     { "notes.post_pipe_helper",                test_notes_post_pipe_helper,                false, NULL },
     { "notes.proc_lifecycle",                  test_notes_proc_lifecycle,                  false, NULL },
