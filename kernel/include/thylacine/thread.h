@@ -170,18 +170,55 @@ struct Thread {
     // stack), uaccess_store_u32 returns -1 and torpor_wake is skipped.
     // Userspace bug, not ours to fix — but kernel never extincts on it.
     u64                clear_child_tid;
+
+    // P6-pouch-signals-impl (sub-chunk 13a): note-delivery state per Thread.
+    //
+    // `note_mask`  — bit per NOTE_BIT_* (see <thylacine/notes.h>). Bit set
+    //                means this Thread defers delivery of that note (queue
+    //                entry is left in place; another Thread of the Proc, or
+    //                a future unmask, picks it up). Set / cleared by
+    //                SYS_NOTE_MASK.
+    //
+    // `in_handler` — true while an async note handler is RUNNING on this
+    //                Thread (between the EL0-return-tail dispatch and the
+    //                SYS_NOTED restore). The N-3 re-entrancy guard: the
+    //                EL0-return-tail check skips delivery for any Thread
+    //                with in_handler == true.
+    //
+    // `note_saved_*` — the user context snapshot captured at delivery,
+    //                  restored at SYS_NOTED(NCONT). Inline rather than
+    //                  heap-allocated so delivery is alloc-free (a kmalloc
+    //                  failure mid-delivery would silently drop the
+    //                  handler invocation, which is a worse failure mode
+    //                  than a slightly larger Thread cache slot).
+    //                  note_saved_regs[0..30] mirror exception_context's
+    //                  x0..x30; sp_el0 / elr / spsr likewise. The same
+    //                  layout is restored verbatim into the ctx of the
+    //                  SYS_NOTED syscall's exception_context.
+    u64                note_mask;
+    bool               in_handler;
+    u8                 _pad_in_handler[7];   // explicit 8-byte alignment
+    u64                note_saved_regs[31];   // x0..x30
+    u64                note_saved_sp_el0;
+    u64                note_saved_elr;
+    u64                note_saved_spsr;
+    // SYS_NOTED(NDFLT) needs to know the note name to apply the default
+    // action (`exits(name)` for the v1.0 supported set). Captured at
+    // EL0-return-tail delivery; cleared when in_handler returns to false.
+    // 16 bytes = NOTE_NAME_MAX. Avoids re-popping the queue at NOTED time
+    // (which would race with another delivery / fd-read).
+    char               note_handling_name[16];
 };
 
-_Static_assert(sizeof(struct Thread) == 816,
-               "struct Thread size pinned at 816 bytes. P6-pouch-threads "
-               "added clear_child_tid (8 bytes) after sleep_timedout — it "
-               "consumed the 7 bytes of trailing pad + 1 of the previous "
-               "tail, so sizeof stayed at 816 (no SLUB-cache growth). The "
-               "P5-tsleep math (was 784; +32 for timerwait_next/prev + "
-               "sleep_deadline + sleep_timedout + 7 pad) still applies; "
-               "clear_child_tid now occupies the formerly-padded 8 bytes. "
-               "Adding ANY further field will grow the cache; update this "
-               "assert deliberately so the change is intentional.");
+_Static_assert(sizeof(struct Thread) == 1120,
+               "struct Thread size pinned at 1120 bytes. P6-pouch-signals-"
+               "impl (sub-chunk 13a) appended note_mask + in_handler + the "
+               "user-context save block (note_saved_regs[31] + sp_el0 + elr "
+               "+ spsr) + note_handling_name[16] = 304 bytes after the 816-"
+               "byte P6-pouch-threads baseline. SLUB cache slot grows "
+               "accordingly. Adding ANY further field will grow the cache "
+               "further; update this assert deliberately so the change is "
+               "intentional.");
 _Static_assert(__builtin_offsetof(struct Thread, magic) == 0,
                "magic must be at offset 0 (P2-A audit R4 F42)");
 

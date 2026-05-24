@@ -239,6 +239,27 @@ struct Proc {
     // unlocked state (SPIN_LOCK_INIT == (spin_lock_t){ 0 }).
     spin_lock_t        vma_lock;
     u32                _pad_vma_lock;     // explicit 8-byte-align padding
+
+    // P6-pouch-signals-impl (sub-chunk 13a): per-Proc note state.
+    //
+    // `notes` is the per-Proc note queue — heap-allocated by proc_alloc via
+    // notes_queue_alloc; freed by proc_free. The queue is ~544 bytes
+    // inline; we pointer it to keep the Proc cache slot compact (same
+    // pattern as handles, territory). NULL only briefly during proc_alloc/
+    // proc_free; ALIVE Procs always carry a valid pointer.
+    //
+    // `handler_va` is the registered async-handler entry point (user-VA).
+    // 0 = no handler (the fd-shaped path is the only consumer; the EL0-
+    // return-tail check leaves all notes queued for devnotes_read). Set
+    // by SYS_NOTIFY; cleared by SYS_NOTIFY(0). Inherited across
+    // rfork(RFPROC) per Plan 9 idiom (musl's pthread_create inherits the
+    // signal disposition unless explicitly reset).
+    //
+    // ARCH §7.6.2 invariants: the queue is the truth; the fd is a view;
+    // the handler is the legacy consumer. The discipline holds at v1.0
+    // (single-thread Procs at start; multi-thread per sub-chunk 9a).
+    struct NoteQueue  *notes;
+    u64                handler_va;
 };
 
 #define PROC_FLAG_NODUMP            (1u << 0)
@@ -247,11 +268,11 @@ struct Proc {
 #define PROC_FLAG_CONSOLE_ATTACHED  (1u << 3)
 #define PROC_FLAG_MAY_POST_SERVICE  (1u << 4)
 
-_Static_assert(sizeof(struct Proc) == 152,
-               "struct Proc size pinned at 152 bytes (P5-corvus-srv-impl-a1 "
-               "baseline 144 + the P6-pouch-mem vma_lock 4 + _pad 4 = 152). "
-               "Adding a field grows the SLUB cache; update this assert "
-               "deliberately so the change is intentional.");
+_Static_assert(sizeof(struct Proc) == 168,
+               "struct Proc size pinned at 168 bytes (sub-chunk 12 baseline "
+               "152 + the P6-pouch-signals notes pointer 8 + handler_va 8 = "
+               "168). Adding a field grows the SLUB cache; update this "
+               "assert deliberately so the change is intentional.");
 _Static_assert(__builtin_offsetof(struct Proc, magic) == 0,
                "magic must be at offset 0 so SLUB's freelist write on "
                "kmem_cache_free clobbers it (double-free defense — "

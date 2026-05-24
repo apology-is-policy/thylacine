@@ -168,6 +168,18 @@ void test_thread_create_user_ctx_layout(void);
 void test_thread_exit_self_marks_exiting(void);
 void test_thread_exit_self_last_thread_zombies(void);
 void test_proc_multi_thread_reap(void);
+void test_notes_queue_alloc_free_smoke(void);
+void test_notes_post_dequeue_smoke(void);
+void test_notes_post_ordering(void);
+void test_notes_unknown_name_rejected(void);
+void test_notes_queue_full_returns_minus1(void);
+void test_notes_coalesce_synthetic(void);
+void test_notes_mask_defers(void);
+void test_notes_kill_dequeue_smoke(void);
+void test_notes_post_child_exit_helper(void);
+void test_notes_post_pipe_helper(void);
+void test_notes_proc_lifecycle(void);
+void test_notes_peek_does_not_pop(void);
 void test_directmap_kva_round_trip(void);
 void test_directmap_alloc_through_directmap(void);
 void test_directmap_vmalloc_mmio_smoke(void);
@@ -805,6 +817,18 @@ struct test_case g_tests[] = {
     { "thread.exit_self_marks_exiting",        test_thread_exit_self_marks_exiting,        false, NULL },
     { "thread.exit_self_last_thread_zombies",  test_thread_exit_self_last_thread_zombies,  false, NULL },
     { "proc.multi_thread_reap",                test_proc_multi_thread_reap,                false, NULL },
+    { "notes.queue_alloc_free_smoke",          test_notes_queue_alloc_free_smoke,          false, NULL },
+    { "notes.post_dequeue_smoke",              test_notes_post_dequeue_smoke,              false, NULL },
+    { "notes.post_ordering",                   test_notes_post_ordering,                   false, NULL },
+    { "notes.unknown_name_rejected",           test_notes_unknown_name_rejected,           false, NULL },
+    { "notes.queue_full_returns_minus1",       test_notes_queue_full_returns_minus1,       false, NULL },
+    { "notes.coalesce_synthetic",              test_notes_coalesce_synthetic,              false, NULL },
+    { "notes.mask_defers",                     test_notes_mask_defers,                     false, NULL },
+    { "notes.kill_dequeue_smoke",              test_notes_kill_dequeue_smoke,              false, NULL },
+    { "notes.post_child_exit_helper",          test_notes_post_child_exit_helper,          false, NULL },
+    { "notes.post_pipe_helper",                test_notes_post_pipe_helper,                false, NULL },
+    { "notes.proc_lifecycle",                  test_notes_proc_lifecycle,                  false, NULL },
+    { "notes.peek_does_not_pop",               test_notes_peek_does_not_pop,               false, NULL },
     { "directmap.kva_round_trip",      test_directmap_kva_round_trip,      false, NULL },
     { "directmap.alloc_through_directmap",
                                        test_directmap_alloc_through_directmap,

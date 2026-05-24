@@ -105,6 +105,8 @@ set(KERNEL_SRCS
     poll.c
     srvconn.c
     torpor.c
+    notes.c
+    devnotes.c
     test/test_dev.c
     test/test_trivial_devs.c
     test/test_devproc.c
@@ -159,6 +161,7 @@ set(KERNEL_SRCS
     test/test_sys_spawn_with_perms.c
     test/test_sys_burrow.c
     test/test_torpor.c
+    test/test_notes.c
     test/test_thread_spawn.c
     test/test_pipe_probe.c
     test/test_attach_probe.c

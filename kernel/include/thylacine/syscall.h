@@ -770,6 +770,87 @@ enum {
     //   returns: KObj_Srv listener handle (>=0) on success, -1 on
     //            gate fail / bad name / duplicate / OOM / registry full
     SYS_POST_SERVICE_BYTE = 43,
+
+    // P6-pouch-signals-impl (sub-chunk 13a): the note delivery primitive.
+    // Design in ARCH §7.6.1-§7.6.8 (binding scripture at 237f096); the
+    // novel angle (fd-first, async-handler as opt-in) is NOVEL.md §3.1.
+
+    // SYS_NOTE_OPEN — mint a fd to the calling Proc's note Spoor read end.
+    //   (no args)
+    // Idempotent: each call mints a fresh handle against the same kernel-
+    // owned note Spoor (`devnotes`). Closing one fd doesn't affect the
+    // queue or future opens; the queue lives with the Proc (N-5).
+    //
+    // The returned fd reads `struct note_record` (32 bytes — name + arg +
+    // sender_pid + timestamp_ns; ABI-pinned in <thylacine/notes.h>) one
+    // record per read() call at v1.0. poll() integrates: POLLIN iff the
+    // queue has at least one entry whose NOTE_BIT_* is NOT in the calling
+    // Thread's note_mask.
+    //
+    // Returns the new fd (>= 0) on success, -1 on:
+    //   - handle table full
+    //   - devnotes_open failure (defense-in-depth; structurally impossible)
+    SYS_NOTE_OPEN    = 44,
+
+    // SYS_NOTIFY(handler_va) — register / clear the async note handler.
+    //   x0 = handler_va   user-VA of the handler function (0 to clear).
+    // The handler is per-Proc (inherited across rfork(RFPROC) — the v1.0
+    // rfork path is single-Proc-spawn; the inheritance lands when
+    // pthread_create-equivalent rfork-share semantics arrive). When set,
+    // the EL0-return-tail dispatch in arch/arm64/exception.c pops the
+    // next deliverable note from the queue and lands the handler on it.
+    //
+    // Returns 0 on success, -1 on:
+    //   - handler_va is non-zero AND outside the user-VA bound
+    SYS_NOTIFY       = 45,
+
+    // SYS_NOTED(arg) — return from a running note handler.
+    //   x0 = arg    NCONT (= 0; restore saved user context + resume)
+    //               NDFLT (= 1; take the note's default action — for the
+    //                            v1.0 supported set, exits with a status
+    //                            string matching the note name)
+    // NEVER RETURNS NORMALLY. Either the saved user context is restored
+    // (the syscall's exception_context is rewritten with the t->note_saved_*
+    // fields), or the Proc transitions to ZOMBIE via exits.
+    //
+    // Returns -1 on:
+    //   - caller is NOT in a handler (t->in_handler == false)
+    //   - arg is not NCONT or NDFLT
+    SYS_NOTED        = 46,
+
+    // SYS_POSTNOTE(pid, name_va, name_len) — post a note to another Proc.
+    //   x0 = pid        target Proc's pid (or self_pid for self-post)
+    //   x1 = name_va    user-VA pointer to the note name bytes
+    //   x2 = name_len   bytes (1..NOTE_NAME_MAX-1; NUL not required —
+    //                    name_len is authoritative)
+    //
+    // Permission gate at v1.0: caller must be the target's parent OR
+    // pid == caller's own pid (self-post is always allowed). Future:
+    // CAP_KILL (ARCH §7.6.8 [OPEN Q 7.6.B]) plus the long-term namespace-
+    // shape (write to /proc/<pid>/note when path resolution arrives).
+    //
+    // Returns 0 on success, -1 on:
+    //   - bad name_len bounds (0 or > NOTE_NAME_MAX - 1)
+    //   - name_va outside the user-VA bound / unmapped
+    //   - name not in the v1.0 supported set (NOTE_NAME_* enumerated in
+    //     <thylacine/notes.h>)
+    //   - target pid not found (-ESRCH-equivalent collapsed to -1)
+    //   - target Proc's queue is full (-EAGAIN-equivalent)
+    //   - permission denied (caller is not the parent + pid != self)
+    SYS_POSTNOTE     = 47,
+
+    // SYS_NOTE_MASK(new_mask, old_mask_out_va) — set the calling Thread's
+    //   x0 = new_mask         the new mask (bit set = defer that note)
+    //   x1 = old_mask_out_va  user-VA pointer to a u64; the previous mask
+    //                          is written there if old_mask_out_va != 0
+    // The mask is per-Thread (POSIX pthread_sigmask semantics).
+    // Unsupported bits are tolerated (set but unused) so future supported-
+    // note additions don't break old userspace that wrote a wider mask.
+    //
+    // Returns 0 on success, -1 on:
+    //   - old_mask_out_va is non-zero AND outside the user-VA bound /
+    //     unmapped at store time
+    SYS_NOTE_MASK    = 48,
 };
 
 // SYS_WALK_OPEN's FROM_ROOT sentinel: when passed as the spoor_fd, the

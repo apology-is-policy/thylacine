@@ -263,6 +263,10 @@ void exception_irq_curr_el(struct exception_context *ctx) {
 //
 // EC_PC_ALIGN / EC_SP_ALIGN / EC_BTI / EC_BRK from EL0 also extinct
 // at v1.0; Phase 5+ note delivery handles these as user-faults.
+// P6-pouch-signals-impl (sub-chunk 13a): forward-declare the EL0-return-
+// tail note-delivery hook (defined in kernel/notes.c).
+void notes_deliver_at_el0_return(struct exception_context *ctx);
+
 void exception_sync_lower_el(struct exception_context *ctx) {
     u64 esr = ctx->esr;
     u64 far = ctx->far;
@@ -277,6 +281,13 @@ void exception_sync_lower_el(struct exception_context *ctx) {
 
         switch (r) {
         case FAULT_HANDLED:
+            // P6-pouch-signals-impl: check for pending note delivery at
+            // every EL0-return tail. Page-fault-return path: the faulting
+            // instruction will re-execute, which is fine — the handler
+            // will see the same fault on its return if it didn't fix the
+            // mapping (the in_handler guard prevents a delivery loop on
+            // a handler-side fault).
+            notes_deliver_at_el0_return(ctx);
             return;          // ERET resumes the faulting EL0 instruction.
         case FAULT_UNHANDLED_USER:
             // Phase 5+: deliver SIGSEGV-like note to the offending
@@ -301,6 +312,12 @@ void exception_sync_lower_el(struct exception_context *ctx) {
         // pick another thread). All other syscalls return normally;
         // vectors.S ERETs to EL0 with the result in x0.
         syscall_dispatch(ctx);
+        // P6-pouch-signals-impl: EL0-return tail. After syscall_dispatch
+        // wrote regs[0], check for a deliverable note and (if any)
+        // rewrite ctx to land at the registered handler. The async-
+        // handler path; the fd-read path (devnotes_read) consumes
+        // queued notes independently.
+        notes_deliver_at_el0_return(ctx);
         return;
 
     case EC_PC_ALIGN:

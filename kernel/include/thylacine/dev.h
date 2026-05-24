@@ -144,6 +144,7 @@ extern struct Dev devnull;        // dc='0'  — bit bucket (writes consumed; re
 extern struct Dev devzero;        // dc='z'  — produces zeroes
 extern struct Dev devfull;        // dc='f'  — full disk (writes fail; reads NUL-fill). P6 sub-chunk 11.
 extern struct Dev devrandom;      // dc='r'  — CSPRNG (RNDR-backed at v1.0)
+extern struct Dev devnotes;       // dc='n'  — per-Proc note queue (fd-first view). P6 sub-chunk 13a.
 
 // Kernel-internal directory Devs (P4-C+).
 extern struct Dev devproc;        // dc='p'  — /proc/<pid>/{status,cmdline,ctl,ns}

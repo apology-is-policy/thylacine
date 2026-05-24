@@ -22,6 +22,7 @@
 #include <thylacine/handle.h>
 #include <thylacine/irqfwd.h>
 #include <thylacine/mmio_handle.h>
+#include <thylacine/notes.h>
 #include <thylacine/page.h>
 #include <thylacine/pipe.h>
 #include <thylacine/poll.h>
@@ -1331,6 +1332,215 @@ static void sys_thread_exit_handler(void) {
     // thread_exit_self is __noreturn; the wrapper inherits via the
     // attribute, so the compiler does not emit a fall-through.
     __builtin_unreachable();
+}
+
+// =============================================================================
+// P6-pouch-signals-impl (sub-chunk 13a): note delivery syscalls.
+// =============================================================================
+//
+// Five thin handlers over kernel/notes.c + kernel/devnotes.c. Design in
+// ARCH §7.6.1-§7.6.8.
+
+extern int  notes_noted_restore(struct exception_context *ctx,
+                                struct Thread *t);
+__attribute__((noreturn))
+extern void notes_noted_default(struct Thread *t);
+
+// SYS_NOTE_OPEN — mint a fd to the calling Proc's note queue.
+//   (no args)
+//
+// Mints a fresh Spoor (via devnotes->attach), opens it, installs in the
+// caller's handle table. Idempotent across calls — each open mints a
+// separate Spoor, but reads/polls all access the same per-Proc queue
+// (devnotes is stateless; the queue is in current_thread()->proc->notes).
+static s64 sys_note_open_handler(void) {
+    struct Thread *t = current_thread();
+    if (!t || !t->proc) return -1;
+    struct Proc *p = t->proc;
+
+    struct Spoor *c = devnotes.attach(NULL);
+    if (!c) return -1;
+    struct Spoor *opened = devnotes.open(c, 0 /* OREAD */);
+    if (!opened) {
+        spoor_unref(c);
+        return -1;
+    }
+
+    rights_t rights = RIGHT_READ;
+    hidx_t fd = handle_alloc(p, KOBJ_SPOOR, rights, opened);
+    if (fd < 0) {
+        // handle_alloc failed; release the Spoor we just opened. The
+        // close runs the dev->close path (devnotes_close → dev_simple_close).
+        spoor_clunk(opened);
+        return -1;
+    }
+    return (s64)fd;
+}
+
+// SYS_NOTIFY(handler_va) — register/clear the async note handler.
+static s64 sys_notify_handler(u64 handler_va) {
+    struct Thread *t = current_thread();
+    if (!t || !t->proc) return -1;
+    struct Proc *p = t->proc;
+
+    if (handler_va != 0) {
+        if (handler_va >= UACCESS_USER_VA_TOP) return -1;
+        if (handler_va & 0x3) return -1;     // aarch64 instructions are 4-aligned
+    }
+    p->handler_va = handler_va;
+    return 0;
+}
+
+// SYS_NOTED(ctx, arg) — return from a handler.
+//   arg = 0 (NCONT) — restore ctx from t->note_saved_*
+//   arg = 1 (NDFLT) — exits with the note name
+// On invalid arg / not-in-handler, sets ctx->regs[0] = -1 + returns.
+static void sys_noted_handler(struct exception_context *ctx, u64 arg) {
+    struct Thread *t = current_thread();
+    if (!t || !t->proc) {
+        ctx->regs[0] = (u64)(s64)-1;
+        return;
+    }
+    if (!t->in_handler) {
+        ctx->regs[0] = (u64)(s64)-1;
+        return;
+    }
+    if (arg == 0) {
+        // NCONT — restore. Returns 0 on success (ctx rewritten with the
+        // pre-handler user state; regs[0] is now the saved value).
+        if (notes_noted_restore(ctx, t) != 0) {
+            ctx->regs[0] = (u64)(s64)-1;
+        }
+        return;
+    }
+    if (arg == 1) {
+        // NDFLT — default action. Never returns.
+        notes_noted_default(t);
+        // unreachable
+    }
+    // Anything else — -EINVAL via -1.
+    ctx->regs[0] = (u64)(s64)-1;
+}
+
+// SYS_POSTNOTE(pid, name_va, name_len) — post a note to another Proc.
+// Permission gate at v1.0: caller must be the target's parent OR
+// pid == self_pid (self-post is always allowed).
+#define NOTES_POSTNOTE_NAME_MAX  (NOTE_NAME_MAX - 1)
+
+struct postnote_walk_ctx {
+    int           target_pid;
+    struct Proc  *caller;
+    const char   *name;
+    int           result;        // 0 = not yet found (continue walk);
+                                  // +1 = post succeeded (stop walk);
+                                  // -1 = post failed / permission denied
+                                  //      (stop walk).
+};
+
+static int postnote_walk_cb(struct Proc *target, void *arg) {
+    struct postnote_walk_ctx *w = (struct postnote_walk_ctx *)arg;
+    if (target->pid != w->target_pid) return 0;     // keep walking
+
+    // Found the target. Permission gate: caller must be the parent.
+    if (target->parent != w->caller) {
+        w->result = -1;
+        return 1;     // stop walk (non-zero return)
+    }
+
+    // Post. notes_post is safe under proc_table_lock — see the lock-order
+    // discussion in sys_postnote_handler.
+    int rc = notes_post(target, w->name, 0u, w->caller, false);
+    w->result = (rc == 0) ? 1 : -1;
+    return 1;
+}
+
+static s64 sys_postnote_handler(u64 pid_raw, u64 name_va, u64 name_len_raw) {
+    struct Thread *t = current_thread();
+    if (!t || !t->proc) return -1;
+    struct Proc *p = t->proc;
+
+    if (name_len_raw == 0) return -1;
+    if (name_len_raw > NOTES_POSTNOTE_NAME_MAX) return -1;
+    if (name_va == 0) return -1;
+    if (name_va >= UACCESS_USER_VA_TOP) return -1;
+    if (name_va + name_len_raw > UACCESS_USER_VA_TOP) return -1;
+
+    char buf[NOTE_NAME_MAX];
+    for (u32 i = 0; i < NOTE_NAME_MAX; i++) buf[i] = 0;
+    for (u32 i = 0; i < (u32)name_len_raw; i++) {
+        u8 b;
+        if (uaccess_load_u8(name_va + i, &b) != 0) return -1;
+        // Reject embedded NUL and non-printable bytes — the v1.0
+        // supported set is "interrupt"/"kill"/"pipe"/"child_exit", all
+        // [a-z_]; the validation in notes_post will catch unknown
+        // strings, but reject obvious garbage at the boundary.
+        if (b == 0) return -1;
+        if (b < 0x20 || b > 0x7e) return -1;
+        buf[i] = (char)b;
+    }
+    buf[(u32)name_len_raw] = 0;
+
+    int target_pid = (int)pid_raw;
+
+    // Fast-path self-post: we ARE the target. No lookup needed; the Proc
+    // can't be freed while we're running it.
+    if (target_pid == p->pid) {
+        int rc = notes_post(p, buf, 0u, p, false);
+        return (rc == 0) ? 0 : (s64)-1;
+    }
+
+    // Cross-Proc post: walk the proc tree via proc_for_each, which runs
+    // its callback under g_proc_table_lock. We do the find + permission-
+    // check + post inside the callback so the target Proc cannot be
+    // reaped + freed mid-operation. Lock order: proc_table_lock → q->lock
+    // → poll_list.lock → (drop q->lock, still hold proc_table_lock) →
+    // rendez.lock. None of those reverse-takes proc_table_lock so the
+    // chain is acyclic.
+    struct postnote_walk_ctx wctx = {
+        .target_pid = target_pid,
+        .caller     = p,
+        .name       = buf,
+        .result     = 0,
+    };
+    int rv = proc_for_each(postnote_walk_cb, &wctx);
+    (void)rv;     // proc_for_each returns the first non-zero callback
+                  // result; wctx.result carries the canonical answer
+    if (wctx.result == 1) return 0;     // post succeeded
+    return -1;                            // not found / permission / EAGAIN
+}
+
+// SYS_NOTE_MASK(new_mask, old_mask_out_va) — swap-and-return mask.
+static s64 sys_note_mask_handler(u64 new_mask, u64 old_mask_out_va) {
+    struct Thread *t = current_thread();
+    if (!t) return -1;
+
+    u64 old = t->note_mask;
+    t->note_mask = new_mask;
+
+    if (old_mask_out_va != 0) {
+        if (old_mask_out_va >= UACCESS_USER_VA_TOP) {
+            // Restore the prior mask on bound failure so the syscall is
+            // observably atomic (no half-swap).
+            t->note_mask = old;
+            return -1;
+        }
+        // Byte-by-byte uaccess (no u64 primitive at v1.0 — uaccess.h
+        // exposes u8 / u32 only).
+        const u8 *src = (const u8 *)&old;
+        for (u32 i = 0; i < sizeof(u64); i++) {
+            if (uaccess_store_u8(old_mask_out_va + i, src[i]) != 0) {
+                t->note_mask = old;
+                return -1;
+            }
+        }
+    }
+
+    // A mask CLEAR re-pumps delivery — a note that was previously
+    // deferred for this Thread may now be deliverable. The actual
+    // delivery fires at the next EL0-return tail (which is the syscall
+    // return we're about to ret from), so the EL0-return-tail check
+    // will see the new mask state. No explicit wake needed here.
+    return 0;
 }
 
 // =============================================================================
@@ -3205,6 +3415,35 @@ void syscall_dispatch(struct exception_context *ctx) {
         // exception_context stays on the EXITING thread's kstack until
         // the parent's wait_pid → thread_free.
         sys_thread_exit_handler();
+
+    // P6-pouch-signals-impl (sub-chunk 13a): the 5 note syscalls.
+    case SYS_NOTE_OPEN:
+        ctx->regs[0] = (u64)sys_note_open_handler();
+        return;
+
+    case SYS_NOTIFY:
+        ctx->regs[0] = (u64)sys_notify_handler(ctx->regs[0]);
+        return;
+
+    case SYS_NOTED:
+        // sys_noted_handler manages ctx directly:
+        //   - NCONT (arg=0): rewrites ctx with the saved pre-handler
+        //     state; regs[0] becomes the saved value. NO post-write.
+        //   - NDFLT (arg=1): exits, never returns.
+        //   - Invalid: sets ctx->regs[0] = -1 internally.
+        sys_noted_handler(ctx, ctx->regs[0]);
+        return;
+
+    case SYS_POSTNOTE:
+        ctx->regs[0] = (u64)sys_postnote_handler(ctx->regs[0],
+                                                  ctx->regs[1],
+                                                  ctx->regs[2]);
+        return;
+
+    case SYS_NOTE_MASK:
+        ctx->regs[0] = (u64)sys_note_mask_handler(ctx->regs[0],
+                                                    ctx->regs[1]);
+        return;
 
     default:
         // Unknown syscall. Phase 5+ delivers SIGSYS-equivalent note;

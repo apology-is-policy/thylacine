@@ -1,0 +1,367 @@
+// P6-pouch-signals-impl (sub-chunk 13a) — tests for the kernel notes substrate.
+//
+// Coverage focuses on the queue + post + dequeue invariants (N-1..N-5)
+// and the synthetic-poster helpers. The async-handler-on-EL0-return path
+// is exercised end-to-end by the future /pouch-hello-signals proving
+// binary (sub-chunk 13b); these kernel tests cover the leaf-level
+// substrate.
+//
+// Tests:
+//   notes.queue_alloc_free_smoke      — alloc + free without leak
+//   notes.post_dequeue_smoke          — single post → single dequeue
+//   notes.post_ordering               — three posts dequeued in order
+//   notes.unknown_name_rejected       — notes_post with unknown name → -1
+//   notes.queue_full_returns_minus1   — non-synthetic posts fail at full
+//   notes.coalesce_synthetic          — synthetic poster merges at threshold
+//   notes.mask_defers                 — masked entries skipped at dequeue
+//   notes.kill_dequeue_smoke          — kill dequeues normally (no special
+//                                        kernel-side action; the EL0-return-
+//                                        tail dispatch is what makes it
+//                                        non-catchable at delivery time)
+//   notes.post_child_exit_helper      — synthetic helper packs arg
+//   notes.post_pipe_helper            — synthetic helper smoke
+//   notes.proc_lifecycle              — proc_alloc gives a non-NULL queue;
+//                                        proc_free cleans up
+//   notes.peek_does_not_pop           — peek leaves count unchanged
+
+#include "test.h"
+
+#include <thylacine/notes.h>
+#include <thylacine/proc.h>
+#include <thylacine/sched.h>
+#include <thylacine/spinlock.h>
+#include <thylacine/thread.h>
+#include <thylacine/types.h>
+
+#include "../../arch/arm64/timer.h"
+
+void test_notes_queue_alloc_free_smoke(void);
+void test_notes_post_dequeue_smoke(void);
+void test_notes_post_ordering(void);
+void test_notes_unknown_name_rejected(void);
+void test_notes_queue_full_returns_minus1(void);
+void test_notes_coalesce_synthetic(void);
+void test_notes_mask_defers(void);
+void test_notes_kill_dequeue_smoke(void);
+void test_notes_post_child_exit_helper(void);
+void test_notes_post_pipe_helper(void);
+void test_notes_proc_lifecycle(void);
+void test_notes_peek_does_not_pop(void);
+
+// ---------------------------------------------------------------------------
+// queue_alloc_free_smoke
+// ---------------------------------------------------------------------------
+
+void test_notes_queue_alloc_free_smoke(void) {
+    struct NoteQueue *q = notes_queue_alloc();
+    TEST_ASSERT(q != NULL, "notes_queue_alloc returned non-NULL");
+    TEST_EXPECT_EQ(q->count, 0u, "fresh queue has count == 0");
+    TEST_EXPECT_EQ(q->head, 0u, "fresh queue head == 0");
+    TEST_EXPECT_EQ(q->tail, 0u, "fresh queue tail == 0");
+    notes_queue_free(q);
+}
+
+// ---------------------------------------------------------------------------
+// post_dequeue_smoke
+// ---------------------------------------------------------------------------
+
+void test_notes_post_dequeue_smoke(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc succeeded");
+    TEST_ASSERT(p->notes != NULL, "proc_alloc populated notes queue");
+
+    int rc = notes_post(p, "interrupt", 0u, NULL, true);
+    TEST_EXPECT_EQ(rc, 0, "notes_post(interrupt) returned 0");
+    TEST_EXPECT_EQ(p->notes->count, 1u, "queue count == 1 after post");
+
+    struct Note got;
+    spin_lock(&p->notes->lock);
+    int popped = notes_dequeue_locked(p, NULL, &got);
+    spin_unlock(&p->notes->lock);
+    TEST_EXPECT_EQ(popped, 1, "notes_dequeue_locked returned 1");
+    TEST_ASSERT(got.name[0] == 'i' && got.name[1] == 'n', "popped name starts with 'in'");
+    TEST_EXPECT_EQ(p->notes->count, 0u, "queue empty after dequeue");
+
+    // Cleanup. proc_free requires ZOMBIE; this is a test fixture so we
+    // poke the state directly (mirrors test_torpor's pattern).
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+}
+
+// ---------------------------------------------------------------------------
+// post_ordering
+// ---------------------------------------------------------------------------
+
+void test_notes_post_ordering(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc succeeded");
+
+    TEST_EXPECT_EQ(notes_post(p, "interrupt", 1u, NULL, true), 0, "post 1");
+    TEST_EXPECT_EQ(notes_post(p, "pipe",      2u, NULL, true), 0, "post 2");
+    TEST_EXPECT_EQ(notes_post(p, "child_exit",3u, NULL, true), 0, "post 3");
+    TEST_EXPECT_EQ(p->notes->count, 3u, "count == 3");
+
+    struct Note got;
+    spin_lock(&p->notes->lock);
+    notes_dequeue_locked(p, NULL, &got);
+    spin_unlock(&p->notes->lock);
+    TEST_EXPECT_EQ(got.arg, 1u, "first dequeue is post #1");
+
+    spin_lock(&p->notes->lock);
+    notes_dequeue_locked(p, NULL, &got);
+    spin_unlock(&p->notes->lock);
+    TEST_EXPECT_EQ(got.arg, 2u, "second dequeue is post #2");
+
+    spin_lock(&p->notes->lock);
+    notes_dequeue_locked(p, NULL, &got);
+    spin_unlock(&p->notes->lock);
+    TEST_EXPECT_EQ(got.arg, 3u, "third dequeue is post #3");
+
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+}
+
+// ---------------------------------------------------------------------------
+// unknown_name_rejected
+// ---------------------------------------------------------------------------
+
+void test_notes_unknown_name_rejected(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc succeeded");
+
+    TEST_EXPECT_EQ(notes_post(p, "alarm",      0u, NULL, true), -1,
+                   "post(alarm) rejected (deferred at v1.0)");
+    TEST_EXPECT_EQ(notes_post(p, "garbage",    0u, NULL, true), -1,
+                   "post(garbage) rejected");
+    TEST_EXPECT_EQ(notes_post(p, "",           0u, NULL, true), -1,
+                   "post(empty) rejected");
+    TEST_EXPECT_EQ(p->notes->count, 0u, "no rejected post landed in queue");
+
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+}
+
+// ---------------------------------------------------------------------------
+// queue_full_returns_minus1
+// ---------------------------------------------------------------------------
+
+void test_notes_queue_full_returns_minus1(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc succeeded");
+
+    // Fill the queue with NOTE_QUEUE_DEPTH userspace-style posts (synthetic
+    // = false; no coalesce). Use unique-arg posts so the queue holds
+    // NOTE_QUEUE_DEPTH distinct entries. We use the same name "interrupt"
+    // — synthetic=false skips coalesce regardless of name, so each call
+    // either succeeds (adds an entry) or hits queue-full.
+    for (u32 i = 0; i < NOTE_QUEUE_DEPTH; i++) {
+        TEST_EXPECT_EQ(notes_post(p, "interrupt", i, NULL, false), 0,
+                       "fill: post succeeded");
+    }
+    TEST_EXPECT_EQ(p->notes->count, NOTE_QUEUE_DEPTH,
+                   "queue at full depth");
+
+    // Next non-synthetic post must fail.
+    TEST_EXPECT_EQ(notes_post(p, "interrupt", 99u, NULL, false), -1,
+                   "post at full → -1");
+
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+}
+
+// ---------------------------------------------------------------------------
+// coalesce_synthetic
+// ---------------------------------------------------------------------------
+
+void test_notes_coalesce_synthetic(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc succeeded");
+
+    // Fill past the coalesce threshold with synthetic posts. The first
+    // NOTE_COALESCE_THRESHOLD posts enqueue normally; once count reaches
+    // the threshold, the SAME-name same-source post overwrites the
+    // already-queued entry's arg (the head-of-bucket; FIFO position
+    // preserved). We then keep posting; each new arg overwrites in place.
+    for (u32 i = 0; i < NOTE_COALESCE_THRESHOLD; i++) {
+        TEST_EXPECT_EQ(notes_post(p, "child_exit", i, NULL, true), 0,
+                       "fill below threshold");
+    }
+    TEST_EXPECT_EQ(p->notes->count, NOTE_COALESCE_THRESHOLD,
+                   "queue at coalesce threshold");
+
+    // Subsequent synthetic posts of the SAME name coalesce — count
+    // stays at threshold, arg of the first entry updates.
+    TEST_EXPECT_EQ(notes_post(p, "child_exit", 1000u, NULL, true), 0,
+                   "coalesce post 1 succeeded");
+    TEST_EXPECT_EQ(notes_post(p, "child_exit", 2000u, NULL, true), 0,
+                   "coalesce post 2 succeeded");
+    TEST_EXPECT_EQ(p->notes->count, NOTE_COALESCE_THRESHOLD,
+                   "queue still at threshold after coalesce posts");
+
+    // The head entry's arg now reflects the LAST coalesce update.
+    // (The first matching entry from head — same (name, sender) — was
+    // updated; since all our posts share name="child_exit" sender=NULL,
+    // the head entry is the one we walked to.)
+    struct Note got;
+    spin_lock(&p->notes->lock);
+    notes_dequeue_locked(p, NULL, &got);
+    spin_unlock(&p->notes->lock);
+    TEST_EXPECT_EQ(got.arg, 2000u, "head entry's arg = latest coalesce");
+
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+}
+
+// ---------------------------------------------------------------------------
+// mask_defers
+// ---------------------------------------------------------------------------
+
+void test_notes_mask_defers(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc succeeded");
+
+    notes_post(p, "interrupt", 0u, NULL, true);
+    notes_post(p, "pipe", 0u, NULL, true);
+
+    // Simulate a Thread with interrupt masked (bit 0).
+    struct Thread fake_t;
+    fake_t.note_mask = (1u << NOTE_BIT_INTERRUPT);
+
+    // Dequeue with the masked Thread: skip "interrupt", return "pipe".
+    struct Note got;
+    spin_lock(&p->notes->lock);
+    int popped = notes_dequeue_locked(p, &fake_t, &got);
+    spin_unlock(&p->notes->lock);
+    TEST_EXPECT_EQ(popped, 1, "dequeue returned 1 (skipped masked)");
+    TEST_ASSERT(got.name[0] == 'p' && got.name[1] == 'i',
+                "popped 'pipe' (interrupt was masked)");
+    TEST_EXPECT_EQ(p->notes->count, 1u, "interrupt still queued");
+
+    // Clear mask; now "interrupt" dequeues.
+    fake_t.note_mask = 0;
+    spin_lock(&p->notes->lock);
+    popped = notes_dequeue_locked(p, &fake_t, &got);
+    spin_unlock(&p->notes->lock);
+    TEST_EXPECT_EQ(popped, 1, "dequeue interrupt after unmask");
+    TEST_ASSERT(got.name[0] == 'i', "popped 'interrupt'");
+
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+}
+
+// ---------------------------------------------------------------------------
+// kill_dequeue_smoke
+// ---------------------------------------------------------------------------
+
+void test_notes_kill_dequeue_smoke(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc succeeded");
+
+    notes_post(p, "kill", 0u, NULL, true);
+    struct Note got;
+    spin_lock(&p->notes->lock);
+    int popped = notes_dequeue_locked(p, NULL, &got);
+    spin_unlock(&p->notes->lock);
+    TEST_EXPECT_EQ(popped, 1, "kill dequeued");
+    TEST_ASSERT(got.name[0] == 'k' && got.name[1] == 'i',
+                "popped name is 'kill'");
+
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+}
+
+// ---------------------------------------------------------------------------
+// post_child_exit_helper
+// ---------------------------------------------------------------------------
+
+void test_notes_post_child_exit_helper(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc succeeded");
+
+    notes_post_child_exit(p, 42, 7);
+    TEST_EXPECT_EQ(p->notes->count, 1u, "child_exit posted");
+
+    struct Note got;
+    spin_lock(&p->notes->lock);
+    notes_dequeue_locked(p, NULL, &got);
+    spin_unlock(&p->notes->lock);
+    TEST_ASSERT(got.name[0] == 'c', "name is 'child_exit'");
+    TEST_EXPECT_EQ(got.arg, ((u32)42 << 16) | 7u, "arg packs (pid, status)");
+
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+}
+
+// ---------------------------------------------------------------------------
+// post_pipe_helper
+// ---------------------------------------------------------------------------
+
+void test_notes_post_pipe_helper(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc succeeded");
+
+    notes_post_pipe(p);
+    TEST_EXPECT_EQ(p->notes->count, 1u, "pipe note posted");
+
+    struct Note got;
+    spin_lock(&p->notes->lock);
+    notes_dequeue_locked(p, NULL, &got);
+    spin_unlock(&p->notes->lock);
+    TEST_ASSERT(got.name[0] == 'p' && got.name[1] == 'i',
+                "name is 'pipe'");
+
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+}
+
+// ---------------------------------------------------------------------------
+// proc_lifecycle
+// ---------------------------------------------------------------------------
+
+void test_notes_proc_lifecycle(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc succeeded");
+    TEST_ASSERT(p->notes != NULL, "p->notes non-NULL after proc_alloc");
+    TEST_EXPECT_EQ(p->handler_va, 0ull, "fresh proc has handler_va == 0");
+
+    // Post a few notes to confirm the queue is usable.
+    notes_post(p, "interrupt", 0u, NULL, true);
+    notes_post(p, "pipe", 0u, NULL, true);
+    TEST_EXPECT_EQ(p->notes->count, 2u, "queue holds 2 entries");
+
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+    // proc_free's notes_queue_free should free the queue. There's no
+    // direct probe; the smoke is that proc_free returned without
+    // extinction.
+}
+
+// ---------------------------------------------------------------------------
+// peek_does_not_pop
+// ---------------------------------------------------------------------------
+
+void test_notes_peek_does_not_pop(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc succeeded");
+
+    notes_post(p, "interrupt", 7u, NULL, true);
+    TEST_EXPECT_EQ(p->notes->count, 1u, "one entry");
+
+    struct Note peeked;
+    spin_lock(&p->notes->lock);
+    int has = notes_peek_locked(p, NULL, &peeked);
+    spin_unlock(&p->notes->lock);
+    TEST_EXPECT_EQ(has, 1, "peek returned 1");
+    TEST_EXPECT_EQ(peeked.arg, 7u, "peek saw arg=7");
+    TEST_EXPECT_EQ(p->notes->count, 1u, "count unchanged after peek");
+
+    // Second peek still observes the same entry.
+    spin_lock(&p->notes->lock);
+    has = notes_peek_locked(p, NULL, &peeked);
+    spin_unlock(&p->notes->lock);
+    TEST_EXPECT_EQ(has, 1, "second peek still returns 1");
+    TEST_EXPECT_EQ(p->notes->count, 1u, "count still 1");
+
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+}

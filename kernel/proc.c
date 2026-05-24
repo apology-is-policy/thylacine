@@ -21,6 +21,7 @@
 #include <thylacine/devsrv.h>
 #include <thylacine/extinction.h>
 #include <thylacine/handle.h>
+#include <thylacine/notes.h>
 #include <thylacine/page.h>
 #include <thylacine/territory.h>
 #include <thylacine/proc.h>
@@ -284,6 +285,18 @@ struct Proc *proc_alloc(void) {
     }
     p->asid = asid_alloc();      // extincts on exhaustion (no rollback path)
 
+    // P6-pouch-signals-impl: allocate the per-Proc note queue. NULL on OOM
+    // routes through the same rollback path as the handle-table / pgtable
+    // failure: ZOMBIE + proc_free. proc_free knows to skip notes_queue_free
+    // when notes is NULL (no-op safe), so a partially-constructed Proc
+    // doesn't double-free.
+    p->notes = notes_queue_alloc();
+    if (!p->notes) {
+        p->state = PROC_STATE_ZOMBIE;
+        proc_free(p);
+        return NULL;
+    }
+
     // F89: assign the real PID now that handle table is live. This is
     // the only path that exposes a Proc to the world; subsequent rollback
     // (e.g., territory_clone or thread_create_with_arg failure in rfork) frees
@@ -351,9 +364,23 @@ void proc_free(struct Proc *p) {
 
     // P2-Fc: release the handle table. Closes any in-use slots first
     // (defensive — well-behaved Procs close all handles before exits;
-    // but a Proc that crashed mid-session leaves stragglers).
+    // but a Proc that crashed mid-session leaves stragglers). The
+    // handle-close cascade includes any open devnotes Spoors — those run
+    // devnotes_close which clears Spoor state without touching p->notes,
+    // so the queue is still valid for the notes_queue_free that follows.
     handle_table_free(p->handles);
     p->handles = NULL;
+
+    // P6-pouch-signals-impl: release the note queue. Must run AFTER
+    // handle_table_free so any devnotes_close fires before the queue is
+    // freed (otherwise a close-side read of q->waiters / q->poll_list
+    // would UAF). NULL-tolerant: a Proc that failed allocation pre-notes
+    // (e.g., handle_table_alloc OOM rollback) reaches here with notes ==
+    // NULL — no-op safe.
+    if (p->notes) {
+        notes_queue_free(p->notes);
+        p->notes = NULL;
+    }
 
     // P3-Bcb: release per-Proc address space resources. Both calls are
     // idempotent on 0: kproc + rolled-back-pre-pgtable_create paths
@@ -774,6 +801,16 @@ static void proc_become_zombie_locked(struct Proc *p, int status, const char *ms
     // proc_table_lock → r->lock.
     if (p->parent) {
         wakeup(&p->parent->child_done);
+        // P6-pouch-signals-impl (sub-chunk 13a): post the synthetic
+        // `child_exit` note to the parent's queue. notes_post takes the
+        // queue lock + the poll_list.lock + (after dropping queue lock)
+        // the queue's Rendez lock — all compose with proc_table_lock
+        // (no path takes those then proc_table_lock). synthetic=true
+        // enables coalesce-on-full so the post is contractually
+        // infallible (a queue-full parent may lose precise (pid, status)
+        // tuples but will still observe "a child exited"; wait_pid
+        // re-discovers any losses by walking p->children).
+        notes_post_child_exit(p->parent, p->pid, p->exit_status);
     }
 }
 

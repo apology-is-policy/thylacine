@@ -116,6 +116,7 @@ void dev_init(void) {
     dev_register(&devzero);
     dev_register(&devfull);
     dev_register(&devrandom);
+    dev_register(&devnotes);        // P6-pouch-signals-impl: per-Proc note fd (dc='n')
     dev_register(&devproc);
     dev_register(&devctl);
     dev_register(&devramfs);

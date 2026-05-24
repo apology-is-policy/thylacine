@@ -16,11 +16,14 @@
 
 #include <thylacine/dev.h>
 #include <thylacine/extinction.h>
+#include <thylacine/notes.h>
 #include <thylacine/pipe.h>
 #include <thylacine/poll.h>
+#include <thylacine/proc.h>
 #include <thylacine/rendez.h>
 #include <thylacine/spinlock.h>
 #include <thylacine/spoor.h>
+#include <thylacine/thread.h>
 #include <thylacine/types.h>
 
 #include "../mm/slub.h"
@@ -316,6 +319,20 @@ static long devpipe_write(struct Spoor *c, const void *buf, long n, s64 off) {
         spin_lock(&r->lock);
         if (r->read_eof) {
             spin_unlock(&r->lock);
+            // P6-pouch-signals-impl (sub-chunk 13a): synthesize the `pipe`
+            // note to the writing Proc. Tolerant of NULL current thread
+            // (defense-in-depth — write should only run on a userspace
+            // path that always has a current Thread/Proc). notes_post_pipe
+            // is synthetic=true so a queue-full Proc still observes "pipe
+            // happened" via coalesce. The note is informational; the -1
+            // return is the load-bearing EPIPE signal that musl's write
+            // wrapper translates to errno.
+            {
+                struct Thread *t = current_thread();
+                if (t && t->proc) {
+                    notes_post_pipe(t->proc);
+                }
+            }
             return -1;      // EPIPE
         }
         if (r->count < PIPE_BUF_SIZE) {
