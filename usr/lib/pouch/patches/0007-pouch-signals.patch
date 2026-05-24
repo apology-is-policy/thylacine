@@ -200,7 +200,7 @@ flag set + value verified); exits 0.
 +#define __NR_note_mask 48
 --- a/src/internal/_pouch_signal.h
 +++ b/src/internal/_pouch_signal.h
-@@ -0,0 +1,122 @@
+@@ -0,0 +1,130 @@
 +/* pouch — POSIX signals over Thylacine notes (P6-pouch-signals, sub-chunk
 + * 13b). The boundary-line layer that retargets musl's src/signal/ from
 + * Linux's rt_sigaction / rt_sigprocmask / tkill / rt_sigreturn onto the
@@ -252,8 +252,16 @@ flag set + value verified); exits 0.
 + *   - sigpending / sigtimedwait / sigqueue / sigsuspend return ENOSYS.
 + *   - SIGRT* (real-time signals) and per-signal-info (siginfo_t) not
 + *     supported. sigqueue() returns ENOSYS.
-+ *   - SIGABRT not in the v1.0 supported set; abort() falls through to
-+ *     its plain-_Exit fallback path (no handler ever fires).
++ *   - SIGABRT not in the v1.0 supported set (sigaction(SIGABRT) returns
++ *     EINVAL). musl's abort.c reaches a_crash() (a deliberate NULL deref)
++ *     BEFORE its _Exit(127) tail; at v1.0 the kernel's FAULT_UNHANDLED_USER
++ *     policy extincts on EL0 faults, so abort() manifests as kernel
++ *     extinction rather than clean process termination. PRE-EXISTING
++ *     limitation (not introduced by sub-chunk 13b — pre-13b pouch had the
++ *     same a_crash() path). v1.x extensions: (1) override pouch's abort.c
++ *     to _Exit(127) directly, bypassing a_crash; (2) deliver SIGSEGV-shaped
++ *     note instead of extincting on EL0 fault. See R1-F4 closed disposition
++ *     + docs/reference/83-pouch-signals.md "Known caveats / footguns".
 + */
 +
 +#ifndef _POUCH_SIGNAL_H
@@ -707,7 +715,7 @@ flag set + value verified); exits 0.
  }
 --- a/src/signal/sigaction.c
 +++ b/src/signal/sigaction.c
-@@ -1,87 +1,95 @@
+@@ -1,87 +1,100 @@
 +/* sigaction(2) over Thylacine notes (pouch sub-chunk 13b). Replaces
 + * musl's Linux SYS_rt_sigaction path with the pouch per-Proc sigaction
 + * table — the bootstrap handler (__pouch_note_handler) is registered
@@ -860,8 +868,13 @@ flag set + value verified); exits 0.
 -	return r;
 +	/* musl preserves a SIGABRT abort-lock interlock here on Linux.
 +	 * Thylacine v1.0 does not include SIGABRT in the supported set
-+	 * (sigaction(SIGABRT) returns EINVAL above); abort() falls through
-+	 * to its plain _Exit path. So no abort-lock branch is needed. */
++	 * (sigaction(SIGABRT) returns EINVAL above); the abort-lock interlock
++	 * is dead code at v1.0. musl's abort.c reaches a_crash() (NULL deref)
++	 * BEFORE its _Exit(127) tail; at v1.0 the kernel's FAULT_UNHANDLED_USER
++	 * policy extincts on EL0 faults, so abort() manifests as kernel
++	 * extinction. PRE-EXISTING limitation (not introduced by sub-chunk 13b).
++	 * v1.x extensions: override abort.c to _Exit directly, or deliver
++	 * SIGSEGV-shaped note. See R1-F4 closed disposition + reference doc. */
 +	return __libc_sigaction(sig, sa, old);
  }
  
