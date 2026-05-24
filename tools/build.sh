@@ -753,6 +753,111 @@ build_libsodium() {
     fi
 }
 
+build_stratumd() {
+    # Phase 6 (Pouch) sub-chunk 15 — cross-compile stratumd against the
+    # pouch sysroot. The first real non-trivial daemon ported via pouch;
+    # exercises stratumd's POSIX + GNU surface (threads, sockets, file I/O,
+    # signals) on Thylacine's musl-based libc. Per POUCH-DESIGN.md section 14
+    # row 15 + section 10 (the per-OS arms pattern): stratumd stays ~99%
+    # portable POSIX with a thin Thylacine arm in peer_creds.c (the new
+    # `__thylacine__` branch landed on the Stratum side).
+    #
+    # Source: $STRATUM_SRC (defaults to ~/projects/stratum/v2). Build dir:
+    # $BUILD_DIR/pouch/stratumd-cmake. Output binary: $BUILD_DIR/pouch/
+    # stratumd-cmake/src/cmd/stratumd/stratumd, copied alongside the pouch
+    # hello binaries under $BUILD_DIR/pouch/progs/ for the ramfs step.
+    #
+    # Configure flags:
+    #   -DCMAKE_TOOLCHAIN_FILE     pouch cross-toolchain (defines
+    #                              __thylacine__, _GNU_SOURCE, drives pouch-ld).
+    #   -DSTM_ENABLE_PQ=OFF        liboqs not cross-compiled for pouch at v1.0.
+    #   -DSTM_ENABLE_IOURING=OFF   io_uring is Linux-only; explicit-off
+    #                              avoids the pkg_check_modules probe.
+    #   -DSTM_ENABLE_LIBAIO=OFF    libaio likewise Linux-only.
+    #   -DSTM_BUILD_TESTS=OFF      tests need a host harness that doesn't exist
+    #                              on Thylacine; the cross build only ships the
+    #                              stratumd binary.
+    #   -DSTM_BUILD_FUZZERS=OFF    libFuzzer not cross-compiled.
+    #   -DSTM_WERROR=OFF           pouch's clang flags + musl headers surface
+    #                              warnings the upstream Stratum tree hasn't
+    #                              hit; cross-compile is best-effort on
+    #                              warning hygiene at v1.0.
+    #
+    # The Stratum source is consumed READ-ONLY from $STRATUM_SRC; no in-tree
+    # changes are written. The Stratum-side `__thylacine__` arm in
+    # peer_creds.c + the STM_PLATFORM_THYLACINE detection in CMakeLists.txt
+    # live on the `thylacine-pouch-arm` branch in the Stratum repo (a
+    # coordination artifact records the integration; see Stratum's
+    # docs/session-handoff-2026-05-24-thylacine-pouch-arm.md).
+    local sysroot="$BUILD_DIR/sysroot"
+    local stratum_src="${STRATUM_SRC:-$HOME/projects/stratum/v2}"
+    local stratumd_build="$BUILD_DIR/pouch/stratumd-cmake"
+    local progs_out="$BUILD_DIR/pouch/progs"
+    local toolchain="$REPO_ROOT/cmake/Toolchain-aarch64-pouch.cmake"
+    local readelf="$LLVM_PREFIX/bin/llvm-readelf"
+
+    if [[ ! -d "$stratum_src" ]]; then
+        echo "==> stratumd: source tree not found at $stratum_src" >&2
+        echo "    override with STRATUM_SRC=/path/to/stratum/v2" >&2
+        exit 1
+    fi
+    if [[ ! -f "$stratum_src/CMakeLists.txt" ]]; then
+        echo "==> stratumd: $stratum_src/CMakeLists.txt missing" >&2
+        exit 1
+    fi
+    if [[ ! -f "$sysroot/lib/libc.a" || ! -f "$sysroot/lib/libsodium.a" ]]; then
+        echo "==> stratumd: sysroot incomplete (libc.a or libsodium.a missing)" >&2
+        echo "    run 'tools/build.sh sysroot' first" >&2
+        exit 1
+    fi
+
+    echo "==> building stratumd (aarch64-thylacine) from $stratum_src"
+    rm -rf "$stratumd_build"
+    mkdir -p "$stratumd_build" "$progs_out"
+
+    # Configure with the pouch toolchain. CMake's tool-probes (compiler,
+    # threads) are short-circuited by the toolchain file's
+    # CMAKE_C_COMPILER_WORKS + the synthesized Threads::/PkgConfig::LIBSODIUM
+    # IMPORTED targets in Stratum's CMakeLists.txt's STM_PLATFORM_THYLACINE
+    # branch.
+    cmake -S "$stratum_src" -B "$stratumd_build" \
+        -DCMAKE_TOOLCHAIN_FILE="$toolchain" \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DSTM_ENABLE_PQ=OFF \
+        -DSTM_ENABLE_IOURING=OFF \
+        -DSTM_ENABLE_LIBAIO=OFF \
+        -DSTM_BUILD_TESTS=OFF \
+        -DSTM_BUILD_FUZZERS=OFF \
+        -DSTM_WERROR=OFF \
+        -DSTRATUM_BUILD_TESTING_HOOKS=OFF
+
+    cmake --build "$stratumd_build" --target stratumd -j"$(sysctl -n hw.ncpu 2>/dev/null || echo 4)"
+
+    local binary="$stratumd_build/src/cmd/stratumd/stratumd"
+    if [[ ! -f "$binary" ]]; then
+        echo "==> stratumd: build did not produce $binary" >&2
+        exit 1
+    fi
+
+    # Verify the layout the kernel ELF loader requires: ET_EXEC, no
+    # PT_DYNAMIC. Matches build_pouch_progs's verification.
+    local elf_hdr elf_phdrs
+    elf_hdr="$("$readelf" -h "$binary")"
+    elf_phdrs="$("$readelf" -l "$binary")"
+    case "$elf_hdr" in
+        *"Type:"*EXEC*) ;;
+        *) echo "    stratumd: not ET_EXEC — kernel/elf.c would reject it" >&2
+           exit 1 ;;
+    esac
+    case "$elf_phdrs" in
+        *DYNAMIC*) echo "    stratumd: has PT_DYNAMIC — kernel/elf.c would reject it" >&2
+                   exit 1 ;;
+    esac
+
+    cp "$binary" "$progs_out/stratumd"
+    echo "==> stratumd built: $progs_out/stratumd ($(wc -c < "$progs_out/stratumd" | tr -d ' ') bytes, ET_EXEC, static)"
+}
+
 build_pouch_progs() {
     # Phase 6 (Pouch) — cross-compile the pouch POSIX test programs (the
     # hello binaries) against the pouch sysroot. These are the first
@@ -900,13 +1005,14 @@ case "$target" in
     ramfs)       build_ramfs       ;;
     sysroot)     build_sysroot     ;;
     pouch-progs) build_pouch_progs ;;
+    stratumd)    build_stratumd    ;;
     userspace)   build_userspace   ;;
     disk)        build_disk        ;;
     all)         build_all         ;;
     clean)       clean             ;;
     *)
         echo "Unknown target: $target" >&2
-        echo "Valid: kernel, ramfs, sysroot, pouch-progs, userspace, disk, all, clean" >&2
+        echo "Valid: kernel, ramfs, sysroot, pouch-progs, stratumd, userspace, disk, all, clean" >&2
         exit 1
         ;;
 esac

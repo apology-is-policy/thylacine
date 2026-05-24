@@ -74,8 +74,21 @@ set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
 #
 #   -march: the Thylacine hardware baseline (ARMv8-A + LSE atomics +
 #           pointer auth + BTI). Matches the kernel + native userspace.
-#   -nostdinc + -isystem <sysroot>/include: pouch owns the entire include
-#           path; no host headers leak in. (Empty until sub-chunk 3.)
+#   -nostdlibinc + -isystem <sysroot>/include: pouch owns the libc + system
+#           include paths; no host system headers leak in. Unlike -nostdinc,
+#           this keeps clang's OWN resource headers on the path (stdint.h /
+#           stdarg.h / arm_neon.h / unwind.h — all compiler-provided), which
+#           portable C libraries (xxHash, BLAKE3) reference unconditionally.
+#   -D__thylacine__: the Thylacine platform identifier. Programs that
+#           need a Thylacine-specific arm (stratumd's peer_creds.c,
+#           future ports) gate on this macro. Set unconditionally — the
+#           triple is aarch64-thylacine; the macro is the C-visible peer.
+#   -D_GNU_SOURCE=1: pouch is musl-based, and musl's headers expose the
+#           Linux/glibc-compatible API surface (struct ucred, getrandom,
+#           fallocate, ...) only when _GNU_SOURCE is defined. Projects
+#           ported to pouch (stratumd, libsodium) generally assume the
+#           full POSIX + GNU surface; setting it at the toolchain level
+#           keeps each consumer from re-stating it.
 #   hardening: stack protector, stack-clash, PAC+BTI branch protection —
 #           Thylacine hardening discipline; on for the projects we own.
 #
@@ -84,35 +97,27 @@ set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
 # drives those).
 set(_pouch_c_flags
     "-march=armv8-a+lse+pauth+bti"
-    "-nostdinc"
+    "-nostdlibinc"
     "-isystem ${THYLACINE_SYSROOT}/include"
+    "-D__thylacine__=1"
+    "-D_GNU_SOURCE=1"
     "-fno-common"
     "-fno-omit-frame-pointer"
     "-fstack-protector-strong"
-    "-fstack-clash-protection"
     "-mbranch-protection=pac-ret+bti"
 )
 string(JOIN " " CMAKE_C_FLAGS_INIT ${_pouch_c_flags})
 set(CMAKE_ASM_FLAGS_INIT "-march=armv8-a+lse+pauth+bti")
 
-# Link flags — applied automatically to every executable link.
+# Link via tools/pouch-ld — the link half of the pouch toolchain. Drives
+# ld.lld directly with the static/W^X/non-PIE link line + auto-supplies
+# the CRT objects (crt1/crti/crtn) + libc.a + libclang_rt.builtins.a from
+# the sysroot. clang cannot drive the ELF link for aarch64-thylacine on
+# a macOS host — its driver mis-selects the host Darwin toolchain. See
+# tools/pouch-ld + docs/reference/78-pouch.md.
 #
-#   -fuse-ld=lld: the LLVM linker.
-#   -static: v1.0 pouch is static-only (no dynamic linker / .so).
-#   W^X + hardening linker flags: mirror the native-userspace toolchain.
-#
-# NOT yet set: the CRT objects (crt1/crti/crtn) + -lc. clang does not
-# auto-locate them for the unknown "thylacine" OS; pouch link lines name
-# them explicitly once sub-chunks 2-5 install them into the sysroot.
-# See docs/POUCH-DESIGN.md §14.
-set(_pouch_ld_flags
-    "-fuse-ld=lld"
-    "--ld-path=${LLD_PREFIX}/bin/ld.lld"
-    "-static"
-    "-Wl,-z,text"
-    "-Wl,-z,noexecstack"
-    "-Wl,-z,max-page-size=4096"
-    "-Wl,--no-dynamic-linker"
-    "-Wl,--build-id=none"
-)
-string(JOIN " " CMAKE_EXE_LINKER_FLAGS_INIT ${_pouch_ld_flags})
+# Override CMAKE_C_LINK_EXECUTABLE rather than CMAKE_EXE_LINKER_FLAGS_INIT
+# because pouch-ld is not a clang front-end — it's a direct ld.lld driver
+# (no -Wl, prefix on its args, takes objects + -o + extra libs).
+set(CMAKE_C_LINK_EXECUTABLE
+    "${CMAKE_CURRENT_LIST_DIR}/../tools/pouch-ld <OBJECTS> -o <TARGET> <LINK_LIBRARIES>")
