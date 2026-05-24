@@ -30,20 +30,40 @@
 //
 // THE I-9 / I-19 invariants — ARCH §7.6.7 (sub-invariants N-1..N-5):
 //   N-1 (queue ordering): notes consumed in post order per source.
-//        EXCEPTION (R3-F5 audit close): `kill` is special-cased -- it
+//        EXCEPTION 1 (R3-F5 audit close): `kill` is special-cased -- it
 //        is always delivered FIRST regardless of FIFO position, and on
 //        re-enqueue (live_peers > 0 defer) it goes to the head, not the
-//        original position. The kill exception applies to KILL ONLY;
-//        all other notes still respect strict per-source FIFO.
+//        original position.
+//        EXCEPTION 2 (R4-F1 audit close): non-kill notes also relax to
+//        BEST-EFFORT FIFO when a re-enqueue-at-head happens on user-stack
+//        push failure (dispatcher's non-kill branch). The popped note
+//        goes to head, which can reverse cross-name order vs mask-
+//        deferred earlier same-source entries still in queue. This is a
+//        v1.x perf-vs-correctness tradeoff (strict FIFO would require a
+//        re-enqueue-at-original-index primitive with more bookkeeping).
 //   N-2 (consumed exactly once): every non-`kill` note consumed once across
 //        the handler + fd-read paths.
 //   N-3 (handler re-entrancy): while in_handler == true, no further delivery
 //        to that Thread. EXCEPTION (R2-F2 audit close): `kill` bypasses
 //        in_handler -- kill is fully non-catchable.
 //   N-4 (`kill` non-catchable): a `kill` note terminates the Proc at next
-//        EL0-return regardless of mask / handler / in_handler.
+//        EL0-return regardless of mask / handler / in_handler. EXCEPTION
+//        (R3-F3 documented v1.0 limitation): if the kill arrives in the
+//        narrow TOCTOU window where the target Proc transitions from
+//        single-thread to multi-thread (via SYS_THREAD_SPAWN), the kill
+//        cannot be delivered until cross-thread shootdown lands (v1.x).
 //   N-5 (fd lifecycle): a closed note Spoor fd does not affect future
 //        SYS_NOTE_OPEN or queue state. The queue lives with the Proc.
+//
+// SYS_NOTED arg semantics (R4-F6 audit close):
+//   - arg = 0 (NCONT): restore saved user context; resume pre-handler
+//     execution. Always succeeds while in_handler.
+//   - arg = 1 (NDFLT): take the note's default action (for the v1.0
+//     supported set, every default is exits(name)). Requires
+//     `live_peers == 0` -- exits extincts the kernel on live peer
+//     Threads (cross-thread shootdown is v1.x). NDFLT in a multi-
+//     thread Proc therefore returns -1; the handler must fall back to
+//     NCONT or explicit per-Thread teardown (SYS_THREAD_EXIT).
 //
 // Spec-to-code suspended (CLAUDE.md, broadened 2026-05-23) — no
 // specs/notes.tla module. The invariants above are pinned by the queue-lock
@@ -132,9 +152,11 @@ _Static_assert(sizeof(struct note_record) == sizeof(struct Note),
 
 // Per-Proc note queue. Allocated by notes_queue_alloc at proc_alloc; freed
 // by notes_queue_free at proc_free. The `lock` serializes all queue
-// mutations (post + dequeue); `waiters` is the Rendez devnotes_read parks
-// on when the queue is empty (or all entries are masked by the calling
-// Thread).
+// mutations (post + dequeue); `poll_list` is the multi-waiter hook list
+// shared by devnotes_read (a private Rendez + stack-allocated poll_waiter
+// per read call -- R2-F3 audit close restructured from single-waiter
+// Rendez to this pattern to break the ABBA with notes_post's wake) AND
+// SYS_POLL on /dev/notes -- producers wake the entire list under q->lock.
 struct NoteQueue {
     spin_lock_t              lock;
     u32                      head;        // index of next dequeue
@@ -179,7 +201,8 @@ void notes_queue_free(struct NoteQueue *q);
 // posts when queue count >= NOTE_COALESCE_THRESHOLD); false (userspace
 // SYS_POSTNOTE path) skips coalesce — -EAGAIN bubbles to userspace.
 //
-// Wakes any devnotes_read parked on q->waiters.
+// Wakes every registered hook on q->poll_list (devnotes_read parkers AND
+// SYS_POLL pollers; multi-waiter via the poll_waiter_list mechanism).
 int notes_post(struct Proc *p, const char *name, u32 arg,
                struct Proc *sender, bool synthetic);
 
@@ -217,8 +240,15 @@ int notes_peek_for_fd_locked(struct Proc *p, struct Thread *t,
                              struct Note *out);
 
 // Predicate: 1 iff `name` is the literal "kill". Used by the EL0-return-
-// tail dispatcher (the non-catchable detection) AND by devnotes_read's
-// R3-F1 fix (detecting a kill-only queue to bail out of tsleep loop).
+// tail dispatcher (the non-catchable detection), devnotes_read's R3-F1
+// fix (detecting a kill-only queue to bail out of tsleep loop), and
+// devnotes_poll's R4-F2 fix (POLLERR for kill-only queue).
+//
+// Contract (R4-F5 audit close): `name` MUST be either NUL-terminated
+// within NOTE_NAME_MAX characters, OR be at least NOTE_NAME_MAX bytes
+// long. The comparison is bounded at NOTE_NAME_MAX so a 16-byte non-
+// terminated buffer is safe; a shorter non-terminated buffer would read
+// past its end.
 int notes_name_is_kill(const char *name);
 
 // F5 + F6 audit close (sub-chunk 13a): re-enqueue a previously-dequeued

@@ -81,10 +81,9 @@ static int notes_name_to_bit(const char *name) {
     return -1;
 }
 
-// Forward decl — notes_name_is_kill is published with external linkage
-// at the bottom of this file (the EL0-return-tail dispatch + the
-// SYS_POSTNOTE F4 check use it via extern declaration in syscall.c).
-int notes_name_is_kill(const char *name);
+// R4-F4 audit close: notes_name_is_kill is now declared in the public
+// header (`<thylacine/notes.h>`) -- the prior forward decl block here
+// and the function-local extern decls in syscall.c are removed.
 
 // F10 audit close: return the canonical string-literal pointer for a
 // supported note name. The literal lives for the program's lifetime

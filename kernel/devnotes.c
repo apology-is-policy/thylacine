@@ -228,6 +228,20 @@ static short devnotes_poll(struct Spoor *c, short events,
             revents |= POLLIN;
         }
     }
+    // R4-F2 audit close: parallel to R3-F1 (read). If the queue contains
+    // ONLY kill (fd-variant peek skips it), poll must NOT block silently
+    // -- it would never wake. Report POLLERR so the caller's poll()
+    // returns immediately; on the next EL0-return the dispatcher fires
+    // and delivers kill. Without this, a Proc parked in SYS_POLL on
+    // /dev/notes with a kill-only queue would sleep forever (R3-F1's
+    // analog for poll).
+    if (revents == 0) {
+        struct Note kill_check;
+        if (notes_peek_locked(p, t, &kill_check) &&
+            notes_name_is_kill(kill_check.name)) {
+            revents |= POLLERR;
+        }
+    }
     // POLLOUT on devnotes is N/A (read-only); silently absent — the
     // poll caller observes "not ready for write," which is the
     // POSIX-correct answer for a read-only file.

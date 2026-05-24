@@ -1481,7 +1481,6 @@ static int postnote_walk_cb(struct Proc *target, void *arg) {
     // refuses when peer Threads exist; the caller learns the kill cannot
     // be delivered. Self-posts to single-thread Procs (kill self) +
     // parent-to-single-thread-child posts are still allowed.
-    extern int notes_name_is_kill(const char *name);
     if (notes_name_is_kill(w->name)) {
         int live_threads = proc_count_live_peers_locked(target, NULL);
         if (live_threads > 1) {
@@ -1534,7 +1533,6 @@ static s64 sys_postnote_handler(u64 pid_raw, u64 name_va, u64 name_len_raw) {
     // multi-thread; the kill would queue forever). Same gate as the
     // walk_cb path: refuse kill when live_threads > 1.
     if (target_pid == p->pid) {
-        extern int notes_name_is_kill(const char *name);
         if (notes_name_is_kill(buf)) {
             irq_state_t s = proc_table_lock_acquire();
             int live_threads = proc_count_live_peers_locked(p, NULL);
