@@ -30,10 +30,16 @@
 //
 // THE I-9 / I-19 invariants — ARCH §7.6.7 (sub-invariants N-1..N-5):
 //   N-1 (queue ordering): notes consumed in post order per source.
+//        EXCEPTION (R3-F5 audit close): `kill` is special-cased -- it
+//        is always delivered FIRST regardless of FIFO position, and on
+//        re-enqueue (live_peers > 0 defer) it goes to the head, not the
+//        original position. The kill exception applies to KILL ONLY;
+//        all other notes still respect strict per-source FIFO.
 //   N-2 (consumed exactly once): every non-`kill` note consumed once across
 //        the handler + fd-read paths.
 //   N-3 (handler re-entrancy): while in_handler == true, no further delivery
-//        to that Thread.
+//        to that Thread. EXCEPTION (R2-F2 audit close): `kill` bypasses
+//        in_handler -- kill is fully non-catchable.
 //   N-4 (`kill` non-catchable): a `kill` note terminates the Proc at next
 //        EL0-return regardless of mask / handler / in_handler.
 //   N-5 (fd lifecycle): a closed note Spoor fd does not affect future
@@ -209,6 +215,11 @@ int notes_dequeue_for_fd_locked(struct Proc *p, struct Thread *t,
 // would refuse to consume).
 int notes_peek_for_fd_locked(struct Proc *p, struct Thread *t,
                              struct Note *out);
+
+// Predicate: 1 iff `name` is the literal "kill". Used by the EL0-return-
+// tail dispatcher (the non-catchable detection) AND by devnotes_read's
+// R3-F1 fix (detecting a kill-only queue to bail out of tsleep loop).
+int notes_name_is_kill(const char *name);
 
 // F5 + F6 audit close (sub-chunk 13a): re-enqueue a previously-dequeued
 // note at the HEAD of the queue. Used by devnotes_read on uaccess failure

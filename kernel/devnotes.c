@@ -146,6 +146,27 @@ static long devnotes_read(struct Spoor *c, void *buf, long n, s64 off) {
             return (long)sizeof(struct note_record);
         }
 
+        // R3-F1 audit close: if the queue contains ONLY kill entries
+        // (fd-read skipped them all), don't tsleep -- return -1 instead
+        // so the syscall returns to user, which triggers the EL0-return-
+        // tail dispatcher that DOES consume kill. Without this exit,
+        // a Proc parked in devnotes_read on a kill-only queue would be
+        // unkillable (N-4 violated -- the kill is enqueued but the only
+        // path that delivers it requires the Thread to return to EL0,
+        // which it can't do while tsleep'd).
+        //
+        // Dispatcher peek (`notes_peek_locked` -- kill-first scan)
+        // returns kill if any kill is in queue. If so, we unblock the
+        // syscall; the user's read() returns -1; the user retries (or
+        // exits, or anything else); between syscalls the EL0-return-tail
+        // fires and delivers kill.
+        struct Note kill_check;
+        if (notes_peek_locked(p, t, &kill_check) &&
+            notes_name_is_kill(kill_check.name)) {
+            spin_unlock(&q->lock);
+            return -1;
+        }
+
         // Empty for this Thread's mask. Register pw + tsleep.
         pw.ready = false;       // re-arm for this iteration
         poll_waiter_list_register(&q->poll_list, &pw);

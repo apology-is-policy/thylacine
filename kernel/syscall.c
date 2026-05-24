@@ -1417,7 +1417,22 @@ static void sys_noted_handler(struct exception_context *ctx, u64 arg) {
         return;
     }
     if (arg == 1) {
-        // NDFLT — default action. Never returns.
+        // NDFLT -- default action. For the v1.0 supported set every
+        // default is exits(name), which requires live_peers == 0
+        // (exits extincts on live peer threads -- cross-thread shoot-
+        // down is v1.x).
+        //
+        // R3-F2 audit close: refuse NDFLT in multi-thread Procs so the
+        // kernel does not extinct on userspace-driven path. The user's
+        // handler can fall back to NCONT (restore) or do its own
+        // cleanup. Single-thread Procs reach exits cleanly.
+        irq_state_t s = proc_table_lock_acquire();
+        int live_peers = proc_count_live_peers_locked(t->proc, t);
+        proc_table_lock_release(s);
+        if (live_peers != 0) {
+            ctx->regs[0] = (u64)(s64)-1;
+            return;
+        }
         notes_noted_default(t);
         // unreachable
     }

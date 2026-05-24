@@ -525,12 +525,24 @@ void notes_deliver_at_el0_return(struct exception_context *ctx) {
         if (live_peers != 0) {
             // Re-enqueue the kill at head. SYS_POSTNOTE refuses kill to
             // multi-thread Procs at v1.0, so this path is defense-in-
-            // depth for a kernel-internal poster that bypasses the
-            // syscall gate. The kill stays queued; when peer Threads
-            // eventually exit on their own, the survivor picks it up.
+            // depth for a kernel-internal poster (or the R3-F3 TOCTOU
+            // race against SYS_THREAD_SPAWN). The kill stays queued;
+            // when peer Threads eventually exit on their own, the
+            // survivor picks it up.
+            //
+            // R3-F4 audit close: extinct on re-enqueue failure. Kill
+            // loss is a kernel-fatal invariant violation (N-2 + N-4);
+            // a silent drop would let the Proc survive a kill that the
+            // poster already received "success" for. Better to crash
+            // the kernel deliberately so the bug surfaces.
             spin_lock(&q->lock);
-            (void)notes_reenqueue_head_locked(q, &kill_popped);
+            int re_rc = notes_reenqueue_head_locked(q, &kill_popped);
             spin_unlock(&q->lock);
+            if (re_rc != 0) {
+                extinction("notes_deliver_at_el0_return: re-enqueue of "
+                           "kill failed (queue full) -- N-2/N-4 violation; "
+                           "kernel-fatal rather than silently lose kill");
+            }
             return;
         }
         exits("killed");
