@@ -1378,6 +1378,9 @@ static s64 sys_note_open_handler(void) {
 }
 
 // SYS_NOTIFY(handler_va) — register/clear the async note handler.
+// F9 audit close: release-store so a multi-thread Proc's other Thread
+// observing handler_va in notes_deliver_at_el0_return sees a coherent
+// value (paired with the acquire-load in notes.c).
 static s64 sys_notify_handler(u64 handler_va) {
     struct Thread *t = current_thread();
     if (!t || !t->proc) return -1;
@@ -1387,7 +1390,7 @@ static s64 sys_notify_handler(u64 handler_va) {
         if (handler_va >= UACCESS_USER_VA_TOP) return -1;
         if (handler_va & 0x3) return -1;     // aarch64 instructions are 4-aligned
     }
-    p->handler_va = handler_va;
+    __atomic_store_n(&p->handler_va, handler_va, __ATOMIC_RELEASE);
     return 0;
 }
 
@@ -1445,6 +1448,22 @@ static int postnote_walk_cb(struct Proc *target, void *arg) {
     if (target->parent != w->caller) {
         w->result = -1;
         return 1;     // stop walk (non-zero return)
+    }
+
+    // F4 audit close: refuse kill to multi-thread Procs at v1.0. Cross-
+    // thread shootdown is a v1.x extension (sub-chunk 9a deferred it
+    // explicitly). Without it, `exits("killed")` would extinct on
+    // `live_peers != 0`. The cleanest v1.0 contract: SYS_POSTNOTE("kill")
+    // refuses when peer Threads exist; the caller learns the kill cannot
+    // be delivered. Self-posts to single-thread Procs (kill self) +
+    // parent-to-single-thread-child posts are still allowed.
+    extern int notes_name_is_kill(const char *name);
+    if (notes_name_is_kill(w->name)) {
+        int live_threads = proc_count_live_peers_locked(target, NULL);
+        if (live_threads > 1) {
+            w->result = -1;
+            return 1;
+        }
     }
 
     // Post. notes_post is safe under proc_table_lock — see the lock-order
@@ -1518,7 +1537,14 @@ static s64 sys_note_mask_handler(u64 new_mask, u64 old_mask_out_va) {
     t->note_mask = new_mask;
 
     if (old_mask_out_va != 0) {
-        if (old_mask_out_va >= UACCESS_USER_VA_TOP) {
+        // F7 audit close: bound the END of the 8-byte writeback. The
+        // prior code checked only the START, letting the high bytes
+        // straddle the user/kernel boundary and (with PAN unconfigured
+        // at v1.0) write attacker-controlled bytes (the old mask) into
+        // kernel memory. Both bounds + overflow-check now.
+        if (old_mask_out_va >= UACCESS_USER_VA_TOP ||
+            old_mask_out_va + sizeof(u64) > UACCESS_USER_VA_TOP ||
+            old_mask_out_va + sizeof(u64) < old_mask_out_va) {
             // Restore the prior mask on bound failure so the syscall is
             // observably atomic (no half-swap).
             t->note_mask = old;

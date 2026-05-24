@@ -136,8 +136,11 @@ struct NoteQueue {
     u32                      count;
     u32                      _pad;        // explicit 8-byte alignment
     struct Note              ring[NOTE_QUEUE_DEPTH];
-    struct Rendez            waiters;     // single-waiter Rendez for devnotes_read
-    struct poll_waiter_list  poll_list;   // SYS_POLL register-then-observe hooks
+    // F3 audit close (sub-chunk 13a): devnotes_read uses the poll_-
+    // waiter_list mechanism — each reader has its own private Rendez +
+    // stack-allocated poll_waiter; producers wake via poll_waiter_list_-
+    // wake which is multi-waiter-safe. No per-queue single-waiter Rendez.
+    struct poll_waiter_list  poll_list;   // register-then-observe hooks (devnotes_read AND SYS_POLL)
 };
 
 // `kill` recognition — the special-case non-catchable note. The constant is
@@ -155,9 +158,9 @@ struct NoteQueue {
 // notes_queue_free.
 struct NoteQueue *notes_queue_alloc(void);
 
-// Release a NoteQueue. Caller must ensure no thread is currently sleeping
-// on `q->waiters` (handled by proc_free's ordering: ZOMBIE state is set,
-// all threads EXITING, no devnotes_read can be in flight).
+// Release a NoteQueue. Caller must ensure no thread is currently
+// registered on `q->poll_list` (handled by proc_free's ordering: ZOMBIE
+// state is set, all threads EXITING, no devnotes_read can be in flight).
 void notes_queue_free(struct NoteQueue *q);
 
 // Post a note to `p->notes`. `name` is bounded to NOTE_NAME_MAX-1 chars +
@@ -191,6 +194,15 @@ int notes_dequeue_locked(struct Proc *p, struct Thread *t,
 // Used by devnotes_poll for the POLLIN sample.
 int notes_peek_locked(struct Proc *p, struct Thread *t,
                       struct Note *out);
+
+// F5 + F6 audit close (sub-chunk 13a): re-enqueue a previously-dequeued
+// note at the HEAD of the queue. Used by devnotes_read on uaccess failure
+// and by notes_deliver_at_el0_return on user-stack-push failure to
+// preserve the N-2 (consumed exactly once) invariant — the note is put
+// back so the next consume can pick it up. Caller MUST hold
+// p->notes->lock. Returns 0 on success. Cannot fail at v1.0 since the
+// caller just popped (so there is space).
+int notes_reenqueue_head_locked(struct NoteQueue *q, const struct Note *n);
 
 // =============================================================================
 // Synthetic posters — kernel-internal callers (proc.c::exits, pipe.c write

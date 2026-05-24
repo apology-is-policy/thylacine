@@ -64,50 +64,38 @@ static void devnotes_close(struct Spoor *c) {
     dev_simple_close(c);
 }
 
-// devnotes_read_cond — tsleep predicate. Returns 1 iff the queue has a
-// note that the calling Thread can dequeue (NOTE_BIT_* not in its mask).
-// Re-evaluated under p->notes->lock on every wake (tsleep takes the
-// Rendez's own lock; the cond is then a peek under the queue lock).
-//
-// `arg` is the calling Thread (captured at devnotes_read entry — the
-// Thread's mask is the gate). The Proc is `arg->proc`.
-struct devnotes_read_cond_arg {
-    struct Proc   *proc;
-    struct Thread *thread;
-};
-
+// F3 audit close: use the poll_waiter_list mechanism for wait/wake — not
+// a single-waiter Rendez. The producer (notes_post) already calls
+// poll_waiter_list_wake under q->lock; routing devnotes_read through the
+// same list breaks the ABBA deadlock cycle the prior single-waiter design
+// had with the cond-under-q->lock path. The cond callback now reads only
+// pw->ready (no q->lock acquisition under the tsleep g_timerwait + rendez
+// locks).
 static int devnotes_read_cond(void *arg) {
-    struct devnotes_read_cond_arg *a = (struct devnotes_read_cond_arg *)arg;
-    if (!a || !a->proc || !a->proc->notes) return 0;
-    struct NoteQueue *q = a->proc->notes;
-
-    // We're called under q->waiters.lock by tsleep; we need q->lock to
-    // peek the queue safely. Take it; the lock-order rule is q->lock
-    // first (the producer takes q->lock then drops it before wakeup which
-    // takes waiters.lock — consumer takes them in the reverse order with
-    // a try-style backoff if we needed nested holds; we DON'T nest here
-    // because we only need a moment of q->lock).
-    //
-    // This works because rendez.sleep's cond callback is allowed to take
-    // unrelated locks AS LONG AS the global lock-order discipline holds.
-    // We do NOT take waiters.lock here (we'd deadlock on tsleep's own
-    // hold); we only take q->lock, which is acquired/released cleanly.
-    spin_lock(&q->lock);
-    struct Note tmp;
-    int has = notes_peek_locked(a->proc, a->thread, &tmp);
-    spin_unlock(&q->lock);
-    return has;
+    const struct poll_waiter *pw = (const struct poll_waiter *)arg;
+    // pw->ready is set under list->lock by poll_waiter_list_wake AND the
+    // setter calls wakeup(pw->rendez) which acquires/releases the rendez
+    // lock that tsleep also holds when calling cond — the pairing of
+    // those rendez-lock release-acquires synchronizes the producer's
+    // set with this read. Plain load.
+    return pw->ready ? 1 : 0;
 }
 
 // devnotes_read — pop one note from the calling Proc's queue, copy to
 // the user buffer as a struct note_record (32 bytes). Blocks if empty
 // (single-record-per-call at v1.0; vectored reads are a v1.x extension).
 //
+// F3 audit close: blocks via poll_waiter (multi-waiter-safe; ABBA-safe).
+// F6 audit close: re-enqueues at head on partial uaccess failure, so
+// N-2 (consumed exactly once) holds across a faulting user-VA copy.
+// F8 audit close: loops back to tsleep on spurious wake instead of
+// returning -1 (which would surface as EIO to userspace).
+//
 // Returns:
 //   32     — one record copied
 //    0     — EOF (currently unreachable at v1.0; queue never EOFs)
 //   -1     — n < sizeof(struct note_record), or no calling Proc, or
-//            other validation failure
+//            persistent uaccess failure on the user buffer
 static long devnotes_read(struct Spoor *c, void *buf, long n, s64 off) {
     (void)c; (void)off;
     if (!buf) return -1;
@@ -118,46 +106,59 @@ static long devnotes_read(struct Spoor *c, void *buf, long n, s64 off) {
     struct Proc *p = t->proc;
     struct NoteQueue *q = p->notes;
 
-    // Block until a dequeueable note is present (mask-permitted).
-    struct devnotes_read_cond_arg a = { .proc = p, .thread = t };
-    int rc = tsleep(&q->waiters, devnotes_read_cond, &a, 0u);
-    // tsleep with deadline_ns = 0 = "no deadline"; returns TSLEEP_AWOKEN.
-    (void)rc;     // single-waiter is structurally guaranteed by v1.0
-                  // model; tsleep only returns AWOKEN here.
+    // Per-read private Rendez + poll_waiter, stack-allocated for the
+    // duration of this read call. Lifetime invariant: unregistered
+    // before return on every path.
+    struct Rendez priv;
+    rendez_init(&priv);
+    struct poll_waiter pw;
+    poll_waiter_init(&pw, &priv);
 
-    // Dequeue under q->lock.
-    spin_lock(&q->lock);
-    struct Note popped;
-    int got = notes_dequeue_locked(p, t, &popped);
-    spin_unlock(&q->lock);
+    for (;;) {
+        // Atomic register-then-observe under q->lock: dequeue if a
+        // mask-permitted entry exists, else register pw on the list +
+        // tsleep on priv. The producer's notes_post calls
+        // poll_waiter_list_wake under the SAME q->lock — if it ran
+        // before we register, the queue is non-empty and we dequeue;
+        // if it ran after, the wake walks our registered pw and sets
+        // pw->ready.
+        spin_lock(&q->lock);
+        struct Note popped;
+        int got = notes_dequeue_locked(p, t, &popped);
+        if (got) {
+            spin_unlock(&q->lock);
 
-    if (!got) {
-        // Spurious wake (race with another consumer of the same queue,
-        // e.g., the EL0-return-tail handler dispatch grabbed it first).
-        // v1.0 returns -1 + leaves the user buffer untouched; userspace
-        // re-issues the read (matches non-blocking semantics that callers
-        // already expect from a Rendez-based wait/wake).
-        return -1;
-    }
-
-    // memcpy popped → user buffer. note_record and Note are byte-
-    // identical (see _Static_assert in notes.h). We bounce through a
-    // local copy to avoid handing the user a raw pointer into the
-    // kernel ring; uaccess_store_u8 walks the user-VA byte-by-byte
-    // with fault fixup (the standard pattern for KOBJ_SPOOR read paths).
-    u8 *u = (u8 *)buf;
-    const u8 *src = (const u8 *)&popped;
-    for (u32 i = 0; i < sizeof(struct note_record); i++) {
-        if (uaccess_store_u8((u64)(uintptr_t)(u + i), src[i]) != 0) {
-            // Partial write fault. We've already popped — the note is
-            // GONE. v1.0 accepts the data loss (matches our docs at
-            // ARCH §7.6.5 "queue overflow / consume policy"); a future
-            // chunk could buffer + retry. Return -1.
-            return -1;
+            // Copy out via uaccess byte loop. On any failure, re-enqueue
+            // popped at head (N-2 consumed-exactly-once invariant).
+            u8 *u = (u8 *)buf;
+            const u8 *src = (const u8 *)&popped;
+            for (u32 i = 0; i < sizeof(struct note_record); i++) {
+                if (uaccess_store_u8((u64)(uintptr_t)(u + i), src[i]) != 0) {
+                    spin_lock(&q->lock);
+                    (void)notes_reenqueue_head_locked(q, &popped);
+                    spin_unlock(&q->lock);
+                    return -1;
+                }
+            }
+            return (long)sizeof(struct note_record);
         }
-    }
 
-    return (long)sizeof(struct note_record);
+        // Empty for this Thread's mask. Register pw + tsleep.
+        pw.ready = false;       // re-arm for this iteration
+        poll_waiter_list_register(&q->poll_list, &pw);
+        spin_unlock(&q->lock);
+
+        // tsleep on the private Rendez until pw.ready is set by a
+        // producer's poll_waiter_list_wake (which sets pw.ready under
+        // list lock then wakes pw.rendez).
+        (void)tsleep(&priv, devnotes_read_cond, &pw, 0u);
+
+        // Unregister; loop and re-attempt dequeue. Spurious wakes
+        // (e.g., another consumer drained the queue between our wake
+        // and our re-acquire) are absorbed by the loop — devnotes_read
+        // doesn't return -1 on empty-after-wake.
+        poll_waiter_list_unregister(&pw);
+    }
 }
 
 static struct Block *devnotes_bread(struct Spoor *c, long n, s64 off) {

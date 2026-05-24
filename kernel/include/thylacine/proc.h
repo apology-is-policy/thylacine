@@ -251,9 +251,19 @@ struct Proc {
     // `handler_va` is the registered async-handler entry point (user-VA).
     // 0 = no handler (the fd-shaped path is the only consumer; the EL0-
     // return-tail check leaves all notes queued for devnotes_read). Set
-    // by SYS_NOTIFY; cleared by SYS_NOTIFY(0). Inherited across
-    // rfork(RFPROC) per Plan 9 idiom (musl's pthread_create inherits the
-    // signal disposition unless explicitly reset).
+    // by SYS_NOTIFY; cleared by SYS_NOTIFY(0).
+    //
+    // F13 audit close: at v1.0 `handler_va` is NOT inherited across
+    // rfork — the child Proc starts with handler_va == 0 (the
+    // proc_alloc KP_ZERO default). The Plan 9 inherit-on-fork semantic
+    // is deferred to v1.x alongside RFNOTEG, when the rfork primitive
+    // gains real fork-without-exec semantics. v1.0 SYS_SPAWN-shaped
+    // creation always replaces the binary, so the parent's handler_va
+    // wouldn't apply to the child's code anyway.
+    //
+    // F9 audit close: reads/writes use __atomic_load_n / __atomic_store_n
+    // with acquire / release ordering so multi-thread Procs observe a
+    // coherent value across CPUs.
     //
     // ARCH §7.6.2 invariants: the queue is the truth; the fd is a view;
     // the handler is the legacy consumer. The discipline holds at v1.0
@@ -427,6 +437,13 @@ void thread_exit_self(void);
 // already included above).
 irq_state_t proc_table_lock_acquire(void);
 void        proc_table_lock_release(irq_state_t s);
+
+// P6-pouch-signals-impl (sub-chunk 13a) audit F4 close: cross-module
+// access to the live-peer count for the kill-delivery defense-in-depth
+// check + the SYS_POSTNOTE multi-thread gate. Counts peer Threads (NOT
+// `self`) whose state is not THREAD_EXITING. PRECONDITION: caller holds
+// g_proc_table_lock. `self` may be NULL to count all live Threads.
+int proc_count_live_peers_locked(struct Proc *p, struct Thread *self);
 
 // P2-D: wait_pid — reap a zombie child.
 //

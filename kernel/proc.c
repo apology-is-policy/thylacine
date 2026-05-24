@@ -835,7 +835,7 @@ static void proc_become_zombie_locked(struct Proc *p, int status, const char *ms
 // add its own synchronization; the lock here is NOT sufficient for
 // that. Also: the link/unlink of p->threads itself runs under this
 // lock (F1 audit close), so the list walk is coherent.
-static int proc_count_live_peers_locked(struct Proc *p, struct Thread *self) {
+int proc_count_live_peers_locked(struct Proc *p, struct Thread *self) {
     int n = 0;
     for (struct Thread *peer = p->threads; peer; peer = peer->next_in_proc) {
         if (peer == self) continue;

@@ -43,6 +43,8 @@ void test_notes_queue_full_returns_minus1(void);
 void test_notes_coalesce_synthetic(void);
 void test_notes_mask_defers(void);
 void test_notes_kill_dequeue_smoke(void);
+void test_notes_kill_bypasses_mask(void);
+void test_notes_reenqueue_head_smoke(void);
 void test_notes_post_child_exit_helper(void);
 void test_notes_post_pipe_helper(void);
 void test_notes_proc_lifecycle(void);
@@ -265,6 +267,96 @@ void test_notes_kill_dequeue_smoke(void) {
     TEST_EXPECT_EQ(popped, 1, "kill dequeued");
     TEST_ASSERT(got.name[0] == 'k' && got.name[1] == 'i',
                 "popped name is 'kill'");
+
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+}
+
+// ---------------------------------------------------------------------------
+// kill_bypasses_mask (F2 audit regression)
+// ---------------------------------------------------------------------------
+//
+// Per ARCH §7.6.7 N-4: a `kill` note must be deliverable regardless of
+// the calling Thread's note_mask. The prior implementation walked the
+// queue once with the mask filter, so a Thread with NOTE_BIT_KILL set
+// would skip kill entries entirely — defeating SIGKILL semantics. The
+// fix: peek/dequeue scan for kill first regardless of mask.
+
+void test_notes_kill_bypasses_mask(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc succeeded");
+
+    // Queue an interrupt then a kill (in that order).
+    notes_post(p, "interrupt", 0u, NULL, true);
+    notes_post(p, "kill",      0u, NULL, true);
+
+    // Thread with EVERY supported bit masked.
+    struct Thread fake_t;
+    fake_t.note_mask = (1u << NOTE_BIT_INTERRUPT) | (1u << NOTE_BIT_KILL) |
+                       (1u << NOTE_BIT_PIPE) | (1u << NOTE_BIT_CHILD_EXIT);
+
+    // Peek must find kill first regardless of mask.
+    struct Note got;
+    spin_lock(&p->notes->lock);
+    int has = notes_peek_locked(p, &fake_t, &got);
+    spin_unlock(&p->notes->lock);
+    TEST_EXPECT_EQ(has, 1, "peek with all-masked thread finds kill anyway");
+    TEST_ASSERT(got.name[0] == 'k' && got.name[1] == 'i',
+                "kill peeked over interrupt despite mask");
+
+    // Dequeue must also find kill first.
+    spin_lock(&p->notes->lock);
+    int popped = notes_dequeue_locked(p, &fake_t, &got);
+    spin_unlock(&p->notes->lock);
+    TEST_EXPECT_EQ(popped, 1, "dequeue finds kill despite mask");
+    TEST_ASSERT(got.name[0] == 'k', "dequeued name is kill");
+
+    // After kill is popped, the masked interrupt is still queued (since
+    // it's masked, this Thread can't dequeue it). count should be 1.
+    TEST_EXPECT_EQ(p->notes->count, 1u, "interrupt still queued (masked)");
+
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+}
+
+// ---------------------------------------------------------------------------
+// reenqueue_head_smoke (F5/F6 audit regression — helper used to re-push
+// a note on uaccess failure)
+// ---------------------------------------------------------------------------
+
+void test_notes_reenqueue_head_smoke(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc succeeded");
+
+    notes_post(p, "interrupt", 1u, NULL, true);
+    notes_post(p, "pipe",      2u, NULL, true);
+
+    // Pop the head (interrupt).
+    struct Note popped;
+    spin_lock(&p->notes->lock);
+    notes_dequeue_locked(p, NULL, &popped);
+    spin_unlock(&p->notes->lock);
+    TEST_EXPECT_EQ(popped.arg, 1u, "popped interrupt arg=1");
+    TEST_EXPECT_EQ(p->notes->count, 1u, "count == 1 after pop");
+
+    // Re-enqueue at head. Order should be restored: interrupt then pipe.
+    spin_lock(&p->notes->lock);
+    int rc = notes_reenqueue_head_locked(p->notes, &popped);
+    spin_unlock(&p->notes->lock);
+    TEST_EXPECT_EQ(rc, 0, "reenqueue_head returned 0");
+    TEST_EXPECT_EQ(p->notes->count, 2u, "count back to 2");
+
+    // Now dequeue twice — should see interrupt then pipe.
+    struct Note got;
+    spin_lock(&p->notes->lock);
+    notes_dequeue_locked(p, NULL, &got);
+    spin_unlock(&p->notes->lock);
+    TEST_EXPECT_EQ(got.arg, 1u, "first dequeue is interrupt (re-enqueued at head)");
+
+    spin_lock(&p->notes->lock);
+    notes_dequeue_locked(p, NULL, &got);
+    spin_unlock(&p->notes->lock);
+    TEST_EXPECT_EQ(got.arg, 2u, "second dequeue is pipe");
 
     p->state = PROC_STATE_ZOMBIE;
     proc_free(p);

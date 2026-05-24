@@ -81,6 +81,25 @@ static int notes_name_to_bit(const char *name) {
     return -1;
 }
 
+// Forward decl — notes_name_is_kill is published with external linkage
+// at the bottom of this file (the EL0-return-tail dispatch + the
+// SYS_POSTNOTE F4 check use it via extern declaration in syscall.c).
+int notes_name_is_kill(const char *name);
+
+// F10 audit close: return the canonical string-literal pointer for a
+// supported note name. The literal lives for the program's lifetime
+// (read-only data section), so it's safe to capture by reference into
+// p->exit_msg without a per-Proc copy buffer. Returns NULL if the input
+// doesn't match a supported name (caller passes "unknown" then).
+static const char *notes_canonical_name_ptr(const char *name) {
+    for (u32 i = 0; i < NOTE_NUM_KNOWN; i++) {
+        if (notes_name_eq(name, g_known_notes[i].name)) {
+            return g_known_notes[i].name;
+        }
+    }
+    return NULL;
+}
+
 // Bounded strncpy for the in-kernel note name buffer. Always NUL-
 // terminates within NOTE_NAME_MAX. Caller has already validated the
 // source is short enough.
@@ -111,7 +130,6 @@ void notes_queue_init(struct NoteQueue *q) {
         q->ring[i].sender_pid = 0;
         q->ring[i].timestamp_ns = 0;
     }
-    rendez_init(&q->waiters);
     poll_waiter_list_init(&q->poll_list);
 }
 
@@ -125,13 +143,9 @@ struct NoteQueue *notes_queue_alloc(void) {
 void notes_queue_free(struct NoteQueue *q) {
     if (!q) return;
     // Defense-in-depth: at free time the queue MUST be quiescent — no
-    // sleeper on waiters, no registered poll_waiter. proc_free's calling
-    // sequence guarantees this (ZOMBIE state set, all Threads EXITING,
-    // handles closed); a violation here would be a serious lifecycle bug.
-    if (q->waiters.waiter != NULL) {
-        extinction("notes_queue_free: waiter still parked on q->waiters "
-                   "(proc_free called before draining note Spoors?)");
-    }
+    // registered poll_waiter. proc_free's calling sequence guarantees
+    // this (ZOMBIE state set, all Threads EXITING, handles closed); a
+    // violation here would be a serious lifecycle bug.
     if (q->poll_list.head != NULL) {
         extinction("notes_queue_free: poll_waiter still registered on "
                    "q->poll_list (poll caller leaked a hook?)");
@@ -185,13 +199,10 @@ int notes_post(struct Proc *p, const char *name, u32 arg,
         if (found >= 0) {
             q->ring[found].arg = arg;
             q->ring[found].timestamp_ns = ts;
-            // Coalesce delivered; wake any consumers (the readiness state
-            // hasn't changed — it was already non-empty — but a producer
-            // that just bumped the head-of-bucket arg deserves to wake
-            // anyone parked on a still-empty mask-permitted scan).
+            // Wake registered poll_waiters AND devnotes_read's pollers
+            // (same list at F3 close).
             poll_waiter_list_wake(&q->poll_list);
             spin_unlock(&q->lock);
-            (void)wakeup(&q->waiters);
             return 0;
         }
     }
@@ -211,20 +222,38 @@ int notes_post(struct Proc *p, const char *name, u32 arg,
     q->tail = (q->tail + 1) % NOTE_QUEUE_DEPTH;
     q->count++;
 
-    // Wake any poll waiters BEFORE we drop the queue lock — the
-    // register-then-observe discipline requires that any concurrent
+    // Wake every registered poll_waiter (including any devnotes_read
+    // parked on this list per F3 close) BEFORE we drop the queue lock.
+    // The register-then-observe discipline requires that any concurrent
     // dev->poll's sample either happens-before our enqueue (and sees
-    // empty; subsequent post then wakes it) or after (and sees the new
+    // empty; the subsequent post wakes it) or after (and sees the new
     // entry). poll_waiter_list_wake takes its own lock per the documented
     // lock order (object → list).
     poll_waiter_list_wake(&q->poll_list);
 
     spin_unlock(&q->lock);
+    return 0;
+}
 
-    // wakeup() takes the rendez's own lock; outside the queue lock to
-    // keep the lock order acyclic.
-    (void)wakeup(&q->waiters);
-
+// F5/F6 audit close: re-enqueue at head. Caller MUST hold q->lock.
+// Cannot fail at v1.0 since the caller just popped (so there is a free
+// slot). Pre-decrement head with wrap; the new entry is the next dequeue.
+int notes_reenqueue_head_locked(struct NoteQueue *q, const struct Note *n) {
+    if (!q || !n) return -1;
+    if (q->count >= NOTE_QUEUE_DEPTH) {
+        // Should be unreachable for the caller pattern (just popped).
+        // Defense-in-depth: refuse.
+        return -1;
+    }
+    // Decrement head with modulo wrap.
+    q->head = (q->head + NOTE_QUEUE_DEPTH - 1) % NOTE_QUEUE_DEPTH;
+    q->ring[q->head] = *n;
+    q->count++;
+    // Caller has not changed the readiness state of the queue (a note
+    // popped and re-pushed is back where it started); we wake regardless
+    // so any consumer that was about to register-and-sleep finds the
+    // queue non-empty.
+    poll_waiter_list_wake(&q->poll_list);
     return 0;
 }
 
@@ -234,14 +263,32 @@ int notes_peek_locked(struct Proc *p, struct Thread *t, struct Note *out) {
     if (q->count == 0) return 0;
 
     u32 mask = (t != NULL) ? t->note_mask : 0u;
-    u32 idx = q->head;
-    for (u32 n = 0; n < q->count; n++) {
-        int bit = notes_name_to_bit(q->ring[idx].name);
-        if (bit >= 0 && (mask & (1u << (u32)bit)) == 0) {
-            *out = q->ring[idx];
-            return 1;
+
+    // F2 audit close: kill is non-catchable (N-4) — mask MUST NOT defer
+    // its delivery. First pass scans for kill regardless of mask.
+    {
+        u32 idx = q->head;
+        for (u32 n = 0; n < q->count; n++) {
+            if (notes_name_is_kill(q->ring[idx].name)) {
+                *out = q->ring[idx];
+                return 1;
+            }
+            idx = (idx + 1) % NOTE_QUEUE_DEPTH;
         }
-        idx = (idx + 1) % NOTE_QUEUE_DEPTH;
+    }
+
+    // No kill present; second pass scans for the first mask-permitted
+    // entry in FIFO order.
+    {
+        u32 idx = q->head;
+        for (u32 n = 0; n < q->count; n++) {
+            int bit = notes_name_to_bit(q->ring[idx].name);
+            if (bit >= 0 && (mask & (1u << (u32)bit)) == 0) {
+                *out = q->ring[idx];
+                return 1;
+            }
+            idx = (idx + 1) % NOTE_QUEUE_DEPTH;
+        }
     }
     return 0;
 }
@@ -278,15 +325,34 @@ int notes_dequeue_locked(struct Proc *p, struct Thread *t, struct Note *out) {
     if (q->count == 0) return 0;
 
     u32 mask = (t != NULL) ? t->note_mask : 0u;
-    u32 idx = q->head;
-    for (u32 n = 0; n < q->count; n++) {
-        int bit = notes_name_to_bit(q->ring[idx].name);
-        if (bit >= 0 && (mask & (1u << (u32)bit)) == 0) {
-            *out = q->ring[idx];
-            notes_pop_at_locked(q, idx);
-            return 1;
+
+    // F2 audit close: kill bypasses the mask (N-4 non-catchable). First
+    // pass scans for kill in FIFO order regardless of mask state.
+    {
+        u32 idx = q->head;
+        for (u32 n = 0; n < q->count; n++) {
+            if (notes_name_is_kill(q->ring[idx].name)) {
+                *out = q->ring[idx];
+                notes_pop_at_locked(q, idx);
+                return 1;
+            }
+            idx = (idx + 1) % NOTE_QUEUE_DEPTH;
         }
-        idx = (idx + 1) % NOTE_QUEUE_DEPTH;
+    }
+
+    // No kill present; second pass scans for the first mask-permitted
+    // entry in FIFO order.
+    {
+        u32 idx = q->head;
+        for (u32 n = 0; n < q->count; n++) {
+            int bit = notes_name_to_bit(q->ring[idx].name);
+            if (bit >= 0 && (mask & (1u << (u32)bit)) == 0) {
+                *out = q->ring[idx];
+                notes_pop_at_locked(q, idx);
+                return 1;
+            }
+            idx = (idx + 1) % NOTE_QUEUE_DEPTH;
+        }
     }
     return 0;
 }
@@ -336,8 +402,7 @@ int notes_name_is_kill(const char *name) {
 //   - every queued note is in the thread's mask (deferred)
 
 #include "../arch/arm64/exception.h"
-
-extern long uaccess_store_u8(u64 user_va, u8 value);
+#include "../arch/arm64/uaccess.h"
 
 // Forward-declare exits() — defined in kernel/proc.c.
 __attribute__((noreturn)) extern void exits(const char *msg);
@@ -353,10 +418,26 @@ void notes_deliver_at_el0_return(struct exception_context *ctx) {
     // N-3 re-entrancy guard: skip delivery while a handler is running.
     if (t->in_handler) return;
 
+    // F1 audit close: ctx->sp at this point is the attacker-controllable
+    // SP_EL0 the user had at syscall entry. uaccess_store_u8 at EL1
+    // does NOT validate user-VA bounds (PAN unconfigured at v1.0), so a
+    // userspace process that pre-sets SP to a kernel VA would otherwise
+    // get the kernel to write the note name into kernel memory. Reject
+    // any ctx->sp that isn't a sane user VA. The bound is intentionally
+    // strict — sp must point well within the user half AND must leave
+    // NOTE_NAME_MAX bytes below it for the frame.
+    if (ctx->sp == 0)                              return;
+    if (ctx->sp >= UACCESS_USER_VA_TOP)             return;
+    if (ctx->sp < (u64)NOTE_NAME_MAX)               return;
+
+    // F9 audit close: acquire-load handler_va so a multi-thread Proc
+    // observes a coherent value vs a concurrent SYS_NOTIFY's store.
+    u64 handler_va = __atomic_load_n(&p->handler_va, __ATOMIC_ACQUIRE);
+
     // Peek + pop under q->lock. Two passes: first identify the head
-    // deliverable note (checks `kill` special case + handler-registered);
-    // second pops it. We do this in one locked sequence so the pop
-    // matches the peek.
+    // deliverable note (kill special case + handler-registered); then
+    // pop it. We do this in one locked sequence so the pop matches the
+    // peek.
     spin_lock(&q->lock);
     struct Note candidate;
     if (!notes_peek_locked(p, t, &candidate)) {
@@ -365,8 +446,30 @@ void notes_deliver_at_el0_return(struct exception_context *ctx) {
     }
 
     // `kill` is non-catchable — terminate the Proc regardless of handler
-    // registration or mask state. Pop and exits.
+    // registration or mask state (N-4). F4 audit close: if peer Threads
+    // exist, exits() would extinct (live_peers != 0). Cross-thread
+    // shootdown is a v1.x extension; we leave kill queued + log a
+    // diagnostic. The post path (SYS_POSTNOTE) refuses kill to multi-
+    // thread Procs at v1.0 (F4 primary fix), so this case is a defense-
+    // in-depth path for any kernel-internal poster that bypasses the
+    // syscall gate.
     if (notes_name_is_kill(candidate.name)) {
+        spin_unlock(&q->lock);
+        // Re-acquire under proc_table_lock to check peer count safely.
+        // If the only live Thread is `t`, exits is the right action. If
+        // there are peers, we'd extinct in exits — instead leave kill
+        // queued (a peer will pick it up at its next EL0-return, OR a
+        // future cross-thread shootdown extension will handle it).
+        irq_state_t s = proc_table_lock_acquire();
+        int live_peers = proc_count_live_peers_locked(p, t);
+        proc_table_lock_release(s);
+        if (live_peers != 0) {
+            // Leave kill queued. Defense-in-depth; SYS_POSTNOTE refuses
+            // this case at v1.0.
+            return;
+        }
+        // Now safe to exits. Pop the kill first (we'll never come back).
+        spin_lock(&q->lock);
         struct Note popped;
         (void)notes_dequeue_locked(p, t, &popped);
         spin_unlock(&q->lock);
@@ -376,37 +479,51 @@ void notes_deliver_at_el0_return(struct exception_context *ctx) {
 
     // No async handler registered: leave the note queued for the fd-read
     // path. The Proc that did SYS_NOTE_OPEN + read on the fd will see it.
-    if (p->handler_va == 0) {
+    if (handler_va == 0) {
         spin_unlock(&q->lock);
         return;
     }
 
-    // Pop the head deliverable note and capture its details for the
-    // handler invocation.
-    struct Note popped;
-    (void)notes_dequeue_locked(p, t, &popped);
-    spin_unlock(&q->lock);
-
-    // Build the handler's user-stack frame. Push the note name string
-    // onto the user stack so the handler can read it via x0. 16-byte
-    // alignment for AAPCS64. We allocate NOTE_NAME_MAX bytes.
-    u64 new_sp = ctx->sp;
-    if (new_sp < NOTE_NAME_MAX) {
-        // Pathological — user stack too low to push our frame. Drop the
-        // delivery (the note is lost; alternative would be exits, but
-        // that's hostile). Mark in_handler off (no state mutated yet).
+    // Compute the user-stack frame BEFORE popping. The push happens
+    // BEFORE the pop so N-2 (consumed exactly once) holds across a
+    // faulting user-VA push — if the push fails, the note stays in the
+    // queue and a future delivery / fd-read consumes it.
+    u64 new_sp = (ctx->sp - NOTE_NAME_MAX) & ~(u64)0xf;
+    // F1 defense-in-depth: alignment-down can't underflow given the
+    // sp >= NOTE_NAME_MAX guard above, but verify the result is also
+    // a sane user VA after alignment.
+    if (new_sp == 0 || new_sp >= UACCESS_USER_VA_TOP) {
+        spin_unlock(&q->lock);
         return;
     }
-    new_sp -= NOTE_NAME_MAX;
-    new_sp &= ~(u64)0xf;    // 16-byte align
+
+    spin_unlock(&q->lock);
 
     // Write the note name into the user-stack buffer. uaccess_store_u8
     // handles demand-page + fault-fixup. On failure (user stack VMA
-    // missing / permission denied), drop the delivery silently.
+    // missing / permission denied), the note stays in the queue (we
+    // haven't popped yet — F5 audit close).
     for (u32 i = 0; i < NOTE_NAME_MAX; i++) {
-        if (uaccess_store_u8(new_sp + i, (u8)popped.name[i]) != 0) {
+        if (uaccess_store_u8(new_sp + i, (u8)candidate.name[i]) != 0) {
+            // Push failed; leave the note queued. A future EL0-return
+            // (after the user maps the stack or fixes permissions) will
+            // re-attempt.
             return;
         }
+    }
+
+    // Push succeeded. Now pop the note (commit the consume — N-2).
+    spin_lock(&q->lock);
+    struct Note popped;
+    int got = notes_dequeue_locked(p, t, &popped);
+    spin_unlock(&q->lock);
+    if (!got) {
+        // Race: another consumer (e.g. a peer Thread's EL0-return-tail
+        // OR a devnotes_read on this Proc) picked up the candidate
+        // between our peek and pop. v1.0 single-thread Procs avoid this;
+        // multi-thread Procs (post sub-chunk 9a) tolerate it by simply
+        // returning — the next EL0-return tries again.
+        return;
     }
 
     // Save the current user context into the Thread (inline cache; the
@@ -418,7 +535,8 @@ void notes_deliver_at_el0_return(struct exception_context *ctx) {
     t->note_saved_elr    = ctx->elr;
     t->note_saved_spsr   = ctx->spsr;
 
-    // Remember the note name for NDFLT's default action.
+    // Remember the note name for NDFLT's default action (F10 audit close
+    // copies this into the Proc's exit_msg_buf on NDFLT path).
     for (u32 i = 0; i < NOTE_NAME_MAX; i++) {
         t->note_handling_name[i] = popped.name[i];
     }
@@ -432,7 +550,7 @@ void notes_deliver_at_el0_return(struct exception_context *ctx) {
     ctx->regs[0] = new_sp;
     ctx->regs[1] = (u64)popped.arg;
     ctx->sp      = new_sp;     // sp_el0 saved back to exception frame's sp
-    ctx->elr     = p->handler_va;
+    ctx->elr     = handler_va;
     // spsr unchanged — the handler runs at EL0 with the same PSTATE the
     // syscall entered with.
 }
@@ -474,11 +592,19 @@ void notes_noted_default(struct Thread *t) {
         // Caller validated in_handler; reaching here is a programmer bug.
         extinction("notes_noted_default: not in handler (caller missed check)");
     }
-    // The name is NUL-terminated within NOTE_NAME_MAX by notes_name_copy.
-    // exits captures the pointer by reference; the buffer is in the
-    // Thread, which lives until reap. Plan 9 convention: the status
-    // string is the note name (e.g., "interrupt"); shells / parents read
-    // it via exit_msg.
-    exits(t->note_handling_name);
+    // F10 audit close: pass the canonical string-literal pointer to
+    // exits — the literal lives in .rodata for the program's lifetime,
+    // so p->exit_msg's by-reference capture is safe. The prior code
+    // passed t->note_handling_name (a buffer inside struct Thread, freed
+    // at thread_free during reap — UAF for any future exit_msg consumer
+    // that reads after thread_free + before proc_free).
+    const char *msg = notes_canonical_name_ptr(t->note_handling_name);
+    if (!msg) {
+        // Should be unreachable — note_handling_name was captured from
+        // notes_peek_locked's output, which only returns supported-set
+        // entries. Defense-in-depth.
+        msg = "noted";
+    }
+    exits(msg);
     // unreachable
 }
