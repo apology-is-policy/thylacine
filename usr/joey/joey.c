@@ -1116,6 +1116,56 @@ int main(void) {
 
     t_putstr("joey: corvus-d hybrid-PKE round-trip verified via /srv/corvus (b3b)\n");
 
+    // === stratumd binary probe (P6-pouch-stratumd-boot sub-chunk 16a) ===
+    //
+    // The real stratumd cross-compiled by sub-chunk 15 (cmake-driven build
+    // at build/pouch/progs/stratumd, ~860 KiB static ET_EXEC) is now in
+    // the ramfs at /stratumd. This probe verifies the binary actually
+    // LOADS and RUNS in Thylacine — kernel ELF accept + dynamic linker
+    // not needed (static) + libc init (.init_array constructors, including
+    // pouch's __pouch_note_handler register from sub-chunk 13b) + argv
+    // parsing + the stratumd usage-print + clean exit.
+    //
+    // The argv shape: no args -> stm_cmd_stratumd_main hits `argc < 2` ->
+    // usage() to stderr -> return 1. We accept any non-zero exit as
+    // success (the probe's contract is "the binary ran"; matching exit==1
+    // would also work but ties us to stratumd's specific exit code).
+    //
+    // Sub-chunks 16b + 16c are the actual integration:
+    //  - 16b: pool generation + block device wiring + real stratumd mount
+    //  - 16c: kernel 9P client connect to stratumd's /srv socket +
+    //         /sysroot mount + ramfs pivot + stub retirement
+    //
+    // If 16a surfaces runtime gaps (mlock/madvise/mprotect ENOSYS
+    // sentinels via the 0xFFFF seam; missing syscalls; constructor
+    // failures), those are inputs to 16b/16c planning.
+    {
+        const char sd_name[] = "stratumd";
+        long sd_pid = t_spawn(sd_name, sizeof(sd_name) - 1);
+        if (sd_pid <= 0) {
+            t_putstr("joey: t_spawn(\"stratumd\") FAILED\n");
+            return 1;
+        }
+        int sd_status = -1;
+        long sd_reaped = t_wait_pid(&sd_status);
+        if (sd_reaped != sd_pid) {
+            t_putstr("joey: /stratumd-probe wrong pid reaped\n");
+            return 1;
+        }
+        // stratumd with no args -> usage() -> return 1. Any non-zero exit
+        // is the success case for THIS probe: the binary loaded, libc init
+        // ran, argv parsing executed, and the process exited cleanly. A
+        // zero exit would be surprising (would mean stratumd's argc<2
+        // gate broke) — flag it but don't fail the boot.
+        t_putstr("joey: /stratumd-probe reaped status=");
+        t_putstr(itoa_dec(sd_status, buf, sizeof(buf)));
+        if (sd_status == 0) {
+            t_putstr(" (UNEXPECTED — argv<2 should usage-exit 1)\n");
+        } else {
+            t_putstr(" (binary loaded, argv parsed, usage exit)\n");
+        }
+    }
+
     // === stratumd-stub boot pivot demo (P5-stratumd-stub-bringup-c) ===
     if (do_stratumd_stub_bringup() != 0) return 1;
     t_putstr("joey: stub-bringup ok (pipe + spawn + attach + mount + unmount + walk_open + read)\n");

@@ -132,6 +132,11 @@ build_kernel() {
     # build_ramfs ships /pouch-hello + /pouch-hello-stdio.
     build_userspace
     build_pouch_progs
+    # P6-pouch-stratumd-boot (sub-chunk 16a): cross-build stratumd so it
+    # lands in the ramfs alongside the pouch hello binaries. Incremental
+    # on no-source-change rebuilds (CMake/ninja dep tracking inside
+    # $stratumd_build keep this <5s warm; cold rebuild is ~2-3 min).
+    build_stratumd
     build_ramfs
 
     # P4-Ic5b2: produce build/disk.img alongside the kernel so
@@ -189,6 +194,21 @@ EOF
     local pouch_bins=( "pouch-hello" "pouch-hello-stdio" "pouch-hello-printf" "pouch-hello-malloc" "pouch-hello-threads" "pouch-hello-poll" "pouch-hello-getrandom" "pouch-hello-sockets" "pouch-hello-signals" "pouch-hello-sodium" )
     local pouch_progs="$BUILD_DIR/pouch/progs"
     for bin in "${pouch_bins[@]}"; do
+        local src="$pouch_progs/$bin"
+        if [[ -f "$src" ]]; then
+            cp "$src" "$ramfs_src/$bin"
+            chmod 0755 "$ramfs_src/$bin"
+        fi
+    done
+
+    # P6-pouch-stratumd-boot (sub-chunk 16a): copy the cross-built stratumd
+    # daemon binary if build_stratumd has produced it. Separate from
+    # pouch_bins because stratumd is the real daemon (not a hello test
+    # binary) — by sub-chunk 16c it will be spawned by joey + drive the
+    # /sysroot mount + ramfs pivot. At 16a it's a "does it actually run
+    # in Thylacine" probe.
+    local pouch_daemon_bins=( "stratumd" )
+    for bin in "${pouch_daemon_bins[@]}"; do
         local src="$pouch_progs/$bin"
         if [[ -f "$src" ]]; then
             cp "$src" "$ramfs_src/$bin"
@@ -812,7 +832,9 @@ build_stratumd() {
     fi
 
     echo "==> building stratumd (aarch64-thylacine) from $stratum_src"
-    rm -rf "$stratumd_build"
+    # Incremental: keep $stratumd_build across runs so CMake's cache +
+    # ninja/make's dep tracking skip unchanged objects. The first build
+    # is ~2-3 minutes; incremental on a no-source-change rebuild is <5s.
     mkdir -p "$stratumd_build" "$progs_out"
 
     # Configure with the pouch toolchain. CMake's tool-probes (compiler,
@@ -893,8 +915,11 @@ build_pouch_progs() {
         echo "==> pouch progs: reusing $sysroot (run 'tools/build.sh sysroot' to refresh)"
     fi
 
-    rm -rf "$progs_out"
+    # Preserve stratumd (and other future daemon binaries) installed by
+    # build_stratumd into the same $progs_out directory. Only remove the
+    # pouch-hello-* binaries we're about to rebuild, by-name.
     mkdir -p "$progs_out"
+    rm -f "$progs_out"/pouch-hello*.o "$progs_out"/pouch-hello*
 
     local prog
     for prog in pouch-hello pouch-hello-stdio pouch-hello-printf pouch-hello-malloc pouch-hello-threads pouch-hello-poll pouch-hello-getrandom pouch-hello-sockets pouch-hello-signals pouch-hello-sodium; do
