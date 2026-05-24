@@ -98,6 +98,24 @@ When to re-enable: at user direction. The natural re-enabling points: (a) an inv
 
 Cross-link: `memory/feedback_spec_to_code_suspended.md` (project-wide policy record; updated 2026-05-23 to reflect the broadening).
 
+### Design conversation -> scripture commit (mid-project pattern)
+
+When an implementation chunk surfaces a non-trivial design question -- a new mechanism, a load-bearing decision, an invariant not yet in scripture -- the workflow is:
+
+1. **Stop the implementation.** Don't try to design-while-coding. Stop, surface to the user.
+2. **Surface as a structured option set.** Not a yes/no; lay out 2-4 options with their consequences. Auto-mode bias is "make the call" -- but scripture-altering decisions are explicitly outside auto-mode and warrant the user's vote.
+3. **Have the conversation in-session.** Iterate to user signoff in one round-trip where possible.
+4. **Land the design as a SCRIPTURE COMMIT FIRST -- no code.** The commit updates `ARCHITECTURE.md` / `NOVEL.md` / phase-design docs / `CLAUDE.md` / `ROADMAP.md` as needed, and adds a memory-file index entry. The commit message names the design decision, the rationale, the alternatives considered, and the open questions resolved.
+5. **THEN implement** in a subsequent commit that references the scripture commit's SHA in its message.
+6. **THEN audit** (the standard pattern for audit-bearing implementations).
+
+The pattern is "scripture before code, every time the code would otherwise determine the scripture." Examples that drove this pattern in Thylacine:
+- P6-pouch-mem-design (`2fd9797`): the two-tier native memory interface, surfaced mid-implementation of `pouch-mem`; landed as scripture commit before the kernel-side syscalls.
+- P6-pouch-compiler-rt-design (`bc97630`): the compiler-rt + `pouch-ld` requirement, surfaced by `pouch-hello-smoke`; landed as scripture before the rt build wiring.
+- P6-pouch-signals-design (`237f096`): the fd-first notes substrate (novel angle), surfaced before the kernel notes implementation; landed as scripture + NOVEL.md update before the kernel-side code.
+
+The pattern produces audit-traceable design history and makes the implementation auditable against a fixed reference. The scripture commit is short, focused, and reversible if implementation surfaces a flaw in the design.
+
 ### TLA+ setup
 
 Install OpenJDK (`/opt/homebrew/opt/openjdk/bin` on macOS; `apt-get install default-jdk` on Linux).
@@ -721,6 +739,68 @@ Before spawning the formal audit agent, do a 30-60 second self-review pass on th
 - **Boundary conditions**: integer overflow, empty inputs, max bounds.
 
 Findings from self-review either land as a fix-in-the-same-chunk OR as an explicit "self-found before audit" addendum commit (so the audit's closed-list preamble accounts for them). Self-audit is not redundant with the formal audit; it absorbs class P1s that would otherwise be embarrassing for the formal round to find.
+
+---
+
+## Audit-in-flight parallel work
+
+When the focused audit prosecutor is running in the background, do NOT idle and do NOT poll for completion (the runtime delivers a notification on completion). Two activities happen in parallel — both required, in this order:
+
+1. **Useful non-colliding work first.** Identify work that doesn't touch the audit's file scope. Examples: documentation updates, status-doc refresh, memory-file maintenance, scripture renumbering, prep notes for the next chunk, a separate-subsystem refactor, sibling-test additions. The agent's prompt scoped its file list explicitly — treat that list as off-limits while the agent runs (don't risk creating a merge conflict with the agent's deductions).
+
+2. **Then a self-audit on the same surface as the agent.** Prosecute the audited code adversarially yourself. Re-read every modified file. Trace each invariant. Find what the agent might miss. Two independent prosecutors catch different issues — the agent and you bias toward different categories. Treat your findings with the same authority as the agent's.
+
+When the agent completes:
+- **Merge findings**: combine its report with your self-found ones. Disposition together; do not segregate "agent findings" vs "self findings" — they're all findings with the same severity rigor.
+- **Cross-check**: if the agent missed something you found (or vice versa), the gap itself is signal about audit coverage. Note it for the next prosecutor prompt's "focus areas."
+
+This discipline is **non-optional** for any audit-bearing chunk. The cost is small (the self-audit is anyway a refinement of the pre-audit self-review per §"Self-audit before formal audit"); the value is real — round 2 prosecutors and self-audits running concurrently with round 1 have caught real P0/P1s the single-pass formal audit missed.
+
+---
+
+## Re-audit on dirty close
+
+A close is **dirty** if any of:
+- Any P0 returned.
+- (P1 + P2 count) ≥ 6.
+- The fixes themselves were structurally invasive (restructured a load-bearing mechanism, lifted a lock-order rule, changed a wait/wake protocol, removed a primitive).
+
+On a dirty close, the fixes themselves may introduce new bugs — **schedule a follow-up audit round on the audit-close state**. The follow-up:
+
+1. Treats the round-N closed list as do-not-re-report preamble (just like any audit).
+2. Focuses prosecutor attention on **the fixes themselves**, named explicitly in a "round N+1 focus areas" section. Invasive restructures often introduce new lock-order issues, lifecycle hazards, or memory-ordering gaps.
+3. Runs the audit-in-flight parallel-work discipline (above): useful non-colliding work + self-audit on the same surface.
+4. Repeats until the round returns clean (0 P0, 0 P1, only documented-as-deferred P3s).
+
+A clean close that completed via N > 1 rounds is still clean. Multiple rounds aren't a defect; they're the discipline doing its job. Each round's findings + dispositions get appended to the cumulative closed-list memory file.
+
+The pattern caught real bugs in our practice: a round-1 audit close restructured a wait/wake mechanism (devnotes_read from single-waiter Rendez to multi-waiter poll_waiter_list to break an ABBA deadlock); the round-2 audit found that the restructure introduced a new pop-and-copy race window that lost notes under contention — a defect the round-1 fixes created that round-1 review didn't see.
+
+---
+
+## Plain ASCII commit messages
+
+Commit message bodies (and the first line) use plain ASCII. Specifically:
+- **No em-dashes** (`—`). Use `--` instead.
+- **No Unicode arrows** (`→`, `←`). Use `->`, `<-`.
+- **No section signs** (`§`). Use `section` or just the number.
+- **No Unicode quotes** (`"..."`, `'...'`). Use `"..."`, `'...'`.
+- **No comparison glyphs** (`≥`, `≤`, `≠`). Use `>=`, `<=`, `!=`.
+- **No emoji** unless the user explicitly requests them in the message.
+
+Why: clean diff against `git log`, clean grep over the log, consistent rendering across terminals and CI dashboards, and one fewer thing for a future maintainer's editor / pager to mishandle. Doc files (`docs/*.md`, `CLAUDE.md`) and code comments may use Unicode freely; **commit messages stay ASCII**.
+
+Pass commit message bodies via a HEREDOC for the same robustness reason:
+```bash
+git commit -m "$(cat <<'EOF'
+Title line under 70 chars.
+
+Body paragraphs use plain ASCII (-- not em-dash; -> not arrow; etc.).
+
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>
+EOF
+)"
+```
 
 ---
 
