@@ -860,6 +860,59 @@ enum {
     //   - old_mask_out_va is non-zero AND outside the user-VA bound /
     //     unmapped at store time
     SYS_NOTE_MASK    = 48,
+
+    // SYS_SPAWN_FULL_ARGV(req_va) — combined spawn primitive that subsumes
+    // SYS_SPAWN / SYS_SPAWN_WITH_FDS / SYS_SPAWN_WITH_CAPS / SYS_SPAWN_FULL
+    // / SYS_SPAWN_WITH_PERMS and adds argv pass-through (P6-pouch-stratumd-
+    // boot sub-chunk 16b-alpha). v1.0 spawn surfaces inherit argv =
+    // [name] (one entry); stratumd in sub-chunk 16b-beta needs real argv
+    // (binary path + --keyfile + --listen + ...). Rather than adding yet
+    // another permutation to the SYS_SPAWN_* family, this entry takes a
+    // single user pointer to a struct sys_spawn_args carrying every
+    // existing spawn feature plus the new argv buffer.
+    //
+    //   x0 = req_va         user-VA pointer to a struct sys_spawn_args
+    //                       (must be fully mapped + readable; alignment
+    //                        is not required — the kernel reads byte-by-
+    //                        byte to be alignment-tolerant)
+    //
+    // The struct's wire fields (see struct sys_spawn_args below) carry
+    // name + argv + fds + cap_mask + perm_flags. Validation rules + error
+    // semantics mirror the SYS_SPAWN_WITH_PERMS handler one-to-one for the
+    // shared fields; the new argv fields are validated against the
+    // SYS_SPAWN_ARGV_* bounds + the NUL-termination invariant.
+    //
+    // Lifetime: the kernel copies the argv_data buffer into kernel memory
+    // BEFORE rfork. The buffer is owned by the spawn_args struct until the
+    // child thunk consumes it via exec_setup_with_argv; the user-side
+    // buffer is never observed post-syscall. argv buffer never crosses
+    // Proc boundaries by handle transfer (strings only — I-4 + I-5
+    // structurally upheld; argv contains no handles).
+    //
+    // The child observes argv via the System V startup frame at sp
+    // (exec_build_init_stack lays out argc / argv[] / envp[] / auxv +
+    // strings region; pouch's musl _start exposes argv to main).
+    //
+    // Returns the child's pid on success (positive), -1 on any failure:
+    //   - req_va outside the user-VA bound / unmapped at struct-copy time
+    //   - any field outside its documented bounds (name_len, argv_data_len,
+    //     argc, fd_count, perm_flags, cap_mask — same as the legacy
+    //     SYS_SPAWN_WITH_PERMS rejections)
+    //   - _pad_envp is nonzero (reserved for forward-compat envp_data_len
+    //     when envp pass-through lands; rejected loudly on v1.0 so a
+    //     future kernel that wires the field cannot land on a v1.0
+    //     caller that left random bytes in the slot)
+    //   - argv_data does not end in NUL OR NUL count != argc
+    //   - argc > 0 but argv_data_len == 0 (or vice versa — the two
+    //     fields are tied; argc == 0 requires argv_data_len == 0 and
+    //     vice versa)
+    //   - perm_flags carries any bit outside SPAWN_PERM_ALL
+    //   - perm_flags nonzero but caller is not console-attached
+    //   - any inherited fd is not a KOBJ_SPOOR handle
+    //   - devramfs binary not found OR oversize (> SYS_SPAWN_BLOB_MAX)
+    //   - kmalloc OOM at any step
+    //   - rfork_with_caps OOM (Proc / Thread allocation)
+    SYS_SPAWN_FULL_ARGV = 49,
 };
 
 // SYS_WALK_OPEN's FROM_ROOT sentinel: when passed as the spoor_fd, the
@@ -938,6 +991,22 @@ _Static_assert(__builtin_offsetof(struct srv_peer_info, alive) == 20,
 // kernel-stack scratch for the fd-list copy.
 #define SYS_SPAWN_MAX_FDS   16u
 
+// Maximum argc for SYS_SPAWN_FULL_ARGV (P6-pouch-stratumd-boot sub-chunk
+// 16b-alpha). 16 is well above the v1.0 callers' needs: stratumd's full
+// CLI shape is ~8 args (binary-path + --keyfile + path + --listen + path
+// + optional --read-only + optional --bind-pool-serial + hex). Bounds the
+// kernel argv-pointer array sizing in exec_build_init_stack.
+#define SYS_SPAWN_ARGV_MAX  16u
+
+// Maximum total bytes of the argv buffer for SYS_SPAWN_FULL_ARGV (the
+// concatenated NUL-terminated strings). One page is generous for the
+// v1.0 callers (stratumd's longest CLI is well under 200 bytes). Bounds
+// the kernel-side kmalloc + the user-stack region that holds the strings.
+// At the maximum (4 KiB strings + 16 argv pointers * 8 + 152 fixed-frame
+// bytes), the System V frame fits comfortably under EXEC_USER_STACK_SIZE
+// (256 KiB).
+#define SYS_SPAWN_ARGV_DATA_MAX  4096u
+
 // Maximum single-component name length for SYS_WALK_OPEN. Matches the
 // Plan 9 + 9P2000.L practical cap for a single path element; bounds the
 // kernel-stack scratch + the per-byte uaccess loop. The wire codec's
@@ -961,6 +1030,71 @@ _Static_assert(__builtin_offsetof(struct srv_peer_info, alive) == 20,
 // never one enormous one. Being page-aligned, it also bounds the
 // page-rounding so `length + PAGE_SIZE` cannot overflow.
 #define BURROW_ATTACH_MAX  (256u * 1024u * 1024u)
+
+// SYS_SPAWN_FULL_ARGV argument record (P6-pouch-stratumd-boot sub-chunk
+// 16b-alpha). The caller fills this in user memory and passes its
+// user-VA in x0; the kernel uaccess-copies the struct, then each
+// referenced buffer (name, argv_data, fd_list) by walking the pointers.
+//
+// The layout is the binding ABI for the syscall — fields are 8-aligned;
+// the trailing `_pad_envp` field is reserved as a forward-compatibility
+// slot for envp pass-through (a future sub-chunk can wire envp_data_va +
+// envp_data_len without breaking the ABI by reusing this slot).
+//
+// Wire fields (offsets pinned by _Static_assert below):
+//   name_va         u64  — user-VA of the binary name (no NUL required)
+//   argv_data_va    u64  — user-VA of the argv buffer (concatenated NUL-
+//                          terminated strings; argc strings; total bytes
+//                          == argv_data_len; the final byte MUST be NUL)
+//   fd_list_va      u64  — user-VA of fd_count u32 fd indices to inherit
+//   name_len        u32  — 1..SYS_SPAWN_NAME_MAX
+//   argv_data_len   u32  — 0..SYS_SPAWN_ARGV_DATA_MAX; 0 iff argc == 0
+//   argc            u32  — 0..SYS_SPAWN_ARGV_MAX; NUL count in argv_data
+//                          MUST equal argc
+//   fd_count        u32  — 0..SYS_SPAWN_MAX_FDS
+//   perm_flags      u32  — SPAWN_PERM_* bits; bits outside SPAWN_PERM_ALL
+//                          are rejected
+//   _pad_envp       u32  — must be 0 at v1.0; reserved for envp_data_len
+//                          when envp pass-through lands
+//   cap_mask        u64  — caps_t bits; AND'd with parent caps by
+//                          rfork_with_caps (I-2 monotonic reduction holds
+//                          structurally)
+struct sys_spawn_args {
+    u64 name_va;
+    u64 argv_data_va;
+    u64 fd_list_va;
+    u32 name_len;
+    u32 argv_data_len;
+    u32 argc;
+    u32 fd_count;
+    u32 perm_flags;
+    u32 _pad_envp;
+    u64 cap_mask;
+};
+
+_Static_assert(sizeof(struct sys_spawn_args) == 56,
+               "struct sys_spawn_args is a SYS_SPAWN_FULL_ARGV ABI type "
+               "— pinned at 56 bytes; no implicit padding under aarch64 ILP32+u64");
+_Static_assert(__builtin_offsetof(struct sys_spawn_args, name_va) == 0,
+               "sys_spawn_args.name_va at ABI offset 0");
+_Static_assert(__builtin_offsetof(struct sys_spawn_args, argv_data_va) == 8,
+               "sys_spawn_args.argv_data_va at ABI offset 8");
+_Static_assert(__builtin_offsetof(struct sys_spawn_args, fd_list_va) == 16,
+               "sys_spawn_args.fd_list_va at ABI offset 16");
+_Static_assert(__builtin_offsetof(struct sys_spawn_args, name_len) == 24,
+               "sys_spawn_args.name_len at ABI offset 24");
+_Static_assert(__builtin_offsetof(struct sys_spawn_args, argv_data_len) == 28,
+               "sys_spawn_args.argv_data_len at ABI offset 28");
+_Static_assert(__builtin_offsetof(struct sys_spawn_args, argc) == 32,
+               "sys_spawn_args.argc at ABI offset 32");
+_Static_assert(__builtin_offsetof(struct sys_spawn_args, fd_count) == 36,
+               "sys_spawn_args.fd_count at ABI offset 36");
+_Static_assert(__builtin_offsetof(struct sys_spawn_args, perm_flags) == 40,
+               "sys_spawn_args.perm_flags at ABI offset 40");
+_Static_assert(__builtin_offsetof(struct sys_spawn_args, _pad_envp) == 44,
+               "sys_spawn_args._pad_envp at ABI offset 44");
+_Static_assert(__builtin_offsetof(struct sys_spawn_args, cap_mask) == 48,
+               "sys_spawn_args.cap_mask at ABI offset 48");
 
 struct exception_context;
 

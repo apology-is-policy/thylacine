@@ -92,12 +92,15 @@ _Static_assert(EXEC_USER_BURROW_TOP <= (1ull << 47),
                "burrow-attach window must stay under USER_VA_TOP (2^47)");
 
 // Initial process stack — the System V process-startup frame exec_setup
-// builds at the very top of the user stack (POUCH-DESIGN.md §12.1). A C
-// runtime (pouch — the Thylacine POSIX libc) reads argc/argv/envp and
-// the auxiliary vector from here. Layout, low → high address:
+// (and exec_setup_with_argv) builds at the very top of the user stack
+// (POUCH-DESIGN.md §12.1). A C runtime (pouch — the Thylacine POSIX libc)
+// reads argc/argv/envp and the auxiliary vector from here.
 //
-//   sp + 0      argc                  u64 — 0 at v1.0 (no argv source
-//                                      until the exec syscall lands)
+// Two shapes:
+//
+// Shape A — "no argv" (legacy exec_setup; backward-compat for v1.0
+// callers that have not yet adopted the argv-bearing entry):
+//   sp + 0      argc                  u64 — 0
 //   sp + 8      argv[] terminator     one NULL pointer
 //   sp + 16     envp[] terminator     one NULL pointer
 //   sp + 24     auxv[]                EXEC_INIT_AUXV_COUNT × Elf64_auxv_t
@@ -106,19 +109,58 @@ _Static_assert(EXEC_USER_BURROW_TOP <= (1ull << 47),
 //   sp + 120    (8 bytes padding)
 //   sp + 128    AT_RANDOM entropy     16 kernel-CSPRNG bytes
 //   sp + 144    EXEC_USER_STACK_TOP
+// Frame size is the fixed EXEC_INIT_STACK_SIZE = 144 bytes.
 //
-// The frame is a fixed EXEC_INIT_STACK_SIZE bytes at v1.0 (argc == 0,
-// fixed auxv count); the exec syscall makes argv/envp variable-length
-// in a later phase. The initial sp = EXEC_USER_STACK_TOP -
-// EXEC_INIT_STACK_SIZE; it is 16-byte aligned because the frame size is
-// rounded up to a 16-byte multiple and EXEC_USER_STACK_TOP is aligned.
+// Shape B — "argv-bearing" (exec_setup_with_argv, P6-pouch-stratumd-boot
+// sub-chunk 16b-alpha):
+//   sp + 0                        argc                  u64 = argc
+//   sp + 8                        argv[0]               u64 = user-VA pointing
+//                                                        into the strings region
+//   sp + 8 + 8*i                  argv[i]               (i = 1..argc-1)
+//   sp + 8 + 8*argc               argv[argc]            u64 = 0 (terminator)
+//   sp + 16 + 8*argc              envp[0]               u64 = 0 (no envp at v1.0)
+//   sp + 24 + 8*argc              auxv[]                6 × 16 bytes (same
+//                                                        entries as Shape A;
+//                                                        AT_RANDOM points to the
+//                                                        AT_RANDOM block below)
+//   sp + 120 + 8*argc             (pad to next 16-align)
+//   sp + R                        AT_RANDOM entropy     16 kernel-CSPRNG bytes
+//                                                        (R is the 16-aligned
+//                                                        offset; the AT_RANDOM
+//                                                        auxv entry's value is
+//                                                        sp + R)
+//   sp + R + 16                   argv strings region   argv_data_len bytes,
+//                                                        concatenated NUL-
+//                                                        terminated; argv[i]
+//                                                        pointers above point
+//                                                        into here
+//   sp + frame_size               EXEC_USER_STACK_TOP   (frame_size rounded up
+//                                                        to 16-byte alignment)
+// Frame size is variable, bounded above by EXEC_INIT_STACK_MAX_SIZE.
+//
+// In both shapes, initial sp = EXEC_USER_STACK_TOP - frame_size; sp is
+// 16-byte aligned because the frame size is rounded up to a 16-byte
+// multiple and EXEC_USER_STACK_TOP is aligned.
 #define EXEC_INIT_AUXV_COUNT   6
 #define EXEC_INIT_STACK_SIZE \
     (((8 + 8 + 8 + EXEC_INIT_AUXV_COUNT * 16 + 16) + 15) & ~15ull)
-// Offset (from the frame base / from sp) of the 16-byte AT_RANDOM block.
+// Offset (from the frame base / from sp) of the 16-byte AT_RANDOM block
+// under Shape A (no argv). Shape B computes the offset dynamically.
 #define EXEC_INIT_RANDOM_OFFSET   (EXEC_INIT_STACK_SIZE - 16)
+// Maximum frame size under Shape B (argv-bearing). Bounds the kernel
+// validation + the EXEC_USER_STACK_SIZE budget: with argc = 16 (=
+// SYS_SPAWN_ARGV_MAX) and argv_data_len = 4096 (= SYS_SPAWN_ARGV_DATA_MAX),
+// the structured top is (8 + 8*17 + 8 + 96 + 16-align-pad + 16) bytes,
+// followed by 4096 strings bytes, rounded up to 16. ~4376 bytes — well
+// under the 256 KiB user-stack budget.
+#define EXEC_INIT_STACK_MAX_SIZE \
+    (((8 + (16u + 1u) * 8 + 8 + EXEC_INIT_AUXV_COUNT * 16 + 16 + 16 + 4096) + 15) & ~15ull)
 _Static_assert(EXEC_INIT_STACK_SIZE % 16 == 0,
                "initial sp must be 16-byte aligned (AArch64 SysV ABI)");
+_Static_assert(EXEC_INIT_STACK_MAX_SIZE % 16 == 0,
+               "Shape-B frame max-size must be 16-byte aligned");
+_Static_assert(EXEC_INIT_STACK_MAX_SIZE < EXEC_USER_STACK_SIZE,
+               "Shape-B max frame must fit under the user stack budget");
 
 // exec_setup — parse the ELF blob, populate `p`'s VMA tree, set up the
 // user stack mapping.
@@ -163,6 +205,33 @@ _Static_assert(EXEC_INIT_STACK_SIZE % 16 == 0,
 //               Caller writes it to SP_EL0 before the eret to EL0.
 int exec_setup(struct Proc *p, const void *blob, size_t blob_size,
                u64 *entry_out, u64 *sp_out);
+
+// exec_setup_with_argv — extended entry that threads argv through to the
+// initial-stack layout (P6-pouch-stratumd-boot sub-chunk 16b-alpha). Same
+// contract as exec_setup but the System V frame carries argc + argv[]
+// pointing into a strings region populated from argv_data.
+//
+// argv_data: kernel-resident buffer of `argv_data_len` bytes containing
+//            `argc` concatenated NUL-terminated strings. May be NULL iff
+//            argv_data_len == 0 AND argc == 0 (degrades to exec_setup's
+//            "no argv" behavior — frame is the legacy fixed-size shape).
+//
+// argv_data_len: total bytes including NULs. Bounded by
+//                SYS_SPAWN_ARGV_DATA_MAX (4096). Last byte MUST be NUL
+//                if argv_data_len > 0.
+//
+// argc: number of NULs in argv_data (i.e., number of strings). Bounded
+//       by SYS_SPAWN_ARGV_MAX (16). Caller's invariant: argv_data has
+//       exactly `argc` NUL terminators.
+//
+// Returns 0 on success; -1 on any failure (ELF parse error, alignment
+// violation, VMA SLUB OOM, page allocation OOM, argv invariant
+// violation). The argv_data buffer is read-only from this function's
+// perspective; the caller retains ownership and is responsible for
+// freeing it after this returns.
+int exec_setup_with_argv(struct Proc *p, const void *blob, size_t blob_size,
+                         const char *argv_data, u32 argv_data_len, u32 argc,
+                         u64 *entry_out, u64 *sp_out);
 
 // Kernel→EL0 transition (asm in arch/arm64/userland.S). Sets
 // ELR_EL1 = entry_pc, SP_EL0 = user_sp, SPSR_EL1 = 0 (PSTATE = EL0t,

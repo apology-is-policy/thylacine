@@ -159,6 +159,7 @@ set(KERNEL_SRCS
     test/test_sys_spawn_with_caps.c
     test/test_sys_spawn_full.c
     test/test_sys_spawn_with_perms.c
+    test/test_sys_spawn_full_argv.c
     test/test_sys_burrow.c
     test/test_torpor.c
     test/test_notes.c

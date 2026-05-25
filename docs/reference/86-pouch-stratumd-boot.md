@@ -111,6 +111,167 @@ gates naturally at the integration point.
 
 ---
 
+## 16b-α — argv pass-through kernel surface
+
+**Deliverable**: a new struct-based `SYS_SPAWN_FULL_ARGV = 49` kernel
+syscall that delivers argv to spawned children, replacing the legacy
+`argv = [name]` default. Pouch's musl `_start` parses the System V
+startup frame the kernel built (in the new "Shape B" layout) and
+exposes `argc` + `argv` to `main()`. Joey constructs argv =
+`["pouch-hello-argv", "alpha", "beta", "gamma"]`; the binary echoes
+each back; joey content-checks the round-trip.
+
+### What landed
+
+| Component | Path |
+|---|---|
+| Kernel ABI: constants | `kernel/include/thylacine/syscall.h::SYS_SPAWN_ARGV_MAX` (16) + `SYS_SPAWN_ARGV_DATA_MAX` (4096). |
+| Kernel ABI: struct | `struct sys_spawn_args` — 56 bytes; offset + total-size `_Static_assert`s pin every wire field (`name_va`, `argv_data_va`, `fd_list_va`, `name_len`, `argv_data_len`, `argc`, `fd_count`, `perm_flags`, `_pad_envp`, `cap_mask`). `_pad_envp` is reserved for forward-compat envp pass-through. |
+| Kernel ABI: syscall # | `SYS_SPAWN_FULL_ARGV = 49`. |
+| Kernel handler | `kernel/syscall.c::sys_spawn_full_argv_handler` — uaccess-copies the struct + sub-buffers; validates every field; routes to internal body. |
+| Kernel body | `kernel/syscall.c::sys_spawn_full_argv_with_perms_for_proc` + exported `sys_spawn_full_argv_for_proc` (latter adds console-attached gate for perm_flags). |
+| Kernel thunk | `kernel/syscall.c::sys_spawn_full_argv_thunk` — installs fds + applies perms + calls `exec_setup_with_argv` + kfree's argv buffer at the end of the kernel-side path (lifetime ends here). |
+| exec layout | `kernel/exec.c::exec_build_init_stack` extended with `argv_data` + `argv_data_len` + `argc` params; supports two shapes (legacy Shape A == argc=0; Shape B == argv-bearing). `exec_setup_with_argv` exported; `exec_setup` wraps with `(NULL, 0, 0)`. |
+| exec frame doc | `kernel/include/thylacine/exec.h` — layout block documents both shapes; `EXEC_INIT_STACK_MAX_SIZE` constant bounds Shape B. |
+| libt wrapper | `usr/lib/libt/include/thyla/syscall.h::t_spawn_full_argv(&req)` — takes a pointer to `struct t_sys_spawn_args` (mirrors the kernel's `struct sys_spawn_args` 56-byte ABI). |
+| Pouch probe | `usr/pouch-hello/pouch-hello-argv.c` — POSIX C `main(argc, argv)` printing each argv string back through stdio. |
+| Joey hook | `usr/joey/joey.c::pouch_smoke_one_argv` + invocation in `do_pouch_hello_smoke` with argv `["pouch-hello-argv", "alpha", "beta", "gamma"]`. Content-checks for `pouch-hello-argv: argv[3]=gamma` marker (last argv string, which proves every prior argv pointer was placed correctly). |
+| Kernel tests | `kernel/test/test_sys_spawn_full_argv.c` — 8 tests: golden + 7 negative paths (oversize argc, oversize argv_data_len, missing trailing NUL, NUL-count mismatch in both directions, argc>0 with len=0, argc=0 with len>0, Shape-A no-argv parity with SYS_SPAWN_WITH_PERMS). Registered in `kernel/test/test.c`. |
+| Test count | 586/586 → **594/594** PASS × default + UBSan, 0 UBSan errors. |
+
+### exec_build_init_stack — Shape A vs Shape B
+
+The kernel-side frame layout is now two-mode:
+
+| | Shape A (no argv, legacy) | Shape B (argv-bearing) |
+|---|---|---|
+| Selected by | `argc == 0` | `argc > 0` (caller's invariant; defense-in-depth in the function) |
+| Frame size | Fixed 144 bytes (`EXEC_INIT_STACK_SIZE`) | Variable, bounded by `EXEC_INIT_STACK_MAX_SIZE` |
+| `argc` word | 0 | `argc` |
+| argv[] array | One u64 NULL terminator | `argc` u64 ptrs into strings region + NULL terminator |
+| envp NULL | u64 = 0 | u64 = 0 |
+| auxv | 6 entries × 16 bytes = 96 bytes | Same 6 entries; `AT_RANDOM` user-VA pointer adjusted for variable frame size |
+| AT_RANDOM block | At `EXEC_INIT_RANDOM_OFFSET` (sp + 128) | At `random_offset_from_sp` = `(structured_top + 15) & ~15` |
+| Strings region | (absent) | argv_data_len bytes immediately after AT_RANDOM; argv[i] pointers into this region |
+
+The legacy Shape A path is preserved bit-identical: existing `exec_setup`
+callers continue to land on the exact 144-byte frame they did before
+this sub-chunk, with no behavioral change.
+
+### Lifetime + safety invariants
+
+1. **argv buffer copy** — the syscall handler copies argv_data into a
+   kernel stack buffer (`SYS_SPAWN_ARGV_DATA_MAX = 4096`) for in-handler
+   validation; the body re-copies into a kmalloc'd region BEFORE rfork
+   so the user-side buffer is never observed post-rfork. The kmalloc'd
+   region is owned by `struct spawn_full_argv_args` and kfree'd by the
+   thunk after `exec_setup_with_argv` returns. No path leaks; every
+   error path kfree's everything in reverse order.
+
+2. **NUL-termination + count match** — the body verifies the last byte
+   of argv_data is `\0` AND the total NUL count equals `argc`. The
+   kernel's argv-walk in `exec_build_init_stack` re-verifies the count
+   as defense-in-depth (extinction on mismatch — should never trigger
+   given the body validated).
+
+3. **No handle smuggling** — argv strings are bytes only. No paths
+   read the strings as fd indices or other handles. I-4 + I-5 hold
+   structurally.
+
+4. **Bounded kernel-stack usage** — the handler uses a stack buffer of
+   exactly `SYS_SPAWN_ARGV_DATA_MAX = 4096` bytes for argv copy.
+   Kernel stack budget is well above this.
+
+5. **`_pad_envp` reservation** — the wire field is reserved for the
+   future envp pass-through extension. The handler rejects any non-zero
+   value at v1.0, so a future kernel that wires `_pad_envp` to
+   `envp_data_len` cannot land on a v1.0 caller's request.
+
+### Why no specs/spawn_argv.tla
+
+Spec-to-code is FULLY suspended project-wide as of 2026-05-23 (broadened
+from the prior 2026-05-21 narrow lift). Per the suspension policy, this
+sub-chunk's invariants are validated by prose reasoning in this
+reference + the audit round + the runtime test suite (kernel-side
+golden + 7 negative paths; userspace `/pouch-hello-argv` end-to-end
+echo). The buggy-cfgs for already-spec'd subsystems remain binding;
+this sub-chunk adds none.
+
+### What 16b-α did NOT exercise (deferred to 16b-β / 16c)
+
+- **`CAP_HW_CREATE` spawn**: 16b-α uses `cap_mask = 0` for the joey
+  probe; 16b-β grants `CAP_HW_CREATE` to stratumd via the same
+  syscall.
+- **`SPAWN_PERM_MAY_POST_SERVICE` with argv**: 16b-α uses `perm_flags
+  = 0`; 16b-β grants the perm so stratumd can call SYS_POST_SERVICE
+  for the FS socket.
+- **Stratumd-side virtio-blk driver**: 16b-β's Stratum-branch work.
+- **Real pool mount**: 16b-β's joey + Stratum integration.
+
+### Audit close (round 1)
+
+**Posture**: 0 P0 + 0 P1 + 2 P2 + 9 P3 = 11 findings dispositioned.
+Clean by severity ceiling (no P0/P1). 599/599 PASS × default + UBSan.
+
+**P2 findings fixed by code**:
+
+- **F1 [P2]**: kernel-side tests bypassed the handler — no in-kernel
+  coverage of the uaccess/struct-copy path's distinctive checks
+  (`_pad_envp != 0`, `perm_flags & ~ALL`, oversize fields).
+  Fixed: extracted `sys_spawn_full_argv_validate_req` as a kernel-
+  internal helper called by the handler; added 4 helper-direct tests
+  (`validate_req_golden` / `validate_req_rejects_pad_envp` /
+  `validate_req_rejects_unknown_perm_bits` / `validate_req_rejects_
+  oversize_fields`).
+- **F2 [P2]**: `/pouch-hello-argv` did not exercise the
+  `argv[argc] == NULL` POSIX guarantee; joey's content-check used a
+  single substring (`argv[3]=gamma`) so argv[1..2] pointer errors
+  could exit 0 without joey catching them. Fixed: pouch-hello-argv
+  now asserts `argv[argc] == NULL` and prints a confirmation marker;
+  joey's `pouch_smoke_one_argv` changed to take an array of
+  `argv_marker` substrings; call site now checks 6 per-position
+  markers (argc=4, argv[0..3], argv[argc] NULL terminator).
+
+**P3 findings fixed by code**:
+
+- **F4 [P3]**: handler did not early-reject `(argc > 0, argv_data_len
+  == 0)` at the field-bound stage. Fixed in
+  `sys_spawn_full_argv_validate_req`.
+- **F5 [P3]**: thunk comment referred to the wrong function name
+  (`sys_spawn_with_perms_for_proc` instead of
+  `sys_spawn_full_argv_for_proc`). Fixed inline.
+- **F6 [P3]**: SYS_SPAWN_FULL_ARGV header docs omitted `_pad_envp !=
+  0` rejection AND the argc⇔argv_data_len symmetry rejection as
+  documented failure modes. Fixed inline.
+- **F7 [P3]**: header `req_va` doc said "must be aligned" — kernel
+  reads byte-by-byte; alignment is irrelevant. Fixed inline.
+- **F8 [P3]**: libt `struct t_sys_spawn_args` mirror lacked per-field
+  offsetof asserts (only size pinned). Fixed: added 10 offsetof
+  asserts mirroring the kernel struct.
+- **F11 [P3]**: no test for SYS_SPAWN_FULL_ARGV's own copy of the
+  console-attached gate. Fixed: added
+  `rejects_non_console_attached_perm_flags` (uses `proc_alloc()` to
+  make a fresh non-attached Proc, independent of kproc's flag state).
+
+**P3 findings deferred**:
+
+- **F3 [P3]**: handle_alloc fd>i defense — pre-existing pattern
+  copied from `sys_spawn_with_fds_thunk`. Same latent bug exists in
+  every spawn thunk. Defer to a separate hygiene chunk that fixes
+  both at once (rather than landing an asymmetric fix here that
+  improves the new code's defense without touching the older
+  identical code).
+- **F9 [P3]**: dead `installed` counter — pre-existing pattern,
+  same deferral as F3.
+- **F10 [P3]**: `next_start` local inlinable — trivial readability
+  cosmetic; defer to a future hygiene pass.
+
+**Test count delta**: 586/586 → 594/594 (initial 16b-α) → **599/599**
+(R1 close: +5 tests for F1 helper coverage + F11 gate). 0 UBSan
+runtime errors on default + UBSan builds.
+
+---
+
 ## 16a — stratumd binary-load probe
 
 **Deliverable**: `/stratumd-probe` runs in joey; stratumd's binary

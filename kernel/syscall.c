@@ -2622,6 +2622,369 @@ static s64 sys_spawn_with_perms_handler(u64 name_va, u64 name_len_raw,
                                               (u32)perm_flags_raw);
 }
 
+// =============================================================================
+// SYS_SPAWN_FULL_ARGV — argv pass-through spawn (P6-pouch-stratumd-boot 16b-a).
+// =============================================================================
+//
+// Combined spawn primitive that extends SYS_SPAWN_WITH_PERMS with argv
+// pass-through. Stratumd in sub-chunk 16b-beta needs a real argv (pool
+// path + --keyfile + --listen + ...); the legacy SYS_SPAWN_* family
+// inherits only argv=[name]. Rather than adding yet another register-
+// based permutation (the WITH_PERMS handler is already at the 6-arg
+// register-ABI ceiling), the new entry takes a single user pointer to a
+// struct sys_spawn_args carrying every existing spawn feature plus the
+// new argv fields.
+//
+// Lifetime: the argv buffer is uaccess-copied into a kernel kmalloc'd
+// region BEFORE rfork. The spawn_full_argv_args struct OWNS the argv copy
+// until the thunk consumes it via exec_setup_with_argv. The user-side
+// buffer is never observed post-syscall. argv strings carry no handles
+// (I-4 + I-5 structurally upheld).
+//
+// Validation invariants (all -1 on violation):
+//   - sys_validate_user_buf on req_va for sizeof(struct sys_spawn_args).
+//   - name_len in [1, SYS_SPAWN_NAME_MAX]; name bytes non-NUL.
+//   - argv_data_len in [0, SYS_SPAWN_ARGV_DATA_MAX]; if argc == 0 then
+//     argv_data_len == 0; if argc > 0 then argv_data_len > 0 AND the
+//     last byte is NUL AND the NUL count == argc.
+//   - argc in [0, SYS_SPAWN_ARGV_MAX].
+//   - fd_count in [0, SYS_SPAWN_MAX_FDS]; each fd a live KOBJ_SPOOR.
+//   - perm_flags subset of SPAWN_PERM_ALL; nonzero only if console-attached.
+//   - _pad_envp == 0 (reserved for forward-compat envp pass-through;
+//     reject non-zero values so a future envp wiring cannot silently land
+//     on a v1.0 kernel).
+
+// Kernel-side spawn args for SYS_SPAWN_FULL_ARGV. Mirrors
+// spawn_with_fds_args but adds argv_data ownership.
+struct spawn_full_argv_args {
+    void          *blob;
+    size_t         blob_size;
+    u32            fd_count;
+    struct Spoor  *spoors[SYS_SPAWN_MAX_FDS];
+    // R15 F231: rights captured at spawn time so the child's install
+    // preserves I-6 (rights monotonically reduce on transfer).
+    rights_t       rights[SYS_SPAWN_MAX_FDS];
+    u32            perm_flags;
+    // argv ownership — kmalloc'd kernel buffer; the thunk passes it to
+    // exec_setup_with_argv, then kfree's at the END (only after the
+    // user-frame copy completes). Lifetime ends at the thunk; never
+    // crosses any Proc boundary.
+    char          *argv_data;
+    u32            argv_data_len;
+    u32            argc;
+};
+
+__attribute__((noreturn))
+static void sys_spawn_full_argv_thunk(void *arg) {
+    struct spawn_full_argv_args *sa = (struct spawn_full_argv_args *)arg;
+    void   *blob          = sa->blob;
+    size_t  blob_size     = sa->blob_size;
+    u32     fd_count      = sa->fd_count;
+    u32     perm_flags    = sa->perm_flags;
+    char   *argv_data     = sa->argv_data;
+    u32     argv_data_len = sa->argv_data_len;
+    u32     argc          = sa->argc;
+    struct Spoor *spoors_local[SYS_SPAWN_MAX_FDS];
+    rights_t      rights_local[SYS_SPAWN_MAX_FDS];
+    for (u32 i = 0; i < fd_count; i++) {
+        spoors_local[i] = sa->spoors[i];
+        rights_local[i] = sa->rights[i];
+    }
+    kfree(sa);
+
+    struct Thread *t = current_thread();
+    if (!t) extinction("sys_spawn_full_argv_thunk: no current_thread");
+    struct Proc *p = t->proc;
+    if (!p) extinction("sys_spawn_full_argv_thunk: no proc");
+
+    // Apply parent-vetted SPAWN_PERM_* bits BEFORE anything user-
+    // observable; the parent gate-checked the bits in sys_spawn_full_
+    // argv_for_proc (R1 F5 fix: was incorrectly attributed to sys_spawn_
+    // with_perms_for_proc). Same pattern as sys_spawn_with_fds_thunk's
+    // perm-application block.
+    if (perm_flags & SPAWN_PERM_MAY_POST_SERVICE) {
+        proc_mark_may_post_service(p);
+    }
+    if (perm_flags & ~SPAWN_PERM_ALL) {
+        extinction("sys_spawn_full_argv_thunk: unknown SPAWN_PERM_* bit");
+    }
+
+    // Install inherited fds (same pattern as sys_spawn_with_fds_thunk).
+    u32 installed = 0;
+    for (u32 i = 0; i < fd_count; i++) {
+        hidx_t fd = handle_alloc(p, KOBJ_SPOOR, rights_local[i],
+                                 spoors_local[i]);
+        if (fd != (hidx_t)i) {
+            for (u32 j = i; j < fd_count; j++) spoor_clunk(spoors_local[j]);
+            kfree(blob);
+            kfree(argv_data);
+            exits("fail-fd-install");
+        }
+        installed++;
+    }
+    (void)installed;
+
+    u64 entry = 0, sp = 0;
+    int rc = exec_setup_with_argv(p, blob, blob_size,
+                                  argv_data, argv_data_len, argc,
+                                  &entry, &sp);
+    kfree(blob);
+    kfree(argv_data);
+    if (rc != 0) {
+        exits("fail-exec");
+    }
+
+    userland_enter(entry, sp);
+}
+
+// Internal: the unified spawn-with-argv body. Mirrors sys_spawn_full_with_
+// perms_for_proc but threads argv through; perm_flags MUST be vetted by
+// the caller (gate-checks console-attachment before passing nonzero).
+static int sys_spawn_full_argv_with_perms_for_proc(
+        struct Proc *p,
+        const char *name, size_t name_len,
+        const char *argv_data, u32 argv_data_len, u32 argc,
+        const u32 *fds, u32 fd_count,
+        caps_t cap_mask, u32 perm_flags) {
+    if (!p)                                            return -1;
+    if (!name)                                         return -1;
+    if (name_len == 0 || name_len > SYS_SPAWN_NAME_MAX) return -1;
+    for (size_t i = 0; i < name_len; i++) {
+        if (name[i] == '\0')                            return -1;
+    }
+    if (name[name_len] != '\0')                         return -1;
+    if (fd_count > SYS_SPAWN_MAX_FDS)                   return -1;
+    if (fd_count > 0 && !fds)                           return -1;
+    if (perm_flags & ~SPAWN_PERM_ALL)                   return -1;
+
+    // argv validation. Both shapes accepted: (argc=0, argv_data_len=0,
+    // argv_data=NULL) is the "no argv" case (equivalent to legacy
+    // SYS_SPAWN_WITH_PERMS); (argc>0) requires a NUL-terminated buffer
+    // with exactly argc NULs.
+    if (argc > SYS_SPAWN_ARGV_MAX)                     return -1;
+    if (argv_data_len > SYS_SPAWN_ARGV_DATA_MAX)       return -1;
+    if (argc == 0) {
+        if (argv_data_len != 0)                        return -1;
+    } else {
+        if (argv_data_len == 0)                        return -1;
+        if (!argv_data)                                return -1;
+        if (argv_data[argv_data_len - 1] != '\0')      return -1;
+        u32 nuls = 0;
+        for (u32 i = 0; i < argv_data_len; i++) {
+            if (argv_data[i] == '\0') nuls++;
+        }
+        if (nuls != argc)                              return -1;
+    }
+
+    // Bump fds (same pattern as sys_spawn_with_fds_for_proc).
+    struct Spoor *bumped[SYS_SPAWN_MAX_FDS];
+    rights_t      bumped_rights[SYS_SPAWN_MAX_FDS];
+    if (sys_bump_inherit_fds(p, fds, fd_count, bumped, bumped_rights) != 0)
+        return -1;
+
+    const void *cpio_blob = NULL;
+    size_t      cpio_size = 0;
+    if (devramfs_lookup(name, &cpio_blob, &cpio_size) != 0) {
+        for (u32 j = 0; j < fd_count; j++) spoor_unref(bumped[j]);
+        return -1;
+    }
+    if (cpio_size == 0 || cpio_size > SYS_SPAWN_BLOB_MAX) {
+        for (u32 j = 0; j < fd_count; j++) spoor_unref(bumped[j]);
+        return -1;
+    }
+
+    void *blob_copy = kmalloc(cpio_size, 0);
+    if (!blob_copy) {
+        for (u32 j = 0; j < fd_count; j++) spoor_unref(bumped[j]);
+        return -1;
+    }
+    if (((uintptr_t)blob_copy & 0x7) != 0) {
+        kfree(blob_copy);
+        for (u32 j = 0; j < fd_count; j++) spoor_unref(bumped[j]);
+        return -1;
+    }
+    {
+        const u8 *src = (const u8 *)cpio_blob;
+        u8 *dst = (u8 *)blob_copy;
+        for (size_t i = 0; i < cpio_size; i++) dst[i] = src[i];
+    }
+
+    // Kernel-side argv copy. Lifetime: owned by the spawn_args struct
+    // until the thunk's exec_setup_with_argv consumes it. Free-on-error
+    // paths handle every interleaving below.
+    char *argv_data_copy = NULL;
+    if (argv_data_len > 0) {
+        argv_data_copy = kmalloc(argv_data_len, 0);
+        if (!argv_data_copy) {
+            kfree(blob_copy);
+            for (u32 j = 0; j < fd_count; j++) spoor_unref(bumped[j]);
+            return -1;
+        }
+        for (u32 i = 0; i < argv_data_len; i++) argv_data_copy[i] = argv_data[i];
+    }
+
+    struct spawn_full_argv_args *sa = kmalloc(sizeof(*sa), KP_ZERO);
+    if (!sa) {
+        if (argv_data_copy) kfree(argv_data_copy);
+        kfree(blob_copy);
+        for (u32 j = 0; j < fd_count; j++) spoor_unref(bumped[j]);
+        return -1;
+    }
+    sa->blob          = blob_copy;
+    sa->blob_size     = cpio_size;
+    sa->fd_count      = fd_count;
+    sa->perm_flags    = perm_flags;
+    sa->argv_data     = argv_data_copy;
+    sa->argv_data_len = argv_data_len;
+    sa->argc          = argc;
+    for (u32 i = 0; i < fd_count; i++) {
+        sa->spoors[i] = bumped[i];
+        sa->rights[i] = bumped_rights[i];
+    }
+
+    int pid = rfork_with_caps(RFPROC, sys_spawn_full_argv_thunk, sa, cap_mask);
+    if (pid < 0) {
+        kfree(sa);
+        if (argv_data_copy) kfree(argv_data_copy);
+        kfree(blob_copy);
+        for (u32 j = 0; j < fd_count; j++) spoor_unref(bumped[j]);
+        return -1;
+    }
+    return pid;
+}
+
+// Exported (non-static) for kernel-internal tests in
+// kernel/test/test_sys_spawn_full_argv.c. perm_flags console-attachment
+// gate is enforced by this entry point (mirrors sys_spawn_with_perms_
+// for_proc's external contract).
+int sys_spawn_full_argv_for_proc(struct Proc *p,
+                                 const char *name, size_t name_len,
+                                 const char *argv_data, u32 argv_data_len,
+                                 u32 argc,
+                                 const u32 *fds, u32 fd_count,
+                                 caps_t cap_mask, u32 perm_flags) {
+    if (!p)                                             return -1;
+    if (perm_flags & ~SPAWN_PERM_ALL)                   return -1;
+    if (perm_flags != 0u && !proc_is_console_attached(p)) return -1;
+    return sys_spawn_full_argv_with_perms_for_proc(p, name, name_len,
+                                                   argv_data, argv_data_len,
+                                                   argc,
+                                                   fds, fd_count,
+                                                   cap_mask, perm_flags);
+}
+
+// uaccess-loader helper: copy the struct sys_spawn_args from user memory
+// in a single pass. The struct is 56 bytes (pinned by _Static_assert in
+// the ABI header); we read it byte-by-byte to avoid pointer-cast
+// strict-aliasing pitfalls and to keep every load on the uaccess fixup
+// path. Returns 0 on success, -1 on any uaccess fault.
+static int sys_load_spawn_args(u64 req_va, struct sys_spawn_args *out) {
+    u8 *dst = (u8 *)out;
+    for (u64 i = 0; i < sizeof(*out); i++) {
+        u8 b = 0;
+        if (uaccess_load_u8(req_va + i, &b) != 0) return -1;
+        dst[i] = b;
+    }
+    return 0;
+}
+
+// R1 F1 fix: handler-side field-bound validation extracted as a
+// kernel-internal helper so kernel tests can exercise the handler's
+// distinctive checks (_pad_envp != 0, perm_flags & ~ALL, oversize fields)
+// without needing an SVC instruction or a user-VA fixture. Returns 0 on
+// "all fields pass static bounds", -1 on any violation.
+//
+// This helper deliberately does NOT do any uaccess work: callers (the
+// handler) do uaccess BEFORE calling this so a fault returns -1 distinct
+// from a field-bounds violation. The argc/argv_data_len symmetry check
+// (argc == 0 ⟺ argv_data_len == 0) is also enforced here; the body
+// re-checks defense-in-depth on the same invariant.
+int sys_spawn_full_argv_validate_req(const struct sys_spawn_args *req) {
+    if (!req)                                          return -1;
+    if (req->name_len == 0 || req->name_len > SYS_SPAWN_NAME_MAX) return -1;
+    if (req->argv_data_len > SYS_SPAWN_ARGV_DATA_MAX)  return -1;
+    if (req->argc > SYS_SPAWN_ARGV_MAX)                return -1;
+    if (req->fd_count > SYS_SPAWN_MAX_FDS)              return -1;
+    if (req->perm_flags & ~(u32)SPAWN_PERM_ALL)         return -1;
+    if (req->_pad_envp != 0)                           return -1;
+    // R1 F4 fix: reject (argc > 0, argv_data_len == 0) at the handler's
+    // field-bound stage rather than waiting for the body's NUL-walk to
+    // reject it. Symmetric to the existing (argc == 0, argv_data_len > 0)
+    // check and saves the uaccess sub-buffer copies on a guaranteed-fail
+    // input.
+    if (req->argc > 0 && req->argv_data_len == 0)      return -1;
+    if (req->argc == 0 && req->argv_data_len != 0)     return -1;
+    return 0;
+}
+
+static s64 sys_spawn_full_argv_handler(u64 req_va) {
+    struct Thread *t = current_thread();
+    if (!t)                                            return -1;
+    struct Proc *p = t->proc;
+    if (!p)                                            return -1;
+
+    // Validate + load the struct.
+    if (!sys_validate_user_buf(req_va, sizeof(struct sys_spawn_args)))
+        return -1;
+    struct sys_spawn_args req;
+    if (sys_load_spawn_args(req_va, &req) != 0)        return -1;
+
+    // Field bounds (refuse oversized inputs BEFORE allocating any kernel
+    // memory or copying any buffer). Extracted as a helper for kernel-
+    // test coverage; see sys_spawn_full_argv_validate_req above.
+    if (sys_spawn_full_argv_validate_req(&req) != 0)   return -1;
+
+    // Sub-buffer validity (each pointer + its length).
+    if (!sys_validate_user_buf(req.name_va, req.name_len)) return -1;
+    if (req.argv_data_len > 0 &&
+        !sys_validate_user_buf(req.argv_data_va, req.argv_data_len))
+        return -1;
+    if (req.fd_count > 0) {
+        u64 fd_bytes = (u64)req.fd_count * sizeof(u32);
+        if (!sys_validate_user_buf(req.fd_list_va, fd_bytes)) return -1;
+    }
+
+    // Copy name (NUL-rejection inline, matches existing handlers).
+    char name[SYS_SPAWN_NAME_MAX + 1];
+    for (u32 i = 0; i < req.name_len; i++) {
+        u8 b = 0;
+        if (uaccess_load_u8(req.name_va + i, &b) != 0) return -1;
+        if (b == 0)                                    return -1;
+        name[i] = (char)b;
+    }
+    name[req.name_len] = '\0';
+
+    // Copy fd list (matches existing handlers' byte-by-byte pattern).
+    u32 fds_kbuf[SYS_SPAWN_MAX_FDS] = { 0 };
+    for (u32 i = 0; i < req.fd_count; i++) {
+        u32 v = 0;
+        for (u32 b = 0; b < sizeof(u32); b++) {
+            u8 byte = 0;
+            if (uaccess_load_u8(req.fd_list_va + i * sizeof(u32) + b, &byte) != 0)
+                return -1;
+            v |= (u32)byte << (b * 8);
+        }
+        fds_kbuf[i] = v;
+    }
+
+    // Copy argv_data into a stack buffer for in-kernel validation. The
+    // body re-copies into a kmalloc'd region before rfork; the stack
+    // buffer here only lives for the duration of the handler and the
+    // synchronous body call below. Bound: SYS_SPAWN_ARGV_DATA_MAX = 4 KiB.
+    char argv_kbuf[SYS_SPAWN_ARGV_DATA_MAX];
+    for (u32 i = 0; i < req.argv_data_len; i++) {
+        u8 b = 0;
+        if (uaccess_load_u8(req.argv_data_va + i, &b) != 0) return -1;
+        argv_kbuf[i] = (char)b;
+    }
+
+    return (s64)sys_spawn_full_argv_for_proc(
+        p, name, (size_t)req.name_len,
+        req.argv_data_len > 0 ? argv_kbuf : NULL, req.argv_data_len, req.argc,
+        fds_kbuf, req.fd_count,
+        (caps_t)req.cap_mask, req.perm_flags);
+}
+
 static s64 sys_spawn_with_fds_handler(u64 name_va, u64 name_len_raw,
                                       u64 fd_list_va, u64 fd_count_raw) {
     struct Thread *t = current_thread();
@@ -3426,6 +3789,10 @@ void syscall_dispatch(struct exception_context *ctx) {
                                                           ctx->regs[3],
                                                           ctx->regs[4],
                                                           ctx->regs[5]);
+        return;
+
+    case SYS_SPAWN_FULL_ARGV:
+        ctx->regs[0] = (u64)sys_spawn_full_argv_handler(ctx->regs[0]);
         return;
 
     case SYS_CAP_GRANT:

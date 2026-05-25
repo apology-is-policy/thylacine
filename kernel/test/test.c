@@ -560,6 +560,19 @@ void test_sys_spawn_with_perms_zero_perm_is_spawn_full(void);
 void test_sys_spawn_with_perms_console_attached_grants_may_post(void);
 void test_sys_spawn_with_perms_rejects_non_console_attached_parent(void);
 void test_sys_spawn_with_perms_rejects_unknown_perm_bits(void);
+void test_sys_spawn_full_argv_no_argv_acts_as_spawn_with_perms(void);
+void test_sys_spawn_full_argv_golden_argc4(void);
+void test_sys_spawn_full_argv_rejects_argc_over_max(void);
+void test_sys_spawn_full_argv_rejects_data_len_over_max(void);
+void test_sys_spawn_full_argv_rejects_missing_trailing_nul(void);
+void test_sys_spawn_full_argv_rejects_nul_count_mismatch(void);
+void test_sys_spawn_full_argv_rejects_argc_with_zero_data_len(void);
+void test_sys_spawn_full_argv_rejects_zero_argc_with_nonzero_data(void);
+void test_sys_spawn_full_argv_validate_req_golden(void);
+void test_sys_spawn_full_argv_validate_req_rejects_pad_envp(void);
+void test_sys_spawn_full_argv_validate_req_rejects_unknown_perm_bits(void);
+void test_sys_spawn_full_argv_validate_req_rejects_oversize_fields(void);
+void test_sys_spawn_full_argv_rejects_non_console_attached_perm_flags(void);
 void test_stratumd_stub_round_trip(void);
 void test_stratumd_stub_fs_round_trip(void);
 void test_stratumd_stub_walk_round_trip(void);
@@ -1363,6 +1376,21 @@ struct test_case g_tests[] = {
     { "sys_spawn_with_perms.console_attached_grants_may_post", test_sys_spawn_with_perms_console_attached_grants_may_post, false, NULL },
     { "sys_spawn_with_perms.rejects_non_console_attached_parent", test_sys_spawn_with_perms_rejects_non_console_attached_parent, false, NULL },
     { "sys_spawn_with_perms.rejects_unknown_perm_bits", test_sys_spawn_with_perms_rejects_unknown_perm_bits, false, NULL },
+    { "sys_spawn_full_argv.no_argv_acts_as_spawn_with_perms", test_sys_spawn_full_argv_no_argv_acts_as_spawn_with_perms, false, NULL },
+    { "sys_spawn_full_argv.golden_argc4",              test_sys_spawn_full_argv_golden_argc4,              false, NULL },
+    { "sys_spawn_full_argv.rejects_argc_over_max",     test_sys_spawn_full_argv_rejects_argc_over_max,     false, NULL },
+    { "sys_spawn_full_argv.rejects_data_len_over_max", test_sys_spawn_full_argv_rejects_data_len_over_max, false, NULL },
+    { "sys_spawn_full_argv.rejects_missing_trailing_nul", test_sys_spawn_full_argv_rejects_missing_trailing_nul, false, NULL },
+    { "sys_spawn_full_argv.rejects_nul_count_mismatch", test_sys_spawn_full_argv_rejects_nul_count_mismatch, false, NULL },
+    { "sys_spawn_full_argv.rejects_argc_with_zero_data_len", test_sys_spawn_full_argv_rejects_argc_with_zero_data_len, false, NULL },
+    { "sys_spawn_full_argv.rejects_zero_argc_with_nonzero_data", test_sys_spawn_full_argv_rejects_zero_argc_with_nonzero_data, false, NULL },
+    // R1 F11 fix: console-attached gate test (uses proc_alloc to make
+    // a fresh non-attached Proc, independent of kproc's flag state).
+    { "sys_spawn_full_argv.rejects_non_console_attached_perm_flags", test_sys_spawn_full_argv_rejects_non_console_attached_perm_flags, false, NULL },
+    { "sys_spawn_full_argv.validate_req_golden",       test_sys_spawn_full_argv_validate_req_golden,       false, NULL },
+    { "sys_spawn_full_argv.validate_req_rejects_pad_envp", test_sys_spawn_full_argv_validate_req_rejects_pad_envp, false, NULL },
+    { "sys_spawn_full_argv.validate_req_rejects_unknown_perm_bits", test_sys_spawn_full_argv_validate_req_rejects_unknown_perm_bits, false, NULL },
+    { "sys_spawn_full_argv.validate_req_rejects_oversize_fields", test_sys_spawn_full_argv_validate_req_rejects_oversize_fields, false, NULL },
     { "userspace.stratumd_stub_round_trip",            test_stratumd_stub_round_trip,                      false, NULL },
     { "userspace.stratumd_stub_fs_round_trip",         test_stratumd_stub_fs_round_trip,                   false, NULL },
     { "userspace.stratumd_stub_walk_round_trip",       test_stratumd_stub_walk_round_trip,                 false, NULL },

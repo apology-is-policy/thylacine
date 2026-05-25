@@ -477,6 +477,115 @@ static int pouch_smoke_one_perms(const char *name, size_t name_len,
                             cap_mask, perm_flags);
 }
 
+// argv_marker — one substring expected to appear in the child's stdout.
+// Used by pouch_smoke_one_argv's content-check loop. R1 F2 fix:
+// per-argv-position markers prove every argv[i] pointer was placed
+// correctly, not just the last one.
+struct argv_marker {
+    const char *str;
+    size_t      len;
+};
+
+// pouch_smoke_one_argv — argv-bearing variant. Spawns via t_spawn_full_argv
+// with the caller-constructed argv buffer; same pipe + reap-before-drain
+// + content-check pattern as pouch_smoke_core, but routed through the new
+// struct-based SYS_SPAWN_FULL_ARGV (P6-pouch-stratumd-boot 16b-alpha) AND
+// content-checks every marker in `markers` (not just one).
+//
+// argv_data + argv_data_len + argc encode the argv exactly as the kernel
+// will read it: a flat buffer of `argc` NUL-terminated strings totaling
+// argv_data_len bytes, with the final byte == '\0'.
+//
+// Inherited fds: this variant pre-installs (wr, wr) as fd 0 + fd 1 so the
+// child's stdout flows to joey via the pipe (same shape as
+// pouch_smoke_core). cap_mask + perm_flags are passed through to the
+// kernel's spawn body; both default to 0 in this initial 16b-alpha probe.
+//
+// R1 F2 fix: markers is an array of `markers_count` substring checks;
+// every marker must appear in the child's captured output. A single-
+// marker check (the prior shape) only proved the LAST argv pointer was
+// placed correctly; per-position markers prove every intermediate
+// pointer too.
+static int pouch_smoke_one_argv(const char *name, size_t name_len,
+                                const char *argv_data, unsigned int argv_data_len,
+                                unsigned int argc,
+                                const struct argv_marker *markers,
+                                size_t markers_count,
+                                unsigned long cap_mask,
+                                unsigned long perm_flags) {
+    long rd = -1, wr = -1;
+    if (t_pipe(&rd, &wr) < 0) {
+        t_putstr("joey: pouch-smoke-argv t_pipe FAILED\n");
+        return -1;
+    }
+    unsigned int fds[2] = { (unsigned int)wr, (unsigned int)wr };
+    struct t_sys_spawn_args req = {
+        .name_va       = (unsigned long)name,
+        .argv_data_va  = (unsigned long)argv_data,
+        .fd_list_va    = (unsigned long)fds,
+        .name_len      = (unsigned int)name_len,
+        .argv_data_len = argv_data_len,
+        .argc          = argc,
+        .fd_count      = 2,
+        .perm_flags    = (unsigned int)perm_flags,
+        ._pad_envp     = 0,
+        .cap_mask      = cap_mask,
+    };
+    long pid = t_spawn_full_argv(&req);
+    if (pid <= 0) {
+        t_putstr("joey: pouch-smoke-argv spawn FAILED\n");
+        (void)t_close(rd);
+        (void)t_close(wr);
+        return -1;
+    }
+    // Drop joey's writer ref. Child's two refs remain — released at reap.
+    if (t_close(wr) != 0) {
+        t_putstr("joey: pouch-smoke-argv t_close(wr) FAILED\n");
+        (void)t_close(rd);
+        return -1;
+    }
+    int status = -1;
+    long reaped = t_wait_pid(&status);
+    if (reaped != pid) {
+        t_putstr("joey: pouch-smoke-argv t_wait_pid wrong pid\n");
+        (void)t_close(rd);
+        return -1;
+    }
+    // Same buffer size as pouch_smoke_core.
+    unsigned char acc[2048];
+    size_t acc_len = 0;
+    for (;;) {
+        unsigned char buf[256];
+        long n = t_read(rd, buf, sizeof(buf));
+        if (n < 0) {
+            t_putstr("joey: pouch-smoke-argv t_read FAILED\n");
+            (void)t_close(rd);
+            return -1;
+        }
+        if (n == 0) break;
+        (void)t_puts((const char *)buf, (size_t)n);
+        for (long i = 0; i < n && acc_len < sizeof(acc); i++)
+            acc[acc_len++] = buf[i];
+    }
+    if (t_close(rd) != 0) {
+        t_putstr("joey: pouch-smoke-argv t_close(rd) FAILED\n");
+        return -1;
+    }
+    if (status != 0) {
+        t_putstr("joey: pouch-smoke-argv child exited non-zero\n");
+        return -1;
+    }
+    for (size_t i = 0; i < markers_count; i++) {
+        if (!mem_contains(acc, acc_len, markers[i].str, markers[i].len)) {
+            t_putstr("joey: pouch-smoke-argv missing expected marker: ");
+            t_putstr(markers[i].str);
+            t_putstr("\n");
+            return -1;
+        }
+    }
+    return 0;
+}
+
 // do_pouch_hello_smoke — run the pouch POSIX C binaries and verify
 // each prints + exits 0. /pouch-hello exercises the raw write(2) seam and
 // the 0xFFFF unimplemented-syscall sentinel on both musl syscall paths;
@@ -610,6 +719,41 @@ static int do_pouch_hello_smoke(void) {
                              T_CAP_CSPRNG_READ) != 0)
         return -1;
     t_putstr("joey: pouch-hello-sodium smoke ok (libsodium KATs + AEAD + ed25519)\n");
+
+    // /pouch-hello-argv — proves the new SYS_SPAWN_FULL_ARGV kernel
+    // surface (P6-pouch-stratumd-boot sub-chunk 16b-alpha). Construct
+    // argv = ["pouch-hello-argv", "alpha", "beta", "gamma"] as a flat
+    // NUL-separated buffer; the kernel lays out the System V startup
+    // frame (Shape B); pouch's musl _start exposes argv to main; the
+    // binary prints each back. joey content-checks the round-trip via
+    // per-position markers (R1 F2 fix: prior single-marker check only
+    // proved the LAST argv pointer; per-position markers prove every
+    // intermediate pointer too) PLUS the NULL-terminator marker (proves
+    // the argv[argc]=NULL POSIX guarantee in the binary's argv probe).
+    static const char pargv_name[]    = "pouch-hello-argv";
+    static const char pargv_argv[]    = "pouch-hello-argv\0alpha\0beta\0gamma";
+    static const char pargv_m0[]      = "pouch-hello-argv: argc=4";
+    static const char pargv_m1[]      = "pouch-hello-argv: argv[0]=pouch-hello-argv";
+    static const char pargv_m2[]      = "pouch-hello-argv: argv[1]=alpha";
+    static const char pargv_m3[]      = "pouch-hello-argv: argv[2]=beta";
+    static const char pargv_m4[]      = "pouch-hello-argv: argv[3]=gamma";
+    static const char pargv_m5[]      = "pouch-hello-argv: argv[argc] NULL terminator ok";
+    static const struct argv_marker pargv_markers[] = {
+        { pargv_m0, sizeof(pargv_m0) - 1 },
+        { pargv_m1, sizeof(pargv_m1) - 1 },
+        { pargv_m2, sizeof(pargv_m2) - 1 },
+        { pargv_m3, sizeof(pargv_m3) - 1 },
+        { pargv_m4, sizeof(pargv_m4) - 1 },
+        { pargv_m5, sizeof(pargv_m5) - 1 },
+    };
+    if (pouch_smoke_one_argv(pargv_name, sizeof(pargv_name) - 1,
+                             pargv_argv, sizeof(pargv_argv),
+                             /*argc=*/4u,
+                             pargv_markers,
+                             sizeof(pargv_markers) / sizeof(pargv_markers[0]),
+                             /*cap_mask=*/0ul, /*perm_flags=*/0ul) != 0)
+        return -1;
+    t_putstr("joey: pouch-hello-argv smoke ok (argv pass-through via SYS_SPAWN_FULL_ARGV)\n");
     return 0;
 }
 

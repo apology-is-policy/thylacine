@@ -76,6 +76,10 @@ enum {
     T_SYS_TORPOR_WAKE = 40,      // P6-pouch-wait-addr: wake waiters on a user-VA word
     T_SYS_THREAD_SPAWN = 41,     // P6-pouch-threads: spawn an EL0 Thread in the caller's Proc
     T_SYS_THREAD_EXIT  = 42,     // P6-pouch-threads: exit the calling Thread; never returns
+    // 43..48 — SYS_POST_SERVICE_BYTE + SYS_NOTE_OPEN / NOTIFY / NOTED /
+    // POSTNOTE / NOTE_MASK (P6-pouch-sockets + P6-pouch-signals); pouch
+    // musl reaches them directly through bits/syscall.h.in.
+    T_SYS_SPAWN_FULL_ARGV = 49,  // P6-pouch-stratumd-boot 16b-alpha: argv pass-through spawn
 };
 
 // Torpor error codes — match kernel's TORPOR_ERR_* (Linux/musl-numeric
@@ -158,6 +162,53 @@ static inline long t_torpor_wake(unsigned int *addr_va, unsigned int count) {
 // SYS_POST_SERVICE; granting it requires the parent to be console-
 // attached.
 #define T_SPAWN_PERM_MAY_POST_SERVICE  (1u << 0)
+
+// SYS_SPAWN_FULL_ARGV bounds — must mirror SYS_SPAWN_ARGV_MAX +
+// SYS_SPAWN_ARGV_DATA_MAX in kernel/include/thylacine/syscall.h.
+#define T_SYS_SPAWN_ARGV_MAX        16u
+#define T_SYS_SPAWN_ARGV_DATA_MAX   4096u
+
+// SYS_SPAWN_FULL_ARGV argument record — must mirror struct sys_spawn_args
+// in kernel/include/thylacine/syscall.h. The 56-byte ABI shape is pinned
+// by _Static_assert there; the layout here is the user-visible counterpart.
+struct t_sys_spawn_args {
+    unsigned long  name_va;          // 0
+    unsigned long  argv_data_va;     // 8
+    unsigned long  fd_list_va;       // 16
+    unsigned int   name_len;         // 24
+    unsigned int   argv_data_len;    // 28
+    unsigned int   argc;             // 32
+    unsigned int   fd_count;         // 36
+    unsigned int   perm_flags;       // 40
+    unsigned int   _pad_envp;        // 44 — must be 0 at v1.0
+    unsigned long  cap_mask;         // 48
+};
+_Static_assert(sizeof(struct t_sys_spawn_args) == 56,
+               "struct t_sys_spawn_args must mirror the kernel's "
+               "struct sys_spawn_args 56-byte ABI");
+// R1 F8 fix: per-field offsetof asserts (mirror the kernel struct's
+// asserts) so a reordering on either side that leaves total size
+// unchanged still fails at compile time.
+_Static_assert(__builtin_offsetof(struct t_sys_spawn_args, name_va) == 0,
+               "t_sys_spawn_args.name_va at ABI offset 0");
+_Static_assert(__builtin_offsetof(struct t_sys_spawn_args, argv_data_va) == 8,
+               "t_sys_spawn_args.argv_data_va at ABI offset 8");
+_Static_assert(__builtin_offsetof(struct t_sys_spawn_args, fd_list_va) == 16,
+               "t_sys_spawn_args.fd_list_va at ABI offset 16");
+_Static_assert(__builtin_offsetof(struct t_sys_spawn_args, name_len) == 24,
+               "t_sys_spawn_args.name_len at ABI offset 24");
+_Static_assert(__builtin_offsetof(struct t_sys_spawn_args, argv_data_len) == 28,
+               "t_sys_spawn_args.argv_data_len at ABI offset 28");
+_Static_assert(__builtin_offsetof(struct t_sys_spawn_args, argc) == 32,
+               "t_sys_spawn_args.argc at ABI offset 32");
+_Static_assert(__builtin_offsetof(struct t_sys_spawn_args, fd_count) == 36,
+               "t_sys_spawn_args.fd_count at ABI offset 36");
+_Static_assert(__builtin_offsetof(struct t_sys_spawn_args, perm_flags) == 40,
+               "t_sys_spawn_args.perm_flags at ABI offset 40");
+_Static_assert(__builtin_offsetof(struct t_sys_spawn_args, _pad_envp) == 44,
+               "t_sys_spawn_args._pad_envp at ABI offset 44");
+_Static_assert(__builtin_offsetof(struct t_sys_spawn_args, cap_mask) == 48,
+               "t_sys_spawn_args.cap_mask at ABI offset 48");
 
 // SYS_GETRANDOM flags (mirror kernel/include/thylacine/syscall.h).
 #define T_GRND_NONBLOCK   1u
@@ -772,6 +823,41 @@ static inline long t_spawn_with_perms(const char *name, size_t name_len,
         "svc #0"
         : "+r"(x0)
         : "r"(x1), "r"(x2), "r"(x3), "r"(x4), "r"(x5), "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
+// t_spawn_full_argv — combined spawn primitive that extends t_spawn_with
+// _perms with argv pass-through (P6-pouch-stratumd-boot 16b-alpha).
+//
+// Construct a `struct t_sys_spawn_args` on the caller's stack (or any
+// addressable memory), fill every field, and call this wrapper with its
+// address. The kernel uaccess-copies the struct, validates every field
+// + sub-buffer, and dispatches to the spawn body. Same gate as
+// t_spawn_with_perms: any nonzero perm_flags bit requires the calling
+// Proc to be console-attached.
+//
+// argv encoding: `argv_data` is a flat buffer of `argc` concatenated
+// NUL-terminated strings, total `argv_data_len` bytes (the last byte
+// MUST be NUL). Example for argv=["pouch-hello-argv","alpha","beta"]:
+//   argv_data = "pouch-hello-argv\0alpha\0beta\0"  (28 bytes)
+//   argc      = 3
+//   argv_data_len = 28
+//
+// Returns the child PID (>0) on success, -1 on any of:
+//   - any field outside its documented bounds
+//   - argv_data not NUL-terminated OR NUL count != argc
+//   - any inherited fd is not a KOBJ_SPOOR handle
+//   - any condition that t_spawn_with_perms returns -1 on
+__attribute__((always_inline))
+static inline long t_spawn_full_argv(const struct t_sys_spawn_args *req) {
+    register long x0 __asm__("x0") = (long)(unsigned long)req;
+    register long x8 __asm__("x8") = T_SYS_SPAWN_FULL_ARGV;
+    __asm__ volatile (
+        "svc #0"
+        : "+r"(x0)
+        : "r"(x8)
         : "memory", "cc"
     );
     return x0;

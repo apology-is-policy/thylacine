@@ -177,35 +177,82 @@ static int exec_map_user_stack(struct Proc *p) {
 }
 
 // Build the System V initial-process stack frame — argc / argv / envp /
-// auxv — at the top of the user stack. See exec.h for the byte layout.
+// auxv (+ argv strings region under Shape B) — at the top of the user
+// stack. See exec.h for the byte layout.
+//
+// Two shapes (selected by whether argv_data is non-NULL and argc > 0):
+//   Shape A — no argv (legacy: argc == 0; fixed-size frame =
+//             EXEC_INIT_STACK_SIZE = 144 bytes).
+//   Shape B — argv-bearing (P6-pouch-stratumd-boot sub-chunk 16b-alpha;
+//             variable-size frame bounded by EXEC_INIT_STACK_MAX_SIZE).
 //
 // The stack BURROW (installed by exec_map_user_stack) is located via
 // vma_lookup and written through the kernel direct map; offset 0 of the
 // BURROW corresponds to EXEC_USER_STACK_BASE, so the frame's bytes land
-// in the BURROW's last EXEC_INIT_STACK_SIZE bytes. Returns the initial
-// user sp — the user VA of the frame's `argc` word.
+// in the BURROW's last `frame_size` bytes. Returns the initial user sp —
+// the user VA of the frame's `argc` word.
 _Static_assert(EXEC_INIT_AUXV_COUNT == 6,
                "exec_build_init_stack writes exactly 6 auxv entries by "
-               "literal index — adding an entry means editing the w[] "
+               "literal index — adding an entry means editing the auxv "
                "block below, not just bumping the exec.h macro");
-static u64 exec_build_init_stack(struct Proc *p, const struct elf_image *img) {
+static u64 exec_build_init_stack(struct Proc *p, const struct elf_image *img,
+                                 const char *argv_data, u32 argv_data_len,
+                                 u32 argc) {
+    // Shape selection. argv_data_len > 0 iff argc > 0 (caller's
+    // invariant enforced at the syscall body); we re-check the
+    // structural invariant here as defense-in-depth.
+    bool has_argv = (argc > 0);
+    if (has_argv) {
+        if (argv_data_len == 0 || !argv_data)
+            extinction("exec_build_init_stack: argc > 0 with no argv_data");
+        if (argc > 16u)                    // SYS_SPAWN_ARGV_MAX bound — kept
+                                           // local to this file to avoid a
+                                           // syscall.h include cycle
+            extinction("exec_build_init_stack: argc exceeds bound");
+        if (argv_data_len > 4096u)         // SYS_SPAWN_ARGV_DATA_MAX bound
+            extinction("exec_build_init_stack: argv_data_len exceeds bound");
+        if (argv_data[argv_data_len - 1] != '\0')
+            extinction("exec_build_init_stack: argv_data not NUL-terminated");
+    }
+
     // exec_map_user_stack returned 0 → the stack VMA + its BURROW exist.
-    // Assert the invariant: a future exec-replaces-in-place path that
-    // tore VMAs down would otherwise NULL-deref here on the boot path.
     struct Vma *sv = vma_lookup(p, EXEC_USER_STACK_BASE);
     if (!sv || !sv->burrow)
         extinction("exec_build_init_stack: stack VMA missing");
-    u8 *stack_kva  = (u8 *)pa_to_kva(page_to_pa(sv->burrow->pages));
-    u8 *frame      = stack_kva + EXEC_USER_STACK_SIZE - EXEC_INIT_STACK_SIZE;
-    u64 sp         = EXEC_USER_STACK_TOP - EXEC_INIT_STACK_SIZE;
+    u8 *stack_kva = (u8 *)pa_to_kva(page_to_pa(sv->burrow->pages));
+
+    // Compute frame layout.
+    //
+    // Shape A: fixed-size 144-byte frame; same as the legacy layout.
+    // Shape B:
+    //   structured_top_bytes = 8 (argc) + 8*(argc+1) (argv[]+NULL)
+    //                          + 8 (envp NULL) + 96 (auxv) = 120 + 8*argc.
+    //   strings_region_offset = round_up(structured_top_bytes, 16) + 16
+    //                            (the 16-aligned AT_RANDOM block precedes
+    //                            the strings region).
+    //   frame_size            = round_up(strings_region_offset + argv_data_len, 16).
+    u64 frame_size;
+    u64 random_offset_from_sp;  // offset of the 16-byte AT_RANDOM block
+
+    if (!has_argv) {
+        frame_size            = EXEC_INIT_STACK_SIZE;
+        random_offset_from_sp = EXEC_INIT_RANDOM_OFFSET;
+    } else {
+        u64 structured = 8 + (u64)(argc + 1u) * 8u + 8u + (u64)EXEC_INIT_AUXV_COUNT * 16u;
+        random_offset_from_sp = (structured + 15u) & ~15ull;
+        u64 strings_offset    = random_offset_from_sp + 16u;
+        u64 unrounded         = strings_offset + (u64)argv_data_len;
+        frame_size            = (unrounded + 15u) & ~15ull;
+    }
+
+    u8 *frame = stack_kva + EXEC_USER_STACK_SIZE - frame_size;
+    u64 sp    = EXEC_USER_STACK_TOP - frame_size;
 
     // AT_PHDR — the user VA of the program-header table. The phdrs sit
     // at file offset img->phoff; find the PT_LOAD segment whose file
     // range covers the whole table and translate offset → user VA. A
     // well-formed static binary's first PT_LOAD spans the ELF header +
-    // phdrs. If none covers them, the entire phdr triple (AT_PHDR /
-    // AT_PHENT / AT_PHNUM) is reported 0 — a coherent "no phdrs" auxv;
-    // a C runtime then skips the phdr walk (safe for a no-TLS program).
+    // phdrs. If none covers them, the entire phdr triple is reported 0.
     u64 phdr_va = 0;
     u64 phnum   = 0;
     u64 phent   = 0;
@@ -223,30 +270,70 @@ static u64 exec_build_init_stack(struct Proc *p, const struct elf_image *img) {
         }
     }
 
-    // AT_RANDOM — 16 bytes of kernel-CSPRNG entropy. The scratch buffer
-    // is zero-initialised first, so a short or unavailable CSPRNG read
-    // can never ship kernel-stack residue into userspace — at worst the
-    // block is partially or wholly zero (degraded entropy, never a
-    // leak). That mirrors the system-wide CSPRNG posture: a host without
-    // FEAT_RNG degrades devrandom + corvus identically.
+    // AT_RANDOM — 16 bytes of kernel-CSPRNG entropy. Same shape across
+    // both layouts; the in-frame offset differs.
     u8 rand[16] = {0};
     (void)kern_random_bytes(rand, sizeof(rand));
 
     // Lay out the frame. The frame base is 16-byte aligned (exec.h
-    // _Static_assert); every field below is u64-aligned.
+    // _Static_assert + the round_up above); every u64 below is 8-aligned.
     u64 *w = (u64 *)frame;
-    w[0]  = 0;                           // argc
-    w[1]  = 0;                           // argv[0] — NULL terminator
-    w[2]  = 0;                           // envp[0] — NULL terminator
-    w[3]  = AT_PHDR;    w[4]  = phdr_va;
-    w[5]  = AT_PHENT;   w[6]  = phent;
-    w[7]  = AT_PHNUM;   w[8]  = phnum;
-    w[9]  = AT_PAGESZ;  w[10] = PAGE_SIZE;
-    w[11] = AT_RANDOM;  w[12] = sp + EXEC_INIT_RANDOM_OFFSET;
-    w[13] = AT_NULL;    w[14] = 0;
-    // w[15] is the 8-byte alignment pad — left zero (KP_ZERO from alloc).
+    if (!has_argv) {
+        // Shape A — argc=0, single NULL terminator for argv[].
+        w[0]  = 0;                           // argc
+        w[1]  = 0;                           // argv[0] — NULL terminator
+        w[2]  = 0;                           // envp[0] — NULL terminator
+        w[3]  = AT_PHDR;    w[4]  = phdr_va;
+        w[5]  = AT_PHENT;   w[6]  = phent;
+        w[7]  = AT_PHNUM;   w[8]  = phnum;
+        w[9]  = AT_PAGESZ;  w[10] = PAGE_SIZE;
+        w[11] = AT_RANDOM;  w[12] = sp + EXEC_INIT_RANDOM_OFFSET;
+        w[13] = AT_NULL;    w[14] = 0;
+        // w[15] is the 8-byte alignment pad — left zero.
+    } else {
+        // Shape B — argc real, argv[] points into the strings region.
+        // The strings region starts at (sp + random_offset_from_sp + 16);
+        // walk argv_data to compute each argv[i]'s user-VA.
+        u64 strings_user_va = sp + random_offset_from_sp + 16u;
 
-    u8 *rand_dst = frame + EXEC_INIT_RANDOM_OFFSET;
+        w[0] = (u64)argc;                    // argc
+
+        // argv[0..argc-1] point into the strings region. Walk argv_data
+        // NUL-by-NUL to find each string's start offset; argv[0] starts
+        // at offset 0, argv[i] at the byte AFTER the (i-1)-th NUL.
+        u32 cur_arg = 0;
+        u32 next_start = 0;
+        w[1 + 0] = strings_user_va + 0;       // argv[0] starts at offset 0
+        for (u32 i = 0; i < argv_data_len; i++) {
+            if (argv_data[i] == '\0') {
+                cur_arg++;
+                next_start = i + 1;
+                if (cur_arg < argc) {
+                    w[1 + cur_arg] = strings_user_va + next_start;
+                }
+            }
+        }
+        if (cur_arg != argc)
+            extinction("exec_build_init_stack: NUL count != argc post-validation");
+
+        w[1 + argc]   = 0;                   // argv[argc] = NULL terminator
+        w[2 + argc]   = 0;                   // envp[0]    = NULL terminator
+
+        // auxv at w[3 + argc .. 14 + argc]; 12 u64s (6 entries × 2).
+        u64 *auxv = &w[3 + argc];
+        auxv[0]  = AT_PHDR;   auxv[1]  = phdr_va;
+        auxv[2]  = AT_PHENT;  auxv[3]  = phent;
+        auxv[4]  = AT_PHNUM;  auxv[5]  = phnum;
+        auxv[6]  = AT_PAGESZ; auxv[7]  = PAGE_SIZE;
+        auxv[8]  = AT_RANDOM; auxv[9]  = sp + random_offset_from_sp;
+        auxv[10] = AT_NULL;   auxv[11] = 0;
+
+        // Copy argv strings into the strings region.
+        u8 *strings_dst = frame + random_offset_from_sp + 16u;
+        for (u32 i = 0; i < argv_data_len; i++) strings_dst[i] = (u8)argv_data[i];
+    }
+
+    u8 *rand_dst = frame + random_offset_from_sp;
     for (size_t i = 0; i < sizeof(rand); i++) rand_dst[i] = rand[i];
 
     return sp;
@@ -256,13 +343,31 @@ static u64 exec_build_init_stack(struct Proc *p, const struct elf_image *img) {
 // Public entry.
 // =============================================================================
 
-int exec_setup(struct Proc *p, const void *blob, size_t blob_size,
-               u64 *entry_out, u64 *sp_out) {
+// Internal: the unified exec body. exec_setup + exec_setup_with_argv are
+// thin wrappers that pass NULL/0/0 or the caller's argv buffer
+// respectively. Sharing the body avoids the divergence the earlier copy-
+// paste pattern would accumulate; argv flows transparently through to
+// exec_build_init_stack.
+static int exec_setup_argv_body(struct Proc *p,
+                                const void *blob, size_t blob_size,
+                                const char *argv_data, u32 argv_data_len,
+                                u32 argc,
+                                u64 *entry_out, u64 *sp_out) {
     if (!p || !blob || !entry_out || !sp_out) return -1;
     if (p->magic != PROC_MAGIC)                return -1;
     if (p->pgtable_root == 0)                  return -1;     // kproc rejected
     // v1.0: no replace-in-place; p must be clean.
     if (p->vmas != NULL)                       return -1;
+
+    // argv invariants (defense-in-depth — the syscall body has already
+    // checked these, but exec_setup_with_argv is exported to other
+    // callers and the contract is owned here too).
+    if (argc > 0) {
+        if (argv_data_len == 0 || !argv_data)  return -1;
+        if (argv_data[argv_data_len - 1] != '\0') return -1;
+    } else {
+        if (argv_data_len != 0)                return -1;
+    }
 
     struct elf_image img;
     int r = elf_load(blob, blob_size, &img);
@@ -281,9 +386,26 @@ int exec_setup(struct Proc *p, const void *blob, size_t blob_size,
         return -1;
     }
 
-    // Build the System V startup frame (argc / argv / envp / auxv) at
-    // the top of the user stack; *sp_out points at its `argc` word.
+    // Build the System V startup frame (argc / argv / envp / auxv +
+    // strings region under Shape B) at the top of the user stack;
+    // *sp_out points at its `argc` word.
     *entry_out = img.entry;
-    *sp_out    = exec_build_init_stack(p, &img);
+    *sp_out    = exec_build_init_stack(p, &img, argv_data, argv_data_len, argc);
     return 0;
+}
+
+int exec_setup(struct Proc *p, const void *blob, size_t blob_size,
+               u64 *entry_out, u64 *sp_out) {
+    return exec_setup_argv_body(p, blob, blob_size,
+                                /*argv_data=*/NULL, /*argv_data_len=*/0u,
+                                /*argc=*/0u,
+                                entry_out, sp_out);
+}
+
+int exec_setup_with_argv(struct Proc *p, const void *blob, size_t blob_size,
+                         const char *argv_data, u32 argv_data_len, u32 argc,
+                         u64 *entry_out, u64 *sp_out) {
+    return exec_setup_argv_body(p, blob, blob_size,
+                                argv_data, argv_data_len, argc,
+                                entry_out, sp_out);
 }
