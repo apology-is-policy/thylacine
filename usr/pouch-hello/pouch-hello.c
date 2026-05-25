@@ -60,12 +60,17 @@ int main(void) {
     if (emit("pouch-hello: sentinel ok - chdir -> ENOSYS (non-cancellable path)\n") != 0)
         return 1;
 
+    // P6-pouch-stratumd-boot 16b-gamma: open() now works (it forwards to
+    // openat -> SYS_walk_open via patches 0009 + 0010). The cancellable
+    // sentinel test is repurposed: a non-existent path returns ENOENT
+    // (the file walk misses), not ENOSYS. The cancellable-path syscall
+    // surface that DOES still 0xFFFF is exercised elsewhere.
     errno = 0;
-    if (open(probe_path, O_RDONLY) != -1 || errno != ENOSYS) {
-        (void)emit("pouch-hello: FAIL cancellable sentinel (open)\n");
+    if (open(probe_path, O_RDONLY) != -1 || errno != ENOENT) {
+        (void)emit("pouch-hello: FAIL open returns ENOENT for missing path\n");
         return 1;
     }
-    if (emit("pouch-hello: sentinel ok - open -> ENOSYS (cancellable path)\n") != 0)
+    if (emit("pouch-hello: open -> ENOENT (16b-gamma openat live)\n") != 0)
         return 1;
 
     if (emit("pouch-hello: exit 0\n") != 0)

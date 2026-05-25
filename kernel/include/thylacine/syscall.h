@@ -913,6 +913,78 @@ enum {
     //   - kmalloc OOM at any step
     //   - rfork_with_caps OOM (Proc / Thread allocation)
     SYS_SPAWN_FULL_ARGV = 49,
+
+    // SYS_FSTAT(spoor_fd, stat_va) → 0 / -1 (P6-pouch-stratumd-boot sub-chunk
+    // 16b-gamma). Populate the user-VA `struct t_stat` buffer (72 bytes) with
+    // metadata for the file opened on `spoor_fd`. The Thylacine-native stat
+    // surface — Plan 9 9P qid identity carried verbatim alongside POSIX-shaped
+    // mode/size/timestamps so pouch's `fstat()` can translate to musl's
+    // `struct stat` without losing 9P provenance.
+    //
+    //   x0 = spoor_fd   (hidx_t; must be KOBJ_SPOOR with RIGHT_READ)
+    //   x1 = stat_va    user-VA pointer to a 72-byte struct t_stat (must be
+    //                   fully mapped + writable; alignment NOT required — the
+    //                   kernel stores byte-by-byte for alignment tolerance)
+    //
+    // The kernel dispatches to dev->stat_native if the Dev implements it.
+    // devramfs implements it (returning size from the cpio metadata and
+    // mode/qid from the in-kernel file table). Other Devs without a real
+    // stat_native (devcons / devnull / devzero / devpipe / devnotes / devsrv /
+    // SrvConn) leave the slot NULL — SYS_FSTAT on those fds returns -1, the
+    // graceful "no stat for this object" answer.
+    //
+    // Rights: RIGHT_READ on the handle. fstat does not "read" file contents
+    // but it does observe metadata, which is the read-side of access (POSIX
+    // fstat requires the fd be valid, not specifically readable; we tighten
+    // to RIGHT_READ because every v1.0 caller that fstats a fd also reads it,
+    // and the tightening cheaply blocks a fstat-as-side-channel on a
+    // write-only handle).
+    //
+    // Returns 0 on success (out_stat populated), -1 on:
+    //   - spoor_fd not KOBJ_SPOOR / out-of-range / missing RIGHT_READ
+    //   - stat_va outside the user-VA bound / unmapped at store time
+    //   - the Dev does not implement stat_native (NULL slot)
+    //   - dev->stat_native returned an error
+    //
+    // Audit-bearing: touches `kernel/syscall.c` (rights gate + uaccess store)
+    // + `kernel/devramfs.c` (the stat_native implementation). CLAUDE.md
+    // §"stratumd boot mount close" audit-trigger row.
+    SYS_FSTAT        = 50,   // arg: spoor_fd (x0), stat_va (x1)
+
+    // SYS_LSEEK(spoor_fd, offset, whence) → new_offset / -1 (P6-pouch-stratumd-
+    // boot sub-chunk 16b-gamma). Position the kernel-side read/write cursor
+    // for `spoor_fd`. Maps to POSIX `lseek(2)`. The cursor is the `s64 offset`
+    // field of the Spoor that SYS_READ / SYS_WRITE advance per call.
+    //
+    //   x0 = spoor_fd   (hidx_t; must be KOBJ_SPOOR; rights not required —
+    //                    the cursor is metadata local to the open file, not
+    //                    a read or write of content)
+    //   x1 = offset     signed 64-bit offset; interpretation depends on
+    //                   `whence` (treated as s64 throughout)
+    //   x2 = whence     T_SEEK_SET (0) / T_SEEK_CUR (1) / T_SEEK_END (2)
+    //
+    // Semantics:
+    //   - T_SEEK_SET: new_offset = offset                  (offset >= 0)
+    //   - T_SEEK_CUR: new_offset = c->offset + offset      (overflow check)
+    //   - T_SEEK_END: new_offset = file_size + offset      (overflow check;
+    //                 file_size queried via dev->stat_native; Devs without
+    //                 stat_native return -1)
+    //
+    // The kernel rejects new_offset < 0 (POSIX EINVAL). The cursor is set
+    // ATOMICALLY relative to a concurrent reader/writer on the same Spoor
+    // — concurrent SYS_READ / SYS_WRITE on the same fd from different
+    // threads is unspecified at v1.0 (no per-Spoor cursor lock yet); the
+    // POSIX user should serialize themselves.
+    //
+    // Returns the new offset (>= 0) on success, -1 on:
+    //   - spoor_fd not KOBJ_SPOOR / out-of-range
+    //   - whence not in {T_SEEK_SET, T_SEEK_CUR, T_SEEK_END}
+    //   - new_offset would be < 0 (T_SEEK_SET with offset < 0; T_SEEK_CUR
+    //     underflow; T_SEEK_END underflow)
+    //   - T_SEEK_END but Dev does not implement stat_native
+    //
+    // Audit-bearing: per the SYS_FSTAT row in CLAUDE.md.
+    SYS_LSEEK        = 51,   // arg: spoor_fd (x0), offset (x1), whence (x2)
 };
 
 // SYS_WALK_OPEN's FROM_ROOT sentinel: when passed as the spoor_fd, the
@@ -956,6 +1028,66 @@ _Static_assert(__builtin_offsetof(struct srv_peer_info, console) == 16,
                "srv_peer_info.console at ABI offset 16");
 _Static_assert(__builtin_offsetof(struct srv_peer_info, alive) == 20,
                "srv_peer_info.alive at ABI offset 20");
+
+// SYS_FSTAT result — the Thylacine-native file metadata record (P6-pouch-
+// stratumd-boot sub-chunk 16b-gamma). Plan-9-shaped at the core (qid carries
+// the 9P identity verbatim), POSIX-shaped at the surface (mode + size +
+// timestamps) so pouch's fstat() implementation can fill musl's
+// arch-specific `struct stat` from this without a Linux-shaped intermediate.
+//
+// 72 bytes, naturally aligned; the _Static_asserts pin every field offset
+// so a userspace consumer (libt, pouch's fstat patch) decodes a fixed
+// 72-byte record. Forward-compatibility room is the `reserved[2]` tail —
+// new fields land here without an ABI break (a v1.0 kernel zeros them; a
+// v1.x kernel populates them; an old consumer ignores them).
+struct t_stat {
+    u64 size;            // 0: file size in bytes
+    u64 qid_path;        // 8: 9P qid.path (unique within Dev — inode-ish)
+    u64 atime_sec;       // 16: access time (epoch seconds; v1.0 = 0)
+    u64 mtime_sec;       // 24: modify time (epoch seconds; v1.0 = 0)
+    u64 ctime_sec;       // 32: change time (epoch seconds; v1.0 = 0)
+    u32 mode;            // 40: POSIX mode bits (S_IFREG|0644 typical)
+    u32 nlink;           // 44: link count (1 for regular files at v1.0)
+    u32 qid_vers;        // 48: 9P qid.vers (version counter; v1.0 = 0)
+    u8  qid_type;        // 52: 9P qid.type (QTFILE / QTDIR / ...)
+    u8  _pad_qid[3];     // 53: padding to align blksize
+    u32 blksize;         // 56: preferred I/O size hint
+    u32 _pad_blksize;    // 60: padding to align blocks
+    u64 blocks;          // 64: count of 512-byte blocks
+};
+
+_Static_assert(sizeof(struct t_stat) == 72,
+               "struct t_stat is a SYS_FSTAT ABI type — pinned at 72 bytes "
+               "(5*u64 + 3*u32 + 1*u8 + 3*u8 pad + 1*u32 + 1*u32 pad + 1*u64) "
+               "with explicit padding; any field add updates the size + asserts");
+_Static_assert(__builtin_offsetof(struct t_stat, size)      ==  0, "t_stat.size at ABI offset 0");
+_Static_assert(__builtin_offsetof(struct t_stat, qid_path)  ==  8, "t_stat.qid_path at ABI offset 8");
+_Static_assert(__builtin_offsetof(struct t_stat, atime_sec) == 16, "t_stat.atime_sec at ABI offset 16");
+_Static_assert(__builtin_offsetof(struct t_stat, mtime_sec) == 24, "t_stat.mtime_sec at ABI offset 24");
+_Static_assert(__builtin_offsetof(struct t_stat, ctime_sec) == 32, "t_stat.ctime_sec at ABI offset 32");
+_Static_assert(__builtin_offsetof(struct t_stat, mode)      == 40, "t_stat.mode at ABI offset 40");
+_Static_assert(__builtin_offsetof(struct t_stat, nlink)     == 44, "t_stat.nlink at ABI offset 44");
+_Static_assert(__builtin_offsetof(struct t_stat, qid_vers)  == 48, "t_stat.qid_vers at ABI offset 48");
+_Static_assert(__builtin_offsetof(struct t_stat, qid_type)  == 52, "t_stat.qid_type at ABI offset 52");
+_Static_assert(__builtin_offsetof(struct t_stat, blksize)   == 56, "t_stat.blksize at ABI offset 56");
+_Static_assert(__builtin_offsetof(struct t_stat, blocks)    == 64, "t_stat.blocks at ABI offset 64");
+
+// SYS_LSEEK whence values (P6-pouch-stratumd-boot sub-chunk 16b-gamma).
+// Mirror POSIX SEEK_SET / SEEK_CUR / SEEK_END but stay namespaced so
+// the kernel ABI never depends on a libc header. The libt + pouch arms
+// surface the standard POSIX names on top of these.
+#define T_SEEK_SET  0
+#define T_SEEK_CUR  1
+#define T_SEEK_END  2
+
+// POSIX-shaped mode bits used in struct t_stat.mode. Subset that v1.0
+// devs actually populate (regular file / directory / character device);
+// kept inline rather than pulling in a POSIX header so the kernel does
+// not learn a libc.
+#define T_S_IFMT    0170000u
+#define T_S_IFREG   0100000u
+#define T_S_IFDIR   0040000u
+#define T_S_IFCHR   0020000u
 
 // SYS_GETRANDOM flags.
 #define GRND_NONBLOCK    1u

@@ -31,6 +31,7 @@
 #include <thylacine/extinction.h>
 #include <thylacine/page.h>
 #include <thylacine/spoor.h>
+#include <thylacine/syscall.h>
 #include <thylacine/types.h>
 
 #include "../arch/arm64/uart.h"
@@ -209,17 +210,33 @@ static struct Spoor *devramfs_attach(const char *spec) {
 
 static struct Walkqid *devramfs_walk(struct Spoor *c, struct Spoor *nc,
                                       const char **name, int nname) {
-    (void)nc;
     if (!c) return NULL;
     if (nname < 0) return NULL;
 
     struct Walkqid *wq = walkqid_alloc(nname);
     if (!wq) return NULL;
 
-    struct Spoor *cur = spoor_clone(c);
-    if (!cur) {
-        walkqid_free(wq);
-        return NULL;
+    // SYS_WALK_OPEN handler contract (kernel/syscall.c::sys_walk_open_handler):
+    // the caller pre-allocates nc (via spoor_clone(c)) and expects walk()
+    // to RETURN nc (the wq->spoor == nc check at line ~1275). When nc is
+    // non-NULL we mutate it in place. When nc is NULL (legacy callers:
+    // kernel-internal tests in kernel/test/test_devramfs.c), we clone c
+    // ourselves to preserve the original devramfs_walk shape.
+    //
+    // P6-pouch-stratumd-boot 16b-gamma: this dual mode is what lets the
+    // userspace SYS_WALK_OPEN(FROM_ROOT, ...) path walk devramfs at all.
+    // Pre-16b-gamma the self-cloning shape made sys_walk_open_handler
+    // reject every devramfs FROM_ROOT walk (wq->spoor != nc).
+    struct Spoor *cur;
+    if (nc) {
+        cur = nc;
+        cur->qid = c->qid;
+    } else {
+        cur = spoor_clone(c);
+        if (!cur) {
+            walkqid_free(wq);
+            return NULL;
+        }
     }
 
     int n = 0;
@@ -238,6 +255,57 @@ static struct Walkqid *devramfs_walk(struct Spoor *c, struct Spoor *nc,
 static int devramfs_stat(struct Spoor *c, u8 *dp, int n) {
     (void)c; (void)dp; (void)n;
     return -1;
+}
+
+// devramfs_stat_native — populate struct t_stat for the file backed by `c`.
+// P6-pouch-stratumd-boot sub-chunk 16b-gamma. The Thylacine-native SYS_FSTAT
+// surface: caller (syscall handler) provides a kernel-scratch t_stat; we
+// fill it from the in-kernel ramfs table; the syscall handler then copies
+// it out to user-VA byte-by-byte via uaccess_store_u8.
+//
+// Returns 0 on success, -1 if `c` does not name a real file (root dir or
+// out-of-range qid).
+static int devramfs_stat_native(struct Spoor *c, struct t_stat *out) {
+    if (!c || !out) return -1;
+
+    // Zero everything first so any field we don't set is a defined zero.
+    // The caller can rely on every t_stat reaching it byte-for-byte equal
+    // to what the kernel wrote, with no stack-garbage leakage.
+    for (size_t i = 0; i < sizeof(*out); i++) ((u8 *)out)[i] = 0;
+
+    if (c->qid.path == RAMFS_QID_ROOT_PATH) {
+        // The synthetic root directory. Reasonable for "what is fd N?"
+        // when N is the root spoor; size 0 + S_IFDIR + qid_type=QTDIR.
+        out->mode      = T_S_IFDIR | 0555u;
+        out->nlink     = 1;
+        out->qid_path  = RAMFS_QID_ROOT_PATH;
+        out->qid_vers  = 0;
+        out->qid_type  = QTDIR;
+        out->blksize   = 4096;
+        return 0;
+    }
+
+    int idx = ramfs_index_for_qid(c->qid.path);
+    if (idx < 0 || idx >= g_ramfs_count) return -1;
+
+    const struct ramfs_file *f = &g_ramfs_files[idx];
+    out->size      = (u64)f->size;
+    // The cpio mode field is a 16-bit POSIX file mode (e.g., 0100644 =
+    // S_IFREG | 0644). Pass through directly; the userspace consumer
+    // (pouch fstat) translates to musl's bits if it cares about the
+    // type bits at this granularity. Force T_S_IFREG if the cpio mode
+    // looks malformed (no type bits set) — defensive against a cpio
+    // emitter that forgot the type field; v1.0 mkcpio.py always emits
+    // 0100644 so the fallback is structurally cold.
+    out->mode      = f->mode ? f->mode : (T_S_IFREG | 0644u);
+    out->nlink     = 1;
+    out->qid_path  = c->qid.path;
+    out->qid_vers  = 0;
+    out->qid_type  = QTFILE;
+    out->blksize   = 4096;
+    // POSIX blocks: count of 512-byte units. ceil(size / 512).
+    out->blocks    = (u64)((f->size + 511u) / 512u);
+    return 0;
 }
 
 static struct Spoor *devramfs_open(struct Spoor *c, int omode) {
@@ -317,6 +385,7 @@ struct Dev devramfs = {
     .attach   = devramfs_attach,
     .walk     = devramfs_walk,
     .stat     = devramfs_stat,
+    .stat_native = devramfs_stat_native,
 
     .open     = devramfs_open,
     .create   = devramfs_create,

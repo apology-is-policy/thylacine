@@ -1260,17 +1260,84 @@ int main(void) {
 
     t_putstr("joey: corvus-d hybrid-PKE round-trip verified via /srv/corvus (b3b)\n");
 
-    // === stratumd boot pool mount (P6-pouch-stratumd-boot sub-chunk 16b-beta) ===
+    // P6-pouch-stratumd-boot 16b-gamma sanity: walk /system.key from the
+    // ramfs root via t_walk_open + t_fstat from joey itself. This isolates
+    // whether the kernel-side SYS_FSTAT + SYS_WALK_OPEN(FROM_ROOT) work
+    // BEFORE attempting stratumd's pouch-musl-mediated open+fstat. If
+    // joey's direct call fails here, the kernel surface is broken; if it
+    // succeeds but stratumd still fails, the pouch musl arm is the issue.
+    {
+        static const char sk_name[] = "system.key";
+        long sk_fd = t_walk_open(T_WALK_OPEN_FROM_ROOT, sk_name,
+                                  sizeof(sk_name) - 1, T_OREAD);
+        if (sk_fd < 0) {
+            t_putstr("joey: probe /system.key walk_open FAILED\n");
+            return 1;
+        }
+        struct t_stat sk_st;
+        long sk_rc = t_fstat(sk_fd, &sk_st);
+        if (sk_rc != 0) {
+            t_putstr("joey: probe /system.key fstat FAILED rc=");
+            t_putstr(itoa_dec(sk_rc, buf, sizeof(buf)));
+            t_putstr("\n");
+            (void)t_close(sk_fd);
+            return 1;
+        }
+        t_putstr("joey: probe /system.key fstat OK size=");
+        t_putstr(itoa_dec((long)sk_st.size, buf, sizeof(buf)));
+        t_putstr(" mode=0o");
+        // print octal mode manually (itoa_dec is decimal)
+        {
+            unsigned int m = sk_st.mode;
+            char obuf[12];
+            int oi = (int)sizeof(obuf) - 1;
+            obuf[oi--] = '\0';
+            if (m == 0) obuf[oi--] = '0';
+            while (m && oi >= 0) {
+                obuf[oi--] = (char)('0' + (m & 7));
+                m >>= 3;
+            }
+            t_putstr(&obuf[oi + 1]);
+        }
+        t_putstr("\n");
+        // Also exercise t_lseek SEEK_END to verify the size path.
+        long sk_end = t_lseek(sk_fd, 0, T_SEEK_END);
+        if (sk_end != (long)sk_st.size) {
+            t_putstr("joey: probe /system.key lseek SEEK_END mismatch (got ");
+            t_putstr(itoa_dec(sk_end, buf, sizeof(buf)));
+            t_putstr(")\n");
+            (void)t_close(sk_fd);
+            return 1;
+        }
+        long sk_set = t_lseek(sk_fd, 0, T_SEEK_SET);
+        if (sk_set != 0) {
+            t_putstr("joey: probe /system.key lseek SEEK_SET FAILED rc=");
+            t_putstr(itoa_dec(sk_set, buf, sizeof(buf)));
+            t_putstr("\n");
+            (void)t_close(sk_fd);
+            return 1;
+        }
+        (void)t_close(sk_fd);
+        t_putstr("joey: probe /system.key lseek SEEK_END/SEEK_SET OK\n");
+    }
+
+    // === stratumd boot pool mount (P6-pouch-stratumd-boot sub-chunk 16b-gamma) ===
     //
     // The real end-to-end integration: spawn stratumd with argv pointing at
     // the pre-generated pool fixture, CAP_HW_CREATE granted from joey, and
     // SPAWN_PERM_MAY_POST_SERVICE for bind() onto /srv/stratum-fs. stratumd
     // claims the virtio-mmio bank via bdev_thylacine.c (Stratum-side arm on
     // the thylacine-pouch-arm branch), finds the second virtio-blk-device
-    // (the pool backing; QEMU virt slot 30), reads pool.img's superblock,
+    // (the pool backing; QEMU virt slot 31 — HIGH-to-LOW scan picks the
+    // pool first), reads pool.img's superblock via the bdev I/O ops,
     // mounts the FS, accepts the system.key wrap-keyfile from the literal
-    // ramfs file at /etc/stratum/system.key (per K1 initramfs-literal boot
-    // key, scripture commit e82e945), and binds /srv/stratum-fs.
+    // ramfs file at /system.key (16b-gamma scope reduction: flat-cpio
+    // root placement; FHS-shaped /etc/stratum/ is a v1.x lift atop the
+    // devramfs subdir walk), and binds /srv/stratum-fs.
+    //
+    // 16b-gamma closes this: kernel SYS_FSTAT + SYS_LSEEK exposed at the
+    // pouch musl ABI (patches 0010-pouch-fstat-lseek); stm_keyfile_load
+    // open/fstat/peek/lseek/read sequence succeeds end-to-end.
     //
     // Joey verifies the bind by attempting t_srv_connect on the service
     // name. A bounded-retry loop tolerates the race between t_spawn_full_argv
@@ -1281,7 +1348,7 @@ int main(void) {
     // SUBSUMED by this one: the new probe spawning succeeded confirms the
     // binary loads + libc init ran + argv parsing executed (the 16a
     // contract); successful t_srv_connect after spawn confirms mount + bind
-    // (the additional 16b-beta contract). No need for both.
+    // (the additional 16b-gamma contract). No need for both.
     //
     // stratumd is NOT reaped here. Joey continues to do_stratumd_stub_-
     // bringup() afterwards (the stub demo uses pipes, not /srv, so no
@@ -1290,7 +1357,7 @@ int main(void) {
     // joey to use stratumd's real FS.
     {
         // argv = { "stratumd", "/dev/virtio-blk", "--listen",
-        //          "/srv/stratum-fs", "--keyfile", "/etc/stratum/system.key" }.
+        //          "/srv/stratum-fs", "--keyfile", "/system.key" }.
         // The flat buffer concatenates with explicit NUL terminators;
         // the trailing C-implicit NUL is excluded via the sizeof - 1.
         // bdev_thylacine.c ignores the path argument (slot determined by
@@ -1302,10 +1369,10 @@ int main(void) {
             "--listen\0"
             "/srv/stratum-fs\0"
             "--keyfile\0"
-            "/etc/stratum/system.key\0";
+            "/system.key\0";
         // 6 strings: "stratumd" (9) + "/dev/virtio-blk" (16) +
         // "--listen" (9) + "/srv/stratum-fs" (16) + "--keyfile" (10) +
-        // "/etc/stratum/system.key" (24) = 84 bytes.
+        // "/system.key" (12) = 72 bytes.
         struct t_sys_spawn_args sd_req = {
             .name_va       = (unsigned long)sd_name,
             .argv_data_va  = (unsigned long)sd_argv_data,
@@ -1357,20 +1424,22 @@ int main(void) {
         // so stratumd has time to libsodium-init + bdev_thylacine MMIO
         // claim + pool mount + pthread spawn + listen + bind.
         //
-        // v1.0 status: the full mount path is gated on TWO pouch-side
-        // POSIX lifts not yet implemented at the end of this sub-chunk:
-        //   - pouch fstat() (still __NR_fstat = 0xFFFF sentinel)
-        //   - devramfs subdirectory walk (mkcpio is flat-only at v1.0,
-        //     so /etc/stratum/system.key can't actually exist in the
-        //     ramfs even with the openat path-walk patch landing here)
-        // So the connect retry-loop is expected to exhaust until both
-        // lifts land in a follow-up chunk (16b-gamma). This probe
-        // captures stratumd's stderr output for diagnostic and reports
-        // the failure as a NON-FATAL status (continue boot). The
-        // foundation (bdev_thylacine.c MMIO/DMA/IRQ claim + virtio-blk
-        // device detection + pool fixture + QEMU wiring + argv +
-        // CAP_HW_CREATE flow) is what this sub-chunk lands; the mount
-        // completion gates on the keyfile-path lifts.
+        // 16b-gamma-syscalls (this checkpoint) lands the SYS_FSTAT +
+        // SYS_LSEEK kernel surfaces + the pouch open() -> openat()
+        // redirect + the devramfs walk reuse-nc + the partial-walk
+        // reject. stratumd reaches stm_fs_mount and successfully:
+        //   - opens /system.key
+        //   - fstats it (size 3656)
+        //   - read-peeks the magic header
+        //   - keyfile_load returns OK
+        //   - stm_bdev_open(THYLACINE) claims MMIO + DMA + IRQ + does
+        //     VirtIO init + reports capacity = 64 MiB
+        //   - stm_sb_mount_scan fails STM_ENOENT — bdev_thylacine's
+        //     read I/O isn't returning the pool's on-disk uberblocks
+        //     to Stratum.
+        //
+        // The bdev-I/O block is a separate v1.x sub-chunk (16b-gamma-
+        // mount-close). This probe stays NON-FATAL until that lands.
         static const char srv_name[] = "stratum-fs";
         long sd_srv_fd = -1;
         for (int i = 0; i < 600; i++) {
@@ -1385,8 +1454,8 @@ int main(void) {
         }
 
         if (sd_srv_fd < 0) {
-            t_putstr("joey: stratumd-boot /srv/stratum-fs not bound (expected at this sub-chunk; "
-                     "keyfile-path completion gates on follow-up)\n");
+            t_putstr("joey: stratumd-boot /srv/stratum-fs not bound (16b-gamma-syscalls; "
+                     "bdev_thylacine read-path is the next blocker)\n");
             // Reap stratumd; drain its stderr for diagnostic so the boot
             // log records where the mount path stopped.
             int wedged_status = -1;
@@ -1403,16 +1472,11 @@ int main(void) {
             (void)t_close(sd_rd);
             // NON-FATAL: continue boot.
         } else {
-            // Connection works. Release joey's client handle (the per-Proc
-            // /srv-client cap is 1; subsequent t_srv_connect attempts from
-            // joey would refuse until we drop this).
+            // Connection works. Release joey's client handle.
             if (t_close(sd_srv_fd) != 0) {
                 t_putstr("joey: stratumd-boot t_close(srv_fd) FAILED\n");
                 return 1;
             }
-            // Drop the rd pipe; stratumd's fd 1+2 wr refs will start failing
-            // with SIGPIPE once it tries to write again, but at v1.0 we accept
-            // that as the natural way to signal "joey is done observing".
             (void)t_close(sd_rd);
         }
     }

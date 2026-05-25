@@ -41,11 +41,14 @@
 
 #include <thylacine/joey.h>
 
+#include <thylacine/dev.h>
 #include <thylacine/devramfs.h>
 #include <thylacine/elf.h>
 #include <thylacine/exec.h>
 #include <thylacine/extinction.h>
 #include <thylacine/proc.h>
+#include <thylacine/spoor.h>
+#include <thylacine/territory.h>
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 
@@ -144,6 +147,34 @@ void joey_run(void) {
     // ELF loader requires.
     const u8 *src = (const u8 *)cpio_blob;
     for (size_t i = 0; i < blob_size; i++) g_joey_elf_blob[i] = src[i];
+
+    // P6-pouch-stratumd-boot 16b-gamma: stamp kproc's Territory with a
+    // root_spoor pointing at devramfs root, BEFORE rforking joey. The
+    // child Territory clone inherits root_spoor (territory.c::territory_clone
+    // deep-copies + spoor_refs), so joey + every descendant Proc has a
+    // sane default for SYS_WALK_OPEN(FROM_ROOT, ...) walks. Without this,
+    // joey's territory->root_spoor is NULL and FROM_ROOT walks return -1
+    // until the Proc itself calls SYS_CHROOT. stratumd's keyfile load
+    // path (open("/system.key", O_RDONLY) via the pouch openat-over-
+    // walk_open patch) needs FROM_ROOT to resolve, and stratumd has no
+    // chroot of its own to issue.
+    //
+    // Refcount discipline: devramfs_attach returns ref=1 (the dev_simple_-
+    // attach pattern); territory_chroot takes its own ref (ref=2); we
+    // spoor_unref to drop back to ref=1 (territory's ref only). On
+    // Territory destruction the ref is released; for the long-lived
+    // kproc Territory at v1.0 this happens at shutdown.
+    {
+        struct Spoor *ramfs_root = devramfs.attach(NULL);
+        if (!ramfs_root) extinction("joey: devramfs.attach for root_spoor failed");
+        struct Thread *kt = current_thread();
+        if (!kt || !kt->proc || !kt->proc->territory)
+            extinction("joey: no kproc territory");
+        if (territory_chroot(kt->proc->territory, ramfs_root) != 0)
+            extinction("joey: territory_chroot to devramfs root failed");
+        spoor_unref(ramfs_root);
+        uart_puts("  joey: kproc territory rooted at devramfs (FROM_ROOT walks live)\n");
+    }
 
     uart_puts("  joey: rforking child for /joey (");
     uart_putdec((u64)blob_size);

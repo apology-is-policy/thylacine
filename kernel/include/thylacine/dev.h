@@ -40,6 +40,7 @@ struct Spoor;
 struct Walkqid;
 struct Block;       // 9P-style block I/O carrier; defined when bread/bwrite-using devs land
 struct poll_waiter; // <thylacine/poll.h>; the hook a polling thread installs on .poll
+struct t_stat;      // <thylacine/syscall.h>; the SYS_FSTAT native metadata record
 
 // The Plan 9 Dev vtable. ARCH §9.2 verbatim with C99 const additions on
 // input strings (read-only inputs that were `char *` in 9front; we
@@ -70,10 +71,21 @@ struct Dev {
     //                              succeeded.
     //   stat(c, dp, n) — write 9P stat to dp[0:n]; returns bytes
     //                    written or -1 on failure.
+    //   stat_native(c, out) — Thylacine-native fstat surface (P6-pouch-
+    //                    stratumd-boot sub-chunk 16b-gamma). Fill *out
+    //                    with the file's metadata in struct t_stat shape.
+    //                    Returns 0 on success, -1 on failure. A NULL slot
+    //                    means "no native stat available" — SYS_FSTAT on
+    //                    a Spoor backed by such a Dev returns -1. Devs
+    //                    that have real file metadata (devramfs in
+    //                    particular) implement this; trivial leaf Devs
+    //                    (devcons / devnull / devzero / devnotes) leave
+    //                    the slot NULL.
     struct Spoor   *(*attach)(const char *spec);
     struct Walkqid *(*walk)(struct Spoor *c, struct Spoor *nc,
                             const char **name, int nname);
     int             (*stat)(struct Spoor *c, u8 *dp, int n);
+    int             (*stat_native)(struct Spoor *c, struct t_stat *out);
 
     // Open / create / close.
     //   open(c, omode) — transition c from "walked" to "opened". Returns

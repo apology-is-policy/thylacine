@@ -1,0 +1,207 @@
+pouch boundary-line patch 0010 - native fstat() + lseek() arm.
+
+Phase 6 sub-chunk 16b-gamma (pouch-stratumd-boot mount close, audit-bearing).
+Arms the Thylacine kernel's SYS_FSTAT (50) and SYS_LSEEK (51) at the pouch
+musl ABI surface so stratumd's stm_keyfile_load can call fstat() to learn
+the keyfile size and lseek() to rewind the fd between header peek and full
+read.
+
+Two changes:
+
+1. arch/aarch64/bits/syscall.h.in: re-define __NR_fstat and __NR_lseek
+   from the 0xFFFF ENOSYS sentinel (parked by 0001-pouch-syscall-seam.patch)
+   to the live Thylacine kernel ABI numbers. Both are appended at the end
+   of the file with explicit #undef + #define so the redefinition is loud
+   to a future patch reader.
+
+2. src/stat/fstat.c: replace the upstream "fstat → fstatat(SYS_statx)"
+   path with a direct SYS_fstat call. The kernel populates a 72-byte
+   struct t_stat (Thylacine-native; documented in
+   kernel/include/thylacine/syscall.h); the patched fstat.c translates
+   it field-by-field into musl's aarch64 struct stat. Timestamps map
+   1:1 (sub-second always zero at v1.0). uid/gid/device numbers stay
+   zero (Thylacine v1.0 has no per-Proc uid/gid; devramfs files have
+   no device number distinct from the Dev itself).
+
+   This is the SAME boundary-line discipline (P-3 of POUCH-DESIGN.md):
+   the patch routes a portable upper-half POSIX surface (fstat) onto
+   a Thylacine-native kernel ABI without leaking Linux-shaped state.
+
+src/unistd/lseek.c is unchanged - musl's lseek() already calls
+syscall(SYS_lseek, fd, offset, whence), which matches the Thylacine
+SYS_LSEEK kernel ABI one-to-one. Once __NR_lseek is no longer 0xFFFF
+(this patch), lseek "just works".
+
+Stratumd's stm_keyfile_load (the proving consumer for this sub-chunk)
+calls:
+  open("/system.key", O_RDONLY)
+  fstat(fd, &st)              # this patch
+  read(fd, header, 8)
+  lseek(fd, 0, SEEK_SET)      # this patch
+  read(fd, buf, KEYFILE_SIZE)
+  close(fd)
+
+After this patch lands, all five succeed on Thylacine and the system
+pool's wrap key reaches stm_fs_mount.
+
+Per CLAUDE.md "stratumd boot mount close" audit-trigger row.
+
+diff -u a/arch/aarch64/bits/syscall.h.in b/arch/aarch64/bits/syscall.h.in
+--- a/arch/aarch64/bits/syscall.h.in
++++ b/arch/aarch64/bits/syscall.h.in
+@@ -434,3 +434,28 @@
+  * resolves to the caller's Territory root_spoor.
+  */
+ #define __NR_walk_open 34
++
++/*
++ * pouch / Thylacine native fstat + lseek extensions (P6-pouch-stratumd-
++ * boot, sub-chunk 16b-gamma). The matched kernel surfaces are
++ * SYS_FSTAT = 50 and SYS_LSEEK = 51 (kernel/include/thylacine/syscall.h).
++ *
++ * The 0001-pouch-syscall-seam patch parked the upstream-Linux
++ * SYS_fstat (80) + SYS_lseek (62) at the 0xFFFF ENOSYS sentinel so
++ * naive musl callers would EFAULT-quickly rather than dispatch a
++ * Linux-shaped syscall that Thylacine doesn't speak. We #undef the
++ * sentinels and re-define them to the Thylacine kernel ABI numbers.
++ *
++ * src/stat/fstat.c is rewritten to call SYS_fstat directly with a
++ * struct t_stat buffer (72 bytes) and translate to musl's
++ * struct stat. src/unistd/lseek.c is unchanged - it calls
++ * SYS_lseek(fd, offset, whence) which matches the kernel ABI
++ * one-to-one.
++ *
++ * Gate: SYS_FSTAT requires RIGHT_READ on the fd; SYS_LSEEK requires
++ * the fd be a KOBJ_SPOOR (any rights). Both fail -1 on bad fd.
++ */
++#undef  __NR_fstat
++#define __NR_fstat 50
++#undef  __NR_lseek
++#define __NR_lseek 51
+diff -u a/src/stat/fstat.c b/src/stat/fstat.c
+--- a/src/stat/fstat.c
++++ b/src/stat/fstat.c
+@@ -1,13 +1,83 @@
+-#define _BSD_SOURCE
++/*
++ * pouch fstat() — translate the Thylacine native SYS_fstat surface
++ * (struct t_stat, 72 bytes; kernel/include/thylacine/syscall.h) into
++ * musl's aarch64 struct stat (arch/aarch64/bits/stat.h).
++ *
++ * P6-pouch-stratumd-boot sub-chunk 16b-gamma. The upstream
++ * __fstatat-based path Linux uses (statx + translation) does NOT
++ * work on Thylacine: SYS_statx (291) + SYS_newfstatat (79) are both
++ * 0xFFFF ENOSYS sentinels under the seam. We bypass the entire
++ * upstream fstat plumbing and call the Thylacine-native SYS_fstat
++ * directly. The kernel returns 0 on success and populates the
++ * 72-byte t_stat; we fill struct stat from those fields.
++ *
++ * The translation is straight-line: every t_stat field maps to
++ * exactly one struct stat field. v1.0 always-zero fields (timestamps,
++ * uid/gid, st_dev, st_rdev) translate to zero on the userspace side
++ * too. The struct stat layout for aarch64 is:
++ *   st_dev / st_ino / st_mode / st_nlink / st_uid / st_gid / st_rdev /
++ *   pad / st_size / st_blksize / pad2 / st_blocks / st_atim / st_mtim /
++ *   st_ctim / pad[2]
++ */
+ #include <sys/stat.h>
+ #include <errno.h>
+-#include <fcntl.h>
+ #include "syscall.h"
+
++/* Mirror of <thylacine/syscall.h> struct t_stat. Hand-rolled here so
++ * the patch is self-contained against vendored musl without pulling in
++ * a Thylacine kernel header from a userspace libc translation unit.
++ * Field offsets must match the kernel ABI exactly. */
++struct t_stat {
++	unsigned long size;        /*  0 */
++	unsigned long qid_path;    /*  8 */
++	unsigned long atime_sec;   /* 16 */
++	unsigned long mtime_sec;   /* 24 */
++	unsigned long ctime_sec;   /* 32 */
++	unsigned int  mode;        /* 40 */
++	unsigned int  nlink;       /* 44 */
++	unsigned int  qid_vers;    /* 48 */
++	unsigned char qid_type;    /* 52 */
++	unsigned char _pad_qid[3]; /* 53 */
++	unsigned int  blksize;     /* 56 */
++	unsigned int  _pad_blksize;/* 60 */
++	unsigned long blocks;      /* 64 */
++};
++_Static_assert(sizeof(struct t_stat) == 72,
++               "pouch fstat: t_stat ABI must match Thylacine kernel (72 bytes)");
++
+ int __fstat(int fd, struct stat *st)
+ {
+-	if (fd<0) return __syscall_ret(-EBADF);
+-	return __fstatat(fd, "", st, AT_EMPTY_PATH);
++	struct t_stat t;
++	long rc;
++	unsigned i;
++
++	if (fd < 0)    return __syscall_ret(-EBADF);
++	if (!st)       return __syscall_ret(-EFAULT);
++
++	rc = __syscall(SYS_fstat, fd, &t);
++	if (rc < 0)    return __syscall_ret(rc);
++	/* Thylacine SYS_fstat returns -1 on any error; treat anything
++	 * non-zero as -EBADF (the most common error after a kernel
++	 * fd-validation rejection). Granular errno is a v1.x lift. */
++	if (rc != 0)   return __syscall_ret(-EBADF);
++
++	/* Zero everything first so any field we don't populate from t_stat
++	 * is a defined zero (matches the v1.0 Thylacine semantics: no
++	 * timestamps, no uid/gid tracking, no device numbers). */
++	for (i = 0; i < sizeof(*st); i++) ((unsigned char *)st)[i] = 0;
++
++	st->st_size    = (off_t)t.size;
++	st->st_mode    = (mode_t)t.mode;
++	st->st_nlink   = (nlink_t)t.nlink;
++	st->st_ino     = (ino_t)t.qid_path;
++	st->st_blksize = (blksize_t)t.blksize;
++	st->st_blocks  = (blkcnt_t)t.blocks;
++	st->st_atim.tv_sec  = (time_t)t.atime_sec;
++	st->st_mtim.tv_sec  = (time_t)t.mtime_sec;
++	st->st_ctim.tv_sec  = (time_t)t.ctime_sec;
++	/* tv_nsec stays zero — v1.0 kernel does not track sub-second times. */
++
++	return 0;
+ }
+
+ weak_alias(__fstat, fstat);
+diff -u a/src/fcntl/open.c b/src/fcntl/open.c
+--- a/src/fcntl/open.c
++++ b/src/fcntl/open.c
+@@ -1,6 +1,20 @@
++/*
++ * pouch open() — defer to the patched openat() C function rather than
++ * dispatching SYS_openat directly. P6-pouch-stratumd-boot 16b-gamma.
++ *
++ * The upstream musl open() expands __sys_open_cp into a direct
++ * __syscall(SYS_openat, AT_FDCWD, ...) which on Thylacine hits the
++ * SYS_openat = 0xFFFF ENOSYS sentinel (parked by 0001-pouch-syscall-
++ * seam.patch). The patched openat.c (0009-pouch-openat.patch) is
++ * never called from inside musl because of this bypass.
++ *
++ * The fix is straight-line: forward open() to openat(AT_FDCWD, ...)
++ * which IS the patched openat C function. O_CLOEXEC is silently
++ * accepted (every Thylacine handle is cloexec by construction —
++ * documented in patch 0009).
++ */
+ #include <fcntl.h>
+ #include <stdarg.h>
+-#include "syscall.h"
+
+ int open(const char *filename, int flags, ...)
+ {
+@@ -13,9 +27,5 @@
+ 		va_end(ap);
+ 	}
+
+-	int fd = __sys_open_cp(filename, flags, mode);
+-	if (fd>=0 && (flags & O_CLOEXEC))
+-		__syscall(SYS_fcntl, fd, F_SETFD, FD_CLOEXEC);
+-
+-	return __syscall_ret(fd);
++	return openat(AT_FDCWD, filename, flags, mode);
+ }

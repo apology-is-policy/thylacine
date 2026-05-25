@@ -80,6 +80,8 @@ enum {
     // POSTNOTE / NOTE_MASK (P6-pouch-sockets + P6-pouch-signals); pouch
     // musl reaches them directly through bits/syscall.h.in.
     T_SYS_SPAWN_FULL_ARGV = 49,  // P6-pouch-stratumd-boot 16b-alpha: argv pass-through spawn
+    T_SYS_FSTAT       = 50,      // P6-pouch-stratumd-boot 16b-gamma: native file metadata
+    T_SYS_LSEEK       = 51,      // P6-pouch-stratumd-boot 16b-gamma: file-offset cursor
 };
 
 // Torpor error codes — match kernel's TORPOR_ERR_* (Linux/musl-numeric
@@ -1133,6 +1135,77 @@ static inline void t_thread_exit(void) {
         : "memory", "cc"
     );
     __builtin_unreachable();
+}
+
+// P6-pouch-stratumd-boot 16b-gamma: native file metadata + offset cursor.
+
+// struct t_stat — userspace mirror of the kernel's struct t_stat from
+// <thylacine/syscall.h>. 72 bytes; field offsets pinned by _Static_asserts
+// at the end. Native callers consume this directly; pouch's fstat()
+// translation layer (patch 0010) maps t_stat onto musl's struct stat for
+// POSIX consumers like stratumd.
+struct t_stat {
+    unsigned long size;             //  0: file size in bytes
+    unsigned long qid_path;         //  8: 9P qid.path
+    unsigned long atime_sec;        // 16: access time (epoch seconds; 0 at v1.0)
+    unsigned long mtime_sec;        // 24: modify time (0 at v1.0)
+    unsigned long ctime_sec;        // 32: change time (0 at v1.0)
+    unsigned int  mode;             // 40: POSIX mode bits (S_IFREG|0644 typical)
+    unsigned int  nlink;            // 44: link count
+    unsigned int  qid_vers;         // 48: 9P qid.vers
+    unsigned char qid_type;         // 52: 9P qid.type (QTFILE / QTDIR / ...)
+    unsigned char _pad_qid[3];      // 53: padding
+    unsigned int  blksize;          // 56: preferred I/O size hint
+    unsigned int  _pad_blksize;     // 60: padding
+    unsigned long blocks;           // 64: count of 512-byte blocks
+};
+
+_Static_assert(sizeof(struct t_stat) == 72,
+               "libt t_stat must match kernel t_stat ABI (72 bytes)");
+_Static_assert(__builtin_offsetof(struct t_stat, size)      ==  0, "t_stat.size at 0");
+_Static_assert(__builtin_offsetof(struct t_stat, qid_path)  ==  8, "t_stat.qid_path at 8");
+_Static_assert(__builtin_offsetof(struct t_stat, mode)      == 40, "t_stat.mode at 40");
+_Static_assert(__builtin_offsetof(struct t_stat, qid_type)  == 52, "t_stat.qid_type at 52");
+_Static_assert(__builtin_offsetof(struct t_stat, blocks)    == 64, "t_stat.blocks at 64");
+
+// Whence values for t_lseek — mirror kernel T_SEEK_* + POSIX SEEK_*.
+#define T_SEEK_SET 0
+#define T_SEEK_CUR 1
+#define T_SEEK_END 2
+
+// t_fstat — populate `*out` with metadata for `fd`. Returns 0 on success
+// (*out filled), -1 on bad fd / no native stat / uaccess fault. `out`
+// must be a writable buffer of at least sizeof(struct t_stat) bytes.
+__attribute__((always_inline))
+static inline long t_fstat(long fd, struct t_stat *out) {
+    register long x0 __asm__("x0") = fd;
+    register long x1 __asm__("x1") = (long)(unsigned long)out;
+    register long x8 __asm__("x8") = T_SYS_FSTAT;
+    __asm__ volatile (
+        "svc #0"
+        : "+r"(x0)
+        : "r"(x1), "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
+// t_lseek — reposition the per-Spoor offset cursor on `fd`. Returns the
+// new offset (>= 0) on success, -1 on bad fd / bad whence / underflow /
+// overflow / SEEK_END on a Dev without native stat.
+__attribute__((always_inline))
+static inline long t_lseek(long fd, long offset, long whence) {
+    register long x0 __asm__("x0") = fd;
+    register long x1 __asm__("x1") = offset;
+    register long x2 __asm__("x2") = whence;
+    register long x8 __asm__("x8") = T_SYS_LSEEK;
+    __asm__ volatile (
+        "svc #0"
+        : "+r"(x0)
+        : "r"(x1), "r"(x2), "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
 }
 
 #endif // THYLA_SYSCALL_H

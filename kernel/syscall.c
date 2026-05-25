@@ -830,6 +830,142 @@ static s64 sys_close_handler(u64 hraw) {
 }
 
 // =============================================================================
+// SYS_FSTAT / SYS_LSEEK — POSIX-shaped file-metadata + seek surfaces.
+// =============================================================================
+//
+// P6-pouch-stratumd-boot sub-chunk 16b-gamma. Closes the boot mount path:
+// stratumd's `stm_keyfile_load` opens /system.key, calls fstat() to learn
+// the size (size-check gate), reads 8 bytes to identify the keyfile format,
+// lseek(SEEK_SET, 0) to rewind, then reads the rest. Without these two
+// syscalls, stratumd's keyfile_load fails at the first fstat / lseek and
+// the system-pool mount never starts.
+//
+// SYS_FSTAT routes through dev->stat_native; only devramfs implements it
+// at v1.0 (real file-metadata source). Other Devs leave the slot NULL and
+// fstat returns -1, the graceful "no stat for this kind of object" answer.
+// SrvConn (KOBJ_SRV) handles likewise reject — fstat on a socket isn't
+// meaningful.
+//
+// SYS_LSEEK manipulates the per-Spoor `s64 offset` cursor that SYS_READ /
+// SYS_WRITE advance per call. SEEK_END queries dev->stat_native for size;
+// Devs without stat_native cannot service SEEK_END (returns -1). At v1.0
+// no per-Spoor cursor lock — concurrent lseek/read/write on the same fd
+// from different threads is unspecified (POSIX user serializes).
+
+// Inner — kernel-side helper exposing the t_stat fill for a Spoor.
+// Returns 0 on success (out populated), -1 on:
+//   - c is NULL
+//   - dev->stat_native is NULL (Dev does not support native stat)
+//   - dev->stat_native returned an error
+static int spoor_stat_native(struct Spoor *c, struct t_stat *out) {
+    if (!c || !out)                                  return -1;
+    if (!c->dev || !c->dev->stat_native)             return -1;
+    return c->dev->stat_native(c, out);
+}
+
+static s64 sys_fstat_handler(u64 hraw, u64 stat_va) {
+    struct Thread *t = current_thread();
+    if (!t)                                          return -1;
+    struct Proc *p = t->proc;
+    if (!p)                                          return -1;
+
+    // user-VA range validation. The full struct must lie within the
+    // user-VA bound; sys_validate_user_buf rejects an out-of-range
+    // base or end. Alignment is not required — the per-byte store
+    // loop tolerates any alignment.
+    if (!sys_validate_user_buf(stat_va, sizeof(struct t_stat))) return -1;
+
+    // Rights gate: the handle must be KOBJ_SPOOR with RIGHT_READ.
+    // sys_lookup_rw_handle filters KOBJ_SRV (SrvConns are not stat'able);
+    // for KOBJ_SPOOR it also checks the rights mask.
+    struct Handle *slot = sys_lookup_rw_handle(p, (hidx_t)hraw, RIGHT_READ);
+    if (!slot)                                        return -1;
+    if (slot->kind != KOBJ_SPOOR)                     return -1;
+
+    struct Spoor *c = (struct Spoor *)slot->obj;
+
+    // Fill a kernel-scratch t_stat from the Dev. Failing the Dev's
+    // stat_native (NULL slot or error return) maps to -1 here.
+    struct t_stat ks;
+    if (spoor_stat_native(c, &ks) != 0)               return -1;
+
+    // Copy out to user-VA. Per-byte uaccess_store_u8; on fault the
+    // user-VA may have partially-written bytes (consistent with the
+    // existing per-byte uaccess pattern in SYS_READ).
+    const u8 *src = (const u8 *)&ks;
+    for (u64 i = 0; i < sizeof(struct t_stat); i++) {
+        if (uaccess_store_u8(stat_va + i, src[i]) != 0) return -1;
+    }
+    return 0;
+}
+
+static s64 sys_lseek_handler(u64 hraw, u64 offset_raw, u64 whence_raw) {
+    struct Thread *t = current_thread();
+    if (!t)                                          return -1;
+    struct Proc *p = t->proc;
+    if (!p)                                          return -1;
+
+    // Whence range check before any handle work — cheap reject of
+    // structurally invalid calls.
+    if (whence_raw != T_SEEK_SET &&
+        whence_raw != T_SEEK_CUR &&
+        whence_raw != T_SEEK_END)                    return -1;
+
+    // No rights mask: lseek manipulates the per-Spoor cursor, which is
+    // metadata about an open file, not its content. sys_lookup_rw_handle
+    // with rights=0 still validates kind + KOBJ_SRV rejection.
+    struct Handle *slot = sys_lookup_rw_handle(p, (hidx_t)hraw, 0);
+    if (!slot)                                        return -1;
+    if (slot->kind != KOBJ_SPOOR)                     return -1;
+
+    struct Spoor *c = (struct Spoor *)slot->obj;
+    s64 offset = (s64)offset_raw;
+    s64 new_off;
+
+    switch (whence_raw) {
+    case T_SEEK_SET:
+        if (offset < 0)                               return -1;
+        new_off = offset;
+        break;
+    case T_SEEK_CUR: {
+        s64 cur = c->offset;
+        // Overflow / underflow check: cur + offset stays in s64 range
+        // and is non-negative. INT64_MIN handled because offset is u64-
+        // cast to s64; INT64_MIN would have appeared if the user passed
+        // 0x8000000000000000, which still fails the "non-negative" check
+        // after addition.
+        if (offset > 0 && cur > INT64_MAX - offset)     return -1;
+        if (offset < 0 && cur < INT64_MIN - offset)     return -1;
+        new_off = cur + offset;
+        if (new_off < 0)                                return -1;
+        break;
+    }
+    case T_SEEK_END: {
+        // Query size from dev->stat_native; Devs without native stat
+        // cannot service SEEK_END.
+        struct t_stat ks;
+        if (spoor_stat_native(c, &ks) != 0)           return -1;
+        s64 size = (s64)ks.size;
+        // ks.size is a u64 cap'd by file system; cast to s64 may
+        // overflow only for files >= 2^63 bytes (structurally impossible
+        // at v1.0 — devramfs files are bounded by the cpio blob size
+        // which is far below s64 max).
+        if (size < 0)                                 return -1;
+        if (offset > 0 && size > INT64_MAX - offset)  return -1;
+        if (offset < 0 && size < INT64_MIN - offset)  return -1;
+        new_off = size + offset;
+        if (new_off < 0)                              return -1;
+        break;
+    }
+    default:
+        return -1;
+    }
+
+    c->offset = new_off;
+    return new_off;
+}
+
+// =============================================================================
 // SYS_ATTACH_9P — wrap a Spoor pair in a 9P client + return root fd
 // (P5-attach-syscall).
 // =============================================================================
@@ -1140,6 +1276,20 @@ static s64 sys_walk_open_handler(u64 spoor_fd_raw, u64 name_va,
         walkqid_free(w);
         nc->aux = NULL;
         spoor_unref(nc);
+        return -1;
+    }
+    // F-16b-gamma close: reject partial walks. A Dev whose walk reports
+    // nqid < nname (here always 1 for the single-component v1.0
+    // contract) means the requested name did not resolve. dev9p_walk
+    // returns NULL outright on Rerror; devramfs_walk (P6-pouch-stratumd-
+    // boot 16b-gamma) returns a wq with nqid=0 on miss. Both paths must
+    // produce -1 here. Without this check, a walk-miss returned a fd
+    // bound to the SOURCE Spoor's qid (still the source's pre-walk
+    // value, which for FROM_ROOT is the directory root) — open() would
+    // open root as if the named file existed.
+    if (w->nqid != 1) {
+        walkqid_free(w);
+        spoor_clunk(nc);
         return -1;
     }
     // dev9p's walkqid carrier has nc as its spoor; we own + free it
@@ -3793,6 +3943,17 @@ void syscall_dispatch(struct exception_context *ctx) {
 
     case SYS_SPAWN_FULL_ARGV:
         ctx->regs[0] = (u64)sys_spawn_full_argv_handler(ctx->regs[0]);
+        return;
+
+    case SYS_FSTAT:
+        ctx->regs[0] = (u64)sys_fstat_handler(ctx->regs[0],
+                                              ctx->regs[1]);
+        return;
+
+    case SYS_LSEEK:
+        ctx->regs[0] = (u64)sys_lseek_handler(ctx->regs[0],
+                                              ctx->regs[1],
+                                              ctx->regs[2]);
         return;
 
     case SYS_CAP_GRANT:
