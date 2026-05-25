@@ -828,6 +828,195 @@ fix that makes (c) unnecessary.
 
 ---
 
+## 16b-γ-mount-bind deep-dive (Finding 2 narrowing)
+
+The follow-up session pinned Finding 2 (mallocng corruption) to
+a specific code site and isolated a key invariant violation, but
+did NOT identify a v1.0 root-cause for the corruption itself. All
+changes were diagnostic-only (Stratum-side fprintf tracers in
+`src/btree_store/crypt.c`, pouch-side temporary CAP_CSPRNG_READ
+grant in `usr/joey/joey.c`, pouch-side mallocng instrumentation
+in `build/pouch/musl-src/`). All reverted before commit; no v1.0
+shippable fix landed this round. The narrowing IS the deliverable.
+
+### Narrowing the call site
+
+With CAP_CSPRNG_READ temporarily granted, stratumd advances
+through `stm_sync_open`, then deep into the btree-engine cold path
+during mount-root validation. Per-malloc/free ring buffer
+instrumentation in pouch mallocng (caller-PC recorded via
+`__builtin_return_address(0)`) pinned the failing free to:
+
+- **Function**: `stm_btree_node_decrypt` (Stratum
+  `src/btree_store/crypt.c::stm_btree_node_decrypt`).
+- **Pattern**: `ct = malloc(node_size); memcpy(ct, buf, node_size);
+  stm_aead_decrypt(...); free(ct);` -- the temporary
+  ciphertext-scratch buffer.
+- **Specifics**: `node_size = STM_BTNODE_SIZE = 131072 bytes`. The
+  failing free is at `pc=0x26fe70` (right after the memcpy + AEAD
+  decrypt + free chain).
+
+### What's different about the SECOND call
+
+`stm_btree_node_decrypt` is called twice during mount-root
+validation:
+
+1. **First call (root)**: from
+   `stm_btree_store_deserialize` for the root node. `ct` malloc'd
+   at e.g. `0x10002a0b0`. `memcpy(ct, root_buf, 131072)`
+   completes; `decrypt` returns OK; `free(ct)` succeeds. Clean
+   pass.
+2. **Second call (leaf)**: from the same function's child loop
+   for the first child leaf. `ct` malloc'd at e.g. `0x10002b0e0`.
+   `memcpy(ct, leaf_buf, 131072)` completes; `decrypt` returns
+   `STM_EBADTAG` (`s=0xffffff37 = -201`); **`free(ct)` trips
+   `assert(!end[-5])` in `get_nominal_size`** (or sometimes a
+   different assert in the same chain).
+
+The SAME function code runs in both calls. The DIFFERENCE is the
+data and the caller-supplied buf.
+
+### Slot-footer corruption empirics
+
+Adding pre/post probes around the memcpy:
+
+- **PRE-MEMCPY** (immediately after malloc, before memcpy):
+  - For both calls: `ct[node_size + 0..16] = 0x00 * 16`
+    (clean, anon-mmap zero).
+  - For both calls: `ct[node_size + 3860..3868]` =
+    `00 00 00 00 1c 0f 00 00` -- mallocng's `set_size`-written
+    size field (reserved=3868=0xf1c) and sentinel byte
+    (`end[-5]=0`). Correct mallocng setup.
+- **POST-MEMCPY** (immediately after memcpy):
+  - First call: `past = 00...` (clean), `ftr = 00 00 00 00 ...`
+    (clean).
+  - Second call: `past = <16 high-entropy bytes>`,
+    `ftr = <8 high-entropy bytes>` -- the slot footer has been
+    OVERWRITTEN.
+
+The corruption bytes vary across runs (NOT deterministic) but the
+pattern is consistent: the SECOND call's ct slot footer becomes
+non-zero between malloc-return and free-call.
+
+### What rule-outs were proven
+
+The most baffling part: **the byte-copy operation that triggers
+the corruption is provably correct**.
+
+1. **`memcpy` is innocent**: replacing `memcpy(ct, buf, node_size)`
+   with a hand-written `for (i=0; i<node_size; i++) ct[i]=buf[i]`
+   loop (via `volatile` casts to prevent vectorization) gives the
+   IDENTICAL corruption pattern.
+2. **The C compiler is innocent**: replacing the C loop with
+   explicit inline `__asm__("...ldrb...strb...sub...b...")` byte
+   loop gives the IDENTICAL corruption pattern.
+3. **The byte loop's writes are bounded**: per disassembly, the
+   loop's `strb` writes only to `[ct, ct + node_size)`. The
+   loop's `cmp x21 (=node_size), x9 (=counter)` correctly exits
+   when counter hits node_size. Verified by encoded instruction
+   decode + scanning all `str/stp/strb` instructions in the
+   function body for any write via x19 (= ct), x21 (= ct +
+   node_size), or x23 (= ct + 134932).
+4. **The byte loop's pattern persists**: writing a unique
+   pre-loop pattern at `ct[node_size..node_size+16]` (e.g.,
+   `0xA0..0xAF`) and checking after the loop shows the pattern
+   IS PRESERVED -- the loop does NOT overwrite those bytes
+   (verified for the first call; the second call regresses to
+   the empirical corruption pattern when the pre-loop pattern is
+   removed).
+5. **Without the byte copy, no corruption**: replacing the entire
+   `memcpy(ct, buf, node_size)` with no-op (just `(void)buf;`)
+   makes the boot green -- decrypt fails differently (ct is
+   uninitialized), but ct's slot footer stays clean.
+
+So the byte-copy operation is the necessary trigger, but it
+DOESN'T write to the corrupted address range.
+
+### Unexplained observations
+
+- Corruption bytes don't match `buf[node_size..node_size+16]`
+  (which is also zero per a separate probe).
+- Corruption bytes look like AEGIS-256 cipher output or
+  high-entropy stack/cache state.
+- The first call to `stm_btree_node_decrypt` (root) has
+  IDENTICAL code but NO corruption.
+
+### Candidate root-cause directions for next session
+
+(In rough priority order.)
+
+1. **Kernel mmap/page coherency**: ct's mmap region for the
+   second call reuses VA pages that were previously freed (the
+   first call's root_buf munmap freed its region). The kernel
+   may not be flushing dcache on munmap or zeroing the new
+   page's cache lines before remapping. The byte loop's writes
+   may cause a stale cache line at ct[node_size..] to be
+   evicted to RAM, surfacing stale content.
+2. **QEMU emulation quirk**: QEMU's TCG cache emulation may
+   have a corner case where many sequential byte stores cause
+   spurious cache line behavior. Worth testing with KVM (if
+   available on M2 host) vs TCG.
+3. **bdev_thylacine DMA interaction**: virtio-blk DMA writes
+   may have lingering coherency effects on adjacent CPU-visible
+   memory regions. The DMA buffer is at THYLA_DATA_USER_VA
+   (fixed), distinct from ct's VA, but the kernel's page table
+   setup might share TLB entries or cache lines.
+4. **libsodium internal allocator hooks**: `_sodium_alloc_init`
+   may interpose on malloc/free with allocator state that
+   mismatches mallocng's expectations after multiple
+   allocations. The first stm_btree_node_decrypt call's
+   alloc/free pair clears state; the second's pair (with
+   intervening sodium-internal allocations) might trigger a
+   sodium-vs-mallocng mismatch.
+5. **mallocng size-class 63 (mmap'd) corner case**: 128 KiB
+   crosses MMAP_THRESHOLD (131052), so the allocation uses
+   sizeclass 63 (individually-mmapped). This path is
+   exercised heavily by stratumd but rarely by
+   `pouch-hello-malloc` (which uses small slots). A
+   sizeclass-63-specific bug in pouch's mallocng port is
+   possible.
+
+### Pragmatic fix path
+
+Without root-causing, the most direct fix to unblock 16c is to
+eliminate the `malloc(node_size) + memcpy + decrypt + free`
+pattern in `stm_btree_node_decrypt` by switching to **in-place
+decrypt**: `stm_aead_decrypt(..., buf, node_size, buf, &pt_len)`.
+libsodium's `aegis256_decrypt_detached` supports in-place
+operation (the spec allows overlapping ct/pt). The behavior delta
+is documented in the current code's comment: "a tag-fail leaves
+buf in undefined state (the caller must discard it)" -- already
+the contract, so in-place is semantically equivalent.
+
+This requires a Stratum-side coordination change on
+`thylacine-pouch-arm`. The next session should:
+
+1. Patch `src/btree_store/crypt.c::stm_btree_node_decrypt` to
+   in-place.
+2. Verify joey boot reaches AT LEAST `Thylacine boot OK` with
+   the second-call corruption no longer triggering (decrypt may
+   still return STM_EBADTAG, but free's slot integrity holds).
+3. If decrypt-EBADTAG persists, that's a SEPARATE issue (likely
+   a key/AAD/data mismatch in the leaf's on-disk encoding) and
+   shifts focus there.
+4. Continue to investigate the underlying byte-copy-vs-slot-
+   footer phenomenon in parallel; the in-place fix is a workaround,
+   not a root cause.
+
+### What this session did NOT change
+
+- No kernel code change.
+- No Stratum-side commit (all crypt.c changes were diagnostic
+  and reverted).
+- No pouch patch added/removed.
+- No joey probe change (the CAP_CSPRNG_READ grant was
+  diagnostic-only, reverted).
+- Test suite: 609/609 PASS x default + UBSan (unchanged).
+- Boot: `Thylacine boot OK` reproducible; joey's stratumd-boot
+  probe `child exit_status=1 (final drain)` reproducible.
+
+---
+
 ## 16a — stratumd binary-load probe
 
 **Deliverable**: `/stratumd-probe` runs in joey; stratumd's binary
