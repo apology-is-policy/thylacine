@@ -6,16 +6,108 @@ joey spawns stratumd, stratumd mounts a real pool, the kernel 9P
 client connects to stratumd's `/srv` socket, joey mounts `/sysroot`,
 ramfs pivots, the stub is retired. Closes Phase 5 + Phase 6.
 
-The chunk is **sub-chunked** into three stages because each layer
-has its own integration risk and runtime gaps to discover:
+The chunk is **sub-chunked**; 16b was further sub-chunked in-session
+2026-05-25 under the stratumd-as-driver architectural decision (see
+"Design decisions" below):
 
 | Sub-chunk | Scope | Audit-bearing? |
 |---|---|---|
-| **16a** (this section) | Binary-load probe: joey spawns stratumd with no args; verifies the binary loads + libc init runs + argv parsing executes + clean exit. | no (joey spawn path unchanged) |
-| 16b (next) | Pool generation (cross-built `stratum-mkfs`) + block device wiring + stratumd mounts a real pool. | **yes** (block layer + boot ordering) |
-| 16c (final) | Kernel 9P client connect to stratumd's `/srv` socket + joey mounts `/sysroot` + ramfs pivot + stub retire. | **yes** (boot ordering + I-1 namespace isolation) |
+| **16a** (landed 2026-05-24) | Binary-load probe: joey spawns stratumd with no args; verifies the binary loads + libc init runs + argv parsing executes + clean exit. | no (joey spawn path unchanged) |
+| **16b-α** (next) | argv pass-through kernel surface (new SYS_SPAWN_* with argv buffer OR extended SYS_SPAWN_WITH_PERMS); pouch arm; joey constructs richer argv; the probe verifies argv is observable from inside stratumd. | **yes** (new kernel surface) |
+| **16b-β** | Stratum-side `src/io/bdev_thylacine.c` (port of the userspace Rust `usr/virtio-blk-rw` driver) + pouch HW-syscall arm + joey spawns stratumd with `CAP_HW_CREATE` + end-to-end pool mount + `/srv` socket bind. | **yes** (block layer + cap surface + boot ordering) |
+| **16c** (final) | Kernel 9P client connects to stratumd's `/srv` socket + joey mounts `/sysroot` + ramfs pivot + stub retire. | **yes** (boot ordering + I-1 namespace isolation) |
 
-This file documents 16a; 16b + 16c extend it in place.
+This file documents 16a; 16b-α + 16b-β + 16c extend it in place.
+
+---
+
+## Design decisions
+
+### The stratumd-as-driver architecture (chosen 2026-05-25)
+
+Sub-chunk 16b's load-bearing claim is "stratumd runs as a Thylacine
+native process and mounts a real pool". Surfacing 16b implementation
+forced a question that mid-design notes hadn't fully resolved: **what
+provides the block-device backing under stratumd?**
+
+Thylacine's block-device model is *userspace-driver-shaped*: virtio-blk
+is a userspace Rust process (`usr/virtio-blk-rw`) that drives
+virtio-mmio + DMA + IRQ directly via SYS_MMIO_* / SYS_DMA_* / SYS_IRQ_*
+handles (P4-Ic5b). There is no kernel synth `/dev/blk/N` path.
+Stratumd cannot simply `open("/dev/sda")`.
+
+Four options surfaced:
+
+1. **Writable in-RAM pool (α)** — new kernel synth Dev for a writable
+   in-RAM pool, pre-initialized from a ramfs template. Pool resets
+   each boot; doesn't yet prove real block backing.
+2. **Separate `virtio-blkd` userspace daemon (β)** — new Rust daemon
+   fronting virtio-blk via 9P. Real persistent backing. Multiple
+   audit-bearing sub-chunks; effectively a small phase.
+3. **Defer real backing (γ)** — close 16 minimally; real pool mounting
+   moves to a post-Phase-6 bootloader/installer phase.
+4. **Stratumd-as-driver (δ)** — stratumd holds `CAP_HW_CREATE` and
+   drives the virtio-blk hardware directly. New Stratum-side
+   `src/io/bdev_thylacine.c` arm; no separate daemon; no 9P-block
+   protocol seam.
+
+**Choice: (δ).** Rationale:
+
+- **Plan-9-canonical**: "The filesystem owns its disk." Plan 9's disk
+  servers historically drove their hardware directly. The decision is
+  not architecturally novel; it's faithful to the lineage Thylacine is
+  in.
+- **Stratum already has platform arms**: `peer_creds.c` already carries
+  Darwin/Linux/Thylacine arms; the `stm_bdev` abstraction is already
+  the right seam for a Thylacine arm. We are on the `thylacine-pouch-arm`
+  branch of Stratum precisely so this kind of code has a home.
+- **Honest capability allocation**: `CAP_HW_CREATE` for stratumd
+  reflects what stratumd is — the storage daemon. Granting it the
+  storage hardware is not privilege creep; it is the correct authority
+  for the role. I-2 (caps monotonically reduce post-grant) and I-5
+  (HW handles cannot transfer) continue to hold; the cap-broadening
+  attack surface is bounded by stratumd's known scope.
+- **Persistent backing**: writes go to the QEMU disk.img (a second
+  virtio-blk-device). Pool survives reboots. This is what the original
+  16b scope wanted to prove.
+- **No new daemon protocol**: (β) would require designing a
+  9P-block-protocol between virtio-blkd and stratumd. Here, stratumd
+  speaks to itself; no protocol seam to design and verify.
+- **Reversible**: if process isolation later proves desirable (e.g., we
+  decide block-driver bugs should not poison the FS server), the
+  driver can be factored back out into a daemon. (δ) is not a one-way
+  door.
+
+**Honest concerns documented** (worth surfacing, not blockers):
+
+- Stratumd LOC grows by ~500-800 lines (the C port of `virtio-blk-rw`
+  into `bdev_thylacine.c`). The "stratumd is a fs server" framing gets
+  stretched. Mitigation: partition the driver code clearly under
+  `src/io/`; the FS-server core remains separable.
+- Coupling stratumd to virtio-mmio specifics. Future block hardware
+  (NVMe, real ATA, ...) needs new arms. This is true of any block
+  driver in any OS; nothing about (δ) makes it worse than (β).
+- A virtio-blk-driver bug crashes stratumd. In (β) the same bug
+  crashes the daemon, and stratumd loses its filesystem anyway. The
+  fault-isolation benefit of process separation is marginal when the
+  data dependency is total.
+
+### Sub-chunking 16b under (δ)
+
+The choice of (δ) makes 16b genuinely two stages, not one:
+
+- **16b-α**: argv pass-through. Orthogonal to the stratumd-as-driver
+  decision (any non-trivial spawn wants argv pass-through). Smallest
+  blast-radius new kernel surface; audit-bearing for the surface; lands
+  independently.
+- **16b-β**: the integration chunk. Stratum-side `bdev_thylacine.c` +
+  pouch HW-syscall arm + joey spawn with `CAP_HW_CREATE` + end-to-end
+  mount. Larger but coherent.
+
+Sub-chunking further (e.g., split β into stratum-side-only and
+joey-side-only) was considered but rejected: the Stratum-side change
+is unobservable from Thylacine until joey wires it up, so testing
+gates naturally at the integration point.
 
 ---
 
