@@ -1424,3 +1424,110 @@ task #712 in the prior session is **falsified**; the real blocker
 is the AEGIS-256 soft decrypt path. Baseline preserved:
 `Thylacine boot OK`, 599/599 PASS × default + UBSan, joey probe
 NON-FATAL (clean reap on stratumd's sodium_init exit-127).
+
+---
+
+## 16b-γ-mount-bind further narrowing — libsodium AEGIS-256 isolated as NOT broken
+
+This session attempted to root-cause the AEGIS-256 corruption by
+isolating it. Key findings (all diagnostics reverted before commit;
+baseline restored):
+
+### libsodium AEGIS-256 works correctly in isolation
+
+A minimal repro was added to `pouch-hello-sodium.c`: malloc(131072)
+two buffers, encrypt 131040 bytes with AEGIS-256, decrypt back,
+verify round-trip. Plus a stress loop of 8 iterations
+(malloc/decrypt/free) to exercise mallocng's sizeclass-63 mmap
+reuse. **Both passed cleanly** under pouch musl + libsodium 1.0.20
+on Thylacine. This **falsifies any "libsodium AEGIS-256 is broken
+on Thylacine" hypothesis** — the primitive works in isolation.
+
+### Why pouch-hello works on Thylacine and Stratum doesn't
+
+macOS arm64 uses libsodium's ARM crypto path (HW AES) because
+`sodium_runtime_has_armcrypto()` returns 1 (via `sysctlbyname`).
+Most Linux ARM with HWCAP_AES likewise. The portable C AEGIS-256
+soft impl is rarely exercised in practice. On Thylacine the soft
+impl IS used (no AT_HWCAP → has_armcrypto=0). pouch-hello-sodium
+proves the soft impl is correct on Thylacine. So the corruption is
+not in the soft impl itself.
+
+### The corruption is context-specific to Stratum's heap state
+
+A self-test inserted at the START of `stm_stratumd_run` (before any
+Stratum logic) — same malloc(131072) + encrypt + decrypt(131040) —
+**works**. The corruption only manifests after Stratum's mount
+code has run (keyfile_load, bdev_open, sb_mount_scan, pool_open,
+alloc_open, sync_open). At the point where `stm_btree_node_decrypt`
+is called for paddr=352 gen=1, the heap is in a state that triggers
+the crash on the real call.
+
+A self-test inserted INSIDE stm_btree_node_decrypt (right before
+the real `stm_aead_decrypt` call) — using FRESH malloc'd input +
+fresh malloc'd output, with the same `cx->metadata_key` / nonce / ad
+as the real call — **works**. So the libsodium dispatch is correct
+at that program point with arbitrary args.
+
+### The corruption requires the specific (mmap'd ct + mallocng buf) combo
+
+Bisecting the actual `stm_aead_decrypt(key, nonce, ad, ct, len, buf, &pt_len)`
+call by swapping the buffers:
+
+| ct                                              | buf                        | Result   |
+|---|---|---|
+| **mallocng** (via `malloc(131072)`, copied from real ct) | mallocng (real buf, 0x100008090) | **WORKS** |
+| **mmap'd** (via the mmap-bypass at 0x10002a000) | mallocng (fresh malloc'd 131072) | **WORKS** |
+| **mallocng** (fresh malloc'd 131072)            | mallocng (fresh malloc'd 131072) | **WORKS** |
+| **mmap'd** (the actual scratch, 0x10002a000)    | mallocng (real buf, 0x100008090) | **CRASHES** |
+
+The ONLY failing combination is **direct mmap'd ct + the actual
+mallocng-allocated buf**. The crash signature is mallocng's
+`alloc_slot::enframe()::assert(!p[-4])` failing — heap corruption.
+
+### Hypotheses for the actual root cause (next session)
+
+1. **Page-zeroing**: the direct mmap-bypass might receive pages that
+   weren't properly zeroed. mallocng's enframe expects `p[-4] == 0`;
+   if the kernel's `SYS_BURROW_ATTACH` returns stale-content pages
+   from a recycled VMA, that invariant is violated. Test: after the
+   direct mmap, print `ct[0..7]` and `ct[131072..131088]` — if any
+   non-zero on a fresh mmap, the kernel isn't zeroing.
+
+2. **VMA adjacency / TLB interaction**: real ct at 0x10002a000 and
+   real buf at 0x100008090 are in adjacent VAs (~135KB apart). The
+   kernel's pgtable code might mishandle some bookkeeping when two
+   large 33-page VMAs are processed alternately by AEGIS-256 (each
+   iteration: read 16 bytes from ct+i, write 16 bytes to buf+i).
+   When mt_buf is a fresh malloc, its VMA is elsewhere; that breaks
+   the alternation pattern.
+
+3. **mallocng metadata adjacency**: mallocng's allocation for real
+   buf has metadata at known offsets. The direct mmap-bypass for ct
+   sits at a specific address that might overlap with a mallocng-
+   tracked region (the "active_idx" group struct, or the ctx state).
+   When AEGIS-256 reads ct and writes buf, the writes might cross-
+   contaminate mallocng's tracking structures.
+
+The diagnostic at iteration i ∈ [102400, 103424) (from the prior
+session's bisect) corresponds to writing to buf+102400..buf+103440.
+That's still inside buf's allocation (which extends to buf+131072).
+So a forward-overrun of buf isn't the issue. The corruption must be
+a side-effect of the WRITE PATTERN reaching some specific
+combination of buf address + ct address that confuses mallocng's
+state machine.
+
+### Verification status: BLOCKED at narrowing-level-3
+
+The bug is now narrowed to "specifically the combination of direct
+mmap'd ct + mallocng-allocated buf causes mallocng heap corruption
+after AEGIS-256 decrypt". Next investigation: instrument the kernel
+side `SYS_BURROW_ATTACH` and `userland_demand_page` to see if the
+mmap'd pages are properly zeroed; OR instrument mallocng's
+`ctx.active[*]` state to see what gets corrupted.
+
+NOT a libsodium bug. NOT reportable upstream — the primitive works.
+
+Workaround W-a (expose AT_HWCAP → ARM crypto path) remains the
+cleanest unblock; bypassing the soft impl entirely sidesteps this
+context-specific interaction.
