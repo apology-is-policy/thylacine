@@ -1017,6 +1017,124 @@ This requires a Stratum-side coordination change on
 
 ---
 
+## 16b-γ-mount-bind mmap-bypass attempt + bdev_thylacine read-loop blocker
+
+This session attempted Option (i) from the prior session's
+"Pragmatic fix path" (in-place decrypt) but found it BLOCKED by
+the existing crypt.c comment (lines 27-37): libsodium's AEGIS-256
+is empirically NOT safe under aliased ct/pt -- Stratum tested this
+and got zero plaintext output. The recommendation was based on
+libsodium's general docs ("m and c can point to overlapping memory")
+but didn't account for Stratum's specific empirical finding.
+
+Pivoted to Option (i'): bypass mallocng's sizeclass-63 path via
+direct mmap. The page-grain mmap region has no allocator-side slot
+footer at `ct[node_size..]` for memcpy's adjacency to perturb;
+`munmap` returns the pages cleanly with no integrity check. The
+change is gated by `#ifdef __thylacine__` in Stratum's
+`src/btree_store/crypt.c`, leaving the Linux + glibc path
+byte-identically preserved.
+
+### What landed
+
+Stratum-side (branch `thylacine-pouch-arm`, commit `c5b998c`):
+
+| Component | Path |
+|---|---|
+| Mmap-bypass in `stm_btree_node_decrypt` | `src/btree_store/crypt.c` |
+| Session-handoff doc | `docs/session-handoff-2026-05-25-thylacine-mmap-decrypt.md` |
+
+Thylacine-side: no kernel/userspace code change. This reference
+doc + phase status + memory updates only.
+
+### Verification status: DORMANT
+
+The mmap fix CANNOT be verified end-to-end yet. A SEPARATE upstream
+bug in `bdev_thylacine.c` (the same branch's earlier `63a3eb1`)
+sends a zero-sized virtio descriptor at approximately the 113th
+sequential read during `stm_sb_mount_scan`'s label x slot
+iteration. QEMU rejects with `virtio: zero sized buffers are not
+allowed` and the boot eventually times out / EL0-faults.
+
+Empirically (with diagnostic fprintfs in `stm_sb_mount_scan` AND
+`T_CAP_CSPRNG_READ` granted in joey):
+
+- `li=0 si=0..62` -- 63 reads, each returns -2 (STM_ENOENT for
+  unused slots, expected for most positions).
+- `li=1 si=0..48` -- 49 reads, also -2 expected.
+- `li=1 si=49` pre-read fires, then QEMU virtio error.
+
+The pool fixture has a valid uberblock at `lbl=2 slot=6` (per the
+prior session's diagnostic of sync.c's internal mount_scan). The
+fs.c-side `stm_sb_mount_scan` would normally reach this on its own
+loop. The bug halts the loop before label 2.
+
+Without the diagnostic fprintfs, the same path produces an EL0
+fault at vaddr 0x0 -- likely the same root cause but observed at a
+faster downstream symptom (the QEMU error is the kernel's
+bdev_thylacine emitting the bad descriptor; the EL0 fault is
+stratumd dereferencing NULL when bdev_thylacine returns an error
+that's not handled).
+
+### Why this leaves the fix in-tree
+
+The mmap-bypass is a **forward-looking** quality improvement:
+
+1. When the bdev_thylacine read-loop bug is fixed in a later
+   session, the mount path will reach `stm_btree_node_decrypt`'s
+   second call. Without this fix, that call would trip mallocng's
+   slot-footer assertion and extinct the kernel.
+2. The change is gated by `#ifdef __thylacine__`, so other
+   platforms see no behavioral change.
+3. The 2026-05-23 SIGSEGV-like note delivery (Phase 5+
+   FAULT_UNHANDLED_USER architectural fix) would protect against
+   kernel extinction from user-mode NULL deref, but mallocng's
+   `assert(!end[-5])` would still trip and `_Exit(127)` the
+   stratumd process. The mmap fix prevents the assert from firing
+   at all.
+
+### Boot state at this checkpoint
+
+- `Thylacine boot OK` (599/599 PASS x default + UBSan).
+- joey's stratumd-boot child `exit_status=1 (final drain)` --
+  same as baseline (without CAP_CSPRNG_READ, sodium_init fails;
+  joey reaps clean).
+- The CAP_CSPRNG_READ grant in joey was attempted and REVERTED
+  this session. It remains a v1.x lift, hard-paired with the
+  bdev_thylacine read-loop fix.
+
+### Carry-forwards (priority order)
+
+1. **bdev_thylacine read-loop bug** (NEW, blocks 16c): root-cause
+   the zero-sized virtio descriptor at the ~113th sequential read.
+   Likely a descriptor reuse bug, a read-buffer reset gap, or a
+   sequence number off-by-one in `bdev_thylacine`'s single-chain
+   descriptor reuse. Stratum-side `src/block/bdev_thylacine.c`
+   `do_request` and the descriptor chain init (the IO-2 setup).
+2. **mallocng root cause** (still open): the underlying mechanism
+   that causes the sizeclass-63 slot footer to corrupt after a
+   memcpy whose writes don't touch the footer. Top hypothesis:
+   kernel page-allocation coherency on freed-then-reused mmap
+   regions. The mmap-bypass dodges the symptom without addressing
+   the mechanism. See "16b-γ-mount-bind deep-dive (Finding 2
+   narrowing)" above.
+3. **SIGSEGV-like note delivery** (Phase 5+ architectural):
+   `FAULT_UNHANDLED_USER` should deliver a note to the offending
+   Proc rather than extinct the kernel. Independent of (1) and
+   (2) but reduces the blast radius of any future user-mode bug.
+
+### What this session did NOT change
+
+- No kernel code change.
+- No Thylacine userspace code change (the CAP_CSPRNG_READ grant
+  was attempted then reverted).
+- No new pouch patch (the existing 0011-pouch-abort.patch and the
+  other 11 patches remain).
+- Test suite: 599/599 PASS x default + UBSan (unchanged).
+- Boot: `Thylacine boot OK` reproducible.
+
+---
+
 ## 16a — stratumd binary-load probe
 
 **Deliverable**: `/stratumd-probe` runs in joey; stratumd's binary
