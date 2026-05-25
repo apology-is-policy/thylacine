@@ -1,0 +1,107 @@
+pouch boundary-line patch 0008 - Thylacine HW-capability syscall numbers.
+
+Phase 6 sub-chunk 16b-beta (pouch-stratumd-boot pool mount, audit-bearing).
+Exposes the Thylacine HW-capability syscall numbers (kernel/include/-
+thylacine/syscall.h sec "SYS_MMIO_*/IRQ_*/DMA_*") at the pouch musl ABI
+surface so cross-built Stratum (sub-chunk 15) can drive virtio-blk
+directly from inside stratumd via raw syscall() calls.
+
+Six numbers added; all six already exist in the Thylacine kernel
+since the CAP_HW_CREATE arm landed at the userspace-virtio-blk-probe
+sub-chunk (P4-Ic5b2). The numbers are 2..7 - tight near the head
+of the syscall table because they were the kernel's first non-trivial
+CAP-gated surface beyond SYS_PUTS / SYS_EXITS.
+
+  __NR_mmio_create  = 2  Allocate KOBJ_MMIO covering a PA range. Gated
+                          on CAP_HW_CREATE. Args (pa, size, rights).
+  __NR_irq_create   = 3  Allocate KOBJ_IRQ for a GIC SPI. Args
+                          (intid, rights).
+  __NR_irq_wait     = 4  Block until the IRQ fires; returns the
+                          per-handle pending count. Args (handle).
+  __NR_mmio_map     = 5  Install a MMIO PTE for an existing KOBJ_MMIO
+                          handle. Args (handle, vaddr, prot).
+  __NR_dma_create   = 6  Allocate a contiguous pinned KOBJ_DMA chunk.
+                          Args (size, rights).
+  __NR_dma_map      = 7  Install a DMA PTE for an existing KOBJ_DMA
+                          handle. Returns the device-visible PA on
+                          success. Args (handle, vaddr, prot).
+
+Stratum's pouch arm (src/block/bdev_thylacine.c on the thylacine-pouch-
+arm branch) consumes these directly via syscall(__NR_mmio_create, ...)
+instead of going through a libthyla wrapper. The C-side raw syscall
+keeps bdev_thylacine.c self-contained: no pouch-side wrapper crate
+to vendor; no extra patch to vendored musl beyond this number table.
+
+Gating:
+  - The kernel handlers reject calls from a Proc lacking CAP_HW_CREATE
+    (returning -1). At v1.0, only kproc and its initial fork joey hold
+    the cap.
+  - stratumd inherits CAP_HW_CREATE from joey via the new SYS_SPAWN_-
+    FULL_ARGV cap_mask (sub-chunk 16b-alpha, kernel commit 338cd44).
+    Joey passes cap_mask = T_CAP_HW_CREATE in the spawn request; the
+    kernel narrows to the intersection (joey's caps & cap_mask) at
+    rfork_with_caps.
+
+Invariants preserved (P-1..P-4 per POUCH-DESIGN.md sec 11):
+  - P-1 (no foreign syscall numbers): every __NR_* added maps 1:1 onto
+        a real Thylacine kernel syscall. None are 0xFFFF sentinels.
+  - P-3 (no silently-wrong POSIX): these are Thylacine-native names
+        with no POSIX equivalent; they cannot be misread as a POSIX
+        call by an unaware caller.
+  - P-4 (boundary-line discipline): the patch touches only the SEAM
+        (bits/syscall.h.in). The portable upper half of musl is
+        unchanged.
+
+Files modified: one.
+
+  arch/aarch64/bits/syscall.h.in   Appends the six Thylacine HW-
+      capability extension numbers - __NR_mmio_create 2, __NR_irq_-
+      create 3, __NR_irq_wait 4, __NR_mmio_map 5, __NR_dma_create 6,
+      __NR_dma_map 7 - so musl's awk pass generates the
+      SYS_mmio_create / SYS_irq_create / SYS_irq_wait / SYS_mmio_map /
+      SYS_dma_create / SYS_dma_map aliases.
+
+Files NOT modified: none. Pure ABI-number-table extension. The seam's
+syscall_arch.h dispatch is unchanged (it routes every non-0xFFFF
+__NR_* via svc 0 with x8 = the number).
+
+Binding design: docs/POUCH-DESIGN.md sec 14 row 16 (stratumd-as-driver
+delta architecture); docs/reference/86-pouch-stratumd-boot.md (the
+16b-beta sub-chunk's reference doc); CLAUDE.md audit-trigger row
+"stratumd virtio-blk driver arm" (also "stratumd HW-cap spawn" and
+"argv pass-through to spawn"); ARCH sec 28 invariants I-2 (cap-
+monotonic-reduction) + I-5 (HW-handle non-transferability).
+
+Proving binary: end-to-end /pouch-stratumd-boot-e2e in joey - spawns
+stratumd with cap_mask = CAP_HW_CREATE + perm_flags = MAY_POST_SERVICE,
+expects stratumd to mount the pre-generated pool fixture from the
+second virtio-blk-device, bind /srv/stratum-fs, and return.
+
+--- a/arch/aarch64/bits/syscall.h.in
++++ b/arch/aarch64/bits/syscall.h.in
+@@ -398,3 +398,25 @@
+ #define __NR_noted 46
+ #define __NR_postnote 47
+ #define __NR_note_mask 48
++
++/*
++ * pouch / Thylacine HW-capability extension numbers (P6-pouch-stratumd-
++ * boot, sub-chunk 16b-beta). The pouch-side virtio-blk driver port
++ * (Stratum's src/block/bdev_thylacine.c, on the thylacine-pouch-arm
++ * branch in ~/projects/stratum/v2) consumes these via raw
++ * syscall(SYS_mmio_create, ...) etc. The numbers match
++ * kernel/include/thylacine/syscall.h (2..7) - kernel syscalls present
++ * since the userspace-virtio-blk-probe sub-chunk (P4-Ic5b2) but not
++ * exposed at the musl ABI surface until this sub-chunk.
++ *
++ * Gate: caller's Proc must hold CAP_HW_CREATE. stratumd receives the
++ * cap from joey at spawn via SYS_SPAWN_FULL_ARGV (sub-chunk 16b-alpha,
++ * kernel commit 338cd44) with cap_mask = T_CAP_HW_CREATE. Joey itself
++ * holds the cap from kproc by rfork inheritance.
++ */
++#define __NR_mmio_create 2
++#define __NR_irq_create 3
++#define __NR_irq_wait 4
++#define __NR_mmio_map 5
++#define __NR_dma_create 6
++#define __NR_dma_map 7

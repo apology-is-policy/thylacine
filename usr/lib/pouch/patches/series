@@ -21,3 +21,5 @@
 0005-pouch-poll.patch
 0006-pouch-sockets.patch
 0007-pouch-signals.patch
+0008-pouch-hw-syscalls.patch
+0009-pouch-openat.patch

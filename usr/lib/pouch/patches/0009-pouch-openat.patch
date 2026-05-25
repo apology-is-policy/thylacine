@@ -1,0 +1,201 @@
+pouch boundary-line patch 0009 - POSIX openat over Thylacine path-walk.
+
+Phase 6 sub-chunk 16b-beta cont. Retargets musl's src/fcntl/openat.c
+from the Linux SYS_openat = 0xFFFF sentinel onto Thylacine's
+SYS_WALK_OPEN (34) primitive. Required because stratumd's mount path
+calls open("/etc/stratum/system.key", O_RDONLY) via stm_keyfile_load
+(stratum/v2/src/keyfile/keyfile.c), and without openat the keyfile
+load returns STM_ENOENT, mount aborts with rc=-2, and stratumd's
+listen socket never binds.
+
+Scope at v1.0:
+  - Absolute paths only. Leading '/' required. Relative paths
+    refused with -ENOTSUP.
+  - AT_FDCWD only. Relative-to-fd open is not supported.
+  - O_RDONLY / O_WRONLY / O_RDWR map to T_OREAD / T_OWRITE / T_ORDWR.
+    O_CREAT / O_TRUNC / O_EXCL / O_APPEND / O_NONBLOCK are silently
+    ignored at v1.0 (stratumd's keyfile load uses only O_RDONLY).
+    O_CLOEXEC is silently accepted (every Thylacine handle is
+    cloexec by construction).
+  - Path traversal: split on '/', walk one component at a time via
+    SYS_WALK_OPEN. Each component <= 64 bytes (the kernel walk_open
+    cap, audited in P5-stratumd-stub-bringup-e). Returns -ENOENT
+    on any component-walk failure; the kernel maps Twalk Rerror
+    to walk_open() returning -1.
+  - Maximum path length: 1024 bytes. Longer refused with -ENAMETOOLONG.
+
+This is the minimum surface to unblock stratumd's keyfile load (16b-beta
+mount path). Multi-component traversal lifts the "path-based open is
+v1.x" line from project_active.md; the broader openat surface
+(O_CREAT, mode_t, AT_FDCWD relative-fd, ".." traversal, symlinks)
+remains v1.x.
+
+Files modified: two.
+
+  arch/aarch64/bits/syscall.h.in   Appends __NR_walk_open 34 so musl's
+      awk pass generates the SYS_walk_open alias that the rewritten
+      openat.c references via syscall(SYS_walk_open, ...).
+
+  src/fcntl/openat.c               Full rewrite. The new body parses
+      `path` as an absolute path, splits on '/', walks each non-empty
+      component via SYS_walk_open with T_WALK_OPEN_FROM_ROOT (= -1)
+      for the first step and the prior step's fd thereafter. Closes
+      intermediate fds. Returns the final opened fd or -1 with errno
+      set on any failure.
+
+Files NOT modified: open.c (musl's open() delegates to openat via
+__sys_open_cp); stat.c (stratumd's fstat() also fails today; addressing
+that is a separate patch, tracked as 16b-beta cont).
+
+Invariants preserved:
+  - P-1 (no foreign syscall numbers): every __NR_* added maps 1:1
+        onto a Thylacine kernel syscall.
+  - P-3 (no silently-wrong POSIX): the v1.0 restrictions (absolute
+        paths only, O_RDONLY/W/RW only, no O_CREAT) are surfaced via
+        explicit -ENOTSUP / -EINVAL returns rather than silent
+        misbehaviour.
+  - P-4 (boundary-line discipline): the patch touches only the SEAM
+        (bits/syscall.h.in) and one specific lower-half file
+        (src/fcntl/openat.c). The portable upper half is untouched.
+
+Binding design: docs/POUCH-DESIGN.md sec 14 row 16; the 16b-beta
+sub-chunk's reference doc. Lifts the "Path-based open() — multi-
+component walk; v1.x." deferred item from project_active.md (the
+keyfile-load path of 16b-beta required it).
+
+--- a/arch/aarch64/bits/syscall.h.in
++++ b/arch/aarch64/bits/syscall.h.in
+@@ -420,3 +420,17 @@
+ #define __NR_mmio_map 5
+ #define __NR_dma_create 6
+ #define __NR_dma_map 7
++
++/*
++ * pouch / Thylacine path-walk extension number (P6-pouch-stratumd-
++ * boot, sub-chunk 16b-beta cont). The rewritten src/fcntl/openat.c
++ * (0009-pouch-openat.patch) walks absolute paths one component at a
++ * time via SYS_walk_open. The number matches kernel/include/
++ * thylacine/syscall.h SYS_WALK_OPEN = 34.
++ *
++ * Gate: caller's Proc must hold T_RIGHT_READ on the spoor_fd passed
++ * as the first arg. The pouch openat() arm always starts at the
++ * sentinel value -1 (T_WALK_OPEN_FROM_ROOT), which the kernel
++ * resolves to the caller's Territory root_spoor.
++ */
++#define __NR_walk_open 34
+--- a/src/fcntl/openat.c
++++ b/src/fcntl/openat.c
+@@ -1,7 +1,37 @@
++/* pouch boundary-line replacement (P6-pouch-stratumd-boot 16b-beta cont).
++ *
++ * openat() over Thylacine's SYS_walk_open path-walk primitive.
++ * Absolute paths only at v1.0; AT_FDCWD only; O_RDONLY/W/RW only.
++ * See 0009-pouch-openat.patch for the design rationale. */
+ #include <fcntl.h>
+ #include <stdarg.h>
++#include <errno.h>
++#include <stddef.h>
+ #include "syscall.h"
+ 
++/* Thylacine flag values (mirror kernel/include/thylacine/syscall.h
++ * and usr/lib/libt/include/thyla/syscall.h). Per-component cap is
++ * 64 bytes (the kernel's SYS_WALK_OPEN bound, audited in
++ * P5-stratumd-stub-bringup-e1). */
++#define POUCH_WALK_FROM_ROOT  ((long)(-1))
++#define POUCH_OREAD           0u
++#define POUCH_OWRITE          1u
++#define POUCH_ORDWR           2u
++#define POUCH_NAME_MAX        64u
++#define POUCH_PATH_MAX        1024u
++
++static inline long pouch_walk_open(long spoor_fd, const char *name,
++                                    unsigned long name_len,
++                                    unsigned long omode)
++{
++    return __syscall(SYS_walk_open, spoor_fd, name, name_len, omode);
++}
++
++static inline long pouch_close_fd(long fd)
++{
++    return __syscall(SYS_close, fd);
++}
++
+ int openat(int fd, const char *filename, int flags, ...)
+ {
+ 	mode_t mode = 0;
+@@ -12,6 +42,74 @@
+ 		mode = va_arg(ap, mode_t);
+ 		va_end(ap);
+ 	}
++	(void)mode;
+ 
+-	return syscall_cp(SYS_openat, fd, filename, flags|O_LARGEFILE, mode);
++	/* AT_FDCWD only at v1.0. */
++	if (fd != AT_FDCWD) {
++		errno = ENOTSUP;
++		return -1;
++	}
++	/* Refuse O_CREAT / O_TMPFILE: the pouch arm doesn't synthesize
++	 * inode creation. Other flags (O_TRUNC, O_APPEND, O_NONBLOCK,
++	 * O_CLOEXEC) are silently no-op at v1.0. */
++	if ((flags & O_CREAT) || (flags & O_TMPFILE) == O_TMPFILE) {
++		errno = ENOTSUP;
++		return -1;
++	}
++	if (!filename) {
++		errno = EFAULT;
++		return -1;
++	}
++	/* Absolute paths only at v1.0. */
++	if (filename[0] != '/') {
++		errno = ENOTSUP;
++		return -1;
++	}
++
++	/* Map POSIX O_RDONLY / O_WRONLY / O_RDWR to Thylacine T_OREAD /
++	 * T_OWRITE / T_ORDWR. The kernel's walk_open enforces the actual
++	 * envelope; pouch only translates the flag bits. */
++	unsigned long omode;
++	switch (flags & O_ACCMODE) {
++	case O_RDONLY: omode = POUCH_OREAD;  break;
++	case O_WRONLY: omode = POUCH_OWRITE; break;
++	case O_RDWR:   omode = POUCH_ORDWR;  break;
++	default:       errno = EINVAL; return -1;
++	}
++
++	/* Walk each path component. Skip leading '/' + collapse runs of
++	 * '/'. Bound by POUCH_PATH_MAX to keep the loop finite without
++	 * stack growth. */
++	long cur = POUCH_WALK_FROM_ROOT;
++	const char *p = filename + 1;
++	for (unsigned long total = 1; *p != '\0'; total++) {
++		if (total > POUCH_PATH_MAX) {
++			if (cur >= 0) pouch_close_fd(cur);
++			errno = ENAMETOOLONG;
++			return -1;
++		}
++		/* Collapse consecutive '/'. */
++		if (*p == '/') { p++; continue; }
++		/* Find component end. */
++		const char *q = p;
++		while (*q != '\0' && *q != '/') q++;
++		unsigned long len = (unsigned long)(q - p);
++		if (len > POUCH_NAME_MAX) {
++			if (cur >= 0) pouch_close_fd(cur);
++			errno = ENAMETOOLONG;
++			return -1;
++		}
++		long next = pouch_walk_open(cur, p, len, omode);
++		if (cur >= 0) pouch_close_fd(cur);
++		if (next < 0) {
++			/* The kernel walk_open returns -1 on Twalk Rerror;
++			 * map to ENOENT as the closest POSIX equivalent. */
++			errno = ENOENT;
++			return -1;
++		}
++		cur = next;
++		p = q;
++	}
++	if (cur < 0) { errno = ENOENT; return -1; }  /* trailing-slash-only path */
++	return (int)cur;
+ }

@@ -272,6 +272,173 @@ runtime errors on default + UBSan builds.
 
 ---
 
+## 16b-β — stratumd virtio-blk driver arm (foundation)
+
+**Status**: foundation landed; end-to-end pool mount **deferred to a
+follow-up sub-chunk (16b-γ)** because two pouch-side v1.x lifts surface
+late in the path:
+  1. pouch `fstat()` is still `__NR_fstat = 0xFFFF` (the ENOSYS
+     sentinel). `stm_keyfile_load` in stratum/v2/src/keyfile/keyfile.c
+     calls `fstat(fd)` after `open(path, O_RDONLY)` to validate the
+     keyfile size matches the expected layout; without fstat the load
+     returns STM_EBACKEND/STM_ENOENT.
+  2. `tools/mkcpio.py` builds the ramfs cpio with FLAT layout only
+     ("Subdirectories are NOT recursed at v1.0"). So even with the
+     0009-pouch-openat.patch landed here, `/etc/stratum/system.key`
+     can't actually exist in the ramfs; the path-walk for the
+     intermediate `etc/` and `stratum/` directories returns Twalk
+     Rerror on the first hop.
+
+Lifting EITHER of these without the other doesn't unblock the mount.
+The 16b-β foundation that did land in this sub-chunk is everything
+*upstream* of those two lifts; 16b-γ will land the lifts + close the
+end-to-end mount + the audit-bearing close.
+
+### What 16b-β foundation landed
+
+**Stratum-side (on the `thylacine-pouch-arm` branch in
+`~/projects/stratum/v2`)** — port of `usr/virtio-blk-rw/src/main.rs`
+(Rust, 814 LOC) into a long-lived `stm_bdev` arm:
+
+- `src/block/bdev_thylacine.c` (new, ~610 LOC). The synchronous
+  `stm_bdev_ops` vtable implemented over Thylacine's HW-capability
+  syscalls. VirtIO 1.2 §3.1.1 init state machine (RESET → ACK →
+  DRIVER → DeviceFeatures readback → DriverFeatures → FEATURES_OK
+  readback → DRIVER_OK); split-virtqueue setup with one chained
+  3-descriptor entry (req-header → data → status) reused per
+  request; IRQ-driven completion with bounded spurious-wake
+  tolerance (MAX_NON_USED_BUFFER_WAKES = 16 per VIRTIO 1.2 §4.2.5);
+  per-bdev pthread_mutex serializing all I/O (one request in flight
+  per bdev at v1.0); 1 MiB data DMA + 4 KiB ring DMA; cap_sectors
+  read from VirtIO blk config-space §5.2.4 byte offset 0..7; HIGH-
+  to-LOW slot scan so the FIRST-listed virtio-blk device (the pool)
+  takes priority over the SECOND (the legacy test disk.img that the
+  virtio-blk-probe / virtio-blk-rw binaries scan LOW-to-HIGH for).
+- `src/block/bdev.c`: STM_BDEV_BACKEND_AUTO routes to THYLACINE when
+  `__thylacine__` is defined; switch case added; explicit case for
+  STM_BDEV_BACKEND_POSIX gated `!__thylacine__` so a caller passing
+  POSIX-by-name gets STM_ENOTSUPPORTED rather than runtime ENOSYS.
+- `src/block/bdev_internal.h`: forward decl `stm_bdev_open_thylacine`
+  gated on `__thylacine__`.
+- `include/stratum/block.h`: new enum value `STM_BDEV_BACKEND_THYLACINE = 3`.
+- `src/block/CMakeLists.txt`: thylacine arm REPLACES posix.c when
+  STM_PLATFORM_THYLACINE (posix.c uses pread/pwrite/fsync which are
+  0xFFFF in pouch musl; the thylacine arm uses virtio-mmio directly
+  and is the only safe path on Thylacine).
+
+**Thylacine-side**:
+
+- `usr/lib/pouch/patches/0008-pouch-hw-syscalls.patch`: exposes
+  `__NR_mmio_create=2`, `__NR_irq_create=3`, `__NR_irq_wait=4`,
+  `__NR_mmio_map=5`, `__NR_dma_create=6`, `__NR_dma_map=7` at the
+  pouch musl ABI surface. Six numbers; one file (`bits/syscall.h.in`).
+  The pouch arm's `bdev_thylacine.c` consumes these via raw
+  `syscall(SYS_mmio_create, ...)` etc.
+- `usr/lib/pouch/patches/0009-pouch-openat.patch`: rewrites musl's
+  `src/fcntl/openat.c` to walk absolute paths one component at a
+  time via `SYS_walk_open` (kernel #34). Lifts a v1.x deferral
+  from project memory. **Necessary but not sufficient** for the
+  stratumd keyfile load (see 16b-γ deferred items above).
+- `tools/build.sh::build_stratum_mkfs_host`: native host build of
+  `stratum-mkfs` (NOT the pouch cross-build). Used at build time
+  to pre-generate the boot system pool fixture.
+- `tools/build.sh::build_stratum_pool_fixture`: runs the host
+  `stratum-mkfs` against `build/fixtures/pool.img` (64 MiB) +
+  `build/fixtures/system.key`. Regenerated each `tools/build.sh
+  kernel` run for reproducibility.
+- `tools/build.sh::build_ramfs`: copies `build/fixtures/system.key`
+  to the ramfs at `etc/stratum/system.key` (per K1 initramfs-literal
+  boot key, scripture commit `e82e945`). NOTE: at v1.0 mkcpio.py
+  is flat-only; the subdirectory copy is a no-op until 16b-γ lifts
+  multi-component devramfs walk.
+- `tools/run-vm.sh`: new `pool_flags` array adding a second
+  `virtio-blk-device` for `build/fixtures/pool.img`. Listed BEFORE
+  `disk_flags` so the pool gets slot 31 (HIGH) and disk.img stays
+  at slot 30 (LOW). Scan direction comment block expanded.
+- `usr/joey/joey.c::do_joey_main`: stratumd-boot probe replaces the
+  16a load-only probe. Constructs argv `["stratumd", "/dev/virtio-blk",
+  "--listen", "/srv/stratum-fs", "--keyfile", "/etc/stratum/system.key"]`,
+  passes cap_mask=`T_CAP_HW_CREATE`, perm_flags=`T_SPAWN_PERM_MAY_POST_SERVICE`,
+  fd_count=3 with the pipe-wr as fd 0/1/2 (so stratumd's stderr is
+  captured into the boot log). Bounded `t_srv_connect("stratum-fs")`
+  retry loop (600 attempts × ~1ms each = ~600ms total wait). **Probe
+  is non-fatal** at this sub-chunk: failure to bind the /srv socket
+  is reported with diagnostic + child stderr drain, but boot
+  continues. Once 16b-γ lifts the remaining pouch surface (fstat +
+  devramfs subdir walk), the probe will become fatal-on-failure +
+  audit-bearing.
+
+### Verified end-to-end up to (but not including) keyfile load
+
+Boot output captured in `build/test-boot.log`:
+
+```
+joey: stratumd-boot child exit_status=1 — output:
+stratumd: serving /dev/virtio-blk on /srv/stratum-fs (backlog=16, msize=8388608, ds=1, ro=0)
+stratumd: run failed (rc=-2)
+```
+
+The "serving" line confirms:
+- stratumd spawned with the foundation argv successfully (16b-α
+  argv pass-through verified at runtime).
+- stratumd's main reached its CLI-argv parser and produced the
+  expected serving line with `fs_path="/dev/virtio-blk"`,
+  `socket_path="/srv/stratum-fs"`.
+- stratumd's `install_signal_handlers()` completed (pouch sigaction
+  arm from sub-chunk 13b ran clean on the {SIGINT, SIGTERM, SIGPIPE}
+  set).
+- stderr propagation works: stratumd's fd 1 + 2 are inherited from
+  joey's pipe and drained into the boot log.
+
+The `rc=-2` (= STM_ENOENT) from `stm_stratumd_run` is the keyfile-load
+failure described in the 16b-γ deferred items above. Foundation works;
+the lift items gate the final mount.
+
+### Deferred to 16b-γ (mount completion + audit)
+
+- pouch `fstat()` implementation (likely via a new SYS_FSTAT kernel
+  syscall + a pouch arm).
+- `tools/mkcpio.py` subdirectory recursion + devramfs nested-dir
+  walk support (kernel/devramfs.c currently maintains a flat file
+  table).
+- End-to-end pool mount: `stm_keyfile_load` succeeds → `stm_stratumd_run`
+  reaches `stm_fs_mount` → bdev_thylacine reads pool header → AEAD
+  decrypt → root dataset visible → listen socket bound on /srv/stratum-fs.
+- Joey's probe becomes fatal-on-failure.
+- Formal audit prosecutor round on the audit-trigger surfaces
+  ("stratumd HW-cap spawn", "stratumd virtio-blk driver arm") added
+  to CLAUDE.md in `e82e945`.
+
+### Architecture invariants confirmed by foundation work
+
+- **I-2 (cap monotonic reduction)**: joey holds CAP_HW_CREATE from
+  kproc inheritance; passes `cap_mask = T_CAP_HW_CREATE` to
+  SYS_SPAWN_FULL_ARGV; `rfork_with_caps` narrows the child's caps to
+  the intersection. No cap expansion observed.
+- **I-5 (hardware-handle non-transferability)**: stratumd's
+  KOBJ_MMIO / KOBJ_IRQ / KOBJ_DMA handles never appear in a 9P
+  transfer (the surface doesn't even exist). Static.
+- **CAP_HW_CREATE allocation honest**: stratumd actually drives
+  hardware (when 16b-γ lands), so the cap is the right authority
+  for the role. Not privilege creep.
+- **Plan-9-canonical**: the FS server owns its disk. Validated by
+  the design + foundation.
+
+### Files added (16b-β foundation)
+
+| File | LOC | Owner |
+|---|---|---|
+| `src/block/bdev_thylacine.c` (Stratum) | ~610 | Stratum thylacine-pouch-arm branch |
+| `usr/lib/pouch/patches/0008-pouch-hw-syscalls.patch` | 100 | Thylacine |
+| `usr/lib/pouch/patches/0009-pouch-openat.patch` | 200 | Thylacine |
+
+Plus edits to: `include/stratum/block.h`, `src/block/bdev.c`,
+`src/block/bdev_internal.h`, `src/block/CMakeLists.txt` (all Stratum);
+`tools/build.sh`, `tools/run-vm.sh`, `usr/joey/joey.c`,
+`usr/lib/pouch/patches/series` (all Thylacine).
+
+---
+
 ## 16a — stratumd binary-load probe
 
 **Deliverable**: `/stratumd-probe` runs in joey; stratumd's binary

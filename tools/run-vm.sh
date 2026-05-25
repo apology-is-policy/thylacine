@@ -128,6 +128,33 @@ if [[ -f "$DISK_IMG" ]]; then
     )
 fi
 
+# P6-pouch-stratumd-boot sub-chunk 16b-beta: second virtio-blk-device
+# backing the boot system pool. tools/build.sh::build_stratum_pool_fixture
+# pre-generates build/fixtures/pool.img (64 MiB, populated by host
+# stratum-mkfs with the bootstrap pool + a single root inode in dataset
+# id=1). stratumd is spawned by joey holding CAP_HW_CREATE, claims the
+# virtio-mmio bank via bdev_thylacine.c (Stratum's thylacine-pouch-arm
+# branch), finds this slot, mounts the pool, binds /srv/stratum-fs.
+#
+# Slot assignment: QEMU virt-machine assigns virtio-mmio slots in
+# REVERSE creation order. pool_flags is listed FIRST so pool.img gets
+# slot 31 (the "primary" virtio-blk slot); disk_flags follows so the
+# test-disk lands at slot 30.
+#
+# bdev_thylacine.c scans HIGH-to-LOW so stratumd picks slot 31 (pool).
+# The legacy virtio-blk-probe / virtio-blk-rw test binaries scan
+# LOW-to-HIGH so they pick slot 30 (disk.img with the "THYLACINE-DISK-1"
+# signature they expect). Two virtio-blk-devices, two scan directions,
+# no collision.
+POOL_IMG="${THYLACINE_POOL_IMG:-$REPO_ROOT/build/fixtures/pool.img}"
+pool_flags=()
+if [[ -f "$POOL_IMG" ]]; then
+    pool_flags=(
+        -drive "if=none,id=pool0,format=raw,file=$POOL_IMG"
+        -device virtio-blk-device,drive=pool0
+    )
+fi
+
 # P4-Ja: virtio-net-device backing. QEMU's user-mode network (slirp)
 # binds a host-side userspace TCP/UDP relay to a guest-visible NIC; no
 # privilege needed (vs. -netdev tap which needs root + bridge config).
@@ -247,6 +274,7 @@ exec qemu-system-aarch64 \
     -m "$mem_mib" \
     -kernel "$KERNEL_BIN" \
     ${ramfs_flags[@]+"${ramfs_flags[@]}"} \
+    ${pool_flags[@]+"${pool_flags[@]}"} \
     ${disk_flags[@]+"${disk_flags[@]}"} \
     ${net_flags[@]+"${net_flags[@]}"} \
     ${input_flags[@]+"${input_flags[@]}"} \
