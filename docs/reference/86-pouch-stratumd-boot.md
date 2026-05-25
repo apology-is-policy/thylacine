@@ -643,6 +643,191 @@ User pushes the Stratum branch; the Stratum agent merges
 
 ---
 
+## 16b-γ-mount-bind diagnostic findings (post-16b-γ-mount-close)
+
+**Status**: investigation complete; no code change shipped (the
+candidate fix degrades the failure mode from clean-reap to kernel
+extinction). Carried forward as v1.x lifts.
+
+### Investigation method
+
+Temporary `fprintf` tracers were inserted into stratumd's mount path
+(non-committed):
+
+- `stratumd/src/cmd/stratumd/run.c::stm_cmd_stratumd_main` — entry +
+  pre-/post-`stm_stratumd_run`.
+- `stratumd/src/cmd/stratumd/serve.c::stm_stratumd_run` — entry +
+  pre-/post-`stm_fs_mount` + `listen_unix` + `accept_loop`.
+- `stratumd/src/fs/fs.c::stm_fs_mount` — entry + ebr_init +
+  keyfile_load + bdev_open + sb_mount_scan + pool_open +
+  alloc_open_blank + sync_open.
+- `stratumd/src/alloc/alloc.c::open_handle_bare` + `alloc_new` —
+  bootstrap_open + bootstrap_stats_get + compute_data_area +
+  crypto_init + calloc + mutex_init + btree_mt_new.
+- `stratumd/src/sync/sync.c::stm_sync_open` — entry + crypto_init +
+  scan loop + compute_auth_gen + content-quorum + pre-/post-
+  `free(scans)` + ub validation + pre-/post-`sync_new`.
+- `arch/arm64/exception.c::exception_sync_lower_el` — dump
+  `ctx->elr` (faulting PC) + `ctx->regs[30]` (LR) + `ctx->sp` (SP)
+  on FAULT_UNHANDLED_USER, via `uart_puts` + `uart_puthex64`.
+
+The full diagnostic chain was reproduced; the tracers were reverted
+in this commit (kept only in the memory file for future reproduction
+guidance).
+
+### Finding 1 — CAP_CSPRNG_READ missing for stratumd
+
+stratumd is spawned by joey with `cap_mask = T_CAP_HW_CREATE` only
+(`usr/joey/joey.c` builder for the 16b-γ probe). libsodium's
+`sodium_init` (called transitively from `stm_alloc_open_blank ->
+alloc_new -> stm_crypto_init`) dispatches `randombytes_stir ->
+randombytes_sysrandom_init ->`
+`randombytes_linux_getrandom(fodder, 16)` which compiles to
+`getrandom(buf, 16, 0)` -> `syscall_cp(SYS_getrandom, buf, 16, 0)`.
+
+`kernel/syscall.c::sys_getrandom_handler` gates on
+`(p->caps & CAP_CSPRNG_READ) == 0 -> return -1`. With only
+T_CAP_HW_CREATE in the mask, the gate fires; pouch's
+`__syscall_ret` maps the kernel -1 to errno EIO. libsodium's loop
+only retries on EINTR/EAGAIN, so EIO falls through to
+`random_dev_open()` (Linux fallback) which fails (no `/dev/urandom`
+on Thylacine) and `sodium_misuse()` runs `raise(SIGSEGV) -> abort()
+-> _Exit(127)` (via pouch's 0011-pouch-abort.patch).
+
+The kernel collapses every non-zero exit status to 1 (per the
+`SYS_EXITS` two-state convention in `kernel/syscall.c`'s
+`sys_exits_handler`), so joey's `t_wait_pid` sees `exit_status=1`.
+**Joey reaps cleanly; boot is green.**
+
+**Candidate fix** (NOT shipped): grant `T_CAP_CSPRNG_READ` in the
+spawn mask:
+```c
+.cap_mask = T_CAP_HW_CREATE | T_CAP_CSPRNG_READ,
+```
+With the fix, stratumd advances past `sodium_init` and reaches
+Finding 2.
+
+### Finding 2 — mallocng heap corruption in `stm_sync_open`
+
+With CAP_CSPRNG_READ granted, stratumd reaches `stm_sync_open` and
+runs through:
+
+- `stm_crypto_init` — OK (sodium_init succeeds; getrandom seeds the
+  CSPRNG).
+- scan loop (`n=1`, `quorum=1`): one device; `stm_sb_mount_scan` on
+  bdev_thylacine returns OK with label=2, slot=6 — the canonical UB
+  decodes cleanly.
+- `compute_auth_gen` returns `auth_gen=6`.
+- content-quorum check (single device; canonical_idx=0).
+- `free(scans)` succeeds (4104-byte allocation; mallocng accepts the
+  free without complaint).
+- ub validation: `ub_device_count=1`, `ub_device_id=0`,
+  `ub_roster_hash=16759053560515923264`, matches pool — passes.
+- `sync_new(p, a)` allocates s2=0x100004060 — OK.
+
+The next `__libc_free` (caller not pinned by the tracers; likely a
+sync_open downstream alloc/free pair) trips mallocng's
+`assert(!end[-5])` in `get_nominal_size`. The exact assert can vary
+between runs but the pattern is consistent: a slot-footer sentinel
+byte is non-zero when mallocng expects zero.
+
+Pouch's mallocng `glue.h` maps the `assert` macro to `a_crash()` =
+`*(volatile char *)0 = 0` (deliberate NULL deref). The fault hits
+EL0 with FAR=0x0 and EC=DATA_ABORT_LOWER; arch_fault_handle returns
+FAULT_UNHANDLED_USER (no VMA at 0x0); `exception_sync_lower_el`
+extincts the kernel.
+
+**Faulting PC** (from the temporary kernel-side tracer):
+`0x2a602c` in `__libc_free` — the `mov x11, xzr; strb wzr, [x11]`
+pair that implements mallocng's a_crash inline.
+
+**Root cause hypotheses** (not yet narrowed):
+
+1. **scans[i].ub overrun**: `stm_sb_mount_scan` writes to
+   `&scans[i].ub` (a 4096-byte stm_uberblock). If the write overruns
+   the allocated slot (e.g., off-by-one on a multi-block read), it
+   stomps mallocng's inline footer. But scans was freed cleanly
+   before the crash, so the corruption is unlikely to be in scans
+   itself.
+2. **libsodium's `_sodium_alloc_init` allocator hooks**: sodium
+   replaces or interposes on malloc/free for its protected
+   allocations. Maybe `_sodium_alloc_init` (called from sodium_init)
+   sets up state that mismatches mallocng's expectations.
+3. **sync_new internal allocation pattern**: sync_new probably
+   allocates a substantial stm_sync struct (~few KB); the
+   allocation pattern (multiple small allocs followed by frees in
+   a non-LIFO order) might trigger a mallocng-specific bug.
+4. **General pouch mallocng v1.0 stability**: pouch-hello-malloc
+   works for small alloc/free pairs, but the heavier stratumd
+   workload (libsodium + Stratum's stm_sync_open allocator dance)
+   exposes a latent issue.
+
+The candidate root-cause-narrow procedure would be:
+
+1. Add `malloc_check_assertions` mode to pouch's mallocng build (no
+   such mode upstream; would require patching mallocng to dump the
+   suspect canary value + allocation history).
+2. Or use a per-malloc tracer to identify which alloc caused the
+   subsequent free to fail.
+3. Or build with `-fsanitize=address` (would require ASan support
+   in pouch + the kernel; not v1.0).
+
+### Finding 3 — kernel FAULT_UNHANDLED_USER policy is too strict
+
+The kernel extincts on any EL0 fault that demand-paging can't
+resolve (`arch/arm64/exception.c::exception_sync_lower_el ->
+FAULT_UNHANDLED_USER -> extinction_with_addr`). This is the
+documented v1.0 behavior; v1.x (Phase 5+ note delivery) routes
+SIGSEGV-like notes instead, letting the offending Proc terminate
+without taking the kernel down.
+
+This finding interacts with Finding 2: a v1.0 mallocng corruption
+that triggers `a_crash` would terminate stratumd cleanly under
+v1.x but extincts the kernel under v1.0. The pre-existing pouch
+`abort()` override (0011-pouch-abort.patch) is the analogous
+boundary-line fix for `raise(SIGABRT) -> abort -> a_crash`; an
+analogous `0012-pouch-mallocng-crash.patch` would patch mallocng's
+`glue.h::assert` macro to `_Exit(127)` instead of `a_crash()`.
+
+### Why the candidate fix is net-negative
+
+Combining Findings 1 + 2 + 3: granting CAP_CSPRNG_READ to stratumd
+lets it past sodium_init (Finding 1 cleared) but exposes mallocng
+corruption (Finding 2) which then escalates to kernel extinction
+(Finding 3). The boot test regresses from `Thylacine boot OK` to
+`EXTINCTION: EL0 fault`.
+
+So at this checkpoint we ship the pre-fix state: stratumd dies
+clean at sodium_init via `_Exit(127)`; joey reaps cleanly; boot is
+green; joey probe stays NON-FATAL.
+
+### Carry-forwards to v1.x (queued)
+
+| # | v1.x lift | Closes |
+|---|---|---|
+| (a) | Grant `T_CAP_CSPRNG_READ` to stratumd (one-line) | Finding 1 |
+| (b) | Investigate + fix mallocng heap corruption in stm_sync_open | Finding 2 root cause |
+| (c) | `0012-pouch-mallocng-crash.patch` — patch mallocng's `glue.h::assert` to use `_Exit(127)` instead of `a_crash()` (parallels 0011-pouch-abort.patch) | Finding 3 (partial; via boundary-line) |
+| (d) | Phase 5+ SIGSEGV-like note delivery in `exception_sync_lower_el` | Finding 3 (real fix) |
+
+(a) MUST be paired with (b) and/or (c) before landing; landing (a)
+alone would regress the boot. (b) is the real fix; (c) is the
+boundary-line analog to the abort override. (d) is the architectural
+fix that makes (c) unnecessary.
+
+### What 16b-γ-mount-bind did NOT change
+
+- No kernel code change.
+- No Stratum-side change.
+- No pouch patch added/removed.
+- No joey probe change.
+- Test suite: 609/609 PASS x default + UBSan (unchanged from
+  16b-γ-mount-close audit close).
+- Boot: `Thylacine boot OK` reproducible; joey's stratumd-boot
+  probe `child exit_status=1 (final drain)` reproducible.
+
+---
+
 ## 16a — stratumd binary-load probe
 
 **Deliverable**: `/stratumd-probe` runs in joey; stratumd's binary
