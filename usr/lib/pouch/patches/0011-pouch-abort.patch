@@ -1,0 +1,78 @@
+Phase 6 sub-chunk 16b-gamma-mount-close (pouch-abort). Overrides musl's
+abort() to call _Exit(127) directly instead of reaching a_crash() (a
+deliberate NULL deref that musl uses as a last-resort "kill the process"
+mechanism after a misbehaved SIGABRT handler returns).
+
+Why the override: at Thylacine v1.0, FAULT_UNHANDLED_USER (an EL0 fault
+with no VMA covering the faulting address) extincts the kernel rather
+than terminating the offending Proc. a_crash()'s deliberate NULL deref
+is therefore not "kill the offending process" but "kill the entire
+kernel" -- every assert() / abort() in any pouch program manifests as
+boot extinction.
+
+This is the documented v1.x extension in
+docs/reference/83-pouch-signals.md ("override pouch's abort.c to _Exit
+directly"). Implemented now because P6-pouch-stratumd-boot sub-chunk 16b
+needs stratumd's mount-time asserts to fail cleanly instead of taking
+the kernel down with them -- without this, the joey stratumd-boot probe
+cannot flip from NON-FATAL to FATAL.
+
+Behavioral delta from upstream abort():
+  - No raise(SIGABRT). The whole signal-delivery dance (block all sigs,
+    install SIG_DFL, tkill, unmask) is removed. Programs that install
+    SIGABRT handlers will NOT see them invoked under this abort path.
+  - No a_crash() NULL deref. The deliberate fault is replaced with
+    _Exit(127), the same status musl reaches at the bottom of its
+    abort() path (after raise(SIGKILL) is supposed to kill the process).
+  - _Exit(127) routes through SYS_exit_group via the existing pouch
+    seam, producing a clean child exit with status 127.
+
+The status code 127 matches musl's normal-termination fallback at the
+bottom of abort() (the _Exit(127) past the unreachable a_crash()), so
+WIFSIGNALED-vs-WIFEXITED handling is the only observable change for a
+parent doing wait_pid. A parent expecting WIFSIGNALED + WTERMSIG ==
+SIGABRT (the Linux behavior) will instead see WIFEXITED + WEXITSTATUS
+== 127. v1.x will add a sigaction surface that distinguishes the two.
+
+--- a/src/exit/abort.c
++++ b/src/exit/abort.c
+@@ -1,30 +1,15 @@
+ #include <stdlib.h>
+-#include <signal.h>
+-#include "syscall.h"
+-#include "pthread_impl.h"
+-#include "atomic.h"
+-#include "lock.h"
+-#include "ksigaction.h"
+
++/* Pouch override (Thylacine P6-pouch-stratumd-boot 16b-gamma-mount-close):
++ * skip raise(SIGABRT) + a_crash() entirely. At v1.0 the kernel extincts
++ * on the deliberate NULL deref a_crash() emits (FAULT_UNHANDLED_USER
++ * policy) -- aborting in any pouch program would take the whole boot
++ * down. _Exit(127) matches musl's normal-termination fallback at the
++ * bottom of upstream abort() (past the unreachable a_crash). v1.x will
++ * add a sigaction(SIGABRT) surface that distinguishes WIFSIGNALED from
++ * WIFEXITED. See docs/reference/83-pouch-signals.md for the design
++ * note. */
+ _Noreturn void abort(void)
+ {
+-	raise(SIGABRT);
+-
+-	/* If there was a SIGABRT handler installed and it returned, or if
+-	 * SIGABRT was blocked or ignored, take an AS-safe lock to prevent
+-	 * sigaction from installing a new SIGABRT handler, uninstall any
+-	 * handler that may be present, and re-raise the signal to generate
+-	 * the default action of abnormal termination. */
+-	__block_all_sigs(0);
+-	LOCK(__abort_lock);
+-	__syscall(SYS_rt_sigaction, SIGABRT,
+-		&(struct k_sigaction){.handler = SIG_DFL}, 0, _NSIG/8);
+-	__syscall(SYS_tkill, __pthread_self()->tid, SIGABRT);
+-	__syscall(SYS_rt_sigprocmask, SIG_UNBLOCK,
+-		&(long[_NSIG/(8*sizeof(long))]){1UL<<(SIGABRT-1)}, 0, _NSIG/8);
+-
+-	/* Beyond this point should be unreachable. */
+-	a_crash();
+-	raise(SIGKILL);
+ 	_Exit(127);
+ }

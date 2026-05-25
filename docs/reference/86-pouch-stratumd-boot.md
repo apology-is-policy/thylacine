@@ -439,6 +439,210 @@ Plus edits to: `include/stratum/block.h`, `src/block/bdev.c`,
 
 ---
 
+## 16b-γ-mount-close — bdev_thylacine read-I/O fix + pouch abort override (this checkpoint)
+
+**Deliverable**: bdev_thylacine's read I/O actually returns pool data.
+The stratumd mount path runs end-to-end through `stm_sb_mount_scan`
+(decodes the uberblock at pool.img label-0 slot-4, STRATUM2 magic at
+offset 0x4000); proceeds into the downstream pool_open / alloc_open /
+sync_create chain. A separate downstream failure surfaces as a clean
+`exit-1` from `stratumd: run failed (rc=-N)` (NOT in this sub-chunk's
+scope -- the joey probe stays NON-FATAL pending the next sub-chunk
+to investigate / fix the post-mount_scan failure).
+
+Sub-chunked in-session at 16b-γ-syscalls + 16b-γ-mount-close because
+the read-I/O block was a separate problem from the POSIX-surface
+lifts (fstat / lseek / open redirect / walk fixes). 16b-γ-syscalls
+landed at `af6fd82` + `416b4f3`; 16b-γ-mount-close lands here.
+
+### The bug
+
+`Stratum/src/block/bdev_thylacine.c` defined its kobj-rights mirror as:
+
+```c
+#define T_RIGHT_READ                 (1u << 0)
+#define T_RIGHT_WRITE                (1u << 1)
+#define T_RIGHT_MAP                  (1u << 2)
+#define T_RIGHT_SIGNAL               (1u << 3)   /* WRONG */
+```
+
+The kernel's `RIGHT_SIGNAL` per `kernel/include/thylacine/handle.h`
+is `(1u << 5)`. The bit at `(1u << 3)` is `RIGHT_TRANSFER` (used
+for the 9P-mediated handle transfer surface; not by HW handles).
+
+What this caused: `t_irq_create(intid, T_RIGHT_SIGNAL)` succeeded
+(the rights mask `(1u << 3)` is within `RIGHT_ALL = 0x3f`, the
+kernel's `rights == 0 || rights & ~RIGHT_ALL` reject doesn't fire).
+The handle was created with `rights = (1u << 3)`. Then every
+`t_irq_wait(d->irq_handle)` returned -1 because
+`sys_irq_wait_handler` gates on `slot->rights & RIGHT_SIGNAL` =
+`(1u<<3) & (1u<<5)` = `0`. `do_request`'s `if (count < 0) return
+STM_EIO;` collapsed every read to EIO. `stm_sb_mount_scan` saw
+every label_read fail and returned STM_ENOENT.
+
+The Rust `usr/virtio-blk-rw` driver was unaffected because it uses
+`libthyla_rs::T_RIGHT_SIGNAL = 1 << 5` (correct). The Rust driver
+has been passing for many sub-chunks without surfacing this bug,
+because nothing else in the tree references `bdev_thylacine.c`'s
+private `T_RIGHT_SIGNAL` constant.
+
+The fix is the one-line update of the C driver's constant +
+a comment that explicitly calls out the kernel's bit-layout
+authority and the adjacent reserved bits `(1u << 3) =
+RIGHT_TRANSFER` + `(1u << 4) = RIGHT_DMA`.
+
+### How the bug was diagnosed
+
+Diagnostic fprintfs were temporarily added to `bdev_thylacine.c`'s
+`op_read` / `do_request` / IRQ-wait loop, and a temporary kernel-
+side EL0 fault diagnostic was added to `arch/arm64/exception.c`
+showing the faulting Proc's PID + ELR (the faulting PC) + LR + SP.
+The traces showed `t_irq_wait` returning -1 every call. Comparing
+`T_RIGHT_SIGNAL` across the three rights-mirror sites
+(`bdev_thylacine.c`, `libthyla_rs/src/lib.rs`,
+`usr/lib/libt/include/thyla/syscall.h`) found the lone outlier.
+
+All diagnostic fprintfs were reverted before the close commit per
+the audit-close discipline. The kernel-side EL0 fault diagnostic
+was also reverted.
+
+### Pouch abort override (the v1.x extension, landed early)
+
+The downstream stratumd mount path can call `abort()` (via
+`assert()` or direct call). Upstream musl's `abort.c` reaches
+`a_crash()` -- a deliberate NULL deref -- as a "last-resort kill
+the process" mechanism after a misbehaved SIGABRT handler returns.
+At Thylacine v1.0, FAULT_UNHANDLED_USER extincts the kernel
+rather than terminating the offending Proc, so a_crash() takes
+the whole boot down.
+
+`usr/lib/pouch/patches/0011-pouch-abort.patch` (NEW, applied as
+the eleventh entry in the boundary-line patch series) overrides
+musl's `abort()` to call `_Exit(127)` directly. Skips the
+`raise(SIGABRT) + a_crash()` chain. Programs that install
+SIGABRT handlers will not see them invoked under this path.
+
+Status code 127 matches musl's normal-termination fallback at
+the bottom of upstream `abort()` (the `_Exit(127)` past the
+unreachable `a_crash`). A parent doing `wait_pid` will observe
+`WIFEXITED + WEXITSTATUS == 127` instead of the
+`WIFSIGNALED + WTERMSIG == SIGABRT` it would observe on Linux.
+v1.x will add a sigaction(SIGABRT) surface that distinguishes
+the two; the docs cross-reference is in
+`docs/reference/83-pouch-signals.md`.
+
+The current downstream failure in stratumd's mount path actually
+exits via run.c's `if (rc != STM_OK) return 1;` path (exit_status
+1, not 127), so the abort override is not exercised in the
+happy-path of this sub-chunk's test. The override lands as a
+defensive measure for future pouch programs that DO assert/abort
+on the mount path.
+
+### Joey reap workaround
+
+The original `joey/joey.c` failure-branch `t_wait_pid` blocked
+unconditionally, which deadlocked if stratumd was alive doing
+slow mount work. The workaround restructures the retry loop +
+failure branch:
+
+- **6000 retries** (up from 600) of `t_srv_connect(srv_name, ...)`.
+  Gives stratumd time to complete mount.
+- **Per-retry non-blocking pipe drain**: each retry calls
+  `t_poll(sd_rd, timeout=0)` and reads available bytes into the
+  boot log via `t_puts`. Keeps the pipe buffer from filling and
+  blocking stratumd's stderr writes.
+- **Failure-branch bounded drain**: 200 iter x 10 ms poll to
+  capture any final diagnostic msg before reap.
+- **Failure-branch wait_pid**: after the drain, reap stratumd
+  to prevent the unreparented-zombie / kproc-wait_pid `wrong pid`
+  extinction race. The race: if stratumd exits before
+  joey-userspace, the zombie reparents to kproc on joey-userspace's
+  exit; kproc-joey_run's `wait_pid` is unfiltered (returns any
+  zombie child) so it can return stratumd's pid instead of
+  joey-userspace's pid, triggering the `wrong pid` extinction in
+  `kernel/joey.c:204`. With this reap in place, stratumd's zombie
+  is collected by joey-userspace before joey-userspace exits.
+
+The 6000-retry + per-retry drain pair are coupled: without the
+drain, stratumd's stderr writes would block once the pipe buffer
+fills (typically after a few hundred bytes); without the bumped
+retry count, joey times out before mount completes.
+
+This is the v1.0 stratumd-boot probe shape. The probe will be
+revisited when the joey-probe-flips-FATAL flip lands (queued for
+the next sub-chunk after the downstream mount path is fixed).
+
+### What works end-to-end this checkpoint
+
+Boot log confirms (after RIGHT_SIGNAL fix):
+- `joey: probe /system.key fstat OK size=3656 mode=0o100644`
+- `joey: probe /system.key lseek SEEK_END/SEEK_SET OK`
+- `stratumd: serving /dev/virtio-blk on /srv/stratum-fs (...)` -- stratumd
+  reached `stm_stratumd_run`, ran libsodium init, opened bdev, etc.
+- (NEW WITH FIX) `stm_keyfile_load("/system.key")` -> STM_OK
+- (NEW WITH FIX) `stm_bdev_open(THYLACINE)` -> STM_OK +
+  capacity = 64 MiB
+- (NEW WITH FIX) `stm_sb_mount_scan` -> STM_OK (decodes uberblock
+  at label-0 slot-4 -- the STRATUM2 magic at offset 0x4000)
+- Mount path proceeds into pool_open / alloc_open / sync_create
+- A downstream failure (NOT in this sub-chunk's scope) terminates
+  the run with `exit-1`
+- `joey: stratumd-boot /srv/stratum-fs not bound (...)` -- expected
+  pending the next sub-chunk
+- `joey: stratumd-boot child exit_status=1 (final drain)` -- reaped
+  cleanly
+- Boot continues to stub-bringup, joey exits cleanly, kernel reports
+  `Thylacine boot OK`
+
+Test posture: `599/599 PASS` x (default + UBSan). No EXTINCTION.
+
+### Audit-trigger surfaces
+
+This sub-chunk's audit covers:
+
+| Surface | New / Existing |
+|---|---|
+| `usr/lib/pouch/patches/0011-pouch-abort.patch` (new) | NEW row |
+| Stratum-side `src/block/bdev_thylacine.c` -- RIGHT_SIGNAL fix | Existing row "stratumd virtio-blk driver arm" |
+| `usr/joey/joey.c` retry+drain+reap workaround | Existing "Initial bringup" / boot-ordering surface |
+| **paired with 16b-γ-syscalls surfaces** (carried over from `af6fd82`/`416b4f3`): | |
+| `kernel/syscall.c::sys_fstat_handler` / `sys_lseek_handler` / partial-walk reject | Existing row "native fstat + lseek surface" |
+| `kernel/devramfs.c::devramfs_walk` reuse-nc + `devramfs_stat_native` | Existing row "native fstat + lseek surface" |
+| `kernel/joey.c::joey_run` kproc territory chroot | Existing row "Initial bringup" |
+
+### Files added / modified (16b-γ-mount-close)
+
+| File | LOC delta | Owner |
+|---|---|---|
+| `src/block/bdev_thylacine.c` (Stratum) | +4 -2 | Stratum `thylacine-pouch-arm` branch |
+| `usr/lib/pouch/patches/0011-pouch-abort.patch` (Thylacine, NEW) | +52 | Thylacine |
+| `usr/lib/pouch/patches/series` | +1 | Thylacine |
+| `usr/joey/joey.c` | retry+drain+reap | Thylacine |
+| `docs/reference/86-pouch-stratumd-boot.md` (this file) | +section | Thylacine |
+| `CLAUDE.md` audit-trigger row update | small | Thylacine |
+| `docs/phase6-status.md` landed row | small | Thylacine |
+
+Stratum side: `Thylacine bdev arm: fix T_RIGHT_SIGNAL constant ...`
+committed on `thylacine-pouch-arm` at `389c742` (parent `63a3eb1`).
+User pushes the Stratum branch; the Stratum agent merges
+`thylacine-pouch-arm` forward to main at its discretion.
+
+### What's queued for the next sub-chunk (post-16b-γ-mount-close)
+
+- Investigate the downstream stratumd mount-path failure. Hypotheses:
+  pool_open / alloc_open_blank / sync_create may hit a Stratum-internal
+  assert + return non-OK; OR an unexpected encrypted-vs-plaintext path
+  mismatch (the bootstrap pool may have been formatted with an
+  encryption envelope that this stratumd build doesn't decrypt
+  cleanly); OR a missing pouch-side syscall surface (getuid, geteuid,
+  fchmod, fchown etc) the mount path needs.
+- After fix: stratumd binds /srv/stratum-fs; joey's probe flips to
+  FATAL on miss.
+- This work expands the boot-path test coverage so additional
+  audit-trigger surfaces may need rows.
+
+---
+
 ## 16a — stratumd binary-load probe
 
 **Deliverable**: `/stratumd-probe` runs in joey; stratumd's binary

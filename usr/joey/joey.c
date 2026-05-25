@@ -1442,7 +1442,7 @@ int main(void) {
         // mount-close). This probe stays NON-FATAL until that lands.
         static const char srv_name[] = "stratum-fs";
         long sd_srv_fd = -1;
-        for (int i = 0; i < 600; i++) {
+        for (int i = 0; i < 6000; i++) {
             sd_srv_fd = t_srv_connect(srv_name, sizeof(srv_name) - 1, 0, 0);
             if (sd_srv_fd >= 0) {
                 t_putstr("joey: stratumd-boot /srv/stratum-fs bound after retry ");
@@ -1450,24 +1450,69 @@ int main(void) {
                 t_putstr(" (pool mounted via bdev_thylacine)\n");
                 break;
             }
-            for (volatile long j = 0; j < 1000000L; j++) { /* nop */ }
-        }
-
-        if (sd_srv_fd < 0) {
-            t_putstr("joey: stratumd-boot /srv/stratum-fs not bound (16b-gamma-syscalls; "
-                     "bdev_thylacine read-path is the next blocker)\n");
-            // Reap stratumd; drain its stderr for diagnostic so the boot
-            // log records where the mount path stopped.
-            int wedged_status = -1;
-            (void)t_wait_pid(&wedged_status);
-            t_putstr("joey: stratumd-boot child exit_status=");
-            t_putstr(itoa_dec(wedged_status, buf, sizeof(buf)));
-            t_putstr(" — output:\n");
+            // Drain stratumd's stderr pipe each retry (non-blocking
+            // poll). Two purposes: (1) surface stratumd's diagnostics
+            // (assertion msgs, libsodium init traces, bdev errors) in
+            // the boot log; (2) keep the pipe buffer from filling --
+            // a full pipe buffer would block stratumd's next stderr
+            // write, which would in turn keep stratumd from progressing
+            // toward bind. The poll timeout of 0 makes this strictly
+            // non-blocking; an empty pipe returns immediately.
             for (;;) {
+                struct pollfd pfd = { .fd = (int)sd_rd, .events = POLLIN, .revents = 0 };
+                long pr = t_poll(&pfd, 1, 0);
+                if (pr <= 0 || !(pfd.revents & POLLIN)) break;
                 unsigned char rd_buf[256];
                 long n = t_read(sd_rd, rd_buf, sizeof(rd_buf));
                 if (n <= 0) break;
                 (void)t_puts((const char *)rd_buf, (size_t)n);
+            }
+            for (volatile long j = 0; j < 1000000L; j++) { /* nop */ }
+        }
+
+        if (sd_srv_fd < 0) {
+            t_putstr("joey: stratumd-boot /srv/stratum-fs not bound (16b-gamma-mount-close; "
+                     "downstream stratumd mount path requires further work)\n");
+            // Bounded-drain stratumd's stderr first so any final
+            // diagnostic msg lands in the boot log.
+            for (int drain_i = 0; drain_i < 200; drain_i++) {
+                struct pollfd pfd = { .fd = (int)sd_rd, .events = POLLIN, .revents = 0 };
+                long pr = t_poll(&pfd, 1, 10);
+                if (pr <= 0) break;
+                if (!(pfd.revents & POLLIN)) break;
+                unsigned char rd_buf[256];
+                long n = t_read(sd_rd, rd_buf, sizeof(rd_buf));
+                if (n <= 0) break;
+                (void)t_puts((const char *)rd_buf, (size_t)n);
+            }
+            // Reap stratumd. With the pouch-abort override (0011-pouch-
+            // abort.patch), stratumd's downstream assert / abort paths
+            // _Exit(127) cleanly rather than triggering EL0 NULL deref.
+            // wait_pid here completes once stratumd's mount path
+            // terminates -- without this reap, an unwaited stratumd
+            // zombie reparents to kproc on joey-userspace exit, and
+            // kproc-joey_run's wait_pid races between joey's zombie
+            // and stratumd's, extincting on "wrong pid" if it sees
+            // stratumd first. (kproc reparent + wait_pid is unfiltered
+            // by pid at v1.0; until kproc.wait_pid grows a pid filter
+            // OR PID 1 splits from kproc, joey-userspace must drain
+            // its zombies before exiting.)
+            int wedged_status = -1;
+            long reaped = t_wait_pid(&wedged_status);
+            if (reaped > 0) {
+                t_putstr("joey: stratumd-boot child exit_status=");
+                t_putstr(itoa_dec(wedged_status, buf, sizeof(buf)));
+                t_putstr(" (final drain)\n");
+                // After reap, the pipe may have residual bytes the
+                // bounded-drain above missed (e.g., the libc atexit
+                // flush). Drain once more, blocking-OK since the
+                // writer is dead and EOF terminates.
+                for (;;) {
+                    unsigned char rd_buf[256];
+                    long n = t_read(sd_rd, rd_buf, sizeof(rd_buf));
+                    if (n <= 0) break;
+                    (void)t_puts((const char *)rd_buf, (size_t)n);
+                }
             }
             (void)t_close(sd_rd);
             // NON-FATAL: continue boot.
