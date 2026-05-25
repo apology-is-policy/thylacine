@@ -1276,3 +1276,151 @@ POUCH-DESIGN.md §14 row 16).
   Linux-shape boot lifecycle (for reference; Thylacine's variant
   follows the same shape but with joey + corvus + the kernel 9P
   client substituted for systemd + initramfs).
+
+---
+
+## 16b-γ-mount-bind narrowing — AEGIS-256 soft decrypt as the corruption source
+
+This session re-investigated the "bdev_thylacine read-loop bug"
+documented above (the symptom: zero-sized virtio descriptor at
+~the 113th read). With diagnostic fprintfs in `mount_scan` and
+`do_request` and a kernel-side PC/LR/ESR/FAR dump on EL0 fault
+(all reverted before commit), the prior session's diagnosis was
+**falsified**:
+
+- bdev_thylacine reads cleanly through ALL 252 mount_scan iterations
+  + 5 subsequent reads (avail_idx 0..509). No descriptor drift,
+  no zero-sized buffers, no DSB SY ordering issue.
+- The "zero sized buffers" QEMU error from the prior session was
+  a TIMING ARTIFACT — heavy fprintf instrumentation slows virtio
+  enough that QEMU eventually sees a stale descriptor; without the
+  fprintfs (or with a lighter dose) the loop completes cleanly.
+- mount_scan returns OK; sync_open advances; the path then reads
+  two 128 KiB btree-node chunks (lba 2304 + lba 2816, paddr 288 +
+  paddr 352, both with the `STBTNODE` magic).
+
+The actual crash site: **inside libsodium's AEGIS-256 soft
+`decrypt_detached`**, called by `stm_btree_node_decrypt` on the
+**second** btree node read (paddr 352, gen 1). The crash is
+detected by mallocng's `alloc_slot` `assert(!p[-4])` (the slot
+footer sentinel) — heap corruption.
+
+### Empirical bisect (all reverted)
+
+Kernel diag dumped on EL0 fault:
+- PC inside `alloc_slot` (mallocng's slot-corruption a_crash)
+- LR also inside `alloc_slot` (recursive `alloc_group ->
+  alloc_slot`)
+- FAR = 0x0 (a_crash: `mov x17, xzr; strb wzr, [x17]`)
+- ESR = 0x92000046 (data abort lower EL, L2 translation fault)
+- SP = 0x7fff90d0 (well within the 256 KiB user stack)
+
+Bisect by overriding the soft `decrypt_detached`'s loop body:
+
+| Loop body | Boot outcome |
+|---|---|
+| Original `aegis256_dec(m+i, c+i, state)` | EL0 NULL deref in alloc_slot |
+| Empty (`i = (mlen / RATE) * RATE`) | **`Thylacine boot OK`** |
+| `memset(m+i, 0xaa, RATE)` | **`Thylacine boot OK`** |
+
+The empty-loop and memset-loop variants write the SAME 131040
+bytes to the SAME output buffer that the original loop targets.
+The CRASH IS SPECIFIC TO `aegis256_dec` — not buffer overrun,
+not iteration count.
+
+Periodic-fprintf bisect of the original loop:
+- Last successful iteration: i = 102400 (m+i = 0x100021090)
+- Crash window: i ∈ [102400, 103424) — i.e., between the
+  6400th and 6464th call to `aegis256_dec`.
+
+### Path validation
+
+- Implementation pointer correctly resolves to
+  `aegis256_soft_implementation` (impl=0x2b4008, impl->dd=0x27a52c).
+  ARM crypto path is NOT taken (Thylacine's auxv lacks AT_HWCAP, so
+  `sodium_runtime_has_armcrypto()` returns 0; expected).
+- `crypto_aead_aegis256_decrypt_detached` IS entered with valid
+  args (m / c / clen / mac all reasonable, k non-NULL).
+- `decrypt_detached` (the soft impl) entry + post-init + pre-loop
+  fprintfs all fire. Post-loop fprintf does NOT fire — confirms the
+  crash is INSIDE the loop or its compiled tail.
+
+### Hypotheses (ordered by likelihood)
+
+1. **Compiler / vectorization bug**. `aegis256_dec` is pure C in
+   `aegis256_common.h`, but clang at -O2 cross-compiling for aarch64
+   may vectorize the XOR / AND chain into NEON instructions with an
+   alignment / ordering bug. The fact that memset (which the
+   compiler emits as straight NEON store-pair `stp q0, q0, ...`)
+   does NOT crash suggests the issue is specific to the
+   `LOAD_XOR_XOR_XOR_AND_STORE` pattern compiled by clang for the
+   soft path, not pure store-bandwidth.
+
+2. **`aegis256_update`-side stack corruption**. Each iteration calls
+   `aegis256_update(state, msg)` which calls `softaes_block_encrypt`
+   5 times. `_encrypt` allocates ~1 KiB of stack (`uint32_t
+   t[4][4][16]` + alignment) per call. The 6400+ iterations
+   exercise this path deeply; a stack-overlap or compiler
+   stack-management bug could touch caller frames. (Stack depth is
+   bounded — peak ~3-4 KiB above the user stack base, well within
+   256 KiB.)
+
+3. **mallocng heap layout interaction**. The output buffer m =
+   `0x100008090` sits inside a mallocng-managed 131072-byte
+   allocation (sizeclass 63 — direct-mmap path); the mmap region
+   reaches ~0x100029080. Writes go to m..m+131040 (= 0x100028070),
+   in-bounds. But the heap also holds mallocng's per-group meta
+   structures, secrets, the `ctx.active[sc]` linkages, etc., and
+   if `aegis256_dec`'s compiled body touches any of those by
+   mistake (e.g., via a register-spill that points at random heap)
+   the corruption shows up on the next mallocng call (the post-
+   loop fprintf transitively triggers `alloc_slot`).
+
+The root cause needs a deeper investigation — disassembling the
+compiled `decrypt_detached` body and walking the actual writes,
+or running a small unit test of `crypto_aead_aegis256_decrypt`
+against a 131040-byte plaintext under pouch's libsodium + arch=arm64
+to reproduce in isolation. That isolated reproducer can then be
+shared with libsodium upstream if the bug is on their side.
+
+### Workaround path (v1.x)
+
+The pre-existing **mmap-bypass for the decrypt scratch** (Stratum
+`c5b998c`) is correct but insufficient — it dodges one
+mallocng-cycle bug (the ct allocation/free corruption) but the
+AEGIS-256 soft decrypt itself has a separate corruption mechanism
+that fires on the m output write.
+
+Pragmatic workarounds for an unblocking v1.x close:
+
+- **(W-a)** Force libsodium's AEGIS-256 ARM crypto path. The
+  ARMv8-A AES instructions (`vaeseq_u8` / `vaesmcq_u8`) are
+  hardware-implemented on QEMU's TCG-emulated cpu=max model. The
+  detection currently fails because Thylacine doesn't expose
+  AT_HWCAP; either (1) add AT_HWCAP with HWCAP_AES bit to
+  `kernel/exec.c::exec_build_init_stack`, or (2) patch pouch's
+  `sodium_runtime_has_armcrypto()` to return 1 unconditionally.
+  Trades: option (1) adds an audit-bearing kernel surface; option
+  (2) is a boundary-line patch local to libsodium.
+- **(W-b)** Hot-swap AEGIS-256 with XChaCha20-Poly1305 in
+  Stratum (which Stratum already supports via `STM_AEAD_XCHACHA20_SIV`
+  enum). Behind `#ifdef __thylacine__` in `src/btree_store/crypt.c`,
+  call `stm_aead_decrypt(STM_AEAD_XCHACHA20_SIV, ...)`. Requires
+  rewriting any persistent ciphertext in the boot pool; effectively
+  a format-break for the system pool. Heavier.
+- **(W-c)** Vendor or patch the pouch libsodium build to disable
+  vectorization on AEGIS-256 (`-O0` or `__attribute__((optnone))`
+  on the soft impl). Lightest blast radius if the hypothesis (1)
+  is correct.
+
+(W-a) is the cleanest and arrives with the smallest code change;
+(W-c) confirms hypothesis 1 if the slow-down builds boot OK.
+
+### Verification status: BLOCKED (root cause unknown)
+
+The mmap-bypass landed at Stratum `c5b998c` remains correct + in
+tree but DORMANT. The bdev_thylacine "read-loop bug" recorded as
+task #712 in the prior session is **falsified**; the real blocker
+is the AEGIS-256 soft decrypt path. Baseline preserved:
+`Thylacine boot OK`, 599/599 PASS × default + UBSan, joey probe
+NON-FATAL (clean reap on stratumd's sodium_init exit-127).
