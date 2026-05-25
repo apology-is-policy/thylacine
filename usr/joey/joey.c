@@ -1518,6 +1518,21 @@ int main(void) {
             // NON-FATAL: continue boot.
         } else {
             // Connection works. Release joey's client handle.
+            //
+            // 16b-gamma-mount-close audit F2 (deferred to 16b-gamma-
+            // mount-bind): this success branch does NOT reap stratumd.
+            // At today's v1.0 checkpoint the branch never fires (joey
+            // probe stays NON-FATAL until mount-bind lands), so the
+            // unreparented-zombie / kproc-wait_pid race is mooted.
+            // When mount-bind flips the probe to FATAL, this branch
+            // becomes the happy path AND joey will continue to do
+            // long-lived work via /srv/stratum-fs; stratumd-as-daemon
+            // should never zombie under normal operation, but
+            // defense-in-depth requires the same reap pattern as the
+            // failure branch above. v1.x lift: kernel `wait_pid_for(pid)`
+            // (per the audit F9 disposition) closes the race
+            // canonically by re-looping kproc.wait_pid on non-matching
+            // reaps.
             if (t_close(sd_srv_fd) != 0) {
                 t_putstr("joey: stratumd-boot t_close(srv_fd) FAILED\n");
                 return 1;

@@ -81,7 +81,7 @@ diff -u a/arch/aarch64/bits/syscall.h.in b/arch/aarch64/bits/syscall.h.in
 diff -u a/src/stat/fstat.c b/src/stat/fstat.c
 --- a/src/stat/fstat.c
 +++ b/src/stat/fstat.c
-@@ -1,13 +1,83 @@
+@@ -1,13 +1,91 @@
 -#define _BSD_SOURCE
 +/*
 + * pouch fstat() — translate the Thylacine native SYS_fstat surface
@@ -142,6 +142,13 @@ diff -u a/src/stat/fstat.c b/src/stat/fstat.c
 +	if (fd < 0)    return __syscall_ret(-EBADF);
 +	if (!st)       return __syscall_ret(-EFAULT);
 +
++	/* R16b-gamma-mount-close audit F6+F11 close: zero `t` BEFORE the
++	 * syscall so a partial uaccess fault inside the kernel's per-byte
++	 * copy-out leaves t in a deterministic zero-filled state instead
++	 * of stack garbage. Defense-in-depth against any future
++	 * restructuring that might consult t post-failure. */
++	for (i = 0; i < sizeof(t); i++) ((unsigned char *)&t)[i] = 0;
++
 +	rc = __syscall(SYS_fstat, fd, &t);
 +	if (rc < 0)    return __syscall_ret(rc);
 +	/* Thylacine SYS_fstat returns -1 on any error; treat anything
@@ -149,9 +156,10 @@ diff -u a/src/stat/fstat.c b/src/stat/fstat.c
 +	 * fd-validation rejection). Granular errno is a v1.x lift. */
 +	if (rc != 0)   return __syscall_ret(-EBADF);
 +
-+	/* Zero everything first so any field we don't populate from t_stat
-+	 * is a defined zero (matches the v1.0 Thylacine semantics: no
-+	 * timestamps, no uid/gid tracking, no device numbers). */
++	/* Zero the userspace struct stat first so any field we don't
++	 * populate from t_stat is a defined zero (matches the v1.0
++	 * Thylacine semantics: no timestamps, no uid/gid tracking, no
++	 * device numbers). */
 +	for (i = 0; i < sizeof(*st); i++) ((unsigned char *)st)[i] = 0;
 +
 +	st->st_size    = (off_t)t.size;

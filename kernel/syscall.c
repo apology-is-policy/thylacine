@@ -919,6 +919,18 @@ static s64 sys_lseek_handler(u64 hraw, u64 offset_raw, u64 whence_raw) {
     if (slot->kind != KOBJ_SPOOR)                     return -1;
 
     struct Spoor *c = (struct Spoor *)slot->obj;
+
+    // R16b-gamma-mount-close audit F3 close: reject lseek on non-seekable
+    // Devs. The presence of `dev->stat_native` is the seek-capability
+    // indicator at v1.0: file-like Devs (devramfs) implement it; stream-
+    // like Devs (devpipe, devnull, devzero, devnotes, devcons, devsrv)
+    // leave it NULL. POSIX requires lseek(2) on a pipe to return -1
+    // with ESPIPE; this check is the v1.0 equivalent (pouch's lseek
+    // translates the kernel -1 to ESPIPE via the errno table). The
+    // narrower `seekable` predicate is deferred to v1.x if any Dev ever
+    // grows stat_native AND wants to refuse seek.
+    if (c->dev->stat_native == NULL)                  return -1;
+
     s64 offset = (s64)offset_raw;
     s64 new_off;
 

@@ -34,6 +34,37 @@ parent doing wait_pid. A parent expecting WIFSIGNALED + WTERMSIG ==
 SIGABRT (the Linux behavior) will instead see WIFEXITED + WEXITSTATUS
 == 127. v1.x will add a sigaction surface that distinguishes the two.
 
+MULTI-THREAD HAZARD (audit-bearing v1.x lift)
+
+The override calls _Exit(127), which routes through pouch's
+__NR_exit_group seam (0001-pouch-syscall-seam.patch) to the kernel
+SYS_EXITS handler. Kernel-side: if the calling Proc has more than one
+live Thread, SYS_EXITS extincts the kernel (the "exits with live peer
+threads (caller must join all spawned threads)" check in
+kernel/proc.c::exits). Single-thread callers are safe; multi-thread
+callers extinct the whole boot.
+
+At v1.0 the safe-use envelope is: abort() may be called only from a
+Proc that has spawned no peer threads OR has joined every peer before
+the abort. The Thylacine pouch-stratumd-boot 16b-gamma-mount-close
+landing satisfies this in the failure mode (stratumd's mount path
+runs single-thread; abort there exits cleanly) but does NOT satisfy
+this once 16c lands the joey-as-9P-client path (stratumd spawns FS
+worker pthreads via serve.c::634 and corvus_notify.c::616, after
+which an abort in any thread would take the kernel down).
+
+The proper v1.x fix is a new kernel SYS_EXIT_GROUP that cascades
+peer-thread termination via SYS_THREAD_EXIT before transitioning the
+Proc to ZOMBIE, with __NR_exit_group wired to it instead of SYS_EXITS.
+This is the same primitive needed to close the documented v1.0
+"kill in multi-thread Proc returns -EIO" limitation in
+audit_p6_pouch_signals_13b_closed_list.md::F9 -- worth lifting as a
+focused mini-chunk before 16c.
+
+Until SYS_EXIT_GROUP lands, every multi-thread pouch program must
+ensure assertion / abort paths are reachable ONLY pre-thread-spawn
+or post-thread-join.
+
 --- a/src/exit/abort.c
 +++ b/src/exit/abort.c
 @@ -1,30 +1,15 @@
