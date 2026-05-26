@@ -82,13 +82,31 @@ static int srvconn_transport_close(void *ctx) {
     if (!st)                                     return -1;
     if (st->magic != P9_SRVCONN_TRANSPORT_MAGIC) return -1;
 
-    // Drop the adapter's srvconn_ref. The SrvConn lives on if other
-    // holders (the userspace KObj_Srv handle, the corvus accept-side
-    // ref, etc.) keep it alive. srvconn_unref is NULL-safe; safe to
-    // re-close (the inner pointer goes NULL after the first close).
+    // Tear down + drop the adapter's srvconn_ref.
+    //
+    // P6-pouch-stratumd-boot 16c: with kernel_attached=true, the
+    // userspace handle_close on the KOBJ_SRV slot skipped teardown
+    // (so the rings stayed alive for the kernel client's Twalk /
+    // Tread / Twrite). The adapter's close runs when the LAST
+    // KOBJ_SPOOR handle referencing the attach session drops via
+    // p9_attached_destroy's transport.close. At THAT point teardown
+    // is the right move: EOF both rings so the server-side worker
+    // (stratumd's per-conn pthread) wakes from any pending read and
+    // exits its serve loop cleanly. Without teardown here, stratumd
+    // would block indefinitely in srvconn_server_recv_blocking.
+    // srvconn_teardown is idempotent (safe if peer already torn).
+    //
+    // The SrvConn lives on if other holders (the accept-side backlog,
+    // a tombstoned service registry entry) keep it alive; the last
+    // srvconn_unref is what frees it. srvconn_unref is NULL-safe;
+    // safe to re-close (the inner pointer goes NULL after the first
+    // close).
     struct SrvConn *cn = st->cn;
     st->cn = NULL;
-    if (cn) srvconn_unref(cn);
+    if (cn) {
+        srvconn_teardown(cn);
+        srvconn_unref(cn);
+    }
 
     // Magic stays valid until p9_srvconn_transport_destroy clobbers
     // it. The transport core's CLOSED state machine guards re-entry.

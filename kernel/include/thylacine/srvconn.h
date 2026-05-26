@@ -223,6 +223,34 @@ struct SrvConn {
     // pre-publication property still holds for current observers
     // (which all reach cn through a lock-paired path).
     bool                byte_mode;
+
+    // P6-pouch-stratumd-boot 16c: kernel-attached gate.
+    //
+    // SYS_ATTACH_9P_SRV wraps a byte-mode SrvConn in a kernel-owned 9P
+    // client (via p9_srvconn_transport). After this call, the SrvConn's
+    // c2s / s2c rings are LOAD-BEARING for the kernel client — any
+    // teardown (chan_set_eof on either ring) breaks all subsequent
+    // Twalk / Tread / Twrite sends.
+    //
+    // The default handle_close discipline for KOBJ_SRV is "close the
+    // connection: srvconn_teardown both rings, then srvconn_unref"
+    // (CORVUS-DESIGN.md section 6.2). For a kernel-attached SrvConn,
+    // teardown would break the FS attach -- the userspace handle close
+    // is releasing the user's view but the kernel client is still using
+    // the rings. With kernel_attached=true, handle_close skips
+    // srvconn_teardown; only srvconn_unref runs. The connection lives
+    // until the LAST holder (the adapter) drops its ref via
+    // p9_attached_destroy's transport.close, which runs srvconn_unref
+    // and lets the refcount hit 0.
+    //
+    // One-way (false -> true), set by SYS_ATTACH_9P_SRV AFTER all
+    // failure paths have been cleared and BEFORE the handle could be
+    // closed. Atomic store-release pairs with handle_close's atomic
+    // load-acquire (cross-CPU userspace close can race the syscall's
+    // setter; the release-acquire ordering ensures the close either
+    // sees the flag set, or sees it clear AND the syscall has not yet
+    // returned the attach_fd to userspace).
+    bool                kernel_attached;
 };
 
 _Static_assert(__builtin_offsetof(struct SrvConn, magic) == 0,
@@ -270,6 +298,23 @@ long srvconn_server_recv_blocking(struct SrvConn *cn, u8 *buf, long n);
 // `cn` must be a freshly-minted SrvConn from srvconn_create — undefined
 // behavior on a NULL or already-published SrvConn.
 void srvconn_set_byte_mode(struct SrvConn *cn);
+
+// srvconn_set_kernel_attached — one-way setter for cn->kernel_attached.
+// P6-pouch-stratumd-boot 16c. Called from sys_attach_9p_srv_handler
+// AFTER all failure paths have cleared and BEFORE the syscall returns
+// the attach_fd to userspace. Atomic store-release pairs with the
+// handle_close path's atomic load-acquire.
+//
+// Once set, handle_close on the KOBJ_SRV handle SKIPS srvconn_teardown
+// (so the c2s/s2c rings stay live for the kernel 9P client). The
+// connection is torn down by the adapter's close hook running at
+// p9_attached_destroy time -- triggered when the LAST KOBJ_SPOOR handle
+// referencing the attach session is closed.
+void srvconn_set_kernel_attached(struct SrvConn *cn);
+
+// srvconn_is_kernel_attached — atomic load-acquire read of the flag.
+// Returns the kernel_attached state; pairs with the setter's release.
+bool srvconn_is_kernel_attached(const struct SrvConn *cn);
 
 // srvconn_ref — take a reference. Extincts on a NULL / corrupted conn.
 void srvconn_ref(struct SrvConn *cn);

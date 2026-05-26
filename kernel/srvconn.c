@@ -260,6 +260,21 @@ void srvconn_set_byte_mode(struct SrvConn *cn) {
     __atomic_store_n(&cn->byte_mode, true, __ATOMIC_RELEASE);
 }
 
+void srvconn_set_kernel_attached(struct SrvConn *cn) {
+    if (!cn || cn->magic != SRV_CONN_MAGIC)
+        extinction("srvconn_set_kernel_attached: NULL or corrupted SrvConn");
+    // Atomic release pairs with srvconn_is_kernel_attached's acquire on
+    // the userspace-close path (handle_close on KOBJ_SRV). Once flipped,
+    // teardown is the kernel-side adapter's responsibility, not the
+    // userspace close.
+    __atomic_store_n(&cn->kernel_attached, true, __ATOMIC_RELEASE);
+}
+
+bool srvconn_is_kernel_attached(const struct SrvConn *cn) {
+    if (!cn || cn->magic != SRV_CONN_MAGIC) return false;
+    return __atomic_load_n(&cn->kernel_attached, __ATOMIC_ACQUIRE);
+}
+
 void srvconn_unref(struct SrvConn *cn) {
     if (!cn) return;
     if (cn->magic != SRV_CONN_MAGIC)

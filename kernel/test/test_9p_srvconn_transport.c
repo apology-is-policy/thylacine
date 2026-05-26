@@ -50,6 +50,7 @@ void test_9p_srvconn_transport_init_null_rejected(void);
 void test_9p_srvconn_transport_send_routes_to_c2s_ring(void);
 void test_9p_srvconn_transport_recv_routes_from_s2c_ring(void);
 void test_9p_srvconn_transport_close_drops_srvconn_ref(void);
+void test_9p_srvconn_transport_kernel_attached_skips_teardown_on_handle_close(void);
 
 // =============================================================================
 // Helpers (mirror test_srv_client.c's pattern).
@@ -324,4 +325,71 @@ void test_9p_srvconn_transport_close_drops_srvconn_ref(void) {
     p9_srvconn_transport_destroy(&st);
     drop_test_proc(server);
     drop_test_proc(client);
+}
+
+// =============================================================================
+// 9p_srvconn_transport.kernel_attached_skips_teardown_on_handle_close
+//
+// F-16c-attach-srv close: with srvconn_set_kernel_attached(cn), the
+// userspace handle_close on the KOBJ_SRV slot must skip srvconn_teardown
+// (so the c2s/s2c rings stay live for the kernel 9P client). The pre-fix
+// behavior tore down the rings, breaking the first Twalk send after
+// SYS_ATTACH_9P_SRV when joey closed its now-redundant client handle.
+// =============================================================================
+
+void test_9p_srvconn_transport_kernel_attached_skips_teardown_on_handle_close(void) {
+    // Part 1: control (no kernel_attached). Default handle_close path
+    // tears down both rings.
+    {
+        srv_registry_reset();
+        struct Proc *server = NULL, *client = NULL;
+        int svc_h = -1, conn_h = -1;
+        struct SrvConn *cn = open_byte_mode_pair(&server, &client, &svc_h, &conn_h);
+        TEST_ASSERT(cn != NULL, "control: open_byte_mode_pair");
+        srvconn_ref(cn);   // probe-ref so we can read AFTER handle_close
+
+        handle_close(client, (hidx_t)conn_h);
+
+        u8 probe;
+        long control_recv = srvconn_server_recv(cn, &probe, 1);
+        TEST_EXPECT_EQ(control_recv, -1,
+            "control: default close tears down rings (server_recv = -1 = EOF)");
+
+        srvconn_unref(cn);
+        srv_registry_reset();
+        drop_test_proc(server);
+        drop_test_proc(client);
+    }
+
+    // Part 2: kernel_attached=true. handle_close MUST NOT tear down --
+    // the rings stay live for the kernel 9P client.
+    {
+        srv_registry_reset();
+        struct Proc *server = NULL, *client = NULL;
+        int svc_h = -1, conn_h = -1;
+        struct SrvConn *cn = open_byte_mode_pair(&server, &client, &svc_h, &conn_h);
+        TEST_ASSERT(cn != NULL, "attached: open_byte_mode_pair");
+        srvconn_ref(cn);
+
+        // Sanity: rings live pre-close.
+        u8 probe;
+        long pre_recv = srvconn_server_recv(cn, &probe, 1);
+        TEST_EXPECT_EQ(pre_recv, 0,
+            "attached: c2s ring empty-but-live pre-close (server_recv = 0)");
+
+        srvconn_set_kernel_attached(cn);
+        TEST_EXPECT_EQ(srvconn_is_kernel_attached(cn), true,
+            "kernel_attached flag set");
+
+        handle_close(client, (hidx_t)conn_h);
+
+        long post_recv = srvconn_server_recv(cn, &probe, 1);
+        TEST_EXPECT_EQ(post_recv, 0,
+            "attached: handle_close skipped teardown (server_recv = 0 = no data, not -1 = EOF)");
+
+        srvconn_unref(cn);
+        srv_registry_reset();
+        drop_test_proc(server);
+        drop_test_proc(client);
+    }
 }

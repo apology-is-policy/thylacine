@@ -160,10 +160,23 @@ static void handle_release_obj(enum kobj_kind kind, void *obj) {
         //     the connection down — EOF both rings so the peer (corvus)
         //     wakes — then release the handle's reference. teardown is
         //     idempotent; the last srvconn_unref frees (a3b).
+        //
+        //     P6-pouch-stratumd-boot 16c exception: when
+        //     srvconn_is_kernel_attached is true (SYS_ATTACH_9P_SRV
+        //     wrapped the conn in a kernel 9P client), teardown would
+        //     break the FS attach -- the c2s/s2c rings are still in
+        //     use by the kernel client. Skip teardown; only unref.
+        //     The connection tears down when the LAST KOBJ_SPOOR
+        //     handle referencing the attach session is closed (the
+        //     adapter's transport.close at p9_attached_destroy runs
+        //     srvconn_teardown + srvconn_unref).
         u64 m = *(const u64 *)obj;
         if (m == SRV_CONN_MAGIC) {
-            srvconn_teardown((struct SrvConn *)obj);
-            srvconn_unref((struct SrvConn *)obj);
+            struct SrvConn *cn = (struct SrvConn *)obj;
+            if (!srvconn_is_kernel_attached(cn)) {
+                srvconn_teardown(cn);
+            }
+            srvconn_unref(cn);
         } else if (m != SRV_SERVICE_MAGIC) {
             extinction("handle_release_obj(KOBJ_SRV): obj has neither "
                        "service nor connection magic (corruption / UAF)");

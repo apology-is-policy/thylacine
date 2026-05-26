@@ -1132,11 +1132,17 @@ populate_stratum_pool() {
     echo "==> populate pool: stratumd bound; running stratum-fs population"
 
     # The populate set. v1.0 16c minimum: one sentinel file at
-    # /etc/thylacine-version. joey's post-pivot probe walks + reads +
-    # content-checks this so a regression in SYS_PIVOT_ROOT surfaces
+    # /thylacine-version (ROOT-level, single component). joey's
+    # pre/post-pivot probes walk + read + content-check this so a
+    # regression in SYS_PIVOT_ROOT or SYS_ATTACH_9P_SRV surfaces
     # immediately. The content string is distinct from /version in
     # devramfs (which contains "Thylacine v0.1-dev") so a content-check
     # cannot pass against the WRONG root_spoor.
+    #
+    # Path constraint: SYS_WALK_OPEN is single-component-only at v1.0,
+    # so the sentinel MUST be at the root (no /etc/ prefix). Multi-
+    # component path resolution lands with the production open()
+    # syscall in a later chunk.
     #
     # Forward-compat populate of the boot binary corpus (joey, corvus,
     # stratumd, pouch hellos, thread-probe) is a deliberate v1.x lift:
@@ -1147,13 +1153,11 @@ populate_stratum_pool() {
     # the corpus populate lands.
     local sentinel_content="Thylacine 1.0-dev (16c boot-from-disk; populated at host build time)"
 
-    "$stratum_fs_bin" -s "$sock_path" mkdir /etc \
-        || { echo "==> populate pool: mkdir /etc FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
-    echo "$sentinel_content" | "$stratum_fs_bin" -s "$sock_path" write /etc/thylacine-version \
-        || { echo "==> populate pool: write /etc/thylacine-version FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+    echo "$sentinel_content" | "$stratum_fs_bin" -s "$sock_path" write /thylacine-version \
+        || { echo "==> populate pool: write /thylacine-version FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
     "$stratum_fs_bin" -s "$sock_path" sync \
         || { echo "==> populate pool: sync FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
-    echo "==> populate pool: /etc/thylacine-version written ($(echo "$sentinel_content" | wc -c | tr -d ' ') bytes)"
+    echo "==> populate pool: /thylacine-version written ($(echo "$sentinel_content" | wc -c | tr -d ' ') bytes)"
 
     # Clean stratumd shutdown: SIGTERM then wait. stratumd unmounts the
     # pool + flushes on its way out, so the pool.img bytes after this

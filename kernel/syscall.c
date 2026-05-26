@@ -1319,6 +1319,17 @@ static s64 sys_attach_9p_srv_handler(u64 srv_fd_raw, u64 aname_va,
         p9_attached_unref(att);
         return -1;
     }
+
+    // F-16c-attach-srv close: flip the SrvConn into kernel-attached mode
+    // BEFORE returning the fd. Once set, handle_close on the userspace
+    // KOBJ_SRV slot skips srvconn_teardown -- the c2s/s2c rings are now
+    // load-bearing for the kernel 9P client (driving subsequent Twalk /
+    // Tread / Twrite via the adapter). Atomic store-release pairs with
+    // handle_close's atomic load-acquire (a cross-CPU userspace close
+    // racing with this setter either sees the flag set, or sees it
+    // unset AND the syscall has not yet returned to userspace).
+    srvconn_set_kernel_attached(cn);
+
     // Drop the construction ref.
     p9_attached_unref(att);
     return (s64)fd;

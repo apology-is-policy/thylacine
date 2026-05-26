@@ -82,6 +82,8 @@ enum {
     T_SYS_SPAWN_FULL_ARGV = 49,  // P6-pouch-stratumd-boot 16b-alpha: argv pass-through spawn
     T_SYS_FSTAT       = 50,      // P6-pouch-stratumd-boot 16b-gamma: native file metadata
     T_SYS_LSEEK       = 51,      // P6-pouch-stratumd-boot 16b-gamma: file-offset cursor
+    T_SYS_ATTACH_9P_SRV = 52,    // P6-pouch-stratumd-boot 16c: 9P attach over byte-mode KOBJ_SRV
+    T_SYS_PIVOT_ROOT  = 53,      // P6-pouch-stratumd-boot 16c: atomic root_spoor swap
 };
 
 // Torpor error codes — match kernel's TORPOR_ERR_* (Linux/musl-numeric
@@ -1203,6 +1205,63 @@ static inline long t_lseek(long fd, long offset, long whence) {
         "svc #0"
         : "+r"(x0)
         : "r"(x1), "r"(x2), "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
+// P6-pouch-stratumd-boot 16c: 9P attach over a byte-mode KObj_Srv handle.
+//
+// Wrap the byte-mode SrvConn handle `srv_fd` in a kernel 9P client, drive
+// Tversion + Tattach, and return a KOBJ_SPOOR fd for the 9P tree's root.
+// Parallel to t_attach_9p but the transport is a SrvConn (the byte-mode
+// flavour from a SYS_SRV_CONNECT against a stratumd-style service) instead
+// of a Spoor pair. The caller must hold RIGHT_READ + RIGHT_WRITE on srv_fd.
+//
+// aname is a server-side path or capability string (up to 256 bytes at
+// v1.0). n_uname is 0 for no-auth attach at v1.0; a Phase 5+ auth backend
+// will use it as the per-user identifier.
+//
+// Returns the new fd (>=0) on success, -1 on:
+//   - invalid srv_fd / wrong kind / missing R+W rights / not byte-mode
+//   - aname out of user-VA bound / aname_len > 256
+//   - server-side Rlerror on Tversion or Tattach
+//   - kmalloc OOM / handle table full
+__attribute__((always_inline))
+static inline long t_attach_9p_srv(long srv_fd,
+                                    const char *aname, size_t aname_len,
+                                    unsigned long n_uname) {
+    register long x0 __asm__("x0") = srv_fd;
+    register long x1 __asm__("x1") = (long)(unsigned long)aname;
+    register long x2 __asm__("x2") = (long)aname_len;
+    register long x3 __asm__("x3") = (long)n_uname;
+    register long x8 __asm__("x8") = T_SYS_ATTACH_9P_SRV;
+    __asm__ volatile (
+        "svc #0"
+        : "+r"(x0)
+        : "r"(x1), "r"(x2), "r"(x3), "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
+// P6-pouch-stratumd-boot 16c: atomic root_spoor swap for long-running Procs.
+//
+// Replace the caller's territory root_spoor with the Spoor named by
+// `new_root_fd` (a KOBJ_SPOOR handle with RIGHT_READ). The old root_spoor
+// is released. The caller MUST already have an initial root_spoor (a prior
+// t_chroot); pivot_root rejects -1 otherwise. Idempotent on same-spoor.
+//
+// Returns 0 on success, -1 on bad fd / wrong kind / missing RIGHT_READ /
+// no initial root_spoor.
+__attribute__((always_inline))
+static inline long t_pivot_root(long new_root_fd) {
+    register long x0 __asm__("x0") = new_root_fd;
+    register long x8 __asm__("x8") = T_SYS_PIVOT_ROOT;
+    __asm__ volatile (
+        "svc #0"
+        : "+r"(x0)
+        : "r"(x8)
         : "memory", "cc"
     );
     return x0;

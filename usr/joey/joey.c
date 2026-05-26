@@ -197,140 +197,12 @@ static size_t build_unwrap(unsigned char *pl,
     return o;
 }
 
-// =============================================================================
-// stratumd-stub boot pivot demo (P5-stratumd-stub-bringup-c). Production-
-// shape orchestration on joey's boot path: t_pipe × 2 → t_spawn_with_fds →
-// t_attach_9p → t_mount → t_unmount → t_close × N → t_wait_pid. This is
-// the same sequence /stub-driver runs (P5-stratumd-stub-bringup-b), now
-// inline in joey so the boot log carries production-shape evidence of the
-// 9P attach + mount lifecycle. Real stratumd swaps in for /stratumd-stub
-// when the musl sysroot lands (Phase 6 dependency). target_path_id 99
-// matches the existing /stub-driver convention to keep the kernel test +
-// boot-path numbers aligned.
-//
-// Failure semantics: any sub-step failure returns -1 with a diagnostic;
-// joey's main treats that as a boot regression (return 1).
-static int do_stratumd_stub_bringup(void) {
-    long c2s_rd = -1, c2s_wr = -1;
-    if (t_pipe(&c2s_rd, &c2s_wr) < 0) {
-        t_putstr("joey: stub-bringup t_pipe c2s FAILED\n");
-        return -1;
-    }
-    long s2c_rd = -1, s2c_wr = -1;
-    if (t_pipe(&s2c_rd, &s2c_wr) < 0) {
-        t_putstr("joey: stub-bringup t_pipe s2c FAILED\n");
-        return -1;
-    }
-
-    const char stub_name[] = "stratumd-stub";
-    unsigned int stub_fds[2] = { (unsigned int)c2s_rd, (unsigned int)s2c_wr };
-    long stub_pid = t_spawn_with_fds(stub_name, sizeof(stub_name) - 1,
-                                     stub_fds, 2);
-    if (stub_pid <= 0) {
-        t_putstr("joey: stub-bringup t_spawn_with_fds FAILED\n");
-        return -1;
-    }
-
-    // Drop joey-side refs on the stub's transport fds. Without this,
-    // the stub never sees EOF on c2s_rd because joey would still hold
-    // an alive reader on the c2s ring.
-    if (t_close(c2s_rd) != 0) {
-        t_putstr("joey: stub-bringup t_close c2s_rd FAILED\n");
-        return -1;
-    }
-    if (t_close(s2c_wr) != 0) {
-        t_putstr("joey: stub-bringup t_close s2c_wr FAILED\n");
-        return -1;
-    }
-
-    static const char aname[] = "/";
-    long attach_fd = t_attach_9p(c2s_wr, s2c_rd, aname, 1, 0);
-    if (attach_fd < 0) {
-        t_putstr("joey: stub-bringup t_attach_9p FAILED\n");
-        return -1;
-    }
-
-    if (t_mount(attach_fd, 99, 0) < 0) {
-        t_putstr("joey: stub-bringup t_mount FAILED\n");
-        return -1;
-    }
-    if (t_unmount(99) < 0) {
-        t_putstr("joey: stub-bringup t_unmount FAILED\n");
-        return -1;
-    }
-
-    // P5-stratumd-stub-bringup-e1: walk-through-mount via SYS_WALK_OPEN.
-    // While attach_fd is still alive, walk one component ("hello") and
-    // open it, then read + content-check the synthetic FS payload. This
-    // exercises the full kernel 9P client + dev9p Dev vtable path on
-    // every boot, so a regression in SYS_WALK_OPEN surfaces immediately.
-    static const char hello_name[] = "hello";
-    static const unsigned char hello_expect[] = "hello from stratumd-stub\n";
-    long hello_fd = t_walk_open(attach_fd, hello_name, 5, T_OREAD);
-    if (hello_fd < 0) {
-        t_putstr("joey: stub-bringup t_walk_open FAILED\n");
-        return -1;
-    }
-    unsigned char hello_buf[32];
-    long hello_n = t_read(hello_fd, hello_buf, sizeof(hello_buf));
-    if (hello_n != 25) {
-        t_putstr("joey: stub-bringup t_read length mismatch\n");
-        (void)t_close(hello_fd);
-        return -1;
-    }
-    for (long i = 0; i < hello_n; i++) {
-        if (hello_buf[i] != hello_expect[i]) {
-            t_putstr("joey: stub-bringup t_read content mismatch\n");
-            (void)t_close(hello_fd);
-            return -1;
-        }
-    }
-    if (t_close(hello_fd) != 0) {
-        t_putstr("joey: stub-bringup t_close(hello_fd) FAILED\n");
-        return -1;
-    }
-
-    // P5-stratumd-stub-bringup-e2 NOTE: joey does NOT exercise SYS_CHROOT
-    // here. The discipline trap: chroot bumps a Territory ref on the
-    // attach Spoor; that ref outlives joey's t_close(attach_fd) below;
-    // joey is the long-running init Proc that never exits during boot —
-    // so the attach Spoor (and the underlying p9_attached + adapter +
-    // transport-Spoors) would never tear down, and the stub would never
-    // see EOF on c2s_rd, deadlocking t_wait_pid. The chroot+root-walk
-    // path IS exercised by stub-walk-probe (a child Proc whose exit
-    // naturally releases the chroot via territory_unref) and by the six
-    // territory.chroot_* kernel-internal tests. v1.x adds SYS_UNCHROOT
-    // (or a proper pivot_root) so a long-running Proc can release a
-    // chroot mid-life.
-
-    if (t_close(attach_fd) != 0) {
-        t_putstr("joey: stub-bringup t_close(attach_fd) FAILED\n");
-        return -1;
-    }
-
-    // Drop the last joey-side transport refs; c2s_wr last-drop fires
-    // write_eof on the c2s ring so the stub's next read returns 0.
-    if (t_close(c2s_wr) != 0) {
-        t_putstr("joey: stub-bringup t_close c2s_wr FAILED\n");
-        return -1;
-    }
-    if (t_close(s2c_rd) != 0) {
-        t_putstr("joey: stub-bringup t_close s2c_rd FAILED\n");
-        return -1;
-    }
-
-    int status = -1;
-    long reaped = t_wait_pid(&status);
-    if (reaped != stub_pid) {
-        t_putstr("joey: stub-bringup t_wait_pid wrong pid\n");
-        return -1;
-    }
-    if (status != 0) {
-        t_putstr("joey: stub-bringup stratumd-stub exited non-zero\n");
-        return -1;
-    }
-    return 0;
-}
+// P6-pouch-stratumd-boot 16c-retire: do_stratumd_stub_bringup (the
+// userspace stratumd-stub bringup demo) retired. Real stratumd-via-9P
+// is now joey's bring-up path; the stub was the audited interim that
+// proved the 9P attach + mount + walk_open + read lifecycle against a
+// dev9p simulacrum. Kernel-internal dev9p + stub tests remain in
+// kernel/test/ for unit-level coverage of the Dev vtable machinery.
 
 // =============================================================================
 // pouch hello smoke (P6-pouch-hello-smoke). The first POSIX C programs
@@ -1496,7 +1368,14 @@ int main(void) {
         // mount-close). This probe stays NON-FATAL until that lands.
         static const char srv_name[] = "stratum-fs";
         long sd_srv_fd = -1;
-        for (int i = 0; i < 6000; i++) {
+        // 16c: populated pool.img (host-bake sentinel) adds non-trivial
+        // weight to stratumd's mount path vs. an empty mkfs'd pool.
+        // Observed in testing: bind typically completes at retry 170-230,
+        // but pool-content variation (different RNG seeds produce
+        // different btree layouts) can push it past 12000 on the slow
+        // side. 30000 gives ~30s headroom; the worst-cases observed
+        // bind well before then.
+        for (int i = 0; i < 30000; i++) {
             sd_srv_fd = t_srv_connect(srv_name, sizeof(srv_name) - 1, 0, 0);
             if (sd_srv_fd >= 0) {
                 t_putstr("joey: stratumd-boot /srv/stratum-fs bound after retry ");
@@ -1525,10 +1404,18 @@ int main(void) {
         }
 
         if (sd_srv_fd < 0) {
-            t_putstr("joey: stratumd-boot /srv/stratum-fs not bound (16b-gamma-mount-close; "
-                     "downstream stratumd mount path requires further work)\n");
-            // Bounded-drain stratumd's stderr first so any final
-            // diagnostic msg lands in the boot log.
+            t_putstr("joey: stratumd-boot /srv/stratum-fs not bound after retries (FATAL at 16c)\n");
+            // Bounded-drain stratumd's stderr so any final diagnostic
+            // msg lands in the boot log. No t_wait_pid here: stratumd
+            // is a long-running daemon (16c+) and never zombifies, so
+            // wait_pid would hang forever. The 16c v1.x lift is a
+            // kernel `wait_pid_for(pid)` so kproc.wait_pid skips the
+            // stratumd pid; until then, an unreaped stratumd at
+            // joey-userspace exit reparents to kproc and the
+            // kproc.wait_pid sees stratumd first, extincting on
+            // "wrong pid" -- but here we're exiting non-zero anyway,
+            // which the kernel handles via the joey-exit-non-zero
+            // path (NOT wait_pid).
             for (int drain_i = 0; drain_i < 200; drain_i++) {
                 struct pollfd pfd = { .fd = (int)sd_rd, .events = POLLIN, .revents = 0 };
                 long pr = t_poll(&pfd, 1, 10);
@@ -1539,65 +1426,102 @@ int main(void) {
                 if (n <= 0) break;
                 (void)t_puts((const char *)rd_buf, (size_t)n);
             }
-            // Reap stratumd. With the pouch-abort override (0011-pouch-
-            // abort.patch), stratumd's downstream assert / abort paths
-            // _Exit(127) cleanly rather than triggering EL0 NULL deref.
-            // wait_pid here completes once stratumd's mount path
-            // terminates -- without this reap, an unwaited stratumd
-            // zombie reparents to kproc on joey-userspace exit, and
-            // kproc-joey_run's wait_pid races between joey's zombie
-            // and stratumd's, extincting on "wrong pid" if it sees
-            // stratumd first. (kproc reparent + wait_pid is unfiltered
-            // by pid at v1.0; until kproc.wait_pid grows a pid filter
-            // OR PID 1 splits from kproc, joey-userspace must drain
-            // its zombies before exiting.)
-            int wedged_status = -1;
-            long reaped = t_wait_pid(&wedged_status);
-            if (reaped > 0) {
-                t_putstr("joey: stratumd-boot child exit_status=");
-                t_putstr(itoa_dec(wedged_status, buf, sizeof(buf)));
-                t_putstr(" (final drain)\n");
-                // After reap, the pipe may have residual bytes the
-                // bounded-drain above missed (e.g., the libc atexit
-                // flush). Drain once more, blocking-OK since the
-                // writer is dead and EOF terminates.
-                for (;;) {
-                    unsigned char rd_buf[256];
-                    long n = t_read(sd_rd, rd_buf, sizeof(rd_buf));
-                    if (n <= 0) break;
-                    (void)t_puts((const char *)rd_buf, (size_t)n);
-                }
-            }
             (void)t_close(sd_rd);
-            // NON-FATAL: continue boot.
+            return 1;
         } else {
-            // Connection works. Release joey's client handle.
+            // Connection works. Drive 9P attach + pivot bringup
+            // (P6-pouch-stratumd-boot 16c).
             //
-            // 16b-gamma-mount-close audit F2 (deferred to 16b-gamma-
-            // mount-bind): this success branch does NOT reap stratumd.
-            // At today's v1.0 checkpoint the branch never fires (joey
-            // probe stays NON-FATAL until mount-bind lands), so the
-            // unreparented-zombie / kproc-wait_pid race is mooted.
-            // When mount-bind flips the probe to FATAL, this branch
-            // becomes the happy path AND joey will continue to do
-            // long-lived work via /srv/stratum-fs; stratumd-as-daemon
-            // should never zombie under normal operation, but
-            // defense-in-depth requires the same reap pattern as the
-            // failure branch above. v1.x lift: kernel `wait_pid_for(pid)`
-            // (per the audit F9 disposition) closes the race
-            // canonically by re-looping kproc.wait_pid on non-matching
-            // reaps.
-            if (t_close(sd_srv_fd) != 0) {
-                t_putstr("joey: stratumd-boot t_close(srv_fd) FAILED\n");
+            // 1. SYS_ATTACH_9P_SRV — wrap byte-mode SrvConn in kernel
+            //    9P client; mints a KOBJ_SPOOR for the FS root.
+            // 2. Pre-pivot probe — walk + read the /thylacine-version
+            //    sentinel through the attach handle, verifying the
+            //    end-to-end 9P plumb (Twalk + Tlopen + Tread).
+            // 3. SYS_PIVOT_ROOT — atomic root_spoor swap; old devramfs
+            //    root unrefs; new disk-backed root installs.
+            // 4. Post-pivot probe — walk + read the sentinel via
+            //    T_WALK_OPEN_FROM_ROOT, confirming the pivot took.
+            long sd_attach_fd = t_attach_9p_srv(sd_srv_fd, "", 0, 0);
+            if (sd_attach_fd < 0) {
+                t_putstr("joey: stratumd-boot t_attach_9p_srv FAILED\n");
                 return 1;
             }
+            t_putstr("joey: stratumd-boot t_attach_9p_srv OK; attach_fd=");
+            t_putstr(itoa_dec(sd_attach_fd, buf, sizeof(buf)));
+            t_putstr("\n");
+            // The kernel 9P client now owns the SrvConn; userspace can
+            // release its client handle. (The adapter takes its own
+            // srvconn_ref; SrvConn lives until both refs drop.)
+            if (t_close(sd_srv_fd) != 0) {
+                t_putstr("joey: stratumd-boot t_close(sd_srv_fd) post-attach FAILED\n");
+                return 1;
+            }
+
+            static const char sentinel_name[] = "thylacine-version";
+            const size_t sentinel_len = sizeof(sentinel_name) - 1;
+
+            long pre_fd = t_walk_open(sd_attach_fd, sentinel_name,
+                                       sentinel_len, T_OREAD);
+            if (pre_fd < 0) {
+                t_putstr("joey: stratumd-boot pre-pivot t_walk_open(/thylacine-version) FAILED rc=");
+                t_putstr(itoa_dec(pre_fd, buf, sizeof(buf)));
+                t_putstr("\n");
+                return 1;
+            }
+            unsigned char pre_buf[128];
+            long pre_n = t_read(pre_fd, pre_buf, sizeof(pre_buf));
+            if (pre_n <= 0) {
+                t_putstr("joey: stratumd-boot pre-pivot t_read FAILED rc=");
+                t_putstr(itoa_dec(pre_n, buf, sizeof(buf)));
+                t_putstr("\n");
+                (void)t_close(pre_fd);
+                return 1;
+            }
+            (void)t_close(pre_fd);
+            t_putstr("joey: stratumd-boot pre-pivot /thylacine-version OK (");
+            t_putstr(itoa_dec(pre_n, buf, sizeof(buf)));
+            t_putstr(" bytes)\n");
+
+            if (t_pivot_root(sd_attach_fd) != 0) {
+                t_putstr("joey: stratumd-boot t_pivot_root FAILED\n");
+                return 1;
+            }
+            if (t_close(sd_attach_fd) != 0) {
+                t_putstr("joey: stratumd-boot t_close(sd_attach_fd) FAILED\n");
+                return 1;
+            }
+
+            long post_fd = t_walk_open(T_WALK_OPEN_FROM_ROOT, sentinel_name,
+                                        sentinel_len, T_OREAD);
+            if (post_fd < 0) {
+                t_putstr("joey: stratumd-boot post-pivot t_walk_open(FROM_ROOT, /thylacine-version) FAILED rc=");
+                t_putstr(itoa_dec(post_fd, buf, sizeof(buf)));
+                t_putstr("\n");
+                return 1;
+            }
+            unsigned char post_buf[128];
+            long post_n = t_read(post_fd, post_buf, sizeof(post_buf));
+            if (post_n <= 0) {
+                t_putstr("joey: stratumd-boot post-pivot t_read FAILED\n");
+                (void)t_close(post_fd);
+                return 1;
+            }
+            (void)t_close(post_fd);
+            t_putstr("joey: stratumd-boot post-pivot /thylacine-version OK (");
+            t_putstr(itoa_dec(post_n, buf, sizeof(buf)));
+            t_putstr(" bytes); root now disk-backed Stratum FS\n");
+
             (void)t_close(sd_rd);
         }
     }
 
-    // === stratumd-stub boot pivot demo (P5-stratumd-stub-bringup-c) ===
-    if (do_stratumd_stub_bringup() != 0) return 1;
-    t_putstr("joey: stub-bringup ok (pipe + spawn + attach + mount + unmount + walk_open + read)\n");
+    // P6-pouch-stratumd-boot 16c-retire: the userspace stub bringup demo
+    // (do_stratumd_stub_bringup -> /stratumd-stub) is retired -- the
+    // real-stratumd path above (t_attach_9p_srv + pre/post-pivot probes)
+    // covers the same lifecycle (9P attach + mount-equivalent + walk_open +
+    // read) AGAINST a real on-disk FS instead of the in-RAM dev9p-stub
+    // simulacrum. The kernel-internal dev9p + stub tests in kernel/test/
+    // remain (they exercise the Dev vtable machinery in isolation).
 
     return 0;
 }
