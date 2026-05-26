@@ -20,7 +20,7 @@ The Phase 7 entry decision (taken under the U-1 scripture conversation):
 | Sub-chunk | What | Commit | Tests |
 |---|---|---|---|
 | U-2 hash fixup | Update U-2 row with the scripture amendment's hash. | *(pending)* | — |
-| U-2 | Scripture amendment: §15 reframed as "the libthyla-rs uplift to the library Thylacine deserves" — lead-by-example framing, complete module structure, sub-chunk decomposition (U-2a..U-2-test, ~9-12 sessions). §19 + phase7-status.md + UTOPIA.md + ROADMAP §8.1/§8.7 updated. NO code. | *(pending)* | — |
+| U-2 | Scripture amendment: §15 reframed as "the libthyla-rs uplift to the library Thylacine deserves" — lead-by-example framing, complete module structure, sub-chunk decomposition (U-2a..U-2-test, ~9-12 sessions). §19 + phase7-status.md + UTOPIA.md + ROADMAP §8.1/§8.7 updated. NO code. | `2fbfad3` | — |
 | U-1 hash fixup | Update U-1 row with the scripture commit's hash. | *(pending)* | — |
 | U-1 | Scripture: UTOPIA.md + UTOPIA-SHELL-DESIGN.md + UTOPIA-VISUAL.md + ARCH/ROADMAP/CLAUDE updates + this doc. NO code. | `c4e57f2` | — |
 
