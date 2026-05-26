@@ -18,6 +18,7 @@
 #include "magazines.h"
 
 #include "../arch/arm64/kaslr.h"
+#include "../arch/arm64/uart.h"
 
 #include <thylacine/dtb.h>
 #include <thylacine/extinction.h>
@@ -29,6 +30,16 @@ extern volatile u64 _saved_dtb_ptr;
 // Snapshot of the layout for diagnostic queries (banner).
 static u64 g_total_pages;
 static u64 g_initial_free_pages;
+
+// F3 (audit-r-memory-model): The kernel direct map (arch/arm64/mmu.c
+// build_page_tables) covers PA [1 GiB, 9 GiB) via l1_directmap[1..8].
+// alloc_pages's KP_ZERO loop dereferences pa_to_kva(pa) -- which past
+// 9 GiB lands at an unmapped VA -> EL1 translation fault ->
+// extinction. Cap zone_end at this value to ensure every PA the buddy
+// can hand out is direct-map-reachable. To raise the cap, extend the
+// direct map first (see arch/arm64/mmu.c build_page_tables and the
+// l1_directmap definition).
+#define DIRECTMAP_USABLE_RAM_MAX (8ull << 30)   /* 8 GiB */
 
 // ---------------------------------------------------------------------------
 // Layout helpers.
@@ -84,8 +95,22 @@ bool phys_init(void) {
     if (!dtb_get_memory(&mem_base, &mem_size)) {
         extinction("phys_init: DTB has no /memory node");
     }
-    paddr_t zone_base = (paddr_t)mem_base;
-    paddr_t zone_end  = (paddr_t)(mem_base + mem_size);
+    paddr_t zone_base    = (paddr_t)mem_base;
+    paddr_t zone_end_dtb = (paddr_t)(mem_base + mem_size);
+
+    // F3: cap zone_end at the direct map's usable upper bound. Without
+    // the cap, alloc_pages can return a PA the direct map can't reach
+    // and the KP_ZERO loop takes an unhandled EL1 translation fault.
+    paddr_t zone_end_cap = (paddr_t)(mem_base + DIRECTMAP_USABLE_RAM_MAX);
+    paddr_t zone_end     = zone_end_dtb < zone_end_cap ? zone_end_dtb
+                                                       : zone_end_cap;
+    if (zone_end < zone_end_dtb) {
+        uart_puts("  phys_init: capping RAM at 0x");
+        uart_puthex64(zone_end);
+        uart_puts(" (direct map reaches 8 GiB; DTB reported 0x");
+        uart_puthex64(zone_end_dtb);
+        uart_puts(" -- extend l1_directmap to raise the cap)\n");
+    }
 
     // 2. Kernel image PA range — captured by kaslr.c during kaslr_init
     //    while still running at PA. After the long-branch into TTBR1,
@@ -233,6 +258,17 @@ struct page *alloc_pages(unsigned order, unsigned flags) {
         u64 *q = pa_to_kva(page_to_pa(p));
         u64 n  = (1ull << order) << PAGE_SHIFT;
         for (u64 i = 0; i < n / 8; i++) q[i] = 0;
+
+        // F5 (audit-r-memory-model): drain the zeroing stores into the
+        // inner-shareable domain before returning the PA to the caller.
+        // At single-CPU v1.0 this is benign (store-to-load forwarding
+        // serves any same-CPU reload), but at Phase 5+ SMP a second
+        // CPU mapping the same PA via a different VA (e.g., the user
+        // page-fault handler installs a PTE on another CPU and the
+        // user faults in to it) could see pre-zero garbage without
+        // this barrier. Trivial cost (single dsb ish per allocation);
+        // defense-in-depth.
+        __asm__ __volatile__("dsb ish" ::: "memory");
     }
     return p;
 }

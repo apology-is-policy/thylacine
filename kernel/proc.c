@@ -387,13 +387,23 @@ void proc_free(struct Proc *p) {
     // hit no-ops cleanly. asid_free issues an inner-shareable broadcast
     // TLB-flush by ASID before returning the slot to the pool (so the
     // next reuser sees a clean TLB).
-    if (p->pgtable_root != 0) {
-        proc_pgtable_destroy(p->pgtable_root);
-        p->pgtable_root = 0;
-    }
+    //
+    // F4 hardening (audit-r-memory-model): asid_free runs BEFORE
+    // proc_pgtable_destroy. Doing it first ensures all sibling-CPU TLB
+    // entries tagged with this Proc's ASID are invalidated before the
+    // sub-table pages return to the buddy free-list -- a speculative
+    // walker on another CPU can't reach a recently-recycled L1/L2/L3
+    // page via stale TLB hints. Pre-F4 the order was reversed; both
+    // orders are correct (asid_free is the TLB-flush step in either
+    // position), but this order narrows the speculative-prefetch
+    // window. See arch/arm64/mmu.c proc_pgtable_destroy doc comment.
     if (p->asid != 0) {                // ASID 0 is kernel-reserved
         asid_free(p->asid);
         p->asid = 0;
+    }
+    if (p->pgtable_root != 0) {
+        proc_pgtable_destroy(p->pgtable_root);
+        p->pgtable_root = 0;
     }
 
     kmem_cache_free(g_proc_cache, p);

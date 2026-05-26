@@ -1048,16 +1048,44 @@ bool mmu_restore_normal_range(paddr_t pa, unsigned n_pages) {
 //   - asid.c::asid_free broadcasts `tlbi aside1is` BEFORE pushing the
 //     ASID onto the free-list, so any subsequent reuser of the ASID
 //     starts with a TLB clean of this Proc's prior translations.
-// The walker may therefore free table pages without per-walk TLB ops;
-// the order in proc.c::proc_free (pgtable_destroy then asid_free) is
-// correct, and the reverse would also be correct.
+// The walker may therefore free table pages without per-walk TLB ops.
+//
+// Ordering (F4 hardening, audit-r-memory-model): proc.c::proc_free
+// invokes asid_free BEFORE proc_pgtable_destroy. With asid_free first,
+// any TLB entries on sibling CPUs tagged with this Proc's ASID are
+// invalidated before the sub-table pages re-enter the buddy
+// free-list, narrowing the window in which a speculative walker (now
+// using stale TLB hints) could reach a recently-recycled sub-table
+// page. Reverse order is also correct (asid_free-after-destroy was
+// the pre-F4 baseline; the asid teardown still flushes TLB before the
+// ASID is reused), but the F4 order is the defense-in-depth choice.
+
+// F4 (audit-r-memory-model, P2): before each table page goes back to
+// the buddy, zero its contents. L3 entries are LEAF page descriptors
+// holding PAs of user pages (owned by the VMA layer; we do NOT free
+// those PAs here — only the table page itself). Were we to free the
+// L3 page with the leaf PTE bit-pattern intact, the recycled page
+// would carry PA_user values; if buddy hands the page out as a slab
+// or a non-zeroed user mapping, those PAs become an info-leak vector
+// (Spectre-class speculative reads through the freed slot's bytes).
+// Same logic at L2/L1 for table-pointer bytes. Zeroing PAGE_SIZE
+// bytes per freed table page is microseconds; the bound is the number
+// of installed tables (a few hundred for typical Procs).
+static inline void clear_page_then_free(paddr_t pa) {
+    u64 *p = (u64 *)pa_to_kva(pa);
+    for (u32 i = 0; i < ENTRIES_PER_TABLE; i++) p[i] = 0;
+    // F5-style barrier: drain the clearing stores into the inner-
+    // shareable domain before the page goes back to the buddy
+    // free-list (so the next allocator sees zeroes regardless of CPU).
+    __asm__ __volatile__("dsb ish" ::: "memory");
+    free_pages(pa_to_page(pa), 0);
+}
 
 static void l3_walk_and_free(paddr_t l3_pa) {
     // L3 entries are LEAF page descriptors. We do NOT free the pages
     // they point at — those belong to the VMA layer (BURROW refcount).
-    // We just free the L3 table page itself.
-    struct page *l3_pg = pa_to_page(l3_pa);
-    free_pages(l3_pg, 0);
+    // We zero + free only the L3 table page itself (F4 hardening).
+    clear_page_then_free(l3_pa);
 }
 
 static void l2_walk_and_free(paddr_t l2_pa) {
@@ -1072,8 +1100,7 @@ static void l2_walk_and_free(paddr_t l2_pa) {
         paddr_t l3_pa = e & ~0xFFFull;
         l3_walk_and_free(l3_pa);
     }
-    struct page *l2_pg = pa_to_page(l2_pa);
-    free_pages(l2_pg, 0);
+    clear_page_then_free(l2_pa);
 }
 
 static void l1_walk_and_free(paddr_t l1_pa) {
@@ -1085,8 +1112,7 @@ static void l1_walk_and_free(paddr_t l1_pa) {
         paddr_t l2_pa = e & ~0xFFFull;
         l2_walk_and_free(l2_pa);
     }
-    struct page *l1_pg = pa_to_page(l1_pa);
-    free_pages(l1_pg, 0);
+    clear_page_then_free(l1_pa);
 }
 
 paddr_t proc_pgtable_create(void) {
@@ -1307,8 +1333,9 @@ int mmu_install_user_pte(paddr_t pgtable_root, u16 asid,
 // emptiness requires scanning all 512 slots of each level, adding
 // up to ~10000 ns per burrow_unmap (vs ~50 ns for the leaf-clear
 // + TLBI we do here). (2) The pages eventually go free when the
-// Proc dies via proc_pgtable_destroy. The freed-sub-table-page
-// race documented in audit F4 is a separate v1.x scope.
+// Proc dies via proc_pgtable_destroy, which (per F4 hardening)
+// zeroes each table page before returning it to the buddy and runs
+// after asid_free has flushed the inner-shareable TLB.
 int mmu_uninstall_user_pte(paddr_t pgtable_root, u16 asid, u64 vaddr) {
     (void)asid;   // reserved (tlbi vaae1is is all-ASID broadcast)
 
@@ -1406,6 +1433,10 @@ void proc_pgtable_destroy(paddr_t root) {
         paddr_t l1_pa = e & ~0xFFFull;
         l1_walk_and_free(l1_pa);
     }
-    struct page *l0_pg = pa_to_page(root);
-    free_pages(l0_pg, 0);
+    // F4 hardening: clear the L0 page contents (table pointers) before
+    // it goes back to the buddy. Same rationale as the lower-level
+    // walkers — the bytes are PAs of L1 sub-tables we've just freed;
+    // letting them leak through a buddy hand-off is a Spectre-class
+    // info-leak vector.
+    clear_page_then_free(root);
 }
