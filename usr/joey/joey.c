@@ -1383,7 +1383,18 @@ int main(void) {
             .fd_count      = 0,
             .perm_flags    = (unsigned int)T_SPAWN_PERM_MAY_POST_SERVICE,
             ._pad_envp     = 0,
-            .cap_mask      = T_CAP_HW_CREATE,
+            // F1 fix validation (P6 hardening #2): grant CAP_CSPRNG_READ
+            // so stratumd's libsodium sodium_init reaches getrandom
+            // successfully and progresses into stm_fs_mount. Pre-F1-fix,
+            // this exposed the AEGIS-256 / mallocng heap-corruption bug
+            // (kernel extinction via FAULT_UNHANDLED_USER on the stale-
+            // PTE-routed access). With F1's mmu_uninstall_user_range +
+            // 0012's mallocng-assert -> _Exit(127), the boot should now
+            // either reach `joey: stratumd-boot /srv/stratum-fs bound
+            // after retry N` (F1 was the root cause) or reach
+            // `child exit_status=127` (F1 wasn't, mallocng still asserts
+            // -- but cleanly, NOT as kernel extinction).
+            .cap_mask      = T_CAP_HW_CREATE | T_CAP_CSPRNG_READ,
         };
 
         // Install a pipe whose write-end becomes stratumd's fd 1 + fd 2
