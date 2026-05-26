@@ -908,32 +908,36 @@ build_stratumd() {
     echo "==> stratumd built: $progs_out/stratumd ($(wc -c < "$progs_out/stratumd" | tr -d ' ') bytes, ET_EXEC, static)"
 }
 
-build_stratum_mkfs_host() {
-    # Phase 6 (Pouch) sub-chunk 16b-beta. Native host build of stratum-mkfs
-    # (NOT the pouch cross-build) so we can pre-generate the system pool
-    # fixture at build time. Distinct from build_stratumd (which is the
-    # pouch cross-build that ships in the ramfs); this one stays on the
-    # host and is invoked by build_stratum_pool_fixture once per
-    # tools/build.sh kernel.
+build_stratum_host_tools() {
+    # Phase 6 (Pouch) sub-chunk 16b-beta + 16c. Native host build of the
+    # three Stratum CLI tools we drive at build time:
+    #   stratum-mkfs   — formats a fresh pool (16b-beta)
+    #   stratumd       — runs as a transient 9P server during populate (16c)
+    #   stratum-fs     — 9P CLI client used to copy boot corpus into pool (16c)
+    # These are NOT the pouch cross-builds (those ship in the ramfs); this
+    # builds the host-native binaries that tools/build.sh orchestrates to
+    # produce a pre-populated pool.img before QEMU boots.
     #
     # Build dir: $BUILD_DIR/host-stratum. Configured for the host's native
     # platform (Darwin on the dev box; Linux for CI). Disables PQ + io_uring
     # + libaio + tests + fuzzers to keep configuration fast (~10s) and
-    # the build small (~30s cold).
+    # the build small (~30s cold for all three targets).
     local stratum_src="${STRATUM_SRC:-$HOME/projects/stratum/v2}"
     local host_build="$BUILD_DIR/host-stratum"
     local mkfs_bin="$host_build/src/cmd/stratum-mkfs/stratum-mkfs"
+    local stratumd_bin="$host_build/src/cmd/stratumd/stratumd"
+    local stratum_fs_bin="$host_build/src/cmd/stratum-fs/stratum-fs"
 
     if [[ ! -d "$stratum_src" ]]; then
-        echo "==> stratum-mkfs (host): source tree not found at $stratum_src" >&2
+        echo "==> stratum host tools: source tree not found at $stratum_src" >&2
         echo "    override with STRATUM_SRC=/path/to/stratum/v2" >&2
         exit 1
     fi
 
-    echo "==> building stratum-mkfs (host) from $stratum_src"
+    echo "==> building stratum host tools (mkfs + stratumd + stratum-fs) from $stratum_src"
     mkdir -p "$host_build"
-    # No --toolchain — use the host's default compiler. The host stratum-
-    # mkfs runs on Darwin/Linux x86_64/arm64, not on Thylacine.
+    # No --toolchain — use the host's default compiler. The host tools
+    # run on Darwin/Linux x86_64/arm64, not on Thylacine.
     cmake -S "$stratum_src" -B "$host_build" \
         -DCMAKE_BUILD_TYPE=Release \
         -DSTM_ENABLE_PQ=OFF \
@@ -945,15 +949,23 @@ build_stratum_mkfs_host() {
         -DSTRATUM_BUILD_TESTING_HOOKS=OFF \
         > /dev/null
 
-    cmake --build "$host_build" --target stratum-mkfs \
+    cmake --build "$host_build" \
+        --target stratum-mkfs stratumd stratum-fs \
         -j"$(sysctl -n hw.ncpu 2>/dev/null || echo 4)" > /dev/null
 
-    if [[ ! -f "$mkfs_bin" ]]; then
-        echo "==> stratum-mkfs (host): build did not produce $mkfs_bin" >&2
+    local missing=""
+    [[ -f "$mkfs_bin" ]]       || missing="$missing stratum-mkfs"
+    [[ -f "$stratumd_bin" ]]   || missing="$missing stratumd"
+    [[ -f "$stratum_fs_bin" ]] || missing="$missing stratum-fs"
+    if [[ -n "$missing" ]]; then
+        echo "==> stratum host tools: build did not produce:$missing" >&2
         exit 1
     fi
-    echo "==> stratum-mkfs (host) built: $mkfs_bin"
+    echo "==> stratum host tools built: $mkfs_bin, $stratumd_bin, $stratum_fs_bin"
 }
+
+# Backward-compat alias: any caller using the old name still works.
+build_stratum_mkfs_host() { build_stratum_host_tools "$@"; }
 
 build_stratum_pool_fixture() {
     # Phase 6 (Pouch) sub-chunk 16b-beta. Generates the boot system pool
@@ -981,8 +993,12 @@ build_stratum_pool_fixture() {
     local pool_img="$fixtures/pool.img"
     local keyfile="$fixtures/system.key"
 
-    if [[ ! -x "$mkfs_bin" ]]; then
-        build_stratum_mkfs_host
+    # 16c: also need stratumd + stratum-fs for the populate step at the
+    # bottom; rebuild all three host tools if any one is missing.
+    local host_stratumd="$host_build/src/cmd/stratumd/stratumd"
+    local host_stratum_fs="$host_build/src/cmd/stratum-fs/stratum-fs"
+    if [[ ! -x "$mkfs_bin" || ! -x "$host_stratumd" || ! -x "$host_stratum_fs" ]]; then
+        build_stratum_host_tools
     fi
 
     mkdir -p "$fixtures"
@@ -1034,6 +1050,120 @@ build_stratum_pool_fixture() {
         exit 1
     fi
     echo "==> stratum pool fixture: $(wc -c < "$pool_img" | tr -d ' ') bytes ($pool_img), $(wc -c < "$keyfile" | tr -d ' ') bytes ($keyfile)"
+
+    # P6-pouch-stratumd-boot 16c: populate the freshly-formatted pool with
+    # the boot binary corpus + a sentinel for joey's post-pivot probe. The
+    # "installer" of the live-medium -> installer -> boot-from-installed
+    # pattern (docs/reference/86-pouch-stratumd-boot.md "### The 16c
+    # live-medium + host-bake + pivot design"), implemented as host-side
+    # orchestration of already-shipping Stratum v2 binaries:
+    #   1. start stratumd in the background on a unique temp Unix socket
+    #   2. poll for the socket to appear (stratumd has to bind first)
+    #   3. stratum-fs write each corpus file under its target path
+    #   4. stratum-fs sync (whole-pool commit)
+    #   5. SIGTERM stratumd; wait for clean exit
+    # No new Stratum-side code; pure shell glue.
+    populate_stratum_pool
+}
+
+populate_stratum_pool() {
+    # See the trailing block of build_stratum_pool_fixture for the design.
+    local host_build="$BUILD_DIR/host-stratum"
+    local stratumd_bin="$host_build/src/cmd/stratumd/stratumd"
+    local stratum_fs_bin="$host_build/src/cmd/stratum-fs/stratum-fs"
+    local fixtures="$BUILD_DIR/fixtures"
+    local pool_img="$fixtures/pool.img"
+    local keyfile="$fixtures/system.key"
+    # Unique-per-build socket path. The basename includes $$ so two
+    # concurrent build runs (unlikely but possible on a CI matrix)
+    # don't collide. Path stays under build/fixtures so cleanup is
+    # bounded.
+    local sock_path="$fixtures/mkfs-populate.$$.sock"
+    local stratumd_log="$fixtures/mkfs-populate.stratumd.log"
+
+    if [[ ! -x "$stratumd_bin" || ! -x "$stratum_fs_bin" ]]; then
+        # Should be impossible -- build_stratum_pool_fixture's call to
+        # build_stratum_host_tools at the top guarantees both. Defensive.
+        echo "==> populate_stratum_pool: stratumd or stratum-fs missing from $host_build" >&2
+        exit 1
+    fi
+
+    # Defensive: rm a stale socket from a prior interrupted run.
+    rm -f "$sock_path"
+
+    echo "==> populate pool: starting stratumd on $sock_path"
+    # Bind to a deterministic dataset (1, the default). Backlog 4 is
+    # plenty for the single sequential stratum-fs caller. Logs go to
+    # the fixtures dir so a failed populate is forensically inspectable
+    # without rerunning the whole build.
+    # --listen takes a raw filesystem path (NOT a unix:PATH URL prefix --
+    # stratumd's listen_unix calls bind(2) on the path verbatim).
+    "$stratumd_bin" "$pool_img" \
+        --listen "$sock_path" \
+        --keyfile "$keyfile" \
+        --root-dataset 1 \
+        --backlog 4 \
+        > "$stratumd_log" 2>&1 &
+    local stratumd_pid=$!
+
+    # Cleanup trap: SIGTERM stratumd on any path out (including script
+    # interrupt). Defensive against build script bailing mid-populate
+    # and leaving a zombie stratumd holding the pool open. The trap is
+    # cleared after the explicit kill at the end of the happy path so
+    # subsequent populate runs in the same shell don't fire it twice.
+    trap "kill -TERM $stratumd_pid 2>/dev/null; rm -f \"$sock_path\"" EXIT INT TERM
+
+    # Poll for the socket to appear. stratumd's listen_unix is
+    # synchronous (bind -> chmod -> listen -> fcntl) so the socket file
+    # exists once the listen() returns. ~5 second window covers cold
+    # mount + listen on a slow CI; failure logs the stratumd output.
+    local waited=0
+    while [[ ! -S "$sock_path" ]]; do
+        if [[ $waited -ge 50 ]]; then
+            echo "==> populate pool: stratumd did not bind $sock_path within 5s" >&2
+            echo "==> populate pool: stratumd log follows:" >&2
+            cat "$stratumd_log" >&2 || true
+            kill -TERM "$stratumd_pid" 2>/dev/null || true
+            exit 1
+        fi
+        sleep 0.1
+        waited=$((waited + 1))
+    done
+    echo "==> populate pool: stratumd bound; running stratum-fs population"
+
+    # The populate set. v1.0 16c minimum: one sentinel file at
+    # /etc/thylacine-version. joey's post-pivot probe walks + reads +
+    # content-checks this so a regression in SYS_PIVOT_ROOT surfaces
+    # immediately. The content string is distinct from /version in
+    # devramfs (which contains "Thylacine v0.1-dev") so a content-check
+    # cannot pass against the WRONG root_spoor.
+    #
+    # Forward-compat populate of the boot binary corpus (joey, corvus,
+    # stratumd, pouch hellos, thread-probe) is a deliberate v1.x lift:
+    # at v1.0, post-pivot joey does NOT respawn anything from disk
+    # (joey is loaded in RAM via cpio and stays running), so no current
+    # consumer needs the binaries on the pool. Phase 7's interactive
+    # shell (Utopia) is the first consumer that would; this is where
+    # the corpus populate lands.
+    local sentinel_content="Thylacine 1.0-dev (16c boot-from-disk; populated at host build time)"
+
+    "$stratum_fs_bin" -s "$sock_path" mkdir /etc \
+        || { echo "==> populate pool: mkdir /etc FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+    echo "$sentinel_content" | "$stratum_fs_bin" -s "$sock_path" write /etc/thylacine-version \
+        || { echo "==> populate pool: write /etc/thylacine-version FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+    "$stratum_fs_bin" -s "$sock_path" sync \
+        || { echo "==> populate pool: sync FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+    echo "==> populate pool: /etc/thylacine-version written ($(echo "$sentinel_content" | wc -c | tr -d ' ') bytes)"
+
+    # Clean stratumd shutdown: SIGTERM then wait. stratumd unmounts the
+    # pool + flushes on its way out, so the pool.img bytes after this
+    # wait are the steady state joey will see when it mounts via 9P.
+    kill -TERM "$stratumd_pid"
+    wait "$stratumd_pid" 2>/dev/null || true
+    rm -f "$sock_path"
+    # Clear the trap; happy path is done.
+    trap - EXIT INT TERM
+    echo "==> populate pool: stratumd shut down cleanly; pool.img populated"
 }
 
 build_pouch_progs() {
