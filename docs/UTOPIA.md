@@ -120,7 +120,8 @@ The execution-phase registry per `ROADMAP.md §2.1` is authoritative; the sectio
 Per `docs/UTOPIA-SHELL-DESIGN.md §19`:
 
 - **U-1** (this commit) — scripture: UTOPIA.md + UTOPIA-SHELL-DESIGN.md + UTOPIA-VISUAL.md + ARCH/ROADMAP/CLAUDE updates + phase7-status.md.
-- **U-2** — libthyla-rs extensions: allocator, File I/O, Path, Poll, Notes, Command/Child.
+- **U-2** — Scripture amendment: the libthyla-rs uplift framing (§15 of UTOPIA-SHELL-DESIGN.md). NO code.
+- **U-2a..U-2-test** — The libthyla-rs uplift: error types, handle RAII, allocator, fs + io, process + pipe, notes + poll, territory + cap, thread/torpor/time/rand/tty, 9P + hardware, cross-module smoke test. ~9-12 sessions of investment in the library Thylacine deserves.
 - **U-3** — Utopia workspace skeleton: ut skeleton + libutopia stubs + build wiring.
 - **U-4** — line editor in libutopia.
 - **U-5** — parser + AST.

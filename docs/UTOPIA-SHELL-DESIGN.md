@@ -856,150 +856,464 @@ These ship in the repo. Users of Thylacine via UART/SSH apply them to their host
 
 ---
 
-## 15. The native runtime — libthyla-rs extensions Utopia requires
+## 15. The native runtime — `libthyla-rs` uplift to the library Thylacine deserves
 
-The existing `libthyla-rs` (857 lines as of `218feb0`) covers the corvus + virtio-* surfaces. Utopia adds substantial new requirements. Each extension is its own U-* chunk (sequenced as a prerequisite for higher-level work).
+### 15.1 Reframing
 
-### 15.1 Heap allocator (U-2)
+The existing `libthyla-rs` (857 lines as of `218feb0`) was right-sized for three Rust binaries (`hello-rs`, the virtio-* drivers, corvus). It is materially behind Thylacine's current kernel surface — Phase 6 added at least eight new syscalls (BURROW_ATTACH/DETACH, TORPOR_WAIT/WAKE, THREAD_SPAWN/EXIT, POST_SERVICE_BYTE) and 16c added two more (ATTACH_9P_SRV, PIVOT_ROOT). And the existing wrappers are bare: raw `i64` returns, no error types, no RAII for handles, no Path type, no notes API, no poll wrapper. It is not right-sized for `ut` + `libutopia` + a dozen coreutils + the future Phase 8 daemons + Halcyon.
 
-A `#[global_allocator]` implementation backed by `burrow_attach`. Lets every Utopia crate use `alloc::Box`, `alloc::Vec`, `alloc::String`, `alloc::collections::BTreeMap`, etc. Likely wraps `dlmalloc-rs` or a similar small no_std allocator.
+U-1 (this scripture) commits to a different framing for the work that comes between now and `ut`-skeleton: **the libthyla-rs uplift to the library Thylacine deserves.** Not just the extensions Utopia needs — a complete, coherent, idiomatic Rust API for every kernel surface Thylacine exposes today. Future native Rust programs will look at libthyla-rs to learn "how is Rust on Thylacine done?" They should find something inspiring.
 
-This is the gating extension — without it, the shell parser cannot allocate ASTs.
+The uplift is the gating prerequisite to U-3+. Every U-* chunk that follows inherits the patterns established here.
 
-### 15.2 File I/O over Spoor handles (U-2 or U-3)
+### 15.2 Lead-by-example
 
-High-level wrappers around the syscall surface (`SYS_WALK_OPEN`, `SYS_FSTAT`, `SYS_LSEEK`, `SYS_READ`, `SYS_WRITE`, `SYS_CLOSE`). Approximately:
+Three concrete arguments:
+
+1. **Current libthyla-rs is behind.** Every U-* chunk past U-2 would have to drag the library forward as a side-effect of its own work, in dribs and drabs, with no consistency. Better to do the uplift coherently up front.
+2. **Every future Thylacine Rust program will copy these patterns.** Phase 8 (Linux compat + network) adds userspace daemons; Phase 10 (Halcyon) is a major Rust userspace; v1.x is more daemons. If `t::fs::File` has a beautiful RAII shape, every future program inherits that. If we leave it as bare wrappers + raw i64, that's what gets copied.
+3. **Investment pays back across the whole remaining project.** v1.0 is multi-month; a ~10-session libthyla-rs uplift at the start of Phase 7 is high-leverage per session for the rest of v1.0 and into v1.x.
+
+### 15.3 The two-library structure (no intermediate tier)
+
+| Library | Audience | Shape |
+|---|---|---|
+| `libthyla-rs` | Every native Thylacine Rust program | Kernel surface + idiomatic Rust primitives. Generic. The library this section defines. |
+| `libutopia` | Utopia (the shell, coreutils, future Utopia tools) | Application helpers — Pale Fire palette, ANSI emission, the line editor, prompt-format. Specific. Depends on libthyla-rs. |
+
+No third-layer "helpers between libthyla-rs and libutopia." If something proves to be useful beyond Utopia (e.g., a logging framework), it migrates up to libthyla-rs at that time. Premature layering is worse than late layering.
+
+Things that belong in libthyla-rs (per this scripture): Path/PathBuf, Error/Result, File/Metadata/ReadDir, Read/Write traits, Command/Child, Pipe, Notes, PollSet, Caps, Territory ops, Thread, Torpor, Time, Rand, Tty, 9P client, hardware-handle surfaces.
+
+Things that belong in libutopia: Pale Fire palette + helpers, the line editor, prompt-emit, terminal-config knowledge.
+
+### 15.4 The module structure
+
+The libthyla-rs uplift target:
+
+```
+usr/lib/libthyla-rs/src/
+├── lib.rs              re-exports; #[global_allocator] hook; #[panic_handler]; _start
+├── syscall.rs          raw SVC wrappers; kept private for the most part
+├── alloc.rs            #[global_allocator] backed by burrow_attach
+├── err.rs              t::Error enum + t::Result<T> alias + From<i64>
+├── handle.rs           Handle RAII newtype; rights tracked at type level
+├── fs/                 filesystem surface
+│   ├── mod.rs          File, Metadata, OpenOptions, SeekFrom
+│   ├── path.rs         Path, PathBuf (std::path-shaped, no_std + alloc)
+│   └── dir.rs          ReadDir, DirEntry, Treaddir-backed
+├── io.rs               Read, Write, BufRead, Seek traits; Cursor; copy/read_to_*
+├── process/            spawn + wait
+│   ├── mod.rs          Command, Child, ExitStatus
+│   ├── stdio.rs        Stdio enum (Inherit, Piped, File, Null)
+│   └── pipe.rs         pipe() -> (Reader, Writer)
+├── notes.rs            Notes RAII (open_self / open_pid), Note struct, mask guards
+├── poll.rs             PollSet ergonomic wrapper, PollEvents bitflags
+├── territory.rs        bind / mount / unmount / pivot_root / rfork
+├── cap.rs              Caps set, query, drop; elevation-only marker types
+├── thread.rs           Thread spawn / exit (peers within a Proc)
+├── torpor.rs           wait/wake on address (futex shape)
+├── time.rs             Instant, Duration, sleep
+├── rand.rs             getrandom wrapper
+├── tty.rs              /dev/consctl raw-mode; termios-equivalent ops
+├── ninep/              9P client (lifted from corvus's internal impl)
+│   ├── mod.rs          Session high-level API
+│   ├── attach.rs       Tversion / Tattach helpers
+│   ├── walk.rs         Twalk / Tlopen / Tlcreate
+│   └── ops.rs          Tread / Twrite / Tgetattr / Tsetattr / Tremove / Treaddir / Treadlink
+├── hardware/           hardware-handle surfaces (for the virtio-* drivers)
+│   ├── mod.rs          common types
+│   ├── mmio.rs         Mmio handle + map + read/write helpers
+│   ├── irq.rs          Irq handle + wait
+│   └── dma.rs          Dma handle + map
+└── prelude.rs          `use t::prelude::*;` brings in commonly-used items
+```
+
+Every module is idiomatic Rust: RAII, typed errors, builders for complex constructors, lifetimes on borrowed references, marker types where invariants need compile-time enforcement.
+
+The top-level crate is re-exported as the short name `t` for ergonomic use (`use t::fs::File;` reads cleaner than `use libthyla_rs::fs::File;`). The actual Cargo package name stays `libthyla-rs` for compat with existing callers.
+
+### 15.5 The before/after taste
+
+What "delightful" means concretely:
 
 ```rust
-pub struct File { /* ... */ }
+// Before (current libthyla-rs shape — every callsite does this):
+let h: i64 = unsafe { svc4(T_SYS_WALK_OPEN, ...) };
+if h < 0 { return Err(...); }
+let mut buf = [0u8; 4096];
+let n: i64 = unsafe { svc3(T_SYS_READ, h as u64, buf.as_mut_ptr() as u64, 4096) };
+if n < 0 { unsafe { svc1(T_SYS_CLOSE, h as u64); } return Err(...); }
+let s = core::str::from_utf8(&buf[..n as usize]).ok();
+unsafe { svc1(T_SYS_CLOSE, h as u64); }
+// Manual cleanup; raw error codes; no type guarantees.
+
+// After (libthyla-rs uplift target):
+let mut f = t::fs::File::open("/etc/hosts")?;
+let mut buf = String::new();
+f.read_to_string(&mut buf)?;
+// Drop closes the handle. `?` propagates t::Error. Rights tracked at the type level.
+```
+
+```rust
+// Notes + poll, the way the shell main loop wants to read:
+let notes = t::notes::Notes::open_self()?;
+let mut poll = t::poll::PollSet::new();
+poll.add(notes.as_fd(), t::poll::READ);
+poll.add(stdin.as_fd(), t::poll::READ);
+
+loop {
+    for r in poll.poll(None)? {
+        match r.fd {
+            fd if fd == notes.as_fd() => handle_note(notes.read()?),
+            fd if fd == stdin.as_fd() => handle_stdin(),
+            _ => {}
+        }
+    }
+}
+```
+
+```rust
+// Process spawn with builder + Stdio:
+let child = t::process::Command::new("ls")
+    .args(&["-l", "/etc"])
+    .stdout(t::process::Stdio::Piped)
+    .spawn()?;
+let output = child.wait_with_output()?;
+```
+
+```rust
+// Namespace composition (Thylacine-specific; no std equivalent):
+t::territory::bind("/srv/stratum-ctl", "/n/stratum", t::territory::BindFlags::REPLACE)?;
+let entries: Vec<_> = t::fs::read_dir("/n/stratum")?.collect::<t::Result<Vec<_>>>()?;
+```
+
+These read like idiomatic Rust to anyone who knows `std::fs` / `std::process` / `mio`, AND route every call through Thylacine syscalls. That's the moat.
+
+### 15.6 Module API sketches
+
+Indicative; exact signatures iterate during impl. These are commitments to shape, not to spelling.
+
+#### 15.6.1 `t::err` — Error + Result
+
+```rust
+pub type Result<T> = core::result::Result<T, Error>;
+
+#[non_exhaustive]
+pub enum Error {
+    // POSIX-aligned per docs/ERRORS.md
+    InvalidArgument,        // T_E_INVAL
+    PermissionDenied,       // T_E_ACCES (NOT T_E_PERM — see CLAUDE.md trap re: pouch -1 collision)
+    NotFound,               // T_E_NOENT
+    Interrupted,            // T_E_INTR
+    NotImplemented,         // T_E_NOSYS
+    TimedOut,               // T_E_TIMEDOUT
+    BadHandle,              // T_E_BADF
+    NoMemory,               // T_E_NOMEM
+    IsDirectory,            // T_E_ISDIR
+    NotDirectory,           // T_E_NOTDIR
+    Exists,                 // T_E_EXIST
+    // Thylacine-specific
+    CapabilityRequired,     // attempted op needs a cap not held
+    RightInsufficient,      // attempted op on a handle with insufficient rights
+    NoteInvalidName,        // tried to use a reserved `snare:` prefix
+    NamespaceCycle,         // bind would create a cycle (I-3 violation)
+    // Pass-through for codes we haven't mapped
+    Other(i64),
+}
+
+impl Error {
+    pub fn from_syscall_return(rc: i64) -> Option<Self>;
+    pub fn as_errno(&self) -> i32;
+}
+
+impl core::fmt::Display for Error { /* ... */ }
+```
+
+#### 15.6.2 `t::alloc` — heap allocator
+
+```rust
+// Set at the top of each native binary by the libthyla-rs prelude;
+// burrow_attach-backed.
+pub struct ThylaAlloc;
+
+unsafe impl core::alloc::GlobalAlloc for ThylaAlloc { /* ... */ }
+
+#[global_allocator]
+static ALLOC: ThylaAlloc = ThylaAlloc;
+```
+
+Gating: without this, `alloc::Box` / `Vec` / `String` are unusable across Utopia.
+
+#### 15.6.3 `t::handle` — Handle RAII
+
+```rust
+pub struct Handle { idx: i32, rights: Rights }
+impl Handle {
+    pub fn rights(&self) -> Rights;
+    pub fn raw(&self) -> i32;
+    pub(crate) fn from_raw(idx: i32, rights: Rights) -> Self;
+}
+impl Drop for Handle { fn drop(&mut self) { let _ = sys::close(self.idx); } }
+
+bitflags::bitflags! {
+    pub struct Rights: u32 {
+        const READ      = 1 << 0;
+        const WRITE     = 1 << 1;
+        const EXECUTE   = 1 << 2;
+        const TRANSFER  = 1 << 3;
+        const SIGNAL    = 1 << 5;  // per kernel/include/thylacine/handle.h
+        // ...
+    }
+}
+```
+
+Foundation for File, Notes, Mmio, Irq, Dma, etc. — every kernel-object-backed type composes a Handle.
+
+#### 15.6.4 `t::fs` — File + Path + ReadDir + Metadata
+
+```rust
+pub struct File { /* private Handle */ }
 impl File {
-    pub fn open(path: &Path) -> Result<File, Error>;
-    pub fn create(path: &Path) -> Result<File, Error>;
-    pub fn read(&self, buf: &mut [u8]) -> Result<usize, Error>;
-    pub fn write(&self, buf: &[u8]) -> Result<usize, Error>;
-    pub fn seek(&self, pos: SeekFrom) -> Result<u64, Error>;
-    pub fn metadata(&self) -> Result<Metadata, Error>;
+    pub fn open(path: impl AsRef<Path>) -> Result<File>;
+    pub fn create(path: impl AsRef<Path>) -> Result<File>;
+    pub fn options() -> OpenOptions;
+    pub fn metadata(&self) -> Result<Metadata>;
+    pub fn sync(&self) -> Result<()>;
+    pub fn set_len(&self, len: u64) -> Result<()>;
 }
+impl Read for File { /* ... */ }
+impl Write for File { /* ... */ }
+impl Seek for File { /* ... */ }
+
+pub struct OpenOptions { /* ... */ }
+impl OpenOptions {
+    pub fn new() -> OpenOptions;
+    pub fn read(self, b: bool) -> Self;
+    pub fn write(self, b: bool) -> Self;
+    pub fn create(self, b: bool) -> Self;
+    pub fn truncate(self, b: bool) -> Self;
+    pub fn open(self, path: impl AsRef<Path>) -> Result<File>;
+}
+
+pub struct Metadata { /* fields per kernel struct t_stat */ }
+impl Metadata {
+    pub fn is_file(&self) -> bool;
+    pub fn is_dir(&self) -> bool;
+    pub fn len(&self) -> u64;
+    // ... mtime, mode, uid/gid, etc.
+}
+
+pub struct ReadDir { /* ... */ }
+impl Iterator for ReadDir { type Item = Result<DirEntry>; }
+pub struct DirEntry { /* ... */ }
+pub fn read_dir(path: impl AsRef<Path>) -> Result<ReadDir>;
 ```
 
-`File` owns a Spoor handle; `Drop` calls `t_close`. The API is `std::fs::File`-shaped for Rust ergonomics but routes through libthyla-rs.
+Path/PathBuf shape-mirror std::path (component iteration, joins, parent, file_name, extension); no_std + alloc.
 
-### 15.3 9P client extensions (U-2)
+#### 15.6.5 `t::process` — Command + Child
 
-If `libthyla-rs` does not already expose enough of the 9P surface (the corvus crate has its own client; we lift it into libthyla-rs), Utopia coreutils need:
+Per §15.5 above; matches `std::process`.
 
-- `walk_open`, `walk_open_for_create`, `walk_open_for_directory`.
-- `readdir` (Treaddir).
-- `getattr` / `setattr` (Tgetattr / Tsetattr).
-- `readlink` (Treadlink).
-
-### 15.4 Poll set (U-2 or U-6)
-
-Ergonomic Rust wrapper around `SYS_POLL`:
+#### 15.6.6 `t::notes`
 
 ```rust
-pub struct PollSet { /* ... */ }
-impl PollSet {
-    pub fn add(&mut self, fd: i32, events: PollEvents);
-    pub fn remove(&mut self, fd: i32);
-    pub fn poll(&mut self, timeout: Option<Duration>) -> Result<Vec<PollResult>, Error>;
-}
-```
-
-Backs the shell's main loop.
-
-### 15.5 Notes API (U-2 or U-6)
-
-```rust
-pub struct Notes { /* ... */ }
+pub struct Notes { /* private Handle */ }
 impl Notes {
-    pub fn open_self() -> Result<Notes, Error>;
-    pub fn open_pid(pid: i32) -> Result<Notes, Error>;
-    pub fn read(&self) -> Result<Note, Error>;
-    pub fn send(&self, target: NoteTarget, name: &str, body: &[u8]) -> Result<(), Error>;
-    pub fn mask(&self, classes: &[&str]) -> NotesMaskGuard<'_>;
+    pub fn open_self() -> Result<Notes>;
+    pub fn open_pid(pid: Pid) -> Result<Notes>;
+    pub fn read(&self) -> Result<Note>;          // blocking
+    pub fn try_read(&self) -> Result<Option<Note>>; // non-blocking
+    pub fn send(&self, target: NoteTarget, name: &str, body: &[u8]) -> Result<()>;
+    pub fn mask<'a>(&'a self, classes: &[&str]) -> MaskGuard<'a>;
 }
+impl AsFd for Notes { /* allows use in PollSet */ }
 
 pub struct Note {
     pub name: String,
     pub body: Vec<u8>,
-    pub from: Option<i32>,
+    pub from: Option<Pid>,
+}
+
+pub enum NoteTarget { Pid(Pid), Group(Pgid), Process(Pid) }
+```
+
+#### 15.6.7 `t::poll`
+
+```rust
+pub struct PollSet { /* ... */ }
+impl PollSet {
+    pub fn new() -> Self;
+    pub fn add<F: AsFd>(&mut self, fd: &F, events: PollEvents);
+    pub fn remove<F: AsFd>(&mut self, fd: &F);
+    pub fn poll(&mut self, timeout: Option<Duration>) -> Result<PollResults>;
+}
+
+bitflags::bitflags! {
+    pub struct PollEvents: i16 {
+        const READ  = 0x001;
+        const WRITE = 0x004;
+        const ERROR = 0x008;
+        const HUP   = 0x010;
+    }
+}
+
+pub struct PollResults { /* iterable */ }
+impl Iterator for PollResults { type Item = PollResult; }
+pub struct PollResult { pub fd: RawFd, pub revents: PollEvents }
+```
+
+#### 15.6.8 `t::territory`
+
+```rust
+pub fn bind(old: impl AsRef<Path>, new: impl AsRef<Path>, flags: BindFlags) -> Result<()>;
+pub fn mount(server: impl AsRef<Path>, new: impl AsRef<Path>, flags: MountFlags) -> Result<()>;
+pub fn unmount(new: impl AsRef<Path>) -> Result<()>;
+pub fn pivot_root(new_root: impl AsRef<Path>) -> Result<()>;
+
+bitflags::bitflags! {
+    pub struct BindFlags: u32 { const BEFORE = 1; const AFTER = 2; const REPLACE = 4; }
+    pub struct MountFlags: u32 { const BEFORE = 1; const AFTER = 2; const CACHE = 4; }
+}
+
+pub fn rfork(flags: RForkFlags) -> Result<RForkResult>;
+```
+
+#### 15.6.9 `t::cap`
+
+```rust
+pub fn current() -> Caps;
+pub fn drop(caps_to_drop: Caps) -> Result<()>;
+
+bitflags::bitflags! {
+    pub struct Caps: u64 {
+        const HW_CREATE     = 1 << 0;
+        const LOCK_PAGES    = 1 << 1;
+        const CSPRNG_READ   = 1 << 2;
+        // Note: HOSTOWNER is elevation-only; not in this fork-grantable set
+        const GRANT_HOSTOWNER = 1 << 4;
+    }
 }
 ```
 
-The note name is the snare:* family per `ERRORS.md`.
+#### 15.6.10 `t::thread`, `t::torpor`, `t::time`, `t::rand`, `t::tty`
 
-### 15.6 Terminal raw mode (U-4)
+Each a small focused module wrapping the corresponding syscall surface. Sketches:
 
 ```rust
-pub struct RawMode { /* ... */ }
-impl RawMode {
-    pub fn enter(tty: &Tty) -> Result<RawMode, Error>;
+// t::thread
+pub fn spawn(f: impl FnOnce() + Send + 'static) -> Result<JoinHandle>;
+pub struct JoinHandle { /* ... */ }
+impl JoinHandle { pub fn join(self) -> Result<()>; }
+
+// t::torpor (wait-on-address; futex shape)
+pub fn wait(addr: &AtomicU32, expected: u32, timeout: Option<Duration>) -> Result<()>;
+pub fn wake(addr: &AtomicU32, count: u32) -> Result<u32>;
+
+// t::time
+pub struct Instant(u64);
+impl Instant { pub fn now() -> Instant; pub fn elapsed(&self) -> Duration; }
+pub struct Duration(u64);  // nanoseconds; or wrap a representation
+pub fn sleep(d: Duration) -> Result<()>;
+
+// t::rand
+pub fn getrandom(buf: &mut [u8]) -> Result<()>;
+
+// t::tty
+pub struct RawMode<'a> { tty: &'a Tty, /* saved state */ }
+impl<'a> RawMode<'a> { pub fn enter(tty: &'a Tty) -> Result<Self>; }
+impl Drop for RawMode<'_> { /* restore */ }
+pub struct Tty { /* opens /dev/cons + /dev/consctl */ }
+```
+
+#### 15.6.11 `t::ninep` — 9P client
+
+Lifted from corvus's internal client. High-level shape:
+
+```rust
+pub struct Session { /* ... */ }
+impl Session {
+    pub fn attach(transport: impl Transport, aname: &str, uname: &str) -> Result<Root>;
 }
-impl Drop for RawMode { fn drop(&mut self) { /* restore */ } }
+
+pub struct Root { /* Spoor handle for the attached root */ }
+impl Root {
+    pub fn walk(&self, path: &[&str]) -> Result<File>;
+    pub fn create(&self, path: &[&str], perm: u32) -> Result<File>;
+}
+// File implements Read/Write/Seek as in t::fs::File.
 ```
 
-Enters raw mode (no canonical line input, no echo) by writing `"rawon"` to `/dev/consctl`. RAII: restoring on drop.
+#### 15.6.12 `t::hardware`
 
-### 15.7 Regex (U-5 or U-9)
-
-Vendored or workspace-internal regex engine. Likely `regex-lite` (no_std-compatible variant of `regex`). Used by:
-
-- The shell's `=~` operator.
-- `grep` coreutil.
-- `sed` coreutil (with caveats; sed needs more than regex).
-
-### 15.8 Process spawn (U-6)
-
-Ergonomic wrapper around `SYS_SPAWN_FULL_ARGV` / `SYS_SPAWN_WITH_PERMS`:
+Existing surface from the virtio-* drivers; kept for them; cleaned up + properly typed during the uplift.
 
 ```rust
-pub struct Command { /* ... */ }
-impl Command {
-    pub fn new(name: &str) -> Command;
-    pub fn arg(&mut self, arg: &str) -> &mut Self;
-    pub fn args(&mut self, args: &[&str]) -> &mut Self;
-    pub fn env(&mut self, key: &str, val: &str) -> &mut Self;
-    pub fn stdin(&mut self, redir: Stdio) -> &mut Self;
-    pub fn stdout(&mut self, redir: Stdio) -> &mut Self;
-    pub fn stderr(&mut self, redir: Stdio) -> &mut Self;
-    pub fn spawn(&self) -> Result<Child, Error>;
+pub struct Mmio { /* Handle */ }
+impl Mmio {
+    pub fn create(addr: PhysAddr, size: usize) -> Result<Mmio>;
+    pub fn map(&self) -> Result<MmioMap>;
+}
+pub struct MmioMap { /* mapped Vmo with read/write helpers */ }
+
+pub struct Irq { /* Handle */ }
+impl Irq {
+    pub fn create(num: u32) -> Result<Irq>;
+    pub fn wait(&self) -> Result<()>;
 }
 
-pub struct Child { /* ... */ }
-impl Child {
-    pub fn pid(&self) -> i32;
-    pub fn notes(&self) -> Result<Notes, Error>;
-    pub fn wait(self) -> Result<ExitStatus, Error>;
-    pub fn kill(&self) -> Result<(), Error>;
+pub struct Dma { /* Handle */ }
+impl Dma {
+    pub fn create(size: usize) -> Result<Dma>;
+    pub fn map(&self) -> Result<DmaMap>;
 }
 ```
 
-`Stdio` enum: `Inherit`, `Piped`, `File(File)`, `Null`. The shell uses `Piped` to compose pipelines.
+### 15.7 Sub-chunk decomposition
 
-### 15.9 Pipe pair (U-6)
+The U-2 work splits into focused sub-chunks. Each ships independently; each is auditable on its own; each preserves existing callers' build.
 
-```rust
-pub fn pipe() -> Result<(File, File), Error>;     // (read_end, write_end)
-```
+| Chunk | Scope | Estimated |
+|---|---|---|
+| **U-2** scripture amendment | This §15 rewrite. Plus the matching §19 + phase7-status.md updates. NO code. | 0.5 session (already happening) |
+| **U-2a** err + handle | `t::err` (Error + Result + From<i64>) + `t::handle` (Handle RAII + Rights bitflags). The foundational types every other module composes. | 1 |
+| **U-2b** alloc | `#[global_allocator]` via burrow_attach. Smoke binary using `alloc::Box`/`Vec`/`String`. | 1 |
+| **U-2c** fs (Path + File + ReadDir + io) | `t::fs::{Path, PathBuf, File, OpenOptions, Metadata, ReadDir}` + `t::io::{Read, Write, Seek, BufRead}`. The fs + io modules together. | 1-2 |
+| **U-2d** process + pipe + stdio | `t::process::{Command, Child, ExitStatus, Stdio}` + `t::process::pipe()`. | 1 |
+| **U-2e** notes + poll | `t::notes::{Notes, Note, MaskGuard, NoteTarget}` + `t::poll::{PollSet, PollEvents}`. | 1 |
+| **U-2f** territory + cap | `t::territory::{bind, mount, unmount, pivot_root, rfork}` + `t::cap::{Caps, current, drop}`. | 1 |
+| **U-2g** thread + torpor + time + rand + tty | The smaller scope modules grouped. | 1 |
+| **U-2h** ninep + hardware | Lift the 9P client out of corvus into `t::ninep`; consolidate the virtio-* hardware-handle surface into `t::hardware`. Migration commit for corvus + virtio-* in the same PR. | 1-2 |
+| **U-2-test** | Cross-module smoke binary running on Thylacine: opens a file, reads, computes, writes, spawns a child, pipes, polls, sends a note, drops caps. Validates the library end-to-end. | 1 |
 
-Backed by `SYS_PIPE`. Used to compose pipelines.
+Total: ~9-12 sessions. Each sub-chunk is independent enough that a context-compaction at any boundary is recoverable.
 
-### 15.10 Path manipulation (U-3)
+### 15.8 Backwards compatibility
 
-```rust
-pub struct Path { /* ... */ }
-pub struct PathBuf { /* ... */ }
-```
+Existing libthyla-rs callers (corvus, virtio-*, hello-rs, mmio-probe, irq-probe, irq-bench, virtio-blk-probe, virtio-blk-rw, virtio-input, virtio-gpu, virtio-net-*) MUST continue building after each U-2X sub-chunk. Strategy:
 
-Simple non-allocating Path / allocating PathBuf, shaped like `std::path`. Bytes; UTF-8 by convention. Used everywhere.
+1. **Add new modules without removing the existing constants/wrappers.** During the uplift, the old `T_SYS_*` constants + the bare svc wrappers stay public so callers don't break.
+2. **Where a sub-chunk restructures something a caller uses (e.g., U-2h moves the 9P client out of corvus), the migration lands in the same commit as the restructure.** A single atomic commit; never a half-migrated tree.
+3. **The U-2-test sub-chunk validates that the existing callers still pass their own tests** after the uplift. If a caller regresses, that's a U-2X bug.
+4. **Once U-2-test is green and the next U-* chunk (U-3) lands, we audit which old-shape exports are still in use.** Anything unused gets removed in a separate cleanup commit; anything still in use stays public (or migrates its callers in the same cleanup).
 
-### 15.11 What we don't get
+### 15.9 Discipline — what we don't do
 
-- Threading. The shell is single-threaded; coreutils are single-threaded. Multi-thread coreutils (if ever) would use raw `SYS_THREAD_SPAWN`.
-- Network. Phase 8 deliverable.
-- Async runtime. Not needed; poll() is sufficient.
-- Async-trait, futures, tokio. Not needed; not portable to no_std easily.
+- **Don't import the entire std API surface.** Some std things are dubious on Thylacine (Mutex with poisoning at v1 — no). Add what's load-bearing.
+- **Don't invent novel Rust idioms.** Where std has a shape, mirror it (File, Path, Command). Where mio or crossterm has a shape, mirror it. Invent only where Thylacine is genuinely novel (notes, caps, namespaces).
+- **Don't add abstractions for hypothetical future programs.** Two real uses > one premature abstraction. The litmus test: does any near-term U-* chunk use this? If yes, add; if no, defer.
+- **Don't make libthyla-rs into a framework.** It's a library — small, focused, no global state beyond the allocator, no startup hooks beyond what's already there.
+- **Don't reach for unsafe except in the syscall.rs glue.** Every module above syscall.rs should be safe by default; unsafe usage in higher modules needs explicit justification.
+
+### 15.10 What stays out
+
+- **Threading as an async runtime.** Native Thylacine programs use poll() for concurrency; no tokio, no futures, no async-trait.
+- **Network.** Phase 8 deliverable (ROADMAP §9). When network lands, libthyla-rs grows a `t::net` module then.
+- **std::sync::Mutex with poisoning semantics.** A simple `t::sync::Mutex` may be added if multi-thread programs need it; the poison-on-panic story is deferred until there's a clear need.
+- **Logging framework.** v1 programs emit to stderr. A structured logging facility is v1.x.
+- **Serde-style serialization.** Programs that need JSON emit it directly; serde is v1.x.
+- **Backwards-compat shims for POSIX shapes.** Programs that want POSIX go via Pouch. libthyla-rs is Thylacine-shaped; the boundary is explicit.
 
 ---
 
@@ -1151,19 +1465,28 @@ The U-* chunks; the order honours dependencies.
 
 | Chunk | Scope | Depends on |
 |---|---|---|
-| **U-1** | Scripture: this doc + UTOPIA-VISUAL.md + UTOPIA.md + ARCH §3.X + ROADMAP §8 + phase7-status.md + CLAUDE.md updates. No code. | — |
-| **U-2** | libthyla-rs extensions: heap allocator, File I/O, Path, basic Poll, Notes API, Command/Child. The shared foundation. | U-1 |
-| **U-3** | Utopia workspace skeleton: `usr/utopia/{Cargo.toml,shell,libutopia,coreutils}`; libutopia palette/ansi/path modules; `ut` skeleton (version + exit); `tools/build.sh utopia` wiring; host-bake `/bin/ut`. | U-2 |
+| **U-1** | Scripture: this doc + UTOPIA-VISUAL.md + UTOPIA.md + ARCH §3.5 + ROADMAP §8 + phase7-status.md + CLAUDE.md updates. No code. | — |
+| **U-2** | Scripture amendment: §15 (the libthyla-rs uplift framing) + this §19 update + phase7-status.md U-* arc refresh. No code. | U-1 |
+| **U-2a** | `t::err` (Error + Result) + `t::handle` (Handle RAII + Rights bitflags). Foundational types. | U-2 |
+| **U-2b** | `t::alloc` (`#[global_allocator]` via burrow_attach). Enables `alloc` crate. Smoke binary with Box/Vec/String. | U-2a |
+| **U-2c** | `t::fs::{Path, PathBuf, File, OpenOptions, Metadata, ReadDir}` + `t::io::{Read, Write, Seek, BufRead}`. The fs + io modules. | U-2b |
+| **U-2d** | `t::process::{Command, Child, ExitStatus, Stdio}` + `t::process::pipe()`. | U-2c |
+| **U-2e** | `t::notes::{Notes, Note, MaskGuard}` + `t::poll::{PollSet, PollEvents}`. | U-2c |
+| **U-2f** | `t::territory::{bind, mount, unmount, pivot_root, rfork}` + `t::cap::{Caps, current, drop}`. | U-2a |
+| **U-2g** | `t::thread` + `t::torpor` + `t::time` + `t::rand` + `t::tty`. The smaller-scope modules grouped. | U-2c |
+| **U-2h** | `t::ninep` (lift 9P client from corvus) + `t::hardware::{Mmio, Irq, Dma}` (consolidate virtio-* surface). Migrates corvus + virtio-* callers in the same commit. | U-2c, U-2d |
+| **U-2-test** | Cross-module smoke binary exercising every libthyla-rs module on Thylacine. Validates the uplift end-to-end. | U-2a..U-2h |
+| **U-3** | Utopia workspace skeleton: `usr/utopia/{Cargo.toml,shell,libutopia,coreutils}`; libutopia palette/ansi/path modules; `ut` skeleton (version + exit); `tools/build.sh utopia` wiring; host-bake `/bin/ut`. | U-2-test |
 | **U-4** | Line editor in libutopia: raw mode + emacs keybindings + line buffer + multi-line + tab hook + Ctrl-R history hook. | U-3 |
 | **U-5** | Parser + AST. Pure logic; unit-testable on host. | U-3 |
-| **U-6** | Evaluator core + main loop: poll() main loop; built-ins (cd, exit, set, source, fn, alias, eval, type, etc.); external command spawn; pipes; redirection; `?`/try-catch; pipefail. | U-4, U-5, U-2 |
+| **U-6** | Evaluator core + main loop: poll() main loop; built-ins (cd, exit, set, source, fn, alias, eval, type, etc.); external command spawn; pipes; redirection; `?`/try-catch; pipefail. | U-4, U-5 |
 | **U-7** | fd-notes job control: Ctrl-C/Ctrl-Z handling; `&`; jobs/fg/bg; on note / mask note. | U-6 |
 | **U-8** | Thylacine builtins: bind, mount, unmount, pivot_root, rfork, cap, note. | U-6 |
 | **U-9..N** | Coreutils, one or two per chunk: cat, ls, echo, grep, sed, awk, cp, mv, rm, mkdir, find, wc. | U-3 (each is independent thereafter) |
 | **U-Helix** | Helix port via Pouch. Parallel to U-6..N. | U-3 (for the host-bake path); independent of shell impl. |
 | **U-Z** | The integration test (§18 above). Multiple full-suite passes; perf measurements; doc final pass. | All above. |
 
-Rough scale: 18-25 sessions across the arc. The first 3 chunks (U-1 scripture; U-2 libthyla-rs foundation; U-3 workspace skeleton) materialize the design and produce a runnable (if not yet useful) `ut` binary. After that the work parallelizes across multiple sub-arcs.
+Rough scale: 27-37 sessions across the arc. The libthyla-rs uplift (U-2..U-2-test) is the heaviest sub-arc — ~9-12 sessions — and is investment in the library every subsequent chunk builds on. After U-2-test, the U-3+ chunks parallelize across multiple sub-arcs.
 
 ---
 

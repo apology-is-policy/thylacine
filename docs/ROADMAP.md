@@ -669,14 +669,19 @@ pouch's lower half (the syscall seam, the socket/thread/signal translation) + th
 
 Per `docs/UTOPIA-SHELL-DESIGN.md §19`. The U-* arc:
 
-**The native runtime substrate (extends `libthyla-rs`)**:
-- `#[global_allocator]` heap (backed by `burrow_attach`) — enables `alloc` crate across Utopia.
-- High-level file I/O: `File`, `Path`, `PathBuf` wrappers around `SYS_WALK_OPEN`/`FSTAT`/`LSEEK`/`READ`/`WRITE`/`CLOSE`.
-- Poll set: ergonomic `PollSet` Rust wrapper around `SYS_POLL`.
-- Notes API: `Notes`, `Note`, `mask` guards.
-- Process spawn: `Command`, `Child` shaped like `std::process` but routing through `SYS_SPAWN_FULL_ARGV`.
-- Pipe: `pipe()` returning `(File, File)` backed by `SYS_PIPE`.
-- Terminal raw mode: `RawMode` RAII wrapper around `/dev/consctl` writes.
+**The native runtime substrate — the `libthyla-rs` uplift to the library Thylacine deserves**. Authoritative scripture: `docs/UTOPIA-SHELL-DESIGN.md §15`. The current libthyla-rs (857 lines as of `218feb0`) is materially behind Thylacine's kernel surface; the U-2..U-2-test sub-arc brings it forward as a complete, idiomatic Rust API. Modules:
+- `t::err` — `Error` enum + `Result<T>` alias (POSIX-aligned per `docs/ERRORS.md`).
+- `t::handle` — `Handle` RAII newtype + `Rights` bitflags.
+- `t::alloc` — `#[global_allocator]` backed by `burrow_attach`; enables `alloc::*`.
+- `t::fs` + `t::io` — `File`, `Path`, `PathBuf`, `OpenOptions`, `Metadata`, `ReadDir`, `Read`/`Write`/`Seek` traits.
+- `t::process` + `t::process::pipe` — `Command`, `Child`, `Stdio`, `pipe()`.
+- `t::notes` + `t::poll` — `Notes`/`Note`/`MaskGuard`, `PollSet`/`PollEvents`.
+- `t::territory` + `t::cap` — `bind`/`mount`/`pivot_root`/`rfork`, `Caps`.
+- `t::thread`, `t::torpor`, `t::time`, `t::rand`, `t::tty` — focused smaller modules.
+- `t::ninep` — 9P client (lifted from corvus).
+- `t::hardware` — `Mmio`/`Irq`/`Dma` (consolidated from virtio-* drivers).
+
+Every module is idiomatic Rust (RAII, typed errors, builders, lifetimes). Every U-3+ chunk and every future native Thylacine Rust program (Phase 8 daemons, Phase 10 Halcyon, v1.x daemons) builds on this library — lead-by-example.
 
 **The shell — `ut`**:
 - Native Rust on `libthyla-rs`. Plan 9-rc-shaped with refinements. NO Pouch, NO musl.
@@ -769,7 +774,7 @@ No new formal specs. Per the 2026-05-23 spec-to-code suspension (`CLAUDE.md`), t
 
 ### 8.7 Parallel opportunities
 
-- U-2 (libthyla-rs extensions) gates everything else; mostly sequential at the start.
+- The libthyla-rs uplift (U-2..U-2-test, ~9-12 sessions) gates everything else; within the uplift the foundation modules (err, handle, alloc) are strictly sequential but later modules (fs, process, notes/poll, territory/cap, thread/time/rand/tty, ninep/hardware) can be developed in parallel batches.
 - After U-3 (workspace skeleton) lands, U-4 (line editor) + U-5 (parser) can proceed in parallel.
 - U-Helix runs in parallel with U-6..N (independent dependency graph).
 - U-9..N coreutils are mutually independent and can be batched/parallelized.

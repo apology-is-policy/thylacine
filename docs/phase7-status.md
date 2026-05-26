@@ -19,6 +19,8 @@ The Phase 7 entry decision (taken under the U-1 scripture conversation):
 
 | Sub-chunk | What | Commit | Tests |
 |---|---|---|---|
+| U-2 hash fixup | Update U-2 row with the scripture amendment's hash. | *(pending)* | — |
+| U-2 | Scripture amendment: §15 reframed as "the libthyla-rs uplift to the library Thylacine deserves" — lead-by-example framing, complete module structure, sub-chunk decomposition (U-2a..U-2-test, ~9-12 sessions). §19 + phase7-status.md + UTOPIA.md + ROADMAP §8.1/§8.7 updated. NO code. | *(pending)* | — |
 | U-1 hash fixup | Update U-1 row with the scripture commit's hash. | *(pending)* | — |
 | U-1 | Scripture: UTOPIA.md + UTOPIA-SHELL-DESIGN.md + UTOPIA-VISUAL.md + ARCH/ROADMAP/CLAUDE updates + this doc. NO code. | `c4e57f2` | — |
 
@@ -26,10 +28,21 @@ The Phase 7 entry decision (taken under the U-1 scripture conversation):
 
 Per `docs/UTOPIA-SHELL-DESIGN.md §19`. Sequenced for dependencies.
 
+The U-2 work was reframed in U-2 scripture amendment from a single "libthyla-rs extensions" chunk into a multi-chunk **libthyla-rs uplift** — the library Thylacine deserves. ~9-12 sessions of foundation work before U-3 begins; investment paying back across every subsequent native Rust program.
+
 | Sub-chunk | Scope | Depends on |
 |---|---|---|
-| **U-2** | libthyla-rs extensions: `#[global_allocator]` heap + File I/O + Path + PollSet + Notes + Command/Child + pipe. The shared foundation. | U-1 |
-| **U-3** | Utopia workspace skeleton: `usr/utopia/{Cargo.toml,shell,libutopia,coreutils}`; libutopia palette + ansi + path modules; `ut` skeleton (version-print + exit); `tools/build.sh utopia` Rust cross-compile wiring; host-bake `/bin/ut`. | U-2 |
+| **U-2** | Scripture amendment: §15 (libthyla-rs uplift framing) + §19 update + phase7-status.md U-* arc refresh. NO code. | U-1 |
+| **U-2a** | `t::err` (Error + Result + From<i64>) + `t::handle` (Handle RAII + Rights bitflags). Foundational. | U-2 |
+| **U-2b** | `t::alloc` (`#[global_allocator]` via burrow_attach). Enables `alloc::*`. Smoke binary with Box/Vec/String. | U-2a |
+| **U-2c** | `t::fs::{Path, PathBuf, File, OpenOptions, Metadata, ReadDir}` + `t::io::{Read, Write, Seek, BufRead}`. | U-2b |
+| **U-2d** | `t::process::{Command, Child, ExitStatus, Stdio}` + `t::process::pipe()`. | U-2c |
+| **U-2e** | `t::notes::{Notes, Note, MaskGuard}` + `t::poll::{PollSet, PollEvents}`. | U-2c |
+| **U-2f** | `t::territory::{bind, mount, unmount, pivot_root, rfork}` + `t::cap::{Caps, current, drop}`. | U-2a |
+| **U-2g** | `t::thread` + `t::torpor` + `t::time` + `t::rand` + `t::tty`. | U-2c |
+| **U-2h** | `t::ninep` (lift 9P client from corvus) + `t::hardware::{Mmio, Irq, Dma}`. Migrates corvus + virtio-* callers in same commit. | U-2c, U-2d |
+| **U-2-test** | Cross-module smoke binary on Thylacine. Validates the uplift. | U-2a..U-2h |
+| **U-3** | Utopia workspace skeleton: `usr/utopia/{Cargo.toml,shell,libutopia,coreutils}`; libutopia palette + ansi + path modules; `ut` skeleton (version-print + exit); `tools/build.sh utopia` Rust cross-compile wiring; host-bake `/bin/ut`. | U-2-test |
 | **U-4** | Line editor in libutopia: raw mode + emacs keybindings + line buffer + multi-line + tab hook + Ctrl-R history hook. Hand-rolled (~1500-2500 LOC); NOT reedline. | U-3 |
 | **U-5** | Parser + AST for rc-shape syntax. Pure logic; unit-testable on host. | U-3 |
 | **U-6** | Evaluator core + main loop: poll() main loop; built-ins (cd, exit, set, source, fn, alias, eval, type, etc.); external command spawn; pipes; redirection; `?`/try-catch; pipefail. | U-4, U-5 |
@@ -40,7 +53,7 @@ Per `docs/UTOPIA-SHELL-DESIGN.md §19`. Sequenced for dependencies.
 | **U-PTY** | PTY infrastructure if not landed by then: `/dev/ptmx`, `/dev/pts/<n>`, `termios` via `/dev/consctl`. | Independent of shell impl until U-Z |
 | **U-Z** | The Utopia bring-up integration test (`docs/UTOPIA-SHELL-DESIGN.md §18`). Multiple full-suite passes; perf measurements; doc final pass. | All above |
 
-Rough scale: 18-25 sessions across the arc.
+Rough scale: 27-37 sessions across the arc. The libthyla-rs uplift (U-2..U-2-test) is the heaviest sub-arc — ~9-12 sessions — and is investment in the library every subsequent chunk builds on.
 
 ## Exit criteria status
 
