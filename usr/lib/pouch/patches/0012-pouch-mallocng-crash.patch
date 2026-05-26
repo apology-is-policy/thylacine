@@ -1,0 +1,86 @@
+Phase 6 hardening (item #3b of the 4-item memory-model hardening plan).
+Overrides mallocng's internal `assert` macro to call _Exit(127) directly
+instead of routing through a_crash() (a deliberate NULL deref musl uses
+as a last-resort terminator).
+
+Why the override: at Thylacine v1.0, FAULT_UNHANDLED_USER (an EL0 fault
+with no VMA covering the faulting address) extincts the kernel rather
+than terminating the offending Proc. a_crash()'s deliberate NULL deref
+in mallocng's hot path -- alloc_slot::enframe::assert(!p[-4]),
+get_nominal_size::assert(!end[-5]), and ~10 others throughout the
+allocator -- becomes "kill the entire kernel" instead of "kill the
+misbehaving program". Without this patch, every mallocng heap-
+corruption detection fires as boot extinction with no diagnostic
+context.
+
+This patch parallels 0011-pouch-abort.patch (which did the same swap
+for upstream's abort(), since mallocng's own assert macro is distinct
+from libc's assert/abort path and was untouched by 0011). Together
+the two patches close the userspace-fault-to-kernel-extinction
+pathway from both mallocng-internal asserts AND abort()/libc-assert
+paths.
+
+Behavioral delta from upstream:
+  - No a_crash() NULL deref. The deliberate fault becomes _Exit(127),
+    matching upstream abort()'s normal-termination fallback (past the
+    unreachable a_crash) and 0011-pouch-abort.patch's behavior.
+  - Parents observe WIFEXITED + WEXITSTATUS == 127 (same as 0011).
+  - mallocng assertion failures still produce no diagnostic output --
+    the assert macro is content-free; only the location in the code
+    indicates which invariant failed. This patch is paired with the
+    POUCH_MALLOCNG_DIAG-gated diagnostic in meta.h (item #3c) that
+    adds an opt-in dump-before-crash for the enframe assertion.
+
+Why this is in scope NOW (not deferred):
+  The 16b-gamma-mount-bind H1 investigation established that the
+  AEGIS-256 / mallocng heap-corruption bug is content-sensitive --
+  it fires with some pool.img contents and not others. When it
+  DOES fire, the user-mode behavior is mallocng's assert -> a_crash
+  -> kernel extinction with no information. Even without a fix for
+  the underlying corruption, this patch ensures the next recurrence
+  produces a clean rc=127 exit that joey can reap, instead of
+  taking down the whole boot.
+
+MULTI-THREAD HAZARD (same as 0011-pouch-abort.patch)
+
+_Exit(127) routes through __NR_exit_group -> kernel SYS_EXITS,
+which extincts the kernel if the calling Proc has live peer
+threads (per kernel/proc.c::exits "caller must join all spawned
+threads" check). The same v1.x lift documented in
+0011-pouch-abort.patch -- a new SYS_EXIT_GROUP that cascades
+peer-thread termination -- closes this for both patches uniformly.
+
+Safe-use envelope until SYS_EXIT_GROUP lands: a mallocng assertion
+must be reachable only from single-thread context OR from a
+thread that has joined every peer. Today's checkpoint satisfies
+this for stratumd (mount path runs single-thread).
+
+--- a/src/malloc/mallocng/glue.h
++++ b/src/malloc/mallocng/glue.h
+@@ -1,6 +1,7 @@
+ #ifndef MALLOC_GLUE_H
+ #define MALLOC_GLUE_H
+
++#include <stdlib.h>
+ #include <stdint.h>
+ #include <sys/mman.h>
+ #include <pthread.h>
+@@ -29,7 +30,16 @@
+ #if USE_REAL_ASSERT
+ #include <assert.h>
+ #else
+ #undef assert
+-#define assert(x) do { if (!(x)) a_crash(); } while(0)
++/* Pouch override (Thylacine P6 hardening #3b): mallocng's hot-path
++ * assert macro was a_crash() = deliberate NULL deref. Under
++ * Thylacine v1.0 FAULT_UNHANDLED_USER policy, the NULL deref
++ * extincts the kernel instead of terminating only the offending
++ * Proc. Swap to _Exit(127) so a mallocng heap-corruption assertion
++ * cleanly terminates the Proc (joey reaps with rc=127) without
++ * taking the boot down. Parallels 0011-pouch-abort.patch (which
++ * did the same swap for upstream abort()). See docs/reference/
++ * 86-pouch-stratumd-boot.md "hardening #3b". */
++#define assert(x) do { if (!(x)) _Exit(127); } while(0)
+ #endif
+
+ #define brk(p) ((uintptr_t)__syscall(SYS_brk, p))

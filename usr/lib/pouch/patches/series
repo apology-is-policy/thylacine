@@ -25,3 +25,4 @@
 0009-pouch-openat.patch
 0010-pouch-fstat-lseek.patch
 0011-pouch-abort.patch
+0012-pouch-mallocng-crash.patch
