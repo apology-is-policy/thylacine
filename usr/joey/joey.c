@@ -1368,14 +1368,18 @@ int main(void) {
         // mount-close). This probe stays NON-FATAL until that lands.
         static const char srv_name[] = "stratum-fs";
         long sd_srv_fd = -1;
-        // 16c: populated pool.img (host-bake sentinel) adds non-trivial
-        // weight to stratumd's mount path vs. an empty mkfs'd pool.
-        // Observed in testing: bind typically completes at retry 170-230,
-        // but pool-content variation (different RNG seeds produce
-        // different btree layouts) can push it past 12000 on the slow
-        // side. 30000 gives ~30s headroom; the worst-cases observed
-        // bind well before then.
-        for (int i = 0; i < 30000; i++) {
+        // 16c: between retries joey sleeps on torpor with a 1 ms timeout
+        // (a never-woken local-stack u32 + expected-value 0). This
+        // (a) yields the vCPU back to the scheduler so stratumd's worker
+        // threads make progress instead of fighting joey's busy-spin under
+        // QEMU TCG emulation; (b) gives a real, kernel-timed pacing that
+        // is consistent across hosts. Pre-fix joey ran a 1 M-nop volatile
+        // loop per retry which clocked ~30 ms wall under TCG (so 170
+        // retries -> ~5.1 s wall, while real work would be sub-second).
+        // 3000 retries * 1 ms = ~3 s outer bound; typical bind observed
+        // well under retry 500 with the yielding pattern.
+        unsigned int sleep_word = 0;
+        for (int i = 0; i < 3000; i++) {
             sd_srv_fd = t_srv_connect(srv_name, sizeof(srv_name) - 1, 0, 0);
             if (sd_srv_fd >= 0) {
                 t_putstr("joey: stratumd-boot /srv/stratum-fs bound after retry ");
@@ -1400,7 +1404,7 @@ int main(void) {
                 if (n <= 0) break;
                 (void)t_puts((const char *)rd_buf, (size_t)n);
             }
-            for (volatile long j = 0; j < 1000000L; j++) { /* nop */ }
+            (void)t_torpor_wait(&sleep_word, 0, 1000); // sleep 1 ms (timeout)
         }
 
         if (sd_srv_fd < 0) {

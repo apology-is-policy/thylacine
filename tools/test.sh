@@ -44,7 +44,20 @@ esac
 KERNEL_ELF="$KERNEL_BUILD/thylacine.elf"
 LOG_FILE="$BUILD_DIR/test-boot.log"
 
-BOOT_TIMEOUT="${BOOT_TIMEOUT:-15}"          # seconds
+BOOT_TIMEOUT="${BOOT_TIMEOUT:-45}"          # seconds -- wallclock max,
+                                            # not a fixed wait. test.sh
+                                            # exits early on banner or
+                                            # extinction (polls log every
+                                            # 0.1 s). Default 45 s gives
+                                            # ~2x headroom over the
+                                            # observed 13-24 s end-to-end
+                                            # boot post-16c spin-elimination
+                                            # (variance dominated by pool
+                                            # RNG-seed differences in
+                                            # AEGIS-256 soft-decrypt cost).
+                                            # UBSan needs ~120-300 s; set
+                                            # BOOT_TIMEOUT=300 (or more)
+                                            # for that pipeline explicitly.
 BOOT_MARKER="Thylacine boot OK"
 EXTINCTION_MARKER="EXTINCTION:"             # per TOOLING.md §10 ABI
 
