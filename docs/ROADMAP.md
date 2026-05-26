@@ -657,125 +657,139 @@ pouch's lower half (the syscall seam, the socket/thread/signal translation) + th
 
 ---
 
-## 8. Phase 5: Syscall surface + musl + Utopia
+## 8. Phase 7: Utopia (textual milestone)
 
-**Goal**: a complete textual POSIX environment. The Utopia milestone (`VISION.md §13`) — a developer using Thylacine via SSH or UART finds a working textual POSIX environment that "feels real, not broken." Halcyon is **not** required to ship at this phase or even at the next two; Halcyon is deliberately the final phase of v1.0 (Phase 8). Phase 5's exit is Utopia. Phase 6 adds Linux compat + network on top. Phase 7 hardens + audits the result and produces a v1.0-rc. Phase 8 lands Halcyon on top of the hardened substrate. The "practical working OS" the project commits to is achieved at Phase 7 exit; Halcyon is the additive graphical layer.
+**Execution Phase 7.** Section numbered §8 in ROADMAP per pre-Pouch convention; the project-execution registry per `§2.1` is authoritative. Pouch (execution Phase 6, ROADMAP §7A) closed `218feb0` and delivered the musl port + cross-compilation that this phase originally bundled — those deliverables are now Pouch's, NOT Phase 7's.
+
+**Binding designs**: `docs/UTOPIA.md` (the experience), `docs/UTOPIA-SHELL-DESIGN.md` (the shell + coreutils design), `docs/UTOPIA-VISUAL.md` (Pale Fire palette + glyph + prompt). All three landed under U-1 (the scripture commit). This section is the ROADMAP-level summary; the binding designs are authoritative for scope, architecture, and sub-chunk detail.
+
+**Goal**: a complete textual environment. The Utopia milestone (`VISION.md §13`) — a developer using Thylacine via UART or SSH finds a working textual environment that "feels real, not broken." Halcyon (graphical layer; Phase 10 execution / ROADMAP §11) is **not** required at this phase; Halcyon is deliberately the final phase of v1.0. Phase 7's exit is Utopia. Phase 8 (execution; ROADMAP §9) adds Linux compat + network on top. Phase 9 (execution; ROADMAP §10) hardens + audits + produces v1.0-rc. Phase 10 (execution; ROADMAP §11) lands Halcyon. The "practical working OS" the project commits to is achieved at Phase 9 exit; Halcyon is the additive graphical layer.
 
 ### 8.1 Deliverables
 
-**Complete syscall table**:
-- `kernel/syscall.c`: every syscall in `ARCHITECTURE.md §11.2` and `§11.3`. `errstr` exposed.
-- `kernel/syscall-linux-shim.c`: top-50 Linux ARM64 syscall translation (per `§11.5`).
+Per `docs/UTOPIA-SHELL-DESIGN.md §19`. The U-* arc:
 
-**Multiplexed I/O**:
-- `kernel/poll.c`: `poll(fds, nfds, timeout)`. Wait list across N fds; first ready wakes thread. For 9P-backed fds, server signals readiness via 9P session notification; for kernel fds, readiness tracked in Spoor structures.
-- `select()` implemented atop `poll()`.
+**The native runtime substrate (extends `libthyla-rs`)**:
+- `#[global_allocator]` heap (backed by `burrow_attach`) — enables `alloc` crate across Utopia.
+- High-level file I/O: `File`, `Path`, `PathBuf` wrappers around `SYS_WALK_OPEN`/`FSTAT`/`LSEEK`/`READ`/`WRITE`/`CLOSE`.
+- Poll set: ergonomic `PollSet` Rust wrapper around `SYS_POLL`.
+- Notes API: `Notes`, `Note`, `mask` guards.
+- Process spawn: `Command`, `Child` shaped like `std::process` but routing through `SYS_SPAWN_FULL_ARGV`.
+- Pipe: `pipe()` returning `(File, File)` backed by `SYS_PIPE`.
+- Terminal raw mode: `RawMode` RAII wrapper around `/dev/consctl` writes.
 
-**Threading primitives**:
-- `kernel/futex.c`: hash table keyed by physical address; per-bucket wait queue. `FUTEX_WAIT`, `FUTEX_WAKE`, `FUTEX_WAIT_BITSET`, `FUTEX_WAKE_BITSET`, `FUTEX_REQUEUE`, `FUTEX_CMP_REQUEUE`.
-- `kernel/notes.c` (extend): full POSIX signal translation per `ARCHITECTURE.md §16.4`.
+**The shell — `ut`**:
+- Native Rust on `libthyla-rs`. Plan 9-rc-shaped with refinements. NO Pouch, NO musl.
+- Twelve resolved design axes: plain text streams; rc-shaped + refinements; implicit-fail + try/catch + `?` + pipefail; rc + double-quote interpolation + `$(cmd)`; `case`/match-block + word operators; modern-middle builtins + Thylacine extensions (bind/mount/cap/note); fd-notes + poll() main loop + `on note`/`mask note`; `fn prompt` + hand-rolled line editor + emacs default; flat-file history; binary name `ut`; workspace under `usr/utopia/` (Helix vendored separately); native libthyla-rs runtime.
 
-**PTY infrastructure**:
-- Userspace 9P server `pty-server` exposing `/dev/ptmx` + `/dev/pts/<n>`.
-- `dev/cons.c` (extend): `termios` via writes to `/dev/consctl` per `ARCHITECTURE.md §23.5`.
+**The line editor — `libutopia::line_editor`**:
+- Hand-rolled (~1500-2500 LOC). Raw-mode + emacs keybindings + multi-line + history + tab completion + Ctrl-R fuzzy search.
+- NOT reedline (reedline assumes std and Pouch; we're native).
 
-**musl port**:
-- musl libc's `arch/aarch64/` adapted to emit Thylacine syscalls.
-- pthread maps to `rfork(RFPROC | RFMEM | RFFDG | RFNAMEG | RFCRED | RFNOTEG)`.
-- TLS via `TPIDR_EL0`.
-- Dynamic linker (`ld-thylacine.so` — musl's ld.so, relinked).
-- musl builds clean for Thylacine.
+**The shared library — `libutopia`**:
+- `palette` (Pale Fire constants + role-aware ANSI helpers).
+- `ansi` (escape emission, prompt-length tracking).
+- `line_editor`, `notes`, `ninep`, `tty`, `prompt`, `path`, `errors` modules.
 
-**Userland — Utopia**:
-- **Tier 1 — Plan 9 userland**: ports of `rc`, `mk`, `awk`, `troff`, `tbl`, `eqn`, `9` launcher (from 9base / plan9port adapted for musl).
-- **Tier 2 — uutils-coreutils**: complete coreutils suite (the Rust rewrite of GNU coreutils, full flag coverage). All commands in `ARCHITECTURE.md §23.2`.
-- **Tier 3 — BusyBox in initramfs**: single-binary recovery shell.
-- `bash` port: bash compiled against musl.
-- `/etc/{passwd,group,hostname,resolv.conf,localtime,profile}` as Stratum files.
+**The coreutils** (native Rust on libthyla-rs):
+- Initial set sized to pass the Utopia bring-up integration test: `cat`, `ls`, `echo`, `grep`, `sed`, `awk`, `cp`, `mv`, `rm`, `mkdir`, `find`, `wc`, plus the shell-builtin tier.
+- 9base-shaped feature scope; uutils-coreutils-shaped Linux flag compatibility where helpful.
+- One Rust crate per command under `usr/utopia/coreutils/`.
 
-**POSIX-compat 9P servers**:
-- `proc-linux/`: synthetic 9P server providing Linux-compat `/proc/<pid>/{status,cmdline,fd,maps,stat,statm,cwd,exe,root}` etc.
-- (Native `/proc/` is in-kernel via `dev/proc.c`; Linux-compat layer adds Linux-specific names.)
+**The default editor — `hx` (Helix)**:
+- Ported via Pouch (NOT native libthyla-rs; Helix is full-std Rust + tokio + ratatui + tree-sitter; impractical to no_std-port).
+- Vendored at `usr/helix/`.
+- Pale Fire theme bundled.
 
-**Specs**:
-- `specs/poll.tla`: wait/wake state machine, missed-wakeup-freedom across N fds.
-- `specs/futex.tla`: FUTEX_WAIT / FUTEX_WAKE atomicity.
-- `specs/notes.tla`: note delivery ordering, signal mask correctness, async safety.
-- `specs/pty.tla`: master/slave atomicity, termios state transitions.
+**The kernel-side prerequisites** (most already delivered; remaining ones land in U-* chunks as needed):
+- `SYS_POLL` (existing).
+- Notes substrate (existing).
+- `/proc` synthetic Dev (existing in kernel; minor extensions for ps/jobs).
+- PTY infrastructure — `/dev/ptmx` + `/dev/pts/<n>` (Phase 7 work; deliverable here for the editor-via-PTY path).
+- `/dev/consctl` termios writes (existing or near-existing).
+
+**The Pale Fire visual identity**:
+- Binding scripture in `docs/UTOPIA-VISUAL.md`.
+- Implemented in `libutopia::palette` + the `palette` shell builtin.
+- Discipline applies to Utopia's own programs; third-party tools colour freely.
+- Terminal-config files shipped at `share/terminal-configs/` (Ghostty / Kitty / Alacritty / etc.).
 
 ### 8.2 Exit criteria — Utopia ships
 
-The exit criteria are the Utopia bring-up integration test (per `ARCHITECTURE.md §23.9`):
+Authoritative: `docs/UTOPIA-SHELL-DESIGN.md §18`. Summary:
 
-- [ ] musl builds clean for Thylacine.
-- [ ] uutils-coreutils all commands work with full Linux-compatible flags.
-- [ ] **Compile and run a "hello world"** in C with `gcc` or `clang`; output reaches stdout.
-- [ ] **Multi-stage shell pipeline**: `cat /etc/passwd | grep root | cut -d: -f1` produces correct output.
-- [ ] **Job control**: launch `sleep 100`, `Ctrl-Z` to stop, `bg`, `fg` work; `Ctrl-C` interrupts.
-- [ ] **`tmux` session**: create, split panes, run different commands per pane, attach/detach.
-- [ ] **`vim`**: open a file, edit, save; syntax highlighting works.
-- [ ] **`top` / `htop`**: shows correct stats, updates in real time.
-- [ ] **`git clone https://...`** works (curl as fetcher; SSL via Stratum or system bundle).
-- [ ] **`ssh` to a localhost service** works (PTY allocation).
-- [ ] **`ps -ef | grep stratum`** shows the daemon running.
-- [ ] **No kernel panics** during a 1-hour test session.
-- [ ] **No driver crashes** during the same.
-- [ ] Linux static ARM64 binary runs via the syscall shim (e.g., `echo hello` from Alpine Linux ARM64 container).
-- [ ] `specs/poll.tla`, `specs/futex.tla`, `specs/notes.tla`, `specs/pty.tla` all clean under TLC.
-- [ ] No P0/P1 audit findings.
+- [ ] Boot a fresh Thylacine VM; reach the Pale Fire `ut` prompt via UART.
+- [ ] Multi-stage shell pipeline: `cat /etc/passwd | grep root | cut -d: -f1` produces correct output.
+- [ ] Job control via fd-notes: `sleep 100 &` appears in `jobs`; Ctrl-Z + `fg` resume; Ctrl-C terminates.
+- [ ] Error model: function with `cmd1?; cmd2?; cmd3?` short-circuits on `cmd2` failure.
+- [ ] Namespace builtin: `bind /srv/stratum-ctl /n/stratum`; `ls /n/stratum` shows the Stratum admin surface.
+- [ ] Notes builtin: `note send $$ snare:user1` triggers a registered `on note` handler.
+- [ ] `hx /etc/hosts` opens Helix; edit + save observable.
+- [ ] rc-shape scripting: `for (f in *.md) { wc -l $f }` runs.
+- [ ] Pale Fire prompt renders with the canonical three-segment colour scheme.
+- [ ] No kernel extinctions, no driver crashes, no zombie processes.
+- [ ] No P0/P1 audit findings on the Utopia surface (the shell + line editor + libthyla-rs extensions + native coreutils).
+
+Linux-compat (curl/git/ssh) and network-stack tests are NOT in Phase 7 exit; they land in Phase 8 (ROADMAP §9).
 
 ### 8.3 Specs landing this phase
 
-- `specs/poll.tla` (mandatory).
-- `specs/futex.tla` (mandatory).
-- `specs/notes.tla` (mandatory).
-- `specs/pty.tla` (mandatory).
+No new formal specs. Per the 2026-05-23 spec-to-code suspension (`CLAUDE.md`), the U-1 design is validated by prose reasoning + adversarial audit + runtime test suite. The originally-gated `specs/poll.tla` / `specs/futex.tla` / `specs/notes.tla` / `specs/pty.tla` are deferred — `poll` + `futex` (`torpor`) + `notes` shipped under Pouch (Phase 6) without spec modules; PTY follows the same pattern under U-* chunks.
 
 ### 8.4 Audit-trigger surfaces introduced or modified
 
 | Surface | Files | Why |
 |---|---|---|
-| Syscall surface | `kernel/syscall.c`, `kernel/syscall-linux-shim.c` | Privilege correctness |
-| poll/select | `kernel/poll.c` | Wait/wake state machine |
-| futex | `kernel/futex.c` | Wait/wake atomicity, hash collision |
-| Notes / signals | `kernel/notes.c`, `compat/signals.c` | Delivery ordering, async safety |
-| PTY | `pty-server/` (userspace), `dev/cons.c` (kernel) | termios state correctness |
-| Linux syscall shim | `kernel/syscall-linux-shim.c` | Syscall number translation correctness |
+| libthyla-rs extensions | `usr/lib/libthyla-rs/src/lib.rs` + new modules | New userspace runtime surface — file I/O wrappers, allocator, poll set, notes API, process spawn |
+| ut shell parser + evaluator | `usr/utopia/shell/src/*` | Quoting, expansion, command lookup, builtin dispatch — input-parsing correctness on user input |
+| ut fd-notes job control | `usr/utopia/shell/src/jobs.rs` (approx) | Note delivery + poll loop interaction — race-condition surface |
+| Thylacine-extension builtins | `usr/utopia/shell/src/builtins/{bind,mount,cap,note,rfork,pivot_root}.rs` | Privilege-affecting builtins; capability + namespace semantics must be correct |
+| libutopia line editor | `usr/utopia/libutopia/src/line_editor.rs` | Raw mode + termios state; signal-clean exit on Ctrl-C; cursor-accounting correctness for ANSI escapes |
+| PTY server | `usr/pty-server/` (Phase 7 deliverable) | termios state correctness; master/slave atomicity |
+| Helix port | `usr/helix/` + pouch-patch growth | Ported foreign code via Pouch; same audit shape as stratumd (boundary-line patches) |
 
 ### 8.5 Risks
 
-- **musl port effort**: musl is designed for portability but has not been ported to Thylacine. The syscall interface is close enough to Plan 9 + POSIX that the port is tractable but non-trivial. Estimate: 2-4 weeks of focused work. Mitigation: Plan 9's libc as reference; musl's portability docs.
-- **uutils-coreutils maturity**: uutils is reaching parity with GNU coreutils (Apr 2025 status: ~95% coverage); some commands may have functional gaps. Mitigation: test against the Linux Test Project's coreutils tests; fall back to GNU coreutils for any command with regressions.
-- **Job control**: `tcsetpgrp` and process-group management are notoriously fiddly. Mitigation: spec'd; test against `bash` + `tmux` + `vim` as the integration test set.
-- **futex hash performance**: hash collisions can degrade futex performance. Mitigation: large hash table; collision chains tracked; benchmark under contention.
-- **`/proc-linux` coverage**: programs vary in what `/proc/` paths they read. Mitigation: implement what's needed for the integration test; expand as needed.
-- **Utopia subjectivity**: "feels real, not broken" is a judgment call. Mitigation: the integration test is concrete; "feels real" is the test passing.
+- **The line editor is hand-rolled.** Reedline parity is not free — ~2000 LOC of state-machine code that has to be right. Mitigation: scoped to v1 essentials; iterate in v1.x; tested in U-Z integration.
+- **Helix port has dependency-graph surface.** Helix vendors ~150 Rust crates and tree-sitter grammars. Each may surface a new pouch-patch need. Mitigation: bound to Helix's audited crate set; pouch-patch growth audited per-extension.
+- **PTY infrastructure is new.** termios + master/slave atomicity has historically been an audit surface. Mitigation: the PTY chunk gets its own audit round.
+- **Native libthyla-rs is unfamiliar surface for new contributors.** Most Rust devs reach for std reflexively. Mitigation: U-1 scripture makes the decision rule explicit; code-review enforces.
+- **"Feels real, not broken" is a judgment call.** Mitigation: the integration test is concrete (the 11 headline checks of `docs/UTOPIA-SHELL-DESIGN.md §18`); "feels real" is the test passing.
 
 ### 8.6 Dependencies
 
-- Phase 4 (Stratum mount; 9P client; per-process 9P connections).
-- Phase 3 (Userspace drivers; framebuffer is fully exercised at Phase 8 with Halcyon, but the userspace virtio-gpu driver itself is Phase 3).
-- Phase 2 (handles, scheduler, territory, processes).
+- **Inbound (already landed)**:
+  - Phase 5 (ROADMAP §7): 9P client + Stratum 9P integration.
+  - Phase 5 corvus: precedent for native libthyla-rs Rust daemon.
+  - Phase 6 (Pouch; ROADMAP §7A): the cross-compilation environment for Helix.
+  - Phase 4 / 3 / 2 / 1 (kernel, scheduler, handles, drivers): all foundational.
+- **Outbound**:
+  - Phase 8 (Linux compat + network; ROADMAP §9): extends the Utopia surface; bash port; container runner.
+  - Phase 9 (hardening + v1.0-rc; ROADMAP §10): audits the Utopia surface end-to-end.
 
 ### 8.7 Parallel opportunities
 
-- musl port + uutils-coreutils + bash port can proceed in parallel.
-- POSIX syscall implementations + Linux shim parallelize.
-- Plan 9 userland ports (`rc`, `mk`, `awk`, etc.) parallelize among themselves.
-- Specs can be written before, during, alongside.
+- U-2 (libthyla-rs extensions) gates everything else; mostly sequential at the start.
+- After U-3 (workspace skeleton) lands, U-4 (line editor) + U-5 (parser) can proceed in parallel.
+- U-Helix runs in parallel with U-6..N (independent dependency graph).
+- U-9..N coreutils are mutually independent and can be batched/parallelized.
 
 ### 8.8 Performance budget contribution
 
-- Syscall p99 (no contention): < 1µs (per VISION §4.5).
+- Syscall p99 (no contention): < 1µs (per `VISION.md §4.5`).
 - Process creation p99: < 1ms.
 - Pipe round-trip: < 5µs.
-- futex wakeup: < 5µs.
-- Halcyon dependency: nothing yet (Halcyon is Phase 8 — the final v1.0 phase).
+- Shell startup (`ut -c 'echo hi'`): < 50ms.
+- Prompt redraw latency: < 16ms (one display frame at 60Hz on a typical terminal).
+- Halcyon dependency: nothing yet (Halcyon is Phase 10 — the final v1.0 phase).
 
 ### 8.9 Carry-overs
 
-- Stratum extensions test coverage: any Stratum extension that emerged late in Phase 8 (the 9P server) gets tested in Phase 4 and re-tested here at Phase 5 with full POSIX integration.
-- Recovery boot: BusyBox + Stratum-fsck path verified at Phase 5 entry.
+- Linux-compat shell flags + bash port: deferred to Phase 8 (ROADMAP §9). Bash via Pouch becomes Linux-compat's deliverable.
+- uutils-coreutils for full GNU-flag-coverage: deferred to Phase 8. Native Rust coreutils ship 9base-shape at v1; uutils brings GNU-coverage where users need it.
+- Stratum-native history (cross-host sync, structured query): deferred to v1.x. Flat-file history ships at v1.
+- Sixel / Kitty graphics emission from Thylacine programs: deferred to v1.x.
+- Syntax highlighting at the prompt: deferred to v1.x.
 
 ---
 

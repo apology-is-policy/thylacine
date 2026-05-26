@@ -129,7 +129,9 @@ The full enumerated invariant list (I-1 through I-N) lives in §28 with file-lev
 | Userspace drivers | **Rust** | Drivers handle hardware DMA descriptors, parse 9P, manage BURROW ref-counts — exactly the domains where Rust's borrow checker eliminates classes of bugs. |
 | Halcyon | **Rust** | Parses bash-subset syntax, decodes images, renders fonts, manages a stateful UI — historically high CVE density in C; Rust eliminates UAF + buffer overflow at compile time. |
 | Userspace services (network stack, video player, etc.) | **Rust** | Same rationale as drivers. |
+| Utopia native programs (`ut` shell, coreutils, `libutopia`) | **Rust on `libthyla-rs`** (no_std, no Pouch) | Authored within the project; speaks Thylacine syscalls directly. The native side of the Plan 9 split (§3.5). |
 | POSIX-compat synthetic FS | **C99** | Small servers wrapping existing C libraries (libfuse-9p, etc.); Rust would add crate-build complexity for little gain. Rewrite candidates for v2.0. |
+| Ported foreign programs (Helix, stratumd, libsodium, future ssh/git/python) | **C or Rust on Pouch** | Adapted to Thylacine via pouch's boundary-line patches. The ported side of the Plan 9 split (§3.5). |
 | musl libc port | **C99** | musl is C; we adapt its arch layer, not rewrite. |
 | Compat syscall shim | **C99** | Lives in the kernel; matches kernel toolchain. |
 | TUI tooling, build helpers | **Rust** | Already established by Stratum's TUI (Ratatui). |
@@ -151,6 +153,24 @@ This discipline is enforced by the audit rounds; deviations get flagged.
 **No C++ anywhere.** No exceptions, no vtables, no hidden allocations. C++'s ABI fragility is incompatible with the kernel/userspace boundary.
 
 **Kernel uses Clang** (not GCC) for: CFI support (`-fsanitize=cfi`), better ARMv8.5 support (BTI, MTE), better static analysis. Clang version pinned per release; `clangd` for development tooling.
+
+### 3.5 The Plan 9 split: native vs ported userspace
+
+**STATUS**: COMMITTED — scripture under U-1 (the Utopia scripture commit).
+
+Every Thylacine userspace program is in one of two camps; the boundary determines the runtime substrate it builds against.
+
+**Native code** — programs authored within Thylacine — builds against `libthyla-rs` (the existing no_std Rust crate at `usr/lib/libthyla-rs/`). Uses Thylacine syscalls directly. Speaks Thylacine concepts natively (Spoor, KObj_*, notes, capabilities, Territories). No musl. No POSIX shim. No Pouch boundary-line patches.
+
+Native programs include: `ut` (the shell), `libutopia` (the shared Rust library), the coreutils (cat / ls / echo / grep / sed / awk / etc.), corvus, the userspace virtio-* drivers, hello-rs / mmio-probe / irq-probe / virtio-blk-* / virtio-net-* / virtio-input / virtio-gpu, and future Thylacine-shaped daemons and tools the project itself authors.
+
+**Ported code** — foreign code adapted to Thylacine — builds via Pouch (the cross-compilation environment from execution Phase 6; binding design `docs/POUCH-DESIGN.md`). Uses musl + the `usr/lib/pouch/patches/*` boundary-line patches that bridge musl syscalls to Thylacine syscalls and adapt POSIX semantics (notes-as-signals, SrvConn-as-AF_UNIX, etc.).
+
+Ported programs include: stratumd, libsodium, the pouch-hello-* probing binaries, **Helix** (the default `$EDITOR`, ported via Pouch under U-Helix), and future ports of foreign programs (ssh, git, python, etc.).
+
+**The decision rule.** When a new program is added: ask whether the program is **authored within Thylacine** (native libthyla-rs, no Pouch) or **ported from elsewhere** (Pouch). Code review enforces; `tools/build.sh` has separate build paths for the two camps. The rationale mirrors Plan 9's `libc.h` (native) / APE (POSIX-compat ported) split: native programs benefit from being Thylacine-shaped — smaller binaries, faster startup, no impedance mismatch, fewer patches to maintain — while ported programs get POSIX-shape via the pouch boundary-line, which is the right place to do the translation work once per surface rather than at every program's syscall site.
+
+Full scripture: `docs/UTOPIA-SHELL-DESIGN.md §3`.
 
 ---
 
@@ -2640,7 +2660,7 @@ DTB-driven hardware discovery; platform layers under `arch/arm64/<platform>/`; f
 
 **STATUS**: COMMITTED
 
-> **Phase 6 (Pouch) + Phase 7 (Utopia) realize this section.** `POUCH-DESIGN.md` is the binding design for the pouch POSIX environment; its §6.6 refines §23.1's "POSIX surfaces are 9P servers" principle into the synthetic-filesystem-as-translation model (the synthetic FS *is* the translation layer). The Utopia userland milestone — the rich `/proc` + `/dev/pts` namespace, coreutils, bash, rc — is the renamed execution **Phase 7**, built on pouch. The phase-number references in this section predate the Phase-6 insertion; per `ROADMAP.md §2.1` the execution-phase registry there is authoritative.
+> **Phase 6 (Pouch) + Phase 7 (Utopia) realize this section.** `POUCH-DESIGN.md` is the binding design for the pouch POSIX environment; its §6.6 refines §23.1's "POSIX surfaces are 9P servers" principle into the synthetic-filesystem-as-translation model (the synthetic FS *is* the translation layer). The Utopia userland milestone is execution **Phase 7**; **`docs/UTOPIA.md`** + **`docs/UTOPIA-SHELL-DESIGN.md`** + **`docs/UTOPIA-VISUAL.md`** are the binding designs for the textual layer (the `ut` shell, the native Rust coreutils, the `hx` editor port, the Pale Fire visual identity). The shell + coreutils enumeration below predates the U-1 scripture commit; per `docs/UTOPIA-SHELL-DESIGN.md` the native libthyla-rs runtime + the `ut` shell supersede the original "rc + bash + uutils" deliverable. The kernel-side POSIX surface enumerations in §23.2–§23.7 (`/proc`, `/dev`, `/etc`, `poll`, `pty`, signals, threading, futex) remain binding. The phase-number references in this section predate the Phase-6 insertion; per `ROADMAP.md §2.1` the execution-phase registry there is authoritative.
 
 ### 23.1 Design principle: POSIX surfaces are 9P servers
 
@@ -2648,32 +2668,29 @@ Every POSIX surface in Thylacine is a 9P server that speaks a POSIX-shaped inter
 
 This is the Plan 9 principle applied consistently: if it can be a file, it is a file. If it can be a 9P server, it is a 9P server.
 
-### 23.2 Utopia minimum viable POSIX (Phase 5 entry requirement)
+### 23.2 Utopia minimum viable POSIX (Phase 7 entry requirement)
 
 Per `VISION.md §13`. The set of surfaces that must exist for Utopia to feel real rather than broken.
 
-**Shells**:
-- `rc` — Plan 9 native, scriptable.
-- `bash` — POSIX compat.
-- Both require: `rfork`/`exec`/`wait`, `pipe`/`dup3`, file redirection, note→signal translation for Ctrl-C, `$PATH`-equivalent via union directories, job control (`SIGTSTP`, `SIGCONT`).
-- Job control is required at Phase 5; feels broken without it.
+**Shell**:
+- `ut` — Thylacine's native Rust shell. Plan 9-rc-shaped with refinements (fd-notes job control, `?`+try/catch error model, double-quote interpolation, `case` block, Thylacine-extension builtins like `bind`/`mount`/`cap`/`note`). Built on `libthyla-rs`, no Pouch. Binding design: `docs/UTOPIA-SHELL-DESIGN.md`.
+- The shell consumes: `rfork`/`exec`/`wait`, `pipe`/`dup3`, file redirection, note delivery for Ctrl-C, `$path`-equivalent search, job control via fd-notes + poll().
+- Bash via Pouch is deferred — not part of Phase 7 Utopia v1. Users who need bash install it themselves via the Pouch path before Phase 8 (Linux compat) lands it as a ROADMAP §9 deliverable.
 
-**Coreutils** — uutils-coreutils (default; Rust rewrite of GNU coreutils, complete flag coverage):
+**Coreutils** — native Rust on libthyla-rs, sub-chunked under U-9..N (binding design: `docs/UTOPIA-SHELL-DESIGN.md §19`). 9base-shaped feature scope, uutils-coreutils-shaped Linux flag compatibility where helpful without bloating. Initial set sized to pass the Utopia bring-up integration test (`docs/UTOPIA-SHELL-DESIGN.md §18`):
+
 ```
-ls, cat, echo, cp, mv, rm, mkdir, rmdir, chmod, chown, chgrp, ln, touch
-stat, du, df, tee, dd, seq, yes, true, false, test, [, expr, printf
-printenv, env, pwd, which, whoami, id, groups, hostname, uname, date
-tty, tput, clear, reset, sleep, timeout, nice, nohup, time
-kill, pkill, pgrep, ps, top, htop, free, vmstat, lsof
-tar, gzip, bzip2, xz, zstd, cpio
-find, xargs, sort, uniq, wc, head, tail, cut, paste, join, split, csplit, comm
-diff, patch, cmp, md5sum, sha256sum, b3sum, od, hexdump, xxd, strings, file
-grep, sed, awk, tr, fmt, fold, pr, nl, column, expand, unexpand
-iconv, base64, base32, b2sum, realpath, readlink, dirname, basename, mktemp
-install, getopt, getopts, mountpoint, chroot, runuser, sudo (v1.0 stub)
+cat, ls, echo, cp, mv, rm, mkdir, rmdir, ln, touch, chmod
+pwd, env, printenv, sleep, true, false, test, [, printf
+find, xargs, sort, uniq, wc, head, tail, cut, grep, sed, awk
+tr, basename, dirname, realpath, readlink, mktemp
+which, type, whence (the last two via shell builtins)
+ps (depends on /proc), kill (shell builtin)
 ```
 
-Plus Plan 9 userland (Tier 1): `rc`, `mk`, `awk`, `troff`, `tbl`, `eqn`, `9` launcher.
+Plus Plan 9 userland: `mk`, `9` launcher (post-Helix arc).
+
+**Editor**: `hx` — Helix, ported via Pouch under U-Helix. Default `$EDITOR`. Modal Kakoune-style; tree-sitter; LSP. Bundled Pale Fire theme.
 
 **`/proc` synthetic 9P server**:
 ```
@@ -2808,61 +2825,67 @@ Full `/sys` is not a goal. The stub satisfies the dynamic linker and basic admin
 
 Deferred to Phase 6 (Linux binary compat phase).
 
-### 23.8 Phase 5 POSIX priority order
+### 23.8 Phase 7 Utopia priority order
 
 ```
-Must have (Utopia does not work without these — Phase 5 exit gate):
-  musl port
-  uutils-coreutils
-  rc + bash
-  poll / select
-  futex
-  /proc synthetic server (kernel + Linux-compat userspace)
+Must have (Utopia does not work without these — Phase 7 exit gate):
+  libthyla-rs heap allocator + File I/O + Path + Poll + Notes + Command/Child  (U-2)
+  ut shell skeleton + libutopia palette + tools/build.sh wiring  (U-3)
+  libutopia line editor (raw-mode, emacs keybindings, multi-line, history)  (U-4)
+  ut parser + AST (rc-shape with refinements)  (U-5)
+  ut evaluator core + main loop + builtins + pipes + redirects + error model  (U-6)
+  ut fd-notes job control (Ctrl-C, Ctrl-Z, &, jobs/fg/bg, on note, mask note)  (U-7)
+  Thylacine builtins (bind, mount, unmount, pivot_root, rfork, cap, note)  (U-8)
+  Native Rust coreutils — initial set (cat, ls, echo, grep, sed, awk, cp, mv, rm, mkdir, find, wc)  (U-9..N)
+  Helix port via Pouch  (U-Helix, parallel)
+  PTY server (/dev/ptmx, /dev/pts/) + termios via /dev/consctl
+  /proc synthetic server (in-kernel) for ps + jobs + on-note's "running" check
   /dev basics (null, zero, random, tty)
-  termios on /dev/cons
-  PTY server (/dev/ptmx, /dev/pts/)
-  Signal translation (SIGINT, SIGTERM, SIGCHLD, SIGHUP, SIGPIPE, SIGWINCH, SIGUSR1, SIGUSR2)
-  TPIDR_EL0 save/restore (TLS)
   /tmp, /run as tmpfs
   /etc minimum files on Stratum
-  Dynamic linker (musl ld.so)
-  Job control (SIGTSTP, SIGCONT, tcsetpgrp)
-  Plan 9 userland: rc, mk, awk, troff, tbl, eqn, 9 launcher
+  Pale Fire visual identity discipline
 
-Should have before Phase 8 (Halcyon):
+Should have before Phase 8 (Linux compat + network):
   PTY-related niceties (winch propagation across nested ttys)
-  More complete bash subset
-  More uutils coverage if any commands are buggy
+  Bash via Pouch (deferred to Phase 8)
+  Linux-compat /proc names where they differ from native /proc
 
-Defer to Phase 6 (Linux binary compat):
+Defer to Phase 8 (Linux binary compat + network):
   /sys stub
   setuid/setgid mechanics (deferred-not-implemented per §15.4)
   Extended attributes (xattr) at the territory level
   POSIX ACLs
+  uutils-coreutils for Linux-compat flag coverage where native ones diverge
+  Stratum-native history (cross-host sync, structured query)
 
 Defer to v1.1+:
   epoll
   inotify (most programs degrade gracefully)
   io_uring
+  Sixel and Kitty graphics emission from Thylacine programs
+  Syntax highlighting at the prompt
+  Plugin model beyond sourceable scripts
 ```
 
 ### 23.9 The Utopia bring-up integration test
 
-At Phase 5 exit, the integration test for Utopia (run in CI):
-1. Boot a fresh Thylacine VM.
-2. SSH in (or attach via UART).
-3. Run a script that exercises every major surface:
-   - Compile a "hello world" with gcc/clang.
-   - Run a multi-stage shell pipeline.
-   - Start tmux; create panes; run different commands.
-   - Open vim; edit a file; save.
-   - Run `top`; verify it shows correct stats.
-   - Run `git clone https://...`; verify SSL works (curl-as-fetcher).
-   - Use `ssh` to connect to a localhost service.
-   - `ps -ef | grep stratum` shows the daemon running.
-4. Assert no kernel panics, no driver crashes, no zombie processes.
+At Phase 7 exit, the integration test (run in CI). Authoritative spec: `docs/UTOPIA-SHELL-DESIGN.md §18`. Headline checks:
 
-If this passes, Utopia ships at Phase 5 exit.
+1. Boot a fresh Thylacine VM.
+2. Attach via UART; reach the Pale Fire `ut` prompt at `pwd == $home`.
+3. Multi-stage shell pipeline: `cat /etc/passwd | grep root | cut -d: -f1` produces correct output.
+4. Job control: `sleep 100 &` shows in `jobs`; Ctrl-Z foregrounds; `fg` resumes; Ctrl-C terminates.
+5. Function with `?` propagation: `cmd1?; cmd2?; cmd3?` short-circuits on `cmd2` failure without running `cmd3`.
+6. Namespace builtin: `bind /srv/stratum-ctl /n/stratum; ls /n/stratum` shows the Stratum admin surface.
+7. Notes via builtin: `note send $$ snare:user1` triggers a registered `on note 'snare:user1' { ... }` handler.
+8. `hx /etc/hosts` opens Helix; edit + save observable in the file.
+9. rc-shape script: `for (f in *.md) { wc -l $f }` runs.
+10. Pale Fire prompt renders with the correct three-segment colour scheme.
+11. Assert no kernel extinctions, no driver crashes, no zombie processes.
+
+Network-dependent tests (curl, ssh, git clone) are deferred to Phase 8 (Linux compat + network) along with the network stack itself.
+
+If this passes, Utopia ships at Phase 7 exit.
 
 ### 23.10 Open design questions
 
@@ -2870,7 +2893,7 @@ None at Gate 3.
 
 ### 23.11 Summary
 
-POSIX as 9P. Utopia at Phase 5 exit: rc + bash + uutils-coreutils + Plan 9 userland + musl + futex + poll + pty + signals + tmpfs. Test: "feels real, not broken."
+POSIX as 9P. Utopia at Phase 7 exit: `ut` (native Rust shell on libthyla-rs) + native Rust coreutils + `hx` (Helix via Pouch) + Pale Fire + Plan 9 namespace builtins + futex + poll + pty + notes + tmpfs. Test: "feels real, not broken." Binding designs: `docs/UTOPIA.md`, `docs/UTOPIA-SHELL-DESIGN.md`, `docs/UTOPIA-VISUAL.md`.
 
 ---
 
