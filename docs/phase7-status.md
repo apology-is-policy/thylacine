@@ -19,7 +19,8 @@ The Phase 7 entry decision (taken under the U-1 scripture conversation):
 
 | Sub-chunk | What | Commit | Tests |
 |---|---|---|---|
-| U-1 | Scripture: UTOPIA.md + UTOPIA-SHELL-DESIGN.md + UTOPIA-VISUAL.md + ARCH/ROADMAP/CLAUDE updates + this doc. NO code. | *(pending)* | — |
+| U-1 hash fixup | Update U-1 row with the scripture commit's hash. | *(pending)* | — |
+| U-1 | Scripture: UTOPIA.md + UTOPIA-SHELL-DESIGN.md + UTOPIA-VISUAL.md + ARCH/ROADMAP/CLAUDE updates + this doc. NO code. | `c4e57f2` | — |
 
 ## Remaining work — the U-* arc
 
