@@ -1531,3 +1531,135 @@ NOT a libsodium bug. NOT reportable upstream — the primitive works.
 Workaround W-a (expose AT_HWCAP → ARM crypto path) remains the
 cleanest unblock; bypassing the soft impl entirely sidesteps this
 context-specific interaction.
+
+---
+
+## 16b-γ-mount-bind H1 investigation — kernel page-zeroing falsified at code-review level + AEGIS corruption is content-sensitive across pool.img regenerations (2026-05-26)
+
+Follow-up to the prior session's three documented hypotheses. Two
+findings, no code shipped (all diagnostics reverted; baseline preserved
+at tip `7045e1f`).
+
+### Finding 1 — H1 (page-zeroing) falsified at code-review level
+
+`alloc_pages(order, KP_ZERO)` in `mm/phys.c:228-236` unconditionally
+zeros the entire 2^order chunk via the kernel direct map after the
+buddy / magazine allocation:
+
+    if (flags & KP_ZERO) {
+        u64 *q = pa_to_kva(page_to_pa(p));
+        u64 n  = (1ull << order) << PAGE_SHIFT;
+        for (u64 i = 0; i < n / 8; i++) q[i] = 0;
+    }
+
+The zeroing covers the FULL buddy chunk, not just the user-requested
+range — so e.g. a 33-page request that the buddy serves from a 64-page
+chunk gets all 64 pages zeroed. `SYS_BURROW_ATTACH` → `burrow_create_anon`
+passes `KP_ZERO`; `userland_demand_page` (arch/arm64/fault.c:339-369)
+installs the PTE pointing at the already-zeroed PA. The independently-
+proven `pouch-hello-sodium` repro (malloc 131072 x 2 + AEGIS-256 round-
+trip + 8-iter stress) shows userspace observes zero pages from
+mallocng's sizeclass-63 path. H1 is mechanically out.
+
+### Finding 2 — what `assert(!p[-4])` actually checks
+
+Two paths through mallocng's `enframe` (`third_party/musl/src/malloc/
+mallocng/meta.h:196-227`) reach the assertion with different
+interpretations of `p[-4]`:
+
+- **sizeclass < 48 (multi-slot group)**: `p = storage + stride*idx`
+  with `idx > 0`. `p[-4]` is the 4-byte zone at the END of slot
+  `idx-1` — the slot's "overflow byte" planted by `set_size` and re-
+  checked by `get_nominal_size`. Assertion firing means the previous
+  slot's user wrote PAST its allocation, smashing the trailing
+  sentinel.
+
+- **sizeclass = 63 (single-slot mmap)**: `idx = 0`, so
+  `p = g->mem->storage` (offset 16 of the fresh mmap region).
+  `p[-4]` is byte 12 of the mmap — inside `struct group::pad[7]`
+  (offsets 9..15 per the struct layout in `meta.h:17-22`). After
+  fresh kernel mmap + the only write `g->mem->meta = g` (offset 0..7),
+  the pad bytes are never touched and should remain zero.
+
+The two interpretations point at completely different root causes:
+multi-slot signals **user-data overflow** (some allocation wrote past
+its bounds); single-slot signals **fresh-page non-zero** (which H1
+already falsifies via code review) OR **stale-VA reuse** (the kernel
+returned a VA whose pages weren't actually re-zeroed because some
+allocator-side caching bypassed `KP_ZERO`).
+
+The prior session's narrowing notes report the crash signature as
+`alloc_slot::enframe::assert(!p[-4])` but did not record the failing
+sizeclass. **A future diagnostic must capture sizeclass + idx at the
+firing site** to disambiguate.
+
+### Finding 3 — AEGIS corruption is content-sensitive: didn't reproduce in this session
+
+This session built a minimal diagnostic patch on `meta.h` to print
+sizeclass / idx / maplen / stride / bytes around `p` at the assertion
+site before letting `a_crash` fire. Two boots:
+
+1. **With diagnostic instrumentation** — built sysroot + stratumd
+   against the instrumented `meta.h`. stratumd reached
+   `serving /dev/virtio-blk on /srv/stratum-fs (backlog=16, msize=...)`
+   without any `MNG:` diagnostic line firing.
+2. **Pristine baseline** — reverted the diagnostic, rebuilt sysroot
+   + stratumd. stratumd ALSO reached the same `serving` message.
+
+Both boots are past the prior session's documented crash point
+(stratumd crashing during `stm_sb_mount_scan` BEFORE setting up the
+listen socket).
+
+The root cause for the divergent behavior: `build_stratum_pool_fixture`
+(`tools/build.sh:947-997`) **regenerates `build/fixtures/pool.img`
+from scratch each `tools/build.sh kernel` run**, deleting the prior
+file (build.sh:982). stratum-mkfs's UUID seed derives from `time + pid`
+(build.sh:957-961), so the pool's btree node payload bytes differ
+across builds. Today's pool.img happens to encode data that doesn't
+trigger the AEGIS-256-soft / mallocng interaction; the prior session's
+pool.img did.
+
+This finding is the strongest evidence yet that the corruption is
+**content-sensitive at the bit-pattern level**: same AEGIS-256 code,
+same mallocng code, same kernel, same caps — different decrypt input
+bytes → different mallocng-heap-state side-effect → bug fires or
+doesn't.
+
+Both boots hung at the same downstream point (after stratumd's
+`serving` message, before any `joey: stratumd-boot /srv/stratum-fs
+bound after retry` success line). That downstream hang is the
+**actual 16b-γ-mount-bind blocker** — separate from the AEGIS
+corruption, queued under the original sub-chunk scope. The prior
+sessions conflated the two; the AEGIS corruption was the visible
+symptom at the time, but the mount-bind hang was always there
+behind it.
+
+### Implications for next session
+
+- The AEGIS corruption is no longer reliably reproducible on tip
+  `7045e1f` — pool.img regeneration changes the trigger pattern.
+  Reproducing the prior session's exact behavior would require
+  pinning the pool.img bytes (recovering from a prior session's
+  build/ if available, OR seeding stratum-mkfs's RNG deterministically).
+- The mount-bind hang IS the visible blocker today. Investigation
+  shifts from "fix AEGIS corruption" to "diagnose why joey's
+  `t_srv_connect` retry loop never succeeds even after stratumd
+  posts /srv/stratum-fs".
+- The AEGIS investigation work is preserved (3 documented hypotheses
+  in the prior section + this section's H1 falsification + assertion
+  semantics) for the eventual recurrence — content-sensitive bugs
+  reappear when the trigger content does.
+- W-a (expose AT_HWCAP → ARM crypto) remains the recommended
+  hardening: it eliminates the soft AEGIS path as an attack surface,
+  making AEGIS-related corruption recurrence impossible.
+
+### Cross-references
+
+- Code-review of kernel mmap path: `kernel/burrow.c::burrow_create_anon`
+  (lines 88-120), `mm/phys.c::alloc_pages` (lines 220-238),
+  `arch/arm64/fault.c::userland_demand_page` (lines 289-372),
+  `kernel/syscall.c::sys_burrow_attach_for_proc` (lines 1804-1855).
+- mallocng `enframe` assertion: `third_party/musl/src/malloc/
+  mallocng/meta.h:196-227`.
+- mallocng `struct group` layout: `meta.h:17-22`.
+- Pool fixture regeneration: `tools/build.sh:947-997`.
