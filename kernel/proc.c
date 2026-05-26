@@ -36,6 +36,7 @@
 #include "../arch/arm64/asid.h"
 #include "../arch/arm64/mmu.h"
 #include "../arch/arm64/uaccess.h"
+#include "../arch/arm64/uart.h"
 #include "../mm/slub.h"
 
 static struct kmem_cache *g_proc_cache;
@@ -852,6 +853,92 @@ int proc_count_live_peers_locked(struct Proc *p, struct Thread *self) {
         if (peer->state != THREAD_EXITING) n++;
     }
     return n;
+}
+
+// P6 hardening #3a (scripture e45a571 -- docs/ERRORS.md + the snare:*
+// note family + the user-authorized 2026-05-26 design): terminate the
+// faulting Proc instead of extincting the kernel on EL0 unhandled
+// fault. Called from arch/arm64/exception.c::exception_sync_lower_el
+// for every EL0 sync exception that previously called
+// extinction_with_addr (FAULT_UNHANDLED_USER, FAULT_FATAL,
+// EC_PC_ALIGN, EC_SP_ALIGN, EC_BTI, EC_BRK, default).
+//
+// CONTRACT:
+//   - `name` MUST be one of the snare:* string-literal constants from
+//     <thylacine/notes.h> (NOTE_NAME_SNARE_SEGV, etc.). The kernel
+//     forwards it verbatim to exits() so wait_pid + the parent's
+//     uart log see a recognizable tag.
+//   - `faulting_addr` is the FAR_EL1 (data abort) or ELR_EL1 (PC
+//     alignment / BTI / BRK / unknown EC) value at the fault; printed
+//     in the diagnostic for forensics.
+//   - NEVER returns. Calls exits() which transitions the calling
+//     Thread's Proc to ZOMBIE and yields; the scheduler picks
+//     another thread.
+//
+// DEFENSE-IN-DEPTH:
+//   - If current_thread() / its Proc is corrupted or NULL, extincts
+//     (the fault path is itself broken; can't safely call exits).
+//   - If the calling Proc is kproc, extincts (kproc runs at EL1; an
+//     EL0 fault tagged to kproc means the exception handler's
+//     current_thread()/proc bookkeeping is broken).
+//   - If the Proc has live peer Threads (thread_count > 1), extincts
+//     with a specific message. v1.0 lacks cross-thread shootdown;
+//     exits() would extinct anyway -- the specific message attributes
+//     the cause cleanly. Multi-thread fault delivery (cross-Thread
+//     shootdown via SYS_THREAD_EXIT on peers) is a v1.x extension
+//     paired with SYS_EXIT_GROUP.
+//
+// The uart line preserves the visibility the prior `extinction_with_addr`
+// call provided: a faulting userspace binary still announces itself on
+// boot logs, so test failures + production diagnostics surface the
+// pid + reason + address without requiring a debugger.
+__attribute__((noreturn))
+void proc_fault_terminate(const char *name, uintptr_t faulting_addr) {
+    struct Thread *t = current_thread();
+    if (!t)                          extinction("proc_fault_terminate with no current thread");
+    if (t->magic != THREAD_MAGIC)    extinction("proc_fault_terminate from corrupted current thread");
+
+    struct Proc *p = t->proc;
+    if (!p)                          extinction("proc_fault_terminate from thread with no proc");
+    if (p->magic != PROC_MAGIC)      extinction("proc_fault_terminate from thread with corrupted proc");
+    if (p == g_kproc)                extinction_with_addr(
+                                         "proc_fault_terminate routed to kproc (impossible at EL0)",
+                                         faulting_addr);
+
+    if (p->thread_count > 1) {
+        // v1.0: exits() rejects a Proc with live peer Threads (no
+        // cross-thread shootdown). Surface the cause clearly rather
+        // than letting exits() extinct with its generic message.
+        uart_puts("user fault: pid=");
+        uart_putdec((u64)p->pid);
+        uart_puts(" reason=\"");
+        uart_puts(name);
+        uart_puts("\" addr=");
+        uart_puthex64((u64)faulting_addr);
+        uart_puts(" -- multi-thread Proc fault termination not yet supported\n");
+        extinction_with_addr(
+            "EL0 fault in multi-thread Proc (v1.x: cross-thread shootdown)",
+            faulting_addr);
+    }
+
+    // Single-thread Proc: cleanly terminate. The uart line preserves
+    // pre-#3a visibility; exits() runs the standard teardown
+    // (child_exit note to parent, ZOMBIE state, sched). Parent's
+    // wait_pid observes exit_status = 1 at v1.0 (sys_exits_handler
+    // collapses non-"ok" messages to 1); the structured 64-bit
+    // exit_status that distinguishes fault-terminated from clean-
+    // non-zero is a v1.x lift per docs/ERRORS.md "Exit-status
+    // semantics".
+    uart_puts("user fault: pid=");
+    uart_putdec((u64)p->pid);
+    uart_puts(" reason=\"");
+    uart_puts(name);
+    uart_puts("\" addr=");
+    uart_puthex64((u64)faulting_addr);
+    uart_puts(" -- terminating Proc\n");
+
+    exits(name);
+    /* UNREACHABLE -- exits is noreturn */
 }
 
 void exits(const char *msg) {

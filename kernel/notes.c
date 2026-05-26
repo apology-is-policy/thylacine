@@ -81,6 +81,32 @@ static int notes_name_to_bit(const char *name) {
     return -1;
 }
 
+// P6 hardening #3a (scripture e45a571 -- docs/ERRORS.md): the `snare:`
+// prefix is RESERVED for kernel-synthetic posts (the fault-note family
+// kept in <thylacine/notes.h> NOTE_NAME_SNARE_*). Userspace SYS_POSTNOTE
+// MUST NOT be able to fake a fault note in any Proc's queue. Returns 1
+// if `name` starts with "snare:" (bounded read; NOTE_NAME_MAX-safe),
+// 0 otherwise.
+//
+// notes_post enforces the gate explicitly so the rejection survives a
+// future supported-set extension (today snare:* isn't in g_known_notes
+// so notes_name_to_bit already rejects; the explicit prefix check
+// future-proofs against that path being relaxed).
+static int notes_name_has_snare_prefix(const char *name) {
+    static const char prefix[] = "snare:";
+    static const u32  plen = sizeof(prefix) - 1;     // 6
+    _Static_assert(plen < NOTE_NAME_MAX,
+                   "snare: prefix must be shorter than NOTE_NAME_MAX so the "
+                   "bounded compare cannot read past the in-kernel name buffer");
+    for (u32 i = 0; i < plen; i++) {
+        // Defense-in-depth: if `name` is shorter than the prefix and
+        // NUL-terminates early, the mismatch on the NUL returns 0
+        // (not a snare:* note).
+        if (name[i] != prefix[i]) return 0;
+    }
+    return 1;
+}
+
 // R4-F4 audit close: notes_name_is_kill is now declared in the public
 // header (`<thylacine/notes.h>`) -- the prior forward decl block here
 // and the function-local extern decls in syscall.c are removed.
@@ -177,6 +203,18 @@ int notes_post(struct Proc *p, const char *name, u32 arg,
     if (!p) return -1;
     if (!p->notes) return -1;
     if (!name) return -1;
+
+    // P6 hardening #3a (scripture e45a571): the snare:* fault-note
+    // prefix is reserved for kernel-synthetic posters. Userspace
+    // SYS_POSTNOTE callers (synthetic=false) MUST NOT be able to
+    // fake a fault note in any Proc's queue -- a faked snare:segv
+    // would otherwise let a malicious Proc impersonate a memory
+    // fault to fool a sibling Proc's fd-read consumer of /dev/notes.
+    // (Today snare:* isn't in the supported set so notes_name_to_bit
+    // below also rejects -- this explicit prefix check future-proofs
+    // against snare:* being added to the supported set for kernel-
+    // synthetic-only delivery.)
+    if (!synthetic && notes_name_has_snare_prefix(name)) return -1;
 
     // Validate name is in the v1.0 supported set.
     if (notes_name_to_bit(name) < 0) return -1;

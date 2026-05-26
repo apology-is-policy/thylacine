@@ -24,7 +24,8 @@
 #include "uaccess.h"                  // R12-uaccess: kernel-mode user-VA fault-fixup
 
 #include <thylacine/extinction.h>
-#include <thylacine/proc.h>           // R12-uaccess: struct Proc for demand-page synth
+#include <thylacine/notes.h>          // P6 #3a: NOTE_NAME_SNARE_* constants for proc_fault_terminate
+#include <thylacine/proc.h>           // R12-uaccess: struct Proc for demand-page synth; P6 #3a: proc_fault_terminate
 #include <thylacine/syscall.h>        // P3-Ec: syscall_dispatch
 #include <thylacine/thread.h>         // R12-uaccess: current_thread()
 #include <thylacine/types.h>
@@ -256,13 +257,18 @@ void exception_irq_curr_el(struct exception_context *ctx) {
 // EL0 instruction).
 //
 // On FAULT_UNHANDLED_USER (no VMA / permission denied) the handler
-// extincts. Phase 5+ note delivery upgrades this to a SIGSEGV-like
-// note.
+// terminates the faulting Proc via proc_fault_terminate(NOTE_NAME_SNARE_*,
+// addr) -- the kernel does NOT extinct. Per docs/ERRORS.md (scripture
+// e45a571) the snare:* note name family signals the fault kind to the
+// parent's wait_pid + uart log; v1.x adds POSIX signal mapping +
+// structured 64-bit exit_status.
 //
-// SVC (EC 0x15) extincts at v1.0 — userspace syscalls land at P3-Ec.
+// SVC (EC 0x15) routes through syscall_dispatch at v1.0 -- userspace
+// syscalls land at P3-Ec; does NOT extinct.
 //
-// EC_PC_ALIGN / EC_SP_ALIGN / EC_BTI / EC_BRK from EL0 also extinct
-// at v1.0; Phase 5+ note delivery handles these as user-faults.
+// EC_PC_ALIGN / EC_SP_ALIGN / EC_BTI / EC_BRK from EL0 also terminate
+// via proc_fault_terminate (snare:align / snare:bti / snare:brk
+// respectively).
 // P6-pouch-signals-impl (sub-chunk 13a): forward-declare the EL0-return-
 // tail note-delivery hook (defined in kernel/notes.c).
 void notes_deliver_at_el0_return(struct exception_context *ctx);
@@ -290,17 +296,26 @@ void exception_sync_lower_el(struct exception_context *ctx) {
             notes_deliver_at_el0_return(ctx);
             return;          // ERET resumes the faulting EL0 instruction.
         case FAULT_UNHANDLED_USER:
-            // Phase 5+: deliver SIGSEGV-like note to the offending
-            // Proc; the thread terminates rather than the kernel
-            // extincting. At v1.0 we extinct loudly so test failures
-            // surface immediately rather than the user thread silently
-            // dying.
-            extinction_with_addr("EL0 fault: no VMA covers vaddr / permission denied",
-                                 (uintptr_t)fi.vaddr);
+            // P6 hardening #3a (scripture e45a571): terminate the
+            // faulting Proc with the snare:segv tag; the kernel does
+            // NOT extinct. proc_fault_terminate emits a uart
+            // diagnostic + calls exits(NOTE_NAME_SNARE_SEGV). Parent
+            // reaps via wait_pid; exit_status = 1 at v1.0.
+            // Diagnostic preserves the visibility the prior
+            // extinction_with_addr line provided.
+            proc_fault_terminate(NOTE_NAME_SNARE_SEGV, (uintptr_t)fi.vaddr);
         case FAULT_FATAL:
-            extinction_with_addr("arch_fault_handle returned FAULT_FATAL (EL0)",
-                                 (uintptr_t)fi.vaddr);
+            // FAULT_FATAL is the reserved "really fatal" return -- a
+            // page-fault path that detected a kernel-side invariant
+            // violation that user code triggered. Treat as a SIGBUS-
+            // class fault: terminate the Proc with snare:bus tag
+            // rather than extincting.
+            proc_fault_terminate(NOTE_NAME_SNARE_BUS, (uintptr_t)fi.vaddr);
         }
+        // Unknown fault_result from arch_fault_handle is a kernel-side
+        // bug (enum grew without this switch updating). Extinct -- the
+        // dispatcher itself can't classify the user fault, so we can't
+        // attribute a snare:* tag confidently.
         extinction_with_addr("arch_fault_handle returned unknown result (EL0)",
                              (uintptr_t)fi.vaddr);
     }
@@ -321,22 +336,32 @@ void exception_sync_lower_el(struct exception_context *ctx) {
         return;
 
     case EC_PC_ALIGN:
-        extinction_with_addr("EL0 PC alignment fault", (uintptr_t)ctx->elr);
+        // EL0 PC alignment fault -- terminate Proc with snare:align.
+        proc_fault_terminate(NOTE_NAME_SNARE_ALIGN, (uintptr_t)ctx->elr);
 
     case EC_SP_ALIGN:
-        extinction_with_addr("EL0 SP alignment fault", (uintptr_t)far);
+        // EL0 SP alignment fault -- terminate Proc with snare:align.
+        proc_fault_terminate(NOTE_NAME_SNARE_ALIGN, (uintptr_t)far);
 
     case EC_BTI:
-        extinction_with_addr("EL0 BTI fault (indirect branch to non-guarded target)",
-                             (uintptr_t)ctx->elr);
+        // EL0 indirect branch to non-`bti j/c/jc` target -- terminate
+        // with snare:bti. On FEAT_BTI hardware this catches the
+        // forge-indirect-call leg of a ROP/JOP chain; v1.0 boot is
+        // green on QEMU virt which doesn't raise BTI (defense-in-
+        // depth for hardware that does).
+        proc_fault_terminate(NOTE_NAME_SNARE_BTI, (uintptr_t)ctx->elr);
 
     case EC_BRK:
-        extinction_with_addr("EL0 brk instruction (assertion?)",
-                             (uintptr_t)ctx->elr);
+        // EL0 brk #imm -- userspace assertion or debug trap.
+        // Terminate with snare:brk. Debuggers attaching at EL0 are a
+        // Phase 5+ concern; v1.0 treats all EL0 brk as fatal-to-Proc.
+        proc_fault_terminate(NOTE_NAME_SNARE_BRK, (uintptr_t)ctx->elr);
 
     default:
-        extinction_with_addr("EL0 unhandled sync exception (EC in ESR_EL1)",
-                             (uintptr_t)esr);
+        // Unknown EC from EL0 -- terminate with snare:ill (illegal
+        // instruction / unknown sync EC). ESR encoded in the addr
+        // slot for forensics.
+        proc_fault_terminate(NOTE_NAME_SNARE_ILL, (uintptr_t)esr);
     }
 }
 

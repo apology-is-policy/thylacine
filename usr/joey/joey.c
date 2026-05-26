@@ -369,10 +369,15 @@ static int do_stratumd_stub_bringup(void) {
 // sockets bind() call, which dispatches to SYS_post_service). All other
 // semantics (pipe wiring, reap-before-drain, content check) are
 // identical.
+// `expect_fault != 0`: invert the exit-status check. The child is
+// expected to exit non-zero (e.g., terminated by an EL0 fault routed
+// through proc_fault_terminate at kernel/proc.c -- the snare:* family).
+// Used only by /pouch-hello-fault.
 static int pouch_smoke_core(const char *name, size_t name_len,
                             const char *expect, size_t expect_len,
                             unsigned long cap_mask,
-                            unsigned long perm_flags) {
+                            unsigned long perm_flags,
+                            int expect_fault) {
     long rd = -1, wr = -1;
     if (t_pipe(&rd, &wr) < 0) {
         t_putstr("joey: pouch-smoke t_pipe FAILED\n");
@@ -436,7 +441,15 @@ static int pouch_smoke_core(const char *name, size_t name_len,
         t_putstr("joey: pouch-smoke t_close(rd) FAILED\n");
         return -1;
     }
-    if (status != 0) {
+    if (expect_fault) {
+        // /pouch-hello-fault path: child MUST exit non-zero (terminated
+        // by proc_fault_terminate via exits(NOTE_NAME_SNARE_*) at v1.0,
+        // collapsed to exit_status = 1 by sys_exits_handler).
+        if (status == 0) {
+            t_putstr("joey: pouch-smoke expected fault but child exited 0\n");
+            return -1;
+        }
+    } else if (status != 0) {
         t_putstr("joey: pouch-smoke child exited non-zero\n");
         return -1;
     }
@@ -452,7 +465,20 @@ static int pouch_smoke_core(const char *name, size_t name_len,
 // caps variant is used). Pre-existing API; the pouch hellos use this.
 static int pouch_smoke_one(const char *name, size_t name_len,
                            const char *expect, size_t expect_len) {
-    return pouch_smoke_core(name, name_len, expect, expect_len, 0, 0);
+    return pouch_smoke_core(name, name_len, expect, expect_len, 0, 0, 0);
+}
+
+// pouch_smoke_one_expect_fault — variant for the durable P6 hardening
+// #3a regression. Spawns the child + drains its stdout + expects the
+// marker AND expects exit_status != 0. The child terminates because
+// arch/arm64/exception.c::exception_sync_lower_el routed the EL0
+// fault through proc_fault_terminate(NOTE_NAME_SNARE_*, addr) ->
+// exits(name). Pre-#3a (scripture e45a571) the same fault extincted
+// the kernel; running this binary would prevent boot from reaching
+// `Thylacine boot OK`.
+static int pouch_smoke_one_expect_fault(const char *name, size_t name_len,
+                                        const char *expect, size_t expect_len) {
+    return pouch_smoke_core(name, name_len, expect, expect_len, 0, 0, 1);
 }
 
 // pouch_smoke_one_caps — capability-granting variant. Spawns via
@@ -461,7 +487,7 @@ static int pouch_smoke_one(const char *name, size_t name_len,
 static int pouch_smoke_one_caps(const char *name, size_t name_len,
                                 const char *expect, size_t expect_len,
                                 unsigned long cap_mask) {
-    return pouch_smoke_core(name, name_len, expect, expect_len, cap_mask, 0);
+    return pouch_smoke_core(name, name_len, expect, expect_len, cap_mask, 0, 0);
 }
 
 // pouch_smoke_one_perms — permission-granting variant. Spawns via
@@ -474,7 +500,7 @@ static int pouch_smoke_one_perms(const char *name, size_t name_len,
                                  unsigned long cap_mask,
                                  unsigned long perm_flags) {
     return pouch_smoke_core(name, name_len, expect, expect_len,
-                            cap_mask, perm_flags);
+                            cap_mask, perm_flags, 0);
 }
 
 // argv_marker — one substring expected to appear in the child's stdout.
@@ -754,6 +780,23 @@ static int do_pouch_hello_smoke(void) {
                              /*cap_mask=*/0ul, /*perm_flags=*/0ul) != 0)
         return -1;
     t_putstr("joey: pouch-hello-argv smoke ok (argv pass-through via SYS_SPAWN_FULL_ARGV)\n");
+
+    // /pouch-hello-fault — durable runtime regression for P6 hardening #3a
+    // (scripture e45a571 -- docs/ERRORS.md "snare:* family"). The binary
+    // deliberately NULL-derefs; the kernel MUST route the EL0 fault
+    // through arch/arm64/exception.c::exception_sync_lower_el ->
+    // proc_fault_terminate(NOTE_NAME_SNARE_SEGV, 0) -> exits("snare:segv")
+    // -- NOT extinct. Joey reaps with exit_status = 1 (v1.0 collapse).
+    // The marker "pouch-hello-fault: about to fault" proves the binary
+    // actually ran the deref (not just failed to start). Pre-#3a (tip
+    // 26e3156 and earlier) this binary would extinct the kernel and
+    // boot would never reach `Thylacine boot OK`.
+    static const char pflt_name[]   = "pouch-hello-fault";
+    static const char pflt_expect[] = "pouch-hello-fault: about to fault";
+    if (pouch_smoke_one_expect_fault(pflt_name, sizeof(pflt_name) - 1,
+                                     pflt_expect, sizeof(pflt_expect) - 1) != 0)
+        return -1;
+    t_putstr("joey: pouch-hello-fault smoke ok (EL0 NULL deref terminated cleanly via snare:segv; kernel did NOT extinct)\n");
     return 0;
 }
 
