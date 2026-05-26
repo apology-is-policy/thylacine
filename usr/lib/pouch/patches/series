@@ -26,3 +26,4 @@
 0010-pouch-fstat-lseek.patch
 0011-pouch-abort.patch
 0012-pouch-mallocng-crash.patch
+0013-pouch-mallocng-diag.patch

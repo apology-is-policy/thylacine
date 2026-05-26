@@ -1,0 +1,137 @@
+Phase 6 hardening (item #3c of the 4-item memory-model hardening plan).
+Adds a build-flag-gated diagnostic dump inside mallocng's enframe()
+assertion site. When mallocng's `assert(!p[-4])` would fire, a short
+write(2)-based dump captures the sizeclass, slot index, maplen,
+stride, and 16 bytes around p (8 before, 8 after) BEFORE the
+assertion is checked -- so when the assertion subsequently fires
+(via 0012-pouch-mallocng-crash.patch's _Exit(127)), the operator
+has the corruption pattern for analysis.
+
+Why a separate patch (not folded into 0012):
+
+  - 0012 is a hot-path change in every pouch program: assert macro
+    is touched by literally every mallocng allocation.
+  - 0013's diagnostic is OFF by default (no perf cost) but adds
+    code volume to enframe and changes its codegen slightly when
+    enabled. Splitting lets a future audit reason about 0012 alone
+    if the diagnostic ever has a side effect.
+
+How to enable:
+
+  POUCH_MALLOCNG_DIAG=1 tools/build.sh sysroot
+
+The env var propagates to musl's configure as `CFLAGS=-DPOUCH_MALLOCNG_DIAG`
+(see tools/build.sh::build_sysroot). When unset, the `#ifdef` skips
+the diagnostic code entirely.
+
+What gets dumped (single line, fixed format):
+
+  MNG: sc=63 idx=0 ml=33 stride=135168 [00 00 00 00 00 00 00 00|01 02 03 04 05 06 07 08]
+
+Where:
+  - sc = g->sizeclass (0..47 = in-band slabs; 63 = mmap-class)
+  - idx = slot index within the group (0 for sizeclass 63)
+  - ml = g->maplen (mmap region size in 4 KiB units)
+  - stride = slot stride in bytes
+  - [...] = 16 bytes around p with '|' separating p[-1] from p[0]
+
+For sizeclass < 48 (multi-slot), p[-4] is the previous slot's
+"overflow byte" (write-past-end detection). For sizeclass = 63
+(single-slot mmap), p[-4] is byte 12 inside struct group::pad[7]
+(should always be zero after fresh kernel mmap + group setup).
+The dump distinguishes the two cases AND shows what value
+corrupted the byte.
+
+Output goes to stderr via direct __syscall(SYS_write) -- no malloc
+involvement, so the dump survives a corrupted heap. The diagnostic
+only fires when p[-4] != 0 (i.e., when the assertion WOULD fail).
+On the happy path (p[-4] == 0), the if-branch short-circuits and
+zero output is produced -- even with POUCH_MALLOCNG_DIAG enabled,
+normal mallocng allocations are silent.
+
+Safe-use envelope:
+
+  - The 256-byte stack buffer is well within any thread stack.
+  - __syscall(SYS_write, ...) is async-signal-safe and does not
+    allocate; safe to call from inside a malloc path.
+  - The diagnostic does NOT prevent the subsequent assertion from
+    firing (it runs BEFORE assert(!p[-4]) on the original line) --
+    so the program still terminates with _Exit(127) via 0012, with
+    the diagnostic captured upstream of the exit.
+
+--- a/src/malloc/mallocng/meta.h
++++ b/src/malloc/mallocng/meta.h
+@@ -202,6 +202,73 @@
+ 	// cycle offset within slot to increase interval to address
+ 	// reuse, facilitate trapping double-free.
+ 	int off = (p[-3] ? *(uint16_t *)(p-2) + 1 : ctr) & 255;
++#ifdef POUCH_MALLOCNG_DIAG
++	/* Pouch hardening #3c: dump corruption pattern + group state
++	 * BEFORE the assertion fires. */
++	if (p[-4]) {
++		static const char __mng_diag_hex[] = "0123456789abcdef";
++		unsigned char __mng_diag_buf[256];
++		int __mng_diag_len = 0;
++		const char *__mng_diag_pfx = "MNG: sc=";
++		while (*__mng_diag_pfx)
++			__mng_diag_buf[__mng_diag_len++] = *__mng_diag_pfx++;
++		int __mng_diag_sc = (int)g->sizeclass;
++		if (__mng_diag_sc >= 10)
++			__mng_diag_buf[__mng_diag_len++] = '0' + (__mng_diag_sc / 10);
++		__mng_diag_buf[__mng_diag_len++] = '0' + (__mng_diag_sc % 10);
++		const char *__mng_diag_p1 = " idx=";
++		while (*__mng_diag_p1)
++			__mng_diag_buf[__mng_diag_len++] = *__mng_diag_p1++;
++		int __mng_diag_ix = idx;
++		if (__mng_diag_ix >= 100)
++			__mng_diag_buf[__mng_diag_len++] = '0' + (__mng_diag_ix / 100);
++		if (__mng_diag_ix >= 10)
++			__mng_diag_buf[__mng_diag_len++] = '0' + ((__mng_diag_ix / 10) % 10);
++		__mng_diag_buf[__mng_diag_len++] = '0' + (__mng_diag_ix % 10);
++		const char *__mng_diag_p2 = " ml=";
++		while (*__mng_diag_p2)
++			__mng_diag_buf[__mng_diag_len++] = *__mng_diag_p2++;
++		uintptr_t __mng_diag_ml = g->maplen;
++		if (__mng_diag_ml == 0)
++			__mng_diag_buf[__mng_diag_len++] = '0';
++		else {
++			char __mng_diag_d[20]; int __mng_diag_dl = 0;
++			while (__mng_diag_ml > 0) {
++				__mng_diag_d[__mng_diag_dl++] = '0' + (__mng_diag_ml % 10);
++				__mng_diag_ml /= 10;
++			}
++			while (__mng_diag_dl > 0)
++				__mng_diag_buf[__mng_diag_len++] = __mng_diag_d[--__mng_diag_dl];
++		}
++		const char *__mng_diag_p3 = " stride=";
++		while (*__mng_diag_p3)
++			__mng_diag_buf[__mng_diag_len++] = *__mng_diag_p3++;
++		uintptr_t __mng_diag_st = stride;
++		if (__mng_diag_st == 0)
++			__mng_diag_buf[__mng_diag_len++] = '0';
++		else {
++			char __mng_diag_d[20]; int __mng_diag_dl = 0;
++			while (__mng_diag_st > 0) {
++				__mng_diag_d[__mng_diag_dl++] = '0' + (__mng_diag_st % 10);
++				__mng_diag_st /= 10;
++			}
++			while (__mng_diag_dl > 0)
++				__mng_diag_buf[__mng_diag_len++] = __mng_diag_d[--__mng_diag_dl];
++		}
++		const char *__mng_diag_p4 = " [";
++		while (*__mng_diag_p4)
++			__mng_diag_buf[__mng_diag_len++] = *__mng_diag_p4++;
++		for (int __mng_diag_k = -8; __mng_diag_k < 8; __mng_diag_k++) {
++			unsigned char __mng_diag_b = p[__mng_diag_k];
++			__mng_diag_buf[__mng_diag_len++] = __mng_diag_hex[(__mng_diag_b >> 4) & 0xf];
++			__mng_diag_buf[__mng_diag_len++] = __mng_diag_hex[__mng_diag_b & 0xf];
++			__mng_diag_buf[__mng_diag_len++] = (__mng_diag_k == -1) ? '|' : ' ';
++		}
++		__mng_diag_buf[__mng_diag_len++] = ']';
++		__mng_diag_buf[__mng_diag_len++] = '\n';
++		__syscall(SYS_write, 2, __mng_diag_buf, __mng_diag_len);
++	}
++#endif /* POUCH_MALLOCNG_DIAG */
+ 	assert(!p[-4]);
+ 	if (off > slack) {
+ 		size_t m = slack;
