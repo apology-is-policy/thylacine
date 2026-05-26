@@ -409,4 +409,43 @@ int mmu_install_user_pte(paddr_t pgtable_root, u16 asid,
                          u64 vaddr, paddr_t pa, u32 prot,
                          bool device_memory);
 
+// P6 hardening #2 / F1: clear a single leaf PTE at `vaddr` in the
+// per-Proc TTBR0 tree rooted at `pgtable_root` AND issue tlbi vaae1is
+// + dsb ish + isb to invalidate any cached translation. Symmetric
+// counterpart to mmu_install_user_pte's leaf install.
+//
+// Returns 0 in three cases (all benign):
+//   - PTE was VALID and is now cleared + TLB invalidated.
+//   - PTE was already not-VALID (idempotent).
+//   - The walk found an L1/L2/L3 sub-table not yet allocated (nothing
+//     mapped at vaddr -> nothing to clear).
+//
+// Returns -1 only on argument-validation failure (NULL pgtable_root,
+// misaligned vaddr, vaddr >> 47 != 0, or a malformed table descriptor
+// found mid-walk).
+//
+// `asid` is currently unused (`tlbi vaae1is` is all-ASID broadcast at
+// the tightest single-VA scope); reserved for a future
+// ASID-targeted optimization if needed.
+//
+// Per audit F1 (P1): without this call from burrow_unmap (and any
+// future mmap-unmap path), SYS_BURROW_DETACH leaves stale PTEs in
+// the per-Proc tree AND stale TLB entries on the CPU. A later
+// user-mode access to the same VA (dangling pointer, overflow,
+// buddy-LIFO-returns-different-PA on re-attach) silently routes
+// to the recycled physical page -> content-sensitive heap
+// corruption that fires only under specific allocation patterns
+// (the suspected root cause of the AEGIS-256 / mallocng bug).
+int mmu_uninstall_user_pte(paddr_t pgtable_root, u16 asid, u64 vaddr);
+
+// Range form: iterate per-page from vaddr_start to vaddr_end
+// (half-open, both page-aligned), calling mmu_uninstall_user_pte
+// for each. Optimized for the burrow_unmap pattern (range of
+// length up to BURROW_ATTACH_MAX = 256 MiB).
+//
+// Returns 0 on success. Returns -1 on argument-validation failure
+// (misaligned, vaddr_start >= vaddr_end, vaddr_end >> 47 != 0).
+int mmu_uninstall_user_range(paddr_t pgtable_root, u16 asid,
+                             u64 vaddr_start, u64 vaddr_end);
+
 #endif // THYLACINE_ARCH_ARM64_MMU_H

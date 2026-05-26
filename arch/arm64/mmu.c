@@ -1287,6 +1287,114 @@ int mmu_install_user_pte(paddr_t pgtable_root, u16 asid,
     return 0;
 }
 
+// =============================================================================
+// P6 hardening #2 / audit F1 (P1): mmu_uninstall_user_pte
+// =============================================================================
+//
+// Symmetric counterpart to mmu_install_user_pte. Walks the per-Proc
+// TTBR0 tree to find the L3 leaf PTE at `vaddr`, clears it (writes 0),
+// and broadcasts tlbi vaae1is + dsb ish + isb to invalidate any
+// cached translation on this and all sibling CPUs.
+//
+// The walk is non-growing: any L1/L2/L3 sub-table that's not yet
+// allocated means nothing is mapped at `vaddr`, so there's nothing
+// to clear (return 0 idempotently). Same idempotence applies if the
+// L3 leaf PTE is already not-VALID.
+//
+// Why not also collapse empty sub-tables (free the L3/L2/L1 page
+// chunks when their last leaf is cleared)? Two reasons: (1) the
+// sub-tables are reused by sibling VAs in the same Proc; deciding
+// emptiness requires scanning all 512 slots of each level, adding
+// up to ~10000 ns per burrow_unmap (vs ~50 ns for the leaf-clear
+// + TLBI we do here). (2) The pages eventually go free when the
+// Proc dies via proc_pgtable_destroy. The freed-sub-table-page
+// race documented in audit F4 is a separate v1.x scope.
+int mmu_uninstall_user_pte(paddr_t pgtable_root, u16 asid, u64 vaddr) {
+    (void)asid;   // reserved (tlbi vaae1is is all-ASID broadcast)
+
+    if (pgtable_root == 0)               return -1;
+    if (vaddr & (PAGE_SIZE - 1))         return -1;
+    // Mirror mmu_install_user_pte's VA bound: bit 47 must be 0 for
+    // the TTBR0 user-half. R10 F158 close.
+    if (vaddr >> 47)                     return -1;
+
+    u32 idx0 = (u32)((vaddr >> BLOCK_SHIFT_L0) & 0x1ff);
+    u32 idx1 = (u32)((vaddr >> BLOCK_SHIFT_L1) & 0x1ff);
+    u32 idx2 = (u32)((vaddr >> BLOCK_SHIFT_L2) & 0x1ff);
+    u32 idx3 = (u32)((vaddr >> PAGE_SHIFT)     & 0x1ff);
+
+    // L0 walk (no grow).
+    u64 *l0 = (u64 *)pa_to_kva(pgtable_root);
+    u64 e = l0[idx0];
+    if (!(e & PTE_VALID))                return 0;     // nothing mapped
+    if (!(e & PTE_TYPE_TABLE))           return -1;    // malformed
+    paddr_t l1_pa = e & ~0xFFFull;
+
+    // L1 walk (no grow).
+    u64 *l1 = (u64 *)pa_to_kva(l1_pa);
+    e = l1[idx1];
+    if (!(e & PTE_VALID))                return 0;
+    if (!(e & PTE_TYPE_TABLE))           return -1;
+    paddr_t l2_pa = e & ~0xFFFull;
+
+    // L2 walk (no grow).
+    u64 *l2 = (u64 *)pa_to_kva(l2_pa);
+    e = l2[idx2];
+    if (!(e & PTE_VALID))                return 0;
+    if (!(e & PTE_TYPE_TABLE))           return -1;
+    paddr_t l3_pa = e & ~0xFFFull;
+
+    // L3 leaf check + clear.
+    u64 *l3 = (u64 *)pa_to_kva(l3_pa);
+    u64 existing = l3[idx3];
+    if (!(existing & PTE_VALID))         return 0;     // already cleared
+
+    l3[idx3] = 0;
+
+    // Drain the store + broadcast invalidate by VA across the inner-
+    // shareable domain. Same shape as mmu_install_user_pte's tail:
+    // dsb ishst orders the PTE write before the tlbi; dsb ish waits
+    // for the tlbi to complete on all CPUs; isb flushes the local
+    // pipeline so any subsequent EL1 access sees the new mapping
+    // state.
+    dsb_ishst();
+    __asm__ __volatile__(
+        "tlbi vaae1is, %0\n"
+        "dsb ish\n"
+        "isb\n"
+        :: "r" ((u64)vaddr >> 12)
+        : "memory"
+    );
+
+    return 0;
+}
+
+int mmu_uninstall_user_range(paddr_t pgtable_root, u16 asid,
+                             u64 vaddr_start, u64 vaddr_end) {
+    if (pgtable_root == 0)                  return -1;
+    if (vaddr_start & (PAGE_SIZE - 1))      return -1;
+    if (vaddr_end   & (PAGE_SIZE - 1))      return -1;
+    if (vaddr_start >= vaddr_end)           return -1;
+    if (vaddr_end > (1ULL << 47))           return -1;
+
+    // Per-page iterate. Each call does its own tlbi vaae1is + dsb ish
+    // + isb. For a 256 MiB unmap that's 65536 pages * (one PTE clear
+    // + one TLBI + one DSB ISH); the dominant cost is the DSB ISH
+    // wait (microseconds per call). A future optimization can batch
+    // the TLBIs and issue one final DSB ISH at the end -- the
+    // load-bearing invariant (no stale cached translation observable
+    // when this returns) is preserved either way. Today's burrow
+    // sizes are small enough (<= 256 MiB; mallocng-mmap'd usually
+    // 128 KiB) that the unoptimized loop is fine.
+    for (u64 v = vaddr_start; v < vaddr_end; v += PAGE_SIZE) {
+        // Ignore per-page failures (already-cleared / unmapped paths
+        // are benign; argument-validation already happened at the
+        // range entry).
+        (void)mmu_uninstall_user_pte(pgtable_root, asid, v);
+    }
+    return 0;
+}
+
 void proc_pgtable_destroy(paddr_t root) {
     if (root == 0) return;             // kproc / unwound failure path
 

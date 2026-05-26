@@ -382,6 +382,35 @@ int burrow_unmap(struct Proc *p, u64 vaddr, size_t length) {
     if (vma->vaddr_start != vaddr) return -1;
     if (vma->vaddr_end   != want_end) return -1;
 
+    // P6 hardening #2 / audit F1 (P1): clear the leaf PTEs in the
+    // per-Proc TTBR0 tree AND invalidate the TLB for the unmapped
+    // range BEFORE returning the pages to the buddy. Without this
+    // step, the PTEs stay valid pointing at PAs that the buddy is
+    // about to recycle to a different mapping -- a later access to
+    // the same VA (dangling pointer, sibling-buffer overflow,
+    // mallocng's slot-canary read on a re-attached VA that happens
+    // to get a different PA) silently routes through the stale PTE
+    // / TLB entry to the now-recycled page. This is content-
+    // sensitive (the trigger depends on buddy LIFO returning the
+    // same PA vs a different one) and is the suspected root cause
+    // of the 16b-gamma-mount-bind AEGIS-256 / mallocng heap
+    // corruption.
+    //
+    // mmu_uninstall_user_range walks per-page; for each, it walks
+    // L0..L3, clears the leaf PTE, and issues tlbi vaae1is + dsb
+    // ish + isb. Returns 0 even if some pages were never faulted
+    // in (PTE absent at L3, or any of L1/L2/L3 sub-tables absent
+    // -- the dual-refcount lifecycle is still safe because
+    // burrow_release_mapping in vma_free runs regardless of how
+    // many pages were demand-paged).
+    //
+    // Note: pgtable_root may be 0 in pathological cases (early-
+    // boot helper paths that synthesize a Proc without an MMU
+    // arm). mmu_uninstall_user_range rejects pgtable_root == 0;
+    // we ignore the rc (vma_free still runs).
+    (void)mmu_uninstall_user_range(p->pgtable_root, p->asid,
+                                   vaddr, want_end);
+
     vma_remove(p, vma);
     vma_free(vma);
     return 0;
