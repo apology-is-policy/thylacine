@@ -1663,3 +1663,95 @@ behind it.
   mallocng/meta.h:196-227`.
 - mallocng `struct group` layout: `meta.h:17-22`.
 - Pool fixture regeneration: `tools/build.sh:947-997`.
+
+---
+
+## 16b-γ-mount-bind followup — there is no mount-bind hang; boot completes per prior session's documented behavior (2026-05-26)
+
+Brief followup to the H1 investigation. Per user direction, before
+investing in memory-model hardening, sequenced a confirmation run to
+verify whether the apparent "downstream mount-bind hang" was a real
+bug or just slow joey retry-loop timing.
+
+### Setup
+
+- Tip `bf42414` (post-H1 documentation commits).
+- Pristine baseline (no diagnostics).
+- `BOOT_TIMEOUT=600` (10 min, doubled from default 420 to allow full
+  retry-loop wall-clock).
+
+### Result
+
+Boot completes cleanly: `Thylacine boot OK` at ~5 min wall-clock.
+Tail of the boot log:
+
+    joey: probe /system.key lseek SEEK_END/SEEK_SET OK
+    stratumd: serving /dev/virtio-blk on /srv/stratum-fs (backlog=16, ...)
+    joey: stratumd-boot /srv/stratum-fs not bound (16b-gamma-mount-close;
+                                downstream stratumd mount path requires
+                                further work)
+    joey: stratumd-boot child exit_status=1 (final drain)
+    stratumd-stub: serving on fd 0 (rx) + fd 1 (tx)
+    stratumd-stub: EOF on rx; exit 0
+    joey: stub-bringup ok (pipe + spawn + attach + mount + unmount + walk_open + read)
+      joey: /joey pid=1524 exited cleanly (status=0)
+    Thylacine boot OK
+
+This matches the prior session's documented expected behavior
+(`project_active.md`: "Boot continues to stub-bringup, joey exits
+cleanly, kernel reports Thylacine boot OK"). **There is no mount-bind
+hang.** The apparent "hang" in earlier sessions was just joey's
+6000-retry busy-wait loop at ~50ms per retry (`usr/joey/joey.c:1470`
+`for (volatile long j = 0; j < 1000000L; j++)`) — total ~5 min wall-
+clock, with the boot output silent between stratumd's "serving"
+message and joey's "not bound" message because neither side produces
+stderr during the spin.
+
+### Sub-finding: stratumd exit_status mismatch
+
+The 16b-γ-mount-close prior session documented stratumd dying at
+sodium_init via `abort() -> _Exit(127)` (the 0011-pouch-abort.patch
+path). joey-side `t_wait_pid` should then surface `exit_status=127`.
+
+Today's boot reports `child exit_status=1`. The `1` is incompatible
+with the abort path (which exits 127) AND with stratumd main's normal
+post-`stm_stratumd_run`-failure path (which returns 2 per `run.c:761`).
+After the "serving" message and before `stm_stratumd_run` returns,
+the only paths to exit_status=1 are pre-serve checks at lines 230,
+315, 339, 348, 361, 375, 384, 398, 444, 463, 474, 490, 501, 515, 525,
+540, 551, 571, 582, 590 (`grep -nE 'return 1' run.c`) — but those all
+fire BEFORE the serving message, and we observe the serving message.
+
+This means stratumd is dying somewhere OTHER than sodium_init's abort
+path, with an unexplained exit code. The prior session's
+characterization of "sodium_init -> abort -> _Exit(127)" may have
+been incorrect, or the failure mode shifted across pool.img
+regenerations (consistent with this section's "content-sensitive"
+findings).
+
+Investigation deferred — the resolution joins the AEGIS investigation
+under the same v1.x lift envelope.
+
+### Implications
+
+The mount-bind investigation is closed: no bug, just slow retry.
+The visible blocker is stratumd's silent exit at status=1, which:
+
+- is NOT the documented sodium_init/_Exit(127) path
+- happens AFTER the "serving" message
+- happens BEFORE bind to `/srv/stratum-fs` registers the service
+
+Next-session strategic decision: the original hardening proposals
+(memory-model audit + page-poison + don't-extinct-on-userspace-faults
++ lockable mkfs seed) become the right next investment, since
+(a) there is no new mount-bind bug to chase, and (b) the visible
+blocker is opaque (silent exit) — hardening would make it diagnosable.
+
+### Cross-reference
+
+- Joey's retry+drain+reap loop: `usr/joey/joey.c:1444-1517` (the
+  6000-retry budget at line 1445; the 1M busy-wait at line 1470).
+- The "expected" rc=1 documented disposition: `project_active.md`
+  (P6 16b-γ-mount-close section) — but the prior-session note also
+  characterizes the failure as `sodium_init -> abort -> _Exit(127)`,
+  which is incompatible with rc=1. The discrepancy is unexplained.
