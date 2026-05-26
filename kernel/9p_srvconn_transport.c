@@ -13,6 +13,8 @@
 #include <thylacine/srvconn.h>
 #include <thylacine/types.h>
 
+#include "../arch/arm64/timer.h"
+
 // =============================================================================
 // Vtable implementations.
 // =============================================================================
@@ -23,31 +25,18 @@ static int srvconn_transport_send(void *ctx, const u8 *buf, size_t len) {
     if (st->magic != P9_SRVCONN_TRANSPORT_MAGIC) return -1;
     if (!st->cn)                                 return -1;
     if (!buf && len > 0)                         return -1;
+    if (len == 0)                                return 0;
 
-    // Loop on short writes. srvconn_client_send is non-blocking and
-    // typically returns `n` (the full request) because SRVCONN_RING_CAP
-    // is sized to hold a full msize frame. A short write (n < len)
-    // would indicate a corrupted ring or a torn connection; the
-    // transport core sinks to ERROR on a partial-write return.
-    //
-    // The 0-return contract: srvconn_client_send returns -1 if torn or
-    // bad args. There is no "0 bytes accepted" success case; a
-    // returned 0 only fires when len == 0.
-    size_t total = 0;
-    while (total < len) {
-        long n = srvconn_client_send(st->cn,
-                                       buf + total,
-                                       (long)(len - total));
-        if (n < 0) return -1;
-        if (n == 0) {
-            // Ring saturated mid-send (should not happen for properly
-            // sized rings). Return partial-write count to communicate
-            // progress; transport core sinks to ERROR.
-            return (int)total;
-        }
-        total += (size_t)n;
-    }
-    return (int)total;
+    // R1 F9 close: simplified. `srvconn_client_send` returns either
+    // the full `len` (success), 0 (only when len == 0, handled above),
+    // or -1 (torn rings / bad args). The "short write" loop the
+    // pre-fix code carried was dead -- SRVCONN_RING_CAP is sized via a
+    // _Static_assert to hold a full msize frame, so chan_produce
+    // never returns a partial count for a kernel-client send.
+    long n = srvconn_client_send(st->cn, buf, (long)len);
+    if (n < 0)                return -1;
+    if ((size_t)n != len)     return -1;   // unreachable per the assert
+    return (int)n;
 }
 
 static int srvconn_transport_recv(void *ctx, u8 *buf, size_t cap) {
@@ -57,14 +46,37 @@ static int srvconn_transport_recv(void *ctx, u8 *buf, size_t cap) {
     if (!st->cn)                                 return -1;
     if (!buf || cap == 0)                        return -1;
 
-    // BLOCKING. The caller is expected to have set the SrvConn's
-    // client_deadline_ns before invoking the upper-level p9_client op
-    // (SYS_ATTACH_9P_SRV does this for Tversion/Tattach; later
-    // Twalk/Tread/Twrite set their own deadlines via the same
-    // mechanism in sys_read_for_proc / sys_write_for_proc / sys_walk_
-    // open_handler's KOBJ_SPOOR -> dev9p arm).
+    // R1 F2 close: defense-in-depth deadline.
     //
-    // Returns:
+    // The upper layer is RESPONSIBLE for setting the SrvConn's
+    // `client_deadline_ns` before initiating a blocking op:
+    //   - sys_attach_9p_srv_handler sets HANDSHAKE_DEADLINE before
+    //     p9_attached_create's Tversion/Tattach (R1 F1 close);
+    //   - the post-attach dev9p path (sys_walk_open / sys_read /
+    //     sys_write KOBJ_SPOOR) is supposed to set OP_DEADLINE before
+    //     each Twalk/Tread/Twrite, but at v1.0 those handlers do NOT
+    //     (the prosecutor's F2 finding).
+    //
+    // Rather than touch every dev9p call site, we auto-arm OP_DEADLINE
+    // here if the deadline reads 0 ("no deadline"). This keeps the
+    // adapter symmetric with the upper layer's contract: every recv
+    // is bounded by a wall-clock cap; a hung peer surfaces as -1 from
+    // tsleep within OP_DEADLINE_NS instead of wedging joey forever.
+    // The auto-arm is a backstop, not a substitute -- a future dev9p
+    // refactor that arms a per-op deadline (e.g., a shorter one for
+    // Tread, a longer one for Twrite) takes precedence because it
+    // sets a non-zero value before this check.
+    //
+    // Atomic read on the deadline word is RELAXED: there is exactly
+    // one writer (the upper-layer setter on the same thread that
+    // immediately calls the recv) and one reader (here, same thread).
+    // No cross-thread visibility needed for the single-flow case.
+    if (__atomic_load_n(&st->cn->client_deadline_ns, __ATOMIC_RELAXED) == 0u) {
+        srvconn_set_client_deadline(st->cn,
+            timer_now_ns() + SRVCONN_OP_DEADLINE_NS);
+    }
+
+    // BLOCKING. Returns:
     //   >0 -- bytes read
     //    0 -- EOF (the SrvConn is torn and no residual bytes remain);
     //          transport core surfaces this as recv-side ERROR. The

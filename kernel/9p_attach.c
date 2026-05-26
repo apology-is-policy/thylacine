@@ -4,6 +4,7 @@
 #include <thylacine/9p_attach.h>
 #include <thylacine/9p_client.h>
 #include <thylacine/9p_spoor_transport.h>
+#include <thylacine/9p_srvconn_transport.h>
 #include <thylacine/9p_transport.h>
 #include <thylacine/9p_wire.h>
 #include <thylacine/dev9p.h>
@@ -155,6 +156,13 @@ static void attached_destroy_inner(struct p9_attached *a) {
         a->adapter      = NULL;
         if (tx)               spoor_clunk(tx);
         if (rx && rx != tx)   spoor_clunk(rx);
+        // R1 F5 close: clobber the adapter's magic BEFORE kfree so a
+        // concurrent observer fast-fails (mirror p9_spoor_transport's +
+        // p9_srvconn_transport's documented invariant; the destroys
+        // are magic-guarded so each is a no-op if `adp` is the other
+        // adapter type -- safe defense-in-depth, harmless cost).
+        p9_spoor_transport_destroy(adp);
+        p9_srvconn_transport_destroy((struct p9_srvconn_transport *)adp);
         kfree(adp);
     }
 

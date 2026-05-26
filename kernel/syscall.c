@@ -693,6 +693,13 @@ s64 sys_write_for_proc(struct Proc *p, hidx_t h, const u8 *kbuf, u64 len) {
         // srvconn_client_write path. F5 close: ATOMIC_ACQUIRE pairs
         // srvconn_set_byte_mode's ATOMIC_RELEASE.
         struct SrvConn *cn = (struct SrvConn *)slot->obj;
+        // R1 F3 close: refuse raw byte I/O on a kernel-attached SrvConn.
+        // After SYS_ATTACH_9P_SRV wraps the conn, the c2s/s2c rings are
+        // load-bearing for the kernel 9P client's Twalk/Tread/Twrite
+        // stream. A concurrent userspace write would interleave bytes
+        // into the c2s ring out-of-band w.r.t. the 9P session, corrupting
+        // the wire. Reject upfront.
+        if (srvconn_is_kernel_attached(cn))          return -1;
         srvconn_set_client_deadline(cn, timer_now_ns() + SRVCONN_OP_DEADLINE_NS);
         bool bm = __atomic_load_n(&cn->byte_mode, __ATOMIC_ACQUIRE);
         long n = bm
@@ -738,6 +745,11 @@ s64 sys_read_for_proc(struct Proc *p, hidx_t h, u8 *kbuf, u64 len) {
         // (see srvconn_client_recv's tsleep against client_deadline_ns).
         // F5 close: ATOMIC_ACQUIRE pairs srvconn_set_byte_mode's RELEASE.
         struct SrvConn *cn = (struct SrvConn *)slot->obj;
+        // R1 F3 close: refuse raw byte I/O on a kernel-attached SrvConn.
+        // After SYS_ATTACH_9P_SRV the c2s/s2c rings carry the kernel
+        // client's 9P stream; a userspace recv would drain Rwalk/Rread
+        // bytes meant for the kernel client and corrupt the session.
+        if (srvconn_is_kernel_attached(cn))          return -1;
         srvconn_set_client_deadline(cn, timer_now_ns() + SRVCONN_OP_DEADLINE_NS);
         bool bm = __atomic_load_n(&cn->byte_mode, __ATOMIC_ACQUIRE);
         long n = bm
@@ -1246,6 +1258,31 @@ static s64 sys_attach_9p_srv_handler(u64 srv_fd_raw, u64 aname_va,
     // drops the ref via close) OR explicitly call the close + destroy
     // sequence + kfree.
 
+    // R1 F4 close: hoist srvconn_set_kernel_attached HERE -- as early
+    // as possible after the adapter has committed (1 srvconn_ref taken).
+    // Pre-fix the setter ran at the end of the syscall (after handle_alloc
+    // of the KOBJ_SPOOR root); a cross-CPU peer-Thread t_close on the
+    // KObj_Srv handle in the same Proc could see kernel_attached=false
+    // and tear the rings down DURING the handshake. Setting the flag here
+    // closes that window: any subsequent handle_close on the userspace
+    // KObj_Srv slot sees kernel_attached=true and skips srvconn_teardown.
+    // Failure paths below still tear down cleanly because the adapter's
+    // transport.close runs srvconn_teardown + srvconn_unref
+    // unconditionally (idempotent on already-torn rings).
+    srvconn_set_kernel_attached(cn);
+
+    // R1 F1 close: set the handshake deadline BEFORE p9_attached_create
+    // drives Tversion + Tattach. Pre-fix the syscall called the
+    // handshake with `cn->client_deadline_ns == 0` -- which the
+    // adapter's srvconn_client_recv interprets as "no deadline" (block
+    // indefinitely on tsleep). A stratumd that was alive but hung
+    // (mid-pthread-join, mallocng-asserted, etc.) would wedge joey
+    // forever instead of failing cleanly. The peer sys_srv_connect_
+    // handler sets the same deadline at line 3811; sys_attach_9p_srv_
+    // handler now mirrors that discipline.
+    srvconn_set_client_deadline(cn,
+        timer_now_ns() + SRVCONN_HANDSHAKE_DEADLINE_NS);
+
     struct p9_transport_ops ops = p9_srvconn_transport_ops(adapter);
     struct p9_attached *att = p9_attached_create(
         ops,
@@ -1320,17 +1357,8 @@ static s64 sys_attach_9p_srv_handler(u64 srv_fd_raw, u64 aname_va,
         return -1;
     }
 
-    // F-16c-attach-srv close: flip the SrvConn into kernel-attached mode
-    // BEFORE returning the fd. Once set, handle_close on the userspace
-    // KOBJ_SRV slot skips srvconn_teardown -- the c2s/s2c rings are now
-    // load-bearing for the kernel 9P client (driving subsequent Twalk /
-    // Tread / Twrite via the adapter). Atomic store-release pairs with
-    // handle_close's atomic load-acquire (a cross-CPU userspace close
-    // racing with this setter either sees the flag set, or sees it
-    // unset AND the syscall has not yet returned to userspace).
-    srvconn_set_kernel_attached(cn);
-
-    // Drop the construction ref.
+    // Drop the construction ref. (kernel_attached was set EARLIER --
+    // right after p9_srvconn_transport_init succeeded; see R1 F4 fix.)
     p9_attached_unref(att);
     return (s64)fd;
 }
@@ -1358,8 +1386,13 @@ static s64 sys_pivot_root_handler(u64 new_root_fd_raw) {
     if (!p)                                          return -1;
     if (!p->territory)                               return -1;
 
-    // RIGHT_READ on the new root: same rationale as SYS_CHROOT --
-    // pivot's purpose is to serve as a walk source post-pivot.
+    // RIGHT_READ on the new root: same rationale as SYS_CHROOT -- pivot
+    // serves as a walk source post-pivot. RIGHT_WRITE not required:
+    // pivot binds a name to a Spoor without inheriting per-handle
+    // rights; subsequent SYS_WALK_OPEN(FROM_ROOT) re-establishes rights
+    // from the freshly-cloned Spoor's Dev. Mount-style operations that
+    // create new edges in the namespace need W; pivot only swaps an
+    // existing R-rights name binding (R1 F10 close).
     struct Spoor *source = sys_lookup_spoor(p, (hidx_t)new_root_fd_raw, RIGHT_READ);
     if (!source)                                     return -1;
 

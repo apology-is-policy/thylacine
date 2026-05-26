@@ -1378,7 +1378,12 @@ int main(void) {
         // retries -> ~5.1 s wall, while real work would be sub-second).
         // 3000 retries * 1 ms = ~3 s outer bound; typical bind observed
         // well under retry 500 with the yielding pattern.
-        unsigned int sleep_word = 0;
+        // R1 F12 close: this is a sleep-only sentinel for torpor_wait's
+        // wait-on-address contract; not a signaling word. The pacer name
+        // documents intent so a future grepper doesn't confuse it with
+        // an actual sync primitive. Never read by t_torpor_wake; the
+        // wait always times out after 1 ms and the retry loops.
+        unsigned int joey_retry_pacer_dummy = 0;
         for (int i = 0; i < 3000; i++) {
             sd_srv_fd = t_srv_connect(srv_name, sizeof(srv_name) - 1, 0, 0);
             if (sd_srv_fd >= 0) {
@@ -1404,7 +1409,7 @@ int main(void) {
                 if (n <= 0) break;
                 (void)t_puts((const char *)rd_buf, (size_t)n);
             }
-            (void)t_torpor_wait(&sleep_word, 0, 1000); // sleep 1 ms (timeout)
+            (void)t_torpor_wait(&joey_retry_pacer_dummy, 0, 1000); // sleep 1 ms
         }
 
         if (sd_srv_fd < 0) {

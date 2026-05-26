@@ -50,14 +50,24 @@ BOOT_TIMEOUT="${BOOT_TIMEOUT:-45}"          # seconds -- wallclock max,
                                             # extinction (polls log every
                                             # 0.1 s). Default 45 s gives
                                             # ~2x headroom over the
-                                            # observed 13-24 s end-to-end
-                                            # boot post-16c spin-elimination
-                                            # (variance dominated by pool
-                                            # RNG-seed differences in
-                                            # AEGIS-256 soft-decrypt cost).
-                                            # UBSan needs ~120-300 s; set
-                                            # BOOT_TIMEOUT=300 (or more)
-                                            # for that pipeline explicitly.
+                                            # observed 16-26 s end-to-end
+                                            # boot post-16c spin-elimination.
+                                            # Variance is bimodal (~16 s
+                                            # "fast" vs ~23 s "slow") and
+                                            # appears on the SAME pool.img;
+                                            # most likely cause is QEMU TCG
+                                            # thread-scheduling non-
+                                            # determinism on the host (4
+                                            # vCPU emulation; stratumd's
+                                            # worker pthreads compete for
+                                            # emulation time with joey's
+                                            # retry path). NOT driven by
+                                            # pool RNG content (which a
+                                            # PRESERVE=1 A/B experiment
+                                            # falsified). UBSan needs
+                                            # ~120-300 s; set BOOT_TIMEOUT
+                                            # =300 (or more) for that
+                                            # pipeline explicitly.
 BOOT_MARKER="Thylacine boot OK"
 EXTINCTION_MARKER="EXTINCTION:"             # per TOOLING.md §10 ABI
 

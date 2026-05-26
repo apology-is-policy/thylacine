@@ -392,4 +392,48 @@ void test_9p_srvconn_transport_kernel_attached_skips_teardown_on_handle_close(vo
         drop_test_proc(server);
         drop_test_proc(client);
     }
+
+    // Part 3 (R1 F8 close): verify the adapter's transport.close DOES
+    // migrate the teardown. With kernel_attached=true, handle_close
+    // skipped teardown; the rings stayed live. The adapter's
+    // transport.close hook is now the SOLE teardown trigger. This
+    // catches a future regression where the adapter's close drops the
+    // teardown call (which would otherwise leave a kernel-attached
+    // SrvConn permanently live after the FS unmount).
+    {
+        srv_registry_reset();
+        struct Proc *server = NULL, *client = NULL;
+        int svc_h = -1, conn_h = -1;
+        struct SrvConn *cn = open_byte_mode_pair(&server, &client, &svc_h, &conn_h);
+        TEST_ASSERT(cn != NULL, "adapter-close: open_byte_mode_pair");
+        srvconn_ref(cn);
+
+        struct p9_srvconn_transport st;
+        TEST_EXPECT_EQ(p9_srvconn_transport_init(&st, cn), 0,
+            "adapter-close: init takes +1 srvconn_ref");
+        struct p9_transport_ops ops = p9_srvconn_transport_ops(&st);
+
+        srvconn_set_kernel_attached(cn);
+        handle_close(client, (hidx_t)conn_h);   // skip teardown (gated)
+
+        u8 probe;
+        long mid_recv = srvconn_server_recv(cn, &probe, 1);
+        TEST_EXPECT_EQ(mid_recv, 0,
+            "adapter-close: rings live after handle_close (kernel_attached gate)");
+
+        // Call the adapter's transport.close -- this is the migrated
+        // teardown path. Post-call the rings MUST be EOF'd.
+        int crc = ops.close(ops.ctx);
+        TEST_EXPECT_EQ(crc, 0, "adapter-close: ops.close returns 0");
+
+        long post_recv = srvconn_server_recv(cn, &probe, 1);
+        TEST_EXPECT_EQ(post_recv, -1,
+            "adapter-close: transport.close completed the migrated teardown "
+            "(server_recv = -1 = EOF)");
+
+        srvconn_unref(cn);   // drop the probe ref we took
+        srv_registry_reset();
+        drop_test_proc(server);
+        drop_test_proc(client);
+    }
 }
