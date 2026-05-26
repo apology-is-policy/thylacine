@@ -177,6 +177,43 @@ struct NoteQueue {
 // re-typing the literal.
 #define NOTE_NAME_KILL "kill"
 
+// `snare:*` family — kernel-synthetic notes posted on EL0 unhandled
+// fault. Per docs/ERRORS.md "Fault-note naming". Each name fits within
+// NOTE_NAME_MAX = 16 bytes including NUL. The `snare:` prefix is
+// reserved for kernel-synthetic posters; userspace SYS_POSTNOTE with
+// a `snare:`-prefixed name is rejected at notes_post.
+//
+// Default action for any unhandled snare:* note: terminate the
+// offending Proc via exits(name). The kernel does NOT extinct on EL0
+// unhandled fault at v1.0 -- see kernel/proc.c::proc_fault_terminate
+// + arch/arm64/exception.c::exception_sync_lower_el.
+#define NOTE_NAME_SNARE_SEGV   "snare:segv"   // no VMA / W^X / perm
+#define NOTE_NAME_SNARE_BUS    "snare:bus"    // VMA-covered but burrow can't satisfy
+#define NOTE_NAME_SNARE_ALIGN  "snare:align"  // EL0 PC/SP alignment fault
+#define NOTE_NAME_SNARE_BTI    "snare:bti"    // EL0 BTI fault
+#define NOTE_NAME_SNARE_BRK    "snare:brk"    // EL0 brk #imm (assertion/debug)
+#define NOTE_NAME_SNARE_ILL    "snare:ill"    // EL0 unknown sync EC
+#define NOTE_NAME_SNARE_FPE    "snare:fpe"    // EL0 floating-point trap (reserved; no v1.0 path emits this)
+
+// Length sanity -- the longest name + NUL must fit NOTE_NAME_MAX. The
+// constants above are #define'd as string literals; sizeof on the
+// literal returns the byte count INCLUDING the trailing NUL. Pin the
+// longest one ("snare:align" = 11+1 = 12) at compile time.
+_Static_assert(sizeof(NOTE_NAME_SNARE_ALIGN) <= NOTE_NAME_MAX,
+               "NOTE_NAME_SNARE_ALIGN does not fit NOTE_NAME_MAX");
+_Static_assert(sizeof(NOTE_NAME_SNARE_SEGV)  <= NOTE_NAME_MAX,
+               "NOTE_NAME_SNARE_SEGV does not fit NOTE_NAME_MAX");
+_Static_assert(sizeof(NOTE_NAME_SNARE_BUS)   <= NOTE_NAME_MAX,
+               "NOTE_NAME_SNARE_BUS does not fit NOTE_NAME_MAX");
+_Static_assert(sizeof(NOTE_NAME_SNARE_BTI)   <= NOTE_NAME_MAX,
+               "NOTE_NAME_SNARE_BTI does not fit NOTE_NAME_MAX");
+_Static_assert(sizeof(NOTE_NAME_SNARE_BRK)   <= NOTE_NAME_MAX,
+               "NOTE_NAME_SNARE_BRK does not fit NOTE_NAME_MAX");
+_Static_assert(sizeof(NOTE_NAME_SNARE_ILL)   <= NOTE_NAME_MAX,
+               "NOTE_NAME_SNARE_ILL does not fit NOTE_NAME_MAX");
+_Static_assert(sizeof(NOTE_NAME_SNARE_FPE)   <= NOTE_NAME_MAX,
+               "NOTE_NAME_SNARE_FPE does not fit NOTE_NAME_MAX");
+
 // ============================================================================
 // Public API
 // ============================================================================

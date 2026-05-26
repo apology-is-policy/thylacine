@@ -30,6 +30,7 @@
 #ifndef THYLACINE_SYSCALL_H
 #define THYLACINE_SYSCALL_H
 
+#include <thylacine/errno.h>
 #include <thylacine/types.h>
 
 // Syscall numbers. v1.0 P3-Ec stable; new syscalls append.
