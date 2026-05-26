@@ -159,12 +159,16 @@ lands on a root that already has `/sbin/corvus` etc.
 
 Three viable options for the installer:
 
-1. **Host-bake (v1.0 expedient)**. Extend `stratum-mkfs` with
-   `--populate-from <dir>` — recursively copies a host directory tree
-   into the formatted pool. `tools/build.sh` calls it with the relevant
-   subtree of the cpio sources (the boot binary corpus). pool.img
-   ships pre-populated. Joey's bringup ends with mount + pivot. The
-   "installer" exists conceptually at host build time.
+1. **Host-bake (v1.0 expedient)**. Orchestrate the already-shipping
+   Stratum v2 tools from `tools/build.sh::build_stratum_pool_fixture`:
+   `stratum-mkfs` (already wired) creates the empty pool; `stratumd`
+   is started in the background on a temp Unix socket; `stratum-fs
+   write` (the audited 9P-CLI client subcommand — `lcreate + buffered
+   Twrite + auto-fsync`) copies each boot-corpus file under its
+   target path; stratumd is shut down. pool.img ships pre-populated.
+   Joey's bringup ends with mount + pivot. The "installer" exists
+   conceptually at host build time, implemented as shell orchestration
+   of already-audited Stratum binaries — **no new Stratum-side code**.
 2. **Runtime installer (v1.1 lift)**. Build a Thylacine `/sbin/installer`
    binary that runs as part of an alternate boot path (joey takes an
    arg, or there's a second init binary). It iterates devramfs, opens
@@ -179,9 +183,13 @@ Three viable options for the installer:
 
 **Choice: 1 (host-bake) for v1.0.** Rationale:
 
-- **Significantly less code than 2.** No new userspace installer binary;
-  no runtime exercise of the 9P write surface (deferred to a later
-  proving binary); host build infra extension only.
+- **Significantly less code than 2 — in fact, zero new Stratum-side
+  code.** Stratum v2 already ships `stratum-fs` (the 9P-CLI client
+  with `write`/`mkdir`/`create`/`sync` subcommands), so host-bake is
+  pure shell orchestration of existing audited binaries in
+  `tools/build.sh`. No `--populate-from` flag, no Stratum-side patch;
+  the populate exercises the same audited Twrite/Tcreate code paths
+  the runtime mount will use.
 - **Same end-state as 2 for v1.0 boot.** Both pre-populate pool.img with
   the same corpus; the difference is *when* the populate runs.
 - **2 stays on the v1.1 plan** as the architecturally complete answer.
