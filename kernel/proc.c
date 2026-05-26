@@ -894,6 +894,19 @@ int proc_count_live_peers_locked(struct Proc *p, struct Thread *self) {
 // pid + reason + address without requiring a debugger.
 __attribute__((noreturn))
 void proc_fault_terminate(const char *name, uintptr_t faulting_addr) {
+    // F2 audit close: defense-in-depth on `name` itself. The contract
+    // says `name` MUST be a NOTE_NAME_SNARE_* string literal; today's
+    // only callers in arch/arm64/exception.c pass literals, so the
+    // NULL case is latent. But the function downstream passes `name`
+    // straight to uart_puts (which `while(*s)`-derefs) and to exits
+    // (which strcmp's against "ok"). A NULL passed in via a future
+    // caller bug would NULL-deref the kernel from the uart layer.
+    // Cheap to guard here; matches the surrounding extinction-on-
+    // contract-violation pattern.
+    if (!name)                       extinction_with_addr(
+                                         "proc_fault_terminate with NULL name (contract violation)",
+                                         faulting_addr);
+
     struct Thread *t = current_thread();
     if (!t)                          extinction("proc_fault_terminate with no current thread");
     if (t->magic != THREAD_MAGIC)    extinction("proc_fault_terminate from corrupted current thread");

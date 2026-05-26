@@ -70,7 +70,7 @@ below are the v1.0 set; additions append (no renumbering).
 | Name           | Value | POSIX equiv  | Meaning |
 |---|---|---|---|
 | `T_E_OK`        | 0     | (success)    | Operation succeeded |
-| `T_E_PERM`      | 1     | `EPERM`      | Operation not permitted (capability check failed) |
+| `T_E_PERM`      | 1     | `EPERM`      | Operation not permitted (capability check failed). **DO NOT RETURN FROM A SYSCALL HANDLER** — `-1` collides with pouch's flat-error sentinel; use `T_E_ACCES` instead. The name remains for translation-from-userspace code. See errno.h for the full rationale. |
 | `T_E_NOENT`     | 2     | `ENOENT`     | No such file or namespace entry |
 | `T_E_IO`        | 5     | `EIO`        | I/O error (storage, device, network) |
 | `T_E_BADF`      | 9     | `EBADF`      | Bad handle / fd |
@@ -117,7 +117,7 @@ fits within `NOTE_NAME_MAX = 16` bytes including the NUL terminator.
 | `snare:bti`       | 9+1    | `SIGILL` (subset)  | EL0 BTI fault (indirect branch to non-`bti j/c/jc` target on FEAT_BTI hardware) |
 | `snare:brk`       | 9+1    | `SIGTRAP`          | EL0 `brk #imm` (assertion / debug trap) |
 | `snare:ill`       | 9+1    | `SIGILL`           | EL0 unhandled sync exception (unknown EC) |
-| `snare:fpe`       | 9+1    | `SIGFPE`           | EL0 floating-point exception (FEAT_AdvSIMD trap; reserved — no v1.0 path emits this yet) |
+| `snare:fpe`       | 9+1    | `SIGFPE`           | EL0 floating-point exception. **RESERVED — no v1.0 path emits this**: the EL0 dispatcher in `arch/arm64/exception.c::exception_sync_lower_el` has no case for `EC_FP_ASIMD` / `EC_FP_TRAP_AARCH64` / `EC_SVE_TRAP`; any FP trap from EL0 currently falls through to the `default:` case and emits `snare:ill`. v1.x wires the FP ECs to `snare:fpe`. The constant is reserved so callers don't have to invent a name. (F6 audit close.) |
 
 The `snare:` prefix is reserved for kernel-synthetic fault notes. User
 processes that want to define their own structured event names should
@@ -138,6 +138,24 @@ via `wait_pid`, kernel continues serving other Procs. (Prior to the
 P6-pouch-stratumd-boot 16b-γ-mount-bind hardening pass the kernel
 extincted on EL0 unhandled faults; the change documented here is
 the close of the auditor's #3a recommendation.)
+
+**Multi-thread Proc carve-out** (F8 audit close, v1.0 limitation):
+the "kernel does NOT extinct" promise above applies to single-thread
+Procs. A multi-thread Proc (`thread_count > 1`) that faults DOES
+extinct the kernel with a specific message
+(`EL0 fault in multi-thread Proc (v1.x: cross-thread shootdown)`).
+The reason: `exits(name)` for a Proc with live peer Threads requires
+cross-thread shootdown (Linux's `CLONE_THREAD`-style `exit_group`)
+which is a v1.x extension paired with `SYS_EXIT_GROUP` (see
+CLAUDE.md's "pouch abort -> _Exit override" audit-trigger row).
+`proc_fault_terminate` surfaces the cause clearly via a uart line
+before extincting, so test failures attribute correctly.
+
+This carve-out narrows the contract: at v1.0, the kernel survives
+faults in single-thread Procs (the actual target — stratumd, joey,
+all pouch-hello-* binaries) but not in multi-thread Procs (today only
+`/pouch-hello-threads`; its happy-path doesn't fault). v1.x closes
+the carve-out when `SYS_EXIT_GROUP` lands.
 
 ## Exit-status semantics
 

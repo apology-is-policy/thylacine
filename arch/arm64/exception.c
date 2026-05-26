@@ -305,12 +305,21 @@ void exception_sync_lower_el(struct exception_context *ctx) {
             // extinction_with_addr line provided.
             proc_fault_terminate(NOTE_NAME_SNARE_SEGV, (uintptr_t)fi.vaddr);
         case FAULT_FATAL:
-            // FAULT_FATAL is the reserved "really fatal" return -- a
-            // page-fault path that detected a kernel-side invariant
-            // violation that user code triggered. Treat as a SIGBUS-
-            // class fault: terminate the Proc with snare:bus tag
-            // rather than extincting.
-            proc_fault_terminate(NOTE_NAME_SNARE_BUS, (uintptr_t)fi.vaddr);
+            // F3 audit close: FAULT_FATAL's documented contract (per
+            // arch/arm64/fault.h) is "kernel-side invariant violation;
+            // the dispatcher extincted internally; this return value
+            // is reserved for paths that can't extinct from inside."
+            // It is NOT "user-mode SIGBUS-class fault". Routing it to
+            // snare:bus would silently terminate the offending user
+            // Proc while leaving the kernel in the broken state that
+            // FAULT_FATAL was meant to surface. Keep extinction so a
+            // future arch_fault_handle path returning FAULT_FATAL per
+            // the documented contract is escalated, not masked.
+            // SIGBUS-class user faults (the v1.x lift) will land via
+            // a new dedicated enum value or via FAULT_UNHANDLED_USER
+            // with a sub-classification, not by overloading FAULT_FATAL.
+            extinction_with_addr("arch_fault_handle returned FAULT_FATAL (EL0)",
+                                 (uintptr_t)fi.vaddr);
         }
         // Unknown fault_result from arch_fault_handle is a kernel-side
         // bug (enum grew without this switch updating). Extinct -- the

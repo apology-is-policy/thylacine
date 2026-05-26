@@ -94,11 +94,15 @@ static int notes_name_to_bit(const char *name) {
 // future-proofs against that path being relaxed).
 static int notes_name_has_snare_prefix(const char *name) {
     static const char prefix[] = "snare:";
-    static const u32  plen = sizeof(prefix) - 1;     // 6
-    _Static_assert(plen < NOTE_NAME_MAX,
+    // F5 audit close: use sizeof(prefix) - 1 directly as the
+    // _Static_assert operand. ISO C11 §6.6 requires integer constant
+    // expressions for _Static_assert; `static const u32 plen = ...`
+    // is accepted by clang as a GNU extension but isn't a constant
+    // expression per the standard. sizeof IS.
+    _Static_assert(sizeof(prefix) - 1 < NOTE_NAME_MAX,
                    "snare: prefix must be shorter than NOTE_NAME_MAX so the "
                    "bounded compare cannot read past the in-kernel name buffer");
-    for (u32 i = 0; i < plen; i++) {
+    for (u32 i = 0; i < sizeof(prefix) - 1; i++) {
         // Defense-in-depth: if `name` is shorter than the prefix and
         // NUL-terminates early, the mismatch on the NUL returns 0
         // (not a snare:* note).

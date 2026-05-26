@@ -110,12 +110,26 @@ struct Thread;
 #define NOTE_BIT_KILL        1u
 #define NOTE_BIT_PIPE        2u
 #define NOTE_BIT_CHILD_EXIT  3u
+// F4 audit close (P6 hardening #3a): reserved bit for the snare:*
+// fault-note family. Setting the bit defers delivery of EVERY snare:*
+// note (per-fault-kind masking is a v1.x extension). At v1.0 snare:*
+// names are NOT in g_known_notes (proc_fault_terminate calls exits
+// directly without going through notes_post), so this bit has no
+// consumer today; it's reserved so the docs/ERRORS.md "Bit-position
+// assignment in note_mask" claim is honored by a real symbol. v1.x
+// adds snare:* to g_known_notes for substrate-based delivery; this
+// bit becomes load-bearing then.
+#define NOTE_BIT_SNARE       4u
 
 // Bitmask of every supported note. Userspace SYS_NOTE_MASK calls that set
 // bits outside this mask succeed (we tolerate unknown bits — they just
 // have no effect at v1.0; the supported set grows per chunk without ABI
 // break). SYS_POSTNOTE with an unsupported note name returns -EINVAL.
-#define NOTE_MASK_SUPPORTED  0x0fu
+//
+// F4 audit close: includes NOTE_BIT_SNARE (bit 4) for the snare:*
+// family even though no v1.0 consumer exists; reserves the bit
+// position for v1.x.
+#define NOTE_MASK_SUPPORTED  0x1fu
 
 // In-kernel note record. The ring lives in `struct NoteQueue.ring` (inline
 // — the queue is heap-allocated once per Proc at proc_alloc).
@@ -199,6 +213,13 @@ struct NoteQueue {
 // constants above are #define'd as string literals; sizeof on the
 // literal returns the byte count INCLUDING the trailing NUL. Pin the
 // longest one ("snare:align" = 11+1 = 12) at compile time.
+//
+// F7 audit close: the `<=` here (not `<`) is deliberate -- a literal
+// of exactly NOTE_NAME_MAX bytes is 15 chars + NUL, which fits
+// notes_name_copy's discipline of writing up to NOTE_NAME_MAX - 1
+// source bytes + padding dst[NOTE_NAME_MAX - 1] = 0 (the padding NUL
+// coincides bit-for-bit with the source NUL). Future entries up to
+// the boundary are safe.
 _Static_assert(sizeof(NOTE_NAME_SNARE_ALIGN) <= NOTE_NAME_MAX,
                "NOTE_NAME_SNARE_ALIGN does not fit NOTE_NAME_MAX");
 _Static_assert(sizeof(NOTE_NAME_SNARE_SEGV)  <= NOTE_NAME_MAX,

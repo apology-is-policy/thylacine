@@ -46,6 +46,30 @@
 // Operation not permitted. Use when a capability check (e.g.,
 // CAP_HOSTOWNER) refuses the operation regardless of handle rights.
 // POSIX: EPERM.
+//
+// **WARNING — DO NOT RETURN `-T_E_PERM` FROM A SYSCALL HANDLER**:
+// the value 1 collides with the pouch boundary-line patch's flat-
+// `-1` EIO sentinel. A handler that returns `-T_E_PERM` evaluates to
+// `-1`, which `usr/lib/pouch/patches/0001-pouch-syscall-seam.patch`
+// (`__syscall_ret`) recognizes as the generic flat-error sentinel
+// and maps to `errno = EIO`, NOT `EPERM`. The collision is invisible
+// to the kernel-side caller -- userspace just sees the wrong errno.
+//
+// Until the boundary-line patch is reworked to drop the `-1 -> EIO`
+// special case (which requires every existing `-1`-returning kernel
+// handler to be upgraded to a specific `-T_E_<NAME>` first, otherwise
+// they'd suddenly produce `errno = EPERM` instead of `EIO`), syscall
+// handlers that mean "permission denied" should use `T_E_ACCES`
+// (POSIX EACCES, value 13 — fits the [-4095, -2] passthrough range
+// and produces the correct POSIX errno on the userspace side).
+//
+// The name remains in the registry because (a) the ABI value 1 = EPERM
+// is fixed by POSIX, (b) kernel-side code that translates from
+// userspace-side EPERM (e.g., a 9P client receiving Rerror with a
+// POSIX errno) needs the symbolic constant. The constraint is on the
+// return-from-syscall direction only.
+//
+// Audit F1 of `audit_p6_pouch_stratumd_boot_16b_gamma_mount_bind_hardening_3a_closed_list.md`.
 #define T_E_PERM       1
 
 // No such file or namespace entry. Use when a 9P walk yields no
