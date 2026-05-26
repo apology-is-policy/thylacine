@@ -976,6 +976,34 @@ build_stratum_pool_fixture() {
 
     mkdir -p "$fixtures"
 
+    # PRESERVE mode: if THYLACINE_MKFS_PRESERVE=1 AND both files
+    # already exist, skip regeneration entirely. The bytes from the
+    # prior build are reused verbatim. This is the only way to get
+    # FULL byte-identical pool content across builds (--seed alone
+    # pins UUIDs but not the libsodium-randomized keyfile + per-run
+    # nonces). Use case: after a build that triggers a content-
+    # sensitive bug, save pool.img + system.key and re-run with
+    # PRESERVE=1 to get byte-perfect reproduction.
+    if [[ "${THYLACINE_MKFS_PRESERVE:-0}" == "1" ]] \
+        && [[ -f "$pool_img" ]] && [[ -f "$keyfile" ]]; then
+        echo "==> stratum pool fixture: PRESERVED (THYLACINE_MKFS_PRESERVE=1; $(wc -c < "$pool_img" | tr -d ' ') bytes pool.img, $(wc -c < "$keyfile" | tr -d ' ') bytes system.key from prior build)"
+        return 0
+    fi
+
+    # SEED mode: if THYLACINE_MKFS_SEED is set, pass it through to
+    # stratum-mkfs's --seed flag. Pins UUID derivation across runs
+    # (but does NOT pin the full pool bytes -- see PRESERVE above
+    # for that). Auto-generate a fresh seed if not set, so EVERY
+    # build records its seed in the log -- if any build triggers a
+    # bug, the log captures the seed for forensic re-runs.
+    local mkfs_seed="${THYLACINE_MKFS_SEED:-}"
+    if [[ -z "$mkfs_seed" ]]; then
+        # Auto-generate: 16 random hex chars from /dev/urandom. Stays
+        # within stratum-mkfs's parse_hex64 bound.
+        mkfs_seed="0x$(od -An -N8 -tx8 /dev/urandom | tr -d ' \n')"
+    fi
+    echo "==> stratum pool fixture: seed=$mkfs_seed (set THYLACINE_MKFS_SEED=<hex64> to pin, THYLACINE_MKFS_PRESERVE=1 to reuse existing files)"
+
     # Reproducible regenerate: blow away existing files so stratum-mkfs
     # doesn't reuse the previous keyfile (which would otherwise mismatch
     # if the pool size or schema changed across builds).
@@ -983,9 +1011,10 @@ build_stratum_pool_fixture() {
 
     echo "==> generating stratum pool fixture ($pool_img, system.key)"
     "$mkfs_bin" "$pool_img" --size 64M --keyfile "$keyfile" \
-        >/dev/null 2>&1 || {
+            --seed "$mkfs_seed" >/dev/null 2>&1 || {
         echo "==> stratum-mkfs failed; rerunning with stderr visible" >&2
-        "$mkfs_bin" "$pool_img" --size 64M --keyfile "$keyfile"
+        "$mkfs_bin" "$pool_img" --size 64M --keyfile "$keyfile" \
+            --seed "$mkfs_seed"
         exit 2
     }
 
