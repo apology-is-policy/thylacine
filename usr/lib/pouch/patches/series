@@ -27,3 +27,5 @@
 0011-pouch-abort.patch
 0012-pouch-mallocng-crash.patch
 0013-pouch-mallocng-diag.patch
+0014-pouch-srv-stubs.patch
+0015-pouch-poll-tag.patch

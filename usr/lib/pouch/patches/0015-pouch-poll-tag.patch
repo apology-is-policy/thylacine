@@ -1,0 +1,223 @@
+pouch boundary-line patch 0015 - poll() tag-dispatch for AF_UNIX socket fds
+
+Phase 6 sub-chunk 16c-pre (pouch-poll-tag). Closes a gap from sub-
+chunk 12 (pouch-sockets, P6-pouch-sockets): poll(2) was the only fd-
+consuming syscall NOT given a pouch-tag dispatch shim.
+
+The 0006-pouch-sockets.patch wired:
+  - read()       (src/unistd/read.c)   tag dispatch added
+  - write()      (src/unistd/write.c)  tag dispatch added
+  - close()      (src/unistd/close.c)  tag dispatch added
+  - getsockopt() (src/network/getsockopt.c) tag dispatch added
+
+But poll() (src/select/poll.c) was left pristine. Tagged fds (>=
+0x40000000 + slot) passed to poll(2) reach the kernel as out-of-
+range fds; kernel/poll.c::poll_scan_one writes POLLNVAL into
+revents. The idiomatic accept loop in stratumd's stm_stratumd_
+accept_loop reads:
+
+    int prc = poll(&pfd, 1, /*timeout_ms=*/200);
+    ...
+    if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) break;
+
+POLLNVAL trips that branch, the accept loop returns STM_EBACKEND,
+stratumd's main returns 2, the process exits, and the parent
+(joey)'s wait_pid for some other child returns stratumd's pid
+instead -- the "wrong pid" extinction race chains all the way to
+kernel extinction via kproc.wait_pid (unfiltered at v1.0).
+
+This patch overrides src/select/poll.c with a tag-dispatch shim
+that mirrors the read/write/close pattern:
+
+  - Untagged fds:    pass through to SYS_poll unchanged (fast path
+                     -- the common case for pipe/spoor/devfd polls
+                     is zero-copy).
+  - Tagged + ready:  translate slot's kernel_fd into a temporary
+                     pollfd[] scratch array; call SYS_poll on the
+                     scratch; copy revents back into the caller's
+                     array. The caller's fds[].fd identifiers are
+                     preserved so subsequent close(fds[i].fd) still
+                     hits the pouch_sock_close path.
+  - Tagged + FRESH/  put -1 into the scratch entry; the kernel's
+    vacant slot:     poll_scan_one fast-paths fd < 0 to POLLNVAL,
+                     which is the POSIX-correct surface for an
+                     unconnected socket polled.
+
+Stack-bounded scratch: PROC_HANDLE_MAX = 64 entries (~ 1 KiB). The
+kernel rejects nfds > 64 at sys_poll_for_proc; the shim mirrors
+the bound so the tagged-translation path doesn't need a heap
+allocation that could trip pre-mallocng-init Procs.
+
+Subsequent ppoll(), select(), pselect() do NOT need their own
+dispatch shim because they route through poll() (see the 0005-
+pouch-poll.patch rewrites).
+
+The audit gap is documented as a v1.x lift in
+audit_p6_pouch_sockets_closed_list.md; this patch closes it as
+part of the stratumd-listen unblock.
+
+Files modified: one.
+
+  src/select/poll.c  Full rewrite. Strips the upstream "#ifdef
+      SYS_poll / SYS_ppoll fallback" cascade (the 0005 patch
+      already adds SYS_poll = 29 unconditionally), adds the
+      tag-dispatch shape from above.
+
+Invariants preserved:
+
+  P-1 (no foreign syscall numbers): no new syscall calls.
+  P-3 (no silently-wrong POSIX): the FRESH/vacant slot case
+       returns POLLNVAL (POSIX-correct for "polled fd is invalid")
+       rather than masking with a fake-ready or fake-error revents.
+  P-4 (boundary-line discipline): the patch touches one lower-
+       half wrapper file. No upper-half files modified.
+
+Binding design: docs/POUCH-DESIGN.md sec 14 row 16c-pre. Reference:
+docs/reference/78-pouch.md (the polling backend; to be updated
+with the tag-dispatch addendum).
+
+Test: stratumd's stm_stratumd_accept_loop now polls its tagged
+listener fd correctly. The 200-ms poll cycles produce
+revents == 0 (no waiting client) until joey's t_srv_connect
+arrives, at which point revents == POLLIN; accept() returns the
+kernel-minted Spoor fd; serve_client takes the connection.
+Without this patch, the listener_fd's first poll returns POLLNVAL
+and the loop bails -- the listen-bound success surfaces but
+serving is impossible.
+
+--- a/src/select/poll.c
++++ b/src/select/poll.c
+@@ -1,20 +1,121 @@
++/* pouch boundary-line replacement for poll() (P6-pouch-stratumd-boot
++ * 16c-pre poll-tag-dispatch).
++ *
++ * Sub-chunk 12 (pouch-sockets) wired read / write / close / getsockopt
++ * to translate pouch-tagged socket fds to their kernel handles via
++ * pouch_sock_kernel_fd before crossing the syscall seam. poll(2) was
++ * left pristine -- passing a tagged fd to SYS_poll causes the kernel
++ * to see fd >= 0x40000000 (above PROC_HANDLE_MAX = 64), handle_get
++ * fails, kernel/poll.c::poll_scan_one writes POLLNVAL into revents,
++ * and the caller's `if (revents & (POLLERR|POLLHUP|POLLNVAL)) break`
++ * idiom (used by stratumd's stm_stratumd_accept_loop and any other
++ * pollable-listener consumer) bails immediately.
++ *
++ * This shim mirrors the read/write dispatch shape: for any tagged fd
++ * in the input pollfd[] array, look up the slot's kernel handle and
++ * pass THAT to SYS_poll. Untagged fds pass through unchanged. The
++ * caller's fd identifiers are preserved across the call -- the
++ * translation lives in a stack-bounded scratch array.
++ *
++ *   tagged LISTENING/CONNECTED slot -> kernel_fd (a valid Spoor/Srv
++ *                                       handle in [0, PROC_HANDLE_MAX))
++ *   tagged FRESH slot              -> -1 in the kfds[i] entry (kernel's
++ *                                       poll_scan_one fast-paths fd<0 to
++ *                                       POLLNVAL, the correct POSIX
++ *                                       answer for an unconnected socket)
++ *   tagged but unallocated slot    -> -1 in the kfds[i] entry (same:
++ *                                       POLLNVAL surfaces the EBADF
++ *                                       state without entering the
++ *                                       kernel with a bogus fd value)
++ *
++ * Stack-bounded scratch: PROC_HANDLE_MAX = 64 entries (~ 1 KiB).
++ * nfds > 64 returns -EINVAL pre-syscall (the kernel rejects the same
++ * shape; the shim mirrors the bound so the tagged-translation path
++ * doesn't need a heap allocation that pre-mallocng-init Procs would
++ * trip on).
++ *
++ * Fast path: when no tagged fd is present, the original pristine
++ * shape is preserved -- SYS_poll runs against the caller's array
++ * directly with zero copy overhead.
++ *
++ * Reference: docs/POUCH-DESIGN.md sec 14 row 16c-pre, 0015-pouch-
++ * poll-tag.patch. */
+ #include <poll.h>
+ #include <time.h>
+ #include <signal.h>
++#include <errno.h>
++#include <stddef.h>
+ #include "syscall.h"
++#include "_pouch_socket.h"
+
++/* Mirrors kernel/include/thylacine/proc.h PROC_HANDLE_MAX. The kernel
++ * already rejects nfds > 64 at sys_poll_for_proc; we mirror to bound
++ * the stack allocation. */
++#define POUCH_POLL_NFDS_MAX 64u
++
+ int poll(struct pollfd *fds, nfds_t n, int timeout)
+ {
+-#ifdef SYS_poll
+-	return syscall_cp(SYS_poll, fds, n, timeout);
+-#else
+-#if SYS_ppoll_time64 == SYS_ppoll
+-	typedef long long ppoll_ts_t[2];
+-#else
+-	typedef long ppoll_ts_t[2];
+-#endif
+-	return syscall_cp(SYS_ppoll, fds, n, timeout>=0 ?
+-		((ppoll_ts_t){ timeout/1000, timeout%1000*1000000 }) : 0,
+-		0, _NSIG/8);
+-#endif
++	/* Zero-fd poll is degenerate POSIX: with timeout >= 0 it's a
++	 * pure sleep; pass through so the kernel handles it uniformly. */
++	if (n == 0) {
++		return syscall_cp(SYS_poll, fds, n, timeout);
++	}
++	if (!fds) {
++		errno = EFAULT;
++		return -1;
++	}
++	if (n > POUCH_POLL_NFDS_MAX) {
++		errno = EINVAL;
++		return -1;
++	}
++
++	/* Fast path: if no tagged fd is present, run against the caller's
++	 * array directly (zero copy). Most pouch programs poll only on
++	 * pipe fds / spoor handles / etc; the tagged-socket case is
++	 * specific to AF_UNIX SOCK_STREAM consumers. */
++	int has_tagged = 0;
++	for (nfds_t i = 0; i < n; i++) {
++		if ((fds[i].fd & POUCH_SOCK_TAG) != 0) {
++			has_tagged = 1;
++			break;
++		}
++	}
++	if (!has_tagged) {
++		return syscall_cp(SYS_poll, fds, n, timeout);
++	}
++
++	/* Tagged-translation slow path. */
++	struct pollfd kfds[POUCH_POLL_NFDS_MAX];
++	for (nfds_t i = 0; i < n; i++) {
++		kfds[i].events  = fds[i].events;
++		kfds[i].revents = 0;
++		if ((fds[i].fd & POUCH_SOCK_TAG) != 0) {
++			int kfd = pouch_sock_kernel_fd(fds[i].fd);
++			if (kfd < 0) {
++				/* FRESH or vacant slot. The kernel sets
++				 * POLLNVAL on fd < 0; surface that uniformly
++				 * via a negative sentinel. errno from
++				 * pouch_sock_kernel_fd (ENOTCONN / EBADF) is
++				 * shadowed because POLLNVAL in revents is the
++				 * POSIX-correct surface for poll(); the next
++				 * read/write on the slot will report the
++				 * specific errno. */
++				kfds[i].fd = -1;
++				continue;
++			}
++			kfds[i].fd = kfd;
++		} else {
++			kfds[i].fd = fds[i].fd;
++		}
++	}
++
++	int r = syscall_cp(SYS_poll, kfds, n, timeout);
++
++	/* Copy revents back. fds[i].fd is left untouched so the caller
++	 * still sees their original (possibly tagged) identifiers. */
++	for (nfds_t i = 0; i < n; i++) {
++		fds[i].revents = kfds[i].revents;
++	}
++
++	return r;
+ }

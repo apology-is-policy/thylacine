@@ -1,0 +1,212 @@
+pouch boundary-line patch 0014 - /srv/ stubs for lstat / unlink / chmod
+
+Phase 6 sub-chunk 16c-pre (pouch-srv-stubs). Unblocks stratumd's
+prep-dance for stm_stratumd_listen_unix:
+
+    lstat(path, &st)            -- "is the socket path stale?"
+    if exists && !S_ISSOCK     -> EEXIST (refuse to clobber)
+    unlink(path)                -- remove any stale entry
+    socket(AF_UNIX, SOCK_STREAM, 0)
+    umask(0777 & ~mode); bind(); umask(prev)
+    chmod(path, mode)
+    listen(fd, backlog)
+    fcntl(fd, F_GETFD); fcntl(fd, F_SETFD, FD_CLOEXEC)
+
+At Thylacine v1.0, /srv/<name> is a synthetic Plan-9-style namespace
+served by the kernel /srv registry (kernel/devsrv.c). There is no file
+inode at /srv/<name> and there is no v1.0 syscall surface to query the
+registry through a stat shape. Without this patch, lstat() returns
+-ENOSYS, bubbles back up as "listen on /srv/stratum-fs failed: Function
+not implemented", stm_stratumd_run aborts with rc=-207, and the boot-
+from-disk path is blocked at the first call before any /srv work.
+
+This patch stubs lstat / unlink / chmod such that programs which
+follow the idiomatic unlink-then-bind dance on a /srv/<name> path
+proceed cleanly:
+
+  lstat("/srv/<name>", &st)      -> -1 / ENOENT
+                                    ("no stale; safe to proceed")
+  unlink("/srv/<name>")          -> 0
+                                    ("no stale to remove; OK")
+  chmod("/srv/<name>", mode)     -> 0
+                                    ("mode-bits do not apply to a
+                                     byte-mode SrvConn; no-op")
+
+Non-/srv paths fall through to the existing 0xFFFF sentinel ->
+-ENOSYS behavior. P-3 (no silently-wrong POSIX) is preserved for
+the broad filesystem; only the /srv namespace is shimmed.
+
+On stratumd's path:
+
+  - lstat returns ENOENT  -- matches the "first-start, no stale"
+    branch (the error check is `if (lstat == 0 && !S_ISSOCK) return
+    -EEXIST; else if (errno != ENOENT) return -errno`).
+  - unlink returns 0      -- the "remove stale" step is satisfied;
+    nothing to remove on first start anyway.
+  - chmod returns 0       -- the explicit perm-clamp after bind()
+    is a no-op (the byte-mode SrvConn has no file-mode bits).
+
+The umask and fcntl(F_GETFD/F_SETFD) calls in stm_stratumd_listen_unix
+already return -ENOSYS via the 0xFFFF sentinel today; both are
+NON-fatal in the listen path (umask discards the return value of
+its second call; fcntl's `if (flags >= 0)` skips the F_SETFD when
+F_GETFD failed). They are not touched by this patch -- keeping the
+P-3-truthful sentinel for surfaces that no critical path depends on.
+A later sub-chunk that surfaces a real consumer for umask or fcntl
+F_GETFD will lift them.
+
+Stratumd post-listen-success path (accept + serve loop) uses syscalls
+already wired by prior boundary-line patches: SYS_srv_accept (sockets
+sub-chunk 12), SYS_read / SYS_write (the seam), pthread_* (threads
+sub-chunk 9b). The listen-success branch should reach the accept loop
+and block awaiting joey's t_srv_connect call.
+
+Failure mode if a /srv/<name> service is already registered (stale
+from a prior boot, or duplicate registration attempt): bind() returns
+EACCES at SYS_post_service_byte time (the kernel post-gate). lstat's
+lie ("ENOENT, no stale") is unobservable -- the operator sees the
+EACCES from bind, which is the proper signal that the name is taken.
+The pouch-side lstat does NOT consult the kernel registry at v1.0;
+adding a registry-stat surface is a Phase 5+ /srv-as-namespace lift
+worth doing alongside the kernel-side /srv tree.
+
+Files modified: three. All single-function full rewrites.
+
+  src/stat/lstat.c       Pre-checks the path. If it starts with
+      "/srv/" returns -1 with errno = ENOENT. Otherwise falls through
+      to the original `fstatat(AT_FDCWD, path, buf, AT_SYMLINK_NOFOLLOW)`
+      delegation (which yields ENOSYS via SYS_newfstatat = 0xFFFF
+      today, preserving the current non-/srv behavior).
+
+  src/unistd/unlink.c    Pre-checks the path. If it starts with
+      "/srv/" returns 0. Otherwise falls through to the original
+      `syscall(SYS_unlinkat, AT_FDCWD, path, 0)` (ENOSYS today).
+
+  src/stat/chmod.c       Pre-checks the path. If it starts with
+      "/srv/" returns 0. Otherwise falls through to the original
+      `syscall(SYS_fchmodat, AT_FDCWD, path, mode)` (ENOSYS today).
+
+Invariants preserved:
+
+  P-1 (no foreign syscall numbers): the patch makes NO new syscall
+       calls; it only short-circuits paths to the userspace return.
+  P-3 (no silently-wrong POSIX): the /srv lie ("ENOENT, no stale")
+       is a Plan-9-shaped truth (the registry has no file inodes;
+       the right error for "stat me at /srv/<name>" with no entry
+       is ENOENT). Non-/srv paths are unchanged -- explicit ENOSYS
+       remains. The unlink "success" and chmod "success" on /srv
+       reflect the semantically-correct "nothing to remove" /
+       "nothing to set" answers for a byte-mode registry name.
+  P-4 (boundary-line discipline): the patch touches only lower-half
+       wrapper files (src/stat/, src/unistd/). No upper-half files
+       are modified.
+
+Binding design: docs/POUCH-DESIGN.md sec 14 row 16c (16c-pre).
+Reference: docs/reference/86-pouch-stratumd-boot.md (to be updated
+with this row).
+
+Test: with this patch applied + tools/test.sh, the joey stratumd-boot
+probe should observe stratumd transitioning from "listen failed:
+Function not implemented" to "listen succeeded, accept loop active"
+(stratumd will block awaiting a 9P client to dial the socket). The
+joey probe's existing retry+drain+reap workaround terminates the
+stratumd process cleanly when joey-userspace exits (the existing
+6000-retry srv_connect path from 16b-gamma-mount-close stays in
+place; sub-chunk 16c replaces it with the kernel 9P client + a real
+t_srv_connect).
+
+--- a/src/stat/lstat.c
++++ b/src/stat/lstat.c
+@@ -1,7 +1,29 @@
++/* pouch boundary-line replacement (P6-pouch-stratumd-boot 16c-pre).
++ *
++ * lstat() with /srv/ short-circuit. /srv/<name> is the Thylacine
++ * kernel /srv registry (synthetic Plan-9 namespace); there is no
++ * file inode at /srv/<name> and no v1.0 syscall to query the
++ * registry through a stat shape. Returning ENOENT matches the
++ * idiomatic-prep "no stale socket" answer programs expect.
++ *
++ * Non-/srv paths fall through to the existing fstatat delegation
++ * (ENOSYS via SYS_newfstatat = 0xFFFF today, preserving the broad
++ * filesystem's silently-wrong-POSIX rejection).
++ *
++ * See 0014-pouch-srv-stubs.patch for the design rationale. */
+ #include <sys/stat.h>
+ #include <fcntl.h>
++#include <string.h>
++#include <errno.h>
+
+ int lstat(const char *restrict path, struct stat *restrict buf)
+ {
++	if (path) {
++		static const char prefix[] = "/srv/";
++		if (strncmp(path, prefix, sizeof(prefix) - 1) == 0) {
++			errno = ENOENT;
++			return -1;
++		}
++	}
+ 	return fstatat(AT_FDCWD, path, buf, AT_SYMLINK_NOFOLLOW);
+ }
+--- a/src/unistd/unlink.c
++++ b/src/unistd/unlink.c
+@@ -1,9 +1,29 @@
++/* pouch boundary-line replacement (P6-pouch-stratumd-boot 16c-pre).
++ *
++ * unlink() with /srv/ short-circuit. The Thylacine /srv registry
++ * has no file artifact; "unlinking" a /srv/<name> is the wrong
++ * abstraction for tearing down a registered service (close on the
++ * server's listener fd releases the slot). Returning 0 satisfies
++ * the idiomatic-prep "remove any stale socket file" dance without
++ * making any kernel call.
++ *
++ * Non-/srv paths fall through to the original syscall(SYS_unlinkat)
++ * delegation (ENOSYS via SYS_unlinkat = 0xFFFF today).
++ *
++ * See 0014-pouch-srv-stubs.patch for the design rationale. */
+ #include <unistd.h>
+ #include <fcntl.h>
++#include <string.h>
+ #include "syscall.h"
+
+ int unlink(const char *path)
+ {
++	if (path) {
++		static const char prefix[] = "/srv/";
++		if (strncmp(path, prefix, sizeof(prefix) - 1) == 0) {
++			return 0;
++		}
++	}
+ #ifdef SYS_unlink
+ 	return syscall(SYS_unlink, path);
+ #else
+--- a/src/stat/chmod.c
++++ b/src/stat/chmod.c
+@@ -1,9 +1,28 @@
++/* pouch boundary-line replacement (P6-pouch-stratumd-boot 16c-pre).
++ *
++ * chmod() with /srv/ short-circuit. A byte-mode SrvConn has no
++ * file-mode bits to set (the registry tracks owner + listening
++ * Proc but not POSIX permissions). The idiomatic post-bind chmod
++ * to clamp socket-file perms is a no-op on Thylacine's /srv;
++ * returning 0 satisfies the caller without a kernel call.
++ *
++ * Non-/srv paths fall through to the original syscall(SYS_fchmodat)
++ * delegation (ENOSYS via SYS_fchmodat = 0xFFFF today).
++ *
++ * See 0014-pouch-srv-stubs.patch for the design rationale. */
+ #include <sys/stat.h>
+ #include <fcntl.h>
++#include <string.h>
+ #include "syscall.h"
+
+ int chmod(const char *path, mode_t mode)
+ {
++	if (path) {
++		static const char prefix[] = "/srv/";
++		if (strncmp(path, prefix, sizeof(prefix) - 1) == 0) {
++			return 0;
++		}
++	}
+ #ifdef SYS_chmod
+ 	return syscall(SYS_chmod, path, mode);
+ #else

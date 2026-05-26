@@ -1755,3 +1755,232 @@ blocker is opaque (silent exit) — hardening would make it diagnosable.
   (P6 16b-γ-mount-close section) — but the prior-session note also
   characterizes the failure as `sodium_init -> abort -> _Exit(127)`,
   which is incompatible with rc=1. The discrepancy is unexplained.
+
+---
+
+## 16c-pre — unblock stratumd's listen path on /srv/stratum-fs
+
+**Status**: LANDED. Pure pouch-side boundary-line; NOT audit-bearing.
+Two new patches (`0014-pouch-srv-stubs.patch`, `0015-pouch-poll-tag.patch`)
+lift the visible "listen on /srv/stratum-fs failed: Function not
+implemented" blocker that surfaced at the end of the 4-item memory-
+model hardening plan close (`e69d634`).
+
+### The blocker shape
+
+At the close of the AEGIS arc + R-3a audit, the visible state was:
+
+```
+joey: probe /system.key fstat OK size=3656 mode=0o100644
+joey: probe /system.key lseek SEEK_END/SEEK_SET OK
+stratumd: serving /dev/virtio-blk on /srv/stratum-fs (...)
+stratumd: listen on /srv/stratum-fs failed: Function not implemented
+stratumd: run failed (rc=-207)
+```
+
+`stm_stratumd_listen_unix` (in Stratum's `src/cmd/stratumd/serve.c`)
+runs an idiomatic POSIX socket-server prep dance:
+
+```c
+lstat(path, &st);          /* "is the socket path stale?" */
+if (exists && !S_ISSOCK)   return -EEXIST;
+unlink(path);              /* remove any stale entry */
+socket(AF_UNIX, SOCK_STREAM, 0);
+umask(0777 & ~mode);
+bind(fd, ...);
+umask(prev_umask);
+chmod(path, mode);
+listen(fd, backlog);
+fcntl(fd, F_GETFD);
+fcntl(fd, F_SETFD, FD_CLOEXEC);
+```
+
+Each of these had a hidden failure surface at the pouch boundary:
+
+- `lstat` -> SYS_newfstatat = 0xFFFF -> ENOSYS -> the FIRST failure;
+  message bubbles back to stratumd's `strerror(-listen_fd)` =
+  "Function not implemented".
+- `unlink` -> SYS_unlinkat = 0xFFFF -> ENOSYS (would be the next
+  failure if lstat had succeeded).
+- `socket` / `bind` / `listen` / `accept` -> already wired by sub-
+  chunk 12 (pouch-sockets).
+- `umask` -> SYS_umask = 0xFFFF -> ENOSYS. NON-fatal: umask discards
+  the return value of its second call; bind happens regardless.
+- `chmod` -> SYS_fchmodat = 0xFFFF -> ENOSYS (would block after
+  bind succeeds).
+- `fcntl(F_GETFD)` -> SYS_fcntl = 0xFFFF -> ENOSYS. NON-fatal:
+  `if (flags >= 0) ...` skips the F_SETFD when F_GETFD fails.
+
+The patch closes the three *blocking* surfaces (lstat, unlink, chmod)
+and leaves the two non-blocking surfaces (umask, fcntl) at their
+existing ENOSYS sentinel.
+
+### 0014-pouch-srv-stubs.patch
+
+Three single-function full-rewrite hunks. Each pre-checks the path
+for the `/srv/` prefix; on match, short-circuits to the POSIX-shape
+answer; on mismatch, falls through to the upstream call which still
+yields ENOSYS via the 0xFFFF sentinel today.
+
+| Wrapper | /srv/ short-circuit | Non-/srv | POSIX semantic |
+|---|---|---|---|
+| `lstat(p, &st)` | `errno = ENOENT; return -1` | `fstatat(AT_FDCWD, p, ..., AT_SYMLINK_NOFOLLOW)` (ENOSYS) | "no stale socket" — programs proceed to bind |
+| `unlink(p)`     | `return 0`                  | `syscall(SYS_unlinkat, ..., 0)` (ENOSYS)             | "removed any stale entry" — no kernel op needed |
+| `chmod(p, m)`   | `return 0`                  | `syscall(SYS_fchmodat, ..., m)` (ENOSYS)             | "set perms" — byte-mode SrvConn has no perm bits |
+
+**Why `/srv/<name>` lstat returns ENOENT, not a stat-of-the-registry**:
+v1.0 has no syscall to query the kernel `/srv` registry through a
+stat shape. The Plan-9-correct surface is a registry-stat — but that
+requires the kernel-side `/srv` namespace lift (Phase 5+ work
+alongside ARCH §28's namespace-tree composition). Until then, the
+"ENOENT" lie is safe because:
+
+- Stratumd's check sequence is `if (lstat == 0 && !S_ISSOCK) return -EEXIST;
+  else if (errno != ENOENT) return -errno`. ENOENT is tolerated.
+- A future `/srv/<name>` collision surfaces from `bind()`'s
+  SYS_post_service_byte (EACCES) — observable + actionable.
+- The lstat-then-bind race window where another Proc registers in
+  between is moot at v1.0 (single-Proc accept loop).
+
+**Why `unlink` and `chmod` return 0**:
+
+- `unlink("/srv/...")` returning 0 lies "removed the stale". The
+  same future-collision surface (bind EACCES) catches the case
+  where a stale registration actually existed; the program sees
+  the clear error there.
+- `chmod("/srv/...", mode)` returning 0 lies "set the mode". The
+  byte-mode SrvConn carries no POSIX mode bits; the caller's
+  intent (clamp permissions) has no analog in the registry.
+  Returning 0 is the no-op-correct answer for a namespace where
+  mode bits do not exist.
+
+**Why `umask` and `fcntl` are NOT touched**:
+
+- `umask(...)` is called twice in stratumd's listen path. The
+  return value of the second call is discarded; the first call's
+  return (cast to `mode_t` from `-1`) is stored as `prev_umask`
+  and passed unchanged to the second call. No observable
+  failure; the umask state is undefined but unobserved.
+- `fcntl(fd, F_GETFD)` returns `-1` on ENOSYS. Stratumd's code is
+  `if (flags >= 0) (void)fcntl(fd, F_SETFD, ...)`. The F_SETFD
+  call is skipped. The CLOEXEC bit is not set on the listener
+  fd, but Thylacine has no exec() yet so CLOEXEC is moot.
+
+Both are documented in the patch preamble as "future-lift if a
+real consumer materializes". Today their ENOSYS-sentinel posture
+is P-3-truthful.
+
+### 0015-pouch-poll-tag.patch
+
+A SECOND blocker surfaced after 0014 unblocked listen: stratumd's
+accept loop calls `poll(&pfd, 1, 200)` on the listener fd. The
+listener fd is a *tagged* pouch socket fd (`>= 0x40000000 + slot`,
+per sub-chunk 12). The kernel's `sys_poll_for_proc` looks up each
+`pollfd.fd` in the Proc's handle table; the table tops out at
+`PROC_HANDLE_MAX = 64`. A tagged fd at 0x40000000+ is out of range;
+`kernel/poll.c::poll_scan_one` writes `POLLNVAL` into revents.
+
+Stratumd's loop:
+
+```c
+if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) break;
+```
+
+POLLNVAL trips the break, the accept loop returns STM_EBACKEND,
+stratumd's main returns 2, the process exits. joey's downstream
+wait_pid for stratumd-stub then returns stratumd's pid instead
+(both are joey's children; wait_pid is unfiltered); the "wrong
+pid" extinction cascade fires the kernel via kproc.wait_pid (also
+unfiltered at v1.0).
+
+The fix mirrors the read/write/close dispatch shape from sub-chunk
+12: `poll()` checks each input pollfd for a tagged fd; if any are
+tagged, walks the array translating tagged fds to their kernel
+handles via `pouch_sock_kernel_fd` into a stack-bounded scratch
+array `kfds[PROC_HANDLE_MAX=64]`; calls SYS_poll on the scratch;
+copies revents back into the caller's array. Untagged-only polls
+take the original pristine fast path (zero copy).
+
+| Slot state | kernel_fd outcome | Translated kfds[i].fd | Kernel response |
+|---|---|---|---|
+| LISTENING | valid Spoor/Srv handle in [0, 64) | translated to kernel handle | normal poll semantics |
+| CONNECTED | valid Spoor handle | translated | normal poll semantics |
+| FRESH     | -1 (errno = ENOTCONN)  | -1                          | POLLNVAL (fast-path in poll_scan_one fd<0 check) |
+| vacant    | -1 (errno = EBADF)     | -1                          | POLLNVAL (same) |
+
+The caller's `fds[i].fd` identifiers are NOT mutated; the
+translation lives only in the scratch.
+
+**Why this is NOT audit-bearing**: pure userspace boundary-line
+gap-fill. No new kernel surface. The pouch_sock_kernel_fd primitive
+is audited (sub-chunk 12); the kernel's `poll_scan_one` is audited
+(P5-poll-a + P5-poll-b). 0015 only routes existing audited paths
+correctly together. The pattern is identical in shape to the
+existing 0006-pouch-sockets dispatch shims for read/write/close.
+
+### Test posture
+
+`599/599 PASS x default + UBSan`. `Thylacine boot OK` reproducibly
+across 3+ default runs + 1 UBSan run. Boot log confirms the new
+chain:
+
+```
+joey: probe /system.key fstat OK size=3656 mode=0o100644
+joey: probe /system.key lseek SEEK_END/SEEK_SET OK
+stratumd: serving /dev/virtio-blk on /srv/stratum-fs (backlog=16, msize=8388608, ds=1, ro=0)
+joey: stratumd-boot /srv/stratum-fs bound after retry 174 (pool mounted via bdev_thylacine)
+stratumd-stub: serving on fd 0 (rx) + fd 1 (tx)
+stratumd-stub: EOF on rx; exit 0
+joey: stub-bringup ok (pipe + spawn + attach + mount + unmount + walk_open + read)
+  joey: /joey pid=1524 exited cleanly (status=0)
+Thylacine boot OK
+```
+
+The 174-retry budget consumed (~1.7 s of joey busy-waiting)
+matches stratumd's libsodium init + bdev claim + mount + bind
+time. UBSan slows the path enough that BOOT_TIMEOUT=1200 is
+required (the 600 s default is at the timing boundary; expect
+occasional "not bound" flakes on UBSan with the default timeout
+that are NOT regressions — joey's NON-FATAL branch absorbs them
+and boot still completes).
+
+### Cross-references
+
+- `usr/lib/pouch/patches/0014-pouch-srv-stubs.patch` — the file
+  rewrites.
+- `usr/lib/pouch/patches/0015-pouch-poll-tag.patch` — the poll
+  dispatch.
+- `usr/lib/pouch/patches/series` — both entries appended.
+- Stratum source: `~/projects/stratum/v2/src/cmd/stratumd/serve.c`
+  `::stm_stratumd_listen_unix` (the call chain) +
+  `::stm_stratumd_accept_loop` (the post-listen poll-then-accept
+  pattern).
+- Kernel poll handler: `kernel/poll.c::sys_poll_for_proc` +
+  `poll_scan_one` (the fd-out-of-range POLLNVAL surface).
+- Sub-chunk 12 audit closed list:
+  `memory/audit_p6_pouch_sockets_closed_list.md` (poll-on-tagged-
+  fd gap NOT caught at sub-chunk 12; closed here).
+
+### What 16c-pre does NOT do
+
+- Does not retire the joey stratumd-boot probe's 6000-retry
+  workaround. Sub-chunk 16c lifts that when the kernel 9P client
+  + real `t_srv_connect` lands.
+- Does not flip the joey probe to FATAL on miss. Same scope as
+  above; 16c lift.
+- Does not touch kernel surfaces. The `pouch_sock_kernel_fd`
+  primitive + SYS_poll handler remain unchanged.
+- Does not address the documented v1.x lifts (kproc.wait_pid pid
+  filter; cross-thread shootdown via SYS_EXIT_GROUP; structured
+  exit_status). The wait_pid race window is closed *contingently*
+  in this checkpoint by stratumd staying alive in its accept
+  loop — no zombie surfaces — but the architectural fix is still
+  v1.x.
+
+### Next: sub-chunk 16c
+
+With stratumd serving 9P over /srv/stratum-fs reliably (accept
+loop active), 16c lands the kernel 9P client + `/sysroot` mount
++ ramfs pivot + stub retire. The headline Phase 6 deliverable
+("Thylacine boots from a disk-backed Stratum FS over real 9P")
+is one audit-bearing sub-chunk away.
