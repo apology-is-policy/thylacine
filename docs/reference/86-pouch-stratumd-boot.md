@@ -109,6 +109,194 @@ joey-side-only) was considered but rejected: the Stratum-side change
 is unobservable from Thylacine until joey wires it up, so testing
 gates naturally at the integration point.
 
+### The 16c live-medium + host-bake + pivot design (chosen 2026-05-26)
+
+The headline Phase 6 deliverable is "Thylacine boots from a disk-backed
+Stratum FS over real 9P". Surfacing sub-chunk 16c's implementation
+forced a question that the original POUCH-DESIGN row 16 had not
+addressed: **after joey pivots its territory root to stratumd's mounted
+FS, where do future spawn paths resolve from?**
+
+Joey spawns several binaries from `/sbin/...` and `/pouch-hello-*`
+during bringup — corvus, stratumd, the pouch hellos, the thread probe.
+All of those resolve through the territory's root_spoor at call time.
+If joey pivots root to stratumd's tree, any post-pivot spawn fails
+because stratumd's tree (a freshly mkfs'd Stratum pool) doesn't contain
+those binaries. The binary-corpus problem is structural to the pivot.
+
+#### The architectural reference: every real OS
+
+The pattern every Linux distro, BSD, illumos, macOS, Windows uses is
+the **live-medium → installer → boot-from-installed-disk** loop:
+
+1. The bootable medium (CD/USB ISO; or for QEMU, a `-kernel + -initrd`
+   pair) contains a complete usable userland — the kernel, an init, a
+   set of binaries enough to run.
+2. From that live system, an installer (Anaconda, Calamares,
+   debian-installer, the FreeBSD/OpenBSD installers, ...) formats the
+   target disk, copies the binary corpus from the live medium onto it,
+   installs a bootloader, marks the disk bootable.
+3. The system reboots, the firmware loads from the installed disk, the
+   installed root has everything the OS needs to run continuously.
+
+For Thylacine the mapping is:
+
+| Real distro thing | Thylacine equivalent |
+|---|---|
+| Live ISO bootable medium | `disk.img` cpio → kernel devramfs |
+| Live ISO's kernel | `build/kernel.elf` |
+| Live ISO's initramfs / squashfs | The cpio's `/sbin/*` + `/pouch-hello-*` + `/joey` |
+| Installer binary | `stratum-mkfs --populate-from <dir>` (host build infra at v1.0) |
+| Installed FS (post-install root) | The populated `pool.img` |
+| Installed bootloader | N/A — QEMU `-kernel` loads our kernel directly |
+| Boot from installed disk | joey: mount stratumd's FS → pivot root → continue |
+
+The binary-corpus problem evaporates because the installer (host-side
+at v1.0, runtime at v1.1) PUT the binaries on the pool. Joey's pivot
+lands on a root that already has `/sbin/corvus` etc.
+
+#### Why host-bake at build time for v1.0
+
+Three viable options for the installer:
+
+1. **Host-bake (v1.0 expedient)**. Extend `stratum-mkfs` with
+   `--populate-from <dir>` — recursively copies a host directory tree
+   into the formatted pool. `tools/build.sh` calls it with the relevant
+   subtree of the cpio sources (the boot binary corpus). pool.img
+   ships pre-populated. Joey's bringup ends with mount + pivot. The
+   "installer" exists conceptually at host build time.
+2. **Runtime installer (v1.1 lift)**. Build a Thylacine `/sbin/installer`
+   binary that runs as part of an alternate boot path (joey takes an
+   arg, or there's a second init binary). It iterates devramfs, opens
+   stratumd's mount, calls Twrite/Tcreate via the kernel 9P client to
+   copy each file. Proves the runtime install loop end-to-end.
+   Exercises the full 9P client write surface (Twrite/Tcreate/Tmkdir)
+   not just read.
+3. **No pivot (v1.x deferral)**. 16c does mount + walk + read against
+   stratumd. The pivot is deferred indefinitely. Disk-backed FS is
+   reachable as a mount subtree but `/` stays devramfs. Sacrifices
+   the headline.
+
+**Choice: 1 (host-bake) for v1.0.** Rationale:
+
+- **Significantly less code than 2.** No new userspace installer binary;
+  no runtime exercise of the 9P write surface (deferred to a later
+  proving binary); host build infra extension only.
+- **Same end-state as 2 for v1.0 boot.** Both pre-populate pool.img with
+  the same corpus; the difference is *when* the populate runs.
+- **2 stays on the v1.1 plan** as the architecturally complete answer.
+  When v1.1 lifts it, the kernel surfaces 16c lands (9p_srvconn
+  transport + SYS_ATTACH_9P_SRV + SYS_PIVOT_ROOT) are exactly what
+  the runtime installer also consumes — no design rework, just code
+  added.
+- **3 fails to deliver the headline.** A Phase 6 that doesn't pivot is
+  honest only if reframed as "mounts a disk-backed Stratum FS during
+  boot." The honest framing has merit but doesn't realize the Phase 6
+  ambition.
+
+#### Why joey pivots LAST
+
+Joey is the long-running init Proc. Its bringup is one-shot:
+
+1. Spawn corvus (resolved via devramfs `/sbin/corvus`)
+2. Run corvus probes (no further spawns)
+3. Spawn stratumd (resolved via devramfs `/sbin/stratumd`) with
+   `CAP_HW_CREATE`
+4. Wait for stratumd's `/srv/stratum-fs` listener via t_srv_connect
+5. Run all pouch-hello probes (each spawns via devramfs; each runs to
+   completion + reaps before the next)
+6. `t_srv_connect("stratum-fs")` → byte-mode SrvConn handle
+7. `t_attach_9p_srv(srv_fd, "/")` → dev9p root Spoor handle
+8. `t_mount(root_fd, /* abstract path id */)` → mount in joey's territory
+9. **`t_pivot_root(root_fd)`** → joey's root_spoor swaps from devramfs
+   to stratumd's tree; old devramfs root_spoor ref drops
+10. Optional: post-pivot `t_walk_open` against a path in stratumd's
+    tree to PROVE `/` is now the disk-backed FS
+11. `Thylacine boot OK`
+
+Step 9 is the last operation that needs a spawn-from-devramfs path.
+Every step 1-8 resolves spawn paths through devramfs first; the pivot
+happens AFTER all bringup. Post-pivot, joey just sits in its
+long-running init role — it does not spawn anything else at v1.0 (a
+shell / interactive surface is Phase 7 — Utopia).
+
+Existing peers (corvus, stratumd) hold their own territories — those
+were stamped at their spawn time and are not affected by joey's later
+pivot. Their already-running executables are loaded in RAM and need
+no path resolution to keep running. The pivot is purely joey-local.
+
+#### Why distinct from SYS_CHROOT
+
+The existing `SYS_CHROOT` (per `kernel/syscall.c::sys_chroot_handler`)
+allows re-chroot: a subsequent SYS_CHROOT call drops the displaced
+root's ref and installs the new one (idempotent on same-spoor). The
+machinery for "atomic root_spoor replacement with displaced-ref
+tear-down" already exists.
+
+A new `SYS_PIVOT_ROOT` is preferable to overloading SYS_CHROOT
+because:
+
+- **Audit-tractability.** SYS_CHROOT is audited (P5-stratumd-stub-
+  bringup-e2). Changing its contract — even to make explicit what
+  the implementation already does — re-litigates an audited surface.
+  A new syscall with its own audit-trigger row is cleaner.
+- **Semantic clarity.** "Pivot" names the long-running-Proc usage
+  pattern (the v1.x note in `usr/joey/joey.c:293-304` explicitly
+  asked for `pivot_root`); SYS_CHROOT names the initial-chroot
+  pattern. Two syscalls for two patterns reads more honestly than
+  one syscall doing both.
+- **Future extensibility.** A v1.x lift might want `SYS_PIVOT_ROOT`
+  to preserve specific bind mounts across the pivot (e.g., a `/dev`
+  bind survives). Evolving that on a distinct syscall doesn't change
+  the SYS_CHROOT contract.
+
+The pivot at v1.0 carries NO mounts across (joey's mount table at
+pivot time only contains the just-mounted `/sysroot` entry, and that
+entry is structurally subsumed by the pivot — the territory's
+root_spoor becomes the same tree the mount points to). v1.x bind-
+survivor semantics are a deliberate non-decision at v1.0.
+
+#### Stub retirement scope
+
+The userspace `usr/stub/` stratumd-stub binary + joey's
+`do_stratumd_stub_bringup()` invocation retire. The kernel-side
+`kernel/dev9p.c` machinery + the kernel-internal tests
+(`kernel/test/test_stratumd_stub.c`, `test_stub_driver.c`,
+`test_9p_attach.c`, `test_territory_chroot.c`,
+`test_sys_spawn_with_fds.c`) are KEPT — they cover the dev9p Dev
+vtable + the SYS_ATTACH_9P + the SYS_CHROOT machinery from the
+kernel's perspective, and that machinery is still load-bearing for
+SYS_ATTACH_9P_SRV (which composes p9_attached_create + dev9p root
+the same way). Removing the kernel-side stub would lose audit
+coverage for no benefit.
+
+#### Audit-trigger surfaces
+
+Three new rows added to CLAUDE.md's audit-trigger table by this
+scripture commit:
+
+1. **9P-srvconn transport adapter** —
+   `kernel/9p_srvconn_transport.{c,h}`. The byte-mode SrvConn rings
+   wrapped into `p9_transport_ops`. Lifetime via `srvconn_ref` /
+   `srvconn_unref`; the byte-mode gate is enforced at the consumer
+   (SYS_ATTACH_9P_SRV) not the adapter (defense in depth).
+2. **SYS_ATTACH_9P_SRV** — `kernel/syscall.c::sys_attach_9p_srv_handler`.
+   The composition of SrvConn handle lookup + byte-mode gate + adapter
+   kmalloc + `p9_attached_create` + handle alloc as KOBJ_SPOOR. Full
+   failure-path rollback discipline; same shape as the audited
+   SYS_ATTACH_9P.
+3. **SYS_PIVOT_ROOT + territory_pivot_root** — `kernel/syscall.c::
+   sys_pivot_root_handler` + new `kernel/territory.c::territory_pivot_
+   root` core. Atomic root_spoor swap with displaced-ref tear-down;
+   touches the audited Territory surface.
+
+A fourth row (`stratum-mkfs --populate-from`) is NOT Thylacine-kernel
+audit-bearing; it is host build infra (Stratum side). Cross-project
+rights-mirror discipline applies the same way as the bdev_thylacine
+arm — the populate path's KObj_rights queries (none at v1.0 — it
+operates on host files) must mirror `kernel/include/thylacine/handle.h`
+if/when it adds any.
+
 ---
 
 ## 16b-α — argv pass-through kernel surface
