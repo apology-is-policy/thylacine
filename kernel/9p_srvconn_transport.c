@@ -46,7 +46,7 @@ static int srvconn_transport_recv(void *ctx, u8 *buf, size_t cap) {
     if (!st->cn)                                 return -1;
     if (!buf || cap == 0)                        return -1;
 
-    // R1 F2 close: defense-in-depth deadline.
+    // R1 F2 close (R2 F1R2 refinement): defense-in-depth deadline.
     //
     // The upper layer is RESPONSIBLE for setting the SrvConn's
     // `client_deadline_ns` before initiating a blocking op:
@@ -55,25 +55,49 @@ static int srvconn_transport_recv(void *ctx, u8 *buf, size_t cap) {
     //   - the post-attach dev9p path (sys_walk_open / sys_read /
     //     sys_write KOBJ_SPOOR) is supposed to set OP_DEADLINE before
     //     each Twalk/Tread/Twrite, but at v1.0 those handlers do NOT
-    //     (the prosecutor's F2 finding).
+    //     (the R1 F2 finding).
     //
     // Rather than touch every dev9p call site, we auto-arm OP_DEADLINE
-    // here if the deadline reads 0 ("no deadline"). This keeps the
-    // adapter symmetric with the upper layer's contract: every recv
-    // is bounded by a wall-clock cap; a hung peer surfaces as -1 from
-    // tsleep within OP_DEADLINE_NS instead of wedging joey forever.
-    // The auto-arm is a backstop, not a substitute -- a future dev9p
-    // refactor that arms a per-op deadline (e.g., a shorter one for
-    // Tread, a longer one for Twrite) takes precedence because it
-    // sets a non-zero value before this check.
+    // here when the deadline is missing OR already lapsed. The
+    // missing/lapsed gate matters because:
     //
-    // Atomic read on the deadline word is RELAXED: there is exactly
-    // one writer (the upper-layer setter on the same thread that
-    // immediately calls the recv) and one reader (here, same thread).
-    // No cross-thread visibility needed for the single-flow case.
-    if (__atomic_load_n(&st->cn->client_deadline_ns, __ATOMIC_RELAXED) == 0u) {
-        srvconn_set_client_deadline(st->cn,
-            timer_now_ns() + SRVCONN_OP_DEADLINE_NS);
+    //   - "Missing" (deadline == 0) is the fresh SrvConn case
+    //     pre-handshake (srvconn_create initializes to 0).
+    //
+    //   - "Lapsed" (now >= deadline) is the post-handshake case
+    //     R2 F1R2 surfaced: the R1 F1 setter armed HANDSHAKE_DEADLINE
+    //     (now+5s) ONCE before the handshake. Post-handshake the
+    //     value lingers; for any op past T_attach+5s the dev9p path
+    //     would see an already-lapsed deadline and tsleep would
+    //     return TIMEDOUT immediately even when the peer is healthy.
+    //     The auto-arm re-fires per-op when the prior deadline has
+    //     lapsed, restoring the documented "every recv bounded by a
+    //     fresh OP_DEADLINE" backstop.
+    //
+    // Within a single op (header read + body read), the first recv
+    // arms; subsequent recvs see a non-zero non-lapsed deadline and
+    // skip the auto-arm (using whatever budget remains from the
+    // first call). Between ops, the budget either still applies (if
+    // within OP_DEADLINE wallclock) or is freshly re-armed (if past).
+    //
+    // A future dev9p refactor that arms a per-op deadline at the
+    // call site BEFORE entering the adapter takes precedence because
+    // it sets a non-zero non-lapsed value before this check.
+    //
+    // Atomic read on the deadline word is RELAXED: writer ordering
+    // is enforced by srvconn_set_client_deadline's single-thread
+    // discipline (one upper-layer caller per blocking op); cross-CPU
+    // observers in v1.x multi-thread Procs are subsumed by the
+    // outer-layer Proc lock / handle-table discipline (see R1 F4
+    // dispositioned in the closed list).
+    {
+        u64 now_ns = timer_now_ns();
+        u64 cur_deadline = __atomic_load_n(&st->cn->client_deadline_ns,
+                                             __ATOMIC_RELAXED);
+        if (cur_deadline == 0u || now_ns >= cur_deadline) {
+            srvconn_set_client_deadline(st->cn,
+                now_ns + SRVCONN_OP_DEADLINE_NS);
+        }
     }
 
     // BLOCKING. Returns:

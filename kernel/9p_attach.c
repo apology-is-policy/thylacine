@@ -16,6 +16,29 @@
 
 _Static_assert(P9_ATTACHED_MAGIC == 0x50394154u, "attach magic drift");
 
+// R2 F5R2 close: pins the dual-destroy discipline in attached_destroy_
+// inner. Both p9_spoor_transport_destroy and p9_srvconn_transport_
+// destroy are called on the same `adp` pointer (one will magic-mismatch
+// and no-op; the other will clobber its magic + clear its inner ref).
+// The correctness depends on the two magic constants being DISTINCT --
+// a future adapter type that accidentally reused a magic would create
+// double-destroy via the wrong-type path. Pin at compile time.
+_Static_assert(P9_SPOOR_TRANSPORT_MAGIC != P9_SRVCONN_TRANSPORT_MAGIC,
+               "transport magic constants must be distinct -- the "
+               "dual-destroy discipline in attached_destroy_inner "
+               "relies on at most one of the two destroy paths matching "
+               "the adapter's magic");
+// R2 F4R2 close: the dual-destroy's strict-aliasing defense relies on
+// `magic` being at offset 0 in BOTH transport types -- the magic read
+// at the start of each destroy is offset-correct regardless of the
+// declared pointer type. Pin the offset.
+_Static_assert(__builtin_offsetof(struct p9_spoor_transport, magic) == 0,
+               "p9_spoor_transport.magic must be at offset 0 for the "
+               "dual-destroy offset-0 read invariant");
+_Static_assert(__builtin_offsetof(struct p9_srvconn_transport, magic) == 0,
+               "p9_srvconn_transport.magic must be at offset 0 for the "
+               "dual-destroy offset-0 read invariant");
+
 struct p9_attached *p9_attached_create(
         struct p9_transport_ops transport_ops,
         size_t                  recv_cap,

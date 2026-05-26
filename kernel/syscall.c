@@ -1322,7 +1322,18 @@ static s64 sys_attach_9p_srv_handler(u64 srv_fd_raw, u64 aname_va,
     if (p9_attached_install_transport(att, (struct p9_spoor_transport *)adapter,
                                        NULL, NULL) != 0) {
         // Shouldn't happen — first install on a fresh attached. Defensive.
-        p9_attached_unref(att);   // Triggers destroy; close drops srvconn_ref.
+        //
+        // R2 F2R2 close: clean up the adapter manually. p9_attached_unref
+        // triggers destroy -> p9_client_close -> transport.ops.close
+        // (which drops the adapter's srvconn_ref via srvconn_unref).
+        // But attached_destroy_inner's `if (a->adapter)` block is SKIPPED
+        // because install_transport never set a->adapter -- so the
+        // kmalloc'd adapter struct itself leaks unless we kfree it here.
+        // Call destroy first (clobbers magic; mirrors the discipline in
+        // attached_destroy_inner's adapter-installed path).
+        p9_attached_unref(att);
+        p9_srvconn_transport_destroy(adapter);
+        kfree(adapter);
         return -1;
     }
     // From here failure paths just unref `att`. The attached's last-ref

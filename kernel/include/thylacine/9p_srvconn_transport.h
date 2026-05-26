@@ -74,13 +74,19 @@
 //   a bug -- should not happen) loops in spoor-transport style.
 //
 // - recv: reads block on s2c via `srvconn_client_recv`. Each blocking
-//   recv is bounded by `cn->client_deadline_ns`; the caller must set
-//   the deadline BEFORE each blocking op via
-//   `srvconn_set_client_deadline`. SYS_ATTACH_9P_SRV does this for
-//   the Tversion/Tattach handshake; subsequent operations (Twalk/
-//   Tread/Twrite via the returned dev9p root) are driven by sys_read /
-//   sys_write / sys_walk_open through the p9_client API, which set
-//   their own deadlines through the same mechanism.
+//   recv is bounded by `cn->client_deadline_ns`. SYS_ATTACH_9P_SRV
+//   sets `SRVCONN_HANDSHAKE_DEADLINE_NS` BEFORE the Tversion/Tattach
+//   handshake (R1 F1 close). Post-attach, the dev9p call sites
+//   (sys_walk_open / sys_read / sys_write KOBJ_SPOOR) do NOT yet arm
+//   their own per-op deadlines (v1.x lift); the adapter's recv
+//   AUTO-ARMS `SRVCONN_OP_DEADLINE_NS` when the deadline is missing
+//   (== 0) OR already lapsed (now >= deadline) (R1 F2 + R2 F1R2
+//   close). The dev9p path is therefore bounded by a fresh per-op
+//   wallclock cap; a hung peer surfaces as -1 via TIMEDOUT rather
+//   than wedging the caller. A future dev9p refactor that arms a
+//   per-op deadline at the call site BEFORE entering the adapter
+//   takes precedence (the auto-arm only fires when the deadline is
+//   missing or lapsed).
 //
 // - close: drops the adapter's srvconn_ref. Idempotent under
 //   re-close (no-ops once the inner srvconn pointer is cleared).
