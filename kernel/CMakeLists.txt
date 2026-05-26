@@ -101,6 +101,7 @@ set(KERNEL_SRCS
     dev9p.c
     9p_attach.c
     9p_spoor_transport.c
+    9p_srvconn_transport.c
     pipe.c
     poll.c
     srvconn.c
@@ -145,6 +146,8 @@ set(KERNEL_SRCS
     test/test_dev9p.c
     test/test_9p_attach.c
     test/test_9p_spoor_transport.c
+    test/test_9p_srvconn_transport.c
+    test/test_territory_pivot_root.c
     test/test_pipe.c
     test/test_pipe_blocking.c
     test/test_poll.c

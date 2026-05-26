@@ -8,6 +8,7 @@
 #include <thylacine/syscall.h>
 #include <thylacine/9p_attach.h>
 #include <thylacine/9p_spoor_transport.h>
+#include <thylacine/9p_srvconn_transport.h>
 #include <thylacine/burrow.h>
 #include <thylacine/caps.h>
 #include <thylacine/dev.h>
@@ -1147,6 +1148,215 @@ static s64 sys_attach_9p_handler(u64 tx_fd_raw, u64 rx_fd_raw,
     // holds are what keep the attached alive going forward.
     p9_attached_unref(att);
     return (s64)fd;
+}
+
+// =============================================================================
+// SYS_ATTACH_9P_SRV — wrap a byte-mode SrvConn in a 9P client + return
+// the root fd (P6-pouch-stratumd-boot 16c).
+// =============================================================================
+//
+// Parallel to SYS_ATTACH_9P but the transport is a byte-mode KObj_Srv
+// connection (the SrvConn from a SYS_SRV_CONNECT against a stratumd-style
+// pouch-byte-mode service) instead of a Spoor pair. Composes:
+//   - SrvConn handle lookup (KObj_Srv, rights R|W)
+//   - byte-mode gate (the embedded kernel-owned p9_client of a 9P-mode
+//     SrvConn owns the rings; a second p9_client would race / produce
+//     wire corruption)
+//   - kmalloc the p9_srvconn_transport adapter (takes 1 srvconn_ref)
+//   - p9_attached_create (drives Tversion + Tattach; allocates the
+//     p9_client + recv_buf)
+//   - p9_attached_root_spoor (constructs the dev9p root Spoor)
+//   - dev9p_priv extension: stash the attached_owner so spoor_clunk
+//     on the returned fd tears down the entire attach session
+//   - handle_alloc KOBJ_SPOOR with RIGHT_READ|WRITE|TRANSFER
+//
+// On any failure, ALL partial state is cleaned up (rollback). Mirrors
+// SYS_ATTACH_9P's rollback discipline.
+//
+// Rights gate on the SrvConn: RIGHT_READ + RIGHT_WRITE. The kernel 9P
+// client both writes Twalk/Tread/Twrite (RIGHT_WRITE) and reads
+// Rwalk/Rread/Rwrite (RIGHT_READ).
+//
+// Aname validation: aname_va is a user-VA buffer of aname_len bytes
+// (max SYS_ATTACH_ANAME_MAX = 256). Copied into kernel scratch via
+// per-byte uaccess_load_u8. NULL with len=0 is allowed (empty aname).
+
+static s64 sys_attach_9p_srv_handler(u64 srv_fd_raw, u64 aname_va,
+                                       u64 aname_len, u64 n_uname) {
+    struct Thread *t = current_thread();
+    if (!t)                                          return -1;
+    struct Proc *p = t->proc;
+    if (!p)                                          return -1;
+
+    // Validate aname length cap.
+    if (aname_len > SYS_ATTACH_ANAME_MAX)             return -1;
+    // n_uname is 9P2000.L's u32 numeric uid field; reject values that
+    // would silently truncate to u32. Mirrors SYS_ATTACH_9P F239 fix.
+    if (n_uname > (u64)0xFFFFFFFFu)                   return -1;
+    // Validate user-VA range when aname_len > 0; zero-length aname is
+    // legal per 9P2000.L.
+    if (aname_len > 0 && !sys_validate_user_buf(aname_va, aname_len))
+                                                     return -1;
+
+    // Look up the SrvConn handle. Rights: READ + WRITE (the kernel 9P
+    // client both reads and writes through the byte rings). Same rights-
+    // gate shape as SYS_ATTACH_9P's READ on rx + WRITE on tx.
+    struct Handle *slot = handle_get(p, (hidx_t)srv_fd_raw);
+    if (!slot)                                       return -1;
+    if (slot->kind != KOBJ_SRV)                      return -1;
+    if (!slot->obj)                                  return -1;
+    if ((slot->rights & (RIGHT_READ | RIGHT_WRITE))
+        != (RIGHT_READ | RIGHT_WRITE))                return -1;
+    if (*(const u64 *)slot->obj != SRV_CONN_MAGIC)   return -1;
+
+    struct SrvConn *cn = (struct SrvConn *)slot->obj;
+
+    // Byte-mode gate. A 9P-mode SrvConn has an EMBEDDED kernel-owned
+    // p9_client driving Tread/Twrite on a single client_fid (the
+    // corvus-style verb stream). Wrapping its c2s/s2c rings with ANOTHER
+    // p9_client via this adapter would interleave Tversion/Tattach/
+    // Twalk frames with the embedded client's Tread/Twrite frames on
+    // the SAME ring -- wire corruption.
+    //
+    // Atomic acquire pairs srvconn_set_byte_mode's RELEASE in
+    // srv_conn_open_for_proc (mirror sys_srv_connect_for_proc's
+    // discipline, F5 close).
+    if (!__atomic_load_n(&cn->byte_mode, __ATOMIC_ACQUIRE))
+                                                      return -1;
+
+    // Copy aname into kernel scratch. Same shape as SYS_ATTACH_9P.
+    u8 aname_scratch[SYS_ATTACH_ANAME_MAX];
+    for (u64 i = 0; i < aname_len; i++) {
+        if (uaccess_load_u8(aname_va + i, &aname_scratch[i]) != 0)
+            return -1;
+    }
+
+    // Allocate the adapter on the heap. The adapter's init takes one
+    // srvconn_ref; the eventual close (in p9_attached_destroy's
+    // transport_ops.close call) drops it.
+    struct p9_srvconn_transport *adapter = kmalloc(sizeof(*adapter), KP_ZERO);
+    if (!adapter)                                    return -1;
+
+    if (p9_srvconn_transport_init(adapter, cn) != 0) {
+        kfree(adapter);
+        return -1;
+    }
+    // From here adapter holds 1 srvconn_ref. Failure paths below must
+    // either install the adapter into p9_attached (so its destroy
+    // drops the ref via close) OR explicitly call the close + destroy
+    // sequence + kfree.
+
+    struct p9_transport_ops ops = p9_srvconn_transport_ops(adapter);
+    struct p9_attached *att = p9_attached_create(
+        ops,
+        SYS_ATTACH_DEFAULT_MSIZE,            // recv_cap (= msize at v1.0)
+        SYS_ATTACH_DEFAULT_ROOT_FID,         // root_fid
+        SYS_ATTACH_DEFAULT_MSIZE,            // msize (client proposal)
+        NULL, 0,                             // uname (empty; no-auth v1.0)
+        aname_len > 0 ? aname_scratch : NULL, aname_len,
+        (u32)n_uname);
+    if (!att) {
+        // Handshake failed (server unresponsive, deadline, Rlerror, OOM).
+        // The adapter still holds its srvconn_ref; release it manually
+        // since we did not transfer ownership.
+        struct p9_transport_ops cops = p9_srvconn_transport_ops(adapter);
+        if (cops.close) (void)cops.close(cops.ctx);
+        p9_srvconn_transport_destroy(adapter);
+        kfree(adapter);
+        return -1;
+    }
+
+    // Transfer adapter ownership into the attached. Mirrors SYS_ATTACH_
+    // 9P's F2 install_transport flow, but with a SrvConn-shaped adapter:
+    // we use install_transport with tx == rx == NULL (no transport-Spoor
+    // refs to manage -- the SrvConn lifetime is owned by the adapter's
+    // own srvconn_ref). install_transport now owns the adapter; its
+    // destroy path will call transport_ops.close (-> srvconn_unref) +
+    // kfree(adapter).
+    //
+    // Note: p9_attached_install_transport's tx/rx parameters are
+    // Spoor *; passing NULL is documented as the "test-loopback" path
+    // (no transport-Spoor refs to drop). Re-using it for our SrvConn-
+    // backed transport works because the adapter type carries its own
+    // srvconn_ref via its close op -- the Spoor-pair plumbing is
+    // unused. A future refactor (v1.x) could give p9_attached an
+    // adapter-only install path; at v1.0 the NULL Spoor pair is the
+    // documented safe combination.
+    if (p9_attached_install_transport(att, (struct p9_spoor_transport *)adapter,
+                                       NULL, NULL) != 0) {
+        // Shouldn't happen — first install on a fresh attached. Defensive.
+        p9_attached_unref(att);   // Triggers destroy; close drops srvconn_ref.
+        return -1;
+    }
+    // From here failure paths just unref `att`. The attached's last-ref
+    // destroy handles adapter + srvconn cleanup via the close vtable.
+
+    struct Spoor *root = p9_attached_root_spoor(att);
+    if (!root) {
+        p9_attached_unref(att);
+        return -1;
+    }
+
+    // Patch the root Spoor's dev9p_priv with the attach-session
+    // ownership pointer. Mirrors SYS_ATTACH_9P's pattern: bump for
+    // root's hold, drop the construction ref.
+    struct dev9p_priv *root_priv = (struct dev9p_priv *)root->aux;
+    if (!root_priv || root_priv->magic != DEV9P_PRIV_MAGIC) {
+        spoor_clunk(root);
+        p9_attached_unref(att);
+        return -1;
+    }
+    root_priv->attached_owner = att;
+    p9_attached_ref(att);
+
+    // Install the root Spoor as a KOBJ_SPOOR handle.
+    rights_t r = RIGHT_READ | RIGHT_WRITE | RIGHT_TRANSFER;
+    hidx_t fd = handle_alloc(p, KOBJ_SPOOR, r, root);
+    if (fd < 0) {
+        // Roll back: clunk the root (dev9p_close unrefs the attached's
+        // root contribution + the construction ref drops below).
+        spoor_clunk(root);
+        p9_attached_unref(att);
+        return -1;
+    }
+    // Drop the construction ref.
+    p9_attached_unref(att);
+    return (s64)fd;
+}
+
+// =============================================================================
+// SYS_PIVOT_ROOT — long-running-Proc root_spoor swap (P6-pouch-stratumd-
+// boot 16c).
+// =============================================================================
+//
+// Thin SVC wrapper over territory_pivot_root. Unlike SYS_CHROOT (the
+// initial-chroot primitive joey + kproc use at boot), SYS_PIVOT_ROOT
+// REQUIRES the caller's Territory to have a current root_spoor. Joey
+// calls this LAST in its bringup, swapping its devramfs root for
+// stratumd's mounted FS root.
+//
+// Audit-trigger: touches `kernel/territory.c` (CLAUDE.md §25.4 — Territory)
+// via territory_pivot_root. Adds no new mount-table edge (no I-3 / I-1
+// implications). MountRefcountConsistency holds via the matched bump +
+// drop in territory_pivot_root.
+
+static s64 sys_pivot_root_handler(u64 new_root_fd_raw) {
+    struct Thread *t = current_thread();
+    if (!t)                                          return -1;
+    struct Proc *p = t->proc;
+    if (!p)                                          return -1;
+    if (!p->territory)                               return -1;
+
+    // RIGHT_READ on the new root: same rationale as SYS_CHROOT --
+    // pivot's purpose is to serve as a walk source post-pivot.
+    struct Spoor *source = sys_lookup_spoor(p, (hidx_t)new_root_fd_raw, RIGHT_READ);
+    if (!source)                                     return -1;
+
+    // territory_pivot_root handles: NULL-source rejection, no-current-
+    // root rejection (the pivot pre-condition), idempotent same-pointer,
+    // prior-root displacement via spoor_clunk, spoor_ref of the new.
+    if (territory_pivot_root(p->territory, source) != 0) return -1;
+    return 0;
 }
 
 // =============================================================================
@@ -3966,6 +4176,17 @@ void syscall_dispatch(struct exception_context *ctx) {
         ctx->regs[0] = (u64)sys_lseek_handler(ctx->regs[0],
                                               ctx->regs[1],
                                               ctx->regs[2]);
+        return;
+
+    case SYS_ATTACH_9P_SRV:
+        ctx->regs[0] = (u64)sys_attach_9p_srv_handler(ctx->regs[0],
+                                                       ctx->regs[1],
+                                                       ctx->regs[2],
+                                                       ctx->regs[3]);
+        return;
+
+    case SYS_PIVOT_ROOT:
+        ctx->regs[0] = (u64)sys_pivot_root_handler(ctx->regs[0]);
         return;
 
     case SYS_CAP_GRANT:

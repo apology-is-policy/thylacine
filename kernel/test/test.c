@@ -469,6 +469,16 @@ void test_spoor_transport_close_clunks_when_owned(void);
 void test_spoor_transport_close_preserves_when_unowned(void);
 void test_spoor_transport_transport_core_round_trip(void);
 void test_spoor_transport_end_to_end_handshake(void);
+void test_9p_srvconn_transport_init_destroy(void);
+void test_9p_srvconn_transport_init_null_rejected(void);
+void test_9p_srvconn_transport_send_routes_to_c2s_ring(void);
+void test_9p_srvconn_transport_recv_routes_from_s2c_ring(void);
+void test_9p_srvconn_transport_close_drops_srvconn_ref(void);
+void test_territory_pivot_root_smoke(void);
+void test_territory_pivot_root_rejects_no_initial_root(void);
+void test_territory_pivot_root_idempotent_same_spoor(void);
+void test_territory_pivot_root_null_source_rejected(void);
+void test_territory_pivot_root_does_not_touch_mounts(void);
 void test_pipe_smoke(void);
 void test_pipe_read_on_empty_returns_zero(void);
 void test_pipe_write_to_full_returns_zero(void);
@@ -710,6 +720,11 @@ struct test_case g_tests[] = {
     { "territory.chroot_clone_bumps_ref",                 test_territory_chroot_clone_bumps_ref,                 false, NULL },
     { "territory.chroot_destroy_drops_ref",               test_territory_chroot_destroy_drops_ref,               false, NULL },
     { "territory.chroot_null_returns_error",              test_territory_chroot_null_returns_error,              false, NULL },
+    { "territory.pivot_root_smoke",                       test_territory_pivot_root_smoke,                       false, NULL },
+    { "territory.pivot_root_rejects_no_initial_root",     test_territory_pivot_root_rejects_no_initial_root,     false, NULL },
+    { "territory.pivot_root_idempotent_same_spoor",       test_territory_pivot_root_idempotent_same_spoor,       false, NULL },
+    { "territory.pivot_root_null_source_rejected",        test_territory_pivot_root_null_source_rejected,        false, NULL },
+    { "territory.pivot_root_does_not_touch_mounts",       test_territory_pivot_root_does_not_touch_mounts,       false, NULL },
     { "handles.alloc_close_smoke",     test_handles_alloc_close_smoke,     false, NULL },
     { "handles.rights_monotonic",      test_handles_rights_monotonic,      false, NULL },
     { "handles.dup_lifecycle",         test_handles_dup_lifecycle,         false, NULL },
@@ -1285,6 +1300,11 @@ struct test_case g_tests[] = {
     { "spoor_transport.close_preserves_when_unowned",       test_spoor_transport_close_preserves_when_unowned,       false, NULL },
     { "spoor_transport.transport_core_round_trip",          test_spoor_transport_transport_core_round_trip,          false, NULL },
     { "spoor_transport.end_to_end_handshake",               test_spoor_transport_end_to_end_handshake,               false, NULL },
+    { "9p_srvconn_transport.init_destroy",                  test_9p_srvconn_transport_init_destroy,                  false, NULL },
+    { "9p_srvconn_transport.init_null_rejected",            test_9p_srvconn_transport_init_null_rejected,            false, NULL },
+    { "9p_srvconn_transport.send_routes_to_c2s_ring",       test_9p_srvconn_transport_send_routes_to_c2s_ring,       false, NULL },
+    { "9p_srvconn_transport.recv_routes_from_s2c_ring",     test_9p_srvconn_transport_recv_routes_from_s2c_ring,     false, NULL },
+    { "9p_srvconn_transport.close_drops_srvconn_ref",       test_9p_srvconn_transport_close_drops_srvconn_ref,       false, NULL },
     { "pipe.smoke",                                         test_pipe_smoke,                                         false, NULL },
     { "pipe.read_on_empty_returns_zero",                    test_pipe_read_on_empty_returns_zero,                    false, NULL },
     { "pipe.write_to_full_returns_zero",                    test_pipe_write_to_full_returns_zero,                    false, NULL },

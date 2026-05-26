@@ -460,3 +460,58 @@ int territory_chroot(struct Territory *territory, struct Spoor *source) {
     }
     return 0;
 }
+
+// =============================================================================
+// Pivot root (long-running-Proc root swap) — P6-pouch-stratumd-boot 16c.
+// =============================================================================
+//
+// Semantics identical to territory_chroot's atomic swap, with one
+// added pre-condition: REQUIRES root_spoor != NULL. The semantic
+// distinction (pivot vs initial chroot) is enforced at this layer so
+// SYS_PIVOT_ROOT cannot be used to establish an initial root on a
+// fresh Territory; that's territory_chroot's job. A pivot on a no-root
+// Territory is a contract violation and returns -1.
+//
+// Implementation footprint deliberately mirrors territory_chroot's
+// post-precondition path; refactoring to a shared helper is deferred
+// to a v1.x cleanup. At v1.0 the two semantics are explicit and
+// independent so a future divergence (e.g., v1.x bind-survivor
+// semantics in pivot but NOT chroot) lands as a localized change.
+int territory_pivot_root(struct Territory *territory, struct Spoor *source) {
+    if (!territory)                    extinction("territory_pivot_root(NULL territory)");
+    if (territory->magic != PGRP_MAGIC) extinction("territory_pivot_root on corrupted Territory");
+
+    if (!source_is_valid(source))       return -1;
+
+    // Pre-condition: pivot requires an existing root. A Territory with
+    // NULL root_spoor has never been chrooted (only kproc + Procs
+    // whose ancestor never chrooted are in this state at v1.0; userspace
+    // Procs that reach SYS_PIVOT_ROOT will always have a root inherited
+    // from kproc's territory_chroot at boot). Returning -1 here makes
+    // the syscall fail-closed -- the caller MUST have established a
+    // root via SYS_CHROOT first (which all v1.0 Procs do, via kproc).
+    if (!territory->root_spoor)         return -1;
+
+    // Idempotent same-pointer: same Spoor reasserted as root → no-op
+    // success; refcount unchanged. Matches territory_chroot's
+    // behavior + Plan 9 / Linux pivot-to-same semantics.
+    if (territory->root_spoor == source) return 0;
+
+    struct Spoor *old = territory->root_spoor;
+
+    // Bump BEFORE swap. spoor_ref extincts on a corrupted source under
+    // its own invariant; pre-swap any failure leaves the territory
+    // unchanged. Post-swap the swap is infallible.
+    spoor_ref(source);
+    territory->root_spoor = source;
+
+    // spoor_clunk (NOT spoor_unref) on the displaced root: if THIS
+    // Territory was the last holder, the Dev's close hook runs. Same
+    // discipline as territory_chroot + mount()'s MREPL displacement.
+    // For joey's pivot the old devramfs root is held by kproc as well
+    // (system-wide; ARCH-invariant for the v1.0 boot path), so this
+    // clunk drops joey's per-Territory ref but does NOT free the
+    // underlying tree structurally.
+    spoor_clunk(old);
+    return 0;
+}

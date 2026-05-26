@@ -255,6 +255,67 @@ int unmount(struct Territory *territory, path_id_t target_path);
 //   -1   source is NULL.
 int territory_chroot(struct Territory *territory, struct Spoor *source);
 
+// =============================================================================
+// Pivot root (long-running-Proc root swap) — P6-pouch-stratumd-boot 16c.
+// =============================================================================
+
+// territory_pivot_root: atomically replace `territory`'s root_spoor with
+// `source`, dropping the displaced root's reference. Unlike
+// territory_chroot (which is documented for initial chroot use and is
+// what kproc calls at boot to stamp devramfs), territory_pivot_root is
+// the LONG-RUNNING-Proc primitive: it requires an existing root
+// (root_spoor != NULL) and swaps it for a new one.
+//
+// Joey's v1.0 usage: stamp stratumd's mounted FS root over the
+// devramfs root, AFTER all bringup spawns (those resolve through the
+// devramfs root). The pivot is the LAST bringup step before
+// `Thylacine boot OK`. Closes the v1.x note in usr/joey/joey.c around
+// line 293-304 ("v1.x adds SYS_UNCHROOT or a proper pivot_root").
+//
+// Semantics mirror territory_chroot's atomicity + refcount discipline:
+//   - if root_spoor == source: idempotent no-op success (returns 0;
+//     no refcount change). Matches Plan 9 / Linux pivot-to-same.
+//   - else: spoor_ref(source) BEFORE swap; territory->root_spoor =
+//     source; spoor_clunk(old) AFTER swap.
+//
+// spoor_clunk (NOT spoor_unref) on the displaced root so if this was
+// the last holder, the Dev's close hook runs — for joey's pivot the
+// old devramfs root is held by:
+//   (a) joey's territory root_spoor (the holder this call drops)
+//   (b) kproc's territory root_spoor (unaffected; kproc is alive)
+//   (c) any child Proc that inherited via territory_clone before
+//       pivot (each holds its own ref)
+// so joey's pivot does NOT free the devramfs root structurally --
+// kproc keeps it alive for the lifetime of the system. The clunk is
+// per-Territory discipline, not a system-wide tear-down.
+//
+// Pre-condition refusal: REQUIRES root_spoor != NULL (this is
+// "swap an existing root", not "establish initial root"). Returns -1
+// if the caller has no current root_spoor. Use territory_chroot for
+// the initial-chroot case (kproc's boot-time setup).
+//
+// Spec posture: same shape as `specs/territory.tla::Chroot(p, s)` --
+// the formal state transition is identical to chroot under the
+// renamed action. No new spec module per the 2026-05-23 spec-to-code
+// suspension; the no-cycle invariant (I-3) holds trivially because
+// pivot does not touch the bind graph, and refcount consistency
+// (§9.6.6) holds via the matched bump + drop pattern.
+//
+// Bind / mount table state across pivot: at v1.0, the per-Territory
+// bind[] and mounts[] are NOT modified by territory_pivot_root. Any
+// mount entries that pointed at sub-trees of the OLD root remain
+// active; walking them post-pivot still routes through the mount-
+// table's Spoors (mount-table entries don't depend on root_spoor for
+// addressability -- they're keyed by path_id_t in the per-Territory
+// namespace). v1.x bind-survivor semantics (e.g., a `/dev` bind that
+// crosses the pivot) lift on top of this primitive.
+//
+// Return values:
+//    0   success (root swapped or idempotent no-op).
+//   -1   territory has no current root_spoor (pre-condition fail) OR
+//        source is NULL.
+int territory_pivot_root(struct Territory *territory, struct Spoor *source);
+
 // Diagnostic.
 int  territory_nbinds(struct Territory *territory);
 int  territory_nmounts(struct Territory *territory);

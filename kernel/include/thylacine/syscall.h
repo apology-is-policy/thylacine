@@ -986,6 +986,100 @@ enum {
     //
     // Audit-bearing: per the SYS_FSTAT row in CLAUDE.md.
     SYS_LSEEK        = 51,   // arg: spoor_fd (x0), offset (x1), whence (x2)
+
+    // P6-pouch-stratumd-boot 16c: SYS_ATTACH_9P_SRV(srv_fd, aname_va,
+    //                                                 aname_len, n_uname)
+    //                                                 -> spoor_fd / -1
+    //   x0 = srv_fd      (hidx_t; must be a byte-mode KOBJ_SRV handle the
+    //                    caller holds, with RIGHT_READ + RIGHT_WRITE -- the
+    //                    kernel 9P client writes Twalk/Tread/Twrite and
+    //                    reads Rwalk/Rread/Rwrite over the rings)
+    //   x1 = aname_va    (user-VA pointer to the attach name string;
+    //                    NUL not required -- aname_len authoritative)
+    //   x2 = aname_len   (bytes; <= SYS_ATTACH_ANAME_MAX = 256;
+    //                    zero-length aname is permitted)
+    //   x3 = n_uname     (u32; 0 for no-auth attach at v1.0)
+    //
+    // Parallel to SYS_ATTACH_9P but the transport is a byte-mode
+    // SrvConn (from pouch sockets' SYS_POST_SERVICE_BYTE + the client's
+    // SYS_SRV_CONNECT) rather than a Spoor pair. The composition:
+    //   1. handle_get(srv_fd) -> KObj_Srv slot
+    //   2. atomic-ACQUIRE on cn->byte_mode; reject if 9P-mode (the
+    //      embedded p9_client owns the rings -- a second p9_client
+    //      would race / produce wire corruption)
+    //   3. kmalloc + p9_srvconn_transport_init (takes 1 srvconn_ref)
+    //   4. p9_attached_create -> drives Tversion + Tattach on the
+    //      kernel-owned p9_client wrapped by the adapter
+    //   5. p9_attached_root_spoor -> dev9p Spoor pointing at the bound
+    //      root_fid
+    //   6. handle_alloc KOBJ_SPOOR with RIGHT_READ | WRITE | TRANSFER
+    //      (same rights envelope as SYS_ATTACH_9P)
+    //
+    // The returned KOBJ_SPOOR fd can be passed to SYS_MOUNT to graft
+    // the resulting 9P tree at a target path in the caller's territory.
+    //
+    // Lifetime: caller's KOBJ_SRV handle reference is INDEPENDENT of
+    // the adapter's reference. Userspace closing the source srv_fd
+    // does NOT tear down the SrvConn while the returned KOBJ_SPOOR is
+    // still alive (the p9_attached holds the adapter holds its own
+    // srvconn_ref). The SrvConn lives until ALL holders unref --
+    // matches the SYS_ATTACH_9P discipline for transport-Spoor refs
+    // (p9_attached_install_transport).
+    //
+    // Returns: x0 = new fd (>=0) on success; -1 on:
+    //   - invalid srv_fd (not KOBJ_SRV / out-of-range / corrupted)
+    //   - srv_fd missing RIGHT_READ or RIGHT_WRITE
+    //   - srv_fd is 9P-mode (byte-mode gate)
+    //   - aname_va outside user-VA bound OR aname_len > SYS_ATTACH_ANAME_MAX
+    //   - n_uname > U32_MAX
+    //   - kmalloc OOM for adapter / p9_attached_create handshake failure
+    //   - handle table full
+    //
+    // Audit-bearing: CLAUDE.md §"Audit-triggering changes" SYS_ATTACH_
+    // 9P_SRV row.
+    SYS_ATTACH_9P_SRV = 52,  // arg: srv_fd, aname_va, aname_len, n_uname
+
+    // P6-pouch-stratumd-boot 16c: SYS_PIVOT_ROOT(new_root_fd) -> 0 / -1
+    //   x0 = new_root_fd   (hidx_t; must be KOBJ_SPOOR with RIGHT_READ)
+    //
+    // Atomic root_spoor swap for the caller's Territory. Unlike
+    // SYS_CHROOT (which is documented for initial-chroot use and
+    // typically called by kproc at boot to stamp the devramfs root),
+    // SYS_PIVOT_ROOT is the long-running-Proc primitive that exchanges
+    // an existing root for a new one. Joey calls this LAST in its
+    // bringup, swapping its devramfs root for stratumd's mounted FS
+    // root (the dev9p Spoor from SYS_ATTACH_9P_SRV + SYS_MOUNT).
+    //
+    // Semantics (mirrors Linux pivot_root(2) minus the put_old arg --
+    // the displaced root is simply unreferenced via spoor_clunk, which
+    // tears down the underlying tree IF this was the last holder):
+    //   1. handle_get(new_root_fd) -> KOBJ_SPOOR slot
+    //   2. validate rights (RIGHT_READ on the new root)
+    //   3. territory_pivot_root(territory, new_root_spoor):
+    //        a. spoor_ref(new) -- bump BEFORE swap (extincts on
+    //           corrupted source under spoor_ref's invariant; pre-
+    //           swap any failure leaves the territory unchanged)
+    //        b. atomically replace root_spoor with new
+    //        c. spoor_clunk(old) -- if territory was last holder,
+    //           Dev close hook runs (frees underlying state)
+    //
+    // Idempotent on same-spoor (returns 0 without bumping refcount).
+    //
+    // Why distinct from SYS_CHROOT (not a re-chroot): semantic clarity
+    // for the audit trail + future v1.x extensibility (e.g., preserving
+    // specific bind mounts across the pivot) without re-litigating
+    // SYS_CHROOT's contract. Closes the v1.x note in usr/joey/joey.c
+    // around line 293-304 ("v1.x adds SYS_UNCHROOT or a proper
+    // pivot_root").
+    //
+    // Returns: 0 on success, -1 on:
+    //   - new_root_fd not KOBJ_SPOOR / out-of-range / missing RIGHT_READ
+    //   - caller has no Territory (kernel invariant -- structurally
+    //     impossible for userspace; defense-in-depth)
+    //
+    // Audit-bearing: CLAUDE.md §"Audit-triggering changes" SYS_PIVOT_
+    // ROOT + territory_pivot_root row.
+    SYS_PIVOT_ROOT   = 53,   // arg: new_root_fd (x0)
 };
 
 // SYS_WALK_OPEN's FROM_ROOT sentinel: when passed as the spoor_fd, the
