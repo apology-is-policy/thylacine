@@ -305,6 +305,9 @@ enum Action {
     EofOrDelete,
     /// Ctrl-L -- screen clear.
     ClearScreen,
+    /// Ctrl-R -- enter incremental search mode (U-4c). In search mode,
+    /// re-pressing Ctrl-R cycles to the next older match.
+    SearchHistory,
     /// No-op (decoded but ignored, e.g. unknown CSI final byte).
     Ignore,
 }
@@ -356,6 +359,30 @@ enum ParserState {
 /// shell line.
 const MAX_BUFFER_LEN: usize = 64 * 1024;
 
+/// Maximum in-memory history entries (U-4c). Per UTOPIA-SHELL-DESIGN.md
+/// section 12.4 (`$HISTSIZE` default). Older entries are dropped when
+/// the cap is exceeded. v1.x can add disk-backed history at
+/// ~/.config/utopia/history.
+const HISTORY_CAP: usize = 10_000;
+
+/// Mode of the line editor (U-4c). Normal is the default; Search is
+/// entered via Ctrl-R and exits on Enter (accept), Ctrl-G/Ctrl-C
+/// (cancel + restore), or implicitly when any other action would
+/// require leaving search.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LineEditorMode {
+    Normal,
+    Search {
+        /// What the user has typed since entering search mode.
+        query: String,
+        /// History index of the currently displayed match, if any.
+        match_index: Option<usize>,
+        /// Saved buffer + cursor to restore on Cancel.
+        saved_buffer: String,
+        saved_cursor: usize,
+    },
+}
+
 pub struct LineEditor {
     buffer: String,
     /// Cursor as a byte index into `buffer` -- always on a UTF-8
@@ -363,7 +390,7 @@ pub struct LineEditor {
     cursor: usize,
     /// Most-recent kill for Ctrl-Y yank.
     kill_buffer: String,
-    /// In-memory history. Empty at U-4a; populated by U-4c.
+    /// In-memory history (capped at HISTORY_CAP entries).
     history: Vec<String>,
     /// History navigation position: None == editing current; Some(i)
     /// == viewing history[i]. When the user starts navigating away
@@ -372,6 +399,12 @@ pub struct LineEditor {
     history_pos: Option<usize>,
     saved_current: String,
     parser: ParserState,
+    /// U-4c: search vs normal. Normal at U-4a; Search added at U-4c.
+    mode: LineEditorMode,
+    /// U-4c: desired visible column for column-preserving Up/Down nav
+    /// across multi-line buffers. Set on Up/Down; cleared on any
+    /// horizontal motion or edit. None == "use current column".
+    desired_col: Option<usize>,
 }
 
 impl Default for LineEditor {
@@ -390,6 +423,8 @@ impl LineEditor {
             history_pos: None,
             saved_current: String::new(),
             parser: ParserState::Ground,
+            mode: LineEditorMode::Normal,
+            desired_col: None,
         }
     }
 
@@ -401,6 +436,8 @@ impl LineEditor {
         self.history_pos = None;
         self.saved_current.clear();
         self.parser = ParserState::Ground;
+        self.mode = LineEditorMode::Normal;
+        self.desired_col = None;
         // kill_buffer survives Cancel/Accept -- yank can paste across
         // a Cancel boundary (standard emacs behaviour).
     }
@@ -421,12 +458,48 @@ impl LineEditor {
         &self.history
     }
 
-    /// Append a line to history. v1.0 history is in-memory only; the
-    /// disk-backed history file at ~/.config/utopia/history (per
-    /// UTOPIA-SHELL-DESIGN section 12) lands later.
+    /// Append a line to history. Empty lines are dropped. When the
+    /// in-memory history reaches HISTORY_CAP entries, the oldest entry
+    /// is removed to make room (oldest-first eviction).
+    ///
+    /// v1.0 history is in-memory only; the disk-backed history file
+    /// at ~/.config/utopia/history (per UTOPIA-SHELL-DESIGN section
+    /// 12) lands later.
     pub fn push_history(&mut self, line: String) {
-        if !line.is_empty() {
-            self.history.push(line);
+        if line.is_empty() {
+            return;
+        }
+        if self.history.len() >= HISTORY_CAP {
+            // Evict oldest. Vec::remove(0) is O(n) but n <= HISTORY_CAP
+            // (10000); each push amortizes to O(1) at steady state
+            // since most pushes don't evict, only the trim boundary
+            // does. v1.x can swap to a VecDeque ring if profiling
+            // says otherwise.
+            self.history.remove(0);
+        }
+        self.history.push(line);
+    }
+
+    /// True iff the editor is currently in incremental-search mode (U-4c).
+    pub fn is_searching(&self) -> bool {
+        matches!(self.mode, LineEditorMode::Search { .. })
+    }
+
+    /// In search mode, return the current query string. None when in
+    /// Normal mode.
+    pub fn search_query(&self) -> Option<&str> {
+        match &self.mode {
+            LineEditorMode::Search { query, .. } => Some(query.as_str()),
+            _ => None,
+        }
+    }
+
+    /// In search mode, return the history index of the current match.
+    /// None when in Normal mode OR when the query has no match.
+    pub fn search_match_index(&self) -> Option<usize> {
+        match &self.mode {
+            LineEditorMode::Search { match_index, .. } => *match_index,
+            _ => None,
         }
     }
 
@@ -487,6 +560,16 @@ impl LineEditor {
     /// U-4b the boot probe only checks emitted bytes (not screen
     /// state) so this is invisible.
     pub fn render(&self, prompt: &str) -> String {
+        // U-4c: in Search mode, render shows the readline-style
+        // search prompt + the matched line (or empty if no match).
+        // Cursor positions at the end of the query inside the
+        // (reverse-i-search)`...': prefix.
+        if let LineEditorMode::Search {
+            query, match_index, ..
+        } = &self.mode
+        {
+            return self.render_search(query, *match_index);
+        }
         let prompt_w = crate::ansi::visible_width(prompt);
         let cont = continuation_prefix(prompt_w);
         let cont_w = crate::ansi::visible_width(&cont);
@@ -542,6 +625,50 @@ impl LineEditor {
         out
     }
 
+    /// U-4c: render in incremental-search mode. Emits readline-style
+    /// `(reverse-i-search)`<query>': <matched_line>` prefix with the
+    /// cursor positioned at the end of the query (inside the prefix).
+    /// On no match (query has no substring hits in history), emits
+    /// `(failed reverse-i-search)`<query>':` with empty matched line.
+    fn render_search(&self, query: &str, match_index: Option<usize>) -> String {
+        let mut out = String::new();
+        out.push('\r');
+        out.push_str("\x1b[K");
+        let (prefix, matched) = match match_index {
+            Some(i) => (
+                format!("(reverse-i-search)`{}': ", query),
+                self.history
+                    .get(i)
+                    .map(|s| String::from(s.as_str()))
+                    .unwrap_or_default(),
+            ),
+            None => (
+                format!("(failed reverse-i-search)`{}': ", query),
+                String::new(),
+            ),
+        };
+        out.push_str(&prefix);
+        out.push_str(&matched);
+        // Cursor at end of query (between `' and `:`). Position is:
+        //   prefix's visible_width is the length of the leading text
+        //   up to and including the closing backtick + space.
+        //   Actually the cursor should sit RIGHT AFTER the query (just
+        //   before the closing `'`). That position equals
+        //   visible_width("(reverse-i-search)`") + query_chars.
+        let leading = if match_index.is_some() {
+            "(reverse-i-search)`"
+        } else {
+            "(failed reverse-i-search)`"
+        };
+        let target_col =
+            crate::ansi::visible_width(leading) + crate::ansi::visible_width(query);
+        out.push('\r');
+        if target_col > 0 {
+            out.push_str(&format!("\x1b[{}C", target_col));
+        }
+        out
+    }
+
     // -------------------------------------------------------------------------
     // Parser implementation.
     // -------------------------------------------------------------------------
@@ -563,7 +690,7 @@ impl LineEditor {
             0x0d => Action::Accept,        // Ctrl-M / CR (Enter)
             0x0e => Action::HistoryNext,   // Ctrl-N
             0x10 => Action::HistoryPrev,   // Ctrl-P
-            0x12 => Action::Ignore,        // Ctrl-R -- U-4c history search
+            0x12 => Action::SearchHistory, // Ctrl-R -- U-4c incremental search
             0x15 => Action::KillToStart,   // Ctrl-U
             0x17 => Action::KillPrevWord,  // Ctrl-W
             0x19 => Action::Yank,          // Ctrl-Y
@@ -760,6 +887,23 @@ impl LineEditor {
     // -------------------------------------------------------------------------
 
     fn apply(&mut self, action: Action) -> EditorAction {
+        // U-4c: in Search mode, action dispatch is different. We
+        // handle the search-mode-relevant subset here + cancel +
+        // re-dispatch for everything else (a minimal interactive
+        // search; v1.x can refine to readline's full set of bindings).
+        if self.is_searching() {
+            return self.apply_in_search(action);
+        }
+        // Most actions reset desired_col (the column-preserving Up/Down
+        // tracker). Up/Down preserve it; only ascending/descending
+        // through lines should sticky-stick to the same column.
+        let preserves_desired_col = matches!(
+            action,
+            Action::HistoryPrev | Action::HistoryNext | Action::Ignore | Action::ClearScreen
+        );
+        if !preserves_desired_col {
+            self.desired_col = None;
+        }
         match action {
             Action::InsertChar(ch) => self.do_insert(ch),
             Action::Backspace => self.do_backspace(),
@@ -778,7 +922,38 @@ impl LineEditor {
             Action::Cancel => self.do_cancel(),
             Action::EofOrDelete => self.do_eof_or_delete(),
             Action::ClearScreen => EditorAction::ClearScreen,
+            Action::SearchHistory => self.do_enter_search(),
             Action::Ignore => EditorAction::NoChange,
+        }
+    }
+
+    /// Action dispatch when in Search mode. Only a few actions matter:
+    ///   - InsertChar(ch)    -> append to query, re-search
+    ///   - Backspace         -> drop from query, re-search
+    ///   - SearchHistory     -> step backward to next-older match
+    ///   - Accept            -> accept current match as buffer + submit
+    ///   - Cancel            -> restore saved state, exit search
+    ///   - EofOrDelete       -> cancel (Ctrl-D in readline acts as cancel)
+    ///   - HistoryPrev       -> alias for SearchHistory (step back)
+    ///   - HistoryNext       -> step forward to next-newer match
+    ///   - Anything else     -> cancel search, do NOT re-dispatch.
+    ///                          (v1.x readline-equivalent: cancel +
+    ///                          re-dispatch the action in Normal mode.)
+    fn apply_in_search(&mut self, action: Action) -> EditorAction {
+        match action {
+            Action::InsertChar(ch) => self.do_search_append(ch),
+            Action::Backspace => self.do_search_backspace(),
+            Action::SearchHistory | Action::HistoryPrev => self.do_search_step_back(),
+            Action::HistoryNext => self.do_search_step_forward(),
+            Action::Accept => self.do_search_accept(),
+            Action::Cancel | Action::EofOrDelete => self.do_search_cancel(),
+            Action::Ignore => EditorAction::NoChange,
+            // Cancel for anything else (cursor motion, kill, etc.).
+            // The user is in search mode; the only sensible default
+            // for an unfamiliar key is to exit search + return to
+            // Normal mode without applying. The user can re-press the
+            // key in Normal mode if they wanted that.
+            _ => self.do_search_cancel(),
         }
     }
 
@@ -910,6 +1085,12 @@ impl LineEditor {
     }
 
     fn do_history_prev(&mut self) -> EditorAction {
+        // U-4c smart Up: when the buffer has '\n' AND the cursor is
+        // NOT on the first line, navigate cursor up one line
+        // (column-preserving) instead of doing history-prev.
+        if self.buffer.contains('\n') && self.line_start_byte(self.cursor) > 0 {
+            return self.do_cursor_up_line();
+        }
         if self.history.is_empty() {
             return EditorAction::NoChange;
         }
@@ -931,6 +1112,11 @@ impl LineEditor {
     }
 
     fn do_history_next(&mut self) -> EditorAction {
+        // U-4c smart Down: when the buffer has '\n' AND the cursor is
+        // NOT on the last line, navigate cursor down one line.
+        if self.buffer.contains('\n') && self.line_end_byte(self.cursor) < self.buffer.len() {
+            return self.do_cursor_down_line();
+        }
         match self.history_pos {
             None => EditorAction::NoChange,
             Some(i) if i + 1 < self.history.len() => {
@@ -951,6 +1137,267 @@ impl LineEditor {
                 EditorAction::Redraw
             }
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // U-4c: multi-line cursor up/down helpers + line-position helpers.
+    // -------------------------------------------------------------------------
+
+    /// Byte index of the start of the line containing `cursor`. Equals
+    /// 0 for the first line; equals (last '\n' + 1) otherwise.
+    fn line_start_byte(&self, cursor: usize) -> usize {
+        self.buffer[..cursor].rfind('\n').map(|i| i + 1).unwrap_or(0)
+    }
+
+    /// Byte index of the end of the line containing `cursor` (the '\n'
+    /// itself, or `buffer.len()` for the last line).
+    fn line_end_byte(&self, cursor: usize) -> usize {
+        self.buffer[cursor..]
+            .find('\n')
+            .map(|i| cursor + i)
+            .unwrap_or(self.buffer.len())
+    }
+
+    /// Visible column of cursor within its line (UTF-8 aware via
+    /// libutopia::ansi::visible_width).
+    fn col_in_line(&self, cursor: usize) -> usize {
+        let line_start = self.line_start_byte(cursor);
+        crate::ansi::visible_width(&self.buffer[line_start..cursor])
+    }
+
+    /// Walk `line` until we reach the `target_col`-th visible char (or
+    /// the end of the line). Returns the byte offset.
+    fn byte_offset_at_col(line: &str, target_col: usize) -> usize {
+        let mut col = 0usize;
+        let mut last_byte = 0usize;
+        for (i, ch) in line.char_indices() {
+            if col >= target_col {
+                return i;
+            }
+            col += 1;
+            last_byte = i + ch.len_utf8();
+        }
+        last_byte
+    }
+
+    fn do_cursor_up_line(&mut self) -> EditorAction {
+        let cur_line_start = self.line_start_byte(self.cursor);
+        if cur_line_start == 0 {
+            return EditorAction::NoChange;
+        }
+        let prev_line_end = cur_line_start - 1; // the '\n'
+        let prev_line_start = self.line_start_byte(prev_line_end);
+        let col = self
+            .desired_col
+            .unwrap_or_else(|| self.col_in_line(self.cursor));
+        let prev_line = &self.buffer[prev_line_start..prev_line_end];
+        let offset = Self::byte_offset_at_col(prev_line, col);
+        self.cursor = prev_line_start + offset;
+        self.desired_col = Some(col);
+        EditorAction::Redraw
+    }
+
+    fn do_cursor_down_line(&mut self) -> EditorAction {
+        let cur_line_end = self.line_end_byte(self.cursor);
+        if cur_line_end == self.buffer.len() {
+            return EditorAction::NoChange;
+        }
+        let next_line_start = cur_line_end + 1; // past the '\n'
+        let next_line_end = self.line_end_byte(next_line_start);
+        let col = self
+            .desired_col
+            .unwrap_or_else(|| self.col_in_line(self.cursor));
+        let next_line = &self.buffer[next_line_start..next_line_end];
+        let offset = Self::byte_offset_at_col(next_line, col);
+        self.cursor = next_line_start + offset;
+        self.desired_col = Some(col);
+        EditorAction::Redraw
+    }
+
+    // -------------------------------------------------------------------------
+    // U-4c: incremental-search mode (Ctrl-R).
+    // -------------------------------------------------------------------------
+
+    /// Find the index of the newest history entry that contains
+    /// `query` as a substring AND has index <= `upto_idx`. Used by
+    /// `step_back` (cycling to next-older match). Returns None if no
+    /// match found.
+    fn search_history_backward(&self, query: &str, upto_idx: usize) -> Option<usize> {
+        if query.is_empty() {
+            return None;
+        }
+        let mut i = upto_idx;
+        loop {
+            if self.history[i].contains(query) {
+                return Some(i);
+            }
+            if i == 0 {
+                return None;
+            }
+            i -= 1;
+        }
+    }
+
+    /// Find the index of the oldest history entry that contains
+    /// `query` as a substring AND has index >= `from_idx`. Used by
+    /// `step_forward` (cycling toward newer matches).
+    fn search_history_forward(&self, query: &str, from_idx: usize) -> Option<usize> {
+        if query.is_empty() {
+            return None;
+        }
+        let n = self.history.len();
+        for i in from_idx..n {
+            if self.history[i].contains(query) {
+                return Some(i);
+            }
+        }
+        None
+    }
+
+    fn do_enter_search(&mut self) -> EditorAction {
+        // Save current buffer + cursor; switch to Search mode with
+        // empty query + no match.
+        let saved_buffer = core::mem::take(&mut self.buffer);
+        let saved_cursor = self.cursor;
+        self.buffer.clear();
+        self.cursor = 0;
+        self.mode = LineEditorMode::Search {
+            query: String::new(),
+            match_index: None,
+            saved_buffer,
+            saved_cursor,
+        };
+        EditorAction::Redraw
+    }
+
+    fn do_search_append(&mut self, ch: char) -> EditorAction {
+        // Compute new query + new match BEFORE re-entering self.mode
+        // mutably, so the &self borrows for history lookup don't
+        // overlap the &mut self.mode borrow.
+        let new_query = match &self.mode {
+            LineEditorMode::Search { query, .. } => {
+                let mut q = query.clone();
+                q.push(ch);
+                q
+            }
+            _ => return EditorAction::NoChange,
+        };
+        let new_match = if self.history.is_empty() {
+            None
+        } else {
+            self.search_history_backward(&new_query, self.history.len() - 1)
+        };
+        if let LineEditorMode::Search {
+            query, match_index, ..
+        } = &mut self.mode
+        {
+            *query = new_query;
+            *match_index = new_match;
+        }
+        EditorAction::Redraw
+    }
+
+    fn do_search_backspace(&mut self) -> EditorAction {
+        // Compute new query + new match BEFORE re-entering self.mode
+        // mutably (same pattern as do_search_append).
+        let new_query = match &self.mode {
+            LineEditorMode::Search { query, .. } => {
+                if query.is_empty() {
+                    return EditorAction::NoChange;
+                }
+                let mut q = query.clone();
+                q.pop();
+                q
+            }
+            _ => return EditorAction::NoChange,
+        };
+        let new_match = if new_query.is_empty() || self.history.is_empty() {
+            None
+        } else {
+            self.search_history_backward(&new_query, self.history.len() - 1)
+        };
+        if let LineEditorMode::Search {
+            query, match_index, ..
+        } = &mut self.mode
+        {
+            *query = new_query;
+            *match_index = new_match;
+        }
+        EditorAction::Redraw
+    }
+
+    fn do_search_step_back(&mut self) -> EditorAction {
+        // Cycle to the next-older match: start from (current match - 1)
+        // or from (history.len() - 1) if no current match.
+        let (query, current_match) = match &self.mode {
+            LineEditorMode::Search {
+                query, match_index, ..
+            } => (query.clone(), *match_index),
+            _ => return EditorAction::NoChange,
+        };
+        let start = match current_match {
+            Some(0) => return EditorAction::NoChange, // already at oldest match
+            Some(i) => Some(i - 1),
+            None => self.history.len().checked_sub(1),
+        };
+        let new_match = start.and_then(|s| self.search_history_backward(&query, s));
+        if let LineEditorMode::Search { match_index, .. } = &mut self.mode {
+            *match_index = new_match;
+        }
+        EditorAction::Redraw
+    }
+
+    fn do_search_step_forward(&mut self) -> EditorAction {
+        // Cycle to the next-newer match: start from (current match + 1).
+        let (query, current_match) = match &self.mode {
+            LineEditorMode::Search {
+                query, match_index, ..
+            } => (query.clone(), *match_index),
+            _ => return EditorAction::NoChange,
+        };
+        let start = match current_match {
+            None => return EditorAction::NoChange,
+            Some(i) if i + 1 >= self.history.len() => return EditorAction::NoChange,
+            Some(i) => i + 1,
+        };
+        let new_match = self.search_history_forward(&query, start);
+        if let LineEditorMode::Search { match_index, .. } = &mut self.mode {
+            *match_index = new_match;
+        }
+        EditorAction::Redraw
+    }
+
+    fn do_search_accept(&mut self) -> EditorAction {
+        // Replace buffer with the matched history line (if any), then
+        // exit search mode and trigger the normal Accept path.
+        let match_text = match &self.mode {
+            LineEditorMode::Search { match_index, .. } => match_index
+                .and_then(|i| self.history.get(i))
+                .cloned()
+                .unwrap_or_default(),
+            _ => return EditorAction::NoChange,
+        };
+        // Exit search.
+        self.mode = LineEditorMode::Normal;
+        self.buffer = match_text;
+        self.cursor = self.buffer.len();
+        // Submit via the standard accept path so balance + reset
+        // semantics apply uniformly.
+        self.do_accept()
+    }
+
+    fn do_search_cancel(&mut self) -> EditorAction {
+        // Restore the saved buffer + cursor, exit search.
+        if let LineEditorMode::Search {
+            saved_buffer,
+            saved_cursor,
+            ..
+        } = core::mem::replace(&mut self.mode, LineEditorMode::Normal)
+        {
+            self.buffer = saved_buffer;
+            self.cursor = saved_cursor;
+        }
+        EditorAction::Redraw
     }
 
     fn do_accept(&mut self) -> EditorAction {
@@ -1540,6 +1987,204 @@ mod tests {
         assert!(s.contains("\x1b[1F"));
         // Final position: prompt_width + 0 = col 2.
         assert!(s.ends_with("\x1b[2C"));
+    }
+
+    // =========================================================================
+    // U-4c tests -- smart Up/Down + search mode + history cap.
+    // =========================================================================
+
+    #[test]
+    fn smart_up_in_multi_line_does_cursor_up() {
+        let mut le = LineEditor::new();
+        // Construct a multi-line buffer by hand.
+        let _ = le.feed_bytes(b"{");
+        le.feed_byte(b'\r');
+        let _ = le.feed_bytes(b"  foo");
+        // Cursor is at end of line 1 (byte 7).
+        assert_eq!(le.cursor(), 7);
+        // Ctrl-P (HistoryPrev) -- multi-line + cursor not on first line
+        // -> should cursor-up to line 0 (preserving column).
+        let r = le.feed_byte(0x10);
+        assert_eq!(r, EditorAction::Redraw);
+        // Now cursor should be on line 0. Line 0 is "{" (1 char), but
+        // desired_col was 5 (after "  foo"); since line 0 is shorter,
+        // cursor lands at end of line 0 = byte 1.
+        assert_eq!(le.cursor(), 1);
+    }
+
+    #[test]
+    fn smart_up_at_first_line_uses_history() {
+        let mut le = LineEditor::new();
+        le.push_history(String::from("older"));
+        // Single-line buffer "x" -- Up should do history-prev.
+        let _ = le.feed_bytes(b"x");
+        le.feed_byte(0x10);
+        assert_eq!(le.buffer(), "older");
+    }
+
+    #[test]
+    fn smart_down_in_multi_line_does_cursor_down() {
+        let mut le = LineEditor::new();
+        // Build "abc\\\nxyz" via backslash-continuation.
+        let _ = le.feed_bytes(b"abc");
+        le.feed_byte(b'\\');
+        le.feed_byte(b'\r');
+        let _ = le.feed_bytes(b"xyz");
+        let buf_len = le.buffer().len();
+        assert_eq!(le.cursor(), buf_len);
+        // Ctrl-A -> start of BUFFER (current Ctrl-A semantics; not
+        // start-of-line. Whole-buffer cursor=0 is on line 0).
+        le.feed_byte(0x01);
+        assert_eq!(le.cursor(), 0);
+        // Ctrl-N (Down) -- multi-line, line_end_byte(0) = 4 < buf_len ->
+        // cursor down to line 1 at col 0. Line 1 starts at byte 5.
+        le.feed_byte(0x0e);
+        assert_eq!(le.cursor(), 5);
+        // Ctrl-N again -- now on last line, falls through to history.
+        // History is empty, history_pos is None -> NoChange. Cursor unchanged.
+        le.feed_byte(0x0e);
+        assert_eq!(le.cursor(), 5);
+    }
+
+    #[test]
+    fn desired_col_preserved_across_consecutive_up_down() {
+        let mut le = LineEditor::new();
+        // Two lines of different length.
+        let _ = le.feed_bytes(b"abcdef");
+        le.feed_byte(b'\\');
+        le.feed_byte(b'\r');
+        let _ = le.feed_bytes(b"xy");
+        // Cursor at end = byte 10 (= "abcdef\\\nxy".len()).
+        // Visible col on line 1 (just "xy") at cursor = 2.
+        // Ctrl-P up to line 0 -- col 2 within "abcdef\\" (7 chars wide
+        // including the backslash). Cursor lands at col 2 = byte 2.
+        le.feed_byte(0x10);
+        assert_eq!(le.cursor(), 2);
+        // Ctrl-N back down to line 1 -- col 2 within "xy" (2 chars).
+        // min(2, 2) = 2 = end of line 1.
+        le.feed_byte(0x0e);
+        // Cursor at end of "xy" -- byte 10.
+        assert_eq!(le.cursor(), 10);
+    }
+
+    #[test]
+    fn push_history_caps_at_history_cap() {
+        let mut le = LineEditor::new();
+        for i in 0..(HISTORY_CAP + 5) {
+            le.push_history(alloc::format!("entry-{}", i));
+        }
+        assert_eq!(le.history().len(), HISTORY_CAP);
+        // The oldest entries should have been evicted.
+        assert!(!le.history()[0].contains("entry-0"));
+        assert!(le.history().last().unwrap().contains(&alloc::format!("entry-{}", HISTORY_CAP + 4)));
+    }
+
+    #[test]
+    fn ctrl_r_enters_search_mode() {
+        let mut le = LineEditor::new();
+        let r = le.feed_byte(0x12);
+        assert_eq!(r, EditorAction::Redraw);
+        assert!(le.is_searching());
+        assert_eq!(le.search_query(), Some(""));
+    }
+
+    #[test]
+    fn search_appends_query_and_finds_match() {
+        let mut le = LineEditor::new();
+        le.push_history(String::from("apple pie"));
+        le.push_history(String::from("banana bread"));
+        le.push_history(String::from("cherry pie"));
+        le.feed_byte(0x12); // Ctrl-R
+        let _ = le.feed_bytes(b"pie");
+        // Newest match for "pie" is index 2 ("cherry pie").
+        assert_eq!(le.search_match_index(), Some(2));
+        assert_eq!(le.search_query(), Some("pie"));
+    }
+
+    #[test]
+    fn search_ctrl_r_steps_to_older_match() {
+        let mut le = LineEditor::new();
+        le.push_history(String::from("apple pie"));
+        le.push_history(String::from("banana bread"));
+        le.push_history(String::from("cherry pie"));
+        le.feed_byte(0x12);
+        let _ = le.feed_bytes(b"pie");
+        assert_eq!(le.search_match_index(), Some(2));
+        // Ctrl-R again -> step back to older "apple pie".
+        le.feed_byte(0x12);
+        assert_eq!(le.search_match_index(), Some(0));
+    }
+
+    #[test]
+    fn search_backspace_widens_match() {
+        let mut le = LineEditor::new();
+        le.push_history(String::from("apple"));
+        le.push_history(String::from("apricot"));
+        le.feed_byte(0x12);
+        let _ = le.feed_bytes(b"app");
+        // Newest match for "app" is index 1 ("apricot" doesn't start
+        // with "app"; "apple" does -> match index 0).
+        assert_eq!(le.search_match_index(), Some(0));
+        // Backspace once -> query is "ap".
+        le.feed_byte(0x7f);
+        assert_eq!(le.search_query(), Some("ap"));
+        // Newest match for "ap" is index 1 ("apricot").
+        assert_eq!(le.search_match_index(), Some(1));
+    }
+
+    #[test]
+    fn search_enter_accepts_match() {
+        let mut le = LineEditor::new();
+        le.push_history(String::from("hello world"));
+        le.feed_byte(0x12);
+        let _ = le.feed_bytes(b"hello");
+        let r = le.feed_byte(b'\r');
+        match r {
+            EditorAction::Accept(s) => assert_eq!(s, "hello world"),
+            _ => panic!("expected Accept; got {:?}", r),
+        }
+        assert!(!le.is_searching());
+    }
+
+    #[test]
+    fn search_cancel_restores_saved_buffer() {
+        let mut le = LineEditor::new();
+        le.push_history(String::from("foo"));
+        let _ = le.feed_bytes(b"draft");
+        assert_eq!(le.buffer(), "draft");
+        le.feed_byte(0x12); // Ctrl-R; saves "draft"
+        let _ = le.feed_bytes(b"foo");
+        // Ctrl-C (cancel)
+        let r = le.feed_byte(0x03);
+        assert_eq!(r, EditorAction::Redraw);
+        assert!(!le.is_searching());
+        // Buffer restored to "draft"; cursor restored to end.
+        assert_eq!(le.buffer(), "draft");
+        assert_eq!(le.cursor(), 5);
+    }
+
+    #[test]
+    fn search_no_match_fails_silently() {
+        let mut le = LineEditor::new();
+        le.push_history(String::from("apple"));
+        le.feed_byte(0x12);
+        let _ = le.feed_bytes(b"xyz");
+        assert_eq!(le.search_match_index(), None);
+        // Render should produce the failed-search prefix.
+        let s = le.render("> ");
+        assert!(s.contains("failed reverse-i-search"));
+    }
+
+    #[test]
+    fn search_render_shows_query_and_match() {
+        let mut le = LineEditor::new();
+        le.push_history(String::from("hello world"));
+        le.feed_byte(0x12);
+        let _ = le.feed_bytes(b"hello");
+        let s = le.render("> ");
+        // Prefix should be (reverse-i-search)`hello': hello world
+        assert!(s.contains("(reverse-i-search)`hello':"));
+        assert!(s.contains("hello world"));
     }
 
     #[test]

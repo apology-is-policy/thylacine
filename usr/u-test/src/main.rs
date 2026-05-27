@@ -730,6 +730,95 @@ fn flow_line_editor() -> Result<(), i64> {
     }
     le.reset();
 
+    // Probe 11 -- U-4c: smart Up nav in multi-line buffer (cursor-up
+    // when cursor not on first line; falls through to history when on
+    // first line or single-line).
+    le.push_history(String::from("older command"));
+    let _ = le.feed_bytes(b"{");
+    le.feed_byte(b'\r');
+    let _ = le.feed_bytes(b"  body");
+    // Cursor at end of line 1 (byte 8). Ctrl-P should cursor-up.
+    let before_up = le.cursor();
+    le.feed_byte(0x10);
+    if le.cursor() >= before_up {
+        t_putstr("u-test: flow_line_editor: smart Up cursor-up FAILED\n");
+        return Err(1);
+    }
+    if le.buffer() != "{\n  body" {
+        t_putstr("u-test: flow_line_editor: smart Up clobbered buffer FAILED\n");
+        return Err(1);
+    }
+    // Ctrl-P again from line 0: history-prev to "older command".
+    le.feed_byte(0x10);
+    if le.buffer() != "older command" {
+        t_putstr("u-test: flow_line_editor: smart Up fall-through to history FAILED\n");
+        return Err(1);
+    }
+    le.reset();
+
+    // Probe 12 -- U-4c: Ctrl-R incremental search, append + accept.
+    // Fresh editor (reset() doesn't clear history; Probe 11 already
+    // pushed "older command" which would shift indices below).
+    // `String` is already in scope from the existing flow_line_editor
+    // top-level `use alloc::string::String;`.
+    let mut le = LineEditor::new();
+    le.push_history(String::from("apple"));
+    le.push_history(String::from("apricot"));
+    le.push_history(String::from("banana"));
+    le.feed_byte(0x12); // Ctrl-R
+    if !le.is_searching() {
+        t_putstr("u-test: flow_line_editor: Ctrl-R didn't enter search FAILED\n");
+        return Err(1);
+    }
+    let _ = le.feed_bytes(b"ap");
+    // Newest match for "ap" is index 1 ("apricot").
+    if le.search_match_index() != Some(1) {
+        t_putstr("u-test: flow_line_editor: search match_index FAILED\n");
+        return Err(1);
+    }
+    // Ctrl-R again -> step to older match ("apple", index 0).
+    le.feed_byte(0x12);
+    if le.search_match_index() != Some(0) {
+        t_putstr("u-test: flow_line_editor: search step-back FAILED\n");
+        return Err(1);
+    }
+    // Enter -> Accept "apple".
+    let r = le.feed_byte(b'\r');
+    match r {
+        EditorAction::Accept(s) if s == "apple" => {}
+        _ => {
+            t_putstr("u-test: flow_line_editor: search Accept FAILED\n");
+            return Err(1);
+        }
+    }
+    if le.is_searching() {
+        t_putstr("u-test: flow_line_editor: search not exited after Accept FAILED\n");
+        return Err(1);
+    }
+
+    // Probe 13 -- U-4c: search Cancel restores saved buffer.
+    let mut le = LineEditor::new();
+    le.push_history(String::from("hello"));
+    let _ = le.feed_bytes(b"draft");
+    le.feed_byte(0x12); // Ctrl-R; saves "draft"
+    let _ = le.feed_bytes(b"hello");
+    if le.search_match_index() != Some(0) {
+        t_putstr("u-test: flow_line_editor: search-before-cancel match FAILED\n");
+        return Err(1);
+    }
+    // Ctrl-C cancels + restores.
+    le.feed_byte(0x03);
+    if le.is_searching() {
+        t_putstr("u-test: flow_line_editor: search not exited on Cancel FAILED\n");
+        return Err(1);
+    }
+    if le.buffer() != "draft" || le.cursor() != 5 {
+        t_putstr("u-test: flow_line_editor: search Cancel restore FAILED\n");
+        return Err(1);
+    }
+    // Continue probe 10 with a fresh editor too (replaces the existing one).
+    let mut le = LineEditor::new();
+
     // Probe 10 -- U-4b: multi-line render emits the ⋮ continuation glyph.
     let _ = le.feed_bytes(b"{");
     le.feed_byte(b'\r');

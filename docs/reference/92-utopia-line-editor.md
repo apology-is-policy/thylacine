@@ -1,4 +1,4 @@
-# 92-utopia-line-editor — `libutopia::line_editor` engine (U-4a + U-4b)
+# 92-utopia-line-editor — `libutopia::line_editor` engine (U-4a + U-4b + U-4c)
 
 Per CLAUDE.md "Reference documentation discipline (load-bearing)" — the
 technical reference for the line editor engine landed at Phase 7 U-4a.
@@ -86,6 +86,24 @@ impl LineEditor {
     pub fn render(&self, prompt: &str) -> String;
 }
 ```
+
+### `LineEditor` -- new U-4c accessors
+
+```rust
+impl LineEditor {
+    /// True iff in incremental-search mode (entered via Ctrl-R).
+    pub fn is_searching(&self) -> bool;
+    /// Current search query, or None when not searching.
+    pub fn search_query(&self) -> Option<&str>;
+    /// History index of the current search match (None if no match
+    /// or not searching).
+    pub fn search_match_index(&self) -> Option<usize>;
+}
+```
+
+`push_history(line)` (existed since U-4a) now enforces a cap of
+`HISTORY_CAP = 10_000` entries; older entries are evicted FIFO when
+exceeded.
 
 ### `libutopia::line_editor::BalanceState` (U-4b)
 
@@ -325,6 +343,58 @@ U-6 will revisit by either:
 For U-4b the boot probe only checks emitted bytes (not screen state),
 so the ghost-clear is invisible at test time.
 
+### Smart Up/Down nav (U-4c)
+
+Up arrow (Ctrl-P / CSI A) and Down arrow (Ctrl-N / CSI B) become
+mode-aware in U-4c:
+
+```
+do_history_prev:
+  if buffer.contains('\n') AND line_start_byte(cursor) > 0:
+    -> do_cursor_up_line()   (column-preserving)
+  else:
+    -> existing history-prev logic
+
+do_history_next:
+  if buffer.contains('\n') AND line_end_byte(cursor) < buffer.len():
+    -> do_cursor_down_line()
+  else:
+    -> existing history-next logic
+```
+
+Matches zsh/fish convention: in multi-line input, Up/Down navigate
+between buffer lines; when there's no line in the indicated direction
+(single-line buffer OR cursor at first/last line), Up/Down fall
+through to history nav.
+
+`desired_col` is a sticky-column tracker:
+- Set on Up/Down to the visible column the cursor wanted to be at.
+- Preserved across consecutive Up/Down operations (so cursor stays in
+  the same column even when intermediate lines are shorter).
+- Cleared on any horizontal motion (Ctrl-B/F/A/E, arrows L/R) or any
+  edit (insert, delete, kill, yank).
+
+### Ctrl-R incremental search (U-4c)
+
+Ctrl-R enters a transient `Search` mode. The mode's state machine:
+
+```
+Enter:    Ctrl-R    saved_buffer/cursor stashed; query = ""; match = None
+In Search mode:
+  Printable char       -> append to query; re-search from history.len()-1 backward
+  Backspace            -> drop from query; re-search OR clear match if query empty
+  Ctrl-R               -> step backward to next-older match
+  Down / Ctrl-N        -> step forward to next-newer match
+  Enter                -> Accept(history[match]); exit search
+  Ctrl-C / Ctrl-G      -> restore saved buffer/cursor; exit search
+  Any other action     -> exit search (cancel without re-dispatch; v1.x
+                          can refine to readline's full re-dispatch)
+```
+
+Search uses **substring match** (`str::contains`) at v1.0. v1.x can
+add fuzzy matching if it earns the complexity. Newest matches surface
+first (search walks history index down from `history.len() - 1`).
+
 ### Per-buffer cap
 
 `MAX_BUFFER_LEN = 64 * 1024` -- a defensive cap so a runaway paste
@@ -397,6 +467,9 @@ U-4a; probes 7-10 are U-4b.
 8. **Single-quote isolates brackets** (U-4b): `'{'` + Enter → `Accept("'{'")` (the bracket is inside the quote; balance is `0`).
 9. **Trailing-backslash continuation** (U-4b): `foo\` + Enter → Redraw; buffer becomes `"foo\\\n"` (backslash preserved for parser).
 10. **Multi-line render emits `⋮`** (U-4b): `{` + Enter + `x` then `render("> ")` contains `\r\n\x1b[K`, the U+22EE glyph, and ends with the correct cursor positioning (col 3 for continuation prefix width 2 + 1 visible char).
+11. **Smart Up nav** (U-4c): multi-line `{\n  body` + Ctrl-P → cursor-up to line 0 (column-preserving); Ctrl-P again from line 0 → fall-through to history-prev.
+12. **Ctrl-R incremental search** (U-4c): push 3 history entries; Ctrl-R + "ap" → match newest "ap" entry; Ctrl-R again → step back to older match; Enter → Accept the matched line; exit search mode.
+13. **Search Cancel restores** (U-4c): type "draft", Ctrl-R, type "hello" (matches history), Ctrl-C → exit search; buffer restored to "draft"; cursor restored to column 5.
 
 Each probe prints `u-test: flow_line_editor: <probe>: <what> FAILED`
 on failure + bails the binary with exit 1; joey treats that as a
@@ -463,15 +536,18 @@ small `[u32; 4]` CSI parameter array.
 ## Status
 
 - **U-4a LANDED** (commit `eccbf0f`).
-- **U-4b LANDED** (commit pending) — adds BalanceState + balance() +
-  multi-line render() + Enter-becomes-newline-when-unbalanced behaviour.
-- `libutopia::line_editor` — ~870 LOC engine (U-4a engine 640 + U-4b
-  additions 230) + ~470 LOC `cfg(test)` unit tests (U-4a 290 + U-4b
-  additions 180).
-- `libutopia::ansi::visible_width` — new helper at U-4a (~60 LOC
-  including tests); reused by U-4b multi-line render for cursor
-  positioning.
-- `u-test::flow_line_editor` — 10 boot-time probes (U-4a 6 + U-4b 4).
+- **U-4b LANDED** (commit `28276a7`).
+- **U-4c LANDED** (commit pending) — adds smart Up/Down line nav +
+  Ctrl-R incremental search + history cap of 10000 + new public
+  accessors (`is_searching`, `search_query`, `search_match_index`).
+- `libutopia::line_editor` — ~1430 LOC engine (U-4a 640 + U-4b 230 +
+  U-4c 560) + ~650 LOC `#[cfg(test)]` unit tests (U-4a 290 + U-4b
+  180 + U-4c 180).
+- `libutopia::ansi::visible_width` — helper from U-4a (~60 LOC with
+  tests); reused by U-4b multi-line render + U-4c column-preserving
+  Up/Down nav.
+- `u-test::flow_line_editor` — 13 boot-time probes (U-4a 6 + U-4b 4 +
+  U-4c 3).
 - `usr/u-test/Cargo.toml` depends on `libutopia` (the first
   non-libthyla-rs Rust workspace dependency consumed by a boot-test
   binary).
