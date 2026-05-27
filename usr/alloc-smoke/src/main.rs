@@ -46,12 +46,14 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use libthyla_rs::alloc::ThylaAlloc;
+use libthyla_rs::cap::{self, Caps};
 use libthyla_rs::err::Error;
 use libthyla_rs::fs::{self, Component, File, OpenOptions, Path, PathBuf};
 use libthyla_rs::io::{Cursor, Read, Seek, SeekFrom, Write};
 use libthyla_rs::notes::{self, NoteClass, NoteMask, NoteTarget, Notes};
 use libthyla_rs::poll::{PollEvents, PollSet, PollTimeout};
 use libthyla_rs::process::{self, Command, Stdio};
+use libthyla_rs::territory::{self, MountFlags};
 use libthyla_rs::t_putstr;
 
 #[global_allocator]
@@ -919,5 +921,195 @@ pub extern "C" fn rs_main() -> i64 {
     drop(n);
 
     t_putstr("alloc-smoke: Notes + Mask + PollSet OK\n");
+
+    // ====================================================================
+    // U-2f: t::territory + t::cap
+    // ====================================================================
+
+    // MountFlags bitops + value checks. Pure-logic round-trip; no
+    // syscall. Catches drift between libthyla-rs constants and the
+    // kernel territory.h values.
+    if MountFlags::REPL.bits() != 0x0001 {
+        t_putstr("alloc-smoke: MountFlags::REPL value FAILED\n");
+        return 1;
+    }
+    if MountFlags::BEFORE.bits() != 0x0002 {
+        t_putstr("alloc-smoke: MountFlags::BEFORE value FAILED\n");
+        return 1;
+    }
+    if MountFlags::AFTER.bits() != 0x0004 {
+        t_putstr("alloc-smoke: MountFlags::AFTER value FAILED\n");
+        return 1;
+    }
+    if MountFlags::CREATE.bits() != 0x0008 {
+        t_putstr("alloc-smoke: MountFlags::CREATE value FAILED\n");
+        return 1;
+    }
+    let combo = MountFlags::REPL | MountFlags::BEFORE;
+    if !combo.contains(MountFlags::REPL) || !combo.contains(MountFlags::BEFORE) {
+        t_putstr("alloc-smoke: MountFlags compose FAILED\n");
+        return 1;
+    }
+    if combo.without(MountFlags::REPL).bits() != MountFlags::BEFORE.bits() {
+        t_putstr("alloc-smoke: MountFlags::without FAILED\n");
+        return 1;
+    }
+    if !MountFlags::NONE.is_empty() {
+        t_putstr("alloc-smoke: MountFlags::NONE not empty FAILED\n");
+        return 1;
+    }
+
+    // Caps bitops + value checks. Mirror checks against kernel
+    // caps.h bit positions.
+    if Caps::HW_CREATE.bits() != (1u64 << 0) {
+        t_putstr("alloc-smoke: Caps::HW_CREATE value FAILED\n");
+        return 1;
+    }
+    if Caps::LOCK_PAGES.bits() != (1u64 << 1) {
+        t_putstr("alloc-smoke: Caps::LOCK_PAGES value FAILED\n");
+        return 1;
+    }
+    if Caps::CSPRNG_READ.bits() != (1u64 << 2) {
+        t_putstr("alloc-smoke: Caps::CSPRNG_READ value FAILED\n");
+        return 1;
+    }
+    if Caps::HOSTOWNER.bits() != (1u64 << 3) {
+        t_putstr("alloc-smoke: Caps::HOSTOWNER value FAILED\n");
+        return 1;
+    }
+    if Caps::GRANT_HOSTOWNER.bits() != (1u64 << 4) {
+        t_putstr("alloc-smoke: Caps::GRANT_HOSTOWNER value FAILED\n");
+        return 1;
+    }
+    let ccombo = Caps::HW_CREATE | Caps::CSPRNG_READ;
+    if !ccombo.contains(Caps::HW_CREATE)
+        || !ccombo.intersects(Caps::CSPRNG_READ)
+        || ccombo.contains(Caps::HOSTOWNER)
+    {
+        t_putstr("alloc-smoke: Caps compose/contains FAILED\n");
+        return 1;
+    }
+    if ccombo.without(Caps::HW_CREATE).bits() != Caps::CSPRNG_READ.bits() {
+        t_putstr("alloc-smoke: Caps::without FAILED\n");
+        return 1;
+    }
+
+    // mount/unmount round-trip on a free path_id. alloc-smoke runs
+    // after joey's pivot to the disk-backed FS; its territory has
+    // joey's mount entries. We pick path_id 0x7E5701 (an unused
+    // value far from joey's typical IDs) to avoid collision.
+    //
+    // Source: /system.key opened RDONLY -- a Spoor with RIGHT_READ.
+    const TEST_PATH_ID: libthyla_rs::territory::PathId = 0x7E5701;
+    let src = match File::open("/system.key") {
+        Ok(f) => f,
+        Err(_) => {
+            t_putstr("alloc-smoke: U-2f File::open(/system.key) FAILED\n");
+            return 1;
+        }
+    };
+    if territory::mount(&src, TEST_PATH_ID, MountFlags::REPL).is_err() {
+        t_putstr("alloc-smoke: territory::mount REPL FAILED\n");
+        return 1;
+    }
+    // Cleanup: unmount the entry we just installed. If we leak the
+    // mount, future boots that share territory layout could be
+    // affected; alloc-smoke is an ALIVE Proc and joey's territory is
+    // its parent's (rfork inherits), so leakage matters even for one
+    // boot.
+    if territory::unmount(TEST_PATH_ID).is_err() {
+        t_putstr("alloc-smoke: territory::unmount after mount FAILED\n");
+        return 1;
+    }
+    // Double-unmount: must return NotFound (no entry at this path_id
+    // any more).
+    match territory::unmount(TEST_PATH_ID) {
+        Err(Error::NotFound) => {}
+        _ => {
+            t_putstr("alloc-smoke: territory::unmount double-call unexpected\n");
+            return 1;
+        }
+    }
+    drop(src);
+
+    // bind_before / bind_after / bind_replace: same plumbing as
+    // mount(); a syscall-success round-trip is enough to verify the
+    // shorthand wiring.
+    let src2 = match File::open("/system.key") {
+        Ok(f) => f,
+        Err(_) => {
+            t_putstr("alloc-smoke: U-2f File::open #2 FAILED\n");
+            return 1;
+        }
+    };
+    if territory::bind_before(&src2, TEST_PATH_ID).is_err() {
+        t_putstr("alloc-smoke: territory::bind_before FAILED\n");
+        return 1;
+    }
+    if territory::unmount(TEST_PATH_ID).is_err() {
+        t_putstr("alloc-smoke: territory::unmount after bind_before FAILED\n");
+        return 1;
+    }
+    if territory::bind_after(&src2, TEST_PATH_ID).is_err() {
+        t_putstr("alloc-smoke: territory::bind_after FAILED\n");
+        return 1;
+    }
+    if territory::unmount(TEST_PATH_ID).is_err() {
+        t_putstr("alloc-smoke: territory::unmount after bind_after FAILED\n");
+        return 1;
+    }
+    if territory::bind_replace(&src2, TEST_PATH_ID).is_err() {
+        t_putstr("alloc-smoke: territory::bind_replace FAILED\n");
+        return 1;
+    }
+    if territory::unmount(TEST_PATH_ID).is_err() {
+        t_putstr("alloc-smoke: territory::unmount after bind_replace FAILED\n");
+        return 1;
+    }
+    drop(src2);
+
+    // mount with a non-Spoor fd: the kernel rejects with -1. Use the
+    // alloc-smoke's notes fd (KOBJ_SPOOR via devnotes; this actually
+    // DOES type-check as a Spoor, so the kernel would accept it).
+    // The clean negative is a closed/invalid fd -- a u32 like 999
+    // that's never been allocated. We can't construct an AsFd with
+    // arbitrary fd directly, but mount() takes &impl AsFd, so we
+    // construct a small adapter.
+    struct RawFdRef(i32);
+    impl libthyla_rs::poll::AsFd for RawFdRef {
+        fn as_raw_fd(&self) -> i32 {
+            self.0
+        }
+    }
+    let bogus = RawFdRef(999);
+    match territory::mount(&bogus, TEST_PATH_ID, MountFlags::REPL) {
+        Err(_) => {}
+        Ok(_) => {
+            t_putstr("alloc-smoke: territory::mount bogus fd unexpectedly succeeded\n");
+            return 1;
+        }
+    }
+
+    // cap::grant: alloc-smoke doesn't hold CAP_GRANT_HOSTOWNER, so
+    // any grant attempt MUST fail with PermissionDenied.
+    match cap::grant(Caps::HOSTOWNER, 0u64) {
+        Err(Error::PermissionDenied) => {}
+        _ => {
+            t_putstr("alloc-smoke: cap::grant without privilege unexpected\n");
+            return 1;
+        }
+    }
+
+    // cap::use_grant: alloc-smoke isn't console-attached AND has no
+    // pending grant. Must fail.
+    match cap::use_grant(Caps::HOSTOWNER) {
+        Err(Error::PermissionDenied) => {}
+        _ => {
+            t_putstr("alloc-smoke: cap::use_grant without pending grant unexpected\n");
+            return 1;
+        }
+    }
+
+    t_putstr("alloc-smoke: Territory + Cap OK\n");
     0
 }

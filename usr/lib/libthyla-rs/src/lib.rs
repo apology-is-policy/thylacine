@@ -67,11 +67,13 @@ extern crate alloc as alloc_crate;
 pub mod err;
 pub mod handle;
 pub mod alloc;
+pub mod cap;
 pub mod fs;
 pub mod io;
 pub mod notes;
 pub mod poll;
 pub mod process;
+pub mod territory;
 
 // =============================================================================
 // Syscall numbers — MUST mirror kernel/include/thylacine/syscall.h.
@@ -139,6 +141,14 @@ pub const T_SYS_NOTIFY: u64           = 45;
 pub const T_SYS_NOTED: u64            = 46;
 pub const T_SYS_POSTNOTE: u64         = 47;
 pub const T_SYS_NOTE_MASK: u64        = 48;
+
+// P5-mount-syscall + P5-chroot-syscall + P6-16c-pivot_root: namespace
+// composition syscalls. Plan 9 mount-table semantics adapted to fd-
+// shaped Spoor sources. Backs t::territory (U-2f).
+pub const T_SYS_MOUNT: u64            = 14;
+pub const T_SYS_UNMOUNT: u64          = 15;
+pub const T_SYS_CHROOT: u64           = 35;
+pub const T_SYS_PIVOT_ROOT: u64       = 53;
 
 // P5-stratumd-stub-bringup-e1: walk-and-open one path component from a
 // Spoor (or from the territory root via T_WALK_OPEN_FROM_ROOT sentinel).
@@ -228,6 +238,28 @@ pub const T_POLLOUT: i16  = 0x004;
 pub const T_POLLERR: i16  = 0x008;
 pub const T_POLLHUP: i16  = 0x010;
 pub const T_POLLNVAL: i16 = 0x020;
+
+// =============================================================================
+// Mount flags ABI mirror — MUST match kernel/include/thylacine/territory.h.
+// =============================================================================
+//
+// Plan 9 mount semantics. At v1.0 only MREPL has distinguished semantics
+// in the kernel (MBEFORE/MAFTER are accepted but treated as additive at
+// the C-API level; MCREATE is reserved). Backs t::territory (U-2f).
+
+pub const T_MREPL:   u32              = 0x0001;
+pub const T_MBEFORE: u32              = 0x0002;
+pub const T_MAFTER:  u32              = 0x0004;
+pub const T_MCREATE: u32              = 0x0008;
+
+// path_id_t — abstract path token used by the mount/unmount/bind
+// surface at v1.0. The kernel comment is the canonical reference:
+// "abstract path token at v1.0 — the same numeric ID used by bind/
+// unbind in the existing PgrpBind / PgrpMount C-API. String-path
+// resolution lands with the fd-syscall walk subsystem in a later
+// chunk." Userspace callers establish their own path_id <-> string
+// convention until then.
+pub type TPathId = u32;
 
 // =============================================================================
 // Notes ABI mirror — MUST match kernel/include/thylacine/notes.h.
@@ -674,6 +706,87 @@ pub unsafe fn t_note_mask(new_mask: u64, old_mask_out_va: *mut u64) -> i64 {
         inlateout("x0") x0,
         in("x1") old_mask_out_va as u64,
         in("x8") T_SYS_NOTE_MASK,
+        options(nostack)
+    );
+    x0
+}
+
+// t_mount — graft `source_spoor_fd`'s tree at `target_path_id` in the
+// calling Proc's territory. `flags` is a bitmask of T_MREPL / T_MBEFORE
+// / T_MAFTER / T_MCREATE; bits outside that union are rejected.
+//
+// Returns 0 on success, -1 on:
+//   - source_spoor_fd not a KOBJ_SPOOR or out-of-range
+//   - missing RIGHT_READ on source
+//   - flags has bits outside the supported set
+//   - territory mount table full
+#[inline(always)]
+pub unsafe fn t_mount(source_spoor_fd: i64, target_path_id: u32, flags: u32) -> i64 {
+    let mut x0: i64 = source_spoor_fd;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") target_path_id as u64,
+        in("x2") flags as u64,
+        in("x8") T_SYS_MOUNT,
+        options(nostack)
+    );
+    x0
+}
+
+// t_unmount — remove the mount entry at `target_path_id` in the calling
+// Proc's territory. Returns 0 on success, -1 if no entry at that
+// path_id. Drops the per-entry Spoor refcount; the Spoor's Dev close
+// runs if this was the last ref.
+#[inline(always)]
+pub unsafe fn t_unmount(target_path_id: u32) -> i64 {
+    let mut x0: i64 = target_path_id as i64;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x8") T_SYS_UNMOUNT,
+        options(nostack)
+    );
+    x0
+}
+
+// t_chroot — replace the calling Proc's Territory root_spoor with
+// `spoor_fd`'s tree (atomic spoor_ref / spoor_clunk-displaced under
+// the territory lock). Plan 9 chroot semantics; intended for the
+// initial chroot. Idempotent on same-spoor.
+//
+// Returns 0 on success, -1 on:
+//   - spoor_fd not a KOBJ_SPOOR or out-of-range
+//   - missing RIGHT_READ on the source
+#[inline(always)]
+pub unsafe fn t_chroot(spoor_fd: i64) -> i64 {
+    let mut x0: i64 = spoor_fd;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x8") T_SYS_CHROOT,
+        options(nostack)
+    );
+    x0
+}
+
+// t_pivot_root — long-running-Proc root swap. Mirrors Linux
+// pivot_root(2) minus the put_old argument: under the Proc's territory
+// lock, swap root_spoor to `new_root_fd`'s tree and unref the
+// displaced root. Distinct from t_chroot for audit-trackability and
+// semantic clarity (joey uses this post-mount-bind to flip from
+// devramfs to the disk-backed Stratum FS).
+//
+// Returns 0 on success, -1 on:
+//   - new_root_fd not a KOBJ_SPOOR / out-of-range
+//   - missing RIGHT_READ on the source
+#[inline(always)]
+pub unsafe fn t_pivot_root(new_root_fd: i64) -> i64 {
+    let mut x0: i64 = new_root_fd;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x8") T_SYS_PIVOT_ROOT,
         options(nostack)
     );
     x0
