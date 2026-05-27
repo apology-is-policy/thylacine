@@ -1,0 +1,18 @@
+[package]
+name = "libutopia"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lib]
+name = "libutopia"
+path = "src/lib.rs"
+
+[dependencies]
+# libutopia is the application-helpers layer for the Utopia surface
+# (palette + ANSI emission + path display). It depends on libthyla-rs
+# for the alloc plumbing (the consumer binary declares ThylaAlloc as
+# its #[global_allocator]); it does NOT call kernel surfaces directly --
+# the consumer handles syscalls.
+libthyla-rs = { path = "../../lib/libthyla-rs" }

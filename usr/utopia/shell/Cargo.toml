@@ -1,0 +1,19 @@
+[package]
+name = "utopia-shell"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "ut"
+path = "src/main.rs"
+
+[dependencies]
+# `ut` is the Utopia shell binary. v1.0-skeleton scope at U-3: print a
+# Pale Fire version banner via libutopia + exit cleanly. The line editor
+# (U-4), parser (U-5), evaluator (U-6), job control (U-7), Thylacine
+# builtins (U-8), coreutils (U-9..N), and PTY infrastructure (U-PTY)
+# land in subsequent chunks.
+libthyla-rs = { path = "../../lib/libthyla-rs" }
+libutopia   = { path = "../libutopia" }

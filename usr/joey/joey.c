@@ -772,6 +772,30 @@ int main(void) {
     }
     t_putstr("joey: /u-test reaped status=0; U-2 arc integration verified\n");
 
+    // === /ut orchestration (Phase 7 U-3 -- Utopia shell skeleton) ===
+    // `ut` is the Utopia shell binary; at U-3 its scope is the Pale
+    // Fire version banner via libutopia + clean exit. The U-4..U-Z
+    // arc fills in the line editor, parser, evaluator, builtins,
+    // job control, coreutils, and PTY support. Booting /ut here
+    // proves the new usr/utopia/ workspace builds, the binary links
+    // against libutopia + libthyla-rs, and the Pale Fire ANSI
+    // escapes emit to the boot UART without dirtying the log
+    // (terminals that don't grok 24-bit colour degrade gracefully
+    // per UTOPIA-VISUAL.md section 4.4).
+    const char ut_name[] = "ut";
+    long ut_shell_pid = t_spawn(ut_name, sizeof(ut_name) - 1);
+    if (ut_shell_pid <= 0) {
+        t_putstr("joey: t_spawn(\"ut\") FAILED\n");
+        return 1;
+    }
+    int ut_shell_status = -1;
+    long ut_shell_reaped = t_wait_pid(&ut_shell_status);
+    if (ut_shell_reaped != ut_shell_pid || ut_shell_status != 0) {
+        t_putstr("joey: /ut orchestration FAILED\n");
+        return 1;
+    }
+    t_putstr("joey: /ut reaped status=0; Utopia shell skeleton verified\n");
+
     // === pouch hello smoke (P6-pouch-hello-smoke) ===
     // The first POSIX C programs Thylacine runs, built against the pouch
     // libc. Placed here, beside the /hello orchestration, so the two
