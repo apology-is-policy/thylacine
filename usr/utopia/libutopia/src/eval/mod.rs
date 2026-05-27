@@ -68,9 +68,11 @@ pub mod env;
 pub mod error;
 pub mod expr;
 pub mod glob;
+pub mod stmt;
 pub mod value;
 
 pub use env::Env;
 pub use error::{EvalError, EvalErrorKind, EvalResult};
 pub use expr::eval_expr;
+pub use stmt::{eval_block, eval_script, eval_source, eval_statement, StatementFlow};
 pub use value::Value;

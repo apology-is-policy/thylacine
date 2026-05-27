@@ -62,7 +62,7 @@ use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 
-use crate::parser::ast::FnDecl;
+use crate::parser::ast::{FnDecl, Statement};
 
 use super::value::Value;
 
@@ -75,6 +75,11 @@ pub struct Env {
     /// Function definitions, name -> AST. Per scripture 5.5,
     /// function defs are globally scoped.
     fns: BTreeMap<String, FnDecl>,
+    /// `on note 'name' { body }` handler registry (scripture 9.5 +
+    /// 10.7). The body is invoked at the next main-loop tick after
+    /// the named note arrives. At U-6b only registration is wired;
+    /// runtime delivery wires at U-7 alongside note-fd polling.
+    note_handlers: BTreeMap<String, Vec<Statement>>,
     /// $status -- exit code of the last command. Initialized to 0
     /// at construction.
     status: i32,
@@ -84,18 +89,43 @@ pub struct Env {
     /// $cwd -- current working directory. Initialized to "/" until
     /// the first cd or until the caller sets it.
     cwd: String,
+    /// Interactive-shell mode (scripture 8.9: "the implicit-fail
+    /// model applies to scripts and functions. At the interactive
+    /// prompt, non-zero exits do NOT terminate the session"). When
+    /// true, a non-zero $status after a command in eval_block does
+    /// NOT propagate as Return. The U-6g main loop sets this true;
+    /// script execution sets it false.
+    pub interactive: bool,
+    /// Nesting depth of `try { ... }` blocks. While > 0, implicit-
+    /// fail is suppressed regardless of `interactive` -- the
+    /// enclosing try will pick up the failure via its post-body
+    /// $status check (scripture 8.6).
+    pub implicit_fail_suppressed: u32,
+    /// Nesting depth of `trace { ... }` blocks (scripture 7.8).
+    /// While > 0, each command is conceptually echoed to stderr
+    /// before execution. At U-6b only the depth is tracked; the
+    /// actual echoing wires at U-6c when external commands land
+    /// alongside a coherent argv-to-stderr path. Tests can
+    /// introspect `trace_depth` to verify scoping.
+    pub trace_depth: u32,
 }
 
 impl Env {
     /// Construct a fresh Env with a single empty global frame, all
-    /// special vars at defaults.
+    /// special vars at defaults. Default `interactive = false` (the
+    /// strict default; implicit-fail active). The U-6g main loop
+    /// flips it to true; tests opt in explicitly.
     pub fn new() -> Self {
         Env {
             scopes: vec![BTreeMap::new()],
             fns: BTreeMap::new(),
+            note_handlers: BTreeMap::new(),
             status: 0,
             errstr: String::new(),
             cwd: "/".to_string(),
+            interactive: false,
+            implicit_fail_suppressed: 0,
+            trace_depth: 0,
         }
     }
 
@@ -196,6 +226,25 @@ impl Env {
     /// Whether a function is defined.
     pub fn fn_defined(&self, name: &str) -> bool {
         self.fns.contains_key(name)
+    }
+
+    // === Note handler registry ===
+
+    /// Register a `on note 'name' { body }` handler. Last registration
+    /// wins (rc convention). At U-6b only registration is wired;
+    /// runtime delivery wires at U-7.
+    pub fn note_handler_set<S: Into<String>>(&mut self, name: S, body: Vec<Statement>) {
+        self.note_handlers.insert(name.into(), body);
+    }
+
+    /// Look up a handler by note name.
+    pub fn note_handler_get(&self, name: &str) -> Option<&Vec<Statement>> {
+        self.note_handlers.get(name)
+    }
+
+    /// Whether a handler is registered for the given note name.
+    pub fn note_handler_defined(&self, name: &str) -> bool {
+        self.note_handlers.contains_key(name)
     }
 
     // === Special variables ===
