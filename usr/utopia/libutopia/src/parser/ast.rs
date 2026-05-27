@@ -9,21 +9,23 @@
 // `Span` so the U-6 evaluator can attach runtime errors to source
 // locations.
 //
-// === Expression contexts at U-5b ===
+// === Expression contexts (U-5c) ===
 //
-// Per scripture section 19 + the U-5b handoff (memory/project_next_
-// session.md): U-5b is statement-level grammar. Expression contexts
-// (condition of `if (...)`, list expression of `for (... in ...)`,
-// condition of `while (...)`, value of `let x = ...`, value of bare
-// assignment, return value, arithmetic body of `(( ... ))`) are
-// stored as RAW `Vec<Token>` placeholders. The U-5c expression
-// parser walks those into proper Expression trees later.
+// Per scripture section 19 + the U-5c session lift: every expression
+// context in a statement is fully parsed at construction time. The
+// statement parser (parse.rs) collects the raw token stream that
+// belongs to an expression context (between `(` and `)` for an `if`
+// condition, between `=` and the statement terminator for an
+// assignment, etc.), then immediately calls into `expr::parse_expr
+// _tokens()` to lift those tokens into a proper `Expr` tree. The
+// AST therefore has ONE canonical shape: every expression slot is
+// an `Expr`, never a raw `Vec<Token>` placeholder.
 //
-// This trade keeps U-5b focused on statement structure (the meat of
-// the parse) while leaving expression semantics for the dedicated
-// U-5c chunk. The runtime evaluator (U-6) can stub expression
-// evaluation against the placeholder Vec<Token> for early bring-up;
-// U-5c lifts that to a proper Expression node.
+// Eager parsing trades a slightly larger parse-time cost for AST
+// uniformity. The evaluator (U-6) sees a single AST shape; spec /
+// audit / refactor work is simpler. The cost is small because
+// expressions are typically short, and parse errors surface at
+// parse time (not at first execution).
 //
 // === Deferred to U-5d ===
 //
@@ -38,8 +40,9 @@
 // Every node carries its source span. For statements, the span covers
 // from the first token of the statement through the last (e.g., for
 // `if (cond) { body }`, the span runs from the `if` keyword through
-// the closing `}`). For compound nodes, the span covers the whole
-// construct including delimiters.
+// the closing `}`). For expressions, the span covers from the first
+// constituent token through the last. For compound nodes, the span
+// covers the whole construct including delimiters.
 
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -91,10 +94,8 @@ pub enum StatementKind {
     Let(Box<LetStmt>),
     /// `name = value` (bare assignment; no `let`)
     Assign(Box<AssignStmt>),
-    /// `return` optionally followed by an expression.
-    /// At U-5b the value is stored as raw `Vec<Token>`; U-5c parses
-    /// it into an Expression.
-    Return(Option<Vec<Token>>),
+    /// `return` optionally followed by an expression (U-5c-lifted).
+    Return(Option<Expr>),
     /// `break`
     Break,
     /// `continue`
@@ -167,9 +168,9 @@ pub enum CommandKind {
     /// `( stmts )` -- a subshell. Forks per scripture section 5.6;
     /// the parent waits.
     Subshell(Vec<Statement>),
-    /// `(( body ))` -- arithmetic expression context. The body is
-    /// stored as raw tokens; U-5c parses it as arithmetic.
-    Arith(Vec<Token>),
+    /// `(( body ))` -- arithmetic expression context. Body lifted to
+    /// `Expr` (U-5c).
+    Arith(Expr),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -194,6 +195,10 @@ pub struct SimpleCommand {
 /// whitespace between them). `$a^$b` -> Concat; `$a ^ $b` -> three
 /// separate words (with `Caret` as an unexpected token -> parser
 /// error in command-arg position).
+///
+/// Word at the command-argv level remains token-shaped at U-5c -- it
+/// is fed through glob/expansion at evaluation time. The Expr-level
+/// concat (inside expression contexts) is `ExprKind::Concat` below.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Word {
     /// A single value-producing token.
@@ -259,13 +264,12 @@ pub enum RedirectKind {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct IfStmt {
-    /// Condition tokens (between the `(` and `)` of the `if`).
-    /// At U-5b: raw tokens; U-5c parses into Expression.
-    pub cond: Vec<Token>,
+    /// Condition expression -- `Expr` (U-5c lifted from `Vec<Token>`).
+    pub cond: Expr,
     pub then_branch: Vec<Statement>,
-    /// `else if (cond2) { body2 }` chain. Each entry is (cond_tokens,
+    /// `else if (cond2) { body2 }` chain. Each entry is (cond_expr,
     /// body) for one elif arm. Empty Vec means no elif.
-    pub elif_branches: Vec<(Vec<Token>, Vec<Statement>)>,
+    pub elif_branches: Vec<(Expr, Vec<Statement>)>,
     /// `else { body }` at the end. `None` means no else.
     pub else_branch: Option<Vec<Statement>>,
     pub span: Span,
@@ -275,18 +279,17 @@ pub struct IfStmt {
 pub struct ForStmt {
     /// The loop variable name (bare identifier from `for (NAME in ...)`).
     pub var_name: String,
-    /// The list expression tokens (between `in` and `)`).
-    /// At U-5b: raw tokens; U-5c parses into Expression.
-    pub list_expr: Vec<Token>,
+    /// The list expression -- `Expr` (U-5c lifted; typically a Var,
+    /// a List, or a Concat).
+    pub list_expr: Expr,
     pub body: Vec<Statement>,
     pub span: Span,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WhileStmt {
-    /// Condition tokens (between the `(` and `)` of the `while`).
-    /// At U-5b: raw tokens; U-5c parses into Expression.
-    pub cond: Vec<Token>,
+    /// Condition expression -- `Expr` (U-5c lifted).
+    pub cond: Expr,
     pub body: Vec<Statement>,
     pub span: Span,
 }
@@ -309,17 +312,190 @@ pub struct FnDecl {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LetStmt {
     pub name: String,
-    /// Value tokens (everything after `=` up to the statement
-    /// terminator). At U-5b: raw tokens; U-5c parses into Expression.
-    pub value: Vec<Token>,
+    /// Value expression -- `Expr` (U-5c lifted).
+    pub value: Expr,
     pub span: Span,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AssignStmt {
     pub name: String,
-    /// Value tokens (everything after `=` up to the statement
-    /// terminator). At U-5b: raw tokens; U-5c parses into Expression.
-    pub value: Vec<Token>,
+    /// Value expression -- `Expr` (U-5c lifted).
+    pub value: Expr,
     pub span: Span,
+}
+
+// ---------------------------------------------------------------------
+// Expression (U-5c)
+// ---------------------------------------------------------------------
+
+/// An expression node -- the result of `expr::parse_expr_tokens()`.
+///
+/// At U-5c every statement that previously held a `Vec<Token>` for
+/// its expression slot now holds a proper `Expr`. The shape is
+/// recursive: composite expressions (BinOp, UnOp, Match, List,
+/// Concat, VarIndex, VarSlice, Subst, etc.) contain boxed children.
+///
+/// The `span` covers from the first token of the expression through
+/// the last. For a single-atom expression (e.g., `Var($x)`), the
+/// span is exactly the atom's span. For a binary operation
+/// (`a + b`), the span covers `a`, the operator, and `b`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Expr {
+    pub kind: ExprKind,
+    pub span: Span,
+}
+
+/// The kind of an expression node.
+///
+/// Atoms map directly to lexer tokens (Word -> ExprKind::Word, etc.)
+/// with one exception: in arithmetic context, Word("42") lifts to
+/// ExprKind::Integer(42).
+///
+/// Composite expressions are produced by the parser:
+/// - `Concat(parts)` -- span-adjacent `^`-joined values in non-arith
+///   contexts (scripture 6.7).
+/// - `List(parts)` -- explicit `(a b c)` list literal in value
+///   context (scripture 6.3).
+/// - `BinOp/UnOp` -- arithmetic and logical operators (scripture
+///   6.13 + 6.14 + 7.3).
+/// - `Match` -- the `matches`/`in`/`=~` match operators (scripture
+///   7.3).
+/// - `VarIndex/VarSlice` -- `$var(N)` element / `$var(M N)` slice
+///   (scripture 6.9).
+/// - `Subst/Backtick/ProcSubIn/ProcSubOut` -- substitutions; body
+///   eagerly parsed as a sub-Script at U-5c.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ExprKind {
+    // === Atoms (single-token-ish) ===
+    /// Bare word; an unquoted argv-like value. Glob meta chars
+    /// preserved; the evaluator (U-6) does glob expansion.
+    Word(String),
+    /// `'literal'`. Single-quoted; literal text.
+    SingleQuoted(String),
+    /// `"interp"`. Body unchanged from the lexer.
+    DoubleQuoted(Vec<DqPart>),
+    /// Integer literal. Emitted only in arith context (or when an
+    /// atom that began as a digit-only Word is consumed in an arith
+    /// sub-expression).
+    Integer(i64),
+    /// `$name` -- list-valued variable reference.
+    Var(String),
+    /// `$#name` -- length of named variable.
+    VarLen(String),
+    /// `$"name` -- no-split form (scripture 6.8).
+    VarNoSplit(String),
+    /// `$var(N)` -- element index (1-indexed). N is itself an
+    /// expression (parsed in arith context).
+    VarIndex(String, Box<Expr>),
+    /// `$var(M N)` -- inclusive slice. Both bounds are integer
+    /// expressions.
+    VarSlice(String, Box<Expr>, Box<Expr>),
+    /// `$(cmd)` -- substitution; body parsed as a sub-Script.
+    Subst(Box<Script>),
+    /// `` `{cmd}` `` -- rc-shape substitution; same as Subst.
+    Backtick(Box<Script>),
+    /// `<(cmd)` -- process substitution (input).
+    ProcSubIn(Box<Script>),
+    /// `>(cmd)` -- process substitution (output).
+    ProcSubOut(Box<Script>),
+    /// `/pattern/` -- regex literal. The string is the body
+    /// (escapes already resolved by the lexer). Semantics deferred
+    /// to U-5d's regex engine.
+    Regex(String),
+
+    // === Composites ===
+    /// `(a b c)` -- list literal. Used in value position
+    /// (scripture 6.3). An empty list `()` is `List(vec![])`.
+    List(Vec<Expr>),
+    /// `a^b^c` -- span-adjacent `^`-joined concatenation in
+    /// non-arith contexts (scripture 6.7). The Vec holds two or
+    /// more value sub-expressions; a single-atom Concat collapses
+    /// to that atom at parse time.
+    Concat(Vec<Expr>),
+
+    // === Operators ===
+    /// `a OP b` -- binary operator. Arithmetic context exercises
+    /// the full set; conditional context uses comparison and
+    /// logical only.
+    BinOp(BinOp, Box<Expr>, Box<Expr>),
+    /// `OP a` -- unary operator (`- ~ !`).
+    UnOp(UnOp, Box<Expr>),
+    /// `a matches glob`, `a in list`, `a =~ /regex/` -- match
+    /// operators (scripture 7.3). Right-hand side carries the
+    /// glob pattern (Word/DoubleQuoted/SingleQuoted), the list
+    /// (Var/List), or the regex literal.
+    Match(MatchOp, Box<Expr>, Box<Expr>),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BinOp {
+    // Arithmetic
+    Add, // +
+    Sub, // -
+    Mul, // *
+    Div, // /
+    Mod, // %
+    Pow, // **  (right-associative)
+    // Bitwise (arith)
+    BitAnd, // &
+    BitOr,  // |
+    BitXor, // ^
+    Shl,    // <<
+    Shr,    // >>
+    // Comparison
+    Lt, // <
+    Le, // <=
+    Gt, // >
+    Ge, // >=
+    Eq, // ==
+    Ne, // !=
+    // Logical
+    And, // &&
+    Or,  // ||
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UnOp {
+    Neg,    // -x
+    BitNot, // ~x  (arith)
+    Not,    // !x  (logical)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MatchOp {
+    /// `matches` -- glob match (scripture 7.3).
+    Glob,
+    /// `in` -- list membership (scripture 7.3).
+    In,
+    /// `=~` -- regex match (scripture 7.3); evaluator wiring at U-5d.
+    Regex,
+}
+
+// ---------------------------------------------------------------------
+// Context discriminator for the expression parser
+// ---------------------------------------------------------------------
+
+/// The syntactic context an expression is being parsed in. Determines
+/// which operators are recognized and how certain tokens are
+/// interpreted.
+///
+/// - `Value` / `Return`: a single value or a list literal. Top-level
+///   operators are NOT recognized (use `(( ... ))` for math, use the
+///   conditional context for booleans). Concat (`^`) and var
+///   indexing are recognized.
+/// - `Cond`: a boolean expression. Logical (`&& || !`), comparison
+///   (`== != < <= > >=`), and match (`matches in =~`) operators are
+///   recognized.
+/// - `Arith`: a full arithmetic expression with all 18+ operators.
+///   Integer-typed; vars auto-deref.
+/// - `List`: the right-hand side of `for (var in expr)`. Accepts a
+///   single value (Var/Concat/atom) or an implicit / explicit list.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExprContext {
+    Value,
+    Cond,
+    Arith,
+    List,
+    Return,
 }

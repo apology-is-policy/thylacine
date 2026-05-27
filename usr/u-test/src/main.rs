@@ -51,8 +51,8 @@ use libutopia::line_editor::{
     EditorAction, LineEditor, StaticCompletionSource,
 };
 use libutopia::parser::{
-    parse, tokenize, CommandKind, DqPart, ParseErrorKind, RedirectKind, StatementKind, TokenKind,
-    Word,
+    parse, parse_expr_tokens, tokenize, BinOp, CommandKind, DqPart, ExprContext, ExprKind, MatchOp,
+    ParseErrorKind, RedirectKind, StatementKind, TokenKind, UnOp, Word,
 };
 
 #[global_allocator]
@@ -87,6 +87,9 @@ pub extern "C" fn rs_main() -> i64 {
         return rc;
     }
     if let Err(rc) = flow_parser_core() {
+        return rc;
+    }
+    if let Err(rc) = flow_parser_expr() {
         return rc;
     }
 
@@ -1459,5 +1462,334 @@ fn flow_parser_core() -> Result<(), i64> {
     }
 
     t_putstr("u-test: parser core OK\n");
+    Ok(())
+}
+
+// =============================================================================
+// Flow 10 -- libutopia parser expression layer (U-5c)
+// =============================================================================
+//
+// Exercises the U-5c expression parser end-to-end via parse() (which
+// internally invokes parse_expr_tokens at each placeholder site) plus
+// direct calls to parse_expr_tokens(). Validates that the AST now has
+// ONE canonical shape: every expression slot carries an `Expr` (no
+// more `Vec<Token>` placeholders).
+//
+// Heap-touching paths: every probe allocates Vec<Token> (lex output),
+// `Box<Expr>` (BinOp/UnOp/Match/VarIndex/Subst children), `Vec<Expr>`
+// (List, Concat). A regression in ThylaAlloc on any of these would
+// surface here.
+fn flow_parser_expr() -> Result<(), i64> {
+    // Probe 1 -- arith literal lifts to Integer + Add.
+    {
+        let s = match parse("let n = (( 1 + 2 ))") {
+            Ok(s) => s,
+            Err(_) => {
+                t_putstr("u-test: flow_parser_expr: probe 1 parse FAILED\n");
+                return Err(1);
+            }
+        };
+        let v = match &s.statements[0].kind {
+            StatementKind::Let(l) => &l.value.kind,
+            _ => {
+                t_putstr("u-test: flow_parser_expr: probe 1 not Let FAILED\n");
+                return Err(1);
+            }
+        };
+        let arith_kind = match v {
+            ExprKind::BinOp(BinOp::Add, l, r) => match (&l.kind, &r.kind) {
+                (ExprKind::Integer(1), ExprKind::Integer(2)) => true,
+                _ => false,
+            },
+            _ => false,
+        };
+        if !arith_kind {
+            t_putstr("u-test: flow_parser_expr: probe 1 wrong arith shape FAILED\n");
+            return Err(1);
+        }
+    }
+
+    // Probe 2 -- explicit list literal in value position.
+    {
+        let s = match parse("let files = (a b c)") {
+            Ok(s) => s,
+            Err(_) => {
+                t_putstr("u-test: flow_parser_expr: probe 2 parse FAILED\n");
+                return Err(1);
+            }
+        };
+        match &s.statements[0].kind {
+            StatementKind::Let(l) => match &l.value.kind {
+                ExprKind::List(elems) => {
+                    if elems.len() != 3 {
+                        t_putstr("u-test: flow_parser_expr: probe 2 list len FAILED\n");
+                        return Err(1);
+                    }
+                }
+                _ => {
+                    t_putstr("u-test: flow_parser_expr: probe 2 not List FAILED\n");
+                    return Err(1);
+                }
+            },
+            _ => {
+                t_putstr("u-test: flow_parser_expr: probe 2 not Let FAILED\n");
+                return Err(1);
+            }
+        }
+    }
+
+    // Probe 3 -- if condition lifts to BinOp(Eq).
+    {
+        let s = match parse("if ($x == 0) { echo zero }") {
+            Ok(s) => s,
+            Err(_) => {
+                t_putstr("u-test: flow_parser_expr: probe 3 parse FAILED\n");
+                return Err(1);
+            }
+        };
+        match &s.statements[0].kind {
+            StatementKind::If(i) => match &i.cond.kind {
+                ExprKind::BinOp(BinOp::Eq, _, _) => {}
+                _ => {
+                    t_putstr("u-test: flow_parser_expr: probe 3 wrong cond shape FAILED\n");
+                    return Err(1);
+                }
+            },
+            _ => {
+                t_putstr("u-test: flow_parser_expr: probe 3 not If FAILED\n");
+                return Err(1);
+            }
+        }
+    }
+
+    // Probe 4 -- for list expression: `for (f in $files)` -> Var.
+    {
+        let s = match parse("for (f in $files) { cat $f }") {
+            Ok(s) => s,
+            Err(_) => {
+                t_putstr("u-test: flow_parser_expr: probe 4 parse FAILED\n");
+                return Err(1);
+            }
+        };
+        match &s.statements[0].kind {
+            StatementKind::For(f) => match &f.list_expr.kind {
+                ExprKind::Var(v) => {
+                    if v != "files" {
+                        t_putstr("u-test: flow_parser_expr: probe 4 var name FAILED\n");
+                        return Err(1);
+                    }
+                }
+                _ => {
+                    t_putstr("u-test: flow_parser_expr: probe 4 not Var FAILED\n");
+                    return Err(1);
+                }
+            },
+            _ => {
+                t_putstr("u-test: flow_parser_expr: probe 4 not For FAILED\n");
+                return Err(1);
+            }
+        }
+    }
+
+    // Probe 5 -- VarIndex `$files(1)` lifts to VarIndex(name, Integer).
+    {
+        let s = match parse("let x = $files(1)") {
+            Ok(s) => s,
+            Err(_) => {
+                t_putstr("u-test: flow_parser_expr: probe 5 parse FAILED\n");
+                return Err(1);
+            }
+        };
+        match &s.statements[0].kind {
+            StatementKind::Let(l) => match &l.value.kind {
+                ExprKind::VarIndex(name, idx) => {
+                    if name != "files" {
+                        t_putstr("u-test: flow_parser_expr: probe 5 name FAILED\n");
+                        return Err(1);
+                    }
+                    if !matches!(idx.kind, ExprKind::Integer(1)) {
+                        t_putstr("u-test: flow_parser_expr: probe 5 idx FAILED\n");
+                        return Err(1);
+                    }
+                }
+                _ => {
+                    t_putstr("u-test: flow_parser_expr: probe 5 not VarIndex FAILED\n");
+                    return Err(1);
+                }
+            },
+            _ => {
+                t_putstr("u-test: flow_parser_expr: probe 5 not Let FAILED\n");
+                return Err(1);
+            }
+        }
+    }
+
+    // Probe 6 -- concat `$a^$b` lifts to ExprKind::Concat.
+    {
+        let s = match parse("let x = $a^$b") {
+            Ok(s) => s,
+            Err(_) => {
+                t_putstr("u-test: flow_parser_expr: probe 6 parse FAILED\n");
+                return Err(1);
+            }
+        };
+        match &s.statements[0].kind {
+            StatementKind::Let(l) => match &l.value.kind {
+                ExprKind::Concat(parts) => {
+                    if parts.len() != 2 {
+                        t_putstr("u-test: flow_parser_expr: probe 6 concat len FAILED\n");
+                        return Err(1);
+                    }
+                }
+                _ => {
+                    t_putstr("u-test: flow_parser_expr: probe 6 not Concat FAILED\n");
+                    return Err(1);
+                }
+            },
+            _ => {
+                t_putstr("u-test: flow_parser_expr: probe 6 not Let FAILED\n");
+                return Err(1);
+            }
+        }
+    }
+
+    // Probe 7 -- match operator `matches` in cond context.
+    {
+        let s = match parse("if ($file matches *.c) { echo C }") {
+            Ok(s) => s,
+            Err(_) => {
+                t_putstr("u-test: flow_parser_expr: probe 7 parse FAILED\n");
+                return Err(1);
+            }
+        };
+        match &s.statements[0].kind {
+            StatementKind::If(i) => match &i.cond.kind {
+                ExprKind::Match(MatchOp::Glob, _, _) => {}
+                _ => {
+                    t_putstr("u-test: flow_parser_expr: probe 7 not Match(Glob) FAILED\n");
+                    return Err(1);
+                }
+            },
+            _ => {
+                t_putstr("u-test: flow_parser_expr: probe 7 not If FAILED\n");
+                return Err(1);
+            }
+        }
+    }
+
+    // Probe 8 -- substitution body lifts to a sub-Script.
+    {
+        let s = match parse("let x = $(echo hi)") {
+            Ok(s) => s,
+            Err(_) => {
+                t_putstr("u-test: flow_parser_expr: probe 8 parse FAILED\n");
+                return Err(1);
+            }
+        };
+        match &s.statements[0].kind {
+            StatementKind::Let(l) => match &l.value.kind {
+                ExprKind::Subst(sub_script) => {
+                    if sub_script.statements.is_empty() {
+                        t_putstr(
+                            "u-test: flow_parser_expr: probe 8 empty sub-script FAILED\n",
+                        );
+                        return Err(1);
+                    }
+                }
+                _ => {
+                    t_putstr("u-test: flow_parser_expr: probe 8 not Subst FAILED\n");
+                    return Err(1);
+                }
+            },
+            _ => {
+                t_putstr("u-test: flow_parser_expr: probe 8 not Let FAILED\n");
+                return Err(1);
+            }
+        }
+    }
+
+    // Probe 9 -- direct parse_expr_tokens API: arith with paren grouping.
+    // `(1 + 2) * 3` -> Mul(Add(1, 2), 3).
+    {
+        let src = "(1 + 2) * 3";
+        let toks = match tokenize(src) {
+            Ok(t) => t,
+            Err(_) => {
+                t_putstr("u-test: flow_parser_expr: probe 9 tokenize FAILED\n");
+                return Err(1);
+            }
+        };
+        // Strip the trailing Eof so the expression parser sees only
+        // body tokens (mirrors what parse.rs does at each placeholder
+        // site -- the collected tokens don't include EOF).
+        let body: Vec<_> = toks
+            .into_iter()
+            .filter(|t| !matches!(t.kind, TokenKind::Eof))
+            .collect();
+        let e = match parse_expr_tokens(body, src.len(), ExprContext::Arith) {
+            Ok(e) => e,
+            Err(_) => {
+                t_putstr("u-test: flow_parser_expr: probe 9 parse FAILED\n");
+                return Err(1);
+            }
+        };
+        match &e.kind {
+            ExprKind::BinOp(BinOp::Mul, l, r) => match (&l.kind, &r.kind) {
+                (ExprKind::BinOp(BinOp::Add, _, _), ExprKind::Integer(3)) => {}
+                _ => {
+                    t_putstr(
+                        "u-test: flow_parser_expr: probe 9 wrong grouping shape FAILED\n",
+                    );
+                    return Err(1);
+                }
+            },
+            _ => {
+                t_putstr("u-test: flow_parser_expr: probe 9 not BinOp(Mul) FAILED\n");
+                return Err(1);
+            }
+        }
+    }
+
+    // Probe 10 -- error case: arith literal that isn't an integer.
+    {
+        let src = "hello";
+        let toks = tokenize(src).expect("lex ok");
+        let body: Vec<_> = toks
+            .into_iter()
+            .filter(|t| !matches!(t.kind, TokenKind::Eof))
+            .collect();
+        match parse_expr_tokens(body, src.len(), ExprContext::Arith) {
+            Ok(_) => {
+                t_putstr("u-test: flow_parser_expr: probe 10 expected error FAILED\n");
+                return Err(1);
+            }
+            Err(e) => {
+                if !matches!(e.kind, ParseErrorKind::InvalidArithLiteral) {
+                    t_putstr("u-test: flow_parser_expr: probe 10 wrong error FAILED\n");
+                    return Err(1);
+                }
+            }
+        }
+    }
+
+    // Bonus -- unary not in cond context.
+    {
+        let s = parse("if (! $x) { echo nope }").expect("parse ok");
+        match &s.statements[0].kind {
+            StatementKind::If(i) => match &i.cond.kind {
+                ExprKind::UnOp(UnOp::Not, _) => {}
+                _ => {
+                    t_putstr("u-test: flow_parser_expr: bonus not UnOp FAILED\n");
+                    return Err(1);
+                }
+            },
+            _ => {
+                t_putstr("u-test: flow_parser_expr: bonus not If FAILED\n");
+                return Err(1);
+            }
+        }
+    }
+
+    t_putstr("u-test: parser expr OK\n");
     Ok(())
 }

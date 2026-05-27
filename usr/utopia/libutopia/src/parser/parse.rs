@@ -43,6 +43,7 @@ use alloc::vec::Vec;
 
 use super::ast::*;
 use super::error::{ParseError, ParseErrorKind, ParseResult};
+use super::expr::parse_expr_tokens;
 use super::lexer::tokenize;
 use super::span::Span;
 use super::token::{DqPart, Token, TokenKind};
@@ -443,8 +444,9 @@ impl Parser {
                     depth -= 1;
                     if depth == 0 {
                         let close = self.advance();
+                        let expr = parse_expr_tokens(body, self.source_len, ExprContext::Arith)?;
                         return Ok(Command {
-                            kind: CommandKind::Arith(body),
+                            kind: CommandKind::Arith(expr),
                             redirects: Vec::new(),
                             fail_propagate: false,
                             span: Span::new(lp.span.start, close.span.end),
@@ -456,8 +458,9 @@ impl Parser {
                     depth -= 2;
                     if depth == 0 {
                         let close = self.advance();
+                        let expr = parse_expr_tokens(body, self.source_len, ExprContext::Arith)?;
                         return Ok(Command {
-                            kind: CommandKind::Arith(body),
+                            kind: CommandKind::Arith(expr),
                             redirects: Vec::new(),
                             fail_propagate: false,
                             span: Span::new(lp.span.start, close.span.end),
@@ -815,12 +818,13 @@ impl Parser {
 
     fn parse_if(&mut self) -> ParseResult<Statement> {
         let if_tok = self.advance(); // If
-        let cond = self.collect_paren_tokens()?;
+        let cond_tokens = self.collect_paren_tokens()?;
+        let cond = parse_expr_tokens(cond_tokens, self.source_len, ExprContext::Cond)?;
         self.skip_newlines_only();
         self.expect_kind(TokenKind::LBrace, "`{`")?;
         let then_branch = self.parse_block_statements()?;
         let mut last_end = self.expect_kind(TokenKind::RBrace, "`}`")?.span.end;
-        let mut elif_branches = Vec::new();
+        let mut elif_branches: Vec<(Expr, Vec<Statement>)> = Vec::new();
         let mut else_branch = None;
         // Handle `else if ...` / `else { ... }` chain.
         loop {
@@ -842,7 +846,9 @@ impl Parser {
             self.skip_newlines_only();
             if matches!(self.peek_kind(), Some(TokenKind::If)) {
                 self.pos += 1; // consume If
-                let elif_cond = self.collect_paren_tokens()?;
+                let elif_tokens = self.collect_paren_tokens()?;
+                let elif_cond =
+                    parse_expr_tokens(elif_tokens, self.source_len, ExprContext::Cond)?;
                 self.skip_newlines_only();
                 self.expect_kind(TokenKind::LBrace, "`{`")?;
                 let elif_body = self.parse_block_statements()?;
@@ -877,17 +883,17 @@ impl Parser {
         self.expect_kind(TokenKind::In, "`in`")?;
         // Collect the list expression until the matching outer RParen.
         let mut depth: i32 = 1;
-        let mut list_expr = Vec::new();
+        let mut list_tokens: Vec<Token> = Vec::new();
         while !self.at_eof() {
             let tok = self.peek_token().expect("at_eof above");
             match &tok.kind {
                 TokenKind::LParen => {
                     depth += 1;
-                    list_expr.push(self.advance());
+                    list_tokens.push(self.advance());
                 }
                 TokenKind::DoubleLParen => {
                     depth += 2;
-                    list_expr.push(self.advance());
+                    list_tokens.push(self.advance());
                 }
                 TokenKind::RParen => {
                     depth -= 1;
@@ -895,7 +901,7 @@ impl Parser {
                         self.pos += 1; // consume outer RParen
                         break;
                     }
-                    list_expr.push(self.advance());
+                    list_tokens.push(self.advance());
                 }
                 TokenKind::DoubleRParen => {
                     depth -= 2;
@@ -909,11 +915,12 @@ impl Parser {
                             span: tok.span,
                         });
                     }
-                    list_expr.push(self.advance());
+                    list_tokens.push(self.advance());
                 }
-                _ => list_expr.push(self.advance()),
+                _ => list_tokens.push(self.advance()),
             }
         }
+        let list_expr = parse_expr_tokens(list_tokens, self.source_len, ExprContext::List)?;
         self.skip_newlines_only();
         self.expect_kind(TokenKind::LBrace, "`{`")?;
         let body = self.parse_block_statements()?;
@@ -932,7 +939,8 @@ impl Parser {
 
     fn parse_while(&mut self) -> ParseResult<Statement> {
         let w_tok = self.advance(); // While
-        let cond = self.collect_paren_tokens()?;
+        let cond_tokens = self.collect_paren_tokens()?;
+        let cond = parse_expr_tokens(cond_tokens, self.source_len, ExprContext::Cond)?;
         self.skip_newlines_only();
         self.expect_kind(TokenKind::LBrace, "`{`")?;
         let body = self.parse_block_statements()?;
@@ -983,11 +991,12 @@ impl Parser {
         let let_tok = self.advance(); // Let
         let name = self.expect_ident()?;
         self.expect_kind(TokenKind::Equal, "`=`")?;
-        let value = self.collect_value_tokens();
-        let end = value
+        let value_tokens = self.collect_value_tokens();
+        let end = value_tokens
             .last()
             .map(|t| t.span.end)
             .unwrap_or(let_tok.span.end);
+        let value = parse_expr_tokens(value_tokens, self.source_len, ExprContext::Value)?;
         let span = Span::new(let_tok.span.start, end);
         Ok(Statement {
             kind: StatementKind::Let(Box::new(LetStmt { name, value, span })),
@@ -1007,8 +1016,12 @@ impl Parser {
             }
         };
         self.expect_kind(TokenKind::Equal, "`=`")?;
-        let value = self.collect_value_tokens();
-        let end = value.last().map(|t| t.span.end).unwrap_or(name_tok.span.end);
+        let value_tokens = self.collect_value_tokens();
+        let end = value_tokens
+            .last()
+            .map(|t| t.span.end)
+            .unwrap_or(name_tok.span.end);
+        let value = parse_expr_tokens(value_tokens, self.source_len, ExprContext::Value)?;
         let span = Span::new(name_tok.span.start, end);
         Ok(Statement {
             kind: StatementKind::Assign(Box::new(AssignStmt { name, value, span })),
@@ -1028,8 +1041,12 @@ impl Parser {
                 span: ret_tok.span,
             });
         }
-        let value = self.collect_value_tokens();
-        let end = value.last().map(|t| t.span.end).unwrap_or(ret_tok.span.end);
+        let value_tokens = self.collect_value_tokens();
+        let end = value_tokens
+            .last()
+            .map(|t| t.span.end)
+            .unwrap_or(ret_tok.span.end);
+        let value = parse_expr_tokens(value_tokens, self.source_len, ExprContext::Return)?;
         let span = Span::new(ret_tok.span.start, end);
         Ok(Statement {
             kind: StatementKind::Return(Some(value)),
@@ -1259,15 +1276,19 @@ mod tests {
     }
 
     #[test]
-    fn arith_command_stores_body_as_tokens() {
+    fn arith_command_lifts_body_to_expr() {
         let s = parse_ok("(( 1 + 2 ))");
         match &s.statements[0].kind {
             StatementKind::Pipeline(p) => match &p.elements[0].command.kind {
-                CommandKind::Arith(body) => {
-                    // Body has at least the "1+2" Word token between
-                    // the surrounding (( )).
-                    assert!(!body.is_empty());
-                }
+                // U-5c: body is now an Expr; `1 + 2` lifts to
+                // BinOp(Add, Integer(1), Integer(2)).
+                CommandKind::Arith(expr) => match &expr.kind {
+                    ExprKind::BinOp(BinOp::Add, l, r) => match (&l.kind, &r.kind) {
+                        (ExprKind::Integer(1), ExprKind::Integer(2)) => {}
+                        other => panic!("expected Integer 1 + Integer 2, got {:?}", other),
+                    },
+                    other => panic!("expected BinOp(Add), got {:?}", other),
+                },
                 _ => panic!(),
             },
             _ => panic!(),
@@ -1360,7 +1381,11 @@ mod tests {
         match &s.statements[0].kind {
             StatementKind::Assign(a) => {
                 assert_eq!(a.name, "x");
-                assert!(!a.value.is_empty());
+                // U-5c: value is now an Expr; `5` lifts to a Word.
+                match &a.value.kind {
+                    ExprKind::Word(w) => assert_eq!(w, "5"),
+                    other => panic!("expected Word, got {:?}", other),
+                }
             }
             _ => panic!(),
         }
@@ -1372,7 +1397,10 @@ mod tests {
         match &s.statements[0].kind {
             StatementKind::Let(l) => {
                 assert_eq!(l.name, "x");
-                assert!(!l.value.is_empty());
+                match &l.value.kind {
+                    ExprKind::Word(w) => assert_eq!(w, "5"),
+                    other => panic!("expected Word, got {:?}", other),
+                }
             }
             _ => panic!(),
         }
@@ -1384,8 +1412,12 @@ mod tests {
         match &s.statements[0].kind {
             StatementKind::Let(l) => {
                 assert_eq!(l.name, "files");
-                // value tokens: LParen Word Word Word RParen = 5 tokens
-                assert_eq!(l.value.len(), 5);
+                // U-5c: value is now an Expr; `(a b c)` lifts to a
+                // List of three Word elements.
+                match &l.value.kind {
+                    ExprKind::List(elems) => assert_eq!(elems.len(), 3),
+                    other => panic!("expected List, got {:?}", other),
+                }
             }
             _ => panic!(),
         }
@@ -1396,7 +1428,12 @@ mod tests {
         let s = parse_ok("if (x == 0) { echo zero }");
         match &s.statements[0].kind {
             StatementKind::If(i) => {
-                assert!(!i.cond.is_empty());
+                // U-5c: cond is now an Expr; `x == 0` lifts to
+                // BinOp(Eq, Word("x"), Word("0")).
+                match &i.cond.kind {
+                    ExprKind::BinOp(BinOp::Eq, _, _) => {}
+                    other => panic!("expected BinOp(Eq), got {:?}", other),
+                }
                 assert_eq!(i.then_branch.len(), 1);
                 assert_eq!(i.elif_branches.len(), 0);
                 assert!(i.else_branch.is_none());
@@ -1435,7 +1472,12 @@ mod tests {
         match &s.statements[0].kind {
             StatementKind::For(f) => {
                 assert_eq!(f.var_name, "f");
-                assert!(!f.list_expr.is_empty());
+                // U-5c: list_expr is now an Expr; `$files` lifts to
+                // Var("files").
+                match &f.list_expr.kind {
+                    ExprKind::Var(v) => assert_eq!(v, "files"),
+                    other => panic!("expected Var, got {:?}", other),
+                }
                 assert_eq!(f.body.len(), 1);
             }
             _ => panic!(),
@@ -1447,7 +1489,12 @@ mod tests {
         let s = parse_ok("while ($cond) { tick }");
         match &s.statements[0].kind {
             StatementKind::While(w) => {
-                assert!(!w.cond.is_empty());
+                // U-5c: cond is now an Expr; `$cond` lifts to
+                // Var("cond").
+                match &w.cond.kind {
+                    ExprKind::Var(v) => assert_eq!(v, "cond"),
+                    other => panic!("expected Var, got {:?}", other),
+                }
                 assert_eq!(w.body.len(), 1);
             }
             _ => panic!(),
@@ -1496,7 +1543,12 @@ mod tests {
         let s = parse_ok("fn f { return 42 }");
         match &s.statements[0].kind {
             StatementKind::FnDecl(f) => match &f.body[0].kind {
-                StatementKind::Return(Some(v)) => assert_eq!(v.len(), 1),
+                // U-5c: Return value is now an Expr; `42` lifts to
+                // Word("42").
+                StatementKind::Return(Some(v)) => match &v.kind {
+                    ExprKind::Word(w) => assert_eq!(w, "42"),
+                    other => panic!("expected Word, got {:?}", other),
+                },
                 _ => panic!(),
             },
             _ => panic!(),

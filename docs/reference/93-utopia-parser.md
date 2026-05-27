@@ -1,6 +1,6 @@
 # `libutopia::parser` — the rc-shape parser stack for `ut` (U-5 arc)
 
-**Status**: U-5a + U-5b LANDED — the tokenizer + the recursive-descent parser core (statement-level grammar + AST). U-5c/d are queued for the expression layer and pattern matching.
+**Status**: U-5a + U-5b + U-5c LANDED — the tokenizer + the recursive-descent parser core (statement-level grammar + AST) + the expression parser (Pratt-style precedence climbing; lifts every `Vec<Token>` placeholder into an `Expr` tree). U-5d is queued for pattern matching + try/catch + trace + on/mask.
 
 This is the as-built reference for the rc-shape parser used by the Utopia shell (`ut`). It lives at `usr/utopia/libutopia/src/parser/` and is the only path from "user typed a line" to "AST evaluator consumes". The line editor (U-4 arc) produces an `EditorAction::Accept(String)` when Enter is pressed on a balanced buffer; that string is fed to `tokenize()` here, then (U-5b onward) to `parse()` to produce an AST, then (U-6) to the evaluator.
 
@@ -426,11 +426,164 @@ usr/utopia/libutopia/src/parser/
 └── parse.rs     U-5b NEW: recursive-descent parser
 ```
 
+## 8.6 Expression parser (U-5c)
+
+The U-5c chunk lifts every `Vec<Token>` placeholder left by U-5b into a proper `Expr` tree. After U-5c the AST has ONE canonical shape: every expression slot is an `Expr` (no raw `Vec<Token>` placeholders remain).
+
+### AST extensions
+
+```rust
+pub struct Expr { pub kind: ExprKind, pub span: Span }
+
+pub enum ExprKind {
+    // Atoms
+    Word(String) | SingleQuoted(String) | DoubleQuoted(Vec<DqPart>)
+    | Integer(i64)        // arith context
+    | Var(String) | VarLen(String) | VarNoSplit(String)
+    | VarIndex(String, Box<Expr>)             // $var(N)
+    | VarSlice(String, Box<Expr>, Box<Expr>)  // $var(M N)
+    | Subst(Box<Script>) | Backtick(Box<Script>)
+    | ProcSubIn(Box<Script>) | ProcSubOut(Box<Script>)
+    | Regex(String)
+    // Composites
+    | List(Vec<Expr>)     // (a b c) literal
+    | Concat(Vec<Expr>)   // span-adjacent ^-joined values
+    // Operators
+    | BinOp(BinOp, Box<Expr>, Box<Expr>)
+    | UnOp(UnOp, Box<Expr>)
+    | Match(MatchOp, Box<Expr>, Box<Expr>)  // matches / in / =~
+}
+
+pub enum BinOp {
+    Add, Sub, Mul, Div, Mod, Pow,
+    BitAnd, BitOr, BitXor, Shl, Shr,
+    Lt, Le, Gt, Ge, Eq, Ne,
+    And, Or,
+}
+
+pub enum UnOp { Neg, BitNot, Not }
+pub enum MatchOp { Glob, In, Regex }
+
+pub enum ExprContext { Value, Cond, Arith, List, Return }
+```
+
+`IfStmt.cond`, `IfStmt.elif_branches[].0`, `ForStmt.list_expr`, `WhileStmt.cond`, `LetStmt.value`, `AssignStmt.value`, `StatementKind::Return`, `CommandKind::Arith` all hold `Expr` (was `Vec<Token>` at U-5b).
+
+### Public API
+
+```rust
+pub fn parse_expr_tokens(
+    tokens: Vec<Token>,
+    source_len: usize,
+    ctx: ExprContext,
+) -> ParseResult<Expr>;
+```
+
+Called by `parse.rs` at each placeholder site:
+
+| Site | Context |
+|---|---|
+| `parse_if` cond, elif conds | `Cond` |
+| `parse_for` list expression | `List` |
+| `parse_while` cond | `Cond` |
+| `parse_let` value | `Value` |
+| `parse_assign` value | `Value` |
+| `parse_return` value | `Return` (same shape as Value) |
+| `parse_arith_command` body | `Arith` |
+
+### Pratt-style precedence climbing
+
+The arith path implements precedence climbing for the integer math operators. Precedence (lowest to highest, in the chain of mutually-recursive methods `parse_or → parse_and → parse_bit_or → parse_bit_xor → parse_bit_and → parse_eq → parse_rel → parse_shift → parse_add → parse_mul → parse_pow → parse_unary → parse_primary`):
+
+| Level | Operators | Associativity | Active in |
+|---|---|---|---|
+| 1 | `\|\|` | left | Cond + Arith |
+| 2 | `&&` | left | Cond + Arith |
+| 3 | `\|` (bit OR) | left | Arith |
+| 4 | `^` (bit XOR) | left | Arith |
+| 5 | `&` (bit AND) | left | Arith |
+| 6 | `==` `!=` `matches` `in` `=~` | left | Cond (eq + match); Arith (eq only) |
+| 7 | `<` `<=` `>` `>=` | left | Cond + Arith |
+| 8 | `<<` `>>` | left | Arith (structural; lex doesn't emit at v1) |
+| 9 | `+` `-` | left | Arith |
+| 10 | `*` `/` `%` | left | Arith |
+| 11 | `**` | right | Arith |
+| 12 (unary) | `! - ~` | right | `!` Cond+Arith; `- ~` Arith |
+| 13 (primary) | atoms + `(...)` grouping | n/a | always |
+
+### Arith retokenization
+
+The lexer at U-5a treats `+ - * /` as word chars (so `1+2` is one Word, and `1 + 2` is three Words: Word("1") Word("+") Word("2")). The arith parser receives these tokens and the Pratt climbing needs to see proper operator tokens.
+
+Solution: when an `ExprParser` is constructed with `ExprContext::Arith`, the entire token stream is preprocessed by `retokenize_arith_stream`. For each non-integer Word token, the helper `retokenize_arith_word` walks the text and emits per-char operator tokens (`+` → Plus, `-` → Minus, `*` → Star, `/` → Slash, `%` → Percent) interleaved with digit-runs (each digit run remains a Word that the integer-literal path parses to `Integer(N)`). Pure integer Words pass through unchanged so the primary path consumes them as integer literals; Words that contain non-digit non-operator chars (e.g., `"hello"`, `"1.5"`) pass through unchanged and the primary path errors with `InvalidArithLiteral`.
+
+**The retokenization is purely a robustness aid.** It is documented as a v1.0 expedient; arith-mode lex awareness (a separate lex mode entered at `((` and exited at `))` that emits proper operator tokens directly) is the v1.x target.
+
+### Concat semantics
+
+The U-5b `Word::Concat` path handles concat in command-arg position. U-5c adds a parallel `ExprKind::Concat` for concat in expression contexts (`let x = $a^$b^$c`). The span-adjacency check is identical: a `^` token only binds when both sides are span-adjacent value tokens.
+
+### Substitution body lifting
+
+`$(cmd)`, `` `{cmd}` ``, `<(cmd)`, `>(cmd)` carry their bodies as raw `String` from the lexer. The U-5c expression parser **eagerly parses** these bodies as sub-scripts (recursive `parse(&body)` call), wrapping the resulting `Script` in `ExprKind::Subst(Box<Script>)` / `Backtick` / `ProcSubIn` / `ProcSubOut`. The AST after U-5c is fully resolved -- the evaluator (U-6) sees a uniform shape.
+
+Cost: small (substitution bodies are typically short). Benefit: parse errors surface at parse time; the evaluator doesn't need a fallback for unparsed bodies.
+
+### Var indexing
+
+`$var(N)` and `$var(M N)` per scripture 6.9. The parser recognizes a span-adjacent `LParen` following a `Var` token (the `(` IMMEDIATELY follows the var name, no whitespace) and switches to index-parsing mode:
+
+1. Collect tokens until the matching `RParen` (with paren-depth tracking).
+2. Split the body on top-level whitespace boundaries (using span-gap detection: adjacent tokens with `prev.end != next.start` at depth 0 indicate a whitespace split).
+3. One body piece → `VarIndex(name, Box<index>)`; two pieces → `VarSlice(name, Box<m>, Box<n>)`; zero or three+ pieces → `InvalidVarIndex` error.
+
+Each piece is parsed in `Arith` context (the index/slice operands are integer-valued).
+
+### Locked U-5c design decisions
+
+| # | Decision | Behavior |
+|---|---|---|
+| 1 | In-place vs separate pass | **In-place lifting**: `parse_expr_tokens` called from each placeholder site in `parse.rs`. The AST has ONE canonical shape; no separate `lift_exprs(&mut Script)` pass. (Closes the U-5b handoff open question.) |
+| 2 | Substitution bodies | **Eager parse**: `$(cmd)` body parsed at U-5c into `Subst(Box<Script>)`. No lazy/raw path. |
+| 3 | Top-level operators in Value context | **Disallowed**: `let x = 5 + 3` is `TrailingTokensInExpr`. User writes `let x = (( 5 + 3 ))`. Concat (`^`) and var indexing remain valid at top level. |
+| 4 | Arith retokenization | **Run upfront at construction**: `retokenize_arith_stream` runs once when an `ExprParser` is built with `ExprContext::Arith`. Splice-on-demand was abandoned mid-impl after the lifetime tangle became apparent. |
+| 5 | Implicit list in List context | **Allowed**: `for (f in a b c)` builds a 3-element `List`. Same in `for (f in $files)` (single value); same in `for (f in (a b c))` (explicit list). |
+| 6 | Empty list literal | **Allowed**: `let xs = ()` parses to `List(vec![])`. |
+| 7 | Var index out-of-range | **Validated at evaluation time**, not parse time. Parser only checks that 1 or 2 integer expressions appear inside the parens. |
+| 8 | `**` (Pow) recognition | Requires SPAN-ADJACENT `Star Star` after retokenization. `(( 2**3 ))` works; `(( 2 ** 3 ))` retokenizes the `**` Word to two adjacent Stars and works the same. |
+
+### Error kinds (new)
+
+```rust
+EmptyExpression                          // empty expression context
+UnexpectedTokenInExpr { expected }       // token doesn't belong in expr context
+InvalidArithLiteral                      // arith Word that's not an integer
+InvalidVarIndex                          // wrong shape inside $var(...)
+TrailingTokensInExpr                     // tokens remain after a complete value
+```
+
+### Impl file map
+
+```
+usr/utopia/libutopia/src/parser/
+├── mod.rs       extends with expr re-exports
+├── span.rs      unchanged
+├── token.rs     unchanged
+├── error.rs     extends with U-5c expression-level error kinds
+├── lexer.rs     unchanged
+├── ast.rs       extends with Expr/ExprKind/BinOp/UnOp/MatchOp/ExprContext;
+│                IfStmt.cond / ForStmt.list_expr / WhileStmt.cond /
+│                LetStmt.value / AssignStmt.value / StatementKind::Return /
+│                CommandKind::Arith change from Vec<Token> to Expr
+├── parse.rs     extends to call parse_expr_tokens at each placeholder
+└── expr.rs      U-5c NEW: Pratt-style expression parser
+```
+
 ## 9. Status
 
 - **U-5a LANDED**: tokenizer with span tracking, full reserved-word + operator coverage, single + double-quoted strings with parts, top-level + DQ-interior dollar forms, substitutions (`$()`, `` `{}` ``), process substitution, heredocs with body collection (interp + non-interp + strip-tabs), regex literal after `=~`. Reference impl at `usr/utopia/libutopia/src/parser/lexer.rs` (~900 LOC + ~560 LOC `#[cfg(test)]` tests).
 - **U-5b LANDED**: parser core + AST. New `usr/utopia/libutopia/src/parser/ast.rs` (AST node types) + `parse.rs` (recursive-descent parser). Public entry: `parse(&str) -> ParseResult<Script>` (convenience that runs tokenize + parse_tokens) + `parse_tokens(Vec<Token>, source_len) -> ParseResult<Script>`. Grammar covers: Script, Statement (Pipeline / If / For / While / FnDecl / Let / Assign / Return / Break / Continue), Pipeline + PipelineElement (with `?|` -> `tolerate_failure` on LEFT element + trailing `&` -> `background`), Command + CommandKind (Simple / BraceBlock / Subshell / Arith — Arith body stored as raw tokens for U-5c), Word (Single token or `Concat(Vec<Token>)` for span-adjacent `^`-joined values), Redirect (Stdin / Stdout / Append / Heredoc-with-inline-body; redirects may interleave with words). Heredoc handling: parser pre-extracts all `HeredocBody` parts into a FIFO `VecDeque<Vec<DqPart>>` at construction time (taking ownership of the tokens via `core::mem::take` to avoid cloning); each `HeredocStart` pops the next body when parsing the redirect. Expression contexts (`if (cond)`, `for (var in expr)`, `while (cond)`, `let x = value`, bare assignment, `return value`) stored as raw `Vec<Token>` placeholders -- U-5c walks them into Expression trees. Locked design decisions per the U-5b session: strict rc (`--key=value` is `UnexpectedEqualInCommand` error); `^` requires span-adjacency on both sides (`UnexpectedCaret` otherwise -- actually emitted via `UnexpectedToken` since the loop just stops); postfix `?` requires a statement terminator (`UnexpectedTokenAfterFailPropagate` otherwise); `case` / `try` / `trace` / `on note` / `mask note` deferred to U-5d. ~900 LOC parser + ~250 LOC AST + ~500 LOC `#[cfg(test)]` tests (37 tests). Extended `flow_parser_core` `/u-test` probe (8 boot-time probes).
-- **U-5c QUEUED**: expression parser — variable refs with index/slice (`$var(N)`, `$var(M N)`), arithmetic `(( ))` (the parser's stored `Arith(Vec<Token>)` body gets re-interpreted), concatenation operator semantics, string comparison, regex semantic interpretation.
+- **U-5c LANDED**: expression parser. New `usr/utopia/libutopia/src/parser/expr.rs` (~1100 LOC parser + ~500 LOC `#[cfg(test)]` tests; 35 tests). Public entry: `parse_expr_tokens(Vec<Token>, source_len: usize, ctx: ExprContext) -> ParseResult<Expr>`. Pratt-style precedence climbing over an owned token stream; eagerly parsed substitution bodies; full operator surface for arith + cond contexts; upfront arith retokenization that splits Word tokens containing operator chars (`+ - * /`) into proper Plus/Minus/Star/Slash tokens. The AST now has ONE canonical shape: every expression slot is an `Expr` (no `Vec<Token>` placeholders remain). `IfStmt.cond` / `IfStmt.elif_branches[].0` / `ForStmt.list_expr` / `WhileStmt.cond` / `LetStmt.value` / `AssignStmt.value` / `StatementKind::Return(Option<Expr>)` / `CommandKind::Arith(Expr)` all hold `Expr`. New `ExprKind` variants cover Atoms (Word/SingleQuoted/DoubleQuoted/Integer/Var/VarLen/VarNoSplit/VarIndex/VarSlice/Subst/Backtick/ProcSubIn/ProcSubOut/Regex), Composites (List/Concat), Operators (BinOp/UnOp/Match). New `ParseErrorKind` variants: `EmptyExpression`, `UnexpectedTokenInExpr`, `InvalidArithLiteral`, `InvalidVarIndex`, `TrailingTokensInExpr`. Extended `flow_parser_expr` `/u-test` probe (10 boot-time probes + 1 bonus, runtime-validated under `ThylaAlloc`). Reference doc 93 extended with section 8.6 covering AST extensions, public API, Pratt precedence chain, arith retokenization, concat semantics, substitution body lifting, var indexing, locked design decisions, error kinds, impl file map.
 - **U-5d QUEUED**: pattern matching + try/catch + trace + on/mask + final glue. `case $x { pat => body ... }`, `try { ... } catch { ... }`, `trace { ... }`, `on note 'name' { ... }`, `mask note 'name' { ... }`. Extends `StatementKind` with the deferred variants; finalizes the parser's public surface.
 
 ## 10. Known caveats / footguns
@@ -446,6 +599,12 @@ usr/utopia/libutopia/src/parser/
 - **`?` disambiguation is one-byte lookahead.** A `?` followed by a UTF-8 multi-byte word char's leading byte (≥ 0x80) is included in the word. This is correct (the multibyte sequence is a word char), but the lookahead doesn't decode the full char. Defensive only — UTF-8 sequences are always valid here since `source: &str` is guaranteed valid UTF-8.
 
 - **Multiple heredocs on one line collect bodies in order.** `cat <<A <<B\nbody_a\nA\nbody_b\nB\n` — bodies collected at the first newline, in FIFO order (A's body first, then B's). This matches POSIX heredoc semantics.
+
+- **(U-5c) Arith Words containing `%` cannot be lexed.** `%` is neither a word char nor a top-level operator the lexer recognizes; `(( 5 % 2 ))` lexes as `Word("5")` then `UnexpectedChar('%')`. The `%` (Mod) operator is structurally supported in the Pratt parser; the lexer side is v1.x. Workaround: rewrite `%` arith expressions in terms of `/` and `-` until the lexer surface lands.
+
+- **(U-5c) Arith Words can't carry alphabetic or `_` chars.** `(( hello ))` produces `InvalidArithLiteral`. Bare identifiers are not primaries in arith; variables must use `$` prefix (`(( $hello ))`).
+
+- **(U-5c) Substitution bodies parse with body-relative spans.** A `$(cmd)` body's sub-Script reports parse errors with spans relative to the body bytes, not the outer source. Translation to outer coordinates is a v1.x lift (the outer span anchors the offset).
 
 - **Regex mode is a one-shot.** Only the IMMEDIATELY following opening `/` (after `=~` + whitespace) is treated as regex start. A pattern like `$x =~ $regex` (where `$regex` holds the pattern) does not engage regex mode; instead `$regex` is just a `Var`. The parser at U-5c/d will route the regex string through whatever runtime path the evaluator uses.
 

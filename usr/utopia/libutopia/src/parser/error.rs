@@ -107,6 +107,32 @@ pub enum ParseErrorKind {
     /// the U-5b design lock (rc-strict): `^` requires span
     /// adjacency to both sides.
     UnexpectedCaret,
+
+    // === Expression-level diagnostics (U-5c) ========================
+    //
+    // The expression parser produces these when an expression
+    // context's token stream cannot be lifted to a valid `Expr`
+    // tree. Each carries a span pinning the offending token range.
+    //
+    /// An expression context required a value but the token stream
+    /// was empty (e.g., `if () { ... }`, `let x = ;`).
+    EmptyExpression,
+    /// A token appeared in an expression context where it has no
+    /// interpretation (e.g., a stray `)` after a complete arith
+    /// expression). Same shape as `UnexpectedToken` but pins
+    /// expression-level provenance.
+    UnexpectedTokenInExpr { expected: &'static str },
+    /// An arithmetic-context Word couldn't be parsed as an integer
+    /// (e.g., `(( 1.5 ))` -- floats deferred to v1.x; `(( hello ))`
+    /// -- bare identifiers aren't valid arith primaries).
+    InvalidArithLiteral,
+    /// `$var(...)` index/slice form had something other than one
+    /// (index) or two (slice) integer expressions inside the
+    /// parens.
+    InvalidVarIndex,
+    /// Trailing tokens remained after a value-context expression
+    /// completed (a stray non-value token after the value).
+    TrailingTokensInExpr,
 }
 
 impl fmt::Display for ParseError {
@@ -160,6 +186,20 @@ impl fmt::Display for ParseError {
             }
             ParseErrorKind::UnexpectedCaret => {
                 f.write_str("unexpected `^`; concat requires both sides span-adjacent to value tokens")
+            }
+
+            ParseErrorKind::EmptyExpression => f.write_str("empty expression"),
+            ParseErrorKind::UnexpectedTokenInExpr { expected } => {
+                write!(f, "unexpected token in expression; expected {}", expected)
+            }
+            ParseErrorKind::InvalidArithLiteral => {
+                f.write_str("invalid arithmetic literal (integers only at v1)")
+            }
+            ParseErrorKind::InvalidVarIndex => {
+                f.write_str("invalid `$var(...)` index or slice (expected one or two integer expressions)")
+            }
+            ParseErrorKind::TrailingTokensInExpr => {
+                f.write_str("trailing tokens after expression")
             }
         }
     }
