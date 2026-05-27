@@ -397,6 +397,7 @@ name = "u-test"
 version = "0.1.0"
 dependencies = [
  "libthyla-rs",
+ "libutopia",
 ]
 
 [[package]]

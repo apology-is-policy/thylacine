@@ -56,6 +56,89 @@ pub fn bg(role: Role, text: &str) -> String {
     out
 }
 
+/// Count the visible-column width of `s`, treating ANSI CSI escapes as
+/// zero-width. Used by the line editor (libutopia::line_editor::
+/// LineEditor::render) for cursor positioning + by future prompt-emit
+/// helpers for prompt-width accounting.
+///
+/// Algorithm: walk the bytes; when an `ESC [` is seen, consume the
+/// CSI body (parameter bytes 0x30..=0x3f, intermediate bytes
+/// 0x20..=0x2f) then the terminating byte (0x40..=0x7e). All bytes
+/// inside the sequence count as 0 columns. Bytes outside the sequence
+/// count as one column each per UTF-8 char (v1.0 approximation; real
+/// grapheme-cluster + wcwidth support is v1.x). Other ANSI escapes
+/// (OSC, DCS, ...) are NOT recognized at v1.0; they would over-count
+/// width if a program emits them. Disciplined Utopia programs emit
+/// only CSI 24-bit-color SGR + reset, which this handles.
+pub fn visible_width(s: &str) -> usize {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    let mut cols = 0usize;
+    while i < bytes.len() {
+        // CSI sequence: ESC [ ... final-byte
+        if bytes[i] == 0x1b && i + 1 < bytes.len() && bytes[i + 1] == b'[' {
+            i += 2;
+            // Parameter bytes 0x30..=0x3f (digits, :, ;, <, =, >, ?)
+            // + intermediate bytes 0x20..=0x2f (space, !, ", ...).
+            while i < bytes.len() && (0x20..=0x3f).contains(&bytes[i]) {
+                i += 1;
+            }
+            // Terminating byte 0x40..=0x7e.
+            if i < bytes.len() {
+                i += 1;
+            }
+            continue;
+        }
+        // Non-escape byte. ASCII -> 1 column; UTF-8 leading byte ->
+        // 1 column (the v1.0 approximation; v1.x can add wcwidth).
+        // Continuation bytes (0x80..=0xbf) DON'T count.
+        if (bytes[i] & 0xc0) != 0x80 {
+            cols += 1;
+        }
+        i += 1;
+    }
+    cols
+}
+
+#[cfg(test)]
+mod width_tests {
+    use super::*;
+
+    #[test]
+    fn plain_ascii_width() {
+        assert_eq!(visible_width("hello"), 5);
+        assert_eq!(visible_width(""), 0);
+    }
+
+    #[test]
+    fn csi_escape_is_zero_width() {
+        assert_eq!(visible_width("\x1b[38;2;255;255;255m"), 0);
+        assert_eq!(visible_width("\x1b[0m"), 0);
+    }
+
+    #[test]
+    fn wrapped_text_yields_inner_width() {
+        let s = fg(Role::Glyph, "x");
+        // fg wraps with CSI + 'x' + RESET; visible width is 1.
+        assert_eq!(visible_width(&s), 1);
+    }
+
+    #[test]
+    fn pale_fire_banner_visible_width() {
+        // The U-3 banner shape: ESC[<rgb>m ⊢ ESC[0m
+        // The turnstile is 1 visible column.
+        let s = fg(Role::Glyph, "\u{22a2}");
+        assert_eq!(visible_width(&s), 1);
+    }
+
+    #[test]
+    fn utf8_multibyte_counts_one() {
+        // "é" is 2 bytes UTF-8 but 1 column.
+        assert_eq!(visible_width("é"), 1);
+        assert_eq!(visible_width("héllo"), 5);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

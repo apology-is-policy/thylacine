@@ -47,6 +47,7 @@ use libthyla_rs::thread;
 use libthyla_rs::time::{self, Duration};
 use libthyla_rs::torpor::{self, WaitResult};
 use libthyla_rs::{t_putstr, T_PROT_READ, T_PROT_WRITE};
+use libutopia::line_editor::{EditorAction, LineEditor};
 
 #[global_allocator]
 static GLOBAL_ALLOCATOR: ThylaAlloc = ThylaAlloc;
@@ -71,6 +72,9 @@ pub extern "C" fn rs_main() -> i64 {
         return rc;
     }
     if let Err(rc) = flow_hardware_caps() {
+        return rc;
+    }
+    if let Err(rc) = flow_line_editor() {
         return rc;
     }
 
@@ -497,5 +501,175 @@ fn flow_hardware_caps() -> Result<(), i64> {
     }
 
     t_putstr("u-test: hardware + cap OK\n");
+    Ok(())
+}
+
+// =============================================================================
+// Flow 7 -- libutopia::line_editor (U-4a): pure-logic engine end-to-end
+// =============================================================================
+//
+// The line editor is a pure-logic engine (no I/O; no PTY surface yet);
+// every part of it is reachable from this in-process flow. Six probes:
+//
+//   1. Insert ASCII -> buffer + cursor advance, Accept clears state
+//   2. ANSI arrow parsing across feed_byte boundaries (\x1b then [ then D)
+//   3. Backspace + Ctrl-K + Ctrl-Y round-trip via the kill buffer
+//   4. UTF-8 multi-byte char insertion + boundary-walking backspace
+//   5. History up/down navigation through push_history-populated entries
+//   6. render() produces ANSI escapes including the cursor positioning
+//
+// Each probe asserts state; any failure tags the probe + returns Err(1).
+fn flow_line_editor() -> Result<(), i64> {
+    use alloc::string::String;
+
+    // Probe 1 -- insert ASCII + Accept.
+    let mut le = LineEditor::new();
+    let _ = le.feed_bytes(b"hello");
+    if le.buffer() != "hello" || le.cursor() != 5 {
+        t_putstr("u-test: flow_line_editor: insert ASCII FAILED\n");
+        return Err(1);
+    }
+    match le.feed_byte(b'\r') {
+        EditorAction::Accept(s) if s == "hello" => {}
+        _ => {
+            t_putstr("u-test: flow_line_editor: Enter -> Accept FAILED\n");
+            return Err(1);
+        }
+    }
+    if !le.buffer().is_empty() || le.cursor() != 0 {
+        t_putstr("u-test: flow_line_editor: post-Accept reset FAILED\n");
+        return Err(1);
+    }
+
+    // Probe 2 -- ANSI arrow parsing across byte boundaries.
+    let _ = le.feed_bytes(b"abc");
+    // ESC then [ then D (Left arrow) -- delivered one byte at a time
+    // to prove the parser persists state across feed_byte calls.
+    match le.feed_byte(0x1b) {
+        EditorAction::NoChange => {}
+        _ => {
+            t_putstr("u-test: flow_line_editor: ESC alone -> NoChange FAILED\n");
+            return Err(1);
+        }
+    }
+    match le.feed_byte(b'[') {
+        EditorAction::NoChange => {}
+        _ => {
+            t_putstr("u-test: flow_line_editor: ESC[ -> NoChange FAILED\n");
+            return Err(1);
+        }
+    }
+    match le.feed_byte(b'D') {
+        EditorAction::Redraw => {}
+        _ => {
+            t_putstr("u-test: flow_line_editor: ESC[D -> Redraw FAILED\n");
+            return Err(1);
+        }
+    }
+    if le.cursor() != 2 {
+        t_putstr("u-test: flow_line_editor: Left arrow cursor mismatch FAILED\n");
+        return Err(1);
+    }
+    le.reset();
+
+    // Probe 3 -- Backspace + Ctrl-K kill-to-end + Ctrl-Y yank.
+    let _ = le.feed_bytes(b"hello world");
+    // Backspace -> "hello worl"
+    le.feed_byte(0x7f);
+    if le.buffer() != "hello worl" {
+        t_putstr("u-test: flow_line_editor: Backspace FAILED\n");
+        return Err(1);
+    }
+    // Ctrl-A then Ctrl-K -> kill_buffer="hello worl", buffer=""
+    le.feed_byte(0x01);
+    le.feed_byte(0x0b);
+    if !le.buffer().is_empty() || le.kill_buffer() != "hello worl" {
+        t_putstr("u-test: flow_line_editor: Ctrl-K kill FAILED\n");
+        return Err(1);
+    }
+    // Ctrl-Y -> buffer restored.
+    le.feed_byte(0x19);
+    if le.buffer() != "hello worl" || le.cursor() != 10 {
+        t_putstr("u-test: flow_line_editor: Ctrl-Y yank FAILED\n");
+        return Err(1);
+    }
+    le.reset();
+
+    // Probe 4 -- UTF-8 multi-byte across feed_byte boundaries.
+    // "café" = c \xc3 \xa9 -- the 2-byte é is delivered as two
+    // separate feed_byte calls. The engine should accumulate in
+    // Utf8 state then insert the complete char.
+    le.feed_byte(b'c');
+    le.feed_byte(b'a');
+    le.feed_byte(b'f');
+    le.feed_byte(0xc3);
+    // After feeding the leading byte, buffer is still "caf" -- the
+    // engine is awaiting the continuation byte.
+    if le.buffer() != "caf" {
+        t_putstr("u-test: flow_line_editor: UTF-8 partial buffer FAILED\n");
+        return Err(1);
+    }
+    le.feed_byte(0xa9);
+    if le.buffer() != "café" {
+        t_putstr("u-test: flow_line_editor: UTF-8 complete buffer FAILED\n");
+        return Err(1);
+    }
+    // Backspace should walk the multi-byte boundary correctly.
+    le.feed_byte(0x7f);
+    if le.buffer() != "caf" || le.cursor() != 3 {
+        t_putstr("u-test: flow_line_editor: UTF-8 backspace FAILED\n");
+        return Err(1);
+    }
+    le.reset();
+
+    // Probe 5 -- history nav.
+    le.push_history(String::from("first command"));
+    le.push_history(String::from("second command"));
+    let _ = le.feed_bytes(b"draft");
+    // Ctrl-P -> most recent.
+    le.feed_byte(0x10);
+    if le.buffer() != "second command" {
+        t_putstr("u-test: flow_line_editor: history Ctrl-P 1 FAILED\n");
+        return Err(1);
+    }
+    // Ctrl-P again -> "first command".
+    le.feed_byte(0x10);
+    if le.buffer() != "first command" {
+        t_putstr("u-test: flow_line_editor: history Ctrl-P 2 FAILED\n");
+        return Err(1);
+    }
+    // Ctrl-N -> "second command" again.
+    le.feed_byte(0x0e);
+    if le.buffer() != "second command" {
+        t_putstr("u-test: flow_line_editor: history Ctrl-N 1 FAILED\n");
+        return Err(1);
+    }
+    // Ctrl-N once more -> restore "draft" (saved current).
+    le.feed_byte(0x0e);
+    if le.buffer() != "draft" {
+        t_putstr("u-test: flow_line_editor: history restore FAILED\n");
+        return Err(1);
+    }
+    le.reset();
+
+    // Probe 6 -- render() produces the expected ANSI shape.
+    let _ = le.feed_bytes(b"x");
+    let r = le.render("> ");
+    // Expected shape: \r\x1b[K> x\r\x1b[3C
+    // (prompt width 2 + buffer width 1 = column 3)
+    if !r.starts_with("\r\x1b[K") {
+        t_putstr("u-test: flow_line_editor: render prefix FAILED\n");
+        return Err(1);
+    }
+    if !r.contains("> x") {
+        t_putstr("u-test: flow_line_editor: render content FAILED\n");
+        return Err(1);
+    }
+    if !r.ends_with("\x1b[3C") {
+        t_putstr("u-test: flow_line_editor: render cursor positioning FAILED\n");
+        return Err(1);
+    }
+
+    t_putstr("u-test: line editor OK\n");
     Ok(())
 }

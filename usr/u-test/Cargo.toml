@@ -17,3 +17,6 @@ path = "src/main.rs"
 # mixed-fd, thread + torpor coordination. Both binaries spawn at boot
 # via joey and run in sequence.
 libthyla-rs = { path = "../lib/libthyla-rs" }
+# U-4a addition: u-test now also exercises libutopia::line_editor as a
+# 7th composed flow (pure-logic engine end-to-end at boot).
+libutopia   = { path = "../utopia/libutopia" }
