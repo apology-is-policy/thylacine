@@ -19,6 +19,8 @@ The Phase 7 entry decision (taken under the U-1 scripture conversation):
 
 | Sub-chunk | What | Commit | Tests |
 |---|---|---|---|
+| U-2c-path hash fixup | Update U-2c-path row with the impl's hash. | *(pending)* | — |
+| U-2c-path | `t::fs::{Path, PathBuf, Component, Components, Display, SEPARATOR}`. Pure logic, no syscalls. Path is `#[repr(transparent)]` newtype over str; PathBuf wraps String. UTF-8 by convention. parent/file_name/file_stem/extension/join/starts_with/ends_with/components iterator. Full Ord/Eq/Hash/Display/Debug. Per-binary `#[global_allocator]` declaration added to the 11 libthyla-rs consumers (hello-rs, mmio-probe, irq-probe, irq-bench, virtio-blk-probe, virtio-blk-rw, virtio-net-probe, virtio-net-arp, virtio-net-loop, virtio-input, virtio-gpu) — sets the project-wide convention that every native Rust binary opts in to ThylaAlloc. U-2c split from one chunk into U-2c-path / U-2c-io / U-2c-fs (3 thin slices). alloc-smoke extended with Path/PathBuf/Components validation. | *(pending)* | usr workspace cargo build clean; `tools/test.sh` boot pass with new joey line: "alloc-smoke: Path + PathBuf + Components OK" alongside the existing alloc lines |
 | U-2b hash fixup | Update U-2b row with the allocator impl's hash. | *(pending)* | — |
 | U-2b | `t::alloc` — `ThylaAlloc` `#[global_allocator]` backed by `linked_list_allocator::LockedHeap` over a single SYS_BURROW_ATTACH region (4 MiB initial). Lazy init via atomic state machine; multi-thread-safe. Adds `t_burrow_attach` + `t_burrow_detach` SVC wrappers + T_SYS_BURROW_ATTACH/DETACH (37/38) constants. New `usr/alloc-smoke/` workspace member: native Rust binary exercising Box/Vec/String/small-alloc loop. Wired into `tools/build.sh` + spawned by joey at boot. | `d8e95d3` | usr workspace cargo build clean; `tools/test.sh` boot pass with new joey lines: "alloc-smoke: Box + Vec + String + small-alloc loop OK" + "joey: /alloc-smoke reaped status=0; libthyla-rs::alloc verified" |
 | U-2a hash fixup | Update U-2a row with the foundation impl's hash. | *(pending)* | — |
@@ -39,12 +41,14 @@ The U-2 work was reframed in U-2 scripture amendment from a single "libthyla-rs 
 | **U-2** | Scripture amendment: §15 (libthyla-rs uplift framing) + §19 update + phase7-status.md U-* arc refresh. NO code. | U-1 |
 | **U-2a** | `t::err` (Error + Result + From<i64>) + `t::handle` (Handle RAII + Rights bitflags). Foundational. | U-2 |
 | **U-2b** | `t::alloc` (`#[global_allocator]` via burrow_attach). Enables `alloc::*`. Smoke binary with Box/Vec/String. | U-2a |
-| **U-2c** | `t::fs::{Path, PathBuf, File, OpenOptions, Metadata, ReadDir}` + `t::io::{Read, Write, Seek, BufRead}`. | U-2b |
-| **U-2d** | `t::process::{Command, Child, ExitStatus, Stdio}` + `t::process::pipe()`. | U-2c |
-| **U-2e** | `t::notes::{Notes, Note, MaskGuard}` + `t::poll::{PollSet, PollEvents}`. | U-2c |
+| **U-2c-path** | `t::fs::{Path, PathBuf, Component, Components, SEPARATOR}`. Pure logic, no syscalls. Mirrors std::path. | U-2b |
+| **U-2c-io** | `t::io::{Read, Write, Seek, BufRead}` + `t::fs::File`. | U-2c-path |
+| **U-2c-fs** | `t::fs::{OpenOptions, Metadata, ReadDir, DirEntry}` + free functions. | U-2c-io |
+| **U-2d** | `t::process::{Command, Child, ExitStatus, Stdio}` + `t::process::pipe()`. | U-2c-io |
+| **U-2e** | `t::notes::{Notes, Note, MaskGuard}` + `t::poll::{PollSet, PollEvents}`. | U-2c-io |
 | **U-2f** | `t::territory::{bind, mount, unmount, pivot_root, rfork}` + `t::cap::{Caps, current, drop}`. | U-2a |
-| **U-2g** | `t::thread` + `t::torpor` + `t::time` + `t::rand` + `t::tty`. | U-2c |
-| **U-2h** | `t::ninep` (lift 9P client from corvus) + `t::hardware::{Mmio, Irq, Dma}`. Migrates corvus + virtio-* callers in same commit. | U-2c, U-2d |
+| **U-2g** | `t::thread` + `t::torpor` + `t::time` + `t::rand` + `t::tty`. | U-2c-io |
+| **U-2h** | `t::ninep` (lift 9P client from corvus) + `t::hardware::{Mmio, Irq, Dma}`. Migrates corvus + virtio-* callers in same commit. | U-2c-io, U-2d |
 | **U-2-test** | Cross-module smoke binary on Thylacine. Validates the uplift. | U-2a..U-2h |
 | **U-3** | Utopia workspace skeleton: `usr/utopia/{Cargo.toml,shell,libutopia,coreutils}`; libutopia palette + ansi + path modules; `ut` skeleton (version-print + exit); `tools/build.sh utopia` Rust cross-compile wiring; host-bake `/bin/ut`. | U-2-test |
 | **U-4** | Line editor in libutopia: raw mode + emacs keybindings + line buffer + multi-line + tab hook + Ctrl-R history hook. Hand-rolled (~1500-2500 LOC); NOT reedline. | U-3 |

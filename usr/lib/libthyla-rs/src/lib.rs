@@ -41,10 +41,30 @@ use core::panic::PanicInfo;
 //
 // U-2a: err + handle.
 // U-2b: alloc.
+// U-2c-path: fs::{Path, PathBuf, Components}.
+//
+// `extern crate alloc` brings the standard `alloc` crate (String,
+// Vec, Box, Borrow, ToOwned) into libthyla-rs's namespace so
+// internal modules (t::fs::path's PathBuf wraps String, etc.) can
+// name them. Renamed to `alloc_crate` because libthyla-rs's own
+// heap allocator module is `pub mod alloc`; the rename avoids
+// resolution collision at every internal `alloc::` path.
+//
+// CONSEQUENCE FOR CONSUMERS: every binary that links libthyla-rs
+// must declare a `#[global_allocator]`. The canonical choice is
+// `libthyla_rs::alloc::ThylaAlloc` (one-liner; see the alloc-smoke
+// header for the pattern). Sets the project-wide convention that
+// every native Thylacine Rust binary opts in to ThylaAlloc unless
+// it has a specific reason to differ (corvus uses a static-BSS
+// allocator for its own pre-heap startup; the virtio-* drivers
+// and hello-rs et al. use ThylaAlloc even when they never allocate
+// -- the symbol just needs to resolve at link time).
+extern crate alloc as alloc_crate;
 
 pub mod err;
 pub mod handle;
 pub mod alloc;
+pub mod fs;
 
 // =============================================================================
 // Syscall numbers — MUST mirror kernel/include/thylacine/syscall.h.

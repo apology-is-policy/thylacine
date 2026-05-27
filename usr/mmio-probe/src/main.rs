@@ -80,6 +80,12 @@
 #![no_std]
 #![no_main]
 
+// libthyla-rs convention (Phase 7 U-2b): every native Rust binary opts
+// in to ThylaAlloc as its global allocator. Required because libthyla-rs
+// links the alloc crate at its root; the symbol resolves here.
+#[global_allocator]
+static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
+
 use libthyla_rs::{
     T_PROT_READ, T_RIGHT_MAP, T_RIGHT_READ,
     t_exits, t_mmio_create, t_mmio_map, t_puts, t_putstr,

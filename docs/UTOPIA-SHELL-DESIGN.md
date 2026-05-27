@@ -1279,7 +1279,9 @@ The U-2 work splits into focused sub-chunks. Each ships independently; each is a
 | **U-2** scripture amendment | This §15 rewrite. Plus the matching §19 + phase7-status.md updates. NO code. | 0.5 session (already happening) |
 | **U-2a** err + handle | `t::err` (Error + Result + From<i64>) + `t::handle` (Handle RAII + Rights bitflags). The foundational types every other module composes. | 1 |
 | **U-2b** alloc | `#[global_allocator]` via burrow_attach. Smoke binary using `alloc::Box`/`Vec`/`String`. | 1 |
-| **U-2c** fs (Path + File + ReadDir + io) | `t::fs::{Path, PathBuf, File, OpenOptions, Metadata, ReadDir}` + `t::io::{Read, Write, Seek, BufRead}`. The fs + io modules together. | 1-2 |
+| **U-2c-path** path types | `t::fs::{Path, PathBuf, Component, Components}`. Pure logic, no syscalls. Mirrors std::path. | 1 |
+| **U-2c-io** I/O traits + File | `t::io::{Read, Write, Seek, BufRead}` + `t::fs::File` over SYS_WALK_OPEN / READ / WRITE / LSEEK / CLOSE. | 1 |
+| **U-2c-fs** options + metadata + dir | `t::fs::{OpenOptions, Metadata, ReadDir, DirEntry}` + `t::fs::read_dir()`. Builds on U-2c-io. | 1 |
 | **U-2d** process + pipe + stdio | `t::process::{Command, Child, ExitStatus, Stdio}` + `t::process::pipe()`. | 1 |
 | **U-2e** notes + poll | `t::notes::{Notes, Note, MaskGuard, NoteTarget}` + `t::poll::{PollSet, PollEvents}`. | 1 |
 | **U-2f** territory + cap | `t::territory::{bind, mount, unmount, pivot_root, rfork}` + `t::cap::{Caps, current, drop}`. | 1 |
@@ -1469,12 +1471,14 @@ The U-* chunks; the order honours dependencies.
 | **U-2** | Scripture amendment: §15 (the libthyla-rs uplift framing) + this §19 update + phase7-status.md U-* arc refresh. No code. | U-1 |
 | **U-2a** | `t::err` (Error + Result) + `t::handle` (Handle RAII + Rights bitflags). Foundational types. | U-2 |
 | **U-2b** | `t::alloc` (`#[global_allocator]` via burrow_attach). Enables `alloc` crate. Smoke binary with Box/Vec/String. | U-2a |
-| **U-2c** | `t::fs::{Path, PathBuf, File, OpenOptions, Metadata, ReadDir}` + `t::io::{Read, Write, Seek, BufRead}`. The fs + io modules. | U-2b |
-| **U-2d** | `t::process::{Command, Child, ExitStatus, Stdio}` + `t::process::pipe()`. | U-2c |
-| **U-2e** | `t::notes::{Notes, Note, MaskGuard}` + `t::poll::{PollSet, PollEvents}`. | U-2c |
+| **U-2c-path** | `t::fs::{Path, PathBuf, Component, Components, SEPARATOR}`. Pure logic; no syscalls. Mirrors std::path. | U-2b |
+| **U-2c-io** | `t::io::{Read, Write, Seek, BufRead}` traits + `t::fs::File` (RAII over SYS_WALK_OPEN / READ / WRITE / LSEEK / CLOSE). | U-2c-path |
+| **U-2c-fs** | `t::fs::{OpenOptions, Metadata, ReadDir, DirEntry}` + `t::fs::read_dir()` + free functions (`canonicalize`, `remove_file`, etc.). | U-2c-io |
+| **U-2d** | `t::process::{Command, Child, ExitStatus, Stdio}` + `t::process::pipe()`. | U-2c-io |
+| **U-2e** | `t::notes::{Notes, Note, MaskGuard}` + `t::poll::{PollSet, PollEvents}`. | U-2c-io |
 | **U-2f** | `t::territory::{bind, mount, unmount, pivot_root, rfork}` + `t::cap::{Caps, current, drop}`. | U-2a |
-| **U-2g** | `t::thread` + `t::torpor` + `t::time` + `t::rand` + `t::tty`. The smaller-scope modules grouped. | U-2c |
-| **U-2h** | `t::ninep` (lift 9P client from corvus) + `t::hardware::{Mmio, Irq, Dma}` (consolidate virtio-* surface). Migrates corvus + virtio-* callers in the same commit. | U-2c, U-2d |
+| **U-2g** | `t::thread` + `t::torpor` + `t::time` + `t::rand` + `t::tty`. The smaller-scope modules grouped. | U-2c-io |
+| **U-2h** | `t::ninep` (lift 9P client from corvus) + `t::hardware::{Mmio, Irq, Dma}` (consolidate virtio-* surface). Migrates corvus + virtio-* callers in the same commit. | U-2c-io, U-2d |
 | **U-2-test** | Cross-module smoke binary exercising every libthyla-rs module on Thylacine. Validates the uplift end-to-end. | U-2a..U-2h |
 | **U-3** | Utopia workspace skeleton: `usr/utopia/{Cargo.toml,shell,libutopia,coreutils}`; libutopia palette/ansi/path modules; `ut` skeleton (version + exit); `tools/build.sh utopia` wiring; host-bake `/bin/ut`. | U-2-test |
 | **U-4** | Line editor in libutopia: raw mode + emacs keybindings + line buffer + multi-line + tab hook + Ctrl-R history hook. | U-3 |
