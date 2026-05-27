@@ -1,0 +1,19 @@
+[package]
+name = "u-test"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "u-test"
+path = "src/main.rs"
+
+[dependencies]
+# u-test closes the U-2 uplift arc -- cumulative cross-module integration
+# smoke for the libthyla-rs typed Rust API. Unlike alloc-smoke (which
+# isolates each module's surface in its own block), u-test exercises
+# composed flows a Utopia builtin would use: process + notes, poll +
+# mixed-fd, thread + torpor coordination. Both binaries spawn at boot
+# via joey and run in sequence.
+libthyla-rs = { path = "../lib/libthyla-rs" }

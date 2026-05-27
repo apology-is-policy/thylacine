@@ -750,6 +750,28 @@ int main(void) {
     }
     t_putstr("joey: /alloc-smoke reaped status=0; libthyla-rs::alloc verified\n");
 
+    // === /u-test orchestration (Phase 7 U-2-test) ===
+    // Cumulative integration smoke for the libthyla-rs uplift, closes
+    // the U-2 arc. Where alloc-smoke isolates each U-2X module's
+    // surface in its own block, /u-test runs composed cross-module
+    // flows -- the patterns a Utopia builtin will reach for. Six
+    // flows: alloc+fs+io, process+pipe, notes+poll+time,
+    // thread+torpor+time, ninep codec round-trip, hardware+cap.
+    // Output: one "u-test: <flow> OK" per flow + "u-test: all OK".
+    const char u_test_name[] = "u-test";
+    long ut_pid = t_spawn(u_test_name, sizeof(u_test_name) - 1);
+    if (ut_pid <= 0) {
+        t_putstr("joey: t_spawn(\"u-test\") FAILED\n");
+        return 1;
+    }
+    int ut_status = -1;
+    long ut_reaped = t_wait_pid(&ut_status);
+    if (ut_reaped != ut_pid || ut_status != 0) {
+        t_putstr("joey: /u-test orchestration FAILED\n");
+        return 1;
+    }
+    t_putstr("joey: /u-test reaped status=0; U-2 arc integration verified\n");
+
     // === pouch hello smoke (P6-pouch-hello-smoke) ===
     // The first POSIX C programs Thylacine runs, built against the pouch
     // libc. Placed here, beside the /hello orchestration, so the two
