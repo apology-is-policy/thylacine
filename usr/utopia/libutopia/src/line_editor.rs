@@ -20,11 +20,35 @@
 //     Enter, printable
 //   - UTF-8 multi-byte accumulation (paste "héllo" arrives byte-at-
 //     a-time, the engine assembles the char before inserting)
-//   - render(prompt: &str) -> String emitter (single-line; multi-line
-//     is U-4b)
+//   - render(prompt: &str) -> String emitter (single-line)
+//
+// What's at U-4b:
+//   - BalanceState struct + balance(s: &str) lightweight tracker --
+//     brackets ({}/()/[]), single + double quotes, '\\' escape inside
+//     double-quoted + unquoted contexts, '#' line-comments, trailing
+//     unescaped backslash. Per UTOPIA-SHELL-DESIGN.md section 5.3 +
+//     11.4 trip hazard: this is intentionally lightweight; the U-5
+//     parser is authoritative.
+//   - Enter behaviour: if !balance(buffer).is_balanced(), insert '\n'
+//     at cursor instead of submitting Accept. If buffer ends in an
+//     unescaped '\\' AND cursor is at end-of-buffer, strip the
+//     trailing backslash before inserting '\n' (rc/sh trailing-
+//     backslash line continuation).
+//   - Multi-line render: emits prompt on line 0, then for each
+//     subsequent buffer line emits "\r\n\x1b[K<continuation_prefix>",
+//     where continuation_prefix is per UTOPIA-VISUAL.md section 3.2 --
+//     padded so the user's continuation text aligns with the user's
+//     first-line text; the receded-steel `⋮` glyph lives at column
+//     (prompt_width - 2).
+//   - Backspace + Delete auto-join lines (falls out of the existing
+//     UTF-8 boundary-walking code: the '\n' is just another char to
+//     delete).
 //
 // What's deferred:
-//   - Multi-line + bracket-balance continuation -> U-4b
+//   - Column-preserving Up/Down cursor nav across multi-line buffer
+//     (in U-4b, Up/Down stay as history-only as in U-4a -- matches
+//     bash's behaviour; the zsh/fish "Up = cursor-up in multi-line,
+//     history otherwise" semantics can land at U-4c or v1.x).
 //   - History up/down nav + Ctrl-R incremental search -> U-4c (the
 //     arrows are recognized + dispatched, but at U-4a the action is
 //     no-op when history.is_empty())
@@ -80,6 +104,170 @@ pub enum EditorAction {
     /// Ctrl-L. The main loop should clear the screen and redraw the
     /// prompt + buffer. The engine's state is unchanged.
     ClearScreen,
+}
+
+// =============================================================================
+// BalanceState -- lightweight bracket / quote / backslash tracker (U-4b).
+// =============================================================================
+//
+// Per UTOPIA-SHELL-DESIGN.md section 11.4 trip hazard: this is a
+// MINIMAL tracker for the line editor to decide "submit on Enter?" vs
+// "insert newline?". It is NOT a tokenizer; the U-5 parser is the
+// authoritative parse. The tracker handles:
+//
+//   - Brace depth `{` `}` (per-bracket-type counters so `{)` is
+//     detected as having mismatched closers).
+//   - Paren depth `(` `)`.
+//   - Bracket depth `[` `]`.
+//   - Single-quoted `'...'` (literal; no escapes; brackets inside don't count).
+//   - Double-quoted `"..."` (interpolating; `\\` escapes the next char;
+//     brackets inside don't count).
+//   - `#` comments to end-of-line in unquoted contexts.
+//   - Trailing unescaped `\\` (line-continuation trigger).
+//
+// Depth counters are i32 (not u32) so stray closers like `}` at top
+// level go negative; is_balanced treats negative depth as "balanced"
+// (the line is malformed but submitting lets the parser report the
+// error, which is the natural shell experience).
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct BalanceState {
+    pub brace_depth: i32,
+    pub paren_depth: i32,
+    pub bracket_depth: i32,
+    pub in_single_quote: bool,
+    pub in_double_quote: bool,
+    /// True iff the buffer's last unquoted character (after any escape
+    /// run) was an UNESCAPED `\\`. Used by Enter handling to strip the
+    /// trailing backslash before inserting `\n` (rc/sh trailing-
+    /// backslash line continuation).
+    pub trailing_unescaped_backslash: bool,
+}
+
+impl BalanceState {
+    /// True iff everything is closed and no continuation is awaited.
+    /// Used by Enter handling -- if true, submit (Accept); if false,
+    /// insert `\n` at cursor.
+    pub fn is_balanced(&self) -> bool {
+        self.brace_depth <= 0
+            && self.paren_depth <= 0
+            && self.bracket_depth <= 0
+            && !self.in_single_quote
+            && !self.in_double_quote
+            && !self.trailing_unescaped_backslash
+    }
+
+    /// Inverse of is_balanced -- the line editor's reason to continue
+    /// to a new line.
+    pub fn awaits_continuation(&self) -> bool {
+        !self.is_balanced()
+    }
+}
+
+/// Walk `s` once, producing a BalanceState reflecting its end-of-string
+/// bracket / quote / escape state. O(s.len()).
+pub fn balance(s: &str) -> BalanceState {
+    let mut st = BalanceState::default();
+    let mut escaped = false;
+    // The trailing-backslash flag is "is the next-to-last token an
+    // unescaped backslash at EOS?". We update it as we walk: clear on
+    // every char, set on an unescaped `\\` in an unquoted-or-double-
+    // quote context. After the loop, its final value is what we want.
+    //
+    // Implementation: when we see `\\` and we'd set escaped=true, also
+    // set trailing_unescaped_backslash=true; we clear it on every
+    // OTHER char so by EOS only the trailing-most `\\` remains.
+
+    let mut chars = s.chars();
+    while let Some(ch) = chars.next() {
+        let was_unescaped_backslash_about_to_be_set = !escaped
+            && !st.in_single_quote
+            && ch == '\\';
+
+        if escaped {
+            // Previous backslash escaped this char.
+            escaped = false;
+            st.trailing_unescaped_backslash = false;
+            continue;
+        }
+
+        if st.in_single_quote {
+            if ch == '\'' {
+                st.in_single_quote = false;
+            }
+            st.trailing_unescaped_backslash = false;
+            continue;
+        }
+
+        if st.in_double_quote {
+            match ch {
+                '"' => st.in_double_quote = false,
+                '\\' => escaped = true,
+                _ => {}
+            }
+            st.trailing_unescaped_backslash = was_unescaped_backslash_about_to_be_set;
+            continue;
+        }
+
+        // Unquoted.
+        match ch {
+            '\'' => st.in_single_quote = true,
+            '"' => st.in_double_quote = true,
+            '\\' => escaped = true,
+            '{' => st.brace_depth += 1,
+            '}' => st.brace_depth -= 1,
+            '(' => st.paren_depth += 1,
+            ')' => st.paren_depth -= 1,
+            '[' => st.bracket_depth += 1,
+            ']' => st.bracket_depth -= 1,
+            '#' => {
+                // Comment to end-of-line. Skip until '\n' (or EOS).
+                for c in chars.by_ref() {
+                    if c == '\n' {
+                        break;
+                    }
+                }
+                // The comment's contents and the terminating newline
+                // (if any) shouldn't leave a trailing backslash.
+                st.trailing_unescaped_backslash = false;
+                continue;
+            }
+            _ => {}
+        }
+        st.trailing_unescaped_backslash = was_unescaped_backslash_about_to_be_set;
+    }
+
+    st
+}
+
+// =============================================================================
+// Continuation prefix (U-4b) -- the ⋮ + padding emitted at the start of
+// every multi-line continuation line. Per UTOPIA-VISUAL.md section 3.2.
+// =============================================================================
+//
+// The continuation prefix occupies prompt_width columns total:
+//   - (prompt_width - 2) leading spaces
+//   - the `⋮` glyph at column (prompt_width - 2) in PATH role colour
+//   - one trailing space (so user's continuation text aligns with
+//     user's first-line text at column prompt_width)
+//
+// For prompt_width < 2, the prefix degenerates to just `⋮` (1 visible
+// column), keeping a sentinel character visible but losing the
+// alignment property. Most real prompts are >= 2 columns ("> " is
+// the minimum disciplined Pale Fire prompt).
+
+fn continuation_prefix(prompt_width: usize) -> alloc::string::String {
+    let mut s = alloc::string::String::new();
+    if prompt_width >= 2 {
+        for _ in 0..(prompt_width - 2) {
+            s.push(' ');
+        }
+        s.push_str(&crate::ansi::fg(crate::palette::Role::Path, "\u{22ee}"));
+        s.push(' ');
+    } else {
+        s.push_str(&crate::ansi::fg(crate::palette::Role::Path, "\u{22ee}"));
+    }
+    s
 }
 
 // =============================================================================
@@ -272,32 +460,85 @@ impl LineEditor {
     /// ANSI byte sequence. The main loop emits this to stdout after
     /// any Redraw EditorAction.
     ///
-    /// Strategy (single-line at U-4a; multi-line is U-4b):
+    /// Single-line strategy:
     ///   1. \r       -- cursor to column 0
     ///   2. \x1b[K   -- erase to end of line
     ///   3. prompt + buffer
-    ///   4. \r       -- cursor to column 0
-    ///   5. \x1b[<n>C  -- cursor right n positions, where n =
-    ///                    visible_width(prompt) + visible chars of
-    ///                    buffer up to cursor.
+    ///   4. \r + \x1b[<n>C  -- position cursor at prompt_width +
+    ///      visible_chars_of_buffer_up_to_cursor.
     ///
-    /// If `cursor_offset` ends up at column 0, we omit step 5
-    /// (\x1b[0C is a no-op but emitting nothing is cleaner).
+    /// Multi-line strategy (U-4b; triggered when buffer contains '\n'):
+    ///   1. \r\x1b[K -- clear current line
+    ///   2. prompt + first line of buffer
+    ///   3. For each subsequent buffer line:
+    ///      "\r\n\x1b[K" + continuation_prefix + line content
+    ///      (continuation_prefix per UTOPIA-VISUAL.md section 3.2 --
+    ///      padded so the user's text aligns across lines.)
+    ///   4. Position cursor: \x1b[<n>F (cursor up n lines + col 0) if
+    ///      cursor is above the last emitted line, then \x1b[<col>C
+    ///      to move right to the target column (= prompt_width OR
+    ///      continuation_prefix width + visible_chars_in_cursor_line_up_to_cursor).
+    ///
+    /// Multi-line caveat (U-6 will revisit): if the previous render
+    /// occupied more lines than this one (e.g. user deleted content
+    /// shrinking the buffer), the trailing lines on screen are NOT
+    /// cleared. U-6 will track prev_render_lines + emit \x1b[J to
+    /// clear "from cursor to end of screen" at start of render. For
+    /// U-4b the boot probe only checks emitted bytes (not screen
+    /// state) so this is invisible.
     pub fn render(&self, prompt: &str) -> String {
+        let prompt_w = crate::ansi::visible_width(prompt);
+        let cont = continuation_prefix(prompt_w);
+        let cont_w = crate::ansi::visible_width(&cont);
+
         let mut out = String::new();
         out.push('\r');
         out.push_str("\x1b[K");
-        out.push_str(prompt);
-        out.push_str(&self.buffer);
-        // Position cursor: prompt_width + visible chars of buffer[..cursor].
-        let prompt_w = crate::ansi::visible_width(prompt);
-        let buffer_to_cursor = &self.buffer[..self.cursor];
-        let buffer_w = crate::ansi::visible_width(buffer_to_cursor);
-        let total = prompt_w + buffer_w;
-        if total > 0 {
-            out.push('\r');
-            out.push_str(&format!("\x1b[{}C", total));
+
+        // Emit each buffer line.
+        let mut line_iter = self.buffer.split('\n');
+        if let Some(first) = line_iter.next() {
+            out.push_str(prompt);
+            out.push_str(first);
         }
+        let mut total_lines = 1usize;
+        for line in line_iter {
+            out.push_str("\r\n\x1b[K");
+            out.push_str(&cont);
+            out.push_str(line);
+            total_lines += 1;
+        }
+
+        // Position cursor.
+        //
+        // cursor_line = number of '\n' chars in buffer[..cursor].
+        let bytes_up_to_cursor = &self.buffer[..self.cursor];
+        let cursor_line = bytes_up_to_cursor.matches('\n').count();
+        // Cursor-line start byte = position just AFTER the last '\n' in
+        // buffer[..cursor], or 0 if none.
+        let cursor_line_start = bytes_up_to_cursor
+            .rfind('\n')
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        let col_in_line = crate::ansi::visible_width(&self.buffer[cursor_line_start..self.cursor]);
+
+        // After emitting all lines, the terminal cursor is at the END
+        // of the last line. Move up to the cursor's line.
+        let lines_to_up = total_lines - 1 - cursor_line;
+        if lines_to_up > 0 {
+            out.push_str(&format!("\r\x1b[{}F", lines_to_up));
+        } else {
+            // Stay on current line.
+            out.push('\r');
+        }
+
+        // Move right to target column.
+        let prefix_w = if cursor_line == 0 { prompt_w } else { cont_w };
+        let target_col = prefix_w + col_in_line;
+        if target_col > 0 {
+            out.push_str(&format!("\x1b[{}C", target_col));
+        }
+
         out
     }
 
@@ -713,6 +954,22 @@ impl LineEditor {
     }
 
     fn do_accept(&mut self) -> EditorAction {
+        // U-4b: bracket / quote / trailing-backslash check.
+        //
+        // If the buffer's balance state is "awaiting continuation"
+        // (unclosed brackets / quotes / trailing-unescaped-backslash),
+        // insert '\n' at cursor instead of submitting. The trailing
+        // backslash stays in the buffer verbatim: the parser (U-5+)
+        // sees `\\\n` as the POSIX/rc line-continuation marker and
+        // elides both atoms. Doing the elision in the editor would
+        // require the parser to maintain a separate "raw buffer" with
+        // continuations re-inserted, which is the opposite of the
+        // separation of concerns scripted in UTOPIA-SHELL-DESIGN.md.
+        let st = balance(&self.buffer);
+        if st.awaits_continuation() {
+            return self.do_insert('\n');
+        }
+        // Balanced: submit.
         let line = core::mem::take(&mut self.buffer);
         self.cursor = 0;
         self.history_pos = None;
@@ -1074,5 +1331,237 @@ mod tests {
         let r = le.feed_byte(0x09);
         assert_eq!(r, EditorAction::NoChange);
         assert_eq!(le.buffer(), "ab");
+    }
+
+    // =========================================================================
+    // U-4b tests -- balance tracker + multi-line.
+    // =========================================================================
+
+    #[test]
+    fn balance_empty_is_balanced() {
+        let st = balance("");
+        assert!(st.is_balanced());
+        assert!(!st.awaits_continuation());
+    }
+
+    #[test]
+    fn balance_open_brace_unbalanced() {
+        let st = balance("{");
+        assert_eq!(st.brace_depth, 1);
+        assert!(!st.is_balanced());
+        assert!(st.awaits_continuation());
+    }
+
+    #[test]
+    fn balance_open_close_brace_balanced() {
+        let st = balance("{ foo }");
+        assert_eq!(st.brace_depth, 0);
+        assert!(st.is_balanced());
+    }
+
+    #[test]
+    fn balance_nested_brackets() {
+        let st = balance("{ ( [ ");
+        assert_eq!(st.brace_depth, 1);
+        assert_eq!(st.paren_depth, 1);
+        assert_eq!(st.bracket_depth, 1);
+        assert!(!st.is_balanced());
+    }
+
+    #[test]
+    fn balance_negative_depth_is_balanced() {
+        // Stray closer -- malformed but the editor submits + lets the
+        // parser report the error.
+        let st = balance("} unexpected");
+        assert_eq!(st.brace_depth, -1);
+        assert!(st.is_balanced());
+    }
+
+    #[test]
+    fn balance_single_quote_isolates_brackets() {
+        let st = balance("'a { b'");
+        assert!(st.is_balanced());
+        assert_eq!(st.brace_depth, 0);
+    }
+
+    #[test]
+    fn balance_single_quote_unclosed_unbalanced() {
+        let st = balance("'unclosed");
+        assert!(st.in_single_quote);
+        assert!(!st.is_balanced());
+    }
+
+    #[test]
+    fn balance_double_quote_isolates_brackets() {
+        let st = balance("\"a { b\"");
+        assert!(st.is_balanced());
+        assert_eq!(st.brace_depth, 0);
+    }
+
+    #[test]
+    fn balance_double_quote_with_escaped_quote() {
+        // "\\\"" inside source is "\"" inside the buffer.
+        let st = balance("\"a \\\" b\"");
+        assert!(st.is_balanced());
+        assert!(!st.in_double_quote);
+    }
+
+    #[test]
+    fn balance_trailing_backslash_unbalanced() {
+        let st = balance("foo\\");
+        assert!(st.trailing_unescaped_backslash);
+        assert!(st.awaits_continuation());
+    }
+
+    #[test]
+    fn balance_paired_backslashes_balanced() {
+        let st = balance("foo\\\\");
+        assert!(!st.trailing_unescaped_backslash);
+        assert!(st.is_balanced());
+    }
+
+    #[test]
+    fn balance_backslash_inside_single_quote_literal() {
+        // Inside '...', \ is literal -- not a trailing escape.
+        let st = balance("'foo\\'");
+        assert!(!st.trailing_unescaped_backslash);
+        assert!(st.is_balanced());
+    }
+
+    #[test]
+    fn balance_comment_skipped() {
+        // # comments to end of line in unquoted contexts.
+        let st = balance("foo # { not a real open brace");
+        assert!(st.is_balanced());
+        assert_eq!(st.brace_depth, 0);
+    }
+
+    #[test]
+    fn balance_comment_in_quote_is_literal() {
+        let st = balance("\"foo # not a comment\"");
+        assert!(st.is_balanced());
+    }
+
+    #[test]
+    fn enter_with_unbalanced_inserts_newline() {
+        let mut le = LineEditor::new();
+        feed(&mut le, b"{");
+        let r = le.feed_byte(b'\r');
+        // Should NOT be Accept; should be Redraw (the do_insert path).
+        assert_eq!(r, EditorAction::Redraw);
+        assert_eq!(le.buffer(), "{\n");
+        assert_eq!(le.cursor(), 2);
+    }
+
+    #[test]
+    fn enter_with_balanced_submits() {
+        let mut le = LineEditor::new();
+        feed(&mut le, b"{}");
+        let r = le.feed_byte(b'\r');
+        assert_eq!(r, EditorAction::Accept(String::from("{}")));
+    }
+
+    #[test]
+    fn multi_line_enter_eventually_accepts() {
+        let mut le = LineEditor::new();
+        // Open brace.
+        feed(&mut le, b"{");
+        // Enter -- multi-line.
+        le.feed_byte(b'\r');
+        assert_eq!(le.buffer(), "{\n");
+        // Type body and close.
+        feed(&mut le, b"  foo");
+        le.feed_byte(b'\r');
+        assert_eq!(le.buffer(), "{\n  foo\n");
+        feed(&mut le, b"}");
+        let r = le.feed_byte(b'\r');
+        match r {
+            EditorAction::Accept(s) => assert_eq!(s, "{\n  foo\n}"),
+            _ => panic!("expected Accept; got {:?}", r),
+        }
+    }
+
+    #[test]
+    fn quote_in_single_quote_no_continuation() {
+        let mut le = LineEditor::new();
+        feed(&mut le, b"'{'");
+        // Buffer is `'{'`; balance: in_single_quote was true after `'`,
+        // then `{` literal, then closing `'` -> closed. Balanced.
+        let r = le.feed_byte(b'\r');
+        match r {
+            EditorAction::Accept(s) => assert_eq!(s, "'{'"),
+            _ => panic!("expected Accept; got {:?}", r),
+        }
+    }
+
+    #[test]
+    fn trailing_backslash_continues() {
+        let mut le = LineEditor::new();
+        feed(&mut le, b"foo\\");
+        let r = le.feed_byte(b'\r');
+        assert_eq!(r, EditorAction::Redraw);
+        assert_eq!(le.buffer(), "foo\\\n");
+    }
+
+    #[test]
+    fn render_multi_line_emits_continuation_prefix() {
+        let mut le = LineEditor::new();
+        feed(&mut le, b"{");
+        le.feed_byte(b'\r');
+        feed(&mut le, b"x");
+        let s = le.render("> ");
+        // First line: "\r\x1b[K> {"
+        assert!(s.starts_with("\r\x1b[K> {"));
+        // Subsequent line: "\r\n\x1b[K<cont>x"
+        // <cont> for prompt_width 2 = `⋮ ` (the glyph in PATH color
+        // wrapped in ANSI, then a space). Just check the literal text.
+        assert!(s.contains("\r\n\x1b[K"));
+        assert!(s.contains("\u{22ee}"));
+        // After all the lines, cursor positioning: cursor is on line 1
+        // (the second line) at col 1 (visible char "x" at col cont_w + 0
+        // -- actually cursor is AFTER the x, so col = cont_w + 1 = 2 + 1 = 3
+        // when prompt_width is 2).
+        assert!(s.ends_with("\x1b[3C"));
+    }
+
+    #[test]
+    fn render_multi_line_cursor_on_first_line() {
+        let mut le = LineEditor::new();
+        feed(&mut le, b"{");
+        le.feed_byte(b'\r');
+        feed(&mut le, b"x");
+        // Move cursor to start of buffer.
+        le.feed_byte(0x01); // Ctrl-A
+        // Cursor should now be on line 0 (first line), column 0 of buffer.
+        // After this re-Ctrl-A in multi-line, cursor lands at byte 0
+        // (start of whole buffer); render needs to move cursor UP one line.
+        let s = le.render("> ");
+        // The cursor-up escape \x1b[1F should appear.
+        assert!(s.contains("\x1b[1F"));
+        // Final position: prompt_width + 0 = col 2.
+        assert!(s.ends_with("\x1b[2C"));
+    }
+
+    #[test]
+    fn backspace_joins_continuation_line() {
+        let mut le = LineEditor::new();
+        feed(&mut le, b"foo");
+        le.feed_byte(b'\r'); // unbalanced? No -- "foo" is balanced -> Accept
+        // Reset since the above accepted. Restart with an actually-unbalanced
+        // case.
+        let mut le = LineEditor::new();
+        feed(&mut le, b"{");
+        le.feed_byte(b'\r');
+        feed(&mut le, b"x");
+        // Move cursor to between \n and x (i.e. byte 2).
+        le.feed_byte(0x01); // Ctrl-A -> cursor=0
+        // Cursor right twice -> over `{` then `\n` to position 2 = start of "x".
+        le.feed_byte(0x06); // Ctrl-F
+        le.feed_byte(0x06); // Ctrl-F
+        assert_eq!(le.cursor(), 2);
+        // Backspace: deletes the '\n' before cursor -- lines join.
+        le.feed_byte(0x7f);
+        assert_eq!(le.buffer(), "{x");
+        assert_eq!(le.cursor(), 1);
     }
 }

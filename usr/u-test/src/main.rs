@@ -669,6 +669,89 @@ fn flow_line_editor() -> Result<(), i64> {
         t_putstr("u-test: flow_line_editor: render cursor positioning FAILED\n");
         return Err(1);
     }
+    le.reset();
+
+    // Probe 7 -- U-4b multi-line via unclosed brace, then close, then
+    // multi-line Accept. Also covers Backspace joining a continuation
+    // line back into the previous line.
+    let _ = le.feed_bytes(b"{");
+    let r = le.feed_byte(b'\r');
+    match r {
+        EditorAction::Redraw => {}
+        _ => {
+            t_putstr("u-test: flow_line_editor: unbalanced Enter -> Redraw FAILED\n");
+            return Err(1);
+        }
+    }
+    if le.buffer() != "{\n" {
+        t_putstr("u-test: flow_line_editor: unbalanced buffer FAILED\n");
+        return Err(1);
+    }
+    let _ = le.feed_bytes(b"  foo");
+    le.feed_byte(b'\r');
+    if le.buffer() != "{\n  foo\n" {
+        t_putstr("u-test: flow_line_editor: multi-line buffer FAILED\n");
+        return Err(1);
+    }
+    let _ = le.feed_bytes(b"}");
+    let r = le.feed_byte(b'\r');
+    match r {
+        EditorAction::Accept(s) if s == "{\n  foo\n}" => {}
+        _ => {
+            t_putstr("u-test: flow_line_editor: multi-line Accept FAILED\n");
+            return Err(1);
+        }
+    }
+
+    // Probe 8 -- U-4b: single-quoted bracket doesn't trigger continuation.
+    let _ = le.feed_bytes(b"'{'");
+    let r = le.feed_byte(b'\r');
+    match r {
+        EditorAction::Accept(s) if s == "'{'" => {}
+        _ => {
+            t_putstr("u-test: flow_line_editor: single-quote isolates brackets FAILED\n");
+            return Err(1);
+        }
+    }
+
+    // Probe 9 -- U-4b: trailing-backslash continuation.
+    let _ = le.feed_bytes(b"foo\\");
+    let r = le.feed_byte(b'\r');
+    match r {
+        EditorAction::Redraw => {}
+        _ => {
+            t_putstr("u-test: flow_line_editor: trailing \\ continuation FAILED\n");
+            return Err(1);
+        }
+    }
+    if le.buffer() != "foo\\\n" {
+        t_putstr("u-test: flow_line_editor: trailing-backslash buffer FAILED\n");
+        return Err(1);
+    }
+    le.reset();
+
+    // Probe 10 -- U-4b: multi-line render emits the ⋮ continuation glyph.
+    let _ = le.feed_bytes(b"{");
+    le.feed_byte(b'\r');
+    let _ = le.feed_bytes(b"x");
+    let r = le.render("> ");
+    // The continuation glyph (U+22EE) must appear; the render must
+    // contain a "\r\n" line break between the first and second lines.
+    if !r.contains("\u{22ee}") {
+        t_putstr("u-test: flow_line_editor: continuation glyph missing FAILED\n");
+        return Err(1);
+    }
+    if !r.contains("\r\n\x1b[K") {
+        t_putstr("u-test: flow_line_editor: multi-line break missing FAILED\n");
+        return Err(1);
+    }
+    // Cursor on line 1 (the continuation line) at col cont_w + 1 (1 = `x`).
+    // cont_w for prompt_width 2 is 2 (= `⋮ ` rendered).
+    if !r.ends_with("\x1b[3C") {
+        t_putstr("u-test: flow_line_editor: multi-line cursor positioning FAILED\n");
+        return Err(1);
+    }
+    le.reset();
 
     t_putstr("u-test: line editor OK\n");
     Ok(())

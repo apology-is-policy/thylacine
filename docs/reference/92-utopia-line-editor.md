@@ -1,4 +1,4 @@
-# 92-utopia-line-editor — `libutopia::line_editor` engine core (U-4a)
+# 92-utopia-line-editor — `libutopia::line_editor` engine (U-4a + U-4b)
 
 Per CLAUDE.md "Reference documentation discipline (load-bearing)" — the
 technical reference for the line editor engine landed at Phase 7 U-4a.
@@ -85,6 +85,32 @@ impl LineEditor {
     /// at U-4b. The main loop emits this after any Redraw.
     pub fn render(&self, prompt: &str) -> String;
 }
+```
+
+### `libutopia::line_editor::BalanceState` (U-4b)
+
+```rust
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct BalanceState {
+    pub brace_depth: i32,           // {} per-bracket counter
+    pub paren_depth: i32,           // ()
+    pub bracket_depth: i32,         // []
+    pub in_single_quote: bool,      // inside '...'
+    pub in_double_quote: bool,      // inside "..."
+    pub trailing_unescaped_backslash: bool,
+}
+
+impl BalanceState {
+    /// True iff Enter should submit (Accept). Negative depth is
+    /// treated as balanced (malformed but unrecoverable by typing more).
+    pub fn is_balanced(&self) -> bool;
+    /// Inverse of is_balanced; true iff Enter should insert '\n'.
+    pub fn awaits_continuation(&self) -> bool;
+}
+
+/// Walk `s` once, return a BalanceState reflecting its end-of-string
+/// state. O(s.len()).
+pub fn balance(s: &str) -> BalanceState;
 ```
 
 ### `libutopia::ansi::visible_width`
@@ -206,6 +232,99 @@ helper in `libutopia::ansi`; it walks the bytes, treats CSI sequences
 one column each (the v1.0 approximation; v1.x will add grapheme
 clusters + wcwidth for proper CJK / emoji width).
 
+### Bracket / quote balance tracker (U-4b)
+
+`balance(s: &str) -> BalanceState` walks `s` once with a small state
+machine:
+
+```
+States: in_single_quote, in_double_quote, escaped (transient)
+
+For each char:
+  if `escaped`: clear escaped + clear trailing_unescaped_backslash;
+                consume the char (it was "escaped by the previous \\").
+  elif in_single_quote:
+    if ch == '\'': in_single_quote = false  (literal close; no escapes)
+  elif in_double_quote:
+    if ch == '"': in_double_quote = false
+    elif ch == '\\': escaped = true
+                     trailing_unescaped_backslash = true (transient)
+    else: clear trailing_unescaped_backslash
+  else (unquoted):
+    '\\' -> in_single_quote = true
+    '"'  -> in_double_quote = true
+    '\\' -> escaped = true; trailing_unescaped_backslash = true (transient)
+    '{' '(' '['  -> depth += 1
+    '}' ')' ']'  -> depth -= 1
+    '#' -> skip until '\n' (comment to EOL)
+    other -> clear trailing_unescaped_backslash
+```
+
+After the loop, `trailing_unescaped_backslash` is true iff the last
+char was an unescaped `\\` in an unquoted-or-double-quoted context.
+
+`is_balanced()` returns true when:
+- All depths `<= 0` (negative depth is malformed but "submit and let
+  parser report it").
+- Neither single nor double quote is open.
+- No trailing unescaped backslash.
+
+### Enter behaviour (U-4b)
+
+`do_accept` consults `balance(buffer)`:
+- If `awaits_continuation()`: insert `\n` at cursor (yielding
+  `EditorAction::Redraw`). The trailing backslash, if any, stays
+  in the buffer verbatim -- the parser (U-5+) sees `\\\n` and elides
+  the line continuation per POSIX/rc semantics. Eliding in the editor
+  would force the parser to maintain a parallel "raw" buffer, which
+  is the opposite of the separation of concerns under
+  UTOPIA-SHELL-DESIGN.md.
+- If balanced: drain buffer into `Accept(line)` and reset state.
+
+### Multi-line render (U-4b)
+
+`render(prompt)` handles a buffer with `\n` chars by:
+
+1. `\r\x1b[K` — clear current line.
+2. Emit prompt + buffer's first line.
+3. For each subsequent buffer line: `\r\n\x1b[K<continuation_prefix><line>`.
+4. Position cursor:
+   - `\x1b[<n>F` (cursor previous-line) to move up to the cursor's
+     line if it's above the last emitted line.
+   - `\r` + `\x1b[<col>C` where `col = (prompt_w if cursor on line 0
+     else cont_w) + visible_width(buffer[cursor_line_start..cursor])`.
+
+`continuation_prefix(prompt_width)` produces a string of total visible
+width `prompt_width` (when `prompt_width >= 2`):
+
+- `(prompt_width - 2)` leading spaces
+- `⋮` (U+22EE) wrapped in `palette::Role::Path` ANSI color
+- one trailing space
+
+The user's continuation text on subsequent lines aligns with the
+user's first-line text -- the column where the user's first
+character started is the same column where their continuation
+characters start. Per UTOPIA-VISUAL.md section 3.2.
+
+For `prompt_width < 2`, the prefix degenerates to just `⋮` (visible
+width 1). Most disciplined Pale Fire prompts are `>= 2`.
+
+### Multi-line ghost-clear caveat (deferred to U-6)
+
+`render(prompt)` is `&self` and does NOT clear lines BELOW the last
+line of the current render. If the previous render occupied more
+lines than the current one (e.g. user deleted content shrinking the
+multi-line buffer), trailing stale lines remain on screen.
+
+U-6 will revisit by either:
+- Lifting `render(prompt)` to `&mut self` + tracking `prev_render_lines`,
+  then emitting `\x1b[J` (erase to end of screen) at the start of
+  each render after backing up to the prompt's first line.
+- Or having the U-6 main loop track this externally.
+
+For U-4b the boot probe only checks emitted bytes (not screen state),
+so the ghost-clear is invisible at test time.
+
 ### Per-buffer cap
 
 `MAX_BUFFER_LEN = 64 * 1024` -- a defensive cap so a runaway paste
@@ -265,7 +384,8 @@ enum Action {
 
 ### Boot-time integration probe (`flow_line_editor` in `/u-test`)
 
-Six composed probes, runtime-validated at every boot:
+Ten composed probes, runtime-validated at every boot. Probes 1-6 are
+U-4a; probes 7-10 are U-4b.
 
 1. **Insert + Accept**: feed `"hello"`, verify buffer + cursor, feed `\r`, verify `Accept("hello")` + state reset.
 2. **ANSI arrow across byte boundaries**: feed `0x1b`, `b'['`, `b'D'` separately; verify NoChange-NoChange-Redraw + cursor moved left.
@@ -273,6 +393,10 @@ Six composed probes, runtime-validated at every boot:
 4. **UTF-8 across byte boundaries**: feed `"caf"` + `0xc3` + `0xa9`; verify the partial-state-then-complete pattern; Backspace correctly removes the 2-byte 'é'.
 5. **History navigation**: push two entries, type a draft, Ctrl-P twice (newest then older), Ctrl-N twice (back through history then restoring the draft).
 6. **render() shape**: verify the `\r\x1b[K<prompt><buffer>\r\x1b[<n>C` output for a 1-char buffer with a 2-char prompt.
+7. **Multi-line via unclosed brace** (U-4b): `{` + Enter → Redraw (not Accept); buffer becomes `"{\n"`. Type `  foo`, Enter (still unbalanced); buffer becomes `"{\n  foo\n"`. Type `}`, Enter → `Accept("{\n  foo\n}")`.
+8. **Single-quote isolates brackets** (U-4b): `'{'` + Enter → `Accept("'{'")` (the bracket is inside the quote; balance is `0`).
+9. **Trailing-backslash continuation** (U-4b): `foo\` + Enter → Redraw; buffer becomes `"foo\\\n"` (backslash preserved for parser).
+10. **Multi-line render emits `⋮`** (U-4b): `{` + Enter + `x` then `render("> ")` contains `\r\n\x1b[K`, the U+22EE glyph, and ends with the correct cursor positioning (col 3 for continuation prefix width 2 + 1 visible char).
 
 Each probe prints `u-test: flow_line_editor: <probe>: <what> FAILED`
 on failure + bails the binary with exit 1; joey treats that as a
@@ -338,11 +462,17 @@ small `[u32; 4]` CSI parameter array.
 
 ## Status
 
-- **U-4a LANDED** at this chunk.
-- `libutopia::line_editor` -- ~640 LOC engine + ~290 LOC `cfg(test)` unit tests.
-- `libutopia::ansi::visible_width` -- new helper (~60 LOC including tests).
-- `u-test::flow_line_editor` -- ~150 LOC boot-time integration probe.
-- New `usr/u-test/Cargo.toml` dependency on `libutopia` (the first
+- **U-4a LANDED** (commit `eccbf0f`).
+- **U-4b LANDED** (commit pending) — adds BalanceState + balance() +
+  multi-line render() + Enter-becomes-newline-when-unbalanced behaviour.
+- `libutopia::line_editor` — ~870 LOC engine (U-4a engine 640 + U-4b
+  additions 230) + ~470 LOC `cfg(test)` unit tests (U-4a 290 + U-4b
+  additions 180).
+- `libutopia::ansi::visible_width` — new helper at U-4a (~60 LOC
+  including tests); reused by U-4b multi-line render for cursor
+  positioning.
+- `u-test::flow_line_editor` — 10 boot-time probes (U-4a 6 + U-4b 4).
+- `usr/u-test/Cargo.toml` depends on `libutopia` (the first
   non-libthyla-rs Rust workspace dependency consumed by a boot-test
   binary).
 - Boot log gains `u-test: line editor OK` between `hardware + cap OK`
@@ -380,6 +510,29 @@ small `[u32; 4]` CSI parameter array.
   `EditorAction`. The mapping between input bytes and actions is
   internal; v1.x users wanting custom keybindings would extend
   through a public hook (TBD; not at U-4a).
+- **U-4b: balance tracker is lightweight**. It handles brackets +
+  single/double quotes + escape + `#` comments. It does NOT handle
+  heredocs (`<<EOF`), here-strings, or other shell quoting forms.
+  The U-5 parser is the authoritative parse; the balance tracker is
+  a heuristic for "should Enter submit?". A user typing a heredoc
+  with `<<EOF` may submit prematurely; v1.x can extend the tracker
+  to recognise heredoc openers if it earns the complexity.
+- **U-4b: Up/Down arrows still navigate history in multi-line buffers**.
+  matches bash behaviour. The zsh/fish convention (Up = cursor-up
+  when not on first line of buffer; history-prev otherwise) can land
+  at U-4c or v1.x. Workaround: use Ctrl-B / Ctrl-F to navigate
+  byte-by-byte within a multi-line buffer.
+- **U-4b: trailing backslash stays in buffer**. After `foo\` + Enter,
+  the buffer is `foo\\\n` (not `foo\n`). The parser (U-5) will
+  elide `\\\n` per POSIX/rc semantics. Users who press Backspace
+  immediately after the continuation see the `\` reappear as the
+  last character on the previous line — that's correct (the `\` is
+  still there; only the `\n` was added).
+- **U-4b: multi-line render does NOT clear stale lines below**.
+  Documented in the Implementation > "Multi-line ghost-clear caveat"
+  section. U-6 (the main loop) will track `prev_render_lines` and
+  add the `\x1b[J` cleanup. Until then, a render that shrinks the
+  buffer leaves trailing lines on screen visually.
 
 ## References
 
