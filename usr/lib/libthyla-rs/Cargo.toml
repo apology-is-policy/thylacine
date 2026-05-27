@@ -9,6 +9,15 @@ license.workspace = true
 name = "libthyla_rs"
 path = "src/lib.rs"
 
+# linked_list_allocator backs t::alloc's `ThylaAlloc` `#[global_allocator]`
+# implementation (U-2b). default-features = false drops the `alloc`-crate
+# feature we don't need (the heap data structure stays purely on the
+# kernel-supplied region; no internal alloc::Box use). use_spin = true
+# brings the `LockedHeap` Mutex<Heap> wrapper required by the
+# `Sync`-bound for `static` globals.
+[dependencies]
+linked_list_allocator = { version = "0.10", default-features = false, features = ["use_spin"] }
+
 # Thylacine userspace runtime — Rust side.
 #
 # Mirror of usr/lib/libt/ on the Rust side. Provides:

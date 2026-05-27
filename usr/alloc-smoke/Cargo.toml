@@ -1,0 +1,17 @@
+[package]
+name = "alloc-smoke"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "alloc-smoke"
+path = "src/main.rs"
+
+[dependencies]
+# alloc-smoke validates the libthyla-rs::alloc surface (U-2b). Links
+# libthyla-rs both for the SVC wrappers + _start + #[panic_handler]
+# (the same minimal-runtime dependency hello-rs uses) and for the
+# `ThylaAlloc` `#[global_allocator]` it instantiates.
+libthyla-rs = { path = "../lib/libthyla-rs" }

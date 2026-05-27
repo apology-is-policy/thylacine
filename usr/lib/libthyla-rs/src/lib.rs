@@ -40,9 +40,11 @@ use core::panic::PanicInfo;
 // transition.
 //
 // U-2a: err + handle.
+// U-2b: alloc.
 
 pub mod err;
 pub mod handle;
+pub mod alloc;
 
 // =============================================================================
 // Syscall numbers — MUST mirror kernel/include/thylacine/syscall.h.
@@ -86,6 +88,12 @@ pub const T_SYS_SPAWN_WITH_PERMS: u64 = 31;
 // to userspace until a generic t_open lands.
 pub const T_SYS_CAP_GRANT: u64        = 32;
 pub const T_SYS_CAP_USE: u64          = 33;
+
+// P6-pouch-mem: anonymous-memory grow/shrink, the Tier-1 native memory
+// primitive (ARCHITECTURE.md §6.5). Backs t::alloc's #[global_allocator]
+// in libthyla-rs (U-2b) and every libt-equivalent userspace allocator.
+pub const T_SYS_BURROW_ATTACH: u64    = 37;
+pub const T_SYS_BURROW_DETACH: u64    = 38;
 
 // SYS_SPAWN_WITH_PERMS perm_flags — must mirror SPAWN_PERM_* in
 // kernel/include/thylacine/syscall.h.
@@ -793,6 +801,56 @@ pub unsafe fn t_cap_use(cap_mask: u64) -> i64 {
         "svc #0",
         inlateout("x0") x0,
         in("x8") T_SYS_CAP_USE,
+        options(nostack)
+    );
+    x0
+}
+
+// t_burrow_attach — request `length` bytes of anonymous, demand-zero,
+// read-write memory and have the kernel install it in the calling
+// Proc's address space. Returns the page-aligned base user-VA on
+// success (always >= EXEC_USER_BURROW_BASE = 0x0000_0001_0000_0000),
+// -1 on:
+//   - length == 0 or length > BURROW_ATTACH_MAX (= 256 MiB)
+//   - no free gap of round_up(length) in the burrow window
+//   - burrow_create_anon / burrow_map OOM
+//
+// The kernel rounds `length` up to a page (4 KiB) and chooses the
+// virtual address (first-fit in EXEC_USER_BURROW_BASE..TOP). Pages
+// install on demand via the user-fault path.
+//
+// Tier-1 native memory primitive (ARCHITECTURE.md §6.5). Backs
+// libthyla-rs's t::alloc global heap (U-2b).
+#[inline(always)]
+pub unsafe fn t_burrow_attach(length: u64) -> i64 {
+    let mut x0: i64 = length as i64;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x8") T_SYS_BURROW_ATTACH,
+        options(nostack)
+    );
+    x0
+}
+
+// t_burrow_detach — release a region previously attached by
+// t_burrow_attach. The (vaddr, page-rounded length) must match an
+// installed VMA exactly — no partial detach at v1.0 (mirrors the
+// kernel-side burrow_unmap constraint). Returns 0 on success, -1 on:
+//   - length == 0 or length > BURROW_ATTACH_MAX
+//   - vaddr not page-aligned
+//   - no VMA matches [vaddr, vaddr + round_up(length)) exactly
+//
+// `length` may be the original request OR any value that page-rounds
+// to the same span; the kernel matches on the rounded range.
+#[inline(always)]
+pub unsafe fn t_burrow_detach(vaddr: u64, length: u64) -> i64 {
+    let mut x0: i64 = vaddr as i64;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") length,
+        in("x8") T_SYS_BURROW_DETACH,
         options(nostack)
     );
     x0

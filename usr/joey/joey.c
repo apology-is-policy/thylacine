@@ -728,6 +728,28 @@ int main(void) {
     }
     t_putstr("joey: /hello reaped status=0; orchestration verified\n");
 
+    // === /alloc-smoke orchestration (Phase 7 U-2b) ===
+    // First native Rust binary that uses the alloc crate (Box / Vec /
+    // String / small-alloc loop) backed by libthyla-rs::alloc::ThylaAlloc
+    // via SYS_BURROW_ATTACH. Validates the libthyla-rs U-2b uplift
+    // sub-chunk end-to-end: t::alloc + t::handle (via Drop) + the
+    // burrow_attach syscall wrapper. On success the binary prints
+    // "alloc-smoke: ... OK" + exits 0; any failed check prints a
+    // tagged FAIL line + exits 1.
+    const char alloc_smoke_name[] = "alloc-smoke";
+    long as_pid = t_spawn(alloc_smoke_name, sizeof(alloc_smoke_name) - 1);
+    if (as_pid <= 0) {
+        t_putstr("joey: t_spawn(\"alloc-smoke\") FAILED\n");
+        return 1;
+    }
+    int as_status = -1;
+    long as_reaped = t_wait_pid(&as_status);
+    if (as_reaped != as_pid || as_status != 0) {
+        t_putstr("joey: /alloc-smoke orchestration FAILED\n");
+        return 1;
+    }
+    t_putstr("joey: /alloc-smoke reaped status=0; libthyla-rs::alloc verified\n");
+
     // === pouch hello smoke (P6-pouch-hello-smoke) ===
     // The first POSIX C programs Thylacine runs, built against the pouch
     // libc. Placed here, beside the /hello orchestration, so the two
