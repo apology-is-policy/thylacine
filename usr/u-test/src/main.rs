@@ -105,6 +105,9 @@ pub extern "C" fn rs_main() -> i64 {
     if let Err(rc) = flow_eval_stmt() {
         return rc;
     }
+    if let Err(rc) = flow_eval_exec() {
+        return rc;
+    }
 
     t_putstr("u-test: all OK\n");
     0
@@ -2790,5 +2793,187 @@ fn flow_eval_stmt() -> Result<(), i64> {
     }
 
     t_putstr("u-test: eval stmt OK\n");
+    Ok(())
+}
+
+// =============================================================================
+// Flow 14 -- eval external spawn: SimpleCommand whose argv[0] isn't a
+// defined fn spawns via libthyla_rs::process::Command. Trace echo
+// closes the U-6b deferral. Spawn failure -> $status=127 + $errstr.
+// Subshell + background still NotImplemented at U-6c.
+// =============================================================================
+//
+// Probes:
+//   1. eval_source("hello-rs") spawns the binary; $status reflects
+//      its raw exit (0 for clean reap).
+//   2. eval_source("nonexistent-binary") fails to spawn; $status=127
+//      and $errstr contains "spawn failed".
+//   3. trace { hello-rs } executes the body (trace echo emits to UART
+//      via t_putstr); $status reflects the child's exit and
+//      trace_depth restores to 0 post-trace.
+//   4. eval_source("hello-rs &") returns NotImplemented(background)
+//      -- the & background marker is still deferred to U-7.
+//   5. eval_source("( hello-rs )") returns NotImplemented(subshell)
+//      -- Subshell forks are deferred to U-6f or later.
+//   6. fn name overrides external: defining `fn hello-rs { ... }`
+//      makes eval_source("hello-rs") invoke the fn, NOT spawn.
+//   7. spawn failure path sets $errstr; explicitly verify it carries
+//      a "spawn failed" prefix (sanity-check the diagnostic shape).
+fn flow_eval_exec() -> Result<(), i64> {
+    // Probe 1: spawn-and-reap an existing binary. hello-rs writes its
+    // banner via SYS_PUTS (not fd 1) and exits 0; perfect target for
+    // a "spawn this, expect status 0" smoke.
+    {
+        let mut env = Env::new();
+        env.interactive = true;
+        let flow = match eval_source(&mut env, "hello-rs") {
+            Ok(f) => f,
+            Err(_) => {
+                t_putstr("u-test: flow_eval_exec: probe 1 eval FAILED\n");
+                return Err(1);
+            }
+        };
+        if !matches!(flow, StatementFlow::Normal) {
+            t_putstr("u-test: flow_eval_exec: probe 1 flow != Normal FAILED\n");
+            return Err(1);
+        }
+        if env.status() != 0 {
+            t_putstr("u-test: flow_eval_exec: probe 1 hello-rs status != 0 FAILED\n");
+            return Err(1);
+        }
+    }
+
+    // Probe 2: spawn failure -> $status=127 (bash command-not-found
+    // convention). The kernel rejects the lookup; spawn returns an
+    // Error; exec_external maps it to status 127.
+    //
+    // Use a 5-char name (well under T_SPAWN_NAME_MAX=64) that's
+    // guaranteed not to exist in devramfs or the pivoted root.
+    {
+        let mut env = Env::new();
+        env.interactive = true;
+        let flow = match eval_source(&mut env, "noenoe") {
+            Ok(f) => f,
+            Err(_) => {
+                t_putstr("u-test: flow_eval_exec: probe 2 eval FAILED\n");
+                return Err(1);
+            }
+        };
+        if !matches!(flow, StatementFlow::Normal) {
+            t_putstr("u-test: flow_eval_exec: probe 2 flow != Normal FAILED\n");
+            return Err(1);
+        }
+        if env.status() != 127 {
+            t_putstr("u-test: flow_eval_exec: probe 2 status != 127 FAILED\n");
+            return Err(1);
+        }
+    }
+
+    // Probe 3: trace { hello-rs } -- body executes; trace_depth
+    // restores after; status reflects the spawn's exit.
+    {
+        let mut env = Env::new();
+        env.interactive = true;
+        if env.trace_depth != 0 {
+            t_putstr("u-test: flow_eval_exec: probe 3 trace_depth init FAILED\n");
+            return Err(1);
+        }
+        if eval_source(&mut env, "trace { hello-rs }").is_err() {
+            t_putstr("u-test: flow_eval_exec: probe 3 trace eval FAILED\n");
+            return Err(1);
+        }
+        if env.trace_depth != 0 {
+            t_putstr("u-test: flow_eval_exec: probe 3 trace_depth not restored FAILED\n");
+            return Err(1);
+        }
+        if env.status() != 0 {
+            t_putstr("u-test: flow_eval_exec: probe 3 hello-rs status != 0 FAILED\n");
+            return Err(1);
+        }
+    }
+
+    // Probe 4: background `&` still NotImplemented. The eval call
+    // surfaces an EvalError; flow is irrelevant.
+    {
+        let mut env = Env::new();
+        env.interactive = true;
+        match eval_source(&mut env, "hello-rs &") {
+            Err(e) => {
+                if !matches!(
+                    e.kind,
+                    EvalErrorKind::NotImplemented(s)
+                        if s.contains("background")
+                ) {
+                    t_putstr(
+                        "u-test: flow_eval_exec: probe 4 wrong NotImplemented kind FAILED\n",
+                    );
+                    return Err(1);
+                }
+            }
+            Ok(_) => {
+                t_putstr("u-test: flow_eval_exec: probe 4 background not rejected FAILED\n");
+                return Err(1);
+            }
+        }
+    }
+
+    // Probe 5: Subshell `( cmds )` still NotImplemented.
+    {
+        let mut env = Env::new();
+        env.interactive = true;
+        match eval_source(&mut env, "( hello-rs )") {
+            Err(e) => {
+                if !matches!(
+                    e.kind,
+                    EvalErrorKind::NotImplemented(s)
+                        if s.contains("subshell")
+                ) {
+                    t_putstr(
+                        "u-test: flow_eval_exec: probe 5 wrong NotImplemented kind FAILED\n",
+                    );
+                    return Err(1);
+                }
+            }
+            Ok(_) => {
+                t_putstr("u-test: flow_eval_exec: probe 5 subshell not rejected FAILED\n");
+                return Err(1);
+            }
+        }
+    }
+
+    // Probe 6: a defined fn shadows external lookup. After `fn mycmd
+    // { let was_fn = 'yes' }`, eval_source("mycmd") invokes the fn,
+    // NOT spawn (mycmd doesn't exist as a binary, so a spawn attempt
+    // would set $status=127; checking status==0 proves the fn ran).
+    {
+        let mut env = Env::new();
+        env.interactive = true;
+        let src = "fn mycmd { let was_fn = 'yes' }\nmycmd";
+        if eval_source(&mut env, src).is_err() {
+            t_putstr("u-test: flow_eval_exec: probe 6 fn-overrides eval FAILED\n");
+            return Err(1);
+        }
+        if env.status() != 0 {
+            t_putstr("u-test: flow_eval_exec: probe 6 fn-overrides status != 0 FAILED\n");
+            return Err(1);
+        }
+    }
+
+    // Probe 7: spawn-failure $errstr carries a recognizable prefix.
+    {
+        let mut env = Env::new();
+        env.interactive = true;
+        if eval_source(&mut env, "noenoe").is_err() {
+            t_putstr("u-test: flow_eval_exec: probe 7 eval FAILED\n");
+            return Err(1);
+        }
+        let errstr = env.errstr();
+        if !errstr.starts_with("spawn failed") {
+            t_putstr("u-test: flow_eval_exec: probe 7 errstr prefix FAILED\n");
+            return Err(1);
+        }
+    }
+
+    t_putstr("u-test: eval exec OK\n");
     Ok(())
 }

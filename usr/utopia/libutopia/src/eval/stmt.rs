@@ -1,6 +1,6 @@
 // libutopia::eval::stmt -- statement evaluation.
 //
-// === Scope at U-6b ===
+// === Scope at U-6c ===
 //
 // Walks a `Statement` (or a `Vec<Statement>` body) and executes it
 // against an `Env`. Statement evaluation is mutating (assignment +
@@ -9,24 +9,71 @@
 //
 // Implemented statement kinds:
 //   - Pipeline (single-element; supports CommandKind::Simple with
-//     argv[0] resolving to a defined fn, CommandKind::BraceBlock,
-//     CommandKind::Arith; Subshell + external Simple + multi-element
-//     pipeline -> NotImplemented)
+//     argv[0] resolving to a defined fn OR an external binary
+//     (U-6c), CommandKind::BraceBlock, CommandKind::Arith; Subshell
+//     + multi-element pipeline -> NotImplemented)
 //   - Let / Assign / FnDecl
 //   - Return / Break / Continue
 //   - If / While / For
 //   - Case (statement form)
 //   - Try / Catch
-//   - Trace
+//   - Trace (echoes argv to the trace sink when trace_depth > 0)
 //   - OnNote / MaskNote
 //
 // Deferred (return NotImplemented at v1.0):
-//   - External command spawn (SimpleCommand whose argv[0] is not a
-//     defined fn or built-in) -- U-6c
 //   - Multi-element Pipeline (pipes) -- U-6d
 //   - Redirects -- U-6d
 //   - Background (&) -- U-7
-//   - Subshell ( cmds ) (fork) -- U-6c
+//   - Subshell ( cmds ) (fork) -- U-6f or later (needs a fork
+//     surface that re-runs the parsed body in the child; the
+//     spawn-then-exec model in libthyla-rs::process doesn't fit)
+//   - Filesystem glob expansion on argv (e.g., `cat *.c`) -- U-6e
+//     (the glob module in this crate already does pattern match;
+//     fs-walk needs a ReadDir surface in libthyla-rs that v1.0
+//     doesn't yet expose)
+//
+// === External command spawn (U-6c) ===
+//
+// When a SimpleCommand's argv[0] does not resolve to a defined fn,
+// `exec_external` spawns the binary via libthyla_rs::process. The
+// kernel does name lookup (single component, no `/`) against
+// devramfs OR the pivoted root. Stdio inherits (pipes wire at
+// U-6d). The child is reaped synchronously via Child::wait; the
+// resulting raw exit status becomes $status.
+//
+// Spawn failure semantics: any error (name too long, name with
+// `/`, NotFound, kernel rejection) sets $status = 127 (bash
+// "command not found" convention) + populates $errstr with a
+// description. The eval call itself returns Ok(Normal) so
+// implicit-fail discipline (see below) can take it from there --
+// a spawn failure is a runtime non-zero exit, not a parse-/eval-
+// time error.
+//
+// === Trace echo (U-6c closes U-6b deferral) ===
+//
+// When `env.trace_depth > 0`, exec_external echoes `+ argv[0]
+// argv[1] ...\n` to the trace sink BEFORE the spawn. The sink at
+// v1.0 is the kernel UART (via t_putstr), matching the rest of the
+// shell's diagnostic output at this stage. When fd 2 (stderr) is
+// wired through line discipline (U-PTY + U-6g), the sink should
+// switch to fd 2. Quoting of args with embedded whitespace is a
+// v1.x refinement; bash's set -x style quoting is the target.
+//
+// === Stdio model at U-6c ===
+//
+// The shell at v1.0 has no terminal-backed fd 0/1/2 (those will
+// land with U-PTY + U-6g; until then ut/u-test/joey all write via
+// SYS_PUTS direct to the kernel UART). Stdio::Inherit would tell
+// the kernel to install the parent's fd-0/1/2 into the child's
+// handle table, but the parent has none, and SYS_SPAWN_FULL_ARGV
+// would reject the spawn. Until PTY lands, exec_external uses the
+// established v1.0 convention (matches alloc-smoke + u-test's
+// flow_process_pipe): Stdio::Piped on all three slots followed by
+// an immediate drop of every parent-side pipe end. The child has
+// pipes installed at 0/1/2 (so the kernel's fd_count=3 path
+// succeeds), but native binaries write via SYS_PUTS and don't
+// read fd 0, so the pipes are functionally inert. When PTY lands,
+// this whole block flips to Stdio::Inherit cleanly.
 //
 // === StatementFlow ===
 //
@@ -79,6 +126,10 @@ use crate::parser::ast::{
     WhileStmt, Word,
 };
 use crate::parser::token::{DqPart, Token, TokenKind};
+use crate::parser::Span;
+
+use libthyla_rs::process::Stdio;
+use libthyla_rs::t_putstr;
 
 use super::env::Env;
 use super::error::{EvalError, EvalErrorKind, EvalResult};
@@ -218,13 +269,9 @@ fn eval_command(env: &mut Env, cmd: &Command) -> EvalResult<StatementFlow> {
             if let Some(decl) = env.fn_get(&argv[0]).cloned() {
                 return invoke_function(env, &decl, &argv);
             }
-            // Not a fn -- external spawn (U-6c) or built-in (U-6e).
-            Err(EvalError::new(
-                EvalErrorKind::NotImplemented(
-                    "external command spawn or built-in (U-6c / U-6e)",
-                ),
-                cmd.span,
-            ))
+            // Not a fn -- external spawn. Built-ins land at U-6e
+            // (they'll be tried ahead of spawn).
+            exec_external(env, &argv, cmd.span)
         }
         CommandKind::BraceBlock(stmts) => {
             // Scripture 5.6: brace blocks run in the current shell;
@@ -295,6 +342,117 @@ fn invoke_function(
         }
         other => other,
     }
+}
+
+// ---------------------------------------------------------------------
+// External command spawn (U-6c)
+// ---------------------------------------------------------------------
+
+/// Spawn an external binary, wait for it, and reflect the result in
+/// `$status` + `$errstr`. The caller has already evaluated the Word
+/// list into argv; argv[0] is the binary name (a single component,
+/// no `/` -- the kernel name-lookup resolves it against devramfs OR
+/// the pivoted root).
+///
+/// Stdio at U-6c: all three slots inherit from the shell. Pipes
+/// land at U-6d.
+///
+/// Trace: when `env.trace_depth > 0`, echo argv to the trace sink
+/// via `trace_echo` BEFORE the spawn. This closes the U-6b
+/// deferral.
+///
+/// Failure modes -- all reflected as $status + $errstr, returning
+/// Ok(StatementFlow::Normal) so the caller's implicit-fail
+/// discipline can act:
+///   - spawn failure (name too long, name with '/', NotFound,
+///     kernel rejection): $status = 127, $errstr = "spawn failed:
+///     <Error variant>" (bash command-not-found convention).
+///   - wait failure (rare; kernel reaped a different child or
+///     other reap error): $status = 1, $errstr = "wait failed:
+///     <Error variant>".
+///   - clean reap: $status = ExitStatus::raw(), $errstr untouched.
+///
+/// SYS_WAIT_PID at v1.0 reaps any zombie child (not the specific
+/// pid). Multi-child wait-by-pid lands with job control at U-7;
+/// for the foreground-only case here, this is benign because the
+/// only outstanding child at this point is the one we just
+/// spawned.
+fn exec_external(
+    env: &mut Env,
+    argv: &[String],
+    _span: Span,
+) -> EvalResult<StatementFlow> {
+    if env.trace_depth > 0 {
+        trace_echo(argv);
+    }
+
+    let mut spawn_cmd = libthyla_rs::process::Command::new(argv[0].clone());
+    if argv.len() > 1 {
+        spawn_cmd.args(argv[1..].iter().cloned());
+    }
+    // v1.0 stdio convention: Piped + immediate drop. The shell has
+    // no terminal-backed 0/1/2 yet (see module-level note). When
+    // U-PTY + U-6g wire fd 0/1/2 to PTY-slave, drop these three
+    // setters and let the Stdio::Inherit defaults take over.
+    spawn_cmd.stdin(Stdio::Piped);
+    spawn_cmd.stdout(Stdio::Piped);
+    spawn_cmd.stderr(Stdio::Piped);
+
+    match spawn_cmd.spawn() {
+        Ok(mut child) => {
+            // Drop the parent-side pipe ends immediately. The child
+            // sees the kernel-installed pipes on 0/1/2; we discard
+            // our copies. Native children (SYS_PUTS-writers) don't
+            // touch the pipes; ported children get EOF on read /
+            // EPIPE on write when they try -- the correct v1.0
+            // behavior for a shell without a terminal. Per
+            // libthyla-rs::process: parent_keeps is Option<File>;
+            // dropping the take()n value runs File::Drop, which
+            // closes the kernel handle.
+            drop(child.stdin.take());
+            drop(child.stdout.take());
+            drop(child.stderr.take());
+            match child.wait() {
+                Ok(status) => {
+                    env.status_set(status.raw());
+                    Ok(StatementFlow::Normal)
+                }
+                Err(e) => {
+                    let mut s = String::new();
+                    let _ = write!(&mut s, "wait failed: {:?}", e);
+                    env.errstr_set(s);
+                    env.status_set(1);
+                    Ok(StatementFlow::Normal)
+                }
+            }
+        }
+        Err(e) => {
+            let mut s = String::new();
+            let _ = write!(&mut s, "spawn failed: {:?}", e);
+            env.errstr_set(s);
+            env.status_set(127);
+            Ok(StatementFlow::Normal)
+        }
+    }
+}
+
+/// Emit a bash-style `+ argv[0] argv[1] ...\n` trace line. The sink
+/// at v1.0 is the kernel UART via `t_putstr`, matching the rest of
+/// the shell's diagnostic output. When fd 2 (stderr) is wired
+/// through line discipline (U-PTY + U-6g), this should switch to
+/// fd 2. Args with embedded whitespace are NOT quoted at v1.0
+/// (bash's set -x quoting is a v1.x refinement).
+fn trace_echo(argv: &[String]) {
+    let mut line = String::new();
+    line.push_str("+ ");
+    for (i, a) in argv.iter().enumerate() {
+        if i > 0 {
+            line.push(' ');
+        }
+        line.push_str(a);
+    }
+    line.push('\n');
+    t_putstr(&line);
 }
 
 // ---------------------------------------------------------------------
