@@ -50,7 +50,10 @@ use libthyla_rs::{t_putstr, T_PROT_READ, T_PROT_WRITE};
 use libutopia::line_editor::{
     EditorAction, LineEditor, StaticCompletionSource,
 };
-use libutopia::parser::{tokenize, DqPart, ParseErrorKind, TokenKind};
+use libutopia::parser::{
+    parse, tokenize, CommandKind, DqPart, ParseErrorKind, RedirectKind, StatementKind, TokenKind,
+    Word,
+};
 
 #[global_allocator]
 static GLOBAL_ALLOCATOR: ThylaAlloc = ThylaAlloc;
@@ -81,6 +84,9 @@ pub extern "C" fn rs_main() -> i64 {
         return rc;
     }
     if let Err(rc) = flow_parser_lexer() {
+        return rc;
+    }
+    if let Err(rc) = flow_parser_core() {
         return rc;
     }
 
@@ -1178,5 +1184,280 @@ fn flow_parser_lexer() -> Result<(), i64> {
     }
 
     t_putstr("u-test: parser lexer OK\n");
+    Ok(())
+}
+
+// =============================================================================
+// Flow 9 -- libutopia::parser::parse (U-5b parser core + AST)
+// =============================================================================
+//
+// 8 probes covering the load-bearing AST shapes from UTOPIA-SHELL-
+// DESIGN.md sections 5-9. The parser builds on U-5a's token stream
+// to produce a Script AST. The probes validate that the heap
+// allocation paths (Box, Vec, BTreeMap-via-VecDeque) work under
+// ThylaAlloc and that the recursive-descent walks produce the same
+// AST shape on the actual Thylacine target as in the host cfg(test)
+// tests.
+fn flow_parser_core() -> Result<(), i64> {
+    // Probe 1 -- empty script -> zero statements.
+    {
+        let s = match parse("") {
+            Ok(s) => s,
+            Err(_) => {
+                t_putstr("u-test: flow_parser_core: probe 1 parse(\"\") FAILED\n");
+                return Err(1);
+            }
+        };
+        if !s.statements.is_empty() {
+            t_putstr("u-test: flow_parser_core: probe 1 empty -> 0 stmts FAILED\n");
+            return Err(1);
+        }
+    }
+
+    // Probe 2 -- simple multi-statement script via semicolons.
+    {
+        let s = match parse("ls; cat /etc/hosts; wc -l") {
+            Ok(s) => s,
+            Err(_) => {
+                t_putstr("u-test: flow_parser_core: probe 2 parse FAILED\n");
+                return Err(1);
+            }
+        };
+        if s.statements.len() != 3 {
+            t_putstr("u-test: flow_parser_core: probe 2 statement count FAILED\n");
+            return Err(1);
+        }
+    }
+
+    // Probe 3 -- pipeline with tolerate flag on left element.
+    {
+        let s = match parse("cmd1 ?| cmd2 | cmd3") {
+            Ok(s) => s,
+            Err(_) => {
+                t_putstr("u-test: flow_parser_core: probe 3 parse FAILED\n");
+                return Err(1);
+            }
+        };
+        match &s.statements[0].kind {
+            StatementKind::Pipeline(p) => {
+                if p.elements.len() != 3 {
+                    t_putstr("u-test: flow_parser_core: probe 3 pipeline len FAILED\n");
+                    return Err(1);
+                }
+                if !p.elements[0].tolerate_failure {
+                    t_putstr("u-test: flow_parser_core: probe 3 cmd1 tolerate FAILED\n");
+                    return Err(1);
+                }
+                if p.elements[1].tolerate_failure || p.elements[2].tolerate_failure {
+                    t_putstr("u-test: flow_parser_core: probe 3 cmd2/cmd3 tolerate FAILED\n");
+                    return Err(1);
+                }
+            }
+            _ => {
+                t_putstr("u-test: flow_parser_core: probe 3 not Pipeline FAILED\n");
+                return Err(1);
+            }
+        }
+    }
+
+    // Probe 4 -- if/else with branches.
+    {
+        let s = match parse("if (x == 0) { a } else if (x < 10) { b } else { c }") {
+            Ok(s) => s,
+            Err(_) => {
+                t_putstr("u-test: flow_parser_core: probe 4 parse FAILED\n");
+                return Err(1);
+            }
+        };
+        match &s.statements[0].kind {
+            StatementKind::If(i) => {
+                if i.then_branch.len() != 1 {
+                    t_putstr("u-test: flow_parser_core: probe 4 then_branch FAILED\n");
+                    return Err(1);
+                }
+                if i.elif_branches.len() != 1 {
+                    t_putstr("u-test: flow_parser_core: probe 4 elif_branches FAILED\n");
+                    return Err(1);
+                }
+                if i.else_branch.is_none() {
+                    t_putstr("u-test: flow_parser_core: probe 4 else_branch FAILED\n");
+                    return Err(1);
+                }
+            }
+            _ => {
+                t_putstr("u-test: flow_parser_core: probe 4 not If FAILED\n");
+                return Err(1);
+            }
+        }
+    }
+
+    // Probe 5 -- for loop with body.
+    {
+        let s = match parse("for (f in $files) { cat $f }") {
+            Ok(s) => s,
+            Err(_) => {
+                t_putstr("u-test: flow_parser_core: probe 5 parse FAILED\n");
+                return Err(1);
+            }
+        };
+        match &s.statements[0].kind {
+            StatementKind::For(f) => {
+                if f.var_name != "f" {
+                    t_putstr("u-test: flow_parser_core: probe 5 var_name FAILED\n");
+                    return Err(1);
+                }
+                if f.body.len() != 1 {
+                    t_putstr("u-test: flow_parser_core: probe 5 body FAILED\n");
+                    return Err(1);
+                }
+            }
+            _ => {
+                t_putstr("u-test: flow_parser_core: probe 5 not For FAILED\n");
+                return Err(1);
+            }
+        }
+    }
+
+    // Probe 6 -- fn declaration with positional args + nested body.
+    {
+        let s = match parse("fn greet name { echo hello $name }") {
+            Ok(s) => s,
+            Err(_) => {
+                t_putstr("u-test: flow_parser_core: probe 6 parse FAILED\n");
+                return Err(1);
+            }
+        };
+        match &s.statements[0].kind {
+            StatementKind::FnDecl(f) => {
+                if f.name != "greet" {
+                    t_putstr("u-test: flow_parser_core: probe 6 fn name FAILED\n");
+                    return Err(1);
+                }
+                if f.args.len() != 1 || f.args[0] != "name" {
+                    t_putstr("u-test: flow_parser_core: probe 6 fn args FAILED\n");
+                    return Err(1);
+                }
+                if f.body.len() != 1 {
+                    t_putstr("u-test: flow_parser_core: probe 6 fn body FAILED\n");
+                    return Err(1);
+                }
+            }
+            _ => {
+                t_putstr("u-test: flow_parser_core: probe 6 not FnDecl FAILED\n");
+                return Err(1);
+            }
+        }
+    }
+
+    // Probe 7 -- heredoc body inlined into Redirect::Heredoc.
+    {
+        let s = match parse("cat <<EOF\nhello\nEOF\n") {
+            Ok(s) => s,
+            Err(_) => {
+                t_putstr("u-test: flow_parser_core: probe 7 parse FAILED\n");
+                return Err(1);
+            }
+        };
+        match &s.statements[0].kind {
+            StatementKind::Pipeline(p) => {
+                let redir = &p.elements[0].command.redirects;
+                if redir.len() != 1 {
+                    t_putstr("u-test: flow_parser_core: probe 7 redirect count FAILED\n");
+                    return Err(1);
+                }
+                match &redir[0].kind {
+                    RedirectKind::Heredoc {
+                        interp,
+                        strip_tabs,
+                        body,
+                    } => {
+                        if !*interp || *strip_tabs {
+                            t_putstr("u-test: flow_parser_core: probe 7 heredoc flags FAILED\n");
+                            return Err(1);
+                        }
+                        if body.len() != 1 {
+                            t_putstr("u-test: flow_parser_core: probe 7 body parts FAILED\n");
+                            return Err(1);
+                        }
+                        match &body[0] {
+                            DqPart::Literal(s) if s == "hello\n" => {}
+                            _ => {
+                                t_putstr("u-test: flow_parser_core: probe 7 body content FAILED\n");
+                                return Err(1);
+                            }
+                        }
+                    }
+                    _ => {
+                        t_putstr("u-test: flow_parser_core: probe 7 not Heredoc FAILED\n");
+                        return Err(1);
+                    }
+                }
+            }
+            _ => {
+                t_putstr("u-test: flow_parser_core: probe 7 not Pipeline FAILED\n");
+                return Err(1);
+            }
+        }
+    }
+
+    // Probe 8 -- error case: postfix `?` followed by a non-terminator.
+    {
+        match parse("cmd ? arg") {
+            Ok(_) => {
+                t_putstr("u-test: flow_parser_core: probe 8 expected error FAILED\n");
+                return Err(1);
+            }
+            Err(e) => {
+                if !matches!(e.kind, ParseErrorKind::UnexpectedTokenAfterFailPropagate) {
+                    t_putstr("u-test: flow_parser_core: probe 8 wrong ParseErrorKind FAILED\n");
+                    return Err(1);
+                }
+            }
+        }
+    }
+
+    // Bonus -- exercise the Word::Concat path so the ThylaAlloc heap
+    // touches the Concat allocation.
+    {
+        let s = match parse("echo $a^$b") {
+            Ok(s) => s,
+            Err(_) => {
+                t_putstr("u-test: flow_parser_core: bonus Concat parse FAILED\n");
+                return Err(1);
+            }
+        };
+        match &s.statements[0].kind {
+            StatementKind::Pipeline(p) => match &p.elements[0].command.kind {
+                CommandKind::Simple(sc) => {
+                    if sc.words.len() != 2 {
+                        t_putstr("u-test: flow_parser_core: bonus words.len FAILED\n");
+                        return Err(1);
+                    }
+                    match &sc.words[1] {
+                        Word::Concat(parts) => {
+                            if parts.len() != 2 {
+                                t_putstr("u-test: flow_parser_core: bonus parts.len FAILED\n");
+                                return Err(1);
+                            }
+                        }
+                        _ => {
+                            t_putstr("u-test: flow_parser_core: bonus not Concat FAILED\n");
+                            return Err(1);
+                        }
+                    }
+                }
+                _ => {
+                    t_putstr("u-test: flow_parser_core: bonus not Simple FAILED\n");
+                    return Err(1);
+                }
+            },
+            _ => {
+                t_putstr("u-test: flow_parser_core: bonus not Pipeline FAILED\n");
+                return Err(1);
+            }
+        }
+    }
+
+    t_putstr("u-test: parser core OK\n");
     Ok(())
 }

@@ -1,6 +1,6 @@
 # `libutopia::parser` — the rc-shape parser stack for `ut` (U-5 arc)
 
-**Status**: U-5a LANDED — the tokenizer. U-5b/c/d are queued for the parser core, expression layer, and pattern matching.
+**Status**: U-5a + U-5b LANDED — the tokenizer + the recursive-descent parser core (statement-level grammar + AST). U-5c/d are queued for the expression layer and pattern matching.
 
 This is the as-built reference for the rc-shape parser used by the Utopia shell (`ut`). It lives at `usr/utopia/libutopia/src/parser/` and is the only path from "user typed a line" to "AST evaluator consumes". The line editor (U-4 arc) produces an `EditorAction::Accept(String)` when Enter is pressed on a balanced buffer; that string is fed to `tokenize()` here, then (U-5b onward) to `parse()` to produce an AST, then (U-6) to the evaluator.
 
@@ -14,24 +14,38 @@ The parser stack consumes a Rust `&str` containing rc-shape source (per `docs/UT
 
 The token taxonomy is opinionated: most syntactic surfaces get their own kind, but where lex-time disambiguation is genuinely impossible without parser context (e.g., `^` is concatenation in command position and bitwise-xor in arithmetic), the lexer emits the same token and lets the parser decide.
 
-## 2. Public API (U-5a)
+## 2. Public API (U-5a + U-5b)
 
 ```rust
 // usr/utopia/libutopia/src/parser/mod.rs
 
+pub mod ast;
 pub mod error;
 pub mod lexer;
+pub mod parse;
 pub mod span;
 pub mod token;
 
 // Re-exports
+pub use ast::{
+    AssignStmt, Command, CommandKind, FnDecl, ForStmt, IfStmt, LetStmt, Pipeline,
+    PipelineElement, Redirect, RedirectKind, Script, SimpleCommand, Statement, StatementKind,
+    WhileStmt, Word,
+};
 pub use error::{ParseError, ParseErrorKind, ParseResult};
 pub use lexer::tokenize;
+pub use parse::{parse, parse_tokens};
 pub use span::Span;
 pub use token::{DqPart, Token, TokenKind};
+```
 
-// usr/utopia/libutopia/src/parser/lexer.rs
+```rust
+// U-5a tokenizer entry
 pub fn tokenize(source: &str) -> ParseResult<Vec<Token>>;
+
+// U-5b parser entries
+pub fn parse(source: &str) -> ParseResult<Script>;
+pub fn parse_tokens(tokens: Vec<Token>, source_len: usize) -> ParseResult<Script>;
 ```
 
 **Contract** of `tokenize`:
@@ -284,12 +298,140 @@ Single-error-stop per scripture section 19 open question #2 — the lexer report
 
 The probe's job is to validate that the lexer's heap allocation paths (`Vec<Token>`, `String`, `Vec<DqPart>`) work under `ThylaAlloc` (the libthyla-rs allocator backed by `SYS_BURROW_ATTACH`) and that UTF-8 char-walking produces identical output to the host. A regression in either would surface here.
 
+## 8.5 AST + parser core (U-5b)
+
+The U-5b chunk adds the recursive-descent parser over the U-5a token stream and the AST node types it produces.
+
+### AST overview
+
+```rust
+pub struct Script {
+    pub statements: Vec<Statement>,
+    pub span: Span,
+}
+
+pub enum StatementKind {
+    Pipeline(Pipeline),
+    If(Box<IfStmt>),
+    For(Box<ForStmt>),
+    While(Box<WhileStmt>),
+    FnDecl(Box<FnDecl>),
+    Let(Box<LetStmt>),
+    Assign(Box<AssignStmt>),
+    Return(Option<Vec<Token>>),
+    Break,
+    Continue,
+    // Case / Try / Trace / OnNote / MaskNote deferred to U-5d
+}
+
+pub struct Pipeline {
+    pub elements: Vec<PipelineElement>,
+    pub background: bool,
+    pub span: Span,
+}
+
+pub struct PipelineElement {
+    pub command: Command,
+    pub tolerate_failure: bool,  // ?| preceded this element
+    pub span: Span,
+}
+
+pub struct Command {
+    pub kind: CommandKind,
+    pub redirects: Vec<Redirect>,
+    pub fail_propagate: bool,  // postfix ?
+    pub span: Span,
+}
+
+pub enum CommandKind {
+    Simple(SimpleCommand),
+    BraceBlock(Vec<Statement>),
+    Subshell(Vec<Statement>),
+    Arith(Vec<Token>),  // body stored as raw tokens for U-5c
+}
+
+pub enum Word {
+    Single(Token),
+    Concat(Vec<Token>),  // span-adjacent ^-joined value tokens
+}
+
+pub enum RedirectKind {
+    Stdin, Stdout, Append,
+    Heredoc { interp: bool, strip_tabs: bool, body: Vec<DqPart> },
+}
+```
+
+Control-flow node types (`IfStmt` / `ForStmt` / `WhileStmt` / `FnDecl` / `LetStmt` / `AssignStmt`) all store their expression contexts as `Vec<Token>` for U-5c to walk into proper Expression trees. The condition tokens of `if (cond)`, the list expression of `for (var in expr)`, the value of `let x = expr`, etc. all use the same placeholder pattern.
+
+### Heredoc body resolution
+
+The lexer emits `HeredocStart` at the source position of the `<<TAG` and `HeredocBody` *after* the next `Newline`. The parser pre-extracts all body parts into a FIFO `VecDeque<Vec<DqPart>>` at construction time (taking ownership of the tokens via `core::mem::take` to avoid cloning). When the parser walks a redirect and encounters `HeredocStart`, it pops the next body from the queue and inlines it into `RedirectKind::Heredoc`. `HeredocBody` tokens themselves are treated as separators (skipped) during statement walking.
+
+This makes the body available exactly where the consumer wants it — on the Redirect — without the AST or evaluator needing to walk forward in the token stream.
+
+### Parser dispatch
+
+`parse_statement` dispatches on the current token:
+
+- `If` / `For` / `While` / `Fn` / `Let` / `Return` / `Break` / `Continue` keywords → dedicated parsers
+- `Word(IDENT)` followed by `Equal` (two-token lookahead) → assignment
+- `Else` / `Catch` / `Case` / `Try` / `Trace` / `On` / `Mask` / `In` at statement-start → `InvalidStatement` error
+- Otherwise → pipeline
+
+`parse_pipeline` parses one or more `PipelineElement` joined by `|` or `?|`:
+- `Pipe` is a plain join.
+- `PipeTolerate` marks the LEFT element's `tolerate_failure = true` (per scripture section 8.4: "the preceding command's exit is ignored for pipefail purposes").
+
+After the pipeline body, the parser checks for a trailing `&` → `background = true`.
+
+`parse_command` dispatches by the first non-separator token:
+- `LBrace` → BraceBlock
+- `LParen` → Subshell (with statements parsed inside)
+- `DoubleLParen` → Arith (body kept as raw tokens; `(( ` and `))` balanced with nested paren counting)
+- Otherwise → SimpleCommand (argv + redirects)
+
+After the command body, if a `Question` token follows, set `fail_propagate = true`. Per the U-5b lock: postfix `?` requires a statement terminator next (`Newline` / `;` / `|` / `?|` / `&` / `}` / `)` / EOF), otherwise `UnexpectedTokenAfterFailPropagate`.
+
+`parse_simple_command` collects words + redirects in source order. Words can be `Word::Single(token)` or `Word::Concat(Vec<Token>)` — the Concat path is engaged when a span-adjacent `Caret` is followed by a span-adjacent value token. If `Equal` appears in command-arg position (after at least one word), the parser emits `UnexpectedEqualInCommand` (the U-5b strict-rc lock).
+
+### Locked design decisions (this session)
+
+| # | Decision | Behavior |
+|---|---|---|
+| 1 | `--key=value` arg | Strict rc: `UnexpectedEqualInCommand` parse error. Users quote: `'--key=value'`. |
+| 2 | `^` concat | Requires span-adjacency on both sides. `$a ^ $b` (with spaces) is three separate tokens; the orphan Caret terminates the simple command and the outer terminator check errors. |
+| 3 | `case` placement | Deferred to U-5d (per scripture section 19). U-5b emits `InvalidStatement` if `case` appears at statement-start. |
+| 4 | Postfix `?` | Must be followed by a statement terminator. `cmd ? arg` is `UnexpectedTokenAfterFailPropagate`. |
+| 5 | Empty pipeline element | Per scripture section 17.10: `cmd1 \| \| cmd2` is `EmptyPipelineElement` error. |
+| 6 | Redirect placement | Anywhere in command (before / interleaved with / after words). All redirects stored in `Command.redirects` in source order. |
+| 7 | `fn name args { ... }` | Args are space-separated bare-word idents between name and `{`. Strict positional only at v1.0. |
+| 8 | Trailing `;` | Allowed. `cmd1;` parses as one statement. |
+| 9 | List literal vs subshell | At U-5b, both `(a b c)` and `(stmt1; stmt2)` appearing in **value** position (right of `=`, inside `if (...)`, etc.) are stored as raw `Vec<Token>`; U-5c parses lists. `(...)` in **command** position is a Subshell. |
+| 10 | Reserved keyword position | `'if'` (quoted) is SingleQuoted (not the If keyword token). Only the bare `If` token is the keyword. |
+
+### Span discipline
+
+Every AST node carries a `Span` from its first token's start through its last token's end. Statement spans include their terminating brace (for blocks). For the `Script` itself, the span is `(0, source.len())`.
+
+### Implementation file map
+
+```
+usr/utopia/libutopia/src/parser/
+├── mod.rs       extends with ast + parse re-exports
+├── span.rs      unchanged from U-5a
+├── token.rs     unchanged from U-5a
+├── error.rs     extended with U-5b parser-level error kinds
+├── lexer.rs     unchanged from U-5a
+├── ast.rs       U-5b NEW: AST node types
+└── parse.rs     U-5b NEW: recursive-descent parser
+```
+
 ## 9. Status
 
 - **U-5a LANDED**: tokenizer with span tracking, full reserved-word + operator coverage, single + double-quoted strings with parts, top-level + DQ-interior dollar forms, substitutions (`$()`, `` `{}` ``), process substitution, heredocs with body collection (interp + non-interp + strip-tabs), regex literal after `=~`. Reference impl at `usr/utopia/libutopia/src/parser/lexer.rs` (~900 LOC + ~560 LOC `#[cfg(test)]` tests).
-- **U-5b QUEUED**: parser core — top-level commands, pipelines, control flow (`if`/`for`/`while`/`fn`/`try`/`catch`/`case`/brace blocks/subshells), AST node types.
-- **U-5c QUEUED**: expression parser — variable refs with index/slice, arithmetic `(( ))` (the lexer's existing tokens get re-interpreted in arith context), concatenation, string comparison.
-- **U-5d QUEUED**: pattern matching + try/catch + trace + fn declarations; regex semantics (currently the token is opaque); finalize the public `parse()` entry.
+- **U-5b LANDED**: parser core + AST. New `usr/utopia/libutopia/src/parser/ast.rs` (AST node types) + `parse.rs` (recursive-descent parser). Public entry: `parse(&str) -> ParseResult<Script>` (convenience that runs tokenize + parse_tokens) + `parse_tokens(Vec<Token>, source_len) -> ParseResult<Script>`. Grammar covers: Script, Statement (Pipeline / If / For / While / FnDecl / Let / Assign / Return / Break / Continue), Pipeline + PipelineElement (with `?|` -> `tolerate_failure` on LEFT element + trailing `&` -> `background`), Command + CommandKind (Simple / BraceBlock / Subshell / Arith — Arith body stored as raw tokens for U-5c), Word (Single token or `Concat(Vec<Token>)` for span-adjacent `^`-joined values), Redirect (Stdin / Stdout / Append / Heredoc-with-inline-body; redirects may interleave with words). Heredoc handling: parser pre-extracts all `HeredocBody` parts into a FIFO `VecDeque<Vec<DqPart>>` at construction time (taking ownership of the tokens via `core::mem::take` to avoid cloning); each `HeredocStart` pops the next body when parsing the redirect. Expression contexts (`if (cond)`, `for (var in expr)`, `while (cond)`, `let x = value`, bare assignment, `return value`) stored as raw `Vec<Token>` placeholders -- U-5c walks them into Expression trees. Locked design decisions per the U-5b session: strict rc (`--key=value` is `UnexpectedEqualInCommand` error); `^` requires span-adjacency on both sides (`UnexpectedCaret` otherwise -- actually emitted via `UnexpectedToken` since the loop just stops); postfix `?` requires a statement terminator (`UnexpectedTokenAfterFailPropagate` otherwise); `case` / `try` / `trace` / `on note` / `mask note` deferred to U-5d. ~900 LOC parser + ~250 LOC AST + ~500 LOC `#[cfg(test)]` tests (37 tests). Extended `flow_parser_core` `/u-test` probe (8 boot-time probes).
+- **U-5c QUEUED**: expression parser — variable refs with index/slice (`$var(N)`, `$var(M N)`), arithmetic `(( ))` (the parser's stored `Arith(Vec<Token>)` body gets re-interpreted), concatenation operator semantics, string comparison, regex semantic interpretation.
+- **U-5d QUEUED**: pattern matching + try/catch + trace + on/mask + final glue. `case $x { pat => body ... }`, `try { ... } catch { ... }`, `trace { ... }`, `on note 'name' { ... }`, `mask note 'name' { ... }`. Extends `StatementKind` with the deferred variants; finalizes the parser's public surface.
 
 ## 10. Known caveats / footguns
 

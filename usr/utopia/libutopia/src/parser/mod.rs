@@ -29,12 +29,20 @@
 // with AST types + a `parse()` entry; U-5c/d add expression and
 // pattern nodes; U-5d completes the public surface.
 
+pub mod ast;
 pub mod error;
 pub mod lexer;
+pub mod parse;
 pub mod span;
 pub mod token;
 
+pub use ast::{
+    AssignStmt, Command, CommandKind, FnDecl, ForStmt, IfStmt, LetStmt, Pipeline,
+    PipelineElement, Redirect, RedirectKind, Script, SimpleCommand, Statement, StatementKind,
+    WhileStmt, Word,
+};
 pub use error::{ParseError, ParseErrorKind, ParseResult};
 pub use lexer::tokenize;
+pub use parse::{parse, parse_tokens};
 pub use span::Span;
 pub use token::{DqPart, Token, TokenKind};
