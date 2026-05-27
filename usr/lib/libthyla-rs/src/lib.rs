@@ -69,6 +69,8 @@ pub mod handle;
 pub mod alloc;
 pub mod fs;
 pub mod io;
+pub mod notes;
+pub mod poll;
 pub mod process;
 
 // =============================================================================
@@ -126,6 +128,17 @@ pub const T_SYS_CAP_USE: u64          = 33;
 // in libthyla-rs (U-2b) and every libt-equivalent userspace allocator.
 pub const T_SYS_BURROW_ATTACH: u64    = 37;
 pub const T_SYS_BURROW_DETACH: u64    = 38;
+
+// P6-pouch-signals-impl (sub-chunk 13a): the note delivery primitive.
+// Async-event mechanism, Plan 9-shaped, FD-first per NOVEL.md §3.1.
+// Backs t::notes (U-2e). SYS_NOTIFY + SYS_NOTED are the async-handler
+// opt-in path (libc-compat); at v1.0 libthyla-rs exposes the canonical
+// fd-shaped path only (open self -> read records -> poll integration).
+pub const T_SYS_NOTE_OPEN: u64        = 44;
+pub const T_SYS_NOTIFY: u64           = 45;
+pub const T_SYS_NOTED: u64            = 46;
+pub const T_SYS_POSTNOTE: u64         = 47;
+pub const T_SYS_NOTE_MASK: u64        = 48;
 
 // P5-stratumd-stub-bringup-e1: walk-and-open one path component from a
 // Spoor (or from the territory root via T_WALK_OPEN_FROM_ROOT sentinel).
@@ -215,6 +228,59 @@ pub const T_POLLOUT: i16  = 0x004;
 pub const T_POLLERR: i16  = 0x008;
 pub const T_POLLHUP: i16  = 0x010;
 pub const T_POLLNVAL: i16 = 0x020;
+
+// =============================================================================
+// Notes ABI mirror — MUST match kernel/include/thylacine/notes.h.
+// =============================================================================
+
+// NOTE_NAME_MAX — bytes including the trailing NUL. The note name proper
+// is bounded to NOTE_NAME_MAX-1 = 15 bytes; SYS_POSTNOTE rejects shorter
+// non-printable + empty names.
+pub const T_NOTE_NAME_MAX: usize  = 16;
+
+// NOTE_BIT_* — bit position of each supported note in the per-Thread
+// note_mask. Bit set = defer delivery of that note. Per-Thread, NOT
+// per-fd (matches POSIX pthread_sigmask semantics).
+pub const T_NOTE_BIT_INTERRUPT:  u8 = 0;
+pub const T_NOTE_BIT_KILL:       u8 = 1;
+pub const T_NOTE_BIT_PIPE:       u8 = 2;
+pub const T_NOTE_BIT_CHILD_EXIT: u8 = 3;
+pub const T_NOTE_BIT_SNARE:      u8 = 4;
+
+// NOTE_MASK_SUPPORTED — the union of every NOTE_BIT_* the kernel knows
+// about today. Setting bits outside this is tolerated (no-op) so future
+// note additions don't break old userspace; SYS_POSTNOTE with an
+// unsupported note NAME returns -1.
+pub const T_NOTE_MASK_SUPPORTED: u64 = 0x1f;
+
+// SYS_POSTNOTE sentinel for "send to my own Proc" (kernel maps pid == 0
+// to the calling Proc's pid; matches POSIX kill(0, sig) "send to my
+// process group" — Thylacine has no process groups at v1.0, so the
+// nearest equivalent is "self").
+pub const T_POSTNOTE_SELF_PID: i64   = 0;
+
+// SYS_NOTED arg values — terminate a running note handler. Reserved for
+// the async-handler path (libc-compat opt-in); libthyla-rs's t::notes
+// wraps the fd-shaped path at v1.0 and does not surface NCONT / NDFLT
+// directly. Constants are provided for callers that want to drive the
+// handler path manually (kernel/syscall.c::sys_noted_handler).
+pub const T_NOTED_NCONT: u64         = 0;
+pub const T_NOTED_NDFLT: u64         = 1;
+
+// TNoteRecord — userspace ABI of one entry read from the SYS_NOTE_OPEN
+// fd. devnotes_read copies one of these per read() call. Mirrors
+// kernel `struct note_record` (kernel/include/thylacine/notes.h)
+// byte-for-byte; the kernel-side `_Static_assert(sizeof(...) == 32)`
+// pins the layout on its end; the const-assert below pins ours.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default)]
+pub struct TNoteRecord {
+    pub name:         [u8; T_NOTE_NAME_MAX],  //  0
+    pub arg:          u32,                     // 16
+    pub sender_pid:   u32,                     // 20
+    pub timestamp_ns: u64,                     // 24
+}
+const _: () = assert!(core::mem::size_of::<TNoteRecord>() == 32);
 
 // =============================================================================
 // Caps — MUST mirror CAP_* bits in kernel/include/thylacine/caps.h.
@@ -538,6 +604,76 @@ pub unsafe fn t_poll(fds: *mut TPollFd, nfds: usize, timeout_ms: i32) -> i64 {
         in("x1") nfds as u64,
         in("x2") timeout_ms as i64 as u64,
         in("x8") T_SYS_POLL,
+        options(nostack)
+    );
+    x0
+}
+
+// t_note_open — mint a fresh handle on the calling Proc's note Spoor.
+// Idempotent: every call returns a new fd against the same per-Proc
+// queue. Reads from the fd yield TNoteRecord (32 bytes each); poll
+// integrates via POLLIN iff the queue holds at least one entry the
+// calling Thread's mask permits.
+//
+// Returns the new fd (>= 0) on success, -1 on handle-table-full or
+// devnotes_open failure.
+#[inline(always)]
+pub unsafe fn t_note_open() -> i64 {
+    let mut x0: i64;
+    asm!(
+        "svc #0",
+        lateout("x0") x0,
+        in("x8") T_SYS_NOTE_OPEN,
+        options(nostack)
+    );
+    x0
+}
+
+// t_postnote — post a note to a Proc. `pid` is the target's pid, OR
+// `T_POSTNOTE_SELF_PID` (== 0) for self-post; the kernel rewrites
+// pid == 0 to the caller's own pid. `name_va` is a user-VA pointer to
+// `name_len` printable [0x20..0x7e] bytes; NUL terminator is NOT
+// required (`name_len` is authoritative). Permission gate: caller
+// must be self OR the target's parent.
+//
+// Returns 0 on success, -1 on bad name / bad target / queue full /
+// permission denied / not-in-supported-set / `snare:`-prefixed name
+// (reserved for kernel-synthetic posters).
+//
+// Safety: `name_va` must point to `name_len` readable bytes in user-
+// VA memory.
+#[inline(always)]
+pub unsafe fn t_postnote(pid: i64, name_va: *const u8, name_len: usize) -> i64 {
+    let mut x0: i64 = pid;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") name_va as u64,
+        in("x2") name_len as u64,
+        in("x8") T_SYS_POSTNOTE,
+        options(nostack)
+    );
+    x0
+}
+
+// t_note_mask — swap the calling Thread's note_mask. `new_mask` is the
+// new mask (bit set = defer that note); if `old_mask_out_va` is
+// non-null, the previous mask is written there. Bits outside
+// `T_NOTE_MASK_SUPPORTED` are tolerated (set but unused).
+//
+// Returns 0 on success, -1 on `old_mask_out_va` non-null but
+// outside user-VA / unmapped at store time.
+//
+// Safety: `old_mask_out_va` is either null OR points to a writable u64
+// in user-VA memory.
+#[inline(always)]
+pub unsafe fn t_note_mask(new_mask: u64, old_mask_out_va: *mut u64) -> i64 {
+    let mut x0: i64 = new_mask as i64;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") old_mask_out_va as u64,
+        in("x8") T_SYS_NOTE_MASK,
         options(nostack)
     );
     x0

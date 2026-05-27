@@ -49,6 +49,8 @@ use libthyla_rs::alloc::ThylaAlloc;
 use libthyla_rs::err::Error;
 use libthyla_rs::fs::{self, Component, File, OpenOptions, Path, PathBuf};
 use libthyla_rs::io::{Cursor, Read, Seek, SeekFrom, Write};
+use libthyla_rs::notes::{self, NoteClass, NoteMask, NoteTarget, Notes};
+use libthyla_rs::poll::{PollEvents, PollSet, PollTimeout};
 use libthyla_rs::process::{self, Command, Stdio};
 use libthyla_rs::t_putstr;
 
@@ -619,5 +621,303 @@ pub extern "C" fn rs_main() -> i64 {
     }
 
     t_putstr("alloc-smoke: pipe + Command + Child OK\n");
+
+    // ====================================================================
+    // U-2e: t::notes + t::poll
+    // ====================================================================
+
+    // Open the per-Proc notes fd. The kernel-side queue exists from
+    // proc_alloc; multiple opens against the same Proc share one queue
+    // (N-5 invariant).
+    let n = match Notes::open_self() {
+        Ok(n) => n,
+        Err(_) => {
+            t_putstr("alloc-smoke: Notes::open_self FAILED\n");
+            return 1;
+        }
+    };
+
+    // Drain any kernel-synthetic notes that piled up during prior
+    // sub-chunks. The U-2d Command::spawn(hello-rs).wait() reaps a
+    // child Proc; kernel `exits()` posts a `child_exit` to our queue
+    // via notes_post_child_exit. We expect at least one drained
+    // child_exit; we tolerate zero (alloc-smoke can be re-run).
+    let mut saw_child_exit = false;
+    let mut drained = 0u32;
+    while let Some(note) = match n.try_read() {
+        Ok(o) => o,
+        Err(_) => {
+            t_putstr("alloc-smoke: Notes::try_read drain FAILED\n");
+            return 1;
+        }
+    } {
+        if note.name == "child_exit" {
+            saw_child_exit = true;
+            // sender_pid is 0 for kernel-synthetic posters.
+            if note.from.is_some() {
+                t_putstr("alloc-smoke: child_exit from sender != None FAILED\n");
+                return 1;
+            }
+        }
+        drained += 1;
+        if drained > 16 {
+            t_putstr("alloc-smoke: notes drain overran NOTE_QUEUE_DEPTH FAILED\n");
+            return 1;
+        }
+    }
+    if !saw_child_exit {
+        t_putstr("alloc-smoke: WARN no child_exit observed; continuing\n");
+    }
+
+    // Mask validation — set then restore. set_mask returns the prior
+    // mask; setting NoteMask::just(Interrupt), then NONE, must
+    // round-trip cleanly. Default mask is NONE.
+    let prior = match notes::set_mask(NoteMask::just(NoteClass::Interrupt)) {
+        Ok(m) => m,
+        Err(_) => {
+            t_putstr("alloc-smoke: notes::set_mask(interrupt) FAILED\n");
+            return 1;
+        }
+    };
+    if !prior.is_empty() {
+        t_putstr("alloc-smoke: notes mask prior not NONE FAILED\n");
+        return 1;
+    }
+    let after = match notes::set_mask(NoteMask::NONE) {
+        Ok(m) => m,
+        Err(_) => {
+            t_putstr("alloc-smoke: notes::set_mask(NONE) FAILED\n");
+            return 1;
+        }
+    };
+    if !after.contains(NoteClass::Interrupt) {
+        t_putstr("alloc-smoke: notes mask round-trip readback FAILED\n");
+        return 1;
+    }
+
+    // with_mask RAII: enter scope with interrupt deferred, then drop
+    // the guard — mask must return to NONE.
+    {
+        let _guard = match notes::with_mask(NoteMask::just(NoteClass::Interrupt)) {
+            Ok(g) => g,
+            Err(_) => {
+                t_putstr("alloc-smoke: notes::with_mask FAILED\n");
+                return 1;
+            }
+        };
+        // Guard drops here.
+    }
+    // Drop already ran the restore. Confirm mask is back to NONE by
+    // setting it to NONE and observing the prior (which should be the
+    // value with_mask restored to — NONE — confirming restore ran).
+    let post_guard = match notes::set_mask(NoteMask::NONE) {
+        Ok(m) => m,
+        Err(_) => {
+            t_putstr("alloc-smoke: notes::set_mask post-guard FAILED\n");
+            return 1;
+        }
+    };
+    if !post_guard.is_empty() {
+        t_putstr("alloc-smoke: with_mask did not restore prior mask FAILED\n");
+        return 1;
+    }
+
+    // Send validation: empty name -> InvalidArgument.
+    match notes::send(NoteTarget::SelfProc, "") {
+        Err(Error::InvalidArgument) => {}
+        _ => {
+            t_putstr("alloc-smoke: notes::send empty name unexpectedly accepted\n");
+            return 1;
+        }
+    }
+    // Send validation: too long (>= 16 bytes) -> InvalidArgument.
+    match notes::send(NoteTarget::SelfProc, "0123456789abcdef") {
+        Err(Error::InvalidArgument) => {}
+        _ => {
+            t_putstr("alloc-smoke: notes::send oversize unexpectedly accepted\n");
+            return 1;
+        }
+    }
+    // Send validation: snare: prefix reserved -> InvalidArgument.
+    match notes::send(NoteTarget::SelfProc, "snare:segv") {
+        Err(Error::InvalidArgument) => {}
+        _ => {
+            t_putstr("alloc-smoke: notes::send snare: prefix unexpectedly accepted\n");
+            return 1;
+        }
+    }
+
+    // Send "interrupt" to self -- in the supported set, kernel accepts.
+    // No handler is registered, so the EL0-return-tail dispatch is a
+    // no-op; the note sits in the queue for the fd-read path.
+    if notes::send(NoteTarget::SelfProc, "interrupt").is_err() {
+        t_putstr("alloc-smoke: notes::send(SelfProc, interrupt) FAILED\n");
+        return 1;
+    }
+
+    // Blocking read pulls the just-posted "interrupt" off the queue.
+    let got = match n.read() {
+        Ok(note) => note,
+        Err(_) => {
+            t_putstr("alloc-smoke: Notes::read interrupt FAILED\n");
+            return 1;
+        }
+    };
+    if got.name != "interrupt" {
+        t_putstr("alloc-smoke: Notes::read name mismatch FAILED\n");
+        return 1;
+    }
+    // The sender is "self" -- the kernel records the calling Proc's pid
+    // (alloc-smoke's own pid). We don't know the value but it MUST be
+    // Some(_) since synthetic posters use 0 and we're userspace.
+    if got.from.is_none() {
+        t_putstr("alloc-smoke: notes::send interrupt from None FAILED (expected Some)\n");
+        return 1;
+    }
+
+    // After consuming, try_read returns None.
+    match n.try_read() {
+        Ok(None) => {}
+        Ok(Some(_)) => {
+            t_putstr("alloc-smoke: Notes::try_read after drain unexpectedly returned Some\n");
+            return 1;
+        }
+        Err(_) => {
+            t_putstr("alloc-smoke: Notes::try_read after drain FAILED\n");
+            return 1;
+        }
+    }
+
+    // ----- PollSet tests -----
+
+    // Empty set: poll returns immediately with no readers.
+    let mut empty = PollSet::new();
+    match empty.poll(PollTimeout::Block) {
+        Ok(mut it) => {
+            if it.next().is_some() {
+                t_putstr("alloc-smoke: PollSet empty produced result FAILED\n");
+                return 1;
+            }
+        }
+        Err(_) => {
+            t_putstr("alloc-smoke: PollSet empty poll FAILED\n");
+            return 1;
+        }
+    }
+
+    // pipe(); poll the read end. Zero timeout: not yet ready.
+    let (mut rd, mut wr) = match process::pipe() {
+        Ok(p) => p,
+        Err(_) => {
+            t_putstr("alloc-smoke: U-2e pipe() FAILED\n");
+            return 1;
+        }
+    };
+    let mut ps = PollSet::new();
+    ps.add(&rd, PollEvents::READ);
+    let rd_fd = rd.as_raw_fd();
+    match ps.poll(PollTimeout::Zero) {
+        Ok(mut it) => {
+            if it.next().is_some() {
+                t_putstr("alloc-smoke: PollSet empty pipe Zero unexpectedly ready\n");
+                return 1;
+            }
+        }
+        Err(_) => {
+            t_putstr("alloc-smoke: PollSet pipe Zero FAILED\n");
+            return 1;
+        }
+    }
+    // Write a byte; poll Block; expect rd ready with READ.
+    if wr.write(b"x").is_err() {
+        t_putstr("alloc-smoke: U-2e pipe write FAILED\n");
+        return 1;
+    }
+    match ps.poll(PollTimeout::Block) {
+        Ok(mut it) => {
+            let ev = match it.next() {
+                Some(e) => e,
+                None => {
+                    t_putstr("alloc-smoke: PollSet post-write produced no event FAILED\n");
+                    return 1;
+                }
+            };
+            if ev.fd != rd_fd {
+                t_putstr("alloc-smoke: PollSet event fd mismatch FAILED\n");
+                return 1;
+            }
+            if !ev.is_readable() {
+                t_putstr("alloc-smoke: PollSet event not readable FAILED\n");
+                return 1;
+            }
+            if it.next().is_some() {
+                t_putstr("alloc-smoke: PollSet emitted spurious second event FAILED\n");
+                return 1;
+            }
+        }
+        Err(_) => {
+            t_putstr("alloc-smoke: PollSet Block FAILED\n");
+            return 1;
+        }
+    }
+    // Consume the byte; remove rd from PollSet.
+    let mut sink = [0u8; 1];
+    if rd.read(&mut sink).is_err() {
+        t_putstr("alloc-smoke: U-2e pipe drain FAILED\n");
+        return 1;
+    }
+    ps.remove(&rd);
+    if ps.len() != 0 {
+        t_putstr("alloc-smoke: PollSet::remove did not shrink FAILED\n");
+        return 1;
+    }
+    drop(rd);
+    drop(wr);
+
+    // Add the notes fd to a fresh PollSet; verify a self-posted note
+    // makes the fd poll-ready. End-to-end smoke that notes integrate
+    // with poll.
+    let mut nps = PollSet::new();
+    nps.add(&n, PollEvents::READ);
+    // Should be empty.
+    match nps.poll(PollTimeout::Zero) {
+        Ok(mut it) => {
+            if it.next().is_some() {
+                t_putstr("alloc-smoke: notes-poll empty unexpectedly ready FAILED\n");
+                return 1;
+            }
+        }
+        Err(_) => {
+            t_putstr("alloc-smoke: notes-poll empty FAILED\n");
+            return 1;
+        }
+    }
+    // Post and confirm poll wakes.
+    if notes::send(NoteTarget::SelfProc, "interrupt").is_err() {
+        t_putstr("alloc-smoke: notes::send for poll FAILED\n");
+        return 1;
+    }
+    match nps.poll(PollTimeout::Block) {
+        Ok(mut it) => match it.next() {
+            Some(ev) if ev.is_readable() => {}
+            _ => {
+                t_putstr("alloc-smoke: notes-poll post-send not readable FAILED\n");
+                return 1;
+            }
+        },
+        Err(_) => {
+            t_putstr("alloc-smoke: notes-poll Block FAILED\n");
+            return 1;
+        }
+    }
+    // Drain the pending note so we leave the queue clean.
+    if n.read().is_err() {
+        t_putstr("alloc-smoke: notes-poll drain FAILED\n");
+        return 1;
+    }
+    drop(nps);
+    drop(n);
+
+    t_putstr("alloc-smoke: Notes + Mask + PollSet OK\n");
     0
 }

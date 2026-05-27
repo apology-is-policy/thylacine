@@ -273,3 +273,10 @@ impl Seek for File {
         Ok(n as u64)
     }
 }
+
+impl crate::poll::AsFd for File {
+    #[inline]
+    fn as_raw_fd(&self) -> i32 {
+        self.handle.raw()
+    }
+}
