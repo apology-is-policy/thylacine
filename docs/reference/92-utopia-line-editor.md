@@ -1,4 +1,8 @@
-# 92-utopia-line-editor — `libutopia::line_editor` engine (U-4a + U-4b + U-4c)
+# 92-utopia-line-editor — `libutopia::line_editor` engine (U-4 arc)
+
+The U-4 line editor sub-arc -- four sub-chunks (U-4a engine core, U-4b
+multi-line + balance, U-4c history nav + Ctrl-R, U-4d Tab completion) --
+is COMPLETE in this doc.
 
 Per CLAUDE.md "Reference documentation discipline (load-bearing)" — the
 technical reference for the line editor engine landed at Phase 7 U-4a.
@@ -86,6 +90,54 @@ impl LineEditor {
     pub fn render(&self, prompt: &str) -> String;
 }
 ```
+
+### `CompletionSource` trait + `StaticCompletionSource` + `Completions` (U-4d)
+
+```rust
+/// Pluggable Tab completion source. Implementors receive the buffer
+/// + cursor and return the byte range to replace + the candidate
+/// strings.
+pub trait CompletionSource {
+    fn complete(&self, buffer: &str, cursor: usize) -> Completions;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Completions {
+    /// Byte range in the buffer each candidate replaces.
+    pub replace_range: core::ops::Range<usize>,
+    /// Candidate full-replacement strings (source order; NOT sorted).
+    pub candidates: Vec<String>,
+}
+
+/// Simple completion source backed by a fixed candidate list. Used
+/// by U-4d tests + boot probes; production code (U-6+) plugs
+/// shell-driven sources (path search, $path scan, function table,
+/// alias table, cap registry, etc.).
+pub struct StaticCompletionSource {
+    pub candidates: Vec<String>,
+}
+impl StaticCompletionSource {
+    pub fn new(candidates: Vec<String>) -> Self;
+}
+impl CompletionSource for StaticCompletionSource { /* ... */ }
+```
+
+`LineEditor` gains:
+
+```rust
+impl LineEditor {
+    pub fn set_completion_source(
+        &mut self,
+        source: alloc::boxed::Box<dyn CompletionSource>,
+    );
+    pub fn clear_completion_source(&mut self);
+}
+```
+
+And the new `EditorAction::ShowCompletions(Vec<String>)` variant: emitted
+when Tab dispatches with 2+ candidates and NO further common-prefix
+extension is possible. The main loop displays the candidate list
+(typically newline-separated below the prompt) then redraws.
 
 ### `LineEditor` -- new U-4c accessors
 
@@ -395,6 +447,37 @@ Search uses **substring match** (`str::contains`) at v1.0. v1.x can
 add fuzzy matching if it earns the complexity. Newest matches surface
 first (search walks history index down from `history.len() - 1`).
 
+### Tab completion (U-4d)
+
+Tab key (Ctrl-I, byte 0x09) dispatches to the registered
+`CompletionSource`:
+
+```
+do_complete:
+  if completion_source is None: NoChange
+  comp = completion_source.complete(buffer, cursor)
+  if comp.candidates is empty: NoChange
+  if comp.candidates has 1 entry:
+    replace buffer[comp.replace_range] with that entry; cursor at
+    end of replacement -> Redraw
+  else:  // 2+ candidates
+    common = longest_common_prefix(comp.candidates)
+    if common.len() > buffer[comp.replace_range].len():
+      // common prefix extends the current word -> apply
+      replace buffer[comp.replace_range] with common -> Redraw
+    else:
+      // no extension possible -> hand list to main loop
+      ShowCompletions(comp.candidates)
+```
+
+`longest_common_prefix` is UTF-8 safe: the returned byte length is
+rounded DOWN to the nearest char boundary.
+
+`StaticCompletionSource::complete` finds the current word by walking
+back from the cursor to whitespace or buffer start. Filters its
+candidate list to entries starting with the current word's prefix.
+Preserves source order (does NOT sort).
+
 ### Per-buffer cap
 
 `MAX_BUFFER_LEN = 64 * 1024` -- a defensive cap so a runaway paste
@@ -470,6 +553,9 @@ U-4a; probes 7-10 are U-4b.
 11. **Smart Up nav** (U-4c): multi-line `{\n  body` + Ctrl-P → cursor-up to line 0 (column-preserving); Ctrl-P again from line 0 → fall-through to history-prev.
 12. **Ctrl-R incremental search** (U-4c): push 3 history entries; Ctrl-R + "ap" → match newest "ap" entry; Ctrl-R again → step back to older match; Enter → Accept the matched line; exit search mode.
 13. **Search Cancel restores** (U-4c): type "draft", Ctrl-R, type "hello" (matches history), Ctrl-C → exit search; buffer restored to "draft"; cursor restored to column 5.
+14. **Tab common-prefix extend + ShowCompletions** (U-4d): plug a StaticCompletionSource with ["apple", "application", "apparatus"]; type "a" + Tab → buffer becomes "app" (common prefix). Second Tab → `ShowCompletions([apple, application, apparatus])` and buffer unchanged at "app".
+15. **Tab single-candidate completes** (U-4d): source with ["uniqueword"]; type "uniq" + Tab → buffer "uniqueword", cursor 10.
+16. **Tab with no source is NoChange** (U-4d): no source registered; Tab returns NoChange + buffer unchanged.
 
 Each probe prints `u-test: flow_line_editor: <probe>: <what> FAILED`
 on failure + bails the binary with exit 1; joey treats that as a
@@ -537,22 +623,28 @@ small `[u32; 4]` CSI parameter array.
 
 - **U-4a LANDED** (commit `eccbf0f`).
 - **U-4b LANDED** (commit `28276a7`).
-- **U-4c LANDED** (commit pending) — adds smart Up/Down line nav +
-  Ctrl-R incremental search + history cap of 10000 + new public
-  accessors (`is_searching`, `search_query`, `search_match_index`).
-- `libutopia::line_editor` — ~1430 LOC engine (U-4a 640 + U-4b 230 +
-  U-4c 560) + ~650 LOC `#[cfg(test)]` unit tests (U-4a 290 + U-4b
-  180 + U-4c 180).
+- **U-4c LANDED** (commit `a80908a`).
+- **U-4d LANDED** (commit pending) — adds CompletionSource trait +
+  StaticCompletionSource + Completions struct + Tab key dispatch +
+  EditorAction::ShowCompletions variant + set/clear_completion_source.
+  **The U-4 line editor arc is COMPLETE.**
+- `libutopia::line_editor` — ~1620 LOC engine (U-4a 640 + U-4b 230 +
+  U-4c 560 + U-4d 190) + ~760 LOC `#[cfg(test)]` unit tests (U-4a 290
+  + U-4b 180 + U-4c 180 + U-4d 110).
 - `libutopia::ansi::visible_width` — helper from U-4a (~60 LOC with
   tests); reused by U-4b multi-line render + U-4c column-preserving
   Up/Down nav.
-- `u-test::flow_line_editor` — 13 boot-time probes (U-4a 6 + U-4b 4 +
-  U-4c 3).
+- `u-test::flow_line_editor` — 16 boot-time probes (U-4a 6 + U-4b 4 +
+  U-4c 3 + U-4d 3).
 - `usr/u-test/Cargo.toml` depends on `libutopia` (the first
   non-libthyla-rs Rust workspace dependency consumed by a boot-test
   binary).
 - Boot log gains `u-test: line editor OK` between `hardware + cap OK`
   and `all OK`.
+
+The next stop on the U-* arc is **U-5** (parser + AST for rc-shape
+syntax). After U-5: U-6 (evaluator + main loop, where the line
+editor finally gets wired to stdin/stdout).
 
 ## Known caveats / footguns
 

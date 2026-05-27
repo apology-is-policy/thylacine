@@ -47,7 +47,9 @@ use libthyla_rs::thread;
 use libthyla_rs::time::{self, Duration};
 use libthyla_rs::torpor::{self, WaitResult};
 use libthyla_rs::{t_putstr, T_PROT_READ, T_PROT_WRITE};
-use libutopia::line_editor::{EditorAction, LineEditor};
+use libutopia::line_editor::{
+    EditorAction, LineEditor, StaticCompletionSource,
+};
 
 #[global_allocator]
 static GLOBAL_ALLOCATOR: ThylaAlloc = ThylaAlloc;
@@ -816,6 +818,80 @@ fn flow_line_editor() -> Result<(), i64> {
         t_putstr("u-test: flow_line_editor: search Cancel restore FAILED\n");
         return Err(1);
     }
+    // Probe 14 -- U-4d: Tab completion via the shipped
+    // StaticCompletionSource. Three candidates with common prefix
+    // "app": single-Tab extends to common prefix; second-Tab with
+    // buffer="app" emits ShowCompletions for the main loop.
+    let mut le = LineEditor::new();
+    le.set_completion_source(alloc::boxed::Box::new(StaticCompletionSource::new(
+        alloc::vec![
+            String::from("apple"),
+            String::from("application"),
+            String::from("apparatus"),
+        ],
+    )));
+    let _ = le.feed_bytes(b"a");
+    let r = le.feed_byte(0x09); // Tab
+    match r {
+        EditorAction::Redraw => {}
+        _ => {
+            t_putstr("u-test: flow_line_editor: Tab common-prefix Redraw FAILED\n");
+            return Err(1);
+        }
+    }
+    if le.buffer() != "app" {
+        t_putstr("u-test: flow_line_editor: Tab common-prefix extension FAILED\n");
+        return Err(1);
+    }
+    // Second Tab from "app" -- all three candidates equally match;
+    // no further common-prefix extension -> ShowCompletions.
+    let r = le.feed_byte(0x09);
+    match r {
+        EditorAction::ShowCompletions(cands) => {
+            if cands.len() != 3 {
+                t_putstr("u-test: flow_line_editor: Tab ShowCompletions count FAILED\n");
+                return Err(1);
+            }
+        }
+        _ => {
+            t_putstr("u-test: flow_line_editor: Tab ShowCompletions FAILED\n");
+            return Err(1);
+        }
+    }
+    if le.buffer() != "app" {
+        t_putstr("u-test: flow_line_editor: Tab ShowCompletions buffer unchanged FAILED\n");
+        return Err(1);
+    }
+    // Probe 15 -- U-4d: Tab with single matching candidate completes it.
+    let mut le = LineEditor::new();
+    le.set_completion_source(alloc::boxed::Box::new(StaticCompletionSource::new(
+        alloc::vec![String::from("uniqueword")],
+    )));
+    let _ = le.feed_bytes(b"uniq");
+    let r = le.feed_byte(0x09);
+    match r {
+        EditorAction::Redraw => {}
+        _ => {
+            t_putstr("u-test: flow_line_editor: Tab single-candidate Redraw FAILED\n");
+            return Err(1);
+        }
+    }
+    if le.buffer() != "uniqueword" || le.cursor() != 10 {
+        t_putstr("u-test: flow_line_editor: Tab single-candidate replace FAILED\n");
+        return Err(1);
+    }
+    // Probe 16 -- U-4d: Tab with no completion source is NoChange.
+    let mut le = LineEditor::new();
+    let _ = le.feed_bytes(b"xy");
+    let r = le.feed_byte(0x09);
+    match r {
+        EditorAction::NoChange => {}
+        _ => {
+            t_putstr("u-test: flow_line_editor: Tab without source NoChange FAILED\n");
+            return Err(1);
+        }
+    }
+
     // Continue probe 10 with a fresh editor too (replaces the existing one).
     let mut le = LineEditor::new();
 

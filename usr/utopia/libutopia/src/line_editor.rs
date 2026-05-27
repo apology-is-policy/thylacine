@@ -104,6 +104,13 @@ pub enum EditorAction {
     /// Ctrl-L. The main loop should clear the screen and redraw the
     /// prompt + buffer. The engine's state is unchanged.
     ClearScreen,
+    /// U-4d: Tab with multiple candidates AND no further common-prefix
+    /// extension possible. The main loop should display the candidate
+    /// list (typically newline-separated below the current prompt, then
+    /// redraw the prompt + buffer). The editor's buffer + cursor are
+    /// unchanged from before the Tab. The Vec is in source order (NOT
+    /// sorted) so the source's natural ordering propagates.
+    ShowCompletions(Vec<String>),
 }
 
 // =============================================================================
@@ -271,6 +278,105 @@ fn continuation_prefix(prompt_width: usize) -> alloc::string::String {
 }
 
 // =============================================================================
+// CompletionSource (U-4d) -- pluggable Tab completion.
+// =============================================================================
+//
+// The line editor doesn't know about file paths, command names, env
+// vars, or any other completion source. Those live above the engine
+// (the shell's main loop, which has access to $path, the alias
+// table, the function table, the cap registry, etc.). U-4d defines
+// the trait the shell implements + the editor-side machinery (Tab
+// key dispatches to the source; the source returns a structured
+// Completions; the editor inserts the common-prefix extension or
+// emits ShowCompletions for the main loop).
+//
+// At U-4d, the engine ships a `StaticCompletionSource` that wraps a
+// fixed candidate list -- used by tests and as a placeholder until
+// U-6 wires in the real shell-driven source.
+
+/// A pluggable source for Tab completion candidates. Implementors
+/// receive the current buffer + cursor position and return the byte
+/// range to replace + the candidate strings.
+pub trait CompletionSource {
+    fn complete(&self, buffer: &str, cursor: usize) -> Completions;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Completions {
+    /// Byte range in the buffer that each candidate replaces.
+    pub replace_range: core::ops::Range<usize>,
+    /// Candidate full-replacement strings, in source order.
+    pub candidates: Vec<String>,
+}
+
+/// A simple completion source backed by a fixed candidate list. Used
+/// by the U-4d tests + boot probes; production code (U-6+) will plug
+/// shell-driven sources (path search, $path scan, function table,
+/// alias table, etc.).
+///
+/// `complete(buffer, cursor)`: finds the start of the current word
+/// (cursor backward to whitespace or buffer start) and returns the
+/// subset of `candidates` whose first chars match the word prefix.
+pub struct StaticCompletionSource {
+    pub candidates: Vec<String>,
+}
+
+impl StaticCompletionSource {
+    pub fn new(candidates: Vec<String>) -> Self {
+        Self { candidates }
+    }
+}
+
+impl CompletionSource for StaticCompletionSource {
+    fn complete(&self, buffer: &str, cursor: usize) -> Completions {
+        let word_start = buffer[..cursor]
+            .rfind(|c: char| c.is_whitespace())
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        let prefix = &buffer[word_start..cursor];
+        let mut matches: Vec<String> = self
+            .candidates
+            .iter()
+            .filter(|c| c.starts_with(prefix))
+            .cloned()
+            .collect();
+        // Preserve source-order; do NOT sort.
+        matches.shrink_to_fit();
+        Completions {
+            replace_range: word_start..cursor,
+            candidates: matches,
+        }
+    }
+}
+
+/// Longest common byte prefix of all `strs`. UTF-8 safe: the returned
+/// length is rounded DOWN to the nearest char boundary in the first
+/// string. Returns "" for empty input.
+fn longest_common_prefix(strs: &[String]) -> String {
+    if strs.is_empty() {
+        return String::new();
+    }
+    if strs.len() == 1 {
+        return strs[0].clone();
+    }
+    let first = strs[0].as_bytes();
+    let mut common_len = first.len();
+    for s in &strs[1..] {
+        let other = s.as_bytes();
+        let mut i = 0;
+        while i < common_len && i < other.len() && first[i] == other[i] {
+            i += 1;
+        }
+        common_len = i;
+    }
+    // Round to char boundary.
+    while common_len > 0 && !strs[0].is_char_boundary(common_len) {
+        common_len -= 1;
+    }
+    String::from(&strs[0][..common_len])
+}
+
+// =============================================================================
 // Action -- internal enum the parser decodes a byte sequence into. NOT
 // part of the public API; the public surface is feed_byte/feed_bytes +
 // EditorAction.
@@ -308,6 +414,8 @@ enum Action {
     /// Ctrl-R -- enter incremental search mode (U-4c). In search mode,
     /// re-pressing Ctrl-R cycles to the next older match.
     SearchHistory,
+    /// Tab -- dispatch to the registered CompletionSource (U-4d).
+    Complete,
     /// No-op (decoded but ignored, e.g. unknown CSI final byte).
     Ignore,
 }
@@ -405,6 +513,10 @@ pub struct LineEditor {
     /// across multi-line buffers. Set on Up/Down; cleared on any
     /// horizontal motion or edit. None == "use current column".
     desired_col: Option<usize>,
+    /// U-4d: pluggable completion source. None == Tab is a no-op.
+    /// Plugged via `set_completion_source`; the shell main loop
+    /// installs a real source at U-6.
+    completion_source: Option<alloc::boxed::Box<dyn CompletionSource>>,
 }
 
 impl Default for LineEditor {
@@ -425,7 +537,24 @@ impl LineEditor {
             parser: ParserState::Ground,
             mode: LineEditorMode::Normal,
             desired_col: None,
+            completion_source: None,
         }
+    }
+
+    /// Install a Tab completion source (U-4d). The shell main loop
+    /// plugs a real source here; tests + early-bringup use the
+    /// shipped StaticCompletionSource.
+    pub fn set_completion_source(
+        &mut self,
+        source: alloc::boxed::Box<dyn CompletionSource>,
+    ) {
+        self.completion_source = Some(source);
+    }
+
+    /// Drop the current Tab completion source. After this, Tab is a
+    /// no-op.
+    pub fn clear_completion_source(&mut self) {
+        self.completion_source = None;
     }
 
     /// Clear the current edit + reset the parser. Used by the main
@@ -683,7 +812,7 @@ impl LineEditor {
             0x05 => Action::CursorEnd,     // Ctrl-E
             0x06 => Action::CursorRight,   // Ctrl-F
             0x08 => Action::Backspace,     // Ctrl-H (some terminals)
-            0x09 => Action::Ignore,        // Tab -- U-4d completion hook
+            0x09 => Action::Complete,      // Tab -- U-4d completion hook
             0x0a => Action::Accept,        // Ctrl-J / LF (Enter)
             0x0b => Action::KillToEnd,     // Ctrl-K
             0x0c => Action::ClearScreen,   // Ctrl-L
@@ -923,6 +1052,7 @@ impl LineEditor {
             Action::EofOrDelete => self.do_eof_or_delete(),
             Action::ClearScreen => EditorAction::ClearScreen,
             Action::SearchHistory => self.do_enter_search(),
+            Action::Complete => self.do_complete(),
             Action::Ignore => EditorAction::NoChange,
         }
     }
@@ -1400,6 +1530,50 @@ impl LineEditor {
         EditorAction::Redraw
     }
 
+    // -------------------------------------------------------------------------
+    // U-4d: Tab completion dispatch.
+    // -------------------------------------------------------------------------
+
+    fn do_complete(&mut self) -> EditorAction {
+        let comp = match &self.completion_source {
+            Some(src) => src.complete(&self.buffer, self.cursor),
+            None => return EditorAction::NoChange,
+        };
+        if comp.candidates.is_empty() {
+            return EditorAction::NoChange;
+        }
+        if comp.candidates.len() == 1 {
+            // Single candidate: replace and done.
+            let cand = comp.candidates[0].clone();
+            return self.apply_completion(comp.replace_range, &cand);
+        }
+        // Multiple candidates: find common prefix. If it extends the
+        // current word, apply that extension (Redraw). Else, emit
+        // ShowCompletions for the main loop to display.
+        let common = longest_common_prefix(&comp.candidates);
+        let current_word_len = comp.replace_range.end - comp.replace_range.start;
+        if common.len() > current_word_len {
+            return self.apply_completion(comp.replace_range, &common);
+        }
+        EditorAction::ShowCompletions(comp.candidates)
+    }
+
+    fn apply_completion(
+        &mut self,
+        range: core::ops::Range<usize>,
+        replacement: &str,
+    ) -> EditorAction {
+        let removed_len = range.end - range.start;
+        let new_total = self.buffer.len() - removed_len + replacement.len();
+        if new_total > MAX_BUFFER_LEN {
+            return EditorAction::NoChange;
+        }
+        let start = range.start;
+        self.buffer.replace_range(range, replacement);
+        self.cursor = start + replacement.len();
+        EditorAction::Redraw
+    }
+
     fn do_accept(&mut self) -> EditorAction {
         // U-4b: bracket / quote / trailing-backslash check.
         //
@@ -1771,8 +1945,8 @@ mod tests {
     }
 
     #[test]
-    fn tab_is_ignored_at_u4a() {
-        // Tab completion is U-4d; at U-4a Ctrl-I (Tab) is no-op.
+    fn tab_with_no_completion_source_is_noop() {
+        // U-4d: without a registered CompletionSource, Tab is NoChange.
         let mut le = LineEditor::new();
         feed(&mut le, b"ab");
         let r = le.feed_byte(0x09);
@@ -2185,6 +2359,146 @@ mod tests {
         // Prefix should be (reverse-i-search)`hello': hello world
         assert!(s.contains("(reverse-i-search)`hello':"));
         assert!(s.contains("hello world"));
+    }
+
+    // =========================================================================
+    // U-4d tests -- Tab completion + CompletionSource trait.
+    // =========================================================================
+
+    #[test]
+    fn longest_common_prefix_basic() {
+        let strs = vec![
+            String::from("apple"),
+            String::from("apricot"),
+            String::from("application"),
+        ];
+        assert_eq!(longest_common_prefix(&strs), "ap");
+    }
+
+    #[test]
+    fn longest_common_prefix_single() {
+        let strs = vec![String::from("hello")];
+        assert_eq!(longest_common_prefix(&strs), "hello");
+    }
+
+    #[test]
+    fn longest_common_prefix_empty() {
+        let strs: Vec<String> = vec![];
+        assert_eq!(longest_common_prefix(&strs), "");
+    }
+
+    #[test]
+    fn longest_common_prefix_utf8_safe() {
+        // Common prefix "café" -- if byte-truncation hit mid-codepoint
+        // the result would panic. Verify the helper rounds to char
+        // boundary.
+        let strs = vec![
+            String::from("café-au-lait"),
+            String::from("café-noir"),
+        ];
+        assert_eq!(longest_common_prefix(&strs), "café-");
+    }
+
+    #[test]
+    fn static_source_matches_word_prefix() {
+        let src = StaticCompletionSource::new(vec![
+            String::from("apple"),
+            String::from("apricot"),
+            String::from("banana"),
+        ]);
+        let comp = src.complete("ap", 2);
+        assert_eq!(comp.replace_range, 0..2);
+        assert_eq!(comp.candidates, vec!["apple", "apricot"]);
+    }
+
+    #[test]
+    fn static_source_finds_word_at_cursor() {
+        let src = StaticCompletionSource::new(vec![String::from("argument")]);
+        let comp = src.complete("foo arg", 7);
+        assert_eq!(comp.replace_range, 4..7);
+        assert_eq!(comp.candidates, vec!["argument"]);
+    }
+
+    #[test]
+    fn tab_single_candidate_completes() {
+        let mut le = LineEditor::new();
+        le.set_completion_source(alloc::boxed::Box::new(StaticCompletionSource::new(
+            vec![String::from("apple")],
+        )));
+        feed(&mut le, b"ap");
+        let r = le.feed_byte(0x09); // Tab
+        assert_eq!(r, EditorAction::Redraw);
+        assert_eq!(le.buffer(), "apple");
+        assert_eq!(le.cursor(), 5);
+    }
+
+    #[test]
+    fn tab_multi_candidate_extends_to_common_prefix() {
+        let mut le = LineEditor::new();
+        le.set_completion_source(alloc::boxed::Box::new(StaticCompletionSource::new(
+            vec![
+                String::from("apple"),
+                String::from("application"),
+                String::from("apparatus"),
+            ],
+        )));
+        feed(&mut le, b"a");
+        let r = le.feed_byte(0x09);
+        // Common prefix of all three is "app" -- "ap" extends to "app".
+        assert_eq!(r, EditorAction::Redraw);
+        assert_eq!(le.buffer(), "app");
+        assert_eq!(le.cursor(), 3);
+    }
+
+    #[test]
+    fn tab_multi_candidate_no_extension_emits_show_completions() {
+        let mut le = LineEditor::new();
+        le.set_completion_source(alloc::boxed::Box::new(StaticCompletionSource::new(
+            vec![
+                String::from("apple"),
+                String::from("application"),
+                String::from("apparatus"),
+            ],
+        )));
+        feed(&mut le, b"app");
+        let r = le.feed_byte(0x09);
+        match r {
+            EditorAction::ShowCompletions(cands) => {
+                assert_eq!(cands.len(), 3);
+                assert!(cands.contains(&String::from("apple")));
+                assert!(cands.contains(&String::from("application")));
+                assert!(cands.contains(&String::from("apparatus")));
+            }
+            other => panic!("expected ShowCompletions; got {:?}", other),
+        }
+        // Buffer unchanged.
+        assert_eq!(le.buffer(), "app");
+        assert_eq!(le.cursor(), 3);
+    }
+
+    #[test]
+    fn tab_zero_candidates_is_noop() {
+        let mut le = LineEditor::new();
+        le.set_completion_source(alloc::boxed::Box::new(StaticCompletionSource::new(
+            vec![String::from("apple")],
+        )));
+        feed(&mut le, b"xy");
+        let r = le.feed_byte(0x09);
+        assert_eq!(r, EditorAction::NoChange);
+        assert_eq!(le.buffer(), "xy");
+    }
+
+    #[test]
+    fn clear_completion_source_disables_tab() {
+        let mut le = LineEditor::new();
+        le.set_completion_source(alloc::boxed::Box::new(StaticCompletionSource::new(
+            vec![String::from("apple")],
+        )));
+        le.clear_completion_source();
+        feed(&mut le, b"ap");
+        let r = le.feed_byte(0x09);
+        assert_eq!(r, EditorAction::NoChange);
+        assert_eq!(le.buffer(), "ap");
     }
 
     #[test]
