@@ -33,6 +33,7 @@
 extern crate alloc;
 
 pub mod ansi;
+pub mod eval;
 pub mod line_editor;
 pub mod palette;
 pub mod parser;

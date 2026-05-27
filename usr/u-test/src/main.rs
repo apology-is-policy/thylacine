@@ -55,6 +55,7 @@ use libutopia::parser::{
     ParseErrorKind, RedirectKind, StatementKind, TokenKind, UnOp, Word,
 };
 // U-5d types for flow_parser_full.
+use libutopia::eval::{eval_expr, Env, EvalErrorKind, Value};
 
 #[global_allocator]
 static GLOBAL_ALLOCATOR: ThylaAlloc = ThylaAlloc;
@@ -94,6 +95,9 @@ pub extern "C" fn rs_main() -> i64 {
         return rc;
     }
     if let Err(rc) = flow_parser_full() {
+        return rc;
+    }
+    if let Err(rc) = flow_eval_expr() {
         return rc;
     }
 
@@ -2124,5 +2128,350 @@ fn flow_parser_full() -> Result<(), i64> {
     }
 
     t_putstr("u-test: parser full OK\n");
+    Ok(())
+}
+
+// =============================================================================
+// Flow 12 -- eval (U-6a): the recursive expression evaluator
+// =============================================================================
+//
+// Validates libutopia::eval against the parser's Expr AST. This is
+// the first runtime exercise of the eval module; the cfg(test)
+// tests in eval/expr.rs cover the same shapes but can't run on
+// host (no_std + no global allocator). The boot-time exercise
+// runs them under ThylaAlloc, on real arm64.
+//
+// Coverage (15 probes):
+//   1.  Integer atom in Arith context
+//   2.  Arithmetic add + mul + precedence
+//   3.  Div-by-zero error
+//   4.  Var lookup (scalar)
+//   5.  Undefined var -> empty Value
+//   6.  VarLen on a list
+//   7.  VarIndex 1-indexed
+//   8.  VarIndex out-of-range -> empty
+//   9.  VarSlice inclusive
+//   10. VarNoSplit join-with-space
+//   11. List literal flattening
+//   12. Concat with var interpolation
+//   13. DoubleQuoted interpolation ($var + $#var)
+//   14. case-as-expression first-match-wins
+//   15. Subst / Regex deferred -> NotImplemented
+fn flow_eval_expr() -> Result<(), i64> {
+    // Lex + parse + eval helper. The library exposes parse_expr_tokens
+    // directly so the test can pin the context (Arith vs Value vs
+    // Cond) -- which matters for atoms like "42" (Integer in Arith,
+    // Word in Value). The trailing Eof token must be stripped before
+    // calling parse_expr_tokens (parse.rs does the same when it
+    // forwards a placeholder body) -- otherwise the parser reports
+    // TrailingTokensInExpr.
+    fn ev(env: &Env, s: &str, ctx: ExprContext) -> Result<Value, libutopia::eval::EvalError> {
+        let toks = tokenize(s).map_err(|_| {
+            libutopia::eval::EvalError::new(
+                EvalErrorKind::Internal("test lex failed"),
+                libutopia::parser::Span::new(0, 0),
+            )
+        })?;
+        let body: Vec<_> = toks
+            .into_iter()
+            .filter(|t| !matches!(t.kind, TokenKind::Eof))
+            .collect();
+        let e = parse_expr_tokens(body, s.len(), ctx).map_err(|_| {
+            libutopia::eval::EvalError::new(
+                EvalErrorKind::Internal("test parse failed"),
+                libutopia::parser::Span::new(0, 0),
+            )
+        })?;
+        eval_expr(env, &e)
+    }
+
+    // Probe 1: integer atom in Arith.
+    {
+        let env = Env::new();
+        let v = match ev(&env, "42", ExprContext::Arith) {
+            Ok(v) => v,
+            Err(_) => {
+                t_putstr("u-test: flow_eval_expr: probe 1 eval FAILED\n");
+                return Err(1);
+            }
+        };
+        if v.as_scalar() != "42" {
+            t_putstr("u-test: flow_eval_expr: probe 1 value FAILED\n");
+            return Err(1);
+        }
+    }
+
+    // Probe 2: arithmetic add + mul.
+    {
+        let env = Env::new();
+        let v = match ev(&env, "1 + 2 * 3", ExprContext::Arith) {
+            Ok(v) => v,
+            Err(_) => {
+                t_putstr("u-test: flow_eval_expr: probe 2 eval FAILED\n");
+                return Err(1);
+            }
+        };
+        if v.as_scalar() != "7" {
+            t_putstr("u-test: flow_eval_expr: probe 2 precedence FAILED\n");
+            return Err(1);
+        }
+    }
+
+    // Probe 3: div-by-zero.
+    {
+        let env = Env::new();
+        match ev(&env, "1 / 0", ExprContext::Arith) {
+            Ok(_) => {
+                t_putstr("u-test: flow_eval_expr: probe 3 should error FAILED\n");
+                return Err(1);
+            }
+            Err(e) if e.kind == EvalErrorKind::DivByZero => {}
+            Err(_) => {
+                t_putstr("u-test: flow_eval_expr: probe 3 wrong error FAILED\n");
+                return Err(1);
+            }
+        }
+    }
+
+    // Probe 4: var lookup (scalar).
+    {
+        let mut env = Env::new();
+        env.let_set("x", Value::scalar("hello"));
+        let v = match ev(&env, "$x", ExprContext::Value) {
+            Ok(v) => v,
+            Err(_) => {
+                t_putstr("u-test: flow_eval_expr: probe 4 eval FAILED\n");
+                return Err(1);
+            }
+        };
+        if v.as_scalar() != "hello" {
+            t_putstr("u-test: flow_eval_expr: probe 4 value FAILED\n");
+            return Err(1);
+        }
+    }
+
+    // Probe 5: undefined var is empty.
+    {
+        let env = Env::new();
+        let v = match ev(&env, "$nope", ExprContext::Value) {
+            Ok(v) => v,
+            Err(_) => {
+                t_putstr("u-test: flow_eval_expr: probe 5 eval FAILED\n");
+                return Err(1);
+            }
+        };
+        if !v.is_empty() {
+            t_putstr("u-test: flow_eval_expr: probe 5 should be empty FAILED\n");
+            return Err(1);
+        }
+    }
+
+    // Probe 6: VarLen on a 3-element list.
+    {
+        let mut env = Env::new();
+        let mut xs = Vec::new();
+        xs.push(alloc::string::String::from("a"));
+        xs.push(alloc::string::String::from("b"));
+        xs.push(alloc::string::String::from("c"));
+        env.let_set("xs", Value::list(xs));
+        let v = match ev(&env, "$#xs", ExprContext::Value) {
+            Ok(v) => v,
+            Err(_) => {
+                t_putstr("u-test: flow_eval_expr: probe 6 eval FAILED\n");
+                return Err(1);
+            }
+        };
+        if v.as_scalar() != "3" {
+            t_putstr("u-test: flow_eval_expr: probe 6 length FAILED\n");
+            return Err(1);
+        }
+    }
+
+    // Probe 7: VarIndex (1-indexed) returns second element.
+    {
+        let mut env = Env::new();
+        let mut xs = Vec::new();
+        xs.push(alloc::string::String::from("a"));
+        xs.push(alloc::string::String::from("b"));
+        xs.push(alloc::string::String::from("c"));
+        env.let_set("xs", Value::list(xs));
+        let v = match ev(&env, "$xs(2)", ExprContext::Value) {
+            Ok(v) => v,
+            Err(_) => {
+                t_putstr("u-test: flow_eval_expr: probe 7 eval FAILED\n");
+                return Err(1);
+            }
+        };
+        if v.as_scalar() != "b" {
+            t_putstr("u-test: flow_eval_expr: probe 7 index FAILED\n");
+            return Err(1);
+        }
+    }
+
+    // Probe 8: VarIndex out-of-range -> empty.
+    {
+        let mut env = Env::new();
+        env.let_set("xs", Value::list(alloc::vec![alloc::string::String::from("a")]));
+        let v = match ev(&env, "$xs(99)", ExprContext::Value) {
+            Ok(v) => v,
+            Err(_) => {
+                t_putstr("u-test: flow_eval_expr: probe 8 eval FAILED\n");
+                return Err(1);
+            }
+        };
+        if !v.is_empty() {
+            t_putstr("u-test: flow_eval_expr: probe 8 should be empty FAILED\n");
+            return Err(1);
+        }
+    }
+
+    // Probe 9: VarSlice inclusive.
+    {
+        let mut env = Env::new();
+        let mut xs = Vec::new();
+        xs.push(alloc::string::String::from("a"));
+        xs.push(alloc::string::String::from("b"));
+        xs.push(alloc::string::String::from("c"));
+        xs.push(alloc::string::String::from("d"));
+        env.let_set("xs", Value::list(xs));
+        let v = match ev(&env, "$xs(2 3)", ExprContext::Value) {
+            Ok(v) => v,
+            Err(_) => {
+                t_putstr("u-test: flow_eval_expr: probe 9 eval FAILED\n");
+                return Err(1);
+            }
+        };
+        if v.0.len() != 2 || v.0[0] != "b" || v.0[1] != "c" {
+            t_putstr("u-test: flow_eval_expr: probe 9 slice FAILED\n");
+            return Err(1);
+        }
+    }
+
+    // Probe 10: VarNoSplit collapses list -> "a b c d".
+    {
+        let mut env = Env::new();
+        let mut xs = Vec::new();
+        xs.push(alloc::string::String::from("a"));
+        xs.push(alloc::string::String::from("b c"));
+        xs.push(alloc::string::String::from("d"));
+        env.let_set("args", Value::list(xs));
+        let v = match ev(&env, "$\"args", ExprContext::Value) {
+            Ok(v) => v,
+            Err(_) => {
+                t_putstr("u-test: flow_eval_expr: probe 10 eval FAILED\n");
+                return Err(1);
+            }
+        };
+        if v.0.len() != 1 || v.0[0] != "a b c d" {
+            t_putstr("u-test: flow_eval_expr: probe 10 join FAILED\n");
+            return Err(1);
+        }
+    }
+
+    // Probe 11: List literal flattening.
+    {
+        let env = Env::new();
+        let v = match ev(&env, "(a b c)", ExprContext::Value) {
+            Ok(v) => v,
+            Err(_) => {
+                t_putstr("u-test: flow_eval_expr: probe 11 eval FAILED\n");
+                return Err(1);
+            }
+        };
+        if v.0.len() != 3 || v.0[0] != "a" || v.0[2] != "c" {
+            t_putstr("u-test: flow_eval_expr: probe 11 list FAILED\n");
+            return Err(1);
+        }
+    }
+
+    // Probe 12: Concat with var interp.
+    {
+        let mut env = Env::new();
+        env.let_set("x", Value::scalar("42"));
+        let v = match ev(&env, "pre-^$x^-post", ExprContext::Value) {
+            Ok(v) => v,
+            Err(_) => {
+                t_putstr("u-test: flow_eval_expr: probe 12 eval FAILED\n");
+                return Err(1);
+            }
+        };
+        if v.as_scalar() != "pre-42-post" {
+            t_putstr("u-test: flow_eval_expr: probe 12 concat FAILED\n");
+            return Err(1);
+        }
+    }
+
+    // Probe 13: DoubleQuoted interpolation -- $var and $#var both.
+    {
+        let mut env = Env::new();
+        env.let_set("user", Value::scalar("alice"));
+        let mut xs = Vec::new();
+        xs.push(alloc::string::String::from("a"));
+        xs.push(alloc::string::String::from("b"));
+        env.let_set("xs", Value::list(xs));
+        let v = match ev(&env, "\"hello $user; count=$#xs\"", ExprContext::Value) {
+            Ok(v) => v,
+            Err(_) => {
+                t_putstr("u-test: flow_eval_expr: probe 13 eval FAILED\n");
+                return Err(1);
+            }
+        };
+        if v.as_scalar() != "hello alice; count=2" {
+            t_putstr("u-test: flow_eval_expr: probe 13 interp FAILED\n");
+            return Err(1);
+        }
+    }
+
+    // Probe 14: case-as-expression matches the *.c arm.
+    {
+        let mut env = Env::new();
+        env.let_set("f", Value::scalar("foo.c"));
+        let v = match ev(
+            &env,
+            "case $f { *.c => 'C source' ; *.rs => 'Rust source' ; * => 'unknown' }",
+            ExprContext::Value,
+        ) {
+            Ok(v) => v,
+            Err(_) => {
+                t_putstr("u-test: flow_eval_expr: probe 14 eval FAILED\n");
+                return Err(1);
+            }
+        };
+        if v.as_scalar() != "C source" {
+            t_putstr("u-test: flow_eval_expr: probe 14 arm FAILED\n");
+            return Err(1);
+        }
+    }
+
+    // Probe 15: $(cmd) substitution + =~ regex -> NotImplemented.
+    {
+        let env = Env::new();
+        match ev(&env, "$(echo hi)", ExprContext::Value) {
+            Ok(_) => {
+                t_putstr("u-test: flow_eval_expr: probe 15 subst should error FAILED\n");
+                return Err(1);
+            }
+            Err(e) if matches!(e.kind, EvalErrorKind::NotImplemented(_)) => {}
+            Err(_) => {
+                t_putstr("u-test: flow_eval_expr: probe 15 wrong subst error FAILED\n");
+                return Err(1);
+            }
+        }
+        let mut env = Env::new();
+        env.let_set("v", Value::scalar("foo"));
+        match ev(&env, "($v =~ /^foo/)", ExprContext::Cond) {
+            Ok(_) => {
+                t_putstr("u-test: flow_eval_expr: probe 15 regex should error FAILED\n");
+                return Err(1);
+            }
+            Err(e) if matches!(e.kind, EvalErrorKind::NotImplemented(_)) => {}
+            Err(_) => {
+                t_putstr("u-test: flow_eval_expr: probe 15 wrong regex error FAILED\n");
+                return Err(1);
+            }
+        }
+    }
+
+    t_putstr("u-test: eval expr OK\n");
     Ok(())
 }
