@@ -49,6 +49,8 @@ use libthyla_rs::alloc::ThylaAlloc;
 use libthyla_rs::cap::{self, Caps};
 use libthyla_rs::err::Error;
 use libthyla_rs::fs::{self, Component, File, OpenOptions, Path, PathBuf};
+use libthyla_rs::handle::Rights;
+use libthyla_rs::hardware::{Dma, Irq, Mmio};
 use libthyla_rs::io::{Cursor, Read, Seek, SeekFrom, Write};
 use libthyla_rs::ninep;
 use libthyla_rs::notes::{self, NoteClass, NoteMask, NoteTarget, Notes};
@@ -59,7 +61,7 @@ use libthyla_rs::territory::{self, MountFlags};
 use libthyla_rs::thread;
 use libthyla_rs::time::{self, Duration};
 use libthyla_rs::torpor::{self, WaitResult};
-use libthyla_rs::t_putstr;
+use libthyla_rs::{t_putstr, T_PROT_READ, T_PROT_WRITE};
 use core::sync::atomic::{AtomicU32, Ordering};
 
 #[global_allocator]
@@ -1441,5 +1443,72 @@ pub extern "C" fn rs_main() -> i64 {
     }
 
     t_putstr("alloc-smoke: NineP codec OK\n");
+
+    // ====================================================================
+    // U-2h-hardware: t::hardware -- Mmio + Irq + Dma RAII wrappers
+    // ====================================================================
+    //
+    // alloc-smoke runs WITHOUT CAP_HW_CREATE (joey grants the cap only
+    // to the virtio-* family + corvus), so positive construction paths
+    // are not reachable here. Instead exercise the negative paths:
+    // every typed constructor MUST map the kernel's -1 rejection onto
+    // Err(InvalidArgument). The positive path is validated by the
+    // /mmio-probe + /irq-probe binaries which DO get CAP_HW_CREATE.
+
+    // Mmio::new without CAP_HW_CREATE -> Err.
+    match unsafe {
+        Mmio::new(
+            0x0901_0000,       // PL031 PA -- legit, but we lack the cap
+            0x1000,
+            Rights::READ | Rights::MAP,
+            0x0050_0000,
+            T_PROT_READ,
+        )
+    } {
+        Err(Error::InvalidArgument) => {}
+        Err(_) => {
+            t_putstr("alloc-smoke: Mmio::new cap-missing wrong-error FAILED\n");
+            return 1;
+        }
+        Ok(_) => {
+            t_putstr("alloc-smoke: Mmio::new without cap unexpectedly succeeded\n");
+            return 1;
+        }
+    }
+
+    // Irq::new without CAP_HW_CREATE -> Err.
+    match Irq::new(96, Rights::SIGNAL) {
+        Err(Error::InvalidArgument) => {}
+        Err(_) => {
+            t_putstr("alloc-smoke: Irq::new cap-missing wrong-error FAILED\n");
+            return 1;
+        }
+        Ok(_) => {
+            t_putstr("alloc-smoke: Irq::new without cap unexpectedly succeeded\n");
+            return 1;
+        }
+    }
+
+    // Dma::new without CAP_HW_CREATE -> Err.
+    match unsafe {
+        Dma::new(
+            4096,
+            Rights::READ | Rights::WRITE | Rights::MAP,
+            0x0060_0000,
+            T_PROT_READ | T_PROT_WRITE,
+        )
+    } {
+        Err(Error::InvalidArgument) => {}
+        Err(_) => {
+            t_putstr("alloc-smoke: Dma::new cap-missing wrong-error FAILED\n");
+            return 1;
+        }
+        Ok(_) => {
+            t_putstr("alloc-smoke: Dma::new without cap unexpectedly succeeded\n");
+            return 1;
+        }
+    }
+
+    t_putstr("alloc-smoke: Mmio + Irq + Dma cap-missing reject OK\n");
     0
 }

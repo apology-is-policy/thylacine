@@ -70,10 +70,9 @@
 #[global_allocator]
 static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
 
-use libthyla_rs::{
-    T_RIGHT_SIGNAL,
-    t_exits, t_irq_create, t_irq_wait, t_putstr,
-};
+use libthyla_rs::handle::Rights;
+use libthyla_rs::hardware::Irq;
+use libthyla_rs::{t_exits, t_putstr};
 
 // GIC SPI 96 — chosen as a safe unused SPI on QEMU virt's GIC. Pinned
 // in lockstep with kernel/test/test_irq_probe.c::IRQ_PROBE_TEST_INTID.
@@ -86,45 +85,49 @@ const IRQ_PROBE_INTID: u32 = 96;
 pub extern "C" fn rs_main() -> i64 {
     t_putstr("irq-probe: starting (P4-Ic5-IRQ-probe)\n");
 
-    // SYS_IRQ_CREATE: claim SPI 96 with SIGNAL right (required for
-    // t_irq_wait to consume IRQs per sys_irq_wait_handler's RIGHT_SIGNAL
-    // check — F148-era handles enforce rights-gating on the consumer
-    // side of the handle).
-    let handle = unsafe { t_irq_create(IRQ_PROBE_INTID, T_RIGHT_SIGNAL) };
-    if handle < 0 {
-        t_putstr("irq-probe: SYS_IRQ_CREATE failed (intid may now be kernel-reserved or already-claimed; update probe to a different unclaimed SPI)\n");
-        unsafe { t_exits(1) };
-    }
-    t_putstr("irq-probe: SYS_IRQ_CREATE ok\n");
+    // Claim SPI 96 with SIGNAL right (required for Irq::wait to
+    // consume IRQs per sys_irq_wait_handler's RIGHT_SIGNAL check --
+    // F148-era handles enforce rights-gating on the consumer side of
+    // the handle). U-2h-hardware: typed Irq wraps SYS_IRQ_CREATE.
+    let irq = match Irq::new(IRQ_PROBE_INTID, Rights::SIGNAL) {
+        Ok(i) => i,
+        Err(_) => {
+            t_putstr("irq-probe: Irq::new failed (intid may now be kernel-reserved or already-claimed; update probe to a different unclaimed SPI)\n");
+            unsafe { t_exits(1) };
+        }
+    };
+    t_putstr("irq-probe: Irq::new ok\n");
 
-    // SYS_IRQ_WAIT: returns the collapsed pending count. With the
-    // kernel test's pre-pend (gic_set_pending_spi(96) before this child
-    // spawned) the IRQ is delivered during the gic_enable_irq inside
-    // t_irq_create OR shortly after on ERET; either way pending_count
-    // is >= 1 by the time we reach the cond check. The sleep call
-    // returns without blocking and t_irq_wait returns the count.
+    // Irq::wait blocks for a pending IRQ; returns the collapsed
+    // pending-count consumed. With the kernel test's pre-pend
+    // (gic_set_pending_spi(96) before this child spawned) the IRQ is
+    // delivered during gic_enable_irq inside Irq::new OR shortly after
+    // on ERET; either way pending_count is >= 1 by the time we reach
+    // the cond check.
     //
-    // If for some reason the IRQ hasn't been delivered yet (extremely
-    // unlikely — IRQ delivery is on the order of nanoseconds vs. the
-    // tens of microseconds for a return-to-EL0+SVC cycle) t_irq_wait
-    // will block here until the kernel's gic_dispatch hook increments
-    // pending_count and wakes the Rendez. The test runner's overall
-    // boot timeout (BOOT_TIMEOUT=20s) bounds the worst case.
-    t_putstr("irq-probe: SYS_IRQ_WAIT entering...\n");
-    let count = unsafe { t_irq_wait(handle) };
-    t_putstr("irq-probe: SYS_IRQ_WAIT returned\n");
+    // If the IRQ hasn't been delivered yet (extremely unlikely -- IRQ
+    // delivery is on the order of nanoseconds vs. the tens of micro-
+    // seconds for return-to-EL0+SVC) Irq::wait blocks here until
+    // gic_dispatch increments pending_count and wakes the Rendez. The
+    // test runner's overall boot timeout (BOOT_TIMEOUT=20s) bounds the
+    // worst case.
+    t_putstr("irq-probe: Irq::wait entering...\n");
+    let wait_result = irq.wait();
+    t_putstr("irq-probe: Irq::wait returned\n");
 
     // The probe expects exactly one IRQ pre-pended. count == 1 proves
-    // the GIC → kobj_irq_dispatch → pending_count → wake/cond → return
-    // path works end-to-end from EL0. count == 0 would indicate the
-    // wait spuriously returned (which sleep's cond loop should make
-    // impossible); count > 1 would indicate IRQ amplification (a fire
-    // delivered more than once, which the GIC + handler discipline
-    // doesn't permit).
-    if count < 0 {
-        t_putstr("irq-probe: FAIL — SYS_IRQ_WAIT returned error\n");
-        unsafe { t_exits(1) };
-    }
+    // GIC → kobj_irq_dispatch → pending_count → wake/cond → return
+    // works end-to-end from EL0. count == 0 would indicate a spurious
+    // wake (which sleep's cond loop should make impossible); count > 1
+    // would indicate IRQ amplification (a fire delivered more than
+    // once, which the GIC + handler discipline doesn't permit).
+    let count = match wait_result {
+        Ok(c) => c as i64,
+        Err(_) => {
+            t_putstr("irq-probe: FAIL — Irq::wait returned error\n");
+            unsafe { t_exits(1) };
+        }
+    };
     if count == 0 {
         t_putstr("irq-probe: FAIL — count==0 (spurious wake or missed wakeup)\n");
         unsafe { t_exits(1) };

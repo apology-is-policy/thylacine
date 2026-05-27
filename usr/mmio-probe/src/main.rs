@@ -86,30 +86,16 @@
 #[global_allocator]
 static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
 
-use libthyla_rs::{
-    T_PROT_READ, T_RIGHT_MAP, T_RIGHT_READ,
-    t_exits, t_mmio_create, t_mmio_map, t_puts, t_putstr,
-};
+use libthyla_rs::handle::Rights;
+use libthyla_rs::hardware::Mmio;
+use libthyla_rs::{T_PROT_READ, t_exits, t_puts, t_putstr};
 
 const PL031_PA: u64 = 0x0901_0000;                      // QEMU virt PL031 RTC
-const PL031_PAGE_SIZE: u64 = 0x1000;
+const PL031_PAGE_SIZE: usize = 0x1000;
 const USER_VA_MAPPING: u64 = 0x0050_0000;               // safe gap (text ends ~0x41xxxx; stack at 0x80000000)
-const PL031_RTCDR_OFFSET: u64 = 0x000;                  // current time (seconds)
-const PL031_PERIPHID0_OFFSET: u64 = 0xfe0;              // 0x31 (the "31" in PL031)
+const PL031_RTCDR_OFFSET: usize = 0x000;                // current time (seconds)
+const PL031_PERIPHID0_OFFSET: usize = 0xfe0;            // 0x31 (the "31" in PL031)
 const EXPECTED_PERIPHID0: u32 = 0x31;                    // PL031 r1p3 TRM Table 3-2
-
-// Volatile MMIO register read. Bypasses Rust's read coalescing /
-// elimination; the kernel-installed PTE has MAIR_IDX_DEVICE (nGnRnE)
-// so the load is non-gathering + non-reordering at the hardware level,
-// but the compiler also needs to be told this is a side-effect-bearing
-// access.
-//
-// Safety: caller must ensure `addr` is a valid user-VA pointing at
-// MMIO that's been mapped via SYS_MMIO_MAP.
-#[inline(always)]
-unsafe fn mmio_read32(addr: u64) -> u32 {
-    core::ptr::read_volatile(addr as *const u32)
-}
 
 // Tiny u32 → hex string helper for diagnostic output. No std formatting
 // in no_std + no_alloc, and pulling in core::fmt would add ~2 KB to a
@@ -133,34 +119,38 @@ fn write_hex_u32(buf: &mut [u8; 10], val: u32) {
 
 #[no_mangle]
 pub extern "C" fn rs_main() -> i64 {
-    t_putstr("mmio-probe: starting (P4-Ic5a)\n");
+    t_putstr("mmio-probe: starting (P4-Ic5a; U-2h-hardware typed API)\n");
 
-    // SYS_MMIO_CREATE: claim the PL031 page. Need READ | MAP rights —
-    // READ for the eventual MMIO read; MAP because SYS_MMIO_MAP checks
-    // for it on the handle.
-    let rights = T_RIGHT_READ | T_RIGHT_MAP;
-    let handle = unsafe { t_mmio_create(PL031_PA, PL031_PAGE_SIZE, rights) };
-    if handle < 0 {
-        t_putstr("mmio-probe: SYS_MMIO_CREATE failed (PL031 may now be kernel-reserved; update probe to a different unclaimed MMIO PA)\n");
-        unsafe { t_exits(1) };
-    }
-    t_putstr("mmio-probe: SYS_MMIO_CREATE ok\n");
+    // Create + map the PL031 page in one constructor call. READ | MAP
+    // rights -- READ for the register read; MAP because SYS_MMIO_MAP
+    // checks for it on the handle. The kernel demand-pages the
+    // device-attribute PTE on the first access.
+    //
+    // SAFETY: PL031_PA is a real QEMU virt device range (PL031 RTC);
+    // USER_VA_MAPPING is a chosen unmapped gap above the binary text
+    // (text ends ~0x41xxxx; stack at 0x80000000).
+    let pl031 = match unsafe {
+        Mmio::new(
+            PL031_PA,
+            PL031_PAGE_SIZE,
+            Rights::READ | Rights::MAP,
+            USER_VA_MAPPING,
+            T_PROT_READ,
+        )
+    } {
+        Ok(m) => m,
+        Err(_) => {
+            t_putstr("mmio-probe: Mmio::new failed (PL031 may now be kernel-reserved; update probe to a different unclaimed MMIO PA)\n");
+            unsafe { t_exits(1) };
+        }
+    };
+    t_putstr("mmio-probe: Mmio::new ok (create + map combined)\n");
 
-    // SYS_MMIO_MAP: install user-VA mappings. Demand-page dispatches on
-    // BURROW_TYPE_MMIO when the first access faults. READ-only prot.
-    let prot = T_PROT_READ;
-    let map_rc = unsafe { t_mmio_map(handle, USER_VA_MAPPING, prot) };
-    if map_rc < 0 {
-        t_putstr("mmio-probe: SYS_MMIO_MAP failed\n");
-        unsafe { t_exits(1) };
-    }
-    t_putstr("mmio-probe: SYS_MMIO_MAP ok\n");
-
-    // Live MMIO reads. First access page-faults → userland_demand_page
-    // → case BURROW_TYPE_MMIO → mmu_install_user_pte(..., device_memory=true)
-    // → MAIR_IDX_DEVICE PTE installed → retry succeeds + returns live data.
-    let rtcdr = unsafe { mmio_read32(USER_VA_MAPPING + PL031_RTCDR_OFFSET) };
-    let periphid0 = unsafe { mmio_read32(USER_VA_MAPPING + PL031_PERIPHID0_OFFSET) };
+    // Live MMIO reads via the typed surface. First access page-faults
+    // -> userland_demand_page -> BURROW_TYPE_MMIO -> mmu_install_user_pte
+    // with device_memory=true -> MAIR_IDX_DEVICE PTE installed.
+    let rtcdr = pl031.read_u32(PL031_RTCDR_OFFSET);
+    let periphid0 = pl031.read_u32(PL031_PERIPHID0_OFFSET);
 
     // Diagnostic: "mmio-probe: rtcdr=0xXXXXXXXX periphid0=0xXXXXXXXX\n".
     // Stack-init array is safe post-P4-Ic5-FP (kernel saves/restores V

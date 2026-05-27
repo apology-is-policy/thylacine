@@ -50,10 +50,9 @@
 #[global_allocator]
 static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
 
-use libthyla_rs::{
-    T_RIGHT_SIGNAL,
-    t_exits, t_irq_create, t_irq_wait, t_putstr,
-};
+use libthyla_rs::handle::Rights;
+use libthyla_rs::hardware::Irq;
+use libthyla_rs::{t_exits, t_putstr};
 
 // SPI 96 — same as /irq-probe. Pinned in lockstep with kernel test's
 // IRQ_BENCH_TEST_INTID. Safe unused SPI on QEMU virt's GIC (not in
@@ -108,12 +107,15 @@ pub extern "C" fn rs_main() -> i64 {
     }
 
     // Claim SPI 96. The kernel pre-pended one IRQ before rfork, so
-    // gic_enable_irq inside t_irq_create delivers immediately.
-    let handle = unsafe { t_irq_create(IRQ_BENCH_INTID, T_RIGHT_SIGNAL) };
-    if handle < 0 {
-        t_putstr("irq-bench: FAIL — SYS_IRQ_CREATE failed\n");
-        unsafe { t_exits(1) };
-    }
+    // gic_enable_irq inside Irq::new delivers immediately. U-2h-hardware:
+    // typed Irq wraps SYS_IRQ_CREATE.
+    let irq = match Irq::new(IRQ_BENCH_INTID, Rights::SIGNAL) {
+        Ok(i) => i,
+        Err(_) => {
+            t_putstr("irq-bench: FAIL — Irq::new failed\n");
+            unsafe { t_exits(1) };
+        }
+    };
 
     // Signal ready (informational; kernel test polls `completed`).
     unsafe { write_u64(SHARED_USER_VA + OFF_READY, 1); }
@@ -121,10 +123,12 @@ pub extern "C" fn rs_main() -> i64 {
     // Drain `num_iter` IRQs. Iteration 0 consumes the pre-pend;
     // iterations 1..num_iter consume per-iteration kernel triggers.
     for i in 0..num_iter {
-        let count = unsafe { t_irq_wait(handle) };
-        if count <= 0 {
-            t_putstr("irq-bench: FAIL — t_irq_wait returned non-positive\n");
-            unsafe { t_exits(1) };
+        match irq.wait() {
+            Ok(c) if c > 0 => {}
+            _ => {
+                t_putstr("irq-bench: FAIL — irq.wait() returned error or zero count\n");
+                unsafe { t_exits(1) };
+            }
         }
 
         let ts = read_cntpct();

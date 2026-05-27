@@ -49,6 +49,7 @@ use core::panic::PanicInfo;
 // U-2f: territory + cap.
 // U-2g: torpor + time + rand + thread.
 // U-2h-ninep: ninep (9P2000.L server-side codec, lifted from corvus).
+// U-2h-hardware: hardware::{Mmio, Irq, Dma} (typed RAII over KObj_MMIO/IRQ/DMA).
 //
 // `extern crate alloc` brings the standard `alloc` crate (String,
 // Vec, Box, Borrow, ToOwned) into libthyla-rs's namespace so
@@ -73,6 +74,7 @@ pub mod handle;
 pub mod alloc;
 pub mod cap;
 pub mod fs;
+pub mod hardware;
 pub mod io;
 pub mod ninep;
 pub mod notes;
