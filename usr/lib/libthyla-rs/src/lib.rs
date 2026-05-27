@@ -42,6 +42,7 @@ use core::panic::PanicInfo;
 // U-2a: err + handle.
 // U-2b: alloc.
 // U-2c-path: fs::{Path, PathBuf, Components}.
+// U-2c-io: io::{Read, Write, Seek, BufRead, BufReader, Cursor, SeekFrom} + fs::File.
 //
 // `extern crate alloc` brings the standard `alloc` crate (String,
 // Vec, Box, Borrow, ToOwned) into libthyla-rs's namespace so
@@ -65,6 +66,7 @@ pub mod err;
 pub mod handle;
 pub mod alloc;
 pub mod fs;
+pub mod io;
 
 // =============================================================================
 // Syscall numbers — MUST mirror kernel/include/thylacine/syscall.h.
@@ -114,6 +116,39 @@ pub const T_SYS_CAP_USE: u64          = 33;
 // in libthyla-rs (U-2b) and every libt-equivalent userspace allocator.
 pub const T_SYS_BURROW_ATTACH: u64    = 37;
 pub const T_SYS_BURROW_DETACH: u64    = 38;
+
+// P5-stratumd-stub-bringup-e1: walk-and-open one path component from a
+// Spoor (or from the territory root via T_WALK_OPEN_FROM_ROOT sentinel).
+// Multi-component paths are walked per-component by the caller.
+// P6-pouch-stratumd-boot sub-chunk 16b-γ-syscalls: lseek + fstat for
+// POSIX file-position semantics. Backs t::fs::File (U-2c-io).
+pub const T_SYS_WALK_OPEN: u64        = 34;
+pub const T_SYS_LSEEK: u64            = 51;
+
+// SYS_WALK_OPEN omode bits — must mirror SYS_WALK_OPEN_OMODE_VALID in
+// kernel/include/thylacine/syscall.h. Plan 9 OREAD/OWRITE/ORDWR/OEXEC
+// in the low two bits; OTRUNC (truncate-on-open for write-shaped opens)
+// in bit 4. Bits outside 0x13 are rejected by the kernel.
+pub const T_OREAD: u32                = 0;
+pub const T_OWRITE: u32               = 1;
+pub const T_ORDWR: u32                = 2;
+pub const T_OEXEC: u32                = 3;
+pub const T_OTRUNC: u32               = 0x10;
+
+// SYS_WALK_OPEN sentinel for "walk from the calling Proc's territory
+// root spoor" (P5-stratumd-stub-bringup-e2). Passed as spoor_fd when
+// no source Spoor is held; the kernel substitutes the Territory's
+// root_spoor.
+pub const T_WALK_OPEN_FROM_ROOT: i64  = -1;
+
+// Maximum single-component name length for SYS_WALK_OPEN. Multi-
+// component paths split at '/' and call SYS_WALK_OPEN per component.
+pub const T_WALK_OPEN_NAME_MAX: usize = 64;
+
+// SYS_LSEEK whence values — must mirror kernel/include/thylacine/syscall.h.
+pub const T_SEEK_SET: u32             = 0;
+pub const T_SEEK_CUR: u32             = 1;
+pub const T_SEEK_END: u32             = 2;
 
 // SYS_SPAWN_WITH_PERMS perm_flags — must mirror SPAWN_PERM_* in
 // kernel/include/thylacine/syscall.h.
@@ -871,6 +906,56 @@ pub unsafe fn t_burrow_detach(vaddr: u64, length: u64) -> i64 {
         inlateout("x0") x0,
         in("x1") length,
         in("x8") T_SYS_BURROW_DETACH,
+        options(nostack)
+    );
+    x0
+}
+
+// t_walk_open — walk one path component from `spoor_fd` (or from the
+// caller's Territory root if `spoor_fd == T_WALK_OPEN_FROM_ROOT`) and
+// open the resulting Spoor with `omode`. The single-step walk reflects
+// the kernel surface: multi-component paths are walked per-component
+// in userspace (t::fs::File does this internally).
+//
+// Returns:
+//   >= 0  — opened KOBJ_SPOOR fd, rights = READ | WRITE | TRANSFER.
+//           The underlying fid's omode is what the server actually
+//           enforces; a write to an OREAD-opened fid gets the server's
+//           Rlerror via SYS_WRITE.
+//   -1    — bad spoor_fd / missing RIGHT_READ / name out of bounds /
+//           name contains '/' or '\0' / omode invalid / walk-or-open
+//           failure / handle table full.
+//
+// Backs t::fs::File::open (U-2c-io).
+#[inline(always)]
+pub unsafe fn t_walk_open(spoor_fd: i64, name: *const u8, name_len: usize, omode: u32) -> i64 {
+    let mut x0: i64 = spoor_fd;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") name as u64,
+        in("x2") name_len as u64,
+        in("x3") omode as u64,
+        in("x8") T_SYS_WALK_OPEN,
+        options(nostack)
+    );
+    x0
+}
+
+// t_lseek — reposition the byte offset of an open Spoor. Mirrors
+// POSIX lseek(2): whence is T_SEEK_SET (absolute), T_SEEK_CUR (relative),
+// or T_SEEK_END (relative to file size). Returns the new offset on
+// success, -1 on bad fd / invalid whence / new_offset < 0 / SEEK_END on
+// a Dev without stat_native. Backs t::io::Seek for t::fs::File (U-2c-io).
+#[inline(always)]
+pub unsafe fn t_lseek(spoor_fd: i64, offset: i64, whence: u32) -> i64 {
+    let mut x0: i64 = spoor_fd;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") offset,
+        in("x2") whence as u64,
+        in("x8") T_SYS_LSEEK,
         options(nostack)
     );
     x0

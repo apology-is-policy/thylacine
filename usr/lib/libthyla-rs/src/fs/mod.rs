@@ -10,6 +10,8 @@
 // The fs module re-exports its sub-module types at this level so
 // callers write `use libthyla_rs::fs::{Path, PathBuf, File, ...}`.
 
+pub mod file;
 pub mod path;
 
+pub use self::file::File;
 pub use self::path::{Component, Components, Display, Path, PathBuf, SEPARATOR};

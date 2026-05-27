@@ -1,0 +1,452 @@
+// libthyla-rs::io — I/O traits.
+//
+// Mirror of std::io's trait surface, scoped to what native Thylacine
+// programs actually need at v1:
+//
+//   - `Read`     — pull bytes from a source.
+//   - `Write`    — push bytes to a sink.
+//   - `Seek`     — reposition the byte offset.
+//   - `BufRead`  — Read plus a buffer for line-oriented input.
+//
+// Plus two concrete adapters:
+//
+//   - `BufReader<R>` — buffering wrapper around any `Read`. The line
+//                     editor + shell input parser will use this.
+//   - `Cursor<T>`    — in-memory Read/Seek over a byte slice or Vec.
+//                     Useful for tests and for parsing pre-loaded data.
+//
+// Foundation chunk: U-2c-io per docs/UTOPIA-SHELL-DESIGN.md §15 (split
+// from U-2c into U-2c-path / U-2c-io / U-2c-fs sub-chunks). Backs
+// `t::fs::File`'s trait impls AND every future libthyla-rs source/sink
+// type (PipeReader, PipeWriter, SrvConn streams, etc.).
+//
+// DESIGN NOTES:
+//   - `Result<T>` is `crate::err::Result<T>` — the single error type.
+//     No separate `io::Error`.
+//   - EOF on read returns `Ok(0)` (POSIX convention; std mirrors).
+//     `read_exact` translates EOF-before-full to `Error::UnexpectedEof`.
+//   - `write` returning `Ok(0)` is a writer-stopped-making-progress
+//     signal. `write_all` translates to `Error::WriteZero`.
+//   - Default-impl helpers (read_to_end, read_to_string, read_exact,
+//     write_all, write_fmt, stream_position, rewind, read_until,
+//     read_line) come "for free" once a type implements the core
+//     methods. Matches std::io.
+//   - Async traits, AsyncRead/Write, vectored I/O (read_vectored,
+//     write_vectored), IoSlice/IoSliceMut — all deferred. v1 is
+//     synchronous-only; vectored I/O is a v1.x consideration.
+
+use crate::err::{Error, Result};
+use alloc_crate::string::String;
+use alloc_crate::vec::Vec;
+use core::cmp;
+
+// =============================================================================
+// Read.
+// =============================================================================
+
+/// Source of bytes.
+///
+/// Implementors define `read`; default impls of `read_to_end`,
+/// `read_to_string`, and `read_exact` build on it.
+pub trait Read {
+    /// Read up to `buf.len()` bytes into `buf`. Returns the number of
+    /// bytes read. `Ok(0)` signals EOF (the source has no more data;
+    /// not an error).
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize>;
+
+    /// Read all remaining bytes from `self` into `buf`, appending.
+    /// Returns the number of bytes read on this call.
+    fn read_to_end(&mut self, buf: &mut Vec<u8>) -> Result<usize> {
+        let start_len = buf.len();
+        let mut tmp = [0u8; 1024];
+        loop {
+            match self.read(&mut tmp) {
+                Ok(0) => return Ok(buf.len() - start_len),
+                Ok(n) => buf.extend_from_slice(&tmp[..n]),
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    /// Read all remaining bytes from `self`, append to `buf` as UTF-8.
+    /// Returns the number of bytes read on this call. Fails with
+    /// `Error::InvalidArgument` if the read bytes are not valid UTF-8.
+    fn read_to_string(&mut self, buf: &mut String) -> Result<usize> {
+        let mut v = Vec::new();
+        let n = self.read_to_end(&mut v)?;
+        let s = core::str::from_utf8(&v).map_err(|_| Error::InvalidArgument)?;
+        buf.push_str(s);
+        Ok(n)
+    }
+
+    /// Read exactly `buf.len()` bytes. EOF before full -> `UnexpectedEof`.
+    fn read_exact(&mut self, mut buf: &mut [u8]) -> Result<()> {
+        while !buf.is_empty() {
+            match self.read(buf) {
+                Ok(0) => return Err(Error::UnexpectedEof),
+                Ok(n) => {
+                    // Advance buf by n bytes.
+                    let tmp = core::mem::take(&mut buf);
+                    buf = &mut tmp[n..];
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
+    }
+}
+
+// Blanket impl for `&mut R`, mirroring std.
+impl<R: Read + ?Sized> Read for &mut R {
+    #[inline]
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
+        (**self).read(buf)
+    }
+}
+
+// =============================================================================
+// Write.
+// =============================================================================
+
+/// Sink of bytes.
+///
+/// Implementors define `write` and `flush`. Default impls of
+/// `write_all` and `write_fmt` build on them.
+pub trait Write {
+    /// Write up to `buf.len()` bytes from `buf`. Returns the number
+    /// of bytes written. May write fewer than requested (call again
+    /// for the rest, or use `write_all`).
+    fn write(&mut self, buf: &[u8]) -> Result<usize>;
+
+    /// Flush any pending buffered data to the underlying sink. For
+    /// unbuffered sinks (like raw `File`) this is a no-op.
+    fn flush(&mut self) -> Result<()>;
+
+    /// Write all of `buf`. Writer-no-progress (`Ok(0)`) -> `WriteZero`.
+    fn write_all(&mut self, mut buf: &[u8]) -> Result<()> {
+        while !buf.is_empty() {
+            match self.write(buf) {
+                Ok(0) => return Err(Error::WriteZero),
+                Ok(n) => buf = &buf[n..],
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
+    }
+
+    /// Glue between `core::fmt::Write` and this trait. Lets callers
+    /// `write!(w, "...")` against a `Write`.
+    fn write_fmt(&mut self, args: core::fmt::Arguments<'_>) -> Result<()> {
+        // Adapter that captures the first error and short-circuits.
+        struct Adapter<'a, W: Write + ?Sized> {
+            inner: &'a mut W,
+            err: Option<Error>,
+        }
+        impl<W: Write + ?Sized> core::fmt::Write for Adapter<'_, W> {
+            fn write_str(&mut self, s: &str) -> core::fmt::Result {
+                match self.inner.write_all(s.as_bytes()) {
+                    Ok(()) => Ok(()),
+                    Err(e) => {
+                        self.err = Some(e);
+                        Err(core::fmt::Error)
+                    }
+                }
+            }
+        }
+        let mut adapter = Adapter { inner: self, err: None };
+        match core::fmt::write(&mut adapter, args) {
+            Ok(()) => Ok(()),
+            Err(_) => Err(adapter.err.unwrap_or(Error::Io)),
+        }
+    }
+}
+
+impl<W: Write + ?Sized> Write for &mut W {
+    #[inline]
+    fn write(&mut self, buf: &[u8]) -> Result<usize> {
+        (**self).write(buf)
+    }
+    #[inline]
+    fn flush(&mut self) -> Result<()> {
+        (**self).flush()
+    }
+}
+
+// =============================================================================
+// Seek.
+// =============================================================================
+
+/// Anchor for `Seek::seek`.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub enum SeekFrom {
+    /// Absolute offset from the start of the stream.
+    Start(u64),
+    /// Relative offset from the end of the stream (typically negative).
+    End(i64),
+    /// Relative offset from the current cursor position.
+    Current(i64),
+}
+
+/// Streams that can reposition their byte offset.
+pub trait Seek {
+    /// Reposition. Returns the new offset.
+    fn seek(&mut self, pos: SeekFrom) -> Result<u64>;
+
+    /// Convenience: the current offset (`SeekFrom::Current(0)`).
+    fn stream_position(&mut self) -> Result<u64> {
+        self.seek(SeekFrom::Current(0))
+    }
+
+    /// Convenience: `seek(Start(0))`, drop the result.
+    fn rewind(&mut self) -> Result<()> {
+        self.seek(SeekFrom::Start(0)).map(|_| ())
+    }
+}
+
+// =============================================================================
+// BufRead.
+// =============================================================================
+
+/// `Read` plus a buffer for line-oriented input.
+///
+/// Implementors expose the buffer via `fill_buf` and signal consumption
+/// via `consume`. `BufReader<R>` is the canonical implementation; the
+/// trait is public so future types (e.g., a 9P-stream reader) can
+/// participate in `read_line` / `read_until` without re-implementing.
+pub trait BufRead: Read {
+    /// Return the buffered bytes available to read. Refills from the
+    /// underlying source if empty.
+    fn fill_buf(&mut self) -> Result<&[u8]>;
+
+    /// Mark `amt` bytes from the buffer as consumed (subsequent reads
+    /// will skip them).
+    fn consume(&mut self, amt: usize);
+
+    /// Read until `delim` (inclusive) into `buf`. Returns the number
+    /// of bytes appended.
+    fn read_until(&mut self, delim: u8, buf: &mut Vec<u8>) -> Result<usize> {
+        let mut total = 0;
+        loop {
+            let (done, used) = {
+                let available = self.fill_buf()?;
+                if available.is_empty() {
+                    return Ok(total);
+                }
+                if let Some(pos) = available.iter().position(|&b| b == delim) {
+                    buf.extend_from_slice(&available[..=pos]);
+                    (true, pos + 1)
+                } else {
+                    buf.extend_from_slice(available);
+                    (false, available.len())
+                }
+            };
+            self.consume(used);
+            total += used;
+            if done {
+                return Ok(total);
+            }
+        }
+    }
+
+    /// Read a UTF-8 line (up to + including `'\n'`) into `buf`.
+    /// Returns the number of bytes appended. Fails with
+    /// `Error::InvalidArgument` if the line is not valid UTF-8.
+    fn read_line(&mut self, buf: &mut String) -> Result<usize> {
+        let mut v = Vec::new();
+        let n = self.read_until(b'\n', &mut v)?;
+        let s = core::str::from_utf8(&v).map_err(|_| Error::InvalidArgument)?;
+        buf.push_str(s);
+        Ok(n)
+    }
+}
+
+// =============================================================================
+// BufReader<R> — buffered wrapper.
+// =============================================================================
+
+const DEFAULT_BUF_CAPACITY: usize = 8 * 1024;
+
+/// Buffered wrapper around any `Read`.
+///
+/// Amortises syscall cost across many small reads + provides the
+/// `BufRead` surface for line-oriented input.
+pub struct BufReader<R> {
+    inner: R,
+    buf: Vec<u8>,
+    pos: usize,
+}
+
+impl<R: Read> BufReader<R> {
+    /// Wrap `inner` with the default 8 KiB buffer.
+    #[inline]
+    pub fn new(inner: R) -> Self {
+        Self::with_capacity(DEFAULT_BUF_CAPACITY, inner)
+    }
+
+    /// Wrap `inner` with a buffer of `capacity` bytes.
+    pub fn with_capacity(capacity: usize, inner: R) -> Self {
+        BufReader {
+            inner,
+            buf: Vec::with_capacity(capacity),
+            pos: 0,
+        }
+    }
+
+    /// Consume the BufReader, returning the wrapped reader. Drops any
+    /// remaining buffered data.
+    #[inline]
+    pub fn into_inner(self) -> R {
+        self.inner
+    }
+
+    /// Borrow the wrapped reader.
+    #[inline]
+    pub fn get_ref(&self) -> &R {
+        &self.inner
+    }
+
+    /// Mutably borrow the wrapped reader. (Bypassing the buffer via
+    /// this reference will desync the buffered position; use sparingly.)
+    #[inline]
+    pub fn get_mut(&mut self) -> &mut R {
+        &mut self.inner
+    }
+}
+
+impl<R: Read> Read for BufReader<R> {
+    fn read(&mut self, dst: &mut [u8]) -> Result<usize> {
+        // Bypass buffer for large reads when the buffer is empty:
+        // no point copying through the buffer if the caller wants
+        // more bytes than the buffer holds.
+        if self.pos == self.buf.len() && dst.len() >= self.buf.capacity() {
+            self.discard_buffer();
+            return self.inner.read(dst);
+        }
+        let avail = self.fill_buf()?;
+        let n = cmp::min(avail.len(), dst.len());
+        dst[..n].copy_from_slice(&avail[..n]);
+        self.consume(n);
+        Ok(n)
+    }
+}
+
+impl<R: Read> BufRead for BufReader<R> {
+    fn fill_buf(&mut self) -> Result<&[u8]> {
+        if self.pos >= self.buf.len() {
+            // Buffer exhausted. Refill from inner. Resize the Vec to
+            // its full capacity (safe for u8 — every bit-pattern is
+            // valid), read into it, then truncate to the read count.
+            let cap = self.buf.capacity();
+            // SAFETY: u8 has no invalid bit patterns; the buffer's
+            // capacity bytes are allocated; we're about to overwrite
+            // exactly the bytes we read and truncate the rest.
+            unsafe {
+                self.buf.set_len(cap);
+            }
+            let n = self.inner.read(&mut self.buf[..])?;
+            unsafe {
+                self.buf.set_len(n);
+            }
+            self.pos = 0;
+        }
+        Ok(&self.buf[self.pos..])
+    }
+
+    fn consume(&mut self, amt: usize) {
+        self.pos = cmp::min(self.pos + amt, self.buf.len());
+    }
+}
+
+impl<R: Read> BufReader<R> {
+    fn discard_buffer(&mut self) {
+        self.buf.clear();
+        self.pos = 0;
+    }
+}
+
+// =============================================================================
+// Cursor<T> — in-memory Read/Seek over a byte slice.
+// =============================================================================
+
+/// In-memory `Read` + `Seek` over a byte container.
+///
+/// Useful for tests that want to drive a `Read` consumer without an
+/// actual file, and for parsing pre-loaded data without re-reading.
+///
+/// `T` is the underlying storage; common choices are `&[u8]`,
+/// `Vec<u8>`, or `Box<[u8]>`. Implements Read + Seek when `T: AsRef<[u8]>`.
+pub struct Cursor<T> {
+    inner: T,
+    pos: u64,
+}
+
+impl<T> Cursor<T> {
+    /// Wrap `inner` with a starting position of 0.
+    #[inline]
+    pub const fn new(inner: T) -> Self {
+        Cursor { inner, pos: 0 }
+    }
+
+    #[inline]
+    pub fn into_inner(self) -> T {
+        self.inner
+    }
+
+    #[inline]
+    pub fn get_ref(&self) -> &T {
+        &self.inner
+    }
+
+    #[inline]
+    pub fn position(&self) -> u64 {
+        self.pos
+    }
+
+    #[inline]
+    pub fn set_position(&mut self, pos: u64) {
+        self.pos = pos;
+    }
+}
+
+impl<T: AsRef<[u8]>> Read for Cursor<T> {
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
+        let slice = self.inner.as_ref();
+        let pos = self.pos as usize;
+        if pos >= slice.len() {
+            return Ok(0);
+        }
+        let n = cmp::min(buf.len(), slice.len() - pos);
+        buf[..n].copy_from_slice(&slice[pos..pos + n]);
+        self.pos += n as u64;
+        Ok(n)
+    }
+}
+
+impl<T: AsRef<[u8]>> Seek for Cursor<T> {
+    fn seek(&mut self, pos: SeekFrom) -> Result<u64> {
+        let len = self.inner.as_ref().len() as u64;
+        let new = match pos {
+            SeekFrom::Start(p) => p,
+            SeekFrom::End(off) => {
+                if off >= 0 {
+                    len.checked_add(off as u64).ok_or(Error::InvalidArgument)?
+                } else {
+                    let abs = (-off) as u64;
+                    len.checked_sub(abs).ok_or(Error::InvalidArgument)?
+                }
+            }
+            SeekFrom::Current(off) => {
+                if off >= 0 {
+                    self.pos
+                        .checked_add(off as u64)
+                        .ok_or(Error::InvalidArgument)?
+                } else {
+                    let abs = (-off) as u64;
+                    self.pos.checked_sub(abs).ok_or(Error::InvalidArgument)?
+                }
+            }
+        };
+        self.pos = new;
+        Ok(new)
+    }
+}

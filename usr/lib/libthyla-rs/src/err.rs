@@ -130,6 +130,19 @@ pub enum Error {
     /// `-rc` where `rc` was the syscall return). Lets unknown errors
     /// propagate instead of being dropped to a synthetic variant.
     Other(i32),
+
+    // ---- library-only variants (no POSIX errno mapping) ----
+
+    /// `read` returned `Ok(0)` (EOF) before `read_exact` could fill
+    /// its buffer. Library-only; not produced by any kernel syscall.
+    /// `as_errno()` returns `0`. Added at U-2c-io.
+    UnexpectedEof,
+
+    /// `write` returned `Ok(0)` before `write_all` could drain its
+    /// buffer (the underlying writer stopped making progress while
+    /// claiming success). Library-only; `as_errno()` returns `0`.
+    /// Added at U-2c-io.
+    WriteZero,
 }
 
 impl Error {
@@ -158,6 +171,9 @@ impl Error {
             Error::NotImplemented   => 38,
             Error::TimedOut         => 110,
             Error::Other(e)         => e,
+            // Library-only variants have no POSIX errno mapping.
+            Error::UnexpectedEof    => 0,
+            Error::WriteZero        => 0,
         }
     }
 
@@ -245,6 +261,8 @@ impl fmt::Display for Error {
             Error::NotImplemented   => "function not implemented",
             Error::TimedOut         => "operation timed out",
             Error::Other(_)         => "kernel error",
+            Error::UnexpectedEof    => "unexpected end of file",
+            Error::WriteZero        => "writer made no progress",
         };
         f.write_str(msg)?;
         if let Error::Other(n) = self {
