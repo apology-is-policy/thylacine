@@ -45,6 +45,10 @@ use core::panic::PanicInfo;
 // U-2c-io: io::{Read, Write, Seek, BufRead, BufReader, Cursor, SeekFrom} + fs::File.
 // U-2c-fs: fs::{OpenOptions, Metadata} + free functions (metadata, exists, is_file, is_dir).
 // U-2d: process::{Command, Child, ExitStatus, Stdio, pipe}.
+// U-2e: notes + poll.
+// U-2f: territory + cap.
+// U-2g: torpor + time + rand + thread.
+// U-2h-ninep: ninep (9P2000.L server-side codec, lifted from corvus).
 //
 // `extern crate alloc` brings the standard `alloc` crate (String,
 // Vec, Box, Borrow, ToOwned) into libthyla-rs's namespace so
@@ -70,6 +74,7 @@ pub mod alloc;
 pub mod cap;
 pub mod fs;
 pub mod io;
+pub mod ninep;
 pub mod notes;
 pub mod poll;
 pub mod process;

@@ -50,6 +50,7 @@ use libthyla_rs::cap::{self, Caps};
 use libthyla_rs::err::Error;
 use libthyla_rs::fs::{self, Component, File, OpenOptions, Path, PathBuf};
 use libthyla_rs::io::{Cursor, Read, Seek, SeekFrom, Write};
+use libthyla_rs::ninep;
 use libthyla_rs::notes::{self, NoteClass, NoteMask, NoteTarget, Notes};
 use libthyla_rs::poll::{PollEvents, PollSet, PollTimeout};
 use libthyla_rs::process::{self, Command, Stdio};
@@ -1290,5 +1291,155 @@ pub extern "C" fn rs_main() -> i64 {
     }
 
     t_putstr("alloc-smoke: Torpor + Time + Rand + Thread OK\n");
+
+    // ====================================================================
+    // U-2h-ninep: t::ninep -- 9P2000.L server-side codec
+    // ====================================================================
+    //
+    // Lifted from corvus's private `p9` module. Exercises the four
+    // codec slices: pack primitives, unpack primitives, Tmsg parsers,
+    // Rmsg builders. The Tmsg parsers are validated by hand-building
+    // a Tmsg frame via the pack primitives + back-patched header, then
+    // parsing it back; the Rmsg builders are validated by peek_header
+    // + unpack primitives on the produced bytes.
+
+    // Primitive round-trip: every integer width + str + qid.
+    let mut buf = [0u8; 64];
+    let p = ninep::pack_u8(&mut buf, 0, 0xA5).unwrap();
+    let p = ninep::pack_u16(&mut buf, p, 0xDEAD).unwrap();
+    let p = ninep::pack_u32(&mut buf, p, 0x1234_5678).unwrap();
+    let p = ninep::pack_u64(&mut buf, p, 0xCAFE_BABE_DEAD_BEEF).unwrap();
+    let p = ninep::pack_str(&mut buf, p, b"ninep").unwrap();
+    let qid_in = ninep::Qid {
+        kind: ninep::P9_QTDIR,
+        version: 7,
+        path: 0x1234_5678_9ABC_DEF0,
+    };
+    let _ = ninep::pack_qid(&mut buf, p, &qid_in).unwrap();
+
+    let (v8, p) = ninep::unpack_u8(&buf, 0).unwrap();
+    if v8 != 0xA5 {
+        t_putstr("alloc-smoke: ninep::unpack_u8 FAILED\n");
+        return 1;
+    }
+    let (v16, p) = ninep::unpack_u16(&buf, p).unwrap();
+    if v16 != 0xDEAD {
+        t_putstr("alloc-smoke: ninep::unpack_u16 FAILED\n");
+        return 1;
+    }
+    let (v32, p) = ninep::unpack_u32(&buf, p).unwrap();
+    if v32 != 0x1234_5678 {
+        t_putstr("alloc-smoke: ninep::unpack_u32 FAILED\n");
+        return 1;
+    }
+    let (v64, p) = ninep::unpack_u64(&buf, p).unwrap();
+    if v64 != 0xCAFE_BABE_DEAD_BEEF {
+        t_putstr("alloc-smoke: ninep::unpack_u64 FAILED\n");
+        return 1;
+    }
+    let (s, _p) = ninep::unpack_str(&buf, p).unwrap();
+    if s != b"ninep" {
+        t_putstr("alloc-smoke: ninep::unpack_str FAILED\n");
+        return 1;
+    }
+
+    // Rversion build + header peek.
+    let mut rver = [0u8; 32];
+    let n = ninep::build_rversion(&mut rver, 0xABCD, 8192, b"9P2000.L").unwrap();
+    let h = ninep::peek_header(&rver[..n]).unwrap();
+    if h.size != n as u32 || h.mtype != ninep::P9_RVERSION || h.tag != 0xABCD {
+        t_putstr("alloc-smoke: ninep::build_rversion / peek_header FAILED\n");
+        return 1;
+    }
+
+    // Tversion parse: hand-build a frame, parse it, verify fields.
+    let mut tver = [0u8; 32];
+    let p = ninep::pack_u32(&mut tver, 0, 0).unwrap(); // size placeholder
+    let p = ninep::pack_u8(&mut tver, p, ninep::P9_TVERSION).unwrap();
+    let p = ninep::pack_u16(&mut tver, p, ninep::P9_NOTAG).unwrap();
+    let p = ninep::pack_u32(&mut tver, p, 16384).unwrap();
+    let p = ninep::pack_str(&mut tver, p, b"9P2000.L").unwrap();
+    let _ = ninep::pack_u32(&mut tver, 0, p as u32).unwrap();
+    let tv = ninep::parse_tversion(&tver[..p]).unwrap();
+    if tv.msize != 16384 || tv.version != b"9P2000.L" {
+        t_putstr("alloc-smoke: ninep::parse_tversion FAILED\n");
+        return 1;
+    }
+
+    // Twalk parse: 3 names of varying lengths.
+    let mut tw = [0u8; 64];
+    let p = ninep::pack_u32(&mut tw, 0, 0).unwrap();
+    let p = ninep::pack_u8(&mut tw, p, ninep::P9_TWALK).unwrap();
+    let p = ninep::pack_u16(&mut tw, p, 0x0042).unwrap();
+    let p = ninep::pack_u32(&mut tw, p, 0x10).unwrap(); // fid
+    let p = ninep::pack_u32(&mut tw, p, 0x20).unwrap(); // newfid
+    let p = ninep::pack_u16(&mut tw, p, 3).unwrap();    // nwname
+    let p = ninep::pack_str(&mut tw, p, b"a").unwrap();
+    let p = ninep::pack_str(&mut tw, p, b"bb").unwrap();
+    let p = ninep::pack_str(&mut tw, p, b"ccc").unwrap();
+    let _ = ninep::pack_u32(&mut tw, 0, p as u32).unwrap();
+    let w = ninep::parse_twalk(&tw[..p]).unwrap();
+    if w.fid != 0x10 || w.newfid != 0x20 || w.nwname != 3 {
+        t_putstr("alloc-smoke: ninep::parse_twalk header FAILED\n");
+        return 1;
+    }
+    if w.names[0] != b"a" || w.names[1] != b"bb" || w.names[2] != b"ccc" {
+        t_putstr("alloc-smoke: ninep::parse_twalk names FAILED\n");
+        return 1;
+    }
+
+    // Rwalk build with 3 qids; peek + read back nwqid.
+    let qids = [
+        ninep::Qid { kind: ninep::P9_QTDIR, version: 0, path: 1 },
+        ninep::Qid { kind: ninep::P9_QTDIR, version: 0, path: 2 },
+        ninep::Qid { kind: ninep::P9_QTFILE, version: 0, path: 3 },
+    ];
+    let mut rw = [0u8; 64];
+    let nw = ninep::build_rwalk(&mut rw, 0x0042, &qids).unwrap();
+    let h = ninep::peek_header(&rw[..nw]).unwrap();
+    if h.size != nw as u32 || h.mtype != ninep::P9_RWALK || h.tag != 0x0042 {
+        t_putstr("alloc-smoke: ninep::build_rwalk header FAILED\n");
+        return 1;
+    }
+    let (count, _) = ninep::unpack_u16(&rw, ninep::P9_HDR_LEN).unwrap();
+    if count != 3 {
+        t_putstr("alloc-smoke: ninep::build_rwalk nwqid FAILED\n");
+        return 1;
+    }
+
+    // Rlerror build + decode.
+    let mut rle = [0u8; 32];
+    let nrl = ninep::build_rlerror(&mut rle, 0x0007, ninep::E_NOENT).unwrap();
+    let h = ninep::peek_header(&rle[..nrl]).unwrap();
+    if h.mtype != ninep::P9_RLERROR || h.tag != 0x0007 {
+        t_putstr("alloc-smoke: ninep::build_rlerror header FAILED\n");
+        return 1;
+    }
+    let (ecode, _) = ninep::unpack_u32(&rle, ninep::P9_HDR_LEN).unwrap();
+    if ecode != ninep::E_NOENT {
+        t_putstr("alloc-smoke: ninep::build_rlerror ecode FAILED\n");
+        return 1;
+    }
+
+    // Error paths -- short buffer + oversized nwname.
+    let short = [0u8; 3];
+    if ninep::peek_header(&short).is_ok() {
+        t_putstr("alloc-smoke: ninep::peek_header short-buf unexpectedly OK\n");
+        return 1;
+    }
+    let mut over = [0u8; 16];
+    let _ = ninep::pack_u32(&mut over, 0, 16).unwrap();
+    let _ = ninep::pack_u8(&mut over, 4, ninep::P9_TWALK).unwrap();
+    let _ = ninep::pack_u16(&mut over, 5, 0).unwrap();
+    let _ = ninep::pack_u32(&mut over, 7, 0).unwrap();
+    let _ = ninep::pack_u32(&mut over, 11, 0).unwrap();
+    // nwname placed at offset 15 -- needs 2 bytes, buffer is 16 so the
+    // u16 read of nwname spans [15..17] -> partial, parse rejects.
+    if ninep::parse_twalk(&over).is_ok() {
+        t_putstr("alloc-smoke: ninep::parse_twalk short-buf unexpectedly OK\n");
+        return 1;
+    }
+
+    t_putstr("alloc-smoke: NineP codec OK\n");
     0
 }

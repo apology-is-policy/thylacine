@@ -1,13 +1,21 @@
-// 9P2000.L codec — corvus server side.
+// t::ninep -- 9P2000.L wire-format codec for native Thylacine servers.
 //
-// Mirror of kernel/include/thylacine/9p_wire.h but selectively: corvus
-// needs to PARSE Tmsgs (Tversion, Tauth, Tattach, Twalk, Tlopen, Tread,
-// Twrite, Tclunk) and BUILD Rmsgs (Rversion, Rattach, Rwalk, Rlopen,
-// Rread, Rwrite, Rclunk, Rlerror). The kernel-side codec only does the
-// other direction (client-side: build T, parse R), so corvus needs its
-// own.
+// At v1.0 the codec is server-side only: T-message parsers consume
+// inbound frames; R-message builders produce outbound frames. The
+// client-side counterparts (T-builders + R-parsers) are NOT here at
+// v1.0 -- native programs reach 9P services via the kernel 9P client
+// (mounted trees via SYS_WALK_OPEN; client SrvConn handshake via
+// SYS_SRV_CONNECT), not by speaking the protocol from userspace. The
+// client side lifts when a real consumer surfaces (compare U-2g's
+// deferral of std::thread::spawn(FnOnce) for the same reason).
 //
-// Wire conventions (per stratum/v2/docs/reference/20-9p.md):
+// Lifted from corvus's private `p9` module (P5-corvus-srv-impl-b3b at
+// 4bf689c) as U-2h-ninep -- any future native 9P server (a successor
+// to corvus, a Plan 9-shaped /srv publisher, a slate-style TUI daemon)
+// reaches for the same codec.
+//
+// Wire conventions (canonical reference: `kernel/include/thylacine/9p_wire.h`;
+// matches `stratum/v2/docs/reference/20-9p.md`):
 //   - All multi-byte integers are LITTLE-ENDIAN.
 //   - 9P-strings are length-prefixed (u16 LE), NOT NUL-terminated. The
 //     unpack returns a zero-copy slice into the caller's buffer.
@@ -15,15 +23,30 @@
 //     is the TOTAL message length INCLUDING the size field itself.
 //   - A qid is 13 bytes on the wire: [type: u8][version: u32][path: u64].
 //
-// Error convention: every function returns a Result<usize, ()> — Ok(n)
+// Error convention: every function returns a Result<usize, ()> -- Ok(n)
 // is bytes consumed/produced; Err(()) is "buffer too small / message
 // malformed / unexpected discriminant". The caller short-circuits on
-// the first Err and replies with Rlerror.
-
-#![allow(dead_code)]
+// the first Err and replies with Rlerror. The error type is the unit
+// because every failure mode is "wire violation"; downstream Rlerror
+// mapping distinguishes EPROTO from EBADF / EISDIR / etc. via the
+// caller's own logic. Promoting to t::err::Error is a v1.x cleanup
+// when a non-corvus consumer surfaces that needs richer error context.
+//
+// What this module does NOT do:
+//   - No fid table -- the server (corvus, future others) owns the
+//     per-connection fid lifecycle (I-11).
+//   - No tag allocation -- tags arrive in inbound Tmsgs and echo in
+//     outbound Rmsgs; uniqueness across a session (I-10) is the
+//     client's invariant, not the server's.
+//   - No I/O -- pack/parse work on caller-supplied byte buffers; the
+//     transport (SrvConn byte-mode pipe, mounted Spoor, future TCP)
+//     is the caller's concern.
+//   - No session state -- msize is negotiated once at Tversion and
+//     stored by the caller; subsequent buffers are sized to msize.
 
 // =============================================================================
-// 9P2000.L message types (the subset corvus serves).
+// 9P2000.L message types (the subset corvus serves; matches the kernel
+// wire header). Extend as new operations land.
 // =============================================================================
 
 pub const P9_TVERSION: u8 = 100;
@@ -44,8 +67,8 @@ pub const P9_TCLUNK: u8   = 120;
 pub const P9_RCLUNK: u8   = 121;
 pub const P9_RLERROR: u8  = 7;
 
-// QID type bits (the v1.0 surface — corvus's namespace is one dir + one
-// file, no symlinks/temp).
+// QID type bits (the v1.0 surface -- corvus's namespace is one dir +
+// one file, no symlinks/temp).
 pub const P9_QTDIR: u8  = 0x80;
 pub const P9_QTFILE: u8 = 0x00;
 
@@ -53,7 +76,7 @@ pub const P9_QTFILE: u8 = 0x00;
 pub const P9_NOFID: u32 = 0xFFFF_FFFF;
 pub const P9_NOTAG: u16 = 0xFFFF;
 
-// Header + qid widths (load-bearing — the wire codec depends on them
+// Header + qid widths (load-bearing -- the wire codec depends on them
 // AND they're _Static_assert-pinned in the kernel header).
 pub const P9_HDR_LEN: usize = 7;
 pub const P9_QID_LEN: usize = 13;
@@ -64,7 +87,9 @@ pub const P9_QID_LEN: usize = 13;
 pub const P9_MAX_WALK: usize = 16;
 pub const P9_NAME_MAX: usize = 255;
 
-// Selected Linux errnos used in Rlerror responses.
+// Selected Linux errnos used in Rlerror responses. Match POSIX values
+// (and Thylacine's T_E_* registry per docs/ERRORS.md -- the Rlerror
+// numeric is what musl + glibc translate to errno on the client).
 pub const E_PERM: u32     = 1;
 pub const E_NOENT: u32    = 2;
 pub const E_BADF: u32     = 9;
@@ -79,9 +104,11 @@ pub const E_PROTO: u32    = 71;
 pub const E_NOSYS: u32    = 38;
 
 // =============================================================================
-// Qid — in-memory shape of the 13-byte wire qid.
+// Qid -- in-memory shape of the 13-byte wire qid.
 // =============================================================================
 
+/// In-memory shape of a 9P qid. Pack via [`pack_qid`]; the wire layout
+/// is `[kind: u8][version: u32][path: u64]` = 13 bytes.
 #[derive(Copy, Clone, Default, Debug)]
 pub struct Qid {
     pub kind: u8,    // P9_QT*
@@ -90,7 +117,7 @@ pub struct Qid {
 }
 
 // =============================================================================
-// Primitive unpackers — zero-copy slice into the caller's buffer.
+// Primitive unpackers -- zero-copy slice into the caller's buffer.
 // =============================================================================
 
 pub fn unpack_u8(buf: &[u8], off: usize) -> Result<(u8, usize), ()> {
@@ -122,8 +149,8 @@ pub fn unpack_u64(buf: &[u8], off: usize) -> Result<(u64, usize), ()> {
     Ok((v, off + 8))
 }
 
-// unpack_str — returns a zero-copy slice into `buf`. Caller MUST not
-// retain it past the buffer's lifetime.
+/// Zero-copy string slice into `buf`. Caller MUST NOT retain it past
+/// the buffer's lifetime. Returns `(slice, new_offset)`.
 pub fn unpack_str<'a>(buf: &'a [u8], off: usize) -> Result<(&'a [u8], usize), ()> {
     let (len, p) = unpack_u16(buf, off)?;
     let end = p + len as usize;
@@ -132,7 +159,7 @@ pub fn unpack_str<'a>(buf: &'a [u8], off: usize) -> Result<(&'a [u8], usize), ()
 }
 
 // =============================================================================
-// Primitive packers — write at `out[off..]`, return new offset.
+// Primitive packers -- write at `out[off..]`, return new offset.
 // =============================================================================
 
 pub fn pack_u8(out: &mut [u8], off: usize, v: u8) -> Result<usize, ()> {
@@ -180,9 +207,11 @@ pub fn pack_qid(out: &mut [u8], off: usize, q: &Qid) -> Result<usize, ()> {
 }
 
 // =============================================================================
-// Header peek — extract size + type + tag without consuming the body.
+// Header peek -- extract size + type + tag without consuming the body.
 // =============================================================================
 
+/// Parsed common header. `size` is the TOTAL message length INCLUDING
+/// the size field itself.
 #[derive(Copy, Clone, Debug)]
 pub struct Header {
     pub size: u32,
@@ -190,6 +219,7 @@ pub struct Header {
     pub tag: u16,
 }
 
+/// Read the 7-byte common header from `buf[0..7]`.
 pub fn peek_header(buf: &[u8]) -> Result<Header, ()> {
     if buf.len() < P9_HDR_LEN { return Err(()); }
     let (size, p) = unpack_u32(buf, 0)?;
@@ -199,8 +229,8 @@ pub fn peek_header(buf: &[u8]) -> Result<Header, ()> {
 }
 
 // =============================================================================
-// Tmsg parsers — corvus's server-side input. Each takes the FULL framed
-// Tmsg (header + body); returns the parsed fields.
+// Tmsg parsers -- server-side input. Each takes the FULL framed Tmsg
+// (header + body); returns the parsed fields.
 //
 // Convention: the size + type are already validated by the dispatcher
 // (peek_header); the parser starts at offset P9_HDR_LEN.
@@ -236,10 +266,9 @@ pub fn parse_tattach(buf: &[u8]) -> Result<TattachArgs<'_>, ()> {
     Ok(TattachArgs { fid, afid, uname, aname, n_uname })
 }
 
-// Twalk — variable-length wname array. The caller provides an `out_names`
-// slice; parse_twalk fills it with zero-copy slices into the body and
-// returns (fid, newfid, nwname). `nwname` ≤ out_names.len() AND ≤
-// P9_MAX_WALK; the parser rejects anything larger.
+/// Twalk -- variable-length wname array. Names are zero-copy slices
+/// into the body; the parser rejects nwname > P9_MAX_WALK and per-name
+/// length > P9_NAME_MAX, so the caller never sees a malformed frame.
 pub struct TwalkArgs<'a> {
     pub fid: u32,
     pub newfid: u32,
@@ -316,12 +345,12 @@ pub fn parse_tclunk(buf: &[u8]) -> Result<TclunkArgs, ()> {
 }
 
 // =============================================================================
-// Rmsg builders — corvus's server-side output. Each writes a full framed
-// Rmsg into `out`; returns the byte count written. The `size` field in
-// the header is back-patched after the body length is known.
+// Rmsg builders -- server-side output. Each writes a full framed Rmsg
+// into `out`; returns the byte count written. The `size` field in the
+// header is back-patched after the body length is known.
 //
-// Caller passes a buffer sized to hold the largest Rmsg corvus emits.
-// For corvus that's bounded by msize (negotiated at Tversion).
+// Caller passes a buffer sized to hold the largest Rmsg the server
+// emits. For corvus that's bounded by msize (negotiated at Tversion).
 // =============================================================================
 
 // Write the common header with a placeholder size of 0, returning the
@@ -358,12 +387,12 @@ pub fn build_rattach(out: &mut [u8], tag: u16, qid: &Qid) -> Result<usize, ()> {
     Ok(p)
 }
 
-// build_rwalk: writes `nwqid` qids from `qids[0..nwqid]`. Per the spec,
-// `nwqid` must equal the count of components actually walked; if all
-// `nwname` components walked successfully, nwqid == nwname (and the
-// last qid is the destination). Partial walk on a not-found path
-// returns the prefix that succeeded; corvus at v1.0 either walks
-// completely or fails the whole Twalk with Rlerror(ENOENT).
+/// Write `nwqid` qids from `qids[0..nwqid]`. Per the spec, `nwqid` must
+/// equal the count of components actually walked; if all `nwname`
+/// components walked successfully, `nwqid == nwname` (and the last qid
+/// is the destination). Partial walk on a not-found path returns the
+/// prefix that succeeded; corvus at v1.0 either walks completely or
+/// fails the whole Twalk with Rlerror(ENOENT).
 pub fn build_rwalk(out: &mut [u8], tag: u16, qids: &[Qid]) -> Result<usize, ()> {
     if qids.len() > P9_MAX_WALK { return Err(()); }
     let p = build_header(out, P9_RWALK, tag)?;
@@ -383,9 +412,9 @@ pub fn build_rlopen(out: &mut [u8], tag: u16, qid: &Qid, iounit: u32) -> Result<
     Ok(p)
 }
 
-// build_rread: write [count: u32][data: u8 * count]. `data` is COPIED
-// into the output buffer. Caller bounds `data.len()` by negotiated
-// msize - P9_HDR_LEN - 4 (the Rread header + count overhead).
+/// Write `[count: u32][data: u8 * count]`. `data` is COPIED into the
+/// output buffer. Caller bounds `data.len()` by negotiated `msize -
+/// P9_HDR_LEN - 4` (the Rread header + count overhead).
 pub fn build_rread(out: &mut [u8], tag: u16, data: &[u8]) -> Result<usize, ()> {
     if data.len() > u32::MAX as usize { return Err(()); }
     let p = build_header(out, P9_RREAD, tag)?;

@@ -97,7 +97,10 @@
 
 extern crate alloc;
 
-mod p9;
+// 9P2000.L server-side codec. Lifted from corvus's private `p9` module
+// into `libthyla_rs::ninep` at U-2h-ninep; aliased back to `p9` so the
+// existing dispatcher references survive byte-identical.
+use libthyla_rs::ninep as p9;
 
 use libthyla_rs::{
     t_cap_grant, t_close, t_explicit_bzero, t_getrandom, t_mlockall, t_poll,
