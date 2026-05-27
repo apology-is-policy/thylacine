@@ -11,6 +11,9 @@
 //   U-2c-io:       Cursor (in-mem Read/Seek), File::open + Read over
 //                  /system.key in devramfs (validates SYS_WALK_OPEN
 //                  + SYS_READ + SYS_LSEEK round-trip via t::io traits)
+//   U-2c-fs:       File::metadata, free fs::{metadata, exists, is_file,
+//                  is_dir}, OpenOptions builder (validates SYS_FSTAT
+//                  + open-mode composition)
 //
 // Spawned by joey at boot; success prints a single "alloc-smoke: ...
 // OK" line per module exercised + exits 0; any failed check prints a
@@ -40,7 +43,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use libthyla_rs::alloc::ThylaAlloc;
-use libthyla_rs::fs::{Component, File, Path, PathBuf};
+use libthyla_rs::err::Error;
+use libthyla_rs::fs::{self, Component, File, OpenOptions, Path, PathBuf};
 use libthyla_rs::io::{Cursor, Read, Seek, SeekFrom};
 use libthyla_rs::t_putstr;
 
@@ -396,5 +400,124 @@ pub extern "C" fn rs_main() -> i64 {
     }
 
     t_putstr("alloc-smoke: Cursor + File + Read + Seek OK\n");
+
+    // ====================================================================
+    // U-2c-fs: Metadata, free functions, OpenOptions
+    // ====================================================================
+
+    // File::metadata on an open File.
+    let sk = match File::open("/system.key") {
+        Ok(f) => f,
+        Err(_) => {
+            t_putstr("alloc-smoke: File::open(/system.key) for metadata FAILED\n");
+            return 1;
+        }
+    };
+    let md = match sk.metadata() {
+        Ok(m) => m,
+        Err(_) => {
+            t_putstr("alloc-smoke: File::metadata FAILED\n");
+            return 1;
+        }
+    };
+    if md.len() != 3656 {
+        t_putstr("alloc-smoke: Metadata::len mismatch FAILED\n");
+        return 1;
+    }
+    if !md.is_file() || md.is_dir() {
+        t_putstr("alloc-smoke: Metadata::is_file/is_dir FAILED\n");
+        return 1;
+    }
+    // mode should be 0o100644 per the joey boot probe. permissions()
+    // masks off the type bits, leaving 0o644.
+    if md.permissions() != 0o644 {
+        t_putstr("alloc-smoke: Metadata::permissions FAILED\n");
+        return 1;
+    }
+    drop(sk);
+
+    // Free-function metadata: same checks, single line.
+    let md2 = match fs::metadata("/system.key") {
+        Ok(m) => m,
+        Err(_) => {
+            t_putstr("alloc-smoke: fs::metadata FAILED\n");
+            return 1;
+        }
+    };
+    if md2.len() != 3656 || !md2.is_file() {
+        t_putstr("alloc-smoke: fs::metadata fields FAILED\n");
+        return 1;
+    }
+
+    // exists / is_file / is_dir.
+    if !fs::exists("/system.key") {
+        t_putstr("alloc-smoke: fs::exists(/system.key) FAILED\n");
+        return 1;
+    }
+    if fs::exists("/no-such-file-thylacine") {
+        t_putstr("alloc-smoke: fs::exists(missing) unexpectedly true\n");
+        return 1;
+    }
+    if !fs::is_file("/system.key") {
+        t_putstr("alloc-smoke: fs::is_file(/system.key) FAILED\n");
+        return 1;
+    }
+    if fs::is_dir("/system.key") {
+        t_putstr("alloc-smoke: fs::is_dir(/system.key) unexpectedly true\n");
+        return 1;
+    }
+
+    // OpenOptions: explicit-read open.
+    let mut sk3 = match OpenOptions::new().read(true).open("/system.key") {
+        Ok(f) => f,
+        Err(_) => {
+            t_putstr("alloc-smoke: OpenOptions::new().read(true).open FAILED\n");
+            return 1;
+        }
+    };
+    let mut probe = [0u8; 8];
+    if sk3.read(&mut probe).is_err() {
+        t_putstr("alloc-smoke: OpenOptions-opened File read FAILED\n");
+        return 1;
+    }
+    drop(sk3);
+
+    // OpenOptions: no read or write -> InvalidArgument.
+    match OpenOptions::new().open("/system.key") {
+        Err(Error::InvalidArgument) => {}
+        _ => {
+            t_putstr("alloc-smoke: OpenOptions::new()-no-mode unexpectedly succeeded\n");
+            return 1;
+        }
+    }
+
+    // OpenOptions: truncate without write -> InvalidArgument.
+    match OpenOptions::new().read(true).truncate(true).open("/system.key") {
+        Err(Error::InvalidArgument) => {}
+        _ => {
+            t_putstr("alloc-smoke: OpenOptions::truncate-without-write unexpectedly succeeded\n");
+            return 1;
+        }
+    }
+
+    // OpenOptions: create requested -> NotImplemented (v1 lacks kernel surface).
+    match OpenOptions::new().write(true).create(true).open("/no-such") {
+        Err(Error::NotImplemented) => {}
+        _ => {
+            t_putstr("alloc-smoke: OpenOptions::create did not return NotImplemented\n");
+            return 1;
+        }
+    }
+
+    // OpenOptions: append requested -> NotImplemented.
+    match OpenOptions::new().write(true).append(true).open("/system.key") {
+        Err(Error::NotImplemented) => {}
+        _ => {
+            t_putstr("alloc-smoke: OpenOptions::append did not return NotImplemented\n");
+            return 1;
+        }
+    }
+
+    t_putstr("alloc-smoke: Metadata + OpenOptions + free fns OK\n");
     0
 }

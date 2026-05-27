@@ -114,7 +114,16 @@ impl File {
         self.handle.rights()
     }
 
-    fn open_with_omode(path: &Path, omode: u32) -> Result<File> {
+    /// Fetch the file's metadata via SYS_FSTAT.
+    ///
+    /// Returns size, type (file/dir/char-device), mode, link count,
+    /// timestamps, 9P qid, blksize, blocks. See `t::fs::Metadata`.
+    #[inline]
+    pub fn metadata(&self) -> Result<super::Metadata> {
+        super::metadata::fstat_fd(self.handle.raw())
+    }
+
+    pub(crate) fn open_with_omode(path: &Path, omode: u32) -> Result<File> {
         if path.is_empty() {
             return Err(Error::InvalidArgument);
         }

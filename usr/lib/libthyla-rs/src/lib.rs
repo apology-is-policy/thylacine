@@ -43,6 +43,7 @@ use core::panic::PanicInfo;
 // U-2b: alloc.
 // U-2c-path: fs::{Path, PathBuf, Components}.
 // U-2c-io: io::{Read, Write, Seek, BufRead, BufReader, Cursor, SeekFrom} + fs::File.
+// U-2c-fs: fs::{OpenOptions, Metadata} + free functions (metadata, exists, is_file, is_dir).
 //
 // `extern crate alloc` brings the standard `alloc` crate (String,
 // Vec, Box, Borrow, ToOwned) into libthyla-rs's namespace so
@@ -121,8 +122,10 @@ pub const T_SYS_BURROW_DETACH: u64    = 38;
 // Spoor (or from the territory root via T_WALK_OPEN_FROM_ROOT sentinel).
 // Multi-component paths are walked per-component by the caller.
 // P6-pouch-stratumd-boot sub-chunk 16b-γ-syscalls: lseek + fstat for
-// POSIX file-position semantics. Backs t::fs::File (U-2c-io).
+// POSIX file-position semantics. Backs t::fs::File (U-2c-io) and
+// t::fs::Metadata (U-2c-fs).
 pub const T_SYS_WALK_OPEN: u64        = 34;
+pub const T_SYS_FSTAT: u64            = 50;
 pub const T_SYS_LSEEK: u64            = 51;
 
 // SYS_WALK_OPEN omode bits — must mirror SYS_WALK_OPEN_OMODE_VALID in
@@ -149,6 +152,15 @@ pub const T_WALK_OPEN_NAME_MAX: usize = 64;
 pub const T_SEEK_SET: u32             = 0;
 pub const T_SEEK_CUR: u32             = 1;
 pub const T_SEEK_END: u32             = 2;
+
+// POSIX-shaped mode bits returned in struct t_stat.mode — must mirror
+// kernel/include/thylacine/syscall.h. Subset that v1.0 Devs populate
+// (regular file / directory / character device). T_S_IFMT is the mask
+// for extracting the type.
+pub const T_S_IFMT:  u32              = 0o170000;
+pub const T_S_IFREG: u32              = 0o100000;
+pub const T_S_IFDIR: u32              = 0o040000;
+pub const T_S_IFCHR: u32              = 0o020000;
 
 // SYS_SPAWN_WITH_PERMS perm_flags — must mirror SPAWN_PERM_* in
 // kernel/include/thylacine/syscall.h.
@@ -956,6 +968,26 @@ pub unsafe fn t_lseek(spoor_fd: i64, offset: i64, whence: u32) -> i64 {
         in("x1") offset,
         in("x2") whence as u64,
         in("x8") T_SYS_LSEEK,
+        options(nostack)
+    );
+    x0
+}
+
+// t_fstat — fill a user-VA 72-byte `struct t_stat` (laid out per
+// kernel/include/thylacine/syscall.h's ABI pins) with the open Spoor's
+// metadata. Returns 0 on success, -1 on bad fd / unaligned stat_va /
+// stat_va outside user VA / Dev without stat_native vtable op.
+//
+// `stat_va` must point to at least 72 bytes of writable, 8-byte-aligned
+// user memory. Backs t::fs::Metadata (U-2c-fs).
+#[inline(always)]
+pub unsafe fn t_fstat(spoor_fd: i64, stat_va: *mut u8) -> i64 {
+    let mut x0: i64 = spoor_fd;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") stat_va as u64,
+        in("x8") T_SYS_FSTAT,
         options(nostack)
     );
     x0
