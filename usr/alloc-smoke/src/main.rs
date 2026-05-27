@@ -14,6 +14,9 @@
 //   U-2c-fs:       File::metadata, free fs::{metadata, exists, is_file,
 //                  is_dir}, OpenOptions builder (validates SYS_FSTAT
 //                  + open-mode composition)
+//   U-2d:          process::pipe round-trip + EOF; Command::spawn
+//                  hello-rs with piped stdio + wait (validates
+//                  SYS_PIPE + SYS_SPAWN_FULL_ARGV + SYS_WAIT_PID)
 //
 // Spawned by joey at boot; success prints a single "alloc-smoke: ...
 // OK" line per module exercised + exits 0; any failed check prints a
@@ -45,7 +48,8 @@ use alloc::vec::Vec;
 use libthyla_rs::alloc::ThylaAlloc;
 use libthyla_rs::err::Error;
 use libthyla_rs::fs::{self, Component, File, OpenOptions, Path, PathBuf};
-use libthyla_rs::io::{Cursor, Read, Seek, SeekFrom};
+use libthyla_rs::io::{Cursor, Read, Seek, SeekFrom, Write};
+use libthyla_rs::process::{self, Command, Stdio};
 use libthyla_rs::t_putstr;
 
 #[global_allocator]
@@ -519,5 +523,101 @@ pub extern "C" fn rs_main() -> i64 {
     }
 
     t_putstr("alloc-smoke: Metadata + OpenOptions + free fns OK\n");
+
+    // ====================================================================
+    // U-2d: process::pipe + Command + Child + ExitStatus
+    // ====================================================================
+
+    // pipe() round-trip: write to writer, read from reader.
+    let (mut rd, mut wr) = match process::pipe() {
+        Ok(p) => p,
+        Err(_) => {
+            t_putstr("alloc-smoke: process::pipe() FAILED\n");
+            return 1;
+        }
+    };
+    let payload = b"thylacine";
+    let n = match wr.write(payload) {
+        Ok(n) => n,
+        Err(_) => {
+            t_putstr("alloc-smoke: pipe write FAILED\n");
+            return 1;
+        }
+    };
+    if n != payload.len() {
+        t_putstr("alloc-smoke: pipe write short FAILED\n");
+        return 1;
+    }
+    let mut got = [0u8; 16];
+    let r = match rd.read(&mut got) {
+        Ok(r) => r,
+        Err(_) => {
+            t_putstr("alloc-smoke: pipe read FAILED\n");
+            return 1;
+        }
+    };
+    if r != payload.len() || &got[..r] != payload {
+        t_putstr("alloc-smoke: pipe round-trip content FAILED\n");
+        return 1;
+    }
+
+    // pipe() EOF: drop writer; reader should see Ok(0).
+    drop(wr);
+    let eof = match rd.read(&mut got) {
+        Ok(n) => n,
+        Err(_) => {
+            t_putstr("alloc-smoke: pipe read-after-drop FAILED\n");
+            return 1;
+        }
+    };
+    if eof != 0 {
+        t_putstr("alloc-smoke: pipe EOF on drop FAILED\n");
+        return 1;
+    }
+    drop(rd);
+
+    // Command::spawn(hello-rs) with piped stdio. We must use Piped (not
+    // Inherit) because alloc-smoke was spawned by joey via the no-fds
+    // SYS_SPAWN path -- our fd table has no slots 0/1/2 to inherit
+    // FROM. Piped creates fresh pipes whose fds we control.
+    //
+    // hello-rs prints via t_putstr -> SYS_PUTS -> UART, NOT via stdio
+    // fds, so the piped stdout/stderr stays empty; the test confirms
+    // only that spawn + wait + exit-status round-trip works.
+    let mut child = match Command::new("hello-rs")
+        .stdin(Stdio::Piped)
+        .stdout(Stdio::Piped)
+        .stderr(Stdio::Piped)
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(_) => {
+            t_putstr("alloc-smoke: Command::spawn(hello-rs) FAILED\n");
+            return 1;
+        }
+    };
+    if child.pid() <= 0 {
+        t_putstr("alloc-smoke: Child::pid out of range FAILED\n");
+        return 1;
+    }
+    // Close the parent's stdin write-end so hello-rs's notional stdin
+    // sees EOF immediately (hello-rs doesn't read, but discipline).
+    drop(child.stdin.take());
+    drop(child.stdout.take());
+    drop(child.stderr.take());
+
+    let status = match child.wait() {
+        Ok(s) => s,
+        Err(_) => {
+            t_putstr("alloc-smoke: Child::wait FAILED\n");
+            return 1;
+        }
+    };
+    if !status.success() {
+        t_putstr("alloc-smoke: hello-rs exit non-zero FAILED\n");
+        return 1;
+    }
+
+    t_putstr("alloc-smoke: pipe + Command + Child OK\n");
     0
 }

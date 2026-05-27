@@ -123,6 +123,16 @@ impl File {
         super::metadata::fstat_fd(self.handle.raw())
     }
 
+    /// Construct a File from an existing Handle. `pub(crate)` so
+    /// other libthyla-rs modules (t::process::pipe, t::process's
+    /// Stdio::Piped handling) can wrap kernel-returned pipe fds as
+    /// Files. External callers obtain Files via File::open / create
+    /// / OpenOptions::open.
+    #[inline]
+    pub(crate) fn from_raw_handle(handle: Handle) -> File {
+        File { handle }
+    }
+
     pub(crate) fn open_with_omode(path: &Path, omode: u32) -> Result<File> {
         if path.is_empty() {
             return Err(Error::InvalidArgument);

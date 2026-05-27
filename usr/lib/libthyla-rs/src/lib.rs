@@ -44,6 +44,7 @@ use core::panic::PanicInfo;
 // U-2c-path: fs::{Path, PathBuf, Components}.
 // U-2c-io: io::{Read, Write, Seek, BufRead, BufReader, Cursor, SeekFrom} + fs::File.
 // U-2c-fs: fs::{OpenOptions, Metadata} + free functions (metadata, exists, is_file, is_dir).
+// U-2d: process::{Command, Child, ExitStatus, Stdio, pipe}.
 //
 // `extern crate alloc` brings the standard `alloc` crate (String,
 // Vec, Box, Borrow, ToOwned) into libthyla-rs's namespace so
@@ -68,6 +69,7 @@ pub mod handle;
 pub mod alloc;
 pub mod fs;
 pub mod io;
+pub mod process;
 
 // =============================================================================
 // Syscall numbers — MUST mirror kernel/include/thylacine/syscall.h.
@@ -86,6 +88,13 @@ pub const T_SYS_PIPE: u64            = 8;
 pub const T_SYS_READ: u64            = 9;
 pub const T_SYS_WRITE: u64           = 10;
 pub const T_SYS_CLOSE: u64           = 11;
+// P5-spawn-wait: reap one zombie child + return its (pid, status). Backs
+// t::process::Child::wait (U-2d).
+pub const T_SYS_WAIT_PID: u64        = 22;
+// P6-pouch-stratumd-boot 16b-alpha: combined spawn with argv pass-through.
+// Subsumes all earlier SYS_SPAWN_* surfaces; backs t::process::Command::spawn
+// (U-2d). Takes a single user-VA pointer to a struct TSpawnArgs (56 bytes).
+pub const T_SYS_SPAWN_FULL_ARGV: u64 = 49;
 // P5-corvus-syscalls (kernel side at 0db0dcf/d10d4ee). v1.0 hardening
 // syscalls used by /sbin/corvus startup.
 pub const T_SYS_MLOCKALL: u64        = 16;
@@ -161,6 +170,39 @@ pub const T_S_IFMT:  u32              = 0o170000;
 pub const T_S_IFREG: u32              = 0o100000;
 pub const T_S_IFDIR: u32              = 0o040000;
 pub const T_S_IFCHR: u32              = 0o020000;
+
+// SYS_SPAWN_FULL_ARGV bounds — must mirror SYS_SPAWN_ARGV_MAX +
+// SYS_SPAWN_ARGV_DATA_MAX in kernel/include/thylacine/syscall.h.
+pub const T_SYS_SPAWN_ARGV_MAX: usize        = 16;
+pub const T_SYS_SPAWN_ARGV_DATA_MAX: usize   = 4096;
+
+// Maximum binary name length (mirror SYS_SPAWN_NAME_MAX).
+pub const T_SPAWN_NAME_MAX: usize    = 64;
+
+// Maximum inherited-fd count (mirror SYS_SPAWN_MAX_FDS).
+pub const T_SPAWN_MAX_FDS: usize     = 16;
+
+// (T_CAP_* constants are defined earlier in this file alongside the
+// other rights/caps mirrors; not re-declared here.)
+
+// SYS_SPAWN_FULL_ARGV argument record (56 bytes; ABI-pinned per
+// kernel/include/thylacine/syscall.h + libt mirror). #[repr(C)] so the
+// kernel reads our struct byte-for-byte.
+#[repr(C)]
+pub struct TSpawnArgs {
+    pub name_va:        u64, // 0
+    pub argv_data_va:   u64, // 8
+    pub fd_list_va:     u64, // 16
+    pub name_len:       u32, // 24
+    pub argv_data_len:  u32, // 28
+    pub argc:           u32, // 32
+    pub fd_count:       u32, // 36
+    pub perm_flags:     u32, // 40
+    pub _pad_envp:      u32, // 44 — must be 0 at v1.0
+    pub cap_mask:       u64, // 48
+}
+// Compile-time pin matching kernel's _Static_assert(sizeof(...) == 56).
+const _: () = assert!(core::mem::size_of::<TSpawnArgs>() == 56);
 
 // SYS_SPAWN_WITH_PERMS perm_flags — must mirror SPAWN_PERM_* in
 // kernel/include/thylacine/syscall.h.
@@ -988,6 +1030,43 @@ pub unsafe fn t_fstat(spoor_fd: i64, stat_va: *mut u8) -> i64 {
         inlateout("x0") x0,
         in("x1") stat_va as u64,
         in("x8") T_SYS_FSTAT,
+        options(nostack)
+    );
+    x0
+}
+
+// t_spawn_full_argv — combined-spawn primitive with argv pass-through.
+// Subsumes every earlier SYS_SPAWN_* surface. Reads the calling Proc's
+// 56-byte `TSpawnArgs` struct at `req_va` and rfork-execs a fresh child.
+// Returns the child's pid (positive) on success, -1 on any rejection
+// (see SYS_SPAWN_FULL_ARGV kernel header for the full list).
+//
+// Backs t::process::Command::spawn (U-2d).
+#[inline(always)]
+pub unsafe fn t_spawn_full_argv(req_va: *const TSpawnArgs) -> i64 {
+    let mut x0: i64 = req_va as i64;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x8") T_SYS_SPAWN_FULL_ARGV,
+        options(nostack)
+    );
+    x0
+}
+
+// t_wait_pid — block until one of the caller's children enters ZOMBIE,
+// then reap it. On success returns the child's pid (positive) and
+// populates `*status_out` with the child's exit status. On failure
+// (no children / unmapped status pointer) returns -1.
+//
+// Backs t::process::Child::wait (U-2d).
+#[inline(always)]
+pub unsafe fn t_wait_pid(status_out: *mut i32) -> i64 {
+    let mut x0: i64 = status_out as i64;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x8") T_SYS_WAIT_PID,
         options(nostack)
     );
     x0
