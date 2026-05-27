@@ -50,6 +50,7 @@ use libthyla_rs::{t_putstr, T_PROT_READ, T_PROT_WRITE};
 use libutopia::line_editor::{
     EditorAction, LineEditor, StaticCompletionSource,
 };
+use libutopia::parser::{tokenize, DqPart, ParseErrorKind, TokenKind};
 
 #[global_allocator]
 static GLOBAL_ALLOCATOR: ThylaAlloc = ThylaAlloc;
@@ -77,6 +78,9 @@ pub extern "C" fn rs_main() -> i64 {
         return rc;
     }
     if let Err(rc) = flow_line_editor() {
+        return rc;
+    }
+    if let Err(rc) = flow_parser_lexer() {
         return rc;
     }
 
@@ -919,5 +923,260 @@ fn flow_line_editor() -> Result<(), i64> {
     le.reset();
 
     t_putstr("u-test: line editor OK\n");
+    Ok(())
+}
+
+// =============================================================================
+// Flow 8 -- libutopia::parser::lexer (U-5a tokenizer for the rc-shape parser)
+// =============================================================================
+//
+// 7 probes covering the load-bearing token shapes from UTOPIA-SHELL-
+// DESIGN.md sections 5-9. Each probe validates a distinct lex
+// surface so a regression in one place doesn't mask another.
+//
+// The lexer's correctness IS proven by the ~50 cfg(test) host unit
+// tests in libutopia/src/parser/lexer.rs::tests; the probes below
+// validate that the same code paths produce the same answers on
+// the actual Thylacine target (the ThylaAlloc heap path differs
+// from the host's allocator, and a UTF-8 char-walk bug would
+// surface here if it did anywhere).
+fn flow_parser_lexer() -> Result<(), i64> {
+    // Probe 1 -- empty input emits only the synthetic EOF token.
+    {
+        let toks = match tokenize("") {
+            Ok(t) => t,
+            Err(_) => {
+                t_putstr("u-test: flow_parser_lexer: probe 1 tokenize(\"\") FAILED\n");
+                return Err(1);
+            }
+        };
+        if toks.len() != 1 || !matches!(toks[0].kind, TokenKind::Eof) {
+            t_putstr("u-test: flow_parser_lexer: probe 1 empty -> Eof FAILED\n");
+            return Err(1);
+        }
+    }
+
+    // Probe 2 -- multi-word command + Pipe operator + Eof.
+    {
+        let toks = match tokenize("foo | bar") {
+            Ok(t) => t,
+            Err(_) => {
+                t_putstr("u-test: flow_parser_lexer: probe 2 tokenize FAILED\n");
+                return Err(1);
+            }
+        };
+        if toks.len() != 4 {
+            t_putstr("u-test: flow_parser_lexer: probe 2 token count FAILED\n");
+            return Err(1);
+        }
+        match &toks[0].kind {
+            TokenKind::Word(s) if s == "foo" => {}
+            _ => {
+                t_putstr("u-test: flow_parser_lexer: probe 2 Word(foo) FAILED\n");
+                return Err(1);
+            }
+        }
+        if !matches!(&toks[1].kind, TokenKind::Pipe) {
+            t_putstr("u-test: flow_parser_lexer: probe 2 Pipe FAILED\n");
+            return Err(1);
+        }
+        match &toks[2].kind {
+            TokenKind::Word(s) if s == "bar" => {}
+            _ => {
+                t_putstr("u-test: flow_parser_lexer: probe 2 Word(bar) FAILED\n");
+                return Err(1);
+            }
+        }
+    }
+
+    // Probe 3 -- reserved word recognition (`let` is a keyword).
+    {
+        let toks = match tokenize("let x = 5") {
+            Ok(t) => t,
+            Err(_) => {
+                t_putstr("u-test: flow_parser_lexer: probe 3 tokenize FAILED\n");
+                return Err(1);
+            }
+        };
+        if !matches!(&toks[0].kind, TokenKind::Let) {
+            t_putstr("u-test: flow_parser_lexer: probe 3 Let reserved FAILED\n");
+            return Err(1);
+        }
+        if !matches!(&toks[2].kind, TokenKind::Equal) {
+            t_putstr("u-test: flow_parser_lexer: probe 3 Equal FAILED\n");
+            return Err(1);
+        }
+    }
+
+    // Probe 4 -- DqString with literal+var+literal+subst parts
+    // (the canonical interp example from scripture section 6.5).
+    {
+        let src = "let greeting = \"Hello, $user from $(pwd)\"";
+        let toks = match tokenize(src) {
+            Ok(t) => t,
+            Err(_) => {
+                t_putstr("u-test: flow_parser_lexer: probe 4 tokenize FAILED\n");
+                return Err(1);
+            }
+        };
+        // [Let, Word(greeting), Equal, DoubleQuoted, Eof] = 5 tokens.
+        if toks.len() != 5 {
+            t_putstr("u-test: flow_parser_lexer: probe 4 token count FAILED\n");
+            return Err(1);
+        }
+        match &toks[3].kind {
+            TokenKind::DoubleQuoted(parts) => {
+                if parts.len() != 4 {
+                    t_putstr("u-test: flow_parser_lexer: probe 4 dqparts count FAILED\n");
+                    return Err(1);
+                }
+                match &parts[0] {
+                    DqPart::Literal(s) if s == "Hello, " => {}
+                    _ => {
+                        t_putstr("u-test: flow_parser_lexer: probe 4 literal 0 FAILED\n");
+                        return Err(1);
+                    }
+                }
+                match &parts[1] {
+                    DqPart::Var(s) if s == "user" => {}
+                    _ => {
+                        t_putstr("u-test: flow_parser_lexer: probe 4 Var FAILED\n");
+                        return Err(1);
+                    }
+                }
+                match &parts[2] {
+                    DqPart::Literal(s) if s == " from " => {}
+                    _ => {
+                        t_putstr("u-test: flow_parser_lexer: probe 4 literal 2 FAILED\n");
+                        return Err(1);
+                    }
+                }
+                match &parts[3] {
+                    DqPart::Subst(s) if s == "pwd" => {}
+                    _ => {
+                        t_putstr("u-test: flow_parser_lexer: probe 4 Subst FAILED\n");
+                        return Err(1);
+                    }
+                }
+            }
+            _ => {
+                t_putstr("u-test: flow_parser_lexer: probe 4 DoubleQuoted FAILED\n");
+                return Err(1);
+            }
+        }
+    }
+
+    // Probe 5 -- heredoc body collection: <<EOF body EOF.
+    {
+        let toks = match tokenize("cat <<EOF\nhello\nEOF\n") {
+            Ok(t) => t,
+            Err(_) => {
+                t_putstr("u-test: flow_parser_lexer: probe 5 tokenize FAILED\n");
+                return Err(1);
+            }
+        };
+        // [Word(cat), HeredocStart, Newline, HeredocBody, Eof] = 5.
+        if toks.len() != 5 {
+            t_putstr("u-test: flow_parser_lexer: probe 5 token count FAILED\n");
+            return Err(1);
+        }
+        match &toks[1].kind {
+            TokenKind::HeredocStart {
+                tag,
+                interp: true,
+                strip_tabs: false,
+            } if tag == "EOF" => {}
+            _ => {
+                t_putstr("u-test: flow_parser_lexer: probe 5 HeredocStart FAILED\n");
+                return Err(1);
+            }
+        }
+        match &toks[3].kind {
+            TokenKind::HeredocBody(parts) => {
+                if parts.len() != 1 {
+                    t_putstr("u-test: flow_parser_lexer: probe 5 body parts FAILED\n");
+                    return Err(1);
+                }
+                match &parts[0] {
+                    DqPart::Literal(s) if s == "hello\n" => {}
+                    _ => {
+                        t_putstr("u-test: flow_parser_lexer: probe 5 body literal FAILED\n");
+                        return Err(1);
+                    }
+                }
+            }
+            _ => {
+                t_putstr("u-test: flow_parser_lexer: probe 5 HeredocBody FAILED\n");
+                return Err(1);
+            }
+        }
+    }
+
+    // Probe 6 -- regex literal after =~ (the one-shot lex mode).
+    {
+        let toks = match tokenize("$x =~ /^foo/") {
+            Ok(t) => t,
+            Err(_) => {
+                t_putstr("u-test: flow_parser_lexer: probe 6 tokenize FAILED\n");
+                return Err(1);
+            }
+        };
+        if toks.len() != 4 {
+            t_putstr("u-test: flow_parser_lexer: probe 6 token count FAILED\n");
+            return Err(1);
+        }
+        match &toks[0].kind {
+            TokenKind::Var(s) if s == "x" => {}
+            _ => {
+                t_putstr("u-test: flow_parser_lexer: probe 6 Var(x) FAILED\n");
+                return Err(1);
+            }
+        }
+        if !matches!(&toks[1].kind, TokenKind::EqualTilde) {
+            t_putstr("u-test: flow_parser_lexer: probe 6 EqualTilde FAILED\n");
+            return Err(1);
+        }
+        match &toks[2].kind {
+            TokenKind::Regex(s) if s == "^foo" => {}
+            _ => {
+                t_putstr("u-test: flow_parser_lexer: probe 6 Regex FAILED\n");
+                return Err(1);
+            }
+        }
+    }
+
+    // Probe 7 -- error case + span tracking: unterminated single
+    // quote returns ParseErrorKind::UnterminatedSingleQuote;
+    // separately, span on a basic word covers the right bytes.
+    {
+        let err = match tokenize("'no close") {
+            Ok(_) => {
+                t_putstr("u-test: flow_parser_lexer: probe 7 expected error FAILED\n");
+                return Err(1);
+            }
+            Err(e) => e,
+        };
+        if !matches!(err.kind, ParseErrorKind::UnterminatedSingleQuote) {
+            t_putstr("u-test: flow_parser_lexer: probe 7 ParseErrorKind FAILED\n");
+            return Err(1);
+        }
+        let toks = match tokenize("hello") {
+            Ok(t) => t,
+            Err(_) => {
+                t_putstr("u-test: flow_parser_lexer: probe 7 span tokenize FAILED\n");
+                return Err(1);
+            }
+        };
+        if toks[0].span.start != 0 || toks[0].span.end != 5 {
+            t_putstr("u-test: flow_parser_lexer: probe 7 Word span FAILED\n");
+            return Err(1);
+        }
+        if toks[1].span.start != 5 || toks[1].span.end != 5 {
+            t_putstr("u-test: flow_parser_lexer: probe 7 Eof point-span FAILED\n");
+            return Err(1);
+        }
+    }
+
+    t_putstr("u-test: parser lexer OK\n");
     Ok(())
 }

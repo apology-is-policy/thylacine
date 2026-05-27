@@ -35,6 +35,7 @@ extern crate alloc;
 pub mod ansi;
 pub mod line_editor;
 pub mod palette;
+pub mod parser;
 pub mod path;
 
 // Re-export the canonical Pale Fire glyph -- `⊢` U+22A2 RIGHT TACK
