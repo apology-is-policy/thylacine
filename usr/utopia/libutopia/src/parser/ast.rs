@@ -100,12 +100,29 @@ pub enum StatementKind {
     Break,
     /// `continue`
     Continue,
-    // === Deferred to U-5d ===
-    // Case(Box<CaseStmt>)
-    // Try(Box<TryStmt>)
-    // Trace(Vec<Statement>)
-    // OnNote(Box<OnNoteStmt>)
-    // MaskNote(Box<MaskNoteStmt>)
+    /// `case $x { pat1 pat2 => body ; pat3 => body ; * => body }` -- the
+    /// statement form of pattern matching (scripture 7.1). First match
+    /// wins; no fallthrough. Each arm's body is one Statement (use a
+    /// BraceBlock for multi-statement arms).
+    Case(Box<CaseStmt>),
+    /// `try { body } catch { catch_body }` -- error handling
+    /// (scripture 7.7). The catch block runs if any command in the
+    /// try body exits non-zero. `$errstr` is set by the evaluator
+    /// before the catch runs.
+    Try(Box<TryStmt>),
+    /// `trace { body }` -- block-scoped tracing (scripture 7.8).
+    /// Each command in the body is printed to stderr before execution
+    /// (set -x equivalent, scoped to the block).
+    Trace(Box<TraceStmt>),
+    /// `on note 'name' { body }` -- note handler registration
+    /// (scripture 9.5 + 10.7). The handler runs in the main poll
+    /// loop, not in an async signal context.
+    OnNote(Box<OnNoteStmt>),
+    /// `mask note 'name' { body }` -- note suppression block
+    /// (scripture 9.5 + 10.8). Notes are deferred while the body
+    /// runs; the registered handler (if any) fires immediately
+    /// after the block exits.
+    MaskNote(Box<MaskNoteStmt>),
 }
 
 // ---------------------------------------------------------------------
@@ -326,6 +343,97 @@ pub struct AssignStmt {
 }
 
 // ---------------------------------------------------------------------
+// Pattern matching, try/catch, trace, note handlers (U-5d)
+// ---------------------------------------------------------------------
+
+/// `case $x { pat => body ... }` -- the statement form. Each arm's
+/// body is one Statement; users wrap multi-statement bodies in a
+/// brace block.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CaseStmt {
+    /// The scrutinee: the value being matched. Parsed as a
+    /// `Value`-context Expr -- typically a Var, SingleQuoted, or
+    /// Concat.
+    pub scrutinee: Expr,
+    pub arms: Vec<CaseArm>,
+    pub span: Span,
+}
+
+/// One arm of a statement-form `case`. Multi-pattern arms are
+/// permitted (scripture 7.1: "Multi-pattern per branch
+/// (space-separated)").
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CaseArm {
+    /// One or more patterns separated by whitespace. Each pattern is
+    /// parsed as a `Value`-context Expr -- typically a Word with
+    /// glob metas (`*.c`), a quoted literal, or a Concat
+    /// (`*.$ext`). The `*` catch-all is just `Word("*")` and the
+    /// evaluator's glob engine handles it as "match anything".
+    pub patterns: Vec<Expr>,
+    /// The arm body: one Statement. Use a brace block (`{ ... }`)
+    /// for multi-statement bodies.
+    pub body: Statement,
+    pub span: Span,
+}
+
+/// `try { body } catch { catch }` (scripture 7.7). `catch` is
+/// required; the parser emits `UnexpectedToken { expected: "`catch`" }`
+/// if absent.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TryStmt {
+    pub body: Vec<Statement>,
+    pub catch: Vec<Statement>,
+    pub span: Span,
+}
+
+/// `trace { body }` (scripture 7.8).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TraceStmt {
+    pub body: Vec<Statement>,
+    pub span: Span,
+}
+
+/// `on note <name> { body }` (scripture 9.5 + 10.7). The note name
+/// is parsed as a `Value`-context Expr so that `'snare:int'`,
+/// `"snare:int"`, and bare `snare:int` all work; the evaluator
+/// resolves to a string at registration time.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OnNoteStmt {
+    pub note_name: Expr,
+    pub body: Vec<Statement>,
+    pub span: Span,
+}
+
+/// `mask note <name> { body }` (scripture 9.5 + 10.8). Same shape
+/// as `OnNote`; the evaluator masks delivery of the named note
+/// class while the body runs.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct MaskNoteStmt {
+    pub note_name: Expr,
+    pub body: Vec<Statement>,
+    pub span: Span,
+}
+
+/// `case $x { pat => value ... }` -- the expression form
+/// (scripture 7.2). Distinct from `CaseStmt` because each arm
+/// produces a single VALUE (Expr), not a Statement. Lives in
+/// `ExprKind::Case` so the AST has ONE canonical expression shape.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CaseExpr {
+    pub scrutinee: Box<Expr>,
+    pub arms: Vec<CaseExprArm>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CaseExprArm {
+    pub patterns: Vec<Expr>,
+    /// The arm value: a `Value`-context Expr.
+    pub value: Expr,
+    pub span: Span,
+}
+
+// ---------------------------------------------------------------------
 // Expression (U-5c)
 // ---------------------------------------------------------------------
 
@@ -426,6 +534,13 @@ pub enum ExprKind {
     /// glob pattern (Word/DoubleQuoted/SingleQuoted), the list
     /// (Var/List), or the regex literal.
     Match(MatchOp, Box<Expr>, Box<Expr>),
+
+    // === Pattern matching as expression (U-5d) ===
+    /// `case $x { pat => value ... }` -- the expression form
+    /// (scripture 7.2). The chosen branch's `value` becomes the
+    /// case expression's value. Distinct from `StatementKind::Case`
+    /// because each arm produces a single Expr (not a Statement).
+    Case(Box<CaseExpr>),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

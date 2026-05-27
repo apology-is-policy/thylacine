@@ -54,6 +54,7 @@ use libutopia::parser::{
     parse, parse_expr_tokens, tokenize, BinOp, CommandKind, DqPart, ExprContext, ExprKind, MatchOp,
     ParseErrorKind, RedirectKind, StatementKind, TokenKind, UnOp, Word,
 };
+// U-5d types for flow_parser_full.
 
 #[global_allocator]
 static GLOBAL_ALLOCATOR: ThylaAlloc = ThylaAlloc;
@@ -90,6 +91,9 @@ pub extern "C" fn rs_main() -> i64 {
         return rc;
     }
     if let Err(rc) = flow_parser_expr() {
+        return rc;
+    }
+    if let Err(rc) = flow_parser_full() {
         return rc;
     }
 
@@ -1791,5 +1795,334 @@ fn flow_parser_expr() -> Result<(), i64> {
     }
 
     t_putstr("u-test: parser expr OK\n");
+    Ok(())
+}
+
+// =====================================================================
+// flow_parser_full -- U-5d: pattern matching + try/catch + trace +
+// on/mask + case-as-expression. The U-5 parser arc closes here; this
+// probe validates the final statement-level + expression-level
+// surface end-to-end on the Thylacine target under ThylaAlloc.
+// =====================================================================
+
+fn flow_parser_full() -> Result<(), i64> {
+    // Probe 1: case-statement basic shape.
+    {
+        let s = match parse("case $x { *.c => echo C ; *.rs => echo Rust ; * => echo other }") {
+            Ok(s) => s,
+            Err(_) => {
+                t_putstr("u-test: flow_parser_full: probe 1 parse FAILED\n");
+                return Err(1);
+            }
+        };
+        if s.statements.len() != 1 {
+            t_putstr("u-test: flow_parser_full: probe 1 stmt count FAILED\n");
+            return Err(1);
+        }
+        match &s.statements[0].kind {
+            StatementKind::Case(c) => {
+                if c.arms.len() != 3 {
+                    t_putstr("u-test: flow_parser_full: probe 1 arm count FAILED\n");
+                    return Err(1);
+                }
+                match &c.scrutinee.kind {
+                    ExprKind::Var(v) if v == "x" => {}
+                    _ => {
+                        t_putstr("u-test: flow_parser_full: probe 1 scrutinee FAILED\n");
+                        return Err(1);
+                    }
+                }
+                // Arm 1: single pattern `*.c`.
+                if c.arms[0].patterns.len() != 1 {
+                    t_putstr("u-test: flow_parser_full: probe 1 arm[0] pat count FAILED\n");
+                    return Err(1);
+                }
+                match &c.arms[0].patterns[0].kind {
+                    ExprKind::Word(w) if w == "*.c" => {}
+                    _ => {
+                        t_putstr("u-test: flow_parser_full: probe 1 arm[0] pat shape FAILED\n");
+                        return Err(1);
+                    }
+                }
+                // Arm 2: catchall via `*` (still just Word("*")).
+                match &c.arms[2].patterns[0].kind {
+                    ExprKind::Word(w) if w == "*" => {}
+                    _ => {
+                        t_putstr("u-test: flow_parser_full: probe 1 catchall FAILED\n");
+                        return Err(1);
+                    }
+                }
+            }
+            _ => {
+                t_putstr("u-test: flow_parser_full: probe 1 not Case FAILED\n");
+                return Err(1);
+            }
+        }
+    }
+
+    // Probe 2: multi-pattern arm `*.c *.h => body`.
+    {
+        let s = match parse("case $x { *.c *.h => echo C ; * => echo other }") {
+            Ok(s) => s,
+            Err(_) => {
+                t_putstr("u-test: flow_parser_full: probe 2 parse FAILED\n");
+                return Err(1);
+            }
+        };
+        match &s.statements[0].kind {
+            StatementKind::Case(c) => {
+                if c.arms[0].patterns.len() != 2 {
+                    t_putstr("u-test: flow_parser_full: probe 2 multi-pat FAILED\n");
+                    return Err(1);
+                }
+                match &c.arms[0].patterns[1].kind {
+                    ExprKind::Word(w) if w == "*.h" => {}
+                    _ => {
+                        t_putstr("u-test: flow_parser_full: probe 2 pat[1] shape FAILED\n");
+                        return Err(1);
+                    }
+                }
+            }
+            _ => {
+                t_putstr("u-test: flow_parser_full: probe 2 not Case FAILED\n");
+                return Err(1);
+            }
+        }
+    }
+
+    // Probe 3: case with brace-block arm body.
+    {
+        let s = match parse("case $x { *.c => { build $x ; install $x } }") {
+            Ok(s) => s,
+            Err(_) => {
+                t_putstr("u-test: flow_parser_full: probe 3 parse FAILED\n");
+                return Err(1);
+            }
+        };
+        match &s.statements[0].kind {
+            StatementKind::Case(c) => match &c.arms[0].body.kind {
+                StatementKind::Pipeline(p) => match &p.elements[0].command.kind {
+                    CommandKind::BraceBlock(stmts) if stmts.len() == 2 => {}
+                    _ => {
+                        t_putstr("u-test: flow_parser_full: probe 3 brace body FAILED\n");
+                        return Err(1);
+                    }
+                },
+                _ => {
+                    t_putstr("u-test: flow_parser_full: probe 3 body not Pipeline FAILED\n");
+                    return Err(1);
+                }
+            },
+            _ => {
+                t_putstr("u-test: flow_parser_full: probe 3 not Case FAILED\n");
+                return Err(1);
+            }
+        }
+    }
+
+    // Probe 4: try / catch.
+    {
+        let s = match parse("try { risky ; cleanup } catch { recover }") {
+            Ok(s) => s,
+            Err(_) => {
+                t_putstr("u-test: flow_parser_full: probe 4 parse FAILED\n");
+                return Err(1);
+            }
+        };
+        match &s.statements[0].kind {
+            StatementKind::Try(t) => {
+                if t.body.len() != 2 || t.catch.len() != 1 {
+                    t_putstr("u-test: flow_parser_full: probe 4 body/catch len FAILED\n");
+                    return Err(1);
+                }
+            }
+            _ => {
+                t_putstr("u-test: flow_parser_full: probe 4 not Try FAILED\n");
+                return Err(1);
+            }
+        }
+    }
+
+    // Probe 5: try without catch -> error.
+    {
+        match parse("try { a }") {
+            Ok(_) => {
+                t_putstr("u-test: flow_parser_full: probe 5 should error FAILED\n");
+                return Err(1);
+            }
+            Err(_) => {} // expected
+        }
+    }
+
+    // Probe 6: trace block.
+    {
+        let s = match parse("trace { cmd1 ; cmd2 ; cmd3 }") {
+            Ok(s) => s,
+            Err(_) => {
+                t_putstr("u-test: flow_parser_full: probe 6 parse FAILED\n");
+                return Err(1);
+            }
+        };
+        match &s.statements[0].kind {
+            StatementKind::Trace(t) => {
+                if t.body.len() != 3 {
+                    t_putstr("u-test: flow_parser_full: probe 6 body len FAILED\n");
+                    return Err(1);
+                }
+            }
+            _ => {
+                t_putstr("u-test: flow_parser_full: probe 6 not Trace FAILED\n");
+                return Err(1);
+            }
+        }
+    }
+
+    // Probe 7: on note 'snare:int' { body }.
+    {
+        let s = match parse("on note 'snare:int' { cleanup ; echo done }") {
+            Ok(s) => s,
+            Err(_) => {
+                t_putstr("u-test: flow_parser_full: probe 7 parse FAILED\n");
+                return Err(1);
+            }
+        };
+        match &s.statements[0].kind {
+            StatementKind::OnNote(o) => {
+                match &o.note_name.kind {
+                    ExprKind::SingleQuoted(s) if s == "snare:int" => {}
+                    _ => {
+                        t_putstr("u-test: flow_parser_full: probe 7 name FAILED\n");
+                        return Err(1);
+                    }
+                }
+                if o.body.len() != 2 {
+                    t_putstr("u-test: flow_parser_full: probe 7 body len FAILED\n");
+                    return Err(1);
+                }
+            }
+            _ => {
+                t_putstr("u-test: flow_parser_full: probe 7 not OnNote FAILED\n");
+                return Err(1);
+            }
+        }
+    }
+
+    // Probe 8: mask note 'snare:stop' { body }.
+    {
+        let s = match parse("mask note 'snare:stop' { critical }") {
+            Ok(s) => s,
+            Err(_) => {
+                t_putstr("u-test: flow_parser_full: probe 8 parse FAILED\n");
+                return Err(1);
+            }
+        };
+        match &s.statements[0].kind {
+            StatementKind::MaskNote(m) => match &m.note_name.kind {
+                ExprKind::SingleQuoted(s) if s == "snare:stop" => {}
+                _ => {
+                    t_putstr("u-test: flow_parser_full: probe 8 name FAILED\n");
+                    return Err(1);
+                }
+            },
+            _ => {
+                t_putstr("u-test: flow_parser_full: probe 8 not MaskNote FAILED\n");
+                return Err(1);
+            }
+        }
+    }
+
+    // Probe 9: on without note keyword -> error.
+    {
+        match parse("on banana { a }") {
+            Ok(_) => {
+                t_putstr("u-test: flow_parser_full: probe 9 should error FAILED\n");
+                return Err(1);
+            }
+            Err(e) => match e.kind {
+                ParseErrorKind::UnexpectedToken { .. } => {}
+                _ => {
+                    t_putstr("u-test: flow_parser_full: probe 9 wrong error FAILED\n");
+                    return Err(1);
+                }
+            },
+        }
+    }
+
+    // Probe 10: case-as-expression via let.
+    {
+        let s = match parse("let kind = case $f { *.c => 'C' ; * => 'unknown' }") {
+            Ok(s) => s,
+            Err(_) => {
+                t_putstr("u-test: flow_parser_full: probe 10 parse FAILED\n");
+                return Err(1);
+            }
+        };
+        match &s.statements[0].kind {
+            StatementKind::Let(l) => match &l.value.kind {
+                ExprKind::Case(c) => {
+                    if c.arms.len() != 2 {
+                        t_putstr("u-test: flow_parser_full: probe 10 arm count FAILED\n");
+                        return Err(1);
+                    }
+                    match &c.arms[0].value.kind {
+                        ExprKind::SingleQuoted(s) if s == "C" => {}
+                        _ => {
+                            t_putstr(
+                                "u-test: flow_parser_full: probe 10 arm[0] value FAILED\n",
+                            );
+                            return Err(1);
+                        }
+                    }
+                }
+                _ => {
+                    t_putstr("u-test: flow_parser_full: probe 10 value not Case FAILED\n");
+                    return Err(1);
+                }
+            },
+            _ => {
+                t_putstr("u-test: flow_parser_full: probe 10 not Let FAILED\n");
+                return Err(1);
+            }
+        }
+    }
+
+    // Probe 11: newline-separated case arms (the more idiomatic
+    // multi-line form).
+    {
+        let s = match parse(
+            "case $f {\n  *.c => echo C\n  *.rs => echo Rust\n  * => echo other\n}",
+        ) {
+            Ok(s) => s,
+            Err(_) => {
+                t_putstr("u-test: flow_parser_full: probe 11 parse FAILED\n");
+                return Err(1);
+            }
+        };
+        match &s.statements[0].kind {
+            StatementKind::Case(c) => {
+                if c.arms.len() != 3 {
+                    t_putstr("u-test: flow_parser_full: probe 11 arm count FAILED\n");
+                    return Err(1);
+                }
+            }
+            _ => {
+                t_putstr("u-test: flow_parser_full: probe 11 not Case FAILED\n");
+                return Err(1);
+            }
+        }
+    }
+
+    // Probe 12: empty case-pattern -> error.
+    {
+        match parse("case $x { => body }") {
+            Ok(_) => {
+                t_putstr("u-test: flow_parser_full: probe 12 should error FAILED\n");
+                return Err(1);
+            }
+            Err(_) => {} // any error variant is acceptable
+        }
+    }
+
+    t_putstr("u-test: parser full OK\n");
     Ok(())
 }

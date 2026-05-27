@@ -1,6 +1,6 @@
 # `libutopia::parser` — the rc-shape parser stack for `ut` (U-5 arc)
 
-**Status**: U-5a + U-5b + U-5c LANDED — the tokenizer + the recursive-descent parser core (statement-level grammar + AST) + the expression parser (Pratt-style precedence climbing; lifts every `Vec<Token>` placeholder into an `Expr` tree). U-5d is queued for pattern matching + try/catch + trace + on/mask.
+**Status**: U-5a + U-5b + U-5c + U-5d LANDED — the U-5 parser arc is COMPLETE. The parser stack now covers the full rc-shape grammar: tokenizer (U-5a), statement-level grammar + AST (U-5b), expression parser with Pratt-style precedence climbing (U-5c), and pattern matching + try/catch + trace + on/mask + case-as-expression (U-5d). The parser's public surface is ready for U-6's evaluator to consume.
 
 This is the as-built reference for the rc-shape parser used by the Utopia shell (`ut`). It lives at `usr/utopia/libutopia/src/parser/` and is the only path from "user typed a line" to "AST evaluator consumes". The line editor (U-4 arc) produces an `EditorAction::Accept(String)` when Enter is pressed on a balanced buffer; that string is fed to `tokenize()` here, then (U-5b onward) to `parse()` to produce an AST, then (U-6) to the evaluator.
 
@@ -579,12 +579,137 @@ usr/utopia/libutopia/src/parser/
 └── expr.rs      U-5c NEW: Pratt-style expression parser
 ```
 
+## 8.7 Pattern matching + try/catch + trace + on/mask (U-5d)
+
+U-5d closes the U-5 parser arc. The U-5b parser core emitted `InvalidStatement` for `case` / `try` / `trace` / `on` / `mask` at statement-start; U-5d removes that error path and adds dedicated parsers for each construct.
+
+### AST extensions
+
+`StatementKind` gains five variants:
+
+```rust
+pub enum StatementKind {
+    // ... existing ...
+    Case(Box<CaseStmt>),        // statement-form case
+    Try(Box<TryStmt>),
+    Trace(Box<TraceStmt>),
+    OnNote(Box<OnNoteStmt>),
+    MaskNote(Box<MaskNoteStmt>),
+}
+
+pub struct CaseStmt {
+    pub scrutinee: Expr,
+    pub arms: Vec<CaseArm>,
+    pub span: Span,
+}
+
+pub struct CaseArm {
+    pub patterns: Vec<Expr>,    // 1+ patterns (space-separated); `*` is just Word("*")
+    pub body: Statement,         // single statement; use a brace block for multi
+    pub span: Span,
+}
+
+pub struct TryStmt {
+    pub body: Vec<Statement>,
+    pub catch: Vec<Statement>,
+    pub span: Span,
+}
+
+pub struct TraceStmt {
+    pub body: Vec<Statement>,
+    pub span: Span,
+}
+
+pub struct OnNoteStmt {
+    pub note_name: Expr,         // value-context Expr; evaluator resolves to string
+    pub body: Vec<Statement>,
+    pub span: Span,
+}
+
+pub struct MaskNoteStmt {
+    pub note_name: Expr,
+    pub body: Vec<Statement>,
+    pub span: Span,
+}
+```
+
+`ExprKind` gains the `Case` variant for case-as-expression (scripture 7.2):
+
+```rust
+pub enum ExprKind {
+    // ... U-5c variants ...
+    Case(Box<CaseExpr>),
+}
+
+pub struct CaseExpr {
+    pub scrutinee: Box<Expr>,
+    pub arms: Vec<CaseExprArm>,
+    pub span: Span,
+}
+
+pub struct CaseExprArm {
+    pub patterns: Vec<Expr>,
+    pub value: Expr,             // single value Expr (Value context)
+    pub span: Span,
+}
+```
+
+### Public surface
+
+No new public functions; `parse(&str) -> ParseResult<Script>` and `parse_tokens(...)` now accept the five new statement forms and the `Case` expression form. The `parse_expr_tokens(...)` entry recognizes `Case` at every context (Value, Cond, Arith, List, Return) — the case-as-expression dispatch lives at the top of `parse_value_top` and `parse_list_top` (so the Value/Return/List paths reach it) and inside `parse_primary` (so the Pratt operator chain in Cond/Arith reaches it).
+
+### Pattern collection
+
+Pattern collection inside a case arm uses the same span-gap whitespace-split algorithm as the U-5c var-index splitter. The helper `split_value_tokens_on_whitespace(Vec<Token>) -> Vec<Vec<Token>>` (previously `split_index_body`, renamed and exposed `pub(super)` so `parse.rs` can reuse it) walks adjacent tokens at top-level depth 0, splitting when `prev_token.span.end != next_token.span.start` (i.e., the user wrote whitespace). Each resulting slice is parsed via `parse_expr_tokens(slice, source_len, ExprContext::Value)` — pattern position disallows top-level operators (consistent with U-5c's Value-context rules).
+
+The catch-all `*` pattern is just `ExprKind::Word("*")`; the evaluator's glob engine handles it as "match anything." No special parser handling needed.
+
+### Locked U-5d design decisions
+
+| # | Decision | Behavior |
+|---|---|---|
+| 1 | Arm body is a single Statement | `case $x { *.c => echo C }` -- the body after `=>` is one Statement. For multi-statement arms, users wrap in a brace block: `*.c => { build $x ; install $x }`. Simpler than detecting next-arm-start. |
+| 2 | catch is REQUIRED after try | `try { a }` (no catch) emits `UnexpectedToken { expected: "`catch`" }`. Scripture 7.7 always pairs them. |
+| 3 | `on` / `mask` require literal `note` | `on note 'snare:int' { ... }`. `note` is NOT a reserved keyword (per the U-5a token taxonomy); the parser matches it by text. `on banana { ... }` errors with `UnexpectedToken { expected: "`note`" }`. |
+| 4 | Note name is an Expr | `on note 'name'`, `on note "name"`, and `on note bare-name` all parse to `OnNoteStmt.note_name: Expr` in Value context. The evaluator resolves to a string at registration time. |
+| 5 | case-as-expression in all contexts | `parse_primary` (Pratt path) AND `parse_value_top` / `parse_list_top` (non-Pratt paths) all dispatch to `parse_case_expr` when the next token is `Case`. The evaluator decides what to do with the resulting value. |
+| 6 | Empty pattern arm errors | `case $x { => body }` emits `EmptyCasePattern`. (The `collect_case_arm_patterns` walk also rejects `=>` at offset 0 with `UnexpectedToken { expected: "`=>`" }` if it hits the FatArrow before any tokens.) |
+| 7 | Pattern list terminator is `=>` | Patterns are collected until `FatArrow` at depth 0. Top-level `Newline` / `Semicolon` / `RBrace` inside a pattern list is a parse error (a missing `=>`). |
+| 8 | Trace body is general | `trace { body }` accepts any Vec<Statement>; the evaluator wraps each command's execution with the trace pre-print. |
+
+### Error kinds (new)
+
+```rust
+EmptyCasePattern    // `case $x { => body }` -- no patterns before `=>`
+```
+
+Other case/try/trace/on/mask shape errors use the existing `UnexpectedToken { expected }` and `UnexpectedEof { expected }` variants with appropriate labels.
+
+### Impl file map
+
+```
+usr/utopia/libutopia/src/parser/
+├── mod.rs       extends re-exports with new AST types
+├── span.rs      unchanged
+├── token.rs     unchanged
+├── error.rs     extends with `EmptyCasePattern`
+├── lexer.rs     unchanged (case/try/catch/trace/on/mask are already reserved words)
+├── ast.rs       extends with Case/Try/Trace/OnNote/MaskNote StatementKind variants,
+│                Case ExprKind variant, and the supporting struct types
+├── parse.rs     extends parse_statement dispatch + parse_case_stmt /
+│                parse_try / parse_trace / parse_on_note / parse_mask_note +
+│                collect_case_arm_patterns + collect_tokens_until_lbrace helpers
+└── expr.rs      extends parse_primary + parse_value_top + parse_list_top with
+                 Case dispatch; new parse_case_expr + parse_case_expr_arm + supporting
+                 collect_* helpers
+```
+
 ## 9. Status
 
 - **U-5a LANDED**: tokenizer with span tracking, full reserved-word + operator coverage, single + double-quoted strings with parts, top-level + DQ-interior dollar forms, substitutions (`$()`, `` `{}` ``), process substitution, heredocs with body collection (interp + non-interp + strip-tabs), regex literal after `=~`. Reference impl at `usr/utopia/libutopia/src/parser/lexer.rs` (~900 LOC + ~560 LOC `#[cfg(test)]` tests).
 - **U-5b LANDED**: parser core + AST. New `usr/utopia/libutopia/src/parser/ast.rs` (AST node types) + `parse.rs` (recursive-descent parser). Public entry: `parse(&str) -> ParseResult<Script>` (convenience that runs tokenize + parse_tokens) + `parse_tokens(Vec<Token>, source_len) -> ParseResult<Script>`. Grammar covers: Script, Statement (Pipeline / If / For / While / FnDecl / Let / Assign / Return / Break / Continue), Pipeline + PipelineElement (with `?|` -> `tolerate_failure` on LEFT element + trailing `&` -> `background`), Command + CommandKind (Simple / BraceBlock / Subshell / Arith — Arith body stored as raw tokens for U-5c), Word (Single token or `Concat(Vec<Token>)` for span-adjacent `^`-joined values), Redirect (Stdin / Stdout / Append / Heredoc-with-inline-body; redirects may interleave with words). Heredoc handling: parser pre-extracts all `HeredocBody` parts into a FIFO `VecDeque<Vec<DqPart>>` at construction time (taking ownership of the tokens via `core::mem::take` to avoid cloning); each `HeredocStart` pops the next body when parsing the redirect. Expression contexts (`if (cond)`, `for (var in expr)`, `while (cond)`, `let x = value`, bare assignment, `return value`) stored as raw `Vec<Token>` placeholders -- U-5c walks them into Expression trees. Locked design decisions per the U-5b session: strict rc (`--key=value` is `UnexpectedEqualInCommand` error); `^` requires span-adjacency on both sides (`UnexpectedCaret` otherwise -- actually emitted via `UnexpectedToken` since the loop just stops); postfix `?` requires a statement terminator (`UnexpectedTokenAfterFailPropagate` otherwise); `case` / `try` / `trace` / `on note` / `mask note` deferred to U-5d. ~900 LOC parser + ~250 LOC AST + ~500 LOC `#[cfg(test)]` tests (37 tests). Extended `flow_parser_core` `/u-test` probe (8 boot-time probes).
 - **U-5c LANDED**: expression parser. New `usr/utopia/libutopia/src/parser/expr.rs` (~1100 LOC parser + ~500 LOC `#[cfg(test)]` tests; 35 tests). Public entry: `parse_expr_tokens(Vec<Token>, source_len: usize, ctx: ExprContext) -> ParseResult<Expr>`. Pratt-style precedence climbing over an owned token stream; eagerly parsed substitution bodies; full operator surface for arith + cond contexts; upfront arith retokenization that splits Word tokens containing operator chars (`+ - * /`) into proper Plus/Minus/Star/Slash tokens. The AST now has ONE canonical shape: every expression slot is an `Expr` (no `Vec<Token>` placeholders remain). `IfStmt.cond` / `IfStmt.elif_branches[].0` / `ForStmt.list_expr` / `WhileStmt.cond` / `LetStmt.value` / `AssignStmt.value` / `StatementKind::Return(Option<Expr>)` / `CommandKind::Arith(Expr)` all hold `Expr`. New `ExprKind` variants cover Atoms (Word/SingleQuoted/DoubleQuoted/Integer/Var/VarLen/VarNoSplit/VarIndex/VarSlice/Subst/Backtick/ProcSubIn/ProcSubOut/Regex), Composites (List/Concat), Operators (BinOp/UnOp/Match). New `ParseErrorKind` variants: `EmptyExpression`, `UnexpectedTokenInExpr`, `InvalidArithLiteral`, `InvalidVarIndex`, `TrailingTokensInExpr`. Extended `flow_parser_expr` `/u-test` probe (10 boot-time probes + 1 bonus, runtime-validated under `ThylaAlloc`). Reference doc 93 extended with section 8.6 covering AST extensions, public API, Pratt precedence chain, arith retokenization, concat semantics, substitution body lifting, var indexing, locked design decisions, error kinds, impl file map.
-- **U-5d QUEUED**: pattern matching + try/catch + trace + on/mask + final glue. `case $x { pat => body ... }`, `try { ... } catch { ... }`, `trace { ... }`, `on note 'name' { ... }`, `mask note 'name' { ... }`. Extends `StatementKind` with the deferred variants; finalizes the parser's public surface.
+- **U-5d LANDED**: pattern matching + try/catch + trace + on/mask + case-as-expression. New statement-level constructs: `case $x { pat => body ... }` (`CaseStmt` + `CaseArm`), `try { ... } catch { ... }` (`TryStmt`), `trace { ... }` (`TraceStmt`), `on note 'name' { ... }` (`OnNoteStmt`), `mask note 'name' { ... }` (`MaskNoteStmt`). New expression-level construct: `case $x { pat => value ... }` in any context (`CaseExpr` + `CaseExprArm`; reached via `parse_primary` for Cond/Arith and via `parse_value_top` / `parse_list_top` for Value/Return/List). Each arm of a statement-form case has a single Statement body (use a brace block for multi-statement). `catch` is required after `try`. `on` / `mask` require the literal `Word("note")` after the keyword. Pattern collection reuses the U-5c span-gap whitespace-split (`split_value_tokens_on_whitespace`, formerly `split_index_body`, now `pub(super)`). New `ParseErrorKind::EmptyCasePattern` for empty-pattern arms; other shape errors use existing `UnexpectedToken { expected }`. ~500 LOC parse.rs additions + ~250 LOC expr.rs additions + ~100 LOC ast.rs additions + cfg(test) tests (20 new tests in parse.rs + 4 in expr.rs). Extended `/u-test` with new `flow_parser_full` (12 boot-time probes runtime-validated under `ThylaAlloc`). Reference doc 93 extended with section 8.7. The U-5 parser arc is COMPLETE; the parser's public surface is ready for U-6's evaluator.
 
 ## 10. Known caveats / footguns
 

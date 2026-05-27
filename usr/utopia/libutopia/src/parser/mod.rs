@@ -18,20 +18,24 @@
 //                          contexts deferred as Vec<Token>
 //                          placeholders.
 //
-//   U-5c (this commit) -- expression parser (expr.rs). Lifts every
+//   U-5c (LANDED)      -- expression parser (expr.rs). Lifts every
 //                          Vec<Token> placeholder into a proper
 //                          Expr tree. Pratt-style precedence
 //                          climbing for arith; recursive substitution
 //                          body lifting; full match-operator surface
 //                          for cond context.
 //
-//   U-5d               -- pattern matching + match operators +
-//                          regex semantics + final glue.
+//   U-5d (this commit) -- pattern matching + try/catch + trace +
+//                          on note / mask note + case-as-expression.
+//                          Closes the U-5 parser arc; the parser's
+//                          public surface is now complete for U-6's
+//                          evaluator to consume.
 //
-// At U-5c the public surface is complete for non-pattern-matching
-// shell expressions. The AST now has ONE canonical shape: every
-// expression slot is an `Expr` (no raw `Vec<Token>` placeholders
-// remain).
+// At U-5d the public surface is complete. The AST has ONE canonical
+// shape for both statements (every U-5b/U-5d statement kind is a
+// `StatementKind` variant) and expressions (every U-5c/U-5d
+// expression slot is an `Expr`, including `ExprKind::Case` for
+// case-as-expression).
 
 pub mod ast;
 pub mod error;
@@ -42,9 +46,10 @@ pub mod span;
 pub mod token;
 
 pub use ast::{
-    AssignStmt, BinOp, Command, CommandKind, Expr, ExprContext, ExprKind, FnDecl, ForStmt, IfStmt,
-    LetStmt, MatchOp, Pipeline, PipelineElement, Redirect, RedirectKind, Script, SimpleCommand,
-    Statement, StatementKind, UnOp, WhileStmt, Word,
+    AssignStmt, BinOp, CaseArm, CaseExpr, CaseExprArm, CaseStmt, Command, CommandKind, Expr,
+    ExprContext, ExprKind, FnDecl, ForStmt, IfStmt, LetStmt, MaskNoteStmt, MatchOp, OnNoteStmt,
+    Pipeline, PipelineElement, Redirect, RedirectKind, Script, SimpleCommand, Statement,
+    StatementKind, TraceStmt, TryStmt, UnOp, WhileStmt, Word,
 };
 pub use error::{ParseError, ParseErrorKind, ParseResult};
 pub use expr::parse_expr_tokens;

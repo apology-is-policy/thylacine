@@ -43,7 +43,7 @@ use alloc::vec::Vec;
 
 use super::ast::*;
 use super::error::{ParseError, ParseErrorKind, ParseResult};
-use super::expr::parse_expr_tokens;
+use super::expr::{parse_expr_tokens, split_value_tokens_on_whitespace};
 use super::lexer::tokenize;
 use super::span::Span;
 use super::token::{DqPart, Token, TokenKind};
@@ -266,24 +266,24 @@ impl Parser {
             Some(TokenKind::Return) => self.parse_return(),
             Some(TokenKind::Break) => self.parse_break_or_continue(true),
             Some(TokenKind::Continue) => self.parse_break_or_continue(false),
+            // U-5d statement-form constructs.
+            Some(TokenKind::Case) => self.parse_case_stmt(),
+            Some(TokenKind::Try) => self.parse_try(),
+            Some(TokenKind::Trace) => self.parse_trace(),
+            Some(TokenKind::On) => self.parse_on_note(),
+            Some(TokenKind::Mask) => self.parse_mask_note(),
             Some(TokenKind::Word(w)) if is_valid_ident(w) && self.is_assignment_start() => {
                 self.parse_assign()
             }
             // Bare reserved keywords that aren't statement-starts:
-            // catch/else without preceding try/if; case/try/trace/
-            // on/mask deferred to U-5d (treat as InvalidStatement
-            // here so the parse error names them clearly).
-            Some(TokenKind::Else)
-            | Some(TokenKind::Catch)
-            | Some(TokenKind::Case)
-            | Some(TokenKind::Try)
-            | Some(TokenKind::Trace)
-            | Some(TokenKind::On)
-            | Some(TokenKind::Mask)
-            | Some(TokenKind::In) => Err(ParseError {
-                kind: ParseErrorKind::InvalidStatement,
-                span: self.current_span(),
-            }),
+            // Else (without preceding If), Catch (without preceding
+            // Try), In (only valid inside For).
+            Some(TokenKind::Else) | Some(TokenKind::Catch) | Some(TokenKind::In) => {
+                Err(ParseError {
+                    kind: ParseErrorKind::InvalidStatement,
+                    span: self.current_span(),
+                })
+            }
             _ => self.parse_pipeline_statement(),
         }
     }
@@ -1066,6 +1066,295 @@ impl Parser {
             span: tok.span,
         })
     }
+
+    // -----------------------------------------------------------------
+    // Pattern matching (U-5d): `case $x { pat ... => body ; ... }`
+    // -----------------------------------------------------------------
+
+    fn parse_case_stmt(&mut self) -> ParseResult<Statement> {
+        let case_tok = self.advance(); // Case
+        // Scrutinee: a value-position expression, terminated by `{`.
+        let scrutinee_tokens = self.collect_tokens_until_lbrace()?;
+        if scrutinee_tokens.is_empty() {
+            return Err(ParseError {
+                kind: ParseErrorKind::EmptyExpression,
+                span: self.current_span(),
+            });
+        }
+        let scrutinee = parse_expr_tokens(scrutinee_tokens, self.source_len, ExprContext::Value)?;
+        self.expect_kind(TokenKind::LBrace, "`{`")?;
+        let mut arms = Vec::new();
+        loop {
+            self.skip_separators();
+            if matches!(self.peek_kind(), Some(TokenKind::RBrace) | Some(TokenKind::Eof) | None) {
+                break;
+            }
+            arms.push(self.parse_case_arm_stmt()?);
+        }
+        let close = self.expect_kind(TokenKind::RBrace, "`}`")?;
+        let span = Span::new(case_tok.span.start, close.span.end);
+        Ok(Statement {
+            kind: StatementKind::Case(Box::new(CaseStmt {
+                scrutinee,
+                arms,
+                span,
+            })),
+            span,
+        })
+    }
+
+    fn parse_case_arm_stmt(&mut self) -> ParseResult<CaseArm> {
+        let start = self.current_span().start;
+        let pat_tokens = self.collect_case_arm_patterns()?;
+        let pieces = split_value_tokens_on_whitespace(pat_tokens);
+        if pieces.is_empty() {
+            return Err(ParseError {
+                kind: ParseErrorKind::EmptyCasePattern,
+                span: Span::new(start, self.current_span().start),
+            });
+        }
+        let mut patterns: Vec<Expr> = Vec::with_capacity(pieces.len());
+        for piece in pieces {
+            patterns.push(parse_expr_tokens(piece, self.source_len, ExprContext::Value)?);
+        }
+        // Allow optional newlines between `=>` and the body so users
+        // can write `... =>\n    body`.
+        self.skip_newlines_only();
+        let body = self.parse_statement()?;
+        let end = body.span.end;
+        Ok(CaseArm {
+            patterns,
+            body,
+            span: Span::new(start, end),
+        })
+    }
+
+    /// Walk tokens up to (and consuming) the `=>` at the SAME paren
+    /// depth as the caller. The patterns may contain `(...)` groups;
+    /// `FatArrow` inside parens is preserved as a literal token (it
+    /// would never round-trip to a meaningful expression, but the
+    /// nesting discipline keeps the algorithm simple).
+    fn collect_case_arm_patterns(&mut self) -> ParseResult<Vec<Token>> {
+        let mut out = Vec::new();
+        let mut depth: i32 = 0;
+        loop {
+            let k = match self.peek_kind() {
+                Some(k) => k,
+                None => {
+                    return Err(ParseError {
+                        kind: ParseErrorKind::UnexpectedEof { expected: "`=>`" },
+                        span: self.eof_span(),
+                    });
+                }
+            };
+            if depth == 0 {
+                match k {
+                    TokenKind::FatArrow => {
+                        self.pos += 1;
+                        return Ok(out);
+                    }
+                    TokenKind::Newline
+                    | TokenKind::Semicolon
+                    | TokenKind::RBrace
+                    | TokenKind::Eof => {
+                        return Err(ParseError {
+                            kind: ParseErrorKind::UnexpectedToken { expected: "`=>`" },
+                            span: self.current_span(),
+                        });
+                    }
+                    _ => {}
+                }
+            }
+            match k {
+                TokenKind::LParen => depth += 1,
+                TokenKind::DoubleLParen => depth += 2,
+                TokenKind::RParen => depth -= 1,
+                TokenKind::DoubleRParen => depth -= 2,
+                _ => {}
+            }
+            if depth < 0 {
+                return Err(ParseError {
+                    kind: ParseErrorKind::UnexpectedToken { expected: "`=>`" },
+                    span: self.current_span(),
+                });
+            }
+            out.push(self.advance());
+        }
+    }
+
+    /// Collect tokens up to (but NOT consuming) the next `{` at depth
+    /// 0. Used by `case $scrutinee { ... }` and by `on note 'name' {
+    /// ... }` / `mask note ... { ... }` to gather the leading
+    /// value-position tokens.
+    fn collect_tokens_until_lbrace(&mut self) -> ParseResult<Vec<Token>> {
+        let mut out = Vec::new();
+        let mut depth: i32 = 0;
+        loop {
+            let k = match self.peek_kind() {
+                Some(k) => k,
+                None => {
+                    return Err(ParseError {
+                        kind: ParseErrorKind::UnexpectedEof { expected: "`{`" },
+                        span: self.eof_span(),
+                    });
+                }
+            };
+            if depth == 0 {
+                match k {
+                    TokenKind::LBrace => return Ok(out),
+                    TokenKind::Newline
+                    | TokenKind::Semicolon
+                    | TokenKind::Eof
+                    | TokenKind::RBrace => {
+                        return Err(ParseError {
+                            kind: ParseErrorKind::UnexpectedToken { expected: "`{`" },
+                            span: self.current_span(),
+                        });
+                    }
+                    _ => {}
+                }
+            }
+            match k {
+                TokenKind::LParen => depth += 1,
+                TokenKind::DoubleLParen => depth += 2,
+                TokenKind::RParen => depth -= 1,
+                TokenKind::DoubleRParen => depth -= 2,
+                _ => {}
+            }
+            if depth < 0 {
+                return Err(ParseError {
+                    kind: ParseErrorKind::UnexpectedToken { expected: "`{`" },
+                    span: self.current_span(),
+                });
+            }
+            out.push(self.advance());
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // try / catch (U-5d)
+    // -----------------------------------------------------------------
+
+    fn parse_try(&mut self) -> ParseResult<Statement> {
+        let try_tok = self.advance(); // Try
+        self.skip_newlines_only();
+        self.expect_kind(TokenKind::LBrace, "`{`")?;
+        let body = self.parse_block_statements()?;
+        self.expect_kind(TokenKind::RBrace, "`}`")?;
+        // Allow `} \n catch` across a newline; catch is REQUIRED per
+        // the U-5d locked decision (scripture 7.7 always pairs them).
+        self.skip_newlines_only();
+        if !matches!(self.peek_kind(), Some(TokenKind::Catch)) {
+            return Err(ParseError {
+                kind: ParseErrorKind::UnexpectedToken {
+                    expected: "`catch`",
+                },
+                span: self.current_span(),
+            });
+        }
+        self.pos += 1; // consume Catch
+        self.skip_newlines_only();
+        self.expect_kind(TokenKind::LBrace, "`{`")?;
+        let catch = self.parse_block_statements()?;
+        let close = self.expect_kind(TokenKind::RBrace, "`}`")?;
+        let span = Span::new(try_tok.span.start, close.span.end);
+        Ok(Statement {
+            kind: StatementKind::Try(Box::new(TryStmt { body, catch, span })),
+            span,
+        })
+    }
+
+    // -----------------------------------------------------------------
+    // trace (U-5d)
+    // -----------------------------------------------------------------
+
+    fn parse_trace(&mut self) -> ParseResult<Statement> {
+        let trace_tok = self.advance(); // Trace
+        self.skip_newlines_only();
+        self.expect_kind(TokenKind::LBrace, "`{`")?;
+        let body = self.parse_block_statements()?;
+        let close = self.expect_kind(TokenKind::RBrace, "`}`")?;
+        let span = Span::new(trace_tok.span.start, close.span.end);
+        Ok(Statement {
+            kind: StatementKind::Trace(Box::new(TraceStmt { body, span })),
+            span,
+        })
+    }
+
+    // -----------------------------------------------------------------
+    // on note / mask note (U-5d)
+    // -----------------------------------------------------------------
+
+    fn parse_on_note(&mut self) -> ParseResult<Statement> {
+        let on_tok = self.advance(); // On
+        self.expect_note_keyword()?;
+        let (note_name, body, close_end) = self.parse_note_name_and_block()?;
+        let span = Span::new(on_tok.span.start, close_end);
+        Ok(Statement {
+            kind: StatementKind::OnNote(Box::new(OnNoteStmt {
+                note_name,
+                body,
+                span,
+            })),
+            span,
+        })
+    }
+
+    fn parse_mask_note(&mut self) -> ParseResult<Statement> {
+        let mask_tok = self.advance(); // Mask
+        self.expect_note_keyword()?;
+        let (note_name, body, close_end) = self.parse_note_name_and_block()?;
+        let span = Span::new(mask_tok.span.start, close_end);
+        Ok(Statement {
+            kind: StatementKind::MaskNote(Box::new(MaskNoteStmt {
+                note_name,
+                body,
+                span,
+            })),
+            span,
+        })
+    }
+
+    /// Expect the bare `Word("note")` token (scripture spells the
+    /// construct `on note 'name' { ... }`; `note` is NOT a reserved
+    /// keyword, so we match it by text here).
+    fn expect_note_keyword(&mut self) -> ParseResult<()> {
+        let span = self.current_span();
+        match self.peek_token() {
+            Some(t) => match &t.kind {
+                TokenKind::Word(w) if w == "note" => {
+                    self.pos += 1;
+                    Ok(())
+                }
+                _ => Err(ParseError {
+                    kind: ParseErrorKind::UnexpectedToken { expected: "`note`" },
+                    span,
+                }),
+            },
+            None => Err(ParseError {
+                kind: ParseErrorKind::UnexpectedEof { expected: "`note`" },
+                span: self.eof_span(),
+            }),
+        }
+    }
+
+    /// Shared between `on note` and `mask note`: parse a name
+    /// expression then a brace-delimited body. Returns (name, body,
+    /// closing-brace.end).
+    fn parse_note_name_and_block(&mut self) -> ParseResult<(Expr, Vec<Statement>, usize)> {
+        let name_tokens = self.collect_tokens_until_lbrace()?;
+        if name_tokens.is_empty() {
+            return Err(ParseError {
+                kind: ParseErrorKind::EmptyExpression,
+                span: self.current_span(),
+            });
+        }
+        let note_name = parse_expr_tokens(name_tokens, self.source_len, ExprContext::Value)?;
+        self.expect_kind(TokenKind::LBrace, "`{`")?;
+        let body = self.parse_block_statements()?;
+        let close = self.expect_kind(TokenKind::RBrace, "`}`")?;
+        Ok((note_name, body, close.span.end))
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -1729,6 +2018,287 @@ mod tests {
         match parse_err("if (x) { a") {
             ParseErrorKind::UnexpectedEof { .. } => {}
             other => panic!("expected UnexpectedEof, got {:?}", other),
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // U-5d: case / try / trace / on / mask
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn case_basic() {
+        let s = parse_ok("case $x { *.c => echo C ; *.rs => echo Rust }");
+        match &s.statements[0].kind {
+            StatementKind::Case(c) => {
+                assert_eq!(c.arms.len(), 2);
+                assert_eq!(c.arms[0].patterns.len(), 1);
+                match &c.arms[0].patterns[0].kind {
+                    ExprKind::Word(w) => assert_eq!(w, "*.c"),
+                    other => panic!("expected Word(*.c), got {:?}", other),
+                }
+                match &c.arms[1].patterns[0].kind {
+                    ExprKind::Word(w) => assert_eq!(w, "*.rs"),
+                    other => panic!("expected Word(*.rs), got {:?}", other),
+                }
+            }
+            other => panic!("expected Case, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn case_multi_pattern_arm() {
+        let s = parse_ok("case $x { *.c *.h => echo C ; * => echo other }");
+        match &s.statements[0].kind {
+            StatementKind::Case(c) => {
+                assert_eq!(c.arms.len(), 2);
+                assert_eq!(c.arms[0].patterns.len(), 2);
+                match &c.arms[0].patterns[0].kind {
+                    ExprKind::Word(w) => assert_eq!(w, "*.c"),
+                    _ => panic!(),
+                }
+                match &c.arms[0].patterns[1].kind {
+                    ExprKind::Word(w) => assert_eq!(w, "*.h"),
+                    _ => panic!(),
+                }
+                // catchall arm
+                assert_eq!(c.arms[1].patterns.len(), 1);
+                match &c.arms[1].patterns[0].kind {
+                    ExprKind::Word(w) => assert_eq!(w, "*"),
+                    _ => panic!(),
+                }
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn case_brace_block_body() {
+        let s = parse_ok("case $x { *.c => { build $x ; install $x } }");
+        match &s.statements[0].kind {
+            StatementKind::Case(c) => {
+                assert_eq!(c.arms.len(), 1);
+                match &c.arms[0].body.kind {
+                    StatementKind::Pipeline(p) => match &p.elements[0].command.kind {
+                        CommandKind::BraceBlock(stmts) => assert_eq!(stmts.len(), 2),
+                        other => panic!("expected BraceBlock, got {:?}", other),
+                    },
+                    _ => panic!(),
+                }
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn case_quoted_pattern() {
+        let s = parse_ok("case $x { 'foo' => echo foo ; * => echo other }");
+        match &s.statements[0].kind {
+            StatementKind::Case(c) => {
+                assert_eq!(c.arms.len(), 2);
+                match &c.arms[0].patterns[0].kind {
+                    ExprKind::SingleQuoted(s) => assert_eq!(s, "foo"),
+                    _ => panic!(),
+                }
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn case_newline_separated_arms() {
+        let s = parse_ok("case $x {\n  *.c => echo C\n  *.rs => echo Rust\n}");
+        match &s.statements[0].kind {
+            StatementKind::Case(c) => assert_eq!(c.arms.len(), 2),
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn case_empty_pattern_errors() {
+        // `=> body` with no patterns before -- error.
+        match parse_err("case $x { => body }") {
+            ParseErrorKind::UnexpectedToken { .. } => {} // collect_case_arm_patterns hits FatArrow first
+            ParseErrorKind::EmptyCasePattern => {}
+            other => panic!("expected EmptyCasePattern or UnexpectedToken, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn case_missing_fat_arrow_errors() {
+        match parse_err("case $x { *.c echo }") {
+            ParseErrorKind::UnexpectedToken { .. } => {}
+            other => panic!("expected UnexpectedToken (=>), got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn try_catch_basic() {
+        let s = parse_ok("try { risky } catch { recover }");
+        match &s.statements[0].kind {
+            StatementKind::Try(t) => {
+                assert_eq!(t.body.len(), 1);
+                assert_eq!(t.catch.len(), 1);
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn try_catch_newline_separated() {
+        let s = parse_ok("try {\n  a\n  b\n} catch {\n  c\n}");
+        match &s.statements[0].kind {
+            StatementKind::Try(t) => {
+                assert_eq!(t.body.len(), 2);
+                assert_eq!(t.catch.len(), 1);
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn try_without_catch_errors() {
+        match parse_err("try { a }") {
+            ParseErrorKind::UnexpectedToken { expected } => {
+                assert!(expected.contains("catch"));
+            }
+            ParseErrorKind::UnexpectedEof { expected } => {
+                assert!(expected.contains("catch"));
+            }
+            other => panic!("expected catch-related error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn try_catch_close_brace_newline_then_catch() {
+        // `} \n catch {` is allowed.
+        let s = parse_ok("try { a }\ncatch { b }");
+        match &s.statements[0].kind {
+            StatementKind::Try(t) => {
+                assert_eq!(t.body.len(), 1);
+                assert_eq!(t.catch.len(), 1);
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn trace_block() {
+        let s = parse_ok("trace { cmd1 ; cmd2 }");
+        match &s.statements[0].kind {
+            StatementKind::Trace(t) => assert_eq!(t.body.len(), 2),
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn trace_empty_block() {
+        let s = parse_ok("trace { }");
+        match &s.statements[0].kind {
+            StatementKind::Trace(t) => assert_eq!(t.body.len(), 0),
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn on_note_basic() {
+        let s = parse_ok("on note 'snare:int' { cleanup }");
+        match &s.statements[0].kind {
+            StatementKind::OnNote(o) => {
+                match &o.note_name.kind {
+                    ExprKind::SingleQuoted(s) => assert_eq!(s, "snare:int"),
+                    other => panic!("expected SingleQuoted, got {:?}", other),
+                }
+                assert_eq!(o.body.len(), 1);
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn on_note_bare_word_name() {
+        let s = parse_ok("on note snare:int { cleanup }");
+        match &s.statements[0].kind {
+            StatementKind::OnNote(o) => match &o.note_name.kind {
+                ExprKind::Word(w) => assert_eq!(w, "snare:int"),
+                _ => panic!(),
+            },
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn on_without_note_keyword_errors() {
+        match parse_err("on banana { cleanup }") {
+            ParseErrorKind::UnexpectedToken { expected } => {
+                assert!(expected.contains("note"));
+            }
+            other => panic!("expected `note` error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn mask_note_basic() {
+        let s = parse_ok("mask note 'snare:int' { critical_section }");
+        match &s.statements[0].kind {
+            StatementKind::MaskNote(m) => {
+                match &m.note_name.kind {
+                    ExprKind::SingleQuoted(s) => assert_eq!(s, "snare:int"),
+                    _ => panic!(),
+                }
+                assert_eq!(m.body.len(), 1);
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn case_as_expression_via_let() {
+        let s = parse_ok("let kind = case $x { *.c => 'C' ; * => 'unknown' }");
+        match &s.statements[0].kind {
+            StatementKind::Let(l) => match &l.value.kind {
+                ExprKind::Case(c) => {
+                    assert_eq!(c.arms.len(), 2);
+                    match &c.arms[0].value.kind {
+                        ExprKind::SingleQuoted(s) => assert_eq!(s, "C"),
+                        _ => panic!(),
+                    }
+                    match &c.arms[1].value.kind {
+                        ExprKind::SingleQuoted(s) => assert_eq!(s, "unknown"),
+                        _ => panic!(),
+                    }
+                }
+                other => panic!("expected ExprKind::Case, got {:?}", other),
+            },
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn case_in_brace_block_body() {
+        // case inside a function body works without special handling.
+        let s = parse_ok("fn classify f { case $f { *.c => echo C ; * => echo other } }");
+        match &s.statements[0].kind {
+            StatementKind::FnDecl(f) => {
+                assert_eq!(f.body.len(), 1);
+                matches!(f.body[0].kind, StatementKind::Case(_));
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn else_without_if_still_errors() {
+        match parse_err("else { a }") {
+            ParseErrorKind::InvalidStatement => {}
+            other => panic!("expected InvalidStatement, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn catch_without_try_still_errors() {
+        match parse_err("catch { a }") {
+            ParseErrorKind::InvalidStatement => {}
+            other => panic!("expected InvalidStatement, got {:?}", other),
         }
     }
 }

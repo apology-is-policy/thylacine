@@ -77,7 +77,9 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use super::ast::{BinOp, Expr, ExprContext, ExprKind, MatchOp, Script, UnOp};
+use super::ast::{
+    BinOp, CaseExpr, CaseExprArm, Expr, ExprContext, ExprKind, MatchOp, Script, UnOp,
+};
 use super::error::{ParseError, ParseErrorKind, ParseResult};
 use super::lexer::tokenize;
 use super::parse::parse_tokens;
@@ -198,6 +200,12 @@ impl ExprParser {
     // -----------------------------------------------------------------
 
     fn parse_value_top(&mut self) -> ParseResult<Expr> {
+        // Case-as-expression (U-5d, scripture 7.2): `let x = case ...`.
+        // The Value/Return path doesn't reach parse_primary, so check
+        // for `Case` here too.
+        if matches!(self.peek_kind(), Some(TokenKind::Case)) {
+            return self.parse_case_expr();
+        }
         // Explicit list `(a b c)` -- accept only if it's the entire
         // expression (the only top-level item).
         if let Some(TokenKind::LParen) = self.peek_kind() {
@@ -222,6 +230,11 @@ impl ExprParser {
     // -----------------------------------------------------------------
 
     fn parse_list_top(&mut self) -> ParseResult<Expr> {
+        // Case-as-expression (U-5d) as a list element. Same rationale
+        // as parse_value_top above.
+        if matches!(self.peek_kind(), Some(TokenKind::Case)) {
+            return self.parse_case_expr();
+        }
         // Explicit `(...)` list literal.
         if let Some(TokenKind::LParen) = self.peek_kind() {
             return self.parse_list_literal();
@@ -793,6 +806,13 @@ impl ExprParser {
     }
 
     fn parse_primary(&mut self) -> ParseResult<Expr> {
+        // Case-as-expression (scripture 7.2): the `case $x { pat =>
+        // value ... }` form. Recognized as a primary in every
+        // context so the AST has ONE canonical expression shape; the
+        // evaluator decides what to do with the resulting value.
+        if matches!(self.peek_kind(), Some(TokenKind::Case)) {
+            return self.parse_case_expr();
+        }
         // Parenthesized sub-expression `( expr )` -- valid in all
         // operator contexts.
         if let Some(TokenKind::LParen) = self.peek_kind() {
@@ -984,6 +1004,236 @@ impl ExprParser {
         // in `new()` when ctx == Arith. Kept as an identity hook so
         // call sites don't need to be deleted.
     }
+
+    // -----------------------------------------------------------------
+    // Case-as-expression (U-5d): `case $x { pat => value ... }`
+    // -----------------------------------------------------------------
+    //
+    // Reached from `parse_primary` whenever the next token is `Case`.
+    // Each arm's value is a single Value-context expression
+    // terminated by Newline / Semicolon / RBrace at depth 0
+    // (matching the rc-shape grammar's statement-terminator rules
+    // applied to a single value).
+
+    fn parse_case_expr(&mut self) -> ParseResult<Expr> {
+        let case_tok = self.advance(); // Case
+        debug_assert!(matches!(case_tok.kind, TokenKind::Case));
+        // Scrutinee: a value-position expression terminated by `{`.
+        let scrutinee_tokens = self.collect_until_lbrace_at_depth0()?;
+        if scrutinee_tokens.is_empty() {
+            return Err(ParseError {
+                kind: ParseErrorKind::EmptyExpression,
+                span: self.current_span(),
+            });
+        }
+        let scrutinee = parse_expr_tokens(scrutinee_tokens, self.source_len, ExprContext::Value)?;
+        if !matches!(self.peek_kind(), Some(TokenKind::LBrace)) {
+            return Err(ParseError {
+                kind: ParseErrorKind::UnexpectedToken { expected: "`{`" },
+                span: self.current_span(),
+            });
+        }
+        self.pos += 1; // consume LBrace
+        let mut arms = Vec::new();
+        loop {
+            // Skip Newline + Semicolon separators between arms.
+            while matches!(
+                self.peek_kind(),
+                Some(TokenKind::Newline) | Some(TokenKind::Semicolon)
+            ) {
+                self.pos += 1;
+            }
+            if matches!(self.peek_kind(), Some(TokenKind::RBrace)) || self.at_end() {
+                break;
+            }
+            arms.push(self.parse_case_expr_arm()?);
+        }
+        if !matches!(self.peek_kind(), Some(TokenKind::RBrace)) {
+            return Err(ParseError {
+                kind: ParseErrorKind::UnexpectedEof { expected: "`}`" },
+                span: self.eof_span(),
+            });
+        }
+        let close = self.advance();
+        let span = Span::new(case_tok.span.start, close.span.end);
+        Ok(Expr {
+            kind: ExprKind::Case(Box::new(CaseExpr {
+                scrutinee: Box::new(scrutinee),
+                arms,
+                span,
+            })),
+            span,
+        })
+    }
+
+    fn parse_case_expr_arm(&mut self) -> ParseResult<CaseExprArm> {
+        let start = self.current_span().start;
+        // Collect pattern tokens until `=>` at depth 0.
+        let pat_tokens = self.collect_until_fat_arrow_at_depth0()?;
+        let pieces = split_value_tokens_on_whitespace(pat_tokens);
+        if pieces.is_empty() {
+            return Err(ParseError {
+                kind: ParseErrorKind::EmptyCasePattern,
+                span: Span::new(start, self.current_span().start),
+            });
+        }
+        let mut patterns: Vec<Expr> = Vec::with_capacity(pieces.len());
+        for piece in pieces {
+            patterns.push(parse_expr_tokens(piece, self.source_len, ExprContext::Value)?);
+        }
+        // Skip optional newlines between `=>` and the value.
+        while matches!(self.peek_kind(), Some(TokenKind::Newline)) {
+            self.pos += 1;
+        }
+        // Collect value tokens until top-level Newline / Semicolon /
+        // RBrace.
+        let value_tokens = self.collect_arm_value_tokens()?;
+        if value_tokens.is_empty() {
+            return Err(ParseError {
+                kind: ParseErrorKind::EmptyExpression,
+                span: self.current_span(),
+            });
+        }
+        let end = value_tokens
+            .last()
+            .expect("non-empty checked above")
+            .span
+            .end;
+        let value = parse_expr_tokens(value_tokens, self.source_len, ExprContext::Value)?;
+        Ok(CaseExprArm {
+            patterns,
+            value,
+            span: Span::new(start, end),
+        })
+    }
+
+    /// Collect tokens up to (but NOT consuming) the next `{` at the
+    /// caller's paren depth.
+    fn collect_until_lbrace_at_depth0(&mut self) -> ParseResult<Vec<Token>> {
+        let mut out = Vec::new();
+        let mut depth: i32 = 0;
+        loop {
+            let k = match self.peek_kind() {
+                Some(k) => k,
+                None => {
+                    return Err(ParseError {
+                        kind: ParseErrorKind::UnexpectedEof { expected: "`{`" },
+                        span: self.eof_span(),
+                    });
+                }
+            };
+            if depth == 0 {
+                match k {
+                    TokenKind::LBrace => return Ok(out),
+                    TokenKind::Newline | TokenKind::Semicolon | TokenKind::RBrace => {
+                        return Err(ParseError {
+                            kind: ParseErrorKind::UnexpectedToken { expected: "`{`" },
+                            span: self.current_span(),
+                        });
+                    }
+                    _ => {}
+                }
+            }
+            match k {
+                TokenKind::LParen => depth += 1,
+                TokenKind::DoubleLParen => depth += 2,
+                TokenKind::RParen => depth -= 1,
+                TokenKind::DoubleRParen => depth -= 2,
+                _ => {}
+            }
+            if depth < 0 {
+                return Err(ParseError {
+                    kind: ParseErrorKind::UnexpectedToken { expected: "`{`" },
+                    span: self.current_span(),
+                });
+            }
+            out.push(self.advance());
+        }
+    }
+
+    /// Collect tokens up to (and consuming) `=>` at the caller's paren
+    /// depth.
+    fn collect_until_fat_arrow_at_depth0(&mut self) -> ParseResult<Vec<Token>> {
+        let mut out = Vec::new();
+        let mut depth: i32 = 0;
+        loop {
+            let k = match self.peek_kind() {
+                Some(k) => k,
+                None => {
+                    return Err(ParseError {
+                        kind: ParseErrorKind::UnexpectedEof { expected: "`=>`" },
+                        span: self.eof_span(),
+                    });
+                }
+            };
+            if depth == 0 {
+                match k {
+                    TokenKind::FatArrow => {
+                        self.pos += 1;
+                        return Ok(out);
+                    }
+                    TokenKind::Newline | TokenKind::Semicolon | TokenKind::RBrace => {
+                        return Err(ParseError {
+                            kind: ParseErrorKind::UnexpectedToken { expected: "`=>`" },
+                            span: self.current_span(),
+                        });
+                    }
+                    _ => {}
+                }
+            }
+            match k {
+                TokenKind::LParen => depth += 1,
+                TokenKind::DoubleLParen => depth += 2,
+                TokenKind::RParen => depth -= 1,
+                TokenKind::DoubleRParen => depth -= 2,
+                _ => {}
+            }
+            if depth < 0 {
+                return Err(ParseError {
+                    kind: ParseErrorKind::UnexpectedToken { expected: "`=>`" },
+                    span: self.current_span(),
+                });
+            }
+            out.push(self.advance());
+        }
+    }
+
+    /// Collect tokens for a case-expression arm value: stops at
+    /// top-level Newline / Semicolon / RBrace (without consuming
+    /// the terminator).
+    fn collect_arm_value_tokens(&mut self) -> ParseResult<Vec<Token>> {
+        let mut out = Vec::new();
+        let mut depth: i32 = 0;
+        loop {
+            let k = match self.peek_kind() {
+                Some(k) => k,
+                None => break,
+            };
+            if depth == 0 {
+                match k {
+                    TokenKind::Newline | TokenKind::Semicolon | TokenKind::RBrace => break,
+                    _ => {}
+                }
+            }
+            match k {
+                TokenKind::LParen => depth += 1,
+                TokenKind::DoubleLParen => depth += 2,
+                TokenKind::RParen => depth -= 1,
+                TokenKind::DoubleRParen => depth -= 2,
+                TokenKind::LBrace => depth += 1, // nested case-expr {}
+                TokenKind::RBrace if depth > 0 => depth -= 1,
+                _ => {}
+            }
+            if depth < 0 {
+                return Err(ParseError {
+                    kind: ParseErrorKind::UnexpectedToken { expected: "`}`" },
+                    span: self.current_span(),
+                });
+            }
+            out.push(self.advance());
+        }
+        Ok(out)
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -1167,7 +1417,7 @@ fn finish_var_index_with_body(
     // Within a sub-expression, paren depth tracks nesting; at depth 0
     // a gap between two adjacent tokens (token[i].span.end !=
     // token[i+1].span.start) is the split point.
-    let parts = split_index_body(body);
+    let parts = split_value_tokens_on_whitespace(body);
     if parts.len() == 1 {
         let idx = parse_expr_tokens(parts.into_iter().next().expect("len 1"), source_len, ExprContext::Arith)?;
         return Ok(Expr {
@@ -1190,13 +1440,17 @@ fn finish_var_index_with_body(
     })
 }
 
-/// Split a VarIndex body into sub-expression token slices on
-/// top-level whitespace boundaries.
+/// Split a token stream into sub-expression slices on top-level
+/// whitespace boundaries.
 ///
 /// We detect whitespace by looking at the span gap between two
 /// adjacent tokens at paren depth 0: when `tok[i].span.end !=
 /// tok[i+1].span.start`, the user wrote whitespace between them.
-fn split_index_body(body: Vec<Token>) -> Vec<Vec<Token>> {
+///
+/// Used at U-5c for `$var(N)` / `$var(M N)` index/slice splitting
+/// and at U-5d for `case` arm pattern list splitting
+/// (`*.c *.h => body`).
+pub(super) fn split_value_tokens_on_whitespace(body: Vec<Token>) -> Vec<Vec<Token>> {
     if body.is_empty() {
         return Vec::new();
     }
@@ -1769,7 +2023,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // split_index_body helper
+    // split_value_tokens_on_whitespace helper
     // -----------------------------------------------------------------
 
     #[test]
@@ -1777,7 +2031,7 @@ mod tests {
         let tokens = lex("1");
         // Exclude the trailing Eof.
         let body: Vec<Token> = tokens.into_iter().filter(|t| !t.is_eof()).collect();
-        let parts = split_index_body(body);
+        let parts = split_value_tokens_on_whitespace(body);
         assert_eq!(parts.len(), 1);
         assert_eq!(parts[0].len(), 1);
     }
@@ -1786,7 +2040,7 @@ mod tests {
     fn split_two_indices_via_space() {
         let tokens = lex("2 3");
         let body: Vec<Token> = tokens.into_iter().filter(|t| !t.is_eof()).collect();
-        let parts = split_index_body(body);
+        let parts = split_value_tokens_on_whitespace(body);
         assert_eq!(parts.len(), 2);
     }
 
@@ -1841,5 +2095,81 @@ mod tests {
     #[allow(dead_code)]
     fn _vec_used() {
         let _: Vec<i32> = vec![1, 2, 3];
+    }
+
+    // -----------------------------------------------------------------
+    // U-5d: case-as-expression
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn case_as_expr_basic() {
+        let e = expr_ok(
+            "case $f { *.c => 'C source' ; * => 'unknown' }",
+            ExprContext::Value,
+        );
+        match &e.kind {
+            ExprKind::Case(c) => {
+                assert_eq!(c.arms.len(), 2);
+                match &c.scrutinee.kind {
+                    ExprKind::Var(v) => assert_eq!(v, "f"),
+                    other => panic!("got {:?}", other),
+                }
+                match &c.arms[0].value.kind {
+                    ExprKind::SingleQuoted(s) => assert_eq!(s, "C source"),
+                    other => panic!("got {:?}", other),
+                }
+            }
+            other => panic!("expected Case, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn case_as_expr_multi_pattern() {
+        let e = expr_ok(
+            "case $f { *.c *.h => 'C' ; * => 'other' }",
+            ExprContext::Value,
+        );
+        match &e.kind {
+            ExprKind::Case(c) => {
+                assert_eq!(c.arms[0].patterns.len(), 2);
+                match &c.arms[0].patterns[0].kind {
+                    ExprKind::Word(w) => assert_eq!(w, "*.c"),
+                    _ => panic!(),
+                }
+                match &c.arms[0].patterns[1].kind {
+                    ExprKind::Word(w) => assert_eq!(w, "*.h"),
+                    _ => panic!(),
+                }
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn case_as_expr_newline_arms() {
+        let e = expr_ok(
+            "case $f {\n  *.c => 'C'\n  *.rs => 'Rust'\n  * => 'other'\n}",
+            ExprContext::Value,
+        );
+        match &e.kind {
+            ExprKind::Case(c) => assert_eq!(c.arms.len(), 3),
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn case_as_expr_in_cond() {
+        // case-as-expression works in Cond context too -- the
+        // evaluator decides what to do with the result.
+        let e = expr_ok(
+            "case $x { 'yes' => 1 ; * => 0 } == 1",
+            ExprContext::Cond,
+        );
+        match &e.kind {
+            ExprKind::BinOp(BinOp::Eq, lhs, _) => {
+                assert!(matches!(lhs.kind, ExprKind::Case(_)));
+            }
+            other => panic!("expected BinOp(Eq, Case, _), got {:?}", other),
+        }
     }
 }

@@ -133,6 +133,17 @@ pub enum ParseErrorKind {
     /// Trailing tokens remained after a value-context expression
     /// completed (a stray non-value token after the value).
     TrailingTokensInExpr,
+
+    // === Pattern matching / try / trace / on / mask (U-5d) =========
+    //
+    // The U-5d statement parsers emit these when the new constructs
+    // are malformed. Generic shape errors continue to use
+    // `UnexpectedToken { expected }` / `UnexpectedEof { expected }`;
+    // these named variants pin the semantically distinct cases.
+    //
+    /// A `case` arm had no patterns before the `=>` separator (e.g.,
+    /// `case $x { => body }`).
+    EmptyCasePattern,
 }
 
 impl fmt::Display for ParseError {
@@ -200,6 +211,10 @@ impl fmt::Display for ParseError {
             }
             ParseErrorKind::TrailingTokensInExpr => {
                 f.write_str("trailing tokens after expression")
+            }
+
+            ParseErrorKind::EmptyCasePattern => {
+                f.write_str("empty pattern list before `=>` in case arm")
             }
         }
     }
