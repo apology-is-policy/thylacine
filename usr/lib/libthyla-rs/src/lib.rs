@@ -29,6 +29,22 @@ use core::arch::{asm, global_asm};
 use core::panic::PanicInfo;
 
 // =============================================================================
+// libthyla-rs uplift — typed Rust modules (U-2a..U-2-test).
+// =============================================================================
+//
+// Per docs/UTOPIA-SHELL-DESIGN.md §15, libthyla-rs is being uplifted
+// from "raw SVC wrappers + constants" into an idiomatic Rust API
+// covering every Thylacine kernel surface. Each U-2X sub-chunk lands
+// one module; existing callers continue to use the bare wrappers
+// + T_* constants below for backwards compatibility during the
+// transition.
+//
+// U-2a: err + handle.
+
+pub mod err;
+pub mod handle;
+
+// =============================================================================
 // Syscall numbers — MUST mirror kernel/include/thylacine/syscall.h.
 // =============================================================================
 

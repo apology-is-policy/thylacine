@@ -19,6 +19,8 @@ The Phase 7 entry decision (taken under the U-1 scripture conversation):
 
 | Sub-chunk | What | Commit | Tests |
 |---|---|---|---|
+| U-2a hash fixup | Update U-2a row with the foundation impl's hash. | *(pending)* | — |
+| U-2a | `t::err` (`Error` enum + `Result<T>` + `From<i32>` + `from_syscall_return` + `Display`) + `t::handle` (`Handle` RAII + `Rights` bitflags-newtype + RAII close via SYS_CLOSE on Drop). Foundational types for the libthyla-rs uplift; no_std + no_alloc; backwards-compatible (existing T_RIGHT_* constants + bare wrappers preserved). | *(pending)* | usr workspace cargo build clean (no warnings); full boot test pass (`tools/test.sh` green; "Thylacine boot OK" reproducible) |
 | U-2 hash fixup | Update U-2 row with the scripture amendment's hash. | *(pending)* | — |
 | U-2 | Scripture amendment: §15 reframed as "the libthyla-rs uplift to the library Thylacine deserves" — lead-by-example framing, complete module structure, sub-chunk decomposition (U-2a..U-2-test, ~9-12 sessions). §19 + phase7-status.md + UTOPIA.md + ROADMAP §8.1/§8.7 updated. NO code. | `2fbfad3` | — |
 | U-1 hash fixup | Update U-1 row with the scripture commit's hash. | *(pending)* | — |
