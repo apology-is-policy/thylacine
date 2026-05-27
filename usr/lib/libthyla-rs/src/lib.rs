@@ -73,7 +73,11 @@ pub mod io;
 pub mod notes;
 pub mod poll;
 pub mod process;
+pub mod rand;
 pub mod territory;
+pub mod thread;
+pub mod time;
+pub mod torpor;
 
 // =============================================================================
 // Syscall numbers — MUST mirror kernel/include/thylacine/syscall.h.
@@ -149,6 +153,30 @@ pub const T_SYS_MOUNT: u64            = 14;
 pub const T_SYS_UNMOUNT: u64          = 15;
 pub const T_SYS_CHROOT: u64           = 35;
 pub const T_SYS_PIVOT_ROOT: u64       = 53;
+
+// P6-pouch-wait-addr (sub-chunk 8) + P6-pouch-threads (sub-chunk 9a):
+// wait-on-address + kernel-level thread spawn/exit. Futex-style
+// no-lost-wakeup primitive (the lock-acquire serializing event takes
+// the kernel `torpor_lock`); thread spawn shares pgtable_root + ASID
+// + handle table with the calling Proc. Backs t::torpor + t::thread
+// (U-2g) and the pouch boundary-line patches.
+pub const T_SYS_TORPOR_WAIT: u64      = 39;
+pub const T_SYS_TORPOR_WAKE: u64      = 40;
+pub const T_SYS_THREAD_SPAWN: u64     = 41;
+pub const T_SYS_THREAD_EXIT: u64      = 42;
+// P6-pouch-kernel-auxv: SYS_SET_TID_ADDRESS — installs the calling
+// thread's "clear-child-tid" address. SYS_THREAD_EXIT stores 0 there
+// + torpor_wakes UINT32_MAX (the canonical join-on-exit signal).
+// Backs t::thread's join helpers + the U-2-test thread roundtrip.
+pub const T_SYS_SET_TID_ADDRESS: u64  = 36;
+
+// SYS_TORPOR_WAIT timeout sentinels (mirror kernel/torpor.c).
+//   < 0 = block indefinitely
+//   = 0 = probe (returns -ETIMEDOUT immediately if value still matched)
+//   > 0 = block at most `timeout_us` microseconds.
+// TORPOR_MAX_TIMEOUT_US caps explicit values at 1 hour.
+pub const T_TORPOR_TIMEOUT_INDEFINITE: i64 = -1;
+pub const T_TORPOR_MAX_TIMEOUT_US: i64     = 3600 * 1_000_000; // 1 hour
 
 // P5-stratumd-stub-bringup-e1: walk-and-open one path component from a
 // Spoor (or from the territory root via T_WALK_OPEN_FROM_ROOT sentinel).
@@ -790,6 +818,126 @@ pub unsafe fn t_pivot_root(new_root_fd: i64) -> i64 {
         options(nostack)
     );
     x0
+}
+
+// t_torpor_wait — futex-style wait-on-address.
+//   addr_va    user-VA pointer to a 4-byte-aligned u32 (the futex word)
+//   expected   compared under the kernel `torpor_lock` -- mismatch =>
+//              return 0 immediately (value already changed)
+//   timeout_us see T_TORPOR_TIMEOUT_INDEFINITE / T_TORPOR_MAX_TIMEOUT_US
+//
+// Returns 0 on success (woken OR value mismatch), or a negative
+// errno per the kernel documentation:
+//   -22 EINVAL    bad alignment / outside user VA / null Proc /
+//                 timeout > TORPOR_MAX_TIMEOUT_US
+//   -14 EFAULT    addr_va unmapped / permission-denied at load
+//   -110 ETIMEDOUT timeout lapsed with no wake
+//
+// Safety: addr_va must point to a 4-byte-aligned writable u32 in
+// user-VA memory.
+#[inline(always)]
+pub unsafe fn t_torpor_wait(addr_va: *const u32, expected: u32, timeout_us: i64) -> i64 {
+    let mut x0: i64 = addr_va as i64;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") expected as u64,
+        in("x2") timeout_us as u64,
+        in("x8") T_SYS_TORPOR_WAIT,
+        options(nostack)
+    );
+    x0
+}
+
+// t_torpor_wake — wake up to `count` waiters on `addr_va`. Does NOT
+// load the word; only hashes the address and walks the queue. count =
+// u32::MAX is the wake-all pattern.
+//
+// Returns the number of waiters actually woken (>= 0), or -22 EINVAL
+// on bad alignment / outside user VA.
+//
+// Safety: addr_va must point to a 4-byte-aligned writable u32 in
+// user-VA memory.
+#[inline(always)]
+pub unsafe fn t_torpor_wake(addr_va: *const u32, count: u32) -> i64 {
+    let mut x0: i64 = addr_va as i64;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") count as u64,
+        in("x8") T_SYS_TORPOR_WAKE,
+        options(nostack)
+    );
+    x0
+}
+
+// t_thread_spawn — kernel-level thread spawn. The new Thread shares
+// pgtable_root + ASID + handle table + Territory with the calling
+// Proc; only the entry / stack / x0 arg / TPIDR_EL0 are fresh.
+//
+//   entry_va   EL0 PC where the new thread starts
+//   sp_va      stack TOP (must be 16-byte aligned per AAPCS64)
+//   arg        the new thread's x0 on first entry
+//   tls_va     loaded into TPIDR_EL0 before eret (0 OK; the entry
+//              function then has to set up its own TLS)
+//
+// Returns the new tid (positive int) on success, or a negative
+// errno:
+//   -22 EINVAL  bad alignment / out-of-bound entry_va / sp_va / tls_va
+//   -12 ENOMEM  kstack alloc fail / Thread cache alloc fail
+//
+// Safety: The new thread runs in the calling Proc's address space.
+// `entry_va`, `sp_va`, `tls_va` must point to user-VA memory the
+// caller controls (the caller owns the stack lifetime; libthyla-rs
+// does not allocate or free the stack).
+#[inline(always)]
+pub unsafe fn t_thread_spawn(entry_va: u64, sp_va: u64, arg: u64, tls_va: u64) -> i64 {
+    let mut x0: i64 = entry_va as i64;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") sp_va,
+        in("x2") arg,
+        in("x3") tls_va,
+        in("x8") T_SYS_THREAD_SPAWN,
+        options(nostack)
+    );
+    x0
+}
+
+// t_set_tid_address — install `tidptr` as the calling thread's
+// clear-child-tid address. SYS_THREAD_EXIT will uaccess_store_u32(0)
+// to `tidptr` + torpor_wake(UINT32_MAX). Returns the calling thread's
+// tid (positive); never fails for a userspace caller. A null tidptr
+// clears the registration (no clear-on-exit).
+//
+// Safety: `tidptr` must be either null OR point to a 4-byte-aligned
+// writable u32 in user-VA memory that remains valid until the
+// calling thread exits.
+#[inline(always)]
+pub unsafe fn t_set_tid_address(tidptr: *mut u32) -> i64 {
+    let mut x0: i64 = tidptr as i64;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x8") T_SYS_SET_TID_ADDRESS,
+        options(nostack)
+    );
+    x0
+}
+
+// t_thread_exit — terminate the calling Thread. NEVER returns.
+//
+// Atomically: clear_child_tid hand-off (best-effort), THREAD_EXITING
+// transition, last-thread-also-exits-the-Proc collapse, and yield.
+// Userspace must treat any apparent return as a kernel bug.
+#[inline(always)]
+pub unsafe fn t_thread_exit() -> ! {
+    asm!(
+        "svc #0",
+        in("x8") T_SYS_THREAD_EXIT,
+        options(nostack, noreturn)
+    );
 }
 
 // t_close — release the handle at `fd`. For KOBJ_SPOOR handles the

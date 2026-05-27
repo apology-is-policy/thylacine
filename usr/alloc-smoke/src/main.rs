@@ -53,8 +53,13 @@ use libthyla_rs::io::{Cursor, Read, Seek, SeekFrom, Write};
 use libthyla_rs::notes::{self, NoteClass, NoteMask, NoteTarget, Notes};
 use libthyla_rs::poll::{PollEvents, PollSet, PollTimeout};
 use libthyla_rs::process::{self, Command, Stdio};
+use libthyla_rs::rand;
 use libthyla_rs::territory::{self, MountFlags};
+use libthyla_rs::thread;
+use libthyla_rs::time::{self, Duration};
+use libthyla_rs::torpor::{self, WaitResult};
 use libthyla_rs::t_putstr;
+use core::sync::atomic::{AtomicU32, Ordering};
 
 #[global_allocator]
 static GLOBAL_ALLOCATOR: ThylaAlloc = ThylaAlloc;
@@ -1111,5 +1116,179 @@ pub extern "C" fn rs_main() -> i64 {
     }
 
     t_putstr("alloc-smoke: Territory + Cap OK\n");
+
+    // ====================================================================
+    // U-2g: t::torpor + t::time + t::rand + t::thread
+    // ====================================================================
+
+    // torpor::wait probe with value-mismatch fast path: pass an
+    // unmatched expected; the kernel observes *addr != expected and
+    // returns Woken without sleeping. (The "Woken" naming covers both
+    // real wakes and the mismatch fast path -- callers re-check the
+    // atomic; we just want a non-error rc here.)
+    let probe = AtomicU32::new(7);
+    match torpor::wait(&probe, 42, Some(Duration::ZERO)) {
+        Ok(_) => {}
+        Err(_) => {
+            t_putstr("alloc-smoke: torpor::wait value-mismatch FAILED\n");
+            return 1;
+        }
+    }
+
+    // torpor::wait timeout path: matching expected + non-zero timeout
+    // + no producer -> TimedOut.
+    let waitee = AtomicU32::new(0);
+    match torpor::wait(&waitee, 0, Some(Duration::from_millis(20))) {
+        Ok(WaitResult::TimedOut) => {}
+        Ok(other) => {
+            let _ = other;
+            t_putstr("alloc-smoke: torpor::wait timeout unexpected variant\n");
+            return 1;
+        }
+        Err(_) => {
+            t_putstr("alloc-smoke: torpor::wait timeout FAILED\n");
+            return 1;
+        }
+    }
+
+    // torpor::wake with no waiters returns Ok(0).
+    let solo = AtomicU32::new(0);
+    match torpor::wake_one(&solo) {
+        Ok(0) => {}
+        Ok(n) => {
+            let _ = n;
+            t_putstr("alloc-smoke: torpor::wake_one with no waiters unexpected\n");
+            return 1;
+        }
+        Err(_) => {
+            t_putstr("alloc-smoke: torpor::wake_one FAILED\n");
+            return 1;
+        }
+    }
+    match torpor::wake_all(&solo) {
+        Ok(0) => {}
+        _ => {
+            t_putstr("alloc-smoke: torpor::wake_all FAILED\n");
+            return 1;
+        }
+    }
+
+    // time::sleep -- 5ms should always return Ok.
+    if time::sleep(Duration::from_millis(5)).is_err() {
+        t_putstr("alloc-smoke: time::sleep FAILED\n");
+        return 1;
+    }
+    // Duration::ZERO returns immediately.
+    if time::sleep(Duration::ZERO).is_err() {
+        t_putstr("alloc-smoke: time::sleep(ZERO) FAILED\n");
+        return 1;
+    }
+
+    // rand::getrandom -- alloc-smoke's cap inheritance from joey is
+    // not stable across config changes, so tolerate either Ok (cap
+    // held + buffer filled, must not be all-zero) OR NotPermitted
+    // (cap absent). InvalidArgument on oversize buf is always
+    // testable.
+    let mut rnd = [0u8; 32];
+    match rand::getrandom(&mut rnd) {
+        Ok(n) => {
+            if n != 32 {
+                t_putstr("alloc-smoke: rand::getrandom short read FAILED\n");
+                return 1;
+            }
+            // Probabilistic check: 32 random bytes should not be all-
+            // zero (probability < 2^-256 per call).
+            if rnd.iter().all(|&b| b == 0) {
+                t_putstr("alloc-smoke: rand::getrandom returned all-zero FAILED\n");
+                return 1;
+            }
+        }
+        Err(Error::NotPermitted) => {
+            // Acceptable -- the cap inheritance bound. Carry on.
+        }
+        Err(_) => {
+            t_putstr("alloc-smoke: rand::getrandom unexpected error\n");
+            return 1;
+        }
+    }
+    // Oversize: > GETRANDOM_MAX -> InvalidArgument.
+    let mut huge = [0u8; rand::GETRANDOM_MAX + 1];
+    match rand::getrandom(&mut huge) {
+        Err(Error::InvalidArgument) => {}
+        _ => {
+            t_putstr("alloc-smoke: rand::getrandom oversize unexpected\n");
+            return 1;
+        }
+    }
+
+    // thread::spawn_raw with misaligned sp_va -> InvalidArgument.
+    // sp_va = 1 is the simplest misaligned value.
+    unsafe {
+        match thread::spawn_raw(0x1000, 1, 0, 0) {
+            Err(_) => {}
+            Ok(_) => {
+                t_putstr("alloc-smoke: thread::spawn_raw bad sp accepted unexpected\n");
+                return 1;
+            }
+        }
+    }
+
+    // thread::spawn_raw end-to-end: spawn a child that registers its
+    // clear-child-tid via set_tid_address, then exits. The kernel
+    // clears the tid_word + wakes UINT32_MAX waiters; the parent
+    // join_tid returns. This is the only safe-exit pattern for a
+    // multi-thread Proc at v1.0 (SYS_EXITS extincts the kernel if any
+    // peer thread is RUNNING; the child's THREAD_EXITING state via
+    // set_tid_address signaling lets the parent return cleanly).
+    //
+    // Stack: heap-allocated 4 KiB, leaked (the parent never touches
+    // it again; the kernel reaps when the Proc dies). The child only
+    // calls SVCs after entering -- it doesn't actually USE the stack
+    // for non-trivial frames -- so 4 KiB is overkill but safer than
+    // bare minimums.
+    static TID_WORD: AtomicU32 = AtomicU32::new(0xCAFE);
+    let stack: alloc::boxed::Box<[u8; 4096]> = alloc::boxed::Box::new([0u8; 4096]);
+    let stack_top_va = unsafe {
+        alloc::boxed::Box::leak(stack).as_mut_ptr().add(4096)
+    } as u64;
+
+    extern "C" fn child_entry(arg: u64) -> ! {
+        // arg is the user-VA of the AtomicU32 tid_word.
+        let tid_word: &AtomicU32 = unsafe { &*(arg as *const AtomicU32) };
+        thread::set_tid_address(tid_word);
+        // No other work -- the child exists only to test the spawn
+        // + clear-child-tid join handshake.
+        thread::exit_self()
+    }
+
+    let _tid = match unsafe {
+        thread::spawn_raw(
+            child_entry as *const () as usize as u64,
+            stack_top_va,
+            (&TID_WORD as *const AtomicU32) as u64,
+            0,
+        )
+    } {
+        Ok(tid) => tid,
+        Err(_) => {
+            t_putstr("alloc-smoke: thread::spawn_raw FAILED\n");
+            return 1;
+        }
+    };
+
+    // Join: wait for the child's exit to clear TID_WORD.
+    match thread::join_tid(&TID_WORD, 0xCAFE, Some(Duration::from_secs(2))) {
+        Ok(()) => {}
+        Err(_) => {
+            t_putstr("alloc-smoke: thread::join_tid FAILED\n");
+            return 1;
+        }
+    }
+    if TID_WORD.load(Ordering::Acquire) != 0 {
+        t_putstr("alloc-smoke: TID_WORD not cleared by child exit FAILED\n");
+        return 1;
+    }
+
+    t_putstr("alloc-smoke: Torpor + Time + Rand + Thread OK\n");
     0
 }
