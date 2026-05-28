@@ -1497,6 +1497,18 @@ The `/srv` transport (`devsrv`, §9.4) by which a userspace 9P server — `corvu
 
 `PROC_FLAG_MAY_POST_SERVICE` is structurally NOT a cap: it is **kernel-stamped only at spawn time** (the `spawn_with_perms` thunk above) so the bit cannot be propagated by `rfork` — the same discipline as `PROC_FLAG_CONSOLE_ATTACHED` (§5.5 of CORVUS-DESIGN). The pre-spawn stamp is what avoids the race window a post-spawn `mark()` syscall would open between the parent's mark and the child's first `SYS_POST_SERVICE` call.
 
+### 11.2d Filesystem-mutation syscalls (the FS foundation; IDENTITY-DESIGN.md §9.2)
+
+The create / durability / enumeration trio. Pulled forward ahead of the corvus identity-DB persistence (A-1b) per the convergence-detour sequencing (IDENTITY-DESIGN.md §9.2): real persistence needs them, and the A-2 coreutils + the shell need them shortly after. The kernel 9P client already implements the wire half; these are the syscall wrappers + the real `dev9p_create` + two new `Dev` vtable slots (`.fsync`, `.readdir`). Numbers continue from `SYS_PIVOT_ROOT = 53`.
+
+| Syscall | Description |
+|---|---|
+| `walk_create(parent_fd, name, name_len, omode, perm) → opened_fd` | Create-then-open the single component `name` in directory `parent_fd` (`KOBJ_SPOOR`, `RIGHT_WRITE`; or the `-1` FROM_ROOT sentinel), returning a new opened `KOBJ_SPOOR` fd (`R\|W\|TRANSFER`). The create-sibling of `walk_open`. `perm`'s low 9 bits are the rwxrwxrwx mode; the `DMDIR` bit (`0x80000000`) selects a directory (`Tmkdir`) instead of a file (`Tlcreate`), other `DM*` bits reserved. Dispatches `dev->create` (real `dev9p_create` → `p9_client_lcreate`/`mkdir`, carrying the caller's `primary_gid` into the 9P `gid` field). Ownership-on-create attribution and per-file rwx enforcement are A-2 (this is the create MECHANISM). `SYS_WALK_CREATE = 54`. |
+| `fsync(fd, datasync) → 0` | Durability barrier on `fd` (`KOBJ_SPOOR`, `RIGHT_WRITE`). `datasync` 0 = full, 1 = data-only. New `Dev.fsync` slot → `dev9p_fsync` → `p9_client_fsync` (Stratum `Tsync`); in-memory Devs no-op success. The "write-then-fsync = durable" contract on the integrity FS. `SYS_FSYNC = 55`. |
+| `readdir(fd, buf, buf_len) → bytes` | Read the next run of directory entries from `fd` (`KOBJ_SPOOR` on a directory, `RIGHT_READ`) into `buf` (≤ `SYS_RW_MAX`), advancing the Spoor's offset; 0 bytes = end-of-directory. Buffer is the raw 9P2000.L `Treaddir` dirent stream (`qid + offset + type + name_len + name` per entry); the caller parses it (a native `struct t_dirent` is a v1.x seam). New `Dev.readdir` slot → `dev9p_readdir` → `p9_client_readdir`. `SYS_READDIR = 56`. |
+
+All three are audit-trigger surfaces (§25.4): the create + write + fsync path is the AEGIS/mallocng-adjacent surface flagged for a focused round. The per-file rwx-permission enforcement (no id bypass, I-22) is A-2d, not this foundation.
+
 ### 11.3 Handle syscalls
 
 Per §18:
@@ -3081,6 +3093,7 @@ Every change to a file or function listed below spawns an adversarial soundness 
 | `burrow_attach` / `burrow_detach` | `kernel/syscall.c` handlers, `kernel/burrow.c`, `kernel/vma.c` | Anonymous-memory syscalls (§6.5 Tier 1) — VMA + Burrow refcount lifecycle, VA placement, per-Proc lock, W^X (RW-only) |
 | Initial bringup | `kernel/main.c`, `init/joey.c` | Boot ordering correctness |
 | pouch lower half + kernel additions | `usr/lib/pouch/` (the syscall seam; socket / thread / signal translation), `kernel/` auxv population + the `torpor` wait-on-address syscall + the allocator-backend call | The POSIX→Thylacine boundary; invariants P-1..P-4 (POUCH-DESIGN.md §11); the `torpor` wait/wake (`futex.tla`). Phase 6 surface — rows enumerated per sub-chunk in POUCH-DESIGN.md §14. |
+| FS-mutation syscalls (create / fsync / readdir) | `kernel/syscall.c` (`sys_walk_create_handler` / `sys_fsync_handler` / `sys_readdir_handler`), `kernel/dev9p.c` (real `dev9p_create` + new `dev9p_fsync` / `dev9p_readdir`), `kernel/devramfs.c` (create/fsync/readdir impls), `kernel/include/thylacine/dev.h` (new `.fsync` / `.readdir` vtable slots), `kernel/include/thylacine/syscall.h` (`SYS_WALK_CREATE = 54` / `SYS_FSYNC = 55` / `SYS_READDIR = 56` + ABI), `usr/lib/libt` + `usr/lib/libthyla-rs` wrappers | Convergence-detour FS foundation (IDENTITY-DESIGN.md §9.2), pulled ahead of A-1b corvus persistence. The create + write + fsync path is the AEGIS/mallocng-adjacent surface from Phase 6 — prosecute hard. Rights gates (`RIGHT_WRITE` on parent for create/fsync; `RIGHT_READ` for readdir); single-component name bounds + `/`-`\0` reject; `perm` reserved-`DM*`-bit reject; `DMDIR`-fold (mkdir vs lcreate); `readdir` buffer bounds + offset advance; durability contract; dev9p fid lifecycle on create/clunk (UAF on a failed create path). Per-file rwx enforcement is A-2d, NOT this surface (I-22 holds — no enforcement exists yet to bypass). **No new spec** per the 2026-05-23 spec-to-code broadening — prose validation in IDENTITY-DESIGN.md §9.2 + this row + the audit + the runtime tests. |
 
 ### 25.5 The audit round
 

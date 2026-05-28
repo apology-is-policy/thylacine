@@ -55,12 +55,51 @@ code (per "design conversation -> scripture commit -> code").
     userspace mirrors. **Audit R1 CLEAN** (0 P0/0 P1/1 P2/4 P3, all fixed). 618/618
     PASS x (default + ASan + UBSan). Reference doc 95. A real stack-clobber (stale
     24-byte pouch srv_peer_info mirror vs the 40-byte kernel write) found + fixed
-    mid-chunk. **NEXT: A-1b** (corvus identity DB + RESOLVE_* + CRVS v2).
+    mid-chunk. **NEXT: the FS-mutation foundation (A-1.5 below), THEN A-1b**
+    (reorder, user-chosen 2026-05-28 -- see A-1.5).
 - **Tests:** identity establishment at spawn; inheritance; capped vs uncapped
   identity-set; `srv_peer_info` exposes principal_id/primary_gid; group checks; I-22
   holds (no id bypasses).
 
+### A-1.5 · FS-mutation foundation *(pulled forward; precedes A-1b; design-first)*
+
+**Reorder, user-chosen 2026-05-28.** A-1b's corvus identity DB persists to disk
+(user chose the full DB + UPG + `GROUP_CREATE` + **real persistence**, not an
+in-memory seam). Real persistence needs file **create + fsync + readdir**, none
+of which existed at A-1a: the only `*_CREATE` syscalls are the HW ones, there is
+no `SYS_WALK_CREATE` (that was A-2b), and `fsync` / `readdir` are the unbuilt
+"G1 FS-mutation" sweep items. So A-2b is **pulled forward** and bundled with the
+G1 durability/enumeration items as one FS foundation that lands BEFORE A-1b.
+
+- **Builds (3 syscalls; ABI pinned in IDENTITY-DESIGN.md §9.2):**
+  - `SYS_WALK_CREATE = 54` -- create-then-open sibling of `SYS_WALK_OPEN`;
+    `perm`'s `DMDIR` bit folds mkdir into create (Tmkdir vs Tlcreate); carries
+    caller `primary_gid` into the 9P gid field. Real `dev9p_create` (today a
+    stub).
+  - `SYS_FSYNC = 55` -- durability barrier; new `Dev.fsync` slot -> Tsync.
+  - `SYS_READDIR = 56` -- enumeration; new `Dev.readdir` slot -> Treaddir.
+- **Why cheap-ish:** the kernel 9P client already implements the wire half
+  (`p9_client_lcreate`/`mkdir`/`fsync`/`readdir`, verified 2026-05-28); `Dev`
+  already has a `.create` slot. This is syscall wrappers + the real
+  `dev9p_create` + two new vtable slots + rights gates + tests + audit.
+- **Split:** **FS-alpha** (`SYS_WALK_CREATE`) -> **FS-beta** (`SYS_FSYNC` +
+  `SYS_READDIR`) -> **one focused audit** over the whole create/write/fsync
+  surface (the AEGIS/mallocng-adjacent path -- prosecute hard).
+- **Depends:** A-1a (identity on the Proc, for the primary_gid stamp). **Seam:**
+  ownership-on-create attribution + per-file rwx ENFORCEMENT are A-2 (this is the
+  create MECHANISM; I-22 holds -- no enforcement exists yet to bypass).
+- **Audit:** the create + write + fsync surface -> full round.
+- **Tests:** create a file + write + fsync + re-read; mkdir-via-DMDIR + readdir
+  round-trip; rights-gate reject (no `RIGHT_WRITE` parent); name bounds; reserved
+  `DM*` bit reject; readdir buffer bounds + EOD.
+
 ### A-2 · FS permission + ownership surface *(splits a/b/c)*
+
+> **Note (2026-05-28):** A-2b's `SYS_WALK_CREATE` is **pulled forward into A-1.5**
+> (the FS-mutation foundation). What remains of A-2b here is the ownership +
+> permission SEMANTICS on top of the create mechanism (owner-stamp =
+> principal_id, group = parent-dir, mode = default & umask) -- which interlocks
+> with A-2a (`t_stat` owner/group/mode) and A-2d (the kernel rwx layer).
 - **A-2a:** extend `t_stat` with owner/group/mode (versioned, ACL-extensible
   **seam**) + `SYS_WSTAT` / chmod / chown (drives `p9_client_setattr`).
 - **A-2b:** `SYS_WALK_CREATE` — make `dev9p_create` / `p9_client_lcreate` live;
@@ -158,9 +197,13 @@ tools/build.sh kernel --sanitize=undefined && tools/test.sh
 
 - **Stratum A2 branch-merge prereq** (A-3): confirm `--role coordinator|client` is
   in the `thylacine-pouch-arm` branch before leaning on per-user stratumd.
-- **A-2 9P-write audit**: the create + write path is the AEGIS/mallocng-adjacent
-  surface from Phase 6 -> prosecute hard.
-- **Design-first sub-commits** owed before A-1 and A-4 code (ABI + cap-model).
+- **A-1.5 / A-2 9P-write audit**: the create + write + fsync path (now landing in
+  the A-1.5 FS-mutation foundation) is the AEGIS/mallocng-adjacent surface from
+  Phase 6 -> prosecute hard.
+- **Design-first sub-commits**: A-1a done; the FS-mutation foundation (A-1.5) is
+  pinned in IDENTITY-DESIGN.md §9.2 (this scripture commit); A-1b's corvus wire
+  ABIs + CRVS v2 byte format still owed (pin in CORVUS-DESIGN.md before A-1b
+  code); A-4 cap-model still owed.
 - **Seams are load-bearing**: A-2 leaves the ACL seam; A-4 leaves the
   resource-scoped-HW-cap allowlist + the distributed crypto-proof seam. Don't bake
   fixed bitfields where a policy object belongs.

@@ -795,5 +795,117 @@ format pinned in `CORVUS-DESIGN.md` when the A-1b corvus code lands):
   exit); an uncapped caller's SET request is rejected with **-1 (fail-closed)**;
   reserved-value reject (INVALID / SYSTEM -> -1); the peer-snapshot data path that
   feeds `srv_peer_info` exposes `principal_id` / `primary_gid`; kproc is SYSTEM.
-- **A-1b (corvus):** the identity DB + `RESOLVE_*` verbs + CRVS v2. Tests:
-  `RESOLVE_ID`/`RESOLVE_NAME` round-trip; v1 -> v2 read/upgrade; group membership.
+- **A-1b (corvus):** the identity DB + `RESOLVE_*` verbs + CRVS v2 + **real
+  persistence** (user-chosen 2026-05-28: the full identity DB with UPG +
+  `GROUP_CREATE`, and on-disk persistence rather than an in-memory-only seam).
+  **Reordered (user-chosen 2026-05-28): A-1b now FOLLOWS the FS-mutation
+  foundation (§9.2), because real persistence requires `SYS_WALK_CREATE` +
+  `SYS_FSYNC` + `SYS_READDIR`, none of which existed at A-1a.** The corvus byte
+  format + `RESOLVE_ID` / `RESOLVE_NAME` / `GROUP_CREATE` wire ABIs + the
+  `USER_CREATE` append-only extension get their own design-first pin in
+  `CORVUS-DESIGN.md` immediately before the A-1b code. Tests:
+  `RESOLVE_ID`/`RESOLVE_NAME` round-trip; v1 -> v2 read/upgrade; group
+  membership; persistence (write the DB, fsync, re-read it within the boot).
+
+### 9.2 FS-mutation foundation ABI (RESOLVED 2026-05-28; precedes A-1b)
+
+The three filesystem-mutation syscalls A-1b's real persistence needs (and the
+A-2 coreutils + the shell need shortly after). **Pulled forward ahead of A-1b**
+per the sequencing decision above: A-2b's `SYS_WALK_CREATE` plus the "G1
+FS-mutation" sweep items (`fsync`, `readdir`) land as one audit-bearing
+foundation, THEN A-1b builds persistence on top. The kernel 9P client already
+implements the wire half (`p9_client_lcreate` / `p9_client_mkdir` /
+`p9_client_fsync` / `p9_client_readdir`, verified 2026-05-28) and the `Dev`
+vtable already has a `.create` slot (today a `dev9p_create` stub); this
+foundation is **syscall wrappers + the real `dev9p_create` + two new `Dev`
+vtable slots (`.fsync`, `.readdir`) + rights gates + tests + audit**, not new
+protocol work. Numbers continue from `SYS_PIVOT_ROOT = 53`.
+
+**`SYS_WALK_CREATE = 54`** -- the create-then-open sibling of `SYS_WALK_OPEN`.
+Single-component create in a directory Spoor; returns an opened `KOBJ_SPOOR` fd
+to the created object (file OR directory), matching `walk_open`'s envelope.
+
+```
+SYS_WALK_CREATE(parent_fd, name_va, name_len, omode, perm) -> opened_fd / -1
+  x0 = parent_fd   hidx_t; KOBJ_SPOOR with RIGHT_WRITE (create mutates the
+                   directory) -- OR the SYS_WALK_OPEN_FROM_ROOT sentinel
+                   ((u64)-1) for the caller's Territory root.
+  x1 = name_va     user-VA of the single component name.
+  x2 = name_len    1 .. SYS_WALK_OPEN_NAME_MAX (64); reject '/' and '\0'.
+  x3 = omode       Plan 9 open mode for the returned fd (OREAD/OWRITE/ORDWR
+                   + optional OTRUNC); SYS_WALK_OPEN_OMODE_VALID mask.
+  x4 = perm        u32 Plan 9 perm. Low 9 bits = rwxrwxrwx mode. The DMDIR bit
+                   (0x80000000) selects directory creation (Tmkdir) instead of
+                   a file (Tlcreate). All other DM* bits reserved 0 -> reject.
+```
+
+- **Returned fd rights:** `RIGHT_READ | RIGHT_WRITE | RIGHT_TRANSFER` (same as
+  `walk_open`). The underlying fid's omode is what the server enforces.
+- **Mechanism:** `dev->create` (the real `dev9p_create`): `perm & DMDIR` ?
+  `p9_client_mkdir(mode = perm & 0777, gid = caller primary_gid)` then walk+open
+  the new directory : `p9_client_lcreate(flags from omode | O_CREAT [+ O_TRUNC],
+  mode = perm & 0777, gid = caller primary_gid)`. For `devramfs` (the
+  kernel-test target) the existing in-memory create path is reused.
+- **Ownership-on-create (SEAM at this chunk):** the create carries the caller's
+  `primary_gid` into the 9P `gid` field. Full owner attribution = caller
+  `principal_id` is recorded where the KERNEL mediates the metadata -- the
+  mount-cape for self-declared-non-POSIX backings (A-2c) and the kernel rwx
+  layer (A-2d); for a Stratum-backed dev9p file the owner is the connection
+  identity (A-3 per-user stratumd completes per-user attribution). This chunk
+  builds the create MECHANISM; the rwx-enforcement semantics ride on top in A-2.
+- **Error cases (-1):** parent not `KOBJ_SPOOR` / missing `RIGHT_WRITE`; FROM_ROOT
+  with no pivoted root; backing Dev has no `.create`; name bounds / `/` / `\0`;
+  omode outside the valid mask; perm has a reserved DM* bit; the server rejects
+  (name exists -> Rlerror; out of space; permission); handle table full.
+- **Rights gate here is the HANDLE right (`RIGHT_WRITE` on the parent); the
+  per-file rwx permission check is A-2d, not this chunk (I-22 stands -- no id
+  bypass exists yet because no rwx enforcement exists yet).**
+
+**`SYS_FSYNC = 55`** -- the durability barrier. Required on an integrity-FS OS:
+"write then fsync" is the contract that makes a persisted record durable
+(corvus's identity DB at A-1b; any later durable writer).
+
+```
+SYS_FSYNC(fd, datasync) -> 0 / -1
+  x0 = fd          hidx_t; KOBJ_SPOOR with RIGHT_WRITE.
+  x1 = datasync    u32; 0 = full fsync (data + metadata), 1 = datasync.
+```
+
+- **Mechanism:** new `Dev.fsync(struct Spoor *c, u32 datasync) -> int` vtable
+  slot. `dev9p_fsync` -> `p9_client_fsync(fid, datasync)` -> Stratum `Tsync`.
+  In-memory Devs (`devramfs`) implement `.fsync` as no-op success (nothing to
+  flush). A Dev with no `.fsync` slot -> -1.
+- **Error cases (-1):** fd not `KOBJ_SPOOR` / missing `RIGHT_WRITE`; no `.fsync`
+  slot; server Rlerror.
+
+**`SYS_READDIR = 56`** -- directory enumeration. Needed for A-1b load-time user
+enumeration and for the A-2 coreutils `ls`.
+
+```
+SYS_READDIR(fd, buf_va, buf_len) -> bytes_written (>=0) / -1
+  x0 = fd          hidx_t; KOBJ_SPOOR opened on a directory, RIGHT_READ.
+  x1 = buf_va      user-VA out buffer.
+  x2 = buf_len     1 .. SYS_RW_MAX (4096).
+```
+
+- **Stateful via the Spoor offset** (the same offset `SYS_READ` / `SYS_LSEEK`
+  advance): each call returns the next run of entries and advances the offset;
+  0 bytes returned == end of directory.
+- **Buffer format:** the raw 9P2000.L `Treaddir` dirent byte stream -- per entry
+  `qid(13) + offset(8) + type(1) + name_len(2 LE) + name`. The caller parses it
+  (libthyla-rs provides a dirent iterator). Pinning the wire dirent format
+  (rather than a Thylacine-native struct) keeps the syscall a thin pass-through
+  of `p9_client_readdir`; a native `struct t_dirent` is a v1.x convenience seam.
+- **Mechanism:** new `Dev.readdir(struct Spoor *c, void *buf, long n, s64 off)
+  -> long` vtable slot. `dev9p_readdir` -> `p9_client_readdir`. `devramfs`
+  enumerates its in-memory entries in the same dirent format.
+- **Error cases (-1):** fd not `KOBJ_SPOOR` / not a directory / missing
+  `RIGHT_READ`; `buf_len` 0 or > `SYS_RW_MAX`; no `.readdir` slot; server Rlerror.
+
+**Implementation split:** **FS-alpha** = `SYS_WALK_CREATE` (real `dev9p_create`
+with the DMDIR fold + `devramfs_create` verify + the primary_gid stamp + libt /
+libthyla-rs wrappers + tests). **FS-beta** = `SYS_FSYNC` + `SYS_READDIR` (the
+two new `Dev` vtable slots + dev9p/devramfs impls + wrappers + tests). **Then
+one focused adversarial audit** over the whole create/write/fsync/readdir
+surface (the AEGIS/mallocng-adjacent create+write path the detour flags
+"prosecute hard"), two-commit close. **Then A-1b** persistence rides on top.
