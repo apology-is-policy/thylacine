@@ -12,6 +12,7 @@
 #include <thylacine/dev9p.h>
 #include <thylacine/page.h>
 #include <thylacine/spoor.h>
+#include <thylacine/syscall.h>
 #include <thylacine/types.h>
 
 #include "../mm/slub.h"
@@ -263,10 +264,74 @@ static struct Spoor *dev9p_open(struct Spoor *c, int omode) {
     return c;
 }
 
-static void dev9p_create(struct Spoor *c, const char *name, int omode, u32 perm) {
-    (void)c; (void)name; (void)omode; (void)perm;
-    // Create maps to Tlcreate; deferred to the syscall chunk where
-    // mode + name-length handling is fully plumbed.
+// Create `name` in the directory c (c's fid is a private clone the caller
+// already walked to the parent dir) and OPEN it; on success c refers to the
+// new opened object. perm's low 9 bits = POSIX mode; the DMDIR bit selects a
+// directory (Tmkdir) over a file (Tlcreate). gid is carried into the 9P gid
+// field. Returns c on success, NULL on failure (the caller spoor_clunks c,
+// whose dev9p_close clunks the walked fid).
+static struct Spoor *dev9p_create(struct Spoor *c, const char *name,
+                                    int omode, u32 perm, u32 gid) {
+    struct dev9p_priv *p = priv_of(c);
+    if (!p) return NULL;
+    if (!name) return NULL;
+
+    // Name length: the handler NUL-terminates within SYS_WALK_OPEN_NAME_MAX,
+    // so this scan is bounded. p9_client_* take an explicit length.
+    size_t name_len = 0;
+    while (name[name_len] != '\0') name_len++;
+    if (name_len == 0) return NULL;
+
+    u32 mode = perm & 0777u;
+    struct p9_qid qid;
+    u32 iounit = 0;
+
+    if (perm & SYS_WALK_CREATE_DMDIR) {
+        // Directory: Tmkdir leaves p->fid at the PARENT, so after creating
+        // the dir we walk parent->name into a fresh fid, swap it in, and
+        // lopen it OREAD (you readdir a directory, never write it).
+        int rc = p9_client_mkdir(p->client, p->fid, (const u8 *)name, name_len,
+                                  mode, gid, &qid);
+        if (rc != 0) return NULL;                 // p->fid still parent; caller clunks
+
+        u32 dir_fid = p9_client_alloc_fid(p->client);
+        if (dir_fid == P9_NOFID) return NULL;     // dir created; can't open it
+
+        const u8 *names[1] = { (const u8 *)name };
+        size_t   lens[1]  = { name_len };
+        u16 nwqid = 0;
+        struct p9_qid wq[1];
+        rc = p9_client_walk(p->client, p->fid, dir_fid, 1,
+                             (const u8 *const *)names, lens, &nwqid, wq);
+        if (rc != 0 || nwqid != 1) {
+            (void)p9_client_clunk(p->client, dir_fid);
+            return NULL;                          // p->fid still parent; caller clunks
+        }
+        // Swap: clunk the parent clone, adopt the new-dir fid. From here a
+        // failure leaves p->fid == dir_fid so dev9p_close clunks the right one.
+        (void)p9_client_clunk(p->client, p->fid);
+        p->fid = dir_fid;
+
+        rc = p9_client_lopen(p->client, dir_fid, 0u /* OREAD */, &qid, &iounit);
+        if (rc != 0) return NULL;
+        c->mode = 0;                              // OREAD
+    } else {
+        // File: Tlcreate creates AND opens; afterward p->fid refers to the
+        // new file. Map Plan 9 omode -> Linux O_* (same shape as dev9p_open).
+        u32 flags = (u32)(omode & 0x3);
+        if (omode & 0x10) flags |= 01000u;        // OTRUNC -> O_TRUNC
+        int rc = p9_client_lcreate(p->client, p->fid, (const u8 *)name, name_len,
+                                    flags, mode, gid, &qid, &iounit);
+        if (rc != 0) return NULL;                 // p->fid still parent; caller clunks
+        c->mode = omode;
+    }
+
+    c->qid.path = qid.path;
+    c->qid.vers = qid.version;
+    c->qid.type = qid_type_p9_to_kernel(qid.type);
+    c->flag    |= COPEN;
+    c->offset   = 0;
+    return c;
 }
 
 static void dev9p_close(struct Spoor *c) {

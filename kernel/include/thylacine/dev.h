@@ -90,11 +90,24 @@ struct Dev {
     // Open / create / close.
     //   open(c, omode) — transition c from "walked" to "opened". Returns
     //                    c on success (typically with c->flag |= COPEN).
-    //   create(...)    — create a new file in c's directory.
+    //   create(c, name, omode, perm, gid)
+    //                  — create `name` in the directory c (whose fid the
+    //                    caller has already clone-walked so c is a private
+    //                    cursor at the parent dir), then OPEN it. On success
+    //                    c is mutated to refer to the new opened object and
+    //                    returned (Plan 9 create semantics; mirrors open's
+    //                    return shape). `perm` low 9 bits = mode; the DMDIR
+    //                    bit selects a directory. `gid` is the creator's
+    //                    primary group, carried into the 9P gid field (the
+    //                    Dev treats it as an opaque number -- identity-
+    //                    agnostic). Returns NULL on failure (the caller
+    //                    spoor_clunks c, which clunks the walked fid).
+    //                    A read-only Dev returns NULL.
     //   close(c)       — release any per-Spoor resources held while open.
     //                    Called by spoor_clunk on its way to spoor_unref.
     struct Spoor *(*open)(struct Spoor *c, int omode);
-    void          (*create)(struct Spoor *c, const char *name, int omode, u32 perm);
+    struct Spoor *(*create)(struct Spoor *c, const char *name, int omode,
+                            u32 perm, u32 gid);
     void          (*close)(struct Spoor *c);
 
     // I/O.

@@ -46,12 +46,11 @@ static struct Spoor *devnone_open(struct Spoor *c, int omode) {
     return NULL;            // can't open
 }
 
-static void devnone_create(struct Spoor *c, const char *name, int omode, u32 perm) {
-    (void)c; (void)name; (void)omode; (void)perm;
-    // no-op; create on devnone is silently ignored. Plan 9 would error
-    // with "create not supported"; at v1.0 we don't have an error
-    // string mechanism in the kernel, so silent no-op + a future syscall
-    // wrapper that returns -1 is the right shape.
+static struct Spoor *devnone_create(struct Spoor *c, const char *name, int omode, u32 perm, u32 gid) {
+    (void)c; (void)name; (void)omode; (void)perm; (void)gid;
+    // create on devnone returns NULL — the SYS_WALK_CREATE handler maps
+    // that to -1 (the error path Plan 9 would express as "create not supported").
+    return NULL;
 }
 
 static void devnone_close(struct Spoor *c) {

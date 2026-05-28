@@ -84,6 +84,7 @@ enum {
     T_SYS_LSEEK       = 51,      // P6-pouch-stratumd-boot 16b-gamma: file-offset cursor
     T_SYS_ATTACH_9P_SRV = 52,    // P6-pouch-stratumd-boot 16c: 9P attach over byte-mode KOBJ_SRV
     T_SYS_PIVOT_ROOT  = 53,      // P6-pouch-stratumd-boot 16c: atomic root_spoor swap
+    T_SYS_WALK_CREATE = 54,      // FS-mutation foundation: create-then-open a component
 };
 
 // Torpor error codes — match kernel's TORPOR_ERR_* (Linux/musl-numeric
@@ -1036,6 +1037,35 @@ static inline long t_walk_open(long spoor_fd, const char *name,
         "svc #0"
         : "+r"(x0)
         : "r"(x1), "r"(x2), "r"(x3), "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
+// t_walk_create — create-then-open the single component `name` inside the
+// directory `parent_fd` (KOBJ_SPOOR with RIGHT_WRITE, or T_WALK_OPEN_FROM_ROOT
+// for the Territory root). Returns a new opened KOBJ_SPOOR fd referring to the
+// created object (file, or directory when perm carries T_WALK_CREATE_DMDIR).
+// perm's low 9 bits are the rwxrwxrwx mode; the created object's group is the
+// caller's primary_gid. omode is the Plan 9 open mode for the returned fd
+// (T_OREAD / T_OWRITE / T_ORDWR [+ T_OTRUNC]); a directory is opened OREAD.
+// Returns the new fd (>=0), -1 on any error (see SYS_WALK_CREATE). FS-mutation
+// foundation (IDENTITY-DESIGN.md section 9.2).
+#define T_WALK_CREATE_DMDIR  0x80000000u
+__attribute__((always_inline))
+static inline long t_walk_create(long parent_fd, const char *name,
+                                  size_t name_len, unsigned long omode,
+                                  unsigned long perm) {
+    register long x0 __asm__("x0") = parent_fd;
+    register long x1 __asm__("x1") = (long)(unsigned long)name;
+    register long x2 __asm__("x2") = (long)name_len;
+    register long x3 __asm__("x3") = (long)omode;
+    register long x4 __asm__("x4") = (long)perm;
+    register long x8 __asm__("x8") = T_SYS_WALK_CREATE;
+    __asm__ volatile (
+        "svc #0"
+        : "+r"(x0)
+        : "r"(x1), "r"(x2), "r"(x3), "r"(x4), "r"(x8)
         : "memory", "cc"
     );
     return x0;

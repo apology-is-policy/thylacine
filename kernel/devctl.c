@@ -358,8 +358,9 @@ static struct Spoor *devctl_open(struct Spoor *c, int omode) {
     return dev_simple_open(c, omode);
 }
 
-static void devctl_create(struct Spoor *c, const char *name, int omode, u32 perm) {
-    (void)c; (void)name; (void)omode; (void)perm;
+static struct Spoor *devctl_create(struct Spoor *c, const char *name, int omode, u32 perm, u32 gid) {
+    (void)c; (void)name; (void)omode; (void)perm; (void)gid;
+    return NULL;
 }
 
 static void devctl_close(struct Spoor *c) {

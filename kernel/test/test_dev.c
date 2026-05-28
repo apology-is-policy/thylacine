@@ -165,10 +165,13 @@ void test_dev_devnone_ops_smoke(void) {
     TEST_ASSERT(devnone.power(c, 0) == NULL,
                 "devnone.power returns NULL");
 
+    // create on devnone is non-creatable -> NULL (FS-mutation foundation).
+    TEST_ASSERT(devnone.create(c, "x", 0, 0, 0) == NULL,
+                "devnone.create returns NULL (not creatable)");
+
     // Void ops — must not crash.
     devnone.reset();
     devnone.shutdown();
-    devnone.create(c, "x", 0, 0);
     devnone.remove(c);
     devnone.close(c);
 

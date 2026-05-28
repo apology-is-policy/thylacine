@@ -337,8 +337,9 @@ static struct Spoor *devcap_open(struct Spoor *c, int omode) {
     return c;
 }
 
-static void devcap_create(struct Spoor *c, const char *name, int omode, u32 perm) {
-    (void)c; (void)name; (void)omode; (void)perm;
+static struct Spoor *devcap_create(struct Spoor *c, const char *name, int omode, u32 perm, u32 gid) {
+    (void)c; (void)name; (void)omode; (void)perm; (void)gid;
+    return NULL;
 }
 
 // close — release the kmalloc'd leaf-ref aux. The root has no aux.

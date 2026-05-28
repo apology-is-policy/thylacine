@@ -643,9 +643,10 @@ static struct Spoor *devsrv_open(struct Spoor *c, int omode) {
     return NULL;
 }
 
-static void devsrv_create(struct Spoor *c, const char *name, int omode, u32 perm) {
-    (void)c; (void)name; (void)omode; (void)perm;
-    // no-op — /srv entries are posted via SYS_POST_SERVICE, not 9P create.
+static struct Spoor *devsrv_create(struct Spoor *c, const char *name, int omode, u32 perm, u32 gid) {
+    (void)c; (void)name; (void)omode; (void)perm; (void)gid;
+    // /srv entries are posted via SYS_POST_SERVICE, not 9P create.
+    return NULL;
 }
 
 // close — release per-Spoor state. The /srv root holds none; a service

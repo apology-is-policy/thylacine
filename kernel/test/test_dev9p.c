@@ -28,6 +28,8 @@ void test_dev9p_read_routes_through_client(void);
 void test_dev9p_write_routes_through_client(void);
 void test_dev9p_close_clunks_owned_fid(void);
 void test_dev9p_close_does_not_clunk_root_fid(void);
+void test_dev9p_create_file(void);
+void test_dev9p_create_dir(void);
 
 // File-scope buffers — client is ~12 KiB, won't fit on the 16 KiB test
 // thread stack alongside a few smaller locals.
@@ -141,6 +143,32 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
         resp[8] = (u8)((count >> 8) & 0xff);
         resp[9] = (u8)((count >> 16) & 0xff);
         resp[10] = (u8)((count >> 24) & 0xff);
+        return (int)total;
+    }
+    if (type == P9_TLCREATE) {
+        // Rlcreate = qid(13) + iounit(4), same shape as Rlopen. path 0x77
+        // distinguishes a created file's qid from a walked/opened one.
+        size_t total = P9_HDR_LEN + P9_QID_LEN + 4;
+        if (resp_cap < total) return -1;
+        resp[0] = (u8)(total & 0xff); resp[1] = 0; resp[2] = 0; resp[3] = 0;
+        resp[4] = P9_RLCREATE;
+        resp[5] = (u8)(tag & 0xff); resp[6] = (u8)((tag >> 8) & 0xff);
+        resp[7] = P9_QTFILE;
+        for (int i = 0; i < 4; i++) resp[8 + i] = 0;
+        resp[12] = 0x77; for (int i = 1; i < 8; i++) resp[12 + i] = 0;
+        resp[20] = 0; resp[21] = 0x10; resp[22] = 0; resp[23] = 0;     // iounit=4096
+        return (int)total;
+    }
+    if (type == P9_TMKDIR) {
+        // Rmkdir = qid(13). path 0x55 distinguishes a mkdir'd dir.
+        size_t total = P9_HDR_LEN + P9_QID_LEN;
+        if (resp_cap < total) return -1;
+        resp[0] = (u8)(total & 0xff); resp[1] = 0; resp[2] = 0; resp[3] = 0;
+        resp[4] = P9_RMKDIR;
+        resp[5] = (u8)(tag & 0xff); resp[6] = (u8)((tag >> 8) & 0xff);
+        resp[7] = P9_QTDIR;
+        for (int i = 0; i < 4; i++) resp[8 + i] = 0;
+        resp[12] = 0x55; for (int i = 1; i < 8; i++) resp[12 + i] = 0;
         return (int)total;
     }
     return -1;
@@ -316,4 +344,50 @@ void test_dev9p_close_does_not_clunk_root_fid(void) {
                  "(close did NOT clunk; higher layer owns root_fid)");
     p9_client_destroy(&g_client);
     p9_loopback_destroy(&g_loopback);
+}
+
+// dev9p.create file path (FS-mutation foundation, SYS_WALK_CREATE). Mirrors
+// what sys_walk_create_handler does: clone the parent dir Spoor, clone-walk it
+// so the clone carries its own fid at the parent, then create. dev9p_create
+// drives Tlcreate (the responder's 0x77 qid) which both creates AND opens.
+void test_dev9p_create_file(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "root");
+    struct Spoor *nc = spoor_clone(root);
+    TEST_ASSERT(nc != NULL, "clone target");
+
+    struct Walkqid *w = dev9p.walk(root, nc, NULL, 0);   // clone-walk
+    TEST_ASSERT(w != NULL, "clone-walk gave nc its own fid");
+    walkqid_free(w);
+
+    struct Spoor *opened = dev9p.create(nc, "newfile", 1 /*OWRITE*/, 0644u, 1000u);
+    TEST_ASSERT(opened == nc,                  "create(file) returns the Spoor");
+    TEST_ASSERT((nc->flag & COPEN) != 0,       "COPEN set after Tlcreate");
+    TEST_EXPECT_EQ((u64)nc->qid.path, (u64)0x77,
+                    "qid taken from the Rlcreate response");
+
+    spoor_clunk(nc);
+    teardown(root);
+}
+
+// dev9p.create directory path: perm & DMDIR -> Tmkdir, then walk+lopen the new
+// dir so the returned Spoor is opened OREAD on it.
+void test_dev9p_create_dir(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "root");
+    struct Spoor *nc = spoor_clone(root);
+    TEST_ASSERT(nc != NULL, "clone target");
+
+    struct Walkqid *w = dev9p.walk(root, nc, NULL, 0);   // clone-walk
+    TEST_ASSERT(w != NULL, "clone-walk");
+    walkqid_free(w);
+
+    // 0x80000000 == DMDIR (SYS_WALK_CREATE_DMDIR); omode OREAD for a dir.
+    struct Spoor *opened = dev9p.create(nc, "newdir", 0 /*OREAD*/,
+                                         0x80000000u | 0755u, 1000u);
+    TEST_ASSERT(opened == nc,             "create(dir) returns the Spoor");
+    TEST_ASSERT((nc->flag & COPEN) != 0,  "COPEN set after Tmkdir+walk+lopen");
+
+    spoor_clunk(nc);
+    teardown(root);
 }

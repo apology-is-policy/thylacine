@@ -194,6 +194,8 @@ pub const T_TORPOR_MAX_TIMEOUT_US: i64     = 3600 * 1_000_000; // 1 hour
 pub const T_SYS_WALK_OPEN: u64        = 34;
 pub const T_SYS_FSTAT: u64            = 50;
 pub const T_SYS_LSEEK: u64            = 51;
+// FS-mutation foundation (IDENTITY-DESIGN.md section 9.2): create-then-open.
+pub const T_SYS_WALK_CREATE: u64      = 54;
 
 // SYS_WALK_OPEN omode bits — must mirror SYS_WALK_OPEN_OMODE_VALID in
 // kernel/include/thylacine/syscall.h. Plan 9 OREAD/OWRITE/ORDWR/OEXEC
@@ -204,6 +206,10 @@ pub const T_OWRITE: u32               = 1;
 pub const T_ORDWR: u32                = 2;
 pub const T_OEXEC: u32                = 3;
 pub const T_OTRUNC: u32               = 0x10;
+
+// SYS_WALK_CREATE perm: low 9 bits = POSIX mode; DMDIR selects a directory.
+// Must mirror SYS_WALK_CREATE_PERM_VALID / SYS_WALK_CREATE_DMDIR in the kernel.
+pub const T_WALK_CREATE_DMDIR: u32    = 0x8000_0000;
 
 // SYS_WALK_OPEN sentinel for "walk from the calling Proc's territory
 // root spoor" (P5-stratumd-stub-bringup-e2). Passed as spoor_fd when
@@ -1423,6 +1429,30 @@ pub unsafe fn t_walk_open(spoor_fd: i64, name: *const u8, name_len: usize, omode
         in("x2") name_len as u64,
         in("x3") omode as u64,
         in("x8") T_SYS_WALK_OPEN,
+        options(nostack)
+    );
+    x0
+}
+
+// t_walk_create — create-then-open the single component `name` inside the
+// directory `parent_fd` (KOBJ_SPOOR with RIGHT_WRITE, or T_WALK_OPEN_FROM_ROOT
+// for the Territory root) and return a new opened KOBJ_SPOOR fd. `perm`'s low 9
+// bits are the POSIX mode; T_WALK_CREATE_DMDIR selects a directory. The created
+// object's group is the caller's primary_gid. `omode` is the open mode for the
+// returned fd (a directory is opened OREAD). FS-mutation foundation
+// (IDENTITY-DESIGN.md section 9.2). Returns the new fd (>= 0) or -1.
+#[inline(always)]
+pub unsafe fn t_walk_create(parent_fd: i64, name: *const u8, name_len: usize,
+                            omode: u32, perm: u32) -> i64 {
+    let mut x0: i64 = parent_fd;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") name as u64,
+        in("x2") name_len as u64,
+        in("x3") omode as u64,
+        in("x4") perm as u64,
+        in("x8") T_SYS_WALK_CREATE,
         options(nostack)
     );
     x0

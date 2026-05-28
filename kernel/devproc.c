@@ -334,11 +334,10 @@ static struct Spoor *devproc_open(struct Spoor *c, int omode) {
     return dev_simple_open(c, omode);
 }
 
-static void devproc_create(struct Spoor *c, const char *name, int omode, u32 perm) {
-    (void)c; (void)name; (void)omode; (void)perm;
-    // /proc is a synthetic FS — create is silently rejected at v1.0
-    // (no error propagation path; the future syscall surface returns
-    // -EROFS or equivalent).
+static struct Spoor *devproc_create(struct Spoor *c, const char *name, int omode, u32 perm, u32 gid) {
+    (void)c; (void)name; (void)omode; (void)perm; (void)gid;
+    // /proc is a synthetic FS — create returns NULL (SYS_WALK_CREATE -> -1).
+    return NULL;
 }
 
 static void devproc_close(struct Spoor *c) {

@@ -312,9 +312,11 @@ static struct Spoor *devramfs_open(struct Spoor *c, int omode) {
     return dev_simple_open(c, omode);
 }
 
-static void devramfs_create(struct Spoor *c, const char *name, int omode, u32 perm) {
-    (void)c; (void)name; (void)omode; (void)perm;
-    // ramfs is read-only at v1.0
+static struct Spoor *devramfs_create(struct Spoor *c, const char *name,
+                                       int omode, u32 perm, u32 gid) {
+    (void)c; (void)name; (void)omode; (void)perm; (void)gid;
+    // ramfs is read-only at v1.0 — SYS_WALK_CREATE on a ramfs dir returns -1.
+    return NULL;
 }
 
 static void devramfs_close(struct Spoor *c) {

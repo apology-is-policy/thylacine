@@ -1080,6 +1080,47 @@ enum {
     // Audit-bearing: CLAUDE.md §"Audit-triggering changes" SYS_PIVOT_
     // ROOT + territory_pivot_root row.
     SYS_PIVOT_ROOT   = 53,   // arg: new_root_fd (x0)
+
+    // Convergence-detour FS-mutation foundation (IDENTITY-DESIGN.md §9.2).
+    //
+    // SYS_WALK_CREATE(parent_fd, name_va, name_len, omode, perm) -> opened_fd / -1
+    //   The create-then-open sibling of SYS_WALK_OPEN. Creates the single
+    //   component `name` inside the directory `parent_fd` and returns a NEW
+    //   opened KOBJ_SPOOR fd referring to the created object (file OR dir).
+    //   x0 = parent_fd  (hidx_t; KOBJ_SPOOR with RIGHT_WRITE -- create mutates
+    //                    the directory -- OR the SYS_WALK_OPEN_FROM_ROOT
+    //                    sentinel (u64)-1 for the caller's Territory root.)
+    //   x1 = name_va    (user-VA of the single component name.)
+    //   x2 = name_len   (bytes; > 0, <= SYS_WALK_OPEN_NAME_MAX; reject '/' '\0'
+    //                    + the "." / ".." entries, same shape as SYS_WALK_OPEN.)
+    //   x3 = omode      (Plan 9 open mode for the returned fd; OREAD/OWRITE/
+    //                    ORDWR + optional OTRUNC; SYS_WALK_OPEN_OMODE_VALID.
+    //                    For a DMDIR create the new dir is opened OREAD
+    //                    regardless -- you readdir a directory, never write it.)
+    //   x4 = perm       (u32 Plan 9 perm. Low 9 bits = rwxrwxrwx mode. The
+    //                    DMDIR bit (0x80000000) selects directory creation
+    //                    (Tmkdir) instead of a file (Tlcreate). Bits outside
+    //                    SYS_WALK_CREATE_PERM_VALID are rejected.)
+    //
+    // The created object's group is stamped from the CALLER's primary_gid
+    // (carried into the 9P Tlcreate/Tmkdir gid field). Full owner attribution
+    // (= caller principal_id) and per-file rwx ENFORCEMENT are A-2 (this is the
+    // create MECHANISM; I-22 holds -- nothing enforces rwx yet to bypass).
+    //
+    // Returns: x0 = opened KOBJ_SPOOR fd (>=0; R|W|TRANSFER, matching
+    // SYS_WALK_OPEN) on success, or -1 on:
+    //   - parent_fd not KOBJ_SPOOR / missing RIGHT_WRITE (excluding FROM_ROOT)
+    //   - FROM_ROOT sentinel used but no pivoted root_spoor
+    //   - backing Dev has no walk or no create vtable op (e.g. read-only ramfs)
+    //   - name_va outside user-VA / name_len 0 / > 64 / contains '/' or '\0' /
+    //     "." / ".."
+    //   - omode has bits outside SYS_WALK_OPEN_OMODE_VALID
+    //   - perm has bits outside SYS_WALK_CREATE_PERM_VALID
+    //   - dev->create fails (Rlerror: name exists / no space / server perm)
+    //   - handle table full
+    //
+    // Audit-bearing: CLAUDE.md FS-mutation-syscalls row.
+    SYS_WALK_CREATE  = 54,   // arg: parent_fd, name_va, name_len, omode, perm
 };
 
 // SYS_WALK_OPEN's FROM_ROOT sentinel: when passed as the spoor_fd, the
@@ -1273,6 +1314,14 @@ _Static_assert(__builtin_offsetof(struct t_stat, blocks)    == 64, "t_stat.block
 // (0x10). Phase 5+ may extend (OCEXEC=0x20, ORCLOSE=0x40, OEXCL=0x1000)
 // as callers materialize. Any bit outside this mask → -1.
 #define SYS_WALK_OPEN_OMODE_VALID  0x13u
+
+// SYS_WALK_CREATE perm: the Plan 9 perm word. Low 9 bits are the POSIX
+// rwxrwxrwx mode; the DMDIR bit selects directory creation. All other DM*
+// bits (DMAPPEND 0x40000000, DMEXCL 0x20000000, DMTMP 0x04000000, ...) are
+// reserved 0 at v1.0 -- a perm with any bit outside SYS_WALK_CREATE_PERM_VALID
+// is rejected with -1 (so a future bit cannot be silently ignored).
+#define SYS_WALK_CREATE_DMDIR       0x80000000u
+#define SYS_WALK_CREATE_PERM_VALID  (0x1FFu | SYS_WALK_CREATE_DMDIR)
 
 // Maximum length for a single SYS_BURROW_ATTACH (and the matching
 // SYS_BURROW_DETACH). A v1.0 sanity bound: burrow_create_anon allocates

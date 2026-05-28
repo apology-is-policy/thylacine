@@ -1610,6 +1610,136 @@ static s64 sys_walk_open_handler(u64 spoor_fd_raw, u64 name_va,
 }
 
 // =============================================================================
+// SYS_WALK_CREATE — the create-then-open sibling of SYS_WALK_OPEN
+// (convergence-detour FS-mutation foundation; IDENTITY-DESIGN.md §9.2).
+//
+// Creates the single component `name` inside the directory `parent_fd` and
+// returns a NEW opened KOBJ_SPOOR fd referring to the created object (file or,
+// when perm carries DMDIR, a directory). The mechanism:
+//   1. resolve the parent dir Spoor (RIGHT_WRITE — create mutates the dir).
+//   2. spoor_clone(parent) -> nc (shallow aux = parent's fid).
+//   3. CLONE-walk nc (dev->walk with nname=0) so nc holds its OWN fid still
+//      pointing at the parent dir (so create doesn't mutate the parent's fid).
+//   4. nc->dev->create(nc, name, omode, perm, primary_gid) — does Tlcreate
+//      (file) or Tmkdir+walk+lopen (dir) on nc's fid, leaving nc opened on the
+//      new object. Returns nc on success, NULL on failure.
+//   5. install nc in the handle table (R|W|TRANSFER, matching SYS_WALK_OPEN).
+//
+// The created object's group is the CALLER's primary_gid (A-1a identity on the
+// Proc), carried into the 9P gid field. Per-file rwx ENFORCEMENT is A-2d; this
+// is the create MECHANISM (I-22 holds — nothing enforces rwx yet to bypass).
+// =============================================================================
+
+static s64 sys_walk_create_handler(u64 parent_fd_raw, u64 name_va,
+                                     u64 name_len_raw, u64 omode_raw,
+                                     u64 perm_raw) {
+    struct Thread *t = current_thread();
+    if (!t)                                          return -1;
+    struct Proc *p = t->proc;
+    if (!p)                                          return -1;
+
+    // Name length cap (same shape as SYS_WALK_OPEN; single-component only).
+    if (name_len_raw == 0)                            return -1;
+    if (name_len_raw > SYS_WALK_OPEN_NAME_MAX)        return -1;
+    if (!sys_validate_user_buf(name_va, name_len_raw)) return -1;
+
+    // omode bit validation (reject unknown bits; forward-compat).
+    if (omode_raw & ~(u64)SYS_WALK_OPEN_OMODE_VALID)  return -1;
+
+    // perm bit validation: only the low-9 mode bits + DMDIR are permitted at
+    // v1.0. Any other DM* bit (DMAPPEND / DMEXCL / DMTMP / ...) -> -1, so a
+    // future bit cannot be silently dropped. Also reject the full 64-bit raw
+    // having bits above 32 (perm is a u32 ABI field).
+    if (perm_raw & ~(u64)SYS_WALK_CREATE_PERM_VALID)  return -1;
+    u32 perm = (u32)perm_raw;
+
+    // Resolve the parent directory Spoor. RIGHT_WRITE is the gate: create
+    // mutates the directory's contents. (SYS_WALK_OPEN uses RIGHT_READ; create
+    // is the write-side op.) The FROM_ROOT sentinel walks from the caller's
+    // pivoted Territory root, same as SYS_WALK_OPEN.
+    struct Spoor *src;
+    if (parent_fd_raw == SYS_WALK_OPEN_FROM_ROOT) {
+        if (!p->territory)                            return -1;
+        src = p->territory->root_spoor;
+        if (!src)                                     return -1;
+    } else {
+        src = sys_lookup_spoor(p, (hidx_t)parent_fd_raw, RIGHT_WRITE);
+        if (!src)                                     return -1;
+    }
+    if (!src->dev || !src->dev->walk || !src->dev->create) return -1;
+
+    // Copy + validate the component name (same strict shape as SYS_WALK_OPEN:
+    // reject '/' '\0' "." ".."; NUL-terminate for dev9p's strlen scan).
+    char name_scratch[SYS_WALK_OPEN_NAME_MAX + 1];
+    for (u64 i = 0; i < name_len_raw; i++) {
+        u8 b;
+        if (uaccess_load_u8(name_va + i, &b) != 0)    return -1;
+        if (b == '/' || b == '\0')                    return -1;
+        name_scratch[i] = (char)b;
+    }
+    if (name_len_raw == 1 && name_scratch[0] == '.')  return -1;
+    if (name_len_raw == 2 && name_scratch[0] == '.' &&
+                              name_scratch[1] == '.') return -1;
+    name_scratch[name_len_raw] = '\0';
+
+    // Clone the parent, then CLONE-walk so nc carries its own fid at the
+    // parent dir (a 0-component walk). create then mutates nc's fid into the
+    // new object without touching the parent's fid.
+    //
+    // Cross-Dev clone-walk safety (this is the first userspace path to call a
+    // Dev walk with nname==0; SYS_WALK_OPEN always passes nname>=1): leaf Devs
+    // (cons/null/zero/full/random/pipe/notes/none) return NULL -> the
+    // walk-fail path below; self-cloning dir Devs (devproc/devctl/devramfs)
+    // return a wq whose spoor is their OWN clone -> the w->spoor != nc reject
+    // below; devcap/devsrv handle nname==0 explicitly but their create stub
+    // returns NULL (and their cloned root carries aux==NULL, so the eventual
+    // spoor_clunk's close is a no-op). Only dev9p replaces nc->aux with a real
+    // fresh fid -- the only Dev whose create actually creates at v1.0.
+    struct Spoor *nc = spoor_clone(src);
+    if (!nc)                                          return -1;
+
+    struct Walkqid *w = src->dev->walk(src, nc, NULL, 0);
+    if (!w) {
+        // Clone-walk failed; nc->aux is still the shallow copy of src->aux
+        // (dev9p_walk replaces aux only on success). Detach + unref without
+        // running close (close would clunk src's fid through the shared aux).
+        nc->aux = NULL;
+        spoor_unref(nc);
+        return -1;
+    }
+    // Defense-in-depth: the reuse-nc contract (same rationale as
+    // SYS_WALK_OPEN's F4 close). A clone-walk returns nqid==0, so we do NOT
+    // apply the nqid==1 partial-walk check here.
+    if (w->spoor != nc) {
+        walkqid_free(w);
+        nc->aux = NULL;
+        spoor_unref(nc);
+        return -1;
+    }
+    walkqid_free(w);
+
+    // Create + open the new object. dev->create returns nc (opened) on
+    // success or NULL on failure; on NULL nc still owns its walked fid, so
+    // spoor_clunk runs dev->close -> clunks it.
+    struct Spoor *opened = nc->dev->create(nc, name_scratch, (int)omode_raw,
+                                            perm, p->primary_gid);
+    if (!opened) {
+        spoor_clunk(nc);
+        return -1;
+    }
+
+    // Install the opened object. R|W|TRANSFER mask matches SYS_WALK_OPEN /
+    // SYS_ATTACH_9P; the 9P server is the omode-enforcement authority.
+    rights_t r = RIGHT_READ | RIGHT_WRITE | RIGHT_TRANSFER;
+    hidx_t fd = handle_alloc(p, KOBJ_SPOOR, r, nc);
+    if (fd < 0) {
+        spoor_clunk(nc);
+        return -1;
+    }
+    return (s64)fd;
+}
+
+// =============================================================================
 // SYS_CHROOT — stamp the caller's territory root_spoor (P5-stratumd-stub-
 // bringup-e2). Per CORVUS-DESIGN.md §10.1 ("chroot at v1.0; full pivot at
 // v1.x") + ARCH §11.2.
@@ -4412,6 +4542,14 @@ void syscall_dispatch(struct exception_context *ctx) {
                                                   ctx->regs[1],
                                                   ctx->regs[2],
                                                   ctx->regs[3]);
+        return;
+
+    case SYS_WALK_CREATE:
+        ctx->regs[0] = (u64)sys_walk_create_handler(ctx->regs[0],
+                                                    ctx->regs[1],
+                                                    ctx->regs[2],
+                                                    ctx->regs[3],
+                                                    ctx->regs[4]);
         return;
 
     case SYS_CHROOT:

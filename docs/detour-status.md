@@ -92,6 +92,12 @@ G1 durability/enumeration items as one FS foundation that lands BEFORE A-1b.
 - **Tests:** create a file + write + fsync + re-read; mkdir-via-DMDIR + readdir
   round-trip; rights-gate reject (no `RIGHT_WRITE` parent); name bounds; reserved
   `DM*` bit reject; readdir buffer bounds + EOD.
+- **FS-alpha LANDED** (`SYS_WALK_CREATE`): real `dev9p_create` (Tlcreate /
+  Tmkdir+walk+lopen), the `Dev` `.create` vtable widened to `struct Spoor
+  *(*)(c,name,omode,perm,gid)` across all 13 Devs (only dev9p creates), the
+  handler with cross-Dev clone-walk safety, libt + libthyla-rs `t_walk_create`,
+  2 dev9p loopback tests (create_file / create_dir), reference doc 96. 620/620
+  PASS (default; +2 from 618). FS-beta (`SYS_FSYNC` + `SYS_READDIR`) next.
 
 ### A-2 · FS permission + ownership surface *(splits a/b/c)*
 
