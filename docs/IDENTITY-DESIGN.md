@@ -665,3 +665,87 @@ across all 54 syscall handlers (spot-clean, not exhaustive).
 When this arc closes, every VISION/ARCH/ROADMAP claim is true-or-honestly-scoped,
 and every foreseeable extension is pre-fitted. Then the Utopia shell arc resumes
 on a sound foundation (next chunk U-6d-b).
+
+---
+
+## 9. Sub-chunk ABI pins (design-first)
+
+Precise ABIs pinned before code, per "design -> scripture -> code." The byte-exact
+layouts here are the contract; the implementation's `_Static_assert`s must match.
+
+### 9.1 A-1 — identity model ABI (RESOLVED 2026-05-28)
+
+**Proc identity record** (new fields on `struct Proc`):
+- `u32 principal_id` — durable identity. **Inherited** across rfork/spawn.
+- `u32 primary_gid`.
+- `u32 supp_gids[15]` + `u8 supp_gid_count` — up to 16 groups total (1 primary + 15
+  supplementary), fixed-size to bound the Proc; corvus is the authority for full
+  membership (the kernel caches the active set).
+- `stripes` stays per-Proc, fresh, unforgeable (unchanged). `caps` stays
+  subset-inherited (unchanged).
+
+**Reserved principal-ids / gids** (none privileged — I-22):
+- `0` = INVALID (never assigned; a Proc with id 0 pre-login is a bug).
+- `PRINCIPAL_SYSTEM = 0xFFFFFFFE` — the boot/kernel-proc identity (kproc, joey,
+  pre-login). Holds caps via the boot chain, NOT via identity.
+- `PRINCIPAL_NONE = 0xFFFFFFFF` — unauthenticated / "nobody" (Plan 9 `none`); lowest
+  baseline.
+- Real users/roles: corvus-assigned in `[1, 0xFFFFFFFD]` (corvus policy, e.g.
+  >= 1000). Same reserved scheme for gids (`GID_SYSTEM` / `GID_NONE`).
+- `proc_alloc` defaults a new Proc's identity to **inherit the parent's**; the boot
+  chain (kproc) is `PRINCIPAL_SYSTEM`, so everything is SYSTEM until login stamps a
+  real identity. (Deliberately no `uid==0`-as-root — sidesteps the Unix-root and
+  Stratum-`/ctl`-uid-0 baggage; a future Thylacine-hostowner -> Stratum-`/ctl`
+  mapping is a separate A-5/admin concern.)
+
+**Identity establishment — at spawn, gated, race-free** (REFINED 2026-05-28 from the
+earlier "stamp-a-running-child" proposal, which had a stamp-before-it-runs race):
+- Identity is set **at Proc creation**, atomically — never on a running Proc. The
+  rich-spawn path (`t_sys_spawn_args`, used by `SYS_SPAWN_FULL_ARGV`) is extended
+  with optional `principal_id` + `primary_gid` + a supp-gids vector.
+- **Gate:** setting a child's identity to anything other than *inherited* requires
+  the caller to hold **`CAP_SET_IDENTITY` (`1ull << 5`)**. Left as the INHERIT
+  sentinel (or without the cap) -> the child inherits the parent's identity. So
+  login (holding `CAP_SET_IDENTITY`, conferred by the boot chain) spawns the user's
+  shell *born with* the user's identity; ordinary processes inherit. **No standalone
+  `SYS_SET_IDENTITY` syscall** — folding into spawn is race-free and reuses existing
+  infrastructure.
+- Self-de-escalation (a daemon dropping its own identity to `PRINCIPAL_NONE`) is a
+  v1.x **seam** (you can always become *less*; not yet built).
+
+**`srv_peer_info` ABI extension** (24 -> 32 bytes; append-only, existing offsets
+unchanged):
+
+```
+struct srv_peer_info {
+    u64 stripes;        // @0   (unchanged)
+    u64 caps;           // @8   (unchanged)
+    u32 console;        // @16  (unchanged)
+    u32 principal_id;   // @20  (new; was pad)
+    u32 primary_gid;    // @24  (new)
+    u32 flags;          // @28  (new; reserved, 0 at v1.0)
+};   // sizeof == 32; offsets pinned by _Static_assert
+```
+
+Supplementary groups are NOT in the struct (variable count) — a consumer resolves
+them via corvus by `principal_id`.
+
+**corvus identity DB** (corvus-side; schema *shape* pinned here, byte-exact CRVS
+format pinned in `CORVUS-DESIGN.md` when the A-1b corvus code lands):
+- **User record:** `{principal_id, name, primary_gid, supp_gids[], wrap-chain
+  (existing), clearance-eligibility[] (A-4)}`.
+- **Group record:** `{gid, name}`.
+- **Resolution verbs** (cross-component ABI on `/srv/corvus`): `RESOLVE_ID`
+  (id -> name + gids) and `RESOLVE_NAME` (name -> id). Pinned ABIs.
+- **CRVS on-disk format:** version bump v1 -> v2 (adds the identity DB); corvus
+  reads v1 as "no identity DB" and writes v2. Byte format = A-1b detail.
+
+**A-1 implementation split:**
+- **A-1a (kernel):** Proc identity fields + inheritance + reserved values + the
+  spawn-args identity extension + `CAP_SET_IDENTITY` + the `srv_peer_info`
+  extension. Audit-bearing. Tests: inheritance; a capped Proc spawns a child with a
+  set identity; an uncapped caller's identity arg is rejected -> inherit;
+  `srv_peer_info` exposes the new fields; reserved-value handling; I-22 (no id
+  bypasses).
+- **A-1b (corvus):** the identity DB + `RESOLVE_*` verbs + CRVS v2. Tests:
+  `RESOLVE_ID`/`RESOLVE_NAME` round-trip; v1 -> v2 read/upgrade; group membership.

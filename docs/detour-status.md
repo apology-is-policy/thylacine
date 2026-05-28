@@ -34,10 +34,14 @@ code (per "design conversation -> scripture commit -> code").
   non-system principal-id).
 - **Depends:** corvus (exists). **Seam:** verifiable-credential projection point
   (distributed identity, v1.x).
-- **Design-first:** the `principal-id` ABI + `stripes` encoding + the corvus DB
-  schema.
-- **Tests:** identity establishment; `stripes` carries principal-id; group checks;
-  I-22 holds (no ambient super-authority).
+- **Design-first: PINNED 2026-05-28 -> IDENTITY-DESIGN §9.1** (principal-id u32 ABI
+  + reserved non-privileged SYSTEM/NONE + Proc record + `srv_peer_info` 24->32 +
+  **identity-at-spawn** via extended `t_sys_spawn_args` gated by `CAP_SET_IDENTITY`
+  [refined from stamp-a-child -> race-free] + corvus DB schema + `RESOLVE_*` verbs +
+  CRVS v2). **Splits A-1a (kernel) / A-1b (corvus).**
+- **Tests:** identity establishment at spawn; inheritance; capped vs uncapped
+  identity-set; `srv_peer_info` exposes principal_id/primary_gid; group checks; I-22
+  holds (no id bypasses).
 
 ### A-2 · FS permission + ownership surface *(splits a/b/c)*
 - **A-2a:** extend `t_stat` with owner/group/mode (versioned, ACL-extensible
