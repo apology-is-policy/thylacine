@@ -1,8 +1,15 @@
 # 96 — Filesystem-mutation syscalls (the FS foundation)
 
 **Status:** FS-alpha (`SYS_WALK_CREATE`) + FS-beta (`SYS_FSYNC` + `SYS_READDIR`)
-LANDED. Next: the FS-audit (one focused adversarial round over the whole
-create/write/fsync surface). Design pin: `IDENTITY-DESIGN.md §9.2`.
+LANDED + audit-CLEAN (opus prosecutor R1: 0 P0 / 0 P1 / 1 P2 / 3 P3 — the fid
+lifecycle, buffer bounds, rights gates, and vtable ABI all sound; F1 doc + F2
+reject-leak + F3 readdir-copy-order fixed, F4 already documented). 622/622 PASS
+on default + UBSan. **KNOWN BLOCKER (not this code):** under ASan the first
+runtime Thylacine->Stratum WRITE (the joey fs-mut create E2E) deterministically
+fails `rc=-1` — heap-layout-sensitive (default + UBSan pass), i.e. the
+documented Phase 6 AEGIS/mallocng write-path corruption (task #713). Root-cause
+of #713 is the user-mandated gate before A-1b persistence. Design pin:
+`IDENTITY-DESIGN.md §9.2`.
 
 ## Purpose
 
@@ -112,12 +119,23 @@ Sequence: validate name/omode/perm -> resolve parent (RIGHT_WRITE | FROM_ROOT)
 primary_gid)` -> `handle_alloc(KOBJ_SPOOR, R|W|TRANSFER)`.
 
 **Cross-Dev clone-walk safety** (the first userspace path to call a Dev walk with
-`nname==0`): leaf Devs return `NULL` (the walk-fail cleanup: `nc->aux = NULL;
-spoor_unref(nc)`); self-cloning directory Devs (`devproc`/`devctl`/`devramfs`)
-return a wq whose spoor is their own clone, caught by the `w->spoor != nc`
-reject (same as `SYS_WALK_OPEN`'s F4 defense); `devcap`/`devsrv` handle `nname==0`
-explicitly but their create stub returns `NULL` and their cloned root carries
-`aux==NULL` (a no-op close). Only `dev9p` replaces `nc->aux` with a fresh fid.
+`nname==0`). Three safe shapes (F1 audit — note `devramfs` is in the REUSE
+bucket, not the reject bucket):
+- **(a) leaf Devs** (`cons`/`null`/`zero`/`full`/`random`/`pipe`/`notes`/`none`)
+  return `NULL` -> the walk-fail cleanup (`nc->aux = NULL; spoor_unref(nc)`).
+- **(b) reuse-nc Devs** (`devcap`/`devsrv`/`devramfs` return `w->spoor == nc`,
+  nqid==0): the create call proceeds but their create stub returns `NULL`, and
+  the cloned Spoor carries `aux==NULL` (or a `dev_simple_close` no-op), so the
+  eventual `spoor_clunk(nc)` is harmless. (Post-16b-gamma `devramfs_walk` REUSES
+  a non-NULL `nc`; the handler always passes one — so devramfs is here, made safe
+  by its NULL create, NOT by the `w->spoor != nc` reject.)
+- **(c) self-cloning dir Devs** (`devproc`/`devctl` IGNORE nc and clone
+  internally) return `w->spoor != nc` -> the reject path, which clunks the
+  leaked clone (F2 audit) then unrefs `nc`.
+
+Only `dev9p` replaces `nc->aux` with a fresh fid. (The identical `w->spoor != nc`
+leak exists pre-existing in `SYS_WALK_OPEN`'s F4 path; unreachable at v1.0 — no
+writable self-cloning Dev is user-exposed — so it is deferred there, fixed here.)
 
 ### `kernel/dev9p.c::dev9p_create`
 

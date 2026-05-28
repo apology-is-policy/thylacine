@@ -1687,14 +1687,20 @@ static s64 sys_walk_create_handler(u64 parent_fd_raw, u64 name_va,
     // new object without touching the parent's fid.
     //
     // Cross-Dev clone-walk safety (this is the first userspace path to call a
-    // Dev walk with nname==0; SYS_WALK_OPEN always passes nname>=1): leaf Devs
-    // (cons/null/zero/full/random/pipe/notes/none) return NULL -> the
-    // walk-fail path below; self-cloning dir Devs (devproc/devctl/devramfs)
-    // return a wq whose spoor is their OWN clone -> the w->spoor != nc reject
-    // below; devcap/devsrv handle nname==0 explicitly but their create stub
-    // returns NULL (and their cloned root carries aux==NULL, so the eventual
-    // spoor_clunk's close is a no-op). Only dev9p replaces nc->aux with a real
-    // fresh fid -- the only Dev whose create actually creates at v1.0.
+    // Dev walk with nname==0; SYS_WALK_OPEN always passes nname>=1). Three
+    // safe shapes (F1 audit -- devramfs is in the SECOND bucket, not the
+    // reject bucket):
+    //   (a) leaf Devs (cons/null/zero/full/random/pipe/notes/none) return NULL
+    //       -> the walk-fail path below.
+    //   (b) Devs that REUSE nc on a clone (devcap/devsrv/devramfs return
+    //       w->spoor == nc, nqid==0) -> the create call proceeds but their
+    //       create stub returns NULL, and their clone carries aux==NULL (or a
+    //       no-op close), so the eventual spoor_clunk(nc) is harmless.
+    //   (c) self-cloning dir Devs (devproc/devctl IGNORE nc and clone
+    //       internally) return w->spoor != nc -> the reject path below (which
+    //       now clunks the leaked clone, F2).
+    // Only dev9p replaces nc->aux with a real fresh fid -- the only Dev whose
+    // create actually creates at v1.0.
     struct Spoor *nc = spoor_clone(src);
     if (!nc)                                          return -1;
 
@@ -1711,6 +1717,11 @@ static s64 sys_walk_create_handler(u64 parent_fd_raw, u64 name_va,
     // SYS_WALK_OPEN's F4 close). A clone-walk returns nqid==0, so we do NOT
     // apply the nqid==1 partial-walk check here.
     if (w->spoor != nc) {
+        // F2 audit: a self-cloning Dev (devproc/devctl) returned its OWN fresh
+        // Spoor (ref=1) instead of reusing nc -- clunk it so it doesn't leak.
+        // (Unreachable at v1.0: no writable self-cloning Dev is user-exposed;
+        // correct for when one is.)
+        if (w->spoor) spoor_clunk(w->spoor);
         walkqid_free(w);
         nc->aux = NULL;
         spoor_unref(nc);
@@ -1810,12 +1821,15 @@ static s64 sys_readdir_handler(u64 fd_raw, u64 buf_va, u64 buf_len_raw) {
         pos += entry;
     }
     if (!advanced)                                   return -1;   // malformed run
-    c->offset = (s64)last_cookie;
 
-    // Copy the dirent bytes to user-VA (per-byte uaccess, same as SYS_READ).
+    // Copy the dirent bytes to user-VA FIRST, THEN advance the Spoor offset
+    // (F3 audit). If a uaccess store faults, we return -1 with the offset
+    // UNCHANGED, so the caller's retry re-fetches the same run rather than
+    // silently skipping the entries it never received.
     for (long i = 0; i < got; i++) {
         if (uaccess_store_u8(buf_va + (u64)i, scratch[i]) != 0) return -1;
     }
+    c->offset = (s64)last_cookie;
     return got;
 }
 
