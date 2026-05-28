@@ -50,7 +50,7 @@ code (per "design conversation -> scripture commit -> code").
     set (INVALID/SYSTEM) also -> -1. Identity applied in the spawn thunk before
     userland_enter (console-attach precedent).
   - **A-1a (kernel) LANDED 2026-05-28** -- scripture `8d1d05d` + code `3610edb` +
-    audit close `*(pending)*`. Proc identity (168->240) + inheritance + kproc=SYSTEM +
+    audit close `9b0c638`. Proc identity (168->240) + inheritance + kproc=SYSTEM +
     CAP_SET_IDENTITY + identity-at-spawn (fail-closed) + srv_peer_info 24->40 + all 4
     userspace mirrors. **Audit R1 CLEAN** (0 P0/0 P1/1 P2/4 P3, all fixed). 618/618
     PASS x (default + ASan + UBSan). Reference doc 95. A real stack-clobber (stale
