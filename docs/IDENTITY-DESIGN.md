@@ -59,12 +59,18 @@ under-specified for our needs. Thylacine keeps them clean:
    in Susan's territory." (I-1.)
 2. **Identity** — *who you are*: an authenticated principal (name + group
    memberships), established by corvus at login, carried as an unforgeable token
-   (`stripes` is the kernel handle). What servers enforce against and what
+   (`stripes` is the kernel handle). What the kernel rwx check + Stratum's dataset-scope enforce against, and what
    privileged actions are *attributed to*.
 3. **Permission** — what you may *do to a named object*: owner/group/other rwx
-   (or ACL), enforced **by the file server** against your identity — not by the
-   kernel (Plan 9 model). For permissionless backings, a Thylacine policy-overlay
-   supplies it (§4.2 / F-1).
+   (or ACL), enforced **by the Thylacine kernel at the FS-access chokepoint** (the
+   Dev / 9P-client layer — an `inode_permission`-equivalent) against your
+   `principal_id` + groups, on the mode/uid/gid the backing provides (Stratum/ext4
+   via Rgetattr) or the mount-cape synthesizes (permissionless backings). **This is
+   the Linux-VFS model — a conscious deviation from Plan 9's server-enforces model**
+   (rationale + the Stratum finding that forced it: §3.7). Dataset-scope (Stratum;
+   coarse, attach-time) is the *outer* defense-in-depth boundary; the kernel rwx
+   check is the *inner* one. A backing that also enforces makes the kernel check a
+   floor, never a conflict.
 4. **Capability** — what *privileged operations* you can perform: the `CAP_*` set
    + handle rights. Orthogonal to identity — "michal" with or without
    `CAP_HW_CREATE`. **Elevation = gaining a capability, scoped and audited, NOT
@@ -215,6 +221,9 @@ mounter, checked at the namespace layer).
   (one mode for the subtree). Satisfies S1 (mount group=A, group-r, owner-rwx).
 - Consequence: the namespace layer gains a *uniform* permission check for these
   mounts (it currently does pure visibility). Much simpler than per-path policy.
+  **(Update 2026-05-28: the mount-cape is the permissionless-backing metadata
+  source within the unified kernel permission layer — see §3.7; F-1 is subsumed
+  into that layer, not a separate mechanism.)**
 
 ### 3.3 Identity — the hybrid model (F-0: RESOLVED 2026-05-28)
 
@@ -334,6 +343,56 @@ foundational "kernel fully trusts every userspace driver" gap (itself a C-class
 real miss). Cost: longer detour; a v1.x→v1.0 shift. A (identity) and B (SMMU) are
 largely independent; the resource-scoped-HW-cap refinement completes on top of
 both.
+
+### 3.7 Permission enforcement: the kernel-VFS model (axis 3; RESOLVED 2026-05-28)
+
+**The Stratum finding that forced this** (agent + spot-verified 2026-05-28): a 9P
+server is not guaranteed to enforce file rwx, and our reference server does not.
+Stratum performs **no per-file owner/group/other rwx check at all** (exhaustive
+grep: zero permission idioms in its FS/9P layer; open/read/write gate only on
+open-mode consistency); `Tsetattr` chmod/chown is **unconditional** (`server.c:2544`,
+no owner check); identity is the socket **`SO_PEERCRED` uid, not the 9P `n_uname`**
+(which it ignores); and there is **no root bypass** (vacuously — no rwx check
+exists). What Stratum *does* enforce is **dataset-scope** (which uid may attach
+which dataset subtree; refusal = `Rlerror(EACCES)` at Tattach). This is
+intentional: Stratum is also a standalone portable encryptor (VeraCrypt-shaped) and
+must stay free of any one consumer's identity model.
+
+**Decision: Thylacine enforces rwx in the kernel, at the FS-access chokepoint — the
+Linux-VFS model, not Plan 9's server-enforces model.** Two decisive reasons:
+1. **Heterogeneous backings.** ext4, FAT, and foreign 9P servers do not (or cannot)
+   self-enforce. The only layer uniform across all backings is the Thylacine kernel,
+   which already mediates **every** FS op (userspace never talks to a backing
+   directly). That chokepoint is exactly where Linux's VFS enforces; ours is
+   airtight by construction.
+2. **Storage-tool independence.** Pushing enforcement into the server would couple
+   Stratum (and every backing) to Thylacine's identity model. Keeping the policy in
+   the OS keeps storage tools portable.
+
+**Mechanism — one uniform kernel permission layer.** At walk/open/create the kernel
+runs an `inode_permission`-equivalent: the file's mode/uid/gid (from the Dev's
+`stat` — Rgetattr for `dev9p`, the in-kernel table for `devramfs`, the **mount-cape**
+for permissionless backings) is checked against the Proc's `principal_id` + groups.
+**The F-1 mount-cape is no longer a special case — it is simply the metadata source
+for permissionless backings within this one layer.** No identity is special (I-22):
+no `principal_id` bypasses the check (we never special-case a uid — unlike a server,
+which we would otherwise have to trust not to). Audit-bearing (privilege boundary;
+lands in Stop A-2).
+
+**Conscious heritage note.** On axis 3, Thylacine is **Linux-shaped (the VFS
+enforces)**, not Plan-9-shaped (the server enforces). Deliberate: axis 1 (namespace)
+stays pure Plan 9; axis 4 (capability) is Fuchsia/seL4; axis 3 takes the Linux-VFS
+model because it is the only one that survives heterogeneous backings. Each axis
+takes its best ancestor — the project's "combine Plan 9 + Fuchsia + seL4" identity,
+made honest about axis 3.
+
+**Within-dataset reality + seam.** Stored mode bits are now *enforced* by the
+kernel (not advisory). `chmod`/`chown` manage those stored bits via `Tsetattr`;
+because Stratum applies them unconditionally, the **ownership-change policy
+(only-owner-may-chmod, privileged-chown) is enforced kernel-side too** (the same
+permission layer), not by Stratum. ACLs remain the v1.x seam (the kernel layer
+reads them when present). Dataset-scope presentation (the `SO_PEERCRED`-equivalent
+for Stratum's outer boundary) is the A-3 cross-project seam.
 
 ---
 
@@ -517,8 +576,9 @@ distribution across other arcs):
 
 - **Stop A — identity / access / privilege** (this document). The hybrid identity
   + groups, the legate/clearance elevation model, `SYS_WALK_CREATE` with
-  ownership-on-create, the rwx surface, the trusted path, the uniform mount-cape,
-  `CAP_KILL` (resolving the open ARCH question). Absorbs the suspended Phase 5
+  ownership-on-create, the **kernel rwx-permission layer** (Linux-VFS model, §3.7 —
+  the mount-cape folds into it), the trusted path, `CAP_KILL` (resolving the open
+  ARCH question). Absorbs the suspended Phase 5
   tail: P5-login, per-user stratumd wiring (Stratum A2 ready), P5-hostowner-c, the
   corvus Q11 4-byte seam.
 - **Stop B — DMA isolation (SMMUv3), in v1.0.** SMMUv3 driver + DMA-API change
@@ -543,6 +603,12 @@ scripture over-claims.
   (the 9P client `p9_client_*` implements all of them). Exit: the v1.0 coreutils
   VISION promises (`date sleep ls mv rm mkdir touch ln ps`) are runnable; `fsync`
   gives a real durability barrier.
+- **Kernel rwx-permission layer** (the Linux-VFS enforcement point, §3.7 — replaces
+  the old "server enforces" assumption; Stratum does not enforce file rwx). At
+  walk/open/create, check the file's mode/uid/gid (Dev `stat` / mount-cape) against
+  the Proc's `principal_id` + groups; no uid bypass (I-22). Exit: a Proc cannot
+  read/write a file its identity + the mode forbid; chmod/chown ownership-change
+  policy enforced kernel-side.
 - **Real exit-status** (replace the 0/1 collapse with a structured status). Exit:
   `exit 42` surfaces verbatim through `wait`.
 - **Demand-zero anonymous paging** (replace eager `alloc_pages` backing). Exit:

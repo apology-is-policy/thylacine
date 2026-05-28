@@ -45,7 +45,14 @@ code (per "design conversation -> scripture commit -> code").
 - **A-2b:** `SYS_WALK_CREATE` — make `dev9p_create` / `p9_client_lcreate` live;
   stamp owner = caller principal-id, group = parent-dir (Plan 9/BSD), mode =
   default & umask.
-- **A-2c:** uniform **mount-cape** for self-declared-non-POSIX backings.
+- **A-2c:** uniform **mount-cape** for self-declared-non-POSIX backings — folds
+  into A-2d as the metadata source for permissionless backings.
+- **A-2d:** the **kernel rwx-permission layer** (Linux-VFS model; IDENTITY-DESIGN
+  §3.7). At walk/open/create, check the file's mode/uid/gid (Dev `stat` /
+  mount-cape) against the Proc's `principal_id` + groups; no uid bypass (I-22);
+  chmod/chown ownership-change policy enforced here. **Replaces the dropped
+  "server enforces" assumption** — Stratum enforces dataset-scope ONLY, not file
+  rwx (agent-verified 2026-05-28; see §3.7).
 - **Depends:** A-1. Interlocks with Stop C FS-mutation (this *is* create+setattr).
 - **Audit:** the create + setattr 9P-write surface (AEGIS-adjacent) -> full round.
 - **Tests:** create stamps owner=caller + group=parent; chmod/chown round-trip;
