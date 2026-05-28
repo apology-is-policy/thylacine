@@ -194,8 +194,11 @@ pub const T_TORPOR_MAX_TIMEOUT_US: i64     = 3600 * 1_000_000; // 1 hour
 pub const T_SYS_WALK_OPEN: u64        = 34;
 pub const T_SYS_FSTAT: u64            = 50;
 pub const T_SYS_LSEEK: u64            = 51;
-// FS-mutation foundation (IDENTITY-DESIGN.md section 9.2): create-then-open.
+// FS-mutation foundation (IDENTITY-DESIGN.md section 9.2): create-then-open,
+// durability barrier, directory enumeration.
 pub const T_SYS_WALK_CREATE: u64      = 54;
+pub const T_SYS_FSYNC: u64            = 55;
+pub const T_SYS_READDIR: u64          = 56;
 
 // SYS_WALK_OPEN omode bits — must mirror SYS_WALK_OPEN_OMODE_VALID in
 // kernel/include/thylacine/syscall.h. Plan 9 OREAD/OWRITE/ORDWR/OEXEC
@@ -1453,6 +1456,40 @@ pub unsafe fn t_walk_create(parent_fd: i64, name: *const u8, name_len: usize,
         in("x3") omode as u64,
         in("x4") perm as u64,
         in("x8") T_SYS_WALK_CREATE,
+        options(nostack)
+    );
+    x0
+}
+
+// t_fsync — durability barrier on `fd` (KOBJ_SPOOR, RIGHT_WRITE). datasync 0 =
+// full, non-zero = data only. Returns 0 / -1. FS-mutation foundation (§9.2).
+#[inline(always)]
+pub unsafe fn t_fsync(fd: i64, datasync: u32) -> i64 {
+    let mut x0: i64 = fd;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") datasync as u64,
+        in("x8") T_SYS_FSYNC,
+        options(nostack)
+    );
+    x0
+}
+
+// t_readdir — read the next run of 9P2000.L dirents from directory `fd`
+// (KOBJ_SPOOR, RIGHT_READ) into `buf` (<= SYS_RW_MAX), advancing the Spoor's
+// offset. Returns bytes (>= 0; 0 = end-of-directory), -1 on error. Each entry:
+// qid(13) + offset(8 LE) + type(1) + name_len(2 LE) + name. FS-mutation
+// foundation (§9.2).
+#[inline(always)]
+pub unsafe fn t_readdir(fd: i64, buf: *mut u8, buf_len: usize) -> i64 {
+    let mut x0: i64 = fd;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") buf as u64,
+        in("x2") buf_len as u64,
+        in("x8") T_SYS_READDIR,
         options(nostack)
     );
     x0

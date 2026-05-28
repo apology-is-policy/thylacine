@@ -1121,6 +1121,31 @@ enum {
     //
     // Audit-bearing: CLAUDE.md FS-mutation-syscalls row.
     SYS_WALK_CREATE  = 54,   // arg: parent_fd, name_va, name_len, omode, perm
+
+    // SYS_FSYNC(fd, datasync) -> 0 / -1 (FS-mutation foundation; §9.2).
+    //   x0 = fd        (hidx_t; KOBJ_SPOOR with RIGHT_WRITE -- fsync is the
+    //                   write-side durability barrier.)
+    //   x1 = datasync  (u32; 0 = full fsync [data + metadata], 1 = data only.)
+    // The "write-then-fsync = durable" contract on the integrity FS. Dispatches
+    // dev->fsync (dev9p -> p9_client_fsync -> Stratum Tsync; in-memory-durable
+    // Devs no-op success). Returns -1 on: fd not KOBJ_SPOOR / missing
+    // RIGHT_WRITE; the Dev has no .fsync slot; server Rlerror.
+    // Audit-bearing: CLAUDE.md FS-mutation-syscalls row.
+    SYS_FSYNC        = 55,   // arg: fd (x0), datasync (x1)
+
+    // SYS_READDIR(fd, buf_va, buf_len) -> bytes_written (>=0) / -1 (§9.2).
+    //   x0 = fd        (hidx_t; KOBJ_SPOOR opened on a directory, RIGHT_READ.)
+    //   x1 = buf_va    (user-VA out buffer.)
+    //   x2 = buf_len   (1 .. SYS_RW_MAX (4096).)
+    // Reads the next run of directory entries into buf, advancing the Spoor's
+    // offset (the same offset SYS_READ / SYS_LSEEK use); 0 bytes returned ==
+    // end-of-directory. The buffer is the raw 9P2000.L Treaddir dirent stream
+    // (per entry: qid(13) + offset(8) + type(1) + name_len(2 LE) + name); the
+    // caller parses it. Dispatches dev->readdir (dev9p -> p9_client_readdir).
+    // Returns -1 on: fd not KOBJ_SPOOR / missing RIGHT_READ; buf_len 0 or >
+    // SYS_RW_MAX; buf_va outside user-VA; the Dev has no .readdir slot; server
+    // Rlerror. Audit-bearing: CLAUDE.md FS-mutation-syscalls row.
+    SYS_READDIR      = 56,   // arg: fd (x0), buf_va (x1), buf_len (x2)
 };
 
 // SYS_WALK_OPEN's FROM_ROOT sentinel: when passed as the spoor_fd, the

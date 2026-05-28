@@ -464,6 +464,8 @@ void test_dev9p_close_clunks_owned_fid(void);
 void test_dev9p_close_does_not_clunk_root_fid(void);
 void test_dev9p_create_file(void);
 void test_dev9p_create_dir(void);
+void test_dev9p_fsync(void);
+void test_dev9p_readdir(void);
 void test_p9_attached_create_destroy(void);
 void test_p9_attached_handshake_failure_returns_null(void);
 void test_p9_attached_root_spoor_walk_read(void);
@@ -1310,6 +1312,8 @@ struct test_case g_tests[] = {
                                                                            false, NULL },
     { "dev9p.create_file",             test_dev9p_create_file,             false, NULL },
     { "dev9p.create_dir",              test_dev9p_create_dir,              false, NULL },
+    { "dev9p.fsync",                   test_dev9p_fsync,                   false, NULL },
+    { "dev9p.readdir",                 test_dev9p_readdir,                 false, NULL },
     { "p9_attached.create_destroy",    test_p9_attached_create_destroy,    false, NULL },
     { "p9_attached.handshake_failure_returns_null",
                                        test_p9_attached_handshake_failure_returns_null,

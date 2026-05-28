@@ -97,7 +97,17 @@ G1 durability/enumeration items as one FS foundation that lands BEFORE A-1b.
   *(*)(c,name,omode,perm,gid)` across all 13 Devs (only dev9p creates), the
   handler with cross-Dev clone-walk safety, libt + libthyla-rs `t_walk_create`,
   2 dev9p loopback tests (create_file / create_dir), reference doc 96. 620/620
-  PASS (default; +2 from 618). FS-beta (`SYS_FSYNC` + `SYS_READDIR`) next.
+  PASS (default; +2 from 618).
+- **FS-beta LANDED** (`SYS_FSYNC=55` + `SYS_READDIR=56`): new `Dev.fsync` +
+  `.readdir` vtable slots (NULL-permitted like `.poll`, so NO 13-Dev churn --
+  only dev9p sets real impls + devramfs a no-op fsync); `dev9p_fsync` -> Tsync,
+  `dev9p_readdir` -> Treaddir; the `SYS_READDIR` handler does the 9P2000.L
+  Treaddir cookie-advance + EOD parse; libt + libthyla-rs `t_fsync` / `t_readdir`;
+  2 dev9p loopback tests (fsync / readdir) + a **joey E2E probe** that does
+  create+write+fsync+read-back + mkdir+readdir+EOD against the REAL disk-backed
+  Stratum FS (covers the handlers end-to-end -- passed: `d1=51` dirent bytes,
+  EOD on the 2nd readdir). 622/622 PASS (default; +4 from 618). **Next: the
+  FS-audit** (one focused adversarial round over create/write/fsync).
 
 ### A-2 · FS permission + ownership surface *(splits a/b/c)*
 

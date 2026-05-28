@@ -418,6 +418,29 @@ static long dev9p_bwrite(struct Spoor *c, struct Block *bp, s64 off) {
     return -1;
 }
 
+// Durability barrier -> Stratum Tsync (FS-mutation foundation; section 9.2).
+static int dev9p_fsync(struct Spoor *c, u32 datasync) {
+    struct dev9p_priv *p = priv_of(c);
+    if (!p) return -1;
+    return p9_client_fsync(p->client, p->fid, datasync) == 0 ? 0 : -1;
+}
+
+// Directory enumeration -> Stratum Treaddir. Returns the raw 9P2000.L dirent
+// byte stream into buf at the Spoor's offset; the caller advances `off` (the
+// SYS_READDIR handler passes c->offset and bumps it). Mirrors dev9p_read's
+// count/offset clamping.
+static long dev9p_readdir(struct Spoor *c, void *buf, long n, s64 off) {
+    struct dev9p_priv *p = priv_of(c);
+    if (!p) return -1;
+    if (n <= 0) return 0;
+    u32 count = (n > 0x7fffffffL) ? 0x7fffffffu : (u32)n;
+    u64 offset = (off < 0) ? 0 : (u64)off;
+    u32 got = 0;
+    int rc = p9_client_readdir(p->client, p->fid, offset, count, (u8 *)buf, &got);
+    if (rc != 0) return -1;
+    return (long)got;
+}
+
 static void dev9p_remove(struct Spoor *c) {
     (void)c;
     // Remove maps to Tunlinkat on the parent; deferred to syscall chunk.
@@ -470,6 +493,8 @@ struct Dev dev9p = {
     .bread    = dev9p_bread,
     .write    = dev9p_write,
     .bwrite   = dev9p_bwrite,
+    .fsync    = dev9p_fsync,
+    .readdir  = dev9p_readdir,
 
     .remove   = dev9p_remove,
     .wstat    = dev9p_wstat,

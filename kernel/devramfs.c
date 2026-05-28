@@ -362,6 +362,13 @@ static long devramfs_bwrite(struct Spoor *c, struct Block *bp, s64 off) {
     return -1;
 }
 
+// ramfs is in-memory (durable-to-itself); fsync is a no-op success so generic
+// write-then-fsync code works against a ramfs file. (FS-mutation foundation.)
+static int devramfs_fsync(struct Spoor *c, u32 datasync) {
+    (void)c; (void)datasync;
+    return 0;
+}
+
 static void devramfs_remove(struct Spoor *c) {
     (void)c;
 }
@@ -397,6 +404,9 @@ struct Dev devramfs = {
     .bread    = devramfs_bread,
     .write    = devramfs_write,
     .bwrite   = devramfs_bwrite,
+    .fsync    = devramfs_fsync,
+    // .readdir left NULL at v1.0 -- ramfs enumeration is a deferred nicety;
+    // the load-bearing readdir is dev9p (the disk-backed Stratum FS).
 
     .remove   = devramfs_remove,
     .wstat    = devramfs_wstat,

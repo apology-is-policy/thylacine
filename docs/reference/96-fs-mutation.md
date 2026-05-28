@@ -1,7 +1,8 @@
 # 96 — Filesystem-mutation syscalls (the FS foundation)
 
-**Status:** FS-alpha LANDED (`SYS_WALK_CREATE`). FS-beta (`SYS_FSYNC` +
-`SYS_READDIR`) is the next sub-chunk. Design pin: `IDENTITY-DESIGN.md §9.2`.
+**Status:** FS-alpha (`SYS_WALK_CREATE`) + FS-beta (`SYS_FSYNC` + `SYS_READDIR`)
+LANDED. Next: the FS-audit (one focused adversarial round over the whole
+create/write/fsync surface). Design pin: `IDENTITY-DESIGN.md §9.2`.
 
 ## Purpose
 
@@ -65,6 +66,36 @@ contract, `test_dev.vtable_slot_coverage`); all Devs except `dev9p` return
 `NULL` (not creatable). The `gid` is an opaque number to the Dev layer —
 identity-agnostic.
 
+### `SYS_FSYNC = 55` + `SYS_READDIR = 56` (FS-beta)
+
+```
+SYS_FSYNC(fd, datasync) -> 0 / -1
+  x0 = fd        KOBJ_SPOOR with RIGHT_WRITE (the write-side flush).
+  x1 = datasync  0 = full (data + metadata), non-zero = data only.
+
+SYS_READDIR(fd, buf_va, buf_len) -> bytes (>=0) / -1
+  x0 = fd        KOBJ_SPOOR opened on a directory, RIGHT_READ.
+  x1 = buf_va    user-VA out buffer.
+  x2 = buf_len   1 .. SYS_RW_MAX (4096).
+```
+
+`SYS_FSYNC` is the durability barrier ("write-then-fsync = durable" on the
+integrity FS); dispatches `dev->fsync` (dev9p -> `p9_client_fsync` -> Stratum
+`Tsync`; in-memory-durable Devs no-op success). A NULL `.fsync` slot -> -1.
+
+`SYS_READDIR` reads the next run of **raw 9P2000.L dirents** into `buf` and
+advances the Spoor's offset; 0 bytes == end-of-directory. Each entry:
+`qid(13) + offset(8 LE) + dtype(1) + name_len(2 LE) + name`. The Treaddir
+`offset` is a **resume cookie** (the last returned entry's offset field), not a
+byte position, so the handler parses the returned run for the last entry's
+cookie and stores THAT in the Spoor offset (mirrors Linux v9fs). A NULL
+`.readdir` slot -> -1.
+
+Two new `Dev` vtable slots (NULL-permitted, like `.poll` / `.stat_native`):
+`int (*fsync)(c, datasync)` and `long (*readdir)(c, buf, n, off)`. Only `dev9p`
+sets a real `.readdir`; `dev9p` + `devramfs` (no-op) set `.fsync`. libt:
+`t_fsync` / `t_readdir`. libthyla-rs: `t_fsync` / `t_readdir`.
+
 ## Implementation
 
 ### `kernel/syscall.c::sys_walk_create_handler`
@@ -123,11 +154,20 @@ handler `spoor_clunk`s `nc`. No double-clunk, no fid leak on the failure paths.
   `Tmkdir` + walk + `Tlopen`; asserts the returned Spoor is opened.
 - `kernel/test/test_dev.c::vtable_slot_coverage` — every Dev still fills `.create`
   (now the widened signature); `devnone.create(...) == NULL`.
-- The loopback responder (`dev9p_responder`) gained `Tlcreate` + `Tmkdir` cases.
-
-FS-beta adds the durability + enumeration tests and a joey end-to-end probe
-(create + write + fsync + readdir + read-back) against the real disk-backed
-Stratum FS.
+- `kernel/test/test_dev9p.c::test_dev9p_fsync` — `dev9p_fsync` -> `Tsync` (full +
+  datasync) returns 0.
+- `kernel/test/test_dev9p.c::test_dev9p_readdir` — `dev9p_readdir` -> `Treaddir`
+  returns the responder's 27-byte dirent ("foo"); asserts the dirent layout.
+- The loopback responder (`dev9p_responder`) gained `Tlcreate` / `Tmkdir` /
+  `Tfsync` / `Treaddir` cases.
+- **joey end-to-end probe** (`usr/joey/joey.c`, post-pivot) — against the REAL
+  disk-backed Stratum FS: `SYS_WALK_CREATE` a file + `SYS_WRITE` + `SYS_FSYNC` +
+  `SYS_WALK_OPEN` read-back + verify; then mkdir-via-DMDIR + `SYS_READDIR` +
+  the cookie-advance EOD check (a non-empty first run must return 0 on the next
+  call). This covers the syscall HANDLERS (clone-walk orchestration, the
+  readdir cookie parse, rights gates) end-to-end through stratumd, which the
+  loopback unit tests do not reach. Confirmed at boot: `fs-mut
+  create+write+fsync+read-back OK` + `fs-mut mkdir+readdir OK (d1=51 bytes)`.
 
 ## Known caveats / footguns
 

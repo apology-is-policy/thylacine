@@ -85,6 +85,8 @@ enum {
     T_SYS_ATTACH_9P_SRV = 52,    // P6-pouch-stratumd-boot 16c: 9P attach over byte-mode KOBJ_SRV
     T_SYS_PIVOT_ROOT  = 53,      // P6-pouch-stratumd-boot 16c: atomic root_spoor swap
     T_SYS_WALK_CREATE = 54,      // FS-mutation foundation: create-then-open a component
+    T_SYS_FSYNC       = 55,      // FS-mutation foundation: durability barrier
+    T_SYS_READDIR     = 56,      // FS-mutation foundation: directory enumeration
 };
 
 // Torpor error codes — match kernel's TORPOR_ERR_* (Linux/musl-numeric
@@ -1066,6 +1068,43 @@ static inline long t_walk_create(long parent_fd, const char *name,
         "svc #0"
         : "+r"(x0)
         : "r"(x1), "r"(x2), "r"(x3), "r"(x4), "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
+// t_fsync — durability barrier on `fd` (KOBJ_SPOOR, RIGHT_WRITE). datasync 0 =
+// full (data + metadata), non-zero = data only. Returns 0 / -1. FS-mutation
+// foundation (IDENTITY-DESIGN.md section 9.2).
+__attribute__((always_inline))
+static inline long t_fsync(long fd, unsigned long datasync) {
+    register long x0 __asm__("x0") = fd;
+    register long x1 __asm__("x1") = (long)datasync;
+    register long x8 __asm__("x8") = T_SYS_FSYNC;
+    __asm__ volatile (
+        "svc #0"
+        : "+r"(x0)
+        : "r"(x1), "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
+// t_readdir — read the next run of 9P2000.L dirents from a directory `fd`
+// (KOBJ_SPOOR, RIGHT_READ) into `buf` (<= SYS_RW_MAX), advancing the Spoor's
+// offset. Returns bytes written (>=0; 0 = end-of-directory), -1 on error. Each
+// entry: qid(13) + offset(8 LE) + type(1) + name_len(2 LE) + name. FS-mutation
+// foundation (IDENTITY-DESIGN.md section 9.2).
+__attribute__((always_inline))
+static inline long t_readdir(long fd, void *buf, size_t buf_len) {
+    register long x0 __asm__("x0") = fd;
+    register long x1 __asm__("x1") = (long)(unsigned long)buf;
+    register long x2 __asm__("x2") = (long)buf_len;
+    register long x8 __asm__("x8") = T_SYS_READDIR;
+    __asm__ volatile (
+        "svc #0"
+        : "+r"(x0)
+        : "r"(x1), "r"(x2), "r"(x8)
         : "memory", "cc"
     );
     return x0;

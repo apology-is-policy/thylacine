@@ -1740,6 +1740,86 @@ static s64 sys_walk_create_handler(u64 parent_fd_raw, u64 name_va,
 }
 
 // =============================================================================
+// SYS_FSYNC — durability barrier (FS-mutation foundation; IDENTITY-DESIGN.md
+// §9.2). RIGHT_WRITE (fsync is the write-side flush). NULL .fsync slot -> -1.
+// =============================================================================
+
+static s64 sys_fsync_handler(u64 fd_raw, u64 datasync_raw) {
+    struct Thread *t = current_thread();
+    if (!t)                                          return -1;
+    struct Proc *p = t->proc;
+    if (!p)                                          return -1;
+
+    struct Spoor *c = sys_lookup_spoor(p, (hidx_t)fd_raw, RIGHT_WRITE);
+    if (!c)                                          return -1;
+    if (!c->dev || !c->dev->fsync)                   return -1;
+
+    // Normalize datasync to 0/1 (any non-zero is "data only").
+    u32 datasync = (datasync_raw != 0) ? 1u : 0u;
+    return c->dev->fsync(c, datasync) == 0 ? 0 : -1;
+}
+
+// =============================================================================
+// SYS_READDIR — directory enumeration (FS-mutation foundation; §9.2).
+// RIGHT_READ on a directory Spoor. Returns the next run of 9P2000.L dirents
+// into the user buffer, advancing the Spoor's offset to the last entry's
+// Treaddir cookie. 0 bytes == end-of-directory. NULL .readdir slot -> -1.
+//
+// 9P2000.L dirent layout (per entry): qid(13) + offset(8 LE) + type(1) +
+// name_len(2 LE) + name(name_len). The Treaddir "offset" is a RESUME COOKIE
+// (the offset field of the last returned entry), NOT a byte position -- so the
+// handler parses the returned run for the last entry's cookie and stores THAT
+// in c->offset for the next call (mirrors Linux v9fs).
+// =============================================================================
+
+static s64 sys_readdir_handler(u64 fd_raw, u64 buf_va, u64 buf_len_raw) {
+    struct Thread *t = current_thread();
+    if (!t)                                          return -1;
+    struct Proc *p = t->proc;
+    if (!p)                                          return -1;
+
+    if (buf_len_raw == 0 || buf_len_raw > SYS_RW_MAX) return -1;
+    if (!sys_validate_user_buf(buf_va, buf_len_raw))  return -1;
+
+    struct Spoor *c = sys_lookup_spoor(p, (hidx_t)fd_raw, RIGHT_READ);
+    if (!c)                                          return -1;
+    if (!c->dev || !c->dev->readdir)                 return -1;
+
+    u8 scratch[SYS_RW_MAX];
+    long got = c->dev->readdir(c, scratch, (long)buf_len_raw, c->offset);
+    if (got < 0)                                     return -1;
+    if (got == 0)                                    return 0;   // EOD; offset unchanged
+
+    // Walk the returned dirents (bounded by `got`) to find the last complete
+    // entry's offset cookie. The minimum entry is 24 bytes (qid+offset+type+
+    // name_len) + a 0-length name. A run with no complete entry is a malformed
+    // stream -> -1 (also prevents a userspace re-read spin on a non-advancing
+    // offset).
+    long pos = 0;
+    u64 last_cookie = 0;
+    bool advanced = false;
+    while (pos + 24 <= got) {
+        u64 cookie = 0;
+        for (int i = 0; i < 8; i++)
+            cookie |= (u64)scratch[pos + 13 + i] << (8 * i);
+        u32 nlen = (u32)scratch[pos + 22] | ((u32)scratch[pos + 23] << 8);
+        long entry = 24 + (long)nlen;
+        if (pos + entry > got)                       break;       // truncated trailing entry
+        last_cookie = cookie;
+        advanced = true;
+        pos += entry;
+    }
+    if (!advanced)                                   return -1;   // malformed run
+    c->offset = (s64)last_cookie;
+
+    // Copy the dirent bytes to user-VA (per-byte uaccess, same as SYS_READ).
+    for (long i = 0; i < got; i++) {
+        if (uaccess_store_u8(buf_va + (u64)i, scratch[i]) != 0) return -1;
+    }
+    return got;
+}
+
+// =============================================================================
 // SYS_CHROOT — stamp the caller's territory root_spoor (P5-stratumd-stub-
 // bringup-e2). Per CORVUS-DESIGN.md §10.1 ("chroot at v1.0; full pivot at
 // v1.x") + ARCH §11.2.
@@ -4550,6 +4630,16 @@ void syscall_dispatch(struct exception_context *ctx) {
                                                     ctx->regs[2],
                                                     ctx->regs[3],
                                                     ctx->regs[4]);
+        return;
+
+    case SYS_FSYNC:
+        ctx->regs[0] = (u64)sys_fsync_handler(ctx->regs[0], ctx->regs[1]);
+        return;
+
+    case SYS_READDIR:
+        ctx->regs[0] = (u64)sys_readdir_handler(ctx->regs[0],
+                                                ctx->regs[1],
+                                                ctx->regs[2]);
         return;
 
     case SYS_CHROOT:

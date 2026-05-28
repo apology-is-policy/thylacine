@@ -1588,6 +1588,94 @@ int main(void) {
             t_putstr(itoa_dec(post_n, buf, sizeof(buf)));
             t_putstr(" bytes); root now disk-backed Stratum FS\n");
 
+            // === FS-mutation foundation E2E (FS-alpha + FS-beta) ===
+            // Exercise SYS_WALK_CREATE + SYS_WRITE + SYS_FSYNC + SYS_READDIR
+            // end-to-end against the real disk-backed Stratum FS (through the
+            // syscall handlers + dev9p_create/_fsync/_readdir + stratumd).
+            {
+                const char probe_name[] = "fs-mut-probe.txt";
+                const char probe_data[] = "FS-MUT-OK\n";
+                long cf = t_walk_create(T_WALK_OPEN_FROM_ROOT, probe_name,
+                                        sizeof(probe_name) - 1, T_OWRITE, 0644u);
+                if (cf < 0) {
+                    t_putstr("joey: fs-mut create FAILED rc=");
+                    t_putstr(itoa_dec(cf, buf, sizeof(buf)));
+                    t_putstr("\n");
+                    return 1;
+                }
+                if (write_all(cf, (const unsigned char *)probe_data,
+                              sizeof(probe_data) - 1) != 0) {
+                    t_putstr("joey: fs-mut write FAILED\n");
+                    return 1;
+                }
+                if (t_fsync(cf, 0) != 0) {
+                    t_putstr("joey: fs-mut fsync FAILED\n");
+                    return 1;
+                }
+                (void)t_close(cf);
+
+                long rf = t_walk_open(T_WALK_OPEN_FROM_ROOT, probe_name,
+                                      sizeof(probe_name) - 1, T_OREAD);
+                if (rf < 0) {
+                    t_putstr("joey: fs-mut reopen FAILED rc=");
+                    t_putstr(itoa_dec(rf, buf, sizeof(buf)));
+                    t_putstr("\n");
+                    return 1;
+                }
+                unsigned char rback[32];
+                long rn = t_read(rf, rback, sizeof(rback));
+                (void)t_close(rf);
+                if (rn != (long)(sizeof(probe_data) - 1)) {
+                    t_putstr("joey: fs-mut read-back wrong len\n");
+                    return 1;
+                }
+                for (long i = 0; i < rn; i++) {
+                    if (rback[i] != (unsigned char)probe_data[i]) {
+                        t_putstr("joey: fs-mut read-back content mismatch\n");
+                        return 1;
+                    }
+                }
+                t_putstr("joey: fs-mut create+write+fsync+read-back OK\n");
+
+                // mkdir-via-DMDIR + readdir (with the handler's Treaddir
+                // cookie-advance: a non-empty first run must reach EOD on the
+                // next call).
+                const char probe_dir[] = "fs-mut-dir";
+                long cd = t_walk_create(T_WALK_OPEN_FROM_ROOT, probe_dir,
+                                        sizeof(probe_dir) - 1, T_OREAD,
+                                        T_WALK_CREATE_DMDIR | 0755u);
+                if (cd < 0) {
+                    t_putstr("joey: fs-mut mkdir FAILED rc=");
+                    t_putstr(itoa_dec(cd, buf, sizeof(buf)));
+                    t_putstr("\n");
+                    return 1;
+                }
+                unsigned char dbuf[256];
+                long d1 = t_readdir(cd, dbuf, sizeof(dbuf));
+                if (d1 < 0) {
+                    t_putstr("joey: fs-mut readdir FAILED rc=");
+                    t_putstr(itoa_dec(d1, buf, sizeof(buf)));
+                    t_putstr("\n");
+                    (void)t_close(cd);
+                    return 1;
+                }
+                if (d1 > 0) {
+                    // Cookie advanced -> the next readdir must report EOD.
+                    long d2 = t_readdir(cd, dbuf, sizeof(dbuf));
+                    if (d2 != 0) {
+                        t_putstr("joey: fs-mut readdir EOD expected 0, got rc=");
+                        t_putstr(itoa_dec(d2, buf, sizeof(buf)));
+                        t_putstr("\n");
+                        (void)t_close(cd);
+                        return 1;
+                    }
+                }
+                (void)t_close(cd);
+                t_putstr("joey: fs-mut mkdir+readdir OK (d1=");
+                t_putstr(itoa_dec(d1, buf, sizeof(buf)));
+                t_putstr(" bytes)\n");
+            }
+
             (void)t_close(sd_rd);
         }
     }

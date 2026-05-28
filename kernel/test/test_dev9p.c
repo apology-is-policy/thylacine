@@ -30,6 +30,8 @@ void test_dev9p_close_clunks_owned_fid(void);
 void test_dev9p_close_does_not_clunk_root_fid(void);
 void test_dev9p_create_file(void);
 void test_dev9p_create_dir(void);
+void test_dev9p_fsync(void);
+void test_dev9p_readdir(void);
 
 // File-scope buffers — client is ~12 KiB, won't fit on the 16 KiB test
 // thread stack alongside a few smaller locals.
@@ -169,6 +171,42 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
         resp[7] = P9_QTDIR;
         for (int i = 0; i < 4; i++) resp[8 + i] = 0;
         resp[12] = 0x55; for (int i = 1; i < 8; i++) resp[12 + i] = 0;
+        return (int)total;
+    }
+    if (type == P9_TFSYNC) {
+        // Rfsync = header only (empty body).
+        if (resp_cap < P9_HDR_LEN) return -1;
+        resp[0] = 7; resp[1] = 0; resp[2] = 0; resp[3] = 0;
+        resp[4] = P9_RFSYNC;
+        resp[5] = (u8)(tag & 0xff); resp[6] = (u8)((tag >> 8) & 0xff);
+        return (int)P9_HDR_LEN;
+    }
+    if (type == P9_TREADDIR) {
+        // Rreaddir = count(4 LE) + data. One dirent "foo":
+        //   qid(13) + offset(8 LE, cookie=1) + dtype(1) + name_len(2 LE=3) + "foo"
+        // = 27 bytes.
+        const u8 nm[] = {'f','o','o'};
+        u32 dcount = (u32)(P9_QID_LEN + 8 + 1 + 2 + sizeof(nm));   // 27
+        size_t total = P9_HDR_LEN + 4 + dcount;
+        if (resp_cap < total) return -1;
+        resp[0] = (u8)(total & 0xff); resp[1] = (u8)((total >> 8) & 0xff);
+        resp[2] = 0; resp[3] = 0;
+        resp[4] = P9_RREADDIR;
+        resp[5] = (u8)(tag & 0xff); resp[6] = (u8)((tag >> 8) & 0xff);
+        resp[7] = (u8)(dcount & 0xff); resp[8] = (u8)((dcount >> 8) & 0xff);
+        resp[9] = 0; resp[10] = 0;
+        size_t o = 11;
+        // qid (13): type(1) + version(4) + path(8 = 0xAB)
+        resp[o++] = P9_QTFILE;
+        for (int i = 0; i < 4; i++) resp[o++] = 0;
+        resp[o++] = 0xAB; for (int i = 1; i < 8; i++) resp[o++] = 0;
+        // offset cookie (8 LE) = 1
+        resp[o++] = 1; for (int i = 1; i < 8; i++) resp[o++] = 0;
+        // dirent type (1)
+        resp[o++] = 8;
+        // name_len (2 LE) = 3
+        resp[o++] = (u8)sizeof(nm); resp[o++] = 0;
+        for (size_t i = 0; i < sizeof(nm); i++) resp[o++] = nm[i];
         return (int)total;
     }
     return -1;
@@ -389,5 +427,34 @@ void test_dev9p_create_dir(void) {
     TEST_ASSERT((nc->flag & COPEN) != 0,  "COPEN set after Tmkdir+walk+lopen");
 
     spoor_clunk(nc);
+    teardown(root);
+}
+
+// dev9p.fsync routes through p9_client_fsync -> Tsync; the responder Rfsync
+// makes it return 0 (durability barrier; FS-mutation foundation).
+void test_dev9p_fsync(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "root");
+    TEST_ASSERT(dev9p.fsync != NULL, "dev9p has .fsync slot");
+    TEST_EXPECT_EQ((u64)dev9p.fsync(root, 0), (u64)0, "fsync(full) -> 0");
+    TEST_EXPECT_EQ((u64)dev9p.fsync(root, 1), (u64)0, "fsync(datasync) -> 0");
+    teardown(root);
+}
+
+// dev9p.readdir routes through p9_client_readdir -> Treaddir; the responder
+// returns one 27-byte dirent ("foo"). Verifies the raw 9P2000.L dirent stream
+// reaches the caller (the SYS_READDIR handler does the cookie-advance parse).
+void test_dev9p_readdir(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "root");
+    TEST_ASSERT(dev9p.readdir != NULL, "dev9p has .readdir slot");
+
+    u8 buf[128];
+    long got = dev9p.readdir(root, buf, (long)sizeof(buf), 0);
+    TEST_EXPECT_EQ((u64)got, (u64)27, "readdir returned the 27-byte dirent run");
+    // Layout: qid(13) + offset(8) + dtype(1) + name_len(2 LE @22) + name(@24).
+    TEST_EXPECT_EQ((u64)buf[22], (u64)3, "dirent name_len == 3");
+    TEST_ASSERT(buf[24] == 'f' && buf[25] == 'o' && buf[26] == 'o',
+                "dirent name is 'foo'");
     teardown(root);
 }

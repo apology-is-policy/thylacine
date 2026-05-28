@@ -897,8 +897,12 @@ SYS_READDIR(fd, buf_va, buf_len) -> bytes_written (>=0) / -1
   (rather than a Thylacine-native struct) keeps the syscall a thin pass-through
   of `p9_client_readdir`; a native `struct t_dirent` is a v1.x convenience seam.
 - **Mechanism:** new `Dev.readdir(struct Spoor *c, void *buf, long n, s64 off)
-  -> long` vtable slot. `dev9p_readdir` -> `p9_client_readdir`. `devramfs`
-  enumerates its in-memory entries in the same dirent format.
+  -> long` vtable slot (NULL-permitted, like `.poll` / `.stat_native`).
+  `dev9p_readdir` -> `p9_client_readdir`. The 9P2000.L Treaddir `offset` is a
+  resume COOKIE, not a byte position, so the `SYS_READDIR` handler parses the
+  returned run for the last entry's cookie and stores THAT in the Spoor offset.
+  `devramfs` leaves `.readdir` NULL at v1.0 (ramfs enumeration deferred; the
+  load-bearing readdir is dev9p, the disk-backed Stratum FS).
 - **Error cases (-1):** fd not `KOBJ_SPOOR` / not a directory / missing
   `RIGHT_READ`; `buf_len` 0 or > `SYS_RW_MAX`; no `.readdir` slot; server Rlerror.
 

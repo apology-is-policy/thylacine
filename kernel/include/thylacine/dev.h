@@ -119,6 +119,22 @@ struct Dev {
     long           (*write)(struct Spoor *c, const void *buf, long n, s64 off);
     long           (*bwrite)(struct Spoor *c, struct Block *bp, s64 off);
 
+    // Durability + enumeration (FS-mutation foundation; IDENTITY-DESIGN.md
+    // section 9.2). Both are NULL-permitted (like .poll / .stat_native -- NOT
+    // among the section-9.2 vtable-coverage 16); only Devs that genuinely back
+    // these set them.
+    //   fsync(c, datasync) — flush durable state (datasync 0 = full, 1 = data
+    //                        only). NULL slot => SYS_FSYNC returns -1 (the Dev
+    //                        has no durability barrier). dev9p -> Tsync;
+    //                        in-memory-durable Devs (devramfs) implement a
+    //                        no-op success.
+    //   readdir(c, buf, n, off) — read the next run of 9P2000.L dirents into
+    //                        buf at the Spoor's offset; return bytes (0 =
+    //                        end-of-directory). NULL slot => SYS_READDIR
+    //                        returns -1 (not a readdir-able directory).
+    int            (*fsync)(struct Spoor *c, u32 datasync);
+    long           (*readdir)(struct Spoor *c, void *buf, long n, s64 off);
+
     // Readiness probe — the SYS_POLL plumbing (§23.3; specs/poll.tla).
     //   poll(c, events, pw)
     //     Returns the subset of `events` currently ready on c. If `pw`
