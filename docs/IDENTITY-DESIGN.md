@@ -683,6 +683,12 @@ layouts here are the contract; the implementation's `_Static_assert`s must match
   membership (the kernel caches the active set).
 - `stripes` stays per-Proc, fresh, unforgeable (unchanged). `caps` stays
   subset-inherited (unchanged).
+- `struct Proc` grows **168 -> 240 bytes** (the identity block appends after
+  `handler_va`; existing offsets unchanged). `PROC_SUPP_GIDS_MAX = 15`. The fields
+  are KP_ZERO at `proc_alloc` (so the transient default is `INVALID`/0, fail-closed);
+  `proc_init` stamps kproc = `{SYSTEM, GID_SYSTEM}`; `rfork_internal` copies the
+  parent's identity into the child (the inherit path); the spawn thunk optionally
+  overrides via `proc_apply_identity` (the single audited mutation site).
 
 **Reserved principal-ids / gids** (none privileged — I-22):
 - `0` = INVALID (never assigned; a Proc with id 0 pre-login is a bug).
@@ -698,35 +704,72 @@ layouts here are the contract; the implementation's `_Static_assert`s must match
   Stratum-`/ctl`-uid-0 baggage; a future Thylacine-hostowner -> Stratum-`/ctl`
   mapping is a separate A-5/admin concern.)
 
-**Identity establishment — at spawn, gated, race-free** (REFINED 2026-05-28 from the
-earlier "stamp-a-running-child" proposal, which had a stamp-before-it-runs race):
-- Identity is set **at Proc creation**, atomically — never on a running Proc. The
-  rich-spawn path (`t_sys_spawn_args`, used by `SYS_SPAWN_FULL_ARGV`) is extended
-  with optional `principal_id` + `primary_gid` + a supp-gids vector.
-- **Gate:** setting a child's identity to anything other than *inherited* requires
-  the caller to hold **`CAP_SET_IDENTITY` (`1ull << 5`)**. Left as the INHERIT
-  sentinel (or without the cap) -> the child inherits the parent's identity. So
-  login (holding `CAP_SET_IDENTITY`, conferred by the boot chain) spawns the user's
-  shell *born with* the user's identity; ordinary processes inherit. **No standalone
-  `SYS_SET_IDENTITY` syscall** — folding into spawn is race-free and reuses existing
-  infrastructure.
+**Identity establishment — at spawn, gated, fail-closed** (REFINED 2026-05-28 from the
+earlier "stamp-a-running-child" proposal, which had a stamp-before-it-runs race;
+gate semantics + spawn-args byte layout pinned at A-1a):
+- Identity is applied in the spawn path's child entry (the `sys_spawn_full_argv`
+  thunk) BEFORE the child enters EL0 — consistent with how the console-attach /
+  `MAY_POST_SERVICE` perm bits are stamped today. "Race-free" means: there is no
+  separate post-spawn identity syscall, and userspace NEVER observes a pre-identity
+  child (the override lands before `userland_enter`; an in-kernel child that carries
+  the inherited identity for the few instructions before its thunk runs has opened
+  no `/srv` connection and is not yet any server's peer). The `CAP_SET_IDENTITY`
+  check is done in the PARENT (the caller's caps), not the child.
+- The rich-spawn ABI (`struct sys_spawn_args`, used by `SYS_SPAWN_FULL_ARGV`) is
+  extended append-only (**56 -> 80 bytes**; every existing offset unchanged):
+  - `principal_id`   `u32` @56
+  - `primary_gid`    `u32` @60
+  - `supp_gids_va`   `u64` @64  — user-VA of up to `PROC_SUPP_GIDS_MAX` (15) `u32` gids
+  - `supp_gid_count` `u32` @72  — 0..15
+  - `identity_flags` `u32` @76  — `SPAWN_IDENTITY_SET = 1u << 0`; other bits reserved 0
+- **Gate (fail-closed).** `identity_flags & SPAWN_IDENTITY_SET == 0` -> the child
+  INHERITS the parent's identity (the default; no cap needed). The flag set AND the
+  caller holds **`CAP_SET_IDENTITY` (`1ull << 5`)** -> the child is born with the
+  requested identity. The flag set WITHOUT the cap -> the syscall **returns -1** (the
+  request is rejected loudly; no child is spawned). This refines the earlier looser
+  "without the cap -> inherit" wording to **fail-closed**: a privilege-boundary
+  request made without authority must fail, never silently downgrade to an identity
+  the caller did not ask for. So login (holding `CAP_SET_IDENTITY`, conferred down
+  the boot chain) spawns the user's shell *born with* the user's identity; ordinary
+  processes do not set the flag and inherit. **No standalone `SYS_SET_IDENTITY`
+  syscall.**
+- **Settable-value policy.** A SET request validates: `principal_id` and
+  `primary_gid` MUST be in `[1, 0xFFFFFFFD]` OR the `NONE` sentinel; `INVALID (0)`
+  and the `SYSTEM` sentinel are REJECTED with -1 (you cannot forge the system
+  identity nor stamp the never-valid 0). `supp_gid_count <= 15`; supp gids reject the
+  `0` sentinel. corvus is the authority for which gids a login may legitimately
+  request; the kernel only bounds + sanity-checks (full supp-gid policy is a corvus
+  concern, A-1b).
+- `CAP_SET_IDENTITY` is FORK-GRANTABLE (a member of `CAP_ALL`): it flows kproc ->
+  joey -> login down the vetted boot chain; rfork's mask-AND means the ordinary user
+  Proc that login spawns does NOT receive it (login omits it from the shell's
+  `cap_mask`), so a user cannot spawn processes as another user.
 - Self-de-escalation (a daemon dropping its own identity to `PRINCIPAL_NONE`) is a
   v1.x **seam** (you can always become *less*; not yet built).
 
-**`srv_peer_info` ABI extension** (24 -> 32 bytes; append-only, existing offsets
-unchanged):
+**`srv_peer_info` ABI extension** (24 -> 40 bytes; append-only, existing offsets
+unchanged). **CORRECTION 2026-05-28 (verified against the tree):** the original pin
+placed `principal_id` at @20 as "was pad" — but @20 is the LIVE `alive` field
+(`SYS_SRV_PEER` writes it; corvus reads it; `specs/corvus.tla` ConnOpPeerWasLive).
+The new fields therefore append AFTER `alive`; size is 40, not 32:
 
 ```
 struct srv_peer_info {
     u64 stripes;        // @0   (unchanged)
     u64 caps;           // @8   (unchanged)
     u32 console;        // @16  (unchanged)
-    u32 principal_id;   // @20  (new; was pad)
-    u32 primary_gid;    // @24  (new)
-    u32 flags;          // @28  (new; reserved, 0 at v1.0)
-};   // sizeof == 32; offsets pinned by _Static_assert
+    u32 alive;          // @20  (unchanged; LIVE — 1 iff an ALIVE Proc carries stripes)
+    u32 principal_id;   // @24  (new; PRINCIPAL_NONE when alive == 0)
+    u32 primary_gid;    // @28  (new; GID_NONE when alive == 0)
+    u32 flags;          // @32  (new; reserved, 0 at v1.0)
+    u32 _reserved;      // @36  (new; explicit pad to 40, reserved 0)
+};   // sizeof == 40; offsets pinned by _Static_assert
 ```
 
+`principal_id` / `primary_gid` are resolved FRESH per query (same walk that yields
+`caps` + `alive`); a dead/reaped peer fail-closes to `PRINCIPAL_NONE` / `GID_NONE`
+(the SrvConn captures only `stripes` + `console` immutably at mint — capturing the
+human-meaningful identity immutably is an A-3 presentation concern, not A-1a).
 Supplementary groups are NOT in the struct (variable count) — a consumer resolves
 them via corvus by `principal_id`.
 
@@ -743,9 +786,11 @@ format pinned in `CORVUS-DESIGN.md` when the A-1b corvus code lands):
 **A-1 implementation split:**
 - **A-1a (kernel):** Proc identity fields + inheritance + reserved values + the
   spawn-args identity extension + `CAP_SET_IDENTITY` + the `srv_peer_info`
-  extension. Audit-bearing. Tests: inheritance; a capped Proc spawns a child with a
-  set identity; an uncapped caller's identity arg is rejected -> inherit;
-  `srv_peer_info` exposes the new fields; reserved-value handling; I-22 (no id
-  bypasses).
+  extension. Audit-bearing. Tests: inheritance (identity inherits while caps reduce
+  to NONE and stripes stay fresh — the I-22 demonstration); `proc_apply_identity`
+  sets fields; a capped Proc spawns a child with a SET identity (accepted, clean
+  exit); an uncapped caller's SET request is rejected with **-1 (fail-closed)**;
+  reserved-value reject (INVALID / SYSTEM -> -1); the peer-snapshot data path that
+  feeds `srv_peer_info` exposes `principal_id` / `primary_gid`; kproc is SYSTEM.
 - **A-1b (corvus):** the identity DB + `RESOLVE_*` verbs + CRVS v2. Tests:
   `RESOLVE_ID`/`RESOLVE_NAME` round-trip; v1 -> v2 read/upgrade; group membership.

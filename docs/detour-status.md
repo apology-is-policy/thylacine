@@ -35,10 +35,20 @@ code (per "design conversation -> scripture commit -> code").
 - **Depends:** corvus (exists). **Seam:** verifiable-credential projection point
   (distributed identity, v1.x).
 - **Design-first: PINNED 2026-05-28 -> IDENTITY-DESIGN §9.1** (principal-id u32 ABI
-  + reserved non-privileged SYSTEM/NONE + Proc record + `srv_peer_info` 24->32 +
-  **identity-at-spawn** via extended `t_sys_spawn_args` gated by `CAP_SET_IDENTITY`
-  [refined from stamp-a-child -> race-free] + corvus DB schema + `RESOLVE_*` verbs +
-  CRVS v2). **Splits A-1a (kernel) / A-1b (corvus).**
+  + reserved non-privileged SYSTEM/NONE + Proc record [168->240 bytes] +
+  `srv_peer_info` 24->40 + **identity-at-spawn** via extended `sys_spawn_args`
+  [56->80] gated by `CAP_SET_IDENTITY` [refined from stamp-a-child -> race-free] +
+  corvus DB schema + `RESOLVE_*` verbs + CRVS v2). **Splits A-1a (kernel) /
+  A-1b (corvus).**
+  - **A-1a scripture-reconcile 2026-05-28 (two corrections to the §9.1 pin, both
+    faithful to intent, both verified against the tree):** (1) `srv_peer_info` is
+    24->**40** not 24->32 -- the pin placed principal_id@20 "was pad" but @20 is the
+    LIVE `alive` field (SYS_SRV_PEER); the new fields append after `alive`
+    (principal_id@24 / primary_gid@28 / flags@32 / _reserved@36). (2) the
+    `CAP_SET_IDENTITY` gate is **fail-closed** -- a SPAWN_IDENTITY_SET request
+    WITHOUT the cap returns -1 (rejected loudly), not silent-inherit; reserved-value
+    set (INVALID/SYSTEM) also -> -1. Identity applied in the spawn thunk before
+    userland_enter (console-attach precedent).
 - **Tests:** identity establishment at spawn; inheritance; capped vs uncapped
   identity-set; `srv_peer_info` exposes principal_id/primary_gid; group checks; I-22
   holds (no id bypasses).
