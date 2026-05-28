@@ -49,6 +49,13 @@ code (per "design conversation -> scripture commit -> code").
     WITHOUT the cap returns -1 (rejected loudly), not silent-inherit; reserved-value
     set (INVALID/SYSTEM) also -> -1. Identity applied in the spawn thunk before
     userland_enter (console-attach precedent).
+  - **A-1a (kernel) LANDED 2026-05-28** -- scripture `8d1d05d` + code `3610edb` +
+    audit close `*(pending)*`. Proc identity (168->240) + inheritance + kproc=SYSTEM +
+    CAP_SET_IDENTITY + identity-at-spawn (fail-closed) + srv_peer_info 24->40 + all 4
+    userspace mirrors. **Audit R1 CLEAN** (0 P0/0 P1/1 P2/4 P3, all fixed). 618/618
+    PASS x (default + ASan + UBSan). Reference doc 95. A real stack-clobber (stale
+    24-byte pouch srv_peer_info mirror vs the 40-byte kernel write) found + fixed
+    mid-chunk. **NEXT: A-1b** (corvus identity DB + RESOLVE_* + CRVS v2).
 - **Tests:** identity establishment at spawn; inheritance; capped vs uncapped
   identity-set; `srv_peer_info` exposes principal_id/primary_gid; group checks; I-22
   holds (no id bypasses).
@@ -160,6 +167,17 @@ tools/build.sh kernel --sanitize=undefined && tools/test.sh
 - **Open verify** (from the scripture pass): `ARCHITECTURE.md:660/662` describe
   `rfork(RFPROC)` as "copy-on-write address space" -- confirm the actual copy
   behavior; add a seam-note like §16 if it doesn't truly COW.
+- **A-4 prerequisite (P1-class, surfaced by the A-1a audit, NOT A-1a):**
+  `kernel/proc.c::rfork_internal` sets `child->caps = parent_caps & caps_mask` WITHOUT
+  `& ~CAP_ELEVATION_ONLY`, but `caps.h:99-105` (P5-hostowner-b) asserts it strips
+  elevation-only caps. Real I-2 hole: a `CAP_HOSTOWNER`-elevated parent can rfork /
+  `SYS_SPAWN_*`(cap_mask incl. HOSTOWNER) a child that inherits `CAP_HOSTOWNER`,
+  bypassing the console-attached `ADMIN_ELEVATE` gate. Does NOT touch identity
+  (`CAP_SET_IDENTITY` is correctly fork-grantable, in CAP_ALL, not elevation-only).
+  Fix is a 1-line AND matching the existing scripture + a regression test, but rfork
+  is an audit-trigger surface and sibling elevation paths want a sweep -> fold into the
+  A-4 (clearance/legate/hostowner) chunk with its own focused audit. Recorded in
+  `memory/audit_a1a_closed_list.md` (carried-out-of-scope).
 
 ---
 

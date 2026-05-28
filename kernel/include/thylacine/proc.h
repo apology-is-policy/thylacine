@@ -644,9 +644,14 @@ bool proc_peer_snapshot_by_stripes(u64 stripes, caps_t *caps_out,
 // stamp/inherit). Called from the spawn thunk BEFORE userland_enter, only
 // after the parent verified CAP_SET_IDENTITY + value bounds. Copies the
 // first `supp_gid_count` gids and zeroes the tail so no stale inherited
-// gid survives past the count. Extincts on a NULL/corrupted Proc or
-// supp_gid_count > PROC_SUPP_GIDS_MAX (a kernel-internal contract
-// violation — the parent already bounds the count). Confers NO caps (I-22).
+// gid survives past the count. Extincts on a kernel-internal contract
+// violation (the caller should already have gated these): a NULL/corrupted
+// Proc; supp_gid_count > PROC_SUPP_GIDS_MAX; or a principal_id/primary_gid
+// that is the INVALID or SYSTEM sentinel (never legitimate to STAMP -- the
+// boot chain sets SYSTEM directly in proc_init, and the spawn gate
+// pre-validates real ids / NONE). Supplementary-gid VALUES are the caller's
+// (the spawn gate's) responsibility -- this site bounds the count only.
+// Confers NO caps (I-22).
 void proc_apply_identity(struct Proc *p, u32 principal_id, u32 primary_gid,
                          const u32 *supp_gids, u8 supp_gid_count);
 

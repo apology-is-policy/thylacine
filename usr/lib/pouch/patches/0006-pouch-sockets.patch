@@ -728,7 +728,7 @@ close dance.
  }
 --- a/src/network/getsockopt.c
 +++ b/src/network/getsockopt.c
-@@ -1,41 +1,107 @@
+@@ -1,41 +1,109 @@
 +/* pouch — getsockopt(2) for AF_UNIX SOCK_STREAM (P6-pouch-sockets,
 + * sub-chunk 12). SO_PEERCRED maps onto SYS_srv_peer — Thylacine's
 + * kernel-stamped, unforgeable peer-identity primitive.
@@ -770,6 +770,8 @@ close dance.
 +	unsigned int  flags;
 +	unsigned int  _reserved;
 +};
++_Static_assert(sizeof(struct pouch_srv_peer_info) == 40,
++               "mirror kernel srv_peer_info (40 bytes; A-1a R1 F5)");
 +
 +int getsockopt(int fd, int level, int optname,
 +               void *restrict optval, socklen_t *restrict optlen)

@@ -64,7 +64,8 @@ u8  supp_gid_count;
 
 ```c
 // The single audited identity-mutation site. Sets principal_id/primary_gid and
-// copies the first supp_gid_count gids (zeroing the tail). Extincts on a NULL/
+// copies the first supp_gid_count gids (zeroing the tail). Extincts on a reserved
+// principal_id/primary_gid (INVALID/SYSTEM -- A-1a R1 F3) or a NULL/
 // corrupted Proc or supp_gid_count > PROC_SUPP_GIDS_MAX. Confers NO caps (I-22).
 void proc_apply_identity(struct Proc *p, u32 principal_id, u32 primary_gid,
                          const u32 *supp_gids, u8 supp_gid_count);
@@ -142,7 +143,8 @@ gate site), which:
    `SPAWN_IDENTITY_SET` request without the cap returns -1, never silent-inherit).
 2. Reserved-value reject (`spawn_identity_value_ok`): `principal_id`/`primary_gid`
    must be `[1, 0xFFFFFFFD]` or `NONE`; `INVALID`/`SYSTEM` -> -1. `supp_gid_count <=
-   15`; supp gids reject `0`.
+   15`; supplementary gids go through the **same predicate** (INVALID + SYSTEM both
+   rejected -- A-1a R1 F1; no smuggling the system group into a supp set).
 3. Passes the bundle into `spawn_full_argv_args` (the kmalloc'd thunk arg).
 
 The thunk (`sys_spawn_full_argv_thunk`) runs in the **child** and, after the perm
@@ -181,7 +183,7 @@ SYSTEM-vs-0 assumption).
 
 ## Tests
 
-`kernel/test/test_proc_identity.c` (7 tests; all run in kproc context):
+`kernel/test/test_proc_identity.c` (8 tests; all run in kproc context):
 
 - `kproc_is_system` — kproc = `{SYSTEM, GID_SYSTEM}`, supp_count 0.
 - `rfork_inherits` — child inherits SYSTEM identity, caps reduce to NONE, stripes
@@ -191,17 +193,20 @@ SYSTEM-vs-0 assumption).
 - `spawn_set_accepted_with_cap` — a capped (kproc) SET spawn of `/hello` succeeds +
   exits clean.
 - `set_rejects_reserved` — SET `INVALID`/`SYSTEM` principal, `SYSTEM` gid -> -1.
+- `set_rejects_system_supp_gid` — SET supp gid `SYSTEM`/`INVALID` -> -1 (R1 F1).
 - `peer_snapshot_by_stripes` — kproc resolves to SYSTEM; 0-sentinel + unassigned tag
   fail-closed.
 
-Suite: 617/617 PASS (default build).
+Suite: 618/618 PASS (default + ASan + UBSan).
 
 ---
 
 ## Error paths
 
-- `proc_apply_identity` — extinction on NULL/corrupted Proc or `supp_gid_count > 15`
-  (kernel-internal contract violation; the parent already bounds it).
+- `proc_apply_identity` — extinction on NULL/corrupted Proc, `supp_gid_count > 15`, or
+  a `principal_id`/`primary_gid` that is the INVALID/SYSTEM sentinel (kernel-internal
+  contract violation; the gate already bounds these -- R1 F3 makes the "single audited
+  site" framing real).
 - `sys_spawn_full_argv_identity_for_proc` — `-1` on: `SPAWN_IDENTITY_SET` without
   `CAP_SET_IDENTITY`; reserved/invalid id or gid; `supp_gid_count > 15`.
 - `sys_spawn_full_argv_validate_req` — `-1` on unknown `identity_flags` bits, or
@@ -216,6 +221,13 @@ Suite: 617/617 PASS (default build).
 - **Implemented (A-1a):** Proc identity fields + inheritance + kproc=SYSTEM +
   `CAP_SET_IDENTITY` + identity-at-spawn (fail-closed gate, reserved-value reject) +
   `srv_peer_info` identity exposure + all userspace mirrors.
+- **Audit (R1, opus prosecutor):** CLEAN -- 0 P0, 0 P1, 1 P2, 4 P3, all fixed in the
+  close. F1 (supp-gid SYSTEM reject), F2 (clamp inherited count), F3 (proc_apply_identity
+  self-validates reserved values), F4 (stale 56-byte comments), F5 (pouch mirror size
+  assert). Carried OUT of scope: a pre-existing P5-hostowner I-2 hole -- `rfork_internal`
+  does not `& ~CAP_ELEVATION_ONLY` despite caps.h saying it does (a hostowner-elevated
+  parent could rfork `CAP_HOSTOWNER` to a child); does not touch identity; flagged for an
+  A-4/hostowner re-audit.
 - **Deferred:** A-1b corvus identity DB + `RESOLVE_ID`/`RESOLVE_NAME` + CRVS v2;
   self-de-escalation (drop to NONE) seam; A-2d kernel rwx permission check that
   *consumes* principal_id/groups; A-3 SO_PEERCRED uid/gid marshal + per-user stratumd

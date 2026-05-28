@@ -108,7 +108,7 @@ pub const T_SYS_CLOSE: u64           = 11;
 pub const T_SYS_WAIT_PID: u64        = 22;
 // P6-pouch-stratumd-boot 16b-alpha: combined spawn with argv pass-through.
 // Subsumes all earlier SYS_SPAWN_* surfaces; backs t::process::Command::spawn
-// (U-2d). Takes a single user-VA pointer to a struct TSpawnArgs (56 bytes).
+// (U-2d). Takes a single user-VA pointer to a struct TSpawnArgs (80 bytes).
 pub const T_SYS_SPAWN_FULL_ARGV: u64 = 49;
 // P5-corvus-syscalls (kernel side at 0db0dcf/d10d4ee). v1.0 hardening
 // syscalls used by /sbin/corvus startup.
@@ -1469,7 +1469,7 @@ pub unsafe fn t_fstat(spoor_fd: i64, stat_va: *mut u8) -> i64 {
 
 // t_spawn_full_argv — combined-spawn primitive with argv pass-through.
 // Subsumes every earlier SYS_SPAWN_* surface. Reads the calling Proc's
-// 56-byte `TSpawnArgs` struct at `req_va` and rfork-execs a fresh child.
+// 80-byte `TSpawnArgs` struct at `req_va` and rfork-execs a fresh child.
 // Returns the child's pid (positive) on success, -1 on any rejection
 // (see SYS_SPAWN_FULL_ARGV kernel header for the full list).
 //

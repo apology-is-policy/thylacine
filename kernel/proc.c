@@ -586,8 +586,14 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
     // the child never runs userspace under the wrong identity.
     child->principal_id   = parent->principal_id;
     child->primary_gid    = parent->primary_gid;
-    child->supp_gid_count = parent->supp_gid_count;
-    for (u8 i = 0; i < parent->supp_gid_count && i < PROC_SUPP_GIDS_MAX; i++)
+    // A-1a R1 F2: clamp the inherited count symmetrically with the copy loop
+    // below. The loop is already bounded by PROC_SUPP_GIDS_MAX; clamping the
+    // stored count too means a (corruption-induced) parent count > 15 can
+    // never leave the child with an out-of-bounds count that a downstream
+    // consumer (A-2d permission walk) would trust.
+    child->supp_gid_count = parent->supp_gid_count > PROC_SUPP_GIDS_MAX
+                          ? PROC_SUPP_GIDS_MAX : parent->supp_gid_count;
+    for (u8 i = 0; i < child->supp_gid_count; i++)
         child->supp_gids[i] = parent->supp_gids[i];
 
     // P5-hostowner-a: child->proc_flags stays 0 (KP_ZERO from
@@ -801,6 +807,17 @@ void proc_apply_identity(struct Proc *p, u32 principal_id, u32 primary_gid,
         extinction("proc_apply_identity: NULL or corrupted Proc");
     if (supp_gid_count > PROC_SUPP_GIDS_MAX)
         extinction("proc_apply_identity: supp_gid_count exceeds PROC_SUPP_GIDS_MAX");
+    // A-1a R1 F3: make the "single audited mutation site" contract real.
+    // INVALID(0) and SYSTEM are never legitimate values to STAMP via this path
+    // (the boot chain sets SYSTEM directly in proc_init; the spawn gate
+    // pre-validates real ids / NONE). One reaching here means a caller bypassed
+    // the gate -- a kernel-internal contract violation, like the count check.
+    // (Supplementary gid VALUES remain the gate's responsibility, per the
+    // header contract; this guards the primary identity scalars.)
+    if (principal_id == PRINCIPAL_INVALID || principal_id == PRINCIPAL_SYSTEM)
+        extinction("proc_apply_identity: principal_id is a reserved sentinel");
+    if (primary_gid == GID_INVALID || primary_gid == GID_SYSTEM)
+        extinction("proc_apply_identity: primary_gid is a reserved sentinel");
     p->principal_id   = principal_id;
     p->primary_gid    = primary_gid;
     p->supp_gid_count = supp_gid_count;

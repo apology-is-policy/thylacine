@@ -736,10 +736,13 @@ gate semantics + spawn-args byte layout pinned at A-1a):
 - **Settable-value policy.** A SET request validates: `principal_id` and
   `primary_gid` MUST be in `[1, 0xFFFFFFFD]` OR the `NONE` sentinel; `INVALID (0)`
   and the `SYSTEM` sentinel are REJECTED with -1 (you cannot forge the system
-  identity nor stamp the never-valid 0). `supp_gid_count <= 15`; supp gids reject the
-  `0` sentinel. corvus is the authority for which gids a login may legitimately
-  request; the kernel only bounds + sanity-checks (full supp-gid policy is a corvus
-  concern, A-1b).
+  identity nor stamp the never-valid 0). `supp_gid_count <= 15`; supplementary gids
+  are validated by the **same predicate** -- INVALID and SYSTEM both rejected (A-1a
+  R1 F1: rejecting only `0` on the supplementary axis while the primary axis rejected
+  SYSTEM was an I-22 asymmetry -- a capped login could smuggle the system group into a
+  user's supplementary set, which becomes authority once A-2d enforces group rwx).
+  corvus is the authority for which real gids a login may legitimately request; the
+  kernel only bounds + sanity-checks (full supp-gid policy is a corvus concern, A-1b).
 - `CAP_SET_IDENTITY` is FORK-GRANTABLE (a member of `CAP_ALL`): it flows kproc ->
   joey -> login down the vetted boot chain; rfork's mask-AND means the ordinary user
   Proc that login spawns does NOT receive it (login omits it from the shell's

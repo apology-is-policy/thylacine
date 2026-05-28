@@ -3110,8 +3110,13 @@ static bool spawn_identity_value_ok(const struct spawn_identity *id) {
     if (!spawn_identity_id_ok(id->principal_id))  return false;
     if (!spawn_identity_id_ok(id->primary_gid))   return false;
     if (id->supp_gid_count > PROC_SUPP_GIDS_MAX)  return false;
+    // A-1a R1 F1: reject INVALID *and* SYSTEM on supplementary gids too — the
+    // same predicate as the primary id/gid. An asymmetry (primary rejects
+    // SYSTEM, supp only rejected 0) would let a capped login smuggle the
+    // system group into a user's supplementary set, which becomes authority
+    // once A-2d enforces group rwx (I-22).
     for (u8 i = 0; i < id->supp_gid_count; i++) {
-        if (id->supp_gids[i] == GID_INVALID)      return false;
+        if (!spawn_identity_id_ok(id->supp_gids[i])) return false;
     }
     return true;
 }
@@ -3401,7 +3406,7 @@ int sys_spawn_full_argv_for_proc(struct Proc *p,
 }
 
 // uaccess-loader helper: copy the struct sys_spawn_args from user memory
-// in a single pass. The struct is 56 bytes (pinned by _Static_assert in
+// in a single pass. The struct is 80 bytes (pinned by _Static_assert in
 // the ABI header); we read it byte-by-byte to avoid pointer-cast
 // strict-aliasing pitfalls and to keep every load on the uaccess fixup
 // path. Returns 0 on success, -1 on any uaccess fault.

@@ -31,6 +31,7 @@ void test_proc_identity_apply_sets_fields(void);
 void test_proc_identity_spawn_set_rejected_without_cap(void);
 void test_proc_identity_spawn_set_accepted_with_cap(void);
 void test_proc_identity_set_rejects_reserved(void);
+void test_proc_identity_set_rejects_system_supp_gid(void);
 void test_proc_identity_peer_snapshot_by_stripes(void);
 
 static void drain_zombies(void) {
@@ -198,6 +199,27 @@ void test_proc_identity_set_rejects_reserved(void) {
         CAP_NONE, 0u, /*set=*/true, 1000u, GID_SYSTEM, NULL, 0u);
     TEST_EXPECT_EQ(rc_gid, -1, "SET primary_gid=SYSTEM not rejected");
     // No grandchildren were spawned (all rejected); nothing to reap.
+}
+
+// A-1a R1 F1: a supplementary gid of GID_SYSTEM (or GID_INVALID) is rejected
+// by the SET gate, uniformly with the primary id/gid (no smuggling the system
+// group into a user's supplementary set). Capped caller; the request is refused
+// before any spawn, so there is no grandchild to reap.
+void test_proc_identity_set_rejects_system_supp_gid(void) {
+    drain_zombies();
+    struct Thread *t = current_thread();
+    TEST_ASSERT(t && t->proc, "current thread has Proc");
+    struct Proc *p = t->proc;
+    u32 sys_supp[1] = { GID_SYSTEM };
+    int rc_sys = sys_spawn_full_argv_identity_for_proc(
+        p, "hello", 5, NULL, 0u, 0u, NULL, 0u,
+        CAP_NONE, 0u, /*set=*/true, 1000u, 1000u, sys_supp, 1u);
+    TEST_EXPECT_EQ(rc_sys, -1, "SET supp_gid=SYSTEM not rejected");
+    u32 inv_supp[1] = { GID_INVALID };
+    int rc_inv = sys_spawn_full_argv_identity_for_proc(
+        p, "hello", 5, NULL, 0u, 0u, NULL, 0u,
+        CAP_NONE, 0u, /*set=*/true, 1000u, 1000u, inv_supp, 1u);
+    TEST_EXPECT_EQ(rc_inv, -1, "SET supp_gid=INVALID not rejected");
 }
 
 // The peer-snapshot data path that feeds srv_peer_info: looking up kproc by
