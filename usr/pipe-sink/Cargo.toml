@@ -1,0 +1,19 @@
+[package]
+name = "pipe-sink"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "pipe-sink"
+path = "src/main.rs"
+
+[dependencies]
+# pipe-sink is a U-6d-a pipeline test fixture: it reads fd 0 (stdin) to
+# EOF and exits a status encoding what it saw. In a pipeline, fd 0 is
+# the kernel-installed pipe read end (the upstream element's stdout).
+# Pairs with pipe-src for the data-transfer probe; pairs with hello-rs
+# (which writes nothing to fd 1) for the EOF + real-non-zero-through-
+# pipefail probe.
+libthyla-rs = { path = "../lib/libthyla-rs" }

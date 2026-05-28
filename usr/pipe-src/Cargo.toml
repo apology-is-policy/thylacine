@@ -1,0 +1,17 @@
+[package]
+name = "pipe-src"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "pipe-src"
+path = "src/main.rs"
+
+[dependencies]
+# pipe-src is a U-6d-a pipeline test fixture: it writes a fixed payload
+# to fd 1 (stdout). In a pipeline, fd 1 is the kernel-installed pipe
+# write end (assigned by libutopia::eval::exec_pipeline); the downstream
+# element reads the payload from its fd 0. Pairs with pipe-sink.
+libthyla-rs = { path = "../lib/libthyla-rs" }

@@ -1,6 +1,6 @@
 // libutopia::eval::stmt -- statement evaluation.
 //
-// === Scope at U-6c ===
+// === Scope at U-6d-a ===
 //
 // Walks a `Statement` (or a `Vec<Statement>` body) and executes it
 // against an `Env`. Statement evaluation is mutating (assignment +
@@ -8,10 +8,13 @@
 // which is pure with respect to `Env`.
 //
 // Implemented statement kinds:
-//   - Pipeline (single-element; supports CommandKind::Simple with
-//     argv[0] resolving to a defined fn OR an external binary
-//     (U-6c), CommandKind::BraceBlock, CommandKind::Arith; Subshell
-//     + multi-element pipeline -> NotImplemented)
+//   - Pipeline:
+//       * single-element -- CommandKind::Simple with argv[0]
+//         resolving to a defined fn OR an external binary (U-6c),
+//         CommandKind::BraceBlock, CommandKind::Arith.
+//       * multi-element (`a | b | c`) (U-6d-a) -- every element must
+//         be a redirect-free external Simple command; pipe-connected;
+//         pipefail-aggregated. See `exec_pipeline`.
 //   - Let / Assign / FnDecl
 //   - Return / Break / Continue
 //   - If / While / For
@@ -21,12 +24,14 @@
 //   - OnNote / MaskNote
 //
 // Deferred (return NotImplemented at v1.0):
-//   - Multi-element Pipeline (pipes) -- U-6d
-//   - Redirects -- U-6d
+//   - Redirects (`>` `<` `>>` `<<`) -- U-6d-b
 //   - Background (&) -- U-7
 //   - Subshell ( cmds ) (fork) -- U-6f or later (needs a fork
 //     surface that re-runs the parsed body in the child; the
 //     spawn-then-exec model in libthyla-rs::process doesn't fit)
+//   - In-process pipeline elements (fn / BraceBlock / Arith /
+//     Subshell as a pipeline stage) -- they have no fd to wire to a
+//     pipe without fork; U-6f or later
 //   - Filesystem glob expansion on argv (e.g., `cat *.c`) -- U-6e
 //     (the glob module in this crate already does pattern match;
 //     fs-walk needs a ReadDir surface in libthyla-rs that v1.0
@@ -128,8 +133,9 @@ use crate::parser::ast::{
 use crate::parser::token::{DqPart, Token, TokenKind};
 use crate::parser::Span;
 
-use libthyla_rs::process::Stdio;
-use libthyla_rs::t_putstr;
+use libthyla_rs::fs::File;
+use libthyla_rs::process::{pipe, Stdio};
+use libthyla_rs::{t_putstr, t_wait_pid};
 
 use super::env::Env;
 use super::error::{EvalError, EvalErrorKind, EvalResult};
@@ -238,10 +244,8 @@ fn eval_pipeline(env: &mut Env, p: &Pipeline) -> EvalResult<StatementFlow> {
         ));
     }
     if p.elements.len() > 1 {
-        return Err(EvalError::new(
-            EvalErrorKind::NotImplemented("multi-element pipeline (|)"),
-            p.span,
-        ));
+        // Multi-element pipeline (U-6d-a).
+        return exec_pipeline(env, p);
     }
     let elem = &p.elements[0];
     let cmd = &elem.command;
@@ -252,6 +256,253 @@ fn eval_pipeline(env: &mut Env, p: &Pipeline) -> EvalResult<StatementFlow> {
         ));
     }
     eval_command(env, cmd)
+}
+
+// ---------------------------------------------------------------------
+// Multi-element pipeline (U-6d-a)
+// ---------------------------------------------------------------------
+//
+// `cmd1 | cmd2 | ... | cmdN` -- spawn all N elements concurrently,
+// connect element i's stdout to element i+1's stdin via a kernel pipe,
+// then reap all and aggregate the exit statuses per scripture 8.4
+// (pipefail).
+//
+// === Element restriction at U-6d-a ===
+//
+// Every pipeline element must be a redirect-free EXTERNAL Simple
+// command (argv[0] not a defined fn). The reasons:
+//   - A fn / BraceBlock / Arith runs IN-PROCESS in this shell; it has
+//     no stdin/stdout fd to wire to a pipe. rc/bash run these in a
+//     forked subshell; libthyla-rs has spawn-then-exec, not fork, so
+//     in-process pipeline elements are NotImplemented at v1.0.
+//   - Subshell `( cmds )` likewise needs fork.
+//   - Per-element redirects (`cmd > f | cmd2`) land at U-6d-b.
+// Any of these -> NotImplemented with a specific tag; the whole
+// pipeline aborts BEFORE any spawn (no half-spawned state).
+//
+// === Stdio wiring ===
+//
+// For N elements there are N-1 pipes. Pipe j connects element j
+// (write end -> its stdout) to element j+1 (read end -> its stdin).
+// The OUTER ends -- element 0's stdin, element N-1's stdout, and every
+// element's stderr -- get the U-6c v1.0 convention (Stdio::Piped +
+// immediate drop), because the shell has no terminal-backed fd 0/1/2
+// to inherit yet (see exec_external's module note). When U-PTY lands,
+// the outer stdin/stdout become Inherit.
+//
+// `Stdio::File(end)` hands a specific pipe end to a child slot: the
+// kernel installs that end into the child's handle table at the slot
+// index, then libthyla-rs drops the parent's copy after the spawn
+// returns. So after element j spawns, the parent no longer holds
+// element j's write end -- only the child does -- which is exactly
+// what lets the downstream reader see EOF when the upstream exits.
+//
+// === Spawn-all-before-wait ===
+//
+// All N children are spawned before the first wait. If we waited after
+// each spawn, a pipeline like `producer | consumer` would deadlock:
+// producer fills the pipe buffer and blocks on write while we block
+// waiting for it, never having spawned consumer to drain the pipe.
+//
+// === Reaping (wait-any + pid match) ===
+//
+// SYS_WAIT_PID reaps ANY of the caller's zombie children, not a
+// specific pid. We spawn N, collect their pids, then wait N times and
+// match each reaped pid back to its element index to record the right
+// status. At v1.0 the shell has no background children (U-7), so the
+// only outstanding children are this pipeline's -- exactly N waits
+// reap them all. A reaped pid not in our set (impossible at v1.0) is
+// ignored.
+//
+// === Pipefail (scripture 8.4) ===
+//
+// The pipeline's $status is the rightmost non-zero exit among elements
+// NOT marked `?|` (tolerate_failure), or 0 if all (non-tolerated)
+// elements succeeded. See `aggregate_pipefail`.
+fn exec_pipeline(env: &mut Env, p: &Pipeline) -> EvalResult<StatementFlow> {
+    let n = p.elements.len();
+
+    // Validate + evaluate every element's argv up front. Any
+    // NotImplemented / empty-argv aborts before a single spawn.
+    let mut argvs: Vec<Vec<String>> = Vec::with_capacity(n);
+    for elem in &p.elements {
+        let cmd = &elem.command;
+        if !cmd.redirects.is_empty() {
+            return Err(EvalError::new(
+                EvalErrorKind::NotImplemented("redirect on pipeline element (U-6d-b)"),
+                elem.span,
+            ));
+        }
+        let simple = match &cmd.kind {
+            CommandKind::Simple(s) => s,
+            _ => {
+                return Err(EvalError::new(
+                    EvalErrorKind::NotImplemented("non-simple command in pipeline"),
+                    cmd.span,
+                ));
+            }
+        };
+        let argv = evaluate_argv(env, &simple.words)?;
+        if argv.is_empty() {
+            return Err(EvalError::new(
+                EvalErrorKind::Internal("empty argv in pipeline element"),
+                cmd.span,
+            ));
+        }
+        if env.fn_get(&argv[0]).is_some() {
+            return Err(EvalError::new(
+                EvalErrorKind::NotImplemented("function as pipeline element"),
+                cmd.span,
+            ));
+        }
+        argvs.push(argv);
+    }
+
+    if env.trace_depth > 0 {
+        for argv in &argvs {
+            trace_echo(argv);
+        }
+    }
+
+    // Allocate N-1 pipes. stdin_files[i] feeds element i's stdin (Some
+    // for i in 1..n); stdout_files[i] is element i's stdout (Some for
+    // i in 0..n-1). On a pipe() failure, the Files allocated so far
+    // drop when this fn returns (the Vecs go out of scope).
+    let mut stdin_files: Vec<Option<File>> = (0..n).map(|_| None).collect();
+    let mut stdout_files: Vec<Option<File>> = (0..n).map(|_| None).collect();
+    for j in 0..n - 1 {
+        match pipe() {
+            Ok((rd, wr)) => {
+                stdout_files[j] = Some(wr);
+                stdin_files[j + 1] = Some(rd);
+            }
+            Err(e) => {
+                let mut s = String::new();
+                let _ = write!(&mut s, "pipe() failed: {:?}", e);
+                env.errstr_set(s);
+                env.status_set(1);
+                return Ok(StatementFlow::Normal);
+            }
+        }
+    }
+
+    // Spawn each element in order. Each spawn consumes its Stdio::File
+    // ends (the kernel refcount-bumps them into the child; libthyla-rs
+    // drops the parent copy on spawn return). On a mid-pipeline spawn
+    // failure we stop spawning and still reap the children already
+    // launched; their pipe ends + the un-spawned elements' ends drop
+    // via the Vecs at fn return.
+    let mut pids: Vec<i32> = Vec::with_capacity(n);
+    let mut spawn_err: Option<&'static str> = None;
+    for i in 0..n {
+        let argv = &argvs[i];
+        let mut spawn_cmd = libthyla_rs::process::Command::new(argv[0].clone());
+        if argv.len() > 1 {
+            spawn_cmd.args(argv[1..].iter().cloned());
+        }
+        match stdin_files[i].take() {
+            Some(f) => {
+                spawn_cmd.stdin(Stdio::File(f));
+            }
+            None => {
+                spawn_cmd.stdin(Stdio::Piped);
+            }
+        }
+        match stdout_files[i].take() {
+            Some(f) => {
+                spawn_cmd.stdout(Stdio::File(f));
+            }
+            None => {
+                spawn_cmd.stdout(Stdio::Piped);
+            }
+        }
+        spawn_cmd.stderr(Stdio::Piped);
+
+        match spawn_cmd.spawn() {
+            Ok(mut child) => {
+                // Drop the Piped parent ends immediately (outer stdin /
+                // stdout / stderr). The Stdio::File ends were already
+                // consumed + dropped inside spawn().
+                drop(child.stdin.take());
+                drop(child.stdout.take());
+                drop(child.stderr.take());
+                pids.push(child.pid());
+            }
+            Err(_) => {
+                spawn_err = Some("pipeline element spawn failed");
+                break;
+            }
+        }
+    }
+
+    // Reap every spawned child (wait-any + pid match). statuses[i]
+    // holds element i's exit status once reaped. NB: at v1.0 the kernel
+    // normalizes any non-zero child exit to 1 (sys_exits_handler:
+    // x0==0 -> "ok"/0; x0!=0 -> "fail"/1; richer u64 status is a Phase
+    // 5+ deferral), so each status here is 0 or 1 -- the literal exit
+    // code is not observable. aggregate_pipefail still computes the
+    // rightmost-non-zero correctly over whatever statuses it gets; the
+    // value-distinction is moot while the kernel collapses to 0/1.
+    let mut statuses: Vec<i32> = (0..pids.len()).map(|_| 0i32).collect();
+    let mut reaped: Vec<bool> = (0..pids.len()).map(|_| false).collect();
+    for _ in 0..pids.len() {
+        let mut st: i32 = 0;
+        // SAFETY: t_wait_pid is the SYS_WAIT_PID SVC wrapper; &mut st
+        // is a valid writable i32.
+        let rc = unsafe { t_wait_pid(&mut st as *mut i32) };
+        if rc < 0 {
+            break; // no more children (shouldn't happen with live pids)
+        }
+        let reaped_pid = rc as i32;
+        if let Some(idx) = pids.iter().position(|&pp| pp == reaped_pid) {
+            if !reaped[idx] {
+                statuses[idx] = st;
+                reaped[idx] = true;
+            }
+        }
+        // else: a reaped pid not in our set -- impossible at v1.0
+        // (no background children); ignore.
+    }
+
+    if let Some(tag) = spawn_err {
+        env.errstr_set(tag);
+        env.status_set(127);
+        return Ok(StatementFlow::Normal);
+    }
+
+    // Pipefail aggregation. Pair each element's status with its
+    // tolerate_failure flag (`?|` sets it on the LEFT element).
+    let pairs: Vec<(i32, bool)> = statuses
+        .iter()
+        .enumerate()
+        .map(|(i, &st)| (st, p.elements[i].tolerate_failure))
+        .collect();
+    env.status_set(aggregate_pipefail(&pairs));
+    Ok(StatementFlow::Normal)
+}
+
+/// Aggregate pipeline element exit statuses per scripture 8.4
+/// (pipefail). Each entry is `(raw_status, tolerate_failure)`. Returns
+/// the RIGHTMOST non-zero status among elements NOT marked `?|`
+/// (tolerate_failure == false), or 0 if every non-tolerated element
+/// exited 0. A tolerated element's status never contributes.
+///
+/// Exposed (pub) for direct boot-probe validation in u-test: native
+/// binaries can't read argv at v1.0, so exit-status fixtures with
+/// controllable codes don't exist; testing the rightmost-non-zero rule
+/// and the `?|` tolerate rule is done by calling this pure function
+/// with synthetic inputs.
+pub fn aggregate_pipefail(elements: &[(i32, bool)]) -> i32 {
+    let mut result = 0;
+    for &(status, tolerate) in elements {
+        if tolerate {
+            continue;
+        }
+        if status != 0 {
+            result = status;
+        }
+    }
+    result
 }
 
 fn eval_command(env: &mut Env, cmd: &Command) -> EvalResult<StatementFlow> {

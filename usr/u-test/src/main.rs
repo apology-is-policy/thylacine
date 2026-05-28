@@ -56,7 +56,7 @@ use libutopia::parser::{
 };
 // U-5d types for flow_parser_full.
 use libutopia::eval::{
-    eval_expr, eval_source, Env, EvalErrorKind, StatementFlow, Value,
+    aggregate_pipefail, eval_expr, eval_source, Env, EvalErrorKind, StatementFlow, Value,
 };
 
 #[global_allocator]
@@ -106,6 +106,9 @@ pub extern "C" fn rs_main() -> i64 {
         return rc;
     }
     if let Err(rc) = flow_eval_exec() {
+        return rc;
+    }
+    if let Err(rc) = flow_eval_pipe() {
         return rc;
     }
 
@@ -2975,5 +2978,189 @@ fn flow_eval_exec() -> Result<(), i64> {
     }
 
     t_putstr("u-test: eval exec OK\n");
+    Ok(())
+}
+
+// =============================================================================
+// Flow 15 -- eval multi-element pipeline: `a | b | c` spawns all stages
+// concurrently, wires stage i's stdout to stage i+1's stdin via kernel
+// pipes, reaps all, and aggregates exit statuses per pipefail (scripture
+// 8.4). Native binaries can't read argv at v1.0, so the pipefail
+// rightmost-non-zero + `?|` tolerate rules are validated by calling the
+// pure `aggregate_pipefail` directly with synthetic statuses; the
+// spawn/wire/reap mechanics + real byte transfer are validated with the
+// pipe-src / pipe-sink fixtures + hello-rs.
+// =============================================================================
+//
+// Probes:
+//   1. hello-rs | hello-rs -- 2-element spawn+wire+reap; both exit 0;
+//      pipeline status 0.
+//   2. hello-rs | hello-rs | hello-rs -- 3-element; status 0.
+//   3. pipe-src | pipe-sink -- REAL byte transfer: pipe-src writes
+//      "PIPE-DATA-OK\n" to fd 1, pipe-sink reads it from fd 0 and
+//      validates; status 0 proves the evaluator wired write-end ->
+//      upstream stdout, read-end -> downstream stdin (direction not
+//      reversed).
+//   4. hello-rs | pipe-sink -- EOF + real non-zero through pipefail:
+//      hello-rs writes via SYS_PUTS (never fd 1), so the pipe carries
+//      no bytes; pipe-sink sees EOF -> exits 5; pipefail reports the
+//      rightmost non-zero = 5.
+//   5. aggregate_pipefail synthetic -- rightmost-non-zero rule.
+//   6. aggregate_pipefail synthetic -- `?|` tolerate rule.
+//   7. background pipeline `hello-rs | hello-rs &` -> NotImplemented.
+//   8. fn-in-pipeline `fn f { } ; f | hello-rs` -> NotImplemented.
+fn flow_eval_pipe() -> Result<(), i64> {
+    // Probe 1: 2-element pipeline, both exit 0.
+    {
+        let mut env = Env::new();
+        env.interactive = true;
+        let flow = match eval_source(&mut env, "hello-rs | hello-rs") {
+            Ok(f) => f,
+            Err(_) => {
+                t_putstr("u-test: flow_eval_pipe: probe 1 eval FAILED\n");
+                return Err(1);
+            }
+        };
+        if !matches!(flow, StatementFlow::Normal) {
+            t_putstr("u-test: flow_eval_pipe: probe 1 flow != Normal FAILED\n");
+            return Err(1);
+        }
+        if env.status() != 0 {
+            t_putstr("u-test: flow_eval_pipe: probe 1 status != 0 FAILED\n");
+            return Err(1);
+        }
+    }
+
+    // Probe 2: 3-element pipeline, all exit 0.
+    {
+        let mut env = Env::new();
+        env.interactive = true;
+        if eval_source(&mut env, "hello-rs | hello-rs | hello-rs").is_err() {
+            t_putstr("u-test: flow_eval_pipe: probe 2 eval FAILED\n");
+            return Err(1);
+        }
+        if env.status() != 0 {
+            t_putstr("u-test: flow_eval_pipe: probe 2 status != 0 FAILED\n");
+            return Err(1);
+        }
+    }
+
+    // Probe 3: REAL byte transfer through the pipe. pipe-src writes the
+    // payload to fd 1; pipe-sink reads fd 0 and exits 0 iff it got the
+    // exact bytes. status 0 proves correct end assignment.
+    {
+        let mut env = Env::new();
+        env.interactive = true;
+        if eval_source(&mut env, "pipe-src | pipe-sink").is_err() {
+            t_putstr("u-test: flow_eval_pipe: probe 3 eval FAILED\n");
+            return Err(1);
+        }
+        if env.status() != 0 {
+            t_putstr("u-test: flow_eval_pipe: probe 3 byte-transfer status != 0 FAILED\n");
+            return Err(1);
+        }
+    }
+
+    // Probe 4: EOF + real non-zero through pipefail. hello-rs writes via
+    // SYS_PUTS (never fd 1) so pipe-sink reads EOF with zero bytes and
+    // returns non-zero. The kernel normalizes any non-zero exit to 1
+    // (sys_exits_handler: x0!=0 -> exit_status=1), so the reaped status
+    // is 1, not pipe-sink's literal return. Pipefail: rightmost non-zero
+    // = 1 (hello-rs=0, sink=1). This is the v1.0 binary-exit-status
+    // reality; the rightmost-VALUE distinction is tested via the pure
+    // aggregate_pipefail probe below (synthetic statuses).
+    {
+        let mut env = Env::new();
+        env.interactive = true;
+        if eval_source(&mut env, "hello-rs | pipe-sink").is_err() {
+            t_putstr("u-test: flow_eval_pipe: probe 4 eval FAILED\n");
+            return Err(1);
+        }
+        if env.status() != 1 {
+            t_putstr("u-test: flow_eval_pipe: probe 4 pipefail status != 1 FAILED\n");
+            return Err(1);
+        }
+    }
+
+    // Probe 5: aggregate_pipefail rightmost-non-zero. Two distinct
+    // non-zero statuses; the rightmost (later index) wins.
+    {
+        // [(7,false),(3,false)] -- both non-tolerated, rightmost = 3.
+        if aggregate_pipefail(&[(7, false), (3, false)]) != 3 {
+            t_putstr("u-test: flow_eval_pipe: probe 5 rightmost-non-zero FAILED\n");
+            return Err(1);
+        }
+        // [(7,false),(0,false)] -- only left non-zero; result 7.
+        if aggregate_pipefail(&[(7, false), (0, false)]) != 7 {
+            t_putstr("u-test: flow_eval_pipe: probe 5 left-only FAILED\n");
+            return Err(1);
+        }
+        // all zero -> 0.
+        if aggregate_pipefail(&[(0, false), (0, false), (0, false)]) != 0 {
+            t_putstr("u-test: flow_eval_pipe: probe 5 all-zero FAILED\n");
+            return Err(1);
+        }
+    }
+
+    // Probe 6: aggregate_pipefail `?|` tolerate. A tolerated element's
+    // non-zero status never contributes.
+    {
+        // [(7,true),(0,false)] -- left tolerated; result 0.
+        if aggregate_pipefail(&[(7, true), (0, false)]) != 0 {
+            t_putstr("u-test: flow_eval_pipe: probe 6 tolerate-left FAILED\n");
+            return Err(1);
+        }
+        // [(7,true),(3,false)] -- left tolerated; right counts; result 3.
+        if aggregate_pipefail(&[(7, true), (3, false)]) != 3 {
+            t_putstr("u-test: flow_eval_pipe: probe 6 tolerate-left-keep-right FAILED\n");
+            return Err(1);
+        }
+    }
+
+    // Probe 7: background pipeline still NotImplemented.
+    {
+        let mut env = Env::new();
+        env.interactive = true;
+        match eval_source(&mut env, "hello-rs | hello-rs &") {
+            Err(e) => {
+                if !matches!(
+                    e.kind,
+                    EvalErrorKind::NotImplemented(s) if s.contains("background")
+                ) {
+                    t_putstr("u-test: flow_eval_pipe: probe 7 wrong kind FAILED\n");
+                    return Err(1);
+                }
+            }
+            Ok(_) => {
+                t_putstr("u-test: flow_eval_pipe: probe 7 background not rejected FAILED\n");
+                return Err(1);
+            }
+        }
+    }
+
+    // Probe 8: a fn as a pipeline element is NotImplemented (fns run
+    // in-process; can't wire to a pipe fd without fork).
+    {
+        let mut env = Env::new();
+        env.interactive = true;
+        let src = "fn myfn { let x = 'y' }\nmyfn | hello-rs";
+        match eval_source(&mut env, src) {
+            Err(e) => {
+                if !matches!(
+                    e.kind,
+                    EvalErrorKind::NotImplemented(s) if s.contains("function as pipeline")
+                ) {
+                    t_putstr("u-test: flow_eval_pipe: probe 8 wrong kind FAILED\n");
+                    return Err(1);
+                }
+            }
+            Ok(_) => {
+                t_putstr("u-test: flow_eval_pipe: probe 8 fn-in-pipeline not rejected FAILED\n");
+                return Err(1);
+            }
+        }
+    }
+
+    t_putstr("u-test: eval pipe OK\n");
     Ok(())
 }
