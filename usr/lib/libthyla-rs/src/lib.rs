@@ -243,9 +243,11 @@ pub const T_SPAWN_MAX_FDS: usize     = 16;
 // (T_CAP_* constants are defined earlier in this file alongside the
 // other rights/caps mirrors; not re-declared here.)
 
-// SYS_SPAWN_FULL_ARGV argument record (56 bytes; ABI-pinned per
+// SYS_SPAWN_FULL_ARGV argument record (80 bytes; ABI-pinned per
 // kernel/include/thylacine/syscall.h + libt mirror). #[repr(C)] so the
-// kernel reads our struct byte-for-byte.
+// kernel reads our struct byte-for-byte. A-1a appended the identity block
+// (56 -> 80); leave identity_flags == 0 to spawn an INHERIT child (setting
+// T_SPAWN_IDENTITY_SET requires the caller to hold CAP_SET_IDENTITY).
 #[repr(C)]
 pub struct TSpawnArgs {
     pub name_va:        u64, // 0
@@ -258,9 +260,26 @@ pub struct TSpawnArgs {
     pub perm_flags:     u32, // 40
     pub _pad_envp:      u32, // 44 — must be 0 at v1.0
     pub cap_mask:       u64, // 48
+    pub principal_id:   u32, // 56 — A-1a (honored iff identity_flags & SET)
+    pub primary_gid:    u32, // 60 — A-1a
+    pub supp_gids_va:   u64, // 64 — A-1a (user-VA of supp_gid_count u32s)
+    pub supp_gid_count: u32, // 72 — A-1a (0..15)
+    pub identity_flags: u32, // 76 — A-1a (T_SPAWN_IDENTITY_SET)
 }
-// Compile-time pin matching kernel's _Static_assert(sizeof(...) == 56).
-const _: () = assert!(core::mem::size_of::<TSpawnArgs>() == 56);
+// Compile-time pin matching kernel's _Static_assert(sizeof(...) == 80).
+const _: () = assert!(core::mem::size_of::<TSpawnArgs>() == 80);
+
+// A-1a: identity_flags bits (mirror SPAWN_IDENTITY_* in the kernel header).
+pub const T_SPAWN_IDENTITY_SET: u32 = 1 << 0;
+
+// A-1a: reserved principal-id / gid sentinels (mirror <thylacine/proc.h>).
+// None is privileged (I-22); real ids are corvus-assigned in [1, 0xFFFFFFFD].
+pub const T_PRINCIPAL_INVALID: u32 = 0;
+pub const T_PRINCIPAL_SYSTEM:  u32 = 0xFFFF_FFFE;
+pub const T_PRINCIPAL_NONE:    u32 = 0xFFFF_FFFF;
+pub const T_GID_INVALID:       u32 = 0;
+pub const T_GID_SYSTEM:        u32 = 0xFFFF_FFFE;
+pub const T_GID_NONE:          u32 = 0xFFFF_FFFF;
 
 // SYS_SPAWN_WITH_PERMS perm_flags — must mirror SPAWN_PERM_* in
 // kernel/include/thylacine/syscall.h.
@@ -358,6 +377,7 @@ pub const T_CAP_LOCK_PAGES: u64      = 1 << 1;
 pub const T_CAP_CSPRNG_READ: u64     = 1 << 2;
 pub const T_CAP_HOSTOWNER: u64       = 1 << 3;   // elevation-only; not in CAP_ALL
 pub const T_CAP_GRANT_HOSTOWNER: u64 = 1 << 4;   // fork-grantable; joey → corvus
+pub const T_CAP_SET_IDENTITY: u64    = 1 << 5;   // A-1a; fork-grantable; gates SPAWN_IDENTITY_SET
 
 // =============================================================================
 // Rights — MUST mirror RIGHT_* bits in kernel/include/thylacine/handle.h.
@@ -1096,8 +1116,11 @@ pub unsafe fn t_getrandom(buf: *mut u8, len: usize, flags: u64) -> i64 {
 
 // TSrvPeerInfo — SYS_SRV_PEER's writeback buffer. Layout pinned by
 // kernel-side struct srv_peer_info (kernel/include/thylacine/syscall.h)
-// to a fixed 24-byte ABI record. Repr-C + the kernel's static asserts
-// pin both sides.
+// to a fixed 40-byte ABI record (A-1a appended the identity block after
+// `alive`). Repr-C + the kernel's static asserts pin both sides.
+//   principal_id : peer's durable identity; PRINCIPAL_NONE when alive == 0
+//   primary_gid  : peer's primary group; GID_NONE when alive == 0
+//   flags        : reserved, 0 at v1.0
 #[repr(C)]
 #[derive(Copy, Clone, Default, Debug)]
 pub struct TSrvPeerInfo {
@@ -1105,7 +1128,12 @@ pub struct TSrvPeerInfo {
     pub caps: u64,
     pub console: u32,
     pub alive: u32,
+    pub principal_id: u32,
+    pub primary_gid: u32,
+    pub flags: u32,
+    pub _reserved: u32,
 }
+const _: () = assert!(core::mem::size_of::<TSrvPeerInfo>() == 40);
 
 // t_post_service — register the calling Proc as the server for service
 // `name`. Requires PROC_FLAG_MAY_POST_SERVICE (the joey-stamped post
@@ -1183,7 +1211,7 @@ pub unsafe fn t_srv_accept(service_handle: i64) -> i64 {
 // Returns 0 on success, -1 on bad handle / wrong kind / SrvConn
 // gate violation / bad user-VA.
 //
-// Safety: `out` must point to a writable TSrvPeerInfo (24 bytes) in
+// Safety: `out` must point to a writable TSrvPeerInfo (40 bytes) in
 // valid user-VA memory.
 #[inline(always)]
 pub unsafe fn t_srv_peer(connection_handle: i64, out: *mut TSrvPeerInfo) -> i64 {

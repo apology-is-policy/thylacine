@@ -69,6 +69,24 @@ typedef u64 caps_t;
 // `cap` device that consumes it; the bit is defined here as foundation.
 #define CAP_GRANT_HOSTOWNER (1ull << 4)
 
+// CAP_SET_IDENTITY — authorizes setting a SPAWNED child's identity
+// (principal_id / primary_gid / supplementary gids) to anything other
+// than the parent's inherited identity, via SPAWN_IDENTITY_SET in
+// struct sys_spawn_args (SYS_SPAWN_FULL_ARGV). This is the setuid-
+// equivalent: a holder can mint a process running as any user. It is
+// the identity counterpart of "elevation = gain a cap" — but for the
+// IDENTITY axis, not the CAPABILITY axis (the two are orthogonal per
+// I-22: setting a child's identity confers no caps; caps still flow
+// only through cap_mask). FORK-GRANTABLE (a member of CAP_ALL): it
+// flows kproc -> joey -> /sbin/login down the vetted boot chain so
+// login can spawn each user's shell *born with* that user's identity.
+// An ordinary user Proc never holds it (login omits it from the
+// shell's spawn cap_mask), so a user cannot spawn processes as another
+// user. The gate is FAIL-CLOSED: a SPAWN_IDENTITY_SET request from a
+// caller lacking this cap returns -1, never silently inherits.
+// (docs/IDENTITY-DESIGN.md §3.3 + §9.1; ARCH §28 I-22.)
+#define CAP_SET_IDENTITY    (1ull << 5)
+
 // Reserved for Phase 5+ (one bit per capability domain):
 //   CAP_NS_MOUNT     — bind/mount in /proc and /ctl (kernel admin Devs).
 //   CAP_NS_BIND      — bind in any namespace (forward-looking).
@@ -91,11 +109,11 @@ typedef u64 caps_t;
 // proc_init. Elevation-only capabilities (CAP_HOSTOWNER) are
 // deliberately excluded — see CAP_HOSTOWNER above. A new fork-grantable
 // CAP_* bit MUST be added here; an elevation-only one MUST NOT.
-#define CAP_ALL         (CAP_HW_CREATE | CAP_LOCK_PAGES | CAP_CSPRNG_READ | CAP_GRANT_HOSTOWNER)
+#define CAP_ALL         (CAP_HW_CREATE | CAP_LOCK_PAGES | CAP_CSPRNG_READ | CAP_GRANT_HOSTOWNER | CAP_SET_IDENTITY)
 
 // _Static_assert pins CAP_ALL — adding a new fork-grantable CAP_* bit
 // requires bumping this expression so kproc's initial mask includes it.
-_Static_assert(CAP_ALL == (CAP_HW_CREATE | CAP_LOCK_PAGES | CAP_CSPRNG_READ | CAP_GRANT_HOSTOWNER),
+_Static_assert(CAP_ALL == (CAP_HW_CREATE | CAP_LOCK_PAGES | CAP_CSPRNG_READ | CAP_GRANT_HOSTOWNER | CAP_SET_IDENTITY),
                "caps.h drift: when adding a new FORK-GRANTABLE CAP_* bit, "
                "update CAP_ALL so kproc's initial mask reflects it. "
                "Elevation-only caps (CAP_HOSTOWNER) are deliberately "

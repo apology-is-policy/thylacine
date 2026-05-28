@@ -173,8 +173,12 @@ static inline long t_torpor_wake(unsigned int *addr_va, unsigned int count) {
 #define T_SYS_SPAWN_ARGV_DATA_MAX   4096u
 
 // SYS_SPAWN_FULL_ARGV argument record — must mirror struct sys_spawn_args
-// in kernel/include/thylacine/syscall.h. The 56-byte ABI shape is pinned
+// in kernel/include/thylacine/syscall.h. The 80-byte ABI shape is pinned
 // by _Static_assert there; the layout here is the user-visible counterpart.
+// A-1a appended the identity block (56 -> 80); leave identity_flags == 0
+// (the default for a designated-initializer / zeroed struct) to spawn a
+// child that INHERITS the caller's identity. Setting SPAWN_IDENTITY_SET
+// requires the caller to hold CAP_SET_IDENTITY (else the syscall -> -1).
 struct t_sys_spawn_args {
     unsigned long  name_va;          // 0
     unsigned long  argv_data_va;     // 8
@@ -186,10 +190,15 @@ struct t_sys_spawn_args {
     unsigned int   perm_flags;       // 40
     unsigned int   _pad_envp;        // 44 — must be 0 at v1.0
     unsigned long  cap_mask;         // 48
+    unsigned int   principal_id;     // 56 — A-1a (honored iff SPAWN_IDENTITY_SET)
+    unsigned int   primary_gid;      // 60 — A-1a
+    unsigned long  supp_gids_va;     // 64 — A-1a (user-VA of supp_gid_count u32s)
+    unsigned int   supp_gid_count;   // 72 — A-1a (0..15)
+    unsigned int   identity_flags;   // 76 — A-1a (T_SPAWN_IDENTITY_SET)
 };
-_Static_assert(sizeof(struct t_sys_spawn_args) == 56,
+_Static_assert(sizeof(struct t_sys_spawn_args) == 80,
                "struct t_sys_spawn_args must mirror the kernel's "
-               "struct sys_spawn_args 56-byte ABI");
+               "struct sys_spawn_args 80-byte ABI (A-1a identity block)");
 // R1 F8 fix: per-field offsetof asserts (mirror the kernel struct's
 // asserts) so a reordering on either side that leaves total size
 // unchanged still fails at compile time.
@@ -213,6 +222,28 @@ _Static_assert(__builtin_offsetof(struct t_sys_spawn_args, _pad_envp) == 44,
                "t_sys_spawn_args._pad_envp at ABI offset 44");
 _Static_assert(__builtin_offsetof(struct t_sys_spawn_args, cap_mask) == 48,
                "t_sys_spawn_args.cap_mask at ABI offset 48");
+_Static_assert(__builtin_offsetof(struct t_sys_spawn_args, principal_id) == 56,
+               "t_sys_spawn_args.principal_id at ABI offset 56");
+_Static_assert(__builtin_offsetof(struct t_sys_spawn_args, primary_gid) == 60,
+               "t_sys_spawn_args.primary_gid at ABI offset 60");
+_Static_assert(__builtin_offsetof(struct t_sys_spawn_args, supp_gids_va) == 64,
+               "t_sys_spawn_args.supp_gids_va at ABI offset 64");
+_Static_assert(__builtin_offsetof(struct t_sys_spawn_args, supp_gid_count) == 72,
+               "t_sys_spawn_args.supp_gid_count at ABI offset 72");
+_Static_assert(__builtin_offsetof(struct t_sys_spawn_args, identity_flags) == 76,
+               "t_sys_spawn_args.identity_flags at ABI offset 76");
+
+// A-1a: identity_flags bits (mirror SPAWN_IDENTITY_* in the kernel header).
+#define T_SPAWN_IDENTITY_SET   (1u << 0)
+
+// A-1a: reserved principal-id / gid sentinels (mirror <thylacine/proc.h>).
+// None is privileged (I-22). Real ids are corvus-assigned in [1, 0xFFFFFFFD].
+#define T_PRINCIPAL_INVALID    0u
+#define T_PRINCIPAL_SYSTEM     0xFFFFFFFEu
+#define T_PRINCIPAL_NONE       0xFFFFFFFFu
+#define T_GID_INVALID          0u
+#define T_GID_SYSTEM           0xFFFFFFFEu
+#define T_GID_NONE             0xFFFFFFFFu
 
 // SYS_GETRANDOM flags (mirror kernel/include/thylacine/syscall.h).
 #define T_GRND_NONBLOCK   1u
@@ -225,6 +256,7 @@ _Static_assert(__builtin_offsetof(struct t_sys_spawn_args, cap_mask) == 48,
 #define T_CAP_CSPRNG_READ     (1UL << 2)
 #define T_CAP_HOSTOWNER       (1UL << 3)   // elevation-only; not in CAP_ALL
 #define T_CAP_GRANT_HOSTOWNER (1UL << 4)   // fork-grantable; joey → corvus
+#define T_CAP_SET_IDENTITY    (1UL << 5)   // A-1a; fork-grantable; gates SPAWN_IDENTITY_SET
 
 // Maximum binary name length for t_spawn (mirror SYS_SPAWN_NAME_MAX).
 #define T_SPAWN_NAME_MAX  64u

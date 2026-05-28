@@ -3081,6 +3081,41 @@ static s64 sys_spawn_with_perms_handler(u64 name_va, u64 name_len_raw,
 //     reject non-zero values so a future envp wiring cannot silently land
 //     on a v1.0 kernel).
 
+// A-1a: identity bundle threaded from the spawn handler/entry into the
+// child via spawn_full_argv_args. `set` mirrors SPAWN_IDENTITY_SET; when
+// false the child INHERITS (proc_apply_identity is not called and rfork's
+// inherit stands). docs/IDENTITY-DESIGN.md §9.1.
+struct spawn_identity {
+    bool set;
+    u32  principal_id;
+    u32  primary_gid;
+    u32  supp_gids[PROC_SUPP_GIDS_MAX];
+    u8   supp_gid_count;
+};
+
+// A settable id is legitimate iff it is a real corvus-assignable value
+// ([1, 0xFFFFFFFD]) OR the NONE sentinel. INVALID(0) and the SYSTEM
+// sentinel are rejected — you cannot stamp the never-valid 0 nor forge the
+// system identity via the spawn path (I-22). The gid reserved scheme
+// shares values with the principal scheme (INVALID/SYSTEM/NONE), so one
+// predicate serves both. corvus is the authority for WHICH real ids a
+// login may request; the kernel sanity-bounds only.
+static bool spawn_identity_id_ok(u32 id) {
+    return id == PRINCIPAL_NONE ||
+           (id != PRINCIPAL_INVALID && id != PRINCIPAL_SYSTEM);
+}
+
+static bool spawn_identity_value_ok(const struct spawn_identity *id) {
+    if (!id)                                      return false;
+    if (!spawn_identity_id_ok(id->principal_id))  return false;
+    if (!spawn_identity_id_ok(id->primary_gid))   return false;
+    if (id->supp_gid_count > PROC_SUPP_GIDS_MAX)  return false;
+    for (u8 i = 0; i < id->supp_gid_count; i++) {
+        if (id->supp_gids[i] == GID_INVALID)      return false;
+    }
+    return true;
+}
+
 // Kernel-side spawn args for SYS_SPAWN_FULL_ARGV. Mirrors
 // spawn_with_fds_args but adds argv_data ownership.
 struct spawn_full_argv_args {
@@ -3099,6 +3134,9 @@ struct spawn_full_argv_args {
     char          *argv_data;
     u32            argv_data_len;
     u32            argc;
+    // A-1a: optional identity override (applied in the thunk before exec
+    // when identity.set; else the child keeps rfork's inherited identity).
+    struct spawn_identity identity;
 };
 
 __attribute__((noreturn))
@@ -3111,6 +3149,7 @@ static void sys_spawn_full_argv_thunk(void *arg) {
     char   *argv_data     = sa->argv_data;
     u32     argv_data_len = sa->argv_data_len;
     u32     argc          = sa->argc;
+    struct spawn_identity identity = sa->identity;   // A-1a: copy before kfree
     struct Spoor *spoors_local[SYS_SPAWN_MAX_FDS];
     rights_t      rights_local[SYS_SPAWN_MAX_FDS];
     for (u32 i = 0; i < fd_count; i++) {
@@ -3134,6 +3173,18 @@ static void sys_spawn_full_argv_thunk(void *arg) {
     }
     if (perm_flags & ~SPAWN_PERM_ALL) {
         extinction("sys_spawn_full_argv_thunk: unknown SPAWN_PERM_* bit");
+    }
+
+    // A-1a: apply the parent-vetted identity override BEFORE any user-
+    // observable state (fd install / exec / userland_enter). The parent
+    // verified CAP_SET_IDENTITY + value bounds in
+    // sys_spawn_full_argv_identity_for_proc; here we just stamp. When
+    // identity.set is false the child keeps the identity rfork inherited.
+    // This is what makes "set at creation" hold: the child never runs EL0
+    // under the wrong identity. docs/IDENTITY-DESIGN.md §9.1.
+    if (identity.set) {
+        proc_apply_identity(p, identity.principal_id, identity.primary_gid,
+                            identity.supp_gids, identity.supp_gid_count);
     }
 
     // Install inherited fds (same pattern as sys_spawn_with_fds_thunk).
@@ -3172,7 +3223,8 @@ static int sys_spawn_full_argv_with_perms_for_proc(
         const char *name, size_t name_len,
         const char *argv_data, u32 argv_data_len, u32 argc,
         const u32 *fds, u32 fd_count,
-        caps_t cap_mask, u32 perm_flags) {
+        caps_t cap_mask, u32 perm_flags,
+        const struct spawn_identity *id) {
     if (!p)                                            return -1;
     if (!name)                                         return -1;
     if (name_len == 0 || name_len > SYS_SPAWN_NAME_MAX) return -1;
@@ -3264,6 +3316,10 @@ static int sys_spawn_full_argv_with_perms_for_proc(
     sa->argv_data     = argv_data_copy;
     sa->argv_data_len = argv_data_len;
     sa->argc          = argc;
+    // A-1a: carry the identity override (KP_ZERO already left identity.set
+    // false, so a NULL `id` means inherit). The parent already gated +
+    // validated it; the thunk stamps it before exec.
+    if (id) sa->identity = *id;
     for (u32 i = 0; i < fd_count; i++) {
         sa->spoors[i] = bumped[i];
         sa->rights[i] = bumped_rights[i];
@@ -3280,24 +3336,68 @@ static int sys_spawn_full_argv_with_perms_for_proc(
     return pid;
 }
 
-// Exported (non-static) for kernel-internal tests in
-// kernel/test/test_sys_spawn_full_argv.c. perm_flags console-attachment
-// gate is enforced by this entry point (mirrors sys_spawn_with_perms_
-// for_proc's external contract).
+// A-1a: identity-aware entry — the real gate site. Does the console-perm
+// gate AND the CAP_SET_IDENTITY gate (FAIL-CLOSED) + reserved-value reject,
+// then delegates to the body. Exported (non-static) for kernel tests; the
+// identity is passed as scalars (not the internal struct spawn_identity)
+// so the test file needs no kernel-internal type. set_identity == false
+// (the back-compat path) means the child inherits the parent's identity.
+int sys_spawn_full_argv_identity_for_proc(struct Proc *p,
+        const char *name, size_t name_len,
+        const char *argv_data, u32 argv_data_len, u32 argc,
+        const u32 *fds, u32 fd_count,
+        caps_t cap_mask, u32 perm_flags,
+        bool set_identity, u32 principal_id, u32 primary_gid,
+        const u32 *supp_gids, u32 supp_gid_count) {
+    if (!p)                                             return -1;
+    if (perm_flags & ~SPAWN_PERM_ALL)                   return -1;
+    if (perm_flags != 0u && !proc_is_console_attached(p)) return -1;
+
+    struct spawn_identity id = {0};
+    const struct spawn_identity *eff_id = NULL;
+    if (set_identity) {
+        // FAIL-CLOSED cap gate (caps read under acquire, matching
+        // rfork_with_caps): a SET request without CAP_SET_IDENTITY is
+        // rejected with -1, never silently downgraded to inherit. I-22:
+        // this gate touches only the IDENTITY axis; cap_mask still governs
+        // the child's caps independently.
+        caps_t my_caps = __atomic_load_n(&p->caps, __ATOMIC_ACQUIRE);
+        if (!(my_caps & CAP_SET_IDENTITY))             return -1;
+        // Bound the count BEFORE copying into the fixed-size bundle.
+        if (supp_gid_count > PROC_SUPP_GIDS_MAX)       return -1;
+        id.set            = true;
+        id.principal_id   = principal_id;
+        id.primary_gid    = primary_gid;
+        id.supp_gid_count = (u8)supp_gid_count;
+        for (u32 i = 0; i < supp_gid_count; i++)
+            id.supp_gids[i] = supp_gids ? supp_gids[i] : 0u;
+        // Reserved-value reject (INVALID/SYSTEM ids; INVALID supp gids).
+        if (!spawn_identity_value_ok(&id))             return -1;
+        eff_id = &id;
+    }
+
+    return sys_spawn_full_argv_with_perms_for_proc(p, name, name_len,
+                                                   argv_data, argv_data_len,
+                                                   argc, fds, fd_count,
+                                                   cap_mask, perm_flags, eff_id);
+}
+
+// Back-compat entry: inherit identity (no SET). Unchanged signature for
+// existing callers + the SYS_SPAWN_WITH_PERMS-shaped tests. perm_flags
+// console-attachment gate is enforced by the identity entry above.
 int sys_spawn_full_argv_for_proc(struct Proc *p,
                                  const char *name, size_t name_len,
                                  const char *argv_data, u32 argv_data_len,
                                  u32 argc,
                                  const u32 *fds, u32 fd_count,
                                  caps_t cap_mask, u32 perm_flags) {
-    if (!p)                                             return -1;
-    if (perm_flags & ~SPAWN_PERM_ALL)                   return -1;
-    if (perm_flags != 0u && !proc_is_console_attached(p)) return -1;
-    return sys_spawn_full_argv_with_perms_for_proc(p, name, name_len,
-                                                   argv_data, argv_data_len,
-                                                   argc,
-                                                   fds, fd_count,
-                                                   cap_mask, perm_flags);
+    return sys_spawn_full_argv_identity_for_proc(p, name, name_len,
+                                                 argv_data, argv_data_len, argc,
+                                                 fds, fd_count, cap_mask,
+                                                 perm_flags,
+                                                 /*set_identity=*/false,
+                                                 PRINCIPAL_INVALID, GID_INVALID,
+                                                 NULL, 0u);
 }
 
 // uaccess-loader helper: copy the struct sys_spawn_args from user memory
@@ -3341,6 +3441,16 @@ int sys_spawn_full_argv_validate_req(const struct sys_spawn_args *req) {
     // input.
     if (req->argc > 0 && req->argv_data_len == 0)      return -1;
     if (req->argc == 0 && req->argv_data_len != 0)     return -1;
+    // A-1a: identity_flags must carry no unknown bits (forward-compat — a
+    // future flag cannot silently land on a v1.0 kernel; same rationale as
+    // _pad_envp). When SPAWN_IDENTITY_SET is set, bound supp_gid_count here
+    // (the handler's supp-gid copy loop indexes a PROC_SUPP_GIDS_MAX buffer;
+    // the identity entry re-checks defense-in-depth). The id VALUE checks
+    // (reserved-reject) live in the identity entry AFTER the cap gate, so an
+    // uncapped caller learns only "rejected", never which value was bad.
+    if (req->identity_flags & ~(u32)SPAWN_IDENTITY_FLAGS_ALL) return -1;
+    if ((req->identity_flags & SPAWN_IDENTITY_SET) &&
+        req->supp_gid_count > PROC_SUPP_GIDS_MAX)      return -1;
     return 0;
 }
 
@@ -3405,11 +3515,41 @@ static s64 sys_spawn_full_argv_handler(u64 req_va) {
         argv_kbuf[i] = (char)b;
     }
 
-    return (s64)sys_spawn_full_argv_for_proc(
+    // A-1a: copy supplementary gids only when a SET identity is requested.
+    // validate_req already bounded supp_gid_count <= PROC_SUPP_GIDS_MAX for
+    // a SET request; the explicit re-check here guards the supp_kbuf write
+    // loop against a future reordering of the validation. The CAP_SET_IDENTITY
+    // gate + reserved-value reject run later in the identity entry.
+    u32  supp_kbuf[PROC_SUPP_GIDS_MAX] = { 0 };
+    bool set_identity = (req.identity_flags & SPAWN_IDENTITY_SET) != 0;
+    u32  supp_count   = 0;
+    if (set_identity) {
+        supp_count = req.supp_gid_count;
+        if (supp_count > PROC_SUPP_GIDS_MAX)              return -1;
+        if (supp_count > 0) {
+            u64 supp_bytes = (u64)supp_count * sizeof(u32);
+            if (!sys_validate_user_buf(req.supp_gids_va, supp_bytes)) return -1;
+            for (u32 i = 0; i < supp_count; i++) {
+                u32 v = 0;
+                for (u32 b = 0; b < sizeof(u32); b++) {
+                    u8 byte = 0;
+                    if (uaccess_load_u8(req.supp_gids_va + i * sizeof(u32) + b,
+                                        &byte) != 0)
+                        return -1;
+                    v |= (u32)byte << (b * 8);
+                }
+                supp_kbuf[i] = v;
+            }
+        }
+    }
+
+    return (s64)sys_spawn_full_argv_identity_for_proc(
         p, name, (size_t)req.name_len,
         req.argv_data_len > 0 ? argv_kbuf : NULL, req.argv_data_len, req.argc,
         fds_kbuf, req.fd_count,
-        (caps_t)req.cap_mask, req.perm_flags);
+        (caps_t)req.cap_mask, req.perm_flags,
+        set_identity, req.principal_id, req.primary_gid,
+        supp_kbuf, supp_count);
 }
 
 static s64 sys_spawn_with_fds_handler(u64 name_va, u64 name_len_raw,
@@ -3741,17 +3881,27 @@ int sys_srv_peer_for_proc(struct Proc *p, hidx_t conn_h,
     u64  peer_stripes = srvconn_peer_stripes(cn);
     bool peer_console = srvconn_peer_console(cn);
 
-    // Live caps + the dead-Proc guard: re-find the peer by stripes under
-    // the process-table lock. A peer that exited / is a zombie / was
-    // reaped has no ALIVE Proc carrying its stripes — `caps` and `alive`
-    // both fail-close to 0 (never a stale snapshot).
-    caps_t peer_caps  = 0;
-    bool   peer_alive = proc_caps_by_stripes(peer_stripes, &peer_caps);
+    // Live caps + identity + the dead-Proc guard: re-find the peer by
+    // stripes under the process-table lock. A peer that exited / is a
+    // zombie / was reaped has no ALIVE Proc carrying its stripes — `caps`
+    // + `alive` + identity all fail-close (never a stale snapshot).
+    // A-1a: one walk snapshots caps + principal_id + primary_gid.
+    caps_t peer_caps      = 0;
+    u32    peer_principal = PRINCIPAL_NONE;
+    u32    peer_gid       = GID_NONE;
+    bool   peer_alive = proc_peer_snapshot_by_stripes(peer_stripes, &peer_caps,
+                                                      &peer_principal, &peer_gid);
 
-    out->stripes = peer_stripes;
-    out->caps    = peer_alive ? (u64)peer_caps : 0u;
-    out->console = peer_console ? 1u : 0u;
-    out->alive   = peer_alive ? 1u : 0u;
+    out->stripes      = peer_stripes;
+    out->caps         = peer_alive ? (u64)peer_caps : 0u;
+    out->console      = peer_console ? 1u : 0u;
+    out->alive        = peer_alive ? 1u : 0u;
+    // A-1a: identity resolved fresh per query; a dead peer fail-closes to
+    // NONE (the SrvConn captures only stripes + console immutably).
+    out->principal_id = peer_alive ? peer_principal : PRINCIPAL_NONE;
+    out->primary_gid  = peer_alive ? peer_gid       : GID_NONE;
+    out->flags        = 0u;
+    out->_reserved    = 0u;
     return 0;
 }
 

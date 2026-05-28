@@ -60,6 +60,35 @@ struct Territory;
 struct HandleTable;
 struct Vma;
 
+// A-1a: identity model (docs/IDENTITY-DESIGN.md §3.3 + §9.1; ARCH §28 I-22).
+//
+// A Proc carries a DURABLE identity (principal_id + groups) that is
+// INHERITED across rfork/spawn — distinct from `caps` (subset-reduced)
+// and `stripes` (fresh per Proc). corvus is the authority for the full
+// id<->name<->groups<->keys mapping; the kernel caches the active set.
+//
+// Reserved ids/gids, NONE privileged (I-22 — no identity carries ambient
+// authority; there is no superuser identity):
+//   *_INVALID (0)      — never assigned; KP_ZERO default, fail-closed.
+//   PRINCIPAL_SYSTEM   — the boot/kernel-proc identity (kproc, joey,
+//                        pre-login). Holds caps via the boot chain, NOT
+//                        via identity. Cannot be SET via the spawn path.
+//   PRINCIPAL_NONE     — unauthenticated "nobody" (Plan 9 `none`); the
+//                        lowest baseline; also reported for a dead peer.
+//   Real users/roles: corvus-assigned in [1, 0xFFFFFFFD].
+#define PRINCIPAL_INVALID  0u
+#define PRINCIPAL_SYSTEM   0xFFFFFFFEu
+#define PRINCIPAL_NONE     0xFFFFFFFFu
+#define GID_INVALID        0u
+#define GID_SYSTEM         0xFFFFFFFEu
+#define GID_NONE           0xFFFFFFFFu
+
+// Max supplementary groups cached on the Proc (1 primary + up to 15
+// supplementary = 16 total, matching the practical 9P/POSIX group bound).
+// Fixed-size to keep the Proc cache slot bounded; corvus holds the full
+// membership and a consumer resolves beyond the cache by principal_id.
+#define PROC_SUPP_GIDS_MAX 15
+
 struct Proc {
     u64               magic;            // PROC_MAGIC
     int               pid;
@@ -270,6 +299,24 @@ struct Proc {
     // (single-thread Procs at start; multi-thread per sub-chunk 9a).
     struct NoteQueue  *notes;
     u64                handler_va;
+
+    // A-1a: durable identity (docs/IDENTITY-DESIGN.md §3.3 + §9.1).
+    // INHERITED across rfork/spawn (rfork_internal copies parent->child);
+    // kproc is stamped {PRINCIPAL_SYSTEM, GID_SYSTEM} at proc_init; the
+    // spawn thunk optionally overrides via proc_apply_identity when the
+    // parent holds CAP_SET_IDENTITY. KP_ZERO at proc_alloc leaves these at
+    // INVALID (0) — the fail-closed transient before inherit/stamp runs.
+    // NEVER mutated on a running Proc that another Proc observes (the
+    // override lands in the child's own thunk before userland_enter), so a
+    // plain read is a coherent snapshot. supp_gids[0..supp_gid_count) are
+    // live; the tail is zeroed. Identity confers NO caps (I-22): caps flow
+    // only through cap_mask; these fields gate the PERMISSION axis (A-2d),
+    // never the CAPABILITY axis.
+    u32                principal_id;
+    u32                primary_gid;
+    u32                supp_gids[PROC_SUPP_GIDS_MAX];
+    u8                 supp_gid_count;
+    u8                 _pad_identity[3];   // explicit align padding
 };
 
 #define PROC_FLAG_NODUMP            (1u << 0)
@@ -278,11 +325,15 @@ struct Proc {
 #define PROC_FLAG_CONSOLE_ATTACHED  (1u << 3)
 #define PROC_FLAG_MAY_POST_SERVICE  (1u << 4)
 
-_Static_assert(sizeof(struct Proc) == 168,
-               "struct Proc size pinned at 168 bytes (sub-chunk 12 baseline "
-               "152 + the P6-pouch-signals notes pointer 8 + handler_va 8 = "
-               "168). Adding a field grows the SLUB cache; update this "
-               "assert deliberately so the change is intentional.");
+_Static_assert(sizeof(struct Proc) == 240,
+               "struct Proc size pinned at 240 bytes (P6-pouch-signals "
+               "baseline 168 + the A-1a identity block: principal_id 4 + "
+               "primary_gid 4 + supp_gids[15] 60 + supp_gid_count 1 + 3 pad "
+               "= 72 -> 240). Adding a field grows the SLUB cache; update "
+               "this assert deliberately so the change is intentional.");
+_Static_assert(__builtin_offsetof(struct Proc, principal_id) == 168,
+               "A-1a identity block appends after handler_va; existing "
+               "offsets must stay stable (KP_ZERO inits the new tail).");
 _Static_assert(__builtin_offsetof(struct Proc, magic) == 0,
                "magic must be at offset 0 so SLUB's freelist write on "
                "kmem_cache_free clobbers it (double-free defense — "
@@ -571,6 +622,33 @@ u64 proc_stripes(const struct Proc *p);
 // The kernel half of specs/corvus.tla ConnOpPeerWasLive: a dead peer
 // authorizes nothing.
 bool proc_caps_by_stripes(u64 stripes, caps_t *caps_out);
+
+// A-1a: the richer peer snapshot feeding SYS_SRV_PEER's srv_peer_info.
+// One walk under g_proc_table_lock snapshots caps + principal_id +
+// primary_gid for the ALIVE Proc carrying `stripes`. proc_caps_by_stripes
+// is now a thin wrapper over this (caps-only). Same fail-closed contract:
+// `stripes == 0` or no ALIVE match -> returns false, out-params untouched.
+// Any out-param may be NULL (the caller takes only what it needs). Only
+// VALUES escape — never the Proc pointer — so a peer reaped after the scan
+// is not a UAF.
+bool proc_peer_snapshot_by_stripes(u64 stripes, caps_t *caps_out,
+                                   u32 *principal_out, u32 *primary_gid_out);
+
+// =============================================================================
+// A-1a: identity mutation (the single audited write site).
+// =============================================================================
+//
+// proc_apply_identity — overwrite `p`'s durable identity with the given
+// principal_id / primary_gid / supplementary gids. The ONLY function that
+// mutates a Proc's identity after proc_init/rfork (which set it via
+// stamp/inherit). Called from the spawn thunk BEFORE userland_enter, only
+// after the parent verified CAP_SET_IDENTITY + value bounds. Copies the
+// first `supp_gid_count` gids and zeroes the tail so no stale inherited
+// gid survives past the count. Extincts on a NULL/corrupted Proc or
+// supp_gid_count > PROC_SUPP_GIDS_MAX (a kernel-internal contract
+// violation — the parent already bounds the count). Confers NO caps (I-22).
+void proc_apply_identity(struct Proc *p, u32 principal_id, u32 primary_gid,
+                         const u32 *supp_gids, u8 supp_gid_count);
 
 // =============================================================================
 // P5-corvus-srv-impl-a2: the /srv service-registry post-gate.

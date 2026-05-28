@@ -728,7 +728,7 @@ close dance.
  }
 --- a/src/network/getsockopt.c
 +++ b/src/network/getsockopt.c
-@@ -1,41 +1,103 @@
+@@ -1,41 +1,107 @@
 +/* pouch — getsockopt(2) for AF_UNIX SOCK_STREAM (P6-pouch-sockets,
 + * sub-chunk 12). SO_PEERCRED maps onto SYS_srv_peer — Thylacine's
 + * kernel-stamped, unforgeable peer-identity primitive.
@@ -758,13 +758,17 @@ close dance.
  #include "syscall.h"
  
 -int getsockopt(int fd, int level, int optname, void *restrict optval, socklen_t *restrict optlen)
-+/* Mirrors kernel/include/thylacine/srvconn.h::srv_peer_info — 24-byte
-+ * record, repr-C-pinned by static asserts on both sides. */
++/* Mirrors kernel/include/thylacine/syscall.h::srv_peer_info — 40-byte
++ * record (A-1a appended identity after `alive`; uid/gid marshal is A-3). */
 +struct pouch_srv_peer_info {
 +	unsigned long stripes;
 +	unsigned long caps;
 +	unsigned int  console;
 +	unsigned int  alive;
++	unsigned int  principal_id;
++	unsigned int  primary_gid;
++	unsigned int  flags;
++	unsigned int  _reserved;
 +};
 +
 +int getsockopt(int fd, int level, int optname,

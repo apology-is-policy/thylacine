@@ -306,6 +306,14 @@ impl Command {
             perm_flags: 0,
             _pad_envp: 0,
             cap_mask: self.cap_mask,
+            // A-1a: inherit the caller's identity (identity_flags == 0).
+            // Command has no identity-override surface at v1.0; the SET
+            // path (login-shaped) lands with A-5.
+            principal_id: 0,
+            primary_gid: 0,
+            supp_gids_va: 0,
+            supp_gid_count: 0,
+            identity_flags: 0,
         };
 
         // SAFETY: every pointer in args_record points into a buffer

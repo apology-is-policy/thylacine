@@ -211,6 +211,15 @@ void proc_init(void) {
     // ProcRoot starting with full caps.
     g_kproc->caps = CAP_ALL;
 
+    // A-1a: kproc is the SYSTEM identity (the boot/kernel-proc principal).
+    // It holds caps via the boot chain (CAP_ALL above), NOT via identity
+    // (I-22 — identity confers no authority). Every rfork child inherits
+    // this until /sbin/login stamps a real user identity, so the whole
+    // boot chain (kproc -> joey -> corvus/stratumd) runs as SYSTEM.
+    // supp_gid_count stays 0 (KP_ZERO). docs/IDENTITY-DESIGN.md §9.1.
+    g_kproc->principal_id = PRINCIPAL_SYSTEM;
+    g_kproc->primary_gid  = GID_SYSTEM;
+
     // P2-Fc: kproc gets its own handle table. handle_init must run
     // before proc_init (main.c bootstrap order). Failures here panic —
     // boot can't continue without kproc.
@@ -564,6 +573,23 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
     caps_t parent_caps = __atomic_load_n(&parent->caps, __ATOMIC_ACQUIRE);
     child->caps = parent_caps & caps_mask;
 
+    // A-1a: identity is INHERITED across rfork (the durable principal-id +
+    // groups flow parent -> child unchanged). This is the opposite of caps
+    // (which monotonically reduce) and stripes (fresh per Proc): identity is
+    // the stable durable attribute. A plain read suffices — identity is
+    // NEVER mutated on a running Proc (the spawn thunk's optional override
+    // via proc_apply_identity runs in the CHILD before userland_enter, not
+    // on the parent), so the parent's identity is immutable for its life
+    // once set. The override (when the parent holds CAP_SET_IDENTITY) lands
+    // in sys_spawn_full_argv_thunk, after this inherit and before exec.
+    // Inheriting then optionally overriding keeps "set at creation" true:
+    // the child never runs userspace under the wrong identity.
+    child->principal_id   = parent->principal_id;
+    child->primary_gid    = parent->primary_gid;
+    child->supp_gid_count = parent->supp_gid_count;
+    for (u8 i = 0; i < parent->supp_gid_count && i < PROC_SUPP_GIDS_MAX; i++)
+        child->supp_gids[i] = parent->supp_gids[i];
+
     // P5-hostowner-a: child->proc_flags stays 0 (KP_ZERO from
     // proc_alloc) — deliberately NOT copied from the parent. In
     // particular PROC_FLAG_CONSOLE_ATTACHED is never conferred by
@@ -711,40 +737,78 @@ u64 proc_stripes(const struct Proc *p) {
     return p->stripes;
 }
 
-// proc_for_each context for proc_caps_by_stripes: match an ALIVE Proc by
-// its stripes tag and snapshot its capability set.
-struct caps_by_stripes_ctx {
-    u64    stripes;     // IN  — the tag to match
-    caps_t caps;        // OUT — the matched Proc's live caps
-    bool   found;       // OUT — set once an ALIVE Proc matched
+// proc_for_each context for proc_peer_snapshot_by_stripes: match an ALIVE
+// Proc by its stripes tag and snapshot the fields a /srv peer query needs.
+struct peer_snapshot_ctx {
+    u64    stripes;       // IN  — the tag to match
+    caps_t caps;          // OUT — the matched Proc's live caps
+    u32    principal_id;  // OUT — A-1a: the peer's durable identity
+    u32    primary_gid;   // OUT — A-1a: the peer's primary group
+    bool   found;         // OUT — set once an ALIVE Proc matched
 };
 
-static int caps_by_stripes_cb(struct Proc *p, void *arg) {
-    struct caps_by_stripes_ctx *c = arg;
+static int peer_snapshot_cb(struct Proc *p, void *arg) {
+    struct peer_snapshot_ctx *c = arg;
     if (p->state == PROC_STATE_ALIVE && p->stripes == c->stripes) {
-        c->caps  = p->caps;
-        c->found = true;
+        c->caps         = p->caps;
+        c->principal_id = p->principal_id;
+        c->primary_gid  = p->primary_gid;
+        c->found        = true;
         return 1;                 // first match wins — stop the walk
     }
     return 0;
 }
 
-bool proc_caps_by_stripes(u64 stripes, caps_t *caps_out) {
+bool proc_peer_snapshot_by_stripes(u64 stripes, caps_t *caps_out,
+                                   u32 *principal_out, u32 *primary_gid_out) {
     // 0 is the reserved fail-closed sentinel; no Proc is ever stamped 0,
-    // so it can never match. Reject it (and a NULL out) before the scan.
-    if (stripes == 0 || !caps_out) return false;
+    // so it can never match. Reject it before the scan. Out-params may be
+    // NULL — the caller takes only what it needs.
+    if (stripes == 0) return false;
 
-    struct caps_by_stripes_ctx ctx = { .stripes = stripes,
-                                       .caps    = 0,
-                                       .found   = false };
+    struct peer_snapshot_ctx ctx = { .stripes      = stripes,
+                                     .caps         = 0,
+                                     .principal_id = PRINCIPAL_NONE,
+                                     .primary_gid  = GID_NONE,
+                                     .found        = false };
     // proc_for_each holds g_proc_table_lock across the whole DFS, so the
-    // callback's "is this Proc ALIVE" test and its p->caps read are one
-    // snapshot under the lock. Only the caps VALUE escapes — never the
-    // Proc pointer — so a peer reaped after the scan is not a UAF.
-    proc_for_each(caps_by_stripes_cb, &ctx);
+    // callback's "is this Proc ALIVE" test and its field reads are one
+    // snapshot under the lock. Only VALUES escape — never the Proc pointer
+    // — so a peer reaped after the scan is not a UAF.
+    proc_for_each(peer_snapshot_cb, &ctx);
     if (!ctx.found) return false;
-    *caps_out = ctx.caps;
+    if (caps_out)        *caps_out        = ctx.caps;
+    if (principal_out)   *principal_out   = ctx.principal_id;
+    if (primary_gid_out) *primary_gid_out = ctx.primary_gid;
     return true;
+}
+
+// proc_caps_by_stripes — caps-only wrapper over the richer snapshot. Keeps
+// the existing SYS_SRV_PEER + spec-mapped API (and its NULL-out rejection;
+// specs/corvus.tla ConnOpPeerWasLive) unchanged for current callers.
+bool proc_caps_by_stripes(u64 stripes, caps_t *caps_out) {
+    if (!caps_out) return false;
+    return proc_peer_snapshot_by_stripes(stripes, caps_out, NULL, NULL);
+}
+
+// A-1a: proc_apply_identity — the single audited identity mutation site.
+// See <thylacine/proc.h> for the full contract. Called from the spawn
+// thunk in the CHILD's context before userland_enter, only after the
+// parent verified CAP_SET_IDENTITY + value bounds.
+void proc_apply_identity(struct Proc *p, u32 principal_id, u32 primary_gid,
+                         const u32 *supp_gids, u8 supp_gid_count) {
+    if (!p || p->magic != PROC_MAGIC)
+        extinction("proc_apply_identity: NULL or corrupted Proc");
+    if (supp_gid_count > PROC_SUPP_GIDS_MAX)
+        extinction("proc_apply_identity: supp_gid_count exceeds PROC_SUPP_GIDS_MAX");
+    p->principal_id   = principal_id;
+    p->primary_gid    = primary_gid;
+    p->supp_gid_count = supp_gid_count;
+    for (u8 i = 0; i < supp_gid_count; i++)
+        p->supp_gids[i] = supp_gids ? supp_gids[i] : 0u;
+    // Zero the tail so no stale inherited gid survives past the new count.
+    for (u8 i = supp_gid_count; i < PROC_SUPP_GIDS_MAX; i++)
+        p->supp_gids[i] = 0u;
 }
 
 // P6-pouch-threads (sub-chunk 9a) audit F1 close: cross-module

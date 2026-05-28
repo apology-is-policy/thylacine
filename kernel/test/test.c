@@ -66,6 +66,13 @@ void test_proc_cascading_rfork_stress(void);
 void test_proc_orphan_reparent_smoke(void);
 void test_proc_console_attached_smoke(void);
 void test_proc_stripes_smoke(void);
+void test_proc_identity_kproc_is_system(void);
+void test_proc_identity_rfork_inherits(void);
+void test_proc_identity_apply_sets_fields(void);
+void test_proc_identity_spawn_set_rejected_without_cap(void);
+void test_proc_identity_spawn_set_accepted_with_cap(void);
+void test_proc_identity_set_rejects_reserved(void);
+void test_proc_identity_peer_snapshot_by_stripes(void);
 void test_namespace_bind_smoke(void);
 void test_namespace_cycle_rejected(void);
 void test_namespace_fork_isolated(void);
@@ -705,6 +712,23 @@ struct test_case g_tests[] = {
     { "proc.orphan_reparent_smoke",    test_proc_orphan_reparent_smoke,    false, NULL },
     { "proc.console_attached_smoke",   test_proc_console_attached_smoke,   false, NULL },
     { "proc.stripes_smoke",            test_proc_stripes_smoke,            false, NULL },
+    { "proc_identity.kproc_is_system", test_proc_identity_kproc_is_system, false, NULL },
+    { "proc_identity.rfork_inherits",  test_proc_identity_rfork_inherits,  false, NULL },
+    { "proc_identity.apply_sets_fields",
+                                       test_proc_identity_apply_sets_fields,
+                                       false, NULL },
+    { "proc_identity.spawn_set_rejected_without_cap",
+                                       test_proc_identity_spawn_set_rejected_without_cap,
+                                       false, NULL },
+    { "proc_identity.spawn_set_accepted_with_cap",
+                                       test_proc_identity_spawn_set_accepted_with_cap,
+                                       false, NULL },
+    { "proc_identity.set_rejects_reserved",
+                                       test_proc_identity_set_rejects_reserved,
+                                       false, NULL },
+    { "proc_identity.peer_snapshot_by_stripes",
+                                       test_proc_identity_peer_snapshot_by_stripes,
+                                       false, NULL },
     { "territory.bind_smoke",          test_namespace_bind_smoke,          false, NULL },
     { "territory.cycle_rejected",      test_namespace_cycle_rejected,      false, NULL },
     { "territory.fork_isolated",       test_namespace_fork_isolated,       false, NULL },

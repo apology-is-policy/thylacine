@@ -1099,22 +1099,41 @@ enum {
 #define SPAWN_PERM_MAY_POST_SERVICE  (1u << 0)
 #define SPAWN_PERM_ALL               (SPAWN_PERM_MAY_POST_SERVICE)
 
+// A-1a (docs/IDENTITY-DESIGN.md §9.1): sys_spawn_args.identity_flags bits.
+// SPAWN_IDENTITY_SET requests that the child be born with the principal_id
+// / primary_gid / supp_gids carried in the struct (instead of inheriting
+// the parent's identity). FAIL-CLOSED gate: a SET request from a caller
+// lacking CAP_SET_IDENTITY is rejected with -1 (never silently inherited).
+// Clear -> the child inherits (the default; no cap needed).
+#define SPAWN_IDENTITY_SET           (1u << 0)
+#define SPAWN_IDENTITY_FLAGS_ALL     (SPAWN_IDENTITY_SET)
+
 // SYS_SRV_PEER result — the kernel-stamped peer identity of a /srv
 // connection (CORVUS-DESIGN.md §6.3). The kernel writes one of these to
 // the SYS_SRV_PEER out_va buffer. A syscall-ABI type: the layout is
 // pinned by the _Static_asserts so a userspace consumer (corvus, at
-// P5-corvus-srv-impl-b) decodes a fixed 24-byte record.
+// P5-corvus-srv-impl-b) decodes a fixed 40-byte record.
+//
+// A-1a (docs/IDENTITY-DESIGN.md §9.1) appended the identity fields AFTER
+// `alive` (24 -> 40 bytes; existing offsets unchanged). principal_id /
+// primary_gid are resolved FRESH per query (same walk as caps + alive);
+// a dead/reaped peer fail-closes them to PRINCIPAL_NONE / GID_NONE.
 struct srv_peer_info {
-    u64 stripes;     // peer Proc's identity tag (0 → unidentifiable peer)
-    u64 caps;        // peer's live capability set; 0 when alive == 0
-    u32 console;     // 1 iff the peer is console-attached, else 0
-    u32 alive;       // 1 iff an ALIVE Proc still carries `stripes`, else 0
+    u64 stripes;       // @0  peer Proc's identity tag (0 → unidentifiable peer)
+    u64 caps;          // @8  peer's live capability set; 0 when alive == 0
+    u32 console;       // @16 1 iff the peer is console-attached, else 0
+    u32 alive;         // @20 1 iff an ALIVE Proc still carries `stripes`, else 0
+    u32 principal_id;  // @24 A-1a: peer's durable identity; NONE when alive == 0
+    u32 primary_gid;   // @28 A-1a: peer's primary group; NONE when alive == 0
+    u32 flags;         // @32 A-1a: reserved, 0 at v1.0
+    u32 _reserved;     // @36 A-1a: explicit pad to 40; reserved, 0
 };
 
-_Static_assert(sizeof(struct srv_peer_info) == 24,
+_Static_assert(sizeof(struct srv_peer_info) == 40,
                "struct srv_peer_info is a SYS_SRV_PEER ABI type — pinned "
-               "at 24 bytes (u64 stripes + u64 caps + u32 console + u32 "
-               "alive), naturally aligned with no implicit padding");
+               "at 40 bytes (A-1a appended principal_id + primary_gid + "
+               "flags + _reserved after the live `alive` field), naturally "
+               "aligned with no implicit padding");
 _Static_assert(__builtin_offsetof(struct srv_peer_info, stripes) == 0,
                "srv_peer_info.stripes at ABI offset 0");
 _Static_assert(__builtin_offsetof(struct srv_peer_info, caps) == 8,
@@ -1123,6 +1142,14 @@ _Static_assert(__builtin_offsetof(struct srv_peer_info, console) == 16,
                "srv_peer_info.console at ABI offset 16");
 _Static_assert(__builtin_offsetof(struct srv_peer_info, alive) == 20,
                "srv_peer_info.alive at ABI offset 20");
+_Static_assert(__builtin_offsetof(struct srv_peer_info, principal_id) == 24,
+               "srv_peer_info.principal_id at ABI offset 24 (after alive@20)");
+_Static_assert(__builtin_offsetof(struct srv_peer_info, primary_gid) == 28,
+               "srv_peer_info.primary_gid at ABI offset 28");
+_Static_assert(__builtin_offsetof(struct srv_peer_info, flags) == 32,
+               "srv_peer_info.flags at ABI offset 32");
+_Static_assert(__builtin_offsetof(struct srv_peer_info, _reserved) == 36,
+               "srv_peer_info._reserved at ABI offset 36");
 
 // SYS_FSTAT result — the Thylacine-native file metadata record (P6-pouch-
 // stratumd-boot sub-chunk 16b-gamma). Plan-9-shaped at the core (qid carries
@@ -1297,11 +1324,21 @@ struct sys_spawn_args {
     u32 perm_flags;
     u32 _pad_envp;
     u64 cap_mask;
+    // A-1a identity extension (append-only; 56 -> 80). Honored only when
+    // identity_flags & SPAWN_IDENTITY_SET; gated FAIL-CLOSED on the
+    // caller holding CAP_SET_IDENTITY (else the syscall returns -1).
+    u32 principal_id;   // [1, 0xFFFFFFFD] or PRINCIPAL_NONE; INVALID/SYSTEM → -1
+    u32 primary_gid;    // [1, 0xFFFFFFFD] or GID_NONE; INVALID/SYSTEM → -1
+    u64 supp_gids_va;   // user-VA of supp_gid_count u32 gids (0 → none)
+    u32 supp_gid_count; // 0..PROC_SUPP_GIDS_MAX (15)
+    u32 identity_flags; // SPAWN_IDENTITY_* bits; outside SPAWN_IDENTITY_FLAGS_ALL → -1
 };
 
-_Static_assert(sizeof(struct sys_spawn_args) == 56,
+_Static_assert(sizeof(struct sys_spawn_args) == 80,
                "struct sys_spawn_args is a SYS_SPAWN_FULL_ARGV ABI type "
-               "— pinned at 56 bytes; no implicit padding under aarch64 ILP32+u64");
+               "— pinned at 80 bytes (A-1a appended the identity block: "
+               "principal_id 4 + primary_gid 4 + supp_gids_va 8 + "
+               "supp_gid_count 4 + identity_flags 4); no implicit padding");
 _Static_assert(__builtin_offsetof(struct sys_spawn_args, name_va) == 0,
                "sys_spawn_args.name_va at ABI offset 0");
 _Static_assert(__builtin_offsetof(struct sys_spawn_args, argv_data_va) == 8,
@@ -1322,6 +1359,16 @@ _Static_assert(__builtin_offsetof(struct sys_spawn_args, _pad_envp) == 44,
                "sys_spawn_args._pad_envp at ABI offset 44");
 _Static_assert(__builtin_offsetof(struct sys_spawn_args, cap_mask) == 48,
                "sys_spawn_args.cap_mask at ABI offset 48");
+_Static_assert(__builtin_offsetof(struct sys_spawn_args, principal_id) == 56,
+               "sys_spawn_args.principal_id at ABI offset 56");
+_Static_assert(__builtin_offsetof(struct sys_spawn_args, primary_gid) == 60,
+               "sys_spawn_args.primary_gid at ABI offset 60");
+_Static_assert(__builtin_offsetof(struct sys_spawn_args, supp_gids_va) == 64,
+               "sys_spawn_args.supp_gids_va at ABI offset 64");
+_Static_assert(__builtin_offsetof(struct sys_spawn_args, supp_gid_count) == 72,
+               "sys_spawn_args.supp_gid_count at ABI offset 72");
+_Static_assert(__builtin_offsetof(struct sys_spawn_args, identity_flags) == 76,
+               "sys_spawn_args.identity_flags at ABI offset 76");
 
 struct exception_context;
 
