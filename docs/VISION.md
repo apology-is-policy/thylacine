@@ -181,7 +181,7 @@ Tail-latency regression is treated as a bug, not a performance variance.
 In order of priority when they conflict. Each property has a brief rationale; the conflict-tiebreak rule is the single most important output of this section.
 
 1. **Correctness.** The kernel must not corrupt data, violate territory isolation, or permit privilege escalation. Correctness is non-negotiable. Every load-bearing invariant has a formal spec; every audit-trigger surface has an adversarial review.
-2. **Security.** Territory isolation as the primary boundary. Stratum's cryptographic integrity as the storage boundary. Userspace drivers as the fault-isolation boundary. Hardware extensions (PAC, MTE, BTI) used everywhere they apply. KASLR, ASLR, W^X, CFI as baseline.
+2. **Security.** Territory isolation as the primary boundary (I-1); no superuser identity — privilege only via scoped, audited legate elevation (I-22). Stratum's cryptographic integrity as the storage boundary. Userspace drivers as the fault-isolation boundary, made safe by the SMMU/IOMMU (DMA isolation; v1.0 per IDENTITY-DESIGN.md §8). Hardware extensions PAC + BTI used everywhere they apply; KASLR, ASLR, W^X as baseline. (MTE → Phase 8 and CFI → post-v1.0 are deferred, reconciled 2026-05-28; see ARCHITECTURE §15.5.)
 3. **Auditability.** The interface layer is simple — one mechanism: 9P. The implementation is no smaller than it must be to do the job correctly, but every component has a bounded specification and a documented interface. A reviewer should be able to read one component without depending on knowledge of the rest. (Renamed from "Simplicity" — the priming was honest about the kernel's scope; auditability is the property worth optimizing.)
 4. **Usability.** Halcyon should be a genuinely pleasant environment. The graphical shell is not a compromise; for the workflows it covers, it should be better than a terminal emulator running inside a windowing system.
 5. **Compatibility.** Linux/POSIX binary compatibility is useful. It is not load-bearing. Degraded compatibility is acceptable; degraded correctness or security is not. musl-static and musl-dynamic ARM64 binaries run; glibc binaries run on best-effort.
@@ -224,7 +224,7 @@ Detailed in `NOVEL.md`. Each is a concrete, testable commitment.
 | 5 | POSIX surfaces as 9P servers (`/proc`, `/dev`, `/sys`, `/dev/pts`) | Low | Phase 5-6 |
 | 6 | Stratum as native filesystem (Stratum v2 stable) | Low | Phase 5 |
 | 7 | Per-process territory inheriting Stratum's per-connection territory | Low | Phase 5 |
-| 8 | EEVDF scheduler with SOTA hardening (PAC, MTE, KASLR, ASLR, W^X, CFI, LSE atomics) from day one | Medium | Phase 1-2 |
+| 8 | EEVDF scheduler with SOTA hardening (PAC, BTI, KASLR, ASLR, W^X, LSE atomics, stack canaries) from day one; MTE (Phase 8) + CFI (post-v1.0) deferred per ARCH §15.5 | Medium | Phase 1-2 |
 | 9 | Formal-verification cadence: nine TLA+ specs gate-tied to phases | Low-medium | Continuous |
 | 10 | Designed-not-implemented v2.0 hooks: factotum capability mediation, multikernel SMP, in-kernel Stratum driver | Low | Phase 0 contracts; v2.0 implementations |
 

@@ -287,7 +287,7 @@ None. This is the foundation phase.
 - [ ] `rfork(RFPROC)` + `exits()` + `wait()` lifecycle works without leak (1000-iteration stress test).
 - [ ] `exec()` loads and runs a static ELF from ramfs; rejects RWX segments.
 - [ ] init starts a UART shell; `echo hello` works via pipe.
-- [ ] Page fault handler allocates demand pages; stack growth works.
+- [ ] Page fault handler lazily installs PTEs for anonymous mappings. *(Reconciled 2026-05-28: anon memory is eagerly backed at v1.0; demand-zero paging is a convergence-detour BUILD item and user-stack auto-grow a SEAM — IDENTITY-DESIGN.md §8.4.)*
 - [ ] **Handle table**: 10,000 handles open/close cycle without leak; rights reduction enforced; hardware-handle transfer attempt panics cleanly.
 - [ ] **BURROW**: create, map, write, read, unmap, close cycle correct; pages freed on last-handle-close + last-mapping-unmap.
 - [ ] Stress: 1000 `rfork`/`exits`/`wait` cycles across 4 CPUs without leak or panic.
@@ -360,7 +360,7 @@ None. This is the foundation phase.
 **Kernel-internal Devs**:
 - `dev/cons.c`: console device (`/dev/cons`, `/dev/consctl`). Wires UART to Dev interface.
 - `dev/null.c`, `dev/zero.c`: trivial.
-- `dev/random.c`: CSPRNG. ARM64 `RNDR` instruction + chacha20 stir.
+- `dev/random.c` (as-built `kernel/random.c`): ARM64 `RNDR` baseline. *(Reconciled 2026-05-28: the chacha20 stir + reseed is a convergence-detour SEAM over the RNDR baseline; also harden the no-`FEAT_RNG` fallback — IDENTITY-DESIGN.md §8.4.)*
 - `dev/proc.c`: `/proc/<pid>/` — synthetic Dev exposing process state (status, cmdline, fd list, mem).
 - `dev/ctl.c`: `/ctl/` — kernel admin synthetic Dev. Exposes scheduler stats, IRQ counters, territory dump.
 - `dev/ramfs.c`: in-memory filesystem. cpio-loaded at boot; freed once persistent FS is mounted.
@@ -664,6 +664,46 @@ pouch's lower half (the syscall seam, the socket/thread/signal translation) + th
 **Binding designs**: `docs/UTOPIA.md` (the experience), `docs/UTOPIA-SHELL-DESIGN.md` (the shell + coreutils design), `docs/UTOPIA-VISUAL.md` (Pale Fire palette + glyph + prompt). All three landed under U-1 (the scripture commit). This section is the ROADMAP-level summary; the binding designs are authoritative for scope, architecture, and sub-chunk detail.
 
 **Goal**: a complete textual environment. The Utopia milestone (`VISION.md §13`) — a developer using Thylacine via UART or SSH finds a working textual environment that "feels real, not broken." Halcyon (graphical layer; Phase 10 execution / ROADMAP §11) is **not** required at this phase; Halcyon is deliberately the final phase of v1.0. Phase 7's exit is Utopia. Phase 8 (execution; ROADMAP §9) adds Linux compat + network on top. Phase 9 (execution; ROADMAP §10) hardens + audits + produces v1.0-rc. Phase 10 (execution; ROADMAP §11) lands Halcyon. The "practical working OS" the project commits to is achieved at Phase 9 exit; Halcyon is the additive graphical layer.
+
+### 8.0 The convergence detour (foundation completion; IN PROGRESS 2026-05-28)
+
+The Utopia shell arc is **paused at U-6d-a**. Building the shell's next features
+(redirects, coreutils, the identity-aware prompt) surfaced that they sit on an
+identity / permission / privilege substrate that did not yet exist; a deliberate
+kernel completeness sweep then found a cluster of fundamental arch/roadmap
+*misses* (no IOMMU/DMA isolation; no create/clock/FS-mutation syscalls; no resource
+floor; no orphan reaper; PAN off; scripture over-claims). Rather than build the
+shell on an incomplete foundation, one comprehensive detour brings the system to a
+clean boundary line where **it really is what it says it is**.
+
+**Binding design + the full ordered work list + every finding's disposition
+(BUILD / SEAM / DOC): `docs/IDENTITY-DESIGN.md §8`** (promoted to binding scripture
+2026-05-28). Governing bar: *build to the extent of the foreseeable future + design
+every seam so extension is additive*; the detour closes when every
+VISION/ARCH/ROADMAP claim is true-because-built or honestly-scoped-with-its-reason
+(NOT "build everything maximally" — that would add unverified complexity).
+
+The one ordered arc — not split, not deferred to v1.x:
+- **A — identity / access / privilege.** The hybrid identity + groups; the
+  legate/clearance scoped-elevation model (no superuser identity, **I-22**);
+  `SYS_WALK_CREATE` + ownership-on-create; the rwx surface; `CAP_KILL`; the trusted
+  path; the uniform mount-cape. Absorbs the suspended Phase 5 tail (P5-login,
+  per-user stratumd wiring [Stratum A2 delivered], P5-hostowner-c, the corvus Q11
+  4-byte seam).
+- **B — DMA isolation (ARM SMMUv3), in v1.0.** Makes the userspace-driver trust
+  model safe (kernel currently fully trusts every driver); the DMA API hands out
+  device-IOVAs, not raw PAs. The F-7 dev-mode flag is dropped (subsumed).
+- **C — kernel completeness-sweep dispositions** (2026-05-28 sweep; kernel CORE
+  verified sound). BUILD: syscall-surface completion (clock + FS-mutation +
+  `fsync` durability + readdir), real exit-status, demand-zero paging, PAN, PAC
+  real entropy, the resource/DoS floor, the orphan reaper, cheap speculation
+  detection. SEAM: COW, ACLs, resource quotas, HW-cap allowlist, hardware-backed
+  keys, verifiable-credential identity, KPTI, stack auto-grow, RNG stir. DOC: the
+  scripture over-claim reconciliations (MTE/CFI, demand-paging/COW, RNG stir, the
+  `ipi.c` drift) — landed 2026-05-28.
+
+Phase 7 resumes at **U-6d-b** (redirects) once the detour closes, on a sound
+foundation.
 
 ### 8.1 Deliverables
 

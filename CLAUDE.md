@@ -155,7 +155,7 @@ Any change to the surfaces below MUST spawn a focused adversarial soundness audi
 | Exception entry | `arch/arm64/start.S`, `arch/arm64/exception.c`, `arch/arm64/vectors.S` | Every syscall / IRQ / fault path. Privilege boundary. |
 | Page fault + COW + W^X | `arch/arm64/fault.c`, `mm/vm.c`, `mm/wxe.c` | Lifetime, demand-page, COW, W^X invariant (I-12) |
 | Allocator | `mm/buddy.c`, `mm/slub.c`, `mm/magazines.c` | Allocation correctness, lock-free invariants |
-| Scheduler | `kernel/sched.c`, `kernel/eevdf.c`, `arch/arm64/context.c`, `arch/arm64/ipi.c` | EEVDF correctness, SMP, wakeup atomicity (I-8, I-9, I-17, I-18) |
+| Scheduler | `kernel/sched.c`, `kernel/eevdf.c`, `arch/arm64/context.c`, `kernel/smp.c` (IPI logic: `ipi_resched_handler`/`smp_cpu_ipi_init`) | EEVDF correctness, SMP, wakeup atomicity (I-8, I-9, I-17, I-18) |
 | Territory | `kernel/territory.c` | Cycle-freedom (I-3), isolation (I-1), mount-refcount consistency (§9.6.6). P6-pouch-stratumd-boot 16c adds `territory_pivot_root` (atomic root_spoor swap with displaced-ref tear-down) for `SYS_PIVOT_ROOT` -- see the dedicated row. |
 | Handle table | `kernel/handle.c` | Rights monotonicity (I-2, I-6), transfer-via-9P (I-4), hardware-handle non-transferability (I-5) |
 | VMO | `kernel/vmo.c`, `mm/vmo_pages.c` | Refcount, mapping lifecycle (I-7) |
@@ -623,7 +623,7 @@ Thylacine vX.Y-dev booting...
   cpus: N
   mem:  XXXX MiB
   dtb:  0xADDR
-  hardening: KASLR+ASLR+W^X+CFI+PAC+MTE+BTI+LSE+canaries
+  hardening: MMU+W^X+extinction+KASLR+vectors+IRQ+canaries+PAC+BTI+LSE (P1-H)
   kernel base: 0xADDR (KASLR offset 0xADDR)
 Thylacine boot OK
 ```

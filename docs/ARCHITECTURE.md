@@ -183,7 +183,7 @@ Full scripture: `docs/UTOPIA-SHELL-DESIGN.md §3`.
 - **EL0**: userspace. **EL1**: kernel. **EL2**: hypervisor (available, not used at v1.0). **EL3**: secure monitor (not used).
 - ARM64 exception model used directly: `SVC #0` for syscall entry, exception vectors for interrupts and faults, `BRK` for kernel breakpoints.
 - **Pointer Authentication (PAC)** enabled for kernel return addresses where hardware supports it (v8.3+). All kernel function returns are PAC-signed; tampering panics cleanly.
-- **Memory Tagging Extension (MTE)** enabled by default where hardware supports (v8.5+; Apple Silicon, recent ARM cores, QEMU emulation). All kernel allocations and userspace heap allocations are MTE-tagged; UAF / overflow caught at hardware speed.
+- **Memory Tagging Extension (MTE)** — **deferred to Phase 8** (reconciled 2026-05-28 per IDENTITY-DESIGN.md §8.4; NOT enabled at v1.0). The hardware feature is *detected* (`hwfeat.c`) but not programmed; enabling needs SLUB tag-aware integration. When on (v8.5+): kernel + userspace heap allocations MTE-tagged, UAF / overflow caught at hardware speed.
 - **Branch Target Identification (BTI)** enabled for kernel and userspace (v8.5+). Indirect branches must land on a `BTI` instruction; deviations panic.
 - **Large System Extensions (LSE)** atomics used where hardware supports (v8.1+; standard on Apple Silicon). Runtime-detected via `HWCAP_ATOMICS`; LL/SC fallback for older hardware.
 - No x86-64 support at v1.0. Architecture-specific code lives in `arch/arm64/`.
@@ -337,7 +337,7 @@ None at Gate 3. KASLR seed entropy source on bare metal Pi 5+ is a Phase post-v1
 **Goals**:
 - 48-bit virtual addressing with split TTBR0 (user) / TTBR1 (kernel).
 - 4 KiB pages with 2 MiB block mappings for kernel large-page mappings.
-- Demand paging with copy-on-write for `rfork(RFPROC)` (when `RFMEM` is not set).
+- Demand-zero paging for anonymous mappings (BUILD item per IDENTITY-DESIGN.md §8.4). Copy-on-write for `rfork(RFPROC)` is a **designed seam** — no address-space-sharing caller exists at v1.0 (`RFMEM` extincts); it activates when a `fork`-style caller lands. *(Reconciled 2026-05-28.)*
 - SOTA physical frame allocator: buddy + per-CPU magazines (illumos kmem-style) for hot-path lock-freedom.
 - SOTA kernel object allocator: SLUB-style (Linux's modern default), better cache locality and lower overhead than slab.
 - W^X enforced as page-table invariant.
@@ -464,8 +464,8 @@ struct vma {
 ```
 
 **Page fault handler** (`arch/arm64/fault.c`):
-- Demand-pages anonymous mappings on first touch (zero-filled).
-- COW-copies on first write to a `RFPROC`-shared page.
+- Demand-zero-pages anonymous mappings on first touch (BUILD item per IDENTITY-DESIGN.md §8.4). *As-built baseline (2026-05-28): `burrow_create_anon` eagerly backs the region and lazily installs PTEs; demand-zero replaces the eager backing.*
+- COW on first write to a shared page is a **designed seam, not yet built** — no caller exists (`rfork` `RFMEM` extincts, so no address space is shared at v1.0). Activates when a `fork`-style sharing caller lands. (IDENTITY-DESIGN.md §8.4 SEAM.)
 - Translates BURROW-backed faults to BURROW page lookups.
 - Panics on kernel faults outside the direct map / vmalloc / fixmap regions (a kernel page fault is a bug, not a recoverable condition).
 
@@ -2020,7 +2020,7 @@ Per §7.7. Coarse-grained, on two axes (per CORVUS-DESIGN.md §3 D5, §5.5.1):
 
 ### 15.5 Hardening (CPU + compiler features)
 
-Detailed in §24. Summary: KASLR, ASLR, W^X (enforced as invariant), CFI, stack canaries, ARM PAC, ARM MTE, ARM BTI — all enabled by default at v1.0.
+Detailed in §24. **Actually enabled at v1.0** (matches the `kernel/main.c` boot banner): MMU, W^X (enforced as invariant, via per-PTE PXN/UXN), KASLR, exception vectors, IRQ hardening, stack canaries, ARM PAC, ARM BTI, LSE atomics. **Deferred — NOT on at v1.0** (reconciled 2026-05-28, IDENTITY-DESIGN.md §8.4): CFI (`-fsanitize=cfi`; post-v1.0) and ARM MTE (Phase 8). PAC is on; its key entropy is being upgraded off `CNTPCT_EL0` (§8.4 BUILD). Userspace ASLR lands with the loader-randomization work.
 
 ### 15.6 Open design questions
 
@@ -3055,19 +3055,19 @@ Per `NOVEL.md` Angle #8. Practical TLA+ verification of every load-bearing OS in
 Example for `scheduler.tla`:
 - `EpochEnter` ↔ `kernel/sched.c:sched_enter()` lines 145-189
 - `EpochExit` ↔ `kernel/sched.c:sched_exit()` lines 192-220
-- `IPIRecv` ↔ `arch/arm64/ipi.c:ipi_handle()` lines 78-103
+- `IPIRecv` ↔ `kernel/smp.c:ipi_resched_handler()` (~line 100)
 - ... etc
 
 ### 25.4 Audit-trigger surfaces
 
-Every change to a file or function listed below spawns an adversarial soundness audit before merge. Updated at every ARCH change.
+Every change to a file or function listed below spawns an adversarial soundness audit before merge. Updated at every ARCH change. **The convergence-detour BUILD items (IDENTITY-DESIGN.md §8.4) — SMMU/DMA isolation, the new syscall surfaces (clock, FS-mutation, `CAP_KILL`, PAN), the resource floor, the orphan reaper — are upcoming audit-bearing surfaces, each appended here in the PR that introduces it.**
 
 | Surface | Files | Why |
 |---|---|---|
 | Exception entry | `arch/arm64/start.S`, `arch/arm64/exception.c`, `arch/arm64/vectors.S` | Every syscall, IRQ, fault path |
 | Page fault | `arch/arm64/fault.c`, `mm/vm.c` | Lifetime, demand-page, COW, W^X |
 | Allocator | `mm/buddy.c`, `mm/slub.c`, `mm/magazines.c` | Allocation correctness, lock-free invariants |
-| Scheduler | `kernel/sched.c`, `arch/arm64/context.c`, `arch/arm64/ipi.c` | EEVDF correctness, SMP, wakeup atomicity |
+| Scheduler | `kernel/sched.c`, `arch/arm64/context.c`, `kernel/smp.c` (IPI logic) | EEVDF correctness, SMP, wakeup atomicity |
 | Territory | `kernel/territory.c` | Cycle-freedom, isolation |
 | Handle table | `kernel/handle.c` | Rights monotonicity, transfer rules, hardware-handle non-transferability |
 | BURROW | `kernel/burrow.c`, `mm/burrow_pages.c` | Refcount, mapping lifecycle |
@@ -3179,6 +3179,7 @@ The complete list of load-bearing invariants. Source for `VISION.md §8`. Each m
 | I-19 | Note delivery preserves causal order within a process; every posted non-`kill` note is consumed exactly once across the handler + fd-read paths; `kill` is non-catchable | Per-Proc `NoteQueue` under lock; EL0-return-tail dispatch; `devnotes` Dev. Sub-invariants N-1..N-5 enumerated in §7.6.7 | (`notes.tla` planned then dropped per CLAUDE.md spec-to-code suspension; prose + audit + tests) |
 | I-20 | PTY master ↔ slave atomicity | PTY data path locked | `pty.tla` |
 | I-21 | Kernel executes uniformly at EL1h (`SPSel=1`); `SP_EL0` is exclusively the userspace stack | Boot sets `SPSel=1` and never lowers it; per-thread kernel stack carries exception frames; `test_smp` asserts `SPSel==1` | `sched_ctxsw.tla` |
+| I-22 | No identity carries ambient super-authority: there is no superuser identity; `hostowner` is an authority *source* (the system key), not an identity; elevated power is acquired only via the legate (scoped, audited, ephemeral) | Syscall surface grants no authority by identity alone; capabilities are explicit (grant or legate activation) via the `cap` device + clearance-level policy | `IDENTITY-DESIGN.md §3.3/§8.2` (prose + audit + tests per the spec-to-code suspension) |
 
 These are the project's promises. Every one has a spec or a runtime check or a compile-time assertion. None are policy-only.
 
