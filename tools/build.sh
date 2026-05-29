@@ -1323,7 +1323,16 @@ case "$target" in
     stratumd)    build_stratumd    ;;
     userspace)   build_userspace   ;;
     disk)        build_disk        ;;
-    pool)        build_stratum_pool_fixture ;;
+    # The keyfile is a ramfs input: build_ramfs bakes build/fixtures/system.key
+    # into the cpio at /system.key. Re-baking the pool regenerates that key
+    # (libsodium-random per run), so the ramfs MUST be rebuilt too -- otherwise
+    # the VM mounts the FRESH pool with the STALE ramfs key, stratumd derives the
+    # wrong metadata key, and the first btree-node AEAD tag verify fails with
+    # STM_EBADTAG ("stratumd: run failed (rc=-201)" at mount). That stale-key
+    # mismatch masqueraded as a content-sensitive "AEGIS-256 corruption" for ~a
+    # year; coupling the ramfs rebuild to the pool re-bake is the fix. See
+    # docs/DEBUGGING-PLAYBOOK.md.
+    pool)        build_stratum_pool_fixture; build_ramfs ;;
     all)         build_all         ;;
     clean)       clean             ;;
     *)
