@@ -42,6 +42,7 @@ extern int sys_post_service_byte_for_proc(struct Proc *p, const char *name,
                                             u8 name_len);
 extern int srv_conn_open_for_proc(struct Proc *p, const char *name, u8 name_len);
 extern void srv_registry_reset(void);
+extern u64 timer_now_ns(void);
 
 // Forward decls for the registered test entries (suppress -Wmissing-
 // prototypes; matches the rest of the kernel test corpus pattern).
@@ -51,6 +52,7 @@ void test_9p_srvconn_transport_send_routes_to_c2s_ring(void);
 void test_9p_srvconn_transport_recv_routes_from_s2c_ring(void);
 void test_9p_srvconn_transport_close_drops_srvconn_ref(void);
 void test_9p_srvconn_transport_kernel_attached_skips_teardown_on_handle_close(void);
+void test_9p_srvconn_transport_send_arms_fresh_deadline(void);
 
 // =============================================================================
 // Helpers (mirror test_srv_client.c's pattern).
@@ -278,6 +280,58 @@ void test_9p_srvconn_transport_large_frame_roundtrip(void) {
         if (rx[i] != (u8)((i * 7 + 3) & 0xff)) { mism = i + 1; break; }
     }
     TEST_EXPECT_EQ(mism, 0, "every byte preserved across the wraparound");
+
+    (void)ops.close(ops.ctx);
+    p9_srvconn_transport_destroy(&st);
+    cleanup_byte_mode_pair(server, client, conn_h);
+}
+
+// =============================================================================
+// 9p_srvconn_transport.send_arms_fresh_deadline
+//
+// Regression for the per-op deadline arm (the A-1b fsync-starvation fix):
+// srvconn_transport_send MUST arm a fresh OP_DEADLINE window at each send, so a
+// sequence of dev9p ops never SHARES one window (a slow op consuming the window
+// would otherwise starve its successor into an immediate lapsed-deadline recv
+// timeout). Pre-fix the send did not touch client_deadline_ns, so a near-lapsed
+// value left by a prior op survived; this test sets that precondition and
+// asserts the send overwrites it with a fresh now + OP_DEADLINE.
+// =============================================================================
+
+void test_9p_srvconn_transport_send_arms_fresh_deadline(void) {
+    srv_registry_reset();
+
+    struct Proc *server = NULL;
+    struct Proc *client = NULL;
+    int svc_h = -1, conn_h = -1;
+    struct SrvConn *cn = open_byte_mode_pair(&server, &client, &svc_h, &conn_h);
+    TEST_ASSERT(cn != NULL, "open_byte_mode_pair");
+
+    struct p9_srvconn_transport st;
+    TEST_EXPECT_EQ(p9_srvconn_transport_init(&st, cn), 0, "init");
+    struct p9_transport_ops ops = p9_srvconn_transport_ops(&st);
+
+    // Precondition: a near-exhausted shared window left by a prior slow op.
+    // Pre-fix (recv-only "arm if lapsed") the next op's send would leave this
+    // stale value, starving the recv into an immediate TSLEEP_TIMEDOUT.
+    u64 stale = timer_now_ns() + 1u;
+    srvconn_set_client_deadline(cn, stale);
+
+    u8 frame[8] = { 8, 0, 0, 0, 0, 0, 0, 0 };
+    u64 t0 = timer_now_ns();
+    int n = ops.send(ops.ctx, frame, sizeof(frame));
+    TEST_EXPECT_EQ(n, (int)sizeof(frame), "send writes full buffer");
+    TEST_ASSERT(cn->client_deadline_ns > stale,
+                "send overwrites the stale near-lapsed deadline");
+    TEST_ASSERT(cn->client_deadline_ns >= t0 + SRVCONN_OP_DEADLINE_NS,
+                "send arms a fresh full OP_DEADLINE window");
+
+    // A second op's send re-arms again -- never inherits the remainder.
+    u64 t1 = timer_now_ns();
+    int n2 = ops.send(ops.ctx, frame, sizeof(frame));
+    TEST_EXPECT_EQ(n2, (int)sizeof(frame), "second send writes full buffer");
+    TEST_ASSERT(cn->client_deadline_ns >= t1 + SRVCONN_OP_DEADLINE_NS,
+                "second send re-arms a fresh window");
 
     (void)ops.close(ops.ctx);
     p9_srvconn_transport_destroy(&st);
