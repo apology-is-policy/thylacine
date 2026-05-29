@@ -20,6 +20,7 @@
 #include <thylacine/page.h>
 #include <thylacine/proc.h>
 #include <thylacine/smp.h>
+#include <thylacine/spinlock.h>
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 #include <thylacine/vma.h>
@@ -286,12 +287,10 @@ enum fault_result arch_fault_handle(const struct fault_info *fi) {
 // P3-Dc: userland_demand_page — VMA → BURROW → PTE install pipeline.
 // =============================================================================
 
-enum fault_result userland_demand_page(struct Proc *p,
-                                       const struct fault_info *fi) {
-    if (!p || !fi)                       return FAULT_UNHANDLED_USER;
-    if (p->magic != PROC_MAGIC)          return FAULT_UNHANDLED_USER;
-    if (p->pgtable_root == 0)            return FAULT_UNHANDLED_USER;
-
+// Locked core. Caller validated p and holds p->vma_lock across the whole
+// lookup -> burrow-resolve -> PTE-install sequence (see userland_demand_page).
+static enum fault_result demand_page_locked(struct Proc *p,
+                                            const struct fault_info *fi) {
     // 1. VMA lookup.
     struct Vma *vma = vma_lookup(p, fi->vaddr);
     if (!vma)                            return FAULT_UNHANDLED_USER;
@@ -369,4 +368,33 @@ enum fault_result userland_demand_page(struct Proc *p,
     if (rc != 0)                         return FAULT_UNHANDLED_USER;
 
     return FAULT_HANDLED;
+}
+
+// P3-Dc: userland_demand_page — VMA → BURROW → PTE install pipeline.
+//
+// P6 #713 root-cause fix (multi-thread-Proc SMP safety): serialize the whole
+// lookup -> burrow-resolve -> PTE-install under p->vma_lock. This completes
+// the vma_lock coverage the proc.h comment explicitly defers to "the
+// pouch-threads sub-chunk ... the page-fault vma_lookup reader" -- which the
+// threads lift never wired up. Pre-fix, the unlocked reader raced a sibling
+// thread's SYS_BURROW_DETACH (vma_remove + free_pages, under vma_lock): the
+// walker could follow a half-unlinked list to a freed VMA and install a leaf
+// PTE aliasing a buddy page already recycled into kernel (or another Proc's)
+// memory -> a wild/kernel pointer in the faulting Proc's address space (the
+// observed 0xffff.. fault). The same lock also serializes two concurrent
+// faults that would otherwise race the intermediate page-table construction
+// in mmu_install_user_pte (orphaning a sub-table). Uncontended for
+// single-thread Procs (the v1.0 common case). Lock order vma_lock ->
+// buddy_lock matches SYS_BURROW_ATTACH (vma_lock held across
+// burrow_create_anon -> alloc_pages), so no inversion.
+enum fault_result userland_demand_page(struct Proc *p,
+                                       const struct fault_info *fi) {
+    if (!p || !fi)                       return FAULT_UNHANDLED_USER;
+    if (p->magic != PROC_MAGIC)          return FAULT_UNHANDLED_USER;
+    if (p->pgtable_root == 0)            return FAULT_UNHANDLED_USER;
+
+    spin_lock(&p->vma_lock);
+    enum fault_result r = demand_page_locked(p, fi);
+    spin_unlock(&p->vma_lock);
+    return r;
 }

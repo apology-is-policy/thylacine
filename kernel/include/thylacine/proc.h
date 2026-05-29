@@ -256,16 +256,23 @@ struct Proc {
     // identity (CORVUS-DESIGN.md §6.3; specs/corvus.tla ConnRecord.peer).
     u64                stripes;
 
-    // P6-pouch-mem: per-Proc lock serializing VMA-list mutation through
-    // the SYS_BURROW_ATTACH / SYS_BURROW_DETACH syscalls (the find-gap +
-    // vma_insert / vma_remove sequences). At v1.0 Procs are single-
-    // threaded, so it is uncontended by construction; it is in place so
-    // the burrow-attach surface is correct when the pouch-threads sub-
-    // chunk makes Procs multi-threaded — that sub-chunk extends the
-    // lock's coverage to the remaining VMA mutators (exec_setup's
-    // burrow_map calls, vma_drain) and the page-fault vma_lookup reader.
-    // KP_ZERO at proc_alloc / proc_init zero-inits it to the valid
-    // unlocked state (SPIN_LOCK_INIT == (spin_lock_t){ 0 }).
+    // P6-pouch-mem: per-Proc lock serializing VMA-list mutation. Held by
+    // EVERY VMA-list mutator: SYS_BURROW_ATTACH / SYS_BURROW_DETACH (find-gap
+    // + vma_insert / vma_remove) AND SYS_MMIO_MAP / SYS_DMA_MAP (the
+    // burrow_map -> vma_insert in the HW-driver map paths; #713 vma_lock
+    // audit F1). P6 #713: it is now ALSO held by the page-fault demand-page
+    // reader (userland_demand_page) across its vma_lookup -> burrow-resolve
+    // -> mmu_install_user_pte sequence. That is the multi-thread-Proc
+    // SMP-safety fix: stratumd (the first heavily multi-threaded Proc, and
+    // the CAP_HW_CREATE holder that calls SYS_MMIO_MAP / SYS_DMA_MAP) raced
+    // the previously-unlocked reader against a sibling thread's VMA-list
+    // mutation -> a freed/half-unlinked VMA -> a leaf PTE aliasing a recycled
+    // (possibly kernel) page. exec_setup's burrow_map calls and vma_drain remain
+    // unlocked deliberately: both run while the Proc is single-threaded by
+    // construction (exec precedes the first thread_spawn; vma_drain runs at
+    // proc_free with thread_count == 0), so no concurrent fault or mutator
+    // can race them. KP_ZERO at proc_alloc / proc_init zero-inits it to the
+    // valid unlocked state (SPIN_LOCK_INIT == (spin_lock_t){ 0 }).
     spin_lock_t        vma_lock;
     u32                _pad_vma_lock;     // explicit 8-byte-align padding
 

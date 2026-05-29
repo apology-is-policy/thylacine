@@ -106,8 +106,36 @@ G1 durability/enumeration items as one FS foundation that lands BEFORE A-1b.
   2 dev9p loopback tests (fsync / readdir) + a **joey E2E probe** that does
   create+write+fsync+read-back + mkdir+readdir+EOD against the REAL disk-backed
   Stratum FS (covers the handlers end-to-end -- passed: `d1=51` dirent bytes,
-  EOD on the 2nd readdir). 622/622 PASS (default; +4 from 618). **Next: the
-  FS-audit** (one focused adversarial round over create/write/fsync).
+  EOD on the 2nd readdir). 622/622 PASS (default; +4 from 618).
+- **FS-audit LANDED** (Opus prosecutor R1 CLEAN: 0 P0 / 0 P1 / 1 P2 / 3 P3, all
+  dispositioned; kernel create/write/fsync encode path SOUND).
+
+### #713 GATE — ROOT-CAUSED + FIXED (2026-05-29) → A-1b UNBLOCKED
+
+The user-mandated "full root-cause before A-1b" gate. The long-hunted
+"AEGIS-256 / mallocng content-sensitive write-path corruption" (the Phase-6
+saga, tasks 710-725) was **not a write-path or heap bug at all** -- it was an
+`eret`-window **IRQ race** in BOTH EL0-entry trampolines (`userland_enter` in
+`arch/arm64/userland.S` + `thread_user_trampoline` in `arch/arm64/context.S`):
+each sets `ELR_EL1 = entry_pc` then runs ~30 instructions to the `eret` **with
+IRQs enabled** (`thread_user_trampoline` even did an explicit `msr daifclr, #2`
+right before the ELR set). A timer/IRQ in that window overwrites `ELR_EL1` with
+the interrupted kernel PC (`<trampoline>+0x10`); the `eret` then returns EL0 to
+a kernel VA -> rare (~3-13%, IRQ-timing/SMP-load-dependent, `-smp 1`-clean)
+instruction-permission fault in ANY freshly-spawned native Proc (test children,
+corvus, **stratumd worker threads** -- the "AEGIS corruption" was a worker-thread
+spawn landing EL0 at a kernel PC, sometimes a kernel stack overflow). **Fix**:
+`msr daifset, #0xf` across the window in both trampolines; the `eret`'s
+`SPSR_EL1=0` re-enables IRQs at EL0 atomically (kernel `thread_trampoline`, EL1,
+no `eret`, correctly keeps its unmask). Verified **0 faults / 75 boots**; an
+adversarial sweep of all `arch/arm64/*.S` found **no sibling** of the class;
+622/622 default + UBSan. Two adjacent fixes landed with it: (a) the dominant
+`fs-mut create FAILED` symptom was a **non-idempotent test** on the persistent
+pool (EEXIST), now joey's probe is open-or-create (reboot-clean + a cross-reboot
+persistence test); (b) the documented-but-undone `vma_lock` extension to the
+demand-page reader + `SYS_MMIO_MAP`/`SYS_DMA_MAP` (independent SMP hardening; its
+own audit: 1 P1 [the map paths] + 1 P3, both fixed). Detail:
+`docs/reference/08-exception.md` "eret-window IRQ race (P6 #713)".
 
 ### A-2 · FS permission + ownership surface *(splits a/b/c)*
 

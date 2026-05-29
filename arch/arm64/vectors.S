@@ -113,10 +113,15 @@
     stp     x13, x14, [sp, #0x110]
 .endm
 
-// KERNEL_EXIT — mirror of KERNEL_ENTRY for recoverable exceptions.
-// Currently unused at P1-F (every exception terminates in extinction)
-// but defined so Phase 2's recoverable page-fault handler has the
-// matching restore path.
+// KERNEL_EXIT — mirror of KERNEL_ENTRY; the live shared recoverable-exit
+// path (via .Lexception_return) for the sync + IRQ slots (0x200/0x280/
+// 0x400/0x480). It is the single most load-bearing exit in the kernel:
+// every syscall-return, IRQ-return, and EL0-fault-return passes through it.
+// It is ALWAYS reached IRQ-masked (hardware masks DAIF on entry; no handler
+// unmasks in a way live here -- sched()'s irqsave/restore re-masks, and
+// cpu_switch_context preserves DAIF), and it installs elr/spsr from the
+// saved frame in the same masked instant it erets -- so unlike the #713
+// trampoline bug, there is no interruptible ELR-set..eret window here.
 .macro KERNEL_EXIT
     ldp     x11, x12, [sp, #0x100]
     msr     elr_el1, x11

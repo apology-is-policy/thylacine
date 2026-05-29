@@ -99,7 +99,7 @@ echo "    Log: $LOG_FILE"
 
 # Launch QEMU in background; capture UART output to log file. Pass the
 # alternate build dir via env so run-vm.sh picks up the sanitizer ELF.
-THYLACINE_BUILD_DIR="$KERNEL_BUILD" "$REPO_ROOT/tools/run-vm.sh" --no-share < /dev/null > "$LOG_FILE" 2>&1 &
+THYLACINE_BUILD_DIR="$KERNEL_BUILD" "$REPO_ROOT/tools/run-vm.sh" --no-share --cpus "${THYLACINE_TEST_CPUS:-4}" < /dev/null > "$LOG_FILE" 2>&1 &
 QEMU_PID=$!
 
 # P4-K-events: spawn background QMP key-injector if enabled. Polls

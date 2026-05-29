@@ -20,7 +20,7 @@
 //   sp  @ 96  tpidr_el0 @ 104       ttbr0 @ 112
 //   _pad_fp  @ 120 (alignment pad to 16-byte boundary)
 //   fp_v[0..31] @ 128 (16 STP-Q pairs at 0/32/64/.../480 from fp_v base)
-//   fpsr @ 640  fpcr @ 644  (size 648, 16-byte aligned)
+//   fpsr @ 640  fpcr @ 644  (struct size 656, 8-byte trailing pad to 16)
 //
 // _Static_asserts in context.h pin both sides; a layout drift triggers a
 // build error there before the asm can corrupt context switches.
@@ -246,11 +246,17 @@ thread_trampoline:
 // P6-pouch-threads (sub-chunk 9). Used as the initial ctx.lr for Threads
 // created by thread_create_user (the kernel-side of SYS_THREAD_SPAWN).
 //
-// Identical sched_finish_task_switch + DAIF unmask discipline as
-// thread_trampoline; differs in the tail: instead of `blr x21` to a
-// kernel entry function, this trampoline performs the userland_enter
-// eret dance inline, consuming four args parked in callee-saved ctx
-// slots that cpu_switch_context loaded just before `ret` into here:
+// Same sched_finish_task_switch release as thread_trampoline, but the
+// DAIF discipline DIFFERS (P6 #713): the kernel thread_trampoline UNmasks
+// IRQs before `blr x21` (a kernel entry stays at EL1 and must be
+// preemptible immediately); this user trampoline instead keeps DAIF
+// MASKED through the eret, because the eret restores SPSR_EL1=0 and that
+// is what makes the new thread preemptible AT EL0 -- atomically, with no
+// interruptible ELR-set..eret window. The tail differs too: instead of
+// `blr x21` to a kernel entry function, this trampoline performs the
+// userland_enter eret dance inline, consuming four args parked in
+// callee-saved ctx slots that cpu_switch_context loaded just before
+// `ret` into here:
 //
 //   x19 = user_sp_va    — SP_EL0 install (non-current bank write at EL1h)
 //   x20 = user_arg      — moved to x0 (AAPCS64 arg-0) for the user entry
@@ -277,7 +283,17 @@ thread_user_trampoline:
      * discipline as thread_trampoline; mirrors the sched() resume path. */
     bl      sched_finish_task_switch
 
-    msr     daifclr, #2          /* P2-Bc: unmask IRQs for new thread */
+    /* P6 #713: keep ALL of DAIF MASKED through the eret. Pre-fix this was
+     * `msr daifclr, #2` (UNMASK IRQ) placed BEFORE `msr elr_el1` -- so an
+     * IRQ taken in the ELR-set..eret window re-entered the exception path
+     * and OVERWROTE ELR_EL1 with the interrupted kernel PC (this trampoline
+     * + ~0x10). This trampoline never re-sets ELR after that point, so the
+     * eret then returned EL0 to that kernel address -> a rare instruction-
+     * permission fault in a freshly-spawned Proc (#713 root cause). The
+     * eret below restores SPSR_EL1=0 (DAIF clear), so the new thread still
+     * runs with IRQs ON at EL0 -- preemptibility is established ATOMICALLY
+     * by the eret, not by a vulnerable pre-eret window. */
+    msr     daifset,   #0xf       /* mask D/A/I/F until the eret */
 
     /* Stage user-mode entry: park entry_pc / sp into scratch x16/x17 so
      * the GPR-zero sweep below can freely clobber x0..x18. x19..x22 are

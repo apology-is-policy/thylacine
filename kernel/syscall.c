@@ -373,12 +373,22 @@ static s64 sys_mmio_map_handler(u64 hraw, u64 vaddr, u64 prot_raw) {
     // reference, transferring ownership to the VMA. On failure, drop
     // the construction reference which (since mapping_count is still
     // 0) triggers burrow_free_internal and releases the kobj_mmio ref.
+    //
+    // P6 #713 vma_lock audit F1: burrow_map walks + splices p->vmas
+    // (vma_insert), so it MUST hold p->vma_lock -- same discipline as
+    // SYS_BURROW_ATTACH. Without it a sibling thread's fault-path
+    // vma_lookup (or another mapper) races this vma_insert. Lock order
+    // vma_lock -> buddy zone->lock holds (burrow_unref-on-failure ->
+    // free_pages). burrow_create_mmio stays outside (no VMA touch).
+    spin_lock(&p->vma_lock);
     int rc = burrow_map(p, b, vaddr, km->size, prot);
     if (rc < 0) {
         burrow_unref(b);
+        spin_unlock(&p->vma_lock);
         return -1;
     }
     burrow_unref(b);
+    spin_unlock(&p->vma_lock);
     return 0;
 }
 
@@ -511,12 +521,20 @@ static s64 sys_dma_map_handler(u64 hraw, u64 vaddr, u64 prot_raw) {
     // the VMA. On failure, dropping the construction reference (with
     // mapping_count still 0) triggers burrow_free_internal → releases
     // the held kobj_dma ref → if it was the last ref, free_pages.
+    //
+    // P6 #713 vma_lock audit F1: burrow_map mutates p->vmas (vma_insert),
+    // so it MUST hold p->vma_lock -- same discipline as SYS_BURROW_ATTACH /
+    // SYS_MMIO_MAP. stratumd (multi-thread, CAP_HW_CREATE) maps its
+    // virtio-blk DMA buffer here concurrently with sibling-thread faults.
+    spin_lock(&p->vma_lock);
     int rc = burrow_map(p, b, vaddr, kd->size, prot);
     if (rc < 0) {
         burrow_unref(b);
+        spin_unlock(&p->vma_lock);
         return -1;
     }
     burrow_unref(b);
+    spin_unlock(&p->vma_lock);
 
     // PA fits in 40 bits at v1.0 (TCR.IPS bound; mmu.c:668). The s64
     // cast is safe — no valid PA has the sign bit set.

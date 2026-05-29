@@ -15,6 +15,15 @@
 // Register cleanup before eret: every GPR is zeroed so the kernel
 // doesn't leak state to userspace.
 //
+// IRQ discipline (P6 #713): DAIF is masked across the entire
+// ELR-set..eret window (the `msr daifset, #0xf` below). This function is
+// reached with IRQs ENABLED (called from a kthread); without the mask an
+// IRQ in the window would overwrite ELR_EL1 with the interrupted kernel PC
+// and the eret would land EL0 at a kernel address. The eret restores
+// SPSR_EL1=0, so EL0 still runs IRQs-on -- the mask only closes the
+// kernel-side window. (thread_user_trampoline in context.S has the
+// identical discipline.)
+//
 // P5-el1h-kernel: the kernel runs uniformly at EL1h (PSTATE.SPSel=1;
 // ARCHITECTURE.md §12.1, invariant I-21). userland_enter therefore
 // executes at EL1h with the live `sp` being SP_EL1 (the calling
@@ -37,6 +46,17 @@
 .type userland_enter, %function
 userland_enter:
     bti     c
+
+    // P6 #713: mask ALL of DAIF for the ELR-set..eret window. This
+    // function is called from a kthread with IRQs ENABLED; without the
+    // mask, an IRQ taken between `msr elr_el1` (below) and `eret` re-enters
+    // the exception path and OVERWRITES ELR_EL1 with the interrupted kernel
+    // PC (userland_enter + ~0x10). userland_enter never re-sets ELR after
+    // that, so the eret returns EL0 to that kernel address -- a rare
+    // instruction-permission fault in the freshly-entered Proc. The eret
+    // restores SPSR_EL1=0 (DAIF clear), so EL0 runs with IRQs ON regardless;
+    // the mask only closes the interruptible kernel-side window.
+    msr     daifset, #0xf
 
     // Park entry_pc (x0) + user_sp (x1) in caller-saved scratch
     // (x16/x17) so the GPR-zeroing sweep below can clobber x0/x1.

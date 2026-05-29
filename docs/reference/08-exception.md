@@ -382,6 +382,20 @@ Why iter 1 worked: the very first userspace dispatch of a session typically land
 
 The regression test for #157 lives in `kernel/test/test_userspace2.c` (`userspace.first_iteration` + `userspace.second_iteration`). Both iterations now pass.
 
+### `userland_enter` / `thread_user_trampoline` eret-window IRQ race (P6 #713)
+
+A sibling of the #157 bug, on the *same* `eret`-to-EL0 trampolines, found and fixed 2026-05-29. Both EL0-entry trampolines — `userland_enter` (`arch/arm64/userland.S`, the exec-thunk path) and `thread_user_trampoline` (`arch/arm64/context.S`, the `SYS_THREAD_SPAWN` path) — program `ELR_EL1 = entry_pc` and then run ~30 more instructions (the GPR-zeroing sweep + the `msr sp_el0`/`spsr`/`tpidr`) before the `eret`. Pre-fix that window ran **with IRQs enabled**: `thread_user_trampoline` did an explicit `msr daifclr, #2` *immediately before* `msr elr_el1`, and `userland_enter` inherited IRQs-on from its kthread caller (which was unmasked back at `thread_trampoline`'s own `daifclr`).
+
+The hazard: if a timer/IRQ fires in that window, the exception entry **overwrites `ELR_EL1`** with the interrupted kernel PC (the trampoline's own `+0x10`, the first instruction boundary after the `msr elr_el1`). The trampoline never re-writes `ELR_EL1` after that point, so its `eret` returns EL0 to `<trampoline>+0x10` — a kernel VA. EL0 cannot fetch from a kernel page, so it takes an instruction-permission abort (`ESR.EC=0x20`, `FSC=0x0f`) at `far == elr == kaslr_base + 0x811c` (= `userland_enter+0x10`).
+
+**Why it hid for a year**: the window is sub-microsecond, so the fault is rare (~3–13% of boots, IRQ-timing-/SMP-load-dependent) and **never occurs under `-smp 1`** (no preemption source mid-window). It struck *any* freshly-spawned native Proc — the kernel test suite's `/hello` children, corvus, and **stratumd's worker threads** — and was the true identity of the long-hunted "AEGIS-256 / mallocng content-sensitive corruption" (a stratumd worker thread landing EL0 at a kernel PC, sometimes manifesting instead as a kernel stack overflow). Deterministic boot tests sailed past it; only a multi-boot statistical sweep + an `[713]`-tagged ELR dump (mapped `far - kaslr_base = 0x811c → userland_enter+0x10` via `aarch64-linux-gnu-addr2line`) pinned it.
+
+**The fix**: `msr daifset, #0xf` (mask D/A/I/F) at the top of each trampoline's window, *before* `msr elr_el1`. The `eret` restores `SPSR_EL1 = 0` (DAIF clear), so the new Proc/thread still runs **IRQs-on at EL0** — preemptibility is now established *atomically by the `eret`*, not by an interruptible pre-`eret` window. The kernel-thread `thread_trampoline` (`context.S`, EL1, no `eret`) correctly *keeps* its `daifclr`: a kernel entry function stays at EL1 and must be made preemptible explicitly, and has no `eret`/SPSR to do it.
+
+`KERNEL_EXIT` (`.Lexception_return`, the syscall/IRQ/fault return path) is **not** vulnerable: it is always reached IRQ-masked (hardware masks DAIF on entry; no handler unmasks in a way live at exit — `sched()`'s `irqsave`/restore re-masks and `cpu_switch_context` preserves DAIF), and it installs `ELR_EL1`/`SPSR_EL1` from the saved frame in the same masked instant it `eret`s. An adversarial sweep of all of `arch/arm64/*.S` (2026-05-29) found no other instance of this class (start.S `eret`s are pre-GIC; SP-bank writes are EL1h non-current-bank; barriers complete).
+
+Verification: 0 faults across 75 boots post-fix; the kernel test suite (`proc_identity.spawn_set_accepted_with_cap`, `territory.pivot_root_*`) + joey's boot bringup spawn dozens of Procs per boot through both trampolines, so each clean boot is a strong sample. No standalone regression test is added (the bug is a timing window that deterministic tests can't force); the every-boot spawn traffic is the durable guard.
+
 ---
 
 ## See also
