@@ -5,8 +5,11 @@
 prosecutor R1: 0 P0 / 0 P1 / 1 P2 / 3 P3 — fid lifecycle, buffer bounds, rights
 gates, vtable ABI all sound). FS-gamma adds the atomic `rename` + `unlink` that
 A-1b's corvus identity-DB persistence uses for its write-tmp → fsync →
-rename-swap → dir-fsync sequence; its audit is the first end-to-end exercise of
-`p9_client_renameat` / `unlinkat`. 624/624 PASS on default + UBSan. **The
+rename-swap → dir-fsync sequence; it is **audit-CLEAN too** (opus prosecutor R1:
+0 P0 / 0 P1 / 0 P2 / 3 P3, all informational/pre-existing — synchronous-client
+no-op guard, the pre-existing surface-wide `handle_get` TOCTOU not worsened, a
+server-delegated `QTDIR` check; no code change), and is the first end-to-end
+exercise of `p9_client_renameat` / `unlinkat`. 624/624 PASS on default + UBSan. **The
 Phase-6 "AEGIS/mallocng content-sensitive write-path corruption" that once gated
 this work was root-caused (task #713) as an `eret`-window IRQ race in the
 EL0-entry trampolines — NOT a write-path or heap bug — and fixed (`cc8a9bd`); the

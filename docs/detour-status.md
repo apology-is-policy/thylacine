@@ -169,6 +169,23 @@ callers (same pull-forward pattern as A-1.5's `SYS_WALK_CREATE`).
 - **Tests:** create->rename->read-back-under-new-name; create->unlink->gone;
   mkdir->rmdir-via-REMOVEDIR; rights-gate reject (no `RIGHT_WRITE`); cross-Dev
   reject; name bounds; reserved-flag reject; joey E2E against real Stratum.
+- **LANDED 2026-05-29.** Scripture `163b16b` (§9.3 ABI pin) + impl `92522f0`
+  (`SYS_RENAME=57` + `SYS_UNLINK=58`; new NULL-permitted `.rename`/`.unlink` Dev
+  slots, dev9p only; handlers run DIRECTLY on the looked-up dir Spoor(s) -- NO
+  clone-walk, since renameat/unlinkat don't transition the dirfid [the §9.3 pin
+  was corrected in the impl commit]; RIGHT_WRITE on every dir; cross-Dev reject +
+  same-`p9_client` reject; flags `{0, REMOVEDIR}`; `_Static_assert
+  SYS_UNLINK_REMOVEDIR == P9_UNLINK_AT_REMOVEDIR`; libt + libthyla-rs `t_rename`
+  / `t_unlink`; 2 dev9p loopback tests [622->624]; idempotent joey E2E proving
+  atomic-replace + unlink + rmdir vs REAL Stratum). **624/624 PASS default +
+  UBSan; joey status=0.** Opus prosecutor R1 **CLEAN** (0 P0 / 0 P1 / 0 P2 / 3 P3
+  all informational/pre-existing -- F1 synchronous-client no-op guard, F2
+  pre-existing surface-wide `handle_get` TOCTOU [not worsened; rename/unlink
+  touch no per-Spoor mutable state], F3 server-delegated QTDIR check; NO code
+  change). First end-to-end exercise of `p9_client_renameat`/`unlinkat` (wire
+  half existed since Phase 5, never driven). `audit_fs_gamma_closed_list.md`;
+  `docs/reference/96-fs-mutation.md` FS-gamma sections. **A-1b now builds corvus
+  persistence on this atomic-swap substrate.**
 
 ### A-2 · FS permission + ownership surface *(splits a/b/c)*
 
