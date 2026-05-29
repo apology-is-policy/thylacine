@@ -709,197 +709,28 @@ static long connect_corvus(void) {
     return result;
 }
 
-int main(void) {
+// A-1.7 capability-scoped service storage: idempotent mkdir returning a
+// NON-OPENED (O_PATH) walkable handle (FS-delta) -- the valid base for the
+// next level AND a valid SYS_CHROOT target. `parent_fd` must itself be a
+// non-opened handle (FROM_ROOT, or a prior mkdir_or_open result): 9P
+// forbids Twalk from an opened fid. Create the dir (DMDIR) if absent [the
+// create returns an OPENED handle, closed at once], then walk_open it with
+// T_OPATH. If it already exists (a prior boot), the create fails and the
+// T_OPATH walk_open still yields the handle. Returns the dir fd or -1.
+static long mkdir_or_open(long parent_fd, const char *name, unsigned long name_len) {
+    long cf = t_walk_create(parent_fd, name, name_len, T_OREAD,
+                            T_WALK_CREATE_DMDIR | 0755u);
+    if (cf >= 0) (void)t_close(cf);
+    return t_walk_open(parent_fd, name, name_len, T_OPATH);
+}
+
+// A-1.7: corvus bringup -- spawn /sbin/corvus handing it `storage_dup_fd`
+// (a R|W-no-TRANSFER storage-root capability) at fd 0, then drive the
+// verb-protocol E2E over /srv/corvus. Moved out of main + called
+// POST-PIVOT so corvus lands on the persistent Stratum root. Returns 0 on
+// success, 1 on any failure (the block's inline `return 1;`s are kept).
+static int do_corvus_bringup(long storage_dup_fd) {
     char buf[24];
-    t_putstr("joey: hello from /joey (real userspace binary, loaded from ramfs)\n");
-
-    // === /hello orchestration (P5-spawn-wait) ===
-    const char hello_name[] = "hello";
-    long pid = t_spawn(hello_name, sizeof(hello_name) - 1);
-    if (pid <= 0) {
-        t_putstr("joey: t_spawn(\"hello\") FAILED\n");
-        return 1;
-    }
-    int status = -1;
-    long reaped = t_wait_pid(&status);
-    if (reaped != pid || status != 0) {
-        t_putstr("joey: /hello orchestration FAILED\n");
-        return 1;
-    }
-    t_putstr("joey: /hello reaped status=0; orchestration verified\n");
-
-    // === /alloc-smoke orchestration (Phase 7 U-2b) ===
-    // First native Rust binary that uses the alloc crate (Box / Vec /
-    // String / small-alloc loop) backed by libthyla-rs::alloc::ThylaAlloc
-    // via SYS_BURROW_ATTACH. Validates the libthyla-rs U-2b uplift
-    // sub-chunk end-to-end: t::alloc + t::handle (via Drop) + the
-    // burrow_attach syscall wrapper. On success the binary prints
-    // "alloc-smoke: ... OK" + exits 0; any failed check prints a
-    // tagged FAIL line + exits 1.
-    const char alloc_smoke_name[] = "alloc-smoke";
-    long as_pid = t_spawn(alloc_smoke_name, sizeof(alloc_smoke_name) - 1);
-    if (as_pid <= 0) {
-        t_putstr("joey: t_spawn(\"alloc-smoke\") FAILED\n");
-        return 1;
-    }
-    int as_status = -1;
-    long as_reaped = t_wait_pid(&as_status);
-    if (as_reaped != as_pid || as_status != 0) {
-        t_putstr("joey: /alloc-smoke orchestration FAILED\n");
-        return 1;
-    }
-    t_putstr("joey: /alloc-smoke reaped status=0; libthyla-rs::alloc verified\n");
-
-    // === /u-test orchestration (Phase 7 U-2-test) ===
-    // Cumulative integration smoke for the libthyla-rs uplift, closes
-    // the U-2 arc. Where alloc-smoke isolates each U-2X module's
-    // surface in its own block, /u-test runs composed cross-module
-    // flows -- the patterns a Utopia builtin will reach for. Six
-    // flows: alloc+fs+io, process+pipe, notes+poll+time,
-    // thread+torpor+time, ninep codec round-trip, hardware+cap.
-    // Output: one "u-test: <flow> OK" per flow + "u-test: all OK".
-    const char u_test_name[] = "u-test";
-    long ut_pid = t_spawn(u_test_name, sizeof(u_test_name) - 1);
-    if (ut_pid <= 0) {
-        t_putstr("joey: t_spawn(\"u-test\") FAILED\n");
-        return 1;
-    }
-    int ut_status = -1;
-    long ut_reaped = t_wait_pid(&ut_status);
-    if (ut_reaped != ut_pid || ut_status != 0) {
-        t_putstr("joey: /u-test orchestration FAILED\n");
-        return 1;
-    }
-    t_putstr("joey: /u-test reaped status=0; U-2 arc integration verified\n");
-
-    // === /ut orchestration (Phase 7 U-3 -- Utopia shell skeleton) ===
-    // `ut` is the Utopia shell binary; at U-3 its scope is the Pale
-    // Fire version banner via libutopia + clean exit. The U-4..U-Z
-    // arc fills in the line editor, parser, evaluator, builtins,
-    // job control, coreutils, and PTY support. Booting /ut here
-    // proves the new usr/utopia/ workspace builds, the binary links
-    // against libutopia + libthyla-rs, and the Pale Fire ANSI
-    // escapes emit to the boot UART without dirtying the log
-    // (terminals that don't grok 24-bit colour degrade gracefully
-    // per UTOPIA-VISUAL.md section 4.4).
-    const char ut_name[] = "ut";
-    long ut_shell_pid = t_spawn(ut_name, sizeof(ut_name) - 1);
-    if (ut_shell_pid <= 0) {
-        t_putstr("joey: t_spawn(\"ut\") FAILED\n");
-        return 1;
-    }
-    int ut_shell_status = -1;
-    long ut_shell_reaped = t_wait_pid(&ut_shell_status);
-    if (ut_shell_reaped != ut_shell_pid || ut_shell_status != 0) {
-        t_putstr("joey: /ut orchestration FAILED\n");
-        return 1;
-    }
-    t_putstr("joey: /ut reaped status=0; Utopia shell skeleton verified\n");
-
-    // === pouch hello smoke (P6-pouch-hello-smoke) ===
-    // The first POSIX C programs Thylacine runs, built against the pouch
-    // libc. Placed here, beside the /hello orchestration, so the two
-    // spawn-and-verify milestones sit together on the boot path.
-    if (do_pouch_hello_smoke() != 0) return 1;
-
-    // === torpor SVC-dispatch smoke (P6-pouch-wait-addr, sub-chunk 8) ===
-    // The kernel-side `torpor` wait-on-address primitive (the futex-
-    // equivalent over which pouch's pthread layer will run at sub-chunk
-    // 9). Joey runs single-threaded — the no-lost-wakeup race + the
-    // wake-finds-waiter chain are covered by the kernel test suite's
-    // torpor.* tests — so here we exercise only that the SVC numbers
-    // (39 / 40) are wired and the fast paths return what they should.
-    //
-    // wait: pass an unmapped user VA (joey's heap doesn't include
-    //   0x10000000) → -EFAULT. Validates the SVC entry + arg dispatch
-    //   + uaccess fault routing.
-    // wake: an empty bucket at the same address → 0. Validates the
-    //   WAKE SVC dispatch + the empty-bucket bypass.
-    {
-        unsigned int *probe_addr = (unsigned int *)(unsigned long)0x10000000ul;
-        long wait_rc = t_torpor_wait(probe_addr, 0u, -1);
-        if (wait_rc != (long)T_TORPOR_ERR_EFAULT) {
-            t_putstr("joey: torpor SVC-dispatch FAILED — wait did not return EFAULT\n");
-            return 1;
-        }
-        long wake_rc = t_torpor_wake(probe_addr, 100u);
-        if (wake_rc != 0) {
-            t_putstr("joey: torpor SVC-dispatch FAILED — wake on empty bucket did not return 0\n");
-            return 1;
-        }
-        t_putstr("joey: torpor SVC-dispatch ok (wait→EFAULT, wake→0 on empty bucket)\n");
-    }
-
-    // === thread-spawn smoke (P6-pouch-threads sub-chunk 9a) ===
-    // SVC-dispatch fast paths for SYS_THREAD_SPAWN + SYS_THREAD_EXIT.
-    // joey runs single-threaded — the end-to-end spawn-and-join chain
-    // is exercised by /thread-probe below; here we only verify the
-    // kernel rejects bad args.
-    //
-    // entry=0: -EINVAL (-22 — kernel rejects null entry)
-    // entry misaligned: -EINVAL (F2 audit close — prevents EC_PC_ALIGN ELE)
-    // sp_va misaligned: -EINVAL
-    // entry above USER_VA_TOP: -EINVAL
-    {
-        long rc;
-        // entry = 0 → -EINVAL
-        rc = t_thread_spawn((void (*)(void *))0, (void *)0x80000000ul,
-                            (void *)0, (void *)0);
-        if (rc != -22) {
-            t_putstr("joey: thread-spawn SVC-dispatch FAILED — null entry not rejected\n");
-            return 1;
-        }
-        // entry not 4-byte aligned → -EINVAL (F2 regression: without
-        // this gate, the eret would trigger EC_PC_ALIGN at EL1 → ELE).
-        rc = t_thread_spawn((void (*)(void *))0x100001ul,
-                            (void *)0x80000000ul,
-                            (void *)0, (void *)0);
-        if (rc != -22) {
-            t_putstr("joey: thread-spawn SVC-dispatch FAILED — misaligned entry not rejected (F2)\n");
-            return 1;
-        }
-        // sp_va not 16-aligned → -EINVAL
-        rc = t_thread_spawn((void (*)(void *))0x100000ul,
-                            (void *)0x80000008ul,    // 8-aligned but not 16
-                            (void *)0, (void *)0);
-        if (rc != -22) {
-            t_putstr("joey: thread-spawn SVC-dispatch FAILED — misaligned sp not rejected\n");
-            return 1;
-        }
-        // entry above USER_VA_TOP (1<<47) → -EINVAL
-        rc = t_thread_spawn((void (*)(void *))0x800000000000ul,
-                            (void *)0x80000000ul,
-                            (void *)0, (void *)0);
-        if (rc != -22) {
-            t_putstr("joey: thread-spawn SVC-dispatch FAILED — entry above USER_VA_TOP not rejected\n");
-            return 1;
-        }
-        t_putstr("joey: thread-spawn SVC-dispatch ok (null/misaligned entry / misaligned sp / OOB entry rejected)\n");
-    }
-
-    // === /thread-probe end-to-end ===
-    // The thread-spawn + join chain proven at EL0. /thread-probe
-    // (usr/thread-probe/thread-probe.c) does:
-    //   - SYS_THREAD_SPAWN a worker that writes a shared counter
-    //   - kernel exit-time clear+wake the worker's tidptr
-    //   - main joins via t_torpor_wait, verifies the counter
-    // Output goes to the UART via t_putstr; no pipe orchestration.
-    {
-        const char tp_name[] = "thread-probe";
-        long tp_pid = t_spawn(tp_name, sizeof(tp_name) - 1);
-        if (tp_pid <= 0) {
-            t_putstr("joey: t_spawn(\"thread-probe\") FAILED\n");
-            return 1;
-        }
-        int tp_status = -1;
-        long tp_reaped = t_wait_pid(&tp_status);
-        if (tp_reaped != tp_pid || tp_status != 0) {
-            t_putstr("joey: /thread-probe orchestration FAILED\n");
-            return 1;
-        }
-        t_putstr("joey: /thread-probe reaped status=0; SYS_THREAD_SPAWN/EXIT verified\n");
-    }
-
     // === /sbin/corvus spawn ===
     //
     // No pipes — corvus posts /srv/corvus and joey reaches it via
@@ -908,14 +739,14 @@ int main(void) {
     // perm bit is stamped on the child by the kernel atomically inside
     // the spawn thunk (BEFORE exec_setup; P5-corvus-srv-impl-b3a).
     const char corvus_name[] = "corvus";
-    unsigned int no_fds[1] = { 0 };
+    unsigned int corvus_fds[1] = { (unsigned int)storage_dup_fd };
     // P5-hostowner-b-b: joey grants corvus T_CAP_GRANT_HOSTOWNER so
     // corvus may write /cap/grant on ADMIN_ELEVATE (the kernel cap
     // device gates the grant write on this fork-grantable bit). joey
     // holds it via CAP_ALL; corvus inherits it through the spawn mask.
     long corvus_pid = t_spawn_with_perms(
         corvus_name, sizeof(corvus_name) - 1,
-        no_fds, 0,
+        corvus_fds, 1,
         T_CAP_LOCK_PAGES | T_CAP_CSPRNG_READ | T_CAP_GRANT_HOSTOWNER,
         T_SPAWN_PERM_MAY_POST_SERVICE);
     if (corvus_pid <= 0) {
@@ -1242,6 +1073,205 @@ int main(void) {
     // service cleanup).
 
     t_putstr("joey: corvus-d hybrid-PKE round-trip verified via /srv/corvus (b3b)\n");
+
+    return 0;
+}
+
+int main(void) {
+    char buf[24];
+    t_putstr("joey: hello from /joey (real userspace binary, loaded from ramfs)\n");
+
+    // === /hello orchestration (P5-spawn-wait) ===
+    const char hello_name[] = "hello";
+    long pid = t_spawn(hello_name, sizeof(hello_name) - 1);
+    if (pid <= 0) {
+        t_putstr("joey: t_spawn(\"hello\") FAILED\n");
+        return 1;
+    }
+    int status = -1;
+    long reaped = t_wait_pid(&status);
+    if (reaped != pid || status != 0) {
+        t_putstr("joey: /hello orchestration FAILED\n");
+        return 1;
+    }
+    t_putstr("joey: /hello reaped status=0; orchestration verified\n");
+
+    // === /alloc-smoke orchestration (Phase 7 U-2b) ===
+    // First native Rust binary that uses the alloc crate (Box / Vec /
+    // String / small-alloc loop) backed by libthyla-rs::alloc::ThylaAlloc
+    // via SYS_BURROW_ATTACH. Validates the libthyla-rs U-2b uplift
+    // sub-chunk end-to-end: t::alloc + t::handle (via Drop) + the
+    // burrow_attach syscall wrapper. On success the binary prints
+    // "alloc-smoke: ... OK" + exits 0; any failed check prints a
+    // tagged FAIL line + exits 1.
+    const char alloc_smoke_name[] = "alloc-smoke";
+    long as_pid = t_spawn(alloc_smoke_name, sizeof(alloc_smoke_name) - 1);
+    if (as_pid <= 0) {
+        t_putstr("joey: t_spawn(\"alloc-smoke\") FAILED\n");
+        return 1;
+    }
+    int as_status = -1;
+    long as_reaped = t_wait_pid(&as_status);
+    if (as_reaped != as_pid || as_status != 0) {
+        t_putstr("joey: /alloc-smoke orchestration FAILED\n");
+        return 1;
+    }
+    t_putstr("joey: /alloc-smoke reaped status=0; libthyla-rs::alloc verified\n");
+
+    // === /u-test orchestration (Phase 7 U-2-test) ===
+    // Cumulative integration smoke for the libthyla-rs uplift, closes
+    // the U-2 arc. Where alloc-smoke isolates each U-2X module's
+    // surface in its own block, /u-test runs composed cross-module
+    // flows -- the patterns a Utopia builtin will reach for. Six
+    // flows: alloc+fs+io, process+pipe, notes+poll+time,
+    // thread+torpor+time, ninep codec round-trip, hardware+cap.
+    // Output: one "u-test: <flow> OK" per flow + "u-test: all OK".
+    const char u_test_name[] = "u-test";
+    long ut_pid = t_spawn(u_test_name, sizeof(u_test_name) - 1);
+    if (ut_pid <= 0) {
+        t_putstr("joey: t_spawn(\"u-test\") FAILED\n");
+        return 1;
+    }
+    int ut_status = -1;
+    long ut_reaped = t_wait_pid(&ut_status);
+    if (ut_reaped != ut_pid || ut_status != 0) {
+        t_putstr("joey: /u-test orchestration FAILED\n");
+        return 1;
+    }
+    t_putstr("joey: /u-test reaped status=0; U-2 arc integration verified\n");
+
+    // === /ut orchestration (Phase 7 U-3 -- Utopia shell skeleton) ===
+    // `ut` is the Utopia shell binary; at U-3 its scope is the Pale
+    // Fire version banner via libutopia + clean exit. The U-4..U-Z
+    // arc fills in the line editor, parser, evaluator, builtins,
+    // job control, coreutils, and PTY support. Booting /ut here
+    // proves the new usr/utopia/ workspace builds, the binary links
+    // against libutopia + libthyla-rs, and the Pale Fire ANSI
+    // escapes emit to the boot UART without dirtying the log
+    // (terminals that don't grok 24-bit colour degrade gracefully
+    // per UTOPIA-VISUAL.md section 4.4).
+    const char ut_name[] = "ut";
+    long ut_shell_pid = t_spawn(ut_name, sizeof(ut_name) - 1);
+    if (ut_shell_pid <= 0) {
+        t_putstr("joey: t_spawn(\"ut\") FAILED\n");
+        return 1;
+    }
+    int ut_shell_status = -1;
+    long ut_shell_reaped = t_wait_pid(&ut_shell_status);
+    if (ut_shell_reaped != ut_shell_pid || ut_shell_status != 0) {
+        t_putstr("joey: /ut orchestration FAILED\n");
+        return 1;
+    }
+    t_putstr("joey: /ut reaped status=0; Utopia shell skeleton verified\n");
+
+    // === pouch hello smoke (P6-pouch-hello-smoke) ===
+    // The first POSIX C programs Thylacine runs, built against the pouch
+    // libc. Placed here, beside the /hello orchestration, so the two
+    // spawn-and-verify milestones sit together on the boot path.
+    if (do_pouch_hello_smoke() != 0) return 1;
+
+    // === torpor SVC-dispatch smoke (P6-pouch-wait-addr, sub-chunk 8) ===
+    // The kernel-side `torpor` wait-on-address primitive (the futex-
+    // equivalent over which pouch's pthread layer will run at sub-chunk
+    // 9). Joey runs single-threaded — the no-lost-wakeup race + the
+    // wake-finds-waiter chain are covered by the kernel test suite's
+    // torpor.* tests — so here we exercise only that the SVC numbers
+    // (39 / 40) are wired and the fast paths return what they should.
+    //
+    // wait: pass an unmapped user VA (joey's heap doesn't include
+    //   0x10000000) → -EFAULT. Validates the SVC entry + arg dispatch
+    //   + uaccess fault routing.
+    // wake: an empty bucket at the same address → 0. Validates the
+    //   WAKE SVC dispatch + the empty-bucket bypass.
+    {
+        unsigned int *probe_addr = (unsigned int *)(unsigned long)0x10000000ul;
+        long wait_rc = t_torpor_wait(probe_addr, 0u, -1);
+        if (wait_rc != (long)T_TORPOR_ERR_EFAULT) {
+            t_putstr("joey: torpor SVC-dispatch FAILED — wait did not return EFAULT\n");
+            return 1;
+        }
+        long wake_rc = t_torpor_wake(probe_addr, 100u);
+        if (wake_rc != 0) {
+            t_putstr("joey: torpor SVC-dispatch FAILED — wake on empty bucket did not return 0\n");
+            return 1;
+        }
+        t_putstr("joey: torpor SVC-dispatch ok (wait→EFAULT, wake→0 on empty bucket)\n");
+    }
+
+    // === thread-spawn smoke (P6-pouch-threads sub-chunk 9a) ===
+    // SVC-dispatch fast paths for SYS_THREAD_SPAWN + SYS_THREAD_EXIT.
+    // joey runs single-threaded — the end-to-end spawn-and-join chain
+    // is exercised by /thread-probe below; here we only verify the
+    // kernel rejects bad args.
+    //
+    // entry=0: -EINVAL (-22 — kernel rejects null entry)
+    // entry misaligned: -EINVAL (F2 audit close — prevents EC_PC_ALIGN ELE)
+    // sp_va misaligned: -EINVAL
+    // entry above USER_VA_TOP: -EINVAL
+    {
+        long rc;
+        // entry = 0 → -EINVAL
+        rc = t_thread_spawn((void (*)(void *))0, (void *)0x80000000ul,
+                            (void *)0, (void *)0);
+        if (rc != -22) {
+            t_putstr("joey: thread-spawn SVC-dispatch FAILED — null entry not rejected\n");
+            return 1;
+        }
+        // entry not 4-byte aligned → -EINVAL (F2 regression: without
+        // this gate, the eret would trigger EC_PC_ALIGN at EL1 → ELE).
+        rc = t_thread_spawn((void (*)(void *))0x100001ul,
+                            (void *)0x80000000ul,
+                            (void *)0, (void *)0);
+        if (rc != -22) {
+            t_putstr("joey: thread-spawn SVC-dispatch FAILED — misaligned entry not rejected (F2)\n");
+            return 1;
+        }
+        // sp_va not 16-aligned → -EINVAL
+        rc = t_thread_spawn((void (*)(void *))0x100000ul,
+                            (void *)0x80000008ul,    // 8-aligned but not 16
+                            (void *)0, (void *)0);
+        if (rc != -22) {
+            t_putstr("joey: thread-spawn SVC-dispatch FAILED — misaligned sp not rejected\n");
+            return 1;
+        }
+        // entry above USER_VA_TOP (1<<47) → -EINVAL
+        rc = t_thread_spawn((void (*)(void *))0x800000000000ul,
+                            (void *)0x80000000ul,
+                            (void *)0, (void *)0);
+        if (rc != -22) {
+            t_putstr("joey: thread-spawn SVC-dispatch FAILED — entry above USER_VA_TOP not rejected\n");
+            return 1;
+        }
+        t_putstr("joey: thread-spawn SVC-dispatch ok (null/misaligned entry / misaligned sp / OOB entry rejected)\n");
+    }
+
+    // === /thread-probe end-to-end ===
+    // The thread-spawn + join chain proven at EL0. /thread-probe
+    // (usr/thread-probe/thread-probe.c) does:
+    //   - SYS_THREAD_SPAWN a worker that writes a shared counter
+    //   - kernel exit-time clear+wake the worker's tidptr
+    //   - main joins via t_torpor_wait, verifies the counter
+    // Output goes to the UART via t_putstr; no pipe orchestration.
+    {
+        const char tp_name[] = "thread-probe";
+        long tp_pid = t_spawn(tp_name, sizeof(tp_name) - 1);
+        if (tp_pid <= 0) {
+            t_putstr("joey: t_spawn(\"thread-probe\") FAILED\n");
+            return 1;
+        }
+        int tp_status = -1;
+        long tp_reaped = t_wait_pid(&tp_status);
+        if (tp_reaped != tp_pid || tp_status != 0) {
+            t_putstr("joey: /thread-probe orchestration FAILED\n");
+            return 1;
+        }
+        t_putstr("joey: /thread-probe reaped status=0; SYS_THREAD_SPAWN/EXIT verified\n");
+    }
+
+    // === /sbin/corvus spawn + E2E ===
+    // Moved to do_corvus_bringup() (defined above main) and called
+    // POST-PIVOT below, so corvus lands on the persistent Stratum root
+    // and receives its storage capability at fd 0 (A-1.7).
 
     // P6-pouch-stratumd-boot 16b-gamma sanity: walk /system.key from the
     // ramfs root via t_walk_open + t_fstat from joey itself. This isolates
@@ -1818,6 +1848,32 @@ int main(void) {
     // read) AGAINST a real on-disk FS instead of the in-RAM dev9p-stub
     // simulacrum. The kernel-internal dev9p + stub tests in kernel/test/
     // remain (they exercise the Dev vtable machinery in isolation).
+
+    // === A-1.7: hand corvus its storage capability, then bring it up ===
+    // Post-pivot: on the persistent Stratum root. Build corvus's storage
+    // dir + hand it as a R|W-no-TRANSFER capability at fd 0; corvus chroots
+    // to it so its filesystem world IS this dir (I-23).
+    {
+        long var_fd = mkdir_or_open(T_WALK_OPEN_FROM_ROOT, "var", 3);
+        long lib_fd = (var_fd >= 0) ? mkdir_or_open(var_fd, "lib", 3) : -1;
+        long cdir_fd = (lib_fd >= 0) ? mkdir_or_open(lib_fd, "corvus", 6) : -1;
+        if (var_fd >= 0) (void)t_close(var_fd);
+        if (lib_fd >= 0) (void)t_close(lib_fd);
+        if (cdir_fd < 0) {
+            t_putstr("joey: A-1.7 mkdir /var/lib/corvus FAILED\n");
+            return 1;
+        }
+        long corvus_storage = t_dup(cdir_fd, T_RIGHT_READ | T_RIGHT_WRITE);
+        (void)t_close(cdir_fd);
+        if (corvus_storage < 0) {
+            t_putstr("joey: A-1.7 t_dup(storage R|W) FAILED\n");
+            return 1;
+        }
+        if (do_corvus_bringup(corvus_storage) != 0) {
+            return 1;
+        }
+        (void)t_close(corvus_storage);
+    }
 
     return 0;
 }
