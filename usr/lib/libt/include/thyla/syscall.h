@@ -164,6 +164,12 @@ static inline long t_torpor_wake(unsigned int *addr_va, unsigned int count) {
 #define T_ORDWR    2u
 #define T_OEXEC    3u
 #define T_OTRUNC   0x10u
+// FS-delta (IDENTITY-DESIGN.md §9.4): walk-without-open (Linux O_PATH /
+// Plan 9 walk). SYS_WALK_OPEN with this flag returns a NON-OPENED, walkable
+// KObj_Spoor -- the valid base for creating/walking/renaming/unlinking
+// children + a valid SYS_CHROOT target (a normally-opened handle is not: 9P
+// forbids Twalk from an opened fid). Access bits are ignored when set.
+#define T_OPATH    0x80u
 
 // Maximum single-component name length for t_walk_open (matches the
 // kernel cap; passing longer returns -1 from the syscall).

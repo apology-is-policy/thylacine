@@ -1592,13 +1592,21 @@ static s64 sys_walk_open_handler(u64 spoor_fd_raw, u64 name_va,
     // returned in w->qid[] — the next open() will refresh nc->qid).
     walkqid_free(w);
 
-    // Issue the open. dev9p_open returns nc itself (state mutated:
-    // COPEN flag set, mode + offset reset, qid refreshed from Rlopen).
-    // On failure nc still has its own walk-allocated fid; spoor_clunk
-    // runs dev->close → p9_client_clunk on that fid + frees the priv.
-    if (!nc->dev->open(nc, (int)omode_raw)) {
-        spoor_clunk(nc);
-        return -1;
+    // FS-delta (IDENTITY-DESIGN.md §9.4): SYS_WALK_OPEN_OPATH skips the
+    // open. nc is walked (dev9p_walk set its fid + qid) but NOT Tlopen'd,
+    // yielding a non-opened, walkable handle -- the valid base for
+    // creating/walking children + a valid chroot target. 9P forbids Twalk
+    // from an opened fid, so a normally-opened handle cannot serve that
+    // role. The access bits are irrelevant for an O_PATH handle.
+    if (!(omode_raw & SYS_WALK_OPEN_OPATH)) {
+        // Issue the open. dev9p_open returns nc itself (state mutated:
+        // COPEN flag set, mode + offset reset, qid refreshed from Rlopen).
+        // On failure nc still has its own walk-allocated fid; spoor_clunk
+        // runs dev->close → p9_client_clunk on that fid + frees the priv.
+        if (!nc->dev->open(nc, (int)omode_raw)) {
+            spoor_clunk(nc);
+            return -1;
+        }
     }
 
     // Install the now-opened nc in the caller's handle table. The

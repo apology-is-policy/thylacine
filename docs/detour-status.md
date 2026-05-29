@@ -209,8 +209,12 @@ FS-delta restores it. **Full design + ABI: `IDENTITY-DESIGN.md §9.4`.**
 - **Audit:** folded into the A-1.7 round (its prerequisite) -- the no-open walk
   path must bound the name, reject `..`/`/`/`\0`, stamp rights identically, leave
   no half-walked Spoor on error.
-- **Tests:** a kernel loopback test (O_PATH walk returns non-opened; child-create
-  under it succeeds where a normal-open base returns -1) + the A-1.7 joey E2E.
+- **Tests:** the A-1.7 joey E2E against REAL Stratum is the behavioral test
+  (mkdir -p /var/lib/corvus + corvus chroot + create-under-cap). The in-kernel
+  dev9p loopback mock does NOT enforce 9P's no-Twalk-from-an-opened-fid rule
+  (that is a real-server behavior), so it cannot reproduce the wall; the suite
+  confirms no regression (624/624). The handler skip-open path itself is `static`
+  + not unit-reachable.
 
 ### A-1.7 · Capability-scoped service storage *(2nd-order detour; pulled before A-1b; design-first)*
 

@@ -1387,7 +1387,16 @@ _Static_assert(__builtin_offsetof(struct t_stat, blocks)    == 64, "t_stat.block
 // OWRITE=1, ORDWR=2, OEXEC=3 (low 2 bits) plus the OTRUNC modifier
 // (0x10). Phase 5+ may extend (OCEXEC=0x20, ORCLOSE=0x40, OEXCL=0x1000)
 // as callers materialize. Any bit outside this mask → -1.
-#define SYS_WALK_OPEN_OMODE_VALID  0x13u
+//
+// FS-delta (IDENTITY-DESIGN.md §9.4): SYS_WALK_OPEN_OPATH = 0x80 is the
+// Linux-O_PATH / Plan-9-walk equivalent -- walk to the component but do
+// NOT Tlopen it, returning a NON-OPENED, walkable KObj_Spoor. 9P forbids
+// Twalk from an OPENED fid, so a normally-opened handle is NOT a valid
+// base for creating/walking/renaming/unlinking/fsync'ing CHILDREN; an
+// O_PATH handle IS (and is a valid SYS_CHROOT target). When set, the
+// access bits are ignored (the handle carries no byte-I/O open).
+#define SYS_WALK_OPEN_OPATH        0x80u
+#define SYS_WALK_OPEN_OMODE_VALID  0x93u
 
 // SYS_WALK_CREATE perm: the Plan 9 perm word. Low 9 bits are the POSIX
 // rwxrwxrwx mode; the DMDIR bit selects directory creation. All other DM*

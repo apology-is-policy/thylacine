@@ -215,6 +215,12 @@ pub const T_OWRITE: u32               = 1;
 pub const T_ORDWR: u32                = 2;
 pub const T_OEXEC: u32                = 3;
 pub const T_OTRUNC: u32               = 0x10;
+// FS-delta (IDENTITY-DESIGN.md §9.4): walk-without-open (Linux O_PATH / Plan 9
+// walk). SYS_WALK_OPEN with T_OPATH returns a NON-OPENED, walkable KObj_Spoor --
+// the valid base for creating/walking/renaming/unlinking children + a valid
+// SYS_CHROOT target (a normally-opened handle is not: 9P forbids Twalk from an
+// opened fid). Access bits are ignored when set.
+pub const T_OPATH: u32                = 0x80;
 
 // SYS_WALK_CREATE perm: low 9 bits = POSIX mode; DMDIR selects a directory.
 // Must mirror SYS_WALK_CREATE_PERM_VALID / SYS_WALK_CREATE_DMDIR in the kernel.
