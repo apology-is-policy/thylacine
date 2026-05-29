@@ -1852,6 +1852,95 @@ static s64 sys_readdir_handler(u64 fd_raw, u64 buf_va, u64 buf_len_raw) {
 }
 
 // =============================================================================
+// SYS_RENAME + SYS_UNLINK — rename/move + remove (FS-mutation foundation
+// FS-gamma; IDENTITY-DESIGN.md §9.3). Unlike SYS_WALK_CREATE, the 9P Trenameat
+// / Tunlinkat verbs operate on the dirfid(s) BY NAME without transitioning
+// them, so these handlers run the Dev op DIRECTLY on the looked-up dir Spoor(s)
+// -- no clone-walk (mirrors SYS_FSYNC / SYS_READDIR). They are the atomic-swap
+// substrate for A-1b's corvus identity-DB persistence + the A-2 coreutils.
+// =============================================================================
+
+// Resolve a directory fd argument for a mutation op: the FROM_ROOT sentinel ->
+// the caller's Territory root_spoor (may be NULL -> caller rejects); otherwise
+// a KOBJ_SPOOR handle gated on RIGHT_WRITE (the directory is mutated).
+static struct Spoor *sys_resolve_dir_wr(struct Proc *p, u64 fd_raw) {
+    if (fd_raw == SYS_WALK_OPEN_FROM_ROOT) {
+        if (!p->territory)                            return NULL;
+        return p->territory->root_spoor;
+    }
+    return sys_lookup_spoor(p, (hidx_t)fd_raw, RIGHT_WRITE);
+}
+
+// Copy + validate a single-component name from user-VA into `scratch` (NUL-
+// terminated), with the same strict shape SYS_WALK_CREATE uses: reject empty /
+// over-length / '/' / '\0' / "." / "..". `scratch` must be at least
+// SYS_WALK_OPEN_NAME_MAX + 1 bytes. Returns 0 on success, -1 on any violation.
+static int sys_copy_component(u64 name_va, u64 name_len, char *scratch) {
+    if (name_len == 0)                                return -1;
+    if (name_len > SYS_WALK_OPEN_NAME_MAX)            return -1;
+    if (!sys_validate_user_buf(name_va, name_len))    return -1;
+    for (u64 i = 0; i < name_len; i++) {
+        u8 b;
+        if (uaccess_load_u8(name_va + i, &b) != 0)    return -1;
+        if (b == '/' || b == '\0')                    return -1;
+        scratch[i] = (char)b;
+    }
+    if (name_len == 1 && scratch[0] == '.')           return -1;
+    if (name_len == 2 && scratch[0] == '.' &&
+                          scratch[1] == '.')           return -1;
+    scratch[name_len] = '\0';
+    return 0;
+}
+
+static s64 sys_rename_handler(u64 olddir_fd_raw, u64 oldname_va, u64 oldname_len_raw,
+                               u64 newdir_fd_raw, u64 newname_va, u64 newname_len_raw) {
+    struct Thread *t = current_thread();
+    if (!t)                                          return -1;
+    struct Proc *p = t->proc;
+    if (!p)                                          return -1;
+
+    // Validate + copy both names BEFORE resolving fds (cheap rejects first;
+    // matches SYS_WALK_CREATE's name-validate-then-resolve order).
+    char old_scratch[SYS_WALK_OPEN_NAME_MAX + 1];
+    char new_scratch[SYS_WALK_OPEN_NAME_MAX + 1];
+    if (sys_copy_component(oldname_va, oldname_len_raw, old_scratch) != 0) return -1;
+    if (sys_copy_component(newname_va, newname_len_raw, new_scratch) != 0) return -1;
+
+    struct Spoor *od = sys_resolve_dir_wr(p, olddir_fd_raw);
+    if (!od)                                          return -1;
+    struct Spoor *nd = sys_resolve_dir_wr(p, newdir_fd_raw);
+    if (!nd)                                          return -1;
+    if (!od->dev || !od->dev->rename)                 return -1;
+    // Two-cursor + cross-Dev invariant: a 9P renameat is within ONE server, so
+    // both directories MUST be on the same Dev (dev9p_rename adds the same-
+    // session guard). Rejected here before any Dev op.
+    if (od->dev != nd->dev)                           return -1;
+
+    return od->dev->rename(od, old_scratch, nd, new_scratch) == 0 ? 0 : -1;
+}
+
+static s64 sys_unlink_handler(u64 parent_fd_raw, u64 name_va, u64 name_len_raw,
+                               u64 flags_raw) {
+    struct Thread *t = current_thread();
+    if (!t)                                          return -1;
+    struct Proc *p = t->proc;
+    if (!p)                                          return -1;
+
+    // Only 0 or SYS_UNLINK_REMOVEDIR permitted; any other bit -> -1 (so a future
+    // flag cannot be silently dropped, same discipline as SYS_WALK_CREATE perm).
+    if (flags_raw & ~(u64)SYS_UNLINK_REMOVEDIR)       return -1;
+
+    char scratch[SYS_WALK_OPEN_NAME_MAX + 1];
+    if (sys_copy_component(name_va, name_len_raw, scratch) != 0) return -1;
+
+    struct Spoor *c = sys_resolve_dir_wr(p, parent_fd_raw);
+    if (!c)                                          return -1;
+    if (!c->dev || !c->dev->unlink)                  return -1;
+
+    return c->dev->unlink(c, scratch, (u32)flags_raw) == 0 ? 0 : -1;
+}
+
+// =============================================================================
 // SYS_CHROOT — stamp the caller's territory root_spoor (P5-stratumd-stub-
 // bringup-e2). Per CORVUS-DESIGN.md §10.1 ("chroot at v1.0; full pivot at
 // v1.x") + ARCH §11.2.
@@ -4672,6 +4761,22 @@ void syscall_dispatch(struct exception_context *ctx) {
         ctx->regs[0] = (u64)sys_readdir_handler(ctx->regs[0],
                                                 ctx->regs[1],
                                                 ctx->regs[2]);
+        return;
+
+    case SYS_RENAME:
+        ctx->regs[0] = (u64)sys_rename_handler(ctx->regs[0],
+                                               ctx->regs[1],
+                                               ctx->regs[2],
+                                               ctx->regs[3],
+                                               ctx->regs[4],
+                                               ctx->regs[5]);
+        return;
+
+    case SYS_UNLINK:
+        ctx->regs[0] = (u64)sys_unlink_handler(ctx->regs[0],
+                                               ctx->regs[1],
+                                               ctx->regs[2],
+                                               ctx->regs[3]);
         return;
 
     case SYS_CHROOT:

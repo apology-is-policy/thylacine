@@ -441,9 +441,51 @@ static long dev9p_readdir(struct Spoor *c, void *buf, long n, s64 off) {
     return (long)got;
 }
 
+// Rename -> Stratum Trenameat (FS-mutation foundation FS-gamma; section 9.3).
+// olddir / newdir are the caller's looked-up directory Spoors (NOT clone-walked
+// -- Trenameat operates on the dirfids by name without transitioning them, like
+// Tsync / Treaddir). The SYS_RENAME handler already required the same Dev; this
+// adds the same-SESSION guard (two dev9p mounts are distinct p9_clients, and a
+// 9P renameat is within one session). Names are NUL-terminated by the handler.
+static int dev9p_rename(struct Spoor *olddir, const char *oldname,
+                        struct Spoor *newdir, const char *newname) {
+    struct dev9p_priv *od = priv_of(olddir);
+    struct dev9p_priv *nd = priv_of(newdir);
+    if (!od || !nd) return -1;
+    if (od->client != nd->client) return -1;     // renameat is within one session
+    if (!oldname || !newname) return -1;
+    size_t ol = 0; while (oldname[ol] != '\0') ol++;
+    size_t nl = 0; while (newname[nl] != '\0') nl++;
+    if (ol == 0 || nl == 0) return -1;
+    return p9_client_renameat(od->client, od->fid, (const u8 *)oldname, ol,
+                               nd->fid, (const u8 *)newname, nl) == 0 ? 0 : -1;
+}
+
+// Unlink -> Stratum Tunlinkat (FS-gamma; section 9.3). parent is the caller's
+// looked-up directory Spoor. flags 0 = unlink a non-directory;
+// P9_UNLINK_AT_REMOVEDIR (== SYS_UNLINK_REMOVEDIR, validated by the handler) =
+// rmdir an empty directory. The flags arg is passed straight to the wire.
+static int dev9p_unlink(struct Spoor *parent, const char *name, u32 flags) {
+    struct dev9p_priv *p = priv_of(parent);
+    if (!p) return -1;
+    if (!name) return -1;
+    size_t nl = 0; while (name[nl] != '\0') nl++;
+    if (nl == 0) return -1;
+    return p9_client_unlinkat(p->client, p->fid, (const u8 *)name, nl, flags)
+               == 0 ? 0 : -1;
+}
+
+// SYS_UNLINK passes its flags arg straight through dev9p_unlink to the wire, so
+// the syscall ABI's REMOVEDIR bit MUST equal the wire's. Pinned here (the only
+// TU that sees both).
+_Static_assert(SYS_UNLINK_REMOVEDIR == P9_UNLINK_AT_REMOVEDIR,
+               "SYS_UNLINK_REMOVEDIR must equal the 9P Tunlinkat flag");
+
 static void dev9p_remove(struct Spoor *c) {
     (void)c;
-    // Remove maps to Tunlinkat on the parent; deferred to syscall chunk.
+    // The Plan 9 .remove slot (target-by-Spoor, void return) is the wrong shape
+    // for SYS_UNLINK (parent + name, error-returning) -- SYS_UNLINK uses the new
+    // .unlink slot (dev9p_unlink) instead. Left as a no-op stub.
 }
 
 static int dev9p_wstat(struct Spoor *c, u8 *dp, int n) {
@@ -495,6 +537,8 @@ struct Dev dev9p = {
     .bwrite   = dev9p_bwrite,
     .fsync    = dev9p_fsync,
     .readdir  = dev9p_readdir,
+    .rename   = dev9p_rename,
+    .unlink   = dev9p_unlink,
 
     .remove   = dev9p_remove,
     .wstat    = dev9p_wstat,

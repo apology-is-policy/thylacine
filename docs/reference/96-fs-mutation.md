@@ -1,15 +1,18 @@
 # 96 — Filesystem-mutation syscalls (the FS foundation)
 
 **Status:** FS-alpha (`SYS_WALK_CREATE`) + FS-beta (`SYS_FSYNC` + `SYS_READDIR`)
-LANDED + audit-CLEAN (opus prosecutor R1: 0 P0 / 0 P1 / 1 P2 / 3 P3 — the fid
-lifecycle, buffer bounds, rights gates, and vtable ABI all sound; F1 doc + F2
-reject-leak + F3 readdir-copy-order fixed, F4 already documented). 622/622 PASS
-on default + UBSan. **KNOWN BLOCKER (not this code):** under ASan the first
-runtime Thylacine->Stratum WRITE (the joey fs-mut create E2E) deterministically
-fails `rc=-1` — heap-layout-sensitive (default + UBSan pass), i.e. the
-documented Phase 6 AEGIS/mallocng write-path corruption (task #713). Root-cause
-of #713 is the user-mandated gate before A-1b persistence. Design pin:
-`IDENTITY-DESIGN.md §9.2`.
++ FS-gamma (`SYS_RENAME` + `SYS_UNLINK`) LANDED. FS-alpha+beta audit-CLEAN (opus
+prosecutor R1: 0 P0 / 0 P1 / 1 P2 / 3 P3 — fid lifecycle, buffer bounds, rights
+gates, vtable ABI all sound). FS-gamma adds the atomic `rename` + `unlink` that
+A-1b's corvus identity-DB persistence uses for its write-tmp → fsync →
+rename-swap → dir-fsync sequence; its audit is the first end-to-end exercise of
+`p9_client_renameat` / `unlinkat`. 624/624 PASS on default + UBSan. **The
+Phase-6 "AEGIS/mallocng content-sensitive write-path corruption" that once gated
+this work was root-caused (task #713) as an `eret`-window IRQ race in the
+EL0-entry trampolines — NOT a write-path or heap bug — and fixed (`cc8a9bd`); the
+create / write / fsync / rename path is sound, and there is no kernel ASan (the
+old "fails under ASan" framing was invalid; the tree only has UBSan).** Design
+pins: `IDENTITY-DESIGN.md §9.2` (alpha+beta) + `§9.3` (gamma).
 
 ## Purpose
 
@@ -103,6 +106,46 @@ Two new `Dev` vtable slots (NULL-permitted, like `.poll` / `.stat_native`):
 sets a real `.readdir`; `dev9p` + `devramfs` (no-op) set `.fsync`. libt:
 `t_fsync` / `t_readdir`. libthyla-rs: `t_fsync` / `t_readdir`.
 
+### `SYS_RENAME = 57` + `SYS_UNLINK = 58` (FS-gamma)
+
+```
+SYS_RENAME(olddir_fd, oldname_va, oldname_len, newdir_fd, newname_va, newname_len) -> 0 / -1
+  x0 = olddir_fd   KOBJ_SPOOR directory, RIGHT_WRITE (or FROM_ROOT).
+  x1/x2 = oldname  user-VA + len (1 .. 64; reject '/' '\0' "." "..").
+  x3 = newdir_fd   KOBJ_SPOOR directory, RIGHT_WRITE (or FROM_ROOT). Same Dev.
+  x4/x5 = newname  user-VA + len.
+
+SYS_UNLINK(parent_fd, name_va, name_len, flags) -> 0 / -1
+  x0 = parent_fd   KOBJ_SPOOR directory, RIGHT_WRITE (or FROM_ROOT).
+  x1/x2 = name     user-VA + len (1 .. 64; reject '/' '\0' "." "..").
+  x3 = flags       0 = unlink a non-directory; SYS_UNLINK_REMOVEDIR (0x200,
+                   == P9_UNLINK_AT_REMOVEDIR) = rmdir an empty directory.
+                   Other bits -> -1.
+```
+
+`SYS_RENAME` atomically renames/moves a single component (POSIX `rename(2)` / 9P
+`Trenameat`): an existing destination is **atomically replaced** — the property
+A-1b's identity-DB swap relies on (`rename(identity.db.tmp → identity.db)`).
+Both directories must be on the **same Dev** (a 9P `renameat` is within one
+server; cross-Dev → -1) and, for `dev9p`, the same `p9_client` session.
+
+`SYS_UNLINK` removes a non-directory, or (with `SYS_UNLINK_REMOVEDIR`) an empty
+directory (9P `Tunlinkat`).
+
+**Unlike `SYS_WALK_CREATE`, neither clone-walks.** `Trenameat` / `Tunlinkat`
+operate on the dirfid(s) **by name** without consuming or transitioning them
+(like `Tsync` / `Treaddir`), so the handlers run the Dev op directly on the
+looked-up dir Spoor(s) — the `SYS_FSYNC` / `SYS_READDIR` pattern. They borrow the
+caller's dir fid and allocate no transient fid, so the FS-alpha failed-create
+fid-leak class structurally cannot arise.
+
+Two more `Dev` vtable slots (NULL-permitted): `int (*rename)(olddir, oldname,
+newdir, newname)` and `int (*unlink)(parent, name, flags)`. Only `dev9p` sets
+them (→ `p9_client_renameat` / `unlinkat`); the pre-existing `void (*remove)`
+Plan 9 slot is wrong-shaped (no name, no error return) and left a no-op stub.
+libt: `t_rename` / `t_unlink` (+ `T_UNLINK_REMOVEDIR`). libthyla-rs: `t_rename` /
+`t_unlink` (+ `T_UNLINK_REMOVEDIR`).
+
 ## Implementation
 
 ### `kernel/syscall.c::sys_walk_create_handler`
@@ -152,6 +195,34 @@ On any 9P failure `dev9p_create` returns `NULL`; the fid it owns at that point
 (parent clone, or `dir_fid` after the swap) is clunked by `dev9p_close` when the
 handler `spoor_clunk`s `nc`. No double-clunk, no fid leak on the failure paths.
 
+### `kernel/syscall.c::sys_rename_handler` / `sys_unlink_handler` (FS-gamma)
+
+Both share two static helpers: `sys_resolve_dir_wr(p, fd_raw)` (FROM_ROOT → the
+Territory `root_spoor`; else `sys_lookup_spoor(RIGHT_WRITE)`) and
+`sys_copy_component(name_va, name_len, scratch)` (the strict single-component
+copy + validate `SYS_WALK_CREATE` does inline — reject empty / >64 / `/` / `\0`
+/ `.` / `..`).
+
+`sys_rename_handler`: copy + validate both names (cheap rejects first) → resolve
+both dir fds (`RIGHT_WRITE`) → require `od->dev->rename` → **cross-Dev reject**
+(`od->dev != nd->dev` → -1, before any Dev op) → `od->dev->rename(od, oldname,
+nd, newname)`. No clone-walk; the looked-up Spoors are used directly.
+
+`sys_unlink_handler`: validate `flags` against `{0, SYS_UNLINK_REMOVEDIR}` (any
+other bit → -1) → copy + validate the name → resolve the parent (`RIGHT_WRITE`)
+→ require `c->dev->unlink` → `c->dev->unlink(c, name, flags)`.
+
+### `kernel/dev9p.c::dev9p_rename` / `dev9p_unlink`
+
+`dev9p_rename` does `priv_of(olddir)` + `priv_of(newdir)`, adds the **same-`p9_client`
+guard** (`od->client != nd->client` → -1; two dev9p mounts are distinct sessions,
+and a 9P `renameat` is within one), then `p9_client_renameat(client, od->fid,
+oldname, nd->fid, newname)`. `dev9p_unlink` does `priv_of(parent)` then
+`p9_client_unlinkat(client, parent->fid, name, flags)`. The `flags` arg passes
+straight to the wire — a `_Static_assert(SYS_UNLINK_REMOVEDIR ==
+P9_UNLINK_AT_REMOVEDIR)` (in `dev9p.c`, the only TU that sees both) pins the
+equality.
+
 ## Error paths (`SYS_WALK_CREATE -> -1`)
 
 - parent not `KOBJ_SPOOR` / missing `RIGHT_WRITE`; FROM_ROOT with no pivoted root
@@ -162,6 +233,19 @@ handler `spoor_clunk`s `nc`. No double-clunk, no fid leak on the failure paths.
 - `perm` outside `SYS_WALK_CREATE_PERM_VALID` (a reserved `DM*` bit)
 - the 9P server rejects (name exists, no space, permission) -> Rlerror
 - handle table full
+
+## Error paths (`SYS_RENAME` / `SYS_UNLINK` -> -1)
+
+- either dir fd not `KOBJ_SPOOR` / missing `RIGHT_WRITE`; FROM_ROOT with no
+  pivoted root
+- name bounds: 0 / > 64 / contains `/` or `\0` / is `.` or `..` (either name)
+- rename: the two dir fds are on different Devs (cross-Dev), or different `dev9p`
+  sessions (same Dev, different `p9_client`)
+- backing Dev has no `.rename` (rename) / `.unlink` (unlink)
+- unlink: `flags` has any bit outside `SYS_UNLINK_REMOVEDIR`
+- the 9P server rejects (`Rlerror`): rename — source `ENOENT`, dest is a
+  non-empty directory, `EXDEV`, permission; unlink — `ENOENT`, `ENOTEMPTY`
+  (rmdir on a non-empty dir), `EISDIR`/`ENOTDIR` mode mismatch, permission
 
 ## Tests
 
@@ -186,6 +270,19 @@ handler `spoor_clunk`s `nc`. No double-clunk, no fid leak on the failure paths.
   readdir cookie parse, rights gates) end-to-end through stratumd, which the
   loopback unit tests do not reach. Confirmed at boot: `fs-mut
   create+write+fsync+read-back OK` + `fs-mut mkdir+readdir OK (d1=51 bytes)`.
+- `kernel/test/test_dev9p.c::test_dev9p_rename` — `dev9p_rename` → `Trenameat`
+  (responder `Rrenameat`, header-only) returns 0 for a same-dir same-session
+  rename. `test_dev9p_unlink` — `dev9p_unlink` → `Tunlinkat` returns 0 for both
+  the file (flags 0) and rmdir (`P9_UNLINK_AT_REMOVEDIR`) cases. The loopback
+  responder gained `Trenameat` / `Tunlinkat` cases.
+- **joey FS-gamma end-to-end probe** (`usr/joey/joey.c`, post-pivot) — against
+  the REAL Stratum FS, fully idempotent (cleanup-first + cleanup-after, so it
+  leaves no artifact on the persistent pool): create src + create dst with
+  *different* bytes → `SYS_RENAME(src → dst)` → verify dst now holds src's bytes
+  (**atomic replace**) + src is gone → `SYS_UNLINK(dst)` → verify gone; then
+  mkdir → `SYS_UNLINK(REMOVEDIR)` → verify gone. Confirmed at boot: `fs-gamma
+  rename(atomic-replace) + unlink OK` + `fs-gamma rmdir(REMOVEDIR) OK`. This is
+  the first end-to-end exercise of `p9_client_renameat` / `unlinkat`.
 
 ## Known caveats / footguns
 
@@ -196,3 +293,18 @@ handler `spoor_clunk`s `nc`. No double-clunk, no fid leak on the failure paths.
   `OREAD` on the new directory (you `readdir` it; you never write it).
 - **A failed directory create can leave the directory on disk** with no fd (if
   the post-`Tmkdir` walk/open fails). Benign partial-success; the caller sees -1.
+- **`SYS_RENAME` / `SYS_UNLINK` deliberately do NOT clone-walk** (unlike
+  `SYS_WALK_CREATE`). `Trenameat` / `Tunlinkat` act on the dirfid by name and
+  never transition it, so the direct form is both simpler and correct — and it
+  means these ops allocate no transient fid, so the FS-alpha failed-create
+  fid-leak class cannot arise. The original `§9.3` pin specified a clone-walk;
+  that was corrected during impl (it was unnecessary).
+- **Rename durability needs a dir-fsync.** `SYS_RENAME` makes the name swap
+  atomic, but the dirent change's *durability* needs a barrier on the containing
+  directory. A durable-rename caller (corvus's identity-DB swap, A-1b) must
+  follow `SYS_RENAME` with `SYS_FSYNC` on the parent dir fd (→ `Tsync` on the
+  dir). Whether Stratum honors `Tsync`-on-a-directory as a metadata barrier is
+  validated end-to-end by the A-1b cross-reboot persistence test.
+- **Cross-Dev / cross-session rename is rejected, not emulated.** Moving a file
+  between two different mounts is not a single 9P `renameat`; the caller must
+  copy + unlink. v1.0 returns -1.

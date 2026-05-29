@@ -199,6 +199,12 @@ pub const T_SYS_LSEEK: u64            = 51;
 pub const T_SYS_WALK_CREATE: u64      = 54;
 pub const T_SYS_FSYNC: u64            = 55;
 pub const T_SYS_READDIR: u64          = 56;
+// FS-gamma (IDENTITY-DESIGN.md section 9.3): atomic rename/move + remove.
+pub const T_SYS_RENAME: u64           = 57;
+pub const T_SYS_UNLINK: u64           = 58;
+// SYS_UNLINK flags: rmdir an empty directory vs unlink a non-directory.
+// Mirrors the kernel's SYS_UNLINK_REMOVEDIR / wire P9_UNLINK_AT_REMOVEDIR.
+pub const T_UNLINK_REMOVEDIR: u32     = 0x200;
 
 // SYS_WALK_OPEN omode bits — must mirror SYS_WALK_OPEN_OMODE_VALID in
 // kernel/include/thylacine/syscall.h. Plan 9 OREAD/OWRITE/ORDWR/OEXEC
@@ -1490,6 +1496,48 @@ pub unsafe fn t_readdir(fd: i64, buf: *mut u8, buf_len: usize) -> i64 {
         in("x1") buf as u64,
         in("x2") buf_len as u64,
         in("x8") T_SYS_READDIR,
+        options(nostack)
+    );
+    x0
+}
+
+// t_rename — atomically rename/move the single component `oldname` in directory
+// `olddir_fd` to `newname` in `newdir_fd` (both KOBJ_SPOOR dirs, RIGHT_WRITE, or
+// T_WALK_OPEN_FROM_ROOT). POSIX rename / 9P Trenameat: an existing destination is
+// atomically replaced. olddir_fd + newdir_fd must be on the same Dev/session.
+// Returns 0 / -1. FS-gamma (IDENTITY-DESIGN.md section 9.3).
+#[inline(always)]
+pub unsafe fn t_rename(olddir_fd: i64, oldname: *const u8, oldname_len: usize,
+                       newdir_fd: i64, newname: *const u8, newname_len: usize) -> i64 {
+    let mut x0: i64 = olddir_fd;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") oldname as u64,
+        in("x2") oldname_len as u64,
+        in("x3") newdir_fd,
+        in("x4") newname as u64,
+        in("x5") newname_len as u64,
+        in("x8") T_SYS_RENAME,
+        options(nostack)
+    );
+    x0
+}
+
+// t_unlink — remove the single component `name` from directory `parent_fd`
+// (KOBJ_SPOOR, RIGHT_WRITE, or T_WALK_OPEN_FROM_ROOT). flags 0 = unlink a
+// non-directory; T_UNLINK_REMOVEDIR = rmdir an empty directory. Returns 0 / -1.
+// FS-gamma (IDENTITY-DESIGN.md section 9.3).
+#[inline(always)]
+pub unsafe fn t_unlink(parent_fd: i64, name: *const u8, name_len: usize, flags: u32) -> i64 {
+    let mut x0: i64 = parent_fd;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") name as u64,
+        in("x2") name_len as u64,
+        in("x3") flags as u64,
+        in("x8") T_SYS_UNLINK,
         options(nostack)
     );
     x0

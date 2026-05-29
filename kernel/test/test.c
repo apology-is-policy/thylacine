@@ -466,6 +466,8 @@ void test_dev9p_create_file(void);
 void test_dev9p_create_dir(void);
 void test_dev9p_fsync(void);
 void test_dev9p_readdir(void);
+void test_dev9p_rename(void);
+void test_dev9p_unlink(void);
 void test_p9_attached_create_destroy(void);
 void test_p9_attached_handshake_failure_returns_null(void);
 void test_p9_attached_root_spoor_walk_read(void);
@@ -1314,6 +1316,8 @@ struct test_case g_tests[] = {
     { "dev9p.create_dir",              test_dev9p_create_dir,              false, NULL },
     { "dev9p.fsync",                   test_dev9p_fsync,                   false, NULL },
     { "dev9p.readdir",                 test_dev9p_readdir,                 false, NULL },
+    { "dev9p.rename",                  test_dev9p_rename,                  false, NULL },
+    { "dev9p.unlink",                  test_dev9p_unlink,                  false, NULL },
     { "p9_attached.create_destroy",    test_p9_attached_create_destroy,    false, NULL },
     { "p9_attached.handshake_failure_returns_null",
                                        test_p9_attached_handshake_failure_returns_null,

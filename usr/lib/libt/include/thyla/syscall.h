@@ -87,7 +87,13 @@ enum {
     T_SYS_WALK_CREATE = 54,      // FS-mutation foundation: create-then-open a component
     T_SYS_FSYNC       = 55,      // FS-mutation foundation: durability barrier
     T_SYS_READDIR     = 56,      // FS-mutation foundation: directory enumeration
+    T_SYS_RENAME      = 57,      // FS-gamma: atomic rename/move (Trenameat)
+    T_SYS_UNLINK      = 58,      // FS-gamma: remove a file or empty directory (Tunlinkat)
 };
+
+// SYS_UNLINK flags: rmdir an empty directory (vs unlink a non-directory).
+// Mirrors the kernel's SYS_UNLINK_REMOVEDIR / wire P9_UNLINK_AT_REMOVEDIR.
+#define T_UNLINK_REMOVEDIR  0x200u
 
 // Torpor error codes — match kernel's TORPOR_ERR_* (Linux/musl-numeric
 // so the pouch syscall seam will decode them as -errno when the pouch
@@ -1105,6 +1111,51 @@ static inline long t_readdir(long fd, void *buf, size_t buf_len) {
         "svc #0"
         : "+r"(x0)
         : "r"(x1), "r"(x2), "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
+// t_rename — atomically rename/move the single component `oldname` in directory
+// `olddir_fd` to `newname` in `newdir_fd` (both KOBJ_SPOOR directories with
+// RIGHT_WRITE, or T_WALK_OPEN_FROM_ROOT). POSIX rename / 9P Trenameat: an
+// existing destination is atomically replaced. olddir_fd and newdir_fd must be
+// on the same Dev/session. Returns 0 / -1. FS-gamma (IDENTITY-DESIGN.md §9.3).
+__attribute__((always_inline))
+static inline long t_rename(long olddir_fd, const char *oldname, size_t oldname_len,
+                            long newdir_fd, const char *newname, size_t newname_len) {
+    register long x0 __asm__("x0") = olddir_fd;
+    register long x1 __asm__("x1") = (long)(unsigned long)oldname;
+    register long x2 __asm__("x2") = (long)oldname_len;
+    register long x3 __asm__("x3") = newdir_fd;
+    register long x4 __asm__("x4") = (long)(unsigned long)newname;
+    register long x5 __asm__("x5") = (long)newname_len;
+    register long x8 __asm__("x8") = T_SYS_RENAME;
+    __asm__ volatile (
+        "svc #0"
+        : "+r"(x0)
+        : "r"(x1), "r"(x2), "r"(x3), "r"(x4), "r"(x5), "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
+// t_unlink — remove the single component `name` from directory `parent_fd`
+// (KOBJ_SPOOR, RIGHT_WRITE, or T_WALK_OPEN_FROM_ROOT). flags 0 = unlink a
+// non-directory; T_UNLINK_REMOVEDIR = rmdir an empty directory. Returns 0 / -1.
+// FS-gamma (IDENTITY-DESIGN.md §9.3).
+__attribute__((always_inline))
+static inline long t_unlink(long parent_fd, const char *name, size_t name_len,
+                            unsigned long flags) {
+    register long x0 __asm__("x0") = parent_fd;
+    register long x1 __asm__("x1") = (long)(unsigned long)name;
+    register long x2 __asm__("x2") = (long)name_len;
+    register long x3 __asm__("x3") = (long)flags;
+    register long x8 __asm__("x8") = T_SYS_UNLINK;
+    __asm__ volatile (
+        "svc #0"
+        : "+r"(x0)
+        : "r"(x1), "r"(x2), "r"(x3), "r"(x8)
         : "memory", "cc"
     );
     return x0;

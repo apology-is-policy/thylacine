@@ -961,17 +961,22 @@ SYS_RENAME(olddir_fd, oldname_va, oldname_len, newdir_fd, newname_va, newname_le
   x5 = newname_len 1 .. 64; reject '/' and '\0'.
 ```
 
-- **Mechanism:** the handler clone-walks `olddir_fd` to a private cursor A and
-  `newdir_fd` to a private cursor B (the §9.2 create discipline — a server-side
-  op never mutates a fid the caller still holds), requires A and B on the **same
-  Dev** (and, for dev9p, the same `p9_client` session), then `dev->rename(A,
-  oldname, B, newname)` → `p9_client_renameat(client, A->fid, oldname, B->fid,
-  newname)`. Both cursors are clunked on return. `Trenameat` operates on the
-  dirfids *by name*; it neither consumes nor transitions them (distinct from the
-  fid-exclusive by-fid `Trename`, which is not used here).
+- **Mechanism:** the handler resolves `olddir_fd` and `newdir_fd` to the
+  caller's looked-up dir Spoors (RIGHT_WRITE on each), requires them on the
+  **same Dev** (and, for dev9p, the same `p9_client` session), then
+  `dev->rename(od, oldname, nd, newname)` → `p9_client_renameat(client, od->fid,
+  oldname, nd->fid, newname)`. **No clone-walk** (unlike `SYS_WALK_CREATE`):
+  `Trenameat` operates on the dirfids *by name* and neither consumes nor
+  transitions them, so the handler runs the op directly on the looked-up Spoors
+  — the `SYS_FSYNC` / `SYS_READDIR` pattern, not the create pattern. (The
+  fid-exclusive *by-fid* `Trename` is not used here; renameat is the dir+name
+  verb.) **Refinement vs the original pin** (corrected during impl, 2026-05-29):
+  the first §9.3 draft specified a `SYS_WALK_CREATE`-style clone-walk; that is
+  unnecessary because renameat/unlinkat never transition the dirfid — the direct
+  form is both simpler and correct.
 - **Same-directory rename** (corvus's swap): `olddir_fd == newdir_fd` (or both
-  FROM_ROOT) is the common case; the handler still clone-walks each to an
-  independent cursor (renameat tolerates `olddir == newdir`).
+  FROM_ROOT) is the common case; the same dir Spoor is used for both
+  (`p9_client_renameat` tolerates `olddirfid == newdirfid`).
 - **Rights gate:** `RIGHT_WRITE` on **both** dir fds (both directories are
   mutated). FROM_ROOT resolves to the Territory root as in `SYS_WALK_CREATE`.
 - **Cross-Dev reject:** A and B on different Devs → -1. A 9P `renameat` is within
@@ -994,9 +999,9 @@ SYS_UNLINK(parent_fd, name_va, name_len, flags) -> 0 / -1
                    directory. Any other bit set -> reject.
 ```
 
-- **Mechanism:** clone-walk `parent_fd` to a private cursor; `dev->unlink(cursor,
-  name, flags)` → `p9_client_unlinkat(client, cursor->fid, name, flags)`; clunk
-  the cursor.
+- **Mechanism:** resolve `parent_fd` to the looked-up dir Spoor (no clone-walk,
+  as for rename); `dev->unlink(parent, name, flags)` →
+  `p9_client_unlinkat(client, parent->fid, name, flags)`.
 - **Rights gate:** `RIGHT_WRITE` on the parent dir fd.
 - **flags:** validated against `{0, SYS_UNLINK_REMOVEDIR}`; any other bit → -1.
   The flag selects file-vs-directory removal mode (a mismatch → server `Rlerror`).
@@ -1023,9 +1028,11 @@ int (*unlink)(struct Spoor *parent, const char *name, u32 flags);
 - `devramfs` leaves both NULL at v1.0 (ramfs mutation deferred; the load-bearing
   target is dev9p / the disk-backed Stratum FS — consistent with `.readdir`
   being dev9p-only). Kernel loopback tests drive dev9p (as FS-alpha/beta did).
-- **Two-cursor invariant** (new for `.rename`): the handler validates `olddir`
-  and `newdir` share a Dev before calling `dev->rename`; a cross-Dev rename is
-  rejected at the handler and never reaches a Dev op.
+- **Cross-Dev invariant** (rename takes two dir fds): the handler validates
+  `olddir` and `newdir` share a Dev before calling `dev->rename`; a cross-Dev
+  rename is rejected at the handler and never reaches a Dev op (`dev9p_rename`
+  adds the same-`p9_client`-session check, since two dev9p mounts are distinct
+  sessions and a 9P renameat is within one session).
 
 **The durability detail rename-swap relies on.** A `rename(tmp → real)` makes the
 name swap atomic, but the *durability* of the dirent change needs a barrier on
@@ -1044,5 +1051,5 @@ kernel loopback tests + a joey E2E against real Stratum: create→rename→read-
 under the new name; create→unlink→gone; mkdir→rmdir-via-REMOVEDIR). **Then one
 focused adversarial audit** (the first end-to-end exercise of
 `p9_client_renameat` / `unlinkat`; the rename-swap durability path; the
-two-cursor + cross-Dev invariant; fid lifecycle on every error path).
+cross-Dev + same-session reject; fid lifecycle on every error path).
 **Then A-1b** builds corvus persistence on the atomic-swap substrate.

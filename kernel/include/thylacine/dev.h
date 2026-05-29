@@ -135,6 +135,24 @@ struct Dev {
     int            (*fsync)(struct Spoor *c, u32 datasync);
     long           (*readdir)(struct Spoor *c, void *buf, long n, s64 off);
 
+    // Rename + unlink (FS-mutation foundation FS-gamma; IDENTITY-DESIGN.md
+    // §9.3). Both NULL-permitted (like .fsync / .readdir); only Devs that
+    // genuinely back them set them (dev9p at v1.0). The directory Spoors are the
+    // caller's looked-up cursors (NOT clone-walked — renameat/unlinkat operate
+    // on the dirfid by name without transitioning it, unlike .create).
+    //   rename(olddir, oldname, newdir, newname) — move `oldname` under olddir
+    //     to `newname` under newdir; an existing destination is atomically
+    //     replaced (POSIX rename / 9P Trenameat). olddir + newdir must share the
+    //     dev (the SYS_RENAME handler checks) AND, for dev9p, the same session
+    //     (dev9p_rename checks). Returns 0 on success, -1 on failure. NULL slot
+    //     => SYS_RENAME returns -1.
+    //   unlink(parent, name, flags) — remove `name` under parent; flags 0 = a
+    //     non-directory, SYS_UNLINK_REMOVEDIR = an empty directory (9P
+    //     Tunlinkat). Returns 0 / -1. NULL slot => SYS_UNLINK returns -1.
+    int            (*rename)(struct Spoor *olddir, const char *oldname,
+                             struct Spoor *newdir, const char *newname);
+    int            (*unlink)(struct Spoor *parent, const char *name, u32 flags);
+
     // Readiness probe — the SYS_POLL plumbing (§23.3; specs/poll.tla).
     //   poll(c, events, pw)
     //     Returns the subset of `events` currently ready on c. If `pw`

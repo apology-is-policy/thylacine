@@ -209,6 +209,22 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
         for (size_t i = 0; i < sizeof(nm); i++) resp[o++] = nm[i];
         return (int)total;
     }
+    if (type == P9_TRENAMEAT) {
+        // Rrenameat = header only (empty body), like Rfsync.
+        if (resp_cap < P9_HDR_LEN) return -1;
+        resp[0] = 7; resp[1] = 0; resp[2] = 0; resp[3] = 0;
+        resp[4] = P9_RRENAMEAT;
+        resp[5] = (u8)(tag & 0xff); resp[6] = (u8)((tag >> 8) & 0xff);
+        return (int)P9_HDR_LEN;
+    }
+    if (type == P9_TUNLINKAT) {
+        // Runlinkat = header only (empty body).
+        if (resp_cap < P9_HDR_LEN) return -1;
+        resp[0] = 7; resp[1] = 0; resp[2] = 0; resp[3] = 0;
+        resp[4] = P9_RUNLINKAT;
+        resp[5] = (u8)(tag & 0xff); resp[6] = (u8)((tag >> 8) & 0xff);
+        return (int)P9_HDR_LEN;
+    }
     return -1;
 }
 
@@ -456,5 +472,31 @@ void test_dev9p_readdir(void) {
     TEST_EXPECT_EQ((u64)buf[22], (u64)3, "dirent name_len == 3");
     TEST_ASSERT(buf[24] == 'f' && buf[25] == 'o' && buf[26] == 'o',
                 "dirent name is 'foo'");
+    teardown(root);
+}
+
+// dev9p.rename routes through p9_client_renameat -> Trenameat; the responder
+// Rrenameat makes it return 0. olddir == newdir == root exercises the same-Dev
+// same-session path (the common case -- corvus's identity.db tmp->real swap).
+void test_dev9p_rename(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "root");
+    TEST_ASSERT(dev9p.rename != NULL, "dev9p has .rename slot");
+    TEST_EXPECT_EQ((u64)dev9p.rename(root, "old", root, "new"), (u64)0,
+                    "rename(old -> new) within one dir -> 0");
+    teardown(root);
+}
+
+// dev9p.unlink routes through p9_client_unlinkat -> Tunlinkat; the responder
+// Runlinkat makes it return 0. Both the file (flags 0) and the rmdir
+// (P9_UNLINK_AT_REMOVEDIR) flag values reach the wire intact.
+void test_dev9p_unlink(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "root");
+    TEST_ASSERT(dev9p.unlink != NULL, "dev9p has .unlink slot");
+    TEST_EXPECT_EQ((u64)dev9p.unlink(root, "victim", 0u), (u64)0,
+                    "unlink(file) -> 0");
+    TEST_EXPECT_EQ((u64)dev9p.unlink(root, "emptydir", P9_UNLINK_AT_REMOVEDIR),
+                    (u64)0, "unlink(REMOVEDIR) -> 0");
     teardown(root);
 }

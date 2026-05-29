@@ -1146,6 +1146,55 @@ enum {
     // SYS_RW_MAX; buf_va outside user-VA; the Dev has no .readdir slot; server
     // Rlerror. Audit-bearing: CLAUDE.md FS-mutation-syscalls row.
     SYS_READDIR      = 56,   // arg: fd (x0), buf_va (x1), buf_len (x2)
+
+    // Convergence-detour FS-gamma (IDENTITY-DESIGN.md §9.3). rename + unlink,
+    // pulled forward ahead of A-1b to give corvus's identity-DB persistence the
+    // classic write-tmp + fsync + atomic rename-swap substrate (and owed for the
+    // A-2 coreutils mv/rm/rmdir). The kernel 9P client already implements the
+    // wire half (p9_client_renameat / unlinkat); these are the syscall wrappers
+    // + two new Dev vtable slots (.rename / .unlink). Unlike SYS_WALK_CREATE,
+    // renameat/unlinkat operate on the dirfid(s) BY NAME and do not transition
+    // them, so the handlers run the op DIRECTLY on the looked-up dir Spoor(s)
+    // with no clone-walk (mirrors SYS_FSYNC / SYS_READDIR).
+    //
+    // SYS_RENAME(olddir_fd, oldname_va, oldname_len, newdir_fd, newname_va, newname_len) -> 0 / -1
+    //   Atomically rename/move the single component `oldname` in directory
+    //   `olddir_fd` to `newname` in `newdir_fd`. POSIX rename(2) / 9P Trenameat:
+    //   an existing destination is ATOMICALLY REPLACED (the property A-1b's
+    //   DB-swap relies on).
+    //   x0 = olddir_fd  (hidx_t; KOBJ_SPOOR directory with RIGHT_WRITE -- OR the
+    //                    SYS_WALK_OPEN_FROM_ROOT sentinel (u64)-1 for the
+    //                    Territory root. Both directories are mutated.)
+    //   x1 = oldname_va (user-VA of the source single-component name.)
+    //   x2 = oldname_len(1 .. SYS_WALK_OPEN_NAME_MAX; reject '/' '\0' "." "..".)
+    //   x3 = newdir_fd  (hidx_t; KOBJ_SPOOR directory with RIGHT_WRITE -- OR
+    //                    FROM_ROOT. Must be the SAME Dev as olddir_fd -- a 9P
+    //                    renameat is within one server; cross-Dev -> -1.)
+    //   x4 = newname_va (user-VA of the destination single-component name.)
+    //   x5 = newname_len(1 .. SYS_WALK_OPEN_NAME_MAX; reject '/' '\0' "." "..".)
+    //   Returns 0 on success, -1 on: either fd not KOBJ_SPOOR / missing
+    //   RIGHT_WRITE; FROM_ROOT with no pivoted root; name bounds / '/' / '\0' /
+    //   "." / ".."; cross-Dev (or, for dev9p, cross-session); Dev has no .rename
+    //   slot; server Rlerror (source ENOENT; dest a non-empty dir; EXDEV; perm).
+    //   Audit-bearing: CLAUDE.md FS-mutation-syscalls (rename / unlink) row.
+    SYS_RENAME       = 57,   // arg: olddir_fd, oldname_va, oldname_len, newdir_fd, newname_va, newname_len
+
+    // SYS_UNLINK(parent_fd, name_va, name_len, flags) -> 0 / -1 (FS-gamma; §9.3).
+    //   Remove the single component `name` from directory `parent_fd` -- a
+    //   non-directory, or (with SYS_UNLINK_REMOVEDIR) an EMPTY directory. 9P
+    //   Tunlinkat.
+    //   x0 = parent_fd  (hidx_t; KOBJ_SPOOR directory with RIGHT_WRITE -- OR
+    //                    FROM_ROOT.)
+    //   x1 = name_va    (user-VA of the single-component name to remove.)
+    //   x2 = name_len   (1 .. SYS_WALK_OPEN_NAME_MAX; reject '/' '\0' "." "..".)
+    //   x3 = flags      (u32; 0 = unlink a non-directory; SYS_UNLINK_REMOVEDIR
+    //                    = rmdir an empty directory. Any other bit set -> -1.)
+    //   Returns 0 on success, -1 on: parent not KOBJ_SPOOR / missing
+    //   RIGHT_WRITE; FROM_ROOT with no pivoted root; name bounds / '/' / '\0' /
+    //   "." / ".."; reserved flag bit; Dev has no .unlink slot; server Rlerror
+    //   (ENOENT; ENOTEMPTY for rmdir on a non-empty dir; EISDIR/ENOTDIR mode
+    //   mismatch; perm). Audit-bearing: CLAUDE.md FS-mutation (rename/unlink) row.
+    SYS_UNLINK       = 58,   // arg: parent_fd, name_va, name_len, flags
 };
 
 // SYS_WALK_OPEN's FROM_ROOT sentinel: when passed as the spoor_fd, the
@@ -1347,6 +1396,13 @@ _Static_assert(__builtin_offsetof(struct t_stat, blocks)    == 64, "t_stat.block
 // is rejected with -1 (so a future bit cannot be silently ignored).
 #define SYS_WALK_CREATE_DMDIR       0x80000000u
 #define SYS_WALK_CREATE_PERM_VALID  (0x1FFu | SYS_WALK_CREATE_DMDIR)
+
+// SYS_UNLINK flags: the only permitted bit at v1.0 is SYS_UNLINK_REMOVEDIR
+// (rmdir an empty directory vs unlink a non-directory). Mirrors the wire
+// constant P9_UNLINK_AT_REMOVEDIR; passed straight through dev9p_unlink to
+// p9_client_unlinkat (a _Static_assert in kernel/syscall.c pins the equality).
+// Any other bit in the flags arg is rejected with -1.
+#define SYS_UNLINK_REMOVEDIR        0x200u
 
 // Maximum length for a single SYS_BURROW_ATTACH (and the matching
 // SYS_BURROW_DETACH). A v1.0 sanity bound: burrow_create_anon allocates

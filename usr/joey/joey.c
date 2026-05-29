@@ -1691,6 +1691,122 @@ int main(void) {
                 t_putstr(" bytes)\n");
             }
 
+            // === FS-gamma E2E (SYS_RENAME + SYS_UNLINK) ===
+            // rename (atomic replace) + unlink + rmdir against the real Stratum
+            // FS. Each step cleans up first AND after, so the sequence is fully
+            // idempotent across the persistent pool (no artifact survives the
+            // boot) -- the cleanup-first unlink also clears anything a crashed
+            // prior boot left behind.
+            {
+                const char gsrc[] = "fs-gamma-src.txt";
+                const char gdst[] = "fs-gamma-dst.txt";
+                const char src_data[] = "RENAMED-SRC\n";
+                const char dst_data[] = "OLD-DST-DATA\n";
+
+                // Cleanup-first: drop any stale src/dst from a crashed boot.
+                (void)t_unlink(T_WALK_OPEN_FROM_ROOT, gsrc, sizeof(gsrc) - 1, 0u);
+                (void)t_unlink(T_WALK_OPEN_FROM_ROOT, gdst, sizeof(gdst) - 1, 0u);
+
+                // Create src (the bytes we expect to survive the rename).
+                long sf = t_walk_create(T_WALK_OPEN_FROM_ROOT, gsrc,
+                                        sizeof(gsrc) - 1, T_OWRITE, 0644u);
+                if (sf < 0 ||
+                    write_all(sf, (const unsigned char *)src_data,
+                              sizeof(src_data) - 1) != 0 ||
+                    t_fsync(sf, 0) != 0) {
+                    t_putstr("joey: fs-gamma src create/write/fsync FAILED\n");
+                    return 1;
+                }
+                (void)t_close(sf);
+
+                // Create dst with DIFFERENT bytes -- rename must atomically
+                // REPLACE it (the property corvus's identity.db swap relies on).
+                long df = t_walk_create(T_WALK_OPEN_FROM_ROOT, gdst,
+                                        sizeof(gdst) - 1, T_OWRITE, 0644u);
+                if (df < 0 ||
+                    write_all(df, (const unsigned char *)dst_data,
+                              sizeof(dst_data) - 1) != 0 ||
+                    t_fsync(df, 0) != 0) {
+                    t_putstr("joey: fs-gamma dst pre-create FAILED\n");
+                    return 1;
+                }
+                (void)t_close(df);
+
+                // Atomic rename src -> dst (replaces the existing dst).
+                if (t_rename(T_WALK_OPEN_FROM_ROOT, gsrc, sizeof(gsrc) - 1,
+                             T_WALK_OPEN_FROM_ROOT, gdst, sizeof(gdst) - 1) != 0) {
+                    t_putstr("joey: fs-gamma rename FAILED\n");
+                    return 1;
+                }
+
+                // src must be gone; dst must now hold SRC's bytes.
+                long chk = t_walk_open(T_WALK_OPEN_FROM_ROOT, gsrc,
+                                       sizeof(gsrc) - 1, T_OREAD);
+                if (chk >= 0) {
+                    (void)t_close(chk);
+                    t_putstr("joey: fs-gamma rename left src behind\n");
+                    return 1;
+                }
+                long rdf = t_walk_open(T_WALK_OPEN_FROM_ROOT, gdst,
+                                       sizeof(gdst) - 1, T_OREAD);
+                if (rdf < 0) {
+                    t_putstr("joey: fs-gamma renamed dst missing\n");
+                    return 1;
+                }
+                unsigned char gback[32];
+                long gn = t_read(rdf, gback, sizeof(gback));
+                (void)t_close(rdf);
+                if (gn != (long)(sizeof(src_data) - 1)) {
+                    t_putstr("joey: fs-gamma replace wrong len\n");
+                    return 1;
+                }
+                for (long i = 0; i < gn; i++) {
+                    if (gback[i] != (unsigned char)src_data[i]) {
+                        t_putstr("joey: fs-gamma atomic-replace content mismatch\n");
+                        return 1;
+                    }
+                }
+
+                // unlink the renamed dst; it must then be gone.
+                if (t_unlink(T_WALK_OPEN_FROM_ROOT, gdst, sizeof(gdst) - 1, 0u) != 0) {
+                    t_putstr("joey: fs-gamma unlink FAILED\n");
+                    return 1;
+                }
+                long gone = t_walk_open(T_WALK_OPEN_FROM_ROOT, gdst,
+                                        sizeof(gdst) - 1, T_OREAD);
+                if (gone >= 0) {
+                    (void)t_close(gone);
+                    t_putstr("joey: fs-gamma unlink did not remove dst\n");
+                    return 1;
+                }
+                t_putstr("joey: fs-gamma rename(atomic-replace) + unlink OK\n");
+
+                // rmdir an empty directory via SYS_UNLINK_REMOVEDIR.
+                const char grd[] = "fs-gamma-rmdir";
+                (void)t_unlink(T_WALK_OPEN_FROM_ROOT, grd, sizeof(grd) - 1,
+                               T_UNLINK_REMOVEDIR);                 // stale cleanup
+                long gd = t_walk_create(T_WALK_OPEN_FROM_ROOT, grd, sizeof(grd) - 1,
+                                        T_OREAD, T_WALK_CREATE_DMDIR | 0755u);
+                if (gd < 0) {
+                    t_putstr("joey: fs-gamma mkdir FAILED\n");
+                    return 1;
+                }
+                (void)t_close(gd);
+                if (t_unlink(T_WALK_OPEN_FROM_ROOT, grd, sizeof(grd) - 1,
+                             T_UNLINK_REMOVEDIR) != 0) {
+                    t_putstr("joey: fs-gamma rmdir FAILED\n");
+                    return 1;
+                }
+                long rgone = t_walk_open(T_WALK_OPEN_FROM_ROOT, grd,
+                                         sizeof(grd) - 1, T_OREAD);
+                if (rgone >= 0) {
+                    (void)t_close(rgone);
+                    t_putstr("joey: fs-gamma rmdir did not remove dir\n");
+                    return 1;
+                }
+                t_putstr("joey: fs-gamma rmdir(REMOVEDIR) OK\n");
+            }
+
             (void)t_close(sd_rd);
         }
     }
