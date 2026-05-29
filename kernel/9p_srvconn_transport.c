@@ -27,6 +27,20 @@ static int srvconn_transport_send(void *ctx, const u8 *buf, size_t len) {
     if (!buf && len > 0)                         return -1;
     if (len == 0)                                return 0;
 
+    // Per-op deadline: a 9P round trip is do_send -> do_recv. Arming the
+    // deadline HERE (once, at the request send) gives each op its own full
+    // OP_DEADLINE budget for the response. The prior scheme armed only in
+    // recv "if missing or lapsed", which made a sequence of dev9p ops SHARE
+    // one deadline window -- a slow op (e.g. the first extent-bearing
+    // Tsync, whose stm_fs_commit flushes many blocks over QEMU-TCG virtio)
+    // would consume most of the 30s, starving the NEXT op's recv into an
+    // immediate lapsed-deadline timeout (no bytes received). Arming at send
+    // restores the documented "every op bounded by a fresh OP_DEADLINE"
+    // backstop. The recv-side auto-arm remains as defense-in-depth for any
+    // recv not preceded by this send (none in p9_transport_round_trip).
+    srvconn_set_client_deadline(st->cn,
+        timer_now_ns() + SRVCONN_OP_DEADLINE_NS);
+
     // R1 F9 close: simplified. `srvconn_client_send` returns either
     // the full `len` (success), 0 (only when len == 0, handled above),
     // or -1 (torn rings / bad args). The "short write" loop the
