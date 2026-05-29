@@ -1626,7 +1626,16 @@ static s64 sys_walk_open_handler(u64 spoor_fd_raw, u64 name_va,
     // a per-Dev policy hook that intersects this mask with Dev-defined
     // upper bounds. At v1.0 the policy is "9P-server-mediated"; this
     // comment is the contract for future walkable Devs.
-    rights_t r = RIGHT_READ | RIGHT_WRITE | RIGHT_TRANSFER;
+    //
+    // F5 (A-1.7 audit): a T_OPATH (non-opened) handle is a directory
+    // navigation / capability base, not a byte-I/O channel -- born with
+    // least authority (no RIGHT_TRANSFER), so a service handed one as a
+    // confined storage capability cannot 9P-transfer it once the Phase-5+
+    // transfer surface lands. A normally-opened handle keeps the
+    // R|W|TRANSFER envelope (unchanged).
+    rights_t r = (omode_raw & SYS_WALK_OPEN_OPATH)
+                     ? (RIGHT_READ | RIGHT_WRITE)
+                     : (RIGHT_READ | RIGHT_WRITE | RIGHT_TRANSFER);
     hidx_t fd = handle_alloc(p, KOBJ_SPOOR, r, nc);
     if (fd < 0) {
         spoor_clunk(nc);

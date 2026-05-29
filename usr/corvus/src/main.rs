@@ -2073,6 +2073,20 @@ unsafe fn corvus_cap_smoke() -> bool {
 pub extern "C" fn rs_main() -> i64 {
     t_putstr("corvus: starting (P5-corvus-srv-impl-b3b)\n");
 
+    // A-1.7 (F2): confine to the handed storage-root capability (fd 0) as the
+    // FIRST action -- before anything else -- so there is no ambient-FS window.
+    // corvus inherits joey's broad Stratum root via territory_clone; this chroot
+    // displaces it (territory_chroot spoor_clunks the old root, spoor_refs the
+    // cap), making corvus's filesystem world the capability (I-23). joey ALWAYS
+    // hands the capability now, so a missing/invalid fd 0 is a fatal boot error,
+    // not a fallback. chroot is a raw syscall -- no heap needed yet.
+    unsafe {
+        if t_chroot(0) != 0 {
+            t_putstr("corvus: FATAL no storage capability at fd 0\n");
+            libthyla_rs::t_exits(1);
+        }
+    }
+
     unsafe {
         heap_init();
         user_states_init();
@@ -2099,20 +2113,15 @@ pub extern "C" fn rs_main() -> i64 {
 
     t_putstr("corvus: ready (hardening applied; serving /srv/corvus)\n");
 
-    // A-1.7: confine corvus to the storage-root capability joey hands at
-    // fd 0 -- chroot so corvus's filesystem world IS its storage (I-23).
-    // Guarded for the incremental boot-reorder: until joey hands the
-    // capability, chroot(0) fails and corvus runs unconfined as before.
+    // A-1.7: corvus is already chroot'd to its storage capability (the first
+    // action in rs_main, F2). Prove confinement: create/read WITHIN the
+    // capability + assert a path ABOVE it is unreachable post-chroot.
     unsafe {
-        if t_chroot(0) == 0 {
-            if corvus_cap_smoke() {
-                t_putstr("corvus: storage capability OK (confined; /thylacine-version unreachable)\n");
-            } else {
-                t_putstr("corvus: storage capability smoke FAILED\n");
-                return 1;
-            }
+        if corvus_cap_smoke() {
+            t_putstr("corvus: storage capability OK (confined; /thylacine-version unreachable)\n");
         } else {
-            t_putstr("corvus: no storage capability at fd 0; unconfined (pre-A-1.7-reorder)\n");
+            t_putstr("corvus: storage capability smoke FAILED\n");
+            return 1;
         }
     }
 

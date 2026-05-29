@@ -189,6 +189,10 @@ callers (same pull-forward pattern as A-1.5's `SYS_WALK_CREATE`).
 
 ### FS-delta · O_PATH walkable directory handles *(3rd-order detour; precedes A-1.7; design-first)*
 
+**LANDED 2026-05-29** -- scripture `cd22572` + impl `bb59c6b` (`T_OPATH=0x80`;
+`SYS_WALK_OPEN_OMODE_VALID` 0x13->0x93; F5 audit-fix: T_OPATH handles born `R|W`).
+624/624, no regression. Audit folded into the A-1.7 R1 close (CLEAN).
+
 **Surfaced 2026-05-29 building A-1.7; user-chosen Option 1 (corrects a mistake).**
 A-1.7's confinement must create files in a confined subtree -- which hit a real
 wall: `SYS_WALK_OPEN`/`SYS_WALK_CREATE` `Tlopen` the fid they return, and 9P
@@ -218,6 +222,18 @@ FS-delta restores it. **Full design + ABI: `IDENTITY-DESIGN.md §9.4`.**
 
 ### A-1.7 · Capability-scoped service storage *(2nd-order detour; pulled before A-1b; design-first)*
 
+**LANDED 2026-05-29** -- `41e417d` scripture / `aa11b17` corvus-side / `67f3ec6`
+joey-side + audit-close fixes. corvus is confined to its handed `/var/lib/corvus`
+capability on the real disk-backed Stratum FS ("storage capability OK (confined;
+/thylacine-version unreachable)"); 624/624. **Audit R1 CLEAN** (0 P0 / 1 P1 / 1 P2
+/ 3 P3): F1 (the "withholding TRANSFER blocks re-handing" claim was false ->
+scripture-corrected to the monotonic bound; security core holds), F2 (confinement
+was cooperative -> corvus chroots FIRST), F5 (`T_OPATH` born `R|W`); F3 (smoke
+proof), F4 (no T_OPATH unit test) documented P3. The feared shared-9P-session
+lifetime (corvus outlives joey) + fid/tag interleaving traced SOUND. Reference doc
+`98-capability-storage.md`; closed list `audit_a1_7_fs_delta_closed_list.md`.
+**A-1b RESUMES next on this substrate** (corvus identity DB inside the chrooted cap).
+
 **Reorder, user-chosen 2026-05-29.** While pinning A-1b's persistence, the
 question "where does a service's storage live + with what authority?" surfaced a
 foundational substrate. Rather than build corvus on the ambient-inherited-root
@@ -233,8 +249,11 @@ after this closes.
 §3.6 + invariant **I-23** (a service's FS authority is bounded by the storage
 capability it is handed). A service is *handed* a storage-root `KObj_Spoor` at
 spawn (endowed like fd 0/1/2, but for state), reduced to `R|W` (no `TRANSFER` --
-cannot re-hand), and does all persistence relative to that base fd. POLA for
-service state, by mechanism not policy.
+least authority), chroots to it as its FIRST action (filesystem world IS the cap),
+and does all persistence at `FROM_ROOT` (now the cap). POLA for service state.
+[A-1.7 audit R1 CLEAN -- F1: authority is bounded `<=` grant + subtree + monotonic
+(the "withholding TRANSFER blocks re-handing" claim was false; scripture-corrected);
+F2: confinement is cooperative (corvus chroots first), spawner-set-root is v1.x.]
 
 - **Builds (userspace, on the FS-delta O_PATH primitive landed first):**
   - joey (post-pivot): `mkdir -p /var/lib/corvus` (create-then-reopen-`T_OPATH`
