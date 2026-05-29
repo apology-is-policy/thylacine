@@ -187,6 +187,31 @@ callers (same pull-forward pattern as A-1.5's `SYS_WALK_CREATE`).
   `docs/reference/96-fs-mutation.md` FS-gamma sections. **A-1b now builds corvus
   persistence on this atomic-swap substrate.**
 
+### FS-delta · O_PATH walkable directory handles *(3rd-order detour; precedes A-1.7; design-first)*
+
+**Surfaced 2026-05-29 building A-1.7; user-chosen Option 1 (corrects a mistake).**
+A-1.7's confinement must create files in a confined subtree -- which hit a real
+wall: `SYS_WALK_OPEN`/`SYS_WALK_CREATE` `Tlopen` the fid they return, and 9P
+forbids `Twalk` from an opened fid, so children cannot be created under any
+returned handle; only the non-opened territory root works. Net: no nested dirs,
+no confined writable subtree (and `File::open` multi-component is latently
+broken). A Plan 9 divergence (Plan 9 walk = clone-UNOPENED; open is separate);
+FS-delta restores it. **Full design + ABI: `IDENTITY-DESIGN.md §9.4`.**
+
+- **Builds:** `T_OPATH = 0x80` omode flag (`SYS_WALK_OPEN_OMODE_VALID` 0x13 ->
+  0x93); `sys_walk_open_handler` skips `dev->open` when `T_OPATH` -> returns a
+  non-opened, walkable `KObj_Spoor` (rights `R|W|TRANSFER` unchanged). `T_OPATH`
+  in syscall.h + libt + libthyla-rs. No new syscall number; dev9p unchanged.
+  Lineage: Linux `O_PATH`; Plan 9 walk; Fuchsia/Genode dir-handles.
+- **Depends:** A-1.5 (the walk/create surface). **Used by:** A-1.7 (mkdir -p +
+  the chroot-target capability); `File::open` multi-component (fixes the latent
+  bug); A-2 coreutils (`mkdir -p`, `cd`).
+- **Audit:** folded into the A-1.7 round (its prerequisite) -- the no-open walk
+  path must bound the name, reject `..`/`/`/`\0`, stamp rights identically, leave
+  no half-walked Spoor on error.
+- **Tests:** a kernel loopback test (O_PATH walk returns non-opened; child-create
+  under it succeeds where a normal-open base returns -1) + the A-1.7 joey E2E.
+
 ### A-1.7 · Capability-scoped service storage *(2nd-order detour; pulled before A-1b; design-first)*
 
 **Reorder, user-chosen 2026-05-29.** While pinning A-1b's persistence, the
@@ -207,22 +232,27 @@ spawn (endowed like fd 0/1/2, but for state), reduced to `R|W` (no `TRANSFER` --
 cannot re-hand), and does all persistence relative to that base fd. POLA for
 service state, by mechanism not policy.
 
-- **Builds (userspace only; ZERO new kernel surface -- verified 2026-05-29):**
-  - joey (post-pivot): `mkdir`-via-DMDIR `/var/lib/corvus` -> `walk_open` ->
-    `handle_dup` to `R|W` (drop `TRANSFER`) -> endow as corvus's storage fd via the
-    existing `t_spawn_with_perms` fds array.
-  - corvus: take the handed fd as `storage_root`; drive all FS ops (`walk_open` /
-    `walk_create` / `rename` / `unlink` / `fsync`) relative to it; a confinement
-    smoke (write + read a file in the capability; prove no ambient reach).
-  - libthyla-rs: a small inherited-storage-fd helper if it earns its keep.
-- **Why zero kernel work:** `walk_open` stamps `R|W|TRANSFER` on the returned
-  handle (`syscall.c`), so a walk-opened nested dir is a valid mutation base;
-  `handle_dup` reduces rights subset-checked (`handle.c`, the I-6 point); spawn
-  installs arbitrary `KObj_Spoor` preserving I-6; `SYS_MOUNT` grafts a source
-  Spoor (RIGHT_READ-gated) for the optional `/state` mount.
-- **Depends:** the post-pivot Stratum root (so joey has a persistent place to scope
-  from); A-1.5/A-1.6 (the FS-mutation surface). **Used by:** A-1b (corvus
-  persistence); every future system daemon's storage.
+- **Builds (userspace, on the FS-delta O_PATH primitive landed first):**
+  - joey (post-pivot): `mkdir -p /var/lib/corvus` (create-then-reopen-`T_OPATH`
+    per component) -> a NON-OPENED walkable handle -> `handle_dup` to `R|W` (drop
+    `TRANSFER`) -> endow as corvus's fd 0 via the existing `t_spawn_with_perms`
+    fds array.
+  - corvus: `SYS_CHROOT` to fd 0 (the non-opened capability) so its filesystem
+    world IS the storage dir; create/read state at `FROM_ROOT`; a confinement
+    smoke (write+read a file; prove a path above the cap is unreachable). [the
+    corvus-side landed guarded at `aa11b17`.]
+- **Why FS-delta is needed (the "zero kernel surface" claim was WRONG):**
+  `walk_open`/`walk_create` `Tlopen` the returned fid, and 9P forbids `Twalk`
+  from an opened fid -- so a returned handle is NOT a valid create/walk base for
+  children (confirmed: `mkdir var`@root=fd0, `mkdir lib` UNDER it=-1). FS-delta
+  (`T_OPATH`; IDENTITY §9.4) adds a walk-without-open mode -> a non-opened
+  walkable handle, which IS a valid base + a valid chroot target. `handle_dup`
+  reduces rights subset-checked (`handle.c`, the I-6 point); spawn installs
+  arbitrary `KObj_Spoor` preserving I-6; `SYS_CHROOT` gates `RIGHT_READ`.
+- **Depends:** **FS-delta** (the O_PATH primitive, landed first); the post-pivot
+  Stratum root (so joey has a persistent place to scope from); A-1.5/A-1.6 (the
+  FS-mutation surface). **Used by:** A-1b (corvus persistence); every future
+  system daemon's storage.
 - **Audit:** the capability/privilege surface -- spawn-time rights reduction
   (`R|W`, no `TRANSFER` -> no re-hand), no-escape confinement (the service cannot
   name a path outside its storage subtree), I-6 monotonicity through the spawn-fd

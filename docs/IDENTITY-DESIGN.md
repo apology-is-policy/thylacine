@@ -1059,3 +1059,53 @@ focused adversarial audit** (the first end-to-end exercise of
 `p9_client_renameat` / `unlinkat`; the rename-swap durability path; the
 cross-Dev + same-session reject; fid lifecycle on every error path).
 **Then A-1b** builds corvus persistence on the atomic-swap substrate.
+
+### 9.4 FS-delta -- O_PATH walkable directory handles (RESOLVED 2026-05-29; precedes A-1.7)
+
+**The gap (empirically surfaced building A-1.7).** `SYS_WALK_OPEN` and
+`SYS_WALK_CREATE` both `Tlopen` the fid they return. 9P2000.L forbids `Twalk`
+from an opened fid, so a returned handle CANNOT be the base for creating or
+walking a child -- only the non-opened territory root (`FROM_ROOT`, the attach
+root) is a valid walk/create base. Net effect at v1.0: only single-component
+entries at the territory root can be created -- **no nested directories, and no
+confined writable subtree** (A-1.7's capability would be an opened subdir,
+unusable as a create base). It also latently breaks `libthyla-rs::File::open`
+for multi-component paths (it walks from opened intermediates). Confirmed
+empirically: `mkdir var` at `FROM_ROOT` -> fd 0; `mkdir lib` UNDER it -> -1.
+
+This conflation of *walk* and *open* is a Plan 9 divergence: Plan 9 `walk` clones
+an UNOPENED Chan (the walkable namespace base); `open` is a separate step. Linux
+keeps the same separation as `O_PATH` (a directory handle with no I/O, usable as
+the `dirfd` base for `openat`/`mkdirat`/`renameat`/`unlinkat`). Fuchsia/Genode: a
+directory handle IS the walkable capability. FS-delta restores the lineage norm
+-- it is a correction, not a new feature.
+
+**The primitive.** A new omode flag `T_OPATH = 0x80` (the first bit past the
+documented Plan 9 omode set; `SYS_WALK_OPEN_OMODE_VALID` 0x13 -> 0x93). When set
+on `SYS_WALK_OPEN`, the handler walks to the component but SKIPS the `dev->open`
+(`Tlopen`) step, returning a NON-OPENED, walkable `KObj_Spoor` (rights envelope
+`R|W|TRANSFER`, unchanged). Such a handle is the valid base for `SYS_WALK_CREATE`
+/ `SYS_WALK_OPEN` / `SYS_RENAME` / `SYS_UNLINK` / `SYS_FSYNC` of CHILDREN
+(clone-walk from a non-opened fid is legal); it is NOT opened for byte I/O. The
+access bits (OREAD/...) are ignored when `T_OPATH` is set. Only `SYS_WALK_OPEN`
+gains the flag; `SYS_WALK_CREATE` is unchanged (the mkdir pattern below
+create-then-reopens).
+
+**`mkdir -p` pattern.** For each component: `SYS_WALK_CREATE`(parent_opath, name,
+DMDIR) [opened] -> `SYS_CLOSE` -> `SYS_WALK_OPEN`(parent_opath, name, `T_OPATH`)
+[non-opened = the next parent]. The first parent is `FROM_ROOT` (non-opened).
+Idempotent: if the dir exists the create fails (EEXIST) and the `T_OPATH`
+walk_open still yields the handle. This is exactly A-1.7's storage-tree build
+(`/var/lib/corvus`) + corvus's chroot target (a non-opened storage handle so
+corvus can create `identity.db` under its chrooted root).
+
+**ABI:** `T_OPATH = 0x80`; `SYS_WALK_OPEN_OMODE_VALID = 0x93`. No new syscall
+number -- a flag on the existing `SYS_WALK_OPEN`. libt + libthyla-rs gain the
+constant. dev9p needs NO change (the walk already produces the non-opened fid;
+the handler just skips the open).
+
+**Audit:** `sys_walk_open_handler` is an FS-mutation audit-trigger surface; the
+O_PATH path is reviewed with A-1.7 (its consumer) -- the no-open path must still
+bound the name, reject `..`/`/`/`\0`, stamp rights identically, and leave no
+half-walked Spoor on error. **No new spec** per the 2026-05-23 spec-to-code
+broadening. Lands BEFORE A-1.7.

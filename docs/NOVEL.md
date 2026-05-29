@@ -28,7 +28,7 @@ The goal is to make `ARCHITECTURE.md` easier to write: each angle becomes a know
 | 7 | SOTA security hardening from day one | Low-medium | 3–5 KLOC C99 (mostly compiler/linker config + targeted code) | Phase 1-2 |
 | 8 | Formal verification cadence: nine TLA+ specs | Low-medium | 4–6 KLOC TLA+ | Continuous |
 | 9 | Designed-not-implemented v2.0 contracts | Low | ~0 KLOC (specifications only) | Phase 0 |
-| 10 | Capability-scoped service storage | Low | ~0.5-1 KLOC (userspace; zero new kernel surface) | Convergence detour (A-1.7), before A-1b |
+| 10 | Capability-scoped service storage | Low | ~0.5-1 KLOC userspace + FS-delta O_PATH primitive (small kernel) | Convergence detour: FS-delta -> A-1.7, before A-1b |
 
 **Total novel-angle code**: ~50-70 KLOC of C99 (kernel + compat) + ~16-24 KLOC of Rust (drivers + Halcyon) + ~4-6 KLOC of TLA+. Within the ~100-130 KLOC total budget for a complete v1.0.
 
