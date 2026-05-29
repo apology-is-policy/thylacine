@@ -353,6 +353,16 @@ For Thylacine specifically:
 
 When an implementation chunk exceeds one commit's reasonable scope, split into sub-chunks named Xa / Xb / Xc. Each sub-chunk lands independently with its own status-doc row, commit message, and tests. Handoff points between sub-chunks mean a context compaction at any boundary is recoverable.
 
+### Chunk completeness — pull dependencies forward; deferral needs signoff
+
+If the current chunk's **proper and complete** implementation depends on an item that is later on the roadmap, or on an item deferred in an earlier chunk, **strongly prefer pulling that item into the current chunk** — complete the chunk to the fullest specification possible rather than shipping a half-version built against a missing dependency. The pull-forward is the **default**, not a deviation: note it in the chunk's commit message + status row and proceed (it does not, by itself, need signoff — it is the act of *finishing the chunk*).
+
+**Deferral is the exception, and it needs the user's signoff.** If deferring the dependency genuinely makes more sense (truly separable, large enough to be its own chunk, or better audited on its own), do not silently ship the half-version — surface it as a structured choice (the design-conversation pattern) and get the user's vote first.
+
+**Why this is binding:** too many quiet deferrals compound into **silent omissions** — the system ends up not actually doing what scripture says it does, and nobody decided that on purpose. The default must bias toward completeness; the burden of proof is on *deferring*, not on *building*.
+
+This is the chunk-scoped form of the convergence-bar "build vs seam" test (IDENTITY-DESIGN.md §8.1): a *dependency of the current chunk* defaults to **BUILD-now** (pull it forward); only a genuinely-separable, foreseeable-but-not-yet item is a **SEAM** — and turning a real current-chunk dependency into a seam is the thing that needs signoff. Worked example: **A-1.6 (FS-gamma)** — A-1b's persistence needed `rename`/`unlink` (roadmap-later coreutils items); rather than ship an append-log workaround around the missing syscalls, they were pulled forward (the substrate choice itself went to the user's vote).
+
 ### Crash-injection + fault-injection testing
 
 For torn-write-sensitive paths (Stratum mount transition, persistent state machines, multi-phase commits), wire fault-injection hooks at every durable write. Test that recovery from each injection point produces a valid state. Same pattern applies to interrupt injection in schedulers, fault injection in fault-tolerant networking, and partial-failure injection in distributed systems.
@@ -370,7 +380,7 @@ For Thylacine: kernel panic during ramfs → Stratum transition; driver process 
 - Format breaks (on-disk version bumps, wire-protocol ABI changes, syscall interface changes).
 - Destructive operations (`git push --force`, branch/tag deletion, hard reset of shared branches, database drops).
 - Architectural deviations from `ARCHITECTURE.md` — either update ARCH first (with user approval) or revert the deviation.
-- Cross-phase scope pivots — if what you're about to do pulls work from Phase N+1 into Phase N, confirm.
+- Cross-phase scope pivots — pulling *unrelated* future scope into the current phase, OR **deferring an item the current chunk depends on** (see "Chunk completeness — pull dependencies forward"), must be confirmed. Pulling a genuine *dependency* forward to complete the current chunk to its fullest spec is preferred and does NOT need confirmation — note it and proceed.
 - Anything unclear in ARCH / ROADMAP / NOVEL / VISION / TOOLING.
 - Anything visible to others (pushes to shared branches, PR creation, external API calls, Slack/email posting).
 - Spending significant compute or external budget.
