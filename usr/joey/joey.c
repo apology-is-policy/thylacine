@@ -1329,6 +1329,20 @@ int main(void) {
     }
     t_putstr("joey: /burrow-torture reaped status=0 (kernel burrow path clean: single-threaded x3 sizes + multi-threaded SMP)\n");
 
+    // === /pouch-hello-mallocng-torture (EBADTAG DFS; report-only) ===
+    // The kernel burrow path tested clean, so the "AEGIS corruption" /
+    // STM_EBADTAG is musl mallocng-specific. This pouch binary replicates
+    // stratumd's 128 KiB malloc/free pattern in isolation. Report-only: the boot
+    // continues regardless, so the torture's fd-1 verdict ("single-threaded OK"
+    // / "REPRODUCED" / "ALL OK") -- and, when built POUCH_MALLOCNG_DIAG=1, the
+    // assert-path byte dump on fd 2 -- land in the log either way. The
+    // single-threaded phase runs first and returns before spawning threads, so a
+    // mallocng assert there is a clean _Exit(127) (no live-peer extinction).
+    (void)pouch_smoke_one("pouch-hello-mallocng-torture",
+                          sizeof("pouch-hello-mallocng-torture") - 1,
+                          "mallocng-torture: ALL OK",
+                          sizeof("mallocng-torture: ALL OK") - 1);
+
     // === /u-test orchestration (Phase 7 U-2-test) ===
     // Cumulative integration smoke for the libthyla-rs uplift, closes
     // the U-2 arc. Where alloc-smoke isolates each U-2X module's
