@@ -295,12 +295,13 @@ tools/build.sh kernel --sanitize=undefined && tools/test.sh
   the A-1.5 FS-mutation foundation) is the AEGIS/mallocng-adjacent surface from
   Phase 6 -> prosecute hard.
 - **Design-first sub-commits**: A-1a done; A-1.5 FS-mutation foundation done
-  (§9.2, landed + audited); A-1.6 / FS-gamma (`SYS_RENAME` + `SYS_UNLINK`) pinned
-  in IDENTITY-DESIGN.md §9.3 (this scripture commit) -- impl + audit next; A-1b's
-  corvus wire ABIs + CRVS v2 byte format still owed (pin in CORVUS-DESIGN.md
-  before A-1b code), and A-1b now persists via **atomic rename-swap** (on A-1.6)
-  + persists the **keypair wraps** (cross-reboot AUTH), both user-chosen
-  2026-05-29; A-4 cap-model still owed.
+  (§9.2, landed + audited); A-1.6 / FS-gamma (`SYS_RENAME` + `SYS_UNLINK`) done
+  (§9.3, landed + audit-CLEAN); A-1b's corvus wire ABIs (RESOLVE_ID=11 /
+  RESOLVE_NAME=12 / GROUP_CREATE=13 + USER_CREATE supp_gids extension) + the CRVS
+  v2 `identity.db` byte format + the rename-swap persist/load flow are now PINNED
+  in **CORVUS-DESIGN.md §16** (this scripture commit; UPG one-counter id==gid,
+  atomic rename-swap on A-1.6, full identity-DB + keypair-wrap persistence) --
+  A-1b impl + audit next; A-4 cap-model still owed.
 - **Seams are load-bearing**: A-2 leaves the ACL seam; A-4 leaves the
   resource-scoped-HW-cap allowlist + the distributed crypto-proof seam. Don't bake
   fixed bitfields where a policy object belongs.

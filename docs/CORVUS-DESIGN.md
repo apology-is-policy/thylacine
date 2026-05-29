@@ -643,19 +643,24 @@ Verb table:
 | 2 | CHANGE_PASSPHRASE | `user_len u8` + `user` + `old_len u16` + `old` + `new_len u16` + `new` |
 | 3 | SESSION_CLOSE | `token` (33 bytes: "s" + 32-char hex) |
 | 4 | UNWRAP | `token` (33) + `dataset_len u8` + `dataset` + `key_id u64 LE` + `wrapped_len u16` + `wrapped` |
-| 5 | USER_CREATE | `user_len u8` + `user` + `pass_len u16` + `passphrase` + `backend u8` |
+| 5 | USER_CREATE | `user_len u8` + `user` + `pass_len u16` + `passphrase` + `backend u8` + *(A-1b append-only)* `supp_gid_count u8` + `supp_gids[count] u32 LE` (absent tail => 0) |
 | 6 | USER_DELETE | `user_len u8` + `user` |
 | 7 | ADMIN_ELEVATE | `token` + `sys_pass_len u16` + `sys_passphrase` |
 | 8 | RECOVER | `phrase_len u16` + `phrase` + `new_sys_pass_len u16` + `new_sys_passphrase` |
 | 9 | ROTATE_KEY | `token` + `dataset_len u8` + `dataset` |
 | 10 | WRAP | `token` (33) + `dataset_len u8` + `dataset` + `key_id u64 LE` + `dek_len u16` + `dek` |
+| 11 | RESOLVE_ID | `principal_id u32 LE` |
+| 12 | RESOLVE_NAME | `name_len u8` + `name` |
+| 13 | GROUP_CREATE | `name_len u8` + `name` |
+
+Verbs 11-13 + the USER_CREATE extension are the A-1b identity surface; full semantics + OK-response payloads + the byte format + persistence are in §16.
 
 Response frame:
 
 ```
 [0]      status            u8  (0=OK, 1=BadAuth, 2=PermissionDenied, 3=NotFound, 4=RateLimited, 5=BadFormat, 6=InternalError)
 [1..3)   payload_len       u16 LE
-[3..)    payload           status-specific (e.g., session token on AUTH OK, DEK on UNWRAP OK)
+[3..)    payload           status-specific (e.g., session token on AUTH OK, DEK on UNWRAP OK; A-1b: {principal_id,primary_gid} on USER_CREATE OK, the resolved record on RESOLVE_* OK, the gid on GROUP_CREATE OK — see §16.7)
 ```
 
 The recv buffer for any frame carrying a passphrase / DEK is mlock'd. Corvus calls `sys_explicit_bzero` on the buffer immediately after parsing the relevant fields into typed storage and again after the typed storage is consumed.
@@ -819,6 +824,9 @@ These are runtime + audit guarantees at v1.0. `specs/corvus.tla` formalizes the 
 | C-21 | `CAP_HOSTOWNER` is elevation-only: it enters a Proc's capability set solely by redeeming a pending grant through the `cap` device's `use` file (for a console-attached Proc), and is never conferred by `rfork` | `cap` device + `rfork` elevation-only strip; `specs/handles.tla` |
 | C-22 | Every `/srv/corvus` connection carries its peer Proc's kernel-stamped identity (`stripes`, console bit, caps); corvus obtains it via `SYS_SRV_PEER` per request — never from the client, never cached on corvus's fid state | `devsrv` kernel-stamped identity + `KObj_Srv` non-transferability; `specs/corvus.tla` (`ConnOpIdentityIsKernelTruth` / `ConnOpPeerWasLive`), `specs/handles.tla` (`WalkChildIsSrv`) |
 | C-23 | The kernel is corvus's sole 9P client; every `/srv/corvus` connection's transport is kernel-created and kernel-owned, never in any handle table | `SYS_POST_SERVICE` (kernel owns all transport); `specs/corvus.tla` (`ConnTransportKernelOwned`), `specs/handles.tla` (`KObj_Srv` / `SrvHandlesAtOrigin`) |
+| C-24 | The identity DB is corvus's authoritative `id <-> name <-> group` map and is **non-secret** — it never contains a key, passphrase, or wrap (secrets live only in the per-user CRVS-v1 `hybrid.corvus`); `RESOLVE_ID`/`RESOLVE_NAME` are therefore ungated | `identity.db` content discipline (§16.1); ungated RESOLVE verbs (§16.7) |
+| C-25 | principal_ids and gids are assigned from ONE monotonic counter (`>= FIRST_AUTO_ID = 1000`); a UPG has `uid == gid`; reserved sentinels (`0` / `PRINCIPAL_SYSTEM` / `PRINCIPAL_NONE` + gid equivalents) are never assigned — an assigned id confers no ambient authority (ARCH I-22) | corvus ID allocator (§16.3) |
+| C-26 | The identity DB is persisted by **atomic rename-swap** (write `identity.db.tmp` -> fsync -> `SYS_RENAME` -> fsync the parent dir); a crash never yields a torn DB — load recovers the last atomically-committed `identity.db` and discards any stale `.tmp` | A-1.6 / FS-gamma `SYS_RENAME`+`SYS_UNLINK`; corvus persist + load (§16.5/§16.6) |
 
 ---
 
@@ -1079,3 +1087,193 @@ State file magic: `CRVS` (LE u32 = 0x53565243; distinct from Stratum janus's `JP
 Three-letter abbreviation in code: `crv` (matches `stm` for Stratum).
 
 **The `cap` device** (§5.5.1, P5-hostowner-b) keeps its Plan 9 name. `cap` / `capability` is Plan 9-derived (the `cap(3)` device); per CLAUDE.md's naming discipline, Plan 9-derived concepts are not thematically renamed. Its files are `grant` (register) and `use` (redeem) — `use` mirrors Plan 9's `capuse`; `grant` replaces `caphash` because the Thylacine device carries no hash (the `grant` write is capability-gated, §5.5.1). `CAP_GRANT_HOSTOWNER` follows the established `CAP_*` convention.
+
+---
+
+## 16. Identity DB + persistence (A-1b)
+
+A-1b makes corvus the authoritative resolver for `id <-> name <-> groups`
+(IDENTITY-DESIGN.md §3.3 + §9.1) and gives it **real on-disk persistence** so a
+user provisioned in one boot survives a reboot. Two design points are user-locked
+(2026-05-29): the durable-write substrate is **atomic rename-swap** — not an
+append-only log; A-1.6 / FS-gamma built the `SYS_RENAME` + `SYS_UNLINK` it needs
+(IDENTITY-DESIGN.md §9.3); and the scope is **full end-to-end** — both the
+non-secret identity DB AND the per-user secret keypair wraps persist, so AUTH
+survives a reboot.
+
+### 16.1 The two on-disk artifacts
+
+corvus's state splits along the secret boundary:
+
+| File | Magic / version | Secret? | Write cadence | Holds |
+|---|---|---|---|---|
+| `/var/lib/corvus/identity.db` | `CRVS` / **v2** | NO | rewrite-swap on each USER_CREATE / GROUP_CREATE | `next_auto_id` + all user identity records + all group records |
+| `/var/lib/corvus/users/<name>/hybrid.corvus` | `CRVS` / v1 | YES | write-once at USER_CREATE | the AEGIS-wrapped hybrid keypair (§4.3, the existing `to_bytes`) |
+
+The shared `CRVS` magic with a distinct **version** field is the format
+discriminator (§9.1's "v1 -> v2"): a v1 blob is a per-user keypair wrap; a v2 blob
+is the central identity DB. They never share a path; a loader that reads the wrong
+version for a path fails closed. The identity DB is **non-secret** (a `uid <->
+name <-> gid` map is world-readable on every Unix — `/etc/passwd` is mode 644), so
+its load/save path is not a secret-handling path — which keeps the A-1b audit
+surface focused (C-24). "corvus reads v1 as 'no identity DB'" (§9.1) means: a
+deployment with no `identity.db` (fresh install, or a pre-A-1b corvus) starts with
+an empty DB (`next_auto_id = FIRST_AUTO_ID`, zero records) and writes v2 on its
+first mutation.
+
+### 16.2 Data model (in-memory)
+
+Each user is one record holding **both** identity and wrap-state:
+- identity: `principal_id u32`, `primary_gid u32`, `supp_gids: [u32; <= 15]` +
+  count, `name`, `backend u8`.
+- wrap-state: the existing `CorvusUserState` fields (argon2 params + salt + nonce
+  + ciphertext + tag), loaded from `hybrid.corvus`.
+
+Groups are a record table `{gid u32, name}`. Every user has a **user-private group
+(UPG)** entry; standalone groups (GROUP_CREATE) are additional entries.
+
+### 16.3 ID assignment — UPG, one shared counter
+
+`next_auto_id` is a single monotonic counter starting at `FIRST_AUTO_ID = 1000`,
+**shared between principal_ids and gids** so a UPG's `uid == gid` is collision-free
+(the Red Hat UPG scheme: a gid and a principal_id are never the same number unless
+they are the matched UPG pair).
+
+- **USER_CREATE** assigns `principal_id = primary_gid = next_auto_id++` and creates
+  the matching UPG group `{gid = principal_id, name = <user>}`. The requested
+  `supp_gids[]` are recorded as given (corvus is the membership authority; the
+  kernel only bounds-checks at A-1a; full membership policy is corvus's, here).
+- **GROUP_CREATE** assigns `gid = next_auto_id++` and records `{gid, name}`.
+- Reserved values (`0` INVALID, `PRINCIPAL_SYSTEM = 0xFFFFFFFE`, `PRINCIPAL_NONE =
+  0xFFFFFFFF`, gid equivalents) are NEVER assigned — the counter starts at 1000 and
+  only increments. I-22 / C-25: an assigned id confers no ambient authority.
+- `next_auto_id` is **persisted in the identity.db header** (not recomputed by
+  max-scan), so a deleted user's id is never reused even after its record is gone
+  (monotonic-forever; v1.0 has no USER_DELETE wired, but the header counter makes
+  the future-delete case correct by construction).
+
+### 16.4 CRVS v2 `identity.db` byte format
+
+All integers little-endian. The whole file is rewritten atomically on each
+mutation (§16.6), so there is no in-place-update / torn-record concern beyond the
+rename-swap.
+
+```
+Header (20 bytes):
+  [0..4)    magic         'CRVS' (0x53565243 LE)
+  [4..8)    version       = 2
+  [8..12)   next_auto_id  u32  (>= FIRST_AUTO_ID = 1000)
+  [12..16)  user_count    u32
+  [16..20)  group_count   u32
+
+User record (variable), repeated user_count times:
+  [0..4)    principal_id  u32
+  [4..8)    primary_gid   u32
+  [8]       backend       u8   (0 = passphrase)
+  [9]       supp_gid_count u8  (0 .. PROC_SUPP_GIDS_MAX = 15)
+  [10]      name_len      u8   (1 .. MAX_USER_LEN = 32)
+  [11 .. 11 + 4*supp_gid_count)   supp_gids   u32 each
+  [.. + name_len)                 name        bytes
+
+Group record (variable), repeated group_count times:
+  [0..4)    gid       u32
+  [4]       name_len  u8   (1 .. MAX_GROUP_LEN = 32)
+  [5 .. + name_len)  name  bytes
+```
+
+Rust `const`-assert pins on the 20-byte header + field offsets. The parser
+validates magic + version; each `name_len` / `supp_gid_count` in range; every
+field bounds-checked against the remaining file length (no over-read, the same
+discipline as the kernel readdir-cookie parse); a truncated trailing record fails
+the whole load **closed** (an atomically-written file is complete by construction
+— a short file means a crash mid-rename, recovered from the surviving real file,
+never a half-written tmp).
+
+### 16.5 Load (boot)
+
+1. Ensure the state tree exists: mkdir-via-DMDIR `/var`, `/var/lib`,
+   `/var/lib/corvus`, `/var/lib/corvus/users` (idempotent — a `SYS_WALK_CREATE`
+   that hits EEXIST falls back to `SYS_WALK_OPEN`). The baked pool ships only
+   `/thylacine-version`; corvus builds its own tree on first boot.
+2. **`SYS_UNLINK` any stale `identity.db.tmp`** (rc ignored) — cleans a tmp left
+   by a crash between create-tmp and rename.
+3. Open `identity.db`. Absent -> empty DB (`next_auto_id = 1000`). Present -> read
+   fully, verify CRVS/v2, parse `next_auto_id` + user + group records.
+4. For each user record, open `users/<name>/hybrid.corvus` and parse the CRVS v1
+   wrap into the user record (so AUTH works this boot). A user record whose wrap
+   file is missing/corrupt is logged + dropped **fail-closed** — that identity has
+   no usable secret, so it is not authoritative for login.
+
+### 16.6 Persist — atomic rename-swap (the A-1.6 substrate)
+
+On USER_CREATE (after assigning ids + generating/wrapping the keypair) and on
+GROUP_CREATE:
+
+1. **Keypair wrap (USER_CREATE only), write-once:** mkdir the per-user dir if
+   absent -> `SYS_WALK_CREATE` `hybrid.corvus` -> write the `to_bytes` blob ->
+   `SYS_FSYNC`. **If this fails, abort the create before touching identity.db** —
+   no orphan identity record.
+2. **Identity DB rewrite-swap:** serialize the full in-memory DB ->
+   `SYS_WALK_CREATE` `identity.db.tmp` -> write -> `SYS_FSYNC(tmp)` ->
+   `SYS_RENAME(identity.db.tmp -> identity.db)` (atomic replace) -> `SYS_FSYNC`
+   the `/var/lib/corvus` **directory** fd (the dirent-durability barrier, §9.3).
+
+Ordering rationale: the keypair wrap is fsync'd BEFORE the identity record is
+committed, so a crash between them leaves an orphan wrap file (harmless — no
+identity record references it; the next USER_CREATE of the same name overwrites
+it) rather than an identity record pointing at a missing wrap. The identity.db
+swap is the **atomic commit point**: a new user either is fully in identity.db
+(and its wrap is already durable) or is not present at all.
+
+Crash-safety (C-26): a crash during the tmp write leaves a partial
+`identity.db.tmp` + the intact old `identity.db` (rename never happened) — load
+reads the old DB + unlinks the stale tmp. A crash during/after the rename: rename
+is atomic, so load reads either the old or the new **complete** DB. There is never
+a torn `identity.db` — which is the entire reason the substrate is rename-swap, not
+a whole-file in-place rewrite (which has no atomic point without `SYS_RENAME`).
+
+### 16.7 Verbs (extends §6.4)
+
+`RESOLVE_ID = 11` and `RESOLVE_NAME = 12` are **ungated** (the `getpwuid` /
+`getpwnam` equivalents — a uid<->name map is not secret; login needs name->id
+pre-AUTH; any consumer resolves supp_gids by id). `GROUP_CREATE = 13` is
+**CAP_HOSTOWNER-gated** via a live `peer_live_caps` re-query (like the admin verbs
+— `groupadd` is privileged). `USER_CREATE = 5` keeps its existing gate
+(CAP_HOSTOWNER, except the bootstrap first-user-create) and is extended
+append-only.
+
+| verb | Request payload | OK-response payload |
+|---|---|---|
+| 5 USER_CREATE (extended) | ...existing... + `supp_gid_count u8` + `supp_gids[count] u32 LE` (absent => 0) | `principal_id u32 LE` + `primary_gid u32 LE` (was empty; append-only — old clients that ignore the payload still see STATUS_OK) |
+| 11 RESOLVE_ID | `principal_id u32 LE` | `primary_gid u32 LE` + `supp_gid_count u8` + `supp_gids[count] u32 LE` + `name_len u8` + `name` |
+| 12 RESOLVE_NAME | `name_len u8` + `name` | `principal_id u32 LE` + `primary_gid u32 LE` |
+| 13 GROUP_CREATE | `name_len u8` + `name` | `gid u32 LE` |
+
+Error responses: RESOLVE_* return `STATUS_NOT_FOUND` for an unknown id/name.
+GROUP_CREATE returns `STATUS_PERMISSION_DENIED` without CAP_HOSTOWNER, and
+`STATUS_BAD_FORMAT` on a bad name (empty / > `MAX_GROUP_LEN` / duplicate). The
+USER_CREATE reserved-value + bounds rejects are unchanged; `supp_gids` is bounded
+to `PROC_SUPP_GIDS_MAX = 15`.
+
+### 16.8 Tests
+
+- RESOLVE_ID / RESOLVE_NAME round-trip (create a user, resolve both directions).
+- USER_CREATE returns the assigned `{principal_id, primary_gid}`; the UPG group is
+  created; `supp_gids` are recorded + resolved back.
+- GROUP_CREATE auto-assigns a gid distinct from every UPG (shared counter).
+- v1 -> v2: no `identity.db` -> empty DB -> first USER_CREATE writes v2; re-read
+  within the boot resolves.
+- **Cross-reboot persistence** (the headline): USER_CREATE in boot N; reboot
+  (persistent pool); RESOLVE_NAME in boot N+1 returns the same principal_id; AUTH
+  succeeds (keypair wrap reloaded). Driven by the joey corvus harness, idempotent
+  like the FS-gamma E2E.
+- Crash-safety: a stale `identity.db.tmp` at boot is unlinked and the real DB loads.
+
+### 16.9 Implementation split
+
+A-1b lands as: **A-1b-impl** (the in-memory model extension + UPG allocator + the 3
+verbs + USER_CREATE extension + the load/persist FS plumbing) -> **one focused
+adversarial audit** (the secret-bearing keypair-wrap-on-disk surface + the
+rename-swap persist + the verb gating + the byte-format parser bounds — prosecute
+hard, it is the first secret-on-disk write path) -> two-commit close. Reference
+doc: a new `docs/reference/97-corvus-identity-db.md`.
