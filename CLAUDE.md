@@ -30,6 +30,7 @@ These documents are binding. Implementation deviations either update scripture f
 | `docs/USER-MANUAL.md` + `docs/manual/NN-*.md` | User-facing reference. Per-topic; deep; binding. Updated per user-visible change. |
 | `docs/ERRORS.md` | Error-code system. Errno registry (Thylacine-wide, POSIX-aligned values), `snare:*` fault-note family (thematic; replaces EL0-unhandled-fault extinction with per-Proc termination), exit-status semantics, boundary-line translation policy. ABI-bearing; updates require user signoff. |
 | `CLAUDE.md` (this) | Operational framework for Claude Code sessions. |
+| `docs/DEBUGGING-PLAYBOOK.md` | **Mandatory reading when an elusive bug appears** (corruption-class symptom, inconsistent repro, cross-layer, or a recurred "resolved" bug). The AEGIS-corruption-triplet case study + the ground-truth-first method. The `elusive-bug-hunt` skill auto-surfaces the condensed method; this doc is the full journal. |
 
 Read first, in this order: VISION → ARCHITECTURE → ROADMAP → CLAUDE.md → the relevant phase status doc.
 
@@ -923,6 +924,7 @@ This structure lets the user (or a future session reading the conversation log) 
 1. Re-read VISION + ARCH + ROADMAP for the relevant section.
 2. Check if a TLA+ spec covers it; if so, the spec wins.
 3. Check the audit-trigger table; if the change touches a trigger surface, audit before merge.
-4. If still uncertain, ask the user. Confirming is cheap; getting it wrong is expensive.
+4. **If you are chasing an elusive bug** — a corruption-class symptom, inconsistent repro, a cross-layer fault, or a bug a prior session "resolved" that recurred — **read `docs/DEBUGGING-PLAYBOOK.md` BEFORE theorizing** (the `elusive-bug-hunt` skill auto-surfaces the condensed method). Ground truth over theory; suspect masking-bug stacks; distrust hollow "AUDITED CLEAN" closes.
+5. If still uncertain, ask the user. Confirming is cheap; getting it wrong is expensive.
 
 The thylacine is real. So is this.
