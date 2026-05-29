@@ -103,10 +103,10 @@ extern crate alloc;
 use libthyla_rs::ninep as p9;
 
 use libthyla_rs::{
-    t_cap_grant, t_close, t_explicit_bzero, t_getrandom, t_mlockall, t_poll,
-    t_post_service, t_putstr, t_read, t_set_dumpable, t_set_traceable,
-    t_srv_accept, t_srv_peer, t_write, TPollFd, TSrvPeerInfo, T_CAP_HOSTOWNER,
-    T_POLLHUP, T_POLLIN,
+    t_cap_grant, t_chroot, t_close, t_explicit_bzero, t_fsync, t_getrandom, t_mlockall,
+    t_poll, t_post_service, t_putstr, t_read, t_set_dumpable, t_set_traceable,
+    t_srv_accept, t_srv_peer, t_walk_create, t_walk_open, t_write, TPollFd, TSrvPeerInfo,
+    T_CAP_HOSTOWNER, T_OREAD, T_OWRITE, T_POLLHUP, T_POLLIN, T_WALK_OPEN_FROM_ROOT,
 };
 
 use alloc::vec::Vec;
@@ -2022,6 +2022,53 @@ fn step_fail(step: u8, rc: i64) -> ! {
     unsafe { libthyla_rs::t_exits(1) }
 }
 
+// A-1.7 capability-scoped service storage (ARCH §3.6; NOVEL §3.10; I-23).
+// Runs AFTER corvus has chrooted to its handed storage capability, so
+// `FROM_ROOT` now resolves to the storage subtree. Proves read/write
+// WITHIN the capability and that a path which exists ABOVE it (the
+// Stratum-root sentinel `/thylacine-version`) is unreachable -- i.e. the
+// chroot actually confines. Idempotent across reboots: on a persistent
+// pool the probe file survives, so a failed create (EEXIST) falls through
+// to read-verify the persisted content (which also proves persistence).
+unsafe fn corvus_cap_smoke() -> bool {
+    let name = b"cap-smoke";
+    let payload = b"corvus-cap-v1";
+
+    let cf = t_walk_create(T_WALK_OPEN_FROM_ROOT, name.as_ptr(), name.len(), T_OWRITE, 0o600);
+    if cf >= 0 {
+        let w = t_write(cf, payload.as_ptr(), payload.len());
+        let _ = t_fsync(cf, 0);
+        let _ = t_close(cf);
+        if w != payload.len() as i64 {
+            return false;
+        }
+    }
+    // else: the probe file already exists from a prior boot -- the
+    // capability persisted; fall through to read-verify it.
+
+    let rf = t_walk_open(T_WALK_OPEN_FROM_ROOT, name.as_ptr(), name.len(), T_OREAD);
+    if rf < 0 {
+        return false;
+    }
+    let mut buf = [0u8; 16];
+    let r = t_read(rf, buf.as_mut_ptr(), buf.len());
+    let _ = t_close(rf);
+    if r != payload.len() as i64 || buf[..payload.len()] != payload[..] {
+        return false;
+    }
+
+    // Confinement: the Stratum-root sentinel exists ABOVE the capability
+    // and MUST be unreachable post-chroot. If it opens, corvus is not
+    // confined -- fail the smoke.
+    let sentinel = b"thylacine-version";
+    let esc = t_walk_open(T_WALK_OPEN_FROM_ROOT, sentinel.as_ptr(), sentinel.len(), T_OREAD);
+    if esc >= 0 {
+        let _ = t_close(esc);
+        return false;
+    }
+    true
+}
+
 #[no_mangle]
 pub extern "C" fn rs_main() -> i64 {
     t_putstr("corvus: starting (P5-corvus-srv-impl-b3b)\n");
@@ -2051,6 +2098,23 @@ pub extern "C" fn rs_main() -> i64 {
     if listener < 0 { step_fail(6, listener); }
 
     t_putstr("corvus: ready (hardening applied; serving /srv/corvus)\n");
+
+    // A-1.7: confine corvus to the storage-root capability joey hands at
+    // fd 0 -- chroot so corvus's filesystem world IS its storage (I-23).
+    // Guarded for the incremental boot-reorder: until joey hands the
+    // capability, chroot(0) fails and corvus runs unconfined as before.
+    unsafe {
+        if t_chroot(0) == 0 {
+            if corvus_cap_smoke() {
+                t_putstr("corvus: storage capability OK (confined; /thylacine-version unreachable)\n");
+            } else {
+                t_putstr("corvus: storage capability smoke FAILED\n");
+                return 1;
+            }
+        } else {
+            t_putstr("corvus: no storage capability at fd 0; unconfined (pre-A-1.7-reorder)\n");
+        }
+    }
 
     let rc = unsafe { srv_server_loop(listener) };
     if rc < 0 {
