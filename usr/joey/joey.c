@@ -197,6 +197,41 @@ static size_t build_unwrap(unsigned char *pl,
     return o;
 }
 
+// build_user_create_ext — extended USER_CREATE (A-1b). The base payload plus the
+// append-only supp_gids tail: supp_gid_count(1) + supp_gids[count] u32 LE.
+static size_t build_user_create_ext(unsigned char *pl,
+                                    const char *user, size_t user_len,
+                                    const char *pass, size_t pass_len,
+                                    const unsigned int *supp, size_t supp_n) {
+    size_t o = build_user_create(pl, user, user_len, pass, pass_len);
+    pl[o++] = (unsigned char)supp_n;
+    for (size_t i = 0; i < supp_n; i++) {
+        for (int b = 0; b < 4; b++) pl[o++] = (unsigned char)(supp[i] >> (8 * b));
+    }
+    return o;
+}
+
+// build_resolve_id — RESOLVE_ID payload (verb 11): principal_id u32 LE.
+static size_t build_resolve_id(unsigned char *pl, unsigned int id) {
+    for (int b = 0; b < 4; b++) pl[b] = (unsigned char)(id >> (8 * b));
+    return 4;
+}
+
+// build_name1 — single name_len(1) + name payload, shared by RESOLVE_NAME
+// (verb 12) and GROUP_CREATE (verb 13).
+static size_t build_name1(unsigned char *pl, const char *name, size_t name_len) {
+    size_t o = 0;
+    pl[o++] = (unsigned char)name_len;
+    for (size_t i = 0; i < name_len; i++) pl[o++] = (unsigned char)name[i];
+    return o;
+}
+
+// rd_u32_le — little-endian u32 read from a response at rx[off].
+static unsigned int rd_u32_le(const unsigned char *rx, size_t off) {
+    return (unsigned int)rx[off] | ((unsigned int)rx[off + 1] << 8)
+         | ((unsigned int)rx[off + 2] << 16) | ((unsigned int)rx[off + 3] << 24);
+}
+
 // P6-pouch-stratumd-boot 16c-retire: do_stratumd_stub_bringup (the
 // userspace stratumd-stub bringup demo) retired. Real stratumd-via-9P
 // is now joey's bring-up path; the stub was the audited interim that
@@ -782,18 +817,35 @@ static int do_corvus_bringup(long storage_dup_fd) {
     // table is empty so the initial hostowner candidate can exist; once
     // any user is created, subsequent USER_CREATEs require the caller
     // to hold CAP_HOSTOWNER, which lands via ADMIN_ELEVATE below.)
+    // A-1b idempotent: on a FRESH pool michael is the bootstrap user (table
+    // empty -> USER_CREATE free) and corvus returns OK + {principal_id=1000,
+    // primary_gid=1000}. On a PERSISTENT pool (PRESERVE=1, boot N+1) michael was
+    // loaded from disk and joey is not yet elevated, so the admin gate returns
+    // PermissionDenied -- accepted here; AUTH below proves the RELOADED wrap,
+    // and RESOLVE_NAME proves the persisted id. Either path proceeds to AUTH.
     pl = build_user_create(tx, "michael", 7, pass_michael, sizeof(pass_michael) - 1);
     if (corvus_exchange(conn_fd, 5, tx, pl, rx, sizeof(rx), &st, &rlen) != 0) {
         t_putstr("joey: USER_CREATE michael transport FAILED\n");
         return 1;
     }
-    if (st != 0 || rlen != 0) {
-        t_putstr("joey: USER_CREATE michael returned non-OK status=");
+    if (st == 0) {
+        if (rlen != 8) {
+            t_putstr("joey: USER_CREATE michael OK but missing {id,gid} payload\n");
+            return 1;
+        }
+        if (rd_u32_le(rx, 3) != 1000u || rd_u32_le(rx, 7) != 1000u) {
+            t_putstr("joey: USER_CREATE michael unexpected id/gid (want 1000/1000)\n");
+            return 1;
+        }
+        t_putstr("joey: USER_CREATE michael ok (bootstrap; id=1000 gid=1000)\n");
+    } else if (st == 2) {
+        t_putstr("joey: USER_CREATE michael already provisioned (persistent pool)\n");
+    } else {
+        t_putstr("joey: USER_CREATE michael unexpected status=");
         t_putstr(itoa_dec(st, buf, sizeof(buf)));
         t_putstr("\n");
         return 1;
     }
-    t_putstr("joey: USER_CREATE michael ok (bootstrap)\n");
 
     // === AUTH michael (wrong passphrase) → BadAuth (1) ===
     pl = build_auth(tx, "michael", 7, "wrong-passphrase", 16);
@@ -830,6 +882,22 @@ static int do_corvus_bringup(long storage_dup_fd) {
     }
     t_putstr("...)\n");
 
+    // === GROUP_CREATE wheel BEFORE elevation -> PermissionDenied (A-1b gate) ===
+    // joey is not yet hostowner; the live-caps gate must refuse regardless of
+    // whether "wheel" is a valid/new name. Idempotent across reboots (always 2).
+    pl = build_name1(tx, "wheel", 5);
+    if (corvus_exchange(conn_fd, 13, tx, pl, rx, sizeof(rx), &st, &rlen) != 0) {
+        t_putstr("joey: GROUP_CREATE(pre-elevate) transport FAILED\n");
+        return 1;
+    }
+    if (st != 2) {
+        t_putstr("joey: GROUP_CREATE(pre-elevate) expected PermissionDenied(2), got status=");
+        t_putstr(itoa_dec(st, buf, sizeof(buf)));
+        t_putstr("\n");
+        return 1;
+    }
+    t_putstr("joey: GROUP_CREATE wheel refused pre-elevate PermissionDenied (gate verified)\n");
+
     // === ADMIN_ELEVATE michael (P5-hostowner-b-b) === verify console +
     // system passphrase; corvus writes /cap/grant for joey's stripes,
     // returns OK. Then joey redeems via t_cap_use → joey's Proc gets
@@ -857,18 +925,138 @@ static int do_corvus_bringup(long storage_dup_fd) {
     // === USER_CREATE susan === (gives the cross-user C-7 test a real
     // owner). Now gated on CAP_HOSTOWNER — joey just elevated, so
     // peer_live_caps for joey's conn includes CAP_HOSTOWNER.
-    pl = build_user_create(tx, "susan", 5, pass_susan, sizeof(pass_susan) - 1);
+    // susan, WITH supplementary groups [100, 200] -- exercises the A-1b
+    // USER_CREATE supp_gids extension; RESOLVE_ID 1001 below round-trips them.
+    {
+        unsigned int susan_supp[2] = { 100u, 200u };
+        pl = build_user_create_ext(tx, "susan", 5, pass_susan,
+                                   sizeof(pass_susan) - 1, susan_supp, 2);
+    }
     if (corvus_exchange(conn_fd, 5, tx, pl, rx, sizeof(rx), &st, &rlen) != 0) {
         t_putstr("joey: USER_CREATE susan transport FAILED\n");
         return 1;
     }
-    if (st != 0 || rlen != 0) {
-        t_putstr("joey: USER_CREATE susan (post-elevate) returned non-OK status=");
+    if (st == 0) {
+        if (rlen != 8) {
+            t_putstr("joey: USER_CREATE susan OK but missing {id,gid} payload\n");
+            return 1;
+        }
+        if (rd_u32_le(rx, 3) != 1001u) {
+            t_putstr("joey: USER_CREATE susan unexpected id (want 1001)\n");
+            return 1;
+        }
+        t_putstr("joey: USER_CREATE susan ok (id=1001; supp_gids [100,200]; gated)\n");
+    } else if (st == 2) {
+        t_putstr("joey: USER_CREATE susan already provisioned (persistent pool)\n");
+    } else {
+        t_putstr("joey: USER_CREATE susan unexpected status=");
         t_putstr(itoa_dec(st, buf, sizeof(buf)));
         t_putstr("\n");
         return 1;
     }
-    t_putstr("joey: USER_CREATE susan ok (gated on CAP_HOSTOWNER)\n");
+
+    // === A-1b identity verbs: GROUP_CREATE (post-elevate) + RESOLVE round-trips ===
+    // GROUP_CREATE wheel: now joey holds CAP_HOSTOWNER. Fresh pool -> OK + a gid
+    // distinct from every UPG (shared counter); persistent pool -> BadFormat
+    // (already loaded). Either way idempotent.
+    pl = build_name1(tx, "wheel", 5);
+    if (corvus_exchange(conn_fd, 13, tx, pl, rx, sizeof(rx), &st, &rlen) != 0) {
+        t_putstr("joey: GROUP_CREATE(post-elevate) transport FAILED\n");
+        return 1;
+    }
+    if (st == 0) {
+        if (rlen != 4) {
+            t_putstr("joey: GROUP_CREATE wheel OK but missing gid\n");
+            return 1;
+        }
+        unsigned int gid = rd_u32_le(rx, 3);
+        if (gid < 1000u || gid == 1000u || gid == 1001u) {
+            t_putstr("joey: GROUP_CREATE wheel gid collides with a UPG\n");
+            return 1;
+        }
+        t_putstr("joey: GROUP_CREATE wheel ok (auto gid distinct from UPGs)\n");
+    } else if (st == 5) {
+        t_putstr("joey: GROUP_CREATE wheel already exists (persistent pool)\n");
+    } else {
+        t_putstr("joey: GROUP_CREATE wheel unexpected status=");
+        t_putstr(itoa_dec(st, buf, sizeof(buf)));
+        t_putstr("\n");
+        return 1;
+    }
+
+    // RESOLVE_NAME michael -> {1000, 1000} (deterministic on FRESH and PERSISTENT).
+    pl = build_name1(tx, "michael", 7);
+    if (corvus_exchange(conn_fd, 12, tx, pl, rx, sizeof(rx), &st, &rlen) != 0) {
+        t_putstr("joey: RESOLVE_NAME michael transport FAILED\n");
+        return 1;
+    }
+    if (st != 0 || rlen != 8 || rd_u32_le(rx, 3) != 1000u || rd_u32_le(rx, 7) != 1000u) {
+        t_putstr("joey: RESOLVE_NAME michael wrong status/id/gid (want OK 1000/1000)\n");
+        return 1;
+    }
+    t_putstr("joey: RESOLVE_NAME michael -> {1000,1000} ok\n");
+
+    // RESOLVE_NAME susan -> {1001, 1001}.
+    pl = build_name1(tx, "susan", 5);
+    if (corvus_exchange(conn_fd, 12, tx, pl, rx, sizeof(rx), &st, &rlen) != 0) {
+        t_putstr("joey: RESOLVE_NAME susan transport FAILED\n");
+        return 1;
+    }
+    if (st != 0 || rlen != 8 || rd_u32_le(rx, 3) != 1001u) {
+        t_putstr("joey: RESOLVE_NAME susan wrong status/id (want OK 1001)\n");
+        return 1;
+    }
+    t_putstr("joey: RESOLVE_NAME susan -> 1001 ok\n");
+
+    // RESOLVE_ID 1001 -> primary_gid 1001 + supp [100,200] + name "susan".
+    // Reply: primary_gid(4) + supp_count(1) + supp[count]*4 + name_len(1) + name.
+    pl = build_resolve_id(tx, 1001u);
+    if (corvus_exchange(conn_fd, 11, tx, pl, rx, sizeof(rx), &st, &rlen) != 0) {
+        t_putstr("joey: RESOLVE_ID 1001 transport FAILED\n");
+        return 1;
+    }
+    if (st != 0 || rlen != 4 + 1 + 8 + 1 + 5) {
+        t_putstr("joey: RESOLVE_ID 1001 bad status/len status=");
+        t_putstr(itoa_dec(st, buf, sizeof(buf)));
+        t_putstr("\n");
+        return 1;
+    }
+    if (rd_u32_le(rx, 3) != 1001u || rx[7] != 2 ||
+        rd_u32_le(rx, 8) != 100u || rd_u32_le(rx, 12) != 200u ||
+        rx[16] != 5 || rx[17] != 's' || rx[18] != 'u' || rx[19] != 's' ||
+        rx[20] != 'a' || rx[21] != 'n') {
+        t_putstr("joey: RESOLVE_ID 1001 payload mismatch (want gid 1001, [100,200], susan)\n");
+        return 1;
+    }
+    t_putstr("joey: RESOLVE_ID 1001 -> susan {gid 1001, supp [100,200]} ok\n");
+
+    // RESOLVE_NAME ghost -> NotFound.
+    pl = build_name1(tx, "ghost", 5);
+    if (corvus_exchange(conn_fd, 12, tx, pl, rx, sizeof(rx), &st, &rlen) != 0) {
+        t_putstr("joey: RESOLVE_NAME ghost transport FAILED\n");
+        return 1;
+    }
+    if (st != 3) {
+        t_putstr("joey: RESOLVE_NAME ghost expected NotFound(3), got status=");
+        t_putstr(itoa_dec(st, buf, sizeof(buf)));
+        t_putstr("\n");
+        return 1;
+    }
+    t_putstr("joey: RESOLVE_NAME ghost -> NotFound (expected)\n");
+
+    // RESOLVE_ID 9999 -> NotFound.
+    pl = build_resolve_id(tx, 9999u);
+    if (corvus_exchange(conn_fd, 11, tx, pl, rx, sizeof(rx), &st, &rlen) != 0) {
+        t_putstr("joey: RESOLVE_ID 9999 transport FAILED\n");
+        return 1;
+    }
+    if (st != 3) {
+        t_putstr("joey: RESOLVE_ID 9999 expected NotFound(3), got status=");
+        t_putstr(itoa_dec(st, buf, sizeof(buf)));
+        t_putstr("\n");
+        return 1;
+    }
+    t_putstr("joey: RESOLVE_ID 9999 -> NotFound (expected)\n");
 
     // === WRAP users/michael — wrap a known 32-byte DEK ===
     unsigned char dek[32];

@@ -66,9 +66,10 @@
 // USER_CREATE + AUTH(bad) + AUTH(good) + SESSION_CLOSE wire codec
 // (~36 KiB total); at P5-stratumd-stub-bringup-e2 the stub-bringup
 // adds an SYS_CHROOT + SYS_WALK_OPEN(FROM_ROOT) sequence, pushing the
-// blob over 65 KiB. 128 KiB gives several more chunks of headroom
-// (RECOVER, USER_DELETE, ROTATE_KEY orchestration, stratumd-real swap).
-#define JOEY_BLOB_MAX (128u * 1024u)
+// blob over 65 KiB. The A-1b corvus identity-DB harness (RESOLVE/
+// GROUP_CREATE round-trips) pushes it past 128 KiB; 256 KiB gives
+// headroom for the remaining orchestration (RECOVER, USER_DELETE, etc.).
+#define JOEY_BLOB_MAX (256u * 1024u)
 static _Alignas(struct Elf64_Ehdr) u8 g_joey_elf_blob[JOEY_BLOB_MAX];
 
 // Arguments passed via rfork's `arg` to the child entry. Lives on the

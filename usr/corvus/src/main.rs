@@ -104,9 +104,10 @@ use libthyla_rs::ninep as p9;
 
 use libthyla_rs::{
     t_cap_grant, t_chroot, t_close, t_explicit_bzero, t_fsync, t_getrandom, t_mlockall,
-    t_poll, t_post_service, t_putstr, t_read, t_set_dumpable, t_set_traceable,
-    t_srv_accept, t_srv_peer, t_walk_create, t_walk_open, t_write, TPollFd, TSrvPeerInfo,
-    T_CAP_HOSTOWNER, T_OREAD, T_OWRITE, T_POLLHUP, T_POLLIN, T_WALK_OPEN_FROM_ROOT,
+    t_poll, t_post_service, t_putstr, t_read, t_rename, t_set_dumpable, t_set_traceable,
+    t_srv_accept, t_srv_peer, t_unlink, t_walk_create, t_walk_open, t_write, TPollFd,
+    TSrvPeerInfo, T_CAP_HOSTOWNER, T_OPATH, T_OREAD, T_OWRITE, T_POLLHUP, T_POLLIN,
+    T_WALK_CREATE_DMDIR, T_WALK_OPEN_FROM_ROOT,
 };
 
 use alloc::vec::Vec;
@@ -201,9 +202,18 @@ const ARGON2_PARALLELISM: u32 = 1;
 const AD_PREFIX: &[u8] = b"thylacine-corvus-v1";
 const BACKEND_ID_PASSPHRASE: u8 = 0;
 
+// A-1b: a user record carries BOTH identity (principal_id / primary_gid /
+// supp_gids / backend / name) and wrap-state (argon2 params + salt + nonce +
+// ciphertext + tag). The identity half persists in the central CRVS-v2
+// identity.db; the wrap half persists in the per-user CRVS-v1 hybrid.corvus
+// (the `to_bytes` blob). Loaded back from both at boot (CORVUS-DESIGN.md §16.2).
 #[derive(Clone)]
 struct CorvusUserState {
     user: Vec<u8>,
+    principal_id: u32,
+    primary_gid: u32,
+    supp_gids: Vec<u32>,
+    backend: u8,
     t_cost: u32,
     m_cost_kib: u32,
     parallelism: u32,
@@ -221,7 +231,11 @@ impl CorvusUserState {
         ad_out.push(BACKEND_ID_PASSPHRASE);
     }
 
-    #[allow(dead_code)] // FS persistence consumes this at P5+
+    // CRVS v1 per-user keypair wrap (the at-rest AEGIS-wrapped hybrid
+    // keypair). The on-disk blob is CIPHERTEXT, not a plaintext secret --
+    // hybrid.corvus is the encrypted wrap, decryptable only with the
+    // passphrase-derived KEK (CORVUS-DESIGN.md §16.1: this keeps the A-1b
+    // secret-handling surface at the wrap blob, never plaintext on the FS).
     fn to_bytes(&self) -> [u8; TOTAL_LEN] {
         let mut out = [0u8; TOTAL_LEN];
         out[0..4].copy_from_slice(&CORVUS_MAGIC.to_le_bytes());
@@ -234,6 +248,36 @@ impl CorvusUserState {
         out[72..72 + KEYPAIR_LEN].copy_from_slice(&self.ciphertext);
         out[72 + KEYPAIR_LEN..72 + KEYPAIR_LEN + AEGIS256_TAG_LEN].copy_from_slice(&self.tag);
         out
+    }
+
+    // Parse a CRVS v1 hybrid.corvus blob into the wrap-state fields of a
+    // record whose identity fields are already filled from identity.db.
+    // Fail-closed: magic/version/length mismatch -> None (the user is then
+    // dropped from the live table; CORVUS-DESIGN.md §16.5 step 4).
+    fn fill_wrap_from_bytes(&mut self, blob: &[u8]) -> bool {
+        if blob.len() != TOTAL_LEN {
+            return false;
+        }
+        let magic = u32::from_le_bytes([blob[0], blob[1], blob[2], blob[3]]);
+        let version = u32::from_le_bytes([blob[4], blob[5], blob[6], blob[7]]);
+        if magic != CORVUS_MAGIC || version != CORVUS_STATE_VERSION {
+            return false;
+        }
+        self.t_cost = u32::from_le_bytes([blob[8], blob[9], blob[10], blob[11]]);
+        let m64 = u64::from_le_bytes([
+            blob[12], blob[13], blob[14], blob[15], blob[16], blob[17], blob[18], blob[19],
+        ]);
+        if m64 > u32::MAX as u64 {
+            return false;
+        }
+        self.m_cost_kib = m64 as u32;
+        self.parallelism = u32::from_le_bytes([blob[20], blob[21], blob[22], blob[23]]);
+        self.salt.copy_from_slice(&blob[24..40]);
+        self.nonce.copy_from_slice(&blob[40..72]);
+        self.ciphertext.copy_from_slice(&blob[72..72 + KEYPAIR_LEN]);
+        self.tag
+            .copy_from_slice(&blob[72 + KEYPAIR_LEN..72 + KEYPAIR_LEN + AEGIS256_TAG_LEN]);
+        true
     }
 }
 
@@ -494,6 +538,91 @@ fn dek_envelope_unwrap(
 // User state vector + dataset ownership table — in-memory at v1.0.
 // =============================================================================
 
+// =============================================================================
+// Identity model — id <-> name <-> groups (A-1b; CORVUS-DESIGN.md §16).
+// =============================================================================
+//
+// corvus is the authoritative resolver. `next_auto_id` is ONE monotonic
+// counter shared between principal_ids and gids (the Red Hat UPG scheme), so a
+// user-private group's uid == gid is collision-free. Reserved values are never
+// assigned (the counter starts at 1000 and only increments). An assigned id
+// confers no ambient authority (I-22 / C-25).
+
+const FIRST_AUTO_ID: u32 = 1000;
+const PRINCIPAL_INVALID: u32 = 0;
+const PRINCIPAL_SYSTEM: u32 = 0xFFFF_FFFE;
+const PRINCIPAL_NONE: u32 = 0xFFFF_FFFF;
+const PROC_SUPP_GIDS_MAX: usize = 15;
+const MAX_GROUP_LEN: usize = 32;
+
+// CRVS v2 identity.db — central, NON-secret id<->name<->group map.
+const IDENTITY_DB_VERSION: u32 = 2;
+const IDENTITY_DB_HEADER_LEN: usize = 20;
+const _: () = assert!(IDENTITY_DB_HEADER_LEN == 20, "identity.db header layout drift");
+const _: () = assert!(PROC_SUPP_GIDS_MAX == 15, "supp_gids cap drift (kernel PROC_SUPP_GIDS_MAX)");
+// alloc_auto_id rejects everything >= PRINCIPAL_SYSTEM, which covers BOTH
+// reserved sentinels; this pins the ordering so a single `>=` stays sufficient.
+const _: () = assert!(PRINCIPAL_NONE > PRINCIPAL_SYSTEM, "reserved-id ordering drift");
+const _: () = assert!(PRINCIPAL_SYSTEM > FIRST_AUTO_ID, "reserved-id ordering drift");
+
+// The storage-capability fd handed by joey at spawn (fd 0). corvus chroots to
+// it (rs_main, A-1.7), and it remains a valid R|W non-opened handle to corvus's
+// root directory afterward (SYS_CHROOT borrows the fd; it is not consumed) --
+// used as the directory fd for the dirent-durability fsync barrier (§16.6).
+const STORAGE_ROOT_FD: i64 = 0;
+
+// One monotonic id allocator shared between principal_ids and gids. Persisted
+// in the identity.db header so a deleted id is never reused (§16.3).
+static mut NEXT_AUTO_ID: u32 = FIRST_AUTO_ID;
+
+unsafe fn alloc_auto_id() -> Option<u32> {
+    let id = NEXT_AUTO_ID;
+    // Refuse to mint a reserved value: the counter only climbs, so the only
+    // way to reach one is exhausting the (1000 .. PRINCIPAL_SYSTEM) range.
+    if id < FIRST_AUTO_ID || id >= PRINCIPAL_SYSTEM {
+        return None;
+    }
+    NEXT_AUTO_ID = id + 1;
+    Some(id)
+}
+
+struct GroupRecord {
+    gid: u32,
+    name: Vec<u8>,
+}
+
+static mut GROUPS: Option<Vec<GroupRecord>> = None;
+
+unsafe fn groups_init() {
+    core::ptr::write(core::ptr::addr_of_mut!(GROUPS), Some(Vec::new()));
+}
+
+unsafe fn group_name_exists(name: &[u8]) -> bool {
+    match (*core::ptr::addr_of!(GROUPS)).as_ref() {
+        Some(g) => g.iter().any(|r| r.name == name),
+        None => false,
+    }
+}
+
+// Append a group record. Caller guarantees the name is not a duplicate (the
+// verb handlers check first). Returns false only if the table is uninitialized.
+unsafe fn groups_push(gid: u32, name: &[u8]) -> bool {
+    let table = match (*core::ptr::addr_of_mut!(GROUPS)).as_mut() {
+        Some(t) => t,
+        None => return false,
+    };
+    let mut n = Vec::new();
+    n.extend_from_slice(name);
+    table.push(GroupRecord { gid, name: n });
+    true
+}
+
+unsafe fn groups_pop_last() {
+    if let Some(t) = (*core::ptr::addr_of_mut!(GROUPS)).as_mut() {
+        let _ = t.pop();
+    }
+}
+
 const MAX_USERS: usize = 256;
 
 static mut USER_STATES: Option<Vec<CorvusUserState>> = None;
@@ -532,6 +661,22 @@ unsafe fn user_states_insert(record: CorvusUserState) -> bool {
     }
     states.push(record);
     true
+}
+
+unsafe fn user_states_find_by_id(principal_id: u32) -> Option<CorvusUserState> {
+    let states = (*core::ptr::addr_of!(USER_STATES)).as_ref()?;
+    for s in states {
+        if s.principal_id == principal_id {
+            return Some(s.clone());
+        }
+    }
+    None
+}
+
+unsafe fn user_states_pop_last() {
+    if let Some(s) = (*core::ptr::addr_of_mut!(USER_STATES)).as_mut() {
+        let _ = s.pop();
+    }
 }
 
 struct DatasetOwner {
@@ -576,6 +721,368 @@ unsafe fn dataset_owner_register(dataset: &[u8], owner: &[u8]) -> bool {
 }
 
 // =============================================================================
+// On-disk persistence — A-1b (CORVUS-DESIGN.md §16.4 / §16.5 / §16.6).
+// =============================================================================
+//
+// corvus's root IS /var/lib/corvus post-chroot (A-1.7), so every path here
+// resolves WITHIN the handed storage capability. Two artifacts: the central
+// non-secret CRVS-v2 identity.db, and the per-user CRVS-v1 hybrid.corvus wrap
+// (encrypted keypair). The DB is rewritten atomically via the A-1.6 rename-swap
+// substrate; the wrap is write-once at USER_CREATE.
+
+const IDB: &[u8] = b"identity.db";
+const IDB_TMP: &[u8] = b"identity.db.tmp";
+const USERS_DIR: &[u8] = b"users";
+const HYBRID: &[u8] = b"hybrid.corvus";
+
+const FS_IO_CHUNK: usize = 2048; // bounded per-call read/write (<= SYS_RW_MAX)
+const IDENTITY_DB_MAX: usize = 256 * 1024; // read cap; ~36 KiB worst case at 256 users
+
+// Write the whole buffer to an opened fd, chunked at SYS_RW_MAX. A short or
+// error return fails the whole write (partial writes are not retried past the
+// reported count, but a 0/-1 return is fatal).
+unsafe fn write_all_fd(fd: i64, buf: &[u8]) -> bool {
+    let mut off = 0usize;
+    while off < buf.len() {
+        let chunk = core::cmp::min(buf.len() - off, FS_IO_CHUNK);
+        let w = t_write(fd, buf[off..].as_ptr(), chunk);
+        if w <= 0 {
+            return false;
+        }
+        off += w as usize;
+        if (w as usize) > chunk {
+            return false; // impossible over-report -> fail closed
+        }
+    }
+    true
+}
+
+// Read an opened fd to EOF into `out`, failing closed past `max` bytes.
+unsafe fn read_to_end_fd(fd: i64, out: &mut Vec<u8>, max: usize) -> bool {
+    let mut buf = [0u8; FS_IO_CHUNK];
+    loop {
+        let r = t_read(fd, buf.as_mut_ptr(), FS_IO_CHUNK);
+        if r < 0 {
+            return false;
+        }
+        if r == 0 {
+            return true; // EOF
+        }
+        let n = r as usize;
+        if n > FS_IO_CHUNK || out.len() + n > max {
+            return false; // over-report / oversize -> fail closed
+        }
+        out.extend_from_slice(&buf[..n]);
+    }
+}
+
+// Idempotent mkdir returning a NON-OPENED (O_PATH) walkable handle (FS-delta);
+// mirrors joey's mkdir_or_open. `parent` must itself be non-opened (FROM_ROOT
+// or a prior result -- 9P forbids Twalk from an opened fid). Returns the dir fd
+// (>= 0) or -1.
+unsafe fn mkdir_opath(parent: i64, name: &[u8]) -> i64 {
+    let cf = t_walk_create(parent, name.as_ptr(), name.len(), T_OREAD,
+                           T_WALK_CREATE_DMDIR | 0o755);
+    if cf >= 0 {
+        let _ = t_close(cf);
+    }
+    t_walk_open(parent, name.as_ptr(), name.len(), T_OPATH)
+}
+
+// Serialize the full in-memory DB to the CRVS v2 byte format (§16.4). Returns
+// an empty Vec only if a table is uninitialized (a caller-side bug); an empty
+// DB serializes to the 20-byte header.
+unsafe fn identity_db_serialize() -> Vec<u8> {
+    let states = match (*core::ptr::addr_of!(USER_STATES)).as_ref() {
+        Some(s) => s,
+        None => return Vec::new(),
+    };
+    let groups = match (*core::ptr::addr_of!(GROUPS)).as_ref() {
+        Some(g) => g,
+        None => return Vec::new(),
+    };
+    let mut out = Vec::new();
+    out.extend_from_slice(&CORVUS_MAGIC.to_le_bytes());
+    out.extend_from_slice(&IDENTITY_DB_VERSION.to_le_bytes());
+    out.extend_from_slice(&NEXT_AUTO_ID.to_le_bytes());
+    out.extend_from_slice(&(states.len() as u32).to_le_bytes());
+    out.extend_from_slice(&(groups.len() as u32).to_le_bytes());
+    for s in states {
+        out.extend_from_slice(&s.principal_id.to_le_bytes());
+        out.extend_from_slice(&s.primary_gid.to_le_bytes());
+        out.push(s.backend);
+        out.push(s.supp_gids.len() as u8);
+        out.push(s.user.len() as u8);
+        for g in &s.supp_gids {
+            out.extend_from_slice(&g.to_le_bytes());
+        }
+        out.extend_from_slice(&s.user);
+    }
+    for g in groups {
+        out.extend_from_slice(&g.gid.to_le_bytes());
+        out.push(g.name.len() as u8);
+        out.extend_from_slice(&g.name);
+    }
+    out
+}
+
+// Parse a CRVS v2 identity.db into NEXT_AUTO_ID + USER_STATES (identity fields
+// only; wrap fields zeroed, filled later from hybrid.corvus) + GROUPS. Every
+// length field is bounds-checked against the remaining buffer (no over-read);
+// any malformed/truncated record fails the WHOLE load closed (§16.4). Trailing
+// bytes past the last record also fail closed (a clean file is consumed
+// exactly). Returns true on a fully-parsed file.
+unsafe fn identity_db_parse(blob: &[u8]) -> bool {
+    if blob.len() < IDENTITY_DB_HEADER_LEN {
+        return false;
+    }
+    let magic = u32::from_le_bytes([blob[0], blob[1], blob[2], blob[3]]);
+    let version = u32::from_le_bytes([blob[4], blob[5], blob[6], blob[7]]);
+    if magic != CORVUS_MAGIC || version != IDENTITY_DB_VERSION {
+        return false;
+    }
+    let next_id = u32::from_le_bytes([blob[8], blob[9], blob[10], blob[11]]);
+    let user_count = u32::from_le_bytes([blob[12], blob[13], blob[14], blob[15]]) as usize;
+    let group_count = u32::from_le_bytes([blob[16], blob[17], blob[18], blob[19]]) as usize;
+    if next_id < FIRST_AUTO_ID || next_id >= PRINCIPAL_SYSTEM {
+        return false;
+    }
+    if user_count > MAX_USERS || group_count > 2 * MAX_USERS {
+        return false;
+    }
+
+    let mut users: Vec<CorvusUserState> = Vec::new();
+    let mut groups: Vec<GroupRecord> = Vec::new();
+    let mut off = IDENTITY_DB_HEADER_LEN;
+
+    for _ in 0..user_count {
+        if off + 11 > blob.len() {
+            return false;
+        }
+        let principal_id =
+            u32::from_le_bytes([blob[off], blob[off + 1], blob[off + 2], blob[off + 3]]);
+        let primary_gid =
+            u32::from_le_bytes([blob[off + 4], blob[off + 5], blob[off + 6], blob[off + 7]]);
+        let backend = blob[off + 8];
+        let supp_n = blob[off + 9] as usize;
+        let name_n = blob[off + 10] as usize;
+        off += 11;
+        if supp_n > PROC_SUPP_GIDS_MAX {
+            return false;
+        }
+        if name_n == 0 || name_n > MAX_USER_LEN {
+            return false;
+        }
+        if off + 4 * supp_n + name_n > blob.len() {
+            return false;
+        }
+        // Reserved/illegal identity values fail closed. Every assigned id is
+        // strictly below next_id (the counter is past all live ids).
+        if principal_id == PRINCIPAL_INVALID || principal_id >= next_id {
+            return false;
+        }
+        if primary_gid == PRINCIPAL_INVALID || primary_gid >= PRINCIPAL_SYSTEM {
+            return false;
+        }
+        let mut supp = Vec::with_capacity(supp_n);
+        for _ in 0..supp_n {
+            let g = u32::from_le_bytes([blob[off], blob[off + 1], blob[off + 2], blob[off + 3]]);
+            supp.push(g);
+            off += 4;
+        }
+        let mut name = Vec::with_capacity(name_n);
+        name.extend_from_slice(&blob[off..off + name_n]);
+        off += name_n;
+        users.push(CorvusUserState {
+            user: name,
+            principal_id,
+            primary_gid,
+            supp_gids: supp,
+            backend,
+            t_cost: 0,
+            m_cost_kib: 0,
+            parallelism: 0,
+            salt: [0; ARGON2_SALT_LEN],
+            nonce: [0; AEGIS256_NONCE_LEN],
+            ciphertext: [0; KEYPAIR_LEN],
+            tag: [0; AEGIS256_TAG_LEN],
+        });
+    }
+    for _ in 0..group_count {
+        if off + 5 > blob.len() {
+            return false;
+        }
+        let gid = u32::from_le_bytes([blob[off], blob[off + 1], blob[off + 2], blob[off + 3]]);
+        let name_n = blob[off + 4] as usize;
+        off += 5;
+        if name_n == 0 || name_n > MAX_GROUP_LEN {
+            return false;
+        }
+        if off + name_n > blob.len() {
+            return false;
+        }
+        if gid == PRINCIPAL_INVALID || gid >= PRINCIPAL_SYSTEM {
+            return false;
+        }
+        let mut name = Vec::with_capacity(name_n);
+        name.extend_from_slice(&blob[off..off + name_n]);
+        off += name_n;
+        groups.push(GroupRecord { gid, name });
+    }
+    if off != blob.len() {
+        return false; // trailing garbage -> fail closed
+    }
+
+    core::ptr::write(core::ptr::addr_of_mut!(USER_STATES), Some(users));
+    core::ptr::write(core::ptr::addr_of_mut!(GROUPS), Some(groups));
+    NEXT_AUTO_ID = next_id;
+    true
+}
+
+// Open users/<name>/hybrid.corvus and fill `rec`'s wrap fields. `users_fd` is
+// the non-opened users/ dir handle. Returns false (drop the user, fail-closed)
+// on any failure -- a user with no usable secret is not authoritative for login.
+unsafe fn load_keypair_wrap(users_fd: i64, name: &[u8], rec: &mut CorvusUserState) -> bool {
+    let udir = t_walk_open(users_fd, name.as_ptr(), name.len(), T_OPATH);
+    if udir < 0 {
+        return false;
+    }
+    let wf = t_walk_open(udir, HYBRID.as_ptr(), HYBRID.len(), T_OREAD);
+    let _ = t_close(udir);
+    if wf < 0 {
+        return false;
+    }
+    let mut blob: Vec<u8> = Vec::new();
+    let ok = read_to_end_fd(wf, &mut blob, TOTAL_LEN + 64);
+    let _ = t_close(wf);
+    if !ok {
+        return false;
+    }
+    rec.fill_wrap_from_bytes(&blob)
+}
+
+// Write the per-user keypair wrap (write-once, fsync'd) to
+// users/<name>/hybrid.corvus, creating the per-user dir if absent. A stale
+// orphan from a prior crashed create is unlinked first. Returns false on any
+// failure (caller aborts the create BEFORE committing identity.db; §16.6 step 1).
+unsafe fn persist_keypair_wrap(users_fd: i64, name: &[u8], rec: &CorvusUserState) -> bool {
+    let udir = mkdir_opath(users_fd, name);
+    if udir < 0 {
+        return false;
+    }
+    let _ = t_unlink(udir, HYBRID.as_ptr(), HYBRID.len(), 0);
+    let wf = t_walk_create(udir, HYBRID.as_ptr(), HYBRID.len(), T_OWRITE, 0o600);
+    let _ = t_close(udir);
+    if wf < 0 {
+        return false;
+    }
+    let blob = rec.to_bytes();
+    let wrote = write_all_fd(wf, &blob);
+    let synced = t_fsync(wf, 0) == 0;
+    let _ = t_close(wf);
+    wrote && synced
+}
+
+// Atomic rewrite-swap of identity.db (§16.6 step 2): write tmp -> fsync(tmp) ->
+// rename(tmp -> real) -> fsync(dir). The rename is the atomic commit point; the
+// directory fsync (on the storage-cap fd, the dir handle) is the dirent-
+// durability barrier. Returns false on any failure (caller rolls back its
+// in-memory mutation). C-26 crash-safety: a crash before the rename leaves the
+// intact old DB + a partial tmp (unlinked at next boot); a crash at/after the
+// rename leaves a complete DB (rename is atomic).
+unsafe fn identity_persist() -> bool {
+    let blob = identity_db_serialize();
+    if blob.len() < IDENTITY_DB_HEADER_LEN {
+        return false; // uninitialized tables -- never on the live path
+    }
+    let _ = t_unlink(T_WALK_OPEN_FROM_ROOT, IDB_TMP.as_ptr(), IDB_TMP.len(), 0);
+    let tf = t_walk_create(T_WALK_OPEN_FROM_ROOT, IDB_TMP.as_ptr(), IDB_TMP.len(), T_OWRITE, 0o600);
+    if tf < 0 {
+        return false;
+    }
+    let wrote = write_all_fd(tf, &blob);
+    let synced = t_fsync(tf, 0) == 0;
+    let _ = t_close(tf);
+    if !wrote || !synced {
+        let _ = t_unlink(T_WALK_OPEN_FROM_ROOT, IDB_TMP.as_ptr(), IDB_TMP.len(), 0);
+        return false;
+    }
+    if t_rename(T_WALK_OPEN_FROM_ROOT, IDB_TMP.as_ptr(), IDB_TMP.len(),
+                T_WALK_OPEN_FROM_ROOT, IDB.as_ptr(), IDB.len()) != 0 {
+        let _ = t_unlink(T_WALK_OPEN_FROM_ROOT, IDB_TMP.as_ptr(), IDB_TMP.len(), 0);
+        return false;
+    }
+    // Dirent-durability barrier (best-effort): the rename already committed
+    // atomically; this hardens against power loss. fd 0 is the still-open R|W
+    // non-opened handle to corvus's root dir (SYS_CHROOT borrowed, not consumed).
+    let _ = t_fsync(STORAGE_ROOT_FD, 0);
+    true
+}
+
+// Boot-time load (§16.5). Returns false on a FATAL condition (present-but-
+// corrupt DB, FS error) so corvus refuses to start rather than silently
+// re-bootstrapping (an attacker who corrupts identity.db must NOT get a free
+// first-user bootstrap). An ABSENT identity.db is a fresh install -> empty DB.
+unsafe fn identity_load() -> bool {
+    // 1. Ensure users/ exists (corvus root IS /var/lib/corvus post-chroot).
+    let users_fd = mkdir_opath(T_WALK_OPEN_FROM_ROOT, USERS_DIR);
+    if users_fd < 0 {
+        return false;
+    }
+
+    // 2. Clean a stale tmp left by a crash between create-tmp and rename.
+    let _ = t_unlink(T_WALK_OPEN_FROM_ROOT, IDB_TMP.as_ptr(), IDB_TMP.len(), 0);
+
+    // 3. Open identity.db. Absent -> fresh install (empty DB; defaults stand).
+    let dbf = t_walk_open(T_WALK_OPEN_FROM_ROOT, IDB.as_ptr(), IDB.len(), T_OREAD);
+    if dbf < 0 {
+        let _ = t_close(users_fd);
+        return true;
+    }
+    let mut blob: Vec<u8> = Vec::new();
+    let read_ok = read_to_end_fd(dbf, &mut blob, IDENTITY_DB_MAX);
+    let _ = t_close(dbf);
+    if !read_ok || !identity_db_parse(&blob) {
+        let _ = t_close(users_fd);
+        return false; // present-but-unreadable/corrupt -> fail closed
+    }
+
+    // 4. Fill each user's wrap from users/<name>/hybrid.corvus; drop a user
+    //    whose wrap is missing/corrupt (no usable secret). Re-register the
+    //    dataset-owner mapping so WRAP/UNWRAP work post-reboot.
+    let taken = (*core::ptr::addr_of_mut!(USER_STATES)).take();
+    let states = match taken {
+        Some(s) => s,
+        None => {
+            let _ = t_close(users_fd);
+            return false;
+        }
+    };
+    let mut keep: Vec<CorvusUserState> = Vec::new();
+    for mut rec in states.into_iter() {
+        let uname = rec.user.clone();
+        if load_keypair_wrap(users_fd, &uname, &mut rec) {
+            let mut ds = Vec::new();
+            ds.extend_from_slice(b"users/");
+            ds.extend_from_slice(&uname);
+            dataset_owner_register(&ds, &uname);
+            keep.push(rec);
+        } else {
+            t_putstr("corvus: identity load dropped a user (missing/corrupt wrap)\n");
+        }
+    }
+    let kept = keep.len();
+    core::ptr::write(core::ptr::addr_of_mut!(USER_STATES), Some(keep));
+    let _ = t_close(users_fd);
+
+    t_putstr("corvus: identity.db loaded (");
+    let mut nbuf = [0u8; 12];
+    t_putstr(usize_dec(kept, &mut nbuf));
+    t_putstr(" users)\n");
+    true
+}
+
+// =============================================================================
 // Wire constants — CORVUS-DESIGN.md §6.4.
 // =============================================================================
 
@@ -585,6 +1092,12 @@ const VERB_UNWRAP: u8 = 4;
 const VERB_USER_CREATE: u8 = 5;
 const VERB_ADMIN_ELEVATE: u8 = 7;
 const VERB_WRAP: u8 = 10;
+// A-1b identity verbs (CORVUS-DESIGN.md §16.7). RESOLVE_* are ungated
+// (getpwuid/getpwnam equivalents -- an id<->name map is not secret).
+// GROUP_CREATE is CAP_HOSTOWNER-gated (groupadd is privileged).
+const VERB_RESOLVE_ID: u8 = 11;
+const VERB_RESOLVE_NAME: u8 = 12;
+const VERB_GROUP_CREATE: u8 = 13;
 
 // System passphrase — verified by ADMIN_ELEVATE before the kernel `cap`
 // grant is registered (CORVUS-DESIGN.md §5.5). v1.0 PLACEHOLDER: a
@@ -625,9 +1138,11 @@ const MAX_WRAPPED_LEN: usize = 2048;
 //   token(33) + dataset_len(1) + dataset(≤64) + key_id(8)
 //   + wrapped_len(2) + wrapped(≤2048) = 2156 bytes.
 const MAX_PAYLOAD_LEN: usize = TOKEN_LEN + 1 + MAX_DATASET_LEN + 8 + 2 + MAX_WRAPPED_LEN;
+// USER_CREATE (extended, A-1b): user_len(1) + user + pass_len(2) + pass +
+// backend(1) + supp_gid_count(1) + supp_gids(4 * PROC_SUPP_GIDS_MAX).
 const _: () = assert!(
-    MAX_PAYLOAD_LEN >= 1 + MAX_USER_LEN + 2 + MAX_PASS_LEN + 1,
-    "USER_CREATE payload must fit MAX_PAYLOAD_LEN"
+    MAX_PAYLOAD_LEN >= 1 + MAX_USER_LEN + 2 + MAX_PASS_LEN + 1 + 1 + 4 * PROC_SUPP_GIDS_MAX,
+    "extended USER_CREATE payload must fit MAX_PAYLOAD_LEN"
 );
 
 // 4-byte request header (verb + protocol_version + len_lo + len_hi).
@@ -773,6 +1288,26 @@ fn nibble_to_hex(n: u8) -> u8 {
     } else {
         b'a' + (n - 10)
     }
+}
+
+// Format a usize as decimal into `buf`; returns the populated &str. Boot
+// diagnostics only (no heap).
+fn usize_dec(mut n: usize, buf: &mut [u8; 12]) -> &str {
+    if n == 0 {
+        buf[0] = b'0';
+        return unsafe { core::str::from_utf8_unchecked(&buf[..1]) };
+    }
+    let mut tmp = [0u8; 12];
+    let mut i = 0;
+    while n > 0 && i < tmp.len() {
+        tmp[i] = b'0' + (n % 10) as u8;
+        n /= 10;
+        i += 1;
+    }
+    for j in 0..i {
+        buf[j] = tmp[i - 1 - j];
+    }
+    unsafe { core::str::from_utf8_unchecked(&buf[..i]) }
 }
 
 // =============================================================================
@@ -952,19 +1487,50 @@ unsafe fn handle_user_create(handle: i64, payload: &[u8], response: &mut Vec<u8>
     if pass_len == 0 || pass_len > MAX_PASS_LEN {
         return stage_response(response, STATUS_BAD_FORMAT, &[]);
     }
-    if payload.len() != 1 + user_len + 2 + pass_len + 1 {
+    // Through the backend byte. Then the A-1b append-only extension:
+    //   [base]   supp_gid_count u8 (absent => 0)
+    //   [base+1] supp_gids[count] u32 LE
+    let backend_off = 1 + user_len + 2 + pass_len;
+    if payload.len() < backend_off + 1 {
         return stage_response(response, STATUS_BAD_FORMAT, &[]);
     }
-    let passphrase = &payload[1 + user_len + 2..1 + user_len + 2 + pass_len];
-    let backend = payload[1 + user_len + 2 + pass_len];
+    let passphrase = &payload[1 + user_len + 2..backend_off];
+    let backend = payload[backend_off];
     if backend != BACKEND_ID_PASSPHRASE {
         return stage_response(response, STATUS_BAD_FORMAT, &[]);
+    }
+    let ext_off = backend_off + 1;
+    let mut supp_gids: Vec<u32> = Vec::new();
+    if payload.len() != ext_off {
+        // Extension present: exactly supp_gid_count + count*4 trailing bytes.
+        if payload.len() < ext_off + 1 {
+            return stage_response(response, STATUS_BAD_FORMAT, &[]);
+        }
+        let supp_n = payload[ext_off] as usize;
+        if supp_n > PROC_SUPP_GIDS_MAX {
+            return stage_response(response, STATUS_BAD_FORMAT, &[]);
+        }
+        if payload.len() != ext_off + 1 + 4 * supp_n {
+            return stage_response(response, STATUS_BAD_FORMAT, &[]);
+        }
+        let mut o = ext_off + 1;
+        for _ in 0..supp_n {
+            supp_gids.push(u32::from_le_bytes([
+                payload[o], payload[o + 1], payload[o + 2], payload[o + 3],
+            ]));
+            o += 4;
+        }
     }
 
     if user_states_find(user_slice).is_some() {
         return stage_response(response, STATUS_PERMISSION_DENIED, &[]);
     }
     if user_states_count() >= MAX_USERS {
+        return stage_response(response, STATUS_INTERNAL_ERROR, &[]);
+    }
+    // A UPG group named after the user must not already exist (it would be an
+    // orphan group with no owner). Fail closed.
+    if group_name_exists(user_slice) {
         return stage_response(response, STATUS_INTERNAL_ERROR, &[]);
     }
 
@@ -1009,8 +1575,20 @@ unsafe fn handle_user_create(handle: i64, payload: &[u8], response: &mut Vec<u8>
     wipe(&mut kek);
     wipe(&mut keypair_plain);
 
+    // UPG: principal_id == primary_gid == next_auto_id++ (§16.3). A burned id
+    // (counter bumped but a later step fails) is never reused -- monotonic.
+    let principal_id = match alloc_auto_id() {
+        Some(id) => id,
+        None => return stage_response(response, STATUS_INTERNAL_ERROR, &[]),
+    };
+    let primary_gid = principal_id;
+
     let record = CorvusUserState {
-        user: user_vec,
+        user: user_vec.clone(),
+        principal_id,
+        primary_gid,
+        supp_gids,
+        backend: BACKEND_ID_PASSPHRASE,
         t_cost: ARGON2_T_COST,
         m_cost_kib: ARGON2_M_COST_KIB,
         parallelism: ARGON2_PARALLELISM,
@@ -1020,16 +1598,146 @@ unsafe fn handle_user_create(handle: i64, payload: &[u8], response: &mut Vec<u8>
         tag,
     };
 
+    // Persist (§16.6): keypair wrap (write-once, fsync'd) BEFORE the identity.db
+    // commit, so a crash between them leaves an orphan wrap (harmless), never an
+    // identity record pointing at a missing wrap. Open users/ once.
+    let users_fd = mkdir_opath(T_WALK_OPEN_FROM_ROOT, USERS_DIR);
+    if users_fd < 0 {
+        return stage_response(response, STATUS_INTERNAL_ERROR, &[]);
+    }
+    let wrap_ok = persist_keypair_wrap(users_fd, &user_vec, &record);
+    let _ = t_close(users_fd);
+    if !wrap_ok {
+        return stage_response(response, STATUS_INTERNAL_ERROR, &[]);
+    }
+
+    // In-memory commit (append) + UPG group, THEN identity.db rewrite-swap (the
+    // atomic commit point). On swap failure, roll back the appends -- the new
+    // user is then neither in identity.db nor in the live table.
     if !user_states_insert(record) {
+        return stage_response(response, STATUS_INTERNAL_ERROR, &[]);
+    }
+    if !groups_push(principal_id, &user_vec) {
+        user_states_pop_last();
+        return stage_response(response, STATUS_INTERNAL_ERROR, &[]);
+    }
+    if !identity_persist() {
+        groups_pop_last();
+        user_states_pop_last();
+        return stage_response(response, STATUS_INTERNAL_ERROR, &[]);
+    }
+
+    // Committed. Register the dataset-owner mapping (users/<name> -> <name>) so
+    // WRAP/UNWRAP gate correctly; done after the commit so a rolled-back create
+    // leaves no stale owner.
+    let mut dataset = Vec::new();
+    dataset.extend_from_slice(b"users/");
+    dataset.extend_from_slice(&user_vec);
+    dataset_owner_register(&dataset, &user_vec);
+
+    let mut ok = [0u8; 8];
+    ok[0..4].copy_from_slice(&principal_id.to_le_bytes());
+    ok[4..8].copy_from_slice(&primary_gid.to_le_bytes());
+    stage_response(response, STATUS_OK, &ok);
+}
+
+// handle_resolve_id — RESOLVE_ID verb (verb_id=11; UNGATED). The getpwuid
+// equivalent: id -> primary_gid + supp_gids + name. A uid<->name map is not
+// secret (CORVUS-DESIGN.md §16.7).
+//
+// Request:  principal_id u32 LE
+// OK reply: primary_gid u32 LE + supp_gid_count u8 + supp_gids[count] u32 LE
+//           + name_len u8 + name
+unsafe fn handle_resolve_id(payload: &[u8], response: &mut Vec<u8>) {
+    if payload.len() != 4 {
+        return stage_response(response, STATUS_BAD_FORMAT, &[]);
+    }
+    let principal_id = u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]]);
+    let rec = match user_states_find_by_id(principal_id) {
+        Some(r) => r,
+        None => return stage_response(response, STATUS_NOT_FOUND, &[]),
+    };
+    let mut out: Vec<u8> = Vec::new();
+    out.extend_from_slice(&rec.primary_gid.to_le_bytes());
+    out.push(rec.supp_gids.len() as u8);
+    for g in &rec.supp_gids {
+        out.extend_from_slice(&g.to_le_bytes());
+    }
+    out.push(rec.user.len() as u8);
+    out.extend_from_slice(&rec.user);
+    stage_response(response, STATUS_OK, &out);
+}
+
+// handle_resolve_name — RESOLVE_NAME verb (verb_id=12; UNGATED). The getpwnam
+// equivalent: name -> {principal_id, primary_gid}. Login needs name->id
+// pre-AUTH (§16.7).
+//
+// Request:  name_len u8 + name
+// OK reply: principal_id u32 LE + primary_gid u32 LE
+unsafe fn handle_resolve_name(payload: &[u8], response: &mut Vec<u8>) {
+    if payload.is_empty() {
+        return stage_response(response, STATUS_BAD_FORMAT, &[]);
+    }
+    let name_len = payload[0] as usize;
+    if name_len == 0 || name_len > MAX_USER_LEN {
+        return stage_response(response, STATUS_BAD_FORMAT, &[]);
+    }
+    if payload.len() != 1 + name_len {
+        return stage_response(response, STATUS_BAD_FORMAT, &[]);
+    }
+    let name = &payload[1..1 + name_len];
+    let rec = match user_states_find(name) {
+        Some(r) => r,
+        None => return stage_response(response, STATUS_NOT_FOUND, &[]),
+    };
+    let mut out = [0u8; 8];
+    out[0..4].copy_from_slice(&rec.principal_id.to_le_bytes());
+    out[4..8].copy_from_slice(&rec.primary_gid.to_le_bytes());
+    stage_response(response, STATUS_OK, &out);
+}
+
+// handle_group_create — GROUP_CREATE verb (verb_id=13; CAP_HOSTOWNER-gated via
+// a live peer re-query, like the admin verbs -- groupadd is privileged).
+// Auto-assigns a gid from the shared counter, so a standalone group's gid is
+// distinct from every UPG (§16.7).
+//
+// Request:  name_len u8 + name
+// OK reply: gid u32 LE
+unsafe fn handle_group_create(handle: i64, payload: &[u8], response: &mut Vec<u8>) {
+    // Gate FIRST -- a non-hostowner peer learns nothing about the group table
+    // (PermissionDenied regardless of whether the name is valid/duplicate).
+    let caps = peer_live_caps(handle);
+    if (caps & T_CAP_HOSTOWNER) == 0 {
         return stage_response(response, STATUS_PERMISSION_DENIED, &[]);
     }
 
-    let mut dataset = Vec::new();
-    dataset.extend_from_slice(b"users/");
-    dataset.extend_from_slice(user_slice);
-    dataset_owner_register(&dataset, user_slice);
+    if payload.is_empty() {
+        return stage_response(response, STATUS_BAD_FORMAT, &[]);
+    }
+    let name_len = payload[0] as usize;
+    if name_len == 0 || name_len > MAX_GROUP_LEN {
+        return stage_response(response, STATUS_BAD_FORMAT, &[]);
+    }
+    if payload.len() != 1 + name_len {
+        return stage_response(response, STATUS_BAD_FORMAT, &[]);
+    }
+    let name = &payload[1..1 + name_len];
+    if group_name_exists(name) {
+        return stage_response(response, STATUS_BAD_FORMAT, &[]);
+    }
 
-    stage_response(response, STATUS_OK, &[]);
+    let gid = match alloc_auto_id() {
+        Some(id) => id,
+        None => return stage_response(response, STATUS_INTERNAL_ERROR, &[]),
+    };
+    if !groups_push(gid, name) {
+        return stage_response(response, STATUS_INTERNAL_ERROR, &[]);
+    }
+    if !identity_persist() {
+        groups_pop_last();
+        return stage_response(response, STATUS_INTERNAL_ERROR, &[]);
+    }
+    stage_response(response, STATUS_OK, &gid.to_le_bytes());
 }
 
 // handle_admin_elevate — ADMIN_ELEVATE verb (verb_id=7). Verifies the
@@ -1523,6 +2231,10 @@ unsafe fn try_dispatch_verb(conn: &mut Conn) {
             VERB_ADMIN_ELEVATE => handle_admin_elevate(&conn_peer, &payload_owned,
                                                        &mut conn.pending_response),
             VERB_WRAP => handle_wrap(&payload_owned, &mut conn.pending_response),
+            VERB_RESOLVE_ID => handle_resolve_id(&payload_owned, &mut conn.pending_response),
+            VERB_RESOLVE_NAME => handle_resolve_name(&payload_owned, &mut conn.pending_response),
+            VERB_GROUP_CREATE => handle_group_create(conn_handle, &payload_owned,
+                                                     &mut conn.pending_response),
             _ => stage_response(&mut conn.pending_response, STATUS_BAD_FORMAT, &[]),
         }
 
@@ -2091,6 +2803,7 @@ pub extern "C" fn rs_main() -> i64 {
         heap_init();
         user_states_init();
         dataset_owners_init();
+        groups_init();
     }
 
     let rc = unsafe { t_mlockall(0) };
@@ -2121,6 +2834,16 @@ pub extern "C" fn rs_main() -> i64 {
             t_putstr("corvus: storage capability OK (confined; /thylacine-version unreachable)\n");
         } else {
             t_putstr("corvus: storage capability smoke FAILED\n");
+            return 1;
+        }
+    }
+
+    // A-1b: load the identity DB + per-user keypair wraps from within the
+    // chrooted storage cap. Fail-closed -- a present-but-corrupt identity.db
+    // aborts boot rather than silently re-bootstrapping a free first user.
+    unsafe {
+        if !identity_load() {
+            t_putstr("corvus: FATAL identity.db load failed (corrupt/unreadable)\n");
             return 1;
         }
     }

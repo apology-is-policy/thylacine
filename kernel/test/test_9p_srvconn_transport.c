@@ -221,6 +221,70 @@ void test_9p_srvconn_transport_send_routes_to_c2s_ring(void) {
 }
 
 // =============================================================================
+// 9p_srvconn_transport.large_frame_roundtrip
+//
+// A-1b regression: corvus's first LARGE 9P write frame (>~128 B) over this
+// byte-mode SrvConn fails at runtime while tiny frames work. Drives a 2048-byte
+// payload through adapter.send -> c2s -> srvconn_server_recv_blocking (the path
+// stratumd's serve loop uses), AT A WRAPPED RING POSITION (warm-up cycles
+// advance head/tail near SRVCONN_RING_CAP so the big frame straddles the
+// wraparound). Byte integrity + counts checked piecewise (header-then-body,
+// like read_full).
+// =============================================================================
+
+void test_9p_srvconn_transport_large_frame_roundtrip(void) {
+    srv_registry_reset();
+
+    struct Proc *server = NULL;
+    struct Proc *client = NULL;
+    int svc_h = -1, conn_h = -1;
+    struct SrvConn *cn = open_byte_mode_pair(&server, &client, &svc_h, &conn_h);
+    TEST_ASSERT(cn != NULL, "open_byte_mode_pair");
+
+    struct p9_srvconn_transport st;
+    TEST_EXPECT_EQ(p9_srvconn_transport_init(&st, cn), 0, "init");
+    struct p9_transport_ops ops = p9_srvconn_transport_ops(&st);
+
+    static u8 big[2048];
+    for (int i = 0; i < 2048; i++) big[i] = (u8)((i * 7 + 3) & 0xff);
+
+    // Warm-up: cycle 400-byte frames to advance the ring head/tail near the
+    // SRVCONN_RING_CAP (8192) boundary so the subsequent large frame wraps.
+    static u8 warm[512];
+    for (int cyc = 0; cyc < 20; cyc++) {
+        int sn = ops.send(ops.ctx, big, 400);
+        TEST_EXPECT_EQ(sn, 400, "warmup send full");
+        long gn = srvconn_server_recv_blocking(cn, warm, 400);
+        TEST_EXPECT_EQ((int)gn, 400, "warmup recv full");
+    }
+
+    // The large frame -- likely straddling the wraparound now.
+    int sn = ops.send(ops.ctx, big, 2048);
+    TEST_EXPECT_EQ(sn, 2048, "large adapter.send writes full 2048");
+
+    // Drain server-side in pieces (4-byte header sim, then the rest) exactly
+    // as stratumd's read_full would, accumulating until 2048.
+    static u8 rx[2048];
+    long off = 0;
+    while (off < 2048) {
+        long want = (off == 0) ? 4 : (2048 - off);
+        long g = srvconn_server_recv_blocking(cn, rx + off, want);
+        TEST_ASSERT(g > 0, "server recv piece > 0");
+        off += g;
+    }
+    TEST_EXPECT_EQ((int)off, 2048, "server reassembles full 2048");
+    int mism = 0;
+    for (int i = 0; i < 2048; i++) {
+        if (rx[i] != (u8)((i * 7 + 3) & 0xff)) { mism = i + 1; break; }
+    }
+    TEST_EXPECT_EQ(mism, 0, "every byte preserved across the wraparound");
+
+    (void)ops.close(ops.ctx);
+    p9_srvconn_transport_destroy(&st);
+    cleanup_byte_mode_pair(server, client, conn_h);
+}
+
+// =============================================================================
 // 9p_srvconn_transport.recv_routes_from_s2c_ring
 // =============================================================================
 
