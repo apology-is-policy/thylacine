@@ -669,6 +669,8 @@ This means: in Phases 1-4, ask before significant decisions; in Phases 5+, proce
 
 ## Stratum coordination
 
+**Stratum is in scope: operate on it like it's your own (user-authorized 2026-05-29).** The Stratum tree at `~/projects/stratum/v2` (branch `thylacine-pouch-arm`) may be modified directly as part of Thylacine work -- root-cause, fix, test, and commit Stratum-side bugs (e.g. the `bdev_thylacine` virtio-blk port, the pouch boundary-line, the 9P server) without asking first. The Thylacine<->Stratum boundary is a single engineering surface for this project; a bug that surfaces in Thylacine but lives in Stratum gets fixed in Stratum. Standing constraints still apply on the Stratum tree: ASCII commit messages, no force-push, the user pushes (you commit), and `third_party/` stays byte-pristine. Stratum's own on-disk-format / wire-ABI breaks remain escalation-worthy (they ripple to the installer/upgrade path) -- but ordinary code fixes do not.
+
 **Stratum v2 is feature-complete and shipping.** The POSIX surface (P8) and the 9P client interfaces (P9) both landed during 2026 Q1-Q2; Stratum exposes three concurrent ABIs that Thylacine Phase 5 binds to:
 
 | Stratum ABI | Form | Stability | Thylacine consumer |
