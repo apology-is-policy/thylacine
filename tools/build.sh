@@ -1323,11 +1323,12 @@ case "$target" in
     stratumd)    build_stratumd    ;;
     userspace)   build_userspace   ;;
     disk)        build_disk        ;;
+    pool)        build_stratum_pool_fixture ;;
     all)         build_all         ;;
     clean)       clean             ;;
     *)
         echo "Unknown target: $target" >&2
-        echo "Valid: kernel, ramfs, sysroot, pouch-progs, stratumd, userspace, disk, all, clean" >&2
+        echo "Valid: kernel, ramfs, sysroot, pouch-progs, stratumd, userspace, disk, pool, all, clean" >&2
         exit 1
         ;;
 esac

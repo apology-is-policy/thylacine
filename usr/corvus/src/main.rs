@@ -623,6 +623,13 @@ unsafe fn groups_pop_last() {
     }
 }
 
+unsafe fn groups_count() -> usize {
+    match (*core::ptr::addr_of!(GROUPS)).as_ref() {
+        Some(g) => g.len(),
+        None => 0,
+    }
+}
+
 const MAX_USERS: usize = 256;
 
 static mut USER_STATES: Option<Vec<CorvusUserState>> = None;
@@ -881,12 +888,21 @@ unsafe fn identity_db_parse(blob: &[u8]) -> bool {
         if principal_id == PRINCIPAL_INVALID || principal_id >= next_id {
             return false;
         }
-        if primary_gid == PRINCIPAL_INVALID || primary_gid >= PRINCIPAL_SYSTEM {
+        // primary_gid is a corvus-assigned id (the UPG == principal_id), so it
+        // is always < next_id; reject INVALID and any id never assigned (which
+        // covers the reserved sentinels, since next_id <= PRINCIPAL_SYSTEM).
+        if primary_gid == PRINCIPAL_INVALID || primary_gid >= next_id {
             return false;
         }
         let mut supp = Vec::with_capacity(supp_n);
         for _ in 0..supp_n {
             let g = u32::from_le_bytes([blob[off], blob[off + 1], blob[off + 2], blob[off + 3]]);
+            // Reject reserved sentinels (INVALID/SYSTEM/NONE). supp_gids are NOT
+            // bounded to corvus-assigned ids -- they may be external group
+            // references -- so they are not range-checked against next_id.
+            if g == PRINCIPAL_INVALID || g >= PRINCIPAL_SYSTEM {
+                return false;
+            }
             supp.push(g);
             off += 4;
         }
@@ -980,11 +996,15 @@ unsafe fn persist_keypair_wrap(users_fd: i64, name: &[u8], rec: &CorvusUserState
     let wrote = write_all_fd(wf, &blob);
     let file_synced = t_fsync(wf, 0) == 0;
     let _ = t_close(wf);
-    // Dirent-durability barriers (CORVUS-DESIGN.md §16.6): the file fsync makes
-    // only the data extent durable; the name->inode links are not durable until
-    // the containing dirs are synced. Sync users/<name>/ so the hybrid.corvus
-    // link survives reboot, and users/ so the <name> link does. Without these a
-    // reboot loses the PATH to a wrap that identity.db still references.
+    // Dirent-durability barriers (CORVUS-DESIGN.md §16.6). On the CURRENT
+    // Stratum, Tfsync (h_fsync) is a WHOLE-POOL commit (stm_fs_commit), so the
+    // file fsync above already commits the hybrid.corvus + users/<name> dirents
+    // -- these per-dir fsyncs are forward-portable insurance that becomes
+    // load-bearing the moment Stratum makes Tfsync per-fid (the POSIX FS
+    // contract, where a file fsync does NOT make the name->inode link durable).
+    // Harmless idempotent re-commits today; kept so the path is correct on any
+    // 9P server. (The load-bearing cross-reboot fixes were the bdev partial-tail
+    // RMW + the read-offset alignment, Stratum-side; see DEBUGGING-PLAYBOOK.md.)
     let wrap_dir_synced = t_fsync(udir, 0) == 0;
     let _ = t_close(udir);
     let users_dir_synced = t_fsync(users_fd, 0) == 0;
@@ -1523,9 +1543,13 @@ unsafe fn handle_user_create(handle: i64, payload: &[u8], response: &mut Vec<u8>
         }
         let mut o = ext_off + 1;
         for _ in 0..supp_n {
-            supp_gids.push(u32::from_le_bytes([
-                payload[o], payload[o + 1], payload[o + 2], payload[o + 3],
-            ]));
+            let g = u32::from_le_bytes([payload[o], payload[o + 1], payload[o + 2], payload[o + 3]]);
+            // A reserved sentinel is never a valid group membership (I-22: a
+            // reserved id confers no authority and must not enter the table).
+            if g == PRINCIPAL_INVALID || g >= PRINCIPAL_SYSTEM {
+                return stage_response(response, STATUS_BAD_FORMAT, &[]);
+            }
+            supp_gids.push(g);
             o += 4;
         }
     }
@@ -1732,6 +1756,12 @@ unsafe fn handle_group_create(handle: i64, payload: &[u8], response: &mut Vec<u8
     let name = &payload[1..1 + name_len];
     if group_name_exists(name) {
         return stage_response(response, STATUS_BAD_FORMAT, &[]);
+    }
+    // Cap live groups at the same bound identity_db_parse enforces
+    // (2 * MAX_USERS) so a GROUP_CREATE can never serialize a DB the next boot
+    // refuses to load. Symmetric to USER_CREATE's user_states_count() guard.
+    if groups_count() >= 2 * MAX_USERS {
+        return stage_response(response, STATUS_INTERNAL_ERROR, &[]);
     }
 
     let gid = match alloc_auto_id() {

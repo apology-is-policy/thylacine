@@ -291,6 +291,58 @@ F2: confinement is cooperative (corvus chroots first), spawner-set-root is v1.x.
   persist/load flow is unchanged except `storage_root` is the handed capability,
   not a walked territory path.
 
+### A-1b · corvus identity DB + cross-reboot persistence *(CLOSED 2026-05-29)*
+
+**LANDED + audit-CLEAN 2026-05-29 (2nd session).** corvus is the authoritative
+`id <-> name <-> groups` resolver with REAL on-disk persistence -- the first
+end-to-end SECRET-on-disk write/read-back path in the OS. boot1 creates michael +
+susan + groups + the AEGIS-256-wrapped keypair wraps; boot2 on the SAME pool
+loads `identity.db` ("already provisioned") + reloads each secret wrap from disk +
+AUTHs (UNWRAP DEK round-trip verified) -- **on a successful boot**. Wired into the
+suite as a standing guard (`tools/test-cross-reboot.sh` / `make test-cross-reboot`;
+re-bake + 2 boots; hard-fails a missing persistence marker AND hard-fails the
+EBADTAG corruption below -- it does NOT retry-mask either).
+
+**KNOWN BLOCKER (re-opened 2026-05-29, 3rd session): the cross-reboot is
+INTERMITTENT, blocked UPSTREAM of corvus by a recurring stratumd-mount AEAD
+failure.** Ground truth from a failing boot log: stratumd mounts, prints "serving
+... on /srv/stratum-fs", then `stm_stratumd_run` returns **rc=-201 = STM_EBADTAG**
+(AEAD tag verification failed) reading the on-disk pool metadata back through
+`bdev_thylacine`; stratumd exits before binding -> joey's connect retries lapse ->
+joey exits 1 -> kproc reaps the orphan stratumd zombie -> `EXTINCTION: wait_pid
+returned wrong pid`. This is the SAME error family as the "AEGIS-256 corruption"
+the 2nd session declared fixed -- so that fix was INCOMPLETE. It is NOT a flake:
+EBADTAG = wrong bytes read (a read-path correctness bug); the intermittency tracks
+POOL CONTENT (each re-bake = fresh random seed), not host load. A-1b's own code
+(corvus DB + F1/F2) is fine; the blocker is at stratumd's mount. **NEXT = the
+EBADTAG DFS** (opener: HVF accel + a chacha20 RNG fallback so boots are fast +
+deterministic; then bisect the read path -- `bdev_thylacine::op_read` partial/
+multi-sector handling OR the fs metadata read -- against the preserved repro at
+`build/fixtures/REPRO-ebadtag-201/`). See `bug_large_9p_write_srvconn_runtime.md`
+(re-opened) + `docs/DEBUGGING-PLAYBOOK.md`.
+
+- **On the A-1.7 substrate:** identity.db + `users/<name>/hybrid.corvus` live
+  inside the handed `storage_root` cap (corvus chrooted to `/var/lib/corvus`) on
+  the disk-backed Stratum FS, via the A-1.6 atomic rename-swap. Verbs RESOLVE_ID=11
+  / RESOLVE_NAME=12 (ungated) + GROUP_CREATE=13 (CAP_HOSTOWNER live re-query) +
+  USER_CREATE supp_gids extension. CRVS v2 identity.db (20-B header + bounds-checked
+  records) + CRVS v1 wrap (3752 B = an extent file). UPG one shared monotonic counter.
+- **The cross-reboot UNBLOCK (the year-long "AEGIS-256 corruption"):** a 3-bug
+  masking stack in the disk-backed extent path -- (1) bdev partial-tail zero-pad
+  CLOBBER -> RMW (Stratum `91ae5d8`); (2) corvus missing dir-fsync (Thylacine
+  `573b984`; audit-R1-refined to forward-portable, NOT load-bearing on current
+  whole-pool-Tfsync Stratum); (3) fs raw read-offset -> EINVAL on the 2nd Tread
+  -> `fs_read_extent_aligned_locked` (Stratum `91ae5d8`). **Load-bearing pair =
+  1 + 3.** Method + journal: `docs/DEBUGGING-PLAYBOOK.md`.
+- **Audit R1 CLEAN** (0 P0 / 0 P1 / 1 P2 / 4 P3; `audit_a1b_closed_list.md`,
+  SUPERSEDES the blocker-fix list): F1 (P2) GROUP_CREATE had no count cap vs the
+  parse `>512` reject -> privileged boot-brick -> CAPPED; F2 (P3) supp_gid/
+  primary_gid value validation -> added (USER_CREATE + parse); F4 (P3) read-helper
+  scratch unbounded -> capped (Stratum); F5 (P3) whole-pool-Tfsync refinement ->
+  doc; F3 (P3) dropped-wrap record not pruned -> DEFERRED to USER_DELETE.
+- Reference doc `97-corvus-identity-db.md`. **A-1b CLOSES the corvus identity arc.
+  RESUME the detour at A-2 (FS permission / A-2d kernel rwx).**
+
 ### A-2 · FS permission + ownership surface *(splits a/b/c)*
 
 > **Note (2026-05-28):** A-2b's `SYS_WALK_CREATE` is **pulled forward into A-1.5**

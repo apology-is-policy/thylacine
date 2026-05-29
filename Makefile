@@ -4,7 +4,7 @@
 # Per ARCHITECTURE.md §3: real build system is CMake (kernel) + Cargo (Rust).
 # This Makefile is just for muscle memory (`make kernel`, `make test`, etc.).
 
-.PHONY: all kernel sysroot userspace disk clean test run gdb specs help
+.PHONY: all kernel sysroot userspace disk pool clean test test-cross-reboot run gdb specs help
 
 all:
 	@tools/build.sh all
@@ -21,11 +21,17 @@ userspace:
 disk:
 	@tools/build.sh disk
 
+pool:
+	@tools/build.sh pool
+
 clean:
 	@tools/build.sh clean
 
 test:
 	@tools/test.sh
+
+test-cross-reboot:
+	@tools/test-cross-reboot.sh
 
 run:
 	@tools/run-vm.sh
@@ -44,7 +50,9 @@ help:
 	@echo "Thylacine OS — make targets:"
 	@echo "  kernel     — build the kernel ELF (build/kernel/thylacine.elf)"
 	@echo "  all        — kernel + sysroot + userspace + disk (as available per phase)"
+	@echo "  pool       — re-bake build/fixtures/pool.img (clean Stratum boot pool)"
 	@echo "  test       — run-vm + boot-banner verify"
+	@echo "  test-cross-reboot — A-1b corvus persistence: boot twice on one pool"
 	@echo "  run        — launch a dev VM (interactive UART)"
 	@echo "  gdb        — launch dev VM with GDB stub on :1234, halted at entry"
 	@echo "  specs      — run all TLA+ specs under specs/"

@@ -1213,12 +1213,17 @@ GROUP_CREATE:
    absent -> `SYS_WALK_CREATE` `hybrid.corvus` -> write the `to_bytes` blob ->
    `SYS_FSYNC` (the file's data extent) -> **`SYS_FSYNC` the per-user dir fd**
    (so the `hybrid.corvus` dirent is durable) **and the `users/` dir fd** (so the
-   `<name>` dirent is durable). The dirent-durability barriers are NOT optional:
-   `SYS_FSYNC` on the file makes only the data extent durable; the name->inode
-   links are not durable until the containing directories are synced. Without
-   them a reboot loses the PATH to a wrap that identity.db still references,
-   so load drops the user (missing/corrupt wrap) even though the wrap bytes are
-   on disk. Symmetric to identity.db's root-dir barrier in step 2. **If any of
+   `<name>` dirent is durable). The dirent-durability barriers are the
+   forward-portable contract: on a POSIX FS `SYS_FSYNC` on the file makes only
+   the data extent durable, and the name->inode links are not durable until the
+   containing directories are synced. **On the CURRENT Stratum, `Tfsync`
+   (`h_fsync`) is a whole-pool commit (`stm_fs_commit`), so the file fsync
+   already commits these dirents** -- the per-dir fsyncs are harmless idempotent
+   re-commits today and become load-bearing only when Stratum makes `Tfsync`
+   per-fid. They are kept so the path is correct on any 9P server (and symmetric
+   to identity.db's root-dir barrier in step 2). (A-1b audit R1 F5 refinement;
+   the load-bearing cross-reboot fixes were the Stratum bdev partial-tail RMW +
+   read-offset alignment -- see `docs/reference/97-corvus-identity-db.md`.) **If any of
    these fails, abort the create before touching identity.db** — no orphan
    identity record.
 2. **Identity DB rewrite-swap:** serialize the full in-memory DB ->
