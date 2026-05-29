@@ -972,15 +972,23 @@ unsafe fn persist_keypair_wrap(users_fd: i64, name: &[u8], rec: &CorvusUserState
     }
     let _ = t_unlink(udir, HYBRID.as_ptr(), HYBRID.len(), 0);
     let wf = t_walk_create(udir, HYBRID.as_ptr(), HYBRID.len(), T_OWRITE, 0o600);
-    let _ = t_close(udir);
     if wf < 0 {
+        let _ = t_close(udir);
         return false;
     }
     let blob = rec.to_bytes();
     let wrote = write_all_fd(wf, &blob);
-    let synced = t_fsync(wf, 0) == 0;
+    let file_synced = t_fsync(wf, 0) == 0;
     let _ = t_close(wf);
-    wrote && synced
+    // Dirent-durability barriers (CORVUS-DESIGN.md §16.6): the file fsync makes
+    // only the data extent durable; the name->inode links are not durable until
+    // the containing dirs are synced. Sync users/<name>/ so the hybrid.corvus
+    // link survives reboot, and users/ so the <name> link does. Without these a
+    // reboot loses the PATH to a wrap that identity.db still references.
+    let wrap_dir_synced = t_fsync(udir, 0) == 0;
+    let _ = t_close(udir);
+    let users_dir_synced = t_fsync(users_fd, 0) == 0;
+    wrote && file_synced && wrap_dir_synced && users_dir_synced
 }
 
 // Atomic rewrite-swap of identity.db (§16.6 step 2): write tmp -> fsync(tmp) ->

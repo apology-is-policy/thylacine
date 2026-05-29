@@ -1211,8 +1211,16 @@ GROUP_CREATE:
 
 1. **Keypair wrap (USER_CREATE only), write-once:** mkdir the per-user dir if
    absent -> `SYS_WALK_CREATE` `hybrid.corvus` -> write the `to_bytes` blob ->
-   `SYS_FSYNC`. **If this fails, abort the create before touching identity.db** —
-   no orphan identity record.
+   `SYS_FSYNC` (the file's data extent) -> **`SYS_FSYNC` the per-user dir fd**
+   (so the `hybrid.corvus` dirent is durable) **and the `users/` dir fd** (so the
+   `<name>` dirent is durable). The dirent-durability barriers are NOT optional:
+   `SYS_FSYNC` on the file makes only the data extent durable; the name->inode
+   links are not durable until the containing directories are synced. Without
+   them a reboot loses the PATH to a wrap that identity.db still references,
+   so load drops the user (missing/corrupt wrap) even though the wrap bytes are
+   on disk. Symmetric to identity.db's root-dir barrier in step 2. **If any of
+   these fails, abort the create before touching identity.db** — no orphan
+   identity record.
 2. **Identity DB rewrite-swap:** serialize the full in-memory DB ->
    `SYS_WALK_CREATE` `identity.db.tmp` -> write -> `SYS_FSYNC(tmp)` ->
    `SYS_RENAME(identity.db.tmp -> identity.db)` (atomic replace) -> `SYS_FSYNC`
