@@ -1306,6 +1306,29 @@ int main(void) {
     }
     t_putstr("joey: /alloc-smoke reaped status=0; libthyla-rs::alloc verified\n");
 
+    // === /burrow-torture (kernel-burrow + SMP regression guard) ===
+    // Native attach/detach/re-attach stress over SYS_BURROW_ATTACH/DETACH -- no
+    // musl, no Stratum, no mount. Born in the EBADTAG DFS to test whether the
+    // "AEGIS corruption" lived in the kernel burrow/MMU/buddy/TLBI path; it
+    // proved that path CLEAN (single-threaded x3 sizes + multi-threaded SMP),
+    // exonerating the kernel and narrowing the bug to musl mallocng. Kept as a
+    // fast every-boot guard: a future regression in burrow re-attach, the
+    // inner-shareable TLBI broadcast, the buddy LIFO, or the SMP locks would
+    // trip a stale-zero / cross-pattern check here and FAIL the boot.
+    const char burrow_torture_name[] = "burrow-torture";
+    long bt_pid = t_spawn(burrow_torture_name, sizeof(burrow_torture_name) - 1);
+    if (bt_pid <= 0) {
+        t_putstr("joey: t_spawn(\"burrow-torture\") FAILED\n");
+        return 1;
+    }
+    int bt_status = -1;
+    long bt_reaped = t_wait_pid(&bt_status);
+    if (bt_reaped != bt_pid || bt_status != 0) {
+        t_putstr("joey: /burrow-torture FAILED -- kernel burrow attach/detach/re-attach corruption (single-threaded or SMP) REPRODUCED\n");
+        return 1;
+    }
+    t_putstr("joey: /burrow-torture reaped status=0 (kernel burrow path clean: single-threaded x3 sizes + multi-threaded SMP)\n");
+
     // === /u-test orchestration (Phase 7 U-2-test) ===
     // Cumulative integration smoke for the libthyla-rs uplift, closes
     // the U-2 arc. Where alloc-smoke isolates each U-2X module's

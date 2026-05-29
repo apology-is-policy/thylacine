@@ -1,0 +1,18 @@
+[package]
+name = "burrow-torture"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "burrow-torture"
+path = "src/main.rs"
+
+[dependencies]
+# Native burrow-attach/detach torture (EBADTAG DFS). Uses libthyla-rs for
+# _start + #[panic_handler] + the raw t_burrow_attach / t_burrow_detach SVC
+# wrappers + t_putstr. NO ThylaAlloc heap use on the hot path -- the torture
+# drives SYS_BURROW_ATTACH / SYS_BURROW_DETACH directly so it exercises the
+# kernel burrow/MMU/buddy re-attach path with no allocator in between.
+libthyla-rs = { path = "../lib/libthyla-rs" }

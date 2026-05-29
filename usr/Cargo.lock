@@ -56,6 +56,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "burrow-torture"
+version = "0.1.0"
+dependencies = [
+ "libthyla-rs",
+]
+
+[[package]]
 name = "cc"
 version = "1.2.62"
 source = "registry+https://github.com/rust-lang/crates.io-index"
