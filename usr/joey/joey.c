@@ -1595,32 +1595,43 @@ int main(void) {
             {
                 const char probe_name[] = "fs-mut-probe.txt";
                 const char probe_data[] = "FS-MUT-OK\n";
-                long cf = t_walk_create(T_WALK_OPEN_FROM_ROOT, probe_name,
-                                        sizeof(probe_name) - 1, T_OWRITE, 0644u);
-                if (cf < 0) {
-                    t_putstr("joey: fs-mut create FAILED rc=");
-                    t_putstr(itoa_dec(cf, buf, sizeof(buf)));
-                    t_putstr("\n");
-                    return 1;
-                }
-                if (write_all(cf, (const unsigned char *)probe_data,
-                              sizeof(probe_data) - 1) != 0) {
-                    t_putstr("joey: fs-mut write FAILED\n");
-                    return 1;
-                }
-                if (t_fsync(cf, 0) != 0) {
-                    t_putstr("joey: fs-mut fsync FAILED\n");
-                    return 1;
-                }
-                (void)t_close(cf);
-
+                // Idempotent: the Stratum pool is PERSISTENT across reboots,
+                // so open-or-create. First boot on a fresh pool creates +
+                // writes + fsyncs; a reboot finds the persisted file and just
+                // verifies it reads back. A non-idempotent create would
+                // EEXIST-fail (boot-fatally) on every reboot -- and this way
+                // the probe doubles as a cross-reboot persistence regression
+                // test (the durable bytes survive a power cycle).
                 long rf = t_walk_open(T_WALK_OPEN_FROM_ROOT, probe_name,
                                       sizeof(probe_name) - 1, T_OREAD);
                 if (rf < 0) {
-                    t_putstr("joey: fs-mut reopen FAILED rc=");
-                    t_putstr(itoa_dec(rf, buf, sizeof(buf)));
-                    t_putstr("\n");
-                    return 1;
+                    // Not present (fresh pool) -- create + write + fsync.
+                    long cf = t_walk_create(T_WALK_OPEN_FROM_ROOT, probe_name,
+                                            sizeof(probe_name) - 1, T_OWRITE, 0644u);
+                    if (cf < 0) {
+                        t_putstr("joey: fs-mut create FAILED rc=");
+                        t_putstr(itoa_dec(cf, buf, sizeof(buf)));
+                        t_putstr("\n");
+                        return 1;
+                    }
+                    if (write_all(cf, (const unsigned char *)probe_data,
+                                  sizeof(probe_data) - 1) != 0) {
+                        t_putstr("joey: fs-mut write FAILED\n");
+                        return 1;
+                    }
+                    if (t_fsync(cf, 0) != 0) {
+                        t_putstr("joey: fs-mut fsync FAILED\n");
+                        return 1;
+                    }
+                    (void)t_close(cf);
+                    rf = t_walk_open(T_WALK_OPEN_FROM_ROOT, probe_name,
+                                     sizeof(probe_name) - 1, T_OREAD);
+                    if (rf < 0) {
+                        t_putstr("joey: fs-mut reopen FAILED rc=");
+                        t_putstr(itoa_dec(rf, buf, sizeof(buf)));
+                        t_putstr("\n");
+                        return 1;
+                    }
                 }
                 unsigned char rback[32];
                 long rn = t_read(rf, rback, sizeof(rback));
@@ -1635,20 +1646,24 @@ int main(void) {
                         return 1;
                     }
                 }
-                t_putstr("joey: fs-mut create+write+fsync+read-back OK\n");
+                t_putstr("joey: fs-mut create/persist + read-back OK\n");
 
-                // mkdir-via-DMDIR + readdir (with the handler's Treaddir
-                // cookie-advance: a non-empty first run must reach EOD on the
-                // next call).
+                // mkdir-via-DMDIR + readdir, also idempotent (open-or-create
+                // the dir; Treaddir cookie-advance: a non-empty first run must
+                // reach EOD on the next call).
                 const char probe_dir[] = "fs-mut-dir";
-                long cd = t_walk_create(T_WALK_OPEN_FROM_ROOT, probe_dir,
-                                        sizeof(probe_dir) - 1, T_OREAD,
-                                        T_WALK_CREATE_DMDIR | 0755u);
+                long cd = t_walk_open(T_WALK_OPEN_FROM_ROOT, probe_dir,
+                                      sizeof(probe_dir) - 1, T_OREAD);
                 if (cd < 0) {
-                    t_putstr("joey: fs-mut mkdir FAILED rc=");
-                    t_putstr(itoa_dec(cd, buf, sizeof(buf)));
-                    t_putstr("\n");
-                    return 1;
+                    cd = t_walk_create(T_WALK_OPEN_FROM_ROOT, probe_dir,
+                                       sizeof(probe_dir) - 1, T_OREAD,
+                                       T_WALK_CREATE_DMDIR | 0755u);
+                    if (cd < 0) {
+                        t_putstr("joey: fs-mut mkdir FAILED rc=");
+                        t_putstr(itoa_dec(cd, buf, sizeof(buf)));
+                        t_putstr("\n");
+                        return 1;
+                    }
                 }
                 unsigned char dbuf[256];
                 long d1 = t_readdir(cd, dbuf, sizeof(dbuf));
