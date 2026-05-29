@@ -187,6 +187,57 @@ callers (same pull-forward pattern as A-1.5's `SYS_WALK_CREATE`).
   `docs/reference/96-fs-mutation.md` FS-gamma sections. **A-1b now builds corvus
   persistence on this atomic-swap substrate.**
 
+### A-1.7 · Capability-scoped service storage *(2nd-order detour; pulled before A-1b; design-first)*
+
+**Reorder, user-chosen 2026-05-29.** While pinning A-1b's persistence, the
+question "where does a service's storage live + with what authority?" surfaced a
+foundational substrate. Rather than build corvus on the ambient-inherited-root
+model and migrate later, the substrate is built once, first, with **corvus as its
+first + most-important consumer** (a secret-holding daemon that should be
+confined). A genuine depth-first push (see
+`memory/feedback_depth_first_dependencies.md`): A-1b is preempted at a clean
+boundary (its mechanism-independent core -- identity model + CRVS v2
+serialize/parse -- drafted then reverted at `6df247f`) and RESUMES immediately
+after this closes.
+
+**The angle (scripture, this commit):** NOVEL.md §3.10 (lead angle #10) + ARCH
+§3.6 + invariant **I-23** (a service's FS authority is bounded by the storage
+capability it is handed). A service is *handed* a storage-root `KObj_Spoor` at
+spawn (endowed like fd 0/1/2, but for state), reduced to `R|W` (no `TRANSFER` --
+cannot re-hand), and does all persistence relative to that base fd. POLA for
+service state, by mechanism not policy.
+
+- **Builds (userspace only; ZERO new kernel surface -- verified 2026-05-29):**
+  - joey (post-pivot): `mkdir`-via-DMDIR `/var/lib/corvus` -> `walk_open` ->
+    `handle_dup` to `R|W` (drop `TRANSFER`) -> endow as corvus's storage fd via the
+    existing `t_spawn_with_perms` fds array.
+  - corvus: take the handed fd as `storage_root`; drive all FS ops (`walk_open` /
+    `walk_create` / `rename` / `unlink` / `fsync`) relative to it; a confinement
+    smoke (write + read a file in the capability; prove no ambient reach).
+  - libthyla-rs: a small inherited-storage-fd helper if it earns its keep.
+- **Why zero kernel work:** `walk_open` stamps `R|W|TRANSFER` on the returned
+  handle (`syscall.c`), so a walk-opened nested dir is a valid mutation base;
+  `handle_dup` reduces rights subset-checked (`handle.c`, the I-6 point); spawn
+  installs arbitrary `KObj_Spoor` preserving I-6; `SYS_MOUNT` grafts a source
+  Spoor (RIGHT_READ-gated) for the optional `/state` mount.
+- **Depends:** the post-pivot Stratum root (so joey has a persistent place to scope
+  from); A-1.5/A-1.6 (the FS-mutation surface). **Used by:** A-1b (corvus
+  persistence); every future system daemon's storage.
+- **Audit:** the capability/privilege surface -- spawn-time rights reduction
+  (`R|W`, no `TRANSFER` -> no re-hand), no-escape confinement (the service cannot
+  name a path outside its storage subtree), I-6 monotonicity through the spawn-fd
+  endow. Full round.
+- **Tests:** corvus confinement smoke (read/write inside the handed capability; a
+  path outside it is unreachable); joey grants `R|W`-no-`TRANSFER` and corvus
+  cannot re-transfer; survives reboot (the storage dir persists on Stratum).
+- **RESUME POINTER (the exact return point):** when A-1.7 closes, **resume A-1b**
+  (task #776). Re-apply the reverted mechanism-independent core (identity model +
+  UPG allocator + CRVS v2 serialize/parse -- reconstruct from CORVUS-DESIGN.md §16
+  / the session record) and build corvus's `identity.db` + per-user wraps **inside
+  the handed `storage_root`** (NOT via `FROM_ROOT` absolute paths). The §16
+  persist/load flow is unchanged except `storage_root` is the handed capability,
+  not a walked territory path.
+
 ### A-2 · FS permission + ownership surface *(splits a/b/c)*
 
 > **Note (2026-05-28):** A-2b's `SYS_WALK_CREATE` is **pulled forward into A-1.5**
@@ -289,6 +340,15 @@ tools/build.sh kernel --sanitize=undefined && tools/test.sh
 
 ## Trip hazards
 
+- **DEPTH-FIRST PUSH IN PROGRESS -> A-1.7 before A-1b (read first).** A-1.7
+  (capability-scoped service storage; 2nd-order detour; scripture landed this
+  commit -- NOVEL §3.10 / ARCH §3.6 / I-23) is being built BEFORE A-1b because
+  corvus is its first consumer. **A-1b (#776) is preempted at a clean boundary**
+  (its mechanism-independent core was reverted at `6df247f`; reconstruct from
+  CORVUS-DESIGN.md §16). **RESUME A-1b immediately after A-1.7 closes** -- build
+  corvus's `identity.db` + wraps inside the handed `storage_root`, not via
+  `FROM_ROOT`. Exact resume pointer: the A-1.7 section above. See
+  `memory/feedback_depth_first_dependencies.md`.
 - **Stratum A2 branch-merge prereq** (A-3): confirm `--role coordinator|client` is
   in the `thylacine-pouch-arm` branch before leaning on per-user stratumd.
 - **A-1.5 / A-2 9P-write audit**: the create + write + fsync path (now landing in
@@ -298,10 +358,13 @@ tools/build.sh kernel --sanitize=undefined && tools/test.sh
   (§9.2, landed + audited); A-1.6 / FS-gamma (`SYS_RENAME` + `SYS_UNLINK`) done
   (§9.3, landed + audit-CLEAN); A-1b's corvus wire ABIs (RESOLVE_ID=11 /
   RESOLVE_NAME=12 / GROUP_CREATE=13 + USER_CREATE supp_gids extension) + the CRVS
-  v2 `identity.db` byte format + the rename-swap persist/load flow are now PINNED
-  in **CORVUS-DESIGN.md §16** (this scripture commit; UPG one-counter id==gid,
-  atomic rename-swap on A-1.6, full identity-DB + keypair-wrap persistence) --
-  A-1b impl + audit next; A-4 cap-model still owed.
+  v2 `identity.db` byte format + the rename-swap persist/load flow are PINNED
+  in **CORVUS-DESIGN.md §16** (`a433956`; UPG one-counter id==gid, atomic
+  rename-swap on A-1.6, full identity-DB + keypair-wrap persistence) -- but
+  **A-1.7 (capability-scoped service storage; 2nd-order detour, scripture this
+  commit) is pulled BEFORE A-1b**: A-1.7 impl + audit, THEN resume A-1b (#776)
+  building corvus persistence inside the handed `storage_root`; A-4 cap-model
+  still owed.
 - **Seams are load-bearing**: A-2 leaves the ACL seam; A-4 leaves the
   resource-scoped-HW-cap allowlist + the distributed crypto-proof seam. Don't bake
   fixed bitfields where a policy object belongs.

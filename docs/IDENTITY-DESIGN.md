@@ -507,6 +507,12 @@ Remaining before promotion to binding scripture: walk the §4 S5+ scenario catal
 - The trusted-path mechanism (console + secure-attention).
 - The uniform mount-cape for non-POSIX backings.
 - A voluntary capability/namespace *reduction* primitive (pledge/unveil dual).
+- **Capability-scoped service storage (A-1.7, 2nd-order detour pulled before
+  A-1b; lead angle #10).** A system service is *handed* a storage-root `KObj_Spoor`
+  at spawn (reduced to `R|W`, no `TRANSFER`) and confines all persistence to it --
+  no ambient FS authority beyond the handed capability (I-23). Built once, with
+  corvus as first consumer. Full design: `ARCHITECTURE.md §3.6` + `NOVEL.md §3.10`;
+  work-list + resume pointer: `docs/detour-status.md` A-1.7.
 
 **Explicit v1.x deferrals:**
 - Hardware-backed secret storage (TPM/Secure Enclave); design corvus key iface for

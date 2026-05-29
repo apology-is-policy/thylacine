@@ -28,6 +28,7 @@ The goal is to make `ARCHITECTURE.md` easier to write: each angle becomes a know
 | 7 | SOTA security hardening from day one | Low-medium | 3–5 KLOC C99 (mostly compiler/linker config + targeted code) | Phase 1-2 |
 | 8 | Formal verification cadence: nine TLA+ specs | Low-medium | 4–6 KLOC TLA+ | Continuous |
 | 9 | Designed-not-implemented v2.0 contracts | Low | ~0 KLOC (specifications only) | Phase 0 |
+| 10 | Capability-scoped service storage | Low | ~0.5-1 KLOC (userspace; zero new kernel surface) | Convergence detour (A-1.7), before A-1b |
 
 **Total novel-angle code**: ~50-70 KLOC of C99 (kernel + compat) + ~16-24 KLOC of Rust (drivers + Halcyon) + ~4-6 KLOC of TLA+. Within the ~100-130 KLOC total budget for a complete v1.0.
 
@@ -707,6 +708,30 @@ The three contracts:
 - **Implement all three at v1.0**. Rejected: ~30-50 KLOC of additional v1.0 scope; v1.0 release pushes out by ~2 years.
 
 **Sequence**: Phase 0. The contracts are part of the Gate 3 scripture commitment.
+
+---
+
+### 3.10 Angle #10 — Capability-scoped service storage
+
+**Scope.** A system service reaches its persistent storage not by *naming a path* in an ambient namespace (`open("/var/lib/foo/...")`) but through a **storage-root capability** it is *handed*: a `KObj_Spoor` for its storage subtree, endowed at spawn (like fd 0/1/2, but for state), with reduced rights. All of the service's persistence is relative to that handle; there is no path it can name that escapes the granted subtree. Names become labels *within* the capability, not the authority itself. The spawner — joey today, a service manager later — is the single point that decides each service's storage scope.
+
+The mechanism is a synthesis the kernel **already supports** (zero new syscall surface, verified 2026-05-29): the spawner walks/creates the storage dir, `handle_dup`s it down to `R|W` (dropping `TRANSFER` so the service cannot re-hand its storage), and endows it as a child fd at spawn; the service drives `walk_open` / `walk_create` / `rename` / `unlink` / `fsync` from that base fd (all take a base Spoor); optionally it `SYS_MOUNT`s the handed Spoor into its Territory at a path (e.g. `/state`) for ergonomic path I/O within the confined view.
+
+**"Done."** The convention is pinned in scripture (`ARCHITECTURE.md §3.6`) and proven end-to-end on **corvus** — the canonical first subject (a secret-holding daemon that *should* be confined): corvus's identity DB + per-user key wraps live in its handed storage capability, and corvus holds `R|W` on exactly that one directory and nothing else. A second consumer is additive; no service-storage framework is built ahead of need.
+
+**Dependencies.** `handle_dup` rights reduction (I-6), spawn fd-endowment, `walk_*`/`fsync`-from-a-base-Spoor, `SYS_MOUNT` — all present. The post-pivot Stratum root (so the spawner has a persistent place to scope from). Lands in the convergence detour as A-1.7, immediately before A-1b (corvus persistence) — its first consumer.
+
+**Complexity.** Low. ~0.5-1 KLOC of userspace (spawner-side dir-prep + dup + endow; service-side base-fd use; a tiny `libthyla-rs` helper). No kernel change.
+
+**Risk — Low.** The kernel primitives are audited (handles I-2/I-6, territory I-1/I-3, the FS-mutation surface). The new property — *FS authority bounded by the handed capability* (I-23) — is a composition of existing capability invariants; the audit prosecutes the spawn-time rights reduction, the no-escape confinement, and the no-`TRANSFER` re-hand block.
+
+**Why it is a lead position, not just an implementation detail.** It is where Thylacine's two lineages fuse: Plan 9 gives the per-process namespace but still *names* the mount; the capability microkernels (Fuchsia's routed directory capabilities, Genode's per-component `File_system` sessions) give the handed capability but have no namespace to compose it into. Thylacine does both — a 9P-backed Spoor capability (so *any* 9P server can back a service's storage), endowed at spawn, and mountable into a Plan 9 Territory. The pattern generalizes past storage to any handed resource ("the service's world is the set of handles it is given"), and every future daemon inherits confined, relocatable, per-instance-isolatable storage *for free*. It is POLA for service state, by mechanism rather than policy.
+
+**Alternative approaches considered.**
+- **Ambient path naming** (the model corvus would otherwise use): inherit the system root, `open` an absolute path. Simpler, but every service has ambient reach over the whole tree, storage is coupled to boot topology, and there is no per-instance isolation without path conventions. Rejected as the *default* (kept as the degenerate full-scope case of the capability model).
+- **A general `ServiceStorage` framework up front.** Rejected for v1.0: build the mechanism + convention, prove on one consumer, generalize when a second appears.
+
+**Sequence.** Convergence detour, sub-chunk A-1.7 — before A-1b. Scripture-first → userspace substrate + corvus proving ground → focused audit → resume A-1b on top.
 
 ---
 

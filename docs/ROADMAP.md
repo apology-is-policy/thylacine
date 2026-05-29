@@ -702,6 +702,21 @@ The one ordered arc — not split, not deferred to v1.x:
   scripture over-claim reconciliations (MTE/CFI, demand-paging/COW, RNG stir, the
   `ipi.c` drift) — landed 2026-05-28.
 
+**2nd-order detour (2026-05-29): capability-scoped service storage (A-1.7),
+pulled before A-1b.** While pinning A-1b (corvus identity-DB persistence), the
+question "where does a service's persistent storage live, and with what
+authority?" surfaced a foundational substrate worth building once, before its
+first consumer: a service is *handed* a storage-root capability (a `KObj_Spoor`)
+at spawn rather than naming an ambient path, and its FS authority is bounded by
+that capability (**I-23**; ARCH §3.6; NOVEL.md §3.10 lead angle #10). corvus is
+the canonical first subject (a secret-holding daemon that should be confined).
+Per the depth-first discipline, A-1b is preempted at a clean boundary and
+**resumes immediately after A-1.7 closes**, building corvus's identity DB + key
+wraps inside the handed storage capability. The substrate needs zero new kernel
+surface (verified: `handle_dup` rights reduction, spawn fd-endowment,
+`walk_*`/`fsync`-from-a-base-Spoor, `SYS_MOUNT` all exist). Full work-list +
+resume pointer: `docs/detour-status.md` A-1.7.
+
 Phase 7 resumes at **U-6d-b** (redirects) once the detour closes, on a sound
 foundation.
 
