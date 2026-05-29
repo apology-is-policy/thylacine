@@ -137,6 +137,39 @@ demand-page reader + `SYS_MMIO_MAP`/`SYS_DMA_MAP` (independent SMP hardening; it
 own audit: 1 P1 [the map paths] + 1 P3, both fixed). Detail:
 `docs/reference/08-exception.md` "eret-window IRQ race (P6 #713)".
 
+### A-1.6 · FS-gamma: rename + unlink *(pulled forward; precedes A-1b; design-first)*
+
+**Reorder, user-chosen 2026-05-29.** When pinning A-1b's persistence model, the
+user chose the classic **write-tmp + fsync + atomic rename-swap** substrate for
+corvus's identity DB over an append-only log. With no `SYS_RENAME` at v1.0, a
+whole-file rewrite cannot be atomic -- so `rename` (atomic replace) + `unlink`
+(stale-tmp cleanup) are pulled forward ahead of A-1b. Both are owed for the A-2
+coreutils (`mv` / `rm` / `rmdir`) regardless, so building them here serves two
+callers (same pull-forward pattern as A-1.5's `SYS_WALK_CREATE`).
+
+- **Builds (2 syscalls; ABI pinned in IDENTITY-DESIGN.md §9.3):**
+  - `SYS_RENAME = 57` -- atomic rename/move; `Trenameat` shape (olddir+oldname
+    -> newdir+newname); destination atomically replaced (POSIX `rename(2)`). New
+    `Dev.rename` slot -> `dev9p_rename` -> `p9_client_renameat`.
+  - `SYS_UNLINK = 58` -- remove a non-dir, or rmdir an empty dir via
+    `SYS_UNLINK_REMOVEDIR` (`0x200` = `P9_UNLINK_AT_REMOVEDIR`). New `Dev.unlink`
+    slot -> `dev9p_unlink` -> `p9_client_unlinkat`.
+- **Why cheap-ish:** the wire half (`p9_client_renameat` / `unlinkat`) already
+  exists -- but is IMPLEMENTED-YET-UNEXERCISED (no syscall drives it;
+  `dev9p_remove` is a `void` stub). Syscall wrappers + 2 new NULL-permitted Dev
+  slots + dev9p impls + rights gates + tests + the **first end-to-end audit** of
+  those wire functions. The `void (*remove)` Plan 9 slot is left as-is (wrong
+  shape); `SYS_UNLINK` uses the new `.unlink`.
+- **Depends:** A-1.5 (the FS-mutation foundation + the clone-walk-to-cursor
+  discipline). **Used by:** A-1b's atomic-swap persistence; A-2 coreutils.
+- **Audit:** the rename/unlink write surface (AEGIS-adjacent; first exercise of
+  the renameat/unlinkat wire half) -> full round. Focus: the two-cursor +
+  cross-Dev reject on rename, fid lifecycle on every error path, the rename-swap
+  durability detail (post-rename `Tsync`-on-dir as the metadata barrier).
+- **Tests:** create->rename->read-back-under-new-name; create->unlink->gone;
+  mkdir->rmdir-via-REMOVEDIR; rights-gate reject (no `RIGHT_WRITE`); cross-Dev
+  reject; name bounds; reserved-flag reject; joey E2E against real Stratum.
+
 ### A-2 · FS permission + ownership surface *(splits a/b/c)*
 
 > **Note (2026-05-28):** A-2b's `SYS_WALK_CREATE` is **pulled forward into A-1.5**
@@ -244,10 +277,13 @@ tools/build.sh kernel --sanitize=undefined && tools/test.sh
 - **A-1.5 / A-2 9P-write audit**: the create + write + fsync path (now landing in
   the A-1.5 FS-mutation foundation) is the AEGIS/mallocng-adjacent surface from
   Phase 6 -> prosecute hard.
-- **Design-first sub-commits**: A-1a done; the FS-mutation foundation (A-1.5) is
-  pinned in IDENTITY-DESIGN.md §9.2 (this scripture commit); A-1b's corvus wire
-  ABIs + CRVS v2 byte format still owed (pin in CORVUS-DESIGN.md before A-1b
-  code); A-4 cap-model still owed.
+- **Design-first sub-commits**: A-1a done; A-1.5 FS-mutation foundation done
+  (§9.2, landed + audited); A-1.6 / FS-gamma (`SYS_RENAME` + `SYS_UNLINK`) pinned
+  in IDENTITY-DESIGN.md §9.3 (this scripture commit) -- impl + audit next; A-1b's
+  corvus wire ABIs + CRVS v2 byte format still owed (pin in CORVUS-DESIGN.md
+  before A-1b code), and A-1b now persists via **atomic rename-swap** (on A-1.6)
+  + persists the **keypair wraps** (cross-reboot AUTH), both user-chosen
+  2026-05-29; A-4 cap-model still owed.
 - **Seams are load-bearing**: A-2 leaves the ACL seam; A-4 leaves the
   resource-scoped-HW-cap allowlist + the distributed crypto-proof seam. Don't bake
   fixed bitfields where a policy object belongs.

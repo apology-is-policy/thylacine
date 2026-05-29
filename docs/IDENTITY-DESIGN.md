@@ -913,3 +913,136 @@ two new `Dev` vtable slots + dev9p/devramfs impls + wrappers + tests). **Then
 one focused adversarial audit** over the whole create/write/fsync/readdir
 surface (the AEGIS/mallocng-adjacent create+write path the detour flags
 "prosecute hard"), two-commit close. **Then A-1b** persistence rides on top.
+
+### 9.3 FS-gamma — rename + unlink (RESOLVED 2026-05-29; precedes A-1b)
+
+Two more filesystem-mutation syscalls, pulled forward ahead of A-1b per the
+2026-05-29 design decision (user-chosen). A-1b's corvus identity DB persists
+durably via the classic **write-tmp + fsync + atomic rename-swap** pattern
+rather than an append-only log, and that pattern needs `rename` (atomic
+replace) + `unlink` (stale-tmp cleanup). Both are also owed for the A-2
+coreutils (`mv` / `rm` / `rmdir`), so building them here serves two callers. As
+with §9.2, the kernel 9P client already implements the wire half
+(`p9_client_renameat` / `p9_client_unlinkat`, verified 2026-05-29) — but those
+functions are **implemented yet unexercised**: no syscall has ever driven them,
+and `dev9p.c::dev9p_remove` is a `void` stub noting "Remove maps to Tunlinkat on
+the parent; deferred to syscall chunk." So this foundation is **syscall wrappers
++ two new `Dev` vtable slots + the real `dev9p_rename` / `dev9p_unlink` + rights
+gates + tests + the first end-to-end audit of `p9_client_renameat` /
+`unlinkat`**, not new protocol. Numbers continue from `SYS_READDIR = 56`.
+
+**Why rename-swap over append-log** (the substrate decision). corvus's identity
+DB is the login authority; a torn write must never lock the system out. With no
+`SYS_RENAME` at v1.0, a whole-file rewrite cannot be made atomic, so the
+original §9.2 plan implied an append-only log. The user chose instead to **pull
+`rename` forward** (owed for coreutils regardless) and give corvus the classic
+atomic-swap substrate: simpler load (parse one complete file), and future-proof
+for the mutation-heavy identity DB to come (`USER_DELETE`, group-membership
+edits, A-4 clearance grants), where an append-log would need tombstones +
+compaction. The cost is one audit-bearing FS chunk on the critical path before
+A-1b. (The append-log alternative — zero new syscalls, crash-safe by
+construction — was rejected as the weaker substrate for a mutable DB.)
+
+**`SYS_RENAME = 57`** — atomically rename/move a single component from one
+directory to another (or within one). POSIX `rename(2)` / 9P2000.L `Trenameat`
+shape: the destination, if it exists, is **atomically replaced**. This
+atomic-replace is exactly what corvus's DB-swap relies on (`rename(identity.db.tmp
+→ identity.db)`).
+
+```
+SYS_RENAME(olddir_fd, oldname_va, oldname_len, newdir_fd, newname_va, newname_len) -> 0 / -1
+  x0 = olddir_fd   hidx_t; KOBJ_SPOOR (directory) with RIGHT_WRITE -- OR the
+                   SYS_WALK_OPEN_FROM_ROOT sentinel ((u64)-1) for the caller's
+                   Territory root.
+  x1 = oldname_va  user-VA of the source single-component name.
+  x2 = oldname_len 1 .. SYS_WALK_OPEN_NAME_MAX (64); reject '/' and '\0'.
+  x3 = newdir_fd   hidx_t; KOBJ_SPOOR (directory) with RIGHT_WRITE -- OR FROM_ROOT.
+  x4 = newname_va  user-VA of the destination single-component name.
+  x5 = newname_len 1 .. 64; reject '/' and '\0'.
+```
+
+- **Mechanism:** the handler clone-walks `olddir_fd` to a private cursor A and
+  `newdir_fd` to a private cursor B (the §9.2 create discipline — a server-side
+  op never mutates a fid the caller still holds), requires A and B on the **same
+  Dev** (and, for dev9p, the same `p9_client` session), then `dev->rename(A,
+  oldname, B, newname)` → `p9_client_renameat(client, A->fid, oldname, B->fid,
+  newname)`. Both cursors are clunked on return. `Trenameat` operates on the
+  dirfids *by name*; it neither consumes nor transitions them (distinct from the
+  fid-exclusive by-fid `Trename`, which is not used here).
+- **Same-directory rename** (corvus's swap): `olddir_fd == newdir_fd` (or both
+  FROM_ROOT) is the common case; the handler still clone-walks each to an
+  independent cursor (renameat tolerates `olddir == newdir`).
+- **Rights gate:** `RIGHT_WRITE` on **both** dir fds (both directories are
+  mutated). FROM_ROOT resolves to the Territory root as in `SYS_WALK_CREATE`.
+- **Cross-Dev reject:** A and B on different Devs → -1. A 9P `renameat` is within
+  one server; a cross-Dev move is copy-then-unlink, not a v1.0 primitive.
+- **Error cases (-1):** either fd not `KOBJ_SPOOR` / not a directory / missing
+  `RIGHT_WRITE`; FROM_ROOT with no pivoted root; name bounds / `/` / `\0` on
+  either name; cross-Dev; backing Dev has no `.rename`; server `Rlerror` (source
+  `ENOENT`; dest is a non-empty directory; `EXDEV`; permission; out of space).
+
+**`SYS_UNLINK = 58`** — remove a single component (a non-directory, or an empty
+directory) from a parent directory. 9P2000.L `Tunlinkat`.
+
+```
+SYS_UNLINK(parent_fd, name_va, name_len, flags) -> 0 / -1
+  x0 = parent_fd   hidx_t; KOBJ_SPOOR (directory) with RIGHT_WRITE -- OR FROM_ROOT.
+  x1 = name_va     user-VA of the single-component name to remove.
+  x2 = name_len    1 .. SYS_WALK_OPEN_NAME_MAX (64); reject '/' and '\0'.
+  x3 = flags       u32; 0 = remove a non-directory; SYS_UNLINK_REMOVEDIR
+                   (0x200, mirrors P9_UNLINK_AT_REMOVEDIR) = rmdir an EMPTY
+                   directory. Any other bit set -> reject.
+```
+
+- **Mechanism:** clone-walk `parent_fd` to a private cursor; `dev->unlink(cursor,
+  name, flags)` → `p9_client_unlinkat(client, cursor->fid, name, flags)`; clunk
+  the cursor.
+- **Rights gate:** `RIGHT_WRITE` on the parent dir fd.
+- **flags:** validated against `{0, SYS_UNLINK_REMOVEDIR}`; any other bit → -1.
+  The flag selects file-vs-directory removal mode (a mismatch → server `Rlerror`).
+- **Error cases (-1):** parent not `KOBJ_SPOOR` / not a directory / missing
+  `RIGHT_WRITE`; FROM_ROOT with no pivoted root; name bounds / `/` / `\0`;
+  reserved flag bit; backing Dev has no `.unlink`; server `Rlerror` (`ENOENT`;
+  `ENOTEMPTY` for rmdir on a non-empty dir; `EISDIR` / `ENOTDIR` mode mismatch;
+  permission).
+
+**`Dev` vtable additions** (both NULL-permitted, like `.fsync` / `.readdir` —
+only Devs that genuinely back them set them; no 13-Dev churn):
+
+```
+int (*rename)(struct Spoor *olddir, const char *oldname,
+              struct Spoor *newdir, const char *newname);
+int (*unlink)(struct Spoor *parent, const char *name, u32 flags);
+```
+
+- `dev9p` sets both → `p9_client_renameat` / `p9_client_unlinkat`. The
+  pre-existing `void (*remove)(struct Spoor *)` Plan 9 slot is **left as-is** —
+  its shape (no name, no error return, target-not-parent) is wrong for a syscall
+  that must report failure on a parent+name target; `SYS_UNLINK` uses the new
+  `.unlink`, not `.remove`.
+- `devramfs` leaves both NULL at v1.0 (ramfs mutation deferred; the load-bearing
+  target is dev9p / the disk-backed Stratum FS — consistent with `.readdir`
+  being dev9p-only). Kernel loopback tests drive dev9p (as FS-alpha/beta did).
+- **Two-cursor invariant** (new for `.rename`): the handler validates `olddir`
+  and `newdir` share a Dev before calling `dev->rename`; a cross-Dev rename is
+  rejected at the handler and never reaches a Dev op.
+
+**The durability detail rename-swap relies on.** A `rename(tmp → real)` makes the
+name swap atomic, but the *durability* of the dirent change needs a barrier on
+the containing directory. corvus's swap sequence is therefore: `SYS_WALK_CREATE`
+tmp → write → `SYS_FSYNC(tmp)` → `SYS_RENAME(tmp → real)` → **`SYS_FSYNC` on the
+parent directory fd** (→ `dev9p_fsync` → `p9_client_fsync(dir_fid)` → Stratum
+`Tsync` on the directory). Whether Stratum honors `Tsync`-on-a-directory as a
+metadata barrier is the load-bearing property; the A-1b cross-reboot persistence
+test is its end-to-end proof (a user created in boot N must resolve in boot
+N+1). A crash between create-tmp and rename leaves a stale `*.tmp`; corvus's load
+path `SYS_UNLINK`s any stale tmp before its first write (idempotent cleanup).
+
+**Implementation split:** one chunk — `SYS_RENAME` + `SYS_UNLINK` together (the
+two new vtable slots + dev9p impls + handlers + libt / libthyla-rs wrappers +
+kernel loopback tests + a joey E2E against real Stratum: create→rename→read-back
+under the new name; create→unlink→gone; mkdir→rmdir-via-REMOVEDIR). **Then one
+focused adversarial audit** (the first end-to-end exercise of
+`p9_client_renameat` / `unlinkat`; the rename-swap durability path; the
+two-cursor + cross-Dev invariant; fid lifecycle on every error path).
+**Then A-1b** builds corvus persistence on the atomic-swap substrate.
