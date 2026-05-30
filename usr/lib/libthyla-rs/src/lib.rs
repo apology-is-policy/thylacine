@@ -1577,12 +1577,12 @@ pub unsafe fn t_lseek(spoor_fd: i64, offset: i64, whence: u32) -> i64 {
     x0
 }
 
-// t_fstat — fill a user-VA 72-byte `struct t_stat` (laid out per
+// t_fstat — fill a user-VA 80-byte `struct t_stat` (laid out per
 // kernel/include/thylacine/syscall.h's ABI pins) with the open Spoor's
 // metadata. Returns 0 on success, -1 on bad fd / unaligned stat_va /
 // stat_va outside user VA / Dev without stat_native vtable op.
 //
-// `stat_va` must point to at least 72 bytes of writable, 8-byte-aligned
+// `stat_va` must point to at least 80 bytes of writable, 8-byte-aligned
 // user memory. Backs t::fs::Metadata (U-2c-fs).
 #[inline(always)]
 pub unsafe fn t_fstat(spoor_fd: i64, stat_va: *mut u8) -> i64 {

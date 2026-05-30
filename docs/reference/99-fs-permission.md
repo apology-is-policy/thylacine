@@ -189,5 +189,12 @@ libthyla-rs `const _: () = assert!`) and the `T_WSTAT_* == P9_SETATTR_*` asserts
   A-2a's mechanism implies access control.
 - **dev9p uid/gid is the connection identity** until A-3 (per-user stratumd). A
   single boot connection presents one identity for the whole FS at v1.0.
+- **`dev9p_stat_native` maps the Rgetattr uid/gid unconditionally** (it does not
+  consult the server's `valid` mask). Dormant at v1.0 (Stratum always fills
+  uid/gid in `P9_GETATTR_BASIC`); a non-Stratum server that cleared the uid/gid
+  `valid` bits would have the kernel report stale wire bytes as the owner.
+  **A-2a audit F2 (P3), deferred to A-2d**: when enforcement lands, gate the map
+  on `attr.valid & P9_STATS_{UID,GID}` and report `PRINCIPAL_NONE`/`GID_NONE`
+  (or fail) when absent.
 - **devramfs is system-owned + has no `.wstat_native`** — chmod/chown on a boot-FS
   file always returns -1 (read-only). This is correct, not a gap.

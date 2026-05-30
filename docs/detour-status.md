@@ -359,8 +359,13 @@ post-fix passing pool) -- not a live reproducer. Full coda:
   reports `PRINCIPAL_SYSTEM`/`GID_SYSTEM`. The MECHANISM only -- per-file rwx
   enforcement is A-2d. libt + libthyla-rs + pouch `0010` consumers updated in
   lockstep. Tests: dev9p getattr/setattr loopback + devramfs sentinels + joey
-  `/system.key` reject-path probe; 0 FAIL. Detail: `docs/reference/99-fs-
-  permission.md` + IDENTITY-DESIGN.md §9.5.
+  `/system.key` reject-path probe; 0 FAIL. **Opus audit R1 CLEAN (0 P0/1 P1/0 P2/
+  3 P3):** F1 (P1) stale-sysroot overflow on the committed build path -> FIXED by
+  the `build.sh sysroot_is_stale()` cache-invalidation (`b4dda9c`); F2 (P3)
+  `dev9p_stat_native` ignores the Rgetattr valid mask -> deferred to A-2d; F3 (P3)
+  "72-byte" doc-rot -> swept. Headline overflow question SOUND (no live 72-byte
+  consumer; 629/629 default + UBSan). Detail: `docs/reference/99-fs-permission.md`
+  + IDENTITY-DESIGN.md §9.5 + `audit_a2a_closed_list.md`.
 - **A-2b:** `SYS_WALK_CREATE` — make `dev9p_create` / `p9_client_lcreate` live;
   stamp owner = caller principal-id, group = parent-dir (Plan 9/BSD), mode =
   default & umask.

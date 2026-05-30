@@ -1,7 +1,7 @@
 // libthyla-rs::fs::metadata — Metadata struct backed by SYS_FSTAT.
 //
 // Mirror of std::fs::Metadata, scoped to what Thylacine's kernel
-// surfaces today. Backed by `struct t_stat` (72 bytes, ABI-pinned per
+// surfaces today. Backed by `struct t_stat` (80 bytes, ABI-pinned per
 // kernel/include/thylacine/syscall.h).
 //
 // Foundation chunk: U-2c-fs per docs/UTOPIA-SHELL-DESIGN.md §15

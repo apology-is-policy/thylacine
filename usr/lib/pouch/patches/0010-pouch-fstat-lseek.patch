@@ -86,7 +86,7 @@ diff -u a/src/stat/fstat.c b/src/stat/fstat.c
 -#define _BSD_SOURCE
 +/*
 + * pouch fstat() — translate the Thylacine native SYS_fstat surface
-+ * (struct t_stat, 72 bytes; kernel/include/thylacine/syscall.h) into
++ * (struct t_stat, 80 bytes; kernel/include/thylacine/syscall.h) into
 + * musl's aarch64 struct stat (arch/aarch64/bits/stat.h).
 + *
 + * P6-pouch-stratumd-boot sub-chunk 16b-gamma. The upstream
@@ -95,7 +95,7 @@ diff -u a/src/stat/fstat.c b/src/stat/fstat.c
 + * 0xFFFF ENOSYS sentinels under the seam. We bypass the entire
 + * upstream fstat plumbing and call the Thylacine-native SYS_fstat
 + * directly. The kernel returns 0 on success and populates the
-+ * 72-byte t_stat; we fill struct stat from those fields.
++ * 80-byte t_stat; we fill struct stat from those fields.
 + *
 + * The translation is straight-line: every t_stat field maps to
 + * exactly one struct stat field. uid/gid map to st_uid/st_gid (A-2a);

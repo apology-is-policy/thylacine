@@ -916,14 +916,14 @@ enum {
     SYS_SPAWN_FULL_ARGV = 49,
 
     // SYS_FSTAT(spoor_fd, stat_va) → 0 / -1 (P6-pouch-stratumd-boot sub-chunk
-    // 16b-gamma). Populate the user-VA `struct t_stat` buffer (72 bytes) with
+    // 16b-gamma; A-2a grew it to 80). Populate the user-VA `struct t_stat` with
     // metadata for the file opened on `spoor_fd`. The Thylacine-native stat
     // surface — Plan 9 9P qid identity carried verbatim alongside POSIX-shaped
     // mode/size/timestamps so pouch's `fstat()` can translate to musl's
     // `struct stat` without losing 9P provenance.
     //
     //   x0 = spoor_fd   (hidx_t; must be KOBJ_SPOOR with RIGHT_READ)
-    //   x1 = stat_va    user-VA pointer to a 72-byte struct t_stat (must be
+    //   x1 = stat_va    user-VA pointer to an 80-byte struct t_stat (must be
     //                   fully mapped + writable; alignment NOT required — the
     //                   kernel stores byte-by-byte for alignment tolerance)
     //
