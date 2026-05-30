@@ -363,6 +363,65 @@ boot the mismatch -> `rc=-201`, rebuild the ramfs to match -> boot OK. Fix:
 
 ---
 
+## 6.11 The flake-dismissal anti-pattern (the most expensive habit)
+
+Every bug in this playbook was first dismissed as something cheaper. "AEGIS
+corruption" was "intermittent / content-sensitive" for ~a year. #713 was "rare,
+IRQ-timing-dependent." The EBADTAG was "intermittent." The pattern is not a
+coincidence -- it is the rule: **the nasty bugs are intermittent BY NATURE,
+because they are races, resource-margin cliffs, and ordering bugs. "Flaky" is the
+SYMPTOM of that class, never the explanation.** The deterministic bugs are the
+easy ones; you fix them and move on. The ones that cost months are the ones you
+were tempted to wave away.
+
+"Flaky" / "transient" / "boot variance" / "timing-dependent" / "just KASLR" /
+"just QEMU scheduling" / "works on re-run" is a **hypothesis with the same burden
+of proof as any other root cause** -- a definitive, reproducible mechanism. It is
+also the most *convenient* hypothesis (it lets you proceed without digging), which
+is precisely what makes it the most dangerous. **The convenience is the tell.**
+
+The discipline (now the `elusive-bug-hunt` skill's earliest trigger):
+1. The instant you reach for a flake word, STOP. Do not silently absorb it. Never
+   write it into a commit / status / memory as a CONCLUSION -- the only honest
+   unproven label is **"UNEXPLAINED -- suspected X, NOT confirmed; deep-dive
+   queued."**
+2. **Quick pre-analysis (minutes):** name the convenient hypothesis AND the one
+   cheap observation that confirms or refutes it. The convenient theory is often
+   already weak on inspection -- check the *mechanism*, not the vibe.
+3. **Surface to the user** with the pre-analysis + what a definitive proof needs.
+   The user queues the deep dive at the earliest convenient point (park the chunk
+   now if it could be impacted; else right after it ships) -- tracked, never
+   dropped.
+
+Two worked examples, caught the moment they were waved away (2026-05-30; both
+queued for deep dive, not yet root-caused -- this section will be updated when
+they are):
+- **"rfork_stress_1000 boot-flaky kernel-stack-overflow."** The convenient label
+  was "KASLR stack placement." Pre-analysis REFUTED it in one read: `kaslr.c`
+  randomizes only `__stack_chk_guard` (the canary cookie) and the kernel *image
+  base* -- NOT the per-thread kernel *stack* allocation (`thread.c`: a fixed 16
+  KiB usable + 16 KiB guard). A fixed stack cannot overflow "because of KASLR."
+  What actually varies run-to-run is **interrupt timing**: an IRQ taken at the
+  deepest point of the rfork/exec/wait call chain pushes an exception frame onto
+  the same 16 KiB stack and can cross the guard. Leading hypothesis: the kernel
+  stack margin is **too thin for worst-case call-depth + interrupt nesting** -- a
+  real resource-margin bug, intermittent because IRQ arrival is. Definitive proof:
+  paint the stack with a sentinel, run the stress, scan the high-water mark, and
+  measure the margin to the guard (and/or mask IRQs across the test and see if the
+  overflow stops).
+- **"Normal QEMU TCG boot variance" (boot straddles the 45s timeout).** The
+  retry count barely moves (616 vs 621 -> ~5 ms), so the tens-of-seconds swing is
+  NOT joey's 1 ms-paced `/srv`-bind poll. Unchecked confound: the timeout runs
+  happened while a concurrent build + a heavy Opus audit agent loaded the host;
+  the passing re-runs were on an idle host. Decisive experiment: run `test.sh`
+  N times on an IDLE host -- if consistently < 45 s, it is host CPU contention
+  (benign; the fix is don't-run-concurrent or bump the timeout); if it STILL
+  swings, instrument the boot phase timeline and look for a **bimodal / cliff**
+  signature (a race or a missed-wakeup falling back to a deadline -- the I-9
+  class). Either way "normal" is unproven until measured.
+
+---
+
 ## 7. Appendix — reproduction recipe
 
 ```sh
