@@ -587,7 +587,21 @@ struct Dev dev9p = {
     // A-2d: rwx enforcement DEFERRED to A-3. The server-reported uid/gid is the
     // connection / host-baked identity, not reconciled with the PRINCIPAL_SYSTEM
     // boot chain until per-user stratumd lands -- uniform enforcement would brick
-    // the post-pivot creates. A-3 flips this to true. (IDENTITY-DESIGN.md 3.7.1.)
+    // the post-pivot creates. (IDENTITY-DESIGN.md 3.7.1.)
+    //
+    // A-3 PREREQUISITES before flipping this to `true` (A-2d audit F1+F2, dormant
+    // while false; do not flip without closing both -- each is a privilege hole):
+    //   F1 (P1): sys_walk_open_handler installs the handle with a hardcoded
+    //     R|W[|TRANSFER] envelope independent of omode (syscall.c ~1662). With an
+    //     enforced Dev, an OREAD/OEXEC open of a file the caller has only r-- /
+    //     --x on would yield a writable/readable handle the perm_check never
+    //     validated (SYS_READ/SYS_WRITE re-check only the RIGHT, not perm). A-3
+    //     MUST derive the handle rights from the omode (the contract comment at
+    //     that install site already says so).
+    //   F2 (P2): sys_rename_handler / sys_unlink_handler gate on RIGHT_WRITE only,
+    //     with no perm_check -- A-3 MUST add perm_check(parent, PERM_W|PERM_X)
+    //     there (matching sys_walk_create_handler), or an O_PATH-born R|W handle
+    //     to a no-write directory could mutate its entries.
     .perm_enforced = false,
 
     .reset    = dev9p_reset,

@@ -1653,6 +1653,14 @@ static s64 sys_walk_open_handler(u64 spoor_fd_raw, u64 name_va,
     // upper bounds. At v1.0 the policy is "9P-server-mediated"; this
     // comment is the contract for future walkable Devs.
     //
+    // A-2d audit F1 (P1, dormant while dev9p.perm_enforced == false): when A-3
+    // enforces dev9p, this hardcoded envelope outruns the omode that perm_check
+    // validated above -- an OREAD/OEXEC open would still install RIGHT_WRITE /
+    // RIGHT_READ. A-3 MUST derive `r` from omode (OREAD->RIGHT_READ,
+    // OWRITE->RIGHT_WRITE, ORDWR->R|W, OEXEC->RIGHT_READ; O_PATH keeps the F5
+    // R|W navigation envelope) so the capability axis cannot exceed the checked
+    // access. See dev9p.c's .perm_enforced A-3-prerequisites note.
+    //
     // F5 (A-1.7 audit): a T_OPATH (non-opened) handle is a directory
     // navigation / capability base, not a byte-I/O channel -- born with
     // least authority (no RIGHT_TRANSFER), so a service handed one as a

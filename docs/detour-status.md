@@ -371,10 +371,18 @@ post-fix passing pool) -- not a live reproducer. Full coda:
   default & umask.
 - **A-2c:** uniform **mount-cape** for self-declared-non-POSIX backings — folds
   into A-2d as the metadata source for permissionless backings.
-- **A-2d (IMPLEMENTED 2026-05-30; devramfs-live, dev9p deferred to A-3; audit
-  pending):** the **kernel rwx-permission layer** (`kernel/perm.c` +
-  walk/open/create/wstat chokepoints; 8 `perm.*` tests; 637/637 + boot OK +
-  cross-reboot PASS) (Linux-VFS model; IDENTITY-DESIGN §3.7 + the §3.7.1
+- **A-2d (LANDED 2026-05-30; devramfs-live, dev9p deferred to A-3; audit R1
+  CLEAN 0/1/1/1):** the **kernel rwx-permission layer** (`kernel/perm.c` +
+  walk/open/create/wstat chokepoints; 8 `perm.*` tests; 637/637 default+UBSan +
+  boot OK + cross-reboot PASS). **Audit R1 CLEAN at v1.0** -- the active surface
+  is sound (I-22 no-identity-bypass, owner-first, fail-closed, wstat policy,
+  O_PATH, A-2a F2 closed, boot survival); the F1(P1)+F2(P2) are **dormant at
+  v1.0** (devramfs RO+world-readable; dev9p unenforced) and **deferred to A-3 as
+  named activation prerequisites** -- A-3 MUST, in the pass that flips
+  `dev9p.perm_enforced=true`: (F1) derive the SYS_WALK_OPEN handle rights from the
+  omode (today hardcoded R|W[|TRANSFER]); (F2) add `perm_check(parent, W|X)` to
+  rename+unlink. Loud in-code prereq notes at both sites; full record in
+  `audit_a2d_closed_list.md`. (Linux-VFS model; IDENTITY-DESIGN §3.7 + the §3.7.1
   privilege-model refinement + the §9.6 implementation contract). At walk/open/
   create, `perm_check` the file's mode/uid/gid (`spoor_stat_native`) against the
   Proc's `principal_id` + groups (owner-first POSIX); enforcement points

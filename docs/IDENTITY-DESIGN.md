@@ -1369,3 +1369,37 @@ NOT also skip the X-search); the boot-chain-survival (devramfs world-r/x → no 
 **No new spec** per the 2026-05-23 spec-to-code broadening -- prose validation in
 §3.7.1 + this section + the CLAUDE.md audit-trigger row + the audit + the runtime
 tests.
+
+**Audit R1 (2026-05-30): CLEAN at v1.0 (0 P0 / 1 P1 / 1 P2 / 1 P3).** The active
+surface verified sound (I-22: no `principal_id` bypasses; owner-first algorithm;
+fail-closed; wstat policy; O_PATH R/W-exempt-but-X-enforced; the A-2a F2
+valid-mask fix; nc lifetime; boot-chain survival). Both the P1 and the P2 are
+**dormant at v1.0** (devramfs is read-only + world-readable; dev9p is
+`perm_enforced=false`) -- there is no actively-reproducible escalation in the
+merged state -- and are deferred to A-3 as **named activation prerequisites**:
+
+- **F1 (P1) -- handle rights outrun the checked omode.** `sys_walk_open_handler`
+  installs the KOBJ_SPOOR handle with a hardcoded `R|W[|TRANSFER]` envelope
+  independent of `omode` (a pre-existing behavior; the install site already
+  carries a "future enforcing Dev must derive rights" contract comment). With an
+  enforced Dev, an OREAD/OEXEC open of a file the caller has only `r--`/`--x` on
+  yields a writable/readable handle that `perm_check` never validated (SYS_READ/
+  SYS_WRITE re-check only the RIGHT, by the open-time-snapshot design). **A-3 MUST
+  derive the handle rights from `omode`** (OREAD->RIGHT_READ, OWRITE->RIGHT_WRITE,
+  ORDWR->R|W, OEXEC->RIGHT_READ; O_PATH keeps the F5 navigation envelope) before
+  flipping `dev9p.perm_enforced`. Dormant now: devramfs is world-readable, so no
+  execute-only-no-read target exists.
+- **F2 (P2) -- dir-mutation ops are RIGHT-gated only.** `sys_rename_handler` /
+  `sys_unlink_handler` gate on `RIGHT_WRITE` with no `perm_check`, unlike
+  `sys_walk_create_handler` (which checks W|X on the parent). An O_PATH-born `R|W`
+  handle to a directory the caller has no `other-w` on could then rename/unlink
+  its entries once dev9p enforces. **A-3 MUST add `perm_check(parent, W|X)`** to
+  rename + unlink in lockstep with the flip. Dormant now: devramfs leaves
+  `.rename`/`.unlink` NULL; dev9p is unenforced.
+- **F3 (P3): subsumed** -- the wstat owner-read-then-setattr TOCTOU is the
+  pre-existing surface-wide lockless `handle_get` window, not worsened by A-2d;
+  rides the deferred handle-lifetime hardening pass.
+
+The activation points carry loud in-code prerequisite notes (`kernel/dev9p.c`'s
+`.perm_enforced` + the `syscall.c` handle-rights install site) so the A-3 flip
+cannot miss F1/F2. Full record: `memory/audit_a2d_closed_list.md`.
