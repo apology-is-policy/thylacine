@@ -1,25 +1,59 @@
 #!/usr/bin/env bash
-# tools/build.sh — Thylacine top-level build wrapper.
+# tools/build.sh — Thylacine top-level build wrapper (CMake kernel + Cargo/clang
+# userspace + pouch POSIX sysroot). Per CLAUDE.md "Build + test commands" +
+# TOOLING.md §9.
 #
-# Per CLAUDE.md "Build + test commands" and TOOLING.md §9: thin wrapper around
-# CMake (kernel) and Cargo (userspace; appears post-P1-A as Rust components
-# arrive).
+# ============================================================================
+# WHAT EACH TARGET (RE)BUILDS — READ THIS BEFORE BLAMING A "STALE" ARTIFACT.
+# ============================================================================
+# The bootable image (build/disk.img + build/ramfs.cpio) is what tools/test.sh
+# boots. `kernel` and `all` both produce it; they are effectively the SAME
+# command because `kernel` pulls the whole chain in this order:
 #
-# Usage:
-#   tools/build.sh kernel        — build the kernel ELF
-#   tools/build.sh userspace     — build native userspace binaries from usr/ (P4-Ia1+)
-#   tools/build.sh ramfs         — assemble build/ramfs.cpio
-#   tools/build.sh sysroot       — build the pouch POSIX sysroot (Phase 6)
-#   tools/build.sh pouch-progs   — build the pouch POSIX test programs (Phase 6)
-#   tools/build.sh disk          — assemble build/disk.img (Phase 4+)
-#   tools/build.sh all           — kernel + userspace + ramfs
-#   tools/build.sh clean         — remove build artifacts
+#   all -> kernel -> { userspace, pouch-progs, stratumd, pool-fixture,
+#                      ramfs, disk }
+#
+# Per-target (run `tools/build.sh <target>`):
+#   all          full bootable image. ALIAS for `kernel` (same chain). USE THIS.
+#   kernel       kernel ELF (CMake) + the entire userspace/ramfs/disk chain.
+#   userspace    native libt C binaries (usr/*, incl. joey) + the Rust workspace
+#                (usr/Cargo.toml: corvus, libthyla-rs, ut, ...). NOT the kernel.
+#   sysroot      the pouch POSIX libc: copies pristine third_party/musl, applies
+#                the usr/lib/pouch/patches/ series, cross-builds libc.a +
+#                compiler-rt + libsodium into build/sysroot/. SLOW (~1-2 min).
+#   pouch-progs  the pouch-hello-* test binaries (need the sysroot).
+#   stratumd     the Stratum FS daemon (pouch binary; links the sysroot libc).
+#   pool         regenerate build/fixtures/pool.img + system.key, THEN re-bake
+#                the ramfs (so /system.key matches the fresh pool key).
+#   ramfs        assemble build/ramfs.cpio (bakes the userspace bins + key).
+#   disk         assemble build/disk.img.
+#   clean        rm -rf build/  (the ONLY true from-scratch reset).
+#
+# ----------------------------------------------------------------------------
+# CACHING / STALENESS — the two footguns that bite sessions:
+# ----------------------------------------------------------------------------
+# 1. The pouch SYSROOT (musl libc) is CACHED. `kernel`/`all` REUSE build/sysroot
+#    if present -- EXCEPT this script now AUTO-REBUILDS it when any pouch patch
+#    is newer than the built libc.a (see sysroot_is_stale). So editing a
+#    usr/lib/pouch/patches/*.patch and running `all` rebuilds the libc + every
+#    pouch consumer (stratumd) in lockstep. (Before this check, a patched ABI
+#    silently linked against a STALE libc -- e.g. the A-2a t_stat 72->80 growth
+#    overflowing stratumd's stale 72-byte buffer.) To FORCE it: `clean` then
+#    `all`, or run `sysroot` directly.
+# 2. The pool fixture's system.key is RANDOM per regeneration. The `pool` target
+#    couples the ramfs re-bake to the pool re-bake so /system.key always matches
+#    (a mismatch = STM_EBADTAG at mount; the year-long "AEGIS corruption" ghost).
+#    A bare `kernel`/`all` regenerates BOTH together, so they always agree.
+#
+# Every run prints a "SUMMARY for target ..." block at the END listing exactly
+# what was BUILT / REUSED / PRESERVED -- read that to know the resulting state.
 #
 # Options:
-#   --release        — Release build (-O2, no debug). Default is Debug (with assertions).
-#   --hardening-full — Enable P1-H hardening flags (lands at P1-H).
-#   --kaslr          — Enable KASLR (lands at P1-C).
-#   --verbose        — Verbose CMake/Cargo output.
+#   --release        Release build (-O2, no debug). Default Debug (assertions on).
+#   --hardening-full Enable P1-H hardening flags.
+#   --kaslr          Enable KASLR.
+#   --sanitize=ubsan UBSan kernel build (separate build dir).
+#   --verbose        Verbose CMake/Cargo output.
 
 set -euo pipefail
 
@@ -108,6 +142,37 @@ elif [[ -n "$sanitize_cmake" ]]; then
     KERNEL_BUILD="$BUILD_DIR/kernel-${sanitize_cmake}"
 fi
 
+# --- build ledger -------------------------------------------------------------
+# So a session reading the build output afterwards can see EXACTLY what was
+# (re)built vs reused vs skipped -- without having to know each target's
+# internal chain. Every top-level step records one line; the dispatch prints
+# the SUMMARY at the very end. `ledger` both echoes live and accumulates.
+BUILD_LEDGER=""
+ledger() {
+    BUILD_LEDGER="${BUILD_LEDGER}    - $*"$'\n'
+    echo "==> [build.sh] $*"
+}
+
+# sysroot_is_stale — true (0) iff the pouch POSIX sysroot must be rebuilt: it
+# is MISSING, or any boundary-line patch / the series file is NEWER than the
+# built libc.a (i.e. a pouch patch was edited since the last sysroot build).
+#
+# This is the cache-invalidation that makes `all` (and any target that links
+# pouch code) TRUSTWORTHY. Without it, editing a pouch patch left `all` silently
+# reusing a STALE libc -- the exact footgun that masked the A-2a t_stat 72->80
+# ABI growth (the kernel wrote 80 bytes into stratumd's stale 72-byte buffer, a
+# silent stack overflow a "passing" boot hid). Same class as the pool/key
+# coupling on the `pool` target. A genuine full nuke is `build.sh clean`.
+sysroot_is_stale() {
+    local libc="$BUILD_DIR/sysroot/lib/libc.a"
+    [[ -f "$libc" ]] || return 0
+    [[ -f "$BUILD_DIR/sysroot/lib/libclang_rt.builtins.a" ]] || return 0
+    if [[ -n "$(find "$REPO_ROOT/usr/lib/pouch/patches" -type f -newer "$libc" 2>/dev/null)" ]]; then
+        return 0
+    fi
+    return 1
+}
+
 build_kernel() {
     echo "==> Building kernel (build_type=$build_type, hardening=$hardening_full, kaslr=$kaslr, sanitize='${sanitize_cmake}', dir=$KERNEL_BUILD)"
     cmake -S "$REPO_ROOT" -B "$KERNEL_BUILD" \
@@ -119,6 +184,7 @@ build_kernel() {
         ${extra_cmake_args[@]+"${extra_cmake_args[@]}"}
     cmake --build "$KERNEL_BUILD" $verbose
     echo "==> Kernel built: $KERNEL_BUILD/thylacine.elf"
+    ledger "kernel ELF: BUILT ($build_type, hardening=$hardening_full, kaslr=$kaslr, sanitize='${sanitize_cmake:-none}')"
     ls -la "$KERNEL_BUILD/thylacine.elf"
 
     # P4-E: build the ramfs cpio alongside the kernel so QEMU's
@@ -235,6 +301,7 @@ EOF
 
     python3 "$REPO_ROOT/tools/mkcpio.py" "$ramfs_src" "$ramfs_out"
     echo "==> ramfs cpio: $ramfs_out"
+    ledger "ramfs.cpio: REBUILT (bakes the current userspace binaries + system.key)"
 }
 
 build_userspace() {
@@ -246,6 +313,7 @@ build_userspace() {
         ${extra_cmake_args[@]+"${extra_cmake_args[@]}"}
     cmake --build "$USR_BUILD" $verbose
     echo "==> Userspace C built under $USR_BUILD"
+    ledger "userspace: BUILT (native libt C binaries + the Rust workspace below)"
     ls -la "$USR_BUILD/hello/hello" 2>/dev/null || true
 
     # Rust side — cargo. Optional: if rustup hasn't installed the
@@ -418,6 +486,7 @@ build_sysroot() {
     echo "    CRT       crt1.o crti.o crtn.o"
     echo "    headers   $(find "$sysroot/include" -name '*.h' | wc -l | tr -d ' ') files"
     echo "    seam      syscall table retargeted to the Thylacine ABI"
+    ledger "sysroot: REBUILT (pristine musl + pouch patch series + libc.a + compiler-rt + libsodium)"
 }
 
 build_compiler_rt() {
@@ -906,6 +975,7 @@ build_stratumd() {
 
     cp "$binary" "$progs_out/stratumd"
     echo "==> stratumd built: $progs_out/stratumd ($(wc -c < "$progs_out/stratumd" | tr -d ' ') bytes, ET_EXEC, static)"
+    ledger "stratumd: BUILT (links the pouch libc -- a stale sysroot would ship a stale ABI here)"
 }
 
 build_stratum_host_tools() {
@@ -1014,6 +1084,7 @@ build_stratum_pool_fixture() {
     if [[ "${THYLACINE_MKFS_PRESERVE:-0}" == "1" ]] \
         && [[ -f "$pool_img" ]] && [[ -f "$keyfile" ]]; then
         echo "==> stratum pool fixture: PRESERVED (THYLACINE_MKFS_PRESERVE=1; $(wc -c < "$pool_img" | tr -d ' ') bytes pool.img, $(wc -c < "$keyfile" | tr -d ' ') bytes system.key from prior build)"
+        ledger "pool.img + system.key: PRESERVED (THYLACINE_MKFS_PRESERVE=1; the existing key is kept -- rebuild the ramfs to re-bake it)"
         return 0
     fi
 
@@ -1050,6 +1121,7 @@ build_stratum_pool_fixture() {
         exit 1
     fi
     echo "==> stratum pool fixture: $(wc -c < "$pool_img" | tr -d ' ') bytes ($pool_img), $(wc -c < "$keyfile" | tr -d ' ') bytes ($keyfile)"
+    ledger "pool.img + system.key: REGENERATED (fresh random key, seed=$mkfs_seed) -- the ramfs MUST be re-baked so /system.key matches"
 
     # P6-pouch-stratumd-boot 16c: populate the freshly-formatted pool with
     # the boot binary corpus + a sentinel for joey's post-pivot probe. The
@@ -1198,11 +1270,15 @@ build_pouch_progs() {
     local pouch_ld="$REPO_ROOT/tools/pouch-ld"
     local readelf="$LLVM_PREFIX/bin/llvm-readelf"
 
-    if [[ ! -f "$sysroot/lib/libc.a" || ! -f "$sysroot/lib/libclang_rt.builtins.a" ]]; then
-        echo "==> pouch progs: sysroot incomplete — building it first"
+    if sysroot_is_stale; then
+        if [[ -f "$sysroot/lib/libc.a" ]]; then
+            echo "==> pouch progs: sysroot STALE (a pouch patch is newer than libc.a) — rebuilding it first"
+        else
+            echo "==> pouch progs: sysroot incomplete — building it first"
+        fi
         build_sysroot
     else
-        echo "==> pouch progs: reusing $sysroot (run 'tools/build.sh sysroot' to refresh)"
+        ledger "sysroot: REUSED (cached + up-to-date; force with 'tools/build.sh sysroot', or 'tools/build.sh clean' for a full nuke)"
     fi
 
     # Preserve stratumd (and other future daemon binaries) installed by
@@ -1303,10 +1379,14 @@ build_disk() {
     fi
     echo "    block 0 signature: '$readback' (16 bytes)"
     echo "    size: $actual_size bytes"
+    ledger "disk.img: REBUILT"
 }
 
 build_all() {
-    # build_kernel calls build_userspace + build_ramfs + build_disk internally.
+    # `all` is an ALIAS for `kernel`: build_kernel pulls in userspace +
+    # pouch-progs + stratumd + pool-fixture + ramfs + disk internally (and
+    # auto-rebuilds the pouch sysroot if a patch is newer than libc.a). The
+    # end-of-run SUMMARY reports exactly what was (re)built vs reused.
     build_kernel
 }
 
@@ -1341,3 +1421,15 @@ case "$target" in
         exit 1
         ;;
 esac
+
+# --- build summary ------------------------------------------------------------
+# Print EXACTLY what this invocation (re)built / reused / preserved, so a session
+# reading the tail of the build output knows the resulting state without having
+# to re-derive each target's internal chain. (`clean` adds nothing -> no block.)
+if [[ -n "$BUILD_LEDGER" ]]; then
+    echo ""
+    echo "==> [build.sh] SUMMARY for target '$target' (build_type=$build_type):"
+    printf '%s' "$BUILD_LEDGER"
+    echo "==> [build.sh] note: a pouch ABI/patch change auto-triggers a sysroot REBUILT above"
+    echo "    (any patch newer than libc.a); 'tools/build.sh clean' forces a full from-scratch rebuild."
+fi
