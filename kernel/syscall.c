@@ -27,6 +27,7 @@
 #include <thylacine/page.h>
 #include <thylacine/pipe.h>
 #include <thylacine/poll.h>
+#include <thylacine/perm.h>
 #include <thylacine/proc.h>
 #include <thylacine/random.h>
 #include <thylacine/sched.h>
@@ -1499,6 +1500,18 @@ static s64 sys_walk_open_handler(u64 spoor_fd_raw, u64 name_va,
     }
     if (!src->dev || !src->dev->walk || !src->dev->open) return -1;
 
+    // A-2d (IDENTITY-DESIGN.md 3.7.1): search (X) permission on the source
+    // directory before walking into it. Gated on the Dev's perm_enforced flag
+    // (dev9p deferred to A-3; devramfs live). devramfs dirs are 0555, so the
+    // PRINCIPAL_SYSTEM owner traverses while a non-system principal needs
+    // other-x. fail-closed if the Dev cannot vouch for the metadata. This is
+    // additive to the handle-RIGHT gate above (capability axis); both must hold.
+    if (src->dev->perm_enforced) {
+        struct t_stat src_st;
+        if (spoor_stat_native(src, &src_st) != 0)        return -1;
+        if (perm_check(p, &src_st, PERM_X) != 0)         return -1;
+    }
+
     // Copy the name into kernel scratch + validate component shape.
     // Reject '/' (multi-component path — defer to production open()),
     // '\0' (truncation attack), and the special entries "." (no-op) +
@@ -1599,6 +1612,19 @@ static s64 sys_walk_open_handler(u64 spoor_fd_raw, u64 name_va,
     // from an opened fid, so a normally-opened handle cannot serve that
     // role. The access bits are irrelevant for an O_PATH handle.
     if (!(omode_raw & SYS_WALK_OPEN_OPATH)) {
+        // A-2d: R and/or W permission on the walked target per the open mode
+        // (OREAD->R, OWRITE->W, ORDWR->R|W, OEXEC->X; OTRUNC adds W). O_PATH is
+        // exempt from this gate (a walk-only handle has no access semantics --
+        // FS-delta 9.4) but NOT from the src X-search above. nc->dev == src->dev
+        // so perm_enforced matches; re-checked on nc for clarity.
+        if (nc->dev->perm_enforced) {
+            struct t_stat nc_st;
+            if (spoor_stat_native(nc, &nc_st) != 0)  { spoor_clunk(nc); return -1; }
+            if (perm_check(p, &nc_st, perm_want_for_omode((u32)omode_raw)) != 0) {
+                spoor_clunk(nc);
+                return -1;
+            }
+        }
         // Issue the open. dev9p_open returns nc itself (state mutated:
         // COPEN flag set, mode + offset reset, qid refreshed from Rlopen).
         // On failure nc still has its own walk-allocated fid; spoor_clunk
@@ -1702,6 +1728,17 @@ static s64 sys_walk_create_handler(u64 parent_fd_raw, u64 name_va,
         if (!src)                                     return -1;
     }
     if (!src->dev || !src->dev->walk || !src->dev->create) return -1;
+
+    // A-2d: write + search (W|X) permission on the parent directory before
+    // creating in it. Gated on perm_enforced (dev9p deferred to A-3). devramfs
+    // is read-only (its .create stub returns NULL) so this is effectively dead
+    // for devramfs, but correct: a non-system principal lacks other-w on a 0755
+    // dir and is denied here before the create attempt. fail-closed on no stat.
+    if (src->dev->perm_enforced) {
+        struct t_stat parent_st;
+        if (spoor_stat_native(src, &parent_st) != 0)          return -1;
+        if (perm_check(p, &parent_st, PERM_W | PERM_X) != 0)  return -1;
+    }
 
     // Copy + validate the component name (same strict shape as SYS_WALK_OPEN:
     // reject '/' '\0' "." ".."; NUL-terminate for dev9p's strlen scan).
@@ -2020,6 +2057,17 @@ static s64 sys_wstat_handler(u64 hraw, u64 valid_raw, u64 mode_raw,
     if (slot->kind != KOBJ_SPOOR)                    return -1;
 
     struct Spoor *c = (struct Spoor *)slot->obj;
+
+    // A-2d: the ownership-change policy (IDENTITY-DESIGN.md 3.7.1 + perm.c).
+    // Gated on perm_enforced (dev9p deferred to A-3; devramfs .wstat_native is
+    // NULL so SYS_WSTAT on it returns -1 below regardless -> this is dormant at
+    // v1.0, exercised by perm_wstat_check's unit tests and activated with dev9p
+    // at A-3). Reads the file's CURRENT owner, then applies the policy.
+    if (c->dev && c->dev->perm_enforced) {
+        struct t_stat cur;
+        if (spoor_stat_native(c, &cur) != 0)                  return -1;
+        if (perm_wstat_check(p, cur.uid, valid, gid) != 0)    return -1;
+    }
     return spoor_wstat_native(c, valid, mode, uid, gid) == 0 ? 0 : -1;
 }
 

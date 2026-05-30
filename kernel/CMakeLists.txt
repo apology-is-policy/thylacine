@@ -12,6 +12,7 @@ set(KERNEL_SRCS
     canary.c
     fault_test.c
     proc.c
+    perm.c
     thread.c
     sched.c
     smp.c
@@ -145,6 +146,7 @@ set(KERNEL_SRCS
     test/test_9p_transport.c
     test/test_9p_client.c
     test/test_dev9p.c
+    test/test_perm.c
     test/test_9p_attach.c
     test/test_9p_spoor_transport.c
     test/test_9p_srvconn_transport.c

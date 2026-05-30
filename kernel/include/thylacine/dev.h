@@ -50,6 +50,18 @@ struct Dev {
     int          dc;     // device character ('-' for none, 'c' for cons, ...)
     const char  *name;   // human-readable name; matches bestiary entry
 
+    // A-2d (IDENTITY-DESIGN.md sections 3.7.1 + 9.6): when true, the kernel
+    // rwx-permission layer enforces owner/group/other access at walk/open/
+    // create for Spoors backed by this Dev (reading mode/uid/gid via
+    // .stat_native against the Proc's principal_id + groups). When false the
+    // chokepoint skips the rwx check (handle-RIGHT gating only -- the v1.0
+    // status quo). devramfs = true (system-owned -> real per-principal
+    // enforcement); dev9p = false (its stored uids are the connection / host-
+    // baked identity, not reconciled with the PRINCIPAL_SYSTEM boot chain until
+    // A-3 -- uniform enforcement would brick the post-pivot creates). The A-3
+    // dev9p activation is flipping this one flag to true.
+    bool         perm_enforced;
+
     // Lifecycle: called by the kernel.
     //   reset()    — re-initialize the dev (Plan 9 `dev->reset`);
     //                kernel-driven on hardware reset.

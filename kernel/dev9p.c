@@ -250,22 +250,27 @@ static int dev9p_stat_native(struct Spoor *c, struct t_stat *out) {
     struct p9_attr attr;
     if (p9_client_getattr(p->client, p->fid, P9_GETATTR_BASIC, &attr) != 0)
         return -1;
-    // v1.0 Stratum fills uid/gid in BASIC; a server that cleared their valid
-    // bits would have us report the stale wire bytes (dormant -- Stratum-only).
     for (size_t i = 0; i < sizeof(*out); i++) ((u8 *)out)[i] = 0;
     out->size      = attr.size;
     out->qid_path  = attr.qid.path;
     out->atime_sec = attr.atime_sec;
     out->mtime_sec = attr.mtime_sec;
     out->ctime_sec = attr.ctime_sec;
-    out->mode      = attr.mode;
     out->nlink     = (u32)attr.nlink;
     out->qid_vers  = attr.qid.version;
     out->qid_type  = qid_type_p9_to_kernel(attr.qid.type);
     out->blksize   = attr.blksize ? (u32)attr.blksize : 4096u;
     out->blocks    = attr.blocks;
-    out->uid       = attr.uid;
-    out->gid       = attr.gid;
+    // A-2a F2 (closed in A-2d): respect the server's `valid` mask for the
+    // security-critical trio. A server that did not fill mode/uid/gid must NOT
+    // have us report stale wire bytes -- leaving the pre-zeroed field is
+    // fail-closed (mode 0 = no rwx bits; uid 0 = PRINCIPAL_INVALID, gid 0 =
+    // GID_INVALID -- a real principal matches none, so perm_check denies). v1.0
+    // Stratum fills BASIC, so this is dormant for the reference server; it makes
+    // the A-3 dev9p enforcement (which reads these) sound against any server.
+    if (attr.valid & P9_GETATTR_MODE) out->mode = attr.mode;
+    if (attr.valid & P9_GETATTR_UID)  out->uid  = attr.uid;
+    if (attr.valid & P9_GETATTR_GID)  out->gid  = attr.gid;
     return 0;
 }
 
@@ -579,6 +584,11 @@ void dev9p_init(void) {
 struct Dev dev9p = {
     .dc       = DEV9P_DC,
     .name     = "9p",
+    // A-2d: rwx enforcement DEFERRED to A-3. The server-reported uid/gid is the
+    // connection / host-baked identity, not reconciled with the PRINCIPAL_SYSTEM
+    // boot chain until per-user stratumd lands -- uniform enforcement would brick
+    // the post-pivot creates. A-3 flips this to true. (IDENTITY-DESIGN.md 3.7.1.)
+    .perm_enforced = false,
 
     .reset    = dev9p_reset,
     .init     = dev9p_init_noop,             // registration is via dev9p_init (outside the bestiary walk)

@@ -371,8 +371,10 @@ post-fix passing pool) -- not a live reproducer. Full coda:
   default & umask.
 - **A-2c:** uniform **mount-cape** for self-declared-non-POSIX backings — folds
   into A-2d as the metadata source for permissionless backings.
-- **A-2d (DESIGN LANDED 2026-05-30; ready to implement):** the **kernel
-  rwx-permission layer** (Linux-VFS model; IDENTITY-DESIGN §3.7 + the §3.7.1
+- **A-2d (IMPLEMENTED 2026-05-30; devramfs-live, dev9p deferred to A-3; audit
+  pending):** the **kernel rwx-permission layer** (`kernel/perm.c` +
+  walk/open/create/wstat chokepoints; 8 `perm.*` tests; 637/637 + boot OK +
+  cross-reboot PASS) (Linux-VFS model; IDENTITY-DESIGN §3.7 + the §3.7.1
   privilege-model refinement + the §9.6 implementation contract). At walk/open/
   create, `perm_check` the file's mode/uid/gid (`spoor_stat_native`) against the
   Proc's `principal_id` + groups (owner-first POSIX); enforcement points

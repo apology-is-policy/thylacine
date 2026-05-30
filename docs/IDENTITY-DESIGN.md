@@ -492,9 +492,11 @@ Mechanism: the chokepoint is **Dev-gated by a `Dev.perm_enforced` flag**
 **F2** (gate `dev9p_stat_native` on the `Rgetattr` valid mask) is closed here — the
 enforcement reads that stat, so a missing-`valid`-bit garbage mode would
 mis-enforce. A-2c's mount-cape stays a **seam** (no permissionless backing is
-mounted at v1.0). Hardening flag (not a blocker): `/system.key` is `0644` (world-r)
-in devramfs — A-2d is the natural moment to tighten its cpio mode to `0600` (joey
-reads it as `PRINCIPAL_SYSTEM` → owner-r still works).
+mounted at v1.0). (Verified during impl: `/system.key` in devramfs is already
+`0400` (build.sh `chmod 0400`), reported owner = `PRINCIPAL_SYSTEM` -- so a
+non-system principal cannot read it post-enforcement and the boot chain (owner)
+still can. The earlier "0644 -> tighten to 0600" flag was a wrong guess; no change
+needed.)
 
 ---
 

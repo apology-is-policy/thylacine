@@ -268,6 +268,14 @@ void test_devramfs_read_partial_offset(void);
 void test_devramfs_read_dir_returns_neg1(void);
 void test_devramfs_write_rejected(void);
 void test_devramfs_stat_native_system_owned(void);
+void test_perm_check_owner_group_other(void);
+void test_perm_check_owner_first_authoritative(void);
+void test_perm_check_hostowner_override(void);
+void test_perm_in_group(void);
+void test_perm_want_for_omode(void);
+void test_perm_wstat_policy(void);
+void test_perm_devramfs_enforced_real_metadata(void);
+void test_perm_dev_flags(void);
 void test_devsrv_registered(void);
 void test_devsrv_post_gate(void);
 void test_devsrv_post_basic(void);
@@ -1566,6 +1574,15 @@ struct test_case g_tests[] = {
     { "dma_map.proc_free_releases_kobj",
                                        test_dma_map_proc_free_releases_kobj,
                                                                            false, NULL },
+    { "perm.check_owner_group_other",  test_perm_check_owner_group_other,  false, NULL },
+    { "perm.check_owner_first",        test_perm_check_owner_first_authoritative, false, NULL },
+    { "perm.check_hostowner_override", test_perm_check_hostowner_override, false, NULL },
+    { "perm.in_group",                 test_perm_in_group,                 false, NULL },
+    { "perm.want_for_omode",           test_perm_want_for_omode,           false, NULL },
+    { "perm.wstat_policy",             test_perm_wstat_policy,             false, NULL },
+    { "perm.devramfs_enforced_real_metadata",
+                                       test_perm_devramfs_enforced_real_metadata, false, NULL },
+    { "perm.dev_flags",                test_perm_dev_flags,                false, NULL },
     { NULL, NULL, false, NULL },          // sentinel
 };
 

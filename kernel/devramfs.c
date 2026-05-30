@@ -393,6 +393,10 @@ static struct Spoor *devramfs_power(struct Spoor *c, int on) {
 struct Dev devramfs = {
     .dc       = 'm',
     .name     = "ramfs",
+    // A-2d: system-owned, world-readable boot FS -> rwx enforcement is live
+    // (the boot chain owns everything it touches; a non-system principal gets
+    // other-r/x but not write). See <thylacine/dev.h>::perm_enforced.
+    .perm_enforced = true,
 
     .reset    = devramfs_reset,
     .init     = devramfs_init,

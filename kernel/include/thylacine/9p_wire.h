@@ -492,6 +492,12 @@ struct p9_statfs {
 
 // Tgetattr request-mask convention (Linux v9fs STATX_*); the server may
 // return fewer fields than requested (its `valid` reports which it filled).
+// Individual field bits (a consumer that enforces against mode/uid/gid must
+// confirm the server actually filled them -- A-2d / A-2a F2 fail-closed).
+#define P9_GETATTR_MODE       0x00000001ull
+#define P9_GETATTR_NLINK      0x00000002ull
+#define P9_GETATTR_UID        0x00000004ull
+#define P9_GETATTR_GID        0x00000008ull
 #define P9_GETATTR_BASIC      0x000007FFull
 #define P9_GETATTR_ALL        0x00003FFFull
 
