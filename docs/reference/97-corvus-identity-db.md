@@ -228,23 +228,27 @@ that exercised the read-offset and partial-tail fixes.
 - The three cross-reboot fixes: Stratum `91ae5d8` (bdev partial-tail RMW + read
   alignment) + Thylacine `573b984` (corvus dir-fsync). F4 (read-helper scratch
   bound) lands in the Stratum close commit.
+- **Cross-reboot acceptance GREEN (2026-05-30):** `tools/test-cross-reboot.sh`
+  passes 3/3, first try, both boots. The long-standing mount-`STM_EBADTAG`
+  "blocker" was a build-harness stale-key footgun -- fixed Thylacine `b7066e4`
+  (the `build.sh pool` target now rebuilds the ramfs so `/system.key` tracks the
+  re-baked pool). NOT a corvus or read-path bug. See Known caveats +
+  `docs/DEBUGGING-PLAYBOOK.md` section 6.10.
 
 ## Known caveats / footguns
 
-- **Cross-reboot is INTERMITTENTLY BLOCKED upstream by a recurring stratumd-mount
-  `STM_EBADTAG` (re-opened 2026-05-29).** A-1b's own code is complete + correct,
-  but the boot path it rides on intermittently dies *before* corvus runs:
-  stratumd mounts, then `stm_stratumd_run` returns rc=-201 (`STM_EBADTAG`, AEAD
-  tag verification failed) reading the on-disk pool metadata back through
-  `bdev_thylacine`, exits before binding `/srv/stratum-fs`, and the orphaned
-  zombie trips an `EXTINCTION: wait_pid returned wrong pid` in kproc. This is the
-  same error family as the "AEGIS-256 corruption" believed fixed -- a
-  content-sensitive read-path correctness bug (fresh pool seed per re-bake
-  triggers it or not), NOT a timing flake. Tracked as the EBADTAG DFS (opener:
-  HVF accel + a chacha20 RNG fallback for fast deterministic repro; then bisect
-  `bdev_thylacine::op_read` partial/multi-sector handling vs the fs metadata read,
-  against `build/fixtures/REPRO-ebadtag-201/`). See the History section +
-  `docs/DEBUGGING-PLAYBOOK.md`.
+- **Build footgun (this WAS the year-long "EBADTAG corruption"; resolved
+  2026-05-30).** Re-baking the pool with a bare `tools/build.sh pool` regenerates
+  the random `system.key`, but the ramfs bakes `/system.key` in at `build_ramfs`
+  time -- so a stale ramfs key against a fresh pool makes stratumd mount with the
+  WRONG key and AEAD reject the first btree node (`STM_EBADTAG` -> `rc=-201` at
+  mount -> joey FATAL -> extinction). This wore the "AEGIS-256 corruption" mask
+  for ~a year; the "intermittency" was build-command history (failed after
+  `build.sh pool`, passed after `build.sh kernel`/`all`). Fixed `b7066e4` (the
+  `pool` target now rebuilds the ramfs); `build.sh kernel`/`all` always did.
+  Sanity check on any mount EBADTAG: `shasum build/fixtures/system.key
+  build/ramfs-src/system.key` -- if they differ, it is the key, not the bytes.
+  Full coda: `docs/DEBUGGING-PLAYBOOK.md` section 6.10.
 - **Dropped-wrap records are not pruned (audit R1 F3).** A user whose
   `hybrid.corvus` is missing/corrupt is dropped from the in-memory table on load
   but the identity.db row is NOT rewritten, so it persists + re-drops + re-logs
@@ -257,12 +261,17 @@ that exercised the read-offset and partial-tail fixes.
 - **Whole-pool Tfsync** (F5 above): do not "optimize away" the per-dir fsyncs --
   they are the forward-portable contract for a per-fid Tfsync.
 
-## History -- the three-bug masking stack (the "AEGIS-256 corruption")
+## History -- the masking stack behind the "AEGIS-256 corruption"
 
-A-1b's cross-reboot persistence was blocked for ~a year by what presented as
-content-sensitive "AEGIS-256 corruption" (#710/712/714/H1). It was three bugs in
-the disk-backed extent write+read-back path, all first exposed because
-`hybrid.corvus` is the first multi-chunk extent corvus writes AND reads back:
+A-1b's cross-reboot was blocked for ~a year by what presented as content-sensitive
+"AEGIS-256 corruption" (#710/712/714/H1). It was never one bug. The READ-BACK
+triplet below -- all first exposed because `hybrid.corvus` is the first
+multi-chunk extent corvus writes AND reads back -- was real and is fixed. But the
+recurring stratumd-MOUNT `STM_EBADTAG` that kept "re-opening" *afterward* was a
+FOURTH, separate cause: a build-harness stale-key footgun (`build.sh pool`
+re-baked the key without rebuilding the ramfs), root-caused + fixed `b7066e4` on
+2026-05-30 (see Known caveats above + `docs/DEBUGGING-PLAYBOOK.md` section 6.10).
+The read-back triplet:
 
 1. **bdev_thylacine `op_write` partial-tail clobber** (Stratum). A block backend
    transfers whole sectors; a non-sector-aligned extent write (4128 B) zero-padded

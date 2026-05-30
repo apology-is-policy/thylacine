@@ -6,9 +6,14 @@ spans the Thylacine<->Stratum boundary, or has already burned a prior session
 or two — **read this document before you start theorizing.** It exists because
 one bug class cost this project the better part of a year of intermittent
 hunting (issues #710, #712, #714, the "H1" investigation) under the wrong name
-("AEGIS-256 content-sensitive corruption"), and was then resolved in a single
-session once the method changed. The method is the transferable asset; the
-specific bug is just the worked example.
+("AEGIS-256 content-sensitive corruption"). It was never one bug: it was a
+*stack* of independent causes that all wore the same `STM_EBADTAG` mask, peeled
+one session at a time. Sections 1-6 document the read-back triplet. **But the
+recurring stratumd-MOUNT failure that kept "re-opening" after every "RESOLVED"
+was the sharpest lesson of all -- and it was not a corruption bug. Read the coda
+(section 6.10) before you trust any of this; it is where the method earns its
+keep.** The method is the transferable asset; the specific bugs are just the
+worked examples.
 
 We are building an OS and a filesystem from scratch. Bugs of this shape — a
 stack of independent defects that mask each other, surfacing only at a layer
@@ -286,6 +291,78 @@ Two domain invariants this bug taught, now load-bearing:
 
 ---
 
+## 6.10 Coda — the fourth cause: the recorded reproducer lied (resolved 2026-05-30)
+
+The triplet in sections 4-6 was real and is fixed. But the cross-reboot kept
+**re-opening with the identical `STM_EBADTAG`, now at stratumd's pool MOUNT** --
+*before* corvus or any read-back even runs. A 3rd session cornered it to "a
+stratumd-pattern corruption, silent to mallocng, between the byte-perfect read
+and the AEAD decrypt of a 128 KiB btree node," built two heap-torture binaries
+that both came back clean, preserved a failing pool at
+`build/fixtures/REPRO-ebadtag-201/`, and handed off "NOT fixed; instrument the
+read->decrypt window."
+
+A 4th session did exactly that -- and the answer was **not corruption at all.**
+
+**What the instrument found.** A heap-free probe (stack `snprintf` + `write(2)`,
+zero `malloc`, so it cannot perturb the allocator it observes) at the single
+decrypt chokepoint `stm_btree_node_decrypt`, run on BOTH the host and the VM
+against the same pool, showed **every node decoding byte-identical to the host
+reference across 23 boots** -- same ciphertext FNV, same tag bytes, same derived
+key. There was no corruption anywhere in the read->decrypt window. The VM that
+"failed deterministically" passed 23/23.
+
+**The reproducer was a lie.** `REPRO-ebadtag-201/` was a *mismatched pair*: a
+`failing-boot.log` stamped 18:05 (a pre-fix, mid-debugging build) bundled with a
+`pool.img` stamped 18:32 -- baked *after* the day's fix commits landed at 18:21.
+The pool+key were a matched, working set; the log was from a different epoch. A
+"deterministic reproducer" that passes N/N is not a reproducer.
+
+**The actual root cause.** `tools/build.sh`'s `pool` target re-bakes
+`build/fixtures/system.key` (libsodium-random, fresh per run) but did **not**
+rebuild the ramfs that bakes that key in at `/system.key`. So any caller that
+re-baked the pool via `build.sh pool` -- notably `tools/test-cross-reboot.sh`
+itself -- left the ramfs holding a **stale** key. The VM then mounted the *fresh*
+pool with the *wrong* key; stratumd derived the wrong metadata key; AEAD tag
+verification *correctly* rejected the first btree node -> `STM_EBADTAG` ->
+`run failed (rc=-201)` at mount. The "content-sensitive intermittency" was
+build-command HISTORY: it failed after `build.sh pool` and passed after
+`build.sh kernel`/`all` (which rebuild pool and ramfs together). Confirmed both
+directions -- `hash(fixtures key) != hash(ramfs key)` after `build.sh pool`,
+boot the mismatch -> `rc=-201`, rebuild the ramfs to match -> boot OK. Fix:
+`tools/build.sh` `b7066e4` couples `build_ramfs` to the `pool` target;
+`test-cross-reboot.sh` then passes 3/3.
+
+**The generalizable lessons -- the sharpest in this document:**
+
+1. **The build/test harness is part of the system under test.** A "year-long
+   content-sensitive memory corruption" was a shell-script ordering bug. When the
+   failure is at a key/crypto boundary, suspect the *key pipeline* -- provisioning,
+   propagation, staleness, who-rebuilds-what -- with the same rigor as the data
+   path. Hash the key at every hop; a one-line `shasum A != shasum B` ended a year.
+
+2. **A `MAC`/`AEAD` failure means wrong bytes OR wrong key/nonce -- never assume
+   "corruption."** The tell was visible the whole time: the Merkle check (over the
+   ciphertext) *passed*, then AEAD *failed*. Correct ciphertext + failing tag is
+   the signature of a *parameter* mismatch, not data damage. Split the two with an
+   instrument before you theorize about heap footers.
+
+3. **A preserved reproducer can lie -- verify provenance and re-derive from
+   scratch.** Re-confirm it still reproduces, check that its artifacts are from
+   one epoch (the log and the pool were 27 minutes and three fix-commits apart),
+   and prefer a *recipe* you can re-run over a frozen blob. The frozen blob had
+   already been overtaken by a fix when it was saved.
+
+4. **One mask, a stack of causes.** `STM_EBADTAG` wore *four* distinct root causes
+   across this year: op_write tail-clobber, the read-offset EINVAL, the #713
+   eret-window IRQ race, and finally this stale-key footgun. Every "RESOLVED" was
+   true for the cause it found and false for the next. **When the ghost returns,
+   it is a new bug wearing the old face -- re-derive from ground truth, every
+   time.** This is exactly the masking-bug-stack discipline of section 6.1, and it
+   does not stop just because a prior session sounded confident.
+
+---
+
 ## 7. Appendix — reproduction recipe
 
 ```sh
@@ -303,13 +380,25 @@ SF=build/host-stratum/src/cmd/stratum-fs/stratum-fs
 "$SF" -s /tmp/x.sock read /var/lib/corvus/users/<u>/hybrid.corvus | wc -c  # bytes readable? (EBADTAG => write corrupt)
 ```
 
+**Key-staleness footgun (section 6.10):** never re-bake the pool with a bare
+`tools/build.sh pool` and then boot without rebuilding the ramfs -- the ramfs
+bakes `/system.key` in, so a stale ramfs key against a fresh pool is a
+`STM_EBADTAG` at mount that looks *exactly* like corruption. As of `b7066e4` the
+`pool` target rebuilds the ramfs for you; `build.sh kernel`/`all` always did. A
+fast sanity check when a mount EBADTAGs: `shasum build/fixtures/system.key
+build/ramfs-src/system.key` -- if they differ, it is the key, not the bytes.
+
 Observability cheat-sheet: kernel = `uart_puts`/`uart_putdec`; stratumd
-main-thread `stderr` reaches console (worker threads do not); native procs =
+main-thread `stderr` reaches console AND the boot log via joey's fd-2 pipe
+(the mount path is main-thread, so its diagnostics surface); native procs =
 `t_putstr`.
 
 ---
 
-*Written 2026-05-29 after the A-1b cross-reboot close. The bug is real; so is the
-method. Full root-cause detail lives in the session memory
+*Written 2026-05-29 after the A-1b read-back close; coda (section 6.10) added
+2026-05-30 after the recurring mount-EBADTAG was root-caused as a build-harness
+stale-key footgun -- NOT corruption. The bugs are real; so is the method. Full
+root-cause detail lives in the session memory
 `bug_large_9p_write_srvconn_runtime.md`; the fixes are Stratum `91ae5d8` +
-Thylacine `573b984`.*
+Thylacine `573b984` (the read-back triplet) + Thylacine `b7066e4` (the stale-key
+harness fix).*

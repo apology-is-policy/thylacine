@@ -291,35 +291,37 @@ F2: confinement is cooperative (corvus chroots first), spawner-set-root is v1.x.
   persist/load flow is unchanged except `storage_root` is the handed capability,
   not a walked territory path.
 
-### A-1b · corvus identity DB + cross-reboot persistence *(CLOSED 2026-05-29)*
+### A-1b · corvus identity DB + cross-reboot persistence *(CLOSED 2026-05-29; cross-reboot blocker fully resolved 2026-05-30, `b7066e4`)*
 
 **LANDED + audit-CLEAN 2026-05-29 (2nd session).** corvus is the authoritative
 `id <-> name <-> groups` resolver with REAL on-disk persistence -- the first
 end-to-end SECRET-on-disk write/read-back path in the OS. boot1 creates michael +
 susan + groups + the AEGIS-256-wrapped keypair wraps; boot2 on the SAME pool
 loads `identity.db` ("already provisioned") + reloads each secret wrap from disk +
-AUTHs (UNWRAP DEK round-trip verified) -- **on a successful boot**. Wired into the
+AUTHs (UNWRAP DEK round-trip verified). Wired into the
 suite as a standing guard (`tools/test-cross-reboot.sh` / `make test-cross-reboot`;
 re-bake + 2 boots; hard-fails a missing persistence marker AND hard-fails the
 EBADTAG corruption below -- it does NOT retry-mask either).
 
-**KNOWN BLOCKER (re-opened 2026-05-29, 3rd session): the cross-reboot is
-INTERMITTENT, blocked UPSTREAM of corvus by a recurring stratumd-mount AEAD
-failure.** Ground truth from a failing boot log: stratumd mounts, prints "serving
-... on /srv/stratum-fs", then `stm_stratumd_run` returns **rc=-201 = STM_EBADTAG**
-(AEAD tag verification failed) reading the on-disk pool metadata back through
-`bdev_thylacine`; stratumd exits before binding -> joey's connect retries lapse ->
-joey exits 1 -> kproc reaps the orphan stratumd zombie -> `EXTINCTION: wait_pid
-returned wrong pid`. This is the SAME error family as the "AEGIS-256 corruption"
-the 2nd session declared fixed -- so that fix was INCOMPLETE. It is NOT a flake:
-EBADTAG = wrong bytes read (a read-path correctness bug); the intermittency tracks
-POOL CONTENT (each re-bake = fresh random seed), not host load. A-1b's own code
-(corvus DB + F1/F2) is fine; the blocker is at stratumd's mount. **NEXT = the
-EBADTAG DFS** (opener: HVF accel + a chacha20 RNG fallback so boots are fast +
-deterministic; then bisect the read path -- `bdev_thylacine::op_read` partial/
-multi-sector handling OR the fs metadata read -- against the preserved repro at
-`build/fixtures/REPRO-ebadtag-201/`). See `bug_large_9p_write_srvconn_runtime.md`
-(re-opened) + `docs/DEBUGGING-PLAYBOOK.md`.
+**BLOCKER RESOLVED 2026-05-30 (4th session): the recurring stratumd-mount
+`STM_EBADTAG` was a BUILD-HARNESS stale-key bug -- NOT corruption, NOT a read-path
+bug.** `tools/build.sh`'s `pool` target re-baked `build/fixtures/system.key`
+(libsodium-random per run) WITHOUT rebuilding the ramfs that bakes it in at
+`/system.key`. So `tools/test-cross-reboot.sh`'s `build.sh pool` re-bake (line
+119) left the ramfs holding a STALE key; the VM mounted the FRESH pool with the
+WRONG key; stratumd derived the wrong metadata key; AEAD *correctly* rejected the
+first btree node -> `rc=-201` at mount -> joey FATAL -> extinction. The "content
+intermittency" was build-command HISTORY: it failed after `build.sh pool` and
+passed after `build.sh kernel`/`all` (which rebuild the ramfs together with the
+pool -- so every kernel-rebuild boot passed). Ground truth: 23-boot
+decrypt-chokepoint instrumentation showed every node BYTE-IDENTICAL to a host
+reference (no corruption in the read->decrypt window); `hash(fixtures key) !=
+hash(ramfs key)` after `build.sh pool`; mismatch boots -> `rc=-201`, matched
+boots -> OK. **Fixed `b7066e4`** (the `pool` target now runs `build_ramfs`);
+**`tools/test-cross-reboot.sh` passes 3/3, first try, both boots.** The preserved
+`build/fixtures/REPRO-ebadtag-201/` was a MISMATCHED pair (pre-fix failing log +
+post-fix passing pool) -- not a live reproducer. Full coda:
+`docs/DEBUGGING-PLAYBOOK.md` section 6.10 + `bug_large_9p_write_srvconn_runtime.md`.
 
 - **On the A-1.7 substrate:** identity.db + `users/<name>/hybrid.corvus` live
   inside the handed `storage_root` cap (corvus chrooted to `/var/lib/corvus`) on
