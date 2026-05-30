@@ -261,6 +261,23 @@ if [[ -n "$snapshot" ]]; then
     echo "Snapshot restore not yet implemented (Phase 5+ deliverable)." >&2
 fi
 
+# Hardware-acceleration toggle. Default tcg (portable + deterministic; -cpu max
+# emulates the full v8.5 feature set incl. RNDR). THYLACINE_ACCEL=hvf uses the
+# macOS Hypervisor.framework on Apple Silicon for a much faster boot -- but the
+# guest then sees the HOST CPU's real features via -cpu host: Apple cores have
+# LSE+PAC+BTI but NOT FEAT_RNG/RNDR, so the kernel RNG falls back (DTB seed drives
+# KASLR + the stack canary; SYS_GETRANDOM returns -1 until the software-RNG
+# fallback lands). THYLACINE_CPU overrides the -cpu model explicitly.
+accel="${THYLACINE_ACCEL:-tcg}"
+case "$accel" in
+    hvf) cpu="${THYLACINE_CPU:-host}" ;;
+    *)   cpu="${THYLACINE_CPU:-max}"  ;;
+esac
+# GIC version. Default 3 (QEMU virt's modern default; the kernel autodetects
+# v2-vs-v3 from DTB). THYLACINE_GIC=2 forces GICv2 -- a probe path for HVF, whose
+# emulated GICv3 distributor MMIO can trip an `isv` data-abort assertion.
+gicv="${THYLACINE_GIC:-3}"
+
 # Canonical QEMU flags per TOOLING.md §3.
 #
 # disk_flags (P4-Ic5b2) comes BEFORE virtio-rng-device because QEMU
@@ -268,8 +285,8 @@ fi
 # -device lands at slot 31. virtio-blk-probe scans 0..31 either way;
 # the ordering keeps slot 31 conventionally the "primary device."
 exec qemu-system-aarch64 \
-    -machine virt,gic-version=3 \
-    -cpu max \
+    -machine "virt,gic-version=$gicv,accel=$accel" \
+    -cpu "$cpu" \
     -smp "$cpus" \
     -m "$mem_mib" \
     -kernel "$KERNEL_BIN" \
