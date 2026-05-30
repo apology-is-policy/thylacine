@@ -474,10 +474,19 @@ so the `PRINCIPAL_SYSTEM` boot chain owns everything it touches (owner-rwx, no
 brick), while a non-system principal gets `other-r`+`other-x` (read+traverse) but
 not write. This is **testable today** via A-1a's `CAP_SET_IDENTITY` (joey spawns a
 child as `principal_id=1000` and proves denied-write / allowed-read) — **not
-blocked on login (A-5)**. On **dev9p** the file's uid/gid is the *connection*
-identity (`PRINCIPAL_SYSTEM` until per-user stratumd), so Stratum enforcement is
-**coarse (single connection identity) until A-3** — the mechanism is airtight; the
-per-user fidelity completes at A-3.
+blocked on login (A-5)**. On **dev9p**, rwx enforcement is **DEFERRED to A-3**
+(user-signed-off 2026-05-30). Ground truth: Stratum's host-bake stamps pool entries
+owned by the *host* uid (`stratum-fs` writes files `0644` / dirs `0755`; the server
+stamps owner = the `SO_PEERCRED` auth_uid, `server.c:2019`), and the Thylacine boot
+chain runs as `PRINCIPAL_SYSTEM` *without* `CAP_HOSTOWNER` — so under uniform
+enforcement joey-as-*other* cannot write the pool, and the post-pivot creates
+(`/var/lib/corvus`, the cross-reboot `susan`) would be **DENIED → boot brick**.
+Meaningful dev9p enforcement structurally requires A-3 (per-user stratumd + F-4
+identity presentation + `n_uname` trust reconciling the pool's stored uids with the
+runtime identity). So at v1.0 dev9p stays **handle-RIGHT-gated only** (capability
+axis — status quo, no regression); the identity-axis rwx activates at A-3.
+Mechanism: the chokepoint is **Dev-gated by a `Dev.perm_enforced` flag**
+(`devramfs` = true, `dev9p` = false; the A-3 activation is a one-line flip).
 
 **Folds + flags.** A-2b's create-check (W+X on parent) lands here. A-2a audit
 **F2** (gate `dev9p_stat_native` on the `Rgetattr` valid mask) is closed here — the
@@ -1297,7 +1306,11 @@ int  perm_check(const struct Proc *p, const struct t_stat *st, unsigned want);
     // (p->caps & CAP_HOSTOWNER) short-circuits to 0 -- the DAC-override.
 ```
 
-**Enforcement-point insertions** (`kernel/syscall.c`):
+**Enforcement-point insertions** (`kernel/syscall.c`). Every insertion is gated on
+the Dev's `perm_enforced` flag (the dev9p deferral, §3.7.1: `devramfs` = true,
+`dev9p` = false). When the flag is false the chokepoint **skips the rwx check
+entirely** (status-quo handle-RIGHT gating) -- so at v1.0 only devramfs access is
+enforced; the A-3 dev9p activation is the one-line `dev9p.perm_enforced = true` flip.
 - `sys_walk_open_handler`: after `src` resolves + before `dev->walk`,
   `perm_check(p, &src_stat, PERM_X)` on `src` (search the directory). After the
   walk + before `dev->open`, `perm_check(p, &nc_stat, want(omode))` on the target
@@ -1311,7 +1324,10 @@ int  perm_check(const struct Proc *p, const struct t_stat *st, unsigned want);
   (owner AND `proc_in_group(p, new_gid)`) or `CAP_HOSTOWNER`. The policy gate runs
   BEFORE the `dev->wstat_native` (Tsetattr) call. **Closes A-2a F2 in the same
   pass** (gate `dev9p_stat_native` on the `Rgetattr` valid mask so the owner read
-  is trustworthy).
+  is trustworthy). The wstat policy is **also gated on `perm_enforced`** -- at v1.0
+  it is dormant (devramfs `wstat_native` is NULL -> `SYS_WSTAT` returns -1 before
+  the policy ever runs; dev9p is deferred), unit-tested via the policy helper, and
+  activates with dev9p at A-3.
 
 **Where the stat comes from.** `spoor_stat_native(c, &st)` (the A-2a read side):
 `dev9p` → `Tgetattr`; `devramfs` → the in-kernel table (system-owned, world-r). A
@@ -1333,9 +1349,12 @@ syscall layer is the only enforced surface, per §3.7's chokepoint model).
 - wstat policy: owner chmods own file (allow); non-owner chmods (deny); owner
   chowns-away (deny); `CAP_HOSTOWNER` chowns (allow); owner chgrps to own group
   (allow) / to a foreign group (deny).
-- dev9p loopback: enforcement reads the mocked `Tgetattr` mode + allows/denies.
+- dev9p deferral: a unit asserts `dev9p`'s `perm_enforced == false` (the A-3
+  activation point) -- a dev9p access is NOT rwx-gated at v1.0 (handle-RIGHT only).
 - joey boot regression: the existing `/system.key` probe asserts the system
-  principal still reads it post-enforcement (guard against bricking the boot chain).
+  principal still reads it post-enforcement (guard against bricking the boot chain);
+  the post-pivot dev9p creates (`/var/lib/corvus`, `susan`) still succeed (dev9p
+  unenforced at v1.0), proven by the existing corvus bringup + cross-reboot tests.
 
 **Audit-bearing** (privilege boundary; the CLAUDE.md + ARCH §25.4 row lands in this
 scripture commit). The rwx layer is the first real exercise of I-22's enforcement

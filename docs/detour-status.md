@@ -386,8 +386,14 @@ post-fix passing pool) -- not a live reproducer. Full coda:
   **closes A-2a audit F2** (gate `dev9p_stat_native` on the `Rgetattr` valid mask);
   A-2c mount-cape stays a seam; A-4 splits a finer `fs-admin` clearance
   (`CAP_DAC_OVERRIDE`+`CAP_CHOWN`) additively. **Testable now** via
-  `CAP_SET_IDENTITY` (devramfs deny/allow); coarse on dev9p (connection identity)
-  until A-3.
+  `CAP_SET_IDENTITY` (devramfs deny/allow). **dev9p enforcement DEFERRED to A-3**
+  (user-signed-off 2026-05-30): ground truth shows uniform dev9p enforcement bricks
+  the boot (host-bake stamps pool entries host-uid-owned 0644/0755; the
+  `PRINCIPAL_SYSTEM` boot chain has no `CAP_HOSTOWNER`, so as *other* it cannot
+  write the pool -> post-pivot creates `/var/lib/corvus` + `susan` denied). Gated by
+  a new `Dev.perm_enforced` flag (devramfs=true, dev9p=false; A-3 = one-line flip);
+  dev9p stays handle-RIGHT-gated only at v1.0. The wstat ownership-change policy is
+  also `perm_enforced`-gated (dormant + unit-tested at v1.0).
 - **Depends:** A-1. Interlocks with Stop C FS-mutation (this *is* create+setattr).
 - **Audit:** the create + setattr 9P-write surface (AEGIS-adjacent) -> full round.
 - **Tests:** create stamps owner=caller + group=parent; chmod/chown round-trip;
