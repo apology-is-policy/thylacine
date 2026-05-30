@@ -244,6 +244,20 @@ Post-Phase 8. Pi 5 chosen because:
 
 The delta from QEMU `virt` to Pi 5 bare metal: EL2→EL1 drop sequence, mailbox framebuffer driver, RP1 Ethernet driver for network boot. Estimated: one focused sprint after Phase 8 stabilizes. See `ROADMAP.md §12.1`.
 
+> **Reconciled 2026-05-30 by the Lazarus portability arc (`docs/PORTABILITY.md`).**
+> Two corrections from the HW-accel assessment: (1) "GIC-400 identical to QEMU
+> `virt`" is **wrong** — QEMU `virt` is **GICv3**; GIC-400 (both Pi 4/400 and
+> Pi 5) is **GICv2** (a distinct CPU-interface: MMIO `GICC_*`, not `ICC_*`
+> sysregs). The kernel's GICv3-only driver currently extincts on v2; a GICv2 path
+> is owed (Lazarus W2). (2) The **first board is reconciled to Raspberry Pi 400**
+> (Cortex-A72, ARMv8.0-A) and the **compile target to the v8.0 floor** — the
+> strict common subset of A72 / A76 (Pi 5) / Apple M-series, so one binary runs
+> on QEMU-TCG, QEMU-HVF-on-Apple, and bare metal. Pi 5 (A76/v8.2) is covered by
+> the same v8.0 base as a secondary target. The hardening posture (PAC/BTI/LSE)
+> moves to **runtime-conditional** (best-effort on capable hardware) — see
+> `PORTABILITY.md §4` + the §28 follow-up owed at Lazarus W1. **Sequencing: after
+> the identity detour (A-2..A-5).**
+
 ### 4.5 RISC-V (long horizon, v2.x)
 
 Post-v1.0. Target: first RVA23-compliant SBC with PCIe and NVMe (Milk-V Jupiter 2 or equivalent). The kernel port from ARM64 to RISC-V is mechanical above `arch/`: swap GIC for PLIC, ARM CSRs for RISC-V CSRs, ARM generic timer for SBI timer. All territory, scheduler, 9P, BURROW, and handle code is architecture-independent and transfers without modification.
