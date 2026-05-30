@@ -56,12 +56,21 @@ struct Thread {
     // cpu_switch_context call saves into it.
     struct Context     ctx;
 
-    // Kernel stack. 16 KiB (THREAD_KSTACK_SIZE) allocated via alloc_pages
-    // at order=2. kstack_base is the low address; ctx.sp is set to
-    // kstack_base + kstack_size on thread_create (initial top of stack).
+    // Kernel stack. 16 KiB usable (THREAD_KSTACK_SIZE) + 16 KiB guard,
+    // allocated as one 32 KiB order-3 chunk via alloc_pages; the bottom
+    // THREAD_KSTACK_GUARD_PAGES are mapped no-access. kstack_base is the
+    // LOW address (guard base); ctx.sp is set to kstack_base +
+    // THREAD_KSTACK_TOTAL_SIZE (the top) on thread_create and grows down
+    // through the 16 KiB usable region, faulting into the guard on overflow.
     //
-    // No guard page below the stack at P2-A — Phase 2 close adds the
-    // per-CPU exception stack + per-thread guard page.
+    // The per-thread guard page IS present (P2-Dc). A dedicated per-CPU
+    // exception/IRQ stack is NOT implemented, so a kernel-mode IRQ builds
+    // its frame on the interrupted thread's own kstack (vectors.S: "no
+    // separate per-CPU exception stack"). See the #788 deep-dive
+    // (DEBUGGING-PLAYBOOK 6.12): a narrow SMP timing race can land a
+    // corrupted SP in a guard page ("kernel stack overflow" symptom);
+    // normal max kernel thread depth is only ~6 KiB. The dedicated IRQ/
+    // overflow stack is the documented future hardening.
     void              *kstack_base;
     size_t             kstack_size;
 

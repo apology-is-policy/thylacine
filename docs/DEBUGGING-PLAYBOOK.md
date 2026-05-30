@@ -422,6 +422,60 @@ they are):
 
 ---
 
+## 6.12 The two 6.11 flakes, resolved (worked example, 2026-05-30)
+
+The two symptoms 6.11 caught being dismissed were deep-dived FIRST the next
+session. **Both were real; neither was a flake.** The hunt is a clean worked
+example of 6.11's protocol + three reusable lessons.
+
+**#789 boot variance — proven HOST-side (benign), not "normal QEMU".** Built a
+phase-timestamping harness (`build/flake789/harness.py`) and ran the idle-host
+distribution: BIMODAL with a clean ~7 s cliff (19-26 s | 33-37 s). Per 6.11 the
+bimodal-vs-smooth question is decisive, so the cliff alone said "real, not
+jitter." Localized it: the kernel phase (boot + 629 tests + irq-bench) is
+CONSTANT ~11 s (1-CPU-bound); the entire swing is the post-suite userspace
+phase — the only part that spreads work across all 4 vCPUs. Decisive
+discriminators: `-smp 1` (one vCPU thread) → 0.39 s spread; `taskpolicy -b`
+(force the throttled/E-core tier) → 170-220 s; default `-smp 4` → bimodal. Root
+cause: **macOS placing QEMU's 4 TCG vCPU threads across the Apple-Silicon M2's
+4 P-cores vs 4 E-cores** — an E-core in the mix drags the synchronized guest
+~2.5x. Host-scheduling artifact, not a guest bug. (Bonus: the committed
+BOOT_TIMEOUT comment blaming "stratumd worker pthreads" was wrong; the real
+constant long pole is the irq-bench kernel-side busy-spin.)
+
+**#788 rfork_stress kernel-stack-overflow — real bug, but the obvious fix was
+REFUTED.** Reproduced 3/15 on a fully idle host (`EXTINCTION: kernel stack
+overflow` inside `proc.rfork_stress_1000`). "KASLR" doubly refuted (kstack is
+buddy-allocated). Measured: boot stack uses 4.5 KiB (ruled out); deepest
+surviving per-thread kstack ~6 KiB; no deep-growth code path exists (`exits()`
+shallow; IRQ-nesting CODE-refuted — `sched()` runs IRQ-masked). The obvious fix
+is "bump the 16 KiB stack." The **forcing experiment killed it**: shrink the
+kstack 16→8 KiB; if it were depth, an 8 KiB stack would overflow MORE (a chain
+reaching >16 must pass through 8). Result: 8 KiB → **0/15** overflows. Smaller
+stack → FEWER overflows REFUTES depth. Combined with extreme timing-fragility
+(fires only on the exact clean build, 3/15; ANY source change → 0/~100), the
+"stack overflow" is a SYMPTOM: a corrupted SP/pointer landing in a guard page
+under a narrow SMP timing race — same CLASS as #713. **Fix = find-the-race
+(GDB hardware-watchpoint on the guard pages, which preserves the binary's
+timing), NOT bump the stack (would mask).** Deferred to a dedicated session.
+
+**Three reusable lessons:**
+1. **Instrumentation detunes a timing race.** Adding probes (or even changing a
+   constant → recompile) shifts code layout and closes a narrow window: 0/~100
+   instrumented vs 3/15 clean. When a bug vanishes the instant you instrument,
+   that fragility IS the finding (it is timing, not depth/size). To observe such
+   a bug, use a tool that doesn't change the binary (GDB hardware watchpoint).
+2. **A "size/depth" symptom that gets RARER as you shrink the resource is not a
+   size bug.** Let the forcing experiment run the wrong direction — it falsifies
+   the easy fix cheaply, before you commit a masking patch.
+3. **Verify the measurement instrument, not just the target.** A probe here
+   reported a fully-UNUSED stack as fully-USED (high-water cursor init'd to the
+   low end, not the high end). Caught only by SYMBOLIZING the alarming
+   "deepest tid=5" — it was a thread created+freed without ever running. The
+   "beware self-tests that mask the bug" rule (6.5) applies to probes too.
+
+---
+
 ## 7. Appendix — reproduction recipe
 
 ```sh

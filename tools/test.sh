@@ -44,29 +44,43 @@ esac
 KERNEL_ELF="$KERNEL_BUILD/thylacine.elf"
 LOG_FILE="$BUILD_DIR/test-boot.log"
 
-BOOT_TIMEOUT="${BOOT_TIMEOUT:-45}"          # seconds -- wallclock max,
+BOOT_TIMEOUT="${BOOT_TIMEOUT:-90}"          # seconds -- wallclock max,
                                             # not a fixed wait. test.sh
                                             # exits early on banner or
                                             # extinction (polls log every
-                                            # 0.1 s). Default 45 s gives
-                                            # ~2x headroom over the
-                                            # observed 16-26 s end-to-end
-                                            # boot post-16c spin-elimination.
-                                            # Variance is bimodal (~16 s
-                                            # "fast" vs ~23 s "slow") and
-                                            # appears on the SAME pool.img;
-                                            # most likely cause is QEMU TCG
-                                            # thread-scheduling non-
-                                            # determinism on the host (4
-                                            # vCPU emulation; stratumd's
-                                            # worker pthreads compete for
-                                            # emulation time with joey's
-                                            # retry path). NOT driven by
-                                            # pool RNG content (which a
-                                            # PRESERVE=1 A/B experiment
-                                            # falsified). UBSan needs
-                                            # ~120-300 s; set BOOT_TIMEOUT
-                                            # =300 (or more) for that
+                                            # 0.1 s).
+                                            #
+                                            # Boot-time variance (deep-dived
+                                            # 2026-05-30; see DEBUGGING-
+                                            # PLAYBOOK 6.12): the idle-host
+                                            # distribution is BIMODAL (~19-26 s
+                                            # "fast" | ~33-37 s "slow", clean
+                                            # ~7 s gap). PROVEN cause = macOS
+                                            # placing QEMU's 4 TCG vCPU
+                                            # threads across the Apple-Silicon
+                                            # P-cores vs E-cores (an E-core in
+                                            # the mix drags the whole
+                                            # synchronized guest ~2.5x). NOT
+                                            # stratumd, NOT pool RNG. Proven
+                                            # by: -smp 1 -> 0.39 s spread;
+                                            # taskpolicy -b (force E) -> 170-
+                                            # 220 s; default -smp 4 ->
+                                            # bimodal. The constant ~10 s long
+                                            # pole is the irq-bench kernel-
+                                            # side busy-spin (NOT the
+                                            # variance). 90 s default clears
+                                            # the slow mode + moderate
+                                            # concurrent host load (the
+                                            # original >45 s timeouts were
+                                            # slow-mode + a concurrent build/
+                                            # agent). For fast+stable local
+                                            # iteration use THYLACINE_TEST_CPUS
+                                            # =1 (loses in-kernel SMP
+                                            # coverage). macOS has no upward
+                                            # "pin to P-cores" knob
+                                            # (taskpolicy only clamps DOWN).
+                                            # UBSan needs ~120-300 s; set
+                                            # BOOT_TIMEOUT=300 for that
                                             # pipeline explicitly.
 BOOT_MARKER="Thylacine boot OK"
 EXTINCTION_MARKER="EXTINCTION:"             # per TOOLING.md §10 ABI
