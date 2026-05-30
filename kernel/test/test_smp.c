@@ -347,12 +347,20 @@ void test_smp_work_stealing_smoke(void) {
     TEST_ASSERT(any_secondary_ran,
         "no secondary CPU observed work-stealing (try_steal not pulling?)");
 
-    // Cleanup. After exit signal, each thread sleeps on its dedicated
-    // Rendez (state SLEEPING, not in any run tree). thread_free
-    // accepts SLEEPING threads. The Rendez waiter slot still points
-    // at the thread but the test never wakeup()s — no dangling deref
-    // since the Rendez memory is also static-test-scope and unused
-    // after the test returns.
+    // Cleanup. After the exit signal each worker sleeps on its dedicated
+    // Rendez (state SLEEPING, not in any run tree). The Rendez waiter slot
+    // still points at the thread but the test never wakeup()s — no dangling
+    // deref since the Rendez memory is static-test-scope and unused after.
+    //
+    // #788: a worker can be SLEEPING but still on_cpu==true — its own sched()
+    // is mid-cpu_switch_context on the secondary, physically on the worker's
+    // kstack — when this CPU0 drain (timer_busy_wait_ticks, CPU0-measured)
+    // elapses but the secondary is host-descheduled (E-core; #789). Freeing
+    // such a worker was a use-after-free that surfaced ~4 tests later as a
+    // bogus "kernel stack overflow" in rfork_stress (buddy-LIFO recycle of the
+    // freed slot+kstack while the secondary's late register-save corrupted
+    // it). thread_free now gates on on_cpu (kernel/thread.c) and waits out the
+    // in-flight switch, so this free is safe without an explicit spin here.
     for (unsigned i = 0; i < cpus; i++) {
         thread_free(g_steal_test_threads[i]);
         g_steal_test_threads[i] = NULL;

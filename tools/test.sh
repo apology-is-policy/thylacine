@@ -73,12 +73,17 @@ BOOT_TIMEOUT="${BOOT_TIMEOUT:-90}"          # seconds -- wallclock max,
                                             # concurrent host load (the
                                             # original >45 s timeouts were
                                             # slow-mode + a concurrent build/
-                                            # agent). For fast+stable local
-                                            # iteration use THYLACINE_TEST_CPUS
-                                            # =1 (loses in-kernel SMP
-                                            # coverage). macOS has no upward
-                                            # "pin to P-cores" knob
-                                            # (taskpolicy only clamps DOWN).
+                                            # agent). THYLACINE_TEST_CPUS=1 is
+                                            # fast + has no boot-time variance,
+                                            # but DO NOT rely on it for CI yet:
+                                            # at -smp 1 joey exits non-zero in
+                                            # ~45% of boots (a separate smp1-
+                                            # specific bug, task #791) AND it
+                                            # loses in-kernel SMP coverage.
+                                            # macOS has no upward "pin to
+                                            # P-cores" knob (taskpolicy only
+                                            # clamps DOWN), so -smp 4 + this
+                                            # 90 s timeout is the CI default.
                                             # UBSan needs ~120-300 s; set
                                             # BOOT_TIMEOUT=300 for that
                                             # pipeline explicitly.

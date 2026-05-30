@@ -455,20 +455,54 @@ reaching >16 must pass through 8). Result: 8 KiB → **0/15** overflows. Smaller
 stack → FEWER overflows REFUTES depth. Combined with extreme timing-fragility
 (fires only on the exact clean build, 3/15; ANY source change → 0/~100), the
 "stack overflow" is a SYMPTOM: a corrupted SP/pointer landing in a guard page
-under a narrow SMP timing race — same CLASS as #713. **Fix = find-the-race
-(GDB hardware-watchpoint on the guard pages, which preserves the binary's
-timing), NOT bump the stack (would mask).** Deferred to a dedicated session.
+under a narrow SMP timing race — same CLASS as #713. (Hindsight caveat: the
+8 KiB result ALONE is confounded — shrinking the stack also recompiles, so it
+cannot by itself refute depth; the un-confounded probe is next.)
 
-**Three reusable lessons:**
-1. **Instrumentation detunes a timing race.** Adding probes (or even changing a
+**RESOLVED (same session, by audit + a NON-recompiling probe — no GDB needed).**
+The decisive move was the `-smp` discriminator: run the BYTE-IDENTICAL clean
+binary at `-smp 4/2/1` — vary only a QEMU flag, never the binary, so the timing
+window survives. Result: stack-overflow **2/20 (smp4), 1/20 (smp2), 0/20
+(smp1)** — it NEEDS a secondary CPU. In parallel a focused soundness prosecutor
+(Opus subagent) found the exact race: **`thread_free()` gates on thread STATE
+but not `on_cpu`**, so `test_smp_work_stealing_smoke` frees a worker that is
+`SLEEPING` but still `on_cpu==true` — its own `sched()` is mid-
+`cpu_switch_context` on a secondary that the host descheduled onto an E-core
+(the #789 substrate is *why* the window is wide enough to lose the race). The
+freed SLUB slot + order-3 kstack are buddy-LIFO-recycled by `rfork_stress` ~4
+tests later (the "work_stealing_smoke precedes the overflow" fingerprint in all
+5 logs); the stalled secondary's late register-save corrupts the recycled
+thread's ctx → wild SP → guard fault. A **use-after-free**, not depth, not an
+IRQ-stack issue. **Fix = an `on_cpu` gate in `thread_free`** (mirror of the
+audited `wait_pid` reap spin); bumping the stack would have masked it. The
+R5-H F76 fix had closed only the RUNNING flavor of this same "free a thread mid-
+cpu_switch_context" race; this was the SLEEPING/EXITING-but-on_cpu flavor.
+Verification footgun: the fix can't be confirmed by "rebuild → overflow gone"
+(the rebuild detunes the window regardless) — confirmation is the root-cause
+triple-lock (code + the all-5-logs fingerprint + smp1→0) + correctness by
+construction (the gate is a no-op when `on_cpu` is false, the canonical wait
+when true), with a counter that flags the window if it is ever hit at runtime.
+
+**Four reusable lessons:**
+1. **Vary the RUNTIME, not the binary.** The probe that broke #788 open changed
+   only a QEMU flag (`-smp 4/2/1`) on the byte-identical clean binary — so the
+   timing window survived (unlike every recompile). smp4 2/20 → smp1 0/20 proved
+   "needs a secondary CPU," which collapsed the search to the SMP scheduler and
+   let a focused audit name the exact `thread_free`/`on_cpu` race. When a bug is
+   too fragile to instrument, the FIRST move is a non-recompiling runtime knob
+   (cpu count, accel, memory, clock) that can still shift the *category* of cause
+   — it resolved #788 without ever needing to observe the fault directly.
+2. **Instrumentation detunes a timing race.** Adding probes (or even changing a
    constant → recompile) shifts code layout and closes a narrow window: 0/~100
    instrumented vs 3/15 clean. When a bug vanishes the instant you instrument,
-   that fragility IS the finding (it is timing, not depth/size). To observe such
-   a bug, use a tool that doesn't change the binary (GDB hardware watchpoint).
-2. **A "size/depth" symptom that gets RARER as you shrink the resource is not a
+   that fragility IS the finding (it is timing, not depth/size). To OBSERVE such
+   a bug you need a tool that doesn't change the binary (GDB hardware watchpoint).
+3. **A "size/depth" symptom that gets RARER as you shrink the resource is not a
    size bug.** Let the forcing experiment run the wrong direction — it falsifies
-   the easy fix cheaply, before you commit a masking patch.
-3. **Verify the measurement instrument, not just the target.** A probe here
+   the easy fix cheaply, before you commit a masking patch. (Caveat: a shrink is
+   also a recompile, so on a timing race read it alongside a non-recompiling
+   probe, not alone.)
+4. **Verify the measurement instrument, not just the target.** A probe here
    reported a fully-UNUSED stack as fully-USED (high-water cursor init'd to the
    low end, not the high end). Caught only by SYMBOLIZING the alarming
    "deepest tid=5" — it was a thread created+freed without ever running. The

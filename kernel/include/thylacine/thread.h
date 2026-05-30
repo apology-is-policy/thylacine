@@ -63,14 +63,17 @@ struct Thread {
     // THREAD_KSTACK_TOTAL_SIZE (the top) on thread_create and grows down
     // through the 16 KiB usable region, faulting into the guard on overflow.
     //
-    // The per-thread guard page IS present (P2-Dc). A dedicated per-CPU
-    // exception/IRQ stack is NOT implemented, so a kernel-mode IRQ builds
-    // its frame on the interrupted thread's own kstack (vectors.S: "no
-    // separate per-CPU exception stack"). See the #788 deep-dive
-    // (DEBUGGING-PLAYBOOK 6.12): a narrow SMP timing race can land a
-    // corrupted SP in a guard page ("kernel stack overflow" symptom);
-    // normal max kernel thread depth is only ~6 KiB. The dedicated IRQ/
-    // overflow stack is the documented future hardening.
+    // The per-thread guard page IS present (P2-Dc). Normal max kernel thread
+    // depth is only ~6 KiB; a "kernel stack overflow" during rfork_stress was
+    // NOT honest depth -- it was the #788 use-after-free (thread_free freeing
+    // a SLEEPING-but-still-on_cpu thread whose sched() was mid-
+    // cpu_switch_context on a host-stalled secondary -> buddy-LIFO recycle of
+    // the slot+kstack -> the stalled CPU's late register-save corrupts the
+    // recycled thread's ctx.sp -> wild SP faults in its own guard). Fixed by
+    // the on_cpu gate in thread_free (DEBUGGING-PLAYBOOK 6.12). Separately,
+    // a dedicated per-CPU exception/IRQ stack is still NOT implemented (a
+    // kernel IRQ builds its frame on the interrupted thread's own kstack);
+    // that is unrelated to #788 and remains a documented future hardening.
     void              *kstack_base;
     size_t             kstack_size;
 

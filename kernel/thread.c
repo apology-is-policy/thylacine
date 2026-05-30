@@ -48,6 +48,16 @@ static struct Thread     *g_kthread;
 static u32                g_next_tid = 0;
 static u64                g_thread_created;
 static u64                g_thread_destroyed;
+// #788: count of thread_free calls that had to spin for an in-flight
+// cpu_switch_context away from the victim (on_cpu==true at entry). >0 proves
+// the SLEEPING/EXITING-but-still-on_cpu free window is real + the gate caught
+// it. Diagnostic stat; read via thread_free_oncpu_waits().
+static u64                g_thread_free_oncpu_waits;
+
+u64 thread_free_oncpu_waits(void);
+u64 thread_free_oncpu_waits(void) {
+    return __atomic_load_n(&g_thread_free_oncpu_waits, __ATOMIC_RELAXED);
+}
 
 // Allocate the next monotonic tid + extinct on INT_MAX overflow. The
 // overflow path is unreachable at v1.0 thread counts (< 10^5 in any
@@ -447,6 +457,37 @@ void thread_free(struct Thread *t) {
     // here. If state is RUNNING at this point, we lost the race.
     if (t->state == THREAD_RUNNING)
         extinction("thread_free: peer CPU transitioned t to RUNNING between gate and walk");
+
+    // #788: wait for any in-flight cpu_switch_context AWAY from t to finish
+    // before reclaiming its Thread slot + kstack. The state gates above prove
+    // t will not be PICKED again (not RUNNING; removed from every run tree by
+    // the walk) -- but a thread that just went SLEEPING or EXITING can still
+    // be on_cpu==true: t's OWN sched() is mid-flight on a peer CPU, physically
+    // executing on t's kstack and about to do the register-SAVE half of
+    // cpu_switch_context into t->ctx. on_cpu is cleared only by the
+    // destination CPU's resume frame AFTER that switch completes (sched.c
+    // prev_to_clear_on_cpu). The R5-H F76 re-check above closed the RUNNING
+    // flavor of this race (RUNNABLE->RUNNING via a peer pick) but NOT the
+    // SLEEPING/EXITING-but-still-on_cpu flavor. Freeing here returns t's SLUB
+    // slot + order-3 kstack to the allocators while the peer is still writing
+    // them: a buddy-LIFO recycle (the very next rfork's thread_create) aliases
+    // t's slot/kstack, and the peer's stale register-save corrupts the
+    // recycled thread's ctx (sp/lr/callee-saved) -> the recycled thread
+    // resumes onto a wild SP and faults in its own guard ("kernel stack
+    // overflow"). That is the #788 race: SMP-only (needs a secondary running
+    // the freed thread -- 0/20 at -smp 1 vs 2/20 at -smp 4), ~10-20% on the
+    // exact clean binary, riding the #789 E-core host-stall that widens the
+    // SLEEPING..on_cpu-cleared window past the caller's drain. on_cpu is the
+    // canonical "stack/ctx still in use" signal; gate on it. Mirrors the
+    // reap-path spin in wait_pid (proc.c). thread_free is always called
+    // lock-free, so the spin cannot deadlock; it is bounded by the single
+    // in-flight switch (the peer always resumes and clears on_cpu).
+    if (__atomic_load_n(&t->on_cpu, __ATOMIC_ACQUIRE)) {
+        __atomic_fetch_add(&g_thread_free_oncpu_waits, 1u, __ATOMIC_RELAXED);
+        while (__atomic_load_n(&t->on_cpu, __ATOMIC_ACQUIRE)) {
+            __asm__ __volatile__("yield" ::: "memory");
+        }
+    }
 
     thread_unlink_from_proc(t);
 

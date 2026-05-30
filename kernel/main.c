@@ -515,6 +515,21 @@ void boot_main(void) {
     uart_putdec(timer_get_ticks());
     uart_puts(" (kernel breathing)\n");
 
+    // #788: count of thread_free calls that had to wait out an in-flight
+    // cpu_switch_context away from the victim (SLEEPING/EXITING but still
+    // on_cpu). Silent at 0; a non-zero value flags that the #788 UAF window
+    // was hit on this boot (host-stalled secondary; common only under E-core
+    // contention) AND the on_cpu gate handled it instead of corrupting.
+    {
+        extern u64 thread_free_oncpu_waits(void);
+        u64 waits = thread_free_oncpu_waits();
+        if (waits > 0) {
+            uart_puts("  thread_free on_cpu-waits: ");
+            uart_putdec(waits);
+            uart_puts(" (#788 gate engaged -- race window hit + handled)\n");
+        }
+    }
+
     // Boot-time banner (P1-I; ROADMAP §4.2 < 500 ms exit criterion).
     // Read CNTPCT now and subtract the start-of-_real_start capture to
     // get elapsed counter ticks; convert to microseconds via CNTFRQ.
