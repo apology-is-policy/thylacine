@@ -202,9 +202,18 @@ pub const T_SYS_READDIR: u64          = 56;
 // FS-gamma (IDENTITY-DESIGN.md section 9.3): atomic rename/move + remove.
 pub const T_SYS_RENAME: u64           = 57;
 pub const T_SYS_UNLINK: u64           = 58;
+// A-2a (IDENTITY-DESIGN.md section 9.5): chmod/chown via Tsetattr.
+pub const T_SYS_WSTAT: u64            = 59;
 // SYS_UNLINK flags: rmdir an empty directory vs unlink a non-directory.
 // Mirrors the kernel's SYS_UNLINK_REMOVEDIR / wire P9_UNLINK_AT_REMOVEDIR.
 pub const T_UNLINK_REMOVEDIR: u32     = 0x200;
+
+// SYS_WSTAT valid-mask bits (A-2a). Mirror the kernel T_WSTAT_* / wire
+// P9_SETATTR_* bits. chmod sets T_WSTAT_MODE; chown sets T_WSTAT_UID|GID.
+pub const T_WSTAT_MODE: u32           = 0x1;
+pub const T_WSTAT_UID: u32            = 0x2;
+pub const T_WSTAT_GID: u32            = 0x4;
+pub const T_WSTAT_MODE_MASK: u32      = 0o777;
 
 // SYS_WALK_OPEN omode bits — must mirror SYS_WALK_OPEN_OMODE_VALID in
 // kernel/include/thylacine/syscall.h. Plan 9 OREAD/OWRITE/ORDWR/OEXEC
@@ -1583,6 +1592,28 @@ pub unsafe fn t_fstat(spoor_fd: i64, stat_va: *mut u8) -> i64 {
         inlateout("x0") x0,
         in("x1") stat_va as u64,
         in("x8") T_SYS_FSTAT,
+        options(nostack)
+    );
+    x0
+}
+
+// t_wstat — chmod/chown an open Spoor `fd` (KOBJ_SPOOR, RIGHT_WRITE) via
+// Tsetattr. `valid` selects which of (mode, uid, gid) to apply (T_WSTAT_*
+// bits; at least one). `mode` is the 9 rwx bits only (setuid/setgid/sticky
+// rejected). Returns 0 on success, -1 on bad fd / bad mask / out-of-range
+// value / Dev without wstat_native / server error. A-2a (the mechanism;
+// the per-file permission policy is A-2d). Backs t::fs metadata mutation.
+#[inline(always)]
+pub unsafe fn t_wstat(fd: i64, valid: u32, mode: u32, uid: u32, gid: u32) -> i64 {
+    let mut x0: i64 = fd;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") valid as u64,
+        in("x2") mode as u64,
+        in("x3") uid as u64,
+        in("x4") gid as u64,
+        in("x8") T_SYS_WSTAT,
         options(nostack)
     );
     x0

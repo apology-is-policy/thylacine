@@ -1555,8 +1555,33 @@ int main(void) {
             (void)t_close(sk_fd);
             return 1;
         }
+        // A-2a (IDENTITY-DESIGN.md §9.5): chmod/chown surface end-to-end through
+        // the real SYS_FSTAT + SYS_WSTAT handlers. /system.key is on the
+        // read-only system boot FS (devramfs): fstat now reports owner/group
+        // (system-owned), and wstat must reject structurally-invalid requests
+        // AND a chmod on a Dev with no wstat_native. The handle carries
+        // RIGHT_WRITE (walk_open grants R|W|T), so the RIGHT_WRITE gate passes
+        // and the handler validation + dispatch is what's under test.
+        if (sk_st.uid != T_PRINCIPAL_SYSTEM || sk_st.gid != T_GID_SYSTEM) {
+            t_putstr("joey: probe /system.key not system-owned (A-2a)\n");
+            (void)t_close(sk_fd);
+            return 1;
+        }
+        if (t_wstat(sk_fd, 0, 0, 0, 0) != -1 ||              // empty mask
+            t_wstat(sk_fd, 0x8u, 0, 0, 0) != -1 ||           // reserved valid bit
+            t_wstat(sk_fd, T_WSTAT_MODE, 04000u, 0, 0) != -1) {  // setuid in mode
+            t_putstr("joey: probe SYS_WSTAT bad-arg not rejected (A-2a)\n");
+            (void)t_close(sk_fd);
+            return 1;
+        }
+        if (t_chmod(sk_fd, 0600u) != -1) {   // read-only Dev: no wstat_native slot
+            t_putstr("joey: probe chmod on read-only FS not rejected (A-2a)\n");
+            (void)t_close(sk_fd);
+            return 1;
+        }
         (void)t_close(sk_fd);
         t_putstr("joey: probe /system.key lseek SEEK_END/SEEK_SET OK\n");
+        t_putstr("joey: probe A-2a owner=system + SYS_WSTAT reject paths OK\n");
     }
 
     // === stratumd boot pool mount (P6-pouch-stratumd-boot sub-chunk 16b-gamma) ===

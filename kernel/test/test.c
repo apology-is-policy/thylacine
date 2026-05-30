@@ -267,6 +267,7 @@ void test_devramfs_read_version(void);
 void test_devramfs_read_partial_offset(void);
 void test_devramfs_read_dir_returns_neg1(void);
 void test_devramfs_write_rejected(void);
+void test_devramfs_stat_native_system_owned(void);
 void test_devsrv_registered(void);
 void test_devsrv_post_gate(void);
 void test_devsrv_post_basic(void);
@@ -468,6 +469,8 @@ void test_dev9p_fsync(void);
 void test_dev9p_readdir(void);
 void test_dev9p_rename(void);
 void test_dev9p_unlink(void);
+void test_dev9p_stat_native_maps_getattr(void);
+void test_dev9p_wstat_native_drives_setattr(void);
 void test_p9_attached_create_destroy(void);
 void test_p9_attached_handshake_failure_returns_null(void);
 void test_p9_attached_root_spoor_walk_read(void);
@@ -986,6 +989,8 @@ struct test_case g_tests[] = {
     { "devramfs.read_partial_offset",  test_devramfs_read_partial_offset,  false, NULL },
     { "devramfs.read_dir_returns_neg1",
                                        test_devramfs_read_dir_returns_neg1, false, NULL },
+    { "devramfs.stat_native_system_owned",
+                                       test_devramfs_stat_native_system_owned, false, NULL },
     { "devramfs.write_rejected",       test_devramfs_write_rejected,       false, NULL },
     { "devsrv.registered",             test_devsrv_registered,             false, NULL },
     { "devsrv.post_gate",              test_devsrv_post_gate,              false, NULL },
@@ -1320,6 +1325,10 @@ struct test_case g_tests[] = {
     { "dev9p.readdir",                 test_dev9p_readdir,                 false, NULL },
     { "dev9p.rename",                  test_dev9p_rename,                  false, NULL },
     { "dev9p.unlink",                  test_dev9p_unlink,                  false, NULL },
+    { "dev9p.stat_native_maps_getattr",
+                                       test_dev9p_stat_native_maps_getattr, false, NULL },
+    { "dev9p.wstat_native_drives_setattr",
+                                       test_dev9p_wstat_native_drives_setattr, false, NULL },
     { "p9_attached.create_destroy",    test_p9_attached_create_destroy,    false, NULL },
     { "p9_attached.handshake_failure_returns_null",
                                        test_p9_attached_handshake_failure_returns_null,

@@ -1958,6 +1958,72 @@ static s64 sys_unlink_handler(u64 parent_fd_raw, u64 name_va, u64 name_len_raw,
 }
 
 // =============================================================================
+// SYS_WSTAT — chmod/chown MECHANISM (A-2a; IDENTITY-DESIGN.md §9.5). Apply the
+// (mode, uid, gid) subset selected by the `valid` mask to an open Spoor via
+// dev->wstat_native (dev9p -> Tsetattr). Register-passed (no user buffer).
+//
+// This is the mechanism only: the handle RIGHT_WRITE gate is the sole gate;
+// the per-file rwx PERMISSION policy (owner-only chmod, CAP_HOSTOWNER chown)
+// is A-2d (the kernel rwx-enforcement layer). I-22 stands -- no rwx enforcement
+// exists yet to bypass. The value checks here are structural (mask sanity,
+// mode in 0777 with setuid rejected per §S5, uid/gid != INVALID), not policy.
+// =============================================================================
+
+static int spoor_wstat_native(struct Spoor *c, u32 valid, u32 mode,
+                              u32 uid, u32 gid) {
+    if (!c)                                          return -1;
+    if (!c->dev || !c->dev->wstat_native)            return -1;
+    return c->dev->wstat_native(c, valid, mode, uid, gid);
+}
+
+static s64 sys_wstat_handler(u64 hraw, u64 valid_raw, u64 mode_raw,
+                             u64 uid_raw, u64 gid_raw) {
+    struct Thread *t = current_thread();
+    if (!t)                                          return -1;
+    struct Proc *p = t->proc;
+    if (!p)                                          return -1;
+
+    u32 valid = (u32)valid_raw;
+    u32 mode  = (u32)mode_raw;
+    u32 uid   = (u32)uid_raw;
+    u32 gid   = (u32)gid_raw;
+
+    // Mask sanity: at least one known bit, no reserved bit (so a future
+    // T_WSTAT_* extension cannot be silently dropped -- same discipline as
+    // SYS_UNLINK's flags / SYS_WALK_CREATE's perm).
+    if (valid == 0)                                  return -1;
+    if (valid & ~(u32)T_WSTAT_VALID)                 return -1;
+
+    // Per-field structural bounds. A field whose valid bit is clear is forced
+    // to 0 before the Dev call (the server ignores it -- its valid bit is
+    // clear -- but a defined 0 avoids passing a caller-controlled stale value).
+    if (valid & T_WSTAT_MODE) {
+        if (mode & ~(u32)T_WSTAT_MODE_MASK)          return -1;  // setuid/sgid/sticky + stray bits
+    } else {
+        mode = 0;
+    }
+    if (valid & T_WSTAT_UID) {
+        if (uid == PRINCIPAL_INVALID)                return -1;
+    } else {
+        uid = 0;
+    }
+    if (valid & T_WSTAT_GID) {
+        if (gid == GID_INVALID)                      return -1;
+    } else {
+        gid = 0;
+    }
+
+    // Rights gate: KOBJ_SPOOR with RIGHT_WRITE (setattr mutates metadata).
+    // Mirrors SYS_FSTAT's lookup but with RIGHT_WRITE; rejects KOBJ_SRV.
+    struct Handle *slot = sys_lookup_rw_handle(p, (hidx_t)hraw, RIGHT_WRITE);
+    if (!slot)                                       return -1;
+    if (slot->kind != KOBJ_SPOOR)                    return -1;
+
+    struct Spoor *c = (struct Spoor *)slot->obj;
+    return spoor_wstat_native(c, valid, mode, uid, gid) == 0 ? 0 : -1;
+}
+
+// =============================================================================
 // SYS_CHROOT — stamp the caller's territory root_spoor (P5-stratumd-stub-
 // bringup-e2). Per CORVUS-DESIGN.md §10.1 ("chroot at v1.0; full pivot at
 // v1.x") + ARCH §11.2.
@@ -4794,6 +4860,14 @@ void syscall_dispatch(struct exception_context *ctx) {
                                                ctx->regs[1],
                                                ctx->regs[2],
                                                ctx->regs[3]);
+        return;
+
+    case SYS_WSTAT:
+        ctx->regs[0] = (u64)sys_wstat_handler(ctx->regs[0],
+                                              ctx->regs[1],
+                                              ctx->regs[2],
+                                              ctx->regs[3],
+                                              ctx->regs[4]);
         return;
 
     case SYS_CHROOT:

@@ -89,11 +89,20 @@ enum {
     T_SYS_READDIR     = 56,      // FS-mutation foundation: directory enumeration
     T_SYS_RENAME      = 57,      // FS-gamma: atomic rename/move (Trenameat)
     T_SYS_UNLINK      = 58,      // FS-gamma: remove a file or empty directory (Tunlinkat)
+    T_SYS_WSTAT       = 59,      // A-2a: chmod/chown via Tsetattr
 };
 
 // SYS_UNLINK flags: rmdir an empty directory (vs unlink a non-directory).
 // Mirrors the kernel's SYS_UNLINK_REMOVEDIR / wire P9_UNLINK_AT_REMOVEDIR.
 #define T_UNLINK_REMOVEDIR  0x200u
+
+// SYS_WSTAT valid-mask bits (A-2a; IDENTITY-DESIGN.md §9.5). Mirror the kernel
+// T_WSTAT_* / wire P9_SETATTR_* bits. chmod sets T_WSTAT_MODE; chown sets
+// T_WSTAT_UID | T_WSTAT_GID.
+#define T_WSTAT_MODE       0x1u
+#define T_WSTAT_UID        0x2u
+#define T_WSTAT_GID        0x4u
+#define T_WSTAT_MODE_MASK  0777u
 
 // Torpor error codes — match kernel's TORPOR_ERR_* (Linux/musl-numeric
 // so the pouch syscall seam will decode them as -errno when the pouch
@@ -1167,6 +1176,40 @@ static inline long t_unlink(long parent_fd, const char *name, size_t name_len,
     return x0;
 }
 
+// t_wstat — apply chmod/chown to `fd` (KOBJ_SPOOR, RIGHT_WRITE) via Tsetattr.
+// `valid` selects which of (mode, uid, gid) to set (T_WSTAT_* bits; >=1 bit).
+// mode is the 9 rwx bits only (setuid/setgid/sticky rejected). Returns 0 / -1.
+// A-2a (IDENTITY-DESIGN.md §9.5). The per-file permission policy is A-2d.
+__attribute__((always_inline))
+static inline long t_wstat(long fd, unsigned long valid, unsigned long mode,
+                           unsigned long uid, unsigned long gid) {
+    register long x0 __asm__("x0") = fd;
+    register long x1 __asm__("x1") = (long)valid;
+    register long x2 __asm__("x2") = (long)mode;
+    register long x3 __asm__("x3") = (long)uid;
+    register long x4 __asm__("x4") = (long)gid;
+    register long x8 __asm__("x8") = T_SYS_WSTAT;
+    __asm__ volatile (
+        "svc #0"
+        : "+r"(x0)
+        : "r"(x1), "r"(x2), "r"(x3), "r"(x4), "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
+// t_chmod — set `fd`'s permission bits (9 rwx bits). Convenience over t_wstat.
+__attribute__((always_inline))
+static inline long t_chmod(long fd, unsigned long mode) {
+    return t_wstat(fd, T_WSTAT_MODE, mode, 0, 0);
+}
+
+// t_chown — set `fd`'s owner + group. Convenience over t_wstat.
+__attribute__((always_inline))
+static inline long t_chown(long fd, unsigned long uid, unsigned long gid) {
+    return t_wstat(fd, T_WSTAT_UID | T_WSTAT_GID, 0, uid, gid);
+}
+
 // t_chroot — stamp the calling Proc's Territory root_spoor to the Spoor
 // named by `spoor_fd`. After this call, t_walk_open(T_WALK_OPEN_FROM_ROOT,
 // name, ...) walks from this Spoor. The caller may close `spoor_fd`
@@ -1300,10 +1343,10 @@ static inline void t_thread_exit(void) {
 // P6-pouch-stratumd-boot 16b-gamma: native file metadata + offset cursor.
 
 // struct t_stat — userspace mirror of the kernel's struct t_stat from
-// <thylacine/syscall.h>. 72 bytes; field offsets pinned by _Static_asserts
-// at the end. Native callers consume this directly; pouch's fstat()
-// translation layer (patch 0010) maps t_stat onto musl's struct stat for
-// POSIX consumers like stratumd.
+// <thylacine/syscall.h>. 80 bytes (A-2a appended uid + gid after the 72-byte
+// tail); field offsets pinned by _Static_asserts at the end. Native callers
+// consume this directly; pouch's fstat() translation layer (patch 0010) maps
+// t_stat onto musl's struct stat for POSIX consumers like stratumd.
 struct t_stat {
     unsigned long size;             //  0: file size in bytes
     unsigned long qid_path;         //  8: 9P qid.path
@@ -1318,15 +1361,19 @@ struct t_stat {
     unsigned int  blksize;          // 56: preferred I/O size hint
     unsigned int  _pad_blksize;     // 60: padding
     unsigned long blocks;           // 64: count of 512-byte blocks
+    unsigned int  uid;              // 72: A-2a owner principal-id
+    unsigned int  gid;              // 76: A-2a owning group
 };
 
-_Static_assert(sizeof(struct t_stat) == 72,
-               "libt t_stat must match kernel t_stat ABI (72 bytes)");
+_Static_assert(sizeof(struct t_stat) == 80,
+               "libt t_stat must match kernel t_stat ABI (80 bytes; A-2a uid+gid)");
 _Static_assert(__builtin_offsetof(struct t_stat, size)      ==  0, "t_stat.size at 0");
 _Static_assert(__builtin_offsetof(struct t_stat, qid_path)  ==  8, "t_stat.qid_path at 8");
 _Static_assert(__builtin_offsetof(struct t_stat, mode)      == 40, "t_stat.mode at 40");
 _Static_assert(__builtin_offsetof(struct t_stat, qid_type)  == 52, "t_stat.qid_type at 52");
 _Static_assert(__builtin_offsetof(struct t_stat, blocks)    == 64, "t_stat.blocks at 64");
+_Static_assert(__builtin_offsetof(struct t_stat, uid)       == 72, "t_stat.uid at 72");
+_Static_assert(__builtin_offsetof(struct t_stat, gid)       == 76, "t_stat.gid at 76");
 
 // Whence values for t_lseek — mirror kernel T_SEEK_* + POSIX SEEK_*.
 #define T_SEEK_SET 0

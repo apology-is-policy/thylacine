@@ -238,6 +238,37 @@ static int dev9p_stat(struct Spoor *c, u8 *dp, int n) {
     return -1;
 }
 
+// Native fstat surface (A-2a; IDENTITY-DESIGN.md §9.5) -> Stratum Tgetattr.
+// Fills *out from the server's Rgetattr. uid/gid are the server-reported owner
+// + group; for a per-user stratumd they are the connection's principal (A-3
+// completes per-user attribution). Unlike the .stat slot (the Plan 9 wire-stat,
+// still deferred), this is the metadata source the kernel rwx layer (A-2d) and
+// SYS_FSTAT consume. P9_GETATTR_BASIC covers mode/uid/gid/size/times/nlink.
+static int dev9p_stat_native(struct Spoor *c, struct t_stat *out) {
+    struct dev9p_priv *p = priv_of(c);
+    if (!p || !out) return -1;
+    struct p9_attr attr;
+    if (p9_client_getattr(p->client, p->fid, P9_GETATTR_BASIC, &attr) != 0)
+        return -1;
+    // v1.0 Stratum fills uid/gid in BASIC; a server that cleared their valid
+    // bits would have us report the stale wire bytes (dormant -- Stratum-only).
+    for (size_t i = 0; i < sizeof(*out); i++) ((u8 *)out)[i] = 0;
+    out->size      = attr.size;
+    out->qid_path  = attr.qid.path;
+    out->atime_sec = attr.atime_sec;
+    out->mtime_sec = attr.mtime_sec;
+    out->ctime_sec = attr.ctime_sec;
+    out->mode      = attr.mode;
+    out->nlink     = (u32)attr.nlink;
+    out->qid_vers  = attr.qid.version;
+    out->qid_type  = qid_type_p9_to_kernel(attr.qid.type);
+    out->blksize   = attr.blksize ? (u32)attr.blksize : 4096u;
+    out->blocks    = attr.blocks;
+    out->uid       = attr.uid;
+    out->gid       = attr.gid;
+    return 0;
+}
+
 static struct Spoor *dev9p_open(struct Spoor *c, int omode) {
     struct dev9p_priv *p = priv_of(c);
     if (!p) return NULL;
@@ -490,9 +521,39 @@ static void dev9p_remove(struct Spoor *c) {
 
 static int dev9p_wstat(struct Spoor *c, u8 *dp, int n) {
     (void)c; (void)dp; (void)n;
-    // wstat maps to Tsetattr; deferred.
+    // The Plan 9 wire-stat .wstat slot is deferred; SYS_WSTAT (chmod/chown)
+    // uses the native .wstat_native slot below (dev9p_wstat_native -> Tsetattr).
     return -1;
 }
+
+// Native chmod/chown surface (A-2a; IDENTITY-DESIGN.md §9.5) -> Stratum
+// Tsetattr. The SYS_WSTAT handler has already validated the mask (>=1 T_WSTAT_*
+// bit, no reserved bit) + value bounds (mode in 0777, uid/gid != INVALID); this
+// maps the T_WSTAT_* mask onto P9_SETATTR_* (identical bit values, pinned below)
+// and forwards. Like dev9p_rename / dev9p_unlink it borrows the caller's fid and
+// allocates no transient fid, so the create-path fid-leak class cannot arise.
+static int dev9p_wstat_native(struct Spoor *c, u32 valid, u32 mode,
+                              u32 uid, u32 gid) {
+    struct dev9p_priv *p = priv_of(c);
+    if (!p) return -1;
+    struct p9_setattr sa;
+    for (size_t i = 0; i < sizeof(sa); i++) ((u8 *)&sa)[i] = 0;
+    sa.valid = valid;        // T_WSTAT_* == P9_SETATTR_* (pinned below)
+    sa.mode  = mode;
+    sa.uid   = uid;
+    sa.gid   = gid;
+    return p9_client_setattr(p->client, p->fid, &sa) == 0 ? 0 : -1;
+}
+
+// SYS_WSTAT passes its valid mask straight through dev9p_wstat_native to the
+// Tsetattr wire, so the syscall ABI's T_WSTAT_* bits MUST equal the wire's
+// P9_SETATTR_* bits. Pinned here (the only TU that sees both).
+_Static_assert(T_WSTAT_MODE == P9_SETATTR_MODE,
+               "T_WSTAT_MODE must equal the 9P Tsetattr MODE bit");
+_Static_assert(T_WSTAT_UID == P9_SETATTR_UID,
+               "T_WSTAT_UID must equal the 9P Tsetattr UID bit");
+_Static_assert(T_WSTAT_GID == P9_SETATTR_GID,
+               "T_WSTAT_GID must equal the 9P Tsetattr GID bit");
 
 static struct Spoor *dev9p_power(struct Spoor *c, int on) {
     (void)c; (void)on;
@@ -526,6 +587,7 @@ struct Dev dev9p = {
     .attach   = dev9p_attach_spec,
     .walk     = dev9p_walk,
     .stat     = dev9p_stat,
+    .stat_native = dev9p_stat_native,
 
     .open     = dev9p_open,
     .create   = dev9p_create,
@@ -542,5 +604,6 @@ struct Dev dev9p = {
 
     .remove   = dev9p_remove,
     .wstat    = dev9p_wstat,
+    .wstat_native = dev9p_wstat_native,
     .power    = dev9p_power,
 };

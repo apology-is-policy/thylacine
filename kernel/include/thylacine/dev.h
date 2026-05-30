@@ -81,11 +81,23 @@ struct Dev {
     //                    particular) implement this; trivial leaf Devs
     //                    (devcons / devnull / devzero / devnotes) leave
     //                    the slot NULL.
+    //   wstat_native(c, valid, mode, uid, gid) — Thylacine-native chmod/chown
+    //                    surface (A-2a; IDENTITY-DESIGN.md §9.5). Apply the
+    //                    subset of (mode, uid, gid) selected by the `valid`
+    //                    mask (T_WSTAT_* bits) to the file backed by c.
+    //                    Returns 0 on success, -1 on failure. NULL-permitted
+    //                    (like .stat_native / .fsync): a NULL slot => SYS_WSTAT
+    //                    returns -1. dev9p -> Tsetattr; read-only / metadata-
+    //                    less Devs (devramfs at v1.0) leave it NULL. The
+    //                    handler has already validated the mask + value bounds;
+    //                    the Dev forwards to its backing.
     struct Spoor   *(*attach)(const char *spec);
     struct Walkqid *(*walk)(struct Spoor *c, struct Spoor *nc,
                             const char **name, int nname);
     int             (*stat)(struct Spoor *c, u8 *dp, int n);
     int             (*stat_native)(struct Spoor *c, struct t_stat *out);
+    int             (*wstat_native)(struct Spoor *c, u32 valid,
+                                    u32 mode, u32 uid, u32 gid);
 
     // Open / create / close.
     //   open(c, omode) — transition c from "walked" to "opened". Returns

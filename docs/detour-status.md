@@ -352,8 +352,15 @@ post-fix passing pool) -- not a live reproducer. Full coda:
 > permission SEMANTICS on top of the create mechanism (owner-stamp =
 > principal_id, group = parent-dir, mode = default & umask) -- which interlocks
 > with A-2a (`t_stat` owner/group/mode) and A-2d (the kernel rwx layer).
-- **A-2a:** extend `t_stat` with owner/group/mode (versioned, ACL-extensible
-  **seam**) + `SYS_WSTAT` / chmod / chown (drives `p9_client_setattr`).
+- **A-2a (LANDED 2026-05-30):** `t_stat` += owner/group (72 -> 80 bytes;
+  versioned, ACL-extensible seam) + `SYS_WSTAT = 59` / `t_chmod` / `t_chown`
+  (drives `p9_client_setattr`). dev9p gains a real `Tgetattr`-backed
+  `stat_native` (was a stub) + a NULL-permitted `.wstat_native` slot; devramfs
+  reports `PRINCIPAL_SYSTEM`/`GID_SYSTEM`. The MECHANISM only -- per-file rwx
+  enforcement is A-2d. libt + libthyla-rs + pouch `0010` consumers updated in
+  lockstep. Tests: dev9p getattr/setattr loopback + devramfs sentinels + joey
+  `/system.key` reject-path probe; 0 FAIL. Detail: `docs/reference/99-fs-
+  permission.md` + IDENTITY-DESIGN.md §9.5.
 - **A-2b:** `SYS_WALK_CREATE` — make `dev9p_create` / `p9_client_lcreate` live;
   stamp owner = caller principal-id, group = parent-dir (Plan 9/BSD), mode =
   default & umask.

@@ -30,8 +30,8 @@ use core::mem::MaybeUninit;
 /// File / Spoor metadata returned by `t::fs::File::metadata`,
 /// `t::fs::metadata(path)`, and friends.
 ///
-/// 72-byte plain-data struct mirroring the kernel's `struct t_stat`.
-/// Cheap to copy.
+/// 80-byte plain-data struct mirroring the kernel's `struct t_stat`
+/// (A-2a appended uid + gid after the 72-byte tail). Cheap to copy.
 #[repr(C)]
 #[derive(Copy, Clone, Debug)]
 pub struct Metadata {
@@ -48,12 +48,14 @@ pub struct Metadata {
     blksize: u32,
     _pad_blksize: u32,
     blocks: u64,
+    uid: u32,
+    gid: u32,
 }
 
 // Compile-time check that our Rust mirror matches the kernel's ABI pin
-// (72 bytes). If a v1.x kernel adds fields to struct t_stat without
-// extending Metadata, this assertion fires.
-const _: () = assert!(core::mem::size_of::<Metadata>() == 72);
+// (80 bytes; A-2a uid+gid). If a v1.x kernel adds fields to struct t_stat
+// without extending Metadata, this assertion fires.
+const _: () = assert!(core::mem::size_of::<Metadata>() == 80);
 
 impl Metadata {
     /// File size in bytes.
@@ -180,6 +182,23 @@ impl Metadata {
     pub const fn blocks(&self) -> u64 {
         self.blocks
     }
+
+    /// Owner principal-id (A-2a). `T_PRINCIPAL_SYSTEM` for boot-FS
+    /// (devramfs) files; the server-reported owner for Stratum-backed
+    /// (dev9p) files.
+    #[inline]
+    #[must_use]
+    pub const fn uid(&self) -> u32 {
+        self.uid
+    }
+
+    /// Owning group (A-2a). `T_GID_SYSTEM` for boot-FS files; the
+    /// server-reported group for Stratum-backed files.
+    #[inline]
+    #[must_use]
+    pub const fn gid(&self) -> u32 {
+        self.gid
+    }
 }
 
 /// Internal: fill a Metadata from the given Spoor fd via SYS_FSTAT.
@@ -189,7 +208,7 @@ impl Metadata {
 /// (bad fd, Dev without `stat_native`, etc.) propagates as the matching
 /// `Error` variant.
 pub(crate) fn fstat_fd(spoor_fd: i32) -> Result<Metadata> {
-    // SAFETY: MaybeUninit<Metadata> reserves 72 bytes of stack-aligned
+    // SAFETY: MaybeUninit<Metadata> reserves 80 bytes of stack-aligned
     // memory; t_fstat fully initializes it on success. On failure we
     // discard the (uninitialized) struct without reading it. The
     // pointer cast is safe — Metadata is #[repr(C)] matching the
@@ -199,6 +218,6 @@ pub(crate) fn fstat_fd(spoor_fd: i32) -> Result<Metadata> {
         t_fstat(spoor_fd as i64, buf.as_mut_ptr() as *mut u8)
     };
     let _n = Error::from_syscall_return(rc)?;
-    // Success -- the kernel wrote 72 bytes into buf.
+    // Success -- the kernel wrote 80 bytes into buf.
     Ok(unsafe { buf.assume_init() })
 }

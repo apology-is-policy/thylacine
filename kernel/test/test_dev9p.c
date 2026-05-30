@@ -17,6 +17,7 @@
 #include <thylacine/dev.h>
 #include <thylacine/dev9p.h>
 #include <thylacine/spoor.h>
+#include <thylacine/syscall.h>
 #include <thylacine/types.h>
 
 void test_dev9p_registered(void);
@@ -39,6 +40,13 @@ static struct p9_client g_client;
 static struct p9_loopback g_loopback;
 static u8 g_recv_buf[4096];
 static u8 g_loopback_resp[4096];
+
+// A-2a: capture the Tsetattr fields dev9p_wstat_native put on the wire so a
+// test can assert the T_WSTAT_* -> P9_SETATTR_* mask + values reached it.
+static u32 g_setattr_valid, g_setattr_mode, g_setattr_uid, g_setattr_gid;
+static u32 le32_at(const u8 *p) {
+    return (u32)p[0] | ((u32)p[1] << 8) | ((u32)p[2] << 16) | ((u32)p[3] << 24);
+}
 
 // Canonical responder — synthesizes valid Rmsgs for every op type
 // dev9p might issue. Mirrors the responder used in test_9p_client.c
@@ -222,6 +230,50 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
         if (resp_cap < P9_HDR_LEN) return -1;
         resp[0] = 7; resp[1] = 0; resp[2] = 0; resp[3] = 0;
         resp[4] = P9_RUNLINKAT;
+        resp[5] = (u8)(tag & 0xff); resp[6] = (u8)((tag >> 8) & 0xff);
+        return (int)P9_HDR_LEN;
+    }
+    if (type == P9_TGETATTR) {
+        // Rgetattr body: valid(8)+qid(13)+mode(4)+uid(4)+gid(4)+15*u64 = 153.
+        // Distinguishable mode/uid/gid so the test can prove dev9p_stat_native
+        // maps them into struct t_stat.
+        size_t total = P9_HDR_LEN + 8 + P9_QID_LEN + 4 + 4 + 4 + 15 * 8;  // 160
+        if (resp_cap < total) return -1;
+        for (size_t i = 0; i < total; i++) resp[i] = 0;
+        resp[0] = (u8)(total & 0xff); resp[1] = (u8)((total >> 8) & 0xff);
+        resp[4] = P9_RGETATTR;
+        resp[5] = (u8)(tag & 0xff); resp[6] = (u8)((tag >> 8) & 0xff);
+        size_t o = P9_HDR_LEN;
+        resp[o] = 0xff; resp[o + 1] = 0x07; o += 8;          // valid = 0x7ff (BASIC)
+        resp[o] = P9_QTFILE; o += 1 + 4; resp[o] = 0x33; o += 8;   // qid (path 0x33)
+        { u32 m = 0100644u;                                  // mode S_IFREG|0644
+          resp[o] = (u8)m; resp[o + 1] = (u8)(m >> 8);
+          resp[o + 2] = (u8)(m >> 16); resp[o + 3] = (u8)(m >> 24); o += 4; }
+        resp[o] = 0x34; resp[o + 1] = 0x12; o += 4;          // uid = 0x1234
+        resp[o] = 0x78; resp[o + 1] = 0x56; o += 4;          // gid = 0x5678
+        resp[o] = 1; o += 8;                                 // nlink = 1
+        o += 8;                                              // rdev = 0
+        resp[o] = 0x00; resp[o + 1] = 0x01; o += 8;          // size = 0x100
+        resp[o] = 0x00; resp[o + 1] = 0x10; o += 8;          // blksize = 4096
+        resp[o] = 1; o += 8;                                 // blocks = 1
+        o += 8 * 8 + 2 * 8;                                  // a/m/c/b times + gen + dv = 0
+        (void)o;                                             // o == total here
+        return (int)total;
+    }
+    if (type == P9_TSETATTR) {
+        // Capture the request's valid/mode/uid/gid (Tsetattr body: fid@7,
+        // valid@11, mode@15, uid@19, gid@23) so the test asserts the
+        // T_WSTAT_* mask + values reached the wire.
+        if (req_len >= P9_HDR_LEN + 4 + 4 + 4 + 4 + 4) {
+            g_setattr_valid = le32_at(req + 11);
+            g_setattr_mode  = le32_at(req + 15);
+            g_setattr_uid   = le32_at(req + 19);
+            g_setattr_gid   = le32_at(req + 23);
+        }
+        // Rsetattr = header only (empty body).
+        if (resp_cap < P9_HDR_LEN) return -1;
+        resp[0] = 7; resp[1] = 0; resp[2] = 0; resp[3] = 0;
+        resp[4] = P9_RSETATTR;
         resp[5] = (u8)(tag & 0xff); resp[6] = (u8)((tag >> 8) & 0xff);
         return (int)P9_HDR_LEN;
     }
@@ -498,5 +550,43 @@ void test_dev9p_unlink(void) {
                     "unlink(file) -> 0");
     TEST_EXPECT_EQ((u64)dev9p.unlink(root, "emptydir", P9_UNLINK_AT_REMOVEDIR),
                     (u64)0, "unlink(REMOVEDIR) -> 0");
+    teardown(root);
+}
+
+// A-2a: dev9p_stat_native maps the server's Rgetattr (mode/uid/gid/size)
+// into struct t_stat -- the metadata source SYS_FSTAT + the kernel rwx layer
+// (A-2d) read for a Stratum-backed file.
+void test_dev9p_stat_native_maps_getattr(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "root");
+    TEST_ASSERT(dev9p.stat_native != NULL, "dev9p has .stat_native slot");
+    struct t_stat st;
+    TEST_EXPECT_EQ((u64)dev9p.stat_native(root, &st), (u64)0,
+                    "stat_native -> 0 (Rgetattr)");
+    TEST_EXPECT_EQ((u64)st.uid, (u64)0x1234u, "uid from Rgetattr");
+    TEST_EXPECT_EQ((u64)st.gid, (u64)0x5678u, "gid from Rgetattr");
+    TEST_EXPECT_EQ((u64)st.mode, (u64)0100644u, "mode from Rgetattr");
+    TEST_EXPECT_EQ((u64)st.size, (u64)0x100u, "size from Rgetattr");
+    teardown(root);
+}
+
+// A-2a: dev9p_wstat_native maps the T_WSTAT_* mask + (mode, uid, gid) onto a
+// Tsetattr that reaches the wire intact -- the chmod/chown write path. Proves
+// the T_WSTAT_* == P9_SETATTR_* no-translation map.
+void test_dev9p_wstat_native_drives_setattr(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "root");
+    TEST_ASSERT(dev9p.wstat_native != NULL, "dev9p has .wstat_native slot");
+    g_setattr_valid = g_setattr_mode = g_setattr_uid = g_setattr_gid = 0xdeadbeefu;
+    TEST_EXPECT_EQ((u64)dev9p.wstat_native(root,
+                       T_WSTAT_MODE | T_WSTAT_UID | T_WSTAT_GID,
+                       0640u, 1000u, 2000u), (u64)0,
+                    "wstat_native -> 0 (Rsetattr)");
+    TEST_EXPECT_EQ((u64)g_setattr_valid,
+                    (u64)(T_WSTAT_MODE | T_WSTAT_UID | T_WSTAT_GID),
+                    "valid mask reached the wire");
+    TEST_EXPECT_EQ((u64)g_setattr_mode, (u64)0640u, "mode on the wire");
+    TEST_EXPECT_EQ((u64)g_setattr_uid, (u64)1000u, "uid on the wire");
+    TEST_EXPECT_EQ((u64)g_setattr_gid, (u64)2000u, "gid on the wire");
     teardown(root);
 }

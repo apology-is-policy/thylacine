@@ -7,7 +7,9 @@
 #include "test.h"
 
 #include <thylacine/dev.h>
+#include <thylacine/proc.h>
 #include <thylacine/spoor.h>
+#include <thylacine/syscall.h>
 #include <thylacine/types.h>
 
 void test_devramfs_bestiary_smoke(void);
@@ -20,6 +22,7 @@ void test_devramfs_read_version(void);
 void test_devramfs_read_partial_offset(void);
 void test_devramfs_read_dir_returns_neg1(void);
 void test_devramfs_write_rejected(void);
+void test_devramfs_stat_native_system_owned(void);
 
 // =============================================================================
 // Helpers.
@@ -198,4 +201,33 @@ void test_devramfs_write_rejected(void) {
                    "writes to ramfs files rejected (read-only)");
 
     spoor_clunk(c);
+}
+
+// A-2a: the read-only boot FS reports every entry as system-owned
+// (PRINCIPAL_SYSTEM / GID_SYSTEM) -- there is no per-file owner table in the
+// cpio ramfs. Covers both branches of devramfs_stat_native (root dir + file).
+void test_devramfs_stat_native_system_owned(void) {
+    struct Spoor *root = devramfs.attach("");
+    TEST_ASSERT(root != NULL, "attach root");
+    TEST_ASSERT(devramfs.stat_native != NULL, "devramfs has .stat_native");
+
+    struct t_stat st;
+    TEST_EXPECT_EQ((u64)devramfs.stat_native(root, &st), (u64)0,
+                    "root stat_native -> 0");
+    TEST_EXPECT_EQ((u64)st.uid, (u64)PRINCIPAL_SYSTEM, "root uid = SYSTEM");
+    TEST_EXPECT_EQ((u64)st.gid, (u64)GID_SYSTEM,       "root gid = SYSTEM");
+    TEST_ASSERT((st.mode & T_S_IFMT) == T_S_IFDIR,     "root is a directory");
+
+    if (devramfs_file_count() >= 1) {
+        struct Spoor *f = walk_one(root, "welcome");
+        TEST_ASSERT(f != NULL, "walk welcome");
+        TEST_EXPECT_EQ((u64)devramfs.stat_native(f, &st), (u64)0,
+                        "file stat_native -> 0");
+        TEST_EXPECT_EQ((u64)st.uid, (u64)PRINCIPAL_SYSTEM, "file uid = SYSTEM");
+        TEST_EXPECT_EQ((u64)st.gid, (u64)GID_SYSTEM,       "file gid = SYSTEM");
+        TEST_ASSERT((st.mode & T_S_IFMT) == T_S_IFREG,     "file is regular");
+        spoor_unref(f);
+    }
+
+    spoor_unref(root);
 }

@@ -30,6 +30,7 @@
 #include <thylacine/dtb.h>
 #include <thylacine/extinction.h>
 #include <thylacine/page.h>
+#include <thylacine/proc.h>
 #include <thylacine/spoor.h>
 #include <thylacine/syscall.h>
 #include <thylacine/types.h>
@@ -282,6 +283,10 @@ static int devramfs_stat_native(struct Spoor *c, struct t_stat *out) {
         out->qid_vers  = 0;
         out->qid_type  = QTDIR;
         out->blksize   = 4096;
+        // The boot FS is system-owned; world-readable (A-2a §9.5). No per-file
+        // owner table in the read-only cpio ramfs -- every entry is SYSTEM.
+        out->uid       = PRINCIPAL_SYSTEM;
+        out->gid       = GID_SYSTEM;
         return 0;
     }
 
@@ -305,6 +310,8 @@ static int devramfs_stat_native(struct Spoor *c, struct t_stat *out) {
     out->blksize   = 4096;
     // POSIX blocks: count of 512-byte units. ceil(size / 512).
     out->blocks    = (u64)((f->size + 511u) / 512u);
+    out->uid       = PRINCIPAL_SYSTEM;
+    out->gid       = GID_SYSTEM;
     return 0;
 }
 

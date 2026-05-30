@@ -1195,6 +1195,36 @@ enum {
     //   (ENOENT; ENOTEMPTY for rmdir on a non-empty dir; EISDIR/ENOTDIR mode
     //   mismatch; perm). Audit-bearing: CLAUDE.md FS-mutation (rename/unlink) row.
     SYS_UNLINK       = 58,   // arg: parent_fd, name_va, name_len, flags
+
+    // Convergence-detour A-2a (IDENTITY-DESIGN.md §9.5). The chmod/chown
+    // MECHANISM: set a file's mode/owner/group via 9P Tsetattr. The kernel 9P
+    // client already implements the wire half (p9_client_setattr); this is the
+    // syscall wrapper + a new NULL-permitted Dev vtable slot (.wstat_native ->
+    // dev9p_wstat_native). Register-passed (no user buffer): the only fields a
+    // v1.0 chmod/chown sets are mode + uid + gid, which fit in x1..x4 with the
+    // valid mask in x1. SIZE (truncate) + ATIME/MTIME stay out -- separate
+    // concerns; a v1.x SYS_WSTAT2 or O_TRUNC covers them.
+    //
+    // This chunk builds the MECHANISM only. The per-file rwx PERMISSION check
+    // (who may chmod/chown -- owner-only chmod, CAP_HOSTOWNER chown) is A-2d
+    // (the kernel rwx-enforcement layer); at A-2a the handle RIGHT_WRITE gate is
+    // the only gate, and I-22 stands (no rwx enforcement exists yet to bypass).
+    //
+    // SYS_WSTAT(fd, valid, mode, uid, gid) -> 0 / -1
+    //   x0 = fd     (hidx_t; KOBJ_SPOOR with RIGHT_WRITE -- setattr mutates.)
+    //   x1 = valid  (u32 bitmask of T_WSTAT_MODE | T_WSTAT_UID | T_WSTAT_GID;
+    //                at least one bit set; any other bit -> -1.)
+    //   x2 = mode   (u32; new permission bits when T_WSTAT_MODE. The 9 rwx bits
+    //                only -- setuid/setgid/sticky (07000) + any bit outside 0777
+    //                are REJECTED (-1). setuid is explicitly unsupported, §S5.)
+    //   x3 = uid    (u32; new owner principal-id when T_WSTAT_UID. PRINCIPAL_-
+    //                INVALID (0) -> -1.)
+    //   x4 = gid    (u32; new group when T_WSTAT_GID. GID_INVALID (0) -> -1.)
+    //   Returns 0 on success, -1 on: fd not KOBJ_SPOOR / missing RIGHT_WRITE;
+    //   valid 0 or with a reserved bit; mode outside 0777; uid/gid INVALID;
+    //   Dev has no .wstat_native slot; server Rlerror. Audit-bearing:
+    //   CLAUDE.md A-2 FS-permission row.
+    SYS_WSTAT        = 59,   // arg: fd (x0), valid (x1), mode (x2), uid (x3), gid (x4)
 };
 
 // SYS_WALK_OPEN's FROM_ROOT sentinel: when passed as the spoor_fd, the
@@ -1272,11 +1302,15 @@ _Static_assert(__builtin_offsetof(struct srv_peer_info, _reserved) == 36,
 // timestamps) so pouch's fstat() implementation can fill musl's
 // arch-specific `struct stat` from this without a Linux-shaped intermediate.
 //
-// 72 bytes, naturally aligned; the _Static_asserts pin every field offset
-// so a userspace consumer (libt, pouch's fstat patch) decodes a fixed
-// 72-byte record. Forward-compatibility room is the `reserved[2]` tail —
-// new fields land here without an ABI break (a v1.0 kernel zeros them; a
-// v1.x kernel populates them; an old consumer ignores them).
+// 80 bytes, naturally aligned; the _Static_asserts pin every field offset
+// so a userspace consumer (libt, pouch's fstat patch, libthyla-rs) decodes a
+// fixed record. A-2a (IDENTITY-DESIGN.md §9.5) appended uid + gid AFTER the
+// 72-byte 16b-gamma tail (existing offsets unchanged), the durable owner +
+// group the kernel rwx layer (A-2d) reads. There is no reserved tail today; a
+// further field add extends the record again (every consumer rebuilds in
+// lockstep -- no persistent on-disk consumer of this ABI exists). devramfs
+// reports PRINCIPAL_SYSTEM / GID_SYSTEM (the boot FS is system-owned); dev9p
+// reports the server's Rgetattr uid/gid verbatim.
 struct t_stat {
     u64 size;            // 0: file size in bytes
     u64 qid_path;        // 8: 9P qid.path (unique within Dev — inode-ish)
@@ -1291,12 +1325,14 @@ struct t_stat {
     u32 blksize;         // 56: preferred I/O size hint
     u32 _pad_blksize;    // 60: padding to align blocks
     u64 blocks;          // 64: count of 512-byte blocks
+    u32 uid;             // 72: A-2a owner principal-id (PRINCIPAL_SYSTEM/NONE/real)
+    u32 gid;             // 76: A-2a owning group (GID_SYSTEM/NONE/real)
 };
 
-_Static_assert(sizeof(struct t_stat) == 72,
-               "struct t_stat is a SYS_FSTAT ABI type — pinned at 72 bytes "
-               "(5*u64 + 3*u32 + 1*u8 + 3*u8 pad + 1*u32 + 1*u32 pad + 1*u64) "
-               "with explicit padding; any field add updates the size + asserts");
+_Static_assert(sizeof(struct t_stat) == 80,
+               "struct t_stat is a SYS_FSTAT ABI type — pinned at 80 bytes "
+               "(A-2a appended u32 uid + u32 gid after the 72-byte tail); "
+               "any field add updates the size + asserts");
 _Static_assert(__builtin_offsetof(struct t_stat, size)      ==  0, "t_stat.size at ABI offset 0");
 _Static_assert(__builtin_offsetof(struct t_stat, qid_path)  ==  8, "t_stat.qid_path at ABI offset 8");
 _Static_assert(__builtin_offsetof(struct t_stat, atime_sec) == 16, "t_stat.atime_sec at ABI offset 16");
@@ -1308,6 +1344,8 @@ _Static_assert(__builtin_offsetof(struct t_stat, qid_vers)  == 48, "t_stat.qid_v
 _Static_assert(__builtin_offsetof(struct t_stat, qid_type)  == 52, "t_stat.qid_type at ABI offset 52");
 _Static_assert(__builtin_offsetof(struct t_stat, blksize)   == 56, "t_stat.blksize at ABI offset 56");
 _Static_assert(__builtin_offsetof(struct t_stat, blocks)    == 64, "t_stat.blocks at ABI offset 64");
+_Static_assert(__builtin_offsetof(struct t_stat, uid)       == 72, "t_stat.uid at ABI offset 72 (A-2a)");
+_Static_assert(__builtin_offsetof(struct t_stat, gid)       == 76, "t_stat.gid at ABI offset 76 (A-2a)");
 
 // SYS_LSEEK whence values (P6-pouch-stratumd-boot sub-chunk 16b-gamma).
 // Mirror POSIX SEEK_SET / SEEK_CUR / SEEK_END but stay namespaced so
@@ -1325,6 +1363,22 @@ _Static_assert(__builtin_offsetof(struct t_stat, blocks)    == 64, "t_stat.block
 #define T_S_IFREG   0100000u
 #define T_S_IFDIR   0040000u
 #define T_S_IFCHR   0020000u
+
+// SYS_WSTAT valid-mask bits (A-2a; IDENTITY-DESIGN.md §9.5). Which of the
+// (mode, uid, gid) register arguments the kernel applies. Chosen to equal the
+// 9P Tsetattr P9_SETATTR_{MODE,UID,GID} bit values so dev9p_wstat_native maps
+// the mask with no translation; the equality is pinned by a _Static_assert in
+// dev9p.c (the only TU that sees both). Userspace chmod() sets T_WSTAT_MODE;
+// chown() sets T_WSTAT_UID | T_WSTAT_GID (or just one).
+#define T_WSTAT_MODE   (1u << 0)
+#define T_WSTAT_UID    (1u << 1)
+#define T_WSTAT_GID    (1u << 2)
+#define T_WSTAT_VALID  (T_WSTAT_MODE | T_WSTAT_UID | T_WSTAT_GID)
+
+// Permission bits a SYS_WSTAT mode may carry (the 9 rwx bits). setuid/setgid/
+// sticky (07000) + any bit outside 0777 are rejected -- setuid is explicitly
+// unsupported (IDENTITY-DESIGN.md §S5; the kernel never honors a setuid bit).
+#define T_WSTAT_MODE_MASK  0777u
 
 // SYS_GETRANDOM flags.
 #define GRND_NONBLOCK    1u

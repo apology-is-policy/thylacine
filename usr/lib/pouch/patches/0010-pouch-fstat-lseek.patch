@@ -15,13 +15,14 @@ Two changes:
    to a future patch reader.
 
 2. src/stat/fstat.c: replace the upstream "fstat → fstatat(SYS_statx)"
-   path with a direct SYS_fstat call. The kernel populates a 72-byte
+   path with a direct SYS_fstat call. The kernel populates an 80-byte
    struct t_stat (Thylacine-native; documented in
    kernel/include/thylacine/syscall.h); the patched fstat.c translates
    it field-by-field into musl's aarch64 struct stat. Timestamps map
-   1:1 (sub-second always zero at v1.0). uid/gid/device numbers stay
-   zero (Thylacine v1.0 has no per-Proc uid/gid; devramfs files have
-   no device number distinct from the Dev itself).
+   1:1 (sub-second always zero at v1.0). uid/gid translate to st_uid/
+   st_gid (A-2a added owner/group to t_stat: 72 -> 80 bytes); device
+   numbers stay zero (devramfs files have no device number distinct
+   from the Dev itself).
 
    This is the SAME boundary-line discipline (P-3 of POUCH-DESIGN.md):
    the patch routes a portable upper-half POSIX surface (fstat) onto
@@ -66,8 +67,8 @@ diff -u a/arch/aarch64/bits/syscall.h.in b/arch/aarch64/bits/syscall.h.in
 + * sentinels and re-define them to the Thylacine kernel ABI numbers.
 + *
 + * src/stat/fstat.c is rewritten to call SYS_fstat directly with a
-+ * struct t_stat buffer (72 bytes) and translate to musl's
-+ * struct stat. src/unistd/lseek.c is unchanged - it calls
++ * struct t_stat buffer (80 bytes; A-2a uid+gid) and translate to
++ * musl's struct stat. src/unistd/lseek.c is unchanged - it calls
 + * SYS_lseek(fd, offset, whence) which matches the kernel ABI
 + * one-to-one.
 + *
@@ -81,7 +82,7 @@ diff -u a/arch/aarch64/bits/syscall.h.in b/arch/aarch64/bits/syscall.h.in
 diff -u a/src/stat/fstat.c b/src/stat/fstat.c
 --- a/src/stat/fstat.c
 +++ b/src/stat/fstat.c
-@@ -1,13 +1,91 @@
+@@ -1,13 +1,95 @@
 -#define _BSD_SOURCE
 +/*
 + * pouch fstat() — translate the Thylacine native SYS_fstat surface
@@ -97,9 +98,9 @@ diff -u a/src/stat/fstat.c b/src/stat/fstat.c
 + * 72-byte t_stat; we fill struct stat from those fields.
 + *
 + * The translation is straight-line: every t_stat field maps to
-+ * exactly one struct stat field. v1.0 always-zero fields (timestamps,
-+ * uid/gid, st_dev, st_rdev) translate to zero on the userspace side
-+ * too. The struct stat layout for aarch64 is:
++ * exactly one struct stat field. uid/gid map to st_uid/st_gid (A-2a);
++ * v1.0 always-zero fields (timestamps, st_dev, st_rdev) translate to
++ * zero on the userspace side too. The struct stat layout for aarch64 is:
 + *   st_dev / st_ino / st_mode / st_nlink / st_uid / st_gid / st_rdev /
 + *   pad / st_size / st_blksize / pad2 / st_blocks / st_atim / st_mtim /
 + *   st_ctim / pad[2]
@@ -127,9 +128,11 @@ diff -u a/src/stat/fstat.c b/src/stat/fstat.c
 +	unsigned int  blksize;     /* 56 */
 +	unsigned int  _pad_blksize;/* 60 */
 +	unsigned long blocks;      /* 64 */
++	unsigned int  uid;         /* 72 */
++	unsigned int  gid;         /* 76 */
 +};
-+_Static_assert(sizeof(struct t_stat) == 72,
-+               "pouch fstat: t_stat ABI must match Thylacine kernel (72 bytes)");
++_Static_assert(sizeof(struct t_stat) == 80,
++               "pouch fstat: t_stat ABI must match Thylacine kernel (80 bytes; A-2a uid+gid)");
 +
  int __fstat(int fd, struct stat *st)
  {
@@ -168,6 +171,8 @@ diff -u a/src/stat/fstat.c b/src/stat/fstat.c
 +	st->st_ino     = (ino_t)t.qid_path;
 +	st->st_blksize = (blksize_t)t.blksize;
 +	st->st_blocks  = (blkcnt_t)t.blocks;
++	st->st_uid     = (uid_t)t.uid;
++	st->st_gid     = (gid_t)t.gid;
 +	st->st_atim.tv_sec  = (time_t)t.atime_sec;
 +	st->st_mtim.tv_sec  = (time_t)t.mtime_sec;
 +	st->st_ctim.tv_sec  = (time_t)t.ctime_sec;

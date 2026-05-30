@@ -1109,3 +1109,76 @@ O_PATH path is reviewed with A-1.7 (its consumer) -- the no-open path must still
 bound the name, reject `..`/`/`/`\0`, stamp rights identically, and leave no
 half-walked Spoor on error. **No new spec** per the 2026-05-23 spec-to-code
 broadening. Lands BEFORE A-1.7.
+
+### 9.5 A-2a -- file metadata: owner/group + chmod/chown (RESOLVED 2026-05-30)
+
+The metadata read+write ABI that the kernel rwx-enforcement layer (A-2d) reads.
+Two coordinated changes: `struct t_stat` gains owner/group (the read side), and a
+new `SYS_WSTAT` drives 9P `Tsetattr` (the chmod/chown write side). As with section
+9.2/9.3, the kernel 9P client already implements the wire half
+(`p9_client_getattr` / `p9_client_setattr`, verified 2026-05-30) -- these were
+**implemented yet unexercised** (no syscall had driven them) -- so this is syscall
+wrappers + dev-vtable plumbing, NOT new protocol. **This chunk builds the
+MECHANISM only; the per-file rwx PERMISSION enforcement is A-2d.** I-22 stands at
+A-2a: nothing enforces rwx yet, so there is nothing to bypass.
+
+**`struct t_stat` 72 -> 80 bytes.** Two `u32` fields appended after the 16b-gamma
+tail (existing offsets unchanged): `uid` at 72 (owner principal-id), `gid` at 76
+(owning group). Pinned by `_Static_assert`s on size + both offsets; mirrored in
+libt + libthyla-rs (`Metadata::uid()`/`gid()`) + the pouch `0010` fstat patch
+(which now translates them into musl's `st_uid`/`st_gid`, and whose hand-rolled
+`struct t_stat` grows to 80 -- the kernel writes 80 bytes, so the patch's stack
+buffer MUST match). No persistent on-disk consumer of this ABI exists; every
+consumer rebuilds in lockstep, so the growth is a clean extension, not a break.
+
+- **Metadata source per Dev:** `dev9p` gains a real `stat_native` (it had only the
+  `.stat` -1 stub) that drives `Tgetattr` and maps `p9_attr.{mode,uid,gid,...}`
+  into `t_stat` -- the load-bearing fstat for the disk-backed Stratum FS, and the
+  source A-2d's enforcement reads. `devramfs` reports every entry as
+  `PRINCIPAL_SYSTEM` / `GID_SYSTEM` (the read-only boot FS has no per-file owner
+  table; it is system-owned, world-readable). For a Stratum file the server-
+  reported uid/gid is the *connection* identity -- per-user attribution completes
+  at A-3 (per-user stratumd).
+
+**`SYS_WSTAT = 59`** -- the chmod/chown mechanism. Register-passed (no user
+buffer): a v1.0 chmod/chown sets only mode/uid/gid, which fit in x1..x4.
+
+```
+SYS_WSTAT(fd, valid, mode, uid, gid) -> 0 / -1
+  x0 = fd     hidx_t; KOBJ_SPOOR with RIGHT_WRITE (setattr mutates metadata).
+  x1 = valid  u32 bitmask of T_WSTAT_MODE|UID|GID; >= 1 bit; reserved bit -> -1.
+  x2 = mode   u32; new permission bits when T_WSTAT_MODE. The 9 rwx bits ONLY --
+              setuid/setgid/sticky (07000) + any bit outside 0777 are REJECTED
+              (-1). setuid is explicitly unsupported (section S5).
+  x3 = uid    u32; new owner principal-id when T_WSTAT_UID. PRINCIPAL_INVALID -> -1.
+  x4 = gid    u32; new group when T_WSTAT_GID. GID_INVALID -> -1.
+```
+
+- **T_WSTAT_* == P9_SETATTR_*** (bit values chosen equal; pinned by
+  `_Static_assert` in `dev9p.c`, the only TU seeing both) so `dev9p_wstat_native`
+  maps the mask with no translation. New NULL-permitted `Dev.wstat_native` slot
+  (like `.rename`/`.unlink`/`.fsync`); `devramfs` leaves it NULL (read-only boot
+  FS) -> `SYS_WSTAT` on a devramfs fd returns -1. Borrows the caller's fid and
+  allocates no transient fid, so the section-9.2 failed-create UAF/fid-leak class
+  structurally cannot arise.
+- **Rights gate here is the HANDLE right (`RIGHT_WRITE`); the per-file
+  owner-only-chmod / privileged-chown POLICY is A-2d** (the kernel rwx layer). At
+  A-2a, Stratum applies `Tsetattr` unconditionally (section 3.7), so a chmod/chown
+  on a dev9p fd succeeds against the server -- the kernel-side ownership-change
+  policy that gates it lands with enforcement in A-2d.
+- **Error cases (-1):** fd not `KOBJ_SPOOR` / missing `RIGHT_WRITE`; valid 0 or a
+  reserved bit; mode outside 0777; uid/gid INVALID; Dev has no `.wstat_native`;
+  server Rlerror. **Audit-bearing:** the `Tgetattr`/`Tsetattr` 9P metadata
+  read+write surface (AEGIS-adjacent write path) -> full round.
+
+**`chmod`/`chown` userspace shape:** libt + libthyla-rs surface `t_chmod(fd, mode)`
+= `t_wstat(fd, T_WSTAT_MODE, ...)` and `t_chown(fd, uid, gid)` = `t_wstat(fd,
+T_WSTAT_UID|T_WSTAT_GID, ...)` over the one syscall.
+
+**No new spec** per the 2026-05-23 spec-to-code broadening -- prose validation in
+this section + `docs/reference/99-fs-permission.md` + the CLAUDE.md audit-trigger
+row + the runtime test suite (dev9p getattr/setattr loopback round-trips +
+devramfs system-owned sentinels + joey's `/system.key` reject-path probe). **A-2d
+(the kernel rwx-enforcement layer + the chmod/chown ownership-change policy) is
+scripture-first: it lands as a section-3.7 refinement with the chown-privilege
+model BEFORE its code.**
