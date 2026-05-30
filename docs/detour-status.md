@@ -371,12 +371,23 @@ post-fix passing pool) -- not a live reproducer. Full coda:
   default & umask.
 - **A-2c:** uniform **mount-cape** for self-declared-non-POSIX backings — folds
   into A-2d as the metadata source for permissionless backings.
-- **A-2d:** the **kernel rwx-permission layer** (Linux-VFS model; IDENTITY-DESIGN
-  §3.7). At walk/open/create, check the file's mode/uid/gid (Dev `stat` /
-  mount-cape) against the Proc's `principal_id` + groups; no uid bypass (I-22);
-  chmod/chown ownership-change policy enforced here. **Replaces the dropped
-  "server enforces" assumption** — Stratum enforces dataset-scope ONLY, not file
-  rwx (agent-verified 2026-05-28; see §3.7).
+- **A-2d (DESIGN LANDED 2026-05-30; ready to implement):** the **kernel
+  rwx-permission layer** (Linux-VFS model; IDENTITY-DESIGN §3.7 + the §3.7.1
+  privilege-model refinement + the §9.6 implementation contract). At walk/open/
+  create, `perm_check` the file's mode/uid/gid (`spoor_stat_native`) against the
+  Proc's `principal_id` + groups (owner-first POSIX); enforcement points
+  walk[X]/open[R/W, `O_PATH` exempt]/create[W+X]; read/write not re-checked
+  (open-time snapshot). **`CAP_HOSTOWNER` is the unified v1.0 fs-admin authority**
+  (user-voted 2026-05-30: DAC-override + chmod/chown/chgrp-any; a capability, never
+  an identity -> **I-22 preserved**, no `principal_id` bypasses); owner keeps
+  owner|self-group chmod + chgrp-to-own-group; **no-give-away chown**. **Replaces
+  the dropped "server enforces" assumption** — Stratum enforces dataset-scope ONLY,
+  not file rwx (agent-verified 2026-05-28; see §3.7). Folds A-2b's create-check +
+  **closes A-2a audit F2** (gate `dev9p_stat_native` on the `Rgetattr` valid mask);
+  A-2c mount-cape stays a seam; A-4 splits a finer `fs-admin` clearance
+  (`CAP_DAC_OVERRIDE`+`CAP_CHOWN`) additively. **Testable now** via
+  `CAP_SET_IDENTITY` (devramfs deny/allow); coarse on dev9p (connection identity)
+  until A-3.
 - **Depends:** A-1. Interlocks with Stop C FS-mutation (this *is* create+setattr).
 - **Audit:** the create + setattr 9P-write surface (AEGIS-adjacent) -> full round.
 - **Tests:** create stamps owner=caller + group=parent; chmod/chown round-trip;

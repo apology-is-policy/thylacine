@@ -394,6 +394,99 @@ permission layer), not by Stratum. ACLs remain the v1.x seam (the kernel layer
 reads them when present). Dataset-scope presentation (the `SO_PEERCRED`-equivalent
 for Stratum's outer boundary) is the A-3 cross-project seam.
 
+### 3.7.1 The v1.0 privilege model (RESOLVED 2026-05-30, A-2d scripture)
+
+§3.7 fixed the *model* (kernel-VFS enforcement). A-2d pins the *concrete policy*,
+voted by the user 2026-05-30 after a Plan 9 + Linux-VFS + capability-microkernel
+prior-art pass (Plan 9 and Linux agree on the load-bearing rules; the capability
+microkernels — Fuchsia/seL4/Genode — have no FS-rwx model to copy, enforcing via
+namespace + capability routing instead).
+
+**The access-check algorithm (owner-first POSIX).** For a Proc `p` accessing a
+file with stat `st`, wanting `want ⊆ {R=4, W=2, X=1}`:
+1. `p->caps & CAP_HOSTOWNER` → allow (the DAC-override; see below).
+2. else `p->principal_id == st.uid` → owner bits `(st.mode >> 6) & 7`.
+3. else `gid_member(p, st.gid)` → group bits `(st.mode >> 3) & 7`.
+4. else → other bits `st.mode & 7`.
+5. allow iff `(bits & want) == want`.
+
+Owner-first is **authoritative** (POSIX): a Proc that owns a file is judged on
+owner bits *only*, even when group/other would grant more — it can always `chmod`
+itself the bit, since it owns the file. Group membership =
+`st.gid == p->primary_gid || st.gid ∈ p->supp_gids[0..supp_gid_count)`
+(`GID_INVALID` is never a member).
+
+**Enforcement points** (the chokepoints the kernel already mediates — userspace
+never talks to a backing directly):
+- **walk** (`SYS_WALK_OPEN`, per component): **X** (search) on the source directory
+  `src`. The walk is already one-component-per-call (`dev->walk(src, nc, names, 1)`
+  with the `w->nqid != 1` partial-walk guard), so this is one `stat_native(src)`
+  per step — **cheap, not N extra round-trips** (the "server-side batched walk
+  makes POSIX X-checks expensive" worry dissolves).
+- **open**: **R** and/or **W** on the walked target per `omode` (OREAD→R, OWRITE→W,
+  ORDWR→R|W). `O_PATH` (`SYS_WALK_OPEN_OPATH`) is **exempt** from the R/W gate
+  (§9.4: a walk-only handle has no access semantics) — the **X-search on the path
+  to reach it still applies**.
+- **create** (`SYS_WALK_CREATE`): **W and X** on the parent directory.
+- **read/write are NOT re-checked**: POSIX open-time snapshot — a later `chmod`
+  does not retroactively revoke an open fd.
+
+The handle RIGHT (capability axis) and the rwx check (identity axis) are **both**
+required and orthogonal — a Proc may hold a `RIGHT_READ` handle to a file its
+identity lacks `other-r` on (handed via a privileged path); §3.7 requires both.
+
+**The privilege model — `CAP_HOSTOWNER` is the unified v1.0 fs-admin authority**
+(voted: fold-into-`CAP_HOSTOWNER`, over mint-finer-caps-now and no-override-at-all):
+
+| operation | who may |
+|---|---|
+| rwx access override (DAC-override) | `CAP_HOSTOWNER` |
+| `chmod` (mode bits) | file owner OR `CAP_HOSTOWNER` |
+| `chown` (change uid — give-away) | `CAP_HOSTOWNER` **only** (owner may NOT give a file away) |
+| `chgrp` (change gid) | file owner → a group **they belong to**; OR `CAP_HOSTOWNER` → any group |
+
+`CAP_HOSTOWNER` is **elevation-only** (caps.h: never in `CAP_ALL`, never
+rfork-grantable, conferred only via the `cap` device to a console-attached Proc
+after the system passphrase). It is therefore a **capability, not an identity** —
+so the DAC-override **preserves I-22** (no *identity* carries ambient
+super-authority; the override rides the console-gated capability the legate model
+will later refine). **No `principal_id` — not even `PRINCIPAL_SYSTEM` — bypasses
+the check; only the capability does.**
+
+**No-give-away `chown`** matches Plan 9 (fileserver-owner only) and Linux
+(`CAP_CHOWN`): it prevents quota-dodging and accountability-laundering.
+setuid/setgid/sticky are already rejected at A-2a (S5 no-setuid); A-2d does not
+revisit them.
+
+**Alternatives considered + rejected.** (a) Mint `CAP_DAC_OVERRIDE` + `CAP_CHOWN`
+as separate elevation-only bits now — rejected: no v1.0 caller (the fs-admin
+legate is A-4), cuts against the convergence bar's build-iff-caller rule (§8.1),
+adds audit surface for no near-term use. (b) No rwx override at all (purest I-22) —
+rejected: awkward admin/backup/recovery, and a hostowner could `chown`-to-self then
+read anyway, so the denial buys friction, not security. **A-4's legate model
+splits a finer `fs-admin` clearance (`CAP_DAC_OVERRIDE` + `CAP_CHOWN`) out of
+`CAP_HOSTOWNER` — an additive seam** (the cap representation already supports new
+bits; no ABI break).
+
+**Honest scope.** Enforcement is **real and per-principal on devramfs now**: it
+reports system-owned, world-readable (root `0555`, files cpio-mode `0644`/`0755`),
+so the `PRINCIPAL_SYSTEM` boot chain owns everything it touches (owner-rwx, no
+brick), while a non-system principal gets `other-r`+`other-x` (read+traverse) but
+not write. This is **testable today** via A-1a's `CAP_SET_IDENTITY` (joey spawns a
+child as `principal_id=1000` and proves denied-write / allowed-read) — **not
+blocked on login (A-5)**. On **dev9p** the file's uid/gid is the *connection*
+identity (`PRINCIPAL_SYSTEM` until per-user stratumd), so Stratum enforcement is
+**coarse (single connection identity) until A-3** — the mechanism is airtight; the
+per-user fidelity completes at A-3.
+
+**Folds + flags.** A-2b's create-check (W+X on parent) lands here. A-2a audit
+**F2** (gate `dev9p_stat_native` on the `Rgetattr` valid mask) is closed here — the
+enforcement reads that stat, so a missing-`valid`-bit garbage mode would
+mis-enforce. A-2c's mount-cape stays a **seam** (no permissionless backing is
+mounted at v1.0). Hardening flag (not a blocker): `/system.key` is `0644` (world-r)
+in devramfs — A-2d is the natural moment to tighten its cpio mode to `0600` (joey
+reads it as `PRINCIPAL_SYSTEM` → owner-r still works).
+
 ---
 
 ## 4. Scenario catalog
@@ -1182,3 +1275,76 @@ devramfs system-owned sentinels + joey's `/system.key` reject-path probe). **A-2
 (the kernel rwx-enforcement layer + the chmod/chown ownership-change policy) is
 scripture-first: it lands as a section-3.7 refinement with the chown-privilege
 model BEFORE its code.**
+
+### 9.6 A-2d -- kernel rwx enforcement + the chmod/chown policy (RESOLVED 2026-05-30)
+
+The enforcement layer that reads A-2a's metadata. The *policy* is §3.7.1; this is
+the *implementation contract*. **No new syscall, no new cap bit, no ABI struct
+change** -- A-2d is enforcement logic at existing chokepoints, reading the existing
+`t_stat` (A-2a) and the existing `CAP_HOSTOWNER` (caps.h) + Proc identity (A-1a:
+`principal_id` / `primary_gid` / `supp_gids[0..supp_gid_count)`).
+
+**Two new kernel helpers** (placement -- `kernel/perm.c` vs folding into
+`kernel/proc.c` -- decided at impl):
+```
+bool proc_in_group(const struct Proc *p, u32 gid);
+    // gid == p->primary_gid || gid in p->supp_gids[0..supp_gid_count).
+    // GID_INVALID is never a member.
+
+int  perm_check(const struct Proc *p, const struct t_stat *st, unsigned want);
+    // want subset of PERM_R(4)|PERM_W(2)|PERM_X(1).
+    // returns 0 (allowed) / -1 (denied), per the §3.7.1 owner-first algorithm.
+    // (p->caps & CAP_HOSTOWNER) short-circuits to 0 -- the DAC-override.
+```
+
+**Enforcement-point insertions** (`kernel/syscall.c`):
+- `sys_walk_open_handler`: after `src` resolves + before `dev->walk`,
+  `perm_check(p, &src_stat, PERM_X)` on `src` (search the directory). After the
+  walk + before `dev->open`, `perm_check(p, &nc_stat, want(omode))` on the target
+  (skipped when `SYS_WALK_OPEN_OPATH` -- but the X-search above is NOT skipped).
+  Both stats via `spoor_stat_native`.
+- `sys_walk_create_handler`: after `parent` resolves,
+  `perm_check(p, &parent_stat, PERM_W|PERM_X)`.
+- `sys_wstat_handler`: the ownership-change policy (the §3.7.1 table). Reads the
+  current owner via `spoor_stat_native` first, then per `valid` bit: MODE needs
+  owner-or-`CAP_HOSTOWNER`; UID needs `CAP_HOSTOWNER`; GID needs
+  (owner AND `proc_in_group(p, new_gid)`) or `CAP_HOSTOWNER`. The policy gate runs
+  BEFORE the `dev->wstat_native` (Tsetattr) call. **Closes A-2a F2 in the same
+  pass** (gate `dev9p_stat_native` on the `Rgetattr` valid mask so the owner read
+  is trustworthy).
+
+**Where the stat comes from.** `spoor_stat_native(c, &st)` (the A-2a read side):
+`dev9p` → `Tgetattr`; `devramfs` → the in-kernel table (system-owned, world-r). A
+Dev with no `stat_native` slot cannot be permission-checked → the access is
+**denied (fail-closed)** at the enforcement point. At v1.0 every user-reachable
+walk/open-capable Dev (`devramfs`, `dev9p`) implements `stat_native`, so
+fail-closed is a future-Dev backstop, not a live denial. The kernel-internal
+devramfs walks of the boot chain do not pass through these user syscalls (the
+syscall layer is the only enforced surface, per §3.7's chokepoint model).
+
+**Testability (now, not gated on login A-5).** New tests:
+- devramfs enforcement via `CAP_SET_IDENTITY`: a child stamped `principal_id=1000`
+  opens a devramfs file `OREAD` (allowed -- `other-r`), traverses a dir (allowed --
+  `other-x`), and is **denied** `OWRITE`; a `PRINCIPAL_SYSTEM` peer is allowed
+  (owner-rwx).
+- `perm_check` unit table (owner/group/other × r/w/x × allow/deny; owner-first
+  authority; `CAP_HOSTOWNER` override).
+- `proc_in_group` (primary, supplementary, non-member, `GID_INVALID`).
+- wstat policy: owner chmods own file (allow); non-owner chmods (deny); owner
+  chowns-away (deny); `CAP_HOSTOWNER` chowns (allow); owner chgrps to own group
+  (allow) / to a foreign group (deny).
+- dev9p loopback: enforcement reads the mocked `Tgetattr` mode + allows/denies.
+- joey boot regression: the existing `/system.key` probe asserts the system
+  principal still reads it post-enforcement (guard against bricking the boot chain).
+
+**Audit-bearing** (privilege boundary; the CLAUDE.md + ARCH §25.4 row lands in this
+scripture commit). The rwx layer is the first real exercise of I-22's enforcement
+obligation. Prosecute: the owner-first algorithm (no group/other leak when owner
+bits deny); the `CAP_HOSTOWNER` override placement (only the capability, never an
+identity -- I-22); the fail-closed NULL-`stat_native` path; the wstat policy
+(no-give-away `chown`; chgrp-to-own-group only); the `O_PATH` R/W exemption (must
+NOT also skip the X-search); the boot-chain-survival (devramfs world-r/x → no brick).
+
+**No new spec** per the 2026-05-23 spec-to-code broadening -- prose validation in
+§3.7.1 + this section + the CLAUDE.md audit-trigger row + the audit + the runtime
+tests.
