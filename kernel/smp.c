@@ -120,6 +120,23 @@ void smp_cpu_ipi_init(unsigned cpu_idx) {
     __asm__ __volatile__("msr daifclr, #2" ::: "memory");
 }
 
+// SYS_EXIT_GROUP / cross-Proc kill cross-thread shootdown (ARCH §7.9.1, I-24).
+// Broadcast IPI_RESCHED to every CPU except self. The reschedule IPI traps a
+// peer running in userspace on another CPU into the kernel so it reaches its
+// IRQ-from-EL0 die-check (el0_return_die_check) without waiting for a timer
+// tick — Linux's kick_process. A CPU not running a peer of the terminating
+// Proc simply no-ops its die-check. Rare path (process group-exit / kill); at
+// most ncpus-1 SGI writes. gic_send_ipi bounds-checks the target, so an
+// out-of-range / offline index is a quiet no-op (-smp 1 sends nothing).
+void smp_resched_others(void) {
+    unsigned self = smp_cpu_idx_self();
+    unsigned n    = smp_cpu_count();
+    for (unsigned c = 0; c < n; c++) {
+        if (c == self) continue;
+        (void)gic_send_ipi(c, IPI_RESCHED);
+    }
+}
+
 static unsigned g_cpu_count;
 static unsigned g_cpu_online_count;
 

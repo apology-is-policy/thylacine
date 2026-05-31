@@ -577,6 +577,21 @@ static int do_pouch_hello_smoke(void) {
         return -1;
     t_putstr("joey: pouch-hello-threads smoke ok (pthread + mutex over SYS_THREAD_* / SYS_TORPOR_*)\n");
 
+    // SYS_EXIT_GROUP (#809; ARCH §7.9.1 / invariant I-24): the cross-thread-
+    // shootdown proving binary. A multi-thread Proc calls _Exit(0) ->
+    // __NR_exit_group -> SYS_EXIT_GROUP with TWO live, un-joined workers (one
+    // futex/cond-wait torpor sleeper, one userspace spinner). Pre-fix this
+    // extincted the kernel ("exits with live peer threads", the #808 audit F3
+    // hazard); post-fix the kernel cascades termination to both workers and the
+    // Proc exits status 0. joey's t_wait_pid returning rc == 0 IS the proof the
+    // full cascade completed -- the Proc only zombies once BOTH peers died.
+    static const char peg_name[]   = "pouch-hello-exitgroup";
+    static const char peg_expect[] = "pouch-hello-exitgroup: 2 live un-joined workers";
+    if (pouch_smoke_one(peg_name, sizeof(peg_name) - 1,
+                        peg_expect, sizeof(peg_expect) - 1) != 0)
+        return -1;
+    t_putstr("joey: pouch-hello-exitgroup smoke ok (exit_group with live peers cascades -- SYS_EXIT_GROUP)\n");
+
     // P6-pouch-poll sub-chunk 10: the polling pouch hello. Exercises the
     // boundary-line patched src/select/{poll,ppoll,select,pselect}.c.
     // SYS_PIPE → devpipe; poll on the read end with timeout + with byte;

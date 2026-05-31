@@ -324,6 +324,21 @@ struct Proc {
     u32                supp_gids[PROC_SUPP_GIDS_MAX];
     u8                 supp_gid_count;
     u8                 _pad_identity[3];   // explicit align padding
+
+    // SYS_EXIT_GROUP / cross-Proc kill cross-thread shootdown (ARCH §7.9.1,
+    // invariant I-24). NULL = no group termination in progress; non-NULL =
+    // proc_group_terminate has flagged every Thread of this Proc to die at
+    // its next EL0-return die-check, and the LAST Thread out (thread_exit_self)
+    // transitions the Proc to ZOMBIE with THIS msg (status derived as exits()
+    // does: "ok" -> 0, else -> 1) instead of the default 0/"ok". Set ONCE via
+    // an atomic CAS in proc_group_terminate (first msg wins; a racing second
+    // group-terminate is a no-op); never cleared (the Proc is terminating).
+    // Read __ATOMIC_ACQUIRE at every EL0-return die-check + thread_exit_self's
+    // last-out path; the release/acquire pairing gives a cross-CPU peer a
+    // coherent view independent of any lock. KP_ZERO inits it to NULL. NOT
+    // propagated by rfork (a transient terminating state, not an inherited
+    // property).
+    const char        *group_exit_msg;
 };
 
 #define PROC_FLAG_NODUMP            (1u << 0)
@@ -332,15 +347,17 @@ struct Proc {
 #define PROC_FLAG_CONSOLE_ATTACHED  (1u << 3)
 #define PROC_FLAG_MAY_POST_SERVICE  (1u << 4)
 
-_Static_assert(sizeof(struct Proc) == 240,
-               "struct Proc size pinned at 240 bytes (P6-pouch-signals "
-               "baseline 168 + the A-1a identity block: principal_id 4 + "
-               "primary_gid 4 + supp_gids[15] 60 + supp_gid_count 1 + 3 pad "
-               "= 72 -> 240). Adding a field grows the SLUB cache; update "
-               "this assert deliberately so the change is intentional.");
+_Static_assert(sizeof(struct Proc) == 248,
+               "struct Proc size pinned at 248 bytes (A-1a baseline 240 + the "
+               "SYS_EXIT_GROUP group_exit_msg pointer = 8 -> 248). Adding a "
+               "field grows the SLUB cache; update this assert deliberately so "
+               "the change is intentional.");
 _Static_assert(__builtin_offsetof(struct Proc, principal_id) == 168,
                "A-1a identity block appends after handler_va; existing "
                "offsets must stay stable (KP_ZERO inits the new tail).");
+_Static_assert(__builtin_offsetof(struct Proc, group_exit_msg) == 240,
+               "SYS_EXIT_GROUP group_exit_msg appends after the A-1a identity "
+               "block; existing offsets stay stable (KP_ZERO inits it NULL).");
 _Static_assert(__builtin_offsetof(struct Proc, magic) == 0,
                "magic must be at offset 0 so SLUB's freelist write on "
                "kmem_cache_free clobbers it (double-free defense — "
@@ -495,6 +512,35 @@ void proc_fault_terminate(const char *name, uintptr_t faulting_addr);
 //     program registered one).
 __attribute__((noreturn))
 void thread_exit_self(void);
+
+// SYS_EXIT_GROUP / cross-Proc kill cross-thread shootdown (ARCH §7.9.1,
+// invariant I-24). Flag `p` for group termination + wake/kick its Threads so
+// each self-terminates at its next EL0-return die-check (el0_return_die_check).
+// Does NOT wait for peers; the LAST Thread out reaps the Proc -> ZOMBIE with
+// `msg` (NULL -> "killed"). Idempotent (CAS the flag; first msg wins).
+//
+// Mechanism: (1) CAS p->group_exit_msg = msg; (2) torpor_wake_all_for_proc(p)
+// so already-sleeping futex peers return; (3) smp_resched_others() so a peer
+// spinning in userspace on another CPU traps + hits its IRQ-from-EL0 die-check
+// (the periodic timer is the floor if the IPI is missed). v1.0 envelope (ARCH
+// OPEN Q 7.9.A): a peer blocked indefinitely in a non-torpor/non-note kernel
+// sleep dies at its call's completion, not instantly.
+//
+// LOCK CONTRACT: acquires NO g_proc_table_lock. It takes torpor_lock + (via
+// wakeup) rendez/cs locks -- all strictly BELOW g_proc_table_lock in the lock
+// order -- so it is safe to call EITHER holding g_proc_table_lock (the
+// cross-Proc kill walk_cb, where the target is alive under the lock) OR not
+// (SYS_EXIT_GROUP on self->proc, which cannot be reaped while running).
+void proc_group_terminate(struct Proc *p, const char *msg);
+
+// EL0-return-tail die-check (ARCH §7.9.1, invariant I-24). Called at every
+// return-to-EL0 (the sync-from-EL0 SVC + fault-handled tails in
+// exception.c, and the IRQ-from-EL0 tail in vectors.S 0x480). If the calling
+// Thread's Proc is group-terminating (group_exit_msg != NULL), the Thread
+// self-terminates here via thread_exit_self() (NEVER returns in that case).
+// Otherwise returns. #713: runs BEFORE the DAIF-masked ELR-set..eret window;
+// the die path sched()s away and never reaches the eret.
+void el0_return_die_check(void);
 
 // P6-pouch-threads (sub-chunk 9a) audit F1 close: cross-module access to
 // `g_proc_table_lock` (kept static in proc.c). thread.c's

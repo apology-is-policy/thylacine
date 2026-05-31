@@ -76,6 +76,29 @@ static void sys_exits_handler(u64 status) {
     extinction("sys_exits returned");
 }
 
+// SYS_EXIT_GROUP / POSIX exit_group(2) (ARCH §7.9.1, invariant I-24).
+// Terminate the WHOLE Proc -- cascade peer-Thread termination -- not just the
+// calling Thread. proc_group_terminate flags the Proc + wakes torpor sleepers
+// + IPI-kicks running peers so each self-exits at its EL0-return die-check;
+// then this Thread exits via thread_exit_self, which honors the recorded
+// group_exit_msg for the last-Thread-out ZOMBIE status. A single-thread Proc
+// is equivalent to exits(status). Replaces the v1.0 path where _Exit /
+// exit_group routed to SYS_EXITS and extincted the kernel on live peers.
+__attribute__((noreturn))
+static void sys_exit_group_handler(u64 status) {
+    struct Thread *t = current_thread();
+    struct Proc   *p = (t && t->magic == THREAD_MAGIC) ? t->proc : NULL;
+    const char *msg = (status == 0) ? "ok" : "fail";
+    if (p && p->magic == PROC_MAGIC) {
+        proc_group_terminate(p, msg);
+    }
+    // Exit the caller (a Thread of p). thread_exit_self validates current /
+    // proc state + extincts on kproc / corruption, mirroring sys_exits_handler.
+    thread_exit_self();
+    // Unreachable -- thread_exit_self is noreturn.
+    extinction("sys_exit_group returned");
+}
+
 // =============================================================================
 // SYS_PUTS — write `len` bytes to UART.
 // =============================================================================
@@ -2396,17 +2419,22 @@ static int postnote_walk_cb(struct Proc *target, void *arg) {
         return 1;
     }
 
-    // F4 audit close: refuse kill to multi-thread Procs at v1.0. Cross-
-    // thread shootdown is a v1.x extension (sub-chunk 9a deferred it
-    // explicitly). Without it, `exits("killed")` would extinct on
-    // `live_peers != 0`. The cleanest v1.0 contract: SYS_POSTNOTE("kill")
-    // refuses when peer Threads exist; the caller learns the kill cannot
-    // be delivered. Self-posts to single-thread Procs (kill self) +
-    // parent-to-single-thread-child posts are still allowed.
+    // SYS_EXIT_GROUP / kill cross-thread shootdown (ARCH §7.9.1, I-24): a
+    // multi-thread target is no longer refused (the prior `kill -> -EIO in
+    // multi-thread Proc`, 13b R1-F9). Cascade-terminate the whole Proc --
+    // proc_group_terminate flags it + wakes/kicks its Threads so each
+    // self-exits at its EL0-return die-check; the last Thread out reaps the
+    // Proc. Safe under g_proc_table_lock (held by proc_for_each here):
+    // proc_group_terminate acquires only torpor / rendez / cs locks, all below
+    // proc_table_lock in the order, and the target is alive under this lock so
+    // there is no reap-UAF. A SINGLE-thread target falls through to the note
+    // post below -- the existing non-catchable-kill EL0-return delivery, left
+    // unchanged.
     if (notes_name_is_kill(w->name)) {
         int live_threads = proc_count_live_peers_locked(target, NULL);
         if (live_threads > 1) {
-            w->result = -1;
+            proc_group_terminate(target, "killed");
+            w->result = 1;
             return 1;
         }
     }
@@ -2457,17 +2485,22 @@ static s64 sys_postnote_handler(u64 pid_raw, u64 name_va, u64 name_len_raw) {
     // POSIX-conforming. The sentinel is documented as ABI in
     // kernel/include/thylacine/syscall.h (SYS_POSTNOTE docblock).
     //
-    // R2-F5 audit close: still apply the kill gate. A multi-thread Proc
-    // self-posting kill would otherwise enqueue an undeliverable kill
-    // (the dispatcher's defense-in-depth check would refuse delivery to
-    // multi-thread; the kill would queue forever). Same gate as the
-    // walk_cb path: refuse kill when live_threads > 1.
+    // SYS_EXIT_GROUP / kill cross-thread shootdown (ARCH §7.9.1, I-24): a
+    // multi-thread self-kill cascades the whole Proc instead of being refused
+    // (the prior `kill -> -EIO`, 13b R1-F9). proc_group_terminate is called
+    // AFTER releasing proc_table_lock (it takes only lower-order locks; self
+    // cannot be reaped while running); the caller returns success + self-exits
+    // at its own EL0-return die-check before userspace resumes. A single-thread
+    // self-post falls through to the note post below (unchanged).
     if (target_pid == p->pid || pid_raw == 0) {
         if (notes_name_is_kill(buf)) {
             irq_state_t s = proc_table_lock_acquire();
             int live_threads = proc_count_live_peers_locked(p, NULL);
             proc_table_lock_release(s);
-            if (live_threads > 1) return -1;
+            if (live_threads > 1) {
+                proc_group_terminate(p, "killed");
+                return 0;
+            }
         }
         int rc = notes_post(p, buf, 0u, p, false);
         return (rc == 0) ? 0 : (s64)-1;
@@ -4686,6 +4719,13 @@ void syscall_dispatch(struct exception_context *ctx) {
         // The exception_context stays on the EXITING thread's kstack
         // until wait_pid → thread_free.
         sys_exits_handler(ctx->regs[0]);
+
+    case SYS_EXIT_GROUP:
+        // Never returns. POSIX exit_group(2): terminate the WHOLE Proc
+        // (cascade peer Threads via proc_group_terminate), not just the
+        // calling Thread. The exception_context stays on the EXITING thread's
+        // kstack until wait_pid -> thread_free.
+        sys_exit_group_handler(ctx->regs[0]);
 
     case SYS_PUTS:
         ctx->regs[0] = (u64)sys_puts_handler(ctx->regs[0], ctx->regs[1]);

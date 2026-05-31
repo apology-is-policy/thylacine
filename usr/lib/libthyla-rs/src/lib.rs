@@ -204,6 +204,7 @@ pub const T_SYS_RENAME: u64           = 57;
 pub const T_SYS_UNLINK: u64           = 58;
 // A-2a (IDENTITY-DESIGN.md section 9.5): chmod/chown via Tsetattr.
 pub const T_SYS_WSTAT: u64            = 59;
+pub const T_SYS_EXIT_GROUP: u64       = 60;
 // SYS_UNLINK flags: rmdir an empty directory vs unlink a non-directory.
 // Mirrors the kernel's SYS_UNLINK_REMOVEDIR / wire P9_UNLINK_AT_REMOVEDIR.
 pub const T_UNLINK_REMOVEDIR: u32     = 0x200;
@@ -451,6 +452,23 @@ pub unsafe fn t_exits(status: i64) -> ! {
         "svc #0",
         in("x0") status,
         in("x8") T_SYS_EXITS,
+        options(noreturn, nostack)
+    );
+}
+
+// t_exit_group — SYS_EXIT_GROUP (ARCH 7.9.1, I-24): terminate the WHOLE Proc
+// (cascade peer-Thread termination), not just the calling Thread. Never
+// returns. status==0 ⇒ "ok"; non-zero ⇒ "fail". POSIX exit_group(2): a
+// single-thread Proc is equivalent to t_exits(status); a multi-thread Proc has
+// every peer Thread self-exit at its EL0-return die-check. (No native v1.0
+// consumer — the boundary is pouch's __NR_exit_group -> 60; exported for ABI
+// completeness + a future native multi-thread program.)
+#[inline(always)]
+pub unsafe fn t_exit_group(status: i64) -> ! {
+    asm!(
+        "svc #0",
+        in("x0") status,
+        in("x8") T_SYS_EXIT_GROUP,
         options(noreturn, nostack)
     );
 }

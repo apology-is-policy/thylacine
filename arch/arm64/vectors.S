@@ -254,6 +254,7 @@ _exception_vectors:
     mov     x0, sp
     bl      exception_irq_curr_el
     bl      preempt_check_irq            /* P2-Bc: maybe context-switch */
+    bl      el0_return_die_check         /* I-24: self-exit if Proc group-terminating (noreturn if so) */
     b       .Lexception_return
 
     .org _exception_vectors + 0x500

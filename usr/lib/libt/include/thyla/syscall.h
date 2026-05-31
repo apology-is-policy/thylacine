@@ -90,6 +90,7 @@ enum {
     T_SYS_RENAME      = 57,      // FS-gamma: atomic rename/move (Trenameat)
     T_SYS_UNLINK      = 58,      // FS-gamma: remove a file or empty directory (Tunlinkat)
     T_SYS_WSTAT       = 59,      // A-2a: chmod/chown via Tsetattr
+    T_SYS_EXIT_GROUP  = 60,      // SYS_EXIT_GROUP: whole-Proc group-terminate (ARCH 7.9.1/I-24)
 };
 
 // SYS_UNLINK flags: rmdir an empty directory (vs unlink a non-directory).
@@ -1335,6 +1336,27 @@ static inline void t_thread_exit(void) {
         "svc #0"
         :
         : "r"(x8)
+        : "memory", "cc"
+    );
+    __builtin_unreachable();
+}
+
+// SYS_EXIT_GROUP (ARCH 7.9.1, invariant I-24): terminate the WHOLE Proc --
+// cascade peer-Thread termination -- with `status` (0 -> "ok", else "fail").
+// NEVER returns. POSIX exit_group(2): the whole-process exit a multi-thread
+// program wants. Every peer Thread self-exits at its EL0-return die-check; the
+// last Thread out reaps the Proc to ZOMBIE with the status. pouch's _Exit /
+// exit / abort route through __NR_exit_group -> SYS_EXIT_GROUP. A single-thread
+// Proc gets t_exits(status)-equivalent semantics. Distinct from t_thread_exit
+// (exits ONE Thread) and t_exits (which v1.0 REQUIRES all peers already
+// joined; t_exit_group does the joining-by-shootdown instead).
+__attribute__((noreturn, always_inline))
+static inline void t_exit_group(long status) {
+    register long x0 __asm__("x0") = status;
+    register long x8 __asm__("x8") = T_SYS_EXIT_GROUP;
+    __asm__ volatile (
+        "svc #0"
+        :: "r"(x0), "r"(x8)
         : "memory", "cc"
     );
     __builtin_unreachable();

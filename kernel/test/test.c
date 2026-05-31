@@ -66,6 +66,7 @@ void test_proc_cascading_rfork_stress(void);
 void test_proc_orphan_reparent_smoke(void);
 void test_proc_console_attached_smoke(void);
 void test_proc_stripes_smoke(void);
+void test_proc_group_terminate_smoke(void);
 void test_proc_identity_kproc_is_system(void);
 void test_proc_identity_rfork_inherits(void);
 void test_proc_identity_apply_sets_fields(void);
@@ -743,6 +744,7 @@ struct test_case g_tests[] = {
     { "proc.orphan_reparent_smoke",    test_proc_orphan_reparent_smoke,    false, NULL },
     { "proc.console_attached_smoke",   test_proc_console_attached_smoke,   false, NULL },
     { "proc.stripes_smoke",            test_proc_stripes_smoke,            false, NULL },
+    { "proc.group_terminate_smoke",    test_proc_group_terminate_smoke,    false, NULL },
     { "proc_identity.kproc_is_system", test_proc_identity_kproc_is_system, false, NULL },
     { "proc_identity.rfork_inherits",  test_proc_identity_rfork_inherits,  false, NULL },
     { "proc_identity.apply_sets_fields",

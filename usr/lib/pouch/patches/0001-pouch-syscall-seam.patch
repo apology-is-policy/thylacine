@@ -9,7 +9,7 @@ seam from the Linux ABI to the Thylacine ABI. Four files, one change.
       sentinel. Reproduce after a musl re-vendor with this awk filter run
       over the pristine arch/aarch64/bits/syscall.h.in:
 
-        BEGIN { m["exit"]="0"; m["exit_group"]="0"; m["read"]="9";
+        BEGIN { m["exit"]="0"; m["exit_group"]="60"; m["read"]="9";
                 m["write"]="10"; m["close"]="11"; m["mlockall"]="16";
                 m["getrandom"]="20"; m["set_tid_address"]="36"; }
         /^#define __NR_/ { n=$2; sub(/^__NR_/,"",n);
@@ -359,8 +359,8 @@ Binding design: docs/POUCH-DESIGN.md sections 5 + 5.1. Invariants P-1, P-3.
 + *     call is a clean ENOSYS (invariant P-3) and no foreign syscall number
 + *     ever reaches the kernel (invariant P-1).
 + *
-+ * exit and exit_group both map to SYS_EXITS - whole-process exit at v1.0;
-+ * the per-thread exit distinction lands with the pouch-threads sub-chunk.
++ * exit maps to SYS_EXITS (0); exit_group maps to SYS_EXIT_GROUP (60) -- the
++ * whole-Proc group-terminate cascading peer-thread shootdown (ARCH 7.9.1/I-24).
 + *
 + * Wider POSIX (open, mmap, the socket family) is NOT 1:1 - pouch implements
 + * it in C in its lower half as sequences of Thylacine syscalls; those
@@ -463,7 +463,7 @@ Binding design: docs/POUCH-DESIGN.md sections 5 + 5.1. Invariants P-1, P-3.
 +#define __NR_capset 0xFFFF
 +#define __NR_personality 0xFFFF
 +#define __NR_exit 0
-+#define __NR_exit_group 0
++#define __NR_exit_group 60
 +#define __NR_waitid 0xFFFF
 +#define __NR_set_tid_address 36
 +#define __NR_unshare 0xFFFF

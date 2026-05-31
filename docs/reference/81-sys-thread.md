@@ -207,6 +207,31 @@ Pouch's `pthread_join` wraps this loop with the `pthread_t` bookkeeping; the wor
 
 ---
 
+## SYS_EXIT_GROUP — cross-thread shootdown (`= 60`)
+
+`SYS_EXIT_GROUP(status)` terminates the WHOLE Proc (POSIX `exit_group(2)`), cascading termination to every peer Thread — the v1.x lift named in the caveats below, landed for #809 (the #808-audit F3 de-flake). It replaces the v1.0 behavior where `_Exit` / `abort` / a mallocng assert in a multi-thread pouch Proc routed `__NR_exit_group -> SYS_EXITS` and EXTINCTED the kernel ("exits with live peer threads"). Design: ARCH §7.9.1 + invariant I-24.
+
+**Model — flag-and-self-terminate at the EL0-return checkpoint** (Plan 9 / Linux / Zircon convergent; seL4's synchronous cross-core stall rejected). The caller flags the Proc + wakes/kicks its Threads; each Thread kills ITSELF at its next return-to-EL0. No Thread is force-torn-down from outside; the IPI is a latency accelerant, not a synchronous stop.
+
+**Mechanism** (`kernel/proc.c::proc_group_terminate`):
+1. CAS-publish `p->group_exit_msg` (a `const char *` NULL-sentinel; set-once, first msg wins; `__ATOMIC_RELEASE`). NULL = not terminating; non-NULL = the recorded last-Thread-out ZOMBIE status (`"ok" -> 0`, else `1`).
+2. `torpor_wake_all_for_proc(p)` — wake every futex (torpor) sleeper of `p` so it returns from `torpor_wait` to its die-check.
+3. `smp_resched_others()` — broadcast `IPI_RESCHED` to other CPUs so a peer spinning in userspace traps + hits its IRQ-from-EL0 die-check (Linux's `kick_process`; the periodic preemption timer is the floor if the IPI is missed).
+
+`proc_group_terminate` acquires NO `g_proc_table_lock` (only `torpor_lock` + via `wakeup` the rendez/cs locks, all below it), so it is safe to call either holding `proc_table_lock` (the cross-Proc `kill` walk_cb, where the target is alive under the lock) or not (`SYS_EXIT_GROUP` on `self->proc`).
+
+**The die-check** (`kernel/proc.c::el0_return_die_check`) runs at every return-to-EL0: the sync-from-EL0 tail (`exception_sync_lower_el_impl`: the SVC + fault-handled paths) AND the new IRQ-from-EL0 tail (`vectors.S` 0x480 -> `bl el0_return_die_check`). If `current->proc->group_exit_msg != NULL` it calls `thread_exit_self()` (noreturn — `sched()`s away). **#713-safe**: it runs BEFORE the DAIF-masked `ELR_EL1`-set..`eret` window, and the die path never reaches the `eret`. The LAST Thread out transitions the Proc -> ZOMBIE with the group status; `wait_pid` reaps the multi-Thread zombie (the `on_cpu`-spin per #788, unchanged).
+
+**Lost-wakeup close (I-9):** `sys_torpor_wait_for_proc` re-checks `group_exit_msg` AFTER registering its waiter, under `torpor_lock` — the same lock `torpor_wake_all_for_proc` walks. A peer that registers after the wake-all walk observes the set flag here and does not sleep; a peer that registered before is found by the walk. Register-then-observe, airtight.
+
+**Consumers.** `SYS_EXIT_GROUP = 60` calls it on `self->proc` (pouch rewires `__NR_exit_group` 0 -> 60 in `0001-pouch-syscall-seam.patch`; libt `t_exit_group` + libthyla-rs `t_exit_group` export it natively). A cross-Proc `kill` of a multi-thread target calls it (`sys_postnote`, both the walk_cb + self-post paths) instead of the prior `-EIO` refusal (closes 13b R1-F9). A single-thread Proc gets `exits(status)`-equivalent semantics.
+
+**v1.0 envelope (ARCH OPEN Q 7.9.A).** A peer blocked INDEFINITELY in a non-torpor / non-note kernel sleep (at v1.0 only a bare pipe read awaiting data/EOF) dies at its blocking call's completion, not instantly — the chosen consumers (stratumd's futex / 9P / running workers; typically single-thread killed Procs) do not hit it. Universal death-interruptibility of every kernel sleep (the Plan 9 `error(Eintr)`-from-`sleep` lift) is the v1.x arc. The multi-thread FAULT path (`proc_fault_terminate`) is a tracked follow-up (#810), not this chunk.
+
+**Tests.** `kernel/test/test_proc.c::proc.group_terminate_smoke` (kernel-side: set-once CAS, NULL no-op, die-check no-op on a non-terminating Proc, isolation). End-to-end: `/pouch-hello-exitgroup` (joey smoke) spawns 2 live un-joined workers (one cond-wait torpor sleeper, one userspace spinner), calls `_Exit(0)` -> `exit_group`, and joey reaps rc == 0 with zero extinction — the Proc only zombies once BOTH peers died, so rc == 0 IS proof the full cascade completed. Verified default(smp4) + UBSan + smp8 (the smp8 run exercises the cross-CPU IPI-kick).
+
+---
+
 ## Tests
 
 ### Kernel unit tests (`kernel/test/test_thread_spawn.c`)
@@ -248,7 +273,7 @@ joey's main runs this on every boot via a small `t_spawn("thread-probe")` + `t_w
 
 1. **No per-Thread reaping at v1.0.** A Thread that calls `SYS_THREAD_EXIT` leaves its Thread descriptor + 32 KiB allocation (16 KiB kstack + 16 KiB guard) live in the Proc's `threads` list until the Proc dies. For short-lived programs (libsodium tests) the leak is bounded; for long-running daemons (stratumd, future Thylacine-native daemons) the thread count must be bounded at the program level — typical pthread pool patterns work. A v1.x sub-chunk can add a per-Thread reap path (idle-CPU reaper walking a per-Proc dead-Thread list) when a workload requires it.
 
-2. **`exits()` requires all peer Threads EXITING.** Cross-thread shootdown (Linux's CLONE_THREAD-style `exit_group` that forcibly terminates running peers) is NOT supported at v1.0. A program that reaches `exits()` (or musl's `_exit_group`) with non-joined non-detached Threads triggers extinction with the message "exits with live peer threads". For the v1.0 proving set (libsodium self-tests + stratumd, both of which join their spawned threads at shutdown) this is the contract; per-Thread shootdown is a v1.x feature when needed.
+2. **`exits()` (SYS_EXITS) requires all peer Threads EXITING; `SYS_EXIT_GROUP` does the shootdown.** The cross-thread shootdown that terminates running peers landed for #809 as `SYS_EXIT_GROUP` (= 60; see the section above; ARCH §7.9.1 / I-24) — pouch routes `_Exit` / `exit` / `abort` / `exit_group` through `__NR_exit_group -> SYS_EXIT_GROUP`, so a multi-thread pouch Proc (stratumd) now exits cleanly instead of extincting. The bare `exits()` / `SYS_EXITS` path KEEPS its all-peers-EXITING contract: it is the non-cascade single-Thread / last-Thread exit, and a live peer at `exits()`-time still extincts with "exits with live peer threads" (well-formed programs reach the group exit via `exit_group`, not raw `SYS_EXITS`). v1.0 envelope: a peer blocked INDEFINITELY in a non-torpor / non-note kernel sleep dies at its call's completion, not instantly (ARCH OPEN Q 7.9.A); the multi-thread FAULT path (`proc_fault_terminate`) is the tracked follow-up #810.
 
 3. **`clear_child_tid` clear-and-wake is best-effort.** If a joiner munmap'd the worker's tidptr page before the worker exits, `uaccess_store_u32` returns -1 and `torpor_wake` is skipped — the kernel does NOT extinct. This is a programming error (a joiner that unmaps a worker's tidptr without joining the worker) but v1.0 silently degrades rather than panicking; no kernel-side recovery is possible.
 

@@ -1225,6 +1225,21 @@ enum {
     //   Dev has no .wstat_native slot; server Rlerror. Audit-bearing:
     //   CLAUDE.md A-2 FS-permission row.
     SYS_WSTAT        = 59,   // arg: fd (x0), valid (x1), mode (x2), uid (x3), gid (x4)
+
+    // SYS_EXIT_GROUP(status) -- terminate the WHOLE Proc (POSIX exit_group(2)).
+    // NEVER returns. Cascades termination to every peer Thread of the calling
+    // Proc (proc_group_terminate flags the Proc + wakes/kicks its Threads so
+    // each self-exits at its EL0-return die-check), then exits the caller; the
+    // LAST Thread out transitions the Proc to ZOMBIE with `status` collapsed to
+    // the ok/fail convention (status == 0 -> "ok"/0, else -> "fail"/1; the
+    // structured 64-bit status is a Phase-5+ deferral). Replaces the v1.0
+    // behavior where _Exit / exit_group routed to SYS_EXITS and EXTINCTED the
+    // kernel when the Proc had live peer Threads. pouch rewires
+    // __NR_exit_group -> 60; a single-thread Proc gets exits(status)-equivalent
+    // semantics. Audit-bearing: CLAUDE.md "Group termination / cross-thread
+    // shootdown" row; ARCH §7.9.1 + invariant I-24.
+    //   x0 = status (int; 0 = clean exit, non-zero = error)
+    SYS_EXIT_GROUP   = 60,   // arg: status (x0); NEVER returns
 };
 
 // SYS_WALK_OPEN's FROM_ROOT sentinel: when passed as the spoor_fd, the

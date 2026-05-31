@@ -509,6 +509,61 @@ void test_proc_console_attached_smoke(void) {
 }
 
 // =============================================================================
+// SYS_EXIT_GROUP / cross-thread shootdown (ARCH §7.9.1, invariant I-24).
+// =============================================================================
+
+// proc.group_terminate_smoke
+//   Kernel-side contract for proc_group_terminate + el0_return_die_check. The
+//   FULL cascade (every peer Thread self-exits at its EL0-return die-check; the
+//   last out reaps the Proc) is a userspace-EL0 behavior proven by the
+//   stratumd-shutdown E2E (the test.sh de-flake) -- a kernel rfork child runs
+//   in the kernel and never hits an EL0-return tail, so it can't exercise that
+//   path here. This pins what IS unit-testable:
+//     * a NULL Proc is a safe no-op (fail-safe);
+//     * group_exit_msg is set-once (CAS; the first caller's msg wins, so the
+//       last-Thread-out ZOMBIE status is the first-declared one);
+//     * el0_return_die_check no-ops (RETURNS) on a Proc not group-terminating;
+//     * terminating one Proc does not flag another (isolation).
+void test_proc_group_terminate_smoke(void) {
+    // Fail-safe: a NULL Proc is a quiet no-op (the caller validates; defensive).
+    proc_group_terminate(NULL, "fail");
+
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    TEST_ASSERT(p->group_exit_msg == NULL,
+        "a fresh Proc must not be group-terminating (KP_ZERO -> NULL)");
+
+    // First group-terminate publishes the msg. Also exercises the empty-bucket
+    // torpor_wake_all_for_proc + smp_resched_others -- both safe no-ops here
+    // (no torpor waiters; the IPI broadcast is harmless / nothing at -smp 1).
+    proc_group_terminate(p, "fail");
+    TEST_ASSERT(p->group_exit_msg != NULL,
+        "proc_group_terminate must publish group_exit_msg");
+    TEST_EXPECT_EQ((int)p->group_exit_msg[0], (int)'f',
+        "group_exit_msg must be the first caller's msg (\"fail\")");
+
+    // Set-once (CAS): a racing second group-terminate does NOT overwrite the
+    // first msg -- the last-Thread-out ZOMBIE status stays the first-declared.
+    const char *first = p->group_exit_msg;
+    proc_group_terminate(p, "ok");
+    TEST_ASSERT(p->group_exit_msg == first,
+        "proc_group_terminate is set-once (first msg wins; CAS idempotent)");
+
+    // Isolation + el0_return_die_check no-op: the test thread's own Proc is
+    // NOT group-terminating, so el0_return_die_check must RETURN here (it must
+    // not self-exit the test thread). Asserting the Proc is un-flagged first
+    // guards the call from accidentally terminating the harness.
+    struct Thread *t = current_thread();
+    struct Proc *self = t ? t->proc : NULL;
+    TEST_ASSERT(self != NULL && self->group_exit_msg == NULL,
+        "terminating p must not flag the test thread's Proc (isolation)");
+    el0_return_die_check();   // must return -- self is not group-terminating
+
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+}
+
+// =============================================================================
 // P5-corvus-srv: per-Proc identity tag (`stripes`).
 // =============================================================================
 

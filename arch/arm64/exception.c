@@ -321,6 +321,13 @@ static void exception_irq_curr_el_impl(struct exception_context *ctx) {
 // tail note-delivery hook (defined in kernel/notes.c).
 void notes_deliver_at_el0_return(struct exception_context *ctx);
 
+// SYS_EXIT_GROUP / kill cross-thread shootdown (ARCH §7.9.1, I-24): the
+// EL0-return-tail die-check (defined in kernel/proc.c). If the calling
+// Thread's Proc is group-terminating, the Thread self-exits here (noreturn);
+// otherwise returns. Called at the sync-from-EL0 tails below + the
+// IRQ-from-EL0 tail (vectors.S 0x480 -> bl el0_return_die_check).
+void el0_return_die_check(void);
+
 static void exception_sync_lower_el_impl(struct exception_context *ctx) {
     u64 esr = ctx->esr;
     u64 far = ctx->far;
@@ -341,6 +348,11 @@ static void exception_sync_lower_el_impl(struct exception_context *ctx) {
             // will see the same fault on its return if it didn't fix the
             // mapping (the in_handler guard prevents a delivery loop on
             // a handler-side fault).
+            //
+            // I-24: the EL0-return die-check runs FIRST -- if this Proc is
+            // group-terminating (SYS_EXIT_GROUP / kill), the Thread self-exits
+            // here (noreturn) instead of resuming the faulting instruction.
+            el0_return_die_check();
             notes_deliver_at_el0_return(ctx);
             return;          // ERET resumes the faulting EL0 instruction.
         case FAULT_UNHANDLED_USER:
@@ -389,6 +401,12 @@ static void exception_sync_lower_el_impl(struct exception_context *ctx) {
         // rewrite ctx to land at the registered handler. The async-
         // handler path; the fd-read path (devnotes_read) consumes
         // queued notes independently.
+        //
+        // I-24: the EL0-return die-check runs FIRST -- a woken torpor_wait, or
+        // any syscall returning while this Proc is group-terminating
+        // (SYS_EXIT_GROUP / kill), self-exits here (noreturn) before resuming
+        // userspace.
+        el0_return_die_check();
         notes_deliver_at_el0_return(ctx);
         return;
 

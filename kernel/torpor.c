@@ -202,6 +202,24 @@ s64 sys_torpor_wait_for_proc(struct Proc *p, u64 addr_va, u32 expected,
     w.next = torpor_buckets[idx];
     torpor_buckets[idx] = &w;
 
+    // SYS_EXIT_GROUP / kill cross-thread shootdown lost-wakeup close (I-24).
+    // Re-check the Proc's group-termination flag AFTER registering, UNDER
+    // torpor_lock -- the same lock proc_group_terminate's torpor_wake_all walk
+    // takes. This makes the wake airtight against the register-vs-walk race:
+    //   - if we registered BEFORE the wake-all walk, the walk finds us +
+    //     wakes us (awoken=1) -> tsleep returns immediately;
+    //   - if we register AFTER the walk (it missed us), then the flag-set
+    //     happened-before the walk, the walk released torpor_lock, and we
+    //     acquired it to register -- so this acquire-load observes the set
+    //     flag here and we do NOT sleep.
+    // Either way a group-terminating Proc's futex sleeper does not sleep
+    // through the exit; it returns + dies at its EL0-return die-check.
+    if (__atomic_load_n(&p->group_exit_msg, __ATOMIC_ACQUIRE) != NULL) {
+        torpor_bucket_unlink_locked(&w);
+        spin_unlock(&torpor_lock);
+        return TORPOR_OK;
+    }
+
     // Compute the tsleep deadline on the timer_now_ns timebase. < 0
     // timeout maps to `deadline_ns = 0` (the "no deadline" sentinel
     // tsleep treats as `sleep`).
@@ -313,4 +331,29 @@ s64 sys_torpor_wake_for_proc(struct Proc *p, u64 addr_va, u32 count) {
 
     spin_unlock(&torpor_lock);
     return (s64)woken;
+}
+
+// SYS_EXIT_GROUP / cross-Proc kill cross-thread shootdown (ARCH §7.9.1, I-24).
+// Wake EVERY torpor waiter owned by `p`, regardless of the address waited on,
+// so each returns from sys_torpor_wait_for_proc to its EL0-return die-check.
+// Called by proc_group_terminate AFTER it sets p->group_exit_msg. Walks all
+// buckets -- the group-exit path is rare + not address-keyed (unlike the
+// per-(proc,addr) WAKE). Same awoken-flag + wakeup() discipline as
+// sys_torpor_wake_for_proc; the register-after-this-walk lost-wakeup is closed
+// by the post-register group_exit_msg check in sys_torpor_wait_for_proc. Same
+// F2 hazard as the per-address wake (holds torpor_lock across wakeup()'s
+// on_cpu spin); dormant at v1.0, the v1.x per-bucket split applies uniformly.
+void torpor_wake_all_for_proc(struct Proc *p) {
+    if (!p) return;
+    spin_lock(&torpor_lock);
+    for (u32 idx = 0; idx < TORPOR_HASH_BUCKETS; idx++) {
+        for (struct torpor_waiter *w = torpor_buckets[idx];
+             w != NULL; w = w->next) {
+            if (w->proc != p) continue;
+            if (w->awoken)    continue;
+            w->awoken = 1;
+            (void)wakeup(&w->rendez);
+        }
+    }
+    spin_unlock(&torpor_lock);
 }

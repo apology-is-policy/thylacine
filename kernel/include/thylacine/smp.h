@@ -195,4 +195,11 @@ extern volatile u64 g_ipi_resched_count[DTB_MAX_CPUS];
 // enabled to wake from WFI when an IPI arrives.
 void smp_cpu_ipi_init(unsigned cpu_idx);
 
+// SYS_EXIT_GROUP / cross-Proc kill cross-thread shootdown (ARCH §7.9.1,
+// invariant I-24). Broadcast IPI_RESCHED to all CPUs except self, kicking any
+// peer running in userspace on another CPU into the kernel so it hits its
+// IRQ-from-EL0 die-check (Linux kick_process). Called by proc_group_terminate;
+// the periodic preemption timer is the floor if an IPI is missed.
+void smp_resched_others(void);
+
 #endif // THYLACINE_SMP_H

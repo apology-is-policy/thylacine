@@ -27,6 +27,7 @@
 #include <thylacine/proc.h>
 #include <thylacine/rendez.h>
 #include <thylacine/sched.h>
+#include <thylacine/smp.h>
 #include <thylacine/spinlock.h>
 #include <thylacine/thread.h>
 #include <thylacine/torpor.h>
@@ -1173,11 +1174,21 @@ void thread_exit_self(void) {
     bool become_zombie = (live_peers == 0);
 
     if (become_zombie) {
-        // This Thread is the last live one. Proc transitions to ZOMBIE
-        // with status 0 (the SYS_THREAD_EXIT convention — no
-        // user-specified status; explicit-status program exit goes
-        // through exits()).
-        proc_become_zombie_locked(p, 0, "ok");
+        // This Thread is the last live one. Proc transitions to ZOMBIE.
+        // SYS_EXIT_GROUP / kill cross-thread shootdown (I-24): if a group
+        // termination is in progress, use the recorded group_exit_msg + its
+        // derived status (the same "ok" -> 0 / else -> 1 collapse exits()
+        // uses); otherwise the SYS_THREAD_EXIT convention is status 0 / "ok"
+        // (no user-specified status; explicit-status program exit goes through
+        // exits()). The group_exit_msg read is under g_proc_table_lock here +
+        // set via release CAS in proc_group_terminate -- a coherent snapshot.
+        const char *gmsg = __atomic_load_n(&p->group_exit_msg, __ATOMIC_ACQUIRE);
+        if (gmsg) {
+            int gstatus = (gmsg[0] == 'o' && gmsg[1] == 'k' && gmsg[2] == 0) ? 0 : 1;
+            proc_become_zombie_locked(p, gstatus, gmsg);
+        } else {
+            proc_become_zombie_locked(p, 0, "ok");
+        }
     }
 
     t->state = THREAD_EXITING;
@@ -1204,6 +1215,63 @@ void thread_exit_self(void) {
 
     sched();
     extinction("thread_exit_self: returned from sched (impossible)");
+}
+
+// ===========================================================================
+// SYS_EXIT_GROUP / cross-Proc kill cross-thread shootdown (ARCH §7.9.1, I-24).
+// ===========================================================================
+//
+// The flag-and-self-terminate model (Plan 9 / Linux / Zircon convergent): the
+// caller flags the Proc + wakes/kicks its Threads, and each Thread kills
+// ITSELF at its next EL0-return die-check (el0_return_die_check). No Thread is
+// force-torn-down from outside; the IPI is a latency accelerant, not a
+// synchronous stop. See proc.h for the contract + ARCH §7.9.1 for the design.
+
+void proc_group_terminate(struct Proc *p, const char *msg) {
+    if (!p || p->magic != PROC_MAGIC) return;   // fail-safe; caller validates
+    if (!msg) msg = "killed";
+
+    // Flag the Proc for group termination. Set-once via CAS: the first
+    // caller's msg wins; a racing second group-terminate (two threads both
+    // exit_group, or exit_group racing a kill) is a no-op for the flag but
+    // still re-runs the wake + kick below (idempotent). __ATOMIC_RELEASE so a
+    // peer's __ATOMIC_ACQUIRE load at its die-check sees a fully-published msg.
+    const char *expected = NULL;
+    __atomic_compare_exchange_n(&p->group_exit_msg, &expected, msg,
+                                false, __ATOMIC_RELEASE, __ATOMIC_RELAXED);
+
+    // Wake every futex (torpor) sleeper of p so it returns from torpor_wait to
+    // its EL0-return die-check. MUST run AFTER the flag set: a peer that
+    // registers in torpor_wait after this walk re-observes the now-set flag in
+    // torpor_wait's post-register check (register-then-observe; I-9). The
+    // torpor lock-order is strictly below g_proc_table_lock, so this is sound
+    // whether or not the caller holds g_proc_table_lock (the kill walk_cb does;
+    // SYS_EXIT_GROUP on self does not).
+    torpor_wake_all_for_proc(p);
+
+    // Kick any peer RUNNING in userspace on another CPU so it traps + hits its
+    // IRQ-from-EL0 die-check without waiting for a timer tick (Linux
+    // kick_process). Broadcast to other online CPUs (rare path; <= ncpus-1
+    // IPIs); a CPU not running a peer of p simply no-ops its die-check. The
+    // periodic preemption timer is the floor if the IPI is somehow missed.
+    smp_resched_others();
+}
+
+void el0_return_die_check(void) {
+    struct Thread *t = current_thread();
+    if (!t || t->magic != THREAD_MAGIC) return;
+    struct Proc *p = t->proc;
+    if (!p || p->magic != PROC_MAGIC)   return;
+    if (__atomic_load_n(&p->group_exit_msg, __ATOMIC_ACQUIRE) != NULL) {
+        // The Proc is group-terminating; self-terminate. thread_exit_self
+        // marks self EXITING and, if this is the last live Thread, transitions
+        // the Proc to ZOMBIE with the recorded group_exit_msg status. NEVER
+        // returns (sched() away) -- so on the sync tail the subsequent
+        // notes_deliver is skipped, and on the IRQ tail the eret is never
+        // reached (#713-safe: no interruptible ELR-set..eret window is entered
+        // on the die path).
+        thread_exit_self();
+    }
 }
 
 // cond predicate for wait_pid's sleep: any child in ZOMBIE state, OR

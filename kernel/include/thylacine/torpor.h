@@ -157,4 +157,12 @@ s64 sys_torpor_wait_for_proc(struct Proc *p, u64 addr_va, u32 expected,
 // consumer's later WAIT reads `*addr_va` under `torpor_lock`.
 s64 sys_torpor_wake_for_proc(struct Proc *p, u64 addr_va, u32 count);
 
+// SYS_EXIT_GROUP / cross-Proc kill cross-thread shootdown (ARCH §7.9.1,
+// invariant I-24). Wake EVERY torpor waiter owned by `p` (all addresses) so
+// each returns from sys_torpor_wait_for_proc to its EL0-return die-check.
+// Called only by proc_group_terminate, after it publishes p->group_exit_msg;
+// the post-register group_exit_msg re-check in sys_torpor_wait_for_proc closes
+// the register-after-this-walk lost-wakeup. Not a syscall surface.
+void torpor_wake_all_for_proc(struct Proc *p);
+
 #endif // THYLACINE_TORPOR_H
