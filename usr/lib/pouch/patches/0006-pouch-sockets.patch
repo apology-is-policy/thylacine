@@ -728,7 +728,7 @@ close dance.
  }
 --- a/src/network/getsockopt.c
 +++ b/src/network/getsockopt.c
-@@ -1,41 +1,109 @@
+@@ -1,41 +1,115 @@
 +/* pouch — getsockopt(2) for AF_UNIX SOCK_STREAM (P6-pouch-sockets,
 + * sub-chunk 12). SO_PEERCRED maps onto SYS_srv_peer — Thylacine's
 + * kernel-stamped, unforgeable peer-identity primitive.
@@ -759,7 +759,13 @@ close dance.
  
 -int getsockopt(int fd, int level, int optname, void *restrict optval, socklen_t *restrict optlen)
 +/* Mirrors kernel/include/thylacine/syscall.h::srv_peer_info — 40-byte
-+ * record (A-1a appended identity after `alive`; uid/gid marshal is A-3). */
++ * record (A-1a appended identity after `alive`). A-3: the uid/gid marshal
++ * below carries the peer's kernel-stamped principal_id / primary_gid (was a
++ * 0/0 stub). This is Thylacine's SO_PEERCRED-carries-principal channel: a
++ * trusted-local server (per-user stratumd) reads peer creds via this path
++ * to stamp create-ownership and to be reconciled against the kernel's rwx
++ * enforcement. The principal is kernel-stamped (SYS_srv_peer reads the peer
++ * Proc's durable principal_id), so the connecting Proc cannot forge it. */
 +struct pouch_srv_peer_info {
 +	unsigned long stripes;
 +	unsigned long caps;
@@ -853,8 +859,8 @@ close dance.
 +		unsigned int gid;
 +	} ucred = {
 +		.pid = (int)(info.stripes & 0x7fffffff),
-+		.uid = 0,
-+		.gid = 0,
++		.uid = info.principal_id,
++		.gid = info.primary_gid,
 +	};
 +
 +	/* F10 close (P6-pouch-sockets audit): per the Linux man page,

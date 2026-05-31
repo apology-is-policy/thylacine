@@ -173,6 +173,27 @@ sysroot_is_stale() {
     return 1
 }
 
+# stratum_host_tools_stale -- true (0) iff the host-native stratum tools
+# (stratum-mkfs / stratumd / stratum-fs) must be rebuilt: a binary is missing,
+# OR a Stratum C source / header is newer than the built stratumd. Mirrors
+# sysroot_is_stale (the A-2a stale-consumer footgun fix). The prior guard in
+# build_stratum_pool_fixture rebuilt ONLY when a binary was missing, so a
+# Stratum source edit (e.g. A-3's --bake-owner-uid flag) silently shipped a
+# stale host stratumd and the pool bake failed with "unknown option".
+stratum_host_tools_stale() {
+    local stratum_src="${STRATUM_SRC:-$HOME/projects/stratum/v2}"
+    local hb="$BUILD_DIR/host-stratum"
+    local sd="$hb/src/cmd/stratumd/stratumd"
+    [[ -x "$hb/src/cmd/stratum-mkfs/stratum-mkfs" ]] || return 0
+    [[ -x "$sd" ]]                                   || return 0
+    [[ -x "$hb/src/cmd/stratum-fs/stratum-fs" ]]     || return 0
+    if [[ -n "$(find "$stratum_src/src" "$stratum_src/include" \
+                     "$stratum_src/CMakeLists.txt" -newer "$sd" 2>/dev/null)" ]]; then
+        return 0
+    fi
+    return 1
+}
+
 build_kernel() {
     echo "==> Building kernel (build_type=$build_type, hardening=$hardening_full, kaslr=$kaslr, sanitize='${sanitize_cmake}', dir=$KERNEL_BUILD)"
     cmake -S "$REPO_ROOT" -B "$KERNEL_BUILD" \
@@ -1064,10 +1085,11 @@ build_stratum_pool_fixture() {
     local keyfile="$fixtures/system.key"
 
     # 16c: also need stratumd + stratum-fs for the populate step at the
-    # bottom; rebuild all three host tools if any one is missing.
+    # bottom. Rebuild all three host tools if any is missing OR if a Stratum
+    # source file is newer than the built stratumd (stratum_host_tools_stale).
     local host_stratumd="$host_build/src/cmd/stratumd/stratumd"
     local host_stratum_fs="$host_build/src/cmd/stratum-fs/stratum-fs"
-    if [[ ! -x "$mkfs_bin" || ! -x "$host_stratumd" || ! -x "$host_stratum_fs" ]]; then
+    if stratum_host_tools_stale; then
         build_stratum_host_tools
     fi
 
@@ -1170,11 +1192,20 @@ populate_stratum_pool() {
     # without rerunning the whole build.
     # --listen takes a raw filesystem path (NOT a unix:PATH URL prefix --
     # stratumd's listen_unix calls bind(2) on the path verbatim).
+    # A-3: stamp every baked file PRINCIPAL_SYSTEM-owned (uid == gid ==
+    # 0xFFFFFFFE == 4294967294) instead of the host build user's uid. The
+    # Thylacine boot chain runs as PRINCIPAL_SYSTEM; once kernel dev9p rwx
+    # enforcement is live (A-3b) the boot chain must be the OWNER of the
+    # baked corpus (owner-rwx) or its post-pivot creates would be denied
+    # as `other` -> boot brick. See IDENTITY-DESIGN.md section 9.7 M2.
+    local bake_owner=4294967294   # PRINCIPAL_SYSTEM == GID_SYSTEM == (u32)-2
     "$stratumd_bin" "$pool_img" \
         --listen "$sock_path" \
         --keyfile "$keyfile" \
         --root-dataset 1 \
         --backlog 4 \
+        --bake-owner-uid "$bake_owner" \
+        --bake-owner-gid "$bake_owner" \
         > "$stratumd_log" 2>&1 &
     local stratumd_pid=$!
 

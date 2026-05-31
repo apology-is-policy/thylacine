@@ -1110,7 +1110,13 @@ static s64 sys_attach_9p_handler(u64 tx_fd_raw, u64 rx_fd_raw,
         SYS_ATTACH_DEFAULT_MSIZE,            // msize (client proposal)
         NULL, 0,                             // uname (empty at v1.0; no-auth)
         aname_len > 0 ? aname_scratch : NULL, aname_len,
-        (u32)n_uname);
+        // A-3 M4: assert the caller's kernel-stamped principal as n_uname.
+        // The userspace-supplied n_uname is vestigial (validated above for
+        // ABI hygiene, then superseded). Against Stratum this is a no-op
+        // (it reconciles via SO_PEERCRED, ignoring n_uname); it is forward-
+        // compat for a foreign 9P server with no SO_PEERCRED. SO_PEERCRED is
+        // the live local channel (IDENTITY-DESIGN.md section 9.7 M1/M4).
+        p->principal_id);
     if (!att) {
         // p9_attached_create's failure leaves the adapter untouched
         // (the create's transport_ops.close runs on rollback, which is
@@ -1310,7 +1316,10 @@ static s64 sys_attach_9p_srv_handler(u64 srv_fd_raw, u64 aname_va,
         SYS_ATTACH_DEFAULT_MSIZE,            // msize (client proposal)
         NULL, 0,                             // uname (empty; no-auth v1.0)
         aname_len > 0 ? aname_scratch : NULL, aname_len,
-        (u32)n_uname);
+        // A-3 M4: assert the caller's kernel-stamped principal as n_uname
+        // (vestigial userspace arg superseded; SO_PEERCRED is the live local
+        // channel for stratumd). See section 9.7 + the sys_attach_9p_handler twin.
+        p->principal_id);
     if (!att) {
         // Handshake failed (server unresponsive, deadline, Rlerror, OOM).
         // The adapter still holds its srvconn_ref; release it manually
