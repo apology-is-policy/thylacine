@@ -68,7 +68,7 @@ Used by `exception_sync_curr_el` (and future `exception_sync_lower_el` at P3-E) 
 
 Top-level dispatcher. At v1.0 P3-C the order of checks is:
 
-1. **Kernel-mode + stack-guard region** → `extinction("kernel stack overflow")`.
+1. **Kernel-mode + stack-guard region** → `extinction("kernel stack overflow (<flavor>)")` where `<flavor>` is `boot-stack guard` / `secondary-stack guard` / `current-thread kstack guard` (F4, 2026-05-31: the message NAMES the guard so a wild-SP fault is never misattributed — the generic message had let the F-B early-boot overflow read as a `_boot_stack` overflow even though the boot CPU provably cannot deepen its stack in that window).
 2. **Kernel-mode + permission fault + kernel image** → `extinction("PTE violates W^X (kernel image)")`.
 3. **Kernel-mode + translation fault** → `extinction("unhandled kernel translation fault")`.
 4. **Kernel-mode + permission fault (other)** → `extinction("unhandled kernel permission fault")`.
@@ -165,7 +165,7 @@ case EC_INST_ABORT_SAME: {
 
 ### Address-range classifiers
 
-- `addr_is_stack_guard(addr)` checks: the boot-stack guard (PA + high-VA ranges), each secondary boot-stack guard page (PA + high-VA forms — P5-secondary-stack-guard, one per `g_secondary_boot_stacks` slot), and the current-thread kstack guard region (direct-map KVA via `t->kstack_base`). Defense-in-depth: multiple address forms because FAR_EL1 may carry the PA OR the VA depending on which translation root caught the fault. A secondary CPU's idle thread runs on its boot stack, so an overflow there lands in that slot's guard page.
+- `addr_is_stack_guard(addr)` checks: the boot-stack guard (PA + high-VA ranges), each secondary boot-stack guard page (PA + high-VA forms — P5-secondary-stack-guard, one per `g_secondary_boot_stacks` slot), and the current-thread kstack guard region (direct-map KVA via `t->kstack_base`). Defense-in-depth: multiple address forms because FAR_EL1 may carry the PA OR the VA depending on which translation root caught the fault. A secondary CPU's idle thread runs on its boot stack, so an overflow there lands in that slot's guard page. Since F4 (2026-05-31) the classifier is `stack_guard_overflow_msg(addr)`, which returns the flavor-named extinction string (or NULL); `addr_is_stack_guard` is now a thin `!= NULL` wrapper. Naming the flavor disambiguated the F-B early-boot overflow that the generic message had misattributed to `_boot_stack`.
 - `addr_is_kernel_image(addr)` checks: kernel-image PA range, kernel-image high VA range, and direct-map alias of kernel-image PA range (P3-Bca added the third).
 
 ## Data structures

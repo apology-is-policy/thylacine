@@ -131,50 +131,49 @@ static u64 sym_to_pa(const void *sym) {
     return high_va_to_pa((u64)(uintptr_t)sym);
 }
 
-// True iff `addr` falls inside any active stack guard region — the boot
-// stack guard (start.S) OR the per-thread kstack guard (P3-Bca; lower
-// THREAD_KSTACK_GUARD_SIZE of each thread_create'd kstack mapped no-
-// access in the kernel direct map). Both flavors produce the same
-// "kernel stack overflow" extinction.
-static bool addr_is_stack_guard(u64 addr) {
-    // Boot stack guard via PA range.
-    u64 guard_pa  = sym_to_pa(_boot_stack_guard);
-    u64 bottom_pa = sym_to_pa(_boot_stack_bottom);
-    if (addr >= guard_pa && addr < bottom_pa) return true;
+// Returns the "kernel stack overflow" extinction message NAMING the guard
+// region that contains `addr`, or NULL if `addr` is in no active guard.
+// Three flavors: the boot CPU's _boot_stack guard (start.S), the per-secondary
+// boot-stack guards (P5-secondary-stack-guard), and the current thread's
+// per-thread kstack guard (P3-Bca; lower THREAD_KSTACK_GUARD_SIZE mapped
+// no-access in the kernel direct map). F4 (SMP soundness sweep, 2026-05-31):
+// the message NAMES the flavor so a fault is never misattributed -- a
+// secondary's (or current-thread's) wild-SP fault must not read as a
+// "_boot_stack" overflow, which is exactly what left the F-B early-boot
+// overflow ambiguous (the boot CPU provably cannot deepen its stack in that
+// window, so a _boot_stack-named fault there had no constructible cause).
+static const char *stack_guard_overflow_msg(u64 addr) {
+    // Boot stack guard (PA range, then high-VA range).
+    if (addr >= sym_to_pa(_boot_stack_guard) && addr < sym_to_pa(_boot_stack_bottom))
+        return "kernel stack overflow (boot-stack guard)";
+    if (addr >= (u64)(uintptr_t)_boot_stack_guard &&
+        addr < (u64)(uintptr_t)_boot_stack_bottom)
+        return "kernel stack overflow (boot-stack guard)";
 
-    // Boot stack guard via high-VA range.
-    u64 guard_va  = (u64)(uintptr_t)_boot_stack_guard;
-    u64 bottom_va = (u64)(uintptr_t)_boot_stack_bottom;
-    if (addr >= guard_va && addr < bottom_va) return true;
-
-    // P5-secondary-stack-guard: secondary boot-stack guard pages. Each
-    // slot's leading page is mapped no-access by mmu.c. A secondary's
-    // idle thread runs on its boot stack (it owns no per-thread kstack),
-    // so an overflow there lands in that slot's guard page. FAR_EL1 is
-    // the kernel-image high VA of the guard (post-MMU) — the PA form is
-    // checked defensively. Checked globally: any access into any
-    // secondary guard page is a stack overflow.
+    // Per-secondary boot-stack guard pages (high-VA, then PA). A secondary's
+    // idle thread runs on its boot stack (it owns no per-thread kstack), so an
+    // overflow OR a wild SP there lands in that slot's guard page.
     for (unsigned c = 0; c < DTB_MAX_CPUS - 1; c++) {
         u64 sg_va = (u64)(uintptr_t)&g_secondary_boot_stacks[c].guard[0];
         if (addr >= sg_va && addr < sg_va + SECONDARY_STACK_GUARD_SIZE)
-            return true;
+            return "kernel stack overflow (secondary-stack guard)";
         u64 sg_pa = sym_to_pa(&g_secondary_boot_stacks[c].guard[0]);
         if (addr >= sg_pa && addr < sg_pa + SECONDARY_STACK_GUARD_SIZE)
-            return true;
+            return "kernel stack overflow (secondary-stack guard)";
     }
 
-    // Per-thread kstack guard. P3-Bca: t->kstack_base is a direct-map KVA;
-    // the lower THREAD_KSTACK_GUARD_SIZE bytes are mapped no-access via
-    // mmu_set_no_access_range. Stack overflow lands inside that range,
-    // and FAR_EL1 is the direct-map KVA of the guard page.
+    // Current thread's per-thread kstack guard (direct-map KVA).
     struct Thread *t = current_thread();
     if (t && t->magic == THREAD_MAGIC && t->kstack_base) {
-        u64 t_guard_base = (u64)(uintptr_t)t->kstack_base;
-        u64 t_guard_end  = t_guard_base + THREAD_KSTACK_GUARD_SIZE;
-        if (addr >= t_guard_base && addr < t_guard_end) return true;
+        u64 b = (u64)(uintptr_t)t->kstack_base;
+        if (addr >= b && addr < b + THREAD_KSTACK_GUARD_SIZE)
+            return "kernel stack overflow (current-thread kstack guard)";
     }
+    return NULL;
+}
 
-    return false;
+static bool addr_is_stack_guard(u64 addr) {
+    return stack_guard_overflow_msg(addr) != NULL;
 }
 
 // True iff `addr` falls inside the kernel image's permanent mappings
@@ -210,9 +209,15 @@ enum fault_result arch_fault_handle(const struct fault_info *fi) {
     //    lower N pages of every kstack as no-access (P3-Bca direct-map
     //    L3 entries). An overflow access lands in one of those pages
     //    and faults; FAR_EL1 is in the guard region.
-    if (!fi->from_user && addr_is_stack_guard(fi->vaddr)) {
-        extinction_with_addr("kernel stack overflow",
-                             (uintptr_t)fi->vaddr);
+    if (!fi->from_user) {
+        // F4: name the guard flavor (boot / secondary / current-thread kstack)
+        // so a wild-SP fault is never misattributed -- the generic message
+        // made the F-B early-boot overflow read as "_boot_stack" even though
+        // the boot CPU provably cannot deepen its stack in that window.
+        // FAR_EL1 (fi->vaddr) shows where the SP landed; the flavor shows
+        // which stack it belongs to.
+        const char *ovf = stack_guard_overflow_msg(fi->vaddr);
+        if (ovf) extinction_with_addr(ovf, (uintptr_t)fi->vaddr);
     }
 
     // 2. W^X violation on the kernel image (kernel-mode only).
