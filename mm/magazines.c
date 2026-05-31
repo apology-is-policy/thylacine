@@ -13,6 +13,7 @@
 #include "magazines.h"
 #include "buddy.h"
 
+#include <thylacine/extinction.h> // ASSERT_OR_DIE (count-corruption guard)
 #include <thylacine/page.h>
 #include <thylacine/smp.h>        // smp_cpu_idx_self (MPIDR_EL1.Aff0)
 #include <thylacine/spinlock.h>   // spin_lock_irqsave(NULL): bare IRQ mask
@@ -47,6 +48,16 @@ static unsigned mag_idx_to_order(int idx) {
 // preemption (which is IRQ-driven). Clamp a wild MPIDR onto slot 0
 // (mirrors the fault.c #806 guard) so an out-of-range Aff0 can never
 // index past g_percpu[].
+//
+// KERNEL-WIDE ASSUMPTION (#807 audit F1): Aff0 == the dense logical CPU
+// index [0, online). This is the same convention sched.c (g_cpu_sched[]),
+// gic.c (redistributor base), fault.c, and halls.c already require -- and
+// per_cpu_main is even handed the dense DTB index as its sched id. On a
+// clustered SoC (big.LITTLE: Aff0 repeats per cluster) this folds two CPUs
+// onto one slot, re-opening the shared-set race for them -- so the Lazarus
+// / PORTABILITY arc must introduce ONE canonical MPIDR->dense-id map and
+// route smp_cpu_idx_self() through it (fixing magazines/sched/gic/fault/
+// halls uniformly). Dormant on QEMU virt + RPi 400 (dense Aff0).
 static inline int my_cpu(void) {
     unsigned c = smp_cpu_idx_self();
     return c < NCPUS ? (int)c : 0;
@@ -84,6 +95,10 @@ struct page *mag_alloc(unsigned order) {
     // irqsave -- fine (zone lock is a leaf; order is IRQ-off -> zone lock).
     irq_state_t s = spin_lock_irqsave(NULL);
     struct magazine *m = &g_percpu[my_cpu()].mags[idx];
+    // #807 regression guard: a corrupt count (e.g. a regressed cross-CPU
+    // race re-opening this set) trips here LOUDLY instead of silently
+    // double-allocating. Cheap (a compare under the mask we already hold).
+    ASSERT_OR_DIE((unsigned)m->count <= MAGAZINE_SIZE, "mag_alloc: count corrupt");
     if (m->count == 0) {
         mag_refill(m, mag_idx_to_order(idx));
         if (m->count == 0) {
@@ -118,6 +133,7 @@ bool mag_free(struct page *p, unsigned order) {
     // as mag_alloc -- pins this CPU's set, non-reentrantly.
     irq_state_t s = spin_lock_irqsave(NULL);
     struct magazine *m = &g_percpu[my_cpu()].mags[idx];
+    ASSERT_OR_DIE((unsigned)m->count <= MAGAZINE_SIZE, "mag_free: count corrupt");
     if (m->count == MAGAZINE_SIZE) {
         mag_drain(m, mag_idx_to_order(idx));
     }
