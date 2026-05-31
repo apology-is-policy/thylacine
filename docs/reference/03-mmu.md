@@ -314,6 +314,8 @@ This is the Linux-arm64 move — it page-maps the linear map (no block mappings)
 
 **Cost.** One L3 table (4 KiB) per 2 MiB block + one L2 per demoted GiB ≈ RAM/512 ≈ 0.2% of managed RAM (4 MiB per 2 GiB; 16 MiB at the `DIRECTMAP_USABLE_RAM_MAX` 8 GiB cap; boot banner reports it via `phys_directmap_table_pages`). The lost 1 GiB / 2 MiB block TLB reach is a bare-metal (Lazarus) perf concern only — free on QEMU TCG. Boot adds ≈1.4 s on QEMU TCG (≈1024 `tlbi vmalle1is`, each a full softmmu-TLB flush + re-translation under TCG); on real hardware these are ~µs ops (single-CPU `dsb ish` completes immediately) ≈ a few ms. A boot-path TLBI-batching / this-CPU-`tlbi vmalle1` optimization is a deferred Lazarus-era P3 (kept out of v1.0 to reuse the single audited BBM rather than add a second). See `25-fault-dispatcher.md` footgun #6 and `mmu.c::mmu_pagemap_directmap`.
 
+**Audited R1 CLEAN** (0 P0 / 0 P1 / 0 P2 / 3 P3; Opus prosecutor on the impl `d80e160`). Both claims (no runtime BBM remains; the boot pass's own BBMs are safe) verified by code-trace *and* empirically: the prosecutor booted the parent (`5664da5`, IRQ-mask only) 2/8 into the #806 wild-`FAR 0x800000` bare-extinction signature, while #808 ran clean — direct empirical proof the cross-CPU race is closed. The 3 P3s were: a clarified OOM-extinction message (fixed); the pre-existing `DIRECTMAP_USABLE_RAM_MAX` mem_base-relative-vs-absolute cap loose end (F2 above, Lazarus-bringup comment added); and the pre-existing v1.x `SYS_EXIT_GROUP` stratumd-`_Exit` flake (orthogonal to #808; escalated separately).
+
 ---
 
 ## See also

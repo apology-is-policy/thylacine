@@ -45,6 +45,17 @@ static paddr_t g_zone_end;
 // can hand out is direct-map-reachable. To raise the cap, extend the
 // direct map first (see arch/arm64/mmu.c build_page_tables and the
 // l1_directmap definition).
+//
+// #808 caveat (Lazarus loose end, dormant at v1.0): the cap below is
+// mem_base-RELATIVE (zone_end = mem_base + 8 GiB), but the direct map is
+// ABSOLUTE: l1_directmap[1..8] = PA [1 GiB, 9 GiB). They coincide only when
+// mem_base == 1 GiB (QEMU virt). If a future board reports mem_base != 1 GiB,
+// this relative cap would permit PAs above the absolute 9 GiB ceiling, which
+// the direct map cannot reach (the original F3 fault). mmu_pagemap_directmap's
+// own gib>8 skip is already absolute-correct, so the boot pass stays safe;
+// only this cap is the loose end. At Lazarus board bringup, express the cap as
+// the absolute ceiling -- min(mem_base + 8 GiB, 9 GiB) -- or widen the direct
+// map. (Pre-existing; surfaced by the #808 audit F2.)
 #define DIRECTMAP_USABLE_RAM_MAX (8ull << 30)   /* 8 GiB */
 
 // ---------------------------------------------------------------------------

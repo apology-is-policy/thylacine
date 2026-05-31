@@ -1099,9 +1099,15 @@ void mmu_pagemap_directmap(paddr_t base, paddr_t end) {
          pa += BLOCK_SIZE_L2) {
         u32 gib = (u32)(pa >> BLOCK_SHIFT_L1);
         if (gib < 1 || gib > 8) continue;          // outside the direct map
+        // NULL here is either alloc OOM or -- for an in-range block -- an
+        // unexpectedly-invalid L1/L2 entry (a hole in the direct map the pass
+        // assumes is fully mapped: a structural bug, not OOM). Both are fatal
+        // (the no-runtime-BBM invariant cannot be established); neither is
+        // reachable at v1.0 (gib 1 fully populated by build_page_tables, gib
+        // 2..8 get fully-valid L2s on demote, ~all RAM free here).
         if (!directmap_walk_to_l3(pa)) {
-            extinction("mmu_pagemap_directmap: OOM page-mapping the buddy "
-                       "direct map (#808)");
+            extinction("mmu_pagemap_directmap: cannot page-map an in-range "
+                       "buddy block (#808: OOM or an unmapped direct-map block)");
         }
     }
 }
