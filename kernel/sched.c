@@ -137,6 +137,11 @@ void sched_init(unsigned cpu_idx) {
     cs->idle         = current_thread();   // CPU's idle thread = first
                                            // thing parked in TPIDR_EL1
                                            // before sched_init runs.
+    // #801/F6: published to other CPUs by per_cpu_main's `dsb sy` after
+    // sched_init returns (smp.c); a secondary's try_steal / sched read of a
+    // peer's `initialized` relies on that barrier as the acquire side, so the
+    // plain store suffices. If that dsb is ever removed, make this a RELEASE
+    // store + the peer reads ACQUIRE loads.
     cs->initialized  = true;
 }
 
@@ -484,6 +489,22 @@ static struct Thread *try_steal(struct CpuSched *cs, bool *contended_out) {
             }
         }
 
+        // #801/F1: claim the victim under peer->lock BEFORE releasing it.
+        // Otherwise `stolen` sits out-of-tree + RUNNABLE + on_cpu==false in an
+        // unlocked limbo between here and the picker's on_cpu set (~line 670),
+        // so a concurrent thread_free could observe it free-able and reclaim it
+        // mid-steal (a UAF on its ctx/kstack -- the F1 window the SMP prosecutor
+        // found; production-unreachable today since only tests free a RUNNABLE
+        // in-tree thread, but closed here for any future caller). Setting on_cpu
+        // under peer->lock means a racing thread_free -- whose
+        // sched_remove_if_runnable walk also takes peer->lock -- either unlinked
+        // `stolen` FIRST (we won't find it) or observes on_cpu==true after its
+        // walk and waits the steal out via its on_cpu spin. RELAXED matches the
+        // picker's set; the peer->lock release/acquire is the inter-CPU publish
+        // edge. on_cpu is later cleared normally when `stolen` is switched out.
+        if (stolen)
+            __atomic_store_n(&stolen->on_cpu, true, __ATOMIC_RELAXED);
+
         spin_unlock(&peer->lock);
 
         if (stolen) {
@@ -667,6 +688,13 @@ void sched(void) {
     // cpu_switch_context completes (prev is fully switched out).
     // wakeup() spins on the waiter's on_cpu, so this transition
     // protects against a peer transitioning a still-running thread.
+    // #801/F3: the store is RELAXED, not RELEASE -- correct because the only
+    // inter-CPU edge guarding ctx/kstack reuse is the RELEASE-clear (~line 700)
+    // -> ACQUIRE-load (thread_free / reap / wakeup) pairing; this set is consumed
+    // in program order on this CPU. Any future reader that branches on
+    // on_cpu==true for SAFETY must wait for false, never trust true. (The steal
+    // path sets on_cpu earlier under peer->lock -- see try_steal -- so a stolen
+    // `next` may already read true here; the idempotent re-store is harmless.)
     __atomic_store_n(&next->on_cpu, true, __ATOMIC_RELAXED);
     cs->prev_to_clear_on_cpu = prev;
 

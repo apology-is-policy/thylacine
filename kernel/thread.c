@@ -451,10 +451,15 @@ void thread_free(struct Thread *t) {
     // fast-path observes RUNNING → returns without removing; thread_free
     // would otherwise free a thread that's currently running on the
     // peer CPU (UAF on its kstack mid-cpu_switch_context). After the
-    // walk, t is provably not in any tree (we held every cs->lock
-    // momentarily), so no future pick can transition state to RUNNING.
-    // Thus this re-check IS atomic with the walk: state is stable
-    // here. If state is RUNNING at this point, we lost the race.
+    // walk, t is not in any tree (we held every cs->lock momentarily).
+    // #801/F2 precision: a LOCAL pick cannot then transition t (same-CPU
+    // serialization with this thread_free), but a cross-CPU try_steal that
+    // already unlinked t from a peer tree COULD still set state=RUNNING after
+    // this walk -- this re-check alone does NOT make that flavor safe. It is
+    // closed by try_steal claiming on_cpu under peer->lock (see sched.c), so
+    // the on_cpu spin below waits the steal out. This re-check stays as a loud
+    // backstop: state==RUNNING here means we lost a race that should now be
+    // impossible -- extinct rather than free-under-run.
     if (t->state == THREAD_RUNNING)
         extinction("thread_free: peer CPU transitioned t to RUNNING between gate and walk");
 
