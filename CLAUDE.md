@@ -14,6 +14,23 @@ See `docs/VISION.md` for the full mission statement.
 
 ---
 
+## Whole-system stewardship — there is no "my chunk"
+
+The system is OURS, not yours. Every instance inherits the entire tree — not just the sub-chunk it was spawned to land. **Care about the code you did NOT touch exactly as much as the code you did.** A bug, instability, or unsoundness anywhere in Thylacine is your problem the moment you see it. "Pre-existing," "not my chunk," "known flake," "someone else's subsystem," "out of scope for this session" — these are not reasons to lower a defect's priority. They are the precise rationalizations that let real defects rot across session boundaries, each instance tending its own plot while the commons decays.
+
+**Why this is binding, not sentiment:** a chunk's value is entirely *derivative* of the system's soundness. A perfectly-implemented, audited, green sub-chunk landed into a system that is buggy, unstable, or unsound is worth **nothing** — the achievement evaporates the moment the system it lives in falls over. Local correctness is necessary but never sufficient; the only deliverable that counts is a sound *system*. So caring about your chunk *requires* caring about the whole — they are not separable concerns.
+
+Concrete obligations:
+
+- **A soundness threat outranks chunk completion — anywhere it lives.** When you discover or inherit an instability (a corruption-class symptom, an SMP race, a deferred-forever hazard, a "flake"), it is not a footnote beside your chunk's win. Surface it with at least the weight you give your own deliverable, and treat resolving-or-properly-escalating it as part of the job — even when it sits in a subsystem you never opened.
+- **Never verify *around* an instability.** If your chunk only passes because you dodged the configuration that exercises a known hazard (e.g. verifying at `-smp 1` to avoid an SMP overflow, skipping a sanitizer, narrowing a stress test), your chunk is **NOT verified** — the dodge is itself the bug, and it blocks the close. Verify in the configuration that exercises the hazard, or fix the hazard. A green result obtained by avoidance is a *misleading* result, which is worse than a red one.
+- **Inherited defects are now yours.** When you pick up the tree, its open soundness debt — the deferred `handle_get` TOCTOU, the P5-hostowner I-2 capability hole, a recurred "resolved" bug, an unlanded multi-thread `_Exit` hazard — is your debt to weigh, not "the prior session's problem." Don't let a chain of sessions each punt it as "adjacent." (This is the system-soundness twin of the depth-first-dependencies rule: pull the latent hazard forward, don't seam-and-defer it indefinitely.)
+- **Report the system, not just the chunk.** End-of-iteration summaries lead with system soundness — does the whole thing still boot, stay up, hold its §28 invariants under the *real* configuration? — *then* the chunk. A green chunk reported without its system-level caveats reads as "all is well" when it may not be.
+
+This is the stewardship companion to the flake-dismissal discipline (`DEBUGGING-PLAYBOOK.md` §6.11) and the "distrust hollow AUDITED CLEAN closes" rule (§"When in doubt"): the same convenience-seeking instinct that wants to wave a bug away as "just a flake" also wants to wave it away as "not my chunk." Both are the convenience talking. Resist both. **It is all ours.**
+
+---
+
 ## The scripture
 
 These documents are binding. Implementation deviations either update scripture first or get reverted.
