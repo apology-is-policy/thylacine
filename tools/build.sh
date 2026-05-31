@@ -1163,12 +1163,14 @@ build_stratum_pool_fixture() {
     #   3. stratum-fs write each corpus file under its target path
     #   4. stratum-fs sync (whole-pool commit)
     #   5. SIGTERM stratumd; wait for clean exit
-    # No new Stratum-side code; pure shell glue.
-    populate_stratum_pool
+    # No new Stratum-side code; pure shell glue. bake_owner passed explicitly
+    # (A-3 audit F4: not via bash dynamic scope) so the data flow is legible.
+    populate_stratum_pool "$bake_owner"
 }
 
 populate_stratum_pool() {
     # See the trailing block of build_stratum_pool_fixture for the design.
+    local bake_owner="${1:?populate_stratum_pool requires the bake-owner uid/gid}"
     local host_build="$BUILD_DIR/host-stratum"
     local stratumd_bin="$host_build/src/cmd/stratumd/stratumd"
     local stratum_fs_bin="$host_build/src/cmd/stratum-fs/stratum-fs"
@@ -1200,8 +1202,9 @@ populate_stratum_pool() {
     # --listen takes a raw filesystem path (NOT a unix:PATH URL prefix --
     # stratumd's listen_unix calls bind(2) on the path verbatim).
     # A-3: stamp every baked file PRINCIPAL_SYSTEM-owned via --bake-owner-uid
-    # (bake_owner declared above with the mkfs --root-uid; same value owns the
-    # root inode AND the baked files, so the boot chain owns the whole tree).
+    # (bake_owner is the arg passed by build_stratum_pool_fixture -- the same
+    # value it gave mkfs --root-uid; so the root inode AND the baked files are
+    # SYSTEM-owned and the boot chain owns the whole tree).
     "$stratumd_bin" "$pool_img" \
         --listen "$sock_path" \
         --keyfile "$keyfile" \

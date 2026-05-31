@@ -1,9 +1,10 @@
 # 100 — 9P identity presentation (A-3)
 
-**Status:** A-3a + A-3b LANDED (reconciliation mechanism + dev9p rwx enforcement
-activation, closing the A-2d F1/F2 prerequisites). A-3c (per-user stratumd mechanism
-proof + trust-stamp seam) appends as it lands. Design: `IDENTITY-DESIGN.md §9.7` + the
-§3.5 F-4 correction + the §3.7.1 activation note.
+**Status:** A-3a + A-3b LANDED + **audit R1 CLEAN** (0 P0 / 0 P1 / 1 P2 / 3 P3, all
+fixed — the P2 was the create-leg of F1 [`sys_walk_create_handler` now also derives
+rights from omode]; full record in `memory/audit_a3_closed_list.md`). A-3c (per-user
+stratumd mechanism proof + trust-stamp seam) appends as it lands. Design:
+`IDENTITY-DESIGN.md §9.7` + the §3.5 F-4 correction + the §3.7.1 activation note.
 
 ---
 

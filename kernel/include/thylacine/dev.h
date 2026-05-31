@@ -56,10 +56,11 @@ struct Dev {
     // .stat_native against the Proc's principal_id + groups). When false the
     // chokepoint skips the rwx check (handle-RIGHT gating only -- the v1.0
     // status quo). devramfs = true (system-owned -> real per-principal
-    // enforcement); dev9p = false (its stored uids are the connection / host-
-    // baked identity, not reconciled with the PRINCIPAL_SYSTEM boot chain until
-    // A-3 -- uniform enforcement would brick the post-pivot creates). The A-3
-    // dev9p activation is flipping this one flag to true.
+    // enforcement); dev9p = true (A-3b: the host-bake stamps the pool
+    // PRINCIPAL_SYSTEM-owned [mkfs --root-uid + stratumd --bake-owner-uid] +
+    // SO_PEERCRED carries the connecting principal, so the server-reported uids
+    // reconcile with the PRINCIPAL_SYSTEM boot chain -- the boot chain owns the
+    // baked tree, so enforcement does not brick).
     bool         perm_enforced;
 
     // Lifecycle: called by the kernel.

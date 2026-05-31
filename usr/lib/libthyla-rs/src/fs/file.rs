@@ -43,10 +43,11 @@
 //     surface).
 //
 // RIGHTS:
-//   - The kernel grants RIGHT_READ | RIGHT_WRITE | RIGHT_TRANSFER on
-//     a successful SYS_WALK_OPEN. The server-side fid's omode is what
-//     actually gates reads/writes; rights at the handle level are a
-//     transfer-control concern, not a read/write gate.
+//   - Since A-3b the kernel DERIVES the handle rights from the open mode
+//     (rights_for_omode): OREAD->RIGHT_READ, OWRITE->RIGHT_WRITE,
+//     ORDWR->R|W (+RIGHT_TRANSFER for a normally-opened handle). So a
+//     RIGHT-bearing dev9p Dev now gates reads/writes by the handle RIGHT in
+//     addition to the server-side omode -- an OREAD handle is RIGHT_READ-only.
 
 use crate::err::{Error, Result};
 use crate::handle::{Handle, Rights};
@@ -105,10 +106,12 @@ impl File {
         self.handle.raw()
     }
 
-    /// The rights the kernel granted on this File's handle. Always
-    /// `READ | WRITE | TRANSFER` at v1 (the kernel's SYS_WALK_OPEN
-    /// envelope); the underlying fid's open-mode is what actually
-    /// gates read/write success.
+    /// The rights the kernel granted on this File's handle. Since A-3b the
+    /// kernel derives these from the open mode (`rights_for_omode`):
+    /// `open` (OREAD) -> `READ`; `create` (OWRITE|OTRUNC) -> `WRITE`; ORDWR ->
+    /// `READ | WRITE` (+ `TRANSFER` for a normally-opened handle). On a
+    /// RIGHT-enforcing Dev (dev9p) the handle RIGHT gates read/write in
+    /// addition to the server-side omode.
     #[inline]
     pub fn rights(&self) -> Rights {
         self.handle.rights()

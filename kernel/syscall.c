@@ -1818,9 +1818,14 @@ static s64 sys_walk_create_handler(u64 parent_fd_raw, u64 name_va,
         return -1;
     }
 
-    // Install the opened object. R|W|TRANSFER mask matches SYS_WALK_OPEN /
-    // SYS_ATTACH_9P; the 9P server is the omode-enforcement authority.
-    rights_t r = RIGHT_READ | RIGHT_WRITE | RIGHT_TRANSFER;
+    // A-3 audit F1 (the create leg, closed in lockstep with the SYS_WALK_OPEN
+    // leg): derive the handle rights from omode (rights_for_omode) so the
+    // capability axis cannot exceed the access. A freshly-created file is
+    // normally OWRITE/ORDWR -> RIGHT_WRITE; readers re-open OREAD. The mkdir
+    // path (mkdir_or_open) creates with OREAD then CLOSES the handle and walks
+    // T_OPATH for the navigation base, so the OREAD->RIGHT_READ create handle
+    // is never used as a create base. Normally-opened -> RIGHT_TRANSFER.
+    rights_t r = rights_for_omode((u32)omode_raw) | RIGHT_TRANSFER;
     hidx_t fd = handle_alloc(p, KOBJ_SPOOR, r, nc);
     if (fd < 0) {
         spoor_clunk(nc);

@@ -421,8 +421,11 @@ post-fix passing pool) -- not a live reproducer. Full coda:
 so the PRINCIPAL_SYSTEM boot chain hit it as *other* and joey's create in the root was
 denied — M2 had to stamp the ROOT SYSTEM-owned, not just the baked files). 639/639
 (smp1) + boot OK + cross-reboot PASS under live enforcement (full corvus identity-DB
-create / rename-swap / cross-reboot reload as PRINCIPAL_SYSTEM owner). NEXT = A-3c +
-the A-3 audit round.
+create / rename-swap / cross-reboot reload as PRINCIPAL_SYSTEM owner). **A-3 audit R1
+CLEAN** (Opus prosecutor: 0 P0 / 0 P1 / 1 P2 / 3 P3, all fixed -- the P2 was the
+create-leg of F1, `sys_walk_create_handler` now also derives rights from omode;
+`audit_a3_closed_list.md`). NEXT = A-3c (per-user stratumd mechanism proof +
+dataset-scope EACCES + the trust-stamp v1.x seam).
 
 **Reshaped by ground truth (corrects F-4).** The 2026-05-28 sketch said "forward
 principal-id as `n_uname`." Ground truth: **Stratum ignores `n_uname`** and reconciles
