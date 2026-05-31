@@ -147,6 +147,8 @@ while (pfn < end_pfn) {
 
 `mm/magazines.c`. Each CPU has a `struct percpu_data` with two `struct magazine` slots — one for order 0 (4 KiB), one for order 9 (2 MiB). Each magazine is a stack of 16 entries.
 
+**SMP safety (#807).** `NCPUS = DTB_MAX_CPUS` and `my_cpu()` reads `MPIDR_EL1.Aff0` (`smp_cpu_idx_self`, clamped to a valid slot), so each CPU touches only its own set. The fast path runs with IRQs masked — `spin_lock_irqsave(NULL)` (the header-sanctioned mask-only idiom: a NULL lock skips the lock and only flips DAIF) — around the whole `my_cpu()` -> pop/push (+ any refill/drain), so (a) an IRQ-context alloc cannot re-enter the same set and (b) preemption (which is IRQ-driven) cannot migrate the thread onto another CPU's set mid-op. The popped/pushed page is the caller's private object outside the magazine, so its field init happens outside the critical section. `mag_refill`/`mag_drain`'s `buddy_alloc`/`buddy_free` take the zone lock with their own nested irqsave — lock order is IRQ-off -> zone lock (a leaf), no ABBA. Before #807 this was `NCPUS=1` + `my_cpu()==0` + no IRQ discipline: under `-smp >1` all CPUs shared `g_percpu[0]` and raced the non-atomic `count` RMW (a double-allocation hazard that went live once work-stealing enabled cross-CPU allocation for joey). The IRQ-off window across a refill spans up to 8 buddy ops (bounded, slow-path; the hot pop/push is ~3 extra DAIF instructions).
+
 **Refill** (called when count == 0): `mag_refill` calls `buddy_alloc` repeatedly until count reaches `MAGAZINE_SIZE / 2` = 8. Partial refill on OOM is OK — the alloc path will see count == 0 still and return NULL.
 
 **Drain** (called when count == MAGAZINE_SIZE): `mag_drain` calls `buddy_free` repeatedly until count reaches `MAGAZINE_SIZE / 2` = 8. The half-full hysteresis avoids thrashing when alloc-free pairs straddle the threshold.
@@ -201,7 +203,7 @@ See [Implementation](#implementation). One per NUMA node; v1.0 has `g_zone0`.
 
 ### `struct percpu_data`
 
-Per-CPU magazine slots. `g_percpu[NCPUS]`. NCPUS=1 at P1-D; bumps at P1-F.
+Per-CPU magazine slots. `g_percpu[NCPUS]`, `NCPUS = DTB_MAX_CPUS` (#807; was 1 pre-SMP). Indexed by `my_cpu()` = `MPIDR_EL1.Aff0`; accessed IRQ-masked so each slot is single-CPU + non-reentrant.
 
 ---
 
@@ -211,7 +213,7 @@ No formal spec at P1-D. A future `phys.tla` could prove:
 
 - The buddy invariant: free-list contents + reserved pages + allocated pages partition the zone exactly.
 - Merge correctness: the buddy at the same order being PG_FREE is a sufficient condition.
-- Magazine consistency under SMP (when P1-F brings real concurrency).
+- Magazine consistency under SMP: per-CPU sets + IRQ-masked fast path (#807). No spec module; validated by prose reasoning (above) + the audit + the smp4/smp8/UBSan suite.
 
 These are post-v1.0 unless a real bug surfaces. The P1-I audit pass at Phase 1 exit will exercise the allocator under sanitizers (ASan + UBSan); a 10000-iteration alloc/free leak check is part of the exit criteria per ROADMAP §4.2.
 

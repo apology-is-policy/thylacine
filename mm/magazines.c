@@ -14,6 +14,8 @@
 #include "buddy.h"
 
 #include <thylacine/page.h>
+#include <thylacine/smp.h>        // smp_cpu_idx_self (MPIDR_EL1.Aff0)
+#include <thylacine/spinlock.h>   // spin_lock_irqsave(NULL): bare IRQ mask
 #include <thylacine/types.h>
 
 struct percpu_data g_percpu[NCPUS];
@@ -40,9 +42,14 @@ static unsigned mag_idx_to_order(int idx) {
     return idx == MAG_IDX_ORDER_4K ? 0 : 9;
 }
 
-// Current CPU. P1-D pins to CPU 0; P1-F reads MPIDR_EL1.Aff0.
+// Current CPU = MPIDR_EL1.Aff0. Callers hold IRQs masked across the
+// my_cpu() -> set access, so the result cannot change mid-op via
+// preemption (which is IRQ-driven). Clamp a wild MPIDR onto slot 0
+// (mirrors the fault.c #806 guard) so an out-of-range Aff0 can never
+// index past g_percpu[].
 static inline int my_cpu(void) {
-    return 0;
+    unsigned c = smp_cpu_idx_self();
+    return c < NCPUS ? (int)c : 0;
 }
 
 // Refill a magazine to half full. Called when count == 0; partial
@@ -70,12 +77,25 @@ struct page *mag_alloc(unsigned order) {
     int idx = order_to_mag_idx(order);
     if (idx < 0) return NULL;
 
+    // IRQ-masked across my_cpu() + the pop (+ any refill): pins this CPU's
+    // set so no IRQ-context alloc re-enters it and preemption can't migrate
+    // us onto another CPU's set mid-op. NULL lock = mask-only (spinlock.h).
+    // mag_refill's buddy_alloc takes the zone lock with its own nested
+    // irqsave -- fine (zone lock is a leaf; order is IRQ-off -> zone lock).
+    irq_state_t s = spin_lock_irqsave(NULL);
     struct magazine *m = &g_percpu[my_cpu()].mags[idx];
     if (m->count == 0) {
         mag_refill(m, mag_idx_to_order(idx));
-        if (m->count == 0) return NULL;
+        if (m->count == 0) {
+            spin_unlock_irqrestore(NULL, s);
+            return NULL;
+        }
     }
     struct page *p = m->entries[--m->count];
+    spin_unlock_irqrestore(NULL, s);
+
+    // p is out of the magazine now -- private to this caller; init outside
+    // the critical section.
     p->order    = order;
     p->flags    = PG_KERNEL;
     p->refcount = 1;
@@ -88,17 +108,29 @@ bool mag_free(struct page *p, unsigned order) {
     int idx = order_to_mag_idx(order);
     if (idx < 0) return false;
 
+    // p is the caller's (being freed) -- not yet in any set -- so init it
+    // outside the critical section.
+    p->next  = NULL;
+    p->prev  = NULL;
+    p->flags = 0;       // not PG_FREE — magazine ownership, not free list
+
+    // IRQ-masked across my_cpu() + the push (+ any drain): same rationale
+    // as mag_alloc -- pins this CPU's set, non-reentrantly.
+    irq_state_t s = spin_lock_irqsave(NULL);
     struct magazine *m = &g_percpu[my_cpu()].mags[idx];
     if (m->count == MAGAZINE_SIZE) {
         mag_drain(m, mag_idx_to_order(idx));
     }
-    p->next  = NULL;
-    p->prev  = NULL;
-    p->flags = 0;       // not PG_FREE — magazine ownership, not free list
     m->entries[m->count++] = p;
+    spin_unlock_irqrestore(NULL, s);
     return true;
 }
 
+// Drains EVERY CPU's set back to the buddy. QUIESCENT-ONLY: it touches
+// peer CPUs' sets without IRQ-masking or cross-CPU coordination, so it is
+// safe only when no CPU is concurrently allocating -- i.e. the in-kernel
+// test harness (secondaries parked in WFI) or a single-threaded shutdown.
+// Never call it during active SMP workload.
 void magazines_drain_all(void) {
     for (int cpu = 0; cpu < NCPUS; cpu++) {
         for (int idx = 0; idx < NUM_MAG_ORDERS; idx++) {

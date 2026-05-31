@@ -5,8 +5,14 @@
 // Slow path: refill on empty, drain on full — both batch operations
 // that amortize one buddy-lock acquisition over MAGAZINE_SIZE pages.
 //
-// At P1-D NCPUS = 1; at P1-F (SMP) NCPUS bumps and my_cpu() reads
-// MPIDR_EL1.Aff0. The interface is fixed so callers don't change.
+// One magazine set per CPU (NCPUS = DTB_MAX_CPUS), indexed by
+// my_cpu() = MPIDR_EL1.Aff0. The fast path runs with IRQs masked so a
+// CPU touches only its own set, non-reentrantly (an IRQ-context alloc
+// cannot re-enter; preemption -- being IRQ-driven -- cannot migrate the
+// thread mid-op onto another CPU's set). The interface is fixed so
+// callers don't change. Before this (#807) NCPUS was pinned at 1 with
+// my_cpu()==0 and no IRQ discipline -- all CPUs shared one set and
+// raced the non-atomic count RMW under -smp >1.
 //
 // Per ARCHITECTURE.md §6.3.
 
@@ -14,6 +20,7 @@
 #define THYLACINE_MM_MAGAZINES_H
 
 #include <thylacine/page.h>
+#include <thylacine/smp.h>      // DTB_MAX_CPUS
 #include <thylacine/types.h>
 
 // 16 entries per magazine matches Linux's per-CPU page cache default.
@@ -35,7 +42,7 @@ struct percpu_data {
     struct magazine mags[NUM_MAG_ORDERS];
 };
 
-#define NCPUS               1   // P1-D; bumped at P1-F when SMP arrives.
+#define NCPUS               DTB_MAX_CPUS   // #807: one set per CPU (was 1).
 
 extern struct percpu_data g_percpu[NCPUS];
 
