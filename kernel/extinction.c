@@ -27,7 +27,7 @@ void extinction_with_addr(const char *msg, uintptr_t addr) {
     uart_puts("\n");
     uart_puts("EXTINCTION: ");
     uart_puts(msg);
-    uart_puts(" 0x");
+    uart_puts(" ");          // uart_puthex64 emits its own "0x" prefix
     uart_puthex64((uint64_t)addr);
     uart_puts("\n");
     halls_dump((void *)0);

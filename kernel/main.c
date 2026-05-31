@@ -74,9 +74,56 @@ extern volatile u64 _boot_start_cntpct;
 extern char _kernel_start[];
 extern char _kernel_end[];
 
+// From arch/arm64/kernel.ld — the boot CPU's static 16 KiB stack. The
+// kthread (TID 0, kstack_base==NULL) runs the entire in-kernel test suite
+// on this stack, including the deep proc.rfork_stress_1000 chain.
+extern char _boot_stack_bottom[];
+extern char _boot_stack_top[];
+
+// #806 boot-stack high-water probe. Paint the unused boot stack at boot_main
+// entry, scan the deepest sentinel-overwrite after the suite -> measure the
+// true stack depth. Discriminates a genuine depth overflow (high-water near
+// 16 KiB) from a wild-SP fault landing in the guard (shallow high-water).
+#define BOOT_STACK_SENTINEL 0xB007B007B007B007ULL
+
+static void boot_stack_paint(void) {
+    u64 sp;
+    __asm__ __volatile__("mov %0, sp" : "=r"(sp));
+    // Paint only BELOW the live SP (with slack for this frame); the live
+    // frames above are untouched. The deep test chain runs below here, so
+    // the high-water it leaves is captured.
+    u64 *lo = (u64 *)(uintptr_t)_boot_stack_bottom;
+    u64 *hi = (u64 *)(uintptr_t)(sp - 512);
+    for (u64 *p = lo; p < hi; p++) *p = BOOT_STACK_SENTINEL;
+}
+
+static void boot_stack_report(void) {
+    u64 lo  = (u64)(uintptr_t)_boot_stack_bottom;
+    u64 top = (u64)(uintptr_t)_boot_stack_top;
+    u64 deepest = top;  // nothing touched
+    for (u64 *p = (u64 *)(uintptr_t)lo; p < (u64 *)(uintptr_t)top; p++) {
+        if (*p != BOOT_STACK_SENTINEL) { deepest = (u64)(uintptr_t)p; break; }
+    }
+    u64 used = top - deepest;
+    u64 total = top - lo;
+    uart_puts("  boot-stack high-water: ");
+    uart_putdec(used);
+    uart_puts(" / ");
+    uart_putdec(total);
+    uart_puts(" B used, margin ");
+    uart_putdec(total - used);
+    uart_puts(" B to guard; deepest SP ");
+    uart_puthex64(deepest);
+    uart_puts("\n");
+}
+
 void boot_main(void);
 
 void boot_main(void) {
+    // #806 probe: paint the unused boot stack first thing, before any deep
+    // call uses it. boot_stack_report() (post-suite) reads the high-water.
+    boot_stack_paint();
+
     // P4-Ic5-FP: enable CPACR_EL1.FPEN = 0b11 on the boot CPU before
     // any context switch (and any STP/LDP Q-reg the kernel emits in
     // cpu_switch_context). Secondaries call this from per_cpu_main.
@@ -505,6 +552,9 @@ void boot_main(void) {
         uart_puts(" FAIL\n");
         extinction("kernel test suite failed");
     }
+
+    // #806 probe: report the boot-stack high-water left by the suite.
+    boot_stack_report();
 
     // Wait for ticks to confirm IRQ delivery, then print the count.
     // 5 ticks at 1000 Hz = 5 ms — enough to demonstrate the path is

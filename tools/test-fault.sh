@@ -37,11 +37,16 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD_DIR_BASE="$REPO_ROOT/build"
-BOOT_TIMEOUT="${BOOT_TIMEOUT:-10}"
+# fault_test_run() fires AFTER the full in-kernel suite (main.c), and the
+# suite's irq-bench long-pole alone is ~10s+ -- so the provoker is not even
+# reached inside a 10s budget on a normal/loaded host, producing a false
+# "timeout" FAIL. Default to 60s (env-overridable; bump further under heavy
+# host load, e.g. taskpolicy -b).
+BOOT_TIMEOUT="${BOOT_TIMEOUT:-60}"
 
 # variant → expected extinction substring (case-sensitive prefix match
 # against the EXTINCTION: line). Keep the case below in sync with this.
-ALL_VARIANTS="canary_smash wxe_violation bti_fault kstack_overflow secondary_stack_guard"
+ALL_VARIANTS="canary_smash wxe_violation bti_fault kstack_overflow secondary_stack_guard recursive_kernel_fault"
 
 expected_for() {
     case "$1" in
@@ -50,6 +55,7 @@ expected_for() {
         bti_fault)       echo "EXTINCTION: BTI fault" ;;
         kstack_overflow) echo "EXTINCTION: kernel stack overflow" ;;
         secondary_stack_guard) echo "EXTINCTION: kernel stack overflow" ;;
+        recursive_kernel_fault) echo "EXTINCTION: recursive kernel fault" ;;
         *)               echo "" ;;
     esac
 }
@@ -60,11 +66,11 @@ selected=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -v|--verbose) verbose=1; shift ;;
-        canary_smash|wxe_violation|bti_fault|kstack_overflow|secondary_stack_guard)
+        canary_smash|wxe_violation|bti_fault|kstack_overflow|secondary_stack_guard|recursive_kernel_fault)
             selected="$selected $1"; shift ;;
         -h|--help)
             echo "Usage: $0 [-v] [variant...]"
-            echo "Variants: canary_smash wxe_violation bti_fault kstack_overflow secondary_stack_guard"
+            echo "Variants: canary_smash wxe_violation bti_fault kstack_overflow secondary_stack_guard recursive_kernel_fault"
             exit 0
             ;;
         *) echo "Unknown arg: $1" >&2; exit 2 ;;

@@ -398,7 +398,7 @@ static void build_page_tables(u64 slide) {
         // page-aligned BSS array inside this 2 MiB kernel block; slot c's
         // guard is its first page. A secondary CPU's stack overflow
         // lands here and faults instead of corrupting the adjacent slot
-        // or BSS (fault.c addr_is_stack_guard → "kernel stack overflow").
+        // or BSS (fault.c stack_guard_overflow_msg → "kernel stack overflow").
         for (unsigned c = 0; c < DTB_MAX_CPUS - 1; c++) {
             u64 sg_pa  = (u64)(uintptr_t)&g_secondary_boot_stacks[c].guard[0];
             u32 sg_idx = (u32)((sg_pa - kernel_2mib_pa) >> PAGE_SHIFT);

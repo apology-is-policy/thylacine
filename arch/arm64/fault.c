@@ -32,6 +32,14 @@ extern char _boot_stack_bottom[];
 extern char _kernel_start[];
 extern char _kernel_end[];
 
+// #806: per-CPU re-entrancy guard for the kernel-fault dispatch. A fault
+// taken WHILE handling a kernel fault (classically a wild current_thread()
+// deref inside stack_guard_overflow_msg) would otherwise recurse one
+// KERNEL_ENTRY frame per fault until the boot stack overflows -- making the
+// real bug masquerade as "kernel stack overflow (boot-stack guard)". Per-CPU
+// because faults are CPU-local; see arch_fault_handle.
+static volatile bool g_in_kernel_fault[DTB_MAX_CPUS];
+
 // =============================================================================
 // ESR_EL1 decode constants (mirrors exception.c; centralized here for
 // the dispatcher).
@@ -172,10 +180,6 @@ static const char *stack_guard_overflow_msg(u64 addr) {
     return NULL;
 }
 
-static bool addr_is_stack_guard(u64 addr) {
-    return stack_guard_overflow_msg(addr) != NULL;
-}
-
 // True iff `addr` falls inside the kernel image's permanent mappings
 // (TEXT / RODATA / DATA / BSS). Used to recognize W^X violations.
 //
@@ -210,12 +214,38 @@ enum fault_result arch_fault_handle(const struct fault_info *fi) {
     //    L3 entries). An overflow access lands in one of those pages
     //    and faults; FAR_EL1 is in the guard region.
     if (!fi->from_user) {
+        // #806 re-entrancy guard. Every kernel-fault branch below extincts
+        // (a kernel fault is fatal at v1.0). But the handler itself can fault:
+        // stack_guard_overflow_msg dereferences current_thread() (TPIDR_EL1),
+        // so a wild current_thread -- e.g. a context switch to a corrupted
+        // Thread -- makes t->magic fault, re-entering here. Unguarded, that
+        // recurses one KERNEL_ENTRY frame (288 B) per fault until the boot
+        // stack crosses its guard, and the REAL bug masquerades as a
+        // "boot-stack guard" overflow (the F-B/#806 saga: the apparent depth
+        // is a recursion amplifier, not honest call depth -- normal boot-stack
+        // high-water is ~4.5 KiB of 16 KiB). On re-entry, extinct NOW with the
+        // nested FAR (the wild address), before re-running the faulting code.
+        // Never cleared: a kernel fault is always fatal, so the CPU is dying
+        // either way; the flag only has to survive long enough to break the
+        // recursion. (The HALLS dump's own re-entrancy guard, HX-I1, catches a
+        // further fault inside the dump.)
+        // Clamp a wild MPIDR onto slot 0 (mirrors halls_cpu) rather than
+        // skipping -- so the guard stays LIVE under a corrupt Aff0 instead
+        // of silently disabling itself in exactly the scenario it exists for.
+        unsigned cpu = smp_cpu_idx_self();
+        if (cpu >= DTB_MAX_CPUS) cpu = 0;
+        if (g_in_kernel_fault[cpu]) {
+            extinction_with_addr("recursive kernel fault (handler re-entered)",
+                                 (uintptr_t)fi->vaddr);
+        }
+        g_in_kernel_fault[cpu] = true;
+
         // F4: name the guard flavor (boot / secondary / current-thread kstack)
-        // so a wild-SP fault is never misattributed -- the generic message
-        // made the F-B early-boot overflow read as "_boot_stack" even though
-        // the boot CPU provably cannot deepen its stack in that window.
-        // FAR_EL1 (fi->vaddr) shows where the SP landed; the flavor shows
-        // which stack it belongs to.
+        // so the fault is never misattributed. FAR_EL1 (fi->vaddr) shows where
+        // the access landed; the flavor names which stack's guard it is. NB:
+        // a "boot-stack guard" hit is NOT proof of honest boot-CPU depth -- a
+        // recursive handler fault (above) descends the boot stack too; #806's
+        // re-entrancy guard fires first so that case extincts honestly.
         const char *ovf = stack_guard_overflow_msg(fi->vaddr);
         if (ovf) extinction_with_addr(ovf, (uintptr_t)fi->vaddr);
     }

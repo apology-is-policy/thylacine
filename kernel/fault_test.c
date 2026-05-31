@@ -204,6 +204,34 @@ static void provoke_secondary_stack_guard(void) {
 #endif
 
 // ---------------------------------------------------------------------------
+// recursive_kernel_fault — #806 regression. Reproduce the root condition of
+// the F-B/#806 saga: a wild current_thread() (TPIDR_EL1). arch_fault_handle's
+// stack_guard_overflow_msg dereferences current_thread()->magic, so the first
+// kernel data abort below makes that deref re-fault. WITHOUT the #806
+// re-entrancy guard the handler recurses one KERNEL_ENTRY frame per fault
+// until the boot stack crosses its guard -> "kernel stack overflow
+// (boot-stack guard)" (the misleading symptom that cost a year). WITH the
+// guard, the second entry to the kernel-fault dispatch extincts ->
+// "recursive kernel fault (handler re-entered)". test-fault.sh asserts the
+// latter, so this FAILS on the pre-fix code and PASSES on the fix.
+// ---------------------------------------------------------------------------
+
+#ifdef THYLACINE_FAULT_TEST_recursive_kernel_fault
+__attribute__((noinline))
+__attribute__((no_stack_protector))
+static void provoke_recursive_kernel_fault(void) {
+    // Wild current_thread: an unmapped TTBR1 VA. Any subsequent kernel fault
+    // makes stack_guard_overflow_msg's t->magic deref re-fault.
+    __asm__ __volatile__("msr tpidr_el1, %0" :: "r"((u64)0xdead000000000000ULL));
+    // Deliberate kernel data abort at an unmapped high VA -> the fault
+    // dispatch runs with the wild current_thread set above.
+    volatile u64 *p = (volatile u64 *)0xffff999900000000ULL;
+    __asm__ __volatile__("" : "+r"(p));
+    *p = 0xbadu;
+}
+#endif
+
+// ---------------------------------------------------------------------------
 // Public entry point. Called from boot_main before the success line.
 //
 // In a production build, evaluates to a single return.
@@ -230,6 +258,10 @@ void fault_test_run(void) {
     uart_puts("  fault-test: invoking secondary_stack_guard...\n");
     provoke_secondary_stack_guard();
     uart_puts("FAIL: provoke_secondary_stack_guard returned (guard did not fire)\n");
+#elif defined(THYLACINE_FAULT_TEST_recursive_kernel_fault)
+    uart_puts("  fault-test: invoking recursive_kernel_fault...\n");
+    provoke_recursive_kernel_fault();
+    uart_puts("FAIL: provoke_recursive_kernel_fault returned (no fault fired)\n");
 #else
     // No fault test selected — production build.
 #endif
