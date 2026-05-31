@@ -147,6 +147,14 @@ void test_fault_decode_kernel_data_permission_write(void);
 void test_fault_decode_user_data_translation(void);
 void test_fault_decode_user_instruction_fetch(void);
 void test_fault_decode_access_flag(void);
+void test_halls_fp_sane_accepts_valid(void);
+void test_halls_fp_sane_rejects_misaligned(void);
+void test_halls_fp_sane_rejects_non_increasing(void);
+void test_halls_fp_sane_rejects_out_of_range(void);
+void test_halls_link_addr_removes_slide(void);
+void test_halls_link_addr_underflow_guarded(void);
+void test_halls_frame_enter_leave_nesting(void);
+void test_halls_frame_is_live_gate(void);
 void test_vma_alloc_free_smoke(void);
 void test_vma_alloc_constraints(void);
 void test_vma_insert_lookup_smoke(void);
@@ -870,6 +878,16 @@ struct test_case g_tests[] = {
                                        test_fault_decode_user_instruction_fetch,
                                                                            false, NULL },
     { "fault.decode_access_flag",      test_fault_decode_access_flag,      false, NULL },
+    { "halls.fp_sane_accepts_valid",       test_halls_fp_sane_accepts_valid,       false, NULL },
+    { "halls.fp_sane_rejects_misaligned",  test_halls_fp_sane_rejects_misaligned,  false, NULL },
+    { "halls.fp_sane_rejects_non_increasing",
+                                       test_halls_fp_sane_rejects_non_increasing,  false, NULL },
+    { "halls.fp_sane_rejects_out_of_range",
+                                       test_halls_fp_sane_rejects_out_of_range,    false, NULL },
+    { "halls.link_addr_removes_slide",     test_halls_link_addr_removes_slide,     false, NULL },
+    { "halls.link_addr_underflow_guarded", test_halls_link_addr_underflow_guarded, false, NULL },
+    { "halls.frame_enter_leave_nesting",   test_halls_frame_enter_leave_nesting,   false, NULL },
+    { "halls.frame_is_live_gate",          test_halls_frame_is_live_gate,          false, NULL },
     { "vma.alloc_free_smoke",          test_vma_alloc_free_smoke,          false, NULL },
     { "vma.alloc_constraints",         test_vma_alloc_constraints,         false, NULL },
     { "vma.insert_lookup_smoke",       test_vma_insert_lookup_smoke,       false, NULL },

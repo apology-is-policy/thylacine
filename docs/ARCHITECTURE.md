@@ -3110,6 +3110,7 @@ Every change to a file or function listed below spawns an adversarial soundness 
 | Surface | Files | Why |
 |---|---|---|
 | Exception entry | `arch/arm64/start.S`, `arch/arm64/exception.c`, `arch/arm64/vectors.S` | Every syscall, IRQ, fault path |
+| Halls crash dump (HX-1) | `arch/arm64/halls.c`, `arch/arm64/halls.h`, `arch/arm64/exception.c` (entry wrappers), `kernel/extinction.c` | Tier-1 fatal-path dump; runs on a dying machine. HX-I1 re-entrancy guard (no loop), HX-I2 bounded sanity-gated fp walk, HX-I3 `EXTINCTION:` ABI line unchanged. See `docs/reference/101-halls.md`. |
 | Page fault | `arch/arm64/fault.c`, `mm/vm.c` | Lifetime, demand-page, COW, W^X |
 | Allocator | `mm/buddy.c`, `mm/slub.c`, `mm/magazines.c` | Allocation correctness, lock-free invariants |
 | Scheduler | `kernel/sched.c`, `arch/arm64/context.c`, `kernel/smp.c` (IPI logic) | EEVDF correctness, SMP, wakeup atomicity |

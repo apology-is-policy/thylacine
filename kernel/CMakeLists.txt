@@ -22,6 +22,7 @@ set(KERNEL_SRCS
     ../arch/arm64/kaslr.c
     ../arch/arm64/exception.c
     ../arch/arm64/fault.c
+    ../arch/arm64/halls.c
     ../arch/arm64/uaccess.c
     ../arch/arm64/uaccess.S
     ../arch/arm64/vectors.S
@@ -63,6 +64,7 @@ set(KERNEL_SRCS
     test/test_directmap.c
     test/test_proc_pgtable.c
     test/test_fault_decode.c
+    test/test_halls.c
     test/test_vma.c
     test/test_burrow_map_proc.c
     test/test_demand_page.c

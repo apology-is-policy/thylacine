@@ -21,6 +21,7 @@
 #include "exception.h"
 #include "fault.h"                    // P3-C: arch_fault_handle / fault_info_decode
 #include "gic.h"
+#include "halls.h"                    // HX-1: per-CPU live-frame tracking for the crash dump
 #include "uaccess.h"                  // R12-uaccess: kernel-mode user-VA fault-fixup
 
 #include <thylacine/extinction.h>
@@ -77,6 +78,53 @@ _Static_assert(__builtin_offsetof(struct exception_context, far) == 0x118,
 #define EC_SVC_AARCH64     0x15     /* svc #imm at EL0 (AArch64) */
 
 // ---------------------------------------------------------------------------
+// HX-1: per-CPU live-frame tracking. Each public exception entry point is a
+// thin wrapper that records its register frame in the per-CPU Halls slot for
+// the duration of the handler, so halls_dump (reached from extinction) reads
+// the dying frame without threading ctx through every signature. A normal
+// return restores the previous slot; an extinction (noreturn) inside the
+// handler skips the restore, leaving the slot pointed at the dying frame.
+// The handlers themselves do not migrate CPUs mid-execution, so set-on-this-
+// CPU / restore-on-this-CPU holds (see halls.c).
+// ---------------------------------------------------------------------------
+
+static void exception_sync_curr_el_impl(struct exception_context *ctx);
+static void exception_irq_curr_el_impl(struct exception_context *ctx);
+static void exception_sync_lower_el_impl(struct exception_context *ctx);
+__attribute__((noreturn))
+static void exception_unexpected_impl(struct exception_context *ctx, u64 vector_idx);
+
+void exception_sync_curr_el(struct exception_context *ctx) {
+    const struct exception_context *prev = halls_enter_frame(ctx);
+    exception_sync_curr_el_impl(ctx);
+    halls_leave_frame(prev);
+}
+
+void exception_irq_curr_el(struct exception_context *ctx) {
+    const struct exception_context *prev = halls_enter_frame(ctx);
+    exception_irq_curr_el_impl(ctx);
+    halls_leave_frame(prev);
+}
+
+void exception_sync_lower_el(struct exception_context *ctx) {
+    const struct exception_context *prev = halls_enter_frame(ctx);
+    exception_sync_lower_el_impl(ctx);
+    halls_leave_frame(prev);
+}
+
+void exception_unexpected(struct exception_context *ctx, u64 vector_idx) {
+    // F6: the discarded prev + missing leave are safe ONLY because
+    // exception_unexpected_impl is noreturn (it always extincts) -- the
+    // machine dies before the slot's staleness matters, and halls_dump reads
+    // the frame we just set. If this vector group is ever made recoverable
+    // (vectors.S flags a future SError-recovery stack), restore save/restore
+    // symmetry with the other three wrappers (prev = halls_enter_frame(ctx)
+    // ... halls_leave_frame(prev)).
+    halls_enter_frame(ctx);
+    exception_unexpected_impl(ctx, vector_idx);
+}
+
+// ---------------------------------------------------------------------------
 // exception_init.
 // ---------------------------------------------------------------------------
 
@@ -94,7 +142,7 @@ void exception_init(void) {
 // BRK) are handled inline below.
 // ---------------------------------------------------------------------------
 
-void exception_sync_curr_el(struct exception_context *ctx) {
+static void exception_sync_curr_el_impl(struct exception_context *ctx) {
     u64 esr = ctx->esr;
     u64 far = ctx->far;
     u32 ec  = (u32)ESR_EC(esr);
@@ -229,7 +277,7 @@ void exception_sync_curr_el(struct exception_context *ctx) {
 // resuming the interrupted code with all GP regs restored.
 // ---------------------------------------------------------------------------
 
-void exception_irq_curr_el(struct exception_context *ctx) {
+static void exception_irq_curr_el_impl(struct exception_context *ctx) {
     (void)ctx;       // available for scheduler use at Phase 2
     u32 intid = gic_acknowledge();
     // INTIDs 1020..1023 are reserved per ARM IHI 0069 §2.2.1 (1023 is
@@ -273,7 +321,7 @@ void exception_irq_curr_el(struct exception_context *ctx) {
 // tail note-delivery hook (defined in kernel/notes.c).
 void notes_deliver_at_el0_return(struct exception_context *ctx);
 
-void exception_sync_lower_el(struct exception_context *ctx) {
+static void exception_sync_lower_el_impl(struct exception_context *ctx) {
     u64 esr = ctx->esr;
     u64 far = ctx->far;
     u32 ec  = (u32)ESR_EC(esr);
@@ -374,7 +422,7 @@ void exception_sync_lower_el(struct exception_context *ctx) {
     }
 }
 
-void exception_unexpected(struct exception_context *ctx, u64 vector_idx) {
+static void exception_unexpected_impl(struct exception_context *ctx, u64 vector_idx) {
     // Stash ESR / FAR / ELR / vector_idx into recognizable diagnostic.
     // extinction_with_addr is the closest match in the existing API;
     // we encode the vector index in the message so a developer can

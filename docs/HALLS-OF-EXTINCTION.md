@@ -6,9 +6,18 @@ everything that is hard or impossible to obtain after the fact — registers,
 stack, a backtrace, the fault syndrome — and (Tier 3) persist a compact record
 across the reboot.
 
-Status: **design** (2026-05-31, user-requested). Tier 1 + Tier 2 are BUILD;
-Tier 3 is DESIGN-only this pass (built later — Lazarus-adjacent). Naming is
-thematic (extinction = ELE, the kernel panic; the Halls archive the dead).
+Status: **Tier 1 LANDED (HX-1)**; Tier 2 + Tier 3 designed, not yet built
+(Tier 3 is Lazarus-adjacent). As-built reference: `docs/reference/101-halls.md`.
+Naming is thematic (extinction = ELE, the kernel panic; the Halls archive the
+dead).
+
+**As-built deltas from this design (HX-1):** (a) the per-CPU live-frame slot is
+set/restored by **C wrappers** on the four exception entry handlers, NOT in
+`vectors.S` -- the asm slots are at their 0x80-byte budget and `KERNEL_EXIT` is
+too load-bearing to touch for no gain. (b) Return addresses spilled to the
+kernel stack are **PAC-signed**; `halls_strip_pac` (`xpaci`) strips them before
+the KASLR link-translation, else the link addr is unresolvable -- validated on
+a real frame (the ELR link resolved to `boot_main` via `addr2line`).
 
 ---
 
