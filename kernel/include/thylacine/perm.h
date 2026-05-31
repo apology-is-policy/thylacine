@@ -5,16 +5,18 @@
 // bypasses the check; only CAP_HOSTOWNER (a console-gated capability, never an
 // identity) is the DAC-override.
 //
-// At v1.0 enforcement is live only for Devs with perm_enforced == true
-// (devramfs -- system-owned). dev9p enforcement is deferred to A-3 (its stored
-// uids are the connection identity / host-baked, not yet reconciled with the
-// PRINCIPAL_SYSTEM boot chain); the chokepoint skips the check when the Dev's
-// flag is false. See <thylacine/dev.h>::Dev.perm_enforced.
+// Enforcement is live for Devs with perm_enforced == true: devramfs
+// (system-owned, A-2d) and dev9p (A-3b -- after the host-bake stamps the pool
+// PRINCIPAL_SYSTEM-owned + SO_PEERCRED carries the connecting principal, so the
+// server-reported uids reconcile with the PRINCIPAL_SYSTEM boot chain). The
+// chokepoint skips the check when a Dev's flag is false. See
+// <thylacine/dev.h>::Dev.perm_enforced.
 
 #ifndef THYLACINE_PERM_H
 #define THYLACINE_PERM_H
 
 #include <thylacine/types.h>
+#include <thylacine/handle.h>   // rights_t (rights_for_omode)
 
 struct Proc;
 struct t_stat;
@@ -40,6 +42,13 @@ int perm_check(const struct Proc *p, const struct t_stat *st, unsigned want);
 // perm_want_for_omode — map a SYS_WALK_OPEN omode (Plan 9: OREAD=0 / OWRITE=1 /
 // ORDWR=2 / OEXEC=3, OTRUNC=0x10) to the rwx bits an open requires.
 unsigned perm_want_for_omode(u32 omode);
+
+// rights_for_omode — map an omode to the handle RIGHT_* envelope (A-3b/F1). The
+// capability-axis analog of perm_want_for_omode: the returned handle's rights must
+// not exceed the access perm_check validated. OEXEC -> RIGHT_READ (no RIGHT_EXEC;
+// the handle loads the binary via read). RIGHT_TRANSFER + the T_OPATH born-R|W
+// base are caller policy (sys_walk_open_handler), not derived here.
+rights_t rights_for_omode(u32 omode);
 
 // perm_wstat_check — the SYS_WSTAT ownership-change policy (chmod/chown/chgrp).
 // cur_uid is the file's CURRENT owner; valid is the T_WSTAT_* field mask; new_gid

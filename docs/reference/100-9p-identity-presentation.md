@@ -1,9 +1,9 @@
 # 100 — 9P identity presentation (A-3)
 
-**Status:** A-3a LANDED (the reconciliation mechanism). A-3b (dev9p rwx enforcement
-activation + the A-2d F1/F2 closes) and A-3c (per-user stratumd mechanism proof +
-trust-stamp seam) append to this doc as they land. Design: `IDENTITY-DESIGN.md §9.7`
-+ the §3.5 F-4 correction + the §3.7.1 activation note.
+**Status:** A-3a + A-3b LANDED (reconciliation mechanism + dev9p rwx enforcement
+activation, closing the A-2d F1/F2 prerequisites). A-3c (per-user stratumd mechanism
+proof + trust-stamp seam) appends as it lands. Design: `IDENTITY-DESIGN.md §9.7` + the
+§3.5 F-4 correction + the §3.7.1 activation note.
 
 ---
 
@@ -110,6 +110,50 @@ pool) were rebuilt **only when a binary was missing**, so a Stratum source edit 
 `sysroot_is_stale()`) rebuilds when any Stratum C source/header is newer than the built
 `stratumd`. Same stale-consumer class as the A-2a sysroot fix.
 
+## Enforcement activation (A-3b)
+
+dev9p rwx enforcement is now LIVE: `kernel/dev9p.c` sets `.perm_enforced = true`. With
+the A-3a reconciliation in place (pool `PRINCIPAL_SYSTEM`-owned + `SO_PEERCRED` carrying
+the connecting principal), `dev9p_stat_native`'s server-reported uid/gid is a Thylacine
+principal, so the kernel `perm_check` at the FS chokepoints (A-2d) is coherent and the
+boot chain (`PRINCIPAL_SYSTEM` = owner of the baked corpus and of its own runtime
+creates) is not denied. The A-2d activation prerequisites close in lockstep with the flip:
+
+### F1 — handle rights derived from omode
+
+`sys_walk_open_handler` installs the `KObj_Spoor` handle rights from `omode` via the new
+`rights_for_omode` helper (`kernel/perm.c`), so the capability axis cannot exceed the
+access `perm_check` validated:
+
+| omode | handle rights |
+|---|---|
+| OREAD (0) | `RIGHT_READ` |
+| OWRITE (1) | `RIGHT_WRITE` |
+| ORDWR (2) | `RIGHT_READ \| RIGHT_WRITE` |
+| OEXEC (3) | `RIGHT_READ` (read-implied; there is no `RIGHT_EXEC`) |
+| `+OTRUNC` (0x10) | `+RIGHT_WRITE` |
+
+A normally-opened handle also gets `RIGHT_TRANSFER` (caller policy in
+`sys_walk_open_handler`, not in `rights_for_omode`). `T_OPATH` is the one case NOT
+derived from `omode`: it stays born `R|W` with NO `RIGHT_TRANSFER` (the A-1.7/F5 confined
+storage-capability navigation base). `rights_for_omode` is the capability-axis sibling of
+`perm_want_for_omode` (the identity-axis `omode -> PERM_*` map); the deliberate
+divergence is OEXEC (`PERM_X` for the identity check vs `RIGHT_READ` for the handle,
+which loads the binary by reading).
+
+Regression note: narrowing the envelope is safe for correct callers — an OREAD handle
+that loses `RIGHT_WRITE` only fails a write the 9P server already rejected pre-A-3b; the
+rejection just moves earlier (kernel RIGHT gate instead of server `Rlerror`).
+
+### F2 — perm_check on directory mutation
+
+`sys_rename_handler` (BOTH parent dirs — POSIX rename needs write+search on source and
+destination) and `sys_unlink_handler` (the parent dir) now run
+`perm_check(parent, PERM_W | PERM_X)`, gated on `dev->perm_enforced`, mirroring
+`sys_walk_create_handler`. Before A-3b they gated on `RIGHT_WRITE` only, so an
+`O_PATH`-born `R|W` handle to a no-`other-w` directory could rename/unlink its entries
+once dev9p enforced.
+
 ## Invariants
 
 - **I-22 preserved** — the `SO_PEERCRED` principal is kernel-stamped (`SYS_srv_peer`),
@@ -121,21 +165,37 @@ pool) were rebuilt **only when a binary was missing**, so a Stratum source edit 
 
 ## Tests
 
-A-3a is behaviorally inert at runtime (dev9p rwx enforcement is still off until A-3b),
-so it changes only *recorded* ownership + the `n_uname` wire value — neither enforced
-yet. Verified by: full build (sysroot + host stratumd + kernel + pool re-bake), suite
-**637/637 PASS** (default + UBSan), **boot OK**, and **cross-reboot PASS** (the corvus
-identity-DB persistence path rides the SO_PEERCRED-stamped stratumd creates). The
-enforcement-behavior tests (the deny/allow proof, F1 rights-from-omode, F2) land at A-3b.
+**A-3a** was behaviorally inert at runtime (enforcement off), changing only *recorded*
+ownership + the `n_uname` wire value; verified by build + suite (637/637) + boot +
+cross-reboot, no regression.
+
+**A-3b** activates dev9p enforcement + adds the enforcement-behavior tests (suite
+**639/639 PASS**, **boot OK** + **cross-reboot PASS** under live enforcement — the full
+corvus identity-DB create / rename-swap / cross-reboot reload path runs as
+PRINCIPAL_SYSTEM owner):
+- `perm.rights_for_omode` — the F1 omode->RIGHT_* map.
+- `dev9p.perm_enforced_deny_allow` — composes `dev9p_stat_native` (loopback Rgetattr:
+  uid 0x1234, mode 0644) with `perm_check`: owner writes; group/other/PRINCIPAL_SYSTEM
+  denied write (the I-22-on-dev9p proof).
+- `perm.dev_flags` — asserts `dev9p.perm_enforced == true`.
+- `stratumd-stub` gains a Tgetattr handler (SYSTEM-owned, world-traversable) so the
+  `userspace.stratumd_stub_walk_round_trip` probe's `t_walk_open` passes the now-enforced
+  walk path — once enforcement is live, a dev9p server MUST answer Tgetattr.
+- **No-brick (the M2 completion):** the pool ROOT must be SYSTEM-owned too, not just the
+  baked files. The mkfs root inode was uid=0/0755, so the PRINCIPAL_SYSTEM boot chain hit
+  it as *other* and joey's `t_walk_create` in the root was denied. `stratum-mkfs` gained
+  `--root-uid`/`--root-gid` (build.sh passes PRINCIPAL_SYSTEM). With root + baked files +
+  runtime creates (M1) all SYSTEM-owned, the boot chain owns the whole tree.
 
 ## Status
 
-- **A-3a (this):** M1 (pouch SO_PEERCRED → principal) + M2 (host-bake SYSTEM-owned via
+- **A-3a (landed):** M1 (pouch SO_PEERCRED → principal) + M2 (host-bake SYSTEM-owned via
   the Stratum `--bake-owner-uid` flag + build.sh) + M4 (kernel `n_uname` = principal) +
-  the `stratum_host_tools_stale` build fix. dev9p enforcement remains OFF.
-- **A-3b (next):** flip `dev9p.perm_enforced = true`; close A-2d audit F1
-  (SYS_WALK_OPEN handle rights derived from omode; `T_OPATH` keeps the A-1.7 born-`R|W`
-  base) + F2 (`perm_check` on `sys_rename_handler` / `sys_unlink_handler`); the
-  enforcement deny/allow tests.
+  the `stratum_host_tools_stale` build fix. (dev9p enforcement was OFF.)
+- **A-3b (landed):** flipped `dev9p.perm_enforced = true`; closed A-2d audit F1
+  (`rights_for_omode`; `T_OPATH` keeps the A-1.7 born-`R|W` base) + F2 (`perm_check` on
+  rename/unlink); the `stratumd-stub` Tgetattr; the `stratum-mkfs --root-uid`/`--root-gid`
+  no-brick fix (M2 completion — the root inode, not just the baked files, must be
+  SYSTEM-owned).
 - **A-3c (next):** per-user stratumd `--role client` mechanism proof (dataset-scope
   `EACCES`-at-Tattach); the corvus trust-stamp gate recorded as a v1.x seam.

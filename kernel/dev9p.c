@@ -584,25 +584,16 @@ void dev9p_init(void) {
 struct Dev dev9p = {
     .dc       = DEV9P_DC,
     .name     = "9p",
-    // A-2d: rwx enforcement DEFERRED to A-3. The server-reported uid/gid is the
-    // connection / host-baked identity, not reconciled with the PRINCIPAL_SYSTEM
-    // boot chain until per-user stratumd lands -- uniform enforcement would brick
-    // the post-pivot creates. (IDENTITY-DESIGN.md 3.7.1.)
-    //
-    // A-3 PREREQUISITES before flipping this to `true` (A-2d audit F1+F2, dormant
-    // while false; do not flip without closing both -- each is a privilege hole):
-    //   F1 (P1): sys_walk_open_handler installs the handle with a hardcoded
-    //     R|W[|TRANSFER] envelope independent of omode (syscall.c ~1662). With an
-    //     enforced Dev, an OREAD/OEXEC open of a file the caller has only r-- /
-    //     --x on would yield a writable/readable handle the perm_check never
-    //     validated (SYS_READ/SYS_WRITE re-check only the RIGHT, not perm). A-3
-    //     MUST derive the handle rights from the omode (the contract comment at
-    //     that install site already says so).
-    //   F2 (P2): sys_rename_handler / sys_unlink_handler gate on RIGHT_WRITE only,
-    //     with no perm_check -- A-3 MUST add perm_check(parent, PERM_W|PERM_X)
-    //     there (matching sys_walk_create_handler), or an O_PATH-born R|W handle
-    //     to a no-write directory could mutate its entries.
-    .perm_enforced = false,
+    // A-3b: rwx enforcement ACTIVE. The reconciliation A-2d deferred is in place
+    // (IDENTITY-DESIGN.md 3.7.1 + 9.7): the host-bake stamps the pool
+    // PRINCIPAL_SYSTEM-owned (Stratum --bake-owner-uid) and SO_PEERCRED carries
+    // the connecting principal (the pouch shim), so dev9p_stat_native's
+    // server-reported uid/gid is a Thylacine principal and perm_check is coherent
+    // -- the boot chain (PRINCIPAL_SYSTEM = owner) is not denied. The A-2d audit
+    // F1 (sys_walk_open_handler now derives handle rights from omode via
+    // rights_for_omode) + F2 (sys_rename_handler / sys_unlink_handler now
+    // perm_check(parent, PERM_W|PERM_X)) were closed in lockstep with this flip.
+    .perm_enforced = true,
 
     .reset    = dev9p_reset,
     .init     = dev9p_init_noop,             // registration is via dev9p_init (outside the bestiary walk)

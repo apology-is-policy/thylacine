@@ -25,6 +25,7 @@ void test_perm_check_owner_first_authoritative(void);
 void test_perm_check_hostowner_override(void);
 void test_perm_in_group(void);
 void test_perm_want_for_omode(void);
+void test_perm_rights_for_omode(void);
 void test_perm_wstat_policy(void);
 void test_perm_devramfs_enforced_real_metadata(void);
 void test_perm_dev_flags(void);
@@ -145,6 +146,21 @@ void test_perm_want_for_omode(void) {
                    "OWRITE|OTRUNC -> W");
 }
 
+void test_perm_rights_for_omode(void) {
+    // A-3b/F1: the handle RIGHT_* envelope derived from omode (capability-axis
+    // analog of want_for_omode). Note OEXEC -> RIGHT_READ (no RIGHT_EXEC; the
+    // handle loads the binary via read).
+    TEST_EXPECT_EQ(rights_for_omode(0u), RIGHT_READ,               "OREAD -> R");
+    TEST_EXPECT_EQ(rights_for_omode(1u), RIGHT_WRITE,              "OWRITE -> W");
+    TEST_EXPECT_EQ(rights_for_omode(2u), RIGHT_READ | RIGHT_WRITE, "ORDWR -> R|W");
+    TEST_EXPECT_EQ(rights_for_omode(3u), RIGHT_READ,               "OEXEC -> R (read-implied)");
+    TEST_EXPECT_EQ(rights_for_omode(0u | 0x10u), RIGHT_READ | RIGHT_WRITE,
+                   "OREAD|OTRUNC -> R|W (truncate writes)");
+    // RIGHT_TRANSFER is caller policy (sys_walk_open_handler), never from the map.
+    TEST_ASSERT((rights_for_omode(2u) & RIGHT_TRANSFER) == 0,
+                "rights_for_omode never sets TRANSFER");
+}
+
 // =============================================================================
 // perm_wstat_check — the chmod/chown/chgrp ownership-change policy.
 // =============================================================================
@@ -239,6 +255,6 @@ void test_perm_devramfs_enforced_real_metadata(void) {
 void test_perm_dev_flags(void) {
     TEST_ASSERT(devramfs.perm_enforced,
                 "devramfs enforces rwx (system-owned, live at v1.0)");
-    TEST_ASSERT(!dev9p.perm_enforced,
-                "dev9p rwx enforcement deferred to A-3 (perm_enforced false)");
+    TEST_ASSERT(dev9p.perm_enforced,
+                "dev9p enforces rwx (A-3b: pool SYSTEM-owned + SO_PEERCRED-principal)");
 }

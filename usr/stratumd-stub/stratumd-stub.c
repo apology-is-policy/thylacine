@@ -57,6 +57,8 @@
 #define P9_RLOPEN     13
 #define P9_TREAD      116
 #define P9_RREAD      117
+#define P9_TGETATTR   24
+#define P9_RGETATTR   25
 
 #define READ_FD       0
 #define WRITE_FD      1
@@ -144,6 +146,9 @@ static void put_u32(unsigned char *p, unsigned int v) {
     p[1] = (unsigned char)((v >> 8) & 0xff);
     p[2] = (unsigned char)((v >> 16) & 0xff);
     p[3] = (unsigned char)((v >> 24) & 0xff);
+}
+static void put_u64(unsigned char *p, unsigned long long v) {
+    for (int i = 0; i < 8; i++) p[i] = (unsigned char)((v >> (i * 8)) & 0xff);
 }
 static unsigned short get_u16(const unsigned char *p) {
     return (unsigned short)((unsigned)p[0] | ((unsigned)p[1] << 8));
@@ -342,6 +347,41 @@ static long build_response(const unsigned char *req, long req_len,
         for (unsigned int i = 0; i < n; i++) {
             resp[P9_HDR_LEN + 4 + i] = HELLO_CONTENT[(unsigned int)offset + i];
         }
+        return total;
+    }
+
+    if (type == P9_TGETATTR) {
+        // Tgetattr body: [fid u32][request_mask u64]. A-3b: the kernel's rwx
+        // enforcement (dev9p_stat_native) sends Tgetattr at every walk_open, so
+        // a dev9p server MUST report ownership. Model the real Stratum pool:
+        // PRINCIPAL_SYSTEM-owned, world-traversable (0755 dir / 0644 file), so
+        // the probe's walk_open passes perm_check whether it is owner or other.
+        if (req_len < P9_HDR_LEN + 4 + 8)
+            return build_rlerror(resp, resp_cap, tag, 5);  // EINVAL
+        unsigned int fid = get_u32(req + 7);
+        int slot = fid_find(fid);
+        if (slot < 0) return build_rlerror(resp, resp_cap, tag, 9);  // EBADF
+        unsigned char path = g_fids[slot].path;
+        int is_dir = (path == PATH_ROOT);
+
+        // Rgetattr body (9P2000.L, 153 bytes): valid(8) qid(13) mode(4) uid(4)
+        // gid(4) then 15 u64 (nlink rdev size blksize blocks a/m/c/btime gen
+        // data_version). Only valid/qid/mode/uid/gid/size are populated; the
+        // rest stay zero (the probe reads /hello via Tread, not via stat).
+        long total = P9_HDR_LEN + 153;
+        if (total > resp_cap) return -1;
+        put_u32(resp, (unsigned)total);
+        resp[4] = P9_RGETATTR;
+        put_u16(resp + 5, tag);
+        unsigned char *b = resp + P9_HDR_LEN;
+        for (int i = 0; i < 153; i++) b[i] = 0;
+        put_u64(b + 0,  0x7ffULL);                      // valid = P9_GETATTR_BASIC
+        put_qid(b + 8,  qtype_for_path(path), path);    // qid @ 8
+        put_u32(b + 21, is_dir ? 0040755u : 0100644u);  // mode @ 21
+        put_u32(b + 25, 0xFFFFFFFEu);                   // uid @ 25 (PRINCIPAL_SYSTEM)
+        put_u32(b + 29, 0xFFFFFFFEu);                   // gid @ 29 (GID_SYSTEM)
+        put_u64(b + 49, is_dir ? 0ULL                   // size @ 49
+                               : (unsigned long long)HELLO_CONTENT_LEN);
         return total;
     }
 

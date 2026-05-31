@@ -2,6 +2,7 @@
 #include <thylacine/proc.h>
 #include <thylacine/caps.h>
 #include <thylacine/syscall.h>
+#include <thylacine/handle.h>
 
 bool proc_in_group(const struct Proc *p, u32 gid) {
     if (!p)                  return false;
@@ -46,6 +47,25 @@ unsigned perm_want_for_omode(u32 omode) {
     }
     if (omode & 0x10u) want |= PERM_W;             // OTRUNC truncates -> write
     return want;
+}
+
+// rights_for_omode -- map a SYS_WALK_OPEN omode to the handle RIGHT_* envelope
+// (A-3b/F1). Parallel to perm_want_for_omode but in the capability bit-space:
+// the handle's rights must not exceed the access perm_check validated. Note the
+// deliberate divergence at OEXEC -- perm_want_for_omode returns PERM_X (execute
+// is an identity-axis check), but the HANDLE only needs RIGHT_READ to load the
+// binary (there is no RIGHT_EXEC). RIGHT_TRANSFER + the T_OPATH born-R|W base
+// are caller policy (sys_walk_open_handler), NOT derived here.
+rights_t rights_for_omode(u32 omode) {
+    rights_t r;
+    switch (omode & 0x3u) {
+        case 0:  r = RIGHT_READ;                break;  // OREAD
+        case 1:  r = RIGHT_WRITE;               break;  // OWRITE
+        case 2:  r = RIGHT_READ | RIGHT_WRITE;  break;  // ORDWR
+        default: r = RIGHT_READ;                break;  // OEXEC -> read-implied
+    }
+    if (omode & 0x10u) r |= RIGHT_WRITE;                // OTRUNC -> write
+    return r;
 }
 
 int perm_wstat_check(const struct Proc *p, u32 cur_uid, u32 valid, u32 new_gid) {

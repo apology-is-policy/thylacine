@@ -1129,12 +1129,19 @@ build_stratum_pool_fixture() {
     # if the pool size or schema changed across builds).
     rm -f "$pool_img" "$keyfile"
 
+    # A-3: PRINCIPAL_SYSTEM == GID_SYSTEM == 4294967294 == (u32)-2. The root
+    # inode (mkfs --root-uid/-gid) AND every baked file (stratumd
+    # --bake-owner-uid below) are stamped SYSTEM-owned, so the boot chain
+    # (PRINCIPAL_SYSTEM) owns the whole baked tree once the OS enforces dev9p
+    # rwx (A-3b) -- otherwise joey-as-other cannot create in the root -> brick.
+    local bake_owner=4294967294
     echo "==> generating stratum pool fixture ($pool_img, system.key)"
     "$mkfs_bin" "$pool_img" --size 64M --keyfile "$keyfile" \
-            --seed "$mkfs_seed" >/dev/null 2>&1 || {
+            --seed "$mkfs_seed" --root-uid "$bake_owner" --root-gid "$bake_owner" \
+            >/dev/null 2>&1 || {
         echo "==> stratum-mkfs failed; rerunning with stderr visible" >&2
         "$mkfs_bin" "$pool_img" --size 64M --keyfile "$keyfile" \
-            --seed "$mkfs_seed"
+            --seed "$mkfs_seed" --root-uid "$bake_owner" --root-gid "$bake_owner"
         exit 2
     }
 
@@ -1192,13 +1199,9 @@ populate_stratum_pool() {
     # without rerunning the whole build.
     # --listen takes a raw filesystem path (NOT a unix:PATH URL prefix --
     # stratumd's listen_unix calls bind(2) on the path verbatim).
-    # A-3: stamp every baked file PRINCIPAL_SYSTEM-owned (uid == gid ==
-    # 0xFFFFFFFE == 4294967294) instead of the host build user's uid. The
-    # Thylacine boot chain runs as PRINCIPAL_SYSTEM; once kernel dev9p rwx
-    # enforcement is live (A-3b) the boot chain must be the OWNER of the
-    # baked corpus (owner-rwx) or its post-pivot creates would be denied
-    # as `other` -> boot brick. See IDENTITY-DESIGN.md section 9.7 M2.
-    local bake_owner=4294967294   # PRINCIPAL_SYSTEM == GID_SYSTEM == (u32)-2
+    # A-3: stamp every baked file PRINCIPAL_SYSTEM-owned via --bake-owner-uid
+    # (bake_owner declared above with the mkfs --root-uid; same value owns the
+    # root inode AND the baked files, so the boot chain owns the whole tree).
     "$stratumd_bin" "$pool_img" \
         --listen "$sock_path" \
         --keyfile "$keyfile" \

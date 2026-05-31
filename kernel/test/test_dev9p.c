@@ -19,6 +19,9 @@
 #include <thylacine/spoor.h>
 #include <thylacine/syscall.h>
 #include <thylacine/types.h>
+#include <thylacine/perm.h>
+#include <thylacine/proc.h>
+#include <thylacine/caps.h>
 
 void test_dev9p_registered(void);
 void test_dev9p_attach_client_root_spoor(void);
@@ -588,5 +591,41 @@ void test_dev9p_wstat_native_drives_setattr(void) {
     TEST_EXPECT_EQ((u64)g_setattr_mode, (u64)0640u, "mode on the wire");
     TEST_EXPECT_EQ((u64)g_setattr_uid, (u64)1000u, "uid on the wire");
     TEST_EXPECT_EQ((u64)g_setattr_gid, (u64)2000u, "gid on the wire");
+    teardown(root);
+}
+
+// A-3b: a synthetic Proc carrying only the identity perm_check reads.
+static void mkproc9(struct Proc *p, u32 principal, u32 pgid) {
+    for (size_t i = 0; i < sizeof(*p); i++) ((u8 *)p)[i] = 0;
+    p->principal_id   = principal;
+    p->primary_gid    = pgid;
+    p->supp_gid_count = 0;
+    p->caps           = CAP_NONE;
+}
+
+// A-3b: dev9p enforcement composes dev9p_stat_native (the loopback Rgetattr:
+// uid 0x1234, gid 0x5678, mode 0100644 = -rw-r--r--) with perm_check. Proves the
+// wiring on dev9p SPECIFICALLY (devramfs is the A-2d test) reads the right
+// owner/group/other bits, and that PRINCIPAL_SYSTEM gets NO ambient bypass (I-22).
+void test_dev9p_perm_enforced_deny_allow(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "root");
+    TEST_ASSERT(dev9p.perm_enforced, "dev9p enforces rwx (A-3b)");
+    struct t_stat st;
+    TEST_EXPECT_EQ((u64)dev9p.stat_native(root, &st), (u64)0, "stat_native -> 0");
+
+    struct Proc owner, grp, other, sys;
+    mkproc9(&owner, 0x1234u, 0x9999u);              // owner == st.uid
+    mkproc9(&grp,   0x4321u, 0x5678u);              // member of st.gid
+    mkproc9(&other, 0x4321u, 0x9999u);              // neither owner nor group
+    mkproc9(&sys,   PRINCIPAL_SYSTEM, GID_SYSTEM);  // system, but not owner/group
+
+    TEST_EXPECT_EQ(perm_check(&owner, &st, PERM_W), 0,  "dev9p owner W allowed (rw-)");
+    TEST_EXPECT_EQ(perm_check(&grp,   &st, PERM_R), 0,  "dev9p group R allowed (r--)");
+    TEST_EXPECT_EQ(perm_check(&grp,   &st, PERM_W), -1, "dev9p group W denied");
+    TEST_EXPECT_EQ(perm_check(&other, &st, PERM_R), 0,  "dev9p other R allowed (r--)");
+    TEST_EXPECT_EQ(perm_check(&other, &st, PERM_W), -1, "dev9p other W denied");
+    TEST_EXPECT_EQ(perm_check(&sys,   &st, PERM_W), -1,
+                   "dev9p PRINCIPAL_SYSTEM W denied (I-22: no identity bypass)");
     teardown(root);
 }

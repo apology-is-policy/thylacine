@@ -1645,40 +1645,30 @@ static s64 sys_walk_open_handler(u64 spoor_fd_raw, u64 name_va,
     }
 
     // Install the now-opened nc in the caller's handle table. The
-    // rights envelope matches SYS_ATTACH_9P: R | W | TRANSFER. The
-    // server enforces the actual omode (writes to an OREAD-only fid
-    // return Rlerror, not -EPERM here). handle_alloc takes ownership
-    // of the ref from spoor_clone; on full-table failure we spoor_clunk
-    // (running dev->close to clunk the fid).
+    // handle_alloc takes ownership of the ref from spoor_clone; on full-table
+    // failure we spoor_clunk (running dev->close to clunk the fid).
     //
-    // F7 close (P5-stratumd-stub-bringup audit): the R|W|TRANSFER mask
-    // delegates write/transfer gating to the underlying Dev. For dev9p
-    // — the only user-reachable walk source at v1.0 — the 9P server is
-    // the authority; the kernel rights envelope is a hint, not the
-    // enforcement gate. A future Dev whose walk requires kernel rights
-    // for enforcement MUST derive returned rights from the source slot
-    // (e.g., slot->rights), not from this hardcoded mask, OR sit behind
-    // a per-Dev policy hook that intersects this mask with Dev-defined
-    // upper bounds. At v1.0 the policy is "9P-server-mediated"; this
-    // comment is the contract for future walkable Devs.
-    //
-    // A-2d audit F1 (P1, dormant while dev9p.perm_enforced == false): when A-3
-    // enforces dev9p, this hardcoded envelope outruns the omode that perm_check
-    // validated above -- an OREAD/OEXEC open would still install RIGHT_WRITE /
-    // RIGHT_READ. A-3 MUST derive `r` from omode (OREAD->RIGHT_READ,
-    // OWRITE->RIGHT_WRITE, ORDWR->R|W, OEXEC->RIGHT_READ; O_PATH keeps the F5
-    // R|W navigation envelope) so the capability axis cannot exceed the checked
-    // access. See dev9p.c's .perm_enforced A-3-prerequisites note.
+    // A-3b (closes A-2d audit F1): the handle rights are DERIVED FROM omode
+    // (rights_for_omode) so the capability axis cannot exceed the access
+    // perm_check validated above. Before A-3b a hardcoded R|W|TRANSFER was
+    // installed (the "9P-server-mediated" v1.0 policy, valid only while
+    // dev9p.perm_enforced was false); once dev9p enforces, that envelope
+    // outran the checked omode -- an OREAD/OEXEC open of an r-- / --x file
+    // would yield a writable/readable handle perm_check never validated
+    // (SYS_READ / SYS_WRITE re-check only the RIGHT, by the open-time-snapshot
+    // design). A future walkable Dev inherits this derivation for free.
     //
     // F5 (A-1.7 audit): a T_OPATH (non-opened) handle is a directory
-    // navigation / capability base, not a byte-I/O channel -- born with
-    // least authority (no RIGHT_TRANSFER), so a service handed one as a
-    // confined storage capability cannot 9P-transfer it once the Phase-5+
-    // transfer surface lands. A normally-opened handle keeps the
-    // R|W|TRANSFER envelope (unchanged).
-    rights_t r = (omode_raw & SYS_WALK_OPEN_OPATH)
-                     ? (RIGHT_READ | RIGHT_WRITE)
-                     : (RIGHT_READ | RIGHT_WRITE | RIGHT_TRANSFER);
+    // navigation / capability base, not a byte-I/O channel -- born R|W (it
+    // must be a valid create/walk target for a confined storage-root cap) with
+    // NO RIGHT_TRANSFER (it cannot be 9P-transferred once that surface lands).
+    // This is the one case NOT derived from omode & 3.
+    rights_t r;
+    if (omode_raw & SYS_WALK_OPEN_OPATH) {
+        r = RIGHT_READ | RIGHT_WRITE;
+    } else {
+        r = rights_for_omode((u32)omode_raw) | RIGHT_TRANSFER;
+    }
     hidx_t fd = handle_alloc(p, KOBJ_SPOOR, r, nc);
     if (fd < 0) {
         spoor_clunk(nc);
@@ -1987,6 +1977,18 @@ static s64 sys_rename_handler(u64 olddir_fd_raw, u64 oldname_va, u64 oldname_len
     // session guard). Rejected here before any Dev op.
     if (od->dev != nd->dev)                           return -1;
 
+    // A-3b (closes A-2d audit F2): rwx enforcement on dir mutation. POSIX
+    // rename needs write + search (W|X) on BOTH parent dirs. Gated on the
+    // Dev's perm_enforced (devramfs leaves .rename NULL; dev9p enforces from
+    // A-3b). od->dev == nd->dev here, so one flag governs both.
+    if (od->dev->perm_enforced) {
+        struct t_stat ost, nst;
+        if (spoor_stat_native(od, &ost) != 0)             return -1;
+        if (perm_check(p, &ost, PERM_W | PERM_X) != 0)    return -1;
+        if (spoor_stat_native(nd, &nst) != 0)             return -1;
+        if (perm_check(p, &nst, PERM_W | PERM_X) != 0)    return -1;
+    }
+
     return od->dev->rename(od, old_scratch, nd, new_scratch) == 0 ? 0 : -1;
 }
 
@@ -2007,6 +2009,15 @@ static s64 sys_unlink_handler(u64 parent_fd_raw, u64 name_va, u64 name_len_raw,
     struct Spoor *c = sys_resolve_dir_wr(p, parent_fd_raw);
     if (!c)                                          return -1;
     if (!c->dev || !c->dev->unlink)                  return -1;
+
+    // A-3b (closes A-2d audit F2): W|X on the parent dir to remove an entry
+    // (POSIX). Gated on perm_enforced (dev9p enforces from A-3b; devramfs
+    // leaves .unlink NULL).
+    if (c->dev->perm_enforced) {
+        struct t_stat cst;
+        if (spoor_stat_native(c, &cst) != 0)              return -1;
+        if (perm_check(p, &cst, PERM_W | PERM_X) != 0)    return -1;
+    }
 
     return c->dev->unlink(c, scratch, (u32)flags_raw) == 0 ? 0 : -1;
 }

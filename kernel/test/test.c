@@ -273,6 +273,7 @@ void test_perm_check_owner_first_authoritative(void);
 void test_perm_check_hostowner_override(void);
 void test_perm_in_group(void);
 void test_perm_want_for_omode(void);
+void test_perm_rights_for_omode(void);
 void test_perm_wstat_policy(void);
 void test_perm_devramfs_enforced_real_metadata(void);
 void test_perm_dev_flags(void);
@@ -479,6 +480,7 @@ void test_dev9p_rename(void);
 void test_dev9p_unlink(void);
 void test_dev9p_stat_native_maps_getattr(void);
 void test_dev9p_wstat_native_drives_setattr(void);
+void test_dev9p_perm_enforced_deny_allow(void);
 void test_p9_attached_create_destroy(void);
 void test_p9_attached_handshake_failure_returns_null(void);
 void test_p9_attached_root_spoor_walk_read(void);
@@ -1337,6 +1339,8 @@ struct test_case g_tests[] = {
                                        test_dev9p_stat_native_maps_getattr, false, NULL },
     { "dev9p.wstat_native_drives_setattr",
                                        test_dev9p_wstat_native_drives_setattr, false, NULL },
+    { "dev9p.perm_enforced_deny_allow",
+                                       test_dev9p_perm_enforced_deny_allow, false, NULL },
     { "p9_attached.create_destroy",    test_p9_attached_create_destroy,    false, NULL },
     { "p9_attached.handshake_failure_returns_null",
                                        test_p9_attached_handshake_failure_returns_null,
@@ -1579,6 +1583,7 @@ struct test_case g_tests[] = {
     { "perm.check_hostowner_override", test_perm_check_hostowner_override, false, NULL },
     { "perm.in_group",                 test_perm_in_group,                 false, NULL },
     { "perm.want_for_omode",           test_perm_want_for_omode,           false, NULL },
+    { "perm.rights_for_omode",         test_perm_rights_for_omode,         false, NULL },
     { "perm.wstat_policy",             test_perm_wstat_policy,             false, NULL },
     { "perm.devramfs_enforced_real_metadata",
                                        test_perm_devramfs_enforced_real_metadata, false, NULL },

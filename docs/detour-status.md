@@ -409,7 +409,20 @@ post-fix passing pool) -- not a live reproducer. Full coda:
 - **Tests:** create stamps owner=caller + group=parent; chmod/chown round-trip;
   mount-cape uniform perms on a FAT-like backing; ownership survives reboot.
 
-### A-3 · 9P identity presentation + dev9p enforcement activation + per-user stratumd *(design-first; scripture LANDED 2026-05-31)*
+### A-3 · 9P identity presentation + dev9p enforcement activation + per-user stratumd *(design-first; scripture + A-3a + A-3b LANDED 2026-05-31; A-3c + audit remain)*
+
+**A-3a + A-3b LANDED 2026-05-31.** A-3a = reconciliation mechanism (pouch SO_PEERCRED
+→ principal + Stratum `--bake-owner-uid` + kernel `n_uname` = principal + the
+`stratum_host_tools_stale` build-staleness fix); behaviorally inert (enforcement off);
+637/637 + boot OK + cross-reboot PASS. A-3b = enforcement activation: flipped
+`dev9p.perm_enforced = true`, closed A-2d **F1** (`rights_for_omode`) + **F2**
+(`perm_check` on rename/unlink), added the `stratumd-stub` Tgetattr + the
+`stratum-mkfs --root-uid`/`--root-gid` no-brick fix (the mkfs root inode was uid=0/0755,
+so the PRINCIPAL_SYSTEM boot chain hit it as *other* and joey's create in the root was
+denied — M2 had to stamp the ROOT SYSTEM-owned, not just the baked files). 639/639
+(smp1) + boot OK + cross-reboot PASS under live enforcement (full corvus identity-DB
+create / rename-swap / cross-reboot reload as PRINCIPAL_SYSTEM owner). NEXT = A-3c +
+the A-3 audit round.
 
 **Reshaped by ground truth (corrects F-4).** The 2026-05-28 sketch said "forward
 principal-id as `n_uname`." Ground truth: **Stratum ignores `n_uname`** and reconciles
