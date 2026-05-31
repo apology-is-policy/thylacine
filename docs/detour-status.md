@@ -409,15 +409,39 @@ post-fix passing pool) -- not a live reproducer. Full coda:
 - **Tests:** create stamps owner=caller + group=parent; chmod/chown round-trip;
   mount-cape uniform perms on a FAT-like backing; ownership survives reboot.
 
-### A-3 · 9P identity presentation + per-user stratumd
-- **Builds:** trust gate (corvus stamps the `/srv` posting; kernel forwards
-  principal-id as `n_uname` ONLY to stamped servers; untrusted -> `none`); per-user
-  stratumd spawn (`--role client`, dataset-scoped, Stratum A2); EACCES-at-`Tattach`.
-- **Depends:** A-1. **Prereq to verify first:** Stratum A2 is merged into the
-  `thylacine-pouch-arm` branch we cross-build.
-- **Audit:** privilege boundary (I-2 / I-4 / I-6) -> full round.
-- **Tests:** trusted-local attach presents principal-id; untrusted -> `none`;
-  per-user stratumd serves only its scoped dataset; out-of-scope -> EACCES.
+### A-3 · 9P identity presentation + dev9p enforcement activation + per-user stratumd *(design-first; scripture LANDED 2026-05-31)*
+
+**Reshaped by ground truth (corrects F-4).** The 2026-05-28 sketch said "forward
+principal-id as `n_uname`." Ground truth: **Stratum ignores `n_uname`** and reconciles
+identity via **`SO_PEERCRED`** (which pouch already marshals from the kernel's
+unforgeable `SYS_srv_peer`, but the shim hardcodes `uid=0`, a pre-A-1a stub). Two user
+votes 2026-05-31: **`SO_PEERCRED` is the load-bearing local channel** (n_uname demoted
+to the v1.x foreign/authenticated path); **flip dev9p enforcement now**. Full design:
+IDENTITY-DESIGN.md §9.7 + the §3.5 F-4 correction + the §3.7.1 activation note.
+**Stratum A2 (`--role client`) verified MERGED** on `thylacine-pouch-arm` (`run.c:301`).
+
+- **Builds (split a/b/c):**
+  - **A-3a** -- reconciliation: pouch SO_PEERCRED shim `ucred.uid = principal_id` /
+    `gid = primary_gid` (M1); Stratum `--bake-owner-uid`/`--bake-owner-gid` flag +
+    `build.sh` stamps the pool `PRINCIPAL_SYSTEM`-owned (M2; NOT an on-disk-format
+    change); kernel substitutes `principal_id` for `n_uname` at the two Tattach sites
+    (M4, belt-and-suspenders).
+  - **A-3b** -- activation: flip `dev9p.perm_enforced = true` (M3) + close A-2d **F1**
+    (derive SYS_WALK_OPEN handle rights from omode; `T_OPATH` keeps the A-1.7 born-R|W
+    base) + **F2** (`perm_check(parent, W|X)` on rename [both dirs] + unlink). Depends
+    on A-3a (the flip bricks without the reconciliation).
+  - **A-3c** -- per-user stratumd `--role client` mechanism proof + dataset-scope
+    `EACCES`-at-Tattach; the trust-stamp gate as a v1.x SEAM (M5/M6; per-login spawn is
+    the A-5 consumer).
+- **Depends:** A-1, A-2d (closes its F1+F2). **Prereq verified:** Stratum A2 merged.
+- **Audit:** privilege boundary (I-22 / I-2 / I-4 / I-6; AEGIS-adjacent write path) ->
+  full round. Prosecute the kernel-stamped-vs-forgeable identity, F1 rights-narrowing
+  (no latent wrong-omode caller; T_OPATH base preserved), F2 both rename parents, the
+  host-bake no-brick, the `--bake-owner-uid` override placement.
+- **Tests:** a `CAP_SET_IDENTITY` non-system child is DENIED write to SYSTEM-owned dev9p
+  + ALLOWED read/exec (same shape as the A-2d devramfs test, now on dev9p); F1 OREAD ->
+  RIGHT_READ-only handle, O_PATH -> R|W; F2 non-owner cannot mutate a no-other-w dir;
+  out-of-scope dataset -> EACCES; boot OK + cross-reboot PASS (no brick).
 
 ### A-4 · Clearance + legate elevation + CAP_KILL + trusted path *(splits a/b/c; design-first)*
 - **A-4a:** clearance-level policy objects `{caps, auth_required, time_bound,

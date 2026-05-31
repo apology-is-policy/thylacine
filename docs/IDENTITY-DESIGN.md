@@ -305,6 +305,21 @@ reads, B writes") = namespace composition, not an ACL.
 - v1.0 boundary: the filesystem is local stratumds; cross-machine authenticated
   9P is not a v1.0 deliverable.
 
+**CORRECTED 2026-05-31 (A-3 ground truth; the channel above was the wrong one).** The
+2026-05-28 sketch named **`n_uname`** as the local channel. Ground truth (two Explore
+passes, building A-3) showed that is wrong against the actual stack: **Stratum ignores
+`n_uname`** (`server.c:1007-1008`) and reconciles identity via **`SO_PEERCRED`** only,
+which pouch already marshals from the kernel's **`SYS_srv_peer`** (kernel-stamped,
+*unforgeable*; the connecting Proc's durable `principal_id` via its stripes). So the
+load-bearing trusted-local channel is **`SO_PEERCRED`-carries-principal**, not
+`n_uname`-asserted (the pouch shim's pre-A-1a `ucred.uid = 0` stub is fixed to carry
+`principal_id`). `n_uname` forwarding is kept (cheap) but **demoted to the v1.x
+foreign/authenticated path** (a server with no `SO_PEERCRED` -- remote/TCP -- where the
+corvus-`Tauth`/trust-stamp gate then matters). The **trust-stamp gate is a v1.x SEAM**:
+at v1.0 every attach is local, so the presented identity is the unforgeable kernel-stamp
+and there is no untrusted-assertion to gate. Full mechanism + invariants: **§9.7**. The
+bullets above are preserved as the superseded 2026-05-28 record.
+
 ### 3.6 Hardware-capability granularity + ad-hoc elevation gate (F-6 + F-7: RESOLVED 2026-05-28)
 
 Confirmed in-tree 2026-05-28: **no SMMU/IOMMU in the kernel** — DMA is unconstrained
@@ -497,6 +512,18 @@ mounted at v1.0). (Verified during impl: `/system.key` in devramfs is already
 non-system principal cannot read it post-enforcement and the boot chain (owner)
 still can. The earlier "0644 -> tighten to 0600" flag was a wrong guess; no change
 needed.)
+
+**A-3 activation (RESOLVED 2026-05-31; §9.7).** The dev9p deferral above is lifted at
+A-3. The reconciliation the deferral named -- "the pool's host-baked uids don't match
+the runtime principal" -- is solved by stamping the pool **`PRINCIPAL_SYSTEM`-owned** at
+host-bake (a Stratum `--bake-owner-uid` flag) and making **`SO_PEERCRED` carry the
+connecting principal** (fix the pouch shim's pre-A-1a `ucred.uid = 0`), so the
+kernel-side `perm_check` is coherent and the boot chain (owner) is not bricked. Then
+`dev9p.perm_enforced` flips to **true** and the A-2d F1 (handle-rights-from-omode) + F2
+(perm_check on rename/unlink) prerequisites close in the same pass. User-voted
+2026-05-31 (`SO_PEERCRED` channel; flip-now). The post-2026-05-30 statement "dev9p stays
+handle-RIGHT-gated only at v1.0" is **superseded by A-3** -- it held only for the A-2d
+landing window.
 
 ---
 
@@ -1403,3 +1430,144 @@ merged state -- and are deferred to A-3 as **named activation prerequisites**:
 The activation points carry loud in-code prerequisite notes (`kernel/dev9p.c`'s
 `.perm_enforced` + the `syscall.c` handle-rights install site) so the A-3 flip
 cannot miss F1/F2. Full record: `memory/audit_a2d_closed_list.md`.
+
+### 9.7 A-3 -- 9P identity presentation + dev9p enforcement activation + per-user stratumd (RESOLVED 2026-05-31)
+
+A-3 makes dev9p rwx enforcement real -- the activation §3.7.1 deferred. The blocker
+§3.7.1 named was "the pool's host-baked uids don't match the runtime principal." A-3
+reconciles them, then flips `dev9p.perm_enforced = true` and closes the A-2d
+activation prerequisites (F1 + F2). It also **corrects F-4** (§3.5): the load-bearing
+local identity channel is **`SO_PEERCRED`** (kernel-stamped, unforgeable), not the 9P
+`n_uname` (which Stratum ignores). Two user votes (2026-05-31): the `SO_PEERCRED`
+channel (over literal-F-4 `n_uname`); flip enforcement now (over defer-to-login).
+
+**Ground truth that reshaped the design** (2026-05-31, two Explore passes + spot-verify):
+- Stratum **ignores `n_uname`** at Tattach (`server.c:1007-1008`, literally "ignore");
+  file ownership is stamped from the connection's **`SO_PEERCRED` uid** only
+  (`server.c:2019` Tlcreate -> `s->auth_uid`; `Tsetattr` chown at `server.c:2554` is
+  unconditional).
+- pouch already marshals `getsockopt(SO_PEERCRED)` onto the kernel's **`SYS_srv_peer`**
+  (`0006-pouch-sockets.patch`), and the 40-byte `srv_peer_info` already carries
+  `principal_id` (A-1a) -- **but the shim hardcodes `ucred.uid = 0`** (a pre-A-1a stub:
+  "Thylacine has no uid model").
+- **Stratum A2 (`--role client` per-user proxy) is merged** on `thylacine-pouch-arm`
+  (`run.c:301-317`); dataset-scope refusal is `Rlerror(EACCES)` at Tattach
+  (`serve.c:137-241`). The detour-status "verify Stratum A2 first" prereq is satisfied.
+
+**M1 -- `SO_PEERCRED` carries the principal (the local identity channel; pouch boundary-line).**
+Fix the `0006-pouch-sockets.patch` SO_PEERCRED shim to marshal `ucred.uid =
+info.principal_id` and `ucred.gid = info.primary_gid` (was `0`/`0`). `info` is the
+`pouch_srv_peer_info` the shim already reads from `SYS_srv_peer`. Effect:
+stratumd-in-Thylacine's `peer_creds()` returns the connecting Proc's principal as
+`auth_uid`, so its create-owner stamp records Thylacine principals. **The principal is
+kernel-stamped** (`SYS_srv_peer` reads the peer Proc's durable `principal_id` via its
+stripes) -- a connecting Proc **cannot forge** it. This preserves I-22 (no identity
+self-elevation) and is the property that lets the trusted-local server believe the
+presented identity without `Tauth`.
+
+**M2 -- host-bake stamps `PRINCIPAL_SYSTEM` (Stratum + build.sh).** The host-bake runs
+`stratumd` + `stratum-fs write` as the host build user, so baked files are owner = host
+uid (501/1000), not a Thylacine principal. Add a **`--bake-owner-uid <u32>` /
+`--bake-owner-gid <u32>`** flag to `stratumd` that overrides `s->auth_uid`/`s->auth_gid`
+at/just-before `stm_9p_server_create` for that session. **Not an on-disk-format change**
+-- `si_uid`/`si_gid` already exist (`inode.h:202-203`); only the stamped VALUE changes
+(no `STM_UB_VERSION` bump). `tools/build.sh::build_stratum_pool_fixture` passes
+`--bake-owner-uid 4294967294` (`PRINCIPAL_SYSTEM`) + `--bake-owner-gid <GID_SYSTEM>`.
+Modes are the existing stamps (files `0644`, dirs `0755`, `/system.key` `0400`); since
+the boot chain is `PRINCIPAL_SYSTEM` = the owner, owner-bit access covers read /
+traverse / write everywhere it needs -- no brick. v1.0 bakes no user files; users are
+created at runtime by corvus, owned by their creator's principal via M1.
+
+**M3 -- flip `dev9p.perm_enforced = true` + close F1 + F2 (kernel).**
+- The flip: `kernel/dev9p.c` `.perm_enforced = true`; replace the A-3-prerequisites
+  deferral comment with the activated state.
+- **F1 (A-2d P1) -- derive handle rights from `omode`.** `sys_walk_open_handler` installs
+  the KOBJ_SPOOR handle rights from `omode`, not a hardcoded `R|W[|TRANSFER]`:
+  `OREAD -> RIGHT_READ`; `OWRITE -> RIGHT_WRITE`; `ORDWR -> RIGHT_READ|RIGHT_WRITE`;
+  `OEXEC -> RIGHT_READ` (read-implied; documented); `+OTRUNC -> | RIGHT_WRITE`. A
+  normally-opened handle keeps `RIGHT_TRANSFER`.
+  - **`T_OPATH` keeps the A-1.7/F5 born-`R|W` navigation envelope, no `TRANSFER`** -- an
+    O_PATH walk is a directory/capability base (a service confined to a handed storage
+    root creates under it), so it MUST stay `R|W` regardless of the (absent) access mode.
+    This is the one case that does NOT derive from `omode & 3`. Preserving it is
+    load-bearing for A-1.7 (I-23) -- do not regress the storage-capability base.
+- **F2 (A-2d P2) -- `perm_check` on dir mutation.** `sys_rename_handler` (BOTH the old and
+  new parent dirs) + `sys_unlink_handler` (the parent dir) gain
+  `if (dir->dev->perm_enforced) { spoor_stat_native; perm_check(p, &st, PERM_W|PERM_X); }`,
+  mirroring `sys_walk_create_handler`.
+
+**M4 -- `n_uname` forwarding (belt-and-suspenders; kernel).** The two Tattach sites
+(`syscall.c:1113`, `:1313`) substitute the calling Proc's `principal_id` for the
+`n_uname` field (the userspace-supplied value becomes vestigial; the syscall ABI is
+unchanged -- the arg stays, ignored). Against Stratum this is a **no-op** (Stratum
+ignores n_uname; M1 is the live channel); it is forward-compat for a future **foreign**
+9P server that honors n_uname but has no `SO_PEERCRED` (a remote/TCP transport -- none
+exists at v1.0).
+
+**M5 -- trust-stamp gate is a v1.x SEAM (no v1.0 caller).** F-4's "corvus stamps the
+`/srv` posting; the kernel forwards an asserted identity ONLY to stamped servers"
+guarded against leaking identity to an untrusted server. Under M1 that concern is
+**structurally absent at v1.0**: every v1.0 attach is **local** (a `SrvConn`), so the
+presented identity is the kernel-stamped `SYS_srv_peer` principal (unforgeable, and
+already revealed to any server the Proc connects to -- that is how `SO_PEERCRED` works).
+There is no `n_uname`-assert-to-untrusted-server path because there are no remote
+transports. So the trust-stamp registry is **not built** (convergence bar §8.1:
+build-iff-caller). **Seam trigger (recorded):** when a v1.x remote/foreign 9P transport
+lands, the kernel MUST gate the M4 `n_uname` assertion on a corvus-stamped trust bit on
+the service/connection before asserting identity to a server whose peer it does not
+kernel-stamp. Ground truth: no `trusted_for_identity_fwd` field exists on
+`SrvService`/`SrvConn` today -- the seam is a clean add.
+
+**M6 -- per-user stratumd (`--role client`) mechanism; consumer = A-5.** Stratum A2 is
+merged. A-3 proves the mechanism is reachable: a probe attaches an out-of-scope dataset
+and observes `Rlerror(EACCES)` at Tattach. The per-login spawn of a user's `--role
+client` stratumd (scoped to that user's datasets, so its `SO_PEERCRED`-stamped creates
+are owner = that user) is **A-5 (login)** -- no v1.0 caller exists pre-login. **v1.0
+shared-mount note:** the boot chain attaches one mount (joey's `SrvConn`); pre-login
+every Proc is `PRINCIPAL_SYSTEM`, so the single connection stamping `PRINCIPAL_SYSTEM`
+is correct. The "shared mount stamps the attacher's principal" limitation is exactly
+what per-user stratumd resolves at login -- and the kernel `perm_check` (per-Proc, at
+the chokepoint) already denies a non-system Proc's write to a SYSTEM-owned dir BEFORE
+the create reaches the server, so enforcement is per-Proc-correct even over the shared
+mount.
+
+**Invariants.**
+- **I-22 preserved** -- the `SO_PEERCRED` principal is kernel-stamped (`SYS_srv_peer`),
+  not client-asserted; no identity self-elevates. `CAP_HOSTOWNER` remains the only
+  DAC-override (a capability, not an identity).
+- **I-2 / I-4 / I-6 unaffected** -- M1-M6 add no capability, no handle-transfer path, no
+  rights expansion. F1 *narrows* the handle-rights envelope (omode-derived) --
+  monotonic-reduction-friendly.
+- **A-1.7 (I-23) preserved** -- F1's `T_OPATH` carve-out keeps the storage-capability
+  base born `R|W`.
+- **No-brick** -- M2 makes the boot chain the owner of the baked corpus; `boot OK` +
+  cross-reboot PASS are the gate.
+
+**Testability (now, not gated on login A-5).**
+- A `CAP_SET_IDENTITY` non-system child (`principal_id=1000`) attempting to
+  create/`OWRITE` under a SYSTEM-owned dev9p directory is **denied** at the kernel
+  chokepoint (other-bits lack W); the boot chain (owner) succeeds. Same proof shape as
+  the A-2d devramfs test, now on dev9p.
+- F1: an `OREAD` open of a dev9p file yields a `RIGHT_READ`-only handle (a subsequent
+  `SYS_WRITE` fails the RIGHT gate); an `O_PATH` walk still yields `R|W` (the A-1.7 base).
+- F2: a non-`other-w` directory cannot be rename/unlink-mutated by a non-owner once
+  dev9p enforces.
+- M6: out-of-scope dataset attach -> `EACCES`.
+- joey boot regression + cross-reboot: the post-pivot creates (`/var/lib/corvus`, the
+  cross-reboot `susan`) still succeed (boot chain owns the SYSTEM pool).
+
+**Split.** **A-3a** (reconciliation: M1 pouch + M2 Stratum/build.sh + M4 n_uname) ->
+**A-3b** (activation: M3 flip + F1 + F2) -> **A-3c** (M6 mechanism proof + M5 seam) ->
+**one focused audit** over the privilege boundary (AEGIS-adjacent write path again --
+prosecute hard). A-3a precedes A-3b (the flip bricks without the reconciliation in place).
+
+**Audit-bearing** (privilege boundary; the CLAUDE.md + ARCH §25.4 rows land in this
+scripture commit). Prosecute: kernel-stamped-vs-forgeable identity (I-22); F1's
+rights-narrowing surfacing any latent wrong-`omode` caller AND preserving the `T_OPATH`
+base; F2 covering both rename parents; the host-bake SYSTEM-owned no-brick; the dev9p
+flip end-to-end; the Stratum `--bake-owner-uid` override placement (must apply to every
+create on the bake session, must NOT leak into a non-bake stratumd).
+
+**No new spec** per the 2026-05-23 spec-to-code broadening -- prose validation in §3.5
+(corrected F-4) + §3.7.1 + this section + the audit-trigger rows + the audit + the
+runtime tests.
