@@ -891,17 +891,20 @@ static u64 *directmap_walk_to_l2(paddr_t pa) {
     // overflow". Mask IRQs across the window so no handler on THIS CPU can
     // observe the transient unmap. NULL lock = bare DAIF mask (spinlock.h).
     //
-    // SCOPE (audit F1): the per-CPU mask closes the SAME-CPU IRQ-in-window race
-    // -- the proven #806 root cause. It does NOT close the CROSS-CPU hazard: a
-    // peer CPU dereferencing a direct-map PA inside the GiB this CPU is
-    // transiently unmapping faults identically, and a per-CPU mask cannot
-    // prevent it. That hazard is reachable today (-smp N + work-stealing ->
-    // concurrent rfork -> concurrent demote), NOT a future-only concern; it is
-    // a tracked Phase-5+ item (the SMP note above). The durable fix is a
-    // non-BBM OA-preserving refinement (this demote preserves output-address +
-    // attributes, so the `= 0` break is arch-unnecessary -- B2.7.1's BBM rule
-    // targets size/attr CHANGES) or a cross-CPU quiesce; a global mmu_lock
-    // alone does NOT fix it (the faulting peer holds no lock). See 03-mmu.md.
+    // SCOPE: the per-CPU mask closes the SAME-CPU IRQ-in-window race -- the
+    // proven #806 root cause. It does NOT by itself close the CROSS-CPU hazard
+    // (a peer CPU dereferencing a direct-map PA inside the GiB this CPU is
+    // transiently unmapping faults identically; a per-CPU mask cannot prevent
+    // it). #808 closes BOTH races for the buddy zone BY CONSTRUCTION:
+    // mmu_pagemap_directmap (called from phys_init -- single-CPU, IRQ-masked,
+    // pre-thread_create) demotes EVERY 2 MiB block of l1_directmap[1..8] to L3
+    // at boot, so at runtime mmu_set_no_access_range always finds an already-
+    // demoted L3 and this block->table BBM never fires for a kstack-guard poke.
+    // This window + its IRQ-mask therefore remain only as belt-and-suspenders
+    // for a hypothetical demote OUTSIDE the pre-mapped zone (none exists at
+    // v1.0). The rejected non-BBM OA-preserving alternative would need
+    // FEAT_BBM level 2 (absent on ARMv8.0, e.g. the RPi 400) to be portable.
+    // See mmu_pagemap_directmap below + 03-mmu.md "Direct-map demote".
     irq_state_t s = spin_lock_irqsave(NULL);
     l1_directmap[gib] = 0;
     dsb_ishst();
@@ -946,13 +949,16 @@ static u64 *directmap_walk_to_l3(paddr_t pa) {
         l3[i] = make_page_pte_l3(page_pa, PTE_KERN_RW);
     }
 
-    // BBM on the L2 entry. Same #806 hazard as directmap_walk_to_l2's L1 BBM:
-    // the `= 0` transiently unmaps this 2 MiB block of the direct map across a
-    // tlbi + dsb_ish, and an IRQ whose handler dereferences a current_thread()
-    // (or any slab object) whose PA lies in this block faults -> recursive
-    // kernel fault. This L2 window is the one the captured dump hit (ESR
-    // DFSC=0x06, an L2-level translation fault, during thread_create ->
-    // mmu_set_no_access_range in rfork_stress). Mask IRQs across it.
+    // BBM on the L2 entry. Same #806 hazard as directmap_walk_to_l2's L1 BBM
+    // (the `= 0` transiently unmaps this 2 MiB block across a tlbi + dsb_ish;
+    // an IRQ whose handler derefs a current_thread() / slab object with a PA in
+    // this block faults -> recursive kernel fault). This L2 window is the one
+    // the captured #806 dump hit (ESR DFSC=0x06, an L2 translation fault,
+    // during thread_create -> mmu_set_no_access_range in rfork_stress). Mask
+    // IRQs across it. Per #808 (mmu_pagemap_directmap) this demote runs at boot
+    // for the whole buddy zone, so at runtime the kstack-guard path finds the
+    // L3 already present and never reaches this BBM; the mask is belt-and-
+    // suspenders. See directmap_walk_to_l2's SCOPE note + 03-mmu.md.
     irq_state_t s = spin_lock_irqsave(NULL);
     l2[l2_idx] = 0;
     dsb_ishst();
@@ -1043,6 +1049,81 @@ bool mmu_restore_normal_range(paddr_t pa, unsigned n_pages) {
     dsb_ish();
     isb();
     return true;
+}
+
+// =============================================================================
+// #808: boot-time page-map of the buddy direct map (eliminate runtime BBM).
+// =============================================================================
+//
+// build_page_tables leaves l1_directmap[2..8] as 1 GiB blocks and the
+// non-kernel 2 MiB blocks of the kernel GiB as 2 MiB blocks. The FIRST
+// mmu_set_no_access_range on a kstack guard inside such a block forces a
+// runtime break-before-make (directmap_walk_to_l2's L1->L2 demote and/or
+// directmap_walk_to_l3's L2->L3 demote), which transiently unmaps a live
+// 1 GiB / 2 MiB span of the direct map. That window is the #806 root cause
+// (a same-CPU IRQ in it derefs a direct-map slab object and faults) AND has
+// a cross-CPU sibling (a peer derefs a direct-map PA in the span; a per-CPU
+// IRQ mask cannot prevent it).
+//
+// mmu_pagemap_directmap forces every 2 MiB block of the buddy zone through
+// directmap_walk_to_l3 ONCE at boot (from phys_init): single-CPU, IRQs
+// masked at PSTATE (boot_main has not yet run `msr daifclr, #2`), and before
+// the first thread_create. Those BBMs are safe by construction -- no
+// concurrent CPU, no IRQ handler can observe the unmap, and the running code
+// + boot stack live in the kernel-image 2 MiB blocks (already L3, never
+// re-BBM'd). Afterwards EVERY l1_directmap[1..8] entry is a table descriptor
+// and EVERY 2 MiB block within is an L3 table, so the runtime
+// mmu_set_no_access_range / mmu_restore_normal_range path hits the already-
+// demoted fast path (a plain L3 leaf flip) and NEVER does a block->table BBM.
+// Both the #806 same-CPU race and its cross-CPU sibling are thereby gone for
+// the buddy zone BY CONSTRUCTION.
+//
+// This is the Linux-arm64 move: page-map the linear map (no block mappings)
+// so per-page linear-map permission changes (rodata_full / DEBUG_PAGEALLOC /
+// KFENCE) never need a runtime block split. The rejected non-BBM
+// OA-preserving alternative would need FEAT_BBM level 2 (ARMv8.4+), absent on
+// the RPi 400 (Cortex-A72 / ARMv8.0) -> not portable.
+//
+// Cost: one L3 table (4 KiB) per 2 MiB block + one L2 table per demoted GiB
+// ~= RAM / 512 ~= 0.2% of managed RAM (4 MiB per 2 GiB; 16 MiB at the
+// DIRECTMAP_USABLE_RAM_MAX 8 GiB cap). The lost 1 GiB / 2 MiB block TLB reach
+// is a bare-metal (Lazarus) perf concern only; free on QEMU TCG at v1.0.
+//
+// `base`..`end` are the buddy zone bounds (phys.c, already capped at the
+// direct map's 8 GiB reach). Blocks outside [1 GiB, 9 GiB) are skipped
+// (directmap_walk_to_l3 rejects them). An in-range OOM is fatal -- we cannot
+// establish the no-runtime-BBM invariant -- but is effectively impossible
+// right after buddy init when nearly all RAM is free.
+void mmu_pagemap_directmap(paddr_t base, paddr_t end) {
+    for (paddr_t pa = base & ~(BLOCK_SIZE_L2 - 1); pa < end;
+         pa += BLOCK_SIZE_L2) {
+        u32 gib = (u32)(pa >> BLOCK_SHIFT_L1);
+        if (gib < 1 || gib > 8) continue;          // outside the direct map
+        if (!directmap_walk_to_l3(pa)) {
+            extinction("mmu_pagemap_directmap: OOM page-mapping the buddy "
+                       "direct map (#808)");
+        }
+    }
+}
+
+// #808 diagnostic / regression-test helper. Reports whether the 2 MiB block
+// containing `pa` is demoted to L3 page granularity in the direct map --
+// i.e. l1_directmap[gib] is a table descriptor AND the covering L2 entry is
+// a table descriptor. When true, a kstack-guard poke (mmu_set_no_access_range
+// -> directmap_walk_to_l3) takes the already-demoted fast path and does NO
+// block->table break-before-make. NON-mutating (unlike directmap_walk_to_*,
+// which would demote). Returns false for PAs outside the direct map.
+bool mmu_directmap_is_pagemapped(paddr_t pa) {
+    u32 gib = (u32)(pa >> BLOCK_SHIFT_L1);
+    if (gib < 1 || gib > 8) return false;
+
+    u64 l1e = l1_directmap[gib];
+    if (!(l1e & PTE_VALID) || !(l1e & PTE_TYPE_TABLE)) return false;
+
+    u64 *l2 = (u64 *)pa_to_kva(l1e & ~0xFFFull);
+    u32 l2_idx = (u32)((pa >> BLOCK_SHIFT_L2) & 0x1ff);
+    u64 l2e = l2[l2_idx];
+    return (l2e & PTE_VALID) && (l2e & PTE_TYPE_TABLE);
 }
 
 // =============================================================================

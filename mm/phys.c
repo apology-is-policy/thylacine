@@ -18,6 +18,7 @@
 #include "magazines.h"
 
 #include "../arch/arm64/kaslr.h"
+#include "../arch/arm64/mmu.h"          // mmu_pagemap_directmap (#808)
 #include "../arch/arm64/uart.h"
 
 #include <thylacine/dtb.h>
@@ -30,6 +31,11 @@ extern volatile u64 _saved_dtb_ptr;
 // Snapshot of the layout for diagnostic queries (banner).
 static u64 g_total_pages;
 static u64 g_initial_free_pages;
+// #808: page-table pages the boot-time direct-map page-map consumed.
+static u64 g_directmap_table_pages;
+// Buddy zone bounds (post-cap), retained for diagnostics + the #808 sweep test.
+static paddr_t g_zone_base;
+static paddr_t g_zone_end;
 
 // F3 (audit-r-memory-model): The kernel direct map (arch/arm64/mmu.c
 // build_page_tables) covers PA [1 GiB, 9 GiB) via l1_directmap[1..8].
@@ -218,6 +224,22 @@ bool phys_init(void) {
 
     g_total_pages        = num_pages_total;
     g_initial_free_pages = g_zone0.total_free_pages;
+    g_zone_base          = zone_base;
+    g_zone_end           = zone_end;
+
+    // 8. #808: page-map the buddy direct map to L3 granularity now. We are
+    //    single-CPU and IRQ-masked (boot_main has not yet run `msr daifclr,
+    //    #2`), the buddy is live (it allocates the L2/L3 tables), and the
+    //    first thread_create is still ahead -- the exact window where the
+    //    block->table demotes are safe by construction. Afterwards the
+    //    runtime kstack-guard path (mmu_set_no_access_range) only flips
+    //    already-present L3 leaves, so it never does a break-before-make:
+    //    the #806 same-CPU IRQ-during-BBM race AND its cross-CPU sibling are
+    //    eliminated for the buddy zone. The table cost is the free-page
+    //    delta (boot-banner diagnostic via phys_directmap_table_pages).
+    u64 free_before_pagemap = g_zone0.total_free_pages;
+    mmu_pagemap_directmap(zone_base, zone_end);
+    g_directmap_table_pages = free_before_pagemap - g_zone0.total_free_pages;
 
     return true;
 }
@@ -236,6 +258,15 @@ u64 phys_free_pages(void) {
 
 u64 phys_reserved_pages(void) {
     return g_total_pages - g_initial_free_pages;
+}
+
+u64 phys_directmap_table_pages(void) {
+    return g_directmap_table_pages;
+}
+
+void phys_zone_bounds(paddr_t *base, paddr_t *end) {
+    if (base) *base = g_zone_base;
+    if (end)  *end  = g_zone_end;
 }
 
 // ---------------------------------------------------------------------------

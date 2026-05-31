@@ -203,6 +203,7 @@ void test_notes_peek_does_not_pop(void);
 void test_directmap_kva_round_trip(void);
 void test_directmap_alloc_through_directmap(void);
 void test_directmap_vmalloc_mmio_smoke(void);
+void test_directmap_pagemapped_808(void);
 void test_elf_parse_minimal_ok(void);
 void test_elf_parse_multi_segment_ok(void);
 void test_elf_header_rejection(void);
@@ -938,6 +939,7 @@ struct test_case g_tests[] = {
                                        test_directmap_alloc_through_directmap,
                                                                            false, NULL },
     { "directmap.vmalloc_mmio_smoke",  test_directmap_vmalloc_mmio_smoke,  false, NULL },
+    { "directmap.pagemapped_808",      test_directmap_pagemapped_808,      false, NULL },
     { "elf.parse_minimal_ok",          test_elf_parse_minimal_ok,          false, NULL },
     { "elf.parse_multi_segment_ok",    test_elf_parse_multi_segment_ok,    false, NULL },
     { "elf.header_rejection",          test_elf_header_rejection,          false, NULL },

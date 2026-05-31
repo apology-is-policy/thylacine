@@ -42,6 +42,7 @@
 void test_directmap_kva_round_trip(void);
 void test_directmap_alloc_through_directmap(void);
 void test_directmap_vmalloc_mmio_smoke(void);
+void test_directmap_pagemapped_808(void);
 
 void test_directmap_kva_round_trip(void) {
     // Arithmetic identity: pa | KERNEL_DIRECT_MAP_BASE → kva; kva &
@@ -128,4 +129,56 @@ void test_directmap_vmalloc_mmio_smoke(void) {
     // remain). Phase 5+ would add reclaim.
 
     kpage_free(backing);
+}
+
+void test_directmap_pagemapped_808(void) {
+    // #808: mmu_pagemap_directmap (driven from phys_init at boot, single-CPU
+    // + IRQ-masked, before the first thread_create) demotes EVERY 2 MiB block
+    // of the buddy zone to L3 page granularity. So the runtime kstack-guard
+    // path (mmu_set_no_access_range -> directmap_walk_to_l3) always finds an
+    // already-present L3 and NEVER does a block->table break-before-make --
+    // which is what eliminated the #806 same-CPU IRQ-during-BBM race and its
+    // cross-CPU sibling by construction.
+    //
+    // Sweep every 2 MiB block of the buddy zone and assert it is page-mapped.
+    // PRE-#808 this fails: only the blocks that happened to receive a kstack
+    // were demoted; the rest were still 1 GiB / 2 MiB blocks. POST-#808 every
+    // block is L3-backed regardless of allocation history.
+    paddr_t base = 0, end = 0;
+    phys_zone_bounds(&base, &end);
+    TEST_ASSERT(base != 0 && end > base,
+        "phys_zone_bounds returned an empty zone");
+
+    const paddr_t TWO_MIB = 0x200000ull;     // 2 MiB (one L2 block / one L3)
+    unsigned checked = 0;
+    for (paddr_t pa = base & ~(TWO_MIB - 1); pa < end; pa += TWO_MIB) {
+        u32 gib = (u32)(pa >> 30);
+        if (gib < 1 || gib > 8) continue;    // outside the direct map (pass skips)
+        TEST_ASSERT(mmu_directmap_is_pagemapped(pa),
+            "a buddy-zone 2 MiB block is NOT page-mapped "
+            "(#808 boot pass missed it -> runtime BBM still reachable)");
+        checked++;
+    }
+    TEST_ASSERT(checked > 0, "#808 sweep checked zero blocks");
+
+    // A sub-1-GiB PA (MMIO range; l1_directmap[0] invalid) is never
+    // page-mapped -- confirms the query rejects out-of-direct-map PAs.
+    TEST_ASSERT(!mmu_directmap_is_pagemapped(0x10000000ull),
+        "a sub-1-GiB PA reported page-mapped (l1_directmap[0] must be invalid)");
+
+    // A live buddy allocation's 2 MiB block is page-mapped, and a guard poke
+    // + restore round-trips on it without disturbing the page-mapping (the
+    // fast path: no demote, no BBM).
+    void *p = kpage_alloc(KP_ZERO);
+    TEST_ASSERT(p != NULL, "kpage_alloc failed");
+    paddr_t pa = kva_to_pa(p);
+    TEST_ASSERT(mmu_directmap_is_pagemapped(pa),
+        "a freshly-allocated buddy page's 2 MiB block is not page-mapped");
+    TEST_ASSERT(mmu_set_no_access(pa),
+        "mmu_set_no_access failed on a page-mapped block");
+    TEST_ASSERT(mmu_restore_normal(pa),
+        "mmu_restore_normal failed");
+    TEST_ASSERT(mmu_directmap_is_pagemapped(pa),
+        "block lost its page-mapping after set_no_access/restore");
+    kpage_free(p);
 }

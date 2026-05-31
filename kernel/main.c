@@ -275,6 +275,12 @@ void boot_main(void) {
     uart_putdec((reserved * PAGE_SIZE) / 1024UL);
     uart_puts(" KiB reserved (kernel + struct_page + DTB)\n");
 
+    // #808: the buddy direct map is page-mapped (L3) from boot, so no runtime
+    // mmu_set_no_access_range demote does a block->table break-before-make.
+    uart_puts("  directmap: page-mapped to L3 (");
+    uart_putdec((phys_directmap_table_pages() * PAGE_SIZE) / 1024UL);
+    uart_puts(" KiB tables; no runtime BBM -- #808)\n");
+
     // P3-Bda: relocate the DTB blob from its original PA (where QEMU
     // placed it; reachable only via TTBR0 identity) to a buddy-allocated
     // buffer in the kernel direct map. After this call, all DTB walks

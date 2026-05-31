@@ -305,6 +305,34 @@ bool mmu_restore_normal(paddr_t pa);
 bool mmu_set_no_access_range(paddr_t pa, unsigned n_pages);
 bool mmu_restore_normal_range(paddr_t pa, unsigned n_pages);
 
+// #808: page-map the entire buddy direct map to L3 granularity at boot.
+//
+// Demotes every 2 MiB block of [base, end) within the direct-map range
+// (l1_directmap[1..8] = PA [1 GiB, 9 GiB)) to a page-grain L3 table, by
+// driving the same directmap_walk_to_l3 demote the runtime kstack-guard path
+// uses. After this, mmu_set_no_access_range / mmu_restore_normal_range only
+// flip already-present L3 leaf entries -- no runtime block->table
+// break-before-make ever occurs, which eliminates the #806 same-CPU
+// IRQ-during-BBM race AND its cross-CPU sibling for the buddy zone by
+// construction.
+//
+// MUST be called exactly once, single-CPU, with IRQs masked, AFTER the buddy
+// allocator is live (it allocates the L2 / L3 tables) and BEFORE the first
+// thread_create. phys_init is the call site (it owns the buddy <-> direct-map
+// coupling -- the same place as the 8 GiB direct-map reach cap). Extincts on
+// OOM (cannot establish the invariant otherwise).
+//
+// `base`..`end` are the buddy zone bounds, already capped at the direct map's
+// 8 GiB reach by phys.c. Blocks outside [1 GiB, 9 GiB) are skipped.
+void mmu_pagemap_directmap(paddr_t base, paddr_t end);
+
+// #808 diagnostic: true iff the 2 MiB direct-map block containing `pa` is
+// demoted to a page-grain L3 table (both the L1 and the covering L2 entry
+// are table descriptors). When true, the runtime kstack-guard poke takes the
+// fast path with no block->table break-before-make. Non-mutating. False for
+// PAs outside the direct-map range. Used by the boot-pass regression test.
+bool mmu_directmap_is_pagemapped(paddr_t pa);
+
 // P3-Bdb: PA of the kernel-only TTBR0 page table (l0_ttbr0). Used as the
 // pgtable_root for kproc threads (which have proc->pgtable_root = 0).
 // Captured in build_page_tables at boot time (when PC = load PA, so

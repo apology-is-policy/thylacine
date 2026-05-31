@@ -28,6 +28,14 @@ u64 phys_total_pages(void);     // total pages in the zone
 u64 phys_free_pages(void);      // currently free pages (across all orders)
 u64 phys_reserved_pages(void);  // total - free, computed at init
 
+// #808: page table pages consumed by the boot-time direct-map page-map
+// (mmu_pagemap_directmap, driven from phys_init). Boot-banner diagnostic.
+u64 phys_directmap_table_pages(void);
+
+// Buddy zone bounds [base, end) after the direct-map 8 GiB-reach cap.
+// NULL args are skipped. Used by the #808 page-map sweep test.
+void phys_zone_bounds(paddr_t *base, paddr_t *end);
+
 // Public allocation API per ARCHITECTURE.md §6.3.
 struct page *alloc_pages(unsigned order, unsigned flags);
 void free_pages(struct page *p, unsigned order);
