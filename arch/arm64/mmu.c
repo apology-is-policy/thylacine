@@ -49,6 +49,7 @@
 #include <stdint.h>
 #include <thylacine/extinction.h>   // extinction (P3-Bb mmu_map_mmio guards)
 #include <thylacine/smp.h>          // g_secondary_boot_stacks (P5-secondary-stack-guard)
+#include <thylacine/spinlock.h>     // spin_lock_irqsave(NULL): bare IRQ mask (#806 BBM window)
 #include <thylacine/types.h>
 
 // ---------------------------------------------------------------------------
@@ -877,6 +878,31 @@ static u64 *directmap_walk_to_l2(paddr_t pa) {
     // Break-before-make on the L1 entry. Per ARM ARM B2.7.1, changing
     // a block descriptor to a table descriptor (or vice versa) requires
     // BBM: write 0, TLB-flush, write the new descriptor.
+    //
+    // #806 root cause: between the `= 0` (break) and the `= make_table_pte`
+    // (make) this entire 1 GiB of the direct map is UNMAPPED, and the window
+    // spans a tlbi + dsb_ish (microseconds, waits for inner-shareable
+    // completion). An IRQ taken in this window runs the handler on the boot
+    // CPU; arch_fault_handle (and the scheduler) dereference current_thread()
+    // -- a slab object reached via its DIRECT-MAP KVA. When current_thread's
+    // PA falls in this demoted GiB, that read faults (translation), and the
+    // fault handler re-dereferences the same wild pointer -> the recursive
+    // kernel fault that masqueraded for a year as "rfork_stress boot-stack
+    // overflow". Mask IRQs across the window so no handler on THIS CPU can
+    // observe the transient unmap. NULL lock = bare DAIF mask (spinlock.h).
+    //
+    // SCOPE (audit F1): the per-CPU mask closes the SAME-CPU IRQ-in-window race
+    // -- the proven #806 root cause. It does NOT close the CROSS-CPU hazard: a
+    // peer CPU dereferencing a direct-map PA inside the GiB this CPU is
+    // transiently unmapping faults identically, and a per-CPU mask cannot
+    // prevent it. That hazard is reachable today (-smp N + work-stealing ->
+    // concurrent rfork -> concurrent demote), NOT a future-only concern; it is
+    // a tracked Phase-5+ item (the SMP note above). The durable fix is a
+    // non-BBM OA-preserving refinement (this demote preserves output-address +
+    // attributes, so the `= 0` break is arch-unnecessary -- B2.7.1's BBM rule
+    // targets size/attr CHANGES) or a cross-CPU quiesce; a global mmu_lock
+    // alone does NOT fix it (the faulting peer holds no lock). See 03-mmu.md.
+    irq_state_t s = spin_lock_irqsave(NULL);
     l1_directmap[gib] = 0;
     dsb_ishst();
     tlbi_vmalle1is();
@@ -886,6 +912,7 @@ static u64 *directmap_walk_to_l2(paddr_t pa) {
     l1_directmap[gib] = make_table_pte_pa(l2_pa);
     dsb_ishst();
     isb();
+    spin_unlock_irqrestore(NULL, s);
 
     return l2;
 }
@@ -919,7 +946,14 @@ static u64 *directmap_walk_to_l3(paddr_t pa) {
         l3[i] = make_page_pte_l3(page_pa, PTE_KERN_RW);
     }
 
-    // BBM on the L2 entry.
+    // BBM on the L2 entry. Same #806 hazard as directmap_walk_to_l2's L1 BBM:
+    // the `= 0` transiently unmaps this 2 MiB block of the direct map across a
+    // tlbi + dsb_ish, and an IRQ whose handler dereferences a current_thread()
+    // (or any slab object) whose PA lies in this block faults -> recursive
+    // kernel fault. This L2 window is the one the captured dump hit (ESR
+    // DFSC=0x06, an L2-level translation fault, during thread_create ->
+    // mmu_set_no_access_range in rfork_stress). Mask IRQs across it.
+    irq_state_t s = spin_lock_irqsave(NULL);
     l2[l2_idx] = 0;
     dsb_ishst();
     tlbi_vmalle1is();
@@ -929,6 +963,7 @@ static u64 *directmap_walk_to_l3(paddr_t pa) {
     l2[l2_idx] = make_table_pte_pa(l3_pa);
     dsb_ishst();
     isb();
+    spin_unlock_irqrestore(NULL, s);
 
     return l3;
 }

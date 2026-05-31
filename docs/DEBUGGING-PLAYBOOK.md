@@ -510,6 +510,70 @@ when true), with a counter that flags the window if it is ever hit at runtime.
 
 ---
 
+## 6.13 #806 cracked — build the diagnostic, then seed-pin the repro (2026-05-31)
+
+The other half of the "rfork_stress kernel stack overflow" symptom (the part #788's
+on_cpu fix did NOT explain) was root-caused and fixed this session. It is the
+sharpest worked example yet of three transferable moves.
+
+**The bug (one line):** `directmap_walk_to_l2/_l3` (the kstack-guard demote in
+`arch/arm64/mmu.c`) do a break-before-make on the direct map — transiently
+unmapping a 1 GiB / 2 MiB block across a `tlbi+dsb_ish` — WITHOUT masking IRQs. A
+timer IRQ in that window runs a handler that dereferences `current_thread()` (a
+slab object reached via its direct-map KVA); when that thread's PA is in the
+demoted block, the read faults, and the fault handler re-derefs the same wild
+pointer → the recursive fault that descends the boot stack into its guard. Fixed
+by masking IRQs across the BBM.
+
+**The moves that cracked a year-long bug:**
+
+1. **Build the diagnostic that makes the bug HONEST before hunting the root.**
+   The symptom (`boot-stack guard` overflow) was a *lie* told by an amplifier: a
+   wild `current_thread` made the fault handler re-fault, recursing one frame per
+   fault until the boot stack crossed its guard. HX-1 (the crash dump) + the #806
+   re-entrancy guard (`g_in_kernel_fault`, extinct on the *second* kernel-fault
+   entry with the nested FAR) converted the lie into the truth: `recursive kernel
+   fault ... 0x<wild current_thread>`. **You cannot root-cause a symptom that is
+   itself a downstream artifact — first invest in the instrument that surfaces the
+   real first fault.** (This is why the amplifier fix, though it did not fix the
+   root, was the prerequisite for fixing it.)
+
+2. **For a layout-sensitive bug, pin the layout knob to FORCE a deterministic
+   repro — vary the RUNTIME, not the binary.** The repro was ~1/24 and "any
+   rebuild detunes it to 0" — because QEMU randomizes `/chosen/kaslr-seed` per
+   boot, and the KASLR slide moves the kernel's *physical* base, which shifts
+   where the buddy zone (hence every Thread/kstack) begins. So the SEED selects
+   the heap layout. Feeding a fixed DTB via `-dtb` pins the seed (verified: same
+   dtb → identical KASLR offset twice). A `dtc`-edited seed search over ~24
+   pinned seeds on the guard-equipped binary re-opened the window on seed 10 and
+   caught the honest dump. Same lesson as 6.12's `-smp` discriminator: when a bug
+   is too fragile to instrument, find the *non-recompiling runtime knob* that
+   controls it (here the DTB seed) and pin it. (Caveat: it was still probabilistic
+   on the pinned seed — the layout is necessary, the IRQ-timing coincidence also
+   needed — which itself CONFIRMED the timing leg.)
+
+3. **A prosecutor reasoning from the AMPLIFIED dump mis-rates the true root.**
+   Three independent prosecutors ran. One actually FOUND this exact code
+   (`mmu_set_no_access_range` BBM not IRQ-masked) but rated it **LOW-fit /
+   "almost certainly NOT #806"** — because it reasoned from the old boot-20 dump
+   whose terminal fault was the *boot-stack guard* (a TTBR1 access), and concluded
+   the bug couldn't be in the direct-map regime. The honest dump (a *direct-map*
+   L2 fault on `current_thread`) flipped that LOW to the root. **When the captured
+   dump is a downstream artifact, every severity judgment built on it is suspect;
+   re-rate against ground truth from the honest instrument, not the amplified
+   symptom.** Corollary to 6.1's masking-stack rule: an amplifier is a kind of
+   mask, and it mis-weights the prosecution, not just the diagnosis.
+
+**Verification (per the timing-bug discipline, not rebuild-and-rerun):** the
+recompile detunes the seed→repro map, so a clean A/B is impossible. Confirmation
+is the root-cause triple-lock (honest-dump backtrace + ESR DFSC=0x06 L2-read +
+the wild direct-map `current_thread` + the unguarded BBM in code) plus
+correctness-by-construction (IRQs masked across the BBM → no handler can observe
+the transient unmap → the fault is structurally impossible on the boot CPU), with
+the #806 re-entrancy guard as the permanent runtime tripwire for any recurrence.
+
+---
+
 ## 7. Appendix — reproduction recipe
 
 ```sh
