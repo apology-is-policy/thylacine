@@ -149,8 +149,9 @@ _Static_assert(KASLR_ALIGN_BITS >= 22,
 // vmalloc range (page-grain MMIO at base 0xFFFF_8000_0000_0000):
 //   - l0_ttbr1[256] -> l1_vmalloc.
 //   - l1_vmalloc[0] -> l2_vmalloc.
-//   - l2_vmalloc[0] -> l3_vmalloc (covers 2 MiB; 512 × 4 KiB pages).
-//   - l3_vmalloc populated by mmu_map_mmio at runtime.
+//   - l2_vmalloc[0] -> l3_vmalloc  (first 2 MiB; 512 × 4 KiB pages).
+//   - l2_vmalloc[1] -> l3_vmalloc2 (next 2 MiB; VA-contiguous).
+//   - both populated by mmu_map_mmio at runtime (4 MiB MMIO window).
 //
 // All direct-map PTEs unconditionally R/W + XN (PTE_KERN_RW_BLOCK has
 // PTE_PXN | PTE_UXN built in). All vmalloc-MMIO PTEs are
@@ -161,6 +162,27 @@ static u64 l1_directmap[ENTRIES_PER_TABLE] __attribute__((aligned(PAGE_SIZE)));
 static u64 l1_vmalloc[ENTRIES_PER_TABLE]   __attribute__((aligned(PAGE_SIZE)));
 static u64 l2_vmalloc[ENTRIES_PER_TABLE]   __attribute__((aligned(PAGE_SIZE)));
 static u64 l3_vmalloc[ENTRIES_PER_TABLE]   __attribute__((aligned(PAGE_SIZE)));
+// P5-mmio-pool-8cpu: a SECOND contiguous L3 table extends the MMIO vmalloc
+// window from 2 MiB to 4 MiB (1024 4-KiB pages). One table sufficed for <=4
+// CPUs, but the per-CPU GIC redistributor mapping (cpu_count contiguous
+// 0x20000 frames = 32 pages/CPU) scales with CPU count: at DTB_MAX_CPUS=8 the
+// redist alone is 256 pages, which -- with the 1 MiB ECAM (256) + GIC dist
+// (16) + virtio/uart -- overruns a single 512-entry table (the smp8 boot ELE
+// "l3_vmalloc exhausted"). l2_vmalloc[0]->l3_vmalloc maps the first 2 MiB;
+// l2_vmalloc[1]->l3_vmalloc2 the VA-contiguous second 2 MiB.
+static u64 l3_vmalloc2[ENTRIES_PER_TABLE]  __attribute__((aligned(PAGE_SIZE)));
+
+// Total MMIO vmalloc capacity in 4-KiB pages -- the bump allocator's bound.
+#define VMALLOC_MMIO_ENTRIES  (2u * ENTRIES_PER_TABLE)
+
+// Compile-time guard: the pool MUST back the declared CPU max. Worst-case
+// boot MMIO = ECAM(1 MiB=256) + GIC dist(64 KiB=16) + GIC redist(32 pages/CPU
+// * DTB_MAX_CPUS) + virtio/uart slack(64). If DTB_MAX_CPUS is ever raised
+// past what the pool backs, this fires -- add another l3_vmalloc L3 table.
+_Static_assert(VMALLOC_MMIO_ENTRIES >=
+                   256u + 16u + 32u * (unsigned)DTB_MAX_CPUS + 64u,
+               "MMIO vmalloc pool too small to map all GIC redistributors at "
+               "DTB_MAX_CPUS; add another l3_vmalloc L3 table");
 
 // P3-Bb-hardening: direct-map demotion for the kernel image's 1 GiB.
 //
@@ -186,10 +208,11 @@ static u64 l2_directmap_kernel[ENTRIES_PER_TABLE]   __attribute__((aligned(PAGE_
 // 4 MiB region, matching l3_kernel's two-table span (P5-kernel-l3-4mib).
 static u64 l3_directmap_kernel[ENTRIES_PER_TABLE * 2] __attribute__((aligned(PAGE_SIZE)));
 
-// vmalloc bump-allocator cursor. Tracks the next free L3 entry index in
-// l3_vmalloc. Each mmu_map_mmio call advances by ceil(size / PAGE_SIZE).
-// Bounded by ENTRIES_PER_TABLE (512); v1.0 uses ~81 entries (PL011 + GIC
-// dist + 4×GIC redists), leaving ~431 entries of headroom.
+// vmalloc bump-allocator cursor. Tracks the next free L3 entry index across
+// the two MMIO L3 tables (l3_vmalloc, then l3_vmalloc2). Each mmu_map_mmio
+// call advances by ceil(size / PAGE_SIZE). Bounded by VMALLOC_MMIO_ENTRIES
+// (1024 = 4 MiB). At -smp 4 boot uses ~407 entries (ECAM 256 + GIC redist
+// 128 + dist 16 + virtio/uart); at the DTB_MAX_CPUS=8 max ~535 (redist 256).
 static u32 g_vmalloc_next_idx;
 
 // P3-Bdb: PA of l0_ttbr0 captured at build_page_tables. Used as the
@@ -556,18 +579,17 @@ static void build_page_tables(u64 slide) {
     // VA decode for 0xFFFF_8000_0000_0000:
     //   bits 47:39 = 256 → l0_ttbr1[256].
     //   bits 38:30 = 0   → l1_vmalloc[0].
-    //   bits 29:21 = 0   → l2_vmalloc[0].
-    //   bits 20:12 = 0..511 → l3_vmalloc[idx] (4 KiB pages).
+    //   bits 29:21 = 0 or 1 → l2_vmalloc[0 or 1] (2 MiB each).
+    //   bits 20:12 = 0..511 → l3_vmalloc[idx] / l3_vmalloc2[idx] (4 KiB).
     //
-    // The L3 table covers the first 2 MiB of vmalloc (512 × 4 KiB).
-    // l3_vmalloc entries are zero (invalid) until populated by
-    // mmu_map_mmio.
+    // Two L3 tables cover the first 4 MiB of vmalloc (1024 × 4 KiB). Their
+    // entries are zero (invalid) until populated by mmu_map_mmio.
     {
         l0_ttbr1[256] = make_table_pte(l1_vmalloc);
         l1_vmalloc[0] = make_table_pte(l2_vmalloc);
         l2_vmalloc[0] = make_table_pte(l3_vmalloc);
-        // l3_vmalloc entries left zero — populated by mmu_map_mmio post-
-        // boot.
+        l2_vmalloc[1] = make_table_pte(l3_vmalloc2);
+        // l3 entries left zero — populated by mmu_map_mmio post-boot.
         g_vmalloc_next_idx = 0;
     }
 }
@@ -751,17 +773,24 @@ void *mmu_map_mmio(paddr_t pa, size_t size) {
 
     // R6-B F117: subtraction-form bound. Cannot wrap; safe even if
     // ENTRIES_PER_TABLE were reduced or g_vmalloc_next_idx grew.
-    if (n_pages > (u32)(ENTRIES_PER_TABLE) - g_vmalloc_next_idx) {
+    if (n_pages > VMALLOC_MMIO_ENTRIES - g_vmalloc_next_idx) {
         // Out of vmalloc space. v1.0 doesn't expand; extinct loudly so
         // the bound is visible (rather than silent NULL return that a
         // caller might dereference).
-        extinction("mmu_map_mmio: l3_vmalloc exhausted (>512 4-KiB MMIO pages)");
+        extinction("mmu_map_mmio: vmalloc MMIO pool exhausted (>1024 4-KiB pages)");
     }
 
     u32 start_idx = g_vmalloc_next_idx;
     for (u32 i = 0; i < n_pages; i++) {
+        u32 idx = start_idx + i;
         paddr_t page_pa = pa + ((paddr_t)i << PAGE_SHIFT);
-        l3_vmalloc[start_idx + i] = make_page_pte_l3(page_pa, PTE_DEVICE_RW);
+        // Two contiguous L3 tables back the window: [0,512) -> l3_vmalloc,
+        // [512,1024) -> l3_vmalloc2. A single mapping may straddle the
+        // boundary; each page is placed by its own global index. The
+        // returned VA stays contiguous because l2_vmalloc[0]/[1] map
+        // adjacent 2 MiB windows.
+        u64 *tbl = (idx < ENTRIES_PER_TABLE) ? l3_vmalloc : l3_vmalloc2;
+        tbl[idx % ENTRIES_PER_TABLE] = make_page_pte_l3(page_pa, PTE_DEVICE_RW);
     }
     g_vmalloc_next_idx += n_pages;
 

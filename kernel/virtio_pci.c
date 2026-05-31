@@ -213,7 +213,7 @@ void virtio_pci_init(void) {
     g_ecam_size = (size_t)ecam_size;
 
     // Map just bus 0's 1 MiB of config space (32 dev × 8 fn × 4 KiB).
-    // Full ECAM mapping (256 MiB) would exhaust the 2 MiB vmalloc L3;
+    // Full ECAM mapping (256 MiB) would exhaust the 4 MiB MMIO vmalloc window;
     // bus 0 mapping suffices for QEMU virt's no-bridge config. v1.x
     // can extend to multi-bus by adding an L2 block mapping or a
     // dedicated PCI config aperture.

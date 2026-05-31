@@ -117,14 +117,14 @@ void test_directmap_vmalloc_mmio_smoke(void) {
     TEST_ASSERT(kva != NULL, "mmu_map_mmio returned NULL");
     TEST_ASSERT((u64)(uintptr_t)kva >= VMALLOC_BASE,
         "mmu_map_mmio returned a non-vmalloc address");
-    TEST_ASSERT((u64)(uintptr_t)kva < VMALLOC_BASE + (1ull << 21),
-        "mmu_map_mmio returned outside the first 2 MiB of vmalloc");
+    TEST_ASSERT((u64)(uintptr_t)kva < VMALLOC_BASE + (1ull << 22),
+        "mmu_map_mmio returned outside the 4 MiB MMIO vmalloc window");
 
     // Note: there's no public mmu_unmap_mmio at v1.0 P3-Bb (the bump
     // allocator is one-way; reuse comes via boot reset only). The
     // l3_vmalloc entry stays populated; the PA-backing kpage is
     // freed below, but the vmalloc KVA still maps to it. At v1.0 this
-    // is an accepted leak in the test (1 vmalloc slot consumed; 511
+    // is an accepted leak in the test (1 vmalloc slot consumed; 1023
     // remain). Phase 5+ would add reclaim.
 
     kpage_free(backing);

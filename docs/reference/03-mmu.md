@@ -284,6 +284,14 @@ The 2 MiB era ended at P5-kernel-l3-4mib: the UBSan-instrumented image grew past
 
 A companion `kernel.ld` assert pins that the 4 MiB region lies **within a single 1 GiB L2 table** — `((KERNEL_LOAD_PA & ~(2 MiB - 1)) & (1 GiB - 1)) + 4 MiB <= 1 GiB`. `build_page_tables` wires the region's two 2 MiB halves as L2 entries `idx` and `idx + 1` of one per-GiB table (`l2_ttbr0[gib]`, and the single `l2_directmap_kernel`); were `kernel_2mib_pa` in the last 2 MiB of a GiB, `idx + 1` would overrun the 512-entry table. The TTBR1 high-half path guards the same condition at *runtime* (its L2 index derives from the KASLR slide, not a link-time constant); the fixed-PA TTBR0 + direct-map paths are pinned at *link time* by this assert. Added at the P5-kernel-l3-4mib MMU/KASLR audit close (finding F1).
 
+### MMIO vmalloc pool sized for the CPU max
+
+This is a *separate* region from the kernel-image L3 above. Runtime MMIO mappings — GIC distributor + per-CPU redistributors, the PL011 UART, the virtio-pci ECAM window, virtio-mmio transports — live in a page-grain vmalloc range at `VMALLOC_BASE` (`0xFFFF_8000_0000_0000`), populated by the `mmu_map_mmio` bump allocator. Since the P5-mmio-pool-8cpu fix (2026-05-31) the range is backed by **two contiguous L3 tables** (`l3_vmalloc` + `l3_vmalloc2`, 1024 entries = 4 MiB) instead of one (512 entries = 2 MiB).
+
+The driver was the per-CPU GIC redistributor mapping: `gic_init` maps `cpu_count × GICR_FRAME_STRIDE` (32 pages/CPU) as one block, so the redist alone is 128 pages at `-smp 4` but **256 pages at the `DTB_MAX_CPUS = 8` design max** — which, with the 1 MiB ECAM (256 pages) + GIC dist (16) + virtio/uart, overran a single 512-entry table and made `-smp 8` extinct at early boot (`mmu_map_mmio: l3_vmalloc exhausted`, 20/20 deterministic) even though the static secondary/exception stacks were *already* sized for 8. The kernel `_Static_assert`ed `DTB_MAX_CPUS == 8` but could not actually boot 8 CPUs — surfaced by the 2026-05-31 SMP adverse-condition soundness sweep (finding "F-C").
+
+A `_Static_assert` now ties the pool capacity to the CPU max — `VMALLOC_MMIO_ENTRIES >= 256 + 16 + 32 * DTB_MAX_CPUS + 64` — so a future CPU-max bump that outgrows the pool fails the **build**, not the boot. `mmu_map_mmio` places each page by its global index across the two tables (`idx < 512` → `l3_vmalloc`, else `l3_vmalloc2[idx % 512]`); a single mapping may straddle the 512-entry boundary, and the returned VA stays contiguous because `l2_vmalloc[0]`/`[1]` map adjacent 2 MiB windows. To raise the cap further, add another `l3_vmalloc` table + `l2_vmalloc[2]` wiring.
+
 ---
 
 ## See also
