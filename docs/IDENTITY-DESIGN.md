@@ -1795,6 +1795,75 @@ vote: build the SAK now):
 - *SAK sequence*: pinned in the A-4c impl + reference doc -- a control sequence that cannot
   occur in normal input (a `BREAK`, or a reserved multi-byte escape).
 
+*As-built resolution* (2026-06-01, the implementer's calls within the approved shape, after a
+GIC/UART/notes/poll ground-truth pass + a Plan 9 / Linux-serial-SysRq / NT-AIX-SAK prior-art
+pass; landed scripture-first, no code):
+- **SAK = serial BREAK.** Of the two named options, BREAK is chosen: it is a *line condition,
+  not a data byte*, so EL0 data cannot forge it (the PL011 raises the break flag, DR bit-10
+  `BE`, only on a real line break -- never from a written byte), and its recognizer is
+  *stateless* (no multi-byte state machine to starve or partially-spoof). Together these make
+  the audit obligation "the SAK recognizer cannot be starved/spoofed by crafted input"
+  STRUCTURAL rather than a property to defend. It is the canonical serial trusted-attention
+  signal (Linux magic-SysRq-over-serial; the NT Ctrl-Alt-Del / AIX SAK "un-typeable attention"
+  lineage). QEMU's PL011 sets `DR.BE` on a host break event, so `Ctrl-A b` over `-serial
+  mon:stdio` is a real interactive test path. The "reserved multi-byte escape" alternative is
+  REJECTED: more recognizer surface + a byte sequence is producible by any writer to the input
+  stream, weakening the "cannot occur in normal input" property.
+- **Deferred-action via a console-manager kthread.** The RX IRQ handler runs in IRQ context,
+  where `notes_post` (plain `spin_lock`, NOT irqsave) and `poll_waiter_list_wake` (ditto) are
+  UNSAFE to call -- only `wakeup()` on a `Rendez` is IRQ-safe. So the handler does ONLY: drain
+  the PL011 RX FIFO into a console input ring (under an irqsave ring lock); classify each
+  entry (`BREAK` -> SAK-pending; `Ctrl-C` 0x03 -> interrupt-pending, cooked-consumed; other ->
+  data); then `wakeup()` the data `Rendez` (a blocked reader) AND the console-manager `Rendez`
+  (any pending deferred action). A dedicated kproc kernel thread (`console_mgr`) sleeps on its
+  `Rendez` and, in *process context*, performs the privileged/blocking work: post the
+  `interrupt` note to the current console owner (Ctrl-C), and the SAK revoke/re-grant. This
+  mirrors the kernel's "defer privileged work out of IRQ context" discipline (note delivery at
+  the EL0-return tail).
+- **Console-owner pointer.** A single kernel `g_console_owner` (`struct Proc *`) protected by
+  `g_proc_table_lock` (the proc-lifecycle lock -- closes the TOCTOU vs the owner exiting).
+  Initialized to joey at boot (the boot console-attach anchor, joey.c:104). `exits()` clears
+  `g_console_owner` when the exiting Proc is the owner (no dangling pointer).
+  `proc_revoke_console_attached(p)` clears `PROC_FLAG_CONSOLE_ATTACHED` via `__atomic_and_fetch`
+  -- the SAK runs on the kthread (a DIFFERENT thread than the owner), so the proc_flags
+  single-writer convention requires atomicity here (the documented multi-thread lift);
+  `proc_mark_console_attached` is made correspondingly atomic.
+- **SAK transition (I-27 handoff).** Under `g_proc_table_lock`, on the kthread: (1) revoke
+  `PROC_FLAG_CONSOLE_ATTACHED` from the current `g_console_owner` + post it a notify note (a
+  foreground app learns it lost the console); (2) re-grant the bit to corvus (the elevation
+  authority) + set `g_console_owner = corvus`. The re-grant target is corvus, identified by a
+  single `g_console_trusted_proc` pointer set when joey establishes corvus. FAIL-SAFE: if no
+  trusted proc is registered/alive, the SAK is REVOKE-ONLY (`g_console_owner = NULL`; no Proc
+  can then redeem elevation until a trusted login claims the console -- the security-correct
+  default). Idempotent under a BREAK flood. Guarantees the post-SAK redeemer is the TCB's (the
+  devcap redeem gate keys on `PROC_FLAG_CONSOLE_ATTACHED`, devcap.c:310).
+- **Data wait = single `Rendez` + single-reader busy-guard.** `poll_waiter_list_wake` is not
+  IRQ-safe, so the data-ready wake uses a `Rendez` + `wakeup()` (IRQ-safe). The console is a
+  single-reader resource; a 2nd concurrent blocking `devcons_read` returns -1 (rather than the
+  single-waiter `Rendez`'s second-sleeper extinction) via a busy-guard under the ring lock. (A
+  v1.x multi-reader console lifts to an IRQ-safe multi-waiter wake.)
+- **Ctrl-C + BREAK are cooked-consumed** (generate the note / SAK; not enqueued as data) -- v1.0
+  has no consctl/termios (cons.c is held for the Phase-5 PTY surface), so cons is otherwise raw.
+- **PL011 IRQ = SPI 33** (QEMU virt), hardcoded as the platform fallback in `arch/arm64/uart.c`
+  (mirrors the existing base-address fallback; DTB `interrupts`-property parsing does not exist
+  and is a Lazarus/portability follow-up -- a SEAM, not a half-version, since v1.0 targets QEMU
+  virt). Reserved in `irqfwd_init` (like the timer PPI 30) so userspace `SYS_IRQ_CREATE` cannot
+  claim it (SPI 33 >= 32 is otherwise claimable). Coexists with the userspace virtio-input path
+  (ARCH §17.1) -- separate IRQ lines, separate Devs.
+- **Test strategy (harness-honest).** The integration harness cannot inject UART RX bytes (or a
+  BREAK) non-interactively: `-serial mon:stdio` run with `< /dev/null`, one PL011, no QMP
+  serial-byte channel; a bidirectional-socket retrofit would touch the boot-banner test ABI
+  (off-limits). So A-4c is proven by (a) in-kernel unit tests driving the RX handler + ring +
+  BREAK/Ctrl-C recognizer + `g_console_owner` transitions + `proc_revoke_console_attached`
+  synthetically (the 671-suite pattern), (b) boot survival (GIC attach/enable + IMSC.RXIM
+  unmask without an IRQ storm), and (c) the interactive `Ctrl-A b` manual path (a real host
+  BREAK -> DR.BE -> SAK). "Real hardware IRQ end-to-end" is validated by (b)+(c), not by
+  injected automated input.
+- **Split (as-built):** A-4c-1 (console RX -- RX IRQ + ring + blocking `devcons_read` + Ctrl-C +
+  the `console_mgr` kthread + `g_console_owner` + the `exits()` clear-hook) lands + audits
+  first; A-4c-2 (the BREAK->SAK revoke/re-grant + `g_console_trusted_proc` + the I-27 handoff)
+  lands + audits second.
+
 **New invariants** (land in ARCHITECTURE.md §28; mirrored here):
 - **I-25 -- legate scope is bounded + fully revoked.** A legate's elevated caps are bounded
   to its `legate_scope_id` subtree, attenuate to children by I-2, and are FULLY revoked (the

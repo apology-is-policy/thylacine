@@ -577,11 +577,32 @@ kill = BOTH the namespace `/proc/<pid>/ctl` surface AND a narrow elevation-only 
   perm_enforced=false) DEFERRED-with-justification to the /proc-mount chunk. Matrix:
   default + UBSan + smp8 ALL **671/671** + boot OK + 0 EXTINCTION. Closed list:
   `audit_a4b_closed_list.md`. **A-4b arc DONE.**
-- **A-4c** -- trusted path (vote: build the SAK now): **c-1** pull forward the kernel UART
-  console RX path (RX IRQ + a console ring + a real blocking `devcons_read` + Ctrl-C -> note;
-  Phase-4-G work, on the kernel UART Dev `dc='c'`, NOT the userspace virtio-input path);
-  **c-2** the SAK keystroke recognizer at the RX chokepoint + `proc_revoke_console_attached`
-  + a single kernel console-owner pointer + re-grant to corvus + the unspoofable-elevation gate.
+- **A-4c** -- trusted path (vote: build the SAK now). **As-built design refined + landed
+  scripture-first 2026-06-01** (IDENTITY-DESIGN §9.8 "As-built resolution" + ARCH §28 I-27 +
+  §25.4 + CLAUDE.md rows; the implementer's calls within the approved shape after a
+  GIC/UART/notes/poll ground-truth + Plan-9 / Linux-serial-SysRq / NT-AIX-SAK prior-art pass):
+  - **SAK = serial BREAK** (a line condition, not a data byte -> EL0 data cannot forge it,
+    stateless recognizer; the "cannot be starved/spoofed" obligation becomes structural).
+    Rejected the "reserved multi-byte escape" alternative (more surface + byte-forgeable).
+  - **Deferred-action via a `console_mgr` kproc kthread**: the RX IRQ handler is wakeup-only
+    (`notes_post`/`poll_waiter_list_wake` use plain `spin_lock`, NOT IRQ-safe; only `wakeup()`
+    on a `Rendez` is) -- it drains the PL011 RX FIFO into a ring, classifies (BREAK->SAK /
+    Ctrl-C->interrupt, cooked-consumed / other->data) + wakes; the kthread does the privileged
+    work in process context.
+  - **`g_console_owner`** under `g_proc_table_lock`, init to joey, cleared by `exits()` on
+    owner-exit; `proc_revoke_console_attached` clears the flag atomically; SAK re-grants to
+    corvus via `g_console_trusted_proc`, FAIL-SAFE revoke-only (`=NULL`) if absent.
+  - **Data wait = single `Rendez` + single-reader busy-guard** (poll_waiter_list isn't IRQ-safe
+    to wake; 2nd concurrent blocking read returns -1, not the single-waiter extinction).
+  - **PL011 IRQ = SPI 33** hardcoded as the QEMU-virt fallback (DTB `interrupts`-parsing = a
+    Lazarus seam); reserved in `irqfwd_init` like the timer.
+  - **Test (harness-honest)**: the harness can't inject UART RX non-interactively without
+    touching the boot-banner ABI -> in-kernel unit tests (synthetic drive) + boot survival +
+    the interactive `Ctrl-A b` BREAK path.
+  - **Split**: **c-1** = console RX (RX IRQ + ring + blocking `devcons_read` + Ctrl-C + the
+    kthread + `g_console_owner` + the `exits()` clear-hook) lands + audits first; **c-2** = the
+    BREAK->SAK revoke/re-grant + `g_console_trusted_proc` + the I-27 handoff lands + audits
+    second. On the kernel UART Dev `dc='c'`, NOT the userspace virtio-input path (they coexist).
 - **Depends:** A-1 + corvus. **Seams:** resource-scoped HW-cap allowlist (the structured caps
   TLV); distributed clearance crypto-proof (v1.x); the graphical Nitpicker-style trusted
   screen (Halcyon); a finer per-target kill handle (vs the blanket `CAP_KILL`).
