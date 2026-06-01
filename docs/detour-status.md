@@ -513,7 +513,7 @@ kill = BOTH the namespace `/proc/<pid>/ctl` surface AND a narrow elevation-only 
       `legate_session_id`@248 / `legate_scope_id`@252 / `legate_valid_until`@256 +
       `PROC_FLAG_LEGATE_ROOT`) + rfork-inherit (a child JOINS the scope; the ROOT flag is NOT
       inherited). DORMANT until 2b.
-    - **A-4a-2b** *(LANDED -- the kernel mechanism)* -- the `cap` device clearance grant/redeem
+    - **A-4a-2b** *(LANDED `85efd7c` -- the kernel mechanism)* -- the `cap` device clearance grant/redeem
       (`/grant` length-discriminated 16=hostowner / 32=clearance; `/cap/use` ONE locked
       kind-branched redeem; the redeem rides the EXISTING `/cap/use` file -- NO new syscall) +
       `proc_become_legate` + the two teardown triggers (exits() root-exit locked walk; EL0-tail
