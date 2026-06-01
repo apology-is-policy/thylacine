@@ -103,10 +103,11 @@ extern crate alloc;
 use libthyla_rs::ninep as p9;
 
 use libthyla_rs::{
-    t_cap_grant, t_chroot, t_close, t_explicit_bzero, t_fsync, t_getrandom, t_mlockall,
-    t_poll, t_post_service, t_putstr, t_read, t_rename, t_set_dumpable, t_set_traceable,
-    t_srv_accept, t_srv_peer, t_unlink, t_walk_create, t_walk_open, t_write, TPollFd,
-    TSrvPeerInfo, T_CAP_HOSTOWNER, T_OPATH, T_OREAD, T_OWRITE, T_POLLHUP, T_POLLIN,
+    t_cap_grant, t_cap_grant_clearance, t_chroot, t_close, t_explicit_bzero, t_fsync,
+    t_getrandom, t_mlockall, t_poll, t_post_service, t_putstr, t_read, t_rename,
+    t_set_dumpable, t_set_traceable, t_srv_accept, t_srv_peer, t_unlink, t_walk_create,
+    t_walk_open, t_write, TPollFd, TSrvPeerInfo, T_CAP_CHOWN, T_CAP_DAC_OVERRIDE,
+    T_CAP_HOSTOWNER, T_CAP_KILL, T_OPATH, T_OREAD, T_OWRITE, T_POLLHUP, T_POLLIN,
     T_WALK_CREATE_DMDIR, T_WALK_OPEN_FROM_ROOT,
 };
 
@@ -1111,6 +1112,340 @@ unsafe fn identity_load() -> bool {
 }
 
 // =============================================================================
+// Clearance levels + the legate (A-4a-3; CORVUS-DESIGN.md §5.7 + IDENTITY-DESIGN
+// §9.8). corvus owns the clearance POLICY (the level table + per-user
+// eligibility); the kernel owns the cap-stamp + scope (the `cap` device clearance
+// grant -> proc_become_legate). No local crypto -- corvus's CAP_GRANT_CLEARANCE
+// is the trust root, and it verifies a level's `auth_required` before ever
+// registering the grant.
+// =============================================================================
+
+// auth_required scales with stakes (scripture §3.1). v1.0 enforces RE_AUTH in
+// band (a valid session token IS the re-auth proof). The high-stakes paths
+// (DISTINCT_SECRET / SYSTEM_KEY / HOSTOWNER_COSIGN) require the kernel SAK
+// trusted path (A-4c, not yet built), so CLEARANCE_ACTIVATE on such a level is
+// REFUSED at v1.0 -- a documented A-4c dependency, not a silent gap.
+const AUTH_REQ_RE_AUTH: u8 = 0;
+const AUTH_REQ_DISTINCT_SECRET: u8 = 1;
+const AUTH_REQ_SYSTEM_KEY: u8 = 2;
+const AUTH_REQ_HOSTOWNER_COSIGN: u8 = 3;
+
+const MAX_LEVEL_LEN: usize = 32;
+
+// A clearance level -- a built-in policy object at v1.0 (the coarse set scripture
+// names; no LEVEL_CREATE verb exists, so runtime authoring + per-level-file
+// persistence are a v1.x seam). A level's caps MUST be a subset of the kernel's
+// CAP_GRANTABLE_CLEARANCE ({DAC_OVERRIDE, CHOWN, KILL}) -- the kernel grant
+// rejects anything else -- and only RE_AUTH levels are activatable at v1.0.
+struct ClearanceLevel {
+    name: &'static [u8],
+    caps: u64,
+    auth_required: u8,
+    time_bound_ns: u64, // 0 = no time bound (scope ends only on legate root exit)
+}
+
+// The v1.0 built-in level set. fs-admin (the DAC-override + chown split out of
+// CAP_HOSTOWNER -- the only level with a live consumer today, via perm_check) +
+// supervisor (CAP_KILL; its /proc-ctl consumer lands in A-4b -- the cap is inert
+// until then, but the clearance mechanism is proven with a second cap). Both
+// RE_AUTH. hw-dev / user-admin / clearance-admin (scripture's other coarse names)
+// are NOT v1.0 levels: their caps are not in CAP_GRANTABLE_CLEARANCE
+// (HW_CREATE is fork-grantable; user/clearance-admin ride CAP_HOSTOWNER), so they
+// are v1.x once a finer cap or dev-mode (§3.1 F-7) lands.
+static CLEARANCE_LEVELS: &[ClearanceLevel] = &[
+    ClearanceLevel {
+        name: b"fs-admin",
+        caps: T_CAP_DAC_OVERRIDE | T_CAP_CHOWN,
+        auth_required: AUTH_REQ_RE_AUTH,
+        time_bound_ns: 0,
+    },
+    ClearanceLevel {
+        name: b"supervisor",
+        caps: T_CAP_KILL,
+        auth_required: AUTH_REQ_RE_AUTH,
+        time_bound_ns: 0,
+    },
+];
+
+fn level_by_name(name: &[u8]) -> Option<&'static ClearanceLevel> {
+    CLEARANCE_LEVELS.iter().find(|l| l.name == name)
+}
+
+// caps -> the versioned TLV the wire carries (scripture: "structured TLV, NOT a
+// bare u64", so v1.x resource-scoping is additive). v1.0 emits ONE entry: the
+// cap bitmask. Layout: version u8 (=1) + {tag u8 (=BITMASK), len u16 LE (=8),
+// value u64 LE}. A v1.x decoder reads entries it understands + skips unknown
+// tags -- additive by construction.
+const CAPS_TLV_VERSION: u8 = 1;
+const CAPS_TLV_TAG_BITMASK: u8 = 1;
+
+fn caps_tlv_encode(caps: u64, out: &mut Vec<u8>) {
+    out.push(CAPS_TLV_VERSION);
+    out.push(CAPS_TLV_TAG_BITMASK);
+    out.extend_from_slice(&8u16.to_le_bytes());
+    out.extend_from_slice(&caps.to_le_bytes());
+}
+
+// -----------------------------------------------------------------------------
+// Per-user eligibility -- the persisted "who may activate which level" table. A
+// grant creates a record; a revoke deletes it (per-user, no shared-secret
+// rotation; scripture §3.1). Persisted in /var/lib/corvus/clearance.db
+// (CRVS-format, atomic rename-swap, mirroring identity.db §16.6). For a RE_AUTH
+// level there is no secret unlock material, so eligibility is a plain record;
+// the secret-bearing CRVS wrap (for DISTINCT_SECRET / SYSTEM_KEY levels) is the
+// A-4c / v1.x extension.
+// -----------------------------------------------------------------------------
+
+const SUBJECT_KIND_USER: u8 = 0;
+const SUBJECT_KIND_GROUP: u8 = 1;
+
+const CLEARANCE_DB: &[u8] = b"clearance.db";
+const CLEARANCE_DB_TMP: &[u8] = b"clearance.db.tmp";
+const CLEARANCE_DB_VERSION: u32 = 1;
+const CLEARANCE_DB_HEADER_LEN: usize = 12;
+const MAX_ELIGIBILITY: usize = 2 * MAX_USERS; // same bound class as GROUPS
+const CLEARANCE_DB_MAX: usize = 256 * 1024;
+
+#[derive(Clone)]
+struct EligibilityRecord {
+    subject_kind: u8,
+    subject: Vec<u8>,
+    level: Vec<u8>,
+}
+
+static mut ELIGIBILITY: Option<Vec<EligibilityRecord>> = None;
+
+unsafe fn clearance_init() {
+    core::ptr::write(core::ptr::addr_of_mut!(ELIGIBILITY), Some(Vec::new()));
+}
+
+unsafe fn eligibility_count() -> usize {
+    match (*core::ptr::addr_of!(ELIGIBILITY)).as_ref() {
+        Some(e) => e.len(),
+        None => 0,
+    }
+}
+
+unsafe fn eligibility_has(kind: u8, subject: &[u8], level: &[u8]) -> bool {
+    match (*core::ptr::addr_of!(ELIGIBILITY)).as_ref() {
+        Some(e) => e
+            .iter()
+            .any(|r| r.subject_kind == kind && r.subject == subject && r.level == level),
+        None => false,
+    }
+}
+
+// Append an eligibility record (caller checked non-duplicate + bound). false on
+// uninitialized table.
+unsafe fn eligibility_push(kind: u8, subject: &[u8], level: &[u8]) -> bool {
+    let table = match (*core::ptr::addr_of_mut!(ELIGIBILITY)).as_mut() {
+        Some(t) => t,
+        None => return false,
+    };
+    let mut s = Vec::new();
+    s.extend_from_slice(subject);
+    let mut l = Vec::new();
+    l.extend_from_slice(level);
+    table.push(EligibilityRecord { subject_kind: kind, subject: s, level: l });
+    true
+}
+
+unsafe fn eligibility_pop_last() {
+    if let Some(t) = (*core::ptr::addr_of_mut!(ELIGIBILITY)).as_mut() {
+        let _ = t.pop();
+    }
+}
+
+// Remove the matching record; returns true if one was removed.
+unsafe fn eligibility_remove(kind: u8, subject: &[u8], level: &[u8]) -> bool {
+    let table = match (*core::ptr::addr_of_mut!(ELIGIBILITY)).as_mut() {
+        Some(t) => t,
+        None => return false,
+    };
+    let before = table.len();
+    table.retain(|r| !(r.subject_kind == kind && r.subject == subject && r.level == level));
+    table.len() != before
+}
+
+unsafe fn group_gid_by_name(name: &[u8]) -> Option<u32> {
+    match (*core::ptr::addr_of!(GROUPS)).as_ref() {
+        Some(g) => g.iter().find(|r| r.name == name).map(|r| r.gid),
+        None => None,
+    }
+}
+
+// Is `user` eligible for `level`? Direct user eligibility OR group eligibility
+// (a group record whose gid is one of the user's groups -- primary_gid or a
+// supp_gid; like group membership, §5.7).
+unsafe fn user_eligible_for(user: &[u8], level: &[u8]) -> bool {
+    let table = match (*core::ptr::addr_of!(ELIGIBILITY)).as_ref() {
+        Some(e) => e,
+        None => return false,
+    };
+    let urec = user_states_find(user);
+    for r in table {
+        if r.level != level {
+            continue;
+        }
+        match r.subject_kind {
+            SUBJECT_KIND_USER => {
+                if r.subject == user {
+                    return true;
+                }
+            }
+            SUBJECT_KIND_GROUP => {
+                if let Some(ref u) = urec {
+                    if let Some(gid) = group_gid_by_name(&r.subject) {
+                        if u.primary_gid == gid || u.supp_gids.iter().any(|g| *g == gid) {
+                            return true;
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+unsafe fn clearance_db_serialize() -> Vec<u8> {
+    let table = match (*core::ptr::addr_of!(ELIGIBILITY)).as_ref() {
+        Some(t) => t,
+        None => return Vec::new(),
+    };
+    let mut out = Vec::new();
+    out.extend_from_slice(&CORVUS_MAGIC.to_le_bytes());
+    out.extend_from_slice(&CLEARANCE_DB_VERSION.to_le_bytes());
+    out.extend_from_slice(&(table.len() as u32).to_le_bytes());
+    for r in table {
+        out.push(r.subject_kind);
+        out.push(r.subject.len() as u8);
+        out.push(r.level.len() as u8);
+        out.extend_from_slice(&r.subject);
+        out.extend_from_slice(&r.level);
+    }
+    out
+}
+
+// Parse clearance.db into ELIGIBILITY. Every length is bounds-checked against the
+// remaining buffer; any malformed/truncated record (or trailing bytes) fails the
+// WHOLE load closed (the identity_db_parse discipline).
+unsafe fn clearance_db_parse(blob: &[u8]) -> bool {
+    if blob.len() < CLEARANCE_DB_HEADER_LEN {
+        return false;
+    }
+    let magic = u32::from_le_bytes([blob[0], blob[1], blob[2], blob[3]]);
+    let version = u32::from_le_bytes([blob[4], blob[5], blob[6], blob[7]]);
+    if magic != CORVUS_MAGIC || version != CLEARANCE_DB_VERSION {
+        return false;
+    }
+    let count = u32::from_le_bytes([blob[8], blob[9], blob[10], blob[11]]) as usize;
+    if count > MAX_ELIGIBILITY {
+        return false;
+    }
+    let mut recs: Vec<EligibilityRecord> = Vec::new();
+    let mut off = CLEARANCE_DB_HEADER_LEN;
+    for _ in 0..count {
+        if off + 3 > blob.len() {
+            return false;
+        }
+        let kind = blob[off];
+        let sl = blob[off + 1] as usize;
+        let ll = blob[off + 2] as usize;
+        off += 3;
+        if kind != SUBJECT_KIND_USER && kind != SUBJECT_KIND_GROUP {
+            return false;
+        }
+        if sl == 0 || sl > MAX_USER_LEN || ll == 0 || ll > MAX_LEVEL_LEN {
+            return false;
+        }
+        if off + sl + ll > blob.len() {
+            return false;
+        }
+        let mut subject = Vec::with_capacity(sl);
+        subject.extend_from_slice(&blob[off..off + sl]);
+        off += sl;
+        let mut level = Vec::with_capacity(ll);
+        level.extend_from_slice(&blob[off..off + ll]);
+        off += ll;
+        recs.push(EligibilityRecord { subject_kind: kind, subject, level });
+    }
+    if off != blob.len() {
+        return false; // trailing garbage -> fail closed
+    }
+    core::ptr::write(core::ptr::addr_of_mut!(ELIGIBILITY), Some(recs));
+    true
+}
+
+// Atomic rewrite-swap of clearance.db (mirrors identity_persist §16.6: write tmp
+// -> fsync -> rename -> fsync dir). Returns false on any failure; caller rolls
+// back its in-memory mutation.
+unsafe fn clearance_persist() -> bool {
+    let blob = clearance_db_serialize();
+    if blob.len() < CLEARANCE_DB_HEADER_LEN {
+        return false;
+    }
+    let _ = t_unlink(T_WALK_OPEN_FROM_ROOT, CLEARANCE_DB_TMP.as_ptr(), CLEARANCE_DB_TMP.len(), 0);
+    let tf = t_walk_create(T_WALK_OPEN_FROM_ROOT, CLEARANCE_DB_TMP.as_ptr(),
+                           CLEARANCE_DB_TMP.len(), T_OWRITE, 0o600);
+    if tf < 0 {
+        return false;
+    }
+    let wrote = write_all_fd(tf, &blob);
+    let synced = t_fsync(tf, 0) == 0;
+    let _ = t_close(tf);
+    if !wrote || !synced {
+        let _ = t_unlink(T_WALK_OPEN_FROM_ROOT, CLEARANCE_DB_TMP.as_ptr(), CLEARANCE_DB_TMP.len(), 0);
+        return false;
+    }
+    if t_rename(T_WALK_OPEN_FROM_ROOT, CLEARANCE_DB_TMP.as_ptr(), CLEARANCE_DB_TMP.len(),
+                T_WALK_OPEN_FROM_ROOT, CLEARANCE_DB.as_ptr(), CLEARANCE_DB.len()) != 0 {
+        let _ = t_unlink(T_WALK_OPEN_FROM_ROOT, CLEARANCE_DB_TMP.as_ptr(), CLEARANCE_DB_TMP.len(), 0);
+        return false;
+    }
+    let _ = t_fsync(STORAGE_ROOT_FD, 0);
+    true
+}
+
+// Boot-time load (after identity_load, so user/group resolution works). Absent
+// clearance.db -> fresh install (empty eligibility). Present-but-corrupt -> fail
+// closed (an attacker who corrupts clearance.db must not erase eligibility
+// records by making the file unreadable -- corvus refuses to start).
+unsafe fn clearance_load() -> bool {
+    let _ = t_unlink(T_WALK_OPEN_FROM_ROOT, CLEARANCE_DB_TMP.as_ptr(), CLEARANCE_DB_TMP.len(), 0);
+    let dbf = t_walk_open(T_WALK_OPEN_FROM_ROOT, CLEARANCE_DB.as_ptr(), CLEARANCE_DB.len(), T_OREAD);
+    if dbf < 0 {
+        return true; // absent -> fresh install
+    }
+    let mut blob: Vec<u8> = Vec::new();
+    let read_ok = read_to_end_fd(dbf, &mut blob, CLEARANCE_DB_MAX);
+    let _ = t_close(dbf);
+    if !read_ok || !clearance_db_parse(&blob) {
+        return false;
+    }
+    t_putstr("corvus: clearance.db loaded (");
+    let mut nbuf = [0u8; 12];
+    t_putstr(usize_dec(eligibility_count(), &mut nbuf));
+    t_putstr(" eligibility records)\n");
+    true
+}
+
+// Monotonic legate-session-id counter. Nonzero (0 = the kernel not-a-legate
+// sentinel), fits u32 (the kernel grant requires session_id != 0 && <= u32).
+// Ephemeral -- not persisted; it is audit attribution WITHIN a boot (§3.1).
+static mut NEXT_LEGATE_SESSION: u32 = 1;
+
+unsafe fn next_legate_session() -> u32 {
+    let s = NEXT_LEGATE_SESSION;
+    // A u32 of activations in one boot is unreachable; saturate rather than wrap
+    // to 0 (which the kernel would reject as not-a-legate).
+    if NEXT_LEGATE_SESSION < u32::MAX {
+        NEXT_LEGATE_SESSION += 1;
+    }
+    s
+}
+
+// =============================================================================
 // Wire constants — CORVUS-DESIGN.md §6.4.
 // =============================================================================
 
@@ -1126,6 +1461,14 @@ const VERB_WRAP: u8 = 10;
 const VERB_RESOLVE_ID: u8 = 11;
 const VERB_RESOLVE_NAME: u8 = 12;
 const VERB_GROUP_CREATE: u8 = 13;
+// A-4a clearance/legate verbs (CORVUS-DESIGN.md §6.4 + IDENTITY-DESIGN §9.8).
+// CLEARANCE_LIST / CLEARANCE_ACTIVATE are user-facing (gated by a valid session
+// token); CLEARANCE_GRANT / CLEARANCE_REVOKE are CAP_HOSTOWNER-gated eligibility
+// admin (the hostowner decides who may become which legate -- like GROUP_CREATE).
+const VERB_CLEARANCE_LIST: u8 = 14;
+const VERB_CLEARANCE_ACTIVATE: u8 = 15;
+const VERB_CLEARANCE_GRANT: u8 = 16;
+const VERB_CLEARANCE_REVOKE: u8 = 17;
 
 // System passphrase — verified by ADMIN_ELEVATE before the kernel `cap`
 // grant is registered (CORVUS-DESIGN.md §5.5). v1.0 PLACEHOLDER: a
@@ -1778,6 +2121,265 @@ unsafe fn handle_group_create(handle: i64, payload: &[u8], response: &mut Vec<u8
     stage_response(response, STATUS_OK, &gid.to_le_bytes());
 }
 
+// handle_clearance_list — CLEARANCE_LIST verb (verb_id=14; user-facing, gated by
+// a valid session token). Returns the built-in levels the session's user is
+// eligible for, each with its caps (the versioned TLV), auth_required, and
+// time_bound (CORVUS-DESIGN §6.4 + §5.7).
+//
+// Request:  token (33)
+// OK reply: count u8, then per level:
+//   name_len u8 + name + auth_required u8 + time_bound u64 LE
+//   + caps_tlv_len u16 LE + caps_tlv
+unsafe fn handle_clearance_list(payload: &[u8], response: &mut Vec<u8>) {
+    if payload.len() != TOKEN_LEN {
+        return stage_response(response, STATUS_BAD_FORMAT, &[]);
+    }
+    if !session_token_matches(payload) {
+        return stage_response(response, STATUS_BAD_AUTH, &[]);
+    }
+    let user = match session_user_copy() {
+        Some(u) => u,
+        None => return stage_response(response, STATUS_BAD_AUTH, &[]),
+    };
+    let mut out: Vec<u8> = Vec::new();
+    out.push(0); // count placeholder (CLEARANCE_LEVELS <= 255)
+    let mut count: u8 = 0;
+    for lvl in CLEARANCE_LEVELS {
+        if !user_eligible_for(&user, lvl.name) {
+            continue;
+        }
+        out.push(lvl.name.len() as u8);
+        out.extend_from_slice(lvl.name);
+        out.push(lvl.auth_required);
+        out.extend_from_slice(&lvl.time_bound_ns.to_le_bytes());
+        let mut tlv: Vec<u8> = Vec::new();
+        caps_tlv_encode(lvl.caps, &mut tlv);
+        out.extend_from_slice(&(tlv.len() as u16).to_le_bytes());
+        out.extend_from_slice(&tlv);
+        count = count.saturating_add(1);
+    }
+    out[0] = count;
+    stage_response(response, STATUS_OK, &out);
+}
+
+// handle_clearance_activate — CLEARANCE_ACTIVATE verb (verb_id=15; the legate
+// path). Verifies the session user is eligible + the level's auth_required is
+// satisfiable in-band (v1.0: RE_AUTH only -- a valid session token is the proof;
+// high-stakes levels need the A-4c trusted path and are refused), reads the
+// peer's stripes (SYS_SRV_PEER), and registers the kernel cap-device clearance
+// grant against those stripes. The peer redeems via the cap device `use`
+// (t_cap_use) -> it becomes a legate root.
+//
+// Request:  token (33) + level_len u8 + level + self_restrict u64 LE
+//           + valid_until_req u64 LE (0 = level default)
+// OK reply: legate_session_id u32 LE + granted_caps u64 LE
+unsafe fn handle_clearance_activate(handle: i64, payload: &[u8], response: &mut Vec<u8>) {
+    if payload.len() < TOKEN_LEN + 1 {
+        return stage_response(response, STATUS_BAD_FORMAT, &[]);
+    }
+    let token = &payload[0..TOKEN_LEN];
+    let level_len = payload[TOKEN_LEN] as usize;
+    if level_len == 0 || level_len > MAX_LEVEL_LEN {
+        return stage_response(response, STATUS_BAD_FORMAT, &[]);
+    }
+    if payload.len() != TOKEN_LEN + 1 + level_len + 8 + 8 {
+        return stage_response(response, STATUS_BAD_FORMAT, &[]);
+    }
+    let level = &payload[TOKEN_LEN + 1..TOKEN_LEN + 1 + level_len];
+    let sr_off = TOKEN_LEN + 1 + level_len;
+    let mut self_restrict: u64 = 0;
+    for i in 0..8 {
+        self_restrict |= (payload[sr_off + i] as u64) << (8 * i);
+    }
+    let vu_off = sr_off + 8;
+    let mut valid_until_req: u64 = 0;
+    for i in 0..8 {
+        valid_until_req |= (payload[vu_off + i] as u64) << (8 * i);
+    }
+
+    if !session_token_matches(token) {
+        return stage_response(response, STATUS_BAD_AUTH, &[]);
+    }
+    let user = match session_user_copy() {
+        Some(u) => u,
+        None => return stage_response(response, STATUS_BAD_AUTH, &[]),
+    };
+    let lvl = match level_by_name(level) {
+        Some(l) => l,
+        None => return stage_response(response, STATUS_NOT_FOUND, &[]),
+    };
+    if !user_eligible_for(&user, level) {
+        return stage_response(response, STATUS_PERMISSION_DENIED, &[]);
+    }
+    // auth_required: v1.0 enforces RE_AUTH in-band (the live session token is the
+    // proof). High-stakes levels require the kernel SAK trusted path (A-4c), not
+    // yet built -> refuse (documented A-4c dependency, not a silent gap).
+    match lvl.auth_required {
+        AUTH_REQ_RE_AUTH => {}
+        AUTH_REQ_DISTINCT_SECRET | AUTH_REQ_SYSTEM_KEY | AUTH_REQ_HOSTOWNER_COSIGN => {
+            return stage_response(response, STATUS_PERMISSION_DENIED, &[]);
+        }
+        _ => return stage_response(response, STATUS_PERMISSION_DENIED, &[]),
+    }
+
+    // self_restrict narrows the level's caps (STS-style, I-2). 0 = no restriction
+    // (take the full level set). Restricting to nothing is meaningless -> reject.
+    let effective_caps = if self_restrict == 0 {
+        lvl.caps
+    } else {
+        lvl.caps & self_restrict
+    };
+    if effective_caps == 0 {
+        return stage_response(response, STATUS_BAD_FORMAT, &[]);
+    }
+
+    // valid_for: the user may request SHORTER than the level bound, never longer.
+    // An unbounded level (time_bound_ns == 0) honors the request as-is (0 = none).
+    let valid_for_ns = if valid_until_req == 0 {
+        lvl.time_bound_ns
+    } else if lvl.time_bound_ns != 0 {
+        core::cmp::min(valid_until_req, lvl.time_bound_ns)
+    } else {
+        valid_until_req
+    };
+
+    // The peer's stripes -- the kernel's per-Proc identity tag + the grant
+    // target. Read LIVE (C-22); a dead peer / zero stripes fails closed.
+    let mut info = TSrvPeerInfo::default();
+    if t_srv_peer(handle, &mut info) != 0 || info.alive == 0 || info.stripes == 0 {
+        return stage_response(response, STATUS_INTERNAL_ERROR, &[]);
+    }
+
+    let session_id = next_legate_session();
+
+    // Register the kernel clearance grant (gated kernel-side on corvus holding
+    // CAP_GRANT_CLEARANCE). The peer redeems for its own stripes via t_cap_use.
+    let rc =
+        t_cap_grant_clearance(effective_caps, info.stripes, valid_for_ns, session_id as u64);
+    if rc != 0 {
+        return stage_response(response, STATUS_INTERNAL_ERROR, &[]);
+    }
+
+    let mut out = [0u8; 12];
+    out[0..4].copy_from_slice(&session_id.to_le_bytes());
+    out[4..12].copy_from_slice(&effective_caps.to_le_bytes());
+    stage_response(response, STATUS_OK, &out);
+}
+
+// Parse the CLEARANCE_GRANT / CLEARANCE_REVOKE payload (identical shape). On
+// success returns (subject_kind, subject, level). The token is present in the
+// wire (reserved for v1.x per-admin audit attribution); the authority gate is
+// the peer's live CAP_HOSTOWNER, like GROUP_CREATE.
+//
+// Layout: token (33) + subject_kind u8 + subject_len u8 + subject
+//         + level_len u8 + level
+fn parse_clearance_admin(payload: &[u8]) -> Option<(u8, &[u8], &[u8])> {
+    if payload.len() < TOKEN_LEN + 1 + 1 + 1 + 1 {
+        return None;
+    }
+    let kind = payload[TOKEN_LEN];
+    if kind != SUBJECT_KIND_USER && kind != SUBJECT_KIND_GROUP {
+        return None;
+    }
+    let sl = payload[TOKEN_LEN + 1] as usize;
+    if sl == 0 || sl > MAX_USER_LEN {
+        return None;
+    }
+    let subj_off = TOKEN_LEN + 2;
+    if payload.len() < subj_off + sl + 1 {
+        return None;
+    }
+    let subject = &payload[subj_off..subj_off + sl];
+    let ll_off = subj_off + sl;
+    let ll = payload[ll_off] as usize;
+    if ll == 0 || ll > MAX_LEVEL_LEN {
+        return None;
+    }
+    let lvl_off = ll_off + 1;
+    if payload.len() != lvl_off + ll {
+        return None;
+    }
+    let level = &payload[lvl_off..lvl_off + ll];
+    Some((kind, subject, level))
+}
+
+// handle_clearance_grant — CLEARANCE_GRANT verb (verb_id=16; CAP_HOSTOWNER-gated
+// eligibility admin, like GROUP_CREATE). Records that `subject` (a user or
+// group) may activate `level`. Idempotent (re-granting an existing eligibility
+// returns OK).
+//
+// Request:  token (33) + subject_kind u8 + subject_len u8 + subject
+//           + level_len u8 + level
+// OK reply: no payload
+unsafe fn handle_clearance_grant(handle: i64, payload: &[u8], response: &mut Vec<u8>) {
+    // Gate FIRST -- a non-hostowner peer learns nothing about the eligibility table.
+    let caps = peer_live_caps(handle);
+    if (caps & T_CAP_HOSTOWNER) == 0 {
+        return stage_response(response, STATUS_PERMISSION_DENIED, &[]);
+    }
+    let (kind, subject, level) = match parse_clearance_admin(payload) {
+        Some(t) => t,
+        None => return stage_response(response, STATUS_BAD_FORMAT, &[]),
+    };
+    // The level must be a known built-in; the subject must exist.
+    if level_by_name(level).is_none() {
+        return stage_response(response, STATUS_NOT_FOUND, &[]);
+    }
+    let subject_exists = match kind {
+        SUBJECT_KIND_USER => user_states_find(subject).is_some(),
+        SUBJECT_KIND_GROUP => group_name_exists(subject),
+        _ => false,
+    };
+    if !subject_exists {
+        return stage_response(response, STATUS_NOT_FOUND, &[]);
+    }
+    // Idempotent: a re-grant of an existing eligibility is a no-op success.
+    if eligibility_has(kind, subject, level) {
+        return stage_response(response, STATUS_OK, &[]);
+    }
+    if eligibility_count() >= MAX_ELIGIBILITY {
+        return stage_response(response, STATUS_INTERNAL_ERROR, &[]);
+    }
+    if !eligibility_push(kind, subject, level) {
+        return stage_response(response, STATUS_INTERNAL_ERROR, &[]);
+    }
+    if !clearance_persist() {
+        eligibility_pop_last();
+        return stage_response(response, STATUS_INTERNAL_ERROR, &[]);
+    }
+    stage_response(response, STATUS_OK, &[]);
+}
+
+// handle_clearance_revoke — CLEARANCE_REVOKE verb (verb_id=17; CAP_HOSTOWNER-
+// gated). Deletes the eligibility record; an active legate keeps its already-
+// stamped caps until scope exit -- revoke blocks FUTURE activation (§3.1).
+// NotFound if no such eligibility.
+//
+// Request:  same shape as CLEARANCE_GRANT
+// OK reply: no payload
+unsafe fn handle_clearance_revoke(handle: i64, payload: &[u8], response: &mut Vec<u8>) {
+    let caps = peer_live_caps(handle);
+    if (caps & T_CAP_HOSTOWNER) == 0 {
+        return stage_response(response, STATUS_PERMISSION_DENIED, &[]);
+    }
+    let (kind, subject, level) = match parse_clearance_admin(payload) {
+        Some(t) => t,
+        None => return stage_response(response, STATUS_BAD_FORMAT, &[]),
+    };
+    if !eligibility_has(kind, subject, level) {
+        return stage_response(response, STATUS_NOT_FOUND, &[]);
+    }
+    if !eligibility_remove(kind, subject, level) {
+        return stage_response(response, STATUS_INTERNAL_ERROR, &[]);
+    }
+    if !clearance_persist() {
+        // Best-effort rollback so memory matches disk on persist failure.
+        let _ = eligibility_push(kind, subject, level);
+        return stage_response(response, STATUS_INTERNAL_ERROR, &[]);
+    }
+    stage_response(response, STATUS_OK, &[]);
+}
+
 // handle_admin_elevate — ADMIN_ELEVATE verb (verb_id=7). Verifies the
 // peer is console-attached + the system passphrase is correct, then
 // registers a pending CAP_HOSTOWNER grant against the peer's stripes
@@ -2273,6 +2875,14 @@ unsafe fn try_dispatch_verb(conn: &mut Conn) {
             VERB_RESOLVE_NAME => handle_resolve_name(&payload_owned, &mut conn.pending_response),
             VERB_GROUP_CREATE => handle_group_create(conn_handle, &payload_owned,
                                                      &mut conn.pending_response),
+            VERB_CLEARANCE_LIST => handle_clearance_list(&payload_owned,
+                                                         &mut conn.pending_response),
+            VERB_CLEARANCE_ACTIVATE => handle_clearance_activate(conn_handle, &payload_owned,
+                                                                 &mut conn.pending_response),
+            VERB_CLEARANCE_GRANT => handle_clearance_grant(conn_handle, &payload_owned,
+                                                           &mut conn.pending_response),
+            VERB_CLEARANCE_REVOKE => handle_clearance_revoke(conn_handle, &payload_owned,
+                                                             &mut conn.pending_response),
             _ => stage_response(&mut conn.pending_response, STATUS_BAD_FORMAT, &[]),
         }
 
@@ -2842,6 +3452,7 @@ pub extern "C" fn rs_main() -> i64 {
         user_states_init();
         dataset_owners_init();
         groups_init();
+        clearance_init();
     }
 
     let rc = unsafe { t_mlockall(0) };
@@ -2882,6 +3493,16 @@ pub extern "C" fn rs_main() -> i64 {
     unsafe {
         if !identity_load() {
             t_putstr("corvus: FATAL identity.db load failed (corrupt/unreadable)\n");
+            return 1;
+        }
+    }
+
+    // A-4a-3: load the clearance eligibility DB AFTER identity (group/user
+    // resolution must be live). Fail-closed -- a present-but-corrupt clearance.db
+    // aborts boot rather than silently dropping eligibility records.
+    unsafe {
+        if !clearance_load() {
+            t_putstr("corvus: FATAL clearance.db load failed (corrupt/unreadable)\n");
             return 1;
         }
     }
