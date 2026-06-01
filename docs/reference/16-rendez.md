@@ -32,9 +32,11 @@ struct Rendez {
 
 static inline void rendez_init(struct Rendez *r);
 
-void sleep(struct Rendez *r, int (*cond)(void *arg), void *arg);
+int  sleep(struct Rendez *r, int (*cond)(void *arg), void *arg);   /* SLEEP_OK | SLEEP_INTR (#811) */
 int  wakeup(struct Rendez *r);
 ```
+
+`sleep` (and `tsleep`, below) are **death-interruptible** since #811 (ARCH §8.8.1): a `sleep` whose Proc is group-terminating returns `SLEEP_INTR` (`tsleep` returns `TSLEEP_INTR`) instead of blocking, so the Thread unwinds to its EL0-return die-check. See "Death-interruptible sleep" below.
 
 ### `sleep(r, cond, arg)` semantics
 
@@ -60,11 +62,20 @@ int  wakeup(struct Rendez *r);
 **Semantics:**
 - Acquires `r->lock` with `spin_lock_irqsave`.
 - If `r->waiter == NULL`: drop lock, return 0. (Idempotent no-op — this is intended; producers can call `wakeup` unconditionally without coordinating with consumers.)
-- Else: `r->waiter = NULL`; waiter's `rendez_blocked_on = NULL`; waiter's `state = THREAD_RUNNABLE`; `ready(waiter)`. Drop lock, return 1.
+- Else: `r->waiter = NULL`; waiter's `state = THREAD_RUNNABLE`; `ready(waiter)`. Drop lock, return 1. **#811: `wakeup` no longer clears the waiter's `rendez_blocked_on`** — only the owning Thread clears it, on its `sleep`/`tsleep` resume, under its own `wait_lock`. The waiter therefore stays `rendez_blocked_on == r` from registration until it resumes; this is what lets the group-terminate death-wake cascade read the backref lock-safely (below).
 
 **Postcondition:** the woken thread is in the scheduler's run tree; some subsequent `sched()` call (on this CPU, or another at SMP) will pick it up and resume it inside its `sleep` loop.
 
 **IRQ-context safe:** the lock is irqsave; `wakeup` may be called from an IRQ handler (P2-Bc lands the timer-IRQ scheduler-tick path that exercises this).
+
+### Death-interruptible sleep (#811 — universal Eintr)
+
+`sleep` / `tsleep` gain a *third* wake source beyond cond + (for `tsleep`) the deadline: a group-terminating Proc (§7.9.1 `SYS_EXIT_GROUP` / `kill` / [v1.x] fault) must wake **every** sleeping peer so each returns to its EL0-return tail and self-terminates at `el0_return_die_check`. The full design is ARCH §8.8.1; the as-built mechanism:
+
+- **Per-Thread `wait_lock`** (the Plan 9 `p->rlock` analog; `struct Thread`, `spin_lock_t`) protects `rendez_blocked_on`. Only the owning Thread *writes* it (set at register, cleared on resume, under `wait_lock`); wakers at most *read* it. `wait_lock` is the **outermost** wait-lock: `wait_lock → g_timerwait.lock → r->lock`.
+- **Generalized register-then-observe** (the I-9 close): after registering the waiter, `sleep` / `tsleep` re-check `current->proc->group_exit_msg` (acquire-load) *under `wait_lock`* before dropping locks and calling `sched()`. If set → undo the registration and return `SLEEP_INTR` / `TSLEEP_INTR`. On resume, a second `group_exit_msg` check returns `*_INTR` rather than re-looping.
+- **The cascade waker** (`proc_group_terminate`, under `g_proc_table_lock`) walks `p->threads`; per peer it takes the peer's `wait_lock`, reads `rendez_blocked_on`, and `wakeup()`s the Rendez **with `wait_lock` held across the call** (Option A) — which pins a torpor waiter's stack-allocated `w.rendez` so it cannot be popped under the waker.
+- **Caller contract:** every blocking site must, on `*_INTR`, release its locks / free transient state and **return** (NOT re-loop — re-sleeping would re-register + re-INTR = livelock that never reaches the die-check). The return value to userspace is immaterial (a flagged Thread never resumes EL0). The 9 sites (poll, pipe r+w, devnotes, srvconn client+server recv, devsrv accept, irqfwd, `wait_pid`) carry this arm; `torpor` absorbs `TSLEEP_INTR` via its `return TORPOR_OK` (the syscall tail's die-check catches it).
 
 ---
 
@@ -169,7 +180,7 @@ A pointer field added at end of `struct Thread`:
 struct Rendez *rendez_blocked_on;     /* NULL when not sleeping; r when sleeping */
 ```
 
-Set by `sleep` under `r->lock` atomically with `state = THREAD_SLEEPING`; cleared by `wakeup` under `r->lock` atomically with `state = THREAD_RUNNABLE`. Diagnostic + invariant aid: a SLEEPING thread with `rendez_blocked_on != NULL` is sleeping on that specific Rendez; `wakeup` cross-checks the backref.
+Set by `sleep`/`tsleep` under `wait_lock` + `r->lock` atomically with `state = THREAD_SLEEPING`. **#811: cleared by the OWNING Thread on its `sleep`/`tsleep` resume, under its own `wait_lock`** — NOT by `wakeup` (a waker only reads it, so the death-wake cascade can resolve which Rendez a sleeping peer is on). It therefore persists `== r` across the wakeup until the owner resumes. Diagnostic + invariant aid: a SLEEPING thread with `rendez_blocked_on != NULL` is sleeping on that specific Rendez; `wakeup` cross-checks the backref.
 
 `struct Thread` size grew 200 → 208 bytes. `_Static_assert` in `thread.h` is bumped accordingly.
 

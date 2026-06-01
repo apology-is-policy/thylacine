@@ -525,7 +525,8 @@ void test_proc_console_attached_smoke(void) {
 //     * el0_return_die_check no-ops (RETURNS) on a Proc not group-terminating;
 //     * terminating one Proc does not flag another (isolation).
 void test_proc_group_terminate_smoke(void) {
-    // Fail-safe: a NULL Proc is a quiet no-op (the caller validates; defensive).
+    // Fail-safe: a NULL Proc is a quiet no-op -- it returns at the magic check
+    // BEFORE the p->threads walk, so it needs no g_proc_table_lock.
     proc_group_terminate(NULL, "fail");
 
     struct Proc *p = proc_alloc();
@@ -534,9 +535,16 @@ void test_proc_group_terminate_smoke(void) {
         "a fresh Proc must not be group-terminating (KP_ZERO -> NULL)");
 
     // First group-terminate publishes the msg. Also exercises the empty-bucket
-    // torpor_wake_all_for_proc + smp_resched_others -- both safe no-ops here
-    // (no torpor waiters; the IPI broadcast is harmless / nothing at -smp 1).
-    proc_group_terminate(p, "fail");
+    // torpor_wake_all_for_proc + the empty p->threads cascade walk +
+    // smp_resched_others -- all safe no-ops here (no torpor waiters, no peers).
+    // #811: proc_group_terminate's contract requires g_proc_table_lock held
+    // (the cascade walks p->threads, which races thread_free). p has no threads
+    // so the walk is empty, but hold the lock so the test models the contract.
+    {
+        irq_state_t s = proc_table_lock_acquire();
+        proc_group_terminate(p, "fail");
+        proc_table_lock_release(s);
+    }
     TEST_ASSERT(p->group_exit_msg != NULL,
         "proc_group_terminate must publish group_exit_msg");
     TEST_EXPECT_EQ((int)p->group_exit_msg[0], (int)'f',
@@ -545,7 +553,11 @@ void test_proc_group_terminate_smoke(void) {
     // Set-once (CAS): a racing second group-terminate does NOT overwrite the
     // first msg -- the last-Thread-out ZOMBIE status stays the first-declared.
     const char *first = p->group_exit_msg;
-    proc_group_terminate(p, "ok");
+    {
+        irq_state_t s = proc_table_lock_acquire();
+        proc_group_terminate(p, "ok");
+        proc_table_lock_release(s);
+    }
     TEST_ASSERT(p->group_exit_msg == first,
         "proc_group_terminate is set-once (first msg wins; CAS idempotent)");
 

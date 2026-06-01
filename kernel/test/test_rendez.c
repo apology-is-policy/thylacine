@@ -269,7 +269,7 @@ void test_rendez_death_interrupts_sleep(void) {
         "consumer cleared its backref on the death-interrupted resume");
 
     thread_free(consumer);
-    g_death_proc->state = 2;                     // ZOMBIE -- proc_free precondition
+    g_death_proc->state = PROC_STATE_ZOMBIE;     // proc_free precondition
     proc_free(g_death_proc);
     g_death_proc = NULL;
     TEST_EXPECT_EQ(sched_runnable_count(), 0u,

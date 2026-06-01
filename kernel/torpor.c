@@ -265,6 +265,15 @@ s64 sys_torpor_wait_for_proc(struct Proc *p, u64 addr_va, u32 expected,
     spin_unlock(&torpor_lock);
 
     if (sleep_rc == TSLEEP_TIMEDOUT) return TORPOR_ERR_ETIMEDOUT;
+    // #811: tsleep may also return TSLEEP_INTR when the Proc is group-
+    // terminating (the universal death-wake, ARCH §8.8.1). torpor maps it to
+    // TORPOR_OK (same as AWOKEN) deliberately: SYS_TORPOR_WAIT returns through
+    // the standard syscall tail, whose el0_return_die_check observes the set
+    // group_exit_msg and self-terminates this Thread before it can resume
+    // userspace -- so the return value is immaterial, and the waiter must NOT
+    // re-sleep (its bucket is already unlinked above). Made explicit because
+    // torpor is the one blocking site that absorbs *_INTR via fall-through
+    // rather than a dedicated arm.
     return TORPOR_OK;
 }
 
