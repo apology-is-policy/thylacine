@@ -494,7 +494,7 @@ rows, **CORVUS-DESIGN** §5.5.1 / §5.7 / §6.4. **Two user votes 2026-06-01:** 
 kill = BOTH the namespace `/proc/<pid>/ctl` surface AND a narrow elevation-only `CAP_KILL`;
 (2) trusted path = build the kernel SAK now (pulling the kernel console RX path forward).
 
-- **A-4-pre** *(LANDED `(pending)`)* -- closed the **P5-hostowner I-2 hole** (the named
+- **A-4-pre** *(LANDED `c617429`)* -- closed the **P5-hostowner I-2 hole** (the named
   prerequisite below): `rfork_internal` now ANDs `~CAP_ELEVATION_ONLY`. At v1.0
   `CAP_ELEVATION_ONLY = {CAP_HOSTOWNER}`; the strip auto-covers DAC_OVERRIDE + CHOWN + KILL
   as A-4a/b add those bits to the macro. + the `caps.rfork_strips_elevation_only` regression
@@ -608,7 +608,7 @@ tools/build.sh kernel --sanitize=undefined && tools/test.sh
 - **Open verify** (from the scripture pass): `ARCHITECTURE.md:660/662` describe
   `rfork(RFPROC)` as "copy-on-write address space" -- confirm the actual copy
   behavior; add a seam-note like §16 if it doesn't truly COW.
-- **A-4 prerequisite (P1-class) -- CLOSED by A-4-pre `(pending)`:** the P5-hostowner I-2
+- **A-4 prerequisite (P1-class) -- CLOSED by A-4-pre `c617429`:** the P5-hostowner I-2
   hole (surfaced by the A-1a audit, NOT A-1a). `kernel/proc.c::rfork_internal` set
   `child->caps = parent_caps & caps_mask` WITHOUT `& ~CAP_ELEVATION_ONLY`, despite
   `caps.h:99-105` (P5-hostowner-b) asserting it strips elevation-only caps -- a
