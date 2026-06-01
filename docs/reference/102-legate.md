@@ -98,6 +98,20 @@ hostowner grant `{cap_mask, target_stripes}`; a 32-byte write is the clearance
 grant `{cap_mask, target_stripes, valid_for_ns, session_id}` (all u64 LE). The
 two never collide. `/cap/use` is unchanged (8 bytes: the requested cap-set).
 
+**The userspace bridge is a syscall, not a file walk** (A-4a-3). corvus chroots
+to its storage cap (`/var/lib/corvus`) at startup, so `/cap` is outside its
+namespace -- it cannot walk to the `/cap/grant` file. It reaches the cap device
+by **syscall**, exactly as the hostowner grant already does (`SYS_CAP_GRANT`):
+the clearance grant rides `SYS_CAP_GRANT_CLEARANCE = 61`
+(`x0 = cap_mask, x1 = target_stripes, x2 = valid_for_ns, x3 = session_id`), which
+forwards to `cap_register_clearance_grant_for_writer`. The **redeem** rides the
+existing `SYS_CAP_USE` (its handler calls the unified `cap_redeem_grant_for_writer`,
+which kind-branches to the clearance core) -- so there is NO new *redeem* syscall.
+The 32-byte `/cap/grant` Dev write (`devcap_write`) remains the conceptual path
+for an un-chrooted writer + the unit tests. libthyla-rs mirrors this as
+`t_cap_grant_clearance` / `cap::grant_clearance` (grant) + the existing
+`t_cap_use` / `cap::use_grant` (redeem).
+
 A single pending-grant table slot per `stripes` (a re-register replaces in
 place). The slot carries a `kind` discriminator + the clearance fields; the
 shared `cap_set_entry_locked` writer resets EVERY field on each register, so a
@@ -217,7 +231,12 @@ orchestration; the kernel mechanism here is fully unit-tested.
 
 Landed A-4a-2b: the kernel mechanism (devcap clearance grant/redeem + the two
 teardown triggers + `proc_become_legate` + the perm cap-honoring) + full kernel
-unit tests. Pending A-4a-3: corvus's `CLEARANCE_LIST/ACTIVATE/GRANT/REVOKE` verbs
-(14-17), the libt/libthyla-rs clearance wrappers, the clearance-policy persist,
-and the end-to-end legate prover. The focused A-4a adversarial audit (covering
-A-4-pre + A-4a-1 + A-4a-2a + A-4a-2b + A-4a-3, under UBSan + smp8) follows A-4a-3.
+unit tests. Landed A-4a-3-alpha: `SYS_CAP_GRANT_CLEARANCE = 61` (the grant-side
+userspace bridge -- corvus is chrooted, so it reaches the cap device by syscall)
++ the libthyla-rs mirror (`t_cap_grant_clearance` / `cap::grant_clearance` + the
+four `T_CAP_*` clearance constants); the syscall path is exercised end-to-end by
+the A-4a-3-gamma prover. Pending A-4a-3-beta/gamma: corvus's
+`CLEARANCE_LIST/ACTIVATE/GRANT/REVOKE` verbs (14-17), the built-in clearance-level
+table + per-user eligibility persist, and the end-to-end legate prover + joey
+wiring. The focused A-4a adversarial audit (covering A-4-pre + A-4a-1 + A-4a-2a +
+A-4a-2b + A-4a-3, under UBSan + smp8) follows A-4a-3.

@@ -205,6 +205,7 @@ pub const T_SYS_UNLINK: u64           = 58;
 // A-2a (IDENTITY-DESIGN.md section 9.5): chmod/chown via Tsetattr.
 pub const T_SYS_WSTAT: u64            = 59;
 pub const T_SYS_EXIT_GROUP: u64       = 60;
+pub const T_SYS_CAP_GRANT_CLEARANCE: u64 = 61;  // A-4a clearance grant-side bridge
 // SYS_UNLINK flags: rmdir an empty directory vs unlink a non-directory.
 // Mirrors the kernel's SYS_UNLINK_REMOVEDIR / wire P9_UNLINK_AT_REMOVEDIR.
 pub const T_UNLINK_REMOVEDIR: u32     = 0x200;
@@ -409,6 +410,11 @@ pub const T_CAP_CSPRNG_READ: u64     = 1 << 2;
 pub const T_CAP_HOSTOWNER: u64       = 1 << 3;   // elevation-only; not in CAP_ALL
 pub const T_CAP_GRANT_HOSTOWNER: u64 = 1 << 4;   // fork-grantable; joey → corvus
 pub const T_CAP_SET_IDENTITY: u64    = 1 << 5;   // A-1a; fork-grantable; gates SPAWN_IDENTITY_SET
+// A-4a clearance/legate caps (mirror kernel/include/thylacine/caps.h).
+pub const T_CAP_GRANT_CLEARANCE: u64 = 1 << 6;   // fork-grantable; corvus-only; register clearance grants
+pub const T_CAP_DAC_OVERRIDE: u64    = 1 << 7;   // elevation-only; perm_check rwx bypass
+pub const T_CAP_CHOWN: u64           = 1 << 8;   // elevation-only; chown/chgrp-to-any
+pub const T_CAP_KILL: u64            = 1 << 9;   // elevation-only; cross-identity kill override
 
 // =============================================================================
 // Rights — MUST mirror RIGHT_* bits in kernel/include/thylacine/handle.h.
@@ -1390,6 +1396,34 @@ pub unsafe fn t_cap_use(cap_mask: u64) -> i64 {
         "svc #0",
         inlateout("x0") x0,
         in("x8") T_SYS_CAP_USE,
+        options(nostack)
+    );
+    x0
+}
+
+// t_cap_grant_clearance — register a pending CLEARANCE grant for
+// `target_stripes` (the A-4a legate grant-side bridge; the analog of
+// t_cap_grant). Caller must hold CAP_GRANT_CLEARANCE (corvus). `cap_mask` is a
+// non-empty subset of CAP_GRANTABLE_CLEARANCE; `valid_for_ns` is the legate
+// lifetime duration (0 = no time bound); `session_id` is corvus's audit tag
+// (nonzero, fits u32). The target redeems via t_cap_use (SYS_CAP_USE) -> it
+// becomes a legate root. Returns 0 on success, -1 on gate fail / bad args /
+// table full.
+#[inline(always)]
+pub unsafe fn t_cap_grant_clearance(
+    cap_mask: u64,
+    target_stripes: u64,
+    valid_for_ns: u64,
+    session_id: u64,
+) -> i64 {
+    let mut x0: i64 = cap_mask as i64;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") target_stripes,
+        in("x2") valid_for_ns,
+        in("x3") session_id,
+        in("x8") T_SYS_CAP_GRANT_CLEARANCE,
         options(nostack)
     );
     x0

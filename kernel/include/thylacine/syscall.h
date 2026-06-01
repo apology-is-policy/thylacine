@@ -1240,6 +1240,21 @@ enum {
     // shootdown" row; ARCH §7.9.1 + invariant I-24.
     //   x0 = status (int; 0 = clean exit, non-zero = error)
     SYS_EXIT_GROUP   = 60,   // arg: status (x0); NEVER returns
+
+    // SYS_CAP_GRANT_CLEARANCE -- the A-4a clearance grant-side bridge (the
+    // legate analog of SYS_CAP_GRANT). Registers a pending CLEARANCE grant for
+    // `target_stripes` by calling cap_register_clearance_grant_for_writer; gated
+    // on the writer holding CAP_GRANT_CLEARANCE (corvus). The 32-byte
+    // /cap/grant Dev write (devcap_write) is the conceptual production path, but
+    // corvus is chrooted to its storage cap and reaches the cap device by
+    // syscall (not a /cap file walk) -- exactly as the hostowner grant already
+    // does via SYS_CAP_GRANT. The REDEEM still rides SYS_CAP_USE (its unified
+    // handler already kind-branches to the clearance core); only the grant side
+    // needs this bridge. Returns 0 on success, -1 on any gate/bounds failure
+    // (writer lacks CAP_GRANT_CLEARANCE, cap_mask escapes CAP_GRANTABLE_CLEARANCE
+    // or is 0, target_stripes == 0, session_id == 0 or > u32, table full).
+    //   x0 = cap_mask, x1 = target_stripes, x2 = valid_for_ns, x3 = session_id
+    SYS_CAP_GRANT_CLEARANCE = 61,
 };
 
 // SYS_WALK_OPEN's FROM_ROOT sentinel: when passed as the spoor_fd, the

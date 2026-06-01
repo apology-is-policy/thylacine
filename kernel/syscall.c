@@ -4657,6 +4657,19 @@ static s64 sys_cap_use_handler(u64 cap_mask) {
     return (rc >= 0) ? 0 : -1;
 }
 
+// SYS_CAP_GRANT_CLEARANCE — the A-4a clearance grant-side bridge (corvus is
+// chrooted; it reaches the cap device by syscall, like the hostowner grant).
+// Forwards to cap_register_clearance_grant_for_writer, which enforces the
+// CAP_GRANT_CLEARANCE gate + all bounds. The redeem rides SYS_CAP_USE.
+static s64 sys_cap_grant_clearance_handler(u64 cap_mask, u64 target_stripes,
+                                           u64 valid_for_ns, u64 session_id) {
+    struct Thread *t = current_thread();
+    if (!t || !t->proc)                                    return -1;
+    long rc = cap_register_clearance_grant_for_writer(
+        t->proc, (caps_t)cap_mask, target_stripes, valid_for_ns, session_id);
+    return (rc >= 0) ? 0 : -1;
+}
+
 // =============================================================================
 // SYS_POLL — the multi-fd wait/wake primitive (P5-poll-a).
 //
@@ -4966,6 +4979,11 @@ void syscall_dispatch(struct exception_context *ctx) {
 
     case SYS_CAP_USE:
         ctx->regs[0] = (u64)sys_cap_use_handler(ctx->regs[0]);
+        return;
+
+    case SYS_CAP_GRANT_CLEARANCE:
+        ctx->regs[0] = (u64)sys_cap_grant_clearance_handler(
+            ctx->regs[0], ctx->regs[1], ctx->regs[2], ctx->regs[3]);
         return;
 
     case SYS_WALK_OPEN:

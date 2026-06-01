@@ -37,8 +37,9 @@
 
 use crate::err::{Error, Result};
 use crate::{
-    t_cap_grant, t_cap_use, T_CAP_CSPRNG_READ, T_CAP_GRANT_HOSTOWNER, T_CAP_HOSTOWNER,
-    T_CAP_HW_CREATE, T_CAP_LOCK_PAGES,
+    t_cap_grant, t_cap_grant_clearance, t_cap_use, T_CAP_CHOWN, T_CAP_CSPRNG_READ,
+    T_CAP_DAC_OVERRIDE, T_CAP_GRANT_CLEARANCE, T_CAP_GRANT_HOSTOWNER, T_CAP_HOSTOWNER,
+    T_CAP_HW_CREATE, T_CAP_KILL, T_CAP_LOCK_PAGES,
 };
 
 // =============================================================================
@@ -79,6 +80,32 @@ impl Caps {
     /// `joey` (the system bringup Proc); the receiver is typically
     /// `corvus` (the authentication daemon).
     pub const GRANT_HOSTOWNER: Caps = Caps(T_CAP_GRANT_HOSTOWNER);
+
+    /// `CAP_GRANT_CLEARANCE` (A-4a) — permits the holder to register a
+    /// pending CLEARANCE grant via `grant_clearance` (the legate path).
+    /// Fork-grantable; held only by `corvus` (the clearance authority).
+    pub const GRANT_CLEARANCE: Caps = Caps(T_CAP_GRANT_CLEARANCE);
+
+    /// `CAP_DAC_OVERRIDE` (A-4a) — `perm_check` rwx bypass, split out of
+    /// `CAP_HOSTOWNER`. ELEVATION-ONLY: acquired only via a clearance
+    /// grant (the legate's `cap` device redeem), never by `rfork`.
+    pub const DAC_OVERRIDE: Caps = Caps(T_CAP_DAC_OVERRIDE);
+
+    /// `CAP_CHOWN` (A-4a) — chown/chgrp-to-any, split out of
+    /// `CAP_HOSTOWNER`. ELEVATION-ONLY.
+    pub const CHOWN: Caps = Caps(T_CAP_CHOWN);
+
+    /// `CAP_KILL` (A-4a) — cross-identity kill override (the third
+    /// `/proc/<pid>/ctl` authority axis, A-4b). ELEVATION-ONLY.
+    pub const KILL: Caps = Caps(T_CAP_KILL);
+
+    /// The clearance-grantable set — the elevation-only caps a clearance
+    /// grant may confer. Mirrors `CAP_GRANTABLE_CLEARANCE`
+    /// (`kernel/include/thylacine/devcap.h`). A clearance `cap_mask` must
+    /// be a non-empty subset of this; `CAP_HOSTOWNER` is NOT in it (that
+    /// stays on the console-gated hostowner path).
+    pub const GRANTABLE_CLEARANCE: Caps =
+        Caps(T_CAP_DAC_OVERRIDE | T_CAP_CHOWN | T_CAP_KILL);
 
     /// Construct from raw bits. Bits outside the currently-known set
     /// are accepted at the type level; the kernel rejects unknown
@@ -192,6 +219,38 @@ pub type Stripes = u64;
 pub fn grant(caps: Caps, target_stripes: Stripes) -> Result<()> {
     // SAFETY: t_cap_grant takes only u64 scalars; no user-VA args.
     let rc = unsafe { t_cap_grant(caps.bits(), target_stripes) };
+    if rc < 0 {
+        return Err(Error::PermissionDenied);
+    }
+    Ok(())
+}
+
+/// Register a pending CLEARANCE grant of `caps` against `target_stripes`
+/// (A-4a, the legate grant-side path). Caller must hold
+/// `CAP_GRANT_CLEARANCE` (corvus, the clearance authority).
+///
+/// `caps` must be a non-empty subset of [`Caps::GRANTABLE_CLEARANCE`];
+/// `valid_for_ns` is the legate lifetime duration (0 = no time bound, the
+/// scope ends only on the legate root's exit); `session_id` is the
+/// caller's audit tag (nonzero, fits u32). The target redeems via
+/// [`use_grant`] (the same `cap` device `use` file as the hostowner path)
+/// and becomes a legate root: its caps gain `caps & self_restriction` and
+/// the kernel records the scope.
+///
+/// Errors:
+///   - `Error::PermissionDenied`: caller lacks `CAP_GRANT_CLEARANCE`, OR
+///     `caps` escapes `GRANTABLE_CLEARANCE` / is empty, OR `target_stripes`
+///     is 0, OR `session_id` is 0 / exceeds u32, OR the grant table is
+///     full. The v1.0 kernel collapses these to -1.
+pub fn grant_clearance(
+    caps: Caps,
+    target_stripes: Stripes,
+    valid_for_ns: u64,
+    session_id: u64,
+) -> Result<()> {
+    // SAFETY: t_cap_grant_clearance takes only u64 scalars; no user-VA args.
+    let rc =
+        unsafe { t_cap_grant_clearance(caps.bits(), target_stripes, valid_for_ns, session_id) };
     if rc < 0 {
         return Err(Error::PermissionDenied);
     }

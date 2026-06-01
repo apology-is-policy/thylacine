@@ -1666,7 +1666,11 @@ rotation). An active legate keeps already-stamped caps until scope exit; revoke 
   `CAP_GRANT_CLEARANCE` (corvus) for a clearance grant, OR `CAP_GRANT_HOSTOWNER` for the
   legacy hostowner grant (unchanged). corvus cannot write another Proc's caps directly (it
   is userspace) -- this two-phase grant is the only path, exactly as `ADMIN_ELEVATE` works
-  today (CORVUS-DESIGN §5.5).
+  today (CORVUS-DESIGN §5.5). *As-built bridge (A-4a-3):* corvus is chrooted to its storage
+  cap, so it reaches the cap device by **syscall**, not a `/cap` file walk -- the clearance
+  grant rides a dedicated `SYS_CAP_GRANT_CLEARANCE` (the grant-side analog of the existing
+  `SYS_CAP_GRANT` hostowner bridge); the redeem rides the existing `SYS_CAP_USE` (no new
+  redeem syscall -- its handler kind-branches to the clearance core).
 - The `cap` device **`use`** file (redeem): the activating Proc redeems its own pending
   grant; the kernel stamps `current->caps |= (granted_cap_mask & self_restriction)` and
   records the legate context. Gate: a pending grant exists for the writer's own stripes.
