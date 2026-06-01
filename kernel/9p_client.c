@@ -80,9 +80,16 @@ static int map_error(int session_send_rc, int exchange_rc,
     if (session_send_rc < 0) return -P9_E_IO;
     if (exchange_rc < 0) return -P9_E_IO;
     if (r->is_error) {
-        // Rlerror surfaced an errno; map directly. The server-side
-        // ecode is a Linux errno (positive); we negate to match the
-        // client's signed-errno convention.
+        // Rlerror surfaced an errno; map it to the client's signed-errno
+        // convention. The wire ecode is an unvalidated u32 a (hostile or
+        // buggy) server controls, so bound it before negating: 0 (an error
+        // reply MUST carry a nonzero errno) and any value past the Linux
+        // MAX_ERRNO collapse to -EIO. Without the bound, -(int)0x80000000 is
+        // signed-overflow UB -- it traps under -fsanitize=undefined (a kernel
+        // halt reachable by any Rlerror on any op), and an out-of-range ecode
+        // would surface a nonsense errno. 4095 is the top of the pouch
+        // boundary-line's [-4095,-2] errno passthrough window.
+        if (r->ecode == 0 || r->ecode > 4095u) return -P9_E_IO;
         return -(int)r->ecode;
     }
     return 0;

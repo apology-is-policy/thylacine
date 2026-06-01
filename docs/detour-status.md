@@ -409,7 +409,7 @@ post-fix passing pool) -- not a live reproducer. Full coda:
 - **Tests:** create stamps owner=caller + group=parent; chmod/chown round-trip;
   mount-cape uniform perms on a FAT-like backing; ownership survives reboot.
 
-### A-3 · 9P identity presentation + dev9p enforcement activation + per-user stratumd *(design-first; scripture + A-3a + A-3b + A-3c LANDED; A-3c focused audit remains)*
+### A-3 · 9P identity presentation + dev9p enforcement activation + per-user stratumd *(design-first; scripture + A-3a + A-3b + A-3c LANDED + audited CLEAN; A-3 arc DONE)*
 
 **A-3a + A-3b LANDED 2026-05-31.** A-3a = reconciliation mechanism (pouch SO_PEERCRED
 → principal + Stratum `--bake-owner-uid` + kernel `n_uname` = principal + the
@@ -439,8 +439,15 @@ trust-stamp gate recorded as a v1.x SEAM (no v1.0 caller; every v1.0 attach is l
 add). User-chosen scope 2026-06-01: "plumb the ecode" (focused) over the heavier live
 boot probe. The live multi-principal dev9p enforcement probe (A-3 audit confidence note)
 deferred to A-5. Kernel test extends `handshake_failure_returns_null` to assert
-`-T_E_ACCES`; 650/650. NEXT = the A-3c focused audit (SYS_ATTACH_9P_SRV is an
-audit-trigger surface) -> close.
+`-T_E_ACCES`. **A-3c audit R1 CLEAN** (Opus prosecutor a923edeff825a7866 + self-audit:
+0 P0 / 0 P1 / 1 P2 / 2 P3, all fixed -- verdict: the M6 commit introduces NO new defect;
+the 3 findings were PRE-EXISTING `map_error` robustness issues A-3c raised in salience).
+The close fix: `map_error` now bounds the wire ecode before negating
+(`ecode == 0 || ecode > 4095 -> -EIO`), killing a server-controlled signed-overflow UB
+(`-(int)0x80000000` traps under UBSan -- a kernel halt reachable by any `Rlerror` on any
+op) and folding the `ecode=0`-as-success corner; +regression test
+`handshake_rlerror_ecode_overflow_clamped`. MATRIX GREEN: default(smp4) + UBSan + smp8
+ALL 651/651, 0 EXTINCTION, boot OK. `audit_a3c_closed_list.md`.
 
 **Reshaped by ground truth (corrects F-4).** The 2026-05-28 sketch said "forward
 principal-id as `n_uname`." Ground truth: **Stratum ignores `n_uname`** and reconciles

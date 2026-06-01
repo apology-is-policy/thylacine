@@ -19,6 +19,7 @@
 
 void test_p9_attached_create_destroy(void);
 void test_p9_attached_handshake_failure_returns_null(void);
+void test_p9_attached_handshake_rlerror_ecode_overflow_clamped(void);
 void test_p9_attached_root_spoor_walk_read(void);
 void test_p9_attached_query_helpers(void);
 void test_p9_attached_walked_outlives_root_no_uaf(void);
@@ -139,6 +140,31 @@ static int handshake_fail_responder(void *ctx, const u8 *req, size_t req_len,
     return -1;
 }
 
+// Responder that surfaces Rlerror(ecode=0x80000000) for Tattach -- the
+// server-controlled value for which `-(int)ecode` is signed-overflow UB
+// (A-3c audit F1). map_error MUST bound the wire ecode before negating
+// (-> -EIO), so it neither traps under -fsanitize=undefined nor wraps.
+static int handshake_fail_overflow_responder(void *ctx, const u8 *req, size_t req_len,
+                                               u8 *resp, size_t resp_cap) {
+    (void)ctx;
+    if (req_len < P9_HDR_LEN) return -1;
+    u32 size; u8 type; u16 tag;
+    if (p9_peek_header(req, req_len, &size, &type, &tag) < 0) return -1;
+    if (type == P9_TVERSION) {
+        return attach_responder(ctx, req, req_len, resp, resp_cap);
+    }
+    if (type == P9_TATTACH) {
+        size_t total = P9_HDR_LEN + 4;
+        if (resp_cap < total) return -1;
+        resp[0] = 11; resp[1] = 0; resp[2] = 0; resp[3] = 0;
+        resp[4] = P9_RLERROR;
+        resp[5] = (u8)(tag & 0xff); resp[6] = (u8)((tag >> 8) & 0xff);
+        resp[7] = 0x00; resp[8] = 0x00; resp[9] = 0x00; resp[10] = 0x80;  // 0x80000000 LE
+        return (int)total;
+    }
+    return -1;
+}
+
 // =============================================================================
 // Tests.
 // =============================================================================
@@ -187,6 +213,31 @@ void test_p9_attached_handshake_failure_returns_null(void) {
     // No leak — p9_attached_create cleaned up the half-built client +
     // buffers on the handshake failure. Verifiable indirectly:
     // subsequent attempts to allocate succeed.
+    p9_loopback_destroy(&g_loopback);
+}
+
+void test_p9_attached_handshake_rlerror_ecode_overflow_clamped(void) {
+    int rc = p9_loopback_init(&g_loopback, g_loopback_resp,
+                                sizeof(g_loopback_resp),
+                                handshake_fail_overflow_responder, NULL);
+    TEST_EXPECT_EQ(rc, 0, "loopback init (overflow ecode)");
+
+    const u8 uname[] = {'r'};
+    const u8 aname[] = {'/'};
+    int aerr = 0;
+    struct p9_attached *a = p9_attached_create(
+        p9_loopback_ops_for(&g_loopback),
+        4096, 0, 8192,
+        uname, sizeof(uname), aname, sizeof(aname), 0, &aerr);
+    TEST_ASSERT(a == NULL, "attach fails on Rlerror");
+    // A-3c audit F1: a server-controlled ecode of 0x80000000 makes
+    // `-(int)ecode` signed-overflow UB -- it TRAPS under -fsanitize=undefined
+    // (a kernel halt reachable by any Rlerror on any op) and wraps to INT_MIN
+    // on the plain build. map_error MUST bound the wire ecode before negating,
+    // collapsing out-of-range values to -EIO. Pre-fix this assertion fails
+    // (INT_MIN) on the default build and traps under UBSan.
+    TEST_EXPECT_EQ((s64)aerr, (s64)(-P9_E_IO),
+                   "out-of-range Rlerror ecode clamps to -EIO (no overflow UB)");
     p9_loopback_destroy(&g_loopback);
 }
 

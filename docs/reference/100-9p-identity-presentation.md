@@ -1,10 +1,12 @@
 # 100 — 9P identity presentation (A-3)
 
-**Status:** A-3a + A-3b + A-3c LANDED. A-3 (a+b) audit R1 CLEAN (0 P0 / 0 P1 / 1 P2 /
-3 P3, all fixed — the P2 was the create-leg of F1 [`sys_walk_create_handler` now also
-derives rights from omode]; `memory/audit_a3_closed_list.md`). A-3c (M6 ecode-surfacing
-+ M5 trust-stamp seam) gets its own focused round. Design: `IDENTITY-DESIGN.md §9.7` +
-the §3.5 F-4 correction + the §3.7.1 activation note.
+**Status:** A-3a + A-3b + A-3c LANDED + audited CLEAN; **the A-3 arc is DONE.** A-3
+(a+b) audit R1 CLEAN (0 P0 / 0 P1 / 1 P2 / 3 P3; `memory/audit_a3_closed_list.md`).
+A-3c (M6 ecode-surfacing + M5 trust-stamp seam) audit R1 CLEAN (0 P0 / 0 P1 / 1 P2 /
+2 P3, all fixed — the M6 commit itself introduced no new defect; the findings were
+pre-existing `map_error` robustness issues raised in salience, closed by bounding the
+wire ecode before negating; `memory/audit_a3c_closed_list.md`). Design:
+`IDENTITY-DESIGN.md §9.7` + the §3.5 F-4 correction + the §3.7.1 activation note.
 
 ---
 
@@ -201,6 +203,17 @@ Tattach) and now asserts `aerr == -T_E_ACCES`. The handler wiring
 code-reviewed pass-through; the full syscall-level E2E — a real Thylacine Proc attaching
 an out-of-scope dataset on a per-user stratumd and reading `errno == EACCES` — is the
 **A-5** login-path test (where per-user stratumd actually runs).
+
+**Audit close (F1):** surfacing the server-controlled ecode made the A-3c audit
+look harder at the value's provenance and found a pre-existing hazard: `map_error`
+(`kernel/9p_client.c`) computed `-(int)r->ecode` on an unvalidated wire `u32`, which
+is signed-overflow UB for `ecode == 0x80000000` — it *traps* under
+`-fsanitize=undefined` (a kernel halt reachable by any `Rlerror` on any op, not just
+attach). The plain build's `attach_err_to_ret` clamp masked it, but the UBSan build
+did not. Fixed by bounding the ecode before negating (`ecode == 0 || ecode > 4095 ->
+-EIO`; 4095 is the Linux MAX_ERRNO), which also folds the malformed-`Rlerror(ecode=0)`
+-as-success corner into a clean `-EIO`. Regression test:
+`test_p9_attached_handshake_rlerror_ecode_overflow_clamped`.
 
 ### M5 — trust-stamp gate is a v1.x seam (no v1.0 caller; not built)
 

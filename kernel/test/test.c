@@ -494,6 +494,7 @@ void test_dev9p_wstat_native_drives_setattr(void);
 void test_dev9p_perm_enforced_deny_allow(void);
 void test_p9_attached_create_destroy(void);
 void test_p9_attached_handshake_failure_returns_null(void);
+void test_p9_attached_handshake_rlerror_ecode_overflow_clamped(void);
 void test_p9_attached_root_spoor_walk_read(void);
 void test_p9_attached_query_helpers(void);
 void test_p9_attached_walked_outlives_root_no_uaf(void);
@@ -1368,6 +1369,9 @@ struct test_case g_tests[] = {
     { "p9_attached.create_destroy",    test_p9_attached_create_destroy,    false, NULL },
     { "p9_attached.handshake_failure_returns_null",
                                        test_p9_attached_handshake_failure_returns_null,
+                                                                           false, NULL },
+    { "p9_attached.handshake_rlerror_ecode_overflow_clamped",
+                                       test_p9_attached_handshake_rlerror_ecode_overflow_clamped,
                                                                            false, NULL },
     { "p9_attached.root_spoor_walk_read",
                                        test_p9_attached_root_spoor_walk_read,
