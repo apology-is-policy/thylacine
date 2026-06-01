@@ -1726,15 +1726,23 @@ two-axis fusion.**
   gated by namespace visibility only (I-1) -- an unauthorized opener holds a powerless
   handle; the WRITE is the gate.
 - *Two-axis authority* (the A-2d pattern -- the capability axis AND the identity axis,
-  orthogonal -- generalized to kill): a `kill`/`killgrp` write is authorized iff
-  `perm_check(caller, ctl_stat, PERM_W) == 0` (owner-rwx -- same `principal_id` as the
-  target; covers "kill your own processes/subtree", and the parent-of-same-identity-child
-  case §7.6.3 is now expressible as ownership, not a special case; the existing `perm_check`
-  DAC-override folds in `CAP_HOSTOWNER`/`CAP_DAC_OVERRIDE`) OR the caller holds `CAP_KILL`
-  (the cross-identity override for a debugger/supervisor that is neither owner nor
-  hostowner). No identity bypasses (I-22 -- `CAP_KILL`/`CAP_HOSTOWNER` are capabilities,
-  never identities); containment is namespace visibility (I-1 -- a Proc that cannot walk to
-  `/proc/<pid>` cannot kill it).
+  orthogonal -- generalized to kill): a `kill`/`killgrp` write is authorized iff the caller
+  is the target's OWNER (owner-rwx on the `0600` ctl file -- the owner always holds the
+  w-bit, so this reduces to "same `principal_id` as the target"; covers killing your own
+  processes/subtree, and the parent-of-same-identity-child case §7.6.3 is now expressible as
+  ownership, not a special case) OR the caller holds `CAP_HOSTOWNER` (the unified admin) OR
+  `CAP_KILL` (the cross-identity override for a debugger/supervisor that is neither owner nor
+  hostowner). devproc enforces this I-26 set DIRECTLY in `devproc_write` (it does NOT route
+  through the generic `perm_check` DAC-override -- consistent with `perm_enforced=false`):
+  `CAP_DAC_OVERRIDE` (the generic fs-rwx admin, A-4) is therefore deliberately NOT a kill
+  axis -- the A-4 capability split keeps fs-admin and process-kill ORTHOGONAL (mirrors Linux
+  `CAP_DAC_OVERRIDE` vs `CAP_KILL`); an fs-admin is not implicitly a process-killer. (At
+  v1.0 ctl's mode is fixed at `0600` and devproc has no `wstat_native`, so "owner-rwx" and
+  "same principal" are identical and immutable; if a future ctl mode gained group/other
+  w-bits, the owner-rwx computation would generalize -- still WITHOUT the DAC-override.) No
+  identity bypasses (I-22 -- `CAP_HOSTOWNER`/`CAP_KILL` are capabilities, never identities);
+  containment is namespace visibility (I-1 -- a Proc that cannot walk to `/proc/<pid>` cannot
+  kill it).
 - *Dispatch* (RECONCILED): both `kill` and `killgrp` terminate the target Proc's
   thread-group via `proc_group_terminate` UNIFORMLY (single + multi thread), under
   `g_proc_table_lock` via the `proc_for_each` resolve+authorize+kill idiom (the audited
