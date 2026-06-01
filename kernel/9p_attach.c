@@ -8,6 +8,7 @@
 #include <thylacine/9p_transport.h>
 #include <thylacine/9p_wire.h>
 #include <thylacine/dev9p.h>
+#include <thylacine/errno.h>
 #include <thylacine/page.h>
 #include <thylacine/spoor.h>
 #include <thylacine/types.h>
@@ -46,24 +47,32 @@ struct p9_attached *p9_attached_create(
         u32                     msize,
         const u8               *uname, size_t uname_len,
         const u8               *aname, size_t aname_len,
-        u32                     n_uname) {
-    if (recv_cap < P9_HDR_LEN) return NULL;
-    if (msize == 0) return NULL;
+        u32                     n_uname,
+        int                    *out_err) {
+    // out_err carries a negative POSIX errno on every NULL-return path so the
+    // SYS_ATTACH_9P* handlers surface it (A-3c / M6) -- most importantly the
+    // Tattach Rlerror ecode (-T_E_ACCES on a dataset-scope refusal) rather than
+    // collapsing every failure to a bare -1.
+    if (out_err) *out_err = 0;
+    if (recv_cap < P9_HDR_LEN) { if (out_err) *out_err = -T_E_INVAL; return NULL; }
+    if (msize == 0)            { if (out_err) *out_err = -T_E_INVAL; return NULL; }
 
     struct p9_attached *a = kmalloc(sizeof(*a), KP_ZERO);
-    if (!a) return NULL;
+    if (!a) { if (out_err) *out_err = -T_E_NOMEM; return NULL; }
 
     // The p9_client struct is ~12 KiB; kmalloc routes large requests
     // through alloc_pages (slub.c bypass at SLUB_MAX_OBJECT_SIZE).
     a->client = kmalloc(sizeof(*a->client), KP_ZERO);
     if (!a->client) {
         kfree(a);
+        if (out_err) *out_err = -T_E_NOMEM;
         return NULL;
     }
     a->recv_buf = kmalloc(recv_cap, KP_ZERO);
     if (!a->recv_buf) {
         kfree(a->client);
         kfree(a);
+        if (out_err) *out_err = -T_E_NOMEM;
         return NULL;
     }
 
@@ -73,6 +82,7 @@ struct p9_attached *p9_attached_create(
         kfree(a->recv_buf);
         kfree(a->client);
         kfree(a);
+        if (out_err) *out_err = rc;   // -P9_E_INVAL (== -T_E_INVAL)
         return NULL;
     }
 
@@ -82,11 +92,14 @@ struct p9_attached *p9_attached_create(
         // Handshake failed; destroy the client + free buffers. The
         // client's transport may have closed via map_error's -EIO
         // path; destroy is safe either way (no-op on already-closed
-        // transport).
+        // transport). rc is the negated server errno -- a Tattach
+        // Rlerror ecode (e.g. -T_E_ACCES for a per-user-stratumd
+        // dataset-scope refusal) or -P9_E_IO on a transport drop.
         p9_client_destroy(a->client);
         kfree(a->recv_buf);
         kfree(a->client);
         kfree(a);
+        if (out_err) *out_err = rc;
         return NULL;
     }
 

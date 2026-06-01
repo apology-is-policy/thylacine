@@ -13,6 +13,7 @@
 #include <thylacine/9p_wire.h>
 #include <thylacine/dev.h>
 #include <thylacine/dev9p.h>
+#include <thylacine/errno.h>
 #include <thylacine/spoor.h>
 #include <thylacine/types.h>
 
@@ -154,7 +155,7 @@ void test_p9_attached_create_destroy(void) {
         p9_loopback_ops_for(&g_loopback),
         /*recv_cap=*/4096,
         /*root_fid=*/0, /*msize=*/8192,
-        uname, sizeof(uname), aname, sizeof(aname), 0);
+        uname, sizeof(uname), aname, sizeof(aname), 0, NULL);
     TEST_ASSERT(a != NULL,                       "attached created");
     TEST_ASSERT(p9_attached_is_open(a),          "session is OPEN");
     TEST_EXPECT_EQ((u64)a->root_fid, (u64)0,     "root_fid = 0");
@@ -171,11 +172,18 @@ void test_p9_attached_handshake_failure_returns_null(void) {
 
     const u8 uname[] = {'r'};
     const u8 aname[] = {'/'};
+    int aerr = 0;
     struct p9_attached *a = p9_attached_create(
         p9_loopback_ops_for(&g_loopback),
         4096, 0, 8192,
-        uname, sizeof(uname), aname, sizeof(aname), 0);
+        uname, sizeof(uname), aname, sizeof(aname), 0, &aerr);
     TEST_ASSERT(a == NULL, "attached creation fails on Rattach Rlerror");
+    // A-3c / M6: the responder's Tattach Rlerror(ecode=13, EACCES) must be
+    // SURFACED, not collapsed -- this is exactly the per-user-stratumd
+    // dataset-scope refusal the SYS_ATTACH_9P* handlers map to a userspace
+    // EACCES via attach_err_to_ret. Pre-M6 the ecode was lost (bare NULL).
+    TEST_EXPECT_EQ((s64)aerr, (s64)(-T_E_ACCES),
+                   "handshake Rlerror ecode surfaces as -T_E_ACCES");
     // No leak — p9_attached_create cleaned up the half-built client +
     // buffers on the handshake failure. Verifiable indirectly:
     // subsequent attempts to allocate succeed.
@@ -189,7 +197,7 @@ void test_p9_attached_root_spoor_walk_read(void) {
     const u8 aname[] = {'/'};
     struct p9_attached *a = p9_attached_create(
         p9_loopback_ops_for(&g_loopback), 4096, 0, 8192,
-        uname, sizeof(uname), aname, sizeof(aname), 0);
+        uname, sizeof(uname), aname, sizeof(aname), 0, NULL);
     TEST_ASSERT(a != NULL, "attached created");
 
     // Get the root Spoor + walk + open + read end-to-end.
@@ -224,7 +232,7 @@ void test_p9_attached_query_helpers(void) {
     const u8 aname[] = {'/'};
     struct p9_attached *a = p9_attached_create(
         p9_loopback_ops_for(&g_loopback), 4096, 0, 8192,
-        uname, sizeof(uname), aname, sizeof(aname), 0);
+        uname, sizeof(uname), aname, sizeof(aname), 0, NULL);
     TEST_ASSERT(a != NULL, "attached");
 
     TEST_ASSERT(p9_attached_is_open(a),          "is_open after create");
@@ -309,7 +317,7 @@ void test_sys_walk_open_max_length_name_nul_terminated(void) {
     const u8 aname[] = {'/'};
     struct p9_attached *a = p9_attached_create(
         p9_loopback_ops_for(&g_f1_loopback), 4096, 0, 8192,
-        uname, sizeof(uname), aname, sizeof(aname), 0);
+        uname, sizeof(uname), aname, sizeof(aname), 0, NULL);
     TEST_ASSERT(a != NULL, "attached created");
 
     struct Spoor *root = p9_attached_root_spoor(a);
@@ -367,7 +375,7 @@ void test_p9_attached_walked_outlives_root_no_uaf(void) {
     const u8 aname[] = {'/'};
     struct p9_attached *a = p9_attached_create(
         p9_loopback_ops_for(&g_loopback), 4096, 0, 8192,
-        uname, sizeof(uname), aname, sizeof(aname), 0);
+        uname, sizeof(uname), aname, sizeof(aname), 0, NULL);
     TEST_ASSERT(a != NULL, "attached created");
 
     struct Spoor *root = p9_attached_root_spoor(a);

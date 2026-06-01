@@ -116,6 +116,12 @@ struct p9_attached {
 // to `msize`). Returns a heap-allocated struct on success (caller calls
 // p9_attached_destroy when done), NULL on failure with all intermediate
 // allocations released.
+//
+// `out_err` (A-3c / M6): when non-NULL and the call returns NULL, receives
+// the negative POSIX errno that caused the failure -- crucially the Tattach
+// `Rlerror` ecode the server sent (e.g. -T_E_ACCES for a dataset-scope
+// refusal), so the SYS_ATTACH_9P* handlers surface it instead of a bare -1.
+// On success it is set to 0. Pass NULL when the caller does not distinguish.
 struct p9_attached *p9_attached_create(
     struct p9_transport_ops transport_ops,
     size_t                  recv_cap,
@@ -123,7 +129,8 @@ struct p9_attached *p9_attached_create(
     u32                     msize,
     const u8               *uname, size_t uname_len,
     const u8               *aname, size_t aname_len,
-    u32                     n_uname);
+    u32                     n_uname,
+    int                    *out_err);
 
 // Allocate a fresh dev9p Spoor representing the attached's bound root.
 // The returned Spoor has fid_owned=false (root_fid stays bound until

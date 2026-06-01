@@ -1,10 +1,10 @@
 # 100 — 9P identity presentation (A-3)
 
-**Status:** A-3a + A-3b LANDED + **audit R1 CLEAN** (0 P0 / 0 P1 / 1 P2 / 3 P3, all
-fixed — the P2 was the create-leg of F1 [`sys_walk_create_handler` now also derives
-rights from omode]; full record in `memory/audit_a3_closed_list.md`). A-3c (per-user
-stratumd mechanism proof + trust-stamp seam) appends as it lands. Design:
-`IDENTITY-DESIGN.md §9.7` + the §3.5 F-4 correction + the §3.7.1 activation note.
+**Status:** A-3a + A-3b + A-3c LANDED. A-3 (a+b) audit R1 CLEAN (0 P0 / 0 P1 / 1 P2 /
+3 P3, all fixed — the P2 was the create-leg of F1 [`sys_walk_create_handler` now also
+derives rights from omode]; `memory/audit_a3_closed_list.md`). A-3c (M6 ecode-surfacing
++ M5 trust-stamp seam) gets its own focused round. Design: `IDENTITY-DESIGN.md §9.7` +
+the §3.5 F-4 correction + the §3.7.1 activation note.
 
 ---
 
@@ -155,11 +155,83 @@ destination) and `sys_unlink_handler` (the parent dir) now run
 `O_PATH`-born `R|W` handle to a no-`other-w` directory could rename/unlink its entries
 once dev9p enforced.
 
+## Per-user stratumd reachability + the EACCES channel (A-3c)
+
+A-3c closes the A-3 split by (M6) proving the per-user-stratumd dataset-scope refusal
+is *reachable from Thylacine* and (M5) recording the trust-stamp gate as a v1.x seam.
+
+### M6 — dataset-scope `EACCES` is reachable: surface the Tattach ecode
+
+**The Stratum mechanism (built + tested upstream).** A per-user `stratumd --role client`
+proxy is scoped to a dataset glob list (`--datasets-allowed`); it intercepts Tattach,
+matches the requested `aname` against the patterns, and on a miss writes
+`Rlerror(EACCES)` (ecode 13) back to the client *without* forwarding to the coordinator
+(`src/cmd/stratumd/proxy_9p.c`). A `--role coord` stratumd enforces the same per-uid via
+`--user-policy` (`src/cmd/stratumd/serve.c`). Both are exercised Stratum-side by
+`tests/test_proxy_9p.c::proxy_9p_e2e_refuses_aname_not_in_allowlist` (aname
+`users/susan` vs patterns `users/michael*` → `Rlerror(EACCES)`). **The per-login spawn
+of a user's `--role client` stratumd is A-5** (no v1.0 caller exists pre-login); A-3c
+only proves the channel reaches Thylacine.
+
+**The Thylacine gap A-3c closes.** The kernel 9P client already maps an `Rlerror` ecode
+to a negative errno (`kernel/9p_client.c::map_error` → `-(int)r->ecode`), but
+`p9_attached_create` (`kernel/9p_attach.c`) **collapsed every handshake failure to a
+bare `NULL`**, so `SYS_ATTACH_9P` / `SYS_ATTACH_9P_SRV` returned `-1` for an out-of-scope
+attach — the EACCES was lost. A-3c threads the ecode out:
+
+- `p9_attached_create` gains an `int *out_err` out-param. On every NULL-return path it
+  records a negative POSIX errno: `-T_E_INVAL` (bad params), `-T_E_NOMEM` (alloc fail),
+  the `p9_client_init` rc, or — the load-bearing one — the `p9_client_handshake` rc,
+  which for a Tattach `Rlerror(EACCES)` is `-T_E_ACCES` (-13). On success it is 0.
+- Both `sys_attach_9p_handler` and `sys_attach_9p_srv_handler` pass `&aerr` and, on
+  failure, `return attach_err_to_ret(aerr)` — a helper that surfaces a valid passthrough
+  errno (the `[-4095, -2]` range the pouch boundary-line translates to a userspace errno)
+  and otherwise the generic `-1`. So an out-of-scope attach now returns `-EACCES`, which
+  pouch presents as `errno == EACCES`.
+
+The syscall ABI is unchanged (args identical); only the failure *return value* is refined
+from `{-1, fd}` to `{-errno, fd}` — the sanctioned per-touch errno upgrade (`ERRORS.md`).
+Across the surface this also makes a bad-aname attach observably `-EINVAL`, an OOM
+`-ENOMEM`, and a transport drop `-EIO`.
+
+Proof: `kernel/test/test_9p_attach.c::test_p9_attached_handshake_failure_returns_null`
+drives the existing `handshake_fail_responder` (Rversion OK, then `Rlerror(ecode=13)` for
+Tattach) and now asserts `aerr == -T_E_ACCES`. The handler wiring
+(`return attach_err_to_ret(aerr)` immediately after the `&aerr` create) is a trivial,
+code-reviewed pass-through; the full syscall-level E2E — a real Thylacine Proc attaching
+an out-of-scope dataset on a per-user stratumd and reading `errno == EACCES` — is the
+**A-5** login-path test (where per-user stratumd actually runs).
+
+### M5 — trust-stamp gate is a v1.x seam (no v1.0 caller; not built)
+
+F-4's original concern — "corvus stamps the `/srv` posting; the kernel forwards an
+asserted identity ONLY to trusted servers" — is **structurally absent at v1.0**. Every
+v1.0 attach is local (a `SrvConn`), so the presented identity is the kernel-stamped
+`SYS_srv_peer` principal (M1) — unforgeable, and already revealed to any server the Proc
+connects to (that is how `SO_PEERCRED` works). There is no `n_uname`-assert-to-untrusted
+path because no remote/foreign 9P transport exists. Per the convergence bar (build-iff-
+caller), the trust-stamp registry is **not built**.
+
+**Seam trigger (recorded):** when a v1.x remote/foreign 9P transport lands, the kernel
+MUST gate the M4 `n_uname` assertion on a corvus-stamped trust bit on the
+service/connection before asserting identity to a server whose peer it does not
+kernel-stamp. Ground truth: no `trusted_for_identity_fwd` field exists on
+`SrvService` / `SrvConn` today — the seam is a clean additive field, not a redesign.
+
+### Deferred to A-5: the live multi-principal dev9p enforcement probe
+
+The A-3 audit noted that a `CAP_SET_IDENTITY` non-system child being denied write to a
+SYSTEM-owned dev9p directory is covered by the `dev9p.perm_enforced_deny_allow` *unit*
+test but not by a *live* boot probe (the boot chain is uniformly `PRINCIPAL_SYSTEM`
+pre-login). That live probe is structurally an A-5 deliverable — A-5 (login) is where a
+non-system principal first exists — so it is deferred there with the per-login per-user
+stratumd spawn, not folded into A-3c.
+
 ## Invariants
 
 - **I-22 preserved** — the `SO_PEERCRED` principal is kernel-stamped (`SYS_srv_peer`),
   not client-asserted; no identity self-elevates. `CAP_HOSTOWNER` remains the only
-  DAC-override (A-2d).
+  DAC-override (A-2d). A-3c adds no privilege — the ecode out-param is observational.
 - **I-2 / I-4 / I-6 unaffected** — M1/M2/M4 add no capability, no handle-transfer path,
   no rights expansion.
 - **No on-disk-format change** (M2) — only the stamped `si_uid`/`si_gid` value differs.
@@ -198,5 +270,9 @@ PRINCIPAL_SYSTEM owner):
   rename/unlink); the `stratumd-stub` Tgetattr; the `stratum-mkfs --root-uid`/`--root-gid`
   no-brick fix (M2 completion — the root inode, not just the baked files, must be
   SYSTEM-owned).
-- **A-3c (next):** per-user stratumd `--role client` mechanism proof (dataset-scope
-  `EACCES`-at-Tattach); the corvus trust-stamp gate recorded as a v1.x seam.
+- **A-3c (landed):** M6 — the per-user-stratumd dataset-scope `EACCES`-at-Tattach channel
+  is reachable from Thylacine: `p9_attached_create` surfaces the Tattach `Rlerror` ecode
+  via a new `int *out_err`, and both attach handlers map it through `attach_err_to_ret` so
+  an out-of-scope attach returns `-EACCES` (was bare `-1`). M5 — the corvus trust-stamp
+  gate recorded as a v1.x seam (no v1.0 caller; not built). The live multi-principal dev9p
+  enforcement boot probe is deferred to A-5 (where a non-system principal first exists).

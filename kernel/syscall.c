@@ -1072,6 +1072,16 @@ static s64 sys_lseek_handler(u64 hraw, u64 offset_raw, u64 whence_raw) {
 #define SYS_ATTACH_DEFAULT_MSIZE     4096u
 #define SYS_ATTACH_DEFAULT_ROOT_FID  1u
 
+// Map a p9_attached_create out-err to a syscall return (A-3c / M6). Surface a
+// valid passthrough errno -- the [-4095, -2] range the pouch boundary-line
+// translates to a userspace errno, e.g. -T_E_ACCES from a per-user-stratumd
+// Tattach dataset-scope refusal -- otherwise the generic -1. Both SYS_ATTACH_9P
+// and SYS_ATTACH_9P_SRV route their create-failure return through here so an
+// out-of-scope attach is observably EACCES, not an undistinguished failure.
+static inline s64 attach_err_to_ret(int aerr) {
+    return (aerr <= -2 && aerr >= -4095) ? (s64)aerr : -1;
+}
+
 static s64 sys_attach_9p_handler(u64 tx_fd_raw, u64 rx_fd_raw,
                                  u64 aname_va, u64 aname_len, u64 n_uname) {
     struct Thread *t = current_thread();
@@ -1133,6 +1143,7 @@ static s64 sys_attach_9p_handler(u64 tx_fd_raw, u64 rx_fd_raw,
     }
 
     struct p9_transport_ops ops = p9_spoor_transport_ops(adapter);
+    int aerr = 0;
     struct p9_attached *att = p9_attached_create(
         ops,
         SYS_ATTACH_DEFAULT_MSIZE,            // recv_cap (= msize at v1.0)
@@ -1146,7 +1157,7 @@ static s64 sys_attach_9p_handler(u64 tx_fd_raw, u64 rx_fd_raw,
         // (it reconciles via SO_PEERCRED, ignoring n_uname); it is forward-
         // compat for a foreign 9P server with no SO_PEERCRED. SO_PEERCRED is
         // the live local channel (IDENTITY-DESIGN.md section 9.7 M1/M4).
-        p->principal_id);
+        p->principal_id, &aerr);
     if (!att) {
         // p9_attached_create's failure leaves the adapter untouched
         // (the create's transport_ops.close runs on rollback, which is
@@ -1155,7 +1166,7 @@ static s64 sys_attach_9p_handler(u64 tx_fd_raw, u64 rx_fd_raw,
         spoor_unref(tx);
         if (rx != tx) spoor_unref(rx);
         kfree(adapter);
-        return -1;
+        return attach_err_to_ret(aerr);
     }
 
     // F2: transfer adapter + transport Spoor refs into the attached.
@@ -1339,6 +1350,7 @@ static s64 sys_attach_9p_srv_handler(u64 srv_fd_raw, u64 aname_va,
         timer_now_ns() + SRVCONN_HANDSHAKE_DEADLINE_NS);
 
     struct p9_transport_ops ops = p9_srvconn_transport_ops(adapter);
+    int aerr = 0;
     struct p9_attached *att = p9_attached_create(
         ops,
         SYS_ATTACH_DEFAULT_MSIZE,            // recv_cap (= msize at v1.0)
@@ -1349,7 +1361,7 @@ static s64 sys_attach_9p_srv_handler(u64 srv_fd_raw, u64 aname_va,
         // A-3 M4: assert the caller's kernel-stamped principal as n_uname
         // (vestigial userspace arg superseded; SO_PEERCRED is the live local
         // channel for stratumd). See section 9.7 + the sys_attach_9p_handler twin.
-        p->principal_id);
+        p->principal_id, &aerr);
     if (!att) {
         // Handshake failed (server unresponsive, deadline, Rlerror, OOM).
         // The adapter still holds its srvconn_ref; release it manually
@@ -1358,7 +1370,10 @@ static s64 sys_attach_9p_srv_handler(u64 srv_fd_raw, u64 aname_va,
         if (cops.close) (void)cops.close(cops.ctx);
         p9_srvconn_transport_destroy(adapter);
         kfree(adapter);
-        return -1;
+        // A-3c/M6: the per-user stratumd dataset-scope refusal arrives as a
+        // Tattach Rlerror(EACCES); surface -T_E_ACCES so the attacher observes
+        // EACCES, not a bare -1. Other handshake failures map likewise.
+        return attach_err_to_ret(aerr);
     }
 
     // Transfer adapter ownership into the attached. Mirrors SYS_ATTACH_
