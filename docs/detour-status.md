@@ -540,7 +540,7 @@ kill = BOTH the namespace `/proc/<pid>/ctl` surface AND a narrow elevation-only 
       to kproc's strict wait_pid -> extinction; the documented `wait_pid_for(pid)` lift). The
       member walk is unit-covered (test_proc) + the death is #809/#811. Ref:
       `docs/reference/102-legate.md`.
-    - **A-4a audit** *(LANDED `<pending>` -- Opus prosecutor a597f2841af126e72 + an in-session
+    - **A-4a audit** *(LANDED `a19b586` -- Opus prosecutor a597f2841af126e72 + an in-session
       self-audit; R1 CLEAN **0 P0 / 0 P1 / 1 P2 / 2 P3**; **I-2 / I-22 / I-25 HELD**)* -- covers
       A-4-pre + 1 + 2a + 2b + 3. **F1 (P2) FIXED**: the legate-root scope teardown was `exits()`-only
       and skipped on the kill / group-terminate death path (the path **A-4b's `CAP_KILL` drives**);
