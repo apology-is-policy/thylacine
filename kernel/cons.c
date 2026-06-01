@@ -40,20 +40,39 @@
 // a multi-reader lift is v1.x).
 
 #define CONS_RING_SIZE  256u   // power of two (mask-indexed); bounded -- full drops
+_Static_assert((CONS_RING_SIZE & (CONS_RING_SIZE - 1u)) == 0u,
+               "CONS_RING_SIZE must be a power of two (the ring is mask-indexed)");
 
 struct cons_input {
-    spin_lock_t lock;                  // ring + flags + reader_busy; taken irqsave
+    spin_lock_t lock;                  // ring + head/tail + reader_busy; taken irqsave
     u8          ring[CONS_RING_SIZE];
     u32         head;                  // next byte to read
     u32         tail;                  // next slot to write
-    u32         count;
+    u32         count;                 // mutated under lock; read locklessly in cond -- cons_count_*
     bool        reader_busy;           // a devcons_read is parked (single-reader)
-    bool        intr_pending;          // Ctrl-C seen -> post `interrupt` to owner
+    bool        intr_pending;          // mutated under lock; read locklessly in cond -- cons_intr_*
 };
 
 static struct cons_input g_cons = { .lock = SPIN_LOCK_INIT };
 static struct Rendez g_cons_data_rendez = RENDEZ_INIT;   // a reader parks here
 static struct Rendez g_cons_mgr_rendez  = RENDEZ_INIT;   // console_mgr parks here
+
+// `count` and `intr_pending` are MUTATED only under g_cons.lock, but they are
+// also READ locklessly inside the sleep conds (cons_data_ready /
+// cons_mgr_pending run under the Rendez lock, NOT g_cons.lock). A plain
+// cross-lock read of a field written under another lock is a C11 data race, so
+// these two fields are accessed via RELAXED atomics -- which makes the lockless
+// cond read well-defined (never torn) WITHOUT changing the lock structure.
+// Crucially, the no-lost-wakeup guarantee (I-9) does NOT come from these atomics:
+// it comes from the Rendez lock (the producer's wakeup() acquires the Rendez lock
+// that the sleeper's cond-check + sleep-transition hold), so a stale RELAXED read
+// at worst costs one extra sleep/recheck cycle, never a lost wake. (NOTE: this is
+// NOT the devnotes_read pattern -- that reads a dedicated per-waiter `ready` flag;
+// here the cond reads the shared count/flag directly, hence the atomic.)
+static inline u32  cons_count_load(void)   { return __atomic_load_n(&g_cons.count, __ATOMIC_RELAXED); }
+static inline void cons_count_store(u32 v) { __atomic_store_n(&g_cons.count, v, __ATOMIC_RELAXED); }
+static inline bool cons_intr_load(void)    { return __atomic_load_n(&g_cons.intr_pending, __ATOMIC_RELAXED); }
+static inline void cons_intr_store(bool v) { __atomic_store_n(&g_cons.intr_pending, v, __ATOMIC_RELAXED); }
 
 void cons_rx_input(u8 byte, bool is_break) {
     if (is_break) {
@@ -64,36 +83,42 @@ void cons_rx_input(u8 byte, bool is_break) {
     bool wake_data = false, wake_mgr = false;
     irq_state_t s = spin_lock_irqsave(&g_cons.lock);
     if (byte == 0x03u) {               // Ctrl-C: cooked-consume -> interrupt note
-        g_cons.intr_pending = true;
+        cons_intr_store(true);
         wake_mgr = true;
-    } else if (g_cons.count < CONS_RING_SIZE) {
-        g_cons.ring[g_cons.tail] = byte;
-        g_cons.tail = (g_cons.tail + 1u) & (CONS_RING_SIZE - 1u);
-        g_cons.count++;
-        wake_data = true;
+    } else {
+        u32 c = cons_count_load();
+        if (c < CONS_RING_SIZE) {
+            g_cons.ring[g_cons.tail] = byte;
+            g_cons.tail = (g_cons.tail + 1u) & (CONS_RING_SIZE - 1u);
+            cons_count_store(c + 1u);
+            wake_data = true;
+        }
+        // else: ring full -> drop (bounded; never overflows).
     }
-    // else: ring full -> drop (bounded; never overflows).
     spin_unlock_irqrestore(&g_cons.lock, s);
 
     // wakeup() is IRQ-safe (irqsave); a wake with no waiter is a no-op. The
     // producer set the condition under g_cons.lock and the wakeup takes the
-    // Rendez lock the sleeper's cond is evaluated under -> no lost wakeup (the
-    // register-then-observe / I-9 pairing, as in devnotes_read).
+    // Rendez lock the sleeper's cond-check + sleep-transition hold -> no lost
+    // wakeup (the register-then-observe / I-9 pairing; see the cons_count_* /
+    // cons_intr_* rationale above for why the cond's lockless read is sound).
     if (wake_data) wakeup(&g_cons_data_rendez);
     if (wake_mgr)  wakeup(&g_cons_mgr_rendez);
 }
 
-// cond: the ring holds at least one byte. Evaluated under the Rendez lock; the
-// producer's count-set is paired by the wakeup's Rendez-lock acquire.
+// cond: the ring holds at least one byte. Runs under the Rendez lock (NOT
+// g_cons.lock), so the count read is a RELAXED atomic (see the cons_count_*
+// rationale); the Rendez lock provides the no-lost-wakeup pairing.
 static int cons_data_ready(void *arg) {
     (void)arg;
-    return g_cons.count > 0u;
+    return cons_count_load() > 0u;
 }
 
-// cond: a deferred console action is pending.
+// cond: a deferred console action is pending. Same lockless-under-Rendez-lock
+// discipline as cons_data_ready.
 static int cons_mgr_pending(void *arg) {
     (void)arg;
-    return g_cons.intr_pending;
+    return cons_intr_load();
 }
 
 // The console_mgr kproc kthread (spawned once at boot). Services deferred
@@ -106,8 +131,8 @@ void console_mgr_main(void) {
             continue;
 
         irq_state_t s = spin_lock_irqsave(&g_cons.lock);
-        bool do_intr = g_cons.intr_pending;
-        g_cons.intr_pending = false;
+        bool do_intr = cons_intr_load();
+        cons_intr_store(false);
         spin_unlock_irqrestore(&g_cons.lock, s);
 
         if (do_intr) proc_console_post_interrupt();
@@ -116,17 +141,15 @@ void console_mgr_main(void) {
 
 void cons_test_reset(void) {
     irq_state_t s = spin_lock_irqsave(&g_cons.lock);
-    g_cons.head = g_cons.tail = g_cons.count = 0u;
-    g_cons.reader_busy  = false;
-    g_cons.intr_pending = false;
+    g_cons.head = g_cons.tail = 0u;
+    cons_count_store(0u);
+    g_cons.reader_busy = false;
+    cons_intr_store(false);
     spin_unlock_irqrestore(&g_cons.lock, s);
 }
 
 bool cons_test_intr_pending(void) {
-    irq_state_t s = spin_lock_irqsave(&g_cons.lock);
-    bool v = g_cons.intr_pending;
-    spin_unlock_irqrestore(&g_cons.lock, s);
-    return v;
+    return cons_intr_load();
 }
 
 void cons_test_set_reader_busy(bool busy) {
@@ -191,11 +214,13 @@ static long devcons_read(struct Spoor *c, void *buf, long n, s64 off) {
     long got = 0;
     for (;;) {
         s = spin_lock_irqsave(&g_cons.lock);
-        while (g_cons.count > 0u && got < n) {
+        u32 c = cons_count_load();
+        while (c > 0u && got < n) {
             out[got++] = g_cons.ring[g_cons.head];
             g_cons.head = (g_cons.head + 1u) & (CONS_RING_SIZE - 1u);
-            g_cons.count--;
+            c--;
         }
+        cons_count_store(c);
         spin_unlock_irqrestore(&g_cons.lock, s);
         if (got > 0) break;            // read() returns as soon as >= 1 byte is ready
         if (sleep(&g_cons_data_rendez, cons_data_ready, NULL) == SLEEP_INTR) break;

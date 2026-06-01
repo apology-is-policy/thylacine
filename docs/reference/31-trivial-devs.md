@@ -160,6 +160,7 @@ When `specs/9p_client.tla` lands at Phase 4+ (cumulative ROADMAP §7), Spoor cro
 ### cons
 
 - `cons.write_advances` — write of marker string returns n; n=0 returns 0; NULL/negative rejected.
+- `cons.blocking_read_wakeup` — a consumer kthread parks in `devcons_read` on an empty ring; `cons_rx_input` wakes it and it returns the byte (the I-9 register-then-observe pairing; two-thread, mirrors `test_tsleep`). Added by the A-4c-1 audit (F3).
 - `cons.ring_fill_drain` — pushed data bytes drain in FIFO order (A-4c-1).
 - `cons.ring_overflow_drop` — a full ring drops the excess; no corruption / overflow.
 - `cons.ctrlc_consumed` — Ctrl-C (0x03) sets intr-pending and is NOT enqueued as ring data.
@@ -188,7 +189,7 @@ The `random.*` tests skip gracefully when RNDR is unavailable (e.g., a future po
 | `kernel/cons.c` + devcons Dev (dc='c'; UART forward) | Landed (P4-B); blocking RX + Ctrl-C + console-owner added (A-4c-1) |
 | `dev_simple_attach / open / close` helpers | Landed (P4-B) |
 | Bestiary registration in `dev_init` | Landed (P4-B; 5 Devs total) |
-| In-kernel tests | 11 covering bestiary registration, per-Dev contracts, lifecycle stress (10K no-leak on /dev/null). The A-4c-1 console RX tests (8 `cons.*`) live in `kernel/test/test_cons.c`. |
+| In-kernel tests | 11 covering bestiary registration, per-Dev contracts, lifecycle stress (10K no-leak on /dev/null). The A-4c-1 console RX tests (9 `cons.*`, incl. the two-thread `blocking_read_wakeup`) live in `kernel/test/test_cons.c`. |
 | ROADMAP §6.2 "Spoor lifecycle: 10K cycles on /dev/null" | Closed (P4-B). |
 | ROADMAP §6.2 "cat /dev/random produces non-zero bytes" | Closed (P4-B; conditional on FEAT_RNG, which QEMU virt -cpu max provides). |
 | chacha20 stir for devrandom | Held to a future hardening sub-chunk (defense-in-depth; API unchanged). |
