@@ -523,7 +523,7 @@ kill = BOTH the namespace `/proc/<pid>/ctl` surface AND a narrow elevation-only 
       rfork-stripped -> only the ROOT is elevated; member teardown is the scripture tidiness
       sweep (a spawn-race straggler is benign + UNELEVATED, not an I-25 violation). Ref:
       `docs/reference/102-legate.md`.
-    - **A-4a-3** *(LANDED: alpha `b7edcc7` / beta `6224028` / gamma `*(pending)*`)* -- the
+    - **A-4a-3** *(LANDED: alpha `b7edcc7` / beta `6224028` / gamma `e48a14c`)* -- the
       userspace half + the boot E2E. **alpha**: `SYS_CAP_GRANT_CLEARANCE = 61` (the grant-side
       bridge -- corvus is chrooted, reaches the cap device by syscall, like the hostowner grant;
       "NO new syscall" was always about the REDEEM, which rides `SYS_CAP_USE`) + the libthyla-rs
