@@ -120,7 +120,9 @@ misread @20 as pad; corrected to 40 bytes at A-1a (see the commit + `IDENTITY-DE
 
 ### Inheritance (`kernel/proc.c::rfork_internal`)
 
-After the caps reduce (`child->caps = parent_caps & caps_mask`), the child copies the
+After the caps reduce (`child->caps = (parent_caps & caps_mask) & ~CAP_ELEVATION_ONLY` —
+the `~CAP_ELEVATION_ONLY` strip is A-4-pre, so no elevation-only cap such as
+`CAP_HOSTOWNER` crosses a fork even from an elevated parent), the child copies the
 parent's identity verbatim: `principal_id`, `primary_gid`, and the first
 `supp_gid_count` supplementary gids. A plain read suffices — identity is never mutated
 on a running Proc (the spawn override runs in the child's own thunk before
@@ -224,10 +226,11 @@ Suite: 618/618 PASS (default + ASan + UBSan).
 - **Audit (R1, opus prosecutor):** CLEAN -- 0 P0, 0 P1, 1 P2, 4 P3, all fixed in the
   close. F1 (supp-gid SYSTEM reject), F2 (clamp inherited count), F3 (proc_apply_identity
   self-validates reserved values), F4 (stale 56-byte comments), F5 (pouch mirror size
-  assert). Carried OUT of scope: a pre-existing P5-hostowner I-2 hole -- `rfork_internal`
-  does not `& ~CAP_ELEVATION_ONLY` despite caps.h saying it does (a hostowner-elevated
-  parent could rfork `CAP_HOSTOWNER` to a child); does not touch identity; flagged for an
-  A-4/hostowner re-audit.
+  assert). Carried OUT of scope at A-1a, **CLOSED by A-4-pre**: a pre-existing
+  P5-hostowner I-2 hole -- `rfork_internal` did not `& ~CAP_ELEVATION_ONLY` despite caps.h
+  saying it does (a hostowner-elevated parent could rfork `CAP_HOSTOWNER` to a child).
+  A-4-pre added the 1-line strip + the `caps.rfork_strips_elevation_only` regression test
+  (652/653 FAIL pre-fix, 653/653 post); did not touch identity.
 - **Deferred:** A-1b corvus identity DB + `RESOLVE_ID`/`RESOLVE_NAME` + CRVS v2;
   self-de-escalation (drop to NONE) seam; A-2d kernel rwx permission check that
   *consumes* principal_id/groups; A-3 SO_PEERCRED uid/gid marshal + per-user stratumd

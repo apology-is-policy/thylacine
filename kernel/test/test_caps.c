@@ -22,6 +22,7 @@ void test_caps_rfork_child_has_none(void);
 void test_caps_rfork_with_caps_grants_subset(void);
 void test_caps_rfork_with_caps_clamps_to_parent(void);
 void test_caps_rfork_with_caps_zero_mask(void);
+void test_caps_rfork_strips_elevation_only(void);
 
 // kproc starts with CAP_ALL (currently == CAP_HW_CREATE).
 void test_caps_kproc_has_all(void) {
@@ -138,4 +139,61 @@ void test_caps_rfork_with_caps_zero_mask(void) {
     TEST_EXPECT_EQ(status, 0, "child exit status");
     TEST_EXPECT_EQ(caps_child_observed, (int)CAP_NONE,
                    "child got non-empty caps from CAP_NONE mask");
+}
+
+// A-4-pre / I-2: rfork strips CAP_ELEVATION_ONLY from the child. An
+// elevated parent (one holding CAP_HOSTOWNER, as if it had redeemed a
+// console-gated `cap`-device grant) must NOT leak that bit across a fork
+// even when the caller passes a mask that includes it; the fork-grantable
+// subset still flows. Maps to caps.h::CAP_ELEVATION_ONLY +
+// specs/handles.tla::ElevationOnly. Pre-fix (no ~CAP_ELEVATION_ONLY AND in
+// rfork_internal) the grandchild observes CAP_HOSTOWNER and this FAILS.
+//
+// The intermediate is a throwaway Proc that mutates its OWN caps (nothing
+// else reads them) — this avoids touching kproc's live caps, and mirrors
+// the clamps_to_parent two-level pattern above.
+static int caps_elev_grandchild_observed = -1;
+static void caps_elev_grandchild_thunk(void *arg) {
+    (void)arg;
+    struct Thread *t = current_thread();
+    if (!t)                          extinction("caps_elev_grandchild: no current_thread");
+    struct Proc *p = t->proc;
+    if (!p)                          extinction("caps_elev_grandchild: no proc");
+    caps_elev_grandchild_observed = (int)p->caps;
+    exits("ok");
+}
+static void caps_elev_intermediate_thunk(void *arg) {
+    (void)arg;
+    struct Thread *t = current_thread();
+    if (!t)                          extinction("caps_elev_intermediate: no current_thread");
+    struct Proc *p = t->proc;
+    if (!p)                          extinction("caps_elev_intermediate: no proc");
+    // Simulate a legitimately-elevated parent holding both the full
+    // fork-grantable ceiling AND the elevation-only CAP_HOSTOWNER.
+    p->caps |= (CAP_ALL | CAP_HOSTOWNER);
+    // Try to hand the whole set (incl. the elevation-only bit) down.
+    int gpid = rfork_with_caps(RFPROC, caps_elev_grandchild_thunk, NULL,
+                               CAP_ALL | CAP_HOSTOWNER);
+    if (gpid <= 0) extinction("elev intermediate rfork_with_caps failed");
+    int gstatus = -42;
+    int greaped = wait_pid(&gstatus);
+    if (greaped != gpid) extinction("elev intermediate wait_pid pid mismatch");
+    if (gstatus != 0)    extinction("elev grandchild exit status non-zero");
+    exits("ok");
+}
+void test_caps_rfork_strips_elevation_only(void) {
+    caps_elev_grandchild_observed = -1;
+    int ipid = rfork(RFPROC, caps_elev_intermediate_thunk, NULL);
+    TEST_ASSERT(ipid > 0, "elev intermediate rfork failed");
+
+    int istatus = -42;
+    int ireaped = wait_pid(&istatus);
+    TEST_EXPECT_EQ(ireaped, ipid, "elev intermediate wait_pid pid");
+    TEST_EXPECT_EQ(istatus, 0, "elev intermediate exit status");
+    // The elevation-only bit MUST NOT cross the fork...
+    TEST_ASSERT((caps_elev_grandchild_observed & (int)CAP_HOSTOWNER) == 0,
+                "rfork leaked elevation-only CAP_HOSTOWNER across fork");
+    // ...while the fork-grantable subset still flows intact.
+    TEST_EXPECT_EQ(caps_elev_grandchild_observed, (int)CAP_ALL,
+                   "rfork did not confer the fork-grantable subset");
 }

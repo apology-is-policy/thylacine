@@ -571,8 +571,17 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
     // (mid-ReduceCaps update from another CPU). Maps to spec's
     // `granted \subseteq proc_caps[parent]`: the AND with caps_mask is
     // the impl-side "ceiling at parent's current caps" enforcement.
+    //
+    // A-4-pre / I-2: AND with ~CAP_ELEVATION_ONLY unconditionally. An
+    // elevated parent (one that legitimately gained CAP_HOSTOWNER via the
+    // console-gated `cap` device) must not leak it across a fork —
+    // elevation-only caps are the sole sanctioned capability growth and
+    // flow ONLY through the cap device for a console-attached Proc, never
+    // by inheritance. caps_mask alone can't enforce this (a caller may
+    // pass a mask that includes the bit); the ~CAP_ELEVATION_ONLY strip
+    // is load-bearing. Honors the contract caps.h already documents.
     caps_t parent_caps = __atomic_load_n(&parent->caps, __ATOMIC_ACQUIRE);
-    child->caps = parent_caps & caps_mask;
+    child->caps = (parent_caps & caps_mask) & ~CAP_ELEVATION_ONLY;
 
     // A-1a: identity is INHERITED across rfork (the durable principal-id +
     // groups flow parent -> child unchanged). This is the opposite of caps

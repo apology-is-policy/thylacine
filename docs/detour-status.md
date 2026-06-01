@@ -494,9 +494,11 @@ rows, **CORVUS-DESIGN** §5.5.1 / §5.7 / §6.4. **Two user votes 2026-06-01:** 
 kill = BOTH the namespace `/proc/<pid>/ctl` surface AND a narrow elevation-only `CAP_KILL`;
 (2) trusted path = build the kernel SAK now (pulling the kernel console RX path forward).
 
-- **A-4-pre** -- close the **P5-hostowner I-2 hole** (the named prerequisite below):
-  `rfork_internal` ANDs `~CAP_ELEVATION_ONLY` (now the 4-bit set HOSTOWNER + DAC_OVERRIDE +
-  CHOWN + KILL). Lands first; folds into A-4a's round.
+- **A-4-pre** *(LANDED `(pending)`)* -- closed the **P5-hostowner I-2 hole** (the named
+  prerequisite below): `rfork_internal` now ANDs `~CAP_ELEVATION_ONLY`. At v1.0
+  `CAP_ELEVATION_ONLY = {CAP_HOSTOWNER}`; the strip auto-covers DAC_OVERRIDE + CHOWN + KILL
+  as A-4a/b add those bits to the macro. + the `caps.rfork_strips_elevation_only` regression
+  test (652/653 FAIL pre-fix, 653/653 post). Formal audit folds into A-4a's round.
 - **A-4a** -- clearance-level policy objects (corvus-held; **structured-TLV** caps so v1.x
   resource-scoping is additive) + the **legate** = the existing `cap`-device two-phase grant
   generalized (corvus registers via the new `CAP_GRANT_CLEARANCE`; the Proc redeems; kernel
@@ -606,18 +608,18 @@ tools/build.sh kernel --sanitize=undefined && tools/test.sh
 - **Open verify** (from the scripture pass): `ARCHITECTURE.md:660/662` describe
   `rfork(RFPROC)` as "copy-on-write address space" -- confirm the actual copy
   behavior; add a seam-note like §16 if it doesn't truly COW.
-- **A-4 prerequisite (P1-class; DESIGNED 2026-06-01 -> closed in A-4-pre, IDENTITY-DESIGN
-  §9.8 + ARCH §25.4 A-4 audit row; surfaced by the A-1a audit, NOT A-1a):**
-  `kernel/proc.c::rfork_internal` sets `child->caps = parent_caps & caps_mask` WITHOUT
-  `& ~CAP_ELEVATION_ONLY`, but `caps.h:99-105` (P5-hostowner-b) asserts it strips
-  elevation-only caps. Real I-2 hole: a `CAP_HOSTOWNER`-elevated parent can rfork /
-  `SYS_SPAWN_*`(cap_mask incl. HOSTOWNER) a child that inherits `CAP_HOSTOWNER`,
-  bypassing the console-attached `ADMIN_ELEVATE` gate. Does NOT touch identity
-  (`CAP_SET_IDENTITY` is correctly fork-grantable, in CAP_ALL, not elevation-only).
-  Fix is a 1-line AND matching the existing scripture + a regression test, but rfork
-  is an audit-trigger surface and sibling elevation paths want a sweep -> fold into the
-  A-4 (clearance/legate/hostowner) chunk with its own focused audit. Recorded in
-  `memory/audit_a1a_closed_list.md` (carried-out-of-scope).
+- **A-4 prerequisite (P1-class) -- CLOSED by A-4-pre `(pending)`:** the P5-hostowner I-2
+  hole (surfaced by the A-1a audit, NOT A-1a). `kernel/proc.c::rfork_internal` set
+  `child->caps = parent_caps & caps_mask` WITHOUT `& ~CAP_ELEVATION_ONLY`, despite
+  `caps.h:99-105` (P5-hostowner-b) asserting it strips elevation-only caps -- a
+  `CAP_HOSTOWNER`-elevated parent could rfork / `SYS_SPAWN_*`(cap_mask incl. HOSTOWNER) a
+  child inheriting `CAP_HOSTOWNER`, bypassing the console-attached `ADMIN_ELEVATE` gate
+  (does NOT touch identity -- `CAP_SET_IDENTITY` is correctly fork-grantable, in CAP_ALL).
+  A-4-pre added the 1-line strip + the `caps.rfork_strips_elevation_only` regression test;
+  the sibling sweep confirmed `rfork_internal` is the single fork-time chokepoint (all three
+  `SYS_SPAWN_*_CAPS` route through it; the devcap redeem is the sanctioned grant path, not a
+  fork leak). Formal audit folds into A-4a. Was recorded in `memory/audit_a1a_closed_list.md`
+  (carried-out-of-scope).
 
 ---
 

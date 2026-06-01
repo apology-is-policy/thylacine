@@ -637,6 +637,7 @@ void test_caps_rfork_child_has_none(void);
 void test_caps_rfork_with_caps_grants_subset(void);
 void test_caps_rfork_with_caps_clamps_to_parent(void);
 void test_caps_rfork_with_caps_zero_mask(void);
+void test_caps_rfork_strips_elevation_only(void);
 void test_mmio_handle_create_basic(void);
 void test_mmio_handle_create_misaligned_rejected(void);
 void test_mmio_handle_create_zero_size_rejected(void);
@@ -1524,6 +1525,9 @@ struct test_case g_tests[] = {
                                                                            false, NULL },
     { "caps.rfork_with_caps_zero_mask",
                                        test_caps_rfork_with_caps_zero_mask,
+                                                                           false, NULL },
+    { "caps.rfork_strips_elevation_only",
+                                       test_caps_rfork_strips_elevation_only,
                                                                            false, NULL },
     { "mmio_handle.create_basic",      test_mmio_handle_create_basic,      false, NULL },
     { "mmio_handle.create_misaligned_rejected",

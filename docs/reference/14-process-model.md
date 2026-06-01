@@ -388,7 +388,7 @@ Future appends:
 
 ### Console attachment + `CAP_HOSTOWNER` (P5-hostowner-a)
 
-`CAP_HOSTOWNER` (`<thylacine/caps.h>`, bit 3) gates the corvus admin verbs. Unlike `CAP_HW_CREATE` / `CAP_LOCK_PAGES` / `CAP_CSPRNG_READ`, it is **elevation-only** — deliberately excluded from `CAP_ALL`, so no Proc (not even kproc) holds it at creation, and `rfork`'s mask-AND can never confer it. The sole grant path is corvus's `ADMIN_ELEVATE` verb (P5-hostowner-b).
+`CAP_HOSTOWNER` (`<thylacine/caps.h>`, bit 3) gates the corvus admin verbs. Unlike `CAP_HW_CREATE` / `CAP_LOCK_PAGES` / `CAP_CSPRNG_READ`, it is **elevation-only** — deliberately excluded from `CAP_ALL`, so no Proc (not even kproc) holds it at creation, and it can never cross a fork: `rfork_internal` ANDs every child's caps with `~CAP_ELEVATION_ONLY` (A-4-pre). The mask-AND alone would not enforce this — a caller can pass a `caps_mask` that includes the bit, so a `CAP_HOSTOWNER`-elevated parent would otherwise leak it; the `~CAP_ELEVATION_ONLY` strip is the load-bearing enforcement (I-2). The sole grant path is corvus's `ADMIN_ELEVATE` verb (P5-hostowner-b).
 
 `PROC_FLAG_CONSOLE_ATTACHED` (`<thylacine/proc.h>`, `proc_flags` bit 3) marks a Proc spawned through joey's console-login chain — the local-console trust anchor. corvus's `ADMIN_ELEVATE` grants `CAP_HOSTOWNER` only to a console-attached peer (CORVUS-DESIGN §5.5; `specs/corvus.tla` `HostownerRequiresConsole`).
 
