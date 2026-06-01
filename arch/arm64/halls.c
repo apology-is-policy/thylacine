@@ -22,6 +22,7 @@
 #include "halls.h"
 
 #include "exception.h"
+#include "halls_symtab.h"
 #include "kaslr.h"
 #include "uart.h"
 
@@ -126,17 +127,74 @@ static u64 halls_peek(u64 addr) {
     return *(volatile u64 *)(uintptr_t)addr;
 }
 
+// HX-2: minimal-width hex (no leading zeros) for the symbol offset --
+// "boot_main+0x1a4" reads cleaner than uart_puthex64's fixed 16-digit field.
+static void halls_puthex(u64 v) {
+    uart_puts("0x");
+    if (v == 0) { uart_putc('0'); return; }
+    char buf[16];
+    unsigned n = 0;
+    while (v && n < sizeof(buf)) {
+        u64 d = v & 0xfu;
+        buf[n++] = (char)(d < 10u ? ('0' + d) : ('a' + (d - 10u)));
+        v >>= 4;
+    }
+    while (n) uart_putc(buf[--n]);
+}
+
+// HX-2: pure binary search over an EXPLICIT (offset, name) table (the global
+// wrapper below feeds it the linked-in table; test_halls feeds a synthetic
+// one). Returns the greatest entry with `off <= (link_va - base)`. Reads only
+// the .rodata table (no faulting stack reads) and is bounded by log2(count),
+// so it is safe to call from the dying-machine dump path.
+const char *halls_symbolize_table(const struct halls_sym *tab, u32 count,
+                                  const char *names, u64 base,
+                                  u64 link_va, u64 *out_off) {
+    if (count == 0u || link_va < base) return (const char *)0;
+    u64 q64 = link_va - base;
+    if (q64 > 0xFFFFFFFFu) return (const char *)0;   // outside the u32 window
+    u32 q = (u32)q64;
+    if (q < tab[0].off) return (const char *)0;       // below the first symbol
+    // Half-open [lo, hi); invariant tab[lo].off <= q holds after the guard.
+    u32 lo = 0u, hi = count;
+    while (hi - lo > 1u) {
+        u32 mid = lo + (hi - lo) / 2u;
+        if (tab[mid].off <= q) lo = mid;
+        else                   hi = mid;
+    }
+    if (out_off) *out_off = (u64)(q - tab[lo].off);
+    return &names[tab[lo].name_off];
+}
+
+const char *halls_symbolize(u64 link_va, u64 *out_off) {
+    return halls_symbolize_table(halls_symtab, halls_symtab_count,
+                                 halls_symtab_names, halls_symtab_link_base,
+                                 link_va, out_off);
+}
+
 // One "raw  (link 0x...)" code-address line: strip the PAC, print the
 // canonical address, then -- unless it is a userspace VA (skip_link; F5) --
-// its KASLR link-time form for addr2line. A user VA minus the kernel KASLR
-// offset is nonsense, so the link is suppressed for EL0-source frames.
+// its KASLR link-time form for addr2line, and (HX-2) its live `name+0xN`
+// symbolization. A user VA minus the kernel KASLR offset is nonsense, so both
+// the link and the symbol are suppressed for EL0-source frames.
 static void halls_emit_code_addr(const char *label, u64 addr, u64 koff, bool skip_link) {
     u64 a = halls_strip_pac(addr);
     uart_puts(label);
     uart_puthex64(a);
     if (!skip_link) {
+        u64 link = halls_link_addr(a, koff);
         uart_puts("  link ");
-        uart_puthex64(halls_link_addr(a, koff));
+        uart_puthex64(link);
+        // HX-2: live symbolization. NULL (a stub/count-0 table, or an address
+        // outside .text) falls back to the raw+link form -- the HX-1 behaviour.
+        u64 off = 0;
+        const char *name = halls_symbolize(link, &off);
+        if (name) {
+            uart_puts("  ");
+            uart_puts(name);
+            uart_putc('+');
+            halls_puthex(off);
+        }
     }
     uart_puts("\n");
 }

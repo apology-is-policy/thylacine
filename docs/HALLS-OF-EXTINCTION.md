@@ -6,8 +6,10 @@ everything that is hard or impossible to obtain after the fact — registers,
 stack, a backtrace, the fault syndrome — and (Tier 3) persist a compact record
 across the reboot.
 
-Status: **Tier 1 LANDED (HX-1)**; Tier 2 + Tier 3 designed, not yet built
-(Tier 3 is Lazarus-adjacent). As-built reference: `docs/reference/101-halls.md`.
+Status: **Tier 1 LANDED (HX-1) + Tier 2 LANDED (HX-2)**; Tier 3 designed, not
+yet built (Tier 3 is Lazarus-adjacent). As-built reference:
+`docs/reference/101-halls.md` (Tier-2 section = the as-built symbol table +
+live `func+0xN` symbolization).
 Naming is thematic (extinction = ELE, the kernel panic; the Halls archive the
 dead).
 

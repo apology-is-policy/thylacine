@@ -1,7 +1,8 @@
-# 101 -- Halls of Extinction (Tier-1 crash dump)
+# 101 -- Halls of Extinction (Tier-1 crash dump + Tier-2 symbolization)
 
-**Status**: Tier 1 LANDED (HX-1). Tier 2 (in-kernel symbols) + Tier 3
-(persistence) are designed in `docs/HALLS-OF-EXTINCTION.md`, not yet built.
+**Status**: Tier 1 (HX-1) + Tier 2 (HX-2, in-kernel symbols) LANDED. Tier 3
+(persistence) is designed in `docs/HALLS-OF-EXTINCTION.md`, not yet built. The
+Tier-2 section below documents the as-built symbol table + live symbolization.
 
 ## Purpose
 
@@ -172,6 +173,92 @@ about to halt forever.
   unavailable and prints only the captured `sp`/`fp`/`lr` + the (stale,
   labelled) EL1 syndrome regs. The backtrace from the current x29 still walks
   the assert's call chain.
+
+## Tier 2 -- in-kernel symbolization (HX-2)
+
+Every code-address line the Tier-1 dump prints (`ELR`, `LR`, each backtrace
+frame) now carries `func+0xN` live, resolved in-kernel against an embedded
+symbol table -- no offline `addr2line` step. A real `wxe_violation` dump:
+
+```
+HALLS: ELR  0xffffa00193480bfc  link 0xffffa00000080bfc  provoke_wxe_violation+0x8
+HALLS: LR   0xffffa00193480be0  link 0xffffa00000080be0  fault_test_run+0x1c
+HALLS: backtrace (fp-chain; link addrs for addr2line):
+HALLS:   #0  0xffffa00193480bfc  link 0xffffa00000080bfc  provoke_wxe_violation+0x8
+HALLS:   #1  0xffffa00193480938  link 0xffffa00000080938  boot_main+0x7e0
+HALLS:   #2  0x0000000040080154  link 0x0000000040080154
+```
+
+The raw + KASLR link addrs are unchanged (HX-1); the trailing `name+0xN` is
+HX-2. `#2` is the early-boot LMA (`0x40080154`, below the KASLR offset) -- no
+high-VA symbol, so it degrades gracefully to raw, the same as any address
+outside `.text`.
+
+### The table
+
+`struct halls_sym { u32 off; u32 name_off; }` (`arch/arm64/halls_symtab.h`),
+sorted ascending by `off`, alongside `halls_symtab_count`,
+`halls_symtab_link_base`, and a NUL-separated `halls_symtab_names[]` blob.
+
+- **Offsets, not absolute VAs.** `off` is `sym_link_va - halls_symtab_link_base`
+  (the base is the minimum text address the generator saw, == `_start` ==
+  `KERNEL_LINK_VA`). A u32 offset is a plain constant, so the table emits **zero
+  relocations** -- crucially, an absolute VA in initialized data would draw an
+  `R_AARCH64_RELATIVE` reloc per symbol that the boot stub *slides* by the KASLR
+  offset, both bloating `.rela.dyn` and turning the stored value into a runtime
+  address (defeating "link-relative"). Verified: 0 relocs land inside the table
+  region. The table lives in `.rodata` (R-only; always mapped; never slid).
+- **Cost**: ~1.7k symbols -> ~14 KiB index + ~41 KiB names ~= 55 KiB of `.rodata`
+  (well under the ~1.7 MiB headroom against the 4 MiB L3-mapping cap in
+  `kernel.ld`).
+
+### Lookup
+
+`halls_symbolize(link_va, &off)` (the global wrapper) -> `halls_symbolize_table`
+(`arch/arm64/halls.c`): a binary search for the greatest entry with
+`off <= (link_va - base)`. Returns NULL (raw fallback) when `count == 0` (an
+unsymbolized / stub build), `link_va < base`, the offset exceeds the u32 window,
+or `link_va` is below the first symbol. **Dump-path-safe**: it reads only the
+`.rodata` table (no faulting stack reads, unlike the fp-walk), is bounded by
+`log2(count)`, takes no locks, and allocates nothing -- so it composes with
+HX-I1 (a fault during the dump still trips the re-entrancy guard) and HX-I2 (the
+fp-walk's bounds are unchanged). `q - tab[lo].off` cannot underflow (the search
+invariant guarantees `tab[lo].off <= q`).
+
+### The build (kallsyms-lite, two-pass)
+
+The table is **generated per-build-dir** from the linked ELF, never committed to
+the source tree, because the default and sanitizer builds have different `.text`
+layouts (default 1727 symbols, UBSan 1760) and would otherwise clobber each
+other.
+
+1. `kernel/CMakeLists.txt` seeds `<build>/generated/halls_symtab.c` from the
+   committed stub (`arch/arm64/halls_symtab.stub.c`, `count == 0`) at first
+   configure, and compiles it into the kernel. A bare `cmake` / IDE build thus
+   always links + runs (the stub -> NULL -> HX-1 raw fallback).
+2. `tools/regen-halls-symtab.sh <build-dir>` (shared by `tools/build.sh` and,
+   via `build.sh kernel --build-dir`, `tools/test-fault.sh`) runs
+   `llvm-nm --defined-only` over the linked ELF through
+   `tools/gen-halls-symtab.py`, overwrites the build-dir copy, and re-links.
+   Because the table sits in `.rodata` (after `.text`), the re-link does not
+   move the symbolized `.text` addresses, so it **converges after one re-link**;
+   a second pass re-derives a byte-identical table (the stability assert), and a
+   no-op incremental build converges in pass 1 with no extra link.
+3. The generator is **deterministic** (sorted, deduped by address, no
+   timestamps) so the stability check is a byte-compare and builds are
+   reproducible. It is **best-effort**: a missing `llvm-nm`/`python3` or a
+   generation failure keeps the existing table and the build stays green --
+   symbolization is ergonomics, never a build gate.
+
+### Tests
+
+- `halls.symbolize_table` (`kernel/test/test_halls.c`): the binary search +
+  boundary logic over a synthetic table -- exact hit, mid-function offset,
+  past-the-last-symbol, below-first-entry -> NULL, below-base -> NULL,
+  `count == 0` -> NULL, u32-overflow -> NULL.
+- E2E: `tools/test-fault.sh wxe_violation` produces the symbolized dump above
+  (the fault build is symbolized automatically -- it runs through
+  `build.sh kernel --build-dir`).
 
 ## Naming rationale
 

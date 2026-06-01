@@ -204,6 +204,9 @@ build_kernel() {
         -DTHYLACINE_SANITIZE="$sanitize_cmake" \
         ${extra_cmake_args[@]+"${extra_cmake_args[@]}"}
     cmake --build "$KERNEL_BUILD" $verbose
+    # HX-2: bake the live symbol table from the linked ELF + re-link (two-pass;
+    # shared with tools/test-fault.sh so every dump path is symbolized).
+    "$REPO_ROOT/tools/regen-halls-symtab.sh" "$KERNEL_BUILD" "$verbose"
     echo "==> Kernel built: $KERNEL_BUILD/thylacine.elf"
     ledger "kernel ELF: BUILT ($build_type, hardening=$hardening_full, kaslr=$kaslr, sanitize='${sanitize_cmake:-none}')"
     ls -la "$KERNEL_BUILD/thylacine.elf"

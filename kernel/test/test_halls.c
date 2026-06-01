@@ -10,6 +10,7 @@
 #include "test.h"
 
 #include "../../arch/arm64/halls.h"
+#include "../../arch/arm64/halls_symtab.h"
 
 #include <thylacine/types.h>
 
@@ -21,6 +22,7 @@ void test_halls_link_addr_removes_slide(void);
 void test_halls_link_addr_underflow_guarded(void);
 void test_halls_frame_enter_leave_nesting(void);
 void test_halls_frame_is_live_gate(void);
+void test_halls_symbolize_table(void);
 
 // A plausible kernel-stack window for the gate tests.
 #define LO  0xffff000000010000ull
@@ -122,4 +124,49 @@ void test_halls_frame_is_live_gate(void) {
     TEST_ASSERT(!halls_frame_is_live(sp + 16u * 1024u + 16u, sp),
                 "just past the slack boundary -> stale");
     TEST_ASSERT(!halls_frame_is_live(sp + 0x100000, sp),   "1 MiB above (other stack) -> stale");
+}
+
+// HX-2: the symbolize binary search + boundary logic, over a synthetic table.
+// Pointer-equality on the returned name avoids needing strcmp in the test env.
+void test_halls_symbolize_table(void) {
+    static const char names[] = "alpha\0beta\0gamma";   // offs 0, 6, 11
+    static const struct halls_sym tab[] = {
+        { 0x010u, 0u },    // "alpha"
+        { 0x040u, 6u },    // "beta"
+        { 0x100u, 11u },   // "gamma"
+    };
+    const u64 base = 0xffffa00000080000ull;
+    u64 off = 0xdeadu;
+    const char *s;
+
+    // Exact hit at a symbol start -> offset 0.
+    s = halls_symbolize_table(tab, 3u, names, base, base + 0x010u, &off);
+    TEST_ASSERT(s == &names[0],          "exact alpha -> &names[0]");
+    TEST_EXPECT_EQ(off, 0u,              "exact alpha -> off 0");
+
+    // Inside a function -> greatest symbol <= query, nonzero offset.
+    s = halls_symbolize_table(tab, 3u, names, base, base + 0x05cu, &off);
+    TEST_ASSERT(s == &names[6],          "0x5c -> beta");
+    TEST_EXPECT_EQ(off, 0x1cu,           "0x5c -> beta+0x1c");
+
+    // Past the last symbol -> still the last (no upper bound at v1.0).
+    s = halls_symbolize_table(tab, 3u, names, base, base + 0x180u, &off);
+    TEST_ASSERT(s == &names[11],         "0x180 -> gamma");
+    TEST_EXPECT_EQ(off, 0x80u,           "0x180 -> gamma+0x80");
+
+    // >= base but below the first entry -> NULL.
+    s = halls_symbolize_table(tab, 3u, names, base, base + 0x008u, &off);
+    TEST_ASSERT(s == (const char *)0,    "below first symbol -> NULL");
+
+    // Below base (a non-slid datum, not a code addr) -> NULL.
+    s = halls_symbolize_table(tab, 3u, names, base, base - 1u, &off);
+    TEST_ASSERT(s == (const char *)0,    "below base -> NULL");
+
+    // count 0 (the stub / unsymbolized build) -> NULL.
+    s = halls_symbolize_table(tab, 0u, names, base, base + 0x040u, &off);
+    TEST_ASSERT(s == (const char *)0,    "count 0 -> NULL");
+
+    // Query whose offset overflows the u32 window -> NULL.
+    s = halls_symbolize_table(tab, 3u, names, base, base + 0x100000000ull, &off);
+    TEST_ASSERT(s == (const char *)0,    "offset > u32 -> NULL");
 }

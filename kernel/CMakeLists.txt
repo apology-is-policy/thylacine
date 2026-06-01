@@ -178,9 +178,26 @@ set(KERNEL_SRCS
     test/test_stub_driver.c
 )
 
+# HX-2: in-kernel symbol table (kallsyms-style). Generated PER-BUILD-DIR from
+# the linked ELF by tools/gen-halls-symtab.py (driven by tools/build.sh's
+# two-pass build) -- it is build-specific (the default + sanitizer builds have
+# different .text layouts), so it lives under the build dir, never the source
+# tree. The committed stub (count=0 -> halls_symbolize() returns NULL -> a
+# graceful HX-1 raw+link fallback) seeds the build-dir copy at first configure
+# so a bare cmake / IDE build still links + runs; build.sh then regenerates the
+# real table + re-links. The NOT-EXISTS guard keeps a re-configure from
+# clobbering the regenerated table.
+set(HALLS_SYMTAB_GEN ${CMAKE_BINARY_DIR}/generated/halls_symtab.c)
+if(NOT EXISTS ${HALLS_SYMTAB_GEN})
+    configure_file(
+        ${CMAKE_CURRENT_SOURCE_DIR}/../arch/arm64/halls_symtab.stub.c
+        ${HALLS_SYMTAB_GEN}
+        COPYONLY)
+endif()
+
 set(KERNEL_LD_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/../arch/arm64/kernel.ld)
 
-add_executable(thylacine.elf ${KERNEL_SRCS})
+add_executable(thylacine.elf ${KERNEL_SRCS} ${HALLS_SYMTAB_GEN})
 
 target_include_directories(thylacine.elf
     PRIVATE

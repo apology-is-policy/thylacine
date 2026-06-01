@@ -157,6 +157,7 @@ void test_halls_link_addr_removes_slide(void);
 void test_halls_link_addr_underflow_guarded(void);
 void test_halls_frame_enter_leave_nesting(void);
 void test_halls_frame_is_live_gate(void);
+void test_halls_symbolize_table(void);
 void test_vma_alloc_free_smoke(void);
 void test_vma_alloc_constraints(void);
 void test_vma_insert_lookup_smoke(void);
@@ -894,6 +895,7 @@ struct test_case g_tests[] = {
     { "halls.link_addr_underflow_guarded", test_halls_link_addr_underflow_guarded, false, NULL },
     { "halls.frame_enter_leave_nesting",   test_halls_frame_enter_leave_nesting,   false, NULL },
     { "halls.frame_is_live_gate",          test_halls_frame_is_live_gate,          false, NULL },
+    { "halls.symbolize_table",             test_halls_symbolize_table,             false, NULL },
     { "vma.alloc_free_smoke",          test_vma_alloc_free_smoke,          false, NULL },
     { "vma.alloc_constraints",         test_vma_alloc_constraints,         false, NULL },
     { "vma.insert_lookup_smoke",       test_vma_insert_lookup_smoke,       false, NULL },
