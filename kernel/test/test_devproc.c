@@ -489,7 +489,12 @@ void test_devproc_write_ctl_kill_dispatch(void) {
     // (b) DENIED: target owned by a different principal; caller holds no cap.
     struct Proc *other = proc_alloc();
     TEST_ASSERT(other != NULL, "alloc non-owned target");
-    other->principal_id = caller->principal_id + 1u;   // != caller (no wrap-to-self)
+    // A distinct, non-sentinel principal: guaranteed != caller by construction,
+    // and never PRINCIPAL_INVALID(0) / SYSTEM(0xFFFFFFFE) / NONE(0xFFFFFFFF).
+    // (A-4b audit F3: caller->principal_id + 1u could land on the PRINCIPAL_NONE
+    // sentinel when the harness caller is PRINCIPAL_SYSTEM.)
+    other->principal_id = (caller->principal_id == 0x0B0B0B0Bu) ? 0x0C0C0C0Cu
+                                                                : 0x0B0B0B0Bu;
     other->state        = PROC_STATE_ALIVE;
     proc_test_link(other);
     struct Spoor *nctl = open_ctl_for_pid(other->pid);

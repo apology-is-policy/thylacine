@@ -256,6 +256,14 @@ A `kill` of pid 0 is refused before the authority check — even a `CAP_KILL` ho
 
 The ctl kill authority is computed directly (owner OR `CAP_HOSTOWNER` OR `CAP_KILL`), NOT via `perm_check`. Routing through `perm_check` would fold in `CAP_DAC_OVERRIDE` (its A-4a DAC-override) and silently make every fs-admin a process-killer — defeating the A-4 capability split, which deliberately keeps fs-rwx admin orthogonal to process-kill (mirrors Linux `CAP_DAC_OVERRIDE` vs `CAP_KILL`). A future maintainer must not "simplify" the check to a `perm_check` call.
 
+### Owner-axis breadth at v1.0: SYSTEM-owns-SYSTEM (A-4b audit F1)
+
+The owner axis is `caller->principal_id == target->principal_id`. At v1.0 the *entire* boot chain (kproc → joey → corvus → stratumd → every spawned Proc) runs as `PRINCIPAL_SYSTEM` (no `/sbin/login` stamps distinct identities until A-5), so every SYSTEM-principal Proc is "owner" of every other. This is the correct consequence of the identity model (mirrors Linux: all root-owned procs can signal each other) and narrows naturally once A-5 stamps distinct login identities. It is dormant at v1.0 (devproc is unmounted; the surface is EL0-unreachable). **Forward-looking** (the future `/proc`-mount chunk): reconsider whether a *persistent* PID-1/init Proc should join `kproc` in the unconditional-unkillable guard — at v1.0 joey exits after bringup (no persistent init), and only `kproc` is structurally critical, so only `kproc` is guarded.
+
+### `devproc_stat_native` uses the lockless `proc_find_by_pid` window (A-4b audit F2)
+
+`stat_native` dereferences the bare pointer from `proc_find_by_pid` with no lock held — the documented v1.0 "no concurrent reap" window, the *same class* as `devproc_read` above. It is NOT on any authorization path: every `perm_check` site that consults `stat_native` is gated on `dev->perm_enforced`, and `devproc.perm_enforced == false`; stat_native serves only `SYS_FSTAT` introspection + `SEEK_END`. The KILL path does NOT use it (it resolves under `g_proc_table_lock` via `proc_for_each`). The general fix (deref inside a `proc_for_each` cb, as the kill path does) is the right shape if devproc ever gains concurrent reaping or perm-enforcement; tracks with the pre-existing `devproc_read` window.
+
 ### Reads on root or pid_dir return -1 at v1.0
 
 The Plan 9 idiom is "read on a directory returns synthesized 9P stat records (one per child entry)". v1.0 P4-C returns -1 — readdir lands when the 9P interpreter or in-kernel readdir helper lands. Tests pin -1; replacing it requires explicit code change.

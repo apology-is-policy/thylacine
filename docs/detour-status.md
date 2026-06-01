@@ -553,7 +553,7 @@ kill = BOTH the namespace `/proc/<pid>/ctl` surface AND a narrow elevation-only 
       carried v1.x (`wait_pid_for(pid)`), not an A-4a defect (the no-member model keeps it dormant).
       Matrix GREEN: default(smp4) + UBSan + smp8 all **668/668** + legate E2E OK + boot OK.
       `audit_a4a_closed_list.md`. **A-4a arc DONE.**
-- **A-4b** *(impl LANDED `<pending>`; scripture reconcile `17dcb77` + fix `585d519`; audit NEXT)* --
+- **A-4b** *(DONE -- impl `4edd65c`; scripture reconcile `17dcb77` + fix `585d519`; audit close `<pending>`)* --
   cross-process kill: `/proc/<pid>/ctl` write parses `kill`/`killgrp` -> `proc_group_terminate`
   (uniform, single + multi thread; the #811 wake-total primitive), under `g_proc_table_lock`
   via the `proc_for_each` resolve+authorize idiom (the audited `sys_postnote` pattern; no
@@ -569,7 +569,14 @@ kill = BOTH the namespace `/proc/<pid>/ctl` surface AND a narrow elevation-only 
   a Utopia namespace seam** (the `namec` multi-component mount-crossing resolver + a boot
   `SYS_MOUNT`), user-confirmed NOT in A-4b -- the mechanism + authority are kernel-unit-tested
   (4 devproc tests: predicate / stat_native / dispatch / rejects). Resolves ARCH OPEN Q 7.6.B.
-  Matrix: default + UBSan GREEN 671/671 (smp8 + the formal audit close the chunk).
+  **Audit R1 CLEAN** (Opus prosecutor a20761e4222353045 + an in-session self-audit;
+  **0 P0 / 0 P1 / 0 P2 / 3 P3**; I-26 / I-22 / I-1 all HELD): F3 (denied-test principal landed
+  on the PRINCIPAL_NONE sentinel) FIXED; F1 (SYSTEM-owns-SYSTEM owner breadth + joey/init not
+  guarded -- correct identity-model consequence, dormant: /proc unmounted + joey exits) +
+  F2 (stat_native lockless find -- same class as devproc_read, NOT on a security path:
+  perm_enforced=false) DEFERRED-with-justification to the /proc-mount chunk. Matrix:
+  default + UBSan + smp8 ALL **671/671** + boot OK + 0 EXTINCTION. Closed list:
+  `audit_a4b_closed_list.md`. **A-4b arc DONE.**
 - **A-4c** -- trusted path (vote: build the SAK now): **c-1** pull forward the kernel UART
   console RX path (RX IRQ + a console ring + a real blocking `devcons_read` + Ctrl-C -> note;
   Phase-4-G work, on the kernel UART Dev `dc='c'`, NOT the userspace virtio-input path);
