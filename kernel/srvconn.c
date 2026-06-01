@@ -543,6 +543,10 @@ long srvconn_client_recv(struct SrvConn *cn, u8 *buf, long n) {
             cn->client_timed_out = true;
             return -1;                       // corvus hung past the deadline
         }
+        // #811 (ARCH §8.8.1): death-interrupted -> Proc group-terminating;
+        // return so the Thread unwinds to its EL0-return die-check.
+        if (ts == TSLEEP_INTR)
+            return -1;
         // TSLEEP_AWOKEN — loop, re-check the channel under the lock.
     }
 }
@@ -614,6 +618,10 @@ long srvconn_server_recv_blocking(struct SrvConn *cn, u8 *buf, long n) {
             // Unreachable with deadline=0; defense in depth.
             return -1;
         }
+        // #811 (ARCH §8.8.1): death-interrupted -> Proc group-terminating;
+        // return so the Thread unwinds to its EL0-return die-check.
+        if (ts == TSLEEP_INTR)
+            return -1;
         // TSLEEP_AWOKEN — loop, re-check the channel under the lock.
     }
 }

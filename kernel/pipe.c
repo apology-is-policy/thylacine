@@ -295,7 +295,11 @@ static long devpipe_read(struct Spoor *c, void *buf, long n, s64 off) {
             return 0;       // EOF
         }
         spin_unlock(&r->lock);
-        sleep(&r->read_rendez, cond_can_read, r);
+        // #811 (ARCH §8.8.1): a death-interrupted sleep means the Proc is
+        // group-terminating -- return so the Thread unwinds to its EL0-return
+        // die-check (re-looping would re-register + re-INTR = livelock).
+        if (sleep(&r->read_rendez, cond_can_read, r) == SLEEP_INTR)
+            return -1;
         // Loop: re-check state with the lock held.
     }
 }
@@ -348,7 +352,10 @@ static long devpipe_write(struct Spoor *c, const void *buf, long n, s64 off) {
             return put;
         }
         spin_unlock(&r->lock);
-        sleep(&r->write_rendez, cond_can_write, r);
+        // #811 (ARCH §8.8.1): death-interrupted -> Proc group-terminating;
+        // return so the Thread unwinds to its EL0-return die-check.
+        if (sleep(&r->write_rendez, cond_can_write, r) == SLEEP_INTR)
+            return -1;
     }
 }
 

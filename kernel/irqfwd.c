@@ -306,8 +306,11 @@ u32 kobj_irq_wait(struct KObj_IRQ *k) {
         extinction("kobj_irq_wait of corrupted KObj_IRQ");
 
     // Block until pending_count > 0. sleep's cond loop guarantees no
-    // spurious return.
-    sleep(&k->rendez, kobj_irq_pending_cond, k);
+    // spurious return. #811 (ARCH §8.8.1): a death-interrupted sleep means the
+    // Proc is group-terminating -- return so the Thread unwinds to its EL0-
+    // return die-check (the count is immaterial; the Thread never reaches EL0).
+    if (sleep(&k->rendez, kobj_irq_pending_cond, k) == SLEEP_INTR)
+        return 0;
 
     // Re-take the lock to atomically read + zero pending_count. An IRQ
     // that fires between sleep's return and this read MUST NOT be lost

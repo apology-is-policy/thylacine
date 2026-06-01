@@ -14,6 +14,7 @@
 
 #include <thylacine/context.h>
 #include <thylacine/types.h>
+#include <thylacine/spinlock.h>
 
 struct Proc;
 struct Rendez;
@@ -220,10 +221,26 @@ struct Thread {
     // 16 bytes = NOTE_NAME_MAX. Avoids re-popping the queue at NOTED time
     // (which would race with another delivery / fd-read).
     char               note_handling_name[16];
+
+    // P6 #811 (death-interruptible sleep, ARCH 8.8.1): per-Thread wait-lock,
+    // the Plan 9 `p->rlock` analog. Protects this Thread's wait registration
+    // (`rendez_blocked_on` + its THREAD_SLEEPING transition). Only the OWNING
+    // Thread WRITES rendez_blocked_on (set at register, cleared on resume,
+    // both under this lock); a group-terminate cascade (proc_group_terminate)
+    // takes a peer's wait_lock to READ rendez_blocked_on and wake it, so the
+    // cascade-vs-register read/write is serialized (acquire/release on
+    // group_exit_msg alone loses the wakeup in the miss case). wait_lock is
+    // the OUTERMOST wait-lock: order wait_lock -> g_timerwait.lock -> r->lock,
+    // and it is NEVER held across sched() (a sleeper that held it would
+    // deadlock the cascade). Zero (KP_ZERO from the SLUB cache) == unlocked,
+    // so no explicit init is needed.
+    spin_lock_t        wait_lock;
 };
 
-_Static_assert(sizeof(struct Thread) == 1120,
-               "struct Thread size pinned at 1120 bytes. P6-pouch-signals-"
+_Static_assert(sizeof(struct Thread) == 1136,
+               "struct Thread size pinned at 1136 bytes (P6 #811 appended a "
+               "tail spin_lock_t wait_lock -- death-interruptible sleep, "
+               "ARCH 8.8.1; 1120 -> 1136 incl. tail padding). P6-pouch-signals-"
                "impl (sub-chunk 13a) appended note_mask + in_handler + the "
                "user-context save block (note_saved_regs[31] + sp_el0 + elr "
                "+ spsr) + note_handling_name[16] = 304 bytes after the 816-"

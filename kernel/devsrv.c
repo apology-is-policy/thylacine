@@ -501,7 +501,10 @@ struct SrvConn *srv_accept_blocking(struct SrvService *svc) {
         // tombstone). sleep re-checks accept_cond under the Rendez lock —
         // a wakeup between the unlock above and the sleep transition is
         // not lost (specs/scheduler.tla NoMissedWakeup).
-        sleep(&svc->accept_rendez, accept_cond_is_ready, svc);
+        // #811 (ARCH §8.8.1): death-interrupted -> Proc group-terminating;
+        // return so the Thread unwinds to its EL0-return die-check.
+        if (sleep(&svc->accept_rendez, accept_cond_is_ready, svc) == SLEEP_INTR)
+            return NULL;
     }
 }
 

@@ -64,7 +64,17 @@ static inline void rendez_init(struct Rendez *r) {
 //   - Caller is NOT in IRQ context; sleep() may yield indefinitely.
 //   - At most one thread may sleep on a given Rendez at a time
 //     (single-waiter convention). Extincts on second sleeper.
-void sleep(struct Rendez *r, int (*cond)(void *arg), void *arg);
+//
+// Returns SLEEP_OK when cond became true (the normal wake), or SLEEP_INTR
+// when the caller's Proc is group-terminating (ARCH §7.9.1 / §8.8.1, task
+// #811): the sleep was death-interrupted and the caller MUST unwind (release
+// locks, free transient state) and return -- the Thread then dies at its
+// EL0-return die-check (`el0_return_die_check`). The value the caller
+// ultimately returns to userspace is immaterial; a group-flagged Thread never
+// re-enters EL0. Callers that have nothing to unwind may ignore the return.
+#define SLEEP_OK     0   // cond satisfied -- normal return
+#define SLEEP_INTR   1   // group-terminate death-interrupt -- caller unwinds
+int sleep(struct Rendez *r, int (*cond)(void *arg), void *arg);
 
 // Wake the (at most one) thread sleeping on r. If no thread is
 // sleeping, wakeup is a no-op. Returns 1 if a waiter was woken,
@@ -87,6 +97,11 @@ int wakeup(struct Rendez *r);
 #define TSLEEP_AWOKEN     1     // cond became true (a wakeup, or cond
                                 //   already true at entry / on resume).
 #define TSLEEP_TIMEDOUT   0     // the deadline passed; cond never true.
+#define TSLEEP_INTR     (-1)    // group-terminate death-interrupt (ARCH §8.8.1,
+                                //   task #811): caller unwinds + returns; the
+                                //   Thread dies at its EL0-return die-check.
+                                //   Distinct from AWOKEN/TIMEDOUT so a caller's
+                                //   `== TSLEEP_TIMEDOUT` test never mistakes it.
 
 // sleep, bounded by an absolute deadline. Identical to sleep() except
 // the wait ALSO ends when monotonic time (timer_now_ns) reaches

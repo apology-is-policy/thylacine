@@ -887,66 +887,99 @@ static void wake_rendez_waiter(struct Rendez *r, struct Thread *t,
         __asm__ __volatile__("yield" ::: "memory");
     }
     r->waiter            = NULL;
-    t->rendez_blocked_on = NULL;
+    // P6 #811: do NOT clear t->rendez_blocked_on here. Only the OWNING Thread
+    // mutates it -- it is cleared on the owner's sleep/tsleep resume, under the
+    // owner's own wait_lock -- so the group-terminate cascade can read it
+    // lock-safely (under wait_lock). Clearing it here (under r->lock, not
+    // wait_lock) would race the cascade's read. The owner is still SLEEPING at
+    // this point, so rendez_blocked_on stays == r until it resumes and clears.
     t->sleep_timedout    = timed_out;
     t->state             = THREAD_RUNNABLE;
     ready(t);
 }
 
-void sleep(struct Rendez *r, int (*cond)(void *arg), void *arg) {
+int sleep(struct Rendez *r, int (*cond)(void *arg), void *arg) {
     if (!r)    extinction("sleep(NULL rendez)");
     if (!cond) extinction("sleep with NULL cond");
 
-    irq_state_t s = spin_lock_irqsave(&r->lock);
+    struct Thread *t = current_thread();
+    if (!t)                       extinction("sleep: no current thread");
+    if (t->magic != THREAD_MAGIC) extinction("sleep: corrupted current");
 
-    // Loop: re-check cond on each wakeup. Single-waiter UP: cond should
-    // be true after wakeup. The loop is robustness against future multi-
-    // waker / spurious-wake scenarios (Phase 5 poll/futex).
+    // P6 #811: wait_lock is the OUTERMOST wait-lock (ARCH §8.8.1) and carries
+    // the IRQ mask for the whole call (incl. the sched() yields). It is taken
+    // BEFORE r->lock so the group-terminate cascade -- which holds a peer's
+    // wait_lock while it reads rendez_blocked_on and wakeup()s the rendez --
+    // is serialized against this Thread's register-then-observe of
+    // group_exit_msg (the I-9 death-wake close).
+    irq_state_t s = spin_lock_irqsave(&t->wait_lock);
+    spin_lock(&r->lock);
+
+    int rc = SLEEP_OK;
+    // Loop: re-check cond on each wakeup. Single-waiter UP: cond should be true
+    // after a normal wakeup. The loop also absorbs spurious / cascade wakes.
     while (!cond(arg)) {
-        if (r->waiter) {
-            // Single-waiter discipline. A second sleeper indicates
-            // either a Rendez being reused incorrectly (caller error)
-            // or a multi-waiter use case that needs a wait queue.
+        if (r->waiter)
             extinction("sleep: rendez already has a waiter (single-waiter discipline)");
-        }
-
-        struct Thread *t = current_thread();
-        if (!t)                       extinction("sleep: no current thread");
-        if (t->magic != THREAD_MAGIC) extinction("sleep: corrupted current");
         if (t->state != THREAD_RUNNING)
             extinction("sleep: current is not RUNNING");
         if (t->rendez_blocked_on)
             extinction("sleep: current already blocked on a rendez");
 
-        // Atomic under r->lock: enqueue + state transition. Any wakeup
-        // that fires after the unlock below sees waiter == t and walks
-        // the protocol correctly.
-        r->waiter = t;
+        // Register under wait_lock + r->lock: enqueue + state transition. Any
+        // wakeup after the unlock below sees waiter == t and walks correctly.
+        r->waiter            = t;
         t->rendez_blocked_on = r;
-        t->state = THREAD_SLEEPING;
+        t->state             = THREAD_SLEEPING;
 
-        // Drop the rendez spinlock (the IRQ mask remains via the
-        // outer irqsave — we're about to call sched, which may
-        // observe a pending IRQ as a wakeup notification on
-        // resumption; the mask spans the entire sleep call). sched()
-        // sees state == SLEEPING and refrains from re-inserting prev
-        // into the run tree. On SMP this window (between unlock and
-        // sched) is the canonical wait/wake race that P2-C closes
-        // with the finish_task_switch pattern.
+        // Register-then-observe (I-9 death-wake close, ARCH §8.8.1): re-check
+        // the Proc's group_exit_msg UNDER wait_lock -- the same lock the
+        // cascade (proc_group_terminate) takes per peer. If set: either we
+        // registered before the cascade's walk (it finds + wakes us), or the
+        // flag-set happens-before our wait_lock acquire (so this acquire-load
+        // observes it). Either way we must NOT sleep through the group exit:
+        // undo the registration and return SLEEP_INTR -- the caller unwinds and
+        // the Thread dies at its EL0-return die-check. kproc never group-
+        // terminates, so its kernel threads never take this branch.
+        if (t->proc &&
+            __atomic_load_n(&t->proc->group_exit_msg, __ATOMIC_ACQUIRE) != NULL) {
+            r->waiter            = NULL;
+            t->rendez_blocked_on = NULL;
+            t->state             = THREAD_RUNNING;
+            rc = SLEEP_INTR;
+            break;
+        }
+
+        // Drop BOTH locks before sched() (the IRQ mask stays via the wait_lock
+        // irqsave). wait_lock MUST NOT be held across sched() -- a descheduled
+        // sleeper holding it would deadlock the cascade. sched() sees state ==
+        // SLEEPING and keeps t out of the run tree; the unlock..sched window is
+        // the canonical wait/wake race closed by the on_cpu finish-task-switch.
         spin_unlock(&r->lock);
+        spin_unlock(&t->wait_lock);
 
         sched();
 
-        // Resumption point: a wakeup transitioned us back to RUNNABLE
-        // under r->lock; ready() inserted us in the run tree;
-        // pick_next pulled us out and set us RUNNING. Reacquire the
-        // lock to re-evaluate cond. If cond is still false (multi-
-        // waker scenarios — none at v1.0 P2-Bb but plausible later),
-        // loop and sleep again.
+        // Resumed: a normal wakeup, a timeout, or the cascade transitioned us
+        // RUNNABLE -> RUNNING. wake_rendez_waiter no longer clears
+        // rendez_blocked_on (only the owner does), so clear it here under
+        // wait_lock before re-evaluating cond. Re-acquire wait_lock then r->lock.
+        spin_lock(&t->wait_lock);
+        t->rendez_blocked_on = NULL;
         spin_lock(&r->lock);
+
+        // Woken by the cascade? Return INTR rather than looping (the next
+        // register-then-observe would catch it anyway -- this is the prompt path).
+        if (t->proc &&
+            __atomic_load_n(&t->proc->group_exit_msg, __ATOMIC_ACQUIRE) != NULL) {
+            rc = SLEEP_INTR;
+            break;
+        }
     }
 
-    spin_unlock_irqrestore(&r->lock, s);
+    spin_unlock(&r->lock);
+    spin_unlock_irqrestore(&t->wait_lock, s);
+    return rc;
 }
 
 // P5-tsleep: sleep bounded by an absolute deadline. See rendez.h for the
@@ -963,25 +996,28 @@ int tsleep(struct Rendez *r, int (*cond)(void *arg), void *arg,
     if (!r)    extinction("tsleep(NULL rendez)");
     if (!cond) extinction("tsleep with NULL cond");
 
-    // No deadline: tsleep degrades to plain sleep (ARCH §8.8). sleep is
-    // the spec-proven path (scheduler.tla NoMissedWakeup); route through
-    // it rather than re-deriving the wait loop.
+    // No deadline: tsleep degrades to plain sleep (ARCH §8.8). sleep is the
+    // spec-proven path (scheduler.tla NoMissedWakeup); route through it. Map
+    // sleep's death-interrupt (SLEEP_INTR) onto TSLEEP_INTR; otherwise AWOKEN.
     if (deadline_ns == 0) {
-        sleep(r, cond, arg);
-        return TSLEEP_AWOKEN;
+        return (sleep(r, cond, arg) == SLEEP_INTR) ? TSLEEP_INTR : TSLEEP_AWOKEN;
     }
 
     u64 deadline_cnt = timer_ns_to_counter(deadline_ns);
 
-    // g_timerwait.lock is the OUTER lock; r->lock nests inside. The
-    // irqsave on the outer lock carries the IRQ mask across the whole
-    // call including the sched() yields — mirrors sleep()'s discipline.
-    irq_state_t s = spin_lock_irqsave(&g_timerwait.lock);
-    spin_lock(&r->lock);
-
     struct Thread *t = current_thread();
     if (!t)                       extinction("tsleep: no current thread");
     if (t->magic != THREAD_MAGIC) extinction("tsleep: corrupted current");
+
+    // P6 #811: wait_lock is the OUTERMOST wait-lock (ARCH §8.8.1), then
+    // g_timerwait.lock, then r->lock. The irqsave on wait_lock carries the IRQ
+    // mask across the whole call (incl. the sched() yields). wait_lock taken
+    // before g_timerwait/r->lock so the cascade's per-peer wait_lock walk is
+    // serialized against this Thread's register-then-observe.
+    irq_state_t s = spin_lock_irqsave(&t->wait_lock);
+    spin_lock(&g_timerwait.lock);
+    spin_lock(&r->lock);
+
     if (t->state != THREAD_RUNNING)
         extinction("tsleep: current is not RUNNING");
     if (t->rendez_blocked_on)
@@ -992,14 +1028,12 @@ int tsleep(struct Rendez *r, int (*cond)(void *arg), void *arg,
 
     int ret;
     for (;;) {
-        // cond has precedence — tsleep.tla's correct Commit checks cond
-        // first, so a wait satisfied at (or past) the deadline still
-        // reports AWOKEN.
+        // cond has precedence — tsleep.tla's correct Commit checks cond first,
+        // so a wait satisfied at (or past) the deadline still reports AWOKEN.
         if (cond(arg)) { ret = TSLEEP_AWOKEN; break; }
 
-        // Timed out: the tick scan flagged us (sleep_timedout), or the
-        // deadline already lay in the past at this (re-)evaluation.
-        // cond is false above, so the wait genuinely timed out.
+        // Timed out: the tick scan flagged us (sleep_timedout), or the deadline
+        // already lay in the past at this (re-)evaluation.
         if (t->sleep_timedout || timer_get_counter() >= deadline_cnt) {
             ret = TSLEEP_TIMEDOUT;
             break;
@@ -1010,29 +1044,57 @@ int tsleep(struct Rendez *r, int (*cond)(void *arg), void *arg,
         if (timerwait_is_linked(t))
             extinction("tsleep: current already on the timer-wait list");
 
-        // Atomic under g_timerwait.lock + r->lock: enqueue on the Rendez
-        // AND the timer-wait list, then transition to SLEEPING.
+        // Atomic under wait_lock + g_timerwait.lock + r->lock: enqueue on the
+        // Rendez AND the timer-wait list, then transition to SLEEPING.
         r->waiter            = t;
         t->rendez_blocked_on = r;
         t->sleep_deadline    = deadline_cnt;
         timerwait_link(t);
         t->state             = THREAD_SLEEPING;
 
-        // Drop both locks (the IRQ mask stays — outer irqsave). sched()
-        // sees SLEEPING and keeps t out of the run tree; wakeup() or the
-        // tick scan transitions t back, eagerly unlinking it.
+        // Register-then-observe (I-9 death-wake close, ARCH §8.8.1): identical
+        // to sleep(). Set => undo the FULL registration (rendez + timer-wait)
+        // and return TSLEEP_INTR; the caller unwinds + the Thread dies at its
+        // EL0-return die-check.
+        if (t->proc &&
+            __atomic_load_n(&t->proc->group_exit_msg, __ATOMIC_ACQUIRE) != NULL) {
+            r->waiter            = NULL;
+            t->rendez_blocked_on = NULL;
+            timerwait_unlink(t);
+            t->state             = THREAD_RUNNING;
+            ret = TSLEEP_INTR;
+            break;
+        }
+
+        // Drop all three locks (the IRQ mask stays via the wait_lock irqsave).
+        // sched() sees SLEEPING and keeps t out of the run tree; wakeup() / the
+        // tick scan / the cascade transition t back, eagerly unlinking it from
+        // the timer-wait list.
         spin_unlock(&r->lock);
         spin_unlock(&g_timerwait.lock);
+        spin_unlock(&t->wait_lock);
 
         sched();
 
-        // Resumed: re-acquire both locks in order, re-evaluate.
+        // Resumed: clear rendez_blocked_on under wait_lock (the owner clears,
+        // not wake_rendez_waiter; t is already unlinked from the timer-wait
+        // list by whoever woke it), then re-acquire in order and re-evaluate.
+        spin_lock(&t->wait_lock);
+        t->rendez_blocked_on = NULL;
         spin_lock(&g_timerwait.lock);
         spin_lock(&r->lock);
+
+        // Woken by the cascade? Return INTR (prompt path).
+        if (t->proc &&
+            __atomic_load_n(&t->proc->group_exit_msg, __ATOMIC_ACQUIRE) != NULL) {
+            ret = TSLEEP_INTR;
+            break;
+        }
     }
 
     spin_unlock(&r->lock);
-    spin_unlock_irqrestore(&g_timerwait.lock, s);
+    spin_unlock(&g_timerwait.lock);
+    spin_unlock_irqrestore(&t->wait_lock, s);
     return ret;
 }
 

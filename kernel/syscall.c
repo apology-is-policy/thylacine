@@ -90,7 +90,14 @@ static void sys_exit_group_handler(u64 status) {
     struct Proc   *p = (t && t->magic == THREAD_MAGIC) ? t->proc : NULL;
     const char *msg = (status == 0) ? "ok" : "fail";
     if (p && p->magic == PROC_MAGIC) {
+        // proc_group_terminate's universal death-wake walks p->threads, which
+        // requires g_proc_table_lock (#811, ARCH §8.8.1). Acquire it around the
+        // call and RELEASE before thread_exit_self -- thread_exit_self
+        // re-acquires it for the last-out ZOMBIE transition (spinlocks are not
+        // recursive).
+        irq_state_t s = proc_table_lock_acquire();
         proc_group_terminate(p, msg);
+        proc_table_lock_release(s);
     }
     // Exit the caller (a Thread of p). thread_exit_self validates current /
     // proc state + extincts on kproc / corruption, mirroring sys_exits_handler.
@@ -2487,20 +2494,24 @@ static s64 sys_postnote_handler(u64 pid_raw, u64 name_va, u64 name_len_raw) {
     //
     // SYS_EXIT_GROUP / kill cross-thread shootdown (ARCH §7.9.1, I-24): a
     // multi-thread self-kill cascades the whole Proc instead of being refused
-    // (the prior `kill -> -EIO`, 13b R1-F9). proc_group_terminate is called
-    // AFTER releasing proc_table_lock (it takes only lower-order locks; self
-    // cannot be reaped while running); the caller returns success + self-exits
-    // at its own EL0-return die-check before userspace resumes. A single-thread
-    // self-post falls through to the note post below (unchanged).
+    // (the prior `kill -> -EIO`, 13b R1-F9). proc_group_terminate's universal
+    // death-wake walks p->threads and so MUST run UNDER g_proc_table_lock
+    // (#811, ARCH §8.8.1) -- the count AND the cascade run in the SAME lock
+    // acquisition (previously the lock was dropped before the cascade; that is
+    // now a contract violation). self cannot be reaped while running here; the
+    // caller returns success + self-exits at its own EL0-return die-check
+    // before userspace resumes. A single-thread self-post falls through to the
+    // note post below (unchanged).
     if (target_pid == p->pid || pid_raw == 0) {
         if (notes_name_is_kill(buf)) {
             irq_state_t s = proc_table_lock_acquire();
             int live_threads = proc_count_live_peers_locked(p, NULL);
-            proc_table_lock_release(s);
             if (live_threads > 1) {
                 proc_group_terminate(p, "killed");
+                proc_table_lock_release(s);
                 return 0;
             }
+            proc_table_lock_release(s);
         }
         int rc = notes_post(p, buf, 0u, p, false);
         return (rc == 0) ? 0 : (s64)-1;

@@ -45,6 +45,7 @@ void test_sched_notify_idle_peer_smoke(void);
 void test_sched_notify_disabled_no_ipi(void);
 void test_rendez_sleep_immediate_cond_true(void);
 void test_rendez_basic_handoff(void);
+void test_rendez_death_interrupts_sleep(void);
 void test_rendez_wakeup_no_waiter(void);
 void test_tsleep_fast_path_cond_true(void);
 void test_tsleep_no_deadline_degrades(void);
@@ -707,6 +708,7 @@ struct test_case g_tests[] = {
                                        test_rendez_sleep_immediate_cond_true,
                                                                            false, NULL },
     { "rendez.basic_handoff",          test_rendez_basic_handoff,          false, NULL },
+    { "rendez.death_interrupts_sleep", test_rendez_death_interrupts_sleep, false, NULL },
     { "rendez.wakeup_no_waiter",       test_rendez_wakeup_no_waiter,       false, NULL },
     { "tsleep.fast_path_cond_true",
                                        test_tsleep_fast_path_cond_true,

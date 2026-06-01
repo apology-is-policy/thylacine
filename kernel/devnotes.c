@@ -176,13 +176,22 @@ static long devnotes_read(struct Spoor *c, void *buf, long n, s64 off) {
         // tsleep on the private Rendez until pw.ready is set by a
         // producer's poll_waiter_list_wake (which sets pw.ready under
         // list lock then wakes pw.rendez).
-        (void)tsleep(&priv, devnotes_read_cond, &pw, 0u);
+        int ts = tsleep(&priv, devnotes_read_cond, &pw, 0u);
 
         // Unregister; loop and re-attempt dequeue. Spurious wakes
         // (e.g., another consumer drained the queue between our wake
         // and our re-acquire) are absorbed by the loop — devnotes_read
         // doesn't return -1 on empty-after-wake.
         poll_waiter_list_unregister(&pw);
+
+        // #811 (ARCH §8.8.1): death-interrupted -> the Proc is group-
+        // terminating. pw is now unregistered (above), so it is safe to
+        // return -- the Thread unwinds to its EL0-return die-check. Returning
+        // AFTER the unregister is load-bearing: pw is stack-allocated and was
+        // listed on the queue's poll_list; leaving it listed would dangle.
+        // Do NOT loop (re-tsleep would re-INTR = livelock).
+        if (ts == TSLEEP_INTR)
+            return -1;
     }
 }
 

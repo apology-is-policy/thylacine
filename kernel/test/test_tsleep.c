@@ -180,8 +180,11 @@ void test_tsleep_woken_before_deadline(void) {
         "consumer must be RUNNABLE after wakeup");
     TEST_ASSERT(g_tsl_rendez.waiter == NULL,
         "rendez waiter must be cleared after wakeup");
-    TEST_ASSERT(consumer->rendez_blocked_on == NULL,
-        "consumer rendez backref must be cleared after wakeup");
+    // #811 (ARCH §8.8.1): the waker no longer clears rendez_blocked_on; the
+    // owner clears it on its tsleep-resume under wait_lock. Until the consumer
+    // resumes (the sched() below) its backref still points at the rendez.
+    TEST_ASSERT(consumer->rendez_blocked_on == &g_tsl_rendez,
+        "consumer rendez backref persists until the owner resumes (#811)");
 
     // Yield: consumer resumes inside tsleep, re-checks cond (now true),
     // returns TSLEEP_AWOKEN, increments to 2, parks.
@@ -191,6 +194,9 @@ void test_tsleep_woken_before_deadline(void) {
         "consumer must have run again post-wake");
     TEST_EXPECT_EQ(g_tsl_ret, TSLEEP_AWOKEN,
         "tsleep must return TSLEEP_AWOKEN — cond met before the deadline");
+    // #811: the owner cleared its backref on its tsleep-resume.
+    TEST_ASSERT(consumer->rendez_blocked_on == NULL,
+        "consumer rendez backref cleared on the owner's tsleep-resume (#811)");
 
     thread_free(consumer);
     TEST_EXPECT_EQ(sched_runnable_count(), 0u,

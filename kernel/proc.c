@@ -1102,8 +1102,18 @@ void exits(const char *msg) {
     // restricted — only that none is live.
     int live_peers = proc_count_live_peers_locked(p, t);
     if (live_peers != 0) {
+        // #811 (ARCH §8.8.1, closes #809-audit F4): a whole-Proc exits() with
+        // live peers is no longer a kernel extinction. Route through the SAME
+        // universal cascade as exit_group -- flag + wake every sleeping peer +
+        // IPI-kick running peers (under the lock proc_group_terminate now
+        // requires) -- then self-exit. Each peer dies at its EL0-return
+        // die-check; the last Thread out reaps the Proc with this msg's status
+        // (thread_exit_self reads the recorded group_exit_msg). A well-formed
+        // multi-thread program joins its peers first and never reaches here.
+        proc_group_terminate(p, msg);
         spin_unlock_irqrestore(&g_proc_table_lock, s);
-        extinction("exits with live peer threads (caller must join all spawned threads)");
+        thread_exit_self();
+        extinction("exits: thread_exit_self returned after group terminate");
     }
 
     int status = (msg && msg[0] == 'o' && msg[1] == 'k' && msg[2] == 0) ? 0 : 1;
@@ -1226,9 +1236,19 @@ void thread_exit_self(void) {
 // ITSELF at its next EL0-return die-check (el0_return_die_check). No Thread is
 // force-torn-down from outside; the IPI is a latency accelerant, not a
 // synchronous stop. See proc.h for the contract + ARCH §7.9.1 for the design.
+//
+// CONTRACT: the caller MUST hold g_proc_table_lock. The universal death-wake
+// (#811, ARCH §8.8.1) walks p->threads, and that list is mutated (peers
+// self-remove on exit) only under g_proc_table_lock -- a lockless walk would
+// race a concurrent thread_free into a use-after-free. All callers comply: the
+// kill walk_cb runs under proc_for_each's lock; sys_exit_group_handler and
+// exits() acquire it around this call. Holding it also serializes every
+// group-termination, so the CAS below only guards idempotency for a serialized
+// second caller (exit_group racing a kill).
 
 void proc_group_terminate(struct Proc *p, const char *msg) {
     if (!p || p->magic != PROC_MAGIC) return;   // fail-safe; caller validates
+    if (p == g_kproc) return;   // #809 P3a: kproc runs at EL1 + never group-exits
     if (!msg) msg = "killed";
 
     // Flag the Proc for group termination. Set-once via CAS: the first
@@ -1244,10 +1264,36 @@ void proc_group_terminate(struct Proc *p, const char *msg) {
     // its EL0-return die-check. MUST run AFTER the flag set: a peer that
     // registers in torpor_wait after this walk re-observes the now-set flag in
     // torpor_wait's post-register check (register-then-observe; I-9). The
-    // torpor lock-order is strictly below g_proc_table_lock, so this is sound
-    // whether or not the caller holds g_proc_table_lock (the kill walk_cb does;
-    // SYS_EXIT_GROUP on self does not).
+    // torpor lock-order (torpor_lock) is strictly below g_proc_table_lock, so
+    // this composes under the lock the contract now requires.
     torpor_wake_all_for_proc(p);
+
+    // Universal death-wake (#811, ARCH §8.8.1): wake EVERY peer blocked in a
+    // sleep()/tsleep() rendez sleep so it returns *_INTR and dies at its EL0-
+    // return die-check -- closing the §7.9.1 residual where an indefinite
+    // poll(-1) / pipe / devnotes_read sleeper was never woken and its Proc was
+    // never reaped (the #809-audit F1 hang). The only record of "Thread T
+    // sleeps on Rendez R" is the reverse pointer t->rendez_blocked_on: read it
+    // under the peer's wait_lock -- the SAME lock the sleeper's register-then-
+    // observe takes, which is the I-9 serialization -- and wakeup() the Rendez.
+    //
+    // wait_lock is HELD ACROSS wakeup (Option A, ARCH §8.8.1): it pins the peer
+    // so a torpor waiter's STACK-allocated w.rendez (rendez_blocked_on can
+    // point into a sleeping peer's kernel stack frame) cannot be popped out
+    // from under the waker. rendez_blocked_on is non-NULL exactly while the
+    // owner is registered-and-sleeping (set/cleared only by the owner, under
+    // wait_lock); a RUNNING peer reads NULL and is skipped (it reaches its own
+    // die-check). wakeup() re-validates r->waiter under r->lock, so a peer
+    // already woken on its normal path (or by torpor_wake_all above) is a safe
+    // no-op. Lock order: g_proc_table_lock -> wait_lock -> (wakeup:
+    // g_timerwait.lock -> r->lock); acyclic (only the owner WRITES
+    // rendez_blocked_on; the cascade only READS it, under wait_lock).
+    for (struct Thread *peer = p->threads; peer; peer = peer->next_in_proc) {
+        irq_state_t ws = spin_lock_irqsave(&peer->wait_lock);
+        struct Rendez *r = peer->rendez_blocked_on;
+        if (r) wakeup(r);
+        spin_unlock_irqrestore(&peer->wait_lock, ws);
+    }
 
     // Kick any peer RUNNING in userspace on another CPU so it traps + hits its
     // IRQ-from-EL0 die-check without waiting for a timer tick (Linux
@@ -1414,7 +1460,12 @@ int wait_pid(int *status_out) {
         // sleep is atomic with the cond check (see scheduler.tla
         // NoMissedWakeup proof).
         spin_unlock_irqrestore(&g_proc_table_lock, s);
-        sleep(&p->child_done, wait_pid_cond, p);
+        // #811 (ARCH §8.8.1): a death-interrupted sleep means THIS Proc is
+        // group-terminating (a peer / kill flagged it while we waited on a
+        // child). Return so the waiting Thread unwinds to its EL0-return
+        // die-check; do NOT loop (re-sleep would re-INTR = livelock).
+        if (sleep(&p->child_done, wait_pid_cond, p) == SLEEP_INTR)
+            return -1;
     }
 }
 

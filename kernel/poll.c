@@ -274,7 +274,17 @@ s64 sys_poll_for_proc(struct Proc *p, struct pollfd *kfds, u64 nfds,
 
     __atomic_fetch_add(&g_poll_slept, 1u, __ATOMIC_RELAXED);
     struct poll_cond_arg cond_arg = { .waiters = waiters, .nfds = nfds };
-    (void)tsleep(&r, poll_cond_any_flagged, &cond_arg, deadline_ns);
+    int ts = tsleep(&r, poll_cond_any_flagged, &cond_arg, deadline_ns);
+
+    // #811 (ARCH §8.8.1): death-interrupted -> the Proc is group-terminating.
+    // Skip the re-sample (the Thread dies at its EL0-return die-check; the
+    // result is immaterial) and fall to the unregister sweep, which is
+    // REQUIRED -- waiters[] are stack-allocated and still listed on each fd's
+    // poll_list; returning without unregistering would dangle them.
+    if (ts == TSLEEP_INTR) {
+        ready_count = 0;
+        goto unregister_and_return;
+    }
 
     // Post-wake re-sample: tsleep returned either TSLEEP_AWOKEN (some
     // pw->ready was set) or TSLEEP_TIMEDOUT (deadline lapsed with no
