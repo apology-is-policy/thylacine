@@ -147,9 +147,14 @@ the rest -- no peek-then-redeem TOCTOU.
                          the ROOT flag -> they are scope MEMBERS
                                                        |
                                     EVAPORATION (either trigger):
-   trigger 1  root exits      -> exits() (lock held) proc_for_each_walk:
-                                  group-terminate every member (except = root);
-                                  root exits via its normal path
+   trigger 1  root DIES       -> proc_become_zombie_locked (lock held) ->
+                                  proc_legate_teardown_if_root: proc_for_each_walk
+                                  group-terminates every member (except = root).
+                                  Fires from the shared ZOMBIE chokepoint, so it
+                                  covers EVERY root death path -- a clean exit AND
+                                  a kill / group-terminate / SYS_EXIT_GROUP death
+                                  (A-4a audit F1), not only exits(). The root dies
+                                  via the surrounding zombie transition.
    trigger 2  valid_until past -> el0_return_die_check (lockless) proc_for_each:
                                   group-terminate every member INCLUDING self
                                   (except = NULL); self then self-terminates at
@@ -256,11 +261,14 @@ v1.0 model below): a scope-MEMBER teardown E2E is v1.x (see the caveat below).
 
 ## Known caveats / footguns
 
-- **`valid_for_ns` overflow is fail-safe.** `legate_valid_until = now +
-  valid_for_ns`; a near-`U64_MAX` `valid_for_ns` wraps to a small value, which
-  reads as already-expired -> the legate is torn down at its next EL0 tail.
-  Fail-safe (revokes early, never grants-forever). corvus is trusted not to pass
-  garbage; the wrap is a backstop.
+- **`valid_for_ns` deadline is saturating (A-4a audit F3).** `legate_valid_until`
+  is computed with a saturating add: `valid_for == 0 -> 0` (no time bound);
+  `now + valid_for` would overflow `-> ~0` ("never expires by time," still
+  scope-bounded by the root's exit); else `now + valid_for`. The clamp removes the
+  pathological wrap-to-exactly-`0` case (which would have silently aliased the `0`
+  "no time bound" sentinel, degrading a nonzero request into an unbounded window).
+  Fail-safe either way; corvus is trusted not to pass garbage -- the clamp is a
+  backstop, not a security boundary.
 - **Blocked-root expiry latency.** `valid_until` is checked at the EL0-return
   tail. If the root is blocked in a long kernel sleep when its deadline passes,
   the expiry is not detected until it (or any active scope member) next returns
@@ -272,6 +280,16 @@ v1.0 model below): a scope-MEMBER teardown E2E is v1.x (see the caveat below).
   the v1.0 model above), so this is a tidiness gap, not an I-25 violation. A
   strict whole-subtree close (an `rfork`-under-lock parent-flag check) is a
   documented v1.x refinement.
+- **Double-redeem orphans the first scope (A-4a audit F2; v1.x).** `proc_become_-
+  legate` unconditionally allocates a fresh `legate_scope_id`, so a Proc that
+  redeems a *second* clearance grant overwrites its scope tag -- members of its
+  first scope (if any) no longer match the root's teardown walk. The orphaned
+  members are UNELEVATED (rfork-stripped), so this is a tidiness gap, not an I-25
+  privilege violation; and it is UNREACHABLE at v1.0 (the prover redeems once, and
+  a no-member legate has nothing to orphan). The merge-vs-reject semantics (reject
+  the second redeem, or merge into the existing scope) are a deliberate design
+  choice deferred to the member-bearing v1.x work (the same chunk that lifts
+  fork-grantable clearance caps + the kproc orphan-reaper below).
 - **Member teardown vs the kproc orphan-reaper (v1.x).** When a legate root with
   a LIVE scope member exits, the teardown correctly group-terminates the member;
   the member then zombies and reparents up to the boot init (`kproc`). At v1.0

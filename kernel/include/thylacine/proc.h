@@ -357,16 +357,19 @@ struct Proc {
     //   legate_valid_until -- ns deadline (0 = none); copied from the
     //     grant, inherited across rfork. On `now > legate_valid_until`
     //     (checked at the EL0-return tail) the whole scope is torn down.
-    // PROC_FLAG_LEGATE_ROOT (proc_flags) marks the redeeming Proc; on its
-    // exit the scope is to be torn down (proc_group_terminate each member).
-    // The flag is NOT propagated by rfork (proc_flags never are), so a
+    // PROC_FLAG_LEGATE_ROOT (proc_flags) marks the redeeming Proc; when it
+    // DIES the scope is torn down (proc_group_terminate each member). The
+    // teardown fires from proc_become_zombie_locked -- the shared ZOMBIE
+    // chokepoint -- so it covers EVERY death path (a clean exit AND a kill /
+    // group-terminate / SYS_EXIT_GROUP death), not only exits() (A-4a audit
+    // F1). The flag is NOT propagated by rfork (proc_flags never are), so a
     // child is a scope MEMBER, never a second root. Evaporation = scope
     // teardown (reuses the #809/#811 cascade): no elevated Proc outlives
     // the scope. A-4a-2a lands these fields + the rfork-inherit + the
     // membership tag; the devcap redeem that SETS them (creates a legate)
-    // and the teardown triggers (exits() root-exit + the EL0-tail
-    // valid_until expiry) land together in A-4a-2b -- so a legate never
-    // exists without its teardown (I-25 holds at every commit).
+    // and the teardown triggers (the zombie-chokepoint root death + the
+    // EL0-tail valid_until expiry) land together in A-4a-2b -- so a legate
+    // never exists without its teardown (I-25 holds at every commit).
     u32                legate_session_id;
     u32                legate_scope_id;
     u64                legate_valid_until;
@@ -379,8 +382,9 @@ struct Proc {
 #define PROC_FLAG_MAY_POST_SERVICE  (1u << 4)
 // A-4a: marks the legate ROOT -- the Proc that redeemed a `cap`-device
 // clearance grant. Set at redeem; one-way; NOT propagated by rfork (no
-// proc_flag is). On the root's exit, exits() will tear down its scope
-// (the redeem that sets it + the teardown land in A-4a-2b). I-25.
+// proc_flag is). When the root DIES, proc_become_zombie_locked tears down
+// its scope on every death path (clean exit AND kill / group-terminate;
+// A-4a audit F1). I-25.
 #define PROC_FLAG_LEGATE_ROOT       (1u << 5)
 
 _Static_assert(sizeof(struct Proc) == 264,
@@ -770,6 +774,13 @@ void proc_apply_identity(struct Proc *p, u32 principal_id, u32 primary_gid,
 // lands in the same chunk so a legate never exists without its teardown (I-25).
 void proc_become_legate(struct Proc *p, u64 caps_to_or, u32 session_id,
                         u64 valid_until);
+
+// proc_legate_teardown_if_root — if `p` is a legate ROOT, group-terminate every
+// OTHER Proc in its legate_scope_id (I-25). Called from proc_become_zombie_locked
+// (the shared ZOMBIE chokepoint) so the sweep fires on EVERY root death path
+// (clean exit AND kill / group-terminate; A-4a audit F1). A non-root Proc is a
+// no-op. PRECONDITION: caller holds g_proc_table_lock (uses the LOCKED walk).
+void proc_legate_teardown_if_root(struct Proc *p);
 
 // =============================================================================
 // P5-corvus-srv-impl-a2: the /srv service-registry post-gate.

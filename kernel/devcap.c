@@ -286,8 +286,16 @@ long cap_redeem_grant_for_writer(struct Proc *writer, caps_t cap_mask) {
 
         // The legate window opens NOW -- when the caps actually land -- not at
         // grant-register time, so a slow redeem doesn't shorten the window and
-        // there is no userspace/kernel clock-domain dependency.
-        u64 valid_until = (valid_for == 0) ? 0 : now + valid_for;
+        // there is no userspace/kernel clock-domain dependency. Saturating add
+        // (A-4a audit F3): a valid_for so large that now + valid_for would wrap
+        // is clamped to ~0 ("never expires by time"; still scope-bounded by the
+        // root's exit) rather than wrapping to a small deadline -- or, in the
+        // pathological wrap-to-exactly-0 case, silently aliasing the 0 sentinel
+        // that means "no time bound." Fail-safe either way; the clamp removes the
+        // alias so a nonzero request never degrades into an unbounded window.
+        u64 valid_until = (valid_for == 0)                ? 0
+                        : (valid_for > (~0ull - now))     ? ~0ull
+                        : now + valid_for;
         proc_become_legate(writer, to_or, session, valid_until);
         return (long)CAP_USE_WRITE_LEN;
     }

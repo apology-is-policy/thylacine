@@ -934,6 +934,26 @@ static int legate_teardown_cb(struct Proc *m, void *arg) {
     return 0;   // visit every Proc
 }
 
+// proc_legate_teardown_if_root -- if `p` is a legate ROOT, group-terminate every
+// OTHER Proc carrying its legate_scope_id (the scripture-mandated subtree sweep,
+// I-25). Called from proc_become_zombie_locked -- the SINGLE chokepoint every
+// LIVE Proc's ZOMBIE transition passes through (exits() AND thread_exit_self) --
+// so the sweep fires on EVERY root death path: a clean exit AND a kill /
+// group-terminate / SYS_EXIT_GROUP death (A-4a audit F1; the path A-4b's CAP_KILL
+// drives). `except = p`: the root dies via the surrounding zombie transition. A
+// non-root Proc (a scope MEMBER -- scope_id set, no ROOT flag) is a no-op: only
+// the root sweeps its scope, so a member's own death never tears down the group.
+// PRECONDITION: caller holds g_proc_table_lock (uses the LOCKED proc_for_each_walk;
+// proc_for_each would re-take it -> deadlock). The flag read pairs (ACQUIRE) with
+// proc_become_legate's RELEASE store; legate_scope_id is its coherent companion.
+void proc_legate_teardown_if_root(struct Proc *p) {
+    if (!p || p->magic != PROC_MAGIC) return;
+    if (!(__atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE) & PROC_FLAG_LEGATE_ROOT))
+        return;
+    struct legate_teardown_ctx tctx = { .scope_id = p->legate_scope_id, .except = p };
+    proc_for_each_walk(g_kproc, legate_teardown_cb, &tctx);
+}
+
 // P6-pouch-threads (sub-chunk 9a) audit F1 close: cross-module
 // acquire/release for g_proc_table_lock. thread.c's thread_link_into_proc
 // / thread_unlink_from_proc need to serialize with proc_count_live_peers_-
@@ -988,6 +1008,12 @@ static void thread_clear_child_tid_handoff(struct Thread *t, struct Proc *p) {
 // msg:    captured by reference; caller-owned (typically a string
 //         literal). NULL becomes "ok".
 static void proc_become_zombie_locked(struct Proc *p, int status, const char *msg) {
+    // A-4a (I-25): if p is a legate ROOT, tear down its scope as it dies. Placed
+    // at this chokepoint (not in exits() alone) so the sweep fires on EVERY death
+    // path -- a clean exit AND a kill / group-terminate (the path A-4b's CAP_KILL
+    // drives, and the multi-thread-root SYS_EXIT_GROUP path). A-4a audit F1.
+    proc_legate_teardown_if_root(p);
+
     if (p->children) {
         proc_reparent_children(p);
     }
@@ -1201,22 +1227,11 @@ void exits(const char *msg) {
     // observes consistent (p->state == ZOMBIE AND ct->state == EXITING).
     irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
 
-    // A-4a (I-25) trigger 1: if this Proc is a legate ROOT, tear down its
-    // scope as it exits -- every other Proc carrying its legate_scope_id is
-    // group-terminated (the scripture-mandated subtree sweep). Done via the
-    // LOCKED walk (proc_for_each_walk) because we ALREADY hold
-    // g_proc_table_lock -- proc_for_each would re-take it -> deadlock. The
-    // root itself (except = p) exits via the normal path below. Placed before
-    // the live-peers branch so it fires whether or not the root has live
-    // peers. The ROOT flag read pairs (ACQUIRE) with proc_become_legate's
-    // RELEASE store; legate_scope_id is then a coherent companion read.
-    if (__atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE) & PROC_FLAG_LEGATE_ROOT) {
-        struct legate_teardown_ctx tctx = {
-            .scope_id = p->legate_scope_id,
-            .except   = p,
-        };
-        proc_for_each_walk(g_kproc, legate_teardown_cb, &tctx);
-    }
+    // A-4a (I-25) legate-root scope teardown is NOT inline here: it fires in
+    // proc_become_zombie_locked (the shared ZOMBIE chokepoint), so a root that
+    // dies via the group-terminate path (thread_exit_self below, when this Proc
+    // has live peers; or a kill / SYS_EXIT_GROUP) sweeps its scope too -- not
+    // only the clean single-thread exit. A-4a audit F1.
 
     // Peer-Thread check (multi-thread Proc gate): every peer Thread MUST
     // be in THREAD_EXITING state already. wait_pid's reap loop later

@@ -51,6 +51,7 @@ void test_proc_console_attached_smoke(void);
 void test_proc_stripes_smoke(void);
 void test_proc_legate_scope_teardown(void);
 void test_proc_legate_teardown_except_and_zero(void);
+void test_proc_legate_teardown_from_zombie_chokepoint(void);
 
 // Test-harness hooks (kept out of proc.h; no production caller). The legate
 // teardown walk + the synthetic-Proc table splice let the test verify the walk
@@ -733,4 +734,43 @@ void test_proc_legate_teardown_except_and_zero(void) {
         "teardown of an unmatched scope flags nobody");
 
     legate_drop_linked(normal);
+}
+
+// A-4a audit F1 regression: the legate-root scope teardown fires from the SHARED
+// zombie chokepoint (proc_become_zombie_locked -> proc_legate_teardown_if_root),
+// so a root that dies via a kill / group-terminate path -- not only via exits()
+// -- still sweeps its scope. And the GUARD: only a Proc carrying
+// PROC_FLAG_LEGATE_ROOT triggers the sweep, so a dying scope MEMBER (scope_id
+// set, no ROOT flag) must NOT tear down the whole group. proc_legate_teardown_-
+// if_root requires the caller hold g_proc_table_lock (it uses the LOCKED walk),
+// mirroring its production call site inside proc_become_zombie_locked.
+void test_proc_legate_teardown_from_zombie_chokepoint(void) {
+    struct Proc *root = legate_make_linked(0x5Eu);
+    struct Proc *mem  = legate_make_linked(0x5Eu);
+    TEST_ASSERT(root && mem, "alloc + link root + member (scope 0x5E)");
+
+    // (a) A non-ROOT Proc at the chokepoint is a no-op: a dying MEMBER does not
+    //     sweep its scope (pre-F1, the teardown lived only in exits(); the guard
+    //     here is what keeps a member death from nuking the group).
+    irq_state_t s = proc_table_lock_acquire();
+    proc_legate_teardown_if_root(mem);            // mem carries scope but no ROOT flag
+    proc_table_lock_release(s);
+    TEST_EXPECT_EQ(root->group_exit_msg, (const char *)NULL,
+        "a non-root member at the chokepoint does NOT flag the scope");
+    TEST_EXPECT_EQ(mem->group_exit_msg, (const char *)NULL,
+        "a non-root member at the chokepoint does NOT flag itself");
+
+    // (b) The ROOT at the chokepoint sweeps the scope (member flagged), sparing
+    //     itself (except = the dying root, which the zombie transition handles).
+    __atomic_fetch_or(&root->proc_flags, PROC_FLAG_LEGATE_ROOT, __ATOMIC_RELEASE);
+    s = proc_table_lock_acquire();
+    proc_legate_teardown_if_root(root);
+    proc_table_lock_release(s);
+    TEST_ASSERT(mem->group_exit_msg != NULL,
+        "the legate root at the chokepoint flags the scope member");
+    TEST_EXPECT_EQ(root->group_exit_msg, (const char *)NULL,
+        "the legate root spares itself (except = p)");
+
+    legate_drop_linked(root);
+    legate_drop_linked(mem);
 }
