@@ -1709,20 +1709,56 @@ two-axis fusion.**
   `proc_group_terminate` -- both built + audited, #809/#811). `stop`/`start` stay stubbed
   (scheduler integration, ARCH [OPEN Q 7.6.D], Phase 7). No `/proc/<pid>/note` file at v1.0
   -- kill rides `ctl` (Plan 9 idiom; the note-file is ARCH [OPEN Q 7.6.A]'s later form).
-- *Ownership model for `/proc`* (devproc has none today -- no `stat_native`, no
-  `perm_enforced`): add `devproc.stat_native` reporting the TARGET Proc's `principal_id`
-  (uid) + `primary_gid` (gid) + a `ctl` mode (`0600`, owner rw -- the Plan 9 "process files
-  owned + read-protected by the owner" rule), and set `devproc.perm_enforced = true` so the
-  `open(/proc/<pid>/ctl, OWRITE)` chokepoint runs `perm_check`.
-- *Two-axis authority* (the A-2d pattern -- the handle-RIGHT axis AND the identity axis,
-  orthogonal -- generalized to kill): a ctl write is authorized iff the open-for-write
-  passes, which succeeds if `perm_check(caller, ctl_stat, PERM_W) == 0` (owner-rwx; covers
-  "kill your own subtree/session"; namespace visibility (I-1) gives containment for free --
-  a Proc that cannot see `/proc/<pid>` cannot kill it) OR the caller holds `CAP_HOSTOWNER`
-  (the existing `perm_check` DAC-override) OR the caller holds `CAP_KILL` (the new
-  cross-identity override, checked in the devproc ctl open/write path, for
-  debuggers/supervisors that are neither owner nor hostowner). No identity bypasses (I-22);
-  the parent-of-target case (§7.6.3) is now expressible as ownership, not a special case.
+- *Ownership model + enforcement SITE for `/proc`* (RECONCILED 2026-06-01, user vote --
+  supersedes the design-time "perm_enforced=true + gate-at-open" sketch): devproc gains
+  `stat_native` reporting the TARGET Proc's `principal_id` (uid) + `primary_gid` (gid) +
+  per-file mode (`ctl` = `0600` owner-rw, the Plan 9 "process files owned + read-protected
+  by the owner" rule; `status`/`cmdline`/`ns` = `0444`). devproc keeps `perm_enforced =
+  FALSE` and the two-axis authority is checked at the **write** site (`devproc_write`, when
+  the `kill`/`killgrp` verb is consumed), NOT at open. WHY the reconcile: the SHARED open
+  chokepoint (`sys_walk_open_handler`) hard-rejects on `perm_check` failure BEFORE
+  `devproc.open` runs, so a `CAP_KILL`-holding non-owner (ctl is `0600`) could never reach
+  the devproc `CAP_KILL` check the open-gate model itself requires -- "perm_enforced=true +
+  gate-at-open" and "`CAP_KILL` checked in the devproc path" cannot BOTH hold as-built.
+  Write-time enforcement resolves it cleanly: the composite axis lives in one place, is
+  fresh at the kill, COMPLETELY wires `CAP_KILL` (for when A-4c makes the supervisor
+  clearance grantable -- not a half-version), and touches no shared code. Open of `ctl` is
+  gated by namespace visibility only (I-1) -- an unauthorized opener holds a powerless
+  handle; the WRITE is the gate.
+- *Two-axis authority* (the A-2d pattern -- the capability axis AND the identity axis,
+  orthogonal -- generalized to kill): a `kill`/`killgrp` write is authorized iff
+  `perm_check(caller, ctl_stat, PERM_W) == 0` (owner-rwx -- same `principal_id` as the
+  target; covers "kill your own processes/subtree", and the parent-of-same-identity-child
+  case §7.6.3 is now expressible as ownership, not a special case; the existing `perm_check`
+  DAC-override folds in `CAP_HOSTOWNER`/`CAP_DAC_OVERRIDE`) OR the caller holds `CAP_KILL`
+  (the cross-identity override for a debugger/supervisor that is neither owner nor
+  hostowner). No identity bypasses (I-22 -- `CAP_KILL`/`CAP_HOSTOWNER` are capabilities,
+  never identities); containment is namespace visibility (I-1 -- a Proc that cannot walk to
+  `/proc/<pid>` cannot kill it).
+- *Dispatch* (RECONCILED): both `kill` and `killgrp` terminate the target Proc's
+  thread-group via `proc_group_terminate` UNIFORMLY (single + multi thread), under
+  `g_proc_table_lock` via the `proc_for_each` resolve+authorize+kill idiom (the audited
+  `sys_postnote` pattern -- the target is alive under the lock, so no reap-UAF). WHY uniform
+  (supersedes the design-time "single-thread: notes_post; multi-thread: proc_group_terminate"
+  split): post-#811, `proc_group_terminate` is the ONLY termination primitive whose
+  death-wake is TOTAL (universal death-interruptible sleep, §8.8.1) -- `notes_post("kill")`
+  wakes only note-pollers, so a single-thread target blocked in a non-notes sleep (e.g.
+  `poll(-1)`) would NOT wake and the kill would hang until that sleep completed on its own.
+  v1.0 has no cross-Proc process groups (no `setpgrp`), so `kill` and `killgrp` both map to
+  "terminate this Proc's thread-group"; a distinct cross-Proc `killgrp` is a v1.x seam
+  (pending process groups). `stop`/`start` stay stubbed (scheduler integration, ARCH [OPEN Q
+  7.6.D]). USER-REACHABILITY of `/proc/<pid>/ctl` is a documented Utopia-lane namespace seam,
+  NOT part of A-4b (user-confirmed 2026-06-01): devproc is kernel-internal at v1.0 (joey's
+  territory is a single root -- `chroot` to devramfs, `pivot_root` to Stratum FS -- with no
+  synthetic Dev grafted in), and reaching a 3-component path that crosses the
+  devramfs->devproc mount boundary needs (a) a boot-path `SYS_MOUNT` of devproc at `/proc`
+  AND (b) the production multi-component, mount-crossing path resolver (Plan 9 `namec`) --
+  the v1.0 `SYS_WALK_OPEN` is single-component + dev-internal (it rejects `/`). That resolver
+  is a namespace subsystem serving `/proc` + `/ctl` + `/dev` + `/net` uniformly (ROADMAP
+  Utopia). `SYS_POSTNOTE` already gives userspace the parent-kill path today. A-4b therefore
+  lands + KERNEL-UNIT-TESTS the mechanism + the two-axis authority (the load-bearing privilege
+  logic is fully exercisable in-kernel: construct caller/target Procs, assert the authority
+  decision + the `group_exit_msg` dispatch observable).
 - Resolves ARCH **[OPEN Q 7.6.B]** (`CAP_KILL`) + advances **[OPEN Q 7.6.A]** (namespace
   posting -- the `ctl` form lands; the `note`-file form stays future).
 
