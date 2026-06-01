@@ -225,6 +225,15 @@ HX-I1 (a fault during the dump still trips the re-entrancy guard) and HX-I2 (the
 fp-walk's bounds are unchanged). `q - tab[lo].off` cannot underflow (the search
 invariant guarantees `tab[lo].off <= q`).
 
+**Known caveat (HX-2 audit F4, accepted):** the table carries no per-symbol
+size, so a code address in inter-function padding -- or a corrupt backtrace
+return address that happens to land in `[base, _text_end)` -- resolves to the
+nearest preceding function with a large offset rather than "no symbol". This is
+memory-safe (still a bounded `.rodata` read) and best-effort by design; the raw
++ KASLR link address is always printed on the same line, so the operator is
+never misled -- they have the exact address alongside the symbol guess. A
+per-symbol upper-bound check is a possible v1.x refinement, not warranted now.
+
 ### The build (kallsyms-lite, two-pass)
 
 The table is **generated per-build-dir** from the linked ELF, never committed to

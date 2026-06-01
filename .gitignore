@@ -40,6 +40,10 @@ snapshots/
 # Generated docs
 docs/_build/
 
+# Python tooling cache (tools/*.py: the HX-2 symtab generator, etc.)
+__pycache__/
+*.pyc
+
 # Local config overrides
 .env.local
 *.local
