@@ -606,6 +606,21 @@ static int rfork_internal(unsigned flags, void (*entry)(void *), void *arg,
     for (u8 i = 0; i < child->supp_gid_count; i++)
         child->supp_gids[i] = parent->supp_gids[i];
 
+    // A-4a: inherit the legate scope tag across rfork (IDENTITY-DESIGN
+    // §9.8, I-25). A child of a legate-scoped Proc JOINS the scope: it
+    // carries scope_id + session_id + valid_until so the teardown walk
+    // (A-4a-2b) finds it and it can detect valid_until expiry at its own
+    // EL0-return tail. It carries only the FORK-GRANTABLE subset of the
+    // caps -- the elevation-only members were already stripped above by
+    // `& ~CAP_ELEVATION_ONLY` (A-4-pre), so a scope member cannot wield
+    // the legate's fs-admin authority; the membership tag governs lifetime,
+    // not authority. PROC_FLAG_LEGATE_ROOT is NOT inherited (proc_flags
+    // never are; see below), so the child is a scope MEMBER, never a second
+    // root. For a non-legate parent these are all 0 -> child not-a-legate.
+    child->legate_scope_id    = parent->legate_scope_id;
+    child->legate_session_id  = parent->legate_session_id;
+    child->legate_valid_until = parent->legate_valid_until;
+
     // P5-hostowner-a: child->proc_flags stays 0 (KP_ZERO from
     // proc_alloc) — deliberately NOT copied from the parent. In
     // particular PROC_FLAG_CONSOLE_ATTACHED is never conferred by

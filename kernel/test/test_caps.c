@@ -23,6 +23,7 @@ void test_caps_rfork_with_caps_grants_subset(void);
 void test_caps_rfork_with_caps_clamps_to_parent(void);
 void test_caps_rfork_with_caps_zero_mask(void);
 void test_caps_rfork_strips_elevation_only(void);
+void test_caps_rfork_inherits_legate_scope(void);
 
 // kproc starts with CAP_ALL (currently == CAP_HW_CREATE).
 void test_caps_kproc_has_all(void) {
@@ -199,4 +200,76 @@ void test_caps_rfork_strips_elevation_only(void) {
     // still flows intact.
     TEST_EXPECT_EQ(caps_elev_grandchild_observed, (int)CAP_ALL,
                    "rfork did not confer the fork-grantable subset");
+}
+
+// A-4a-2a / I-25: rfork INHERITS the legate scope tag. A child of a
+// legate-scoped Proc JOINS the scope -- it carries legate_scope_id +
+// legate_session_id + legate_valid_until (so the A-4a-2b teardown finds
+// it and it can detect valid_until expiry), but NOT PROC_FLAG_LEGATE_ROOT
+// (proc_flags never inherit; the child is a scope MEMBER, never a second
+// root). The intermediate is a throwaway Proc that sets its OWN legate
+// fields (nothing else reads them), mirroring the clamps_to_parent
+// two-level pattern. No teardown exists yet (A-4a-2b), and the values are
+// arbitrary test markers -- so nothing acts on them; this isolates the
+// rfork-inherit plumbing.
+static u32 legate_gc_scope;
+static u32 legate_gc_session;
+static u64 legate_gc_valid_until;
+static u32 legate_gc_proc_flags;
+static void legate_inherit_grandchild_thunk(void *arg) {
+    (void)arg;
+    struct Thread *t = current_thread();
+    if (!t)                          extinction("legate_gc: no current_thread");
+    struct Proc *p = t->proc;
+    if (!p)                          extinction("legate_gc: no proc");
+    legate_gc_scope       = p->legate_scope_id;
+    legate_gc_session     = p->legate_session_id;
+    legate_gc_valid_until = p->legate_valid_until;
+    legate_gc_proc_flags  = p->proc_flags;
+    exits("ok");
+}
+static void legate_inherit_intermediate_thunk(void *arg) {
+    (void)arg;
+    struct Thread *t = current_thread();
+    if (!t)                          extinction("legate_int: no current_thread");
+    struct Proc *p = t->proc;
+    if (!p)                          extinction("legate_int: no proc");
+    // Become a (fake) legate root: set the scope tag + the ROOT flag, as
+    // the A-4a-2b devcap redeem will. Arbitrary markers -- no teardown
+    // acts on them at A-4a-2a.
+    p->legate_scope_id    = 0xA4A4u;
+    p->legate_session_id  = 0x5E55u;
+    p->legate_valid_until = 0x123456789ull;
+    p->proc_flags        |= PROC_FLAG_LEGATE_ROOT;
+
+    int gpid = rfork(RFPROC, legate_inherit_grandchild_thunk, NULL);
+    if (gpid <= 0) extinction("legate intermediate rfork failed");
+    int gstatus = -42;
+    int greaped = wait_pid(&gstatus);
+    if (greaped != gpid) extinction("legate intermediate wait_pid pid mismatch");
+    if (gstatus != 0)    extinction("legate grandchild exit status non-zero");
+    exits("ok");
+}
+void test_caps_rfork_inherits_legate_scope(void) {
+    legate_gc_scope = 0; legate_gc_session = 0; legate_gc_valid_until = 0;
+    legate_gc_proc_flags = 0xFFFFFFFFu;
+    int ipid = rfork(RFPROC, legate_inherit_intermediate_thunk, NULL);
+    TEST_ASSERT(ipid > 0, "legate intermediate rfork failed");
+
+    int istatus = -42;
+    int ireaped = wait_pid(&istatus);
+    TEST_EXPECT_EQ(ireaped, ipid, "legate intermediate wait_pid pid");
+    TEST_EXPECT_EQ(istatus, 0, "legate intermediate exit status");
+
+    // The scope tag inherits -- the child JOINS the scope.
+    TEST_EXPECT_EQ((int)legate_gc_scope, 0xA4A4,
+                   "legate_scope_id not inherited across rfork");
+    TEST_EXPECT_EQ((int)legate_gc_session, 0x5E55,
+                   "legate_session_id not inherited across rfork");
+    TEST_ASSERT(legate_gc_valid_until == 0x123456789ull,
+                "legate_valid_until not inherited across rfork");
+    // ...but the ROOT flag does NOT (proc_flags never inherit): the child
+    // is a scope MEMBER, never a second root.
+    TEST_ASSERT((legate_gc_proc_flags & PROC_FLAG_LEGATE_ROOT) == 0,
+                "PROC_FLAG_LEGATE_ROOT leaked across rfork");
 }

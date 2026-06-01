@@ -339,6 +339,37 @@ struct Proc {
     // propagated by rfork (a transient terminating state, not an inherited
     // property).
     const char        *group_exit_msg;
+
+    // A-4a legate elevation (IDENTITY-DESIGN.md §9.8, invariant I-25). A
+    // "legate" is the durable user (principal_id UNCHANGED) granted extra
+    // caps for a bounded scope via the `cap` device clearance redeem
+    // (devcap.c). These tag the scope; KP_ZERO -> not-a-legate.
+    //   legate_scope_id    -- the scope this Proc belongs to (0 = none).
+    //     Set on the legate ROOT at redeem (fresh, monotonic); INHERITED
+    //     across rfork (a child of a scoped Proc joins the scope, carrying
+    //     only the fork-grantable subset of the caps -- the elevation-only
+    //     members are rfork-stripped, I-2). The subtree-membership tag the
+    //     teardown walk matches on.
+    //   legate_session_id  -- ephemeral attribution id (0 = not a legate).
+    //     Audit reads "principal P via legate-session N". Set on the root
+    //     at redeem; inherited across rfork. Durable principal_id is
+    //     UNCHANGED by elevation (scripture §3.1).
+    //   legate_valid_until -- ns deadline (0 = none); copied from the
+    //     grant, inherited across rfork. On `now > legate_valid_until`
+    //     (checked at the EL0-return tail) the whole scope is torn down.
+    // PROC_FLAG_LEGATE_ROOT (proc_flags) marks the redeeming Proc; on its
+    // exit the scope is to be torn down (proc_group_terminate each member).
+    // The flag is NOT propagated by rfork (proc_flags never are), so a
+    // child is a scope MEMBER, never a second root. Evaporation = scope
+    // teardown (reuses the #809/#811 cascade): no elevated Proc outlives
+    // the scope. A-4a-2a lands these fields + the rfork-inherit + the
+    // membership tag; the devcap redeem that SETS them (creates a legate)
+    // and the teardown triggers (exits() root-exit + the EL0-tail
+    // valid_until expiry) land together in A-4a-2b -- so a legate never
+    // exists without its teardown (I-25 holds at every commit).
+    u32                legate_session_id;
+    u32                legate_scope_id;
+    u64                legate_valid_until;
 };
 
 #define PROC_FLAG_NODUMP            (1u << 0)
@@ -346,18 +377,28 @@ struct Proc {
 #define PROC_FLAG_MLOCKED           (1u << 2)
 #define PROC_FLAG_CONSOLE_ATTACHED  (1u << 3)
 #define PROC_FLAG_MAY_POST_SERVICE  (1u << 4)
+// A-4a: marks the legate ROOT -- the Proc that redeemed a `cap`-device
+// clearance grant. Set at redeem; one-way; NOT propagated by rfork (no
+// proc_flag is). On the root's exit, exits() will tear down its scope
+// (the redeem that sets it + the teardown land in A-4a-2b). I-25.
+#define PROC_FLAG_LEGATE_ROOT       (1u << 5)
 
-_Static_assert(sizeof(struct Proc) == 248,
-               "struct Proc size pinned at 248 bytes (A-1a baseline 240 + the "
-               "SYS_EXIT_GROUP group_exit_msg pointer = 8 -> 248). Adding a "
-               "field grows the SLUB cache; update this assert deliberately so "
-               "the change is intentional.");
+_Static_assert(sizeof(struct Proc) == 264,
+               "struct Proc size pinned at 264 bytes (SYS_EXIT_GROUP baseline "
+               "248 + the A-4a legate block: legate_session_id u32 + "
+               "legate_scope_id u32 + legate_valid_until u64 = 16 -> 264). "
+               "Adding a field grows the SLUB cache; update this assert "
+               "deliberately so the change is intentional.");
 _Static_assert(__builtin_offsetof(struct Proc, principal_id) == 168,
                "A-1a identity block appends after handler_va; existing "
                "offsets must stay stable (KP_ZERO inits the new tail).");
 _Static_assert(__builtin_offsetof(struct Proc, group_exit_msg) == 240,
                "SYS_EXIT_GROUP group_exit_msg appends after the A-1a identity "
                "block; existing offsets stay stable (KP_ZERO inits it NULL).");
+_Static_assert(__builtin_offsetof(struct Proc, legate_session_id) == 248,
+               "A-4a legate block appends after group_exit_msg; existing "
+               "offsets stay stable (KP_ZERO inits the new tail to "
+               "not-a-legate).");
 _Static_assert(__builtin_offsetof(struct Proc, magic) == 0,
                "magic must be at offset 0 so SLUB's freelist write on "
                "kmem_cache_free clobbers it (double-free defense — "
