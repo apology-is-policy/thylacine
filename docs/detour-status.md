@@ -553,7 +553,7 @@ kill = BOTH the namespace `/proc/<pid>/ctl` surface AND a narrow elevation-only 
       carried v1.x (`wait_pid_for(pid)`), not an A-4a defect (the no-member model keeps it dormant).
       Matrix GREEN: default(smp4) + UBSan + smp8 all **668/668** + legate E2E OK + boot OK.
       `audit_a4a_closed_list.md`. **A-4a arc DONE.**
-- **A-4b** *(DONE -- impl `4edd65c`; scripture reconcile `17dcb77` + fix `585d519`; audit close `<pending>`)* --
+- **A-4b** *(DONE -- impl `4edd65c`; scripture reconcile `17dcb77` + fix `585d519`; audit close `c6dfced`)* --
   cross-process kill: `/proc/<pid>/ctl` write parses `kill`/`killgrp` -> `proc_group_terminate`
   (uniform, single + multi thread; the #811 wake-total primitive), under `g_proc_table_lock`
   via the `proc_for_each` resolve+authorize idiom (the audited `sys_postnote` pattern; no
