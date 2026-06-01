@@ -51,6 +51,16 @@ void test_devcap_use_basic(void);
 void test_devcap_use_one_shot(void);
 void test_devcap_use_mismatched_cap(void);
 void test_devcap_exit_clears_grant(void);
+// A-4a clearance grant/redeem (the legate-creation half).
+void test_devcap_clearance_grant_gate_no_cap(void);
+void test_devcap_clearance_grant_bad_args(void);
+void test_devcap_clearance_redeem_basic(void);
+void test_devcap_clearance_self_restriction(void);
+void test_devcap_clearance_redeem_beyond_grant(void);
+void test_devcap_clearance_one_shot(void);
+void test_devcap_clearance_cross_stripes(void);
+void test_devcap_clearance_valid_until(void);
+void test_devcap_clearance_kind_isolation(void);
 
 // Test-only Proc construction. proc_alloc() draws a fresh stripes, so
 // each test Proc has a unique tag. The console-attached + cap setup is
@@ -356,4 +366,225 @@ void test_devcap_exit_clears_grant(void) {
 
     drop_test_proc(target);
     drop_test_proc(grantor);
+}
+
+// =============================================================================
+// A-4a clearance grant/redeem -- the legate-creation half (the teardown half
+// is exercised by test_proc.c's legate-teardown-walk tests, since the actual
+// death fires at the EL0 die-check which kernel test threads never reach).
+// =============================================================================
+
+void test_devcap_clearance_grant_gate_no_cap(void) {
+    cap_reset_table();
+    struct Proc *p = make_test_proc();   // caps = 0; lacks CAP_GRANT_CLEARANCE
+    TEST_ASSERT(p != NULL, "alloc proc");
+
+    long rc = cap_register_clearance_grant_for_writer(
+        p, CAP_DAC_OVERRIDE, 0xDEAD, 0, 0x5E55);
+    TEST_EXPECT_EQ(rc, -1, "clearance grant rejected: lacks CAP_GRANT_CLEARANCE");
+    TEST_EXPECT_EQ(cap_pending_count(), 0, "pending count stays 0");
+
+    drop_test_proc(p);
+}
+
+void test_devcap_clearance_grant_bad_args(void) {
+    cap_reset_table();
+    struct Proc *p = make_test_proc_with_caps(CAP_GRANT_CLEARANCE);
+    TEST_ASSERT(p != NULL, "alloc");
+
+    TEST_EXPECT_EQ(cap_register_clearance_grant_for_writer(
+        p, CAP_DAC_OVERRIDE, 0, 0, 0x5E55), -1, "reject: target_stripes == 0");
+    TEST_EXPECT_EQ(cap_register_clearance_grant_for_writer(
+        p, 0, 0xABC, 0, 0x5E55), -1, "reject: cap_mask == 0");
+    // CAP_HOSTOWNER is NOT in CAP_GRANTABLE_CLEARANCE (it stays on the
+    // console-gated hostowner path).
+    TEST_EXPECT_EQ(cap_register_clearance_grant_for_writer(
+        p, CAP_HOSTOWNER, 0xABC, 0, 0x5E55), -1,
+        "reject: cap_mask not subset of CAP_GRANTABLE_CLEARANCE");
+    // A fork-grantable cap is likewise not clearance-grantable.
+    TEST_EXPECT_EQ(cap_register_clearance_grant_for_writer(
+        p, CAP_HW_CREATE, 0xABC, 0, 0x5E55), -1, "reject: fork-grantable cap");
+    TEST_EXPECT_EQ(cap_register_clearance_grant_for_writer(
+        p, CAP_DAC_OVERRIDE, 0xABC, 0, 0), -1, "reject: session_id == 0 sentinel");
+    TEST_EXPECT_EQ(cap_register_clearance_grant_for_writer(
+        p, CAP_DAC_OVERRIDE, 0xABC, 0, 0x100000000ull), -1,
+        "reject: session_id exceeds u32");
+    TEST_EXPECT_EQ(cap_pending_count(), 0, "pending count stays 0");
+
+    drop_test_proc(p);
+    cap_reset_table();
+}
+
+void test_devcap_clearance_redeem_basic(void) {
+    cap_reset_table();
+    struct Proc *grantor  = make_test_proc_with_caps(CAP_GRANT_CLEARANCE);
+    TEST_ASSERT(grantor != NULL, "alloc grantor");
+    // The redeemer is NOT console-attached -- a clearance redeem must NOT
+    // require it (the key difference from the hostowner path).
+    struct Proc *redeemer = make_test_proc();
+    TEST_ASSERT(redeemer != NULL, "alloc redeemer");
+
+    u64 target = proc_stripes(redeemer);
+    TEST_EXPECT_EQ(cap_register_clearance_grant_for_writer(
+        grantor, CAP_DAC_OVERRIDE, target, 0, 0x5E55),
+        (long)CAP_GRANT_CLEARANCE_WRITE_LEN, "clearance grant ok");
+    TEST_EXPECT_EQ(cap_pending_count(), 1, "1 pending");
+
+    long rc = cap_redeem_grant_for_writer(redeemer, CAP_DAC_OVERRIDE);
+    TEST_EXPECT_EQ(rc, (long)CAP_USE_WRITE_LEN, "clearance redeem ok (no console)");
+    TEST_EXPECT_NE(redeemer->caps & CAP_DAC_OVERRIDE, (u64)0, "gained DAC_OVERRIDE");
+    TEST_EXPECT_NE(redeemer->legate_scope_id, (u32)0, "became a legate (scope set)");
+    TEST_EXPECT_EQ(redeemer->legate_session_id, (u32)0x5E55, "session recorded");
+    TEST_EXPECT_EQ(redeemer->legate_valid_until, (u64)0, "valid_for 0 -> no deadline");
+    TEST_EXPECT_NE(redeemer->proc_flags & PROC_FLAG_LEGATE_ROOT, (u32)0,
+        "marked LEGATE_ROOT");
+    TEST_EXPECT_EQ(cap_pending_count(), 0, "pending consumed");
+
+    drop_test_proc(redeemer);
+    drop_test_proc(grantor);
+    cap_reset_table();
+}
+
+void test_devcap_clearance_self_restriction(void) {
+    cap_reset_table();
+    struct Proc *grantor  = make_test_proc_with_caps(CAP_GRANT_CLEARANCE);
+    struct Proc *redeemer = make_test_proc();
+    TEST_ASSERT(grantor && redeemer, "alloc");
+
+    u64 target = proc_stripes(redeemer);
+    // Grant {DAC_OVERRIDE | CHOWN}; the redeemer self-restricts to DAC only.
+    cap_register_clearance_grant_for_writer(
+        grantor, CAP_DAC_OVERRIDE | CAP_CHOWN, target, 0, 0x5E55);
+    long rc = cap_redeem_grant_for_writer(redeemer, CAP_DAC_OVERRIDE);
+    TEST_EXPECT_EQ(rc, (long)CAP_USE_WRITE_LEN, "redeem subset ok");
+    TEST_EXPECT_NE(redeemer->caps & CAP_DAC_OVERRIDE, (u64)0, "gained DAC_OVERRIDE");
+    TEST_EXPECT_EQ(redeemer->caps & CAP_CHOWN, (u64)0,
+        "did NOT gain CHOWN (self-restricted below the grant)");
+
+    drop_test_proc(redeemer);
+    drop_test_proc(grantor);
+    cap_reset_table();
+}
+
+void test_devcap_clearance_redeem_beyond_grant(void) {
+    cap_reset_table();
+    struct Proc *grantor  = make_test_proc_with_caps(CAP_GRANT_CLEARANCE);
+    struct Proc *redeemer = make_test_proc();
+    TEST_ASSERT(grantor && redeemer, "alloc");
+
+    u64 target = proc_stripes(redeemer);
+    // Grant only DAC_OVERRIDE; redeem asks for DAC_OVERRIDE | CHOWN (beyond).
+    cap_register_clearance_grant_for_writer(
+        grantor, CAP_DAC_OVERRIDE, target, 0, 0x5E55);
+    long rc = cap_redeem_grant_for_writer(redeemer, CAP_DAC_OVERRIDE | CAP_CHOWN);
+    TEST_EXPECT_EQ(rc, -1, "redeem beyond grant rejected");
+    TEST_EXPECT_EQ(redeemer->caps & (CAP_DAC_OVERRIDE | CAP_CHOWN), (u64)0,
+        "no cap gained on rejected redeem");
+    TEST_EXPECT_EQ(redeemer->legate_scope_id, (u32)0, "not a legate (redeem failed)");
+    TEST_EXPECT_EQ(cap_pending_count(), 1, "grant retained on beyond-grant reject");
+
+    drop_test_proc(redeemer);
+    drop_test_proc(grantor);
+    cap_reset_table();
+}
+
+void test_devcap_clearance_one_shot(void) {
+    cap_reset_table();
+    struct Proc *grantor  = make_test_proc_with_caps(CAP_GRANT_CLEARANCE);
+    struct Proc *redeemer = make_test_proc();
+    TEST_ASSERT(grantor && redeemer, "alloc");
+
+    u64 target = proc_stripes(redeemer);
+    cap_register_clearance_grant_for_writer(
+        grantor, CAP_DAC_OVERRIDE, target, 0, 0x5E55);
+    TEST_EXPECT_EQ(cap_redeem_grant_for_writer(redeemer, CAP_DAC_OVERRIDE),
+        (long)CAP_USE_WRITE_LEN, "first redeem ok");
+    long rc = cap_redeem_grant_for_writer(redeemer, CAP_DAC_OVERRIDE);
+    TEST_EXPECT_EQ(rc, -1, "second redeem rejected: grant consumed");
+
+    drop_test_proc(redeemer);
+    drop_test_proc(grantor);
+    cap_reset_table();
+}
+
+void test_devcap_clearance_cross_stripes(void) {
+    cap_reset_table();
+    struct Proc *grantor  = make_test_proc_with_caps(CAP_GRANT_CLEARANCE);
+    struct Proc *target   = make_test_proc();    // grant is FOR this one's stripes
+    struct Proc *other    = make_test_proc();    // a DIFFERENT Proc tries to redeem
+    TEST_ASSERT(grantor && target && other, "alloc");
+
+    cap_register_clearance_grant_for_writer(
+        grantor, CAP_DAC_OVERRIDE, proc_stripes(target), 0, 0x5E55);
+    long rc = cap_redeem_grant_for_writer(other, CAP_DAC_OVERRIDE);
+    TEST_EXPECT_EQ(rc, -1, "cross-stripes redeem rejected");
+    TEST_EXPECT_EQ(other->legate_scope_id, (u32)0, "other did not become a legate");
+    TEST_EXPECT_EQ(cap_pending_count(), 1, "grant retained (wrong stripes)");
+
+    drop_test_proc(other);
+    drop_test_proc(target);
+    drop_test_proc(grantor);
+    cap_reset_table();
+}
+
+void test_devcap_clearance_valid_until(void) {
+    cap_reset_table();
+    struct Proc *grantor  = make_test_proc_with_caps(CAP_GRANT_CLEARANCE);
+    struct Proc *r1       = make_test_proc();
+    struct Proc *r2       = make_test_proc();
+    TEST_ASSERT(grantor && r1 && r2, "alloc");
+
+    // valid_for > 0 -> legate_valid_until is a future deadline (> 0).
+    cap_register_clearance_grant_for_writer(
+        grantor, CAP_DAC_OVERRIDE, proc_stripes(r1), 1000000000000ull, 0x5E55);
+    TEST_EXPECT_EQ(cap_redeem_grant_for_writer(r1, CAP_DAC_OVERRIDE),
+        (long)CAP_USE_WRITE_LEN, "redeem r1 ok");
+    TEST_EXPECT_NE(r1->legate_valid_until, (u64)0,
+        "valid_for > 0 -> a deadline was computed");
+
+    // valid_for == 0 -> no deadline (scope ends only on root exit).
+    cap_register_clearance_grant_for_writer(
+        grantor, CAP_DAC_OVERRIDE, proc_stripes(r2), 0, 0x5E56);
+    TEST_EXPECT_EQ(cap_redeem_grant_for_writer(r2, CAP_DAC_OVERRIDE),
+        (long)CAP_USE_WRITE_LEN, "redeem r2 ok");
+    TEST_EXPECT_EQ(r2->legate_valid_until, (u64)0, "valid_for 0 -> no deadline");
+
+    drop_test_proc(r2);
+    drop_test_proc(r1);
+    drop_test_proc(grantor);
+    cap_reset_table();
+}
+
+void test_devcap_clearance_kind_isolation(void) {
+    // A clearance grant then a hostowner re-register for the SAME stripes must
+    // fully reset the entry to the hostowner kind -- a stale clearance flag
+    // must NOT let a no-console writer redeem. Proves cap_set_entry_locked
+    // resets every discriminator field.
+    cap_reset_table();
+    struct Proc *grantor  = make_test_proc_with_caps(
+        CAP_GRANT_CLEARANCE | CAP_GRANT_HOSTOWNER);
+    struct Proc *redeemer = make_test_proc();   // NOT console-attached
+    TEST_ASSERT(grantor && redeemer, "alloc");
+
+    u64 target = proc_stripes(redeemer);
+    // First a clearance grant (no-console redeemable), then re-register a
+    // hostowner grant over the SAME stripes.
+    cap_register_clearance_grant_for_writer(
+        grantor, CAP_DAC_OVERRIDE, target, 0, 0x5E55);
+    TEST_EXPECT_EQ(cap_register_grant_for_writer(grantor, CAP_HOSTOWNER, target),
+        (long)CAP_GRANT_WRITE_LEN, "re-register hostowner over same stripes");
+    TEST_EXPECT_EQ(cap_pending_count(), 1, "still 1 pending (replaced in place)");
+
+    // The entry is now a HOSTOWNER grant -> redeem requires console. A
+    // no-console redeem must fail (if the stale clearance kind had survived,
+    // this would wrongly succeed without console).
+    long rc = cap_redeem_grant_for_writer(redeemer, CAP_HOSTOWNER);
+    TEST_EXPECT_EQ(rc, -1, "no-console hostowner redeem rejected (kind reset)");
+    TEST_EXPECT_EQ(redeemer->caps & CAP_HOSTOWNER, (u64)0, "no CAP_HOSTOWNER gained");
+    TEST_EXPECT_EQ(redeemer->legate_scope_id, (u32)0, "did NOT become a legate");
+    TEST_EXPECT_EQ(cap_pending_count(), 1, "grant retained (console gate)");
+
+    drop_test_proc(redeemer);
+    drop_test_proc(grantor);
+    cap_reset_table();
 }

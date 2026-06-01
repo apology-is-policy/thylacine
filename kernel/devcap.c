@@ -44,11 +44,29 @@ enum cap_grant_state {
     CAP_GRANT_PENDING = 1,    // grant registered, awaiting redemption
 };
 
+// A-4a: a pending grant is one of two kinds. The kind is set at register and
+// determines the redeem gate + effect (see cap_redeem_grant_for_writer). It
+// rides on the entry (NOT on which /grant write length produced it after the
+// fact), so a SINGLE locked lookup at redeem reads the kind atomically -- no
+// peek/redeem TOCTOU.
+enum cap_grant_kind {
+    CAP_GRANT_KIND_HOSTOWNER = 0,  // legacy console-gated CAP_HOSTOWNER grant
+    CAP_GRANT_KIND_CLEARANCE = 1,  // A-4a clearance grant -> creates a legate
+};
+
 struct cap_grant_entry {
     enum cap_grant_state state;
+    enum cap_grant_kind  kind;        // discriminates redeem semantics
     caps_t               cap_mask;     // capabilities to confer at redeem
     u64                  target_stripes;  // writer's stripes must match
-    u64                  expiry_ns;    // timer_now_ns deadline; >= it == expired
+    u64                  expiry_ns;    // REDEMPTION-window deadline (timer_now_ns;
+                                       // <= it == the grant itself expired)
+    u64                  valid_for_ns; // CLEARANCE: legate lifetime DURATION
+                                       // (0 = none). legate_valid_until is
+                                       // computed = now + this AT redeem, so the
+                                       // window opens when the caps actually land
+                                       // (avoids any userspace/kernel clock skew).
+    u32                  session_id;   // CLEARANCE: corvus audit tag (-> legate)
 };
 
 struct cap_grant_table {
@@ -82,16 +100,22 @@ struct devcap_leaf_ref {
 //
 // "Expire" means: any entry whose expiry_ns is at or before `now_ns` is
 // reset to FREE; the slot becomes available without a separate sweep.
+static void cap_clear_locked(struct cap_grant_entry *e) {
+    e->state          = CAP_GRANT_FREE;
+    e->kind           = CAP_GRANT_KIND_HOSTOWNER;
+    e->cap_mask       = 0;
+    e->target_stripes = 0;
+    e->expiry_ns      = 0;
+    e->valid_for_ns   = 0;
+    e->session_id     = 0;
+}
+
 static int cap_find_free_locked(u64 now_ns) {
     int free_idx = -1;
     for (u32 i = 0; i < CAP_GRANT_MAX; i++) {
         struct cap_grant_entry *e = &g_cap_grants.entries[i];
-        if (e->state == CAP_GRANT_PENDING && e->expiry_ns <= now_ns) {
-            e->state          = CAP_GRANT_FREE;
-            e->cap_mask       = 0;
-            e->target_stripes = 0;
-            e->expiry_ns      = 0;
-        }
+        if (e->state == CAP_GRANT_PENDING && e->expiry_ns <= now_ns)
+            cap_clear_locked(e);
         if (e->state == CAP_GRANT_FREE && free_idx < 0) {
             free_idx = (int)i;
         }
@@ -112,11 +136,33 @@ static int cap_find_stripes_locked(u64 stripes) {
     return -1;
 }
 
-static void cap_clear_locked(struct cap_grant_entry *e) {
-    e->state          = CAP_GRANT_FREE;
-    e->cap_mask       = 0;
-    e->target_stripes = 0;
-    e->expiry_ns      = 0;
+// Write all fields of a slot for a fresh/replacing PENDING grant. Routing
+// BOTH register paths through this is load-bearing: a re-register over an
+// existing slot of the OTHER kind must reset EVERY discriminator field
+// (kind, valid_for_ns, session_id), or a stale clearance grant's fields
+// could survive under a hostowner cap_mask (or vice versa) and a redeem
+// would apply the wrong kind's semantics. PRECONDITION: caller holds the
+// table lock.
+static void cap_set_entry_locked(struct cap_grant_entry *e,
+                                 enum cap_grant_kind kind, caps_t cap_mask,
+                                 u64 target_stripes, u64 expiry_ns,
+                                 u64 valid_for_ns, u32 session_id) {
+    e->state          = CAP_GRANT_PENDING;
+    e->kind           = kind;
+    e->cap_mask       = cap_mask;
+    e->target_stripes = target_stripes;
+    e->expiry_ns      = expiry_ns;
+    e->valid_for_ns   = valid_for_ns;
+    e->session_id     = session_id;
+}
+
+// Find the slot index to write for `target_stripes` -- the existing PENDING
+// entry for those stripes (re-register replaces in place) or a free slot.
+// Returns -1 if no slot is available. PRECONDITION: caller holds the lock.
+static int cap_slot_for_stripes_locked(u64 target_stripes, u64 now) {
+    int existing = cap_find_stripes_locked(target_stripes);
+    if (existing >= 0) return existing;
+    return cap_find_free_locked(now);
 }
 
 // =============================================================================
@@ -141,40 +187,70 @@ long cap_register_grant_for_writer(struct Proc *writer,
     // Re-register semantics (CORVUS-DESIGN §5.5.1 "at most one pending
     // grant per tag; a re-register replaces it"): if a PENDING entry
     // already targets these stripes, overwrite it in place.
-    int existing = cap_find_stripes_locked(target_stripes);
-    int idx;
-    if (existing >= 0) {
-        idx = existing;
-    } else {
-        idx = cap_find_free_locked(now);
-        if (idx < 0) {
-            spin_unlock_irqrestore(&g_cap_grants.lock, s);
-            return -1;        // table full of non-expired entries
-        }
+    int idx = cap_slot_for_stripes_locked(target_stripes, now);
+    if (idx < 0) {
+        spin_unlock_irqrestore(&g_cap_grants.lock, s);
+        return -1;        // table full of non-expired entries
     }
 
-    g_cap_grants.entries[idx].state          = CAP_GRANT_PENDING;
-    g_cap_grants.entries[idx].cap_mask       = cap_mask;
-    g_cap_grants.entries[idx].target_stripes = target_stripes;
-    g_cap_grants.entries[idx].expiry_ns      = expiry;
+    // HOSTOWNER kind; valid_for_ns + session_id are 0 (clearance-only) -- set
+    // explicitly so a re-register over a stale clearance slot resets them.
+    cap_set_entry_locked(&g_cap_grants.entries[idx], CAP_GRANT_KIND_HOSTOWNER,
+                         cap_mask, target_stripes, expiry, 0, 0);
 
     spin_unlock_irqrestore(&g_cap_grants.lock, s);
     return (long)CAP_GRANT_WRITE_LEN;
 }
 
+// A-4a clearance /grant core (32-byte form). See devcap.h. Gated on
+// CAP_GRANT_CLEARANCE; cap_mask must be a non-empty subset of
+// CAP_GRANTABLE_CLEARANCE; session_id must be nonzero (sentinel) and fit u32.
+long cap_register_clearance_grant_for_writer(struct Proc *writer,
+                                             caps_t cap_mask, u64 target_stripes,
+                                             u64 valid_for_ns, u64 session_id) {
+    if (!writer)                                              return -1;
+    if (target_stripes == 0)                                 return -1;
+    if (cap_mask == 0)                                       return -1;
+    if ((cap_mask & ~(caps_t)CAP_GRANTABLE_CLEARANCE) != 0)  return -1;
+    if (session_id == 0 || session_id > 0xFFFFFFFFull)       return -1;
+    // Writer gate: must hold CAP_GRANT_CLEARANCE (corvus). The clearance
+    // analog of the hostowner grant's CAP_GRANT_HOSTOWNER gate.
+    if ((writer->caps & (caps_t)CAP_GRANT_CLEARANCE) == 0)   return -1;
+
+    u64 now = timer_now_ns();
+    u64 expiry = now + CAP_GRANT_EXPIRY_NS;
+
+    irq_state_t s = spin_lock_irqsave(&g_cap_grants.lock);
+
+    int idx = cap_slot_for_stripes_locked(target_stripes, now);
+    if (idx < 0) {
+        spin_unlock_irqrestore(&g_cap_grants.lock, s);
+        return -1;        // table full of non-expired entries
+    }
+
+    cap_set_entry_locked(&g_cap_grants.entries[idx], CAP_GRANT_KIND_CLEARANCE,
+                         cap_mask, target_stripes, expiry, valid_for_ns,
+                         (u32)session_id);
+
+    spin_unlock_irqrestore(&g_cap_grants.lock, s);
+    return (long)CAP_GRANT_CLEARANCE_WRITE_LEN;
+}
+
 long cap_redeem_grant_for_writer(struct Proc *writer, caps_t cap_mask) {
-    if (!writer)                                  return -1;
-    if (cap_mask == 0)                            return -1;
-    if ((cap_mask & ~(caps_t)CAP_GRANTABLE) != 0) return -1;
-    if (!proc_is_console_attached(writer))        return -1;
+    if (!writer)        return -1;
+    if (cap_mask == 0)  return -1;    // a redeem must request >= one cap
 
     u64 stripes = proc_stripes(writer);
-    if (stripes == 0)                             return -1;
+    if (stripes == 0)   return -1;
 
     u64 now = timer_now_ns();
 
     irq_state_t s = spin_lock_irqsave(&g_cap_grants.lock);
 
+    // ONE locked lookup: the grant's `kind` is read atomically with the rest,
+    // so there is no peek-then-redeem TOCTOU (a concurrent re-register that
+    // flips the kind for these stripes either lands fully before this lookup
+    // or fully after the consume).
     int idx = cap_find_stripes_locked(stripes);
     if (idx < 0) {
         spin_unlock_irqrestore(&g_cap_grants.lock, s);
@@ -190,11 +266,43 @@ long cap_redeem_grant_for_writer(struct Proc *writer, caps_t cap_mask) {
         return -1;
     }
 
-    // The pending grant's cap_mask must EQUAL the redeem request's
-    // cap_mask. Equality (not subset) makes the protocol explicit: a
-    // /use that asks for a different cap than was granted is a bug or
-    // an attack — fail closed. The grant is NOT consumed on mismatch
-    // (the legitimate holder still gets to redeem).
+    if (e->kind == CAP_GRANT_KIND_CLEARANCE) {
+        // A-4a clearance redeem -> creates a legate. NO console gate (the
+        // high-stakes auth was enforced corvus-side via auth_required BEFORE
+        // the grant was ever registered; CAP_GRANT_CLEARANCE is corvus-only).
+        // self_restriction (I-2): the request must be a non-empty SUBSET of the
+        // granted set -- the Proc voluntarily narrows below the ceiling. A
+        // request reaching BEYOND the grant is a bug/attack -> fail closed
+        // WITHOUT consuming (the legitimate holder may still redeem).
+        if ((cap_mask & ~e->cap_mask) != 0) {
+            spin_unlock_irqrestore(&g_cap_grants.lock, s);
+            return -1;
+        }
+        caps_t to_or     = cap_mask;          // == cap_mask & e->cap_mask (subset)
+        u64    valid_for = e->valid_for_ns;
+        u32    session   = e->session_id;
+        cap_clear_locked(e);                  // one-shot consume
+        spin_unlock_irqrestore(&g_cap_grants.lock, s);
+
+        // The legate window opens NOW -- when the caps actually land -- not at
+        // grant-register time, so a slow redeem doesn't shorten the window and
+        // there is no userspace/kernel clock-domain dependency.
+        u64 valid_until = (valid_for == 0) ? 0 : now + valid_for;
+        proc_become_legate(writer, to_or, session, valid_until);
+        return (long)CAP_USE_WRITE_LEN;
+    }
+
+    // HOSTOWNER redeem (unchanged v1.0 semantics): console-gated + the request
+    // must EQUAL the granted cap. Gate console AFTER the lookup so the kind is
+    // known -- a clearance grant for these stripes was already handled above,
+    // so this arm only ever sees a hostowner grant. Equality (not subset) keeps
+    // the protocol explicit (a /use asking for a different cap is a bug/attack);
+    // the grant is NOT consumed on a gate failure (the legitimate console
+    // holder may still redeem).
+    if (!proc_is_console_attached(writer)) {
+        spin_unlock_irqrestore(&g_cap_grants.lock, s);
+        return -1;
+    }
     if (e->cap_mask != cap_mask) {
         spin_unlock_irqrestore(&g_cap_grants.lock, s);
         return -1;
@@ -205,10 +313,9 @@ long cap_redeem_grant_for_writer(struct Proc *writer, caps_t cap_mask) {
 
     spin_unlock_irqrestore(&g_cap_grants.lock, s);
 
-    // The capability lands on the WRITER's Proc — direct OR on the
-    // caps field. v1.0 single-thread-per-Proc makes this race-free
-    // (no parallel reader/writer on writer->caps); a future
-    // multi-thread-per-Proc lift needs __atomic_fetch_or.
+    // The capability lands on the WRITER's Proc. v1.0 hostowner redeemers
+    // (corvus / login) make the non-atomic OR benign in practice; the
+    // clearance path above uses proc_become_legate's __atomic_fetch_or.
     writer->caps |= to_or;
     return (long)CAP_USE_WRITE_LEN;
 }
@@ -387,10 +494,22 @@ static long devcap_write(struct Spoor *c, const void *buf, long n, s64 off) {
     const u8 *b = (const u8 *)buf;
 
     if (m == DEVCAP_GRANT_MAGIC) {
-        if (n != (long)CAP_GRANT_WRITE_LEN) return -1;
-        caps_t cap_mask        = (caps_t)le64(b);
-        u64    target_stripes  = le64(b + 8);
-        return cap_register_grant_for_writer(writer, cap_mask, target_stripes);
+        // Length-discriminated: 16 bytes = hostowner grant; 32 = A-4a clearance
+        // grant. The two never collide. Any other length fails closed.
+        if (n == (long)CAP_GRANT_WRITE_LEN) {
+            caps_t cap_mask        = (caps_t)le64(b);
+            u64    target_stripes  = le64(b + 8);
+            return cap_register_grant_for_writer(writer, cap_mask, target_stripes);
+        }
+        if (n == (long)CAP_GRANT_CLEARANCE_WRITE_LEN) {
+            caps_t cap_mask        = (caps_t)le64(b);
+            u64    target_stripes  = le64(b + 8);
+            u64    valid_for_ns    = le64(b + 16);
+            u64    session_id      = le64(b + 24);
+            return cap_register_clearance_grant_for_writer(writer, cap_mask,
+                       target_stripes, valid_for_ns, session_id);
+        }
+        return -1;
     }
     if (m == DEVCAP_USE_MAGIC) {
         if (n != (long)CAP_USE_WRITE_LEN) return -1;

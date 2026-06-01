@@ -505,7 +505,30 @@ kill = BOTH the namespace `/proc/<pid>/ctl` surface AND a narrow elevation-only 
   stamps `caps |= clearance ∩ self_restriction`). Durable `principal_id` UNCHANGED + an
   ephemeral `legate_session_id`; scope = `legate_scope_id` subtree, **fully torn down**
   (group-terminate, reusing #809/#811) on the legate root's exit OR `valid_until` expiry; no
-  local crypto. New corvus verbs CLEARANCE_LIST / ACTIVATE / GRANT / REVOKE (14-17).
+  local crypto. New corvus verbs CLEARANCE_LIST / ACTIVATE / GRANT / REVOKE (14-17). *Split:*
+    - **A-4a-1** *(LANDED `6ea2d2c`)* -- caps.h foundation: `CAP_GRANT_CLEARANCE`=1<<6
+      (fork-grantable) + `CAP_DAC_OVERRIDE`=1<<7 / `CAP_CHOWN`=1<<8 / `CAP_KILL`=1<<9
+      (elevation-only); `CAP_ELEVATION_ONLY` -> the 4-bit set; CAP_ALL/ELEVATION disjoint assert.
+    - **A-4a-2a** *(LANDED `1ee8cab`)* -- legate scope fields on `struct Proc` (248->264:
+      `legate_session_id`@248 / `legate_scope_id`@252 / `legate_valid_until`@256 +
+      `PROC_FLAG_LEGATE_ROOT`) + rfork-inherit (a child JOINS the scope; the ROOT flag is NOT
+      inherited). DORMANT until 2b.
+    - **A-4a-2b** *(LANDED -- the kernel mechanism)* -- the `cap` device clearance grant/redeem
+      (`/grant` length-discriminated 16=hostowner / 32=clearance; `/cap/use` ONE locked
+      kind-branched redeem; the redeem rides the EXISTING `/cap/use` file -- NO new syscall) +
+      `proc_become_legate` + the two teardown triggers (exits() root-exit locked walk; EL0-tail
+      `valid_until` expiry lockless walk) + `perm.c` honoring `CAP_DAC_OVERRIDE`/`CAP_CHOWN`. 13
+      kernel tests (devcap clearance lifecycle + teardown walk via synthetic Procs + perm
+      cap-mapping); 667/667 default. **v1.0 model:** the clearance set is all elevation-only ->
+      rfork-stripped -> only the ROOT is elevated; member teardown is the scripture tidiness
+      sweep (a spawn-race straggler is benign + UNELEVATED, not an I-25 violation). Ref:
+      `docs/reference/102-legate.md`.
+    - **A-4a-3** *(NEXT)* -- corvus clearance-policy objects (structured-TLV, persisted) +
+      CLEARANCE_LIST/ACTIVATE/GRANT/REVOKE (14-17) + libt/libthyla-rs clearance wrappers + the
+      **E2E legate prover** (a real binary redeems -> spawns a child -> exits/expires -> the
+      child is torn down; deferred here because the real grant orchestration -- corvus learning
+      the peer's stripes via `/srv` -- is corvus's job). Then the focused A-4a audit
+      (UBSan + smp8, covers A-4-pre + 1 + 2a + 2b + 3).
 - **A-4b** -- cross-process kill: wire the existing `/proc/<pid>/ctl` stub to `kill`/`killgrp`
   -> `notes_post` / `proc_group_terminate`; give devproc an ownership model (`stat_native` +
   `perm_enforced`) for the owner-rwx axis; **two-axis** authority (owner-rwx OR `CAP_HOSTOWNER`

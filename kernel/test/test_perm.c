@@ -29,6 +29,8 @@ void test_perm_rights_for_omode(void);
 void test_perm_wstat_policy(void);
 void test_perm_devramfs_enforced_real_metadata(void);
 void test_perm_dev_flags(void);
+void test_perm_check_dac_override_cap(void);
+void test_perm_wstat_chown_cap(void);
 
 // =============================================================================
 // Helpers.
@@ -257,4 +259,59 @@ void test_perm_dev_flags(void) {
                 "devramfs enforces rwx (system-owned, live at v1.0)");
     TEST_ASSERT(dev9p.perm_enforced,
                 "dev9p enforces rwx (A-3b: pool SYSTEM-owned + SO_PEERCRED-principal)");
+}
+
+// =============================================================================
+// A-4a: the finer fs-admin caps split out of CAP_HOSTOWNER. Pin each cap to
+// exactly the axis it authorizes (DAC_OVERRIDE = rwx bypass; CHOWN =
+// chown/chgrp-any; neither grants the other's authority; chmod-any stays
+// CAP_HOSTOWNER-only -- no CAP_FOWNER split at v1.0).
+// =============================================================================
+
+void test_perm_check_dac_override_cap(void) {
+    // mode 0000 -- no identity grants anything. CAP_DAC_OVERRIDE is the rwx
+    // bypass split out of CAP_HOSTOWNER; it overrides like CAP_HOSTOWNER.
+    struct t_stat st = mkstat(0000u, 100u, 200u);
+    struct Proc p;
+
+    mkproc(&p, 555u, 888u, CAP_DAC_OVERRIDE);
+    TEST_EXPECT_EQ(perm_check(&p, &st, PERM_R | PERM_W | PERM_X), 0,
+                   "CAP_DAC_OVERRIDE overrides rwx like CAP_HOSTOWNER");
+
+    // CAP_CHOWN authorizes chown/chgrp, NOT an rwx bypass.
+    mkproc(&p, 555u, 888u, CAP_CHOWN);
+    TEST_EXPECT_EQ(perm_check(&p, &st, PERM_R), -1,
+                   "CAP_CHOWN does NOT override the rwx check");
+
+    // CAP_KILL is a kill axis, never an fs DAC override.
+    mkproc(&p, 555u, 888u, CAP_KILL);
+    TEST_EXPECT_EQ(perm_check(&p, &st, PERM_R), -1,
+                   "CAP_KILL does NOT override the rwx check");
+}
+
+void test_perm_wstat_chown_cap(void) {
+    struct Proc p;
+
+    // chown(uid): CAP_CHOWN authorizes it (the no-give-away chown right), like
+    // CAP_HOSTOWNER.
+    mkproc(&p, 999u, 200u, CAP_CHOWN);
+    TEST_EXPECT_EQ(perm_wstat_check(&p, 100u, T_WSTAT_UID, 0u), 0,
+                   "CAP_CHOWN may chown");
+    // chgrp to any group: CAP_CHOWN authorizes it.
+    mkproc(&p, 999u, 200u, CAP_CHOWN);
+    TEST_EXPECT_EQ(perm_wstat_check(&p, 100u, T_WSTAT_GID, 777u), 0,
+                   "CAP_CHOWN may chgrp to any group");
+
+    // chmod-any stays CAP_HOSTOWNER-only: neither CAP_CHOWN nor CAP_DAC_OVERRIDE
+    // grants chmod of another principal's file (no CAP_FOWNER split at v1.0).
+    mkproc(&p, 999u, 200u, CAP_CHOWN);
+    TEST_EXPECT_EQ(perm_wstat_check(&p, 100u, T_WSTAT_MODE, 0u), -1,
+                   "CAP_CHOWN does NOT grant chmod of another's file");
+    mkproc(&p, 999u, 200u, CAP_DAC_OVERRIDE);
+    TEST_EXPECT_EQ(perm_wstat_check(&p, 100u, T_WSTAT_MODE, 0u), -1,
+                   "CAP_DAC_OVERRIDE does NOT grant chmod of another's file");
+    // CAP_DAC_OVERRIDE does NOT grant chown (that authority is CAP_CHOWN/HOSTOWNER).
+    mkproc(&p, 999u, 200u, CAP_DAC_OVERRIDE);
+    TEST_EXPECT_EQ(perm_wstat_check(&p, 100u, T_WSTAT_UID, 0u), -1,
+                   "CAP_DAC_OVERRIDE does NOT grant chown");
 }

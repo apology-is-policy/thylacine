@@ -49,6 +49,16 @@ void test_proc_cascading_rfork_stress(void);
 void test_proc_orphan_reparent_smoke(void);
 void test_proc_console_attached_smoke(void);
 void test_proc_stripes_smoke(void);
+void test_proc_legate_scope_teardown(void);
+void test_proc_legate_teardown_except_and_zero(void);
+
+// Test-harness hooks (kept out of proc.h; no production caller). The legate
+// teardown walk + the synthetic-Proc table splice let the test verify the walk
+// flags every scope member -- the actual death fires at the EL0 die-check,
+// which kernel test threads (EL1) never reach, so the flag is the observable.
+extern void proc_test_link(struct Proc *p);
+extern void proc_test_unlink(struct Proc *p);
+extern void proc_test_legate_teardown(u32 scope_id, struct Proc *except);
 
 static volatile u32 g_proc_test_ran;
 static volatile u64 g_cpu_run_count[DTB_MAX_CPUS];
@@ -644,4 +654,83 @@ void test_proc_stripes_smoke(void) {
     TEST_ASSERT(child_stripes != kp,
         "an rfork'd child's stripes must differ from the parent's "
         "(minted fresh, never inherited)");
+}
+
+// =============================================================================
+// A-4a legate scope teardown (I-25). Synthetic Procs spliced into the table
+// with a chosen legate_scope_id; the teardown walk must group-terminate (set
+// group_exit_msg) exactly the matching members, sparing non-members, the
+// `except` Proc (the legate root on its own exit), and kproc. Synthetic Procs
+// have no running thread, so flagging them is inert -- the flag is the
+// unit-testable observable (the death step is the already-tested #809/#811
+// EL0-die-check path).
+// =============================================================================
+
+static struct Proc *legate_make_linked(u32 scope) {
+    struct Proc *p = proc_alloc();
+    if (!p) return NULL;
+    p->legate_scope_id = scope;
+    proc_test_link(p);
+    return p;
+}
+
+static void legate_drop_linked(struct Proc *p) {
+    if (!p) return;
+    proc_test_unlink(p);
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+}
+
+void test_proc_legate_scope_teardown(void) {
+    // A,B share scope 0xA; C is in a different scope 0xB (the control).
+    struct Proc *a = legate_make_linked(0xAu);
+    struct Proc *b = legate_make_linked(0xAu);
+    struct Proc *c = legate_make_linked(0xBu);
+    TEST_ASSERT(a && b && c, "alloc + link synthetic Procs");
+
+    proc_test_legate_teardown(0xAu, NULL);
+
+    TEST_ASSERT(a->group_exit_msg != NULL, "scope-0xA member A flagged");
+    TEST_ASSERT(b->group_exit_msg != NULL, "scope-0xA member B flagged");
+    TEST_EXPECT_EQ(c->group_exit_msg, (const char *)NULL,
+        "scope-0xB member C NOT flagged (different scope)");
+    TEST_EXPECT_EQ(kproc()->group_exit_msg, (const char *)NULL,
+        "kproc NEVER flagged by a legate teardown");
+
+    legate_drop_linked(a);
+    legate_drop_linked(b);
+    legate_drop_linked(c);
+}
+
+void test_proc_legate_teardown_except_and_zero(void) {
+    // `except`: the legate root (trigger 1) is spared; the other member dies.
+    struct Proc *root = legate_make_linked(0xCu);
+    struct Proc *mem  = legate_make_linked(0xCu);
+    TEST_ASSERT(root && mem, "alloc + link");
+
+    proc_test_legate_teardown(0xCu, root);   // except = root
+    TEST_EXPECT_EQ(root->group_exit_msg, (const char *)NULL,
+        "the except (root) Proc is NOT flagged");
+    TEST_ASSERT(mem->group_exit_msg != NULL, "the other scope member IS flagged");
+
+    legate_drop_linked(root);
+    legate_drop_linked(mem);
+
+    // scope_id == 0 is the not-a-legate sentinel: a teardown for scope 0 (or
+    // against a normal scope-0 Proc) must be a TOTAL no-op -- never nuke every
+    // ordinary Proc. This guards the catastrophic mis-call.
+    struct Proc *normal = legate_make_linked(0u);   // scope_id 0 == normal Proc
+    TEST_ASSERT(normal != NULL, "alloc + link normal Proc");
+
+    proc_test_legate_teardown(0u, NULL);            // scope 0 -> no-op
+    TEST_EXPECT_EQ(normal->group_exit_msg, (const char *)NULL,
+        "scope-0 teardown does NOT flag a normal Proc");
+    TEST_EXPECT_EQ(kproc()->group_exit_msg, (const char *)NULL,
+        "scope-0 teardown does NOT flag kproc");
+
+    proc_test_legate_teardown(0xDEADu, NULL);       // no member has this scope
+    TEST_EXPECT_EQ(normal->group_exit_msg, (const char *)NULL,
+        "teardown of an unmatched scope flags nobody");
+
+    legate_drop_linked(normal);
 }

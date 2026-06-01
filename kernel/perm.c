@@ -19,10 +19,12 @@ int perm_check(const struct Proc *p, const struct t_stat *st, unsigned want) {
     if (!p || !st)           return -1;
     want &= (PERM_R | PERM_W | PERM_X);
 
-    // The DAC-override: the sole bypass is the CAP_HOSTOWNER capability, never
-    // an identity (I-22). No principal_id -- not even PRINCIPAL_SYSTEM -- is
-    // special-cased here.
-    if (p->caps & CAP_HOSTOWNER) return 0;
+    // The DAC-override: a capability, NEVER an identity (I-22). No principal_id
+    // -- not even PRINCIPAL_SYSTEM -- is special-cased here. CAP_HOSTOWNER is
+    // the unified fs-admin authority; CAP_DAC_OVERRIDE (A-4a) is the finer
+    // rwx-bypass split out of it, conferred via a legate clearance grant. Either
+    // bypasses the rwx check.
+    if (p->caps & (CAP_HOSTOWNER | CAP_DAC_OVERRIDE)) return 0;
 
     // Owner-first POSIX: an owner is judged on owner bits ONLY (even when group/
     // other would grant more -- it can always chmod itself the bit). The file's
@@ -70,16 +72,24 @@ rights_t rights_for_omode(u32 omode) {
 
 int perm_wstat_check(const struct Proc *p, u32 cur_uid, u32 valid, u32 new_gid) {
     if (!p) return -1;
-    bool hostowner = (p->caps & CAP_HOSTOWNER) != 0;  // the elevation-only cap
+    // chmod-any authority: CAP_HOSTOWNER only. There is no finer CAP_FOWNER
+    // split at v1.0 -- chmod-by-non-owner stays in the unified authority (the
+    // A-4a clearance set is DAC_OVERRIDE/CHOWN/KILL, none of which is chmod).
+    bool fowner    = (p->caps & CAP_HOSTOWNER) != 0;
+    // chown/chgrp-to-any authority: CAP_HOSTOWNER OR the A-4a CAP_CHOWN (the
+    // finer no-give-away chown right split out of CAP_HOSTOWNER, conferable via
+    // a legate clearance grant).
+    bool chown_any = (p->caps & (CAP_HOSTOWNER | CAP_CHOWN)) != 0;
     bool owner     = (p->principal_id == cur_uid);
-    // chmod: only the owner may change a file's mode bits (or CAP_HOSTOWNER).
-    if ((valid & T_WSTAT_MODE) && !owner && !hostowner)  return -1;
-    // chown(uid): no give-away -- only CAP_HOSTOWNER (Plan 9 fileserver-owner /
-    // Linux CAP_CHOWN). The owner may NOT hand a file to another principal.
-    if ((valid & T_WSTAT_UID)  && !hostowner)            return -1;
-    // chgrp: the owner may move a file to a group they belong to; CAP_HOSTOWNER
-    // to any group.
-    if ((valid & T_WSTAT_GID)  && !hostowner &&
+    // chmod: only the owner may change a file's mode bits (or chmod-any authority).
+    if ((valid & T_WSTAT_MODE) && !owner && !fowner)     return -1;
+    // chown(uid): no give-away -- the owner may NOT hand a file to another
+    // principal; only chown-any authority may (Plan 9 fileserver-owner /
+    // Linux CAP_CHOWN).
+    if ((valid & T_WSTAT_UID)  && !chown_any)            return -1;
+    // chgrp: the owner may move a file to a group they belong to; chown-any
+    // authority to any group.
+    if ((valid & T_WSTAT_GID)  && !chown_any &&
         !(owner && proc_in_group(p, new_gid)))           return -1;
     return 0;
 }

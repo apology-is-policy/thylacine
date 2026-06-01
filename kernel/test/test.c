@@ -68,6 +68,8 @@ void test_proc_orphan_reparent_smoke(void);
 void test_proc_console_attached_smoke(void);
 void test_proc_stripes_smoke(void);
 void test_proc_group_terminate_smoke(void);
+void test_proc_legate_scope_teardown(void);
+void test_proc_legate_teardown_except_and_zero(void);
 void test_proc_identity_kproc_is_system(void);
 void test_proc_identity_rfork_inherits(void);
 void test_proc_identity_apply_sets_fields(void);
@@ -289,6 +291,8 @@ void test_perm_rights_for_omode(void);
 void test_perm_wstat_policy(void);
 void test_perm_devramfs_enforced_real_metadata(void);
 void test_perm_dev_flags(void);
+void test_perm_check_dac_override_cap(void);
+void test_perm_wstat_chown_cap(void);
 void test_devsrv_registered(void);
 void test_devsrv_post_gate(void);
 void test_devsrv_post_basic(void);
@@ -309,6 +313,15 @@ void test_devcap_use_basic(void);
 void test_devcap_use_one_shot(void);
 void test_devcap_use_mismatched_cap(void);
 void test_devcap_exit_clears_grant(void);
+void test_devcap_clearance_grant_gate_no_cap(void);
+void test_devcap_clearance_grant_bad_args(void);
+void test_devcap_clearance_redeem_basic(void);
+void test_devcap_clearance_self_restriction(void);
+void test_devcap_clearance_redeem_beyond_grant(void);
+void test_devcap_clearance_one_shot(void);
+void test_devcap_clearance_cross_stripes(void);
+void test_devcap_clearance_valid_until(void);
+void test_devcap_clearance_kind_isolation(void);
 void test_srvconn_create_destroy(void);
 void test_srvconn_roundtrip(void);
 void test_srvconn_ring_capacity(void);
@@ -751,6 +764,9 @@ struct test_case g_tests[] = {
     { "proc.console_attached_smoke",   test_proc_console_attached_smoke,   false, NULL },
     { "proc.stripes_smoke",            test_proc_stripes_smoke,            false, NULL },
     { "proc.group_terminate_smoke",    test_proc_group_terminate_smoke,    false, NULL },
+    { "proc.legate_scope_teardown",    test_proc_legate_scope_teardown,    false, NULL },
+    { "proc.legate_teardown_except_and_zero",
+                                       test_proc_legate_teardown_except_and_zero, false, NULL },
     { "proc_identity.kproc_is_system", test_proc_identity_kproc_is_system, false, NULL },
     { "proc_identity.rfork_inherits",  test_proc_identity_rfork_inherits,  false, NULL },
     { "proc_identity.apply_sets_fields",
@@ -1051,6 +1067,15 @@ struct test_case g_tests[] = {
     { "devcap.use_one_shot",           test_devcap_use_one_shot,           false, NULL },
     { "devcap.use_mismatched_cap",     test_devcap_use_mismatched_cap,     false, NULL },
     { "devcap.exit_clears_grant",      test_devcap_exit_clears_grant,      false, NULL },
+    { "devcap.clearance_grant_gate_no_cap",   test_devcap_clearance_grant_gate_no_cap,   false, NULL },
+    { "devcap.clearance_grant_bad_args",      test_devcap_clearance_grant_bad_args,      false, NULL },
+    { "devcap.clearance_redeem_basic",        test_devcap_clearance_redeem_basic,        false, NULL },
+    { "devcap.clearance_self_restriction",    test_devcap_clearance_self_restriction,    false, NULL },
+    { "devcap.clearance_redeem_beyond_grant", test_devcap_clearance_redeem_beyond_grant, false, NULL },
+    { "devcap.clearance_one_shot",            test_devcap_clearance_one_shot,            false, NULL },
+    { "devcap.clearance_cross_stripes",       test_devcap_clearance_cross_stripes,       false, NULL },
+    { "devcap.clearance_valid_until",         test_devcap_clearance_valid_until,         false, NULL },
+    { "devcap.clearance_kind_isolation",      test_devcap_clearance_kind_isolation,      false, NULL },
     { "srvconn.create_destroy",        test_srvconn_create_destroy,        false, NULL },
     { "srvconn.roundtrip",             test_srvconn_roundtrip,             false, NULL },
     { "srvconn.ring_capacity",         test_srvconn_ring_capacity,         false, NULL },
@@ -1626,6 +1651,8 @@ struct test_case g_tests[] = {
     { "perm.devramfs_enforced_real_metadata",
                                        test_perm_devramfs_enforced_real_metadata, false, NULL },
     { "perm.dev_flags",                test_perm_dev_flags,                false, NULL },
+    { "perm.check_dac_override_cap",   test_perm_check_dac_override_cap,   false, NULL },
+    { "perm.wstat_chown_cap",          test_perm_wstat_chown_cap,          false, NULL },
     { NULL, NULL, false, NULL },          // sentinel
 };
 

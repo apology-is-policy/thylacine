@@ -750,6 +750,28 @@ void proc_apply_identity(struct Proc *p, u32 principal_id, u32 primary_gid,
                          const u32 *supp_gids, u8 supp_gid_count);
 
 // =============================================================================
+// A-4a: the legate stamp (the single audited legate-creation write site).
+// =============================================================================
+//
+// proc_become_legate — make `p` a legate ROOT (IDENTITY-DESIGN.md §9.8, I-25).
+// The ONLY function that creates a legate; called from the `cap` device
+// clearance redeem (devcap.c::cap_redeem_grant_for_writer) after it validated
+// the pending clearance grant. Atomically ORs `caps_to_or` (already narrowed by
+// the redeem's self_restriction to a subset of the grant) into p->caps, records
+// the scope context (a FRESH kernel-allocated legate_scope_id -- NEVER caller-
+// supplied, since it is the teardown-walk match key and a collision would tear
+// down the wrong subtree -- plus the corvus-supplied session_id + the computed
+// valid_until), and sets PROC_FLAG_LEGATE_ROOT. Durable principal_id is
+// UNCHANGED (scripture §3.1: the legate is the same human, more authority).
+// `caps_to_or` is OR'd with __ATOMIC_ACQ_REL (multi-thread Procs exist since
+// P6; a sibling thread may read p->caps in a concurrent syscall cap-check).
+// Extincts on a NULL / corrupted Proc (a kernel-internal contract violation).
+// The matching EVAPORATION (scope teardown on root exit / valid_until expiry)
+// lands in the same chunk so a legate never exists without its teardown (I-25).
+void proc_become_legate(struct Proc *p, u64 caps_to_or, u32 session_id,
+                        u64 valid_until);
+
+// =============================================================================
 // P5-corvus-srv-impl-a2: the /srv service-registry post-gate.
 // =============================================================================
 //

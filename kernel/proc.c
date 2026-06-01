@@ -36,6 +36,7 @@
 
 #include "../arch/arm64/asid.h"
 #include "../arch/arm64/mmu.h"
+#include "../arch/arm64/timer.h"   // timer_now_ns (A-4a legate valid_until expiry)
 #include "../arch/arm64/uaccess.h"
 #include "../arch/arm64/uart.h"
 #include "../mm/slub.h"
@@ -59,6 +60,13 @@ static u64                g_proc_destroyed;
 // an explicit INT_MAX guard). Value 0 is never handed out: stripes == 0
 // is the reserved fail-closed sentinel. proc_init seeds it to 1.
 static u64                g_next_stripes;
+
+// A-4a: monotonic source of legate scope ids (legate_scope_alloc). Like
+// g_next_stripes, value 0 is never handed out (0 == not-a-legate). A scope id
+// is the teardown-walk match key, so it MUST be unique per legate -- kernel-
+// allocated here, never derived from any caller-supplied value. u32 to match
+// the struct Proc field; a wrap (after ~4 billion legates) skips 0.
+static u32                g_next_legate_scope;
 
 // P3-A (R5-H F75 close): global proc-table lock guarding the Proc-
 // lineage state machine on SMP.
@@ -853,6 +861,79 @@ void proc_apply_identity(struct Proc *p, u32 principal_id, u32 primary_gid,
         p->supp_gids[i] = 0u;
 }
 
+// =============================================================================
+// A-4a: the legate stamp + scope teardown (IDENTITY-DESIGN.md §9.8, I-25).
+// =============================================================================
+
+// Allocate a fresh, nonzero legate scope id. The teardown-walk match key, so
+// uniqueness is load-bearing -- kernel-allocated, never caller-supplied. The
+// loop skips the 0 sentinel on the (physically-unreachable) u32 wrap.
+static u32 legate_scope_alloc(void) {
+    u32 id;
+    do {
+        id = __atomic_fetch_add(&g_next_legate_scope, 1u, __ATOMIC_RELAXED) + 1u;
+    } while (id == 0u);
+    return id;
+}
+
+void proc_become_legate(struct Proc *p, u64 caps_to_or, u32 session_id,
+                        u64 valid_until) {
+    if (!p || p->magic != PROC_MAGIC)
+        extinction("proc_become_legate: NULL or corrupted Proc");
+
+    u32 scope = legate_scope_alloc();
+
+    // OR the (already self-restricted) cleared caps atomically -- a sibling
+    // thread of this Proc may read p->caps concurrently in a syscall cap-check
+    // (multi-thread Procs exist since P6).
+    __atomic_fetch_or(&p->caps, caps_to_or, __ATOMIC_ACQ_REL);
+
+    // Durable principal_id is UNCHANGED (scripture §3.1). Record the scope
+    // context. session_id + valid_until are written before scope_id so a
+    // concurrent teardown walk (of some OTHER scope) that observes a nonzero
+    // scope_id via the RELEASE store below also observes these. (Correctness
+    // does not depend on it -- a fresh scope id matches no in-flight teardown
+    // ctx -- but it keeps the publication clean.)
+    p->legate_session_id  = session_id;
+    p->legate_valid_until = valid_until;
+    __atomic_store_n(&p->legate_scope_id, scope, __ATOMIC_RELEASE);
+
+    // Mark the ROOT. One-way; NEVER inherited by rfork (proc_flags never are),
+    // so an rfork child is a scope MEMBER (carries scope_id, not the flag),
+    // never a second root. RELEASE pairs with the ACQUIRE read in exits().
+    __atomic_fetch_or(&p->proc_flags, PROC_FLAG_LEGATE_ROOT, __ATOMIC_RELEASE);
+}
+
+// Teardown walk context + callback. The callback group-terminates every Proc
+// carrying `scope_id` except `except` (the legate root on its own exit, which
+// exits via the normal path) and kproc. Returns 0 always so proc_for_each /
+// proc_for_each_walk visits the ENTIRE table.
+//
+// Member teardown is the scripture-mandated tidiness sweep: at v1.0 the
+// clearance set is ALL elevation-only, which rfork strips, so a scope MEMBER
+// never holds the elevated caps (only the root does). I-25's privilege
+// guarantee ("no elevated Proc outlives the scope") therefore rests on the
+// ROOT -- which dies on its own exit (trigger 1) or self-terminates on
+// valid_until expiry (trigger 2, which passes except=NULL to include self).
+// A member spawned racing this walk that the sweep misses is a benign,
+// UNELEVATED straggler with a stale scope tag -- not an I-25 violation. (A
+// strict whole-subtree close via an rfork-under-lock parent-flag check is a
+// documented v1.x tidiness refinement.)
+struct legate_teardown_ctx {
+    u32          scope_id;
+    struct Proc *except;
+};
+
+static int legate_teardown_cb(struct Proc *m, void *arg) {
+    struct legate_teardown_ctx *ctx = arg;
+    if (ctx->scope_id == 0u)  return 0;   // never tear down the 0 (not-a-legate) scope
+    if (m == ctx->except)     return 0;
+    if (m == g_kproc)         return 0;
+    if (m->legate_scope_id != 0u && m->legate_scope_id == ctx->scope_id)
+        proc_group_terminate(m, "legate scope ended");
+    return 0;   // visit every Proc
+}
+
 // P6-pouch-threads (sub-chunk 9a) audit F1 close: cross-module
 // acquire/release for g_proc_table_lock. thread.c's thread_link_into_proc
 // / thread_unlink_from_proc need to serialize with proc_count_live_peers_-
@@ -1120,6 +1201,23 @@ void exits(const char *msg) {
     // observes consistent (p->state == ZOMBIE AND ct->state == EXITING).
     irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
 
+    // A-4a (I-25) trigger 1: if this Proc is a legate ROOT, tear down its
+    // scope as it exits -- every other Proc carrying its legate_scope_id is
+    // group-terminated (the scripture-mandated subtree sweep). Done via the
+    // LOCKED walk (proc_for_each_walk) because we ALREADY hold
+    // g_proc_table_lock -- proc_for_each would re-take it -> deadlock. The
+    // root itself (except = p) exits via the normal path below. Placed before
+    // the live-peers branch so it fires whether or not the root has live
+    // peers. The ROOT flag read pairs (ACQUIRE) with proc_become_legate's
+    // RELEASE store; legate_scope_id is then a coherent companion read.
+    if (__atomic_load_n(&p->proc_flags, __ATOMIC_ACQUIRE) & PROC_FLAG_LEGATE_ROOT) {
+        struct legate_teardown_ctx tctx = {
+            .scope_id = p->legate_scope_id,
+            .except   = p,
+        };
+        proc_for_each_walk(g_kproc, legate_teardown_cb, &tctx);
+    }
+
     // Peer-Thread check (multi-thread Proc gate): every peer Thread MUST
     // be in THREAD_EXITING state already. wait_pid's reap loop later
     // walks p->threads and frees each, so the count itself is not
@@ -1332,6 +1430,25 @@ void el0_return_die_check(void) {
     if (!t || t->magic != THREAD_MAGIC) return;
     struct Proc *p = t->proc;
     if (!p || p->magic != PROC_MAGIC)   return;
+
+    // A-4a (I-25) trigger 2: legate scope time-expiry. Cheap guard FIRST -- the
+    // common case is not-a-legate (scope_id == 0), which short-circuits before
+    // any timer read or lock. If this Proc is in a legate scope whose deadline
+    // has passed, tear down the ENTIRE scope INCLUDING self (except = NULL):
+    // proc_group_terminate flags each member's group_exit_msg, and the
+    // fall-through check below then observes self's own flag and self-terminates
+    // (so the elevated ROOT never executes more EL0 work past valid_until). This
+    // tail is LOCKLESS, so the lock-TAKING proc_for_each is correct here (unlike
+    // exits()'s already-locked walk). Re-entrant-safe: once flagged, a second
+    // expiry pass is a CAS no-op. scope_id read ACQUIRE (pairs with
+    // proc_become_legate's RELEASE); valid_until is its coherent companion.
+    u32 scope = __atomic_load_n(&p->legate_scope_id, __ATOMIC_ACQUIRE);
+    if (scope != 0u && p->legate_valid_until != 0u &&
+        timer_now_ns() > p->legate_valid_until) {
+        struct legate_teardown_ctx tctx = { .scope_id = scope, .except = NULL };
+        proc_for_each(legate_teardown_cb, &tctx);
+    }
+
     if (__atomic_load_n(&p->group_exit_msg, __ATOMIC_ACQUIRE) != NULL) {
         // The Proc is group-terminating; self-terminate. thread_exit_self
         // marks self EXITING and, if this is the last live Thread, transitions
@@ -1527,4 +1644,15 @@ void proc_test_unlink(struct Proc *p) {
     p->parent  = NULL;
     p->sibling = NULL;
     spin_unlock_irqrestore(&g_proc_table_lock, s);
+}
+
+// proc_test_legate_teardown — run the A-4a legate-scope teardown walk for
+// `scope_id`, excluding `except`. Exposes the lockless (proc_for_each) form of
+// trigger 2 so the unit test can verify the walk flags every scope member's
+// group_exit_msg + spares non-members / kproc -- the actual death step fires at
+// the EL0-return die-check, which kernel test threads (EL1) never reach, so the
+// flag is the unit-testable observable. No production caller.
+void proc_test_legate_teardown(u32 scope_id, struct Proc *except) {
+    struct legate_teardown_ctx tctx = { .scope_id = scope_id, .except = except };
+    proc_for_each(legate_teardown_cb, &tctx);
 }
