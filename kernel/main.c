@@ -46,6 +46,7 @@
 #include <thylacine/thread.h>
 #include <thylacine/vma.h>      // vma_init (P3-Da)
 #include <thylacine/burrow.h>
+#include <thylacine/cons.h>     // console_mgr_main (A-4c-1)
 #include <thylacine/dev.h>
 #include <thylacine/dev9p.h>
 #include <thylacine/pipe.h>
@@ -534,6 +535,30 @@ void boot_main(void) {
         bootcpu_idle->band = SCHED_BAND_IDLE;
         sched_set_bootcpu_idle(bootcpu_idle);
     }
+
+    // A-4c-1: kernel UART console RX + the console_mgr kthread. Unmask the
+    // PL011 RX IRQ, route it to the console RX handler (fills the cons input
+    // ring; Ctrl-C -> a deferred `interrupt` note to the console owner), and
+    // spawn the console_mgr kthread that services deferred console actions in
+    // process context (the RX IRQ handler is wakeup-only, since notes_post is
+    // not IRQ-safe). On the kernel UART Dev (dc='c'); the userspace
+    // virtio-input path is separate (ARCH §17.1). The UART SPI is reserved
+    // against userspace SYS_IRQ_CREATE claim in irqfwd_init (above). Spawned
+    // after sched_init + kproc + bootcpu_idle so the kthread can block + be
+    // scheduled; RX bytes arriving before it runs simply sit in the ring.
+    uart_rx_init();
+    if (!gic_attach(UART_INTID_PL011, uart_rx_handler, NULL))
+        extinction("boot_main: gic_attach(uart-rx) failed");
+    if (!gic_enable_irq(UART_INTID_PL011))
+        extinction("boot_main: gic_enable_irq(uart-rx) failed");
+    {
+        struct Thread *console_mgr = thread_create(kproc(), console_mgr_main);
+        if (!console_mgr) extinction("boot_main: console_mgr alloc failed");
+        ready(console_mgr);
+    }
+    uart_puts("  cons:  UART RX live (INTID ");
+    uart_putdec((u64)UART_INTID_PL011);
+    uart_puts("); console_mgr kthread up\n");
 
     uart_puts("  sched:   bands=3 (INTERACTIVE/NORMAL/IDLE) runnable=");
     uart_putdec((u64)sched_runnable_count());

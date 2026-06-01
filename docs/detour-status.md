@@ -603,6 +603,14 @@ kill = BOTH the namespace `/proc/<pid>/ctl` surface AND a narrow elevation-only 
     kthread + `g_console_owner` + the `exits()` clear-hook) lands + audits first; **c-2** = the
     BREAK->SAK revoke/re-grant + `g_console_trusted_proc` + the I-27 handoff lands + audits
     second. On the kernel UART Dev `dc='c'`, NOT the userspace virtio-input path (they coexist).
+  - **c-1 LANDED** *(impl pending-SHA; default build 677/677 + boot OK)*: `uart.c` RX IRQ +
+    `uart_rx_init` + `UART_INTID_PL011=33`; `cons.c` ring + blocking `devcons_read`
+    (single-reader busy-guard) + `cons_rx_input` (IRQ wakeup-only) + the `console_mgr` kthread
+    (deferred Ctrl-C `interrupt` post); `proc.c` `g_console_owner` + `proc_set_console_owner` +
+    `proc_console_post_interrupt` + the zombie-chokepoint owner-clear; `joey.c` sets the boot
+    owner; `main.c` boot wiring; `irqfwd.c` SPI-33 reservation. 8 `cons.*` tests; removed the
+    stale `cons.read_returns_eof` (its EOF contract is superseded by the blocking read).
+    **c-2 (SAK) NEXT.**
 - **Depends:** A-1 + corvus. **Seams:** resource-scoped HW-cap allowlist (the structured caps
   TLV); distributed clearance crypto-proof (v1.x); the graphical Nitpicker-style trusted
   screen (Halcyon); a finer per-target kill handle (vs the blanket `CAP_KILL`).

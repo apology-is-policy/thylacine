@@ -21,7 +21,6 @@
 //   cons.write_advances                 — write returns n; bytes go
 //                                         to UART (visual confirm via
 //                                         boot log)
-//   cons.read_returns_eof               — v1.0 read is degenerate
 //   trivial_devs.spoor_alloc_10k_no_leak_devnull
 //                                       — ROADMAP §6.2 full 10K iter
 //                                         exit criterion via the
@@ -46,7 +45,6 @@ void test_random_rndr_available(void);
 void test_random_read_produces_nonzero_bytes(void);
 void test_random_read_varies_across_calls(void);
 void test_cons_write_advances(void);
-void test_cons_read_returns_eof(void);
 void test_trivial_devs_devnull_10k_no_leak(void);
 
 // =============================================================================
@@ -331,18 +329,6 @@ void test_cons_write_advances(void) {
     TEST_EXPECT_EQ(devcons.write(c, "", 0, 0), (long)0, "n=0 returns 0");
     TEST_EXPECT_EQ(devcons.write(c, NULL, 5, 0), (long)-1, "NULL buf rejected");
     TEST_EXPECT_EQ(devcons.write(c, marker, -1, 0), (long)-1, "neg n rejected");
-
-    spoor_clunk(c);
-}
-
-void test_cons_read_returns_eof(void) {
-    struct Spoor *c = open_spoor(&devcons, 0);
-    TEST_ASSERT(c != NULL, "open devcons OK");
-
-    u8 buf[16];
-    long got = devcons.read(c, buf, 16, 0);
-    TEST_EXPECT_EQ(got, (long)0,
-                   "devcons.read returns 0 at v1.0 (UART RX deferred)");
 
     spoor_clunk(c);
 }

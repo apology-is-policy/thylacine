@@ -20,7 +20,7 @@ The cons / null / zero / random Devs are also the substrate for the future users
 ## Public API — `<thylacine/dev.h>`
 
 ```c
-extern struct Dev devcons;        // dc='c'  — UART console (write-only at v1.0)
+extern struct Dev devcons;        // dc='c'  — UART console (write + blocking RX, A-4c-1)
 extern struct Dev devnull;        // dc='0'  — bit bucket
 extern struct Dev devzero;        // dc='z'  — produces zeroes
 extern struct Dev devrandom;      // dc='r'  — CSPRNG (RNDR-backed)
@@ -38,7 +38,7 @@ Each Dev's vtable is a single-file leaf with `dc` + `name` + 16 ops. Most ops fo
 
 | Dev | `read` | `write` | `init` | Notes |
 |---|---|---|---|---|
-| `cons` ('c') | returns 0 (EOF) | forwards to `uart_putc` | no-op | UART RX deferred to a later P4 sub-chunk (likely after irqfwd P4-G). Rendez-blocked read with IRQ-driven RX is the production path; userspace input drivers may make kernel-side `cons.read` permanently degenerate. |
+| `cons` ('c') | blocks on the RX ring; returns >= 1 byte (A-4c-1) | forwards to `uart_putc` | no-op | RX landed at A-4c-1: the PL011 RX IRQ (`arch/arm64/uart.c::uart_rx_handler`, SPI 33) fills a bounded ring via `cons_rx_input`; `devcons_read` blocks on a single `Rendez` (single-reader busy-guard; a 2nd concurrent reader gets -1). Ctrl-C (0x03) is cooked-consumed -> a deferred `interrupt` note to the console owner (posted by the `console_mgr` kthread, since the IRQ handler is wakeup-only); a serial BREAK is the A-4c-2 SAK (discarded at A-4c-1). See `cons.h` + IDENTITY-DESIGN.md section 9.8. |
 | `null` ('0') | returns 0 (EOF) | returns n (silently consume) | no-op | POSIX `/dev/null` semantics. |
 | `zero` ('z') | fills buf with 0; returns n | returns n (silently consume) | no-op | POSIX `/dev/zero` semantics. |
 | `random` ('r') | RNDR-backed; returns n on full success, < n on RNDR-retry-exhausted, -1 if RNDR absent | returns n (silently consume; future versions stir into chacha20 state) | detects FEAT_RNG via ID_AA64ISAR0_EL1.RNDR field; sets `g_rndr_available`; prints to boot banner | RNDR / RNDRRS per ARM v8.5+. |
@@ -57,7 +57,8 @@ Each Dev's vtable is a single-file leaf with `dc` + `name` + 16 ops. Most ops fo
 | `kernel/null.c` | ~100 | devnull vtable; reads return 0; writes consume. |
 | `kernel/zero.c` | ~100 | devzero vtable; reads fill with zeroes; writes consume. |
 | `kernel/random.c` | ~190 | devrandom vtable + RNDR detection + retry loop. |
-| `kernel/cons.c` | ~110 | devcons vtable; writes forward to `uart_putc`; reads return 0. |
+| `kernel/cons.c` | ~240 | devcons vtable; writes forward to `uart_putc`; A-4c-1: RX ring + blocking `devcons_read` + `cons_rx_input` (IRQ-context, wakeup-only) + the `console_mgr` kthread (deferred Ctrl-C `interrupt` post). |
+| `arch/arm64/uart.c` | +RX | A-4c-1: `uart_rx_init` (IMSC.RXIM unmask) + `uart_rx_handler` (RX-FIFO drain + `DR.BE` BREAK split -> `cons_rx_input`); `UART_INTID_PL011 = 33` (QEMU-virt SPI fallback) in uart.h. |
 | `kernel/dev.c` | +50 | `dev_simple_attach / dev_simple_open / dev_simple_close` helpers + bestiary registration of all four in `dev_init`. |
 
 ### RNDR detail (random.c)
@@ -159,7 +160,15 @@ When `specs/9p_client.tla` lands at Phase 4+ (cumulative ROADMAP §7), Spoor cro
 ### cons
 
 - `cons.write_advances` — write of marker string returns n; n=0 returns 0; NULL/negative rejected.
-- `cons.read_returns_eof` — read returns 0 at v1.0.
+- `cons.ring_fill_drain` — pushed data bytes drain in FIFO order (A-4c-1).
+- `cons.ring_overflow_drop` — a full ring drops the excess; no corruption / overflow.
+- `cons.ctrlc_consumed` — Ctrl-C (0x03) sets intr-pending and is NOT enqueued as ring data.
+- `cons.break_discarded` — a serial BREAK entry is discarded (A-4c-1; the SAK is A-4c-2).
+- `cons.read_busy_guard` — a 2nd concurrent reader returns -1 (single-reader guard), not data.
+- `cons.read_bad_args` — NULL buf / n<0 -> -1; n==0 -> 0 (no block).
+- `cons.console_owner_intr` — `proc_console_post_interrupt` posts `interrupt` to the live owner; a NULL or zombie owner is a no-op.
+
+The A-4c-1 cons tests drive `cons_rx_input` synthetically (the harness cannot inject UART RX -- IDENTITY-DESIGN.md section 9.8 test note); the real PL011 RX IRQ wiring is validated by boot survival + the interactive `Ctrl-A b` BREAK path.
 
 ### Lifecycle stress (ROADMAP §6.2)
 
@@ -176,10 +185,10 @@ The `random.*` tests skip gracefully when RNDR is unavailable (e.g., a future po
 | `kernel/null.c` + devnull Dev (dc='0') | Landed (P4-B) |
 | `kernel/zero.c` + devzero Dev (dc='z') | Landed (P4-B) |
 | `kernel/random.c` + devrandom Dev (dc='r'; RNDR-backed) | Landed (P4-B) |
-| `kernel/cons.c` + devcons Dev (dc='c'; UART forward) | Landed (P4-B) |
+| `kernel/cons.c` + devcons Dev (dc='c'; UART forward) | Landed (P4-B); blocking RX + Ctrl-C + console-owner added (A-4c-1) |
 | `dev_simple_attach / open / close` helpers | Landed (P4-B) |
 | Bestiary registration in `dev_init` | Landed (P4-B; 5 Devs total) |
-| In-kernel tests | 12 covering bestiary registration, per-Dev contracts, lifecycle stress (10K no-leak on /dev/null). |
+| In-kernel tests | 11 covering bestiary registration, per-Dev contracts, lifecycle stress (10K no-leak on /dev/null). The A-4c-1 console RX tests (8 `cons.*`) live in `kernel/test/test_cons.c`. |
 | ROADMAP §6.2 "Spoor lifecycle: 10K cycles on /dev/null" | Closed (P4-B). |
 | ROADMAP §6.2 "cat /dev/random produces non-zero bytes" | Closed (P4-B; conditional on FEAT_RNG, which QEMU virt -cpu max provides). |
 | chacha20 stir for devrandom | Held to a future hardening sub-chunk (defense-in-depth; API unchanged). |

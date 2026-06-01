@@ -693,6 +693,19 @@ void proc_mark_console_attached(struct Proc *p);
 // PROC_FLAG_CONSOLE_ATTACHED. Returns false for a NULL `p`.
 bool proc_is_console_attached(const struct Proc *p);
 
+// A-4c-1: the kernel console owner (the trusted-path anchor for /dev/cons).
+//
+// proc_set_console_owner — record `p` as the current console owner (joey at
+// boot; A-4c-2's SAK re-grants to corvus). Takes g_proc_table_lock. Pass NULL
+// to clear (the A-4c-2 fail-safe revoke-only). proc_become_zombie_locked also
+// clears it automatically when the owner dies, so the pointer never dangles.
+void proc_set_console_owner(struct Proc *p);
+
+// proc_console_post_interrupt — post the `interrupt` note (Ctrl-C) to the
+// current console owner. Called from the console_mgr kthread (process context).
+// No-op when there is no live owner. Takes g_proc_table_lock.
+void proc_console_post_interrupt(void);
+
 // =============================================================================
 // P5-corvus-srv: per-Proc identity tag.
 // =============================================================================

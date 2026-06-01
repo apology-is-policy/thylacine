@@ -239,7 +239,6 @@ void test_random_rndr_available(void);
 void test_random_read_produces_nonzero_bytes(void);
 void test_random_read_varies_across_calls(void);
 void test_cons_write_advances(void);
-void test_cons_read_returns_eof(void);
 void test_trivial_devs_devnull_10k_no_leak(void);
 void test_devproc_bestiary_smoke(void);
 void test_devproc_attach_returns_dir(void);
@@ -257,6 +256,13 @@ void test_devproc_read_partial_offset(void);
 void test_devproc_kill_authorized_predicate(void);
 void test_devproc_stat_native_ctl_owner(void);
 void test_devproc_write_ctl_kill_dispatch(void);
+void test_cons_ring_fill_drain(void);
+void test_cons_ring_overflow_drop(void);
+void test_cons_ctrlc_consumed(void);
+void test_cons_break_discarded(void);
+void test_cons_read_busy_guard(void);
+void test_cons_read_bad_args(void);
+void test_cons_console_owner_intr(void);
 void test_devctl_bestiary_smoke(void);
 void test_devctl_attach_returns_dir(void);
 void test_devctl_walk_to_each_leaf(void);
@@ -1000,7 +1006,6 @@ struct test_case g_tests[] = {
     { "random.read_produces_nonzero",  test_random_read_produces_nonzero_bytes, false, NULL },
     { "random.read_varies",            test_random_read_varies_across_calls, false, NULL },
     { "cons.write_advances",           test_cons_write_advances,           false, NULL },
-    { "cons.read_returns_eof",         test_cons_read_returns_eof,         false, NULL },
     { "trivial_devs.devnull_10k_no_leak",
                                        test_trivial_devs_devnull_10k_no_leak,
                                                                            false, NULL },
@@ -1022,6 +1027,13 @@ struct test_case g_tests[] = {
     { "devproc.kill_authorized_predicate", test_devproc_kill_authorized_predicate, false, NULL },
     { "devproc.stat_native_ctl_owner",     test_devproc_stat_native_ctl_owner,     false, NULL },
     { "devproc.write_ctl_kill_dispatch",   test_devproc_write_ctl_kill_dispatch,   false, NULL },
+    { "cons.ring_fill_drain",          test_cons_ring_fill_drain,          false, NULL },
+    { "cons.ring_overflow_drop",       test_cons_ring_overflow_drop,       false, NULL },
+    { "cons.ctrlc_consumed",           test_cons_ctrlc_consumed,           false, NULL },
+    { "cons.break_discarded",          test_cons_break_discarded,          false, NULL },
+    { "cons.read_busy_guard",          test_cons_read_busy_guard,          false, NULL },
+    { "cons.read_bad_args",            test_cons_read_bad_args,            false, NULL },
+    { "cons.console_owner_intr",       test_cons_console_owner_intr,       false, NULL },
     { "devctl.bestiary_smoke",         test_devctl_bestiary_smoke,         false, NULL },
     { "devctl.attach_returns_dir",     test_devctl_attach_returns_dir,     false, NULL },
     { "devctl.walk_to_each_leaf",      test_devctl_walk_to_each_leaf,      false, NULL },

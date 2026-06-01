@@ -25,12 +25,23 @@
 #include "mmu.h"
 
 #include <stdint.h>
+#include <thylacine/cons.h>
 #include <thylacine/extinction.h>
 #include <thylacine/page.h>
 
 #define PL011_DR    0x000
 #define PL011_FR    0x018
 #define PL011_FR_TXFF  (1u << 5)   // TX FIFO full / busy
+
+// A-4c-1: RX-side register layout (ARM DDI 0183 PrimeCell PL011 TRM).
+#define PL011_FR_RXFE     (1u << 4)    // RX FIFO empty
+#define PL011_DR_BE       (1u << 10)   // break error flag in a DR read
+#define PL011_IMSC        0x038        // interrupt mask set/clear
+#define PL011_ICR         0x044        // interrupt clear (write-1-to-clear)
+#define PL011_IMSC_RXIM   (1u << 4)    // RX interrupt mask
+#define PL011_IMSC_RTIM   (1u << 6)    // RX-timeout interrupt mask
+#define PL011_ICR_RXIC    (1u << 4)    // clear RX interrupt
+#define PL011_ICR_RTIC    (1u << 6)    // clear RX-timeout interrupt
 
 // Active PL011 base. Defaults to QEMU virt fallback so prints work
 // during early boot (before DTB parsing). uart_set_base() updates this
@@ -81,6 +92,34 @@ void uart_putc(char c) {
         // P1-F adds IRQ-driven TX with a buffer.
     }
     mmio_write32(base, PL011_DR, (uint32_t)(unsigned char)c);
+}
+
+// A-4c-1: unmask the PL011 RX path. Clear any stale RX raw-interrupt state,
+// then set IMSC.RXIM | RTIM so a received byte (or an RX-FIFO-timeout with
+// data pending) raises the UART SPI. CR (UARTEN/TXE/RXE) is left as QEMU's
+// default brings it up -- touching CR risks disrupting the live TX path.
+void uart_rx_init(void) {
+    uintptr_t base = pl011_base;
+    mmio_write32(base, PL011_ICR, PL011_ICR_RXIC | PL011_ICR_RTIC);
+    uint32_t imsc = mmio_read32(base, PL011_IMSC);
+    mmio_write32(base, PL011_IMSC, imsc | PL011_IMSC_RXIM | PL011_IMSC_RTIM);
+}
+
+// A-4c-1: PL011 RX IRQ handler. Runs in IRQ context (IRQs masked at PSTATE).
+// Drains the RX FIFO until empty, splitting each 12-bit DR read into the data
+// byte (bits 7:0) and the break flag (bit 10 BE), and hands each entry to the
+// console layer. cons_rx_input is wakeup-only (it does no IRQ-unsafe work);
+// the privileged/blocking work is deferred to the console_mgr kthread. Clears
+// the RX + RX-timeout interrupts before returning so the line de-asserts.
+void uart_rx_handler(uint32_t intid, void *arg) {
+    (void)intid;
+    (void)arg;
+    uintptr_t base = pl011_base;
+    while (!(mmio_read32(base, PL011_FR) & PL011_FR_RXFE)) {
+        uint32_t dr = mmio_read32(base, PL011_DR);
+        cons_rx_input((uint8_t)(dr & 0xffu), (dr & PL011_DR_BE) != 0u);
+    }
+    mmio_write32(base, PL011_ICR, PL011_ICR_RXIC | PL011_ICR_RTIC);
 }
 
 void uart_puts(const char *s) {

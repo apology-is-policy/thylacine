@@ -726,6 +726,40 @@ bool proc_is_console_attached(const struct Proc *p) {
 }
 
 // =============================================================================
+// A-4c-1: the kernel console owner (the trusted-path anchor for /dev/cons).
+// =============================================================================
+//
+// g_console_owner is the single Proc currently holding the console for the
+// kernel UART console Dev. Protected by g_proc_table_lock (the proc-lifecycle
+// lock) so a reader can deref it without racing the owner's exit/reap. Init
+// NULL; joey sets itself the owner at boot (joey_thunk, right after
+// proc_mark_console_attached); proc_become_zombie_locked clears it on
+// owner-death (every death path -- clean exit / kill / group-terminate). A-4c-2
+// adds the SAK revoke/re-grant transitions.
+static struct Proc *g_console_owner;   // BSS NULL
+
+void proc_set_console_owner(struct Proc *p) {
+    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    g_console_owner = p;
+    spin_unlock_irqrestore(&g_proc_table_lock, s);
+}
+
+// Post the `interrupt` note (Ctrl-C) to the current console owner. Runs in the
+// console_mgr kthread's process context. Reads g_console_owner + posts under
+// g_proc_table_lock so the owner cannot be reaped/freed mid-post (the A-4b kill
+// pattern: hold g_proc_table_lock, post a note; lock order g_proc_table_lock ->
+// note q->lock). A no-op when there is no live owner (e.g. after joey exits, or
+// a future SAK revoke-only).
+void proc_console_post_interrupt(void) {
+    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    struct Proc *owner = g_console_owner;
+    if (owner && owner->magic == PROC_MAGIC && owner->state == PROC_STATE_ALIVE) {
+        notes_post(owner, "interrupt", 0u, NULL, true);
+    }
+    spin_unlock_irqrestore(&g_proc_table_lock, s);
+}
+
+// =============================================================================
 // P5-corvus-srv-impl-a2: the /srv service-registry post-gate.
 // =============================================================================
 //
@@ -1013,6 +1047,15 @@ static void proc_become_zombie_locked(struct Proc *p, int status, const char *ms
     // path -- a clean exit AND a kill / group-terminate (the path A-4b's CAP_KILL
     // drives, and the multi-thread-root SYS_EXIT_GROUP path). A-4a audit F1.
     proc_legate_teardown_if_root(p);
+
+    // A-4c-1: if p is the kernel console owner, clear the owner pointer so it
+    // never dangles to a zombie/freed Proc. Same chokepoint discipline as the
+    // legate teardown above -- fires on every death path. (caller holds
+    // g_proc_table_lock, which proc_set_console_owner / proc_console_post_-
+    // interrupt also take, so the clear is race-free w.r.t. those readers.)
+    if (g_console_owner == p) {
+        g_console_owner = NULL;
+    }
 
     if (p->children) {
         proc_reparent_children(p);

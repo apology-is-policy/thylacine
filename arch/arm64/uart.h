@@ -46,6 +46,25 @@ uintptr_t uart_get_base(void);
 void uart_putc(char c);
 void uart_puts(const char *s);
 
+// A-4c-1: kernel UART console RX.
+//
+// PL011 interrupt number. On the QEMU virt machine the PL011 is wired to
+// GIC SPI 1 = INTID 33. Hardcoded as the platform fallback (the same shape
+// as the base-address fallback above): DTB `interrupts`-property parsing
+// does not exist at v1.0 and is a Lazarus/portability follow-up. v1.0
+// targets QEMU virt, so this is complete, not a half-version.
+#define UART_INTID_PL011  33u
+
+// Unmask the PL011 RX + RX-timeout interrupts (IMSC.RXIM | RTIM) after
+// clearing any stale RX raw-interrupt state. boot_main() calls this once,
+// then gic_attach(UART_INTID_PL011, uart_rx_handler, ...) + gic_enable_irq.
+void uart_rx_init(void);
+
+// PL011 RX IRQ handler (GIC dispatch target; runs in IRQ context). Drains
+// the RX FIFO, splitting each 12-bit DR entry into a data byte + a break
+// flag, and hands each to cons_rx_input. Clears the RX interrupts on exit.
+void uart_rx_handler(uint32_t intid, void *arg);
+
 // Print an unsigned 64-bit integer in hexadecimal, prefixed with "0x" and
 // zero-padded to 16 hex digits (i.e. "0x0000000040080000"). Used for the
 // boot banner's address fields.

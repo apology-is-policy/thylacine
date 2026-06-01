@@ -105,6 +105,12 @@ static void joey_thunk(void *arg) {
     if (!proc_is_console_attached(p))
         extinction("joey_thunk: console-attachment stamp did not take");
 
+    // A-4c-1: joey is the boot console owner -- the target the console_mgr
+    // kthread posts the `interrupt` note (Ctrl-C) to. proc_become_zombie_locked
+    // clears the owner when joey exits (so it never dangles); A-4c-2's SAK
+    // re-grants ownership to corvus.
+    proc_set_console_owner(p);
+
     u64 entry = 0, sp = 0;
     int rc = exec_setup(p, ia->blob, ia->blob_size, &entry, &sp);
     if (rc != 0) {

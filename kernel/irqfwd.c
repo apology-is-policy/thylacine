@@ -100,12 +100,15 @@ void irqfwd_init(void) {
     irq_state_t s = spin_lock_irqsave(&g_intid_lock);
     g_intid_claimed[IPI_RESCHED]             = true;     // SGI 0
     g_intid_claimed[TIMER_INTID_EL1_PHYS_NS] = true;     // PPI 30
+    g_intid_claimed[UART_INTID_PL011]        = true;     // A-4c-1: kernel cons RX
     spin_unlock_irqrestore(&g_intid_lock, s);
 
     uart_puts("irqfwd: reserved kernel INTIDs ");
     uart_putdec((u64)IPI_RESCHED);
     uart_puts(",");
     uart_putdec((u64)TIMER_INTID_EL1_PHYS_NS);
+    uart_puts(",");
+    uart_putdec((u64)UART_INTID_PL011);
     uart_puts("\n");
 }
 

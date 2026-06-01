@@ -9,11 +9,131 @@
 // with consctl (mode control); consctl is held until the Phase 5 PTY +
 // termios surface lands.
 
+#include <thylacine/cons.h>
 #include <thylacine/dev.h>
+#include <thylacine/proc.h>
+#include <thylacine/rendez.h>
+#include <thylacine/spinlock.h>
 #include <thylacine/spoor.h>
 #include <thylacine/types.h>
 
 #include "../arch/arm64/uart.h"
+
+// =============================================================================
+// A-4c-1: kernel UART console RX (the first kernel console INPUT path).
+// =============================================================================
+//
+// uart_rx_handler (IRQ context) calls cons_rx_input per received byte. Data
+// bytes fill g_cons.ring; devcons_read drains it, blocking on
+// g_cons_data_rendez when empty. Ctrl-C (0x03) is cooked-consumed -> the
+// console_mgr kthread posts the `interrupt` note to the console owner. A serial
+// BREAK is the A-4c-2 SAK; A-4c-1 discards it.
+//
+// IRQ-safety (IDENTITY-DESIGN.md section 9.8 "As-built"): cons_rx_input runs in
+// IRQ context, so it does ONLY ring + flag mutation (under an irqsave lock) +
+// wakeup() -- the SOLE IRQ-safe wake (notes_post + poll_waiter_list_wake take
+// plain spin_locks). The privileged/blocking work runs in console_mgr's process
+// context. The data wait is a single Rendez + a single-reader busy-guard:
+// poll_waiter_list_wake is not IRQ-safe, and a single-waiter Rendez extincts on
+// a second sleeper, so a 2nd concurrent blocking read returns -1 rather than
+// racing into that extinction (the console is a single-reader resource at v1.0;
+// a multi-reader lift is v1.x).
+
+#define CONS_RING_SIZE  256u   // power of two (mask-indexed); bounded -- full drops
+
+struct cons_input {
+    spin_lock_t lock;                  // ring + flags + reader_busy; taken irqsave
+    u8          ring[CONS_RING_SIZE];
+    u32         head;                  // next byte to read
+    u32         tail;                  // next slot to write
+    u32         count;
+    bool        reader_busy;           // a devcons_read is parked (single-reader)
+    bool        intr_pending;          // Ctrl-C seen -> post `interrupt` to owner
+};
+
+static struct cons_input g_cons = { .lock = SPIN_LOCK_INIT };
+static struct Rendez g_cons_data_rendez = RENDEZ_INIT;   // a reader parks here
+static struct Rendez g_cons_mgr_rendez  = RENDEZ_INIT;   // console_mgr parks here
+
+void cons_rx_input(u8 byte, bool is_break) {
+    if (is_break) {
+        // A-4c-2 SAK; discarded at A-4c-1 so a BREAK never corrupts the data
+        // stream (the DR data byte accompanying a break is 0x00).
+        return;
+    }
+    bool wake_data = false, wake_mgr = false;
+    irq_state_t s = spin_lock_irqsave(&g_cons.lock);
+    if (byte == 0x03u) {               // Ctrl-C: cooked-consume -> interrupt note
+        g_cons.intr_pending = true;
+        wake_mgr = true;
+    } else if (g_cons.count < CONS_RING_SIZE) {
+        g_cons.ring[g_cons.tail] = byte;
+        g_cons.tail = (g_cons.tail + 1u) & (CONS_RING_SIZE - 1u);
+        g_cons.count++;
+        wake_data = true;
+    }
+    // else: ring full -> drop (bounded; never overflows).
+    spin_unlock_irqrestore(&g_cons.lock, s);
+
+    // wakeup() is IRQ-safe (irqsave); a wake with no waiter is a no-op. The
+    // producer set the condition under g_cons.lock and the wakeup takes the
+    // Rendez lock the sleeper's cond is evaluated under -> no lost wakeup (the
+    // register-then-observe / I-9 pairing, as in devnotes_read).
+    if (wake_data) wakeup(&g_cons_data_rendez);
+    if (wake_mgr)  wakeup(&g_cons_mgr_rendez);
+}
+
+// cond: the ring holds at least one byte. Evaluated under the Rendez lock; the
+// producer's count-set is paired by the wakeup's Rendez-lock acquire.
+static int cons_data_ready(void *arg) {
+    (void)arg;
+    return g_cons.count > 0u;
+}
+
+// cond: a deferred console action is pending.
+static int cons_mgr_pending(void *arg) {
+    (void)arg;
+    return g_cons.intr_pending;
+}
+
+// The console_mgr kproc kthread (spawned once at boot). Services deferred
+// console actions in process context.
+void console_mgr_main(void) {
+    for (;;) {
+        // kproc's console_mgr never group-terminates at v1.0; a (defensive)
+        // death-interrupt just re-loops -- there is no caller state to unwind.
+        if (sleep(&g_cons_mgr_rendez, cons_mgr_pending, NULL) == SLEEP_INTR)
+            continue;
+
+        irq_state_t s = spin_lock_irqsave(&g_cons.lock);
+        bool do_intr = g_cons.intr_pending;
+        g_cons.intr_pending = false;
+        spin_unlock_irqrestore(&g_cons.lock, s);
+
+        if (do_intr) proc_console_post_interrupt();
+    }
+}
+
+void cons_test_reset(void) {
+    irq_state_t s = spin_lock_irqsave(&g_cons.lock);
+    g_cons.head = g_cons.tail = g_cons.count = 0u;
+    g_cons.reader_busy  = false;
+    g_cons.intr_pending = false;
+    spin_unlock_irqrestore(&g_cons.lock, s);
+}
+
+bool cons_test_intr_pending(void) {
+    irq_state_t s = spin_lock_irqsave(&g_cons.lock);
+    bool v = g_cons.intr_pending;
+    spin_unlock_irqrestore(&g_cons.lock, s);
+    return v;
+}
+
+void cons_test_set_reader_busy(bool busy) {
+    irq_state_t s = spin_lock_irqsave(&g_cons.lock);
+    g_cons.reader_busy = busy;
+    spin_unlock_irqrestore(&g_cons.lock, s);
+}
 
 static void devcons_reset(void)    { /* no-op */ }
 static void devcons_init(void)     { /* no-op — UART came up at boot */ }
@@ -48,14 +168,43 @@ static void devcons_close(struct Spoor *c) {
     dev_simple_close(c);
 }
 
-// Reads return 0 (EOF) at v1.0. UART RX with a blocking Rendez wait
-// lands at a later P4 sub-chunk (likely after irqfwd in P4-G —
-// userspace drivers will own the keyboard, so the kernel-side cons
-// read may stay degenerate at v1.0 and rely on the userspace input
-// driver delivering keystrokes via 9P).
+// A-4c-1: blocking console read. Drains the RX ring; blocks on
+// g_cons_data_rendez when empty (death-interruptible per #811). Single-reader:
+// a 2nd concurrent blocking read returns -1 (the data Rendez is single-waiter;
+// a 2nd sleeper would extinct). Returns the byte count (>= 1) on data, 0 only on
+// a death-interrupt with nothing buffered (immaterial -- a group-flagged Thread
+// never re-enters EL0), or -1 on bad args / reader-busy.
 static long devcons_read(struct Spoor *c, void *buf, long n, s64 off) {
-    (void)c; (void)buf; (void)n; (void)off;
-    return 0;
+    (void)c; (void)off;
+    if (!buf || n < 0) return -1;
+    if (n == 0)        return 0;
+
+    irq_state_t s = spin_lock_irqsave(&g_cons.lock);
+    if (g_cons.reader_busy) {
+        spin_unlock_irqrestore(&g_cons.lock, s);
+        return -1;
+    }
+    g_cons.reader_busy = true;
+    spin_unlock_irqrestore(&g_cons.lock, s);
+
+    u8 *out = (u8 *)buf;
+    long got = 0;
+    for (;;) {
+        s = spin_lock_irqsave(&g_cons.lock);
+        while (g_cons.count > 0u && got < n) {
+            out[got++] = g_cons.ring[g_cons.head];
+            g_cons.head = (g_cons.head + 1u) & (CONS_RING_SIZE - 1u);
+            g_cons.count--;
+        }
+        spin_unlock_irqrestore(&g_cons.lock, s);
+        if (got > 0) break;            // read() returns as soon as >= 1 byte is ready
+        if (sleep(&g_cons_data_rendez, cons_data_ready, NULL) == SLEEP_INTR) break;
+    }
+
+    s = spin_lock_irqsave(&g_cons.lock);
+    g_cons.reader_busy = false;
+    spin_unlock_irqrestore(&g_cons.lock, s);
+    return got;
 }
 
 static struct Block *devcons_bread(struct Spoor *c, long n, s64 off) {
