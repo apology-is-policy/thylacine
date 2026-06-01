@@ -251,9 +251,12 @@ void test_devproc_read_status_format(void);
 void test_devproc_read_cmdline_kproc(void);
 void test_devproc_read_ns_format(void);
 void test_devproc_read_ctl_returns_zero(void);
-void test_devproc_write_ctl_consumes(void);
+void test_devproc_write_ctl_rejects(void);
 void test_devproc_read_dir_returns_neg1(void);
 void test_devproc_read_partial_offset(void);
+void test_devproc_kill_authorized_predicate(void);
+void test_devproc_stat_native_ctl_owner(void);
+void test_devproc_write_ctl_kill_dispatch(void);
 void test_devctl_bestiary_smoke(void);
 void test_devctl_attach_returns_dir(void);
 void test_devctl_walk_to_each_leaf(void);
@@ -1013,9 +1016,12 @@ struct test_case g_tests[] = {
     { "devproc.read_cmdline_kproc",    test_devproc_read_cmdline_kproc,    false, NULL },
     { "devproc.read_ns_format",        test_devproc_read_ns_format,        false, NULL },
     { "devproc.read_ctl_returns_zero", test_devproc_read_ctl_returns_zero, false, NULL },
-    { "devproc.write_ctl_consumes",    test_devproc_write_ctl_consumes,    false, NULL },
+    { "devproc.write_ctl_rejects",     test_devproc_write_ctl_rejects,     false, NULL },
     { "devproc.read_dir_returns_neg1", test_devproc_read_dir_returns_neg1, false, NULL },
     { "devproc.read_partial_offset",   test_devproc_read_partial_offset,   false, NULL },
+    { "devproc.kill_authorized_predicate", test_devproc_kill_authorized_predicate, false, NULL },
+    { "devproc.stat_native_ctl_owner",     test_devproc_stat_native_ctl_owner,     false, NULL },
+    { "devproc.write_ctl_kill_dispatch",   test_devproc_write_ctl_kill_dispatch,   false, NULL },
     { "devctl.bestiary_smoke",         test_devctl_bestiary_smoke,         false, NULL },
     { "devctl.attach_returns_dir",     test_devctl_attach_returns_dir,     false, NULL },
     { "devctl.walk_to_each_leaf",      test_devctl_walk_to_each_leaf,      false, NULL },

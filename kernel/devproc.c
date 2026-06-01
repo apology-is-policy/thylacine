@@ -6,8 +6,21 @@
 //
 //   /proc/<pid>/status   — pid, state, threads, exit_status text
 //   /proc/<pid>/cmdline  — argv[0]; placeholder at v1.0 (no argv yet)
-//   /proc/<pid>/ctl      — write commands (stub: consumed; see caveats)
+//   /proc/<pid>/ctl      — write commands: kill / killgrp (A-4b)
 //   /proc/<pid>/ns       — territory bind list
+//
+// A-4b (IDENTITY-DESIGN.md §9.8, invariant I-26): a write of "kill" /
+// "killgrp" to ctl terminates the target Proc's thread-group via
+// proc_group_terminate. Authority is the two-axis I-26 set, enforced at the
+// WRITE site (devproc.perm_enforced stays false; the shared open chokepoint
+// hard-rejects pre-devproc.open, so the CAP_KILL axis cannot live at open):
+// the caller must be the target's OWNER (same principal_id — ctl is 0600, so
+// the owner always holds w) OR hold CAP_HOSTOWNER OR CAP_KILL. Checked
+// directly, NOT via perm_check, so CAP_DAC_OVERRIDE (the fs-rwx admin) is not
+// a kill axis — fs-admin and process-kill stay orthogonal. Containment is
+// namespace visibility (I-1). USER-REACHABILITY of /proc is a Utopia
+// namespace seam (devproc is kernel-internal at v1.0); the mechanism +
+// authority here are kernel-unit-tested.
 //
 // Single-file leaves like /proc/<pid>/mem (raw memory access) and
 // /proc/<pid>/fd/ (handle table directory) are held to later sub-chunks
@@ -21,11 +34,13 @@
 // proc.c for this chunk). Lookup is O(N) DFS through the kproc tree;
 // acceptable while the live-Proc count is bounded.
 
+#include <thylacine/caps.h>
 #include <thylacine/dev.h>
 #include <thylacine/extinction.h>
 #include <thylacine/proc.h>
 #include <thylacine/rendez.h>
 #include <thylacine/spoor.h>
+#include <thylacine/syscall.h>
 #include <thylacine/territory.h>
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
@@ -330,6 +345,50 @@ static int devproc_stat(struct Spoor *c, u8 *dp, int n) {
     return -1;        // 9P stat encoding lands when the syscall surface needs it
 }
 
+// Per-subkind mode (A-4b). ctl is 0600 (owner rw — the kill-authority gate);
+// the info files are 0444 (world-readable, Plan 9 /proc convention); the pid
+// dir is 0555.
+static u32 devproc_mode_for_kind(u32 kind) {
+    switch (kind) {
+    case PQS_CTL:     return 0600u;
+    case PQS_STATUS:
+    case PQS_CMDLINE:
+    case PQS_NS:      return 0444u;
+    case PQS_PID_DIR: return 0555u;
+    default:          return 0u;
+    }
+}
+
+// stat_native — Thylacine fstat surface (A-4b). Reports the TARGET Proc's
+// identity as the per-pid object's owner (uid/gid) with the per-subkind mode.
+// devproc.perm_enforced stays false, so the open chokepoint does NOT consult
+// this; it serves SYS_FSTAT introspection + documents the ownership model the
+// ctl kill-authority (devproc_kill_authorized) enforces directly. Root (the
+// dev apex) has no single owner -> -1.
+//
+// proc_find_by_pid here is lockless — the documented v1.0 "no concurrent
+// reap" window, identical to devproc_read. The KILL path does NOT use this;
+// it resolves the target under g_proc_table_lock via proc_for_each.
+static int devproc_stat_native(struct Spoor *c, struct t_stat *out) {
+    if (!c || !out)                  return -1;
+    u64 path = c->qid.path;
+    if (path == PROC_QID_ROOT_PATH)  return -1;   // dev apex: no per-Proc owner
+    u32 kind = proc_qid_kind(path);
+    int pid  = proc_qid_pid(path);
+
+    struct Proc *p = proc_find_by_pid(pid);
+    if (!p)                          return -1;   // gone since walk
+
+    u8 *z = (u8 *)out;
+    for (size_t i = 0; i < sizeof(*out); i++) z[i] = 0;
+    out->uid      = p->principal_id;
+    out->gid      = p->primary_gid;
+    out->mode     = devproc_mode_for_kind(kind);
+    out->qid_path = path;
+    out->qid_type = (kind == PQS_PID_DIR) ? QTDIR : QTFILE;
+    return 0;
+}
+
 static struct Spoor *devproc_open(struct Spoor *c, int omode) {
     return dev_simple_open(c, omode);
 }
@@ -407,26 +466,112 @@ static struct Block *devproc_bread(struct Spoor *c, long n, s64 off) {
     return NULL;
 }
 
-// Write: ctl accepts commands but the verb-set is held to Phase 5+
-// when notes/signal delivery lands. v1.0 stub: log + consume. Returns n.
-// Reads + writes on other files / dirs are -1.
+// =============================================================================
+// ctl kill — cross-process termination (A-4b; IDENTITY-DESIGN.md §9.8, I-26).
+// =============================================================================
+
+// Two-axis authority for a kill/killgrp write to /proc/<pid>/ctl. ctl is owned
+// by the target's principal/group at mode 0600, so:
+//   - identity axis: the OWNER (same principal_id — the owner always holds the
+//     0600 w-bit) may kill (covers killing your own processes; the
+//     parent-of-same-identity-child case is expressible as ownership);
+//   - capability axis: CAP_HOSTOWNER (the unified admin) OR CAP_KILL (the
+//     cross-identity override) may kill any target.
+// Checked DIRECTLY (not via perm_check): CAP_DAC_OVERRIDE — the generic fs-rwx
+// admin — is deliberately NOT a kill axis. The A-4 capability split keeps
+// fs-admin and process-kill orthogonal (mirrors Linux CAP_DAC_OVERRIDE vs
+// CAP_KILL). No identity bypasses (I-22 — the cap axes are capabilities, never
+// identities). Non-static: the kernel test suite exercises the predicate.
+bool devproc_kill_authorized(const struct Proc *caller, const struct Proc *target) {
+    if (!caller || !target)                            return false;
+    if (caller->principal_id == target->principal_id)  return true;   // owner-rwx on 0600
+    if (caller->caps & (CAP_HOSTOWNER | CAP_KILL))     return true;   // admin OR kill-anyone
+    return false;
+}
+
+// ctl verbs. v1.0: kill / killgrp both terminate the target Proc's thread-
+// group (no cross-Proc process groups at v1.0 — a distinct killgrp is a v1.x
+// seam). stop / start are scheduler integration (ARCH OPEN Q 7.6.D); other
+// tokens are rejected.
+enum ctl_verb { CTL_VERB_NONE, CTL_VERB_KILL, CTL_VERB_KILLGRP, CTL_VERB_OTHER };
+
+// Match the token [s, s+len) against a NUL-terminated literal (no libc).
+static bool ctl_tok_eq(const char *s, long len, const char *lit) {
+    long i = 0;
+    while (lit[i]) { if (i >= len || s[i] != lit[i]) return false; i++; }
+    return i == len;
+}
+
+// Parse the leading whitespace-delimited verb token from a ctl write.
+static enum ctl_verb parse_ctl_verb(const char *s, long n) {
+    if (!s || n <= 0) return CTL_VERB_NONE;
+    long i = 0;
+    while (i < n && (s[i] == ' ' || s[i] == '\t')) i++;
+    long start = i;
+    while (i < n && s[i] != ' '  && s[i] != '\t' && s[i] != '\n' &&
+                    s[i] != '\r' && s[i] != '\0') i++;
+    long len = i - start;
+    if (len == 0)                              return CTL_VERB_NONE;
+    if (ctl_tok_eq(s + start, len, "kill"))    return CTL_VERB_KILL;
+    if (ctl_tok_eq(s + start, len, "killgrp")) return CTL_VERB_KILLGRP;
+    return CTL_VERB_OTHER;
+}
+
+// proc_for_each context for the kill walk. result: 0 = target pid not found
+// (cb never matched), +1 = killed, -1 = found but denied / not-ALIVE.
+struct devproc_kill_ctx {
+    int          target_pid;
+    struct Proc *caller;
+    int          result;
+};
+
+// Resolve + authorize + terminate, all under g_proc_table_lock (proc_for_each
+// holds it throughout). The target is ALIVE under the lock, so no reap-UAF;
+// proc_group_terminate is safe under the lock (it takes only torpor / rendez /
+// cs locks, all below g_proc_table_lock) — the audited postnote_walk_cb idiom
+// (kernel/syscall.c). Both verbs dispatch via proc_group_terminate uniformly:
+// post-#811 it is the only termination primitive whose death-wake is total (a
+// single-thread target blocked in a non-notes sleep would not wake on a bare
+// note post). Refuse non-ALIVE targets (no consumer; mirrors postnote R2-F9).
+static int devproc_kill_walk_cb(struct Proc *target, void *arg) {
+    struct devproc_kill_ctx *k = (struct devproc_kill_ctx *)arg;
+    if (target->pid != k->target_pid)                return 0;   // keep walking
+    // kproc (the kernel proc, pid 0) is unkillable -- terminating it would take
+    // down the kernel. Refuse regardless of caller authority, BEFORE the
+    // authority check (a CAP_KILL holder cannot kill the kernel either).
+    if (target == kproc())                         { k->result = -1; return 1; }
+    if (target->state != PROC_STATE_ALIVE)         { k->result = -1; return 1; }
+    if (!devproc_kill_authorized(k->caller, target)) { k->result = -1; return 1; }
+    proc_group_terminate(target, "killed");
+    k->result = 1;
+    return 1;
+}
+
+// Write: ctl parses kill / killgrp and terminates the target Proc's thread-
+// group (A-4b). Writes to status / cmdline / ns / dirs, and unrecognized
+// verbs, return -1. The verb is offset-agnostic (a control message, not a byte
+// stream), so off is ignored.
 static long devproc_write(struct Spoor *c, const void *buf, long n, s64 off) {
-    (void)buf; (void)off;
-    if (!c) return -1;
+    (void)off;
+    if (!c)    return -1;
     if (n < 0) return -1;
 
     u32 kind = proc_qid_kind(c->qid.path);
-    if (kind != PQS_CTL) {
-        // Writes to status / cmdline / ns / dirs are rejected.
-        return -1;
-    }
+    if (kind != PQS_CTL) return -1;
 
-    // ctl: accept the command, return n. Future Phase 5+ parses the
-    // verb (kill / stop / start / notepg / ...) + dispatches via the
-    // notes layer (specs/notes.tla). The v1.0 stub is the placeholder
-    // these landings replace; the API contract (write returns n) is
-    // stable.
-    return n;
+    enum ctl_verb v = parse_ctl_verb((const char *)buf, n);
+    if (v != CTL_VERB_KILL && v != CTL_VERB_KILLGRP) return -1;
+
+    struct Thread *t = current_thread();
+    if (!t || !t->proc) return -1;
+
+    struct devproc_kill_ctx k = {
+        .target_pid = proc_qid_pid(c->qid.path),
+        .caller     = t->proc,
+        .result     = 0,
+    };
+    proc_for_each(devproc_kill_walk_cb, &k);
+    return (k.result == 1) ? n : -1;
 }
 
 static long devproc_bwrite(struct Spoor *c, struct Block *bp, s64 off) {
@@ -456,9 +601,10 @@ struct Dev devproc = {
     .init     = devproc_init,
     .shutdown = devproc_shutdown,
 
-    .attach   = devproc_attach,
-    .walk     = devproc_walk,
-    .stat     = devproc_stat,
+    .attach      = devproc_attach,
+    .walk        = devproc_walk,
+    .stat        = devproc_stat,
+    .stat_native = devproc_stat_native,
 
     .open     = devproc_open,
     .create   = devproc_create,

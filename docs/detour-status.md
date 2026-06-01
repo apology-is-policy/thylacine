@@ -553,10 +553,23 @@ kill = BOTH the namespace `/proc/<pid>/ctl` surface AND a narrow elevation-only 
       carried v1.x (`wait_pid_for(pid)`), not an A-4a defect (the no-member model keeps it dormant).
       Matrix GREEN: default(smp4) + UBSan + smp8 all **668/668** + legate E2E OK + boot OK.
       `audit_a4a_closed_list.md`. **A-4a arc DONE.**
-- **A-4b** -- cross-process kill: wire the existing `/proc/<pid>/ctl` stub to `kill`/`killgrp`
-  -> `notes_post` / `proc_group_terminate`; give devproc an ownership model (`stat_native` +
-  `perm_enforced`) for the owner-rwx axis; **two-axis** authority (owner-rwx OR `CAP_HOSTOWNER`
-  OR the new elevation-only `CAP_KILL`). Resolves ARCH OPEN Q 7.6.B.
+- **A-4b** *(impl LANDED `<pending>`; scripture reconcile `17dcb77` + fix `585d519`; audit NEXT)* --
+  cross-process kill: `/proc/<pid>/ctl` write parses `kill`/`killgrp` -> `proc_group_terminate`
+  (uniform, single + multi thread; the #811 wake-total primitive), under `g_proc_table_lock`
+  via the `proc_for_each` resolve+authorize idiom (the audited `sys_postnote` pattern; no
+  reap-UAF). devproc gains `stat_native` (per-pid owner + mode: ctl 0600, info 0444).
+  **Two-axis** authority (I-26), enforced at the **WRITE** site (`perm_enforced` stays FALSE):
+  owner (same `principal_id` on 0600 ctl) OR `CAP_HOSTOWNER` OR `CAP_KILL` -- computed
+  DIRECTLY (NOT via `perm_check`), so `CAP_DAC_OVERRIDE` is NOT a kill axis (fs-admin stays
+  orthogonal to process-kill). **kproc (pid 0) is unkillable.** Two scripture reconciles
+  (user-voted 2026-06-01): (1) enforcement moved open->write because the shared open
+  chokepoint hard-rejects pre-`devproc.open`, so the gate-at-open sketch could not host the
+  `CAP_KILL` axis (`17dcb77`); (2) the kill authority excludes `CAP_DAC_OVERRIDE` -- the
+  `perm_check`-routing would have folded it in (`585d519`). **USER-REACHABILITY of `/proc` is
+  a Utopia namespace seam** (the `namec` multi-component mount-crossing resolver + a boot
+  `SYS_MOUNT`), user-confirmed NOT in A-4b -- the mechanism + authority are kernel-unit-tested
+  (4 devproc tests: predicate / stat_native / dispatch / rejects). Resolves ARCH OPEN Q 7.6.B.
+  Matrix: default + UBSan GREEN 671/671 (smp8 + the formal audit close the chunk).
 - **A-4c** -- trusted path (vote: build the SAK now): **c-1** pull forward the kernel UART
   console RX path (RX IRQ + a console ring + a real blocking `devcons_read` + Ctrl-C -> note;
   Phase-4-G work, on the kernel UART Dev `dc='c'`, NOT the userspace virtio-input path);

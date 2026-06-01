@@ -1,8 +1,8 @@
 # 32 — devproc: synthetic /proc Dev (P4-C)
 
-The first **directory-typed** Dev. Walks resolve `/proc/<pid>/{status, cmdline, ctl, ns}`; each leaf is a small synthetic text file. Process control via `/proc/<pid>/ctl` is 9P-mediated per Plan 9 idiom (write commands like `kill`, `stop`, `start`, `notepg`); v1.0 P4-C lands the read side + a stub ctl-write that consumes commands.
+The first **directory-typed** Dev. Walks resolve `/proc/<pid>/{status, cmdline, ctl, ns}`; each leaf is a small synthetic text file. Process control via `/proc/<pid>/ctl` is 9P-mediated per Plan 9 idiom: a write of `kill` / `killgrp` terminates the target Proc (A-4b). P4-C landed the read side + a stub ctl-write; **A-4b** (IDENTITY-DESIGN.md §9.8, invariant I-26) makes ctl real — the two-axis kill authority (owner OR `CAP_HOSTOWNER` OR `CAP_KILL`) + dispatch via `proc_group_terminate`.
 
-Per ARCH §9.4 + ROADMAP §6.1.
+Per ARCH §9.4 + ROADMAP §6.1 + IDENTITY-DESIGN.md §9.8 (A-4b).
 
 ---
 
@@ -12,7 +12,7 @@ Two distinct functions, the same Dev:
 
 1. **Process introspection** (read side). Userspace code (Phase 5+) opens `/proc/<pid>/status` and reads pid + state + thread count + (for zombies) exit_status. Same for `cmdline` and `ns`. The format is plain ASCII text — Plan 9 doesn't byte-pack /proc; the text is the contract.
 
-2. **Process control** (write side). Writing commands to `/proc/<pid>/ctl` is the way one process sends signals / stops / starts / kills another. v1.0 P4-C accepts but discards the commands; the verb-set + dispatch lands when `specs/notes.tla` + the kernel notes layer go live (Phase 5+ per the spec catalogue).
+2. **Process control** (write side). Writing `kill` / `killgrp` to `/proc/<pid>/ctl` is the way one process terminates another. A-4b makes this real: the two-axis I-26 authority (owner OR `CAP_HOSTOWNER` OR `CAP_KILL`) is enforced at the write site, then `proc_group_terminate` cascades the target's thread-group. `stop` / `start` stay stubbed (scheduler integration, ARCH [OPEN Q 7.6.D]). See the `/proc/<pid>/ctl` section below for the full authority + dispatch contract.
 
 The lifecycle primitives `rfork` / `exits` / `wait_pid` remain syscalls (per ARCH §11) — they manipulate the calling thread's own kernel state and can't be 9P-mediated. /proc supplements them with cross-process control.
 
@@ -77,15 +77,28 @@ v1.0 prints `kproc` for kproc and `<unnamed>` for everyone else (no `Proc.argv0`
 
 ### `/proc/<pid>/ctl`
 
-Read returns 0 (write-only). Write returns n (commands consumed; verb-set held to Phase 5+). The future verb-set will include:
+Read returns 0 (write-only). Write parses a leading whitespace-delimited verb (A-4b; IDENTITY-DESIGN.md §9.8, invariant I-26):
 
-- `kill`           — terminate (sends `SIGKILL`-equivalent note)
-- `stop`           — pause (note `SIGSTOP`-equivalent)
-- `start`          — resume from stop
-- `notepg <verb>`  — broadcast to all threads in the proc-group
-- `kill-group`     — kill all threads in proc-group
+- `kill`    — terminate the target Proc's thread-group.
+- `killgrp` — terminate the target Proc's thread-group. At v1.0 (no cross-Proc process groups — no `setpgrp`) this is identical to `kill`; a distinct cross-Proc `killgrp` is a v1.x seam (pending process groups).
+- `stop` / `start` — recognized as future verbs but unimplemented (scheduler integration, ARCH [OPEN Q 7.6.D]); return `-1`.
+- any other token — `-1`.
 
-All routed through the (future) kernel `notes` layer pinned by `specs/notes.tla`.
+An authorized `kill`/`killgrp` returns `n` (the byte count); a denied / refused / unknown write returns `-1`.
+
+**Authority (two-axis, I-26).** A `kill`/`killgrp` is authorized iff:
+
+- the caller is the target's **owner** — the ctl file is mode `0600` (owner-private), so the owner always holds the w-bit and this reduces to "same `principal_id` as the target" (covers killing your own processes; the parent-of-same-identity-child case is expressible as ownership); OR
+- the caller holds **`CAP_HOSTOWNER`** (the unified admin); OR
+- the caller holds **`CAP_KILL`** (the cross-identity override for a debugger/supervisor that is neither owner nor hostowner).
+
+The check is computed **directly** in `devproc_write` (NOT via `perm_check`): `CAP_DAC_OVERRIDE` — the generic fs-rwx admin — is deliberately **not** a kill axis. The A-4 capability split keeps fs-admin and process-kill orthogonal (mirrors Linux `CAP_DAC_OVERRIDE` vs `CAP_KILL`); an fs-admin is not implicitly a process-killer. No identity bypasses (I-22); containment is namespace visibility (I-1 — a Proc that cannot walk to `/proc/<pid>` cannot kill it).
+
+**kproc is unkillable.** A `kill` of pid 0 (the kernel proc) is refused *before* the authority check — even a `CAP_KILL` holder cannot terminate the kernel.
+
+**Dispatch.** Both verbs dispatch via `proc_group_terminate` uniformly (single + multi thread), under `g_proc_table_lock` via the `proc_for_each` resolve+authorize+kill idiom (the audited `sys_postnote` pattern — the target is alive under the lock, so no reap-UAF). `proc_group_terminate` is chosen over a bare note post because, post-#811, it is the only termination primitive whose death-wake is **total** (universal death-interruptible sleep): a single-thread target blocked in a non-notes sleep (e.g. `poll(-1)`) would not wake on a bare note post.
+
+**User-reachability** of `/proc/<pid>/ctl` is a Utopia namespace seam: devproc is kernel-internal at v1.0 (joey's territory is a single root, no synthetic Dev grafted in), and reaching a path that crosses the devramfs->devproc mount boundary needs a boot-path `SYS_MOUNT` of devproc + the production multi-component, mount-crossing path resolver (Plan 9 `namec`). `SYS_POSTNOTE` already gives userspace the parent-kill path. A-4b lands + kernel-unit-tests the mechanism + the authority.
 
 ### `/proc/<pid>/ns`
 
@@ -154,23 +167,24 @@ Returns -1. The 9P readdir machinery (which would synthesize a stat-record strea
 
 ### Write semantics
 
-- `ctl` writes return `n` (commands consumed). The future verb parser is the natural extension point; the API contract (write returns n) does NOT change.
+- `ctl` writes parse the verb (A-4b): an authorized `kill`/`killgrp` terminates the target Proc's thread-group and returns `n`; a denied / refused (kproc) / unimplemented (`stop`/`start`) / unknown verb returns `-1`. See the `/proc/<pid>/ctl` section for the two-axis authority + dispatch.
 - Non-`ctl` writes return `-1` (status / cmdline / ns / dirs are read-only).
 
 ---
 
 ## Spec cross-reference
 
-P4-C is impl-only — no new TLA+ module. Two cross-references for future audit:
+P4-C + A-4b are impl-only — no new TLA+ module (per the 2026-05-23 spec-to-code suspension). Cross-references for audit:
 
-- **Notes / signal delivery** (`specs/notes.tla`) — pin the cross-process delivery semantics that ctl-write will dispatch through. Phase 5+ when notes lands; the ctl write parser then routes verbs through `note_post(target_proc, note)`.
-- **Concurrent proc lookup** — at v1.0 P4-C, `proc_find_by_pid` returns a stable pointer under "no concurrent reap" assumption; SMP-safe lookup with refcount lands at Phase 5+ (alongside the syscall surface where userspace-facing /proc ops can race wait_pid).
+- **Group termination** (ARCH §7.9.1, invariant I-24) — the ctl `kill`/`killgrp` dispatch routes through `proc_group_terminate` (the audited #809/#811 cascade), NOT a bare note post: post-#811 it is the only termination primitive whose death-wake is total. The A-4b authority (I-26) is validated by prose (IDENTITY-DESIGN.md §9.8) + this doc + the audit + the kernel tests.
+- **The `sys_postnote` idiom** (`kernel/syscall.c`) — devproc's resolve+authorize+kill walk mirrors `postnote_walk_cb` (target resolved + acted-on under `g_proc_table_lock` via `proc_for_each`; no reap-UAF). The authority model differs (postnote is parent-only; ctl is the I-26 two-axis set).
+- **Concurrent proc lookup** — at v1.0, `proc_find_by_pid` (used by `devproc_stat_native` + `devproc_read`) returns a stable pointer only under the "no concurrent reap" assumption; the KILL path does NOT use it — it resolves under `g_proc_table_lock` via `proc_for_each`. SMP-safe refcounted lookup lands at Phase 5+.
 
 ---
 
 ## Tests
 
-`kernel/test/test_devproc.c` — 13 tests:
+`kernel/test/test_devproc.c` — 16 tests (P4-C: 13; A-4b: the renamed `write_ctl_rejects` + 3 new kill tests):
 
 | Test | Covers |
 |---|---|
@@ -184,11 +198,14 @@ P4-C is impl-only — no new TLA+ module. Two cross-references for future audit:
 | `devproc.read_cmdline_kproc` | Read /proc/0/cmdline; contains "kproc". |
 | `devproc.read_ns_format` | Read /proc/0/ns; contains "binds:". |
 | `devproc.read_ctl_returns_zero` | ctl read returns 0 (write-only). |
-| `devproc.write_ctl_consumes` | ctl write returns n; non-ctl writes return -1. |
+| `devproc.write_ctl_rejects` | A-4b: kill of kproc (pid 0) refused; unknown verb -1; non-ctl write -1. |
 | `devproc.read_dir_returns_neg1` | Read on root QTDIR returns -1 (readdir deferred). |
 | `devproc.read_partial_offset` | Offset-aware slice; off >= total returns 0. |
+| `devproc.kill_authorized_predicate` | A-4b: the two-axis predicate — owner / CAP_KILL / CAP_HOSTOWNER allow; non-owner-no-cap denies; **CAP_DAC_OVERRIDE denies** (not a kill axis). |
+| `devproc.stat_native_ctl_owner` | A-4b: stat_native reports target uid/gid; ctl mode 0600, status 0444; dev apex -1. |
+| `devproc.write_ctl_kill_dispatch` | A-4b: owner kill + killgrp set `group_exit_msg`; non-owner denied (NULL); non-ALIVE refused. |
 
-Tests cover the v1.0 contract end-to-end. Future Phase 5+ chunks add tests for cross-process ctl-write routing through notes + readdir-on-directory + multi-pid walk under concurrent rfork.
+The A-4b kill tests construct synthetic targets (no running thread, so `group_exit_msg` is the dispatch observable — the death step is the audited #809/#811 EL0-die-check path) and exercise the authority predicate + dispatch directly. Userspace E2E of `/proc/<pid>/ctl` is deferred with the namespace seam (see the ctl section). Future chunks add readdir-on-directory + multi-pid walk under concurrent rfork.
 
 ---
 
@@ -199,16 +216,19 @@ Tests cover the v1.0 contract end-to-end. Future Phase 5+ chunks add tests for c
 | `kernel/devproc.c` + devproc Dev (dc='p') | Landed (P4-C) |
 | Qid encoding + walk dispatch | Landed (P4-C) |
 | status / cmdline / ns / ctl read | Landed (P4-C) |
-| ctl write (stub: consume commands) | Landed (P4-C) |
+| ctl write: `kill` / `killgrp` + two-axis authority (I-26) | Landed (A-4b) |
+| `devproc_stat_native` (per-pid owner + mode) | Landed (A-4b) |
 | Multi-step walk | Landed (P4-C) |
 | `proc_find_by_pid` + `proc_for_each` | Landed (P4-C; in `kernel/proc.c`) |
 | `walkqid_alloc` + `walkqid_free` | Landed (P4-C; in `kernel/spoor.c`) |
-| In-kernel tests | 13 covering the full v1.0 contract |
+| In-kernel tests | 16 (P4-C contract + A-4b kill mechanism/authority) |
 | Bestiary count | 6 (devnone + cons + null + zero + random + proc) |
 | /proc readdir (9P stat-stream synthesis) | Held to a Phase 4+ readdir chunk |
 | /proc/<pid>/mem | Held to Phase 5+ (mem read needs handle-table-mediated VA→PA path) |
 | /proc/<pid>/fd/ | Held to Phase 5+ (handle table iteration via 9P readdir) |
-| ctl verb parser + note dispatch | Held to Phase 5+ (after `specs/notes.tla` lands) |
+| ctl `stop` / `start` verbs | Held (scheduler integration, ARCH [OPEN Q 7.6.D]) |
+| `/proc` user-mount (reachability) | Held to Utopia (namespace seam: boot `SYS_MOUNT` + the `namec` multi-component mount-crossing resolver) |
+| cross-Proc `killgrp` (distinct from thread-group) | Held to v1.x (no process groups at v1.0) |
 | Refcount-protected `proc_find_by_pid` (SMP) | Held to Phase 5+ (proc_get/put + wait_pid integration) |
 | `argv[0]` in cmdline | Held to a Phase 5+ ELF loader extension |
 
@@ -224,9 +244,17 @@ At v1.0 the returned `struct Proc *` is valid only while the caller hasn't relea
 
 `devproc_walk` always `spoor_clone(c)` the result. For deep multi-step walks the allocation traffic adds up. Phase 5+ may extend by accepting `nc` (the candidate Spoor) and mutating it in place, eliminating per-step alloc — the API contract supports this; v1.0 simplifies for clarity.
 
-### ctl writes are silent at v1.0
+### `/proc` is kernel-internal at v1.0 — ctl kill is not yet userspace-reachable
 
-Write to `/proc/<pid>/ctl` returns n but does not act. A test that expects "after `kill` the proc is ZOMBIE" will fail. v1.0 P4-C is the substrate; the verb-set + dispatch is Phase 5+ work after `specs/notes.tla` pins delivery semantics.
+A-4b lands the ctl `kill`/`killgrp` mechanism + the two-axis authority, but `/proc` is not mounted into any user territory at v1.0 (joey's namespace is a single root: `chroot` to devramfs, `pivot_root` to Stratum FS). Reaching `/proc/<pid>/ctl` from userspace needs (a) a boot-path `SYS_MOUNT` of devproc and (b) the production multi-component, mount-crossing path resolver (Plan 9 `namec`) — the v1.0 `SYS_WALK_OPEN` is single-component + dev-internal (rejects `/`). Both are Utopia-lane namespace work (the resolver serves `/proc` + `/ctl` + `/dev` + `/net` uniformly). `SYS_POSTNOTE` already provides userspace a parent-kill path. A-4b's mechanism + authority are kernel-unit-tested.
+
+### kproc (pid 0) is unkillable; `kill` and `killgrp` are identical at v1.0
+
+A `kill` of pid 0 is refused before the authority check — even a `CAP_KILL` holder cannot terminate the kernel proc. And with no cross-Proc process groups at v1.0 (no `setpgrp`), `kill` and `killgrp` both terminate the *target Proc's thread-group*; a distinct cross-Proc `killgrp` (the Plan 9 note-group sense) is a v1.x seam.
+
+### `CAP_DAC_OVERRIDE` is NOT a kill axis
+
+The ctl kill authority is computed directly (owner OR `CAP_HOSTOWNER` OR `CAP_KILL`), NOT via `perm_check`. Routing through `perm_check` would fold in `CAP_DAC_OVERRIDE` (its A-4a DAC-override) and silently make every fs-admin a process-killer — defeating the A-4 capability split, which deliberately keeps fs-rwx admin orthogonal to process-kill (mirrors Linux `CAP_DAC_OVERRIDE` vs `CAP_KILL`). A future maintainer must not "simplify" the check to a `perm_check` call.
 
 ### Reads on root or pid_dir return -1 at v1.0
 
