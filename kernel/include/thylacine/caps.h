@@ -87,37 +87,83 @@ typedef u64 caps_t;
 // (docs/IDENTITY-DESIGN.md §3.3 + §9.1; ARCH §28 I-22.)
 #define CAP_SET_IDENTITY    (1ull << 5)
 
-// Reserved for Phase 5+ (one bit per capability domain):
+// CAP_GRANT_CLEARANCE — authorizes writing the `cap` device's clearance
+// grant file (registering a pending A-4 *clearance* grant for a peer
+// Proc: {cap_mask, target_stripes, valid_until, session_id}). The legate
+// analog of CAP_GRANT_HOSTOWNER: an ordinary FORK-GRANTABLE capability (a
+// member of CAP_ALL), conferred on corvus alone via its spawn mask; no
+// ordinary user Proc receives it. corvus verifies the clearance level's
+// auth_required (the trusted path) BEFORE registering the grant; the
+// kernel cap-stamp at redeem is the enforcement. Unlike the hostowner
+// grant, redeeming a clearance grant does NOT require console attachment
+// (high-stakes auth is corvus-side). CORVUS-DESIGN.md §5.5.1 + §5.7 +
+// docs/IDENTITY-DESIGN.md §9.8 (A-4a).
+#define CAP_GRANT_CLEARANCE (1ull << 6)
+
+// CAP_DAC_OVERRIDE — elevation-only. The fs-admin DAC-override (the
+// kernel/perm.c rwx-check bypass) split out of CAP_HOSTOWNER so it can be
+// conferred as a finer clearance (IDENTITY-DESIGN.md §3.7.1 + §9.8). A
+// holder may traverse/read/write any path regardless of owner/group/other
+// bits. Acquired ONLY through the `cap` device (a clearance grant); never
+// by rfork (it is in CAP_ELEVATION_ONLY).
+#define CAP_DAC_OVERRIDE    (1ull << 7)
+
+// CAP_CHOWN — elevation-only. chown/chgrp-to-any-owner, split out of
+// CAP_HOSTOWNER (the no-give-away chown authority). Acquired ONLY through
+// the `cap` device; rfork-stripped. IDENTITY-DESIGN.md §3.7.1 + §9.8.
+#define CAP_CHOWN           (1ull << 8)
+
+// CAP_KILL — elevation-only. The cross-identity kill override: the third
+// authority axis on /proc/<pid>/ctl (owner-rwx OR CAP_HOSTOWNER OR
+// CAP_KILL; A-4b / I-26). Deliberately elevation-only, NOT fork-grantable
+// — a kill-anyone right must not leak to a legate's children; the
+// supervisor/debugger Proc itself holds it, and killing your OWN children
+// never needs it (parent authority covers that). Acquired ONLY through the
+// `cap` device; rfork-stripped. IDENTITY-DESIGN.md §9.8 (A-4b).
+#define CAP_KILL            (1ull << 9)
+
+// Reserved for Phase 5+ (one bit per capability domain; next free bit is
+// 1<<10):
 //   CAP_NS_MOUNT     — bind/mount in /proc and /ctl (kernel admin Devs).
 //   CAP_NS_BIND      — bind in any namespace (forward-looking).
-//   CAP_SIGNAL_ANY   — signal any Proc (vs. signal-children-only default).
 //   CAP_NET_RAW      — open raw network sockets / Ethernet frames.
 //   CAP_TIME_SET     — modify system clock.
 //   CAP_REBOOT       — initiate kernel reboot / extinction.
-// Each lands when the corresponding subsystem matures.
+// (CAP_SIGNAL_ANY is realized as CAP_KILL = 1<<9 above — the cross-
+// identity kill override.) Each lands when its subsystem matures.
 
 // CAP_ELEVATION_ONLY — the set of elevation-only capability bits: those
 // excluded from CAP_ALL that no Proc holds at creation and that rfork
 // MUST strip from every child, so an elevated parent cannot leak
 // elevation across a fork. rfork_internal ANDs the child's caps with
-// ~CAP_ELEVATION_ONLY (P5-hostowner-b). At v1.0 the only such cap is
-// CAP_HOSTOWNER. Maps to specs/handles.tla::ElevationOnly.
-#define CAP_ELEVATION_ONLY  (CAP_HOSTOWNER)
+// ~CAP_ELEVATION_ONLY (A-4-pre). All four are acquired ONLY through the
+// `cap` device: CAP_HOSTOWNER (the unified fs-admin authority) plus the
+// A-4 finer caps split out of it — CAP_DAC_OVERRIDE, CAP_CHOWN, CAP_KILL.
+// Maps to specs/handles.tla::ElevationOnly.
+#define CAP_ELEVATION_ONLY  (CAP_HOSTOWNER | CAP_DAC_OVERRIDE | CAP_CHOWN | CAP_KILL)
 
 // CAP_ALL — the FORK-GRANTABLE capability ceiling: every capability a
 // Proc may legitimately hold from creation, and the mask kproc gets at
-// proc_init. Elevation-only capabilities (CAP_HOSTOWNER) are
-// deliberately excluded — see CAP_HOSTOWNER above. A new fork-grantable
-// CAP_* bit MUST be added here; an elevation-only one MUST NOT.
-#define CAP_ALL         (CAP_HW_CREATE | CAP_LOCK_PAGES | CAP_CSPRNG_READ | CAP_GRANT_HOSTOWNER | CAP_SET_IDENTITY)
+// proc_init. Elevation-only capabilities (CAP_ELEVATION_ONLY:
+// CAP_HOSTOWNER, CAP_DAC_OVERRIDE, CAP_CHOWN, CAP_KILL) are deliberately
+// excluded — see above. A new fork-grantable CAP_* bit MUST be added
+// here; an elevation-only one MUST NOT.
+#define CAP_ALL         (CAP_HW_CREATE | CAP_LOCK_PAGES | CAP_CSPRNG_READ | CAP_GRANT_HOSTOWNER | CAP_SET_IDENTITY | CAP_GRANT_CLEARANCE)
 
 // _Static_assert pins CAP_ALL — adding a new fork-grantable CAP_* bit
 // requires bumping this expression so kproc's initial mask includes it.
-_Static_assert(CAP_ALL == (CAP_HW_CREATE | CAP_LOCK_PAGES | CAP_CSPRNG_READ | CAP_GRANT_HOSTOWNER | CAP_SET_IDENTITY),
+_Static_assert(CAP_ALL == (CAP_HW_CREATE | CAP_LOCK_PAGES | CAP_CSPRNG_READ | CAP_GRANT_HOSTOWNER | CAP_SET_IDENTITY | CAP_GRANT_CLEARANCE),
                "caps.h drift: when adding a new FORK-GRANTABLE CAP_* bit, "
                "update CAP_ALL so kproc's initial mask reflects it. "
-               "Elevation-only caps (CAP_HOSTOWNER) are deliberately "
+               "Elevation-only caps (CAP_ELEVATION_ONLY) are deliberately "
                "excluded from CAP_ALL.");
+
+// CAP_ALL and CAP_ELEVATION_ONLY are disjoint by construction — a bit is
+// either fork-grantable or elevation-only, never both. Pin it.
+_Static_assert((CAP_ALL & CAP_ELEVATION_ONLY) == 0,
+               "caps.h drift: a CAP_* bit is in BOTH CAP_ALL and "
+               "CAP_ELEVATION_ONLY. Each bit is fork-grantable XOR "
+               "elevation-only — never both.");
 
 // CAP_NONE — empty capability mask. The default for rfork'd children
 // at v1.0 (Phase 5+ inherits parent's mask AND'd with rfork's caps_mask

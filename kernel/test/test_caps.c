@@ -169,11 +169,12 @@ static void caps_elev_intermediate_thunk(void *arg) {
     struct Proc *p = t->proc;
     if (!p)                          extinction("caps_elev_intermediate: no proc");
     // Simulate a legitimately-elevated parent holding both the full
-    // fork-grantable ceiling AND the elevation-only CAP_HOSTOWNER.
-    p->caps |= (CAP_ALL | CAP_HOSTOWNER);
-    // Try to hand the whole set (incl. the elevation-only bit) down.
+    // fork-grantable ceiling AND every elevation-only cap (HOSTOWNER plus
+    // the A-4 finer caps DAC_OVERRIDE / CHOWN / KILL).
+    p->caps |= (CAP_ALL | CAP_ELEVATION_ONLY);
+    // Try to hand the whole set (incl. every elevation-only bit) down.
     int gpid = rfork_with_caps(RFPROC, caps_elev_grandchild_thunk, NULL,
-                               CAP_ALL | CAP_HOSTOWNER);
+                               CAP_ALL | CAP_ELEVATION_ONLY);
     if (gpid <= 0) extinction("elev intermediate rfork_with_caps failed");
     int gstatus = -42;
     int greaped = wait_pid(&gstatus);
@@ -190,10 +191,12 @@ void test_caps_rfork_strips_elevation_only(void) {
     int ireaped = wait_pid(&istatus);
     TEST_EXPECT_EQ(ireaped, ipid, "elev intermediate wait_pid pid");
     TEST_EXPECT_EQ(istatus, 0, "elev intermediate exit status");
-    // The elevation-only bit MUST NOT cross the fork...
-    TEST_ASSERT((caps_elev_grandchild_observed & (int)CAP_HOSTOWNER) == 0,
-                "rfork leaked elevation-only CAP_HOSTOWNER across fork");
-    // ...while the fork-grantable subset still flows intact.
+    // NO elevation-only bit may cross the fork -- HOSTOWNER and the A-4
+    // finer caps alike; the A-4-pre strip auto-covers the whole macro.
+    TEST_ASSERT((caps_elev_grandchild_observed & (int)CAP_ELEVATION_ONLY) == 0,
+                "rfork leaked an elevation-only cap across fork");
+    // ...while the full fork-grantable ceiling (incl. CAP_GRANT_CLEARANCE)
+    // still flows intact.
     TEST_EXPECT_EQ(caps_elev_grandchild_observed, (int)CAP_ALL,
                    "rfork did not confer the fork-grantable subset");
 }
