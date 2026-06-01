@@ -282,6 +282,11 @@ _Static_assert(__builtin_offsetof(struct t_sys_spawn_args, identity_flags) == 76
 #define T_CAP_HOSTOWNER       (1UL << 3)   // elevation-only; not in CAP_ALL
 #define T_CAP_GRANT_HOSTOWNER (1UL << 4)   // fork-grantable; joey → corvus
 #define T_CAP_SET_IDENTITY    (1UL << 5)   // A-1a; fork-grantable; gates SPAWN_IDENTITY_SET
+// A-4a clearance/legate caps (mirror kernel/include/thylacine/caps.h).
+#define T_CAP_GRANT_CLEARANCE (1UL << 6)   // fork-grantable; corvus-only; register clearance grants
+#define T_CAP_DAC_OVERRIDE    (1UL << 7)   // elevation-only; perm_check rwx bypass
+#define T_CAP_CHOWN           (1UL << 8)   // elevation-only; chown/chgrp-to-any
+#define T_CAP_KILL            (1UL << 9)   // elevation-only; cross-identity kill override
 
 // Maximum binary name length for t_spawn (mirror SYS_SPAWN_NAME_MAX).
 #define T_SPAWN_NAME_MAX  64u

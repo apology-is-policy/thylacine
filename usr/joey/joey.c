@@ -794,10 +794,14 @@ static int do_corvus_bringup(long storage_dup_fd) {
     // corvus may write /cap/grant on ADMIN_ELEVATE (the kernel cap
     // device gates the grant write on this fork-grantable bit). joey
     // holds it via CAP_ALL; corvus inherits it through the spawn mask.
+    // A-4a-3: joey ALSO grants corvus T_CAP_GRANT_CLEARANCE so corvus may
+    // register clearance grants (SYS_CAP_GRANT_CLEARANCE) on
+    // CLEARANCE_ACTIVATE -- the legate analog of the hostowner grant.
     long corvus_pid = t_spawn_with_perms(
         corvus_name, sizeof(corvus_name) - 1,
         corvus_fds, 1,
-        T_CAP_LOCK_PAGES | T_CAP_CSPRNG_READ | T_CAP_GRANT_HOSTOWNER,
+        T_CAP_LOCK_PAGES | T_CAP_CSPRNG_READ | T_CAP_GRANT_HOSTOWNER
+            | T_CAP_GRANT_CLEARANCE,
         T_SPAWN_PERM_MAY_POST_SERVICE);
     if (corvus_pid <= 0) {
         t_putstr("joey: t_spawn_with_perms(\"corvus\") FAILED\n");
@@ -1172,6 +1176,38 @@ static int do_corvus_bringup(long storage_dup_fd) {
         return 1;
     }
     t_putstr("joey: UNWRAP malformed envelope refused BadFormat (expected)\n");
+
+    // === A-4a-3: CLEARANCE_GRANT michael fs-admin (hostowner eligibility admin) ===
+    // joey holds CAP_HOSTOWNER (from ADMIN_ELEVATE above), so verb 16 is allowed
+    // (the gate is the peer's live CAP_HOSTOWNER, like GROUP_CREATE). Records that
+    // michael may ACTIVATE the fs-admin clearance level; persisted in corvus's
+    // clearance.db. Idempotent across reboots (a re-grant returns OK). The
+    // legate-prover (spawned post-bringup) AUTHs michael + activates fs-admin.
+    // Payload: token(33) + subject_kind u8 (0=user) + subject_len u8 + subject
+    //          + level_len u8 + level.
+    {
+        size_t o = 0;
+        for (int i = 0; i < 33; i++) tx[o++] = token[i];
+        tx[o++] = 0;   // subject_kind = user
+        tx[o++] = 7;   // subject_len
+        const char m[] = "michael";
+        for (int i = 0; i < 7; i++) tx[o++] = (unsigned char)m[i];
+        tx[o++] = 8;   // level_len
+        const char lv[] = "fs-admin";
+        for (int i = 0; i < 8; i++) tx[o++] = (unsigned char)lv[i];
+        pl = o;
+    }
+    if (corvus_exchange(conn_fd, 16, tx, pl, rx, sizeof(rx), &st, &rlen) != 0) {
+        t_putstr("joey: CLEARANCE_GRANT michael fs-admin transport FAILED\n");
+        return 1;
+    }
+    if (st != 0) {
+        t_putstr("joey: CLEARANCE_GRANT michael fs-admin unexpected status=");
+        t_putstr(itoa_dec(st, buf, sizeof(buf)));
+        t_putstr("\n");
+        return 1;
+    }
+    t_putstr("joey: CLEARANCE_GRANT michael fs-admin ok (eligibility recorded)\n");
 
     // === SESSION_CLOSE ===
     if (corvus_exchange(conn_fd, 3, token, 33, rx, sizeof(rx), &st, &rlen) != 0) {
@@ -2138,6 +2174,35 @@ int main(void) {
             return 1;
         }
         (void)t_close(corvus_storage);
+
+        // === A-4a-3: the legate E2E prover ===
+        // corvus is up, michael is eligible for fs-admin (granted in the bringup),
+        // and the global session is closed (the bringup's reconnect path closed
+        // it) -- so the prover can AUTH michael fresh, CLEARANCE_ACTIVATE fs-admin,
+        // redeem -> become a legate root, and exit (exits() runs the legate-root
+        // teardown walk). At v1.0 a legate HOLDS the clearance + does the work
+        // itself (no scope members); a scope-member teardown E2E is v1.x, gated on
+        // a general kproc orphan-reaper (a torn-down member orphans to kproc's
+        // strict wait_pid). The prover needs no fds/caps (it t_putstrs to the
+        // console + connects to corvus itself). Success marker: "legate E2E OK".
+        {
+            const char prover_name[] = "legate-prover";
+            long lp_pid = t_spawn(prover_name, sizeof(prover_name) - 1);
+            if (lp_pid <= 0) {
+                t_putstr("joey: t_spawn(\"legate-prover\") FAILED\n");
+                return 1;
+            }
+            // No-member legate -> no reparented grandchild -> a single reap
+            // suffices. corvus stays running, so t_wait_pid only returns the
+            // exited prover.
+            int lp_status = -1;
+            long lp_reaped = t_wait_pid(&lp_status);
+            if (lp_reaped != lp_pid || lp_status != 0) {
+                t_putstr("joey: /legate-prover orchestration FAILED\n");
+                return 1;
+            }
+            t_putstr("joey: /legate-prover reaped status=0; legate E2E verified\n");
+        }
     }
 
     return 0;

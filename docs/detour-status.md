@@ -523,12 +523,24 @@ kill = BOTH the namespace `/proc/<pid>/ctl` surface AND a narrow elevation-only 
       rfork-stripped -> only the ROOT is elevated; member teardown is the scripture tidiness
       sweep (a spawn-race straggler is benign + UNELEVATED, not an I-25 violation). Ref:
       `docs/reference/102-legate.md`.
-    - **A-4a-3** *(NEXT)* -- corvus clearance-policy objects (structured-TLV, persisted) +
-      CLEARANCE_LIST/ACTIVATE/GRANT/REVOKE (14-17) + libt/libthyla-rs clearance wrappers + the
-      **E2E legate prover** (a real binary redeems -> spawns a child -> exits/expires -> the
-      child is torn down; deferred here because the real grant orchestration -- corvus learning
-      the peer's stripes via `/srv` -- is corvus's job). Then the focused A-4a audit
-      (UBSan + smp8, covers A-4-pre + 1 + 2a + 2b + 3).
+    - **A-4a-3** *(LANDED: alpha `b7edcc7` / beta `6224028` / gamma `*(pending)*`)* -- the
+      userspace half + the boot E2E. **alpha**: `SYS_CAP_GRANT_CLEARANCE = 61` (the grant-side
+      bridge -- corvus is chrooted, reaches the cap device by syscall, like the hostowner grant;
+      "NO new syscall" was always about the REDEEM, which rides `SYS_CAP_USE`) + the libthyla-rs
+      cap mirror. **beta**: the corvus clearance subsystem -- a built-in level table (`fs-admin`
+      = DAC_OVERRIDE|CHOWN + `supervisor` = KILL; both RE_AUTH) + per-user eligibility persisted
+      in `/var/lib/corvus/clearance.db` (rename-swap) + the four verbs 14-17 (LIST/ACTIVATE
+      [reads peer stripes via SYS_SRV_PEER, registers the grant] / GRANT/REVOKE [CAP_HOSTOWNER]).
+      **gamma**: the boot E2E legate prover (`usr/legate-prover/`) -- AUTH michael -> LIST ->
+      ACTIVATE fs-admin -> redeem -> legate root; joey grants corvus CAP_GRANT_CLEARANCE +
+      CLEARANCE_GRANTs michael fs-admin. GREEN end-to-end (`legate E2E OK` -> `Thylacine boot
+      OK`; 667/667). **The prover is a NO-MEMBER legate (the v1.0 model: a legate HOLDS the
+      clearance + does the work itself).** A scope-MEMBER teardown E2E is v1.x -- it needs BOTH
+      fork-grantable clearance caps AND a general kproc orphan-reaper (a torn-down member orphans
+      to kproc's strict wait_pid -> extinction; the documented `wait_pid_for(pid)` lift). The
+      member walk is unit-covered (test_proc) + the death is #809/#811. Ref:
+      `docs/reference/102-legate.md`. **NEXT: the focused A-4a audit** (UBSan + smp8, covers
+      A-4-pre + 1 + 2a + 2b + 3).
 - **A-4b** -- cross-process kill: wire the existing `/proc/<pid>/ctl` stub to `kill`/`killgrp`
   -> `notes_post` / `proc_group_terminate`; give devproc an ownership model (`stat_native` +
   `perm_enforced`) for the owner-rwx axis; **two-axis** authority (owner-rwx OR `CAP_HOSTOWNER`

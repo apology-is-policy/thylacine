@@ -170,6 +170,45 @@ do not flow at all -- all elevation-only), and are FULLY revoked on the root's
 exit or `valid_until` expiry; no elevated Proc outlives the scope; the durable
 identity is unchanged by elevation.
 
+## Corvus clearance subsystem + verbs (A-4a-3)
+
+corvus owns the clearance POLICY + per-user eligibility (the kernel owns the
+cap-stamp + scope). `usr/corvus/src/main.rs`:
+
+- **Built-in clearance levels** (a fixed v1.0 set; no `LEVEL_CREATE` verb exists,
+  so runtime authoring + per-level-file persistence are a v1.x seam):
+  `fs-admin` (`CAP_DAC_OVERRIDE | CAP_CHOWN` -- the only level with a live consumer
+  today, via `perm_check`) + `supervisor` (`CAP_KILL`; its `/proc`-ctl consumer
+  lands in A-4b -- inert until then, but it proves the mechanism with a second
+  cap). Both `auth_required = RE_AUTH`. A level's caps MUST be a subset of the
+  kernel `CAP_GRANTABLE_CLEARANCE` set. hw-dev / user-admin / clearance-admin
+  (scripture's other coarse names) are NOT v1.0 levels -- their caps are not in
+  `CAP_GRANTABLE_CLEARANCE`.
+
+- **Per-user eligibility**, persisted in `/var/lib/corvus/clearance.db`
+  (CRVS-format, atomic rename-swap mirroring `identity.db` §16.6; fail-closed
+  parse). A record is `{subject_kind (user|group), subject, level}`; group
+  eligibility matches any of the user's groups (`primary_gid` or a `supp_gid`),
+  like group membership. For a `RE_AUTH` level there is no secret unlock
+  material, so eligibility is a plain record; the secret-bearing CRVS wrap (for
+  `DISTINCT_SECRET` / `SYSTEM_KEY` levels) is the A-4c / v1.x extension.
+
+- **Verbs** (CORVUS-DESIGN §6.4 wire):
+  - `CLEARANCE_LIST = 14` (user-facing, valid-session-token gated): the levels
+    the session user is eligible for, each with `caps` as a versioned TLV (NOT a
+    bare u64 -- v1.x resource-scoping is additive), `auth_required`, `time_bound`.
+  - `CLEARANCE_ACTIVATE = 15` (the legate path): verify eligibility +
+    `auth_required` (v1.0 enforces `RE_AUTH` in-band -- the live session token is
+    the proof; high-stakes levels need the A-4c trusted path, REFUSED until it
+    lands), read the peer `stripes` (`SYS_SRV_PEER`, the C-22 live read), register
+    the kernel grant (`caps = level.caps & self_restrict` -- STS-style narrowing
+    bounded to the level set, I-2) via `SYS_CAP_GRANT_CLEARANCE`, reply OK +
+    `legate_session_id` + `granted_caps`.
+  - `CLEARANCE_GRANT = 16` / `CLEARANCE_REVOKE = 17` (`CAP_HOSTOWNER`-gated, like
+    `GROUP_CREATE`): the hostowner manages eligibility; grant is idempotent,
+    revoke blocks FUTURE activation (an active legate keeps its caps until scope
+    exit).
+
 ## Tests
 
 - `kernel/test/test_devcap.c` -- the clearance grant/redeem lifecycle (the
@@ -191,13 +230,20 @@ identity is unchanged by elevation.
 - `kernel/test/test_caps.c` -- `caps.rfork_inherits_legate_scope` (A-4a-2a):
   a child joins the scope (carries the 3 fields) but not the ROOT flag.
 
+- `usr/legate-prover/` + joey wiring (A-4a-3, the boot E2E) -- the only test that
+  exercises the FULL userspace->kernel chain (the unit tests call the cores
+  directly): joey (hostowner) `CLEARANCE_GRANT`s michael fs-admin; the prover
+  AUTHs michael, `CLEARANCE_LIST`s (asserts fs-admin), `CLEARANCE_ACTIVATE`s
+  (corvus reads the prover's `stripes` via `SYS_SRV_PEER`, registers the grant via
+  `SYS_CAP_GRANT_CLEARANCE`), redeems via `SYS_CAP_USE` -> becomes a legate root,
+  asserts `granted == DAC_OVERRIDE|CHOWN` + `session_id != 0`, prints
+  `legate E2E OK`, exits 0. Proves the corvus orchestration + the grant syscall +
+  the real redeem + legate creation; a healthy boot through the exits()
+  legate-root path is the integration signal.
+
 The actual member *death* (flag -> `thread_exit_self`) is the already-tested
-#809/#811 EL0-die-check path; the end-to-end legate prover (a real binary that
-redeems via `/cap/use`, spawns a child, and exits/expires -> the child is torn
-down) lands with A-4a-3, where corvus's CLEARANCE verbs provide the real grant
-orchestration (corvus learns the peer's `stripes` via `/srv` and registers the
-grant). Building a throwaway joey-direct prover in A-4a-2b would duplicate that
-orchestration; the kernel mechanism here is fully unit-tested.
+#809/#811 EL0-die-check path. The A-4a-3 prover is a **no-member** legate (the
+v1.0 model below): a scope-MEMBER teardown E2E is v1.x (see the caveat below).
 
 ## Error paths
 
@@ -226,6 +272,20 @@ orchestration; the kernel mechanism here is fully unit-tested.
   the v1.0 model above), so this is a tidiness gap, not an I-25 violation. A
   strict whole-subtree close (an `rfork`-under-lock parent-flag check) is a
   documented v1.x refinement.
+- **Member teardown vs the kproc orphan-reaper (v1.x).** When a legate root with
+  a LIVE scope member exits, the teardown correctly group-terminates the member;
+  the member then zombies and reparents up to the boot init (`kproc`). At v1.0
+  `kproc.wait_pid` is a *strict* "wait for joey" loop (`kernel/joey.c`), not a
+  general orphan-reaper, so an orphaned member reaching it extincts on a wrong-pid
+  (the same limitation documented for an unreaped stratumd, `usr/joey/joey.c`).
+  This is orthogonal to the legate mechanism -- a general `kproc` reaper (the
+  documented `wait_pid_for(pid)` v1.x lift) closes it for stragglers of every
+  kind. It does NOT affect the v1.0 legate model (above): a v1.0 legate HOLDS the
+  clearance and does the privileged work itself -- it has no scope members, so no
+  orphan arises. The member-bearing case (an elevated shell forking commands) is
+  the same v1.x consideration as fork-grantable clearance caps. The A-4a-3 prover
+  is therefore a no-member legate; the member teardown WALK is unit-covered
+  (`test_proc::legate_scope_teardown`) and the death step is #809/#811.
 
 ## Status
 
@@ -233,10 +293,11 @@ Landed A-4a-2b: the kernel mechanism (devcap clearance grant/redeem + the two
 teardown triggers + `proc_become_legate` + the perm cap-honoring) + full kernel
 unit tests. Landed A-4a-3-alpha: `SYS_CAP_GRANT_CLEARANCE = 61` (the grant-side
 userspace bridge -- corvus is chrooted, so it reaches the cap device by syscall)
-+ the libthyla-rs mirror (`t_cap_grant_clearance` / `cap::grant_clearance` + the
-four `T_CAP_*` clearance constants); the syscall path is exercised end-to-end by
-the A-4a-3-gamma prover. Pending A-4a-3-beta/gamma: corvus's
-`CLEARANCE_LIST/ACTIVATE/GRANT/REVOKE` verbs (14-17), the built-in clearance-level
-table + per-user eligibility persist, and the end-to-end legate prover + joey
-wiring. The focused A-4a adversarial audit (covering A-4-pre + A-4a-1 + A-4a-2a +
-A-4a-2b + A-4a-3, under UBSan + smp8) follows A-4a-3.
++ the libthyla-rs mirror. Landed A-4a-3-beta: the corvus clearance subsystem (the
+built-in level table + per-user eligibility persist + the four verbs 14-17).
+Landed A-4a-3-gamma: the boot E2E legate prover (`usr/legate-prover/`) + joey
+wiring (corvus gets `CAP_GRANT_CLEARANCE`; joey `CLEARANCE_GRANT`s michael
+fs-admin); the full chain is GREEN end-to-end at boot (`legate E2E OK` ->
+`Thylacine boot OK`). **A-4a kernel + userspace COMPLETE.** The focused A-4a
+adversarial audit (covering A-4-pre + A-4a-1 + A-4a-2a + A-4a-2b + A-4a-3, under
+UBSan + smp8) is the remaining A-4a step.
