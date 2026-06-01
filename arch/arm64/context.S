@@ -283,6 +283,20 @@ thread_user_trampoline:
      * discipline as thread_trampoline; mirrors the sched() resume path. */
     bl      sched_finish_task_switch
 
+    /* P6 #811 (#809-audit F3): first-entry group-termination die-check. A peer
+     * Thread spawned while its Proc is already group-terminating would
+     * otherwise execute EL0 code until its next trap; check HERE so it
+     * self-terminates before ever reaching EL0 (closes I-24's "no Thread runs
+     * at EL0 after ZOMBIE" for the freshly-spawned-during-termination case).
+     * el0_return_die_check reads current->proc->group_exit_msg and, if set,
+     * calls thread_exit_self -> sched() (noreturn) -- so the die path NEVER
+     * reaches the ELR-set..eret window below (#713-safe: no interruptible
+     * ELR_EL1-set window is entered on the die path). x19..x22 (user
+     * sp/arg/entry/tls) are callee-saved across this C call, so they survive
+     * into the msr operands. Same C-ABI footing as sched_finish_task_switch
+     * above; runs BEFORE the daifset window. */
+    bl      el0_return_die_check
+
     /* P6 #713: keep ALL of DAIF MASKED through the eret. Pre-fix this was
      * `msr daifclr, #2` (UNMASK IRQ) placed BEFORE `msr elr_el1` -- so an
      * IRQ taken in the ELR-set..eret window re-entered the exception path
