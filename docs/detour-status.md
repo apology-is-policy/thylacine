@@ -484,22 +484,46 @@ IDENTITY-DESIGN.md §9.7 + the §3.5 F-4 correction + the §3.7.1 activation not
   RIGHT_READ-only handle, O_PATH -> R|W; F2 non-owner cannot mutate a no-other-w dir;
   out-of-scope dataset -> EACCES; boot OK + cross-reboot PASS (no brick).
 
-### A-4 · Clearance + legate elevation + CAP_KILL + trusted path *(splits a/b/c; design-first)*
-- **A-4a:** clearance-level policy objects `{caps, auth_required, time_bound,
-  scope}` (corvus-held; grant/revoke via per-user wrap chains); the **legate**
-  (kernel mints an ephemeral principal forked from the durable user; caps =
-  clearance ∩ self-restriction; bounded to process-subtree + time; evaporates on
-  exit; kernel cap-stamp, NO local crypto proof).
-- **A-4b:** `CAP_KILL` + cross-process signaling (resolves the open ARCH question).
-- **A-4c:** the **trusted path** (console + secure-attention via corvus).
-- **Depends:** A-1 + corvus. **Seams:** resource-scoped HW-cap allowlist;
-  distributed clearance crypto-proof (v1.x).
-- **Design-first:** clearance wire format + legate scope semantics + CAP_KILL
-  permission model.
-- **Audit:** highest-stakes privilege surface -> full round.
-- **Tests:** grant->activate->legate-has-caps->scope-exit-drops; revoke blocks
-  future activation; `CAP_KILL` targets a non-child with the cap; trusted-path
-  rejects a spoofed prompt; clearance secret != data key.
+### A-4 · Clearance + legate elevation + CAP_KILL + trusted path *(DESIGN RESOLVED 2026-06-01; scripture landed; splits pre/a/b/c)*
+
+**Design-first pass DONE** (this scripture commit; no code). Prior-art grounding (Plan 9
+`/proc`-ctl + seL4/Zircon/Genode derived authority + NT/AIX SAK + Genode Nitpicker) +
+verified tree facts. Full design pinned in **IDENTITY-DESIGN.md §9.8** (+ the §3.1/§3.3
+reconcile), **ARCH** §28 (new I-25/I-26/I-27) + §7.6 (OPEN Q 7.6.B CLOSED) + §25.4 audit
+rows, **CORVUS-DESIGN** §5.5.1 / §5.7 / §6.4. **Two user votes 2026-06-01:** (1) cross-process
+kill = BOTH the namespace `/proc/<pid>/ctl` surface AND a narrow elevation-only `CAP_KILL`;
+(2) trusted path = build the kernel SAK now (pulling the kernel console RX path forward).
+
+- **A-4-pre** -- close the **P5-hostowner I-2 hole** (the named prerequisite below):
+  `rfork_internal` ANDs `~CAP_ELEVATION_ONLY` (now the 4-bit set HOSTOWNER + DAC_OVERRIDE +
+  CHOWN + KILL). Lands first; folds into A-4a's round.
+- **A-4a** -- clearance-level policy objects (corvus-held; **structured-TLV** caps so v1.x
+  resource-scoping is additive) + the **legate** = the existing `cap`-device two-phase grant
+  generalized (corvus registers via the new `CAP_GRANT_CLEARANCE`; the Proc redeems; kernel
+  stamps `caps |= clearance ∩ self_restriction`). Durable `principal_id` UNCHANGED + an
+  ephemeral `legate_session_id`; scope = `legate_scope_id` subtree, **fully torn down**
+  (group-terminate, reusing #809/#811) on the legate root's exit OR `valid_until` expiry; no
+  local crypto. New corvus verbs CLEARANCE_LIST / ACTIVATE / GRANT / REVOKE (14-17).
+- **A-4b** -- cross-process kill: wire the existing `/proc/<pid>/ctl` stub to `kill`/`killgrp`
+  -> `notes_post` / `proc_group_terminate`; give devproc an ownership model (`stat_native` +
+  `perm_enforced`) for the owner-rwx axis; **two-axis** authority (owner-rwx OR `CAP_HOSTOWNER`
+  OR the new elevation-only `CAP_KILL`). Resolves ARCH OPEN Q 7.6.B.
+- **A-4c** -- trusted path (vote: build the SAK now): **c-1** pull forward the kernel UART
+  console RX path (RX IRQ + a console ring + a real blocking `devcons_read` + Ctrl-C -> note;
+  Phase-4-G work, on the kernel UART Dev `dc='c'`, NOT the userspace virtio-input path);
+  **c-2** the SAK keystroke recognizer at the RX chokepoint + `proc_revoke_console_attached`
+  + a single kernel console-owner pointer + re-grant to corvus + the unspoofable-elevation gate.
+- **Depends:** A-1 + corvus. **Seams:** resource-scoped HW-cap allowlist (the structured caps
+  TLV); distributed clearance crypto-proof (v1.x); the graphical Nitpicker-style trusted
+  screen (Halcyon); a finer per-target kill handle (vs the blanket `CAP_KILL`).
+- **New invariants:** I-25 (legate scope bounded + fully revoked), I-26 (cross-process kill
+  two-axis), I-27 (trusted path: unspoofable elevation prompt). All ARCH §28.
+- **Audit:** highest-stakes privilege surface -> a focused adversarial round per sub-chunk.
+- **Tests:** I-2 strip (elevated parent rforks -> child lacks the elevation-only bits);
+  activate -> legate-has-caps -> scope-exit / `valid_until`-expiry tears down the subtree;
+  revoke blocks future activation; kill via `/proc/ctl` owner-rwx + `CAP_KILL` + the parent
+  case; a non-owner without `CAP_KILL` is denied; console RX read + Ctrl-C; SAK revokes +
+  re-grants; only the console holder redeems elevation; clearance secret != data key.
 
 ### A-5 · Login + session lifecycle + hostowner-c + corvus Q11 seam *(integration)*
 - **Builds:** `/sbin/login` (console -> corvus auth -> principal-id -> spawn
@@ -582,7 +606,8 @@ tools/build.sh kernel --sanitize=undefined && tools/test.sh
 - **Open verify** (from the scripture pass): `ARCHITECTURE.md:660/662` describe
   `rfork(RFPROC)` as "copy-on-write address space" -- confirm the actual copy
   behavior; add a seam-note like §16 if it doesn't truly COW.
-- **A-4 prerequisite (P1-class, surfaced by the A-1a audit, NOT A-1a):**
+- **A-4 prerequisite (P1-class; DESIGNED 2026-06-01 -> closed in A-4-pre, IDENTITY-DESIGN
+  §9.8 + ARCH §25.4 A-4 audit row; surfaced by the A-1a audit, NOT A-1a):**
   `kernel/proc.c::rfork_internal` sets `child->caps = parent_caps & caps_mask` WITHOUT
   `& ~CAP_ELEVATION_ONLY`, but `caps.h:99-105` (P5-hostowner-b) asserts it strips
   elevation-only caps. Real I-2 hole: a `CAP_HOSTOWNER`-elevated parent can rfork /

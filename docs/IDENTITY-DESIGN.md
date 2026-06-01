@@ -206,6 +206,13 @@ trusted-path/new-PTY) + Fuchsia/seL4 (ocap, no ambient authority) + Plan 9
 (namespace, factotum, cap device, no-setuid). Novel = the synthesis as a
 multi-user OS kernel primitive.
 
+**As-built mechanism (RESOLVED 2026-06-01): §9.8.** The legate is the existing `cap`-device
+two-phase grant generalized to clearance cap-sets (corvus registers, the Proc redeems, the
+kernel stamps `caps |= clearance ∩ self_restriction`); scope = a `legate_scope_id` subtree
+that is fully torn down (group-terminate, reusing #809/#811) on the legate root's exit or
+`valid_until` expiry; `CAP_KILL` / `CAP_DAC_OVERRIDE` / `CAP_CHOWN` are the elevation-only
+caps split out of `CAP_HOSTOWNER`. No local crypto.
+
 ### 3.2 Permissionless backings (F-1: RESOLVED)
 
 Every FS backing **must speak 9P** (already our posture). A backing with no native
@@ -242,11 +249,17 @@ incompatible with Linux's uid-is-authority and with pure ocap's no-durable-ident
 - **Groups are first-class.** Both permission (file group-perm) and
   clearance-eligibility (hostowner grants to a group) may target a user OR a
   group. Groups are the reusable indirection.
-- **`stripes` = the per-Proc runtime credential**: an unforgeable token stamped
-  with `{principal-id it acts as, current capability set, clearance annotations}`.
-  principal-id is the durable identity (corvus-authoritative). A legate = same
-  principal-id, fresh stripes-context carrying the added caps + scope. (Thematic
-  fit: stripes are the markings that identify the individual thylacine.)
+- **`stripes` = the per-Proc unforgeable identity tag** -- a plain monotonic `u64`, set
+  once at `proc_alloc`, read via `SYS_SRV_PEER` (thematic fit: the markings that identify
+  the individual thylacine). It answers "is this the same Proc?" -- it is NOT itself a
+  structured credential. The runtime *authority* lives in **separate Proc fields** the
+  kernel reports alongside it: `caps` (the capability set) and `principal_id` (the durable
+  identity, corvus-authoritative); a legate adds the ephemeral `legate_*` annotation (§9.8).
+  A legate = same `principal_id`, with the clearance caps stamped on `caps` and the scope in
+  `legate_scope_id` -- the durable identity never changes. *(As-built reconcile 2026-06-01:
+  the earlier "stripes is a token stamped with {principal-id, caps, clearance annotations}"
+  framing was a design-time over-claim; the kernel keeps these as distinct fields that
+  `SYS_SRV_PEER` returns together -- see §9.1 + §9.8.)*
 - **Anti-tangle invariant (I-22 candidate):** *no identity carries ambient
   super-authority.* There is no superuser identity. Hostowner is an **authority
   source** (the system key), not an identity. Every identity's only ambient
@@ -1571,3 +1584,205 @@ create on the bake session, must NOT leak into a non-bake stratumd).
 **No new spec** per the 2026-05-23 spec-to-code broadening -- prose validation in §3.5
 (corrected F-4) + §3.7.1 + this section + the audit-trigger rows + the audit + the
 runtime tests.
+
+### 9.8 A-4 -- clearance + legate elevation + CAP_KILL + trusted path (RESOLVED 2026-06-01)
+
+The highest-stakes privilege surface of the arc. Two user votes 2026-06-01, taken
+after a Plan 9 + capability-microkernel + trusted-path prior-art pass (Plan 9
+`/proc`-ctl, seL4/Zircon/Genode derived authority, NT/AIX SAK, Genode Nitpicker):
+**(1) cross-process kill = BOTH the namespace `/proc/<pid>/ctl` surface AND a narrow
+elevation-only `CAP_KILL`; (2) the trusted path = build the kernel SAK now, pulling
+the kernel console RX path forward.** The recurring fusion: the **Plan 9 idiom as the
+spine** (per-Proc namespace, files-as-interface, kernel-owned console,
+ownership-as-authority), the **capability-microkernel SOTA as the rigor** (kernel-
+stamped derived authority, capability-IS-permission, group-granularity, tiny TCB),
+**corvus as the clearance/identity authority**, and the **#809/#811 die-at-EL0-checkpoint
+machinery as the shared enforcement primitive** -- with **no local crypto** (the kernel
+cap-stamp is the unforgeable substrate, exactly as seL4 CNodes / Zircon handles are).
+
+**New capabilities** (`kernel/include/thylacine/caps.h`; bits append after
+`CAP_SET_IDENTITY = 1<<5`):
+- `CAP_GRANT_CLEARANCE = 1<<6` -- **fork-grantable** (joins `CAP_ALL`). Authorizes
+  registering a pending *clearance* grant on the `cap` device (the legate analog of
+  `CAP_GRANT_HOSTOWNER`). corvus alone holds it (conferred in corvus's spawn mask, like
+  `CAP_GRANT_HOSTOWNER`); no ordinary Proc receives it.
+- `CAP_DAC_OVERRIDE = 1<<7` -- **elevation-only**. The fs-admin DAC-override split out of
+  `CAP_HOSTOWNER` (the `perm_check` bypass), now grantable as a finer clearance (§3.7.1
+  foreshadowed this split).
+- `CAP_CHOWN = 1<<8` -- **elevation-only**. chown/chgrp-any, split out of `CAP_HOSTOWNER`.
+- `CAP_KILL = 1<<9` -- **elevation-only**. The cross-identity kill override (the third
+  authority axis on `/proc/<pid>/ctl`, A-4b).
+- **`CAP_ELEVATION_ONLY` expands** `{CAP_HOSTOWNER}` -> `{CAP_HOSTOWNER, CAP_DAC_OVERRIDE,
+  CAP_CHOWN, CAP_KILL}` (bits 3,7,8,9). All four are acquired ONLY through the `cap`
+  device and are **rfork-stripped**. `CAP_ALL` gains only `CAP_GRANT_CLEARANCE` (bit 6);
+  the elevation-only four stay excluded.
+- **Why `CAP_KILL` is elevation-only (rfork-stripped), not fork-grantable:** a kill-anyone
+  right must not leak to a legate's children; the supervisor/debugger Proc itself holds it;
+  killing your OWN children never needs it (parent authority already covers that, A-4b). A
+  clearance's caps that DO flow to a subtree (§3.1 "attenuate to children") are the
+  *fork-grantable* members of its set; the elevation-only members stay on the legate root.
+
+**A-4-pre -- close the P5-hostowner I-2 hole** (the named A-4 prerequisite; detour-status
+trip-hazard; surfaced by the A-1a audit):
+- `kernel/proc.c::rfork_internal` (`child->caps = parent_caps & caps_mask`) ANDs
+  additionally with `~CAP_ELEVATION_ONLY` (the now-4-bit set), matching the `caps.h`
+  contract it currently violates. Closes the real I-2 hole (a `CAP_HOSTOWNER`-elevated
+  parent could `rfork`/`SYS_SPAWN_WITH_CAPS` a child inheriting `CAP_HOSTOWNER`, bypassing
+  the console-gated `ADMIN_ELEVATE`). Regression test + sibling-elevation sweep (`devcap`
+  redeem is correctly console+grant gated; `SYS_SPAWN_WITH_CAPS` routes through
+  `rfork_internal` -> the one fix covers it). Lands first; folds into the A-4a audit.
+
+**A-4a -- clearance levels + the legate.**
+
+*Clearance level* (corvus-held policy object; persisted in corvus's storage cap
+`/var/lib/corvus`):
+```
+clearance_level := {
+    name          : utf8 (bounded),
+    caps          : structured cap-set -- a versioned TLV, NOT a bare u64, so v1.x
+                    resource-scoping (per-file / per-device allowlists) is ADDITIVE,
+    auth_required : enum { re_auth, distinct_secret, system_key, hostowner_cosign },
+    time_bound    : u64 ns (0 = none),
+    scope_kind    : enum { subtree }     (v1.0; resource-scoped is v1.x),
+}
+```
+Per-user eligibility = the level's unlock material wrapped under the user's hybrid keypair
+(CRVS wrap). Grant = create the wrap; revoke = delete it (per-user, no shared-secret
+rotation). An active legate keeps already-stamped caps until scope exit; revoke blocks
+*future* activation (scripture §3.1).
+
+*corvus verbs* (binary frames, CORVUS-DESIGN §6.4; verb_ids continue from 13):
+- `CLEARANCE_LIST = 14` -- levels the session's user is eligible for + their caps.
+- `CLEARANCE_ACTIVATE = 15` -- request `{level, self_restriction_mask, valid_until_req}`;
+  corvus verifies the level's `auth_required` (the trusted path for high-stakes, A-4c),
+  then registers the kernel cap-device pending clearance grant against the caller's
+  stripes; returns OK + the assigned `legate_session_id`.
+- `CLEARANCE_GRANT = 16` / `CLEARANCE_REVOKE = 17` -- hostowner manages eligibility
+  (`CAP_HOSTOWNER`-gated, like `USER_CREATE` / `GROUP_CREATE`).
+
+*Kernel legate mechanism* (the `cap` device generalized + the redeem):
+- The `cap` device **`grant`** file generalizes from "CAP_HOSTOWNER only" to an arbitrary
+  clearance grant `{cap_mask, target_stripes, valid_until, session_id}`. Gate: writer holds
+  `CAP_GRANT_CLEARANCE` (corvus) for a clearance grant, OR `CAP_GRANT_HOSTOWNER` for the
+  legacy hostowner grant (unchanged). corvus cannot write another Proc's caps directly (it
+  is userspace) -- this two-phase grant is the only path, exactly as `ADMIN_ELEVATE` works
+  today (CORVUS-DESIGN §5.5).
+- The `cap` device **`use`** file (redeem): the activating Proc redeems its own pending
+  grant; the kernel stamps `current->caps |= (granted_cap_mask & self_restriction)` and
+  records the legate context. Gate: a pending grant exists for the writer's own stripes.
+  Console-attach is NOT required for ordinary clearance (only the hostowner grant requires
+  it); high-stakes auth is enforced corvus-side via `auth_required` before the grant is
+  ever registered.
+- New `struct Proc` fields (append after the identity block; KP_ZERO -> not-a-legate):
+  - `u32 legate_session_id` -- ephemeral attribution id (0 = not a legate). Audit reads
+    "principal P via legate-session N". Durable `principal_id` UNCHANGED (scripture §3.1:
+    do not mint a fresh principal -- the legate is the same human, more authority).
+  - `u32 legate_scope_id` -- the scope this Proc belongs to (0 = none); set on the legate
+    root at redeem; **INHERITED across rfork** (a child of a legate-scoped Proc joins the
+    scope). The subtree-membership tag.
+  - `u64 legate_valid_until` -- ns deadline (0 = none); copied from the grant.
+- *Self-restriction* (STS-style, I-2): the redeem's `self_restriction` mask can only reduce
+  the granted set (`& self_restriction`); the Proc voluntarily narrows below the ceiling.
+- *Evaporation = scope teardown.* On the legate root's exit, OR when `now >
+  legate_valid_until` (checked at the EL0-return tail -- the same checkpoint #811
+  generalizes), the kernel walks all Procs carrying this `legate_scope_id` and
+  `proc_group_terminate`s each (reusing the #809/#811 cascade). An elevated window leaves
+  NO elevated Proc running past it -- stronger than sudo (whose backgrounded jobs survive);
+  the security-correct call. [Alternative considered: cap-drop-to-baseline instead of
+  teardown -- gentler, but leaves elevated-but-orphaned Procs + an audit gap; rejected for
+  v1.0.]
+- *No local crypto* (scripture §3.1): the kernel cap-stamp + the cap-device grant
+  (authorized by `CAP_GRANT_CLEARANCE`, held only by corvus) is the enforcement; corvus's
+  authority to register the grant is the trust root, and it verified `auth_required` first.
+  Distributed crypto-proof stays a v1.x seam (§8.4).
+
+**A-4b -- cross-process kill: `/proc/<pid>/ctl` (namespace) + `CAP_KILL` (capability), the
+two-axis fusion.**
+- `/proc/<pid>/ctl` ALREADY exists + is writable (`devproc.c`; today a stub whose own
+  comment anticipates "parses the verb kill / stop / start / notepg + dispatches via the
+  notes layer"). A-4b makes it real: a write of `kill\n` / `killgrp\n` resolves `<pid>` ->
+  `struct Proc` and posts the kill (single-thread: `notes_post`; multi-thread:
+  `proc_group_terminate` -- both built + audited, #809/#811). `stop`/`start` stay stubbed
+  (scheduler integration, ARCH [OPEN Q 7.6.D], Phase 7). No `/proc/<pid>/note` file at v1.0
+  -- kill rides `ctl` (Plan 9 idiom; the note-file is ARCH [OPEN Q 7.6.A]'s later form).
+- *Ownership model for `/proc`* (devproc has none today -- no `stat_native`, no
+  `perm_enforced`): add `devproc.stat_native` reporting the TARGET Proc's `principal_id`
+  (uid) + `primary_gid` (gid) + a `ctl` mode (`0600`, owner rw -- the Plan 9 "process files
+  owned + read-protected by the owner" rule), and set `devproc.perm_enforced = true` so the
+  `open(/proc/<pid>/ctl, OWRITE)` chokepoint runs `perm_check`.
+- *Two-axis authority* (the A-2d pattern -- the handle-RIGHT axis AND the identity axis,
+  orthogonal -- generalized to kill): a ctl write is authorized iff the open-for-write
+  passes, which succeeds if `perm_check(caller, ctl_stat, PERM_W) == 0` (owner-rwx; covers
+  "kill your own subtree/session"; namespace visibility (I-1) gives containment for free --
+  a Proc that cannot see `/proc/<pid>` cannot kill it) OR the caller holds `CAP_HOSTOWNER`
+  (the existing `perm_check` DAC-override) OR the caller holds `CAP_KILL` (the new
+  cross-identity override, checked in the devproc ctl open/write path, for
+  debuggers/supervisors that are neither owner nor hostowner). No identity bypasses (I-22);
+  the parent-of-target case (§7.6.3) is now expressible as ownership, not a special case.
+- Resolves ARCH **[OPEN Q 7.6.B]** (`CAP_KILL`) + advances **[OPEN Q 7.6.A]** (namespace
+  posting -- the `ctl` form lands; the `note`-file form stays future).
+
+**A-4c -- trusted path: the kernel SAK + the console-RX pull-forward** (per the 2026-06-01
+vote: build the SAK now):
+- *Part 1 -- kernel UART console RX pull-forward* (Phase-4-G-deferred infra, pulled into
+  A-4 because the SAK has no input chokepoint without it): `arch/arm64/uart.c` gains RX IRQ
+  handling (GIC-registered) feeding a kernel console input ring; `cons.c::devcons_read`
+  becomes a real blocking read on that ring via a `Rendez` (today it returns EOF); `Ctrl-C`
+  (0x03) on the RX path posts an `interrupt` note to the console-attached Proc (ARCH §7.6.5
+  "future cons ^C"). On the kernel UART console Dev (`dc='c'`) -- NOT the userspace
+  VirtIO-input (graphical keyboard) path, which stays userspace (ARCH §17.1: "keyboard via
+  UART or VirtIO input"); the two coexist. Audit-bearing (a new EL0-bound input path).
+- *Part 2 -- the SAK + trusted-path handoff*: a kernel-recognized Secure Attention Key
+  sequence sits at the RX chokepoint, inspected BEFORE any byte reaches an EL0 reader. On
+  recognition the kernel (a) revokes the console-attach bit from the current holder via a
+  new `proc_revoke_console_attached` (the missing unset side of the set-once
+  `PROC_FLAG_CONSOLE_ATTACHED`; the SAK is the sole revoker) + posts it a notify note; (b)
+  re-grants the console-attach bit to corvus (or the kernel's trusted login Proc); so (c)
+  the immediately-following elevation / login prompt is provably the TCB's, because only
+  the console-attach holder may redeem `CAP_HOSTOWNER` or a high-stakes clearance (the
+  cap-device redeem gate). Requires a single kernel "current console owner" pointer (none
+  today -- only the scattered per-Proc flag). NT/AIX SAK + Plan-9 kernel-owned-console +
+  Genode tiny-TCB discipline; the graphical Nitpicker-style labeled trusted screen is a
+  Halcyon seam.
+- *SAK sequence*: pinned in the A-4c impl + reference doc -- a control sequence that cannot
+  occur in normal input (a `BREAK`, or a reserved multi-byte escape).
+
+**New invariants** (land in ARCHITECTURE.md §28; mirrored here):
+- **I-25 -- legate scope is bounded + fully revoked.** A legate's elevated caps are bounded
+  to its `legate_scope_id` subtree, attenuate to children by I-2, and are FULLY revoked (the
+  scope torn down via group-terminate) on the legate root's exit or `valid_until` expiry; no
+  elevated Proc outlives the scope; the durable identity is unchanged by elevation.
+- **I-26 -- cross-process control authority is explicit + two-axis.** A `kill`/`killgrp`
+  write to `/proc/<pid>/ctl` is authorized only by owner-rwx on the ctl file (identity axis)
+  OR `CAP_HOSTOWNER` OR `CAP_KILL` (capability axis); no identity carries ambient kill
+  authority (composes I-22); containment is namespace visibility (I-1).
+- **I-27 -- trusted path: the elevation prompt is unspoofable.** After a kernel SAK, the
+  console-attach bit is held only by corvus / the trusted login Proc, and only the
+  console-attach holder may redeem `CAP_HOSTOWNER` / a high-stakes clearance -- so an
+  interposer that drew a fake prompt cannot complete an elevation; the SAK keystroke is
+  recognized in the kernel RX path before EL0 delivery.
+
+**Split.** A-4-pre (I-2 fix) -> A-4a (clearance + legate) -> A-4b (`/proc` ctl kill +
+`CAP_KILL`) -> A-4c-1 (console RX) -> A-4c-2 (SAK + trusted path). Each is audit-bearing
+(privilege boundary + the input path) and gets a focused adversarial round -- the
+highest-stakes privilege surface; prosecute hard. A-4-pre lands first and folds into A-4a's
+round.
+
+**Audit-bearing** (the CLAUDE.md + ARCH §25.4 rows land in this scripture commit).
+Prosecute: I-2 (no elevation-only leak across rfork), I-25 (no cap leak past scope; no
+orphaned elevated Proc; teardown is exactly-once + reuses #809/#811 correctly), I-26 (no
+identity bypass of the kill gate; namespace containment; parent-case still works), I-27 (no
+interposer completes an elevation; the SAK is unspoofable + recognized pre-EL0), I-22 (the
+override is always a capability, never an identity), the cap-device grant lifecycle (no
+grant replay, no cross-stripes redeem, `valid_until` honored, `self_restriction` only
+reduces), and the console RX path (no ring overflow, no missed-wakeup on the `Rendez`,
+correct Ctrl-C delivery, the SAK recognizer cannot be starved or spoofed by crafted input).
+
+**Seams** (foreseeable, additive): resource-scoped caps (the structured `caps` TLV carries
+an allowlist; SMMU [Stop B] makes it enforceable); distributed clearance crypto-proof (the
+CPU-server case, §8.4); the graphical trusted screen (Halcyon / Nitpicker); a finer
+per-target kill *handle* (vs the blanket `CAP_KILL`) if a concrete consumer appears.
+
+**No new spec** per the 2026-05-23 spec-to-code broadening -- prose validation in §3.1 +
+this section + the ARCH §28 invariants (I-25 / I-26 / I-27) + the audit-trigger rows + the
+per-sub-chunk audits + the runtime tests.

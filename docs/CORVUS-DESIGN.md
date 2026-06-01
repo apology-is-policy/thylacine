@@ -507,8 +507,8 @@ The Proc that issues ADMIN_ELEVATE is the Proc that redeems and is elevated: cor
 
 A kernel device, `cap`, exposes two write-only files:
 
-- **`grant`** — corvus writes `{ cap, identity_tag }`. The kernel gates the write on the writer holding `CAP_GRANT_HOSTOWNER` and records a *pending grant* in a small bounded table keyed by identity tag. At most one pending grant per tag (a re-register replaces it); pending grants carry a short expiry and are dropped on the target Proc's death. v1.0 accepts only `cap == CAP_HOSTOWNER`; the device is general so future elevation-only capabilities can reuse it.
-- **`use`** — any Proc writes a redeem request. The kernel looks up a pending grant for *the writer's own* kernel-stamped identity tag; if one exists **and** the writer holds `PROC_FLAG_CONSOLE_ATTACHED`, it ORs the granted capability into `current->caps` and consumes the pending grant. One-shot.
+- **`grant`** — corvus writes `{ cap, identity_tag }`. The kernel gates the write on the writer holding `CAP_GRANT_HOSTOWNER` and records a *pending grant* in a small bounded table keyed by identity tag. At most one pending grant per tag (a re-register replaces it); pending grants carry a short expiry and are dropped on the target Proc's death. v1.0 has two grant shapes: the **hostowner grant** (`cap == CAP_HOSTOWNER`), gated on the writer holding `CAP_GRANT_HOSTOWNER`; and **A-4's clearance grant** -- `{ cap_set, valid_until, session_id }` keyed by identity tag, gated on the writer holding `CAP_GRANT_CLEARANCE` (the legate path; IDENTITY-DESIGN §9.8 + §5.7). corvus alone holds either grant capability.
+- **`use`** — any Proc writes a redeem request. The kernel looks up a pending grant for *the writer's own* kernel-stamped identity tag; it consumes the pending grant (one-shot). For a **hostowner grant** it ORs `CAP_HOSTOWNER` into `current->caps` **iff** the writer holds `PROC_FLAG_CONSOLE_ATTACHED` (the load-bearing kernel gate). For a **clearance grant** (A-4) it stamps `current->caps |= cap_set & self_restriction` and records the legate context (`legate_scope_id` / `legate_session_id` / `legate_valid_until`); console attachment is **not** required for ordinary clearance -- the level's `auth_required` is enforced corvus-side (the trusted path for high-stakes, §5.7) before the grant is ever registered. The A-4 finer elevation-only caps `CAP_DAC_OVERRIDE` / `CAP_CHOWN` / `CAP_KILL` (split out of `CAP_HOSTOWNER`) join `CAP_ELEVATION_ONLY`, so the `rfork` strip -- the P5-hostowner I-2 hole, closed in A-4-pre -- covers them all.
 
 **Two capabilities, two roles.**
 
@@ -549,6 +549,63 @@ A session without `CAP_HOSTOWNER` cannot execute admin verbs; verb authorization
 ```
 
 The recovery phrase is a printed-paper instrument. Loss of both system passphrase AND recovery phrase = system reinstall required (intentional disaster-recovery floor).
+
+### 5.7 Clearance levels + the legate (A-4)
+
+A-4's just-in-time elevation (IDENTITY-DESIGN §3.1 / §9.8). corvus owns the **clearance
+policy** + **eligibility**; the kernel owns the **cap-stamp** + **scope** (§5.5.1 `cap`
+device; the `legate_*` Proc fields). No local crypto: corvus's authority to register a
+clearance grant (`CAP_GRANT_CLEARANCE`) is the trust root.
+
+**Clearance level** (policy object; persisted in corvus's storage cap
+`/var/lib/corvus/clearance/<name>`):
+
+```
+clearance_level := {
+    name,
+    caps          : structured TLV  (resource-scoping is a v1.x-additive field, NOT a bare u64),
+    auth_required : { re_auth | distinct_secret | system_key | hostowner_cosign },
+    time_bound    : ns (0 = none),
+    scope_kind    : { subtree }   (v1.0),
+}
+```
+
+Kept few + coarse (hw-dev, fs-admin, user-admin, clearance-admin). The hostowner authors
+them; `CLEARANCE_GRANT` / `CLEARANCE_REVOKE` target a user OR a group (like group membership).
+
+**Eligibility = a per-user wrap.** A grant wraps the level's unlock material under the
+subject's hybrid keypair (the A-1b CRVS wrap); revoke deletes that wrap (per-user, no
+shared-secret rotation). An active legate keeps its stamped caps until scope exit; revoke
+blocks *future* activation.
+
+**Activation flow** (`CLEARANCE_ACTIVATE` -- the legate path):
+
+```
+[user shell] CLEARANCE_ACTIVATE { token, level, self_restrict, valid_until_req }
+       v
+[corvus]  resolve the session's principal (SYS_SRV_PEER) + verify eligibility (wrap exists)
+       |  satisfy the level's auth_required:
+       |    low-stakes  -> re-auth with the user's own login secret (in-band)
+       |    high-stakes -> the TRUSTED PATH: a kernel SAK hands the console to corvus
+       |                   (IDENTITY-DESIGN §9.8, A-4c) so the prompt is unspoofable;
+       |                   never a spoofable in-shell prompt
+       |  on success: write the cap-device `grant` (clearance shape):
+       |    { cap_set = level.caps, identity_tag = peer stripes, valid_until, session_id }
+       |    [kernel gate: corvus holds CAP_GRANT_CLEARANCE]
+       v
+[user shell] redeem via the cap-device `use` -> kernel stamps
+             caps |= cap_set & self_restrict; records legate_scope_id / session_id / valid_until.
+```
+
+The legate's **identity stays the durable user** (attribution + ownership-on-create); the
+caps + `legate_session_id` are the only delta. The scope (`legate_scope_id` subtree) is
+fully torn down on the legate root's exit or `valid_until` expiry (kernel-side, §9.8).
+corvus re-queries the peer's live caps before any irreversible admin effect (the C-22 TOCTOU
+discipline) -- unchanged.
+
+**Verbs** (§6.4 wire): `CLEARANCE_LIST` (eligible levels + their caps) + `CLEARANCE_ACTIVATE`
+are user-facing; `CLEARANCE_GRANT` / `CLEARANCE_REVOKE` are `CAP_HOSTOWNER`-gated eligibility
+admin (the hostowner decides who may become which legate).
 
 ---
 
@@ -652,6 +709,10 @@ Verb table:
 | 11 | RESOLVE_ID | `principal_id u32 LE` |
 | 12 | RESOLVE_NAME | `name_len u8` + `name` |
 | 13 | GROUP_CREATE | `name_len u8` + `name` |
+| 14 | CLEARANCE_LIST | `token` (33) |
+| 15 | CLEARANCE_ACTIVATE | `token` (33) + `level_len u8` + `level` + `self_restrict u64 LE` + `valid_until_req u64 LE` (0 = level default) |
+| 16 | CLEARANCE_GRANT | `token` (33) + `subject_kind u8` (0=user,1=group) + `subject_len u8` + `subject` + `level_len u8` + `level` |
+| 17 | CLEARANCE_REVOKE | `token` (33) + `subject_kind u8` + `subject_len u8` + `subject` + `level_len u8` + `level` |
 
 Verbs 11-13 + the USER_CREATE extension are the A-1b identity surface; full semantics + OK-response payloads + the byte format + persistence are in §16.
 
