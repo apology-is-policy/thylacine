@@ -339,6 +339,63 @@ static inline bool mount_key_eq(const struct PgrpMount *m,
            m->mp_qid_path == s->qid.path;
 }
 
+// A mount-point / source identity (Plan 9 type+dev+qid). Used by the mount
+// cycle check below.
+struct mkey { int dc; u32 devno; u64 path; };
+
+static inline bool mkey_eq(struct mkey a, struct mkey b) {
+    return a.dc == b.dc && a.devno == b.devno && a.path == b.path;
+}
+static inline struct mkey spoor_mkey(const struct Spoor *s) {
+    struct mkey k = { s->dc, s->devno, s->qid.path };
+    return k;
+}
+static bool mkey_in(const struct mkey *arr, int n, struct mkey k) {
+    for (int i = 0; i < n; i++) if (mkey_eq(arr[i], k)) return true;
+    return false;
+}
+
+// would_create_mount_cycle(t, source, mountpoint): would adding the mount edge
+// `key(mountpoint) -> key(source)` (walking onto the mount point crosses to the
+// source's tree) create a cycle in `t`'s mount-identity graph? I-3 (mount points
+// form a DAG, never a cycle) -- the mount-table analog of would_create_cycle for
+// binds (stalk-2 audit F1: I-3 was claimed "by construction" but a self-mount or
+// a two-tree oscillation could form a cycle that `cross_mounts` then resolved to
+// a silently-wrong endpoint; enforce it here so the invariant actually holds).
+//
+// Algorithm mirrors would_create_cycle: from `key(source)`, follow existing
+// mount edges to a fixed point (an entry whose mount-point key is reachable adds
+// its source key); if `key(mountpoint)` is then reachable, the new edge closes a
+// cycle (mountpoint -> source -> ... -> mountpoint). The trivial self-mount
+// (source identity == mountpoint identity) is the degenerate case.
+static bool would_create_mount_cycle(const struct Territory *t,
+                                     const struct Spoor *source,
+                                     const struct Spoor *mountpoint) {
+    struct mkey src = spoor_mkey(source);
+    struct mkey dst = spoor_mkey(mountpoint);
+    if (mkey_eq(src, dst)) return true;            // self-mount
+
+    struct mkey reach[PGRP_MAX_MOUNTS + 1];
+    int n = 0;
+    reach[n++] = src;
+
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (int i = 0; i < t->nmounts; i++) {
+            struct mkey e_mp  = { t->mounts[i].mp_dc, t->mounts[i].mp_devno,
+                                  t->mounts[i].mp_qid_path };
+            struct mkey e_src = spoor_mkey(t->mounts[i].source);
+            if (mkey_in(reach, n, e_mp) && !mkey_in(reach, n, e_src)) {
+                if (n >= PGRP_MAX_MOUNTS + 1) break;
+                reach[n++] = e_src;
+                changed = true;
+            }
+        }
+    }
+    return mkey_in(reach, n, dst);
+}
+
 int mount(struct Territory *territory, struct Spoor *source,
           struct Spoor *mountpoint, u32 flags) {
     if (!territory)                    extinction("mount(NULL territory)");
@@ -349,6 +406,12 @@ int mount(struct Territory *territory, struct Spoor *source,
     // (dc, devno, qid.path), never retain the Spoor. Reject NULL / corrupted.
     if (!mountpoint)                    return -1;
     if (mountpoint->magic != SPOOR_MAGIC) return -1;
+
+    // I-3: reject a mount that would create a cycle in the mount-identity graph
+    // (a self-mount, or a cross-tree oscillation). stalk-2 audit F1 -- enforce
+    // the DAG here rather than relying on cross_mounts' loop bound, so a
+    // cyclic mount cannot be installed + then resolve to a wrong endpoint.
+    if (would_create_mount_cycle(territory, source, mountpoint)) return -3;
 
     // Idempotency: (key(mountpoint), source) pair already in the table → no-op.
     // Spec: <<path, s>> \notin mounts[p] precondition under the re-keyed

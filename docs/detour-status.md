@@ -755,22 +755,28 @@ kill = BOTH the namespace `/proc/<pid>/ctl` surface AND a narrow elevation-only 
     `amode`) FIXED; F2 (unreachable defense-in-depth branch) DOCUMENTED; F3 (inherited `handle_get`
     TOCTOU amplified to N hops) DEFERRED to the handle-lifetime pass. Matrix GREEN: default(smp4) +
     smp8 + UBSan ALL 698/698 + E2E + boot OK + 0 EXTINCTION.
-  - **stalk-2 LANDED** (`<pending>`) (cites scripture 514f8a6). Mount re-key + Plan 9 `domount`:
-    `PgrpMount` re-keyed from the abstract `path_id_t` to the FULL `(dc, devno, qid.path)`
-    mount-point Spoor identity (the **`devno` axis** -- a new `u32 Spoor.devno` = Plan 9 `Chan.dev`,
-    minted per attach by `spoor_next_devno()`, stamped in `dev9p_attach_client` -- is LOAD-BEARING:
-    every dev9p session shares `dc='9'`+root `qid.path 0`, so `(dc,qid.path)` alone collides the
-    A-5b corvus + per-user stratum-fs); `mount`/`unmount`/`mount_lookup` Spoor-keyed (entry 16->32 B,
-    static_asserts re-bumped); `cross_mounts` (cross-on-descent) + `STALK_MOUNT` (no-cross-final, so
-    MREPL re-keys the same point) in `stalk.c`; `SYS_MOUNT`/`UNMOUNT` PATH-keyed; devramfs synthetic
-    `/srv`+`/proc` mount-point dirs (D4 M1); migrated `/attach-probe`,`/stub-driver` (thunk chroots a
-    devramfs root),`alloc-smoke` + libt/libthyla-rs `t_mount`/`t_unmount`/`territory::mount`. 6 new
-    `stalk.cross_mount*` unit tests + `territory_mount.devno_disambiguates` + a joey dev9p cross E2E
-    (`stalk-x-mnt/xleaf -> stalk-x-src/xleaf`). The 5 `territory_buggy*` TLA invariant-detection gates
-    green. Matrix GREEN: default(smp4) + smp8 + UBSan ALL **705/705** + both E2Es + boot OK + 0
-    EXTINCTION + 0 UBSan errors. Design refinements (devno restores §1's stated `type+dev+qid`;
-    `STALK_MOUNT`) folded into `docs/STALK-DESIGN.md` §3. **NEXT = stalk-3** (#834: devsrv
-    per-territory + namespace-resident `/srv` + retire `SYS_SRV_CONNECT`/`POST_SERVICE`).
+  - **stalk-2 LANDED + audit CLEAN** (impl `e291b74` / close `<pending>`; cites scripture 514f8a6).
+    Mount re-key + Plan 9 `domount`: `PgrpMount` re-keyed from the abstract `path_id_t` to the FULL
+    `(dc, devno, qid.path)` mount-point Spoor identity (the **`devno` axis** -- a new `u32 Spoor.devno`
+    = Plan 9 `Chan.dev`, minted per attach by `spoor_next_devno()`, stamped in `dev9p_attach_client`
+    -- is LOAD-BEARING: every dev9p session shares `dc='9'`+root `qid.path 0`, so `(dc,qid.path)` alone
+    collides the A-5b corvus + per-user stratum-fs); `mount`/`unmount`/`mount_lookup` Spoor-keyed
+    (entry 16->32 B, static_asserts re-bumped); `cross_mounts` (cross-on-descent) + `STALK_MOUNT`
+    (no-cross-final, so MREPL re-keys the same point) in `stalk.c`; `SYS_MOUNT`/`UNMOUNT` PATH-keyed;
+    devramfs synthetic `/srv`+`/proc` mount-point dirs (D4 M1); migrated `/attach-probe`,`/stub-driver`
+    (thunk chroots a devramfs root),`alloc-smoke` + libt/libthyla-rs `t_mount`/`t_unmount`/`territory::mount`.
+    7 new tests (6 `stalk.cross_mount*` + `territory_mount.devno_disambiguates`) + a joey dev9p cross
+    E2E (`stalk-x-mnt/xleaf -> stalk-x-src/xleaf`). **Audit R1 CLEAN: 0 P0 / 0 P1 / 1 P2 / 2 P3**
+    (Opus prosecutor a1d95b43 + self-audit CONVERGED; `memory/audit_stalk2_closed_list.md`): **F1 (P2)
+    FIXED** -- the mount table admitted cycles (I-3's "cycle-free by construction" was FALSE; a
+    self-mount/oscillation resolved to a silently-wrong endpoint via the bounded loop); fixed with
+    `would_create_mount_cycle` at mount() (mirrors bind's check, `-3` return) + `territory_mount.rejects_cycle`
+    + STALK-DESIGN §7 corrected; F2 (P3) dev9p_walk monotonic-fid leak on a failed clone-walk
+    (pre-existing, benign) DEFERRED to a p9_client free-list chunk; F3 (P3) cross-mount `..` fidelity
+    gap DOCUMENTED (v1.x). Matrix GREEN: default(smp4) + smp8 + UBSan ALL **706/706** (+1 cycle test) +
+    both E2Es + boot OK + 0 EXTINCTION + 0 UBSan errors. The 5 `territory_buggy*` TLA gates correctly
+    violate. **NEXT = stalk-3** (#834: devsrv per-territory + namespace-resident `/srv` + retire
+    `SYS_SRV_CONNECT`/`POST_SERVICE`).
 
 ---
 

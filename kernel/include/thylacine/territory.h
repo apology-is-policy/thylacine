@@ -231,6 +231,10 @@ int unbind(struct Territory *territory, path_id_t src, path_id_t dst);
 //    0   success (entry added or idempotent no-op).
 //   -1   source or mountpoint is NULL / has corrupted magic.
 //   -2   mounts[] full (PGRP_MAX_MOUNTS reached).
+//   -3   would create a mount cycle (I-3) -- a self-mount (source identity ==
+//        mountpoint identity) or a cross-tree oscillation. The SVC layer
+//        collapses every failure to -1; the distinct code is for the C-API +
+//        tests (mirrors bind()'s -1 cycle code).
 int mount(struct Territory *territory, struct Spoor *source,
           struct Spoor *mountpoint, u32 flags);
 

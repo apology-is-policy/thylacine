@@ -90,6 +90,7 @@ void test_territory_mount_table_full(void);
 void test_territory_mount_clone_bumps_refs(void);
 void test_territory_mount_destroy_drops_all_refs(void);
 void test_territory_mount_devno_disambiguates(void);
+void test_territory_mount_rejects_cycle(void);
 void test_territory_chroot_smoke(void);
 void test_territory_chroot_idempotent_same_spoor(void);
 void test_territory_chroot_replace_clunks_old(void);
@@ -838,6 +839,7 @@ struct test_case g_tests[] = {
     { "territory_mount.clone_bumps_refs",                 test_territory_mount_clone_bumps_refs,                 false, NULL },
     { "territory_mount.destroy_drops_all_refs",           test_territory_mount_destroy_drops_all_refs,           false, NULL },
     { "territory_mount.devno_disambiguates",              test_territory_mount_devno_disambiguates,              false, NULL },
+    { "territory_mount.rejects_cycle",                    test_territory_mount_rejects_cycle,                    false, NULL },
     { "territory.chroot_smoke",                           test_territory_chroot_smoke,                           false, NULL },
     { "territory.chroot_idempotent_same_spoor",           test_territory_chroot_idempotent_same_spoor,           false, NULL },
     { "territory.chroot_replace_clunks_old",              test_territory_chroot_replace_clunks_old,              false, NULL },

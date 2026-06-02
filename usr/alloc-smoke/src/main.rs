@@ -1002,15 +1002,15 @@ pub extern "C" fn rs_main() -> i64 {
         return 1;
     }
 
-    // mount/unmount round-trip (stalk-2: path-keyed). alloc-smoke runs after
-    // joey's pivot to the disk-backed FS; FROM_ROOT resolves on the Stratum
-    // root. We mount onto /system.key itself -- a leaf file alloc-smoke opens
-    // and controls the access timing of, so the transient self-shadow during
-    // mount..unmount is harmless (vs. shadowing a shared system dir). This is
-    // a plumbing smoke for the territory:: API + the new path-keyed ABI.
-    //
-    // Source: /system.key opened RDONLY -- a Spoor with RIGHT_READ.
-    const TEST_MP: &str = "/system.key";
+    // mount/unmount round-trip (stalk-2: path-keyed). alloc-smoke is spawned by
+    // joey PRE-pivot, so FROM_ROOT resolves on the devramfs boot root. Source =
+    // /system.key (a cpio leaf, opened RDONLY -> RIGHT_READ); mount point = the
+    // devramfs synthetic /srv dir (stalk-2 D4) -- a DISTINCT, purpose-built,
+    // empty mount point (the mount cycle check, stalk-2 audit F1, rejects a
+    // self-mount where the source identity == the mount-point identity, so the
+    // source and the mount point must differ). A plumbing smoke for the
+    // territory:: API + the new path-keyed ABI.
+    const TEST_MP: &str = "/srv";
     let src = match File::open("/system.key") {
         Ok(f) => f,
         Err(_) => {

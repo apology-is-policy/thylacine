@@ -87,10 +87,12 @@ static int cross_mounts(struct Proc *p, struct Spoor *probe,
 
     struct Spoor *cur = NULL;     // latest owned crossed clone (NULL until 1st)
     struct Spoor *id  = probe;    // identity to test each round
-    // Bound by the table size: each cross consumes a DISTINCT entry, and mount
-    // points are cycle-free by construction (I-3), so at most PGRP_MAX_MOUNTS
-    // crosses are possible. The bound is also a defensive backstop against a
-    // would-be cycle (it would simply stop crossing rather than spin).
+    // Bound by the table size: each cross consumes a DISTINCT entry, and the
+    // mount graph is acyclic -- I-3 is ENFORCED at mount() time
+    // (territory.c::would_create_mount_cycle rejects a self-mount or a cross-tree
+    // oscillation), NOT merely "by construction" -- so at most PGRP_MAX_MOUNTS
+    // crosses are possible. The bound remains as a defensive backstop (it would
+    // stop crossing rather than spin even if a cycle somehow existed).
     for (int hops = 0; hops < PGRP_MAX_MOUNTS; hops++) {
         struct Spoor *src = mount_lookup(p->territory, id);
         if (!src) break;                          // id is not a mount point

@@ -283,9 +283,16 @@ style policy favours it) — needs signoff (D3).
 - **I-1 (namespace isolation).** `stalk` reads only the caller's territory;
   per-session `/srv` makes cross-user services *unnameable*. Strengthened, not
   weakened.
-- **I-3 (mount DAG / no cycle).** Preserved; the bind cycle-check stays. v1.0
-  `stalk` follows mount edges that are cycle-free by construction (one mount per
-  mount point; MREPL replaces).
+- **I-3 (mount DAG / no cycle).** Preserved + ENFORCED at mount() time (stalk-2
+  audit F1): `territory.c::would_create_mount_cycle` rejects a mount that would
+  close a cycle in the mount-identity graph -- a self-mount (source identity ==
+  mount-point identity) or a cross-tree oscillation -- mirroring `bind`'s
+  `would_create_cycle`. (The earlier "cycle-free by construction" claim was
+  wrong: "one mount per mount point" does NOT preclude a two-tree cycle; the
+  resolver's `PGRP_MAX_MOUNTS` loop bound was the only thing preventing a hang,
+  and a cyclic mount resolved to a silently-wrong endpoint. Now the cycle cannot
+  be installed; the bound stays as a backstop.) The bind cycle-check is
+  unchanged.
 - **Per-component X-search (A-3 / I-22-adjacent).** The new enforcement
   obligation — every directory hop checks `PERM_X` for the caller's principal.
 - **`..` containment.** No resolution escapes `root_spoor`. (New, audit-critical.)

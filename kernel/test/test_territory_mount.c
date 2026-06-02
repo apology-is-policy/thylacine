@@ -58,6 +58,7 @@ void test_territory_mount_table_full(void);
 void test_territory_mount_clone_bumps_refs(void);
 void test_territory_mount_destroy_drops_all_refs(void);
 void test_territory_mount_devno_disambiguates(void);
+void test_territory_mount_rejects_cycle(void);
 
 // Mint a mount-point Spoor with a distinct identity (devnone dc '-', devno 0,
 // the given qid.path). The mount table keys on (dc, devno, qid.path), so a
@@ -332,4 +333,48 @@ void test_territory_mount_devno_disambiguates(void) {
     spoor_unref(mp1);
     spoor_unref(mp2);
     spoor_unref(mp3);
+}
+
+// stalk-2 audit F1: mount() must reject a mount that would create a cycle in the
+// mount-identity graph (I-3). Two reachable triggers: a self-mount (source
+// identity == mount-point identity) and a cross-tree oscillation.
+void test_territory_mount_rejects_cycle(void) {
+    struct Territory *p = territory_alloc();
+    TEST_ASSERT(p != NULL, "territory_alloc returned NULL");
+
+    // (1) Self-mount: source and mount point share an identity (-,0,7) -> -3.
+    struct Spoor *self_src = spoor_alloc(&devnone);
+    struct Spoor *self_mp  = spoor_alloc(&devnone);
+    TEST_ASSERT(self_src && self_mp, "self spoor_alloc");
+    self_src->qid.path = 7; self_mp->qid.path = 7;   // SAME identity
+    TEST_EXPECT_EQ(mount(p, self_src, self_mp, 0), -3,
+        "self-mount (source identity == mount-point identity) rejected (I-3)");
+    TEST_EXPECT_EQ(territory_nmounts(p), 0, "no entry installed for self-mount");
+    TEST_EXPECT_EQ(self_src->ref, 1, "self-mount reject must NOT bump source ref");
+
+    // (2) Cross-tree oscillation. Identities: A=10, B=20.
+    //   mount(srcA[10] onto mpB[20]) -> edge 20->10 (installed; not yet a cycle).
+    //   mount(srcB[20] onto mpA[10]) -> edge 10->20 closes 20->10->20 -> -3.
+    struct Spoor *srcA = spoor_alloc(&devnone);   // identity 10 (the A tree root)
+    struct Spoor *mpB  = spoor_alloc(&devnone);   // identity 20 (a dir in B)
+    struct Spoor *srcB = spoor_alloc(&devnone);   // identity 20 (the B tree root)
+    struct Spoor *mpA  = spoor_alloc(&devnone);   // identity 10 (a dir in A)
+    TEST_ASSERT(srcA && mpB && srcB && mpA, "osc spoor_alloc");
+    srcA->qid.path = 10; mpA->qid.path = 10;
+    srcB->qid.path = 20; mpB->qid.path = 20;
+
+    TEST_EXPECT_EQ(mount(p, srcA, mpB, 0), 0, "A onto B installs (edge 20->10)");
+    TEST_EXPECT_EQ(territory_nmounts(p), 1, "one entry after first oscillation mount");
+    TEST_EXPECT_EQ(mount(p, srcB, mpA, 0), -3,
+        "B onto A would close the 20->10->20 cycle -> rejected (I-3)");
+    TEST_EXPECT_EQ(territory_nmounts(p), 1, "cycle reject left the table at 1");
+    TEST_EXPECT_EQ(srcB->ref, 1, "cycle reject must NOT bump srcB ref");
+
+    territory_unref(p);
+    spoor_unref(self_src);
+    spoor_unref(self_mp);
+    spoor_unref(srcA);
+    spoor_unref(mpB);
+    spoor_unref(srcB);
+    spoor_unref(mpA);
 }
