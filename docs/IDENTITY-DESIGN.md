@@ -2054,27 +2054,52 @@ Stratum-side sub-chunk below.
     presents S. Stratum's shipped `stm_corvus_unwrap` (`include/stratum/corvus_client.h:502`)
     already drives that path at mount time (`stm_sync_open` / `sync_unwrap_cb`), and
     `sync_dek_insert` (install) already exists.
-  - **The call: the coordinator PULLS** the DEK over its own corvus connection using the
-    login-forwarded token -- the already-built path, **no corvus connection-model lift** (the
-    per-Proc cap + token-keyed session already admit a second Proc). corvus PUSH is rejected:
-    it inverts corvus's server/key-agent role (corvus dials no one) and corvus does not hold
-    the storage layout (the wrapped blob + key_id + dataset live on the Stratum side). Safe at
-    v1.0 because the single global `SESSION` slot + single-console-serial = one live session;
-    concurrent multi-session corvus (already a seam below) generalizes it at v1.x.
-  - **The genuinely-new plumbing is all Stratum-side** (verified NO on-disk-format / wire-ABI
-    break -- the keyslot envelope is opaque to the on-disk layout, the deks map is in-RAM,
-    UNWRAP/WRAP are wire-v1-stable): (1) the **deferred-unwrap soft-skip** -- the coordinator
-    boots with user-sealed CURRENT keyslots present-but-locked when no session token is
-    available (keyed on token-availability, the predicate already half-present at
-    `src/sync/sync.c:555-561`); (2) a runtime DEK **install** (`stm_corvus_unwrap` with the
-    forwarded token, then `sync_dek_insert`) + **evict** (`sync_dek_remove` + zero -- today
-    only the unmount-wide `sync_dek_wipe_all` exists) on the long-lived coordinator; (3) a
-    coordinator **runtime control surface** login drives to trigger install (at login) / evict
-    (at logout) with the user's token -- its exact form (a `/ctl`-style 9P control file vs a
-    dedicated command socket) pinned at Stratum impl, no wire-ABI change. login never holds the
-    raw DEK (the coordinator unwraps + installs; login forwards only the opaque token).
+  - **The call (CORRECTED 2026-06-02 -- deeper ground truth + a user vote): the coordinator
+    PULLS** the DEK over its OWN corvus connection with the login-forwarded token (the §6.3
+    bearer-token-forward). corvus PUSH stays rejected (it inverts corvus's server/key-agent
+    role + corvus does not hold the storage layout). BUT the earlier same-day "no corvus
+    connection-model lift / all Stratum-side" conclusion was INCOMPLETE: no pouch stratumd has
+    ever reached corvus, and realizing the pull requires TWO enabling changes (neither alters
+    the fixed security property):
+    1. **pouch->corvus transport enablement.** corvus serves its verbs on the `ctl` sub-fid
+       (reached via `Twalk("ctl")`); login's native `t_srv_connect(b"corvus", b"ctl")` walks to
+       it, but the pouch `connect()` passes `path_len = 0` and `sun_path_to_name` rejects any
+       `/`, so a pouch client never binds the ctl fid. Fix: teach the pouch sockets connect to
+       parse `/srv/<name>/<walk>` and forward the walk component (the kernel's 2-arg
+       `SYS_srv_connect` already drives `Tversion+Tattach+Twalk+Tlopen` -- login proves it). No
+       kernel / corvus / Stratum-client change; the raw-byte `stm_corvus_unwrap` + the wire
+       codec + the 1217-byte envelope are all verified compatible and unchanged. (`0006-pouch-
+       sockets.patch`, audit-bearing boundary-line.)
+    2. **corvus session-ownership lift (user-voted Option B, 2026-06-02).** corvus's impl clears
+       its single global AUTH SESSION on ANY connection close (`close_conn` -> `session_clear`,
+       `usr/corvus/src/main.rs:3352`), a v1.0 single-client shortcut. A transient coordinator
+       connection's close would wipe login's session mid-session -- breaking A-4 legate
+       elevation (which presents the same token). The lift: stamp the session-OWNING connection
+       at AUTH; clear the SESSION only on THAT connection's close or an explicit SESSION_CLOSE;
+       a non-owning bearer-token connection's close no longer clears it. This realizes the
+       §4.2/§6.2 "token bound to the creating Proc; closing it auto-closes the session" intent
+       precisely (the single-global-slot impl approximated it under the single-client
+       assumption) and is the first step of the v1.x multi-session direction. Audit-bearing
+       (corvus session model); CORVUS-DESIGN §6.2 updated this commit.
+  - **The genuinely-new plumbing** (verified NO on-disk-format / wire-ABI break -- the keyslot
+    envelope is opaque to the on-disk layout, the deks map is in-RAM, UNWRAP/WRAP are
+    wire-v1-stable): the two enabling changes above, PLUS all Stratum-side: (1) the
+    **deferred-unwrap soft-skip** -- the coordinator boots with user-sealed CURRENT keyslots
+    present-but-locked when no session token is available (the predicate is half-present at
+    `src/sync/sync.c:555-561`; keep R42's hard-fail at `628/652` for an *attempted* unwrap that
+    fails -- that is tamper, not deferral); (2) a runtime DEK **install** (`stm_corvus_unwrap`
+    with the forwarded token, then `sync_dek_insert`) + **evict** (`sync_dek_remove` + zero --
+    today only the unmount-wide `sync_dek_wipe_all` exists) on the long-lived coordinator; (3) a
+    coordinator **runtime control surface** login drives to trigger install (login) / evict
+    (logout) with the user's token -- realized as two new writable `/ctl` kinds (`install-dek` /
+    `evict-dek`; the `mark-snapshot-compromised` handler is the action+commit+revert template),
+    reached over a 2nd 9P attach to the coordinator's `--ctl-listen` socket; authorized by the
+    token (bearer cred + corvus's C-7 owner gate) + the SYSTEM peer as defense-in-depth (NOT the
+    ctl-admin gate -- login is `PRINCIPAL_SYSTEM`, not uid 0); (4) host-bake via
+    `stratumd --provision-corvus-dataset`. login never holds the raw DEK -- it forwards only the
+    opaque token; the coordinator unwraps + installs.
   - The *security property* (at-rest + session-scoped + login-never-holds-the-raw-DEK +
-    evict-at-logout) is fixed; the above is the plumbing within it.
+    evict-at-logout) is fixed; all the above is the plumbing within it.
 - *Thylacine-side*: login spawns the user's `--role client` stratumd (A-3c, dataset-scoped via
   `--datasets-allowed` -> the user-vs-user access boundary, `Rlerror(EACCES)` out-of-scope),
   triggers the coordinator DEK-install, and binds `/home/<user>` into the user's territory

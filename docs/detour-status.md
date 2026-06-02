@@ -710,16 +710,22 @@ kill = BOTH the namespace `/proc/<pid>/ctl` surface AND a narrow elevation-only 
 - **I-27 carry (A-4c-2 forward-note):** during a session corvus is the SOLE console-attached
   Proc; login + shell are NEVER attached; joey relinquishes its boot attach at the
   bringup->session boundary. Optional `SPAWN_PERM_CONSOLE_OWNER` for Ctrl-C-to-shell.
-- **A-5b open impl-design -- RESOLVED 2026-06-02** (ground-truth pass; no vote -- the fork
-  dissolved): `SRV_CONN_PER_PROC_MAX=1` is **per-Proc** (`kernel/devsrv.c:360`), so login's
-  connection does not block a second (coordinator) Proc; corvus's session is **token-keyed**
-  (`usr/corvus/src/main.rs:1586`) and `VERB_UNWRAP` already implements the bearer-token-forward
-  (CORVUS-DESIGN §6.3 / line 678; Stratum's `stm_corvus_unwrap` already drives it). **The
-  coordinator PULLS** with the login-forwarded token over its own connection -- no corvus
-  lift; push rejected (inverts corvus's role; corvus lacks the storage layout). New plumbing is
-  all Stratum-side (NO format/wire-ABI break): deferred-unwrap soft-skip + runtime DEK
-  install/evict + a coordinator control surface login drives with the token. Full reasoning:
-  IDENTITY-DESIGN §9.9 "Open A-5b impl-design item -- RESOLVED".
+- **A-5b open impl-design -- RESOLVED 2026-06-02** (ground-truth + a user vote): **the
+  coordinator PULLS** the DEK with the login-forwarded token over its own corvus connection
+  (the §6.3 bearer-token-forward; push rejected -- inverts corvus's role + corvus lacks the
+  storage layout). The first same-day "no corvus lift / all Stratum-side" note was INCOMPLETE
+  (corrected `ecbd8f4` -> this commit): no pouch stratumd has ever reached corvus, so the pull
+  needs TWO enabling changes -- (1) **pouch->corvus transport**: the pouch `connect()` must
+  walk to corvus's `ctl` fid (`sun_path_to_name` rejects `/` today; the kernel 2-arg
+  `SYS_srv_connect` already drives the walk -- login proves it; no corvus/Stratum-client
+  change); (2) **corvus session-ownership lift (user-voted Option B)**: clear the global AUTH
+  SESSION only on the OWNING connection's close or explicit SESSION_CLOSE, not on any close
+  (`close_conn`@`usr/corvus/src/main.rs:3352`) -- else the coordinator's transient connection
+  wipes login's session mid-session + breaks A-4 elevation. PLUS the Stratum-side: deferred-
+  unwrap soft-skip + runtime DEK install/evict (two new writable `/ctl` `install-dek`/`evict-dek`
+  kinds over `--ctl-listen`) + host-bake. NO on-disk-format/wire-ABI break. Full reasoning:
+  IDENTITY-DESIGN §9.9 "The call (CORRECTED 2026-06-02)" + CORVUS-DESIGN §6.2 "AUTH-session
+  ownership".
 
 ---
 
