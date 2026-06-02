@@ -4821,6 +4821,14 @@ static s64 sys_console_open_handler(void) {
     if (!t)                            return -1;
     struct Proc *p = t->proc;
     if (!p)                            return -1;
+    // A-5a audit F2: gate on console-attach. /dev/cons is a single-reader global
+    // (devcons_read drains one ring; first reader wins), so an UNGATED open lets
+    // any EL0 Proc (a user shell's child) steal the getty's console input or deny
+    // it a reader slot. Only the console-trust anchor may open it: joey opens it
+    // while still attached (BEFORE SYS_CONSOLE_RELINQUISH) and hands it to login;
+    // post-SAK corvus is the attached Proc. login + the user shell are never
+    // console-attached, so they cannot open /dev/cons.
+    if (!proc_is_console_attached(p))  return -1;
     return (s64)sys_console_open_for_proc(p);
 }
 

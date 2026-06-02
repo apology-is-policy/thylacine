@@ -187,23 +187,48 @@ PY
 fi
 
 # Wait up to BOOT_TIMEOUT seconds for the boot marker to appear.
+#
+# A-5a (login + session): the "Thylacine boot OK" banner no longer ends the boot.
+# joey signals SYS_BOOT_COMPLETE (the banner) and then KEEPS RUNNING -- it
+# getty-loops /sbin/login. So post-banner code (the getty, a login session) can
+# now fault AFTER the banner. To avoid masking a post-banner extinction as a
+# false PASS, (a) the EXTINCTION check takes PRECEDENCE over the banner on every
+# poll, and (b) on banner-observed we watch a short grace window (still running)
+# for a post-banner extinction before declaring PASS. BANNER_GRACE is
+# env-overridable (bump it for very slow / oversubscribed SMP boots).
+BANNER_GRACE="${BANNER_GRACE:-3}"
 deadline=$(( $(date +%s) + BOOT_TIMEOUT ))
 result="timeout"
 while [[ $(date +%s) -lt $deadline ]]; do
-    if [[ -f "$LOG_FILE" ]] && grep -q "$BOOT_MARKER" "$LOG_FILE"; then
-        result="pass"
-        break
-    fi
+    # Extinction first: a crash is a FAIL whether or not the banner also printed.
     if [[ -f "$LOG_FILE" ]] && grep -q "^$EXTINCTION_MARKER" "$LOG_FILE"; then
         result="extinction"
         break
     fi
+    if [[ -f "$LOG_FILE" ]] && grep -q "$BOOT_MARKER" "$LOG_FILE"; then
+        # Banner observed. Watch a grace window for a POST-banner extinction
+        # (getty/login fault) before declaring PASS -- joey persists past the
+        # banner, so a later crash must not be masked.
+        result="pass"
+        grace_deadline=$(( $(date +%s) + BANNER_GRACE ))
+        while [[ $(date +%s) -lt $grace_deadline ]]; do
+            if grep -q "^$EXTINCTION_MARKER" "$LOG_FILE"; then
+                result="extinction"
+                break
+            fi
+            if ! kill -0 "$QEMU_PID" 2>/dev/null; then
+                break
+            fi
+            sleep 0.1
+        done
+        break
+    fi
     if ! kill -0 "$QEMU_PID" 2>/dev/null; then
-        # QEMU exited before the marker. Final check on the log.
-        if grep -q "$BOOT_MARKER" "$LOG_FILE"; then
-            result="pass"
-        elif grep -q "^$EXTINCTION_MARKER" "$LOG_FILE"; then
+        # QEMU exited before the marker. Final check on the log (extinction first).
+        if grep -q "^$EXTINCTION_MARKER" "$LOG_FILE"; then
             result="extinction"
+        elif grep -q "$BOOT_MARKER" "$LOG_FILE"; then
+            result="pass"
         else
             result="qemu-exit"
         fi

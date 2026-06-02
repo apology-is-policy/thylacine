@@ -1354,7 +1354,10 @@ static int do_login_e2e(void) {
     }
 
     // Seed "michael\n<pass>\n", then close the write end so login's fd 0 reads
-    // the creds then EOF (ut, inheriting fd 0, then also sees EOF -> exits).
+    // the creds then EOF. (Audit F4: the U-3 `ut` skeleton prints a banner via
+    // SYS_PUTS and exits 0 WITHOUT reading fd 0, so the E2E passes regardless of
+    // ut's fd-0 state today; the creds-pipe EOF wiring is forward-looking for
+    // when ut grows a REPL that reads stdin.)
     {
         unsigned char creds[80];
         size_t o = 0;
@@ -1407,18 +1410,24 @@ static int do_login_e2e(void) {
 
 // session_getty_loop -- the live login session; NEVER returns (joey is init).
 // Runs AFTER SYS_BOOT_COMPLETE, so the harness has already observed the banner +
-// killed QEMU -- this is the real-console path. Each iteration opens /dev/cons,
-// spawns /sbin/login on it (fd 0/1/2), and waits the session; on logout it loops
-// (getty). In the harness, login blocks reading /dev/cons (no input) -- harmless,
-// QEMU is already gone. On a console-open / spawn failure, fall through to
-// reaping orphans forever (joey must never exit -> the banner stays valid).
-static void session_getty_loop(void) {
+// killed QEMU -- this is the real-console path. `cfd` is the /dev/cons handle joey
+// opened BEFORE relinquishing its console-attach (audit F2: SYS_CONSOLE_OPEN is
+// gated on console-attach, which joey drops right after the open; a user shell
+// can never open the console). Each iteration spawns /sbin/login on cfd (fd
+// 0/1/2) and waits the session; on logout it loops (getty), reusing the SAME cfd
+// (joey holds it for the loop's lifetime; each login inherits a ref, released at
+// its reap). In the harness, login blocks reading /dev/cons (no input) --
+// harmless, QEMU is already gone. On a spawn failure, fall through to reaping
+// orphans forever (joey must never exit -> the banner stays valid). F5 (P3,
+// degraded-state-only): a flapping login (e.g. corvus persistently down) would
+// respin without backoff; at v1.0 corvus is a persistent boot server so this
+// does not occur -- a timed getty backoff is a v1.x lift (needs a sleep
+// primitive wired into the getty).
+static void session_getty_loop(long cfd) {
     static const char login_argv[] = "login\0";
     const char login_name[] = "login";
+    unsigned int fds[3] = { (unsigned int)cfd, (unsigned int)cfd, (unsigned int)cfd };
     for (;;) {
-        long cfd = t_console_open();
-        if (cfd < 0) break;
-        unsigned int fds[3] = { (unsigned int)cfd, (unsigned int)cfd, (unsigned int)cfd };
         struct t_sys_spawn_args req = {
             .name_va       = (unsigned long)login_name,
             .argv_data_va  = (unsigned long)login_argv,
@@ -1432,10 +1441,9 @@ static void session_getty_loop(void) {
             .cap_mask      = LOGIN_CAPS,
         };
         long lpid = t_spawn_full_argv(&req);
-        (void)t_close(cfd);          // joey's copy; login holds the inherited tty
         if (lpid <= 0) break;
         int st = 0;
-        (void)t_wait_pid(&st);       // wait the session; on logout, loop -> fresh login
+        (void)t_wait_pid(&st);       // wait the session; on logout, loop -> fresh login on the SAME cfd
     }
     for (;;) {
         int st = 0;
@@ -2351,7 +2359,14 @@ int main(void) {
         return 1;
     }
 
-    // (3) Drop the boot console-attach (I-27: during a user session corvus must
+    // (3) Open /dev/cons NOW, while joey is still console-attached. SYS_CONSOLE_OPEN
+    // is gated on console-attach (audit F2: an ungated open lets a user Proc steal
+    // the getty's console input), and the very next step drops that attach -- so
+    // the getty must acquire its console handle here, before relinquishing. joey
+    // holds it for the getty's lifetime and hands a ref to each login.
+    long console_fd = t_console_open();
+
+    // (4) Drop the boot console-attach (I-27: during a user session corvus must
     // be the SOLE console-attached Proc; a post-SAK {joey,corvus} both-attached
     // state would break the trusted path). Anything that fails AFTER the banner
     // is post-PASS, so keep this minimal + robust (relinquish cannot fail here --
@@ -2361,9 +2376,15 @@ int main(void) {
         return 1;
     }
 
-    // (4) The live login session: getty-loop /sbin/login on /dev/cons. Never
-    // returns (joey is init); on a real console this prompts + runs sessions, in
-    // the harness login blocks on /dev/cons (QEMU is already gone post-banner).
-    session_getty_loop();
+    // (5) The live login session: getty-loop /sbin/login on the console handle.
+    // Never returns (joey is init); on a real console this prompts + runs
+    // sessions, in the harness login blocks on /dev/cons (QEMU is already gone
+    // post-banner). If the console could not be opened, joey still persists (the
+    // banner printed) -- reap orphans forever, no interactive login.
+    if (console_fd < 0) {
+        t_putstr("joey: t_console_open FAILED -- persisting without a login console\n");
+        for (;;) { int st = 0; (void)t_wait_pid(&st); }
+    }
+    session_getty_loop(console_fd);
     return 1;   // unreachable -- session_getty_loop never returns
 }

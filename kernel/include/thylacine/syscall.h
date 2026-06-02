@@ -1287,9 +1287,11 @@ enum {
     // and install a KOBJ_SPOOR handle with RIGHT_READ|RIGHT_WRITE. The session
     // getty (joey) opens this and hands it to /sbin/login as fd 0/1/2 (the Unix
     // login-reads-the-tty model); the A-4c-1 devcons_read blocking read drains
-    // the RX ring. No args. Returns the fd (>= 0) or -1. v1.0 ungates the open
-    // (devcons is single-reader-guarded: a 2nd concurrent read returns -1); a
-    // console-open capability gate is a v1.x seam if untrusted Procs ever run.
+    // the RX ring. No args. Returns the fd (>= 0) or -1. GATED on the caller
+    // being console-attached (A-5a audit F2): /dev/cons is a single-reader global,
+    // so an ungated open would let a user Proc steal/deny the getty's console
+    // input. joey opens it while still attached -- BEFORE SYS_CONSOLE_RELINQUISH --
+    // and hands it to login; login + the user shell are never console-attached.
     SYS_CONSOLE_OPEN = 64,
 };
 

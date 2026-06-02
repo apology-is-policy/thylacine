@@ -2005,7 +2005,16 @@ log now reaches a live `Thylacine login:` prompt. As-built reference:
 seeded mechanism + the prompt + an interactive run (the A-4c harness-cannot-
 inject precedent). `SPAWN_PERM_CONSOLE_OWNER` was deferred (under I-27 the
 non-attached login cannot pass the console-attached-gated perm; the SAK protects
-elevation regardless). NEXT: the A-5a audit round, then A-5b.
+elevation regardless). **A-5a audit R1 CLEAN** (Opus prosecutor + self-audit
+converged; 0 P0 / 0 P1 / 2 P2 / 3 P3, NOT dirty): F1 (a post-banner extinction
+was masked by test.sh now that joey runs past the banner -> test.sh now scans
+for EXTINCTION with precedence + a post-banner grace window) + F2
+(`SYS_CONSOLE_OPEN` was ungated -> now gated on console-attach; joey opens
+`/dev/cons` before relinquishing + reuses the one handle) + F4 (comment) FIXED;
+F3 (E2E doesn't assert ut's stamped principal_id -- needs a self-id syscall) +
+F5 (getty backoff -- needs a sleep primitive) DEFERRED-justified. Matrix:
+default + UBSan + smp8 GREEN (smp8 wants BOOT_TIMEOUT=1200 on M2 -- A-5a adds a
+2nd Argon2id before the banner). NEXT: A-5b.
 
 **A-5b -- per-user encrypted home** (Flavor 1: at-rest + session-scoped). Depends on the
 Stratum-side sub-chunk below.

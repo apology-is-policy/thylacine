@@ -685,12 +685,18 @@ kill = BOTH the namespace `/proc/<pid>/ctl` surface AND a narrow elevation-only 
   SYS_CONSOLE_RELINQUISH=63 / SYS_CONSOLE_OPEN=64 + `boot_mark_complete` banner move +
   `proc_console_relinquish` + 3 kernel tests, 686/686; the `Thylacine boot OK` string is
   unchanged, it now fires on init's SYS_BOOT_COMPLETE not joey's exit -- TOOLING.md 10 +
-  CLAUDE.md updated). A-5a-beta = native `/sbin/login` (`usr/login`; fd-0 creds -> corvus
+  CLAUDE.md updated). A-5a-beta (`161efa1`) = native `/sbin/login` (`usr/login`; fd-0 creds -> corvus
   AUTH -> RESOLVE_NAME/ID -> spawn `ut` stamped via `Command::identity()`) + joey
   `do_login_e2e` seeded CI proof (michael -> uid=1000 gid=1000 -> ut spawned+reaped, gated on
   login exit) + `session_getty_loop` (the boot log reaches a live `Thylacine login:` prompt).
-  As-built: `docs/reference/103-login.md`. NEXT: A-5a audit round, then A-5b. `SPAWN_PERM_CONSOLE_OWNER`
-  deferred (I-27: non-attached login can't pass the console-gated perm; SAK protects elevation).
+  As-built: `docs/reference/103-login.md`. **A-5a audit R1 CLEAN** (0 P0/0 P1/2 P2/3 P3, NOT dirty;
+  prosecutor + self-audit converged): F1 (test.sh masked a post-banner extinction -> EXTINCTION-
+  precedence + a post-banner grace window) + F2 (`SYS_CONSOLE_OPEN` ungated -> gated on
+  console-attach; joey opens /dev/cons pre-relinquish + reuses it) + F4 (comment) FIXED; F3 (assert
+  ut's stamped id -- needs a self-id syscall) + F5 (getty backoff -- needs a sleep primitive)
+  deferred-justified. Matrix default+UBSan+smp8 GREEN (smp8 wants BOOT_TIMEOUT=1200 on M2).
+  `SPAWN_PERM_CONSOLE_OWNER` deferred (I-27: non-attached login can't pass the console-gated perm).
+  NEXT: A-5b. See `memory/audit_a5a_closed_list.md`.
 - **Stratum-side** (in-scope; verified NO format/wire-ABI break): deferred-unwrap soft-skip +
   runtime DEK install/evict (reusing `stm_corvus_unwrap`) + token-forward, on `thylacine-pouch-arm`.
 - **Split:** A-5a (login core; Stratum-independent; lands first) -> A-5b (encrypted home + the

@@ -40,12 +40,15 @@ SYS_CONSOLE_OPEN       = 64   // x0 -> fd / -1
   another Proc); gated on the caller being console-attached.
   `kernel/proc.c::proc_console_relinquish` (under `g_proc_table_lock`).
 - **`SYS_CONSOLE_OPEN`** -- attach `/dev/cons` (`devcons`) and install a
-  `KOBJ_SPOOR` handle with `RIGHT_READ | RIGHT_WRITE`. The getty (joey) hands
-  this to `/sbin/login` as fd 0/1/2. `devcons_read` ignores the Spoor and drains
-  the global RX ring, so any opened handle is a valid console reader. v1.0
-  ungates the open (the console is single-reader-guarded -- a 2nd concurrent
-  read returns -1); a console-open capability gate is a v1.x seam.
-  `kernel/syscall.c::sys_console_open_for_proc`.
+  `KOBJ_SPOOR` handle with `RIGHT_READ | RIGHT_WRITE`. **GATED on the caller
+  being console-attached** (audit F2): `/dev/cons` is a single-reader global
+  (`devcons_read` drains one ring; first reader wins), so an ungated open would
+  let a user Proc steal/deny the getty's console input. The getty (joey) opens
+  it while still attached -- BEFORE `SYS_CONSOLE_RELINQUISH` -- and hands the one
+  handle to each `/sbin/login` (login + the user shell are never attached, so
+  they cannot open it; post-SAK corvus is the attached Proc).
+  `kernel/syscall.c::sys_console_open_handler` (gate) +
+  `sys_console_open_for_proc` (core).
 
 libt wrappers: `t_boot_complete()` / `t_console_relinquish()` / `t_console_open()`
 (`usr/lib/libt/include/thyla/syscall.h`).
