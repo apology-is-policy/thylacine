@@ -755,7 +755,7 @@ kill = BOTH the namespace `/proc/<pid>/ctl` surface AND a narrow elevation-only 
     `amode`) FIXED; F2 (unreachable defense-in-depth branch) DOCUMENTED; F3 (inherited `handle_get`
     TOCTOU amplified to N hops) DEFERRED to the handle-lifetime pass. Matrix GREEN: default(smp4) +
     smp8 + UBSan ALL 698/698 + E2E + boot OK + 0 EXTINCTION.
-  - **stalk-2 LANDED + audit CLEAN** (impl `e291b74` / close `<pending>`; cites scripture 514f8a6).
+  - **stalk-2 LANDED + audit CLEAN** (impl `e291b74` / close `c185186`; cites scripture 514f8a6).
     Mount re-key + Plan 9 `domount`: `PgrpMount` re-keyed from the abstract `path_id_t` to the FULL
     `(dc, devno, qid.path)` mount-point Spoor identity (the **`devno` axis** -- a new `u32 Spoor.devno`
     = Plan 9 `Chan.dev`, minted per attach by `spoor_next_devno()`, stamped in `dev9p_attach_client`
