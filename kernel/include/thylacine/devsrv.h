@@ -251,6 +251,16 @@ void srv_registry_unref(struct SrvRegistry *reg);
 // `reg` (taking ONE registry ref). The mount source at boot + per session.
 // Returns NULL on OOM (no ref taken). spoor_clunk of the returned root
 // (on its last holder) runs devsrv_close, which drops the registry ref.
+//
+// CLONE CONTRACT (the dev9p-aux discipline; audit F3): a `spoor_clone` of
+// a devsrv root carries a SHALLOW copy of `aux = reg` but holds NO registry
+// ref. The clone's `aux` is UNOWNED until `devsrv.walk` takes ownership
+// (its normalize-then-ref discipline). A caller that clones a devsrv root
+// and then `spoor_clunk`s it WITHOUT an intervening `devsrv.walk` would
+// make devsrv_close phantom-`srv_registry_unref` a ref the clone never
+// took -- so a devsrv-root clone MUST pass through `devsrv.walk` (which
+// every kernel path does: `stalk`'s clone_walk_zero + main-loop walk), or
+// have its `aux` detached before clunk.
 struct Spoor *devsrv_attach_registry(struct SrvRegistry *reg);
 
 // srv_boot_registry — the one immortal registry mounted on kproc's /srv at

@@ -247,6 +247,18 @@ void srv_registry_unref(struct SrvRegistry *reg) {
         // then free. Clear magic before kfree so a stale-pointer read
         // fast-fails on the magic check (UAF defense, mirroring
         // spoor_free_internal).
+        //
+        // stalk-3b/A-5b ORDERING OBLIGATION (audit F2): kfree frees
+        // entries[] too. A raw interior pointer into entries[] -- a
+        // SrvService* held by a KObj_Srv listener handle's obj, or by an
+        // in-flight srv_conn_open_in / svc_listener_poll -- carries NO
+        // registry ref. In stalk-3a this never dangles (every such pointer
+        // is into the immortal boot registry, which never reaches ref 0).
+        // When 3b mints a MORTAL per-session registry, its last unref MUST
+        // be ordered AFTER every listener/connection handle into it is
+        // closed (the session poster is group-terminated first, #811,
+        // closing its KObj_Srv listener) -- or the listener handle / the
+        // devsrv_svc_ref must hold a registry ref that already covers it.
         srv_registry_drain(reg);
         reg->magic = 0;
         kfree(reg);
@@ -728,6 +740,15 @@ struct Spoor *devsrv_attach_registry(struct SrvRegistry *reg) {
     c->qid.type = QTDIR;
     c->qid.path = 0;
     c->qid.vers = 0;
+    // stalk-3a is the point devsrv becomes a MULTI-instance Dev: each
+    // registry is a distinct instance (the boot registry; a future per-
+    // session login registry). Stamp a per-instance devno (Plan 9
+    // Chan.dev) like dev9p_attach_client, so two registry roots have
+    // distinct mount-key identity (dc, devno, qid.path) -- without it both
+    // are (s,0,0) and stalk-2's (dc,devno,qid.path) keying / the mount
+    // cycle check could not tell them apart (audit F1). A walk/clone of
+    // this root inherits the devno (spoor_clone copies it).
+    c->devno    = spoor_next_devno();
     srv_registry_ref(reg);     // the root Spoor instance holds one registry ref
     return c;
 }

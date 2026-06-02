@@ -809,8 +809,24 @@ kill = BOTH the namespace `/proc/<pid>/ctl` surface AND a narrow elevation-only 
     migrates yet (that is 3b). 2 new tests (`devsrv.registry_lifecycle` + `devsrv.svc_ref_holds_registry`,
     the refcount/UAF/drain crux) + the existing `devsrv.walk_service` updated for the root-carries-reg
     reality. Matrix GREEN: default(smp4) + UBSan + smp8 ALL **708/708** + boot OK + login E2E + 0
-    EXTINCTION + 0 UBSan. Reference `docs/reference/70-devsrv.md` updated. **OWN audit (refcount/UAF/
-    drain lifecycle) NEXT, then the two-commit close.** **NEXT after the 3a audit = stalk-3b.**
+    EXTINCTION + 0 UBSan. Reference `docs/reference/70-devsrv.md` updated.
+  - **stalk-3a audit CLOSE: 0 P0 / 0 P1 / 0 P2 / 4 P3 -- CLEAN (NOT dirty)** (Opus prosecutor
+    `a752dec0` + an in-session self-audit, CONVERGED on SOUND; `memory/audit_stalk3a_closed_list.md`).
+    The headline refcount/UAF crux is exhaustively traced SOUND: the per-Spoor registry-ref discipline,
+    the `devsrv_walk` aux-normalize (no phantom unref on EVERY failure path), the `clone_walk_zero`
+    interaction, the last-drop drain-then-free, the boot-mount refcount trace, the `reg->lock` leaf
+    discipline, KOBJ_SRV-vs-registry magic isolation, the wrapper-over-`_in` behavior parity; the 2 new
+    tests are non-vacuous. **F1 (P3) FIXED**: `devsrv_attach_registry` now stamps a per-instance
+    `spoor_next_devno()` (devsrv is now a MULTI-instance Dev; without it two per-session registry roots
+    collide at `(s,0,0)` -- a stalk-2-class mount-key trap, fixed before 3b depends on per-session roots).
+    **F2 (P3)** latent cross-registry UAF on a held `svc`/listener pointer once registries are mortal --
+    DORMANT in 3a (boot reg immortal); recorded as a named **stalk-3b/A-5b prerequisite** (the mortal
+    session registry's last unref must be ordered after all KObj_Srv listener/connection handles into it
+    are closed -- #811 group-terminate -- or the handle holds a reg ref) + a loud forward note at
+    `srv_registry_unref`. **F3 (P3)** clone-without-walk phantom-unref contract DOCUMENTED (`devsrv.h`;
+    no such caller exists). **F4 (P3)** 3b `srv_conn_count` accounting note recorded. Matrix RE-VERIFIED
+    GREEN on the fixed code: default(smp4)+UBSan+smp8 ALL **708/708** + boot OK + login E2E. **NEXT =
+    stalk-3b.**
 
 ---
 
