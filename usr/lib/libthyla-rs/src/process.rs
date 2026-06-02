@@ -50,7 +50,7 @@ use crate::err::{Error, Result};
 use crate::fs::File;
 use crate::handle::{Handle, Rights};
 use crate::{
-    t_pipe, t_spawn_full_argv, t_wait_pid, TSpawnArgs, T_SPAWN_NAME_MAX,
+    t_pipe, t_spawn_full_argv, t_wait_pid, TSpawnArgs, T_SPAWN_IDENTITY_SET, T_SPAWN_NAME_MAX,
     T_SYS_SPAWN_ARGV_DATA_MAX, T_SYS_SPAWN_ARGV_MAX,
 };
 use alloc_crate::string::String;
@@ -183,6 +183,11 @@ pub struct Command {
     stdout: Stdio,
     stderr: Stdio,
     cap_mask: u64,
+    // A-5a: when Some, stamp the child's identity (SPAWN_IDENTITY_SET) instead
+    // of inheriting the caller's. (principal_id, primary_gid, supp_gids). The
+    // caller must hold T_CAP_SET_IDENTITY or the kernel rejects the spawn.
+    // /sbin/login is the v1.0 consumer: it stamps the authenticated user.
+    identity: Option<(u32, u32, Vec<u32>)>,
 }
 
 impl Command {
@@ -198,6 +203,7 @@ impl Command {
             stdout: Stdio::Inherit,
             stderr: Stdio::Inherit,
             cap_mask: !0u64, // inherit all caps; kernel intersects with parent
+            identity: None,  // A-5a: inherit the caller's identity by default
         }
     }
 
@@ -252,6 +258,18 @@ impl Command {
         self
     }
 
+    /// A-5a: stamp the spawned child's identity (SPAWN_IDENTITY_SET) instead of
+    /// inheriting the caller's. The caller must hold `T_CAP_SET_IDENTITY` (else
+    /// the kernel rejects the spawn). `/sbin/login` is the v1.0 consumer: after
+    /// corvus authenticates the user, login stamps `ut` with the user's
+    /// `principal_id` / `primary_gid` / `supp_gids` so the shell is born AS the
+    /// user, not PRINCIPAL_SYSTEM. The kernel bounds `supp_gids` (0..15).
+    #[inline]
+    pub fn identity(&mut self, principal_id: u32, primary_gid: u32, supp_gids: &[u32]) -> &mut Command {
+        self.identity = Some((principal_id, primary_gid, supp_gids.to_vec()));
+        self
+    }
+
     /// Spawn the child. Returns a `Child` handle; the parent retains
     /// any `Stdio::Piped` ends as `Child::stdin` / `stdout` / `stderr`.
     pub fn spawn(&mut self) -> Result<Child> {
@@ -295,6 +313,18 @@ impl Command {
             stderr_p.child_fd as u32,
         ];
 
+        // A-5a: the identity block. supp_arr is an OWNED local -> dropped at
+        // end of spawn(), so the supp_gids_va pointer stays valid through the
+        // t_spawn_full_argv SVC below (owned-value drop is at scope end, NOT
+        // NLL last-use). identity_flags == 0 (None) means inherit the caller's.
+        let (id_flags, id_pid, id_gid, supp_arr): (u32, u32, u32, Vec<u32>) =
+            match &self.identity {
+                Some((pid, gid, supp)) => (T_SPAWN_IDENTITY_SET, *pid, *gid, supp.clone()),
+                None => (0, 0, 0, Vec::new()),
+            };
+        let supp_count = supp_arr.len() as u32;
+        let supp_va = if supp_count > 0 { supp_arr.as_ptr() as u64 } else { 0 };
+
         let args_record = TSpawnArgs {
             name_va: self.name.as_ptr() as u64,
             argv_data_va: argv_buf.as_ptr() as u64,
@@ -306,14 +336,11 @@ impl Command {
             perm_flags: 0,
             _pad_envp: 0,
             cap_mask: self.cap_mask,
-            // A-1a: inherit the caller's identity (identity_flags == 0).
-            // Command has no identity-override surface at v1.0; the SET
-            // path (login-shaped) lands with A-5.
-            principal_id: 0,
-            primary_gid: 0,
-            supp_gids_va: 0,
-            supp_gid_count: 0,
-            identity_flags: 0,
+            principal_id: id_pid,
+            primary_gid: id_gid,
+            supp_gids_va: supp_va,
+            supp_gid_count: supp_count,
+            identity_flags: id_flags,
         };
 
         // SAFETY: every pointer in args_record points into a buffer

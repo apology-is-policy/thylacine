@@ -1322,6 +1322,127 @@ static int do_corvus_bringup(long storage_dup_fd) {
     return 0;
 }
 
+// =============================================================================
+// A-5a: the /sbin/login session core (IDENTITY-DESIGN.md section 9.9).
+// =============================================================================
+
+// LOGIN_CAPS -- the caps joey grants /sbin/login. CAP_SET_IDENTITY lets login
+// stamp the authenticated user's identity onto the shell; LOCK_PAGES +
+// CSPRNG_READ are the benign user caps login passes down to the shell (it drops
+// SET_IDENTITY for the shell -- a shell is not an identity-stamper). login runs
+// as PRINCIPAL_SYSTEM (inherited) and is never console-attached (joey
+// relinquished; spawn does not confer the bit), so I-27 holds.
+#define LOGIN_CAPS (T_CAP_SET_IDENTITY | T_CAP_LOCK_PAGES | T_CAP_CSPRNG_READ)
+
+// do_login_e2e -- prove the /sbin/login orchestration NON-interactively on the
+// boot path. The harness passes at the banner + kills QEMU, so the live
+// getty-loop never runs in CI; this seeded run is the CI coverage of
+// read-creds -> corvus AUTH -> identity resolve -> spawn ut STAMPED -> reap ->
+// SESSION_CLOSE. fd 0 = a pipe seeded with michael's creds; fd 1/2 = the same
+// read-end (login emits its marker via SYS_PUTS -> the boot log, so no capture
+// pipe is needed and the "ut floods a pipe joey isn't draining" deadlock cannot
+// arise). Gate: login exits 0 only if the WHOLE cycle succeeded; the
+// "login: michael uid=1000 gid=1000" marker in the boot log confirms the
+// resolved identity. Returns 0 / -1.
+static int do_login_e2e(void) {
+    const char pass_michael[] = "correct-horse-battery-staple-v1";
+
+    long cr_rd = -1, cr_wr = -1;
+    if (t_pipe(&cr_rd, &cr_wr) < 0) {
+        t_putstr("joey: login-e2e creds t_pipe FAILED\n");
+        return -1;
+    }
+
+    // Seed "michael\n<pass>\n", then close the write end so login's fd 0 reads
+    // the creds then EOF (ut, inheriting fd 0, then also sees EOF -> exits).
+    {
+        unsigned char creds[80];
+        size_t o = 0;
+        const char u[] = "michael\n";
+        for (size_t i = 0; i < sizeof(u) - 1; i++) creds[o++] = (unsigned char)u[i];
+        for (size_t i = 0; i < sizeof(pass_michael) - 1; i++)
+            creds[o++] = (unsigned char)pass_michael[i];
+        creds[o++] = (unsigned char)'\n';
+        if (write_all(cr_wr, creds, o) != 0) {
+            t_putstr("joey: login-e2e seed write FAILED\n");
+            (void)t_close(cr_rd);
+            (void)t_close(cr_wr);
+            return -1;
+        }
+    }
+    (void)t_close(cr_wr);
+
+    static const char login_argv[] = "login\0";
+    const char login_name[] = "login";
+    unsigned int login_fds[3] = { (unsigned int)cr_rd, (unsigned int)cr_rd,
+                                  (unsigned int)cr_rd };
+    struct t_sys_spawn_args lreq = {
+        .name_va       = (unsigned long)login_name,
+        .argv_data_va  = (unsigned long)login_argv,
+        .fd_list_va    = (unsigned long)login_fds,
+        .name_len      = sizeof(login_name) - 1,
+        .argv_data_len = sizeof(login_argv) - 1,
+        .argc          = 1,
+        .fd_count      = 3,
+        .perm_flags    = 0,
+        ._pad_envp     = 0,
+        .cap_mask      = LOGIN_CAPS,
+    };
+    long lpid = t_spawn_full_argv(&lreq);
+    (void)t_close(cr_rd);   // joey's copy; login holds its inherited fd 0
+    if (lpid <= 0) {
+        t_putstr("joey: login-e2e t_spawn_full_argv FAILED\n");
+        return -1;
+    }
+
+    int lst = -1;
+    long lreaped = t_wait_pid(&lst);
+    if (lreaped != lpid || lst != 0) {
+        t_putstr("joey: /sbin/login E2E FAILED (login exit_status != 0)\n");
+        return -1;
+    }
+    t_putstr("joey: /sbin/login E2E OK (michael authed; ut spawned stamped + reaped; session closed)\n");
+    return 0;
+}
+
+// session_getty_loop -- the live login session; NEVER returns (joey is init).
+// Runs AFTER SYS_BOOT_COMPLETE, so the harness has already observed the banner +
+// killed QEMU -- this is the real-console path. Each iteration opens /dev/cons,
+// spawns /sbin/login on it (fd 0/1/2), and waits the session; on logout it loops
+// (getty). In the harness, login blocks reading /dev/cons (no input) -- harmless,
+// QEMU is already gone. On a console-open / spawn failure, fall through to
+// reaping orphans forever (joey must never exit -> the banner stays valid).
+static void session_getty_loop(void) {
+    static const char login_argv[] = "login\0";
+    const char login_name[] = "login";
+    for (;;) {
+        long cfd = t_console_open();
+        if (cfd < 0) break;
+        unsigned int fds[3] = { (unsigned int)cfd, (unsigned int)cfd, (unsigned int)cfd };
+        struct t_sys_spawn_args req = {
+            .name_va       = (unsigned long)login_name,
+            .argv_data_va  = (unsigned long)login_argv,
+            .fd_list_va    = (unsigned long)fds,
+            .name_len      = sizeof(login_name) - 1,
+            .argv_data_len = sizeof(login_argv) - 1,
+            .argc          = 1,
+            .fd_count      = 3,
+            .perm_flags    = 0,
+            ._pad_envp     = 0,
+            .cap_mask      = LOGIN_CAPS,
+        };
+        long lpid = t_spawn_full_argv(&req);
+        (void)t_close(cfd);          // joey's copy; login holds the inherited tty
+        if (lpid <= 0) break;
+        int st = 0;
+        (void)t_wait_pid(&st);       // wait the session; on logout, loop -> fresh login
+    }
+    for (;;) {
+        int st = 0;
+        (void)t_wait_pid(&st);       // fallback: reap orphans; never exit
+    }
+}
+
 int main(void) {
     char buf[24];
     t_putstr("joey: hello from /joey (real userspace binary, loaded from ramfs)\n");
@@ -2211,29 +2332,38 @@ int main(void) {
         }
     }
 
-    // === A-5a: boot-complete + the session-supervisor transition ===
-    // joey is the long-running init (ARCH section 5.1). All boot-test asserts
-    // above have passed, so signal SYS_BOOT_COMPLETE -- the kernel prints
-    // "Thylacine boot OK" (the banner no longer rides joey's exit; joey
-    // persists). Then drop the boot console-attach (I-27: during a user session
-    // corvus must be the SOLE console-attached Proc; a post-SAK {joey,corvus}
-    // both-attached state would break the trusted path). A-5a-beta replaces the
-    // persist loop below with the /sbin/login getty-loop; at -alpha joey reaps
-    // orphans forever and never exits (a clean exit BEFORE BOOT_COMPLETE
-    // extincts in joey_run; an exit AFTER would skip the banner -> harness
-    // timeout, so joey must persist).
+    // === A-5a: the /sbin/login session core + the boot->session transition ===
+    // joey is the long-running init (ARCH section 5.1). IDENTITY-DESIGN.md 9.9.
+    //
+    // (1) Prove the login orchestration NON-interactively (the CI coverage: the
+    // harness kills QEMU at the banner, so the live getty-loop below never runs
+    // in CI). A failure here returns non-zero BEFORE BOOT_COMPLETE -> joey_run
+    // extincts -> the banner never prints -> the boot test FAILS.
+    if (do_login_e2e() != 0) {
+        return 1;
+    }
+
+    // (2) Signal boot-complete. All boot-test asserts have passed, so the kernel
+    // prints "Thylacine boot OK" here (the banner no longer rides joey's exit;
+    // joey persists as the session supervisor).
     if (t_boot_complete() != 0) {
         t_putstr("joey: t_boot_complete FAILED (not console-attached?)\n");
         return 1;
     }
+
+    // (3) Drop the boot console-attach (I-27: during a user session corvus must
+    // be the SOLE console-attached Proc; a post-SAK {joey,corvus} both-attached
+    // state would break the trusted path). Anything that fails AFTER the banner
+    // is post-PASS, so keep this minimal + robust (relinquish cannot fail here --
+    // joey is still console-attached).
     if (t_console_relinquish() != 0) {
         t_putstr("joey: t_console_relinquish FAILED\n");
         return 1;
     }
-    for (;;) {
-        int st = 0;
-        // Blocks: corvus + stratumd are live children that do not exit, so
-        // wait_pid sleeps rather than busy-spinning. Reaps any that ever does.
-        (void)t_wait_pid(&st);
-    }
+
+    // (4) The live login session: getty-loop /sbin/login on /dev/cons. Never
+    // returns (joey is init); on a real console this prompts + runs sessions, in
+    // the harness login blocks on /dev/cons (QEMU is already gone post-banner).
+    session_getty_loop();
+    return 1;   // unreachable -- session_getty_loop never returns
 }

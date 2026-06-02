@@ -1987,6 +1987,26 @@ stamp -> shell; the session leader). Stratum-INDEPENDENT; lands first.
   cascade); (3) tears down the per-user mounts (A-5b); (4) corvus `SESSION_CLOSE` (verb 3)
   zeroes the keypair (+ A-5b evicts the DEK); (5) loops to the prompt (getty-style) or exits.
 
+**A-5a IMPL STATUS (LANDED).** The user chose the "live session now" boot shape
+(2026-06-02): joey becomes the persistent init. A-5a-alpha (`97a3af5`) added the
+kernel substrate -- three syscalls `SYS_BOOT_COMPLETE` (62; one-shot +
+console-attached-gated banner via `boot_mark_complete`), `SYS_CONSOLE_RELINQUISH`
+(63; self-drop of the console-attach, I-27), `SYS_CONSOLE_OPEN` (64; a R|W
+`/dev/cons` KOBJ_SPOOR handle) -- + the `boot_mark_complete` banner move (the
+`Thylacine boot OK` string is unchanged; it now fires on init's signal, not
+joey's reap; TOOLING.md section 10 + CLAUDE.md updated) + 3 kernel unit tests
+(686/686). A-5a-beta added the native `/sbin/login` (`usr/login`, reads creds
+from fd 0 -> corvus AUTH -> RESOLVE_NAME/ID -> spawns `ut` stamped via the new
+`Command::identity()`), joey's `do_login_e2e` seeded CI proof (michael ->
+uid=1000 gid=1000 -> ut spawned + reaped, gated on login's exit code) + the
+`session_getty_loop` (open `/dev/cons` -> spawn login -> wait -> loop). The boot
+log now reaches a live `Thylacine login:` prompt. As-built reference:
+`docs/reference/103-login.md`. The interactive `/dev/cons` read is proven by the
+seeded mechanism + the prompt + an interactive run (the A-4c harness-cannot-
+inject precedent). `SPAWN_PERM_CONSOLE_OWNER` was deferred (under I-27 the
+non-attached login cannot pass the console-attached-gated perm; the SAK protects
+elevation regardless). NEXT: the A-5a audit round, then A-5b.
+
 **A-5b -- per-user encrypted home** (Flavor 1: at-rest + session-scoped). Depends on the
 Stratum-side sub-chunk below.
 - *Property*: each user's home dataset is AEAD-encrypted at rest, its DEK a fresh CSPRNG-random

@@ -680,6 +680,17 @@ kill = BOTH the namespace `/proc/<pid>/ctl` surface AND a narrow elevation-only 
   session leader); logout lifecycle (DEK evict + group-terminate + mount teardown +
   SESSION_CLOSE); P5-hostowner-c (RECOVER paper phrase). The corvus Q11 4-byte header is
   already live (A-3).
+- **A-5a LANDED** (login core; "live session now" boot shape, user-voted 2026-06-02):
+  A-5a-alpha (`97a3af5`) = kernel substrate (3 syscalls SYS_BOOT_COMPLETE=62 /
+  SYS_CONSOLE_RELINQUISH=63 / SYS_CONSOLE_OPEN=64 + `boot_mark_complete` banner move +
+  `proc_console_relinquish` + 3 kernel tests, 686/686; the `Thylacine boot OK` string is
+  unchanged, it now fires on init's SYS_BOOT_COMPLETE not joey's exit -- TOOLING.md 10 +
+  CLAUDE.md updated). A-5a-beta = native `/sbin/login` (`usr/login`; fd-0 creds -> corvus
+  AUTH -> RESOLVE_NAME/ID -> spawn `ut` stamped via `Command::identity()`) + joey
+  `do_login_e2e` seeded CI proof (michael -> uid=1000 gid=1000 -> ut spawned+reaped, gated on
+  login exit) + `session_getty_loop` (the boot log reaches a live `Thylacine login:` prompt).
+  As-built: `docs/reference/103-login.md`. NEXT: A-5a audit round, then A-5b. `SPAWN_PERM_CONSOLE_OWNER`
+  deferred (I-27: non-attached login can't pass the console-gated perm; SAK protects elevation).
 - **Stratum-side** (in-scope; verified NO format/wire-ABI break): deferred-unwrap soft-skip +
   runtime DEK install/evict (reusing `stm_corvus_unwrap`) + token-forward, on `thylacine-pouch-arm`.
 - **Split:** A-5a (login core; Stratum-independent; lands first) -> A-5b (encrypted home + the
