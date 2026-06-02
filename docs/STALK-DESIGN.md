@@ -226,39 +226,129 @@ return quarry
 
 ## 5. The `/srv` consumer (namespace-resident service registry)
 
-### 5.1 Per-territory service table
+> **stalk-3 sub-design RESOLVED (user-voted 2026-06-02; three forks).** This
+> section was a sketch; it is now the binding stalk-3 design. The votes:
+> **(Q1)** two-step explicit attach for a path into a 9P-mode service;
+> **(Q2)** a `DMSRVBYTE` `perm` bit for the post-by-create mode; **(Q3)** full
+> per-territory multiplicity now (heap-allocated + refcounted registry). The
+> settled calls (9P-unification, handle kinds, the sub-split) follow. Resolved
+> sub-decisions captured as D5/D6/D7 (section 11).
 
-The global `g_srv_registry` becomes **per-session** (or per-territory). corvus
-and each per-user stratumd post into the session's table; a service is visible
-only to Procs whose territory's `/srv` is backed by that table. susan's `/srv`
-has no entry for michael's coordinator — the isolation is structural, at the
-naming layer, *above* the A-3 rwx layer that already denies the file reads.
+### 5.1 Per-territory service registry (Q3 = full multiplicity now)
 
-### 5.2 `open(/srv/<name>)` = connect
+The single static `g_srv_registry` becomes a **heap-allocated, refcounted
+`SrvRegistry`** reached **through the mounted devsrv root Spoor** — not a
+`Territory` field (Plan-9-true: the registry is *named through the namespace*,
+not bolted onto the process struct).
 
-`devsrv_open` (today a stub) performs the connect: mint a `SrvConn` + drive the
-handshake.
+- `srv_registry_create()` allocates one (ref=1; stamps each entry's permanent
+  `magic` + `poll_list`). `srv_registry_ref` / `srv_registry_unref`; the last
+  unref drains every pending connection (the existing `srv_registry_reset`
+  teardown discipline) then frees.
+- `devsrv_attach_registry(reg)` mints a `/srv` root Spoor whose `aux` is `reg`
+  (holding **one** registry ref). **Every devsrv Spoor instance that carries
+  `aux = reg` holds exactly one registry ref**: the mounted root, each
+  cross-clone of it (the `clone_walk_zero` 0-element `devsrv_walk` bumps the
+  ref -- mirroring dev9p's `attached_owner` discipline), and each `/srv/<name>`
+  service-ref Spoor (its `devsrv_svc_ref` carries a registry ref). `devsrv_close`
+  drops exactly one. `spoor_ref` (same instance) adds **no** registry ref; only
+  `spoor_clone`+walk0 (a new instance) does. The registry outlives any single
+  Spoor; it is freed when the last referencing Spoor is clunked.
+- **Boot** creates one registry and mounts a devsrv root on the `/srv` synthetic
+  dir of the **root (kproc/joey) territory** -- so joey + corvus + login +
+  legate-prover + every boot Proc share **one** registry via `territory_clone`
+  mount inheritance (preserving all current behavior; the boot registry is never
+  freed because the root territory never dies).
+- A permitted Proc (**login**, in A-5b-body #827) `srv_registry_create()`s a
+  **fresh** registry and mounts a devsrv root at its session's `/srv` (MREPL over
+  the inherited mount). susan's `/srv` has no entry for michael's coordinator --
+  the isolation is structural, at the naming layer, *above* the A-3 rwx layer.
+  **stalk-3 delivers the mechanism + the one boot registry; which services
+  populate which session's registry is A-5b-body policy.**
 
-- **9p-mode service** (corvus): `open` attaches (Tversion + Tattach) and returns
-  a **dev9p-style root Spoor**, so `/srv/corvus/ctl` is a further normal dev9p
-  walk. This **unifies with `SYS_ATTACH_9P_SRV`** (which already wraps a SrvConn
-  into a dev9p root).
-- **byte-mode service** (stratum-fs, pouch sockets): `open` returns a
-  byte-stream Spoor; `devsrv_read`/`devsrv_write` already drive the rings, so
-  pouch `read`/`write` work on the fd.
+Tombstone-on-poster-death stays **registry-scoped**: a poster posts into exactly
+one registry (the one backing the `/srv` it created in); the lifecycle that
+tombstones its services + drains backlogs is reached through the listener handle
+(which carries its registry), not a global `stripes`-walk. The exact trigger
+(handle-release vs. an intrusive registry list) is a 3a impl decision; either way
+it is registry-scoped and audited in 3a.
 
-The returned connection handle is a **`KOBJ_SPOOR`** (Dev = devsrv or dev9p),
-not the current `KObj_Srv`. `SO_PEERCRED` peer info rides in the Spoor's aux. The
-`SRV_CONN_PER_PROC_MAX = 1` cap likely must **relax** (a session needs corvus
-*and* its stratum-fs concurrently) — flagged for the stalk-3 sub-design.
+### 5.2 `open(/srv/<name>)` = connect (Q1 = two-step explicit attach)
 
-### 5.3 Posting
+`devsrv_open` (today a stub) performs the connect: resolve the service in the
+Spoor's registry, mint a `SrvConn`, return a **`KOBJ_SPOOR`** endpoint.
 
-Plan-9-true posting is `create(/srv/<name>)` -> the kernel mints a listener bound
-to the caller and returns a `KObj_Srv` listener handle (Thylacine doesn't pass
-fds via writes — handles are non-transferable — so "create + the kernel binds
-your listener" replaces Plan 9's "create + write your channel fd"). Alternatively
-keep `SYS_POST_SERVICE`. See sub-decision D2.
+- **9p-mode service** (corvus): `open` mints the SrvConn (server side
+  poll/non-blocking), wraps its rings in `p9_srvconn_transport` + `p9_attached`
+  (Tversion + Tattach) and returns a **dev9p root Spoor**. This is the SAME
+  machinery `SYS_ATTACH_9P_SRV` uses -- the **9P-unification**: the bespoke
+  embedded-client path (`srvconn_drive_client_handshake`, `srvconn_client_read`,
+  `srvconn_client_write`, and the SrvConn `client_fid` / `client_handshake_done`
+  / `client_offset` / embedded `client`+`recv_buf` fields) **retires**. corvus's
+  server side is unchanged (still reads Tmsg / writes Rmsg via
+  `srvconn_server_recv` / `_send`).
+
+  **Two-step (Q1).** `open("/srv/corvus")` returns the dev9p root; the client
+  then opens `"ctl"` **relative to that root fd** (a normal dev9p walk+open,
+  reusing stalk's relative resolution). `stalk` does **not** connect-cross a
+  service node mid-resolution -- path resolution stays **I/O-free** (no hidden
+  blocking 9P handshake inside `stalk`), matching Plan 9's open-then-mount and
+  shrinking the audit surface. Clients do two opens at session start (reused
+  across all verb ops; negligible). A one-call `open("/srv/corvus/ctl")` is
+  **not** supported -- the service node is opened, *then* walked.
+
+- **byte-mode service** (stratum-fs, pouch sockets): `open` mints the SrvConn
+  (`byte_mode`; server side blocking-recv) and returns a **byte-stream devsrv
+  connection Spoor** (`dc='s'`, `SRV_CONN_MAGIC` aux). `read`/`write` drive the
+  rings; `SYS_SRV_PEER` resolves the peer via `devsrv_conn_of` (unchanged -- the
+  `SO_PEERCRED` source). A byte-mode service has no sub-paths (a byte stream is a
+  leaf); the stratum-fs client then `SYS_ATTACH_9P_SRV`-wraps it into a dev9p
+  root. That syscall **stays**, retargeted to accept a `KOBJ_SPOOR` devsrv
+  byte-Spoor (via `devsrv_conn_of`) instead of a `KObj_Srv` handle.
+
+The connection endpoint is `KOBJ_SPOOR`, not the current `KObj_Srv` (the §18.2
+`KObj_Srv` kind is retained only for the **listener** side, §5.3). A devsrv
+connection Spoor stays **non-dup-able** (a `dc='s'` guard in `handle_dup`),
+preserving the pin-to-Proc property; cross-Proc transfer does not exist at v1.0
+(I-4 by absence). The `SRV_CONN_PER_PROC_MAX = 1` cap is **removed** -- a session
+needs corvus *and* its stratum-fs concurrently (the global `SRV_MAX_CONNS` cap +
+the per-service accept backlog remain the resource bounds).
+
+### 5.3 Posting = `create(/srv/<name>)` (D2; Q2 = `DMSRVBYTE` perm bit)
+
+`devsrv_create` (today a stub) is the post: `SYS_WALK_CREATE` on the `/srv` mount
+dir fd with `name = <service>` mints a listener bound to the caller and returns a
+**`KObj_Srv` listener handle** (then `SYS_SRV_ACCEPT` on it, as today -- accept
+stays). Handles are non-transferable, so "create + the kernel binds your
+listener" replaces Plan 9's "create + write your channel fd."
+
+- **Mode (Q2).** `create("/srv/x", perm = DMSRVBYTE)` posts **byte-mode**;
+  default (no `DMSRVBYTE` bit) posts **9P-mode** -- matching Plan 9's `DM*`
+  perm-bit idiom (a new `DMSRVBYTE` constant in the high `perm` bits, asserted
+  distinct from `DMDIR` etc.). The `MAY_POST_SERVICE` gate (the joey-stamped
+  `proc_flags` bit) is preserved on the create path.
+
+### 5.4 Sub-chunk split (each green; focused audit per stakes)
+
+- **stalk-3a -- per-territory registry + mount `/srv`.** Heap+refcounted
+  `SrvRegistry`; `devsrv_attach_registry`; every devsrv op resolves the registry
+  from the Spoor (not `g_srv_registry`); the per-Spoor registry-ref lifecycle;
+  boot creates one registry + mounts devsrv on the `/srv` synth-dir. **Keep the
+  old syscalls working** (they resolve the boot registry) -- nothing migrates
+  yet. Own audit (the refcount / UAF / drain-on-last-unref lifecycle crux).
+- **stalk-3b -- open=connect + create=post + 9P-unification.** `devsrv_open`
+  (two-step 9p->dev9p root via `p9_attached`; byte->stream), `devsrv_create`
+  (`DMSRVBYTE`), retire the embedded `srvconn_client_*` path, retarget
+  `SYS_ATTACH_9P_SRV` to a `KOBJ_SPOOR` byte-Spoor; migrate the **native**
+  clients (joey, corvus, login, legate-prover) to `SYS_OPEN` / `SYS_WALK_CREATE`.
+  Own audit (the connection-handle reconciliation crux; AEGIS/mallocng-adjacent
+  via the corvus DEK path it unblocks -- prosecute hard).
+- **stalk-3c -- retire syscalls + pouch seam.** Retire `SYS_SRV_CONNECT` +
+  `SYS_POST_SERVICE` + `SYS_POST_SERVICE_BYTE` (ABI break, D3, no-compat-shim);
+  migrate `usr/lib/pouch/patches/0006-pouch-sockets.patch` (`bind`->create,
+  `connect`->open; `accept` + `getsockopt(SO_PEERCRED)` unchanged); remove the
+  per-Proc cap. Final audit (the per-territory isolation property + the full
+  ABI-break surface).
 
 ---
 
@@ -266,15 +356,22 @@ keep `SYS_POST_SERVICE`. See sub-decision D2.
 
 | Syscall | Shape | Disposition |
 |---|---|---|
-| `SYS_OPEN(start_fd, path, omode, flags)` | NEW — the multi-component `stalk` entry; `start_fd = -1` => root | add |
-| `SYS_WALK_OPEN` | single-component | fold into `SYS_OPEN` (or keep as a fast path) |
-| `SYS_MOUNT(path, source_fd, flags)` / `SYS_UNMOUNT(path)` | path-keyed | re-shape from `path_id` |
+| `SYS_OPEN(start_fd, path, omode, flags)` | the multi-component `stalk` entry; `start_fd = -1` => root | landed stalk-1 |
+| `SYS_WALK_OPEN` | single-component | retained (degenerate single-component path) |
+| `SYS_MOUNT(path, source_fd, flags)` / `SYS_UNMOUNT(path)` | path-keyed | landed stalk-2 |
 | `SYS_BIND` | path-keyed (symbolic) | v1.x (no v1.0 consumer; D1) |
-| `SYS_SRV_CONNECT` | `(name, path)` connect | **retire** — pouch `connect("/srv/x")` becomes `SYS_OPEN("/srv/x", ORDWR)` once absolute paths resolve |
-| `SYS_POST_SERVICE` / `_BYTE` | post by syscall | **retire** if D2 = post-by-create, else keep |
+| `SYS_WALK_CREATE(dir_fd, name, omode, perm, gid)` | on a `/srv` dir fd: **post** a service (mints a `KObj_Srv` listener). `perm & DMSRVBYTE` -> byte-mode; else 9P-mode (D6/Q2) | reuse (devsrv `.create`) |
+| `SYS_SRV_ACCEPT(listener_h)` / `SYS_SRV_PEER(conn_spoor, &info)` | accept on a listener; read a byte-conn peer's `SO_PEERCRED` | **keep** (peer resolves via `devsrv_conn_of`) |
+| `SYS_ATTACH_9P_SRV(conn_spoor, aname, ...)` | wrap a `KOBJ_SPOOR` byte-conn Spoor into a dev9p root (stratum-fs) | **keep**, retargeted from `KObj_Srv` to a `KOBJ_SPOOR` byte-Spoor |
+| `SYS_SRV_CONNECT` | `(name, path)` connect | **retire** (stalk-3c) -- `connect("/srv/x")` becomes `SYS_OPEN("/srv/x", ...)`; corvus's `/ctl` is the two-step open-then-walk (D5/Q1) |
+| `SYS_POST_SERVICE` / `_BYTE` | post by syscall | **retire** (stalk-3c) -- subsumed by `SYS_WALK_CREATE` on `/srv` (D2) |
 
-Retiring `SYS_SRV_CONNECT`/`POST_SERVICE` is an **ABI break** (no-compat-shim
-style policy favours it) — needs signoff (D3).
+Retiring `SYS_SRV_CONNECT` + `SYS_POST_SERVICE` + `SYS_POST_SERVICE_BYTE` is an
+**ABI break** (D3, signed off; no-compat-shim style policy), landed in stalk-3c.
+The connection endpoint becomes a `KOBJ_SPOOR` (dev9p root for 9p-mode, byte-conn
+Spoor for byte-mode); the `KObj_Srv` kind is retained only for the **listener**
+side (§18.2). No new syscall NUMBER is added by stalk-3 -- posting and connecting
+both ride existing entries (`SYS_WALK_CREATE`, `SYS_OPEN`).
 
 ---
 
@@ -322,20 +419,22 @@ cfgs stay pre-commit gates** and are re-run on every `stalk`/mount change.
 
 ## 9. Sub-chunk plan (each lands independently; own tests; audit per stakes)
 
-- **stalk-1 — resolver core.** tokenizer + multi-component walk *within one Dev*
-  (no mount-cross) + per-component X-search + `.`/`..` containment + `SYS_OPEN`.
-  Delivers absolute FS paths (`/sbin/login`, `/home/<user>`). Migrate FROM_ROOT
-  callers. **Own audit** (path traversal).
-- **stalk-2 — mount re-key + crossing (domount).** `PgrpMount` -> Spoor-identity;
-  `SYS_MOUNT`/`UNMOUNT` path-keyed; `cross_mounts` in `stalk`; devramfs `/srv`
-  `/proc` dirs. Migrate stub-driver/attach-probe. **Own audit** (mount-cross perm
-  + lifetime).
-- **stalk-3 — devsrv per-territory + namespace-resident `/srv`.** per-territory
-  service table; mount devsrv at `/srv`; `open`=connect (9p->dev9p root,
-  byte->stream); posting (D2); relax per-Proc cap; migrate all `/srv` clients +
-  pouch seam; retire old syscalls (D3). **Own audit** (the isolation property +
-  the connection-handle reconciliation; AEGIS/mallocng-adjacent via the A-5b DEK
-  path it unblocks — prosecute hard).
+- **stalk-1 — resolver core. LANDED** (`acd9547`). tokenizer + multi-component
+  walk *within one Dev* (no mount-cross) + per-component X-search + `.`/`..`
+  containment + `SYS_OPEN`. Delivers absolute FS paths (`/sbin/login`,
+  `/home/<user>`). FROM_ROOT callers migrated. Audit CLEAN (0/0/0/3).
+- **stalk-2 — mount re-key + crossing (domount). LANDED** (`e291b74`).
+  `PgrpMount` -> the full `(dc, devno, qid.path)` Spoor identity (new
+  `Spoor.devno`); `SYS_MOUNT`/`UNMOUNT` path-keyed; `cross_mounts` in `stalk`;
+  `STALK_MOUNT` no-cross-final; devramfs `/srv` `/proc` synth dirs.
+  stub-driver/attach-probe migrated. Audit CLEAN (0/0/1/2; I-3 mount-cycle
+  ENFORCED).
+- **stalk-3 — devsrv per-territory + namespace-resident `/srv`.** Split into
+  **3a / 3b / 3c** per **§5.4** (per-territory registry + mount; open=connect +
+  create=post + 9P-unification; retire syscalls + pouch seam). Resolved
+  sub-decisions D5/D6/D7 (§11). **Own audit per sub-chunk** (the registry
+  lifecycle; the connection-handle reconciliation + the isolation property;
+  AEGIS/mallocng-adjacent via the A-5b DEK path it unblocks — prosecute hard).
 
 Then A-5b's body (#826/#827/#829) resumes on top of namespace-resident `/srv`.
 
@@ -361,6 +460,9 @@ attach-9p unification); integer/bounds on the tokenizer.
 | **D2** | posting model | **post-by-`create(/srv/<name>)`** (Plan-9-true) — the kernel mints a listener bound to the caller and returns a `KObj_Srv` listener handle (handles are non-transferable, so "create + the kernel binds your listener" replaces Plan 9's "create + write your channel fd"). Symmetric with connect-by-open; removes `SYS_POST_SERVICE`. |
 | **D3** | retire `SYS_SRV_CONNECT` / `POST_SERVICE`? | **RETIRE** after migration — `SYS_OPEN("/srv/x", ...)` subsumes connect; `create("/srv/x")` subsumes post; no-compat-shim style policy. ABI break, landed in stalk-3. |
 | **D4** | mount-point existence | **M1 (Plan 9 domount)** — mount points must be walkable dirs; devramfs gains `/srv` (+ `/proc`, `/net` as they arrive); the post-pivot FS root provides them (host-bake / first-login provisions). Unifies bind/mount/union; no synthetic-overlay special case. |
+| **D5** | 9P-mode service path resolution (Q1, 2026-06-02) | **Two-step explicit attach** — `open("/srv/corvus")` connects + returns a dev9p root; the client then opens `"ctl"` relative to it. `stalk` performs no connect-cross / no blocking 9P handshake mid-resolution (path resolution stays I/O-free; matches Plan 9 open-then-mount; smallest audit surface). One-call `open("/srv/corvus/ctl")` rejected over the convenience-but-hidden-I/O alternative. |
+| **D6** | post-by-create mode encoding (Q2, 2026-06-02) | **`DMSRVBYTE` `perm` bit** — `create("/srv/x", perm=DMSRVBYTE)` posts byte-mode, default posts 9P-mode (Plan 9 `DM*` perm-bit idiom). Chosen over an `omode` bit (mode-of-the-service is an attribute, not an open intent). |
+| **D7** | per-territory registry scope (Q3, 2026-06-02) | **Full multiplicity now** — `SrvRegistry` becomes heap-allocated + refcounted, reached through the mounted devsrv root Spoor; boot mounts one global registry at `/srv`; login (A-5b-body) can mount a fresh per-session registry. The refcount-lifecycle work lands + is audited in stalk-3a. Chosen over single-registry-now / defer-multiplicity (the isolation crux gets its own focused round, per "build the fuller thing" + §0 "required for the feature"). |
 
 ---
 

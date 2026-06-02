@@ -775,8 +775,20 @@ kill = BOTH the namespace `/proc/<pid>/ctl` surface AND a narrow elevation-only 
     (pre-existing, benign) DEFERRED to a p9_client free-list chunk; F3 (P3) cross-mount `..` fidelity
     gap DOCUMENTED (v1.x). Matrix GREEN: default(smp4) + smp8 + UBSan ALL **706/706** (+1 cycle test) +
     both E2Es + boot OK + 0 EXTINCTION + 0 UBSan errors. The 5 `territory_buggy*` TLA gates correctly
-    violate. **NEXT = stalk-3** (#834: devsrv per-territory + namespace-resident `/srv` + retire
-    `SYS_SRV_CONNECT`/`POST_SERVICE`).
+    violate.
+  - **stalk-3 sub-design RESOLVED (user-voted 2026-06-02; scripture commit, no code)** -- three
+    forks decided + landed in STALK-DESIGN §5 (D5/D6/D7): **(D5)** two-step explicit attach for a
+    path into a 9P-mode service (`open(/srv/corvus)` -> dev9p root, then walk `ctl`; `stalk` does no
+    connect mid-resolution -- I/O-free, Plan-9-true); **(D6)** `DMSRVBYTE` `perm` bit selects
+    byte-vs-9P on post-by-`create`; **(D7)** full per-territory multiplicity now (heap+refcounted
+    `SrvRegistry` reached through the mounted devsrv root Spoor; boot mounts one; login mints
+    per-session). Settled calls: 9P-unification (corvus moves onto the `p9_srvconn_transport`+
+    `p9_attached` dev9p path, the embedded `srvconn_client_*` retires); connect -> `KOBJ_SPOOR`,
+    listener stays `KObj_Srv`; `SYS_ATTACH_9P_SRV` retargets to a `KOBJ_SPOOR` byte-Spoor;
+    `SRV_CONN_PER_PROC_MAX` removed. **Split 3a/3b/3c** (§5.4): 3a per-territory registry + mount
+    `/srv` (own audit: refcount lifecycle); 3b open=connect + create=post + 9P-unification + migrate
+    native clients (own audit: connection-handle reconciliation); 3c retire syscalls + pouch seam
+    (final audit: isolation + ABI break). **NEXT = stalk-3a impl.**
 
 ---
 
