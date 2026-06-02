@@ -178,11 +178,11 @@ This convention requires no kernel support — it is pure shell. It is available
 **Pre-Utopia (Phases 1-4): UART pattern matching**
 
 Before the shell exists, the agent looks for:
-- Boot success: `"Thylacine boot OK"` printed by `boot_main()` at the end of init (the boot banner contract — see §10).
+- Boot success: `"Thylacine boot OK"` printed when init signals `SYS_BOOT_COMPLETE`, after its boot-test asserts pass (the boot banner contract — see §10).
 - Kernel panic: `"PANIC:"` prefix, followed by the panic message.
 - Phase exit criteria: specific strings printed by test code (e.g. `"TIMER: tick 1000"` for the Phase 1 timer test).
 
-`boot_main()` must print a canonical success banner as its last act. This is not optional — it is the agent's signal that the boot succeeded.
+The kernel must print a canonical success banner once init's boot-test asserts pass (via `SYS_BOOT_COMPLETE`; see §10). This is not optional — it is the agent's signal that the boot succeeded.
 
 ---
 
@@ -436,7 +436,7 @@ The kernel build uses Clang (not GCC) per `ARCHITECTURE.md §3` for CFI + ARMv8.
 
 **This is non-negotiable for the agentic loop to work.**
 
-`boot_main()` in `kernel/main.c` must print the following as its final act before entering the init process:
+The kernel must print the following banner during boot:
 
 ```
 Thylacine vX.Y-dev booting...
@@ -449,10 +449,14 @@ Thylacine vX.Y-dev booting...
 Thylacine boot OK
 ```
 
-The line `Thylacine boot OK` is the agent's boot-success signal. It must:
+The multi-line header is printed by `boot_main()` (`kernel/main.c`) during late bring-up, before it enters the init process (joey).
+
+The final line `Thylacine boot OK` is the agent's boot-success signal. Since A-5a (login + session), it is printed by `boot_mark_complete()` when **init signals `SYS_BOOT_COMPLETE`** -- after joey's boot-test asserts pass and just before joey transitions to the persistent session supervisor (it getty-loops `/sbin/login`). The banner no longer rides joey's exit: joey is the long-running init and does not exit on success. It must:
 - Appear on a line by itself.
-- Be the last kernel-printed line before userspace takes over.
-- Not appear if the kernel panicked before completing init.
+- Appear only after init's boot-test asserts have passed (a pre-completion failure exits joey non-zero before `SYS_BOOT_COMPLETE`, which extincts in `joey_run` -> the banner never prints).
+- Not appear if the kernel panicked, or if init failed, before signalling boot-complete.
+
+`SYS_BOOT_COMPLETE` is one-shot and gated on the caller being console-attached (the boot console-trust anchor, joey), so a spawned child cannot emit a premature banner.
 
 A kernel **extinction** (ELE — Extinction Level Event; the thylacine's own fate transposed onto a kernel that has lost the will to continue) must print:
 

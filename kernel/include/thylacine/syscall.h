@@ -1255,6 +1255,42 @@ enum {
     // or is 0, target_stripes == 0, session_id == 0 or > u32, table full).
     //   x0 = cap_mask, x1 = target_stripes, x2 = valid_for_ns, x3 = session_id
     SYS_CAP_GRANT_CLEARANCE = 61,
+
+    // A-5a (login + session): the three boot->session-transition syscalls. The
+    // session shape is "joey persists as init": joey runs its boot-test asserts,
+    // signals SYS_BOOT_COMPLETE (the banner fires here, NOT on joey exit), drops
+    // its boot console-attach (SYS_CONSOLE_RELINQUISH, I-27), and getty-loops
+    // /sbin/login on a console handle (SYS_CONSOLE_OPEN). See IDENTITY-DESIGN.md
+    // section 9.9 + the ARCH section 25.4 "A-5" audit-trigger row.
+
+    // SYS_BOOT_COMPLETE -- init signals "boot-test asserts passed; the system is
+    // up." The kernel prints the "Thylacine boot OK" banner (TOOLING.md section
+    // 10 ABI) exactly ONCE here, replacing the post-joey-exit print: joey no
+    // longer exits on success (it persists as the session supervisor), so the
+    // banner cannot ride joey's reap. GATE: caller must be console-attached (the
+    // boot console-trust anchor -- joey, pre-relinquish), so a spawned child
+    // cannot spoof a premature banner (-> a false test PASS). ONE-SHOT (a 2nd
+    // call is a no-op). No args. Returns 0 (or -1 if not console-attached).
+    SYS_BOOT_COMPLETE = 62,
+
+    // SYS_CONSOLE_RELINQUISH -- the caller drops its OWN console-attach
+    // (PROC_FLAG_CONSOLE_ATTACHED) and, if it is the current g_console_owner,
+    // clears the owner pointer. I-27 carry: during a user session corvus must be
+    // the SOLE console-attached Proc, so joey (the boot anchor) relinquishes at
+    // the bringup->session boundary -- else a post-SAK state is {joey,corvus}
+    // both-attached. SELF-ONLY (cannot revoke another Proc). GATE: caller must be
+    // console-attached (can only relinquish what you hold). No args. Returns 0
+    // (or -1 if not console-attached).
+    SYS_CONSOLE_RELINQUISH = 63,
+
+    // SYS_CONSOLE_OPEN -- attach the kernel UART console Dev (/dev/cons, dc='c')
+    // and install a KOBJ_SPOOR handle with RIGHT_READ|RIGHT_WRITE. The session
+    // getty (joey) opens this and hands it to /sbin/login as fd 0/1/2 (the Unix
+    // login-reads-the-tty model); the A-4c-1 devcons_read blocking read drains
+    // the RX ring. No args. Returns the fd (>= 0) or -1. v1.0 ungates the open
+    // (devcons is single-reader-guarded: a 2nd concurrent read returns -1); a
+    // console-open capability gate is a v1.x seam if untrusted Procs ever run.
+    SYS_CONSOLE_OPEN = 64,
 };
 
 // SYS_WALK_OPEN's FROM_ROOT sentinel: when passed as the spoor_fd, the

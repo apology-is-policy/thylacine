@@ -30,9 +30,19 @@
 #ifndef THYLACINE_INIT_H
 #define THYLACINE_INIT_H
 
+#include <thylacine/types.h>   // bool (boot_mark_complete return)
+
 // Build the embedded /init ELF, rfork a child Proc, exec_setup the blob,
 // userland_enter into EL0, wait_pid for completion, verify exit_status==0.
 // Extincts on any failure (so tools/test.sh observes EXTINCTION:).
 void joey_run(void);
+
+// A-5a: print the "Thylacine boot OK" banner (TOOLING.md section 10 ABI)
+// exactly once. Called from the SYS_BOOT_COMPLETE handler when init (joey)
+// signals its boot-test asserts passed -- joey now persists as the session
+// supervisor, so the banner no longer rides joey's reap. ONE-SHOT (a 2nd call
+// is a no-op). Returns true iff this call printed the banner. Implemented in
+// kernel/main.c (where the banner string lives).
+bool boot_mark_complete(void);
 
 #endif // THYLACINE_INIT_H

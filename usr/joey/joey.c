@@ -2211,5 +2211,29 @@ int main(void) {
         }
     }
 
-    return 0;
+    // === A-5a: boot-complete + the session-supervisor transition ===
+    // joey is the long-running init (ARCH section 5.1). All boot-test asserts
+    // above have passed, so signal SYS_BOOT_COMPLETE -- the kernel prints
+    // "Thylacine boot OK" (the banner no longer rides joey's exit; joey
+    // persists). Then drop the boot console-attach (I-27: during a user session
+    // corvus must be the SOLE console-attached Proc; a post-SAK {joey,corvus}
+    // both-attached state would break the trusted path). A-5a-beta replaces the
+    // persist loop below with the /sbin/login getty-loop; at -alpha joey reaps
+    // orphans forever and never exits (a clean exit BEFORE BOOT_COMPLETE
+    // extincts in joey_run; an exit AFTER would skip the banner -> harness
+    // timeout, so joey must persist).
+    if (t_boot_complete() != 0) {
+        t_putstr("joey: t_boot_complete FAILED (not console-attached?)\n");
+        return 1;
+    }
+    if (t_console_relinquish() != 0) {
+        t_putstr("joey: t_console_relinquish FAILED\n");
+        return 1;
+    }
+    for (;;) {
+        int st = 0;
+        // Blocks: corvus + stratumd are live children that do not exit, so
+        // wait_pid sleeps rather than busy-spinning. Reaps any that ever does.
+        (void)t_wait_pid(&st);
+    }
 }

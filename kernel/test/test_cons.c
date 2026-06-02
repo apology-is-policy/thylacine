@@ -31,6 +31,7 @@
 
 #include <thylacine/cons.h>
 #include <thylacine/dev.h>
+#include <thylacine/handle.h>   // A-5a: struct Handle / handle_get / KOBJ_SPOOR / RIGHT_*
 #include <thylacine/notes.h>
 #include <thylacine/proc.h>
 #include <thylacine/sched.h>
@@ -51,6 +52,9 @@ void test_cons_sak_revoke_regrant(void);
 void test_cons_sak_failsafe_revoke_only(void);
 void test_cons_sak_idempotent_flood(void);
 void test_cons_sak_via_console_mgr(void);
+void test_proc_console_relinquish(void);              // A-5a (I-27)
+void test_proc_console_relinquish_other_owner(void);  // A-5a (self-only)
+void test_cons_console_open(void);                    // A-5a (SYS_CONSOLE_OPEN)
 
 // cons.c test hooks + the extern Dev (read slot ignores the Spoor arg, so the
 // tests pass NULL). proc.c test helpers (the test_proc.c / test_devproc.c pattern).
@@ -58,6 +62,12 @@ extern struct Dev devcons;
 extern void proc_test_link(struct Proc *p);
 extern void proc_test_unlink(struct Proc *p);
 extern struct Proc *proc_test_console_owner(void);   // A-4c-2 SAK assertions
+
+// A-5a: the SYS_CONSOLE_OPEN core + the shared read-via-handle helper (the
+// test_sys_pipe.c pattern). devcons_read ignores the Spoor and drains the
+// global ring, so the opened handle is a valid console reader.
+extern hidx_t sys_console_open_for_proc(struct Proc *p);
+extern s64 sys_read_for_proc(struct Proc *p, hidx_t h, u8 *kbuf, u64 len);
 
 // 16-byte-bounded name equality against a literal.
 static bool name_eq(const char *name, const char *lit) {
@@ -268,6 +278,84 @@ void test_proc_revoke_console_attached(void) {
     proc_revoke_console_attached(NULL);                  // fail-closed no-op (must not crash)
 
     p->state = PROC_STATE_ZOMBIE;                         // proc_free requires ZOMBIE
+    proc_free(p);
+}
+
+// A-5a (I-27): proc_console_relinquish clears the caller's OWN console-attach
+// AND, when the caller is the current owner, clears the owner pointer. joey calls
+// this at the bringup->session boundary so corvus becomes the SOLE attached Proc
+// during a session. Idempotent + fail-closed on NULL.
+void test_proc_console_relinquish(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    p->state = PROC_STATE_ALIVE;
+
+    proc_mark_console_attached(p);
+    proc_set_console_owner(p);
+    TEST_ASSERT(proc_is_console_attached(p), "p marked console-attached");
+    TEST_ASSERT(proc_test_console_owner() == p, "p is the console owner");
+
+    proc_console_relinquish(p);
+    TEST_ASSERT(!proc_is_console_attached(p), "relinquish cleared p's attach bit");
+    TEST_ASSERT(proc_test_console_owner() == NULL, "relinquish cleared the owner (was p)");
+
+    proc_console_relinquish(p);                           // idempotent
+    TEST_ASSERT(!proc_is_console_attached(p), "relinquish is idempotent");
+    proc_console_relinquish(NULL);                        // fail-closed no-op (no crash)
+
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+}
+
+// A-5a (self-only): relinquish clears ONLY the caller's attach; it must NOT clear
+// the owner pointer when a DIFFERENT Proc owns the console (the session has moved
+// ownership on). Guards the "joey relinquish must not disturb a live session".
+void test_proc_console_relinquish_other_owner(void) {
+    struct Proc *owner = proc_alloc();
+    struct Proc *p     = proc_alloc();
+    TEST_ASSERT(owner != NULL && p != NULL, "proc_alloc x2");
+    owner->state = PROC_STATE_ALIVE;
+    p->state     = PROC_STATE_ALIVE;
+
+    proc_set_console_owner(owner);
+    proc_mark_console_attached(p);
+    proc_console_relinquish(p);                           // p is attached but NOT the owner
+    TEST_ASSERT(!proc_is_console_attached(p), "p's attach cleared");
+    TEST_ASSERT(proc_test_console_owner() == owner, "owner pointer untouched (p != owner)");
+
+    proc_set_console_owner(NULL);                         // clear the static before free
+    owner->state = PROC_STATE_ZOMBIE; proc_free(owner);
+    p->state     = PROC_STATE_ZOMBIE; proc_free(p);
+}
+
+// A-5a (SYS_CONSOLE_OPEN): the open core installs a R|W KOBJ_SPOOR handle on
+// /dev/cons, and a read through it drains the RX ring -- the getty hands this to
+// /sbin/login as fd 0/1/2 (the Unix login-reads-the-tty model). Proves the
+// open -> handle -> devcons_read path end-to-end.
+void test_cons_console_open(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    p->state = PROC_STATE_ALIVE;
+
+    hidx_t fd = sys_console_open_for_proc(p);
+    TEST_ASSERT(fd >= 0, "sys_console_open_for_proc returned a valid fd");
+
+    struct Handle *h = handle_get(p, fd);
+    TEST_ASSERT(h != NULL, "console handle installed");
+    TEST_EXPECT_EQ((int)h->kind, (int)KOBJ_SPOOR, "console handle is KOBJ_SPOOR");
+    TEST_EXPECT_EQ(h->rights, (rights_t)(RIGHT_READ | RIGHT_WRITE),
+        "console handle rights are R|W");
+
+    // Seed the RX ring + read through the handle (the login-reads-the-tty path).
+    cons_test_reset();
+    cons_rx_input((u8)'k', false);
+    u8 buf[4] = { 0 };
+    s64 got = sys_read_for_proc(p, fd, buf, sizeof(buf));
+    TEST_EXPECT_EQ(got, 1L, "read through the console handle drained 1 byte");
+    TEST_EXPECT_EQ((long)buf[0], (long)'k', "the byte read back is 'k'");
+
+    handle_close(p, fd);
+    p->state = PROC_STATE_ZOMBIE;
     proc_free(p);
 }
 

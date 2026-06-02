@@ -666,7 +666,7 @@ The `Makefile` at the root provides `make kernel`, `make all`, `make test`, etc.
 
 Per `TOOLING.md §10`. Non-negotiable for the agentic loop to work.
 
-`boot_main()` in `kernel/main.c` must print, as its final act before entering the init process:
+The kernel prints this banner during boot. `boot_main()` (`kernel/main.c`) prints the multi-line header during late bring-up; the final `Thylacine boot OK` line is printed by `boot_mark_complete()` when **init (joey) signals `SYS_BOOT_COMPLETE`** -- after joey's boot-test asserts pass, just before it transitions to the persistent session supervisor (getty-loops `/sbin/login`). Since A-5a joey is the long-running init and does NOT exit on success, so the banner can no longer ride its reap. `SYS_BOOT_COMPLETE` is one-shot + gated on the caller being console-attached (so a spawned child cannot fake a premature banner -> a false PASS); a boot failure before the signal extincts in `joey_run` and the banner never prints.
 
 ```
 Thylacine vX.Y-dev booting...

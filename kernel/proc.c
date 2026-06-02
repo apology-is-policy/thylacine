@@ -787,6 +787,23 @@ void proc_console_post_interrupt(void) {
     spin_unlock_irqrestore(&g_proc_table_lock, s);
 }
 
+// A-5a (I-27 carry): `p` relinquishes its own console-attach. The attach-bit
+// clear is the atomic proc_revoke_console_attached; the owner-pointer clear (when
+// p IS the owner) takes g_proc_table_lock -- the same lock proc_console_sak +
+// proc_set_console_owner hold, so the SAK cannot observe a torn owner/attach
+// state. joey calls this at the bringup->session boundary; afterward no Proc is
+// console-attached (corvus is g_console_trusted_proc, attached only on SAK), so a
+// later SAK leaves corvus the SOLE attached Proc. owner -> NULL pre-SAK drops
+// Ctrl-C (no foreground consumer at v1.0). The handler self-restricts (passes
+// only the caller's Proc), so this never revokes another Proc.
+void proc_console_relinquish(struct Proc *p) {
+    if (!p) return;
+    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    proc_revoke_console_attached(p);   // atomic AND on proc_flags
+    if (g_console_owner == p) g_console_owner = NULL;
+    spin_unlock_irqrestore(&g_proc_table_lock, s);
+}
+
 // A-4c-2: the SAK transition (I-27 trusted-path handoff). Called from the
 // console_mgr kthread on a recognized serial BREAK. The whole transition runs
 // under g_proc_table_lock so the owner + trusted pointers cannot be reaped/freed

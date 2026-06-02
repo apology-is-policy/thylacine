@@ -269,6 +269,9 @@ void test_cons_sak_revoke_regrant(void);
 void test_cons_sak_failsafe_revoke_only(void);
 void test_cons_sak_idempotent_flood(void);
 void test_cons_sak_via_console_mgr(void);
+void test_proc_console_relinquish(void);
+void test_proc_console_relinquish_other_owner(void);
+void test_cons_console_open(void);
 void test_devctl_bestiary_smoke(void);
 void test_devctl_attach_returns_dir(void);
 void test_devctl_walk_to_each_leaf(void);
@@ -1046,6 +1049,9 @@ struct test_case g_tests[] = {
     { "cons.sak_failsafe_revoke_only", test_cons_sak_failsafe_revoke_only, false, NULL },
     { "cons.sak_idempotent_flood",     test_cons_sak_idempotent_flood,     false, NULL },
     { "cons.sak_via_console_mgr",      test_cons_sak_via_console_mgr,      false, NULL },
+    { "proc.console_relinquish",       test_proc_console_relinquish,       false, NULL },
+    { "proc.console_relinquish_other", test_proc_console_relinquish_other_owner, false, NULL },
+    { "cons.console_open",             test_cons_console_open,             false, NULL },
     { "devctl.bestiary_smoke",         test_devctl_bestiary_smoke,         false, NULL },
     { "devctl.attach_returns_dir",     test_devctl_attach_returns_dir,     false, NULL },
     { "devctl.walk_to_each_leaf",      test_devctl_walk_to_each_leaf,      false, NULL },

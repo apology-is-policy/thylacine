@@ -28,6 +28,7 @@
 #include <thylacine/pipe.h>
 #include <thylacine/poll.h>
 #include <thylacine/perm.h>
+#include <thylacine/joey.h>     // boot_mark_complete (SYS_BOOT_COMPLETE)
 #include <thylacine/proc.h>
 #include <thylacine/random.h>
 #include <thylacine/sched.h>
@@ -4762,6 +4763,68 @@ static s64 sys_poll_handler(u64 fds_va, u64 nfds_raw, u64 timeout_ms_raw) {
 }
 
 // =============================================================================
+// A-5a: boot -> session transition syscalls (login + session lifecycle).
+// IDENTITY-DESIGN.md section 9.9 + the ARCH section 25.4 "A-5" audit-trigger row.
+// =============================================================================
+
+// SYS_BOOT_COMPLETE -- init (joey) signals its boot-test asserts passed. Prints
+// the "Thylacine boot OK" banner exactly once (boot_mark_complete is one-shot).
+// GATE: the caller must be console-attached -- only the boot console-trust
+// anchor (joey, pre-relinquish) can emit the banner, so a spawned child cannot
+// fake a premature banner (-> a false test PASS). joey persists after this
+// (getty-loops login), so the banner can no longer ride joey's reap.
+static s64 sys_boot_complete_handler(void) {
+    struct Thread *t = current_thread();
+    if (!t)                            return -1;
+    struct Proc *p = t->proc;
+    if (!p)                            return -1;
+    if (!proc_is_console_attached(p))  return -1;
+    (void)boot_mark_complete();
+    return 0;
+}
+
+// SYS_CONSOLE_RELINQUISH -- the caller drops its OWN console-attach (I-27). joey
+// calls this at the bringup->session boundary so corvus becomes the SOLE
+// console-attached Proc during a user session. Self-only (passes the caller's
+// Proc -- it cannot revoke another Proc); gated on the caller currently being
+// console-attached (can only relinquish what you hold).
+static s64 sys_console_relinquish_handler(void) {
+    struct Thread *t = current_thread();
+    if (!t)                            return -1;
+    struct Proc *p = t->proc;
+    if (!p)                            return -1;
+    if (!proc_is_console_attached(p))  return -1;
+    proc_console_relinquish(p);
+    return 0;
+}
+
+// SYS_CONSOLE_OPEN core -- attach /dev/cons + install a KOBJ_SPOOR R|W handle.
+// The getty (joey) hands this to /sbin/login as its tty (fd 0/1/2; the Unix
+// login-reads-the-tty model). devcons_read ignores the Spoor and drains the
+// global RX ring, so any opened handle is a valid console reader. Exposed
+// (non-static) for kernel-internal tests (test_cons.c). Returns the fd or -1;
+// on handle-table failure the Spoor ref taken by attach is released.
+hidx_t sys_console_open_for_proc(struct Proc *p) {
+    if (!p)                            return -1;
+    struct Spoor *cs = devcons.attach(NULL);   // dev_simple_attach -> ref=1
+    if (!cs)                           return -1;
+    hidx_t fd = handle_alloc(p, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE, cs);
+    if (fd < 0) {
+        spoor_clunk(cs);
+        return -1;
+    }
+    return fd;
+}
+
+static s64 sys_console_open_handler(void) {
+    struct Thread *t = current_thread();
+    if (!t)                            return -1;
+    struct Proc *p = t->proc;
+    if (!p)                            return -1;
+    return (s64)sys_console_open_for_proc(p);
+}
+
+// =============================================================================
 // Dispatch entry.
 // =============================================================================
 
@@ -5000,6 +5063,18 @@ void syscall_dispatch(struct exception_context *ctx) {
     case SYS_CAP_GRANT_CLEARANCE:
         ctx->regs[0] = (u64)sys_cap_grant_clearance_handler(
             ctx->regs[0], ctx->regs[1], ctx->regs[2], ctx->regs[3]);
+        return;
+
+    case SYS_BOOT_COMPLETE:
+        ctx->regs[0] = (u64)sys_boot_complete_handler();
+        return;
+
+    case SYS_CONSOLE_RELINQUISH:
+        ctx->regs[0] = (u64)sys_console_relinquish_handler();
+        return;
+
+    case SYS_CONSOLE_OPEN:
+        ctx->regs[0] = (u64)sys_console_open_handler();
         return;
 
     case SYS_WALK_OPEN:

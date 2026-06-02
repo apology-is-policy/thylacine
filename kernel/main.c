@@ -120,6 +120,24 @@ static void boot_stack_report(void) {
 
 void boot_main(void);
 
+// A-5a: the "Thylacine boot OK" banner (TOOLING.md section 10 ABI) is printed
+// HERE, exactly once, on the first call -- not after joey exits. The session
+// shape is "joey persists as init" (IDENTITY-DESIGN.md section 9.9): joey runs
+// its boot-test asserts, then calls SYS_BOOT_COMPLETE -> this function, then
+// getty-loops /sbin/login (never exiting). joey can no longer ride the
+// post-reap print, so the kernel emits the banner on init's explicit signal.
+// ONE-SHOT via an atomic exchange (a 2nd SYS_BOOT_COMPLETE is a no-op); the
+// SYS_BOOT_COMPLETE handler additionally gates on the caller being
+// console-attached so no spawned child can emit a premature banner (-> a false
+// test PASS). Returns true iff this call printed the banner.
+bool boot_mark_complete(void) {
+    static bool g_boot_complete_done;   // BSS false
+    if (__atomic_exchange_n(&g_boot_complete_done, true, __ATOMIC_SEQ_CST))
+        return false;
+    uart_puts("Thylacine boot OK\n");
+    return true;
+}
+
 void boot_main(void) {
     // #806 probe: paint the unused boot stack first thing, before any deep
     // call uses it. boot_stack_report() (post-suite) reads the high-water.
@@ -661,13 +679,22 @@ void boot_main(void) {
     // #157 (second-userspace-exec hang) means we run /init exactly once
     // per boot and don't follow it with another userspace exec; the
     // prior `userspace.exec_exits_ok` test was retired in favor of this.
-    // Failure (rfork OOM / exec error / non-zero exit_status) extincts.
+    // Failure (rfork OOM / exec_setup error / non-zero exit before the
+    // boot-complete signal) extincts inside joey_run.
+    //
+    // A-5a: joey is now the long-running session supervisor. On SUCCESS it
+    // calls SYS_BOOT_COMPLETE (-> boot_mark_complete prints the banner) and
+    // then NEVER exits (it getty-loops /sbin/login), so joey_run's wait_pid
+    // blocks forever and this call does not return. On FAILURE joey exits
+    // non-zero before the banner -> joey_run extincts. Either way the banner
+    // is no longer printed here -- it rides SYS_BOOT_COMPLETE while joey is
+    // alive (IDENTITY-DESIGN.md section 9.9).
     joey_run();
 
-    uart_puts("Thylacine boot OK\n");
-
-    // boot_main() must not return. start.S has a fallthrough to _torpor
-    // for safety, but be explicit here too.
+    // Reached only if joey exits cleanly WITHOUT persisting (not a v1.0 path;
+    // the banner already printed via SYS_BOOT_COMPLETE if joey got that far).
+    // boot_main() must not return; start.S falls through to _torpor, but be
+    // explicit.
     extern void _torpor(void) __attribute__((noreturn));
     _torpor();
 }

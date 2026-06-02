@@ -91,6 +91,10 @@ enum {
     T_SYS_UNLINK      = 58,      // FS-gamma: remove a file or empty directory (Tunlinkat)
     T_SYS_WSTAT       = 59,      // A-2a: chmod/chown via Tsetattr
     T_SYS_EXIT_GROUP  = 60,      // SYS_EXIT_GROUP: whole-Proc group-terminate (ARCH 7.9.1/I-24)
+    // 61 = SYS_CAP_GRANT_CLEARANCE (native libthyla-rs only; not used from libt).
+    T_SYS_BOOT_COMPLETE     = 62,  // A-5a: init signals boot-complete -> banner
+    T_SYS_CONSOLE_RELINQUISH = 63, // A-5a: drop own console-attach (I-27)
+    T_SYS_CONSOLE_OPEN      = 64,  // A-5a: open /dev/cons -> R|W KOBJ_SPOOR fd
 };
 
 // SYS_UNLINK flags: rmdir an empty directory (vs unlink a non-directory).
@@ -927,6 +931,52 @@ static inline long t_spawn_full_argv(const struct t_sys_spawn_args *req) {
     __asm__ volatile (
         "svc #0"
         : "+r"(x0)
+        : "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
+// A-5a (login + session). joey's boot->session-transition syscalls.
+
+// t_boot_complete — signal "boot-test asserts passed". The kernel prints the
+// "Thylacine boot OK" banner (one-shot). Caller must be console-attached (joey,
+// pre-relinquish). Returns 0 on success, -1 if not console-attached.
+static inline long t_boot_complete(void) {
+    register long x0 __asm__("x0");
+    register long x8 __asm__("x8") = T_SYS_BOOT_COMPLETE;
+    __asm__ volatile (
+        "svc #0"
+        : "=r"(x0)
+        : "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
+// t_console_relinquish — drop the caller's OWN console-attach (I-27). joey calls
+// this at the bringup->session boundary so corvus is the sole console-attached
+// Proc during a session. Returns 0, or -1 if the caller is not console-attached.
+static inline long t_console_relinquish(void) {
+    register long x0 __asm__("x0");
+    register long x8 __asm__("x8") = T_SYS_CONSOLE_RELINQUISH;
+    __asm__ volatile (
+        "svc #0"
+        : "=r"(x0)
+        : "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
+// t_console_open — open /dev/cons and return a R|W KOBJ_SPOOR fd. The getty
+// hands this to /sbin/login as its tty (fd 0/1/2). Returns the fd or -1.
+static inline long t_console_open(void) {
+    register long x0 __asm__("x0");
+    register long x8 __asm__("x8") = T_SYS_CONSOLE_OPEN;
+    __asm__ volatile (
+        "svc #0"
+        : "=r"(x0)
         : "r"(x8)
         : "memory", "cc"
     );

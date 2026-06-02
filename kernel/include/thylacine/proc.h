@@ -718,6 +718,18 @@ void proc_set_console_owner(struct Proc *p);
 // No-op when there is no live owner. Takes g_proc_table_lock.
 void proc_console_post_interrupt(void);
 
+// proc_console_relinquish — `p` drops its OWN console-attach bit and, if it is
+// the current g_console_owner, clears the owner pointer. A-5a / I-27: joey (the
+// boot console anchor) calls this (via SYS_CONSOLE_RELINQUISH on itself) at the
+// bringup->session boundary so that during a user session corvus is the SOLE
+// console-attached Proc -- otherwise a post-SAK state is {joey,corvus} both
+// attached. Takes g_proc_table_lock (the owner-pointer clear); the attach-bit
+// clear is the atomic proc_revoke_console_attached. owner->NULL pre-SAK means
+// Ctrl-C is dropped (no foreground consumer at v1.0); the SAK re-grants corvus
+// regardless. The SYS_CONSOLE_RELINQUISH handler only ever passes the caller's
+// own Proc (self-only -- it cannot revoke another Proc).
+void proc_console_relinquish(struct Proc *p);
+
 // proc_set_console_trusted — record `p` as the trusted login authority (corvus):
 // the target the A-4c-2 SAK re-grants the console to. Takes g_proc_table_lock.
 // Set when joey establishes corvus (SPAWN_PERM_CONSOLE_TRUSTED). Pass NULL to
