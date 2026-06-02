@@ -333,6 +333,30 @@ void srv_proc_exit_notify(struct Proc *p);
 // diagnostics; takes the registry lock.
 int srv_registry_count(void);
 
+// devsrv_post_listener — the create=post path (stalk-3b, STALK-DESIGN.md §5.3
+// / D2). A SYS_WALK_CREATE against a /srv directory (a devsrv root Spoor) is a
+// service post: mint a KObj_Srv listener bound to `p` for service `name` in
+// `root`'s registry and return its handle index. `mode` (derived by the
+// caller from the create perm's DMSRVBYTE bit) selects byte- vs 9P-mode.
+//
+// Gated on PROC_FLAG_MAY_POST_SERVICE — the SAME one-way joey-stamped gate
+// SYS_POST_SERVICE checks (CORVUS-DESIGN.md §6.1); an unmarked Proc gets -1.
+// `root` MUST be a devsrv root (dc='s', aux = a SrvRegistry, SRV_REGISTRY_
+// MAGIC) -- the caller (sys_walk_create_handler's devsrv branch) verifies that
+// before calling; this re-reads the aux defensively. The post is the same
+// reserve -> handle_alloc(KObj_Srv) -> commit two-phase as SYS_POST_SERVICE,
+// rolled back via srv_abort on a full handle table. Returns hidx >= 0 or -1
+// (bad args / unmarked Proc / oversized-or-non-printable name / name already
+// LIVE-or-RESERVING / registry full / handle table full).
+//
+// Why a dedicated entry, not the Dev `.create` vtable slot: a listener is a
+// KObj_Srv handle whose obj is a SrvService, but the generic
+// sys_walk_create_handler installs the returned Spoor as a KOBJ_SPOOR. The
+// post yields a different handle KIND, so it cannot ride the Spoor-returning
+// create path; the handler branches to here and returns the hidx directly.
+int devsrv_post_listener(struct Proc *p, struct Spoor *root,
+                         const char *name, size_t name_len, enum srv_mode mode);
+
 // =============================================================================
 // Per-connection layer (P5-corvus-srv-impl-a3b).
 // =============================================================================

@@ -1,20 +1,24 @@
 # 70 — devsrv: the `/srv` service registry
 
-**Status**: as-built at A-5b-0 **stalk-3a**. The service registry, the
+**Status**: as-built at A-5b-0 **stalk-3b-α**. The service registry, the
 `devsrv` Dev, the `SYS_POST_SERVICE` syscall, the `proc_flags` post-gate,
 and poster-exit tombstoning landed at P5-corvus-srv-impl-a2; the
 **per-connection layer** — the `devsrv` walk op, the client-connect path
 (`srv_conn_open_for_proc`), the bounded accept backlog, `SYS_SRV_ACCEPT`,
 and the connection-Spoor read/write/close — landed at a3b; `SYS_SRV_PEER`
-(the peer-identity read) landed at a3c. **stalk-3a (this revision)** makes
-the registry **namespace-resident**: the single static `g_srv_registry`
-becomes a heap-allocated, refcounted `SrvRegistry` reached *through the
-mounted devsrv root Spoor* (the root's `aux`), and boot mounts one immortal
-registry on the kproc `/srv` synthetic dir. The retained `SYS_POST_SERVICE`
-/ `SYS_SRV_CONNECT` syscall path resolves the one boot registry (nothing
-migrates in 3a). What remains: stalk-3b makes `devsrv_open` the connect and
-`devsrv_create` the post (retiring the syscalls in stalk-3c); the corvus 9P
-server with the §6.2 step-5 handshake drive.
+(the peer-identity read) landed at a3c. **stalk-3a** made the registry
+**namespace-resident**: the single static `g_srv_registry` became a
+heap-allocated, refcounted `SrvRegistry` reached *through the mounted devsrv
+root Spoor* (the root's `aux`), and boot mounts one immortal registry on the
+kproc `/srv` synthetic dir. **stalk-3b-α (this revision)** adds the
+**create=post** path: a `SYS_WALK_CREATE` against a `/srv` directory mints a
+`KObj_Srv` listener (`devsrv_post_listener`), the Plan-9-true symmetric
+sibling of the open=connect to come — `perm & DMSRVBYTE` selects byte-mode,
+else 9P-mode. The retained `SYS_POST_SERVICE` / `SYS_SRV_CONNECT` syscall
+path still resolves the one boot registry, and **no client has migrated yet**
+(corvus still posts via `SYS_POST_SERVICE`). What remains: stalk-3b-β makes
+`devsrv_open` the connect (the two-step 9P-unification) and migrates the
+native clients; stalk-3c retires the syscalls + the pouch seam.
 
 > **stalk-3a delta in one place.** The registry was a single static
 > `struct SrvRegistry g_srv_registry`; it is now heap-allocated +
@@ -304,6 +308,49 @@ The joey→corvus stamp itself is **deferred to P5-corvus-srv-impl-b**,
 when corvus is wired to post `/srv/corvus` for real; until then the gate
 ships fail-closed (no production Proc carries the bit) and is exercised
 only by tests.
+
+### Posting via `create` (stalk-3b-α)
+
+`SYS_WALK_CREATE` against a `/srv` directory — a devsrv root Spoor (`dc =
+'s'`, `aux` = a `SrvRegistry`, `SRV_REGISTRY_MAGIC` at offset 0) — is a
+service **post**, the Plan-9-true symmetric sibling of the open=connect to
+come (STALK-DESIGN.md §5.3 / D2). `sys_walk_create_handler` detects the
+devsrv root *after* validating the name and *before* the generic clone-walk,
+and routes to `devsrv_post_listener` (`kernel/devsrv.c`):
+
+```c
+int devsrv_post_listener(struct Proc *p, struct Spoor *root,
+                         const char *name, size_t name_len, enum srv_mode mode);
+```
+
+It mirrors `sys_post_service_core` exactly — the same `PROC_FLAG_MAY_POST_-
+SERVICE` gate, the same printable-ASCII name hygiene, the same
+reserve → `handle_alloc(KOBJ_SRV)` → commit two-phase (rolled back via
+`srv_abort` on a full handle table) — but bound to the registry behind
+`root` (resolved from `root->aux`, re-validated against `SRV_REGISTRY_MAGIC`)
+rather than the boot registry, and returns the listener `hidx` directly.
+
+**Why a dedicated entry, not the `Dev.create` vtable slot.** A listener is a
+`KObj_Srv` handle whose `obj` is a `SrvService`; the generic
+`sys_walk_create_handler` installs the returned Spoor as a `KObj_Spoor`. The
+post yields a *different handle kind*, so it cannot ride the Spoor-returning
+create path. `devsrv_create` (the vtable slot) stays a graceful-fail stub;
+the handler branch is the post path. A non-root devsrv Spoor used as a create
+parent (a connection or service-ref Spoor) falls through to the generic path,
+where `devsrv_walk` with `nname == 0` rejects non-roots — so a create in a
+connection cleanly returns `-1` with no leak.
+
+**`DMSRVBYTE`.** `perm & SYS_WALK_CREATE_DMSRVBYTE` (`0x02000000`, bit 25 —
+unused by Plan 9's standard `DM*` set, so collision-free; pinned by a
+`_Static_assert`) posts byte-mode; its absence posts 9P-mode — the Plan 9
+`DM*` perm-bit idiom (the mode is a service attribute, not an open intent).
+The bit is admitted through the create-perm validation so it reaches the
+devsrv branch; a regular (non-`/srv`) create **rejects** it, so it can never
+leak into a dev9p `Tlcreate` perm.
+
+No client posts via `create` yet — corvus still uses `SYS_POST_SERVICE`; the
+migration (post-before-chroot) lands with the open=connect client migration
+in stalk-3b-β.
 
 ### Tombstoning
 
@@ -767,7 +814,8 @@ is `specs/SPEC-TO-CODE.md`.
 
 ## Tests
 
-`kernel/test/test_devsrv.c` — 6 tests (the a2 registry):
+`kernel/test/test_devsrv.c` — 7 tests (the a2 registry + the stalk-3b-α
+create=post):
 
 - `devsrv.registered` — `devsrv` is in the bestiary (`dc='s'`); `attach`
   yields a QTDIR `/srv` root Spoor.
@@ -782,6 +830,11 @@ is `specs/SPEC-TO-CODE.md`.
 - `devsrv.registry_full` — the registry caps at `SRV_MAX_SERVICES`.
 - `devsrv.post_rollback` — a `handle_alloc` failure after `srv_reserve`
   leaves no stale registry entry (the `srv_abort` rollback path).
+- `devsrv.post_listener` (stalk-3b-α) — the create=post MECHANISM:
+  `devsrv_post_listener` on a `/srv` root mints a `LIVE` `KObj_Srv` listener
+  in that root's registry; the selected mode (9P / byte) is recorded; the
+  `MAY_POST_SERVICE` gate holds on this path too (unmarked Proc → `-1`); and
+  the parent must be a registry ROOT (a service-ref Spoor is rejected).
 
 `kernel/test/test_devsrv_conn.c` — 11 tests (the a3b per-connection
 layer + the a3c `SYS_SRV_PEER` tests):
@@ -972,7 +1025,9 @@ list-lock acquisition cannot deadlock with the producer's state lock.
 |---|---|
 | heap+refcounted per-territory `SrvRegistry` + boot `/srv` mount | landed (A-5b-0 stalk-3a) |
 | `srv_registry_create`/`_ref`/`_unref` + `devsrv_attach_registry` + `srv_boot_registry` | landed (stalk-3a) |
-| `devsrv_open`=connect / `devsrv_create`=post (still graceful-fail stubs) | deferred to stalk-3b |
+| create=post (`devsrv_post_listener` + `SYS_WALK_CREATE` `/srv` branch + `DMSRVBYTE`) | landed (stalk-3b-α) |
+| `devsrv_open`=connect (two-step 9P-unification) + native client migration | deferred to stalk-3b-β |
+| `devsrv_create` Dev vtable slot (still a graceful-fail stub; post rides the handler branch) | by design |
 | retire `SYS_SRV_CONNECT` / `SYS_POST_SERVICE` (subsumed by `SYS_OPEN` / `SYS_WALK_CREATE`) | deferred to stalk-3c |
 | service registry + two-phase post | landed (P5-corvus-srv-impl-a2) |
 | `SYS_POST_SERVICE` (syscall 26) | landed |

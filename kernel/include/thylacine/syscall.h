@@ -1562,12 +1562,27 @@ _Static_assert(__builtin_offsetof(struct t_stat, gid)       == 76, "t_stat.gid a
 #define SYS_WALK_OPEN_OMODE_VALID  0x93u
 
 // SYS_WALK_CREATE perm: the Plan 9 perm word. Low 9 bits are the POSIX
-// rwxrwxrwx mode; the DMDIR bit selects directory creation. All other DM*
-// bits (DMAPPEND 0x40000000, DMEXCL 0x20000000, DMTMP 0x04000000, ...) are
+// rwxrwxrwx mode; the DMDIR bit selects directory creation. All other Plan 9
+// DM* bits (DMAPPEND 0x40000000, DMEXCL 0x20000000, DMTMP 0x04000000, ...) are
 // reserved 0 at v1.0 -- a perm with any bit outside SYS_WALK_CREATE_PERM_VALID
 // is rejected with -1 (so a future bit cannot be silently ignored).
 #define SYS_WALK_CREATE_DMDIR       0x80000000u
-#define SYS_WALK_CREATE_PERM_VALID  (0x1FFu | SYS_WALK_CREATE_DMDIR)
+// DMSRVBYTE (Thylacine extension; stalk-3b, STALK-DESIGN.md §5.3 / D6): on a
+// CREATE against a /srv directory (a devsrv root), this perm bit posts the new
+// service in BYTE mode; its absence posts 9P mode (the Plan 9 DM* perm-bit
+// idiom -- mode-of-the-service is an attribute, not an open intent). Bit 25 is
+// unused by Plan 9's standard DM set (DMDIR/DMAPPEND/DMEXCL/DMMOUNT/DMAUTH/
+// DMTMP occupy the top six bits), so it cannot collide. It is admitted by
+// SYS_WALK_CREATE_PERM_VALID so it reaches the devsrv-post branch of
+// sys_walk_create_handler; that branch is the ONLY place it is meaningful -- a
+// regular (non-/srv) create rejects it (it must not leak into a dev9p Tlcreate
+// perm). For a service post the only valid perm bits are {0, DMSRVBYTE}.
+#define SYS_WALK_CREATE_DMSRVBYTE   0x02000000u
+#define SYS_WALK_CREATE_PERM_VALID  (0x1FFu | SYS_WALK_CREATE_DMDIR | \
+                                     SYS_WALK_CREATE_DMSRVBYTE)
+_Static_assert((SYS_WALK_CREATE_DMSRVBYTE &
+                (0x1FFu | SYS_WALK_CREATE_DMDIR)) == 0,
+               "DMSRVBYTE must not collide with the mode bits or DMDIR");
 
 // SYS_UNLINK flags: the only permitted bit at v1.0 is SYS_UNLINK_REMOVEDIR
 // (rmdir an empty directory vs unlink a non-directory). Mirrors the wire

@@ -395,6 +395,65 @@ void srv_abort(struct SrvService *svc, enum srv_state prior) {
     spin_unlock_irqrestore(&svc->reg->lock, s);
 }
 
+// devsrv_post_listener — the create=post path (stalk-3b, STALK-DESIGN.md
+// §5.3 / D2). Mirrors sys_post_service_core's reserve -> handle_alloc(KObj_Srv)
+// -> commit two-phase, but bound to the registry behind the /srv directory
+// Spoor `root` (resolved from its aux) rather than the boot registry, and
+// reached through SYS_WALK_CREATE on a /srv dir rather than the SYS_POST_-
+// SERVICE syscall. The listener handle's obj is the registry entry; the entry
+// outlives the handle (tombstoned at the poster's exit, never freed by handle
+// close), so handle_release_obj's KOBJ_SRV case is a no-op for it.
+int devsrv_post_listener(struct Proc *p, struct Spoor *root,
+                         const char *name, size_t name_len, enum srv_mode mode) {
+    if (!p)                                              return -1;
+    if (!name)                                           return -1;
+    if (name_len == 0 || name_len > SRV_NAME_MAX)        return -1;
+    if (mode != SRV_MODE_9P && mode != SRV_MODE_BYTE)    return -1;
+
+    // The parent MUST be a devsrv root Spoor whose aux is a SrvRegistry. The
+    // caller (sys_walk_create_handler's devsrv branch) verified this; re-read
+    // the aux defensively so a corrupt / non-root Spoor can never be coerced
+    // into a registry pointer.
+    if (!root || root->dc != 's' || !root->aux)          return -1;
+    if (*(const u64 *)root->aux != SRV_REGISTRY_MAGIC)   return -1;
+    struct SrvRegistry *reg = (struct SrvRegistry *)root->aux;
+
+    // Post-gate — the SAME one-way joey-stamped bit SYS_POST_SERVICE checks
+    // (CORVUS-DESIGN.md §6.1; corvus.tla PostService precondition). Fail-closed
+    // for a bad Proc.
+    if (!proc_may_post_service(p))                       return -1;
+
+    // Service-name hygiene, identical to sys_post_service_core: printable
+    // ASCII, no '/' (a /srv path separator), no control bytes -- so the name
+    // can never be mis-parsed once it is a path component.
+    for (size_t i = 0; i < name_len; i++) {
+        unsigned char c = (unsigned char)name[i];
+        if (c < 0x21u || c > 0x7eu || c == '/')          return -1;
+    }
+
+    // Phase 1: reserve a slot in THIS registry (RESERVING; never observably
+    // LIVE until the handle below exists).
+    struct SrvService *svc = NULL;
+    enum srv_state     prior = SRV_STATE_FREE;
+    if (srv_reserve_in(reg, name, (u8)name_len, p, mode, &svc, &prior) != 0)
+        return -1;
+
+    // Install the KObj_Srv listener handle. handle_alloc does not take a
+    // reference; the listener is non-transferable (handle_dup rejects KObj_Srv)
+    // so it is pinned to p.
+    hidx_t h = handle_alloc(p, KOBJ_SRV, RIGHT_READ | RIGHT_WRITE, svc);
+    if (h < 0) {
+        // Phase 2 (failure): roll the reservation back to its prior state so a
+        // retry -- or another poster -- can still claim the name.
+        srv_abort(svc, prior);
+        return -1;
+    }
+
+    // Phase 2 (success): RESERVING -> LIVE. Infallible.
+    srv_commit(svc);
+    return (int)h;
+}
+
 // srv_lookup_in — find a service by name in `reg`. The public srv_lookup
 // binds the boot registry.
 static struct SrvService *srv_lookup_in(struct SrvRegistry *reg,

@@ -435,17 +435,33 @@ cfgs stay pre-commit gates** and are re-run on every `stalk`/mount change.
   sub-decisions D5/D6/D7 (§11). **Own audit per sub-chunk** (the registry
   lifecycle; the connection-handle reconciliation + the isolation property;
   AEGIS/mallocng-adjacent via the A-5b DEK path it unblocks — prosecute hard).
-  - **stalk-3a LANDED** (cites scripture `adafc0a`). The registry is
-    namespace-resident: heap-allocated + refcounted `SrvRegistry` reached
-    through the mounted devsrv root Spoor (`srv_registry_create`/`_ref`/
-    `_unref`, `devsrv_attach_registry`, `srv_boot_registry`); the per-Spoor
-    registry-ref discipline (dev9p `attached_owner` mirror) + the
-    `devsrv_walk` aux-normalize (no phantom unref); boot mounts one immortal
-    registry on kproc's `/srv`. Old syscalls resolve the boot registry
-    (nothing migrates). Matrix GREEN 708/708 (default + UBSan + smp8); ref
-    doc `70-devsrv.md` updated. Own audit (refcount/UAF/drain) next.
-  - **stalk-3b / 3c** — pending (open=connect + create=post + 9P-unification
-    + migrate native clients; then retire the syscalls + the pouch seam).
+  - **stalk-3a LANDED + audited** (impl `23400e6`, audit-close `676567c`;
+    cites scripture `adafc0a`). The registry is namespace-resident:
+    heap-allocated + refcounted `SrvRegistry` reached through the mounted
+    devsrv root Spoor (`srv_registry_create`/`_ref`/`_unref`,
+    `devsrv_attach_registry`, `srv_boot_registry`); the per-Spoor registry-ref
+    discipline (dev9p `attached_owner` mirror) + the `devsrv_walk` aux-normalize
+    (no phantom unref); boot mounts one immortal registry on kproc's `/srv`.
+    Old syscalls resolve the boot registry (nothing migrates). Audit CLEAN
+    (0 P0/0 P1/0 P2/4 P3). Matrix GREEN 708/708 (default + UBSan + smp8).
+  - **stalk-3b-α LANDED** — the **create=post** path: a `SYS_WALK_CREATE`
+    against a `/srv` directory routes (a devsrv-root branch in
+    `sys_walk_create_handler`) to `devsrv_post_listener`, which mints a
+    `KObj_Srv` listener in that root's registry — the Plan-9-true symmetric
+    sibling of open=connect. `DMSRVBYTE` (`perm` bit 25) selects byte-mode,
+    else 9P-mode; a regular create rejects it so it cannot leak into a dev9p
+    `Tlcreate`. A dedicated handler branch (not the `Dev.create` vtable slot)
+    because a listener is a different handle KIND than the `KOBJ_SPOOR` the
+    generic create installs. Old syscalls intact; **no client migrated yet**
+    (corvus still posts via `SYS_POST_SERVICE`). Matrix GREEN 709/709
+    (default + UBSan + smp8); `70-devsrv.md` updated. The formal 3b audit
+    covers the full create+open surface at the end of the arc.
+  - **stalk-3b-β / 3c** — pending. 3b-β: `devsrv_open`=connect (two-step
+    9P-unification; `stalk` `STALK_OPEN` gains open-returns-a-new-Spoor
+    support; retarget `SYS_ATTACH_9P_SRV` to `KOBJ_SPOOR`) + migrate the
+    native clients (corvus post-before-chroot, joey/login/legate connects) +
+    remove `SRV_CONN_PER_PROC_MAX` + close the 3a-audit F2/F4 prereqs; THEN
+    the formal 3b audit. 3c: retire the syscalls + the pouch seam.
 
 Then A-5b's body (#826/#827/#829) resumes on top of namespace-resident `/srv`.
 

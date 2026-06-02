@@ -827,6 +827,27 @@ kill = BOTH the namespace `/proc/<pid>/ctl` surface AND a narrow elevation-only 
     no such caller exists). **F4 (P3)** 3b `srv_conn_count` accounting note recorded. Matrix RE-VERIFIED
     GREEN on the fixed code: default(smp4)+UBSan+smp8 ALL **708/708** + boot OK + login E2E. **NEXT =
     stalk-3b.**
+  - **stalk-3b-α IMPL LANDED** -- the **create=post** path (STALK-DESIGN.md section 5.3 / D2). A
+    `SYS_WALK_CREATE` against a `/srv` directory (a devsrv root Spoor: `dc='s'`, `aux` = a `SrvRegistry`)
+    is a service POST: `sys_walk_create_handler` branches (after name validation, before the generic
+    clone-walk) to the new `devsrv_post_listener`, which mirrors `sys_post_service_core`'s gate +
+    name-hygiene + reserve->`handle_alloc(KObj_Srv)`->commit two-phase, but bound to the registry behind
+    that `/srv` Spoor (resolved from its aux, re-validated `SRV_REGISTRY_MAGIC`). A LISTENER is a
+    `KObj_Srv` handle (a different KIND than the `KOBJ_SPOOR` the generic create installs over the
+    returned Spoor), so it CANNOT ride the `Dev.create` vtable slot -- the handler branch returns the
+    listener hidx directly; `devsrv_create` stays a graceful-fail stub by design. New perm bit
+    `SYS_WALK_CREATE_DMSRVBYTE` (`0x02000000`, bit 25, unused by Plan 9's `DM*` set; `_Static_assert`
+    no-collision) selects byte- vs 9P-mode; admitted through the create-perm validation so it reaches
+    the devsrv branch, but **rejected on the generic (non-`/srv`) create path** so it can never corrupt a
+    dev9p `Tlcreate` perm. **Old syscalls intact; NO client migrated** (corvus still posts via
+    `SYS_POST_SERVICE` -- its migration is post-before-chroot, deferred to 3b-beta with the open=connect
+    client migration). 1 new kernel test (`devsrv.post_listener`). Matrix GREEN: default(smp4)+UBSan+smp8
+    ALL **709/709** + boot OK + login + legate E2E + 0 EXTINCTION + 0 UBSan. `70-devsrv.md` + STALK-DESIGN
+    section 9 updated. The formal 3b audit (connection-handle reconciliation) covers the full
+    create+open surface at the end of the arc. **NEXT = stalk-3b-beta** (`devsrv_open`=connect, two-step
+    9P-unification; `stalk` `STALK_OPEN` gains open-returns-a-new-Spoor; retarget `SYS_ATTACH_9P_SRV` to
+    `KOBJ_SPOOR`; migrate the native clients; remove `SRV_CONN_PER_PROC_MAX`; close the 3a-audit F2/F4
+    prereqs).
 
 ---
 

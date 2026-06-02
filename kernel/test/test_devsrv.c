@@ -56,6 +56,7 @@ void test_devsrv_registry_full(void);
 void test_devsrv_post_rollback(void);
 void test_devsrv_registry_lifecycle(void);
 void test_devsrv_svc_ref_holds_registry(void);
+void test_devsrv_post_listener(void);
 
 static struct Proc *make_test_proc(void) {
     return proc_alloc();
@@ -338,6 +339,71 @@ void test_devsrv_svc_ref_holds_registry(void) {
     TEST_ASSERT(srv_lookup("corvus", 6) != NULL,
         "boot registry still holds the posted service");
 
+    drop_test_proc(p);
+    srv_registry_reset();
+}
+
+// devsrv.post_listener — the stalk-3b create=post MECHANISM. A SYS_WALK_CREATE
+// against a /srv directory routes to devsrv_post_listener, which mints a
+// KObj_Srv listener in the registry behind that directory Spoor (here the boot
+// registry, via a 2nd attached root). Proves: the listener is KObj_Srv + LIVE,
+// the mode (9P / byte) is what the caller selected, the MAY_POST_SERVICE gate
+// holds on this path too, and the parent must be a registry ROOT (a service-
+// ref Spoor is rejected). The handler's perm->mode glue (syscall.c) is thin
+// and is exercised end-to-end when a client posts via SYS_WALK_CREATE.
+void test_devsrv_post_listener(void) {
+    srv_registry_reset();
+
+    struct Proc *p = make_marked_test_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc + mark");
+
+    // A /srv root over the boot registry -- devsrv_post_listener resolves the
+    // registry from this root's aux (the same boot registry srv_lookup uses).
+    struct Spoor *root = devsrv_attach_registry(srv_boot_registry());
+    TEST_ASSERT(root != NULL, "attach a boot /srv root");
+
+    // 9P-mode post via the create path.
+    int h = devsrv_post_listener(p, root, "corvus", 6, SRV_MODE_9P);
+    TEST_ASSERT(h >= 0, "devsrv_post_listener(9P) -> handle");
+    struct Handle *sh = handle_get(p, h);
+    TEST_ASSERT(sh != NULL, "listener handle installed");
+    TEST_EXPECT_EQ((int)sh->kind, (int)KOBJ_SRV, "listener is KObj_Srv");
+    struct SrvService *svc = srv_lookup("corvus", 6);
+    TEST_ASSERT(svc != NULL, "service registered in the boot registry");
+    TEST_EXPECT_EQ((int)svc->state, (int)SRV_STATE_LIVE, "service LIVE");
+    TEST_EXPECT_EQ((int)svc->mode, (int)SRV_MODE_9P, "service is 9P-mode");
+    TEST_EXPECT_EQ(svc->poster_stripes, proc_stripes(p),
+        "entry stamped with the poster's stripes");
+
+    // byte-mode post (the DMSRVBYTE arm -> SRV_MODE_BYTE).
+    int hb = devsrv_post_listener(p, root, "byter", 5, SRV_MODE_BYTE);
+    TEST_ASSERT(hb >= 0, "devsrv_post_listener(BYTE) -> handle");
+    struct SrvService *svb = srv_lookup("byter", 5);
+    TEST_ASSERT(svb != NULL, "byte service registered");
+    TEST_EXPECT_EQ((int)svb->mode, (int)SRV_MODE_BYTE, "service is byte-mode");
+
+    // The MAY_POST_SERVICE gate holds on the create path: an unmarked Proc
+    // cannot post.
+    struct Proc *u = make_test_proc();
+    TEST_ASSERT(u != NULL, "unmarked proc");
+    TEST_EXPECT_EQ(devsrv_post_listener(u, root, "nope", 4, SRV_MODE_9P), -1,
+        "create=post by an unmarked Proc -> -1 (MAY_POST_SERVICE gate)");
+
+    // Defense-in-depth: the parent must be a devsrv ROOT (SRV_REGISTRY_MAGIC).
+    // A service-ref Spoor (walk /corvus -> DEVSRV_SVC_MAGIC aux) is rejected.
+    struct Spoor *svc_ref = spoor_clone(root);
+    TEST_ASSERT(svc_ref != NULL, "clone root for the svc-ref walk");
+    const char *names[1] = { "corvus" };
+    struct Walkqid *w = devsrv.walk(root, svc_ref, names, 1);
+    TEST_ASSERT(w != NULL && w->nqid == 1 && w->spoor == svc_ref,
+        "walk /corvus -> service-ref Spoor");
+    walkqid_free(w);
+    TEST_EXPECT_EQ(devsrv_post_listener(p, svc_ref, "x", 1, SRV_MODE_9P), -1,
+        "create=post on a non-root (service-ref) Spoor -> -1");
+    spoor_clunk(svc_ref);
+
+    spoor_clunk(root);
+    drop_test_proc(u);
     drop_test_proc(p);
     srv_registry_reset();
 }

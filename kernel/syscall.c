@@ -1882,6 +1882,27 @@ static s64 sys_walk_create_handler(u64 parent_fd_raw, u64 name_va,
                               name_scratch[1] == '.') return -1;
     name_scratch[name_len_raw] = '\0';
 
+    // stalk-3b (STALK-DESIGN.md §5.3 / D2): a CREATE against a /srv directory
+    // (a devsrv root Spoor: dc='s', aux = a SrvRegistry) is a service POST, not
+    // a file create. It mints a KObj_Srv LISTENER -- a different handle kind
+    // than the KOBJ_SPOOR the generic create path installs over the returned
+    // Spoor -- so it cannot ride that path; branch here and return the listener
+    // hidx directly. perm selects the transport: DMSRVBYTE -> byte-mode, else
+    // 9P-mode; no other perm bit is meaningful for a service post.
+    if (src->dc == 's' && src->aux &&
+        *(const u64 *)src->aux == SRV_REGISTRY_MAGIC) {
+        if (perm & ~SYS_WALK_CREATE_DMSRVBYTE)            return -1;
+        enum srv_mode mode = (perm & SYS_WALK_CREATE_DMSRVBYTE)
+                                 ? SRV_MODE_BYTE : SRV_MODE_9P;
+        return (s64)devsrv_post_listener(p, src, name_scratch,
+                                         (size_t)name_len_raw, mode);
+    }
+
+    // DMSRVBYTE is meaningful ONLY for the /srv service post above. On a
+    // regular create it must not reach a Dev's create perm (e.g. a dev9p
+    // Tlcreate), where the high bit would corrupt the wire perm -- reject it.
+    if (perm & SYS_WALK_CREATE_DMSRVBYTE)                 return -1;
+
     // Clone the parent, then CLONE-walk so nc carries its own fid at the
     // parent dir (a 0-component walk). create then mutates nc's fid into the
     // new object without touching the parent's fid.
