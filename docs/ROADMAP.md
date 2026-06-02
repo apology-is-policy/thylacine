@@ -717,6 +717,19 @@ surface (verified: `handle_dup` rights reduction, spawn fd-endowment,
 `walk_*`/`fsync`-from-a-base-Spoor, `SYS_MOUNT` all exist). Full work-list +
 resume pointer: `docs/detour-status.md` A-1.7.
 
+**Namespace spine pulled forward (2026-06-02): stalk + namespace-resident `/srv`
+(A-5b-0).** A-5b (per-user encrypted home) needs per-user storage coordinators a
+second user cannot even *name* — and the global flat `/srv` registry (8 slots,
+one poster per name) cannot host two per-user `stratum-fs` coordinators. The
+system-right answer (user-voted; system over cost/scope) is to build the
+multi-component pathname resolver **stalk** (Plan 9 `namec`) that Thylacine
+deferred since Phase 5 — `SYS_WALK_OPEN` is single-component and never crosses a
+mount — with namespace-resident `/srv` as its first consumer. This unlocks all
+absolute-path resolution (`/srv`, `/proc`, `/net`, `/home/<user>`), not just the
+A-5b driver. Design: `docs/STALK-DESIGN.md` (signed off); invariant **I-28**;
+sub-chunks stalk-1/2/3, each audited. The A-5b body resumes on top. Resume
+pointer: `docs/detour-status.md` A-5b-0.
+
 Phase 7 resumes at **U-6d-b** (redirects) once the detour closes, on a sound
 foundation.
 

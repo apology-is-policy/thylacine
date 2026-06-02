@@ -726,6 +726,24 @@ kill = BOTH the namespace `/proc/<pid>/ctl` surface AND a narrow elevation-only 
   kinds over `--ctl-listen`) + host-bake. NO on-disk-format/wire-ABI break. Full reasoning:
   IDENTITY-DESIGN §9.9 "The call (CORRECTED 2026-06-02)" + CORVUS-DESIGN §6.2 "AUTH-session
   ownership".
+- **A-5b-0 (stalk) -- the isolation FOUNDATION, sequenced FIRST (user-voted 2026-06-02; #831).**
+  The A-5b design prosecution (#830) downgraded F1 (susan-reads-michael's-home) from P0 to
+  P1-latent (the A-3 kernel rwx layer gates it), but its CORE stood: the per-Proc-territory model
+  needs a real namespace so a 2nd user cannot even NAME another's coordinator -- and the global
+  flat `/srv` registry (8 slots, ONE poster per name) literally cannot host two per-user
+  `stratum-fs` coordinators. User voted (twice): build territory-scoped `/srv` as the FULL
+  namespace-resident Dev, which requires building the multi-component pathname resolver
+  (**stalk**; Plan 9 `namec`, user-named) that does NOT exist today (`SYS_WALK_OPEN` is
+  single-component + never crosses a mount; the mount table is abstract-`path_id_t`-keyed with no
+  string layer). DESIGN SIGNED OFF: `docs/STALK-DESIGN.md` (D1 defer bind-in-walk / D2
+  post-by-create / D3 retire `SYS_SRV_CONNECT`+`POST_SERVICE` / D4 Plan-9 M1 mount-points-must-
+  exist). Invariant **I-28** (path-resolution containment + per-component X-search; ARCH §9.6.7 +
+  the §25.4 audit row + the §28 row). Sub-chunks: **stalk-1** (resolver core + `SYS_OPEN` ->
+  absolute FS paths) -> **stalk-2** (mount re-key to Spoor identity + crossing) -> **stalk-3**
+  (devsrv per-territory + `/srv` + retire old syscalls), each its OWN audit (path resolution = a
+  privilege boundary). The A-5b body (corvus lift completion #829 + Stratum coordinator #826 +
+  login wiring #827) resumes ON TOP of namespace-resident `/srv`. Scripture-first: this entry +
+  STALK-DESIGN + ARCH land as the scripture commit (no code); impl follows citing its SHA.
 
 ---
 
