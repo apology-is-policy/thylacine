@@ -1867,7 +1867,8 @@ pass; landed scripture-first, no code):
   `SPAWN_PERM_CONSOLE_TRUSTED` corvus designation; see `docs/detour-status.md` A-4c). The
   SAK-revoke courtesy note reuses the `interrupt` name (the closed notes table has no dedicated
   "console-revoked" name; a distinct one is a v1.x notes SEAM, additive when a consumer needs
-  to distinguish SAK-revoke from Ctrl-C).
+  to distinguish SAK-revoke from Ctrl-C). c-2 impl + audit close `a0f6163` (R1 CLEAN, 0/1/0/2
+  all fixed; the A-4 arc is DONE). **A-4-pre + A-4a + A-4b + A-4c all LANDED + audited CLEAN.**
 
 **New invariants** (land in ARCHITECTURE.md §28; mirrored here):
 - **I-25 -- legate scope is bounded + fully revoked.** A legate's elevated caps are bounded
