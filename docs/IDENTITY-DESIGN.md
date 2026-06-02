@@ -1909,3 +1909,158 @@ per-target kill *handle* (vs the blanket `CAP_KILL`) if a concrete consumer appe
 **No new spec** per the 2026-05-23 spec-to-code broadening -- prose validation in §3.1 +
 this section + the ARCH §28 invariants (I-25 / I-26 / I-27) + the audit-trigger rows + the
 per-sub-chunk audits + the runtime tests.
+
+### 9.9 A-5 -- login + session lifecycle + per-user encrypted home (RESOLVED 2026-06-02)
+
+The capstone integration of the arc: it wires A-1 (identity), A-2 (rwx), A-3 (9P identity
+presentation + per-user stratumd + dev9p enforcement) and A-4 (clearance / legate / CAP_KILL
+/ trusted path) into the user-facing login flow. **No new kernel primitives** -- the
+substrate is all built (`CAP_SET_IDENTITY` + `SYS_SPAWN_FULL_ARGV`'s `SPAWN_IDENTITY_SET`,
+the SAK + the console-owner model, the legate + `CAP_KILL`, the devcap redeem gate, corvus's
+`AUTH`/`UNWRAP`/`SESSION_CLOSE`/`CLEARANCE_*` verbs, the A-3c per-user `--role client`
+stratumd, the A-4c-1 `/dev/cons` blocking read). Three user votes 2026-06-02, taken after a
+Plan 9 prior-art pass (factotum/secstore/authsrv as the key agent that *delegates* secrets;
+the per-Proc namespace AS the session, built at login + evaporating with the session's procs;
+the session-leader-reaps-its-group idiom) + a capability-microkernel SOTA pass (Fuchsia
+account-handler + zxcrypt per-account volume; Genode vault-session capability; seL4 CapDL
+CSpace-subtree-as-scope -- all converge on "a dedicated credential component owns the
+key-unwrap and hands the FS a *capability* to already-unlocked storage; the session process
+never holds the raw key") + a Stratum per-user-encryption-readiness verification (background
+agent):
+- **(1) Full encrypted home** -- build per-user AEAD-encrypted `/home` now (the
+  chunk-completeness default), not defer.
+- **(2) stratumd-asks-corvus for the DEK** -- the storage layer delegates the unwrap to
+  corvus; login never holds the raw DEK (the factotum idiom; no secret transits argv/files).
+- **(3) userspace session-leader** -- logout = login reaps its group via the A-4b
+  `CAP_KILL`/`proc_group_terminate` path + unmount + corvus `SESSION_CLOSE`; NO new kernel
+  session construct (the per-Proc territory + the kill path ARE the mechanism, Plan 9 idiom).
+- **(4, refining)** after the Stratum verdict sharpened "Full": **at-rest + session-scoped
+  encryption** (home unreadable on disk without the passphrase + DEK evicted at logout -- the
+  exact scripture property + the Linux/macOS LUKS/FileVault norm), NOT the stronger
+  *coordinator-blind* property (the system FS provably cannot read a logged-in user's data),
+  which exceeds what the scripture asks and is recorded as a v1.x NOVEL (seams below).
+
+The recurring fusion: **corvus = the factotum/key-agent** (holds the identity DB + the
+keypair, owns every unwrap); **the per-Proc territory = the session** (built at login,
+torn down with the session's procs); **the A-4c SAK** makes the login + elevation prompt
+unspoofable; **the A-4b CAP_KILL + the #811 wake-total cascade** = the session-teardown
+primitive; **the kernel cap-stamp (`CAP_SET_IDENTITY`)** = the unforgeable identity substrate.
+
+**Calls made without a vote** (resolved by the decision-rules + ground truth, not escalated):
+- **`/sbin/login` is NATIVE (libthyla-rs)** -- authored-within-Thylacine, no foreign POSIX
+  code (ARCH §3.5 native/ported rule; the old phase5 "blocked on pouch" note predates
+  libthyla-rs's `t_srv_connect`/`t_spawn_full_argv` + corvus-as-9P-server). The shell it
+  execs is `ut` (the native Utopia shell, functional through U-6d-a), reading `/dev/cons`
+  via the A-4c-1 console RX.
+- **Single-console-serial at v1.0** -- one physical console + one SAK => one login at a time;
+  corvus's singleton session (`SRV_CONN_PER_PROC_MAX = 1`) fits exactly. Concurrent
+  multi-session corvus is a v1.x lift (seams); the exit criterion "a second user cannot read
+  the first's home" is about *isolation*, which serial logins prove.
+
+**A-5a -- login core** (native `/sbin/login`; SAK-gated prompt -> corvus AUTH -> identity
+stamp -> shell; the session leader). Stratum-INDEPENDENT; lands first.
+- *Flow*: joey (post-pivot) spawns `/sbin/login`. login opens `/dev/cons` (the A-4c-1
+  blocking read), draws the prompt, reads `{user, passphrase}` -> corvus `AUTH` (verb 1;
+  template joey.c's corvus client) -> on `STATUS_OK`, corvus holds the user's keypair in RAM
+  + returns the 33-byte session token. login resolves `principal_id`/`primary_gid`/`supp_gids`
+  (corvus `RESOLVE_NAME`, verb 12) and spawns `ut` via `SYS_SPAWN_FULL_ARGV` with
+  `SPAWN_IDENTITY_SET` + that identity triple (login holds `CAP_SET_IDENTITY`, fork-granted
+  kproc -> joey -> login) -> the shell is born AS the user, not `PRINCIPAL_SYSTEM`. login is
+  the session leader and waits on the shell.
+- *Console/trusted-path invariant (the A-4c-2 forward-note made concrete -- I-27 carry)*:
+  during a user session, **corvus is the SOLE Proc that may hold
+  `PROC_FLAG_CONSOLE_ATTACHED`**; login and the user shell are NEVER console-attached (so a
+  foreground shell cannot redeem `CAP_HOSTOWNER`, and the SAK's "revoke the owner, re-grant
+  corvus" leaves corvus the sole attached Proc). The boot console-attach anchor (joey) must
+  **relinquish** its attach at the bringup->session boundary, else a post-SAK state is
+  `{joey, corvus}` both-attached and I-27 breaks. As-built choice (A-5a impl): joey persists
+  as the v1.0 session supervisor (it already reaps corvus/stratumd) + relinquishes
+  console-attach via a small gated kernel op at the boundary, OR exits to a session reaper;
+  the relinquish is a new touch on the A-4c audit surface. Both preserve the invariant.
+- *Ctrl-C-to-shell*: an OPTIONAL `SPAWN_PERM_CONSOLE_OWNER` (mirroring
+  `SPAWN_PERM_CONSOLE_TRUSTED`) sets `g_console_owner` to the spawned shell WITHOUT the attach
+  bit, so interrupt delivery reaches the foreground shell. A-5a may include it (small) or
+  defer it as a Utopia-lane polish seam -- not an exit criterion (the SAK protects elevation
+  regardless of who is owner).
+- *Logout / teardown (userspace session-leader)*: the shell exits -> login (1) reaps it;
+  (2) group-terminates any session descendants via the A-4b kill path (the #811 wake-total
+  cascade); (3) tears down the per-user mounts (A-5b); (4) corvus `SESSION_CLOSE` (verb 3)
+  zeroes the keypair (+ A-5b evicts the DEK); (5) loops to the prompt (getty-style) or exits.
+
+**A-5b -- per-user encrypted home** (Flavor 1: at-rest + session-scoped). Depends on the
+Stratum-side sub-chunk below.
+- *Property*: each user's home dataset is AEAD-encrypted at rest, its DEK a fresh CSPRNG-random
+  32 bytes sealed under the user's hybrid keypair (corvus WRAP) -- "unreadable on disk without
+  the passphrase." The DEK is in cleartext only during the user's session; evicted at logout.
+  The system coordinator (a trusted process) handles plaintext only while the user is logged
+  in (the mainstream-OS norm), NOT the coordinator-blind property (v1.x NOVEL).
+- *Stratum-side* (IN-SCOPE per the Stratum-coordination grant; verified to need NO on-disk
+  format or wire-ABI break; lands on `thylacine-pouch-arm` with its own audit): (1)
+  **deferred-unwrap soft-skip** -- `stm_sync_open`'s CURRENT-keyslot hard-fail
+  (`src/sync/sync.c:561/652`) becomes a *scoped* soft-skip for datasets outside the mounting
+  identity's scope, so the system coordinator boots with user-sealed datasets
+  present-but-unreadable; (2) **runtime DEK install/evict** -- a consumer that, given a user's
+  session token, calls the shipped `stm_corvus_unwrap` (`include/stratum/corvus_client.h:502`)
+  to fetch the user's DEK and install it into the live `deks` map, and the inverse (evict +
+  zero) at logout (the missing consumer side -- the resolver `sync_resolve_current_dek_locked`
+  already exists); (3) a **token-forward** path so the coordinator reaches corvus with the
+  user's token at login.
+- *Realizing the "stratumd-asks-corvus" vote* (verdict Q3: the `--role client` proxy does NO
+  crypto -- the coordinator does -- so the DEK consumer is the coordinator). **Open A-5b
+  impl-design item** within the settled shape: corvus's `SRV_CONN_PER_PROC_MAX = 1` + its
+  session-keyed-by-token model interacts with who pulls the DEK -- login holding the session
+  connection blocks a second (coordinator) connection. Resolve scripture-faithfully at A-5b
+  (corvus + Stratum both in-scope), candidate shapes: corvus PUSHES the DEK to the coordinator
+  after AUTH (the factotum-hands-the-key idiom), OR a small corvus connection-model lift (a
+  second connection / a dedicated key-service posting) lets the coordinator pull with the
+  forwarded token. The *security property* (at-rest + session-scoped + login-never-holds-the-
+  raw-DEK + evict-at-logout) is fixed; this is plumbing within it.
+- *Thylacine-side*: login spawns the user's `--role client` stratumd (A-3c, dataset-scoped via
+  `--datasets-allowed` -> the user-vs-user access boundary, `Rlerror(EACCES)` out-of-scope),
+  triggers the coordinator DEK-install, and binds `/home/<user>` into the user's territory
+  (`SYS_ATTACH_9P_SRV` + `SYS_MOUNT`/bind -- the joey 16c template). Logout: unmount +
+  coordinator DEK-evict + corvus `SESSION_CLOSE`.
+- *Host-bake*: the build fixture provisions each v1.0 user's home dataset sealed to that user
+  via the shipped `stratumd --provision-corvus-dataset` (`src/cmd/stratumd/serve.c:1212`; the
+  A-3 `--bake-owner-uid` wiring extends to it).
+
+**A-5c -- RECOVER paper phrase + hostowner-c** (later sub-chunk; own scripture refinement +
+audit). The account-recovery round-trip -- a paper recovery phrase that re-derives/re-wraps
+the user's keypair when the passphrase is lost (the crypto mechanism gets its own design pass)
+-- plus P5-hostowner-c.
+
+**Invariants.** A-5 adds NO new ARCH §28 kernel invariant -- it COMPOSES the existing set;
+the new properties are session-scoped, recorded here + audit-bearing:
+- **I-1** -- each session's `/home` is bound in the user's own territory; another user's
+  session cannot walk to it.
+- **I-22** -- the logged-in user is a `principal_id`, never a superuser; rwx (A-2d/A-3) +
+  dataset-scope (A-3c) are the only access gates; `CAP_HOSTOWNER` stays a console-gated
+  capability, never an identity.
+- **I-27** -- preserved + sharpened: corvus is the sole console-attached Proc during a session.
+- **A-5 DEK session-lifetime property** (a corvus + Stratum property, not a kernel invariant):
+  a user's DEK exists in cleartext only between that user's `AUTH` and `SESSION_CLOSE`; logout
+  evicts + zeroes it; disk theft without the passphrase yields only ciphertext.
+
+**Split.** A-5a (login core) -> A-5b (encrypted home; includes the Stratum-side sub-chunk) ->
+A-5c (RECOVER + hostowner-c). Each audit-bearing; A-5a is Stratum-independent and lands first.
+
+**Audit-bearing** (the CLAUDE.md + ARCH §25.4 rows land in this scripture commit). Prosecute:
+I-27 (login/shell never console-attached; the joey relinquish preserves the sole-attached
+invariant; no interposer between the SAK and the corvus prompt); the identity stamp
+(`CAP_SET_IDENTITY` gate; no principal forge; login stamps only what corvus authenticated);
+the DEK handoff (login never holds the raw DEK; the token-forward leaks no secret via
+argv/files; the coordinator install/evict has no UAF/leak; eviction actually zeroes -- the
+AEGIS/mallocng-adjacent class, prosecute hard); user-vs-user isolation (susan's session cannot
+unwrap or attach michael's dataset); the session teardown (no orphaned session Proc; the kill
+cascade is total per #811); the Stratum-side deferred-unwrap (a soft-skipped dataset is
+provably unreadable until its DEK is installed; the install validates the token).
+
+**Seams** (foreseeable, additive): concurrent multi-session corvus (v1.x -- multiple VTs /
+network logins); **the coordinator-blind encryption property** (v1.x NOVEL -- "the FS
+provably cannot read a logged-in user's data," via per-user devices or a crypto-split-proxy;
+the Stratum verdict's escalation-worthy path); a dedicated "console-revoked"/"hangup" note
+name (the SAK reuses `interrupt`); job control / Ctrl-Z (Utopia lane); the trust-stamp gate
+for foreign/remote 9P (A-3 M5 seam).
+
+**No new spec** per the 2026-05-23 broadening -- prose validation in this section + the
+per-sub-chunk audits + the runtime + cross-reboot tests + the boot-path login E2E.

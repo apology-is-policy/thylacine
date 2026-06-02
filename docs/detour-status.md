@@ -666,15 +666,35 @@ kill = BOTH the namespace `/proc/<pid>/ctl` surface AND a narrow elevation-only 
   case; a non-owner without `CAP_KILL` is denied; console RX read + Ctrl-C; SAK revokes +
   re-grants; only the console holder redeems elevation; clearance secret != data key.
 
-### A-5 · Login + session lifecycle + hostowner-c + corvus Q11 seam *(integration)*
-- **Builds:** `/sbin/login` (console -> corvus auth -> principal-id -> spawn
-  per-user stratumd -> bind home -> spawn shell); logout lifecycle (DEK eviction
-  via A4-notify + process reap + mount teardown); P5-hostowner-c (RECOVER paper
-  phrase); the corvus Q11 4-byte request-header seam (live A3 interop).
+### A-5 · Login + session lifecycle + per-user encrypted home + hostowner-c *(integration)*
+- **Design RESOLVED 2026-06-02** (IDENTITY-DESIGN §9.9; 3 votes + a refining 4th, after a
+  Plan 9 / capability-microkernel prior-art pass + a background Stratum
+  per-user-encryption-readiness verification): (1) Full encrypted home; (2) stratumd-asks-
+  corvus for the DEK (login never holds the raw key); (3) userspace session-leader (logout
+  reaps the group via A-4b CAP_KILL + unmount + corvus SESSION_CLOSE; no new kernel construct);
+  (4) at-rest + session-scoped encryption (the scripture property + the Linux/macOS norm), NOT
+  the coordinator-blind property (recorded as a v1.x NOVEL). NATIVE /sbin/login (libthyla-rs);
+  shell = ut; single-console-serial at v1.0.
+- **Builds:** `/sbin/login` (SAK-gated console prompt -> corvus AUTH -> CAP_SET_IDENTITY stamp
+  via SYS_SPAWN_FULL_ARGV -> per-user `--role client` stratumd -> bind /home -> spawn ut as the
+  session leader); logout lifecycle (DEK evict + group-terminate + mount teardown +
+  SESSION_CLOSE); P5-hostowner-c (RECOVER paper phrase). The corvus Q11 4-byte header is
+  already live (A-3).
+- **Stratum-side** (in-scope; verified NO format/wire-ABI break): deferred-unwrap soft-skip +
+  runtime DEK install/evict (reusing `stm_corvus_unwrap`) + token-forward, on `thylacine-pouch-arm`.
+- **Split:** A-5a (login core; Stratum-independent; lands first) -> A-5b (encrypted home + the
+  Stratum sub-chunk) -> A-5c (RECOVER + hostowner-c). Each audit-bearing.
 - **Depends:** A-1..A-4.
-- **Audit:** boot/login path + DEK lifecycle -> full round.
-- **Tests:** login as a user -> correct principal-id + home + shell; logout -> DEK
-  evicted + procs reaped; RECOVER round-trip; full single-user -> multi-user boot.
+- **Audit:** trusted-path login + identity-stamp + the DEK handoff (AEGIS/mallocng-adjacent --
+  prosecute hard) -> a focused round per sub-chunk.
+- **Tests:** login as a user -> correct principal-id + home + shell; a 2nd user cannot
+  read/attach the first's home; logout -> DEK evicted + procs reaped + mounts torn down;
+  cross-reboot at-rest (home unreadable without the passphrase); RECOVER round-trip.
+- **I-27 carry (A-4c-2 forward-note):** during a session corvus is the SOLE console-attached
+  Proc; login + shell are NEVER attached; joey relinquishes its boot attach at the
+  bringup->session boundary. Optional `SPAWN_PERM_CONSOLE_OWNER` for Ctrl-C-to-shell.
+- **A-5b open impl-design:** corvus `SRV_CONN_PER_PROC_MAX=1` vs who pulls the DEK -- resolve
+  scripture-faithfully (corvus push, or a connection-model lift); the security property is fixed.
 
 ---
 
