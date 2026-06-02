@@ -1,9 +1,10 @@
 # 104 - stalk: the per-Proc pathname resolver
 
-> **Layer**: kernel namespace / path resolution. **Status**: stalk-1 landed
-> (resolution within one Dev; multi-component absolute paths). stalk-2 (mount
-> crossing) and stalk-3 (namespace-resident `/srv`) are pending. Binding design:
-> `docs/STALK-DESIGN.md`. Invariant **I-28** (ARCHITECTURE.md section 28).
+> **Layer**: kernel namespace / path resolution. **Status**: stalk-1 + stalk-2
+> landed (multi-component absolute paths + Plan 9 `domount` mount crossing keyed
+> by the full `(dc, devno, qid.path)` Spoor identity). stalk-3 (namespace-resident
+> `/srv`) is pending. Binding design: `docs/STALK-DESIGN.md`. Invariant **I-28**
+> (ARCHITECTURE.md section 28).
 
 ## Purpose
 
@@ -25,13 +26,23 @@ path in the OS.
 ### Kernel: `stalk()` (`kernel/include/thylacine/stalk.h`)
 
 ```c
-#define STALK_WALK  0   // resolve only; do NOT open (O_PATH / walkable base)
-#define STALK_OPEN  1   // resolve + Dev.open(quarry, omode)
+#define STALK_WALK  0   // resolve only; do NOT open (O_PATH / walkable base).
+                        //   The quarry IS crossed (open a mount point -> the
+                        //   mounted root).
+#define STALK_OPEN  1   // resolve + Dev.open(quarry, omode). Quarry crossed.
+#define STALK_MOUNT 2   // resolve to the mount point's OWN identity (final
+                        //   component NOT crossed) + no open. SYS_MOUNT/UNMOUNT
+                        //   use it so MREPL re-keys the same underlying point.
 #define STALK_MAX_DEPTH 40
 
 struct Spoor *stalk(struct Proc *p, struct Spoor *start,
                     const char *path, u64 pathlen, int amode, u32 omode);
 ```
+
+stalk-2 added `STALK_MOUNT` and the mount-crossing behavior (below). The `amode`
+is validated at entry (`amode != STALK_WALK && != STALK_OPEN && != STALK_MOUNT
+-> NULL`); a sub-chunk adding a new amode MUST extend this guard AND give it a
+final-hop dispatch arm (stalk-1 audit F1).
 
 - `p` -- the calling Proc (for the per-component `perm_check`).
 - `start` -- the base Spoor. **BORROWED**: the caller owns it (a handle's Spoor
@@ -140,9 +151,53 @@ even though `dev9p_walk` can batch up to `P9_MAX_WALK = 16` components into one
 to the server); correctness-first, batching is a documented v1.x perf
 optimization. Cost: a deep dev9p path is N x [Tgetattr + Twalk].
 
+### Mount crossing (stalk-2, Plan 9 `domount`)
+
+The mount table (`Territory.mounts[]`, `kernel/territory.c`) is keyed by the
+mount point's full Plan 9 identity `(dc, devno, qid.path)` -- the
+`(type, dev, qid)` triple. `cross_mounts(p, probe, &out)` tests `probe`'s identity
+against the table (`mount_lookup`); on a match it mints an INDEPENDENT clone of
+the mounted source via `clone_walk_zero` (a zero-element `Dev.walk`, which for
+dev9p allocates a fresh fid so the crossed Spoor does not share the table's
+source fid) and loops to follow a mount-over-a-mount chain to the leaf (bounded
+by `PGRP_MAX_MOUNTS`; cycle-free by I-3). `probe` is never consumed -- the caller
+decides whether to clunk it.
+
+**Why the `devno` axis.** `qid.path` is unique only WITHIN a `(dc, devno)`
+instance. Every dev9p attach session shares `dc = '9'` and every attach root has
+`qid.path == 0`, so `(dc, qid.path)` alone cannot distinguish two concurrent 9P
+sessions' mount points -- exactly the A-5b case (corvus + a per-user stratum-fs
+mounted in one Territory). stalk-2 added `u32 Spoor.devno` (Plan 9 `Chan.dev`),
+minted per attach session by `spoor_next_devno()` (`kernel/spoor.c`); dev9p stamps
+the attach root in `dev9p_attach_client`, and walked/cloned descendants inherit
+it via `spoor_clone`. Static single-instance Devs (devramfs, the test fixture)
+leave it 0. `test_territory_mount.c::devno_disambiguates` proves two mount points
+with the same `(dc, qid.path)` and distinct `devno` are distinct entries.
+
+**Crossing is "on descent" (Plan 9 namec).** A trail Spoor is crossed the moment
+it is used as a directory to walk THROUGH -- replaced in place by the mounted
+root, which is then X-checked (the MOUNTED root's perms govern, not the shadowed
+mount point's). The quarry is crossed at the end (so `open("/mnt")` yields the
+mounted root), EXCEPT under `STALK_MOUNT`, which returns the mount point's own
+identity. The base Spoor (`start`) is crossed before the loop -- if it crosses,
+the owned crossed clone becomes `trail[0]` (since `start` is borrowed and cannot
+be crossed in place). When no mounts exist, `cross_mounts` is a table-lookup
+no-op, so stalk-1 behavior is preserved exactly.
+
+**Mount points must exist** (Plan 9 M1, design D4). devramfs gained synthetic
+`/srv` + `/proc` directories (empty, world-r/x, SYSTEM-owned; qid range above any
+file index) so the boot root has walkable mount points; the disk FS provides its
+own (host-baked).
+
 ## Data structures
 
-No new persistent struct. The resolver holds an on-stack
+The mount-table entry (`struct PgrpMount`, `kernel/include/thylacine/territory.h`)
+grew from 16 to 32 bytes when re-keyed: `{ Spoor *source; u64 mp_qid_path; int
+mp_dc; u32 mp_devno; u32 flags; u32 _pad; }`. The size-pinned `Territory`
+static_asserts re-bumped accordingly (entry 16->32, total `32 + 8*BINDS +
+32*MOUNTS`). `struct Spoor` gained `u32 devno` after `dc`.
+
+No new persistent resolver struct. The resolver holds an on-stack
 `struct Spoor *trail[STALK_MAX_DEPTH]` (40 pointers) plus a
 `char namebuf[SYS_WALK_OPEN_NAME_MAX + 1]` per component. `sys_open_handler`
 holds a `char path_scratch[SYS_OPEN_PATH_MAX + 1]` (1025 bytes) -- comfortably
@@ -170,12 +225,25 @@ clarity bar there, and the discipline is not to force it.
   `opath_no_open` (STALK_WALK leaves COPEN clear), `open_root` (the 0-component
   clone-walk path), `depth_cap` (a self-referential `loop` node overflows the
   trail cap -> clean NULL), `lifetime_no_leak` (Spoor count balance across
-  success + denial).
-- `usr/joey/joey.c` -- the boot-path E2E: mkdir `stalk-e2e-dir`, create
-  `stalk-e2e-dir/leaf`, then `t_open(FROM_ROOT, "stalk-e2e-dir/leaf", OREAD)` and
-  read it back -- a 2-component absolute resolve on the real dev9p Stratum root.
-  Prints `joey: stalk-1 multi-component SYS_OPEN E2E OK (stalk-e2e-dir/leaf)`.
-  Idempotent (cleanup before + after).
+  success + denial). **stalk-2 cross-mount** (6 more): `cross_mount` (graft
+  subtree onto a dir, resolve THROUGH it), `cross_mount_final_quarry` (open a
+  mount point -> the mounted root), `cross_mount_xsearch_deny` (the MOUNTED
+  root's no-x perms deny traversal), `mount_amode_no_cross` (STALK_MOUNT returns
+  the mount point's own identity + MREPL re-keys the same point), `cross_mount_chain`
+  (mount-over-a-mount follows to the leaf), `cross_mount_no_leak` (the
+  `clone_walk_zero` transient is clunked, not leaked).
+- `kernel/test/test_territory_mount.c::devno_disambiguates` -- two mount points
+  with the same `(dc, qid.path)` but distinct `devno` are distinct entries +
+  `mount_lookup` resolves each to its own source (the dev9p two-session fix).
+- `usr/joey/joey.c` -- two boot-path E2Es on the real dev9p Stratum root.
+  stalk-1: mkdir `stalk-e2e-dir`, create `stalk-e2e-dir/leaf`, `t_open(FROM_ROOT,
+  "stalk-e2e-dir/leaf", OREAD)`, read back. stalk-2: graft `stalk-x-src` onto the
+  sibling `stalk-x-mnt` and `t_open(FROM_ROOT, "stalk-x-mnt/xleaf", OREAD)` --
+  resolves THROUGH the mount (a real dev9p `domount` cross). Both idempotent
+  (cleanup before + after); print `... E2E OK`.
+- The `/attach-probe` + `/stub-driver` userspace probes (kernel-test harnesses)
+  exercise the path-keyed `SYS_MOUNT`/`SYS_UNMOUNT` cycle end-to-end with a real
+  userspace 9P attach (mount the attached root onto devramfs `/srv`, unmount).
 
 ## Error paths
 
@@ -198,11 +266,14 @@ allocation in the resolver beyond the Spoor clones, which are SLUB).
 ## Status
 
 - **stalk-1 (landed)**: the resolver core + `SYS_OPEN` + the wrappers + the
-  joey E2E. Resolution within a single Dev; absolute FS paths work. 698/698
-  kernel tests; boot + login + the multi-component E2E green.
-- **stalk-2 (pending)**: re-key the mount table to mount-point Spoor identity
-  (`dc` + `qid.path`) + `cross_mounts` (Plan 9 `domount`) in the resolver +
-  path-keyed `SYS_MOUNT`/`UNMOUNT`.
+  joey E2E. Resolution within a single Dev; absolute FS paths work.
+- **stalk-2 (landed)**: the mount table re-keyed to the full `(dc, devno,
+  qid.path)` mount-point Spoor identity + `Spoor.devno` (Plan 9 `Chan.dev`) +
+  `cross_mounts` (Plan 9 `domount`, cross-on-descent) + `STALK_MOUNT` +
+  path-keyed `SYS_MOUNT`/`SYS_UNMOUNT` + devramfs synthetic `/srv`+`/proc` mount
+  points + the migrated `/attach-probe`/`/stub-driver`/`alloc-smoke` callers.
+  705/705 kernel tests (default + UBSan + smp8); the 5 `territory_buggy*` TLA
+  invariant-detection gates green; boot + login + both joey E2Es green.
 - **stalk-3 (pending)**: devsrv per-territory + namespace-resident `/srv` +
   retire `SYS_SRV_CONNECT` / `SYS_POST_SERVICE`.
 
@@ -213,9 +284,18 @@ allocation in the resolver beyond the Spoor clones, which are SLUB).
   Spoor you were handed). This is over-restrictive vs POSIX `openat` (safe -- it
   cannot escape) and is the v1.0 containment choice; full cross-mount `..`
   fidelity (Plan 9 `Chan->mh` back-pointers) is a v1.x refinement.
-- **No mount-crossing yet.** A path that would cross a mount point resolves
-  entirely within the base's Dev (stalk-2 adds crossing). `/srv` is not yet a
-  namespace-resident path (stalk-3).
+- **Mount crossing is in-call only; `..` does not un-cross.** stalk-2 crosses
+  mounts forward (Plan 9 `domount`), and `..` pops the in-call trail (contained
+  at the base). Full Plan-9 cross-mount `..` fidelity (a `..` at a mounted root
+  returning to the mount point's parent-in-the-underlying-fs across separate
+  `stalk` calls, via persisted `Chan->mh` back-pointers) is a v1.x refinement;
+  v1.0's in-call trail containment is the audited invariant. `/srv` is not yet a
+  namespace-resident path (stalk-3 mounts devsrv there).
+- **No per-Territory mount-table lock.** Like the rest of the per-Proc Territory
+  (binds/mounts have never been locked), `cross_mounts`/`mount_lookup` read
+  `mounts[]` without a lock. A peer thread mutating the table concurrently
+  (multi-thread Proc) is the same inherited lock-free-Territory class as the
+  `handle_get` TOCTOU; SMP Territory locking is a Phase-5+ item.
 - **`SYS_WALK_OPEN` still exists.** Single-component callers (joey bringup
   probes, the pouch openat seam) are unchanged; migrating them to `SYS_OPEN` and
   retiring `SYS_WALK_OPEN` is a deferred cleanup.

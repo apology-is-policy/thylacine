@@ -4,9 +4,13 @@
 //
 // Binding design: docs/STALK-DESIGN.md (signed off 2026-06-02). Invariant I-28
 // (ARCHITECTURE.md section 28): path-resolution containment + per-component
-// X-search. This is the stalk-1 sub-chunk: resolution WITHIN one Dev (no
-// mount-crossing yet -- stalk-2 adds Plan 9 `domount` keyed by mount-point
-// Spoor identity; stalk-3 the namespace-resident /srv consumer).
+// X-search + mount-cross permission. stalk-2 adds Plan 9 `domount`: after
+// resolving a component, stalk crosses to the mounted tree iff the resolved
+// Spoor's (dc, devno, qid.path) identity matches a mount-table entry
+// (territory.c::mount_lookup). Crossing is "on descent" -- a Spoor is crossed
+// the moment it is used as a directory to walk through, and the quarry is
+// crossed at the end (so opening a mount point opens the mounted root), EXCEPT
+// under STALK_MOUNT. stalk-3 adds the namespace-resident /srv consumer.
 //
 // Vocabulary (user-approved thematic names):
 //   - stalk  : the resolver.
@@ -31,8 +35,18 @@ struct Spoor;
 
 // amode -- what stalk does at the final (quarry) component.
 #define STALK_WALK  0   // resolve only; do NOT open (the O_PATH / walkable-base
-                        // case -- a navigation / create / chroot target).
+                        // case -- a navigation / create / chroot target). The
+                        // quarry IS crossed (a walked mount point yields the
+                        // mounted root).
 #define STALK_OPEN  1   // resolve + Dev.open(quarry, omode) (the byte-I/O case).
+                        // The quarry is crossed before opening.
+#define STALK_MOUNT 2   // resolve to the mount point's OWN identity (the final
+                        // component is NOT crossed) + do NOT open. SYS_MOUNT /
+                        // SYS_UNMOUNT use this so MREPL re-keys the same
+                        // underlying mount point even when it already hosts a
+                        // mount (Plan 9 Amount). Intermediate components still
+                        // cross normally (you can mount onto /a/b where /a is
+                        // itself a mount).
 
 // Trail depth cap: the maximum number of path components stalk resolves. An
 // over-deep path (including a '..'-heavy path that pushes past the cap before

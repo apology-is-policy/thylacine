@@ -77,16 +77,29 @@ struct PgrpBind {
     path_id_t dst;
 };
 
-// One entry in the mount table: at `target` in the Territory, the Spoor
-// `source` is grafted. The entry holds one refcount on source; dropped
+// One entry in the mount table: the Spoor `source` is grafted at the
+// MOUNT POINT identified by (mp_dc, mp_devno, mp_qid_path) -- the Plan 9
+// (type, dev, qid) identity of the directory mounted onto (stalk-2; was an
+// abstract path_id_t target at v1.0). `stalk`, after resolving a component to
+// Spoor S, crosses to a clone of `source` iff S's (dc, devno, qid.path) matches
+// this key (Plan 9 `domount`). The entry holds one refcount on source; dropped
 // at unmount() OR at Territory final release.
 //
-// Field order chosen for compact layout: pointer first (8 bytes;
-// 8-byte aligned), then two u32s pack into 8 bytes. sizeof(PgrpMount) = 16.
+// Why the full triple: qid.path is unique only WITHIN a (dc, devno) instance.
+// Every dev9p session shares dc='9' and every attach root has qid.path 0, so
+// (dc, qid.path) alone cannot distinguish two concurrent 9P sessions' mount
+// points (the A-5b corvus + per-user-stratum-fs case). devno (Plan 9 Chan.dev,
+// minted per attach by spoor_next_devno) closes that.
+//
+// Field order: pointer first (8B, 8-aligned), u64 qid_path (8B), then the three
+// u32s + pad fill the last 16B. sizeof(PgrpMount) = 32.
 struct PgrpMount {
     struct Spoor   *source;
-    path_id_t       target;
+    u64             mp_qid_path;
+    int             mp_dc;
+    u32             mp_devno;
     u32             flags;    // MREPL / MBEFORE / MAFTER / MCREATE
+    u32             _pad;     // 8-byte array-stride alignment for source
 };
 
 // Mount flags (ARCH §9.6.1 — mirror Plan 9). At v1.0 only MREPL has
@@ -114,12 +127,16 @@ struct Territory {
     struct PgrpMount     mounts[PGRP_MAX_MOUNTS];
 };
 
-_Static_assert(sizeof(struct PgrpMount) == 16,
-               "struct PgrpMount pinned at 16 bytes (8 ptr + 4 target + 4 flags)");
+_Static_assert(sizeof(struct PgrpMount) == 32,
+               "struct PgrpMount pinned at 32 bytes (8 source + 8 mp_qid_path + "
+               "4 mp_dc + 4 mp_devno + 4 flags + 4 pad). stalk-2 re-keyed from "
+               "the abstract path_id_t target to the (dc, devno, qid.path) "
+               "mount-point identity; the deliberate +16/entry growth.");
 _Static_assert(sizeof(struct Territory)
-               == 32 + 8 * PGRP_MAX_BINDS + 16 * PGRP_MAX_MOUNTS,
-               "struct Territory size pinned (P5-stratumd-stub-bringup-e2: "
-               "24 header + 8 root_spoor + 8*PGRP_MAX_BINDS + 16*PGRP_MAX_MOUNTS).");
+               == 32 + 8 * PGRP_MAX_BINDS + 32 * PGRP_MAX_MOUNTS,
+               "struct Territory size pinned (stalk-2: 24 header + 8 root_spoor "
+               "+ 8*PGRP_MAX_BINDS + 32*PGRP_MAX_MOUNTS -- mounts[] entry grew "
+               "16->32 with the Spoor-identity re-key).");
 _Static_assert(__builtin_offsetof(struct Territory, magic) == 0,
                "magic must be at offset 0 (SLUB freelist write "
                "clobbers it on free, double-free defense)");
@@ -193,38 +210,48 @@ int unbind(struct Territory *territory, path_id_t src, path_id_t dst);
 // Mount (graft-a-Spoor-at-a-path).
 // =============================================================================
 
-// mount: graft Spoor `source` at `target` in `territory`'s mount table.
-// Bumps source's refcount; the entry holds the reference until either
-// unmount() or Territory destruction releases it.
+// mount: graft Spoor `source` at the MOUNT POINT `mountpoint` in
+// `territory`'s mount table (stalk-2: was an abstract path_id_t target).
+// The entry records `mountpoint`'s (dc, devno, qid.path) IDENTITY -- it does
+// NOT retain `mountpoint` itself (the caller stalk's it, mount() copies the
+// key, the caller clunks it). Bumps source's refcount; the entry holds that
+// reference until unmount() or Territory destruction releases it.
 //
 // `flags` mirror Plan 9 (MREPL / MBEFORE / MAFTER / MCREATE); only MREPL
 // has distinguished semantics at v1.0 — when MREPL is set and an entry
-// at `target` already exists, the existing entry is replaced (its
-// source's ref is dropped). The other flags are stored for future
-// union-mount work; at v1.0 they're treated as "append a new entry."
+// at the same mount-point identity already exists, the existing entry is
+// replaced (its source's ref is dropped). The other flags are stored for
+// future union-mount work; at v1.0 they're treated as "append a new entry."
 //
-// Idempotency: mount(territory, S, target, flags) where (target, S) is
-// already in the mount table is a no-op success (returns 0; refcount not
-// bumped; matches the spec's `<<path, s>> \notin mounts[p]` precondition).
+// Idempotency: mount(t, S, mp, flags) where (key(mp), S) is already in the
+// mount table is a no-op success (returns 0; refcount not bumped; the spec's
+// `<<path, s>> \notin mounts[p]` precondition under the re-keyed identity).
 //
 // Return values:
 //    0   success (entry added or idempotent no-op).
-//   -1   source is NULL or has corrupted magic.
+//   -1   source or mountpoint is NULL / has corrupted magic.
 //   -2   mounts[] full (PGRP_MAX_MOUNTS reached).
 int mount(struct Territory *territory, struct Spoor *source,
-          path_id_t target, u32 flags);
+          struct Spoor *mountpoint, u32 flags);
 
-// unmount: remove ONE mount entry at `target_path` from `territory`'s
-// mount table and drop the source's refcount. Models the spec's Unmount
-// action.
+// unmount: remove ONE mount entry whose mount-point identity matches
+// `mountpoint`'s (dc, devno, qid.path) from `territory`'s mount table and
+// drop the source's refcount. Models the spec's Unmount action.
 //
-// If multiple entries exist at the same target (union mount), this
+// If multiple entries exist at the same mount point (union mount), this
 // removes the FIRST found; subsequent calls drop the others one by one.
 //
 // Return values:
 //    0   success (entry removed; refcount dropped).
-//   -1   no entry exists at `target_path`.
-int unmount(struct Territory *territory, path_id_t target_path);
+//   -1   no entry exists at `mountpoint`'s identity / mountpoint is NULL.
+int unmount(struct Territory *territory, struct Spoor *mountpoint);
+
+// mount_lookup: the `stalk` cross-mount probe (Plan 9 `domount`). Returns
+// the BORROWED source Spoor of the FIRST mount entry whose mount-point
+// identity matches `probe`'s (dc, devno, qid.path), or NULL if `probe` is
+// not a mount point. The returned ref is the table's -- the caller must NOT
+// clunk it; `stalk` clone-walks it to mint an independent crossed Spoor.
+struct Spoor *mount_lookup(struct Territory *territory, struct Spoor *probe);
 
 // =============================================================================
 // Chroot (root-Spoor pivot) — P5-stratumd-stub-bringup-e2.

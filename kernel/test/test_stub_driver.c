@@ -27,10 +27,13 @@
 
 #include "test.h"
 
+#include <thylacine/dev.h>
 #include <thylacine/devramfs.h>
 #include <thylacine/exec.h>
 #include <thylacine/extinction.h>
 #include <thylacine/proc.h>
+#include <thylacine/spoor.h>
+#include <thylacine/territory.h>
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 
@@ -53,6 +56,14 @@ static void stub_driver_thunk(void *arg) {
     if (!t) extinction("stub_driver_thunk: no current_thread");
     struct Proc *p = t->proc;
     if (!p) extinction("stub_driver_thunk: no proc");
+
+    // stalk-2: give the driver a devramfs root so its path-keyed
+    // t_mount("/srv", ...) resolves (devramfs ships a synthetic /srv dir).
+    struct Spoor *ramfs_root = devramfs.attach(NULL);
+    if (!ramfs_root) extinction("stub_driver_thunk: devramfs.attach failed");
+    if (territory_chroot(p->territory, ramfs_root) != 0)
+        extinction("stub_driver_thunk: territory_chroot failed");
+    spoor_clunk(ramfs_root);   // territory_chroot took its own ref
 
     u64 entry = 0, sp = 0;
     int rc = exec_setup(p, ea->blob, ea->size, &entry, &sp);

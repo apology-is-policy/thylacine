@@ -56,6 +56,7 @@
 
 #include "test.h"
 
+#include <thylacine/dev.h>
 #include <thylacine/devramfs.h>
 #include <thylacine/exec.h>
 #include <thylacine/extinction.h>
@@ -64,6 +65,7 @@
 #include <thylacine/proc.h>
 #include <thylacine/sched.h>
 #include <thylacine/spoor.h>
+#include <thylacine/territory.h>
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 
@@ -120,6 +122,16 @@ static void stub_exec_thunk(void *arg) {
         uart_puts("\n");
         exits("fail-fd1");
     }
+
+    // stalk-2: give the child a devramfs root so /attach-probe's path-keyed
+    // t_mount("/srv", ...) resolves (devramfs ships a synthetic /srv dir).
+    // Harmless for /stratumd-stub (it only serves on its pipe fds). rfork
+    // cloned the rootless kproc Territory; chroot it here.
+    struct Spoor *ramfs_root = devramfs.attach(NULL);
+    if (!ramfs_root) extinction("stub_exec_thunk: devramfs.attach failed");
+    if (territory_chroot(p->territory, ramfs_root) != 0)
+        extinction("stub_exec_thunk: territory_chroot failed");
+    spoor_clunk(ramfs_root);
 
     u64 entry = 0, sp = 0;
     int rc = exec_setup(p, ea->blob, ea->size, &entry, &sp);

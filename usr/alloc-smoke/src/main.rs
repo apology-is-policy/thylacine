@@ -1002,13 +1002,15 @@ pub extern "C" fn rs_main() -> i64 {
         return 1;
     }
 
-    // mount/unmount round-trip on a free path_id. alloc-smoke runs
-    // after joey's pivot to the disk-backed FS; its territory has
-    // joey's mount entries. We pick path_id 0x7E5701 (an unused
-    // value far from joey's typical IDs) to avoid collision.
+    // mount/unmount round-trip (stalk-2: path-keyed). alloc-smoke runs after
+    // joey's pivot to the disk-backed FS; FROM_ROOT resolves on the Stratum
+    // root. We mount onto /system.key itself -- a leaf file alloc-smoke opens
+    // and controls the access timing of, so the transient self-shadow during
+    // mount..unmount is harmless (vs. shadowing a shared system dir). This is
+    // a plumbing smoke for the territory:: API + the new path-keyed ABI.
     //
     // Source: /system.key opened RDONLY -- a Spoor with RIGHT_READ.
-    const TEST_PATH_ID: libthyla_rs::territory::PathId = 0x7E5701;
+    const TEST_MP: &str = "/system.key";
     let src = match File::open("/system.key") {
         Ok(f) => f,
         Err(_) => {
@@ -1016,7 +1018,7 @@ pub extern "C" fn rs_main() -> i64 {
             return 1;
         }
     };
-    if territory::mount(&src, TEST_PATH_ID, MountFlags::REPL).is_err() {
+    if territory::mount(&src, TEST_MP, MountFlags::REPL).is_err() {
         t_putstr("alloc-smoke: territory::mount REPL FAILED\n");
         return 1;
     }
@@ -1025,13 +1027,13 @@ pub extern "C" fn rs_main() -> i64 {
     // affected; alloc-smoke is an ALIVE Proc and joey's territory is
     // its parent's (rfork inherits), so leakage matters even for one
     // boot.
-    if territory::unmount(TEST_PATH_ID).is_err() {
+    if territory::unmount(TEST_MP).is_err() {
         t_putstr("alloc-smoke: territory::unmount after mount FAILED\n");
         return 1;
     }
     // Double-unmount: must return NotFound (no entry at this path_id
     // any more).
-    match territory::unmount(TEST_PATH_ID) {
+    match territory::unmount(TEST_MP) {
         Err(Error::NotFound) => {}
         _ => {
             t_putstr("alloc-smoke: territory::unmount double-call unexpected\n");
@@ -1050,27 +1052,27 @@ pub extern "C" fn rs_main() -> i64 {
             return 1;
         }
     };
-    if territory::bind_before(&src2, TEST_PATH_ID).is_err() {
+    if territory::bind_before(&src2, TEST_MP).is_err() {
         t_putstr("alloc-smoke: territory::bind_before FAILED\n");
         return 1;
     }
-    if territory::unmount(TEST_PATH_ID).is_err() {
+    if territory::unmount(TEST_MP).is_err() {
         t_putstr("alloc-smoke: territory::unmount after bind_before FAILED\n");
         return 1;
     }
-    if territory::bind_after(&src2, TEST_PATH_ID).is_err() {
+    if territory::bind_after(&src2, TEST_MP).is_err() {
         t_putstr("alloc-smoke: territory::bind_after FAILED\n");
         return 1;
     }
-    if territory::unmount(TEST_PATH_ID).is_err() {
+    if territory::unmount(TEST_MP).is_err() {
         t_putstr("alloc-smoke: territory::unmount after bind_after FAILED\n");
         return 1;
     }
-    if territory::bind_replace(&src2, TEST_PATH_ID).is_err() {
+    if territory::bind_replace(&src2, TEST_MP).is_err() {
         t_putstr("alloc-smoke: territory::bind_replace FAILED\n");
         return 1;
     }
-    if territory::unmount(TEST_PATH_ID).is_err() {
+    if territory::unmount(TEST_MP).is_err() {
         t_putstr("alloc-smoke: territory::unmount after bind_replace FAILED\n");
         return 1;
     }
@@ -1090,7 +1092,7 @@ pub extern "C" fn rs_main() -> i64 {
         }
     }
     let bogus = RawFdRef(999);
-    match territory::mount(&bogus, TEST_PATH_ID, MountFlags::REPL) {
+    match territory::mount(&bogus, TEST_MP, MountFlags::REPL) {
         Err(_) => {}
         Ok(_) => {
             t_putstr("alloc-smoke: territory::mount bogus fd unexpectedly succeeded\n");

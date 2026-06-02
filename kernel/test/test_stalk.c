@@ -37,6 +37,7 @@
 #include <thylacine/spoor.h>
 #include <thylacine/stalk.h>
 #include <thylacine/syscall.h>   // struct t_stat, T_S_IFDIR/IFREG
+#include <thylacine/territory.h> // stalk-2: mount / unmount / territory_alloc
 #include <thylacine/types.h>
 
 // Forward declarations (registered in kernel/test/test.c).
@@ -52,6 +53,13 @@ void test_stalk_opath_no_open(void);
 void test_stalk_open_root(void);
 void test_stalk_depth_cap(void);
 void test_stalk_lifetime_no_leak(void);
+// stalk-2 cross-mount (Plan 9 domount).
+void test_stalk_cross_mount(void);
+void test_stalk_cross_mount_final_quarry(void);
+void test_stalk_cross_mount_xsearch_deny(void);
+void test_stalk_mount_amode_no_cross(void);
+void test_stalk_cross_mount_chain(void);
+void test_stalk_cross_mount_no_leak(void);
 
 // =============================================================================
 // The fixture Dev.
@@ -358,5 +366,186 @@ void test_stalk_lifetime_no_leak(void) {
     live_after = spoor_total_allocated() - spoor_total_freed();
     TEST_EXPECT_EQ(live_after, live_before, "no Spoor leak across a denied resolve");
 
+    spoor_unref(root);
+}
+
+// =============================================================================
+// stalk-2: cross-mount (Plan 9 domount). The fixture is one Dev instance
+// (devno 0); the (dc, devno) axis is constant, so these prove the QID-keyed
+// cross + the on-descent/quarry/STALK_MOUNT behavior + the chain + lifetime.
+// The devno DISAMBIGUATION axis (two same-(dc,qid) instances) is proven
+// separately in test_territory_mount.c (devno_disambiguates).
+// =============================================================================
+
+// Set up a SYSTEM Proc with a fresh Territory + a fixture root. The Territory is
+// the mount-table home cross_mounts reads. Returns the root (caller owns); fills
+// *p (territory must be territory_unref'd by the caller).
+static struct Spoor *cross_setup(struct Proc *p) {
+    mkproc_system(p);
+    p->territory = territory_alloc();
+    if (!p->territory) return NULL;
+    return fix_root();
+}
+
+void test_stalk_cross_mount(void) {
+    struct Proc p;
+    struct Spoor *root = cross_setup(&p);
+    TEST_ASSERT(root != NULL && p.territory != NULL, "cross_setup");
+
+    // Resolve the source (subtree "a", qid 1) and the mount point ("loop", qid
+    // 7, a 0755 dir). Graft a onto loop.
+    struct Spoor *src = stalk(&p, root, "a", 1, STALK_WALK, 0);
+    struct Spoor *mp  = stalk(&p, root, "loop", 4, STALK_MOUNT, 0);
+    TEST_ASSERT(src != NULL && mp != NULL, "resolve src + mount point");
+    TEST_EXPECT_EQ(mount(p.territory, src, mp, 0), 0, "mount a onto loop");
+
+    // "/loop/b": walk to loop, cross loop->a (domount), walk "b" -> a/b (qid 2).
+    struct Spoor *q = stalk(&p, root, "loop/b", 6, STALK_OPEN, 0);
+    TEST_ASSERT(q != NULL, "resolve loop/b (crossed)");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)2, "loop/b crosses to a/b (qid 2)");
+    spoor_clunk(q);
+
+    territory_unref(p.territory);   // drops the mount entry's ref on src
+    spoor_clunk(src);
+    spoor_clunk(mp);
+    spoor_unref(root);
+}
+
+void test_stalk_cross_mount_final_quarry(void) {
+    struct Proc p;
+    struct Spoor *root = cross_setup(&p);
+    TEST_ASSERT(root != NULL && p.territory != NULL, "cross_setup");
+
+    struct Spoor *src = stalk(&p, root, "a", 1, STALK_WALK, 0);
+    struct Spoor *mp  = stalk(&p, root, "loop", 4, STALK_MOUNT, 0);
+    TEST_ASSERT(src != NULL && mp != NULL, "resolve src + mount point");
+    TEST_EXPECT_EQ(mount(p.territory, src, mp, 0), 0, "mount a onto loop");
+
+    // Opening the mount point itself yields the MOUNTED root (Plan 9 domount on
+    // the final element): "/loop" (STALK_OPEN) crosses to a-root (qid 1).
+    struct Spoor *q = stalk(&p, root, "loop", 4, STALK_OPEN, 0);
+    TEST_ASSERT(q != NULL, "resolve loop (final-element cross)");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)1, "open(loop) -> mounted a-root (qid 1)");
+    TEST_ASSERT((q->flag & COPEN) != 0, "mounted root opened");
+    spoor_clunk(q);
+
+    territory_unref(p.territory);
+    spoor_clunk(src);
+    spoor_clunk(mp);
+    spoor_unref(root);
+}
+
+void test_stalk_cross_mount_xsearch_deny(void) {
+    struct Proc p;
+    struct Spoor *root = cross_setup(&p);
+    TEST_ASSERT(root != NULL && p.territory != NULL, "cross_setup");
+
+    // Mount "nox" (a 0644 dir -- owner rw-, NO x) onto "loop". After crossing
+    // loop->nox-root, the X-search on the MOUNTED root denies traversal: the
+    // mounted fs's own perms govern, so loop/sekret is unreachable.
+    struct Spoor *src = stalk(&p, root, "nox", 3, STALK_WALK, 0);
+    struct Spoor *mp  = stalk(&p, root, "loop", 4, STALK_MOUNT, 0);
+    TEST_ASSERT(src != NULL && mp != NULL, "resolve nox + loop");
+    TEST_EXPECT_EQ(mount(p.territory, src, mp, 0), 0, "mount nox onto loop");
+
+    struct Spoor *q = stalk(&p, root, "loop/sekret", 11, STALK_OPEN, 0);
+    TEST_ASSERT(q == NULL, "loop/sekret denied at X-search on the mounted nox-root");
+
+    territory_unref(p.territory);
+    spoor_clunk(src);
+    spoor_clunk(mp);
+    spoor_unref(root);
+}
+
+void test_stalk_mount_amode_no_cross(void) {
+    struct Proc p;
+    struct Spoor *root = cross_setup(&p);
+    TEST_ASSERT(root != NULL && p.territory != NULL, "cross_setup");
+
+    struct Spoor *src = stalk(&p, root, "a", 1, STALK_WALK, 0);
+    struct Spoor *mp  = stalk(&p, root, "loop", 4, STALK_MOUNT, 0);
+    TEST_ASSERT(src != NULL && mp != NULL, "resolve src + mount point");
+    TEST_EXPECT_EQ(mount(p.territory, src, mp, 0), 0, "mount a onto loop");
+
+    // STALK_MOUNT must NOT cross the final element: resolving "loop" yields
+    // loop's OWN identity (qid 7), not the mounted a-root -- so a SECOND mount
+    // onto "loop" MREPL-replaces the SAME entry (re-keying correctness).
+    struct Spoor *mp2 = stalk(&p, root, "loop", 4, STALK_MOUNT, 0);
+    TEST_ASSERT(mp2 != NULL, "re-resolve loop (STALK_MOUNT)");
+    TEST_EXPECT_EQ((u64)mp2->qid.path, (u64)7,
+        "STALK_MOUNT returns loop's own identity (qid 7), not the crossed a-root");
+
+    // Prove MREPL re-keys the same point: mount "deep" (qid 3) onto loop with
+    // MREPL; nmounts stays 1; "/loop" now crosses to deep (qid 3).
+    struct Spoor *src2 = stalk(&p, root, "a/deep", 6, STALK_WALK, 0);
+    TEST_ASSERT(src2 != NULL, "resolve a/deep");
+    TEST_EXPECT_EQ(mount(p.territory, src2, mp2, MREPL), 0, "MREPL deep onto loop");
+    TEST_EXPECT_EQ(territory_nmounts(p.territory), 1, "MREPL kept ONE entry");
+
+    struct Spoor *q = stalk(&p, root, "loop", 4, STALK_OPEN, 0);
+    TEST_ASSERT(q != NULL, "resolve loop after MREPL");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)3, "loop now crosses to deep (qid 3)");
+    spoor_clunk(q);
+
+    territory_unref(p.territory);
+    spoor_clunk(src);
+    spoor_clunk(src2);
+    spoor_clunk(mp);
+    spoor_clunk(mp2);
+    spoor_unref(root);
+}
+
+void test_stalk_cross_mount_chain(void) {
+    struct Proc p;
+    struct Spoor *root = cross_setup(&p);
+    TEST_ASSERT(root != NULL && p.territory != NULL, "cross_setup");
+
+    // mount-over-a-mount: a onto loop, AND deep onto a. "/loop" then crosses
+    // loop->a (qid 1), and a is ITSELF a mount point -> crosses again to deep
+    // (qid 3). The bounded domount loop must follow the chain to the leaf.
+    struct Spoor *src_a    = stalk(&p, root, "a", 1, STALK_WALK, 0);
+    struct Spoor *mp_loop  = stalk(&p, root, "loop", 4, STALK_MOUNT, 0);
+    struct Spoor *src_deep = stalk(&p, root, "a/deep", 6, STALK_WALK, 0);
+    struct Spoor *mp_a     = stalk(&p, root, "a", 1, STALK_MOUNT, 0);
+    TEST_ASSERT(src_a && mp_loop && src_deep && mp_a, "resolve chain pieces");
+    TEST_EXPECT_EQ(mount(p.territory, src_a, mp_loop, 0), 0, "mount a onto loop");
+    TEST_EXPECT_EQ(mount(p.territory, src_deep, mp_a, 0), 0, "mount deep onto a");
+
+    struct Spoor *q = stalk(&p, root, "loop", 4, STALK_OPEN, 0);
+    TEST_ASSERT(q != NULL, "resolve loop (chain)");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)3,
+        "loop -> a -> deep chain crosses to qid 3 (deep)");
+    spoor_clunk(q);
+
+    territory_unref(p.territory);
+    spoor_clunk(src_a);
+    spoor_clunk(mp_loop);
+    spoor_clunk(src_deep);
+    spoor_clunk(mp_a);
+    spoor_unref(root);
+}
+
+void test_stalk_cross_mount_no_leak(void) {
+    struct Proc p;
+    struct Spoor *root = cross_setup(&p);
+    TEST_ASSERT(root != NULL && p.territory != NULL, "cross_setup");
+
+    struct Spoor *src = stalk(&p, root, "a", 1, STALK_WALK, 0);
+    struct Spoor *mp  = stalk(&p, root, "loop", 4, STALK_MOUNT, 0);
+    TEST_ASSERT(src != NULL && mp != NULL, "resolve src + mount point");
+    TEST_EXPECT_EQ(mount(p.territory, src, mp, 0), 0, "mount a onto loop");
+
+    // A crossing resolve mints a transient clone of the source (clone_walk_zero)
+    // that must be clunked, not leaked: live count balances across resolve+clunk.
+    u64 live_before = spoor_total_allocated() - spoor_total_freed();
+    struct Spoor *q = stalk(&p, root, "loop/b", 6, STALK_OPEN, 0);
+    TEST_ASSERT(q != NULL, "resolve loop/b (crossed)");
+    spoor_clunk(q);
+    u64 live_after = spoor_total_allocated() - spoor_total_freed();
+    TEST_EXPECT_EQ(live_after, live_before, "no Spoor leak across a crossed resolve");
+
+    territory_unref(p.territory);
+    spoor_clunk(src);
+    spoor_clunk(mp);
     spoor_unref(root);
 }

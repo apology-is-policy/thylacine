@@ -61,10 +61,44 @@ static bool              g_ramfs_initialized;
 // Qid encoding.
 // =============================================================================
 //
-// path = 0          => root /ramfs (QTDIR)
-// path = 1..N       => file at index (path - 1) (QTFILE)
+// path = 0                  => root /ramfs (QTDIR)
+// path = 1..N               => file at index (path - 1) (QTFILE)
+// path >= RAMFS_QID_SYNTH_BASE => synthetic mount-point dir (QTDIR)
 
 #define RAMFS_QID_ROOT_PATH  0ULL
+
+// Synthetic mount-point directories (stalk-2, design D4 = Plan 9 M1). The boot
+// root (devramfs, before joey pivots to the disk FS) must provide walkable
+// directories to mount onto -- a Spoor-identity-keyed mount cannot graft onto a
+// path that does not resolve. These dirs are EMPTY (a walk into them misses;
+// only `..` -> root succeeds) and exist purely as mount points. The qid.path
+// range is well above any plausible file index (RAMFS_FILE_MAX = 64), so it
+// never collides with a real file's qid.
+#define RAMFS_QID_SYNTH_BASE  0x1000000000000000ULL
+#define RAMFS_QID_SYNTH_SRV   (RAMFS_QID_SYNTH_BASE + 1ULL)   // /srv
+#define RAMFS_QID_SYNTH_PROC  (RAMFS_QID_SYNTH_BASE + 2ULL)   // /proc
+
+struct ramfs_synth_dir {
+    const char *name;
+    u64         qid_path;
+};
+
+static const struct ramfs_synth_dir g_ramfs_synth_dirs[] = {
+    { "srv",  RAMFS_QID_SYNTH_SRV  },
+    { "proc", RAMFS_QID_SYNTH_PROC },
+};
+
+static inline bool ramfs_qid_is_synth(u64 path) {
+    return path >= RAMFS_QID_SYNTH_BASE;
+}
+
+// Single-component name equality (both NUL-terminated). The walk caller has
+// already split + NUL-terminated each component.
+static bool ramfs_streq(const char *a, const char *b) {
+    int i = 0;
+    while (a[i] && b[i] && a[i] == b[i]) i++;
+    return a[i] == '\0' && b[i] == '\0';
+}
 
 static inline u64 ramfs_qid_for_index(int idx) {
     return (u64)(idx + 1);
@@ -72,6 +106,7 @@ static inline u64 ramfs_qid_for_index(int idx) {
 
 static inline int ramfs_index_for_qid(u64 path) {
     if (path == 0) return -1;
+    if (ramfs_qid_is_synth(path)) return -1;   // synth dir, not a file index
     return (int)(path - 1);
 }
 
@@ -180,12 +215,24 @@ static bool walk_one(u64 cur_path, const char *name, struct Qid *out_qid) {
     }
 
     if (cur_path == RAMFS_QID_ROOT_PATH) {
+        // Synthetic mount-point dirs (stalk-2 D4) shadow same-named files (none
+        // ship by those names): /srv, /proc resolve to empty walkable dirs.
+        for (size_t k = 0; k < sizeof(g_ramfs_synth_dirs) /
+                                sizeof(g_ramfs_synth_dirs[0]); k++) {
+            if (ramfs_streq(name, g_ramfs_synth_dirs[k].name)) {
+                out_qid->path = g_ramfs_synth_dirs[k].qid_path;
+                out_qid->type = QTDIR;
+                return true;
+            }
+        }
         int idx = ramfs_find_by_name(name);
         if (idx < 0) return false;
         out_qid->path = ramfs_qid_for_index(idx);
         out_qid->type = QTFILE;
         return true;
     }
+    // Walking out of a synthetic mount-point dir misses (they are empty; `..`
+    // back to root was handled above). They exist only as mount points.
     return false;
 }
 
@@ -285,6 +332,22 @@ static int devramfs_stat_native(struct Spoor *c, struct t_stat *out) {
         out->blksize   = 4096;
         // The boot FS is system-owned; world-readable (A-2a §9.5). No per-file
         // owner table in the read-only cpio ramfs -- every entry is SYSTEM.
+        out->uid       = PRINCIPAL_SYSTEM;
+        out->gid       = GID_SYSTEM;
+        return 0;
+    }
+
+    if (ramfs_qid_is_synth(c->qid.path)) {
+        // A synthetic mount-point dir (stalk-2 D4): system-owned, world-r/x
+        // (0555), same as the root. The X bit is load-bearing -- stalk's
+        // per-component X-search must pass for a principal to traverse onto the
+        // mount point and cross. Empty (no entries); a directory.
+        out->mode      = T_S_IFDIR | 0555u;
+        out->nlink     = 1;
+        out->qid_path  = c->qid.path;
+        out->qid_vers  = 0;
+        out->qid_type  = QTDIR;
+        out->blksize   = 4096;
         out->uid       = PRINCIPAL_SYSTEM;
         out->gid       = GID_SYSTEM;
         return 0;

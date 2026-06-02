@@ -89,6 +89,7 @@ void test_territory_mount_unmount_missing_returns_error(void);
 void test_territory_mount_table_full(void);
 void test_territory_mount_clone_bumps_refs(void);
 void test_territory_mount_destroy_drops_all_refs(void);
+void test_territory_mount_devno_disambiguates(void);
 void test_territory_chroot_smoke(void);
 void test_territory_chroot_idempotent_same_spoor(void);
 void test_territory_chroot_replace_clunks_old(void);
@@ -324,6 +325,12 @@ void test_stalk_opath_no_open(void);
 void test_stalk_open_root(void);
 void test_stalk_depth_cap(void);
 void test_stalk_lifetime_no_leak(void);
+void test_stalk_cross_mount(void);
+void test_stalk_cross_mount_final_quarry(void);
+void test_stalk_cross_mount_xsearch_deny(void);
+void test_stalk_mount_amode_no_cross(void);
+void test_stalk_cross_mount_chain(void);
+void test_stalk_cross_mount_no_leak(void);
 void test_devsrv_registered(void);
 void test_devsrv_post_gate(void);
 void test_devsrv_post_basic(void);
@@ -830,6 +837,7 @@ struct test_case g_tests[] = {
     { "territory_mount.table_full",                       test_territory_mount_table_full,                       false, NULL },
     { "territory_mount.clone_bumps_refs",                 test_territory_mount_clone_bumps_refs,                 false, NULL },
     { "territory_mount.destroy_drops_all_refs",           test_territory_mount_destroy_drops_all_refs,           false, NULL },
+    { "territory_mount.devno_disambiguates",              test_territory_mount_devno_disambiguates,              false, NULL },
     { "territory.chroot_smoke",                           test_territory_chroot_smoke,                           false, NULL },
     { "territory.chroot_idempotent_same_spoor",           test_territory_chroot_idempotent_same_spoor,           false, NULL },
     { "territory.chroot_replace_clunks_old",              test_territory_chroot_replace_clunks_old,              false, NULL },
@@ -1716,6 +1724,12 @@ struct test_case g_tests[] = {
     { "stalk.open_root",               test_stalk_open_root,               false, NULL },
     { "stalk.depth_cap",               test_stalk_depth_cap,               false, NULL },
     { "stalk.lifetime_no_leak",        test_stalk_lifetime_no_leak,        false, NULL },
+    { "stalk.cross_mount",             test_stalk_cross_mount,             false, NULL },
+    { "stalk.cross_mount_final_quarry", test_stalk_cross_mount_final_quarry, false, NULL },
+    { "stalk.cross_mount_xsearch_deny", test_stalk_cross_mount_xsearch_deny, false, NULL },
+    { "stalk.mount_amode_no_cross",    test_stalk_mount_amode_no_cross,    false, NULL },
+    { "stalk.cross_mount_chain",       test_stalk_cross_mount_chain,       false, NULL },
+    { "stalk.cross_mount_no_leak",     test_stalk_cross_mount_no_leak,     false, NULL },
     { NULL, NULL, false, NULL },          // sentinel
 };
 

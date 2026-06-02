@@ -16,6 +16,7 @@
 static struct kmem_cache *g_spoor_cache;
 static u64                g_spoor_allocated;
 static u64                g_spoor_freed;
+static u32                g_spoor_devno_ctr;   // monotonic; spoor_next_devno()
 
 void spoor_init(void) {
     if (g_spoor_cache) extinction("spoor_init called twice");
@@ -45,6 +46,10 @@ static struct Spoor *spoor_alloc_internal(struct Dev *d) {
 
     c->magic = SPOOR_MAGIC;
     c->dc    = d->dc;
+    c->devno = 0;            // static single-instance Dev default; multi-instance
+                             // Devs (dev9p) overwrite with spoor_next_devno() at
+                             // attach. The clone path copies it (a walked child
+                             // inherits its session's devno).
     c->dev   = d;
     spin_lock_init(&c->lock);
     // R15 F233 close: ref is updated atomically. Init is safe with a
@@ -150,8 +155,24 @@ struct Spoor *spoor_clone(struct Spoor *c) {
     nc->mode   = c->mode;
     nc->offset = c->offset;
     nc->aux    = c->aux;
+    // devno is the per-instance device identity (Plan 9 Chan.dev). A walk /
+    // clone of a Spoor stays within the SAME device instance (a dev9p walk
+    // stays in the session; a cross-mount clone stays in the source tree), so
+    // the clone inherits it. Together with dc + qid.path this is the mount-key.
+    nc->devno  = c->devno;
 
     return nc;
+}
+
+// spoor_next_devno -- mint a fresh per-instance device number (Plan 9 Chan.dev)
+// for a multi-instance Dev's attach. Monotonic from 1 (0 is the static
+// single-instance default set in spoor_alloc_internal). The wrap after 2^32
+// attaches is benign: the mount key is per-Territory, not a security boundary,
+// and a collision would require two LIVE same-devno sessions in one Territory's
+// mount table -- astronomically unlikely and non-exploitable (it is identity
+// disambiguation, not a capability).
+u32 spoor_next_devno(void) {
+    return __atomic_add_fetch(&g_spoor_devno_ctr, 1u, __ATOMIC_RELAXED);
 }
 
 void spoor_clunk(struct Spoor *c) {

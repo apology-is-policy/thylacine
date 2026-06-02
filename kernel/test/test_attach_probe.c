@@ -61,6 +61,7 @@
 #include <thylacine/proc.h>
 #include <thylacine/sched.h>
 #include <thylacine/spoor.h>
+#include <thylacine/territory.h>
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 
@@ -289,6 +290,16 @@ static void attach_probe_exec_thunk(void *arg) {
         uart_puts(" (want 1)\n");
         exits("fail-fd-rx");
     }
+
+    // stalk-2: give the probe a devramfs root so its path-keyed
+    // t_mount("/srv", ...) resolves. rfork cloned the (rootless kproc)
+    // Territory; chroot it to a fresh devramfs root here. devramfs ships a
+    // synthetic /srv mount-point dir (Plan 9 M1).
+    struct Spoor *ramfs_root = devramfs.attach(NULL);
+    if (!ramfs_root) extinction("attach_probe_exec_thunk: devramfs.attach failed");
+    if (territory_chroot(p->territory, ramfs_root) != 0)
+        extinction("attach_probe_exec_thunk: territory_chroot failed");
+    spoor_clunk(ramfs_root);   // territory_chroot took its own ref
 
     u64 entry = 0, sp = 0;
     int rc = exec_setup(p, ea->blob, ea->size, &entry, &sp);

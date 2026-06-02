@@ -36,12 +36,15 @@ struct PgrpBind {
     path_id_t dst;                              // mount point; walking dst yields src
 };
 
-struct PgrpMount {
-    struct Spoor   *source;                     // 8-byte aligned first for compact layout
-    path_id_t       target;
+struct PgrpMount {                              // stalk-2: re-keyed from an
+    struct Spoor   *source;                     //   abstract path_id_t target to
+    u64             mp_qid_path;                //   the mount point's full Plan 9
+    int             mp_dc;                       //   (type, dev, qid) identity:
+    u32             mp_devno;                   //   (dc, devno, qid.path).
     u32             flags;                      // MREPL | MBEFORE | MAFTER | MCREATE
+    u32             _pad;                        // 8-byte array-stride alignment
 };
-_Static_assert(sizeof(struct PgrpMount) == 16, ...);
+_Static_assert(sizeof(struct PgrpMount) == 32, ...);   // was 16 (stalk-2)
 
 #define MREPL    0x0001
 #define MBEFORE  0x0002
@@ -59,7 +62,7 @@ struct Territory {
     struct PgrpMount    mounts[PGRP_MAX_MOUNTS];
 };
 _Static_assert(sizeof(struct Territory)
-               == 32 + 8 * PGRP_MAX_BINDS + 16 * PGRP_MAX_MOUNTS, ...);
+               == 32 + 8 * PGRP_MAX_BINDS + 32 * PGRP_MAX_MOUNTS, ...);  // mounts[] 16->32/entry
 
 void               territory_init(void);
 struct Territory  *kpgrp(void);
@@ -74,8 +77,9 @@ int                unbind(struct Territory *p,
                           path_id_t src, path_id_t dst);
 
 int                mount(struct Territory *p, struct Spoor *source,
-                         path_id_t target, u32 flags);
-int                unmount(struct Territory *p, path_id_t target_path);
+                         struct Spoor *mountpoint, u32 flags);   // stalk-2: Spoor-keyed
+int                unmount(struct Territory *p, struct Spoor *mountpoint);
+struct Spoor      *mount_lookup(struct Territory *p, struct Spoor *probe);  // stalk-2: domount probe
 
 int                territory_chroot(struct Territory *p, struct Spoor *source);
 
@@ -104,24 +108,30 @@ u64                territory_total_destroyed(void);
 
 (Renamed from `unmount` at P5-attach-mount — the verb `unmount` is now reserved for the mount-table primitive.)
 
-### `mount(p, source, target, flags)` — return semantics
+### `mount(p, source, mountpoint, flags)` — return semantics
+
+stalk-2: keyed by the `mountpoint` Spoor's `(dc, devno, qid.path)` identity (the
+Spoor is NOT retained -- only its identity is copied; the caller `stalk`s it and
+clunks it). `mount_lookup(p, probe)` is the `stalk` cross-mount probe -- it
+returns the borrowed source of the first entry matching `probe`'s identity, or
+NULL. See `docs/reference/104-stalk.md` "Mount crossing" for the full picture.
 
 | Return | Meaning |
 |---|---|
 | `0`  | success (entry added or idempotent no-op) |
-| `-1` | source is NULL |
+| `-1` | source or mountpoint NULL / corrupted |
 | `-2` | mounts[] full (PGRP_MAX_MOUNTS reached) |
 
-- **Idempotency**: re-mounting the same `(target, source)` pair is a no-op success; no second `spoor_ref`.
-- **MREPL**: if `flags & MREPL` and an entry at `target` exists with a different `source`, the existing entry is replaced (old source's ref dropped; new source's ref taken); `nmounts` unchanged.
+- **Idempotency**: re-mounting the same `(key(mountpoint), source)` pair is a no-op success; no second `spoor_ref`.
+- **MREPL**: if `flags & MREPL` and an entry at the same mount-point identity exists with a different `source`, the existing entry is replaced (old source's ref dropped; new source's ref taken); `nmounts` unchanged. (Re-mounting onto an already-mounted point keys on the SAME underlying identity because `SYS_MOUNT` resolves it with `STALK_MOUNT` -- the final mount is NOT crossed.)
 - **MBEFORE / MAFTER / MCREATE**: recorded in the entry's `flags` field; at v1.0 treated as "append a new entry" for union mounts. Union walk semantics land at Phase 5+ when the walk algorithm grows union support.
 
-### `unmount(p, target_path)` — return semantics
+### `unmount(p, mountpoint)` — return semantics
 
 | Return | Meaning |
 |---|---|
 | `0`  | success; one entry removed; source's refcount dropped |
-| `-1` | no entry at `target_path` |
+| `-1` | no entry matching `mountpoint`'s identity / mountpoint NULL |
 
 Removes the FIRST entry at `target_path`. For union mounts with multiple entries, call repeatedly.
 

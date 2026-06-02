@@ -507,53 +507,59 @@ static inline long t_attach_9p(long tx_fd, long rx_fd,
     return x0;
 }
 
-// t_mount — graft the Spoor at `source_spoor_fd` at `target_path_id`
-// in the caller's Territory mount table. Plan 9 `mount` semantics:
-// the mount entry holds its OWN refcount on the source Spoor (per
+// t_mount — graft the Spoor at `source_spoor_fd` onto the mount-point
+// directory named by the absolute `path` (`path_len` bytes) in the caller's
+// Territory mount table (stalk-2: path-keyed; was an abstract path_id token).
+// The kernel `stalk`s `path` from the Territory root to the mount point's
+// (dc, devno, qid.path) identity and keys the entry on that. Plan 9 `mount`
+// semantics: the mount entry holds its OWN refcount on the source Spoor (per
 // ARCH §9.6.6), so the caller can `t_close(source_spoor_fd)` after a
-// successful mount; the mount table keeps the Spoor alive until
-// `t_unmount` or Territory destruction.
+// successful mount; the mount table keeps the Spoor alive until `t_unmount`
+// or Territory destruction.
 //
-// `target_path_id` is a u32 abstract path token at v1.0 — the same
-// numeric ID used by bind/unbind. String-path resolution lands with
-// the fd-syscall walk subsystem in a later chunk.
+// The MOUNT POINT MUST EXIST as a walkable directory (Plan 9 M1; devramfs
+// ships /srv + /proc, the disk FS provides its own).
 //
 // `flags` is T_MREPL / T_MBEFORE / T_MAFTER / T_MCREATE (bit-or'd).
 //
 // Returns 0 on success, -1 on:
+//   - path absent / empty / too long / not resolvable
 //   - invalid source_spoor_fd (not KOBJ_SPOOR or out-of-range)
 //   - source handle missing T_RIGHT_READ
 //   - flags has bits outside the valid set
 //   - Territory mount table full (8 entries at v1.0)
 __attribute__((always_inline))
-static inline long t_mount(long source_spoor_fd, unsigned long target_path_id,
-                           unsigned long flags) {
-    register long x0 __asm__("x0") = source_spoor_fd;
-    register long x1 __asm__("x1") = (long)target_path_id;
-    register long x2 __asm__("x2") = (long)flags;
+static inline long t_mount(const char *path, unsigned long path_len,
+                           long source_spoor_fd, unsigned long flags) {
+    register long x0 __asm__("x0") = (long)path;
+    register long x1 __asm__("x1") = (long)path_len;
+    register long x2 __asm__("x2") = source_spoor_fd;
+    register long x3 __asm__("x3") = (long)flags;
     register long x8 __asm__("x8") = T_SYS_MOUNT;
     __asm__ volatile (
         "svc #0"
         : "+r"(x0)
-        : "r"(x1), "r"(x2), "r"(x8)
+        : "r"(x1), "r"(x2), "r"(x3), "r"(x8)
         : "memory", "cc"
     );
     return x0;
 }
 
-// t_unmount — remove the FIRST mount entry at `target_path_id` from
-// the caller's Territory mount table; drop the source's per-entry
-// refcount. (Union mounts with multiple entries at the same target
-// require multiple t_unmount calls — Phase 5+ once walk-side union
-// support lands.) Returns 0 on success, -1 if no entry exists.
+// t_unmount — remove the FIRST mount entry whose mount-point identity matches
+// the absolute `path` (`path_len` bytes) from the caller's Territory mount
+// table; drop the source's per-entry refcount. (Union mounts with multiple
+// entries at the same point require multiple t_unmount calls — Phase 5+ once
+// walk-side union support lands.) Returns 0 on success, -1 if no entry exists
+// (or the path does not resolve).
 __attribute__((always_inline))
-static inline long t_unmount(unsigned long target_path_id) {
-    register long x0 __asm__("x0") = (long)target_path_id;
+static inline long t_unmount(const char *path, unsigned long path_len) {
+    register long x0 __asm__("x0") = (long)path;
+    register long x1 __asm__("x1") = (long)path_len;
     register long x8 __asm__("x8") = T_SYS_UNMOUNT;
     __asm__ volatile (
         "svc #0"
         : "+r"(x0)
-        : "r"(x8)
+        : "r"(x1), "r"(x8)
         : "memory", "cc"
     );
     return x0;

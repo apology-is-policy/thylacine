@@ -157,13 +157,15 @@ void test_territory_pivot_root_does_not_touch_mounts(void) {
     struct Spoor *root_a = spoor_alloc(&devnone);
     struct Spoor *root_b = spoor_alloc(&devnone);
     struct Spoor *mounted = spoor_alloc(&devnone);
-    TEST_ASSERT(root_a && root_b && mounted, "spoor_alloc");
+    struct Spoor *mp = spoor_alloc(&devnone);   // stalk-2: mount-point identity
+    TEST_ASSERT(root_a && root_b && mounted && mp, "spoor_alloc");
+    mp->qid.path = 42u;                         // distinct mount-point identity
 
     TEST_EXPECT_EQ(territory_chroot(p, root_a), 0, "chroot to A");
 
     // Install a mount entry while root is A.
-    TEST_EXPECT_EQ(mount(p, mounted, /*target_path=*/42u, MREPL), 0,
-        "mount installs at target=42 with MREPL");
+    TEST_EXPECT_EQ(mount(p, mounted, mp, MREPL), 0,
+        "mount installs at mount point (qid.path 42) with MREPL");
     TEST_EXPECT_EQ(territory_nmounts(p), 1, "1 mount entry");
     TEST_EXPECT_EQ(mounted->ref, 2,
         "mounted Spoor ref = 2 (test + mount entry)");
@@ -184,4 +186,5 @@ void test_territory_pivot_root_does_not_touch_mounts(void) {
     spoor_unref(root_a);
     spoor_unref(root_b);
     spoor_unref(mounted);
+    spoor_unref(mp);
 }

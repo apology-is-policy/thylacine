@@ -328,35 +328,49 @@ static bool source_is_valid(struct Spoor *s) {
     return true;
 }
 
+// Mount-point identity match (stalk-2): the Plan 9 (type, dev, qid) triple ==
+// (dc, devno, qid.path). All three compare: qid.path is unique only within a
+// (dc, devno) instance, so two dev9p sessions (same dc, both root qid.path 0)
+// are distinguished by devno.
+static inline bool mount_key_eq(const struct PgrpMount *m,
+                                const struct Spoor *s) {
+    return m->mp_dc == s->dc &&
+           m->mp_devno == s->devno &&
+           m->mp_qid_path == s->qid.path;
+}
+
 int mount(struct Territory *territory, struct Spoor *source,
-          path_id_t target, u32 flags) {
+          struct Spoor *mountpoint, u32 flags) {
     if (!territory)                    extinction("mount(NULL territory)");
     if (territory->magic != PGRP_MAGIC) extinction("mount on corrupted Territory");
 
     if (!source_is_valid(source))       return -1;
+    // The mount point is a transient resolved Spoor; we copy its IDENTITY
+    // (dc, devno, qid.path), never retain the Spoor. Reject NULL / corrupted.
+    if (!mountpoint)                    return -1;
+    if (mountpoint->magic != SPOOR_MAGIC) return -1;
 
-    // Idempotency: (target, source) pair already in the table → no-op.
-    // Spec: <<path, s>> \notin mounts[p] precondition. Caller doesn't
-    // see a refcount bump; the existing entry's refcount is unchanged.
+    // Idempotency: (key(mountpoint), source) pair already in the table → no-op.
+    // Spec: <<path, s>> \notin mounts[p] precondition under the re-keyed
+    // identity. Caller sees no refcount bump.
     for (int i = 0; i < territory->nmounts; i++) {
-        if (territory->mounts[i].target == target &&
+        if (mount_key_eq(&territory->mounts[i], mountpoint) &&
             territory->mounts[i].source == source) {
             return 0;
         }
     }
 
     // MREPL semantics at v1.0: if `flags & MREPL` and an entry at the
-    // same target exists (with a different source — we already checked
-    // for idempotent same-source above), replace the FIRST matching
-    // entry. Drop the old source's refcount; install the new source
-    // with a fresh ref.
+    // same mount-point identity exists (with a different source — idempotent
+    // same-source handled above), replace the FIRST matching entry. Drop the
+    // old source's refcount; install the new source with a fresh ref.
     //
     // MBEFORE/MAFTER/MCREATE union semantics are recorded but treated
     // as "append a new entry" at v1.0; union walking is Phase 5+ once
     // the walk algorithm grows union support.
     if (flags & MREPL) {
         for (int i = 0; i < territory->nmounts; i++) {
-            if (territory->mounts[i].target == target) {
+            if (mount_key_eq(&territory->mounts[i], mountpoint)) {
                 struct Spoor *old = territory->mounts[i].source;
                 territory->mounts[i].source = source;
                 territory->mounts[i].flags  = flags;
@@ -374,26 +388,29 @@ int mount(struct Territory *territory, struct Spoor *source,
 
     if (territory->nmounts >= PGRP_MAX_MOUNTS)  return -2;
 
-    // Take the per-entry reference BEFORE installing the entry. If the
-    // ref bump succeeds, the entry is committed; if installation fails
-    // (it can't here — we already validated nmounts), we'd need to
-    // un-ref. Since the path below is infallible after the ref, no
-    // rollback is needed.
+    // Take the per-entry reference BEFORE installing the entry. The path
+    // below is infallible after the ref, so no rollback is needed.
     spoor_ref(source);
 
-    territory->mounts[territory->nmounts].target = target;
-    territory->mounts[territory->nmounts].source = source;
-    territory->mounts[territory->nmounts].flags  = flags;
+    struct PgrpMount *e = &territory->mounts[territory->nmounts];
+    e->source      = source;
+    e->mp_qid_path = mountpoint->qid.path;
+    e->mp_dc       = mountpoint->dc;
+    e->mp_devno    = mountpoint->devno;
+    e->flags       = flags;
+    e->_pad        = 0;
     territory->nmounts++;
     return 0;
 }
 
-int unmount(struct Territory *territory, path_id_t target_path) {
+int unmount(struct Territory *territory, struct Spoor *mountpoint) {
     if (!territory)                    extinction("unmount(NULL territory)");
     if (territory->magic != PGRP_MAGIC) extinction("unmount on corrupted Territory");
+    if (!mountpoint)                    return -1;
+    if (mountpoint->magic != SPOOR_MAGIC) return -1;
 
     for (int i = 0; i < territory->nmounts; i++) {
-        if (territory->mounts[i].target == target_path) {
+        if (mount_key_eq(&territory->mounts[i], mountpoint)) {
             struct Spoor *source = territory->mounts[i].source;
             // Remove by swapping with the last element. Order within
             // mounts[] is not load-bearing at v1.0; MBEFORE/MAFTER union
@@ -412,6 +429,24 @@ int unmount(struct Territory *territory, path_id_t target_path) {
         }
     }
     return -1;
+}
+
+// mount_lookup -- the `stalk` cross-mount probe (Plan 9 domount). Returns the
+// BORROWED source of the FIRST entry whose mount-point identity matches
+// `probe`'s (dc, devno, qid.path), or NULL. The table keeps its ref; the
+// caller (stalk) clone-walks the result to mint an independent crossed Spoor.
+struct Spoor *mount_lookup(struct Territory *territory, struct Spoor *probe) {
+    if (!territory)                    return NULL;
+    if (territory->magic != PGRP_MAGIC) extinction("mount_lookup on corrupted Territory");
+    if (!probe)                        return NULL;
+    if (probe->magic != SPOOR_MAGIC)   extinction("mount_lookup probe corrupted Spoor");
+
+    for (int i = 0; i < territory->nmounts; i++) {
+        if (mount_key_eq(&territory->mounts[i], probe)) {
+            return territory->mounts[i].source;
+        }
+    }
+    return NULL;
 }
 
 // =============================================================================

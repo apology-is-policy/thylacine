@@ -141,39 +141,50 @@ enum {
     // a pipe-as-mount mostly produces -1, but the lifetime discipline
     // composes regardless), or a future cross-territory share.
     //
-    // SYS_MOUNT(source_spoor_fd, target_path_id, flags) → 0/-1
-    //   x0 = source_spoor_fd (hidx_t; must be a KOBJ_SPOOR handle)
-    //   x1 = target_path_id (u32; abstract path token at v1.0 — the
-    //        same numeric ID used by bind/unbind in the existing
-    //        PgrpBind / PgrpMount C-API. String-path resolution lands
-    //        with the fd-syscall walk subsystem in a later chunk.)
-    //   x2 = flags (u32; MREPL / MBEFORE / MAFTER / MCREATE)
+    // SYS_MOUNT(path_va, path_len, source_spoor_fd, flags) → 0/-1
+    //   x0 = path_va  (user VA of the absolute mount-point path)
+    //   x1 = path_len (1 .. SYS_OPEN_PATH_MAX; bytes, NUL-free)
+    //   x2 = source_spoor_fd (hidx_t; must be a KOBJ_SPOOR handle)
+    //   x3 = flags (u32; MREPL / MBEFORE / MAFTER / MCREATE)
+    // stalk-2: path-keyed (was an abstract target_path_id). The kernel
+    // `stalk`s `path` from the caller's Territory root to the mount-point
+    // Spoor (STALK_MOUNT: resolve, do NOT cross the final mount, do NOT
+    // open -- so re-mounting onto an already-mounted point MREPL-replaces
+    // it) and records the mount keyed by the mount point's
+    // (dc, devno, qid.path) identity. The MOUNT POINT MUST EXIST as a
+    // walkable directory (Plan 9 M1; devramfs ships /srv + /proc, the
+    // disk FS provides its own). Resolves from root only at v1.0 (absolute
+    // paths); a relative-mount start_fd is a v1.x add.
     // Returns: 0 on success, -1 on:
+    //   - path absent / empty / too long / not resolvable / NUL-embedded
     //   - invalid source_spoor_fd (not KOBJ_SPOOR, out-of-range)
-    //   - missing RIGHT_READ (the mount holder needs to be able to
-    //     consume the source's tree — without READ, a mount has no
-    //     value at v1.0; this is a defense-in-depth check, not a
-    //     deep correctness requirement)
+    //   - missing RIGHT_READ on the source (it must be consumable as a tree)
     //   - flags has bits outside the MREPL|MBEFORE|MAFTER|MCREATE set
     //   - territory mount table full (PGRP_MAX_MOUNTS reached)
     //
-    // Lifecycle (per ARCH §9.6.6): `mount` bumps the Spoor's refcount
+    // Lifecycle (per ARCH §9.6.6): `mount` bumps the source Spoor's refcount
     // (the mount-table entry holds its own ref). The caller can close
     // their source_spoor_fd afterward; the mount table keeps the Spoor
     // alive. unmount() (or Territory destruction) drops the per-entry
     // ref; if it was the last ref, the Spoor's Dev close runs (which,
     // for dev9p-backed Spoors set up by SYS_ATTACH_9P, tears down the
-    // entire 9P session).
-    SYS_MOUNT       = 14,   // arg: source_spoor_fd, target_path_id, flags
+    // entire 9P session). The transient mount-point Spoor is clunked
+    // immediately -- the table keeps only its identity, not the Spoor.
+    SYS_MOUNT       = 14,   // arg: path_va, path_len, source_spoor_fd, flags
 
-    // SYS_UNMOUNT(target_path_id) → 0/-1
-    //   x0 = target_path_id (u32; same abstract token as SYS_MOUNT)
+    // SYS_UNMOUNT(path_va, path_len) → 0/-1
+    //   x0 = path_va  (user VA of the absolute mount-point path)
+    //   x1 = path_len (1 .. SYS_OPEN_PATH_MAX)
+    // stalk-2: path-keyed. The kernel `stalk`s `path` (STALK_MOUNT) to the
+    // mount point's own identity and removes the FIRST mount entry matching
+    // (dc, devno, qid.path).
     // Returns: 0 on success, -1 on:
-    //   - no entry at target_path_id in the caller's Territory
+    //   - path absent / empty / too long / not resolvable
+    //   - no entry at that mount-point identity in the caller's Territory
     //
     // Drops the per-entry Spoor ref; the Spoor's Dev close runs if
     // this was the last ref.
-    SYS_UNMOUNT     = 15,   // arg: target_path_id
+    SYS_UNMOUNT     = 15,   // arg: path_va, path_len
 
     // P5-corvus-syscalls: v1.0 hardening syscalls per CORVUS-DESIGN.md
     // §4.1.1 + ARCH §11.2b. corvus + per-user stratumd call these at

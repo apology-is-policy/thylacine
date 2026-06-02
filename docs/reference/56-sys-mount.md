@@ -41,50 +41,67 @@ The source Spoor can be ANY KOBJ_SPOOR — a dev9p-backed root from SYS_ATTACH_9
 
 ## ABI
 
+> **stalk-2 update**: `SYS_MOUNT` / `SYS_UNMOUNT` are now **path-keyed** (was an
+> abstract `target_path_id`). The kernel `stalk`s the absolute mount-point path
+> from the Territory root (`STALK_MOUNT`: resolve, do NOT cross the final mount,
+> do NOT open) and keys the mount on the resolved directory's full Plan 9
+> `(dc, devno, qid.path)` identity. The mount point MUST exist as a walkable
+> directory (Plan 9 M1). See `docs/reference/104-stalk.md` "Mount crossing".
+
 ### SYS_MOUNT
 
 ```
-SYS_MOUNT = 14
+SYS_MOUNT = 14   (stalk-2: path-keyed)
 
 Args:
-  x0 = source_spoor_fd  — hidx_t; KOBJ_SPOOR handle in the caller's table
-  x1 = target_path_id   — u32; abstract path token (see "Path IDs at v1.0" below)
-  x2 = flags            — u32; MREPL / MBEFORE / MAFTER / MCREATE
+  x0 = path_va          — user VA of the absolute mount-point path (NUL-free)
+  x1 = path_len         — 1 .. SYS_OPEN_PATH_MAX (1024)
+  x2 = source_spoor_fd  — hidx_t; KOBJ_SPOOR handle in the caller's table
+  x3 = flags            — u32; MREPL / MBEFORE / MAFTER / MCREATE
 
 Return:
   x0 = 0  on success;
   x0 = -1 on:
+    - path absent / empty / too long / not resolvable / embedded NUL;
     - source_spoor_fd not a KOBJ_SPOOR or out-of-range;
     - missing RIGHT_READ on the source handle;
     - flags has bits outside MREPL|MBEFORE|MAFTER|MCREATE;
-    - target_path_id or flags raw value above u32 max;
     - Territory mount table full (PGRP_MAX_MOUNTS = 8);
-    - Proc has no Territory (defensive — kernel-internal-only path).
+    - Proc has no Territory / no root_spoor (resolves from root at v1.0).
 ```
 
 ### SYS_UNMOUNT
 
 ```
-SYS_UNMOUNT = 15
+SYS_UNMOUNT = 15   (stalk-2: path-keyed)
 
 Args:
-  x0 = target_path_id  — u32; the path to remove a mount from
+  x0 = path_va   — user VA of the absolute mount-point path
+  x1 = path_len  — 1 .. SYS_OPEN_PATH_MAX
 
 Return:
   x0 = 0  if an entry was found + removed;
   x0 = -1 on:
-    - no entry exists at target_path_id;
-    - target_path_id raw value above u32 max;
+    - path absent / empty / too long / not resolvable;
+    - no entry matches the resolved mount point's identity;
     - Proc has no Territory.
 ```
 
-### Path IDs at v1.0
+### Mount-point identity at v1.0 (stalk-2)
 
-`target_path_id` is a u32 abstract path token — the same identifier used by the existing `bind` / `unbind` / `mount` / `unmount` C-API (`path_id_t` in `kernel/include/thylacine/territory.h`). The Territory's mount table is keyed on these u32s today.
+The mount table is keyed on the mount point's full Plan 9 `(type, dev, qid)`
+identity = `(dc, devno, qid.path)` of the resolved directory Spoor. The
+`devno` axis (Plan 9 `Chan.dev`, minted per attach session by
+`spoor_next_devno()`) is load-bearing: every dev9p session shares `dc='9'` and
+every attach root has `qid.path 0`, so `(dc, qid.path)` alone would collide two
+concurrent 9P sessions (the A-5b corvus + per-user stratum-fs case). The
+transient mount-point Spoor is clunked immediately after the table op -- the
+table keeps only its identity, not the Spoor.
 
-String-path resolution (walk through the namespace tree to produce a path_id) is a future chunk — when the fd-syscall walk subsystem lands, an additional SVC entry will copy a user-VA string and resolve it through bind/mount before reaching this layer. The handler signature stays the same; only its caller chain changes.
-
-Userspace can pick its own conventions for path IDs at v1.0 (e.g., test programs use small integers like 42).
+The pre-stalk-2 abstract `path_id_t` is retired AS THE MOUNT KEY (it survives
+only for the unconsumed symbolic `binds[]`). Relative-mount `start_fd` support
+(mount onto a path relative to a dirfd) is a v1.x add; v1.0 resolves from the
+Territory root only.
 
 ### Flags
 

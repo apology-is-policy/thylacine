@@ -101,6 +101,15 @@ struct Spoor *dev9p_attach_client(struct p9_client *client, u32 root_fid) {
         return NULL;
     }
     c->aux = p;
+    // Per-instance device number (Plan 9 Chan.dev). EVERY dev9p Spoor shares
+    // dc='9' and every attach root has qid.path 0, so without a per-session
+    // devno the mount table's (dc, qid.path) key cannot tell two concurrent
+    // sessions apart (corvus + a per-user stratum-fs -- the A-5b case). One
+    // fresh devno per attach session; walked + cloned descendants inherit it
+    // via spoor_clone (the session is the instance). dev9p_attach_client is
+    // called EXACTLY ONCE per session (SYS_ATTACH_9P / SYS_ATTACH_9P_SRV ->
+    // p9_attached_root_spoor, both single-mint), so one devno == one session.
+    c->devno = spoor_next_devno();
     // Root is always a directory; the qid path/vers come from the
     // server but at v1.0 we don't carry them at the Spoor layer (the
     // qid is meaningful per-walk via the Dev vtable). The cached qid

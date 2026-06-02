@@ -78,11 +78,15 @@ int main(void) {
         return 1;
     }
 
-    if (t_mount(attach_fd, 99, 0) < 0) {
+    // stalk-2: mount is path-keyed. The kernel test thunk chrooted us to a
+    // devramfs root with a synthetic /srv mount-point dir; graft + ungraft
+    // the attached 9P root there.
+    static const char MP_SRV[] = "/srv";
+    if (t_mount(MP_SRV, sizeof(MP_SRV) - 1, attach_fd, 0) < 0) {
         t_putstr("stub-driver: t_mount FAIL\n");
         return 1;
     }
-    if (t_unmount(99) < 0) {
+    if (t_unmount(MP_SRV, sizeof(MP_SRV) - 1) < 0) {
         t_putstr("stub-driver: t_unmount FAIL\n");
         return 1;
     }

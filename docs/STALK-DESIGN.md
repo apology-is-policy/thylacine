@@ -85,21 +85,48 @@ each Spoor, check whether it is a mount point **by Spoor identity**; if so, cros
 
 Today `PgrpMount = { Spoor *source; path_id_t target; u32 flags; }` (16B), keyed
 by an abstract token. `stalk` needs to recognise a mount point **when it walks
-onto it**, so re-key by mount-point identity:
+onto it**, so re-key by mount-point identity -- the **full Plan 9 `(type, dev,
+qid)`** triple cited in section 1, NOT just `(dc, qid.path)`:
 
 ```c
 struct PgrpMount {
     struct Spoor *source;       // the grafted tree (holds one ref, as today)
     u64           mp_qid_path;  // mount-point Spoor's qid.path
-    u32           mp_dc;        // mount-point Spoor's Dev char (qid.path unique only within a Dev)
+    int           mp_dc;        // mount-point Spoor's Dev char (Plan 9 `type`)
+    u32           mp_devno;     // mount-point Spoor's per-instance device number
     u32           flags;        // MREPL (v1.0) | MBEFORE/MAFTER/MCREATE (v1.x union)
+    u32           _pad;         // 8-byte array-stride alignment -> sizeof = 32
 };
 ```
 
-`stalk`, after resolving a component to Spoor `S`, scans the table for an entry
-with `mp_dc == S->dev->dc && mp_qid_path == S->qid.path`; on match it crosses to
-a ref'd clone of `source`. This is Plan 9 `domount`. `path_id_t` retires; the
-size-pinned `Territory` static_asserts re-bump (deliberate; documented).
+**Why `devno` is load-bearing, not optional** (stalk-2 impl finding; this
+corrects the section-1-vs-section-3 under-specification): `qid.path` is unique
+only WITHIN a `(dc, devno)` instance. EVERY dev9p session shares `dc='9'` and
+every Tattach root has `qid.path == 0`, so `(dc, qid.path)` alone **cannot**
+distinguish two concurrent 9P sessions' mount points -- exactly the A-5b case
+(corvus + a per-user stratum-fs, both mounted in one Territory). Plan 9's `Chan`
+carries a per-instance `dev` number for this reason; Thylacine adds `u32 devno`
+to `struct Spoor`, minted per attach session by `spoor_next_devno()` (dev9p
+stamps the attach root; walked/cloned descendants inherit it; static
+single-instance Devs leave it 0). The mount key is the full `(dc, devno,
+qid.path)` triple.
+
+`stalk`, after resolving a component to Spoor `S`, scans the table
+(`territory.c::mount_lookup`) for an entry with `mp_dc == S->dc && mp_devno ==
+S->devno && mp_qid_path == S->qid.path`; on match it crosses to a fresh
+clone-walk of `source` (Plan 9 `domount`; a zero-element `Dev.walk` mints an
+independent fid). `path_id_t` retires AS THE MOUNT KEY (it stays for the
+unconsumed symbolic `binds[]` per D1); the size-pinned `Territory`
+static_asserts re-bump 16->32 bytes/entry (deliberate; documented).
+
+**A fourth amode -- `STALK_MOUNT`** (stalk-2 impl finding): `SYS_MOUNT` /
+`SYS_UNMOUNT` resolve the mount point with the final component **NOT crossed**
+(Plan 9 `Amount`), so re-mounting onto an already-mounted point keys on the SAME
+underlying identity and MREPL replaces it (crossing the final element would key
+the new mount on the source-root identity, producing a second entry instead of a
+replace). Intermediate components still cross normally. `STALK_WALK` /
+`STALK_OPEN` cross the final element (opening a walked mount point yields the
+mounted root).
 
 `SYS_MOUNT` / `SYS_UNMOUNT` become **path-keyed**: the kernel `stalk`s the path
 to the mount-point Spoor, then records `key(mountpoint) -> source`. The

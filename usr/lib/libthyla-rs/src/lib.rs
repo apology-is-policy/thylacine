@@ -824,39 +824,47 @@ pub unsafe fn t_note_mask(new_mask: u64, old_mask_out_va: *mut u64) -> i64 {
     x0
 }
 
-// t_mount — graft `source_spoor_fd`'s tree at `target_path_id` in the
-// calling Proc's territory. `flags` is a bitmask of T_MREPL / T_MBEFORE
-// / T_MAFTER / T_MCREATE; bits outside that union are rejected.
+// t_mount — graft `source_spoor_fd`'s tree onto the mount-point directory named
+// by the absolute `path` (`path_len` bytes) in the calling Proc's territory
+// (stalk-2: path-keyed; was an abstract target_path_id). The kernel `stalk`s
+// `path` to the mount point's (dc, devno, qid.path) identity. `flags` is a
+// bitmask of T_MREPL / T_MBEFORE / T_MAFTER / T_MCREATE; bits outside that union
+// are rejected. The mount point MUST EXIST as a walkable directory.
 //
 // Returns 0 on success, -1 on:
+//   - path absent / empty / too long / not resolvable
 //   - source_spoor_fd not a KOBJ_SPOOR or out-of-range
 //   - missing RIGHT_READ on source
 //   - flags has bits outside the supported set
 //   - territory mount table full
 #[inline(always)]
-pub unsafe fn t_mount(source_spoor_fd: i64, target_path_id: u32, flags: u32) -> i64 {
-    let mut x0: i64 = source_spoor_fd;
+pub unsafe fn t_mount(path: *const u8, path_len: usize,
+                      source_spoor_fd: i64, flags: u32) -> i64 {
+    let mut x0: i64 = path as i64;
     asm!(
         "svc #0",
         inlateout("x0") x0,
-        in("x1") target_path_id as u64,
-        in("x2") flags as u64,
+        in("x1") path_len as u64,
+        in("x2") source_spoor_fd,
+        in("x3") flags as u64,
         in("x8") T_SYS_MOUNT,
         options(nostack)
     );
     x0
 }
 
-// t_unmount — remove the mount entry at `target_path_id` in the calling
-// Proc's territory. Returns 0 on success, -1 if no entry at that
-// path_id. Drops the per-entry Spoor refcount; the Spoor's Dev close
-// runs if this was the last ref.
+// t_unmount — remove the mount entry whose mount-point identity matches the
+// absolute `path` (`path_len` bytes) in the calling Proc's territory. Returns
+// 0 on success, -1 if no entry matches (or the path does not resolve). Drops
+// the per-entry Spoor refcount; the Spoor's Dev close runs if this was the
+// last ref.
 #[inline(always)]
-pub unsafe fn t_unmount(target_path_id: u32) -> i64 {
-    let mut x0: i64 = target_path_id as i64;
+pub unsafe fn t_unmount(path: *const u8, path_len: usize) -> i64 {
+    let mut x0: i64 = path as i64;
     asm!(
         "svc #0",
         inlateout("x0") x0,
+        in("x1") path_len as u64,
         in("x8") T_SYS_UNMOUNT,
         options(nostack)
     );

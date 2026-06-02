@@ -2220,6 +2220,99 @@ int main(void) {
                          "(stalk-e2e-dir/leaf)\n");
             }
 
+            // === stalk-2 E2E (Plan 9 domount cross-mount on the real FS) ===
+            // Graft a source subtree onto a sibling mount-point dir, then open a
+            // path THROUGH the mount: stalk crosses stalk-x-mnt -> stalk-x-src
+            // and resolves xleaf, proving SYS_MOUNT/UNMOUNT path-keying + the
+            // dev9p cross (clone_walk_zero mints a fresh fid via a zero-walk
+            // Twalk) end-to-end. Sibling dirs (acyclic). Idempotent: cleanup
+            // before + after.
+            {
+                const char xsrc[]  = "stalk-x-src";
+                const char xmnt[]  = "stalk-x-mnt";
+                const char xleaf[] = "xleaf";
+                const char xpath[] = "stalk-x-mnt/xleaf";
+
+                // cleanup-first (clear any crashed-prior-boot artifact).
+                {
+                    long d = t_open(T_WALK_OPEN_FROM_ROOT, xsrc, sizeof(xsrc) - 1, T_OPATH);
+                    if (d >= 0) { (void)t_unlink(d, xleaf, sizeof(xleaf) - 1, 0u); (void)t_close(d); }
+                }
+                (void)t_unmount(xmnt, sizeof(xmnt) - 1);
+                (void)t_unlink(T_WALK_OPEN_FROM_ROOT, xsrc, sizeof(xsrc) - 1, T_UNLINK_REMOVEDIR);
+                (void)t_unlink(T_WALK_OPEN_FROM_ROOT, xmnt, sizeof(xmnt) - 1, T_UNLINK_REMOVEDIR);
+
+                long sdir = mkdir_or_open(T_WALK_OPEN_FROM_ROOT, xsrc, sizeof(xsrc) - 1);
+                long mdir = mkdir_or_open(T_WALK_OPEN_FROM_ROOT, xmnt, sizeof(xmnt) - 1);
+                if (sdir < 0 || mdir < 0) {
+                    t_putstr("joey: stalk-2 e2e mkdir FAILED\n");
+                    return 1;
+                }
+                const char xdata[] = "cross";
+                long lf = t_walk_create(sdir, xleaf, sizeof(xleaf) - 1, T_OWRITE, 0644u);
+                if (lf < 0) {
+                    t_putstr("joey: stalk-2 e2e create FAILED rc=");
+                    t_putstr(itoa_dec(lf, buf, sizeof(buf)));
+                    t_putstr("\n");
+                    return 1;
+                }
+                (void)t_write(lf, xdata, sizeof(xdata) - 1);
+                (void)t_fsync(lf, 0);
+                (void)t_close(lf);
+                (void)t_close(mdir);
+
+                // Graft stalk-x-src's tree onto stalk-x-mnt. Source: an O_PATH
+                // handle on stalk-x-src (born R|W -> has the RIGHT_READ mount
+                // needs). The mount table keys on stalk-x-mnt's identity.
+                long src = t_open(T_WALK_OPEN_FROM_ROOT, xsrc, sizeof(xsrc) - 1, T_OPATH);
+                if (src < 0) {
+                    t_putstr("joey: stalk-2 e2e open(src,O_PATH) FAILED\n");
+                    return 1;
+                }
+                if (t_mount(xmnt, sizeof(xmnt) - 1, src, 0) < 0) {
+                    t_putstr("joey: stalk-2 e2e t_mount FAILED\n");
+                    (void)t_close(src);
+                    return 1;
+                }
+
+                // The proof: open a path THROUGH the mount. stalk crosses
+                // stalk-x-mnt -> stalk-x-src (domount) then resolves xleaf.
+                long of = t_open(T_WALK_OPEN_FROM_ROOT, xpath, sizeof(xpath) - 1, T_OREAD);
+                if (of < 0) {
+                    t_putstr("joey: stalk-2 e2e t_open(stalk-x-mnt/xleaf) FAILED rc=");
+                    t_putstr(itoa_dec(of, buf, sizeof(buf)));
+                    t_putstr("\n");
+                    (void)t_unmount(xmnt, sizeof(xmnt) - 1);
+                    (void)t_close(src);
+                    return 1;
+                }
+                unsigned char xback[8];
+                long xn = t_read(of, xback, sizeof(xback));
+                (void)t_close(of);
+                if (xn != (long)(sizeof(xdata) - 1) ||
+                    xback[0] != 'c' || xback[4] != 's') {
+                    t_putstr("joey: stalk-2 e2e cross read-back mismatch\n");
+                    (void)t_unmount(xmnt, sizeof(xmnt) - 1);
+                    (void)t_close(src);
+                    return 1;
+                }
+
+                if (t_unmount(xmnt, sizeof(xmnt) - 1) < 0) {
+                    t_putstr("joey: stalk-2 e2e t_unmount FAILED\n");
+                    (void)t_close(src);
+                    return 1;
+                }
+                (void)t_close(src);
+
+                // cleanup-after: remove the leaf + both dirs.
+                (void)t_unlink(sdir, xleaf, sizeof(xleaf) - 1, 0u);
+                (void)t_close(sdir);
+                (void)t_unlink(T_WALK_OPEN_FROM_ROOT, xsrc, sizeof(xsrc) - 1, T_UNLINK_REMOVEDIR);
+                (void)t_unlink(T_WALK_OPEN_FROM_ROOT, xmnt, sizeof(xmnt) - 1, T_UNLINK_REMOVEDIR);
+                t_putstr("joey: stalk-2 cross-mount E2E OK "
+                         "(stalk-x-mnt/xleaf -> stalk-x-src/xleaf)\n");
+            }
+
             // === FS-gamma E2E (SYS_RENAME + SYS_UNLINK) ===
             // rename (atomic replace) + unlink + rmdir against the real Stratum
             // FS. Each step cleans up first AND after, so the sequence is fully
@@ -2310,7 +2403,7 @@ int main(void) {
                 }
                 t_putstr("joey: fs-gamma rename(atomic-replace) + unlink OK\n");
 
-                // rmdir an empty directory via SYS_UNLINK_REMOVEDIR.
+                // rmdir an empty directory via T_UNLINK_REMOVEDIR.
                 const char grd[] = "fs-gamma-rmdir";
                 (void)t_unlink(T_WALK_OPEN_FROM_ROOT, grd, sizeof(grd) - 1,
                                T_UNLINK_REMOVEDIR);                 // stale cleanup

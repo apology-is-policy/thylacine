@@ -63,23 +63,24 @@ int main(void) {
         return 1;
     }
 
-    // Target path 99 is arbitrary at v1.0 — the abstract u32 token
-    // matches the PgrpMount table's keying. String-path resolution
-    // arrives with the walk subsystem.
-    if (t_mount(attach_fd, 99, 0) < 0) {
+    // stalk-2: mount is path-keyed. The kernel test thunk chrooted us to a
+    // devramfs root, which ships a synthetic /srv mount-point dir. Graft the
+    // attached 9P root onto /srv; the mount table keys on /srv's identity.
+    static const char MP_SRV[] = "/srv";
+    if (t_mount(MP_SRV, sizeof(MP_SRV) - 1, attach_fd, 0) < 0) {
         t_putstr("attach-probe: t_mount FAIL\n");
         return 1;
     }
 
     // Unmount the just-installed entry; mount table goes 1→0.
-    if (t_unmount(99) < 0) {
+    if (t_unmount(MP_SRV, sizeof(MP_SRV) - 1) < 0) {
         t_putstr("attach-probe: t_unmount FAIL\n");
         return 1;
     }
 
-    // Unmount of a non-existent path → -1 (regression coverage of
+    // Unmount of an already-unmounted point → -1 (regression coverage of
     // the SYS_UNMOUNT error path while we're here).
-    if (t_unmount(99) >= 0) {
+    if (t_unmount(MP_SRV, sizeof(MP_SRV) - 1) >= 0) {
         t_putstr("attach-probe: t_unmount of already-unmounted should fail\n");
         return 1;
     }

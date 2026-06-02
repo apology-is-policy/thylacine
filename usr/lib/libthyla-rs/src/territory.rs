@@ -10,15 +10,12 @@
 //
 // Foundation chunk: U-2f per docs/UTOPIA-SHELL-DESIGN.md section 15.6.8.
 //
-// PATH-ID vs STRING PATHS at v1.0:
-//   The kernel's mount table at v1.0 is keyed by an abstract u32
-//   `path_id_t`. Userspace callers pick path_ids and maintain their
-//   own path_id <-> string convention. String-path resolution for
-//   mount/bind/unmount is a v1.x extension that requires the
-//   namespace-aware fd-syscall walk subsystem. The scripture sketch
-//   (UTOPIA-SHELL-DESIGN.md section 15.6.8) was forward-looking; this
-//   implementation honors the v1.0 kernel ABI honestly and documents
-//   the future lift.
+// PATH-KEYED MOUNTS (stalk-2):
+//   The kernel mount table is keyed by the mount point's Spoor identity
+//   (dc, devno, qid.path). mount/unmount take an absolute mount-point PATH;
+//   the kernel `stalk`s it from the Territory root and keys the entry on the
+//   resolved directory's identity. The mount point MUST EXIST as a walkable
+//   directory (Plan 9 M1). This replaces the pre-stalk-2 abstract path_id_t.
 //
 // SOURCE TYPE — AsFd:
 //   Mount / chroot / pivot_root take `&impl AsFd` from `t::poll`. The
@@ -40,16 +37,7 @@ use crate::err::{Error, Result};
 use crate::poll::AsFd;
 use crate::{
     t_chroot, t_mount, t_pivot_root, t_unmount, T_MAFTER, T_MBEFORE, T_MCREATE, T_MREPL,
-    TPathId,
 };
-
-/// Abstract path-token used by mount/unmount/bind at v1.0.
-///
-/// Re-exported from the crate root so callers don't have to reach
-/// into libthyla_rs::TPathId. A v1.x extension lifts this to a path
-/// string at the syscall boundary; until then, callers pick values
-/// and maintain their own path_id <-> path mapping.
-pub type PathId = TPathId;
 
 // =============================================================================
 // MountFlags — bitmask passed to SYS_MOUNT.
@@ -148,28 +136,32 @@ impl core::ops::BitOrAssign for MountFlags {
 // mount / bind variants / unmount.
 // =============================================================================
 
-/// Mount `source`'s tree at `target_path_id` in the calling Proc's
-/// territory. `source` is any handle with a kernel-side spoor type
-/// (typically a `t::fs::File`); the kernel validates the KOBJ kind
-/// and rights at the syscall boundary.
+/// Mount `source`'s tree onto the mount-point directory named by the absolute
+/// `mount_point` path in the calling Proc's territory (stalk-2: path-keyed).
+/// `source` is any handle with a kernel-side spoor type (typically a
+/// `t::fs::File`); the kernel validates the KOBJ kind + rights and resolves
+/// `mount_point` to its (dc, devno, qid.path) identity at the syscall boundary.
+/// The mount point MUST EXIST as a walkable directory (Plan 9 M1).
 ///
 /// `flags` follows Plan 9 mount-semantics; see `MountFlags`.
 ///
 /// Errors:
 ///   - `Error::BadHandle`: `source` is not a KOBJ_SPOOR / out-of-range.
 ///   - `Error::PermissionDenied`: missing RIGHT_READ on `source`.
-///   - `Error::InvalidArgument`: `flags` contains bits outside the
-///     supported set.
+///   - `Error::InvalidArgument`: `flags` outside the supported set, or
+///     `mount_point` absent / unresolvable.
 ///   - `Error::OutOfRange`: territory mount table is full.
-///   - `Error::Io`: defense-in-depth on unmapped kernel collapse.
 pub fn mount<F: AsFd + ?Sized>(
     source: &F,
-    target_path_id: PathId,
+    mount_point: &str,
     flags: MountFlags,
 ) -> Result<()> {
-    // SAFETY: t_mount only reads the fd index; the kernel takes care
-    // of validation. No user-VA arguments to bound-check here.
-    let rc = unsafe { t_mount(source.as_raw_fd() as i64, target_path_id, flags.bits()) };
+    // SAFETY: t_mount reads the path bytes (mount_point lives in this Proc's
+    // address space for the call) + the fd index; the kernel validates both.
+    let rc = unsafe {
+        t_mount(mount_point.as_ptr(), mount_point.len(),
+                source.as_raw_fd() as i64, flags.bits())
+    };
     if rc < 0 {
         // v1.0 kernel collapses every failure to -1; map to a
         // representative variant. v1.x will return -errno.
@@ -178,37 +170,34 @@ pub fn mount<F: AsFd + ?Sized>(
     Ok(())
 }
 
-/// Bind-replace: shorthand for `mount(source, target_path_id,
-/// MountFlags::REPL)`. The kernel's MREPL semantics replace the
-/// existing mount at `target_path_id` (atomically, under the
-/// territory lock).
-pub fn bind_replace<F: AsFd + ?Sized>(source: &F, target_path_id: PathId) -> Result<()> {
-    mount(source, target_path_id, MountFlags::REPL)
+/// Bind-replace: shorthand for `mount(source, mount_point, MountFlags::REPL)`.
+/// The kernel's MREPL semantics replace the existing mount at the same
+/// mount-point identity (atomically, under the territory lock).
+pub fn bind_replace<F: AsFd + ?Sized>(source: &F, mount_point: &str) -> Result<()> {
+    mount(source, mount_point, MountFlags::REPL)
 }
 
-/// Bind-before: shorthand for `mount(source, target_path_id,
-/// MountFlags::BEFORE)`. Positions the new mount BEFORE any existing
-/// at the same `target_path_id`.
-pub fn bind_before<F: AsFd + ?Sized>(source: &F, target_path_id: PathId) -> Result<()> {
-    mount(source, target_path_id, MountFlags::BEFORE)
+/// Bind-before: shorthand for `mount(source, mount_point, MountFlags::BEFORE)`.
+/// Positions the new mount BEFORE any existing at the same mount point.
+pub fn bind_before<F: AsFd + ?Sized>(source: &F, mount_point: &str) -> Result<()> {
+    mount(source, mount_point, MountFlags::BEFORE)
 }
 
-/// Bind-after: shorthand for `mount(source, target_path_id,
-/// MountFlags::AFTER)`. Positions the new mount AFTER any existing at
-/// the same `target_path_id`.
-pub fn bind_after<F: AsFd + ?Sized>(source: &F, target_path_id: PathId) -> Result<()> {
-    mount(source, target_path_id, MountFlags::AFTER)
+/// Bind-after: shorthand for `mount(source, mount_point, MountFlags::AFTER)`.
+/// Positions the new mount AFTER any existing at the same mount point.
+pub fn bind_after<F: AsFd + ?Sized>(source: &F, mount_point: &str) -> Result<()> {
+    mount(source, mount_point, MountFlags::AFTER)
 }
 
-/// Remove the mount entry at `target_path_id` from the calling Proc's
-/// territory. Drops the per-entry Spoor refcount; the Spoor's Dev
+/// Remove the mount entry at the absolute `mount_point` path from the calling
+/// Proc's territory. Drops the per-entry Spoor refcount; the Spoor's Dev
 /// close runs if this was the last ref.
 ///
 /// Errors:
-///   - `Error::NotFound`: no entry at `target_path_id`.
-pub fn unmount(target_path_id: PathId) -> Result<()> {
-    // SAFETY: takes only a u32; no user-VA arguments.
-    let rc = unsafe { t_unmount(target_path_id) };
+///   - `Error::NotFound`: no entry at `mount_point`'s identity (or unresolvable).
+pub fn unmount(mount_point: &str) -> Result<()> {
+    // SAFETY: t_unmount reads the path bytes; no other user-VA arguments.
+    let rc = unsafe { t_unmount(mount_point.as_ptr(), mount_point.len()) };
     if rc < 0 {
         return Err(Error::NotFound);
     }
