@@ -34,6 +34,7 @@
 #include <thylacine/sched.h>
 #include <thylacine/spinlock.h>
 #include <thylacine/spoor.h>
+#include <thylacine/stalk.h>
 #include <thylacine/srvconn.h>
 #include <thylacine/territory.h>
 #include <thylacine/thread.h>
@@ -920,7 +921,9 @@ static s64 sys_close_handler(u64 hraw) {
 //   - c is NULL
 //   - dev->stat_native is NULL (Dev does not support native stat)
 //   - dev->stat_native returned an error
-static int spoor_stat_native(struct Spoor *c, struct t_stat *out) {
+// Non-static (declared in <thylacine/spoor.h>): the stalk resolver shares this
+// stat-fetch for its per-component X-search.
+int spoor_stat_native(struct Spoor *c, struct t_stat *out) {
     if (!c || !out)                                  return -1;
     if (!c->dev || !c->dev->stat_native)             return -1;
     return c->dev->stat_native(c, out);
@@ -1718,6 +1721,78 @@ static s64 sys_walk_open_handler(u64 spoor_fd_raw, u64 name_va,
     hidx_t fd = handle_alloc(p, KOBJ_SPOOR, r, nc);
     if (fd < 0) {
         spoor_clunk(nc);
+        return -1;
+    }
+    return (s64)fd;
+}
+
+// =============================================================================
+// SYS_OPEN — the multi-component pathname open (stalk-1; A-5b-0;
+// docs/STALK-DESIGN.md). Generalizes SYS_WALK_OPEN: rather than a single
+// component, it resolves a full '/'-separated path through the `stalk` resolver
+// (per-component X-search, '.'/'..' contained at the base, one Dev at v1.0 --
+// mount-crossing is stalk-2). The arg validation + rights derivation mirror
+// sys_walk_open_handler; the resolution itself is stalk().
+// =============================================================================
+static s64 sys_open_handler(u64 start_fd_raw, u64 path_va,
+                            u64 path_len_raw, u64 omode_raw) {
+    struct Thread *t = current_thread();
+    if (!t)                                          return -1;
+    struct Proc *p = t->proc;
+    if (!p)                                          return -1;
+
+    if (path_len_raw == 0)                           return -1;
+    if (path_len_raw > SYS_OPEN_PATH_MAX)            return -1;
+    if (!sys_validate_user_buf(path_va, path_len_raw)) return -1;
+    if (omode_raw & ~(u64)SYS_WALK_OPEN_OMODE_VALID) return -1;
+
+    // Resolve the base Spoor (BORROWED — stalk never refs/clunks it). FROM_ROOT
+    // uses the Territory's pivoted root_spoor; otherwise a KOBJ_SPOOR handle
+    // gated on RIGHT_READ (the capability axis; stalk's per-component perm_check
+    // is the orthogonal identity axis).
+    struct Spoor *start;
+    if (start_fd_raw == SYS_WALK_OPEN_FROM_ROOT) {
+        if (!p->territory)                           return -1;
+        start = p->territory->root_spoor;
+        if (!start)                                  return -1;
+    } else {
+        start = sys_lookup_spoor(p, (hidx_t)start_fd_raw, RIGHT_READ);
+        if (!start)                                  return -1;
+    }
+
+    // Copy the path into kernel scratch + reject embedded NUL (truncation /
+    // wire-leak vector). '/' is ALLOWED here (multi-component) — stalk
+    // tokenizes it. The scratch is one byte over so the NUL terminator below
+    // is always writable even at the max length.
+    char path_scratch[SYS_OPEN_PATH_MAX + 1];
+    for (u64 i = 0; i < path_len_raw; i++) {
+        u8 b;
+        if (uaccess_load_u8(path_va + i, &b) != 0)   return -1;
+        if (b == '\0')                               return -1;
+        path_scratch[i] = (char)b;
+    }
+    path_scratch[path_len_raw] = '\0';
+
+    int amode = (omode_raw & SYS_WALK_OPEN_OPATH) ? STALK_WALK : STALK_OPEN;
+    struct Spoor *quarry = stalk(p, start, path_scratch, path_len_raw,
+                                 amode, (u32)omode_raw);
+    if (!quarry)                                     return -1;
+
+    // Handle rights, identical policy to sys_walk_open_handler: an O_PATH
+    // (walk-only) handle is born R|W with NO RIGHT_TRANSFER (a navigation /
+    // capability base, A-1.7/F5); a normally-opened handle derives its rights
+    // from omode (A-3b) so the capability axis cannot exceed the access stalk's
+    // final perm_check validated, plus RIGHT_TRANSFER. The quarry owns its ref
+    // (from stalk); handle_alloc takes it; on a full table we clunk it.
+    rights_t r;
+    if (omode_raw & SYS_WALK_OPEN_OPATH) {
+        r = RIGHT_READ | RIGHT_WRITE;
+    } else {
+        r = rights_for_omode((u32)omode_raw) | RIGHT_TRANSFER;
+    }
+    hidx_t fd = handle_alloc(p, KOBJ_SPOOR, r, quarry);
+    if (fd < 0) {
+        spoor_clunk(quarry);
         return -1;
     }
     return (s64)fd;
@@ -5090,6 +5165,13 @@ void syscall_dispatch(struct exception_context *ctx) {
                                                   ctx->regs[1],
                                                   ctx->regs[2],
                                                   ctx->regs[3]);
+        return;
+
+    case SYS_OPEN:
+        ctx->regs[0] = (u64)sys_open_handler(ctx->regs[0],
+                                             ctx->regs[1],
+                                             ctx->regs[2],
+                                             ctx->regs[3]);
         return;
 
     case SYS_WALK_CREATE:

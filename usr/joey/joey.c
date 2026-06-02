@@ -2157,6 +2157,69 @@ int main(void) {
                 t_putstr(" bytes)\n");
             }
 
+            // === stalk-1 E2E (multi-component SYS_OPEN on the real FS) ===
+            // Resolve a 2-component absolute path through the kernel `stalk`
+            // resolver (A-5b-0; docs/STALK-DESIGN.md) on the persistent Stratum
+            // root: mkdir a dir, create a leaf inside it, then t_open the full
+            // "stalk-e2e-dir/leaf" path FROM_ROOT and read it back. Proves the
+            // resolver crosses >1 component + the per-component X-search on the
+            // real dev9p root (the corner cases -- '..', X-deny, lifetime -- are
+            // unit-tested in kernel/test/test_stalk.c). Idempotent: cleanup
+            // before + after, so no artifact survives the boot.
+            {
+                const char sdir_name[] = "stalk-e2e-dir";
+                long sdir = mkdir_or_open(T_WALK_OPEN_FROM_ROOT, sdir_name,
+                                          sizeof(sdir_name) - 1);
+                if (sdir < 0) {
+                    t_putstr("joey: stalk-1 e2e mkdir FAILED rc=");
+                    t_putstr(itoa_dec(sdir, buf, sizeof(buf)));
+                    t_putstr("\n");
+                    return 1;
+                }
+                const char sleaf[] = "leaf";
+                (void)t_unlink(sdir, sleaf, sizeof(sleaf) - 1, 0u);   // cleanup-first
+                long lf = t_walk_create(sdir, sleaf, sizeof(sleaf) - 1,
+                                        T_OWRITE, 0644u);
+                if (lf < 0) {
+                    t_putstr("joey: stalk-1 e2e create FAILED rc=");
+                    t_putstr(itoa_dec(lf, buf, sizeof(buf)));
+                    t_putstr("\n");
+                    (void)t_close(sdir);
+                    return 1;
+                }
+                const char sdata[] = "stalk";
+                (void)t_write(lf, sdata, sizeof(sdata) - 1);
+                (void)t_fsync(lf, 0);
+                (void)t_close(lf);
+
+                // The proof: a 2-component absolute open via the resolver.
+                const char spath[] = "stalk-e2e-dir/leaf";
+                long of = t_open(T_WALK_OPEN_FROM_ROOT, spath,
+                                 sizeof(spath) - 1, T_OREAD);
+                if (of < 0) {
+                    t_putstr("joey: stalk-1 e2e t_open(stalk-e2e-dir/leaf) FAILED rc=");
+                    t_putstr(itoa_dec(of, buf, sizeof(buf)));
+                    t_putstr("\n");
+                    (void)t_unlink(sdir, sleaf, sizeof(sleaf) - 1, 0u);
+                    (void)t_close(sdir);
+                    return 1;
+                }
+                unsigned char sback[8];
+                long sn = t_read(of, sback, sizeof(sback));
+                (void)t_close(of);
+                if (sn != (long)(sizeof(sdata) - 1) ||
+                    sback[0] != 's' || sback[4] != 'k') {
+                    t_putstr("joey: stalk-1 e2e read-back mismatch\n");
+                    (void)t_unlink(sdir, sleaf, sizeof(sleaf) - 1, 0u);
+                    (void)t_close(sdir);
+                    return 1;
+                }
+                (void)t_unlink(sdir, sleaf, sizeof(sleaf) - 1, 0u);   // cleanup-after
+                (void)t_close(sdir);
+                t_putstr("joey: stalk-1 multi-component SYS_OPEN E2E OK "
+                         "(stalk-e2e-dir/leaf)\n");
+            }
+
             // === FS-gamma E2E (SYS_RENAME + SYS_UNLINK) ===
             // rename (atomic replace) + unlink + rmdir against the real Stratum
             // FS. Each step cleans up first AND after, so the sequence is fully

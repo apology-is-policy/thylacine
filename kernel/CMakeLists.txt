@@ -79,6 +79,7 @@ set(KERNEL_SRCS
     syscall.c
     joey.c
     spoor.c
+    stalk.c
     dev.c
     devnone.c
     cons.c
@@ -150,6 +151,7 @@ set(KERNEL_SRCS
     test/test_9p_client.c
     test/test_dev9p.c
     test/test_perm.c
+    test/test_stalk.c
     test/test_9p_attach.c
     test/test_9p_spoor_transport.c
     test/test_9p_srvconn_transport.c

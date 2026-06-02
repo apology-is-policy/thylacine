@@ -744,6 +744,18 @@ kill = BOTH the namespace `/proc/<pid>/ctl` surface AND a narrow elevation-only 
   privilege boundary). The A-5b body (corvus lift completion #829 + Stratum coordinator #826 +
   login wiring #827) resumes ON TOP of namespace-resident `/srv`. Scripture-first: this entry +
   STALK-DESIGN + ARCH land as the scripture commit (no code); impl follows citing its SHA.
+  - **stalk-1 LANDED** *(pending SHA)* (cites scripture 514f8a6). The resolver core
+    `kernel/stalk.c` (`stalk()` -- per-component X-search, `.`/`..` contained at the base via a
+    `trail` of owned clones, one component per `Dev.walk`, no batch v1.0) + `SYS_OPEN = 65`
+    (`sys_open_handler`) + `spoor_stat_native` exposed + libt/libthyla-rs `t_open` + 12 unit tests
+    (nested fixture Dev, since devramfs is flat) + a joey 2-component dev9p E2E
+    (`stalk-e2e-dir/leaf`) + `docs/reference/104-stalk.md`. Resolution within ONE Dev (no
+    mount-crossing -- stalk-2). **Audit R1 CLEAN: 0 P0 / 0 P1 / 0 P2 / 3 P3** (Opus prosecutor
+    a0e76cb5 + self-audit CONVERGED; `memory/audit_stalk1_closed_list.md`): F1 (unvalidated
+    `amode`) FIXED; F2 (unreachable defense-in-depth branch) DOCUMENTED; F3 (inherited `handle_get`
+    TOCTOU amplified to N hops) DEFERRED to the handle-lifetime pass. Matrix GREEN: default(smp4) +
+    smp8 + UBSan ALL 698/698 + E2E + boot OK + 0 EXTINCTION. **NEXT = stalk-2** (#833: re-key the
+    mount table to mount-point Spoor identity + `cross_mounts`/domount).
 
 ---
 

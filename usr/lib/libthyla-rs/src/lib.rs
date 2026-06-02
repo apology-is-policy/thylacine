@@ -206,6 +206,7 @@ pub const T_SYS_UNLINK: u64           = 58;
 pub const T_SYS_WSTAT: u64            = 59;
 pub const T_SYS_EXIT_GROUP: u64       = 60;
 pub const T_SYS_CAP_GRANT_CLEARANCE: u64 = 61;  // A-4a clearance grant-side bridge
+pub const T_SYS_OPEN: u64             = 65;     // A-5b-0/stalk-1 multi-component open
 // SYS_UNLINK flags: rmdir an empty directory vs unlink a non-directory.
 // Mirrors the kernel's SYS_UNLINK_REMOVEDIR / wire P9_UNLINK_AT_REMOVEDIR.
 pub const T_UNLINK_REMOVEDIR: u32     = 0x200;
@@ -1508,6 +1509,27 @@ pub unsafe fn t_walk_open(spoor_fd: i64, name: *const u8, name_len: usize, omode
         in("x2") name_len as u64,
         in("x3") omode as u64,
         in("x8") T_SYS_WALK_OPEN,
+        options(nostack)
+    );
+    x0
+}
+
+/// t_open -- open a (possibly multi-component) path via the kernel `stalk`
+/// resolver (A-5b-0; SYS_OPEN; docs/STALK-DESIGN.md). `start_fd` is a
+/// KOBJ_SPOOR handle or T_WALK_OPEN_FROM_ROOT; `path` is '/'-separated;
+/// `omode` is as for t_walk_open (+ T_OPATH for a walk-only handle).
+/// Returns the opened (or O_PATH) fd (>= 0) or -1. Supersedes t_walk_open
+/// for paths of more than one component.
+#[inline(always)]
+pub unsafe fn t_open(start_fd: i64, path: *const u8, path_len: usize, omode: u32) -> i64 {
+    let mut x0: i64 = start_fd;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") path as u64,
+        in("x2") path_len as u64,
+        in("x3") omode as u64,
+        in("x8") T_SYS_OPEN,
         options(nostack)
     );
     x0

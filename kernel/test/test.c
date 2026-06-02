@@ -312,6 +312,18 @@ void test_perm_devramfs_enforced_real_metadata(void);
 void test_perm_dev_flags(void);
 void test_perm_check_dac_override_cap(void);
 void test_perm_wstat_chown_cap(void);
+void test_stalk_resolve_multi(void);
+void test_stalk_resolve_deep(void);
+void test_stalk_leading_and_double_slash(void);
+void test_stalk_dot_noop(void);
+void test_stalk_dotdot_pop(void);
+void test_stalk_dotdot_containment(void);
+void test_stalk_xsearch_deny(void);
+void test_stalk_missing_component(void);
+void test_stalk_opath_no_open(void);
+void test_stalk_open_root(void);
+void test_stalk_depth_cap(void);
+void test_stalk_lifetime_no_leak(void);
 void test_devsrv_registered(void);
 void test_devsrv_post_gate(void);
 void test_devsrv_post_basic(void);
@@ -1692,6 +1704,18 @@ struct test_case g_tests[] = {
     { "perm.dev_flags",                test_perm_dev_flags,                false, NULL },
     { "perm.check_dac_override_cap",   test_perm_check_dac_override_cap,   false, NULL },
     { "perm.wstat_chown_cap",          test_perm_wstat_chown_cap,          false, NULL },
+    { "stalk.resolve_multi",           test_stalk_resolve_multi,           false, NULL },
+    { "stalk.resolve_deep",            test_stalk_resolve_deep,            false, NULL },
+    { "stalk.leading_and_double_slash", test_stalk_leading_and_double_slash, false, NULL },
+    { "stalk.dot_noop",                test_stalk_dot_noop,                false, NULL },
+    { "stalk.dotdot_pop",              test_stalk_dotdot_pop,              false, NULL },
+    { "stalk.dotdot_containment",      test_stalk_dotdot_containment,      false, NULL },
+    { "stalk.xsearch_deny",            test_stalk_xsearch_deny,            false, NULL },
+    { "stalk.missing_component",       test_stalk_missing_component,       false, NULL },
+    { "stalk.opath_no_open",           test_stalk_opath_no_open,           false, NULL },
+    { "stalk.open_root",               test_stalk_open_root,               false, NULL },
+    { "stalk.depth_cap",               test_stalk_depth_cap,               false, NULL },
+    { "stalk.lifetime_no_leak",        test_stalk_lifetime_no_leak,        false, NULL },
     { NULL, NULL, false, NULL },          // sentinel
 };
 

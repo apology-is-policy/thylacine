@@ -189,4 +189,12 @@ u64 spoor_total_freed(void);
 struct Walkqid *walkqid_alloc(int max_qids);
 void            walkqid_free(struct Walkqid *w);
 
+// spoor_stat_native — fetch a Spoor's native metadata via its Dev's
+// stat_native vtable slot (the perm_check / fstat companion). Returns 0 on
+// success (out populated), -1 if `c`/`out` is NULL or the Dev has no
+// stat_native. Shared by the syscall handlers (fstat / walk-open / wstat /
+// open) and the stalk resolver (the per-component X-search stat fetch).
+struct t_stat;
+int spoor_stat_native(struct Spoor *c, struct t_stat *out);
+
 #endif  // THYLACINE_SPOOR_H

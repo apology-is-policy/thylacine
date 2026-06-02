@@ -95,6 +95,7 @@ enum {
     T_SYS_BOOT_COMPLETE     = 62,  // A-5a: init signals boot-complete -> banner
     T_SYS_CONSOLE_RELINQUISH = 63, // A-5a: drop own console-attach (I-27)
     T_SYS_CONSOLE_OPEN      = 64,  // A-5a: open /dev/cons -> R|W KOBJ_SPOOR fd
+    T_SYS_OPEN              = 65,  // A-5b-0/stalk-1: multi-component pathname open
 };
 
 // SYS_UNLINK flags: rmdir an empty directory (vs unlink a non-directory).
@@ -1116,6 +1117,30 @@ static inline long t_walk_open(long spoor_fd, const char *name,
     register long x2 __asm__("x2") = (long)name_len;
     register long x3 __asm__("x3") = (long)omode;
     register long x8 __asm__("x8") = T_SYS_WALK_OPEN;
+    __asm__ volatile (
+        "svc #0"
+        : "+r"(x0)
+        : "r"(x1), "r"(x2), "r"(x3), "r"(x8)
+        : "memory", "cc"
+    );
+    return x0;
+}
+
+// t_open — open a file at a (possibly multi-component) path resolved by the
+// kernel `stalk` resolver (A-5b-0; SYS_OPEN; docs/STALK-DESIGN.md). `start_fd`
+// is a KOBJ_SPOOR handle (RIGHT_READ) or T_WALK_OPEN_FROM_ROOT to resolve from
+// the Territory root. `path` is '/'-separated (NUL-free); `omode` is as for
+// t_walk_open (OREAD/OWRITE/ORDWR/OEXEC + OTRUNC; T_OPATH for a walk-only
+// handle). Returns an opened (or O_PATH walkable) KOBJ_SPOOR fd (>= 0) or -1.
+// Supersedes t_walk_open for paths of more than one component.
+__attribute__((always_inline))
+static inline long t_open(long start_fd, const char *path,
+                          size_t path_len, unsigned long omode) {
+    register long x0 __asm__("x0") = start_fd;
+    register long x1 __asm__("x1") = (long)(unsigned long)path;
+    register long x2 __asm__("x2") = (long)path_len;
+    register long x3 __asm__("x3") = (long)omode;
+    register long x8 __asm__("x8") = T_SYS_OPEN;
     __asm__ volatile (
         "svc #0"
         : "+r"(x0)

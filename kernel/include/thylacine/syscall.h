@@ -1293,6 +1293,21 @@ enum {
     // input. joey opens it while still attached -- BEFORE SYS_CONSOLE_RELINQUISH --
     // and hands it to login; login + the user shell are never console-attached.
     SYS_CONSOLE_OPEN = 64,
+
+    // SYS_OPEN -- the multi-component pathname open (stalk-1; A-5b-0;
+    // docs/STALK-DESIGN.md). Generalizes SYS_WALK_OPEN from one component to a
+    // full path resolved by the `stalk` resolver (per-component X-search;
+    // '.'/'..' contained at the base; one Dev at v1.0 -- mount-crossing is
+    // stalk-2). Supersedes SYS_WALK_OPEN going forward (which remains as the
+    // single-component fast path until its callers migrate).
+    //   x0 = start_fd : a KOBJ_SPOOR handle (RIGHT_READ) OR
+    //                   SYS_WALK_OPEN_FROM_ROOT ((u64)-1) for the Territory root.
+    //   x1 = path_va  : user-VA of the path bytes (NUL-free; '/'-separated).
+    //   x2 = path_len : 1 .. SYS_OPEN_PATH_MAX.
+    //   x3 = omode    : OREAD/OWRITE/ORDWR/OEXEC (+ OTRUNC); SYS_WALK_OPEN_OPATH
+    //                   selects a walk-only (unopened) handle.
+    // Returns an opened (or O_PATH walkable) KOBJ_SPOOR fd (>= 0) or -1.
+    SYS_OPEN = 65,
 };
 
 // SYS_WALK_OPEN's FROM_ROOT sentinel: when passed as the spoor_fd, the
@@ -1513,6 +1528,12 @@ _Static_assert(__builtin_offsetof(struct t_stat, gid)       == 76, "t_stat.gid a
 // per-name cap is larger; we choose the smaller bound here because v1.0
 // callers (joey, the bringup probes) all walk short server-stamped names.
 #define SYS_WALK_OPEN_NAME_MAX  64u
+
+// Maximum full-path length for SYS_OPEN (stalk-1). Bounds the kernel-stack
+// path scratch + the per-byte uaccess copy. A path is at most STALK_MAX_DEPTH
+// components, each <= SYS_WALK_OPEN_NAME_MAX, plus separators; 1024 comfortably
+// covers v1.0 absolute paths (/var/lib/corvus, /home/<user>/...).
+#define SYS_OPEN_PATH_MAX  1024u
 
 // Permitted omode bits for SYS_WALK_OPEN. Plan 9 modes: OREAD=0,
 // OWRITE=1, ORDWR=2, OEXEC=3 (low 2 bits) plus the OTRUNC modifier
