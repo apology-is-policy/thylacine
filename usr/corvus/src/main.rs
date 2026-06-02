@@ -1550,6 +1550,13 @@ struct Session {
     user: [u8; MAX_USER_LEN],
     token: [u8; TOKEN_LEN],
     keypair: [u8; KEYPAIR_LEN],
+    // A-5b: conn_id of the connection that ran the successful AUTH. The
+    // global AUTH session is cleared on THIS connection's close (close_conn)
+    // or an explicit SESSION_CLOSE -- never on a non-owning bearer-token
+    // connection's close, so a 2nd Proc presenting the token for an UNWRAP
+    // (the section 6.3 forward; e.g. the A-5b storage coordinator pulling a
+    // home DEK) cannot wipe a live login session by disconnecting. 0 = none.
+    owner_conn_id: u64,
 }
 
 static mut SESSION: Session = Session {
@@ -1558,13 +1565,15 @@ static mut SESSION: Session = Session {
     user: [0; MAX_USER_LEN],
     token: [0; TOKEN_LEN],
     keypair: [0; KEYPAIR_LEN],
+    owner_conn_id: 0,
 };
 
 unsafe fn session_active() -> bool {
     core::ptr::read(core::ptr::addr_of!(SESSION.active))
 }
 
-unsafe fn session_install(user: &[u8], token: &[u8; TOKEN_LEN], keypair: &[u8; KEYPAIR_LEN]) {
+unsafe fn session_install(user: &[u8], token: &[u8; TOKEN_LEN], keypair: &[u8; KEYPAIR_LEN],
+                          owner_conn_id: u64) {
     let s = core::ptr::addr_of_mut!(SESSION);
     let user_ptr = core::ptr::addr_of_mut!((*s).user) as *mut u8;
     let token_ptr = core::ptr::addr_of_mut!((*s).token) as *mut u8;
@@ -1580,6 +1589,7 @@ unsafe fn session_install(user: &[u8], token: &[u8; TOKEN_LEN], keypair: &[u8; K
     }
     core::ptr::copy_nonoverlapping(keypair.as_ptr(), kp_ptr, KEYPAIR_LEN);
     core::ptr::write(core::ptr::addr_of_mut!((*s).user_len), user.len() as u8);
+    core::ptr::write(core::ptr::addr_of_mut!((*s).owner_conn_id), owner_conn_id);
     core::ptr::write(core::ptr::addr_of_mut!((*s).active), true);
 }
 
@@ -1646,6 +1656,13 @@ unsafe fn session_clear() {
         core::ptr::write_volatile(kp_ptr.add(i), 0);
     }
     core::ptr::write(core::ptr::addr_of_mut!((*s).user_len), 0);
+    core::ptr::write(core::ptr::addr_of_mut!((*s).owner_conn_id), 0);
+}
+
+// A-5b: the conn_id that owns the live AUTH session (0 = none). The owner is
+// the connection that ran AUTH; only its close clears the session.
+unsafe fn session_owner_conn_id() -> u64 {
+    core::ptr::read(core::ptr::addr_of!(SESSION.owner_conn_id))
 }
 
 // =============================================================================
@@ -1713,7 +1730,7 @@ fn stage_response(response: &mut Vec<u8>, status: u8, payload: &[u8]) {
 //   [1..1+ul]      user
 //   [1+ul..3+ul]   pass_len u16 LE (1..=MAX_PASS_LEN)
 //   [3+ul..]       passphrase
-unsafe fn handle_auth(payload: &[u8], response: &mut Vec<u8>) {
+unsafe fn handle_auth(owner_conn_id: u64, payload: &[u8], response: &mut Vec<u8>) {
     if payload.len() < 3 {
         return stage_response(response, STATUS_BAD_FORMAT, &[]);
     }
@@ -1788,7 +1805,7 @@ unsafe fn handle_auth(payload: &[u8], response: &mut Vec<u8>) {
     }
     let _ = t_explicit_bzero(entropy.as_mut_ptr(), TOKEN_ENTROPY_BYTES);
 
-    session_install(user, &token, &keypair);
+    session_install(user, &token, &keypair, owner_conn_id);
     wipe(&mut keypair);
 
     stage_response(response, STATUS_OK, &token);
@@ -2683,6 +2700,11 @@ const P9_VERSION_9P2000_L: &[u8] = b"9P2000.L";
 
 struct Conn {
     handle: i64,
+    // A-5b: a process-unique monotonic id assigned at accept. The AUTH
+    // session records its owning conn's id; only the owner's close clears
+    // the session (close_conn), so a non-owning bearer-token connection
+    // cannot wipe a live login session by disconnecting.
+    conn_id: u64,
     // Captured at t_srv_accept; carried by-value across the conn's life
     // for corvus.tla's ConnOpIdentityIsKernelTruth. Not yet read at the
     // dispatch layer (v1.0 has no admin verbs that gate on peer identity
@@ -2714,9 +2736,10 @@ struct Conn {
 }
 
 impl Conn {
-    fn new(handle: i64, peer: TSrvPeerInfo) -> Self {
+    fn new(handle: i64, peer: TSrvPeerInfo, conn_id: u64) -> Self {
         Self {
             handle,
+            conn_id,
             peer,
             version_done: false,
             msize: SERVER_MSIZE,
@@ -2861,9 +2884,10 @@ unsafe fn try_dispatch_verb(conn: &mut Conn) {
         // (immutable identity + the handle for re-query).
         let conn_handle = conn.handle;
         let conn_peer = conn.peer;
+        let conn_id = conn.conn_id;
 
         match verb_id {
-            VERB_AUTH => handle_auth(&payload_owned, &mut conn.pending_response),
+            VERB_AUTH => handle_auth(conn_id, &payload_owned, &mut conn.pending_response),
             VERB_SESSION_CLOSE => handle_session_close(&payload_owned, &mut conn.pending_response),
             VERB_UNWRAP => handle_unwrap(&payload_owned, &mut conn.pending_response),
             VERB_USER_CREATE => handle_user_create(conn_handle, &payload_owned,
@@ -3247,6 +3271,8 @@ const MAX_CONNS: usize = 8;
 
 unsafe fn srv_server_loop(listener: i64) -> i64 {
     let mut conns: Vec<Conn> = Vec::with_capacity(MAX_CONNS);
+    // A-5b: monotonic per-accept conn id (0 = the "no owner" sentinel).
+    let mut next_conn_id: u64 = 1;
 
     // Bounded poll-fd buffer: [listener] + per-conn (max MAX_CONNS).
     let mut pollfds: [TPollFd; 1 + MAX_CONNS] =
@@ -3289,7 +3315,8 @@ unsafe fn srv_server_loop(listener: i64) -> i64 {
                         // listener-side state; corvus's loop will
                         // re-poll.
                     } else {
-                        conns.push(Conn::new(h, peer));
+                        conns.push(Conn::new(h, peer, next_conn_id));
+                        next_conn_id = next_conn_id.wrapping_add(1);
                     }
                 }
                 // else: listener torn down; loop will pick it up via
@@ -3349,9 +3376,17 @@ unsafe fn close_conn(conns: &mut Vec<Conn>, idx: usize) {
     wipe(&mut conn.out_buf);
     wipe(&mut conn.pending_request);
     wipe(&mut conn.pending_response);
-    // Clear the global session — at v1.0 only one client at a time,
-    // so a closed conn implies the session (if any) is orphaned.
-    session_clear();
+    // A-5b: clear the global AUTH session only when its OWNING connection
+    // (the one that ran AUTH) closes. A non-owning bearer-token connection
+    // -- e.g. the A-5b storage coordinator that presented login's token for
+    // an UNWRAP -- disconnecting must NOT wipe a live login session (that
+    // would break mid-session A-4 legate elevation, which re-presents the
+    // same token). SESSION_CLOSE (the verb) + shutdown clear unconditionally;
+    // only this connection-teardown path is gated on ownership.
+    let owner = session_owner_conn_id();
+    if owner != 0 && conn.conn_id == owner {
+        session_clear();
+    }
     let _ = t_close(conn.handle);
     conns.remove(idx);
 }
