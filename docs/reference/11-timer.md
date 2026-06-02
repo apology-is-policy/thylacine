@@ -25,7 +25,8 @@ The ARMv8 generic timer is a system-register peripheral (no MMIO). Each PE has a
 ```c
 #define TIMER_INTID_EL1_PHYS_NS  GIC_PPI_TO_INTID(14)   /* = 30 */
 
-bool timer_init(u32 hz);             // one-time bring-up; hz typically 1000
+bool timer_init(u32 hz);             // one-time bring-up (boot CPU); hz typically 1000
+void timer_arm_this_cpu(void);       // arm THIS CPU's banked timer (per-CPU; #810)
 void timer_irq_handler(u32 intid, void *arg);
 
 u64  timer_get_ticks(void);          // monotonic; 0 before timer_init
@@ -37,11 +38,13 @@ u64  timer_ns_to_counter(u64 ns);    // absolute ns → CNTPCT value (P5-tsleep)
 void timer_busy_wait_ticks(u64 n);   // WFI loop until N ticks elapsed
 ```
 
-`timer_init(hz)` is one-time: reads `CNTFRQ_EL0`, computes `reload = freq / hz`, programs `CNTP_TVAL_EL0 = reload`, enables the timer (`CNTP_CTL_EL0 = ENABLE | !IMASK`). Returns `false` if `hz == 0` or `hz > freq`. Caller follows with `gic_attach(TIMER_INTID_EL1_PHYS_NS, timer_irq_handler, NULL)` and `gic_enable_irq(TIMER_INTID_EL1_PHYS_NS)` to route the IRQ through.
+`timer_init(hz)` is one-time (boot CPU): reads `CNTFRQ_EL0`, computes and caches `reload = freq / hz`, then calls `timer_arm_this_cpu()` to program `CNTP_TVAL_EL0 = reload` + enable (`CNTP_CTL_EL0 = ENABLE | !IMASK`). Returns `false` if `hz == 0` or `hz > freq`. Caller follows with `gic_attach(TIMER_INTID_EL1_PHYS_NS, timer_irq_handler, NULL)` and `gic_enable_irq(TIMER_INTID_EL1_PHYS_NS)` to route the IRQ through.
 
-`timer_irq_handler(intid, arg)` is registered with the GIC. Increments `g_ticks`; reloads `CNTP_TVAL_EL0` for the next fire. The handler signature matches `gic_irq_handler_t`.
+`timer_arm_this_cpu()` arms the **current** CPU's timer from the cached `g_reload` (it does NOT recompute freq/reload or reset `g_ticks`). `CNTP_TVAL_EL0`/`CNTP_CTL_EL0` are **per-CPU banked**, so each CPU must arm its own to receive the preemptive scheduler tick. The boot CPU arms via `timer_init`; each secondary arms via this function from `per_cpu_main`'s idle loop, gated on `smp_enable_secondary_preemption()` (see below). A secondary with no armed timer never preempts -- a CPU-bound EL0 thread there monopolizes the CPU and starves co-runnable peers (invariants I-8 / I-17; bug #810). The caller must also `gic_enable_irq(TIMER_INTID_EL1_PHYS_NS)` on that CPU (the PPI enable is per-redistributor).
 
-`timer_get_ticks()` is monotonic and lock-free at v1.0 (single CPU; the increment-and-reload is non-preemptable since IRQs are masked at PSTATE during the handler). Phase 2 adds atomic semantics for SMP.
+`timer_irq_handler(intid, arg)` is registered with the GIC (one global handler, dispatched on whichever CPU takes the IRQ). It re-arms **this** CPU's banked `CNTP_TVAL_EL0`, then calls `sched_tick()` (per-CPU preemption accounting + the tsleep deadline scan). `g_ticks` is incremented **only on the boot CPU** (`smp_cpu_idx_self() == 0`): it is the single-writer monotonic timebase for `timer_busy_wait_ticks` + diagnostics, and gating it to cpu0 preserves the pre-#810 advance rate (1 kHz from cpu0) without a multi-writer race now that secondaries also tick.
+
+`timer_get_ticks()` is monotonic and lock-free: only the boot CPU writes `g_ticks` (inside the IRQ handler, non-preemptable since DAIF is masked there) and `_get_ticks` reads it. Secondary ticks (post-#810) do not touch `g_ticks`, so the single-writer property holds under SMP without atomics.
 
 `timer_get_counter()` reads `CNTPCT_EL0` directly — useful for fine-grained delta measurements (sub-millisecond) where the 1 ms tick granularity is too coarse.
 
@@ -114,14 +117,14 @@ WFI suspends the CPU until an interrupt arrives. The next timer tick (or any oth
 ## Data structures
 
 ```c
-static u64 g_freq;       // CNTFRQ_EL0, cached at init
-static u64 g_reload;     // freq / hz
-static u64 g_ticks;      // incremented per IRQ
+static u64 g_freq;       // CNTFRQ_EL0, cached at init (write-once before SMP)
+static u64 g_reload;     // freq / hz (write-once before SMP; read by every CPU's arm + re-arm)
+static u64 g_ticks;      // incremented per IRQ, BOOT CPU ONLY
 ```
 
-Three u64s. No arrays. No locks at v1.0 (single CPU; the IRQ handler is the only mutator of `g_ticks` and `_get_ticks` is the only reader from non-IRQ context).
+Three u64s. No arrays, no locks. `g_freq` / `g_reload` are written once by `timer_init` on the boot CPU, before any secondary arms its timer (the `smp_init` bring-up barrier + the RELEASE/ACQUIRE on `g_secondary_preempt_enabled` give the happens-before edge), so secondaries read them unsynchronized but always see the final value -- a future writer to `g_reload` (e.g. dynamic tick reprogramming) would need to add ordering.
 
-Phase 2 adds atomic load-acquire on `g_ticks` (multiple CPUs read; only the IRQ-holding CPU writes — the standard single-writer-multi-reader pattern). The increment in the handler can stay non-atomic on SMP because each CPU's banked timer fires its handler on that CPU; `g_ticks` becomes per-CPU and a sum-of-tickers helper aggregates.
+`g_ticks` stays a **single-writer** counter even under SMP: as of #810 every CPU takes timer IRQs and re-arms its own banked timer, but only the boot CPU (`smp_cpu_idx_self() == 0`) increments `g_ticks`. This deliberately keeps the `timer_busy_wait_ticks` timebase identical to the pre-SMP-preemption behavior (1 kHz from cpu0) and avoids the multi-writer read-modify-write race a per-CPU-summed counter would otherwise require. (The earlier plan to make `g_ticks` per-CPU + aggregate was dropped: the boot-CPU-only increment is simpler and every `g_ticks` consumer runs on the boot path.)
 
 ---
 

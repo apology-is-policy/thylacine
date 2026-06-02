@@ -574,6 +574,72 @@ the #806 re-entrancy guard as the permanent runtime tripwire for any recurrence.
 
 ---
 
+## 6.14 #810 cracked — gdbstub a HANG; distrust the inherited hypothesis (2026-06-01)
+
+The "exit_group cascade SMP race" — an intermittent boot HANG (no EXTINCTION) at
+the `pouch-hello-exitgroup` smoke, ~1/2 at `-smp 4`, worse under host load — was
+handed off across sessions with a *named root-cause hypothesis*: a missed
+death-wake / on_cpu spin in `proc_group_terminate`'s cascade reap. It was wrong.
+The real bug: **secondary CPUs had no per-CPU timer, so a CPU-bound EL0 thread on
+a secondary was never preempted** — the exitgroup test's `main()` busy-spun
+`while(g_started<2)` on a secondary, monopolizing it while its worker sat RUNNABLE
+in that CPU's run tree, never scheduled; `g_started` never reached 2, `exit_group`
+never ran, joey's `wait_pid` hung. The cascade never even executed. Fixed by
+arming the per-CPU timer on secondaries (deferred to the production transition so
+the UP-like in-kernel tests stay quiescent). Five transferable moves:
+
+1. **A HANG is a gift: capture it with a non-perturbing gdbstub.** Unlike a crash
+   (which needs HX-1 to fire), a hang sits perfectly still. Boot QEMU with `-s`
+   (gdbstub, running — `run-vm.sh` passes it through), detect the stall in the
+   UART log (reached marker X, no marker Y, log size stable, QEMU alive), then
+   attach `lldb` in batch: `gdb-remote :1234` + `target modules load --file
+   thylacine.elf --slide <KASLR-offset-from-the-banner>` gives a symbolized
+   all-vCPU backtrace + `print` of any kernel global. This is the timing-race
+   analog of 6.12-lesson-2 ("instrumentation detunes"): the gdbstub observes
+   without recompiling. The capture harness (`build/hunt810/gdbcatch.sh`) loops
+   until it catches a hang (~1/2), so even an intermittent bug is caught in 1-3
+   boots.
+
+2. **The inherited hypothesis is a hypothesis, not a fact — re-derive from ground
+   truth.** The handoff's "cascade reap race" framing had survived multiple
+   sessions unverified. The gdbstub disassembly of the surviving EL0 thread —
+   `yield; ldar w9,[x8]; cmp w9,#0x2; b.lt` — is uniquely `main`'s `g_started<2`
+   loop, not a worker and not `proc_group_terminate`. I *also* misread it on the
+   first (register-only) dump as `worker_spin`; the *second* dump (with
+   disassembly) corrected me. Read the actual instructions, not the symbol you
+   expect. (§6.2, applied to an inherited theory.)
+
+3. **The `-smp` discriminator collapses the search.** `-smp 1`: 10/10 boots clean.
+   That single fact proved the hang NEEDS a secondary CPU, ruling out every
+   non-SMP cause and pointing straight at "what's different about secondaries" —
+   which led to the per-CPU-timer asymmetry. (Same move as 6.12 for #788; vary the
+   runtime, not the binary.) The `g_ipi_resched_count[]` global (read via lldb)
+   ruled out an IPI-delivery gap in the same pass.
+
+4. **Grep the history before re-treading it.** A `git grep`/doc sweep surfaced
+   `docs/handoffs/011-p2db-eb.md`: per-CPU-timer-on-secondaries had been tried
+   TWICE (P2-Dd) and reverted, because it exposed two latent SMP races. Both were
+   since fixed by *other* work (#788's `on_cpu` gate; the EL1h conversion / I-21).
+   So the fix was sound *now* even though it had failed before — and the two
+   historical failure tests (`rfork_stress_1000`, `preemption_smoke`) became the
+   precise regression targets to re-prove. Whole-system stewardship pays here: the
+   answer was in the tree's own memory.
+
+5. **A correct fix can EXPOSE a latent bug — that's not a regression in your fix,
+   it's the masking stack in reverse (§6.1).** Arming the secondary timer at
+   bring-up immediately crashed `scheduler.preemption_smoke`
+   (`thread_free of RUNNING thread`): the in-kernel tests are deliberately UP-like
+   (`sched_set_notify_enabled(false)` parks secondaries), and a per-CPU timer gave
+   each secondary an independent wake → it stole a test thread. The fix wasn't
+   wrong; it unmasked an assumption. Resolution: defer the arm past the test phase
+   (mirror the existing notify gate). The matrix (smp4 20-boot 0/20 hangs + 678/678,
+   UBSan 5/5, smp8 8/8) is the empirical gate for a timing fix that can't be A/B'd
+   by rebuild-and-rerun; an independent adversarial prosecutor + a self-audit
+   converged CLEAN, with the load-bearing argument being correctness-by-construction
+   (every CPU now has the preemptive tick + syscall/fault paths are non-preemptible).
+
+---
+
 ## 7. Appendix — reproduction recipe
 
 ```sh

@@ -478,7 +478,9 @@ NULL-guard handles `thread_switch` (P2-A direct-switch primitive used by context
 
 ## WFI-aware work-stealing (P3-G)
 
-Closes R5-H **F77** (try_steal extincts on transient peer-lock contention) + **F78** (ready/wakeup don't IPI an idle peer in WFI). Without these fixes, secondaries — which have no per-CPU timer at v1.0 — can sit in WFI indefinitely while runnable work waits on a peer's tree.
+Closes R5-H **F77** (try_steal extincts on transient peer-lock contention) + **F78** (ready/wakeup don't IPI an idle peer in WFI). Without these fixes, secondaries can sit in WFI while runnable work waits on a peer's tree.
+
+> **Update (#810): secondaries now run a per-CPU timer in production.** When this section was written, secondaries had no per-CPU timer, so the WFI-wake IPI was the *only* way an idle secondary discovered stealable work, and a CPU-bound EL0 thread on a secondary could never be preempted (it monopolized the CPU — the pouch-hello-exitgroup boot hang). As of #810 each secondary arms its own banked generic timer (`timer_arm_this_cpu`) at the production transition (`smp_enable_secondary_preemption()`, called from `boot_main` after the UP-like in-kernel test suite). This gives secondaries a ~1 kHz preemptive tick (invariants I-8 / I-17 now hold on every CPU) **and** an independent self-wake that strengthens stealable-work discovery — the F78 WFI-wake IPI remains as the *prompt* (low-latency) path, while the timer is the *floor*. The arming is DEFERRED past `test_run_all()` (mirroring the `sched_set_notify_enabled` gate) so the deterministic, single-CPU-scheduled in-kernel tests stay quiescent — arming during the test phase let a secondary self-wake and steal a test thread, surfacing as `thread_free of RUNNING thread` in `scheduler.preemption_smoke`. See `docs/reference/11-timer.md` (`timer_arm_this_cpu`) and `kernel/smp.c::smp_enable_secondary_preemption`.
 
 ### Mechanism
 

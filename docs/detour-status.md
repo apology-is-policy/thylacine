@@ -615,6 +615,20 @@ kill = BOTH the namespace `/proc/<pid>/ctl` surface AND a narrow elevation-only 
     F2 `_Static_assert` CONS_RING_SIZE power-of-two; F3 the two-thread `cons.blocking_read_wakeup`
     I-9 regression test. Matrix: default(smp4) + UBSan + smp8 all **678/678** + boot OK.
     Closed list: `audit_a4c1_closed_list.md`. **c-2 (SAK) NEXT.**
+    - **INTERLEAVED (2026-06-02): #810 SMP secondary-timer fix landed** (a "long bug
+      hunt" preempting c-2, user-directed). The intermittent boot HANG at
+      `pouch-hello-exitgroup` was root-caused (QEMU gdbstub, not the handoff's
+      "cascade-reap" guess) to **secondary CPUs having no per-CPU timer** -> no
+      preemption on secondaries -> a CPU-bound EL0 thread (the exitgroup test's
+      `main` spinning `while(g_started<2)`) monopolized a secondary while its worker
+      starved -> `wait_pid` hung. Fix: arm a per-CPU timer on every secondary,
+      DEFERRED to the production transition (`smp_enable_secondary_preemption()` in
+      `boot_main`) so the UP-like in-kernel tests stay quiescent. Invariants I-8 / I-17
+      now hold on secondaries. Matrix: smp4 0/20 hangs + UBSan 5/5 + smp8 0/8, all
+      678/678; adversarial prosecutor + self-audit CLEAN (0 P0/0 P1/0 P2/3 P3 fixed).
+      The two twice-reverted P2-Dd blockers (thread_free/on_cpu; SP_EL1/SPSel) are
+      closed by #788 + EL1h. See `memory/bug_810_smp_no_secondary_timer.md` +
+      `docs/DEBUGGING-PLAYBOOK.md` §6.14 + `docs/reference/11-timer.md`. **c-2 still NEXT.**
 - **Depends:** A-1 + corvus. **Seams:** resource-scoped HW-cap allowlist (the structured caps
   TLV); distributed clearance crypto-proof (v1.x); the graphical Nitpicker-style trusted
   screen (Halcyon); a finer per-target kill handle (vs the blanket `CAP_KILL`).

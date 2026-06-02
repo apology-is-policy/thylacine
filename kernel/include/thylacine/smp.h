@@ -202,4 +202,13 @@ void smp_cpu_ipi_init(unsigned cpu_idx);
 // the periodic preemption timer is the floor if an IPI is missed.
 void smp_resched_others(void);
 
+// Enable preemptive scheduling on secondary CPUs (each arms its own per-CPU
+// generic timer). Called once from boot_main at the production transition,
+// after the UP-like in-kernel test suite. Before this, secondaries have no
+// timer and stay quiescent (test-phase determinism); after, every CPU gets the
+// preemptive tick so a CPU-bound thread on a secondary cannot monopolize it
+// (#810 / invariants I-8, I-17). This is what makes smp_resched_others's
+// "periodic preemption timer is the floor" true on secondaries.
+void smp_enable_secondary_preemption(void);
+
 #endif // THYLACINE_SMP_H

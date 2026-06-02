@@ -80,9 +80,18 @@ static inline void write_cntp_ctl_el0(u64 v) {
 // API-surface guarantee is what callers should be able to rely on.
 // ---------------------------------------------------------------------------
 
-static u64 g_freq;            // CNTFRQ_EL0 in Hz, cached at init
-static u64 g_reload;          // freq / hz, programmed into CNTP_TVAL_EL0
-static volatile u64 g_ticks;  // incremented once per IRQ
+static u64 g_freq;            // CNTFRQ_EL0 in Hz, cached at init (write-once before SMP)
+// freq / hz reload count. Write-once on the boot CPU in timer_init, BEFORE any
+// secondary arms its timer -- the smp_init bring-up barrier + the release/acquire
+// on g_secondary_preempt_enabled (smp.c) order it -- so every CPU's
+// timer_arm_this_cpu() + per-tick re-arm reads it unsynchronized yet always sees
+// the final value. A future dynamic-reprogram writer would need to add ordering.
+static u64 g_reload;
+// Monotonic tick counter -- BOOT CPU ONLY (#810). Post-#810 every CPU takes timer
+// IRQs, but only cpu0 increments g_ticks: a single-writer timebase for
+// timer_busy_wait_ticks + diagnostics that preserves the pre-#810 1 kHz rate with
+// no multi-writer race. volatile so non-IRQ readers re-load each access.
+static volatile u64 g_ticks;
 
 // ---------------------------------------------------------------------------
 // timer_init.
@@ -116,11 +125,26 @@ bool timer_init(u32 hz) {
     g_reload = reload;
     g_ticks  = 0;
 
-    // Program initial reload, then enable (IMASK=0 so IRQs flow).
-    write_cntp_tval_el0(g_reload);
-    write_cntp_ctl_el0(CNTP_CTL_ENABLE);
+    // Arm the boot CPU's timer. Each secondary arms its own (per-CPU
+    // banked) timer via timer_arm_this_cpu() from per_cpu_main.
+    timer_arm_this_cpu();
 
     return true;
+}
+
+// Arm THIS CPU's banked physical timer using the reload computed by
+// timer_init. CNTP_TVAL_EL0 / CNTP_CTL_EL0 are per-CPU banked, so the boot
+// CPU's timer_init does NOT arm secondaries -- each CPU must call this to
+// receive the preemptive scheduler tick. A secondary with no armed timer
+// never preempts: a CPU-bound EL0 thread there monopolizes the CPU and
+// starves co-runnable peers (I-8 / I-17 violation; #810). MUST run after
+// timer_init has set g_reload (boot CPU); the EL1-phys-NS timer PPI must
+// also be enabled on this CPU's redistributor (gic_enable_irq, per-CPU).
+void timer_arm_this_cpu(void) {
+    if (g_reload == 0)
+        extinction("timer_arm_this_cpu before timer_init (g_reload unset)");
+    write_cntp_tval_el0(g_reload);
+    write_cntp_ctl_el0(CNTP_CTL_ENABLE);
 }
 
 // ---------------------------------------------------------------------------
@@ -130,13 +154,21 @@ bool timer_init(u32 hz) {
 void timer_irq_handler(u32 intid, void *arg) {
     (void)intid;
     (void)arg;
-    g_ticks++;
+    // Re-arm THIS CPU's timer (CNTP_TVAL_EL0 is per-CPU banked; every CPU
+    // with an armed timer re-arms its own). CNTP_CTL stays at ENABLE.
     write_cntp_tval_el0(g_reload);
-    // CNTP_CTL stays at ENABLE; no need to rewrite.
+
+    // g_ticks is the boot CPU's single-writer monotonic counter (the
+    // timer_busy_wait_ticks timebase + diagnostics). Secondaries now also
+    // tick (#810: per-CPU preemption), but they must NOT race g_ticks --
+    // only the boot CPU increments it, preserving the pre-#810 timebase
+    // and avoiding a multi-writer read-modify-write data race.
+    if (smp_cpu_idx_self() == 0) g_ticks++;
 
     // P2-Bc: scheduler tick. Decrements current's slice; sets
     // need_resched if expired so preempt_check_irq triggers a
-    // context switch on IRQ-return. No-op before sched_init.
+    // context switch on IRQ-return. No-op before sched_init. Runs on
+    // EVERY CPU's tick (per-CPU state); secondaries get it now too.
     sched_tick();
 }
 

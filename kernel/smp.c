@@ -137,6 +137,30 @@ void smp_resched_others(void) {
     }
 }
 
+// #810: secondary CPUs DEFER arming their per-CPU generic timer until the
+// production transition (boot_main, after the UP-like in-kernel test suite).
+// During the test phase, secondaries stay quiescent -- parked in WFI, woken
+// only by an explicit notify IPI (sched_set_notify_enabled is OFF for tests).
+// So the deterministic, single-CPU-scheduled in-kernel tests are not perturbed
+// by a secondary self-waking on its own timer tick and stealing a test thread
+// (which surfaced as `thread_free of RUNNING thread` in
+// scheduler.preemption_smoke). This is the per-CPU-timer analog of P3-G's
+// sched_set_notify_enabled gate; each secondary arms its own banked timer in
+// per_cpu_main's idle loop once this flag is set.
+static volatile bool g_secondary_preempt_enabled;
+
+// Enable preemptive scheduling on secondary CPUs. Called once from boot_main
+// at the production transition (alongside sched_set_notify_enabled(true),
+// after test_run_all). Publishes the flag, then wakes every secondary out of
+// WFI so it observes the flag and arms its own per-CPU timer promptly (rather
+// than waiting for the first work-placement notify IPI). I-8 / I-17: every CPU
+// then gets the preemptive tick, so a CPU-bound thread on a secondary can no
+// longer monopolize it (the #810 exitgroup boot hang).
+void smp_enable_secondary_preemption(void) {
+    __atomic_store_n(&g_secondary_preempt_enabled, true, __ATOMIC_RELEASE);
+    smp_resched_others();
+}
+
 static unsigned g_cpu_count;
 static unsigned g_cpu_online_count;
 
@@ -390,7 +414,23 @@ void per_cpu_main(int cpu_idx) {
     // sched() internally takes its own spin_lock_irqsave/restore — so
     // calling sched with IRQs already masked is sound (sched saves
     // MASKED, restores MASKED).
+    // #810: this secondary arms its OWN per-CPU timer the first time it
+    // observes the production-preemption flag (set by smp_enable_secondary_-
+    // preemption at boot_main's transition, after the UP-like in-kernel test
+    // suite). Deferred to HERE -- not the bringup above -- so a secondary stays
+    // quiescent (no self-wake, no work-stealing) during the deterministic test
+    // phase, while production gets the preemptive tick on every CPU (I-8/I-17).
+    // The timer + PPI registers are per-CPU banked, so each secondary must arm
+    // its own (gic_enable_irq enables INTID 30 on THIS CPU's redistributor).
+    bool timer_armed = false;
     for (;;) {
+        if (!timer_armed &&
+            __atomic_load_n(&g_secondary_preempt_enabled, __ATOMIC_ACQUIRE)) {
+            if (!gic_enable_irq(TIMER_INTID_EL1_PHYS_NS))
+                extinction("per_cpu_main: gic_enable_irq(timer PPI) failed");
+            timer_arm_this_cpu();
+            timer_armed = true;
+        }
         irq_state_t s = spin_lock_irqsave(NULL);
         sched_set_idle_in_wfi(true);
         sched();

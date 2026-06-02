@@ -36,14 +36,24 @@
 // QEMU virt direct EL1 entry the bits are already set by the firmware.
 #define TIMER_INTID_EL1_PHYS_NS  GIC_PPI_TO_INTID(14)   /* = 30 */
 
-// One-time bring-up. Reads CNTFRQ_EL0, computes the reload count for
-// `hz` Hz, programs CNTP_TVAL_EL0 + CNTP_CTL_EL0 (ENABLE, !IMASK).
+// One-time bring-up (boot CPU). Reads CNTFRQ_EL0, caches the reload count
+// for `hz` Hz, then arms the boot CPU's timer via timer_arm_this_cpu()
+// (CNTP_TVAL_EL0 + CNTP_CTL_EL0 = ENABLE, !IMASK). Secondaries arm their
+// own banked timer (timer_arm_this_cpu) at the production transition; #810.
 // Caller follows with gic_attach(TIMER_INTID_EL1_PHYS_NS, ...) and
 // gic_enable_irq(TIMER_INTID_EL1_PHYS_NS) to route the IRQ through.
 //
 // `hz` must be > 0 and < CNTFRQ_EL0; typical 1000 Hz gives 1 ms ticks.
 // Returns false if hz is out of range.
 bool timer_init(u32 hz);
+
+// Arm THIS CPU's per-CPU-banked physical timer using the reload computed
+// by timer_init. Every CPU must call this (the boot CPU via timer_init;
+// each secondary from per_cpu_main) to receive the preemptive scheduler
+// tick -- CNTP_*_EL0 are banked per-CPU. The caller must also enable the
+// timer PPI on this CPU's redistributor (gic_enable_irq, per-CPU). MUST
+// run after timer_init has set the reload. See #810 / I-8 / I-17.
+void timer_arm_this_cpu(void);
 
 // IRQ handler. Signature matches gic_irq_handler_t. Increments the tick
 // counter and reloads CNTP_TVAL_EL0. Caller wires this via gic_attach.

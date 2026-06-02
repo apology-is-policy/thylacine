@@ -320,6 +320,8 @@ P2-Cd extends per_cpu_main beyond a pure WFI park. After per-CPU init (PAC, MMU,
 5. Sets `g_cpu_alive[cpu_idx]` (the "fully ready" signal that smp_init waits for).
 6. Enters the idle loop: `for(;;){sched();wfi;}`.
 
+**#810 — per-CPU timer armed at the production transition.** Secondaries do NOT arm a per-CPU generic timer at bring-up; they stay quiescent (woken only by a notify IPI) through the deliberately-UP-like in-kernel test suite. At the production transition, `boot_main` calls `smp_enable_secondary_preemption()` (right after `sched_set_notify_enabled(true)`, after `test_run_all`), which RELEASE-publishes a flag and broadcasts `smp_resched_others()`; each secondary's idle loop then arms its OWN banked timer (`gic_enable_irq(TIMER_INTID_EL1_PHYS_NS)` on its redistributor + `timer_arm_this_cpu()`) the first iteration it ACQUIRE-observes the flag. This gives every CPU the preemptive tick (invariants I-8 / I-17 now hold on secondaries), so a CPU-bound EL0 thread on a secondary can no longer monopolize it. The deferral keeps the test phase deterministic (arming during tests let a secondary self-wake and steal a test thread, surfacing as `thread_free of RUNNING thread` in `scheduler.preemption_smoke`); it mirrors the `sched_set_notify_enabled` gate. See `docs/reference/11-timer.md` + `kernel/smp.c`.
+
 ### Per-CPU GIC bring-up (P2-Cdc)
 
 `gic_init_secondary(cpu_idx)` performs this CPU's GIC initialization:
