@@ -744,7 +744,7 @@ kill = BOTH the namespace `/proc/<pid>/ctl` surface AND a narrow elevation-only 
   privilege boundary). The A-5b body (corvus lift completion #829 + Stratum coordinator #826 +
   login wiring #827) resumes ON TOP of namespace-resident `/srv`. Scripture-first: this entry +
   STALK-DESIGN + ARCH land as the scripture commit (no code); impl follows citing its SHA.
-  - **stalk-1 LANDED** *(pending SHA)* (cites scripture 514f8a6). The resolver core
+  - **stalk-1 LANDED** (`acd9547`) (cites scripture 514f8a6). The resolver core
     `kernel/stalk.c` (`stalk()` -- per-component X-search, `.`/`..` contained at the base via a
     `trail` of owned clones, one component per `Dev.walk`, no batch v1.0) + `SYS_OPEN = 65`
     (`sys_open_handler`) + `spoor_stat_native` exposed + libt/libthyla-rs `t_open` + 12 unit tests
