@@ -43,11 +43,13 @@
 
 #include <thylacine/dev.h>
 #include <thylacine/devramfs.h>
+#include <thylacine/devsrv.h>
 #include <thylacine/elf.h>
 #include <thylacine/exec.h>
 #include <thylacine/extinction.h>
 #include <thylacine/proc.h>
 #include <thylacine/spoor.h>
+#include <thylacine/stalk.h>
 #include <thylacine/territory.h>
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
@@ -181,6 +183,50 @@ void joey_run(void) {
             extinction("joey: territory_chroot to devramfs root failed");
         spoor_unref(ramfs_root);
         uart_puts("  joey: kproc territory rooted at devramfs (FROM_ROOT walks live)\n");
+
+        // stalk-3a: mount the boot service registry's /srv root on the
+        // kproc territory's /srv synthetic dir. joey + every descendant
+        // inherits the mount via territory_clone, so all share the ONE
+        // namespace-resident boot registry. The retained SYS_POST_SERVICE /
+        // SYS_SRV_CONNECT path resolves the boot registry directly
+        // (srv_boot_registry); this mount is what stalk-3b's open=connect /
+        // create=post will resolve through the namespace. STALK-DESIGN §5.1.
+        struct SrvRegistry *boot_reg = srv_boot_registry();
+        if (!boot_reg)
+            extinction("joey: boot service registry not initialized");
+        struct Spoor *srv_root_dir = kt->proc->territory->root_spoor;
+        if (!srv_root_dir)
+            extinction("joey: kproc territory has no root_spoor for /srv mount");
+
+        // Resolve /srv (the devramfs synthetic mount-point dir) WITHOUT
+        // crossing it (STALK_MOUNT), mirroring sys_mount_handler. The mount
+        // keys on /srv's own (dc, devno, qid.path) identity.
+        struct Spoor *srv_mp = stalk(kt->proc, srv_root_dir, "srv", 3,
+                                     STALK_MOUNT, 0);
+        if (!srv_mp)
+            extinction("joey: stalk(/srv) for boot devsrv mount failed");
+
+        // Mint the devsrv root over the boot registry (takes one registry
+        // ref), then graft it onto /srv. MREPL so a re-run replaces rather
+        // than duplicates (defensive; boot mounts once).
+        struct Spoor *devsrv_root = devsrv_attach_registry(boot_reg);
+        if (!devsrv_root) {
+            spoor_clunk(srv_mp);
+            extinction("joey: devsrv_attach_registry(boot) failed");
+        }
+        if (mount(kt->proc->territory, devsrv_root, srv_mp, MREPL) != 0) {
+            // mount failed (no ref taken): clunk our attach ref -- last
+            // drop runs devsrv_close -> srv_registry_unref (boot reg keeps
+            // the global ref; it is not freed).
+            spoor_clunk(devsrv_root);
+            spoor_clunk(srv_mp);
+            extinction("joey: mount(devsrv -> /srv) failed");
+        }
+        // mount() took its own ref on devsrv_root; drop ours (the mount
+        // table is now the holder). srv_mp was a transient identity probe.
+        spoor_clunk(devsrv_root);
+        spoor_clunk(srv_mp);
+        uart_puts("  joey: /srv mounted (namespace-resident service registry)\n");
     }
 
     uart_puts("  joey: rforking child for /joey (");

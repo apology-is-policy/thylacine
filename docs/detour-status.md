@@ -788,7 +788,29 @@ kill = BOTH the namespace `/proc/<pid>/ctl` surface AND a narrow elevation-only 
     `SRV_CONN_PER_PROC_MAX` removed. **Split 3a/3b/3c** (§5.4): 3a per-territory registry + mount
     `/srv` (own audit: refcount lifecycle); 3b open=connect + create=post + 9P-unification + migrate
     native clients (own audit: connection-handle reconciliation); 3c retire syscalls + pouch seam
-    (final audit: isolation + ABI break). **NEXT = stalk-3a impl.**
+    (final audit: isolation + ABI break).
+  - **stalk-3a IMPL LANDED (cites scripture `adafc0a`)** -- the registry is now namespace-resident:
+    the single static `g_srv_registry` becomes a **heap-allocated, refcounted `SrvRegistry`** reached
+    THROUGH the mounted devsrv root Spoor (the root's `aux` is the registry; `SRV_REGISTRY_MAGIC` at
+    offset 0). New `srv_registry_create`/`_ref`/`_unref` (last unref drains + frees) +
+    `devsrv_attach_registry(reg)` + `srv_boot_registry()`. **Registry-ref discipline** (mirrors dev9p's
+    `attached_owner`): every devsrv Spoor instance carrying `aux=reg` holds ONE registry ref -- the
+    mounted root, each `clone_walk_zero` cross-clone (the `devsrv_walk` nname==0 bump), each
+    `/srv/<name>` service-ref -- dropped at `devsrv_close` (fires only on the Spoor's last clunk);
+    `spoor_ref` (same instance) adds none. The `devsrv_walk` aux-NORMALIZE (clear the clone-copied
+    `aux`, set + take the ref only on success) is the no-phantom-unref crux. The public name-based API
+    (`srv_reserve`/`srv_lookup`/`srv_conn_open_for_proc`/`srv_proc_exit_notify`/`srv_registry_count`)
+    becomes a thin wrapper over `_in(reg, ...)` bound to the boot registry; svc-based API
+    (`srv_commit`/`srv_abort`/`srv_accept_blocking`/`srv_backlog_depth`/`svc_listener_poll`) reaches
+    the lock via a new `svc->reg` back-pointer. **Boot** (`kernel/joey.c`, kproc bringup after the
+    devramfs chroot) `stalk`s `/srv` (`STALK_MOUNT`), `devsrv_attach_registry(srv_boot_registry())`,
+    and `mount`s it (MREPL) so joey + every descendant share one immortal registry via
+    `territory_clone`. **KEEP the old syscalls working** (resolve the boot registry) -- nothing
+    migrates yet (that is 3b). 2 new tests (`devsrv.registry_lifecycle` + `devsrv.svc_ref_holds_registry`,
+    the refcount/UAF/drain crux) + the existing `devsrv.walk_service` updated for the root-carries-reg
+    reality. Matrix GREEN: default(smp4) + UBSan + smp8 ALL **708/708** + boot OK + login E2E + 0
+    EXTINCTION + 0 UBSan. Reference `docs/reference/70-devsrv.md` updated. **OWN audit (refcount/UAF/
+    drain lifecycle) NEXT, then the two-commit close.** **NEXT after the 3a audit = stalk-3b.**
 
 ---
 

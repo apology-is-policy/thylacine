@@ -54,6 +54,8 @@ void test_devsrv_post_basic(void);
 void test_devsrv_tombstone(void);
 void test_devsrv_registry_full(void);
 void test_devsrv_post_rollback(void);
+void test_devsrv_registry_lifecycle(void);
+void test_devsrv_svc_ref_holds_registry(void);
 
 static struct Proc *make_test_proc(void) {
     return proc_alloc();
@@ -244,4 +246,98 @@ void test_devsrv_post_rollback(void) {
         "failed post left no stale registry entry (srv_abort rolled back)");
 
     drop_test_proc(p);
+}
+
+// devsrv.registry_lifecycle — the stalk-3a registry-ref crux. A heap
+// registry's ref counts the devsrv Spoor INSTANCES that carry aux=reg (the
+// attached root + each clone-walk-zero of it), each dropped at devsrv_close
+// (the Spoor's last clunk). The last registry ref drains + frees. Proves no
+// phantom unref (the normalize-aux discipline in devsrv_walk) and no leak.
+void test_devsrv_registry_lifecycle(void) {
+    u64 created0   = srv_registry_total_created();
+    u64 destroyed0 = srv_registry_total_destroyed();
+    u64 sp_alloc0  = spoor_total_allocated();
+    u64 sp_freed0  = spoor_total_freed();
+
+    struct SrvRegistry *reg = srv_registry_create();      // create ref = 1
+    TEST_ASSERT(reg != NULL, "srv_registry_create");
+    TEST_EXPECT_EQ(srv_registry_total_created() - created0, (u64)1,
+        "one registry created");
+
+    struct Spoor *root = devsrv_attach_registry(reg);     // reg ref = 2
+    TEST_ASSERT(root != NULL, "devsrv_attach_registry");
+    TEST_EXPECT_EQ((int)root->qid.type, (int)QTDIR, "attached root is QTDIR");
+    TEST_EXPECT_EQ(root->dc, 's', "attached root carries dc='s'");
+
+    // clone_walk_zero (the cross_mounts cross): spoor_clone copies aux=reg
+    // (NO reg ref); the 0-element walk takes the clone's OWN reg ref.
+    struct Spoor *nc = spoor_clone(root);
+    TEST_ASSERT(nc != NULL, "spoor_clone(root)");
+    struct Walkqid *w = devsrv.walk(root, nc, (const char **)0, 0);  // reg ref = 3
+    TEST_ASSERT(w != NULL && w->spoor == nc,
+        "walk0 returns the clone as a fresh root instance");
+    walkqid_free(w);
+
+    // Dropping the clone runs devsrv_close -> srv_registry_unref (3->2);
+    // the registry is NOT freed (root + the test's create ref remain).
+    spoor_clunk(nc);
+    TEST_EXPECT_EQ(srv_registry_total_destroyed() - destroyed0, (u64)0,
+        "registry alive after the clone is clunked");
+
+    // Dropping the root (2->1); still alive (the test holds the create ref).
+    spoor_clunk(root);
+    TEST_EXPECT_EQ(srv_registry_total_destroyed() - destroyed0, (u64)0,
+        "registry alive after the root is clunked");
+
+    // The last (create) ref: drain + free. `reg` is INVALID after this.
+    srv_registry_unref(reg);
+    TEST_EXPECT_EQ(srv_registry_total_destroyed() - destroyed0, (u64)1,
+        "registry freed at the last unref");
+
+    // No Spoor leaked: root + nc both allocated + freed (net zero delta).
+    TEST_EXPECT_EQ(spoor_total_allocated() - sp_alloc0,
+                   spoor_total_freed() - sp_freed0,
+        "no Spoor leaked across the registry lifecycle");
+}
+
+// devsrv.svc_ref_holds_registry — a /srv/<name> service-ref Spoor + a 2nd
+// root over the BOOT registry each take + drop a registry ref via
+// devsrv_walk / devsrv_close; the boot registry is NEVER freed by this
+// churn (it is immortal — its kproc /srv mount holds a ref forever).
+void test_devsrv_svc_ref_holds_registry(void) {
+    srv_registry_reset();
+
+    struct Proc *p = make_marked_test_proc();
+    TEST_ASSERT(p != NULL, "proc_alloc + mark");
+    TEST_ASSERT(sys_post_service_for_proc(p, "corvus", 6) >= 0, "post corvus");
+
+    u64 destroyed0 = srv_registry_total_destroyed();
+
+    // A 2nd root over the boot registry (boot ref +1).
+    struct Spoor *root = devsrv_attach_registry(srv_boot_registry());
+    TEST_ASSERT(root != NULL, "attach a 2nd boot root");
+
+    // Walk /corvus on it -> a service-ref Spoor (boot ref +1).
+    struct Spoor *nc = spoor_clone(root);
+    TEST_ASSERT(nc != NULL, "clone root for the service walk");
+    const char *names[1] = { "corvus" };
+    struct Walkqid *w = devsrv.walk(root, nc, names, 1);
+    TEST_ASSERT(w != NULL && w->nqid == 1 && w->spoor == nc,
+        "walk /corvus yields a service-ref Spoor");
+    walkqid_free(w);
+
+    // Tear down: svc-ref then root. Each devsrv_close drops one boot ref.
+    spoor_clunk(nc);
+    spoor_clunk(root);
+
+    // The boot registry is unaffected: never freed, still resolvable, still
+    // holds the posted service.
+    TEST_EXPECT_EQ(srv_registry_total_destroyed() - destroyed0, (u64)0,
+        "boot registry not freed by service-ref churn (immortal)");
+    TEST_ASSERT(srv_boot_registry() != NULL, "boot registry still present");
+    TEST_ASSERT(srv_lookup("corvus", 6) != NULL,
+        "boot registry still holds the posted service");
+
+    drop_test_proc(p);
+    srv_registry_reset();
 }

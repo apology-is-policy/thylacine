@@ -338,6 +338,8 @@ void test_devsrv_post_basic(void);
 void test_devsrv_tombstone(void);
 void test_devsrv_registry_full(void);
 void test_devsrv_post_rollback(void);
+void test_devsrv_registry_lifecycle(void);
+void test_devsrv_svc_ref_holds_registry(void);
 void test_devcap_registered(void);
 void test_devcap_walk_grant_use(void);
 void test_devcap_walk_unknown(void);
@@ -1114,6 +1116,8 @@ struct test_case g_tests[] = {
     { "devsrv.tombstone",              test_devsrv_tombstone,              false, NULL },
     { "devsrv.registry_full",          test_devsrv_registry_full,          false, NULL },
     { "devsrv.post_rollback",          test_devsrv_post_rollback,          false, NULL },
+    { "devsrv.registry_lifecycle",     test_devsrv_registry_lifecycle,     false, NULL },
+    { "devsrv.svc_ref_holds_registry", test_devsrv_svc_ref_holds_registry, false, NULL },
     { "devcap.registered",             test_devcap_registered,             false, NULL },
     { "devcap.walk_grant_use",         test_devcap_walk_grant_use,         false, NULL },
     { "devcap.walk_unknown",           test_devcap_walk_unknown,           false, NULL },

@@ -435,6 +435,17 @@ cfgs stay pre-commit gates** and are re-run on every `stalk`/mount change.
   sub-decisions D5/D6/D7 (§11). **Own audit per sub-chunk** (the registry
   lifecycle; the connection-handle reconciliation + the isolation property;
   AEGIS/mallocng-adjacent via the A-5b DEK path it unblocks — prosecute hard).
+  - **stalk-3a LANDED** (cites scripture `adafc0a`). The registry is
+    namespace-resident: heap-allocated + refcounted `SrvRegistry` reached
+    through the mounted devsrv root Spoor (`srv_registry_create`/`_ref`/
+    `_unref`, `devsrv_attach_registry`, `srv_boot_registry`); the per-Spoor
+    registry-ref discipline (dev9p `attached_owner` mirror) + the
+    `devsrv_walk` aux-normalize (no phantom unref); boot mounts one immortal
+    registry on kproc's `/srv`. Old syscalls resolve the boot registry
+    (nothing migrates). Matrix GREEN 708/708 (default + UBSan + smp8); ref
+    doc `70-devsrv.md` updated. Own audit (refcount/UAF/drain) next.
+  - **stalk-3b / 3c** — pending (open=connect + create=post + 9P-unification
+    + migrate native clients; then retire the syscalls + the pouch seam).
 
 Then A-5b's body (#826/#827/#829) resumes on top of namespace-resident `/srv`.
 

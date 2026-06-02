@@ -18,6 +18,22 @@
 //   - the devsrv walk op + the connection-Spoor read/write/close ops;
 //   - srv_proc_exit_notify draining a dead poster's backlog.
 //
+// stalk-3a (STALK-DESIGN.md §5.1) makes the registry NAMESPACE-RESIDENT:
+// the single static registry becomes a heap-allocated, refcounted
+// `SrvRegistry` reached THROUGH the mounted devsrv root Spoor (the root's
+// `aux`), not a global. Boot mounts one immortal registry on the kproc
+// `/srv` synthetic dir; a future login (A-5b-body) mounts a fresh
+// per-session registry so a second user's coordinator is structurally
+// unnameable (I-1). The retained SYS_POST_SERVICE / SYS_SRV_CONNECT
+// syscall path (nothing migrates in 3a) resolves the one boot registry
+// via thin wrappers over the internal `_in(reg, ...)` variants; the
+// devsrv vtable ops (walk / close / poll) resolve the registry from the
+// Spoor's aux. Registry-ref discipline mirrors dev9p's attached_owner:
+// every devsrv Spoor instance carrying `aux = reg` holds exactly ONE
+// registry ref, dropped at devsrv_close (which fires only on the Spoor's
+// last clunk). The boot registry never frees (kproc's mount holds it
+// forever).
+//
 // Spec: specs/corvus.tla — MarkMayPost / PostService / ServiceTombstone /
 // SrvBind / SrvAccept / ProcExit; specs/handles.tla — KObj_Srv.
 
@@ -36,14 +52,35 @@
 
 #include "../mm/slub.h"
 
-// The registry. Static storage zero-initializes every entry's `state` to
-// SRV_STATE_FREE (== 0), the lock to the all-zero SPIN_LOCK_INIT form,
-// and each accept Rendez to {unlocked, no waiter}.
+// The registry. Heap-allocated by srv_registry_create (stalk-3a); was a
+// single static struct pre-stalk-3a. `magic` (offset 0) discriminates a
+// devsrv root Spoor's aux (SRV_REGISTRY_MAGIC) from a service-ref
+// (DEVSRV_SVC_MAGIC) / connection (SRV_CONN_MAGIC). `ref` is the
+// instance-scoped refcount: the mounted root, each cross-clone of it, and
+// each /srv/<name> service-ref each hold one (see the file header). Each
+// entry's `state` is FREE (== 0) at create (KP_ZERO); srv_registry_create
+// stamps each entry's permanent magic + poll_list + reg back-pointer.
 struct SrvRegistry {
+    u64               magic;          // SRV_REGISTRY_MAGIC; 0 once freed
+    int               ref;            // instance refcount (atomic)
     spin_lock_t       lock;
     struct SrvService entries[SRV_MAX_SERVICES];
 };
-static struct SrvRegistry g_srv_registry;
+
+_Static_assert(__builtin_offsetof(struct SrvRegistry, magic) == 0,
+               "magic at offset 0 — a devsrv root Spoor's aux is its "
+               "SrvRegistry; devsrv_close / devsrv_poll / devsrv_conn_of "
+               "read the aux's first u64 to discriminate root (SRV_REGISTRY_"
+               "MAGIC) vs service (DEVSRV_SVC_MAGIC) vs conn (SRV_CONN_MAGIC)");
+
+// The one immortal boot registry, mounted on kproc's /srv synthetic dir.
+// Created by devsrv_init; resolved by the retained syscall path
+// (srv_*_for_proc wrappers) + the in-kernel test harness. NULL before
+// devsrv_init.
+static struct SrvRegistry *g_boot_srv_registry;
+
+static u64 g_srv_registry_created;
+static u64 g_srv_registry_destroyed;
 
 // =============================================================================
 // Registry internals.
@@ -59,11 +96,12 @@ static bool srv_name_eq(const char *a, u8 alen, const char *b, u8 blen) {
     return true;
 }
 
-// Find a non-FREE entry by name. PRECONDITION: caller holds the registry
-// lock. Returns the entry (LIVE / RESERVING / TOMBSTONED) or NULL.
-static struct SrvService *srv_find_locked(const char *name, u8 name_len) {
+// Find a non-FREE entry by name in `reg`. PRECONDITION: caller holds
+// reg->lock. Returns the entry (LIVE / RESERVING / TOMBSTONED) or NULL.
+static struct SrvService *srv_find_locked(struct SrvRegistry *reg,
+                                          const char *name, u8 name_len) {
     for (u32 i = 0; i < SRV_MAX_SERVICES; i++) {
-        struct SrvService *e = &g_srv_registry.entries[i];
+        struct SrvService *e = &reg->entries[i];
         if (e->state == SRV_STATE_FREE) continue;
         if (srv_name_eq(e->name, e->name_len, name, name_len)) return e;
     }
@@ -73,14 +111,15 @@ static struct SrvService *srv_find_locked(const char *name, u8 name_len) {
 // Wipe an entry back to FREE. PRECONDITION: caller holds the registry lock.
 //
 // `magic` is NOT cleared — a SrvService's magic is a permanent struct
-// type tag (stamped once by devsrv_init), never a liveness bit: `state`
-// tracks FREE/RESERVING/LIVE/TOMBSTONED. A KObj_Srv service handle may
-// outlive its entry's LIVE state, and handle_release_obj must still read
-// SRV_SERVICE_MAGIC at offset 0 to discriminate it from a connection.
+// type tag (stamped once by srv_registry_create), never a liveness bit:
+// `state` tracks FREE/RESERVING/LIVE/TOMBSTONED. A KObj_Srv service handle
+// may outlive its entry's LIVE state, and handle_release_obj must still
+// read SRV_SERVICE_MAGIC at offset 0 to discriminate it from a connection.
+// `reg` (the back-pointer) is likewise permanent — never cleared.
 //
 // The backlog ARRAY is left as-is — callers (srv_abort on a RESERVING
 // entry, which never reached LIVE so never enqueued a connection;
-// srv_registry_reset after draining) guarantee no live SrvConn reference
+// srv_registry_drain after draining) guarantee no live SrvConn reference
 // is dropped here. The accept Rendez is left untouched: sleep / wakeup
 // own its `waiter` field, and clobbering it would strand a sleeper.
 static void srv_clear_locked(struct SrvService *e) {
@@ -121,12 +160,118 @@ static struct SrvConn *srv_backlog_pop_locked(struct SrvService *e) {
 }
 
 // =============================================================================
+// Registry lifecycle (stalk-3a).
+// =============================================================================
+
+// srv_registry_drain — tear down every pending connection in `reg`,
+// wiping each entry to FREE, then wake any accept/poll waiter. Shared by
+// srv_registry_reset (test harness, on the boot registry) and
+// srv_registry_unref's last-drop. The teardown (srvconn_teardown /
+// srvconn_unref take the SrvConn's locks; wakeup takes a Rendez lock) runs
+// OUTSIDE reg->lock — the srvconn.c teardown discipline keeps those off
+// any path that re-enters the registry lock.
+static void srv_registry_drain(struct SrvRegistry *reg) {
+    struct SrvConn *drained[SRV_MAX_SERVICES * SRV_ACCEPT_BACKLOG];
+    u32             n_drained = 0;
+    // Snapshot the per-entry accept Rendez + poll-list pointers BEFORE
+    // clearing — a thread blocked in srv_accept_blocking or polling the
+    // listener must be woken so it observes state != LIVE and returns.
+    struct Rendez           *waked[SRV_MAX_SERVICES];
+    struct poll_waiter_list *poll_waked[SRV_MAX_SERVICES];
+
+    irq_state_t s = spin_lock_irqsave(&reg->lock);
+    for (u32 i = 0; i < SRV_MAX_SERVICES; i++) {
+        struct SrvService *e = &reg->entries[i];
+        for (;;) {
+            struct SrvConn *cn = srv_backlog_pop_locked(e);
+            if (!cn) break;
+            drained[n_drained++] = cn;
+        }
+        srv_clear_locked(e);
+        waked[i]      = &e->accept_rendez;
+        poll_waked[i] = &e->poll_list;
+    }
+    spin_unlock_irqrestore(&reg->lock, s);
+
+    for (u32 i = 0; i < n_drained; i++) {
+        srvconn_teardown(drained[i]);
+        srvconn_unref(drained[i]);
+    }
+    for (u32 i = 0; i < SRV_MAX_SERVICES; i++) {
+        wakeup(waked[i]);
+        poll_waiter_list_wake(poll_waked[i]);
+    }
+}
+
+struct SrvRegistry *srv_registry_create(void) {
+    struct SrvRegistry *reg = kmalloc(sizeof(*reg), KP_ZERO);
+    if (!reg) return NULL;
+
+    reg->magic = SRV_REGISTRY_MAGIC;
+    spin_lock_init(&reg->lock);
+    __atomic_store_n(&reg->ref, 1, __ATOMIC_RELAXED);
+
+    // Stamp each entry's permanent type tag, reg back-pointer, and
+    // poll-list (the list lock is the all-zero SPIN_LOCK_INIT from
+    // KP_ZERO; the explicit init is the documented contract, mirroring
+    // kernel/pipe.c::pipe_create). `state` is FREE (== 0) from KP_ZERO;
+    // accept_rendez is {unlocked, no waiter} from KP_ZERO.
+    for (u32 i = 0; i < SRV_MAX_SERVICES; i++) {
+        reg->entries[i].magic = SRV_SERVICE_MAGIC;
+        reg->entries[i].reg   = reg;
+        poll_waiter_list_init(&reg->entries[i].poll_list);
+    }
+
+    __atomic_fetch_add(&g_srv_registry_created, 1u, __ATOMIC_RELAXED);
+    return reg;
+}
+
+void srv_registry_ref(struct SrvRegistry *reg) {
+    if (!reg)                            extinction("srv_registry_ref(NULL)");
+    if (reg->magic != SRV_REGISTRY_MAGIC)
+        extinction("srv_registry_ref of corrupted registry");
+    int pre = __atomic_fetch_add(&reg->ref, 1, __ATOMIC_ACQ_REL);
+    if (pre <= 0)
+        extinction("srv_registry_ref of zero-ref registry (already freed?)");
+}
+
+void srv_registry_unref(struct SrvRegistry *reg) {
+    if (!reg) return;                                // NULL-safe
+    if (reg->magic != SRV_REGISTRY_MAGIC)
+        extinction("srv_registry_unref of corrupted registry (use-after-free?)");
+    int pre = __atomic_fetch_sub(&reg->ref, 1, __ATOMIC_ACQ_REL);
+    if (pre <= 0)
+        extinction("srv_registry_unref of zero-ref registry");
+    if (pre == 1) {
+        // Last holder. Drain pending connections (the reset discipline)
+        // then free. Clear magic before kfree so a stale-pointer read
+        // fast-fails on the magic check (UAF defense, mirroring
+        // spoor_free_internal).
+        srv_registry_drain(reg);
+        reg->magic = 0;
+        kfree(reg);
+        __atomic_fetch_add(&g_srv_registry_destroyed, 1u, __ATOMIC_RELAXED);
+    }
+}
+
+struct SrvRegistry *srv_boot_registry(void) {
+    return g_boot_srv_registry;
+}
+
+u64 srv_registry_total_created(void)   { return __atomic_load_n(&g_srv_registry_created, __ATOMIC_RELAXED); }
+u64 srv_registry_total_destroyed(void) { return __atomic_load_n(&g_srv_registry_destroyed, __ATOMIC_RELAXED); }
+
+// =============================================================================
 // Registry API — the reserve / commit / abort two-phase post.
 // =============================================================================
 
-int srv_reserve(const char *name, u8 name_len, struct Proc *poster,
-                enum srv_mode mode,
-                struct SrvService **svc_out, enum srv_state *prior_out) {
+// srv_reserve_in — phase 1 against an explicit `reg`. The public
+// srv_reserve binds the boot registry (the retained syscall path).
+static int srv_reserve_in(struct SrvRegistry *reg,
+                          const char *name, u8 name_len, struct Proc *poster,
+                          enum srv_mode mode,
+                          struct SrvService **svc_out, enum srv_state *prior_out) {
+    if (!reg)                                              return -1;
     if (!name || name_len == 0 || name_len > SRV_NAME_MAX) return -1;
     if (!svc_out || !prior_out)                            return -1;
     if (mode != SRV_MODE_9P && mode != SRV_MODE_BYTE)      return -1;
@@ -139,15 +284,15 @@ int srv_reserve(const char *name, u8 name_len, struct Proc *poster,
     u64 stripes = proc_stripes(poster);
     if (stripes == 0) return -1;
 
-    irq_state_t s = spin_lock_irqsave(&g_srv_registry.lock);
+    irq_state_t s = spin_lock_irqsave(&reg->lock);
 
-    struct SrvService *e = srv_find_locked(name, name_len);
+    struct SrvService *e = srv_find_locked(reg, name, name_len);
     if (e) {
         // The name exists. A LIVE or RESERVING entry must not be displaced
         // — no stealing a running or in-flight server. Only a TOMBSTONED
         // name (prior poster exited) is re-postable.
         if (e->state != SRV_STATE_TOMBSTONED) {
-            spin_unlock_irqrestore(&g_srv_registry.lock, s);
+            spin_unlock_irqrestore(&reg->lock, s);
             return -1;
         }
         // F2 mode_change_on_rebind close (P6-pouch-sockets audit):
@@ -159,27 +304,27 @@ int srv_reserve(const char *name, u8 name_len, struct Proc *poster,
         // mode connection in the new poster's backlog. With this
         // check, a mode change requires a different service name.
         if (e->mode != mode) {
-            spin_unlock_irqrestore(&g_srv_registry.lock, s);
+            spin_unlock_irqrestore(&reg->lock, s);
             return -1;
         }
         *prior_out = SRV_STATE_TOMBSTONED;
     } else {
         // Fresh post — claim a FREE slot.
         for (u32 i = 0; i < SRV_MAX_SERVICES; i++) {
-            if (g_srv_registry.entries[i].state == SRV_STATE_FREE) {
-                e = &g_srv_registry.entries[i];
+            if (reg->entries[i].state == SRV_STATE_FREE) {
+                e = &reg->entries[i];
                 break;
             }
         }
         if (!e) {
-            spin_unlock_irqrestore(&g_srv_registry.lock, s);
+            spin_unlock_irqrestore(&reg->lock, s);
             return -1;   // registry full
         }
         *prior_out = SRV_STATE_FREE;
     }
 
-    // e->magic is already SRV_SERVICE_MAGIC — devsrv_init stamped every
-    // registry entry once; it is a permanent type tag, never cleared.
+    // e->magic is already SRV_SERVICE_MAGIC + e->reg is already set —
+    // srv_registry_create stamped every entry once; both are permanent.
     e->state          = SRV_STATE_RESERVING;
     e->name_len       = name_len;
     for (u8 i = 0; i < name_len; i++) e->name[i] = name[i];
@@ -188,30 +333,39 @@ int srv_reserve(const char *name, u8 name_len, struct Proc *poster,
     e->mode           = mode;
     *svc_out = e;
 
-    spin_unlock_irqrestore(&g_srv_registry.lock, s);
+    spin_unlock_irqrestore(&reg->lock, s);
     return 0;
+}
+
+int srv_reserve(const char *name, u8 name_len, struct Proc *poster,
+                enum srv_mode mode,
+                struct SrvService **svc_out, enum srv_state *prior_out) {
+    return srv_reserve_in(g_boot_srv_registry, name, name_len, poster, mode,
+                          svc_out, prior_out);
 }
 
 void srv_commit(struct SrvService *svc) {
     if (!svc)                          extinction("srv_commit(NULL)");
     if (svc->magic != SRV_SERVICE_MAGIC)
         extinction("srv_commit: bad service magic (wild pointer / corruption)");
+    if (!svc->reg)                     extinction("srv_commit: service has no registry");
 
-    irq_state_t s = spin_lock_irqsave(&g_srv_registry.lock);
+    irq_state_t s = spin_lock_irqsave(&svc->reg->lock);
     if (svc->state != SRV_STATE_RESERVING)
         extinction("srv_commit: entry not RESERVING (double commit / lifecycle bug)");
     svc->state = SRV_STATE_LIVE;
-    spin_unlock_irqrestore(&g_srv_registry.lock, s);
+    spin_unlock_irqrestore(&svc->reg->lock, s);
 }
 
 void srv_abort(struct SrvService *svc, enum srv_state prior) {
     if (!svc)                          extinction("srv_abort(NULL)");
     if (svc->magic != SRV_SERVICE_MAGIC)
         extinction("srv_abort: bad service magic (wild pointer / corruption)");
+    if (!svc->reg)                     extinction("srv_abort: service has no registry");
     if (prior != SRV_STATE_FREE && prior != SRV_STATE_TOMBSTONED)
         extinction("srv_abort: prior state must be FREE or TOMBSTONED");
 
-    irq_state_t s = spin_lock_irqsave(&g_srv_registry.lock);
+    irq_state_t s = spin_lock_irqsave(&svc->reg->lock);
     if (svc->state != SRV_STATE_RESERVING)
         extinction("srv_abort: entry not RESERVING (lifecycle bug)");
     if (prior == SRV_STATE_FREE) {
@@ -226,18 +380,34 @@ void srv_abort(struct SrvService *svc, enum srv_state prior) {
         svc->poster_stripes = 0;
         svc->poster_pid     = 0;
     }
-    spin_unlock_irqrestore(&g_srv_registry.lock, s);
+    spin_unlock_irqrestore(&svc->reg->lock, s);
 }
 
-struct SrvService *srv_lookup(const char *name, u8 name_len) {
+// srv_lookup_in — find a service by name in `reg`. The public srv_lookup
+// binds the boot registry.
+static struct SrvService *srv_lookup_in(struct SrvRegistry *reg,
+                                        const char *name, u8 name_len) {
+    if (!reg)                                              return NULL;
     if (!name || name_len == 0 || name_len > SRV_NAME_MAX) return NULL;
-    irq_state_t s = spin_lock_irqsave(&g_srv_registry.lock);
-    struct SrvService *e = srv_find_locked(name, name_len);
-    spin_unlock_irqrestore(&g_srv_registry.lock, s);
+    irq_state_t s = spin_lock_irqsave(&reg->lock);
+    struct SrvService *e = srv_find_locked(reg, name, name_len);
+    spin_unlock_irqrestore(&reg->lock, s);
     return e;
 }
 
-void srv_proc_exit_notify(struct Proc *p) {
+struct SrvService *srv_lookup(const char *name, u8 name_len) {
+    return srv_lookup_in(g_boot_srv_registry, name, name_len);
+}
+
+// srv_proc_exit_notify_in — tombstone every LIVE service in `reg` posted
+// by `p` (matched by stripes), draining each accept backlog. The public
+// srv_proc_exit_notify binds the boot registry: in stalk-3a all posters
+// post into the one boot registry (nothing migrates), so walking it is
+// correct + complete. stalk-3b moves the tombstone trigger to the listener
+// handle (which will carry its registry ref), making it per-registry for
+// session registries — see STALK-DESIGN.md §5.1.
+static void srv_proc_exit_notify_in(struct SrvRegistry *reg, struct Proc *p) {
+    if (!reg) return;
     // proc_stripes fail-closes to 0; a LIVE poster always carries a
     // non-zero stripes tag, so a 0 here matches nothing.
     u64 stripes = proc_stripes(p);
@@ -255,9 +425,9 @@ void srv_proc_exit_notify(struct Proc *p) {
     struct SrvService *tombed[SRV_MAX_SERVICES];
     u32                n_tombed = 0;
 
-    irq_state_t s = spin_lock_irqsave(&g_srv_registry.lock);
+    irq_state_t s = spin_lock_irqsave(&reg->lock);
     for (u32 i = 0; i < SRV_MAX_SERVICES; i++) {
-        struct SrvService *e = &g_srv_registry.entries[i];
+        struct SrvService *e = &reg->entries[i];
         if (e->state == SRV_STATE_LIVE && e->poster_stripes == stripes) {
             // Tombstone: the name stays reserved (re-postable only by a
             // joey-marked Proc — CORVUS-DESIGN.md §6.1), the dead poster
@@ -276,7 +446,7 @@ void srv_proc_exit_notify(struct Proc *p) {
             tombed[n_tombed++] = e;
         }
     }
-    spin_unlock_irqrestore(&g_srv_registry.lock, s);
+    spin_unlock_irqrestore(&reg->lock, s);
 
     for (u32 i = 0; i < n_drained; i++) {
         srvconn_teardown(drained[i]);   // EOF both rings — wakes the client
@@ -294,60 +464,41 @@ void srv_proc_exit_notify(struct Proc *p) {
     }
 }
 
-int srv_registry_count(void) {
+void srv_proc_exit_notify(struct Proc *p) {
+    srv_proc_exit_notify_in(g_boot_srv_registry, p);
+}
+
+static int srv_registry_count_in(struct SrvRegistry *reg) {
+    if (!reg) return 0;
     int n = 0;
-    irq_state_t s = spin_lock_irqsave(&g_srv_registry.lock);
+    irq_state_t s = spin_lock_irqsave(&reg->lock);
     for (u32 i = 0; i < SRV_MAX_SERVICES; i++) {
-        if (g_srv_registry.entries[i].state != SRV_STATE_FREE) n++;
+        if (reg->entries[i].state != SRV_STATE_FREE) n++;
     }
-    spin_unlock_irqrestore(&g_srv_registry.lock, s);
+    spin_unlock_irqrestore(&reg->lock, s);
     return n;
+}
+
+int srv_registry_count(void) {
+    return srv_registry_count_in(g_boot_srv_registry);
 }
 
 int srv_backlog_depth(struct SrvService *svc) {
-    if (!svc || svc->magic != SRV_SERVICE_MAGIC) return -1;
-    irq_state_t s = spin_lock_irqsave(&g_srv_registry.lock);
+    if (!svc || svc->magic != SRV_SERVICE_MAGIC || !svc->reg) return -1;
+    irq_state_t s = spin_lock_irqsave(&svc->reg->lock);
     int n = (int)svc->backlog_count;
-    spin_unlock_irqrestore(&g_srv_registry.lock, s);
+    spin_unlock_irqrestore(&svc->reg->lock, s);
     return n;
 }
 
-// srv_registry_reset — TEST SUPPORT ONLY. Wipe the registry to all-FREE,
-// draining (tearing down) every pending connection first. Deliberately
-// NOT declared in devsrv.h: no production caller exists; the in-kernel
-// test harness extern-declares it so each devsrv test starts from an
-// empty registry.
+// srv_registry_reset — TEST SUPPORT ONLY. Drain the BOOT registry to
+// all-FREE, tearing down every pending connection first. Deliberately NOT
+// declared in devsrv.h: no production caller exists; the in-kernel test
+// harness extern-declares it so each devsrv test starts from an empty boot
+// registry (the registry its public-API calls resolve).
 void srv_registry_reset(void) {
-    struct SrvConn *drained[SRV_MAX_SERVICES * SRV_ACCEPT_BACKLOG];
-    u32             n_drained = 0;
-    // Snapshot the per-entry accept Rendez + poll-list pointers BEFORE
-    // clearing — a thread blocked in srv_accept_blocking or polling the
-    // listener must be woken so it observes state != LIVE and returns.
-    struct Rendez           *waked[SRV_MAX_SERVICES];
-    struct poll_waiter_list *poll_waked[SRV_MAX_SERVICES];
-
-    irq_state_t s = spin_lock_irqsave(&g_srv_registry.lock);
-    for (u32 i = 0; i < SRV_MAX_SERVICES; i++) {
-        struct SrvService *e = &g_srv_registry.entries[i];
-        for (;;) {
-            struct SrvConn *cn = srv_backlog_pop_locked(e);
-            if (!cn) break;
-            drained[n_drained++] = cn;
-        }
-        srv_clear_locked(e);
-        waked[i]      = &e->accept_rendez;
-        poll_waked[i] = &e->poll_list;
-    }
-    spin_unlock_irqrestore(&g_srv_registry.lock, s);
-
-    for (u32 i = 0; i < n_drained; i++) {
-        srvconn_teardown(drained[i]);
-        srvconn_unref(drained[i]);
-    }
-    for (u32 i = 0; i < SRV_MAX_SERVICES; i++) {
-        wakeup(waked[i]);
-        poll_waiter_list_wake(poll_waked[i]);
-    }
+    if (!g_boot_srv_registry) return;
+    srv_registry_drain(g_boot_srv_registry);
 }
 
 // =============================================================================
@@ -355,11 +506,17 @@ void srv_registry_reset(void) {
 // =============================================================================
 
 // Per-Proc cap on LIVE `/srv` client connections (CORVUS-DESIGN.md §6.2 —
-// "One connection per Proc"). At v1.0 = 1; future v1.x may lift to per-
-// service counters if multiple `/srv` services exist.
+// "One connection per Proc"). At v1.0 = 1; stalk-3b REMOVES this cap (a
+// session needs corvus AND its stratum-fs concurrently — STALK-DESIGN.md
+// §5.2). Retained in stalk-3a: the old SYS_SRV_CONNECT path is unchanged.
 #define SRV_CONN_PER_PROC_MAX  1u
 
-int srv_conn_open_for_proc(struct Proc *p, const char *name, u8 name_len) {
+// srv_conn_open_in — the client-connect core against an explicit `reg`.
+// The public srv_conn_open_for_proc binds the boot registry (the retained
+// SYS_SRV_CONNECT path).
+static int srv_conn_open_in(struct SrvRegistry *reg, struct Proc *p,
+                            const char *name, u8 name_len) {
+    if (!reg)                                               return -1;
     if (!p)                                                return -1;
     if (!name || name_len == 0 || name_len > SRV_NAME_MAX)  return -1;
 
@@ -383,7 +540,7 @@ int srv_conn_open_for_proc(struct Proc *p, const char *name, u8 name_len) {
     // spares the heavy mint below). The push under the registry lock
     // re-checks LIVE, so this is an optimization, not the correctness
     // gate.
-    struct SrvService *svc = srv_lookup(name, name_len);
+    struct SrvService *svc = srv_lookup_in(reg, name, name_len);
     if (!svc) return -1;
 
     // Capture the poster's stripes AND the service's transport mode under
@@ -396,11 +553,11 @@ int srv_conn_open_for_proc(struct Proc *p, const char *name, u8 name_len) {
     u64           poster_stripes;
     enum srv_mode service_mode;
     {
-        irq_state_t s = spin_lock_irqsave(&g_srv_registry.lock);
+        irq_state_t s = spin_lock_irqsave(&reg->lock);
         bool live      = (svc->state == SRV_STATE_LIVE);
         poster_stripes = svc->poster_stripes;
         service_mode   = svc->mode;
-        spin_unlock_irqrestore(&g_srv_registry.lock, s);
+        spin_unlock_irqrestore(&reg->lock, s);
         if (!live) return -1;
     }
 
@@ -418,7 +575,7 @@ int srv_conn_open_for_proc(struct Proc *p, const char *name, u8 name_len) {
     // (and not-yet-published) SrvConn. SRV_MODE_BYTE flips byte_mode on
     // BEFORE the cn is enqueued in the accept backlog or installed as a
     // KObj_Srv handle — every observer (sys_srv_connect_for_proc's
-    // handshake gate, sys_read/write_for_proc's KObj_SRV dispatch) reads
+    // handshake gate, sys_read/write_for_proc's KOBJ_SRV dispatch) reads
     // the field after publication, so the value is consistent for the
     // cn's lifetime.
     if (service_mode == SRV_MODE_BYTE) {
@@ -446,9 +603,9 @@ int srv_conn_open_for_proc(struct Proc *p, const char *name, u8 name_len) {
     // A second reference for the accept-backlog slot, then enqueue. The
     // push re-validates LIVE atomically with the slot write.
     srvconn_ref(cn);
-    irq_state_t s = spin_lock_irqsave(&g_srv_registry.lock);
+    irq_state_t s = spin_lock_irqsave(&reg->lock);
     int rc = srv_backlog_push_locked(svc, cn);
-    spin_unlock_irqrestore(&g_srv_registry.lock, s);
+    spin_unlock_irqrestore(&reg->lock, s);
     if (rc != 0) {
         // Service died between the pre-check and the push, or the backlog
         // is full. Drop the backlog ref, then close the handle (whose
@@ -472,26 +629,30 @@ int srv_conn_open_for_proc(struct Proc *p, const char *name, u8 name_len) {
     return (int)h;
 }
 
+int srv_conn_open_for_proc(struct Proc *p, const char *name, u8 name_len) {
+    return srv_conn_open_in(g_boot_srv_registry, p, name, name_len);
+}
+
 // accept_cond_is_ready — sleep()'s wait predicate for srv_accept_blocking.
 // Reads backlog_count / state WITHOUT the registry lock: sleep evaluates
-// it under the accept Rendez lock, and every producer (srv_conn_open_for_
-// proc's push, srv_proc_exit_notify's tombstone) mutates these fields
-// under the registry lock and then calls wakeup(), whose Rendez-lock
-// acquisition provides the happens-before. The discipline matches
-// srvconn.c's chan_cond_readable.
+// it under the accept Rendez lock, and every producer (srv_conn_open_in's
+// push, srv_proc_exit_notify_in's tombstone) mutates these fields under
+// the registry lock (svc->reg->lock) and then calls wakeup(), whose
+// Rendez-lock acquisition provides the happens-before. The discipline
+// matches srvconn.c's chan_cond_readable.
 static int accept_cond_is_ready(void *arg) {
     struct SrvService *svc = (struct SrvService *)arg;
     return (svc->backlog_count > 0) || (svc->state != SRV_STATE_LIVE);
 }
 
 struct SrvConn *srv_accept_blocking(struct SrvService *svc) {
-    if (!svc || svc->magic != SRV_SERVICE_MAGIC) return NULL;
+    if (!svc || svc->magic != SRV_SERVICE_MAGIC || !svc->reg) return NULL;
 
     for (;;) {
-        irq_state_t s = spin_lock_irqsave(&g_srv_registry.lock);
+        irq_state_t s = spin_lock_irqsave(&svc->reg->lock);
         struct SrvConn *cn  = srv_backlog_pop_locked(svc);
         enum srv_state  st  = svc->state;
-        spin_unlock_irqrestore(&g_srv_registry.lock, s);
+        spin_unlock_irqrestore(&svc->reg->lock, s);
 
         if (cn) return cn;                 // dequeued — ownership to caller
         if (st != SRV_STATE_LIVE) return NULL;   // service gone; give up
@@ -533,57 +694,91 @@ struct Spoor *devsrv_make_conn_spoor(struct SrvConn *cn) {
 
 static void devsrv_reset(void)    { /* no-op */ }
 
-// init — stamp the type tag + initialize the listener poll list on every
-// (static, zero-initialized) registry entry. A SrvService's magic is
-// permanent: it identifies the struct for the KObj_Srv handle-release
-// discriminator and is never cleared (see srv_clear_locked). poll_list
-// is similarly permanent (the list lock is the all-zero SPIN_LOCK_INIT
-// from BSS so the explicit init is the documented contract, mirroring
-// kernel/pipe.c::pipe_create's poll_waiter_list_init). dev_init calls
-// this once at boot.
+// init — create the one immortal boot registry (stalk-3a). srv_registry_
+// create stamps every entry's permanent magic + reg back-pointer +
+// poll_list. dev_init calls this once at boot, before joey's kproc bringup
+// mounts the boot registry's devsrv root on /srv.
 static void devsrv_init(void) {
-    for (u32 i = 0; i < SRV_MAX_SERVICES; i++) {
-        g_srv_registry.entries[i].magic = SRV_SERVICE_MAGIC;
-        poll_waiter_list_init(&g_srv_registry.entries[i].poll_list);
-    }
+    if (g_boot_srv_registry) extinction("devsrv_init called twice");
+    g_boot_srv_registry = srv_registry_create();
+    if (!g_boot_srv_registry)
+        extinction("devsrv_init: srv_registry_create(boot) failed");
 }
 
 static void devsrv_shutdown(void) { /* no-op */ }
 
-// attach — produce the /srv root directory Spoor. `spec` is unused: /srv
-// is a single root, not a spec-selected namespace.
+// attach — produce a /srv root directory Spoor over the BOOT registry. A
+// direct `#s` attach (vs. the mount, which uses devsrv_attach_registry
+// with an explicit registry) yields the one namespace-resident registry at
+// v1.0. `spec` is unused. NULL before devsrv_init (no boot registry yet).
 static struct Spoor *devsrv_attach(const char *spec) {
     (void)spec;
-    return dev_simple_attach(&devsrv, QTDIR);
+    return devsrv_attach_registry(g_boot_srv_registry);
+}
+
+// devsrv_attach_registry — mint a /srv root directory Spoor whose aux is
+// `reg` (taking one registry ref). The mount source at boot + per session
+// (A-5b-body). spoor_clunk of the returned root (on its last holder) runs
+// devsrv_close, which drops the registry ref.
+struct Spoor *devsrv_attach_registry(struct SrvRegistry *reg) {
+    if (!reg) return NULL;
+    struct Spoor *c = spoor_alloc(&devsrv);
+    if (!c) return NULL;
+    c->aux      = reg;
+    c->qid.type = QTDIR;
+    c->qid.path = 0;
+    c->qid.vers = 0;
+    srv_registry_ref(reg);     // the root Spoor instance holds one registry ref
+    return c;
 }
 
 // devsrv_conn_of — the SrvConn behind a connection Spoor, or NULL if `c`
-// is not one. A devsrv Spoor's aux discriminates its flavor: NULL for the
-// /srv root, a struct devsrv_svc_ref (DEVSRV_SVC_MAGIC) for a service
-// Spoor, or a struct SrvConn (SRV_CONN_MAGIC) for an accepted connection.
-// Non-static — SYS_SRV_PEER (kernel/syscall.c) resolves a connection
-// endpoint handle through here; declared in <thylacine/devsrv.h>.
+// is not one. A devsrv Spoor's aux discriminates its flavor: a SrvRegistry
+// (SRV_REGISTRY_MAGIC) for a /srv root, a devsrv_svc_ref (DEVSRV_SVC_MAGIC)
+// for a service Spoor, or a SrvConn (SRV_CONN_MAGIC) for an accepted
+// connection. Non-static — SYS_SRV_PEER (kernel/syscall.c) resolves a
+// connection endpoint handle through here; declared in <thylacine/devsrv.h>.
 struct SrvConn *devsrv_conn_of(struct Spoor *c) {
-    if (!c || c->dc != 's' || !c->aux)         return NULL;
+    if (!c || c->dc != 's' || !c->aux)          return NULL;
     if (*(const u64 *)c->aux != SRV_CONN_MAGIC) return NULL;
     return (struct SrvConn *)c->aux;
 }
 
-// walk — only the /srv root walks, and only one component deep: a walk of
-// /srv/<name> yields a service Spoor naming a LIVE posted service. The
-// service Spoor is structurally KObj_Srv (it carries devsrv's dc='s').
-// Walking out of a service or connection Spoor (the client-side
-// /srv/<name>/<path> walk) is P5-corvus-srv-impl-b.
+// walk — only a /srv root walks (aux = the SrvRegistry, SRV_REGISTRY_MAGIC),
+// and only one component deep: a walk of /srv/<name> yields a service Spoor
+// naming a LIVE posted service in THIS root's registry. The service Spoor
+// is structurally KObj_Srv (it carries devsrv's dc='s'). Walking out of a
+// service or connection Spoor is rejected.
+//
+// Registry-ref discipline (stalk-3a): `nc` is a spoor_clone of the root, so
+// spoor_clone copied nc->aux = reg — but a clone holds NO registry ref.
+// We NORMALIZE nc->aux = NULL on entry, then take the registry ref + set
+// nc->aux only on the success path. A walk failure therefore leaves
+// nc->aux == NULL, and devsrv_close(nc) is a clean no-op — no phantom
+// srv_registry_unref of a ref nc never took. (clone_walk_zero's failure
+// path does `nc->aux = NULL; spoor_unref` — no Dev close — so a ref taken
+// on a failing nname==0 path would leak; we drop it ourselves below.)
 static struct Walkqid *devsrv_walk(struct Spoor *c, struct Spoor *nc,
                                    const char **name, int nname) {
-    if (!c || c->dc != 's' || c->aux != NULL) return NULL;   // root only
-    if (!nc || nname < 0)                     return NULL;
+    if (!c || c->dc != 's' || !c->aux)                 return NULL;
+    if (*(const u64 *)c->aux != SRV_REGISTRY_MAGIC)    return NULL;   // root only
+    if (!nc || nname < 0)                              return NULL;
+
+    struct SrvRegistry *reg = (struct SrvRegistry *)c->aux;
+    nc->aux = NULL;            // normalize the clone-copied reg (see header)
 
     if (nname == 0) {
-        // Clone — nc is the caller's shallow copy of the root (aux NULL,
-        // so nc->aux is NULL too: nc stays a root Spoor).
+        // Clone — nc is the caller's shallow copy of the root. It becomes a
+        // NEW root instance naming the same registry, so it takes its OWN
+        // registry ref (mirroring dev9p's attached_owner clone-bump);
+        // devsrv_close(nc) drops it.
+        srv_registry_ref(reg);
         struct Walkqid *w = walkqid_alloc(1);
-        if (!w) return NULL;
+        if (!w) {
+            srv_registry_unref(reg);   // drop the ref we just took (no leak)
+            return NULL;               // nc->aux == NULL -> clean clone_walk_zero unref
+        }
+        nc->aux  = reg;                // commit: nc is a live root instance
         w->nqid  = 0;
         w->spoor = nc;
         return w;
@@ -598,12 +793,12 @@ static struct Walkqid *devsrv_walk(struct Spoor *c, struct Spoor *nc,
     while (len < SRV_NAME_MAX && s[len] != '\0') len++;
     if (len == 0 || s[len] != '\0') return NULL;   // empty or over-long
 
-    struct SrvService *svc = srv_lookup(s, (u8)len);
+    struct SrvService *svc = srv_lookup_in(reg, s, (u8)len);
     if (!svc) return NULL;
     {
-        irq_state_t st = spin_lock_irqsave(&g_srv_registry.lock);
+        irq_state_t st = spin_lock_irqsave(&reg->lock);
         bool live = (svc->state == SRV_STATE_LIVE);
-        spin_unlock_irqrestore(&g_srv_registry.lock, st);
+        spin_unlock_irqrestore(&reg->lock, st);
         if (!live) return NULL;        // only a LIVE service is walkable
     }
 
@@ -612,14 +807,17 @@ static struct Walkqid *devsrv_walk(struct Spoor *c, struct Spoor *nc,
     ref->magic    = DEVSRV_SVC_MAGIC;
     ref->name_len = (u8)len;
     for (u32 i = 0; i < len; i++) ref->name[i] = s[i];
+    ref->reg      = reg;
+    srv_registry_ref(reg);             // the service-ref carries one registry ref
 
     struct Walkqid *w = walkqid_alloc(1);
     if (!w) {
+        srv_registry_unref(reg);       // drop the svc-ref's ref (no leak)
         kfree(ref);
-        return NULL;
+        return NULL;                   // nc->aux == NULL -> clean
     }
 
-    nc->aux      = ref;        // nc's shallow-copied root aux was NULL
+    nc->aux      = ref;        // commit: nc is a service-ref Spoor
     nc->qid.type = QTFILE;
     nc->qid.path = 0;
     nc->qid.vers = 0;
@@ -634,39 +832,49 @@ static int devsrv_stat(struct Spoor *c, u8 *dp, int n) {
     return -1;
 }
 
-// open — a3b leaves this a graceful-fail stub. The /srv client-connect
-// (an open of /srv/<name>) yields a KObj_Srv handle whose obj is a
-// SrvConn — not a Spoor — so it cannot be expressed through the Dev
-// `open` vtable, which returns a Spoor. The client-connect core is
-// srv_conn_open_for_proc(); the production client-open syscall that
-// routes a namespace open into it lands at P5-corvus-srv-impl-b with the
-// joey /srv mount.
+// open — stalk-3a leaves this a graceful-fail stub. devsrv_open=connect (a
+// /srv/<name> open mints a SrvConn and returns a KOBJ_SPOOR endpoint — a
+// dev9p root for 9p-mode, a byte-stream conn Spoor for byte-mode) is
+// stalk-3b (STALK-DESIGN.md §5.2). The retained client-connect core is
+// srv_conn_open_for_proc(), driven by the retained SYS_SRV_CONNECT.
 static struct Spoor *devsrv_open(struct Spoor *c, int omode) {
     (void)c; (void)omode;
     return NULL;
 }
 
+// create — stalk-3a leaves this a graceful-fail stub. devsrv_create=post (a
+// SYS_WALK_CREATE on the /srv dir fd mints a KObj_Srv listener; perm &
+// DMSRVBYTE selects byte- vs 9P-mode) is stalk-3b (STALK-DESIGN.md §5.3).
+// At v1.0 /srv entries are posted via the retained SYS_POST_SERVICE.
 static struct Spoor *devsrv_create(struct Spoor *c, const char *name, int omode, u32 perm, u32 gid) {
     (void)c; (void)name; (void)omode; (void)perm; (void)gid;
-    // /srv entries are posted via SYS_POST_SERVICE, not 9P create.
     return NULL;
 }
 
-// close — release per-Spoor state. The /srv root holds none; a service
-// Spoor holds a kmalloc'd devsrv_svc_ref; a connection Spoor holds a
-// SrvConn reference. Closing a connection Spoor is a connection close
-// (CORVUS-DESIGN.md §6.2): tear the connection down so the peer wakes,
-// then release the reference.
+// close — release per-Spoor state. A /srv root holds a SrvRegistry ref; a
+// service Spoor holds a kmalloc'd devsrv_svc_ref (carrying a registry ref);
+// a connection Spoor holds a SrvConn reference. Closing a connection Spoor
+// is a connection close (CORVUS-DESIGN.md §6.2): tear the connection down
+// so the peer wakes, then release the reference. A Spoor with aux == NULL
+// (a failed/transient walk clone normalized in devsrv_walk) is a clean
+// no-op.
 static void devsrv_close(struct Spoor *c) {
-    if (!c || c->dc != 's' || !c->aux) return;   // root Spoor — no-op
+    if (!c || c->dc != 's' || !c->aux) return;   // root sans-reg / transient — no-op
     u64 m = *(const u64 *)c->aux;
-    if (m == SRV_CONN_MAGIC) {
+    if (m == SRV_REGISTRY_MAGIC) {
+        // A /srv root instance: drop its registry ref (the last drop drains
+        // + frees the registry; the boot registry never reaches that — its
+        // mount holds a ref forever).
+        srv_registry_unref((struct SrvRegistry *)c->aux);
+    } else if (m == SRV_CONN_MAGIC) {
         srvconn_teardown((struct SrvConn *)c->aux);
         srvconn_unref((struct SrvConn *)c->aux);
     } else if (m == DEVSRV_SVC_MAGIC) {
         struct devsrv_svc_ref *ref = (struct devsrv_svc_ref *)c->aux;
+        struct SrvRegistry    *r   = ref->reg;
         ref->magic = 0;
         kfree(ref);
+        srv_registry_unref(r);     // drop the svc-ref's registry ref
     } else {
         extinction("devsrv_close: Spoor aux has unknown magic (corruption)");
     }
@@ -757,29 +965,33 @@ static struct Spoor *devsrv_power(struct Spoor *c, int on) {
 // svc_listener_poll — listener-readiness probe on a SrvService. POLLIN
 // when the accept backlog has one or more waiting connections (corvus
 // has something to accept); POLLHUP when the service is no longer LIVE
-// (tombstoned by srv_proc_exit_notify or wiped by srv_registry_reset).
+// (tombstoned by srv_proc_exit_notify or wiped by srv_registry_drain).
 //
-// The sample-and-register are both atomic under the registry lock; the
-// producer side (srv_conn_open_for_proc → srv_backlog_push_locked under
-// the registry lock, then poll_waiter_list_wake after release;
-// srv_proc_exit_notify under the registry lock, then poll_waiter_list_
-// wake after release) commits the readiness change under the same lock.
+// The sample-and-register are both atomic under the registry lock
+// (svc->reg->lock); the producer side (srv_conn_open_in →
+// srv_backlog_push_locked under the registry lock, then poll_waiter_list_
+// wake after release; srv_proc_exit_notify_in under the registry lock,
+// then poll_waiter_list_wake after release) commits the readiness change
+// under the same lock.
 static short svc_listener_poll(struct SrvService *svc, short events,
                                struct poll_waiter *pw) {
     if (!svc) return POLLERR;
     if (svc->magic != SRV_SERVICE_MAGIC) {
         extinction("svc_listener_poll: bad service magic (UAF / wild ptr?)");
     }
+    if (!svc->reg) {
+        extinction("svc_listener_poll: service has no registry");
+    }
 
     short revents = 0;
 
-    irq_state_t s = spin_lock_irqsave(&g_srv_registry.lock);
+    irq_state_t s = spin_lock_irqsave(&svc->reg->lock);
     if (svc->backlog_count > 0)        revents |= POLLIN;
     if (svc->state != SRV_STATE_LIVE)  revents |= POLLHUP;
     if (pw) {
         poll_waiter_list_register(&svc->poll_list, pw);
     }
-    spin_unlock_irqrestore(&g_srv_registry.lock, s);
+    spin_unlock_irqrestore(&svc->reg->lock, s);
 
     // POSIX: POLLIN/POLLOUT only when requested; POLLHUP always. POLLOUT
     // is undefined for a listener — never set.
@@ -820,19 +1032,24 @@ static short devsrv_poll(struct Spoor *c, short events,
                          struct poll_waiter *pw) {
     if (!c || c->dc != 's') return POLLERR;
     if (!c->aux) {
-        // /srv root Spoor — no readiness state. The caller is asking
-        // about a directory; a poll on a directory has no real meaning
-        // here. Report no events (the caller's poll blocks until timeout).
+        // A transient/failed walk clone (aux normalized to NULL). No
+        // readiness state; the caller's poll blocks until timeout.
         return 0;
     }
     u64 m = *(const u64 *)c->aux;
     if (m == SRV_CONN_MAGIC) {
         return srvconn_poll((struct SrvConn *)c->aux, events, pw);
     }
+    if (m == SRV_REGISTRY_MAGIC) {
+        // /srv root Spoor — no readiness state. The caller is asking about
+        // a directory; a poll on a directory has no real meaning here.
+        // Report no events (the caller's poll blocks until timeout).
+        return 0;
+    }
     if (m == DEVSRV_SVC_MAGIC) {
         // Service-ref Spoor — the result of walking /srv/<name>. Used by
-        // the client-open path (P5-corvus-srv-impl-b) to mint a SrvConn;
-        // not a pollable transport itself. No events.
+        // the client-open path (stalk-3b) to mint a SrvConn; not a pollable
+        // transport itself. No events.
         return 0;
     }
     extinction("devsrv_poll: Spoor aux has unknown magic (corruption)");

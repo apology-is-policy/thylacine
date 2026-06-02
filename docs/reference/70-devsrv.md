@@ -1,14 +1,43 @@
 # 70 — devsrv: the `/srv` service registry
 
-**Status**: as-built at P5-corvus-srv-impl-a3c. The service registry, the
+**Status**: as-built at A-5b-0 **stalk-3a**. The service registry, the
 `devsrv` Dev, the `SYS_POST_SERVICE` syscall, the `proc_flags` post-gate,
-and poster-exit tombstoning landed at a2; the **per-connection layer** —
-the `devsrv` walk op, the client-connect path (`srv_conn_open_for_proc`),
-the bounded accept backlog, `SYS_SRV_ACCEPT`, and the connection-Spoor
-read/write/close — landed at a3b; `SYS_SRV_PEER` (the peer-identity read)
-landed at a3c. What remains: the corvus 9P server with the §6.2 step-5
-handshake drive plus the production client-open syscall
-(P5-corvus-srv-impl-b).
+and poster-exit tombstoning landed at P5-corvus-srv-impl-a2; the
+**per-connection layer** — the `devsrv` walk op, the client-connect path
+(`srv_conn_open_for_proc`), the bounded accept backlog, `SYS_SRV_ACCEPT`,
+and the connection-Spoor read/write/close — landed at a3b; `SYS_SRV_PEER`
+(the peer-identity read) landed at a3c. **stalk-3a (this revision)** makes
+the registry **namespace-resident**: the single static `g_srv_registry`
+becomes a heap-allocated, refcounted `SrvRegistry` reached *through the
+mounted devsrv root Spoor* (the root's `aux`), and boot mounts one immortal
+registry on the kproc `/srv` synthetic dir. The retained `SYS_POST_SERVICE`
+/ `SYS_SRV_CONNECT` syscall path resolves the one boot registry (nothing
+migrates in 3a). What remains: stalk-3b makes `devsrv_open` the connect and
+`devsrv_create` the post (retiring the syscalls in stalk-3c); the corvus 9P
+server with the §6.2 step-5 handshake drive.
+
+> **stalk-3a delta in one place.** The registry was a single static
+> `struct SrvRegistry g_srv_registry`; it is now heap-allocated +
+> refcounted (`srv_registry_create` / `srv_registry_ref` /
+> `srv_registry_unref`), reached through a mounted devsrv root Spoor whose
+> `aux` *is* the registry (`SRV_REGISTRY_MAGIC` at offset 0).
+> **Registry-ref discipline** (mirrors dev9p's `attached_owner`): every
+> devsrv Spoor instance carrying `aux = reg` holds exactly ONE registry ref
+> — the mounted root, each `clone_walk_zero` cross-clone of it, and each
+> `/srv/<name>` service-ref Spoor — dropped at `devsrv_close` (which fires
+> only on the Spoor's last `spoor_clunk`). `spoor_ref` (same instance) adds
+> NO registry ref; only a new instance does. The public name-based API
+> (`srv_reserve` / `srv_lookup` / `srv_conn_open_for_proc` /
+> `srv_proc_exit_notify` / `srv_registry_count`) is a thin wrapper over an
+> internal `_in(reg, …)` variant bound to the boot registry; the svc-based
+> API (`srv_commit` / `srv_abort` / `srv_accept_blocking` /
+> `srv_backlog_depth`) reaches the registry lock through a new `svc->reg`
+> back-pointer. Boot (`kernel/joey.c`, in kproc's bringup after the
+> devramfs chroot) `stalk`s `/srv` (`STALK_MOUNT`), mints
+> `devsrv_attach_registry(srv_boot_registry())`, and `mount`s it (MREPL) so
+> joey + every descendant shares the one registry via `territory_clone`
+> mount inheritance; the boot registry is immortal because kproc's mount
+> holds a ref forever. STALK-DESIGN.md §5.1.
 
 ---
 
@@ -105,23 +134,47 @@ on success, `-1` on any failure (see Error paths).
 ### Registry API — `<thylacine/devsrv.h>`
 
 ```c
+// Per-territory registry lifecycle (stalk-3a).
+struct SrvRegistry *srv_registry_create(void);
+void                srv_registry_ref(struct SrvRegistry *reg);
+void                srv_registry_unref(struct SrvRegistry *reg);
+struct Spoor       *devsrv_attach_registry(struct SrvRegistry *reg);
+struct SrvRegistry *srv_boot_registry(void);
+u64                 srv_registry_total_created(void);
+u64                 srv_registry_total_destroyed(void);
+
+// Name-based registry API (the retained SYS_POST_SERVICE / SYS_SRV_CONNECT
+// path) — thin wrappers bound to the boot registry over internal _in(reg).
 int  srv_reserve(const char *name, u8 name_len, struct Proc *poster,
+                 enum srv_mode mode,
                  struct SrvService **svc_out, enum srv_state *prior_out);
-void srv_commit(struct SrvService *svc);
+void srv_commit(struct SrvService *svc);          // reaches svc->reg->lock
 void srv_abort(struct SrvService *svc, enum srv_state prior);
 struct SrvService *srv_lookup(const char *name, u8 name_len);
 void srv_proc_exit_notify(struct Proc *p);
 int  srv_registry_count(void);
 ```
 
+`srv_registry_create` allocates a fresh refcounted registry (ref = 1;
+stamps each entry's permanent magic + poll_list + `reg` back-pointer);
+`srv_registry_ref` / `srv_registry_unref` are the refcount (the last unref
+drains every pending connection then frees). `devsrv_attach_registry` mints
+a `/srv` root Spoor whose `aux` is the registry (taking one ref).
+`srv_boot_registry` returns the one immortal boot registry the retained
+syscall path resolves. See "Per-territory registry (stalk-3a)" below.
+
 `srv_reserve` / `srv_commit` / `srv_abort` are the reserve-then-commit
 two-phase post: a registry slot is claimed (`RESERVING`), then either
 committed to `LIVE` or rolled back. `srv_lookup` finds a service by name.
 `srv_proc_exit_notify` is the poster-exit hook. `srv_registry_count`
-returns the number of non-`FREE` entries (tests + diagnostics).
+returns the number of non-`FREE` entries (tests + diagnostics). Each is a
+thin wrapper over an internal `*_in(reg, …)` variant bound to
+`srv_boot_registry()`; `srv_commit` / `srv_abort` reach the registry lock
+through the entry's `reg` back-pointer.
 
 `srv_registry_reset()` exists in `kernel/devsrv.c` as **test support
-only** — it is not declared in `devsrv.h` and has no production caller.
+only** — it is not declared in `devsrv.h` and has no production caller; it
+drains the boot registry.
 
 ### Per-connection API — `<thylacine/devsrv.h>`
 
@@ -188,26 +241,35 @@ Known caveats); the remaining slots (`stat`, `create`, `bread`,
 
 ### The registry
 
-`kernel/devsrv.c` holds a single static `struct SrvRegistry`:
+`kernel/devsrv.c` holds the `struct SrvRegistry` — **heap-allocated +
+refcounted** since stalk-3a (a single static `g_srv_registry` pre-3a):
 
 ```c
 struct SrvRegistry {
+    u64               magic;    // SRV_REGISTRY_MAGIC at offset 0; 0 once freed
+    int               ref;      // instance refcount (atomic)
     spin_lock_t       lock;
     struct SrvService entries[SRV_MAX_SERVICES];   // SRV_MAX_SERVICES == 8
 };
-static struct SrvRegistry g_srv_registry;
+static struct SrvRegistry *g_boot_srv_registry;    // the one immortal boot registry
 ```
 
-Static storage zero-initializes every entry's `state` to `SRV_STATE_FREE`,
-the lock to the all-zero `SPIN_LOCK_INIT` form, and each accept `Rendez`
-to `{unlocked, no waiter}`. The `devsrv.init` hook (`devsrv_init`, run
-once by `dev_init`) does one job: it stamps `SRV_SERVICE_MAGIC` into every
-entry's `magic` field as a permanent struct type tag (see Data structures
-— the `magic` field). The lock is a leaf lock: every registry function
-takes and releases it without nesting another lock inside.
+`srv_registry_create` `kmalloc`s one with `KP_ZERO` (every entry's `state`
+reads `SRV_STATE_FREE`, each accept `Rendez` `{unlocked, no waiter}`),
+stamps `magic` + `ref = 1` + `spin_lock_init(&lock)`, and stamps each
+entry's permanent `SRV_SERVICE_MAGIC` + `reg` back-pointer +
+`poll_waiter_list_init`. The `devsrv.init` hook (`devsrv_init`, run once by
+`dev_init`) creates the one boot registry into `g_boot_srv_registry`. The
+lock is a leaf lock: every registry function takes and releases it without
+nesting another lock inside. `magic` (`SRV_REGISTRY_MAGIC`) at offset 0
+both discriminates a devsrv root Spoor's `aux` and fast-fails a
+stale-pointer read (cleared at free, the `spoor_free_internal` UAF-defense
+pattern).
 
-`corvus` is the only v1.0 service (`/srv/stratum-ctl` is a *mounted* 9P
-tree, not a `devsrv` service); `SRV_MAX_SERVICES = 8` is headroom.
+`corvus` is the only v1.0 service in the boot registry (`/srv/stratum-ctl`
+is a *mounted* 9P tree, not a `devsrv` service); `SRV_MAX_SERVICES = 8` is
+headroom. A future login session gets its OWN registry (A-5b-body), so a
+second user's coordinator is unnameable from another session (I-1).
 
 ### Two-phase post
 
@@ -341,17 +403,30 @@ with EOF rather than waiting on a server it will never reach.
 
 ### The `devsrv` walk
 
-`devsrv_walk` is real at a3b. Only the `/srv` root walks — a root Spoor
-is the one whose `aux` is `NULL` — and only one component deep:
+`devsrv_walk` is real. Only the `/srv` root walks — a root Spoor is the
+one whose `aux` is its `SrvRegistry` (`SRV_REGISTRY_MAGIC` at offset 0;
+pre-stalk-3a the root's `aux` was `NULL`) — and only one component deep.
 
-- `nname == 0` is a clone: the result is the caller's shallow copy of the
-  root, which stays a `/srv` root Spoor (its `aux` is `NULL` too).
-- `nname == 1` of a `LIVE` posted service yields a **service Spoor**
-  (`QTFILE`) whose `aux` is a `kmalloc`'d `struct devsrv_svc_ref` naming
-  that service. Only a `LIVE` service is walkable (`srv_lookup` + a
-  locked `state` check).
-- `nname > 1` fails — there is no `/srv/<name>/<path>` nesting yet; the
-  client-side connection-tree walk is P5-corvus-srv-impl-b.
+**The aux-normalize discipline (stalk-3a).** `nc` arrives as a
+`spoor_clone` of the root, so `spoor_clone` shallow-copied `nc->aux = reg`
+— but a clone holds NO registry ref. `devsrv_walk` therefore **normalizes
+`nc->aux = NULL` on entry** and sets `nc->aux` (plus takes the matching
+registry ref) only on a success path. A walk failure then leaves
+`nc->aux == NULL`, so `devsrv_close(nc)` is a clean no-op — never a phantom
+`srv_registry_unref` of a ref the clone never took. (This matches the
+dev9p discipline: a clone's `aux` is unowned until the walk takes
+ownership; `clone_walk_zero` / stalk's failure paths detach `aux` before
+`spoor_unref`.)
+
+- `nname == 0` is a clone (the `cross_mounts` cross): `nc` becomes a FRESH
+  `/srv` root instance over the SAME registry — it takes its own registry
+  ref (mirroring dev9p's `attached_owner` clone-bump), dropped at
+  `devsrv_close(nc)`.
+- `nname == 1` of a `LIVE` posted service (resolved in the root's registry
+  via `srv_lookup_in(reg, …)` + a locked `state` check) yields a **service
+  Spoor** (`QTFILE`) whose `aux` is a `kmalloc`'d `struct devsrv_svc_ref`
+  carrying a registry ref.
+- `nname > 1` fails — there is no `/srv/<name>/<path>` nesting yet.
 
 ### Connection-Spoor read / write / close
 
@@ -365,11 +440,15 @@ corvus polls again), or `-1` (EOF — the connection is torn down). The
 is ignored — a connection is a byte stream.
 
 `devsrv_close` discriminates the Spoor's `aux` by the magic word at
-offset 0: a root Spoor (`aux == NULL`) is a no-op; a service Spoor
+offset 0: a **root Spoor (`SRV_REGISTRY_MAGIC`)** `srv_registry_unref`s the
+registry (stalk-3a — the last unref drains + frees; the boot registry
+never reaches that, its mount holding a ref forever); a service Spoor
 (`DEVSRV_SVC_MAGIC`) `kfree`s the `devsrv_svc_ref` (clearing its magic
-first); a connection Spoor (`SRV_CONN_MAGIC`) does `srvconn_teardown`
-then `srvconn_unref`. Closing a connection Spoor *is* a connection close
-(CORVUS-DESIGN.md §6.2: teardown EOFs both rings so the peer wakes).
+first) then `srv_registry_unref`s its registry ref; a connection Spoor
+(`SRV_CONN_MAGIC`) does `srvconn_teardown` then `srvconn_unref`. An
+`aux == NULL` Spoor (a failed/transient walk clone, normalized) is a clean
+no-op. Closing a connection Spoor *is* a connection close (CORVUS-DESIGN.md
+§6.2: teardown EOFs both rings so the peer wakes).
 
 ### `SYS_SRV_PEER` — the peer-identity read
 
@@ -537,8 +616,14 @@ struct SrvService {
     u32            backlog_tail;     // next-pop  index; mod SRV_ACCEPT_BACKLOG
     u32            backlog_count;    // entries buffered; 0..SRV_ACCEPT_BACKLOG
     struct Rendez  accept_rendez;    // the poster blocks here in SYS_SRV_ACCEPT
+    struct poll_waiter_list poll_list;   // listener pollers (P5-poll-b)
+    struct SrvRegistry *reg;         // owning registry (stalk-3a; permanent)
 };
 ```
+
+The `reg` back-pointer (stalk-3a) is stamped once at `srv_registry_create`
+and never cleared — it lets the svc-taking API reach `svc->reg->lock`
+without threading a `reg` argument through every signature.
 
 `magic` (`SRV_SERVICE_MAGIC`) sits at offset 0 — a **permanent struct
 type tag**, stamped once per entry by `devsrv_init` and never cleared
@@ -559,11 +644,14 @@ struct devsrv_svc_ref {
     u64  magic;                      // DEVSRV_SVC_MAGIC at offset 0
     u8   name_len;                   // 1..SRV_NAME_MAX
     char name[SRV_NAME_MAX];
+    struct SrvRegistry *reg;         // the registry this service-ref names into (stalk-3a)
 };
 ```
 
 The `aux` of a *service Spoor* — the product of a `/srv` root walk
-(`devsrv_walk`, `nname == 1`). It names a posted service **by value**: the
+(`devsrv_walk`, `nname == 1`). The `reg` field (stalk-3a) carries ONE
+registry ref (taken in `devsrv_walk`, dropped in `devsrv_close`) and is the
+registry the service is resolved fresh in — per-territory, never a global. It names a posted service **by value**: the
 connect path resolves the name fresh via `srv_lookup`, never caching a raw
 `SrvService *` (a tombstone-then-rebind reuses the registry slot, so a
 cached pointer could name a different service). `DEVSRV_SVC_MAGIC`
@@ -701,7 +789,18 @@ layer + the a3c `SYS_SRV_PEER` tests):
 - `devsrv.walk_service` — a `/srv` root walk of a posted name yields a
   `QTFILE` service Spoor with a `devsrv_svc_ref` aux; a walk of an
   unposted name or two components deep fails; a clone (`nname == 0`)
-  stays a `/srv` root.
+  yields a fresh `/srv` root instance over the **same registry**
+  (stalk-3a: `nc4->aux == root->aux`, `SRV_REGISTRY_MAGIC`).
+- `devsrv.registry_lifecycle` (stalk-3a) — the registry-ref crux: a heap
+  registry's ref counts the devsrv Spoor INSTANCES carrying `aux=reg` (the
+  attached root + each clone-walk-zero), each dropped at `devsrv_close`;
+  the last unref drains + frees (`srv_registry_total_destroyed` bumps), and
+  no Spoor is leaked (allocated-delta == freed-delta). Proves the
+  normalize-aux discipline (no phantom unref).
+- `devsrv.svc_ref_holds_registry` (stalk-3a) — a `/srv/<name>` service-ref
+  Spoor + a 2nd root over the BOOT registry each take + drop a registry ref
+  via `devsrv_walk` / `devsrv_close`; the boot registry is never freed by
+  this churn (immortal) and still resolves the posted service.
 - `devsrv.conn_open` — `srv_conn_open_for_proc` mints a connection,
   enqueues it, and installs a `KObj_Srv` handle; `handle_dup` refuses the
   handle (`NoSrvDup`); a connect to an unposted or tombstoned service
@@ -741,8 +840,8 @@ layer + the a3c `SYS_SRV_PEER` tests):
 Each test calls `srv_registry_reset()` first for isolation; the
 `SYS_SRV_PEER` tests additionally splice their bare-allocated peer Procs
 into the process table with `proc_test_link` (so `proc_caps_by_stripes`
-can see them) and `proc_test_unlink` before freeing. Suite: 477/477 PASS
-× default + UBSan.
+can see them) and `proc_test_unlink` before freeing. Suite: 708/708 PASS
+× default (smp4) + UBSan + smp8 at stalk-3a.
 
 ---
 
@@ -845,7 +944,9 @@ release / wake pattern from `kernel/pipe.c`).
 `SYS_SRV_ACCEPT`). corvus polls it for POLLIN (bytes to read) and
 POLLOUT (room to write); a teardown surfaces POLLHUP + POLLERR.
 `devsrv_poll` (the Dev vtable slot) dispatches by aux:
-- aux == NULL → `/srv` root Spoor: returns 0 (no readiness).
+- aux == NULL → a failed/transient walk clone (normalized): returns 0.
+- aux's first u64 == SRV_REGISTRY_MAGIC → `/srv` root Spoor: returns 0
+  (no readiness; a directory poll — stalk-3a, was the aux==NULL case).
 - aux's first u64 == DEVSRV_SVC_MAGIC → service-ref Spoor (the result
   of walking `/srv/<name>`): returns 0 (not pollable as transport).
 - aux's first u64 == SRV_CONN_MAGIC → connection Spoor: delegates to
@@ -869,6 +970,10 @@ list-lock acquisition cannot deadlock with the producer's state lock.
 
 | Item | State |
 |---|---|
+| heap+refcounted per-territory `SrvRegistry` + boot `/srv` mount | landed (A-5b-0 stalk-3a) |
+| `srv_registry_create`/`_ref`/`_unref` + `devsrv_attach_registry` + `srv_boot_registry` | landed (stalk-3a) |
+| `devsrv_open`=connect / `devsrv_create`=post (still graceful-fail stubs) | deferred to stalk-3b |
+| retire `SYS_SRV_CONNECT` / `SYS_POST_SERVICE` (subsumed by `SYS_OPEN` / `SYS_WALK_CREATE`) | deferred to stalk-3c |
 | service registry + two-phase post | landed (P5-corvus-srv-impl-a2) |
 | `SYS_POST_SERVICE` (syscall 26) | landed |
 | `PROC_FLAG_MAY_POST_SERVICE` post-gate | landed |

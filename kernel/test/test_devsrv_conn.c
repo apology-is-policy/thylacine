@@ -199,13 +199,19 @@ void test_devsrv_walk_service(void) {
         "walk two components deep → NULL");
     spoor_clunk(nc3);
 
-    // A clone (nname == 0) → the supplied Spoor stays a /srv root (no aux).
+    // A clone (nname == 0) → the supplied Spoor becomes a FRESH /srv root
+    // instance over the SAME registry (stalk-3a: the cross_mounts clone-walk;
+    // the clone takes its own registry ref, dropped at devsrv_close). Pre-
+    // stalk-3a the root carried no aux; now it names its SrvRegistry.
     struct Spoor *nc4 = spoor_clone(root);
     TEST_ASSERT(nc4 != NULL, "spoor_clone");
     struct Walkqid *wc = devsrv.walk(root, nc4, NULL, 0);
     TEST_ASSERT(wc != NULL, "clone walk (nname=0) succeeds");
     TEST_EXPECT_EQ(wc->nqid, 0, "clone walks zero components");
-    TEST_ASSERT(nc4->aux == NULL, "the cloned root Spoor carries no aux");
+    TEST_ASSERT(nc4->aux == root->aux,
+        "the cloned root names the same registry as its source");
+    TEST_ASSERT(*(const u64 *)nc4->aux == SRV_REGISTRY_MAGIC,
+        "the cloned root's aux is the SrvRegistry (SRV_REGISTRY_MAGIC)");
     walkqid_free(wc);
     spoor_clunk(nc4);
 

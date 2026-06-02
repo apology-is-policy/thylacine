@@ -42,6 +42,7 @@ struct Dev;
 struct Proc;
 struct Spoor;
 struct SrvConn;
+struct SrvRegistry;
 struct poll_waiter;
 
 // Maximum service-name length. Service names are short identifiers
@@ -59,6 +60,15 @@ struct poll_waiter;
 // word: a KObj_Srv handle's obj is a SrvService for a SYS_POST_SERVICE
 // handle, a SrvConn for a client connection handle.
 #define SRV_SERVICE_MAGIC  0x53525653564300ULL    // 'SRVSVC' || 0x00
+
+// SRV_REGISTRY_MAGIC — sentinel at offset 0 of struct SrvRegistry
+// (stalk-3a). A devsrv root Spoor's aux is its SrvRegistry; this magic
+// lets devsrv_close / devsrv_poll / devsrv_conn_of discriminate the root
+// (a SrvRegistry) from a service-ref (DEVSRV_SVC_MAGIC) and a connection
+// (SRV_CONN_MAGIC) by the aux's first u64 — the same first-u64 dispatch
+// the service/connection objects already use. Cleared at free (UAF
+// defense), so a stale root-Spoor aux read fast-fails.
+#define SRV_REGISTRY_MAGIC  0x5352565245474900ULL  // 'SRVREGI' || 0x00
 
 // Per-service accept backlog depth — the count of kernel-minted-but-not-
 // yet-accepted /srv connections held for the poster. A client open past
@@ -88,6 +98,11 @@ struct devsrv_svc_ref {
     u64  magic;                      // DEVSRV_SVC_MAGIC
     u8   name_len;                   // 1..SRV_NAME_MAX
     char name[SRV_NAME_MAX];
+    // stalk-3a: the registry this service-ref names into. Carries ONE
+    // registry ref (taken in devsrv_walk when the ref is minted, dropped
+    // in devsrv_close). The service is resolved fresh in THIS registry
+    // (devsrv_open in 3b), never a global — per-territory isolation.
+    struct SrvRegistry *reg;
 };
 
 // F2 close (P5-corvus-srv-impl audit): pin the magic to offset 0. Read
@@ -179,6 +194,13 @@ struct SrvService {
     // drain) wake this list AFTER releasing the registry lock — the
     // accept_rendez wake's discipline (specs/poll.tla MakeReady).
     struct poll_waiter_list poll_list;
+
+    // stalk-3a: back-pointer to the owning registry. Stamped once at
+    // srv_registry_create (alongside `magic`), never cleared. Lets the
+    // svc-taking API (srv_commit / srv_abort / srv_accept_blocking /
+    // srv_backlog_depth / svc_listener_poll) reach the registry lock
+    // without threading a separate `reg` argument through every signature.
+    struct SrvRegistry *reg;
 };
 
 // F2 close (P5-corvus-srv-impl audit): pin the magic to offset 0. Read
@@ -193,6 +215,54 @@ _Static_assert(__builtin_offsetof(struct SrvService, magic) == 0,
 
 // The devsrv Dev. dc='s' (Plan 9 #s); registered by dev_init().
 extern struct Dev devsrv;
+
+// =============================================================================
+// Per-territory service registry (stalk-3a).
+// =============================================================================
+//
+// STALK-DESIGN.md §5.1. `/srv` is namespace-resident: the registry is a
+// heap-allocated, refcounted SrvRegistry reached THROUGH the mounted
+// devsrv root Spoor (the root's `aux`), not a global or a Territory field
+// (Plan-9-true — named through the namespace). Boot mounts one immortal
+// registry on the kproc `/srv` synthetic dir; login (A-5b-body) mounts a
+// fresh per-session registry, so a second user's coordinator is
+// structurally unnameable (I-1).
+//
+// Registry-ref discipline (mirrors dev9p's attached_owner): EVERY devsrv
+// Spoor instance carrying `aux = reg` holds exactly ONE registry ref — the
+// mounted root, each clone_walk_zero cross-clone of it, and each
+// /srv/<name> service-ref Spoor. devsrv_close drops exactly one. spoor_ref
+// (same instance) adds NO registry ref; only a new instance (spoor_clone +
+// walk0, or a fresh service-ref) does. The registry outlives any single
+// Spoor; it is freed at the last srv_registry_unref.
+
+// srv_registry_create — allocate a fresh registry (ref = 1; stamps each
+// entry's permanent magic + poll_list + reg back-pointer). Returns NULL on
+// OOM. The caller owns the initial reference.
+struct SrvRegistry *srv_registry_create(void);
+
+// srv_registry_ref / srv_registry_unref — refcount. The last unref drains
+// every pending connection (the srv_registry_reset teardown discipline)
+// then frees. NULL-safe (unref). Extincts on corrupt magic / underflow.
+void srv_registry_ref(struct SrvRegistry *reg);
+void srv_registry_unref(struct SrvRegistry *reg);
+
+// devsrv_attach_registry — mint a /srv root directory Spoor whose `aux` is
+// `reg` (taking ONE registry ref). The mount source at boot + per session.
+// Returns NULL on OOM (no ref taken). spoor_clunk of the returned root
+// (on its last holder) runs devsrv_close, which drops the registry ref.
+struct Spoor *devsrv_attach_registry(struct SrvRegistry *reg);
+
+// srv_boot_registry — the one immortal registry mounted on kproc's /srv at
+// boot. The retained-for-stalk-3a syscall path (SYS_POST_SERVICE /
+// SYS_SRV_CONNECT) resolves it; the in-kernel test harness uses it via the
+// public name-based API + srv_registry_reset. NULL before devsrv_init.
+struct SrvRegistry *srv_boot_registry(void);
+
+// Cumulative registry lifecycle counters (tests verify drain-on-last-unref
+// without dereferencing a freed registry). (created - destroyed) == live.
+u64 srv_registry_total_created(void);
+u64 srv_registry_total_destroyed(void);
 
 // =============================================================================
 // Service registry.
