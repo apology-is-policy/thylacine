@@ -710,8 +710,16 @@ kill = BOTH the namespace `/proc/<pid>/ctl` surface AND a narrow elevation-only 
 - **I-27 carry (A-4c-2 forward-note):** during a session corvus is the SOLE console-attached
   Proc; login + shell are NEVER attached; joey relinquishes its boot attach at the
   bringup->session boundary. Optional `SPAWN_PERM_CONSOLE_OWNER` for Ctrl-C-to-shell.
-- **A-5b open impl-design:** corvus `SRV_CONN_PER_PROC_MAX=1` vs who pulls the DEK -- resolve
-  scripture-faithfully (corvus push, or a connection-model lift); the security property is fixed.
+- **A-5b open impl-design -- RESOLVED 2026-06-02** (ground-truth pass; no vote -- the fork
+  dissolved): `SRV_CONN_PER_PROC_MAX=1` is **per-Proc** (`kernel/devsrv.c:360`), so login's
+  connection does not block a second (coordinator) Proc; corvus's session is **token-keyed**
+  (`usr/corvus/src/main.rs:1586`) and `VERB_UNWRAP` already implements the bearer-token-forward
+  (CORVUS-DESIGN §6.3 / line 678; Stratum's `stm_corvus_unwrap` already drives it). **The
+  coordinator PULLS** with the login-forwarded token over its own connection -- no corvus
+  lift; push rejected (inverts corvus's role; corvus lacks the storage layout). New plumbing is
+  all Stratum-side (NO format/wire-ABI break): deferred-unwrap soft-skip + runtime DEK
+  install/evict + a coordinator control surface login drives with the token. Full reasoning:
+  IDENTITY-DESIGN §9.9 "Open A-5b impl-design item -- RESOLVED".
 
 ---
 

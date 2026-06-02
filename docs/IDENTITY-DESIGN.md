@@ -2035,15 +2035,46 @@ Stratum-side sub-chunk below.
   already exists); (3) a **token-forward** path so the coordinator reaches corvus with the
   user's token at login.
 - *Realizing the "stratumd-asks-corvus" vote* (verdict Q3: the `--role client` proxy does NO
-  crypto -- the coordinator does -- so the DEK consumer is the coordinator). **Open A-5b
-  impl-design item** within the settled shape: corvus's `SRV_CONN_PER_PROC_MAX = 1` + its
-  session-keyed-by-token model interacts with who pulls the DEK -- login holding the session
-  connection blocks a second (coordinator) connection. Resolve scripture-faithfully at A-5b
-  (corvus + Stratum both in-scope), candidate shapes: corvus PUSHES the DEK to the coordinator
-  after AUTH (the factotum-hands-the-key idiom), OR a small corvus connection-model lift (a
-  second connection / a dedicated key-service posting) lets the coordinator pull with the
-  forwarded token. The *security property* (at-rest + session-scoped + login-never-holds-the-
-  raw-DEK + evict-at-logout) is fixed; this is plumbing within it.
+  crypto -- the coordinator does -- so the DEK consumer is the coordinator).
+- **Open A-5b impl-design item -- RESOLVED 2026-06-02 (ground-truth pass; no vote -- the fork
+  dissolved).** The framed worry ("login holding the session connection blocks a second
+  (coordinator) connection") was a misread of the connection model. Verified across both trees:
+  - `SRV_CONN_PER_PROC_MAX = 1` is **per-Proc**, not per-corvus-total (`kernel/devsrv.c:360,372`;
+    CORVUS-DESIGN §6.2 / line 643). Two distinct Procs each hold their own `/srv/corvus`
+    connection -- login's connection does NOT block the coordinator's.
+  - corvus's session is **token-keyed, not connection-keyed**: `session_token_matches` is a
+    constant-time compare against the global `SESSION` slot with no peer/stripes check
+    (`usr/corvus/src/main.rs:1586`). The C-8 "no Proc impersonation" gate stamps the AUTH
+    channel's Proc identity; UNWRAP's 33-byte bearer token is the *deliberate* cross-Proc
+    credential, and UNWRAP is NOT console-attached-gated (only AUTH / elevation are).
+  - corvus's `VERB_UNWRAP` (verb 4) **already implements the bearer-token-forward pull**
+    (`token(33) + dataset + key_id(8) + wrapped(1217) -> 32-byte DEK`, C-7 owner-gated), and
+    CORVUS-DESIGN §6.3 ("Session reach across Procs", line 678) already blesses exactly this:
+    login forwards token S to the per-user stratumd, which opens its own connection and
+    presents S. Stratum's shipped `stm_corvus_unwrap` (`include/stratum/corvus_client.h:502`)
+    already drives that path at mount time (`stm_sync_open` / `sync_unwrap_cb`), and
+    `sync_dek_insert` (install) already exists.
+  - **The call: the coordinator PULLS** the DEK over its own corvus connection using the
+    login-forwarded token -- the already-built path, **no corvus connection-model lift** (the
+    per-Proc cap + token-keyed session already admit a second Proc). corvus PUSH is rejected:
+    it inverts corvus's server/key-agent role (corvus dials no one) and corvus does not hold
+    the storage layout (the wrapped blob + key_id + dataset live on the Stratum side). Safe at
+    v1.0 because the single global `SESSION` slot + single-console-serial = one live session;
+    concurrent multi-session corvus (already a seam below) generalizes it at v1.x.
+  - **The genuinely-new plumbing is all Stratum-side** (verified NO on-disk-format / wire-ABI
+    break -- the keyslot envelope is opaque to the on-disk layout, the deks map is in-RAM,
+    UNWRAP/WRAP are wire-v1-stable): (1) the **deferred-unwrap soft-skip** -- the coordinator
+    boots with user-sealed CURRENT keyslots present-but-locked when no session token is
+    available (keyed on token-availability, the predicate already half-present at
+    `src/sync/sync.c:555-561`); (2) a runtime DEK **install** (`stm_corvus_unwrap` with the
+    forwarded token, then `sync_dek_insert`) + **evict** (`sync_dek_remove` + zero -- today
+    only the unmount-wide `sync_dek_wipe_all` exists) on the long-lived coordinator; (3) a
+    coordinator **runtime control surface** login drives to trigger install (at login) / evict
+    (at logout) with the user's token -- its exact form (a `/ctl`-style 9P control file vs a
+    dedicated command socket) pinned at Stratum impl, no wire-ABI change. login never holds the
+    raw DEK (the coordinator unwraps + installs; login forwards only the opaque token).
+  - The *security property* (at-rest + session-scoped + login-never-holds-the-raw-DEK +
+    evict-at-logout) is fixed; the above is the plumbing within it.
 - *Thylacine-side*: login spawns the user's `--role client` stratumd (A-3c, dataset-scoped via
   `--datasets-allowed` -> the user-vs-user access boundary, `Rlerror(EACCES)` out-of-scope),
   triggers the coordinator DEK-install, and binds `/home/<user>` into the user's territory
