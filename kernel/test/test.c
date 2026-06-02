@@ -260,10 +260,15 @@ void test_cons_blocking_read_wakeup(void);
 void test_cons_ring_fill_drain(void);
 void test_cons_ring_overflow_drop(void);
 void test_cons_ctrlc_consumed(void);
-void test_cons_break_discarded(void);
+void test_cons_break_sets_sak(void);
 void test_cons_read_busy_guard(void);
 void test_cons_read_bad_args(void);
 void test_cons_console_owner_intr(void);
+void test_proc_revoke_console_attached(void);
+void test_cons_sak_revoke_regrant(void);
+void test_cons_sak_failsafe_revoke_only(void);
+void test_cons_sak_idempotent_flood(void);
+void test_cons_sak_via_console_mgr(void);
 void test_devctl_bestiary_smoke(void);
 void test_devctl_attach_returns_dir(void);
 void test_devctl_walk_to_each_leaf(void);
@@ -1032,10 +1037,15 @@ struct test_case g_tests[] = {
     { "cons.ring_fill_drain",          test_cons_ring_fill_drain,          false, NULL },
     { "cons.ring_overflow_drop",       test_cons_ring_overflow_drop,       false, NULL },
     { "cons.ctrlc_consumed",           test_cons_ctrlc_consumed,           false, NULL },
-    { "cons.break_discarded",          test_cons_break_discarded,          false, NULL },
+    { "cons.break_sets_sak",           test_cons_break_sets_sak,           false, NULL },
     { "cons.read_busy_guard",          test_cons_read_busy_guard,          false, NULL },
     { "cons.read_bad_args",            test_cons_read_bad_args,            false, NULL },
     { "cons.console_owner_intr",       test_cons_console_owner_intr,       false, NULL },
+    { "proc.revoke_console_attached",  test_proc_revoke_console_attached,  false, NULL },
+    { "cons.sak_revoke_regrant",       test_cons_sak_revoke_regrant,       false, NULL },
+    { "cons.sak_failsafe_revoke_only", test_cons_sak_failsafe_revoke_only, false, NULL },
+    { "cons.sak_idempotent_flood",     test_cons_sak_idempotent_flood,     false, NULL },
+    { "cons.sak_via_console_mgr",      test_cons_sak_via_console_mgr,      false, NULL },
     { "devctl.bestiary_smoke",         test_devctl_bestiary_smoke,         false, NULL },
     { "devctl.attach_returns_dir",     test_devctl_attach_returns_dir,     false, NULL },
     { "devctl.walk_to_each_leaf",      test_devctl_walk_to_each_leaf,      false, NULL },

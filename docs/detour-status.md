@@ -629,6 +629,24 @@ kill = BOTH the namespace `/proc/<pid>/ctl` surface AND a narrow elevation-only 
       The two twice-reverted P2-Dd blockers (thread_free/on_cpu; SP_EL1/SPSel) are
       closed by #788 + EL1h. See `memory/bug_810_smp_no_secondary_timer.md` +
       `docs/DEBUGGING-PLAYBOOK.md` §6.14 + `docs/reference/11-timer.md`. **c-2 still NEXT.**
+  - **c-2 LANDED** *(impl `<pending>`; audit close below)*: the BREAK->SAK revoke/re-grant +
+    the I-27 trusted-path handoff. `cons.c` a BREAK sets `sak_pending` (was discarded) + wakes
+    `console_mgr`, which (process context) runs the new `proc.c::proc_console_sak`. `proc.c`
+    adds `g_console_trusted_proc` (under `g_proc_table_lock`, zombie-chokepoint-cleared like
+    `g_console_owner`) + `proc_set_console_trusted` + `proc_revoke_console_attached` (atomic
+    AND); `proc_mark_console_attached`/`proc_is_console_attached` became `__atomic_*` RELAXED
+    (the console bit is now multi-writer -- mark+revoke from the kthread). `proc_console_sak`
+    under `g_proc_table_lock`: revoke from owner (+ post `interrupt`) -> re-grant to
+    `g_console_trusted_proc` -> owner=trusted; FAIL-SAFE revoke-only (owner=NULL) if no trusted
+    Proc alive; idempotent no-op if trusted already owns. Wiring: `SPAWN_PERM_CONSOLE_TRUSTED`
+    (syscall.h bit 1 + both spawn thunks + libt + libthyla-rs); joey grants it to corvus
+    (console-attached-caller-gated). I-27 anchor unchanged: the devcap HOSTOWNER redeem gate
+    keys on `PROC_FLAG_CONSOLE_ATTACHED`, so post-SAK only corvus can redeem. The note reuses
+    `interrupt` (closed notes table; a dedicated console-revoked name is a v1.x notes SEAM).
+    Inert at boot (no BREAK injectable). 4 new tests (`proc.revoke_console_attached` +
+    `cons.sak_revoke_regrant` / `cons.sak_failsafe_revoke_only` / `cons.sak_idempotent_flood`)
+    + `cons.break_discarded` -> `cons.break_sets_sak`. Matrix: default(smp4) + UBSan + smp8 all
+    **682/682** + boot OK + 0 EXTINCTION. **Audit `<pending>`.**
 - **Depends:** A-1 + corvus. **Seams:** resource-scoped HW-cap allowlist (the structured caps
   TLV); distributed clearance crypto-proof (v1.x); the graphical Nitpicker-style trusted
   screen (Halcyon); a finer per-target kill handle (vs the blanket `CAP_KILL`).

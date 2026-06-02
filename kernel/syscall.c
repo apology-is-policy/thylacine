@@ -2860,7 +2860,11 @@ int sys_mlockall_for_proc(struct Proc *p, u32 flags) {
     (void)flags;       // unused at v1.0; reserved for MCL_CURRENT/MCL_FUTURE
     if ((__atomic_load_n(&p->caps, __ATOMIC_ACQUIRE) & CAP_LOCK_PAGES) == 0)
         return -1;
-    p->proc_flags |= PROC_FLAG_MLOCKED;
+    // Atomic OR: A-4c-2 made PROC_FLAG_CONSOLE_ATTACHED (same word) multi-writer
+    // (the SAK kthread clears it on the console owner). If `p` is the console
+    // owner, a non-atomic RMW here could race the SAK's atomic clear and lose it
+    // (I-27). So every proc_flags RMW is atomic.
+    __atomic_or_fetch(&p->proc_flags, PROC_FLAG_MLOCKED, __ATOMIC_RELAXED);
     return 0;
 }
 
@@ -2878,12 +2882,15 @@ static s64 sys_mlockall_handler(u64 flags_raw) {
 int sys_set_dumpable_for_proc(struct Proc *p, u32 dumpable) {
     if (!p)                                          return -1;
     if (dumpable == 0) {
-        p->proc_flags |= PROC_FLAG_NODUMP;
+        // Atomic RMW: the console bit shares this word and is multi-writer
+        // post-A-4c-2 (see sys_mlockall_for_proc).
+        __atomic_or_fetch(&p->proc_flags, PROC_FLAG_NODUMP, __ATOMIC_RELAXED);
         return 0;
     }
     if (dumpable == 1) {
         // Refuse re-enable: corvus's no-coredump posture is one-way.
-        if (p->proc_flags & PROC_FLAG_NODUMP)        return -1;
+        if (__atomic_load_n(&p->proc_flags, __ATOMIC_RELAXED) & PROC_FLAG_NODUMP)
+            return -1;
         return 0;                                     // already dumpable
     }
     return -1;                                       // bad arg
@@ -2902,11 +2909,14 @@ static s64 sys_set_dumpable_handler(u64 dumpable_raw) {
 int sys_set_traceable_for_proc(struct Proc *p, u32 traceable) {
     if (!p)                                          return -1;
     if (traceable == 0) {
-        p->proc_flags |= PROC_FLAG_NOTRACE;
+        // Atomic RMW: the console bit shares this word and is multi-writer
+        // post-A-4c-2 (see sys_mlockall_for_proc).
+        __atomic_or_fetch(&p->proc_flags, PROC_FLAG_NOTRACE, __ATOMIC_RELAXED);
         return 0;
     }
     if (traceable == 1) {
-        if (p->proc_flags & PROC_FLAG_NOTRACE)       return -1;
+        if (__atomic_load_n(&p->proc_flags, __ATOMIC_RELAXED) & PROC_FLAG_NOTRACE)
+            return -1;
         return 0;
     }
     return -1;
@@ -3200,6 +3210,9 @@ static void sys_spawn_with_fds_thunk(void *arg) {
     // parent must have stripped it).
     if (perm_flags & SPAWN_PERM_MAY_POST_SERVICE) {
         proc_mark_may_post_service(p);
+    }
+    if (perm_flags & SPAWN_PERM_CONSOLE_TRUSTED) {
+        proc_set_console_trusted(p);   // A-4c-2: the SAK re-grant target
     }
     if (perm_flags & ~SPAWN_PERM_ALL) {
         extinction("sys_spawn_with_fds_thunk: unknown SPAWN_PERM_* bit");
@@ -3729,6 +3742,9 @@ static void sys_spawn_full_argv_thunk(void *arg) {
     // perm-application block.
     if (perm_flags & SPAWN_PERM_MAY_POST_SERVICE) {
         proc_mark_may_post_service(p);
+    }
+    if (perm_flags & SPAWN_PERM_CONSOLE_TRUSTED) {
+        proc_set_console_trusted(p);   // A-4c-2: the SAK re-grant target
     }
     if (perm_flags & ~SPAWN_PERM_ALL) {
         extinction("sys_spawn_full_argv_thunk: unknown SPAWN_PERM_* bit");

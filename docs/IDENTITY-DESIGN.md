@@ -1862,7 +1862,12 @@ pass; landed scripture-first, no code):
 - **Split (as-built):** A-4c-1 (console RX -- RX IRQ + ring + blocking `devcons_read` + Ctrl-C +
   the `console_mgr` kthread + `g_console_owner` + the `exits()` clear-hook) lands + audits
   first; A-4c-2 (the BREAK->SAK revoke/re-grant + `g_console_trusted_proc` + the I-27 handoff)
-  lands + audits second.
+  lands + audits second. **Both LANDED** (c-1 impl `426c10e` / audit `e043334`; c-2 the SAK
+  trusted-path handoff -- `proc_console_sak` + `g_console_trusted_proc` + the
+  `SPAWN_PERM_CONSOLE_TRUSTED` corvus designation; see `docs/detour-status.md` A-4c). The
+  SAK-revoke courtesy note reuses the `interrupt` name (the closed notes table has no dedicated
+  "console-revoked" name; a distinct one is a v1.x notes SEAM, additive when a consumer needs
+  to distinguish SAK-revoke from Ctrl-C).
 
 **New invariants** (land in ARCHITECTURE.md §28; mirrored here):
 - **I-25 -- legate scope is bounded + fully revoked.** A legate's elevated caps are bounded

@@ -797,12 +797,18 @@ static int do_corvus_bringup(long storage_dup_fd) {
     // A-4a-3: joey ALSO grants corvus T_CAP_GRANT_CLEARANCE so corvus may
     // register clearance grants (SYS_CAP_GRANT_CLEARANCE) on
     // CLEARANCE_ACTIVATE -- the legate analog of the hostowner grant.
+    // A-4c-2: joey ALSO stamps T_SPAWN_PERM_CONSOLE_TRUSTED so the kernel
+    // records corvus as the trusted login authority -- the Proc a kernel SAK
+    // (serial BREAK) re-grants the console to (g_console_trusted_proc). joey is
+    // console-attached, so the kernel's console-attached-caller gate on
+    // perm-granting accepts it. Inert until a SAK fires (no SAK at boot -- the
+    // automated harness cannot inject a BREAK).
     long corvus_pid = t_spawn_with_perms(
         corvus_name, sizeof(corvus_name) - 1,
         corvus_fds, 1,
         T_CAP_LOCK_PAGES | T_CAP_CSPRNG_READ | T_CAP_GRANT_HOSTOWNER
             | T_CAP_GRANT_CLEARANCE,
-        T_SPAWN_PERM_MAY_POST_SERVICE);
+        T_SPAWN_PERM_MAY_POST_SERVICE | T_SPAWN_PERM_CONSOLE_TRUSTED);
     if (corvus_pid <= 0) {
         t_putstr("joey: t_spawn_with_perms(\"corvus\") FAILED\n");
         return 1;

@@ -22,17 +22,18 @@
 // Feed one received byte to the console input layer. Called from the PL011 RX
 // IRQ handler (arch/arm64/uart.c::uart_rx_handler), IRQ context. `is_break` is
 // true when the PL011 flagged a line BREAK on this entry (DR bit-10 BE) -- the
-// A-4c-2 SAK; A-4c-1 discards it. A data byte equal to 0x03 (Ctrl-C) is
-// cooked-consumed (it generates a deferred `interrupt` note, NOT ring data).
-// Any other byte is enqueued to the ring (dropped if the ring is full --
-// bounded, never overflows). Wakes a blocked devcons_read and/or the
-// console_mgr kthread as appropriate.
+// A-4c-2 SAK: it sets sak-pending + wakes console_mgr (which runs the privileged
+// revoke/re-grant in process context); the accompanying DR byte is NOT enqueued.
+// A data byte equal to 0x03 (Ctrl-C) is cooked-consumed (it generates a deferred
+// `interrupt` note, NOT ring data). Any other byte is enqueued to the ring
+// (dropped if the ring is full -- bounded, never overflows). Wakes a blocked
+// devcons_read and/or the console_mgr kthread as appropriate.
 void cons_rx_input(u8 byte, bool is_break);
 
 // The console_mgr kproc kthread entry. Spawned once at boot (boot_main). Sleeps
 // on the console-manager Rendez; on wake, performs the deferred privileged work
 // in process context: post the `interrupt` note to the current console owner
-// (Ctrl-C). Never returns.
+// (Ctrl-C), and the A-4c-2 SAK revoke/re-grant (proc_console_sak). Never returns.
 void console_mgr_main(void);
 
 // =============================================================================
@@ -48,6 +49,10 @@ void cons_test_reset(void);
 // True iff a Ctrl-C `interrupt` post is pending (set by cons_rx_input, cleared
 // by the console_mgr kthread).
 bool cons_test_intr_pending(void);
+
+// True iff an A-4c-2 SAK (serial BREAK) is pending (set by cons_rx_input on a
+// BREAK, cleared by the console_mgr kthread before proc_console_sak runs).
+bool cons_test_sak_pending(void);
 
 // Force the single-reader busy flag (to exercise the devcons_read busy-guard
 // without a second live reader thread).

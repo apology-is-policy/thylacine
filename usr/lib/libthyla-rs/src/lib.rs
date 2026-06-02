@@ -316,6 +316,9 @@ pub const T_GID_NONE:          u32 = 0xFFFF_FFFF;
 // SYS_SPAWN_WITH_PERMS perm_flags — must mirror SPAWN_PERM_* in
 // kernel/include/thylacine/syscall.h.
 pub const T_SPAWN_PERM_MAY_POST_SERVICE: u64 = 1 << 0;
+// A-4c-2: records the spawned child as the trusted login authority (the SAK
+// re-grant target). Granting it requires the parent to be console-attached.
+pub const T_SPAWN_PERM_CONSOLE_TRUSTED: u64 = 1 << 1;
 
 // poll event bits — MUST mirror POLL* in kernel/include/thylacine/poll.h.
 // Linux values; the future musl shim is a no-op.

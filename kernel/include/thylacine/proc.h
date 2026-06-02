@@ -681,16 +681,28 @@ int proc_for_each(int (*callback)(struct Proc *p, void *arg), void *arg);
 // invariant.
 
 // proc_mark_console_attached — stamp PROC_FLAG_CONSOLE_ATTACHED on `p`.
-// One-way: idempotent, never cleared. Maps to specs/corvus.tla's
-// MarkConsoleAttached action. v1.0 caller: joey (the console-login
-// chain root) marks itself at boot; P5-login's login process will mark
-// the per-user shells it spawns. The bit is NEVER conferred by rfork —
-// every console-attached Proc is the result of an explicit call here.
-// Extincts on a NULL or corrupted Proc.
+// Idempotent; maps to specs/corvus.tla's MarkConsoleAttached action.
+// Callers: joey (the console-login chain root) marks itself at boot; the
+// A-4c-2 SAK re-grant marks corvus (the trusted login authority). The bit
+// is NEVER conferred by rfork — every console-attached Proc is the result
+// of an explicit call here. The OR is atomic (__atomic_or_fetch): A-4c-2
+// makes the bit multi-writer (the SAK runs on the console_mgr kthread, a
+// DIFFERENT thread than the owner), so the v1.0 single-writer proc_flags
+// convention no longer holds for this one bit. Extincts on a NULL/corrupt/
+// non-ALIVE Proc.
 void proc_mark_console_attached(struct Proc *p);
 
+// proc_revoke_console_attached — clear PROC_FLAG_CONSOLE_ATTACHED on `p`
+// (the unset side the A-4c-2 SAK needs; the SAK is the sole revoker). The
+// AND is atomic (multi-writer bit; see proc_mark_console_attached). A
+// no-op on a NULL/corrupt Proc (fail-closed). Owner-lifetime is the
+// caller's responsibility — proc_console_sak calls this under
+// g_proc_table_lock with the owner pinned.
+void proc_revoke_console_attached(struct Proc *p);
+
 // proc_is_console_attached — true iff `p` carries
-// PROC_FLAG_CONSOLE_ATTACHED. Returns false for a NULL `p`.
+// PROC_FLAG_CONSOLE_ATTACHED. Returns false for a NULL `p`. The read is an
+// atomic load (the bit is multi-writer post-A-4c-2).
 bool proc_is_console_attached(const struct Proc *p);
 
 // A-4c-1: the kernel console owner (the trusted-path anchor for /dev/cons).
@@ -705,6 +717,23 @@ void proc_set_console_owner(struct Proc *p);
 // current console owner. Called from the console_mgr kthread (process context).
 // No-op when there is no live owner. Takes g_proc_table_lock.
 void proc_console_post_interrupt(void);
+
+// proc_set_console_trusted — record `p` as the trusted login authority (corvus):
+// the target the A-4c-2 SAK re-grants the console to. Takes g_proc_table_lock.
+// Set when joey establishes corvus (SPAWN_PERM_CONSOLE_TRUSTED). Pass NULL to
+// clear; proc_become_zombie_locked also clears it on the trusted Proc's death so
+// the pointer never dangles (a then-fired SAK falls back to revoke-only).
+void proc_set_console_trusted(struct Proc *p);
+
+// proc_console_sak — the A-4c-2 SAK transition (I-27 trusted-path handoff). Run
+// from the console_mgr kthread on a recognized serial BREAK. Under
+// g_proc_table_lock: revoke the console-attach bit from the current owner + post
+// it a notify note, then re-grant the bit to the trusted login authority and
+// make it the owner. FAIL-SAFE: with no trusted Proc alive, revoke-only (owner
+// cleared to NULL) -- no Proc can redeem CAP_HOSTOWNER / a clearance until a
+// trusted login claims the console. Idempotent if the trusted Proc already owns
+// the console (a BREAK flood is a no-op).
+void proc_console_sak(void);
 
 // =============================================================================
 // P5-corvus-srv: per-Proc identity tag.

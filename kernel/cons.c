@@ -51,6 +51,7 @@ struct cons_input {
     u32         count;                 // mutated under lock; read locklessly in cond -- cons_count_*
     bool        reader_busy;           // a devcons_read is parked (single-reader)
     bool        intr_pending;          // mutated under lock; read locklessly in cond -- cons_intr_*
+    bool        sak_pending;           // A-4c-2: a serial BREAK (SAK) awaits console_mgr -- cons_sak_*
 };
 
 static struct cons_input g_cons = { .lock = SPIN_LOCK_INIT };
@@ -73,16 +74,24 @@ static inline u32  cons_count_load(void)   { return __atomic_load_n(&g_cons.coun
 static inline void cons_count_store(u32 v) { __atomic_store_n(&g_cons.count, v, __ATOMIC_RELAXED); }
 static inline bool cons_intr_load(void)    { return __atomic_load_n(&g_cons.intr_pending, __ATOMIC_RELAXED); }
 static inline void cons_intr_store(bool v) { __atomic_store_n(&g_cons.intr_pending, v, __ATOMIC_RELAXED); }
+static inline bool cons_sak_load(void)     { return __atomic_load_n(&g_cons.sak_pending, __ATOMIC_RELAXED); }
+static inline void cons_sak_store(bool v)  { __atomic_store_n(&g_cons.sak_pending, v, __ATOMIC_RELAXED); }
 
 void cons_rx_input(u8 byte, bool is_break) {
-    if (is_break) {
-        // A-4c-2 SAK; discarded at A-4c-1 so a BREAK never corrupts the data
-        // stream (the DR data byte accompanying a break is 0x00).
-        return;
-    }
     bool wake_data = false, wake_mgr = false;
     irq_state_t s = spin_lock_irqsave(&g_cons.lock);
-    if (byte == 0x03u) {               // Ctrl-C: cooked-consume -> interrupt note
+    if (is_break) {
+        // A-4c-2 SAK: a serial BREAK is a PL011 line condition (DR.BE), not a
+        // data byte -- EL0-written bytes cannot forge it, and the accompanying
+        // DR byte (0x00) is never enqueued. Set sak-pending + defer the
+        // privileged revoke/re-grant to console_mgr's process context
+        // (proc_console_sak takes g_proc_table_lock + posts a note -- neither is
+        // IRQ-safe). The recognizer is stateless: one flag, no multi-byte state
+        // machine to starve or partially-spoof (the I-27 "cannot be
+        // starved/spoofed by crafted input" obligation is thus structural).
+        cons_sak_store(true);
+        wake_mgr = true;
+    } else if (byte == 0x03u) {         // Ctrl-C: cooked-consume -> interrupt note
         cons_intr_store(true);
         wake_mgr = true;
     } else {
@@ -114,11 +123,11 @@ static int cons_data_ready(void *arg) {
     return cons_count_load() > 0u;
 }
 
-// cond: a deferred console action is pending. Same lockless-under-Rendez-lock
-// discipline as cons_data_ready.
+// cond: a deferred console action is pending (a Ctrl-C interrupt OR an A-4c-2
+// SAK). Same lockless-under-Rendez-lock discipline as cons_data_ready.
 static int cons_mgr_pending(void *arg) {
     (void)arg;
-    return cons_intr_load();
+    return cons_intr_load() || cons_sak_load();
 }
 
 // The console_mgr kproc kthread (spawned once at boot). Services deferred
@@ -132,10 +141,17 @@ void console_mgr_main(void) {
 
         irq_state_t s = spin_lock_irqsave(&g_cons.lock);
         bool do_intr = cons_intr_load();
+        bool do_sak  = cons_sak_load();
         cons_intr_store(false);
+        cons_sak_store(false);
         spin_unlock_irqrestore(&g_cons.lock, s);
 
+        // Ctrl-C first (the foreground app gets its interrupt), then the SAK
+        // (which revokes the console from that same owner + re-grants to the
+        // trusted login authority). Both run in process context, never under
+        // g_cons.lock -- proc_console_sak takes g_proc_table_lock + posts a note.
         if (do_intr) proc_console_post_interrupt();
+        if (do_sak)  proc_console_sak();
     }
 }
 
@@ -145,11 +161,16 @@ void cons_test_reset(void) {
     cons_count_store(0u);
     g_cons.reader_busy = false;
     cons_intr_store(false);
+    cons_sak_store(false);
     spin_unlock_irqrestore(&g_cons.lock, s);
 }
 
 bool cons_test_intr_pending(void) {
     return cons_intr_load();
+}
+
+bool cons_test_sak_pending(void) {
+    return cons_sak_load();
 }
 
 void cons_test_set_reader_busy(bool busy) {

@@ -1272,7 +1272,16 @@ enum {
 // so corvus may call SYS_POST_SERVICE("corvus") and become the /srv/corvus
 // 9P server. NOT a cap because rfork does not propagate it.
 #define SPAWN_PERM_MAY_POST_SERVICE  (1u << 0)
-#define SPAWN_PERM_ALL               (SPAWN_PERM_MAY_POST_SERVICE)
+// SPAWN_PERM_CONSOLE_TRUSTED (A-4c-2) records the spawned child as the trusted
+// login authority -- the target a kernel SAK re-grants the console to
+// (proc_set_console_trusted -> g_console_trusted_proc). joey grants this to
+// /sbin/corvus. Like every SPAWN_PERM_* bit it is gate-checked at spawn (the
+// granting caller must itself be console-attached), so only the console-trust
+// chain can designate the SAK re-grant target. NOT a cap (rfork does not
+// propagate it).
+#define SPAWN_PERM_CONSOLE_TRUSTED   (1u << 1)
+#define SPAWN_PERM_ALL               (SPAWN_PERM_MAY_POST_SERVICE | \
+                                      SPAWN_PERM_CONSOLE_TRUSTED)
 
 // A-1a (docs/IDENTITY-DESIGN.md §9.1): sys_spawn_args.identity_flags bits.
 // SPAWN_IDENTITY_SET requests that the child be born with the principal_id

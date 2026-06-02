@@ -38,7 +38,7 @@ Each Dev's vtable is a single-file leaf with `dc` + `name` + 16 ops. Most ops fo
 
 | Dev | `read` | `write` | `init` | Notes |
 |---|---|---|---|---|
-| `cons` ('c') | blocks on the RX ring; returns >= 1 byte (A-4c-1) | forwards to `uart_putc` | no-op | RX landed at A-4c-1: the PL011 RX IRQ (`arch/arm64/uart.c::uart_rx_handler`, SPI 33) fills a bounded ring via `cons_rx_input`; `devcons_read` blocks on a single `Rendez` (single-reader busy-guard; a 2nd concurrent reader gets -1). Ctrl-C (0x03) is cooked-consumed -> a deferred `interrupt` note to the console owner (posted by the `console_mgr` kthread, since the IRQ handler is wakeup-only); a serial BREAK is the A-4c-2 SAK (discarded at A-4c-1). See `cons.h` + IDENTITY-DESIGN.md section 9.8. |
+| `cons` ('c') | blocks on the RX ring; returns >= 1 byte (A-4c-1) | forwards to `uart_putc` | no-op | RX landed at A-4c-1: the PL011 RX IRQ (`arch/arm64/uart.c::uart_rx_handler`, SPI 33) fills a bounded ring via `cons_rx_input`; `devcons_read` blocks on a single `Rendez` (single-reader busy-guard; a 2nd concurrent reader gets -1). Ctrl-C (0x03) is cooked-consumed -> a deferred `interrupt` note to the console owner (posted by the `console_mgr` kthread, since the IRQ handler is wakeup-only). A serial BREAK is the A-4c-2 SAK -> sak-pending -> the `console_mgr` runs `proc_console_sak` (the I-27 trusted-path revoke/re-grant). See `cons.h` + IDENTITY-DESIGN.md section 9.8. |
 | `null` ('0') | returns 0 (EOF) | returns n (silently consume) | no-op | POSIX `/dev/null` semantics. |
 | `zero` ('z') | fills buf with 0; returns n | returns n (silently consume) | no-op | POSIX `/dev/zero` semantics. |
 | `random` ('r') | RNDR-backed; returns n on full success, < n on RNDR-retry-exhausted, -1 if RNDR absent | returns n (silently consume; future versions stir into chacha20 state) | detects FEAT_RNG via ID_AA64ISAR0_EL1.RNDR field; sets `g_rndr_available`; prints to boot banner | RNDR / RNDRRS per ARM v8.5+. |
@@ -57,7 +57,7 @@ Each Dev's vtable is a single-file leaf with `dc` + `name` + 16 ops. Most ops fo
 | `kernel/null.c` | ~100 | devnull vtable; reads return 0; writes consume. |
 | `kernel/zero.c` | ~100 | devzero vtable; reads fill with zeroes; writes consume. |
 | `kernel/random.c` | ~190 | devrandom vtable + RNDR detection + retry loop. |
-| `kernel/cons.c` | ~240 | devcons vtable; writes forward to `uart_putc`; A-4c-1: RX ring + blocking `devcons_read` + `cons_rx_input` (IRQ-context, wakeup-only) + the `console_mgr` kthread (deferred Ctrl-C `interrupt` post). |
+| `kernel/cons.c` | ~260 | devcons vtable; writes forward to `uart_putc`; A-4c-1: RX ring + blocking `devcons_read` + `cons_rx_input` (IRQ-context, wakeup-only) + the `console_mgr` kthread (deferred Ctrl-C `interrupt` post). A-4c-2: a BREAK sets `sak_pending` -> `console_mgr` runs `proc_console_sak` (the SAK trusted-path handoff). |
 | `arch/arm64/uart.c` | +RX | A-4c-1: `uart_rx_init` (IMSC.RXIM unmask) + `uart_rx_handler` (RX-FIFO drain + `DR.BE` BREAK split -> `cons_rx_input`); `UART_INTID_PL011 = 33` (QEMU-virt SPI fallback) in uart.h. |
 | `kernel/dev.c` | +50 | `dev_simple_attach / dev_simple_open / dev_simple_close` helpers + bestiary registration of all four in `dev_init`. |
 
@@ -164,12 +164,16 @@ When `specs/9p_client.tla` lands at Phase 4+ (cumulative ROADMAP §7), Spoor cro
 - `cons.ring_fill_drain` — pushed data bytes drain in FIFO order (A-4c-1).
 - `cons.ring_overflow_drop` — a full ring drops the excess; no corruption / overflow.
 - `cons.ctrlc_consumed` — Ctrl-C (0x03) sets intr-pending and is NOT enqueued as ring data.
-- `cons.break_discarded` — a serial BREAK entry is discarded (A-4c-1; the SAK is A-4c-2).
+- `cons.break_sets_sak` — a serial BREAK sets sak-pending (A-4c-2 SAK) and is NOT enqueued as ring data.
 - `cons.read_busy_guard` — a 2nd concurrent reader returns -1 (single-reader guard), not data.
 - `cons.read_bad_args` — NULL buf / n<0 -> -1; n==0 -> 0 (no block).
 - `cons.console_owner_intr` — `proc_console_post_interrupt` posts `interrupt` to the live owner; a NULL or zombie owner is a no-op.
+- `proc.revoke_console_attached` — the atomic console-attach clear (A-4c-2); idempotent; NULL is a fail-closed no-op.
+- `cons.sak_revoke_regrant` — `proc_console_sak` revokes the console from the owner (+ posts it an `interrupt` note) and re-grants it to the trusted login authority, which becomes the new owner.
+- `cons.sak_failsafe_revoke_only` — a SAK with no trusted Proc alive clears the owner to NULL (revoke-only).
+- `cons.sak_idempotent_flood` — a SAK when the trusted Proc already owns the console is a no-op (no spurious revoke / re-grant / note).
 
-The A-4c-1 cons tests drive `cons_rx_input` synthetically (the harness cannot inject UART RX -- IDENTITY-DESIGN.md section 9.8 test note); the real PL011 RX IRQ wiring is validated by boot survival + the interactive `Ctrl-A b` BREAK path.
+The cons tests drive `cons_rx_input` / `proc_console_sak` synthetically (the harness cannot inject UART RX or a BREAK -- IDENTITY-DESIGN.md section 9.8 test note); the real PL011 RX IRQ + the live SAK transition are validated by boot survival + the interactive `Ctrl-A b` BREAK path.
 
 ### Lifecycle stress (ROADMAP §6.2)
 
@@ -186,10 +190,10 @@ The `random.*` tests skip gracefully when RNDR is unavailable (e.g., a future po
 | `kernel/null.c` + devnull Dev (dc='0') | Landed (P4-B) |
 | `kernel/zero.c` + devzero Dev (dc='z') | Landed (P4-B) |
 | `kernel/random.c` + devrandom Dev (dc='r'; RNDR-backed) | Landed (P4-B) |
-| `kernel/cons.c` + devcons Dev (dc='c'; UART forward) | Landed (P4-B); blocking RX + Ctrl-C + console-owner added (A-4c-1) |
+| `kernel/cons.c` + devcons Dev (dc='c'; UART forward) | Landed (P4-B); blocking RX + Ctrl-C + console-owner added (A-4c-1); the BREAK->SAK trusted-path revoke/re-grant + `g_console_trusted_proc` added (A-4c-2) |
 | `dev_simple_attach / open / close` helpers | Landed (P4-B) |
 | Bestiary registration in `dev_init` | Landed (P4-B; 5 Devs total) |
-| In-kernel tests | 11 covering bestiary registration, per-Dev contracts, lifecycle stress (10K no-leak on /dev/null). The A-4c-1 console RX tests (9 `cons.*`, incl. the two-thread `blocking_read_wakeup`) live in `kernel/test/test_cons.c`. |
+| In-kernel tests | 11 covering bestiary registration, per-Dev contracts, lifecycle stress (10K no-leak on /dev/null). The console RX + SAK tests (`cons.*` + `proc.revoke_console_attached`; A-4c-1 + A-4c-2, incl. the two-thread `blocking_read_wakeup` and the three `cons.sak_*` transition tests) live in `kernel/test/test_cons.c`. |
 | ROADMAP §6.2 "Spoor lifecycle: 10K cycles on /dev/null" | Closed (P4-B). |
 | ROADMAP §6.2 "cat /dev/random produces non-zero bytes" | Closed (P4-B; conditional on FEAT_RNG, which QEMU virt -cpu max provides). |
 | chacha20 stir for devrandom | Held to a future hardening sub-chunk (defense-in-depth; API unchanged). |

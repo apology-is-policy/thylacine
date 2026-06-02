@@ -191,6 +191,10 @@ static inline long t_torpor_wake(unsigned int *addr_va, unsigned int count) {
 // SYS_POST_SERVICE; granting it requires the parent to be console-
 // attached.
 #define T_SPAWN_PERM_MAY_POST_SERVICE  (1u << 0)
+// T_SPAWN_PERM_CONSOLE_TRUSTED (A-4c-2) records the spawned child as the trusted
+// login authority (the SAK re-grant target); joey grants it to /sbin/corvus.
+// Like every perm bit, granting it requires the parent to be console-attached.
+#define T_SPAWN_PERM_CONSOLE_TRUSTED   (1u << 1)
 
 // SYS_SPAWN_FULL_ARGV bounds — must mirror SYS_SPAWN_ARGV_MAX +
 // SYS_SPAWN_ARGV_DATA_MAX in kernel/include/thylacine/syscall.h.

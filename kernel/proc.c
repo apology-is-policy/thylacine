@@ -705,24 +705,38 @@ void proc_mark_console_attached(struct Proc *p) {
     // loudly rather than silently stamping trust on it.
     if (p->state != PROC_STATE_ALIVE)
         extinction("proc_mark_console_attached on non-ALIVE Proc");
-    // One-way set, idempotent — the console bit is never cleared (a Proc
-    // once in the console-login chain stays marked for life;
-    // specs/corvus.tla: console_attached only grows). Maps to the spec's
-    // MarkConsoleAttached action. The |= is non-atomic: sound under the
-    // v1.0 single-thread-per-Proc invariant — a Proc's proc_flags is
-    // written only by that Proc's own thread/chain (here, and the
-    // SYS_SET_DUMPABLE / SYS_SET_TRACEABLE / SYS_MLOCKALL handlers). The
-    // multi-threaded-Proc lift must convert every proc_flags writer to
-    // __atomic_or_fetch.
-    p->proc_flags |= PROC_FLAG_CONSOLE_ATTACHED;
+    // Idempotent set. The OR is ATOMIC: A-4c-2 makes PROC_FLAG_CONSOLE_-
+    // ATTACHED multi-writer -- the SAK re-grant marks corvus from the
+    // console_mgr kthread (a DIFFERENT thread than the marked Proc), and
+    // proc_revoke_console_attached clears the same bit from that kthread.
+    // So this one bit no longer obeys the v1.0 single-writer proc_flags
+    // convention. The OTHER proc_flags bits (MAY_POST_SERVICE / DUMPABLE /
+    // TRACEABLE / MLOCKALL) remain set-once before EL0 by the Proc's own
+    // thread -- temporally disjoint from any SAK on an already-running
+    // owner -- so they do not concurrently RMW this word with the console
+    // transitions. RELAXED: the bit carries no ordering dependency (the
+    // redeem gate and the SAK both read it as a standalone predicate).
+    __atomic_or_fetch(&p->proc_flags, PROC_FLAG_CONSOLE_ATTACHED, __ATOMIC_RELAXED);
+}
+
+// Clear PROC_FLAG_CONSOLE_ATTACHED (the unset side proc_console_sak needs).
+// Atomic AND -- the bit is multi-writer (see proc_mark_console_attached). A
+// no-op on a NULL/corrupt Proc (fail-closed). The caller pins owner lifetime
+// (proc_console_sak holds g_proc_table_lock with the owner ALIVE-checked).
+void proc_revoke_console_attached(struct Proc *p) {
+    if (!p || p->magic != PROC_MAGIC) return;
+    __atomic_and_fetch(&p->proc_flags, ~PROC_FLAG_CONSOLE_ATTACHED, __ATOMIC_RELAXED);
 }
 
 bool proc_is_console_attached(const struct Proc *p) {
     // Fail-closed: a NULL or corrupted Proc reads as NOT console-
     // attached — this query gates hostowner elevation, so the safe
-    // default on a bad pointer is "no console, no elevation."
+    // default on a bad pointer is "no console, no elevation." The load is
+    // ATOMIC: the bit is multi-writer post-A-4c-2 (the SAK kthread mutates
+    // it), so a plain read would be a C11 data race.
     if (!p || p->magic != PROC_MAGIC) return false;
-    return (p->proc_flags & PROC_FLAG_CONSOLE_ATTACHED) != 0;
+    return (__atomic_load_n(&p->proc_flags, __ATOMIC_RELAXED)
+            & PROC_FLAG_CONSOLE_ATTACHED) != 0;
 }
 
 // =============================================================================
@@ -738,9 +752,23 @@ bool proc_is_console_attached(const struct Proc *p) {
 // adds the SAK revoke/re-grant transitions.
 static struct Proc *g_console_owner;   // BSS NULL
 
+// g_console_trusted_proc is the trusted login authority (corvus) -- the target
+// the A-4c-2 SAK re-grants the console to. Set when joey establishes corvus
+// (SPAWN_PERM_CONSOLE_TRUSTED, applied in the spawn thunk). Same lifetime
+// discipline as g_console_owner: protected by g_proc_table_lock, cleared by
+// proc_become_zombie_locked on the trusted Proc's death so it never dangles (a
+// then-fired SAK falls back to revoke-only -- the security-correct default).
+static struct Proc *g_console_trusted_proc;   // BSS NULL
+
 void proc_set_console_owner(struct Proc *p) {
     irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
     g_console_owner = p;
+    spin_unlock_irqrestore(&g_proc_table_lock, s);
+}
+
+void proc_set_console_trusted(struct Proc *p) {
+    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    g_console_trusted_proc = p;
     spin_unlock_irqrestore(&g_proc_table_lock, s);
 }
 
@@ -757,6 +785,65 @@ void proc_console_post_interrupt(void) {
         notes_post(owner, "interrupt", 0u, NULL, true);
     }
     spin_unlock_irqrestore(&g_proc_table_lock, s);
+}
+
+// A-4c-2: the SAK transition (I-27 trusted-path handoff). Called from the
+// console_mgr kthread on a recognized serial BREAK. The whole transition runs
+// under g_proc_table_lock so the owner + trusted pointers cannot be reaped/freed
+// mid-transition (the A-4c-1 console-owner lifetime discipline). Lock order
+// g_proc_table_lock -> note q->lock matches proc_console_post_interrupt and the
+// proc_become_zombie_locked -> notes_post_child_exit order (audited; acyclic).
+void proc_console_sak(void) {
+    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    struct Proc *owner   = g_console_owner;
+    struct Proc *trusted = g_console_trusted_proc;
+
+    bool trusted_live = trusted && trusted->magic == PROC_MAGIC
+                        && trusted->state == PROC_STATE_ALIVE;
+
+    // Idempotent under a BREAK flood: if the trusted login authority already
+    // holds the console, the SAK is a no-op -- no spurious revoke / re-grant /
+    // note. (This is also the only path on which owner == trusted, so the steps
+    // below never revoke-then-re-grant the same Proc.)
+    if (trusted_live && owner == trusted) {
+        spin_unlock_irqrestore(&g_proc_table_lock, s);
+        return;
+    }
+
+    // (1) Revoke the console-attach bit from the current owner + post it a
+    // notify note (a foreground app learns it lost the console). Guarded on a
+    // live owner: after the owner exited, proc_become_zombie_locked already
+    // cleared the pointer, so there is nothing to revoke. The note reuses the
+    // existing `interrupt` name (the closed notes table -- notes.c -- has no
+    // dedicated "console-revoked"/"hangup" name; a distinct name is a v1.x notes
+    // SEAM, additive when a consumer needs to tell SAK-revoke from Ctrl-C). At
+    // v1.0 the owner is joey, whose fd 0 is a pipe/cap, not /dev/cons -- the note
+    // is a courtesy with no behavioral consumer yet.
+    if (owner && owner->magic == PROC_MAGIC && owner->state == PROC_STATE_ALIVE) {
+        proc_revoke_console_attached(owner);
+        notes_post(owner, "interrupt", 0u, NULL, true);
+    }
+
+    // (2) Re-grant the console to the trusted login authority and make it the
+    // owner. FAIL-SAFE: with no trusted Proc alive, revoke-only (owner = NULL) --
+    // no Proc can redeem CAP_HOSTOWNER / a clearance (the devcap redeem gate keys
+    // on PROC_FLAG_CONSOLE_ATTACHED) until a trusted login claims the console.
+    if (trusted_live) {
+        proc_mark_console_attached(trusted);   // atomic OR; trusted ALIVE-checked
+        g_console_owner = trusted;
+    } else {
+        g_console_owner = NULL;
+    }
+    spin_unlock_irqrestore(&g_proc_table_lock, s);
+}
+
+// Test-only: read g_console_owner (the SAK-transition target assertion in
+// kernel/test/test_cons.c). Externed in the test (the proc_test_link pattern).
+struct Proc *proc_test_console_owner(void) {
+    irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
+    struct Proc *o = g_console_owner;
+    spin_unlock_irqrestore(&g_proc_table_lock, s);
+    return o;
 }
 
 // =============================================================================
@@ -782,19 +869,22 @@ void proc_mark_may_post_service(struct Proc *p) {
     if (p->state != PROC_STATE_ALIVE)
         extinction("proc_mark_may_post_service on non-ALIVE Proc");
     // One-way, idempotent — never cleared, never propagated by rfork
-    // (rfork_internal does not copy proc_flags). The |= is non-atomic:
-    // sound under the v1.0 single-thread-per-Proc invariant (see the
-    // proc_mark_console_attached note); the multi-threaded-Proc lift must
-    // convert every proc_flags writer to __atomic_or_fetch.
-    p->proc_flags |= PROC_FLAG_MAY_POST_SERVICE;
+    // (rfork_internal does not copy proc_flags). The OR is atomic: A-4c-2
+    // made PROC_FLAG_CONSOLE_ATTACHED (same word) multi-writer, so every
+    // proc_flags RMW is atomic to avoid a torn update clobbering the console
+    // bit. (This writer is itself disjoint from the SAK -- it stamps a child
+    // in the spawn thunk pre-EL0, never the live console owner -- but the
+    // all-RMWs-atomic posture closes the class.)
+    __atomic_or_fetch(&p->proc_flags, PROC_FLAG_MAY_POST_SERVICE, __ATOMIC_RELAXED);
 }
 
 bool proc_may_post_service(const struct Proc *p) {
     // Fail-closed: a NULL or corrupted Proc reads as NOT permitted — this
     // query gates SYS_POST_SERVICE, so the safe default on a bad pointer
-    // is "may not post."
+    // is "may not post." Atomic load (the word is multi-writer post-A-4c-2).
     if (!p || p->magic != PROC_MAGIC) return false;
-    return (p->proc_flags & PROC_FLAG_MAY_POST_SERVICE) != 0;
+    return (__atomic_load_n(&p->proc_flags, __ATOMIC_RELAXED)
+            & PROC_FLAG_MAY_POST_SERVICE) != 0;
 }
 
 // =============================================================================
@@ -1055,6 +1145,12 @@ static void proc_become_zombie_locked(struct Proc *p, int status, const char *ms
     // interrupt also take, so the clear is race-free w.r.t. those readers.)
     if (g_console_owner == p) {
         g_console_owner = NULL;
+    }
+    // A-4c-2: likewise clear the trusted login authority (corvus) on its death,
+    // so a SAK fired after it exits falls back to revoke-only rather than
+    // re-granting the console to a freed Proc.
+    if (g_console_trusted_proc == p) {
+        g_console_trusted_proc = NULL;
     }
 
     if (p->children) {

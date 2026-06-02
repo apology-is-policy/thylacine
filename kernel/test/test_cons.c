@@ -17,11 +17,15 @@
 //   cons.ring_fill_drain    — pushed data bytes drain in order
 //   cons.ring_overflow_drop — a full ring drops excess; no corruption/overflow
 //   cons.ctrlc_consumed     — Ctrl-C (0x03) sets intr-pending, is NOT ring data
-//   cons.break_discarded    — a BREAK entry is discarded (A-4c-1; SAK is A-4c-2)
+//   cons.break_sets_sak     — a BREAK sets sak-pending (A-4c-2), is NOT ring data
 //   cons.read_busy_guard    — a 2nd reader (busy flag) returns -1, not data
 //   cons.read_bad_args      — NULL buf / n<0 -> -1; n==0 -> 0 (no block)
 //   cons.console_owner_intr — proc_console_post_interrupt posts to the owner;
 //                             NULL/zombie owner is a no-op
+//   proc.revoke_console_attached — the atomic clear (A-4c-2); idempotent
+//   cons.sak_revoke_regrant — SAK revokes from owner (+ note) + re-grants to trusted
+//   cons.sak_failsafe_revoke_only — SAK with no trusted Proc clears the owner
+//   cons.sak_idempotent_flood — SAK when trusted already owns is a no-op (no note)
 
 #include "test.h"
 
@@ -38,16 +42,22 @@ void test_cons_blocking_read_wakeup(void);
 void test_cons_ring_fill_drain(void);
 void test_cons_ring_overflow_drop(void);
 void test_cons_ctrlc_consumed(void);
-void test_cons_break_discarded(void);
+void test_cons_break_sets_sak(void);
 void test_cons_read_busy_guard(void);
 void test_cons_read_bad_args(void);
 void test_cons_console_owner_intr(void);
+void test_proc_revoke_console_attached(void);
+void test_cons_sak_revoke_regrant(void);
+void test_cons_sak_failsafe_revoke_only(void);
+void test_cons_sak_idempotent_flood(void);
+void test_cons_sak_via_console_mgr(void);
 
 // cons.c test hooks + the extern Dev (read slot ignores the Spoor arg, so the
 // tests pass NULL). proc.c test helpers (the test_proc.c / test_devproc.c pattern).
 extern struct Dev devcons;
 extern void proc_test_link(struct Proc *p);
 extern void proc_test_unlink(struct Proc *p);
+extern struct Proc *proc_test_console_owner(void);   // A-4c-2 SAK assertions
 
 // 16-byte-bounded name equality against a literal.
 static bool name_eq(const char *name, const char *lit) {
@@ -159,17 +169,26 @@ void test_cons_ctrlc_consumed(void) {
     cons_test_reset();
 }
 
-void test_cons_break_discarded(void) {
+void test_cons_break_sets_sak(void) {
     cons_test_reset();
-    cons_rx_input(0x00u, true);           // BREAK: A-4c-1 discards (SAK is A-4c-2)
+    cons_rx_input(0x00u, true);           // BREAK: A-4c-2 SAK -> sak-pending (NOT ring data)
     cons_rx_input((u8)'y', false);
+    TEST_ASSERT(cons_test_sak_pending(), "a BREAK set sak-pending (A-4c-2 SAK)");
     TEST_ASSERT(!cons_test_intr_pending(), "a BREAK is not a Ctrl-C (no intr-pending)");
 
     u8 buf[8];
     long got = devcons.read(NULL, buf, (long)sizeof(buf), 0);
-    TEST_EXPECT_EQ(got, 1L, "only the data byte is in the ring (BREAK discarded)");
-    TEST_EXPECT_EQ((long)buf[0], (long)'y', "the data byte is 'y'");
-    cons_test_reset();
+    TEST_EXPECT_EQ(got, 1L, "only the data byte is in the ring (BREAK is not data)");
+    TEST_EXPECT_EQ((long)buf[0], (long)'y', "the data byte is 'y', not the BREAK's 0x00");
+    cons_test_reset();                    // clears sak-pending before console_mgr acts
+
+    // The BREAK woke the boot console_mgr kthread (wake-only); with sak-pending
+    // now cleared, drain it deterministically: sched() lets it re-observe the
+    // false cond and return to SLEEPING (rather than leaving it runnable for a
+    // later test to trip over -- A-4c-2 audit F2). g_console_owner is NULL here
+    // (pre-joey), so even if it ran proc_console_sak it would be a fail-safe no-op.
+    sched();
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "console_mgr drained back to SLEEPING");
 }
 
 void test_cons_read_busy_guard(void) {
@@ -232,4 +251,161 @@ void test_cons_console_owner_intr(void) {
     // route through that chokepoint).
     proc_set_console_owner(NULL);
     proc_free(owner);
+}
+
+// A-4c-2: the atomic console-attach clear (the unset side the SAK needs).
+void test_proc_revoke_console_attached(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    p->state = PROC_STATE_ALIVE;
+
+    proc_mark_console_attached(p);
+    TEST_ASSERT(proc_is_console_attached(p), "marked console-attached");
+    proc_revoke_console_attached(p);
+    TEST_ASSERT(!proc_is_console_attached(p), "revoke cleared the bit");
+    proc_revoke_console_attached(p);                     // idempotent
+    TEST_ASSERT(!proc_is_console_attached(p), "revoke is idempotent");
+    proc_revoke_console_attached(NULL);                  // fail-closed no-op (must not crash)
+
+    p->state = PROC_STATE_ZOMBIE;                         // proc_free requires ZOMBIE
+    proc_free(p);
+}
+
+// A-4c-2 SAK core: a recognized BREAK revokes the console from the current owner
+// (+ notifies it) and re-grants it to the trusted login authority, which becomes
+// the new owner. proc_console_sak is invoked DIRECTLY (the console_mgr dispatch
+// is straight-line; the cons_rx_input -> sak-pending half is cons.break_sets_sak)
+// so the transition is deterministic under the UP-like test scheduler.
+void test_cons_sak_revoke_regrant(void) {
+    struct Proc *owner   = proc_alloc();
+    struct Proc *trusted = proc_alloc();
+    TEST_ASSERT(owner != NULL && trusted != NULL, "proc_alloc owner + trusted");
+    TEST_ASSERT(owner->notes != NULL, "owner has a note queue");
+    owner->state   = PROC_STATE_ALIVE;
+    trusted->state = PROC_STATE_ALIVE;
+
+    // Owner holds the console; trusted is the designated re-grant target but is
+    // NOT yet console-attached (mirrors corvus pre-SAK -- the SAK is what grants
+    // it the bit).
+    proc_mark_console_attached(owner);
+    TEST_ASSERT(!proc_is_console_attached(trusted), "trusted not console-attached pre-SAK");
+    proc_set_console_owner(owner);
+    proc_set_console_trusted(trusted);
+
+    proc_console_sak();
+
+    TEST_ASSERT(!proc_is_console_attached(owner), "SAK revoked the old owner's console bit");
+    TEST_ASSERT(proc_is_console_attached(trusted), "SAK granted the trusted Proc the console bit");
+    TEST_EXPECT_EQ(proc_test_console_owner(), trusted, "trusted is the new console owner");
+    TEST_EXPECT_EQ(owner->notes->count, 1u, "the revoked owner got a notify note");
+
+    struct Note got;
+    spin_lock(&owner->notes->lock);
+    int popped = notes_dequeue_locked(owner, NULL, &got);
+    spin_unlock(&owner->notes->lock);
+    TEST_EXPECT_EQ(popped, 1, "dequeued the notify note");
+    TEST_ASSERT(name_eq(got.name, "interrupt"), "the notify note is `interrupt`");
+
+    // Clear the pointers BEFORE freeing so neither dangles.
+    proc_set_console_owner(NULL);
+    proc_set_console_trusted(NULL);
+    owner->state   = PROC_STATE_ZOMBIE;                  // proc_free requires ZOMBIE
+    trusted->state = PROC_STATE_ZOMBIE;
+    proc_free(owner);
+    proc_free(trusted);
+}
+
+// A-4c-2 SAK fail-safe: with no trusted Proc registered, the SAK is revoke-only
+// (the owner is cleared to NULL) -- no Proc can then redeem elevation until a
+// trusted login claims the console.
+void test_cons_sak_failsafe_revoke_only(void) {
+    struct Proc *owner = proc_alloc();
+    TEST_ASSERT(owner != NULL, "proc_alloc owner");
+    TEST_ASSERT(owner->notes != NULL, "owner has a note queue");
+    owner->state = PROC_STATE_ALIVE;
+
+    proc_mark_console_attached(owner);
+    proc_set_console_owner(owner);
+    proc_set_console_trusted(NULL);            // no trusted authority alive
+
+    proc_console_sak();
+
+    TEST_ASSERT(!proc_is_console_attached(owner), "SAK revoked the owner's console bit");
+    TEST_EXPECT_EQ(proc_test_console_owner(), (struct Proc *)NULL,
+                   "fail-safe: owner cleared to NULL (revoke-only)");
+    TEST_EXPECT_EQ(owner->notes->count, 1u, "the revoked owner got a notify note");
+
+    proc_set_console_owner(NULL);
+    owner->state = PROC_STATE_ZOMBIE;                    // proc_free requires ZOMBIE
+    proc_free(owner);
+}
+
+// A-4c-2 SAK idempotency: if the trusted authority already holds + owns the
+// console, a SAK (and a BREAK flood) is a no-op -- no spurious revoke / re-grant
+// / note.
+void test_cons_sak_idempotent_flood(void) {
+    struct Proc *trusted = proc_alloc();
+    TEST_ASSERT(trusted != NULL, "proc_alloc trusted");
+    TEST_ASSERT(trusted->notes != NULL, "trusted has a note queue");
+    trusted->state = PROC_STATE_ALIVE;
+
+    proc_mark_console_attached(trusted);
+    proc_set_console_owner(trusted);           // trusted already owns the console
+    proc_set_console_trusted(trusted);
+
+    proc_console_sak();                         // owner == trusted -> no-op
+    proc_console_sak();                         // flood: still a no-op
+
+    TEST_ASSERT(proc_is_console_attached(trusted), "trusted retains the console (idempotent)");
+    TEST_EXPECT_EQ(proc_test_console_owner(), trusted, "trusted remains the console owner");
+    TEST_EXPECT_EQ(trusted->notes->count, 0u, "no spurious notify note on a no-op SAK");
+
+    proc_set_console_owner(NULL);
+    proc_set_console_trusted(NULL);
+    trusted->state = PROC_STATE_ZOMBIE;                  // proc_free requires ZOMBIE
+    proc_free(trusted);
+}
+
+// A-4c-2 end-to-end: the full BREAK -> sak-pending -> console_mgr -> proc_console_sak
+// path, driven through the REAL boot `console_mgr` kthread (not a direct call). Closes
+// the dispatch-arm coverage gap (console_mgr_main's `if (do_sak)` line; A-4c-2 audit F3).
+void test_cons_sak_via_console_mgr(void) {
+    // The boot console_mgr must be SLEEPING at entry: drain any stale wake left
+    // by an earlier cons test (cons_test_reset clears the conds; sched() lets it
+    // re-observe + re-sleep). A LOST wakeup would hang the boot here.
+    cons_test_reset();
+    sched();
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "console_mgr SLEEPING at entry");
+
+    struct Proc *owner   = proc_alloc();
+    struct Proc *trusted = proc_alloc();
+    TEST_ASSERT(owner != NULL && trusted != NULL, "proc_alloc owner + trusted");
+    TEST_ASSERT(owner->notes != NULL, "owner has a note queue");
+    owner->state   = PROC_STATE_ALIVE;
+    trusted->state = PROC_STATE_ALIVE;
+    proc_mark_console_attached(owner);
+    proc_set_console_owner(owner);
+    proc_set_console_trusted(trusted);
+
+    // Drive the IRQ-side half: a BREAK sets sak-pending + wakes console_mgr.
+    cons_rx_input(0x00u, true);
+    TEST_ASSERT(cons_test_sak_pending(), "BREAK set sak-pending + woke console_mgr");
+    TEST_EXPECT_EQ(sched_runnable_count(), 1u, "console_mgr is RUNNABLE post-BREAK");
+
+    // Yield: console_mgr resumes, clears sak-pending, runs proc_console_sak (the
+    // transition), then loops back to sleep on a now-false cond (re-SLEEPING).
+    sched();
+    TEST_ASSERT(!cons_test_sak_pending(), "console_mgr consumed sak-pending");
+    TEST_ASSERT(!proc_is_console_attached(owner), "console_mgr SAK revoked the owner");
+    TEST_ASSERT(proc_is_console_attached(trusted), "console_mgr SAK re-granted the trusted Proc");
+    TEST_EXPECT_EQ(proc_test_console_owner(), trusted, "trusted is the new console owner");
+    TEST_EXPECT_EQ(owner->notes->count, 1u, "the revoked owner got a notify note");
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "console_mgr re-SLEEPING after the SAK");
+
+    proc_set_console_owner(NULL);
+    proc_set_console_trusted(NULL);
+    owner->state   = PROC_STATE_ZOMBIE;
+    trusted->state = PROC_STATE_ZOMBIE;
+    proc_free(owner);
+    proc_free(trusted);
 }
