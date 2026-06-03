@@ -30,17 +30,15 @@
 
 #include <thylacine/9p_srvconn_transport.h>
 #include <thylacine/9p_transport.h>
+#include <thylacine/dev.h>
 #include <thylacine/devsrv.h>
 #include <thylacine/handle.h>
 #include <thylacine/proc.h>
+#include <thylacine/spoor.h>
 #include <thylacine/srvconn.h>
 #include <thylacine/types.h>
 
-// External declarations -- the byte-mode posting + connect path lives
-// in kernel/syscall.c + kernel/devsrv.c.
-extern int sys_post_service_byte_for_proc(struct Proc *p, const char *name,
-                                            u8 name_len);
-extern int srv_conn_open_for_proc(struct Proc *p, const char *name, u8 name_len);
+// Test-support registry wipe (non-static; defined in kernel/devsrv.c).
 extern void srv_registry_reset(void);
 extern u64 timer_now_ns(void);
 
@@ -75,37 +73,61 @@ static void drop_test_proc(struct Proc *p) {
     proc_free(p);
 }
 
-// Post a byte-mode service, open one connection, return the (server,
-// client, srv_handle, conn_handle, cn) tuple via out-params. All test
-// procs reset on cleanup -- test should call cleanup_byte_mode_pair on
-// the way out.
+// Post a byte-mode service (create=post) + open one connection (open=connect)
+// via the production /srv path, and install the client conn-endpoint Spoor as
+// a KOBJ_SPOOR handle. Returns the (server, client, srv_handle, conn_handle,
+// cn) tuple via out-params; cn is recovered from the conn Spoor via
+// devsrv_conn_of. All test procs reset on cleanup -- test should call
+// cleanup_byte_mode_pair on the way out. (stalk-3c retired the name-only
+// SYS_POST_SERVICE_BYTE / SYS_SRV_CONNECT; this drives devsrv_post_listener +
+// devsrv_open_connect, the same machinery stalk's SYS_WALK_CREATE / SYS_OPEN
+// reach.)
 static struct SrvConn *open_byte_mode_pair(struct Proc **out_server,
                                             struct Proc **out_client,
                                             int *out_svc_h, int *out_conn_h) {
     struct Proc *server = make_marked_test_proc();
     if (!server) return NULL;
-    int svc_h = sys_post_service_byte_for_proc(server, "btest", 5);
+
+    // create=post (byte mode) on a transient boot /srv root.
+    struct Spoor *proot = devsrv_attach_registry(srv_boot_registry());
+    if (!proot) { drop_test_proc(server); return NULL; }
+    int svc_h = devsrv_post_listener(server, proot, "btest", 5, SRV_MODE_BYTE);
+    spoor_clunk(proot);
     if (svc_h < 0) { drop_test_proc(server); return NULL; }
 
     struct Proc *client = make_test_proc();
     if (!client) { drop_test_proc(server); return NULL; }
 
-    int conn_h = srv_conn_open_for_proc(client, "btest", 5);
-    if (conn_h < 0) {
-        drop_test_proc(server);
-        drop_test_proc(client);
-        return NULL;
+    // open=connect: walk /srv/btest -> a service-ref Spoor, then
+    // devsrv_open_connect -> a CSRVCLIENT byte-conn endpoint Spoor.
+    struct Spoor *root = devsrv_attach_registry(srv_boot_registry());
+    if (!root) { drop_test_proc(server); drop_test_proc(client); return NULL; }
+    struct Spoor *sref = spoor_clone(root);
+    if (!sref) {
+        spoor_clunk(root);
+        drop_test_proc(server); drop_test_proc(client); return NULL;
     }
+    const char *names[1] = { "btest" };
+    struct Walkqid *w = devsrv.walk(root, sref, names, 1);
+    if (!w) {
+        spoor_clunk(sref); spoor_clunk(root);
+        drop_test_proc(server); drop_test_proc(client); return NULL;
+    }
+    walkqid_free(w);
+    struct Spoor *cs = devsrv_open_connect(client, sref, /*omode ORDWR*/ 2);
+    spoor_clunk(sref);                 // the spent quarry (open-returns-new)
+    spoor_clunk(root);
+    if (!cs) { drop_test_proc(server); drop_test_proc(client); return NULL; }
 
-    struct Handle *slot = handle_get(client, (hidx_t)conn_h);
-    if (!slot || slot->kind != KOBJ_SRV || !slot->obj) {
-        handle_close(client, (hidx_t)conn_h);
+    int conn_h = handle_alloc(client, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE, cs);
+    if (conn_h < 0) {
+        spoor_clunk(cs);
         srv_registry_reset();
         drop_test_proc(server);
         drop_test_proc(client);
         return NULL;
     }
-    struct SrvConn *cn = (struct SrvConn *)slot->obj;
+    struct SrvConn *cn = devsrv_conn_of(cs);
 
     *out_server = server;
     *out_client = client;
@@ -140,10 +162,9 @@ void test_9p_srvconn_transport_init_destroy(void) {
     struct SrvConn *cn = open_byte_mode_pair(&server, &client, &svc_h, &conn_h);
     TEST_ASSERT(cn != NULL, "open_byte_mode_pair");
 
-    // Pre-state. The client's KObj_Srv holds 1 ref. The accept-backlog
-    // side dropped its ref when the client opened (per the SrvConn
-    // lifecycle, srv_conn_open_for_proc installs the handle which
-    // takes the canonical reference). So cn->ref should be 1 here.
+    // Pre-state: open=connect minted the SrvConn and handed one ref to the
+    // client conn-endpoint Spoor (the KOBJ_SPOOR conn_h) and one to the
+    // accept backlog -- cn->ref == 2 here. init below takes a third.
 
     struct p9_srvconn_transport st;
     int rc = p9_srvconn_transport_init(&st, cn);
@@ -407,9 +428,8 @@ void test_9p_srvconn_transport_close_drops_srvconn_ref(void) {
 
     struct p9_transport_ops ops = p9_srvconn_transport_ops(&st);
 
-    // A freshly-minted SrvConn from srv_conn_open_for_proc has THREE
-    // holders pre-test:
-    //   (a) the client's KObj_Srv handle slot,
+    // A freshly-minted SrvConn from open=connect has THREE holders pre-test:
+    //   (a) the client's KOBJ_SPOOR conn-endpoint handle slot,
     //   (b) the service's accept backlog (server hasn't called accept),
     //   (c) the adapter we just init'd.
     // To isolate "adapter is the last holder" we must drop (a) and (b)

@@ -322,6 +322,13 @@ void srv_abort(struct SrvService *svc, enum srv_state prior);
 // P5-corvus-srv-impl-a3's devsrv walk uses this; a2 exercises it in tests.
 struct SrvService *srv_lookup(const char *name, u8 name_len);
 
+// srv_lookup_in — find a service by name in an explicit `reg` (the devsrv
+// open=connect / walk internal lookup). The in-kernel test harness uses it
+// against srv_boot_registry() now that the name-only SYS_POST_SERVICE /
+// SYS_SRV_CONNECT path is retired (stalk-3c). Takes the registry lock.
+struct SrvService *srv_lookup_in(struct SrvRegistry *reg,
+                                 const char *name, u8 name_len);
+
 // srv_proc_exit_notify — called from exits() for every exiting Proc. Any
 // LIVE service whose poster is `p` (matched by stripes) is TOMBSTONED:
 // the name stays reserved, awaiting a joey-marked rebind. A Proc that

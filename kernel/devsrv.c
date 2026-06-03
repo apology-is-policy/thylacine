@@ -456,10 +456,11 @@ int devsrv_post_listener(struct Proc *p, struct Spoor *root,
     return (int)h;
 }
 
-// srv_lookup_in — find a service by name in `reg`. The public srv_lookup
-// binds the boot registry.
-static struct SrvService *srv_lookup_in(struct SrvRegistry *reg,
-                                        const char *name, u8 name_len) {
+// srv_lookup_in — find a service by name in `reg`. Internal to the devsrv
+// open=connect / walk paths; also the in-kernel test harness's name-based
+// probe against the boot registry (srv_boot_registry()).
+struct SrvService *srv_lookup_in(struct SrvRegistry *reg,
+                                 const char *name, u8 name_len) {
     if (!reg)                                              return NULL;
     if (!name || name_len == 0 || name_len > SRV_NAME_MAX) return NULL;
     irq_state_t s = spin_lock_irqsave(&reg->lock);

@@ -373,7 +373,6 @@ void test_srvconn_recv_deadline_timeout(void);
 void test_srvconn_teardown_eofs(void);
 void test_srvconn_teardown_wakes_blocked(void);
 void test_devsrv_walk_service(void);
-void test_devsrv_conn_open(void);
 void test_devsrv_open_connect_byte(void);
 void test_devsrv_kernel_attached_io_refused(void);
 void test_devsrv_accept_immediate(void);
@@ -386,12 +385,8 @@ void test_devsrv_srv_peer_dead_peer(void);
 void test_devsrv_srv_peer_gate(void);
 void test_devsrv_srv_peer_bad_args(void);
 void test_srv_client_no_per_proc_cap(void);
-void test_srv_client_sys_srv_connect_unknown_service(void);
-void test_srv_client_sys_srv_connect_9p_rejected(void);
 void test_srv_client_byte_mode_propagates_to_conn(void);
-void test_srv_client_byte_mode_9p_post_stays_9p(void);
-void test_srv_client_byte_mode_connect_rejects_path(void);
-void test_srv_client_byte_mode_kobj_srv_dispatch(void);
+void test_srv_client_byte_mode_conn_dispatch(void);
 void test_srv_client_byte_mode_mode_change_rebind_refused(void);
 void test_srv_client_byte_mode_server_recv_blocking_eof(void);
 void test_virtio_mmio_probe(void);
@@ -612,7 +607,6 @@ void test_poll_devsrv_conn_pollout_immediate(void);
 void test_poll_devsrv_conn_pollhup_on_teardown(void);
 void test_poll_devsrv_conn_block_then_wake_pollin(void);
 void test_poll_null_obj_spoor_pollnval(void);
-void test_poll_client_srv_handle_pollnval(void);
 void test_poll_mixed_spoor_and_srv(void);
 void test_poll_max_nfds(void);
 void test_sys_pipe_allocates_two_distinct_spoor_handles(void);
@@ -1156,7 +1150,6 @@ struct test_case g_tests[] = {
                                        test_srvconn_teardown_wakes_blocked,
                                                                            false, NULL },
     { "devsrv.walk_service",           test_devsrv_walk_service,           false, NULL },
-    { "devsrv.conn_open",              test_devsrv_conn_open,              false, NULL },
     { "devsrv.open_connect_byte",      test_devsrv_open_connect_byte,      false, NULL },
     { "devsrv.kernel_attached_io_refused",
                                        test_devsrv_kernel_attached_io_refused, false, NULL },
@@ -1176,23 +1169,11 @@ struct test_case g_tests[] = {
     { "srv_client.no_per_proc_cap",
                                        test_srv_client_no_per_proc_cap,
                                                                            false, NULL },
-    { "srv_client.sys_srv_connect_unknown_service",
-                                       test_srv_client_sys_srv_connect_unknown_service,
-                                                                           false, NULL },
-    { "srv_client.sys_srv_connect_9p_rejected",
-                                       test_srv_client_sys_srv_connect_9p_rejected,
-                                                                           false, NULL },
     { "srv_client.byte_mode_propagates_to_conn",
                                        test_srv_client_byte_mode_propagates_to_conn,
                                                                            false, NULL },
-    { "srv_client.byte_mode_9p_post_stays_9p",
-                                       test_srv_client_byte_mode_9p_post_stays_9p,
-                                                                           false, NULL },
-    { "srv_client.byte_mode_connect_rejects_path",
-                                       test_srv_client_byte_mode_connect_rejects_path,
-                                                                           false, NULL },
-    { "srv_client.byte_mode_kobj_srv_dispatch",
-                                       test_srv_client_byte_mode_kobj_srv_dispatch,
+    { "srv_client.byte_mode_conn_dispatch",
+                                       test_srv_client_byte_mode_conn_dispatch,
                                                                            false, NULL },
     { "srv_client.byte_mode_mode_change_rebind_refused",
                                        test_srv_client_byte_mode_mode_change_rebind_refused,
@@ -1525,7 +1506,6 @@ struct test_case g_tests[] = {
     { "poll.devsrv_conn_pollhup_on_teardown",   test_poll_devsrv_conn_pollhup_on_teardown,   false, NULL },
     { "poll.devsrv_conn_block_then_wake_pollin", test_poll_devsrv_conn_block_then_wake_pollin, false, NULL },
     { "poll.null_obj_spoor_pollnval",           test_poll_null_obj_spoor_pollnval,           false, NULL },
-    { "poll.client_srv_handle_pollnval",        test_poll_client_srv_handle_pollnval,        false, NULL },
     { "poll.mixed_spoor_and_srv",               test_poll_mixed_spoor_and_srv,               false, NULL },
     { "poll.max_nfds",                          test_poll_max_nfds,                          false, NULL },
     { "sys_pipe.allocates_two_distinct_spoor_handles", test_sys_pipe_allocates_two_distinct_spoor_handles, false, NULL },

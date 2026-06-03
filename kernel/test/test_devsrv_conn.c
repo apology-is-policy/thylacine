@@ -10,12 +10,6 @@
 //     Spoor (QTFILE, a devsrv_svc_ref aux); a walk of an unposted name or
 //     two components deep fails; a clone (nname=0) stays a /srv root.
 //
-//   devsrv.conn_open
-//     srv_conn_open_for_proc mints a connection, enqueues it on the accept
-//     backlog, and installs a KObj_Srv handle; the handle is
-//     non-transferable (handle_dup refuses it); a connect to an unposted
-//     or tombstoned service fails.
-//
 //   devsrv.accept_immediate
 //     With a connection already backlogged, SYS_SRV_ACCEPT returns at once
 //     with a KObj_Spoor server endpoint and drains the backlog; the
@@ -76,10 +70,6 @@
 #include <thylacine/types.h>
 
 // Inner syscall cores (non-static; defined in kernel/syscall.c).
-extern int sys_post_service_for_proc(struct Proc *p, const char *name,
-                                     size_t name_len);
-extern int sys_post_service_byte_for_proc(struct Proc *p, const char *name,
-                                          size_t name_len);
 extern int sys_srv_accept_for_proc(struct Proc *p, hidx_t service_h);
 extern int sys_srv_peer_for_proc(struct Proc *p, hidx_t conn_h,
                                  struct srv_peer_info *out);
@@ -99,7 +89,6 @@ extern void proc_test_link(struct Proc *p);
 extern void proc_test_unlink(struct Proc *p);
 
 void test_devsrv_walk_service(void);
-void test_devsrv_conn_open(void);
 void test_devsrv_open_connect_byte(void);
 void test_devsrv_kernel_attached_io_refused(void);
 void test_devsrv_accept_immediate(void);
@@ -153,6 +142,41 @@ static void drop_linked_test_proc(struct Proc *p) {
     proc_free(p);
 }
 
+// post_svc_byte — post a byte-mode service into the boot registry via the
+// production create=post path (devsrv_post_listener on a transient boot /srv
+// root). Replaces the retired SYS_POST_SERVICE[_BYTE] name-only entry
+// (stalk-3c). Byte mode so the per-test connect (connect_byte) returns
+// without a server handshake; none of these tests assert the service mode.
+// Returns the listener handle (>= 0) or -1.
+static int post_svc_byte(struct Proc *p, const char *name, size_t name_len) {
+    struct Spoor *root = devsrv_attach_registry(srv_boot_registry());
+    if (!root) return -1;
+    int h = devsrv_post_listener(p, root, name, name_len, SRV_MODE_BYTE);
+    spoor_clunk(root);
+    return h;
+}
+
+// connect_byte — open=connect to a byte-mode /srv service: walk /srv/<name>
+// to a service-ref Spoor, then devsrv_open_connect -> a CLIENT-direction
+// byte-conn endpoint Spoor (CSRVCLIENT). Returns the conn Spoor or NULL; the
+// caller owns it (wrap in a KOBJ_SPOOR handle or spoor_clunk). Byte-mode (not
+// 9P) so the connect returns without a server handshake -- a unit test has no
+// server thread to answer Tversion/Tattach. `name` must be NUL-terminated.
+static struct Spoor *connect_byte(struct Proc *p, const char *name) {
+    struct Spoor *root = devsrv_attach_registry(srv_boot_registry());
+    if (!root) return NULL;
+    struct Spoor *sref = spoor_clone(root);
+    if (!sref) { spoor_clunk(root); return NULL; }
+    const char *names[1] = { name };
+    struct Walkqid *w = devsrv.walk(root, sref, names, 1);
+    if (!w) { spoor_clunk(sref); spoor_clunk(root); return NULL; }
+    walkqid_free(w);
+    struct Spoor *cs = devsrv_open_connect(p, sref, /*omode ORDWR*/ 2);
+    spoor_clunk(sref);                 // the spent quarry (open-returns-new)
+    spoor_clunk(root);
+    return cs;
+}
+
 // ---------------------------------------------------------------------------
 // devsrv.walk_service
 // ---------------------------------------------------------------------------
@@ -162,7 +186,7 @@ void test_devsrv_walk_service(void) {
 
     struct Proc *corvus = make_marked_test_proc();
     TEST_ASSERT(corvus != NULL, "proc_alloc + mark");
-    TEST_ASSERT(sys_post_service_for_proc(corvus, "corvus", 6) >= 0,
+    TEST_ASSERT(post_svc_byte(corvus, "corvus", 6) >= 0,
         "post \"corvus\"");
 
     struct Spoor *root = devsrv.attach(NULL);
@@ -225,54 +249,6 @@ void test_devsrv_walk_service(void) {
 }
 
 // ---------------------------------------------------------------------------
-// devsrv.conn_open
-// ---------------------------------------------------------------------------
-
-void test_devsrv_conn_open(void) {
-    srv_registry_reset();
-
-    struct Proc *corvus = make_marked_test_proc();
-    TEST_ASSERT(corvus != NULL, "corvus proc");
-    TEST_ASSERT(sys_post_service_for_proc(corvus, "corvus", 6) >= 0,
-        "post \"corvus\"");
-    struct SrvService *svc = srv_lookup("corvus", 6);
-    TEST_ASSERT(svc != NULL, "the service is registered");
-
-    struct Proc *client = make_test_proc();
-    TEST_ASSERT(client != NULL, "client proc");
-
-    // A client opens /srv/corvus.
-    int h = srv_conn_open_for_proc(client, "corvus", 6);
-    TEST_ASSERT(h >= 0, "srv_conn_open → a connection handle");
-    struct Handle *sh = handle_get(client, h);
-    TEST_ASSERT(sh != NULL, "the connection handle is installed");
-    TEST_EXPECT_EQ((int)sh->kind, (int)KOBJ_SRV,
-        "the connection handle is KObj_Srv");
-    TEST_EXPECT_EQ(srv_backlog_depth(svc), 1,
-        "the connection is enqueued on the accept backlog");
-
-    // KObj_Srv is non-transferable — handle_dup must refuse it (NoSrvDup).
-    TEST_EXPECT_EQ(handle_dup(client, h, RIGHT_READ), -1,
-        "dup of a KObj_Srv connection handle → -1");
-
-    // A connect to a name with no LIVE service → -1.
-    TEST_EXPECT_EQ(srv_conn_open_for_proc(client, "absent", 6), -1,
-        "connect to an unposted name → -1");
-
-    // A connect to a TOMBSTONED service → -1 (the drain also clears the
-    // one backlogged connection).
-    srv_proc_exit_notify(corvus);
-    TEST_EXPECT_EQ((int)svc->state, (int)SRV_STATE_TOMBSTONED,
-        "the poster exit tombstoned the service");
-    TEST_EXPECT_EQ(srv_conn_open_for_proc(client, "corvus", 6), -1,
-        "connect to a tombstoned service → -1");
-
-    srv_registry_reset();
-    drop_test_proc(client);
-    drop_test_proc(corvus);
-}
-
-// ---------------------------------------------------------------------------
 // devsrv.open_connect_byte — the stalk-3b-β open=connect path (byte-mode).
 //
 // devsrv_open_connect on a byte-mode service-ref Spoor mints a SrvConn, enqueues
@@ -287,9 +263,9 @@ void test_devsrv_open_connect_byte(void) {
 
     struct Proc *server = make_marked_test_proc();
     TEST_ASSERT(server != NULL, "server proc");
-    TEST_ASSERT(sys_post_service_byte_for_proc(server, "stratum-fs", 10) >= 0,
+    TEST_ASSERT(post_svc_byte(server, "stratum-fs", 10) >= 0,
         "post byte-mode \"stratum-fs\"");
-    struct SrvService *svc = srv_lookup("stratum-fs", 10);
+    struct SrvService *svc = srv_lookup_in(srv_boot_registry(), "stratum-fs", 10);
     TEST_ASSERT(svc != NULL, "the byte service is registered");
 
     // Walk /srv -> a service-ref Spoor (devsrv_walk's product).
@@ -360,7 +336,7 @@ void test_devsrv_kernel_attached_io_refused(void) {
 
     struct Proc *server = make_marked_test_proc();
     TEST_ASSERT(server != NULL, "server proc");
-    TEST_ASSERT(sys_post_service_byte_for_proc(server, "stratum-fs", 10) >= 0,
+    TEST_ASSERT(post_svc_byte(server, "stratum-fs", 10) >= 0,
         "post byte-mode \"stratum-fs\"");
 
     struct Spoor *root = devsrv.attach(NULL);
@@ -424,16 +400,18 @@ void test_devsrv_accept_immediate(void) {
 
     struct Proc *corvus = make_marked_test_proc();
     TEST_ASSERT(corvus != NULL, "corvus proc");
-    int svc_h = sys_post_service_for_proc(corvus, "corvus", 6);
+    int svc_h = post_svc_byte(corvus, "corvus", 6);
     TEST_ASSERT(svc_h >= 0, "post \"corvus\"");
-    struct SrvService *svc = srv_lookup("corvus", 6);
+    struct SrvService *svc = srv_lookup_in(srv_boot_registry(), "corvus", 6);
     TEST_ASSERT(svc != NULL, "the service is registered");
 
     struct Proc *client = make_test_proc();
     TEST_ASSERT(client != NULL, "client proc");
 
     // The client connects first — the connection waits on the backlog.
-    int client_h = srv_conn_open_for_proc(client, "corvus", 6);
+    struct Spoor *cs = connect_byte(client, "corvus");
+    TEST_ASSERT(cs != NULL, "client open=connect to /srv/corvus");
+    int client_h = handle_alloc(client, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE, cs);
     TEST_ASSERT(client_h >= 0, "the client connects");
     TEST_EXPECT_EQ(srv_backlog_depth(svc), 1, "one connection backlogged");
 
@@ -449,7 +427,7 @@ void test_devsrv_accept_immediate(void) {
     // The accepted endpoint and the client's handle name the same SrvConn.
     struct SrvConn *cn_srv = (struct SrvConn *)((struct Spoor *)ch->obj)->aux;
     struct SrvConn *cn_cli =
-        (struct SrvConn *)handle_get(client, client_h)->obj;
+        devsrv_conn_of(cs);
     TEST_EXPECT_EQ(cn_srv, cn_cli,
         "accept and connect name the same connection");
 
@@ -486,9 +464,9 @@ void test_devsrv_accept_blocks_then_wakes(void) {
 
     struct Proc *corvus = make_marked_test_proc();
     TEST_ASSERT(corvus != NULL, "corvus proc");
-    int svc_h = sys_post_service_for_proc(corvus, "corvus", 6);
+    int svc_h = post_svc_byte(corvus, "corvus", 6);
     TEST_ASSERT(svc_h >= 0, "post \"corvus\"");
-    struct SrvService *svc = srv_lookup("corvus", 6);
+    struct SrvService *svc = srv_lookup_in(srv_boot_registry(), "corvus", 6);
     TEST_ASSERT(svc != NULL, "the service is registered");
 
     struct Proc *client = make_test_proc();
@@ -515,7 +493,9 @@ void test_devsrv_accept_blocks_then_wakes(void) {
         "the worker is the accept-rendez waiter");
 
     // A client connects — the enqueue wakes the blocked accepter.
-    int client_h = srv_conn_open_for_proc(client, "corvus", 6);
+    struct Spoor *cs = connect_byte(client, "corvus");
+    TEST_ASSERT(cs != NULL, "client open=connect to /srv/corvus");
+    int client_h = handle_alloc(client, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE, cs);
     TEST_ASSERT(client_h >= 0, "the client connects");
 
     sched();
@@ -527,7 +507,7 @@ void test_devsrv_accept_blocks_then_wakes(void) {
     TEST_ASSERT(ch != NULL, "the accepted handle is installed");
     struct SrvConn *cn_srv = (struct SrvConn *)((struct Spoor *)ch->obj)->aux;
     struct SrvConn *cn_cli =
-        (struct SrvConn *)handle_get(client, client_h)->obj;
+        devsrv_conn_of(cs);
     TEST_EXPECT_EQ(cn_srv, cn_cli,
         "the accept woke onto the client's connection");
 
@@ -546,38 +526,42 @@ void test_devsrv_conn_io(void) {
 
     struct Proc *corvus = make_marked_test_proc();
     TEST_ASSERT(corvus != NULL, "corvus proc");
-    int svc_h = sys_post_service_for_proc(corvus, "corvus", 6);
+    int svc_h = post_svc_byte(corvus, "corvus", 6);
     TEST_ASSERT(svc_h >= 0, "post \"corvus\"");
 
     struct Proc *client = make_test_proc();
     TEST_ASSERT(client != NULL, "client proc");
 
-    int client_h = srv_conn_open_for_proc(client, "corvus", 6);
+    struct Spoor *cs = connect_byte(client, "corvus");
+    TEST_ASSERT(cs != NULL, "client open=connect to /srv/corvus");
+    int client_h = handle_alloc(client, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE, cs);
     TEST_ASSERT(client_h >= 0, "the client connects");
-    struct SrvConn *cn = (struct SrvConn *)handle_get(client, client_h)->obj;
+    struct SrvConn *cn = devsrv_conn_of(cs);
     TEST_ASSERT(cn != NULL, "the client handle names a SrvConn");
 
     int conn_h = sys_srv_accept_for_proc(corvus, (hidx_t)svc_h);
     TEST_ASSERT(conn_h >= 0, "corvus accepts");
 
-    // The kernel 9P client side queues bytes on c2s; corvus reads them off
-    // its server endpoint via SYS_READ → devsrv_read → srvconn_server_recv.
+    // The client side queues bytes on c2s; the server reads them off its
+    // accepted endpoint via SYS_READ -> devsrv_read -> srvconn_server_recv*.
+    // This is a byte-mode service, so the server read is the BLOCKING
+    // variant (srvconn_server_recv_blocking) -- the test only reads with
+    // data already present. The 9P-mode non-blocking "empty reads 0"
+    // (srvconn_server_recv) is corvus's pattern, exercised end-to-end at boot
+    // (a 9P conn cannot be minted here -- open=connect drives a handshake
+    // that needs a live server thread).
     u8 msg[16];
     for (int i = 0; i < 16; i++) msg[i] = (u8)(0x40 + i);
     TEST_EXPECT_EQ(srvconn_client_send(cn, msg, 16), 16L,
-        "the kernel-client side queues 16 bytes toward corvus");
+        "the client side queues 16 bytes toward the server");
     u8 got[16];
     TEST_EXPECT_EQ(sys_read_for_proc(corvus, (hidx_t)conn_h, got, 16), 16,
-        "corvus reads the 16 bytes off its accepted endpoint");
+        "the server reads the 16 bytes off its accepted endpoint");
     bool ok = true;
     for (int i = 0; i < 16; i++) if (got[i] != (u8)(0x40 + i)) ok = false;
     TEST_ASSERT(ok, "the request bytes round-tripped intact");
 
-    // An empty live connection reads 0 — corvus polls again.
-    TEST_EXPECT_EQ(sys_read_for_proc(corvus, (hidx_t)conn_h, got, 16), 0,
-        "an empty live connection reads 0");
-
-    // corvus writes a server→client frame; the kernel-client side reads it.
+    // The server writes a reply frame; the client side reads it off s2c.
     u8 reply[8];
     for (int i = 0; i < 8; i++) reply[i] = (u8)(0x90 + i);
     TEST_EXPECT_EQ(sys_write_for_proc(corvus, (hidx_t)conn_h, reply, 8), 8,
@@ -611,20 +595,22 @@ void test_devsrv_conn_release(void) {
 
     struct Proc *corvus = make_marked_test_proc();
     TEST_ASSERT(corvus != NULL, "corvus proc");
-    int svc_h = sys_post_service_for_proc(corvus, "corvus", 6);
+    int svc_h = post_svc_byte(corvus, "corvus", 6);
     TEST_ASSERT(svc_h >= 0, "post \"corvus\"");
 
     struct Proc *client = make_test_proc();
     TEST_ASSERT(client != NULL, "client proc");
 
-    int client_h = srv_conn_open_for_proc(client, "corvus", 6);
+    struct Spoor *cs = connect_byte(client, "corvus");
+    TEST_ASSERT(cs != NULL, "client open=connect to /srv/corvus");
+    int client_h = handle_alloc(client, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE, cs);
     TEST_ASSERT(client_h >= 0, "the client connects");
     TEST_EXPECT_EQ(srvconn_total_created(), created0 + 1,
         "the connect minted one SrvConn");
 
     int conn_h = sys_srv_accept_for_proc(corvus, (hidx_t)svc_h);
     TEST_ASSERT(conn_h >= 0, "corvus accepts");
-    struct SrvConn *cn = (struct SrvConn *)handle_get(client, client_h)->obj;
+    struct SrvConn *cn = devsrv_conn_of(cs);
     TEST_EXPECT_EQ(cn->ref, 2,
         "the connection is held by the client handle and corvus's endpoint");
 
@@ -658,18 +644,20 @@ void test_devsrv_poster_exit_drains_backlog(void) {
 
     struct Proc *corvus = make_marked_test_proc();
     TEST_ASSERT(corvus != NULL, "corvus proc");
-    TEST_ASSERT(sys_post_service_for_proc(corvus, "corvus", 6) >= 0,
+    TEST_ASSERT(post_svc_byte(corvus, "corvus", 6) >= 0,
         "post \"corvus\"");
-    struct SrvService *svc = srv_lookup("corvus", 6);
+    struct SrvService *svc = srv_lookup_in(srv_boot_registry(), "corvus", 6);
     TEST_ASSERT(svc != NULL, "the service is registered");
 
     struct Proc *client = make_test_proc();
     TEST_ASSERT(client != NULL, "client proc");
 
-    int client_h = srv_conn_open_for_proc(client, "corvus", 6);
+    struct Spoor *cs = connect_byte(client, "corvus");
+    TEST_ASSERT(cs != NULL, "client open=connect to /srv/corvus");
+    int client_h = handle_alloc(client, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE, cs);
     TEST_ASSERT(client_h >= 0, "the client connects");
     TEST_EXPECT_EQ(srv_backlog_depth(svc), 1, "one connection backlogged");
-    struct SrvConn *cn = (struct SrvConn *)handle_get(client, client_h)->obj;
+    struct SrvConn *cn = devsrv_conn_of(cs);
     TEST_ASSERT(srvconn_is_live(cn),
         "the connection is live before the poster exits");
 
@@ -704,7 +692,7 @@ void test_devsrv_srv_peer_identity(void) {
 
     struct Proc *corvus = make_marked_test_proc();
     TEST_ASSERT(corvus != NULL, "corvus proc");
-    int svc_h = sys_post_service_for_proc(corvus, "corvus", 6);
+    int svc_h = post_svc_byte(corvus, "corvus", 6);
     TEST_ASSERT(svc_h >= 0, "post \"corvus\"");
 
     // A console-attached client with a known capability set, spliced into
@@ -714,7 +702,9 @@ void test_devsrv_srv_peer_identity(void) {
     proc_mark_console_attached(client);
     client->caps = CAP_CSPRNG_READ;
 
-    int client_h = srv_conn_open_for_proc(client, "corvus", 6);
+    struct Spoor *cs = connect_byte(client, "corvus");
+    TEST_ASSERT(cs != NULL, "client open=connect to /srv/corvus");
+    int client_h = handle_alloc(client, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE, cs);
     TEST_ASSERT(client_h >= 0, "the client connects");
     int conn_h = sys_srv_accept_for_proc(corvus, (hidx_t)svc_h);
     TEST_ASSERT(conn_h >= 0, "corvus accepts");
@@ -755,7 +745,7 @@ void test_devsrv_srv_peer_dead_peer(void) {
 
     struct Proc *corvus = make_marked_test_proc();
     TEST_ASSERT(corvus != NULL, "corvus proc");
-    int svc_h = sys_post_service_for_proc(corvus, "corvus", 6);
+    int svc_h = post_svc_byte(corvus, "corvus", 6);
     TEST_ASSERT(svc_h >= 0, "post \"corvus\"");
 
     struct Proc *client = make_linked_test_proc();
@@ -763,7 +753,9 @@ void test_devsrv_srv_peer_dead_peer(void) {
     client->caps = CAP_CSPRNG_READ;
     u64 client_stripes = proc_stripes(client);
 
-    int client_h = srv_conn_open_for_proc(client, "corvus", 6);
+    struct Spoor *cs = connect_byte(client, "corvus");
+    TEST_ASSERT(cs != NULL, "client open=connect to /srv/corvus");
+    int client_h = handle_alloc(client, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE, cs);
     TEST_ASSERT(client_h >= 0, "the client connects");
     int conn_h = sys_srv_accept_for_proc(corvus, (hidx_t)svc_h);
     TEST_ASSERT(conn_h >= 0, "corvus accepts");
@@ -810,12 +802,14 @@ void test_devsrv_srv_peer_gate(void) {
 
     struct Proc *corvus = make_marked_test_proc();
     TEST_ASSERT(corvus != NULL, "corvus proc");
-    int svc_h = sys_post_service_for_proc(corvus, "corvus", 6);
+    int svc_h = post_svc_byte(corvus, "corvus", 6);
     TEST_ASSERT(svc_h >= 0, "post \"corvus\"");
 
     struct Proc *client = make_linked_test_proc();
     TEST_ASSERT(client != NULL, "client proc");
-    int client_h = srv_conn_open_for_proc(client, "corvus", 6);
+    struct Spoor *cs = connect_byte(client, "corvus");
+    TEST_ASSERT(cs != NULL, "client open=connect to /srv/corvus");
+    int client_h = handle_alloc(client, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE, cs);
     TEST_ASSERT(client_h >= 0, "the client connects");
     int conn_h = sys_srv_accept_for_proc(corvus, (hidx_t)svc_h);
     TEST_ASSERT(conn_h >= 0, "corvus accepts");
@@ -846,10 +840,13 @@ void test_devsrv_srv_peer_gate(void) {
         "a non-poster holding the connection endpoint is still refused");
     handle_close(stranger, shared);             // drops the spoor_ref above
 
-    // The client's own KObj_Srv connection handle is not a SYS_SRV_PEER
-    // argument — the syscall requires a KObj_Spoor endpoint.
+    // The client's own conn endpoint (a CSRVCLIENT KOBJ_SPOOR conn Spoor)
+    // is refused: SYS_SRV_PEER is the accept-side query (the poster reading
+    // its accepted peer), so the CSRVCLIENT direction gate rejects a client
+    // endpoint outright -- and the poster gate would reject it regardless
+    // (the client is not the service poster).
     TEST_EXPECT_EQ(sys_srv_peer_for_proc(client, (hidx_t)client_h, &info),
-        -1, "a KObj_Srv connection handle is rejected (wrong kind)");
+        -1, "the client's CSRVCLIENT conn endpoint is refused (not accept-side)");
 
     handle_close(corvus, (hidx_t)conn_h);
     srv_registry_reset();
@@ -867,7 +864,7 @@ void test_devsrv_srv_peer_bad_args(void) {
 
     struct Proc *corvus = make_marked_test_proc();
     TEST_ASSERT(corvus != NULL, "corvus proc");
-    int svc_h = sys_post_service_for_proc(corvus, "corvus", 6);
+    int svc_h = post_svc_byte(corvus, "corvus", 6);
     TEST_ASSERT(svc_h >= 0, "post \"corvus\"");
 
     struct srv_peer_info info = {0};

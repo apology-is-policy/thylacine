@@ -37,9 +37,7 @@ extern s64 sys_poll_for_proc(struct Proc *p, struct pollfd *kfds,
                              u64 nfds, s32 timeout_ms);
 
 // devsrv test-support — non-static cores of the SYS_POST_SERVICE +
-// SYS_SRV_ACCEPT syscalls + the test-only registry reset.
-extern int sys_post_service_for_proc(struct Proc *p, const char *name,
-                                     size_t name_len);
+// SYS_SRV_ACCEPT syscall + the test-only registry reset.
 extern int sys_srv_accept_for_proc(struct Proc *p, hidx_t service_h);
 extern void srv_registry_reset(void);
 
@@ -65,7 +63,6 @@ void test_poll_devsrv_conn_pollout_immediate(void);
 void test_poll_devsrv_conn_pollhup_on_teardown(void);
 void test_poll_devsrv_conn_block_then_wake_pollin(void);
 void test_poll_null_obj_spoor_pollnval(void);
-void test_poll_client_srv_handle_pollnval(void);
 void test_poll_mixed_spoor_and_srv(void);
 void test_poll_max_nfds(void);
 
@@ -446,7 +443,7 @@ void test_poll_unregister_after_fast_path(void) {
 //     srvconn_poll.
 // =============================================================================
 
-// Helper: a Proc joey-marked so it can SYS_POST_SERVICE.
+// Helper: a Proc joey-marked so it can post a /srv service.
 static struct Proc *make_marked_test_proc(void) {
     struct Proc *p = proc_alloc();
     if (!p) return NULL;
@@ -454,18 +451,55 @@ static struct Proc *make_marked_test_proc(void) {
     return p;
 }
 
+// post_svc_byte — post a byte-mode service into the boot registry via the
+// production create=post path (devsrv_post_listener on a transient boot /srv
+// root). Replaces the retired SYS_POST_SERVICE name-only entry (stalk-3c).
+// Byte mode so the per-test connect (connect_byte) returns without a server
+// handshake; the listener-poll readiness is mode-independent. Returns the
+// listener handle (>= 0) or -1.
+static int post_svc_byte(struct Proc *p, const char *name, size_t name_len) {
+    struct Spoor *root = devsrv_attach_registry(srv_boot_registry());
+    if (!root) return -1;
+    int h = devsrv_post_listener(p, root, name, name_len, SRV_MODE_BYTE);
+    spoor_clunk(root);
+    return h;
+}
+
+// connect_byte — open=connect to a byte-mode /srv service: walk /srv/<name>
+// to a service-ref Spoor, then devsrv_open_connect -> a CLIENT-direction
+// byte-conn endpoint Spoor (CSRVCLIENT). Returns the conn Spoor or NULL; the
+// caller owns it (wrap in a KOBJ_SPOOR handle or spoor_clunk). The connect
+// pushes the conn onto the poster's accept backlog (waking the listener-poll
+// list), the side effect these tests rely on. `name` must be NUL-terminated.
+static struct Spoor *connect_byte(struct Proc *p, const char *name) {
+    struct Spoor *root = devsrv_attach_registry(srv_boot_registry());
+    if (!root) return NULL;
+    struct Spoor *sref = spoor_clone(root);
+    if (!sref) { spoor_clunk(root); return NULL; }
+    const char *names[1] = { name };
+    struct Walkqid *w = devsrv.walk(root, sref, names, 1);
+    if (!w) { spoor_clunk(sref); spoor_clunk(root); return NULL; }
+    walkqid_free(w);
+    struct Spoor *cs = devsrv_open_connect(p, sref, /*omode ORDWR*/ 2);
+    spoor_clunk(sref);                 // the spent quarry (open-returns-new)
+    spoor_clunk(root);
+    return cs;
+}
+
 void test_poll_devsrv_listener_immediate_pollin(void) {
     srv_registry_reset();
 
     struct Proc *corvus = make_marked_test_proc();
     TEST_ASSERT(corvus != NULL, "corvus proc");
-    int svc_h = sys_post_service_for_proc(corvus, "corvus", 6);
+    int svc_h = post_svc_byte(corvus, "corvus", 6);
     TEST_ASSERT(svc_h >= 0, "post \"corvus\"");
 
     // A client opens — one entry on the listener's accept backlog.
     struct Proc *client = make_test_proc();
     TEST_ASSERT(client != NULL, "client proc");
-    int client_h = srv_conn_open_for_proc(client, "corvus", 6);
+    struct Spoor *cs = connect_byte(client, "corvus");
+    TEST_ASSERT(cs != NULL, "client open=connect to /srv/corvus");
+    int client_h = handle_alloc(client, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE, cs);
     TEST_ASSERT(client_h >= 0, "client connects");
 
     // corvus polls its listener handle (the KObj_Srv from SYS_POST_SERVICE).
@@ -491,7 +525,7 @@ void test_poll_devsrv_listener_empty_not_ready(void) {
 
     struct Proc *corvus = make_marked_test_proc();
     TEST_ASSERT(corvus != NULL, "corvus proc");
-    int svc_h = sys_post_service_for_proc(corvus, "corvus", 6);
+    int svc_h = post_svc_byte(corvus, "corvus", 6);
     TEST_ASSERT(svc_h >= 0, "post \"corvus\"");
 
     // Empty backlog + timeout=0 → return 0, no sleep.
@@ -529,7 +563,7 @@ void test_poll_devsrv_listener_block_then_wake(void) {
 
     struct Proc *corvus = make_marked_test_proc();
     TEST_ASSERT(corvus != NULL, "corvus proc");
-    int svc_h = sys_post_service_for_proc(corvus, "corvus", 6);
+    int svc_h = post_svc_byte(corvus, "corvus", 6);
     TEST_ASSERT(svc_h >= 0, "post \"corvus\"");
 
     g_listener_proc         = corvus;
@@ -544,11 +578,13 @@ void test_poll_devsrv_listener_block_then_wake(void) {
     TEST_EXPECT_EQ(poller->state, THREAD_SLEEPING,
         "listener-poll is SLEEPING on its private rendez");
 
-    // Boot side: a client connects → srv_conn_open_for_proc enqueues +
+    // Boot side: a client open=connects -> devsrv_open_connect enqueues +
     // wakes the listener poll list.
     struct Proc *client = make_test_proc();
     TEST_ASSERT(client != NULL, "client proc");
-    int client_h = srv_conn_open_for_proc(client, "corvus", 6);
+    struct Spoor *cs = connect_byte(client, "corvus");
+    TEST_ASSERT(cs != NULL, "client open=connect to /srv/corvus");
+    int client_h = handle_alloc(client, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE, cs);
     TEST_ASSERT(client_h >= 0, "client connects → wakes the poll list");
     TEST_EXPECT_EQ(poller->state, THREAD_RUNNABLE,
         "listener-poll wakes after the connect");
@@ -568,7 +604,7 @@ void test_poll_devsrv_listener_pollhup_on_tombstone(void) {
 
     struct Proc *corvus = make_marked_test_proc();
     TEST_ASSERT(corvus != NULL, "corvus proc");
-    int svc_h = sys_post_service_for_proc(corvus, "corvus", 6);
+    int svc_h = post_svc_byte(corvus, "corvus", 6);
     TEST_ASSERT(svc_h >= 0, "post \"corvus\"");
 
     g_listener_proc         = corvus;
@@ -604,14 +640,16 @@ void test_poll_devsrv_conn_pollin_on_send(void) {
 
     struct Proc *corvus = make_marked_test_proc();
     TEST_ASSERT(corvus != NULL, "corvus proc");
-    int svc_h = sys_post_service_for_proc(corvus, "corvus", 6);
+    int svc_h = post_svc_byte(corvus, "corvus", 6);
     TEST_ASSERT(svc_h >= 0, "post \"corvus\"");
 
     struct Proc *client = make_test_proc();
     TEST_ASSERT(client != NULL, "client proc");
-    int client_h = srv_conn_open_for_proc(client, "corvus", 6);
+    struct Spoor *cs = connect_byte(client, "corvus");
+    TEST_ASSERT(cs != NULL, "client open=connect to /srv/corvus");
+    int client_h = handle_alloc(client, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE, cs);
     TEST_ASSERT(client_h >= 0, "client connects");
-    struct SrvConn *cn = (struct SrvConn *)handle_get(client, client_h)->obj;
+    struct SrvConn *cn = devsrv_conn_of(cs);
     int conn_h = sys_srv_accept_for_proc(corvus, (hidx_t)svc_h);
     TEST_ASSERT(conn_h >= 0, "corvus accepts");
 
@@ -642,12 +680,14 @@ void test_poll_devsrv_conn_pollout_immediate(void) {
 
     struct Proc *corvus = make_marked_test_proc();
     TEST_ASSERT(corvus != NULL, "corvus proc");
-    int svc_h = sys_post_service_for_proc(corvus, "corvus", 6);
+    int svc_h = post_svc_byte(corvus, "corvus", 6);
     TEST_ASSERT(svc_h >= 0, "post \"corvus\"");
 
     struct Proc *client = make_test_proc();
     TEST_ASSERT(client != NULL, "client proc");
-    int client_h = srv_conn_open_for_proc(client, "corvus", 6);
+    struct Spoor *cs = connect_byte(client, "corvus");
+    TEST_ASSERT(cs != NULL, "client open=connect to /srv/corvus");
+    int client_h = handle_alloc(client, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE, cs);
     TEST_ASSERT(client_h >= 0, "client connects");
     int conn_h = sys_srv_accept_for_proc(corvus, (hidx_t)svc_h);
     TEST_ASSERT(conn_h >= 0, "corvus accepts");
@@ -672,14 +712,16 @@ void test_poll_devsrv_conn_pollhup_on_teardown(void) {
 
     struct Proc *corvus = make_marked_test_proc();
     TEST_ASSERT(corvus != NULL, "corvus proc");
-    int svc_h = sys_post_service_for_proc(corvus, "corvus", 6);
+    int svc_h = post_svc_byte(corvus, "corvus", 6);
     TEST_ASSERT(svc_h >= 0, "post \"corvus\"");
 
     struct Proc *client = make_test_proc();
     TEST_ASSERT(client != NULL, "client proc");
-    int client_h = srv_conn_open_for_proc(client, "corvus", 6);
+    struct Spoor *cs = connect_byte(client, "corvus");
+    TEST_ASSERT(cs != NULL, "client open=connect to /srv/corvus");
+    int client_h = handle_alloc(client, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE, cs);
     TEST_ASSERT(client_h >= 0, "client connects");
-    struct SrvConn *cn = (struct SrvConn *)handle_get(client, client_h)->obj;
+    struct SrvConn *cn = devsrv_conn_of(cs);
     int conn_h = sys_srv_accept_for_proc(corvus, (hidx_t)svc_h);
     TEST_ASSERT(conn_h >= 0, "corvus accepts");
 
@@ -724,14 +766,16 @@ void test_poll_devsrv_conn_block_then_wake_pollin(void) {
 
     struct Proc *corvus = make_marked_test_proc();
     TEST_ASSERT(corvus != NULL, "corvus proc");
-    int svc_h = sys_post_service_for_proc(corvus, "corvus", 6);
+    int svc_h = post_svc_byte(corvus, "corvus", 6);
     TEST_ASSERT(svc_h >= 0, "post \"corvus\"");
 
     struct Proc *client = make_test_proc();
     TEST_ASSERT(client != NULL, "client proc");
-    int client_h = srv_conn_open_for_proc(client, "corvus", 6);
+    struct Spoor *cs = connect_byte(client, "corvus");
+    TEST_ASSERT(cs != NULL, "client open=connect to /srv/corvus");
+    int client_h = handle_alloc(client, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE, cs);
     TEST_ASSERT(client_h >= 0, "client connects");
-    struct SrvConn *cn = (struct SrvConn *)handle_get(client, client_h)->obj;
+    struct SrvConn *cn = devsrv_conn_of(cs);
     int conn_h = sys_srv_accept_for_proc(corvus, (hidx_t)svc_h);
     TEST_ASSERT(conn_h >= 0, "corvus accepts");
 
@@ -790,42 +834,6 @@ void test_poll_null_obj_spoor_pollnval(void) {
     drop_test_proc(p);
 }
 
-void test_poll_client_srv_handle_pollnval(void) {
-    // F1 regression: a client-side KObj_Srv handle (obj = SrvConn) is NOT
-    // pollable at v1.0 — `srv_handle_poll`'s SRV_CONN_MAGIC arm fails
-    // closed to POLLNVAL. (The server-endpoint poll lives on the
-    // KOBJ_SPOOR handle returned by SYS_SRV_ACCEPT.) Routes the client
-    // handle's KOBJ_SRV dispatch through srv_handle_poll.
-    srv_registry_reset();
-
-    struct Proc *corvus = make_marked_test_proc();
-    TEST_ASSERT(corvus != NULL, "corvus proc");
-    TEST_ASSERT(sys_post_service_for_proc(corvus, "corvus", 6) >= 0,
-        "post \"corvus\"");
-
-    struct Proc *client = make_test_proc();
-    TEST_ASSERT(client != NULL, "client proc");
-    int client_h = srv_conn_open_for_proc(client, "corvus", 6);
-    TEST_ASSERT(client_h >= 0, "client connects → KObj_Srv handle");
-
-    struct Handle *slot = handle_get(client, (hidx_t)client_h);
-    TEST_ASSERT(slot != NULL, "handle resolves");
-    TEST_EXPECT_EQ((int)slot->kind, (int)KOBJ_SRV,
-        "client connection handle is KOBJ_SRV");
-
-    struct pollfd pfds[1] = {
-        { .fd = client_h, .events = POLLIN | POLLOUT, .revents = 0 },
-    };
-    s64 ret = sys_poll_for_proc(client, pfds, 1, 0);
-    TEST_EXPECT_EQ(ret, 1L, "POLLNVAL counts as ready");
-    TEST_EXPECT_EQ((s64)pfds[0].revents, (s64)POLLNVAL,
-        "client-side KObj_Srv handle → POLLNVAL (no v1.0 client poll)");
-
-    srv_registry_reset();
-    drop_test_proc(client);
-    drop_test_proc(corvus);
-}
-
 void test_poll_mixed_spoor_and_srv(void) {
     // Cross-kobj-kind coverage: poll one KObj_Spoor (a pipe read end) +
     // one KObj_Srv (corvus's listener) in a single call. Both unready
@@ -835,7 +843,7 @@ void test_poll_mixed_spoor_and_srv(void) {
 
     struct Proc *corvus = make_marked_test_proc();
     TEST_ASSERT(corvus != NULL, "corvus proc");
-    int svc_h = sys_post_service_for_proc(corvus, "corvus", 6);
+    int svc_h = post_svc_byte(corvus, "corvus", 6);
     TEST_ASSERT(svc_h >= 0, "post \"corvus\"");
 
     struct Spoor *rd = NULL, *wr = NULL;
@@ -854,11 +862,13 @@ void test_poll_mixed_spoor_and_srv(void) {
     TEST_EXPECT_EQ((s64)pfds[0].revents, 0L, "spoor not ready");
     TEST_EXPECT_EQ((s64)pfds[1].revents, 0L, "listener not ready");
 
-    // Make the listener ready (client connects).
+    // Make the listener ready (client connects -> backlog non-empty).
     struct Proc *client = make_test_proc();
     TEST_ASSERT(client != NULL, "client proc");
-    TEST_ASSERT(srv_conn_open_for_proc(client, "corvus", 6) >= 0,
-        "client connects");
+    struct Spoor *cs = connect_byte(client, "corvus");
+    TEST_ASSERT(cs != NULL, "client connects");
+    int client_h = handle_alloc(client, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE, cs);
+    TEST_ASSERT(client_h >= 0, "client conn endpoint installed");
 
     pfds[0].revents = 0;
     pfds[1].revents = 0;
