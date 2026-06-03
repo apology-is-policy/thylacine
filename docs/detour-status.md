@@ -869,9 +869,26 @@ kill = BOTH the namespace `/proc/<pid>/ctl` surface AND a narrow elevation-only 
     (the stale SYS_ATTACH_9P_SRV ABI doc) FIXED; F3 (per-Proc-cap-removal cross-Proc fairness)
     DOCUMENTED-accepted (the 3a-F4 tradeoff; global `SRV_MAX_CONNS=64` bounds memory). corvus POST stays
     `SYS_POST_SERVICE` until 3c (USER VOTE 2026-06-03). Matrix GREEN default(smp4)+UBSan+smp8 ALL
-    **709/709** + full corvus/Q11/corvus-d/legate/login E2E + boot OK + 0 EXTINCTION/UBSan. **NEXT =
-    stalk-3c** (retire `SYS_SRV_CONNECT`/`SYS_POST_SERVICE`/`_BYTE` + migrate corvus POST
-    [post-before-chroot] + the pouch `0006` seam; final audit) -> the A-5b body (#826/#827/#829).
+    **709/709** + full corvus/Q11/corvus-d/legate/login E2E + boot OK + 0 EXTINCTION/UBSan.
+  - **stalk-3c IN PROGRESS -- the ABI-break close (D3); migrations DONE + MATRIX GREEN.**
+    - **3c-a `0d360f7`**: corvus POST migrated to **create=post** (pre-chroot). corvus opens `/srv`
+      `O_PATH` + `t_walk_create("corvus", perm=0)` [9P-mode] as the FIRST action in `rs_main`, BEFORE
+      the storage-cap chroot (which displaces the namespace -> `/srv` unreachable after). The KObj_Srv
+      listener handle is a capability and survives the chroot. libthyla-rs += `T_WALK_CREATE_DMSRVBYTE`.
+    - **3c-b `8c834de`**: the pouch `0006-pouch-sockets.patch` seam migrated -- `bind` ->
+      `SYS_open(/srv,O_PATH)+SYS_walk_create(<name>,DMSRVBYTE)` [byte create=post]; `connect` ->
+      `SYS_open("/srv/<name>",ORDWR)` [open=connect; missing svc -> ECONNREFUSED]; `accept` +
+      `SO_PEERCRED` UNCHANGED. The syscall seam drops `__NR_post_service`/`_srv_connect`/`_post_service_byte`,
+      adds `__NR_walk_create 54` + `__NR_open 65`; `0007-pouch-signals.patch`'s `syscall.h.in` context
+      anchor re-pointed to 0006's new tail (the overlapping-hunk trap); `tools/build.sh` seam-verify list
+      synced. Kernel: `sys_srv_peer` now rejects the **CSRVCLIENT** (client-direction) conn Spoor --
+      open=connect made the client conn resolvable, but its SrvConn stamps the CONNECTOR as peer, so a
+      same-Proc client query would mis-report self; the gate keeps the v1.0 server-side-only SO_PEERCRED
+      contract (client -> ENOTSOCK). Proven: stratumd binds `/srv/stratum-fs` via byte create=post +
+      attaches + pivots; pouch-hello-sockets full bind/connect/accept byte round-trip; matrix
+      default+UBSan+smp8 ALL 709/709 + boot OK.
+    - **NEXT = 3c-c** (retire the 3 kernel syscalls + the 60-use/5-file kernel-test migration to the
+      production path) -> **3c-d** (formal 3c audit + two-commit close) -> the A-5b body (#826/#827/#829).
 
 ---
 
