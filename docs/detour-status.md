@@ -887,8 +887,37 @@ kill = BOTH the namespace `/proc/<pid>/ctl` surface AND a narrow elevation-only 
       contract (client -> ENOTSOCK). Proven: stratumd binds `/srv/stratum-fs` via byte create=post +
       attaches + pivots; pouch-hello-sockets full bind/connect/accept byte round-trip; matrix
       default+UBSan+smp8 ALL 709/709 + boot OK.
-    - **NEXT = 3c-c** (retire the 3 kernel syscalls + the 60-use/5-file kernel-test migration to the
-      production path) -> **3c-d** (formal 3c audit + two-commit close) -> the A-5b body (#826/#827/#829).
+    - **3c-c-1 `d26e760`**: migrated the kernel /srv tests (5 files, 60 uses) to the PRODUCTION path
+      (`devsrv_post_listener` create=post / `devsrv_open_connect` open=connect / `srv_lookup_in` -- the
+      last un-static'd + declared for the harness); deleted 6 SYS_SRV_CONNECT-subject tests, retargeted
+      `byte_mode_kobj_srv_dispatch` -> `byte_mode_conn_dispatch` + `devsrv.conn_io` -> byte-mode (dropping
+      its 9P-only "empty reads 0" assert; byte server-read blocks). Bisectable checkpoint -- old syscalls
+      still dispatched, untested. Default 703/703 (709 - 6 deleted), boot OK, 0 EXTINCTION.
+    - **3c-c-2 `cde3577`**: the ABI break -- retired `SYS_POST_SERVICE`(26) / `SYS_POST_SERVICE_BYTE`(43)
+      / `SYS_SRV_CONNECT`(30): deleted the 3 handlers + 5 workers + 3 dispatch cases (syscall.c),
+      `srv_conn_open_for_proc`/`_in` + the public `srv_reserve`/`srv_lookup` (devsrv.c), the decls/enums/
+      ABI-docs (devsrv.h, syscall.h -- numbers RESERVED, no reuse), and the `t_srv_connect`/`t_post_service`
+      wrappers + number consts (libt, libthyla-rs). **Dead-arm removal** (a named 3c-d audit focus): after
+      retirement NO KOBJ_SRV handle is ever a client SrvConn, so the client-conn r/w machinery is a stale
+      trap -- removed the KOBJ_SRV arms in sys_read/write_for_proc + the KOBJ_SRV admission in
+      sys_lookup_rw_handle (KOBJ_SPOOR-only now; a listener was already rejected -- behavior unchanged).
+      `srvconn_client_send/recv` survive (devsrv CSRVCLIENT + the 9P transport). Net -637 lines.
+      **Default (smp4) + smp8 GREEN 703/703**, boot OK, 0 EXTINCTION, 8/8 CPUs.
+    - **UBSan flake DISCOVERED (pre-existing, NOT a 3c-c regression; tracked for a dedicated hunt):** the
+      UBSan matrix failed 1/2 runs at **corvus STEP=6 = create=post** (`corvus: STEP=6 FAIL rc=f` ->
+      joey `/srv/corvus` open fails [the "t_srv_connect FAILED" is a stale diagnostic STRING, not a call]
+      -> `EXTINCTION: joey: wait_pid returned wrong pid 0x656`, cpu 2). The 2nd UBSan run was fully GREEN.
+      The failing path (`devsrv_post_listener` / `sys_walk_create_handler`) is byte-IDENTICAL across 3c-c
+      (I deleted around it) and shipped in 3c-a (present at 4cae10c) -- so 3c-b's single "UBSan 709/709"
+      was a lucky run; the flake predates 3c-c. Smells like a #789-class UBSan-timing boot-ordering
+      sensitivity in corvus startup / joey reap. **3c-d MUST characterize it (re-run N x; confirm
+      pre-existing via 4cae10c UBSan) before the close -- do NOT dismiss without ground truth.**
+    - **NEXT = 3c-d**: the UBSan-flake characterization (above) + the formal 3c audit (the ABI-break
+      surface + the dead-arm r/w-resolver change + per-territory isolation; do-not-report preamble =
+      `audit_stalk3b_closed_list.md` + `audit_stalk3a_closed_list.md` SOUND sets) + the owed docs sweep
+      (STALK-DESIGN section 9, this row, 70-devsrv, 78-pouch, CLAUDE.md syscall-retirement note + residual
+      stale comments: srvconn.h prose, joey.c "t_srv_connect FAILED" diagnostic strings) + two-commit
+      close + `audit_stalk3c_closed_list.md`. Then the A-5b body (#826/#827/#829).
 
 ---
 
