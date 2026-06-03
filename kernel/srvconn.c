@@ -347,6 +347,42 @@ long srvconn_client_send(struct SrvConn *cn, const u8 *buf, long n) {
     return put;
 }
 
+long srvconn_client_send_frame(struct SrvConn *cn, const u8 *buf, long n) {
+    if (!cn || cn->magic != SRV_CONN_MAGIC) return -1;
+    if (!buf || n < 0) return -1;
+    if (n == 0) return 0;
+    // A whole 9P frame is <= the negotiated msize <= SRVCONN_RING_CAP (the
+    // _Static_assert), so a frame can ALWAYS fit an empty ring; n past the ring
+    // is a framing-layer bug, not back-pressure.
+    if (n > (long)SRVCONN_RING_CAP) return -1;
+    struct srvconn_chan *ch = &cn->c2s;
+    spin_lock(&ch->lock);
+    if (ch->eof) {
+        spin_unlock(&ch->lock);
+        return -1;
+    }
+    // #841 ALL-OR-NOTHING. The pipelined kernel 9P client can have several
+    // frames in flight, so c2s may transiently hold a prior undrained frame; a
+    // partial write (which chan_produce / chan_ring_write would do on a nearly-
+    // full ring) leaves a fragment on the wire and DESYNCS the shared stream.
+    // Write the WHOLE frame iff it fits; else write NOTHING + return 0 (the
+    // caller fails the op + marks the session dead -- no fragment on the wire).
+    // Frame-atomicity vs concurrent senders is the caller's (the client holds
+    // c->lock across the send).
+    u32 freeb = SRVCONN_RING_CAP - ch->count;
+    if ((u32)n > freeb) {
+        spin_unlock(&ch->lock);
+        return 0;                       // no room -- all-or-nothing back-pressure
+    }
+    long put = chan_ring_write(ch, buf, n);   // room guaranteed -> writes all n
+    spin_unlock(&ch->lock);
+    if (put > 0) {
+        wakeup(&ch->rendez);
+        poll_waiter_list_wake(&cn->poll_list);
+    }
+    return put;
+}
+
 long srvconn_client_recv(struct SrvConn *cn, u8 *buf, long n) {
     if (!cn || cn->magic != SRV_CONN_MAGIC) return -1;
     if (!buf || n < 0) return -1;

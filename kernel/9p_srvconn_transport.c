@@ -13,8 +13,6 @@
 #include <thylacine/srvconn.h>
 #include <thylacine/types.h>
 
-#include "../arch/arm64/timer.h"
-
 // =============================================================================
 // Vtable implementations.
 // =============================================================================
@@ -27,29 +25,22 @@ static int srvconn_transport_send(void *ctx, const u8 *buf, size_t len) {
     if (!buf && len > 0)                         return -1;
     if (len == 0)                                return 0;
 
-    // Per-op deadline: a 9P round trip is do_send -> do_recv. Arming the
-    // deadline HERE (once, at the request send) gives each op its own full
-    // OP_DEADLINE budget for the response. The prior scheme armed only in
-    // recv "if missing or lapsed", which made a sequence of dev9p ops SHARE
-    // one deadline window -- a slow op (e.g. the first extent-bearing
-    // Tsync, whose stm_fs_commit flushes many blocks over QEMU-TCG virtio)
-    // would consume most of the 30s, starving the NEXT op's recv into an
-    // immediate lapsed-deadline timeout (no bytes received). Arming at send
-    // restores the documented "every op bounded by a fresh OP_DEADLINE"
-    // backstop. The recv-side auto-arm remains as defense-in-depth for any
-    // recv not preceded by this send (none in p9_transport_round_trip).
-    srvconn_set_client_deadline(st->cn,
-        timer_now_ns() + SRVCONN_OP_DEADLINE_NS);
-
-    // R1 F9 close: simplified. `srvconn_client_send` returns either
-    // the full `len` (success), 0 (only when len == 0, handled above),
-    // or -1 (torn rings / bad args). The "short write" loop the
-    // pre-fix code carried was dead -- SRVCONN_RING_CAP is sized via a
-    // _Static_assert to hold a full msize frame, so chan_produce
-    // never returns a partial count for a kernel-client send.
-    long n = srvconn_client_send(st->cn, buf, (long)len);
+    // #841: NO per-op deadline arming here. The pipelined client (ARCH §21.10)
+    // decouples send from recv -- a different Thread may read the reply -- and
+    // a per-op recv deadline that abandons one in-flight op desyncs the shared
+    // byte stream (the stalk-3c bug §21.10 restores §21 to fix). The deadline
+    // is now caller-set: HANDSHAKE_DEADLINE during the serial handshake, then 0
+    // (block until reply / EOF / death; death-interruptible via #811) for
+    // steady-state ops -- srvconn_attach_dev9p_root sets each.
+    //
+    // ALL-OR-NOTHING send (#841): srvconn_client_send_frame writes the WHOLE
+    // frame or nothing (0 = ring full). With pipelining, c2s can transiently
+    // hold a prior undrained frame, so a partial write would leave a fragment
+    // on the wire + desync the shared stream; all-or-nothing turns a full ring
+    // into a clean op failure (the client marks the session dead) instead.
+    long n = srvconn_client_send_frame(st->cn, buf, (long)len);
     if (n < 0)                return -1;
-    if ((size_t)n != len)     return -1;   // unreachable per the assert
+    if ((size_t)n != len)     return -1;   // 0 (ring full) / short -> caller -EIO
     return (int)n;
 }
 
@@ -60,59 +51,16 @@ static int srvconn_transport_recv(void *ctx, u8 *buf, size_t cap) {
     if (!st->cn)                                 return -1;
     if (!buf || cap == 0)                        return -1;
 
-    // R1 F2 close (R2 F1R2 refinement): defense-in-depth deadline.
-    //
-    // The upper layer is RESPONSIBLE for setting the SrvConn's
-    // `client_deadline_ns` before initiating a blocking op:
-    //   - sys_attach_9p_srv_handler sets HANDSHAKE_DEADLINE before
-    //     p9_attached_create's Tversion/Tattach (R1 F1 close);
-    //   - the post-attach dev9p path (sys_walk_open / sys_read /
-    //     sys_write KOBJ_SPOOR) is supposed to set OP_DEADLINE before
-    //     each Twalk/Tread/Twrite, but at v1.0 those handlers do NOT
-    //     (the R1 F2 finding).
-    //
-    // Rather than touch every dev9p call site, we auto-arm OP_DEADLINE
-    // here when the deadline is missing OR already lapsed. The
-    // missing/lapsed gate matters because:
-    //
-    //   - "Missing" (deadline == 0) is the fresh SrvConn case
-    //     pre-handshake (srvconn_create initializes to 0).
-    //
-    //   - "Lapsed" (now >= deadline) is the post-handshake case
-    //     R2 F1R2 surfaced: the R1 F1 setter armed HANDSHAKE_DEADLINE
-    //     (now+5s) ONCE before the handshake. Post-handshake the
-    //     value lingers; for any op past T_attach+5s the dev9p path
-    //     would see an already-lapsed deadline and tsleep would
-    //     return TIMEDOUT immediately even when the peer is healthy.
-    //     The auto-arm re-fires per-op when the prior deadline has
-    //     lapsed, restoring the documented "every recv bounded by a
-    //     fresh OP_DEADLINE" backstop.
-    //
-    // Within a single op (header read + body read), the first recv
-    // arms; subsequent recvs see a non-zero non-lapsed deadline and
-    // skip the auto-arm (using whatever budget remains from the
-    // first call). Between ops, the budget either still applies (if
-    // within OP_DEADLINE wallclock) or is freshly re-armed (if past).
-    //
-    // A future dev9p refactor that arms a per-op deadline at the
-    // call site BEFORE entering the adapter takes precedence because
-    // it sets a non-zero non-lapsed value before this check.
-    //
-    // Atomic read on the deadline word is RELAXED: writer ordering
-    // is enforced by srvconn_set_client_deadline's single-thread
-    // discipline (one upper-layer caller per blocking op); cross-CPU
-    // observers in v1.x multi-thread Procs are subsumed by the
-    // outer-layer Proc lock / handle-table discipline (see R1 F4
-    // dispositioned in the closed list).
-    {
-        u64 now_ns = timer_now_ns();
-        u64 cur_deadline = __atomic_load_n(&st->cn->client_deadline_ns,
-                                             __ATOMIC_RELAXED);
-        if (cur_deadline == 0u || now_ns >= cur_deadline) {
-            srvconn_set_client_deadline(st->cn,
-                now_ns + SRVCONN_OP_DEADLINE_NS);
-        }
-    }
+    // #841: NO recv-side deadline auto-arm. The pipelined client (ARCH §21.10)
+    // runs the elected reader's recv with NO per-op timeout for steady-state
+    // ops -- the deadline is caller-set (srvconn_attach_dev9p_root arms
+    // HANDSHAKE_DEADLINE for the serial handshake, then resets it to 0 = "block
+    // until reply / EOF / death" for everything after). Auto-arming OP_DEADLINE
+    // here would re-impose a per-op timeout whose expiry abandons one in-flight
+    // op and DESYNCS the shared byte stream -- the stalk-3c bug §21.10 restores
+    // §21 to fix. A genuinely-hung server now blocks the caller (death-
+    // interruptible via #811), as Plan 9 / local Linux-9p do, rather than
+    // corrupting a session shared across Procs.
 
     // BLOCKING. Returns:
     //   >0 -- bytes read

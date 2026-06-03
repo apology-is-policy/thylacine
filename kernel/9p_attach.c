@@ -287,6 +287,14 @@ struct Spoor *srvconn_attach_dev9p_root(struct SrvConn *cn,
         return NULL;
     }
 
+    // #841: the handshake (Tversion + Tattach) is done -> switch to NO
+    // steady-state deadline. The elected-reader pipeline (ARCH §21.10) blocks
+    // until reply / EOF / death (death-interruptible via #811) -- a per-op
+    // timeout would abandon one in-flight op and desync the shared 9P stream.
+    // The HANDSHAKE_DEADLINE armed above bounded only the serial, fresh-client
+    // handshake, where a timeout tears down the unshared client with no desync.
+    srvconn_set_client_deadline(cn, 0);
+
     // Transfer adapter ownership into the attached (tx == rx == NULL: the SrvConn
     // lifetime is the adapter's own srvconn_ref, not a transport-Spoor pair).
     if (p9_attached_install_transport(att, (struct p9_spoor_transport *)adapter,

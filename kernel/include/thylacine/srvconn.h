@@ -377,6 +377,21 @@ u64 srvconn_server_stripes(const struct SrvConn *cn);
 // down or args are bad. Non-blocking.
 long srvconn_client_send(struct SrvConn *cn, const u8 *buf, long n);
 
+// srvconn_client_send_frame — ALL-OR-NOTHING send of one whole 9P frame
+// (#841). The pipelined kernel 9P client (ARCH §21.10) may have several frames
+// in flight, so c2s can transiently hold a prior undrained frame; a partial
+// write would leave a fragment on the wire and desync the shared stream. This
+// writes the WHOLE `n`-byte frame iff it fits the c2s ring right now, else
+// writes nothing. Returns:
+//   n   — the whole frame was written.
+//   0   — no room (the caller fails the op + marks the session dead; no
+//         fragment is ever left on the wire).
+//  -1   — the connection is torn (EOF) or args are bad, or n > the ring (a
+//         framing-layer bug -- a frame can never exceed msize <= ring cap).
+// Non-blocking. Frame-atomicity vs concurrent senders is the caller's
+// responsibility (the kernel 9P client holds c->lock across the send).
+long srvconn_client_send_frame(struct SrvConn *cn, const u8 *buf, long n);
+
 // srvconn_client_recv — kernel client reads up to `n` bytes from corvus
 // (the s2c ring), BLOCKING until data arrives, the connection is torn
 // down, or `client_deadline_ns` passes. Returns:

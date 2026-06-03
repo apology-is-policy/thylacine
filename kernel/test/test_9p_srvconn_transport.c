@@ -50,7 +50,7 @@ void test_9p_srvconn_transport_send_routes_to_c2s_ring(void);
 void test_9p_srvconn_transport_recv_routes_from_s2c_ring(void);
 void test_9p_srvconn_transport_close_drops_srvconn_ref(void);
 void test_9p_srvconn_transport_kernel_attached_skips_teardown_on_handle_close(void);
-void test_9p_srvconn_transport_send_arms_fresh_deadline(void);
+void test_9p_srvconn_transport_send_preserves_caller_deadline(void);
 
 // =============================================================================
 // Helpers (mirror test_srv_client.c's pattern).
@@ -308,18 +308,19 @@ void test_9p_srvconn_transport_large_frame_roundtrip(void) {
 }
 
 // =============================================================================
-// 9p_srvconn_transport.send_arms_fresh_deadline
+// 9p_srvconn_transport.send_preserves_caller_deadline
 //
-// Regression for the per-op deadline arm (the A-1b fsync-starvation fix):
-// srvconn_transport_send MUST arm a fresh OP_DEADLINE window at each send, so a
-// sequence of dev9p ops never SHARES one window (a slow op consuming the window
-// would otherwise starve its successor into an immediate lapsed-deadline recv
-// timeout). Pre-fix the send did not touch client_deadline_ns, so a near-lapsed
-// value left by a prior op survived; this test sets that precondition and
-// asserts the send overwrites it with a fresh now + OP_DEADLINE.
+// #841: srvconn_transport_send no longer arms a per-op deadline. The deadline
+// is caller-set -- srvconn_attach_dev9p_root arms HANDSHAKE_DEADLINE for the
+// serial handshake, then resets it to 0 ("block until reply / EOF / death") for
+// steady-state ops. A per-op arm whose expiry abandons one in-flight op desyncs
+// the pipelined client's shared byte stream (the stalk-3c bug ARCH 21.10
+// restores 21 to fix), so the send MUST leave client_deadline_ns exactly as the
+// caller set it. (Supersedes the A-1b fsync-starvation "arm at send" fix: the
+// no-timeout steady state removes the shared-window starvation by construction.)
 // =============================================================================
 
-void test_9p_srvconn_transport_send_arms_fresh_deadline(void) {
+void test_9p_srvconn_transport_send_preserves_caller_deadline(void) {
     srv_registry_reset();
 
     struct Proc *server = NULL;
@@ -332,27 +333,23 @@ void test_9p_srvconn_transport_send_arms_fresh_deadline(void) {
     TEST_EXPECT_EQ(p9_srvconn_transport_init(&st, cn), 0, "init");
     struct p9_transport_ops ops = p9_srvconn_transport_ops(&st);
 
-    // Precondition: a near-exhausted shared window left by a prior slow op.
-    // Pre-fix (recv-only "arm if lapsed") the next op's send would leave this
-    // stale value, starving the recv into an immediate TSLEEP_TIMEDOUT.
-    u64 stale = timer_now_ns() + 1u;
-    srvconn_set_client_deadline(cn, stale);
-
     u8 frame[8] = { 8, 0, 0, 0, 0, 0, 0, 0 };
-    u64 t0 = timer_now_ns();
+
+    // A caller-set deadline (the handshake case) survives the send UNCHANGED.
+    u64 set = timer_now_ns() + SRVCONN_HANDSHAKE_DEADLINE_NS;
+    srvconn_set_client_deadline(cn, set);
     int n = ops.send(ops.ctx, frame, sizeof(frame));
     TEST_EXPECT_EQ(n, (int)sizeof(frame), "send writes full buffer");
-    TEST_ASSERT(cn->client_deadline_ns > stale,
-                "send overwrites the stale near-lapsed deadline");
-    TEST_ASSERT(cn->client_deadline_ns >= t0 + SRVCONN_OP_DEADLINE_NS,
-                "send arms a fresh full OP_DEADLINE window");
+    TEST_ASSERT(cn->client_deadline_ns == set,
+                "send leaves the caller-set deadline untouched");
 
-    // A second op's send re-arms again -- never inherits the remainder.
-    u64 t1 = timer_now_ns();
+    // The steady-state case: deadline 0 (no timeout) stays 0 across the send,
+    // so the elected reader blocks until reply / EOF / death.
+    srvconn_set_client_deadline(cn, 0);
     int n2 = ops.send(ops.ctx, frame, sizeof(frame));
     TEST_EXPECT_EQ(n2, (int)sizeof(frame), "second send writes full buffer");
-    TEST_ASSERT(cn->client_deadline_ns >= t1 + SRVCONN_OP_DEADLINE_NS,
-                "second send re-arms a fresh window");
+    TEST_ASSERT(cn->client_deadline_ns == 0u,
+                "send does not re-arm a deadline (steady-state blocks)");
 
     (void)ops.close(ops.ctx);
     p9_srvconn_transport_destroy(&st);

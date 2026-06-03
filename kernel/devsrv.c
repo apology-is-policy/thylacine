@@ -918,18 +918,29 @@ static void devsrv_close(struct Spoor *c) {
     } else if (m == SRV_CONN_MAGIC) {
         // Closing a connection Spoor is a connection close (CORVUS-DESIGN §6.2):
         // tear the connection down so the peer wakes, then drop the reference.
-        // EXCEPT a kernel-attached SrvConn (SYS_ATTACH_9P_SRV wrapped it, or
-        // devsrv_open's 9p-mode path did): its c2s/s2c rings are LOAD-BEARING for
-        // the kernel 9P client, so a userspace t_close of the now-redundant conn
-        // endpoint must NOT EOF them. SKIP teardown; only unref. The session
-        // tears down when the LAST holder (the adapter's transport.close at
-        // p9_attached_destroy) drops its ref. Mirrors handle.c's KOBJ_SRV release
-        // arm (16c-integration); stalk-3b-β makes the connection endpoint a
-        // KOBJ_SPOOR conn Spoor that releases through HERE, so the same gate is
-        // owed here -- without it joey's idiomatic close of an attach-wrapped
-        // conn Spoor would EOF the rings before the first Twalk.
+        //
+        // The kernel-attached SKIP is for the CLIENT endpoint ONLY. When the
+        // kernel wraps a conn's rings in a 9P client (SYS_ATTACH_9P_SRV, or
+        // devsrv_open's 9p-mode path), those c2s/s2c rings are LOAD-BEARING for
+        // that client, so a userspace t_close of the now-redundant CLIENT conn
+        // endpoint must NOT EOF them -- teardown migrates to the adapter's
+        // transport.close at p9_attached_destroy (the last holder). Mirrors
+        // handle.c's KOBJ_SRV release arm (16c-integration); stalk-3b-β makes the
+        // CLIENT endpoint a CSRVCLIENT conn Spoor that releases through HERE.
+        //
+        // #841: the SERVER endpoint (corvus's accepted Spoor -- NO CSRVCLIENT)
+        // is the OTHER side of the same shared SrvConn, and its kernel_attached
+        // flag was set by the CLIENT's attach. But the server closing means the
+        // 9P server is GONE -- it MUST EOF the rings so the kernel client's
+        // blocked recv wakes with EOF. A no-timeout client (ARCH §21.10) observes
+        // connection death via EOF, never a per-op timeout; honoring
+        // kernel_attached on the server side suppressed the EOF and hung the
+        // client's Tclunk forever (the 30s per-op deadline the #841 restoration
+        // removed had been masking exactly this -- corvus's post-BadFormat Q11
+        // teardown). So skip teardown ONLY for the kernel-attached CLIENT side.
         struct SrvConn *cn = (struct SrvConn *)c->aux;
-        if (!srvconn_is_kernel_attached(cn)) srvconn_teardown(cn);
+        bool client_ep = (c->flag & CSRVCLIENT) != 0;
+        if (!(client_ep && srvconn_is_kernel_attached(cn))) srvconn_teardown(cn);
         srvconn_unref(cn);
     } else if (m == DEVSRV_SVC_MAGIC) {
         struct devsrv_svc_ref *ref = (struct devsrv_svc_ref *)c->aux;

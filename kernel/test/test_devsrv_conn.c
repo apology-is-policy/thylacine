@@ -91,6 +91,7 @@ extern void proc_test_unlink(struct Proc *p);
 void test_devsrv_walk_service(void);
 void test_devsrv_open_connect_byte(void);
 void test_devsrv_kernel_attached_io_refused(void);
+void test_devsrv_kernel_attached_server_close_eofs(void);
 void test_devsrv_accept_immediate(void);
 void test_devsrv_accept_blocks_then_wakes(void);
 void test_devsrv_conn_io(void);
@@ -389,6 +390,58 @@ void test_devsrv_kernel_attached_io_refused(void) {
     srv_registry_reset();
     drop_test_proc(client);
     drop_test_proc(server);
+}
+
+// ---------------------------------------------------------------------------
+// devsrv.kernel_attached_server_close_eofs — #841 regression.
+//
+// A kernel-attached SrvConn is one whose c2s/s2c rings the kernel 9P client
+// drives (devsrv_open's 9p-mode path / SYS_ATTACH_9P_SRV). devsrv_close honors
+// kernel_attached by SKIPPING teardown -- BUT that skip is correct ONLY for the
+// CLIENT endpoint (its rings stay live for the kernel client; teardown migrates
+// to the adapter's transport.close at p9_attached_destroy). The SERVER endpoint
+// (corvus's accepted Spoor -- NO CSRVCLIENT) is the OTHER side of the SAME
+// shared SrvConn, carrying the kernel_attached flag the CLIENT's attach set; its
+// close means the 9P server is GONE and MUST tear the conn down so the kernel
+// client's blocked recv wakes with EOF (ARCH section 21.10: a no-timeout client
+// observes connection death via EOF, never a per-op timeout).
+//
+// Pre-fix devsrv_close skipped teardown on BOTH endpoints when kernel_attached,
+// so corvus's post-BadFormat server-side close left joey's rings live + EOF-less
+// -> joey's t_close-driven Tclunk blocked forever (the #841 boot hang the no-
+// timeout client exposed; the retired 30s per-op deadline had masked it).
+// ---------------------------------------------------------------------------
+
+void test_devsrv_kernel_attached_server_close_eofs(void) {
+    // Part A: a SERVER-endpoint close on a kernel-attached conn MUST tear down.
+    struct SrvConn *cn = srvconn_create(0, 1, false, 0);
+    TEST_ASSERT(cn != NULL, "srvconn_create (server-close case)");
+    srvconn_set_kernel_attached(cn);
+    TEST_ASSERT(srvconn_is_live(cn), "conn born live");
+    srvconn_ref(cn);                                    // inspection ref (survives the Spoor close)
+    struct Spoor *srv_ep = devsrv_make_conn_spoor(cn);  // SERVER endpoint: no CSRVCLIENT
+    TEST_ASSERT(srv_ep != NULL, "server-endpoint conn Spoor");
+    TEST_ASSERT((srv_ep->flag & CSRVCLIENT) == 0,
+        "the accepted Spoor is the SERVER endpoint (no CSRVCLIENT)");
+    spoor_clunk(srv_ep);                                // -> devsrv_close
+    TEST_ASSERT(!srvconn_is_live(cn),
+        "#841: server-side close of a kernel-attached conn TEARS DOWN (EOFs the rings)");
+    srvconn_unref(cn);                                  // drop inspection ref -> free
+
+    // Part B (control): a CLIENT-endpoint close on a kernel-attached conn must
+    // SKIP teardown -- its rings are load-bearing for the kernel 9P client.
+    struct SrvConn *cn2 = srvconn_create(0, 1, false, 0);
+    TEST_ASSERT(cn2 != NULL, "srvconn_create (client-close case)");
+    srvconn_set_kernel_attached(cn2);
+    srvconn_ref(cn2);                                   // inspection ref
+    struct Spoor *cli_ep = devsrv_make_conn_spoor(cn2);
+    TEST_ASSERT(cli_ep != NULL, "client-endpoint conn Spoor");
+    cli_ep->flag |= CSRVCLIENT;                         // the CLIENT direction
+    spoor_clunk(cli_ep);                                // -> devsrv_close (skip teardown)
+    TEST_ASSERT(srvconn_is_live(cn2),
+        "client-side close of a kernel-attached conn SKIPS teardown (rings stay live)");
+    srvconn_teardown(cn2);                              // explicit cleanup
+    srvconn_unref(cn2);                                 // -> free
 }
 
 // ---------------------------------------------------------------------------

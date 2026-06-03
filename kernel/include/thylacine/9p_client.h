@@ -57,6 +57,7 @@
 #include <thylacine/9p_session.h>
 #include <thylacine/9p_transport.h>
 #include <thylacine/9p_wire.h>
+#include <thylacine/rendez.h>
 #include <thylacine/spinlock.h>
 #include <thylacine/types.h>
 
@@ -66,16 +67,58 @@
 
 #define P9_CLIENT_MAGIC        0x50394354u   // "P9CT" little-endian
 
+// One in-flight steady-state op (ARCH §21.3 "Request" / §21.10). The
+// submitter allocates a p9_rpc on its OWN stack, registers it in
+// c->inflight[tag] under c->lock, and blocks on its own `rendez` until
+// the elected reader copies the matching reply frame into `reply_buf`
+// and sets `done`. SINGLE-WAITER: exactly one thread (the submitter)
+// ever sleeps on `rendez` -- the struct Rendez single-waiter convention
+// holds because each rpc has its own. The three flags are mutated only
+// under c->lock, and every mutation is followed by wakeup(&rpc->rendez)
+// (the I-9 register-then-observe discipline; rpc_wait_cond reads ONLY
+// these flags, never cross-lock client state).
+struct p9_rpc {
+    u16            tag;        // 9P tag (0..P9_SESSION_MAX_OUTSTANDING-1)
+    bool           done;       // reply copied into reply_buf (reply_len valid)
+    bool           dead;       // session torn down under me -> -P9_E_IO
+    bool           be_reader;  // a departing reader handed me the reader role
+    int            reply_len;  // bytes in reply_buf (valid iff done)
+    u8            *reply_buf;  // kmalloc'd recv_cap bytes; reader copies frame here
+    struct Rendez  rendez;     // the submitter sleeps here; reader wakes it
+};
+
 struct p9_client {
     u32                  magic;
-    // Per-client lock. Acquired by every public p9_client_* op for the
-    // duration of build + transport-exchange + dispatch + bookkeeping.
-    // Protects session.outstanding[], session.bound_fids[], out_buf,
-    // next_fid, and total_ops/total_errors counters. R15-c F230 close.
+    // Per-client lock. Protects session.outstanding[], session.bound_fids[],
+    // out_buf, next_fid, total_ops/total_errors, the inflight[] table, and
+    // reader_active / dead. Held across build + send + dispatch, but DROPPED
+    // across the blocking reader recv and the per-rpc sleep (ARCH §21.10 --
+    // the #841 elected-reader restoration; never held across a blocking wait).
     spin_lock_t          lock;
     struct p9_session    session;
     struct p9_transport  transport;
+    // Shared outbound Tmsg buffer. Used only under c->lock during the
+    // build+send of one op (serialized), so the elected-reader pipeline can
+    // share it across ops without per-op allocation -- the frame is copied
+    // into the c2s ring by the send before c->lock is released.
     u8                   out_buf[P9_CLIENT_OUT_BUF_MAX];
+    size_t               recv_cap;     // transport recv-buf cap; per-rpc reply_buf size
+    // Pipeline state (ARCH §21.10). inflight[tag] is the submitter's stack
+    // p9_rpc for the op holding `tag`, or NULL (free / op died + unwound,
+    // leaving outstanding[tag] active for stray-reply reclaim). reader_active
+    // is the single-reader election flag; dead latches on transport EOF/error
+    // (every op then returns -P9_E_IO). All under c->lock.
+    struct p9_rpc       *inflight[P9_SESSION_MAX_OUTSTANDING];
+    bool                 reader_active;
+    bool                 dead;
+    // Most-recently-completed op's reply buffer, kept alive past client_run's
+    // return. The read/readdir/readlink dispatch results ZERO-COPY ALIAS into
+    // it (out->read_data / readdir_data / readlink_target point inside the
+    // dispatched frame), and the caller copies those out AFTER client_run
+    // returns -- so the buffer must outlive the call. Freed at the NEXT
+    // completion or at destroy, both under c->lock, by which point the prior
+    // caller has copied out and dropped c->lock. Holds at most one buffer.
+    u8                  *done_reply_buf;
     // Monotonic fid allocator. Starts at root_fid + 1; each
     // p9_client_alloc_fid returns next_fid then increments. Burned
     // fids are not reclaimed at v1.0 (32-bit space; plenty for any
