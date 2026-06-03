@@ -849,7 +849,7 @@ kill = BOTH the namespace `/proc/<pid>/ctl` surface AND a narrow elevation-only 
     `KOBJ_SPOOR`; migrate the native clients; remove `SRV_CONN_PER_PROC_MAX`; close the 3a-audit F2/F4
     prereqs).
   - **stalk-3b-β LANDED + audited (the open=connect + 9P-unification chunk; A `995973d` / B `cd40f64` /
-    C1 `42ce2e0` / C2 `8003564` / D `46ff378` / E close `*(pending)*`).** `open("/srv/<name>")` IS the
+    C1 `42ce2e0` / C2 `8003564` / D `46ff378` / E close `d6724a0`).** `open("/srv/<name>")` IS the
     connect: `stalk` `STALK_OPEN` adopts a `Dev.open`-returned replacement Spoor (A); `devsrv_open` =
     `devsrv_open_connect` mints a SrvConn + (9p-mode) wraps its client side in the SHARED kernel 9P
     client via `srvconn_attach_dev9p_root` -> a dev9p root Spoor, OR (byte-mode) returns a CSRVCLIENT
