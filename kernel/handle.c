@@ -347,20 +347,6 @@ int handle_close(struct Proc *p, hidx_t h) {
     struct Handle *slot = &t->slots[h];
     if (slot->magic != HANDLE_MAGIC)    return -1;
 
-    // Per-Proc /srv-connection cap decrement (P5-corvus-srv-impl-b2). Run
-    // BEFORE handle_release_obj — the release path teardowns + unrefs the
-    // SrvConn (and the last unref clobbers the magic + frees), so the
-    // SRV_CONN_MAGIC discriminator MUST read the obj first while the
-    // SrvConn is still alive. proc_free's bulk-close path bypasses this
-    // (it calls handle_release_obj directly without a Proc) — fine, the
-    // Proc is being destroyed.
-    if (slot->kind == KOBJ_SRV && slot->obj &&
-        *(const u64 *)slot->obj == SRV_CONN_MAGIC) {
-        if (p->srv_conn_count == 0)
-            extinction("handle_close: srv_conn_count underflow on KOBJ_SRV release");
-        p->srv_conn_count--;
-    }
-
     // Per-kind release. P2-Fd integrates burrow_unref for KOBJ_BURROW; future
     // phases add the other kinds.
     handle_release_obj(slot->kind, slot->obj);

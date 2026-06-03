@@ -384,12 +384,9 @@ void test_devsrv_srv_peer_identity(void);
 void test_devsrv_srv_peer_dead_peer(void);
 void test_devsrv_srv_peer_gate(void);
 void test_devsrv_srv_peer_bad_args(void);
-void test_srv_client_per_proc_cap_blocks_second_open(void);
-void test_srv_client_handle_close_decrements_cap(void);
-void test_srv_client_read_write_fail_pre_handshake(void);
-void test_srv_client_handshake_times_out_without_responder(void);
+void test_srv_client_no_per_proc_cap(void);
 void test_srv_client_sys_srv_connect_unknown_service(void);
-void test_srv_client_sys_srv_connect_per_proc_cap(void);
+void test_srv_client_sys_srv_connect_9p_rejected(void);
 void test_srv_client_byte_mode_propagates_to_conn(void);
 void test_srv_client_byte_mode_9p_post_stays_9p(void);
 void test_srv_client_byte_mode_connect_rejects_path(void);
@@ -1173,23 +1170,14 @@ struct test_case g_tests[] = {
     { "devsrv.srv_peer_dead_peer",     test_devsrv_srv_peer_dead_peer,     false, NULL },
     { "devsrv.srv_peer_gate",          test_devsrv_srv_peer_gate,          false, NULL },
     { "devsrv.srv_peer_bad_args",      test_devsrv_srv_peer_bad_args,      false, NULL },
-    { "srv_client.per_proc_cap_blocks_second_open",
-                                       test_srv_client_per_proc_cap_blocks_second_open,
-                                                                           false, NULL },
-    { "srv_client.handle_close_decrements_cap",
-                                       test_srv_client_handle_close_decrements_cap,
-                                                                           false, NULL },
-    { "srv_client.read_write_fail_pre_handshake",
-                                       test_srv_client_read_write_fail_pre_handshake,
-                                                                           false, NULL },
-    { "srv_client.handshake_times_out_without_responder",
-                                       test_srv_client_handshake_times_out_without_responder,
+    { "srv_client.no_per_proc_cap",
+                                       test_srv_client_no_per_proc_cap,
                                                                            false, NULL },
     { "srv_client.sys_srv_connect_unknown_service",
                                        test_srv_client_sys_srv_connect_unknown_service,
                                                                            false, NULL },
-    { "srv_client.sys_srv_connect_per_proc_cap",
-                                       test_srv_client_sys_srv_connect_per_proc_cap,
+    { "srv_client.sys_srv_connect_9p_rejected",
+                                       test_srv_client_sys_srv_connect_9p_rejected,
                                                                            false, NULL },
     { "srv_client.byte_mode_propagates_to_conn",
                                        test_srv_client_byte_mode_propagates_to_conn,

@@ -438,27 +438,27 @@ enum {
     //                       only, no Twalk).
     //   x3 = path_len       0..SRVCONN_PATH_MAX = 64
     //
-    // The client-open path for the `/srv` mechanism (CORVUS-DESIGN.md §6.2).
-    // Composes the existing srv_conn_open_for_proc (which mints the SrvConn,
+    // The BYTE-mode client-open path for the `/srv` mechanism
+    // (CORVUS-DESIGN.md §6.2). srv_conn_open_for_proc mints the SrvConn,
     // enqueues it on the service's accept backlog, and installs a non-
-    // transferable KObj_Srv handle in the caller's table) with the new
-    // srvconn_drive_client_handshake (Tversion + Tattach + optional Twalk
-    // + Tlopen on the SrvConn's kernel-owned p9_client). On success, the
-    // returned fd has the open `client_fid` ready for SYS_READ / SYS_WRITE
-    // (the kernel translates those to Tread / Twrite at that fid).
+    // transferable KObj_Srv handle in the caller's table; the returned fd
+    // is raw-byte (SYS_READ / SYS_WRITE push/pull on c2s / s2c).
     //
-    // Per-Proc cap: a Proc may hold at most one /srv client connection at
-    // v1.0 (CORVUS-DESIGN.md §6.2 — "One connection per Proc"). A second
-    // SYS_SRV_CONNECT from a Proc that still holds one returns -1.
+    // Post stalk-3b-β this surface is BYTE-mode only (pouch AF_UNIX
+    // sockets). A 9P-mode service is connected via open=connect (open a
+    // /srv/<name> path -> devsrv_open_connect drives Tversion + Tattach
+    // and returns a dev9p root Spoor) -- a SYS_SRV_CONNECT to a 9P-mode
+    // service returns -1. path_len must be 0 in byte mode (no 9P fid to
+    // walk). The per-Proc connection cap was removed (3a-audit F4).
     //
     // Returns -1 on:
     //   - bad name_len / path_len bounds
-    //   - the caller already holds a /srv client connection
-    //   - global SRV_MAX_CONNS cap reached
     //   - the named service is not LIVE (missing / RESERVING / TOMBSTONED)
+    //   - the named service is 9P-mode (use open=connect)
+    //   - a non-empty path_len in byte mode
+    //   - global SRV_MAX_CONNS cap reached
     //   - accept-backlog full
     //   - handle-table full
-    //   - 9P handshake failure (server crashed / hung / Rlerror)
     SYS_SRV_CONNECT  = 30,   // arg: name_va, name_len, path_va, path_len
 
     // P5-corvus-srv-impl-b3a: SYS_SPAWN_WITH_PERMS(name_va, name_len,
@@ -761,13 +761,13 @@ enum {
     // but the service entry's transport mode is SRV_MODE_BYTE instead
     // of SRV_MODE_9P. Effects propagate to every connection minted
     // against this listener:
-    //   - SYS_srv_connect SKIPS the 9P handshake (Tversion + Tattach +
-    //     Tlopen) and REFUSES a non-empty path. The kernel returns a
-    //     KObj_Srv handle ready for raw byte I/O the moment the
-    //     SrvConn is enqueued on the accept backlog.
+    //   - SYS_srv_connect returns a KObj_Srv handle ready for raw byte
+    //     I/O the moment the SrvConn is enqueued on the accept backlog
+    //     (no 9P handshake); a non-empty path is REFUSED.
     //   - sys_read/write_for_proc's KObj_SRV arm routes through
-    //     srvconn_client_send/recv (raw c2s/s2c) instead of
-    //     srvconn_client_read/write (9P Tread/Twrite).
+    //     srvconn_client_send/recv (raw c2s/s2c). Post stalk-3b-β the
+    //     KObj_SRV r/w arm is byte-mode only; 9P connections are
+    //     open=connect dev9p-root Spoors, not KObj_Srv handles.
     //
     // Why a separate syscall instead of an `int mode` arg on
     // SYS_POST_SERVICE: the existing svc dispatcher reads x0/x1 only.

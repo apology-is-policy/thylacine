@@ -53,7 +53,6 @@
 #include <thylacine/spinlock.h>
 #include <thylacine/types.h>
 
-struct p9_client;
 struct poll_waiter;
 
 // SRV_CONN_MAGIC — sentinel at offset 0 of struct SrvConn. Distinct
@@ -69,9 +68,9 @@ struct poll_waiter;
 #define SRVCONN_MSIZE   4096u
 
 // The 9P root fid for a SrvConn-backed session (P9 convention; matches
-// SYS_ATTACH_DEFAULT_ROOT_FID). The kernel 9P client Tattaches the root here;
-// SRVCONN_CLIENT_WALK_FID (srvconn.c) walks a child off it. Promoted to the
-// header (stalk-3b-β) so srvconn_attach_dev9p_root (9p_attach.c) can pass it.
+// SYS_ATTACH_DEFAULT_ROOT_FID). srvconn_attach_dev9p_root (9p_attach.c)
+// Tattaches the dev9p root here. Promoted to the header (stalk-3b-β) so
+// the shared attach helper can pass the same root fid.
 #define SRVCONN_ROOT_FID  1u
 
 // Per-direction ring capacity. Sized to comfortably hold one whole
@@ -142,9 +141,13 @@ struct srvconn_chan {
 };
 
 // A kernel-minted /srv connection. Allocated by srvconn_create; freed
-// when the last reference is dropped (srvconn_unref). The embedded
-// `client` is the dedicated synchronous kernel 9P client — kernel-
-// owned, never placed in any handle table (invariant C-23).
+// when the last reference is dropped (srvconn_unref). Holds the
+// bidirectional byte transport (c2s / s2c) + the kernel-stamped peer
+// and server identity. A 9P-mode connection is driven by a SEPARATE,
+// caller-owned kernel 9P client wrapping these rings via
+// p9_srvconn_transport (srvconn_attach_dev9p_root) — the SrvConn itself
+// is pure transport + identity (stalk-3b-β retired the old embedded
+// per-SrvConn p9_client).
 struct SrvConn {
     u64                 magic;             // SRV_CONN_MAGIC; 0 once freed
     int                 ref;               // refcount; create → 1 (atomic)
@@ -182,43 +185,23 @@ struct SrvConn {
     // mirroring kernel/pipe.c's discipline (specs/poll.tla MakeReady).
     struct poll_waiter_list poll_list;
 
-    // The dedicated synchronous kernel 9P client + its receive buffer.
-    // Heap-allocated (the p9_client is large); owned by this SrvConn,
-    // destroyed when the SrvConn is freed.
-    struct p9_client   *client;
-    u8                 *recv_buf;
-
-    // P5-corvus-srv-impl-b2: client-side 9P session state. Set by the
-    // open path's handshake drive (srvconn_drive_client_handshake), read
-    // by srvconn_client_read / srvconn_client_write. The single-thread-
-    // per-Proc invariant (the client Proc is the only thread touching
-    // these) makes non-atomic access safe at v1.0; p9_client's own lock
-    // serializes Tread/Twrite at the wire level.
-    //
-    //   client_fid  — the open fid the handshake left ready for I/O
-    //                 (typically a Twalk + Tlopen on /ctl from root_fid).
-    //                 0 = handshake not yet driven (the kernel never
-    //                 assigns fid 0; root is SRVCONN_ROOT_FID = 1 and
-    //                 the walked child is >= 2).
-    //   client_handshake_done — true once Tversion + Tattach + (optional)
-    //                 Twalk + Tlopen have completed. Gates client_read /
-    //                 client_write — pre-handshake reads fail-close.
-    //   client_offset — Tread / Twrite running offset for the open fid;
-    //                 mirrors Spoor.offset for the Spoor r/w path.
-    u32                 client_fid;
-    bool                client_handshake_done;
-    u64                 client_offset;
-
     // P6-pouch-sockets (sub-chunk 12): transport mode propagated from
-    // the service at mint (srv_conn_open_for_proc reads service->mode
-    // under the registry lock; srvconn_set_byte_mode is the one-way
-    // setter). FALSE (default) is SRV_MODE_9P — read/write route
-    // through srvconn_client_read/write, the kernel-owned p9_client
-    // driving Tread/Twrite frames. TRUE is SRV_MODE_BYTE — read/write
-    // route through srvconn_client_send/recv, raw chan_produce /
-    // chan_consume against c2s / s2c, no 9P framing. The setter is
-    // called BEFORE the SrvConn is enqueued (so an accepting server
-    // never observes a mode-mid-flight conn).
+    // the service at mint (read service->mode under the registry lock;
+    // srvconn_set_byte_mode is the one-way setter). FALSE (default) is
+    // SRV_MODE_9P; TRUE is SRV_MODE_BYTE.
+    //
+    // Post stalk-3b-β the two modes diverge at the connect path
+    // (devsrv_open_connect), not at per-op dispatch:
+    //   - SRV_MODE_9P  — devsrv_open_connect wraps the SrvConn in a
+    //     kernel 9P client (srvconn_attach_dev9p_root) and returns a
+    //     dev9p root Spoor; the client never sees a KOBJ_SRV handle.
+    //     SYS_SRV_CONNECT (byte-only) REJECTS a 9P-mode service.
+    //   - SRV_MODE_BYTE — devsrv_open_connect returns a CSRVCLIENT
+    //     byte-conn Spoor; SYS_SRV_CONNECT returns a KOBJ_SRV handle.
+    //     Both route raw bytes through srvconn_client_send/recv against
+    //     c2s / s2c (no 9P framing).
+    // The setter is called BEFORE the SrvConn is enqueued (so an
+    // accepting server never observes a mode-mid-flight conn).
     //
     // F5 close (P6-pouch-sockets audit): the setter uses
     // __atomic_store_n(.., __ATOMIC_RELEASE) and every reader (devsrv_
@@ -271,14 +254,14 @@ _Static_assert(__builtin_offsetof(struct SrvConn, magic) == 0,
 // srvconn_create — mint a connection. `peer_stripes` / `peer_pid` /
 // `peer_console` are the opening client Proc's kernel-stamped identity;
 // `server_stripes` is the service poster's (corvus's) stripes tag. All
-// four are captured by value. Allocates the SrvConn, its receive buffer,
-// and the embedded synchronous p9_client (configured over this
-// connection's transport). The connection is born LIVE with refcount 1 —
-// the caller owns that reference and drops it via srvconn_unref.
+// four are captured by value. Allocates the SrvConn + initializes its
+// byte transport (c2s / s2c) + poll list. The connection is born LIVE
+// with refcount 1 — the caller owns that reference and drops it via
+// srvconn_unref.
 //
-// Returns NULL on allocation failure (all-or-nothing — no partial
-// state remains). The p9_client is initialized but NOT handshaken;
-// driving Tversion/Tattach is the open path's job (a3b).
+// Returns NULL on allocation failure. A 9P-mode session over this
+// connection is the caller's responsibility to construct
+// (srvconn_attach_dev9p_root wraps the rings in a kernel 9P client).
 struct SrvConn *srvconn_create(u64 peer_stripes, int peer_pid,
                                bool peer_console, u64 server_stripes);
 
@@ -326,9 +309,9 @@ bool srvconn_is_kernel_attached(const struct SrvConn *cn);
 void srvconn_ref(struct SrvConn *cn);
 
 // srvconn_unref — drop a reference. The last unref tears the
-// connection down (idempotent), destroys the p9_client, and frees all
-// storage. After the last unref the pointer is INVALID. NULL is a safe
-// no-op. Extincts on refcount underflow.
+// connection down (idempotent) and frees all storage. After the last
+// unref the pointer is INVALID. NULL is a safe no-op. Extincts on
+// refcount underflow.
 void srvconn_unref(struct SrvConn *cn);
 
 // srvconn_teardown — transition the connection to TORN: latch EOF on
@@ -343,13 +326,8 @@ void srvconn_teardown(struct SrvConn *cn);
 bool srvconn_is_live(const struct SrvConn *cn);
 
 // =============================================================================
-// Kernel 9P client.
+// Client-side blocking-recv deadline.
 // =============================================================================
-
-// srvconn_client — the connection's dedicated synchronous kernel 9P
-// client. Kernel-owned; never installed in a handle table (C-23).
-// Returns NULL for a NULL / corrupted conn.
-struct p9_client *srvconn_client(struct SrvConn *cn);
 
 // srvconn_set_client_deadline — set the absolute deadline (timer_now_ns
 // timebase) for the connection's next blocking client recv, and clear
@@ -419,66 +397,6 @@ long srvconn_server_send(struct SrvConn *cn, const u8 *buf, long n);
 //    0  — the ring is empty but the connection is live (poll again).
 //   -1  — the connection is torn down (and the ring is drained): EOF.
 long srvconn_server_recv(struct SrvConn *cn, u8 *buf, long n);
-
-// =============================================================================
-// Client-side 9P (P5-corvus-srv-impl-b2).
-//
-// The connection's CLIENT side (the Proc that opened /srv/<name>) reaches
-// the 9P server (corvus) through the kernel-owned p9_client. SYS_READ /
-// SYS_WRITE on the KObj_Srv handle dispatch through here — translating
-// raw byte I/O into Tread / Twrite at the open `client_fid`.
-//
-// Lifetime:
-//   - srvconn_create leaves the SrvConn LIVE but the client session
-//     CLOSED (handshake_done == false, fid == 0). The handshake drive
-//     is the OPEN syscall's responsibility — it is not run at create
-//     so the test harness can mint a SrvConn without a peer.
-//   - srvconn_drive_client_handshake performs Tversion + Tattach +
-//     (optional) Twalk(path) + Tlopen on the embedded p9_client. On
-//     success, leaves the client_fid open + handshake_done = true.
-//   - srvconn_client_read / srvconn_client_write are gated on
-//     handshake_done — pre-handshake calls fail-close (-1).
-//   - srvconn_teardown / srvconn_unref tear the p9_client down without
-//     a pre-clunk; the destroying-side discipline is "EOF the byte
-//     rings → the 9P server (corvus) observes the EOF and tears down
-//     its end". No client-side Tclunk is required for correctness.
-// =============================================================================
-
-// srvconn_drive_client_handshake — drive the kernel-side 9P handshake on
-// the client side of `cn`. Sends Tversion + Tattach (uname = "thylacine",
-// n_uname = peer Proc's pid; aname = empty); on `path_len > 0`, also
-// drives Twalk(root_fid → fid 2, [path]) + Tlopen(fid 2, O_RDWR). On
-// success, leaves cn->client_fid set (root_fid if no path, fid 2 if
-// path), cn->client_handshake_done = true, returns 0. On failure (corvus
-// dead / hung / a 9P-level Rlerror / OOM), returns -1 with the SrvConn
-// left untouched (caller closes the handle to teardown).
-//
-// `peer_pid` is the n_uname carried in Tattach so corvus can correlate
-// connections to peers (it is supplementary; the authoritative peer-
-// identity comes from SYS_SRV_PEER, not from this Tattach n_uname).
-//
-// `path` / `path_len` is the path to Twalk + Tlopen at handshake time.
-// At v1.0 the typical value is "ctl" (corvus's /ctl admin file —
-// CORVUS-DESIGN.md §6.4). path_len == 0 leaves the open at root_fid.
-//
-// Deadline: each blocking recv on the s2c ring is bounded by
-// srvconn_set_client_deadline (caller's responsibility to set before
-// calling this) — a hung corvus times out rather than wedging.
-int srvconn_drive_client_handshake(struct SrvConn *cn, int peer_pid,
-                                    const u8 *path, size_t path_len);
-
-// srvconn_client_read — SYS_READ dispatch for a KObj_Srv connection
-// handle. Sends a Tread(client_fid, client_offset, n), copies the
-// response bytes into `buf`, advances client_offset by the byte count.
-// Returns the byte count (0 at EOF, > 0 on data) or -1 on
-// handshake-not-done / torn connection / 9P-level error.
-long srvconn_client_read(struct SrvConn *cn, u8 *buf, long n);
-
-// srvconn_client_write — SYS_WRITE dispatch for a KObj_Srv connection
-// handle. Sends a Twrite(client_fid, client_offset, buf[0..n]), advances
-// client_offset by the server-accepted byte count. Returns the accepted
-// count or -1 on handshake-not-done / torn connection / 9P-level error.
-long srvconn_client_write(struct SrvConn *cn, const u8 *buf, long n);
 
 // =============================================================================
 // poll — readiness probe on the server endpoint Spoor (P5-poll-b).

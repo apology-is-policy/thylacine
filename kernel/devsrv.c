@@ -578,28 +578,17 @@ void srv_registry_reset(void) {
 // Per-connection layer (P5-corvus-srv-impl-a3b).
 // =============================================================================
 
-// Per-Proc cap on LIVE `/srv` client connections (CORVUS-DESIGN.md §6.2 —
-// "One connection per Proc"). At v1.0 = 1; stalk-3b REMOVES this cap (a
-// session needs corvus AND its stratum-fs concurrently — STALK-DESIGN.md
-// §5.2). Retained in stalk-3a: the old SYS_SRV_CONNECT path is unchanged.
-#define SRV_CONN_PER_PROC_MAX  1u
-
 // srv_conn_open_in — the client-connect core against an explicit `reg`.
 // The public srv_conn_open_for_proc binds the boot registry (the retained
-// SYS_SRV_CONNECT path).
+// SYS_SRV_CONNECT byte-mode path). The per-Proc connection cap was removed
+// (stalk-3b-β / 3a-audit F4): a session needs corvus AND its stratum-fs
+// concurrently (STALK-DESIGN.md §5.2). The global SRV_MAX_CONNS soft cap +
+// the per-service accept backlog remain the resource bounds.
 static int srv_conn_open_in(struct SrvRegistry *reg, struct Proc *p,
                             const char *name, u8 name_len) {
     if (!reg)                                               return -1;
     if (!p)                                                return -1;
     if (!name || name_len == 0 || name_len > SRV_NAME_MAX)  return -1;
-
-    // Per-Proc one-connection cap (P5-corvus-srv-impl-b2). Fail FIRST,
-    // before any allocation, so a Proc that already holds a connection
-    // can't burn create/teardown cycles trying to mint a second. At v1.0
-    // single-thread-per-Proc makes the read + increment safe without
-    // atomicity (no concurrent mutator on the same Proc); multi-thread-
-    // per-Proc would need an atomic CAS.
-    if (p->srv_conn_count >= SRV_CONN_PER_PROC_MAX)         return -1;
 
     // Global live-connection cap. (created - freed) is the live SrvConn
     // count; the read is racy against concurrent create/free, which is
@@ -667,12 +656,6 @@ static int srv_conn_open_in(struct SrvRegistry *reg, struct Proc *p,
         return -1;
     }
 
-    // Per-Proc cap counter — count this live SrvConn handle. The matching
-    // decrement is in handle_close's KOBJ_SRV SRV_CONN_MAGIC arm; proc
-    // exit's bulk-close path (handle_release_obj only — no Proc) doesn't
-    // decrement, which is fine because the Proc itself is being torn down.
-    p->srv_conn_count++;
-
     // A second reference for the accept-backlog slot, then enqueue. The
     // push re-validates LIVE atomically with the slot write.
     srvconn_ref(cn);
@@ -682,8 +665,7 @@ static int srv_conn_open_in(struct SrvRegistry *reg, struct Proc *p,
     if (rc != 0) {
         // Service died between the pre-check and the push, or the backlog
         // is full. Drop the backlog ref, then close the handle (whose
-        // release drops the create-ref → teardown + free, AND decrements
-        // p->srv_conn_count via the SRV_CONN_MAGIC arm of handle_close).
+        // release drops the create-ref → teardown + free).
         srvconn_unref(cn);
         handle_close(p, h);
         return -1;

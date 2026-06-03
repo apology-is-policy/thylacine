@@ -716,9 +716,8 @@ static bool sys_validate_user_buf(u64 buf_va, u64 len) {
 // or -1 on bad handle / wrong kind / missing rights / dev error.
 //
 // Dispatches by handle kind: KOBJ_SPOOR routes through the Dev `.write`
-// vtable (Spoor.offset); KOBJ_SRV (a SrvConn client handle) routes
-// through srvconn_client_write — a Twrite on the SrvConn's kernel-owned
-// p9_client (using cn->client_offset). P5-corvus-srv-impl-b2.
+// vtable (Spoor.offset); KOBJ_SRV (a byte-mode SrvConn client handle)
+// routes through srvconn_client_send — raw bytes onto the c2s ring.
 s64 sys_write_for_proc(struct Proc *p, hidx_t h, const u8 *kbuf, u64 len) {
     if (!p || (!kbuf && len > 0))                    return -1;
     struct Handle *slot = sys_lookup_rw_handle(p, h, RIGHT_WRITE);
@@ -735,14 +734,12 @@ s64 sys_write_for_proc(struct Proc *p, hidx_t h, const u8 *kbuf, u64 len) {
         return (s64)n;
     }
     case KOBJ_SRV: {
-        // sys_lookup_rw_handle validated SRV_CONN_MAGIC. F1 close
-        // (P5-corvus-srv-impl audit): refresh the deadline before
-        // each blocking op — same discipline as the read path.
-        // P6-pouch-sockets (sub-chunk 12): byte-mode SrvConns route
-        // through srvconn_client_send (raw chan_produce on c2s) —
-        // no 9P Twrite framing. 9P-mode SrvConns keep the original
-        // srvconn_client_write path. F5 close: ATOMIC_ACQUIRE pairs
-        // srvconn_set_byte_mode's ATOMIC_RELEASE.
+        // sys_lookup_rw_handle validated SRV_CONN_MAGIC. A KOBJ_SRV
+        // handle is BYTE-mode only post stalk-3b-β: the 9P connect path
+        // is open=connect (devsrv_open_connect returns a dev9p root
+        // Spoor, never a KOBJ_SRV handle), and SYS_SRV_CONNECT rejects a
+        // 9P-mode service. So this arm always routes raw bytes through
+        // srvconn_client_send (chan_produce on c2s) -- no 9P framing.
         struct SrvConn *cn = (struct SrvConn *)slot->obj;
         // R1 F3 close: refuse raw byte I/O on a kernel-attached SrvConn.
         // After SYS_ATTACH_9P_SRV wraps the conn, the c2s/s2c rings are
@@ -751,11 +748,11 @@ s64 sys_write_for_proc(struct Proc *p, hidx_t h, const u8 *kbuf, u64 len) {
         // into the c2s ring out-of-band w.r.t. the 9P session, corrupting
         // the wire. Reject upfront.
         if (srvconn_is_kernel_attached(cn))          return -1;
+        // Fail-closed: a KOBJ_SRV handle on a non-byte SrvConn is a
+        // contract violation (no such handle is mintable post-D).
+        if (!__atomic_load_n(&cn->byte_mode, __ATOMIC_ACQUIRE)) return -1;
         srvconn_set_client_deadline(cn, timer_now_ns() + SRVCONN_OP_DEADLINE_NS);
-        bool bm = __atomic_load_n(&cn->byte_mode, __ATOMIC_ACQUIRE);
-        long n = bm
-            ? srvconn_client_send(cn, kbuf, (long)len)
-            : srvconn_client_write(cn, kbuf, (long)len);
+        long n = srvconn_client_send(cn, kbuf, (long)len);
         if (n < 0)                                   return -1;
         return (s64)n;
     }
@@ -768,8 +765,8 @@ s64 sys_write_for_proc(struct Proc *p, hidx_t h, const u8 *kbuf, u64 len) {
 // on EOF) or -1 on bad handle / wrong kind / missing rights / dev error.
 //
 // Dispatches by handle kind: KOBJ_SPOOR routes through the Dev `.read`
-// vtable (Spoor.offset); KOBJ_SRV routes through srvconn_client_read
-// (a Tread on the SrvConn's kernel-owned p9_client). P5-corvus-srv-impl-b2.
+// vtable (Spoor.offset); KOBJ_SRV (a byte-mode SrvConn client handle)
+// routes through srvconn_client_recv — raw bytes off the s2c ring.
 s64 sys_read_for_proc(struct Proc *p, hidx_t h, u8 *kbuf, u64 len) {
     if (!p || (!kbuf && len > 0))                    return -1;
     struct Handle *slot = sys_lookup_rw_handle(p, h, RIGHT_READ);
@@ -786,26 +783,19 @@ s64 sys_read_for_proc(struct Proc *p, hidx_t h, u8 *kbuf, u64 len) {
         return (s64)n;
     }
     case KOBJ_SRV: {
-        // F1 close (P5-corvus-srv-impl audit): refresh the deadline
-        // before each blocking op — same discipline as the handshake.
-        // Without this `srvconn_client_recv` would tsleep with
-        // deadline=0 and a hung corvus would wedge the caller.
-        // P6-pouch-sockets (sub-chunk 12): byte-mode SrvConns route
-        // through srvconn_client_recv (raw chan_consume on s2c) —
-        // the same deadline machinery still bounds the blocking wait
-        // (see srvconn_client_recv's tsleep against client_deadline_ns).
-        // F5 close: ATOMIC_ACQUIRE pairs srvconn_set_byte_mode's RELEASE.
+        // A KOBJ_SRV handle is BYTE-mode only post stalk-3b-β (see the
+        // write arm). Route through srvconn_client_recv (chan_consume on
+        // s2c); the deadline machinery still bounds the blocking wait
+        // (srvconn_client_recv's tsleep against client_deadline_ns).
         struct SrvConn *cn = (struct SrvConn *)slot->obj;
         // R1 F3 close: refuse raw byte I/O on a kernel-attached SrvConn.
         // After SYS_ATTACH_9P_SRV the c2s/s2c rings carry the kernel
         // client's 9P stream; a userspace recv would drain Rwalk/Rread
         // bytes meant for the kernel client and corrupt the session.
         if (srvconn_is_kernel_attached(cn))          return -1;
+        if (!__atomic_load_n(&cn->byte_mode, __ATOMIC_ACQUIRE)) return -1;
         srvconn_set_client_deadline(cn, timer_now_ns() + SRVCONN_OP_DEADLINE_NS);
-        bool bm = __atomic_load_n(&cn->byte_mode, __ATOMIC_ACQUIRE);
-        long n = bm
-            ? srvconn_client_recv(cn, kbuf, (long)len)
-            : srvconn_client_read(cn, kbuf, (long)len);
+        long n = srvconn_client_recv(cn, kbuf, (long)len);
         if (n < 0)                                   return -1;
         return (s64)n;
     }
@@ -4536,28 +4526,26 @@ static s64 sys_srv_peer_handler(u64 conn_h_raw, u64 out_va) {
 }
 
 // =============================================================================
-// SYS_SRV_CONNECT — client-open the /srv mechanism (P5-corvus-srv-impl-b2).
+// SYS_SRV_CONNECT — client-open a BYTE-mode /srv service (P6-pouch-sockets).
 //
-// Per CORVUS-DESIGN.md §6.2. Composes srv_conn_open_for_proc (which
-// already mints + enqueues the SrvConn and installs a non-transferable
-// KObj_Srv handle in the caller's table — landed at -a3b) with the new
-// srvconn_drive_client_handshake (Tversion + Tattach + optional Twalk +
-// Tlopen on the SrvConn's kernel-owned p9_client). On success, the
-// returned KObj_Srv handle has an OPEN client_fid; SYS_READ / SYS_WRITE
-// on the handle translate to Tread / Twrite at that fid.
+// Per CORVUS-DESIGN.md §6.2. Composes srv_conn_open_for_proc (mints +
+// enqueues the SrvConn and installs a non-transferable KObj_Srv handle in
+// the caller's table) with a byte-mode readiness check. The returned
+// KObj_Srv handle is raw-byte: SYS_READ / SYS_WRITE push/pull bytes on
+// the c2s / s2c rings (srvconn_client_send / srvconn_client_recv).
 //
-// Per-Proc cap: srv_conn_open_for_proc rejects when p->srv_conn_count
-// is already at SRV_CONN_PER_PROC_MAX (1 at v1.0). A subsequent
-// SYS_SRV_CONNECT from the same Proc must wait until the existing
-// handle is SYS_CLOSE'd (which decrements the count via handle_close's
-// KOBJ_SRV SRV_CONN_MAGIC arm).
+// Post stalk-3b-β this is the BYTE-mode-only client surface (pouch
+// AF_UNIX sockets). A 9P-mode service is connected via open=connect
+// (stalk -> devsrv_open_connect -> a dev9p root Spoor), NOT here; a
+// SYS_SRV_CONNECT to a 9P-mode service is rejected. The per-Proc
+// connection cap was removed (3a-audit F4): a session needs corvus AND
+// its stratum-fs concurrently.
 //
-// On any handshake failure (server crashed / hung / Rlerror / OOM), the
-// handler closes the just-installed handle — handle_close's release
-// arm tears the SrvConn down + drops both the create reference and the
-// backlog-side reference (via srv_proc_exit_notify on the SERVER side
-// when the backlog is drained, or directly when the accept thread
-// pops it and finds it torn).
+// On any failure the handler closes the just-installed handle —
+// handle_close's release arm tears the SrvConn down + drops both the
+// create reference and the backlog-side reference (via
+// srv_proc_exit_notify on the SERVER side when the backlog is drained,
+// or directly when the accept thread pops it and finds it torn).
 // =============================================================================
 
 int sys_srv_connect_for_proc(struct Proc *p,
@@ -4568,12 +4556,10 @@ int sys_srv_connect_for_proc(struct Proc *p,
     if (path_len > SRVCONN_PATH_MAX)                     return -1;
     if (path_len > 0 && !path)                           return -1;
 
-    // Phase 1: mint + install the KObj_Srv handle + bump p->srv_conn_count.
-    // The cap check + per-Proc bump happen inside srv_conn_open_for_proc;
-    // a failure here leaves no state behind. The mint also propagates
-    // the service's transport mode onto the SrvConn (cn->byte_mode is
-    // set BEFORE Phase 1 enqueues the SrvConn on the accept backlog;
-    // we read it here without a lock).
+    // Phase 1: mint + install the KObj_Srv handle. A failure here leaves
+    // no state behind. The mint also propagates the service's transport
+    // mode onto the SrvConn (cn->byte_mode is set BEFORE Phase 1 enqueues
+    // the SrvConn on the accept backlog; we read it here without a lock).
     int h = srv_conn_open_for_proc(p, name, (u8)name_len);
     if (h < 0) return -1;
 
@@ -4593,12 +4579,12 @@ int sys_srv_connect_for_proc(struct Proc *p,
     }
     struct SrvConn *cn = (struct SrvConn *)slot->obj;
 
-    // P6-pouch-sockets (sub-chunk 12): byte-mode services have no
-    // handshake — the SrvConn is ready for raw byte I/O the moment it
-    // is enqueued. A non-empty path makes no sense in byte mode (there
-    // is no 9P fid to walk against); reject up-front.
-    // F5 close (P6-pouch-sockets audit): atomic acquire pairs the
-    // srvconn_set_byte_mode release in srv_conn_open_for_proc.
+    // Post stalk-3b-β SYS_SRV_CONNECT is BYTE-mode only. A byte-mode
+    // service is ready for raw byte I/O the moment it is enqueued (no
+    // handshake). A non-empty path makes no sense in byte mode (there is
+    // no 9P fid to walk against); reject up-front. F5 close (P6-pouch-
+    // sockets audit): atomic acquire pairs srvconn_set_byte_mode's
+    // release in srv_conn_open_for_proc.
     if (__atomic_load_n(&cn->byte_mode, __ATOMIC_ACQUIRE)) {
         if (path_len > 0) {
             handle_close(p, (hidx_t)h);
@@ -4607,24 +4593,14 @@ int sys_srv_connect_for_proc(struct Proc *p,
         return h;
     }
 
-    // F1 close (P5-corvus-srv-impl audit): bound the handshake on the
-    // wall clock. Without this every Tversion/Tattach/Twalk/Tlopen
-    // recv falls through to a deadline-0 tsleep — "no deadline" —
-    // wedging this Proc indefinitely on a corvus that posted but is
-    // crashed / spinning / not draining. With the deadline a hung
-    // corvus returns -1 here, the handle teardown fires, and the
-    // caller can retry or surface the error to userspace.
-    srvconn_set_client_deadline(cn, timer_now_ns() + SRVCONN_HANDSHAKE_DEADLINE_NS);
-    if (srvconn_drive_client_handshake(cn, p->pid, path, path_len) != 0) {
-        // Handshake failed — corvus crashed / hung / refused / OOM /
-        // deadline-elapsed. Tear the just-installed handle down.
-        // handle_close's KOBJ_SRV path teardowns + unrefs the SrvConn
-        // AND decrements srv_conn_count.
-        handle_close(p, (hidx_t)h);
-        return -1;
-    }
-
-    return h;
+    // A 9P-mode service is NOT connectable via SYS_SRV_CONNECT post
+    // stalk-3b-β -- the 9P connect path is open=connect
+    // (devsrv_open_connect drives Tversion/Tattach via
+    // srvconn_attach_dev9p_root and returns a dev9p root Spoor). The
+    // embedded per-SrvConn 9P client that once drove the handshake here
+    // is retired. Fail-closed.
+    handle_close(p, (hidx_t)h);
+    return -1;
 }
 
 static s64 sys_srv_connect_handler(u64 name_va, u64 name_len_raw,

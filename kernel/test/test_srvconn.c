@@ -100,8 +100,6 @@ void test_srvconn_create_destroy(void) {
         "peer pid stamped by value at create");
     TEST_ASSERT(cn->peer_console == false, "peer console bit stamped");
     TEST_EXPECT_EQ(cn->ref, 1, "a fresh connection has refcount 1");
-    TEST_ASSERT(srvconn_client(cn) != NULL,
-        "the dedicated kernel 9P client is present");
 
     // The peer Proc is freed — the by-value identity must survive it
     // (CORVUS-DESIGN §6.3: the SrvConn holds no raw Proc*).
