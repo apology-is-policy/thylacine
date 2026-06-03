@@ -931,7 +931,7 @@ kill = BOTH the namespace `/proc/<pid>/ctl` surface AND a narrow elevation-only 
       row, + the residual retired-symbol comments (handle.c, syscall.c, srvconn.h, devsrv.c/.h, joey.c,
       ninep.rs). Closed list `audit_stalk3c_closed_list.md`. Matrix GREEN default(smp4)+UBSan+smp8 704/704
       + boot OK + 0 EXTINCTION. **stalk-3 ARC COMPLETE.**
-    - **A-5b body, step 1 -- #829 corvus session-ownership lift COMPLETE** *(pending)* (cites design
+    - **A-5b body, step 1 -- #829 corvus session-ownership lift COMPLETE** (`17997c9`; cites design
       `f690c1b` + the f35d340 first half). Closes the two design-prosecution findings the f35d340 lift
       left open (`audit_a5b_design_closed_list.md`): **F4 [P1]** -- the `SESSION_CLOSE` *verb*
       (`handle_session_close`) was token-gated but NOT owner-gated, so a non-owning bearer-token holder
