@@ -237,6 +237,10 @@ pub const T_OPATH: u32                = 0x80;
 // SYS_WALK_CREATE perm: low 9 bits = POSIX mode; DMDIR selects a directory.
 // Must mirror SYS_WALK_CREATE_PERM_VALID / SYS_WALK_CREATE_DMDIR in the kernel.
 pub const T_WALK_CREATE_DMDIR: u32    = 0x8000_0000;
+// DMSRVBYTE (stalk-3b/3c; STALK-DESIGN.md §5.3 / D6): on a SYS_WALK_CREATE
+// against a /srv directory, this perm bit posts the new service in BYTE mode;
+// its absence posts 9P mode. Mirrors SYS_WALK_CREATE_DMSRVBYTE in the kernel.
+pub const T_WALK_CREATE_DMSRVBYTE: u32 = 0x0200_0000;
 
 // SYS_WALK_OPEN sentinel for "walk from the calling Proc's territory
 // root spoor" (P5-stratumd-stub-bringup-e2). Passed as spoor_fd when

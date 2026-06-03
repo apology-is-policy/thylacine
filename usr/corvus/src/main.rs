@@ -104,7 +104,7 @@ use libthyla_rs::ninep as p9;
 
 use libthyla_rs::{
     t_cap_grant, t_cap_grant_clearance, t_chroot, t_close, t_explicit_bzero, t_fsync,
-    t_getrandom, t_mlockall, t_poll, t_post_service, t_putstr, t_read, t_rename,
+    t_getrandom, t_mlockall, t_open, t_poll, t_putstr, t_read, t_rename,
     t_set_dumpable, t_set_traceable, t_srv_accept, t_srv_peer, t_unlink, t_walk_create,
     t_walk_open, t_write, TPollFd, TSrvPeerInfo, T_CAP_CHOWN, T_CAP_DAC_OVERRIDE,
     T_CAP_HOSTOWNER, T_CAP_KILL, T_OPATH, T_OREAD, T_OWRITE, T_POLLHUP, T_POLLIN,
@@ -3512,13 +3512,31 @@ unsafe fn corvus_cap_smoke() -> bool {
 pub extern "C" fn rs_main() -> i64 {
     t_putstr("corvus: starting (P5-corvus-srv-impl-b3b)\n");
 
-    // A-1.7 (F2): confine to the handed storage-root capability (fd 0) as the
-    // FIRST action -- before anything else -- so there is no ambient-FS window.
-    // corvus inherits joey's broad Stratum root via territory_clone; this chroot
-    // displaces it (territory_chroot spoor_clunks the old root, spoor_refs the
-    // cap), making corvus's filesystem world the capability (I-23). joey ALWAYS
-    // hands the capability now, so a missing/invalid fd 0 is a fatal boot error,
-    // not a fallback. chroot is a raw syscall -- no heap needed yet.
+    // stalk-3c (create=post, STALK-DESIGN.md §5.3 / D2): post /srv/corvus by
+    // CREATE on the namespace-resident /srv. This is the ONE intentional use of
+    // the inherited namespace and it MUST precede the storage-cap chroot below:
+    // the chroot displaces the namespace root, after which /srv is unreachable.
+    // The KObj_Srv listener handle is a capability -- it survives the chroot;
+    // corvus accepts on it in srv_server_loop. perm=0 posts 9P-mode (corvus
+    // serves /ctl as 9P; no DMSRVBYTE). Requires PROC_FLAG_MAY_POST_SERVICE
+    // (joey stamps it via SYS_SPAWN_WITH_PERMS). Raw syscalls -- no heap yet.
+    let listener = unsafe {
+        let srv = t_open(T_WALK_OPEN_FROM_ROOT, b"/srv".as_ptr(), 4, T_OPATH);
+        if srv < 0 { step_fail(6, srv); }
+        let l = t_walk_create(srv, b"corvus".as_ptr(), 6, T_OREAD, 0);
+        let _ = t_close(srv);
+        l
+    };
+    if listener < 0 { step_fail(6, listener); }
+
+    // A-1.7 (F2): confine to the handed storage-root capability (fd 0) --
+    // immediately after the post above (the sole pre-chroot namespace use) so
+    // there is no further ambient-FS window. corvus inherits joey's broad
+    // Stratum root via territory_clone; this chroot displaces it
+    // (territory_chroot spoor_clunks the old root, spoor_refs the cap), making
+    // corvus's filesystem world the capability (I-23). joey ALWAYS hands the
+    // capability now, so a missing/invalid fd 0 is a fatal boot error, not a
+    // fallback. chroot is a raw syscall -- no heap needed yet.
     unsafe {
         if t_chroot(0) != 0 {
             t_putstr("corvus: FATAL no storage capability at fd 0\n");
@@ -3545,12 +3563,6 @@ pub extern "C" fn rs_main() -> i64 {
     if rc != PROBE_LEN as i64 { step_fail(4, rc); }
     let rc = unsafe { t_explicit_bzero(probe.as_mut_ptr(), PROBE_LEN) };
     if rc != 0 { step_fail(5, rc); }
-
-    // Post /srv/corvus. Requires PROC_FLAG_MAY_POST_SERVICE (joey grants
-    // it via SYS_SPAWN_WITH_PERMS at spawn time per P5-corvus-srv-impl-
-    // b3a).
-    let listener = unsafe { t_post_service(b"corvus".as_ptr(), 6) };
-    if listener < 0 { step_fail(6, listener); }
 
     t_putstr("corvus: ready (hardening applied; serving /srv/corvus)\n");
 
