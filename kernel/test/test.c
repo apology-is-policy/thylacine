@@ -324,6 +324,7 @@ void test_stalk_xsearch_deny(void);
 void test_stalk_missing_component(void);
 void test_stalk_opath_no_open(void);
 void test_stalk_open_root(void);
+void test_stalk_open_replace(void);
 void test_stalk_depth_cap(void);
 void test_stalk_lifetime_no_leak(void);
 void test_stalk_cross_mount(void);
@@ -1730,6 +1731,7 @@ struct test_case g_tests[] = {
     { "stalk.missing_component",       test_stalk_missing_component,       false, NULL },
     { "stalk.opath_no_open",           test_stalk_opath_no_open,           false, NULL },
     { "stalk.open_root",               test_stalk_open_root,               false, NULL },
+    { "stalk.open_replace",            test_stalk_open_replace,            false, NULL },
     { "stalk.depth_cap",               test_stalk_depth_cap,               false, NULL },
     { "stalk.lifetime_no_leak",        test_stalk_lifetime_no_leak,        false, NULL },
     { "stalk.cross_mount",             test_stalk_cross_mount,             false, NULL },

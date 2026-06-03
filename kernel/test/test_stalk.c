@@ -51,6 +51,7 @@ void test_stalk_xsearch_deny(void);
 void test_stalk_missing_component(void);
 void test_stalk_opath_no_open(void);
 void test_stalk_open_root(void);
+void test_stalk_open_replace(void);
 void test_stalk_depth_cap(void);
 void test_stalk_lifetime_no_leak(void);
 // stalk-2 cross-mount (Plan 9 domount).
@@ -181,6 +182,37 @@ static struct Dev stalkfix = {
 // Mint the fixture root Spoor (qid.path 0, QTDIR). Caller owns the ref.
 static struct Spoor *fix_root(void) {
     return dev_simple_attach(&stalkfix, QTDIR);
+}
+
+// fix_open_replace -- an open that returns a DISTINCT owned Spoor, mirroring
+// devsrv open=connect (opening a /srv/<name> node yields a different connection-
+// endpoint Spoor: a dev9p root for 9p-mode, a byte-conn Spoor for byte-mode).
+// Mints a fresh clone stamped with a marker; leaves c's ref untouched (stalk
+// clunks the spent quarry). Drives the stalk-3b-β STALK_OPEN open-returns-a-new-
+// Spoor branch (stalk.c). dev9p / devramfs / fix_open return c in place instead.
+static struct Spoor *fix_open_replace(struct Spoor *c, int omode) {
+    if (!c) return NULL;
+    struct Spoor *rep = spoor_clone(c);
+    if (!rep) return NULL;
+    rep->flag    |= COPEN;
+    rep->mode     = omode;
+    rep->qid.vers = 0xBEEFu;   // marker proving the returned Spoor != the quarry
+    return rep;
+}
+
+static struct Dev stalkfix_replace = {
+    .dc            = (int)'Y',
+    .name          = "stalkfix_replace",
+    .perm_enforced = true,
+    .attach        = NULL,
+    .walk          = fix_walk,
+    .stat_native   = fix_stat_native,
+    .open          = fix_open_replace,
+    .close         = fix_close,
+};
+
+static struct Spoor *fix_root_replace(void) {
+    return dev_simple_attach(&stalkfix_replace, QTDIR);
 }
 
 // A synthetic SYSTEM Proc with no caps -- the owner of every fixture node, so
@@ -323,6 +355,29 @@ void test_stalk_open_root(void) {
     TEST_ASSERT((q->flag & COPEN) != 0, "root opened");
     TEST_ASSERT(q != root, "quarry is a distinct Spoor, not the borrowed base");
     spoor_clunk(q);
+    spoor_unref(root);
+}
+
+// stalk-3b-β: Dev.open may RETURN A DIFFERENT Spoor (devsrv open=connect). The
+// resolver must adopt the replacement, clunk the spent quarry, and not leak.
+void test_stalk_open_replace(void) {
+    struct Proc p; mkproc_system(&p);
+    struct Spoor *root = fix_root_replace();
+    TEST_ASSERT(root != NULL, "fix_root_replace");
+
+    u64 live_before = spoor_total_allocated() - spoor_total_freed();
+    struct Spoor *q = stalk(&p, root, "a/b", 3, STALK_OPEN, 0);
+    TEST_ASSERT(q != NULL, "resolve+open a/b");
+    TEST_EXPECT_EQ((u64)q->qid.vers, (u64)0xBEEFu,
+                   "open returned the marked replacement Spoor (opened != quarry)");
+    TEST_EXPECT_EQ((u64)q->qid.path, (u64)2,
+                   "replacement carries the walked node's qid.path (b == 2)");
+    TEST_ASSERT((q->flag & COPEN) != 0, "replacement is opened");
+    spoor_clunk(q);
+    u64 live_after = spoor_total_allocated() - spoor_total_freed();
+    TEST_EXPECT_EQ(live_after, live_before,
+                   "no leak: the spent quarry was clunked, the replacement adopted");
+
     spoor_unref(root);
 }
 

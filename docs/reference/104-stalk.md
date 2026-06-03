@@ -123,6 +123,17 @@ must be re-walked to be opened directly).
 unopened (exempt from R/W, matching the single-hop walk-open's O_PATH carve-out).
 Finally `stalk_unwind` clunks every trail ancestor, and the quarry is returned.
 
+`Dev.open` returns EITHER the same Spoor opened in place (dev9p / devramfs: a
+read/write cursor over the walked node, ref unchanged) OR a DIFFERENT owned Spoor
+that REPLACES the quarry (stalk-3b-β: devsrv open=connect consumes the resolved
+`/srv/<name>` service node and returns the connection endpoint -- a dev9p root
+Spoor for a 9p-mode service, a byte-conn Spoor for a byte-mode one;
+STALK-DESIGN.md §5.2). The resolver adopts the returned Spoor: if it differs from
+the quarry, the spent quarry is `spoor_clunk`'d (open did not consume its ref) and
+the replacement becomes the returned quarry. `stalk.open_replace` (a fixture Dev
+whose open returns a marked clone) covers the replacement branch + its leak
+balance.
+
 ### Lifetime discipline (the audit-critical part)
 
 A `spoor_clone(parent)` copies the parent's `aux` **shallowly** -- for dev9p that

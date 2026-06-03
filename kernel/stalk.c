@@ -269,9 +269,20 @@ struct Spoor *stalk(struct Proc *p, struct Spoor *start,
             if (spoor_stat_native(quarry, &st) != 0)                  goto fail;
             if (perm_check(p, &st, perm_want_for_omode(omode)) != 0)  goto fail;
         }
-        if (!quarry->dev || !quarry->dev->open ||
-            !quarry->dev->open(quarry, (int)omode)) {
-            goto fail;
+        if (!quarry->dev || !quarry->dev->open)                       goto fail;
+        // Dev.open returns EITHER the same Spoor opened in place (dev9p /
+        // devramfs: a read/write cursor over the walked node, ref unchanged) OR
+        // a DIFFERENT owned Spoor that REPLACES the quarry (devsrv open=connect:
+        // a /srv/<name> service node is consumed and the connection endpoint --
+        // a dev9p root Spoor for a 9p-mode service, a byte-conn Spoor for a
+        // byte-mode one -- is returned; STALK-DESIGN.md §5.2). The returned
+        // Spoor carries one owned ref; if it differs, the old quarry is spent
+        // (open did not consume its ref) -> clunk it and adopt the replacement.
+        struct Spoor *opened = quarry->dev->open(quarry, (int)omode);
+        if (!opened) goto fail;
+        if (opened != quarry) {
+            spoor_clunk(quarry);
+            quarry = opened;
         }
     }
 
