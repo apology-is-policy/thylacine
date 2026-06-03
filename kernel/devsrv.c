@@ -1082,6 +1082,14 @@ static long devsrv_read(struct Spoor *c, void *buf, long n, s64 off) {
     struct SrvConn *cn = devsrv_conn_of(c);
     if (!cn) return -1;
     if (c->flag & CSRVCLIENT) {
+        // stalk-3b-E F1: refuse direct I/O on a kernel-attached conn endpoint.
+        // After SYS_ATTACH_9P_SRV wraps this byte-conn Spoor, the c2s/s2c rings
+        // are load-bearing for the kernel 9P client's Twalk/Tread/Twrite stream;
+        // a userspace read here would drain Rread/Rwalk bytes meant for that
+        // client and corrupt the session. This is the same hazard the KOBJ_SRV
+        // r/w arms close (syscall.c R1 F3); the endpoint moved KObj_Srv ->
+        // KOBJ_SPOOR (CSRVCLIENT) in stalk-3b-β-C1, so the I/O guard must too.
+        if (srvconn_is_kernel_attached(cn)) return -1;
         // CLIENT endpoint (a byte-mode connect's Spoor, stalk-3b-β): read the
         // server's replies off s2c. POSIX blocking-read semantics (deadline 0 =
         // block until data or EOF). First exercised by the pouch AF_UNIX client
@@ -1115,6 +1123,10 @@ static long devsrv_write(struct Spoor *c, const void *buf, long n, s64 off) {
     struct SrvConn *cn = devsrv_conn_of(c);
     if (!cn) return -1;
     if (c->flag & CSRVCLIENT) {
+        // stalk-3b-E F1: refuse direct I/O on a kernel-attached conn endpoint
+        // (see devsrv_read) -- a userspace write would interleave bytes into the
+        // c2s ring out-of-band with the kernel 9P client's request stream.
+        if (srvconn_is_kernel_attached(cn)) return -1;
         // CLIENT endpoint: write toward the server via c2s (non-blocking). The
         // mirror of the server arm; stalk-3b-β (see devsrv_read).
         return srvconn_client_send(cn, (const u8 *)buf, n);

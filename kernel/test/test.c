@@ -375,6 +375,7 @@ void test_srvconn_teardown_wakes_blocked(void);
 void test_devsrv_walk_service(void);
 void test_devsrv_conn_open(void);
 void test_devsrv_open_connect_byte(void);
+void test_devsrv_kernel_attached_io_refused(void);
 void test_devsrv_accept_immediate(void);
 void test_devsrv_accept_blocks_then_wakes(void);
 void test_devsrv_conn_io(void);
@@ -1157,6 +1158,8 @@ struct test_case g_tests[] = {
     { "devsrv.walk_service",           test_devsrv_walk_service,           false, NULL },
     { "devsrv.conn_open",              test_devsrv_conn_open,              false, NULL },
     { "devsrv.open_connect_byte",      test_devsrv_open_connect_byte,      false, NULL },
+    { "devsrv.kernel_attached_io_refused",
+                                       test_devsrv_kernel_attached_io_refused, false, NULL },
     { "devsrv.accept_immediate",       test_devsrv_accept_immediate,       false, NULL },
     { "devsrv.accept_blocks_then_wakes",
                                        test_devsrv_accept_blocks_then_wakes,

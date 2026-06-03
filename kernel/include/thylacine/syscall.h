@@ -1001,26 +1001,35 @@ enum {
     // P6-pouch-stratumd-boot 16c: SYS_ATTACH_9P_SRV(srv_fd, aname_va,
     //                                                 aname_len, n_uname)
     //                                                 -> spoor_fd / -1
-    //   x0 = srv_fd      (hidx_t; must be a byte-mode KOBJ_SRV handle the
-    //                    caller holds, with RIGHT_READ + RIGHT_WRITE -- the
-    //                    kernel 9P client writes Twalk/Tread/Twrite and
-    //                    reads Rwalk/Rread/Rwrite over the rings)
+    //   x0 = srv_fd      (hidx_t; must be a byte-mode CSRVCLIENT conn Spoor
+    //                    (KOBJ_SPOOR) the caller holds, with RIGHT_READ +
+    //                    RIGHT_WRITE -- the kernel 9P client writes
+    //                    Twalk/Tread/Twrite and reads Rwalk/Rread/Rwrite
+    //                    over the conn's c2s/s2c rings)
     //   x1 = aname_va    (user-VA pointer to the attach name string;
     //                    NUL not required -- aname_len authoritative)
     //   x2 = aname_len   (bytes; <= SYS_ATTACH_ANAME_MAX = 256;
     //                    zero-length aname is permitted)
     //   x3 = n_uname     (u32; 0 for no-auth attach at v1.0)
     //
-    // Parallel to SYS_ATTACH_9P but the transport is a byte-mode
-    // SrvConn (from pouch sockets' SYS_POST_SERVICE_BYTE + the client's
-    // SYS_SRV_CONNECT) rather than a Spoor pair. The composition:
-    //   1. handle_get(srv_fd) -> KObj_Srv slot
-    //   2. atomic-ACQUIRE on cn->byte_mode; reject if 9P-mode (the
-    //      embedded p9_client owns the rings -- a second p9_client
-    //      would race / produce wire corruption)
-    //   3. kmalloc + p9_srvconn_transport_init (takes 1 srvconn_ref)
+    // Parallel to SYS_ATTACH_9P but the transport is a byte-mode SrvConn
+    // reached by open=connect (SYS_OPEN on a byte-mode /srv service ->
+    // devsrv_open_connect -> a CSRVCLIENT conn Spoor) rather than a Spoor
+    // pair. Pre-stalk-3b-β the endpoint was a KObj_Srv handle from
+    // SYS_SRV_CONNECT; C1 retargeted it to the KOBJ_SPOOR conn Spoor. The
+    // composition (srvconn_attach_dev9p_root):
+    //   1. handle_get(srv_fd) -> KOBJ_SPOOR slot; CSRVCLIENT flag check;
+    //      devsrv_conn_of -> the SrvConn
+    //   2. atomic-ACQUIRE on cn->byte_mode; reject if 9P-mode (a 9P-mode
+    //      service is connected via open=connect directly, not attached)
+    //   3. kmalloc + p9_srvconn_transport_init (takes 1 srvconn_ref) +
+    //      srvconn_set_kernel_attached (the rings become load-bearing for
+    //      the kernel 9P client; userspace I/O on the conn Spoor is then
+    //      refused by devsrv_read/write's kernel_attached guard)
     //   4. p9_attached_create -> drives Tversion + Tattach on the
-    //      kernel-owned p9_client wrapped by the adapter
+    //      kernel-owned p9_client wrapping the adapter (the per-SrvConn
+    //      embedded 9P client was retired in stalk-3b-β-D; this SHARED
+    //      kernel client is the only one over the rings)
     //   5. p9_attached_root_spoor -> dev9p Spoor pointing at the bound
     //      root_fid
     //   6. handle_alloc KOBJ_SPOOR with RIGHT_READ | WRITE | TRANSFER
@@ -1029,16 +1038,18 @@ enum {
     // The returned KOBJ_SPOOR fd can be passed to SYS_MOUNT to graft
     // the resulting 9P tree at a target path in the caller's territory.
     //
-    // Lifetime: caller's KOBJ_SRV handle reference is INDEPENDENT of
-    // the adapter's reference. Userspace closing the source srv_fd
+    // Lifetime: the caller's conn-Spoor handle reference is INDEPENDENT
+    // of the adapter's reference. Userspace closing the source srv_fd
     // does NOT tear down the SrvConn while the returned KOBJ_SPOOR is
-    // still alive (the p9_attached holds the adapter holds its own
-    // srvconn_ref). The SrvConn lives until ALL holders unref --
+    // still alive (the conn Spoor's close honors kernel_attached: skip
+    // teardown, unref only; the p9_attached holds the adapter holds its
+    // own srvconn_ref). The SrvConn lives until ALL holders unref --
     // matches the SYS_ATTACH_9P discipline for transport-Spoor refs
     // (p9_attached_install_transport).
     //
     // Returns: x0 = new fd (>=0) on success; -1 on:
-    //   - invalid srv_fd (not KOBJ_SRV / out-of-range / corrupted)
+    //   - invalid srv_fd (not KOBJ_SPOOR / not CSRVCLIENT / not a devsrv
+    //     conn Spoor / out-of-range / corrupted)
     //   - srv_fd missing RIGHT_READ or RIGHT_WRITE
     //   - srv_fd is 9P-mode (byte-mode gate)
     //   - aname_va outside user-VA bound OR aname_len > SYS_ATTACH_ANAME_MAX

@@ -21,13 +21,19 @@ connection ENDPOINT as a `KOBJ_SPOOR` Spoor — a **dev9p root** for a 9p-mode
 service (the two-step attach: `srvconn_attach_dev9p_root` drives Tversion +
 Tattach, the **9P-unification** shared with `SYS_ATTACH_9P_SRV`) or a
 **CLIENT-direction byte-conn Spoor** (`CSRVCLIENT`) for a byte-mode one. The
-retained `SYS_POST_SERVICE` / `SYS_SRV_CONNECT` syscall path still resolves the
-one boot registry; client migration to `SYS_OPEN` (joey/login/legate) +
-`SYS_ATTACH_9P_SRV`'s retarget to `KOBJ_SPOOR` land in 3b-β-C. What remains:
-3b-β-C migrates the connect-side clients + retargets attach + removes the
-per-Proc cap; 3b-β-D retires the embedded `srvconn_client_*` 9P client; stalk-3c
-retires the old syscalls + the pouch seam (corvus's POST migration co-locates
-there, user-voted 2026-06-03).
+3b-β-C migrated the connect-side clients (joey/login/legate -> the two-step
+`SYS_OPEN`) + retargeted `SYS_ATTACH_9P_SRV` to a `KOBJ_SPOOR` CSRVCLIENT conn
+Spoor + removed the per-Proc cap; **3b-β-D retired the embedded
+`srvconn_client_*` 9P client** (the 9p-mode connect now drives the SHARED kernel
+client only), made `SYS_SRV_CONNECT` **byte-only** (it fail-closed-rejects a 9P
+service — 9P is open=connect), and collapsed `srv_conn_count` to a reserved pad
+(struct Proc stays 264). **3b-β-E (F1)** added the `kernel_attached`
+no-direct-I/O guard to `devsrv_read`/`devsrv_write`'s CSRVCLIENT branches (a
+userspace read/write on a conn endpoint already wrapped by the kernel 9P client
+would corrupt its wire — the same guard the `KOBJ_SRV` r/w arms carry, now
+following the endpoint to `KOBJ_SPOOR`). The retained `SYS_POST_SERVICE` path
+still resolves the one boot registry; **stalk-3c** retires the old syscalls + the
+pouch seam (corvus's POST migration co-locates there, user-voted 2026-06-03).
 
 > **stalk-3a delta in one place.** The registry was a single static
 > `struct SrvRegistry g_srv_registry`; it is now heap-allocated +
@@ -1041,7 +1047,10 @@ list-lock acquisition cannot deadlock with the producer's state lock.
 | heap+refcounted per-territory `SrvRegistry` + boot `/srv` mount | landed (A-5b-0 stalk-3a) |
 | `srv_registry_create`/`_ref`/`_unref` + `devsrv_attach_registry` + `srv_boot_registry` | landed (stalk-3a) |
 | create=post (`devsrv_post_listener` + `SYS_WALK_CREATE` `/srv` branch + `DMSRVBYTE`) | landed (stalk-3b-α) |
-| `devsrv_open`=connect (two-step 9P-unification) + native client migration | deferred to stalk-3b-β |
+| `devsrv_open`=connect (two-step 9P-unification) + native client migration | landed (stalk-3b-β A/B/C1/C2) |
+| retire the embedded per-SrvConn `srvconn_client_*` 9P client + the per-Proc cap (`SRV_CONN_PER_PROC_MAX`/`srv_conn_count`) | landed (stalk-3b-β-D) |
+| `SYS_SRV_CONNECT` byte-only (fail-closed-rejects a 9P service) | landed (stalk-3b-β-D) |
+| `kernel_attached` no-direct-I/O guard on `devsrv_read`/`devsrv_write` CSRVCLIENT branches | landed (stalk-3b-β-E F1) |
 | `devsrv_create` Dev vtable slot (still a graceful-fail stub; post rides the handler branch) | by design |
 | retire `SYS_SRV_CONNECT` / `SYS_POST_SERVICE` (subsumed by `SYS_OPEN` / `SYS_WALK_CREATE`) | deferred to stalk-3c |
 | service registry + two-phase post | landed (P5-corvus-srv-impl-a2) |

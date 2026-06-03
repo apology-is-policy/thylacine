@@ -456,12 +456,24 @@ cfgs stay pre-commit gates** and are re-run on every `stalk`/mount change.
     (corvus still posts via `SYS_POST_SERVICE`). Matrix GREEN 709/709
     (default + UBSan + smp8); `70-devsrv.md` updated. The formal 3b audit
     covers the full create+open surface at the end of the arc.
-  - **stalk-3b-β / 3c** — pending. 3b-β: `devsrv_open`=connect (two-step
-    9P-unification; `stalk` `STALK_OPEN` gains open-returns-a-new-Spoor
-    support; retarget `SYS_ATTACH_9P_SRV` to `KOBJ_SPOOR`) + migrate the
-    native clients (corvus post-before-chroot, joey/login/legate connects) +
-    remove `SRV_CONN_PER_PROC_MAX` + close the 3a-audit F2/F4 prereqs; THEN
-    the formal 3b audit. 3c: retire the syscalls + the pouch seam.
+  - **stalk-3b-β LANDED + audited** — `open("/srv/<name>")` IS the connect.
+    A=`995973d` (`stalk` `STALK_OPEN` adopts a `Dev.open`-returned replacement
+    Spoor), B=`cd40f64` (`devsrv_open_connect`: 9p-mode -> a dev9p root via the
+    SHARED `srvconn_attach_dev9p_root`; byte-mode -> a CSRVCLIENT conn Spoor),
+    C1=`42ce2e0` (retarget `SYS_ATTACH_9P_SRV` KObj_Srv -> KOBJ_SPOOR),
+    C2=`8003564` (migrate joey/login/legate to the two-step `t_open` + 3 fixes:
+    /srv-survives-pivot, corvus Tgetattr [client-as-owner; USER VOTE Option B],
+    serve-loop nfds-1), D=`46ff378` (retire the embedded `srvconn_client_*` 9P
+    client + the per-Proc cap; `SYS_SRV_CONNECT` byte-only + fail-closed-rejects
+    9P). **Formal 3b audit (E) CLEAN 0/0/1/2** (`audit_stalk3b_closed_list.md`):
+    F1 (the `kernel_attached` no-direct-I/O guard followed the conn endpoint
+    KObj_Srv -> KOBJ_SPOOR into `devsrv_read`/`devsrv_write`) FIXED + a regression
+    test; F2 (the SYS_ATTACH_9P_SRV ABI doc) FIXED; F3 (cap-removal cross-Proc
+    fairness) DOCUMENTED-accepted. Matrix GREEN 709/709 (default+UBSan+smp8).
+    corvus's POST migration co-locates with the syscall retirement in 3c (USER
+    VOTE 2026-06-03). **NEXT = 3c**: retire `SYS_SRV_CONNECT` /
+    `SYS_POST_SERVICE` / `_BYTE` + migrate corvus POST (post-before-chroot) + the
+    pouch `0006` seam; final audit.
 
 Then A-5b's body (#826/#827/#829) resumes on top of namespace-resident `/srv`.
 

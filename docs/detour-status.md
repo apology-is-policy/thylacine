@@ -848,6 +848,30 @@ kill = BOTH the namespace `/proc/<pid>/ctl` surface AND a narrow elevation-only 
     9P-unification; `stalk` `STALK_OPEN` gains open-returns-a-new-Spoor; retarget `SYS_ATTACH_9P_SRV` to
     `KOBJ_SPOOR`; migrate the native clients; remove `SRV_CONN_PER_PROC_MAX`; close the 3a-audit F2/F4
     prereqs).
+  - **stalk-3b-β LANDED + audited (the open=connect + 9P-unification chunk; A `995973d` / B `cd40f64` /
+    C1 `42ce2e0` / C2 `8003564` / D `46ff378` / E close `*(pending)*`).** `open("/srv/<name>")` IS the
+    connect: `stalk` `STALK_OPEN` adopts a `Dev.open`-returned replacement Spoor (A); `devsrv_open` =
+    `devsrv_open_connect` mints a SrvConn + (9p-mode) wraps its client side in the SHARED kernel 9P
+    client via `srvconn_attach_dev9p_root` -> a dev9p root Spoor, OR (byte-mode) returns a CSRVCLIENT
+    conn Spoor (B). `SYS_ATTACH_9P_SRV` retargeted KObj_Srv -> KOBJ_SPOOR CSRVCLIENT (C1). corvus
+    connects (joey/login/legate) migrated to the two-step `t_open` (C2) + 3 fixes the first 9p-mode
+    exercise surfaced: **/srv-survives-pivot** (joey `O_PATH`-grabs the devsrv root pre-pivot,
+    MREPL-re-grafts the SAME registry post-pivot); corvus implements **Tgetattr** (reports the
+    connecting client as owner; USER VOTE 2026-06-03 Option B: services implement getattr, uniform
+    kernel enforcement); the **serve-loop services only the `nfds-1` POLLED conns** (a just-accepted
+    conn had a STALE pollfds slot -> spurious close; the new Tclunk-then-EOF close exposed it). The
+    embedded per-SrvConn 9P client + the per-Proc cap (`SRV_CONN_PER_PROC_MAX` + `srv_conn_count` ->
+    `u32 _pad_srv`; struct Proc stays 264) RETIRED (D); `SYS_SRV_CONNECT` is byte-only +
+    fail-closed-rejects a 9P service. **Formal 3b audit (E): CLEAN 0 P0 / 0 P1 / 1 P2 / 2 P3**
+    (`audit_stalk3b_closed_list.md`; Opus prosecutor + self-audit CONVERGED) -- F1 (the
+    `kernel_attached` no-direct-I/O guard had to FOLLOW the conn endpoint from KObj_Srv -> KOBJ_SPOOR
+    into `devsrv_read`/`devsrv_write`) FIXED + regression test `devsrv.kernel_attached_io_refused`; F2
+    (the stale SYS_ATTACH_9P_SRV ABI doc) FIXED; F3 (per-Proc-cap-removal cross-Proc fairness)
+    DOCUMENTED-accepted (the 3a-F4 tradeoff; global `SRV_MAX_CONNS=64` bounds memory). corvus POST stays
+    `SYS_POST_SERVICE` until 3c (USER VOTE 2026-06-03). Matrix GREEN default(smp4)+UBSan+smp8 ALL
+    **709/709** + full corvus/Q11/corvus-d/legate/login E2E + boot OK + 0 EXTINCTION/UBSan. **NEXT =
+    stalk-3c** (retire `SYS_SRV_CONNECT`/`SYS_POST_SERVICE`/`_BYTE` + migrate corvus POST
+    [post-before-chroot] + the pouch `0006` seam; final audit) -> the A-5b body (#826/#827/#829).
 
 ---
 

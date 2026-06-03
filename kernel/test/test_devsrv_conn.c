@@ -101,6 +101,7 @@ extern void proc_test_unlink(struct Proc *p);
 void test_devsrv_walk_service(void);
 void test_devsrv_conn_open(void);
 void test_devsrv_open_connect_byte(void);
+void test_devsrv_kernel_attached_io_refused(void);
 void test_devsrv_accept_immediate(void);
 void test_devsrv_accept_blocks_then_wakes(void);
 void test_devsrv_conn_io(void);
@@ -335,6 +336,79 @@ void test_devsrv_open_connect_byte(void) {
         "walk of a tombstoned service -> NULL (no service-ref minted)");
     spoor_clunk(sref2);
 
+    spoor_clunk(root);
+    srv_registry_reset();
+    drop_test_proc(client);
+    drop_test_proc(server);
+}
+
+// ---------------------------------------------------------------------------
+// devsrv.kernel_attached_io_refused — stalk-3b-E F1 regression.
+//
+// After SYS_ATTACH_9P_SRV wraps a byte-conn endpoint (srvconn_set_kernel_
+// attached), the c2s/s2c rings are load-bearing for the kernel 9P client.
+// A direct read/write on the still-held CSRVCLIENT conn Spoor must be
+// REFUSED -- otherwise it drains/interleaves bytes meant for that client
+// and corrupts the 9P wire (the same hazard the KOBJ_SRV r/w arms guard;
+// the endpoint moved KObj_Srv -> KOBJ_SPOOR in C1 so the I/O guard had to
+// follow into devsrv_read/write). Pre-fix the kernel-attached read would
+// drain the staged s2c bytes (return 5); post-fix the guard returns -1.
+// ---------------------------------------------------------------------------
+
+void test_devsrv_kernel_attached_io_refused(void) {
+    srv_registry_reset();
+
+    struct Proc *server = make_marked_test_proc();
+    TEST_ASSERT(server != NULL, "server proc");
+    TEST_ASSERT(sys_post_service_byte_for_proc(server, "stratum-fs", 10) >= 0,
+        "post byte-mode \"stratum-fs\"");
+
+    struct Spoor *root = devsrv.attach(NULL);
+    TEST_ASSERT(root != NULL, "devsrv root");
+    struct Spoor *sref = spoor_clone(root);
+    TEST_ASSERT(sref != NULL, "spoor_clone for the service-ref");
+    const char *names[1] = { "stratum-fs" };
+    struct Walkqid *w = devsrv.walk(root, sref, names, 1);
+    TEST_ASSERT(w != NULL && w->spoor == sref, "walk /srv/stratum-fs");
+    walkqid_free(w);
+
+    struct Proc *client = make_test_proc();
+    TEST_ASSERT(client != NULL, "client proc");
+    struct Spoor *cs = devsrv_open_connect(client, sref, /*omode ORDWR*/ 2);
+    TEST_ASSERT(cs != NULL, "devsrv_open_connect -> a conn Spoor");
+    TEST_ASSERT((cs->flag & CSRVCLIENT) != 0, "the conn Spoor is the CLIENT endpoint");
+    struct SrvConn *cn = devsrv_conn_of(cs);
+    TEST_ASSERT(cn != NULL, "the conn Spoor names a SrvConn");
+    spoor_clunk(sref);                 // the spent quarry (stalk would clunk it)
+
+    // Control: BEFORE kernel-attach the CSRVCLIENT I/O path is live. The
+    // server stages bytes on s2c; the client read drains them; a client
+    // write fills c2s.
+    u8 pong[5] = { 'P', 'O', 'N', 'G', '\n' };
+    TEST_EXPECT_EQ(srvconn_server_send(cn, pong, 5), 5L,
+        "server stages 5 bytes on s2c");
+    u8 rbuf[16];
+    TEST_EXPECT_EQ(cs->dev->read(cs, rbuf, 16, 0), 5L,
+        "pre-attach: client read drains s2c (path live)");
+    u8 hi[3] = { 'H', 'I', '\n' };
+    TEST_EXPECT_EQ(cs->dev->write(cs, hi, 3, 0), 3L,
+        "pre-attach: client write fills c2s (path live)");
+
+    // stalk-3b-E F1: after kernel-attach, direct I/O on the endpoint is
+    // refused. Stage fresh s2c bytes so a pre-fix read would return 5
+    // (not block on an empty ring) -- the guard must beat the drain.
+    srvconn_set_kernel_attached(cn);
+    TEST_EXPECT_EQ(srvconn_server_send(cn, pong, 5), 5L,
+        "server stages 5 more bytes on s2c");
+    TEST_EXPECT_EQ(cs->dev->read(cs, rbuf, 16, 0), -1L,
+        "kernel-attached: client read REFUSED (F1)");
+    TEST_EXPECT_EQ(cs->dev->write(cs, hi, 3, 0), -1L,
+        "kernel-attached: client write REFUSED (F1)");
+
+    // Release the conn Spoor. devsrv_close honors kernel_attached (skip
+    // teardown, just unref the Spoor's create-ref); the backlog ref drops
+    // at srv_registry_reset, freeing the SrvConn.
+    spoor_clunk(cs);
     spoor_clunk(root);
     srv_registry_reset();
     drop_test_proc(client);
