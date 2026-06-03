@@ -831,6 +831,21 @@ both a userspace dimension (the boundary-line patch `0006-pouch-
 sockets`) and a kernel dimension (a new transport mode on the
 SrvConn).
 
+> **Superseded by stalk-3c (A-5b-0) — read this first.** The seam below is
+> the Phase-6 as-shipped record; the `/srv` mechanism was reworked to be
+> namespace-resident. As of stalk-3c the pouch AF_UNIX seam is:
+> `bind("/srv/<name>")` -> `SYS_open(/srv, O_PATH)` + `SYS_walk_create(<name>,
+> DMSRVBYTE)` (**create=post**); `connect("/srv/<name>")` ->
+> `SYS_open("/srv/<name>", ORDWR)` (**open=connect**; a missing service ->
+> `ECONNREFUSED`); `accept` + `getsockopt(SO_PEERCRED)` are unchanged
+> (`SYS_srv_accept` / `SYS_srv_peer`). The three name-only syscalls
+> (`SYS_post_service` 26 / `SYS_srv_connect` 30 / `SYS_post_service_byte` 43)
+> and the embedded `srvconn_client_read/write` 9P client (3b-D) were RETIRED;
+> the client connection endpoint is now a KOBJ_SPOOR `CSRVCLIENT` conn Spoor,
+> not a KObj_SRV handle. As-built: `docs/reference/70-devsrv.md` +
+> `docs/STALK-DESIGN.md` §5. The narrative below is retained for the Phase-6
+> design rationale (why byte-mode exists at all).
+
 ### The byte-mode SrvConn — kernel-side
 
 The kernel `/srv` mechanism shipped at P5-corvus-srv as a **9P

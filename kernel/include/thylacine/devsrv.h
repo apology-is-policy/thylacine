@@ -264,9 +264,9 @@ void srv_registry_unref(struct SrvRegistry *reg);
 struct Spoor *devsrv_attach_registry(struct SrvRegistry *reg);
 
 // srv_boot_registry — the one immortal registry mounted on kproc's /srv at
-// boot. The retained-for-stalk-3a syscall path (SYS_POST_SERVICE /
-// SYS_SRV_CONNECT) resolves it; the in-kernel test harness uses it via the
-// public name-based API + srv_registry_reset. NULL before devsrv_init.
+// boot. The create=post / open=connect path resolves it through the mounted
+// /srv root; the in-kernel test harness uses it via the `_in` name-based
+// cores + srv_registry_reset. NULL before devsrv_init.
 struct SrvRegistry *srv_boot_registry(void);
 
 // Cumulative registry lifecycle counters (tests verify drain-on-last-unref
@@ -278,9 +278,9 @@ u64 srv_registry_total_destroyed(void);
 // Service registry.
 // =============================================================================
 //
-// SYS_POST_SERVICE is a reserve-then-commit two-phase post so a failing
-// handle_alloc rolls back cleanly (the entry is never observably LIVE
-// until the handle exists):
+// Posting (create=post -> devsrv_post_listener) is a reserve-then-commit
+// two-phase post so a failing handle_alloc rolls back cleanly (the entry is
+// never observably LIVE until the handle exists):
 //
 //   srv_reserve()  — claim a slot + name; the entry goes RESERVING.
 //   srv_commit()   — RESERVING -> LIVE (handle allocated; post succeeded).

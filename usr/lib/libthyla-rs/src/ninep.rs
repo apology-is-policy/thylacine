@@ -4,10 +4,10 @@
 // inbound frames; R-message builders produce outbound frames. The
 // client-side counterparts (T-builders + R-parsers) are NOT here at
 // v1.0 -- native programs reach 9P services via the kernel 9P client
-// (mounted trees via SYS_WALK_OPEN; client SrvConn handshake via
-// SYS_SRV_CONNECT), not by speaking the protocol from userspace. The
-// client side lifts when a real consumer surfaces (compare U-2g's
-// deferral of std::thread::spawn(FnOnce) for the same reason).
+// (mounted trees via SYS_OPEN / SYS_WALK_OPEN; a /srv 9P service via
+// open=connect -> SYS_ATTACH_9P_SRV), not by speaking the protocol from
+// userspace. The client side lifts when a real consumer surfaces (compare
+// U-2g's deferral of std::thread::spawn(FnOnce) for the same reason).
 //
 // Lifted from corvus's private `p9` module (P5-corvus-srv-impl-b3b at
 // 4bf689c) as U-2h-ninep -- any future native 9P server (a successor

@@ -470,10 +470,29 @@ cfgs stay pre-commit gates** and are re-run on every `stalk`/mount change.
     KObj_Srv -> KOBJ_SPOOR into `devsrv_read`/`devsrv_write`) FIXED + a regression
     test; F2 (the SYS_ATTACH_9P_SRV ABI doc) FIXED; F3 (cap-removal cross-Proc
     fairness) DOCUMENTED-accepted. Matrix GREEN 709/709 (default+UBSan+smp8).
-    corvus's POST migration co-locates with the syscall retirement in 3c (USER
-    VOTE 2026-06-03). **NEXT = 3c**: retire `SYS_SRV_CONNECT` /
-    `SYS_POST_SERVICE` / `_BYTE` + migrate corvus POST (post-before-chroot) + the
-    pouch `0006` seam; final audit.
+    corvus's POST migration co-located with the syscall retirement in 3c (USER
+    VOTE 2026-06-03).
+  - **stalk-3c LANDED + audited** — the ABI break + the pouch seam. 3c-a
+    (`0d360f7`) migrated corvus's POST to create=post (post-before-chroot: open
+    `/srv` `O_PATH` + `t_walk_create("corvus")` BEFORE the storage-cap chroot;
+    the `KObj_Srv` listener handle survives the chroot). 3c-b (`8c834de`) migrated
+    the pouch `0006-pouch-sockets` seam (`bind` -> `SYS_open(/srv,O_PATH)` +
+    `SYS_walk_create(DMSRVBYTE)`; `connect` -> `SYS_open("/srv/<name>")`;
+    accept/SO_PEERCRED unchanged) + the kernel `sys_srv_peer_for_proc` CSRVCLIENT
+    reject (a client-direction endpoint -> ENOTSOCK; SO_PEERCRED stays
+    server-side-only). 3c-c (`d26e760` tests -> production path; `cde3577` the
+    retirement) RETIRED `SYS_POST_SERVICE` (26) / `SYS_SRV_CONNECT` (30) /
+    `SYS_POST_SERVICE_BYTE` (43) + the dead client-`KObj_Srv` r/w arms (the r/w
+    resolver `sys_lookup_rw_handle` collapsed to KOBJ_SPOOR-only); numbers
+    reserved, no reuse, no compat shim (-637 lines). **Formal 3c audit (3c-d)
+    CLEAN 0 P0/0 P1/0 P2/3 P3** -- all P3 documentation-staleness, swept in the
+    close (`audit_stalk3c_closed_list.md`). An Opus prosecutor + an in-session
+    self-audit CONVERGED: the collapsed r/w resolver (the kind check precedes any
+    obj deref), the number-indexed dispatch (retired cases fall to `default` ->
+    -1), the SO_PEERCRED direction gate, the corvus pre-chroot ordering, and the
+    pouch patch series (clean apply) are all SOUND; per-territory `/srv` isolation
+    (I-1/I-28) HELD + strengthened (the EL0-reachable global-registry-bypass
+    functions are gone). Matrix GREEN 704/704 (default + UBSan + smp8) at the close.
 
 Then A-5b's body (#826/#827/#829) resumes on top of namespace-resident `/srv`.
 

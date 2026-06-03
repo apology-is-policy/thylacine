@@ -78,9 +78,9 @@ _Static_assert(__builtin_offsetof(struct SrvRegistry, magic) == 0,
                "MAGIC) vs service (DEVSRV_SVC_MAGIC) vs conn (SRV_CONN_MAGIC)");
 
 // The one immortal boot registry, mounted on kproc's /srv synthetic dir.
-// Created by devsrv_init; resolved by the retained syscall path
-// (srv_*_for_proc wrappers) + the in-kernel test harness. NULL before
-// devsrv_init.
+// Created by devsrv_init; resolved through the mounted /srv root by the
+// create=post / open=connect path + srv_proc_exit_notify_in + the in-kernel
+// test harness. NULL before devsrv_init.
 static struct SrvRegistry *g_boot_srv_registry;
 
 static u64 g_srv_registry_created;
@@ -255,10 +255,10 @@ void srv_registry_unref(struct SrvRegistry *reg) {
         // stalk-3b/A-5b ORDERING OBLIGATION (audit F2): kfree frees
         // entries[] too. A raw interior pointer into entries[] -- a
         // SrvService* held by a KObj_Srv listener handle's obj, or by an
-        // in-flight srv_conn_open_in / svc_listener_poll -- carries NO
-        // registry ref. In stalk-3a this never dangles (every such pointer
+        // in-flight devsrv_open_connect / svc_listener_poll -- carries NO
+        // registry ref. In stalk-3a/3b this never dangles (every such pointer
         // is into the immortal boot registry, which never reaches ref 0).
-        // When 3b mints a MORTAL per-session registry, its last unref MUST
+        // When A-5b (#827) mints a MORTAL per-session registry, its last unref MUST
         // be ordered AFTER every listener/connection handle into it is
         // closed (the session poster is group-terminated first, #811,
         // closing its KObj_Srv listener) -- or the listener handle / the
@@ -572,8 +572,8 @@ void srv_registry_reset(void) {
 
 // accept_cond_is_ready — sleep()'s wait predicate for srv_accept_blocking.
 // Reads backlog_count / state WITHOUT the registry lock: sleep evaluates
-// it under the accept Rendez lock, and every producer (srv_conn_open_in's
-// push, srv_proc_exit_notify_in's tombstone) mutates these fields under
+// it under the accept Rendez lock, and every producer (devsrv_open_connect's
+// backlog push, srv_proc_exit_notify_in's tombstone) mutates these fields under
 // the registry lock (svc->reg->lock) and then calls wakeup(), whose
 // Rendez-lock acquisition provides the happens-before. The discipline
 // matches srvconn.c's chan_cond_readable.
@@ -1068,7 +1068,7 @@ static struct Spoor *devsrv_power(struct Spoor *c, int on) {
 // (tombstoned by srv_proc_exit_notify or wiped by srv_registry_drain).
 //
 // The sample-and-register are both atomic under the registry lock
-// (svc->reg->lock); the producer side (srv_conn_open_in →
+// (svc->reg->lock); the producer side (devsrv_open_connect →
 // srv_backlog_push_locked under the registry lock, then poll_waiter_list_
 // wake after release; srv_proc_exit_notify_in under the registry lock,
 // then poll_waiter_list_wake after release) commits the readiness change

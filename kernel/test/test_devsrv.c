@@ -144,7 +144,7 @@ void test_devsrv_post_basic(void) {
     TEST_ASSERT(h >= 0, "post \"corvus\" → handle");
 
     struct SrvService *svc = srv_lookup_in(srv_boot_registry(), "corvus", 6);
-    TEST_ASSERT(svc != NULL, "srv_lookup finds the entry");
+    TEST_ASSERT(svc != NULL, "srv_lookup_in finds the entry");
     TEST_EXPECT_EQ((int)svc->state, (int)SRV_STATE_LIVE, "entry is LIVE");
     TEST_EXPECT_EQ(svc->poster_stripes, proc_stripes(p),
         "entry stamped with the poster's stripes");

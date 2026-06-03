@@ -677,12 +677,14 @@ static struct Spoor *sys_lookup_spoor(struct Proc *p, hidx_t h, rights_t require
     return (struct Spoor *)slot->obj;
 }
 
-// Helper: look up an open r/w-capable handle (KOBJ_SPOOR or KOBJ_SRV
-// with SRV_CONN_MAGIC) + validate rights. Returns the slot pointer or
-// NULL. P5-corvus-srv-impl-b2 — bridges SYS_READ / SYS_WRITE between
-// Spoor-vtable I/O (KOBJ_SPOOR) and the SrvConn-mediated 9P Tread /
-// Twrite (KOBJ_SRV connection handles); the SRV_SERVICE_MAGIC handles
-// are not r/w-able (a service registry slot is not a transport).
+// Helper: look up an open r/w-capable handle (KOBJ_SPOOR only) + validate
+// rights. Returns the slot pointer or NULL. Post-stalk-3c the only
+// readable/writable handle kind is KOBJ_SPOOR -- a /srv connection endpoint
+// is itself a KOBJ_SPOOR conn Spoor (the server side, and the CSRVCLIENT
+// client side), driven through the devsrv read/write vtable. The client-side
+// KObj_Srv conn handle that once bridged raw bytes here was retired with
+// SYS_SRV_CONNECT; a KObj_Srv handle is now only a service listener, never a
+// transport. The kind check (below) precedes any obj dereference.
 static struct Handle *sys_lookup_rw_handle(struct Proc *p, hidx_t h,
                                              rights_t required) {
     struct Handle *slot = handle_get(p, h);

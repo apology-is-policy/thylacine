@@ -148,28 +148,29 @@ static void handle_release_obj(enum kobj_kind kind, void *obj) {
         spoor_clunk((struct Spoor *)obj);
         break;
     case KOBJ_SRV: {
-        // P5-corvus-srv: a KObj_Srv handle's obj is one of two /srv
-        // kernel objects, discriminated by the magic word at offset 0:
-        //   SRV_SERVICE_MAGIC — a service registry entry (SYS_POST_
-        //     SERVICE). Its lifetime is the poster Proc's (tombstoned by
-        //     exits() -> srv_proc_exit_notify, never freed), NOT the
-        //     handle's — closing the handle must not touch it. No-op.
-        //   SRV_CONN_MAGIC — a SrvConn (the client side of a /srv
-        //     connection, from srv_conn_open_for_proc). Closing the
-        //     handle is a connection close (CORVUS-DESIGN.md §6.2): tear
-        //     the connection down — EOF both rings so the peer (corvus)
-        //     wakes — then release the handle's reference. teardown is
-        //     idempotent; the last srvconn_unref frees (a3b).
+        // A KObj_Srv handle's obj is discriminated by the magic word at
+        // offset 0. Post-stalk-3c a KObj_Srv handle is ONLY a service
+        // listener:
+        //   SRV_SERVICE_MAGIC — a service registry entry from create=post
+        //     (devsrv_post_listener). Its lifetime is the poster Proc's
+        //     (tombstoned by exits() -> srv_proc_exit_notify, never freed),
+        //     NOT the handle's — closing the handle must not touch it. No-op.
+        //   SRV_CONN_MAGIC — a SrvConn. Before stalk-3c a client connection
+        //     was a KObj_Srv handle (the retired SYS_SRV_CONNECT); now the
+        //     connection ENDPOINTS are KOBJ_SPOOR conn Spoors (released via
+        //     spoor_clunk -> devsrv_close), so this arm no longer fires for a
+        //     KObj_Srv handle. It is RETAINED as a UAF/corruption guard +
+        //     belt-and-suspenders close (CORVUS-DESIGN.md §6.2): tear the
+        //     connection down — EOF both rings so the peer wakes — then
+        //     release the reference; teardown is idempotent.
         //
-        //     P6-pouch-stratumd-boot 16c exception: when
-        //     srvconn_is_kernel_attached is true (SYS_ATTACH_9P_SRV
-        //     wrapped the conn in a kernel 9P client), teardown would
-        //     break the FS attach -- the c2s/s2c rings are still in
-        //     use by the kernel client. Skip teardown; only unref.
-        //     The connection tears down when the LAST KOBJ_SPOOR
-        //     handle referencing the attach session is closed (the
-        //     adapter's transport.close at p9_attached_destroy runs
-        //     srvconn_teardown + srvconn_unref).
+        //     kernel_attached exception (16c): when srvconn_is_kernel_attached
+        //     is true (SYS_ATTACH_9P_SRV wrapped the conn in a kernel 9P
+        //     client) teardown would break the FS attach — the c2s/s2c rings
+        //     are still in use. Skip teardown; only unref. The connection
+        //     tears down when the LAST KOBJ_SPOOR handle referencing the
+        //     attach session closes (the adapter's transport.close at
+        //     p9_attached_destroy runs srvconn_teardown + srvconn_unref).
         u64 m = *(const u64 *)obj;
         if (m == SRV_CONN_MAGIC) {
             struct SrvConn *cn = (struct SrvConn *)obj;

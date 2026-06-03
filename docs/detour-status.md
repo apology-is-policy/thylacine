@@ -870,7 +870,7 @@ kill = BOTH the namespace `/proc/<pid>/ctl` surface AND a narrow elevation-only 
     DOCUMENTED-accepted (the 3a-F4 tradeoff; global `SRV_MAX_CONNS=64` bounds memory). corvus POST stays
     `SYS_POST_SERVICE` until 3c (USER VOTE 2026-06-03). Matrix GREEN default(smp4)+UBSan+smp8 ALL
     **709/709** + full corvus/Q11/corvus-d/legate/login E2E + boot OK + 0 EXTINCTION/UBSan.
-  - **stalk-3c IN PROGRESS -- the ABI-break close (D3); migrations DONE + MATRIX GREEN.**
+  - **stalk-3c DONE + audited -- the ABI-break close (D3).**
     - **3c-a `0d360f7`**: corvus POST migrated to **create=post** (pre-chroot). corvus opens `/srv`
       `O_PATH` + `t_walk_create("corvus", perm=0)` [9P-mode] as the FIRST action in `rs_main`, BEFORE
       the storage-cap chroot (which displaces the namespace -> `/srv` unreachable after). The KObj_Srv
@@ -918,12 +918,21 @@ kill = BOTH the namespace `/proc/<pid>/ctl` surface AND a narrow elevation-only 
       fixed) + 1P2 (DIED-leaked slot, deferred-documented) + 3P3. **Verified: default 704/704 + UBSan 3/3 +
       smp8 2/2 + `capbare` UBSan boot-loop under `forkstorm` host-load 12/12 + `specs/9p_client.tla` gate.**
       The original-flake repro is now GREEN. See `memory/bug_9p_client_recv_deadline_desync.md` + ARCH §21.10.
-    - **NEXT = 3c-d** (the #841 preemption is DONE; resume here): the formal 3c audit (the ABI-break
-      surface + the dead-arm r/w-resolver change + per-territory isolation; do-not-report preamble =
-      `audit_stalk3b_closed_list.md` + `audit_stalk3a_closed_list.md` SOUND sets) + the owed docs sweep
-      (STALK-DESIGN section 9, this row, 70-devsrv, 78-pouch, CLAUDE.md syscall-retirement note + residual
-      stale comments: srvconn.h prose, joey.c "t_srv_connect FAILED" diagnostic strings) + two-commit
-      close + `audit_stalk3c_closed_list.md`. Then the A-5b body (#826/#827/#829).
+    - **3c-d DONE -- the formal 3c audit + the docs sweep + the close.** An Opus prosecutor + an
+      in-session self-audit CONVERGED: **CLEAN 0 P0 / 0 P1 / 0 P2 / 3 P3** -- all P3
+      documentation-staleness (the residual retired-symbol comments), swept in the close. The five named
+      focus areas verified SOUND: the dead-arm r/w-resolver (`sys_lookup_rw_handle` KOBJ_SPOOR-only -- the
+      kind check precedes any obj deref; a KObj_Srv handle was already rejected by the old switch's
+      `default`, so behavior is unchanged); the number-indexed dispatch (retired 26/30/43 fall to
+      `default` -> -1, no mis-map, numbers reserved); per-territory `/srv` isolation (I-1/I-28) HELD +
+      STRENGTHENED (the EL0-reachable global-registry-bypass functions are gone); corvus's create=post
+      pre-chroot ordering (the listener handle survives the chroot); the pouch patch series (clean apply;
+      the SO_PEERCRED CSRVCLIENT direction gate). Docs swept: STALK-DESIGN §9, 70-devsrv, 78-pouch, this
+      row, + the residual retired-symbol comments (handle.c, syscall.c, srvconn.h, devsrv.c/.h, joey.c,
+      ninep.rs). Closed list `audit_stalk3c_closed_list.md`. Matrix GREEN default(smp4)+UBSan+smp8 704/704
+      + boot OK + 0 EXTINCTION. **stalk-3 ARC COMPLETE.**
+    - **NEXT = the A-5b body** (#826 Stratum / #827 login / #829 corvus-lift) on top of namespace-resident
+      `/srv`. The stalk-3a-audit F2 (mortal-registry last-unref) activates at #827.
 
 ---
 

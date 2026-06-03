@@ -103,7 +103,7 @@ _Static_assert(SRVCONN_RING_CAP >= SRVCONN_MSIZE,
 // 9P frames. 5 seconds is comfortable headroom over QEMU-emulated
 // AArch64's worst-case scheduling jitter without papering over a
 // legitimately-hung server. Caller path:
-// `sys_srv_connect_for_proc`.
+// `srvconn_attach_dev9p_root` (open=connect / SYS_ATTACH_9P_SRV).
 #define SRVCONN_HANDSHAKE_DEADLINE_NS  (5ull * 1000ull * 1000ull * 1000ull)
 
 // Steady-state read/write (after handshake): corvus may run Argon2id
@@ -194,12 +194,10 @@ struct SrvConn {
     // (devsrv_open_connect), not at per-op dispatch:
     //   - SRV_MODE_9P  — devsrv_open_connect wraps the SrvConn in a
     //     kernel 9P client (srvconn_attach_dev9p_root) and returns a
-    //     dev9p root Spoor; the client never sees a KOBJ_SRV handle.
-    //     SYS_SRV_CONNECT (byte-only) REJECTS a 9P-mode service.
+    //     dev9p root Spoor; the client never sees a KObj_Srv handle.
     //   - SRV_MODE_BYTE — devsrv_open_connect returns a CSRVCLIENT
-    //     byte-conn Spoor; SYS_SRV_CONNECT returns a KOBJ_SRV handle.
-    //     Both route raw bytes through srvconn_client_send/recv against
-    //     c2s / s2c (no 9P framing).
+    //     KOBJ_SPOOR byte-conn Spoor, routing raw bytes through
+    //     srvconn_client_send/recv against c2s / s2c (no 9P framing).
     // The setter is called BEFORE the SrvConn is enqueued (so an
     // accepting server never observes a mode-mid-flight conn).
     //
@@ -274,10 +272,9 @@ struct SrvConn *srvconn_create(u64 peer_stripes, int peer_pid,
 long srvconn_server_recv_blocking(struct SrvConn *cn, u8 *buf, long n);
 
 // srvconn_set_byte_mode — one-way setter for cn->byte_mode = true.
-// P6-pouch-sockets (sub-chunk 12). Called from srv_conn_open_for_proc
-// BEFORE the SrvConn is enqueued in the accept backlog and BEFORE
-// sys_srv_connect_for_proc decides whether to drive the 9P handshake
-// — both paths read the flag.
+// Set at conn mint in devsrv_open_connect (from the posted service's
+// mode) BEFORE the SrvConn is enqueued in the accept backlog, so an
+// accepting server + the open=connect path both read a stable flag.
 //
 // Idempotent (sets the flag; never clears). No lock needed: the field
 // is captured at mint (BEFORE any other observer can see the cn) and

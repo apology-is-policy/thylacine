@@ -1,8 +1,8 @@
 # 70 — devsrv: the `/srv` service registry
 
-**Status**: as-built at A-5b-0 **stalk-3b-β** (core). The service registry, the
-`devsrv` Dev, the `SYS_POST_SERVICE` syscall, the `proc_flags` post-gate,
-and poster-exit tombstoning landed at P5-corvus-srv-impl-a2; the
+**Status**: as-built at A-5b-0 **stalk-3c** (syscall retirement). The service
+registry, the `devsrv` Dev, the now-retired `SYS_POST_SERVICE` syscall, the
+`proc_flags` post-gate, and poster-exit tombstoning landed at P5-corvus-srv-impl-a2; the
 **per-connection layer** — the `devsrv` walk op, the client-connect path
 (`srv_conn_open_for_proc`), the bounded accept backlog, `SYS_SRV_ACCEPT`,
 and the connection-Spoor read/write/close — landed at a3b; `SYS_SRV_PEER`
@@ -31,9 +31,15 @@ service — 9P is open=connect), and collapsed `srv_conn_count` to a reserved pa
 no-direct-I/O guard to `devsrv_read`/`devsrv_write`'s CSRVCLIENT branches (a
 userspace read/write on a conn endpoint already wrapped by the kernel 9P client
 would corrupt its wire — the same guard the `KOBJ_SRV` r/w arms carry, now
-following the endpoint to `KOBJ_SPOOR`). The retained `SYS_POST_SERVICE` path
-still resolves the one boot registry; **stalk-3c** retires the old syscalls + the
-pouch seam (corvus's POST migration co-locates there, user-voted 2026-06-03).
+following the endpoint to `KOBJ_SPOOR`). **stalk-3c (this revision)** RETIRED the
+three name-only syscalls -- `SYS_POST_SERVICE` (26), `SYS_SRV_CONNECT` (30),
+`SYS_POST_SERVICE_BYTE` (43); numbers reserved, no reuse, no compat shim. Posting
+is now `SYS_WALK_CREATE` on a `/srv` dir (`devsrv_post_listener`); connecting is
+`SYS_OPEN("/srv/<name>")` (`devsrv_open_connect`); the read/write handle resolver
+collapsed to KOBJ_SPOOR-only (a `/srv` conn endpoint is itself a `KOBJ_SPOOR` conn
+Spoor). corvus's POST migrated to create=post (post-before-chroot) and the pouch
+AF_UNIX seam to bind=create / connect=open. The boot registry is still resolved
+through the mounted `/srv` root that the create=post / open=connect path walks.
 
 > **stalk-3a delta in one place.** The registry was a single static
 > `struct SrvRegistry g_srv_registry`; it is now heap-allocated +
@@ -45,10 +51,13 @@ pouch seam (corvus's POST migration co-locates there, user-voted 2026-06-03).
 > — the mounted root, each `clone_walk_zero` cross-clone of it, and each
 > `/srv/<name>` service-ref Spoor — dropped at `devsrv_close` (which fires
 > only on the Spoor's last `spoor_clunk`). `spoor_ref` (same instance) adds
-> NO registry ref; only a new instance does. The public name-based API
-> (`srv_reserve` / `srv_lookup` / `srv_conn_open_for_proc` /
-> `srv_proc_exit_notify` / `srv_registry_count`) is a thin wrapper over an
-> internal `_in(reg, …)` variant bound to the boot registry; the svc-based
+> NO registry ref; only a new instance does. The name-based core API is the
+> internal `_in(reg, …)` variant (`srv_reserve_in` / `srv_lookup_in` /
+> `srv_proc_exit_notify_in`); the boot path + the in-kernel tests bind the
+> boot registry (`srv_boot_registry()`) explicitly. (The EL0-reachable
+> name-only syscall wrappers `srv_reserve` / `srv_lookup` /
+> `srv_conn_open_for_proc` were RETIRED at stalk-3c -- posting is now
+> create=post, connecting open=connect.) The svc-based
 > API (`srv_commit` / `srv_abort` / `srv_accept_blocking` /
 > `srv_backlog_depth`) reaches the registry lock through a new `svc->reg`
 > back-pointer. Boot (`kernel/joey.c`, in kproc's bringup after the
@@ -84,8 +93,10 @@ cannot 9P-transfer its connection to another Proc, which is what keeps
 the kernel-stamped peer identity behind it unforgeable across a walk.
 
 This layer sits above the Dev framework (`kernel/dev.c`) and the handle
-table (`kernel/handle.c`), and is reached from userspace through one
-syscall, `SYS_POST_SERVICE`.
+table (`kernel/handle.c`), and is reached from userspace through the
+namespace: a server POSTS with `SYS_WALK_CREATE` on a `/srv` directory and a
+client CONNECTS with `SYS_OPEN("/srv/<name>")`. (The name-only
+`SYS_POST_SERVICE` / `SYS_SRV_CONNECT` syscalls were retired at stalk-3c.)
 
 ---
 
@@ -94,22 +105,22 @@ syscall, `SYS_POST_SERVICE`.
 ### Syscalls
 
 ```
-SYS_POST_SERVICE(name_va, name_len)        → service_handle / -1
+SYS_WALK_CREATE(/srv-dir, name, perm)      → service_handle / -1   (post)
+SYS_OPEN("/srv/<name>", omode)             → conn endpoint   / -1   (connect)
 SYS_SRV_ACCEPT(service_handle)             → connection_handle / -1
 SYS_SRV_PEER(connection_handle, out_va)    → 0 / -1
 ```
 
-`SYS_POST_SERVICE` (syscall 26) registers the calling Proc as the 9P
-server for `/srv/<name>` and returns a `KObj_Srv` service handle.
-`name_va` is a user-VA pointer to the name bytes; `name_len` is
-`1..SRV_NAME_MAX` (32). Gated on the one-way joey-stamped
-`PROC_FLAG_MAY_POST_SERVICE` bit. Defined in `kernel/syscall.c` as the
-thin user-VA wrapper `sys_post_service_handler` over the testable core:
+A service POST is a `SYS_WALK_CREATE` against a `/srv` directory Spoor
+(`devsrv_post_listener`): it registers the calling Proc as the 9P server for
+`/srv/<name>` and returns a `KObj_Srv` service handle. `perm & DMSRVBYTE`
+selects byte-mode, else 9P-mode; `name` is `1..SRV_NAME_MAX` (32). Gated on
+the one-way joey-stamped `PROC_FLAG_MAY_POST_SERVICE` bit. A CONNECT is a
+`SYS_OPEN("/srv/<name>")` (`devsrv_open_connect`; see "open=connect" below).
 
-```c
-int sys_post_service_for_proc(struct Proc *p, const char *name,
-                              size_t name_len);
-```
+> The name-only `SYS_POST_SERVICE` (syscall 26) -- the `sys_post_service_for_proc`
+> core + the `sys_post_service_handler` wrapper -- was RETIRED at stalk-3c. The
+> number stays reserved (no reuse, no compat shim).
 
 `SYS_SRV_ACCEPT` (syscall 27) is the poster's accept. The poster of a
 `/srv` service **blocks** here until a client opens the service, then

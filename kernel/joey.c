@@ -187,10 +187,10 @@ void joey_run(void) {
         // stalk-3a: mount the boot service registry's /srv root on the
         // kproc territory's /srv synthetic dir. joey + every descendant
         // inherits the mount via territory_clone, so all share the ONE
-        // namespace-resident boot registry. The retained SYS_POST_SERVICE /
-        // SYS_SRV_CONNECT path resolves the boot registry directly
-        // (srv_boot_registry); this mount is what stalk-3b's open=connect /
-        // create=post will resolve through the namespace. STALK-DESIGN §5.1.
+        // namespace-resident boot registry. Posting (create=post) and
+        // connecting (open=connect) resolve the boot registry through THIS
+        // mount; srv_proc_exit_notify_in + the in-kernel tests reach it via
+        // srv_boot_registry. STALK-DESIGN §5.1.
         struct SrvRegistry *boot_reg = srv_boot_registry();
         if (!boot_reg)
             extinction("joey: boot service registry not initialized");
