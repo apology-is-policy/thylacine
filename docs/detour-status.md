@@ -903,16 +903,22 @@ kill = BOTH the namespace `/proc/<pid>/ctl` surface AND a narrow elevation-only 
       sys_lookup_rw_handle (KOBJ_SPOOR-only now; a listener was already rejected -- behavior unchanged).
       `srvconn_client_send/recv` survive (devsrv CSRVCLIENT + the 9P transport). Net -637 lines.
       **Default (smp4) + smp8 GREEN 703/703**, boot OK, 0 EXTINCTION, 8/8 CPUs.
-    - **UBSan flake DISCOVERED (pre-existing, NOT a 3c-c regression; tracked for a dedicated hunt):** the
-      UBSan matrix failed 1/2 runs at **corvus STEP=6 = create=post** (`corvus: STEP=6 FAIL rc=f` ->
-      joey `/srv/corvus` open fails [the "t_srv_connect FAILED" is a stale diagnostic STRING, not a call]
-      -> `EXTINCTION: joey: wait_pid returned wrong pid 0x656`, cpu 2). The 2nd UBSan run was fully GREEN.
-      The failing path (`devsrv_post_listener` / `sys_walk_create_handler`) is byte-IDENTICAL across 3c-c
-      (I deleted around it) and shipped in 3c-a (present at 4cae10c) -- so 3c-b's single "UBSan 709/709"
-      was a lucky run; the flake predates 3c-c. Smells like a #789-class UBSan-timing boot-ordering
-      sensitivity in corvus startup / joey reap. **3c-d MUST characterize it (re-run N x; confirm
-      pre-existing via 4cae10c UBSan) before the close -- do NOT dismiss without ground truth.**
-    - **NEXT = 3c-d**: the UBSan-flake characterization (above) + the formal 3c audit (the ABI-break
+    - **The "UBSan flake" was NOT a #789-timing flake -- it was a real 9P-client soundness bug, now
+      root-caused + fixed as #841 (DONE, 2026-06-03).** Ground-truthed (instrumented boots, not theory): the
+      corvus STEP=6 failure under UBSan + host load was the kernel `p9_client` holding `c->lock` (a busy-wait
+      spinlock) ACROSS the blocking `recv` with a 30s per-op deadline -- under SMP contention a contender
+      busy-spins while the holder sleeps, starving stratumd's reply -> `TSLEEP_TIMEDOUT` -> the timed-out op
+      desyncs the SHARED 9P byte stream -> corvus exits -> kproc `wait_pid` wrong-pid extinction.
+      **Fix = #841 (elected-reader pipeline restoration; ARCH §21.10):** lock NEVER held across `recv`;
+      tag-demuxed multi-in-flight; no per-op timeout (block until reply / EOF / death, death-interruptible
+      via #811). Removing the timeout exposed a SEPARATE latent bug it had masked -- `devsrv_close` honored
+      `kernel_attached` on the SERVER endpoint, suppressing the ring EOF that wakes the no-timeout client
+      (corvus's post-BadFormat Q11 teardown -> joey's Tclunk hung forever); fixed by skipping teardown ONLY
+      for the kernel-attached CLIENT endpoint. A focused 9P-client+devsrv audit closed 1P1 (reply-buffer UAF,
+      fixed) + 1P2 (DIED-leaked slot, deferred-documented) + 3P3. **Verified: default 704/704 + UBSan 3/3 +
+      smp8 2/2 + `capbare` UBSan boot-loop under `forkstorm` host-load 12/12 + `specs/9p_client.tla` gate.**
+      The original-flake repro is now GREEN. See `memory/bug_9p_client_recv_deadline_desync.md` + ARCH §21.10.
+    - **NEXT = 3c-d** (the #841 preemption is DONE; resume here): the formal 3c audit (the ABI-break
       surface + the dead-arm r/w-resolver change + per-territory isolation; do-not-report preamble =
       `audit_stalk3b_closed_list.md` + `audit_stalk3a_closed_list.md` SOUND sets) + the owed docs sweep
       (STALK-DESIGN section 9, this row, 70-devsrv, 78-pouch, CLAUDE.md syscall-retirement note + residual

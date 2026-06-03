@@ -124,6 +124,16 @@ The pattern is the only thing in this layer. The reason each op is a separate fu
 
 Internal struct-copy helpers (`copy_qid`, `copy_attr`, `copy_statfs`) replace implicit `*dst = *src` assignments that the compiler would otherwise lower to `memcpy`. The kernel doesn't link libc, so `memcpy` is undefined; field-by-field copies sidestep the issue. This mirrors the same discipline applied in P5-session (where all init paths are explicit instead of `memset`-ed).
 
+### Elected-reader pipeline (#841)
+
+The as-built client is **pipelined and multi-Proc-shared** (a single `p9_client` backs a dev9p mount, so every Proc whose territory resolves through that mount drives the same client concurrently from different CPUs). It uses the Plan 9 `devmnt`/`mountio` **elected-reader** model rather than the serial single-in-flight stand-in the P5-client first shipped (the "R15-c F230" regression that #841 restored away from). The full design + invariants are in `ARCH §21.10`; the load-bearing points for a maintainer:
+
+- Each op allocates a stack `struct p9_rpc` {tag, `done`/`dead`/`be_reader` flags, own single-waiter `Rendez`, `reply_buf`} and registers it in the tag-indexed `c->inflight[]` under `c->lock`.
+- `client_run` is the core: submit under `c->lock` (alloc tag, build, `transport_send` frame-atomic), then the **reader-election loop** — a submitter with no reply yet becomes *the* reader (one at a time via `c->reader_active`), drops `c->lock`, `recv`s one frame, retakes the lock, demuxes it by tag to the owning rpc (copies frame → that rpc's `reply_buf`, wakes it), and repeats until its own reply lands; otherwise it sleeps on its own rpc's `Rendez`. On departing the reader role it **hands off** to one still-pending rpc.
+- **`c->lock` is NEVER held across the blocking `recv`** (the soundness fix — the serial regression held a spinlock across the sleep). The deadline is caller-set: `HANDSHAKE_DEADLINE` for the serial fresh-client handshake, then `0` (block until reply / EOF / death) for steady state. Death-interruptible via #811.
+- **Reply-buffer lifetime (audit F1):** the read/readdir/readlink dispatch results zero-copy alias into the rpc's `reply_buf`, and the caller copies them out *after* `client_run` returns — so `client_run` does NOT free the buffer on the DONE path; it stashes it in `c->done_reply_buf` (freeing the prior), freed at the next completion or at destroy (both under `c->lock`, holds at most one buffer).
+- The session is marked `c->dead` on transport EOF/error OR a demux-level protocol violation; every in-flight rpc is then failed `-EIO`. A dead session rejects all subsequent ops.
+
 ## Compile-time invariants
 
 `_Static_assert` in `kernel/9p_client.c`:
@@ -164,9 +174,9 @@ Every public op returns negative on:
 
 ## Performance characteristics
 
-- Per-op cost: 1 backend send + 1+ backend recv calls (depending on partial-read aggregation).
-- No allocation. No locking. Single-CPU at v1.0 (caller serializes).
-- Memory: `sizeof(struct p9_client)` ≈ 12 KiB. Most of it is the embedded session's fid + outstanding tables (~4 KiB) + the 8 KiB inline out_buf.
+- Per-op cost: 1 backend send + 1+ backend recv calls (depending on partial-read aggregation) + one `kmalloc(recv_cap)` per op for the rpc reply buffer + one frame copy (reader → owner buffer). A buffer pool / read-into-owner-buffer is a v1.x optimization.
+- Locking: one per-client spinlock `c->lock`, taken per op and DROPPED across the blocking `recv` (the elected-reader, #841). SMP-safe and shared across Procs (no caller serialization required — the client serializes internally).
+- Memory: `sizeof(struct p9_client)` ≈ 12 KiB + at most one `recv_cap`-sized `done_reply_buf` held between completions. Most of the struct is the embedded session's fid + outstanding tables (~4 KiB) + the 8 KiB inline out_buf.
 
 ## Status
 
@@ -179,14 +189,14 @@ Every public op returns negative on:
 | Metadata ops (getattr / setattr / readdir / statfs / fsync) | **Landed (P5-client)** |
 | Mutation ops (symlink / mknod / rename / readlink / link / mkdir / renameat / unlinkat) | **Landed (P5-client)** |
 | Lock / xattr / Stratum-extension wrappers | Phase 5+ (await codec extensions) |
-| Async dispatch (multi-in-flight) | Phase 5+ (await transport-layer support) |
+| Async dispatch (multi-in-flight) | **Landed (#841 elected-reader)** — tag-demuxed, out-of-order, lock-not-held-across-recv |
 | Partial-walk handling (Rwalk's nwqid < requested nwname) | Phase 5+ (currently returns -EIO if partial) |
 
 ## Known caveats / footguns
 
 1. **`struct p9_client` is ~12 KiB.** Allocate it statically (or heap-side once kalloc exists); never declare it on a stack frame. The kernel's test-thread stack is 16 KiB; one client struct + a few small locals leaves no margin.
 
-2. **`p9_client_read` and `p9_client_readdir` do COPY semantics** — the lower-layer Rread/Rreaddir surface a zero-copy pointer into the transport's recv_buf, but the client copies the bytes into the caller's output buffer so the caller doesn't need to track the recv_buf lifetime. For high-throughput streaming, future versions may add a zero-copy variant (returning a pointer into the transport's recv_buf with a lifetime contract).
+2. **`p9_client_read` / `readdir` / `readlink` do COPY semantics** — the lower-layer Rread/Rreaddir/Rreadlink surface a zero-copy pointer that, under the #841 pipeline, aliases the per-op rpc `reply_buf` (NOT the transport recv_buf as in the old serial client). `client_run` keeps that buffer alive past its return via `c->done_reply_buf` (audit F1) so the public op's copy-out is valid; the caller still ends up with an owned copy in its output buffer. A maintainer adding a new zero-copy-aliasing op MUST ensure the buffer outlives the caller's read of the alias.
 
 3. **Partial walks are reported as -EIO.** If a Twalk with `nwname=3` returns `Rwalk{nwqid=2}` (server walked partway then hit a missing component), `p9_client_walk_one` and the general `p9_client_walk` may produce surprising behavior. At v1.0 we treat partial walks as failures; nuanced "you walked partially, here's what got bound" handling is a Phase 5+ extension.
 
@@ -194,7 +204,7 @@ Every public op returns negative on:
 
 5. **No retry / reconnect.** A single transport-layer failure puts the transport in ERROR state and the next client op fails with -EIO indefinitely. Recovery requires destroy + re-init at a higher layer. Future work: P5-attach may add a Proc-level "reconnect" affordance.
 
-6. **The client is not thread-safe.** Callers must serialize (per-Proc mutex, etc.). The session + transport + client layers all share this contract.
+6. **The client IS internally locked and multi-Proc-shared (#841).** A single `p9_client` backs a dev9p mount and is driven concurrently by every Proc resolving through it; `c->lock` + the elected-reader serialize access. Callers do NOT serialize. (The old serial client required external serialization; that contract is retired.) The one remaining discipline: a Proc that dies mid-op leaves its `outstanding[tag]` reserved until the late reply drains it — see ARCH §21.10 F2 (bounded at 64; a well-behaved server reclaims it).
 
 ## Naming rationale
 

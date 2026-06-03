@@ -513,10 +513,23 @@ registry (stalk-3a — the last unref drains + frees; the boot registry
 never reaches that, its mount holding a ref forever); a service Spoor
 (`DEVSRV_SVC_MAGIC`) `kfree`s the `devsrv_svc_ref` (clearing its magic
 first) then `srv_registry_unref`s its registry ref; a connection Spoor
-(`SRV_CONN_MAGIC`) does `srvconn_teardown` then `srvconn_unref`. An
+(`SRV_CONN_MAGIC`) tears down + `srvconn_unref`s. An
 `aux == NULL` Spoor (a failed/transient walk clone, normalized) is a clean
 no-op. Closing a connection Spoor *is* a connection close (CORVUS-DESIGN.md
 §6.2: teardown EOFs both rings so the peer wakes).
+
+The teardown is **skipped only for the kernel-attached CLIENT endpoint**
+(`(c->flag & CSRVCLIENT) && srvconn_is_kernel_attached(cn)`): when the kernel 9P
+client wraps a conn's rings, those rings are load-bearing for that client and a
+userspace close of the redundant CLIENT endpoint must not EOF them (teardown
+migrates to the adapter's `transport.close` at `p9_attached_destroy`). The
+**SERVER endpoint** (corvus's accepted Spoor — no `CSRVCLIENT`) is the other side
+of the same shared SrvConn and carries the flag the CLIENT's attach set, but its
+close means the 9P server is GONE and MUST EOF the rings so the kernel client's
+blocked recv wakes with EOF (#841: the no-timeout client observes connection
+death via EOF; honoring `kernel_attached` on the server side suppressed the EOF
+and hung joey's Tclunk forever — the boot-hang root cause). So the skip is
+gated on the CLIENT direction; the regression is `devsrv.kernel_attached_server_close_eofs`.
 
 ### `SYS_SRV_PEER` — the peer-identity read
 
