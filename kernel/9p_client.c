@@ -257,7 +257,23 @@ static int client_wait(struct p9_client *c, struct p9_rpc *rpc) {
     for (;;) {
         if (rpc->done)            return CLIENT_WAIT_DONE;
         if (rpc->dead)            return CLIENT_WAIT_DEAD;
-        if (client_self_dying())  return CLIENT_WAIT_DIED;
+        if (client_self_dying()) {
+            // F6 (round-2): if I was the designated-next reader (a departing
+            // reader handed me the role via be_reader + a wake) but my Proc is
+            // dying before I reach the election below, the role would be LOST --
+            // a surviving Proc's pending op would have no reader to demux/wake
+            // it and no future handoff would fire (the dying-reader handoff at
+            // line ~282 only runs for a thread that ACTUALLY assumed the role).
+            // Re-hand-off before unwinding. Gated on be_reader so the
+            // active-reader-dies case (already handed off; be_reader cleared
+            // when it assumed the role) and the plain-sleeper case (an active
+            // reader still exists) do NOT spuriously double-hand-off.
+            if (rpc->be_reader) {
+                rpc->be_reader = false;
+                client_handoff_reader_locked(c, rpc);
+            }
+            return CLIENT_WAIT_DIED;
+        }
         if (!c->reader_active) {
             // Become THE reader: read frames (c->lock dropped) until MY reply
             // lands, the session dies, or I'm dying.
@@ -285,6 +301,18 @@ static int client_wait(struct p9_client *c, struct p9_rpc *rpc) {
             // until my reply lands, the session dies, or I'm handed the reader
             // role. A death-interrupt returns SLEEP_INTR -> the loop-top
             // client_self_dying() returns CLIENT_WAIT_DIED.
+            //
+            // F7 (round-2): clear a stale be_reader FIRST. If I was handed the
+            // role (be_reader set + woken) but lost the election race to a
+            // thread that grabbed reader_active before I re-checked, reaching
+            // here with be_reader still set makes rpc_wait_cond TRUE -> sleep
+            // returns immediately -> I busy-spin (re-lock, re-check, re-sleep)
+            // until that reader departs, burning a CPU + contending c->lock
+            // (the exact pathology the elected reader removes). Dropping it lets
+            // me sleep; the active reader's departure handoff re-wakes me. No
+            // lost wakeup: a handoff re-setting be_reader + waking me after this
+            // clear is observed by sleep's register-then-observe cond-check.
+            rpc->be_reader = false;
             spin_unlock(&c->lock);
             (void)sleep(&rpc->rendez, rpc_wait_cond, rpc);
             spin_lock(&c->lock);
@@ -411,7 +439,14 @@ void p9_client_destroy(struct p9_client *c) {
     if (!c) return;
     if (c->magic != P9_CLIENT_MAGIC) return;
     c->magic = 0;
+    // F8 (round-2): free the deferred reply buffer under c->lock so the impl
+    // matches the documented "freed at the next completion or at destroy, both
+    // under c->lock" invariant. Destroy runs when the last attached ref drops
+    // (no op is in flight), so the lock is uncontended -- this is defense in
+    // depth against a future caller that destroys a still-shared client.
+    spin_lock(&c->lock);
     if (c->done_reply_buf) { kfree(c->done_reply_buf); c->done_reply_buf = NULL; }
+    spin_unlock(&c->lock);
     p9_transport_destroy(&c->transport);
     p9_session_destroy(&c->session);
 }
