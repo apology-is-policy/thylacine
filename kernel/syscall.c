@@ -1280,29 +1280,30 @@ static s64 sys_attach_9p_srv_handler(u64 srv_fd_raw, u64 aname_va,
     if (aname_len > 0 && !sys_validate_user_buf(aname_va, aname_len))
                                                      return -1;
 
-    // Look up the SrvConn handle. Rights: READ + WRITE (the kernel 9P
-    // client both reads and writes through the byte rings). Same rights-
-    // gate shape as SYS_ATTACH_9P's READ on rx + WRITE on tx.
+    // Look up the connection endpoint. stalk-3b-β retargeted this from a
+    // KObj_Srv connection handle to a KOBJ_SPOOR devsrv byte-conn Spoor (the
+    // product of devsrv_open's byte-mode connect, dc='s' + SRV_CONN_MAGIC aux,
+    // resolved via devsrv_conn_of). Rights: READ + WRITE (the kernel 9P client
+    // both reads and writes through the byte rings). The CSRVCLIENT flag gates
+    // it to a CLIENT endpoint -- attaching a SERVER endpoint (from
+    // SYS_SRV_ACCEPT) would drive the rings the wrong way.
     struct Handle *slot = handle_get(p, (hidx_t)srv_fd_raw);
     if (!slot)                                       return -1;
-    if (slot->kind != KOBJ_SRV)                      return -1;
+    if (slot->kind != KOBJ_SPOOR)                    return -1;
     if (!slot->obj)                                  return -1;
     if ((slot->rights & (RIGHT_READ | RIGHT_WRITE))
         != (RIGHT_READ | RIGHT_WRITE))                return -1;
-    if (*(const u64 *)slot->obj != SRV_CONN_MAGIC)   return -1;
+    struct Spoor *conn_spoor = (struct Spoor *)slot->obj;
+    if (!(conn_spoor->flag & CSRVCLIENT))            return -1;   // client endpoint only
+    struct SrvConn *cn = devsrv_conn_of(conn_spoor);
+    if (!cn)                                          return -1;   // not a devsrv conn Spoor
 
-    struct SrvConn *cn = (struct SrvConn *)slot->obj;
-
-    // Byte-mode gate. A 9P-mode SrvConn has an EMBEDDED kernel-owned
-    // p9_client driving Tread/Twrite on a single client_fid (the
-    // corvus-style verb stream). Wrapping its c2s/s2c rings with ANOTHER
-    // p9_client via this adapter would interleave Tversion/Tattach/
-    // Twalk frames with the embedded client's Tread/Twrite frames on
-    // the SAME ring -- wire corruption.
-    //
-    // Atomic acquire pairs srvconn_set_byte_mode's RELEASE in
-    // srv_conn_open_for_proc (mirror sys_srv_connect_for_proc's
-    // discipline, F5 close).
+    // Byte-mode gate. A byte-conn Spoor's SrvConn is byte_mode (devsrv_open set
+    // it from the service mode). A non-byte SrvConn cannot reach here (only a
+    // byte-mode service yields a conn Spoor; 9p-mode yields a dev9p root that
+    // never carries SRV_CONN_MAGIC), but re-check defensively -- a second
+    // p9_client over a 9p-mode SrvConn's rings would interleave frames + corrupt
+    // the wire. Atomic acquire pairs srvconn_set_byte_mode's RELEASE.
     if (!__atomic_load_n(&cn->byte_mode, __ATOMIC_ACQUIRE))
                                                       return -1;
 

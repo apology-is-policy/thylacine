@@ -1900,7 +1900,10 @@ int main(void) {
         //
         // The bdev-I/O block is a separate v1.x sub-chunk (16b-gamma-
         // mount-close). This probe stays NON-FATAL until that lands.
-        static const char srv_name[] = "stratum-fs";
+        // stalk-3b-β: connect = open the namespace-resident /srv path. The
+        // byte-mode open yields a CLIENT byte-conn Spoor (KOBJ_SPOOR), which
+        // t_attach_9p_srv (retargeted to KOBJ_SPOOR) wraps below.
+        static const char srv_path[] = "/srv/stratum-fs";
         long sd_srv_fd = -1;
         // 16c: between retries joey sleeps on torpor with a 1 ms timeout
         // (a never-woken local-stack u32 + expected-value 0). This
@@ -1919,7 +1922,8 @@ int main(void) {
         // wait always times out after 1 ms and the retry loops.
         unsigned int joey_retry_pacer_dummy = 0;
         for (int i = 0; i < 3000; i++) {
-            sd_srv_fd = t_srv_connect(srv_name, sizeof(srv_name) - 1, 0, 0);
+            sd_srv_fd = t_open(T_WALK_OPEN_FROM_ROOT, srv_path,
+                               sizeof(srv_path) - 1, T_ORDWR);
             if (sd_srv_fd >= 0) {
                 t_putstr("joey: stratumd-boot /srv/stratum-fs bound after retry ");
                 t_putstr(itoa_dec(i, buf, sizeof(buf)));
