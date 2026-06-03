@@ -931,8 +931,26 @@ kill = BOTH the namespace `/proc/<pid>/ctl` surface AND a narrow elevation-only 
       row, + the residual retired-symbol comments (handle.c, syscall.c, srvconn.h, devsrv.c/.h, joey.c,
       ninep.rs). Closed list `audit_stalk3c_closed_list.md`. Matrix GREEN default(smp4)+UBSan+smp8 704/704
       + boot OK + 0 EXTINCTION. **stalk-3 ARC COMPLETE.**
-    - **NEXT = the A-5b body** (#826 Stratum / #827 login / #829 corvus-lift) on top of namespace-resident
-      `/srv`. The stalk-3a-audit F2 (mortal-registry last-unref) activates at #827.
+    - **A-5b body, step 1 -- #829 corvus session-ownership lift COMPLETE** *(pending)* (cites design
+      `f690c1b` + the f35d340 first half). Closes the two design-prosecution findings the f35d340 lift
+      left open (`audit_a5b_design_closed_list.md`): **F4 [P1]** -- the `SESSION_CLOSE` *verb*
+      (`handle_session_close`) was token-gated but NOT owner-gated, so a non-owning bearer-token holder
+      (the A-5b storage coordinator pulling a DEK over the §6.3 forward) could wipe a live login session
+      mid-session and break A-4 legate elevation; now requires `conn_id == session_owner_conn_id` (threaded
+      in like `handle_auth`), returning `STATUS_PERMISSION_DENIED` to a non-owner. **F8 [P3]** -- the
+      per-accept `next_conn_id` allocator now skips the 0 sentinel on the 2^64 wrap, so a recycled id can
+      never alias the "no owner" value and falsely pass the ownership gate (the F8 + F4 interaction:
+      conn_id is always >= 1, owner == 0 only means no session, so a real conn never matches the no-owner
+      state). The **pouch connect ctl-walk** half of #829 is SUBSUMED by stalk-3 (connect() is
+      `SYS_OPEN("/srv/<name>")` now; the `sun_path_to_name` hack is gone). Behavior-preserving at v1.0 (no
+      consumer yet exercises a non-owning `SESSION_CLOSE`); default suite 704/704 + boot OK + 0 EXTINCTION
+      + the corvus self-test (`SESSION_CLOSE` + reconnect), legate-prover (A-4 elevation re-presents the
+      token), and login E2E all green. Audit-bearing (corvus session model) -- folds into the #828 A-5b
+      body audit (the full matrix + focused prosecution land there). Docs: CORVUS-DESIGN §6.2 +
+      74-corvus-9p-server.md.
+    - **NEXT = the A-5b body** (#826 Stratum coordinator / #827 login wiring) on top of namespace-resident
+      `/srv`. The stalk-3a-audit F2 (mortal-registry last-unref) activates at #827; the #828 audit prosecutes
+      the DEK handoff (AEGIS/mallocng-adjacent) hard.
 
 ---
 

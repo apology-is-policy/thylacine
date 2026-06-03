@@ -2634,12 +2634,24 @@ unsafe fn handle_unwrap(payload: &[u8], response: &mut Vec<u8>) {
     }
 }
 
-unsafe fn handle_session_close(payload: &[u8], response: &mut Vec<u8>) {
+unsafe fn handle_session_close(conn_id: u64, payload: &[u8], response: &mut Vec<u8>) {
     if payload.len() != TOKEN_LEN {
         return stage_response(response, STATUS_BAD_FORMAT, &[]);
     }
     if !session_token_matches(payload) {
         return stage_response(response, STATUS_NOT_FOUND, &[]);
+    }
+    // Only the session-OWNING connection may close it via the verb. A
+    // non-owning bearer-token connection -- the storage coordinator pulling a
+    // per-user DEK over the S6.3 token-forward -- holds a valid token but must
+    // not wipe a live login session (that would break A-4 legate elevation,
+    // which re-presents the same token). The connection-close path
+    // (close_conn) already gates on ownership; this gates the explicit verb,
+    // completing the lift. session_owner_conn_id() is 0 only when no session
+    // is active and conn_id is always >= 1 (the allocator skips the 0
+    // sentinel), so a non-owner can never alias the no-owner state.
+    if conn_id != session_owner_conn_id() {
+        return stage_response(response, STATUS_PERMISSION_DENIED, &[]);
     }
     session_clear();
     stage_response(response, STATUS_OK, &[]);
@@ -2892,7 +2904,8 @@ unsafe fn try_dispatch_verb(conn: &mut Conn) {
 
         match verb_id {
             VERB_AUTH => handle_auth(conn_id, &payload_owned, &mut conn.pending_response),
-            VERB_SESSION_CLOSE => handle_session_close(&payload_owned, &mut conn.pending_response),
+            VERB_SESSION_CLOSE => handle_session_close(conn_id, &payload_owned,
+                                                       &mut conn.pending_response),
             VERB_UNWRAP => handle_unwrap(&payload_owned, &mut conn.pending_response),
             VERB_USER_CREATE => handle_user_create(conn_handle, &payload_owned,
                                                    &mut conn.pending_response),
@@ -3352,7 +3365,13 @@ unsafe fn srv_server_loop(listener: i64) -> i64 {
                         // re-poll.
                     } else {
                         conns.push(Conn::new(h, peer, next_conn_id));
+                        // Skip the 0 sentinel on the 2^64 wrap so a recycled
+                        // id can never alias the "no owner" value and falsely
+                        // pass the SESSION_CLOSE / close_conn ownership gate.
                         next_conn_id = next_conn_id.wrapping_add(1);
+                        if next_conn_id == 0 {
+                            next_conn_id = 1;
+                        }
                     }
                 }
                 // else: listener torn down; loop will pick it up via
@@ -3425,8 +3444,8 @@ unsafe fn close_conn(conns: &mut Vec<Conn>, idx: usize) {
     // -- e.g. the A-5b storage coordinator that presented login's token for
     // an UNWRAP -- disconnecting must NOT wipe a live login session (that
     // would break mid-session A-4 legate elevation, which re-presents the
-    // same token). SESSION_CLOSE (the verb) + shutdown clear unconditionally;
-    // only this connection-teardown path is gated on ownership.
+    // same token). The SESSION_CLOSE verb is likewise owner-gated
+    // (handle_session_close); only process shutdown clears unconditionally.
     let owner = session_owner_conn_id();
     if owner != 0 && conn.conn_id == owner {
         session_clear();

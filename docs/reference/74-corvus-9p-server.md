@@ -305,7 +305,7 @@ The yield mechanism (`t_poll` on a never-ready pipe-read end) puts joey's thread
 | `ConnTeardown(c)` | client closes its handle → `handle_close` → `srvconn_teardown` (idempotent LIVE→TORN, EOF both rings, wake) |
 | `ConnOpIdentityIsKernelTruth` | corvus calls `t_srv_peer(conn_handle)` to read the kernel-stamped `TSrvPeerInfo` (immutable identity by-value; live caps via `proc_caps_by_stripes`) |
 | `AuthSuccess(p, u)` | `usr/corvus/src/main.rs::handle_auth` (unchanged from -c) |
-| `SessionClose(p)` | `usr/corvus/src/main.rs::handle_session_close` (unchanged from -c) |
+| `SessionClose(p)` | `usr/corvus/src/main.rs::handle_session_close` (A-5b #829: now owner-gated -- token match AND `conn_id == session_owner_conn_id`; a non-owning bearer-token connection cannot wipe a live session) |
 
 | Spec invariant | Source enforcement |
 |---|---|
