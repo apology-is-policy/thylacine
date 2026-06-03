@@ -8,12 +8,13 @@
  * thread doing connect/write/read.
  *
  * Why both threads in one Proc:
- *   - SRV_CONN_PER_PROC_MAX = 1 limits CLIENT connections per Proc to
- *     one outstanding. We need at most one (the client side).
- *   - The kernel SRV_PEER gate checks "caller stripes == poster
- *     stripes". Both threads share Proc stripes, so SYS_srv_peer
- *     works from EITHER endpoint (in a real two-Proc setup the
- *     server side has the SO_PEERCRED oracle; the client doesn't).
+ *   - One Proc with two threads exercises bind+connect together (the
+ *     per-Proc /srv client cap was retired in stalk-3b).
+ *   - SYS_srv_peer is an accept-side (server) primitive; the client
+ *     endpoint (open=connect, CSRVCLIENT) is rejected by direction, so
+ *     the server side has the SO_PEERCRED oracle and the client side
+ *     gets ENOTSOCK (matching a real two-Proc setup: only the poster
+ *     queries who connected).
  *
  * Round-trip pattern (proving the byte transport, not 9P):
  *   1. server thread: socket, bind ("/srv/pouch-sock-demo"), listen,
@@ -303,14 +304,14 @@ static int test_round_trip(void)
     }
     printf("client: read PONG (%zd bytes byte-accurate) ok\n", n);
 
-    /* SO_PEERCRED on the client side is NOT supported at v1.0 — the
-     * kernel SYS_SRV_PEER is gated to the SERVICE POSTER (it accepts
-     * a KObj_Spoor from accept, not a KObj_Srv client handle). The
-     * proving check happens on the SERVER side above (which DID
-     * succeed: see "server: SO_PEERCRED ..." line). A future kernel
-     * extension would let a client query the server's identity. For
-     * now, exercise the negative path: client-side getsockopt returns
-     * ENOTSOCK from the kernel's wrong-handle-kind gate. */
+    /* SO_PEERCRED on the client side is NOT supported at v1.0 — it is an
+     * accept-side (server) query. stalk-3c open=connect made the client
+     * endpoint a devsrv conn Spoor too, so SYS_SRV_PEER rejects it by
+     * direction (the CSRVCLIENT flag): its SrvConn stamps the CONNECTOR as
+     * the peer, so a client query would mis-report the caller's own
+     * identity. The proving check is on the SERVER side above (see
+     * "server: SO_PEERCRED ..."). For now, exercise the negative path:
+     * client-side getsockopt returns ENOTSOCK. */
     {
         struct {
             int          pid;

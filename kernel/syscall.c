@@ -4460,6 +4460,15 @@ int sys_srv_peer_for_proc(struct Proc *p, hidx_t conn_h,
     struct SrvConn *cn = devsrv_conn_of(sp);
     if (!cn) return -1;
 
+    // SO_PEERCRED is an ACCEPT-side (server) query -- "who connected to me?".
+    // stalk-3c open=connect made the CLIENT endpoint a devsrv conn Spoor too
+    // (CSRVCLIENT), so devsrv_conn_of now resolves it; but the SrvConn stamps
+    // the CONNECTOR as the peer, so a client-side query would mis-report the
+    // caller's OWN identity (and in a same-Proc client+server the poster gate
+    // below cannot tell them apart). Reject the client endpoint: SYS_SRV_PEER
+    // is server-side only at v1.0 (pouch getsockopt(SO_PEERCRED) -> ENOTSOCK).
+    if (sp->flag & CSRVCLIENT) return -1;
+
     // Poster gate (CORVUS-DESIGN §6.3): only the service's poster may
     // query a connection's peer. The SrvConn captured the poster's
     // stripes by value at mint; the caller's stripes must match.

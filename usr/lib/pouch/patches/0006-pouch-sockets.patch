@@ -1,5 +1,16 @@
 pouch boundary-line patch 0006 - AF_UNIX SOCK_STREAM over /srv byte mode
 
+AMENDED stalk-3c (D3, STALK-DESIGN.md section 5): the by-syscall post /
+connect were RETIRED. bind() now does create=post (SYS_open /srv O_PATH +
+SYS_walk_create <name> with DMSRVBYTE) and connect() does open=connect
+(SYS_open "/srv/<name>" ORDWR). The syscall.h.in seam drops __NR_post_service
+/ __NR_srv_connect / __NR_post_service_byte and adds __NR_walk_create 54 +
+__NR_open 65; __NR_srv_accept 27 + __NR_srv_peer 28 stay (accept + SO_PEERCRED
+are unchanged). The historical sub-chunk-12 prose below describes the
+superseded SYS_post_service_byte / SYS_srv_connect mapping; the applied hunks
+are as-built. The per-Proc /srv client cap referenced below was also retired
+(stalk-3b).
+
 Phase 6 sub-chunk 12 (pouch-sockets). Maps musl's AF_UNIX SOCK_STREAM
 surface onto Thylacine's /srv registry using the new BYTE-MODE
 transport added to the kernel SrvConn at this sub-chunk. Twelve files,
@@ -136,29 +147,29 @@ close dance.
  #define __NR_thread_exit 42
 +
 +/*
-+ * pouch / Thylacine /srv extension numbers (P6-pouch-sockets, sub-chunk
-+ * 12). The pouch-side AF_UNIX SOCK_STREAM layer maps onto Thylacine's
-+ * /srv registry per POUCH-DESIGN.md section 6.2:
-+ *   socket()           pouch-side slot alloc; no kernel call
-+ *   bind()             SYS_post_service(name, name_len)
-+ *   listen()           no-op (kernel registry has its own backlog)
-+ *   accept()           SYS_srv_accept(listener_h) returns a Spoor fd
-+ *   connect()          SYS_srv_connect(name, name_len, NULL, 0)
++ * pouch / Thylacine /srv extension numbers. The pouch AF_UNIX SOCK_STREAM
++ * layer maps onto Thylacine's namespace-resident /srv (STALK-DESIGN.md
++ * section 5). stalk-3c retired the by-syscall post/connect: posting and
++ * connecting now ride the namespace (create=post / open=connect):
++ *   socket()                 pouch-side slot alloc; no kernel call
++ *   bind(fd, /srv/<name>)    SYS_open(/srv, O_PATH) + SYS_walk_create(
++ *                            <name>, DMSRVBYTE) -- create=post, byte-mode
++ *   listen()                 no-op (the kernel registry has its backlog)
++ *   accept(listener_h)       SYS_srv_accept -> a byte-conn Spoor fd
++ *   connect(fd, /srv/<name>) SYS_open("/srv/<name>", ORDWR) -- open=connect
 + *   getsockopt(SO_PEERCRED)  SYS_srv_peer(conn_h, &out)
-+ * These four kernel numbers match kernel/include/thylacine/syscall.h —
-+ * audited in P5-corvus-srv-impl-a/-b. The boundary-line patch
-+ * 0006-pouch-sockets adds these aliases so socket.c / bind.c / accept.c
-+ * / connect.c / getsockopt.c reference SYS_post_service etc. directly
-+ * rather than the sentinel-blocked SYS_socket / SYS_bind / ...
++ * The numbers match kernel/include/thylacine/syscall.h. accept + srv_peer
++ * keep their dedicated syscalls; post + connect ride SYS_walk_create /
++ * SYS_open, so bind.c / connect.c reference those rather than the retired
++ * SYS_post_service_byte / SYS_srv_connect.
 + */
-+#define __NR_post_service 26
 +#define __NR_srv_accept 27
 +#define __NR_srv_peer 28
-+#define __NR_srv_connect 30
-+#define __NR_post_service_byte 43
++#define __NR_walk_create 54
++#define __NR_open 65
 --- a/src/internal/_pouch_socket.h
 +++ b/src/internal/_pouch_socket.h
-@@ -0,0 +1,113 @@
+@@ -0,0 +1,120 @@
 +/* pouch — AF_UNIX SOCK_STREAM userspace slot table (P6-pouch-sockets,
 + * sub-chunk 12). Kept entirely in pouch; the kernel knows nothing
 + * about POSIX sockets. socket() returns a tagged fd carrying a slot
@@ -167,17 +178,15 @@ close dance.
 + *
 + * Design: POUCH-DESIGN.md section 6.2. The translation table —
 + *   socket(AF_UNIX, SOCK_STREAM, 0)  pouch_sock_alloc()
-+ *   bind(fd, /srv/<name>)            SYS_post_service(<name>)
++ *   bind(fd, /srv/<name>)            create=post: SYS_open(/srv, O_PATH)
++ *                                    + SYS_walk_create(<name>, DMSRVBYTE)
 + *   listen(fd, backlog)              no-op (kernel registry backlog)
 + *   accept(fd)                       SYS_srv_accept(listener_h) ->
 + *                                    raw kernel Spoor fd (NOT pouch-
-+ *                                    tagged — server-side I/O bypasses
++ *                                    tagged -- server-side I/O bypasses
 + *                                    the shim).
-+ *   connect(fd, /srv/<name>)         SYS_srv_connect(<name>, NULL, 0)
-+ *                                    (path_len == 0 == the "no Twalk"
-+ *                                    case in kernel/srvconn.c — Tversion
-+ *                                    + Tattach only, byte stream at
-+ *                                    root_fid)
++ *   connect(fd, /srv/<name>)         open=connect: SYS_open("/srv/<name>",
++ *                                    ORDWR) -> a byte-conn Spoor fd
 + *   getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &ucred, &len)
 + *                                    SYS_srv_peer(conn_h, &out) ->
 + *                                    ucred-shaped marshal
@@ -191,8 +200,8 @@ close dance.
 + * pouch socket fd.
 + *
 + * Constraints accepted at v1.0:
-+ *   - Per-Proc concurrent /srv client cap = 1 (SRV_CONN_PER_PROC_MAX,
-+ *     kernel/srvconn.c). The proving binary uses one client at a time.
++ *   - /srv connection count is bounded by the global kernel registry
++ *     (SRV_MAX_CONNS); the per-Proc cap was retired in stalk-3b.
 + *   - AF_INET / AF_INET6 unsupported (EAFNOSUPPORT — network phase).
 + *   - SOCK_DGRAM / SOCK_SEQPACKET unsupported (EPROTONOSUPPORT).
 + *   - SOCK_NONBLOCK / O_NONBLOCK silently no-op (v1.0 sockets are
@@ -216,10 +225,19 @@ close dance.
 +#define POUCH_SOCK_TAG       0x40000000
 +
 +/* Upper bound on concurrent unbound + listening + connecting sockets
-+ * in one Proc. /srv listener count is bounded by the kernel registry;
-+ * /srv client count is hard-capped at 1 per Proc. POUCH_SOCK_MAX of 8
-+ * is generous for v1.0 servers. */
++ * in one Proc. /srv connection count is bounded by the global kernel
++ * registry (SRV_MAX_CONNS); POUCH_SOCK_MAX of 8 is generous for v1.0
++ * servers. */
 +#define POUCH_SOCK_MAX       8
++
++/* Thylacine open/create omode + perm bits for the create=post /
++ * open=connect boundary (mirror kernel/include/thylacine/syscall.h).
++ * bind() opens /srv O_PATH then walk_creates the service byte-mode
++ * (DMSRVBYTE); connect() opens /srv/<name> ORDWR for a byte stream. */
++#define POUCH_SRV_OREAD      0u
++#define POUCH_SRV_ORDWR      2u
++#define POUCH_SRV_OPATH      0x80u
++#define POUCH_SRV_DMSRVBYTE  0x02000000u
 +
 +enum pouch_sock_state {
 +    POUCH_SOCK_FRESH = 0,        /* socket() returned; no bind/connect yet  */
@@ -488,10 +506,10 @@ close dance.
  }
 --- a/src/network/bind.c
 +++ b/src/network/bind.c
-@@ -1,7 +1,123 @@
+@@ -1,7 +1,137 @@
 +/* pouch — bind(2) for AF_UNIX SOCK_STREAM (P6-pouch-sockets,
 + * sub-chunk 12). Extracts the service name from sun_path and posts it
-+ * to /srv via SYS_post_service.
++ * to /srv via create=post (SYS_walk_create on the /srv dir).
 + *
 + * sun_path  ->  service name:
 + *   "/srv/<name>"   ->   "<name>"
@@ -506,13 +524,13 @@ close dance.
 + * t_spawn_with_perms(... T_SPAWN_PERM_MAY_POST_SERVICE). A bind() in
 + * an ungranted Proc returns EACCES.
 + *
-+ * The kernel syscall is SYS_post_service_byte (= 43) — the byte-mode
-+ * variant of SYS_post_service introduced in P6-pouch-sockets sub-chunk
-+ * 12 to mark the service as a raw byte stream. The 9P-mode variant
-+ * (SYS_post_service = 26) is used by corvus and stratumd, NOT by
-+ * pouch sockets — pouch's AF_UNIX SOCK_STREAM byte semantics are
-+ * incompatible with the kernel 9P handshake that the 9P-mode SrvConn
-+ * drives. See docs/reference/78-pouch.md for the design.
++ * stalk-3c: the post is create=post (STALK-DESIGN.md section 5.3 / D2) --
++ * open the namespace-resident /srv (O_PATH) then SYS_walk_create the
++ * service name with the DMSRVBYTE perm bit, minting a byte-mode KObj_Srv
++ * listener. Byte-mode marks the service a raw byte stream -- pouch's
++ * AF_UNIX SOCK_STREAM byte semantics are incompatible with the kernel 9P
++ * handshake a 9P-mode service drives (corvus posts 9P-mode, perm=0).
++ * See docs/reference/78-pouch.md for the design.
 + */
  #include <sys/socket.h>
 +#include <sys/un.h>
@@ -603,7 +621,21 @@ close dance.
 +		return -1;
 +	}
 +
-+	long r = __syscall(SYS_post_service_byte, name, name_len);
++	/* stalk-3c create=post (STALK-DESIGN.md section 5.3 / D2): open the
++	 * namespace-resident /srv (O_PATH; non-opened, walkable) then
++	 * walk_create <name> with the DMSRVBYTE perm bit -- a byte-mode
++	 * service post. The kernel mints a KObj_Srv listener bound to this
++	 * Proc (PROC_FLAG_MAY_POST_SERVICE still gates it). The /srv dir fd
++	 * is transient; the listener handle is what we keep. */
++	long srv = __syscall(SYS_open, (long)-1, "/srv", (size_t)4,
++	                     (long)POUCH_SRV_OPATH);
++	if (srv < 0) {
++		errno = EACCES;
++		return -1;
++	}
++	long r = __syscall(SYS_walk_create, srv, name, name_len,
++	                   (long)POUCH_SRV_OREAD, (long)POUCH_SRV_DMSRVBYTE);
++	__syscall(SYS_close, srv);
 +	if (r < 0) {
 +		errno = EACCES;
 +		return -1;
@@ -615,21 +647,22 @@ close dance.
  }
 --- a/src/network/connect.c
 +++ b/src/network/connect.c
-@@ -1,7 +1,109 @@
-+/* pouch — connect(2) for AF_UNIX SOCK_STREAM (P6-pouch-sockets,
-+ * sub-chunk 12). Extracts the service name from sun_path (same
-+ * shape as bind) and calls SYS_srv_connect with path_len == 0 — the
-+ * kernel's "no Twalk" case in kernel/srvconn.c, yielding a raw byte
-+ * stream at the server's root fid.
+@@ -1,7 +1,118 @@
++/* pouch -- connect(2) for AF_UNIX SOCK_STREAM (P6-pouch-sockets,
++ * sub-chunk 12). Extracts the service name from sun_path (same shape
++ * as bind), rebuilds "/srv/<name>", and opens it.
 + *
-+ * Per-Proc concurrent /srv client cap = 1 (SRV_CONN_PER_PROC_MAX,
-+ * kernel/srvconn.c). A second connect() from the same Proc whose
-+ * prior connection is still open returns -1 / ECONNREFUSED. Closing
-+ * the previous tagged fd via close() releases the kernel slot.
++ * stalk-3c: connect is open=connect (STALK-DESIGN.md section 5.2 / D5).
++ * SYS_open("/srv/<name>", ORDWR) on a byte-mode service yields a
++ * bidirectional byte-conn Spoor (the client endpoint: read s2c / write
++ * c2s). ORDWR so the conn handle is born R+W (rights_for_omode). A
++ * missing service makes SYS_open fail -> ECONNREFUSED. The per-Proc
++ * client cap was retired in stalk-3b (the global SRV_MAX_CONNS bounds
++ * memory), so bind + connect can coexist in one Proc.
 + *
-+ * On success the slot transitions to CONNECTED, holding the kernel
-+ * KObj_Srv client handle. Subsequent read / write / close / getsockopt
-+ * on this same fd dispatch through pouch_sock_kernel_fd().
++ * On success the slot transitions to CONNECTED, holding the byte-conn
++ * Spoor handle. Subsequent read / write / close / getsockopt on this
++ * same fd dispatch through pouch_sock_kernel_fd().
 + */
  #include <sys/socket.h>
 +#include <sys/un.h>
@@ -716,7 +749,15 @@ close dance.
 +		return -1;
 +	}
 +
-+	long r = __syscall(SYS_srv_connect, name, name_len, (const char *)0, 0);
++	/* stalk-3c open=connect: rebuild the absolute /srv path (the helper
++	 * stripped the prefix) and open it ORDWR. SYS_open on a byte-mode
++	 * service returns the client byte-conn Spoor; a missing service or
++	 * any open failure surfaces as ECONNREFUSED. */
++	char path[5 + SRV_NAME_MAX];
++	memcpy(path, "/srv/", 5);
++	memcpy(path + 5, name, name_len);
++	long r = __syscall(SYS_open, (long)-1, path, (size_t)(5 + name_len),
++	                   (long)POUCH_SRV_ORDWR);
 +	if (r < 0) {
 +		errno = ECONNREFUSED;
 +		return -1;
@@ -880,7 +921,7 @@ close dance.
 @@ -1,7 +1,25 @@
 +/* pouch — listen(2) for AF_UNIX SOCK_STREAM (P6-pouch-sockets,
 + * sub-chunk 12). No-op at v1.0: the kernel /srv registry maintains
-+ * its own bounded accept queue; SYS_post_service already established
++ * its own bounded accept queue; bind's create=post already established
 + * LISTEN-ness on a successful bind. The `backlog` parameter is
 + * ignored. POSIX-correct: listen() on a bound-but-not-yet-listening
 + * socket returns 0; on a connected one returns EOPNOTSUPP.

@@ -467,7 +467,7 @@ build_sysroot() {
                     'SYS_socket 0xFFFF' \
                     'SYS_torpor_wait 39' 'SYS_torpor_wake 40' \
                     'SYS_thread_spawn 41' 'SYS_thread_exit 42' \
-                    'SYS_post_service_byte 43' \
+                    'SYS_walk_create 54' 'SYS_open 65' \
                     'SYS_poll 29' 'SYS_ppoll 0xFFFF' \
                     'SYS_pselect6 0xFFFF' \
                     'SYS_note_open 44' 'SYS_notify 45' 'SYS_noted 46' \

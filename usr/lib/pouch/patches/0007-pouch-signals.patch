@@ -172,8 +172,8 @@ flag set + value verified); exits 0.
 +++ b/arch/aarch64/bits/syscall.h.in
 @@ -374,3 +374,27 @@
  #define __NR_srv_peer 28
- #define __NR_srv_connect 30
- #define __NR_post_service_byte 43
+ #define __NR_walk_create 54
+ #define __NR_open 65
 +
 +/*
 + * pouch / Thylacine notes extension numbers (P6-pouch-signals, sub-chunk
