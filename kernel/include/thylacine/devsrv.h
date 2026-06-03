@@ -286,41 +286,14 @@ u64 srv_registry_total_destroyed(void);
 //   srv_commit()   — RESERVING -> LIVE (handle allocated; post succeeded).
 //   srv_abort()    — RESERVING -> prior (handle_alloc failed; rolled back).
 
-// srv_reserve — phase 1. Claim a registry slot for `name` posted by
-// `poster`. Validates name length; takes the registry lock internally.
-//
-// Returns 0 on success: *svc_out is the reserved entry (state RESERVING),
-// *prior_out is the state to restore on abort (FREE for a fresh post,
-// TOMBSTONED for a rebind of a tombstoned name).
-//
-// Returns -1 on: NULL/empty/oversized name; the name already has a LIVE
-// or RESERVING entry (no displacing a running or in-flight server); the
-// registry is full. On -1, *svc_out / *prior_out are untouched.
-//
-// The caller must have already passed the SYS_POST_SERVICE post-gate
-// (proc_may_post_service) — srv_reserve does NOT re-check it.
-//
-// `mode` selects the transport: SRV_MODE_9P (the default; CORVUS-DESIGN
-// §6.2) or SRV_MODE_BYTE (raw byte stream; P6-pouch-sockets). Set
-// immutably on the entry — the mode of a LIVE service does not change.
-int srv_reserve(const char *name, u8 name_len, struct Proc *poster,
-                enum srv_mode mode,
-                struct SrvService **svc_out, enum srv_state *prior_out);
-
 // srv_commit — phase 2 (success). RESERVING -> LIVE. Takes the registry
-// lock. `svc` must be a reservation returned by srv_reserve.
+// lock. `svc` must be a reservation from the reserve phase (srv_reserve_in,
+// the internal slot claim devsrv_post_listener drives).
 void srv_commit(struct SrvService *svc);
 
-// srv_abort — phase 2 (failure). RESERVING -> `prior` (the value
-// srv_reserve returned in *prior_out). Takes the registry lock.
+// srv_abort — phase 2 (failure). RESERVING -> `prior` (the value the
+// reserve phase returned in *prior_out). Takes the registry lock.
 void srv_abort(struct SrvService *svc, enum srv_state prior);
-
-// srv_lookup — find a service by name. Returns the entry for any
-// non-FREE state (LIVE / RESERVING / TOMBSTONED) — the caller inspects
-// `state`. Returns NULL if no entry matches. Takes the registry lock.
-//
-// P5-corvus-srv-impl-a3's devsrv walk uses this; a2 exercises it in tests.
-struct SrvService *srv_lookup(const char *name, u8 name_len);
 
 // srv_lookup_in — find a service by name in an explicit `reg` (the devsrv
 // open=connect / walk internal lookup). The in-kernel test harness uses it
@@ -371,24 +344,6 @@ int devsrv_post_listener(struct Proc *p, struct Spoor *root,
 // A client Proc reaches corvus over its own kernel-minted connection (a
 // SrvConn, <thylacine/srvconn.h>). The kernel mints + owns all transport
 // (invariant C-23). CORVUS-DESIGN.md §6.2.
-
-// srv_conn_open_for_proc — the client-connect path: mint a /srv connection
-// for `p` to the LIVE service `name`, enqueue it on the service's accept
-// backlog, and install a non-transferable KObj_Srv connection handle
-// (obj = the SrvConn) in p's handle table. Wakes a poster blocked in
-// SYS_SRV_ACCEPT.
-//
-// Returns the connection handle (hidx >= 0) on success, -1 on: bad args /
-// no LIVE service of that name / the global live-connection cap
-// (SRV_MAX_CONNS) is reached / the service's accept backlog is full /
-// kmalloc OOM / p's handle table is full.
-//
-// The Dev `open` vtable slot cannot host this — it returns a Spoor, but a
-// client connection handle is KObj_Srv with a SrvConn obj (the magic
-// discriminator, <thylacine/srvconn.h>), not a Spoor. The production
-// client-open syscall (P5-corvus-srv-impl-b, once joey mounts /srv) wraps
-// this core; at a3b it is exercised directly by tests.
-int srv_conn_open_for_proc(struct Proc *p, const char *name, u8 name_len);
 
 // devsrv_open_connect — the open=connect core (stalk-3b-β; STALK-DESIGN.md §5.2).
 // `c` is a /srv/<name> service-ref Spoor (devsrv_walk's product); mint a SrvConn

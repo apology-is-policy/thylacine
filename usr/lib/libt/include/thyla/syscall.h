@@ -57,10 +57,11 @@ enum {
     T_SYS_SPAWN_WITH_FDS = 23, // P5-stratumd-stub-b: spawn + pre-install fds in child
     T_SYS_SPAWN_WITH_CAPS = 24, // P5-spawn-caps: spawn + grant cap-subset to child
     T_SYS_SPAWN_FULL  = 25, // P5-spawn-full: spawn + inherit fds + grant cap-subset
-    // 26..29 — registered in <thylacine/syscall.h> (P5-corvus-srv + P5-poll);
-    // libt has no C-side wrappers for them at v1.0 (corvus reaches them
-    // via libthyla-rs; joey uses only the client-side wrapper below).
-    T_SYS_SRV_CONNECT = 30,      // P5-corvus-srv-impl-b2: client-side /srv open
+    // 26..30 + 43 — RETIRED/reserved (stalk-3c): SYS_POST_SERVICE (26),
+    // SYS_SRV_CONNECT (30), SYS_POST_SERVICE_BYTE (43) are gone. Posting is
+    // SYS_WALK_CREATE on a /srv dir (create=post; DMSRVBYTE selects mode);
+    // connecting is SYS_OPEN on /srv/<name> (open=connect). No libt wrapper
+    // for the retired numbers; 27..29 (srv_accept / srv_peer / poll) remain.
     T_SYS_SPAWN_WITH_PERMS = 31, // P5-corvus-srv-impl-b3a: spawn_full + perm_flags
     T_SYS_CAP_GRANT   = 32,      // P5-hostowner-b-b: register pending cap grant
     T_SYS_CAP_USE     = 33,      // P5-hostowner-b-b: redeem pending cap grant
@@ -1036,40 +1037,6 @@ static inline long t_poll(void *fds, unsigned long nfds, long timeout_ms) {
         "svc #0"
         : "+r"(x0)
         : "r"(x1), "r"(x2), "r"(x8)
-        : "memory", "cc"
-    );
-    return x0;
-}
-
-// t_srv_connect — open a client-side /srv connection to `name`, walking
-// one path component `path` (typically `"ctl"`). The kernel mints a
-// SrvConn, drives the full handshake (Tversion + Tattach + Twalk(path)
-// + Tlopen) on the caller's behalf, and returns a KObj_Srv client
-// handle. Subsequent t_read / t_write on the returned handle translate
-// to Tread / Twrite at the open fid.
-//
-// Per-Proc cap: at v1.0 a Proc may hold at most ONE concurrent /srv
-// client connection (kernel/srvconn.c SRV_CONN_PER_PROC_MAX=1). A
-// second t_srv_connect from a Proc that already holds one returns -1
-// until t_close releases the prior handle.
-//
-// Returns the client KObj_Srv fd (>=0) on success, -1 on:
-//   - service unposted (no LIVE service named `name`)
-//   - cap exhausted (this Proc already holds a connection)
-//   - handshake refused by the server (bad Rversion/Rattach/Rwalk/Rlopen)
-//   - kernel-side OOM / handle table full
-__attribute__((always_inline))
-static inline long t_srv_connect(const char *name, size_t name_len,
-                                 const char *path, size_t path_len) {
-    register long x0 __asm__("x0") = (long)(unsigned long)name;
-    register long x1 __asm__("x1") = (long)name_len;
-    register long x2 __asm__("x2") = (long)(unsigned long)path;
-    register long x3 __asm__("x3") = (long)path_len;
-    register long x8 __asm__("x8") = T_SYS_SRV_CONNECT;
-    __asm__ volatile (
-        "svc #0"
-        : "+r"(x0)
-        : "r"(x1), "r"(x2), "r"(x3), "r"(x8)
         : "memory", "cc"
     );
     return x0;

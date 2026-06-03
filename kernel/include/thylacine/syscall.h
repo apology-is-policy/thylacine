@@ -331,28 +331,10 @@ enum {
     // failure conditions.
     SYS_SPAWN_FULL   = 25,   // arg: name_va, name_len, fd_list_va, fd_count, cap_mask
 
-    // P5-corvus-srv-impl-a2: SYS_POST_SERVICE(name_va, name_len) →
-    // service_handle / -1
-    //   x0 = name_va    user-VA pointer to the service-name bytes
-    //   x1 = name_len   bytes; 1..SRV_NAME_MAX (32; <thylacine/devsrv.h>)
-    // Register the calling Proc as the 9P server for /srv/<name> in the
-    // kernel service registry (CORVUS-DESIGN.md §6.1; ARCH §9.4 / §11.2c)
-    // and return a KObj_Srv service handle. The kernel creates and owns
-    // all transport (invariant C-23). corvus calls SYS_POST_SERVICE
-    // ("corvus") at startup.
-    //
-    // Gated on the one-way joey-stamped PROC_FLAG_MAY_POST_SERVICE bit:
-    // an unmarked Proc cannot post or hijack a name. A name with a live
-    // server is not displaceable; a TOMBSTONED name (its prior poster
-    // exited) is re-postable only by a marked Proc.
-    //
-    // Returns the service handle (hidx ≥ 0) on success, -1 on:
-    //   - caller lacks PROC_FLAG_MAY_POST_SERVICE
-    //   - name_len out of range / name_va bound violation
-    //   - name contains a non-identifier byte (allowed: 0x21..0x7e, no '/')
-    //   - the name already has a live or in-flight server
-    //   - the service registry is full / handle table full
-    SYS_POST_SERVICE = 26,   // arg: name_va (x0), name_len (x1)
+    // 26 — RETIRED (stalk-3c). Was SYS_POST_SERVICE. Posting a /srv service
+    // is now SYS_WALK_CREATE on a /srv directory (create=post; the create
+    // perm's DMSRVBYTE bit selects byte- vs 9P-mode) -> devsrv_post_listener.
+    // The number stays reserved: no reuse, no compat shim.
 
     // P5-corvus-srv-impl-a3b: SYS_SRV_ACCEPT(service_handle) →
     // connection_handle / -1
@@ -426,40 +408,10 @@ enum {
     // fd; the call as a whole still returns a non-negative count.
     SYS_POLL         = 29,   // arg: fds_va (x0), nfds (x1), timeout_ms (x2)
 
-    // P5-corvus-srv-impl-b2: SYS_SRV_CONNECT(name_va, name_len, path_va,
-    //                                        path_len) → KObj_Srv handle
-    //   x0 = name_va        user-VA pointer to the service name bytes
-    //                       (e.g. "corvus")
-    //   x1 = name_len       1..SRV_NAME_MAX = 31
-    //   x2 = path_va        user-VA pointer to the path bytes within the
-    //                       service's 9P namespace (e.g. "ctl"). May be 0
-    //                       (with path_len == 0) to leave the kernel-side
-    //                       open at the 9P root fid (Tversion + Tattach
-    //                       only, no Twalk).
-    //   x3 = path_len       0..SRVCONN_PATH_MAX = 64
-    //
-    // The BYTE-mode client-open path for the `/srv` mechanism
-    // (CORVUS-DESIGN.md §6.2). srv_conn_open_for_proc mints the SrvConn,
-    // enqueues it on the service's accept backlog, and installs a non-
-    // transferable KObj_Srv handle in the caller's table; the returned fd
-    // is raw-byte (SYS_READ / SYS_WRITE push/pull on c2s / s2c).
-    //
-    // Post stalk-3b-β this surface is BYTE-mode only (pouch AF_UNIX
-    // sockets). A 9P-mode service is connected via open=connect (open a
-    // /srv/<name> path -> devsrv_open_connect drives Tversion + Tattach
-    // and returns a dev9p root Spoor) -- a SYS_SRV_CONNECT to a 9P-mode
-    // service returns -1. path_len must be 0 in byte mode (no 9P fid to
-    // walk). The per-Proc connection cap was removed (3a-audit F4).
-    //
-    // Returns -1 on:
-    //   - bad name_len / path_len bounds
-    //   - the named service is not LIVE (missing / RESERVING / TOMBSTONED)
-    //   - the named service is 9P-mode (use open=connect)
-    //   - a non-empty path_len in byte mode
-    //   - global SRV_MAX_CONNS cap reached
-    //   - accept-backlog full
-    //   - handle-table full
-    SYS_SRV_CONNECT  = 30,   // arg: name_va, name_len, path_va, path_len
+    // 30 — RETIRED (stalk-3c). Was SYS_SRV_CONNECT. Connecting to a /srv
+    // service is now SYS_OPEN on /srv/<name> (open=connect -> devsrv_open_
+    // connect: a 9P-mode service yields a dev9p root Spoor, a byte-mode
+    // service a CSRVCLIENT conn Spoor). Reserved: no reuse, no compat shim.
 
     // P5-corvus-srv-impl-b3a: SYS_SPAWN_WITH_PERMS(name_va, name_len,
     //                                              fd_list_va, fd_count,
@@ -755,33 +707,9 @@ enum {
     // path is undefined; v1.0 reaches sched() unconditionally.
     SYS_THREAD_EXIT  = 42,   // no args
 
-    // SYS_POST_SERVICE_BYTE — register a /srv service in RAW BYTE MODE.
-    // P6-pouch-sockets (sub-chunk 12). Identical wire shape to
-    // SYS_POST_SERVICE (name_va, name_len → KObj_Srv listener handle)
-    // but the service entry's transport mode is SRV_MODE_BYTE instead
-    // of SRV_MODE_9P. Effects propagate to every connection minted
-    // against this listener:
-    //   - SYS_srv_connect returns a KObj_Srv handle ready for raw byte
-    //     I/O the moment the SrvConn is enqueued on the accept backlog
-    //     (no 9P handshake); a non-empty path is REFUSED.
-    //   - sys_read/write_for_proc's KObj_SRV arm routes through
-    //     srvconn_client_send/recv (raw c2s/s2c). Post stalk-3b-β the
-    //     KObj_SRV r/w arm is byte-mode only; 9P connections are
-    //     open=connect dev9p-root Spoors, not KObj_Srv handles.
-    //
-    // Why a separate syscall instead of an `int mode` arg on
-    // SYS_POST_SERVICE: the existing svc dispatcher reads x0/x1 only.
-    // Adding x2 for mode would interpret uninitialized x2 (corvus's
-    // wrapper passes nothing) as garbage mode — a latent ABI hazard.
-    // A new syscall number is the safer extension.
-    //
-    // Same post-gate as SYS_POST_SERVICE: PROC_FLAG_MAY_POST_SERVICE
-    // is required.
-    //
-    //   arg: name_va (x0), name_len (x1)
-    //   returns: KObj_Srv listener handle (>=0) on success, -1 on
-    //            gate fail / bad name / duplicate / OOM / registry full
-    SYS_POST_SERVICE_BYTE = 43,
+    // 43 — RETIRED (stalk-3c). Was SYS_POST_SERVICE_BYTE. Byte-mode posting
+    // is now SYS_WALK_CREATE on a /srv dir with the DMSRVBYTE perm bit
+    // (create=post). Reserved: no reuse, no compat shim.
 
     // P6-pouch-signals-impl (sub-chunk 13a): the note delivery primitive.
     // Design in ARCH §7.6.1-§7.6.8 (binding scripture at 237f096); the

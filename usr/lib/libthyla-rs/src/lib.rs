@@ -118,15 +118,15 @@ pub const T_SYS_SET_TRACEABLE: u64   = 18;
 pub const T_SYS_EXPLICIT_BZERO: u64  = 19;
 pub const T_SYS_GETRANDOM: u64       = 20;
 pub const T_SYS_SPAWN_FULL: u64      = 25;
-// P5-corvus-srv-impl-a/b: /srv mechanism — kernel-owned 9P transport.
-pub const T_SYS_POST_SERVICE: u64    = 26;
+// /srv mechanism — kernel-owned 9P transport. 26 (post) + 30 (connect) are
+// RETIRED (stalk-3c): posting is SYS_WALK_CREATE on a /srv dir (create=post),
+// connecting is SYS_OPEN on /srv/<name> (open=connect); accept + peer remain.
 pub const T_SYS_SRV_ACCEPT: u64      = 27;
 pub const T_SYS_SRV_PEER: u64        = 28;
 // P5-poll-a: the multi-fd wait/wake primitive. Backs corvus's main loop
 // (a single thread serving N /srv/corvus connections) and the future
 // musl `poll(2)` shim. ABI matches Linux event values for shim triviality.
 pub const T_SYS_POLL: u64            = 29;
-pub const T_SYS_SRV_CONNECT: u64     = 30;
 // P5-corvus-srv-impl-b3a: spawn_full + perm_flags (atomic kernel stamp
 // of PROC_FLAG_* bits on the spawned child, gated on caller console-attach).
 pub const T_SYS_SPAWN_WITH_PERMS: u64 = 31;
@@ -1205,33 +1205,6 @@ pub struct TSrvPeerInfo {
 }
 const _: () = assert!(core::mem::size_of::<TSrvPeerInfo>() == 40);
 
-// t_post_service — register the calling Proc as the server for service
-// `name`. Requires PROC_FLAG_MAY_POST_SERVICE (the joey-stamped post
-// gate; see t_spawn_with_perms below). Returns a non-negative KObj_Srv
-// listener handle on success, -1 on:
-//   - gate missing (no PROC_FLAG_MAY_POST_SERVICE)
-//   - bad name (zero len, >SRV_NAME_MAX, NUL bytes)
-//   - registry full / name already posted by a live Proc / OOM
-//
-// On success, future client SYS_SRV_CONNECT(name, ...) calls flow
-// through this listener and become t_srv_accept-able. The listener
-// handle is NON-TRANSFERABLE (KObj_Srv partition of handles.tla).
-//
-// Safety: `name` must point to `name_len` readable bytes in valid
-// user-VA memory.
-#[inline(always)]
-pub unsafe fn t_post_service(name: *const u8, name_len: usize) -> i64 {
-    let mut x0: i64 = name as i64;
-    asm!(
-        "svc #0",
-        inlateout("x0") x0,
-        in("x1") name_len as u64,
-        in("x8") T_SYS_POST_SERVICE,
-        options(nostack)
-    );
-    x0
-}
-
 // t_srv_accept — block until a client connects, return the server-side
 // endpoint as a KObj_Spoor handle (byte I/O — plain t_read/t_write). The
 // handshake (Tversion + Tattach + Twalk + Tlopen) was driven by the
@@ -1291,42 +1264,6 @@ pub unsafe fn t_srv_peer(connection_handle: i64, out: *mut TSrvPeerInfo) -> i64 
         inlateout("x0") x0,
         in("x1") out as u64,
         in("x8") T_SYS_SRV_PEER,
-        options(nostack)
-    );
-    x0
-}
-
-// t_srv_connect — open a client-side connection to `name` and walk one
-// path component `path` (typically `"ctl"` for the Stratum-style 9P
-// /srv pattern). The kernel mints a SrvConn, drives the full handshake
-// (Tversion + Tattach + Twalk(path) + Tlopen) on the caller's behalf,
-// and returns a KObj_Srv client handle. Subsequent t_read / t_write on
-// the returned handle translate to Tread / Twrite at the open fid.
-//
-// Per-Proc cap: at v1.0 a Proc may hold at most ONE concurrent /srv
-// client connection (kernel/srvconn.c SRV_CONN_PER_PROC_MAX=1). A
-// second t_srv_connect from a Proc that already holds one returns -1
-// until t_close releases the prior handle.
-//
-// Returns the client KObj_Srv fd (>=0) on success, -1 on:
-//   - service unposted (no LIVE service named `name`)
-//   - cap exhausted (this Proc already holds a connection)
-//   - handshake refused by the server (bad Rversion/Rattach/Rwalk/Rlopen)
-//   - kernel-side OOM / handle table full
-//
-// Safety: `name` / `path` must point to `name_len` / `path_len`
-// readable bytes in valid user-VA memory.
-#[inline(always)]
-pub unsafe fn t_srv_connect(name: *const u8, name_len: usize,
-                            path: *const u8, path_len: usize) -> i64 {
-    let mut x0: i64 = name as i64;
-    asm!(
-        "svc #0",
-        inlateout("x0") x0,
-        in("x1") name_len as u64,
-        in("x2") path as u64,
-        in("x3") path_len as u64,
-        in("x8") T_SYS_SRV_CONNECT,
         options(nostack)
     );
     x0

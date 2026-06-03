@@ -688,18 +688,14 @@ static struct Handle *sys_lookup_rw_handle(struct Proc *p, hidx_t h,
     struct Handle *slot = handle_get(p, h);
     if (!slot)                                       return NULL;
     if ((slot->rights & required) != required)       return NULL;
-    switch (slot->kind) {
-    case KOBJ_SPOOR:
-        return slot;
-    case KOBJ_SRV: {
-        if (!slot->obj)                              return NULL;
-        u64 m = *(const u64 *)slot->obj;
-        if (m != SRV_CONN_MAGIC)                     return NULL;
-        return slot;
-    }
-    default:
-        return NULL;
-    }
+    // Only KOBJ_SPOOR is read/write-able. A KOBJ_SRV handle is a /srv
+    // listener (its obj is a SrvService) -- not a byte stream. The client +
+    // accepted connection endpoints are KOBJ_SPOOR conn Spoors driven by
+    // devsrv read/write (server side, and CSRVCLIENT client side). The
+    // client-side KObj_Srv conn handle that once routed raw bytes through
+    // here was retired with SYS_SRV_CONNECT (stalk-3c).
+    if (slot->kind != KOBJ_SPOOR)                    return NULL;
+    return slot;
 }
 
 // Common user-VA range check (NULL / overflow / past UACCESS bound).
@@ -715,93 +711,49 @@ static bool sys_validate_user_buf(u64 buf_va, u64 len) {
 // Inner — testable with kernel-side buf. Returns bytes written (>=0)
 // or -1 on bad handle / wrong kind / missing rights / dev error.
 //
-// Dispatches by handle kind: KOBJ_SPOOR routes through the Dev `.write`
-// vtable (Spoor.offset); KOBJ_SRV (a byte-mode SrvConn client handle)
-// routes through srvconn_client_send — raw bytes onto the c2s ring.
+// Only KOBJ_SPOOR is writable (sys_lookup_rw_handle filters): the write
+// routes through the Dev `.write` vtable (Spoor.offset). A byte-mode /srv
+// connection endpoint is itself a KOBJ_SPOOR conn Spoor, so its bytes ride
+// this path too -- devsrv_write picks the server arm (srvconn_server_send)
+// or the CSRVCLIENT client arm (srvconn_client_send) by the conn direction.
+// The client-side KObj_Srv conn handle that once routed here was retired
+// with SYS_SRV_CONNECT (stalk-3c); the kernel-attached no-direct-I/O guard
+// moved with it into devsrv_write.
 s64 sys_write_for_proc(struct Proc *p, hidx_t h, const u8 *kbuf, u64 len) {
     if (!p || (!kbuf && len > 0))                    return -1;
     struct Handle *slot = sys_lookup_rw_handle(p, h, RIGHT_WRITE);
     if (!slot)                                       return -1;
     if (len == 0)                                    return 0;
 
-    switch (slot->kind) {
-    case KOBJ_SPOOR: {
-        struct Spoor *c = (struct Spoor *)slot->obj;
-        if (!c || !c->dev || !c->dev->write)         return -1;
-        long n = c->dev->write(c, kbuf, (long)len, c->offset);
-        if (n < 0)                                   return -1;
-        c->offset += n;
-        return (s64)n;
-    }
-    case KOBJ_SRV: {
-        // sys_lookup_rw_handle validated SRV_CONN_MAGIC. A KOBJ_SRV
-        // handle is BYTE-mode only post stalk-3b-β: the 9P connect path
-        // is open=connect (devsrv_open_connect returns a dev9p root
-        // Spoor, never a KOBJ_SRV handle), and SYS_SRV_CONNECT rejects a
-        // 9P-mode service. So this arm always routes raw bytes through
-        // srvconn_client_send (chan_produce on c2s) -- no 9P framing.
-        struct SrvConn *cn = (struct SrvConn *)slot->obj;
-        // R1 F3 close: refuse raw byte I/O on a kernel-attached SrvConn.
-        // After SYS_ATTACH_9P_SRV wraps the conn, the c2s/s2c rings are
-        // load-bearing for the kernel 9P client's Twalk/Tread/Twrite
-        // stream. A concurrent userspace write would interleave bytes
-        // into the c2s ring out-of-band w.r.t. the 9P session, corrupting
-        // the wire. Reject upfront.
-        if (srvconn_is_kernel_attached(cn))          return -1;
-        // Fail-closed: a KOBJ_SRV handle on a non-byte SrvConn is a
-        // contract violation (no such handle is mintable post-D).
-        if (!__atomic_load_n(&cn->byte_mode, __ATOMIC_ACQUIRE)) return -1;
-        srvconn_set_client_deadline(cn, timer_now_ns() + SRVCONN_OP_DEADLINE_NS);
-        long n = srvconn_client_send(cn, kbuf, (long)len);
-        if (n < 0)                                   return -1;
-        return (s64)n;
-    }
-    default:
-        return -1;   // unreachable — sys_lookup_rw_handle filters
-    }
+    struct Spoor *c = (struct Spoor *)slot->obj;
+    if (!c || !c->dev || !c->dev->write)             return -1;
+    long n = c->dev->write(c, kbuf, (long)len, c->offset);
+    if (n < 0)                                       return -1;
+    c->offset += n;
+    return (s64)n;
 }
 
 // Inner — testable with kernel-side buf. Returns bytes read (>=0; 0
 // on EOF) or -1 on bad handle / wrong kind / missing rights / dev error.
 //
-// Dispatches by handle kind: KOBJ_SPOOR routes through the Dev `.read`
-// vtable (Spoor.offset); KOBJ_SRV (a byte-mode SrvConn client handle)
-// routes through srvconn_client_recv — raw bytes off the s2c ring.
+// Only KOBJ_SPOOR is readable (sys_lookup_rw_handle filters): the read
+// routes through the Dev `.read` vtable (Spoor.offset). A byte-mode /srv
+// connection endpoint is itself a KOBJ_SPOOR conn Spoor -- devsrv_read picks
+// the server arm (srvconn_server_recv*) or the CSRVCLIENT client arm
+// (srvconn_client_recv) by the conn direction. The client-side KObj_Srv conn
+// handle that once routed here was retired with SYS_SRV_CONNECT (stalk-3c).
 s64 sys_read_for_proc(struct Proc *p, hidx_t h, u8 *kbuf, u64 len) {
     if (!p || (!kbuf && len > 0))                    return -1;
     struct Handle *slot = sys_lookup_rw_handle(p, h, RIGHT_READ);
     if (!slot)                                       return -1;
     if (len == 0)                                    return 0;
 
-    switch (slot->kind) {
-    case KOBJ_SPOOR: {
-        struct Spoor *c = (struct Spoor *)slot->obj;
-        if (!c || !c->dev || !c->dev->read)          return -1;
-        long n = c->dev->read(c, kbuf, (long)len, c->offset);
-        if (n < 0)                                   return -1;
-        c->offset += n;
-        return (s64)n;
-    }
-    case KOBJ_SRV: {
-        // A KOBJ_SRV handle is BYTE-mode only post stalk-3b-β (see the
-        // write arm). Route through srvconn_client_recv (chan_consume on
-        // s2c); the deadline machinery still bounds the blocking wait
-        // (srvconn_client_recv's tsleep against client_deadline_ns).
-        struct SrvConn *cn = (struct SrvConn *)slot->obj;
-        // R1 F3 close: refuse raw byte I/O on a kernel-attached SrvConn.
-        // After SYS_ATTACH_9P_SRV the c2s/s2c rings carry the kernel
-        // client's 9P stream; a userspace recv would drain Rwalk/Rread
-        // bytes meant for the kernel client and corrupt the session.
-        if (srvconn_is_kernel_attached(cn))          return -1;
-        if (!__atomic_load_n(&cn->byte_mode, __ATOMIC_ACQUIRE)) return -1;
-        srvconn_set_client_deadline(cn, timer_now_ns() + SRVCONN_OP_DEADLINE_NS);
-        long n = srvconn_client_recv(cn, kbuf, (long)len);
-        if (n < 0)                                   return -1;
-        return (s64)n;
-    }
-    default:
-        return -1;
-    }
+    struct Spoor *c = (struct Spoor *)slot->obj;
+    if (!c || !c->dev || !c->dev->read)              return -1;
+    long n = c->dev->read(c, kbuf, (long)len, c->offset);
+    if (n < 0)                                       return -1;
+    c->offset += n;
+    return (s64)n;
 }
 
 static s64 sys_write_handler(u64 hraw, u64 buf_va, u64 len) {
@@ -814,9 +766,9 @@ static s64 sys_write_handler(u64 hraw, u64 buf_va, u64 len) {
 
     if (len == 0) {
         // Validate the handle even for zero-length writes (POSIX
-        // discipline: bad fd should return -EBADF regardless of
-        // len). Accepts both KOBJ_SPOOR + KOBJ_SRV (SrvConn) so a
-        // zero-length write to a /srv client handle still validates.
+        // discipline: bad fd should return -EBADF regardless of len).
+        // Only KOBJ_SPOOR validates (sys_lookup_rw_handle); a /srv conn
+        // endpoint is itself a KOBJ_SPOOR conn Spoor, so it validates here.
         if (!sys_lookup_rw_handle(p, (hidx_t)hraw, RIGHT_WRITE))
                                                      return -1;
         return 0;
@@ -4235,130 +4187,6 @@ static s64 sys_wait_pid_handler(u64 status_out_va) {
 }
 
 // =============================================================================
-// SYS_POST_SERVICE / SYS_POST_SERVICE_BYTE — register the caller as a /srv
-// service (P5-corvus-srv; P6-pouch-sockets sub-chunk 12 added byte mode).
-// =============================================================================
-//
-// Registers the calling Proc as the server for /srv/<name> and returns a
-// KObj_Srv service handle. CORVUS-DESIGN.md §6.1 + POUCH-DESIGN.md §6.2;
-// spec contract specs/corvus.tla::PostService (the marked-poster gate +
-// the reserve/commit two-phase).
-//
-// Three entry points share one core:
-//   - sys_post_service_for_proc(p, name, len) — the 3-arg legacy path
-//     (default SRV_MODE_9P); kernel tests + corvus depend on this
-//     signature unchanged.
-//   - sys_post_service_byte_for_proc(p, name, len) — the byte-mode
-//     variant (SRV_MODE_BYTE); pouch's AF_UNIX bind() uses this.
-//   - sys_post_service_core(p, name, len, mode) — the shared
-//     implementation. NOT exposed to tests.
-//
-// Returns the service handle (hidx ≥ 0) on success, -1 on failure.
-static int sys_post_service_core(struct Proc *p, const char *name,
-                                  size_t name_len, enum srv_mode mode) {
-    if (!p)                                            return -1;
-    if (!name)                                         return -1;
-    if (name_len == 0 || name_len > SRV_NAME_MAX)       return -1;
-    if (mode != SRV_MODE_9P && mode != SRV_MODE_BYTE)   return -1;
-
-    // Post-gate (corvus.tla PostService precondition `p \in service_-
-    // marked`): the caller must carry the one-way joey-stamped bit.
-    // Fail-closed — proc_may_post_service returns false for a bad Proc.
-    if (!proc_may_post_service(p))                      return -1;
-
-    // Service names are short identifiers: printable ASCII, no '/' (a
-    // path separator the P5-corvus-srv-impl-a3 walk splits on), no
-    // control bytes. Reject anything else so a name can never be
-    // mis-parsed once it is a /srv path component.
-    for (size_t i = 0; i < name_len; i++) {
-        unsigned char c = (unsigned char)name[i];
-        if (c < 0x21u || c > 0x7eu || c == '/')         return -1;
-    }
-
-    // Phase 1: reserve a registry slot. The entry goes RESERVING — it is
-    // never observably LIVE until the handle below exists.
-    struct SrvService *svc = NULL;
-    enum srv_state     prior = SRV_STATE_FREE;
-    if (srv_reserve(name, (u8)name_len, p, mode, &svc, &prior) != 0) return -1;
-
-    // Install the KObj_Srv service handle. The handle's obj is the
-    // registry entry; the entry outlives the handle (its lifetime is the
-    // poster Proc's, via the exits() tombstone), so handle close does not
-    // free it — handle_release_obj's KOBJ_SRV case is a no-op for a
-    // service object.
-    hidx_t h = handle_alloc(p, KOBJ_SRV, RIGHT_READ | RIGHT_WRITE, svc);
-    if (h < 0) {
-        // Phase 2 (failure): roll the reservation back to its prior state
-        // (FREE for a fresh post, TOMBSTONED for a rebind) so a retry —
-        // or another poster — can still claim the name.
-        srv_abort(svc, prior);
-        return -1;
-    }
-
-    // Phase 2 (success): RESERVING -> LIVE. Infallible.
-    srv_commit(svc);
-    return (int)h;
-}
-
-// Public 3-arg wrapper — the signature kernel tests + the existing
-// SYS_POST_SERVICE handler call. SRV_MODE_9P is the historical default
-// (the only mode pre-P6-pouch-sockets).
-int sys_post_service_for_proc(struct Proc *p, const char *name,
-                              size_t name_len) {
-    return sys_post_service_core(p, name, name_len, SRV_MODE_9P);
-}
-
-// Public 3-arg byte-mode wrapper — used by the SYS_POST_SERVICE_BYTE
-// handler. Same shape; SRV_MODE_BYTE flips the SrvService transport.
-int sys_post_service_byte_for_proc(struct Proc *p, const char *name,
-                                    size_t name_len) {
-    return sys_post_service_core(p, name, name_len, SRV_MODE_BYTE);
-}
-
-// post_service_common — shared handler body for SYS_POST_SERVICE and
-// SYS_POST_SERVICE_BYTE. Forks only on the `mode` arg passed through to
-// sys_post_service_core. All other validation (length, user-VA,
-// per-byte copy) is identical.
-static s64 sys_post_service_common(u64 name_va, u64 name_len_raw,
-                                    enum srv_mode mode) {
-    struct Thread *t = current_thread();
-    if (!t)                                            return -1;
-    struct Proc *p = t->proc;
-    if (!p)                                            return -1;
-
-    if (name_len_raw == 0 || name_len_raw > SRV_NAME_MAX) return -1;
-
-    // F6 close (P5-corvus-srv-impl audit): validate the full user-VA
-    // range BEFORE the per-byte copy, matching every other syscall
-    // surface that takes a user buffer (sys_spawn_*, sys_srv_peer,
-    // sys_srv_connect). The per-byte uaccess_load_u8 IS fault-safe
-    // (returns -1 on a bad address), but a pre-validated range fails
-    // a bad name_va before any byte is read into kernel scratch —
-    // matches the pattern documented in sys_validate_user_buf.
-    if (!sys_validate_user_buf(name_va, name_len_raw)) return -1;
-
-    // Copy the name from user-VA into kernel scratch, per-byte
-    // uaccess_load_u8 (same shape as SYS_SPAWN's name copy). name_len_raw
-    // ≤ SRV_NAME_MAX is the buffer bound.
-    char name[SRV_NAME_MAX];
-    for (u64 i = 0; i < name_len_raw; i++) {
-        u8 b;
-        if (uaccess_load_u8(name_va + i, &b) != 0)      return -1;
-        name[i] = (char)b;
-    }
-
-    return (s64)sys_post_service_core(p, name, (size_t)name_len_raw, mode);
-}
-
-static s64 sys_post_service_handler(u64 name_va, u64 name_len_raw) {
-    return sys_post_service_common(name_va, name_len_raw, SRV_MODE_9P);
-}
-
-static s64 sys_post_service_byte_handler(u64 name_va, u64 name_len_raw) {
-    return sys_post_service_common(name_va, name_len_raw, SRV_MODE_BYTE);
-}
-
-// =============================================================================
 // SYS_SRV_ACCEPT — accept a kernel-minted /srv connection (P5-corvus-srv).
 // =============================================================================
 //
@@ -4532,124 +4360,6 @@ static s64 sys_srv_peer_handler(u64 conn_h_raw, u64 out_va) {
         }
     }
     return 0;
-}
-
-// =============================================================================
-// SYS_SRV_CONNECT — client-open a BYTE-mode /srv service (P6-pouch-sockets).
-//
-// Per CORVUS-DESIGN.md §6.2. Composes srv_conn_open_for_proc (mints +
-// enqueues the SrvConn and installs a non-transferable KObj_Srv handle in
-// the caller's table) with a byte-mode readiness check. The returned
-// KObj_Srv handle is raw-byte: SYS_READ / SYS_WRITE push/pull bytes on
-// the c2s / s2c rings (srvconn_client_send / srvconn_client_recv).
-//
-// Post stalk-3b-β this is the BYTE-mode-only client surface (pouch
-// AF_UNIX sockets). A 9P-mode service is connected via open=connect
-// (stalk -> devsrv_open_connect -> a dev9p root Spoor), NOT here; a
-// SYS_SRV_CONNECT to a 9P-mode service is rejected. The per-Proc
-// connection cap was removed (3a-audit F4): a session needs corvus AND
-// its stratum-fs concurrently.
-//
-// On any failure the handler closes the just-installed handle —
-// handle_close's release arm tears the SrvConn down + drops both the
-// create reference and the backlog-side reference (via
-// srv_proc_exit_notify on the SERVER side when the backlog is drained,
-// or directly when the accept thread pops it and finds it torn).
-// =============================================================================
-
-int sys_srv_connect_for_proc(struct Proc *p,
-                              const char *name, size_t name_len,
-                              const u8 *path, size_t path_len) {
-    if (!p)                                              return -1;
-    if (!name || name_len == 0 || name_len > SRV_NAME_MAX) return -1;
-    if (path_len > SRVCONN_PATH_MAX)                     return -1;
-    if (path_len > 0 && !path)                           return -1;
-
-    // Phase 1: mint + install the KObj_Srv handle. A failure here leaves
-    // no state behind. The mint also propagates the service's transport
-    // mode onto the SrvConn (cn->byte_mode is set BEFORE Phase 1 enqueues
-    // the SrvConn on the accept backlog; we read it here without a lock).
-    int h = srv_conn_open_for_proc(p, name, (u8)name_len);
-    if (h < 0) return -1;
-
-    // Phase 2: drive the kernel-side 9P handshake against the now-installed
-    // SrvConn. Look the handle up to reach the SrvConn — srv_conn_open_for_
-    // proc just installed it under the caller's lock, so the handle is
-    // observable here. handle_get validates HANDLE_MAGIC + bounds.
-    struct Handle *slot = handle_get(p, (hidx_t)h);
-    if (!slot || slot->kind != KOBJ_SRV || !slot->obj) {
-        // Should not happen — srv_conn_open_for_proc just installed it.
-        handle_close(p, (hidx_t)h);
-        return -1;
-    }
-    if (*(const u64 *)slot->obj != SRV_CONN_MAGIC) {
-        handle_close(p, (hidx_t)h);
-        return -1;
-    }
-    struct SrvConn *cn = (struct SrvConn *)slot->obj;
-
-    // Post stalk-3b-β SYS_SRV_CONNECT is BYTE-mode only. A byte-mode
-    // service is ready for raw byte I/O the moment it is enqueued (no
-    // handshake). A non-empty path makes no sense in byte mode (there is
-    // no 9P fid to walk against); reject up-front. F5 close (P6-pouch-
-    // sockets audit): atomic acquire pairs srvconn_set_byte_mode's
-    // release in srv_conn_open_for_proc.
-    if (__atomic_load_n(&cn->byte_mode, __ATOMIC_ACQUIRE)) {
-        if (path_len > 0) {
-            handle_close(p, (hidx_t)h);
-            return -1;
-        }
-        return h;
-    }
-
-    // A 9P-mode service is NOT connectable via SYS_SRV_CONNECT post
-    // stalk-3b-β -- the 9P connect path is open=connect
-    // (devsrv_open_connect drives Tversion/Tattach via
-    // srvconn_attach_dev9p_root and returns a dev9p root Spoor). The
-    // embedded per-SrvConn 9P client that once drove the handshake here
-    // is retired. Fail-closed.
-    handle_close(p, (hidx_t)h);
-    return -1;
-}
-
-static s64 sys_srv_connect_handler(u64 name_va, u64 name_len_raw,
-                                    u64 path_va, u64 path_len_raw) {
-    struct Thread *t = current_thread();
-    if (!t)                                              return -1;
-    struct Proc *p = t->proc;
-    if (!p)                                              return -1;
-
-    if (name_len_raw == 0 || name_len_raw > SRV_NAME_MAX) return -1;
-    if (path_len_raw > SRVCONN_PATH_MAX)                  return -1;
-
-    // F6 close (P5-corvus-srv-impl audit): pre-validate the full user-
-    // VA range for each buffer BEFORE the per-byte copy loops. Matches
-    // the discipline of every other handler that takes a user buffer
-    // (sys_spawn_*, sys_srv_peer). The per-byte uaccess_load_u8 IS
-    // fault-safe, but pre-validation catches a bad address before
-    // any byte lands in kernel scratch.
-    if (!sys_validate_user_buf(name_va, name_len_raw)) return -1;
-    if (path_len_raw > 0 && !sys_validate_user_buf(path_va, path_len_raw))
-        return -1;
-
-    // Service name copy-in (per-byte uaccess_load_u8; same shape as
-    // SYS_POST_SERVICE).
-    char name[SRV_NAME_MAX];
-    for (u64 i = 0; i < name_len_raw; i++) {
-        u8 b;
-        if (uaccess_load_u8(name_va + i, &b) != 0)        return -1;
-        name[i] = (char)b;
-    }
-
-    // Path copy-in. path_len_raw == 0 is the "no Twalk" case
-    // (Tversion + Tattach only, open at root_fid).
-    u8 path[SRVCONN_PATH_MAX];
-    for (u64 i = 0; i < path_len_raw; i++) {
-        if (uaccess_load_u8(path_va + i, &path[i]) != 0)  return -1;
-    }
-
-    return (s64)sys_srv_connect_for_proc(p, name, (size_t)name_len_raw,
-                                          path, (size_t)path_len_raw);
 }
 
 // =============================================================================
@@ -5005,16 +4715,6 @@ void syscall_dispatch(struct exception_context *ctx) {
                                                    ctx->regs[4]);
         return;
 
-    case SYS_POST_SERVICE:
-        ctx->regs[0] = (u64)sys_post_service_handler(ctx->regs[0],
-                                                     ctx->regs[1]);
-        return;
-
-    case SYS_POST_SERVICE_BYTE:
-        ctx->regs[0] = (u64)sys_post_service_byte_handler(ctx->regs[0],
-                                                           ctx->regs[1]);
-        return;
-
     case SYS_SRV_ACCEPT:
         ctx->regs[0] = (u64)sys_srv_accept_handler(ctx->regs[0]);
         return;
@@ -5028,13 +4728,6 @@ void syscall_dispatch(struct exception_context *ctx) {
         ctx->regs[0] = (u64)sys_poll_handler(ctx->regs[0],
                                              ctx->regs[1],
                                              ctx->regs[2]);
-        return;
-
-    case SYS_SRV_CONNECT:
-        ctx->regs[0] = (u64)sys_srv_connect_handler(ctx->regs[0],
-                                                     ctx->regs[1],
-                                                     ctx->regs[2],
-                                                     ctx->regs[3]);
         return;
 
     case SYS_SPAWN_WITH_PERMS:

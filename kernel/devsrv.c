@@ -12,8 +12,9 @@
 // attach + SYS_POST_SERVICE. P5-corvus-srv-impl-a3b adds the
 // per-connection layer:
 //   - the accept backlog on struct SrvService;
-//   - srv_conn_open_for_proc — the client-connect path: mint a SrvConn,
-//     enqueue it, install the client's KObj_Srv connection handle;
+//   - devsrv_open_connect — the open=connect path (SYS_OPEN on /srv/<name>):
+//     mint a SrvConn, enqueue it, and return the connection endpoint Spoor
+//     (a dev9p root for 9P-mode, a CSRVCLIENT conn Spoor for byte-mode);
 //   - srv_accept_blocking — the poster's blocking accept (SYS_SRV_ACCEPT);
 //   - the devsrv walk op + the connection-Spoor read/write/close ops;
 //   - srv_proc_exit_notify draining a dead poster's backlog.
@@ -24,10 +25,11 @@
 // `aux`), not a global. Boot mounts one immortal registry on the kproc
 // `/srv` synthetic dir; a future login (A-5b-body) mounts a fresh
 // per-session registry so a second user's coordinator is structurally
-// unnameable (I-1). The retained SYS_POST_SERVICE / SYS_SRV_CONNECT
-// syscall path (nothing migrates in 3a) resolves the one boot registry
-// via thin wrappers over the internal `_in(reg, ...)` variants; the
-// devsrv vtable ops (walk / close / poll) resolve the registry from the
+// unnameable (I-1). Posting is create=post (SYS_WALK_CREATE on a /srv dir
+// -> devsrv_post_listener; the DMSRVBYTE perm bit selects byte- vs 9P-mode)
+// and connecting is open=connect (SYS_OPEN on /srv/<name> -> devsrv_open_
+// connect); the name-only SYS_POST_SERVICE / SYS_SRV_CONNECT syscalls were
+// retired in stalk-3c. Every devsrv op resolves the registry from the
 // Spoor's aux. Registry-ref discipline mirrors dev9p's attached_owner:
 // every devsrv Spoor instance carrying `aux = reg` holds exactly ONE
 // registry ref, dropped at devsrv_close (which fires only on the Spoor's
@@ -351,13 +353,6 @@ static int srv_reserve_in(struct SrvRegistry *reg,
     return 0;
 }
 
-int srv_reserve(const char *name, u8 name_len, struct Proc *poster,
-                enum srv_mode mode,
-                struct SrvService **svc_out, enum srv_state *prior_out) {
-    return srv_reserve_in(g_boot_srv_registry, name, name_len, poster, mode,
-                          svc_out, prior_out);
-}
-
 void srv_commit(struct SrvService *svc) {
     if (!svc)                          extinction("srv_commit(NULL)");
     if (svc->magic != SRV_SERVICE_MAGIC)
@@ -469,10 +464,6 @@ struct SrvService *srv_lookup_in(struct SrvRegistry *reg,
     return e;
 }
 
-struct SrvService *srv_lookup(const char *name, u8 name_len) {
-    return srv_lookup_in(g_boot_srv_registry, name, name_len);
-}
-
 // srv_proc_exit_notify_in — tombstone every LIVE service in `reg` posted
 // by `p` (matched by stripes), draining each accept backlog. The public
 // srv_proc_exit_notify binds the boot registry: in stalk-3a all posters
@@ -578,116 +569,6 @@ void srv_registry_reset(void) {
 // =============================================================================
 // Per-connection layer (P5-corvus-srv-impl-a3b).
 // =============================================================================
-
-// srv_conn_open_in — the client-connect core against an explicit `reg`.
-// The public srv_conn_open_for_proc binds the boot registry (the retained
-// SYS_SRV_CONNECT byte-mode path). The per-Proc connection cap was removed
-// (stalk-3b-β / 3a-audit F4): a session needs corvus AND its stratum-fs
-// concurrently (STALK-DESIGN.md §5.2). The global SRV_MAX_CONNS soft cap +
-// the per-service accept backlog remain the resource bounds.
-static int srv_conn_open_in(struct SrvRegistry *reg, struct Proc *p,
-                            const char *name, u8 name_len) {
-    if (!reg)                                               return -1;
-    if (!p)                                                return -1;
-    if (!name || name_len == 0 || name_len > SRV_NAME_MAX)  return -1;
-
-    // Global live-connection cap. (created - freed) is the live SrvConn
-    // count; the read is racy against concurrent create/free, which is
-    // fine for a soft resource cap — the hard, per-service bound is the
-    // accept backlog, enforced under the registry lock below.
-    if (srvconn_total_created() - srvconn_total_freed() >= SRV_MAX_CONNS)
-        return -1;
-
-    // Resolve the service. Only a LIVE service has a server to accept the
-    // connection; a missing / RESERVING / TOMBSTONED name fails fast (and
-    // spares the heavy mint below). The push under the registry lock
-    // re-checks LIVE, so this is an optimization, not the correctness
-    // gate.
-    struct SrvService *svc = srv_lookup_in(reg, name, name_len);
-    if (!svc) return -1;
-
-    // Capture the poster's stripes AND the service's transport mode under
-    // the registry lock, atomically with the LIVE check: both are stable
-    // while LIVE (set at reserve; mode is immutable through LIVE,
-    // poster_stripes is zeroed only by the tombstone). poster_stripes
-    // becomes the connection's server identity — SYS_SRV_PEER's poster
-    // gate (a3c). `service_mode` propagates onto the SrvConn after mint
-    // (P6-pouch-sockets, sub-chunk 12).
-    u64           poster_stripes;
-    enum srv_mode service_mode;
-    {
-        irq_state_t s = spin_lock_irqsave(&reg->lock);
-        bool live      = (svc->state == SRV_STATE_LIVE);
-        poster_stripes = svc->poster_stripes;
-        service_mode   = svc->mode;
-        spin_unlock_irqrestore(&reg->lock, s);
-        if (!live) return -1;
-    }
-
-    // Mint the connection — the peer AND server identity are captured BY
-    // VALUE here (CORVUS-DESIGN.md §6.3): the SrvConn holds no raw Proc*
-    // for p and no SrvService* for the poster, so neither a p that exits
-    // and is reaped nor a tombstone-then-rebind turns a later connection
-    // read into a UAF.
-    struct SrvConn *cn = srvconn_create(proc_stripes(p), p->pid,
-                                        proc_is_console_attached(p),
-                                        poster_stripes);
-    if (!cn) return -1;
-
-    // Propagate the service's transport mode onto the freshly-minted
-    // (and not-yet-published) SrvConn. SRV_MODE_BYTE flips byte_mode on
-    // BEFORE the cn is enqueued in the accept backlog or installed as a
-    // KObj_Srv handle — every observer (sys_srv_connect_for_proc's
-    // handshake gate, sys_read/write_for_proc's KOBJ_SRV dispatch) reads
-    // the field after publication, so the value is consistent for the
-    // cn's lifetime.
-    if (service_mode == SRV_MODE_BYTE) {
-        srvconn_set_byte_mode(cn);
-    }
-
-    // Install the client's KObj_Srv connection handle. handle_alloc does
-    // not take a reference (only handle_dup does) — so the SrvConn's
-    // create-reference IS this handle's reference; handle_release_obj's
-    // KOBJ_SRV case srvconn_unref's it on close. KObj_Srv is
-    // non-transferable: handle_dup rejects it (NoSrvDup), so the
-    // connection is pinned to p (handles.tla SrvHandlesAtOrigin).
-    hidx_t h = handle_alloc(p, KOBJ_SRV, RIGHT_READ | RIGHT_WRITE, cn);
-    if (h < 0) {
-        srvconn_unref(cn);          // create-ref → 0 → teardown + free
-        return -1;
-    }
-
-    // A second reference for the accept-backlog slot, then enqueue. The
-    // push re-validates LIVE atomically with the slot write.
-    srvconn_ref(cn);
-    irq_state_t s = spin_lock_irqsave(&reg->lock);
-    int rc = srv_backlog_push_locked(svc, cn);
-    spin_unlock_irqrestore(&reg->lock, s);
-    if (rc != 0) {
-        // Service died between the pre-check and the push, or the backlog
-        // is full. Drop the backlog ref, then close the handle (whose
-        // release drops the create-ref → teardown + free).
-        srvconn_unref(cn);
-        handle_close(p, h);
-        return -1;
-    }
-
-    // Wake a poster blocked in SYS_SRV_ACCEPT. Outside the registry lock —
-    // wakeup takes the Rendez lock; the producer-mutates-then-wakeup
-    // ordering is the srvconn.c chan_produce discipline.
-    wakeup(&svc->accept_rendez);
-
-    // Also wake every listener poller (P5-poll-b): backlog_count went 0→1+
-    // (or stayed >0). specs/poll.tla MakeReady — the push committed under
-    // the registry lock above, the wake walks the poll list under its own
-    // lock, the lock chain registry → poll_list is acyclic.
-    poll_waiter_list_wake(&svc->poll_list);
-    return (int)h;
-}
-
-int srv_conn_open_for_proc(struct Proc *p, const char *name, u8 name_len) {
-    return srv_conn_open_in(g_boot_srv_registry, p, name, name_len);
-}
 
 // accept_cond_is_ready — sleep()'s wait predicate for srv_accept_blocking.
 // Reads backlog_count / state WITHOUT the registry lock: sleep evaluates
@@ -1008,10 +889,12 @@ static struct Spoor *devsrv_open(struct Spoor *c, int omode) {
     return devsrv_open_connect(t->proc, c, omode);
 }
 
-// create — stalk-3a leaves this a graceful-fail stub. devsrv_create=post (a
-// SYS_WALK_CREATE on the /srv dir fd mints a KObj_Srv listener; perm &
-// DMSRVBYTE selects byte- vs 9P-mode) is stalk-3b (STALK-DESIGN.md §5.3).
-// At v1.0 /srv entries are posted via the retained SYS_POST_SERVICE.
+// create — a graceful-fail stub. create=post does NOT ride this Spoor-
+// returning vtable slot: a post yields a KObj_Srv listener handle (not a
+// Spoor), so sys_walk_create_handler's devsrv branch calls devsrv_post_
+// listener directly (perm & DMSRVBYTE selects byte- vs 9P-mode) and never
+// reaches here. stalk-3c retired the name-only SYS_POST_SERVICE; posting is
+// SYS_WALK_CREATE on a /srv dir (STALK-DESIGN.md §5.3).
 static struct Spoor *devsrv_create(struct Spoor *c, const char *name, int omode, u32 perm, u32 gid) {
     (void)c; (void)name; (void)omode; (void)perm; (void)gid;
     return NULL;
