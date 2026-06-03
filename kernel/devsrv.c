@@ -37,6 +37,7 @@
 // Spec: specs/corvus.tla — MarkMayPost / PostService / ServiceTombstone /
 // SrvBind / SrvAccept / ProcExit; specs/handles.tla — KObj_Srv.
 
+#include <thylacine/9p_attach.h>
 #include <thylacine/dev.h>
 #include <thylacine/devsrv.h>
 #include <thylacine/extinction.h>
@@ -48,6 +49,7 @@
 #include <thylacine/spinlock.h>
 #include <thylacine/spoor.h>
 #include <thylacine/srvconn.h>
+#include <thylacine/thread.h>
 #include <thylacine/types.h>
 
 #include "../mm/slub.h"
@@ -912,14 +914,115 @@ static int devsrv_stat(struct Spoor *c, u8 *dp, int n) {
     return -1;
 }
 
-// open — stalk-3a leaves this a graceful-fail stub. devsrv_open=connect (a
-// /srv/<name> open mints a SrvConn and returns a KOBJ_SPOOR endpoint — a
-// dev9p root for 9p-mode, a byte-stream conn Spoor for byte-mode) is
-// stalk-3b (STALK-DESIGN.md §5.2). The retained client-connect core is
-// srv_conn_open_for_proc(), driven by the retained SYS_SRV_CONNECT.
+// devsrv_open_connect — the connect core (stalk-3b-β; STALK-DESIGN.md §5.2 / D5).
+// Testable with an explicit Proc; the Dev.open vtable slot (devsrv_open) calls it
+// with current_thread()->proc. `c` is a /srv/<name> service-ref Spoor
+// (devsrv_walk's product, DEVSRV_SVC_MAGIC aux). Resolve the service in c's
+// registry, mint a SrvConn bound to `p`'s kernel-stamped identity, enqueue it on
+// the poster's accept backlog (waking the poster), and return the connection
+// ENDPOINT as a KOBJ_SPOOR Spoor:
+//   - 9p-mode (corvus): wrap the SrvConn's CLIENT side into a dev9p root Spoor
+//     (Tversion + Tattach via srvconn_attach_dev9p_root) -- the two-step attach
+//     (the client then opens "ctl" relative to this root). The client gets no
+//     conn Spoor, so the create ref is dropped here (the dev9p root + the
+//     poster's backlog ref own the SrvConn).
+//   - byte-mode (stratum-fs / pouch socket): return a CLIENT-direction byte-conn
+//     Spoor (CSRVCLIENT). The create ref becomes the Spoor's ref.
+// devsrv (dc='s') is NOT perm_enforced, so stalk runs no rwx gate on the service
+// node; the per-territory /srv visibility (the mount table) is the isolation
+// boundary (I-1).
+struct Spoor *devsrv_open_connect(struct Proc *p, struct Spoor *c, int omode) {
+    (void)omode;
+    if (!p)                                        return NULL;
+    if (!c || c->dc != 's' || !c->aux)             return NULL;
+    if (*(const u64 *)c->aux != DEVSRV_SVC_MAGIC)  return NULL;
+    struct devsrv_svc_ref *ref = (struct devsrv_svc_ref *)c->aux;
+    struct SrvRegistry    *reg = ref->reg;
+    if (!reg)                                      return NULL;
+
+    // Global live-connection cap (soft; the per-service backlog is the hard
+    // bound). The per-Proc cap was removed (stalk-3b-β / 3a-audit F4): a session
+    // needs corvus AND its stratum-fs concurrently.
+    if (srvconn_total_created() - srvconn_total_freed() >= SRV_MAX_CONNS)
+        return NULL;
+
+    // Resolve the service; capture poster stripes + transport mode under the
+    // registry lock, atomically with the LIVE check (both immutable while LIVE).
+    struct SrvService *svc = srv_lookup_in(reg, ref->name, ref->name_len);
+    if (!svc) return NULL;
+    u64           poster_stripes;
+    enum srv_mode service_mode;
+    {
+        irq_state_t ls = spin_lock_irqsave(&reg->lock);
+        bool live      = (svc->state == SRV_STATE_LIVE);
+        poster_stripes = svc->poster_stripes;
+        service_mode   = svc->mode;
+        spin_unlock_irqrestore(&reg->lock, ls);
+        if (!live) return NULL;
+    }
+
+    // Mint the connection (peer + server identity captured BY VALUE -- no raw
+    // Proc* / SrvService* held, so neither a peer exit nor a tombstone-then-
+    // rebind turns a later read into a UAF). create ref == 1.
+    struct SrvConn *cn = srvconn_create(proc_stripes(p), p->pid,
+                                        proc_is_console_attached(p), poster_stripes);
+    if (!cn) return NULL;
+    if (service_mode == SRV_MODE_BYTE) srvconn_set_byte_mode(cn);
+
+    // A 2nd ref for the accept-backlog slot; the push re-validates LIVE atomically.
+    srvconn_ref(cn);
+    irq_state_t s = spin_lock_irqsave(&reg->lock);
+    int rc = srv_backlog_push_locked(svc, cn);
+    spin_unlock_irqrestore(&reg->lock, s);
+    if (rc != 0) {
+        srvconn_unref(cn);     // drop the backlog ref
+        srvconn_unref(cn);     // drop the create ref -> teardown + free
+        return NULL;
+    }
+    // Wake a poster blocked in SYS_SRV_ACCEPT + any listener poller (the push
+    // committed under reg->lock; the wakes run after release -- chan_produce
+    // discipline, specs/poll.tla MakeReady).
+    wakeup(&svc->accept_rendez);
+    poll_waiter_list_wake(&svc->poll_list);
+
+    if (service_mode == SRV_MODE_BYTE) {
+        // Byte-mode endpoint: a CLIENT-direction conn Spoor. devsrv_make_conn_spoor
+        // takes the create ref (it becomes the Spoor's ref; devsrv_close drops it).
+        // The only v1.0 byte client (joey -> stratum-fs) immediately SYS_ATTACH_
+        // 9P_SRV-wraps this Spoor; the direct client read/write path is first used
+        // by pouch (3c) -- the CSRVCLIENT direction is set now regardless.
+        struct Spoor *cs = devsrv_make_conn_spoor(cn);
+        if (!cs) {
+            srvconn_teardown(cn);  // the poster's accept sees EOF
+            srvconn_unref(cn);     // drop the create ref; the poster drains the backlog ref
+            return NULL;
+        }
+        cs->flag |= CSRVCLIENT;    // client endpoint: read s2c / write c2s
+        return cs;
+    }
+
+    // 9p-mode endpoint: wrap the SrvConn's CLIENT side into a dev9p root Spoor.
+    // The blocking handshake runs lock-free here; the poster (corvus), woken
+    // above, accepts + responds concurrently. On any failure the conn is torn
+    // down so the poster's accept sees a dead conn.
+    int err = 0;
+    struct Spoor *root = srvconn_attach_dev9p_root(cn, NULL, 0, p->principal_id, &err);
+    if (!root) {
+        srvconn_teardown(cn);      // idempotent (the helper may already have torn it)
+        srvconn_unref(cn);         // drop the create ref; the poster drains the backlog ref
+        return NULL;
+    }
+    srvconn_unref(cn);             // drop the create ref; root owns the session, the poster the backlog ref
+    return root;
+}
+
+// open — the Dev.open vtable slot. A Dev.open takes no Proc, so resolve the
+// connecting Proc from the running Thread (stalk runs in syscall context on the
+// caller's Thread). stalk-3b-β; STALK-DESIGN.md §5.2.
 static struct Spoor *devsrv_open(struct Spoor *c, int omode) {
-    (void)c; (void)omode;
-    return NULL;
+    struct Thread *t = current_thread();
+    if (!t || !t->proc) return NULL;
+    return devsrv_open_connect(t->proc, c, omode);
 }
 
 // create — stalk-3a leaves this a graceful-fail stub. devsrv_create=post (a
@@ -947,8 +1050,21 @@ static void devsrv_close(struct Spoor *c) {
         // mount holds a ref forever).
         srv_registry_unref((struct SrvRegistry *)c->aux);
     } else if (m == SRV_CONN_MAGIC) {
-        srvconn_teardown((struct SrvConn *)c->aux);
-        srvconn_unref((struct SrvConn *)c->aux);
+        // Closing a connection Spoor is a connection close (CORVUS-DESIGN §6.2):
+        // tear the connection down so the peer wakes, then drop the reference.
+        // EXCEPT a kernel-attached SrvConn (SYS_ATTACH_9P_SRV wrapped it, or
+        // devsrv_open's 9p-mode path did): its c2s/s2c rings are LOAD-BEARING for
+        // the kernel 9P client, so a userspace t_close of the now-redundant conn
+        // endpoint must NOT EOF them. SKIP teardown; only unref. The session
+        // tears down when the LAST holder (the adapter's transport.close at
+        // p9_attached_destroy) drops its ref. Mirrors handle.c's KOBJ_SRV release
+        // arm (16c-integration); stalk-3b-β makes the connection endpoint a
+        // KOBJ_SPOOR conn Spoor that releases through HERE, so the same gate is
+        // owed here -- without it joey's idiomatic close of an attach-wrapped
+        // conn Spoor would EOF the rings before the first Twalk.
+        struct SrvConn *cn = (struct SrvConn *)c->aux;
+        if (!srvconn_is_kernel_attached(cn)) srvconn_teardown(cn);
+        srvconn_unref(cn);
     } else if (m == DEVSRV_SVC_MAGIC) {
         struct devsrv_svc_ref *ref = (struct devsrv_svc_ref *)c->aux;
         struct SrvRegistry    *r   = ref->reg;
@@ -983,10 +1099,19 @@ static long devsrv_read(struct Spoor *c, void *buf, long n, s64 off) {
     (void)off;
     struct SrvConn *cn = devsrv_conn_of(c);
     if (!cn) return -1;
-    // Atomic acquire on byte_mode (F5 close): pair the setter's
-    // ATOMIC_RELEASE in srvconn_set_byte_mode so a multi-thread Proc
-    // reading this server-endpoint Spoor sees the mode that was
-    // propagated at SrvConn mint.
+    if (c->flag & CSRVCLIENT) {
+        // CLIENT endpoint (a byte-mode connect's Spoor, stalk-3b-β): read the
+        // server's replies off s2c. POSIX blocking-read semantics (deadline 0 =
+        // block until data or EOF). First exercised by the pouch AF_UNIX client
+        // (3c) -- the only v1.0 byte client (joey -> stratum-fs) attach-wraps its
+        // conn Spoor, so the kernel 9P client drives s2c via srvconn_client_recv
+        // directly. The CSRVCLIENT direction is the mirror of the server arm.
+        return srvconn_client_recv(cn, (u8 *)buf, n);
+    }
+    // SERVER endpoint (the poster's accepted Spoor): read c2s. Atomic acquire on
+    // byte_mode (F5 close): pair the setter's ATOMIC_RELEASE in
+    // srvconn_set_byte_mode so a multi-thread Proc reading this endpoint sees
+    // the mode that was propagated at SrvConn mint.
     bool bm = __atomic_load_n(&cn->byte_mode, __ATOMIC_ACQUIRE);
     if (bm) {
         return srvconn_server_recv_blocking(cn, (u8 *)buf, n);
@@ -1007,6 +1132,12 @@ static long devsrv_write(struct Spoor *c, const void *buf, long n, s64 off) {
     (void)off;
     struct SrvConn *cn = devsrv_conn_of(c);
     if (!cn) return -1;
+    if (c->flag & CSRVCLIENT) {
+        // CLIENT endpoint: write toward the server via c2s (non-blocking). The
+        // mirror of the server arm; stalk-3b-β (see devsrv_read).
+        return srvconn_client_send(cn, (const u8 *)buf, n);
+    }
+    // SERVER endpoint: write replies toward the client via s2c.
     return srvconn_server_send(cn, (const u8 *)buf, n);
 }
 

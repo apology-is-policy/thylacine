@@ -181,4 +181,29 @@ void p9_attached_destroy(struct p9_attached *a);
 // Query: is this attached's session OPEN?
 bool p9_attached_is_open(const struct p9_attached *a);
 
+// srvconn_attach_dev9p_root -- wrap a byte-transport SrvConn's CLIENT side into
+// a mountable dev9p root Spoor (stalk-3b-β). kmalloc a p9_srvconn_transport
+// adapter (it takes ONE srvconn_ref on `cn`), set kernel_attached + the handshake
+// deadline, drive p9_attached_create (Tversion + Tattach over the byte rings),
+// install the transport, build the root Spoor, and stamp its dev9p_priv->
+// attached_owner so the root's clunk tears down the whole attach session. The
+// shared core of SYS_ATTACH_9P_SRV (stratum-fs byte client) and devsrv_open's
+// 9p-mode connect (corvus) -- the 9P-unification.
+//
+// On success: returns the dev9p root Spoor (one owned ref; *out_err = 0). The
+// adapter's srvconn_ref keeps `cn` alive for the session; the construction ref on
+// the internal p9_attached is dropped here (the root owns the session via its
+// attached_owner). The CALLER's own ref(s) on `cn` are untouched.
+//
+// On failure: returns NULL, *out_err = a negative errno (a Tattach Rlerror ecode
+// like -T_E_ACCES, or -T_E_IO / -T_E_NOMEM). All internal allocations are
+// released. For failures AFTER the adapter's transport_init, the adapter's close
+// path (srvconn_transport_close) has torn `cn` down (EOF both rings); for failures
+// BEFORE it, `cn` is untouched (the caller decides whether to teardown). Either
+// way the caller's own ref(s) on `cn` are NOT dropped here.
+struct SrvConn;
+struct Spoor *srvconn_attach_dev9p_root(struct SrvConn *cn,
+                                        const u8 *aname, size_t aname_len,
+                                        u32 n_uname, int *out_err);
+
 #endif  // THYLACINE_9P_ATTACH_H

@@ -19,10 +19,8 @@
 
 #include "../mm/slub.h"
 
-// The connection's 9P root fid. The kernel 9P client binds this at
-// handshake (driven by the open path, a3b); the value is a transport-
-// internal detail, never crosses a syscall boundary.
-#define SRVCONN_ROOT_FID  1u
+// SRVCONN_ROOT_FID moved to <thylacine/srvconn.h> (stalk-3b-β) so the shared
+// srvconn_attach_dev9p_root helper (9p_attach.c) can pass the same root fid.
 
 static u64 g_srvconn_created;
 static u64 g_srvconn_freed;

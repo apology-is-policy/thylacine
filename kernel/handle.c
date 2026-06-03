@@ -399,6 +399,19 @@ hidx_t handle_dup(struct Proc *p, hidx_t h, rights_t new_rights) {
     //     origin that handles.tla's SrvHandlesAtOrigin wants.
     if (!kobj_kind_is_transferable(parent->kind)) return -1;
 
+    // stalk-3b-β NoSrvSpoorDup: a devsrv Spoor (dc='s' -- a /srv root, a service-
+    // ref, or a CONNECTION endpoint) is pinned to its Proc and must not be dup'd.
+    // The connection endpoint is now a KOBJ_SPOOR (the KObj_Srv connection handle
+    // it replaces was already barred by the transferable check above); a second
+    // handle naming the one connection would blur the SO_PEERCRED origin
+    // (handles.tla SrvHandlesAtOrigin) and double-drive the SrvConn / registry-ref
+    // lifecycle at close. dev9p roots (dc='9') from a 9p-mode connect stay
+    // dup-able like any mounted-9P root.
+    if (parent->kind == KOBJ_SPOOR && parent->obj &&
+        ((struct Spoor *)parent->obj)->dc == 's') {
+        return -1;
+    }
+
     // Rights monotonic reduction: new_rights MUST be a subset of
     // parent->rights. Models the spec's HandleDup precondition.
     // Rejects elevation (e.g., parent has {READ}, dup with {READ,

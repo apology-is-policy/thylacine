@@ -78,6 +78,8 @@
 // Inner syscall cores (non-static; defined in kernel/syscall.c).
 extern int sys_post_service_for_proc(struct Proc *p, const char *name,
                                      size_t name_len);
+extern int sys_post_service_byte_for_proc(struct Proc *p, const char *name,
+                                          size_t name_len);
 extern int sys_srv_accept_for_proc(struct Proc *p, hidx_t service_h);
 extern int sys_srv_peer_for_proc(struct Proc *p, hidx_t conn_h,
                                  struct srv_peer_info *out);
@@ -98,6 +100,7 @@ extern void proc_test_unlink(struct Proc *p);
 
 void test_devsrv_walk_service(void);
 void test_devsrv_conn_open(void);
+void test_devsrv_open_connect_byte(void);
 void test_devsrv_accept_immediate(void);
 void test_devsrv_accept_blocks_then_wakes(void);
 void test_devsrv_conn_io(void);
@@ -266,6 +269,76 @@ void test_devsrv_conn_open(void) {
     srv_registry_reset();
     drop_test_proc(client);
     drop_test_proc(corvus);
+}
+
+// ---------------------------------------------------------------------------
+// devsrv.open_connect_byte — the stalk-3b-β open=connect path (byte-mode).
+//
+// devsrv_open_connect on a byte-mode service-ref Spoor mints a SrvConn, enqueues
+// it on the accept backlog, and returns a CLIENT-direction byte-conn Spoor
+// (CSRVCLIENT). The endpoint is a KOBJ_SPOOR and is non-dup-able (the dc='s'
+// guard). The 9p-mode path (corvus) is E2E-proven once the clients migrate (3b-β-C)
+// since it drives a Tversion/Tattach handshake against a live server.
+// ---------------------------------------------------------------------------
+
+void test_devsrv_open_connect_byte(void) {
+    srv_registry_reset();
+
+    struct Proc *server = make_marked_test_proc();
+    TEST_ASSERT(server != NULL, "server proc");
+    TEST_ASSERT(sys_post_service_byte_for_proc(server, "stratum-fs", 10) >= 0,
+        "post byte-mode \"stratum-fs\"");
+    struct SrvService *svc = srv_lookup("stratum-fs", 10);
+    TEST_ASSERT(svc != NULL, "the byte service is registered");
+
+    // Walk /srv -> a service-ref Spoor (devsrv_walk's product).
+    struct Spoor *root = devsrv.attach(NULL);
+    TEST_ASSERT(root != NULL, "devsrv root");
+    struct Spoor *sref = spoor_clone(root);
+    TEST_ASSERT(sref != NULL, "spoor_clone for the service-ref");
+    const char *names[1] = { "stratum-fs" };
+    struct Walkqid *w = devsrv.walk(root, sref, names, 1);
+    TEST_ASSERT(w != NULL && w->spoor == sref, "walk /srv/stratum-fs");
+    walkqid_free(w);
+
+    // A client opens it. Byte-mode -> a CLIENT-direction byte-conn Spoor. The
+    // service-ref Spoor is NOT consumed (stalk clunks the spent quarry); the test
+    // clunks it below, mirroring the resolver.
+    struct Proc *client = make_test_proc();
+    TEST_ASSERT(client != NULL, "client proc");
+    struct Spoor *cs = devsrv_open_connect(client, sref, /*omode ORDWR*/ 2);
+    TEST_ASSERT(cs != NULL, "devsrv_open_connect -> a conn Spoor");
+    TEST_ASSERT(cs != sref, "the returned endpoint is a NEW Spoor (open-returns-new)");
+    TEST_EXPECT_EQ((int)cs->dc, (int)'s', "the conn Spoor is a devsrv Spoor");
+    TEST_ASSERT((cs->flag & CSRVCLIENT) != 0, "the conn Spoor is the CLIENT endpoint");
+    TEST_ASSERT((cs->flag & COPEN) != 0, "the conn Spoor is opened");
+    struct SrvConn *cn = devsrv_conn_of(cs);
+    TEST_ASSERT(cn != NULL, "the conn Spoor names a SrvConn");
+    TEST_ASSERT(srvconn_is_live(cn), "the SrvConn is live");
+    TEST_EXPECT_EQ(srv_backlog_depth(svc), 1, "the connection is enqueued for accept");
+    spoor_clunk(sref);                 // the spent quarry (stalk would clunk it)
+
+    // The connection endpoint is non-dup-able: install it as a KOBJ_SPOOR handle
+    // and assert handle_dup refuses it (the dc='s' NoSrvSpoorDup guard).
+    hidx_t ch = handle_alloc(client, KOBJ_SPOOR, RIGHT_READ | RIGHT_WRITE, cs);
+    TEST_ASSERT(ch >= 0, "install the conn Spoor as a KOBJ_SPOOR handle");
+    TEST_EXPECT_EQ(handle_dup(client, ch, RIGHT_READ), -1,
+        "dup of a devsrv conn Spoor (dc='s') -> -1 (NoSrvSpoorDup)");
+    handle_close(client, ch);          // releases cs (devsrv_close: not kernel-attached -> teardown + unref)
+
+    // A connect against a TOMBSTONED service mints no service-ref (walk fails),
+    // so open=connect is unreachable; the poster-exit also drained the backlog.
+    srv_proc_exit_notify(server);
+    struct Spoor *sref2 = spoor_clone(root);
+    TEST_ASSERT(sref2 != NULL, "spoor_clone");
+    TEST_ASSERT(devsrv.walk(root, sref2, names, 1) == NULL,
+        "walk of a tombstoned service -> NULL (no service-ref minted)");
+    spoor_clunk(sref2);
+
+    spoor_clunk(root);
+    srv_registry_reset();
+    drop_test_proc(client);
+    drop_test_proc(server);
 }
 
 // ---------------------------------------------------------------------------

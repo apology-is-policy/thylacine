@@ -383,6 +383,17 @@ int devsrv_post_listener(struct Proc *p, struct Spoor *root,
 // this core; at a3b it is exercised directly by tests.
 int srv_conn_open_for_proc(struct Proc *p, const char *name, u8 name_len);
 
+// devsrv_open_connect — the open=connect core (stalk-3b-β; STALK-DESIGN.md §5.2).
+// `c` is a /srv/<name> service-ref Spoor (devsrv_walk's product); mint a SrvConn
+// for `p`, enqueue it on the poster's accept backlog, and return the connection
+// ENDPOINT as a KOBJ_SPOOR Spoor: a dev9p root (9p-mode, via the two-step
+// p9_attached wrap) or a CLIENT-direction byte-conn Spoor (byte-mode, CSRVCLIENT).
+// Returns NULL on bad-Spoor / no-LIVE-service / cap / OOM / handshake failure.
+//
+// The Dev.open vtable slot (devsrv_open) calls this with current_thread()->proc;
+// it is non-static so the test harness can drive it with an explicit Proc.
+struct Spoor *devsrv_open_connect(struct Proc *p, struct Spoor *c, int omode);
+
 // srv_accept_blocking — the poster's accept: block until a connection is
 // on `svc`'s accept backlog, then dequeue and return it. The returned
 // SrvConn carries the one reference the backlog held — ownership passes

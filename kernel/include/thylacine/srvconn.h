@@ -68,6 +68,12 @@ struct poll_waiter;
 // DEK envelope — 4 KiB is generous. Matches SYS_ATTACH_9P's default.
 #define SRVCONN_MSIZE   4096u
 
+// The 9P root fid for a SrvConn-backed session (P9 convention; matches
+// SYS_ATTACH_DEFAULT_ROOT_FID). The kernel 9P client Tattaches the root here;
+// SRVCONN_CLIENT_WALK_FID (srvconn.c) walks a child off it. Promoted to the
+// header (stalk-3b-β) so srvconn_attach_dev9p_root (9p_attach.c) can pass it.
+#define SRVCONN_ROOT_FID  1u
+
 // Per-direction ring capacity. Sized to comfortably hold one whole
 // msize frame so the synchronous, single-frame-in-flight kernel 9P
 // client never blocks on a write (see the file-header rationale).

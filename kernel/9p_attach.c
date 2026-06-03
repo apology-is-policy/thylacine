@@ -11,8 +11,10 @@
 #include <thylacine/errno.h>
 #include <thylacine/page.h>
 #include <thylacine/spoor.h>
+#include <thylacine/srvconn.h>
 #include <thylacine/types.h>
 
+#include "../arch/arm64/timer.h"
 #include "../mm/slub.h"
 
 _Static_assert(P9_ATTACHED_MAGIC == 0x50394154u, "attach magic drift");
@@ -235,4 +237,88 @@ bool p9_attached_is_open(const struct p9_attached *a) {
     if (a->magic != P9_ATTACHED_MAGIC) return false;
     if (!a->handshake_ok) return false;
     return p9_client_is_open(a->client);
+}
+
+struct Spoor *srvconn_attach_dev9p_root(struct SrvConn *cn,
+                                        const u8 *aname, size_t aname_len,
+                                        u32 n_uname, int *out_err) {
+    if (out_err) *out_err = 0;
+    if (!cn) { if (out_err) *out_err = -T_E_INVAL; return NULL; }
+
+    // The adapter wraps cn's c2s/s2c byte rings; its init takes ONE srvconn_ref.
+    // Pre-init failures leave cn untouched (the caller decides on teardown);
+    // post-init failures go through the adapter's close, which tears cn down.
+    struct p9_srvconn_transport *adapter = kmalloc(sizeof(*adapter), KP_ZERO);
+    if (!adapter) { if (out_err) *out_err = -T_E_NOMEM; return NULL; }
+    if (p9_srvconn_transport_init(adapter, cn) != 0) {
+        kfree(adapter);
+        if (out_err) *out_err = -T_E_IO;
+        return NULL;
+    }
+
+    // R1 F4 (SYS_ATTACH_9P_SRV) discipline: set kernel_attached as early as the
+    // adapter commits, so a userspace close of the conn-endpoint handle skips
+    // srvconn_teardown (the rings are load-bearing for this kernel 9P client).
+    srvconn_set_kernel_attached(cn);
+    // R1 F1 discipline: bound the Tversion + Tattach handshake on the wall clock
+    // (a hung server times out rather than wedging the caller indefinitely).
+    srvconn_set_client_deadline(cn,
+        timer_now_ns() + SRVCONN_HANDSHAKE_DEADLINE_NS);
+
+    struct p9_transport_ops ops = p9_srvconn_transport_ops(adapter);
+    int aerr = 0;
+    struct p9_attached *att = p9_attached_create(
+        ops,
+        SRVCONN_MSIZE,           // recv_cap (= msize; matches the SrvConn ring)
+        SRVCONN_ROOT_FID,        // root_fid
+        SRVCONN_MSIZE,           // msize (client proposal; negotiated down)
+        NULL, 0,                 // uname (empty; SO_PEERCRED is the live channel)
+        aname_len > 0 ? aname : NULL, aname_len,
+        n_uname, &aerr);
+    if (!att) {
+        // Handshake failed (server unresponsive / deadline / Rlerror / OOM). The
+        // adapter still holds its srvconn_ref; its close drops it AND tears cn
+        // down (EOF both rings).
+        struct p9_transport_ops cops = p9_srvconn_transport_ops(adapter);
+        if (cops.close) (void)cops.close(cops.ctx);
+        p9_srvconn_transport_destroy(adapter);
+        kfree(adapter);
+        if (out_err) *out_err = aerr;
+        return NULL;
+    }
+
+    // Transfer adapter ownership into the attached (tx == rx == NULL: the SrvConn
+    // lifetime is the adapter's own srvconn_ref, not a transport-Spoor pair).
+    if (p9_attached_install_transport(att, (struct p9_spoor_transport *)adapter,
+                                       NULL, NULL) != 0) {
+        // Defensive (first install on a fresh attached). a->adapter was never
+        // set, so attached_destroy_inner's adapter block is skipped -> kfree it
+        // here after destroying (which drops the srvconn_ref via close).
+        p9_attached_unref(att);
+        p9_srvconn_transport_destroy(adapter);
+        kfree(adapter);
+        if (out_err) *out_err = -T_E_IO;
+        return NULL;
+    }
+    // From here failure paths just unref `att`; its last-ref destroy handles the
+    // adapter + srvconn cleanup via the transport close vtable.
+
+    struct Spoor *root = p9_attached_root_spoor(att);
+    if (!root) {
+        p9_attached_unref(att);
+        if (out_err) *out_err = -T_E_IO;
+        return NULL;
+    }
+
+    struct dev9p_priv *root_priv = (struct dev9p_priv *)root->aux;
+    if (!root_priv || root_priv->magic != DEV9P_PRIV_MAGIC) {
+        spoor_clunk(root);
+        p9_attached_unref(att);
+        if (out_err) *out_err = -T_E_IO;
+        return NULL;
+    }
+    root_priv->attached_owner = att;
+    p9_attached_ref(att);        // the root's attached_owner hold
+    p9_attached_unref(att);      // drop the construction ref; root owns the session
+    return root;
 }

@@ -1,6 +1,6 @@
 # 70 — devsrv: the `/srv` service registry
 
-**Status**: as-built at A-5b-0 **stalk-3b-α**. The service registry, the
+**Status**: as-built at A-5b-0 **stalk-3b-β** (core). The service registry, the
 `devsrv` Dev, the `SYS_POST_SERVICE` syscall, the `proc_flags` post-gate,
 and poster-exit tombstoning landed at P5-corvus-srv-impl-a2; the
 **per-connection layer** — the `devsrv` walk op, the client-connect path
@@ -10,15 +10,24 @@ and the connection-Spoor read/write/close — landed at a3b; `SYS_SRV_PEER`
 **namespace-resident**: the single static `g_srv_registry` became a
 heap-allocated, refcounted `SrvRegistry` reached *through the mounted devsrv
 root Spoor* (the root's `aux`), and boot mounts one immortal registry on the
-kproc `/srv` synthetic dir. **stalk-3b-α (this revision)** adds the
+kproc `/srv` synthetic dir. **stalk-3b-α** added the
 **create=post** path: a `SYS_WALK_CREATE` against a `/srv` directory mints a
 `KObj_Srv` listener (`devsrv_post_listener`), the Plan-9-true symmetric
-sibling of the open=connect to come — `perm & DMSRVBYTE` selects byte-mode,
-else 9P-mode. The retained `SYS_POST_SERVICE` / `SYS_SRV_CONNECT` syscall
-path still resolves the one boot registry, and **no client has migrated yet**
-(corvus still posts via `SYS_POST_SERVICE`). What remains: stalk-3b-β makes
-`devsrv_open` the connect (the two-step 9P-unification) and migrates the
-native clients; stalk-3c retires the syscalls + the pouch seam.
+sibling of the open=connect — `perm & DMSRVBYTE` selects byte-mode,
+else 9P-mode. **stalk-3b-β (this revision)** lands the **open=connect** core
+(`devsrv_open_connect`): an `open` of a `/srv/<name>` service-ref Spoor mints a
+`SrvConn`, enqueues it on the poster's accept backlog, and returns the
+connection ENDPOINT as a `KOBJ_SPOOR` Spoor — a **dev9p root** for a 9p-mode
+service (the two-step attach: `srvconn_attach_dev9p_root` drives Tversion +
+Tattach, the **9P-unification** shared with `SYS_ATTACH_9P_SRV`) or a
+**CLIENT-direction byte-conn Spoor** (`CSRVCLIENT`) for a byte-mode one. The
+retained `SYS_POST_SERVICE` / `SYS_SRV_CONNECT` syscall path still resolves the
+one boot registry; client migration to `SYS_OPEN` (joey/login/legate) +
+`SYS_ATTACH_9P_SRV`'s retarget to `KOBJ_SPOOR` land in 3b-β-C. What remains:
+3b-β-C migrates the connect-side clients + retargets attach + removes the
+per-Proc cap; 3b-β-D retires the embedded `srvconn_client_*` 9P client; stalk-3c
+retires the old syscalls + the pouch seam (corvus's POST migration co-locates
+there, user-voted 2026-06-03).
 
 > **stalk-3a delta in one place.** The registry was a single static
 > `struct SrvRegistry g_srv_registry`; it is now heap-allocated +
@@ -231,13 +240,19 @@ bool proc_may_post_service(const struct Proc *p);
 ### The Dev
 
 `extern struct Dev devsrv;` — `dc='s'`, `name="srv"`, registered by
-`dev_init()`. At a3b the live vtable slots are `init` (stamps the type
+`dev_init()`. The live vtable slots are `init` (stamps the type
 tag on every registry entry), `attach` (yields the `/srv` root QTDIR
 Spoor), `walk` (the `/srv` root, one component deep, to a service
-Spoor), and `read` / `write` / `close` (real for a connection Spoor; see
-Implementation). `open` remains a deliberate graceful-fail stub (see
-Known caveats); the remaining slots (`stat`, `create`, `bread`,
-`bwrite`, `remove`, `wstat`, `power`) are graceful-fail stubs.
+Spoor), `open` (stalk-3b-β = **connect**: a `/srv/<name>` service-ref Spoor
+mints a `SrvConn` and returns the connection endpoint — a dev9p root Spoor for
+9p-mode, a `CSRVCLIENT` byte-conn Spoor for byte-mode; the slot resolves the
+connecting Proc from `current_thread()->proc` and calls `devsrv_open_connect`),
+and `read` / `write` / `close` (real for a connection Spoor — `read`/`write`
+mirror by the `CSRVCLIENT` direction, `close` honors
+`srvconn_is_kernel_attached`; see Implementation). The remaining slots
+(`stat`, `create`, `bread`, `bwrite`, `remove`, `wstat`, `power`) are
+graceful-fail stubs (`create`=post rides the dedicated `devsrv_post_listener`
+handler branch, not the vtable slot).
 
 ---
 

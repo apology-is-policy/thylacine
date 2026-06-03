@@ -68,6 +68,11 @@ _Static_assert(sizeof(struct Qid) == 16,
 // Spoor flag bits.
 #define COPEN     (1u << 0)    // open() has succeeded; offset is meaningful
 #define CMSG      (1u << 1)    // message-style (read returns whole records)
+#define CSRVCLIENT (1u << 2)   // devsrv byte-conn Spoor: CLIENT endpoint (read s2c
+                               // / write c2s, the mirror of the server endpoint).
+                               // Set on the Spoor devsrv_open returns for a byte-
+                               // mode connect; clear = server endpoint (from
+                               // SYS_SRV_ACCEPT, read c2s / write s2c). stalk-3b-β.
 
 // SPOOR_MAGIC — sentinel set at spoor_alloc; checked at spoor_ref /
 // spoor_unref / spoor_clunk. SLUB's freelist write at free clobbers

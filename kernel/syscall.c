@@ -1313,141 +1313,31 @@ static s64 sys_attach_9p_srv_handler(u64 srv_fd_raw, u64 aname_va,
             return -1;
     }
 
-    // Allocate the adapter on the heap. The adapter's init takes one
-    // srvconn_ref; the eventual close (in p9_attached_destroy's
-    // transport_ops.close call) drops it.
-    struct p9_srvconn_transport *adapter = kmalloc(sizeof(*adapter), KP_ZERO);
-    if (!adapter)                                    return -1;
-
-    if (p9_srvconn_transport_init(adapter, cn) != 0) {
-        kfree(adapter);
-        return -1;
-    }
-    // From here adapter holds 1 srvconn_ref. Failure paths below must
-    // either install the adapter into p9_attached (so its destroy
-    // drops the ref via close) OR explicitly call the close + destroy
-    // sequence + kfree.
-
-    // R1 F4 close: hoist srvconn_set_kernel_attached HERE -- as early
-    // as possible after the adapter has committed (1 srvconn_ref taken).
-    // Pre-fix the setter ran at the end of the syscall (after handle_alloc
-    // of the KOBJ_SPOOR root); a cross-CPU peer-Thread t_close on the
-    // KObj_Srv handle in the same Proc could see kernel_attached=false
-    // and tear the rings down DURING the handshake. Setting the flag here
-    // closes that window: any subsequent handle_close on the userspace
-    // KObj_Srv slot sees kernel_attached=true and skips srvconn_teardown.
-    // Failure paths below still tear down cleanly because the adapter's
-    // transport.close runs srvconn_teardown + srvconn_unref
-    // unconditionally (idempotent on already-torn rings).
-    srvconn_set_kernel_attached(cn);
-
-    // R1 F1 close: set the handshake deadline BEFORE p9_attached_create
-    // drives Tversion + Tattach. Pre-fix the syscall called the
-    // handshake with `cn->client_deadline_ns == 0` -- which the
-    // adapter's srvconn_client_recv interprets as "no deadline" (block
-    // indefinitely on tsleep). A stratumd that was alive but hung
-    // (mid-pthread-join, mallocng-asserted, etc.) would wedge joey
-    // forever instead of failing cleanly. The peer sys_srv_connect_
-    // handler sets the same deadline at line 3811; sys_attach_9p_srv_
-    // handler now mirrors that discipline.
-    srvconn_set_client_deadline(cn,
-        timer_now_ns() + SRVCONN_HANDSHAKE_DEADLINE_NS);
-
-    struct p9_transport_ops ops = p9_srvconn_transport_ops(adapter);
+    // Wrap the SrvConn's CLIENT side into a dev9p root via the shared helper
+    // (srvconn_attach_dev9p_root, stalk-3b-β): the audited transport-init +
+    // kernel_attached(early, R1 F4) + handshake-deadline(R1 F1) + Tversion/
+    // Tattach + install + attached_owner-stamp + rollback. The helper drops the
+    // p9_attached construction ref before returning, so the returned root owns
+    // the session via its dev9p_priv->attached_owner. devsrv_open's 9p-mode
+    // connect shares the SAME helper -- the 9P-unification.
     int aerr = 0;
-    struct p9_attached *att = p9_attached_create(
-        ops,
-        SYS_ATTACH_DEFAULT_MSIZE,            // recv_cap (= msize at v1.0)
-        SYS_ATTACH_DEFAULT_ROOT_FID,         // root_fid
-        SYS_ATTACH_DEFAULT_MSIZE,            // msize (client proposal)
-        NULL, 0,                             // uname (empty; no-auth v1.0)
-        aname_len > 0 ? aname_scratch : NULL, aname_len,
-        // A-3 M4: assert the caller's kernel-stamped principal as n_uname
-        // (vestigial userspace arg superseded; SO_PEERCRED is the live local
-        // channel for stratumd). See section 9.7 + the sys_attach_9p_handler twin.
-        p->principal_id, &aerr);
-    if (!att) {
-        // Handshake failed (server unresponsive, deadline, Rlerror, OOM).
-        // The adapter still holds its srvconn_ref; release it manually
-        // since we did not transfer ownership.
-        struct p9_transport_ops cops = p9_srvconn_transport_ops(adapter);
-        if (cops.close) (void)cops.close(cops.ctx);
-        p9_srvconn_transport_destroy(adapter);
-        kfree(adapter);
-        // A-3c/M6: the per-user stratumd dataset-scope refusal arrives as a
-        // Tattach Rlerror(EACCES); surface -T_E_ACCES so the attacher observes
-        // EACCES, not a bare -1. Other handshake failures map likewise.
+    struct Spoor *root = srvconn_attach_dev9p_root(
+        cn, aname_len > 0 ? aname_scratch : NULL, aname_len, p->principal_id, &aerr);
+    if (!root) {
+        // A-3c/M6: surface the Tattach Rlerror ecode (e.g. -T_E_ACCES on a
+        // per-user stratumd dataset-scope refusal) rather than a bare -1.
         return attach_err_to_ret(aerr);
     }
 
-    // Transfer adapter ownership into the attached. Mirrors SYS_ATTACH_
-    // 9P's F2 install_transport flow, but with a SrvConn-shaped adapter:
-    // we use install_transport with tx == rx == NULL (no transport-Spoor
-    // refs to manage -- the SrvConn lifetime is owned by the adapter's
-    // own srvconn_ref). install_transport now owns the adapter; its
-    // destroy path will call transport_ops.close (-> srvconn_unref) +
-    // kfree(adapter).
-    //
-    // Note: p9_attached_install_transport's tx/rx parameters are
-    // Spoor *; passing NULL is documented as the "test-loopback" path
-    // (no transport-Spoor refs to drop). Re-using it for our SrvConn-
-    // backed transport works because the adapter type carries its own
-    // srvconn_ref via its close op -- the Spoor-pair plumbing is
-    // unused. A future refactor (v1.x) could give p9_attached an
-    // adapter-only install path; at v1.0 the NULL Spoor pair is the
-    // documented safe combination.
-    if (p9_attached_install_transport(att, (struct p9_spoor_transport *)adapter,
-                                       NULL, NULL) != 0) {
-        // Shouldn't happen — first install on a fresh attached. Defensive.
-        //
-        // R2 F2R2 close: clean up the adapter manually. p9_attached_unref
-        // triggers destroy -> p9_client_close -> transport.ops.close
-        // (which drops the adapter's srvconn_ref via srvconn_unref).
-        // But attached_destroy_inner's `if (a->adapter)` block is SKIPPED
-        // because install_transport never set a->adapter -- so the
-        // kmalloc'd adapter struct itself leaks unless we kfree it here.
-        // Call destroy first (clobbers magic; mirrors the discipline in
-        // attached_destroy_inner's adapter-installed path).
-        p9_attached_unref(att);
-        p9_srvconn_transport_destroy(adapter);
-        kfree(adapter);
-        return -1;
-    }
-    // From here failure paths just unref `att`. The attached's last-ref
-    // destroy handles adapter + srvconn cleanup via the close vtable.
-
-    struct Spoor *root = p9_attached_root_spoor(att);
-    if (!root) {
-        p9_attached_unref(att);
-        return -1;
-    }
-
-    // Patch the root Spoor's dev9p_priv with the attach-session
-    // ownership pointer. Mirrors SYS_ATTACH_9P's pattern: bump for
-    // root's hold, drop the construction ref.
-    struct dev9p_priv *root_priv = (struct dev9p_priv *)root->aux;
-    if (!root_priv || root_priv->magic != DEV9P_PRIV_MAGIC) {
-        spoor_clunk(root);
-        p9_attached_unref(att);
-        return -1;
-    }
-    root_priv->attached_owner = att;
-    p9_attached_ref(att);
-
-    // Install the root Spoor as a KOBJ_SPOOR handle.
-    rights_t r = RIGHT_READ | RIGHT_WRITE | RIGHT_TRANSFER;
-    hidx_t fd = handle_alloc(p, KOBJ_SPOOR, r, root);
+    // Install the dev9p root as a KOBJ_SPOOR handle. On failure, spoor_clunk
+    // (root) runs dev9p_close -> the last attached_owner unref -> session
+    // teardown (the construction ref was already dropped inside the helper).
+    hidx_t fd = handle_alloc(p, KOBJ_SPOOR,
+                             RIGHT_READ | RIGHT_WRITE | RIGHT_TRANSFER, root);
     if (fd < 0) {
-        // Roll back: clunk the root (dev9p_close unrefs the attached's
-        // root contribution + the construction ref drops below).
         spoor_clunk(root);
-        p9_attached_unref(att);
         return -1;
     }
-
-    // Drop the construction ref. (kernel_attached was set EARLIER --
-    // right after p9_srvconn_transport_init succeeded; see R1 F4 fix.)
-    p9_attached_unref(att);
     return (s64)fd;
 }
 
