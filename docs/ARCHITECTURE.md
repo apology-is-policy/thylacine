@@ -1921,7 +1921,7 @@ See `VISION.md §11` for the coordination story.
 
 ### 14.2 9P client (kernel)
 
-The kernel implements a 9P2000.L client with the Stratum extensions enumerated in §10.2 above. Pipelined from day one (§21).
+The kernel implements a 9P2000.L client with the Stratum extensions enumerated in §10.2 above. Pipelined per §21 — the elected-reader pipeline (§21.10 records the P5 serial regression and the #841 restoration; the P5-client shipped a single-in-flight serial stand-in that §21.10 replaces).
 
 Implementation (`kernel/9p_*` — split across `9p_wire.c`, `9p_session.c`, `9p_transport.c`, `9p_attach.c`): wire protocol encode/decode, fid management, tag pool, outstanding-request table, dispatch loop, Unix-socket transport. Spec: `specs/9p_client.tla`.
 
@@ -2727,7 +2727,7 @@ void receive_loop(struct Session *s) {
 }
 ```
 
-(Real code is more careful with memory ordering and error paths; see implementation.)
+(Real code is more careful with memory ordering and error paths; see implementation.) The as-built v1.0 client uses an **elected-reader** model rather than the dedicated `receive_loop` kthread sketched here — see §21.10 for the as-built design and the #841 restoration from the P5 serial regression.
 
 ### 21.4 Userspace 9P servers benefit automatically
 
@@ -2759,6 +2759,30 @@ None at Gate 3.
 ### 21.9 Summary
 
 Pipelined 9P client from day one. Per-session 32 outstanding requests. Out-of-order completion. Halcyon and POSIX programs benefit automatically.
+
+### 21.10 v1.0 as-built: the serial regression and its restoration (#841)
+
+**What shipped at P5-client (R15-c F230) was NOT the §21.3 pipeline.** To get an SMP-safe client quickly, the P5 client serialized every operation under a single per-client spinlock (`c->lock`) held across the *entire* build → transport-exchange → dispatch window — i.e. across the blocking receive. `struct p9_transport`'s `exchange` is strictly synchronous (send one frame, then read exactly the next frame off the wire and dispatch it); there is no tag demux at the transport layer, and at most one request is ever in flight. The simplification was documented in the layer headers ("thread-safe at the public surface … per-client `spin_lock_t` held across every send/dispatch sequence"). It is a **deviation from this committed section** — the pipeline, the tag-matched completion, and the out-of-order dispatch that §21.2–§21.7 commit were never built.
+
+That deviation is the **#841 soundness bug**. Two independent defects compound:
+
+1. **Spinlock held across a blocking sleep.** Every `p9_client_*` op holds `c->lock` (a busy-wait spinlock) across `p9_transport_exchange`, whose receive blocks (`srvconn_client_recv` → `tsleep`). A second CPU calling any client op **busy-spins** on `c->lock` while the holder sleeps — burning a core the server needs to make progress. When a single kernel 9P client is shared across Procs (corvus and joey share the Stratum-root client, because `territory_clone` shares `root_spoor`), one Proc's blocked op stalls the whole client *and* spins every other CPU that touches it.
+
+2. **Per-op timeout desyncs the shared byte stream.** The receive is bounded by `SRVCONN_OP_DEADLINE_NS` (30 s). On timeout the op abandons its in-flight request: the late reply is never consumed, so the next op reads a frame-misaligned stream; and `do_recv` latches the transport to `P9_TRANS_ERROR`, wedging the session permanently. A single slow reply is unrecoverable.
+
+Observed in stalk-3c-d: corvus, spawned post-pivot with a Stratum-FS root, issues an A-3 X-search `Tgetattr(Stratum root)` for its `/srv` open over the client it shares with joey; under SMP host load (UBSan build) the busy-spin starves `stratumd`, the 30 s deadline trips, the stream desyncs, corvus's open fails persistently, corvus exits, and kproc's `wait_pid` reaps the orphaned corvus → wrong-pid extinction. ~30% under bursty host load; invisible at low load (which is why the serial client passed for so long).
+
+**The restoration (#841)** builds the committed §21 pipeline, with one deliberate departure from the §21.3 *sketch* and one simplification of the timeout policy:
+
+- **Elected-reader, not a reader kthread.** §21.3's `receive_loop` kthread is illustrative ("Real code is more careful … see implementation"). A per-session kthread that blocks indefinitely in `recv` is precisely the free-while-blocked lifecycle hazard that produced #788 and #713 (a thread asleep in the kernel while its owning structure is torn down), and it cannot drive the *synchronous* loopback test transport. Thylacine instead uses the **Plan 9 `devmnt`/`mountio` elected-reader** model: a submitter that has sent its request and finds no reply yet becomes *the* reader (one at a time, guarded), receives the next frame **with no lock held**, demuxes it by tag to its owning request, wakes that owner, and loops until its own reply arrives; if another thread is already the reader, the submitter sleeps on its own request. This (a) never holds a lock across `recv`, (b) has no long-lived kthread to spawn, join, or tear down, (c) preserves the SrvConn's "single blocking consumer of `s2c`" invariant via the election, and (d) drives both the blocking srvconn transport and the synchronous loopback unchanged. It delivers every committed *property* of §21.2–§21.7 (max-outstanding, tag-matched completion, out-of-order dispatch, no-missed-wakeup, flow control); only the sketch's reader-model detail differs. It is exactly the heritage the #841 fix direction named ("Plan 9 mntrpc").
+
+- **No per-op timeout.** §21 commits no per-request deadline. The elected reader blocks until a frame arrives or the transport reaches EOF (server death → all in-flight requests woken with `-EIO`, session marked dead); a blocked op is **death-interruptible** via #811 (universal `*_INTR` sleep), so a group-terminate unblocks it. The 30 s `SRVCONN_OP_DEADLINE_NS` is removed from the kernel-client path. This removes the desync class structurally — there is no "abandon one in-flight request and keep using the stream" path. A wedged-but-alive server now blocks the caller (as Plan 9 and local Linux-9p do) rather than corrupting the session; the caller is still killable.
+
+**Per-request shape.** Each op allocates a `p9_rpc` (the §21.3 "Request"): tag, op-kind, a wait rendez, a done flag + error slot, a result struct, and a per-request reply buffer (≤ msize). Submit: under `c->lock`, allocate a tag (block at `P9_SESSION_MAX_OUTSTANDING` = flow control), build the Tmsg, register the rpc in a tag-indexed `inflight[]` table, send the framed Tmsg (frame-atomic; a sender blocks death-interruptibly if `c2s` lacks room for a whole frame, **without** holding `c->lock` across the block), release `c->lock`, then register-then-observe-sleep on the rpc's rendez (the I-9 no-lost-wakeup discipline `specs/9p_client.tla` pins). The elected reader copies each received frame into the owning rpc's reply buffer, marks it done, and wakes it; the woken submitter dispatches its own buffer through `p9_session_dispatch_rmsg` (which clears `session.outstanding[tag]` and applies fid state, under `c->lock`), extracts its result, frees the tag + rpc, and returns. The per-rpc reply buffer + the one frame copy are the v1.0 cost; a buffer pool / read-into-owner-buffer is a v1.x optimization.
+
+**Invariants.** I-10 (per-session tag uniqueness — the allocator refuses an active tag), I-11 (fid lifecycle — unchanged; `dispatch_rmsg` is still the codec authority), I-9 (no wakeup lost between the rpc-done check and the sleep — register-then-observe under `c->lock`, generalized to the per-rpc rendez), and flow control (bounded outstanding) all hold. The public `p9_client_*` API surface is **unchanged** — `dev9p` and every consumer are untouched; the change is internal to `9p_client.c` + the `9p_transport.c`/srvconn boundary.
+
+**Audit posture.** Audit-bearing (the 9P-client trigger surface; §25.4). Validated against `specs/9p_client.tla` (clean cfg + the four buggy cfgs — `tag_collision`, `ooo_match`, `fid_after_clunk`, `unbounded` — re-run as pre-commit gates per the spec-to-code-suspension carve-out), a focused 9P-client soundness audit, the kernel test suite (extended for multi-in-flight + out-of-order + reader-election + EOF-wakes-all), and the #841 runtime repro (`build/3cd-flake/forkstorm.sh` + `capbare.sh` under the UBSan build) GREEN across N boots under host load.
 
 ---
 
@@ -3225,7 +3249,7 @@ Every change to a file or function listed below spawns an adversarial soundness 
 | Territory | `kernel/territory.c` | Cycle-freedom, isolation |
 | Handle table | `kernel/handle.c` | Rights monotonicity, transfer rules, hardware-handle non-transferability |
 | BURROW | `kernel/burrow.c`, `mm/burrow_pages.c` | Refcount, mapping lifecycle |
-| 9P client | `kernel/9p_client.c`, `kernel/9p_session.c` | Tag uniqueness, fid lifecycle, pipelining |
+| 9P client (pipeline restoration, #841) | `kernel/9p_client.c`, `kernel/9p_session.c`, `kernel/9p_transport.c`, `kernel/9p_attach.c`, the SrvConn transport boundary (`kernel/srvconn.c` client send/recv + `kernel/9p_srvconn_transport.c`) | Tag uniqueness (I-10), fid lifecycle (I-11), no-lost-wakeup (I-9 specialized to the per-rpc rendez), flow control, out-of-order completion. Restores committed §21/§21.10 pipelining (elected-reader, Plan 9 `mountio`) from the R15-c F230 serial regression — the single spinlock held across the blocking `recv` + the 30 s per-op deadline that desynced the shared byte stream (the stalk-3c-d soundness bug). Elected-reader = lock NEVER held across `recv`; multi-in-flight tag-demux; no per-op timeout (block until reply or ring-EOF, death-interruptible via #811). **No new spec** per the 2026-05-23 broadening — but `specs/9p_client.tla` (clean + the 4 buggy cfgs) is the pre-commit gate; prose validation in ARCH §21.10 + this row + the audit + the multi-in-flight runtime tests + the #841 UBSan/forkstorm repro. |
 | poll | `kernel/poll.c` | Wait/wake across N fds, missed-wakeup-freedom (I-9), poll-hook list lifetime |
 | Notes / signals | `kernel/notes.c`, `kernel/devnotes.c`, `kernel/include/thylacine/notes.h`, `kernel/proc.c` (synthetic `child_exit` post in `exits`), `kernel/pipe.c` (synthetic `pipe` post on write-to-closed), `arch/arm64/exception.c` (EL0-return-tail delivery) | Delivery ordering (I-19); async-safety (delivery only at zero-lock EL0-return tail); N-2 consumed-exactly-once across handler + fd-read paths; N-3 in_handler re-entrancy guard; N-4 `kill` non-catchable. **No `specs/notes.tla`** per the 2026-05-23 spec-to-code broadening — prose validation in `notes.h` + the audit + the runtime test suite are the rigor. |
 | Capability checks | All syscall entry points | Privilege correctness |
