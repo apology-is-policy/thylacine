@@ -34,7 +34,8 @@ static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::Th
 use alloc::vec::Vec;
 use libthyla_rs::cap::{self, Caps};
 use libthyla_rs::{
-    t_putstr, t_read, t_srv_connect, t_write, T_CAP_CHOWN, T_CAP_DAC_OVERRIDE,
+    t_close, t_open, t_putstr, t_read, t_write, T_CAP_CHOWN, T_CAP_DAC_OVERRIDE, T_OREAD,
+    T_ORDWR, T_WALK_OPEN_FROM_ROOT,
 };
 
 // Shared test passphrase for "michael" -- MUST match joey's pass_michael (the
@@ -154,9 +155,18 @@ pub extern "C" fn rs_main() -> i64 {
     // covers the accept-queue race.
     let mut conn: i64 = -1;
     for _ in 0..64 {
-        conn = unsafe { t_srv_connect(b"corvus".as_ptr(), 6, b"ctl".as_ptr(), 3) };
-        if conn >= 0 {
-            break;
+        // stalk-3b-β two-step (D5): open /srv/corvus (the connect; 9p-mode -> a
+        // dev9p root), then open "ctl" relative to it. The walked ctl fid holds
+        // the attach session, so the root fd is closed at once.
+        let root =
+            unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/srv/corvus".as_ptr(), 11, T_OREAD) };
+        if root >= 0 {
+            let ctl = unsafe { t_open(root, b"ctl".as_ptr(), 3, T_ORDWR) };
+            let _ = unsafe { t_close(root) };
+            if ctl >= 0 {
+                conn = ctl;
+                break;
+            }
         }
     }
     if conn < 0 {

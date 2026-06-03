@@ -749,8 +749,18 @@ static long connect_corvus(void) {
     if (t_pipe(&rd_yield, &wr_yield) != 0) return -1;
     long result = -1;
     for (int i = 0; i < 60; i++) {
-        long h = t_srv_connect("corvus", 6, "ctl", 3);
-        if (h >= 0) { result = h; break; }
+        // stalk-3b-β two-step (D5): open the namespace-resident /srv/corvus (the
+        // connect; 9p-mode -> a dev9p root, driving Tversion+Tattach), then open
+        // "ctl" relative to that root (Twalk+Tlopen). The connect fails fast with
+        // -1 while corvus has not yet posted (srv_lookup miss), so the retry
+        // paces corvus's startup exactly as the old t_srv_connect did. The walked
+        // "ctl" fid holds the attach session, so the root fd is closed at once.
+        long root = t_open(T_WALK_OPEN_FROM_ROOT, "/srv/corvus", 11, T_OREAD);
+        if (root >= 0) {
+            long c = t_open(root, "ctl", 3, T_ORDWR);
+            (void)t_close(root);
+            if (c >= 0) { result = c; break; }
+        }
         struct pollfd pfd = { .fd = (int)rd_yield, .events = POLLIN, .revents = 0 };
         (void)t_poll(&pfd, 1, 1000);
     }
@@ -2029,6 +2039,21 @@ int main(void) {
             t_putstr(itoa_dec(pre_n, buf, sizeof(buf)));
             t_putstr(" bytes)\n");
 
+            // stalk-3b-β: /srv is a namespace-resident devsrv mount on the
+            // (pre-pivot) devramfs root. The pivot below swaps joey's root to the
+            // disk-backed Stratum FS, which has no /srv -- so the inherited mount
+            // falls out of the namespace. Grab a handle to the devsrv root NOW
+            // (O_PATH crosses into the mount, yielding the boot registry's root)
+            // and re-graft it onto the new root's /srv post-pivot, keeping
+            // /srv/<service> reachable for the corvus connect. The retired
+            // SYS_SRV_CONNECT bypassed the namespace; open=connect resolves
+            // through it, so /srv must survive the pivot.
+            long srv_devsrv_h = t_open(T_WALK_OPEN_FROM_ROOT, "/srv", 4, T_OPATH);
+            if (srv_devsrv_h < 0) {
+                t_putstr("joey: stalk-3b-beta pre-pivot t_open(/srv) FAILED\n");
+                return 1;
+            }
+
             if (t_pivot_root(sd_attach_fd) != 0) {
                 t_putstr("joey: stratumd-boot t_pivot_root FAILED\n");
                 return 1;
@@ -2037,6 +2062,22 @@ int main(void) {
                 t_putstr("joey: stratumd-boot t_close(sd_attach_fd) FAILED\n");
                 return 1;
             }
+
+            // stalk-3b-β: re-establish the namespace-resident /srv on the pivoted
+            // (disk-backed) root. mkdir /srv (idempotent -- the Stratum pool
+            // persists across reboots, so a later boot finds it), then graft the
+            // pre-pivot devsrv root onto it (MREPL). The mount takes its own
+            // spoor_ref, so the pre-pivot handle is closed after.
+            {
+                long mk = t_walk_create(T_WALK_OPEN_FROM_ROOT, "srv", 3, T_OREAD,
+                                        T_WALK_CREATE_DMDIR | 0755u);
+                if (mk >= 0) (void)t_close(mk);
+                if (t_mount("/srv", 4, srv_devsrv_h, T_MREPL) != 0) {
+                    t_putstr("joey: stalk-3b-beta post-pivot t_mount(/srv) FAILED\n");
+                    return 1;
+                }
+            }
+            (void)t_close(srv_devsrv_h);
 
             long post_fd = t_walk_open(T_WALK_OPEN_FROM_ROOT, sentinel_name,
                                         sentinel_len, T_OREAD);

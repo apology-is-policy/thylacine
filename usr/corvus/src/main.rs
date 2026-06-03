@@ -2686,6 +2686,10 @@ struct FidEntry {
 const QID_ROOT_PATH: u64 = 1;
 const QID_CTL_PATH: u64 = 2;
 
+// POSIX st_mode type bits, reported in Rgetattr (stalk-3b-β; see dispatch_tgetattr).
+const S_IFDIR: u32 = 0o40000;
+const S_IFREG: u32 = 0o100000;
+
 fn root_qid() -> p9::Qid { p9::Qid { kind: p9::P9_QTDIR, version: 0, path: QID_ROOT_PATH } }
 fn ctl_qid() -> p9::Qid { p9::Qid { kind: p9::P9_QTFILE, version: 0, path: QID_CTL_PATH } }
 
@@ -2958,6 +2962,7 @@ unsafe fn dispatch_one(conn: &mut Conn, tmsg: &[u8]) -> usize {
         p9::P9_TREAD => dispatch_tread(conn, tmsg, tag),
         p9::P9_TWRITE => dispatch_twrite(conn, tmsg, tag),
         p9::P9_TCLUNK => dispatch_tclunk(conn, tmsg, tag),
+        p9::P9_TGETATTR => dispatch_tgetattr(conn, tmsg, tag),
         _ => Ok(p9::build_rlerror(&mut conn.out_buf, tag, p9::E_NOSYS).unwrap_or(0)),
     };
     match result {
@@ -2976,6 +2981,37 @@ unsafe fn dispatch_one(conn: &mut Conn, tmsg: &[u8]) -> usize {
             n
         }
     }
+}
+
+// dispatch_tgetattr -- stalk-3b-β: the namespace-resident /srv routes service
+// opens through the kernel's stalk resolver + dev9p, whose A-3 per-component
+// X-search calls Tgetattr on each traversed node. corvus reports the connecting
+// client (conn.peer, the kernel-stamped SO_PEERCRED identity) as the OWNER with
+// permissive perms (root drwxr-xr-x, ctl -rw------- owned by the client), so the
+// owner-first perm_check passes. corvus's real authorization is conn.peer + the
+// per-verb console/passphrase checks; the reported FS rwx only lets the client
+// REACH the ctl channel (which it already may, having connected). The valid mask
+// MUST include mode/uid/gid -- dev9p_stat_native fail-closes on an unset bit.
+fn dispatch_tgetattr(conn: &mut Conn, tmsg: &[u8], tag: u16) -> Result<usize, ()> {
+    let fid = match p9::parse_tgetattr(tmsg) {
+        Ok(f) => f,
+        Err(_) => return Ok(p9::build_rlerror(&mut conn.out_buf, tag, p9::E_PROTO)?),
+    };
+    let qid = match conn.fid_find(fid) {
+        Some(idx) => conn.fids[idx].unwrap().qid,
+        None => return Ok(p9::build_rlerror(&mut conn.out_buf, tag, p9::E_BADF)?),
+    };
+    let (mode, nlink) = if qid.kind == p9::P9_QTDIR {
+        (S_IFDIR | 0o755u32, 1u64) // drwxr-xr-x
+    } else {
+        (S_IFREG | 0o600u32, 1u64) // -rw------- (owner = the connecting client)
+    };
+    let valid =
+        p9::P9_GETATTR_MODE | p9::P9_GETATTR_UID | p9::P9_GETATTR_GID | p9::P9_GETATTR_NLINK;
+    p9::build_rgetattr(
+        &mut conn.out_buf, tag, valid, &qid, mode,
+        conn.peer.principal_id, conn.peer.primary_gid, nlink, 0,
+    )
 }
 
 fn dispatch_tversion(conn: &mut Conn, tmsg: &[u8], tag: u16) -> Result<usize, ()> {
@@ -3338,8 +3374,16 @@ unsafe fn srv_server_loop(listener: i64) -> i64 {
         }
 
         // Service ready conns. Iterate from the end so removal doesn't
-        // invalidate indices.
-        let mut i = conns.len();
+        // invalidate indices. Only service the conns that were actually
+        // POLLED this iteration (nfds-1), NOT a conn just accepted above --
+        // its pollfds[] slot was never written by t_poll and holds a STALE
+        // revents from a previously-closed conn at that index, which would
+        // spuriously close the fresh conn before its Tversion is read. The
+        // just-accepted conn is serviced on the next iteration (stalk-3b-β:
+        // the dev9p close sends Tclunk x2 before the EOF, so a peer's POLLHUP
+        // now lands in a separate poll from a reconnect's listener-POLLIN,
+        // exposing this).
+        let mut i = nfds - 1;
         while i > 0 {
             i -= 1;
             let pf = pollfds[1 + i];

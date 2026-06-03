@@ -65,6 +65,8 @@ pub const P9_TWRITE: u8   = 118;
 pub const P9_RWRITE: u8   = 119;
 pub const P9_TCLUNK: u8   = 120;
 pub const P9_RCLUNK: u8   = 121;
+pub const P9_TGETATTR: u8 = 24;
+pub const P9_RGETATTR: u8 = 25;
 pub const P9_RLERROR: u8  = 7;
 
 // QID type bits (the v1.0 surface -- corvus's namespace is one dir +
@@ -442,6 +444,60 @@ pub fn build_rclunk(out: &mut [u8], tag: u16) -> Result<usize, ()> {
 pub fn build_rlerror(out: &mut [u8], tag: u16, ecode: u32) -> Result<usize, ()> {
     let p = build_header(out, P9_RLERROR, tag)?;
     let p = pack_u32(out, p, ecode)?;
+    patch_header_size(out, p)?;
+    Ok(p)
+}
+
+// Tgetattr request-mask bits (Linux v9fs STATX_*). The kernel's dev9p_stat_native
+// reads mode/uid/gid only when their `valid` bit is set; a 9P-mode service (the
+// stalk-3b-β open=connect target) MUST fill the security trio so the kernel's
+// per-component X-search (the A-3 dev9p enforcement) does not fail-closed.
+pub const P9_GETATTR_MODE: u64 = 0x1;
+pub const P9_GETATTR_NLINK: u64 = 0x2;
+pub const P9_GETATTR_UID: u64 = 0x4;
+pub const P9_GETATTR_GID: u64 = 0x8;
+
+/// parse_tgetattr -- extract the fid from a Tgetattr. Body: `[fid: u32]
+/// [request_mask: u64]`; the request_mask is a hint a minimal server may ignore.
+pub fn parse_tgetattr(buf: &[u8]) -> Result<u32, ()> {
+    let (fid, _) = unpack_u32(buf, P9_HDR_LEN)?;
+    Ok(fid)
+}
+
+/// build_rgetattr -- the full 9P2000.L Rgetattr (153-byte body; the kernel's
+/// `p9_parse_rgetattr` enforces exact body length). `valid` is the mask of
+/// meaningfully-filled fields; qid/mode/uid/gid/nlink/size are the node's. The
+/// remaining statx fields (rdev, blksize, blocks, times, gen, data_version) are
+/// zeroed -- a 0 blksize defaults to 4096 in dev9p_stat_native.
+///
+/// Body: valid(8) qid(13) mode(4) uid(4) gid(4) nlink(8) rdev(8) size(8)
+///   blksize(8) blocks(8) atime{s,ns}(16) mtime{s,ns}(16) ctime{s,ns}(16)
+///   btime{s,ns}(16) gen(8) data_version(8).
+#[allow(clippy::too_many_arguments)]
+pub fn build_rgetattr(out: &mut [u8], tag: u16, valid: u64, qid: &Qid,
+                      mode: u32, uid: u32, gid: u32, nlink: u64,
+                      size: u64) -> Result<usize, ()> {
+    let p = build_header(out, P9_RGETATTR, tag)?;
+    let p = pack_u64(out, p, valid)?;
+    let p = pack_qid(out, p, qid)?;
+    let p = pack_u32(out, p, mode)?;
+    let p = pack_u32(out, p, uid)?;
+    let p = pack_u32(out, p, gid)?;
+    let p = pack_u64(out, p, nlink)?;
+    let p = pack_u64(out, p, 0)?;        // rdev
+    let p = pack_u64(out, p, size)?;     // size
+    let p = pack_u64(out, p, 0)?;        // blksize (0 -> dev9p default 4096)
+    let p = pack_u64(out, p, 0)?;        // blocks
+    let p = pack_u64(out, p, 0)?;        // atime_sec
+    let p = pack_u64(out, p, 0)?;        // atime_nsec
+    let p = pack_u64(out, p, 0)?;        // mtime_sec
+    let p = pack_u64(out, p, 0)?;        // mtime_nsec
+    let p = pack_u64(out, p, 0)?;        // ctime_sec
+    let p = pack_u64(out, p, 0)?;        // ctime_nsec
+    let p = pack_u64(out, p, 0)?;        // btime_sec
+    let p = pack_u64(out, p, 0)?;        // btime_nsec
+    let p = pack_u64(out, p, 0)?;        // gen
+    let p = pack_u64(out, p, 0)?;        // data_version
     patch_header_size(out, p)?;
     Ok(p)
 }

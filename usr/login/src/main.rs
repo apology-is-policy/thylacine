@@ -33,7 +33,8 @@ static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::Th
 use alloc::vec::Vec;
 use libthyla_rs::process::{Command, Stdio};
 use libthyla_rs::{
-    t_close, t_putstr, t_read, t_srv_connect, t_write, T_CAP_CSPRNG_READ, T_CAP_LOCK_PAGES,
+    t_close, t_open, t_putstr, t_read, t_write, T_CAP_CSPRNG_READ, T_CAP_LOCK_PAGES, T_OREAD,
+    T_ORDWR, T_WALK_OPEN_FROM_ROOT,
 };
 
 const VERB_AUTH: u8 = 1;
@@ -227,9 +228,17 @@ unsafe fn session_close(fd: i64, token: &[u8; TOKEN_LEN]) {
 // covers the accept-queue race, like legate-prover).
 fn connect_corvus() -> i64 {
     for _ in 0..64 {
-        let c = unsafe { t_srv_connect(b"corvus".as_ptr(), 6, b"ctl".as_ptr(), 3) };
-        if c >= 0 {
-            return c;
+        // stalk-3b-β two-step (D5): open /srv/corvus (the connect; 9p-mode -> a
+        // dev9p root), then open "ctl" relative to it. The walked ctl fid holds
+        // the attach session, so the root fd is closed at once.
+        let root =
+            unsafe { t_open(T_WALK_OPEN_FROM_ROOT, b"/srv/corvus".as_ptr(), 11, T_OREAD) };
+        if root >= 0 {
+            let ctl = unsafe { t_open(root, b"ctl".as_ptr(), 3, T_ORDWR) };
+            let _ = unsafe { t_close(root) };
+            if ctl >= 0 {
+                return ctl;
+            }
         }
     }
     -1
