@@ -32,8 +32,14 @@
 //   - burrow_map creates a VMA via vma_alloc + vma_insert. PTE installation
 //     is deferred to demand-paging via the user-mode fault path (P3-Dc);
 //     burrow_map only installs the VMA.
-//   - Single-CPU lifecycle. Phase 5+ adds atomic ops for handle_count +
-//     mapping_count when SMP syscalls go live.
+//   - SMP-safe lifecycle (#847): handle_count + mapping_count + the
+//     dual-counter free decision are serialized by a per-Burrow spin_lock.
+//     A multi-threaded Proc (stratumd) can have one thread close a Burrow
+//     handle while another unmaps a mapping of the same Burrow; without the
+//     lock the non-atomic ++/-- torn-updated the count and the two
+//     `handle_count==0 && mapping_count==0` free sites raced (double-free or
+//     leak). Pulled forward as the precursor to the #844 handle-lifetime
+//     pass, whose handle_put drops the Burrow ref outside the table lock.
 //
 // Phase 3+ refinement (P3-Dc):
 //   - arch_fault_handle's user-mode dispatch path → vma_lookup → page
@@ -50,6 +56,7 @@
 #ifndef THYLACINE_VMO_H
 #define THYLACINE_VMO_H
 
+#include <thylacine/spinlock.h>     // #847: per-Burrow lock (spin_lock_t)
 #include <thylacine/types.h>
 
 struct Proc;
@@ -99,8 +106,16 @@ struct Burrow {
     enum burrow_type  type;
     size_t         size;           // rounded-up to page_count * PAGE_SIZE
     size_t         page_count;
-    int            handle_count;   // open handles to this BURROW
-    int            mapping_count;  // open mappings (vma's)
+    // #847: serializes the two counts below + the dual-counter free decision
+    // against concurrent ref/unref/{acquire,release}_mapping from sibling
+    // threads of a multi-threaded Proc. Plain spin_lock (process-context only,
+    // never from IRQ -- matches p->vma_lock). KP_ZERO at create inits it
+    // unlocked (SPIN_LOCK_INIT == {0}). A leaf lock: burrow_free_internal runs
+    // OUTSIDE it. Lock order (with #844): handle-table lock -> v->lock (a
+    // handle_get/dup acquire is under the table lock); never the reverse.
+    spin_lock_t    lock;
+    int            handle_count;   // open handles to this BURROW (under lock)
+    int            mapping_count;  // open mappings / vma's (under lock)
     struct page   *pages;          // alloc_pages chunk; NULL after free; NULL for MMIO
     unsigned       order;          // for free_pages; unused for MMIO
     // P4-Ic1 / P4-Ic5b1b: hw-backed-Burrow fields. For BURROW_TYPE_ANON

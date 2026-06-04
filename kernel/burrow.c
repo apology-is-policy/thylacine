@@ -20,6 +20,16 @@
 // each correspond to a way this dual-check could be wrong: free without
 // checking the other count (premature) or fail to check at all (leak).
 //
+// #847 (SMP): the two counts AND the dual-check run under a per-Burrow
+// spin_lock (struct Burrow::lock). Without it a handle-path burrow_unref and
+// a vma-path burrow_release_mapping on the same Burrow raced the free
+// decision (double-free / leak), and the plain ++/-- torn-updated under
+// concurrent handle_dup/handle_close -- pre-existing, reachable from a
+// multi-threaded Proc (stratumd) and amplified by the #844 handle_put, which
+// drops the Burrow ref OUTSIDE the handle-table lock. burrow_free_internal
+// runs outside v->lock (leaf-lock discipline; it takes the buddy / mmio /
+// dma locks, none of which may nest under v->lock).
+//
 // API split (P3-Db):
 //   - burrow_acquire_mapping / burrow_release_mapping: bare refcount ops
 //     (formerly burrow_map / burrow_unmap pre-P3-Db). Internal to the VMA
@@ -260,30 +270,42 @@ static void burrow_free_internal(struct Burrow *v) {
 void burrow_ref(struct Burrow *v) {
     if (!v)                       extinction("burrow_ref(NULL)");
     if (v->magic != VMO_MAGIC)    extinction("burrow_ref of corrupted BURROW");
-    // Defensive: a BURROW with handle_count=0 AND mapping_count=0 should
-    // already be freed; ref-ing it would resurrect an already-freed
-    // object's identity. UAF-class bug.
-    if (v->handle_count == 0 && v->mapping_count == 0)
-        extinction("burrow_ref on BURROW with both counts=0 (already freed?)");
 
+    // #847: the both-counts-zero check + the increment run under v->lock so a
+    // sibling thread's concurrent unref / release_mapping can neither
+    // torn-update the count nor race the free decision.
+    spin_lock(&v->lock);
+    // Defensive: both counts 0 means already-freed; ref-ing resurrects a dead
+    // identity (UAF-class). Coherent under the lock.
+    if (v->handle_count == 0 && v->mapping_count == 0) {
+        spin_unlock(&v->lock);
+        extinction("burrow_ref on BURROW with both counts=0 (already freed?)");
+    }
     v->handle_count++;
+    spin_unlock(&v->lock);
 }
 
 void burrow_unref(struct Burrow *v) {
     if (!v) return;                            // NULL-safe
     if (v->magic != VMO_MAGIC)
         extinction("burrow_unref of corrupted BURROW (use-after-free?)");
-    if (v->handle_count <= 0)
+    // #847: decrement + the dual-counter free decision under v->lock; the
+    // free runs OUTSIDE the lock (leaf discipline -- see file header).
+    spin_lock(&v->lock);
+    if (v->handle_count <= 0) {
+        spin_unlock(&v->lock);
         extinction("burrow_unref of zero-ref BURROW");
-
-    v->handle_count--;
-    // Dual-check: free only when BOTH counts reach 0. Maps to the
-    // spec's NoUseAfterFree iff invariant — premature free violates
-    // (counts > 0 ∧ pages dead); delayed free violates (counts = 0 ∧
-    // pages alive). The dual-check is the runtime enforcement.
-    if (v->handle_count == 0 && v->mapping_count == 0) {
-        burrow_free_internal(v);
     }
+    v->handle_count--;
+    // Dual-check: free only when BOTH counts reach 0. Maps to the spec's
+    // NoUseAfterFree iff invariant — premature free violates (counts > 0 ∧
+    // pages dead); delayed free violates (counts = 0 ∧ pages alive). Exactly
+    // one racing unref/release_mapping sees the 0,0 edge.
+    bool should_free = (v->handle_count == 0 && v->mapping_count == 0);
+    spin_unlock(&v->lock);
+
+    if (should_free)
+        burrow_free_internal(v);
 }
 
 void burrow_acquire_mapping(struct Burrow *v) {
@@ -310,21 +332,31 @@ void burrow_acquire_mapping(struct Burrow *v) {
         extinction("burrow_acquire_mapping: invalid burrow type");
     }
 
+    // #847: the type-liveness switch above reads create-immutable fields
+    // (safe outside the lock; the caller holds a handle keeping pages alive);
+    // only the count mutation needs serialization.
+    spin_lock(&v->lock);
     v->mapping_count++;
+    spin_unlock(&v->lock);
 }
 
 void burrow_release_mapping(struct Burrow *v) {
     if (!v)                       extinction("burrow_release_mapping(NULL)");
     if (v->magic != VMO_MAGIC)
         extinction("burrow_release_mapping of corrupted BURROW (use-after-free?)");
-    if (v->mapping_count <= 0)
+    // #847: symmetric with burrow_unref -- decrement + dual-check under
+    // v->lock, free outside.
+    spin_lock(&v->lock);
+    if (v->mapping_count <= 0) {
+        spin_unlock(&v->lock);
         extinction("burrow_release_mapping of zero-mapping BURROW");
-
-    v->mapping_count--;
-    // Same dual-check as burrow_unref — symmetric.
-    if (v->handle_count == 0 && v->mapping_count == 0) {
-        burrow_free_internal(v);
     }
+    v->mapping_count--;
+    bool should_free = (v->handle_count == 0 && v->mapping_count == 0);
+    spin_unlock(&v->lock);
+
+    if (should_free)
+        burrow_free_internal(v);
 }
 
 // =============================================================================
