@@ -471,14 +471,15 @@ void test_devsrv_accept_immediate(void) {
     // corvus accepts — the backlog is non-empty, so accept returns at once.
     int conn_h = sys_srv_accept_for_proc(corvus, (hidx_t)svc_h);
     TEST_ASSERT(conn_h >= 0, "accept returns a connection handle");
-    struct Handle *ch = handle_get(corvus, conn_h);
-    TEST_ASSERT(ch != NULL, "the accepted handle is installed");
-    TEST_EXPECT_EQ((int)ch->kind, (int)KOBJ_SPOOR,
+    struct Handle ch;
+    TEST_ASSERT(handle_get(corvus, conn_h, &ch) == 0, "the accepted handle is installed");
+    TEST_EXPECT_EQ((int)ch.kind, (int)KOBJ_SPOOR,
         "the accepted handle is a KObj_Spoor server endpoint");
     TEST_EXPECT_EQ(srv_backlog_depth(svc), 0, "accept drained the backlog");
 
     // The accepted endpoint and the client's handle name the same SrvConn.
-    struct SrvConn *cn_srv = (struct SrvConn *)((struct Spoor *)ch->obj)->aux;
+    struct SrvConn *cn_srv = (struct SrvConn *)((struct Spoor *)ch.obj)->aux;
+    handle_put(&ch);
     struct SrvConn *cn_cli =
         devsrv_conn_of(cs);
     TEST_EXPECT_EQ(cn_srv, cn_cli,
@@ -556,9 +557,10 @@ void test_devsrv_accept_blocks_then_wakes(void) {
     TEST_ASSERT(g_da_ret >= 0, "the accept returned a connection handle");
 
     // The accepted endpoint names the connection the client opened.
-    struct Handle *ch = handle_get(corvus, (hidx_t)g_da_ret);
-    TEST_ASSERT(ch != NULL, "the accepted handle is installed");
-    struct SrvConn *cn_srv = (struct SrvConn *)((struct Spoor *)ch->obj)->aux;
+    struct Handle ch;
+    TEST_ASSERT(handle_get(corvus, (hidx_t)g_da_ret, &ch) == 0, "the accepted handle is installed");
+    struct SrvConn *cn_srv = (struct SrvConn *)((struct Spoor *)ch.obj)->aux;
+    handle_put(&ch);
     struct SrvConn *cn_cli =
         devsrv_conn_of(cs);
     TEST_EXPECT_EQ(cn_srv, cn_cli,
@@ -883,8 +885,10 @@ void test_devsrv_srv_peer_gate(void) {
     // the connection endpoint — but is not the service poster — is still
     // refused. Install the same endpoint Spoor in the stranger's table;
     // a spoor_ref balances the extra handle slot's release.
-    struct Spoor *endpoint =
-        (struct Spoor *)handle_get(corvus, (hidx_t)conn_h)->obj;
+    struct Handle eh;
+    handle_get(corvus, (hidx_t)conn_h, &eh);
+    struct Spoor *endpoint = (struct Spoor *)eh.obj;
+    handle_put(&eh);
     spoor_ref(endpoint);
     hidx_t shared = handle_alloc(stranger, KOBJ_SPOOR,
                                  RIGHT_READ | RIGHT_WRITE, endpoint);

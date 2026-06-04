@@ -161,23 +161,24 @@ void test_sys_spawn_with_fds_child_rights_subset_of_parent(void) {
     // Poll for the child's slot to appear (thunk's handle_alloc runs
     // async on child's CPU). Bounded to 1024 sched yields; in practice
     // the child reaches its handle_alloc within a handful of yields.
-    struct Handle *child_slot = NULL;
+    struct Handle child_slot;
+    bool got_child = false;
     for (int i = 0; i < 1024; i++) {
-        child_slot = handle_get(child, 0);
-        if (child_slot != NULL) break;
+        if (handle_get(child, 0, &child_slot) == 0) { got_child = true; break; }
         sched();
     }
-    TEST_ASSERT(child_slot != NULL,
+    TEST_ASSERT(got_child,
         "child has handle at fd 0 after bounded poll");
-    TEST_EXPECT_EQ((u64)child_slot->kind, (u64)KOBJ_SPOOR,
+    TEST_EXPECT_EQ((u64)child_slot.kind, (u64)KOBJ_SPOOR,
         "child fd 0 is KOBJ_SPOOR");
 
     // The critical invariant: child's rights must equal parent's rights
     // (or be a strict subset). Pre-fix, this would be
     // RIGHT_READ|WRITE|TRANSFER (hardcoded), which is a SUPERSET of the
     // parent's RIGHT_READ — an I-6 violation.
-    TEST_EXPECT_EQ((u64)child_slot->rights, (u64)parent_rights,
+    TEST_EXPECT_EQ((u64)child_slot.rights, (u64)parent_rights,
         "child slot rights == parent slot rights (R15 F231)");
+    handle_put(&child_slot);
 
     int status = -1;
     int reaped = wait_pid(&status);

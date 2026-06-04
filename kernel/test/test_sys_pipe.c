@@ -75,17 +75,20 @@ void test_sys_pipe_allocates_two_distinct_spoor_handles(void) {
     TEST_EXPECT_EQ(spoor_total_allocated() - spoor_allocated_before, 2ull,
         "two Spoors allocated");
 
-    struct Handle *h_rd = handle_get(p, fd_rd);
-    struct Handle *h_wr = handle_get(p, fd_wr);
-    TEST_ASSERT(h_rd != NULL && h_wr != NULL,
+    struct Handle h_rd, h_wr;
+    int got_rd = handle_get(p, fd_rd, &h_rd);
+    int got_wr = handle_get(p, fd_wr, &h_wr);
+    TEST_ASSERT(got_rd == 0 && got_wr == 0,
         "handles installed");
-    TEST_EXPECT_EQ((int)h_rd->kind, (int)KOBJ_SPOOR, "rd is KOBJ_SPOOR");
-    TEST_EXPECT_EQ((int)h_wr->kind, (int)KOBJ_SPOOR, "wr is KOBJ_SPOOR");
+    TEST_EXPECT_EQ((int)h_rd.kind, (int)KOBJ_SPOOR, "rd is KOBJ_SPOOR");
+    TEST_EXPECT_EQ((int)h_wr.kind, (int)KOBJ_SPOOR, "wr is KOBJ_SPOOR");
     rights_t expected_rights = RIGHT_READ | RIGHT_WRITE | RIGHT_TRANSFER;
-    TEST_EXPECT_EQ(h_rd->rights, expected_rights, "rd rights");
-    TEST_EXPECT_EQ(h_wr->rights, expected_rights, "wr rights");
-    TEST_ASSERT(h_rd->obj != h_wr->obj,
+    TEST_EXPECT_EQ(h_rd.rights, expected_rights, "rd rights");
+    TEST_EXPECT_EQ(h_wr.rights, expected_rights, "wr rights");
+    TEST_ASSERT(h_rd.obj != h_wr.obj,
         "rd and wr point at distinct Spoors");
+    handle_put(&h_rd);
+    handle_put(&h_wr);
 
     drop_test_proc(p);
 }
@@ -204,9 +207,10 @@ void test_sys_pipe_dup_spoor_handle_acquires_ref(void) {
     hidx_t fd_rd = -1, fd_wr = -1;
     TEST_EXPECT_EQ(sys_pipe_for_proc(p, &fd_rd, &fd_wr), 0, "sys_pipe");
 
-    struct Handle *h_rd = handle_get(p, fd_rd);
-    TEST_ASSERT(h_rd != NULL, "handle_get(rd)");
-    struct Spoor *rd_spoor = (struct Spoor *)h_rd->obj;
+    struct Handle h_rd;
+    TEST_ASSERT(handle_get(p, fd_rd, &h_rd) == 0, "handle_get(rd)");
+    struct Spoor *rd_spoor = (struct Spoor *)h_rd.obj;
+    handle_put(&h_rd);                    // #844: release the borrow before reading ref
     int ref_before = rd_spoor->ref;
 
     // Dup the read end with reduced rights (RIGHT_READ only — subset
@@ -217,12 +221,13 @@ void test_sys_pipe_dup_spoor_handle_acquires_ref(void) {
         "handle_dup bumped the Spoor refcount via handle_acquire_obj");
 
     // Verify the dup'd handle is a KOBJ_SPOOR pointing at the same Spoor.
-    struct Handle *h_dup = handle_get(p, dup_fd);
-    TEST_ASSERT(h_dup != NULL, "handle_get(dup)");
-    TEST_EXPECT_EQ((int)h_dup->kind, (int)KOBJ_SPOOR, "dup'd handle is KOBJ_SPOOR");
-    TEST_ASSERT(h_dup->obj == rd_spoor, "dup'd handle points at same Spoor");
-    TEST_EXPECT_EQ(h_dup->rights, (rights_t)RIGHT_READ,
+    struct Handle h_dup;
+    TEST_ASSERT(handle_get(p, dup_fd, &h_dup) == 0, "handle_get(dup)");
+    TEST_EXPECT_EQ((int)h_dup.kind, (int)KOBJ_SPOOR, "dup'd handle is KOBJ_SPOOR");
+    TEST_ASSERT(h_dup.obj == rd_spoor, "dup'd handle points at same Spoor");
+    TEST_EXPECT_EQ(h_dup.rights, (rights_t)RIGHT_READ,
         "dup'd handle has reduced rights");
+    handle_put(&h_dup);                   // #844: release before the ref==ref_before check
 
     // Rights elevation must be rejected: dup the reduced-rights dup
     // back to READ|WRITE → -1.
@@ -275,13 +280,14 @@ void test_sys_attach_9p_rejection_paths(void) {
     //    by sys_attach_9p_handler internally). This is a structural
     //    pre-check: if handle_get rejects, sys_attach_9p_handler
     //    returns -1 before any allocation.
-    TEST_EXPECT_EQ(handle_get(p, 9999), (struct Handle *)NULL,
-        "out-of-range fd returns NULL from handle_get");
+    struct Handle bogus_tmp;
+    TEST_EXPECT_EQ(handle_get(p, 9999, &bogus_tmp), -1,
+        "out-of-range fd returns -1 from handle_get");
 
     // 2. Verify a closed fd doesn't pass.
     TEST_EXPECT_EQ(handle_close(p, fd_b_wr), 0, "close fd_b_wr");
-    TEST_EXPECT_EQ(handle_get(p, fd_b_wr), (struct Handle *)NULL,
-        "closed fd returns NULL from handle_get");
+    TEST_EXPECT_EQ(handle_get(p, fd_b_wr, &bogus_tmp), -1,
+        "closed fd returns -1 from handle_get");
 
     // Cleanup. Procf_free closes the remaining handles (rd_a, wr_a,
     // rd_b) via handle_table_free → KOBJ_SPOOR release → spoor_clunk.

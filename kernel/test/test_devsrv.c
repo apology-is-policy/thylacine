@@ -125,10 +125,11 @@ void test_devsrv_post_gate(void) {
     // Marked + well-formed name — accepted.
     int h = post_svc_9p(p, "corvus", 6);
     TEST_ASSERT(h >= 0, "post by a marked Proc → handle");
-    struct Handle *sh = handle_get(p, h);
-    TEST_ASSERT(sh != NULL, "service handle is installed");
-    TEST_EXPECT_EQ((int)sh->kind, (int)KOBJ_SRV,
+    struct Handle sh;
+    TEST_ASSERT(handle_get(p, h, &sh) == 0, "service handle is installed");
+    TEST_EXPECT_EQ((int)sh.kind, (int)KOBJ_SRV,
         "service handle is KObj_Srv");
+    handle_put(&sh);
     TEST_EXPECT_EQ(srv_registry_count(), 1, "one service registered");
 
     drop_test_proc(p);
@@ -379,9 +380,10 @@ void test_devsrv_post_listener(void) {
     // 9P-mode post via the create path.
     int h = devsrv_post_listener(p, root, "corvus", 6, SRV_MODE_9P);
     TEST_ASSERT(h >= 0, "devsrv_post_listener(9P) -> handle");
-    struct Handle *sh = handle_get(p, h);
-    TEST_ASSERT(sh != NULL, "listener handle installed");
-    TEST_EXPECT_EQ((int)sh->kind, (int)KOBJ_SRV, "listener is KObj_Srv");
+    struct Handle sh;
+    TEST_ASSERT(handle_get(p, h, &sh) == 0, "listener handle installed");
+    TEST_EXPECT_EQ((int)sh.kind, (int)KOBJ_SRV, "listener is KObj_Srv");
+    handle_put(&sh);
     struct SrvService *svc = srv_lookup_in(srv_boot_registry(), "corvus", 6);
     TEST_ASSERT(svc != NULL, "service registered in the boot registry");
     TEST_EXPECT_EQ((int)svc->state, (int)SRV_STATE_LIVE, "service LIVE");

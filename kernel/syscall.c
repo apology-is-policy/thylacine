@@ -303,32 +303,25 @@ static s64 sys_irq_wait_handler(u64 hraw) {
     // h >= PROC_HANDLE_MAX → NULL`. Casting u64 → hidx_t (int) safely
     // saturates large u64 values to negative ints, which handle_get
     // rejects via `h < 0`.
-    struct Handle *slot = handle_get(p, (hidx_t)hraw);
-    if (!slot)                                       return -1;
-    if (slot->kind != KOBJ_IRQ)                      return -1;
+    // #844: handle_get takes a snapshot + HOLDS a ref on the obj (k) under the
+    // handle-table lock, so the ref is live across the blocking kobj_irq_wait
+    // even if a sibling thread closes this slot concurrently. This subsumes
+    // the old explicit kobj_irq_ref/unref borrow (R9 F143): the snapshot's ref
+    // IS the borrow now. handle_put on every exit drops it. The (hidx_t)hraw
+    // cast saturates large u64 to negative, which handle_get rejects (h < 0).
+    struct Handle hh;
+    if (handle_get(p, (hidx_t)hraw, &hh) < 0)        return -1;
+    if (hh.kind != KOBJ_IRQ)               { handle_put(&hh); return -1; }
 
-    // RIGHT_SIGNAL gates waits on KObj_IRQ — a holder without SIGNAL
-    // can pass the handle around (in a future Phase 5+ transfer surface
-    // — currently forbidden) but not consume IRQs.
-    if ((slot->rights & RIGHT_SIGNAL) == 0)          return -1;
+    // RIGHT_SIGNAL gates waits on KObj_IRQ — a holder without SIGNAL can pass
+    // the handle around (future Phase 5+ transfer) but not consume IRQs.
+    if ((hh.rights & RIGHT_SIGNAL) == 0)   { handle_put(&hh); return -1; }
 
-    struct KObj_IRQ *k = (struct KObj_IRQ *)slot->obj;
-    if (!k)                                          return -1;
+    struct KObj_IRQ *k = (struct KObj_IRQ *)hh.obj;
+    if (!k)                                { handle_put(&hh); return -1; }
 
-    // R9 F143 (P1) close: bump the ref BEFORE releasing the handle-table
-    // lookup (effectively immediately — there's no lock to release at
-    // v1.0, but the principle holds) and BEFORE entering the blocking
-    // sleep inside kobj_irq_wait. Without this, a concurrent
-    // handle_close on this slot would call kobj_irq_unref(k), drop
-    // the ref to 0, and free k while we're still sleeping on
-    // &k->rendez — UAF on wake.
-    //
-    // Pairs with the kobj_irq_unref below after wait returns. The
-    // handle_close path's unref balances with the original ref=1 from
-    // kobj_irq_create; THIS ref is purely the syscall's borrow.
-    kobj_irq_ref(k);
     u32 count = kobj_irq_wait(k);
-    kobj_irq_unref(k);
+    handle_put(&hh);
     return (s64)count;
 }
 
@@ -369,37 +362,40 @@ static s64 sys_mmio_map_handler(u64 hraw, u64 vaddr, u64 prot_raw) {
     if ((__atomic_load_n(&p->caps, __ATOMIC_ACQUIRE) & CAP_HW_CREATE) == 0)
         return -1;
 
-    struct Handle *slot = handle_get(p, (hidx_t)hraw);
-    if (!slot)                                       return -1;
-    if (slot->kind != KOBJ_MMIO)                     return -1;
-    if ((slot->rights & RIGHT_MAP) == 0)             return -1;
+    // #844: handle_get snapshots the slot + HOLDS a ref on the obj (km) under
+    // the handle-table lock, so km cannot be freed by a sibling handle_close
+    // between the read and burrow_create_mmio (which takes its OWN kobj_mmio
+    // ref). The ref is held until handle_put below so km->size stays valid
+    // across burrow_map. handle_put on EVERY exit path.
+    struct Handle hh;
+    if (handle_get(p, (hidx_t)hraw, &hh) < 0)        return -1;
+    if (hh.kind != KOBJ_MMIO)              { handle_put(&hh); return -1; }
+    if ((hh.rights & RIGHT_MAP) == 0)      { handle_put(&hh); return -1; }
 
-    // Bound requested prot by the handle's rights. R+W → handle must
-    // have RIGHT_WRITE; R → handle must have RIGHT_READ. EXEC is
-    // rejected entirely for MMIO mappings (device-memory PTEs aren't
-    // architecturally executable in a useful way).
+    // Bound requested prot by the handle's rights. R+W → handle must have
+    // RIGHT_WRITE; R → handle must have RIGHT_READ. EXEC is rejected entirely
+    // for MMIO mappings (device-memory PTEs aren't usefully executable).
     u32 prot = (u32)prot_raw;
-    if (prot == 0)                                   return -1;
-    if (prot & ~(u32)(VMA_PROT_READ | VMA_PROT_WRITE)) return -1;
-    if ((prot & VMA_PROT_WRITE) && !(slot->rights & RIGHT_WRITE)) return -1;
-    if ((prot & VMA_PROT_READ)  && !(slot->rights & RIGHT_READ))  return -1;
+    if (prot == 0)                                   { handle_put(&hh); return -1; }
+    if (prot & ~(u32)(VMA_PROT_READ | VMA_PROT_WRITE)) { handle_put(&hh); return -1; }
+    if ((prot & VMA_PROT_WRITE) && !(hh.rights & RIGHT_WRITE)) { handle_put(&hh); return -1; }
+    if ((prot & VMA_PROT_READ)  && !(hh.rights & RIGHT_READ))  { handle_put(&hh); return -1; }
 
     // R10 F155 (P2) close: AArch64 has no write-only AP encoding
     // (AP[2:1] = {00=RW EL1, 01=RW any, 10=RO EL1, 11=RO any} — no
     // W-only state per ARM ARM D5.4.1). A `prot=VMA_PROT_WRITE` only
     // request would result in a fully-RW PTE, breaking the rights
-    // claim ("caller can write but not read this device"). Reject
-    // the construct so the rights model and the actual PTE always
-    // agree. Drivers that want write access MUST request R+W.
-    if ((prot & VMA_PROT_WRITE) && !(prot & VMA_PROT_READ)) return -1;
+    // claim ("caller can write but not read this device"). Reject the
+    // construct so the rights model and the actual PTE always agree.
+    if ((prot & VMA_PROT_WRITE) && !(prot & VMA_PROT_READ)) { handle_put(&hh); return -1; }
 
-    struct KObj_MMIO *km = (struct KObj_MMIO *)slot->obj;
-    if (!km)                                         return -1;
-    if (km->magic != KOBJ_MMIO_MAGIC)                return -1;
+    struct KObj_MMIO *km = (struct KObj_MMIO *)hh.obj;
+    if (!km)                               { handle_put(&hh); return -1; }
+    if (km->magic != KOBJ_MMIO_MAGIC)      { handle_put(&hh); return -1; }
 
     // Create the Burrow. handle_count=1 is the construction reference.
     struct Burrow *b = burrow_create_mmio(km);
-    if (!b)                                          return -1;
+    if (!b)                                { handle_put(&hh); return -1; }
 
     // Install the VMA via burrow_map. On success, mapping_count is
     // incremented (matches anon flow); we then drop the construction
@@ -418,10 +414,12 @@ static s64 sys_mmio_map_handler(u64 hraw, u64 vaddr, u64 prot_raw) {
     if (rc < 0) {
         burrow_unref(b);
         spin_unlock(&p->vma_lock);
+        handle_put(&hh);
         return -1;
     }
     burrow_unref(b);
     spin_unlock(&p->vma_lock);
+    handle_put(&hh);
     return 0;
 }
 
@@ -521,33 +519,36 @@ static s64 sys_dma_map_handler(u64 hraw, u64 vaddr, u64 prot_raw) {
     if ((__atomic_load_n(&p->caps, __ATOMIC_ACQUIRE) & CAP_HW_CREATE) == 0)
         return -1;
 
-    struct Handle *slot = handle_get(p, (hidx_t)hraw);
-    if (!slot)                                       return -1;
-    if (slot->kind != KOBJ_DMA)                      return -1;
-    if ((slot->rights & RIGHT_MAP) == 0)             return -1;
+    // #844: handle_get snapshots the slot + HOLDS a ref on the obj (kd) under
+    // the handle-table lock; the ref bridges the read -> burrow_create_dma
+    // (which takes its own kobj_dma ref) and keeps kd->size / kd->pa valid
+    // across burrow_map. handle_put on EVERY exit path.
+    struct Handle hh;
+    if (handle_get(p, (hidx_t)hraw, &hh) < 0)        return -1;
+    if (hh.kind != KOBJ_DMA)               { handle_put(&hh); return -1; }
+    if ((hh.rights & RIGHT_MAP) == 0)      { handle_put(&hh); return -1; }
 
     // Bound requested prot by the handle's rights. EXEC is rejected
-    // unconditionally — DMA buffers carry data, never code (W^X
-    // invariant I-12 + structural defense against ELF-loaded code
-    // accidentally executing from a DMA buffer).
+    // unconditionally — DMA buffers carry data, never code (W^X invariant
+    // I-12 + structural defense against ELF-loaded code executing from DMA).
     u32 prot = (u32)prot_raw;
-    if (prot == 0)                                   return -1;
-    if (prot & ~(u32)(VMA_PROT_READ | VMA_PROT_WRITE)) return -1;
-    if ((prot & VMA_PROT_WRITE) && !(slot->rights & RIGHT_WRITE)) return -1;
-    if ((prot & VMA_PROT_READ)  && !(slot->rights & RIGHT_READ))  return -1;
+    if (prot == 0)                                   { handle_put(&hh); return -1; }
+    if (prot & ~(u32)(VMA_PROT_READ | VMA_PROT_WRITE)) { handle_put(&hh); return -1; }
+    if ((prot & VMA_PROT_WRITE) && !(hh.rights & RIGHT_WRITE)) { handle_put(&hh); return -1; }
+    if ((prot & VMA_PROT_READ)  && !(hh.rights & RIGHT_READ))  { handle_put(&hh); return -1; }
 
     // AArch64 has no write-only PTE encoding (mirrors SYS_MMIO_MAP R10
     // F155): a `prot = WRITE` only request would map fully-RW, breaking
     // the rights claim. Reject so rights model and PTE always agree.
-    if ((prot & VMA_PROT_WRITE) && !(prot & VMA_PROT_READ)) return -1;
+    if ((prot & VMA_PROT_WRITE) && !(prot & VMA_PROT_READ)) { handle_put(&hh); return -1; }
 
-    struct KObj_DMA *kd = (struct KObj_DMA *)slot->obj;
-    if (!kd)                                         return -1;
-    if (kd->magic != KOBJ_DMA_MAGIC)                 return -1;
+    struct KObj_DMA *kd = (struct KObj_DMA *)hh.obj;
+    if (!kd)                               { handle_put(&hh); return -1; }
+    if (kd->magic != KOBJ_DMA_MAGIC)       { handle_put(&hh); return -1; }
 
     // Create the Burrow. handle_count=1 is the construction reference.
     struct Burrow *b = burrow_create_dma(kd);
-    if (!b)                                          return -1;
+    if (!b)                                { handle_put(&hh); return -1; }
 
     // Install the VMA via burrow_map. On success, mapping_count++. We
     // then drop the construction reference, transferring ownership to
@@ -564,14 +565,19 @@ static s64 sys_dma_map_handler(u64 hraw, u64 vaddr, u64 prot_raw) {
     if (rc < 0) {
         burrow_unref(b);
         spin_unlock(&p->vma_lock);
+        handle_put(&hh);
         return -1;
     }
     burrow_unref(b);
     spin_unlock(&p->vma_lock);
 
-    // PA fits in 40 bits at v1.0 (TCR.IPS bound; mmu.c:668). The s64
-    // cast is safe — no valid PA has the sign bit set.
-    return (s64)kd->pa;
+    // PA fits in 40 bits at v1.0 (TCR.IPS bound; mmu.c:668). The s64 cast is
+    // safe — no valid PA has the sign bit set. Read kd->pa before handle_put
+    // (kd is also kept alive by burrow_create_dma's ref, but read it while we
+    // still demonstrably hold a ref).
+    s64 pa = (s64)kd->pa;
+    handle_put(&hh);
+    return pa;
 }
 
 // =============================================================================
@@ -667,14 +673,25 @@ static s64 sys_pipe_handler(u64 *out_rd, u64 *out_wr) {
 // Rights gate: SYS_READ requires RIGHT_READ on the handle; SYS_WRITE
 // requires RIGHT_WRITE.
 
-// Helper: look up an open KOBJ_SPOOR handle, validate rights. Returns
-// the Spoor pointer or NULL on any failure.
+// Helper: look up an open KOBJ_SPOOR handle, validate rights. Returns a
+// REF-HELD Spoor on success (NULL on bad fd / wrong kind / missing rights).
+//
+// #844: handle_get bumps the Spoor's refcount under the handle-table lock; that
+// ref is TRANSFERRED to the caller, who MUST spoor_clunk() the returned Spoor
+// when done. The borrow keeps the Spoor alive for the duration of the caller's
+// use even if a sibling thread closes the fd concurrently (the old contract
+// returned a bare borrowed pointer into the live table -- a TOCTOU UAF in a
+// multi-threaded Proc). The obj is always a Spoor here (kind-gated), so
+// handle_get's acquire was spoor_ref and the caller balances with spoor_clunk.
 static struct Spoor *sys_lookup_spoor(struct Proc *p, hidx_t h, rights_t required) {
-    struct Handle *slot = handle_get(p, h);
-    if (!slot)                                       return NULL;
-    if (slot->kind != KOBJ_SPOOR)                    return NULL;
-    if ((slot->rights & required) != required)       return NULL;
-    return (struct Spoor *)slot->obj;
+    struct Handle hh;
+    if (handle_get(p, h, &hh) < 0)                   return NULL;
+    if (hh.kind != KOBJ_SPOOR ||
+        (hh.rights & required) != required) {
+        handle_put(&hh);                             // drop the ref handle_get took
+        return NULL;
+    }
+    return (struct Spoor *)hh.obj;                   // ref TRANSFERRED to caller
 }
 
 // Helper: look up an open r/w-capable handle (KOBJ_SPOOR only) + validate
@@ -685,19 +702,23 @@ static struct Spoor *sys_lookup_spoor(struct Proc *p, hidx_t h, rights_t require
 // KObj_Srv conn handle that once bridged raw bytes here was retired with
 // SYS_SRV_CONNECT; a KObj_Srv handle is now only a service listener, never a
 // transport. The kind check (below) precedes any obj dereference.
-static struct Handle *sys_lookup_rw_handle(struct Proc *p, hidx_t h,
-                                             rights_t required) {
-    struct Handle *slot = handle_get(p, h);
-    if (!slot)                                       return NULL;
-    if ((slot->rights & required) != required)       return NULL;
-    // Only KOBJ_SPOOR is read/write-able. A KOBJ_SRV handle is a /srv
-    // listener (its obj is a SrvService) -- not a byte stream. The client +
-    // accepted connection endpoints are KOBJ_SPOOR conn Spoors driven by
-    // devsrv read/write (server side, and CSRVCLIENT client side). The
-    // client-side KObj_Srv conn handle that once routed raw bytes through
-    // here was retired with SYS_SRV_CONNECT (stalk-3c).
-    if (slot->kind != KOBJ_SPOOR)                    return NULL;
-    return slot;
+// #844: returns a REF-HELD Spoor (NULL on bad fd / missing rights / wrong
+// kind). Same ref-transfer contract as sys_lookup_spoor -- the caller MUST
+// spoor_clunk() the result. Only KOBJ_SPOOR is read/write-able (a KOBJ_SRV
+// handle is a /srv listener, not a byte stream; the client + accepted conn
+// endpoints are KOBJ_SPOOR conn Spoors driven by devsrv read/write). Returning
+// the ref-held Spoor (not the live slot pointer) closes the TOCTOU where the
+// slot dangled across the blocking dev->read / dev->write that callers run.
+static struct Spoor *sys_lookup_rw_handle(struct Proc *p, hidx_t h,
+                                          rights_t required) {
+    struct Handle hh;
+    if (handle_get(p, h, &hh) < 0)                   return NULL;
+    if ((hh.rights & required) != required ||
+        hh.kind != KOBJ_SPOOR) {
+        handle_put(&hh);
+        return NULL;
+    }
+    return (struct Spoor *)hh.obj;                   // ref TRANSFERRED to caller
 }
 
 // Common user-VA range check (NULL / overflow / past UACCESS bound).
@@ -723,15 +744,17 @@ static bool sys_validate_user_buf(u64 buf_va, u64 len) {
 // moved with it into devsrv_write.
 s64 sys_write_for_proc(struct Proc *p, hidx_t h, const u8 *kbuf, u64 len) {
     if (!p || (!kbuf && len > 0))                    return -1;
-    struct Handle *slot = sys_lookup_rw_handle(p, h, RIGHT_WRITE);
-    if (!slot)                                       return -1;
-    if (len == 0)                                    return 0;
-
-    struct Spoor *c = (struct Spoor *)slot->obj;
-    if (!c || !c->dev || !c->dev->write)             return -1;
+    // #844: c is a REF-HELD Spoor (the lookup transferred the ref); it keeps c
+    // alive across the blocking dev->write even if a sibling closes the fd.
+    // spoor_clunk on EVERY exit after the lookup.
+    struct Spoor *c = sys_lookup_rw_handle(p, h, RIGHT_WRITE);
+    if (!c)                                          return -1;
+    if (len == 0)                                  { spoor_clunk(c); return 0; }
+    if (!c->dev || !c->dev->write)                 { spoor_clunk(c); return -1; }
     long n = c->dev->write(c, kbuf, (long)len, c->offset);
-    if (n < 0)                                       return -1;
+    if (n < 0)                                     { spoor_clunk(c); return -1; }
     c->offset += n;
+    spoor_clunk(c);
     return (s64)n;
 }
 
@@ -746,15 +769,16 @@ s64 sys_write_for_proc(struct Proc *p, hidx_t h, const u8 *kbuf, u64 len) {
 // handle that once routed here was retired with SYS_SRV_CONNECT (stalk-3c).
 s64 sys_read_for_proc(struct Proc *p, hidx_t h, u8 *kbuf, u64 len) {
     if (!p || (!kbuf && len > 0))                    return -1;
-    struct Handle *slot = sys_lookup_rw_handle(p, h, RIGHT_READ);
-    if (!slot)                                       return -1;
-    if (len == 0)                                    return 0;
-
-    struct Spoor *c = (struct Spoor *)slot->obj;
-    if (!c || !c->dev || !c->dev->read)              return -1;
+    // #844: c is a REF-HELD Spoor; it stays alive across the blocking
+    // dev->read even if a sibling closes the fd. spoor_clunk on EVERY exit.
+    struct Spoor *c = sys_lookup_rw_handle(p, h, RIGHT_READ);
+    if (!c)                                          return -1;
+    if (len == 0)                                  { spoor_clunk(c); return 0; }
+    if (!c->dev || !c->dev->read)                  { spoor_clunk(c); return -1; }
     long n = c->dev->read(c, kbuf, (long)len, c->offset);
-    if (n < 0)                                       return -1;
+    if (n < 0)                                     { spoor_clunk(c); return -1; }
     c->offset += n;
+    spoor_clunk(c);
     return (s64)n;
 }
 
@@ -769,10 +793,11 @@ static s64 sys_write_handler(u64 hraw, u64 buf_va, u64 len) {
     if (len == 0) {
         // Validate the handle even for zero-length writes (POSIX
         // discipline: bad fd should return -EBADF regardless of len).
-        // Only KOBJ_SPOOR validates (sys_lookup_rw_handle); a /srv conn
-        // endpoint is itself a KOBJ_SPOOR conn Spoor, so it validates here.
-        if (!sys_lookup_rw_handle(p, (hidx_t)hraw, RIGHT_WRITE))
-                                                     return -1;
+        // #844: the lookup transfers a Spoor ref; release it immediately
+        // (validation only -- no I/O on a zero-length write).
+        struct Spoor *c0 = sys_lookup_rw_handle(p, (hidx_t)hraw, RIGHT_WRITE);
+        if (!c0)                                     return -1;
+        spoor_clunk(c0);
         return 0;
     }
 
@@ -794,8 +819,9 @@ static s64 sys_read_handler(u64 hraw, u64 buf_va, u64 len) {
     if (len > SYS_RW_MAX) len = SYS_RW_MAX;
 
     if (len == 0) {
-        if (!sys_lookup_rw_handle(p, (hidx_t)hraw, RIGHT_READ))
-                                                     return -1;
+        struct Spoor *c0 = sys_lookup_rw_handle(p, (hidx_t)hraw, RIGHT_READ);
+        if (!c0)                                     return -1;   // #844: validate + release
+        spoor_clunk(c0);
         return 0;
     }
 
@@ -885,27 +911,24 @@ static s64 sys_fstat_handler(u64 hraw, u64 stat_va) {
     // loop tolerates any alignment.
     if (!sys_validate_user_buf(stat_va, sizeof(struct t_stat))) return -1;
 
-    // Rights gate: the handle must be KOBJ_SPOOR with RIGHT_READ.
-    // sys_lookup_rw_handle filters KOBJ_SRV (SrvConns are not stat'able);
-    // for KOBJ_SPOOR it also checks the rights mask.
-    struct Handle *slot = sys_lookup_rw_handle(p, (hidx_t)hraw, RIGHT_READ);
-    if (!slot)                                        return -1;
-    if (slot->kind != KOBJ_SPOOR)                     return -1;
-
-    struct Spoor *c = (struct Spoor *)slot->obj;
+    // Rights gate: KOBJ_SPOOR with RIGHT_READ (sys_lookup_rw_handle filters
+    // KOBJ_SRV + checks rights). #844: c is REF-HELD; spoor_clunk on every exit
+    // -- the ref keeps c alive across the (possibly blocking) dev->stat_native.
+    struct Spoor *c = sys_lookup_rw_handle(p, (hidx_t)hraw, RIGHT_READ);
+    if (!c)                                           return -1;
 
     // Fill a kernel-scratch t_stat from the Dev. Failing the Dev's
     // stat_native (NULL slot or error return) maps to -1 here.
     struct t_stat ks;
-    if (spoor_stat_native(c, &ks) != 0)               return -1;
+    if (spoor_stat_native(c, &ks) != 0)             { spoor_clunk(c); return -1; }
 
-    // Copy out to user-VA. Per-byte uaccess_store_u8; on fault the
-    // user-VA may have partially-written bytes (consistent with the
-    // existing per-byte uaccess pattern in SYS_READ).
+    // Copy out to user-VA. Per-byte uaccess_store_u8; on fault the user-VA may
+    // have partially-written bytes (consistent with SYS_READ).
     const u8 *src = (const u8 *)&ks;
     for (u64 i = 0; i < sizeof(struct t_stat); i++) {
-        if (uaccess_store_u8(stat_va + i, src[i]) != 0) return -1;
+        if (uaccess_store_u8(stat_va + i, src[i]) != 0) { spoor_clunk(c); return -1; }
     }
+    spoor_clunk(c);
     return 0;
 }
 
@@ -921,69 +944,53 @@ static s64 sys_lseek_handler(u64 hraw, u64 offset_raw, u64 whence_raw) {
         whence_raw != T_SEEK_CUR &&
         whence_raw != T_SEEK_END)                    return -1;
 
-    // No rights mask: lseek manipulates the per-Spoor cursor, which is
-    // metadata about an open file, not its content. sys_lookup_rw_handle
-    // with rights=0 still validates kind + KOBJ_SRV rejection.
-    struct Handle *slot = sys_lookup_rw_handle(p, (hidx_t)hraw, 0);
-    if (!slot)                                        return -1;
-    if (slot->kind != KOBJ_SPOOR)                     return -1;
-
-    struct Spoor *c = (struct Spoor *)slot->obj;
+    // No rights mask: lseek manipulates the per-Spoor cursor, not content.
+    // #844: c is REF-HELD (sys_lookup_rw_handle kind-gates to KOBJ_SPOOR +
+    // RIGHT 0); the ref keeps c alive across the SEEK_END dev->stat_native
+    // (which may block). spoor_clunk on EVERY exit below.
+    struct Spoor *c = sys_lookup_rw_handle(p, (hidx_t)hraw, 0);
+    if (!c)                                           return -1;
 
     // R16b-gamma-mount-close audit F3 close: reject lseek on non-seekable
     // Devs. The presence of `dev->stat_native` is the seek-capability
-    // indicator at v1.0: file-like Devs (devramfs) implement it; stream-
-    // like Devs (devpipe, devnull, devzero, devnotes, devcons, devsrv)
-    // leave it NULL. POSIX requires lseek(2) on a pipe to return -1
-    // with ESPIPE; this check is the v1.0 equivalent (pouch's lseek
-    // translates the kernel -1 to ESPIPE via the errno table). The
-    // narrower `seekable` predicate is deferred to v1.x if any Dev ever
-    // grows stat_native AND wants to refuse seek.
-    if (c->dev->stat_native == NULL)                  return -1;
+    // indicator at v1.0: file-like Devs (devramfs) implement it; stream-like
+    // Devs leave it NULL. POSIX lseek(2) on a pipe returns -1/ESPIPE.
+    if (c->dev->stat_native == NULL)                { spoor_clunk(c); return -1; }
 
     s64 offset = (s64)offset_raw;
     s64 new_off;
 
     switch (whence_raw) {
     case T_SEEK_SET:
-        if (offset < 0)                               return -1;
+        if (offset < 0)                             { spoor_clunk(c); return -1; }
         new_off = offset;
         break;
     case T_SEEK_CUR: {
         s64 cur = c->offset;
-        // Overflow / underflow check: cur + offset stays in s64 range
-        // and is non-negative. INT64_MIN handled because offset is u64-
-        // cast to s64; INT64_MIN would have appeared if the user passed
-        // 0x8000000000000000, which still fails the "non-negative" check
-        // after addition.
-        if (offset > 0 && cur > INT64_MAX - offset)     return -1;
-        if (offset < 0 && cur < INT64_MIN - offset)     return -1;
+        if (offset > 0 && cur > INT64_MAX - offset) { spoor_clunk(c); return -1; }
+        if (offset < 0 && cur < INT64_MIN - offset) { spoor_clunk(c); return -1; }
         new_off = cur + offset;
-        if (new_off < 0)                                return -1;
+        if (new_off < 0)                            { spoor_clunk(c); return -1; }
         break;
     }
     case T_SEEK_END: {
-        // Query size from dev->stat_native; Devs without native stat
-        // cannot service SEEK_END.
         struct t_stat ks;
-        if (spoor_stat_native(c, &ks) != 0)           return -1;
+        if (spoor_stat_native(c, &ks) != 0)         { spoor_clunk(c); return -1; }
         s64 size = (s64)ks.size;
-        // ks.size is a u64 cap'd by file system; cast to s64 may
-        // overflow only for files >= 2^63 bytes (structurally impossible
-        // at v1.0 — devramfs files are bounded by the cpio blob size
-        // which is far below s64 max).
-        if (size < 0)                                 return -1;
-        if (offset > 0 && size > INT64_MAX - offset)  return -1;
-        if (offset < 0 && size < INT64_MIN - offset)  return -1;
+        if (size < 0)                               { spoor_clunk(c); return -1; }
+        if (offset > 0 && size > INT64_MAX - offset){ spoor_clunk(c); return -1; }
+        if (offset < 0 && size < INT64_MIN - offset){ spoor_clunk(c); return -1; }
         new_off = size + offset;
-        if (new_off < 0)                              return -1;
+        if (new_off < 0)                            { spoor_clunk(c); return -1; }
         break;
     }
     default:
+        spoor_clunk(c);
         return -1;
     }
 
     c->offset = new_off;
+    spoor_clunk(c);
     return new_off;
 }
 
@@ -1055,9 +1062,18 @@ static s64 sys_attach_9p_handler(u64 tx_fd_raw, u64 rx_fd_raw,
     struct Spoor *tx = sys_lookup_spoor(p, (hidx_t)tx_fd_raw, RIGHT_WRITE);
     if (!tx)                                         return -1;
     struct Spoor *rx = sys_lookup_spoor(p, (hidx_t)rx_fd_raw, RIGHT_READ);
-    if (!rx)                                         return -1;
+    if (!rx)                                       { spoor_clunk(tx); return -1; }
+    // #844: tx + rx are REF-HELD (sys_lookup_spoor transferred a ref each). The
+    // adapter takes its OWN independent ref below; we then release the two
+    // lookup borrows here (UNCONDITIONAL -- each lookup ref'd, even when
+    // rx==tx). The adapter ref + the fds' own handle-table refs keep tx/rx
+    // alive for the rest, so every existing error path's adapter rollback
+    // (spoor_unref) + the success path stay correct without further borrow
+    // bookkeeping.
     spoor_ref(tx);
     if (rx != tx) spoor_ref(rx);
+    spoor_clunk(tx);
+    spoor_clunk(rx);
 
     // Copy aname into kernel scratch. SYS_ATTACH_ANAME_MAX byte stack
     // buffer; per-byte uaccess_load_u8 (same shape as SYS_WRITE).
@@ -1231,16 +1247,19 @@ static s64 sys_attach_9p_srv_handler(u64 srv_fd_raw, u64 aname_va,
     // both reads and writes through the byte rings). The CSRVCLIENT flag gates
     // it to a CLIENT endpoint -- attaching a SERVER endpoint (from
     // SYS_SRV_ACCEPT) would drive the rings the wrong way.
-    struct Handle *slot = handle_get(p, (hidx_t)srv_fd_raw);
-    if (!slot)                                       return -1;
-    if (slot->kind != KOBJ_SPOOR)                    return -1;
-    if (!slot->obj)                                  return -1;
-    if ((slot->rights & (RIGHT_READ | RIGHT_WRITE))
-        != (RIGHT_READ | RIGHT_WRITE))                return -1;
-    struct Spoor *conn_spoor = (struct Spoor *)slot->obj;
-    if (!(conn_spoor->flag & CSRVCLIENT))            return -1;   // client endpoint only
+    // #844: snapshot + HOLD the Spoor ref across srvconn_attach_dev9p_root,
+    // which takes its OWN srvconn_ref on the embedded SrvConn. handle_put on
+    // EVERY exit below.
+    struct Handle hh;
+    if (handle_get(p, (hidx_t)srv_fd_raw, &hh) < 0)  return -1;
+    if (hh.kind != KOBJ_SPOOR)             { handle_put(&hh); return -1; }
+    if (!hh.obj)                           { handle_put(&hh); return -1; }
+    if ((hh.rights & (RIGHT_READ | RIGHT_WRITE))
+        != (RIGHT_READ | RIGHT_WRITE))     { handle_put(&hh); return -1; }
+    struct Spoor *conn_spoor = (struct Spoor *)hh.obj;
+    if (!(conn_spoor->flag & CSRVCLIENT))  { handle_put(&hh); return -1; }   // client endpoint only
     struct SrvConn *cn = devsrv_conn_of(conn_spoor);
-    if (!cn)                                          return -1;   // not a devsrv conn Spoor
+    if (!cn)                               { handle_put(&hh); return -1; }   // not a devsrv conn Spoor
 
     // Byte-mode gate. A byte-conn Spoor's SrvConn is byte_mode (devsrv_open set
     // it from the service mode). A non-byte SrvConn cannot reach here (only a
@@ -1249,13 +1268,13 @@ static s64 sys_attach_9p_srv_handler(u64 srv_fd_raw, u64 aname_va,
     // p9_client over a 9p-mode SrvConn's rings would interleave frames + corrupt
     // the wire. Atomic acquire pairs srvconn_set_byte_mode's RELEASE.
     if (!__atomic_load_n(&cn->byte_mode, __ATOMIC_ACQUIRE))
-                                                      return -1;
+                                         { handle_put(&hh); return -1; }
 
     // Copy aname into kernel scratch. Same shape as SYS_ATTACH_9P.
     u8 aname_scratch[SYS_ATTACH_ANAME_MAX];
     for (u64 i = 0; i < aname_len; i++) {
         if (uaccess_load_u8(aname_va + i, &aname_scratch[i]) != 0)
-            return -1;
+            { handle_put(&hh); return -1; }
     }
 
     // Wrap the SrvConn's CLIENT side into a dev9p root via the shared helper
@@ -1271,6 +1290,7 @@ static s64 sys_attach_9p_srv_handler(u64 srv_fd_raw, u64 aname_va,
     if (!root) {
         // A-3c/M6: surface the Tattach Rlerror ecode (e.g. -T_E_ACCES on a
         // per-user stratumd dataset-scope refusal) rather than a bare -1.
+        handle_put(&hh);
         return attach_err_to_ret(aerr);
     }
 
@@ -1281,8 +1301,12 @@ static s64 sys_attach_9p_srv_handler(u64 srv_fd_raw, u64 aname_va,
                              RIGHT_READ | RIGHT_WRITE | RIGHT_TRANSFER, root);
     if (fd < 0) {
         spoor_clunk(root);
+        handle_put(&hh);
         return -1;
     }
+    // #844: borrow done -- the attach session now owns conn_spoor's SrvConn
+    // (its own srvconn_ref); drop the syscall's borrow on conn_spoor.
+    handle_put(&hh);
     return (s64)fd;
 }
 
@@ -1319,11 +1343,14 @@ static s64 sys_pivot_root_handler(u64 new_root_fd_raw) {
     struct Spoor *source = sys_lookup_spoor(p, (hidx_t)new_root_fd_raw, RIGHT_READ);
     if (!source)                                     return -1;
 
-    // territory_pivot_root handles: NULL-source rejection, no-current-
-    // root rejection (the pivot pre-condition), idempotent same-pointer,
-    // prior-root displacement via spoor_clunk, spoor_ref of the new.
-    if (territory_pivot_root(p->territory, source) != 0) return -1;
-    return 0;
+    // territory_pivot_root handles: NULL-source rejection, no-current-root
+    // rejection (the pivot pre-condition), idempotent same-pointer, prior-root
+    // displacement via spoor_clunk, spoor_ref of the new.
+    // #844: source is REF-HELD (a borrow); territory_pivot_root takes its OWN
+    // ref for the root_spoor, so release the borrow after.
+    int rc = territory_pivot_root(p->territory, source);
+    spoor_clunk(source);
+    return rc == 0 ? 0 : -1;
 }
 
 // =============================================================================
@@ -1387,11 +1414,13 @@ static s64 sys_walk_open_handler(u64 spoor_fd_raw, u64 name_va,
         if (!p->territory)                            return -1;
         src = p->territory->root_spoor;
         if (!src)                                     return -1;
+        spoor_ref(src);   // #844: ref the Territory root so the exit clunk is
+                          // uniform + it survives a concurrent pivot_root
     } else {
-        src = sys_lookup_spoor(p, (hidx_t)spoor_fd_raw, RIGHT_READ);
+        src = sys_lookup_spoor(p, (hidx_t)spoor_fd_raw, RIGHT_READ);   // ref-held
         if (!src)                                     return -1;
     }
-    if (!src->dev || !src->dev->walk || !src->dev->open) return -1;
+    if (!src->dev || !src->dev->walk || !src->dev->open) { spoor_clunk(src); return -1; }
 
     // A-2d (IDENTITY-DESIGN.md 3.7.1): search (X) permission on the source
     // directory before walking into it. Gated on the Dev's perm_enforced flag
@@ -1401,8 +1430,8 @@ static s64 sys_walk_open_handler(u64 spoor_fd_raw, u64 name_va,
     // additive to the handle-RIGHT gate above (capability axis); both must hold.
     if (src->dev->perm_enforced) {
         struct t_stat src_st;
-        if (spoor_stat_native(src, &src_st) != 0)        return -1;
-        if (perm_check(p, &src_st, PERM_X) != 0)         return -1;
+        if (spoor_stat_native(src, &src_st) != 0)        { spoor_clunk(src); return -1; }
+        if (perm_check(p, &src_st, PERM_X) != 0)         { spoor_clunk(src); return -1; }
     }
 
     // Copy the name into kernel scratch + validate component shape.
@@ -1426,13 +1455,13 @@ static s64 sys_walk_open_handler(u64 spoor_fd_raw, u64 name_va,
     char name_scratch[SYS_WALK_OPEN_NAME_MAX + 1];
     for (u64 i = 0; i < name_len_raw; i++) {
         u8 b;
-        if (uaccess_load_u8(name_va + i, &b) != 0)    return -1;
-        if (b == '/' || b == '\0')                    return -1;
+        if (uaccess_load_u8(name_va + i, &b) != 0)    { spoor_clunk(src); return -1; }
+        if (b == '/' || b == '\0')                    { spoor_clunk(src); return -1; }
         name_scratch[i] = (char)b;
     }
-    if (name_len_raw == 1 && name_scratch[0] == '.')  return -1;
+    if (name_len_raw == 1 && name_scratch[0] == '.')  { spoor_clunk(src); return -1; }
     if (name_len_raw == 2 && name_scratch[0] == '.' &&
-                              name_scratch[1] == '.') return -1;
+                              name_scratch[1] == '.') { spoor_clunk(src); return -1; }
     // Unconditional NUL terminator — REQUIRED for dev9p_walk's strlen scan.
     name_scratch[name_len_raw] = '\0';
 
@@ -1441,7 +1470,7 @@ static s64 sys_walk_open_handler(u64 spoor_fd_raw, u64 name_va,
     // new fid). The clone starts at ref=1; spoor_clunk on failure runs
     // dev->close (clunks the fid if walk had progressed) + drops the ref.
     struct Spoor *nc = spoor_clone(src);
-    if (!nc)                                          return -1;
+    if (!nc)                                          { spoor_clunk(src); return -1; }
 
     // Issue the walk. Pack the single name + length into one-element
     // arrays for the dev vtable's nname-style signature. dev9p_walk
@@ -1450,6 +1479,10 @@ static s64 sys_walk_open_handler(u64 spoor_fd_raw, u64 name_va,
     // the Walkqid carrier itself.
     const char *names[1] = { name_scratch };
     struct Walkqid *w = src->dev->walk(src, nc, names, 1);
+    // #844: src's last use is the walk above; release the borrow now. nc
+    // carries the walk result (its own ref) through the rest of the handler,
+    // so the post-walk exits clunk nc (unchanged), not src.
+    spoor_clunk(src);
     if (!w) {
         // Walk failed — nc->aux is still the shallow copy of src->aux
         // (dev9p_walk replaces aux only on success). Calling dev->close
@@ -1590,8 +1623,10 @@ static s64 sys_open_handler(u64 start_fd_raw, u64 path_va,
         if (!p->territory)                           return -1;
         start = p->territory->root_spoor;
         if (!start)                                  return -1;
+        spoor_ref(start);   // #844: ref the Territory root for the uniform exit
+                            // clunk (survives a concurrent pivot_root)
     } else {
-        start = sys_lookup_spoor(p, (hidx_t)start_fd_raw, RIGHT_READ);
+        start = sys_lookup_spoor(p, (hidx_t)start_fd_raw, RIGHT_READ);   // ref-held
         if (!start)                                  return -1;
     }
 
@@ -1602,8 +1637,8 @@ static s64 sys_open_handler(u64 start_fd_raw, u64 path_va,
     char path_scratch[SYS_OPEN_PATH_MAX + 1];
     for (u64 i = 0; i < path_len_raw; i++) {
         u8 b;
-        if (uaccess_load_u8(path_va + i, &b) != 0)   return -1;
-        if (b == '\0')                               return -1;
+        if (uaccess_load_u8(path_va + i, &b) != 0)   { spoor_clunk(start); return -1; }
+        if (b == '\0')                               { spoor_clunk(start); return -1; }
         path_scratch[i] = (char)b;
     }
     path_scratch[path_len_raw] = '\0';
@@ -1611,6 +1646,9 @@ static s64 sys_open_handler(u64 start_fd_raw, u64 path_va,
     int amode = (omode_raw & SYS_WALK_OPEN_OPATH) ? STALK_WALK : STALK_OPEN;
     struct Spoor *quarry = stalk(p, start, path_scratch, path_len_raw,
                                  amode, (u32)omode_raw);
+    // #844: start (BORROWED by stalk -- it never refs/clunks it) is done now;
+    // release the borrow. quarry owns its own ref from stalk.
+    spoor_clunk(start);
     if (!quarry)                                     return -1;
 
     // Handle rights, identical policy to sys_walk_open_handler: an O_PATH
@@ -1686,11 +1724,13 @@ static s64 sys_walk_create_handler(u64 parent_fd_raw, u64 name_va,
         if (!p->territory)                            return -1;
         src = p->territory->root_spoor;
         if (!src)                                     return -1;
+        spoor_ref(src);   // #844: ref the Territory root (uniform exit clunk;
+                          // survives a concurrent pivot_root)
     } else {
-        src = sys_lookup_spoor(p, (hidx_t)parent_fd_raw, RIGHT_WRITE);
+        src = sys_lookup_spoor(p, (hidx_t)parent_fd_raw, RIGHT_WRITE);   // ref-held
         if (!src)                                     return -1;
     }
-    if (!src->dev || !src->dev->walk || !src->dev->create) return -1;
+    if (!src->dev || !src->dev->walk || !src->dev->create) { spoor_clunk(src); return -1; }
 
     // A-2d: write + search (W|X) permission on the parent directory before
     // creating in it. Gated on perm_enforced (dev9p deferred to A-3). devramfs
@@ -1699,8 +1739,8 @@ static s64 sys_walk_create_handler(u64 parent_fd_raw, u64 name_va,
     // dir and is denied here before the create attempt. fail-closed on no stat.
     if (src->dev->perm_enforced) {
         struct t_stat parent_st;
-        if (spoor_stat_native(src, &parent_st) != 0)          return -1;
-        if (perm_check(p, &parent_st, PERM_W | PERM_X) != 0)  return -1;
+        if (spoor_stat_native(src, &parent_st) != 0)          { spoor_clunk(src); return -1; }
+        if (perm_check(p, &parent_st, PERM_W | PERM_X) != 0)  { spoor_clunk(src); return -1; }
     }
 
     // Copy + validate the component name (same strict shape as SYS_WALK_OPEN:
@@ -1708,13 +1748,13 @@ static s64 sys_walk_create_handler(u64 parent_fd_raw, u64 name_va,
     char name_scratch[SYS_WALK_OPEN_NAME_MAX + 1];
     for (u64 i = 0; i < name_len_raw; i++) {
         u8 b;
-        if (uaccess_load_u8(name_va + i, &b) != 0)    return -1;
-        if (b == '/' || b == '\0')                    return -1;
+        if (uaccess_load_u8(name_va + i, &b) != 0)    { spoor_clunk(src); return -1; }
+        if (b == '/' || b == '\0')                    { spoor_clunk(src); return -1; }
         name_scratch[i] = (char)b;
     }
-    if (name_len_raw == 1 && name_scratch[0] == '.')  return -1;
+    if (name_len_raw == 1 && name_scratch[0] == '.')  { spoor_clunk(src); return -1; }
     if (name_len_raw == 2 && name_scratch[0] == '.' &&
-                              name_scratch[1] == '.') return -1;
+                              name_scratch[1] == '.') { spoor_clunk(src); return -1; }
     name_scratch[name_len_raw] = '\0';
 
     // stalk-3b (STALK-DESIGN.md §5.3 / D2): a CREATE against a /srv directory
@@ -1726,17 +1766,21 @@ static s64 sys_walk_create_handler(u64 parent_fd_raw, u64 name_va,
     // 9P-mode; no other perm bit is meaningful for a service post.
     if (src->dc == 's' && src->aux &&
         *(const u64 *)src->aux == SRV_REGISTRY_MAGIC) {
-        if (perm & ~SYS_WALK_CREATE_DMSRVBYTE)            return -1;
+        if (perm & ~SYS_WALK_CREATE_DMSRVBYTE)          { spoor_clunk(src); return -1; }
         enum srv_mode mode = (perm & SYS_WALK_CREATE_DMSRVBYTE)
                                  ? SRV_MODE_BYTE : SRV_MODE_9P;
-        return (s64)devsrv_post_listener(p, src, name_scratch,
-                                         (size_t)name_len_raw, mode);
+        // #844: devsrv_post_listener mints a registry-lifetime KObj_Srv (not
+        // tied to src); release the src borrow after it returns.
+        s64 lh = (s64)devsrv_post_listener(p, src, name_scratch,
+                                           (size_t)name_len_raw, mode);
+        spoor_clunk(src);
+        return lh;
     }
 
     // DMSRVBYTE is meaningful ONLY for the /srv service post above. On a
     // regular create it must not reach a Dev's create perm (e.g. a dev9p
     // Tlcreate), where the high bit would corrupt the wire perm -- reject it.
-    if (perm & SYS_WALK_CREATE_DMSRVBYTE)                 return -1;
+    if (perm & SYS_WALK_CREATE_DMSRVBYTE)                 { spoor_clunk(src); return -1; }
 
     // Clone the parent, then CLONE-walk so nc carries its own fid at the
     // parent dir (a 0-component walk). create then mutates nc's fid into the
@@ -1758,9 +1802,12 @@ static s64 sys_walk_create_handler(u64 parent_fd_raw, u64 name_va,
     // Only dev9p replaces nc->aux with a real fresh fid -- the only Dev whose
     // create actually creates at v1.0.
     struct Spoor *nc = spoor_clone(src);
-    if (!nc)                                          return -1;
+    if (!nc)                                          { spoor_clunk(src); return -1; }
 
     struct Walkqid *w = src->dev->walk(src, nc, NULL, 0);
+    // #844: src's last use is the clone-walk above; release the borrow now.
+    // nc carries its own ref through create + the rest of the handler.
+    spoor_clunk(src);
     if (!w) {
         // Clone-walk failed; nc->aux is still the shallow copy of src->aux
         // (dev9p_walk replaces aux only on success). Detach + unref without
@@ -1822,13 +1869,16 @@ static s64 sys_fsync_handler(u64 fd_raw, u64 datasync_raw) {
     struct Proc *p = t->proc;
     if (!p)                                          return -1;
 
+    // #844: c is REF-HELD (borrow); spoor_clunk on every exit (fsync may block).
     struct Spoor *c = sys_lookup_spoor(p, (hidx_t)fd_raw, RIGHT_WRITE);
     if (!c)                                          return -1;
-    if (!c->dev || !c->dev->fsync)                   return -1;
+    if (!c->dev || !c->dev->fsync)                 { spoor_clunk(c); return -1; }
 
     // Normalize datasync to 0/1 (any non-zero is "data only").
     u32 datasync = (datasync_raw != 0) ? 1u : 0u;
-    return c->dev->fsync(c, datasync) == 0 ? 0 : -1;
+    int rc = c->dev->fsync(c, datasync);
+    spoor_clunk(c);
+    return rc == 0 ? 0 : -1;
 }
 
 // =============================================================================
@@ -1853,14 +1903,15 @@ static s64 sys_readdir_handler(u64 fd_raw, u64 buf_va, u64 buf_len_raw) {
     if (buf_len_raw == 0 || buf_len_raw > SYS_RW_MAX) return -1;
     if (!sys_validate_user_buf(buf_va, buf_len_raw))  return -1;
 
+    // #844: c is REF-HELD (borrow); spoor_clunk on every exit (readdir blocks).
     struct Spoor *c = sys_lookup_spoor(p, (hidx_t)fd_raw, RIGHT_READ);
     if (!c)                                          return -1;
-    if (!c->dev || !c->dev->readdir)                 return -1;
+    if (!c->dev || !c->dev->readdir)               { spoor_clunk(c); return -1; }
 
     u8 scratch[SYS_RW_MAX];
     long got = c->dev->readdir(c, scratch, (long)buf_len_raw, c->offset);
-    if (got < 0)                                     return -1;
-    if (got == 0)                                    return 0;   // EOD; offset unchanged
+    if (got < 0)                                   { spoor_clunk(c); return -1; }
+    if (got == 0)                                  { spoor_clunk(c); return 0; }   // EOD
 
     // Walk the returned dirents (bounded by `got`) to find the last complete
     // entry's offset cookie. The minimum entry is 24 bytes (qid+offset+type+
@@ -1881,16 +1932,17 @@ static s64 sys_readdir_handler(u64 fd_raw, u64 buf_va, u64 buf_len_raw) {
         advanced = true;
         pos += entry;
     }
-    if (!advanced)                                   return -1;   // malformed run
+    if (!advanced)                                 { spoor_clunk(c); return -1; }   // malformed run
 
     // Copy the dirent bytes to user-VA FIRST, THEN advance the Spoor offset
     // (F3 audit). If a uaccess store faults, we return -1 with the offset
     // UNCHANGED, so the caller's retry re-fetches the same run rather than
     // silently skipping the entries it never received.
     for (long i = 0; i < got; i++) {
-        if (uaccess_store_u8(buf_va + (u64)i, scratch[i]) != 0) return -1;
+        if (uaccess_store_u8(buf_va + (u64)i, scratch[i]) != 0) { spoor_clunk(c); return -1; }
     }
     c->offset = (s64)last_cookie;
+    spoor_clunk(c);
     return got;
 }
 
@@ -1906,10 +1958,16 @@ static s64 sys_readdir_handler(u64 fd_raw, u64 buf_va, u64 buf_len_raw) {
 // Resolve a directory fd argument for a mutation op: the FROM_ROOT sentinel ->
 // the caller's Territory root_spoor (may be NULL -> caller rejects); otherwise
 // a KOBJ_SPOOR handle gated on RIGHT_WRITE (the directory is mutated).
+// #844: returns a REF-HELD dir Spoor (caller MUST spoor_clunk). The handle
+// branch gets sys_lookup_spoor's transferred ref; the FROM_ROOT branch takes an
+// explicit spoor_ref on the Territory root so the caller's clunk is uniform
+// (and the root survives a concurrent pivot_root). NULL on failure (no ref).
 static struct Spoor *sys_resolve_dir_wr(struct Proc *p, u64 fd_raw) {
     if (fd_raw == SYS_WALK_OPEN_FROM_ROOT) {
         if (!p->territory)                            return NULL;
-        return p->territory->root_spoor;
+        struct Spoor *root = p->territory->root_spoor;
+        if (root) spoor_ref(root);
+        return root;
     }
     return sys_lookup_spoor(p, (hidx_t)fd_raw, RIGHT_WRITE);
 }
@@ -1949,15 +2007,18 @@ static s64 sys_rename_handler(u64 olddir_fd_raw, u64 oldname_va, u64 oldname_len
     if (sys_copy_component(oldname_va, oldname_len_raw, old_scratch) != 0) return -1;
     if (sys_copy_component(newname_va, newname_len_raw, new_scratch) != 0) return -1;
 
+    // #844: od + nd are REF-HELD borrows; spoor_clunk BOTH on every exit. od==nd
+    // (same dir fd / both FROM_ROOT) means each resolve took a ref -> two clunks
+    // balance. Held across the (possibly blocking) stat + rename 9P ops.
     struct Spoor *od = sys_resolve_dir_wr(p, olddir_fd_raw);
     if (!od)                                          return -1;
     struct Spoor *nd = sys_resolve_dir_wr(p, newdir_fd_raw);
-    if (!nd)                                          return -1;
-    if (!od->dev || !od->dev->rename)                 return -1;
+    if (!nd)                                        { spoor_clunk(od); return -1; }
+    if (!od->dev || !od->dev->rename)              { spoor_clunk(od); spoor_clunk(nd); return -1; }
     // Two-cursor + cross-Dev invariant: a 9P renameat is within ONE server, so
     // both directories MUST be on the same Dev (dev9p_rename adds the same-
     // session guard). Rejected here before any Dev op.
-    if (od->dev != nd->dev)                           return -1;
+    if (od->dev != nd->dev)                        { spoor_clunk(od); spoor_clunk(nd); return -1; }
 
     // A-3b (closes A-2d audit F2): rwx enforcement on dir mutation. POSIX
     // rename needs write + search (W|X) on BOTH parent dirs. Gated on the
@@ -1965,13 +2026,16 @@ static s64 sys_rename_handler(u64 olddir_fd_raw, u64 oldname_va, u64 oldname_len
     // A-3b). od->dev == nd->dev here, so one flag governs both.
     if (od->dev->perm_enforced) {
         struct t_stat ost, nst;
-        if (spoor_stat_native(od, &ost) != 0)             return -1;
-        if (perm_check(p, &ost, PERM_W | PERM_X) != 0)    return -1;
-        if (spoor_stat_native(nd, &nst) != 0)             return -1;
-        if (perm_check(p, &nst, PERM_W | PERM_X) != 0)    return -1;
+        if (spoor_stat_native(od, &ost) != 0)             { spoor_clunk(od); spoor_clunk(nd); return -1; }
+        if (perm_check(p, &ost, PERM_W | PERM_X) != 0)    { spoor_clunk(od); spoor_clunk(nd); return -1; }
+        if (spoor_stat_native(nd, &nst) != 0)             { spoor_clunk(od); spoor_clunk(nd); return -1; }
+        if (perm_check(p, &nst, PERM_W | PERM_X) != 0)    { spoor_clunk(od); spoor_clunk(nd); return -1; }
     }
 
-    return od->dev->rename(od, old_scratch, nd, new_scratch) == 0 ? 0 : -1;
+    int rc = od->dev->rename(od, old_scratch, nd, new_scratch);
+    spoor_clunk(od);
+    spoor_clunk(nd);
+    return rc == 0 ? 0 : -1;
 }
 
 static s64 sys_unlink_handler(u64 parent_fd_raw, u64 name_va, u64 name_len_raw,
@@ -1988,20 +2052,24 @@ static s64 sys_unlink_handler(u64 parent_fd_raw, u64 name_va, u64 name_len_raw,
     char scratch[SYS_WALK_OPEN_NAME_MAX + 1];
     if (sys_copy_component(name_va, name_len_raw, scratch) != 0) return -1;
 
+    // #844: c is a REF-HELD borrow; spoor_clunk on every exit (held across the
+    // possibly-blocking stat + unlink 9P ops).
     struct Spoor *c = sys_resolve_dir_wr(p, parent_fd_raw);
     if (!c)                                          return -1;
-    if (!c->dev || !c->dev->unlink)                  return -1;
+    if (!c->dev || !c->dev->unlink)                { spoor_clunk(c); return -1; }
 
     // A-3b (closes A-2d audit F2): W|X on the parent dir to remove an entry
     // (POSIX). Gated on perm_enforced (dev9p enforces from A-3b; devramfs
     // leaves .unlink NULL).
     if (c->dev->perm_enforced) {
         struct t_stat cst;
-        if (spoor_stat_native(c, &cst) != 0)              return -1;
-        if (perm_check(p, &cst, PERM_W | PERM_X) != 0)    return -1;
+        if (spoor_stat_native(c, &cst) != 0)              { spoor_clunk(c); return -1; }
+        if (perm_check(p, &cst, PERM_W | PERM_X) != 0)    { spoor_clunk(c); return -1; }
     }
 
-    return c->dev->unlink(c, scratch, (u32)flags_raw) == 0 ? 0 : -1;
+    int rc = c->dev->unlink(c, scratch, (u32)flags_raw);
+    spoor_clunk(c);
+    return rc == 0 ? 0 : -1;
 }
 
 // =============================================================================
@@ -2062,23 +2130,23 @@ static s64 sys_wstat_handler(u64 hraw, u64 valid_raw, u64 mode_raw,
 
     // Rights gate: KOBJ_SPOOR with RIGHT_WRITE (setattr mutates metadata).
     // Mirrors SYS_FSTAT's lookup but with RIGHT_WRITE; rejects KOBJ_SRV.
-    struct Handle *slot = sys_lookup_rw_handle(p, (hidx_t)hraw, RIGHT_WRITE);
-    if (!slot)                                       return -1;
-    if (slot->kind != KOBJ_SPOOR)                    return -1;
-
-    struct Spoor *c = (struct Spoor *)slot->obj;
+    // #844: c is REF-HELD (KOBJ_SPOOR + RIGHT_WRITE); spoor_clunk on every exit
+    // -- the ref keeps c alive across the (possibly blocking) stat/setattr.
+    struct Spoor *c = sys_lookup_rw_handle(p, (hidx_t)hraw, RIGHT_WRITE);
+    if (!c)                                          return -1;
 
     // A-2d: the ownership-change policy (IDENTITY-DESIGN.md 3.7.1 + perm.c).
     // Gated on perm_enforced (dev9p deferred to A-3; devramfs .wstat_native is
-    // NULL so SYS_WSTAT on it returns -1 below regardless -> this is dormant at
-    // v1.0, exercised by perm_wstat_check's unit tests and activated with dev9p
-    // at A-3). Reads the file's CURRENT owner, then applies the policy.
+    // NULL so SYS_WSTAT on it returns -1 below regardless). Reads the file's
+    // CURRENT owner, then applies the policy.
     if (c->dev && c->dev->perm_enforced) {
         struct t_stat cur;
-        if (spoor_stat_native(c, &cur) != 0)                  return -1;
-        if (perm_wstat_check(p, cur.uid, valid, gid) != 0)    return -1;
+        if (spoor_stat_native(c, &cur) != 0)              { spoor_clunk(c); return -1; }
+        if (perm_wstat_check(p, cur.uid, valid, gid) != 0){ spoor_clunk(c); return -1; }
     }
-    return spoor_wstat_native(c, valid, mode, uid, gid) == 0 ? 0 : -1;
+    int rc = spoor_wstat_native(c, valid, mode, uid, gid);
+    spoor_clunk(c);
+    return rc == 0 ? 0 : -1;
 }
 
 // =============================================================================
@@ -2112,12 +2180,14 @@ static s64 sys_chroot_handler(u64 spoor_fd_raw) {
     struct Spoor *source = sys_lookup_spoor(p, (hidx_t)spoor_fd_raw, RIGHT_READ);
     if (!source)                                     return -1;
 
-    // territory_chroot handles: idempotent same-pointer (returns 0
-    // without ref bump), prior-root displacement (spoor_clunk the old),
-    // spoor_ref of the new source. NULL source is rejected by
-    // territory_chroot's own check (returns -1).
-    if (territory_chroot(p->territory, source) != 0) return -1;
-    return 0;
+    // territory_chroot handles: idempotent same-pointer (returns 0 without ref
+    // bump), prior-root displacement (spoor_clunk the old), spoor_ref of the
+    // new source. #844: source is REF-HELD (a borrow); territory_chroot takes
+    // its own ref, so release the borrow after (also covers the idempotent
+    // same-pointer path, where chroot took no new ref).
+    int rc = territory_chroot(p->territory, source);
+    spoor_clunk(source);
+    return rc == 0 ? 0 : -1;
 }
 
 // SYS_SET_TID_ADDRESS — record the clear-child-tid address on the calling
@@ -2732,12 +2802,14 @@ int sys_mount_for_proc(struct Proc *p, hidx_t source_fd,
     struct Spoor *source = sys_lookup_spoor(p, source_fd, RIGHT_READ);
     if (!source)                                     return -1;
 
-    // territory.c::mount handles: idempotency (no-op on duplicate),
-    // MREPL (replace existing entry), full-table rejection, and the
-    // per-entry spoor_ref. Returns 0 / -1 (NULL source/mountpoint — already
-    // ruled out above) / -2 (table full). We collapse to 0 / -1.
-    if (mount(p->territory, source, mountpoint, flags) != 0) return -1;
-    return 0;
+    // territory.c::mount handles: idempotency (no-op on duplicate), MREPL
+    // (replace existing entry), full-table rejection, and the per-entry
+    // spoor_ref. Returns 0 / -1 / -2 (table full) -> collapse to 0 / -1.
+    // #844: source is REF-HELD (a borrow); mount() takes its own per-entry
+    // ref, so release the borrow after.
+    int rc = mount(p->territory, source, mountpoint, flags);
+    spoor_clunk(source);
+    return rc == 0 ? 0 : -1;
 }
 
 // Inner — testable kernel-internally. Returns 0 on success, -1 if no
@@ -3026,16 +3098,21 @@ static int sys_bump_inherit_fds(struct Proc *p, const u32 *fds, u32 fd_count,
                                 rights_t bumped_rights[SYS_SPAWN_MAX_FDS]) {
     u32 bumped_count = 0;
     for (u32 i = 0; i < fd_count; i++) {
-        struct Handle *slot = handle_get(p, (hidx_t)fds[i]);
-        if (!slot || slot->kind != KOBJ_SPOOR) {
+        // #844: snapshot + the obj ref. Take the child's long-lived spoor_ref
+        // into bumped[], then handle_put releases the borrow. On get-fail
+        // (hh zeroed -> no-op put) or kind-mismatch, put + unwind prior bumps.
+        struct Handle hh;
+        if (handle_get(p, (hidx_t)fds[i], &hh) < 0 || hh.kind != KOBJ_SPOOR) {
+            handle_put(&hh);
             for (u32 j = 0; j < bumped_count; j++) spoor_unref(bumped[j]);
             return -1;
         }
-        struct Spoor *s = (struct Spoor *)slot->obj;
+        struct Spoor *s = (struct Spoor *)hh.obj;
         spoor_ref(s);
         bumped[bumped_count]        = s;
-        bumped_rights[bumped_count] = slot->rights;
+        bumped_rights[bumped_count] = hh.rights;
         bumped_count++;
+        handle_put(&hh);
     }
     return 0;
 }
@@ -4207,13 +4284,21 @@ int sys_srv_accept_for_proc(struct Proc *p, hidx_t service_h) {
     // obj is a service registry entry. The first u64 discriminates a
     // service object (SRV_SERVICE_MAGIC) from a connection object
     // (SRV_CONN_MAGIC) — accept requires a service.
-    struct Handle *slot = handle_get(p, service_h);
-    if (!slot)                                          return -1;
-    if (slot->kind != KOBJ_SRV)                         return -1;
-    if ((slot->rights & RIGHT_READ) != RIGHT_READ)      return -1;
-    if (!slot->obj)                                     return -1;
-    if (*(const u64 *)slot->obj != SRV_SERVICE_MAGIC)   return -1;
-    struct SrvService *svc = (struct SrvService *)slot->obj;
+    // #844: snapshot the slot (closes the torn-read TOCTOU vs a sibling close).
+    // The KOBJ_SRV service obj is registry-owned (tombstoned at poster exit,
+    // never freed by handle close -- handle_release_obj for it is a no-op), so
+    // svc stays valid after handle_put; release the borrow immediately.
+    struct Handle hh;
+    if (handle_get(p, service_h, &hh) < 0)              return -1;
+    if (hh.kind != KOBJ_SRV ||
+        (hh.rights & RIGHT_READ) != RIGHT_READ ||
+        !hh.obj ||
+        *(const u64 *)hh.obj != SRV_SERVICE_MAGIC) {
+        handle_put(&hh);
+        return -1;
+    }
+    struct SrvService *svc = (struct SrvService *)hh.obj;
+    handle_put(&hh);
 
     // Poster gate: only the Proc currently posting this service may accept
     // its connections. Holding the service handle is already evidence; the
@@ -4282,13 +4367,16 @@ int sys_srv_peer_for_proc(struct Proc *p, hidx_t conn_h,
     // Resolve the connection handle: a KObj_Spoor endpoint the caller
     // holds (SYS_SRV_ACCEPT minted it). RIGHT_READ is defense-in-depth —
     // the accept installs READ|WRITE on the endpoint.
+    // #844: sp is REF-HELD (borrow); its last use is the CSRVCLIENT flag check
+    // below, after which cn (kernel-owned, value-captured identity) carries the
+    // rest. spoor_clunk on every exit through there, then once after.
     struct Spoor *sp = sys_lookup_spoor(p, conn_h, RIGHT_READ);
     if (!sp) return -1;
 
     // The Spoor must be a devsrv connection Spoor; devsrv_conn_of returns
     // NULL for a pipe / dev9p / devsrv-root / devsrv-service Spoor.
     struct SrvConn *cn = devsrv_conn_of(sp);
-    if (!cn) return -1;
+    if (!cn) { spoor_clunk(sp); return -1; }
 
     // SO_PEERCRED is an ACCEPT-side (server) query -- "who connected to me?".
     // stalk-3c open=connect made the CLIENT endpoint a devsrv conn Spoor too
@@ -4297,7 +4385,8 @@ int sys_srv_peer_for_proc(struct Proc *p, hidx_t conn_h,
     // caller's OWN identity (and in a same-Proc client+server the poster gate
     // below cannot tell them apart). Reject the client endpoint: SYS_SRV_PEER
     // is server-side only at v1.0 (pouch getsockopt(SO_PEERCRED) -> ENOTSOCK).
-    if (sp->flag & CSRVCLIENT) return -1;
+    if (sp->flag & CSRVCLIENT) { spoor_clunk(sp); return -1; }
+    spoor_clunk(sp);   // borrow done -- cn carries the value-captured peer info
 
     // Poster gate (CORVUS-DESIGN §6.3): only the service's poster may
     // query a connection's peer. The SrvConn captured the poster's

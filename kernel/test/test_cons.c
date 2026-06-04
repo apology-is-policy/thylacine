@@ -340,11 +340,12 @@ void test_cons_console_open(void) {
     hidx_t fd = sys_console_open_for_proc(p);
     TEST_ASSERT(fd >= 0, "sys_console_open_for_proc returned a valid fd");
 
-    struct Handle *h = handle_get(p, fd);
-    TEST_ASSERT(h != NULL, "console handle installed");
-    TEST_EXPECT_EQ((int)h->kind, (int)KOBJ_SPOOR, "console handle is KOBJ_SPOOR");
-    TEST_EXPECT_EQ(h->rights, (rights_t)(RIGHT_READ | RIGHT_WRITE),
+    struct Handle h;
+    TEST_ASSERT(handle_get(p, fd, &h) == 0, "console handle installed");
+    TEST_EXPECT_EQ((int)h.kind, (int)KOBJ_SPOOR, "console handle is KOBJ_SPOOR");
+    TEST_EXPECT_EQ(h.rights, (rights_t)(RIGHT_READ | RIGHT_WRITE),
         "console handle rights are R|W");
+    handle_put(&h);
 
     // Seed the RX ring + read through the handle (the login-reads-the-tty path).
     cons_test_reset();

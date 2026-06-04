@@ -36,6 +36,7 @@
 #ifndef THYLACINE_HANDLE_H
 #define THYLACINE_HANDLE_H
 
+#include <thylacine/spinlock.h>     // #844: per-Proc handle-table lock
 #include <thylacine/types.h>
 
 struct Proc;
@@ -142,11 +143,22 @@ _Static_assert(__builtin_offsetof(struct Handle, magic) == 0,
 #define PROC_HANDLE_MAX 64
 
 struct HandleTable {
+    // #844: serializes all slot ops (alloc / close / get / dup) -- the Plan 9
+    // Fgrp lock. Peer threads of a multi-threaded Proc share one HandleTable,
+    // so a sibling's handle_close must not free a slot's obj or zero the slot
+    // under a concurrent handle_get. Plain spin_lock (process-context only --
+    // handle ops never run from IRQ; matches p->vma_lock). KP_ZERO at
+    // handle_table_alloc inits it unlocked. The obj refcount (bumped under
+    // this lock in handle_get/dup, dropped OUTSIDE it in handle_put/close)
+    // carries the obj's lifetime past the lock release.
+    spin_lock_t   lock;
+    u32           _pad_lock;
     struct Handle slots[PROC_HANDLE_MAX];
 };
 
-_Static_assert(sizeof(struct HandleTable) == 24 * PROC_HANDLE_MAX,
-               "HandleTable size pinned at PROC_HANDLE_MAX * sizeof(Handle)");
+_Static_assert(sizeof(struct HandleTable) == 8 + 24 * PROC_HANDLE_MAX,
+               "HandleTable size pinned at 8 (lock + pad) + "
+               "PROC_HANDLE_MAX * sizeof(Handle)");
 
 // Handle index — signed; -1 indicates invalid / not-found / table-full.
 typedef int hidx_t;
@@ -191,10 +203,29 @@ hidx_t handle_alloc(struct Proc *p, enum kobj_kind kind,
 // Maps to specs/handles.tla::HandleClose(p, h).
 int handle_close(struct Proc *p, hidx_t h);
 
-// Look up a handle. Returns NULL if h is out of range, or the slot is
-// empty (magic != HANDLE_MAGIC), or p is NULL/corrupted. The returned
-// pointer is into p's table; valid until the slot is closed.
-struct Handle *handle_get(struct Proc *p, hidx_t h);
+// Look up a handle into a caller-owned snapshot, with a reference HELD on
+// the underlying kobj. Returns 0 on success (*out filled: kind / rights /
+// obj, magic == HANDLE_MAGIC, and the obj's refcount bumped so it stays alive
+// until the matching handle_put), -1 on failure (out-of-range h, empty slot,
+// NULL/corrupted p, or NULL out -- *out zeroed, no ref held).
+//
+// #844: the lookup + the snapshot copy + the ref bump run under the per-Proc
+// handle-table lock, so a sibling thread's concurrent handle_close cannot
+// invalidate the read or free the obj under the caller. The OLD contract
+// ("returns a live pointer into the table, valid until the slot is closed")
+// was a TOCTOU in a multi-threaded Proc -- the slot pointer dangled and the
+// obj could be freed across any use (esp. blocking dev I/O / accept / 9P
+// handshake). Callers use out->obj (ref-held, safe across blocking ops) and
+// MUST handle_put(out) on EVERY exit path once a get succeeds.
+int handle_get(struct Proc *p, hidx_t h, struct Handle *out);
+
+// Release the reference a successful handle_get acquired on h->obj. Runs the
+// per-kind release OUTSIDE any handle-table lock (it may sleep -- spoor_clunk's
+// Dev close hook, SrvConn teardown). NULL-safe + idempotent: a no-op on a
+// NULL/zeroed snapshot (a failed handle_get), and it zeroes *h after release so
+// a double handle_put is a no-op. NOT slot deletion -- that is handle_close
+// (which drops the TABLE's ref); handle_put drops the CALLER's borrowed ref.
+void handle_put(struct Handle *h);
 
 // Duplicate a handle within p's table with possibly reduced rights.
 //

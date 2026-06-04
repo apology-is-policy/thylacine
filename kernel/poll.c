@@ -178,15 +178,19 @@ static int poll_scan_one(struct Proc *p, struct pollfd *pfd,
         pfd->revents = POLLNVAL;
         return 1;
     }
-    struct Handle *slot = handle_get(p, (hidx_t)pfd->fd);
-    if (!slot) {
+    // #844: snapshot + hold the obj ref across the brief scan. dev->poll /
+    // srv_handle_poll register a waiter but return promptly; the actual poll
+    // sleep happens later in sys_poll_for_proc (the poll-hook list lifetime is
+    // poll's own concern, unchanged here). handle_put before every return.
+    struct Handle hh;
+    if (handle_get(p, (hidx_t)pfd->fd, &hh) < 0) {
         pfd->revents = POLLNVAL;
         return 1;
     }
 
-    switch (slot->kind) {
+    switch (hh.kind) {
     case KOBJ_SPOOR: {
-        struct Spoor *sp = (struct Spoor *)slot->obj;
+        struct Spoor *sp = (struct Spoor *)hh.obj;
         if (!sp || !sp->dev) {
             // Malformed Spoor handle (test path or wild slot). Symmetric
             // with the KOBJ_SRV NULL-obj path in `srv_handle_poll` —
@@ -206,7 +210,7 @@ static int poll_scan_one(struct Proc *p, struct pollfd *pfd,
     case KOBJ_SRV:
         // The KObj_Srv flavor (listener SrvService vs client SrvConn) is
         // discriminated inside srv_handle_poll via the obj's magic.
-        revents = (s16)srv_handle_poll(slot->obj, pfd->events, pw_or_null);
+        revents = (s16)srv_handle_poll(hh.obj, pfd->events, pw_or_null);
         break;
     default:
         // Every other kobj kind (Burrow / Mmio / Irq / Dma / Interrupt /
@@ -215,6 +219,7 @@ static int poll_scan_one(struct Proc *p, struct pollfd *pfd,
         break;
     }
     pfd->revents = revents;
+    handle_put(&hh);
     return (revents != 0) ? 1 : 0;
 }
 

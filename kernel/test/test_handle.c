@@ -99,11 +99,12 @@ void test_handles_alloc_close_smoke(void) {
     TEST_EXPECT_EQ(handle_table_count(p->handles), 2, "count should be 2");
 
     // handle_get returns the right kind + rights.
-    struct Handle *got1 = handle_get(p, h1);
-    TEST_ASSERT(got1 != NULL, "handle_get(h1) returned NULL");
-    TEST_EXPECT_EQ((int)got1->kind, (int)KOBJ_PROCESS, "h1 kind mismatch");
-    TEST_EXPECT_EQ(got1->rights, (rights_t)(RIGHT_READ | RIGHT_TRANSFER),
+    struct Handle got1;
+    TEST_ASSERT(handle_get(p, h1, &got1) == 0, "handle_get(h1) returned -1");
+    TEST_EXPECT_EQ((int)got1.kind, (int)KOBJ_PROCESS, "h1 kind mismatch");
+    TEST_EXPECT_EQ(got1.rights, (rights_t)(RIGHT_READ | RIGHT_TRANSFER),
         "h1 rights mismatch");
+    handle_put(&got1);
 
     // Reject KOBJ_INVALID at alloc.
     hidx_t bad_kind = handle_alloc(p, KOBJ_INVALID, RIGHT_READ, NULL);
@@ -120,8 +121,9 @@ void test_handles_alloc_close_smoke(void) {
     // Close h1.
     TEST_EXPECT_EQ(handle_close(p, h1), 0, "handle_close(h1)");
     TEST_EXPECT_EQ(handle_table_count(p->handles), 1, "count should be 1");
-    TEST_EXPECT_EQ(handle_get(p, h1), NULL,
-        "handle_get on closed slot must return NULL");
+    struct Handle closed_tmp;
+    TEST_EXPECT_EQ(handle_get(p, h1, &closed_tmp), -1,
+        "handle_get on closed slot must return -1");
 
     // Double-close returns -1.
     TEST_EXPECT_EQ(handle_close(p, h1), -1, "double-close must return -1");
@@ -157,12 +159,13 @@ void test_handles_rights_monotonic(void) {
     // Dup with subset rights = READ. Succeeds.
     hidx_t child_read = handle_dup(p, parent, RIGHT_READ);
     TEST_ASSERT(child_read >= 0, "dup with subset rights must succeed");
-    struct Handle *got = handle_get(p, child_read);
-    TEST_ASSERT(got != NULL, "child_read handle_get NULL");
-    TEST_EXPECT_EQ(got->rights, (rights_t)RIGHT_READ,
+    struct Handle got;
+    TEST_ASSERT(handle_get(p, child_read, &got) == 0, "child_read handle_get -1");
+    TEST_EXPECT_EQ(got.rights, (rights_t)RIGHT_READ,
         "child_read rights must be exactly READ");
-    TEST_EXPECT_EQ((int)got->kind, (int)KOBJ_BURROW,
+    TEST_EXPECT_EQ((int)got.kind, (int)KOBJ_BURROW,
         "child_read kind preserved from parent");
+    handle_put(&got);   // #844: KOBJ_BURROW -> the snapshot held a burrow_ref
 
     // Dup with same rights = READ + WRITE. Succeeds (subset of self is self).
     hidx_t child_full = handle_dup(p, parent, RIGHT_READ | RIGHT_WRITE);
@@ -212,12 +215,14 @@ void test_handles_dup_lifecycle(void) {
 
     // Close parent. Dup should still be valid.
     TEST_EXPECT_EQ(handle_close(p, parent), 0, "close parent");
-    TEST_EXPECT_EQ(handle_get(p, parent), NULL, "parent slot now empty");
+    struct Handle parent_tmp;
+    TEST_EXPECT_EQ(handle_get(p, parent, &parent_tmp), -1, "parent slot now empty");
 
-    struct Handle *dup_got = handle_get(p, dup);
-    TEST_ASSERT(dup_got != NULL, "dup must remain valid after parent close");
-    TEST_EXPECT_EQ(dup_got->rights, (rights_t)RIGHT_READ,
+    struct Handle dup_got;
+    TEST_ASSERT(handle_get(p, dup, &dup_got) == 0, "dup must remain valid after parent close");
+    TEST_EXPECT_EQ(dup_got.rights, (rights_t)RIGHT_READ,
         "dup rights unchanged after parent close");
+    handle_put(&dup_got);
     TEST_EXPECT_EQ(handle_table_count(p->handles), 1, "count should be 1");
 
     // Now dup again from the surviving handle, then close it; original
@@ -225,8 +230,10 @@ void test_handles_dup_lifecycle(void) {
     hidx_t dup2 = handle_dup(p, dup, RIGHT_READ);
     TEST_ASSERT(dup2 >= 0, "second dup failed");
     TEST_EXPECT_EQ(handle_close(p, dup2), 0, "close dup2");
-    TEST_ASSERT(handle_get(p, dup) != NULL,
+    struct Handle dup_tmp;
+    TEST_ASSERT(handle_get(p, dup, &dup_tmp) == 0,
         "first dup must remain valid after second dup is closed");
+    handle_put(&dup_tmp);
 
     // Cleanup.
     handle_close(p, dup);
@@ -347,9 +354,10 @@ void test_handles_srv_kind(void) {
     TEST_ASSERT(h >= 0, "handle_alloc(KOBJ_SRV) must succeed");
     TEST_EXPECT_EQ(handle_table_count(p->handles), 1, "count should be 1");
 
-    struct Handle *got = handle_get(p, h);
-    TEST_ASSERT(got != NULL, "handle_get(srv) returned NULL");
-    TEST_EXPECT_EQ((int)got->kind, (int)KOBJ_SRV, "srv handle kind mismatch");
+    struct Handle got;
+    TEST_ASSERT(handle_get(p, h, &got) == 0, "handle_get(srv) returned -1");
+    TEST_EXPECT_EQ((int)got.kind, (int)KOBJ_SRV, "srv handle kind mismatch");
+    handle_put(&got);
 
     // NoSrvDup: dup of a KObj_Srv handle is rejected — exactly as a
     // hardware handle's dup is. A subset-rights request is still

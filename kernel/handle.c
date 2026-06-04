@@ -25,9 +25,18 @@
 //
 // Phase 5+ refinement:
 //   - Growable table via RB-tree keyed by hidx_t.
-//   - Per-Proc handle-table lock for SMP safety.
-//   - Refcount integration via burrow_ref/unref (P2-Fd is the first step).
 //   - Capability-handle elevation via factotum (per ARCH §15.4).
+//
+// #844 (handle-lifetime pass): the per-Proc handle-table lock for SMP safety
+// is now LANDED -- struct HandleTable::lock serializes alloc / close / get /
+// dup. handle_get takes a snapshot + bumps the obj refcount UNDER the lock and
+// returns it by value; handle_put drops that borrowed ref OUTSIDE the lock.
+// This closes the multi-thread-Proc TOCTOU where a sibling handle_close freed
+// a slot's obj / zeroed the slot under a concurrent handle_get's live pointer
+// (esp. across blocking dev I/O / accept / 9P handshake). Per-kind refcount
+// integration (burrow / spoor / srvconn / mmio / irq / dma) is wired via
+// handle_acquire_obj / handle_release_obj; all are SMP-safe (burrow gained a
+// per-Burrow lock in #847, the rest are atomic ACQ_REL).
 
 #include <thylacine/devsrv.h>
 #include <thylacine/dma_handle.h>
@@ -259,6 +268,12 @@ void handle_table_free(struct HandleTable *t) {
     // Close any in-use handles before releasing the table. Calls the
     // per-kind release path so underlying refcounts (KOBJ_BURROW at P2-Fd)
     // are decremented correctly even on orphan-table cleanup.
+    //
+    // #844: NO table lock here -- this is the teardown path, reached only at
+    // proc_free (thread_count == 0) or orphan-table cleanup, so no sibling
+    // thread can race the table (the same single-threaded-by-construction
+    // guarantee as vma_drain). The release MUST run lockless anyway (it may
+    // sleep). The slot-zeroing is belt-and-suspenders before the cache free.
     for (int i = 0; i < PROC_HANDLE_MAX; i++) {
         if (t->slots[i].magic == HANDLE_MAGIC) {
             handle_release_obj(t->slots[i].kind, t->slots[i].obj);
@@ -266,7 +281,7 @@ void handle_table_free(struct HandleTable *t) {
             t->slots[i].kind   = KOBJ_INVALID;
             t->slots[i].rights = RIGHT_NONE;
             t->slots[i].obj    = NULL;
-            g_handle_freed++;
+            __atomic_fetch_add(&g_handle_freed, 1, __ATOMIC_RELAXED);
         }
     }
     kmem_cache_free(g_handle_table_cache, t);
@@ -299,6 +314,26 @@ static bool valid_alloc_args(enum kobj_kind kind, rights_t rights) {
     if (rights == RIGHT_NONE) return false;
     if (rights & ~RIGHT_ALL) return false;
     return true;
+}
+
+// #844: find a free slot and install (kind, rights, obj). Caller holds
+// t->lock. Returns the slot index, or -1 if the table is full. Does NOT
+// touch the underlying-kobj refcount -- the caller accounts for it (the
+// burrow_create_anon-consumed-ref convention for alloc; the
+// handle_acquire_obj bump for dup).
+static hidx_t handle_install_locked(struct HandleTable *t, enum kobj_kind kind,
+                                    rights_t rights, void *obj) {
+    for (int i = 0; i < PROC_HANDLE_MAX; i++) {
+        if (t->slots[i].magic == 0) {
+            t->slots[i].magic  = HANDLE_MAGIC;
+            t->slots[i].kind   = kind;
+            t->slots[i].rights = rights;
+            t->slots[i].obj    = obj;
+            __atomic_fetch_add(&g_handle_allocated, 1, __ATOMIC_RELAXED);
+            return (hidx_t)i;
+        }
+    }
+    return -1;
 }
 
 hidx_t handle_alloc(struct Proc *p, enum kobj_kind kind,
@@ -345,87 +380,144 @@ int handle_close(struct Proc *p, hidx_t h) {
     struct HandleTable *t = proc_handles_or_extinct(p);
 
     if (h < 0 || h >= PROC_HANDLE_MAX)  return -1;
+
+    // #844: capture + zero the slot UNDER the table lock; run the per-kind
+    // release (which may sleep -- spoor_clunk's Dev close hook, SrvConn
+    // teardown) OUTSIDE the lock. A concurrent handle_get either observes the
+    // live slot (and takes its OWN ref before this release) or the zeroed slot
+    // (and fails) -- never a torn read, never a freed obj under a live ref.
+    spin_lock(&t->lock);
     struct Handle *slot = &t->slots[h];
-    if (slot->magic != HANDLE_MAGIC)    return -1;
-
-    // Per-kind release. P2-Fd integrates burrow_unref for KOBJ_BURROW; future
-    // phases add the other kinds.
-    handle_release_obj(slot->kind, slot->obj);
-
+    if (slot->magic != HANDLE_MAGIC) {
+        spin_unlock(&t->lock);
+        return -1;
+    }
+    enum kobj_kind kind = slot->kind;
+    void          *obj  = slot->obj;
     slot->magic  = 0;
     slot->kind   = KOBJ_INVALID;
     slot->rights = RIGHT_NONE;
     slot->obj    = NULL;
-    g_handle_freed++;
+    __atomic_fetch_add(&g_handle_freed, 1, __ATOMIC_RELAXED);
+    spin_unlock(&t->lock);
+
+    handle_release_obj(kind, obj);
     return 0;
 }
 
-struct Handle *handle_get(struct Proc *p, hidx_t h) {
-    if (!p || p->magic != PROC_MAGIC || !p->handles) return NULL;
-    if (h < 0 || h >= PROC_HANDLE_MAX) return NULL;
-    struct Handle *slot = &p->handles->slots[h];
-    if (slot->magic != HANDLE_MAGIC)   return NULL;
-    return slot;
+int handle_get(struct Proc *p, hidx_t h, struct Handle *out) {
+    // Zero the snapshot first so every -1 path leaves a clean, put-safe struct
+    // (handle_put treats magic != HANDLE_MAGIC as a no-op).
+    if (out) {
+        out->magic  = 0;
+        out->kind   = KOBJ_INVALID;
+        out->rights = RIGHT_NONE;
+        out->obj    = NULL;
+    }
+    // Graceful (non-extinct) failure -- matches the old NULL-returning
+    // contract. Handle lookups on syscall entry must fail closed on a bad fd /
+    // bad Proc, never extinct.
+    if (!out) return -1;
+    if (!p || p->magic != PROC_MAGIC || !p->handles) return -1;
+    if (h < 0 || h >= PROC_HANDLE_MAX) return -1;
+
+    struct HandleTable *t = p->handles;
+    spin_lock(&t->lock);
+    struct Handle *slot = &t->slots[h];
+    if (slot->magic != HANDLE_MAGIC) {
+        spin_unlock(&t->lock);
+        return -1;
+    }
+    // Bump the obj refcount UNDER the lock (non-blocking) so the snapshot's obj
+    // outlives the lock release + any concurrent handle_close; then copy the
+    // snapshot by value. The caller drops this borrowed ref via handle_put.
+    handle_acquire_obj(slot->kind, slot->obj);
+    *out = *slot;
+    spin_unlock(&t->lock);
+    return 0;
+}
+
+void handle_put(struct Handle *h) {
+    if (!h) return;
+    if (h->magic != HANDLE_MAGIC) return;   // zeroed / already-put / failed-get
+    handle_release_obj(h->kind, h->obj);
+    // Zero the snapshot so a double handle_put is a no-op.
+    h->magic  = 0;
+    h->kind   = KOBJ_INVALID;
+    h->rights = RIGHT_NONE;
+    h->obj    = NULL;
 }
 
 hidx_t handle_dup(struct Proc *p, hidx_t h, rights_t new_rights) {
-    struct Handle *parent = handle_get(p, h);
-    if (!parent) return -1;
+    struct HandleTable *t = proc_handles_or_extinct(p);
+    if (h < 0 || h >= PROC_HANDLE_MAX) return -1;
 
-    // P4-Ib NoHwDup + P5-corvus-srv NoSrvDup: dup is forbidden for
-    // every NON-transferable kind. Maps to specs/handles.tla's
-    // HandleDup precondition `h.kobj \in TxKObjs` — the runtime guard
-    // is its exact negation, `!kobj_kind_is_transferable`.
-    //   - Hardware (MMIO / IRQ / DMA / Interrupt): drivers hold exactly
-    //     one handle per hw resource — extends I-5 from "non-
-    //     transferable across procs" to "non-duplicable at all". Bug
-    //     class BuggyHwDup.
-    //   - Srv (a /srv connection Spoor): exactly one connection Spoor
-    //     per Proc (CORVUS-DESIGN.md §6.2) — a dup would be a second
-    //     handle naming the one connection, blurring the unambiguous
-    //     origin that handles.tla's SrvHandlesAtOrigin wants.
-    if (!kobj_kind_is_transferable(parent->kind)) return -1;
+    // #844: validate the parent + acquire the child's ref + install the child
+    // slot under ONE table-lock hold, so a concurrent handle_close of the
+    // parent cannot slip between the lookup and the dup (the old code called
+    // handle_get then handle_alloc -- two separate lock acquisitions with a
+    // TOCTOU window). handle_acquire_obj is non-blocking (atomic / per-Burrow-
+    // lock bump); only the alloc-failure rollback release runs after unlock.
+    spin_lock(&t->lock);
+    struct Handle *parent = &t->slots[h];
+    if (parent->magic != HANDLE_MAGIC) {
+        spin_unlock(&t->lock);
+        return -1;
+    }
 
-    // stalk-3b-β NoSrvSpoorDup: a devsrv Spoor (dc='s' -- a /srv root, a service-
-    // ref, or a CONNECTION endpoint) is pinned to its Proc and must not be dup'd.
-    // The connection endpoint is now a KOBJ_SPOOR (the KObj_Srv connection handle
-    // it replaces was already barred by the transferable check above); a second
+    // P4-Ib NoHwDup + P5-corvus-srv NoSrvDup: dup is forbidden for every
+    // NON-transferable kind. Maps to specs/handles.tla's HandleDup
+    // precondition `h.kobj \in TxKObjs` — the runtime guard is its exact
+    // negation, `!kobj_kind_is_transferable`.
+    //   - Hardware (MMIO / IRQ / DMA / Interrupt): drivers hold exactly one
+    //     handle per hw resource — extends I-5 to "non-duplicable at all".
+    //   - Srv: exactly one connection Spoor per Proc (CORVUS-DESIGN.md §6.2).
+    if (!kobj_kind_is_transferable(parent->kind)) {
+        spin_unlock(&t->lock);
+        return -1;
+    }
+
+    // stalk-3b-β NoSrvSpoorDup: a devsrv Spoor (dc='s' -- a /srv root, a
+    // service-ref, or a CONNECTION endpoint) is pinned to its Proc; a second
     // handle naming the one connection would blur the SO_PEERCRED origin
-    // (handles.tla SrvHandlesAtOrigin) and double-drive the SrvConn / registry-ref
-    // lifecycle at close. dev9p roots (dc='9') from a 9p-mode connect stay
-    // dup-able like any mounted-9P root.
+    // (handles.tla SrvHandlesAtOrigin) and double-drive the SrvConn /
+    // registry-ref lifecycle at close. dev9p roots (dc='9') stay dup-able.
     if (parent->kind == KOBJ_SPOOR && parent->obj &&
         ((struct Spoor *)parent->obj)->dc == 's') {
+        spin_unlock(&t->lock);
         return -1;
     }
 
     // Rights monotonic reduction: new_rights MUST be a subset of
-    // parent->rights. Models the spec's HandleDup precondition.
-    // Rejects elevation (e.g., parent has {READ}, dup with {READ,
-    // WRITE}) — the bug class that specs/handles.tla's BuggyDupElevate
-    // models, which produces a RightsCeiling counterexample.
-    if ((new_rights & parent->rights) != new_rights) return -1;
-    if (!valid_alloc_args(parent->kind, new_rights)) return -1;
+    // parent->rights (specs/handles.tla RightsCeiling; rejects the
+    // BuggyDupElevate counterexample).
+    if ((new_rights & parent->rights) != new_rights) {
+        spin_unlock(&t->lock);
+        return -1;
+    }
+    if (!valid_alloc_args(parent->kind, new_rights)) {
+        spin_unlock(&t->lock);
+        return -1;
+    }
 
-    // Capture parent's kind + obj BEFORE handle_alloc — the alloc may
-    // reuse parent's slot (it scans for the lowest free slot, but in
-    // pathological cases of reuse-after-fragmentation the parent slot
-    // could be ours after handle_close earlier; defensive).
+    // Capture BEFORE install (the install skips the occupied parent slot, so
+    // `parent` stays valid -- but capturing is the clean, defensive form).
     enum kobj_kind kind = parent->kind;
     void          *obj  = parent->obj;
 
-    // Acquire a new reference to the underlying kobj. P2-Fd integrates
-    // burrow_ref for KOBJ_BURROW. The dup'd handle is a NEW reference; the
-    // future handle_close on it will release the corresponding ref.
+    // The dup'd handle is a NEW reference; its eventual handle_close releases
+    // it. Acquire under the lock (non-blocking).
     handle_acquire_obj(kind, obj);
+    hidx_t child = handle_install_locked(t, kind, new_rights, obj);
+    spin_unlock(&t->lock);
 
-    hidx_t child = handle_alloc(p, kind, new_rights, obj);
     if (child < 0) {
-        // Roll back the acquire on alloc failure.
+        // Roll back the acquire on table-full, OUTSIDE the lock (release may
+        // sleep for a Spoor's last drop; harmless for the kinds dup allows).
         handle_release_obj(kind, obj);
     }
     return child;
 }
 
-u64 handle_total_allocated(void) { return g_handle_allocated; }
-u64 handle_total_freed(void)     { return g_handle_freed; }
+u64 handle_total_allocated(void) { return __atomic_load_n(&g_handle_allocated, __ATOMIC_RELAXED); }
+u64 handle_total_freed(void)     { return __atomic_load_n(&g_handle_freed, __ATOMIC_RELAXED); }
