@@ -1821,6 +1821,18 @@ int main(void) {
         // the trailing C-implicit NUL is excluded via the sizeof - 1.
         // bdev_thylacine.c ignores the path argument (slot determined by
         // virtio-mmio scan), so "/dev/virtio-blk" is purely informational.
+        // A-5b (#827): beyond the FS listen, the coordinator also (a) serves
+        // the /ctl control surface (--ctl-listen /srv/stratum-ctl) that login
+        // drives for the per-user DEK lifecycle (provision/install/evict-dek);
+        // (b) reaches corvus's verb protocol (--corvus-socket /srv/corvus/ctl,
+        // resolved by the pouch connect-walk: open=connect /srv/corvus then
+        // walk "ctl") to UNWRAP/WRAP per-user DEKs; (c) gates those verbs on
+        // PRINCIPAL_SYSTEM (--system-uid 4294967294 = the login coordinator's
+        // identity). It deliberately does NOT pass --bake-owner-uid: the
+        // RUNTIME coordinator must stamp per-user home files by the per-user
+        // proxy's SO_PEERCRED, not force them SYSTEM-owned (Stratum 9e4f9a7
+        // decoupled the /ctl SYSTEM gate from bake-owner). bake-owner stays
+        // host-bake-only.
         static const char sd_name[] = "stratumd";
         static const char sd_argv_data[] =
             "stratumd\0"
@@ -1828,17 +1840,24 @@ int main(void) {
             "--listen\0"
             "/srv/stratum-fs\0"
             "--keyfile\0"
-            "/system.key\0";
-        // 6 strings: "stratumd" (9) + "/dev/virtio-blk" (16) +
-        // "--listen" (9) + "/srv/stratum-fs" (16) + "--keyfile" (10) +
-        // "/system.key" (12) = 72 bytes.
+            "/system.key\0"
+            "--ctl-listen\0"
+            "/srv/stratum-ctl\0"
+            "--corvus-socket\0"
+            "/srv/corvus/ctl\0"
+            "--system-uid\0"
+            "4294967294\0";
+        // 12 strings: "stratumd"(9) + "/dev/virtio-blk"(16) + "--listen"(9) +
+        // "/srv/stratum-fs"(16) + "--keyfile"(10) + "/system.key"(12) +
+        // "--ctl-listen"(13) + "/srv/stratum-ctl"(17) + "--corvus-socket"(16) +
+        // "/srv/corvus/ctl"(16) + "--system-uid"(13) + "4294967294"(11) = 158.
         struct t_sys_spawn_args sd_req = {
             .name_va       = (unsigned long)sd_name,
             .argv_data_va  = (unsigned long)sd_argv_data,
             .fd_list_va    = 0,
             .name_len      = sizeof(sd_name) - 1,
             .argv_data_len = sizeof(sd_argv_data) - 1,
-            .argc          = 6,
+            .argc          = 12,
             .fd_count      = 0,
             .perm_flags    = (unsigned int)T_SPAWN_PERM_MAY_POST_SERVICE,
             ._pad_envp     = 0,

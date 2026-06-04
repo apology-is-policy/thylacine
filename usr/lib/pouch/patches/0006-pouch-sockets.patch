@@ -11,6 +11,16 @@ superseded SYS_post_service_byte / SYS_srv_connect mapping; the applied hunks
 are as-built. The per-Proc /srv client cap referenced below was also retired
 (stalk-3b).
 
+AMENDED A-5b (#827, IDENTITY-DESIGN.md section 9.9 design-item #1): connect()
+now also forwards an optional single walk component -- connect("/srv/<name>/
+<walk>") does the open=connect-then-walk two-step a native client performs
+(open the service node OREAD -> the dev9p root, relative-open <walk> ORDWR ->
+the sub-fid, drop the root). This lets a pouch client reach a SUB-FID of a
+9p-mode service: the coordinator stratumd dials corvus's verb protocol, which
+is served as Tread/Twrite payloads on corvus's `ctl` file (--corvus-socket
+/srv/corvus/ctl), to UNWRAP/WRAP per-user DEKs. A bare "/srv/<name>" connect
+(no walk) is unchanged. bind() is unchanged (you post a service, not a sub-fid).
+
 Phase 6 sub-chunk 12 (pouch-sockets). Maps musl's AF_UNIX SOCK_STREAM
 surface onto Thylacine's /srv registry using the new BYTE-MODE
 transport added to the kernel SrvConn at this sub-chunk. Twelve files,
@@ -647,7 +657,7 @@ close dance.
  }
 --- a/src/network/connect.c
 +++ b/src/network/connect.c
-@@ -1,7 +1,118 @@
+@@ -1,7 +1,178 @@
 +/* pouch -- connect(2) for AF_UNIX SOCK_STREAM (P6-pouch-sockets,
 + * sub-chunk 12). Extracts the service name from sun_path (same shape
 + * as bind), rebuilds "/srv/<name>", and opens it.
@@ -672,45 +682,78 @@ close dance.
  #include "syscall.h"
  
 +#define SRV_NAME_MAX 64
++#define SRV_WALK_MAX 64
 +
-+static const char *sun_path_to_name(const char *p, size_t maxlen,
-+                                    size_t *out_len)
++/* Split a sun_path into the /srv service name and an optional walk
++ * component. "corvus" or "/srv/corvus" -> name="corvus", walk=NULL;
++ * "/srv/corvus/ctl" -> name="corvus", walk="ctl" (walk_len=3). The walk
++ * reaches a SUB-FID of a 9p-mode service (corvus serves its verb protocol
++ * on the `ctl` file); connect() does the open=connect-then-walk two-step a
++ * native client performs. v1.0 supports exactly ONE walk component -- the
++ * only consumer; a multi-component walk is an additive future extension.
++ * Returns the name pointer (into p), or 0 on malformed (empty/over-length
++ * name, control byte, or empty/over-length/multi-component walk). */
++static const char *sun_path_split(const char *p, size_t maxlen,
++                                  size_t *out_name_len,
++                                  const char **out_walk, size_t *out_walk_len)
 +{
 +	static const char prefix[] = "/srv/";
 +	const size_t      plen     = sizeof(prefix) - 1;
 +
++	*out_walk     = 0;
++	*out_walk_len = 0;
++
 +	if (!p || maxlen == 0) return 0;
 +
-+	const char *name;
++	const char *s;
 +	size_t      avail;
 +
 +	if (maxlen >= plen && memcmp(p, prefix, plen) == 0) {
-+		name  = p + plen;
++		s     = p + plen;
 +		avail = maxlen - plen;
 +	} else if (p[0] == '/') {
 +		return 0;
 +	} else {
-+		name  = p;
++		s     = p;
 +		avail = maxlen;
 +	}
 +
++	/* Require an explicit NUL within avail (F11 discipline: never read
++	 * trailing stack bytes as the name). */
 +	size_t n = 0;
-+	while (n < avail && name[n] != '\0') n++;
-+
-+	if (n == 0)           return 0;
-+	if (n > SRV_NAME_MAX) return 0;
-+
-+	/* F11 close (P6-pouch-sockets audit): require explicit NUL
-+	 * termination within avail — same discipline as bind.c. */
++	while (n < avail && s[n] != '\0') n++;
++	if (n == 0)     return 0;
 +	if (n == avail) return 0;
 +
-+	for (size_t i = 0; i < n; i++) {
-+		unsigned char c = (unsigned char)name[i];
-+		if (c == '/') return 0;
++	/* Service name = up to the first '/'. */
++	size_t name_len = 0;
++	while (name_len < n && s[name_len] != '/') name_len++;
++	if (name_len == 0)           return 0;
++	if (name_len > SRV_NAME_MAX) return 0;
++	for (size_t i = 0; i < name_len; i++) {
++		unsigned char c = (unsigned char)s[i];
++		if (c < 0x20u || c == 0x7fu) return 0;
 +	}
 +
-+	*out_len = n;
-+	return name;
++	if (name_len == n) {
++		*out_name_len = name_len;
++		return s;          /* bare service, no walk */
++	}
++
++	/* Single walk component (no further '/'), no control bytes. */
++	const char *walk     = s + name_len + 1;
++	size_t      walk_len = n - name_len - 1;
++	if (walk_len == 0)           return 0;
++	if (walk_len > SRV_WALK_MAX) return 0;
++	for (size_t i = 0; i < walk_len; i++) {
++		unsigned char c = (unsigned char)walk[i];
++		if (c < 0x20u || c == 0x7fu || c == '/') return 0;
++	}
++
++	*out_name_len = name_len;
++	*out_walk     = walk;
++	*out_walk_len = walk_len;
++	return s;
 +}
 +
  int connect(int fd, const struct sockaddr *addr, socklen_t len)
@@ -742,28 +785,55 @@ close dance.
 +	size_t plen = (size_t)len - sizeof(sa_family_t);
 +	if (plen > sizeof(un->sun_path)) plen = sizeof(un->sun_path);
 +
-+	size_t      name_len;
-+	const char *name = sun_path_to_name(un->sun_path, plen, &name_len);
++	size_t      name_len, walk_len;
++	const char *walk;
++	const char *name = sun_path_split(un->sun_path, plen, &name_len,
++	                                  &walk, &walk_len);
 +	if (!name) {
 +		errno = EINVAL;
 +		return -1;
 +	}
 +
-+	/* stalk-3c open=connect: rebuild the absolute /srv path (the helper
-+	 * stripped the prefix) and open it ORDWR. SYS_open on a byte-mode
-+	 * service returns the client byte-conn Spoor; a missing service or
-+	 * any open failure surfaces as ECONNREFUSED. */
++	/* Rebuild the absolute "/srv/<name>" the helper stripped. */
 +	char path[5 + SRV_NAME_MAX];
 +	memcpy(path, "/srv/", 5);
 +	memcpy(path + 5, name, name_len);
-+	long r = __syscall(SYS_open, (long)-1, path, (size_t)(5 + name_len),
-+	                   (long)POUCH_SRV_ORDWR);
-+	if (r < 0) {
-+		errno = ECONNREFUSED;
-+		return -1;
++	size_t path_len = 5 + name_len;
++
++	long kfd;
++	if (!walk) {
++		/* stalk-3c open=connect: bare byte-mode service opened ORDWR
++		 * returns the client byte-conn Spoor (read s2c / write c2s);
++		 * a missing service or any open failure -> ECONNREFUSED. */
++		kfd = __syscall(SYS_open, (long)-1, path, path_len,
++		                (long)POUCH_SRV_ORDWR);
++		if (kfd < 0) {
++			errno = ECONNREFUSED;
++			return -1;
++		}
++	} else {
++		/* 9p-mode service sub-fid (corvus `ctl`, A-5b): open=connect the
++		 * service node (OREAD -> the dev9p root), relative-open the walk
++		 * component (ORDWR -> the sub-fid), then drop the redundant root.
++		 * The sub-fid's read/write map to Tread/Twrite (the verb stream).
++		 * Mirrors the native two-step (usr/login: open /srv/corvus, then
++		 * open "ctl" relative). Any step failing -> ECONNREFUSED. */
++		long root = __syscall(SYS_open, (long)-1, path, path_len,
++		                      (long)POUCH_SRV_OREAD);
++		if (root < 0) {
++			errno = ECONNREFUSED;
++			return -1;
++		}
++		kfd = __syscall(SYS_open, root, walk, walk_len,
++		                (long)POUCH_SRV_ORDWR);
++		__syscall(SYS_close, root);
++		if (kfd < 0) {
++			errno = ECONNREFUSED;
++			return -1;
++		}
 +	}
 +
-+	slot->kernel_fd = (int)r;
++	slot->kernel_fd = (int)kfd;
 +	slot->state     = POUCH_SOCK_CONNECTED;
 +	return 0;
  }
