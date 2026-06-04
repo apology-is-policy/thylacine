@@ -971,10 +971,25 @@ kill = BOTH the namespace `/proc/<pid>/ctl` surface AND a narrow elevation-only 
       (`test_corvus_provision`) -- the handoff's "host-bake" line referred to existing code, and
       design-finding F3 (host-bake of homes DROPPED; login-driven first-login provisioning is the sole path)
       is the authoritative reconciliation.
-    - **NEXT = #826b** (the runtime DEK install/evict consumer `stm_fs_install_dek`/`evict_dek` + the two
-      writable `/ctl` kinds install-dek/evict-dek + F7 owning-session authz + the read-path 5734
-      `STM_ELOCKED` conversion w/ evict), then **#826c** (first-login provisioning wiring; the stratumd
-      provision mechanism exists), then **#827** login wiring (the stalk-3a-audit F2 mortal-registry
+    - **#826b-1 the sync-layer DEK install/evict MECHANISM -- DONE (Stratum `304dbd1`)**: `stm_sync_install_dek(s,
+      ds, corvus_cfg)` (UNWRAP the existing keyslot with the login-forwarded token -> `sync_dek_insert`;
+      CORVUS-only; idempotent; RAM-only, NO commit; the socket is a PARAM since stm_sync doesn't retain the
+      mount cfg) + `stm_sync_evict_dek(s, ds)` (`sync_dek_remove` zeroes; idempotent; CORVUS-only). Test
+      `corvus_install_evict_dek_roundtrip`; test_fs + corvus GREEN. **DEFERRED (documented):** the read-path
+      `sync.c:5734` `STM_ELOCKED` conversion -- that line is WHERE the in-flight R171/R172
+      `compound_ops_concurrent` flake manifests (transient ECORRUPT retried by the R171 SH-fallback, which
+      gates on ECORRUPT); a blanket change breaks that retry + steps on the active audit. Not load-bearing
+      for v1.0 (the write path 5028 already ELOCKED). Revisit with the R171/R172 close.
+    - **F7 authz RESOLVED (user-voted 2026-06-04): FULL CONNECTION-BINDING** -- login holds one persistent
+      ctl conn per session; install records it; evict only from the same conn; a conn drop auto-evicts;
+      atop a SYSTEM-peer gate + the token. Affects #827 (login holds the persistent ctl conn).
+    - **NEXT = #826b-2** (the /ctl install-dek/evict-dek CONTROL SURFACE -- a LARGE security-critical slice
+      [the DEK-handoff gate #828 prosecutes hard]: the two writable per-dataset `/ctl` kinds + the fs-layer
+      `stm_fs_install_dek`/`evict_dek` wrappers + the connection-binding [per-dataset installed-by-conn +
+      the `stm_ctl_conn_destroy` auto-evict hook] + the SYSTEM-peer gate + a corvus-socket-reach + system-uid
+      plumbing on `stm_ctl`; the full grounded execution plan is turnkey in `project_next_session.md`), then
+      **#826c** (first-login provisioning wiring; `stratumd --provision-corvus-dataset` already exists+tested,
+      F3 = host-bake of homes DROPPED), then **#827** login wiring (the stalk-3a-audit F2 mortal-registry
       last-unref activates here) + **#828** audit (DEK handoff AEGIS/mallocng-adjacent, prosecute hard).
 
 ---
