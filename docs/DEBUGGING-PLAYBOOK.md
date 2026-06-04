@@ -420,6 +420,38 @@ they are):
   signature (a race or a missed-wakeup falling back to a deadline -- the I-9
   class). Either way "normal" is unproven until measured.
 
+### 6.11.1 The ownership-dismissal sibling ("not mine" / "pre-existing")
+
+The flake dismissal says *"this isn't a real bug."* Its sibling says *"this is a
+real bug, but not my problem."* Same convenience, different face -- and the
+`elusive-bug-hunt` skill now trips on BOTH families. The disownment vocabulary:
+**"not mine", "not my chunk", "pre-existing", "already broken", "unrelated",
+"out of scope", "someone else's subsystem", "in-flight elsewhere", "known bug",
+"known flake", "tracked already", "v1.x", "deferred."** The instant one lands on
+a *live, reproducing* defect, STOP -- it routes to CLAUDE.md "Whole-system
+stewardship" (the system is OURS), not to a close.
+
+**Attribution is not ownership.** Proving a defect is pre-existing/cross-tree is
+GOOD triage and IS the ground-truth method (6.2): stash your change, rebuild on
+the base, reproduce -- if it fails there too you've isolated it from your work.
+Do that. But the finding changes only WHO introduced it / WHERE it lives, never
+whose job it is (ours) or how urgent it is. The failure is using a correct
+"pre-existing" proof to disown, deprioritize, or close a chunk around the bug --
+worse than skipping the investigation, because it launders a dodge as diligence.
+The honest label is **"pre-existing + OWNED, queued as <task>"**, never
+"pre-existing, not mine" with a period. And the FIRST disposition is to enqueue
+it (a task + a memory note), the moment it's confirmed real, before deciding
+fix-now vs sequence-later -- prose in a commit body is not ownership.
+
+Worked failure (2026-06-04): during #826b-2 the full Stratum ctest surfaced a
+reproducing `STM_ECORRUPT` in `test_compound_ops_concurrent` (concurrent reflink).
+The instance correctly proved it pre-existing -- stashed the chunk, rebuilt on the
+`304dbd1` base, reproduced 3/3 -- then wrote "in-flight Stratum bug, not mine" and
+moved on. The proof was right; the conclusion was the breach. Correct move: same
+proof, then own it + enqueue it (task #842). (It was also mislabeled "transient
+flake" when it currently fails deterministically -- a 6.11 violation stacked on
+the ownership-dismissal one.)
+
 ---
 
 ## 6.12 The two 6.11 flakes, resolved (worked example, 2026-05-30)
