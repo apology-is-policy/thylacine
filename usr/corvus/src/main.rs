@@ -1871,6 +1871,17 @@ unsafe fn handle_user_create(handle: i64, payload: &[u8], response: &mut Vec<u8>
         return stage_response(response, STATUS_BAD_FORMAT, &[]);
     }
     let user_slice = &payload[1..1 + user_len];
+    // A-5b (#828 B-F1): the username becomes BOTH the per-user dataset name AND
+    // the login proxy's `--datasets-allowed ds:<user>` glob pattern -- the sole
+    // load-bearing attach gate for the encrypted home. Constrain it to a safe
+    // charset at this mint point (the authoritative identity chokepoint) so no
+    // derived pattern can ever carry a glob metacharacter ('*'/'**') or a path
+    // separator ('/') that would widen the gate beyond a single literal name.
+    for &b in user_slice {
+        if !(b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-') {
+            return stage_response(response, STATUS_BAD_FORMAT, &[]);
+        }
+    }
     let pass_len = (payload[1 + user_len] as usize) | ((payload[2 + user_len] as usize) << 8);
     if pass_len == 0 || pass_len > MAX_PASS_LEN {
         return stage_response(response, STATUS_BAD_FORMAT, &[]);

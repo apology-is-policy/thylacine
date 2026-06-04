@@ -1163,8 +1163,31 @@ kill = BOTH the namespace `/proc/<pid>/ctl` surface AND a narrow elevation-only 
       kernel/joey.c + usr/joey/joey.c + usr/lib/libthyla-rs/src/process.rs + usr/login/src/main.rs +
       docs/reference/103-login.md; Stratum src/9p/server.c + src/dataset/dataset.{c,h} + src/fs/fs.c +
       include/stratum/fs.h + src/cmd/stratumd/{serve.c,run.c,proxy_9p.c} + include/stratum/stratumd.h +
-      tests/test_9p.c. NEXT = #828 audit (matrix smp8 + UBSan run AT the audit close; the new ds: resolver
-      + grant-gate + serve-one + DEK handoff -- prosecute hard).
+      tests/test_9p.c. AUDIT: #828 (below).
+
+      **#828 A-5b formal audit -- CLOSE (DONE; Thylacine `*(pending)*`; Stratum `c643c4e`).** THREE
+      focused Opus prosecutors (A: DEK/crypto + the #829 corvus session-ownership; B: the ds: resolver
+      + dataset isolation + proxy; C: the per-bit grant gate + bind_home lifecycle) + an independent
+      self-audit. **0 P0 + 0 P1 + 4 P2 + 6 P3** -- NOT dirty. Core architecture VERIFIED SOUND across
+      4 passes (I-1 cross-user isolation, F7 conn-binding, soft-skip unreadability, the #829
+      session-ownership lift, the SYSTEM gate, provision idempotency, the per-bit grant gate). **4 P2
+      FIXED:** (1) F-bind-leak -- bind_home reaps the proxy on its 3 attach-succeeded failure paths
+      (proxy.wait; the no-lever attach-fail path tracked #855); (2) F-login-scrub -- login
+      t_explicit_bzero's the passphrase / token / payload buffers + t_set_dumpable(0) +
+      t_set_traceable(0) at startup (corvus's discipline); (3) F-dek-evict-gap -- provision records a
+      conn-bound DEK lease so conn-destroy auto-evicts on any login exit (crash-safe). The first-
+      attempted evict-after-provision was a SELF-CAUGHT over-fix: a #826c test asserts provision
+      leaves the DEK installed -- ground-truthed + reverted, did NOT change the test; (4) F-username
+      -- corvus charset-gates the username at the mint point so the derived `ds:<user>` proxy pattern
+      can't carry a glob / path-separator. **6 P3:** A-F4 ctl-loop unauth hardening
+      (stm_ctl_system_uid_configured); A-F3 peer_creds stale-comment; B-F2 ds:-TOCTOU comment; B-F3
+      ds:-empty EINVAL boundary test; tracked #855 (kproc orphan reaper) + #856 (wait-by-pid). Matrix:
+      default smp4 GREEN + UBSan(smp4) GREEN (0 runtime err) + smp8 GREEN on a clean re-run (run-1's 2
+      cons.* flakes were `sched_runnable_count()==0` quiescence assertions racing the live console_mgr
+      kthread -- kernel SOUND, behavioral assertions pass, A-4c test-fragility NOT #828, tracked #857)
+      + login E2E + cross-reboot + 0 EXTINCTION; Stratum ctest 8/8; spec gate N/A (no spec-modeled
+      mechanism changed; the 3 buggy-cfg gates trip correctly). Closed list:
+      `memory/audit_828_closed_list.md`. **A-5b arc COMPLETE bar A-5c (RECOVER + hostowner-c).**
 
 ---
 

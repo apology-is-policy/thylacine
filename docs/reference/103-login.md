@@ -255,3 +255,35 @@ un-unlocked dataset's root stat fails -> the attach is inert).
   shell is spawned by a non-console-attached login, which cannot pass the
   console-attached-gated perm. The SAK protects elevation regardless of the
   Ctrl-C owner; a job-control/owner story is a Utopia-lane seam.
+
+### A-5b #828 audit hardening
+
+The A-5b formal audit (#828; three Opus prosecutors + a self-audit; 0 P0 + 0 P1 +
+4 P2 + 6 P3) verified the core architecture SOUND and closed four P2s:
+
+- **Secret hygiene** (A-F1): login now `t_explicit_bzero`s the cleartext
+  passphrase, the corvus session token, and the AUTH/provision payload buffers
+  the moment they are consumed (mallocng recycles freed heap), and sets
+  `t_set_dumpable(0)` + `t_set_traceable(0)` at startup -- matching corvus's
+  discipline (CORVUS-DESIGN.md 4.1.1). `mlockall` is intentionally omitted (it
+  needs `CAP_LOCK_PAGES`, which login only holds to pass down, and v1.0 has no swap).
+- **Proxy reap on bind failure** (C-F1): the three `bind_home` failure paths that
+  occur AFTER a successful attach (`/home` mkdir, `/home/<user>` mkdir, `t_mount`)
+  now `proxy.wait()` after closing the attach -- the single-session proxy EOF-exits,
+  so the reap cannot hang, and it does not orphan to kproc as a permanent zombie.
+  The fourth path (attach never succeeded -- no EOF/kill lever) keeps the documented
+  drop and is tracked (kproc orphan reaper, task #855).
+- **DEK eviction is crash-safe** (A-F2): `provision-dek` installs the minted DEK
+  into the live map (init_dataset_root needs it) AND now records a conn-bound DEK
+  lease, so conn-destroy auto-evicts the DEK on ANY login exit (clean / install-fail
+  / crash). Without the lease, a provision not followed by a successful install-dek
+  left the cleartext DEK resident until coordinator unmount.
+- **Username charset** (B-F1): corvus `handle_user_create` rejects any byte outside
+  `[A-Za-z0-9._-]`, so the derived `ds:<user>` proxy `--datasets-allowed` glob
+  pattern (the load-bearing attach gate) can never carry a glob metacharacter or a
+  path separator.
+
+Tracked v1.x follow-ups: #855 (a kproc/init orphan reaper + a bounded single-session
+proxy accept, for the bind_home no-lever path) and #856 (a `wait`-by-pid surface, so
+a mid-session proxy death cannot mis-reap the shell). Closed list:
+`memory/audit_828_closed_list.md`.

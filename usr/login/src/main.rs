@@ -40,10 +40,11 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use libthyla_rs::process::{Child, Command, Stdio};
 use libthyla_rs::{
-    t_attach_9p_srv, t_close, t_mount, t_open, t_poll, t_putstr, t_read, t_readdir, t_torpor_wait,
-    t_unmount, t_walk_create, t_walk_open, t_write, TPollFd, T_CAP_CSPRNG_READ, T_CAP_LOCK_PAGES,
-    T_MREPL, T_OPATH, T_OREAD, T_ORDWR, T_OWRITE, T_POLLIN, T_SPAWN_PERM_MAY_POST_SERVICE,
-    T_WALK_CREATE_DMDIR, T_WALK_OPEN_FROM_ROOT,
+    t_attach_9p_srv, t_close, t_explicit_bzero, t_mount, t_open, t_poll, t_putstr, t_read,
+    t_readdir, t_set_dumpable, t_set_traceable, t_torpor_wait, t_unmount, t_walk_create,
+    t_walk_open, t_write, TPollFd, T_CAP_CSPRNG_READ, T_CAP_LOCK_PAGES, T_MREPL, T_OPATH, T_OREAD,
+    T_ORDWR, T_OWRITE, T_POLLIN, T_SPAWN_PERM_MAY_POST_SERVICE, T_WALK_CREATE_DMDIR,
+    T_WALK_OPEN_FROM_ROOT,
 };
 
 const VERB_AUTH: u8 = 1;
@@ -183,12 +184,18 @@ unsafe fn auth(fd: i64, user: &[u8], pass: &[u8]) -> Option<[u8; TOKEN_LEN]> {
     pl.push((pass.len() & 0xff) as u8);
     pl.push(((pass.len() >> 8) & 0xff) as u8);
     pl.extend_from_slice(pass);
-    let (st, resp) = exchange(fd, VERB_AUTH, &pl)?;
+    let r = exchange(fd, VERB_AUTH, &pl);
+    // pl held a copy of the cleartext passphrase -- scrub before it drops
+    // (mallocng recycles freed heap; match corvus's explicit_bzero discipline).
+    let _ = t_explicit_bzero(pl.as_mut_ptr(), pl.len());
+    let (st, mut resp) = r?;
     if st != STATUS_OK || resp.len() != TOKEN_LEN {
+        let _ = t_explicit_bzero(resp.as_mut_ptr(), resp.len());
         return None;
     }
     let mut token = [0u8; TOKEN_LEN];
     token.copy_from_slice(&resp);
+    let _ = t_explicit_bzero(resp.as_mut_ptr(), resp.len());
     Some(token)
 }
 
@@ -371,6 +378,8 @@ unsafe fn provision_dek(ctl_root: i64, owner_uid: u32, owner_gid: u32,
     if !ok {
         t_putstr("login: provision-dek write rejected (coordinator)\n");
     }
+    // pl carried the corvus session token; scrub before it drops (#828 A-F1).
+    let _ = t_explicit_bzero(pl.as_mut_ptr(), pl.len());
     let _ = t_close(fd);
     ok
 }
@@ -663,6 +672,10 @@ unsafe fn bind_home(user: &[u8], pid: u32, gid: u32, supp: &[u32]) -> Option<Hom
     if home_dir < 0 {
         t_putstr("login: /home mkdir failed\n");
         let _ = t_close(attach_root);
+        // Closing the attach EOFs the single-session proxy's upstream; reap it so
+        // it does not orphan to kproc as a permanent zombie (#828 C-F1). The proxy
+        // got its session here (attach_root >= 0), so wait() cannot hang.
+        let _ = proxy.wait();
         return None;
     }
     let ud = mkdir_or_open(home_dir, user);
@@ -670,6 +683,7 @@ unsafe fn bind_home(user: &[u8], pid: u32, gid: u32, supp: &[u32]) -> Option<Hom
     if ud < 0 {
         t_putstr("login: /home/<user> mkdir failed\n");
         let _ = t_close(attach_root);
+        let _ = proxy.wait(); // reap the attached single-session proxy (#828 C-F1)
         return None;
     }
     let _ = t_close(ud);
@@ -680,6 +694,7 @@ unsafe fn bind_home(user: &[u8], pid: u32, gid: u32, supp: &[u32]) -> Option<Hom
     if t_mount(mount_path.as_ptr(), mount_path.len(), attach_root, T_MREPL) != 0 {
         t_putstr("login: /home/<user> mount failed\n");
         let _ = t_close(attach_root);
+        let _ = proxy.wait(); // reap the attached single-session proxy (#828 C-F1)
         return None;
     }
 
@@ -715,6 +730,15 @@ unsafe fn unbind_home(mut sess: HomeSession) {
 
 #[no_mangle]
 pub extern "C" fn rs_main() -> i64 {
+    // Secret hygiene (#828 A-F1): login handles the cleartext passphrase + the
+    // corvus session token. Forbid core dumps + debug-Spoor attach for this Proc
+    // (one-way; matches corvus's startup discipline) so neither secret can leak
+    // via a future dump/trace surface. mlockall is intentionally omitted -- it
+    // needs CAP_LOCK_PAGES (login holds it only to pass down) and v1.0 has no swap.
+    unsafe {
+        let _ = t_set_dumpable(0);
+        let _ = t_set_traceable(0);
+    }
     let mut user: Vec<u8> = Vec::new();
     let mut pass: Vec<u8> = Vec::new();
 
@@ -735,7 +759,12 @@ pub extern "C" fn rs_main() -> i64 {
         return 1;
     }
 
-    let token = match unsafe { auth(conn, &user, &pass) } {
+    let auth_res = unsafe { auth(conn, &user, &pass) };
+    // The passphrase is consumed by auth; scrub login's copy on every path (A-F1).
+    unsafe {
+        let _ = t_explicit_bzero(pass.as_mut_ptr(), pass.len());
+    }
+    let mut token = match auth_res {
         Some(t) => t,
         None => {
             write_out(b"login incorrect\n");
@@ -881,5 +910,9 @@ pub extern "C" fn rs_main() -> i64 {
     let _ = unsafe { t_close(ctl) };
     unsafe { session_close(conn, &token) };
     let _ = unsafe { t_close(conn) };
+    // Scrub the session token (#828 A-F1); it is dead once the session is closed.
+    unsafe {
+        let _ = t_explicit_bzero(token.as_mut_ptr(), token.len());
+    }
     0
 }
