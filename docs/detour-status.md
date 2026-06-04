@@ -1059,7 +1059,7 @@ kill = BOTH the namespace `/proc/<pid>/ctl` surface AND a narrow elevation-only 
       EXTINCTION, login E2E intact; boot log shows **`stratumd: /ctl/ on /srv/stratum-ctl`** (the coordinator
       now serves the control surface). The corvus reach is WIRED + COMPILED; first EXERCISED end-to-end by
       #827a-login. Stratum ctest ctl/corvus/stratumd/proxy 11/11.
-    - **#827a-login DONE** (Thylacine `<pending>` + Stratum `8b62603`). login drives the DEK lifecycle over a
+    - **#827a-login DONE** (Thylacine `44841cb` + Stratum `8b62603`). login drives the DEK lifecycle over a
       persistent `/ctl` attach held for the session: AUTH -> resolve -> attach `/srv/stratum-ctl`
       (`t_open` open=connect -> byte conn; new `libthyla_rs::t_attach_9p_srv` wrapper [SYS_ATTACH_9P_SRV=52]
       wraps it -> dev9p root) -> provision-dek (one Twrite of `{owner_uid LE, owner_gid LE, name_len, name,
