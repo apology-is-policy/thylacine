@@ -104,6 +104,61 @@ After all boot-test asserts:
    wait the session, loop. In the harness, login blocks reading `/dev/cons`
    (no input) -- harmless, the harness killed QEMU at the banner.
 
+## A-5b: the per-user encrypted-home DEK lifecycle (#827a-login)
+
+After identity resolution and before spawning the shell, login drives the boot
+coordinator's `/ctl` over a 9P attach held for the whole session:
+
+1. **attach** -- `t_open("/srv/stratum-ctl", T_ORDWR)` (open=connect -> a byte
+   conn; the coordinator posts `/ctl` byte-mode) then `t_attach_9p_srv(conn,
+   NULL, 0, 0)` -> the dev9p `/ctl` root. The byte-conn fd is closed after the
+   attach commits (`kernel_attached` keeps the rings alive). The new
+   `libthyla_rs::t_attach_9p_srv` wrapper (SYS_ATTACH_9P_SRV = 52) is the native
+   bridge; bounded-retry covers the accept race.
+2. **provision-dek** (idempotent ensure-home) -- a single Twrite of
+   `{owner_uid u32 LE, owner_gid u32 LE, name_len u8, name, path_len u8,
+   corvus_path, token[33]}` to `datasets/provision-dek`. `name` = the username
+   (single component); `corvus_path` = `users/<user>`; `owner` = the user's
+   `principal_id`/`primary_gid` (the home root is born user-owned 0700, F1
+   isolation); `token` = the corvus AUTH token. The coordinator mints a DEK +
+   WRAPs it via corvus + commits; `STM_EEXIST -> OK` for a returning user.
+3. **name->id bridge** (provision-dek is write-only) -- `t_readdir datasets`,
+   and for each numeric `<id>` read `datasets/<id>/properties`, match the
+   `name: <user>` line -> the home dataset id.
+4. **install-dek** -- a 33-byte-token Twrite to `datasets/<id>/install-dek`
+   UNWRAPs the DEK into the live map. The lease is CONN-BOUND, so login holds
+   the `/ctl` attach for the session.
+5. **logout** -- `evict-dek` (zeroes the session DEK), drop the `/ctl` attach,
+   then the corvus `SESSION_CLOSE`.
+
+login NEVER holds the raw DEK -- it forwards only the opaque corvus token; the
+coordinator UNWRAPs/WRAPs over its OWN corvus connection (the #829 bearer-token
+session-ownership lift). The DEK lifecycle is **fatal** (a login that cannot
+provision/unlock the encrypted home is a failed login -- pam_mount parity), so
+the `do_login_e2e` exit-code gate covers the whole path.
+
+**Three cross-layer reconciliations this first end-to-end exercise required**
+(folds into the #828 audit):
+
+- **kernel rwx on `/ctl`** -- A-3 flipped `dev9p.perm_enforced=true`, so login's
+  write to the 0200 DEK nodes hits the kernel owner-first check. The coordinator
+  now reports those three SYSTEM-gated nodes (`provision/install/evict-dek`) as
+  owned by `system_uid` in `getattr_at` (Stratum `src/ctl/synfs.c`), so the
+  kernel check is coherent with the server's own SYSTEM gate -- login runs as
+  PRINCIPAL_SYSTEM and is the owner. (The A-3 "wire owner == authorized
+  principal" reconciliation, applied to the control surface.)
+- **`send`/`recv` pouch shim** -- the Stratum corvus client's `write_all` uses
+  `send(..., MSG_NOSIGNAL)`; pouch shimmed `read`/`write` but not `send`/`recv`.
+  `0006-pouch-sockets.patch` adds `send`/`recv` dispatch shims (tagged socket fd
+  -> the slot's kernel write/read; MSG_NOSIGNAL is a no-op since a closed
+  srvconn write returns an error, not a signal; other flags EOPNOTSUPP).
+- **`dial_corvus` fcntl tolerance** -- the corvus client set O_NONBLOCK via
+  `fcntl(F_GETFL/F_SETFL)` for the bounded-connect poll; Thylacine has no fcntl
+  (`__NR_fcntl` is the 0xFFFF ENOSYS sentinel). `dial_corvus` now degrades to a
+  blocking connect when the non-blocking setup is unavailable (the pouch v1.0
+  socket model is blocking by design; the `/srv` connect-walk is a fast local
+  open).
+
 ## Invariants
 
 - **I-27** (sharpened): during a user session corvus is the SOLE
@@ -124,8 +179,13 @@ After all boot-test asserts:
   different Proc's owner pointer), `cons.console_open` (open -> KOBJ_SPOOR R|W
   handle -> read drains the RX ring, end-to-end). 686/686.
 - Boot-path E2E (`usr/joey/joey.c::do_login_e2e`): michael authed -> uid=1000
-  gid=1000 -> ut spawned stamped + reaped + session closed; gated on login's exit
-  code, runs every boot before the banner.
+  gid=1000 -> A-5b DEK lifecycle (`login: dek michael ds=2 home provisioned +
+  unlocked`) -> ut spawned stamped + reaped + session closed; gated on login's
+  exit code (DEK-fatal), runs every boot before the banner.
+- Stratum host ctest `test_corvus_provision::dek_nodes_report_system_owner`:
+  the three SYSTEM-gated DEK nodes report uid/gid == system_uid via getattr;
+  world-readable `properties` stays uid/gid 0; unset system_uid -> the invalid
+  sentinel (fail-closed). 11/11 ctl/corvus/stratumd/proxy.
 - The live `/dev/cons` interactive read is NOT CI-tested (the harness cannot
   inject UART RX -- the A-4c precedent); it is exercised by the seeded E2E's
   mechanism + the `Thylacine login:` prompt appearing in the boot log + an
@@ -133,8 +193,15 @@ After all boot-test asserts:
 
 ## Status / caveats
 
-- A-5a is the login CORE. Per-user encrypted `/home` (the user's `--role client`
-  stratumd + the DEK-via-corvus handoff) is A-5b; RECOVER + hostowner-c is A-5c.
+- A-5a is the login CORE. The DEK-via-corvus handoff (provision/install/evict
+  over the coordinator's `/ctl`) is **A-5b #827a-login (DONE)** -- see the DEK
+  lifecycle section above. The per-user `--role client` proxy + the `/home`
+  bind is **#827b (NEXT)**; the A-5b formal audit is **#828**. RECOVER +
+  hostowner-c is A-5c.
+- The DEK lifecycle proves the path but does NOT yet bind `/home` (the home
+  dataset is provisioned + its DEK installed, but #827b mounts it). At
+  #827a-login the home is reachable-and-keyed; the bind makes it the user's
+  navigable `/home/<user>`.
 - v1.0 single-console-serial: login writes prompts via fd 1 and the marker via
   `t_putstr` (the UART == the console). Multi-console / multi-session is a v1.x
   lift (prompts would route to fd 1 only; concurrent corvus sessions).

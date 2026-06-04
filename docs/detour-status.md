@@ -1059,32 +1059,40 @@ kill = BOTH the namespace `/proc/<pid>/ctl` surface AND a narrow elevation-only 
       EXTINCTION, login E2E intact; boot log shows **`stratumd: /ctl/ on /srv/stratum-ctl`** (the coordinator
       now serves the control surface). The corvus reach is WIRED + COMPILED; first EXERCISED end-to-end by
       #827a-login. Stratum ctest ctl/corvus/stratumd/proxy 11/11.
-    - **NEXT (impl) = #827a-login** -- login drives the DEK lifecycle over a persistent `/ctl` conn.
-      GROUNDED design (so next session does not re-derive): (a) login attaches the coordinator's /ctl --
-      `t_open("/srv/stratum-ctl", T_ORDWR)` (open=connect -> byte conn) then `t_attach_9p_srv(fd,"",0,0)`
-      (wrap -> dev9p root); **NOTE: `t_attach_9p_srv` is in libt but NOT yet wrapped in libthyla-rs -- add a
-      thin wrapper (or use the raw syscall) since login is native libthyla-rs.** (b) provision-dek: relative
-      walk `datasets/provision-dek` + ONE write of `{owner_uid u32 LE, owner_gid u32 LE, name_len u8, name,
-      path_len u8, corvus_path, token[33]}` (exact-length single delivery; owner_uid/gid = the user's
-      pid/gid from resolve_name; name + corvus_path = the home dataset path e.g. "users/<user>"; token = the
-      AUTH token). (c) **name->id bridge** (provision-dek is write-only, returns no id): `t_readdir`
-      `datasets`, for each `<id>` read `datasets/<id>/properties`, parse the `name: <dataset-name>` line,
-      match the home name -> `<id>`. (d) install-dek: walk `datasets/<id>/install-dek`, write the 33-byte
-      token (the lease is CONN-BOUND -> login MUST hold the /ctl conn open for the whole session). (e)
-      logout: walk `datasets/<id>/evict-dek` + write a non-empty trigger byte, then corvus SESSION_CLOSE
-      (already in login), then close the /ctl conn. Order in login: AUTH -> resolve -> provision-dek ->
-      name->id -> install-dek -> spawn shell -> wait -> evict-dek + SESSION_CLOSE. **#827a-login's E2E proves
-      the corvus reach + the whole DEK lifecycle (the boot log should show provision WRAP + install UNWRAP
-      succeed).** (Stratum coordinator already serves it all; this is pure login-side Rust + the libthyla-rs
-      t_attach_9p_srv wrapper.) Then **#827b** -- the per-user `--role client` proxy (spawned AS the user via
-      `.identity()` so its SO_PEERCRED stamps per-user file ownership + perm MAY_POST_SERVICE; `--listen
-      /srv/home-<user> --coordinator-socket /srv/stratum-fs --datasets-allowed users/<user>`) + attach
-      `/srv/home-<user>` (t_attach_9p_srv aname="users/<user>") + bind `/home/<user>` (t_mount) into login's
-      territory (the shell inherits it) + logout teardown (unmount + reap the proxy). **The stalk-3a-audit F2
-      mortal-registry last-unref activates at #827b** (login mints the first per-session SrvRegistry). Then
-      **#828** audit (the DEK handoff + the provision mint+WRAP path + the pouch connect-walk
-      boundary-line, AEGIS/mallocng-adjacent -- prosecute hard). OWED (#845/#841): the deterministic
-      multi-in-flight loopback-fake-server harness lands with #827's multi-in-flight workload.
+    - **#827a-login DONE** (Thylacine `<pending>` + Stratum `8b62603`). login drives the DEK lifecycle over a
+      persistent `/ctl` attach held for the session: AUTH -> resolve -> attach `/srv/stratum-ctl`
+      (`t_open` open=connect -> byte conn; new `libthyla_rs::t_attach_9p_srv` wrapper [SYS_ATTACH_9P_SRV=52]
+      wraps it -> dev9p root) -> provision-dek (one Twrite of `{owner_uid LE, owner_gid LE, name_len, name,
+      path_len, corvus_path, token[33]}`; name=user, corvus_path="users/<user>", owner=user pid/gid) -> name->id
+      bridge (`t_readdir datasets` + parse each `<id>/properties` `name:` line) -> install-dek (33-byte token;
+      conn-bound lease) -> spawn ut -> wait -> evict-dek + close /ctl + SESSION_CLOSE. **DEK-FATAL** (a home that
+      can't provision/unlock is a failed login; the joey do_login_e2e exit gate covers the whole path). login
+      NEVER holds the raw DEK -- forwards only the corvus token; the coordinator UNWRAPs/WRAPs over its own
+      corvus conn (#829 bearer lift). **The first end-to-end exercise surfaced + fixed 3 cross-layer gaps**
+      (all fold into the #828 audit): (1) **kernel rwx on /ctl** -- A-3 enforces dev9p rwx, so the coordinator
+      now reports the 0200 SYSTEM-gated DEK nodes (provision/install/evict-dek) owned by `system_uid` in
+      `getattr_at`, coherent with its own ctl_caller_is_system gate (Stratum synfs.c; the A-3 wire-owner
+      reconciliation applied to /ctl); (2) **send/recv pouch shim** -- the corvus client's write_all uses
+      `send(MSG_NOSIGNAL)`, which pouch did not shim (only read/write) -> ENOSYS; `0006-pouch-sockets.patch`
+      adds send/recv dispatch shims (tagged socket fd -> kernel write/read; MSG_NOSIGNAL no-op; other flags
+      EOPNOTSUPP); (3) **dial_corvus fcntl tolerance** -- Thylacine has no fcntl (ENOSYS), so the bounded-connect
+      O_NONBLOCK setup bailed -> EBACKEND; dial_corvus now degrades to a blocking connect when fcntl is
+      unavailable (Stratum corvus_client.c; host unchanged). Verified: boot OK, **707/707** + 0 EXTINCTION,
+      boot log `login: dek michael ds=2 home provisioned + unlocked`; Stratum ctest 11/11 (incl. new
+      `dek_nodes_report_system_owner`). Ref: `docs/reference/103-login.md` (DEK lifecycle section). **DEBUG
+      TRAP found + recorded**: editing a comment INSIDE a `--- a/file` new-file patch hunk (the `@@ -0,0 +1,N @@`
+      _pouch_socket.h block) without bumping `N` silently TRUNCATES the generated file -> the WHOLE sysroot
+      build fails -> stale binaries boot (masking the fix). Always update the `@@` count when editing a
+      new-file patch hunk.
+    - **NEXT (impl) = #827b** -- the per-user `--role client` proxy (spawned AS the user via `.identity()` so
+      its SO_PEERCRED stamps per-user file ownership + perm MAY_POST_SERVICE; `--listen /srv/home-<user>
+      --coordinator-socket /srv/stratum-fs --datasets-allowed users/<user>`) + attach `/srv/home-<user>`
+      (`t_attach_9p_srv` aname="users/<user>") + bind `/home/<user>` (t_mount) into login's territory (the
+      shell inherits it) + logout teardown (unmount + reap the proxy). **The stalk-3a-audit F2 mortal-registry
+      last-unref activates at #827b** (login mints the first per-session SrvRegistry). Then **#828** audit (the
+      DEK handoff + the provision mint+WRAP path + the send/recv + dial_corvus + getattr boundary-lines,
+      AEGIS/mallocng-adjacent -- prosecute hard). OWED (#845/#841): the deterministic multi-in-flight
+      loopback-fake-server harness lands with #827's multi-in-flight workload.
 
 ---
 

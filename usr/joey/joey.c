@@ -1347,13 +1347,18 @@ static int do_corvus_bringup(long storage_dup_fd) {
 // do_login_e2e -- prove the /sbin/login orchestration NON-interactively on the
 // boot path. The harness passes at the banner + kills QEMU, so the live
 // getty-loop never runs in CI; this seeded run is the CI coverage of
-// read-creds -> corvus AUTH -> identity resolve -> spawn ut STAMPED -> reap ->
-// SESSION_CLOSE. fd 0 = a pipe seeded with michael's creds; fd 1/2 = the same
-// read-end (login emits its marker via SYS_PUTS -> the boot log, so no capture
-// pipe is needed and the "ut floods a pipe joey isn't draining" deadlock cannot
-// arise). Gate: login exits 0 only if the WHOLE cycle succeeded; the
-// "login: michael uid=1000 gid=1000" marker in the boot log confirms the
-// resolved identity. Returns 0 / -1.
+// read-creds -> corvus AUTH -> identity resolve -> A-5b DEK lifecycle
+// (provision-dek + name->id + install-dek over the coordinator's /ctl) ->
+// spawn ut STAMPED -> reap -> evict-dek + SESSION_CLOSE. fd 0 = a pipe seeded
+// with michael's creds; fd 1/2 = the same read-end (login emits its markers
+// via SYS_PUTS -> the boot log, so no capture pipe is needed and the "ut floods
+// a pipe joey isn't draining" deadlock cannot arise). Gate: login exits 0 only
+// if the WHOLE cycle succeeded -- INCLUDING the DEK lifecycle, which login
+// treats as fatal -- so this gate now also covers the corvus reach + the
+// per-user encrypted-home provisioning + UNWRAP. The boot-log markers
+// "login: michael uid=1000 gid=1000" and "login: dek michael ds=N home
+// provisioned + unlocked" confirm the resolved identity + the DEK path.
+// Returns 0 / -1.
 static int do_login_e2e(void) {
     const char pass_michael[] = "correct-horse-battery-staple-v1";
 
