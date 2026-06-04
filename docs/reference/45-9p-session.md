@@ -254,6 +254,7 @@ The tests use synthesized Rmsg buffers (helper `synth_*` functions in the test f
 | IO family Send/Receive (Tlopen / Tlcreate / Tread / Twrite) | **Landed (P5-wire-io)** |
 | Metadata family Send/Receive (Tgetattr / Tsetattr / Treaddir / Tstatfs / Tfsync) | **Landed (P5-wire-meta)** |
 | Mutation family Send/Receive (Tsymlink / Tmknod / Trename / Treadlink / Tlink / Tmkdir / Trenameat / Tunlinkat) | **Landed (P5-wire-mutation)** |
+| Tflush send + Rflush dispatch + `awaiting_flush` abandon-reservation (`p9_session_send_flush`) | **Landed (#845)** |
 | Mutation family | Phase 5+ (with P5-wire-mutation) |
 | Lock family + Xattr family | Phase 5+ (with P5-wire-lock / -xattr) |
 | Stratum extensions (Tsync / Treflink / Tbind / Tunbind / Tfallocate / Tfadvise) | Phase 5+ (with P5-wire-stratum-ext) |
@@ -266,6 +267,7 @@ The tests use synthesized Rmsg buffers (helper `synth_*` functions in the test f
 3. **Tclunk's Send-time unbind is intentional**. The fid is removed from `bound_fids` BEFORE the Rclunk arrives. Subsequent sends targeting that fid fail at the precondition check. Rclunk's dispatch is a no-op on `bound_fids`. Rlerror on Tclunk: fid stays unbound (the client already treated it as gone).
 4. **Partial-walk binding** (where `nwqid < nwname` in Rwalk): at P5-session, we bind `new_fid` unconditionally on any Rwalk success. The nuanced 9P2000.L semantic — server binds at the LAST walked qid; if no qids returned, new_fid stays unbound — lands in a future P5-session-walk-partial chunk. At v1.0 with all current tests using `nwname=0` (clone), this is benign.
 5. **Concurrency**: the session struct is NOT thread-safe internally. Per-Proc serialization (via Proc lock, or per-session mutex if needed) is the kernel's responsibility. The libstratum-9p reference at `stratum/v2/docs/reference/23-9p_client.md` §"Concurrency model" frames this as "One client = one connection = one fid namespace."
+6. **`awaiting_flush` is the I-10 reuse-race guard (#845)**. `p9_session_send_flush` reserves the abandoned `oldtag` (`outstanding[oldtag].awaiting_flush = true`); from then the tag is freed ONLY by its `Rflush` (the `P9_TFLUSH` dispatch branch), NEVER by a late original reply — `dispatch_rmsg` *consumes-without-clearing* any reply on an `awaiting_flush` tag (returns 0, no `clear_outstanding`, no fid mutation). This is mandatory: 9P forbids reusing `oldtag` until the `Rflush`, so freeing it on the late reply would let the tag be reused while a stray reply is still possible (mis-attribution). A maintainer must NOT add a path that clears an `awaiting_flush` tag outside the `Rflush` branch. The one residual (a non-conformant server's duplicate `Rflush` after the flush tag was freed-and-reused) is the generic "≤1 reply per tag" wire assumption — v1.0-unreachable; see `memory/audit_845_closed_list.md` F1.
 
 ## Naming rationale
 

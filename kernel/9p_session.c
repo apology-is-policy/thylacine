@@ -837,7 +837,12 @@ int p9_session_dispatch_rmsg(struct p9_session *s,
     // (dispatched via its own tag, below) is the SOLE authority that frees an
     // awaiting_flush tag. No fid mutation either: the abandoned caller is gone.
     if (op->awaiting_flush) {
-        out->kind = op->kind;       // diagnostics only; this reply is ownerless
+        // Absorb (do not complete): the tag stays reserved. The ownerless
+        // demux caller is the only one that can reach an awaiting_flush tag
+        // (the owner unwound + NULLed inflight[tag] before the flush reserved
+        // it), and it discards *out -- so leave it zeroed (zero_result ran). A
+        // 0 return here means "ownerless late reply absorbed", NOT "op
+        // completed"; no fid mutation, no clear_outstanding.
         return 0;
     }
 
@@ -891,9 +896,22 @@ int p9_session_dispatch_rmsg(struct p9_session *s,
         // Send-time already unbound; no further action.
     } else if (op->kind == P9_TFLUSH) {
         // Rflush (#845): the server guarantees it will not answer the
-        // abandoned oldtag. This Rflush is therefore the SOLE authority that
-        // frees oldtag (the I-10 reuse-race guard). Clear the reserved
-        // original here; the common tail below clears this flush's own tag.
+        // abandoned oldtag, so this Rflush is the SOLE authority that frees it
+        // (the I-10 reuse-race guard). Clear the reserved original; the common
+        // tail clears this flush's own tag. The guard is maximal: `awaiting_flush`
+        // is set only on a reserved NORMAL op (a flush entry never carries it),
+        // so this can never clear an unrelated in-flight flush, and the bounds +
+        // active checks reject a malformed flush_oldtag. The one residual is a
+        // NON-CONFORMANT server that sends a DUPLICATE Rflush after this flush
+        // tag was freed + reused for a new flush: the duplicate is
+        // indistinguishable on the wire (9P carries no per-tag generation) and
+        // would free the new flush's reserved oldtag. That is the generic
+        // "server sends exactly one reply per tag" assumption the whole client
+        // rests on -- a duplicate same-type reply mis-attributes for ANY op kind
+        // -- so it adds no class of hazard beyond what already exists; it does
+        // not arise with the v1.0 trusted servers (stratumd / kernel dev9p), and
+        // closing it for an untrusted/remote 9P server needs wire-level tag
+        // generations (a v1.x ABI lift, the same seam as the n_uname trust-stamp).
         u16 tag_check;
         rc = p9_parse_rflush(rmsg, len, &tag_check);
         if (rc < 0) return -1;

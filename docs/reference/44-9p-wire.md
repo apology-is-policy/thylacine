@@ -301,6 +301,7 @@ Every public function returns negative on:
 | Tattach / Rattach | **Landed (P5-wire)** |
 | Twalk / Rwalk | **Landed (P5-wire)** |
 | Tclunk / Rclunk | **Landed (P5-wire)** |
+| Tflush (build) / Rflush (parse) | **Landed (#845)** -- `p9_build_tflush` (body `[oldtag:u16]`) + `p9_parse_rflush` (header-only) |
 | Rlerror parse | **Landed (P5-wire)** |
 | Tlopen / Rlopen | **Landed (P5-wire-io)** |
 | Tread / Rread + Twrite / Rwrite | **Landed (P5-wire-io)** |

@@ -1273,10 +1273,23 @@ void test_9p_session_flush_reclaims_both(void) {
     TEST_EXPECT_EQ(rc, 0, "dispatch Rflush ok");
     TEST_EXPECT_EQ((u64)p9_session_inflight(&s), (u64)0, "both tags reclaimed by Rflush");
 
-    // The reclaimed tag space is reusable: a fresh op allocates again.
-    len = p9_session_send_getattr(&s, g_buf, sizeof(g_buf), 0, P9_GETATTR_BASIC);
-    TEST_ASSERT(len > 0, "post-flush op reuses the freed tag");
+    // The reclaimed tag space is reusable AND a fresh op completes end-to-end
+    // on it (F2): walk root -> fid 7 on the reused tag, dispatch its Rwalk,
+    // assert the op completes (inflight back to 0) and the fid binds. A Tflush
+    // that failed to FULLY clear the reserved tag would leave it un-reusable or
+    // mis-complete here -- the genuine reclaim-then-reuse proof.
+    len = p9_session_send_walk(&s, g_buf, sizeof(g_buf), /*src=*/0, /*new=*/7,
+                                /*nwname=*/0, NULL, NULL);
+    TEST_ASSERT(len > 0, "post-flush walk reuses the freed tag");
+    u32 sz3; u8 ty3; u16 wt;
+    p9_peek_header(g_buf, (size_t)len, &sz3, &ty3, &wt);
     TEST_EXPECT_EQ((u64)p9_session_inflight(&s), (u64)1, "1 inflight after reuse");
+    int wlen = synth_rwalk_single(g_buf, sizeof(g_buf), wt, P9_QTDIR, 1, 7);
+    TEST_ASSERT(wlen > 0, "synth Rwalk for reused tag");
+    rc = p9_session_dispatch_rmsg(&s, g_buf, (size_t)wlen, &r);
+    TEST_EXPECT_EQ(rc, 0, "reused-tag op completes end-to-end");
+    TEST_EXPECT_EQ((u64)p9_session_inflight(&s), (u64)0, "reused op reclaimed cleanly");
+    TEST_ASSERT(p9_session_fid_bound(&s, 7), "reused-tag walk bound its fid");
 
     p9_session_destroy(&s);
 }

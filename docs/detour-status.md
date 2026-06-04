@@ -915,7 +915,7 @@ kill = BOTH the namespace `/proc/<pid>/ctl` surface AND a narrow elevation-only 
       `kernel_attached` on the SERVER endpoint, suppressing the ring EOF that wakes the no-timeout client
       (corvus's post-BadFormat Q11 teardown -> joey's Tclunk hung forever); fixed by skipping teardown ONLY
       for the kernel-attached CLIENT endpoint. A focused 9P-client+devsrv audit closed 1P1 (reply-buffer UAF,
-      fixed) + 1P2 (DIED-leaked slot, deferred-documented) + 3P3. **Verified: default 704/704 + UBSan 3/3 +
+      fixed) + 1P2 (DIED-leaked slot, deferred-documented -- later CLOSED by #845 Tflush-on-abandon, ARCH §21.10) + 3P3. **Verified: default 704/704 + UBSan 3/3 +
       smp8 2/2 + `capbare` UBSan boot-loop under `forkstorm` host-load 12/12 + `specs/9p_client.tla` gate.**
       The original-flake repro is now GREEN. See `memory/bug_9p_client_recv_deadline_desync.md` + ARCH §21.10.
     - **3c-d DONE -- the formal 3c audit + the docs sweep + the close.** An Opus prosecutor + an
