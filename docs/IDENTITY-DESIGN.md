@@ -2139,6 +2139,42 @@ Stratum-side sub-chunk below.
   coordinator-blind direction, the SAME family as the v1.x NOVEL seam below; most new surface,
   deferred to v1.x). **Audit-bearing** (the privilege-gate change -- prosecute the per-bit separation
   + that the one-hop delegation cannot widen into rfork-propagation; CLAUDE.md + ARCH §25.4 row).
+- **A-5b #827b-beta -- the per-user child-dataset attach (`ds:<name>` aname) + the init
+  `MAY_POST_SERVICE` grant-root (RESOLVED 2026-06-04, user-voted).** The *Thylacine-side* line
+  ("binds `/home/<user>` ... `SYS_ATTACH_9P_SRV`") left the attach **aname** unspecified, and the
+  #827b-beta impl surfaced that it is load-bearing: a per-user home is a **separate Stratum child
+  dataset** (its own DEK -- per-user encryption REQUIRES a separate dataset, since Stratum encrypts
+  per-dataset), but Stratum's 9P `Tattach` bound a connection ONLY to the coordinator's fixed
+  `root_dataset` (the aname kinds were `DEFAULT` / `ABS_PATH "/..."` / `SPEC "spec:..."`; none select a
+  *different* dataset). `t_attach_9p_srv(aname="users/michael")` -> `Rlerror(EINVAL)`. Homework: Plan 9
+  treats **aname as the tree-to-attach** (a file server serving many trees picks one by aname); ZFS
+  auto-mounts a child dataset at its path in the parent (a graft); Stratum had neither. **Decision
+  (user-voted, of 3 options): add a Stratum 9P aname form `ds:<name>`** that binds the connection's
+  root dataset to the named child dataset (resolved by name under the coordinator's root). Plan-9
+  idiomatic, ADDITIVE (a new aname kind; no wire break -- old anames unchanged). Rejected: the ZFS-style
+  graft-into-`/home` (larger Stratum primitive: a dirent->child-dataset-root link + a cross-dataset
+  Twalk; deferred to v1.x if a unified browseable `/home` is wanted) and deferring per-user encryption
+  (home as a plain subdir of the root dataset -- abandons A-5b's core at-rest-per-user property; rejected).
+  **Access control (3 orthogonal gates, defense-in-depth):** (a) the per-user proxy's
+  `--datasets-allowed ds:<user>` admits ONLY the user's own aname (set by the trusted, console-rooted
+  login chain -- the I-1 user-vs-user boundary; a foreign `ds:<other>` -> `Rlerror(EACCES)` at the proxy
+  before the coordinator sees it); (b) the child dataset root is born `0700` user-owned, so the kernel's
+  A-3 dev9p rwx denies a wrong-principal connection AFTER attach; (c) the dataset's DEK must be installed
+  (a locked / un-provisioned dataset's root-inode read fails) -- so an attach without a live unlock is
+  inert. login attaches `ds:<user>` (the dataset NAME = the username, as minted by `provision-dek`); the
+  proxy is spawned `--datasets-allowed ds:<user>`. The kernel `SYS_ATTACH_9P_SRV` aname is opaque
+  passthrough (bounded by `SYS_ATTACH_ANAME_MAX`); the `ds:` semantics live entirely in the Stratum 9P
+  server. **The init `MAY_POST_SERVICE` grant-root:** joey relinquishes its console-attach at the
+  bringup->session boundary (I-27), but the getty then spawns a FRESH `/sbin/login` per session that must
+  each receive `MAY_POST_SERVICE` -- and a non-console-attached granter can confer it only if it *holds*
+  it (the one-hop gate). So **joey (init) is stamped `MAY_POST_SERVICE` in `joey_thunk`** (alongside its
+  console-attach + console-owner stamps) -- init is the persistent service-posting grant-root, exactly as
+  it is the console-trust + capability root. The bit is a `proc_flags` perm (never `rfork`-propagated,
+  never a `cap_mask` cap) -> I-2 untouched; it grants nothing to children automatically (each spawn
+  decides per `perm_flags`); `CONSOLE_TRUSTED` is still never conferred to login -> I-27 untouched.
+  **Audit-bearing** (the `ds:` resolver is a new attach surface -- prosecute the name->dataset resolution
+  [no id confusion / no cross-parent escape], the 3 access gates compose [no gate alone is load-bearing
+  for cross-user isolation -- the proxy allow-list is], and that an un-DEK'd dataset attach is inert).
 - *Provisioning (F3 correction, user-voted 2026-06-02; SUPERSEDES the earlier host-bake-homes
   line).* Home datasets are **NOT host-baked**: corvus's `handle_wrap` has no `CAP_HOSTOWNER`
   admin path (it takes a live conn), so a DEK cannot be sealed to a user without that user's
