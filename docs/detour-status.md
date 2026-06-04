@@ -1034,11 +1034,57 @@ kill = BOTH the namespace `/proc/<pid>/ctl` surface AND a narrow elevation-only 
       `docs/reference/22-ctl.md`. Verified: `cmake --build build` clean; `ctest -R test_corvus` 4/4 (incl.
       the new `provision_via_ctl`: authz EACCES + bad-payload EINVAL + create/WRAP/0700-owner + idempotent
       EEXIST->OK); `test_fs`/`test_fs_phase8`/`test_ctl*` no regression. Audit folds into #828.
-    - **NEXT (impl) = #827** login wiring (the stalk-3a-audit F2 mortal-registry last-unref activates here;
-      #827 also adds the verified b-2 integration gap: the runtime stratumd
-      `--ctl-listen`/`--bake-owner-uid`/`--corvus-socket` flags + login's name->id bridge for install-dek)
-      + **#828** audit (the DEK handoff + the provision mint+WRAP path AEGIS/mallocng-adjacent, prosecute
-      hard).
+    - **#827a-1 the coordinator /ctl reachability + corvus reach -- DONE (Thylacine `b05d309` + Stratum
+      `9e4f9a7`).** Two gaps closed (both the plumbing IDENTITY-DESIGN section 9.9 design-item #1 named --
+      the "#829 pouch ctl-walk subsumed by stalk-3" note was OPTIMISTIC; the multi-component connect was
+      still unbuilt). (1) **pouch connect-walk** (`usr/lib/pouch/patches/0006-pouch-sockets.patch`): connect()
+      lowered a single `SYS_open("/srv/<name>")` and `sun_path_to_name` REJECTED any `/`, so a pouch binary
+      could only reach a BARE service -- never a 9p-mode service's sub-fid. The kernel `stalk` triggers
+      open=connect ONLY on the FINAL path element (a mid-path `/srv/corvus` is an unconnected service node
+      with no `ctl` child -- why native login does the two-step). New `sun_path_split` extracts an optional
+      SINGLE walk component; connect() does the two-step: open=connect `/srv/<name>` (OREAD -> dev9p root),
+      relative-open `<walk>` (ORDWR -> the sub-fid), drop the root. read/write on the sub-fid map to
+      Tread/Twrite, so the Stratum corvus client sees a socket carrying verb frames -- ZERO Stratum-side
+      change. The Plan 9 factotum idiom (walk to `/mnt/factotum/rpc`); a general capability for any future
+      port. AUDIT-BEARING boundary-line (folds into #828). (2) **Stratum `--system-uid`** (`9e4f9a7`,
+      decoupled from `--bake-owner-uid`): the #826b-2 wiring reused `bake_owner_uid` for the /ctl
+      `system_uid`, but `--bake-owner-uid` ALSO force-stamps every FS file SYSTEM-owned (`serve.c` create_uid
+      override) -- so the RUNTIME coordinator passing it would brick per-user home ownership (A-3 rwx
+      owner-first). New `--system-uid <N>` opt (default `(uid_t)-1` fail-closed) feeds `set_system_uid`,
+      decoupled. (3) **joey coordinator flags**: the boot stratumd spawn gains `--ctl-listen
+      /srv/stratum-ctl` + `--corvus-socket /srv/corvus/ctl` + `--system-uid 4294967294`, deliberately NOT
+      `--bake-owner-uid` (per-user files stamped by the proxy's SO_PEERCRED). Fixed a stale `.argc` (the
+      argv buffer grew 6->12 strings; `.argc` stayed 6 -> the kernel NUL-count check rejected the spawn;
+      caught via the boot extinction -> traced to syscall.c:3877). Verified: boot OK, **707/707**, 0
+      EXTINCTION, login E2E intact; boot log shows **`stratumd: /ctl/ on /srv/stratum-ctl`** (the coordinator
+      now serves the control surface). The corvus reach is WIRED + COMPILED; first EXERCISED end-to-end by
+      #827a-login. Stratum ctest ctl/corvus/stratumd/proxy 11/11.
+    - **NEXT (impl) = #827a-login** -- login drives the DEK lifecycle over a persistent `/ctl` conn.
+      GROUNDED design (so next session does not re-derive): (a) login attaches the coordinator's /ctl --
+      `t_open("/srv/stratum-ctl", T_ORDWR)` (open=connect -> byte conn) then `t_attach_9p_srv(fd,"",0,0)`
+      (wrap -> dev9p root); **NOTE: `t_attach_9p_srv` is in libt but NOT yet wrapped in libthyla-rs -- add a
+      thin wrapper (or use the raw syscall) since login is native libthyla-rs.** (b) provision-dek: relative
+      walk `datasets/provision-dek` + ONE write of `{owner_uid u32 LE, owner_gid u32 LE, name_len u8, name,
+      path_len u8, corvus_path, token[33]}` (exact-length single delivery; owner_uid/gid = the user's
+      pid/gid from resolve_name; name + corvus_path = the home dataset path e.g. "users/<user>"; token = the
+      AUTH token). (c) **name->id bridge** (provision-dek is write-only, returns no id): `t_readdir`
+      `datasets`, for each `<id>` read `datasets/<id>/properties`, parse the `name: <dataset-name>` line,
+      match the home name -> `<id>`. (d) install-dek: walk `datasets/<id>/install-dek`, write the 33-byte
+      token (the lease is CONN-BOUND -> login MUST hold the /ctl conn open for the whole session). (e)
+      logout: walk `datasets/<id>/evict-dek` + write a non-empty trigger byte, then corvus SESSION_CLOSE
+      (already in login), then close the /ctl conn. Order in login: AUTH -> resolve -> provision-dek ->
+      name->id -> install-dek -> spawn shell -> wait -> evict-dek + SESSION_CLOSE. **#827a-login's E2E proves
+      the corvus reach + the whole DEK lifecycle (the boot log should show provision WRAP + install UNWRAP
+      succeed).** (Stratum coordinator already serves it all; this is pure login-side Rust + the libthyla-rs
+      t_attach_9p_srv wrapper.) Then **#827b** -- the per-user `--role client` proxy (spawned AS the user via
+      `.identity()` so its SO_PEERCRED stamps per-user file ownership + perm MAY_POST_SERVICE; `--listen
+      /srv/home-<user> --coordinator-socket /srv/stratum-fs --datasets-allowed users/<user>`) + attach
+      `/srv/home-<user>` (t_attach_9p_srv aname="users/<user>") + bind `/home/<user>` (t_mount) into login's
+      territory (the shell inherits it) + logout teardown (unmount + reap the proxy). **The stalk-3a-audit F2
+      mortal-registry last-unref activates at #827b** (login mints the first per-session SrvRegistry). Then
+      **#828** audit (the DEK handoff + the provision mint+WRAP path + the pouch connect-walk
+      boundary-line, AEGIS/mallocng-adjacent -- prosecute hard). OWED (#845/#841): the deterministic
+      multi-in-flight loopback-fake-server harness lands with #827's multi-in-flight workload.
 
 ---
 
