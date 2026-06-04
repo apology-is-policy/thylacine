@@ -4386,19 +4386,24 @@ int sys_srv_peer_for_proc(struct Proc *p, hidx_t conn_h,
     // below cannot tell them apart). Reject the client endpoint: SYS_SRV_PEER
     // is server-side only at v1.0 (pouch getsockopt(SO_PEERCRED) -> ENOTSOCK).
     if (sp->flag & CSRVCLIENT) { spoor_clunk(sp); return -1; }
-    spoor_clunk(sp);   // borrow done -- cn carries the value-captured peer info
 
-    // Poster gate (CORVUS-DESIGN §6.3): only the service's poster may
-    // query a connection's peer. The SrvConn captured the poster's
-    // stripes by value at mint; the caller's stripes must match.
+    // #844 audit F2: capture EVERY cn-derived value while the borrow (sp) still
+    // pins cn (cn = sp->aux is raw, NOT independently refcounted), THEN drop the
+    // borrow. Reading cn after spoor_clunk(sp) would be a UAF if a sibling
+    // closed the server fd in between (sp's table ref -> devsrv_close ->
+    // srvconn_unref -> cn freed). All three are value-captured-at-mint fields,
+    // so this is a pure hoist -- no semantic change.
+    u64  server_stripes = srvconn_server_stripes(cn);
+    u64  peer_stripes   = srvconn_peer_stripes(cn);
+    bool peer_console   = srvconn_peer_console(cn);
+    spoor_clunk(sp);
+
+    // Poster gate (CORVUS-DESIGN §6.3): only the service's poster may query a
+    // connection's peer. The SrvConn captured the poster's stripes by value at
+    // mint; the caller's stripes must match.
     u64 caller = proc_stripes(p);
     if (caller == 0)                            return -1;
-    if (srvconn_server_stripes(cn) != caller)   return -1;
-
-    // Immutable identity — captured by value on the SrvConn at mint, so
-    // it is available even after the peer exits (no Proc lookup, no UAF).
-    u64  peer_stripes = srvconn_peer_stripes(cn);
-    bool peer_console = srvconn_peer_console(cn);
+    if (server_stripes != caller)               return -1;
 
     // Live caps + identity + the dead-Proc guard: re-find the peer by
     // stripes under the process-table lock. A peer that exited / is a

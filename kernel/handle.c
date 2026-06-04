@@ -363,17 +363,19 @@ hidx_t handle_alloc(struct Proc *p, enum kobj_kind kind,
                        "burrow_create_anon-consumed-reference convention)");
     }
 
-    for (int i = 0; i < PROC_HANDLE_MAX; i++) {
-        if (t->slots[i].magic == 0) {
-            t->slots[i].magic  = HANDLE_MAGIC;
-            t->slots[i].kind   = kind;
-            t->slots[i].rights = rights;
-            t->slots[i].obj    = obj;
-            g_handle_allocated++;
-            return (hidx_t)i;
-        }
-    }
-    return -1;   // table full
+    // #844 audit F1: scan + install UNDER the table lock, via the same
+    // handle_install_locked that handle_dup uses. Without the lock, two peer
+    // threads of one Proc (stratumd) doing concurrent fd-creating syscalls --
+    // or one in handle_alloc + one in handle_dup -- could both pick the same
+    // free slot and the second write clobbers the first: two fds naming the
+    // slot, one obj's table ref leaked, then UAF/double-release at close. This
+    // is the primary fd-creating path; it must serialize exactly like
+    // get/close/dup. The g_handle_allocated bump inside handle_install_locked
+    // is atomic (closes the F4 diagnostics race too).
+    spin_lock(&t->lock);
+    hidx_t h = handle_install_locked(t, kind, rights, obj);
+    spin_unlock(&t->lock);
+    return h;   // -1 if the table is full
 }
 
 int handle_close(struct Proc *p, hidx_t h) {
