@@ -1002,28 +1002,43 @@ kill = BOTH the namespace `/proc/<pid>/ctl` surface AND a narrow elevation-only 
       serving /ctl that login connects to) does NOT yet pass `--ctl-listen` / `--bake-owner-uid` /
       `--corvus-socket` -- #827 must add those so `/ctl` is served, `system_uid` is set to PRINCIPAL_SYSTEM,
       and install can UNWRAP. The b-2 mechanism is configurable + correct; this is the consumer's wiring.**
-    - **#826c the first-login provisioning verb -- DESIGN SETTLED (user-voted 2026-06-04; scripture
-      landed, impl next)**: login-driven first-login provisioning is the SOLE path (F3; host-bake of
-      HOMES dropped -- corvus WRAP needs the user's live session, impossible at build time). Trigger
-      mechanism RESOLVED by ground truth: a one-shot `stratumd --provision-corvus-dataset` against the
-      LIVE pool is a CORRUPTION HAZARD (the pool is opened `O_RDWR`, no `O_EXCL`/flock at
-      `src/block/posix.c:579`; the boot coordinator is the single serialized `fs->global` writer), so
-      runtime provisioning MUST route through the running coordinator's `/ctl`. SHAPE (user vote):
-      a NEW idempotent writable kind **`provision-dek` (kind 34)** -- separate from #826b-2's
-      install-dek(32)/evict-dek(33), mirroring Stratum's own `stm_fs_create_dataset_corvus` vs
-      `stm_fs_install_dek` layering -- calls `stm_fs_create_dataset_corvus` (mint dataset + fresh DEK +
-      corvus WRAP into the CURRENT keyslot), folds `STM_EEXIST -> OK` (returning user = no-op). login
-      drives `provision-dek -> install-dek` every login over its persistent `/ctl` conn; `evict-dek` at
-      logout. The `--provision-corvus-dataset` one-shot stays the build/fixture + standalone provisioner
-      only (`test_corvus_provision::provision_via_stratumd_run` = a standalone mount-create-unmount).
-      IMPL = Stratum `src/ctl/synfs.c` (~8 mechanical sites mirroring install-dek: enum + KIND_META +
-      KIND_MAX 34->35 + the lopen writable/present lists + walk/readdir enumerators + a `vops_write`
-      dispatch branch) + an fs-layer reuse of `stm_fs_create_dataset_corvus` + a ctl-level test. Audit
-      folds into #828.
-    - **NEXT (impl) = #826c** Stratum `provision-dek` kind, then **#827** login wiring (the stalk-3a-audit
-      F2 mortal-registry last-unref activates here; #827 also adds the verified b-2 integration gap: the
-      runtime stratumd `--ctl-listen`/`--bake-owner-uid`/`--corvus-socket` flags) + **#828** audit (the
-      DEK handoff + the provision mint+WRAP path AEGIS/mallocng-adjacent, prosecute hard).
+    - **#826c the first-login provisioning verb -- DONE (Stratum `35b7bc7`)**: login-driven
+      first-login provisioning is the SOLE path (F3; host-bake of HOMES dropped -- corvus WRAP needs the
+      user's live session, impossible at build time). Trigger mechanism RESOLVED by ground truth: a
+      one-shot `stratumd --provision-corvus-dataset` against the LIVE pool is a CORRUPTION HAZARD (the
+      pool is opened `O_RDWR`, no `O_EXCL`/flock at `src/block/posix.c:579`; the boot coordinator is the
+      single serialized `fs->global` writer), so runtime provisioning routes through the running
+      coordinator's `/ctl`. AS-BUILT: a NEW SYSTEM-gated writable kind
+      **`KIND_DATASETS_PROVISION_DEK` (kind 34; `/datasets/provision-dek`)** -- at the `/datasets` LEVEL,
+      NOT per-`<id>` (it CREATES the dataset, so there is no id to address yet; this is the structural
+      difference from #826b-2's install-dek(32)/evict-dek(33)). Structured binary payload
+      `{owner_uid:u32 LE, owner_gid:u32 LE, name_len:u8, name, path_len:u8, corvus_path, token[33]}`
+      (parsed + R99-bounded in `ctl_provision_dek`; exact-length match, control-byte reject). Action = a
+      NEW fs wrapper `stm_fs_provision_corvus_dataset` = `stm_fs_create_dataset_corvus` (mint dataset +
+      fresh DEK + corvus WRAP -> CURRENT keyslot) + `stm_fs_init_dataset_root(0700, owner_uid/gid)`
+      (**F1 isolation**: the home root is born user-owned 0700 so a 2nd user can't read it -- A-3 kernel
+      rwx keys on owner; owner is login-supplied + safe because the token is corvus-owner-gated to the
+      real user) + `stm_fs_commit` (durability -- the running coordinator has no unmount to ride).
+      `vops_write` folds `STM_EEXIST -> OK` (returning user = no-op, never re-WRAPped). NO dek_lease / NO
+      conn-binding (provision writes the DURABLE keyslot, not the session-scoped RAM DEK map = install-dek's
+      job). login drives `provision-dek -> install-dek` every login over its persistent `/ctl` conn;
+      `evict-dek` at logout. The `--provision-corvus-dataset` one-shot stays the build/fixture +
+      standalone provisioner only. v1.0 residual (documented, ~unreachable, fails-closed): an
+      `init_dataset_root` ENOMEM/ECORRUPT returns without committing -> RAM-only rootless dataset heals on
+      coordinator restart; if persisted by an intervening commit, a retry's EEXIST->OK leaves it rootless
+      and login's Tattach to ino=1 fails closed (no corruption / no mis-attributed home). Fully-atomic
+      create+key+root+rollback single transaction = v1.x lift. IMPL: `src/ctl/synfs.c` (enum + KIND_META +
+      KIND_MAX 34->35 + asserts + getattr/walk/readdir/lopen[accmode+SYSTEM-gate+present+session-alloc] +
+      the `ctl_provision_dek` handler + a `vops_write` branch) + `src/fs/fs.c` + `include/stratum/fs.h`
+      (`stm_fs_provision_corvus_dataset`) + `tests/test_corvus_provision.c` (`provision_via_ctl`) +
+      `docs/reference/22-ctl.md`. Verified: `cmake --build build` clean; `ctest -R test_corvus` 4/4 (incl.
+      the new `provision_via_ctl`: authz EACCES + bad-payload EINVAL + create/WRAP/0700-owner + idempotent
+      EEXIST->OK); `test_fs`/`test_fs_phase8`/`test_ctl*` no regression. Audit folds into #828.
+    - **NEXT (impl) = #827** login wiring (the stalk-3a-audit F2 mortal-registry last-unref activates here;
+      #827 also adds the verified b-2 integration gap: the runtime stratumd
+      `--ctl-listen`/`--bake-owner-uid`/`--corvus-socket` flags + login's name->id bridge for install-dek)
+      + **#828** audit (the DEK handoff + the provision mint+WRAP path AEGIS/mallocng-adjacent, prosecute
+      hard).
 
 ---
 
