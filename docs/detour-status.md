@@ -983,14 +983,29 @@ kill = BOTH the namespace `/proc/<pid>/ctl` surface AND a narrow elevation-only 
     - **F7 authz RESOLVED (user-voted 2026-06-04): FULL CONNECTION-BINDING** -- login holds one persistent
       ctl conn per session; install records it; evict only from the same conn; a conn drop auto-evicts;
       atop a SYSTEM-peer gate + the token. Affects #827 (login holds the persistent ctl conn).
-    - **NEXT = #826b-2** (the /ctl install-dek/evict-dek CONTROL SURFACE -- a LARGE security-critical slice
-      [the DEK-handoff gate #828 prosecutes hard]: the two writable per-dataset `/ctl` kinds + the fs-layer
-      `stm_fs_install_dek`/`evict_dek` wrappers + the connection-binding [per-dataset installed-by-conn +
-      the `stm_ctl_conn_destroy` auto-evict hook] + the SYSTEM-peer gate + a corvus-socket-reach + system-uid
-      plumbing on `stm_ctl`; the full grounded execution plan is turnkey in `project_next_session.md`), then
-      **#826c** (first-login provisioning wiring; `stratumd --provision-corvus-dataset` already exists+tested,
-      F3 = host-bake of homes DROPPED), then **#827** login wiring (the stalk-3a-audit F2 mortal-registry
-      last-unref activates here) + **#828** audit (DEK handoff AEGIS/mallocng-adjacent, prosecute hard).
+    - **#826b-2 the /ctl install-dek/evict-dek CONTROL SURFACE -- DONE (Stratum, this session)**: two
+      writable per-dataset `/ctl` kinds `KIND_DATASET_INSTALL_DEK`(32)/`KIND_DATASET_EVICT_DEK`(33) (mode
+      0200; template = mark-snapshot-compromised KIND 29) in `src/ctl/synfs.c` + fs-layer wrappers
+      `stm_fs_install_dek`/`evict_dek` (`src/fs/fs.c`, fs->global EX -> the b-1 sync calls) + **F7 full
+      connection-binding** (a per-`stm_ctl` `dek_leases[64]` table under a new `dek_mu`: install records
+      the owning conn + refuses a dataset leased to another conn before any UNWRAP; evict only from the
+      owning conn; **`stm_ctl_conn_destroy` auto-evicts** every DEK the dropped conn installed, under
+      `dek_mu` before `free(cn)`) + **SYSTEM-peer gate** (new `ctl_caller_is_system` = `caller_uid ==
+      system_uid`, NOT admin/root; new `system_uid` field + `stm_ctl_set_system_uid`) + corvus-socket reach
+      (copied `corvus_socket_path[108]` + `stm_ctl_set_corvus_socket`). serve.c wires
+      `set_system_uid(opts->bake_owner_uid)` + `set_corvus_socket(opts->corvus_unwrap_socket)`. Tests
+      `dek_install_evict_via_ctl` + `dek_ctl_authz` (in `test_corvus_provision.c`: install->DEK lands ->
+      idempotent -> evict -> conn-drop auto-evict; non-SYSTEM lopen EACCES, bad-token-len EINVAL,
+      cross-conn install EACCES, non-owning evict EACCES). Build clean; the 9 ctl+corvus+fs suites GREEN.
+      Docs `docs/reference/22-ctl.md`. Lock order `dek_mu` OUTER -> `stm_fs_*_dek` -> `fs->global`; never
+      under `cn->mu`. **#827 INTEGRATION POINT (verified): the RUNTIME stratumd joey spawns (the one
+      serving /ctl that login connects to) does NOT yet pass `--ctl-listen` / `--bake-owner-uid` /
+      `--corvus-socket` -- #827 must add those so `/ctl` is served, `system_uid` is set to PRINCIPAL_SYSTEM,
+      and install can UNWRAP. The b-2 mechanism is configurable + correct; this is the consumer's wiring.**
+    - **NEXT = #826c** (first-login provisioning wiring; `stratumd --provision-corvus-dataset` already
+      exists+tested, F3 = host-bake of homes DROPPED), then **#827** login wiring (the stalk-3a-audit F2
+      mortal-registry last-unref activates here) + **#828** audit (DEK handoff AEGIS/mallocng-adjacent,
+      prosecute hard).
 
 ---
 
