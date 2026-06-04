@@ -2112,6 +2112,33 @@ Stratum-side sub-chunk below.
   persistent `/ctl` connection with the user's token, and binds `/home/<user>` into the user's
   territory (`SYS_ATTACH_9P_SRV` + `SYS_MOUNT`/bind -- the joey 16c template). Logout: unmount +
   coordinator `evict-dek` + corvus `SESSION_CLOSE`.
+- **A-5b #827b -- the per-user proxy's service-post authority (RESOLVED 2026-06-04, user-voted).**
+  The *Thylacine-side* line above has login spawn a `--role client` proxy that posts
+  `/srv/home-<user>` (login then `SYS_ATTACH_9P_SRV` + binds it). But posting a `/srv` service
+  requires `PROC_FLAG_MAY_POST_SERVICE`, and the `SYS_SPAWN_*` grant gate (`kernel/syscall.c`)
+  requires the *granter* be console-attached -- which login deliberately is NOT (I-27); joey spawns
+  login with `perm_flags = 0` today. So the design as written could not stand up the proxy, and the
+  gate was the only friction: the session's `/srv` is ALREADY private (per-territory `/srv`, stalk-3
+  / I-1), so a per-user proxy posting `/srv/home-<user>` in the session territory is isolated -- the
+  Plan 9 "a server posts into its own (per-process) namespace" idiom, which has no console gate; the
+  capability-microkernel SOTA (seL4/Genode/Fuchsia) instead has the parent mint the channel and hand
+  the child an endpoint. **Decision: make `MAY_POST_SERVICE` delegable ONE explicit hop.** The grant
+  gate becomes per-bit: a Proc that *already holds* `PROC_FLAG_MAY_POST_SERVICE` may confer it on a
+  child (in addition to a console-attached granter); `SPAWN_PERM_CONSOLE_TRUSTED` (the SAK trust
+  anchor) stays console-attached-ONLY. joey (console-attached) confers `MAY_POST_SERVICE` on login;
+  login re-confers it on the per-user proxy. The bit is STILL never `rfork`-propagated (it is
+  conferred only by an explicit `perm_flags` decision at each spawn, exactly as before) -- so the
+  "kernel-stamped, not a cap" discipline (ARCH `spawn_with_perms`) holds; the delegation is rooted at
+  the console-attached joey and is one hop wide. **I-27 unchanged** (login stays
+  non-console-attached; it gains a service-post authority, NOT the console). **I-2 unaffected**
+  (`MAY_POST_SERVICE` is a `proc_flags` bit, not a `cap_mask` cap; the fork-grantable cap set still
+  only reduces). Alternatives considered + rejected for v1.0: (a) a *distinct* delegated-grant bit
+  (`SPAWN_PERM_GRANT_POST_SERVICE`, so login may grant without itself being a poster -- cleaner
+  separation but more surface; deferred); (b) a connected-`SrvConn`-pair primitive (login mints a
+  pair, hands one endpoint to the proxy as an fd, NO `/srv` post at all -- the capability-pure /
+  coordinator-blind direction, the SAME family as the v1.x NOVEL seam below; most new surface,
+  deferred to v1.x). **Audit-bearing** (the privilege-gate change -- prosecute the per-bit separation
+  + that the one-hop delegation cannot widen into rfork-propagation; CLAUDE.md + ARCH §25.4 row).
 - *Provisioning (F3 correction, user-voted 2026-06-02; SUPERSEDES the earlier host-bake-homes
   line).* Home datasets are **NOT host-baked**: corvus's `handle_wrap` has no `CAP_HOSTOWNER`
   admin path (it takes a live conn), so a DEK cannot be sealed to a user without that user's

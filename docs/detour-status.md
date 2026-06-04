@@ -1084,15 +1084,31 @@ kill = BOTH the namespace `/proc/<pid>/ctl` surface AND a narrow elevation-only 
       _pouch_socket.h block) without bumping `N` silently TRUNCATES the generated file -> the WHOLE sysroot
       build fails -> stale binaries boot (masking the fix). Always update the `@@` count when editing a
       new-file patch hunk.
-    - **NEXT (impl) = #827b** -- the per-user `--role client` proxy (spawned AS the user via `.identity()` so
-      its SO_PEERCRED stamps per-user file ownership + perm MAY_POST_SERVICE; `--listen /srv/home-<user>
-      --coordinator-socket /srv/stratum-fs --datasets-allowed users/<user>`) + attach `/srv/home-<user>`
-      (`t_attach_9p_srv` aname="users/<user>") + bind `/home/<user>` (t_mount) into login's territory (the
-      shell inherits it) + logout teardown (unmount + reap the proxy). **The stalk-3a-audit F2 mortal-registry
-      last-unref activates at #827b** (login mints the first per-session SrvRegistry). Then **#828** audit (the
-      DEK handoff + the provision mint+WRAP path + the send/recv + dial_corvus + getattr boundary-lines,
-      AEGIS/mallocng-adjacent -- prosecute hard). OWED (#845/#841): the deterministic multi-in-flight
-      loopback-fake-server harness lands with #827's multi-in-flight workload.
+    - **#827b IN PROGRESS** -- the per-user `--role client` proxy + `/home` bind + logout teardown.
+      **Design fork resolved 2026-06-04 (user-voted; scripture-first commit landed BEFORE code).** The
+      detour line "spawn the proxy + perm MAY_POST_SERVICE" hit a real gate: posting `/srv/home-<user>`
+      needs `PROC_FLAG_MAY_POST_SERVICE`, and the `SYS_SPAWN_*` grant gate (`kernel/syscall.c:3566`)
+      requires the GRANTER be console-attached -- which login deliberately is NOT (I-27; joey spawns login
+      `perm_flags=0`). Homework (Plan 9: a server posts into its own private namespace, no console gate;
+      cap-microkernels: the parent mints+hands an endpoint; Thylacine: per-territory `/srv` already
+      isolates the session) collapsed the fork to: **make `MAY_POST_SERVICE` delegable ONE explicit hop**
+      -- the grant gate is now per-bit (a current `MAY_POST_SERVICE` holder may confer it; `CONSOLE_TRUSTED`
+      stays console-attach-only). joey confers it on login; login re-confers it on the proxy. Never
+      rfork-propagated; I-2/I-27 intact. Scripture: IDENTITY-DESIGN §9.9 + ARCH §11.2c + ARCH §25.4 row +
+      CLAUDE.md row. Alternatives deferred: a distinct `SPAWN_PERM_GRANT_POST_SERVICE` bit; a
+      connected-`SrvConn`-pair primitive (the v1.x coordinator-blind NOVEL).
+      **Impl plan** (depth-first): (1) kernel per-bit gate relaxation + `proc_may_post_service` reuse +
+      regression test; (2) joey spawns login WITH `SPAWN_PERM_MAY_POST_SERVICE`; (3) libthyla-rs `Command`
+      perm setter; (4) login spawns the proxy AS the user (`.identity()` -> SO_PEERCRED per-user ownership)
+      with `MAY_POST_SERVICE` + caps + argv `--role client --listen /srv/home-<user> --coordinator-socket
+      /srv/stratum-fs --datasets-allowed users/<user>`, attach `/srv/home-<user>` (`t_attach_9p_srv`
+      aname="users/<user>"), bind `/home/<user>` (`t_mount`) into login's territory (the shell inherits it),
+      logout teardown (unmount + group-terminate the proxy); (5) Stratum `--role client` verify. **The
+      stalk-3a-audit F2 mortal-registry last-unref activates at #827b** (login mints the first per-session
+      SrvRegistry). Then **#828** audit (the DEK handoff + provision mint+WRAP + send/recv + dial_corvus +
+      getattr + THE GRANT-GATE boundary-lines, AEGIS/mallocng-adjacent + privilege -- prosecute hard).
+      OWED (#845/#841): the deterministic multi-in-flight loopback-fake-server harness lands with #827's
+      multi-in-flight workload.
 
 ---
 
