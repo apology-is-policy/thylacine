@@ -2090,24 +2090,40 @@ Stratum-side sub-chunk below.
     fails -- that is tamper, not deferral); (2) a runtime DEK **install** (`stm_corvus_unwrap`
     with the forwarded token, then `sync_dek_insert`) + **evict** (`sync_dek_remove` + zero --
     today only the unmount-wide `sync_dek_wipe_all` exists) on the long-lived coordinator; (3) a
-    coordinator **runtime control surface** login drives to trigger install (login) / evict
-    (logout) with the user's token -- realized as two new writable `/ctl` kinds (`install-dek` /
-    `evict-dek`; the `mark-snapshot-compromised` handler is the action+commit+revert template),
-    reached over a 2nd 9P attach to the coordinator's `--ctl-listen` socket; authorized by the
+    coordinator **runtime control surface** login drives -- realized as THREE writable per-dataset
+    `/ctl` kinds (the `mark-snapshot-compromised` handler is the action+commit+revert template),
+    reached over a 2nd 9P attach to the coordinator's `--ctl-listen` socket; each authorized by the
     token (bearer cred + corvus's C-7 owner gate) + the SYSTEM peer as defense-in-depth (NOT the
-    ctl-admin gate -- login is `PRINCIPAL_SYSTEM`, not uid 0); (4) host-bake via
-    `stratumd --provision-corvus-dataset`. login never holds the raw DEK -- it forwards only the
-    opaque token; the coordinator unwraps + installs.
+    ctl-admin gate -- login is `PRINCIPAL_SYSTEM`, not uid 0): **`provision-dek`** (idempotent
+    ensure-home -- `stm_fs_create_dataset_corvus` mints the dataset + a fresh DEK + the corvus WRAP
+    into the CURRENT keyslot, folding `STM_EEXIST -> OK` so a returning user is a no-op) at login,
+    then **`install-dek`** (UNWRAP the keyslot into the live `deks` map) per login, then
+    **`evict-dek`** (zero + remove) at logout (`install-dek`/`evict-dek` landed #826b-2 as kinds
+    32/33; `provision-dek` is the new kind 34, separate-verb shape user-voted 2026-06-04); (4) the
+    one-shot `stratumd --provision-corvus-dataset` is the build/fixture + standalone provisioner
+    ONLY -- NOT the runtime path (the F3 correction below: a 2nd stratumd opening the live pool
+    would corrupt it). login never holds the raw DEK -- it forwards only the opaque token; the
+    coordinator unwraps + installs.
   - The *security property* (at-rest + session-scoped + login-never-holds-the-raw-DEK +
     evict-at-logout) is fixed; all the above is the plumbing within it.
 - *Thylacine-side*: login spawns the user's `--role client` stratumd (A-3c, dataset-scoped via
   `--datasets-allowed` -> the user-vs-user access boundary, `Rlerror(EACCES)` out-of-scope),
-  triggers the coordinator DEK-install, and binds `/home/<user>` into the user's territory
-  (`SYS_ATTACH_9P_SRV` + `SYS_MOUNT`/bind -- the joey 16c template). Logout: unmount +
-  coordinator DEK-evict + corvus `SESSION_CLOSE`.
-- *Host-bake*: the build fixture provisions each v1.0 user's home dataset sealed to that user
-  via the shipped `stratumd --provision-corvus-dataset` (`src/cmd/stratumd/serve.c:1212`; the
-  A-3 `--bake-owner-uid` wiring extends to it).
+  drives the coordinator **`provision-dek` (ensure-home; idempotent) then `install-dek`** over its
+  persistent `/ctl` connection with the user's token, and binds `/home/<user>` into the user's
+  territory (`SYS_ATTACH_9P_SRV` + `SYS_MOUNT`/bind -- the joey 16c template). Logout: unmount +
+  coordinator `evict-dek` + corvus `SESSION_CLOSE`.
+- *Provisioning (F3 correction, user-voted 2026-06-02; SUPERSEDES the earlier host-bake-homes
+  line).* Home datasets are **NOT host-baked**: corvus's `handle_wrap` has no `CAP_HOSTOWNER`
+  admin path (it takes a live conn), so a DEK cannot be sealed to a user without that user's
+  **live session**, which does not exist at build time. Therefore **login-driven first-login
+  provisioning is the SOLE path** -- at first login (session live, token in hand) login drives the
+  coordinator's idempotent `provision-dek` verb, which mints + WRAPs + seals the home to the
+  just-authenticated user. The shipped `stratumd --provision-corvus-dataset` one-shot
+  (`src/cmd/stratumd/serve.c`) stays the build/fixture + standalone provisioner (e.g. the corvus
+  dataset itself); it is **not** used at runtime against the live pool -- the pool is opened
+  `O_RDWR` with no `O_EXCL`/flock (`src/block/posix.c:579`), so a 2nd concurrent stratumd writer
+  would corrupt it (the AEGIS/mallocng-adjacent path). The running coordinator is the single
+  serialized writer (`fs->global`), so runtime provisioning MUST route through its `/ctl` surface.
 
 **A-5c -- RECOVER paper phrase + hostowner-c** (later sub-chunk; own scripture refinement +
 audit). The account-recovery round-trip -- a paper recovery phrase that re-derives/re-wraps
