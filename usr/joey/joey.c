@@ -1341,8 +1341,18 @@ static int do_corvus_bringup(long storage_dup_fd) {
 // CSPRNG_READ are the benign user caps login passes down to the shell (it drops
 // SET_IDENTITY for the shell -- a shell is not an identity-stamper). login runs
 // as PRINCIPAL_SYSTEM (inherited) and is never console-attached (joey
-// relinquished; spawn does not confer the bit), so I-27 holds.
+// relinquished; spawn does not confer CONSOLE_TRUSTED), so I-27 holds.
 #define LOGIN_CAPS (T_CAP_SET_IDENTITY | T_CAP_LOCK_PAGES | T_CAP_CSPRNG_READ)
+
+// LOGIN_PERMS (A-5b #827b) -- the SPAWN_PERM_* bits joey confers on /sbin/login.
+// MAY_POST_SERVICE makes login a *holder*, so login may re-confer the bit (one
+// hop) on the per-user proxy stratumd it spawns to back the encrypted home --
+// the proxy posts /srv/home-<user>. joey may confer it because joey is the
+// service-posting grant-root (console-attached in do_login_e2e; a persistent
+// MAY_POST_SERVICE holder in the post-relinquish getty loop -- see joey_thunk).
+// login is NOT granted CONSOLE_TRUSTED, so I-27 (only corvus is console-attached
+// during a session) is untouched.
+#define LOGIN_PERMS ((unsigned int)T_SPAWN_PERM_MAY_POST_SERVICE)
 
 // do_login_e2e -- prove the /sbin/login orchestration NON-interactively on the
 // boot path. The harness passes at the banner + kills QEMU, so the live
@@ -1402,7 +1412,7 @@ static int do_login_e2e(void) {
         .argv_data_len = sizeof(login_argv) - 1,
         .argc          = 1,
         .fd_count      = 3,
-        .perm_flags    = 0,
+        .perm_flags    = LOGIN_PERMS,
         ._pad_envp     = 0,
         .cap_mask      = LOGIN_CAPS,
     };
@@ -1451,7 +1461,7 @@ static void session_getty_loop(long cfd) {
             .argv_data_len = sizeof(login_argv) - 1,
             .argc          = 1,
             .fd_count      = 3,
-            .perm_flags    = 0,
+            .perm_flags    = LOGIN_PERMS,
             ._pad_envp     = 0,
             .cap_mask      = LOGIN_CAPS,
         };

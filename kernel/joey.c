@@ -113,6 +113,20 @@ static void joey_thunk(void *arg) {
     // re-grants ownership to corvus.
     proc_set_console_owner(p);
 
+    // A-5b (#827b): joey is ALSO the root of the service-posting chain. It
+    // grants SPAWN_PERM_MAY_POST_SERVICE to the OS servers it stands up
+    // (corvus, the boot stratumd, /sbin/login). Granting that bit requires the
+    // granter be console-attached OR already hold it (the one-hop delegation
+    // gate). joey relinquishes its console-attach at the bringup->session
+    // boundary (I-27), but the getty loop then keeps spawning fresh /sbin/login
+    // instances that must each receive the bit -- so joey must remain a *holder*
+    // past that relinquish. Stamp it here, in joey's own context, so init is the
+    // persistent grant-root. The bit is a perm-flag, never rfork-propagated, so
+    // joey holding it grants nothing to its children automatically (each spawn
+    // decides per perm_flags) -- I-2 untouched; CONSOLE_TRUSTED stays
+    // console-attach-only so I-27 is untouched.
+    proc_mark_may_post_service(p);
+
     u64 entry = 0, sp = 0;
     int rc = exec_setup(p, ia->blob, ia->blob_size, &entry, &sp);
     if (rc != 0) {

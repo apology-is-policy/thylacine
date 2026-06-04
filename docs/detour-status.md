@@ -1148,6 +1148,23 @@ kill = BOTH the namespace `/proc/<pid>/ctl` surface AND a narrow elevation-only 
       dial_corvus + getattr + THE GRANT-GATE + the proxy serve-one boundary-lines, AEGIS/mallocng-adjacent
       + privilege -- prosecute hard). OWED (#845/#841): the deterministic multi-in-flight
       loopback-fake-server harness lands with #827's multi-in-flight workload.
+      **#827b-beta AS-BUILT (DONE; scripture `afaba69` -> impl).** Surfaced + resolved a SECOND design
+      fork (user-voted, of 3): the per-user home is a SEPARATE Stratum child dataset, but 9P Tattach bound
+      only to the coordinator's root_dataset -- `t_attach_9p_srv(aname="users/michael")` -> EINVAL. **Added
+      a Stratum `ds:<name>` aname form** (server.c h_attach + `stm_fs_lookup_child_dataset` /
+      `stm_dataset_lookup_child_by_name`) that binds the connection root to a named child dataset; login
+      attaches `ds:<user>` + the proxy `--datasets-allowed ds:<user>`. Also: **init holds MAY_POST_SERVICE**
+      (`joey_thunk` stamp) so the post-relinquish getty can confer it; the **proxy coord-dial fcntl-ENOSYS
+      fix** (proxy_9p.c::dial_coord, mirror of corvus_client.c); the **serve-one-session** proxy mode
+      (the teardown lever). As-built path GREEN end-to-end: `login: home michael bound at /home/michael` +
+      `/sbin/login E2E OK` + `Thylacine boot OK`, default suite + cross-reboot both PASS, Stratum
+      `test_9p` 1/1 (+ 2 new `ds:` tests). 3 access gates on the home: proxy `--datasets-allowed`
+      (I-1) + 0700 owner (A-3 rwx) + installed DEK (locked-dataset attach inert). Files: Thylacine
+      kernel/joey.c + usr/joey/joey.c + usr/lib/libthyla-rs/src/process.rs + usr/login/src/main.rs +
+      docs/reference/103-login.md; Stratum src/9p/server.c + src/dataset/dataset.{c,h} + src/fs/fs.c +
+      include/stratum/fs.h + src/cmd/stratumd/{serve.c,run.c,proxy_9p.c} + include/stratum/stratumd.h +
+      tests/test_9p.c. NEXT = #828 audit (matrix smp8 + UBSan run AT the audit close; the new ds: resolver
+      + grant-gate + serve-one + DEK handoff -- prosecute hard).
 
 ---
 

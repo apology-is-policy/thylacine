@@ -159,6 +159,47 @@ the `do_login_e2e` exit-code gate covers the whole path.
   socket model is blocking by design; the `/srv` connect-walk is a fast local
   open).
 
+## A-5b: the per-user home bind (#827b-beta)
+
+After the DEK is installed, login binds the user's encrypted home at
+`/home/<user>` (`usr/login/src/main.rs::bind_home` / `unbind_home`), BEFORE
+spawning the shell, so the shell inherits the mount (the kernel deep-copies the
+mount table on spawn). The home is a SEPARATE Stratum child dataset (its own
+DEK); the path:
+
+1. **Spawn the per-user proxy AS the user**: `Command::new("stratumd")
+   .identity(pid,gid,&supp).perm(MAY_POST_SERVICE).caps(CSPRNG_READ)
+   .args(["--role","client","--listen","/srv/home-<user>",
+   "--coordinator-socket","/srv/stratum-fs","--datasets-allowed","ds:<user>",
+   "--single-session"])`. The proxy's connection to the coordinator carries the
+   user's `SO_PEERCRED` (per-user ownership); `--datasets-allowed ds:<user>`
+   admits ONLY the user's own attach (the I-1 boundary); `--single-session`
+   serves login's one attach then exits (the cooperative teardown lever -- login
+   cannot kill the user-owned proxy). `MAY_POST_SERVICE` is conferred via the
+   one-hop delegation (login holds it from joey).
+2. **Wait for + attach**: bounded retry (3000 x 1 ms torpor-yield, the joey
+   stratumd-boot pacing) `open=connect /srv/home-<user>` then
+   `t_attach_9p_srv(conn, "ds:<user>", ...)` -- the Stratum `ds:<name>` aname
+   form (a new attach kind) binds the connection root to the named child
+   dataset. The proxy's stderr is captured + drained to the boot log (joey's
+   stratumd diagnostics pattern); the read end is dropped after a successful
+   bind so steady-state proxy stderr can't stall on a full pipe.
+3. **Mount**: mkdir `/home` + `/home/<user>` (the joey `mkdir_or_open` idiom),
+   then `t_mount("/home/<user>", attach_root, T_MREPL)`.
+4. **Teardown (logout)**: `t_unmount("/home/<user>")` + close the attach -> the
+   single-session proxy's upstream EOFs -> it exits -> `proxy.wait()` reaps it;
+   then evict-dek + corvus SESSION_CLOSE.
+
+FATAL: a home that cannot be bound is a failed login (the boot E2E gates the
+whole path). Marker: `login: home <user> bound at /home/<user>`.
+
+The Stratum `ds:<name>` aname (`src/9p/server.c::h_attach` + the
+`stm_fs_lookup_child_dataset` / `stm_dataset_lookup_child_by_name` resolver) is
+the per-user-encryption mechanism: 3 orthogonal access gates -- the proxy
+`--datasets-allowed` (the I-1 user-vs-user boundary), the child dataset root's
+`0700` owner (the A-3 kernel rwx after attach), and the installed DEK (an
+un-unlocked dataset's root stat fails -> the attach is inert).
+
 ## Invariants
 
 - **I-27** (sharpened): during a user session corvus is the SOLE
@@ -196,12 +237,17 @@ the `do_login_e2e` exit-code gate covers the whole path.
 - A-5a is the login CORE. The DEK-via-corvus handoff (provision/install/evict
   over the coordinator's `/ctl`) is **A-5b #827a-login (DONE)** -- see the DEK
   lifecycle section above. The per-user `--role client` proxy + the `/home`
-  bind is **#827b (NEXT)**; the A-5b formal audit is **#828**. RECOVER +
+  bind is **#827b-beta (DONE)** -- see the per-user-home-bind section above; the
+  shell now boots with `/home/<user>` mounted from the user's encrypted child
+  dataset (`login: home <user> bound at /home/<user>`). The A-5b formal audit is
+  **#828** (DEK handoff + the `ds:<name>` resolver + the grant-gate + the proxy
+  serve-one boundary-line -- AEGIS/mallocng-adjacent + privilege). RECOVER +
   hostowner-c is A-5c.
-- The DEK lifecycle proves the path but does NOT yet bind `/home` (the home
-  dataset is provisioned + its DEK installed, but #827b mounts it). At
-  #827a-login the home is reachable-and-keyed; the bind makes it the user's
-  navigable `/home/<user>`.
+- v1.0 single-session simplification: the proxy posts `/srv/home-<user>` into
+  the INHERITED (boot) `/srv` registry, not a freshly-minted per-session one --
+  fine for single-session v1.0 (the name is user-scoped, no collision), and the
+  per-session-`/srv` isolation (the stalk-3a F2 mortal-registry concern) is a
+  v1.x lift surfaced here.
 - v1.0 single-console-serial: login writes prompts via fd 1 and the marker via
   `t_putstr` (the UART == the console). Multi-console / multi-session is a v1.x
   lift (prompts would route to fd 1 only; concurrent corvus sessions).

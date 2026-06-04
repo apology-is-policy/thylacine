@@ -36,11 +36,14 @@ extern crate alloc;
 #[global_allocator]
 static GLOBAL_ALLOCATOR: libthyla_rs::alloc::ThylaAlloc = libthyla_rs::alloc::ThylaAlloc;
 
+use alloc::string::String;
 use alloc::vec::Vec;
-use libthyla_rs::process::{Command, Stdio};
+use libthyla_rs::process::{Child, Command, Stdio};
 use libthyla_rs::{
-    t_attach_9p_srv, t_close, t_open, t_putstr, t_read, t_readdir, t_write, T_CAP_CSPRNG_READ,
-    T_CAP_LOCK_PAGES, T_OREAD, T_ORDWR, T_OWRITE, T_WALK_OPEN_FROM_ROOT,
+    t_attach_9p_srv, t_close, t_mount, t_open, t_poll, t_putstr, t_read, t_readdir, t_torpor_wait,
+    t_unmount, t_walk_create, t_walk_open, t_write, TPollFd, T_CAP_CSPRNG_READ, T_CAP_LOCK_PAGES,
+    T_MREPL, T_OPATH, T_OREAD, T_ORDWR, T_OWRITE, T_POLLIN, T_SPAWN_PERM_MAY_POST_SERVICE,
+    T_WALK_CREATE_DMDIR, T_WALK_OPEN_FROM_ROOT,
 };
 
 const VERB_AUTH: u8 = 1;
@@ -510,6 +513,206 @@ unsafe fn evict_dek(ctl_root: i64, dsid: u64) -> bool {
     ok
 }
 
+// ── A-5b per-user encrypted-home bind (IDENTITY-DESIGN section 9.9) ──
+//
+// Once the DEK is installed (the home dataset is unlockable by the coordinator),
+// login binds the user's encrypted home at /home/<user>. The home is a separate
+// Stratum dataset (users/<user>) that login does NOT serve directly: it spawns a
+// per-user proxy stratumd (--role client) AS the user, so the proxy's connection
+// to the boot coordinator carries the user's SO_PEERCRED and the coordinator
+// stamps the user as owner. The proxy posts /srv/home-<user> in the session
+// namespace; login attaches that 9P service and mounts it at /home/<user>. The
+// shell, spawned next, inherits the bind (the kernel territory_clone deep-copies
+// the mount table).
+//
+// The proxy is --single-session: it serves login's one attach and exits when
+// login closes it at logout; login then reaps it. login (PRINCIPAL_SYSTEM)
+// cannot KILL the user-owned proxy (the kill axes are owner / CAP_HOSTOWNER /
+// CAP_KILL, none of which login holds against a user-owned Proc), so the
+// cooperative serve-one teardown is the mechanism. login confers
+// MAY_POST_SERVICE on the proxy via the one-hop delegation (login holds the bit
+// from joey); it does NOT confer CONSOLE_TRUSTED (I-27).
+
+const COORD_FS_PATH: &str = "/srv/stratum-fs";
+
+// The session backing a bound /home/<user>: the proxy Child (reaped at logout),
+// login's dev9p attach root fd, and the mount path (for t_unmount).
+struct HomeSession {
+    proxy: Child,
+    attach_root: i64,
+    mount_path: Vec<u8>,
+}
+
+// mkdir-if-absent then O_PATH-open: a non-opened walkable handle usable as a
+// mountpoint or as the parent for the next level (the joey mkdir_or_open idiom).
+// `parent_fd` is T_WALK_OPEN_FROM_ROOT or a prior O_PATH handle. Returns the dir
+// fd (>= 0) or -1.
+unsafe fn mkdir_or_open(parent_fd: i64, name: &[u8]) -> i64 {
+    let cf = t_walk_create(parent_fd, name.as_ptr(), name.len(), T_OREAD,
+                           T_WALK_CREATE_DMDIR | 0o755);
+    if cf >= 0 {
+        let _ = t_close(cf);
+    }
+    t_walk_open(parent_fd, name.as_ptr(), name.len(), T_OPATH)
+}
+
+// Drain whatever is currently readable on the proxy's captured stderr to the
+// boot log (UART), strictly non-blocking (poll timeout 0). Mirrors joey's
+// stratumd stderr drain: surfaces the proxy's startup diagnostics AND keeps the
+// pipe buffer from filling (a full buffer would stall the proxy's next stderr
+// write). No-op when `fd` < 0.
+unsafe fn drain_proxy_stderr(fd: i64) {
+    if fd < 0 {
+        return;
+    }
+    loop {
+        let mut pfd = TPollFd { fd: fd as i32, events: T_POLLIN, revents: 0 };
+        let pr = t_poll(&mut pfd as *mut TPollFd, 1, 0);
+        if pr <= 0 || (pfd.revents & T_POLLIN) == 0 {
+            break;
+        }
+        let mut chunk = [0u8; 256];
+        let r = t_read(fd, chunk.as_mut_ptr(), chunk.len());
+        if r <= 0 {
+            break;
+        }
+        if let Ok(s) = core::str::from_utf8(&chunk[..r as usize]) {
+            t_putstr(s);
+        }
+    }
+}
+
+// bind_home: spawn the per-user proxy, wait for its /srv/home-<user> post,
+// attach it, and mount it at /home/<user>. Returns the session handle (torn down
+// at logout) or None on any failure -- a home that cannot be bound is a failed
+// login (the boot E2E gates the whole path).
+unsafe fn bind_home(user: &[u8], pid: u32, gid: u32, supp: &[u32]) -> Option<HomeSession> {
+    let user_str = core::str::from_utf8(user).ok()?;
+
+    // "/srv/home-<user>" (the proxy's session-namespace service) and the
+    // attach aname "ds:<user>" (the Stratum `ds:<name>` child-dataset selector;
+    // the dataset NAME = the username, as minted by provision-dek). The same
+    // string is the proxy's --datasets-allowed pattern (the I-1 gate).
+    let mut listen = String::from("/srv/home-");
+    listen.push_str(user_str);
+    let mut allowed = String::from("ds:");
+    allowed.push_str(user_str);
+
+    // Spawn the proxy AS the user. .perm(MAY_POST_SERVICE) is the one-hop
+    // delegation (login holds the bit from joey); .identity stamps the user so
+    // the proxy->coordinator SO_PEERCRED is the user; --datasets-allowed scopes
+    // the Tattach to users/<user> (the I-1 boundary). stderr is captured for
+    // boot-log diagnostics; stdin/stdout inherit login's.
+    let mut cmd = Command::new("stratumd");
+    cmd.identity(pid, gid, supp)
+        .caps(T_CAP_CSPRNG_READ)
+        .perm(T_SPAWN_PERM_MAY_POST_SERVICE)
+        .arg("--role").arg("client")
+        .arg("--listen").arg(listen.clone())
+        .arg("--coordinator-socket").arg(COORD_FS_PATH)
+        .arg("--datasets-allowed").arg(allowed.clone())
+        .arg("--single-session")
+        .stdin(Stdio::Inherit)
+        .stdout(Stdio::Inherit)
+        .stderr(Stdio::Piped);
+    let mut proxy = match cmd.spawn() {
+        Ok(c) => c,
+        Err(_) => {
+            t_putstr("login: home proxy spawn failed\n");
+            return None;
+        }
+    };
+    let err_fd = proxy.stderr.as_ref().map(|f| f.as_raw_fd() as i64).unwrap_or(-1);
+
+    // Wait for the proxy to libsodium-init + dial the coordinator + post
+    // /srv/home-<user>, then attach. Between retries, yield the vCPU via a 1 ms
+    // torpor timeout (the joey-stratumd pacing: busy-spin starves the proxy's
+    // threads under TCG). `pacer` is a never-woken sleep-only sentinel.
+    // 3000 * 1 ms = ~3 s outer bound.
+    let listen_b = listen.as_bytes();
+    let allowed_b = allowed.as_bytes();
+    let mut attach_root: i64 = -1;
+    let pacer: u32 = 0;
+    for _ in 0..3000 {
+        let conn = t_open(T_WALK_OPEN_FROM_ROOT, listen_b.as_ptr(), listen_b.len(), T_ORDWR);
+        if conn >= 0 {
+            // attach the proxy's session via the `ds:<user>` child-dataset aname.
+            let r = t_attach_9p_srv(conn, allowed_b.as_ptr(), allowed_b.len(), 0);
+            let _ = t_close(conn);
+            if r >= 0 {
+                attach_root = r;
+                break;
+            }
+        }
+        drain_proxy_stderr(err_fd);
+        let _ = t_torpor_wait(&pacer as *const u32, 0, 1000);
+    }
+    drain_proxy_stderr(err_fd);
+    if attach_root < 0 {
+        t_putstr("login: home attach failed (proxy never posted /srv/home)\n");
+        // The single-session proxy never got its client; it is still in accept.
+        // login cannot kill it; drop the Child (the kernel reaps it when login
+        // exits). This is a failed login.
+        return None;
+    }
+
+    // Mount the attached home at /home/<user>. The mountpoint must exist: mkdir
+    // /home then /home/<user> (login runs as SYSTEM and owns the boot-pool root,
+    // so these creates are permitted), then graft.
+    let home_dir = mkdir_or_open(T_WALK_OPEN_FROM_ROOT, b"home");
+    if home_dir < 0 {
+        t_putstr("login: /home mkdir failed\n");
+        let _ = t_close(attach_root);
+        return None;
+    }
+    let ud = mkdir_or_open(home_dir, user);
+    let _ = t_close(home_dir);
+    if ud < 0 {
+        t_putstr("login: /home/<user> mkdir failed\n");
+        let _ = t_close(attach_root);
+        return None;
+    }
+    let _ = t_close(ud);
+
+    let mut mount_path: Vec<u8> = Vec::new();
+    mount_path.extend_from_slice(b"/home/");
+    mount_path.extend_from_slice(user);
+    if t_mount(mount_path.as_ptr(), mount_path.len(), attach_root, T_MREPL) != 0 {
+        t_putstr("login: /home/<user> mount failed\n");
+        let _ = t_close(attach_root);
+        return None;
+    }
+
+    // Drop login's read end of the proxy stderr pipe now that startup is done:
+    // steady-state proxy stderr writes then fail fast (EOF) instead of stalling
+    // on a full pipe buffer that nobody drains during the session.
+    drain_proxy_stderr(err_fd);
+    proxy.stderr = None;
+
+    {
+        let mut line: Vec<u8> = Vec::new();
+        line.extend_from_slice(b"login: home ");
+        line.extend_from_slice(user);
+        line.extend_from_slice(b" bound at /home/");
+        line.extend_from_slice(user);
+        line.push(b'\n');
+        if let Ok(s) = core::str::from_utf8(&line) {
+            t_putstr(s);
+        }
+    }
+
+    Some(HomeSession { proxy, attach_root, mount_path })
+}
+
+// unbind_home: logout teardown. Unmount /home/<user> + close login's attach ->
+// the proxy's single upstream EOFs -> the proxy returns from serve and exits ->
+// reap it (ut was already reaped, so this wait collects the proxy).
+unsafe fn unbind_home(mut sess: HomeSession) {
+    let _ = t_unmount(sess.mount_path.as_ptr(), sess.mount_path.len());
+    let _ = t_close(sess.attach_root);
+    let _ = sess.proxy.wait();
+}
+
 #[no_mangle]
 pub extern "C" fn rs_main() -> i64 {
     let mut user: Vec<u8> = Vec::new();
@@ -625,9 +828,26 @@ pub extern "C" fn rs_main() -> i64 {
         }
     }
 
+    // A-5b: bind the user's encrypted home at /home/<user> BEFORE spawning the
+    // shell, so the shell inherits the mount (the kernel deep-copies the mount
+    // table on spawn). FATAL: a home that cannot be bound is a failed login.
+    let home = match unsafe { bind_home(&user, pid, gid, &supp) } {
+        Some(h) => h,
+        None => {
+            t_putstr("login: home bind failed\n");
+            unsafe { dump_ctl_events(ctl) };
+            let _ = unsafe { evict_dek(ctl, dsid) };
+            let _ = unsafe { t_close(ctl) };
+            unsafe { session_close(conn, &token) };
+            let _ = unsafe { t_close(conn) };
+            return 1;
+        }
+    };
+
     // Spawn the shell AS the user. fd 0/1/2 inherit login's (the tty), so the
     // shell reads + writes the same console. The shell gets the user's identity
-    // (SPAWN_IDENTITY_SET) but NOT CAP_SET_IDENTITY.
+    // (SPAWN_IDENTITY_SET) but NOT CAP_SET_IDENTITY. It inherits the /home/<user>
+    // bind established above.
     let mut child = match Command::new(SHELL)
         .identity(pid, gid, &supp)
         .caps(SHELL_CAPS)
@@ -639,6 +859,7 @@ pub extern "C" fn rs_main() -> i64 {
         Ok(c) => c,
         Err(_) => {
             write_out(b"login: shell spawn failed\n");
+            unsafe { unbind_home(home) };
             let _ = unsafe { evict_dek(ctl, dsid) };
             let _ = unsafe { t_close(ctl) };
             unsafe { session_close(conn, &token) };
@@ -650,9 +871,12 @@ pub extern "C" fn rs_main() -> i64 {
     // Session leader: wait the shell. Its exit IS logout (regardless of status).
     let _ = child.wait();
 
-    // Logout: evict the session DEK (the conn-bound lease; conn-destroy would
-    // also auto-evict, but explicit eviction zeroes promptly), drop the /ctl
-    // attach, then close the corvus session (zeroes the keypair) + drop the conn.
+    // Logout: tear down the home (unmount /home/<user> + close the attach -> the
+    // single-session proxy's upstream EOFs -> the proxy exits -> reap it), then
+    // evict the session DEK (the conn-bound lease; conn-destroy would also
+    // auto-evict, but explicit eviction zeroes promptly), drop the /ctl attach,
+    // close the corvus session (zeroes the keypair) + drop the conn.
+    unsafe { unbind_home(home) };
     let _ = unsafe { evict_dek(ctl, dsid) };
     let _ = unsafe { t_close(ctl) };
     unsafe { session_close(conn, &token) };

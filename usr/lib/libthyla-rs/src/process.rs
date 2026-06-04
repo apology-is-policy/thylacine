@@ -188,6 +188,14 @@ pub struct Command {
     // caller must hold T_CAP_SET_IDENTITY or the kernel rejects the spawn.
     // /sbin/login is the v1.0 consumer: it stamps the authenticated user.
     identity: Option<(u32, u32, Vec<u32>)>,
+    // A-5b (#827b): SPAWN_PERM_* bits the kernel stamps onto the child (e.g.
+    // T_SPAWN_PERM_MAY_POST_SERVICE so the child may post a /srv service). The
+    // grant is gated per-bit (kernel spawn_perm_grant_check): MAY_POST_SERVICE
+    // requires the caller be console-attached OR already hold the bit (one-hop
+    // delegation); CONSOLE_TRUSTED stays console-attach-only. Default 0 = grant
+    // nothing. /sbin/login confers MAY_POST_SERVICE on the per-user proxy
+    // stratumd it spawns to back the encrypted home.
+    perm_flags: u64,
 }
 
 impl Command {
@@ -204,6 +212,7 @@ impl Command {
             stderr: Stdio::Inherit,
             cap_mask: !0u64, // inherit all caps; kernel intersects with parent
             identity: None,  // A-5a: inherit the caller's identity by default
+            perm_flags: 0,   // A-5b: grant no SPAWN_PERM_* bits by default
         }
     }
 
@@ -270,6 +279,20 @@ impl Command {
         self
     }
 
+    /// A-5b (#827b): grant the child the given `SPAWN_PERM_*` bits (OR of
+    /// `T_SPAWN_PERM_MAY_POST_SERVICE` / `T_SPAWN_PERM_CONSOLE_TRUSTED`). The
+    /// kernel gates each bit at spawn (`spawn_perm_grant_check`): granting
+    /// `MAY_POST_SERVICE` requires the caller be console-attached OR already
+    /// hold the bit (the one-hop delegation); `CONSOLE_TRUSTED` is
+    /// console-attach-only. A bit the caller may not confer fails the spawn.
+    /// Default 0. `/sbin/login` (holding `MAY_POST_SERVICE` from joey) confers
+    /// it on the per-user proxy stratumd backing the encrypted home.
+    #[inline]
+    pub fn perm(&mut self, perm_flags: u64) -> &mut Command {
+        self.perm_flags = perm_flags;
+        self
+    }
+
     /// Spawn the child. Returns a `Child` handle; the parent retains
     /// any `Stdio::Piped` ends as `Child::stdin` / `stdout` / `stderr`.
     pub fn spawn(&mut self) -> Result<Child> {
@@ -333,7 +356,7 @@ impl Command {
             argv_data_len: argv_buf.len() as u32,
             argc,
             fd_count: 3,
-            perm_flags: 0,
+            perm_flags: self.perm_flags as u32,
             _pad_envp: 0,
             cap_mask: self.cap_mask,
             principal_id: id_pid,
