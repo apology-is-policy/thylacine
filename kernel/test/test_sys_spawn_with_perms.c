@@ -53,10 +53,16 @@ extern int sys_spawn_with_perms_for_proc(struct Proc *p,
                                          const u32 *fds, u32 fd_count,
                                          caps_t cap_mask, u32 perm_flags);
 
+// A-5b #827b: the per-bit grant gate, exported so the decision can be driven
+// directly on synthetic Procs (decoupled from the heavyweight spawn body).
+extern int spawn_perm_grant_check(struct Proc *p, u32 perm_flags);
+
 void test_sys_spawn_with_perms_zero_perm_is_spawn_full(void);
 void test_sys_spawn_with_perms_console_attached_grants_may_post(void);
 void test_sys_spawn_with_perms_rejects_non_console_attached_parent(void);
 void test_sys_spawn_with_perms_rejects_unknown_perm_bits(void);
+void test_sys_spawn_with_perms_holder_delegates_may_post(void);
+void test_sys_spawn_with_perms_console_trusted_not_delegable(void);
 
 static void drain_zombies(void) {
     int status = 0;
@@ -167,4 +173,68 @@ void test_sys_spawn_with_perms_rejects_unknown_perm_bits(void) {
                                             NULL, 0, CAP_NONE,
                                             bad_perm);
     TEST_EXPECT_EQ(rc, -1, "unknown SPAWN_PERM_* bits → -1");
+}
+
+// A-5b #827b: a Proc that ALREADY holds PROC_FLAG_MAY_POST_SERVICE may delegate
+// it ONE hop, even though it is NOT console-attached (joey -> /sbin/login ->
+// per-user --role client proxy). The control case (a non-attached, non-holding
+// Proc) must still be rejected — that is the pre-#827b behavior the delegation
+// must not weaken. Driven through spawn_perm_grant_check directly: the gate
+// DECISION is the security-relevant logic, decoupled from the spawn body.
+void test_sys_spawn_with_perms_holder_delegates_may_post(void) {
+    drain_zombies();
+
+    struct Proc *holder = proc_alloc();
+    TEST_ASSERT(holder != NULL, "proc_alloc holder Proc");
+    TEST_ASSERT(!proc_is_console_attached(holder),
+        "holder is not console-attached");
+
+    // Control (pre-#827b behavior preserved): a non-attached Proc that does NOT
+    // hold the bit cannot grant it.
+    TEST_EXPECT_EQ(spawn_perm_grant_check(holder, SPAWN_PERM_MAY_POST_SERVICE), -1,
+        "non-attached non-holder cannot grant MAY_POST_SERVICE");
+
+    // Stamp the holder. Now the one-hop delegation applies.
+    proc_mark_may_post_service(holder);
+    TEST_ASSERT(proc_may_post_service(holder),
+        "holder now holds MAY_POST_SERVICE");
+    TEST_EXPECT_EQ(spawn_perm_grant_check(holder, SPAWN_PERM_MAY_POST_SERVICE), 0,
+        "a MAY_POST_SERVICE holder delegates the bit (A-5b #827b)");
+    TEST_EXPECT_EQ(spawn_perm_grant_check(holder, 0u), 0,
+        "perm_flags=0 always grantable");
+
+    holder->state = PROC_STATE_ZOMBIE;
+    proc_free(holder);
+}
+
+// A-5b #827b: SPAWN_PERM_CONSOLE_TRUSTED (the SAK trust anchor) is NOT delegable
+// by the held-MAY_POST_SERVICE path — it stays console-attach-only, so a
+// service-poster can never confer the console-trust used for elevation (I-27).
+void test_sys_spawn_with_perms_console_trusted_not_delegable(void) {
+    drain_zombies();
+
+    struct Proc *holder = proc_alloc();
+    TEST_ASSERT(holder != NULL, "proc_alloc holder Proc");
+    proc_mark_may_post_service(holder);
+    TEST_ASSERT(proc_may_post_service(holder) && !proc_is_console_attached(holder),
+        "holder holds MAY_POST_SERVICE and is not console-attached");
+
+    // Holding MAY_POST_SERVICE does NOT let a non-attached Proc grant
+    // CONSOLE_TRUSTED — alone or combined with the delegable bit.
+    TEST_EXPECT_EQ(spawn_perm_grant_check(holder, SPAWN_PERM_CONSOLE_TRUSTED), -1,
+        "held MAY_POST_SERVICE does not delegate CONSOLE_TRUSTED");
+    TEST_EXPECT_EQ(spawn_perm_grant_check(holder,
+        SPAWN_PERM_MAY_POST_SERVICE | SPAWN_PERM_CONSOLE_TRUSTED), -1,
+        "the CONSOLE_TRUSTED bit fails the gate even with MAY_POST_SERVICE held");
+
+    holder->state = PROC_STATE_ZOMBIE;
+    proc_free(holder);
+
+    // The unchanged console path: a console-attached Proc grants both bits.
+    struct Thread *t = current_thread();
+    TEST_ASSERT(t && t->proc, "current thread has Proc");
+    proc_mark_console_attached(t->proc);
+    TEST_EXPECT_EQ(spawn_perm_grant_check(t->proc,
+        SPAWN_PERM_MAY_POST_SERVICE | SPAWN_PERM_CONSOLE_TRUSTED), 0,
+        "console-attached grants both bits");
 }

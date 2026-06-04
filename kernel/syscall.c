@@ -3551,10 +3551,32 @@ int sys_spawn_full_for_proc(struct Proc *p, const char *name, size_t name_len,
                                               cap_mask, /*perm_flags=*/0u);
 }
 
-// SYS_SPAWN_WITH_PERMS — P5-corvus-srv-impl-b3a kernel body. Gates any
-// nonzero SPAWN_PERM_* bit on the caller being console-attached (joey is
-// the v1.0 console anchor; an ordinary Proc that wandered into this call
-// has no path to confer the bit). Setting perm_flags=0 is identical to
+// spawn_perm_grant_check — the authoritative SPAWN_PERM_* grant gate, per-bit.
+// SPAWN_PERM_CONSOLE_TRUSTED is the SAK trust anchor: console-attach-only, never
+// delegable (so a service-poster can never confer the console-trust used for
+// elevation -- I-27). SPAWN_PERM_MAY_POST_SERVICE (A-5b #827b) may be conferred by
+// a console-attached granter OR by a Proc that ALREADY holds the bit -- the
+// one-hop delegation (joey, console-attached, spawns /sbin/login WITH the bit;
+// login confers it on a per-user --role client proxy that posts /srv/home-<user>
+// in the session's private per-territory /srv). The bit is still never
+// rfork-propagated: it is a perm_flags spawn-time decision, not a cap_mask bit,
+// so I-2 (the fork-grantable cap set only reduces) is unaffected. Returns 0 iff
+// every requested bit may be granted by p; -1 otherwise. Both spawn entry points
+// (SYS_SPAWN_WITH_PERMS and SYS_SPAWN_FULL_ARGV) route through here so the grant
+// authority lives in exactly one place. Non-static so the kernel test suite can
+// drive the per-bit decision directly on synthetic Procs.
+int spawn_perm_grant_check(struct Proc *p, u32 perm_flags) {
+    if (perm_flags & ~SPAWN_PERM_ALL)                              return -1;
+    if ((perm_flags & SPAWN_PERM_CONSOLE_TRUSTED)
+            && !proc_is_console_attached(p))                       return -1;
+    if ((perm_flags & SPAWN_PERM_MAY_POST_SERVICE)
+            && !proc_is_console_attached(p)
+            && !proc_may_post_service(p))                          return -1;
+    return 0;
+}
+
+// SYS_SPAWN_WITH_PERMS — P5-corvus-srv-impl-b3a kernel body. The grant gate
+// (spawn_perm_grant_check) is per-bit. Setting perm_flags=0 is identical to
 // SYS_SPAWN_FULL — kept as a single entry point so callers that grant no
 // permissions do not need a separate code path.
 int sys_spawn_with_perms_for_proc(struct Proc *p,
@@ -3562,8 +3584,7 @@ int sys_spawn_with_perms_for_proc(struct Proc *p,
                                   const u32 *fds, u32 fd_count,
                                   caps_t cap_mask, u32 perm_flags) {
     if (!p)                                             return -1;
-    if (perm_flags & ~SPAWN_PERM_ALL)                   return -1;
-    if (perm_flags != 0u && !proc_is_console_attached(p)) return -1;
+    if (spawn_perm_grant_check(p, perm_flags) != 0)     return -1;
     return sys_spawn_full_with_perms_for_proc(p, name, name_len, fds, fd_count,
                                               cap_mask, perm_flags);
 }
@@ -3958,12 +3979,12 @@ static int sys_spawn_full_argv_with_perms_for_proc(
     return pid;
 }
 
-// A-1a: identity-aware entry — the real gate site. Does the console-perm
-// gate AND the CAP_SET_IDENTITY gate (FAIL-CLOSED) + reserved-value reject,
-// then delegates to the body. Exported (non-static) for kernel tests; the
-// identity is passed as scalars (not the internal struct spawn_identity)
-// so the test file needs no kernel-internal type. set_identity == false
-// (the back-compat path) means the child inherits the parent's identity.
+// A-1a: identity-aware entry — the real gate site. Does the per-bit SPAWN_PERM
+// grant gate (spawn_perm_grant_check) AND the CAP_SET_IDENTITY gate (FAIL-CLOSED)
+// + reserved-value reject, then delegates to the body. Exported (non-static) for
+// kernel tests; the identity is passed as scalars (not the internal struct
+// spawn_identity) so the test file needs no kernel-internal type. set_identity ==
+// false (the back-compat path) means the child inherits the parent's identity.
 int sys_spawn_full_argv_identity_for_proc(struct Proc *p,
         const char *name, size_t name_len,
         const char *argv_data, u32 argv_data_len, u32 argc,
@@ -3972,8 +3993,7 @@ int sys_spawn_full_argv_identity_for_proc(struct Proc *p,
         bool set_identity, u32 principal_id, u32 primary_gid,
         const u32 *supp_gids, u32 supp_gid_count) {
     if (!p)                                             return -1;
-    if (perm_flags & ~SPAWN_PERM_ALL)                   return -1;
-    if (perm_flags != 0u && !proc_is_console_attached(p)) return -1;
+    if (spawn_perm_grant_check(p, perm_flags) != 0)     return -1;
 
     struct spawn_identity id = {0};
     const struct spawn_identity *eff_id = NULL;
