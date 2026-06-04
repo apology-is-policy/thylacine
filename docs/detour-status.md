@@ -948,9 +948,34 @@ kill = BOTH the namespace `/proc/<pid>/ctl` surface AND a narrow elevation-only 
       token), and login E2E all green. Audit-bearing (corvus session model) -- folds into the #828 A-5b
       body audit (the full matrix + focused prosecution land there). Docs: CORVUS-DESIGN §6.2 +
       74-corvus-9p-server.md.
-    - **NEXT = the A-5b body** (#826 Stratum coordinator / #827 login wiring) on top of namespace-resident
-      `/srv`. The stalk-3a-audit F2 (mortal-registry last-unref) activates at #827; the #828 audit prosecutes
-      the DEK handoff (AEGIS/mallocng-adjacent) hard.
+    - **A-5b body, step 2a -- #826a Stratum deferred-unwrap soft-skip + STM_ELOCKED COMPLETE**
+      (Stratum `thylacine-pouch-arm` `623f764`; first slice of the #826 coordinator). `sync_unwrap_cb`'s
+      no-token CURRENT-corvus-slot hard-fail (`STM_EINVAL`) becomes a SCOPED soft-skip: a non-system
+      dataset (ds != pool 0 / root 1) comes up present-but-LOCKED so the long-lived coordinator boots with
+      user-sealed homes present-but-unreadable (the system datasets still fail-fast; the R42
+      attempted-unwrap-fails tamper hard-fail is untouched -- soft-skip fires ONLY on passive no-token).
+      `sync_resolve_current_dek_locked` returns the new `STM_ELOCKED` (-218; wire EACCES) instead of
+      `STM_ECORRUPT` when a CURRENT keyslot is present but its DEK is absent (the locked/deferred state) --
+      design finding F6: a locked dataset is access-deferred, not damaged, so it never feeds an
+      integrity/wedge policy. NO on-disk-format or wire-ABI break (DEK cache is RAM-only; CORVUS wrapper
+      pre-exists). Tests: `test_corvus_mount::corvus_mount_soft_skips_locked_user_dataset` (NEW; mount
+      no-corvus -> OK + write -> ELOCKED) + `test_corvus_provision::provision_via_stratumd_run` (no-corvus
+      remount block flipped to the soft-skip + ELOCKED discriminator). Full ctest 64/65 -- the 1 failure
+      (`test_compound_ops_concurrent`) is a PRE-EXISTING, in-flight Stratum concurrency flake (transient
+      `STM_ECORRUPT` under concurrent reflink; the R171/R172 SH-fallback-incomplete audit arc:
+      `.audit_r172_findings.md` + uncommitted `compound_ops_per_inode.tla`), causally isolated from this
+      change (the flake is the SH read path 5734, untouched; this change is the EX write path 5028; it
+      manifests as -200, not -218). Behavior-PRESERVING for the current Thylacine boot (no pool provisions
+      CORVUS homes yet -> the changed branches are dormant); the whole-system LIVE verification is the #827
+      gate. **Discovery:** `stratumd --provision-corvus-dataset` ALREADY exists + is tested
+      (`test_corvus_provision`) -- the handoff's "host-bake" line referred to existing code, and
+      design-finding F3 (host-bake of homes DROPPED; login-driven first-login provisioning is the sole path)
+      is the authoritative reconciliation.
+    - **NEXT = #826b** (the runtime DEK install/evict consumer `stm_fs_install_dek`/`evict_dek` + the two
+      writable `/ctl` kinds install-dek/evict-dek + F7 owning-session authz + the read-path 5734
+      `STM_ELOCKED` conversion w/ evict), then **#826c** (first-login provisioning wiring; the stratumd
+      provision mechanism exists), then **#827** login wiring (the stalk-3a-audit F2 mortal-registry
+      last-unref activates here) + **#828** audit (DEK handoff AEGIS/mallocng-adjacent, prosecute hard).
 
 ---
 
