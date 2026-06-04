@@ -1097,18 +1097,57 @@ kill = BOTH the namespace `/proc/<pid>/ctl` surface AND a narrow elevation-only 
       rfork-propagated; I-2/I-27 intact. Scripture: IDENTITY-DESIGN §9.9 + ARCH §11.2c + ARCH §25.4 row +
       CLAUDE.md row. Alternatives deferred: a distinct `SPAWN_PERM_GRANT_POST_SERVICE` bit; a
       connected-`SrvConn`-pair primitive (the v1.x coordinator-blind NOVEL).
-      **Impl plan** (depth-first): (1) kernel per-bit gate relaxation + `proc_may_post_service` reuse +
-      regression test; (2) joey spawns login WITH `SPAWN_PERM_MAY_POST_SERVICE`; (3) libthyla-rs `Command`
-      perm setter; (4) login spawns the proxy AS the user (`.identity()` -> SO_PEERCRED per-user ownership)
-      with `MAY_POST_SERVICE` + caps + argv `--role client --listen /srv/home-<user> --coordinator-socket
-      /srv/stratum-fs --datasets-allowed users/<user>`, attach `/srv/home-<user>` (`t_attach_9p_srv`
-      aname="users/<user>"), bind `/home/<user>` (`t_mount`) into login's territory (the shell inherits it),
-      logout teardown (unmount + group-terminate the proxy); (5) Stratum `--role client` verify. **The
-      stalk-3a-audit F2 mortal-registry last-unref activates at #827b** (login mints the first per-session
-      SrvRegistry). Then **#828** audit (the DEK handoff + provision mint+WRAP + send/recv + dial_corvus +
-      getattr + THE GRANT-GATE boundary-lines, AEGIS/mallocng-adjacent + privilege -- prosecute hard).
-      OWED (#845/#841): the deterministic multi-in-flight loopback-fake-server harness lands with #827's
-      multi-in-flight workload.
+      **#827b-alpha DONE (`e003c56`)** -- the kernel per-bit grant gate. Factored a single shared
+      `spawn_perm_grant_check(p, perm_flags)` (non-static for tests) that both spawn entry points
+      (`sys_spawn_with_perms_for_proc` + `sys_spawn_full_argv_identity_for_proc`) route through:
+      `CONSOLE_TRUSTED` -> console-attach-only; `MAY_POST_SERVICE` -> console-attach OR
+      `proc_may_post_service(p)`. + 2 deterministic tests (`holder_delegates_may_post`,
+      `console_trusted_not_delegable`). Harmless alone (joey still spawns login `perm_flags=0`). Built
+      clean; 707->709/709 PASS; login E2E intact; 0 EXTINCTION.
+      **#827b-beta NEXT (the consumer wiring; ONE coherent sub-chunk -- the pieces are interdependent):**
+      (1) libthyla-rs `Command` perm setter (thread `perm_flags` into the `TSpawnArgs` record -- today
+      `Command::spawn` hardcodes 0); (2) joey spawns `/sbin/login` WITH `T_SPAWN_PERM_MAY_POST_SERVICE`
+      (both `do_login_e2e` AND `session_getty_loop`); (3) **Stratum serve-one-session proxy mode** (the
+      TEARDOWN resolution -- see below); (4) login: mkdir `/home` + `/home/<user>` (the joey
+      `mkdir_or_open` idiom = `t_walk_create(FROM_ROOT, "home", T_OREAD, DMDIR|0755)` then
+      `t_walk_open(FROM_ROOT,"home",T_OPATH)` then `t_walk_create(home_fd,"<user>",DMDIR|0755)`), spawn
+      the proxy AS the user (`Command::new("stratumd").identity(pid,gid,&supp).perm(MAY_POST_SERVICE)
+      .caps(...).args([...])`) with argv `--role client --listen /srv/home-<user> --coordinator-socket
+      /srv/stratum-fs --datasets-allowed users/<user>` (+ `--single-session` from step 3), bounded-retry
+      open=connect `/srv/home-<user>` -> `t_attach_9p_srv(conn, "users/<user>", 11+, 0)` -> dev9p root,
+      `t_mount("/home/<user>", root, T_MREPL)`, THEN spawn `ut` (so the bind is inherited), wait, logout:
+      `t_unmount("/home/<user>")` + close the attach (-> the proxy's single upstream EOFs -> proxy exits)
+      + `child.wait()` reaps the proxy + evict-dek + close /ctl + SESSION_CLOSE; (5) build all + boot E2E +
+      cross-reboot.
+      **TEARDOWN RESOLVED (within autonomy -- no privilege change):** login (SYSTEM, non-console-attached)
+      CANNOT kill the michael-proxy -- `devproc_kill_authorized` (devproc.c:485) is owner(same
+      principal_id)-OR-`CAP_HOSTOWNER`-OR-`CAP_KILL`, and the cap axes are elevation-only/console-gated
+      (login holds neither); `Child` has no `kill()` (process.rs:399, only `wait()`/`pid()`). And the
+      Stratum proxy loop-accepts (serve.c:722 `stratumd_accept_proxy_loop`, exits only on a fatal signal or
+      listen POLLHUP -- neither reachable by login). So teardown is COOPERATIVE: add a Stratum
+      **serve-one-session** mode (`--single-session` or implied by `--role client` when invoked per-login)
+      that serves login's single upstream attach and EXITS when it closes; login then `child.wait()`-reaps
+      it. No new Thylacine kill authority. (The reusable Plan-9 notegroup-kill primitive is the "right"
+      long-term answer but is Utopia job-control scope -- a documented SEAM, not #827b.)
+      **VERIFIED MECHANICS (ground-truth pass 2026-06-04, all CONFIRMED -- do NOT re-investigate):**
+      (a) territory_clone DEEP-COPIES the mount table + root_spoor (territory.c:129-142) -> the shell
+      inherits login's `/home/<user>` bind IFF login binds BEFORE spawning the shell;
+      (b) `stratumd` IS in the initrd cpio (build.sh:298) and `devramfs_lookup` (syscall.c:3137) is the
+      UNCONDITIONAL, pivot-INDEPENDENT spawn-name resolver -> `Command::new("stratumd")` resolves
+      post-pivot (the Explore agent's "BLOCKED post-pivot" was a FALSE ALARM -- joey already spawns
+      "stratumd" by name);
+      (c) the proxy spawned AS michael (`.identity`) carries michael's SO_PEERCRED on its
+      proxy->coordinator connection -> the coordinator stamps michael ownership (the proxy forwards 9P
+      frames verbatim; per-user attribution flows via SO_PEERCRED, NOT in-band -- this is correct);
+      (d) `--datasets-allowed users/<user>` scopes Tattach -> `Rlerror(EACCES)` out-of-scope
+      (proxy_9p.c:398-432) = the I-1 user-vs-user boundary;
+      (e) login's DEK stays live for the proxy's session because install-dek's lease is conn-bound to
+      login's `/ctl` attach, which login holds until logout.
+      **The stalk-3a-audit F2 mortal-registry last-unref activates at #827b-beta** (login mints the first
+      per-session SrvRegistry). Then **#828** audit (DEK handoff + provision mint+WRAP + send/recv +
+      dial_corvus + getattr + THE GRANT-GATE + the proxy serve-one boundary-lines, AEGIS/mallocng-adjacent
+      + privilege -- prosecute hard). OWED (#845/#841): the deterministic multi-in-flight
+      loopback-fake-server harness lands with #827's multi-in-flight workload.
 
 ---
 
