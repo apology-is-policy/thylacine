@@ -1165,7 +1165,7 @@ kill = BOTH the namespace `/proc/<pid>/ctl` surface AND a narrow elevation-only 
       include/stratum/fs.h + src/cmd/stratumd/{serve.c,run.c,proxy_9p.c} + include/stratum/stratumd.h +
       tests/test_9p.c. AUDIT: #828 (below).
 
-      **#828 A-5b formal audit -- CLOSE (DONE; Thylacine `*(pending)*`; Stratum `c643c4e`).** THREE
+      **#828 A-5b formal audit -- CLOSE (DONE; Thylacine `610d490`; Stratum `c643c4e`).** THREE
       focused Opus prosecutors (A: DEK/crypto + the #829 corvus session-ownership; B: the ds: resolver
       + dataset isolation + proxy; C: the per-bit grant gate + bind_home lifecycle) + an independent
       self-audit. **0 P0 + 0 P1 + 4 P2 + 6 P3** -- NOT dirty. Core architecture VERIFIED SOUND across
