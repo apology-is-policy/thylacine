@@ -458,6 +458,36 @@ int p9_parse_rclunk(const u8 *in, size_t len, u16 *tag) {
 }
 
 // =============================================================================
+// Tflush / Rflush.
+//
+// Tflush body: [oldtag: u16]   (the tag of the request being abandoned)
+// Rflush body: (empty)
+//
+// A client sends Tflush to abandon an outstanding request whose owner has
+// gone away (Thylacine: the owning Proc is group-terminating). On Rflush the
+// server guarantees it will not answer `oldtag`, so the client may reclaim it.
+// =============================================================================
+
+int p9_build_tflush(u8 *out, size_t cap, u16 tag, u16 oldtag) {
+    size_t total = P9_HDR_LEN + 2;
+    if (cap < total) return -1;
+    int rc = write_header(out, cap, (u32)total, P9_TFLUSH, tag);
+    if (rc < 0) return -1;
+    rc = p9_pack_u16(out + P9_HDR_LEN, cap - P9_HDR_LEN, oldtag);
+    if (rc < 0) return -1;
+    return (int)total;
+}
+
+int p9_parse_rflush(const u8 *in, size_t len, u16 *tag) {
+    if (!tag) return -1;
+    int hdr = validate_rmsg_header(in, len, P9_RFLUSH, tag);
+    if (hdr < 0) return -1;
+    // Rflush has no body.
+    if ((size_t)hdr != len) return -1;
+    return 0;
+}
+
+// =============================================================================
 // Rlerror — server-side error response, replaces any expected Rxx.
 //
 // Rlerror body: [ecode: u32]   (Linux errno value)

@@ -220,11 +220,13 @@ static int reader_recv_frame(struct p9_client *c) {
 // Demux one received frame (in c->transport.recv_buf, `len` bytes) to its owner.
 // c->lock HELD. An OWNED frame is copied into the owner's reply_buf + the owner
 // is woken (the owner dispatches it -- extraction stays in the submitter). An
-// OWNERLESS frame (the owning op died + unwound, leaving session.outstanding[tag]
-// active) is dispatched-and-discarded HERE to clear outstanding[tag] -> reclaim
-// the tag (the v1.0 no-Tflush discipline: the tag was never reused because
-// outstanding[tag] stayed active until this reply drained). A malformed header,
-// out-of-range tag, or oversize frame is a protocol violation -> mark dead.
+// OWNERLESS frame is dispatched-and-discarded HERE. For an abandoned op (the
+// owning Proc died + unwound, #845) this is either the late original reply --
+// p9_session_dispatch_rmsg consumes it WITHOUT freeing the tag, which stays
+// reserved (awaiting_flush) until its Rflush -- or the Rflush itself, which
+// frees both the flush tag and the abandoned oldtag. dispatch_rmsg routes both
+// cases. A malformed header, out-of-range tag, or oversize frame is a protocol
+// violation -> mark dead.
 static void demux_frame_locked(struct p9_client *c, size_t len) {
     u32 size; u8 type; u16 tag;
     if (p9_peek_header(c->transport.recv_buf, len, &size, &type, &tag) < 0) {
@@ -368,13 +370,30 @@ static int client_run(struct p9_client *c, size_t built_len,
 
     int wr = client_wait(c, &rpc);
     if (wr == CLIENT_WAIT_DIED) {
-        // My Proc is dying. Leave session.outstanding[tag] ACTIVE (so the tag
-        // is not reused) but drop the inflight registration so the late reply
-        // is treated as ownerless + reclaims the tag (demux_frame_locked). The
-        // reader will not touch reply_buf (inflight[tag] is now NULL), so free
-        // it.
+        // My Proc is dying. Abandon the op (#845): drop the inflight
+        // registration (the reader must not touch reply_buf once freed) + free
+        // reply_buf, then send a Tflush(oldtag=tag) so the server promptly
+        // releases the request and the tag is reclaimed when the Rflush arrives
+        // -- drained ownerless by a survivor's reader via demux_frame_locked.
+        // send_flush leaves session.outstanding[tag] ACTIVE + awaiting_flush:
+        // per 9P the tag is reusable only after the Rflush, so a stray late
+        // original reply can never be mis-attributed to a reused tag (I-10).
+        // The Tflush send is a non-blocking ring write under c->lock (reusing
+        // out_buf, whose prior frame was already pushed to the ring). Reaching
+        // DIED means rpc->dead was false (DEAD is checked first in client_wait),
+        // so c->dead is false and the session is OPEN here. If the flush cannot
+        // be built/sent (pool full / send fail), fall back to the pre-#845
+        // reclaim path -- outstanding[tag] stays active, reclaimed by the
+        // eventual late reply or session teardown (no regression); a failed
+        // transport write means the byte stream is broken, so latch dead.
         c->inflight[tag] = NULL;
         kfree(rpc.reply_buf);
+        int flen = p9_session_send_flush(&c->session, c->out_buf,
+                                         sizeof(c->out_buf), (u16)tag);
+        if (flen > 0) {
+            if (p9_transport_send(&c->transport, c->out_buf, (size_t)flen) < 0)
+                client_mark_dead_locked(c);
+        }
         return -P9_E_IO;
     }
     c->inflight[tag] = NULL;

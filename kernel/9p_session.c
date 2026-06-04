@@ -112,21 +112,25 @@ static int alloc_tag(const struct p9_session *s) {
 static void mark_outstanding(struct p9_session *s, u16 t,
                               u8 kind, u32 fid, u32 new_fid) {
     s->next_op_id++;
-    s->outstanding[t].active   = true;
-    s->outstanding[t].kind     = kind;
-    s->outstanding[t].fid      = fid;
-    s->outstanding[t].new_fid  = new_fid;
-    s->outstanding[t].op_id    = s->next_op_id;
+    s->outstanding[t].active        = true;
+    s->outstanding[t].kind          = kind;
+    s->outstanding[t].fid           = fid;
+    s->outstanding[t].new_fid       = new_fid;
+    s->outstanding[t].op_id         = s->next_op_id;
+    s->outstanding[t].awaiting_flush = false;
+    s->outstanding[t].flush_oldtag  = 0;
     s->total_sent++;
 }
 
 // Clear tag `t`. Caller validates `t` was active.
 static void clear_outstanding(struct p9_session *s, u16 t) {
-    s->outstanding[t].active   = false;
-    s->outstanding[t].kind     = 0;
-    s->outstanding[t].fid      = 0;
-    s->outstanding[t].new_fid  = 0;
-    s->outstanding[t].op_id    = 0;
+    s->outstanding[t].active        = false;
+    s->outstanding[t].kind          = 0;
+    s->outstanding[t].fid           = 0;
+    s->outstanding[t].new_fid       = 0;
+    s->outstanding[t].op_id         = 0;
+    s->outstanding[t].awaiting_flush = false;
+    s->outstanding[t].flush_oldtag  = 0;
     s->total_completed++;
 }
 
@@ -158,11 +162,13 @@ int p9_session_init(struct p9_session *s, u32 root_fid, u32 msize) {
     for (size_t i = 0; i < P9_SESSION_MAX_FIDS; i++) s->bound_fids[i] = 0;
     s->n_bound_fids     = 0;
     for (size_t i = 0; i < P9_SESSION_MAX_OUTSTANDING; i++) {
-        s->outstanding[i].active  = false;
-        s->outstanding[i].kind    = 0;
-        s->outstanding[i].fid     = 0;
-        s->outstanding[i].new_fid = 0;
-        s->outstanding[i].op_id   = 0;
+        s->outstanding[i].active        = false;
+        s->outstanding[i].kind          = 0;
+        s->outstanding[i].fid           = 0;
+        s->outstanding[i].new_fid       = 0;
+        s->outstanding[i].op_id         = 0;
+        s->outstanding[i].awaiting_flush = false;
+        s->outstanding[i].flush_oldtag  = 0;
     }
     s->next_op_id       = 0;
     s->total_sent       = 0;
@@ -311,6 +317,40 @@ int p9_session_send_clunk(struct p9_session *s,
     // this fid even while Tclunk's Rmsg is in flight).
     (void)fid_unbind(s, fid);
     mark_outstanding(s, (u16)t, P9_TCLUNK, fid, fid);
+    return rc;
+}
+
+// =============================================================================
+// Send: Tflush (#845) -- abandon an in-flight request whose owner is gone.
+// =============================================================================
+
+int p9_session_send_flush(struct p9_session *s,
+                          u8 *out, size_t cap,
+                          u16 oldtag) {
+    if (!s) return -1;
+    if (s->magic != P9_SESSION_MAGIC) return -1;
+    // Valid wherever a real-tag op can be outstanding: steady-state ops are
+    // OPEN, the handshake's Tattach is VERSIONED. Tversion uses NOTAG and is
+    // never tracked in outstanding[], so it is never flushable.
+    if (s->state != P9_SESS_OPEN && s->state != P9_SESS_VERSIONED) return -1;
+    if (!out) return -1;
+    if (oldtag >= P9_SESSION_MAX_OUTSTANDING) return -1;
+    struct p9_outstanding *victim = &s->outstanding[oldtag];
+    if (!victim->active) return -1;              // nothing in flight under oldtag
+    if (victim->kind == P9_TFLUSH) return -1;    // never flush a flush
+    if (victim->awaiting_flush) return -1;       // already being flushed
+    int t = alloc_tag(s);
+    if (t < 0) return -1;                        // pool full -> caller falls back
+    int rc = p9_build_tflush(out, cap, (u16)t, oldtag);
+    if (rc < 0) return -1;
+    // The flush op is fid-less; root_fid is a harmless placeholder (matches
+    // version/attach). alloc_tag skipped the active `oldtag`, so t != oldtag
+    // and the victim pointer survives mark_outstanding's write to t. Record
+    // oldtag so the Rflush can free it, and reserve oldtag against reuse until
+    // that Rflush (9P: oldtag not reusable until Rflush -- the I-10 guard).
+    mark_outstanding(s, (u16)t, P9_TFLUSH, s->root_fid, s->root_fid);
+    s->outstanding[t].flush_oldtag = oldtag;
+    victim->awaiting_flush = true;
     return rc;
 }
 
@@ -788,6 +828,19 @@ int p9_session_dispatch_rmsg(struct p9_session *s,
     struct p9_outstanding *op = &s->outstanding[tag];
     if (!op->active) return -1;
 
+    // A reply for a tag reserved by a pending Tflush (#845) is a LATE reply
+    // for an abandoned op (its owner Proc died). Consume it WITHOUT freeing
+    // the tag: per 9P, oldtag is reusable only after the Rflush, so freeing
+    // here would let the tag be reused while a stray duplicate / twin reply
+    // is still possible -> a future reply mis-attributed to the reused tag
+    // (the I-10 violation the naive fix introduces). The flush's Rflush
+    // (dispatched via its own tag, below) is the SOLE authority that frees an
+    // awaiting_flush tag. No fid mutation either: the abandoned caller is gone.
+    if (op->awaiting_flush) {
+        out->kind = op->kind;       // diagnostics only; this reply is ownerless
+        return 0;
+    }
+
     // Type must match (or be Rlerror). The R-msg of T-msg `kind` is
     // numerically kind + 1.
     u8 expected_r = (u8)(op->kind + 1);
@@ -836,6 +889,21 @@ int p9_session_dispatch_rmsg(struct p9_session *s,
         if (rc < 0) return -1;
         if (tag_check != tag) return -1;
         // Send-time already unbound; no further action.
+    } else if (op->kind == P9_TFLUSH) {
+        // Rflush (#845): the server guarantees it will not answer the
+        // abandoned oldtag. This Rflush is therefore the SOLE authority that
+        // frees oldtag (the I-10 reuse-race guard). Clear the reserved
+        // original here; the common tail below clears this flush's own tag.
+        u16 tag_check;
+        rc = p9_parse_rflush(rmsg, len, &tag_check);
+        if (rc < 0) return -1;
+        if (tag_check != tag) return -1;
+        u16 oldtag = op->flush_oldtag;
+        if (oldtag < P9_SESSION_MAX_OUTSTANDING &&
+            s->outstanding[oldtag].active &&
+            s->outstanding[oldtag].awaiting_flush) {
+            clear_outstanding(s, oldtag);
+        }
     } else if (op->kind == P9_TLOPEN) {
         u16 tag_check;
         struct p9_qid qid;

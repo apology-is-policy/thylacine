@@ -130,6 +130,14 @@ struct p9_outstanding {
     u32  fid;        // primary target fid; equals root_fid for version/attach
     u32  new_fid;    // walk's destination; equals fid otherwise
     u32  op_id;      // monotonic spec-side identifier (for diagnostics)
+    // Tflush bookkeeping (#845). `awaiting_flush` marks an abandoned op
+    // whose owner is gone and for which a Tflush is in flight: the tag stays
+    // active (reserved) but is freed ONLY by the flush's Rflush, never by a
+    // late original reply -- 9P forbids reusing oldtag until Rflush, so this
+    // is the I-10 reuse-race guard. `flush_oldtag` is meaningful only on a
+    // TFLUSH entry: the original tag this flush abandons.
+    bool awaiting_flush;
+    u16  flush_oldtag;
 };
 
 // =============================================================================
@@ -229,6 +237,19 @@ int p9_session_send_walk(struct p9_session *s,
 int p9_session_send_clunk(struct p9_session *s,
                           u8 *out, size_t cap,
                           u32 fid);
+
+// Build a Tflush abandoning the in-flight request bearing `oldtag` (#845).
+// Valid in state VERSIONED or OPEN. Preconditions:
+//   - outstanding[oldtag] is active and is NOT itself a Tflush.
+//   - oldtag is not already awaiting a flush.
+// Allocates a fresh tag for the flush, marks it outstanding (kind TFLUSH,
+// remembering oldtag), and RESERVES oldtag (`awaiting_flush`): from here
+// oldtag is freed only by this flush's Rflush, never by a late original
+// reply -- the 9P "oldtag not reusable until Rflush" rule, which is the
+// I-10 reuse-race guard. Returns the Tflush byte length, or -1.
+int p9_session_send_flush(struct p9_session *s,
+                          u8 *out, size_t cap,
+                          u16 oldtag);
 
 // =============================================================================
 // IO send-side API (P5-wire-io extension; spec's SendIO action).

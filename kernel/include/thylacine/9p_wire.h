@@ -298,6 +298,12 @@ int p9_parse_rwalk(const u8 *in, size_t len,
 // Rclunk: no body. Just header validation.
 int p9_parse_rclunk(const u8 *in, size_t len, u16 *tag);
 
+// Tflush: abandon the request bearing `oldtag`. Body: [oldtag: u16].
+// Rflush: server acknowledgement (header only); after it, `oldtag` is
+// reclaimable by the client.
+int p9_build_tflush(u8 *out, size_t cap, u16 tag, u16 oldtag);
+int p9_parse_rflush(const u8 *in, size_t len, u16 *tag);
+
 // Rlerror: u32 LE Linux errno. Used in lieu of any expected Rxx when the
 // server cannot fulfill the request.
 int p9_parse_rlerror(const u8 *in, size_t len, u16 *tag, u32 *ecode);

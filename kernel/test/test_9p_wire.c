@@ -22,6 +22,7 @@ void test_9p_wire_tattach_round_trip(void);
 void test_9p_wire_twalk_round_trip(void);
 void test_9p_wire_twalk_zero_names_clone(void);
 void test_9p_wire_tclunk_round_trip(void);
+void test_9p_wire_tflush_round_trip(void);
 void test_9p_wire_rlerror_parse(void);
 void test_9p_wire_rmsg_size_mismatch_rejected(void);
 void test_9p_wire_rmsg_wrong_type_rejected(void);
@@ -1096,4 +1097,34 @@ void test_9p_wire_tunlinkat_round_trip(void) {
                                 P9_UNLINK_AT_REMOVEDIR);
     TEST_EXPECT_EQ((u64)g_buf[15], (u64)0x00, "flags byte 0");
     TEST_EXPECT_EQ((u64)g_buf[16], (u64)0x02, "flags byte 1 = 0x200 high half");
+}
+
+// Tflush build (body = [oldtag:u16]) + Rflush parse (header only). #845.
+void test_9p_wire_tflush_round_trip(void) {
+    // hdr(7) + oldtag(2) = 9. tag=7, oldtag=3.
+    int total = p9_build_tflush(g_buf, sizeof(g_buf), 0x0007, 0x0003);
+    TEST_EXPECT_EQ(total, 9,                       "Tflush total len");
+    TEST_EXPECT_EQ((u64)g_buf[4], (u64)P9_TFLUSH,  "Tflush type");
+    TEST_EXPECT_EQ((u64)g_buf[5], (u64)0x07,       "Tflush tag LE low");
+    TEST_EXPECT_EQ((u64)g_buf[7], (u64)0x03,       "Tflush oldtag LE low");
+    TEST_EXPECT_EQ((u64)g_buf[8], (u64)0x00,       "Tflush oldtag LE high");
+
+    // Synthesize Rflush: header-only (size=7, type=P9_RFLUSH, tag=7).
+    g_buf[0] = 7; g_buf[1] = 0; g_buf[2] = 0; g_buf[3] = 0;
+    g_buf[4] = P9_RFLUSH;
+    g_buf[5] = 0x07; g_buf[6] = 0;
+    u16 tag_out = 0;
+    int rc = p9_parse_rflush(g_buf, 7, &tag_out);
+    TEST_EXPECT_EQ(rc, 0,                        "Rflush parse ok");
+    TEST_EXPECT_EQ((u64)tag_out, (u64)0x0007,    "Rflush tag round-trip");
+
+    // An Rflush carrying a body is rejected (header-only invariant).
+    g_buf[0] = 8;                  // claim size 8, pass len 8 (1 trailing byte)
+    rc = p9_parse_rflush(g_buf, 8, &tag_out);
+    TEST_EXPECT_EQ(rc, -1,                       "Rflush with body rejected");
+
+    // Wrong type rejected.
+    g_buf[0] = 7; g_buf[4] = P9_RCLUNK;
+    rc = p9_parse_rflush(g_buf, 7, &tag_out);
+    TEST_EXPECT_EQ(rc, -1,                       "Rflush wrong-type rejected");
 }

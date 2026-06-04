@@ -432,6 +432,7 @@ void test_9p_wire_tattach_round_trip(void);
 void test_9p_wire_twalk_round_trip(void);
 void test_9p_wire_twalk_zero_names_clone(void);
 void test_9p_wire_tclunk_round_trip(void);
+void test_9p_wire_tflush_round_trip(void);
 void test_9p_wire_rlerror_parse(void);
 void test_9p_wire_rmsg_size_mismatch_rejected(void);
 void test_9p_wire_rmsg_wrong_type_rejected(void);
@@ -503,6 +504,8 @@ void test_9p_session_unlinkat_round_trip(void);
 void test_9p_session_rename_with_inflight_on_fid_refused(void);
 void test_9p_session_unlinkat_permits_concurrent(void);
 void test_9p_session_mutation_from_unbound_fid_refused(void);
+void test_9p_session_flush_reclaims_both(void);
+void test_9p_session_late_reply_does_not_free_awaiting_flush(void);
 void test_9p_transport_init_destroy(void);
 void test_9p_transport_round_trip(void);
 void test_9p_transport_send_frame_size_mismatch_rejected(void);
@@ -1248,6 +1251,7 @@ struct test_case g_tests[] = {
     { "9p_wire.twalk_round_trip",      test_9p_wire_twalk_round_trip,      false, NULL },
     { "9p_wire.twalk_zero_names_clone",test_9p_wire_twalk_zero_names_clone,false, NULL },
     { "9p_wire.tclunk_round_trip",     test_9p_wire_tclunk_round_trip,     false, NULL },
+    { "9p_wire.tflush_round_trip",     test_9p_wire_tflush_round_trip,     false, NULL },
     { "9p_wire.rlerror_parse",         test_9p_wire_rlerror_parse,         false, NULL },
     { "9p_wire.rmsg_size_mismatch_rejected",
                                        test_9p_wire_rmsg_size_mismatch_rejected,
@@ -1371,6 +1375,11 @@ struct test_case g_tests[] = {
                                                                            false, NULL },
     { "9p_session.mutation_from_unbound_fid_refused",
                                        test_9p_session_mutation_from_unbound_fid_refused,
+                                                                           false, NULL },
+    { "9p_session.flush_reclaims_both",
+                                       test_9p_session_flush_reclaims_both, false, NULL },
+    { "9p_session.late_reply_does_not_free_awaiting_flush",
+                                       test_9p_session_late_reply_does_not_free_awaiting_flush,
                                                                            false, NULL },
     { "9p_transport.init_destroy",     test_9p_transport_init_destroy,     false, NULL },
     { "9p_transport.round_trip",       test_9p_transport_round_trip,       false, NULL },

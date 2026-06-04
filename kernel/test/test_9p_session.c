@@ -61,6 +61,8 @@ void test_9p_session_unlinkat_round_trip(void);
 void test_9p_session_rename_with_inflight_on_fid_refused(void);
 void test_9p_session_unlinkat_permits_concurrent(void);
 void test_9p_session_mutation_from_unbound_fid_refused(void);
+void test_9p_session_flush_reclaims_both(void);
+void test_9p_session_late_reply_does_not_free_awaiting_flush(void);
 
 // 4 KiB scratch buffer.
 static u8 g_buf[4096];
@@ -1227,4 +1229,94 @@ void test_9p_session_mutation_from_unbound_fid_refused(void) {
     rc = p9_session_send_unlinkat(&s, g_buf, sizeof(g_buf), 88,
                                     name, sizeof(name), 0);
     TEST_EXPECT_EQ(rc, -1, "unlinkat on unbound dfid refused");
+}
+
+// =============================================================================
+// Tflush abandon -> reclaim (#845). The session-layer core of the fix: a
+// Tflush reserves the abandoned tag, and the Rflush is the SOLE authority that
+// frees it. These deterministically exercise every line of the session-side
+// fix; the live client_run DIED -> Tflush integration under a real dying Proc
+// (a survivor's reader draining the Rflush) is the SMP window the synchronous
+// harness cannot produce -- OWED with the A-5b multi-in-flight workload, same
+// as the #841 elected-reader coverage gap.
+// =============================================================================
+
+void test_9p_session_flush_reclaims_both(void) {
+    struct p9_session s;
+    TEST_EXPECT_EQ(drive_session_open(&s, /*root_fid=*/0), 0, "drive_session_open");
+
+    // One in-flight op on the bound root fid (read-shaped, concurrent-OK).
+    int len = p9_session_send_getattr(&s, g_buf, sizeof(g_buf), 0, P9_GETATTR_BASIC);
+    TEST_ASSERT(len > 0, "send_getattr ok");
+    u32 sz; u8 ty; u16 t;
+    p9_peek_header(g_buf, (size_t)len, &sz, &ty, &t);
+    TEST_EXPECT_EQ((u64)p9_session_inflight(&s), (u64)1, "1 inflight (the op)");
+
+    // Abandon T: send_flush allocates a distinct flush tag F and reserves T.
+    len = p9_session_send_flush(&s, g_buf, sizeof(g_buf), t);
+    TEST_ASSERT(len > 0, "send_flush ok");
+    u32 sz2; u8 ty2; u16 fT;
+    p9_peek_header(g_buf, (size_t)len, &sz2, &ty2, &fT);
+    TEST_EXPECT_EQ((u64)ty2, (u64)P9_TFLUSH, "flush op is Tflush");
+    TEST_ASSERT((u64)fT != (u64)t, "flush tag distinct from oldtag");
+    TEST_EXPECT_EQ((u64)p9_session_inflight(&s), (u64)2, "2 inflight (op + flush)");
+
+    // Re-flushing the same oldtag is refused (already awaiting).
+    int dup = p9_session_send_flush(&s, g_buf, sizeof(g_buf), t);
+    TEST_EXPECT_EQ(dup, -1, "double-flush of the same oldtag refused");
+
+    // Server Rflushes F -> frees BOTH the flush tag and the abandoned oldtag.
+    int rlen = synth_rmsg(g_buf, sizeof(g_buf), P9_RFLUSH, fT, NULL, 0);
+    TEST_ASSERT(rlen > 0, "synth Rflush");
+    struct p9_dispatch_result r;
+    int rc = p9_session_dispatch_rmsg(&s, g_buf, (size_t)rlen, &r);
+    TEST_EXPECT_EQ(rc, 0, "dispatch Rflush ok");
+    TEST_EXPECT_EQ((u64)p9_session_inflight(&s), (u64)0, "both tags reclaimed by Rflush");
+
+    // The reclaimed tag space is reusable: a fresh op allocates again.
+    len = p9_session_send_getattr(&s, g_buf, sizeof(g_buf), 0, P9_GETATTR_BASIC);
+    TEST_ASSERT(len > 0, "post-flush op reuses the freed tag");
+    TEST_EXPECT_EQ((u64)p9_session_inflight(&s), (u64)1, "1 inflight after reuse");
+
+    p9_session_destroy(&s);
+}
+
+void test_9p_session_late_reply_does_not_free_awaiting_flush(void) {
+    struct p9_session s;
+    TEST_EXPECT_EQ(drive_session_open(&s, /*root_fid=*/0), 0, "drive_session_open");
+
+    int len = p9_session_send_getattr(&s, g_buf, sizeof(g_buf), 0, P9_GETATTR_BASIC);
+    TEST_ASSERT(len > 0, "send_getattr ok");
+    u32 sz; u8 ty; u16 t;
+    p9_peek_header(g_buf, (size_t)len, &sz, &ty, &t);
+
+    // Abandon T (flush F reserves T).
+    len = p9_session_send_flush(&s, g_buf, sizeof(g_buf), t);
+    TEST_ASSERT(len > 0, "send_flush ok");
+    u32 sz2; u8 ty2; u16 fT;
+    p9_peek_header(g_buf, (size_t)len, &sz2, &ty2, &fT);
+    TEST_EXPECT_EQ((u64)p9_session_inflight(&s), (u64)2, "op + flush in flight");
+
+    // The server answered the original BEFORE seeing the flush: a late reply
+    // for T arrives. It MUST be consumed but MUST NOT free T -- 9P forbids
+    // reusing oldtag until the Rflush, so freeing here would let the tag be
+    // reused while a stray duplicate is still possible (the I-10 reuse-race
+    // the naive fix introduces). The early consume-without-clear returns before
+    // the kind-specific parse, so a header-only frame suffices to prove the
+    // reservation. (If a future change frees T on this path, this test fails.)
+    int rlen = synth_rmsg(g_buf, sizeof(g_buf), P9_RGETATTR, t, NULL, 0);
+    TEST_ASSERT(rlen > 0, "synth late Rgetattr (header-only)");
+    struct p9_dispatch_result r;
+    int rc = p9_session_dispatch_rmsg(&s, g_buf, (size_t)rlen, &r);
+    TEST_EXPECT_EQ(rc, 0, "late original reply consumed");
+    TEST_EXPECT_EQ((u64)p9_session_inflight(&s), (u64)2,
+                   "T still reserved after late reply -- the I-10 guard");
+
+    // The Rflush is the sole authority that frees the reserved oldtag.
+    rlen = synth_rmsg(g_buf, sizeof(g_buf), P9_RFLUSH, fT, NULL, 0);
+    rc = p9_session_dispatch_rmsg(&s, g_buf, (size_t)rlen, &r);
+    TEST_EXPECT_EQ(rc, 0, "dispatch Rflush ok");
+    TEST_EXPECT_EQ((u64)p9_session_inflight(&s), (u64)0, "both reclaimed after Rflush");
+
+    p9_session_destroy(&s);
 }
