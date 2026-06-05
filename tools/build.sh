@@ -1197,6 +1197,17 @@ populate_stratum_pool() {
     # Defensive: rm a stale socket from a prior interrupted run.
     rm -f "$sock_path"
 
+    # A-5c-b: build the host corvus-mint tool BEFORE starting stratumd (its build
+    # is independent + can be slow on a cold cargo cache; don't hold the pool open
+    # for it). cargo's incremental build handles staleness. corvus-mint reuses
+    # corvus's crypto via corvus-crypto, so the wraps it mints are byte-identical
+    # to what the on-device corvus reads at boot.
+    local cm_manifest="$REPO_ROOT/tools/corvus-mint/Cargo.toml"
+    local cm_bin="$REPO_ROOT/tools/corvus-mint/target/release/corvus-mint"
+    echo "==> populate pool: building corvus-mint (host system-identity minter)"
+    cargo build --manifest-path "$cm_manifest" --release \
+        || { echo "==> populate pool: corvus-mint BUILD FAILED" >&2; exit 1; }
+
     echo "==> populate pool: starting stratumd on $sock_path"
     # Bind to a deterministic dataset (1, the default). Backlog 4 is
     # plenty for the single sequential stratum-fs caller. Logs go to
@@ -1270,6 +1281,47 @@ populate_stratum_pool() {
     "$stratum_fs_bin" -s "$sock_path" sync \
         || { echo "==> populate pool: sync FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
     echo "==> populate pool: /thylacine-version written ($(echo "$sentinel_content" | wc -c | tr -d ' ') bytes)"
+
+    # --- A-5c-b: host-bake the system identity into /var/lib/corvus ---
+    # corvus-mint mints the admin keypair + system-wrap (keypair under the
+    # build-time system passphrase) + system-recovery-wrap (the same keypair under
+    # a fresh BIP-39 recovery phrase) and self-verifies both unwrap. The files are
+    # INERT until the A-5c-b corvus runtime (system_identity_load + the real
+    # ADMIN_ELEVATE) lands -- baking them now changes no boot behavior.
+    local cm_out="$fixtures/corvus-identity.$$"
+    rm -rf "$cm_out"; mkdir -p "$cm_out"
+    # corvus-mint prints the system recovery phrase to stdout -- log it (forensic,
+    # like the mkfs seed). CORVUS_SYSTEM_PASSPHRASE overrides the "thylacine"
+    # default (kept the known constant at v1.0 so joey's ADMIN_ELEVATE E2E stays
+    # green + the build reproducible; the WRAP is real Argon2id+AEGIS regardless).
+    local sys_recovery_phrase
+    if ! sys_recovery_phrase="$("$cm_bin" "$cm_out")"; then
+        echo "==> populate pool: corvus-mint RUN FAILED" >&2
+        kill -TERM "$stratumd_pid"; exit 1
+    fi
+    echo "==> populate pool: system recovery phrase (hostowner-c): $sys_recovery_phrase"
+    # Create /var/lib/corvus top-down (stratum-fs mkdir is single-level, no -p);
+    # joey's runtime mkdir_or_open of the same chain then no-ops (idempotent).
+    local d
+    for d in /var /var/lib /var/lib/corvus; do
+        "$stratum_fs_bin" -s "$sock_path" mkdir "$d" \
+            || { echo "==> populate pool: mkdir $d FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+    done
+    "$stratum_fs_bin" -s "$sock_path" write /var/lib/corvus/system-wrap < "$cm_out/system-wrap" \
+        || { echo "==> populate pool: write system-wrap FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+    "$stratum_fs_bin" -s "$sock_path" write /var/lib/corvus/system-recovery-wrap < "$cm_out/system-recovery-wrap" \
+        || { echo "==> populate pool: write system-recovery-wrap FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+    "$stratum_fs_bin" -s "$sock_path" sync \
+        || { echo "==> populate pool: sync (system identity) FAILED" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+    # Byte-verify the round-trip through the pool (catches any binary mangling on
+    # the stratum-fs write path NOW, not at the A-5c-b boot-unwrap in the runtime
+    # sub-commit). read the blob back + cmp against the minted file.
+    "$stratum_fs_bin" -s "$sock_path" read /var/lib/corvus/system-wrap | cmp -s - "$cm_out/system-wrap" \
+        || { echo "==> populate pool: system-wrap readback MISMATCH" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+    "$stratum_fs_bin" -s "$sock_path" read /var/lib/corvus/system-recovery-wrap | cmp -s - "$cm_out/system-recovery-wrap" \
+        || { echo "==> populate pool: system-recovery-wrap readback MISMATCH" >&2; kill -TERM "$stratumd_pid"; exit 1; }
+    rm -rf "$cm_out"
+    echo "==> populate pool: system identity baked + readback-verified at /var/lib/corvus (system-wrap + system-recovery-wrap, SYSTEM-owned)"
 
     # Clean stratumd shutdown: SIGTERM then wait. stratumd unmounts the
     # pool + flushes on its way out, so the pool.img bytes after this

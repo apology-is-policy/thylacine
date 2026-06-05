@@ -73,6 +73,12 @@ pub const ARGON2_PARALLELISM: u32 = 1;
 pub const AD_PREFIX: &[u8] = b"thylacine-corvus-v1";
 pub const BACKEND_ID_PASSPHRASE: u8 = 0;
 
+// The AD subject for the SYSTEM identity (A-5c-b) -- the admin keypair's
+// passphrase wrap (system-wrap) and recovery wrap (system-recovery-wrap) both
+// key their AD on this fixed subject (vs a user wrap's username). Shared by the
+// host corvus-mint (wrap) and corvus (unwrap) so the two cannot disagree.
+pub const SYSTEM_WRAP_SUBJECT: &[u8] = b"system";
+
 // =============================================================================
 // DEK envelope -- the hybrid-PKE wrapped-DEK blob (P5-corvus-bringup-d).
 // =============================================================================
@@ -453,6 +459,80 @@ pub fn build_recovery_ad(subject: &[u8], out: &mut Vec<u8>) {
     out.push(RECOVERY_AD_DOMAIN_BYTE);
 }
 
+// CRVS v1 on-disk pack/unpack (TOTAL_LEN). The passphrase wrap (KeypairWrap),
+// the recovery wrap (RecoveryWrap), and corvus's CorvusUserState ALL share this
+// byte layout; only the AEAD AD (set at wrap/unwrap time) distinguishes them on
+// the wire. One packer => no drift between the three serializers.
+fn crvs_v1_pack(
+    t_cost: u32,
+    m_cost_kib: u32,
+    parallelism: u32,
+    salt: &[u8; ARGON2_SALT_LEN],
+    nonce: &[u8; AEGIS256_NONCE_LEN],
+    ciphertext: &[u8; KEYPAIR_LEN],
+    tag: &[u8; AEGIS256_TAG_LEN],
+) -> [u8; TOTAL_LEN] {
+    let mut out = [0u8; TOTAL_LEN];
+    out[0..4].copy_from_slice(&CORVUS_MAGIC.to_le_bytes());
+    out[4..8].copy_from_slice(&CORVUS_STATE_VERSION.to_le_bytes());
+    out[8..12].copy_from_slice(&t_cost.to_le_bytes());
+    out[12..20].copy_from_slice(&(m_cost_kib as u64).to_le_bytes());
+    out[20..24].copy_from_slice(&parallelism.to_le_bytes());
+    out[24..40].copy_from_slice(salt);
+    out[40..72].copy_from_slice(nonce);
+    out[72..72 + KEYPAIR_LEN].copy_from_slice(ciphertext);
+    out[72 + KEYPAIR_LEN..72 + KEYPAIR_LEN + AEGIS256_TAG_LEN].copy_from_slice(tag);
+    out
+}
+
+// Parsed CRVS v1 fields. None on length / magic / version mismatch, or an
+// m_cost that overflows u32 -- fail-closed, mirroring the pre-extraction parser.
+struct CrvsFields {
+    t_cost: u32,
+    m_cost_kib: u32,
+    parallelism: u32,
+    salt: [u8; ARGON2_SALT_LEN],
+    nonce: [u8; AEGIS256_NONCE_LEN],
+    ciphertext: [u8; KEYPAIR_LEN],
+    tag: [u8; AEGIS256_TAG_LEN],
+}
+
+fn crvs_v1_unpack(blob: &[u8]) -> Option<CrvsFields> {
+    if blob.len() != TOTAL_LEN {
+        return None;
+    }
+    let magic = u32::from_le_bytes([blob[0], blob[1], blob[2], blob[3]]);
+    let version = u32::from_le_bytes([blob[4], blob[5], blob[6], blob[7]]);
+    if magic != CORVUS_MAGIC || version != CORVUS_STATE_VERSION {
+        return None;
+    }
+    let t_cost = u32::from_le_bytes([blob[8], blob[9], blob[10], blob[11]]);
+    let m64 = u64::from_le_bytes([
+        blob[12], blob[13], blob[14], blob[15], blob[16], blob[17], blob[18], blob[19],
+    ]);
+    if m64 > u32::MAX as u64 {
+        return None;
+    }
+    let parallelism = u32::from_le_bytes([blob[20], blob[21], blob[22], blob[23]]);
+    let mut salt = [0u8; ARGON2_SALT_LEN];
+    let mut nonce = [0u8; AEGIS256_NONCE_LEN];
+    let mut ciphertext = [0u8; KEYPAIR_LEN];
+    let mut tag = [0u8; AEGIS256_TAG_LEN];
+    salt.copy_from_slice(&blob[24..40]);
+    nonce.copy_from_slice(&blob[40..72]);
+    ciphertext.copy_from_slice(&blob[72..72 + KEYPAIR_LEN]);
+    tag.copy_from_slice(&blob[72 + KEYPAIR_LEN..72 + KEYPAIR_LEN + AEGIS256_TAG_LEN]);
+    Some(CrvsFields {
+        t_cost,
+        m_cost_kib: m64 as u32,
+        parallelism,
+        salt,
+        nonce,
+        ciphertext,
+        tag,
+    })
+}
+
 // The recovery wrap on disk -- the same CRVS v1 layout (TOTAL_LEN) as
 // hybrid.corvus, distinct only by AD + KEK source.
 pub struct RecoveryWrap {
@@ -467,52 +547,27 @@ pub struct RecoveryWrap {
 
 impl RecoveryWrap {
     pub fn to_bytes(&self) -> [u8; TOTAL_LEN] {
-        let mut out = [0u8; TOTAL_LEN];
-        out[0..4].copy_from_slice(&CORVUS_MAGIC.to_le_bytes());
-        out[4..8].copy_from_slice(&CORVUS_STATE_VERSION.to_le_bytes());
-        out[8..12].copy_from_slice(&self.t_cost.to_le_bytes());
-        out[12..20].copy_from_slice(&(self.m_cost_kib as u64).to_le_bytes());
-        out[20..24].copy_from_slice(&self.parallelism.to_le_bytes());
-        out[24..40].copy_from_slice(&self.salt);
-        out[40..72].copy_from_slice(&self.nonce);
-        out[72..72 + KEYPAIR_LEN].copy_from_slice(&self.ciphertext);
-        out[72 + KEYPAIR_LEN..72 + KEYPAIR_LEN + AEGIS256_TAG_LEN].copy_from_slice(&self.tag);
-        out
+        crvs_v1_pack(
+            self.t_cost,
+            self.m_cost_kib,
+            self.parallelism,
+            &self.salt,
+            &self.nonce,
+            &self.ciphertext,
+            &self.tag,
+        )
     }
 
     pub fn from_bytes(blob: &[u8]) -> Option<RecoveryWrap> {
-        if blob.len() != TOTAL_LEN {
-            return None;
-        }
-        let magic = u32::from_le_bytes([blob[0], blob[1], blob[2], blob[3]]);
-        let version = u32::from_le_bytes([blob[4], blob[5], blob[6], blob[7]]);
-        if magic != CORVUS_MAGIC || version != CORVUS_STATE_VERSION {
-            return None;
-        }
-        let t_cost = u32::from_le_bytes([blob[8], blob[9], blob[10], blob[11]]);
-        let m64 = u64::from_le_bytes([
-            blob[12], blob[13], blob[14], blob[15], blob[16], blob[17], blob[18], blob[19],
-        ]);
-        if m64 > u32::MAX as u64 {
-            return None;
-        }
-        let parallelism = u32::from_le_bytes([blob[20], blob[21], blob[22], blob[23]]);
-        let mut salt = [0u8; ARGON2_SALT_LEN];
-        let mut nonce = [0u8; AEGIS256_NONCE_LEN];
-        let mut ciphertext = [0u8; KEYPAIR_LEN];
-        let mut tag = [0u8; AEGIS256_TAG_LEN];
-        salt.copy_from_slice(&blob[24..40]);
-        nonce.copy_from_slice(&blob[40..72]);
-        ciphertext.copy_from_slice(&blob[72..72 + KEYPAIR_LEN]);
-        tag.copy_from_slice(&blob[72 + KEYPAIR_LEN..72 + KEYPAIR_LEN + AEGIS256_TAG_LEN]);
+        let f = crvs_v1_unpack(blob)?;
         Some(RecoveryWrap {
-            t_cost,
-            m_cost_kib: m64 as u32,
-            parallelism,
-            salt,
-            nonce,
-            ciphertext,
-            tag,
+            t_cost: f.t_cost,
+            m_cost_kib: f.m_cost_kib,
+            parallelism: f.parallelism,
+            salt: f.salt,
+            nonce: f.nonce,
+            ciphertext: f.ciphertext,
+            tag: f.tag,
         })
     }
 }
@@ -578,14 +633,54 @@ pub fn unwrap_recovery(
     Some(kp)
 }
 
-// Shared "wrap the keypair under a passphrase" path -- USER_CREATE's initial
-// wrap AND RECOVER's re-wrap under a new passphrase. One code path keeps the AD
-// + nonce discipline identical at both sites. None on RNG/KDF failure.
+// AD for the passphrase-wrap AEAD: "thylacine-corvus-v1" || subject || backend.
+// Backend at v1.0 is passphrase = 0. Symmetric with build_recovery_ad; the
+// distinct prefix is what domain-separates a passphrase wrap from a recovery one.
+pub fn build_passphrase_ad(subject: &[u8], out: &mut Vec<u8>) {
+    out.clear();
+    out.extend_from_slice(AD_PREFIX);
+    out.extend_from_slice(subject);
+    out.push(BACKEND_ID_PASSPHRASE);
+}
+
+// The passphrase wrap -- USER_CREATE's initial wrap, RECOVER's re-wrap, AND the
+// A-5c-b host-minted system-wrap. The on-disk form is the CRVS v1 layout
+// (TOTAL_LEN) shared with RecoveryWrap; only the AD differs.
 pub struct KeypairWrap {
+    pub t_cost: u32,
+    pub m_cost_kib: u32,
+    pub parallelism: u32,
     pub salt: [u8; ARGON2_SALT_LEN],
     pub nonce: [u8; AEGIS256_NONCE_LEN],
     pub ciphertext: [u8; KEYPAIR_LEN],
     pub tag: [u8; AEGIS256_TAG_LEN],
+}
+
+impl KeypairWrap {
+    pub fn to_bytes(&self) -> [u8; TOTAL_LEN] {
+        crvs_v1_pack(
+            self.t_cost,
+            self.m_cost_kib,
+            self.parallelism,
+            &self.salt,
+            &self.nonce,
+            &self.ciphertext,
+            &self.tag,
+        )
+    }
+
+    pub fn from_bytes(blob: &[u8]) -> Option<KeypairWrap> {
+        let f = crvs_v1_unpack(blob)?;
+        Some(KeypairWrap {
+            t_cost: f.t_cost,
+            m_cost_kib: f.m_cost_kib,
+            parallelism: f.parallelism,
+            salt: f.salt,
+            nonce: f.nonce,
+            ciphertext: f.ciphertext,
+            tag: f.tag,
+        })
+    }
 }
 
 pub fn wrap_keypair_passphrase<R: RngCore + CryptoRng>(
@@ -606,18 +701,44 @@ pub fn wrap_keypair_passphrase<R: RngCore + CryptoRng>(
         ARGON2_PARALLELISM,
     )?;
     let mut ad: Vec<u8> = Vec::new();
-    ad.extend_from_slice(AD_PREFIX);
-    ad.extend_from_slice(subject);
-    ad.push(BACKEND_ID_PASSPHRASE);
+    build_passphrase_ad(subject, &mut ad);
     let mut ciphertext = [0u8; KEYPAIR_LEN];
     let tag = aegis_wrap(&kek, &nonce, &ad, keypair, &mut ciphertext);
     wipe(&mut kek);
     Some(KeypairWrap {
+        t_cost: ARGON2_T_COST,
+        m_cost_kib: ARGON2_M_COST_KIB,
+        parallelism: ARGON2_PARALLELISM,
         salt,
         nonce,
         ciphertext,
         tag,
     })
+}
+
+// Unwrap a passphrase keyslot -- the inverse of wrap_keypair_passphrase (corvus's
+// AUTH + the A-5c-b real ADMIN_ELEVATE system-wrap verifier). None on KDF failure
+// or AEAD tag mismatch (wrong passphrase). The recovered keypair byte-equals the
+// wrapped plaintext.
+pub fn unwrap_keypair_passphrase(
+    subject: &[u8],
+    passphrase: &[u8],
+    kw: &KeypairWrap,
+) -> Option<[u8; KEYPAIR_LEN]> {
+    let mut kek = argon2id_kek(passphrase, &kw.salt, kw.t_cost, kw.m_cost_kib, kw.parallelism)?;
+    let mut ad: Vec<u8> = Vec::new();
+    build_passphrase_ad(subject, &mut ad);
+    let res = aegis_unwrap(&kek, &kw.nonce, &ad, &kw.ciphertext, &kw.tag);
+    wipe(&mut kek);
+    let mut plain = res?;
+    if plain.len() != KEYPAIR_LEN {
+        wipe(&mut plain);
+        return None;
+    }
+    let mut kp = [0u8; KEYPAIR_LEN];
+    kp.copy_from_slice(&plain);
+    wipe(&mut plain);
+    Some(kp)
 }
 
 #[cfg(test)]
@@ -786,9 +907,9 @@ mod tests {
 
     #[test]
     fn passphrase_wrap_unwrap_round_trip() {
-        // Full Argon2id+AEGIS path: wrap a keypair, then reconstruct the KEK the
-        // same way and AEAD-open it. Proves wrap_keypair_passphrase produces an
-        // openable wrap (the AUTH path's inverse).
+        // Full Argon2id+AEGIS path: wrap a keypair, then unwrap it via the public
+        // inverse. Proves wrap_keypair_passphrase / unwrap_keypair_passphrase are
+        // a matched pair (the AUTH + ADMIN_ELEVATE verifier path).
         let mut rng = CounterRng(0x1234_5678_9abc_def0);
         let subject = b"carol";
         let pass = b"correct horse battery staple";
@@ -797,18 +918,51 @@ mod tests {
             *b = (i.wrapping_mul(31) & 0xff) as u8;
         }
         let kw = wrap_keypair_passphrase(&mut rng, subject, pass, &keypair).expect("wrap");
-        let kek = argon2id_kek(pass, &kw.salt, ARGON2_T_COST, ARGON2_M_COST_KIB, ARGON2_PARALLELISM)
-            .expect("kek");
-        let mut ad: Vec<u8> = Vec::new();
-        ad.extend_from_slice(AD_PREFIX);
-        ad.extend_from_slice(subject);
-        ad.push(BACKEND_ID_PASSPHRASE);
-        let plain = aegis_unwrap(&kek, &kw.nonce, &ad, &kw.ciphertext, &kw.tag).expect("open");
-        assert_eq!(&plain[..], &keypair[..]);
+        let got = unwrap_keypair_passphrase(subject, pass, &kw).expect("unwrap");
+        assert_eq!(&got[..], &keypair[..]);
         // Wrong passphrase fails the tag.
-        let kek_bad = argon2id_kek(b"wrong", &kw.salt, ARGON2_T_COST, ARGON2_M_COST_KIB, ARGON2_PARALLELISM)
-            .expect("kek");
-        assert!(aegis_unwrap(&kek_bad, &kw.nonce, &ad, &kw.ciphertext, &kw.tag).is_none());
+        assert!(unwrap_keypair_passphrase(subject, b"wrong", &kw).is_none());
+        // Wrong subject (AD mismatch) fails the tag.
+        assert!(unwrap_keypair_passphrase(b"dave", pass, &kw).is_none());
+    }
+
+    #[test]
+    fn keypair_wrap_byte_round_trip_and_crvs_parity() {
+        // KeypairWrap serializes through the shared crvs_v1 packer; round-trip it,
+        // and prove a RecoveryWrap with IDENTICAL fields packs to IDENTICAL bytes
+        // (the no-drift property: passphrase + recovery wraps differ only by AD,
+        // never on-disk -- and corvus's CorvusUserState delegates to this packer).
+        let kw = KeypairWrap {
+            t_cost: ARGON2_T_COST,
+            m_cost_kib: ARGON2_M_COST_KIB,
+            parallelism: ARGON2_PARALLELISM,
+            salt: [0x11u8; ARGON2_SALT_LEN],
+            nonce: [0x22u8; AEGIS256_NONCE_LEN],
+            ciphertext: [0x33u8; KEYPAIR_LEN],
+            tag: [0x44u8; AEGIS256_TAG_LEN],
+        };
+        let blob = kw.to_bytes();
+        assert_eq!(blob.len(), TOTAL_LEN);
+        let kw2 = KeypairWrap::from_bytes(&blob).expect("parse");
+        assert_eq!(kw2.t_cost, kw.t_cost);
+        assert_eq!(kw2.salt, kw.salt);
+        assert_eq!(&kw2.ciphertext[..], &kw.ciphertext[..]);
+        assert_eq!(kw2.tag, kw.tag);
+        // CRVS layout offsets pinned.
+        assert_eq!(&blob[0..4], &CORVUS_MAGIC.to_le_bytes());
+        assert_eq!(&blob[24..40], &kw.salt);
+        assert_eq!(&blob[40..72], &kw.nonce);
+        // Same fields => same bytes through both wrap types.
+        let rw = RecoveryWrap {
+            t_cost: kw.t_cost,
+            m_cost_kib: kw.m_cost_kib,
+            parallelism: kw.parallelism,
+            salt: kw.salt,
+            nonce: kw.nonce,
+            ciphertext: kw.ciphertext,
+            tag: kw.tag,
+        };
+        assert_eq!(&kw.to_bytes()[..], &rw.to_bytes()[..]);
     }
 
     #[test]

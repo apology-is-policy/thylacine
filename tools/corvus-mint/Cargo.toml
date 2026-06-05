@@ -1,0 +1,27 @@
+[package]
+name = "corvus-mint"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "0BSD"
+
+# Standalone (own workspace) HOST-target build-time tool -- A-5c-b. Mints the
+# system identity (admin hybrid keypair + system-wrap + system-recovery-wrap)
+# into files that tools/build.sh bakes into the pool's /var/lib/corvus. Reuses
+# corvus's EXACT crypto via corvus-crypto (a no_std lib that also builds on the
+# host) so the wraps are byte-identical to what the on-device corvus
+# produces/reads -- one implementation, no drift. Lives under tools/ (a
+# build-time host tool, like the stratum host tools) so it does NOT inherit
+# usr/.cargo/config.toml's aarch64-unknown-none target pin.
+[workspace]
+
+[[bin]]
+name = "corvus-mint"
+path = "src/main.rs"
+
+[dependencies]
+corvus-crypto = { path = "../../usr/lib/corvus-crypto" }
+# Host CSPRNG (OsRng) -- impls rand_core 0.6's RngCore + CryptoRng, the bound
+# corvus-crypto's keypair/wrap functions take. rand_core 0.6 is the SAME one
+# corvus-crypto pins, so OsRng satisfies the trait bound across the boundary.
+rand = "0.8"

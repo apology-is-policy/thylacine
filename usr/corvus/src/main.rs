@@ -185,58 +185,43 @@ struct CorvusUserState {
 
 impl CorvusUserState {
     fn build_ad(&self, ad_out: &mut Vec<u8>) {
-        ad_out.clear();
-        ad_out.extend_from_slice(AD_PREFIX);
-        ad_out.extend_from_slice(&self.user);
-        ad_out.push(BACKEND_ID_PASSPHRASE);
+        build_passphrase_ad(&self.user, ad_out);
     }
 
-    // CRVS v1 per-user keypair wrap (the at-rest AEGIS-wrapped hybrid
-    // keypair). The on-disk blob is CIPHERTEXT, not a plaintext secret --
-    // hybrid.corvus is the encrypted wrap, decryptable only with the
-    // passphrase-derived KEK (CORVUS-DESIGN.md §16.1: this keeps the A-1b
-    // secret-handling surface at the wrap blob, never plaintext on the FS).
+    // CRVS v1 per-user keypair wrap (the at-rest AEGIS-wrapped hybrid keypair).
+    // Delegates to corvus_crypto's KeypairWrap serializer -- the single CRVS v1
+    // packer shared with the recovery wrap (RecoveryWrap) and the A-5c-b
+    // host-minted system-wrap, so the three on-disk forms cannot drift. The blob
+    // is CIPHERTEXT, decryptable only with the passphrase-derived KEK.
     fn to_bytes(&self) -> [u8; TOTAL_LEN] {
-        let mut out = [0u8; TOTAL_LEN];
-        out[0..4].copy_from_slice(&CORVUS_MAGIC.to_le_bytes());
-        out[4..8].copy_from_slice(&CORVUS_STATE_VERSION.to_le_bytes());
-        out[8..12].copy_from_slice(&self.t_cost.to_le_bytes());
-        out[12..20].copy_from_slice(&(self.m_cost_kib as u64).to_le_bytes());
-        out[20..24].copy_from_slice(&self.parallelism.to_le_bytes());
-        out[24..40].copy_from_slice(&self.salt);
-        out[40..72].copy_from_slice(&self.nonce);
-        out[72..72 + KEYPAIR_LEN].copy_from_slice(&self.ciphertext);
-        out[72 + KEYPAIR_LEN..72 + KEYPAIR_LEN + AEGIS256_TAG_LEN].copy_from_slice(&self.tag);
-        out
+        KeypairWrap {
+            t_cost: self.t_cost,
+            m_cost_kib: self.m_cost_kib,
+            parallelism: self.parallelism,
+            salt: self.salt,
+            nonce: self.nonce,
+            ciphertext: self.ciphertext,
+            tag: self.tag,
+        }
+        .to_bytes()
     }
 
-    // Parse a CRVS v1 hybrid.corvus blob into the wrap-state fields of a
-    // record whose identity fields are already filled from identity.db.
-    // Fail-closed: magic/version/length mismatch -> None (the user is then
-    // dropped from the live table; CORVUS-DESIGN.md §16.5 step 4).
+    // Parse a CRVS v1 hybrid.corvus blob into the wrap-state fields of a record
+    // whose identity fields are already filled from identity.db. Fail-closed:
+    // magic/version/length mismatch -> false (the user is then dropped from the
+    // live table; CORVUS-DESIGN.md section 16.5 step 4).
     fn fill_wrap_from_bytes(&mut self, blob: &[u8]) -> bool {
-        if blob.len() != TOTAL_LEN {
-            return false;
-        }
-        let magic = u32::from_le_bytes([blob[0], blob[1], blob[2], blob[3]]);
-        let version = u32::from_le_bytes([blob[4], blob[5], blob[6], blob[7]]);
-        if magic != CORVUS_MAGIC || version != CORVUS_STATE_VERSION {
-            return false;
-        }
-        self.t_cost = u32::from_le_bytes([blob[8], blob[9], blob[10], blob[11]]);
-        let m64 = u64::from_le_bytes([
-            blob[12], blob[13], blob[14], blob[15], blob[16], blob[17], blob[18], blob[19],
-        ]);
-        if m64 > u32::MAX as u64 {
-            return false;
-        }
-        self.m_cost_kib = m64 as u32;
-        self.parallelism = u32::from_le_bytes([blob[20], blob[21], blob[22], blob[23]]);
-        self.salt.copy_from_slice(&blob[24..40]);
-        self.nonce.copy_from_slice(&blob[40..72]);
-        self.ciphertext.copy_from_slice(&blob[72..72 + KEYPAIR_LEN]);
-        self.tag
-            .copy_from_slice(&blob[72 + KEYPAIR_LEN..72 + KEYPAIR_LEN + AEGIS256_TAG_LEN]);
+        let kw = match KeypairWrap::from_bytes(blob) {
+            Some(k) => k,
+            None => return false,
+        };
+        self.t_cost = kw.t_cost;
+        self.m_cost_kib = kw.m_cost_kib;
+        self.parallelism = kw.parallelism;
+        self.salt = kw.salt;
+        self.nonce = kw.nonce;
+        self.ciphertext = kw.ciphertext;
+        self.tag = kw.tag;
         true
     }
 }
