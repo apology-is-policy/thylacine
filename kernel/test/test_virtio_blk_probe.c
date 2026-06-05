@@ -173,20 +173,15 @@ void test_virtio_blk_probe_rfork_with_caps(void) {
                               CAP_HW_CREATE);
     TEST_ASSERT(pid > 0, "rfork_with_caps failed for /virtio-blk-probe");
 
-    // P4-Ic6-impl (R12-sched): wait_pid works directly now. Before
-    // R12-sched-impl, this test used a yield-poll pattern (for(;;){
-    // sched(); wfi; } until PROC_STATE_ZOMBIE) to keep the parent
-    // RUNNABLE while the child slept on the IRQ Rendez — because the
-    // scheduler's "no runnable peer system-wide" deadlock check would
-    // ELE when both parent (sleeping on child_done) and child (sleeping
-    // on hardware IRQ) were SLEEPING simultaneously. P4-Ic6-impl
-    // allocates a dedicated boot-CPU idle thread (g_bootcpu_idle) in
-    // BAND_IDLE's run tree, so pick_next always finds something to
-    // switch to even when both parent and child are SLEEPING. The
-    // scheduler switches to bootcpu_idle's WFI loop; the device IRQ
-    // arrives, wakes the child; child runs, exits; exit's wakeup wakes
-    // the parent. This is the wait_pid path that every other userspace
-    // test uses. Closes the R12-sched workaround.
+    // wait_pid works directly here even when both parent (sleeping on
+    // child_done) and child (sleeping on the hardware IRQ Rendez) are SLEEPING
+    // simultaneously. cpu0 has a CPU-pinned in-tree BAND_IDLE thread
+    // (bootcpu_idle, ARCH 8.4.2), so pick_next always finds something to switch
+    // to: the scheduler switches to bootcpu_idle's WFI loop; the device IRQ
+    // arrives, wakes the child; child runs, exits; exit's wakeup wakes the
+    // parent. (Pre-redesign this was a separate off-tree g_bootcpu_idle
+    // dispatched by a deadlock-path special case; the in-tree pinned idle serves
+    // the same role via ordinary pick_next.)
     int status = -42;
     int reaped = wait_pid(&status);
     TEST_EXPECT_EQ(reaped, pid, "wait_pid pid mismatch");

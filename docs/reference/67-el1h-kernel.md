@@ -39,7 +39,11 @@ The dual-mode design had already accreted three separate band-aids for
 this same disease — `userland.S`'s P4-Fix157 `msr SPSel,#0` dance, the
 R7-F135 "`msr SP_EL0` QEMU quirk" reclassification, and the P4-Ic6
 `g_bootcpu_idle`-kept-off-the-run-tree workaround in `sched.c`.
-`P5-el1h-kernel` removes the root cause those all worked around.
+`P5-el1h-kernel` removes the root cause those all worked around. (The
+`g_bootcpu_idle` off-tree arrangement nonetheless *survived* P5 for an
+unrelated reason — stealability, the #860 latent race — and was finally
+retired by the SMP redesign, ARCH §8.4.2 / task #863: cpu0's idle is now
+an ordinary `cpu_pinned` in-tree thread.)
 
 ## The model
 

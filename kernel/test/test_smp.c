@@ -167,11 +167,20 @@ void test_smp_per_cpu_idle_smoke(void) {
     unsigned cpus = smp_cpu_count();
     TEST_ASSERT(cpus >= 1, "smp_cpu_count is positive");
 
-    // Boot CPU's idle is kthread (set by thread_init + sched_init(0)).
+    // SMP redesign (ARCH 8.4.2): cpu0's idle is the dedicated bootcpu_idle
+    // thread (thread_create_bootcpu_idle + sched_install_bootcpu_idle), NOT
+    // kthread. It is CPU-pinned, BAND_IDLE, on kproc, and runs on a dedicated
+    // BSS stack (kstack_base==NULL). kthread is the separate boot/init thread.
     struct Thread *idle0 = sched_idle_thread(0);
     TEST_ASSERT(idle0 != NULL, "boot CPU's sched_idle_thread is non-NULL");
-    TEST_ASSERT(idle0 == kthread(),
-        "boot CPU's idle thread must equal kthread");
+    TEST_ASSERT(idle0 != kthread(),
+        "boot CPU's idle thread is the dedicated bootcpu_idle, NOT kthread");
+    TEST_ASSERT(idle0->cpu_pinned,
+        "boot CPU idle is cpu_pinned (unstealable)");
+    TEST_ASSERT(idle0->band == SCHED_BAND_IDLE,
+        "boot CPU idle is BAND_IDLE");
+    TEST_ASSERT(idle0->kstack_base == NULL,
+        "boot CPU idle owns no per-thread kstack (runs on the dedicated BSS stack)");
     TEST_ASSERT(idle0->magic == THREAD_MAGIC,
         "boot CPU idle has correct magic");
     TEST_ASSERT(idle0->proc == kproc(),

@@ -519,39 +519,26 @@ void boot_main(void) {
     uart_putdec((u64)kthread()->tid);
     uart_puts(" state=RUNNING (current_thread = kthread)\n");
 
-    // P4-Ic6-impl (R12-sched): allocate the boot CPU's dedicated idle
-    // thread, distinct from kthread, AND register it as the boot CPU's
-    // sched-deadlock-path fallback via sched_set_bootcpu_idle. It is
-    // NOT ready()'d into the run tree; sched() switches to it only on
-    // the explicit deadlock path.
+    // SMP redesign (ARCH §8.4.2): allocate cpu0's idle thread -- distinct from
+    // kthread, an ordinary CPU-pinned in-tree BAND_IDLE thread on a dedicated BSS
+    // stack -- and ready() it into cpu0's run_tree[IDLE] via
+    // sched_install_bootcpu_idle. Ordinary pick_next dispatches it whenever
+    // kthread (or any cpu0 thread) blocks with no other runnable work: idle WFI
+    // loops until an IRQ makes some thread RUNNABLE, then its own sched() picks
+    // that thread up. This retires the old off-tree real-kstack g_bootcpu_idle +
+    // its deadlock-path dispatch (the #860 root cause: a real kstack made it
+    // stealable if it ever entered a tree).
     //
-    // The off-run-tree arrangement was a P4-Ic6 workaround for the
-    // pre-P5 EL1t/EL1h dual-mode kernel, where a preempt-time switch
-    // (SPSel=1) into a run-tree idle would have made cpu_switch_context's
-    // `mov sp` clobber SP_EL1 (then a separate per-CPU exception stack).
-    // P5-el1h-kernel removed that hazard — the kernel runs uniformly at
-    // EL1h with one stack bank and no separate exception stack
-    // (ARCHITECTURE.md §12.1, I-21) — so the workaround is now an inert
-    // artifact (folding bootcpu_idle into the run tree is a deferred
-    // scheduler-cleanup item). The explicit deadlock-path switch is
-    // correct regardless.
-    //
-    // Scenarios where the deadlock path now resolves cleanly (was ELE
-    // pre-fix):
-    //   - kthread calls wait_pid on a hardware-IRQ-blocked child driver
-    //     (e.g., test_virtio_blk_probe); kthread → SLEEPING, child →
-    //     SLEEPING; sched() picks bootcpu_idle as the fallback; idle
-    //     WFI loops; IRQ wakes child; eventually wait_pid wakes kthread.
-    //   - Any voluntary sleep where no peer is runnable system-wide.
-    //
-    // Must be initialized BEFORE test_run_all() since rendez tests
-    // cause kthread to sleep, and an unlucky pre-bootcpu_idle sleep
-    // would hit the now-narrowed deadlock extinction.
+    // Must be installed BEFORE test_run_all() since rendez tests cause kthread to
+    // sleep; before the idle is in cpu0's tree, such a sleep with no runnable
+    // peer would hit the (now-defensive, structurally-unreachable) deadlock
+    // extinction. By construction once installed, cpu0's idle is always either
+    // current or in run_tree[IDLE], so pick_next always finds it.
     {
-        struct Thread *bootcpu_idle = thread_create(kproc(), bootcpu_idle_main);
+        struct Thread *bootcpu_idle =
+            thread_create_bootcpu_idle(bootcpu_idle_main, smp_bootcpu_idle_stack_top());
         if (!bootcpu_idle) extinction("boot_main: bootcpu_idle alloc failed");
-        bootcpu_idle->band = SCHED_BAND_IDLE;
-        sched_set_bootcpu_idle(bootcpu_idle);
+        sched_install_bootcpu_idle(bootcpu_idle);
     }
 
     // A-4c-1: kernel UART console RX + the console_mgr kthread. Unmask the
@@ -580,7 +567,7 @@ void boot_main(void) {
 
     uart_puts("  sched:   bands=3 (INTERACTIVE/NORMAL/IDLE) runnable=");
     uart_putdec((u64)sched_runnable_count());
-    uart_puts(" (0 expected pre-test; bootcpu_idle reserved off-tree)\n");
+    uart_puts(" (counts console_mgr work; per-CPU idles are BAND_IDLE, excluded)\n");
 
     // In-kernel test harness. Runs every test in g_tests[] (kaslr
     // mix64 avalanche, DTB chosen seed presence, refactored phys

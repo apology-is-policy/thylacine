@@ -141,6 +141,18 @@ struct Thread {
     // monotonic transitions.
     volatile bool      on_cpu;
 
+    // SMP redesign (deep-smp-review): CPU-pinned bootstrap thread. True for
+    // every per-CPU idle thread (the boot CPU's bootcpu_idle + each
+    // secondary's per_cpu_main idle) and for kthread -- all run on a static
+    // boot/idle stack (kstack_base==NULL) that belongs to one specific CPU, so
+    // try_steal MUST never migrate them (ARCH 8.4.2; modeled as IsPinned in
+    // specs/sched_alpha.tla). This is the single clean unstealability predicate
+    // that REPLACES the prior (kstack_base != NULL) gate + the g_bootcpu_idle
+    // special case (the #860 root cause: g_bootcpu_idle owned a real kstack, so
+    // the kstack_base gate did not exclude it). Set once at thread init; never
+    // mutated. Occupies on_cpu's tail padding -- no struct-size change.
+    bool               cpu_pinned;
+
     // P5-tsleep: deadline-bounded Rendez sleep. A thread inside a
     // deadlined tsleep() is linked onto the global timer-wait list
     // (kernel/sched.c) via timerwait_{next,prev}; sched_tick() scans
@@ -313,8 +325,16 @@ struct Thread *kthread(void);
 //   4. Enter the per-CPU idle loop.
 //
 // Returns NULL on OOM (Thread alloc fail). cpu_idx >= 1 only — CPU 0's
-// idle is kthread (set up in thread_init).
+// idle is the dedicated bootcpu_idle thread (thread_create_bootcpu_idle).
 struct Thread *thread_init_per_cpu_idle(unsigned cpu_idx);
+
+// SMP redesign (ARCH §8.4.2): allocate cpu0's idle Thread on a dedicated BSS
+// stack with first-switch-in ctx (thread_trampoline → blr `entry`). CPU-pinned,
+// band=IDLE, kstack_base==NULL. `stack_top` is the 16-aligned high edge of the
+// dedicated BSS stack. Readied into cpu0's run_tree[IDLE] by
+// sched_install_bootcpu_idle. Returns NULL on OOM. Retires the old off-tree
+// real-kstack g_bootcpu_idle.
+struct Thread *thread_create_bootcpu_idle(void (*entry)(void), void *stack_top);
 
 // Create a kernel thread of `proc` running `entry`. SLUB-allocates the
 // Thread descriptor + 16 KiB kernel stack via alloc_pages(order=2);

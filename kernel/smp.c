@@ -73,6 +73,23 @@ struct secondary_stack g_secondary_boot_stacks[DTB_MAX_CPUS - 1];
 __attribute__((aligned(16)))
 char g_exception_stacks[DTB_MAX_CPUS][EXCEPTION_STACK_SIZE];
 
+// SMP redesign (deep-smp-review, ARCH 8.4.2): cpu0's idle thread runs on this
+// dedicated BSS stack -- symmetric with the secondaries' g_secondary_boot_stacks
+// (the idle owns no per-thread kstack; kstack_base==NULL -> CPU-pinned like the
+// secondaries'). cpu0's _boot_stack belongs to kthread (suspended mid-wait_pid
+// once joey_run blocks), so cpu0's idle needs its own stack. 16 KiB usable,
+// 16-byte aligned for the AAPCS64 SP. Depth is trivially bounded (the idle loop
+// + at most one IRQ frame + sched()), so no MMU guard page is wired here at
+// v1.0 -- a deferred hardening (the secondary guard mechanism has a 2-MiB-block
+// co-location constraint not worth taking on in the scheduler soundness chunk;
+// tracked). Retires the old real-kstack g_bootcpu_idle (the #860 root cause).
+__attribute__((aligned(16)))
+static char g_bootcpu_idle_stack[SECONDARY_STACK_USABLE_SIZE];
+
+void *smp_bootcpu_idle_stack_top(void) {
+    return &g_bootcpu_idle_stack[SECONDARY_STACK_USABLE_SIZE];
+}
+
 // P2-Cdc: IPI_RESCHED receive counter per CPU. Incremented by the
 // IPI handler on every receive; tests read to verify cross-CPU
 // IPI delivery.

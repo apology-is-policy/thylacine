@@ -85,25 +85,26 @@ struct CpuSched {
     // fully switched out and safe to transition.
     struct Thread *prev_to_clear_on_cpu;
 
-    // P3-G: WFI signaling for cross-CPU wake. Set TRUE by THIS CPU
-    // immediately before its `wfi` instruction in per_cpu_main's idle
-    // loop; cleared TRUE→FALSE by THIS CPU immediately after WFI exits
-    // (via any IRQ — IPI_RESCHED is the canonical case). Read by PEER
-    // CPUs in `sched_notify_idle_peer()` to identify a wake target.
+    // P3-G: WFI signaling for cross-CPU wake. Means "this CPU's current thread
+    // is its idle" (ARCH 8.4.5): set TRUE by THIS CPU's idle loop before its
+    // `wfi`, cleared after WFI exits, AND maintained by sched() = (next==idle) at
+    // every switch (the F7 accuracy fix -- a CPU running stolen work no longer
+    // looks idle). Read by PEER CPUs in `sched_notify_idle_peer()` to identify a
+    // wake target.
     //
-    // Race semantics: peer's read can stall behind this CPU's wfi-exit
-    // clear, causing a spurious IPI to a CPU that just woke up. The
-    // IPI handler is a no-op + count, so the spurious IPI is harmless.
-    // Use of `volatile` is sufficient — the writer/reader access is
-    // single-store/single-load with no derived data; relaxed atomic
-    // semantics are what we want.
+    // Race semantics: peer's read can stall behind this CPU's wfi-exit clear,
+    // causing a spurious IPI to a CPU that just woke up. The IPI handler is a
+    // no-op + count, so the spurious IPI is harmless. `volatile` is sufficient --
+    // single-store/single-load with no derived data; relaxed atomic semantics.
     //
-    // Boot CPU: stays FALSE forever (boot's idle is the kthread driven
-    // by timer IRQ, not per_cpu_main's explicit wfi loop). At v1.0 the
-    // primary's post-init flow sits in `_torpor`'s asm wfi loop with no
-    // C-level set/clear hooks; secondaries are the only candidates for
-    // wake-via-IPI placement. Modeling this in `scheduler.tla` is
-    // covered by `EnterWFI(cpu)` + `IPI_Deliver`-clears-`wfi[dst]`.
+    // SMP redesign: cpu0 now has a real in-tree idle (bootcpu_idle) running the
+    // same idle loop as the secondaries, so cpu0's flag toggles like any other
+    // CPU's (the old "boot CPU stays FALSE forever" no longer holds). cpu0 does
+    // not yet attach IPI_RESCHED, so a notify-IPI to it is currently a no-op;
+    // cpu0's idle is instead woken by its always-armed timer (<=1ms). Making cpu0
+    // a full IPI peer is a tracked latency follow-up (deferred from this
+    // soundness chunk). Modeled in `scheduler.tla` by `EnterWFI` +
+    // `IPI_Deliver`-clears-`wfi[dst]`.
     volatile bool  idle_in_wfi;
 };
 
@@ -164,33 +165,38 @@ bool sched_idle_in_wfi(unsigned cpu_idx) {
     return g_cpu_sched[cpu_idx].idle_in_wfi;
 }
 
-// P4-Ic6-impl (R12-sched): boot CPU's deadlock-path idle thread.
-// Registered via sched_set_bootcpu_idle in boot_main; consulted by
-// sched()'s deadlock path. Read-only after init; no lock needed (set
-// once before tests + secondaries running).
-static struct Thread *g_bootcpu_idle;
-
-void sched_set_bootcpu_idle(struct Thread *t) {
-    if (g_bootcpu_idle) extinction("sched_set_bootcpu_idle called twice");
-    if (!t) extinction("sched_set_bootcpu_idle(NULL)");
-    if (t->magic != THREAD_MAGIC) extinction("sched_set_bootcpu_idle: corrupted Thread");
-    if (t->band != SCHED_BAND_IDLE) extinction("sched_set_bootcpu_idle: thread must be SCHED_BAND_IDLE");
-    g_bootcpu_idle = t;
+// SMP redesign (ARCH 8.4.2): install cpu0's idle thread. cpu0's idle is an
+// ordinary in-tree pinned thread (thread_create_bootcpu_idle), retiring the old
+// off-tree real-kstack g_bootcpu_idle + its deadlock-path dispatch (the #860
+// root cause). Records it as cpu0's idle (so the idle_in_wfi `next==idle` logic
+// names it -- overriding the kthread placeholder sched_init(0) set) and ready()s
+// it into cpu0's run_tree[IDLE], whence ordinary pick_next dispatches it.
+void sched_install_bootcpu_idle(struct Thread *t) {
+    if (!t)                         extinction("sched_install_bootcpu_idle(NULL)");
+    if (t->magic != THREAD_MAGIC)   extinction("sched_install_bootcpu_idle: corrupted Thread");
+    if (t->band != SCHED_BAND_IDLE) extinction("sched_install_bootcpu_idle: thread must be SCHED_BAND_IDLE");
+    if (!t->cpu_pinned)             extinction("sched_install_bootcpu_idle: idle must be cpu_pinned");
+    if (smp_cpu_idx_self() != 0)    extinction("sched_install_bootcpu_idle: must run on cpu0");
+    struct CpuSched *cs = &g_cpu_sched[0];
+    if (!cs->initialized)           extinction("sched_install_bootcpu_idle before sched_init(0)");
+    cs->idle = t;
+    ready(t);
 }
 
-// P4-Ic6-impl (R12-sched): boot CPU's idle loop. See sched.h doc.
+// SMP redesign (ARCH 8.4.2): cpu0's idle loop. Body mirrors per_cpu_main's tail
+// (kernel/smp.c) for secondaries. The mask -> set-flag -> sched -> wfi ordering
+// is the R7 F128 close: a peer notifier observes idle_in_wfi=TRUE before the wfi
+// commits, so a peer that ready()s new work between (flag set) and (wfi enters)
+// sends an IPI that wfi sees pending and exits on. The complementary half of the
+// idle_in_wfi accuracy fix (F7) lives in sched(): the flag is cleared to
+// (next==idle) at every switch, so a CPU running stolen work no longer looks
+// idle to peers.
 //
-// Body mirrors per_cpu_main's tail (kernel/smp.c) for secondaries. The
-// IRQ-mask-then-set-flag-then-sched-then-wfi ordering is the R7 F128
-// close: peer notifiers observe idle_in_wfi=TRUE before the wfi commits,
-// so a peer that calls ready() with new work between (flag set) and
-// (wfi enters) will send an IPI that wfi sees as pending and exits on.
-//
-// Reached via thread_trampoline → blr x21 with x21 = bootcpu_idle_main
-// (set by thread_create in boot_main). The trampoline already calls
-// sched_finish_task_switch + msr daifclr,#2 before reaching here, so
-// PSTATE.I is unmasked on entry. The first spin_lock_irqsave(NULL)
-// re-masks for the body.
+// Reached via thread_trampoline -> blr x21 with x21 = bootcpu_idle_main (set by
+// thread_create_bootcpu_idle). The trampoline already calls
+// sched_finish_task_switch + msr daifclr,#2 before reaching here, so PSTATE.I is
+// unmasked on entry; the first spin_lock_irqsave(NULL) re-masks for the body.
+// Dispatched by ordinary pick_next from cpu0's run_tree[IDLE] (NO deadlock path).
 __attribute__((noreturn))
 void bootcpu_idle_main(void) {
     for (;;) {
@@ -215,16 +221,6 @@ static bool in_run_tree(struct CpuSched *cs, struct Thread *t) {
 // Insert `t` into `cs`'s band tree, sorted ascending by vd_t. Ties (equal
 // vd_t) place `t` AFTER existing equal-keyed nodes — FIFO within ties.
 static void insert_sorted(struct CpuSched *cs, struct Thread *t) {
-    // #860 invariant tripwire (durable regression guard): g_bootcpu_idle is the
-    // CPU-0-pinned deadlock-path idle; it is the ONE idle-band thread with a
-    // real kstack (the secondaries' idles are kstack_base==NULL), so if it ever
-    // enters a run tree it becomes stealable by a secondary (try_steal's only
-    // gate is kstack_base != NULL) AND re-pickable by cpu 0's deadlock path ->
-    // two CPUs run it on one kstack/ctx -> cross-CPU context corruption (the
-    // #860 wild-PC / smashed-stack crash). It MUST stay off-tree. Deterministic:
-    // fires at the INSERTION (the precondition), not the rare double-run.
-    if (t == g_bootcpu_idle)
-        extinction("#860: g_bootcpu_idle entered a run tree (must stay off-tree)");
     struct Thread **head = &cs->run_tree[t->band];
 
     // Empty band or t < head: prepend.
@@ -271,6 +267,14 @@ static struct Thread *pick_next(struct CpuSched *cs) {
     for (unsigned b = 0; b < SCHED_BAND_COUNT; b++) {
         struct Thread *t = cs->run_tree[b];
         if (t) {
+            // ARCH 8.4.5 steal-invariant: cs->lock is held across the whole
+            // multi-step switch, so a tree reached here holds only RUNNABLE,
+            // !on_cpu threads (RunqOnCpuSafe). Fail loud if a future change ever
+            // shortens that hold and leaves an on_cpu/non-RUNNABLE thread linked
+            // (a silent double-run / half-saved-ctx resume otherwise).
+            ASSERT_OR_DIE(t->state == THREAD_RUNNABLE &&
+                          !__atomic_load_n(&t->on_cpu, __ATOMIC_ACQUIRE),
+                          "pick_next: victim not RUNNABLE-and-off-cpu (run-tree invariant)");
             unlink(cs, t);
             return t;
         }
@@ -477,29 +481,30 @@ static struct Thread *try_steal(struct CpuSched *cs, bool *contended_out) {
             continue;
         }
 
-        // Pick the highest-priority runnable thread from peer.
+        // Pick the highest-priority STEALABLE thread from peer.
         //
-        // P5-el1h-kernel (audit F2 / invariant I-21): never steal a
-        // thread whose kstack_base is NULL. Such a thread is a bootstrap
-        // context — kthread, or a per-CPU idle thread from
-        // thread_init_per_cpu_idle — that runs on a CPU's *boot* stack,
-        // not on a portable per-thread kstack. Under the uniform-EL1h
-        // model exception frames are built on the running thread's
-        // stack; migrating a boot-stack thread to another CPU would run
-        // it (and build its exception frames) on a stack its origin CPU
-        // still owns — cross-CPU stack corruption. Boot-stack threads
-        // are therefore CPU-pinned. The realistic case is a per-CPU idle
-        // thread sitting in run_tree[BAND_IDLE]; skipping it there costs
-        // nothing (an idle thread is not work worth stealing).
-        // #860: g_bootcpu_idle is CPU-0-pinned despite owning a real kstack
-        // (so the kstack_base != NULL gate alone does NOT exclude it the way it
-        // excludes the secondaries' kstack_base==NULL idles). It must stay
-        // off-tree (the yield path enforces that), so this guard is defense in
-        // depth -- a backstop if any future path leaks it into a tree.
+        // SMP redesign (ARCH 8.4.2, invariant I-21): never migrate a CPU-pinned
+        // thread (cpu_pinned). Pinned == every per-CPU idle (cpu0's bootcpu_idle
+        // + each secondary's) + kthread -- all run on a static boot/idle stack
+        // that belongs to one specific CPU. Under the uniform-EL1h model
+        // exception frames build on the running thread's stack; migrating a
+        // boot-stack thread to another CPU would build its frames on a stack its
+        // origin CPU still owns -> cross-CPU stack corruption. cpu_pinned is the
+        // single clean predicate REPLACING the prior (kstack_base != NULL &&
+        // cand != g_bootcpu_idle) gate: the g_bootcpu_idle special case (a real
+        // kstack the kstack_base gate did NOT exclude) was the #860 root cause;
+        // a pinned in-tree idle is now skipped here by construction.
         struct Thread *stolen = NULL;
         for (unsigned b = 0; b < SCHED_BAND_COUNT && !stolen; b++) {
             struct Thread *cand = peer->run_tree[b];
-            if (cand && cand->kstack_base != NULL && cand != g_bootcpu_idle) {
+            if (cand && !cand->cpu_pinned) {
+                // ARCH 8.4.5 steal-invariant: we hold peer->lock, so peer is not
+                // mid-switch (its spin_trylock would have failed) and its tree
+                // holds only RUNNABLE, !on_cpu threads (RunqOnCpuSafe). Fail loud
+                // if that ever breaks rather than steal a half-saved ctx.
+                ASSERT_OR_DIE(cand->state == THREAD_RUNNABLE &&
+                              !__atomic_load_n(&cand->on_cpu, __ATOMIC_ACQUIRE),
+                              "try_steal: victim not RUNNABLE-and-off-cpu (run-tree invariant)");
                 stolen = cand;
                 unlink(peer, stolen);
             }
@@ -608,46 +613,18 @@ void sched(void) {
     }
     if (!next) {
         if (prev->state != THREAD_RUNNING) {
-            // P4-Ic6-impl (R12-sched): fall back to the boot CPU's
-            // dedicated idle thread instead of extincting. Pre-fix
-            // this was an unconditional ELE because no idle thread
-            // existed distinct from kthread (kthread doubled as
-            // cs->idle); kthread blocking with no peer meant the
-            // kernel had nothing to switch to. The boot CPU has
-            // g_bootcpu_idle (allocated in boot_main); sched() switches
-            // to it explicitly on the deadlock path. The idle thread
-            // WFI loops until an IRQ arrives that makes some thread
-            // RUNNABLE; its own sched() then picks that thread up.
-            //
-            // g_bootcpu_idle is kept OFF the run tree, and that is a HARD
-            // correctness requirement (#860), NOT an artifact: it owns a real
-            // kstack (thread_create in boot_main), so unlike the secondaries'
-            // kstack_base==NULL idles it would PASS try_steal's gate. If it
-            // entered a tree a secondary would steal it while this deadlock path
-            // concurrently re-picks it -> two CPUs run it on one kstack/ctx ->
-            // context corruption (the #860 wild-PC / smashed-stack crash). The
-            // yield path keeps it off-tree; this path is its sole dispatcher.
-            // (P4-Ic6's original off-tree motivation -- dodging the pre-P5
-            // EL1t/EL1h exception-stack clobber -- is obsolete under uniform
-            // EL1h/I-21, but the off-tree invariant is now load-bearing for a
-            // DIFFERENT reason: stealability. Folding it into the tree like the
-            // secondaries' idles would REINTRODUCE the bug, not clean it up.)
-            //
-            // Only the boot CPU has g_bootcpu_idle registered. For secondaries
-            // this path is a genuine deadlock (their per_cpu_main idle is
-            // kstack_base==NULL + in run_tree[BAND_IDLE], so pick_next normally
-            // finds it). Defensive extinction kept for secondaries / mis-init.
-            if (g_bootcpu_idle && smp_cpu_idx_self() == 0) {
-                // #860 belt-and-suspenders: g_bootcpu_idle is off-tree +
-                // unstealable, so it can only ever run here on cpu 0 -- it must
-                // NOT already be on_cpu. A true on_cpu here is a double-dispatch
-                // (the exact corruption); fail loud rather than corrupt silent.
-                if (__atomic_load_n(&g_bootcpu_idle->on_cpu, __ATOMIC_ACQUIRE))
-                    extinction("#860: g_bootcpu_idle already on_cpu at deadlock dispatch");
-                next = g_bootcpu_idle;
-            } else {
-                extinction("sched: deadlock — current is blocking, no runnable peer system-wide");
-            }
+            // SMP redesign (ARCH 8.4.2): structurally unreachable in steady
+            // state. Every CPU has a pinned in-tree idle, so whenever a non-idle
+            // thread is current its CPU's idle sits in run_tree[IDLE] (displaced
+            // when that thread was picked) -- pick_next above ALWAYS finds at
+            // least the idle (sched_alpha.tla IdleAvailable). The old design
+            // dispatched the off-tree g_bootcpu_idle here on cpu0 (the #860 root
+            // cause: a real-kstack thread that became stealable if leaked into a
+            // tree); that special case is retired. The sole remaining way to
+            // reach here is the boot window before sched_install_bootcpu_idle
+            // readies cpu0's idle, or a secondary mis-init -- both are bugs. Fail
+            // loud rather than run nothing.
+            extinction("sched: deadlock -- current blocking, no runnable thread and no in-tree idle");
         }
     }
     if (!next) {
@@ -674,23 +651,17 @@ void sched(void) {
     }
 
     if (prev->state == THREAD_RUNNING) {
-        // Yield: advance vd_t past all currently-runnable threads; insert prev
-        // at the back of its band's rotation. The SECONDARY per-CPU idle
-        // threads participate in the run tree like any other thread -- they are
-        // kstack_base==NULL, so try_steal skips them (CPU-pinned to their boot
-        // stack). g_bootcpu_idle is the #860 EXCEPTION: it owns a REAL kstack
-        // (thread_create in boot_main -- cpu 0's boot stack belongs to kthread,
-        // so cpu 0's idle can't be a bare-boot-stack thread like the
-        // secondaries'). If it entered a tree it would be stealable (try_steal's
-        // only gate is kstack_base != NULL) AND concurrently re-pickable by cpu
-        // 0's deadlock path -> two CPUs run it on one kstack/ctx -> cross-CPU
-        // context corruption. So it MUST stay off-tree: on yield it goes
-        // RUNNABLE but is NOT inserted; the deadlock path below is its sole
-        // dispatcher, re-selecting it from that RUNNABLE-off-tree resting state.
+        // Yield: advance vd_t past all currently-runnable threads; insert prev at
+        // the back of its band's rotation. EVERY thread re-enters the tree here,
+        // the per-CPU idles included -- an idle is an ordinary in-tree thread
+        // (ARCH 8.4.2; the old g_bootcpu_idle off-tree exception is retired).
+        // try_steal skips it via cpu_pinned, so an in-tree idle is never
+        // migrated. This restores the "a non-idle thread is current => its CPU's
+        // idle is in run_tree[IDLE]" invariant that makes the deadlock path above
+        // unreachable.
         prev->vd_t = cs->vd_counter++;
         prev->state = THREAD_RUNNABLE;
-        if (prev != g_bootcpu_idle)
-            insert_sorted(cs, prev);
+        insert_sorted(cs, prev);
     }
     // else: block (SLEEPING) or exit (EXITING) — prev stays out of
     // the run tree. wakeup()/ready() will re-insert SLEEPING; EXITING
@@ -702,6 +673,20 @@ void sched(void) {
     next->slice_remaining = THREAD_DEFAULT_SLICE_TICKS;
     next->state = THREAD_RUNNING;
     set_current_thread(next);
+
+    // ARCH 8.4.5 idle_in_wfi accuracy (F7): the flag means "this CPU's current
+    // thread is its idle." Set it at every switch so a CPU that switched its idle
+    // AWAY to real work (next != idle) no longer looks idle to peers'
+    // sched_notify_idle_peer (the F7 bug both review prosecutors found), and a CPU
+    // that switched real work BACK to its idle (next == idle) is correctly marked
+    // idle so the about-to-wfi resume re-declares it. The idle loop additionally
+    // sets the flag TRUE before its sched() (covering the born-running first
+    // iteration + the stays-idle no-switch case); together they keep the flag
+    // accurate without reopening the R7 F128 window. `cs` is this CPU's slot;
+    // cs->idle is the real idle (kthread placeholder overridden for cpu0 by
+    // sched_install_bootcpu_idle). Set before the switch; after it we may resume
+    // on a different CPU, but this set correctly describes THIS CPU's new current.
+    cs->idle_in_wfi = (next == cs->idle);
 
     // P2-Ce finish_task_switch handoff: stash the lock to be released
     // on the destination CPU. cs->pending_release_lock points at THIS
@@ -792,20 +777,18 @@ unsigned sched_runnable_count(void) {
     // quiescence assertions).
     //
     // SCHED_BAND_IDLE is EXCLUDED on purpose. The per-CPU idle threads are
-    // always-runnable scheduler infrastructure, not pending work: each
-    // secondary's idle thread lives in cs->run_tree[BAND_IDLE] ("participates
-    // in the run tree like any other thread", sched() below), and the boot
-    // CPU's g_bootcpu_idle is the off-tree exception. Counting the in-tree
-    // secondary idles made this report a phantom backlog on an idle multi-CPU
+    // always-runnable scheduler infrastructure, not pending work: EVERY CPU's
+    // idle -- cpu0's bootcpu_idle AND each secondary's -- is an ordinary
+    // BAND_IDLE in-tree thread (ARCH 8.4.2; the old off-tree g_bootcpu_idle is
+    // retired), so the band filter uniformly excludes them all. Counting the
+    // in-tree idles made this report a phantom backlog on an idle multi-CPU
     // system, and made the `sched_runnable_count()==0` quiescence assertions
-    // race a secondary idle thread that, under host load, is in-tree (rather
-    // than the running thread) at the check instant -- the #857 "smp8 cons.*
-    // flake", which was never console_mgr and never a kernel fault, just a
-    // benign idle thread miscounted as work. Real runnable work
-    // (BAND_INTERACTIVE / BAND_NORMAL) is still counted, so a genuinely
-    // stranded work thread is never masked. (g_bootcpu_idle MUST stay off-tree
-    // -- #860: it owns a real kstack so a tree entry makes it stealable; it is
-    // never counted here regardless.)
+    // race an idle thread that, under host load, is in-tree (rather than the
+    // running thread) at the check instant -- the #857 "smp8 cons.* flake",
+    // which was never console_mgr and never a kernel fault, just a benign idle
+    // thread miscounted as work. Real runnable work (BAND_INTERACTIVE /
+    // BAND_NORMAL) is still counted, so a genuinely stranded work thread is
+    // never masked.
     unsigned n = 0;
     for (unsigned i = 0; i < DTB_MAX_CPUS; i++) {
         struct CpuSched *cs = &g_cpu_sched[i];

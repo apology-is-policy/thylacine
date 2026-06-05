@@ -234,6 +234,13 @@ void test_sched_runnable_count(void) {
 void test_sched_runnable_count_excludes_idle(void) {
     TEST_EXPECT_EQ(sched_runnable_count(), 0u, "work count 0 at entry");
 
+    // SMP redesign (ARCH 8.4.2): cpu0's bootcpu_idle is a permanent in-tree
+    // BAND_IDLE thread, so the IDLE band is no longer empty at baseline. This
+    // test runs on cpu0/kthread with secondaries parked (no stealing during
+    // tests), so the IDLE-band count is stable; assert DELTAS against the
+    // captured baseline rather than absolute counts.
+    unsigned base_idle = sched_runnable_count_band(SCHED_BAND_IDLE);
+
     struct Thread *idle_band = thread_create(kproc(), sched_test_thread_a);
     TEST_ASSERT(idle_band != NULL, "thread_create failed");
     idle_band->band = SCHED_BAND_IDLE;          // mimic a per-CPU idle thread
@@ -242,8 +249,8 @@ void test_sched_runnable_count_excludes_idle(void) {
     // Pre-#857 this returned 1 (idle miscounted as work) -> the smp8 flake.
     TEST_EXPECT_EQ(sched_runnable_count(), 0u,
         "a band-IDLE thread is NOT counted as runnable work");
-    TEST_EXPECT_EQ(sched_runnable_count_band(SCHED_BAND_IDLE), 1u,
-        "the band-IDLE thread IS present in the IDLE band");
+    TEST_EXPECT_EQ(sched_runnable_count_band(SCHED_BAND_IDLE), base_idle + 1u,
+        "the band-IDLE thread IS present in the IDLE band (baseline + 1)");
 
     // A real WORK thread alongside it IS counted (no masking of real strands).
     struct Thread *work = thread_create(kproc(), sched_test_thread_b);
@@ -255,8 +262,8 @@ void test_sched_runnable_count_excludes_idle(void) {
     thread_free(work);
     thread_free(idle_band);
     TEST_EXPECT_EQ(sched_runnable_count(), 0u, "work count 0 after free");
-    TEST_EXPECT_EQ(sched_runnable_count_band(SCHED_BAND_IDLE), 0u,
-        "IDLE band empty after free");
+    TEST_EXPECT_EQ(sched_runnable_count_band(SCHED_BAND_IDLE), base_idle,
+        "IDLE band back to baseline after free");
 }
 
 
@@ -279,13 +286,15 @@ void test_sched_idle_in_wfi_observability(void) {
     TEST_EXPECT_EQ(sched_idle_in_wfi(DTB_MAX_CPUS + 100), false,
         "way-out-of-range cpu_idx returns false");
 
-    // P4-Ic6-impl (R12-sched): boot CPU's g_bootcpu_idle runs ONLY when
-    // the deadlock-path fallback fires (prev SLEEPING + no peer
-    // runnable). Pre-virtio_blk_probe this is unreachable; idle_in_wfi(0)
-    // is FALSE. Post-virtio_blk_probe (or any test that triggers the
-    // fallback) it may transiently flip; that's tested elsewhere.
+    // SMP redesign (ARCH 8.4.2/8.4.5): idle_in_wfi(0) means "cpu0's current is
+    // its idle (bootcpu_idle)." This test runs ON kthread, so cpu0's current is
+    // kthread -- the last switch into kthread set the flag = (kthread==idle) =
+    // FALSE. cpu0's idle runs only when kthread (or any cpu0 thread) blocks with
+    // no other runnable work (e.g. virtio_blk_probe), and switching back to
+    // kthread re-clears the flag. So it is FALSE whenever a non-idle thread runs
+    // here.
     TEST_EXPECT_EQ(sched_idle_in_wfi(0), false,
-        "boot CPU idle_in_wfi=FALSE before any deadlock-path fallback fires");
+        "boot CPU idle_in_wfi=FALSE while kthread (a non-idle thread) is running");
 
     // If running multi-CPU, secondaries should be in WFI by now.
     // Allow brief settle window for any in-flight ipi handling.

@@ -71,29 +71,21 @@ void sched_arm_clear_on_cpu(struct Thread *prev);
 // cpu_idx is out of range.
 struct Thread *sched_idle_thread(unsigned cpu_idx);
 
-// P4-Ic6-impl (R12-sched): boot CPU's dedicated idle loop entry point.
-// Allocated in boot_main via thread_create(kproc(), bootcpu_idle_main)
-// with band=SCHED_BAND_IDLE, registered via sched_set_bootcpu_idle.
-// NOT inserted into the run tree (would let preempt's pick_next switch
-// to it at SpSel=1, clobbering SP_EL1 = exception stack). Used solely
-// as the deadlock-path fallback by sched() when prev is SLEEPING/
-// EXITING and no peer is runnable system-wide; that path fires only
-// from voluntary sched() callers at SpSel=0, where cpu_switch_context
-// naturally writes SP_EL0 and the exception stack stays intact.
-//
-// Same IRQ-mask + idle_in_wfi discipline as per_cpu_main's tail loop
-// (R7 F128). Closes R12-sched: kthread can now wait_pid on a hardware-
-// IRQ-blocked child without the scheduler ELE'ing.
+// SMP redesign (ARCH §8.4.2): the boot CPU's idle-loop entry. cpu0's idle
+// thread (thread_create_bootcpu_idle) runs this loop, dispatched by the
+// ORDINARY pick_next from cpu0's run_tree[IDLE] — exactly like a secondary's
+// idle in per_cpu_main's tail. NO deadlock-path special case, NO off-tree
+// state (the #860 root cause retired). Same IRQ-mask + idle_in_wfi discipline
+// as per_cpu_main's tail loop (R7 F128). Noreturn.
 __attribute__((noreturn))
 void bootcpu_idle_main(void);
 
-// P4-Ic6-impl (R12-sched): register the boot CPU's deadlock-fallback
-// idle thread. Stored in a global consulted by sched() when prev is
-// SLEEPING/EXITING and pick_next + try_steal both return NULL — instead
-// of extinction, sched() switches to this thread. The thread must NOT
-// be in any run tree; it's accessed by-pointer in the deadlock path.
-// Idempotent re-call extincts (set-once).
-void sched_set_bootcpu_idle(struct Thread *t);
+// SMP redesign (ARCH §8.4.2): install cpu0's idle thread. Records it as
+// g_cpu_sched[0].idle (overriding the kthread placeholder sched_init(0) set)
+// AND ready()'s it into cpu0's run_tree[IDLE]. Called once from boot_main on
+// cpu0 after thread_create_bootcpu_idle. Replaces the old
+// sched_set_bootcpu_idle (which stored an off-tree deadlock-path pointer).
+void sched_install_bootcpu_idle(struct Thread *t);
 
 // P3-G: WFI signaling for ready/wakeup wake-idle-peer (closes R5-H F78).
 //

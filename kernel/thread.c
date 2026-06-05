@@ -159,6 +159,11 @@ void thread_init(void) {
     g_kthread->band   = SCHED_BAND_NORMAL;
     g_kthread->slice_remaining = THREAD_DEFAULT_SLICE_TICKS;
     g_kthread->on_cpu = true;       // P2-Cf: kthread is the boot CPU's running thread
+    // SMP redesign: kthread runs on cpu0's _boot_stack (kstack_base==NULL); it
+    // is CPU-pinned so try_steal's new !cpu_pinned gate never migrates it off
+    // cpu0 (the boot-stack-thread non-migration rule the old kstack_base==NULL
+    // gate enforced; ARCH 8.4.2).
+    g_kthread->cpu_pinned = true;
 
     // P3-Bdb: pre-populate ctx.ttbr0 with the kernel-only TTBR0 root
     // (l0_ttbr0 PA + ASID 0). kthread is the boot CPU's running thread
@@ -219,9 +224,63 @@ struct Thread *thread_init_per_cpu_idle(unsigned cpu_idx) {
     t->on_cpu = true;                     // P2-Cf: per-CPU idle is
                                           // the executing thread on
                                           // this CPU at sched_init.
+    // SMP redesign: a secondary's idle runs on its boot stack
+    // (kstack_base==NULL) and is CPU-pinned -- try_steal's !cpu_pinned gate
+    // never migrates it (ARCH 8.4.2; was the kstack_base==NULL skip).
+    t->cpu_pinned = true;
 
     // P3-Bdb: kernel-only TTBR0 root. See thread_init for rationale.
     t->ctx.ttbr0 = (u64)mmu_kernel_ttbr0_pa();
+
+    thread_link_into_proc(t, kproc());
+    __atomic_fetch_add(&g_thread_created, 1u, __ATOMIC_RELAXED);
+    return t;
+}
+
+// SMP redesign (deep-smp-review, ARCH 8.4.2): allocate the boot CPU's idle
+// Thread. Unlike a secondary's idle -- which is BORN RUNNING (per_cpu_main IS
+// the idle thread) and never needs a first switch-in -- cpu0's idle is
+// switched INTO when kthread first blocks (joey_run/wait_pid), so it needs the
+// first-switch-in ctx (thread_trampoline -> blr entry), exactly like a
+// thread_create'd thread. But it runs on a caller-provided DEDICATED BSS stack
+// (g_bootcpu_idle_stack) -- NOT an alloc_pages kstack -- so kstack_base stays
+// NULL (it owns no per-thread kstack; symmetric with the secondaries' idles).
+// It is CPU-pinned + lives in cpu0's run_tree[IDLE] (readied by
+// sched_install_bootcpu_idle), retiring the old off-tree real-kstack
+// g_bootcpu_idle + its deadlock-path dispatch (the #860 root cause).
+//
+// `stack_top` is the high edge (SP grows down) of the dedicated BSS stack,
+// 16-byte aligned. The entry runs the per-CPU idle loop and must not return.
+struct Thread *thread_create_bootcpu_idle(void (*entry)(void), void *stack_top) {
+    if (!g_thread_cache) extinction("thread_create_bootcpu_idle before thread_init");
+    if (!kproc())        extinction("thread_create_bootcpu_idle before proc_init");
+    if (!entry)          extinction("thread_create_bootcpu_idle: NULL entry");
+    if (!stack_top)      extinction("thread_create_bootcpu_idle: NULL stack_top");
+    if (((uintptr_t)stack_top & 0xfu) != 0)
+        extinction("thread_create_bootcpu_idle: stack_top not 16-aligned");
+
+    struct Thread *t = kmem_cache_alloc(g_thread_cache, KP_ZERO);
+    if (!t) return NULL;
+
+    // kstack_base stays NULL (KP_ZERO) -- runs on the dedicated BSS stack, owns
+    // no per-thread kstack (thread_free's free_pages is gated on kstack_base).
+    t->magic  = THREAD_MAGIC;
+    t->tid    = alloc_next_tid();
+    t->state  = THREAD_RUNNABLE;           // ready()-able by sched_install_bootcpu_idle
+    t->proc   = kproc();
+    t->weight = 1;
+    t->band   = SCHED_BAND_IDLE;           // lowest band; runs only when nothing
+                                           // else is runnable on cpu0.
+    t->cpu_pinned = true;                  // unstealable (ARCH 8.4.2)
+    t->slice_remaining = THREAD_DEFAULT_SLICE_TICKS;
+
+    // First-switch-in ctx: cpu_switch_context's `ret` lands at thread_trampoline,
+    // which releases the run-tree lock + unmasks IRQs + `blr`s entry. Same layout
+    // as thread_create_internal but on the caller's BSS stack (no alloc_pages).
+    t->ctx.x21   = (u64)(uintptr_t)entry;
+    t->ctx.lr    = (u64)(uintptr_t)thread_trampoline;
+    t->ctx.sp    = (u64)(uintptr_t)stack_top;
+    t->ctx.ttbr0 = (u64)mmu_kernel_ttbr0_pa();   // kproc thread: kernel-only TTBR0
 
     thread_link_into_proc(t, kproc());
     __atomic_fetch_add(&g_thread_created, 1u, __ATOMIC_RELAXED);

@@ -258,6 +258,22 @@ CI) and (2) excise the structural special case so the bug class cannot recur.
 
 ## 7. Recommended forward path
 
+**STATUS (2026-06-05): the soundness core (#863) is LANDED + multi-boot-verified.** It
+implements (b) + (c) + the model gate from (a): `bootcpu_idle` is now a CPU-pinned
+(`cpu_pinned`) in-tree `BAND_IDLE` thread on a dedicated BSS stack
+(`g_bootcpu_idle_stack`), dispatched by ordinary `pick_next`; the deadlock path /
+off-tree state / `insert_sorted` tripwire / `g_bootcpu_idle` are all retired; the steal
+gate is `!cand->cpu_pinned` (generalizing the secondaries' old `kstack_base==NULL` skip,
+to which `kthread` is also folded); `idle_in_wfi` is fixed (F7: set `=(next==cs->idle)`
+at every switch so a CPU running stolen work no longer looks idle); and `pick_next` /
+`try_steal` `ASSERT_OR_DIE` `state==RUNNABLE && !on_cpu` on every victim (F3). Validated:
+`sched_alpha.tla` TLC-green (gate); **default smp4 710/710 PASS**; **UBSan-smp4 multi-boot
+clean** (the #860 amplifier, was ~33-43% crash on the broken option-A build → now 0
+corruption across the run); smp8 + UBSan-smp8 multi-boot clean (see `tools/smp-multiboot.sh`,
+the (d) deliverable). The handoff's "option A regresses smp8" premise did NOT reproduce.
+The HMP foundation (e) is #864; the formal audit is #866. Deferred from #863: the cpu0-idle
+stack guard page (task #867) + cpu0 IPI_RESCHED reception (task #868).
+
 (a) **Re-enable spec-first for the SMP mechanism.** Adopt `specs/sched_oncpu.tla` as a
     gating model alongside `scheduler.tla`; extend it as the mechanism evolves. The
     natural re-enabling point the user flagged ("an invariant-bearing feature that

@@ -123,6 +123,12 @@ extern struct secondary_stack g_secondary_boot_stacks[DTB_MAX_CPUS - 1];
 #define EXCEPTION_STACK_SIZE  4096u
 extern char g_exception_stacks[DTB_MAX_CPUS][EXCEPTION_STACK_SIZE];
 
+// SMP redesign (ARCH §8.4.2): high edge (SP grows down) of cpu0's dedicated
+// BSS idle stack. boot_main passes it to thread_create_bootcpu_idle. 16-byte
+// aligned. Symmetric with the secondaries' g_secondary_boot_stacks; the boot
+// CPU's idle owns no per-thread kstack (kstack_base==NULL).
+void *smp_bootcpu_idle_stack_top(void);
+
 // P2-Cb: per-CPU main. Called from secondary_entry asm trampoline at
 // the kernel's high VA after PAC + MMU + per-CPU stack are live.
 // Sets VBAR_EL1 to the kernel vector table, TPIDR_EL1 to NULL (no
