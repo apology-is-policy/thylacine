@@ -1192,6 +1192,32 @@ kill = BOTH the namespace `/proc/<pid>/ctl` surface AND a narrow elevation-only 
       mechanism changed; the 3 buggy-cfg gates trip correctly). Closed list:
       `memory/audit_828_closed_list.md`. **A-5b arc COMPLETE bar A-5c (RECOVER + hostowner-c).**
 
+- **A-5c DESIGN RESOLVED 2026-06-05** (two user votes after a Plan 9 / capability-microkernel /
+  per-user-encryption prior-art pass + a ground-truth map of corvus's key chain; SCRIPTURE-FIRST,
+  no code). The ground-truth corrected a key fact: corvus has **no `VERB_RECOVER` constant** today
+  (the verb table is 1,3,4,5,7,10,11-17; verb 8 is design-reserved but unbuilt) -- so A-5c
+  *formalizes + unifies* what was latently sketched (CORVUS-DESIGN 5.6 / verb 8 / the
+  `system-recovery-wrap` / C-20 / 9.4.4's "recovery phrase at user-create"), not from-scratch.
+  - **Mechanism = a recovery keyslot** (LUKS model): a SECOND wrap of the subject's hybrid keypair
+    under a recovery-phrase KEK (`recovery.corvus` for a user; the existing `system-recovery-wrap`
+    for the admin). Recovering the keypair transitively recovers all dataset DEKs (envelopes are
+    encapsulated to the keypair's public keys, which are unchanged) -> **no DEK rewrite, no Stratum
+    surface, no kernel surface** -- corvus + login-UX only.
+  - **Vote 1 = user-held only** (NOT hostowner escrow): the hostowner has no verb that recovers a
+    user's data; D3's mutually-encrypted-homes survives a malicious hostowner (Plan 9 no-escrow
+    heritage). The FileVault institutional-escrow option is a rejected v1.x seam.
+  - **Vote 2 = mandatory enrollment**: USER_CREATE mints the recovery wrap + returns the 24-word
+    phrase in its OK response; every account is recoverable by default.
+  - **Unified verb 8 RECOVER** gains `subject_kind` (0=system/hostowner-c, 1=user). Gate: phrase +
+    rate-limit only (no session, no cap); system additionally requires console attachment.
+  - **Scripture landed:** IDENTITY-DESIGN 9.9 (the A-5c design pass) + CORVUS-DESIGN 5.6 (the
+    keyslot flow) / 6.4 (verb 8 payload + USER_CREATE OK) / 8 (the `recovery.corvus` layout) / 9
+    (C-20 generalized + C-27 keyslot + C-28 no-escrow) / 4.2 + CLAUDE.md + ARCH 25.4 audit row.
+  - **Impl split (next):** A-5c-a (keyslot crypto + RECOVER(user) + USER_CREATE enrollment +
+    corvus tests, #873) -> A-5c-b (hostowner-c: RECOVER(system) + console gate, #874) -> A-5c-c
+    (login/UX recovery path + boot E2E + one focused audit, #875). AEGIS/mallocng-adjacent --
+    prosecute hard.
+
 ---
 
 ## Cross-stop sequencing

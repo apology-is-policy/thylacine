@@ -2188,10 +2188,105 @@ Stratum-side sub-chunk below.
   would corrupt it (the AEGIS/mallocng-adjacent path). The running coordinator is the single
   serialized writer (`fs->global`), so runtime provisioning MUST route through its `/ctl` surface.
 
-**A-5c -- RECOVER paper phrase + hostowner-c** (later sub-chunk; own scripture refinement +
-audit). The account-recovery round-trip -- a paper recovery phrase that re-derives/re-wraps
-the user's keypair when the passphrase is lost (the crypto mechanism gets its own design pass)
--- plus P5-hostowner-c.
+**A-5c -- RECOVER paper phrase + hostowner-c** (DESIGN RESOLVED 2026-06-05; two user votes
+after a Plan 9 / capability-microkernel / per-user-encryption prior-art pass + a ground-truth
+map of corvus's existing key chain). The account-recovery round-trip: a paper recovery phrase
+that re-derives the user's keypair when the passphrase is lost -- plus P5-hostowner-c (the
+already-sketched system-passphrase recovery, CORVUS-DESIGN section 5.6 / verb 8 / the
+`system-recovery-wrap` in the section 8 layout / C-20). A-5c **formalizes + unifies** what was
+latently designed; it is corvus + login-UX only -- **no kernel surface, no Stratum surface**
+(see "Why no Stratum/kernel surface" below).
+
+*The mechanism -- a recovery keyslot.* Today corvus wraps each subject's hybrid keypair
+(X25519 + ML-KEM-768, 3648 B) once, under a passphrase-derived KEK (`hybrid.corvus` for a
+user; `system-wrap` for the admin). A-5c adds a **second wrap of the same keypair** under a
+*recovery-phrase*-derived KEK -- a sibling file (`recovery.corvus` for a user; the existing
+`system-recovery-wrap` for the admin). This is the LUKS keyslot model: one volume key (here,
+the keypair), N independent factors that each unwrap it. Recovering the keypair transitively
+recovers everything, because every dataset DEK is a hybrid-PKE envelope encapsulated to that
+keypair's *public* keys -- one recovery wrap restores access to an unbounded set of encrypted
+datasets, no per-DEK escrow. (Novel angle vs FileVault's per-volume escrow; recorded as a
+NOVEL.md candidate: "keyslot recovery on a fan-out hybrid-PQ keypair.")
+
+*Why no Stratum/kernel surface.* Recovery re-wraps the keypair under a NEW passphrase KEK, but
+the keypair *value* is unchanged (same X25519/ML-KEM keys). The DEK envelopes stored in Stratum
+were encapsulated to those public keys, so they remain valid -- recovery restores private-key
+access to the *existing* envelopes. Post-recovery, the A-5b login DEK-pull (AUTH with the new
+passphrase -> unwrap keypair -> UNWRAP envelope -> mount) works unchanged. So A-5c touches no
+on-disk Stratum format and no syscall.
+
+*Prior art (the homework).* **Heritage** -- Plan 9 factotum is an in-memory agent with no
+paper recovery; secstore, on a forgotten password, lets the admin reset the *account* but the
+stored secrets are *lost* -- **no escrow of user data**; the Plan 9 idiom deliberately does not
+let the admin decrypt your secrets. **SOTA** -- the per-user-encryption peers corvus already
+cites: **LUKS** (one volume key, up to 8 keyslots -- the load-bearing analogy), **FileVault**
+(a *personal* recovery key, user-held, plus an *optional* institutional/escrow key offered as
+an explicit deployment choice, never a default), **ZFS/fscrypt** (keep-your-key, no recovery).
+**Fit** -- purely additive to corvus: same primitives (Argon2id + AEGIS-256), same atomic
+rename-swap persistence (A-1.6), same mlock/wipe discipline; CORVUS-DESIGN section D5 already
+commits the "24-word BIP-39-style, Argon2id-sensitive, displayed-once, re-wraps the keypair"
+pattern for the *system* phrase -- A-5c generalizes that exact pattern to users and wires the
+verb.
+
+*The two votes (2026-06-05).*
+- **Trust model = user-held only** (NOT hostowner escrow). The recovery phrase is the sole
+  non-passphrase way into a user's data; the hostowner has NO verb that recovers/decrypts a
+  user's home. This preserves D3's flaunted "cryptographically mutually-encrypted homes"
+  property *against a malicious hostowner* and matches the Plan 9 no-escrow heritage. The
+  FileVault institutional-escrow option (option C) is recorded as a v1.x NOVEL seam (a managed-
+  device story), gated behind an explicit install flag if ever built.
+- **Enrollment = mandatory at account create.** USER_CREATE mints the recovery wrap and returns
+  the 24-word phrase in its OK response; every account is recoverable by default (the phrase is
+  the disaster-recovery instrument, mirroring the system-phrase model). The opt-in alternative
+  (default = no recovery, "data gone by design" purity) is rejected as the v1.0 default; a user
+  who wants that purity simply destroys their phrase.
+
+*The unified verb.* The existing reserved verb 8 RECOVER (CORVUS-DESIGN section 6.4) gains a
+`subject_kind` discriminator: `subject_kind=0` = system (hostowner-c -- the section 5.6 flow,
+resets the system passphrase), `subject_kind=1` = user (the new path, resets a named user's
+passphrase). One verb, one crypto shape, two subjects.
+
+*Gates.* RECOVER(user) requires **only phrase-knowledge + the AUTH rate-limit** -- NO session
+token (the user has LOST their passphrase, so they cannot AUTH) and NO `CAP_HOSTOWNER` (a
+user-held recovery that needed the admin would not be user-held). The 256-bit phrase IS the
+bearer credential; the rate-limit (C-16) defends the online-guess channel. RECOVER(system)
+additionally requires **console attachment** (corvus checks the peer console bit, like
+ADMIN_ELEVATE) -- system recovery resets *admin authority*, so it stays a physical-console
+trusted-path operation; a remote bearer of the system phrase cannot reset the system passphrase.
+
+*Honest scope (the provisioning-time window).* USER_CREATE is admin-driven (CAP_HOSTOWNER), so
+the operator who provisions a user transiently sees that user's initial recovery phrase -- the
+same trust window as the admin-set initial passphrase. This is NOT a standing escrow (no verb
+or stored wrap lets the admin recover later), and it closes the moment the user rotates: a
+successful RECOVER rolls a FRESH phrase shown only to the user at the console, and a user may
+proactively RECOVER to establish an operator-unknown phrase. A forced first-login passphrase +
+phrase rotation (so the initial secrets are never operator-visible) is the near-term UX seam.
+
+*Invariants.* A-5c adds NO new ARCH section 28 kernel invariant (it composes the existing set).
+The new properties are corvus invariants -- CORVUS-DESIGN C-20 generalized + new C-27 (the
+per-user recovery keyslot: minted at create, displayed once, never persisted, wraps the same
+keypair as the passphrase slot) + C-28 (no-escrow: corvus stores no copy of any user's keypair
+or DEK recoverable by any authority other than that user's own passphrase OR own recovery
+phrase -- the faithful realization of the user-held vote).
+
+*Split.* A-5c-a (the recovery keyslot crypto + RECOVER(user) + USER_CREATE mandatory enrollment
++ `recovery.corvus` + corvus unit tests) -> A-5c-b (hostowner-c: RECOVER(system) + the system
+recovery wrap mint + the console gate) -> A-5c-c (login/UX recovery path + the boot E2E:
+create -> capture phrase -> "lose" passphrase -> RECOVER -> re-login with the new passphrase ->
+home decrypts) -> one focused audit. AEGIS/mallocng-adjacent (recovery crypto) -- prosecute
+hard: phrase brute-force vs the rate-limit, the no-escrow property, mlock/wipe of phrase + KEK,
+the no-session bypass, the console gate on system recovery, the rename-swap atomicity of the
+twin wraps.
+
+*Seams (foreseeable, additive).* hostowner co-sign of a high-stakes recovery
+(`AUTH_REQ_HOSTOWNER_COSIGN`, composing with the A-4c SAK trusted path); forced first-login
+enrollment (operator-never-sees-the-phrase); Shamir k-of-n multi-hostowner recovery (D5 already
+flags it); optional institutional escrow (the rejected option C); a single-user / recovery
+*boot* mode (a bigger boot/Utopia item, not the corvus verb).
+
+The concrete corvus surface (the verb 8 payload, the `recovery.corvus` format, the USER_CREATE
+response change, the section 5.6 generalized flow) is pinned in CORVUS-DESIGN sections 5.6 / 6.4
+/ 8 / 9.
 
 **Invariants.** A-5 adds NO new ARCH §28 kernel invariant -- it COMPOSES the existing set;
 the new properties are session-scoped, recorded here + audit-bearing:

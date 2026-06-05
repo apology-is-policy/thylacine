@@ -228,7 +228,7 @@ corvus serves a 9P tree at `/srv/corvus/`:
     ├── user-create           (W)   admin op
     ├── user-delete           (W)   admin op
     ├── rotate-key            (W)   per-dataset key rotation
-    └── recover               (W)   recovery-phrase-based system passphrase reset
+    └── recover               (W)   recovery-phrase passphrase reset: system (hostowner-c) OR user (A-5c)
 ```
 
 The `/ops/unwrap` verb replaces what was previously called "Stratum janus wire compatibility." It is a Thylacine-native verb that carries:
@@ -526,29 +526,43 @@ A session without `CAP_HOSTOWNER` cannot execute admin verbs; verb authorization
 
 **Heritage and originality.** The two-phase register/redeem shape is Plan 9's `cap(3)`. The Thylacine adaptation is substantive: Plan 9's device changed a process's *user identity* (uid strings), but Thylacine has no uid 0 (D5) — the `cap` device grants a *capability bit* and binds the grant to the unforgeable per-Proc identity tag (§6.2). And Plan 9 used an HMAC over a factotum↔kernel shared secret because factotum's registration channel was untrusted; here the `grant` write is itself `CAP_GRANT_HOSTOWNER`-gated, so the kernel trusts the channel directly — no token and no kernel-side cryptography.
 
-### 5.6 Recovery phrase
+### 5.6 Recovery phrase (the recovery keyslot; A-5c)
+
+A **recovery keyslot** is a second wrap of a subject's hybrid keypair under a *recovery-phrase*-derived KEK, alongside the passphrase wrap. Same keypair, two independent factors (the LUKS keyslot model). It exists for two subjects:
+
+- **system** (the admin keypair): `system-recovery-wrap` alongside `system-wrap`. This is **P5-hostowner-c** -- resets the system passphrase when the hostowner forgets it.
+- **user** (each user's keypair, A-5c): `recovery.corvus` alongside `hybrid.corvus`. Resets a user's passphrase when the user forgets it. **Minted mandatorily at USER_CREATE** (the phrase is returned in the OK response, displayed once).
+
+Both wraps use the CRVS v1 wrap layout (section 4.3, 3752 B), Argon2id-**sensitive** params, and a **domain-separated AD** -- `"thylacine-corvus-recovery-v1" || subject_name || 0x00` -- so a recovery wrap can never be confused with or substituted for a passphrase wrap. The phrase is a 24-word BIP-39-style mnemonic (256 bits of CSPRNG entropy + an 8-bit checksum); corvus embeds the 2048-word English wordlist. At recovery, corvus BIP-39-decodes + checksum-verifies the phrase (a typo aborts before the KDF), then `argon2id(canonicalized_phrase, recovery_salt, sensitive_params) -> recovery_KEK`.
+
+**The unified flow** (verb 8 RECOVER, section 6.4; `subject_kind = 0` system / `1` user):
 
 ```
-[hostowner forgets system passphrase]
-       |
-       v
-[console] runs: corvus admin recover
-            paper recovery phrase: --recovery-phrase '<24 words>'
-            new system passphrase:  --new-system-passphrase '<new>'
+[subject forgot the passphrase; presents the paper recovery phrase + a new passphrase]
+       |  (system path runs at the console: "corvus admin recover --recovery-phrase ... --new-system-passphrase ...")
        v
 [corvus]
-       |  argon2id(recovery_phrase, recovery_salt, sensitive_params) → recovery_KEK
-       |  AEAD-unwrap recovery-wrap (alongside system-wrap; same admin keypair, two wraps)
-       |  if successful: explicit_bzero recovery_KEK
-       |  argon2id(new_system_passphrase, fresh_salt, default_params) → new_system_KEK
-       |  AEAD-re-wrap admin keypair under new_system_KEK → new system-wrap
-       |  write atomically (tmp + fsync + rename) /var/lib/corvus/system-wrap
-       |  ALSO re-wrap the recovery wrap with a FRESH recovery_phrase
-       |  (generate new 24 words, display to user, force them to write it down)
-       |  audit-log: recovery-used; system-passphrase-rotated
+       |  BIP-39 decode + checksum-verify the phrase     (typo -> BadFormat, no KDF)
+       |  argon2id(phrase, recovery_salt, sensitive_params) -> recovery_KEK
+       |  AEAD-unwrap the recovery wrap (system-recovery-wrap | users/<name>/recovery.corvus)
+       |       -> the keypair (SAME keypair as the passphrase wrap; bad phrase -> tag fail -> BadAuth)
+       |  explicit_bzero(recovery_KEK)
+       |  argon2id(new_passphrase, fresh_salt, default_params) -> new_KEK
+       |  AEAD-re-wrap the keypair under new_KEK -> new passphrase wrap
+       |  write atomically (tmp + fsync + rename + fsync parent)  (system-wrap | hybrid.corvus)
+       |  ALSO roll a FRESH recovery phrase, re-wrap the recovery wrap, return it in the OK response
+       |       (the used phrase is retired; the new one is displayed once -- write it down)
+       |  explicit_bzero(keypair, new_KEK, both phrases' buffers)
+       |  audit-log: recovery-used; passphrase-rotated; subject
 ```
 
-The recovery phrase is a printed-paper instrument. Loss of both system passphrase AND recovery phrase = system reinstall required (intentional disaster-recovery floor).
+**Gates.** RECOVER(user) requires **only phrase-knowledge + the rate-limit** (C-16) -- NO session token (the user cannot AUTH; they lost the passphrase) and NO `CAP_HOSTOWNER` (a user-held recovery that needed the admin would not be user-held). RECOVER(system) additionally requires **console attachment** (the peer console bit, like ADMIN_ELEVATE) -- it resets admin authority, so it is a physical-console trusted-path operation.
+
+**No DEK rewrite, no Stratum/kernel surface.** Recovery re-wraps the *keypair*; the keypair *value* is unchanged, so its public keys are unchanged, so the dataset DEK envelopes (encapsulated to those public keys, stored in Stratum) remain valid. Post-recovery, the A-5b login DEK-pull works unchanged. A-5c is corvus + login-UX only.
+
+**No escrow (the user-held property, voted 2026-06-05).** corvus stores no copy of any user's keypair or DEK recoverable by any authority other than that user's own passphrase OR own recovery phrase. The hostowner has no verb that recovers/decrypts a user's data -- D3's mutually-encrypted-homes survives a malicious hostowner. (The FileVault institutional-escrow option is a rejected v1.x seam.)
+
+The recovery phrase is a printed-paper instrument. Loss of both the passphrase AND the recovery phrase = that subject's data is sealed forever (user) / system reinstall required (admin) -- the intentional disaster-recovery floor.
 
 ### 5.7 Clearance levels + the legate (A-4)
 
@@ -702,10 +716,10 @@ Verb table:
 | 2 | CHANGE_PASSPHRASE | `user_len u8` + `user` + `old_len u16` + `old` + `new_len u16` + `new` |
 | 3 | SESSION_CLOSE | `token` (33 bytes: "s" + 32-char hex) |
 | 4 | UNWRAP | `token` (33) + `dataset_len u8` + `dataset` + `key_id u64 LE` + `wrapped_len u16` + `wrapped` |
-| 5 | USER_CREATE | `user_len u8` + `user` + `pass_len u16` + `passphrase` + `backend u8` + *(A-1b append-only)* `supp_gid_count u8` + `supp_gids[count] u32 LE` (absent tail => 0) |
+| 5 | USER_CREATE | `user_len u8` + `user` + `pass_len u16` + `passphrase` + `backend u8` + *(A-1b append-only)* `supp_gid_count u8` + `supp_gids[count] u32 LE` (absent tail => 0). *(A-5c)* also mints the per-user recovery wrap; the OK response returns the minted 24-word phrase (mandatory enrollment) |
 | 6 | USER_DELETE | `user_len u8` + `user` |
 | 7 | ADMIN_ELEVATE | `token` + `sys_pass_len u16` + `sys_passphrase` |
-| 8 | RECOVER | `phrase_len u16` + `phrase` + `new_sys_pass_len u16` + `new_sys_passphrase` |
+| 8 | RECOVER | *(A-5c)* `subject_kind u8` (0=system, 1=user) + *(if user)* `user_len u8` + `user` + `phrase_len u16` + `phrase` + `new_pass_len u16` + `new_passphrase`. OK response returns the freshly-rolled 24-word recovery phrase (the used one is retired). Gate: phrase + rate-limit, no token, no cap; `subject_kind=0` additionally requires console attachment (section 5.6) |
 | 9 | ROTATE_KEY | `token` + `dataset_len u8` + `dataset` |
 | 10 | WRAP | `token` (33) + `dataset_len u8` + `dataset` + `key_id u64 LE` + `dek_len u16` + `dek` |
 | 11 | RESOLVE_ID | `principal_id u32 LE` |
@@ -723,7 +737,7 @@ Response frame:
 ```
 [0]      status            u8  (0=OK, 1=BadAuth, 2=PermissionDenied, 3=NotFound, 4=RateLimited, 5=BadFormat, 6=InternalError)
 [1..3)   payload_len       u16 LE
-[3..)    payload           status-specific (e.g., session token on AUTH OK, DEK on UNWRAP OK; A-1b: {principal_id,primary_gid} on USER_CREATE OK, the resolved record on RESOLVE_* OK, the gid on GROUP_CREATE OK — see §16.7)
+[3..)    payload           status-specific (e.g., session token on AUTH OK, DEK on UNWRAP OK; A-1b: {principal_id,primary_gid} on USER_CREATE OK, the resolved record on RESOLVE_* OK, the gid on GROUP_CREATE OK — see §16.7; A-5c: USER_CREATE OK and RECOVER OK additionally carry the freshly-minted 24-word recovery phrase as a trailing `phrase_len u16` + `phrase` — the OK payload grows append-only; callers updated in lockstep)
 ```
 
 The recv buffer for any frame carrying a passphrase / DEK is mlock'd. Corvus calls `sys_explicit_bzero` on the buffer immediately after parsing the relevant fields into typed storage and again after the typed storage is consumed.
@@ -825,6 +839,7 @@ thylacine                              [pool]
 │   │   │       └── users
 │   │   │           └── <name>
 │   │   │               ├── hybrid.corvus     (AEAD-wrapped keypair, magic CRVS)
+│   │   │               ├── recovery.corvus   (A-5c: same keypair, second keyslot, wrapped by the recovery phrase)
 │   │   │               └── wrap-state        (Argon2id params + salt + backend type)
 │   │   └── log
 │   │       └── corvus.audit.gz        ... encrypted append-only audit
@@ -883,13 +898,15 @@ These are runtime + audit guarantees at v1.0. `specs/corvus.tla` formalizes the 
 | C-17 | Session tokens are 128 bits of CSPRNG entropy; idle timeout 30 minutes (sliding); absolute timeout 24 hours (audit F15) | corvus session manager |
 | C-18 | Per-user stratumd processes only mount datasets owned by their user; multi-stratumd-per-pool block-device access is dataset-restricted (audit F1 + new) | stratumd multi-mode + corvus ownership check |
 | C-19 | corvus's audit log is encrypted under a system-passphrase-derived KEK; physical-disk read yields ciphertext only (audit F9) | audit-log encryption discipline |
-| C-20 | Recovery phrase is generated at install, displayed once, never persisted; loss of both system passphrase and recovery phrase requires reinstall (audit F6) | install flow + recovery verb |
+| C-20 | A recovery phrase (system OR user) is generated once, displayed once, never persisted; it derives a KEK that wraps the subject's keypair in a second keyslot alongside the passphrase wrap; loss of both factors = that subject's data is sealed forever (user) / system reinstall (admin) (audit F6; A-5c) | install + USER_CREATE flow + the RECOVER verb (section 5.6) |
 | C-21 | `CAP_HOSTOWNER` is elevation-only: it enters a Proc's capability set solely by redeeming a pending grant through the `cap` device's `use` file (for a console-attached Proc), and is never conferred by `rfork` | `cap` device + `rfork` elevation-only strip; `specs/handles.tla` |
 | C-22 | Every `/srv/corvus` connection carries its peer Proc's kernel-stamped identity (`stripes`, console bit, caps); corvus obtains it via `SYS_SRV_PEER` per request — never from the client, never cached on corvus's fid state | `devsrv` kernel-stamped identity + `KObj_Srv` non-transferability; `specs/corvus.tla` (`ConnOpIdentityIsKernelTruth` / `ConnOpPeerWasLive`), `specs/handles.tla` (`WalkChildIsSrv`) |
 | C-23 | The kernel is corvus's sole 9P client; every `/srv/corvus` connection's transport is kernel-created and kernel-owned, never in any handle table | `SYS_POST_SERVICE` (kernel owns all transport); `specs/corvus.tla` (`ConnTransportKernelOwned`), `specs/handles.tla` (`KObj_Srv` / `SrvHandlesAtOrigin`) |
 | C-24 | The identity DB is corvus's authoritative `id <-> name <-> group` map and is **non-secret** — it never contains a key, passphrase, or wrap (secrets live only in the per-user CRVS-v1 `hybrid.corvus`); `RESOLVE_ID`/`RESOLVE_NAME` are therefore ungated | `identity.db` content discipline (§16.1); ungated RESOLVE verbs (§16.7) |
 | C-25 | principal_ids and gids are assigned from ONE monotonic counter (`>= FIRST_AUTO_ID = 1000`); a UPG has `uid == gid`; reserved sentinels (`0` / `PRINCIPAL_SYSTEM` / `PRINCIPAL_NONE` + gid equivalents) are never assigned — an assigned id confers no ambient authority (ARCH I-22) | corvus ID allocator (§16.3) |
 | C-26 | The identity DB is persisted by **atomic rename-swap** (write `identity.db.tmp` -> fsync -> `SYS_RENAME` -> fsync the parent dir); a crash never yields a torn DB — load recovers the last atomically-committed `identity.db` and discards any stale `.tmp` | A-1.6 / FS-gamma `SYS_RENAME`+`SYS_UNLINK`; corvus persist + load (§16.5/§16.6) |
+| C-27 | The per-user recovery keyslot (`users/<name>/recovery.corvus`, A-5c) wraps the SAME hybrid keypair as `hybrid.corvus`, under a recovery-phrase-derived KEK with domain-separated AD (`"thylacine-corvus-recovery-v1"`); it is minted mandatorily at USER_CREATE; `RECOVER(subject=user)` is gated by phrase-knowledge + the rate-limit ONLY (no session, no `CAP_HOSTOWNER`), re-wraps the keypair under a new passphrase, and rolls a fresh phrase; `RECOVER(subject=system)` additionally requires console attachment | A-5c RECOVER verb (section 5.6 / 6.4); the recovery keyslot |
+| C-28 | **No escrow**: corvus stores no copy of any user's keypair or DEK recoverable by any authority other than that user's own passphrase OR own recovery phrase; the hostowner has no verb that recovers or decrypts a user's data — D3's mutually-encrypted-homes survives a malicious hostowner (user-held vote, 2026-06-05) | corvus key-store discipline; the absence of any hostowner-escrow wrap/verb |
 
 ---
 
