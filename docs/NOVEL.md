@@ -38,15 +38,19 @@ If any angle blows past its estimate by 2×, it's a warning sign worth redesigni
 
 These are not v1.0 angles — they're recorded so a future direction isn't lost.
 
-- **Warren — a shared-memory ring transport for 9P** (`docs/WARREN.md`). The
+- **Loom — a shared-memory ring transport for 9P** (`docs/LOOM.md`). The
   inversion of Linux's io_uring: rather than import io_uring's opcode zoo, expose
   the existing pipelined 9P client (Angle #3) to userspace via a Burrow-backed
   submission/completion ring, with the 9P op set (Angle #1) as the SQEs. io_uring's
   batching + out-of-order completion + (with a poll thread) zero-syscall submission
   come essentially for free, and the "what is the opcode vocabulary?" problem
-  dissolves because 9P already is the uniform vocabulary. Post-v1.0 (the prereq —
-  a solid synchronous pipelined 9P path — is now met); spec-first + audit-bearing
-  when taken up. (2026-06-05.)
+  dissolves because 9P already is the uniform vocabulary. **PROMOTED 2026-06-05**
+  from a post-v1.0 capture to a **scheduled pre-Utopia arc** (ROADMAP §8.0a, the
+  2nd of two arcs before Phase 7 resumes) — so Utopia's native userspace apps
+  consume its fast IO from the start. Binding design `docs/LOOM.md` (signed off:
+  native op-descriptor SQE + a reserved wire-passthrough seam; SQPOLL + multishot
+  built up front; `specs/loom.tla` gates impl; reserves invariants I-29 + I-30).
+  Audit-bearing. (Renamed from "Warren" 2026-06-05.)
 
 ---
 

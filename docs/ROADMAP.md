@@ -754,14 +754,24 @@ fast IO should exist before the apps that consume it.
   the "software-backed RNDR"; **audit-bearing**, CSPRNG quality). Fully
   QEMU-testable (TCG + HVF). **W4** (the actual RPi-400 board bring-up: EL2→EL1
   drop, BCM mailbox, a new SD/EMMC block backend) stays post-v1.0 (§12.1).
-- **Loom — the io_uring-inverted Burrow-backed 9P ring transport.** Scheduled as
-  the second pre-Utopia arc, **pulled forward from its documented post-v1.0 slot**
-  (§12.2) because Utopia's userspace apps consume it. Expose the #841 pipelined
-  9P client to userspace via a shared-memory SQ/CQ ring (the 9P op-set *is* the
-  SQE vocabulary — io_uring's "what opcodes?" problem dissolves); spec-first +
-  audit-bearing from day one. Idea capture: `docs/WARREN.md`. The full design
-  conversation → `docs/LOOM.md` (the Warren→Loom rename) + a NOVEL.md promotion +
-  `specs/loom.tla` land in a companion scripture commit.
+- **Loom — the io_uring-inverted Burrow-backed 9P ring transport.** Binding
+  design `docs/LOOM.md` (signed off 2026-06-05). Scheduled as the second
+  pre-Utopia arc, **pulled forward from its documented post-v1.0 slot** (§12.2)
+  because Utopia's native userspace apps consume it. Expose the #841 pipelined 9P
+  client to userspace via a shared-memory SQ/CQ ring (the 9P op-set *is* the SQE
+  vocabulary — io_uring's "what opcodes?" problem dissolves). Resolved design:
+  **native op-descriptor SQE** (dispatched straight to the structured
+  `p9_client_*` API) + a *reserved, not-built* wire-passthrough seam; **SQPOLL +
+  multishot built up front** (the maximal arc, each its own spec'd + audited
+  sub-chunk); the core kernel work is a **pluggable-completion refactor** of the
+  #841 client (post-CQE vs wake-rendez — one engine, two front-ends);
+  **submit-time capability pin** (the #844 by-value snapshot, never re-checked at
+  completion — io_uring's CVE class). **Spec-first re-enabled** — `specs/loom.tla`
+  (no-lost / no-double / no-stale completion + ring TOCTOU) gates each impl
+  sub-chunk; reserves invariants **I-29** (completion integrity) + **I-30**
+  (submit-time pin); audit-bearing. Sub-chunks Loom-0 (this scripture) →
+  Loom-1 (model) → Loom-2..6 (impl). The liburing-compat shim stays out of core
+  (§12.2).
 
 Phase 7 then resumes at **U-6d-b** (redirects), on a sound + accelerated
 foundation.
@@ -1206,7 +1216,7 @@ The "designed-not-implemented" v2.0 contracts (`NOVEL.md` Angle #9):
 - In-kernel Stratum driver.
 
 Other v1.1+ candidates:
-- `epoll`, `inotify`, `io_uring` syscalls (if not landed at Phase 6).
+- `epoll`, `inotify` syscalls (if not landed at Phase 6). (The io_uring concept is **Loom**, now a pre-Utopia arc §8.0a; the literal io_uring ABI is the v1.2 liburing-shim-over-Loom, §12.2.)
 - HW video decode.
 - Bare-metal Pi 5.
 - Apple Silicon bare metal.
@@ -1231,7 +1241,7 @@ These are explicitly *not in v1.0*; they're tracked for post-v1.0 work.
 
 ### 12.2 v1.2 candidates (6-12 months post-v1.0)
 
-- **`io_uring` syscall surface**: ~5-8 KLOC. The existing 9P pipelining gives most of the win for 9P-mediated I/O; `io_uring` is for direct kernel I/O paths (rare under Thylacine architecture).
+- **liburing-compat shim over Loom** (the literal Linux io_uring ABI): a thin, optional layer translating Linux `io_uring_setup`/`io_uring_enter` + the SQE/CQE format onto Loom (`docs/LOOM.md`). The *native* ring transport (Loom) itself moved **pre-Utopia** (§8.0a); this entry is now only the Linux-binary-compat shim, which stays out of Loom's core — a near-empty consumer set at v1.0 (the Pouch targets use zero io_uring; relevant only if a future perf-critical io_uring-native server with no fallback is ported).
 - **Bluetooth + USB beyond keyboard/mouse**: USB stack, basic Bluetooth.
 - **Multi-pane Halcyon (within scroll buffer)**: experiment with scroll-buffer-with-side-by-side regions. Carefully scoped to not become a windowing system.
 - **`thylacine-run` improvements**: cgroups-equivalent (without cgroup machinery; using territory-level resource accounting).
