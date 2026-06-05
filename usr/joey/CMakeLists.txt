@@ -13,6 +13,14 @@
 add_executable(joey joey.c)
 target_link_libraries(joey PRIVATE t)
 
+# A-5c-c: the build generates the host-baked system recovery phrase header here
+# (tools/build.sh emit_corvus_recovery_header). joey #includes it (guarded by
+# __has_include) to drive the live RECOVER(system) boot E2E. Absent header ->
+# the E2E is skipped (graceful, best-effort).
+if(DEFINED THYLA_GENERATED_DIR)
+    target_include_directories(joey PRIVATE "${THYLA_GENERATED_DIR}")
+endif()
+
 # Strip output name so the cpio entry is exactly "joey" (not "joey.elf").
 set_target_properties(joey PROPERTIES
     SUFFIX ""

@@ -171,12 +171,26 @@ the shared `corvus-crypto` lib (no second implementation -> byte-identical
 wraps). At build time `tools/build.sh` runs it during the pool populate:
 generate the admin keypair, wrap it under the build-time system passphrase
 (default `thylacine`, overridable via `CORVUS_SYSTEM_PASSPHRASE`) and under a
-fresh 24-word recovery phrase, **self-verify both keyslots unwrap to the same
+24-word recovery phrase, **self-verify both keyslots unwrap to the same
 keypair**, and write the two CRVS-v1 blobs into the pool's `/var/lib/corvus`
 (SYSTEM-owned), readback-verified byte-for-byte. The recovery phrase is logged
 once (forensic, like the mkfs seed). At v1.0 the system passphrase is the known
 constant so joey's boot `ADMIN_ELEVATE` stays green; the WRAP is real
 Argon2id+AEGIS. A v1.x installer supplies a real per-install secret.
+
+**Deterministic recovery phrase (A-5c-c).** The recovery-phrase *entropy* is
+derived from `CORVUS_SYSTEM_RECOVERY_SEED` (a 64-hex seed; default a clearly
+test value, overridable -- the same build-baked-known-secret posture as the
+`thylacine` passphrase + the mkfs seed). corvus-mint has a second mode,
+`emit-phrase <header>`, that derives ONLY the phrase from the seed and writes it
+as a C header (`build/generated/corvus_system_recovery_phrase.h`), run by
+`tools/build.sh` (`emit_corvus_recovery_header`) BEFORE the userspace build so
+joey can `#include` it. Both the header and the pool bake derive from the same
+seed, so the header phrase opens the baked `system-recovery-wrap` by
+construction (no drift). This is what lets joey's boot harness drive a LIVE
+`RECOVER(system)` (the keypair, salt, and nonce stay random per build; only the
+phrase entropy is pinned -- joey needs the phrase, not the keypair). A v1.x
+installer supplies real per-install randomness here too.
 
 ### `system_identity_load` (boot)
 
@@ -264,11 +278,21 @@ Compile-time invariants: `24 * 11 == 256 + 8`; the wordlist is exactly
   both keyslots over one keypair -> ADMIN_ELEVATE-unwrap -> RECOVER-unwrap ->
   re-wrap under a new passphrase (old passphrase no longer opens) -> roll a fresh
   phrase (old phrase no longer opens). 12/12 host tests.
-- The full argon2-backed RECOVER round-trips (user: create → capture phrase →
-  reset passphrase → re-login → home decrypts; system: ADMIN_ELEVATE +
-  RECOVER(system)) are the **A-5c-c** boot E2E. `handle_recover_system` is wired +
-  its crypto sequence host-proven, but its **live** execution is owed to A-5c-c
-  (the per-build random phrase needs runtime plumbing).
+- **Live `RECOVER(system)` boot E2E (A-5c-c, landed).** joey's console-attached
+  corvus harness drives `RECOVER(system)` end-to-end on a fresh pool, with the
+  seed-derived phrase from the generated header and `new_pass = "thylacine"` (so
+  the passphrase is restored): boot log `joey: RECOVER(system) ok (live; system
+  passphrase reset from recovery phrase; fresh phrase rolled)`. This is the
+  first **live** execution of `handle_recover_system` (wire dispatch + console
+  gate + argon2id+AEGIS unwrap of the baked wrap + persisted re-wrap). It is
+  **fresh-pool-gated** (RECOVER rolls + persists the wrap, so a persistent pool
+  must not re-run it) and **idempotent across reboots**: a second boot on the
+  same pool skips it (`RECOVER(system) E2E skipped`) and `ADMIN_ELEVATE("thylacine")`
+  still succeeds against the boot-1 re-wrapped `system-wrap` -- independently
+  proving the re-wrap is a valid argon2id+AEGIS round-trip across a reboot.
+- The **live `RECOVER(user)`** round-trip (create → capture phrase → reset
+  passphrase via the login `!recover` UX → re-AUTH with the new passphrase) is
+  the **A-5c-c-2** seeded login E2E.
 
 ## Error paths
 
@@ -292,11 +316,16 @@ the focused adversarial audit are A-5c-c.
 
 ## Known caveats / deferred
 
-- **RECOVER(system) live E2E** is owed to A-5c-c: the handler is wired and its
-  crypto path is host-proven (`system_identity_lifecycle`) + the shared
-  system-wrap path is boot-proven via ADMIN_ELEVATE, but the handler itself has
-  not executed live (the per-build random recovery phrase needs runtime
-  plumbing). A-5c-c drives it + the focused audit.
+- **RECOVER(system) live E2E** landed (A-5c-c-1): joey drives it on a fresh pool
+  via the seed-derived phrase (the generated header). The focused adversarial
+  audit of the whole A-5c surface is A-5c-c-3.
+- **The v1.0 system recovery phrase is build-baked + deterministic** (seed
+  `CORVUS_SYSTEM_RECOVERY_SEED`, default a known test value) — same posture as
+  the known system passphrase. The phrase is logged at build time (forensic) and
+  surfaced into joey via the generated header purely for the boot E2E; a v1.x
+  installer supplies real per-install randomness (the `CORVUS_SYSTEM_RECOVERY_SEED`
+  override is the seam). Overriding the seed without rebuilding joey makes the
+  baked wrap and joey's header disagree -- the E2E then fails loudly (not silent).
 - **The v1.0 system passphrase is the known constant** (`thylacine`) — the WRAP
   is now real Argon2id+AEGIS, but the secret is build-baked, not a real
   per-install secret. A v1.x installer supplies that (the `corvus-mint`

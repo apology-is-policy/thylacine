@@ -1273,12 +1273,24 @@ kill = BOTH the namespace `/proc/<pid>/ctl` surface AND a narrow elevation-only 
   `corvus: system identity loaded` + `joey: ADMIN_ELEVATE ok` (real unwrap proven live) + 0 EXTINCTION
   + 0 UBSan runtime errors; corvus-crypto host tests 12/12 (new `system_identity_lifecycle` proves the
   exact mint -> ADMIN_ELEVATE-unwrap -> RECOVER-unwrap -> re-wrap -> roll sequence). Reference
-  `docs/reference/105-corvus-recovery.md` (A-5c-b section). **OWED to A-5c-c: the LIVE
-  RECOVER(system) E2E** -- the handler is wired + its crypto host-proven + the shared system-wrap path
-  boot-proven via ADMIN_ELEVATE, but the handler itself has not executed live (the per-build random
-  recovery phrase needs runtime plumbing). **NEXT = A-5c-c (#875): login/UX recovery path + the live
-  RECOVER(user)+RECOVER(system) boot E2E + one focused adversarial audit (AEGIS/mallocng-adjacent --
-  prosecute hard) + the full matrix (SMP multi-boot gate + cross-reboot).**
+  `docs/reference/105-corvus-recovery.md` (A-5c-b section).
+
+- **A-5c-c-1 LANDED (#877): live RECOVER(system) E2E + build plumbing.** Closes the OWED
+  RECOVER(system)-live item. `tools/corvus-mint` gains (a) a deterministic recovery entropy from
+  `CORVUS_SYSTEM_RECOVERY_SEED` (default a known test value; same build-baked posture as the
+  `thylacine` passphrase + the mkfs seed) and (b) an `emit-phrase <header>` mode. `tools/build.sh`
+  (`emit_corvus_recovery_header`) runs emit-phrase BEFORE the userspace build to write
+  `build/generated/corvus_system_recovery_phrase.h`; joey `#include`s it (CMake `THYLA_GENERATED_DIR`,
+  `__has_include`-guarded); the pool bake uses the SAME seed, so the header phrase opens the baked
+  `system-recovery-wrap` by construction (no drift -- verified: the build log shows the emit phrase ==
+  the bake phrase). joey's console-attached corvus harness then drives `RECOVER(system)` live
+  (fresh-pool-gated; `new_pass = "thylacine"` so the passphrase is RESTORED): boot log
+  `joey: RECOVER(system) ok (live; ...)`. **Idempotent across reboots** (verified): boot 2 on the same
+  pool `RECOVER(system) E2E skipped` + `ADMIN_ELEVATE("thylacine")` still opens the boot-1 re-wrapped
+  `system-wrap` -- the cross-reboot persistence proof. default boot 1 (fresh) + boot 2 (persistent)
+  both GREEN, 0 EXTINCTION. **NEXT = A-5c-c-2 (#878): login `!recover` UX + live RECOVER(user) seeded
+  E2E -> A-5c-c-3 (#879): focused adversarial audit (whole A-5c surface; AEGIS/mallocng-adjacent --
+  prosecute hard) + full matrix (smp-multiboot + cross-reboot) + two-commit close.**
 
 ---
 

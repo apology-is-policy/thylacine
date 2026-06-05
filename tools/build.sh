@@ -62,6 +62,10 @@ BUILD_DIR="$REPO_ROOT/build"
 KERNEL_BUILD="$BUILD_DIR/kernel"
 USR_BUILD="$BUILD_DIR/usr"
 USR_RS_BUILD="$BUILD_DIR/usr-rs"
+# Generated build artifacts (e.g. the A-5c-c system-recovery-phrase header that
+# joey #includes for the live RECOVER(system) boot E2E). Not in git.
+GEN_DIR="$BUILD_DIR/generated"
+CORVUS_RECOVERY_HEADER="$GEN_DIR/corvus_system_recovery_phrase.h"
 TOOLCHAIN_FILE="$REPO_ROOT/cmake/Toolchain-aarch64-thylacine.cmake"
 USR_TOOLCHAIN_FILE="$REPO_ROOT/cmake/Toolchain-aarch64-userspace.cmake"
 USR_RS_TARGET="aarch64-unknown-none"
@@ -328,12 +332,35 @@ EOF
     ledger "ramfs.cpio: REBUILT (bakes the current userspace binaries + system.key)"
 }
 
+# A-5c-c: emit the host-baked system recovery phrase as a C header BEFORE the
+# userspace build, so joey #includes it for the live RECOVER(system) boot E2E.
+# corvus-mint derives the phrase from CORVUS_SYSTEM_RECOVERY_SEED (or its
+# default) -- the SAME seed the pool-stage bake uses for system-recovery-wrap,
+# so the header phrase opens the baked wrap by construction. Pure derivation (no
+# pool/keypair), so it can run here, before the pool bake. Best-effort: a build
+# failure is fatal (it would silently drop the E2E), but cargo is required for
+# the Rust workspace anyway.
+emit_corvus_recovery_header() {
+    local cm_manifest="$REPO_ROOT/tools/corvus-mint/Cargo.toml"
+    local cm_bin="$REPO_ROOT/tools/corvus-mint/target/release/corvus-mint"
+    echo "==> Generating system recovery phrase header (corvus-mint emit-phrase)"
+    cargo build --manifest-path "$cm_manifest" --release $verbose \
+        || { echo "==> corvus-mint BUILD FAILED (recovery header)" >&2; exit 1; }
+    mkdir -p "$GEN_DIR"
+    "$cm_bin" emit-phrase "$CORVUS_RECOVERY_HEADER" \
+        || { echo "==> corvus-mint emit-phrase FAILED" >&2; exit 1; }
+    ledger "system recovery phrase header: GENERATED ($CORVUS_RECOVERY_HEADER; seed=${CORVUS_SYSTEM_RECOVERY_SEED:-corvus-mint default})"
+}
+
 build_userspace() {
+    # A-5c-c: the generated recovery-phrase header must exist before joey compiles.
+    emit_corvus_recovery_header
     # C side — CMake.
     echo "==> Building userspace C (dir=$USR_BUILD)"
     cmake -S "$REPO_ROOT/usr" -B "$USR_BUILD" \
         -DCMAKE_TOOLCHAIN_FILE="$USR_TOOLCHAIN_FILE" \
         -DCMAKE_BUILD_TYPE="$build_type" \
+        -DTHYLA_GENERATED_DIR="$GEN_DIR" \
         ${extra_cmake_args[@]+"${extra_cmake_args[@]}"}
     cmake --build "$USR_BUILD" $verbose
     echo "==> Userspace C built under $USR_BUILD"
