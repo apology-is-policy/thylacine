@@ -229,12 +229,33 @@ void test_smp_per_cpu_idle_smoke(void) {
 }
 
 void test_smp_ipi_resched_smoke(void) {
+    // #868: cpu0 is now a full IPI_RESCHED peer (smp_boot_cpu_ipi_init attached
+    // the handler + enabled SGI 0 on cpu0's redistributor). Prove cpu0 RECEIVES
+    // by sending IPI_RESCHED to self + observing its receive counter increment.
+    // Pre-#868 cpu0 never enabled SGI 0, so a self-IPI was dropped and the count
+    // never moved. Runs at ANY cpu count (cpu0 always exists); cpu0 runs with
+    // IRQs unmasked (main.c daifclr) so the SGI is delivered promptly.
+    {
+        u64 self_before = g_ipi_resched_count[0];
+        TEST_ASSERT(gic_send_ipi(0, IPI_RESCHED),
+            "gic_send_ipi(self=cpu0, IPI_RESCHED) accepted");
+        u64 self_deadline = timer_get_ticks() + 100;   // 100 ms generous headroom
+        while (g_ipi_resched_count[0] <= self_before) {
+            if (timer_get_ticks() > self_deadline) {
+                TEST_ASSERT(false,
+                    "cpu0 never received its own IPI_RESCHED (#868 attach/enable broken?)");
+            }
+            __asm__ __volatile__("dmb ish" ::: "memory");
+        }
+        TEST_ASSERT(g_ipi_resched_count[0] > self_before,
+            "cpu0 received its own IPI_RESCHED -- it is a full SGI peer (#868)");
+    }
+
     unsigned cpus = smp_cpu_count();
     if (cpus < 2) {
-        // No secondaries available — skip but don't fail. Boot CPU
-        // can't send an IPI to itself meaningfully via SGI 1R (Linux
-        // does sometimes for parking, but the semantics aren't what
-        // we want here).
+        // Only the boot CPU online -- the cpu0 self-reception check above is the
+        // meaningful coverage; no secondaries to broadcast to. (#868 retired the
+        // old "boot CPU can't IPI itself" assumption.)
         return;
     }
 

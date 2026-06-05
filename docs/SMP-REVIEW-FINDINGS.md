@@ -276,8 +276,12 @@ cpu0-idle stack now gets a real MMU guard page (`g_bootcpu_idle_stack` is a `str
 secondary_stack` mapped no-access by `build_page_tables`, bounds-checked fail-loud,
 recognized by `fault.c`, and proven to fault via `tools/test-fault.sh bootcpu_idle_guard`)
 -- restoring the protection the retired thread_create'd g_bootcpu_idle had, which matters
-most on headless small SoCs where a silent stack-corruption is brutal to chase. Still
-deferred: cpu0 IPI_RESCHED reception (task #868; cpu0's idle is timer-woken, <=1ms, for now).
+most on headless small SoCs where a silent stack-corruption is brutal to chase. **Follow-up
+#868 LANDED**: cpu0 now ATTACHES IPI_RESCHED (`smp_boot_cpu_ipi_init`), so a peer's
+`sched_notify_idle_peer` wakes cpu0's idle immediately like any secondary -- cpu0 is a full
+SGI scheduling peer (its always-armed timer remains a <=1ms backstop). Proven by the
+`smp.ipi_resched_smoke` test's new cpu0-self-reception check. Both #863 deferrals are now
+closed; the two SMP follow-up tasks are done.
 
 (a) **Re-enable spec-first for the SMP mechanism.** Adopt `specs/sched_oncpu.tla` as a
     gating model alongside `scheduler.tla`; extend it as the mechanism evolves. The

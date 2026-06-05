@@ -140,6 +140,30 @@ void smp_cpu_ipi_init(unsigned cpu_idx) {
     __asm__ __volatile__("msr daifclr, #2" ::: "memory");
 }
 
+// #868: make the BOOT CPU a full IPI_RESCHED peer. The secondaries attach this
+// SGI in smp_cpu_ipi_init (above); cpu0 never did, so a peer's
+// sched_notify_idle_peer that picked cpu0's idle sent an IPI cpu0 dropped --
+// cpu0's idle was instead woken only by its always-armed timer (<=1 ms). This
+// attaches the same handler + enables SGI 0 on cpu0's own (banked)
+// redistributor, so cpu0 is woken immediately like any secondary.
+//
+// cpu0's GIC redistributor + CPU interface are already up (gic_init runs
+// redist_init_cpu(0) + cpu_iface_init -- the same pair gic_init_secondary runs;
+// cpu0's timer PPI firing proves the interface admits IRQs), so no
+// gic_init_secondary here. gic_attach is idempotent (one global handler slot per
+// INTID). Does NOT touch DAIF: the caller (boot_main) unmasks right after, the
+// same attach-then-unmask order as the timer + the secondaries. cpu0 receives no
+// IPI during the UP-like in-kernel tests -- only kthread calls smp_resched_others
+// there, and it targets others-not-self; secondaries stay parked.
+void smp_boot_cpu_ipi_init(void) {
+    if (smp_cpu_idx_self() != 0)
+        extinction("smp_boot_cpu_ipi_init: must run on cpu0");
+    if (!gic_attach(IPI_RESCHED, ipi_resched_handler, NULL))
+        extinction("smp_boot_cpu_ipi_init: gic_attach(IPI_RESCHED) failed");
+    if (!gic_enable_irq(IPI_RESCHED))
+        extinction("smp_boot_cpu_ipi_init: gic_enable_irq(IPI_RESCHED) failed");
+}
+
 // SYS_EXIT_GROUP / cross-Proc kill cross-thread shootdown (ARCH §7.9.1, I-24).
 // Broadcast IPI_RESCHED to every CPU except self. The reschedule IPI traps a
 // peer running in userspace on another CPU into the kernel so it reaches its

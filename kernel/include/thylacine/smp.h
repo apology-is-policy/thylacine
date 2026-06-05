@@ -206,6 +206,14 @@ extern volatile u64 g_ipi_resched_count[DTB_MAX_CPUS];
 // enabled to wake from WFI when an IPI arrives.
 void smp_cpu_ipi_init(unsigned cpu_idx);
 
+// #868: attach + enable IPI_RESCHED on the BOOT CPU (cpu0), making it a full
+// SMP scheduling peer -- a peer's sched_notify_idle_peer can wake cpu0's idle
+// immediately, not only via cpu0's timer. cpu0's GIC redistributor + interface
+// are already up (gic_init); this only sets the handler + enables SGI 0 on
+// cpu0's redistributor. Does NOT touch DAIF (boot_main unmasks after). Must run
+// on cpu0, after gic_init.
+void smp_boot_cpu_ipi_init(void);
+
 // SYS_EXIT_GROUP / cross-Proc kill cross-thread shootdown (ARCH §7.9.1,
 // invariant I-24). Broadcast IPI_RESCHED to all CPUs except self, kicking any
 // peer running in userspace on another CPU into the kernel so it hits its

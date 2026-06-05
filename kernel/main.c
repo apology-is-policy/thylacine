@@ -347,6 +347,13 @@ void boot_main(void) {
     if (!gic_enable_irq(TIMER_INTID_EL1_PHYS_NS)) {
         extinction("gic_enable_irq(timer) failed");
     }
+    // #868: make cpu0 a full IPI_RESCHED peer (attach the handler + enable SGI 0
+    // on cpu0's redistributor) so a peer's sched_notify_idle_peer can wake cpu0's
+    // idle immediately, not only via cpu0's <=1 ms timer. cpu0's GIC redist + CPU
+    // interface are already up (gic_init above); attach while IRQs are still
+    // masked, unmask below -- the same order as the timer + the secondaries'
+    // smp_cpu_ipi_init.
+    smp_boot_cpu_ipi_init();
     // Unmask IRQs at PSTATE. The DAIF.I bit gates IRQ delivery;
     // clearing it via daifclr opens the gate. FIQ / SError stay
     // masked at v1.0.

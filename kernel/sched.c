@@ -99,12 +99,11 @@ struct CpuSched {
     //
     // SMP redesign: cpu0 now has a real in-tree idle (bootcpu_idle) running the
     // same idle loop as the secondaries, so cpu0's flag toggles like any other
-    // CPU's (the old "boot CPU stays FALSE forever" no longer holds). cpu0 does
-    // not yet attach IPI_RESCHED, so a notify-IPI to it is currently a no-op;
-    // cpu0's idle is instead woken by its always-armed timer (<=1ms). Making cpu0
-    // a full IPI peer is a tracked latency follow-up (deferred from this
-    // soundness chunk). Modeled in `scheduler.tla` by `EnterWFI` +
-    // `IPI_Deliver`-clears-`wfi[dst]`.
+    // CPU's (the old "boot CPU stays FALSE forever" no longer holds). And since
+    // #868 cpu0 ATTACHES IPI_RESCHED (smp_boot_cpu_ipi_init), so a peer's notify
+    // wakes cpu0's idle immediately like any secondary -- cpu0 is a full SGI peer
+    // (it still ALSO has its always-armed timer as a <=1ms backstop). Modeled in
+    // `scheduler.tla` by `EnterWFI` + `IPI_Deliver`-clears-`wfi[dst]`.
     volatile bool  idle_in_wfi;
 };
 
