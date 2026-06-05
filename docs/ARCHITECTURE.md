@@ -975,7 +975,7 @@ Plan 9 `rfork` semantics; threads as siblings in a Proc; notes as the internal s
 
 **Non-goals at v1.0**:
 - Hard real-time (RT) scheduling class. EEVDF gives soft latency bounds; hard RT is v2.x.
-- Energy-aware scheduling (big.LITTLE). v1.0 treats all cores equal.
+- **Full Energy-Aware Scheduling (EAS)** — per-task PELT utilization + an energy model + DVFS/schedutil coupling + asymmetric misfit migration. v1.0 builds the **HMP-ready foundation** (per-CPU capacity from DTB, a `select_target_cpu` placement hook, util fields, a push-capable `balance()` abstraction) + a basic capacity-aware placement policy — **all logic-verified against a synthetic asymmetric DTB** — but the *empirical* EAS tuning is deferred to real heterogeneous hardware (unverifiable on QEMU/HVF; see §8.4.4). The scheduler is **HMP-ready by design; v1.0 ships homogeneous-treatment** on the uniform-topology targets (QEMU virt, RPi). (deep-smp-review, 2026-06-05.)
 - CPU isolation / dedicated cores (cpuset-equivalent). v1.0 schedules everywhere.
 
 ### 8.2 EEVDF — the algorithm
@@ -1020,22 +1020,135 @@ schedule(cpu) {
 
 Within a band, EEVDF picks. Across bands, fixed priority (no aging across bands at v1.0; would be a fairness extension).
 
-### 8.4 Per-CPU run trees + work-stealing
+### 8.4 Per-CPU run trees + the SMP mechanism
 
-Each CPU has a `cpu_t` with:
-- Three EEVDF run trees (one per band) — implemented as red-black trees keyed on `vd_t`.
-- A current running thread.
-- An idle thread.
-- Scheduler stats (`/ctl/sched/cpu<N>/`).
+**STATUS**: REDESIGNED (deep-smp-review, 2026-06-05; model-first via
+`specs/sched_oncpu.tla` + `specs/sched_alpha.tla`). The original §8.4 described
+work-stealing at the level the original `scheduler.tla` modeled it — as a *single
+atomic transfer*, with **no `on_cpu` variable**. The deep SMP review found that
+the load-bearing mechanism (the `on_cpu` protocol + the boot-CPU idle dispatch)
+was never modeled and had accreted point-patches as bugs surfaced one at a time
+(#788, #806, #860 — the masking-bug stack). This section now pins the
+as-redesigned mechanism. Full evidence: `docs/SMP-REVIEW-FINDINGS.md`.
 
-When a thread becomes runnable on CPU N (e.g., wakeup from sleep), it's enqueued in CPU N's run tree. If the wakeup is from a different CPU M, an IPI is sent to N to update its tree.
+Each CPU owns a `struct CpuSched`:
+- Three per-band run trees keyed on `vd_t` (v1.0 impl: sorted intrusive lists;
+  the API is tree-shaped — red-black trees are a deferred optimization).
+- A current running thread — **never NULL** (each CPU always runs at least its
+  own idle; §8.4.2).
+- A **pinned per-CPU idle thread** (§8.4.2).
+- The `on_cpu` handoff slots + the per-CPU run-tree lock (§8.4.1).
+- A per-CPU **capacity** class + per-CPU scheduler stats (§8.4.4).
 
-When a CPU goes idle (no runnable threads in any band), it tries work-stealing:
-1. Pick a peer CPU (round-robin from random start).
-2. If peer's tree is non-empty, lock peer's tree, dequeue a thread from the lowest band with runnable threads, transfer to local tree.
-3. Wake locally.
+#### 8.4.1 The `on_cpu` protocol (the load-bearing SMP correctness mechanism)
 
-Steal frequency is bounded — an idle CPU steals at most every N microseconds to avoid thrashing.
+`on_cpu[t]` is the cross-CPU signal "this thread's ctx/kstack is physically in use
+or mid-switch." It is set under the per-CPU lock (or under the *peer* lock for a
+steal-claim) **before** `cpu_switch_context`, and cleared with a RELEASE store by
+the *resuming* thread's `finish_task_switch` **after** the switch completes.
+`thread_free`, `wait_pid`'s reap, and `wakeup` all spin on `on_cpu` before
+reclaiming / waking a thread. The per-CPU run-tree lock is **held across the entire
+multi-step switch** (from `sched()` entry until the resuming thread releases it) —
+this is what makes a peer's `spin_trylock` skip a mid-switch CPU, and is the
+property that keeps a runqueue free of `on_cpu==true` threads (so a steal can never
+load a half-saved ctx). **Invariant** (I-21 corollary): a thread runs on ≤1 CPU,
+and a ctx/kstack is never written by two CPUs concurrently. Modeled by
+`sched_oncpu.tla` / `sched_alpha.tla`; the kernel additionally ASSERTs
+`state==RUNNABLE && !on_cpu` on every steal/pick victim (§8.4.5).
+
+#### 8.4.2 Per-CPU pinned in-tree idle (retires the `g_bootcpu_idle` special case)
+
+Every CPU — **including the boot CPU** — has its own idle thread that is
+- **pinned to its CPU** (`cpu_pinned`; `try_steal` never migrates a pinned thread
+  — this generalizes the secondaries' `kstack_base==NULL` skip and *retires* the
+  `g_bootcpu_idle` special case), and
+- **in-tree** (it lives in `run_tree[IDLE]` and is dispatched by the ordinary
+  `pick_next`, exactly like any other thread).
+
+The boot CPU's idle gets a **dedicated BSS idle stack** (symmetric with the
+secondaries' `g_secondary_boot_stacks`) rather than a real-kstack idle — so cpu0
+is fully like the secondaries, with no real-kstack/stealability hazard. (The boot
+CPU's old idle role was split between `kthread` and a separate real-kstack
+`g_bootcpu_idle` dispatched only via a "deadlock path"; that thread owned a real
+kstack, which made it *stealable* if it ever entered a tree — the #860 root cause.)
+
+Consequences, all **by construction**: NO deadlock-path dispatch, NO off-tree
+RUNNABLE state, NO racy deadlock guard. Each CPU's idle is *always* reachable on
+its own CPU (`sched_alpha.tla` `IdleAvailable`), so the old `"sched: deadlock —
+current is blocking, no runnable peer"` condition is structurally impossible; and
+a pinned idle never migrates (`IdleStaysHome`). This closes #860 + the entire
+off-tree class. Alternatives weighed (a `cpu_pinned` flag on a real-kstack cpu0
+idle vs. the dedicated BSS stack): the dedicated stack was chosen for full symmetry
+with the secondaries (no special case anywhere). Rationale in SMP-REVIEW-FINDINGS §7.
+
+#### 8.4.3 The placement seam: `select_target_cpu` + `balance()`
+
+Placement **policy** is separated from the enqueue **mechanism** (the original
+design baked placement into `ready()` = "the CPU that woke you"; that is a policy,
+not a law, and made HMP a cross-cutting retrofit).
+
+- **`select_target_cpu(task, prev_cpu)`** — chooses the target CPU's run tree when
+  a thread becomes runnable. v1.0 homogeneous body returns the current/prev CPU
+  (the existing behavior, preserved). HMP bodies bias by capacity (§8.4.4).
+- **`balance()`** — the load-rebalancing abstraction. v1.0 implements it as
+  **pull-only work-stealing**: an idle CPU pulls one *non-pinned* runnable thread
+  from a peer (round-robin-from-rotating-start, bounded steal frequency, the steal
+  claims `on_cpu` under the peer lock per §8.4.1). The abstraction is deliberately
+  **future-ready**: it is shaped to host a capacity-aware **push** path — *misfit
+  migration*, pushing a heavy task off a low-capacity core to a high-capacity one
+  even when the latter is not idle — without re-architecting the scheduler. Misfit
+  push is the one HMP mechanism a pull-only stealer structurally cannot express;
+  building `balance()` push-capable now is the design-for-the-future decision
+  (user-directed) that keeps the eventual EAS layer additive rather than a rewrite.
+
+The placement hook + `balance()` are the HMP **seams**. The `on_cpu` / migration
+protocol is **placement-agnostic** — `sched_alpha.tla` proves the safety invariants
+hold under *arbitrary* placement — so any `select_target_cpu` / `balance()` policy
+(homogeneous or capacity-aware) composes with correctness by construction.
+
+#### 8.4.4 HMP-ready foundation (capacity, util) + the verification boundary
+
+- **Per-CPU capacity** class parsed from the DTB (`cpu-map` clusters +
+  `capacity-dmips-mhz`); composes with **I-15** (the hardware view derives entirely
+  from the DTB). Uniform on QEMU virt / RPi → homogeneous behavior.
+- **Per-task utilization** (PELT-style) fields + accounting hooks on the
+  enqueue/dequeue/tick transitions — inert on uniform-topology targets.
+- A **basic capacity-aware placement policy** (bias high-util tasks to
+  high-capacity CPUs), gated on *declared* heterogeneity.
+
+**The verification boundary** (the load-bearing methodological commitment, per
+"complexity is permitted only where it is verified"):
+
+- **Verifiable NOW → built now.** The placement *logic* is unit-tested against a
+  hand-crafted **synthetic asymmetric DTB** (declared `capacity-dmips-mhz`
+  asymmetry; deterministic; needs no real perf asymmetry): "does `select_target_cpu`
+  route the heavy task to the high-capacity CPU." Plus the safety composition
+  (`sched_alpha.tla`, arbitrary placement). So v1.0 ships the seams + capacity +
+  util-hooks + a logic-verified basic placement policy.
+- **NOT verifiable until real heterogeneous hardware → deferred.** The *empirical*
+  EAS tuning — PELT decay constants, the energy model, schedutil/DVFS coupling,
+  misfit thresholds — cannot be validated on the dev target: QEMU virt declares a
+  **homogeneous DTB**, and HVF (the native dev loop, `THYLACINE_ACCEL=hvf`) runs
+  guest vCPUs on real P/E cores but the **host floats them** (macOS has no P-core
+  pin), so the guest sees no *stable, declared* capacity asymmetry to place against
+  and measure. **HVF closes the speed gap, not the heterogeneity gap.** The first
+  true EAS verification surface is a real big.LITTLE SoC bare-metal (the Lazarus
+  RPi boards are homogeneous A72/A76; bare Apple Silicon is v2 per PORTABILITY.md)
+  or a deliberate Linux+KVM+cpuset-pin+custom-DTB harness — both post-v1.0. The EAS
+  layer is therefore additive + pre-modeled, landing when it becomes verifiable.
+
+#### 8.4.5 `idle_in_wfi` + steal-invariant hardening
+
+- **`idle_in_wfi`** means "about to WFI," cleared when `sched()` switches the idle
+  thread away to real work. This fixes the F7 stale-flag bug both review
+  prosecutors found independently: a CPU that left the idle-loop body but is now
+  *running stolen work* looked idle to `sched_notify_idle_peer`, so peers
+  mis-routed wake-IPIs to it and skipped a genuinely-idle peer (an I-8 / I-17
+  latency/fairness leak).
+- **The steal/pick invariant is loud.** `try_steal` / `pick_next` ASSERT
+  `state==RUNNABLE && !on_cpu` on every victim, making the load-bearing "a run tree
+  only ever holds `on_cpu==false` threads" invariant fail-stop instead of
+  silently-corrupting if a future change ever shortens the lock-hold (F3).
 
 ### 8.5 Wakeup atomicity
 
@@ -1124,12 +1237,32 @@ Acyclic because (a) only the owning Thread *writes* `rendez_blocked_on`, so the 
 
 ### 8.10 Spec
 
-`specs/scheduler.tla` proves:
-- **Progress**: every runnable thread eventually runs (no starvation, even under adversarial wakeup patterns).
-- **Latency bound**: the delay between a thread becoming runnable and running is at most `slice_size × N_runnable_in_band`.
-- **Wakeup atomicity**: no wakeup is lost across the wait/wake race.
-- **IPI ordering**: IPIs from one CPU to another are processed in send order.
-- **Work-stealing fairness**: stealing doesn't preferentially favor or disadvantage any band.
+Spec-first is **re-enabled for the SMP scheduler/thread-lifecycle mechanism** (the
+natural re-enabling point flagged by the spec-to-code suspension: an
+invariant-bearing feature that genuinely benefits from machine-checked
+exploration). Three modules gate this surface:
+
+- **`specs/scheduler.tla`** (the high-level state machine) proves: progress
+  (every runnable thread eventually runs), latency bound, wakeup atomicity, IPI
+  ordering, work-stealing fairness. **Caveat (deep-smp-review):** it models
+  `Steal` as a *single atomic transfer* with **no `on_cpu` variable**, so it is
+  structurally blind to the multi-step claim/load/clear window and the boot-CPU
+  idle dispatch where #788/#806/#860 actually live. It remains valid for what it
+  models (the state machine under atomic steal); the two modules below cover the
+  mechanism it abstracts away.
+- **`specs/sched_oncpu.tla`** (the diagnostic) re-introduces `on_cpu` + the
+  multi-step switch + the per-CPU lock held across the switch + the boot-CPU
+  deadlock-dispatch special case. It **reproduces #860** (two CPUs running one
+  thread) and produces the A/B matrix that justified the fix.
+- **`specs/sched_alpha.tla`** (the **gating model** for the redesigned scheduler)
+  proves the target architecture (§8.4.1–§8.4.4) holds the safety invariants —
+  `NoSimultaneousRun`, `OwnerUnique`, `RunqOnCpuSafe`, and the redesign-specific
+  `IdleStaysHome` (pinned idles never migrate), `IdleAvailable` (the deadlock-path
+  special case is unnecessary), `AlwaysRunning` — **under arbitrary placement**
+  (so any `select_target_cpu`/`balance()` policy composes with correctness). The
+  HMP placement *logic* is additionally LOGIC-verified by a kernel unit test
+  against a synthetic asymmetric DTB (§8.4.4); the empirical EAS tuning is deferred
+  to real heterogeneous hardware.
 
 ### 8.11 Summary
 
