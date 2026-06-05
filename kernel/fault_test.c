@@ -204,6 +204,29 @@ static void provoke_secondary_stack_guard(void) {
 #endif
 
 // ---------------------------------------------------------------------------
+// bootcpu_idle_guard (#867) — write into cpu0's idle-stack guard page.
+// g_bootcpu_idle_stack is a struct secondary_stack whose leading page is mapped
+// no-access by build_page_tables (mmu.c), exactly like the secondary slots; the
+// write raises a data abort with FAR inside the guard, and fault.c's
+// stack_guard_overflow_msg recognizes it → extinction("kernel stack overflow
+// (bootcpu-idle guard)"). Pre-#867 the page was bare RW BSS and the write landed
+// silently → provoker returns → test FAIL. Proves the guard genuinely faults,
+// not just that it boots.
+// ---------------------------------------------------------------------------
+
+#ifdef THYLACINE_FAULT_TEST_bootcpu_idle_guard
+#include <thylacine/smp.h>
+
+__attribute__((noinline))
+__attribute__((no_stack_protector))
+static void provoke_bootcpu_idle_guard(void) {
+    volatile char *g = (volatile char *)&g_bootcpu_idle_stack.guard[0];
+    __asm__ __volatile__("" : "+r"(g));
+    *g = (char)0xA5;
+}
+#endif
+
+// ---------------------------------------------------------------------------
 // recursive_kernel_fault — #806 regression. Reproduce the root condition of
 // the F-B/#806 saga: a wild current_thread() (TPIDR_EL1). arch_fault_handle's
 // stack_guard_overflow_msg dereferences current_thread()->magic, so the first
@@ -258,6 +281,10 @@ void fault_test_run(void) {
     uart_puts("  fault-test: invoking secondary_stack_guard...\n");
     provoke_secondary_stack_guard();
     uart_puts("FAIL: provoke_secondary_stack_guard returned (guard did not fire)\n");
+#elif defined(THYLACINE_FAULT_TEST_bootcpu_idle_guard)
+    uart_puts("  fault-test: invoking bootcpu_idle_guard...\n");
+    provoke_bootcpu_idle_guard();
+    uart_puts("FAIL: provoke_bootcpu_idle_guard returned (guard did not fire)\n");
 #elif defined(THYLACINE_FAULT_TEST_recursive_kernel_fault)
     uart_puts("  fault-test: invoking recursive_kernel_fault...\n");
     provoke_recursive_kernel_fault();

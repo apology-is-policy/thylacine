@@ -46,7 +46,7 @@ BOOT_TIMEOUT="${BOOT_TIMEOUT:-60}"
 
 # variant → expected extinction substring (case-sensitive prefix match
 # against the EXTINCTION: line). Keep the case below in sync with this.
-ALL_VARIANTS="canary_smash wxe_violation bti_fault kstack_overflow secondary_stack_guard recursive_kernel_fault"
+ALL_VARIANTS="canary_smash wxe_violation bti_fault kstack_overflow secondary_stack_guard bootcpu_idle_guard recursive_kernel_fault"
 
 expected_for() {
     case "$1" in
@@ -55,6 +55,7 @@ expected_for() {
         bti_fault)       echo "EXTINCTION: BTI fault" ;;
         kstack_overflow) echo "EXTINCTION: kernel stack overflow" ;;
         secondary_stack_guard) echo "EXTINCTION: kernel stack overflow" ;;
+        bootcpu_idle_guard)    echo "EXTINCTION: kernel stack overflow" ;;
         recursive_kernel_fault) echo "EXTINCTION: recursive kernel fault" ;;
         *)               echo "" ;;
     esac
@@ -66,11 +67,11 @@ selected=""
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -v|--verbose) verbose=1; shift ;;
-        canary_smash|wxe_violation|bti_fault|kstack_overflow|secondary_stack_guard|recursive_kernel_fault)
+        canary_smash|wxe_violation|bti_fault|kstack_overflow|secondary_stack_guard|bootcpu_idle_guard|recursive_kernel_fault)
             selected="$selected $1"; shift ;;
         -h|--help)
             echo "Usage: $0 [-v] [variant...]"
-            echo "Variants: canary_smash wxe_violation bti_fault kstack_overflow secondary_stack_guard recursive_kernel_fault"
+            echo "Variants: canary_smash wxe_violation bti_fault kstack_overflow secondary_stack_guard bootcpu_idle_guard recursive_kernel_fault"
             exit 0
             ;;
         *) echo "Unknown arg: $1" >&2; exit 2 ;;

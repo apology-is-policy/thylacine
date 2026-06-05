@@ -405,6 +405,23 @@ static void build_page_tables(u64 slide) {
             u32 sg_idx = (u32)((sg_pa - kernel_2mib_pa) >> PAGE_SHIFT);
             l3_kernel[sg_idx] = 0;
         }
+
+        // #867: cpu0's idle stack guard (g_bootcpu_idle_stack, a struct
+        // secondary_stack co-located with g_secondary_boot_stacks above in this
+        // 4 MiB image). Bounds-checked: the guard page MUST index inside the
+        // l3_kernel table (ENTRIES_PER_TABLE * 2 = the kernel-image 4 MiB L3
+        // region) -- extinct loudly if a future BSS layout ever moves it out,
+        // rather than an out-of-bounds l3_kernel[] write that would corrupt the
+        // page tables. (The secondary loop above shares this co-location
+        // assumption unchecked; it holds today.)
+        {
+            u64 ig_pa = (u64)(uintptr_t)&g_bootcpu_idle_stack.guard[0];
+            if (ig_pa < kernel_2mib_pa ||
+                ((ig_pa - kernel_2mib_pa) >> PAGE_SHIFT) >= (u64)(ENTRIES_PER_TABLE * 2))
+                extinction("g_bootcpu_idle_stack guard outside the kernel 4 MiB L3 region");
+            u32 ig_idx = (u32)((ig_pa - kernel_2mib_pa) >> PAGE_SHIFT);
+            l3_kernel[ig_idx] = 0;
+        }
     }
 
     // TTBR0: link the two kernel L3 tables into the identity map (so the
@@ -549,6 +566,18 @@ static void build_page_tables(u64 slide) {
                     u64 sg_pa  = (u64)(uintptr_t)&g_secondary_boot_stacks[c].guard[0];
                     u32 sg_idx = (u32)((sg_pa - kernel_2mib_pa) >> PAGE_SHIFT);
                     l3_directmap_kernel[sg_idx] = 0;
+                }
+
+                // #867: cpu0's idle stack guard -- invalid in the direct-map
+                // alias too, so a direct-map probe cannot sidestep it. Same
+                // bounds check as the l3_kernel path above.
+                {
+                    u64 ig_pa = (u64)(uintptr_t)&g_bootcpu_idle_stack.guard[0];
+                    if (ig_pa < kernel_2mib_pa ||
+                        ((ig_pa - kernel_2mib_pa) >> PAGE_SHIFT) >= (u64)(ENTRIES_PER_TABLE * 2))
+                        extinction("g_bootcpu_idle_stack guard outside the kernel 4 MiB L3 region (directmap)");
+                    u32 ig_idx = (u32)((ig_pa - kernel_2mib_pa) >> PAGE_SHIFT);
+                    l3_directmap_kernel[ig_idx] = 0;
                 }
 
                 // Wire the kernel-image 4 MiB → l3_directmap_kernel's

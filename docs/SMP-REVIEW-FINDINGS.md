@@ -271,8 +271,13 @@ at every switch so a CPU running stolen work no longer looks idle); and `pick_ne
 clean** (the #860 amplifier, was ~33-43% crash on the broken option-A build → now 0
 corruption across the run); smp8 + UBSan-smp8 multi-boot clean (see `tools/smp-multiboot.sh`,
 the (d) deliverable). The handoff's "option A regresses smp8" premise did NOT reproduce.
-The HMP foundation (e) is #864; the formal audit is #866. Deferred from #863: the cpu0-idle
-stack guard page (task #867) + cpu0 IPI_RESCHED reception (task #868).
+The HMP foundation (e) is #864; the formal audit is #866. **Follow-up #867 LANDED**: the
+cpu0-idle stack now gets a real MMU guard page (`g_bootcpu_idle_stack` is a `struct
+secondary_stack` mapped no-access by `build_page_tables`, bounds-checked fail-loud,
+recognized by `fault.c`, and proven to fault via `tools/test-fault.sh bootcpu_idle_guard`)
+-- restoring the protection the retired thread_create'd g_bootcpu_idle had, which matters
+most on headless small SoCs where a silent stack-corruption is brutal to chase. Still
+deferred: cpu0 IPI_RESCHED reception (task #868; cpu0's idle is timer-woken, <=1ms, for now).
 
 (a) **Re-enable spec-first for the SMP mechanism.** Adopt `specs/sched_oncpu.tla` as a
     gating model alongside `scheduler.tla`; extend it as the mechanism evolves. The

@@ -161,6 +161,23 @@ void test_smp_secondary_stack_guard_layout(void) {
         TEST_EXPECT_EQ((u64)use, (u64)(slot + SECONDARY_STACK_GUARD_SIZE),
             "usable region starts exactly one guard page above the slot base");
     }
+
+    // #867: cpu0's idle stack (g_bootcpu_idle_stack) is a struct secondary_stack
+    // with the SAME guard-leads-the-slot + page-aligned layout, so build_page_-
+    // tables maps its leading guard page no-access exactly like the secondaries'.
+    {
+        uintptr_t islot  = (uintptr_t)&g_bootcpu_idle_stack;
+        uintptr_t iguard = (uintptr_t)&g_bootcpu_idle_stack.guard[0];
+        uintptr_t iuse   = (uintptr_t)&g_bootcpu_idle_stack.usable[0];
+        TEST_EXPECT_EQ((u64)sizeof(g_bootcpu_idle_stack), (u64)SECONDARY_STACK_SLOT_SIZE,
+            "g_bootcpu_idle_stack is exactly one secondary_stack slot");
+        TEST_EXPECT_EQ((u64)(islot & (SECONDARY_STACK_GUARD_SIZE - 1)), (u64)0,
+            "g_bootcpu_idle_stack is page-aligned");
+        TEST_EXPECT_EQ((u64)iguard, (u64)islot,
+            "the guard page leads the idle stack (slot base IS the guard page)");
+        TEST_EXPECT_EQ((u64)iuse, (u64)(islot + SECONDARY_STACK_GUARD_SIZE),
+            "idle usable region starts exactly one guard page above the slot base");
+    }
 }
 
 void test_smp_per_cpu_idle_smoke(void) {

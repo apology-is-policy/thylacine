@@ -123,10 +123,15 @@ extern struct secondary_stack g_secondary_boot_stacks[DTB_MAX_CPUS - 1];
 #define EXCEPTION_STACK_SIZE  4096u
 extern char g_exception_stacks[DTB_MAX_CPUS][EXCEPTION_STACK_SIZE];
 
-// SMP redesign (ARCH §8.4.2): high edge (SP grows down) of cpu0's dedicated
-// BSS idle stack. boot_main passes it to thread_create_bootcpu_idle. 16-byte
-// aligned. Symmetric with the secondaries' g_secondary_boot_stacks; the boot
-// CPU's idle owns no per-thread kstack (kstack_base==NULL).
+// SMP redesign (ARCH §8.4.2): cpu0's dedicated idle stack -- a `struct
+// secondary_stack` (leading guard page + usable), symmetric with each secondary's
+// g_secondary_boot_stacks slot. The boot CPU's idle owns no per-thread kstack
+// (kstack_base==NULL). The guard page is mapped no-access by build_page_tables
+// (mmu.c) + recognized by fault.c, exactly like the secondary guards (#867).
+extern struct secondary_stack g_bootcpu_idle_stack;
+
+// High edge (SP grows down, 16-aligned) of g_bootcpu_idle_stack's usable region.
+// boot_main passes it to thread_create_bootcpu_idle.
 void *smp_bootcpu_idle_stack_top(void);
 
 // P2-Cb: per-CPU main. Called from secondary_entry asm trampoline at

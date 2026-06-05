@@ -170,6 +170,18 @@ static const char *stack_guard_overflow_msg(u64 addr) {
             return "kernel stack overflow (secondary-stack guard)";
     }
 
+    // #867: cpu0's idle thread (bootcpu_idle) runs on g_bootcpu_idle_stack (a
+    // struct secondary_stack); an overflow or a wild SP lands in its leading
+    // guard page, mapped no-access by build_page_tables (high-VA, then PA).
+    {
+        u64 ig_va = (u64)(uintptr_t)&g_bootcpu_idle_stack.guard[0];
+        if (addr >= ig_va && addr < ig_va + SECONDARY_STACK_GUARD_SIZE)
+            return "kernel stack overflow (bootcpu-idle guard)";
+        u64 ig_pa = sym_to_pa(&g_bootcpu_idle_stack.guard[0]);
+        if (addr >= ig_pa && addr < ig_pa + SECONDARY_STACK_GUARD_SIZE)
+            return "kernel stack overflow (bootcpu-idle guard)";
+    }
+
     // Current thread's per-thread kstack guard (direct-map KVA).
     struct Thread *t = current_thread();
     if (t && t->magic == THREAD_MAGIC && t->kstack_base) {
