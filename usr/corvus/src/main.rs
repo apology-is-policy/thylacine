@@ -679,6 +679,13 @@ const HYBRID_TMP: &[u8] = b"hybrid.corvus.tmp";
 // A-5c recovery keyslot, alongside hybrid.corvus under users/<name>/.
 const RECOVERY_FILE: &[u8] = b"recovery.corvus";
 const RECOVERY_TMP: &[u8] = b"recovery.corvus.tmp";
+// A-5c-b system identity, host-baked into corvus's root (NOT under users/): the
+// admin keypair wrapped under the system passphrase (system-wrap) and under a
+// recovery phrase (system-recovery-wrap). Read at boot; rolled by RECOVER(system).
+const SYSTEM_WRAP_FILE: &[u8] = b"system-wrap";
+const SYSTEM_WRAP_TMP: &[u8] = b"system-wrap.tmp";
+const SYSTEM_RECOVERY_FILE: &[u8] = b"system-recovery-wrap";
+const SYSTEM_RECOVERY_TMP: &[u8] = b"system-recovery-wrap.tmp";
 
 const FS_IO_CHUNK: usize = 2048; // bounded per-call read/write (<= SYS_RW_MAX)
 const IDENTITY_DB_MAX: usize = 256 * 1024; // read cap; ~36 KiB worst case at 256 users
@@ -1124,6 +1131,65 @@ unsafe fn identity_load() -> bool {
 }
 
 // =============================================================================
+// System identity — A-5c-b (CORVUS-DESIGN.md §5.5.1 + §5.6).
+// =============================================================================
+//
+// The admin hybrid keypair is host-baked into corvus's root (tools/build.sh runs
+// corvus-mint at build time) as two CRVS-v1 wraps of the SAME keypair: system-wrap
+// (under the system passphrase, verified by ADMIN_ELEVATE) and system-recovery-wrap
+// (under a recovery phrase, consumed by RECOVER(system)). Both are loaded once at
+// boot and held as parsed wraps in these statics. They hold CIPHERTEXT only -- the
+// plaintext keypair is decrypted transiently inside ADMIN_ELEVATE / RECOVER(system)
+// and wiped, never persisted in RAM. There is no USER_STATES record for the system
+// subject; the system identity lives entirely in these wraps + the two root files.
+static mut SYSTEM_KEYPAIR_WRAP: Option<KeypairWrap> = None;
+static mut SYSTEM_RECOVERY_WRAP: Option<RecoveryWrap> = None;
+
+// Read a CRVS-v1 wrap blob from a root-relative file (corvus is chroot'd, so
+// these resolve within the storage cap). None on absent / FS error / oversized.
+unsafe fn read_root_wrap_blob(name: &[u8]) -> Option<Vec<u8>> {
+    let fd = t_walk_open(T_WALK_OPEN_FROM_ROOT, name.as_ptr(), name.len(), T_OREAD);
+    if fd < 0 {
+        return None;
+    }
+    let mut blob: Vec<u8> = Vec::new();
+    let ok = read_to_end_fd(fd, &mut blob, TOTAL_LEN + 64);
+    let _ = t_close(fd);
+    if !ok {
+        return None;
+    }
+    Some(blob)
+}
+
+// Boot-time load of the host-baked system identity. FATAL (returns false) if
+// EITHER wrap is absent or unparseable -- corvus refuses to start without an
+// authoritative system identity rather than fall back to a byte-compare. The
+// wraps are parse-validated only (magic / version / length); the CRYPTOGRAPHIC
+// check (does the passphrase open system-wrap?) is deferred to ADMIN_ELEVATE,
+// because corvus does NOT know the system passphrase -- only the wrap.
+unsafe fn system_identity_load() -> bool {
+    let kw_blob = match read_root_wrap_blob(SYSTEM_WRAP_FILE) {
+        Some(b) => b,
+        None => return false,
+    };
+    let kw = match KeypairWrap::from_bytes(&kw_blob) {
+        Some(k) => k,
+        None => return false,
+    };
+    let rw_blob = match read_root_wrap_blob(SYSTEM_RECOVERY_FILE) {
+        Some(b) => b,
+        None => return false,
+    };
+    let rw = match RecoveryWrap::from_bytes(&rw_blob) {
+        Some(r) => r,
+        None => return false,
+    };
+    core::ptr::write(core::ptr::addr_of_mut!(SYSTEM_KEYPAIR_WRAP), Some(kw));
+    core::ptr::write(core::ptr::addr_of_mut!(SYSTEM_RECOVERY_WRAP), Some(rw));
+    true
+}
+
+// =============================================================================
 // Clearance levels + the legate (A-4a-3; CORVUS-DESIGN.md §5.7 + IDENTITY-DESIGN
 // §9.8). corvus owns the clearance POLICY (the level table + per-user
 // eligibility); the kernel owns the cap-stamp + scope (the `cap` device clearance
@@ -1485,15 +1551,10 @@ const VERB_CLEARANCE_ACTIVATE: u8 = 15;
 const VERB_CLEARANCE_GRANT: u8 = 16;
 const VERB_CLEARANCE_REVOKE: u8 = 17;
 
-// System passphrase — verified by ADMIN_ELEVATE before the kernel `cap`
-// grant is registered (CORVUS-DESIGN.md §5.5). v1.0 PLACEHOLDER: a
-// hardcoded byte string shared with joey's boot sequence. Real
-// installer-driven first-boot setup (argon2id(passphrase, salt) →
-// system_KEK + AEAD-wrapped magic, persisted across reboots) lands when
-// CRVS persistence does. The current scheme is functionally equivalent
-// to "the system passphrase is `thylacine`" — sufficient to exercise
-// the elevation mechanism end-to-end in the boot test.
-const SYSTEM_PASSPHRASE: &[u8] = b"thylacine";
+// The system passphrase is no longer a corvus-side constant (A-5c-b): ADMIN_ELEVATE
+// verifies a supplied passphrase by unwrapping the host-baked system-wrap (the admin
+// keypair under that passphrase). corvus holds only the wrap, never the passphrase --
+// so there is nothing to byte-compare against. See SYSTEM_KEYPAIR_WRAP + system_identity_load.
 
 // Stratum↔corvus wire version. STRATUM-API-V1.md Q11 resolved to a
 // 4-byte request header carrying this byte at offset 1; an unknown
@@ -2104,15 +2165,18 @@ unsafe fn handle_user_create(handle: i64, payload: &[u8], response: &mut Vec<u8>
 // OK reply: phrase_len u16 LE + fresh_phrase.
 unsafe fn handle_recover(
     _handle: i64,
-    _peer: &TSrvPeerInfo,
+    peer: &TSrvPeerInfo,
     payload: &[u8],
     response: &mut Vec<u8>,
 ) {
     if payload.is_empty() {
         return stage_response(response, STATUS_BAD_FORMAT, &[]);
     }
+    if payload[0] == 0 {
+        // subject_kind=0 (system / hostowner-c): recover the system identity.
+        return handle_recover_system(peer, payload, response);
+    }
     if payload[0] != 1 {
-        // subject_kind=0 (system / hostowner-c) lands in A-5c-b.
         return stage_response(response, STATUS_BAD_FORMAT, &[]);
     }
     if payload.len() < 2 {
@@ -2287,6 +2351,167 @@ unsafe fn handle_recover(
     let _ = t_close(users_fd);
 
     recover_fail_reset(user);
+
+    // OK reply: phrase_len u16 LE + fresh_phrase.
+    let mut phrase_out = bip39_encode(&new_entropy);
+    wipe(&mut new_entropy);
+    let mut out: Vec<u8> = Vec::with_capacity(2 + phrase_out.len());
+    out.push((phrase_out.len() & 0xff) as u8);
+    out.push(((phrase_out.len() >> 8) & 0xff) as u8);
+    out.extend_from_slice(&phrase_out);
+    stage_response(response, STATUS_OK, &out);
+    wipe(&mut phrase_out);
+    wipe(&mut out);
+}
+
+// handle_recover_system — RECOVER(subject_kind=0; A-5c-b / hostowner-c): reset the
+// SYSTEM passphrase (the host-baked admin keypair's passphrase wrap) from the
+// system recovery phrase. The system identity has NO USER_STATES record -- it
+// lives entirely in the SYSTEM_* statics + the two root files (system-wrap +
+// system-recovery-wrap), so this path is wholly distinct from handle_recover's
+// user path. Gate: console-attached + the recovery phrase + the rate limit (NO
+// session token, NO capability). The console requirement is the EXTRA gate over
+// RECOVER(user) and mirrors ADMIN_ELEVATE -- the system identity is the most
+// privileged secret, so it must never be recoverable from a non-console peer (a
+// token-only or non-console path would be the bug). On success the keypair is
+// re-wrapped under the new passphrase (rolling system-wrap) AND a fresh recovery
+// phrase is rolled (rolling system-recovery-wrap); the keypair value is unchanged,
+// so every system-wrapped envelope stays valid (no Stratum/kernel surface).
+//
+// Payload (subject_kind=0):
+//   [0]            subject_kind u8 (0)
+//   [1..3]         phrase_len u16 LE (1..=RECOVERY_PHRASE_MAX)
+//   [3..3+pl]      phrase
+//   [3+pl..5+pl]   new_pass_len u16 LE (1..=MAX_PASS_LEN)
+//   [5+pl..]       new_passphrase
+//
+// OK reply: phrase_len u16 LE + fresh_phrase.
+unsafe fn handle_recover_system(peer: &TSrvPeerInfo, payload: &[u8], response: &mut Vec<u8>) {
+    // Console gate FIRST (cheap; the system identity must never be recoverable
+    // from a non-console peer -- the trusted-path requirement, same as ADMIN_ELEVATE).
+    if peer.console == 0 {
+        return stage_response(response, STATUS_PERMISSION_DENIED, &[]);
+    }
+    // Parse: subject_kind(1) + phrase_len(2) + phrase + new_pass_len(2) + pass.
+    if payload.len() < 3 {
+        return stage_response(response, STATUS_BAD_FORMAT, &[]);
+    }
+    let phrase_len = (payload[1] as usize) | ((payload[2] as usize) << 8);
+    if phrase_len == 0 || phrase_len > RECOVERY_PHRASE_MAX {
+        return stage_response(response, STATUS_BAD_FORMAT, &[]);
+    }
+    let phrase_off = 3;
+    if payload.len() < phrase_off + phrase_len + 2 {
+        return stage_response(response, STATUS_BAD_FORMAT, &[]);
+    }
+    let phrase = &payload[phrase_off..phrase_off + phrase_len];
+    let np_len_off = phrase_off + phrase_len;
+    let new_pass_len = (payload[np_len_off] as usize) | ((payload[np_len_off + 1] as usize) << 8);
+    if new_pass_len == 0 || new_pass_len > MAX_PASS_LEN {
+        return stage_response(response, STATUS_BAD_FORMAT, &[]);
+    }
+    let np_off = np_len_off + 2;
+    if payload.len() != np_off + new_pass_len {
+        return stage_response(response, STATUS_BAD_FORMAT, &[]);
+    }
+    let new_passphrase = &payload[np_off..np_off + new_pass_len];
+
+    let subject = SYSTEM_WRAP_SUBJECT;
+
+    // Rate-limit the EXPENSIVE path BEFORE any KDF (same accounting as RECOVER(user):
+    // a typo fails the cheap checksum and is not charged; only a checksum-valid but
+    // unwrap-failed attempt is). The subject is the fixed system subject.
+    if recover_fail_count(subject) >= RECOVER_FAIL_MAX {
+        return stage_response(response, STATUS_RATE_LIMITED, &[]);
+    }
+
+    // The system recovery wrap must be present (system_identity_load is FATAL on
+    // absent, so this is defensive -- fail closed if somehow cleared).
+    if (*core::ptr::addr_of!(SYSTEM_RECOVERY_WRAP)).is_none() {
+        return stage_response(response, STATUS_INTERNAL_ERROR, &[]);
+    }
+
+    // Decode + checksum the phrase. A typo aborts BEFORE the KDF, NOT charged.
+    let mut entropy = match bip39_decode(phrase) {
+        Some(e) => e,
+        None => return stage_response(response, STATUS_BAD_AUTH, &[]),
+    };
+
+    // Derive the recovery KEK + unwrap (the expensive, charged step). The borrow
+    // of the static is scoped so it ends before the rolling writes below.
+    let unwrap = {
+        let rw = (*core::ptr::addr_of!(SYSTEM_RECOVERY_WRAP)).as_ref().unwrap();
+        unwrap_recovery(subject, &entropy, rw)
+    };
+    wipe(&mut entropy);
+    let mut keypair = match unwrap {
+        Some(kp) => kp,
+        None => {
+            recover_fail_inc(subject);
+            return stage_response(response, STATUS_BAD_AUTH, &[]);
+        }
+    };
+
+    // Build BOTH new wraps in memory before touching disk, so the only failure
+    // points are the two rename-swaps.
+    let new_kw = match wrap_keypair_passphrase(&mut ThylaRng, subject, new_passphrase, &keypair) {
+        Some(k) => k,
+        None => {
+            wipe(&mut keypair);
+            return stage_response(response, STATUS_INTERNAL_ERROR, &[]);
+        }
+    };
+    let mut new_entropy = [0u8; RECOVERY_ENTROPY_BYTES];
+    if t_getrandom(new_entropy.as_mut_ptr(), RECOVERY_ENTROPY_BYTES, 0)
+        != RECOVERY_ENTROPY_BYTES as i64
+    {
+        wipe(&mut keypair);
+        wipe(&mut new_entropy);
+        return stage_response(response, STATUS_INTERNAL_ERROR, &[]);
+    }
+    let new_rw = match make_recovery_wrap(&mut ThylaRng, subject, &new_entropy, &keypair) {
+        Some(r) => r,
+        None => {
+            wipe(&mut keypair);
+            wipe(&mut new_entropy);
+            return stage_response(response, STATUS_INTERNAL_ERROR, &[]);
+        }
+    };
+    wipe(&mut keypair);
+
+    let new_hybrid_blob = new_kw.to_bytes();
+    let new_recovery_blob = new_rw.to_bytes();
+
+    // Commit system-wrap (the passphrase reset) FIRST, then system-recovery-wrap
+    // (the phrase roll). Same crash-safety argument as the user path: both wraps
+    // hold the SAME keypair, so a crash between leaves the new passphrase live AND
+    // the OLD phrase still valid. The system wraps live at the chroot root; fd 0
+    // (STORAGE_ROOT_FD) is the root dir handle, on which create/rename/fsync are
+    // all valid (the same handle identity_persist fsyncs).
+    if !persist_wrap_swap(STORAGE_ROOT_FD, SYSTEM_WRAP_FILE, SYSTEM_WRAP_TMP, &new_hybrid_blob) {
+        wipe(&mut new_entropy);
+        return stage_response(response, STATUS_INTERNAL_ERROR, &[]);
+    }
+    // Reflect the new passphrase wrap in the live static NOW so a subsequent
+    // ADMIN_ELEVATE (new passphrase) works without a reboot. KeypairWrap is a
+    // non-Drop POD (fixed arrays only), so overwriting via ptr::write leaks nothing.
+    core::ptr::write(core::ptr::addr_of_mut!(SYSTEM_KEYPAIR_WRAP), Some(new_kw));
+
+    if !persist_wrap_swap(STORAGE_ROOT_FD, SYSTEM_RECOVERY_FILE, SYSTEM_RECOVERY_TMP,
+                          &new_recovery_blob) {
+        // The passphrase reset committed; the phrase roll did not. The OLD phrase
+        // is still valid (system-recovery-wrap untouched) -> no lockout, but we did
+        // not produce a durable fresh phrase, so report error rather than hand back
+        // a phrase that is not on disk.
+        wipe(&mut new_entropy);
+        return stage_response(response, STATUS_INTERNAL_ERROR, &[]);
+    }
+    // Reflect the rolled recovery wrap in the live static too.
+    core::ptr::write(core::ptr::addr_of_mut!(SYSTEM_RECOVERY_WRAP), Some(new_rw));
+
+    let _ = t_fsync(STORAGE_ROOT_FD, 0);
+
+    recover_fail_reset(subject);
 
     // OK reply: phrase_len u16 LE + fresh_phrase.
     let mut phrase_out = bip39_encode(&new_entropy);
@@ -2717,18 +2942,20 @@ unsafe fn handle_admin_elevate(peer: &TSrvPeerInfo, payload: &[u8],
         return stage_response(response, STATUS_PERMISSION_DENIED, &[]);
     }
 
-    // System passphrase verification — v1.0 PLACEHOLDER (byte-compare
-    // against SYSTEM_PASSPHRASE; argon2id + AEAD-wrap lands when CRVS
-    // persistence does). The check still fails closed for any mismatch.
-    if sys_passphrase.len() != SYSTEM_PASSPHRASE.len() {
-        return stage_response(response, STATUS_BAD_AUTH, &[]);
-    }
-    let mut diff: u8 = 0;
-    for i in 0..SYSTEM_PASSPHRASE.len() {
-        diff |= sys_passphrase[i] ^ SYSTEM_PASSPHRASE[i];
-    }
-    if diff != 0 {
-        return stage_response(response, STATUS_BAD_AUTH, &[]);
+    // System passphrase verification (A-5c-b): unwrap the host-baked system-wrap
+    // (the admin hybrid keypair under the system passphrase) with the SUPPLIED
+    // passphrase. A correct passphrase opens the AEAD (yields the keypair, which
+    // ADMIN_ELEVATE does not need -- so wipe it); any mismatch fails the tag ->
+    // BadAuth. Fail closed: an absent wrap (system_identity_load is FATAL, so this
+    // is defensive) or a KDF failure is BadAuth, never a bypass. The argon2id work
+    // here is the deliberate brute-force cost on the system passphrase.
+    let sys_kw = match (*core::ptr::addr_of!(SYSTEM_KEYPAIR_WRAP)).as_ref() {
+        Some(k) => k,
+        None => return stage_response(response, STATUS_BAD_AUTH, &[]),
+    };
+    match unwrap_keypair_passphrase(SYSTEM_WRAP_SUBJECT, sys_passphrase, sys_kw) {
+        Some(mut kp) => wipe(&mut kp),
+        None => return stage_response(response, STATUS_BAD_AUTH, &[]),
     }
 
     // Register the pending grant for the peer's stripes. The kernel's
@@ -3875,6 +4102,20 @@ pub extern "C" fn rs_main() -> i64 {
             t_putstr("corvus: recovery self-test OK (bip39 + keyslot)\n");
         } else {
             t_putstr("corvus: FATAL recovery self-test FAILED\n");
+            return 1;
+        }
+    }
+
+    // A-5c-b: load the host-baked system identity (system-wrap + system-recovery-wrap)
+    // from the chrooted storage cap. Fail-closed -- absent/corrupt means a broken bake
+    // or tampering, and corvus cannot authorize ADMIN_ELEVATE / RECOVER(system) without
+    // it (no byte-compare fallback survives). The wraps are always host-baked into the
+    // pool, so absence is a real fault, not a fresh-install case.
+    unsafe {
+        if system_identity_load() {
+            t_putstr("corvus: system identity loaded (system-wrap + recovery)\n");
+        } else {
+            t_putstr("corvus: FATAL system identity load failed (missing/corrupt system-wrap)\n");
             return 1;
         }
     }

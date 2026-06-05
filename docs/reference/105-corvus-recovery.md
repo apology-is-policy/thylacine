@@ -1,4 +1,4 @@
-# 105 — corvus recovery keyslot (A-5c-a)
+# 105 — corvus recovery keyslot (A-5c-a + A-5c-b)
 
 ## Purpose
 
@@ -16,11 +16,15 @@ kernel and no Stratum surface** — it is corvus-side crypto plus a login UX
 flow (the UX is A-5c-c).
 
 A-5c-a implements the **user** subject (`recovery.corvus`, the per-user
-keyslot) and the `RECOVER(subject_kind=1)` verb. The **system** subject
-(`system-recovery-wrap`, = P5-hostowner-c) is A-5c-b.
+keyslot) and the `RECOVER(subject_kind=1)` verb. A-5c-b adds the **system**
+subject (`system-recovery-wrap`, = P5-hostowner-c): the admin hybrid keypair is
+host-baked at build time (`corvus-mint` -> `system-wrap` + `system-recovery-wrap`)
+and `ADMIN_ELEVATE` becomes a real Argon2id+AEGIS unwrap of `system-wrap` (the
+v1.0 `b"thylacine"` byte-compare is retired). See "A-5c-b" below.
 
-Design: `CORVUS-DESIGN.md` §5.6 + §8 + §9 (C-20/C-27/C-28);
-`IDENTITY-DESIGN.md` §9.9. Scripture-first commit `064807c`.
+Design: `CORVUS-DESIGN.md` §5.5.1 + §5.6 + §8 + §9 (C-20/C-27/C-28);
+`IDENTITY-DESIGN.md` §9.9. Scripture-first commits `064807c` (A-5c-a) +
+`440a46a` (A-5c-b host-bake).
 
 ## Public API (wire)
 
@@ -54,10 +58,11 @@ OK reply:
   fresh_phrase  phrase_len     (the rolled phrase; the used one is retired)
 ```
 
-`subject_kind = 0` (system) is rejected with `BadFormat` at A-5c-a (A-5c-b
-adds it). **No session token and no capability** are required — the user
-cannot AUTH (the passphrase is lost) and a user-held recovery that needed the
-admin would not be user-held.
+`subject_kind = 0` (system) is handled by `handle_recover_system` (A-5c-b; see
+below) — it carries **no `user` field** (the subject is the fixed `b"system"`)
+and adds a **console-attached** gate. For the user subject, **no session token
+and no capability** are required — the user cannot AUTH (the passphrase is lost)
+and a user-held recovery that needed the admin would not be user-held.
 
 ## Implementation
 
@@ -149,6 +154,81 @@ the first try, so this never locks them out. The full time-windowed,
 Stratum-persisted C-16 rate limit (covering AUTH too) is owed separately
 (task #876).
 
+## A-5c-b — the system identity (hostowner-c)
+
+The **system** subject is the admin hybrid keypair, used by `ADMIN_ELEVATE` to
+gate the `CAP_HOSTOWNER` grant. Unlike a user, the system identity has **no
+`USER_STATES` record** and its wraps live at corvus's chroot **root** (not under
+`users/<name>/`): `system-wrap` (the keypair under the system passphrase) and
+`system-recovery-wrap` (the same keypair under a recovery phrase). Both are
+**host-baked** at build time — they are the system analog of `pool.img` /
+`system.key`.
+
+### Host-bake (corvus-mint)
+
+`tools/corvus-mint/` is a host-target tool that reuses corvus's exact crypto via
+the shared `corvus-crypto` lib (no second implementation -> byte-identical
+wraps). At build time `tools/build.sh` runs it during the pool populate:
+generate the admin keypair, wrap it under the build-time system passphrase
+(default `thylacine`, overridable via `CORVUS_SYSTEM_PASSPHRASE`) and under a
+fresh 24-word recovery phrase, **self-verify both keyslots unwrap to the same
+keypair**, and write the two CRVS-v1 blobs into the pool's `/var/lib/corvus`
+(SYSTEM-owned), readback-verified byte-for-byte. The recovery phrase is logged
+once (forensic, like the mkfs seed). At v1.0 the system passphrase is the known
+constant so joey's boot `ADMIN_ELEVATE` stays green; the WRAP is real
+Argon2id+AEGIS. A v1.x installer supplies a real per-install secret.
+
+### `system_identity_load` (boot)
+
+corvus reads `system-wrap` + `system-recovery-wrap` from its chrooted root
+(post-pivot, so they resolve on the persistent Stratum pool where the bake
+landed), parses them via `KeypairWrap::from_bytes` / `RecoveryWrap::from_bytes`,
+and holds them in two statics (`SYSTEM_KEYPAIR_WRAP` / `SYSTEM_RECOVERY_WRAP` —
+ciphertext only). **FATAL on absent/corrupt**: a missing wrap means a broken
+bake or tampering, and corvus cannot authorize elevation without it — so it
+refuses to start rather than fall back to a byte-compare. The boot banner line
+is `corvus: system identity loaded (system-wrap + recovery)`. The wraps are
+parse-validated only; the cryptographic check (does a passphrase open it?) is
+deferred to `ADMIN_ELEVATE`, because corvus does not know the system passphrase.
+
+### Real ADMIN_ELEVATE (verb 7)
+
+The v1.0 placeholder byte-compared the supplied passphrase against a hardcoded
+`SYSTEM_PASSPHRASE` constant. A-5c-b replaces that with
+`unwrap_keypair_passphrase(SYSTEM_WRAP_SUBJECT, supplied, &SYSTEM_KEYPAIR_WRAP)`:
+a correct passphrase opens the AEAD (the keypair is then wiped — ADMIN_ELEVATE
+only needs the yes/no), any mismatch fails the tag -> `BadAuth`. The Argon2id
+work is the deliberate brute-force cost on the system passphrase. The gate order
+is unchanged (token -> console -> passphrase); only the passphrase step became
+cryptographic. Fail-closed: an absent static (defensive — `system_identity_load`
+is FATAL) or a KDF failure is `BadAuth`, never a bypass.
+
+### RECOVER(system) — `handle_recover_system`
+
+`RECOVER(subject_kind=0)` resets the system passphrase from the system recovery
+phrase. Gate = **console-attached** (the EXTRA gate over RECOVER(user), mirroring
+ADMIN_ELEVATE — the system identity is the most privileged secret, so it must
+never be recoverable from a non-console peer) + the phrase + the rate limit; no
+session token, no capability. The flow mirrors RECOVER(user) but operates on the
+root-level system wraps + the statics instead of a `USER_STATES` record:
+
+1. Console gate first (`PERMISSION_DENIED` if not console-attached), then parse
+   (no `user` field).
+2. Rate-limit (subject `b"system"`) before any KDF.
+3. `unwrap_recovery(SYSTEM_WRAP_SUBJECT, decoded_phrase, &SYSTEM_RECOVERY_WRAP)`
+   (the static borrow is scoped so it ends before the rolling writes). A typo
+   fails the cheap checksum (not charged); a wrong phrase fails the tag (charged).
+4. Re-wrap the recovered keypair under the new passphrase (rolling `system-wrap`)
+   and roll a fresh recovery phrase (rolling `system-recovery-wrap`).
+5. Commit `system-wrap` first (then update `SYSTEM_KEYPAIR_WRAP` so a same-boot
+   ADMIN_ELEVATE uses the new passphrase), then `system-recovery-wrap` (then
+   update `SYSTEM_RECOVERY_WRAP`). Same twin-wrap crash-safety as the user path:
+   both wraps hold the same keypair, so a crash between leaves the new passphrase
+   live AND the old phrase valid. The wraps live at the chroot root; `fd 0`
+   (`STORAGE_ROOT_FD`) is the root dir handle on which `persist_wrap_swap`'s
+   create/rename/fsync are all valid.
+6. Reset the rate limit; return the fresh phrase.
+
 ## Data structures
 
 - `RecoveryWrap` — `{ t_cost, m_cost_kib, parallelism, salt[16], nonce[32],
@@ -175,30 +255,52 @@ Compile-time invariants: `24 * 11 == 256 + 8`; the wordlist is exactly
 - **joey corvus harness** verifies USER_CREATE enrollment end-to-end on every
   boot: `USER_CREATE michael/susan ok (… recovery phrase enrolled)` with the
   phrase present + self-consistent.
-- The full argon2-backed RECOVER round-trip (create → capture phrase → reset
-  passphrase → re-login → home decrypts) is the **A-5c-c** boot E2E.
+- **`system_identity_load` + real ADMIN_ELEVATE** are proven on every boot: the
+  banner `corvus: system identity loaded (system-wrap + recovery)` and
+  `joey: ADMIN_ELEVATE ok` (joey supplies `thylacine` -> the real Argon2id+AEGIS
+  unwrap of the host-baked `system-wrap` succeeds, then `t_cap_use(CAP_HOSTOWNER)`).
+- **`corvus_crypto::tests::system_identity_lifecycle`** (host) proves the exact
+  A-5c-b crypto sequence deterministically under `SYSTEM_WRAP_SUBJECT`: mint
+  both keyslots over one keypair -> ADMIN_ELEVATE-unwrap -> RECOVER-unwrap ->
+  re-wrap under a new passphrase (old passphrase no longer opens) -> roll a fresh
+  phrase (old phrase no longer opens). 12/12 host tests.
+- The full argon2-backed RECOVER round-trips (user: create → capture phrase →
+  reset passphrase → re-login → home decrypts; system: ADMIN_ELEVATE +
+  RECOVER(system)) are the **A-5c-c** boot E2E. `handle_recover_system` is wired +
+  its crypto sequence host-proven, but its **live** execution is owed to A-5c-c
+  (the per-build random phrase needs runtime plumbing).
 
 ## Error paths
 
 | Status | Trigger |
 |---|---|
-| `BadFormat` | malformed payload; `subject_kind = 0` (A-5c-b); over-long phrase/user/pass |
-| `BadAuth` | unknown user; absent `recovery.corvus`; bad checksum (typo); wrong phrase (tag mismatch) |
-| `RateLimited` | `>= RECOVER_FAIL_MAX` checksum-valid-but-wrong attempts for the subject this boot |
-| `InternalError` | RNG/KDF failure; FS open/persist failure (the passphrase may be reset but the phrase roll failed — old phrase still valid, no data loss) |
+| `BadFormat` | malformed payload; unknown `subject_kind` (not 0/1); over-long phrase/user/pass |
+| `PermissionDenied` | RECOVER(system) from a non-console-attached peer; ADMIN_ELEVATE from a non-console peer |
+| `BadAuth` | unknown user; absent `recovery.corvus`; bad checksum (typo); wrong phrase/passphrase (tag mismatch); ADMIN_ELEVATE wrong system passphrase |
+| `RateLimited` | `>= RECOVER_FAIL_MAX` checksum-valid-but-wrong attempts for the subject this boot (user subject, or `b"system"`) |
+| `InternalError` | RNG/KDF failure; FS open/persist failure (the passphrase may be reset but the phrase roll failed — old phrase still valid, no data loss); RECOVER(system) with a cleared system static (defensive — boot is FATAL on absent) |
 | `OK` | passphrase reset; `phrase_len + fresh_phrase` returned |
 
 ## Status
 
-Landed at A-5c-a. The user subject is complete; the system subject
-(hostowner-c) is A-5c-b; the login UX + boot E2E + the focused audit are
-A-5c-c.
+User subject (A-5c-a) complete. System subject + host-bake + real ADMIN_ELEVATE
+(A-5c-b) landed: `corvus-mint` bakes `system-wrap` + `system-recovery-wrap`,
+`system_identity_load` reads them FATAL-on-absent, ADMIN_ELEVATE is a real
+Argon2id+AEGIS unwrap, and `handle_recover_system` is wired (its crypto sequence
+host-proven). The login UX, the live RECOVER(system)/RECOVER(user) boot E2E, and
+the focused adversarial audit are A-5c-c.
 
 ## Known caveats / deferred
 
-- **System subject** (`subject_kind = 0`) returns `BadFormat` until A-5c-b,
-  which must first build the real `system-wrap` (the v1.0 system passphrase
-  is still the `ADMIN_ELEVATE` byte-compare placeholder).
+- **RECOVER(system) live E2E** is owed to A-5c-c: the handler is wired and its
+  crypto path is host-proven (`system_identity_lifecycle`) + the shared
+  system-wrap path is boot-proven via ADMIN_ELEVATE, but the handler itself has
+  not executed live (the per-build random recovery phrase needs runtime
+  plumbing). A-5c-c drives it + the focused audit.
+- **The v1.0 system passphrase is the known constant** (`thylacine`) — the WRAP
+  is now real Argon2id+AEGIS, but the secret is build-baked, not a real
+  per-install secret. A v1.x installer supplies that (the `corvus-mint`
+  `CORVUS_SYSTEM_PASSPHRASE` override is the seam).
 - **Rate limit** is in-memory only (resets on corvus restart, itself bounded
   by joey's restart-rate-limit). The persistent C-16 (AUTH + RECOVER,
   Stratum-backed) is task #876.

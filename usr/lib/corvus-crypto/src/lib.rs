@@ -997,4 +997,62 @@ mod tests {
         let pk = PublicKey::from(&StaticSecret::from(sk));
         assert_eq!(pk.as_bytes(), &kp[KP_X25519_PK_OFF..KP_X25519_PK_OFF + X25519_KEY_LEN]);
     }
+
+    #[test]
+    fn system_identity_lifecycle() {
+        // The exact crypto sequence corvus performs for the host-baked SYSTEM
+        // identity (A-5c-b): mint system-wrap + system-recovery-wrap over ONE keypair
+        // under the fixed SYSTEM_WRAP_SUBJECT, then prove ADMIN_ELEVATE's unwrap and
+        // RECOVER(system)'s unwrap + re-wrap-under-new-passphrase + phrase-roll. Pins
+        // SYSTEM_WRAP_SUBJECT and the no-rewrite invariant (all keyslots yield the
+        // SAME keypair, so the system-wrapped envelopes stay valid across a recover).
+        let mut rng = CounterRng(0x5157_3e31_de70_0001);
+        let subject = SYSTEM_WRAP_SUBJECT;
+        let pass: &[u8] = b"thylacine";
+        let mut keypair = [0u8; KEYPAIR_LEN];
+        for (i, b) in keypair.iter_mut().enumerate() {
+            *b = (i.wrapping_mul(73).wrapping_add(11) & 0xff) as u8;
+        }
+        // Mint both keyslots over the SAME keypair (what corvus-mint bakes).
+        let sw = wrap_keypair_passphrase(&mut rng, subject, pass, &keypair).expect("system-wrap");
+        let mut entropy = [0u8; RECOVERY_ENTROPY_BYTES];
+        rng.fill_bytes(&mut entropy);
+        let srw =
+            make_recovery_wrap(&mut rng, subject, &entropy, &keypair).expect("system-recovery-wrap");
+
+        // ADMIN_ELEVATE: the supplied passphrase opens system-wrap -> the keypair;
+        // a wrong passphrase fails (no elevation).
+        assert_eq!(
+            &unwrap_keypair_passphrase(subject, pass, &sw).expect("admin-elevate")[..],
+            &keypair[..]
+        );
+        assert!(unwrap_keypair_passphrase(subject, b"wrong", &sw).is_none());
+
+        // RECOVER(system) step 1: the recovery phrase opens system-recovery-wrap ->
+        // the SAME keypair; a flipped phrase fails.
+        let rec = unwrap_recovery(subject, &entropy, &srw).expect("recover unwrap");
+        assert_eq!(&rec[..], &keypair[..]);
+        let mut bad = entropy;
+        bad[0] ^= 1;
+        assert!(unwrap_recovery(subject, &bad, &srw).is_none());
+
+        // RECOVER(system) step 2: re-wrap under a NEW passphrase (roll system-wrap).
+        // The new passphrase opens it; the OLD one no longer does.
+        let newpass: &[u8] = b"new-system-secret";
+        let new_sw = wrap_keypair_passphrase(&mut rng, subject, newpass, &rec).expect("re-wrap");
+        assert_eq!(
+            &unwrap_keypair_passphrase(subject, newpass, &new_sw).expect("new-pass")[..],
+            &keypair[..]
+        );
+        assert!(unwrap_keypair_passphrase(subject, pass, &new_sw).is_none());
+
+        // RECOVER(system) step 3: roll a FRESH recovery phrase (new system-recovery-wrap)
+        // over the same keypair; the OLD phrase must not open the NEW recovery wrap.
+        let mut new_entropy = [0u8; RECOVERY_ENTROPY_BYTES];
+        rng.fill_bytes(&mut new_entropy);
+        let new_srw =
+            make_recovery_wrap(&mut rng, subject, &new_entropy, &rec).expect("roll phrase");
+        assert_eq!(&unwrap_recovery(subject, &new_entropy, &new_srw).expect("new-phrase")[..], &keypair[..]);
+        assert!(unwrap_recovery(subject, &entropy, &new_srw).is_none());
+    }
 }

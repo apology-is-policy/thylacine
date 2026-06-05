@@ -1255,7 +1255,30 @@ kill = BOTH the namespace `/proc/<pid>/ctl` surface AND a narrow elevation-only 
   CLAUDE.md + ARCH 25.4 (the A-5c audit row += ADMIN_ELEVATE real-unwrap + corvus-crypto/corvus-mint).
   Impl plan: corvus-crypto extraction (pure refactor; independently landable) -> corvus-mint +
   build.sh bake + corvus runtime (load system-wrap + real ADMIN_ELEVATE + RECOVER(system) console
-  gate). **NEXT = A-5c-b impl.**
+  gate).
+
+- **A-5c-b LANDED (3 sub-commits).** 1/3 (`7a0be7d`) corvus-crypto extraction (pure refactor;
+  main.rs becomes crypto-dep-free bar the ThylaRng adapter). 2a/3 (`0aec871`) the host-bake pipeline:
+  the single `crvs_v1_pack/unpack` packer (RecoveryWrap + KeypairWrap + CorvusUserState all delegate
+  -> proven no-drift by a host test) + `KeypairWrap` serializer + `unwrap_keypair_passphrase` +
+  `SYSTEM_WRAP_SUBJECT`; the host `tools/corvus-mint/` (mints + self-verifies system-wrap +
+  system-recovery-wrap); `build.sh` bake into `/var/lib/corvus` (SYSTEM-owned, readback-verified).
+  2b/3 the corvus runtime privilege surface: `system_identity_load` at boot (reads both wraps,
+  FATAL-on-absent, parse-only -- the crypto check is deferred to ADMIN_ELEVATE since corvus does not
+  know the system passphrase); the real `ADMIN_ELEVATE` (replaced the `b"thylacine"` byte-compare with
+  `unwrap_keypair_passphrase(SYSTEM_WRAP_SUBJECT, supplied, &SYSTEM_KEYPAIR_WRAP)`, fail-closed,
+  `SYSTEM_PASSPHRASE` constant deleted); `handle_recover_system` = `RECOVER(subject_kind=0)`,
+  console-gated (the EXTRA gate over RECOVER(user)) + phrase + rate-limit (subject `b"system"`),
+  twin-wrap rename-swap on the root-level wraps via `fd 0`. Matrix: default + UBSan both 714/714 +
+  `corvus: system identity loaded` + `joey: ADMIN_ELEVATE ok` (real unwrap proven live) + 0 EXTINCTION
+  + 0 UBSan runtime errors; corvus-crypto host tests 12/12 (new `system_identity_lifecycle` proves the
+  exact mint -> ADMIN_ELEVATE-unwrap -> RECOVER-unwrap -> re-wrap -> roll sequence). Reference
+  `docs/reference/105-corvus-recovery.md` (A-5c-b section). **OWED to A-5c-c: the LIVE
+  RECOVER(system) E2E** -- the handler is wired + its crypto host-proven + the shared system-wrap path
+  boot-proven via ADMIN_ELEVATE, but the handler itself has not executed live (the per-build random
+  recovery phrase needs runtime plumbing). **NEXT = A-5c-c (#875): login/UX recovery path + the live
+  RECOVER(user)+RECOVER(system) boot E2E + one focused adversarial audit (AEGIS/mallocng-adjacent --
+  prosecute hard) + the full matrix (SMP multi-boot gate + cross-reboot).**
 
 ---
 
