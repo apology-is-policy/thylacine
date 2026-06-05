@@ -97,11 +97,11 @@
 
 extern crate alloc;
 
-// Canonical BIP-39 English wordlist (2048 words) -- the A-5c recovery phrase
-// alphabet. Generated from bitcoin/bips bip-0039/english.txt; see the module
-// header for the source SHA-256.
-mod bip39_wordlist;
-use bip39_wordlist::BIP39_WORDLIST;
+// The crypto core (CRVS wrap layout + Argon2id + AEGIS-256 + the hybrid keypair
+// + the DEK envelope + the BIP-39 codec + the recovery/passphrase wraps) lives
+// in the shared corvus-crypto lib (A-5c-b) so the host corvus-mint and corvus
+// produce byte-identical wraps. corvus supplies the RNG (ThylaRng) + the heap.
+use corvus_crypto::*;
 
 // 9P2000.L server-side codec. Lifted from corvus's private `p9` module
 // into `libthyla_rs::ninep` at U-2h-ninep; aliased back to `p9` so the
@@ -161,53 +161,6 @@ unsafe fn heap_init() {
     let buf_ptr = core::ptr::addr_of_mut!(HEAP_BUF) as *mut u8;
     ALLOCATOR.lock().init(buf_ptr, HEAP_SIZE);
 }
-
-// =============================================================================
-// State file format — CORVUS-DESIGN.md §4.3.
-// =============================================================================
-
-const CORVUS_MAGIC: u32 = 0x53565243; // 'CRVS' LE
-const CORVUS_STATE_VERSION: u32 = 1;
-const ARGON2_SALT_LEN: usize = 16;
-const AEGIS256_KEY_LEN: usize = 32;
-const AEGIS256_NONCE_LEN: usize = 32;
-const AEGIS256_TAG_LEN: usize = 32;
-
-// Hybrid keypair layout (P5-corvus-bringup-d): the AEGIS-wrapped
-// plaintext is the concatenation of the X25519 and ML-KEM-768 key
-// halves. See KP_* offsets below.
-const X25519_KEY_LEN: usize = 32;
-const MLKEM_EK_LEN: usize = 1184;
-const MLKEM_DK_LEN: usize = 2400;
-const MLKEM_CT_LEN: usize = 1088;
-const KP_X25519_SK_OFF: usize = 0;
-const KP_X25519_PK_OFF: usize = X25519_KEY_LEN;
-const KP_MLKEM_EK_OFF: usize = X25519_KEY_LEN * 2;
-const KP_MLKEM_DK_OFF: usize = X25519_KEY_LEN * 2 + MLKEM_EK_LEN;
-const KEYPAIR_LEN: usize = X25519_KEY_LEN * 2 + MLKEM_EK_LEN + MLKEM_DK_LEN; // 3648
-
-const HEADER_LEN: usize = 4 + 4 + 4 + 8 + 4 + ARGON2_SALT_LEN + AEGIS256_NONCE_LEN; // = 72
-const TOTAL_LEN: usize = HEADER_LEN + KEYPAIR_LEN + AEGIS256_TAG_LEN; // = 3752
-
-const _: () = assert!(HEADER_LEN == 72, "state file header layout drift");
-const _: () = assert!(KEYPAIR_LEN == 3648, "hybrid keypair layout drift");
-const _: () = assert!(KP_MLKEM_DK_OFF == 1248, "keypair sub-offset drift");
-const _: () = assert!(AEGIS256_KEY_LEN == 32, "AEGIS-256 key width is 32");
-const _: () = assert!(AEGIS256_NONCE_LEN == 32, "AEGIS-256 nonce width is 32");
-const _: () = assert!(AEGIS256_TAG_LEN == 32, "AEGIS-256 tag width is 32");
-
-// Argon2id v1.0 preset (CORVUS-DESIGN §4.3). m_cost=16 MiB is the
-// bringup cap (one quarter of the design default 64 MiB) — bounded by
-// the static 24 MiB heap. State-file m_cost_kib is per-record, so a
-// future bump only resizes the heap.
-const ARGON2_T_COST: u32 = 2;
-const ARGON2_M_COST_KIB: u32 = 16 * 1024;
-const ARGON2_PARALLELISM: u32 = 1;
-
-// AD for the keypair-wrap AEAD: "thylacine-corvus-v1" || user_name ||
-// backend_id. Backend ID at v1.0 is `passphrase` = 0.
-const AD_PREFIX: &[u8] = b"thylacine-corvus-v1";
-const BACKEND_ID_PASSPHRASE: u8 = 0;
 
 // A-1b: a user record carries BOTH identity (principal_id / primary_gid /
 // supp_gids / backend / name) and wrap-state (argon2 params + salt + nonce +
@@ -288,79 +241,6 @@ impl CorvusUserState {
     }
 }
 
-// =============================================================================
-// DEK envelope — the hybrid-PKE wrapped-DEK blob (P5-corvus-bringup-d).
-// =============================================================================
-
-const DEK_LEN: usize = 32;
-const ENVELOPE_VERSION: u8 = 1;
-const ENV_MLKEM_CT_OFF: usize = 1;
-const ENV_EPH_PK_OFF: usize = ENV_MLKEM_CT_OFF + MLKEM_CT_LEN; // 1089
-const ENV_NONCE_OFF: usize = ENV_EPH_PK_OFF + X25519_KEY_LEN; // 1121
-const ENV_DEK_CT_OFF: usize = ENV_NONCE_OFF + AEGIS256_NONCE_LEN; // 1153
-const ENV_DEK_TAG_OFF: usize = ENV_DEK_CT_OFF + DEK_LEN; // 1185
-const ENVELOPE_LEN: usize = ENV_DEK_TAG_OFF + AEGIS256_TAG_LEN; // 1217
-
-const _: () = assert!(ENVELOPE_LEN == 1217, "DEK envelope layout drift");
-
-const DEK_KDF_DOMAIN: &[u8] = b"thylacine-corvus-dek-kdf-v1";
-const DEK_AD_PREFIX: &[u8] = b"thylacine-corvus-dek-v1";
-
-// =============================================================================
-// Recovery keyslot — A-5c (CORVUS-DESIGN.md §5.6 + IDENTITY-DESIGN §9.9).
-// =============================================================================
-//
-// A recovery keyslot is a SECOND wrap of a subject's hybrid keypair, alongside
-// the passphrase wrap, under a recovery-phrase-derived KEK (the LUKS two-keyslot
-// model). It re-wraps the KEYPAIR -- not the dataset DEK -- so the keypair value
-// (hence its public keys, hence every DEK envelope encapsulated to them) is
-// unchanged by recovery: there is NO kernel/Stratum surface. The on-disk wrap is
-// the SAME CRVS v1 layout (TOTAL_LEN) as hybrid.corvus; only the AD prefix and
-// the KEK source differ.
-//
-// The phrase is a 24-word BIP-39 mnemonic over RECOVERY_ENTROPY_BYTES of CSPRNG
-// entropy plus an 8-bit SHA-256 checksum (24 * 11 = 264 bits = 256 + 8). The KEK
-// derives from the DECODED ENTROPY (the canonical 32-byte form), not the phrase
-// text -- decode normalizes whitespace/case, so there is no canonicalization
-// ambiguity. The 256-bit entropy is the security floor; the KDF cost is
-// defense-in-depth, not the boundary (you cannot brute-force 256 bits).
-const RECOVERY_ENTROPY_BYTES: usize = 32; // 256-bit
-const RECOVERY_WORD_COUNT: usize = 24;
-const RECOVERY_CHECKSUM_BITS: usize = 8; // 256 / 32
-const BIP39_WORD_BITS: usize = 11;
-const BIP39_WORDLIST_LEN: usize = 2048; // 2^11
-const BIP39_MAX_WORD_LEN: usize = 8; // longest canonical English word
-// Worst-case encoded phrase bytes: 24 words (<=8) + 23 single-space joins.
-const RECOVERY_PHRASE_MAX: usize = RECOVERY_WORD_COUNT * BIP39_MAX_WORD_LEN + (RECOVERY_WORD_COUNT - 1);
-
-const _: () = assert!(RECOVERY_ENTROPY_BYTES * 8 == 256, "recovery entropy is 256-bit");
-const _: () = assert!(
-    RECOVERY_WORD_COUNT * BIP39_WORD_BITS == RECOVERY_ENTROPY_BYTES * 8 + RECOVERY_CHECKSUM_BITS,
-    "BIP-39 word/bit accounting drift (24*11 == 256+8)"
-);
-// The wordlist must exactly fill the 11-bit index space, else an 11-bit index
-// could read past the array (panic) or leave words unreachable.
-const _: () = assert!(
-    BIP39_WORDLIST.len() == BIP39_WORDLIST_LEN,
-    "BIP-39 wordlist must be exactly 2^11 entries"
-);
-
-// AD for the recovery-keyslot AEAD: "thylacine-corvus-recovery-v1" || subject
-// || 0x00. Domain-separated from the passphrase-wrap AD (AD_PREFIX) by the
-// prefix, so a recovery wrap can never be unwrapped as a passphrase wrap or
-// vice versa even if a file is swapped.
-const RECOVERY_AD_PREFIX: &[u8] = b"thylacine-corvus-recovery-v1";
-const RECOVERY_AD_DOMAIN_BYTE: u8 = 0;
-
-// Recovery KDF preset. m_cost is the interactive 16 MiB (heap-bounded -- the
-// static heap is 24 MiB, so the libsodium "sensitive" 1 GiB m_cost is a v1.x
-// heap-resize seam); the time cost is raised (recovery is rare, so a 4x work
-// factor is affordable) as the within-budget hardening. Stored per-wrap in the
-// CRVS header, so a future bump is a single-constant change.
-const RECOVERY_ARGON2_T_COST: u32 = 8;
-const RECOVERY_ARGON2_M_COST_KIB: u32 = ARGON2_M_COST_KIB;
-const RECOVERY_ARGON2_PARALLELISM: u32 = 1;
-
 // In-memory rate limit on the EXPENSIVE RECOVER path. A typo'd phrase fails the
 // BIP-39 checksum first (cheap, before the KDF) and does NOT count here; only a
 // checksum-VALID phrase that then fails the AEAD unwrap (a crafted/guessed
@@ -371,21 +251,6 @@ const RECOVERY_ARGON2_PARALLELISM: u32 = 1;
 // never locks them out. The full time-windowed, Stratum-persisted C-16 rate
 // limit (covering AUTH too) is tracked separately.
 const RECOVER_FAIL_MAX: u32 = 5;
-
-// =============================================================================
-// Crypto: Argon2id KDF + AEGIS-256 AEAD + ML-KEM-768 + X25519 + SHA-256.
-// =============================================================================
-
-use aegis::aegis256::Aegis256;
-use argon2::{Algorithm, Argon2, Params, Version};
-use kem::{Decapsulate, Encapsulate};
-use ml_kem::{Ciphertext, Encoded, EncodedSizeUser, KemCore, MlKem768};
-use rand_core::RngCore;
-use sha2::{Digest, Sha256};
-use x25519_dalek::{EphemeralSecret, PublicKey, StaticSecret};
-
-type MlKemEk = <MlKem768 as KemCore>::EncapsulationKey;
-type MlKemDk = <MlKem768 as KemCore>::DecapsulationKey;
 
 struct ThylaRng;
 
@@ -418,483 +283,6 @@ impl rand_core::RngCore for ThylaRng {
 }
 
 impl rand_core::CryptoRng for ThylaRng {}
-
-fn wipe(buf: &mut [u8]) {
-    for b in buf.iter_mut() {
-        unsafe { core::ptr::write_volatile(b as *mut u8, 0) };
-    }
-}
-
-fn argon2id_kek(
-    passphrase: &[u8],
-    salt: &[u8],
-    t_cost: u32,
-    m_cost_kib: u32,
-    parallelism: u32,
-) -> Option<[u8; AEGIS256_KEY_LEN]> {
-    let params = Params::new(m_cost_kib, t_cost, parallelism, Some(AEGIS256_KEY_LEN)).ok()?;
-    let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
-    let mut kek = [0u8; AEGIS256_KEY_LEN];
-    argon.hash_password_into(passphrase, salt, &mut kek).ok()?;
-    Some(kek)
-}
-
-fn aegis_wrap(
-    key: &[u8; AEGIS256_KEY_LEN],
-    nonce: &[u8; AEGIS256_NONCE_LEN],
-    ad: &[u8],
-    plaintext: &[u8],
-    ciphertext_out: &mut [u8],
-) -> [u8; AEGIS256_TAG_LEN] {
-    debug_assert_eq!(plaintext.len(), ciphertext_out.len());
-    ciphertext_out.copy_from_slice(plaintext);
-    let cipher = Aegis256::<AEGIS256_TAG_LEN>::new(key, nonce);
-    cipher.encrypt_in_place(ciphertext_out, ad)
-}
-
-fn aegis_unwrap(
-    key: &[u8; AEGIS256_KEY_LEN],
-    nonce: &[u8; AEGIS256_NONCE_LEN],
-    ad: &[u8],
-    ciphertext: &[u8],
-    tag: &[u8; AEGIS256_TAG_LEN],
-) -> Option<Vec<u8>> {
-    let mut buf: Vec<u8> = Vec::with_capacity(ciphertext.len());
-    buf.extend_from_slice(ciphertext);
-    let cipher = Aegis256::<AEGIS256_TAG_LEN>::new(key, nonce);
-    cipher.decrypt_in_place(&mut buf, tag, ad).ok()?;
-    Some(buf)
-}
-
-fn sha256_kek(parts: &[&[u8]]) -> [u8; AEGIS256_KEY_LEN] {
-    let mut h = Sha256::new();
-    for p in parts {
-        h.update(p);
-    }
-    let digest = h.finalize();
-    let mut kek = [0u8; AEGIS256_KEY_LEN];
-    kek.copy_from_slice(&digest);
-    kek
-}
-
-fn generate_hybrid_keypair() -> Option<[u8; KEYPAIR_LEN]> {
-    let mut rng = ThylaRng;
-    let x_sk = StaticSecret::random_from_rng(&mut rng);
-    let x_pk = PublicKey::from(&x_sk);
-    let (mlkem_dk, mlkem_ek) = MlKem768::generate(&mut rng);
-    let mut ek_bytes = mlkem_ek.as_bytes();
-    let mut dk_bytes = mlkem_dk.as_bytes();
-    if ek_bytes.len() != MLKEM_EK_LEN || dk_bytes.len() != MLKEM_DK_LEN {
-        return None;
-    }
-    let mut kp = [0u8; KEYPAIR_LEN];
-    kp[KP_X25519_SK_OFF..KP_X25519_SK_OFF + X25519_KEY_LEN].copy_from_slice(x_sk.as_bytes());
-    kp[KP_X25519_PK_OFF..KP_X25519_PK_OFF + X25519_KEY_LEN].copy_from_slice(x_pk.as_bytes());
-    kp[KP_MLKEM_EK_OFF..KP_MLKEM_EK_OFF + MLKEM_EK_LEN].copy_from_slice(&ek_bytes[..]);
-    kp[KP_MLKEM_DK_OFF..KP_MLKEM_DK_OFF + MLKEM_DK_LEN].copy_from_slice(&dk_bytes[..]);
-    wipe(&mut dk_bytes[..]);
-    wipe(&mut ek_bytes[..]);
-    Some(kp)
-}
-
-fn dek_envelope_wrap(
-    x25519_pk: &[u8; X25519_KEY_LEN],
-    mlkem_ek_bytes: &[u8],
-    dek: &[u8; DEK_LEN],
-    ad_dataset: &[u8],
-    key_id: u64,
-) -> Option<[u8; ENVELOPE_LEN]> {
-    let mut rng = ThylaRng;
-
-    let enc = Encoded::<MlKemEk>::try_from(mlkem_ek_bytes).ok()?;
-    let mlkem_ek = MlKemEk::from_bytes(&enc);
-    let (mlkem_ct, mut ss_pq) = mlkem_ek.encapsulate(&mut rng).ok()?;
-    if mlkem_ct.len() != MLKEM_CT_LEN || ss_pq.len() != AEGIS256_KEY_LEN {
-        wipe(&mut ss_pq[..]);
-        return None;
-    }
-
-    let eph = EphemeralSecret::random_from_rng(&mut rng);
-    let eph_pk = PublicKey::from(&eph);
-    let their_pk = PublicKey::from(*x25519_pk);
-    let ss_cl = eph.diffie_hellman(&their_pk);
-
-    let mut kek = sha256_kek(&[
-        DEK_KDF_DOMAIN,
-        &ss_pq[..],
-        &ss_cl.as_bytes()[..],
-        &eph_pk.as_bytes()[..],
-        &mlkem_ct[..],
-    ]);
-    wipe(&mut ss_pq[..]);
-
-    let mut nonce = [0u8; AEGIS256_NONCE_LEN];
-    rng.fill_bytes(&mut nonce);
-    let mut ad: Vec<u8> = Vec::new();
-    ad.extend_from_slice(DEK_AD_PREFIX);
-    ad.extend_from_slice(ad_dataset);
-    ad.extend_from_slice(&key_id.to_le_bytes());
-    let mut dek_ct = [0u8; DEK_LEN];
-    let dek_tag = aegis_wrap(&kek, &nonce, &ad, dek, &mut dek_ct);
-    wipe(&mut kek);
-
-    let mut env = [0u8; ENVELOPE_LEN];
-    env[0] = ENVELOPE_VERSION;
-    env[ENV_MLKEM_CT_OFF..ENV_MLKEM_CT_OFF + MLKEM_CT_LEN].copy_from_slice(&mlkem_ct[..]);
-    env[ENV_EPH_PK_OFF..ENV_EPH_PK_OFF + X25519_KEY_LEN].copy_from_slice(eph_pk.as_bytes());
-    env[ENV_NONCE_OFF..ENV_NONCE_OFF + AEGIS256_NONCE_LEN].copy_from_slice(&nonce);
-    env[ENV_DEK_CT_OFF..ENV_DEK_CT_OFF + DEK_LEN].copy_from_slice(&dek_ct);
-    env[ENV_DEK_TAG_OFF..ENV_DEK_TAG_OFF + AEGIS256_TAG_LEN].copy_from_slice(&dek_tag);
-    Some(env)
-}
-
-fn dek_envelope_unwrap(
-    x25519_sk: &[u8; X25519_KEY_LEN],
-    mlkem_dk_bytes: &[u8],
-    envelope: &[u8],
-    ad_dataset: &[u8],
-    key_id: u64,
-) -> Option<[u8; DEK_LEN]> {
-    if envelope.len() != ENVELOPE_LEN || envelope[0] != ENVELOPE_VERSION {
-        return None;
-    }
-    let mlkem_ct_bytes = &envelope[ENV_MLKEM_CT_OFF..ENV_MLKEM_CT_OFF + MLKEM_CT_LEN];
-    let mut eph_pk = [0u8; X25519_KEY_LEN];
-    eph_pk.copy_from_slice(&envelope[ENV_EPH_PK_OFF..ENV_EPH_PK_OFF + X25519_KEY_LEN]);
-    let mut nonce = [0u8; AEGIS256_NONCE_LEN];
-    nonce.copy_from_slice(&envelope[ENV_NONCE_OFF..ENV_NONCE_OFF + AEGIS256_NONCE_LEN]);
-    let dek_ct = &envelope[ENV_DEK_CT_OFF..ENV_DEK_CT_OFF + DEK_LEN];
-    let mut dek_tag = [0u8; AEGIS256_TAG_LEN];
-    dek_tag.copy_from_slice(&envelope[ENV_DEK_TAG_OFF..ENV_DEK_TAG_OFF + AEGIS256_TAG_LEN]);
-
-    let ct = Ciphertext::<MlKem768>::try_from(mlkem_ct_bytes).ok()?;
-    let enc = Encoded::<MlKemDk>::try_from(mlkem_dk_bytes).ok()?;
-    let mlkem_dk = MlKemDk::from_bytes(&enc);
-    let mut ss_pq = mlkem_dk.decapsulate(&ct).ok()?;
-    if ss_pq.len() != AEGIS256_KEY_LEN {
-        wipe(&mut ss_pq[..]);
-        return None;
-    }
-
-    let sk = StaticSecret::from(*x25519_sk);
-    let eph_pub = PublicKey::from(eph_pk);
-    let ss_cl = sk.diffie_hellman(&eph_pub);
-
-    let mut kek = sha256_kek(&[
-        DEK_KDF_DOMAIN,
-        &ss_pq[..],
-        &ss_cl.as_bytes()[..],
-        &eph_pk[..],
-        mlkem_ct_bytes,
-    ]);
-    wipe(&mut ss_pq[..]);
-
-    let mut ad: Vec<u8> = Vec::new();
-    ad.extend_from_slice(DEK_AD_PREFIX);
-    ad.extend_from_slice(ad_dataset);
-    ad.extend_from_slice(&key_id.to_le_bytes());
-    let plain = aegis_unwrap(&kek, &nonce, &ad, dek_ct, &dek_tag);
-    wipe(&mut kek);
-
-    let mut plain = plain?;
-    if plain.len() != DEK_LEN {
-        wipe(&mut plain);
-        return None;
-    }
-    let mut dek = [0u8; DEK_LEN];
-    dek.copy_from_slice(&plain);
-    wipe(&mut plain);
-    Some(dek)
-}
-
-// =============================================================================
-// Recovery keyslot — BIP-39 phrase codec + the recovery wrap (A-5c).
-// =============================================================================
-
-// Look up a single word (case-insensitive, ASCII) in the canonical wordlist;
-// returns its 0..2048 index. The list is lexicographically sorted, so binary
-// search over the lowercased word resolves it. An unknown or over-long word
-// (no canonical word exceeds BIP39_MAX_WORD_LEN) returns None.
-fn bip39_word_index(word: &[u8]) -> Option<u16> {
-    if word.is_empty() || word.len() > BIP39_MAX_WORD_LEN {
-        return None;
-    }
-    let mut lower = [0u8; BIP39_MAX_WORD_LEN];
-    for (i, &b) in word.iter().enumerate() {
-        lower[i] = b.to_ascii_lowercase();
-    }
-    let key = core::str::from_utf8(&lower[..word.len()]).ok()?;
-    match BIP39_WORDLIST.binary_search(&key) {
-        Ok(idx) => Some(idx as u16),
-        Err(_) => None,
-    }
-}
-
-// First 8 bits of SHA-256(entropy) -- the BIP-39 checksum for 256-bit entropy.
-fn sha256_checksum_byte(entropy: &[u8]) -> u8 {
-    let mut h = Sha256::new();
-    h.update(entropy);
-    h.finalize()[0]
-}
-
-// Map a 264-bit buffer (entropy || checksum) to 24 space-joined words, MSB-first
-// 11 bits per word. Shared by bip39_encode + the self-test (which feeds a
-// deliberately-wrong checksum to exercise the reject path deterministically).
-fn bip39_words_from_bits(bits: &[u8; RECOVERY_ENTROPY_BYTES + 1]) -> Vec<u8> {
-    let mut out: Vec<u8> = Vec::with_capacity(RECOVERY_PHRASE_MAX);
-    for w in 0..RECOVERY_WORD_COUNT {
-        let mut idx: u16 = 0;
-        for b in 0..BIP39_WORD_BITS {
-            let p = w * BIP39_WORD_BITS + b;
-            let bit = (bits[p / 8] >> (7 - (p % 8))) & 1;
-            idx = (idx << 1) | bit as u16;
-        }
-        if w > 0 {
-            out.push(b' ');
-        }
-        out.extend_from_slice(BIP39_WORDLIST[idx as usize].as_bytes());
-    }
-    out
-}
-
-// Encode 256-bit entropy as a 24-word space-joined BIP-39 phrase.
-fn bip39_encode(entropy: &[u8; RECOVERY_ENTROPY_BYTES]) -> Vec<u8> {
-    let mut bits = [0u8; RECOVERY_ENTROPY_BYTES + 1];
-    bits[..RECOVERY_ENTROPY_BYTES].copy_from_slice(entropy);
-    bits[RECOVERY_ENTROPY_BYTES] = sha256_checksum_byte(entropy);
-    let words = bip39_words_from_bits(&bits);
-    wipe(&mut bits); // the buffer holds the entropy bytes
-    words
-}
-
-// Decode a 24-word phrase to 256-bit entropy. None on: not exactly 24 words, an
-// unknown word, or a checksum mismatch (a typo). Splitting is on ASCII
-// whitespace (runs collapsed), so leading/trailing/multiple/tab/newline
-// separators are all accepted.
-fn bip39_decode(phrase: &[u8]) -> Option<[u8; RECOVERY_ENTROPY_BYTES]> {
-    let mut bits = [0u8; RECOVERY_ENTROPY_BYTES + 1];
-    let mut bitpos: usize = 0;
-    let mut nwords: usize = 0;
-    for word in phrase.split(|&c| c == b' ' || c == b'\t' || c == b'\n' || c == b'\r') {
-        if word.is_empty() {
-            continue;
-        }
-        nwords += 1;
-        if nwords > RECOVERY_WORD_COUNT {
-            wipe(&mut bits);
-            return None;
-        }
-        let idx = match bip39_word_index(word) {
-            Some(i) => i,
-            None => {
-                wipe(&mut bits);
-                return None;
-            }
-        };
-        for b in 0..BIP39_WORD_BITS {
-            let bit = ((idx >> (BIP39_WORD_BITS - 1 - b)) & 1) as u8;
-            if bit != 0 {
-                bits[bitpos / 8] |= 1 << (7 - (bitpos % 8));
-            }
-            bitpos += 1;
-        }
-    }
-    if nwords != RECOVERY_WORD_COUNT {
-        wipe(&mut bits);
-        return None;
-    }
-    let mut entropy = [0u8; RECOVERY_ENTROPY_BYTES];
-    entropy.copy_from_slice(&bits[..RECOVERY_ENTROPY_BYTES]);
-    let cs_ok = sha256_checksum_byte(&entropy) == bits[RECOVERY_ENTROPY_BYTES];
-    wipe(&mut bits);
-    if !cs_ok {
-        wipe(&mut entropy);
-        return None;
-    }
-    Some(entropy)
-}
-
-// AD for the recovery-keyslot AEAD: prefix || subject || domain-byte. The prefix
-// domain-separates it from the passphrase-wrap AD.
-fn build_recovery_ad(subject: &[u8], out: &mut Vec<u8>) {
-    out.clear();
-    out.extend_from_slice(RECOVERY_AD_PREFIX);
-    out.extend_from_slice(subject);
-    out.push(RECOVERY_AD_DOMAIN_BYTE);
-}
-
-// The recovery wrap on disk -- the same CRVS v1 layout (TOTAL_LEN) as
-// hybrid.corvus, distinct only by AD + KEK source.
-struct RecoveryWrap {
-    t_cost: u32,
-    m_cost_kib: u32,
-    parallelism: u32,
-    salt: [u8; ARGON2_SALT_LEN],
-    nonce: [u8; AEGIS256_NONCE_LEN],
-    ciphertext: [u8; KEYPAIR_LEN],
-    tag: [u8; AEGIS256_TAG_LEN],
-}
-
-impl RecoveryWrap {
-    fn to_bytes(&self) -> [u8; TOTAL_LEN] {
-        let mut out = [0u8; TOTAL_LEN];
-        out[0..4].copy_from_slice(&CORVUS_MAGIC.to_le_bytes());
-        out[4..8].copy_from_slice(&CORVUS_STATE_VERSION.to_le_bytes());
-        out[8..12].copy_from_slice(&self.t_cost.to_le_bytes());
-        out[12..20].copy_from_slice(&(self.m_cost_kib as u64).to_le_bytes());
-        out[20..24].copy_from_slice(&self.parallelism.to_le_bytes());
-        out[24..40].copy_from_slice(&self.salt);
-        out[40..72].copy_from_slice(&self.nonce);
-        out[72..72 + KEYPAIR_LEN].copy_from_slice(&self.ciphertext);
-        out[72 + KEYPAIR_LEN..72 + KEYPAIR_LEN + AEGIS256_TAG_LEN].copy_from_slice(&self.tag);
-        out
-    }
-
-    fn from_bytes(blob: &[u8]) -> Option<RecoveryWrap> {
-        if blob.len() != TOTAL_LEN {
-            return None;
-        }
-        let magic = u32::from_le_bytes([blob[0], blob[1], blob[2], blob[3]]);
-        let version = u32::from_le_bytes([blob[4], blob[5], blob[6], blob[7]]);
-        if magic != CORVUS_MAGIC || version != CORVUS_STATE_VERSION {
-            return None;
-        }
-        let t_cost = u32::from_le_bytes([blob[8], blob[9], blob[10], blob[11]]);
-        let m64 = u64::from_le_bytes([
-            blob[12], blob[13], blob[14], blob[15], blob[16], blob[17], blob[18], blob[19],
-        ]);
-        if m64 > u32::MAX as u64 {
-            return None;
-        }
-        let parallelism = u32::from_le_bytes([blob[20], blob[21], blob[22], blob[23]]);
-        let mut salt = [0u8; ARGON2_SALT_LEN];
-        let mut nonce = [0u8; AEGIS256_NONCE_LEN];
-        let mut ciphertext = [0u8; KEYPAIR_LEN];
-        let mut tag = [0u8; AEGIS256_TAG_LEN];
-        salt.copy_from_slice(&blob[24..40]);
-        nonce.copy_from_slice(&blob[40..72]);
-        ciphertext.copy_from_slice(&blob[72..72 + KEYPAIR_LEN]);
-        tag.copy_from_slice(&blob[72 + KEYPAIR_LEN..72 + KEYPAIR_LEN + AEGIS256_TAG_LEN]);
-        Some(RecoveryWrap {
-            t_cost,
-            m_cost_kib: m64 as u32,
-            parallelism,
-            salt,
-            nonce,
-            ciphertext,
-            tag,
-        })
-    }
-}
-
-// Wrap a keypair under a FRESH recovery keyslot for `subject`, keyed by the
-// decoded 256-bit `entropy`. getrandom salt + nonce, derive the recovery KEK,
-// AEAD-seal. None on RNG/KDF failure.
-unsafe fn make_recovery_wrap(
-    subject: &[u8],
-    entropy: &[u8; RECOVERY_ENTROPY_BYTES],
-    keypair: &[u8; KEYPAIR_LEN],
-) -> Option<RecoveryWrap> {
-    let mut salt = [0u8; ARGON2_SALT_LEN];
-    if t_getrandom(salt.as_mut_ptr(), ARGON2_SALT_LEN, 0) != ARGON2_SALT_LEN as i64 {
-        return None;
-    }
-    let mut nonce = [0u8; AEGIS256_NONCE_LEN];
-    if t_getrandom(nonce.as_mut_ptr(), AEGIS256_NONCE_LEN, 0) != AEGIS256_NONCE_LEN as i64 {
-        return None;
-    }
-    let mut kek = argon2id_kek(
-        entropy,
-        &salt,
-        RECOVERY_ARGON2_T_COST,
-        RECOVERY_ARGON2_M_COST_KIB,
-        RECOVERY_ARGON2_PARALLELISM,
-    )?;
-    let mut ad: Vec<u8> = Vec::new();
-    build_recovery_ad(subject, &mut ad);
-    let mut ciphertext = [0u8; KEYPAIR_LEN];
-    let tag = aegis_wrap(&kek, &nonce, &ad, keypair, &mut ciphertext);
-    wipe(&mut kek);
-    Some(RecoveryWrap {
-        t_cost: RECOVERY_ARGON2_T_COST,
-        m_cost_kib: RECOVERY_ARGON2_M_COST_KIB,
-        parallelism: RECOVERY_ARGON2_PARALLELISM,
-        salt,
-        nonce,
-        ciphertext,
-        tag,
-    })
-}
-
-// Unwrap a recovery keyslot with `entropy`. None on KDF failure or AEAD tag
-// mismatch (wrong phrase). The recovered keypair value EQUALS the passphrase
-// wrap's plaintext (same keypair, two keyslots) -- the invariant the DEK
-// envelopes depend on.
-unsafe fn unwrap_recovery(
-    subject: &[u8],
-    entropy: &[u8; RECOVERY_ENTROPY_BYTES],
-    rw: &RecoveryWrap,
-) -> Option<[u8; KEYPAIR_LEN]> {
-    let mut kek = argon2id_kek(entropy, &rw.salt, rw.t_cost, rw.m_cost_kib, rw.parallelism)?;
-    let mut ad: Vec<u8> = Vec::new();
-    build_recovery_ad(subject, &mut ad);
-    let res = aegis_unwrap(&kek, &rw.nonce, &ad, &rw.ciphertext, &rw.tag);
-    wipe(&mut kek);
-    let mut plain = res?;
-    if plain.len() != KEYPAIR_LEN {
-        wipe(&mut plain);
-        return None;
-    }
-    let mut kp = [0u8; KEYPAIR_LEN];
-    kp.copy_from_slice(&plain);
-    wipe(&mut plain);
-    Some(kp)
-}
-
-// Shared "wrap the keypair under a passphrase" path -- USER_CREATE's initial
-// wrap AND RECOVER's re-wrap under a new passphrase. One code path keeps the AD
-// + nonce discipline identical at both sites. None on RNG/KDF failure.
-struct KeypairWrap {
-    salt: [u8; ARGON2_SALT_LEN],
-    nonce: [u8; AEGIS256_NONCE_LEN],
-    ciphertext: [u8; KEYPAIR_LEN],
-    tag: [u8; AEGIS256_TAG_LEN],
-}
-
-unsafe fn wrap_keypair_passphrase(
-    subject: &[u8],
-    passphrase: &[u8],
-    keypair: &[u8; KEYPAIR_LEN],
-) -> Option<KeypairWrap> {
-    let mut salt = [0u8; ARGON2_SALT_LEN];
-    if t_getrandom(salt.as_mut_ptr(), ARGON2_SALT_LEN, 0) != ARGON2_SALT_LEN as i64 {
-        return None;
-    }
-    let mut nonce = [0u8; AEGIS256_NONCE_LEN];
-    if t_getrandom(nonce.as_mut_ptr(), AEGIS256_NONCE_LEN, 0) != AEGIS256_NONCE_LEN as i64 {
-        return None;
-    }
-    let mut kek = argon2id_kek(
-        passphrase,
-        &salt,
-        ARGON2_T_COST,
-        ARGON2_M_COST_KIB,
-        ARGON2_PARALLELISM,
-    )?;
-    let mut ad: Vec<u8> = Vec::new();
-    ad.extend_from_slice(AD_PREFIX);
-    ad.extend_from_slice(subject);
-    ad.push(BACKEND_ID_PASSPHRASE);
-    let mut ciphertext = [0u8; KEYPAIR_LEN];
-    let tag = aegis_wrap(&kek, &nonce, &ad, keypair, &mut ciphertext);
-    wipe(&mut kek);
-    Some(KeypairWrap {
-        salt,
-        nonce,
-        ciphertext,
-        tag,
-    })
-}
 
 // Boot-time self-test of the recovery codec + wrap layout (A-5c). FAST -- no
 // argon2 (a fixed test KEK exercises the AEAD + AD + CRVS layout); the argon2-
@@ -2593,7 +1981,7 @@ unsafe fn handle_user_create(handle: i64, payload: &[u8], response: &mut Vec<u8>
     let mut user_vec: Vec<u8> = Vec::new();
     user_vec.extend_from_slice(user_slice);
 
-    let mut keypair_plain = match generate_hybrid_keypair() {
+    let mut keypair_plain = match generate_hybrid_keypair(&mut ThylaRng) {
         Some(kp) => kp,
         None => return stage_response(response, STATUS_INTERNAL_ERROR, &[]),
     };
@@ -2601,7 +1989,7 @@ unsafe fn handle_user_create(handle: i64, payload: &[u8], response: &mut Vec<u8>
     // Wrap the keypair under the passphrase (hybrid.corvus) AND mint the A-5c
     // recovery keyslot (recovery.corvus) over the SAME keypair -- mandatory
     // enrollment. The 24-word phrase is returned once in the OK response.
-    let kw = match wrap_keypair_passphrase(user_slice, passphrase, &keypair_plain) {
+    let kw = match wrap_keypair_passphrase(&mut ThylaRng, user_slice, passphrase, &keypair_plain) {
         Some(k) => k,
         None => {
             wipe(&mut keypair_plain);
@@ -2616,7 +2004,7 @@ unsafe fn handle_user_create(handle: i64, payload: &[u8], response: &mut Vec<u8>
         wipe(&mut recovery_entropy);
         return stage_response(response, STATUS_INTERNAL_ERROR, &[]);
     }
-    let recovery_rw = match make_recovery_wrap(user_slice, &recovery_entropy, &keypair_plain) {
+    let recovery_rw = match make_recovery_wrap(&mut ThylaRng, user_slice, &recovery_entropy, &keypair_plain) {
         Some(r) => r,
         None => {
             wipe(&mut keypair_plain);
@@ -2828,7 +2216,7 @@ unsafe fn handle_recover(
 
     // SUCCESS. Build BOTH new wraps in memory before touching disk, so the only
     // failure points are the two rename-swaps.
-    let kw = match wrap_keypair_passphrase(user, new_passphrase, &keypair) {
+    let kw = match wrap_keypair_passphrase(&mut ThylaRng, user, new_passphrase, &keypair) {
         Some(k) => k,
         None => {
             wipe(&mut keypair);
@@ -2855,7 +2243,7 @@ unsafe fn handle_recover(
         let _ = t_close(users_fd);
         return stage_response(response, STATUS_INTERNAL_ERROR, &[]);
     }
-    let new_rw = match make_recovery_wrap(user, &new_entropy, &keypair) {
+    let new_rw = match make_recovery_wrap(&mut ThylaRng, user, &new_entropy, &keypair) {
         Some(r) => r,
         None => {
             wipe(&mut keypair);
@@ -3434,7 +2822,7 @@ unsafe fn handle_wrap(payload: &[u8], response: &mut Vec<u8>) {
     let mut dek = [0u8; DEK_LEN];
     dek.copy_from_slice(dek_slice);
 
-    let envelope = dek_envelope_wrap(&x_pk, &mlkem_ek, &dek, dataset, key_id);
+    let envelope = dek_envelope_wrap(&mut ThylaRng, &x_pk, &mlkem_ek, &dek, dataset, key_id);
 
     wipe(&mut dek);
     wipe(&mut keypair);

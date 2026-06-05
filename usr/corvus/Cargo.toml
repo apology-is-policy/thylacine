@@ -16,72 +16,25 @@ path = "src/main.rs"
 # surface) + t_pipe/t_read/t_write/t_close (Spoor server I/O).
 libthyla-rs = { path = "../lib/libthyla-rs" }
 
-# Heap allocator — required by Argon2id's working-memory matrix.
-# linked_list_allocator is the no_std-standard. We back it with a
-# static 24 MiB BSS buffer at startup; m_cost up to 16 MiB fits with
-# headroom for state vec + ciphertext bookkeeping. Larger m_cost
-# (sensitive preset = 1 GiB) is a future tuning move that requires
-# re-sizing the BSS buffer.
-# `use_spin` enables the LockedHeap wrapper (Heap + spinning_top mutex).
-# Required for the #[global_allocator] static. UP corvus is single-Proc /
-# single-thread at v1.0; the spinlock is uncontended in practice but the
-# interface is what `LockedHeap` exposes.
+# Heap allocator -- required by Argon2id's working-memory matrix (inside
+# corvus-crypto). linked_list_allocator is the no_std-standard. We back it
+# with a static 24 MiB BSS buffer at startup; m_cost up to 16 MiB fits with
+# headroom for state vec + ciphertext bookkeeping. Larger m_cost (sensitive
+# preset = 1 GiB) is a future tuning move that requires re-sizing the BSS
+# buffer. `use_spin` enables the LockedHeap wrapper (Heap + spinning_top
+# mutex), required for the #[global_allocator] static.
 linked_list_allocator = { version = "0.10", default-features = false, features = ["use_spin"] }
 
-# Argon2id — passphrase → KEK. RustCrypto pure-Rust impl. `alloc`
-# feature pulls in the heap-using parts of the crate; we provide the
-# allocator above. No default features to keep the build lean (drops
-# std, drops password-hash string format support which we don't need —
-# we drive Argon2id at the raw `Argon2::hash_password_into` API).
-argon2 = { version = "0.5", default-features = false, features = ["alloc"] }
+# corvus-crypto -- the shared crypto core (A-5c-b): the CRVS wrap layout +
+# Argon2id KDF + AEGIS-256 AEAD + the hybrid keypair + the DEK envelope + the
+# BIP-39 codec. Extracted from main.rs so the host-target corvus-mint and the
+# on-device corvus produce/consume byte-identical wraps -- no second
+# implementation to drift. The crypto crates (argon2 / aegis / ml-kem / kem /
+# x25519-dalek / sha2) are its dependencies now, not corvus's; corvus drives
+# it through the public API + a `ThylaRng` it supplies.
+corvus-crypto = { path = "../lib/corvus-crypto" }
 
-# AEGIS-256 AEAD — wraps the hybrid keypair per CORVUS-DESIGN §4.3, and
-# (P5-corvus-bringup-d) the DEK envelope's DEM layer.
-# The `aegis` crate provides AEGIS-256 (32-byte key, 32-byte nonce,
-# 32-byte tag — matches the state file layout exactly).
-#
-# `pure-rust` feature is REQUIRED: the default build.rs compiles a C
-# reference implementation (libaegis), which fails on
-# aarch64-unknown-none because it needs <errno.h> / libc headers we
-# don't have. The `pure-rust` feature short-circuits build.rs and
-# enables `softaes` — a pure-Rust AES backend that works on any
-# target. On real ARMv8 hardware this gives up the FEAT_AES hardware
-# acceleration; v1.x can revisit if Argon2id rate-limiting becomes
-# bypassable via the AEAD-bound work factor (unlikely — AEGIS itself
-# is fast either way; the rate limit is at the corvus layer).
-aegis = { version = "0.9", default-features = false, features = ["pure-rust"] }
-
-# ML-KEM-768 (FIPS 203) — the post-quantum half of the hybrid keypair
-# (P5-corvus-bringup-d). RustCrypto pure-Rust impl; same ecosystem as
-# `argon2`. Takes an explicit RNG (no `getrandom` dep — important: the
-# `getrandom` crate has no aarch64-unknown-none backend). No default
-# features → drops `std`. The `zeroize` feature gives `DecapsulationKey`
-# a `ZeroizeOnDrop` impl — the typed secret keys wipe on drop.
-ml-kem = { version = "0.2", default-features = false, features = ["zeroize"] }
-
-# `kem` — the Encapsulate / Decapsulate traits ml-kem's keys implement.
-# ml-kem does NOT re-export them, so calling `.encapsulate()` /
-# `.decapsulate()` requires the traits in scope ⇒ direct dep. Pinned
-# `=` because 0.3.0-pre.0 is a pre-release (cargo needs the exact
-# pre-release pin to select it).
-kem = { version = "=0.3.0-pre.0", default-features = false }
-
-# X25519 — the classical half of the hybrid keypair. `static_secrets`
-# feature provides `StaticSecret` (reusable secret; corvus reconstructs
-# it per-call from the session-slab bytes). `zeroize` makes
-# StaticSecret / EphemeralSecret / SharedSecret wipe on drop — secret
-# hygiene defence-in-depth on top of corvus's explicit wipes. pure-Rust
-# (curve25519-dalek u64 serial backend on aarch64); no_std with
-# default-features off.
-x25519-dalek = { version = "2", default-features = false, features = ["static_secrets", "zeroize"] }
-
-# SHA-256 — the KEK combiner for the hybrid-PKE DEK envelope: the
-# 32-byte DEK-wrapping key is SHA-256 over the two KEM shared secrets
-# plus the ciphertext transcript. RustCrypto; no_std with std off.
-sha2 = { version = "0.10", default-features = false }
-
-# rand_core 0.6 — the RNG trait both `ml-kem` and `x25519-dalek` 2.x
-# consume. corvus implements the trait over the kernel CSPRNG
-# (`t_getrandom`). Declared explicitly so the adapter impl has the
-# trait in scope; default-features off so no `getrandom` is pulled.
+# rand_core 0.6 -- the RNG trait corvus-crypto's keypair/wrap functions take.
+# corvus implements it over the kernel CSPRNG (`t_getrandom`) as `ThylaRng`
+# and passes it in; default-features off so no `getrandom` backend is pulled.
 rand_core = { version = "0.6", default-features = false }

@@ -1,0 +1,47 @@
+[package]
+name = "corvus-crypto"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+# Shared, platform-agnostic crypto core for corvus (the native no_std daemon,
+# aarch64) AND corvus-mint (the host-target system-identity minter, A-5c-b). One
+# source of the CRVS wrap layout / Argon2id / AEGIS-256 / hybrid keypair / BIP-39
+# codec, parameterized over an RNG -- so host-minted and device-read wraps are
+# byte-identical (no second implementation to drift). `no_std` so corvus links it;
+# pure-Rust deps so the host builds it. The RNG + the allocator are the linking
+# binary's concern (corvus: t_getrandom + the static LockedHeap; corvus-mint: std).
+
+[lib]
+name = "corvus_crypto"
+path = "src/lib.rs"
+
+[dependencies]
+# Argon2id -- passphrase/recovery-entropy -> KEK. RustCrypto pure-Rust. `alloc`
+# pulls in the heap-using parts; the linking binary provides the allocator.
+argon2 = { version = "0.5", default-features = false, features = ["alloc"] }
+
+# AEGIS-256 AEAD -- the keypair wrap + the DEK envelope DEM. `pure-rust` is
+# REQUIRED (the default build.rs compiles libaegis C, which fails on
+# aarch64-unknown-none); it enables the softaes pure-Rust backend.
+aegis = { version = "0.9", default-features = false, features = ["pure-rust"] }
+
+# ML-KEM-768 (FIPS 203) -- the post-quantum half of the hybrid keypair. `zeroize`
+# wipes the typed secret keys on drop.
+ml-kem = { version = "0.2", default-features = false, features = ["zeroize"] }
+
+# `kem` -- the Encapsulate / Decapsulate traits ml-kem's keys implement (not
+# re-exported by ml-kem). Pinned `=` because 0.3.0-pre.0 is a pre-release.
+kem = { version = "=0.3.0-pre.0", default-features = false }
+
+# X25519 -- the classical half. `static_secrets` for the reconstructable secret;
+# `zeroize` wipes on drop.
+x25519-dalek = { version = "2", default-features = false, features = ["static_secrets", "zeroize"] }
+
+# SHA-256 -- the hybrid-PKE KEK combiner + the BIP-39 checksum.
+sha2 = { version = "0.10", default-features = false }
+
+# rand_core 0.6 -- the RNG trait the keypair/wrap functions take. The linking
+# binary supplies the impl (corvus: a t_getrandom adapter; corvus-mint: OsRng).
+rand_core = { version = "0.6", default-features = false }

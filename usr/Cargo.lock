@@ -82,11 +82,19 @@ checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 name = "corvus"
 version = "0.1.0"
 dependencies = [
+ "corvus-crypto",
+ "libthyla-rs",
+ "linked_list_allocator",
+ "rand_core",
+]
+
+[[package]]
+name = "corvus-crypto"
+version = "0.1.0"
+dependencies = [
  "aegis",
  "argon2",
  "kem",
- "libthyla-rs",
- "linked_list_allocator",
  "ml-kem",
  "rand_core",
  "sha2",
