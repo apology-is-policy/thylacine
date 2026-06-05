@@ -1,10 +1,15 @@
 # SMP Layer Deep Review — Findings
 
-**Branch**: `deep-smp-review`. **Status**: IN PROGRESS (2026-06-05). This is the
+**Branch**: `deep-smp-review` @ `4f70e9c`. **Status**: REVIEW COMPLETE; fix DECIDED
+(user-voted 2026-06-05: **α with a logic-verified HMP foundation**). This is the
 evidence record for the user-directed deep SMP review (`docs/SMP-REVIEW-HANDOFF.md`).
-The verdict + forward path here are a **design proposal pending user signoff** — a
-from-scratch or targeted scheduler change is an architectural decision (CLAUDE.md
-"Autonomy + escalation").
+The empirical experiments (§4) and the two model-first artifacts (`specs/sched_oncpu.tla`
+diagnostic + `specs/sched_alpha.tla` target design, both TLC-green) are committed. The
+implementation arc is scripture-first (#862 = the binding ARCH §8 rewrite) → impl
+(#863 soundness core, #864 HMP foundation) → CI multi-boot (#865) → adversarial audit
+(#866). The HMP-foundation analysis (HVF closes the speed gap, not the heterogeneity
+gap; placement *logic* verifiable now via a synthetic asymmetric DTB; EAS empirical
+tuning deferred to real heterogeneous hardware) is the basis for §7–§9 below.
 
 ---
 
