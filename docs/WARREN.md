@@ -1,5 +1,7 @@
 # Warren — a shared-memory ring transport for 9P (post-v1.0 idea)
 
+EDIT: I want to call this Loom instead of Warren.
+
 **Status**: IDEA CAPTURE, not a committed design. 2026-06-05. Origin: a design
 conversation about io_uring and how it maps onto Thylacine's 9P philosophy.
 **Sequence**: post-v1.0 (v1.x+). Hard prerequisite: the *synchronous* 9P path
