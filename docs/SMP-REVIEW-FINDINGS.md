@@ -329,6 +329,40 @@ now release/acquire-paired; **F4 [P3]** -- restored `ready_on`'s self-OOB extinc
 `docs/reference/15-scheduler.md`). Closed list: `memory/audit_smp_redesign_closed_list.md`. The
 SMP redesign (#863 + #864 + #866) is now SOUND + audited; #865 (CI gate) is the last SMP item.
 
+**STATUS (2026-06-05): #865 = the multi-boot CI gate + timing-test soft-warn is LANDED. The
+SMP redesign arc is COMPLETE.** This is recommendation (d) -- "the process fix that masked
+everything" -- realized as a reusable gate, plus the §7d soft-warn:
+- **`tools/ci-smp-gate.sh`** (+ `make smp-gate`) is the honest soundness gate: it builds the
+  needed kernels once and multi-boots the full matrix -- `default-smp4` / `default-smp8` /
+  `ubsan-smp4` (the #860 amplifier) / `ubsan-smp8` -- at N>=10 (env `SMP_GATE_N` /
+  `SMP_GATE_CONFIGS`), composing `tools/smp-multiboot.sh`'s CORRUPTION-vs-benign-TIMING-vs-OTHER
+  classifier. It FAILS iff any boot shows a ctx/stack-corruption signature; benign host-timing
+  fragility is reported, not failed. A single `tools/test.sh` is explicitly NOT a soundness
+  gate (it is the primitive the gate multi-boots) -- the recursion is avoided by making the
+  gate a separate CI entry point.
+- **The `test_irq_latency_bench` host-timing budget now SOFT-WARNS** (the new `TEST_SOFT_WARN`
+  harness primitive: log `[SOFT-WARN]` + bump a counter surfaced in the boot summary, do NOT
+  fail the suite) instead of hard-extincting the boot. A hard `TEST_ASSERT` there converted
+  host throttling into a kernel "crash" AND -- because `boot_main` extincts on any suite
+  failure -- masked any real fault that surfaced later in the SAME boot (the #860 class lived
+  in the post-test production bringup). Proven: with the budget temporarily lowered below the
+  observed ~9 ms QEMU p99, the suite reports `714/714 PASS (1 soft-warn)`, the `[SOFT-WARN]`
+  line fires, and the boot SURVIVES (banner present, 0 EXTINCTION) -- pre-#865 it would have
+  extincted. A true pathological regression is still caught: an infinite hang trips
+  `BOOT_TIMEOUT`, broken counter math trips the hard `valid >= N-2` assert. The cons/torpor
+  `sched_runnable_count()==0` asserts are a DIFFERENT class (correctness quiescence, not a
+  timing budget; tasks #857 done / #858 / #859) and are deliberately NOT softened -- softening a
+  correctness check would mask the helper-thread leak it exists to catch.
+- A gate-honesty fix rode along: `tools/smp-multiboot.sh` now clears its own label's prior
+  `build/multiboot-fails/*.log` at the start of a run. Without it, stale captures from an earlier
+  (or a since-fixed-buggy) run persist and masquerade as current findings -- exactly the failure
+  the gate exists to prevent (the old classifier's bare-`canary` false-positive against the
+  `canaries` hardening banner had once tagged every clean boot as CORRUPT, and those logs lingered).
+- **Verified: the full-matrix `tools/ci-smp-gate.sh` at N=10 -- default-smp4 10/10 + default-smp8
+  10/10 + ubsan-smp4 10/10 (the #860 amplifier) + ubsan-smp8 10/10 = 40/40 PASS, 0 corruption** --
+  plus default smp4 714/714 + the soft-warn proof above (`714/714 PASS (1 soft-warn)`, boot
+  survived the budget miss).
+
 (a) **Re-enable spec-first for the SMP mechanism.** Adopt `specs/sched_oncpu.tla` as a
     gating model alongside `scheduler.tla`; extend it as the mechanism evolves. The
     natural re-enabling point the user flagged ("an invariant-bearing feature that

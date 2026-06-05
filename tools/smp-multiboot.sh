@@ -36,6 +36,11 @@ sanflag=""
 LOG="$REPO_ROOT/build/test-boot.log"
 FAILDIR="$REPO_ROOT/build/multiboot-fails"
 mkdir -p "$FAILDIR"
+# Clear THIS label's prior captures so the dir only ever reflects the latest
+# run of each label -- stale fail logs from a previous (or since-fixed-buggy)
+# run otherwise masquerade as current findings. Per-label (not whole-dir) so a
+# gate running multiple labels back-to-back does not wipe a sibling's captures.
+rm -f "$FAILDIR/$LABEL-"*.log 2>/dev/null || true
 
 # Signatures of a real ctx/stack corruption (the SMP soundness bug class).
 # Use the EXACT extinction strings -- bare "canary" would match the benign

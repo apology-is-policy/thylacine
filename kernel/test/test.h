@@ -57,6 +57,16 @@ unsigned test_failed(void);
 // this for you).
 void test_fail(const char *msg);
 
+// Called from inside a test_case's fn to record a non-fatal warning.
+// Logs a [SOFT-WARN] line and bumps the soft-warn counter; does NOT
+// fail the test. Use via TEST_SOFT_WARN, never directly to soften a
+// correctness check.
+void test_soft_warn(const char *msg);
+
+// Count of soft-warns recorded during the last test_run_all. Surfaced
+// in the boot summary so host throttling is visible without failing CI.
+unsigned test_soft_warns(void);
+
 // Convenience macros. TEST_ASSERT short-circuits the current test on
 // failure (returns from the test_case's fn). TEST_EXPECT_EQ is a
 // thin wrapper that stringifies operands for a more useful message.
@@ -70,5 +80,18 @@ void test_fail(const char *msg);
 
 #define TEST_EXPECT_EQ(a, b, msg) TEST_ASSERT((a) == (b), msg)
 #define TEST_EXPECT_NE(a, b, msg) TEST_ASSERT((a) != (b), msg)
+
+// TEST_SOFT_WARN: a host-fragility budget that must NOT fail the boot. On a
+// false cond it logs a [SOFT-WARN] line and CONTINUES (the test still passes).
+// Use ONLY for host-timing budgets (e.g. a QEMU-emulation latency ceiling)
+// where a miss means "the host was throttled," not "the kernel is broken" --
+// a hard TEST_ASSERT there extincts the boot (boot_main gates on
+// test_all_passed) and thereby MASKS any real fault that would surface later
+// in the SAME boot (the #860 class lived in the post-test production bringup;
+// SMP-REVIEW-FINDINGS section 7d). NEVER use it to soften a correctness check.
+#define TEST_SOFT_WARN(cond, msg)         \
+    do {                                  \
+        if (!(cond)) test_soft_warn(msg); \
+    } while (0)
 
 #endif // THYLACINE_KERNEL_TEST_H

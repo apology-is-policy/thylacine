@@ -1150,6 +1150,28 @@ hold under *arbitrary* placement — so any `select_target_cpu` / `balance()` po
   only ever holds `on_cpu==false` threads" invariant fail-stop instead of
   silently-corrupting if a future change ever shortens the lock-hold (F3).
 
+#### 8.4.6 The multi-boot soundness gate (the verification process)
+
+The deep review's load-bearing process finding: **a single boot is not a soundness
+gate.** The #788 / #806 / #860 context-corruption races are layout-/timing-sensitive
+and pass a single boot most of the time, so a one-shot `tools/test.sh` *masked* #860
+for weeks — it is the verification gap, not just a bug. The redesign therefore ships
+its own gate as scripture, per "complexity is permitted only where it is verified":
+
+- **`tools/ci-smp-gate.sh`** (`make smp-gate`) multi-boots the matrix — `default-smp4`,
+  `default-smp8`, `ubsan-smp4` (the #860 amplifier), `ubsan-smp8` — at **N≥10** each,
+  composing `tools/smp-multiboot.sh`'s classifier (a ctx/stack-corruption signature
+  FAILS; benign host-timing fragility is reported, not failed). `tools/test.sh` is the
+  primitive the gate multi-boots, never itself the gate.
+- **Host-timing budgets soft-warn, never extinct.** The `test_irq_latency_bench` QEMU
+  p99 budget uses the `TEST_SOFT_WARN` harness primitive (log + count, do not fail the
+  suite) rather than `TEST_ASSERT`. A hard assert there turned host throttling into a
+  kernel "crash" and — because `boot_main` extincts on any suite failure — masked any
+  real fault later in the same boot (#860 lived in the post-test production bringup). A
+  true pathological regression is still caught (`BOOT_TIMEOUT` for a hang; the hard
+  sample-validity assert for counter-math). The soft-warn is for host-timing budgets
+  ONLY; correctness asserts (the cons/torpor quiescence checks) stay hard.
+
 ### 8.5 Wakeup atomicity
 
 The classic OS bug: thread A is about to sleep on condition X; thread B sets X just before A sleeps; A sleeps with X set; A misses the wakeup and never runs.

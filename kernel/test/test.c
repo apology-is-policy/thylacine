@@ -1753,7 +1753,7 @@ struct test_case g_tests[] = {
 // ---------------------------------------------------------------------------
 
 static struct test_case *current_test;
-static unsigned passed_count, failed_count, total_count;
+static unsigned passed_count, failed_count, total_count, soft_warn_count;
 
 void test_fail(const char *msg) {
     if (current_test) {
@@ -1767,10 +1767,18 @@ void test_fail(const char *msg) {
     sched_dump_runnable(msg);
 }
 
+void test_soft_warn(const char *msg) {
+    soft_warn_count++;
+    uart_puts("[SOFT-WARN] ");
+    uart_puts(msg ? msg : "(no message)");
+    uart_puts("\n");
+}
+
 void test_run_all(void) {
     passed_count = 0;
     failed_count = 0;
     total_count  = 0;
+    soft_warn_count = 0;
 
     for (int i = 0; g_tests[i].fn != NULL; i++) {
         current_test = &g_tests[i];
@@ -1805,3 +1813,4 @@ bool test_all_passed(void) {
 unsigned test_total(void)  { return total_count; }
 unsigned test_passed(void) { return passed_count; }
 unsigned test_failed(void) { return failed_count; }
+unsigned test_soft_warns(void) { return soft_warn_count; }

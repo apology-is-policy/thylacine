@@ -612,7 +612,16 @@ void boot_main(void) {
     uart_puts("/");
     uart_putdec(test_total());
     if (test_all_passed()) {
-        uart_puts(" PASS\n");
+        uart_puts(" PASS");
+        if (test_soft_warns() > 0) {
+            // Host-fragility budgets (e.g. the irq-bench QEMU latency
+            // ceiling) tripped without failing the suite -- surfaced so a
+            // throttled CI host is visible, not silently swallowed.
+            uart_puts(" (");
+            uart_putdec(test_soft_warns());
+            uart_puts(" soft-warn)");
+        }
+        uart_puts("\n");
     } else {
         uart_puts(" FAIL\n");
         extinction("kernel test suite failed");

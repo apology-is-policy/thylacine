@@ -4,7 +4,7 @@
 # Per ARCHITECTURE.md §3: real build system is CMake (kernel) + Cargo (Rust).
 # This Makefile is just for muscle memory (`make kernel`, `make test`, etc.).
 
-.PHONY: all kernel sysroot userspace disk pool clean test test-cross-reboot run gdb specs help
+.PHONY: all kernel sysroot userspace disk pool clean test test-cross-reboot smp-gate run gdb specs help
 
 all:
 	@tools/build.sh all
@@ -33,6 +33,9 @@ test:
 test-cross-reboot:
 	@tools/test-cross-reboot.sh
 
+smp-gate:
+	@tools/ci-smp-gate.sh
+
 run:
 	@tools/run-vm.sh
 
@@ -53,6 +56,8 @@ help:
 	@echo "  pool       — re-bake build/fixtures/pool.img (clean Stratum boot pool)"
 	@echo "  test       — run-vm + boot-banner verify"
 	@echo "  test-cross-reboot — A-1b corvus persistence: boot twice on one pool"
+	@echo "  smp-gate   — SMP soundness CI gate: multi-boot the smp4/smp8 x default/UBSan"
+	@echo "               matrix N>=10 (single boots lie). SMP_GATE_N / SMP_GATE_CONFIGS env."
 	@echo "  run        — launch a dev VM (interactive UART)"
 	@echo "  gdb        — launch dev VM with GDB stub on :1234, halted at entry"
 	@echo "  specs      — run all TLA+ specs under specs/"

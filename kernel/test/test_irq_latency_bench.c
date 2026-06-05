@@ -342,13 +342,21 @@ void test_irq_latency_bench(void) {
     burrow_unref(burrow);
     kobj_dma_destroy(dma);
 
-    // Pass criterion: p99 < CI sanity budget. The bare-metal target
-    // (5 µs per VISION §4.5) is logged for reference; the
-    // authoritative bare-metal check moves to a separate test once
-    // the project boots on real hardware (Phase 5+). Until then, this
-    // assertion catches pathological regressions (infinite hangs,
-    // scheduler deadlocks, counter math bugs) without coupling CI
-    // pass/fail to QEMU TCG emulation overhead.
-    TEST_ASSERT(p99_ns < IRQ_BENCH_CI_BUDGET_NS,
-                "IRQ-to-userspace p99 exceeds CI sanity budget (regression?)");
+    // Budget check: p99 < CI sanity budget. This is a host-fragility
+    // budget, so it SOFT-WARNS rather than failing the boot (#865 /
+    // SMP-REVIEW-FINDINGS section 7d): a hard TEST_ASSERT here converts
+    // host throttling (an oversubscribed CI box where an emulated guest
+    // cycle stretches) into a kernel "crash" -- and because boot_main
+    // extincts the whole boot on any suite failure, that mask hides any
+    // real fault that surfaces LATER in the same boot (the #860 SMP
+    // corruption lived in the post-test production bringup). A true
+    // pathological regression is still caught elsewhere: an infinite hang
+    // never reaches here (it trips BOOT_TIMEOUT), and broken counter math
+    // trips the hard `valid >= N-2` assert above (and shows in the logged
+    // numbers). The authoritative p99<5us check is the bare-metal pass
+    // (Phase 5+), never QEMU TCG. The multi-boot gate is the real
+    // soundness signal (tools/ci-smp-gate.sh).
+    TEST_SOFT_WARN(p99_ns < IRQ_BENCH_CI_BUDGET_NS,
+                   "IRQ-to-userspace p99 exceeds CI sanity budget "
+                   "(host throttled; not a kernel fault)");
 }

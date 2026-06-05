@@ -570,6 +570,11 @@ tools/test.sh
 tools/build.sh kernel --sanitize=undefined
 tools/test.sh --sanitize=undefined
 
+# SMP soundness gate (single boots lie -- multi-boot or it didn't happen).
+# Builds default + UBSan kernels, multi-boots smp4/smp8 x default/UBSan at N>=10.
+make smp-gate                          # full matrix, N=10
+SMP_GATE_CONFIGS="default-smp4 ubsan-smp4" tools/ci-smp-gate.sh   # amplifier subset
+
 # Hardening matrix
 tools/test-fault.sh                    # 3/3 expected
 
@@ -620,3 +625,11 @@ A cross-CPU `ready_on` sets the target's `need_resched` (`#866` F1) so a *busy* 
 
 - **Verifiable now → built + tested**: the placement *logic* is unit-tested against a synthetic asymmetric DTB — `scheduler.capacity_normalize_synthetic_dtb` (raw `capacity-dmips-mhz` → normalized caps + hetero verdict) and `scheduler.place_by_capacity_synthetic_dtb` ("heavy task → high-capacity CPU; light task stays; heavy task already on the biggest core stays") — plus `scheduler.select_target_cpu_homogeneous_is_prev` (the v1.0 behavior-preservation guarantee on the real uniform topology) and `scheduler.ready_on_cross_cpu_enqueue` (the cross-CPU enqueue mechanism). Safety composition is `specs/sched_alpha.tla` (arbitrary placement).
 - **NOT verifiable until real heterogeneous HW → deferred**: the empirical EAS tuning (PELT decay constants, energy model, schedutil/DVFS, misfit thresholds). QEMU virt declares a homogeneous DTB; HVF runs guest vCPUs on real P/E cores but the host floats them (no stable declared asymmetry). HVF closes the speed gap, not the heterogeneity gap. The EAS layer is additive + pre-modeled, landing when it becomes verifiable.
+
+## Multi-boot CI gate + timing soft-warn (#865)
+
+**Single boots lie.** The #788/#806/#860 SMP context-corruption races are layout-/timing-sensitive and pass a single boot most of the time — a one-shot `tools/test.sh` is the verification gap that masked #860 for weeks. The soundness gate is therefore **multi-boot**:
+
+- **`tools/ci-smp-gate.sh`** (`make smp-gate`) builds the needed kernels once and runs the matrix — `default-smp4` / `default-smp8` / `ubsan-smp4` (the #860 amplifier) / `ubsan-smp8` — at **N≥10** boots each (env `SMP_GATE_N`, `SMP_GATE_CONFIGS`). It composes **`tools/smp-multiboot.sh`**, which re-runs `tools/test.sh` against one built kernel and classifies each failure: **CORRUPTION** (a ctx/stack-corruption signature — `invalid prev state`, `stack canary mismatch`, `kernel stack overflow`, `already on_cpu`, `#860`, …) FAILS the gate; benign host-**TIMING** fragility is reported, not failed; **OTHER** is surfaced for investigation. `test.sh` itself is the *primitive* the gate multi-boots — it is deliberately NOT a soundness gate, and the gate is a separate CI entry point to avoid recursion. `smp-multiboot.sh` clears its own label's prior `build/multiboot-fails/*.log` at the start of each run, so the captures dir only ever reflects the latest run — stale logs (including any written by a since-fixed classifier) cannot masquerade as current findings.
+
+- **`TEST_SOFT_WARN(cond, msg)`** (`kernel/test/test.h`) is a host-fragility budget that logs `[SOFT-WARN]` + bumps a counter surfaced in the boot summary (`tests: N/M PASS (K soft-warn)`) **without failing the suite**. `test_irq_latency_bench`'s QEMU-TCG p99 budget (`IRQ_BENCH_CI_BUDGET_NS`, 50 ms) now soft-warns instead of hard-extincting: a `TEST_ASSERT` there turned host throttling into a kernel "crash" AND — because `boot_main` extincts on any suite failure — masked any real fault later in the SAME boot (the #860 class lived in the post-test production bringup). A true pathological regression is still caught (an infinite hang trips `BOOT_TIMEOUT`; broken counter math trips the hard `valid >= N-2` assert). **Use `TEST_SOFT_WARN` only for host-timing budgets** — never to soften a correctness check. The cons/torpor `sched_runnable_count()==0` quiescence asserts are a *correctness* class (tasks #857/#858/#859), deliberately left hard so a leaked-runnable helper still fails.
