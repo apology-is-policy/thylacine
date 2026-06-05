@@ -1,9 +1,13 @@
 # PORTABILITY.md — the bare-metal portability arc ("Lazarus")
 
-**Status: binding design. Scripture-first; no code lands until this is signed off
-and the implementation is sequenced.** Authored 2026-05-30 after the HW-accel
+**Status: binding design -- SIGNED OFF + SEQUENCED 2026-06-05.** The section-9
+forks are resolved (name "Lazarus" kept; PAC/BTI/LSE -> runtime-conditional
+approved, incl. the boot-banner ABI; M1 = W1+W2+W3 as a pre-Utopia arc, W4
+post-v1.0). M1 is the **first of two pre-Utopia arcs** (Lazarus M1, then Loom)
+that land before Phase 7 (Utopia) resumes at U-6d-b; per-workstream impl detail
+is authored at implementation time. Authored 2026-05-30 after the HW-accel
 assessment mini-detour (see `tools/run-vm.sh` commit `52d5663` for the empirical
-HVF findings + `memory/project_next_session.md`).
+HVF findings).
 
 **Working name: "Lazarus"** — the Lazarus-species motif (an extinct taxon
 rediscovered alive; CLAUDE.md's naming sources). The thylacine leaves the
@@ -190,26 +194,39 @@ under QEMU (TCG + HVF) without any of W4.
 - **M2 = W4.** Actual RPi 400 hardware boot. The culminating, post-v1.0-sized
   platform port.
 
-**Implementation sequencing (user-decided 2026-05-30):** Lazarus implements
-**after** the identity / access / privilege convergence detour (A-2..A-5)
-completes. **This scripture lands now (the binding plan); the identity detour
-resumes immediately at A-2.** No Lazarus code lands until the identity arc is
-done and Lazarus is re-sequenced in.
+**Implementation sequencing (user-decided 2026-05-30; re-sequenced 2026-06-05):**
+the identity / access / privilege convergence detour (A-2..A-5c) is **complete**.
+Lazarus **M1** is now sequenced as the **first of two pre-Utopia arcs** -- Lazarus
+M1, then Loom (the io_uring-inverted 9P ring transport) -- both landing before
+Phase 7 (Utopia) resumes at U-6d-b. Rationale (user): Utopia brings userspace
+apps, and Loom's fast IO should exist before the apps that consume it; Lazarus M1
+is the natural first impl (scripture mostly written, the near-term dev-loop win).
+**M2 (W4) stays in its post-v1.0 slot** (ROADMAP section 12.1).
 
 ---
 
-## 9. Open questions / forks (for signoff or deferral)
+## 9. Forks — RESOLVED (user signoff 2026-06-05)
 
-- **Arc name**: "Lazarus" proposed (§ header). Held for signoff.
-- **Board reconciliation**: ARCH §4.4 names Pi **5** as first bare metal; this
-  arc targets the **v8.0 floor** (board-agnostic) and names **Pi 400** first
-  (the lower ISA baseline → widest compatibility; both Pis are GIC-400/GICv2).
-  ARCH §4.4 to be reconciled. *Decided: v8.0 floor + Pi 400 first.*
-- **HVF-on-M2 commitment level**: a **target with one known residual risk**
-  (blocker 1, the GICv2-MMIO `ISV=0` timing heisenbug), not a hard guarantee —
-  proven only when W2 lands. Framed as "expected to work; validated at W2."
+- **Arc name**: **"Lazarus" kept** (signed off). The Lazarus-species motif — an
+  extinct taxon found alive again; the thylacine leaving the QEMU enclosure for
+  real silicon.
+- **Hardening posture (W1)**: **PAC / BTI / LSE → runtime-conditional APPROVED**,
+  including the TOOLING §10 boot-banner ABI rewording and the ARCH §28 posture
+  edit (both land *with* W1, not in the scripture commit). W^X (I-12), KASLR
+  (I-16), stack canaries, vectors, IRQ-safety, and extinction stay
+  **unconditional** on every target. The A72/Pi400 PAC/BTI gap is a property of
+  that silicon, documented not hidden.
+- **M1 scope + roadmap slot**: **M1 = W1 + W2 + W3 lands now as a pre-Utopia
+  arc** (ROADMAP §8.0a); **W4 stays post-v1.0** (ROADMAP §12.1). M1 is fully
+  testable under QEMU (TCG + HVF).
+- **Board reconciliation**: v8.0 floor + **Pi 400 first** (the board-agnostic
+  v8.0 baseline → widest compatibility; both Pis are GIC-400/GICv2). ARCH §4.4
+  reconciled at W1 / W4.
+- **HVF-on-M2 commitment level**: a target with **one known residual risk**
+  (blocker 1, the GICv2-MMIO `ISV=0` timing heisenbug); framed as "expected to
+  work, validated empirically at W2," not a hard guarantee.
 - **W4 storage** (SD-EMMC driver vs USB-MSC vs netboot): deferred to W4 design.
-- **CI baseline**: stays `-cpu max` + GICv3 (deterministic, full-feature). HVF +
+- **CI baseline**: stays `-cpu max` + GICv3 (deterministic, full-feature); HVF +
   bare metal exercise the GICv2 + v8.0 paths as additional matrices.
 
 ---
@@ -223,9 +240,9 @@ done and Lazarus is re-sequenced in.
   runtime-conditional; W^X/KASLR/canaries/vectors/IRQ/extinction stay
   unconditional). Pointer notes added here; the full §28 invariant-table edit
   lands with W1.
-- **`ROADMAP.md`**: Lazarus is registered as a post-identity-detour arc; the
-  bare-metal §12.1 sprint is its W4. Full phase-registry placement lands when
-  implementation is sequenced.
+- **`ROADMAP.md`**: **registered 2026-06-05** — Lazarus M1 is a scheduled
+  pre-Utopia arc (§8.0a, the first of two, ahead of Loom); the bare-metal §12.1
+  sprint is reconciled to its W4 (Pi 400 first).
 - **`TOOLING.md` §10**: the boot-banner hardening line becomes
   runtime-feature-reflective (lands with W1). The `run-vm.sh`
   `THYLACINE_ACCEL`/`THYLACINE_CPU`/`THYLACINE_GIC` toggles already landed

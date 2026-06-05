@@ -665,7 +665,7 @@ pouch's lower half (the syscall seam, the socket/thread/signal translation) + th
 
 **Goal**: a complete textual environment. The Utopia milestone (`VISION.md §13`) — a developer using Thylacine via UART or SSH finds a working textual environment that "feels real, not broken." Halcyon (graphical layer; Phase 10 execution / ROADMAP §11) is **not** required at this phase; Halcyon is deliberately the final phase of v1.0. Phase 7's exit is Utopia. Phase 8 (execution; ROADMAP §9) adds Linux compat + network on top. Phase 9 (execution; ROADMAP §10) hardens + audits + produces v1.0-rc. Phase 10 (execution; ROADMAP §11) lands Halcyon. The "practical working OS" the project commits to is achieved at Phase 9 exit; Halcyon is the additive graphical layer.
 
-### 8.0 The convergence detour (foundation completion; IN PROGRESS 2026-05-28)
+### 8.0 The convergence detour (foundation completion; CLOSED 2026-06-05)
 
 The Utopia shell arc is **paused at U-6d-a**. Building the shell's next features
 (redirects, coreutils, the identity-aware prompt) surfaced that they sit on an
@@ -730,7 +730,40 @@ A-5b driver. Design: `docs/STALK-DESIGN.md` (signed off); invariant **I-28**;
 sub-chunks stalk-1/2/3, each audited. The A-5b body resumes on top. Resume
 pointer: `docs/detour-status.md` A-5b-0.
 
-Phase 7 resumes at **U-6d-b** (redirects) once the detour closes, on a sound
+The convergence detour **closed 2026-06-05** (A-5c complete; the identity /
+access / privilege arc is done — `docs/detour-status.md`). Before Phase 7
+resumes, **two scheduled arcs** land (user-decided 2026-06-05; see §8.0a).
+
+### 8.0a Two pre-Utopia arcs: Lazarus M1 + Loom (scheduled 2026-06-05)
+
+With the foundation sound, two arcs are scheduled **before** Phase 7 resumes —
+both designed scripture-first, no code until each is signed off; **impl order
+Lazarus M1 then Loom**. User rationale: Utopia brings userspace apps, and Loom's
+fast IO should exist before the apps that consume it.
+
+- **Lazarus M1 — bare-metal portability foundation + QEMU HVF acceleration.**
+  Binding design `docs/PORTABILITY.md` (signed off + sequenced 2026-06-05). The
+  *same* kernel binary runs QEMU-TCG (CI baseline, unchanged), QEMU-HVF on Apple
+  Silicon (the fast dev loop — TCG boots take 16-26 s, HVF is near-native), and
+  is ARMv8.0-A-ISA-ready for bare metal. **M1 = W1** (v8.0 ISA floor; PAC/BTI/LSE
+  → runtime-conditional, the rest of the hardening unconditional on every target)
+  **+ W2** (the real GICv2 driver — MMIO CPU interface, no `ICC_*` sysregs; the
+  HVF-on-Apple enabler *and* what the Pi's GIC-400 needs; **audit-bearing**,
+  scheduler/IPI surface, I-18) **+ W3** (a chacha20 software-RNG seeded by a
+  kernel virtio-rng driver + DTB `rng-seed` + `cntpct`, RNDR stirs when present —
+  the "software-backed RNDR"; **audit-bearing**, CSPRNG quality). Fully
+  QEMU-testable (TCG + HVF). **W4** (the actual RPi-400 board bring-up: EL2→EL1
+  drop, BCM mailbox, a new SD/EMMC block backend) stays post-v1.0 (§12.1).
+- **Loom — the io_uring-inverted Burrow-backed 9P ring transport.** Scheduled as
+  the second pre-Utopia arc, **pulled forward from its documented post-v1.0 slot**
+  (§12.2) because Utopia's userspace apps consume it. Expose the #841 pipelined
+  9P client to userspace via a shared-memory SQ/CQ ring (the 9P op-set *is* the
+  SQE vocabulary — io_uring's "what opcodes?" problem dissolves); spec-first +
+  audit-bearing from day one. Idea capture: `docs/WARREN.md`. The full design
+  conversation → `docs/LOOM.md` (the Warren→Loom rename) + a NOVEL.md promotion +
+  `specs/loom.tla` land in a companion scripture commit.
+
+Phase 7 then resumes at **U-6d-b** (redirects), on a sound + accelerated
 foundation.
 
 ### 8.1 Deliverables
@@ -1187,7 +1220,7 @@ These are explicitly *not in v1.0*; they're tracked for post-v1.0 work.
 
 ### 12.1 v1.1 candidates (3-6 months post-v1.0)
 
-- **Bare-metal Raspberry Pi 5**: EL2→EL1 drop, mailbox framebuffer driver (`arch/arm64/rpi5/`), RP1 Ethernet for network boot. GIC-400 and PL011 transfer from QEMU unchanged. Estimated: one focused sprint.
+- **Bare-metal Raspberry Pi (Lazarus W4 / M2)**: the actual board bring-up — EL2→EL1 drop, BCM mailbox, a new SD/EMMC block backend (the load-bearing gap: Thylacine has only a virtio-blk path today), USB input, mailbox framebuffer (`arch/arm64/rpi400/`). **Pi 400 first** (the v8.0 ISA floor → widest compatibility; Pi 5 secondary, covered by the v8.0 base). Lazarus **M1** (W1 v8.0 floor + W2 GICv2 + W3 software-RNG) lands **pre-Utopia** (§8.0a) and is the QEMU-validated groundwork; **W4 is this post-v1.0 board port**. GIC-400 (now real via W2's GICv2 driver) and PL011 transfer from QEMU. Binding design `docs/PORTABILITY.md` §7; storage-backend fork open (PORTABILITY §9). Estimated: one focused sprint.
 - **`epoll` syscall surface**: full Linux-compat epoll implementation as a kernel `Dev` wrapping `poll`. ~2-3 KLOC.
 - **`inotify` syscall surface**: filesystem change notifications. Stratum already supports this internally; surface it.
 - **HW video decode**: VirtIO video decoder as a separate driver class. ~3-5 KLOC Rust.
