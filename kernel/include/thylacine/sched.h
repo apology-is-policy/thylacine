@@ -219,6 +219,13 @@ unsigned sched_place_by_capacity(u32 util, unsigned prev_cpu,
 // ready_on enqueue test to prove placement landed on the intended CPU.
 bool sched_in_cpu_tree(unsigned cpu, struct Thread *t);
 
+// Diagnostic (HMP tests, #866 F1): true iff `cpu`'s need-resched (preempt-
+// pending) flag is set. The cross-CPU ready_on enqueue test asserts this is set
+// on the target after a cross-CPU placement -- proving the placed thread will
+// be reconsidered at the target's next preempt_check_irq rather than waiting a
+// full slice (the I-17/I-8 leak the #864 audit found and F1 fixes).
+bool sched_need_resched_pending(unsigned cpu);
+
 // Diagnostic accessors.
 unsigned sched_runnable_count(void);
 unsigned sched_runnable_count_band(unsigned band);

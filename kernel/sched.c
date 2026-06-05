@@ -122,6 +122,15 @@ static struct CpuSched g_cpu_sched[DTB_MAX_CPUS];
 // sched_capacity_init on the boot CPU; read by select_target_cpu. FALSE on
 // QEMU virt / RPi (uniform), so the capacity-aware placement is inert and
 // ready() preserves the pre-#864 "enqueue on the waking CPU" behavior exactly.
+//
+// #866 F3: this flag is the RELEASE/ACQUIRE publish point for the per-CPU
+// `capacity` stamps. sched_capacity_init writes every capacity (plain) then
+// RELEASE-stores this flag; select_target_cpu ACQUIRE-loads it FIRST and only
+// touches `capacity` when it reads true -- so a cross-CPU reader that sees a
+// heterogeneous topology is guaranteed to see the finished capacity stores
+// (never a torn/stale capacity). Dormant on the uniform v1.0 targets (the
+// acquire short-circuits to prev before any capacity read), but correct for
+// the day a real heterogeneous DTB activates it.
 static bool g_sched_hetero;
 
 // Placement misfit threshold (percent of a CPU's capacity). A task whose util
@@ -143,12 +152,30 @@ static bool g_sched_hetero;
 // which is defined further down with the run-tree helpers.
 static bool in_run_tree(struct CpuSched *cs, struct Thread *t);
 
-// P2-Cd: per-CPU preemption signal. Each CPU's timer IRQ writes its
-// own slot via sched_tick(); preempt_check_irq() on the same CPU
-// reads it. No cross-CPU access — the writer/reader is always the
-// same CPU because timer IRQs are CPU-local. `volatile` is sufficient
-// (no SMP atomicity needed for self-CPU access).
-static volatile bool g_need_resched[DTB_MAX_CPUS];
+// P2-Cd: per-CPU preemption signal. Each CPU's timer IRQ sets its own slot
+// (sched_tick); preempt_check_irq on the same CPU reads + clears it. #866 F1
+// adds ONE cross-CPU producer: ready_on's cross-CPU placement sets the TARGET
+// CPU's slot so a busy target reschedules and considers the just-placed thread
+// at its next preempt_check_irq (otherwise the placed misfit thread waits up to
+// a full slice -- the I-17/I-8 leak the audit found). The target is the sole
+// consumer. Accesses are RELAXED atomics: the flag is a hint, and the actual
+// reschedule is driven by an IRQ (timer or the paired IPI), which carries its
+// own barriers; a late/lost observation only defers to the next tick, never a
+// correctness loss. Volatile alone would be a data race now that a peer writes.
+static u8 g_need_resched[DTB_MAX_CPUS];
+
+static inline void need_resched_set(unsigned cpu) {
+    if (cpu < DTB_MAX_CPUS)
+        __atomic_store_n(&g_need_resched[cpu], 1u, __ATOMIC_RELAXED);
+}
+static inline void need_resched_clear(unsigned cpu) {
+    if (cpu < DTB_MAX_CPUS)
+        __atomic_store_n(&g_need_resched[cpu], 0u, __ATOMIC_RELAXED);
+}
+static inline bool need_resched_pending(unsigned cpu) {
+    return cpu < DTB_MAX_CPUS &&
+           __atomic_load_n(&g_need_resched[cpu], __ATOMIC_RELAXED) != 0u;
+}
 
 static inline struct CpuSched *this_cpu_sched(void) {
     unsigned idx = smp_cpu_idx_self();
@@ -261,7 +288,7 @@ u32 sched_cpu_capacity(unsigned cpu) {
 }
 
 bool sched_topology_hetero(void) {
-    return g_sched_hetero;
+    return __atomic_load_n(&g_sched_hetero, __ATOMIC_ACQUIRE);
 }
 
 void sched_capacity_init(void) {
@@ -282,7 +309,9 @@ void sched_capacity_init(void) {
     // beyond the DTB-reported count (defensive default).
     for (unsigned i = 0; i < DTB_MAX_CPUS; i++)
         g_cpu_sched[i].capacity = (i < n) ? caps[i] : SCHED_CAPACITY_SCALE;
-    g_sched_hetero = hetero;
+    // #866 F3: RELEASE so the capacity stamps above are visible to any CPU that
+    // ACQUIRE-loads g_sched_hetero==true (the publish point; see the decl).
+    __atomic_store_n(&g_sched_hetero, hetero, __ATOMIC_RELEASE);
 }
 
 // HMP foundation (#864): per-task util accounting. Accrue while RUNNING (the
@@ -313,8 +342,10 @@ unsigned select_target_cpu(struct Thread *t, unsigned prev_cpu) {
     // the placement-side companion to try_steal's cpu_pinned skip.
     if (t->cpu_pinned) return prev_cpu;
     // Uniform topology (v1.0 QEMU virt / RPi): identity placement -- keep the
-    // waking CPU. Byte-identical to the pre-#864 ready() behavior.
-    if (!g_sched_hetero) return prev_cpu;
+    // waking CPU. Byte-identical to the pre-#864 ready() behavior. #866 F3:
+    // ACQUIRE pairs with sched_capacity_init's RELEASE so a true result implies
+    // the per-CPU capacity stamps below are visible (no torn/stale read).
+    if (!__atomic_load_n(&g_sched_hetero, __ATOMIC_ACQUIRE)) return prev_cpu;
 
     unsigned n = smp_cpu_count();
     if (n > DTB_MAX_CPUS) n = DTB_MAX_CPUS;
@@ -338,6 +369,10 @@ bool sched_in_cpu_tree(unsigned cpu, struct Thread *t) {
     bool present = in_run_tree(cs, t);
     spin_unlock_irqrestore(&cs->lock, s);
     return present;
+}
+
+bool sched_need_resched_pending(unsigned cpu) {
+    return need_resched_pending(cpu);
 }
 
 void sched_set_idle_in_wfi(bool in_wfi) {
@@ -544,16 +579,18 @@ static bool sched_notify_idle_peer(void) {
     return false;
 }
 
-// HMP foundation (#864, ARCH §8.4.3): targeted cross-CPU placement notify.
-// Wake a SPECIFIC target CPU so it reschedules and runs work just placed on its
-// run tree by ready_on (a capacity-aware placement, or a future misfit push) --
-// the sibling of sched_notify_idle_peer, which instead wakes ANY idle peer to
-// steal. Unconditional IPI to the target (not gated on idle_in_wfi): if the
-// target is running lower-priority work we still want it to reschedule and
-// consider the placed thread; if it is idle the IPI wakes its WFI. Gated by
-// g_sched_notify_enabled so the UP-like in-kernel tests stay quiescent (a
-// parked secondary is not self-woken; the ready_on cross-CPU enqueue test
-// relies on the placed thread sitting still until removed). Never targets self.
+// HMP foundation (#864, ARCH §8.4.3): targeted cross-CPU placement notify --
+// the PROMPTNESS half. The CORRECTNESS half is ready_on's `need_resched_set`
+// (#866 F1): that is what makes the target actually reschedule + consider the
+// just-placed thread at its next preempt_check_irq. This IPI just makes it
+// PROMPT: it traps a target running in EL1/EL0 into the kernel immediately
+// (Linux's kick_process) rather than waiting up to a slice for the next timer
+// tick; for an idle target it exits WFI. The sibling sched_notify_idle_peer
+// instead wakes ANY idle peer to steal. Gated by g_sched_notify_enabled so the
+// UP-like in-kernel tests stay quiescent (a parked secondary is not self-woken;
+// the ready_on cross-CPU enqueue test relies on the placed thread sitting still
+// until removed -- note need_resched_set is NOT gated, so the test still sees
+// it). Never targets self.
 static void sched_notify_cpu(unsigned target) {
     if (!g_sched_notify_enabled) return;
     if (target >= DTB_MAX_CPUS) return;
@@ -582,6 +619,11 @@ void ready_on(unsigned target_cpu, struct Thread *t) {
                                   extinction("ready: invalid band");
 
     unsigned self = smp_cpu_idx_self();
+    // #866 F4: restore the this_cpu_sched() OOB contract the pre-#864 ready()
+    // had -- a clean extinction (not an OOB g_cpu_sched[] access) if THIS CPU's
+    // index is out of range. The target-fallback below only guards `target_cpu`;
+    // if `self` itself is bad, `target_cpu = self` would still index OOB.
+    if (self >= DTB_MAX_CPUS) extinction("ready_on: cpu idx out of range");
     // Safety: fall back to the caller's CPU for an out-of-range or
     // uninitialized target. select_target_cpu already guards this; belt for
     // any other ready_on caller.
@@ -603,10 +645,19 @@ void ready_on(unsigned target_cpu, struct Thread *t) {
     // Wake the right CPU, AFTER releasing the lock so its IPI handler doesn't
     // contend on it. Local placement -> wake an idle peer to steal (the pre-
     // #864 path; maps to scheduler.tla NotifyWFIPeer). Cross-CPU placement ->
-    // wake the target that now holds the work.
+    // make the target reschedule + consider the placed thread.
     if (target_cpu == self) {
         (void)sched_notify_idle_peer();
     } else {
+        // #866 F1: set the target's need_resched so its next preempt_check_irq
+        // (timer tick OR the IPI below) actually reschedules and considers the
+        // thread we just placed -- WITHOUT this the placed thread waits up to a
+        // full slice on a busy target (the I-17/I-8 leak the audit found). This
+        // is the CORRECTNESS half + is NOT gated by g_sched_notify_enabled (so a
+        // busy target reschedules at its next tick even when the wake-IPI is
+        // suppressed during tests). sched_notify_cpu is the PROMPTNESS half: a
+        // gated IPI that traps the target in NOW rather than at the next tick.
+        need_resched_set(target_cpu);
         sched_notify_cpu(target_cpu);
     }
 }
@@ -732,8 +783,19 @@ static struct Thread *try_steal(struct CpuSched *cs, bool *contended_out) {
         // a pinned in-tree idle is now skipped here by construction.
         struct Thread *stolen = NULL;
         for (unsigned b = 0; b < SCHED_BAND_COUNT && !stolen; b++) {
-            struct Thread *cand = peer->run_tree[b];
-            if (cand && !cand->cpu_pinned) {
+            // #866 F2: walk PAST pinned threads within the band -- a non-pinned
+            // thread queued BEHIND a pinned one (behind kthread, or behind a
+            // CPU's in-tree idle in BAND_IDLE) is still stealable. The prior
+            // head-only check skipped the WHOLE band when its head was pinned,
+            // diverging from sched_alpha.tla's StealCand (ANY non-pinned runq
+            // member). Steady-state-unreachable today (kthread's vd_t bump sorts
+            // it to the band tail; nothing non-pinned is placed in BAND_IDLE),
+            // but the head-only scan would silently strand such a thread the day
+            // a path creates one. The vd_t sort is preserved: the FIRST non-
+            // pinned thread in the band is the lowest-vd_t one.
+            for (struct Thread *cand = peer->run_tree[b]; cand;
+                 cand = cand->runnable_next) {
+                if (cand->cpu_pinned) continue;
                 // ARCH 8.4.5 steal-invariant: we hold peer->lock, so peer is not
                 // mid-switch (its spin_trylock would have failed) and its tree
                 // holds only RUNNABLE, !on_cpu threads (RunqOnCpuSafe). Fail loud
@@ -743,6 +805,7 @@ static struct Thread *try_steal(struct CpuSched *cs, bool *contended_out) {
                               "try_steal: victim not RUNNABLE-and-off-cpu (run-tree invariant)");
                 stolen = cand;
                 unlink(peer, stolen);
+                break;
             }
         }
 
@@ -805,7 +868,7 @@ void sched(void) {
     // location because g_need_resched is per-CPU; only this CPU writes
     // its own slot (sched_tick + this clear), and the fetch is monotonic
     // (set TRUE → cleared FALSE → set TRUE again on next slice expiry).
-    g_need_resched[smp_cpu_idx_self()] = false;
+    need_resched_clear(smp_cpu_idx_self());
 
     // P2-Bc/Ce: IRQ-mask + per-CPU run-tree lock. sched() mutates
     // shared state (run tree, current_thread via TPIDR_EL1, vd_t
@@ -1537,7 +1600,7 @@ void sched_tick(void) {
     // Decrement; if expired, request preemption + replenish. The flag
     // is per-CPU — each CPU's IRQ writes its own slot.
     if (--t->slice_remaining <= 0) {
-        g_need_resched[cpu] = true;
+        need_resched_set(cpu);
         t->slice_remaining = THREAD_DEFAULT_SLICE_TICKS;
     }
 }
@@ -1547,18 +1610,19 @@ void preempt_check_irq(void) {
     // Every IRQ-return runs this; keep it cheap. P2-Cd: per-CPU flag.
     unsigned cpu = smp_cpu_idx_self();
     if (cpu >= DTB_MAX_CPUS) return;
-    if (!g_need_resched[cpu]) return;
+    if (!need_resched_pending(cpu)) return;
     if (!g_cpu_sched[cpu].initialized) return;
 
     struct Thread *t = current_thread();
     if (!t) return;                             // pre-thread_init IRQ
     if (t->magic != THREAD_MAGIC) return;       // corruption — defer
 
-    // Clear the flag BEFORE sched() so a re-fire-during-sched (which
-    // can't happen on the same CPU because IRQs are masked, but
-    // defensive depth for SMP cross-CPU writes via IPI_RESCHED at
-    // P2-Cdc) doesn't double-trigger.
-    g_need_resched[cpu] = false;
+    // Clear the flag BEFORE sched() so a re-fire-during-sched doesn't double-
+    // trigger. The cross-CPU write now exists for real (#866 F1: ready_on's
+    // cross-CPU placement sets this CPU's flag so a busy target reschedules and
+    // considers a just-placed thread) -- the clear here consumes both the local
+    // (timer-tick) and the cross-CPU (placement) producer.
+    need_resched_clear(cpu);
 
     // sched() does its own irqsave/irqrestore around the run-tree
     // mutation. We're called from vectors.S IRQ-return path with IRQs

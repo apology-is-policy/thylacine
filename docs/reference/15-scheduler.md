@@ -260,6 +260,7 @@ VISION §4 budget: 500 ms. Headroom remains generous.
 | Spec SMP refinement (`Steal`, `IPI_Send`/`Deliver`, `NoDoubleEnqueue`, `IPIOrdering`) | Landed (P2-Cg) |
 | **SMP redesign: per-CPU `cpu_pinned` in-tree idle (retires `g_bootcpu_idle`); `idle_in_wfi` F7 fix; steal/pick invariant assert** | **Landed (deep-smp-review #863; ARCH §8.4.2/§8.4.5; gate `specs/sched_alpha.tla`; closes #860)** |
 | **HMP foundation: `select_target_cpu` placement hook + `ready_on` cross-CPU enqueue + per-CPU `capacity` (DTB) + per-task `util` + `balance_pull`** | **Landed (deep-smp-review #864; ARCH §8.4.3/§8.4.4; logic-verified vs synthetic asymmetric DTB; inert on uniform v1.0 targets)** |
+| **#866 formal adversarial audit (Opus + self-audit) of #863+#864** | **CLOSED CLEAN (0 P0 + 1 P1 + 0 P2 + 5 P3); F1 cross-CPU `need_resched` + F2 steal band-walk + F3 capacity release/acquire + F4 self-OOB guard + F6 doc fixed; F5 deferred (dormant `r->lock` coupling). `memory/audit_smp_redesign_closed_list.md`** |
 | `LatencyBound` liveness spec | Phase 2 close |
 | Red-black tree refactor | Phase 7 |
 | **Empirical EAS tuning (PELT decay, energy model, schedutil/DVFS, misfit push)** | **Deferred to real heterogeneous HW (ARCH §8.4.4 verification boundary)** |
@@ -601,6 +602,10 @@ The scheduler is **HMP-ready by design; v1.0 ships homogeneous-treatment**. Plac
 - **`void ready(struct Thread *t)`** is now `ready_on(select_target_cpu(t, smp_cpu_idx_self()), t)`.
 
 Safety under an **arbitrary** target is the composition result proved by `specs/sched_alpha.tla` (its `Place` action picks the target CPU non-deterministically), so any `select_target_cpu` / `balance()` policy composes with correctness by construction.
+
+A cross-CPU `ready_on` sets the target's `need_resched` (`#866` F1) so a *busy* target reschedules and considers the placed thread at its next preempt point rather than after a full slice; `sched_notify_cpu` then sends a (gated) `IPI_RESCHED` for promptness. `g_need_resched` is a RELAXED cross-CPU atomic for this (the producer is the placing CPU, the consumer is the target's `preempt_check_irq`).
+
+**Known caveat (`#866` F5, dormant at v1.0):** the cross-CPU `ready_on` wake path holds `r->lock` across the target's full `cpu_switch_context` (it takes the target's CpuSched lock as a full blocking acquire while `wake_rendez_waiter` still holds `r->lock`). This is **bounded** (the peer always releases its lock when its switch completes; `sched()` never takes `r->lock`, so there is **no deadlock**) — it inflates the worst-case `r->lock` hold by one context switch. Inert on the uniform v1.0 topology (cross-CPU placement never fires). When misfit-push lands, prefer to drop `r->lock` before the cross-CPU enqueue+notify (the same off-lock discipline `wake_rendez_waiter` already uses for its `on_cpu` spin).
 
 ### Capacity (DTB) + util
 

@@ -592,6 +592,14 @@ void test_sched_ready_on_cross_cpu_enqueue(void) {
             "ready_on placed the thread on the target peer's run tree");
         TEST_EXPECT_EQ(sched_in_cpu_tree(self, t), false,
             "the thread is NOT on the caller's own tree (placed cross-CPU)");
+        // #866 F1: cross-CPU placement set the TARGET's need_resched so it
+        // reschedules + considers the placed thread at its next preempt point
+        // (not after a full slice). need_resched_set is NOT notify-gated, so the
+        // parked peer's flag is observably set here even with notify disabled.
+        // The flag self-heals: the peer clears it at its first sched() entry
+        // post-test (production transition), so it leaves no lasting state.
+        TEST_EXPECT_EQ(sched_need_resched_pending(peer), true,
+            "cross-CPU placement requested a reschedule on the target");
     } else {
         // -smp 1: only the self target exists; ready_on(self) == local enqueue.
         ready_on(self, t);

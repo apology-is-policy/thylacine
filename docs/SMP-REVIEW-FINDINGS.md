@@ -310,6 +310,25 @@ amplifier); default-smp8 + UBSan-smp8 multi-boot clean. The remaining SMP work i
 `smp-multiboot.sh` into CI + soft-warn the host-fragile timing tests) and #866 (the formal
 adversarial audit of the #863+#864 surface).
 
+**STATUS (2026-06-05): the #866 formal adversarial audit of #863+#864 is CLOSED -- CLEAN.**
+One Opus prosecutor (the full scheduler surface vs I-8/I-9/I-17/I-18/I-21 + the sched_alpha.tla
+safety set) + an independent self-audit. **0 P0 + 1 P1 + 0 P2 + 5 P3 -- NOT dirty.** Core
+architecture VERIFIED SOUND: the homogeneous behavior-preservation (byte-identical to pre-#864),
+the cross-CPU `ready_on` lock-discipline (exactly one CpuSched lock, deadlock-free -- the lock is
+private to sched.c so no caller nests it), the `util` no-concurrent-writer argument (I-21 ->
+single-writer), and #860 closed-by-construction were all independently confirmed. Fixes (all on
+the cross-CPU / heterogeneous path, structurally inert at v1.0): **F1 [P1]** -- cross-CPU
+placement now `need_resched_set`s the target (the I-17/I-8 leak: a busy target ignored the placed
+misfit thread for up to a slice; `g_need_resched` is now a cross-CPU RELAXED atomic, regression
+`scheduler.ready_on_cross_cpu_enqueue` extended); **F2 [P3]** -- `try_steal` walks past pinned
+band heads (matches sched_alpha `StealCand`); **F3 [P3]** -- capacity/`g_sched_hetero` publish is
+now release/acquire-paired; **F4 [P3]** -- restored `ready_on`'s self-OOB extinction guard; **F6
+[P3]** -- doc-vs-code drift fixed. **F5 [P3]** DEFERRED-with-justification (the cross-CPU
+`ready_on` holds `r->lock` across a peer ctx-switch -- bounded, no deadlock, dormant; the drop-
+`r->lock`-first fix lands with misfit-push + its test; documented as a Known caveat in
+`docs/reference/15-scheduler.md`). Closed list: `memory/audit_smp_redesign_closed_list.md`. The
+SMP redesign (#863 + #864 + #866) is now SOUND + audited; #865 (CI gate) is the last SMP item.
+
 (a) **Re-enable spec-first for the SMP mechanism.** Adopt `specs/sched_oncpu.tla` as a
     gating model alongside `scheduler.tla`; extend it as the mechanism evolves. The
     natural re-enabling point the user flagged ("an invariant-bearing feature that
