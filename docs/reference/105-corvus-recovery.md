@@ -290,9 +290,18 @@ Compile-time invariants: `24 * 11 == 256 + 8`; the wordlist is exactly
   same pool skips it (`RECOVER(system) E2E skipped`) and `ADMIN_ELEVATE("thylacine")`
   still succeeds against the boot-1 re-wrapped `system-wrap` -- independently
   proving the re-wrap is a valid argon2id+AEGIS round-trip across a reboot.
-- The **live `RECOVER(user)`** round-trip (create → capture phrase → reset
-  passphrase via the login `!recover` UX → re-AUTH with the new passphrase) is
-  the **A-5c-c-2** seeded login E2E.
+- **Live `RECOVER(user)` via the login `!recover` UX (A-5c-c-2, landed).**
+  `usr/joey/joey.c::do_recover_e2e` (fresh-pool-gated) captures michael's
+  enrolled phrase from USER_CREATE, then spawns `/sbin/login` with a seeded pipe
+  feeding `!recover\nmichael\n<phrase>\n<pass_michael>\n`. login's
+  `do_recover_flow` drives a live `RECOVER(user)` (`login: recovery ok`); the new
+  passphrase = the old one (RESTORE), so the subsequent `do_login_e2e`
+  authenticates michael against the re-wrapped `hybrid.corvus` -- proving the live
+  re-wrap is valid AND (since RECOVER re-wraps the keypair, not the DEK) the home
+  DEK still unlocks. Idempotent across reboots (boot N+1 skips). The
+  reset-takes-effect-with-a-CHANGED-passphrase property is host-proven (the
+  `system_identity_lifecycle` round-trip asserts the old passphrase no longer
+  opens after a reset).
 
 ## Error paths
 

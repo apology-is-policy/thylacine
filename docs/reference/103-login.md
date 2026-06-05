@@ -88,6 +88,40 @@ login itself runs as `PRINCIPAL_SYSTEM` (inherited from joey), holds
 NEVER console-attached (joey relinquished; spawn does not confer the bit). On
 any failure login exits non-zero; the getty respawns it.
 
+## The `!recover` passphrase-recovery UX (A-5c-c)
+
+A user who has forgotten their passphrase types `!recover` at the
+`Thylacine login:` prompt (intercepted by `rs_main` right after the username
+read; `!` cannot begin a corvus username, charset `[A-Za-z0-9._-]`, so the
+sentinel can never shadow a real user). `do_recover_flow` then:
+
+1. Reads `{recover user, recovery phrase, new passphrase}` (three line reads).
+2. `connect_corvus()` and drives `RECOVER` (verb 8, `subject_kind = 1`):
+   `subject_kind(1) | user_len(1) | user | phrase_len(2 LE) | phrase |
+   new_pass_len(2 LE) | new_pass`. **No session token, no capability, no console
+   attach** -- the user has lost the passphrase, so phrase-knowledge + corvus's
+   rate limit are the entire gate (this is exactly why the recovery path is
+   distinct from a login: it needs none of login's authority).
+3. On `OK`, corvus has reset the passphrase **and rolled a fresh recovery
+   phrase**; login surfaces the fresh phrase (`phrase_len(2 LE) | fresh_phrase`)
+   to the tty with "write it down; the old one no longer works", emits the
+   boot-log marker `login: recovery ok (...)`, and exits 0. No session is
+   created -- the getty re-prompts and the user logs in with the new passphrase.
+4. On any non-`OK` (bad phrase / unknown user / rate-limited / transport),
+   login prints a generic "recovery failed" + a `login: recovery FAILED (...)`
+   marker and exits non-zero.
+
+Secret hygiene: the recovery phrase, the new passphrase, the RECOVER payload
+buffer, and the returned fresh phrase are all `t_explicit_bzero`'d on every path
+(login already `set_dumpable(0)`/`set_traceable(0)` at startup). The fresh
+phrase rides the response buffer to the tty (the user's secret to record); it is
+scrubbed immediately after display.
+
+`RECOVER` re-wraps the **keypair**, not the dataset DEK (the keypair value is
+unchanged), so a user who recovers keeps access to their existing encrypted home
+-- the per-dataset DEK envelopes (encapsulated to the unchanged public keys) stay
+valid. See `docs/reference/105-corvus-recovery.md`.
+
 ## joey -- the session supervisor (usr/joey/joey.c)
 
 After all boot-test asserts:
@@ -223,6 +257,16 @@ un-unlocked dataset's root stat fails -> the attach is inert).
   gid=1000 -> A-5b DEK lifecycle (`login: dek michael ds=2 home provisioned +
   unlocked`) -> ut spawned stamped + reaped + session closed; gated on login's
   exit code (DEK-fatal), runs every boot before the banner.
+- Recovery-UX boot-path E2E (`usr/joey/joey.c::do_recover_e2e`, A-5c-c-2):
+  fresh-pool-gated. joey captures michael's enrolled phrase from the USER_CREATE
+  OK frame, then spawns `/sbin/login` with a seeded pipe feeding the recovery
+  dialogue `!recover\nmichael\n<phrase>\n<pass_michael>\n`. login drives a LIVE
+  `RECOVER(user)` (boot log `login: recovery ok (...)`), resetting michael's
+  passphrase to `pass_michael` (RESTORE) so the subsequent `do_login_e2e` still
+  authenticates against the re-wrapped `hybrid.corvus` -- independently proving
+  the re-wrap is a valid argon2 round-trip AND the home DEK still unlocks (the
+  keypair value is unchanged). Idempotent across reboots: boot N+1 (persistent
+  pool) `login !recover E2E skipped`. Marker `joey: login !recover E2E OK`.
 - Stratum host ctest `test_corvus_provision::dek_nodes_report_system_owner`:
   the three SYSTEM-gated DEK nodes report uid/gid == system_uid via getattr;
   world-readable `properties` stays uid/gid 0; unset system_uid -> the invalid

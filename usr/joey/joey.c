@@ -812,6 +812,15 @@ static long mkdir_or_open(long parent_fd, const char *name, unsigned long name_l
     return t_walk_open(parent_fd, name, name_len, T_OPATH);
 }
 
+// A-5c-c-2: michael's recovery phrase, captured from the fresh-pool USER_CREATE
+// OK frame in do_corvus_bringup so do_recover_e2e (which spawns /sbin/login,
+// after joey's corvus conn is closed) can drive the login `!recover` UX through
+// a live RECOVER(user). g_recover_armed implies a fresh pool AND a captured
+// phrase. Scrubbed once consumed. RECOVERY_PHRASE_MAX is 215 -> 256 fits.
+static unsigned char g_michael_phrase[256];
+static size_t g_michael_phrase_len = 0;
+static int g_recover_armed = 0;
+
 // A-1.7: corvus bringup -- spawn /sbin/corvus handing it `storage_dup_fd`
 // (a R|W-no-TRANSFER storage-root capability) at fd 0, then drive the
 // verb-protocol E2E over /srv/corvus. Moved out of main + called
@@ -914,6 +923,13 @@ static int do_corvus_bringup(long storage_dup_fd) {
             if (plen == 0 || rlen != 10 + plen) {
                 t_putstr("joey: USER_CREATE michael recovery phrase malformed\n");
                 return 1;
+            }
+            // A-5c-c-2: capture michael's enrolled phrase for the live login
+            // `!recover` E2E (do_recover_e2e, after the harness closes conn_fd).
+            if (plen <= sizeof(g_michael_phrase)) {
+                for (size_t i = 0; i < plen; i++) g_michael_phrase[i] = rx[13 + i];
+                g_michael_phrase_len = plen;
+                g_recover_armed = 1;
             }
         }
         fresh_pool = 1;
@@ -1530,6 +1546,89 @@ static int do_login_e2e(void) {
         return -1;
     }
     t_putstr("joey: /sbin/login E2E OK (michael authed; ut spawned stamped + reaped; session closed)\n");
+    return 0;
+}
+
+// A-5c-c-2: do_recover_e2e -- prove the /sbin/login `!recover` UX drives a LIVE
+// RECOVER(user). Seeded NON-interactively (the harness cannot type at the
+// console), mirroring do_login_e2e: a creds pipe feeds login's fd 0 the recovery
+// dialogue "!recover\n<user>\n<phrase>\n<new-pass>\n". Uses michael with
+// new_pass = pass_michael (RESTORE), so the subsequent do_login_e2e still
+// authenticates with pass_michael against the re-wrapped hybrid.corvus -- which
+// independently proves the live re-wrap is a valid argon2 round-trip. RECOVER
+// also re-wraps the KEYPAIR (not the DEK), so michael's home DEK envelope stays
+// valid and do_login_e2e's DEK/home path is unaffected. Fresh-pool-gated via
+// g_recover_armed (michael's phrase is only knowable on the boot that freshly
+// enrolled him). Returns 0 on success/skip, -1 on failure.
+static int do_recover_e2e(void) {
+    if (!g_recover_armed) {
+        t_putstr("joey: login !recover E2E skipped (persistent pool; phrase not captured this boot)\n");
+        return 0;
+    }
+    const char pass_michael[] = "correct-horse-battery-staple-v1";
+
+    long cr_rd = -1, cr_wr = -1;
+    if (t_pipe(&cr_rd, &cr_wr) < 0) {
+        t_putstr("joey: recover-e2e creds t_pipe FAILED\n");
+        return -1;
+    }
+    // Seed "!recover\nmichael\n<phrase>\n<pass_michael>\n". The phrase is up to
+    // RECOVERY_PHRASE_MAX (215) bytes -> a 512 B buffer is ample.
+    {
+        unsigned char creds[512];
+        size_t o = 0;
+        const char sentinel[] = "!recover\nmichael\n";
+        for (size_t i = 0; i < sizeof(sentinel) - 1; i++) creds[o++] = (unsigned char)sentinel[i];
+        for (size_t i = 0; i < g_michael_phrase_len; i++) creds[o++] = g_michael_phrase[i];
+        creds[o++] = (unsigned char)'\n';
+        for (size_t i = 0; i < sizeof(pass_michael) - 1; i++) creds[o++] = (unsigned char)pass_michael[i];
+        creds[o++] = (unsigned char)'\n';
+        int wr = write_all(cr_wr, creds, o);
+        // creds held michael's recovery phrase; scrub before the buffer drops.
+        (void)t_explicit_bzero(creds, sizeof(creds));
+        if (wr != 0) {
+            t_putstr("joey: recover-e2e seed write FAILED\n");
+            (void)t_close(cr_rd);
+            (void)t_close(cr_wr);
+            return -1;
+        }
+    }
+    (void)t_close(cr_wr);
+
+    static const char login_argv[] = "login\0";
+    const char login_name[] = "login";
+    unsigned int login_fds[3] = { (unsigned int)cr_rd, (unsigned int)cr_rd,
+                                  (unsigned int)cr_rd };
+    struct t_sys_spawn_args lreq = {
+        .name_va       = (unsigned long)login_name,
+        .argv_data_va  = (unsigned long)login_argv,
+        .fd_list_va    = (unsigned long)login_fds,
+        .name_len      = sizeof(login_name) - 1,
+        .argv_data_len = sizeof(login_argv) - 1,
+        .argc          = 1,
+        .fd_count      = 3,
+        .perm_flags    = LOGIN_PERMS,
+        ._pad_envp     = 0,
+        .cap_mask      = LOGIN_CAPS,
+    };
+    long lpid = t_spawn_full_argv(&lreq);
+    (void)t_close(cr_rd);
+    if (lpid <= 0) {
+        t_putstr("joey: recover-e2e t_spawn_full_argv FAILED\n");
+        return -1;
+    }
+    int lst = -1;
+    long lreaped = t_wait_pid(&lst);
+    // The phrase is consumed; scrub the captured static (boot-secret hygiene),
+    // regardless of outcome.
+    (void)t_explicit_bzero(g_michael_phrase, sizeof(g_michael_phrase));
+    g_michael_phrase_len = 0;
+    g_recover_armed = 0;
+    if (lreaped != lpid || lst != 0) {
+        t_putstr("joey: login !recover E2E FAILED (login exit_status != 0)\n");
+        return -1;
+    }
+    t_putstr("joey: login !recover E2E OK (live RECOVER(user) via the login UX; michael passphrase reset+restored)\n");
     return 0;
 }
 
@@ -2678,6 +2777,14 @@ int main(void) {
     // === A-5a: the /sbin/login session core + the boot->session transition ===
     // joey is the long-running init (ARCH section 5.1). IDENTITY-DESIGN.md 9.9.
     //
+    // (0.5) Prove the /sbin/login `!recover` recovery UX drives a LIVE
+    // RECOVER(user) (A-5c-c-2). Fresh-pool-gated; runs BEFORE the login E2E
+    // because it resets + restores michael's passphrase, which the login E2E
+    // then authenticates against the re-wrapped hybrid.corvus.
+    if (do_recover_e2e() != 0) {
+        return 1;
+    }
+
     // (1) Prove the login orchestration NON-interactively (the CI coverage: the
     // harness kills QEMU at the banner, so the live getty-loop below never runs
     // in CI). A failure here returns non-zero BEFORE BOOT_COMPLETE -> joey_run

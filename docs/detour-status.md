@@ -1288,9 +1288,24 @@ kill = BOTH the namespace `/proc/<pid>/ctl` surface AND a narrow elevation-only 
   `joey: RECOVER(system) ok (live; ...)`. **Idempotent across reboots** (verified): boot 2 on the same
   pool `RECOVER(system) E2E skipped` + `ADMIN_ELEVATE("thylacine")` still opens the boot-1 re-wrapped
   `system-wrap` -- the cross-reboot persistence proof. default boot 1 (fresh) + boot 2 (persistent)
-  both GREEN, 0 EXTINCTION. **NEXT = A-5c-c-2 (#878): login `!recover` UX + live RECOVER(user) seeded
-  E2E -> A-5c-c-3 (#879): focused adversarial audit (whole A-5c surface; AEGIS/mallocng-adjacent --
-  prosecute hard) + full matrix (smp-multiboot + cross-reboot) + two-commit close.**
+  both GREEN, 0 EXTINCTION.
+
+- **A-5c-c-2 LANDED (#878): login `!recover` UX + live RECOVER(user) seeded E2E.** Closes the OWED
+  RECOVER(user)-live item + the user-facing recovery UX deliverable. `/sbin/login` (`do_recover_flow`)
+  intercepts the `!recover` sentinel at the username prompt (`!` cannot begin a corvus username, so no
+  collision), reads {user, phrase, new-pass}, drives `RECOVER(user)` (verb 8, subject_kind 1; NO
+  session/cap/console -- phrase + rate-limit are the gate), surfaces the rolled fresh phrase, and exits
+  without creating a session (the getty re-prompts). joey's `do_recover_e2e` (fresh-pool-gated; mirrors
+  do_login_e2e's seeded pipe) captures michael's enrolled phrase + drives the UX live: boot log
+  `login: recovery ok (...)` + `joey: login !recover E2E OK`. new_pass = pass_michael (RESTORE), so the
+  subsequent `do_login_e2e` still AUTHs michael -- independently proving the live re-wrap is valid AND
+  the home DEK still unlocks (RECOVER re-wraps the keypair, not the DEK). Secrets bzero'd on every path
+  (login + joey's captured static). Idempotent across reboots (boot 2 skips both recover E2Es;
+  `/sbin/login E2E OK` still passes). Verified: fresh boot 1 (both RECOVER E2Es live) + persistent boot
+  2 (both skipped) GREEN, 0 EXTINCTION. Reference 103-login.md (the `!recover` UX section) +
+  105-corvus-recovery.md. **NEXT = A-5c-c-3 (#879): focused adversarial audit (whole A-5c surface;
+  AEGIS/mallocng-adjacent -- prosecute hard) + full matrix (smp-multiboot + UBSan + cross-reboot) +
+  two-commit close.**
 
 ---
 

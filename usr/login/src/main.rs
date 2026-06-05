@@ -49,11 +49,17 @@ use libthyla_rs::{
 
 const VERB_AUTH: u8 = 1;
 const VERB_SESSION_CLOSE: u8 = 3;
+const VERB_RECOVER: u8 = 8;
 const VERB_RESOLVE_ID: u8 = 11;
 const VERB_RESOLVE_NAME: u8 = 12;
 const CORVUS_PROTOCOL_VERSION: u8 = 1;
 const STATUS_OK: u8 = 0;
 const TOKEN_LEN: usize = 33;
+
+// A-5c-c: the `!recover` login sentinel enters the passphrase-recovery UX. `!`
+// is not a valid corvus username char ([A-Za-z0-9._-]), so it cannot collide
+// with a real user typed at the prompt.
+const RECOVERY_SENTINEL: &[u8] = b"!recover";
 
 const FD_IN: i64 = 0; // the tty (or seeded creds pipe)
 const FD_OUT: i64 = 1; // the tty (or capture pipe)
@@ -197,6 +203,111 @@ unsafe fn auth(fd: i64, user: &[u8], pass: &[u8]) -> Option<[u8; TOKEN_LEN]> {
     token.copy_from_slice(&resp);
     let _ = t_explicit_bzero(resp.as_mut_ptr(), resp.len());
     Some(token)
+}
+
+// RECOVER(user) (verb 8): subject_kind(1)=1 + user_len(1) + user +
+// phrase_len(2 LE) + phrase + new_pass_len(2 LE) + new_pass. NO session token,
+// NO capability -- the user lost the passphrase, so phrase-knowledge + corvus's
+// rate limit are the entire gate. OK reply: phrase_len(2 LE) + fresh_phrase.
+unsafe fn recover_user(
+    fd: i64,
+    user: &[u8],
+    phrase: &[u8],
+    new_pass: &[u8],
+) -> Option<(u8, Vec<u8>)> {
+    let mut pl: Vec<u8> = Vec::new();
+    pl.push(1u8); // subject_kind = 1 (user)
+    pl.push(user.len() as u8);
+    pl.extend_from_slice(user);
+    pl.push((phrase.len() & 0xff) as u8);
+    pl.push(((phrase.len() >> 8) & 0xff) as u8);
+    pl.extend_from_slice(phrase);
+    pl.push((new_pass.len() & 0xff) as u8);
+    pl.push(((new_pass.len() >> 8) & 0xff) as u8);
+    pl.extend_from_slice(new_pass);
+    let r = exchange(fd, VERB_RECOVER, &pl);
+    // pl held the cleartext recovery phrase + the new passphrase; scrub before
+    // the buffer drops (mallocng recycles freed heap; #828 A-F1 discipline).
+    let _ = t_explicit_bzero(pl.as_mut_ptr(), pl.len());
+    r
+}
+
+// The login `!recover` recovery UX (A-5c-c). A user who lost their passphrase
+// types `!recover` at the prompt; login then reads the user, the printed
+// recovery phrase, and a new passphrase, and drives corvus RECOVER(user). On
+// success corvus rolls a FRESH phrase, which login surfaces (the user records it
+// and logs in normally with the new passphrase). login is NOT console-attached
+// and creates NO session here -- it returns to the getty prompt (exit code is
+// the CI gate). Secrets (phrase, new passphrase, the returned fresh phrase) are
+// scrubbed on every path.
+unsafe fn do_recover_flow() -> i64 {
+    write_out(b"recover user: ");
+    let mut ruser: Vec<u8> = Vec::new();
+    if !read_line(FD_IN, &mut ruser) || ruser.is_empty() {
+        write_out(b"recovery aborted (no user)\n");
+        return 1;
+    }
+    write_out(b"recovery phrase: ");
+    let mut phrase: Vec<u8> = Vec::new();
+    if !read_line(FD_IN, &mut phrase) || phrase.is_empty() {
+        write_out(b"recovery aborted (no phrase)\n");
+        return 1;
+    }
+    write_out(b"new passphrase: ");
+    let mut newpass: Vec<u8> = Vec::new();
+    if !read_line(FD_IN, &mut newpass) || newpass.is_empty() {
+        let _ = t_explicit_bzero(phrase.as_mut_ptr(), phrase.len());
+        write_out(b"recovery aborted (no passphrase)\n");
+        return 1;
+    }
+
+    let conn = connect_corvus();
+    if conn < 0 {
+        let _ = t_explicit_bzero(phrase.as_mut_ptr(), phrase.len());
+        let _ = t_explicit_bzero(newpass.as_mut_ptr(), newpass.len());
+        write_out(b"login: corvus unavailable\n");
+        return 1;
+    }
+    let res = recover_user(conn, &ruser, &phrase, &newpass);
+    // The phrase + new passphrase are consumed; scrub login's copies.
+    let _ = t_explicit_bzero(phrase.as_mut_ptr(), phrase.len());
+    let _ = t_explicit_bzero(newpass.as_mut_ptr(), newpass.len());
+    let _ = t_close(conn);
+
+    match res {
+        Some((STATUS_OK, mut resp)) => {
+            // resp = phrase_len(2 LE) + fresh_phrase.
+            let plen = if resp.len() >= 2 {
+                (resp[0] as usize) | ((resp[1] as usize) << 8)
+            } else {
+                0
+            };
+            if plen > 0 && resp.len() == 2 + plen {
+                write_out(b"\nPassphrase reset. NEW recovery phrase (write it down; the old one no longer works):\n");
+                write_out(&resp[2..2 + plen]);
+                write_out(b"\nLog in with your new passphrase.\n");
+                // Boot-log marker for the CI E2E (in the seeded run fd 1 is the
+                // creds pipe's read end, so write_out no-ops; t_putstr -> UART).
+                t_putstr("login: recovery ok (RECOVER(user) reset the passphrase; fresh phrase issued)\n");
+                let _ = t_explicit_bzero(resp.as_mut_ptr(), resp.len());
+                return 0;
+            }
+            let _ = t_explicit_bzero(resp.as_mut_ptr(), resp.len());
+            write_out(b"recovery failed (malformed response)\n");
+            t_putstr("login: recovery FAILED (malformed response)\n");
+            1
+        }
+        Some((_st, _resp)) => {
+            write_out(b"recovery failed (bad phrase, unknown user, or rate-limited)\n");
+            t_putstr("login: recovery FAILED (corvus rejected)\n");
+            1
+        }
+        None => {
+            write_out(b"recovery failed (transport error)\n");
+            t_putstr("login: recovery FAILED (transport)\n");
+            1
+        }
+    }
 }
 
 // RESOLVE_NAME (verb 12): name_len(1) + name -> {principal_id u32, primary_gid u32}.
@@ -746,6 +857,13 @@ pub extern "C" fn rs_main() -> i64 {
     if !read_line(FD_IN, &mut user) || user.is_empty() {
         write_out(b"login: no username\n");
         return 1;
+    }
+    // A-5c-c: the `!recover` sentinel enters the passphrase-recovery UX instead
+    // of a login -- it resets a user's passphrase from the printed recovery
+    // phrase and returns to the getty prompt (no session is created). `!` cannot
+    // begin a real corvus username, so this cannot shadow a user.
+    if user.as_slice() == RECOVERY_SENTINEL {
+        return unsafe { do_recover_flow() };
     }
     write_out(b"password: ");
     if !read_line(FD_IN, &mut pass) {
