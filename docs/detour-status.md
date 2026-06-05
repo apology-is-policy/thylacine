@@ -1183,8 +1183,11 @@ kill = BOTH the namespace `/proc/<pid>/ctl` surface AND a narrow elevation-only 
       (stm_ctl_system_uid_configured); A-F3 peer_creds stale-comment; B-F2 ds:-TOCTOU comment; B-F3
       ds:-empty EINVAL boundary test; tracked #855 (kproc orphan reaper) + #856 (wait-by-pid). Matrix:
       default smp4 GREEN + UBSan(smp4) GREEN (0 runtime err) + smp8 GREEN on a clean re-run (run-1's 2
-      cons.* flakes were `sched_runnable_count()==0` quiescence assertions racing the live console_mgr
-      kthread -- kernel SOUND, behavioral assertions pass, A-4c test-fragility NOT #828, tracked #857)
+      cons.* flakes were `sched_runnable_count()==0` quiescence assertions -- ROOT-CAUSED + FIXED under
+      #857: a secondary-CPU IDLE thread miscounted as runnable WORK (secondary idles live in
+      run_tree[BAND_IDLE]; the count now EXCLUDES BAND_IDLE). The "racing console_mgr" framing written
+      here was WRONG -- it was never console_mgr (tid mismatch: idle vs the mgr kthread), never a kernel
+      fault; kernel SOUND throughout, behavioral assertions always passed. NOT #828)
       + login E2E + cross-reboot + 0 EXTINCTION; Stratum ctest 8/8; spec gate N/A (no spec-modeled
       mechanism changed; the 3 buggy-cfg gates trip correctly). Closed list:
       `memory/audit_828_closed_list.md`. **A-5b arc COMPLETE bar A-5c (RECOVER + hostowner-c).**

@@ -41,6 +41,7 @@
 
 #include "../arch/arm64/gic.h"      // P3-G: gic_send_ipi for ready/wakeup wake-idle-peer.
 #include "../arch/arm64/timer.h"    // P5-tsleep: counter read + ns->counter conversion.
+#include "../arch/arm64/uart.h"     // DEBUG (#857): sched_dump_runnable diagnostic.
 
 // P2-Cd: per-CPU sched state. Each CPU owns its own band-indexed run
 // tree, monotonic vd_counter, init flag, and idle-thread pointer. This
@@ -214,6 +215,16 @@ static bool in_run_tree(struct CpuSched *cs, struct Thread *t) {
 // Insert `t` into `cs`'s band tree, sorted ascending by vd_t. Ties (equal
 // vd_t) place `t` AFTER existing equal-keyed nodes — FIFO within ties.
 static void insert_sorted(struct CpuSched *cs, struct Thread *t) {
+    // #860 invariant tripwire (durable regression guard): g_bootcpu_idle is the
+    // CPU-0-pinned deadlock-path idle; it is the ONE idle-band thread with a
+    // real kstack (the secondaries' idles are kstack_base==NULL), so if it ever
+    // enters a run tree it becomes stealable by a secondary (try_steal's only
+    // gate is kstack_base != NULL) AND re-pickable by cpu 0's deadlock path ->
+    // two CPUs run it on one kstack/ctx -> cross-CPU context corruption (the
+    // #860 wild-PC / smashed-stack crash). It MUST stay off-tree. Deterministic:
+    // fires at the INSERTION (the precondition), not the rare double-run.
+    if (t == g_bootcpu_idle)
+        extinction("#860: g_bootcpu_idle entered a run tree (must stay off-tree)");
     struct Thread **head = &cs->run_tree[t->band];
 
     // Empty band or t < head: prepend.
@@ -480,10 +491,15 @@ static struct Thread *try_steal(struct CpuSched *cs, bool *contended_out) {
         // are therefore CPU-pinned. The realistic case is a per-CPU idle
         // thread sitting in run_tree[BAND_IDLE]; skipping it there costs
         // nothing (an idle thread is not work worth stealing).
+        // #860: g_bootcpu_idle is CPU-0-pinned despite owning a real kstack
+        // (so the kstack_base != NULL gate alone does NOT exclude it the way it
+        // excludes the secondaries' kstack_base==NULL idles). It must stay
+        // off-tree (the yield path enforces that), so this guard is defense in
+        // depth -- a backstop if any future path leaks it into a tree.
         struct Thread *stolen = NULL;
         for (unsigned b = 0; b < SCHED_BAND_COUNT && !stolen; b++) {
             struct Thread *cand = peer->run_tree[b];
-            if (cand && cand->kstack_base != NULL) {
+            if (cand && cand->kstack_base != NULL && cand != g_bootcpu_idle) {
                 stolen = cand;
                 unlink(peer, stolen);
             }
@@ -603,24 +619,31 @@ void sched(void) {
             // WFI loops until an IRQ arrives that makes some thread
             // RUNNABLE; its own sched() then picks that thread up.
             //
-            // g_bootcpu_idle is kept OFF the run tree. P4-Ic6 did this
-            // to dodge preempt-time context switches that, under the
-            // pre-P5 EL1t/EL1h dual-mode kernel, could clobber the
-            // per-CPU exception-stack pointer. P5-el1h-kernel removed
-            // that hazard entirely (uniform EL1h, no separate exception
-            // stack — ARCHITECTURE.md §12.1, I-21), so the off-run-tree
-            // arrangement is now just an artifact; folding g_bootcpu_idle
-            // into cs->run_tree[BAND_IDLE] like the secondaries' idles
-            // is a deferred scheduler-cleanup item, not a correctness
-            // fix. The explicit deadlock-path switch here works either
-            // way.
+            // g_bootcpu_idle is kept OFF the run tree, and that is a HARD
+            // correctness requirement (#860), NOT an artifact: it owns a real
+            // kstack (thread_create in boot_main), so unlike the secondaries'
+            // kstack_base==NULL idles it would PASS try_steal's gate. If it
+            // entered a tree a secondary would steal it while this deadlock path
+            // concurrently re-picks it -> two CPUs run it on one kstack/ctx ->
+            // context corruption (the #860 wild-PC / smashed-stack crash). The
+            // yield path keeps it off-tree; this path is its sole dispatcher.
+            // (P4-Ic6's original off-tree motivation -- dodging the pre-P5
+            // EL1t/EL1h exception-stack clobber -- is obsolete under uniform
+            // EL1h/I-21, but the off-tree invariant is now load-bearing for a
+            // DIFFERENT reason: stealability. Folding it into the tree like the
+            // secondaries' idles would REINTRODUCE the bug, not clean it up.)
             //
-            // Only the boot CPU has g_bootcpu_idle registered. For
-            // secondaries this path is unreachable in practice: their
-            // per_cpu_main idle is always in cs->run_tree[BAND_IDLE]
-            // after its first yield, so pick_next finds it. Defensive
-            // extinction kept for secondaries / mis-init scenarios.
+            // Only the boot CPU has g_bootcpu_idle registered. For secondaries
+            // this path is a genuine deadlock (their per_cpu_main idle is
+            // kstack_base==NULL + in run_tree[BAND_IDLE], so pick_next normally
+            // finds it). Defensive extinction kept for secondaries / mis-init.
             if (g_bootcpu_idle && smp_cpu_idx_self() == 0) {
+                // #860 belt-and-suspenders: g_bootcpu_idle is off-tree +
+                // unstealable, so it can only ever run here on cpu 0 -- it must
+                // NOT already be on_cpu. A true on_cpu here is a double-dispatch
+                // (the exact corruption); fail loud rather than corrupt silent.
+                if (__atomic_load_n(&g_bootcpu_idle->on_cpu, __ATOMIC_ACQUIRE))
+                    extinction("#860: g_bootcpu_idle already on_cpu at deadlock dispatch");
                 next = g_bootcpu_idle;
             } else {
                 extinction("sched: deadlock — current is blocking, no runnable peer system-wide");
@@ -651,17 +674,23 @@ void sched(void) {
     }
 
     if (prev->state == THREAD_RUNNING) {
-        // Yield: advance vd_t past all currently-runnable threads;
-        // insert prev at the back of its band's rotation. P2-Cd: the
-        // per-CPU idle thread participates in the run tree like any
-        // other thread — it's "always runnable" by being re-inserted
-        // here on yield. When a CPU has nothing else queued, sched()
-        // picks idle, which calls WFI inside its run loop and yields
-        // back when an IRQ wakes it. (Per_cpu_main on secondaries +
-        // kthread on primary play this role.)
+        // Yield: advance vd_t past all currently-runnable threads; insert prev
+        // at the back of its band's rotation. The SECONDARY per-CPU idle
+        // threads participate in the run tree like any other thread -- they are
+        // kstack_base==NULL, so try_steal skips them (CPU-pinned to their boot
+        // stack). g_bootcpu_idle is the #860 EXCEPTION: it owns a REAL kstack
+        // (thread_create in boot_main -- cpu 0's boot stack belongs to kthread,
+        // so cpu 0's idle can't be a bare-boot-stack thread like the
+        // secondaries'). If it entered a tree it would be stealable (try_steal's
+        // only gate is kstack_base != NULL) AND concurrently re-pickable by cpu
+        // 0's deadlock path -> two CPUs run it on one kstack/ctx -> cross-CPU
+        // context corruption. So it MUST stay off-tree: on yield it goes
+        // RUNNABLE but is NOT inserted; the deadlock path below is its sole
+        // dispatcher, re-selecting it from that RUNNABLE-off-tree resting state.
         prev->vd_t = cs->vd_counter++;
         prev->state = THREAD_RUNNABLE;
-        insert_sorted(cs, prev);
+        if (prev != g_bootcpu_idle)
+            insert_sorted(cs, prev);
     }
     // else: block (SLEEPING) or exit (EXITING) — prev stays out of
     // the run tree. wakeup()/ready() will re-insert SLEEPING; EXITING
@@ -757,13 +786,32 @@ void sched_remove_if_runnable(struct Thread *t) {
 }
 
 unsigned sched_runnable_count(void) {
-    // P2-Cd: aggregate across all CPUs' run trees. Diagnostic only —
-    // not a hot-path operation.
+    // P2-Cd: aggregate runnable WORK across all CPUs' run trees. Diagnostic
+    // only -- not a hot-path operation, and consulted by NO scheduling
+    // decision (the /ctl `runnable` line, the boot print, and the in-kernel
+    // quiescence assertions).
+    //
+    // SCHED_BAND_IDLE is EXCLUDED on purpose. The per-CPU idle threads are
+    // always-runnable scheduler infrastructure, not pending work: each
+    // secondary's idle thread lives in cs->run_tree[BAND_IDLE] ("participates
+    // in the run tree like any other thread", sched() below), and the boot
+    // CPU's g_bootcpu_idle is the off-tree exception. Counting the in-tree
+    // secondary idles made this report a phantom backlog on an idle multi-CPU
+    // system, and made the `sched_runnable_count()==0` quiescence assertions
+    // race a secondary idle thread that, under host load, is in-tree (rather
+    // than the running thread) at the check instant -- the #857 "smp8 cons.*
+    // flake", which was never console_mgr and never a kernel fault, just a
+    // benign idle thread miscounted as work. Real runnable work
+    // (BAND_INTERACTIVE / BAND_NORMAL) is still counted, so a genuinely
+    // stranded work thread is never masked. (g_bootcpu_idle MUST stay off-tree
+    // -- #860: it owns a real kstack so a tree entry makes it stealable; it is
+    // never counted here regardless.)
     unsigned n = 0;
     for (unsigned i = 0; i < DTB_MAX_CPUS; i++) {
         struct CpuSched *cs = &g_cpu_sched[i];
         if (!cs->initialized) continue;
         for (unsigned b = 0; b < SCHED_BAND_COUNT; b++) {
+            if (b == SCHED_BAND_IDLE) continue;
             for (struct Thread *t = cs->run_tree[b]; t; t = t->runnable_next) {
                 n++;
             }
@@ -783,6 +831,37 @@ unsigned sched_runnable_count_band(unsigned band) {
         }
     }
     return n;
+}
+
+// Best-effort snapshot of every runnable thread across ALL CPUs' run trees
+// (every band, INCLUDING idle -- the dump shows everything so a quiescence
+// failure can be fingerprinted), with enough identity (cpu / tid / band /
+// state / on_cpu / proc) to name a thread. Lock-free on purpose: it is called
+// from the test-fail path and the per-test quiescence guard, where a racing
+// mutation during the walk is acceptable -- the goal is to SEE the thread, not
+// a consistent count. Cost is paid only on the failure path, never the hot
+// path. This is the instrument that cracked #857 (cpu=1 tid=1 band=IDLE = a
+// benign secondary idle thread, not a stranded work thread).
+void sched_dump_runnable(const char *tag) {
+    uart_puts("  [runnable-dump ");
+    uart_puts(tag ? tag : "?");
+    uart_puts("]\n");
+    for (unsigned i = 0; i < DTB_MAX_CPUS; i++) {
+        struct CpuSched *cs = &g_cpu_sched[i];
+        if (!cs->initialized) continue;
+        for (unsigned b = 0; b < SCHED_BAND_COUNT; b++) {
+            for (struct Thread *t = cs->run_tree[b]; t; t = t->runnable_next) {
+                uart_puts("    cpu=");    uart_putdec((u64)i);
+                uart_puts(" tid=");       uart_putdec((u64)(unsigned)t->tid);
+                uart_puts(" band=");      uart_putdec((u64)b);
+                uart_puts(" state=");     uart_putdec((u64)t->state);
+                uart_puts(" on_cpu=");    uart_putdec((u64)(t->on_cpu ? 1u : 0u));
+                uart_puts(" proc=");      uart_puthex64((u64)(uintptr_t)t->proc);
+                uart_puts(" magic_ok=");  uart_putdec((u64)(t->magic == THREAD_MAGIC ? 1u : 0u));
+                uart_puts("\n");
+            }
+        }
+    }
 }
 
 // ============================================================================

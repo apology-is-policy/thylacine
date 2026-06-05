@@ -18,6 +18,7 @@
 
 #include "../../arch/arm64/uart.h"
 
+#include <thylacine/sched.h>   // DEBUG (#857): sched_dump_runnable on any test failure
 #include <thylacine/types.h>
 
 // ---------------------------------------------------------------------------
@@ -39,6 +40,7 @@ void test_fp_cpacr_enabled(void);
 void test_fp_round_trip_v_regs_fpsr_fpcr(void);
 void test_sched_dispatch_smoke(void);
 void test_sched_runnable_count(void);
+void test_sched_runnable_count_excludes_idle(void);
 void test_sched_preemption_smoke(void);
 void test_sched_idle_in_wfi_observability(void);
 void test_sched_notify_idle_peer_smoke(void);
@@ -755,6 +757,8 @@ struct test_case g_tests[] = {
                                        test_fp_round_trip_v_regs_fpsr_fpcr, false, NULL },
     { "scheduler.dispatch_smoke",      test_sched_dispatch_smoke,          false, NULL },
     { "scheduler.runnable_count",      test_sched_runnable_count,          false, NULL },
+    { "scheduler.runnable_count_excludes_idle",
+                                       test_sched_runnable_count_excludes_idle, false, NULL },
     { "scheduler.preemption_smoke",    test_sched_preemption_smoke,        false, NULL },
     { "scheduler.idle_in_wfi_observability",
                                        test_sched_idle_in_wfi_observability,
@@ -1744,6 +1748,11 @@ void test_fail(const char *msg) {
         current_test->failed = true;
         current_test->fail_msg = msg;
     }
+    // Dump the all-CPU runnable set on ANY test failure, so a scheduler-
+    // quiescence assertion (sched_runnable_count()==0) self-documents which
+    // thread is on which CPU. Runs only on the (rare) failure path -- no
+    // passing-path cost, no timing detune. (This instrument cracked #857.)
+    sched_dump_runnable(msg);
 }
 
 void test_run_all(void) {

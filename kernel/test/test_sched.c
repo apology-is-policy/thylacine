@@ -220,6 +220,45 @@ void test_sched_runnable_count(void) {
         "thread_free of RUNNABLE thread restored count to 0");
 }
 
+// scheduler.runnable_count_excludes_idle (#857 regression)
+//   sched_runnable_count() reports runnable WORK and MUST exclude
+//   SCHED_BAND_IDLE. The per-CPU idle threads live in run_tree[BAND_IDLE] on
+//   secondaries ("participate in the run tree like any other thread"), so a
+//   count that included them reported a phantom backlog and made the
+//   sched_runnable_count()==0 quiescence assertions race a secondary idle
+//   thread that, under host load, sat in-tree at the check instant -- the smp8
+//   "cons.* flake" (which was never console_mgr, never a kernel fault). This
+//   pins the fix deterministically at smp1: a band-IDLE thread in the tree is
+//   invisible to the work count yet visible to the per-band query, and a
+//   band-WORK thread is still counted (so a real strand is never masked).
+void test_sched_runnable_count_excludes_idle(void) {
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "work count 0 at entry");
+
+    struct Thread *idle_band = thread_create(kproc(), sched_test_thread_a);
+    TEST_ASSERT(idle_band != NULL, "thread_create failed");
+    idle_band->band = SCHED_BAND_IDLE;          // mimic a per-CPU idle thread
+    ready(idle_band);
+
+    // Pre-#857 this returned 1 (idle miscounted as work) -> the smp8 flake.
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u,
+        "a band-IDLE thread is NOT counted as runnable work");
+    TEST_EXPECT_EQ(sched_runnable_count_band(SCHED_BAND_IDLE), 1u,
+        "the band-IDLE thread IS present in the IDLE band");
+
+    // A real WORK thread alongside it IS counted (no masking of real strands).
+    struct Thread *work = thread_create(kproc(), sched_test_thread_b);
+    TEST_ASSERT(work != NULL, "thread_create(work) failed");   // default band NORMAL
+    ready(work);
+    TEST_EXPECT_EQ(sched_runnable_count(), 1u,
+        "a band-NORMAL work thread IS counted (idle excluded, work included)");
+
+    thread_free(work);
+    thread_free(idle_band);
+    TEST_EXPECT_EQ(sched_runnable_count(), 0u, "work count 0 after free");
+    TEST_EXPECT_EQ(sched_runnable_count_band(SCHED_BAND_IDLE), 0u,
+        "IDLE band empty after free");
+}
+
 
 // =============================================================================
 // P3-G: WFI-aware work-stealing tests.

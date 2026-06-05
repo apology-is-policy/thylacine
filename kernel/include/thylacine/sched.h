@@ -154,6 +154,7 @@ void ready(struct Thread *t);
 // Diagnostic accessors.
 unsigned sched_runnable_count(void);
 unsigned sched_runnable_count_band(unsigned band);
+void sched_dump_runnable(const char *tag);   // DEBUG (#857): all-CPU runnable set + RX-IRQ counters
 
 // Internal — called by thread_free if t->state == THREAD_RUNNABLE so the
 // run tree doesn't carry a dangling pointer. Idempotent: safe to call

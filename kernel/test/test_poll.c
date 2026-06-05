@@ -248,6 +248,11 @@ void test_poll_block_then_wake_pollin(void) {
     TEST_EXPECT_EQ((s64)g_poll_revents, (s64)POLLIN,
         "consumer's revents = POLLIN");
 
+    // Reap the poll helper: it parked in a trailing sched() (RUNNABLE, never
+    // returns from its entry). Without this it leaks as a runnable thread for
+    // the rest of the boot -- the band-NORMAL half of the #857 quiescence
+    // pollution. Matches test_cons / test_sched hygiene.
+    thread_free(consumer);
     drop_test_proc(p);
 }
 
@@ -283,6 +288,7 @@ void test_poll_pollhup_on_close_write_end(void) {
     TEST_ASSERT((g_poll_revents & POLLHUP) != 0,
         "consumer's revents includes POLLHUP (POSIX hang-up)");
 
+    thread_free(consumer);          // reap the parked poll helper (see block_then_wake)
     drop_test_proc(p);
 }
 
@@ -594,6 +600,7 @@ void test_poll_devsrv_listener_block_then_wake(void) {
     TEST_EXPECT_EQ((s64)g_listener_poll_revents, (s64)POLLIN,
         "wakeup revents = POLLIN");
 
+    thread_free(poller);            // reap the parked poll helper (see block_then_wake)
     srv_registry_reset();
     drop_test_proc(client);
     drop_test_proc(corvus);
@@ -632,6 +639,7 @@ void test_poll_devsrv_listener_pollhup_on_tombstone(void) {
     TEST_ASSERT((g_listener_poll_revents & POLLHUP) != 0,
         "tombstone revents includes POLLHUP");
 
+    thread_free(poller);            // reap the parked poll helper (see block_then_wake)
     drop_test_proc(corvus);
 }
 
@@ -804,6 +812,7 @@ void test_poll_devsrv_conn_block_then_wake_pollin(void) {
     TEST_EXPECT_EQ((s64)g_conn_poll_revents, (s64)POLLIN,
         "wakeup revents = POLLIN");
 
+    thread_free(poller);            // reap the parked poll helper (see block_then_wake)
     srv_registry_reset();
     drop_test_proc(client);
     drop_test_proc(corvus);

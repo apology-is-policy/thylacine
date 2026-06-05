@@ -127,6 +127,11 @@ void test_pipe_blocking_write_wakes_sleeping_reader(void) {
             "consumer's bytes match what boot wrote");
     }
 
+    // Reap the consumer: it ran its op then parked in a trailing sched()
+    // (RUNNABLE, never returns from its entry). Without this it leaks as a
+    // runnable thread for the rest of the boot -- the band-NORMAL half of the
+    // #857 quiescence pollution. Matches test_cons / test_sched hygiene.
+    thread_free(consumer);
     spoor_clunk(g_rd);
     spoor_clunk(g_wr);
 }
@@ -161,6 +166,7 @@ void test_pipe_blocking_read_wakes_sleeping_writer(void) {
     TEST_EXPECT_EQ(g_consumer_result, 1L,
         "consumer wrote 1 byte after wake");
 
+    thread_free(consumer);          // reap the parked helper (see write_wakes)
     spoor_clunk(g_rd);
     spoor_clunk(g_wr);
 }
@@ -188,6 +194,7 @@ void test_pipe_blocking_close_write_end_wakes_reader_with_eof(void) {
     TEST_EXPECT_EQ(g_consumer_result, 0L,
         "consumer read returns 0 (EOF) after write end closed");
 
+    thread_free(consumer);          // reap the parked helper (see write_wakes)
     spoor_clunk(g_rd);
 }
 
@@ -221,5 +228,6 @@ void test_pipe_blocking_close_read_end_wakes_writer_with_epipe(void) {
     TEST_EXPECT_EQ(g_consumer_result, -1L,
         "consumer write returns -1 (EPIPE) after read end closed");
 
+    thread_free(consumer);          // reap the parked helper (see write_wakes)
     spoor_clunk(g_wr);
 }
