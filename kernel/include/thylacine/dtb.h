@@ -179,6 +179,18 @@ u32 dtb_cpu_count(void);
 // passes the raw value to PSCI_CPU_ON.
 bool dtb_cpu_mpidr(u32 idx, u64 *out_mpidr);
 
+// Raw `capacity-dmips-mhz` for the `idx`-th cpu node (0-based, DTB
+// declaration order) — the per-core relative-performance hint the HMP
+// scheduler normalizes into a capacity class (ARCH §8.4.4; composes with
+// I-15, "the hardware view derives entirely from the DTB"). The property
+// is a single u32 cell; a higher value means a more capable core (Linux's
+// `capacity-dmips-mhz` convention). Returns true and writes *out only when
+// the node declares the property with a positive value; returns false (out
+// untouched) when absent — the QEMU-virt / homogeneous case, where every
+// core is treated at the default full capacity. idx >= dtb_cpu_count() or
+// idx >= DTB_MAX_CPUS also returns false.
+bool dtb_cpu_capacity(u32 idx, u32 *out_dmips_mhz);
+
 // PSCI calling-convention method. Encoded as:
 //   DTB_PSCI_NONE = 0  — no /psci node, or method missing/unknown.
 //   DTB_PSCI_HVC  = 1  — /psci/method = "hvc" (QEMU virt default).

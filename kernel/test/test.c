@@ -45,6 +45,10 @@ void test_sched_preemption_smoke(void);
 void test_sched_idle_in_wfi_observability(void);
 void test_sched_notify_idle_peer_smoke(void);
 void test_sched_notify_disabled_no_ipi(void);
+void test_sched_capacity_normalize_synthetic_dtb(void);
+void test_sched_place_by_capacity_synthetic_dtb(void);
+void test_sched_select_target_cpu_homogeneous_is_prev(void);
+void test_sched_ready_on_cross_cpu_enqueue(void);
 void test_rendez_sleep_immediate_cond_true(void);
 void test_rendez_basic_handoff(void);
 void test_rendez_death_interrupts_sleep(void);
@@ -767,6 +771,14 @@ struct test_case g_tests[] = {
                                        test_sched_notify_idle_peer_smoke,  false, NULL },
     { "scheduler.notify_disabled_no_ipi",
                                        test_sched_notify_disabled_no_ipi,  false, NULL },
+    { "scheduler.capacity_normalize_synthetic_dtb",
+                                       test_sched_capacity_normalize_synthetic_dtb, false, NULL },
+    { "scheduler.place_by_capacity_synthetic_dtb",
+                                       test_sched_place_by_capacity_synthetic_dtb, false, NULL },
+    { "scheduler.select_target_cpu_homogeneous_is_prev",
+                                       test_sched_select_target_cpu_homogeneous_is_prev, false, NULL },
+    { "scheduler.ready_on_cross_cpu_enqueue",
+                                       test_sched_ready_on_cross_cpu_enqueue, false, NULL },
     { "rendez.sleep_immediate_cond_true",
                                        test_rendez_sleep_immediate_cond_true,
                                                                            false, NULL },

@@ -709,21 +709,27 @@ u64 dtb_get_chosen_rng_seed(void) {
 static u32 g_cpu_count_cached = 0;
 
 // Walk callback: for each node with device_type = "cpu", report the
-// cpu's reg cell. Stops walking when stop_at_count is reached.
+// cpu's reg cell (and, when present, its capacity-dmips-mhz). Stops
+// recording past max_count but keeps counting.
 //
 // out_mpidrs: pre-allocated buffer of at least DTB_MAX_CPUS u64s.
+// out_caps:   optional (NULL to ignore) buffer of at least DTB_MAX_CPUS
+//             u32s; entry i = the cpu's raw capacity-dmips-mhz, or 0 if
+//             the node did not declare it (capacity-dmips-mhz is a
+//             positive value, so 0 is an unambiguous "absent" sentinel).
 // returns: count actually populated (≤ DTB_MAX_CPUS).
-static u32 dtb_walk_cpus(u64 *out_mpidrs, u32 max_count) {
+static u32 dtb_walk_cpus(u64 *out_mpidrs, u32 *out_caps, u32 max_count) {
     if (!g_dtb.ready) return 0;
 
     struct fdt_walker w;
     walker_start(&w);
 
-    // Per-node accumulator stack — track device_type and reg per node.
+    // Per-node accumulator stack — track device_type, reg, capacity per node.
     struct {
         bool      is_cpu;
         u32       reg_cell;
         bool      reg_present;
+        u32       cap_dmips;
     } stack[DTB_MAX_DEPTH];
     int sp = 0;
     u32 count = 0;
@@ -740,6 +746,7 @@ static u32 dtb_walk_cpus(u64 *out_mpidrs, u32 max_count) {
                 stack[sp].is_cpu      = false;
                 stack[sp].reg_cell    = 0;
                 stack[sp].reg_present = false;
+                stack[sp].cap_dmips   = 0;
             }
             sp++;
             continue;
@@ -751,6 +758,7 @@ static u32 dtb_walk_cpus(u64 *out_mpidrs, u32 max_count) {
                     stack[sp].is_cpu && stack[sp].reg_present) {
                     if (count < max_count) {
                         out_mpidrs[count] = (u64)stack[sp].reg_cell;
+                        if (out_caps) out_caps[count] = stack[sp].cap_dmips;
                     }
                     count++;
                 }
@@ -767,6 +775,10 @@ static u32 dtb_walk_cpus(u64 *out_mpidrs, u32 max_count) {
                 // /cpus has #address-cells = 1; reg is a single u32 cell.
                 stack[si].reg_cell    = be32_load(propdata);
                 stack[si].reg_present = true;
+            } else if (k_streq(propname, "capacity-dmips-mhz") && proplen >= 4) {
+                // A single u32 cell — the per-core relative-performance hint
+                // (ARCH §8.4.4). Absent on QEMU virt / homogeneous boards.
+                stack[si].cap_dmips = be32_load(propdata);
             }
         }
     }
@@ -776,7 +788,7 @@ static u32 dtb_walk_cpus(u64 *out_mpidrs, u32 max_count) {
 u32 dtb_cpu_count(void) {
     if (g_cpu_count_cached) return g_cpu_count_cached;
     u64 ignore[DTB_MAX_CPUS];
-    g_cpu_count_cached = dtb_walk_cpus(ignore, DTB_MAX_CPUS);
+    g_cpu_count_cached = dtb_walk_cpus(ignore, NULL, DTB_MAX_CPUS);
     return g_cpu_count_cached;
 }
 
@@ -785,10 +797,24 @@ bool dtb_cpu_mpidr(u32 idx, u64 *out_mpidr) {
     if (idx >= DTB_MAX_CPUS) return false;
 
     u64 ids[DTB_MAX_CPUS];
-    u32 count = dtb_walk_cpus(ids, DTB_MAX_CPUS);
+    u32 count = dtb_walk_cpus(ids, NULL, DTB_MAX_CPUS);
     if (idx >= count) return false;
 
     *out_mpidr = ids[idx];
+    return true;
+}
+
+bool dtb_cpu_capacity(u32 idx, u32 *out_dmips_mhz) {
+    if (!out_dmips_mhz) return false;
+    if (idx >= DTB_MAX_CPUS) return false;
+
+    u64 ids[DTB_MAX_CPUS];
+    u32 caps[DTB_MAX_CPUS];
+    u32 count = dtb_walk_cpus(ids, caps, DTB_MAX_CPUS);
+    if (idx >= count) return false;
+    if (caps[idx] == 0) return false;     // property absent on this node
+
+    *out_dmips_mhz = caps[idx];
     return true;
 }
 

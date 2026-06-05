@@ -424,3 +424,187 @@ void test_sched_notify_disabled_no_ipi(void) {
     // without IPI to wake secondaries). thread_free removes.
     thread_free(t);
 }
+
+// =============================================================================
+// HMP foundation (#864, ARCH §8.4.4): capacity + capacity-aware placement.
+//
+// The placement LOGIC is verified here against a SYNTHETIC asymmetric DTB --
+// declared capacity-dmips-mhz asymmetry expressed directly as the normalized
+// capacity arrays the DTB parse would produce. Deterministic; no real perf
+// asymmetry needed (the "verification boundary", ARCH §8.4.4). The EMPIRICAL
+// EAS tuning is deferred to real heterogeneous hardware. The SAFETY of any
+// placement (under arbitrary target CPU) is the composition result proved by
+// specs/sched_alpha.tla; these tests cover the heuristic the safety proof is
+// agnostic to.
+// =============================================================================
+
+// scheduler.capacity_normalize_synthetic_dtb
+//   sched_capacity_normalize maps raw capacity-dmips-mhz (0 == not declared)
+//   to normalized [0, SCHED_CAPACITY_SCALE] capacities + the hetero verdict.
+void test_sched_capacity_normalize_synthetic_dtb(void) {
+    u32 out[DTB_MAX_CPUS];
+
+    // All cores declare the same dmips -> homogeneous, all full scale.
+    {
+        u32 raw[4] = { 1024, 1024, 1024, 1024 };
+        bool h = sched_capacity_normalize(raw, 4, out);
+        TEST_EXPECT_EQ(h, false, "equal dmips -> not heterogeneous");
+        for (unsigned i = 0; i < 4; i++)
+            TEST_EXPECT_EQ(out[i], SCHED_CAPACITY_SCALE, "equal -> full scale");
+    }
+
+    // No core declares capacity-dmips-mhz (QEMU virt) -> homogeneous default.
+    {
+        u32 raw[4] = { 0, 0, 0, 0 };
+        bool h = sched_capacity_normalize(raw, 4, out);
+        TEST_EXPECT_EQ(h, false, "all-absent -> not heterogeneous");
+        for (unsigned i = 0; i < 4; i++)
+            TEST_EXPECT_EQ(out[i], SCHED_CAPACITY_SCALE, "absent -> full scale");
+    }
+
+    // big.LITTLE: two big cores (1024) + two little (512) -> normalized to
+    // 1024 / 512 (max maps to SCALE); heterogeneous.
+    {
+        u32 raw[4] = { 1024, 1024, 512, 512 };
+        bool h = sched_capacity_normalize(raw, 4, out);
+        TEST_EXPECT_EQ(h, true, "big.LITTLE -> heterogeneous");
+        TEST_EXPECT_EQ(out[0], 1024u, "big core -> 1024");
+        TEST_EXPECT_EQ(out[1], 1024u, "big core -> 1024");
+        TEST_EXPECT_EQ(out[2], 512u,  "little core -> 512");
+        TEST_EXPECT_EQ(out[3], 512u,  "little core -> 512");
+    }
+
+    // Arbitrary magnitudes normalize against the max (2000 -> 1024, 1000 -> 512).
+    {
+        u32 raw[2] = { 2000, 1000 };
+        bool h = sched_capacity_normalize(raw, 2, out);
+        TEST_EXPECT_EQ(h, true, "2:1 dmips -> heterogeneous");
+        TEST_EXPECT_EQ(out[0], 1024u, "max dmips -> SCALE");
+        TEST_EXPECT_EQ(out[1], 512u,  "half dmips -> SCALE/2");
+    }
+
+    // A core that does not declare it, on a board where another does, is
+    // assumed full capacity (never wrongly demoted).
+    {
+        u32 raw[2] = { 2000, 0 };
+        bool h = sched_capacity_normalize(raw, 2, out);
+        TEST_EXPECT_EQ(out[0], 1024u, "declared max -> SCALE");
+        TEST_EXPECT_EQ(out[1], SCHED_CAPACITY_SCALE,
+            "undeclared on a mixed board -> assumed full capacity");
+        TEST_EXPECT_EQ(h, false, "1024 vs assumed-1024 -> not distinguishable");
+    }
+}
+
+// scheduler.place_by_capacity_synthetic_dtb
+//   The core question: "does the policy route a heavy task to the high-capacity
+//   CPU, leave a light task put, and not migrate a heavy task already on the
+//   biggest core?" util values are chosen far from the misfit boundary so the
+//   test is robust to the v1.0 placeholder threshold value.
+void test_sched_place_by_capacity_synthetic_dtb(void) {
+    // cpu0 = big (1024), cpu1 = little (512).
+    u32 caps2[2] = { 1024, 512 };
+
+    // Homogeneous verdict -> identity placement regardless of util.
+    TEST_EXPECT_EQ(sched_place_by_capacity(1000u, 1, caps2, 2, false), 1u,
+        "homogeneous -> keep prev (heavy task)");
+    TEST_EXPECT_EQ(sched_place_by_capacity(50u, 0, caps2, 2, false), 0u,
+        "homogeneous -> keep prev (light task)");
+
+    // Heterogeneous: a heavy task on the little core is a misfit -> big core.
+    TEST_EXPECT_EQ(sched_place_by_capacity(1000u, 1, caps2, 2, true), 0u,
+        "heavy task on little core -> routed to big core");
+
+    // A light task on the little core fits -> stays (no needless migration).
+    TEST_EXPECT_EQ(sched_place_by_capacity(50u, 1, caps2, 2, true), 1u,
+        "light task on little core -> stays put");
+
+    // A heavy task already on the biggest core stays (nothing bigger to find).
+    TEST_EXPECT_EQ(sched_place_by_capacity(1000u, 0, caps2, 2, true), 0u,
+        "heavy task on big core -> stays (already the highest capacity)");
+
+    // 4-CPU big.LITTLE: heavy task on a little core -> the first big core.
+    {
+        u32 caps4[4] = { 1024, 1024, 512, 512 };
+        TEST_EXPECT_EQ(sched_place_by_capacity(1000u, 2, caps4, 4, true), 0u,
+            "heavy task on little core -> highest-capacity (first big) core");
+        TEST_EXPECT_EQ(sched_place_by_capacity(50u, 3, caps4, 4, true), 3u,
+            "light task on little core -> stays put");
+    }
+
+    // Defensive: prev_cpu out of range -> return prev unchanged.
+    TEST_EXPECT_EQ(sched_place_by_capacity(1000u, 5, caps2, 2, true), 5u,
+        "out-of-range prev -> returned unchanged");
+}
+
+// scheduler.select_target_cpu_homogeneous_is_prev
+//   On the REAL (uniform) boot topology, the placement wrapper is the identity
+//   for EVERY CPU and EVERY task -- this is the v1.0 behavior-preservation
+//   guarantee that ready() == ready_on(self) == the pre-#864 placement. Also
+//   pins that a CPU-pinned thread never migrates.
+void test_sched_select_target_cpu_homogeneous_is_prev(void) {
+    // QEMU virt / RPi declare no capacity-dmips-mhz -> homogeneous.
+    TEST_EXPECT_EQ(sched_topology_hetero(), false,
+        "boot topology is homogeneous (no capacity-dmips-mhz in the DTB)");
+    TEST_EXPECT_EQ(sched_cpu_capacity(0), SCHED_CAPACITY_SCALE,
+        "cpu0 capacity is the full scale on a uniform topology");
+
+    struct Thread *t = thread_create(kproc(), sched_test_thread_a);
+    TEST_ASSERT(t != NULL, "thread_create failed");
+    t->util = 1000;                      // a "heavy" task...
+
+    // ...still stays on its prev CPU on every CPU, because the topology is
+    // homogeneous (the policy short-circuits to prev).
+    unsigned n = smp_cpu_count();
+    if (n > DTB_MAX_CPUS) n = DTB_MAX_CPUS;
+    for (unsigned c = 0; c < n; c++) {
+        TEST_EXPECT_EQ(select_target_cpu(t, c), c,
+            "homogeneous topology -> select_target_cpu is the identity");
+    }
+
+    // A CPU-pinned thread never migrates regardless of topology/util.
+    t->cpu_pinned = true;
+    TEST_EXPECT_EQ(select_target_cpu(t, 0), 0u,
+        "a cpu_pinned thread stays on its prev CPU");
+
+    thread_free(t);
+}
+
+// scheduler.ready_on_cross_cpu_enqueue
+//   The enqueue MECHANISM (ready_on) places a thread on an EXPLICIT target
+//   CPU's run tree -- the load-bearing capability the placement policy + a
+//   future misfit-push both consume. Notify is disabled during tests, so a
+//   placed-on-a-parked-secondary thread sits still (deterministic) until
+//   removed. At -smp 1 the self-target path is exercised instead.
+void test_sched_ready_on_cross_cpu_enqueue(void) {
+    struct Thread *t = thread_create(kproc(), sched_test_thread_a);
+    TEST_ASSERT(t != NULL, "thread_create failed");
+    TEST_EXPECT_EQ(t->state, THREAD_RUNNABLE, "fresh thread is RUNNABLE");
+
+    unsigned self = smp_cpu_idx_self();
+
+    if (smp_cpu_count() >= 2) {
+        // Target a peer CPU explicitly. With notify disabled the secondary
+        // stays parked (no per-CPU timer during tests, #810), so t sits in
+        // cpu1's tree deterministically.
+        unsigned peer = (self == 1) ? 0u : 1u;
+        ready_on(peer, t);
+        TEST_EXPECT_EQ(sched_in_cpu_tree(peer, t), true,
+            "ready_on placed the thread on the target peer's run tree");
+        TEST_EXPECT_EQ(sched_in_cpu_tree(self, t), false,
+            "the thread is NOT on the caller's own tree (placed cross-CPU)");
+    } else {
+        // -smp 1: only the self target exists; ready_on(self) == local enqueue.
+        ready_on(self, t);
+        TEST_EXPECT_EQ(sched_in_cpu_tree(self, t), true,
+            "ready_on(self) placed the thread on the caller's run tree");
+    }
+
+    // Remove from whichever tree it landed in, then free.
+    sched_remove_if_runnable(t);
+    TEST_EXPECT_EQ(sched_in_cpu_tree(self, t), false, "removed from self tree");
+    if (smp_cpu_count() >= 2) {
+        unsigned peer = (self == 1) ? 0u : 1u;
+        TEST_EXPECT_EQ(sched_in_cpu_tree(peer, t), false, "removed from peer tree");
+    }
+    thread_free(t);
+}

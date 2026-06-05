@@ -105,9 +105,43 @@ struct CpuSched {
     // (it still ALSO has its always-armed timer as a <=1ms backstop). Modeled in
     // `scheduler.tla` by `EnterWFI` + `IPI_Deliver`-clears-`wfi[dst]`.
     volatile bool  idle_in_wfi;
+
+    // HMP foundation (#864, ARCH §8.4.4): this CPU's normalized capacity class
+    // in [0, SCHED_CAPACITY_SCALE], parsed from the DTB's capacity-dmips-mhz by
+    // sched_capacity_init (boot CPU, once). SCHED_CAPACITY_SCALE on a uniform
+    // topology (QEMU virt / RPi) -- where the placement policy is inert. Set
+    // once at boot, never mutated thereafter (read-only data after init), so a
+    // plain field with the boot-time publish barrier suffices.
+    u32            capacity;
 };
 
 static struct CpuSched g_cpu_sched[DTB_MAX_CPUS];
+
+// HMP foundation (#864, ARCH §8.4.4): true iff the DTB declared a
+// heterogeneous topology (some CPU's capacity-dmips-mhz differs). Set once by
+// sched_capacity_init on the boot CPU; read by select_target_cpu. FALSE on
+// QEMU virt / RPi (uniform), so the capacity-aware placement is inert and
+// ready() preserves the pre-#864 "enqueue on the waking CPU" behavior exactly.
+static bool g_sched_hetero;
+
+// Placement misfit threshold (percent of a CPU's capacity). A task whose util
+// exceeds this fraction of its prev CPU's capacity is a "misfit" and is biased
+// toward a higher-capacity CPU. A v1.0 placeholder -- the empirical misfit
+// tuning is deferred to real heterogeneous hardware (ARCH §8.4.4). Only
+// consulted on a declared-heterogeneous topology (g_sched_hetero), so inert at
+// v1.0 on the uniform targets.
+#define SCHED_MISFIT_PCT  80u
+
+// HMP foundation (#864): util EWMA shift. util ramps toward SCHED_CAPACITY_-
+// SCALE while a thread runs (accrue, sched_tick) and decays toward 0 while it
+// is blocked (sched() SLEEPING path), each step moving 1/2^SHIFT of the gap.
+// A simple, cheap estimator; the tuned PELT geometric series (y^32 window) is
+// the deferred EAS work (ARCH §8.4.4). Read by placement only when hetero.
+#define SCHED_UTIL_SHIFT  3u
+
+// Forward declaration: sched_in_cpu_tree (HMP section) reads in_run_tree,
+// which is defined further down with the run-tree helpers.
+static bool in_run_tree(struct CpuSched *cs, struct Thread *t);
 
 // P2-Cd: per-CPU preemption signal. Each CPU's timer IRQ writes its
 // own slot via sched_tick(); preempt_check_irq() on the same CPU
@@ -149,6 +183,161 @@ void sched_init(unsigned cpu_idx) {
 struct Thread *sched_idle_thread(unsigned cpu_idx) {
     if (cpu_idx >= DTB_MAX_CPUS) return NULL;
     return g_cpu_sched[cpu_idx].idle;
+}
+
+// ============================================================================
+// HMP foundation (#864, ARCH §8.4.4): per-CPU capacity + capacity-aware
+// placement. The placement POLICY is separated from the enqueue MECHANISM
+// (ready_on, below) per ARCH §8.4.3. The two PURE functions
+// (sched_capacity_normalize + sched_place_by_capacity) hold the load-bearing
+// logic and are unit-tested against a synthetic asymmetric DTB; the safety of
+// ANY placement is the composition result proved by specs/sched_alpha.tla
+// (Place picks the target non-deterministically). The EMPIRICAL EAS tuning
+// (PELT decay constants, energy model, schedutil/DVFS, misfit thresholds) is
+// deferred to real heterogeneous hardware -- unverifiable on QEMU/HVF (the
+// "verification boundary", ARCH §8.4.4). On the uniform v1.0 targets this
+// whole layer is inert: g_sched_hetero is false, so select_target_cpu returns
+// the prev CPU and ready() behaves exactly as it did before #864.
+// ============================================================================
+
+bool sched_capacity_normalize(const u32 *raw_dmips, unsigned n, u32 *out_caps) {
+    if (!raw_dmips || !out_caps || n == 0) return false;
+
+    // Max declared raw value across the present cpus.
+    u32 max_raw = 0;
+    for (unsigned i = 0; i < n; i++)
+        if (raw_dmips[i] > max_raw) max_raw = raw_dmips[i];
+
+    if (max_raw == 0) {
+        // No CPU declared capacity-dmips-mhz -- the QEMU-virt / homogeneous
+        // case. Every CPU is the default full capacity; not heterogeneous.
+        for (unsigned i = 0; i < n; i++) out_caps[i] = SCHED_CAPACITY_SCALE;
+        return false;
+    }
+
+    // Normalize so the most-capable core maps to SCHED_CAPACITY_SCALE. A cpu
+    // that did NOT declare the property (raw 0) on a board where others did is
+    // assumed full capacity (never wrongly demoted). u64 math: raw <= ~10^6,
+    // * 1024 fits comfortably.
+    for (unsigned i = 0; i < n; i++) {
+        out_caps[i] = raw_dmips[i]
+            ? (u32)(((u64)raw_dmips[i] * SCHED_CAPACITY_SCALE) / max_raw)
+            : SCHED_CAPACITY_SCALE;
+    }
+
+    // Heterogeneous iff any normalized capacity differs from another.
+    for (unsigned i = 1; i < n; i++)
+        if (out_caps[i] != out_caps[0]) return true;
+    return false;
+}
+
+unsigned sched_place_by_capacity(u32 util, unsigned prev_cpu,
+                                 const u32 *caps, unsigned n, bool hetero) {
+    // Homogeneous topology: the placement is the identity -- keep the prev/
+    // waking CPU (the pre-#864 behavior). This is the v1.0 path.
+    if (!hetero || !caps || prev_cpu >= n) return prev_cpu;
+
+    // "Fits comfortably" on the prev CPU: util is at or below the misfit
+    // fraction of its capacity. Keep it where it is (no needless migration).
+    u32 prev_cap = caps[prev_cpu];
+    if ((u64)util * 100u <= (u64)prev_cap * SCHED_MISFIT_PCT)
+        return prev_cpu;
+
+    // Misfit: route to the highest-capacity CPU. If prev already IS the
+    // highest, the scan leaves best == prev_cpu (a heavy task on the biggest
+    // core stays put).
+    unsigned best = prev_cpu;
+    u32 best_cap = prev_cap;
+    for (unsigned i = 0; i < n; i++) {
+        if (caps[i] > best_cap) { best = i; best_cap = caps[i]; }
+    }
+    return best;
+}
+
+u32 sched_cpu_capacity(unsigned cpu) {
+    if (cpu >= DTB_MAX_CPUS) return SCHED_CAPACITY_SCALE;
+    u32 c = g_cpu_sched[cpu].capacity;
+    return c ? c : SCHED_CAPACITY_SCALE;
+}
+
+bool sched_topology_hetero(void) {
+    return g_sched_hetero;
+}
+
+void sched_capacity_init(void) {
+    unsigned n = dtb_cpu_count();
+    if (n == 0) n = 1;
+    if (n > DTB_MAX_CPUS) n = DTB_MAX_CPUS;
+
+    u32 raw[DTB_MAX_CPUS];
+    for (unsigned i = 0; i < n; i++) {
+        u32 c = 0;
+        raw[i] = dtb_cpu_capacity(i, &c) ? c : 0u;   // 0 == not declared
+    }
+
+    u32 caps[DTB_MAX_CPUS];
+    bool hetero = sched_capacity_normalize(raw, n, caps);
+
+    // Stamp every slot: parsed value for 0..n, full capacity for any slot
+    // beyond the DTB-reported count (defensive default).
+    for (unsigned i = 0; i < DTB_MAX_CPUS; i++)
+        g_cpu_sched[i].capacity = (i < n) ? caps[i] : SCHED_CAPACITY_SCALE;
+    g_sched_hetero = hetero;
+}
+
+// HMP foundation (#864): per-task util accounting. Accrue while RUNNING (the
+// task is consuming CPU), decay while blocked. A simple EWMA stepping
+// 1/2^SCHED_UTIL_SHIFT of the gap each call; the tuned PELT series is deferred
+// (ARCH §8.4.4). Inert on uniform topology -- the value is maintained but
+// select_target_cpu ignores it when !g_sched_hetero.
+static void sched_util_accrue(struct Thread *t) {
+    if (!t) return;
+    u32 u = t->util;
+    // Saturate at the scale. Also guards the (SCALE - u) subtraction below from
+    // u32 underflow should util ever be set >= SCALE out of band (the live
+    // accrue/decay dynamics keep it < SCALE, but this makes the estimator
+    // robust to any future direct setter).
+    if (u >= SCHED_CAPACITY_SCALE) { t->util = SCHED_CAPACITY_SCALE; return; }
+    t->util = u + ((SCHED_CAPACITY_SCALE - u) >> SCHED_UTIL_SHIFT);
+}
+
+static void sched_util_decay(struct Thread *t) {
+    if (!t) return;
+    t->util -= (t->util >> SCHED_UTIL_SHIFT);
+}
+
+unsigned select_target_cpu(struct Thread *t, unsigned prev_cpu) {
+    if (!t) return prev_cpu;
+    // CPU-pinned threads (every per-CPU idle + kthread) NEVER migrate -- their
+    // home CPU is fixed (ARCH §8.4.2 / sched_alpha.tla IdleStaysHome). This is
+    // the placement-side companion to try_steal's cpu_pinned skip.
+    if (t->cpu_pinned) return prev_cpu;
+    // Uniform topology (v1.0 QEMU virt / RPi): identity placement -- keep the
+    // waking CPU. Byte-identical to the pre-#864 ready() behavior.
+    if (!g_sched_hetero) return prev_cpu;
+
+    unsigned n = smp_cpu_count();
+    if (n > DTB_MAX_CPUS) n = DTB_MAX_CPUS;
+    u32 caps[DTB_MAX_CPUS];
+    for (unsigned i = 0; i < n; i++)
+        caps[i] = g_cpu_sched[i].initialized ? g_cpu_sched[i].capacity : 0u;
+
+    unsigned tgt = sched_place_by_capacity(t->util, prev_cpu, caps, n, true);
+    // Safety: never place on an out-of-range / uninitialized CPU (an
+    // uninitialized slot had caps[i]==0 so could only be chosen if prev was
+    // also 0 -- defensive belt regardless). Fall back to the prev CPU.
+    if (tgt >= DTB_MAX_CPUS || !g_cpu_sched[tgt].initialized) return prev_cpu;
+    return tgt;
+}
+
+bool sched_in_cpu_tree(unsigned cpu, struct Thread *t) {
+    if (cpu >= DTB_MAX_CPUS || !t) return false;
+    struct CpuSched *cs = &g_cpu_sched[cpu];
+    if (!cs->initialized) return false;
+    irq_state_t s = spin_lock_irqsave(&cs->lock);
+    bool present = in_run_tree(cs, t);
+    spin_unlock_irqrestore(&cs->lock, s);
+    return present;
 }
 
 void sched_set_idle_in_wfi(bool in_wfi) {
@@ -355,7 +544,36 @@ static bool sched_notify_idle_peer(void) {
     return false;
 }
 
-void ready(struct Thread *t) {
+// HMP foundation (#864, ARCH §8.4.3): targeted cross-CPU placement notify.
+// Wake a SPECIFIC target CPU so it reschedules and runs work just placed on its
+// run tree by ready_on (a capacity-aware placement, or a future misfit push) --
+// the sibling of sched_notify_idle_peer, which instead wakes ANY idle peer to
+// steal. Unconditional IPI to the target (not gated on idle_in_wfi): if the
+// target is running lower-priority work we still want it to reschedule and
+// consider the placed thread; if it is idle the IPI wakes its WFI. Gated by
+// g_sched_notify_enabled so the UP-like in-kernel tests stay quiescent (a
+// parked secondary is not self-woken; the ready_on cross-CPU enqueue test
+// relies on the placed thread sitting still until removed). Never targets self.
+static void sched_notify_cpu(unsigned target) {
+    if (!g_sched_notify_enabled) return;
+    if (target >= DTB_MAX_CPUS) return;
+    if (target == smp_cpu_idx_self()) return;
+    if (!g_cpu_sched[target].initialized) return;
+    (void)gic_send_ipi(target, IPI_RESCHED);
+}
+
+// HMP foundation (#864, ARCH §8.4.3): the enqueue MECHANISM, separated from the
+// placement POLICY (select_target_cpu). Insert RUNNABLE `t` into target_cpu's
+// run tree under that CPU's lock. On a uniform topology target_cpu is always
+// the caller's own CPU (select_target_cpu returns prev), so this is identical
+// to the pre-#864 ready(): enqueue locally + wake an idle peer to steal. A
+// cross-CPU target enqueues onto the peer's tree + wakes the target. Safety
+// under an arbitrary target is the composition result of specs/sched_alpha.tla
+// (Place picks the target CPU non-deterministically). Lock discipline: holds
+// exactly ONE CpuSched lock (the target's) and no other -- it never nests, so
+// it cannot form a cycle with try_steal (which try_locks peers while holding
+// its own) or sched_remove_if_runnable (which takes one CPU lock at a time).
+void ready_on(unsigned target_cpu, struct Thread *t) {
     if (!t)                       extinction("ready(NULL)");
     if (t->magic != THREAD_MAGIC) extinction("ready of corrupted Thread");
     if (t->state != THREAD_RUNNABLE)
@@ -363,14 +581,17 @@ void ready(struct Thread *t) {
     if (t->band >= SCHED_BAND_COUNT)
                                   extinction("ready: invalid band");
 
-    // P2-Cd/Ce: insert into THIS CPU's run tree under THIS CPU's lock.
-    // Cross-CPU thread placement is a P2-Ce work-stealing concern: the
-    // peer CPU pulls work from us, not the other way around.
-    struct CpuSched *cs = this_cpu_sched();
+    unsigned self = smp_cpu_idx_self();
+    // Safety: fall back to the caller's CPU for an out-of-range or
+    // uninitialized target. select_target_cpu already guards this; belt for
+    // any other ready_on caller.
+    if (target_cpu >= DTB_MAX_CPUS || !g_cpu_sched[target_cpu].initialized)
+        target_cpu = self;
 
-    // P2-Bc/Ce: IRQ-mask discipline + per-CPU run-tree lock. Disable
-    // IRQs first (own-CPU re-entry) then take the lock (cross-CPU
-    // contention against work-stealing peers).
+    // IRQ-mask discipline + the target CPU's run-tree lock. Disable IRQs first
+    // (own-CPU re-entry) then take the lock (cross-CPU contention against
+    // work-stealing peers / a peer's own sched).
+    struct CpuSched *cs = &g_cpu_sched[target_cpu];
     irq_state_t s = spin_lock_irqsave(&cs->lock);
 
     if (in_run_tree(cs, t))       extinction("ready of already-runnable Thread");
@@ -379,11 +600,27 @@ void ready(struct Thread *t) {
 
     spin_unlock_irqrestore(&cs->lock, s);
 
-    // P3-G: notify an idle peer (in WFI) so it can wake and try_steal
-    // the new work. Done AFTER releasing our lock so the peer's IPI
-    // handler doesn't contend on it. Closes R5-H F78. Maps to
-    // scheduler.tla `NotifyWFIPeer(src=self, dst=peer)`.
-    (void)sched_notify_idle_peer();
+    // Wake the right CPU, AFTER releasing the lock so its IPI handler doesn't
+    // contend on it. Local placement -> wake an idle peer to steal (the pre-
+    // #864 path; maps to scheduler.tla NotifyWFIPeer). Cross-CPU placement ->
+    // wake the target that now holds the work.
+    if (target_cpu == self) {
+        (void)sched_notify_idle_peer();
+    } else {
+        sched_notify_cpu(target_cpu);
+    }
+}
+
+void ready(struct Thread *t) {
+    if (!t)                       extinction("ready(NULL)");
+    if (t->magic != THREAD_MAGIC) extinction("ready of corrupted Thread");
+
+    // HMP foundation (#864, ARCH §8.4.3): placement POLICY then enqueue
+    // MECHANISM. select_target_cpu chooses the run tree; on a uniform topology
+    // (v1.0) it returns the caller's own CPU, so ready() == ready_on(self, t)
+    // == the pre-#864 "enqueue on the CPU that woke you" behavior, exactly.
+    unsigned target = select_target_cpu(t, smp_cpu_idx_self());
+    ready_on(target, t);
 }
 
 // P2-Ce: finish_task_switch helper for thread_trampoline.
@@ -536,6 +773,23 @@ static struct Thread *try_steal(struct CpuSched *cs, bool *contended_out) {
     return NULL;
 }
 
+// HMP foundation (#864, ARCH §8.4.3): balance() -- the load-rebalancing
+// abstraction. v1.0 body is PULL-only work-stealing (try_steal: an idle CPU
+// pulls one non-pinned runnable thread from a peer). The abstraction is
+// deliberately shaped to host a future capacity-aware PUSH path -- misfit
+// migration, pushing a heavy task off a low-capacity CPU onto a high-capacity
+// one even when the latter is not idle -- the one HMP mechanism a pull-only
+// stealer structurally cannot express. The push ENQUEUE primitive already
+// exists: ready_on (cross-CPU enqueue) + sched_notify_cpu (wake the target).
+// So adding push is ADDITIVE (a tick-time misfit scan -> ready_on(high_cap_cpu)
+// + IPI), not a scheduler rewrite -- the design-for-the-future shape the
+// redesign pins (user-directed). Push is deferred to real heterogeneous HW
+// (the empirical-EAS verification boundary, §8.4.4); v1.0 is pull-only. Same
+// signature + contract as try_steal (the implementation it currently wraps).
+static struct Thread *balance_pull(struct CpuSched *cs, bool *contended_out) {
+    return try_steal(cs, contended_out);
+}
+
 void sched(void) {
     // P2-Cd: read THIS CPU's sched state. All run-tree access goes
     // through `cs`.
@@ -593,7 +847,7 @@ void sched(void) {
         // our own lock through the steal (peer access uses try_lock).
         // P3-G: pass contention sentinel so we can distinguish "saw
         // peers empty" from "couldn't see peers due to lock-held".
-        next = try_steal(cs, &steal_contended);
+        next = balance_pull(cs, &steal_contended);
 
         // P3-G F77 close: if try_steal failed AND some peer was contended
         // AND we're on the blocking path (extinction would fire below),
@@ -607,7 +861,7 @@ void sched(void) {
             // time to release. The cap (~256 iters) is bounded so a
             // truly-empty system still extincts in finite time.
             for (volatile unsigned r = 0; r < 256; r++) { /* yield */ }
-            next = try_steal(cs, &steal_contended);
+            next = balance_pull(cs, &steal_contended);
         }
     }
     if (!next) {
@@ -661,10 +915,15 @@ void sched(void) {
         prev->vd_t = cs->vd_counter++;
         prev->state = THREAD_RUNNABLE;
         insert_sorted(cs, prev);
+    } else {
+        // Block (SLEEPING) or exit (EXITING) — prev stays out of the run tree.
+        // wakeup()/ready() will re-insert SLEEPING; EXITING never returns and
+        // gets reaped at Phase 2 close. HMP foundation (#864): prev stopped
+        // consuming CPU, so decay its util estimate (the dequeue-to-blocked
+        // hook, ARCH §8.4.4). Inert on uniform topology + for pinned threads
+        // (select_target_cpu ignores util there).
+        sched_util_decay(prev);
     }
-    // else: block (SLEEPING) or exit (EXITING) — prev stays out of
-    // the run tree. wakeup()/ready() will re-insert SLEEPING; EXITING
-    // never returns and gets reaped at Phase 2 close.
 
     // Replenish next's slice on RUNNABLE → RUNNING transition. The
     // slice is consumed during the running quantum; sched_tick()
@@ -1269,6 +1528,11 @@ void sched_tick(void) {
     if (!t) return;
     if (t->magic != THREAD_MAGIC) return;     // boot transient; ignore
     if (t->state != THREAD_RUNNING) return;    // ignore non-running
+
+    // HMP foundation (#864): the running thread consumed a tick of CPU --
+    // accrue its util estimate (the tick hook, ARCH §8.4.4). Inert on uniform
+    // topology + for pinned threads (select_target_cpu ignores util there).
+    sched_util_accrue(t);
 
     // Decrement; if expired, request preemption + replenish. The flag
     // is per-CPU — each CPU's IRQ writes its own slot.

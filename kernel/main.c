@@ -548,6 +548,28 @@ void boot_main(void) {
         sched_install_bootcpu_idle(bootcpu_idle);
     }
 
+    // HMP foundation (#864, ARCH §8.4.4): parse + normalize per-CPU capacity
+    // from the DTB's capacity-dmips-mhz (composes with I-15). Once, on cpu0,
+    // after smp_init so dtb_cpu_count is final and every CpuSched slot exists.
+    // Uniform on QEMU virt / RPi (no capacity-dmips-mhz declared) -> every CPU
+    // SCHED_CAPACITY_SCALE, hetero=0, and the capacity-aware placement policy
+    // is inert (select_target_cpu returns the prev/waking CPU, so ready() keeps
+    // the pre-#864 behavior exactly). A declared-heterogeneous DTB activates
+    // the capacity bias. The placement LOGIC is unit-tested against a synthetic
+    // asymmetric DTB; the empirical EAS tuning is deferred to real hetero HW.
+    sched_capacity_init();
+    uart_puts("  sched:   topology ");
+    uart_puts(sched_topology_hetero() ? "HETEROGENEOUS caps=[" : "homogeneous caps=[");
+    {
+        unsigned ncpu = smp_cpu_count();
+        if (ncpu > DTB_MAX_CPUS) ncpu = DTB_MAX_CPUS;
+        for (unsigned i = 0; i < ncpu; i++) {
+            if (i) uart_puts(" ");
+            uart_putdec((u64)sched_cpu_capacity(i));
+        }
+    }
+    uart_puts("] (scale=1024; HMP placement inert when homogeneous)\n");
+
     // A-4c-1: kernel UART console RX + the console_mgr kthread. Unmask the
     // PL011 RX IRQ, route it to the console RX handler (fills the cons input
     // ring; Ctrl-C -> a deferred `interrupt` note to the console owner), and

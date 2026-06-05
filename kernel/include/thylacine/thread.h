@@ -153,6 +153,20 @@ struct Thread {
     // mutated. Occupies on_cpu's tail padding -- no struct-size change.
     bool               cpu_pinned;
 
+    // HMP foundation (deep-smp-review #864, ARCH §8.4.4): per-task utilization
+    // estimate, a PELT-style signal in [0, SCHED_CAPACITY_SCALE]. Accrued while
+    // the thread RUNS (sched_tick) and decayed when it blocks (sched() on the
+    // SLEEPING path); read by select_target_cpu to bias a heavy task toward a
+    // high-capacity CPU on a DECLARED-heterogeneous topology. INERT on uniform
+    // targets (QEMU virt / RPi): select_target_cpu short-circuits to the prev
+    // CPU when !sched_topology_hetero(), so util is computed but never changes
+    // placement. The v1.0 estimator is a simple EWMA; the empirical PELT decay
+    // constants + energy model are the deferred EAS tuning (ARCH §8.4.4 "the
+    // verification boundary"), landing on real heterogeneous hardware. Occupies
+    // the 4 bytes of on_cpu/cpu_pinned tail padding before timerwait_next -- no
+    // struct-size change (the _Static_assert below still pins 1136).
+    u32                util;
+
     // P5-tsleep: deadline-bounded Rendez sleep. A thread inside a
     // deadlined tsleep() is linked onto the global timer-wait list
     // (kernel/sched.c) via timerwait_{next,prev}; sched_tick() scans

@@ -33,6 +33,14 @@ struct Thread;
 #define SCHED_BAND_IDLE         2u
 #define SCHED_BAND_COUNT        3u
 
+// HMP foundation (deep-smp-review #864, ARCH §8.4.4). The normalized
+// per-CPU capacity scale: the most-capable core(s) on a topology read
+// SCHED_CAPACITY_SCALE; a less-capable core reads a proportionally smaller
+// value (Linux's 1024 convention). Per-task `util` (struct Thread) shares
+// this scale. On a uniform topology (QEMU virt / RPi) every CPU is
+// SCHED_CAPACITY_SCALE and the placement policy is inert.
+#define SCHED_CAPACITY_SCALE    1024u
+
 // Default scheduler slice in ticks. At 1000 Hz this is 6 ms, matching
 // Linux EEVDF's default `sched_latency_ns / sched_min_granularity` ~=
 // 6 ms. Per ARCH §8.2 — slice_size is tunable at /ctl/sched/slice-size
@@ -141,7 +149,75 @@ void sched(void);
 // thread_create defaults state to RUNNABLE but does NOT call ready —
 // the caller decides when t becomes schedulable. This matches Plan 9's
 // thread_create + ready separation.
+//
+// HMP foundation (ARCH §8.4.3): ready() = ready_on(select_target_cpu(t,
+// self), t) — placement POLICY (select_target_cpu) is separated from the
+// enqueue MECHANISM (ready_on). On a uniform topology select_target_cpu
+// returns the caller's own CPU, so ready() is byte-identical to the
+// pre-#864 "enqueue on the CPU that woke you" behavior.
 void ready(struct Thread *t);
+
+// HMP foundation (ARCH §8.4.3): the enqueue MECHANISM. Insert RUNNABLE `t`
+// into `target_cpu`'s run tree under that CPU's lock. target_cpu == the
+// caller's own CPU is the common (and only, on uniform topology) path and
+// is identical to the pre-#864 ready(); a cross-CPU target (a capacity-aware
+// placement, or a future misfit push) enqueues onto the peer's tree and —
+// when notify is enabled (production) — wakes it. This cross-CPU capability
+// is also the load-bearing shape for balance()'s deferred push path. An
+// out-of-range / uninitialized target falls back to the caller's CPU.
+// Safety under arbitrary target is the composition result proved by
+// specs/sched_alpha.tla (Place picks the target non-deterministically).
+void ready_on(unsigned target_cpu, struct Thread *t);
+
+// HMP foundation (ARCH §8.4.3): the placement POLICY. Choose the CPU whose
+// run tree `t` should be enqueued on, given the CPU it last ran on / the
+// CPU waking it (prev_cpu). v1.0 homogeneous body returns prev_cpu (CPU-
+// pinned threads ALWAYS return prev_cpu — idles/kthread never migrate). On a
+// DECLARED-heterogeneous topology it biases a high-util ("misfit") task to a
+// higher-capacity CPU. Pure-ish (reads only per-CPU capacity + topology
+// flag + t->util/cpu_pinned); the core decision is the testable pure
+// function sched_place_by_capacity().
+unsigned select_target_cpu(struct Thread *t, unsigned prev_cpu);
+
+// HMP foundation (ARCH §8.4.4): parse + normalize per-CPU capacity from the
+// DTB (capacity-dmips-mhz). Called ONCE on the boot CPU during late bring-up
+// (after smp_init, so dtb_cpu_count is final). Stamps each CpuSched.capacity
+// and the topology-heterogeneity flag. Composes with I-15.
+void sched_capacity_init(void);
+
+// Normalized capacity class of `cpu` in [0, SCHED_CAPACITY_SCALE]. Returns
+// SCHED_CAPACITY_SCALE for an out-of-range index (defensive default = full).
+u32  sched_cpu_capacity(unsigned cpu);
+
+// True iff the DTB declared a heterogeneous topology (CPU capacities differ).
+// False on QEMU virt / RPi (uniform) — the placement policy is then inert.
+bool sched_topology_hetero(void);
+
+// HMP foundation (ARCH §8.4.4) — the two PURE functions that hold the
+// load-bearing logic, factored out so a kernel unit test can drive them
+// deterministically against a SYNTHETIC asymmetric DTB (no real perf
+// asymmetry needed; the "verification boundary").
+//
+// sched_capacity_normalize: given each CPU's raw capacity-dmips-mhz (0 =
+// the node did not declare it), produce normalized capacities in [0,
+// SCHED_CAPACITY_SCALE] (scaled so the max raw maps to SCALE; an absent
+// entry defaults to SCALE). Returns true iff the result is heterogeneous
+// (some CPU's capacity differs from another's).
+bool sched_capacity_normalize(const u32 *raw_dmips, unsigned n, u32 *out_caps);
+
+// sched_place_by_capacity: the placement decision. Given a task's `util`,
+// the CPU it would default to (prev_cpu), the per-CPU normalized `caps`
+// array (n entries), and whether the topology is heterogeneous, return the
+// target CPU. Homogeneous → always prev_cpu. Heterogeneous → prev_cpu unless
+// `util` overruns prev_cpu's capacity (a "misfit"), in which case the
+// highest-capacity CPU. Pure; no globals.
+unsigned sched_place_by_capacity(u32 util, unsigned prev_cpu,
+                                 const u32 *caps, unsigned n, bool hetero);
+
+// Diagnostic (HMP tests): true iff `t` is currently linked in `cpu`'s run
+// tree. Takes that CPU's lock for a consistent read. Used by the cross-CPU
+// ready_on enqueue test to prove placement landed on the intended CPU.
+bool sched_in_cpu_tree(unsigned cpu, struct Thread *t);
 
 // Diagnostic accessors.
 unsigned sched_runnable_count(void);

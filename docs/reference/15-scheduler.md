@@ -259,8 +259,10 @@ VISION §4 budget: 500 ms. Headroom remains generous.
 | `on_cpu` flag + SMP wait/wake race close | Landed (P2-Cf) |
 | Spec SMP refinement (`Steal`, `IPI_Send`/`Deliver`, `NoDoubleEnqueue`, `IPIOrdering`) | Landed (P2-Cg) |
 | **SMP redesign: per-CPU `cpu_pinned` in-tree idle (retires `g_bootcpu_idle`); `idle_in_wfi` F7 fix; steal/pick invariant assert** | **Landed (deep-smp-review #863; ARCH §8.4.2/§8.4.5; gate `specs/sched_alpha.tla`; closes #860)** |
+| **HMP foundation: `select_target_cpu` placement hook + `ready_on` cross-CPU enqueue + per-CPU `capacity` (DTB) + per-task `util` + `balance_pull`** | **Landed (deep-smp-review #864; ARCH §8.4.3/§8.4.4; logic-verified vs synthetic asymmetric DTB; inert on uniform v1.0 targets)** |
 | `LatencyBound` liveness spec | Phase 2 close |
 | Red-black tree refactor | Phase 7 |
+| **Empirical EAS tuning (PELT decay, energy model, schedutil/DVFS, misfit push)** | **Deferred to real heterogeneous HW (ARCH §8.4.4 verification boundary)** |
 
 ---
 
@@ -585,3 +587,31 @@ java -cp /tmp/tla2tools.jar tlc2.TLC -workers auto -deadlock \
 java -cp /tmp/tla2tools.jar tlc2.TLC -workers auto -deadlock \
     -config scheduler_buggy_ipi.cfg scheduler.tla    # IPIOrdering counterexample at depth 6
 ```
+
+---
+
+## HMP foundation (#864, ARCH §8.4.3 / §8.4.4)
+
+The scheduler is **HMP-ready by design; v1.0 ships homogeneous-treatment**. Placement **policy** is separated from the enqueue **mechanism**, per-CPU capacity is parsed from the DTB, per-task utilization is tracked, and `balance()`'s shape can host a future capacity-aware push — but the *empirical* EAS tuning is deferred to real heterogeneous hardware (the **verification boundary**). On the uniform v1.0 targets (QEMU virt, RPi) this whole layer is **inert**: `select_target_cpu` returns the prev CPU, so `ready()` is byte-identical to the pre-#864 "enqueue on the CPU that woke you" behavior.
+
+### Placement: `select_target_cpu` + `ready_on`
+
+- **`unsigned select_target_cpu(struct Thread *t, unsigned prev_cpu)`** — the policy. Returns `prev_cpu` for a CPU-pinned thread (idles/kthread never migrate) or on a uniform topology (`!sched_topology_hetero()`). On a declared-heterogeneous topology it biases a high-`util` ("misfit") task toward a higher-capacity CPU. The core decision is the pure, testable `sched_place_by_capacity()`.
+- **`void ready_on(unsigned target_cpu, struct Thread *t)`** — the mechanism. Inserts RUNNABLE `t` into `target_cpu`'s run tree under that CPU's lock; wakes the right CPU after releasing it (local → `sched_notify_idle_peer`; cross-CPU → `sched_notify_cpu`). Holds exactly **one** `CpuSched` lock and never nests, so it cannot cycle with `try_steal` (try-locks peers while holding its own) or `sched_remove_if_runnable` (one lock at a time). An out-of-range / uninitialized target falls back to the caller's CPU.
+- **`void ready(struct Thread *t)`** is now `ready_on(select_target_cpu(t, smp_cpu_idx_self()), t)`.
+
+Safety under an **arbitrary** target is the composition result proved by `specs/sched_alpha.tla` (its `Place` action picks the target CPU non-deterministically), so any `select_target_cpu` / `balance()` policy composes with correctness by construction.
+
+### Capacity (DTB) + util
+
+- **`struct CpuSched.capacity`** — normalized `[0, SCHED_CAPACITY_SCALE]` (1024 = the most-capable core). Parsed once on the boot CPU by `sched_capacity_init()` from each cpu node's `capacity-dmips-mhz` (`lib/dtb.c::dtb_cpu_capacity`); composes with **I-15**. Absent on QEMU virt → every CPU is `SCHED_CAPACITY_SCALE`, `sched_topology_hetero()` is false.
+- **`struct Thread.util`** — a PELT-style estimate (occupies `on_cpu`/`cpu_pinned` tail padding; `sizeof(struct Thread)` unchanged at 1136). Accrued while the thread RUNS (`sched_tick` → `sched_util_accrue`, saturating below the scale) and decayed when it blocks (`sched()` SLEEPING path → `sched_util_decay`). The v1.0 estimator is a simple EWMA (`SCHED_UTIL_SHIFT`); the tuned PELT geometric series is deferred.
+
+### `balance()` — pull now, push-capable shape
+
+`balance_pull()` (v1.0) wraps `try_steal` (pull-only work-stealing). The abstraction is deliberately shaped to host a future capacity-aware **push** (misfit migration) — the one HMP mechanism a pull-only stealer cannot express. The push **enqueue primitive already exists** (`ready_on` + `sched_notify_cpu`), so push is additive (a tick-time misfit scan → `ready_on(high_cap_cpu)` + IPI), not a rewrite. Push is deferred to real heterogeneous HW.
+
+### The verification boundary
+
+- **Verifiable now → built + tested**: the placement *logic* is unit-tested against a synthetic asymmetric DTB — `scheduler.capacity_normalize_synthetic_dtb` (raw `capacity-dmips-mhz` → normalized caps + hetero verdict) and `scheduler.place_by_capacity_synthetic_dtb` ("heavy task → high-capacity CPU; light task stays; heavy task already on the biggest core stays") — plus `scheduler.select_target_cpu_homogeneous_is_prev` (the v1.0 behavior-preservation guarantee on the real uniform topology) and `scheduler.ready_on_cross_cpu_enqueue` (the cross-CPU enqueue mechanism). Safety composition is `specs/sched_alpha.tla` (arbitrary placement).
+- **NOT verifiable until real heterogeneous HW → deferred**: the empirical EAS tuning (PELT decay constants, energy model, schedutil/DVFS, misfit thresholds). QEMU virt declares a homogeneous DTB; HVF runs guest vCPUs on real P/E cores but the host floats them (no stable declared asymmetry). HVF closes the speed gap, not the heterogeneity gap. The EAS layer is additive + pre-modeled, landing when it becomes verifiable.

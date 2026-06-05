@@ -283,6 +283,33 @@ SGI scheduling peer (its always-armed timer remains a <=1ms backstop). Proven by
 `smp.ipi_resched_smoke` test's new cpu0-self-reception check. Both #863 deferrals are now
 closed; the two SMP follow-up tasks are done.
 
+**STATUS (2026-06-05): the HMP foundation (e) = #864 is LANDED + multi-boot-verified.** It
+implements the placement-seam + capacity + util + `balance()`-shape half of the redesign
+(ARCH §8.4.3/§8.4.4), all INERT on the uniform v1.0 targets so runtime behavior is
+byte-identical to #863:
+- **`select_target_cpu(t, prev_cpu)`** (policy) + **`ready_on(target_cpu, t)`** (mechanism)
+  separated; `ready()` = `ready_on(select_target_cpu(t, self), t)`. Homogeneous → returns
+  prev → `ready_on(self)` == the pre-#864 enqueue. Cross-CPU enqueue holds exactly one
+  `CpuSched` lock (no nesting; cannot cycle with `try_steal`/`sched_remove_if_runnable`).
+- **Per-CPU `capacity`** parsed from the DTB `capacity-dmips-mhz` (`lib/dtb.c::dtb_cpu_capacity`
+  + `sched_capacity_init`, composes with I-15); **per-task `util`** (PELT-style EWMA, accrue
+  on tick / decay on block; in `struct Thread`'s tail padding -- `sizeof` unchanged 1136).
+- **`balance_pull`** = the v1.0 pull-only abstraction; the push enqueue primitive (`ready_on`
+  + `sched_notify_cpu`) already exists, so misfit-push is additive, not a rewrite.
+- **Logic-verified** vs a synthetic asymmetric DTB: `scheduler.capacity_normalize_synthetic_dtb`
+  + `scheduler.place_by_capacity_synthetic_dtb` (heavy→big, light stays, heavy-on-biggest
+  stays) + `scheduler.select_target_cpu_homogeneous_is_prev` (v1.0 behavior-preservation) +
+  `scheduler.ready_on_cross_cpu_enqueue` (the cross-CPU mechanism). Safety under arbitrary
+  placement is `sched_alpha.tla`'s `Place` (no model change needed; the impl refines it).
+- The EMPIRICAL EAS tuning (PELT decay, energy model, schedutil/DVFS, misfit push) stays
+  DEFERRED to real heterogeneous HW (the verification boundary, §8.4.4).
+
+Validated: `sched_alpha.tla` TLC-green (97 distinct states); **default smp4 714/714 PASS**
+(710 + the 4 new HMP tests); **UBSan-smp4 multi-boot 12/12, 0 corruption** (the #860
+amplifier); default-smp8 + UBSan-smp8 multi-boot clean. The remaining SMP work is #865 (wire
+`smp-multiboot.sh` into CI + soft-warn the host-fragile timing tests) and #866 (the formal
+adversarial audit of the #863+#864 surface).
+
 (a) **Re-enable spec-first for the SMP mechanism.** Adopt `specs/sched_oncpu.tla` as a
     gating model alongside `scheduler.tla`; extend it as the mechanism evolves. The
     natural re-enabling point the user flagged ("an invariant-bearing feature that
