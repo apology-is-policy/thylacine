@@ -1,4 +1,4 @@
-# 105 — corvus recovery keyslot (A-5c-a + A-5c-b)
+# 105 — corvus recovery keyslot (A-5c-a + A-5c-b + A-5c-c)
 
 ## Purpose
 
@@ -307,7 +307,7 @@ Compile-time invariants: `24 * 11 == 256 + 8`; the wordlist is exactly
 
 | Status | Trigger |
 |---|---|
-| `BadFormat` | malformed payload; unknown `subject_kind` (not 0/1); over-long phrase/user/pass |
+| `BadFormat` | malformed payload; unknown `subject_kind` (not 0/1); over-long phrase/user/pass; `USER_CREATE` of the reserved name `system` (A-5c-c audit F1 -- the system AD subject) |
 | `PermissionDenied` | RECOVER(system) from a non-console-attached peer; ADMIN_ELEVATE from a non-console peer |
 | `BadAuth` | unknown user; absent `recovery.corvus`; bad checksum (typo); wrong phrase/passphrase (tag mismatch); ADMIN_ELEVATE wrong system passphrase |
 | `RateLimited` | `>= RECOVER_FAIL_MAX` checksum-valid-but-wrong attempts for the subject this boot (user subject, or `b"system"`) |
@@ -316,12 +316,16 @@ Compile-time invariants: `24 * 11 == 256 + 8`; the wordlist is exactly
 
 ## Status
 
-User subject (A-5c-a) complete. System subject + host-bake + real ADMIN_ELEVATE
-(A-5c-b) landed: `corvus-mint` bakes `system-wrap` + `system-recovery-wrap`,
-`system_identity_load` reads them FATAL-on-absent, ADMIN_ELEVATE is a real
-Argon2id+AEGIS unwrap, and `handle_recover_system` is wired (its crypto sequence
-host-proven). The login UX, the live RECOVER(system)/RECOVER(user) boot E2E, and
-the focused adversarial audit are A-5c-c.
+**A-5c COMPLETE.** User subject (A-5c-a) + system subject / host-bake / real
+ADMIN_ELEVATE (A-5c-b) + the login `!recover` UX, the live RECOVER(system) and
+RECOVER(user) boot E2Es, and the build plumbing (A-5c-c) all landed. The whole
+arc passed ONE focused adversarial audit (Opus prosecutor + self-audit): **CLEAN
+0 P0 / 0 P1 / 1 P2 / 4 P3** -- architecture VERIFIED SOUND (I-22/I-2/I-6/I-27,
+C-20/C-27/C-28, twin-wrap crash safety, secret hygiene on every path, no-drift
+build). F1 [P2] (reserve the `system` username so a user cannot collide the
+system AD subject) fixed + regression-tested; F2/F3 [P3] fixed (corvus-mint
+phrase wipe; login `user_len` bound); F4 [P3] deferred to #876 (the persistent
+rate-limit); F5 [P3] doc nit. See `memory/audit_a5c_closed_list.md`.
 
 ## Known caveats / deferred
 
@@ -335,6 +339,14 @@ the focused adversarial audit are A-5c-c.
   installer supplies real per-install randomness (the `CORVUS_SYSTEM_RECOVERY_SEED`
   override is the seam). Overriding the seed without rebuilding joey makes the
   baked wrap and joey's header disagree -- the E2E then fails loudly (not silent).
+- **The RECOVER(system) boot E2E consumes the baked phrase on the fresh boot**
+  (it rolls `system-recovery-wrap` to an unknowable random phrase). Harmless at
+  v1.0 (the system passphrase `thylacine` is known, so recovery is never needed;
+  boots 2+ skip it) and consistent with the always-run boot harness that already
+  creates the michael/susan test users + mutates the pool every boot. A v1.x
+  production build that sets a real system passphrase MUST gate/strip the
+  boot-test harness (the same requirement the baked passphrase + test users
+  already impose) -- tracked at **#880**.
 - **The v1.0 system passphrase is the known constant** (`thylacine`) — the WRAP
   is now real Argon2id+AEGIS, but the secret is build-baked, not a real
   per-install secret. A v1.x installer supplies that (the `corvus-mint`

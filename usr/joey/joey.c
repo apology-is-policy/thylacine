@@ -1106,6 +1106,26 @@ static int do_corvus_bringup(long storage_dup_fd) {
         return 1;
     }
 
+    // === A-5c-c audit F1: USER_CREATE "system" is REJECTED (reserved AD subject) ===
+    // The system identity wraps (system-wrap / system-recovery-wrap) key their
+    // AEAD AD on the fixed subject b"system"; a user named "system" would mint
+    // users/system/*.corvus with byte-identical AD. corvus rejects the name at
+    // the mint chokepoint -> BadFormat(5), parse-time + stateless (before the cap
+    // gate), so this fires every boot regardless of pool state. Non-vacuous:
+    // pre-fix, "system" minted OK.
+    pl = build_user_create(tx, "system", 6, "irrelevant", 10);
+    if (corvus_exchange(conn_fd, 5, tx, pl, rx, sizeof(rx), &st, &rlen) != 0) {
+        t_putstr("joey: USER_CREATE(system) transport FAILED\n");
+        return 1;
+    }
+    if (st != 5) {
+        t_putstr("joey: USER_CREATE \"system\" expected BadFormat(5) [reserved], got status=");
+        t_putstr(itoa_dec(st, buf, sizeof(buf)));
+        t_putstr("\n");
+        return 1;
+    }
+    t_putstr("joey: USER_CREATE \"system\" rejected BadFormat (reserved AD subject; F1 verified)\n");
+
     // === A-1b identity verbs: GROUP_CREATE (post-elevate) + RESOLVE round-trips ===
     // GROUP_CREATE wheel: now joey holds CAP_HOSTOWNER. Fresh pool -> OK + a gid
     // distinct from every UPG (shared counter); persistent pool -> BadFormat

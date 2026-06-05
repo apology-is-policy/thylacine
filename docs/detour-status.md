@@ -1303,9 +1303,23 @@ kill = BOTH the namespace `/proc/<pid>/ctl` surface AND a narrow elevation-only 
   (login + joey's captured static). Idempotent across reboots (boot 2 skips both recover E2Es;
   `/sbin/login E2E OK` still passes). Verified: fresh boot 1 (both RECOVER E2Es live) + persistent boot
   2 (both skipped) GREEN, 0 EXTINCTION. Reference 103-login.md (the `!recover` UX section) +
-  105-corvus-recovery.md. **NEXT = A-5c-c-3 (#879): focused adversarial audit (whole A-5c surface;
-  AEGIS/mallocng-adjacent -- prosecute hard) + full matrix (smp-multiboot + UBSan + cross-reboot) +
-  two-commit close.**
+  105-corvus-recovery.md.
+
+- **A-5c-c-3 + A-5c ARC COMPLETE (#879): focused adversarial audit + full matrix.** ONE Opus
+  prosecutor on the whole A-5c surface (a/b/c -- the AEGIS/mallocng-adjacent recovery crypto + the live
+  E2E + the login UX + the build plumbing) + a parallel self-audit: **CLEAN 0 P0 / 0 P1 / 1 P2 / 4 P3**,
+  architecture VERIFIED SOUND (I-22/I-2/I-6/I-27, C-20/C-27/C-28, twin-wrap crash safety, secret hygiene
+  on every path, no-drift build). F1 [P2] reserve the `system` username (a user-"system" would collide
+  the system AEAD AD subject) -- FIXED at the mint chokepoint + regression-tested (joey: `USER_CREATE
+  "system" rejected BadFormat ... F1 verified` every boot, non-vacuous). F2 [P3] corvus-mint phrase wipe
+  + F3 [P3] login `user_len` bound -- FIXED. F4 [P3] rate-limit-lockout deferred to #876. F5 [P3] doc
+  nit. Closed list: `memory/audit_a5c_closed_list.md`. **Matrix GREEN:** default fresh + persistent
+  boots, UBSan fresh boot (0 UBSan runtime errors, 15s), `ubsan-smp4` 10/10 + `default-smp4` 10/10 +
+  `default-smp8` 10/10 multiboot (0 CORRUPTION), corvus-crypto host 12/12, cross-reboot idempotency
+  (boot 1 live RECOVER + boot 2 skip + ADMIN_ELEVATE-against-re-wrap all GREEN), 0 EXTINCTION. Carried
+  v1.x note: the RECOVER(system) E2E consumes the baked phrase on the fresh boot (harmless at v1.0;
+  #880 tracks gating the boot harness for production). **A-5c arc DONE -> the whole identity/access
+  convergence detour is COMPLETE. Utopia resumes at U-6d-b (redirects).**
 
 ---
 

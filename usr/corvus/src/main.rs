@@ -1969,6 +1969,16 @@ unsafe fn handle_user_create(handle: i64, payload: &[u8], response: &mut Vec<u8>
             return stage_response(response, STATUS_BAD_FORMAT, &[]);
         }
     }
+    // A-5c-c (audit F1): reserve the system AD subject. The system identity wraps
+    // (system-wrap / system-recovery-wrap) key their AEAD AD on the fixed subject
+    // SYSTEM_WRAP_SUBJECT (b"system"); a user literally named "system" would mint
+    // users/system/{hybrid,recovery}.corvus with byte-identical AD, defeating the
+    // AD-domain binding the file-swap defense rests on (C-27). The KEK + the file
+    // path already differ, so this is defense-in-depth -- but rejecting the name
+    // at the mint chokepoint keeps the AD-uniqueness property the design claims.
+    if user_slice == SYSTEM_WRAP_SUBJECT {
+        return stage_response(response, STATUS_BAD_FORMAT, &[]);
+    }
     let pass_len = (payload[1 + user_len] as usize) | ((payload[2 + user_len] as usize) << 8);
     if pass_len == 0 || pass_len > MAX_PASS_LEN {
         return stage_response(response, STATUS_BAD_FORMAT, &[]);

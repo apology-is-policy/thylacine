@@ -215,6 +215,14 @@ unsafe fn recover_user(
     phrase: &[u8],
     new_pass: &[u8],
 ) -> Option<(u8, Vec<u8>)> {
+    // A-5c-c (audit F3): user_len is a single wire byte, so bound it so the cast
+    // is provably lossless -- never silently truncate an over-long name to a
+    // shorter (valid-looking) one. phrase_len/new_pass_len are u16-encoded (no
+    // truncation) and read_line caps inputs at MAX_LINE; corvus re-validates all
+    // three. None -> a clean "recovery failed" (no truncated request on the wire).
+    if user.is_empty() || user.len() > 255 {
+        return None;
+    }
     let mut pl: Vec<u8> = Vec::new();
     pl.push(1u8); // subject_kind = 1 (user)
     pl.push(user.len() as u8);
@@ -303,8 +311,9 @@ unsafe fn do_recover_flow() -> i64 {
             1
         }
         None => {
-            write_out(b"recovery failed (transport error)\n");
-            t_putstr("login: recovery FAILED (transport)\n");
+            // transport error OR an over-long input rejected by recover_user.
+            write_out(b"recovery failed\n");
+            t_putstr("login: recovery FAILED (transport or malformed input)\n");
             1
         }
     }

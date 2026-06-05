@@ -133,7 +133,7 @@ fn bake(out_dir: &str) {
     // phrase (seed-derived; joey's header carries the matching phrase). The
     // wrap's salt/nonce are still random per build -- only the entropy is pinned.
     let mut entropy = recovery_seed_entropy();
-    let phrase = bip39_encode(&entropy);
+    let mut phrase = bip39_encode(&entropy);
     let srw = make_recovery_wrap(&mut rng, SYSTEM_WRAP_SUBJECT, &entropy, &keypair)
         .expect("corvus-mint: system-recovery-wrap failed");
 
@@ -159,6 +159,7 @@ fn bake(out_dir: &str) {
 
     wipe(&mut keypair);
     wipe(&mut entropy);
+    wipe(&mut phrase);
     wipe(&mut v1);
     wipe(&mut v2);
 }
