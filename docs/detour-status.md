@@ -1213,10 +1213,28 @@ kill = BOTH the namespace `/proc/<pid>/ctl` surface AND a narrow elevation-only 
   - **Scripture landed:** IDENTITY-DESIGN 9.9 (the A-5c design pass) + CORVUS-DESIGN 5.6 (the
     keyslot flow) / 6.4 (verb 8 payload + USER_CREATE OK) / 8 (the `recovery.corvus` layout) / 9
     (C-20 generalized + C-27 keyslot + C-28 no-escrow) / 4.2 + CLAUDE.md + ARCH 25.4 audit row.
-  - **Impl split (next):** A-5c-a (keyslot crypto + RECOVER(user) + USER_CREATE enrollment +
+  - **Impl split:** A-5c-a (keyslot crypto + RECOVER(user) + USER_CREATE enrollment +
     corvus tests, #873) -> A-5c-b (hostowner-c: RECOVER(system) + console gate, #874) -> A-5c-c
     (login/UX recovery path + boot E2E + one focused audit, #875). AEGIS/mallocng-adjacent --
     prosecute hard.
+
+- **A-5c-a LANDED** -- the recovery keyslot crypto + RECOVER(user) + USER_CREATE mandatory
+  enrollment. New `usr/corvus/src/bip39_wordlist.rs` (canonical 2048-word BIP-39 English list,
+  SHA-256 `2f5eed...`) + the codec/wrap/handler in `main.rs`: BIP-39 encode/decode/checksum;
+  the `recovery.corvus` keyslot (CRVS v1 layout, domain-separated AD, recovery argon2 preset
+  `t=8/m=16MiB` -- KEK from the *decoded entropy*, not the phrase text); `VERB_RECOVER = 8`
+  subject_kind=1 (user) handler (no session, no cap -- phrase + an in-memory post-checksum
+  rate-limit); USER_CREATE appends `phrase_len + phrase` to its OK and mints `recovery.corvus`
+  alongside `hybrid.corvus`; the twin-wrap rename-swap (hybrid first, then recovery -- both wrap
+  the SAME keypair, so no crash strands the user); a boot self-test (`corvus: recovery self-test
+  OK`). joey's harness verifies enrollment E2E. Matrix: **default + UBSan 714/714 + boot OK +
+  self-test + both enrollments + 0 EXTINCTION**. Reference `docs/reference/105-corvus-recovery.md`.
+  Scripture reconciled: 5.6/9.9 now say "recovery preset (heap-bounded)" not "sensitive" (1 GiB
+  is bounded out by the 24 MiB heap -> a v1.x seam). **subject_kind=0 (system) returns BadFormat
+  until A-5c-b** (which must first build the real `system-wrap` -- the v1.0 system passphrase is
+  still the ADMIN_ELEVATE byte-compare placeholder). Owed: the full RECOVER round-trip E2E (the
+  argon2-backed reset -> re-login -> home decrypts) is **A-5c-c**; the persistent C-16 rate-limit
+  (AUTH + RECOVER, Stratum-backed) is **#876**. **NEXT = A-5c-b (#874).**
 
 ---
 

@@ -97,6 +97,12 @@
 
 extern crate alloc;
 
+// Canonical BIP-39 English wordlist (2048 words) -- the A-5c recovery phrase
+// alphabet. Generated from bitcoin/bips bip-0039/english.txt; see the module
+// header for the source SHA-256.
+mod bip39_wordlist;
+use bip39_wordlist::BIP39_WORDLIST;
+
 // 9P2000.L server-side codec. Lifted from corvus's private `p9` module
 // into `libthyla_rs::ninep` at U-2h-ninep; aliased back to `p9` so the
 // existing dispatcher references survive byte-identical.
@@ -299,6 +305,72 @@ const _: () = assert!(ENVELOPE_LEN == 1217, "DEK envelope layout drift");
 
 const DEK_KDF_DOMAIN: &[u8] = b"thylacine-corvus-dek-kdf-v1";
 const DEK_AD_PREFIX: &[u8] = b"thylacine-corvus-dek-v1";
+
+// =============================================================================
+// Recovery keyslot — A-5c (CORVUS-DESIGN.md §5.6 + IDENTITY-DESIGN §9.9).
+// =============================================================================
+//
+// A recovery keyslot is a SECOND wrap of a subject's hybrid keypair, alongside
+// the passphrase wrap, under a recovery-phrase-derived KEK (the LUKS two-keyslot
+// model). It re-wraps the KEYPAIR -- not the dataset DEK -- so the keypair value
+// (hence its public keys, hence every DEK envelope encapsulated to them) is
+// unchanged by recovery: there is NO kernel/Stratum surface. The on-disk wrap is
+// the SAME CRVS v1 layout (TOTAL_LEN) as hybrid.corvus; only the AD prefix and
+// the KEK source differ.
+//
+// The phrase is a 24-word BIP-39 mnemonic over RECOVERY_ENTROPY_BYTES of CSPRNG
+// entropy plus an 8-bit SHA-256 checksum (24 * 11 = 264 bits = 256 + 8). The KEK
+// derives from the DECODED ENTROPY (the canonical 32-byte form), not the phrase
+// text -- decode normalizes whitespace/case, so there is no canonicalization
+// ambiguity. The 256-bit entropy is the security floor; the KDF cost is
+// defense-in-depth, not the boundary (you cannot brute-force 256 bits).
+const RECOVERY_ENTROPY_BYTES: usize = 32; // 256-bit
+const RECOVERY_WORD_COUNT: usize = 24;
+const RECOVERY_CHECKSUM_BITS: usize = 8; // 256 / 32
+const BIP39_WORD_BITS: usize = 11;
+const BIP39_WORDLIST_LEN: usize = 2048; // 2^11
+const BIP39_MAX_WORD_LEN: usize = 8; // longest canonical English word
+// Worst-case encoded phrase bytes: 24 words (<=8) + 23 single-space joins.
+const RECOVERY_PHRASE_MAX: usize = RECOVERY_WORD_COUNT * BIP39_MAX_WORD_LEN + (RECOVERY_WORD_COUNT - 1);
+
+const _: () = assert!(RECOVERY_ENTROPY_BYTES * 8 == 256, "recovery entropy is 256-bit");
+const _: () = assert!(
+    RECOVERY_WORD_COUNT * BIP39_WORD_BITS == RECOVERY_ENTROPY_BYTES * 8 + RECOVERY_CHECKSUM_BITS,
+    "BIP-39 word/bit accounting drift (24*11 == 256+8)"
+);
+// The wordlist must exactly fill the 11-bit index space, else an 11-bit index
+// could read past the array (panic) or leave words unreachable.
+const _: () = assert!(
+    BIP39_WORDLIST.len() == BIP39_WORDLIST_LEN,
+    "BIP-39 wordlist must be exactly 2^11 entries"
+);
+
+// AD for the recovery-keyslot AEAD: "thylacine-corvus-recovery-v1" || subject
+// || 0x00. Domain-separated from the passphrase-wrap AD (AD_PREFIX) by the
+// prefix, so a recovery wrap can never be unwrapped as a passphrase wrap or
+// vice versa even if a file is swapped.
+const RECOVERY_AD_PREFIX: &[u8] = b"thylacine-corvus-recovery-v1";
+const RECOVERY_AD_DOMAIN_BYTE: u8 = 0;
+
+// Recovery KDF preset. m_cost is the interactive 16 MiB (heap-bounded -- the
+// static heap is 24 MiB, so the libsodium "sensitive" 1 GiB m_cost is a v1.x
+// heap-resize seam); the time cost is raised (recovery is rare, so a 4x work
+// factor is affordable) as the within-budget hardening. Stored per-wrap in the
+// CRVS header, so a future bump is a single-constant change.
+const RECOVERY_ARGON2_T_COST: u32 = 8;
+const RECOVERY_ARGON2_M_COST_KIB: u32 = ARGON2_M_COST_KIB;
+const RECOVERY_ARGON2_PARALLELISM: u32 = 1;
+
+// In-memory rate limit on the EXPENSIVE RECOVER path. A typo'd phrase fails the
+// BIP-39 checksum first (cheap, before the KDF) and does NOT count here; only a
+// checksum-VALID phrase that then fails the AEAD unwrap (a crafted/guessed
+// attempt) is counted. After RECOVER_FAIL_MAX such failures for a subject,
+// further RECOVER for that subject is refused until corvus restarts -- bounding
+// the unauthenticated argon2 DoS surface without a wall clock. A legitimate
+// holder's real phrase passes both checksum and unwrap on the first try, so this
+// never locks them out. The full time-windowed, Stratum-persisted C-16 rate
+// limit (covering AUTH too) is tracked separately.
+const RECOVER_FAIL_MAX: u32 = 5;
 
 // =============================================================================
 // Crypto: Argon2id KDF + AEGIS-256 AEAD + ML-KEM-768 + X25519 + SHA-256.
@@ -536,6 +608,396 @@ fn dek_envelope_unwrap(
 }
 
 // =============================================================================
+// Recovery keyslot — BIP-39 phrase codec + the recovery wrap (A-5c).
+// =============================================================================
+
+// Look up a single word (case-insensitive, ASCII) in the canonical wordlist;
+// returns its 0..2048 index. The list is lexicographically sorted, so binary
+// search over the lowercased word resolves it. An unknown or over-long word
+// (no canonical word exceeds BIP39_MAX_WORD_LEN) returns None.
+fn bip39_word_index(word: &[u8]) -> Option<u16> {
+    if word.is_empty() || word.len() > BIP39_MAX_WORD_LEN {
+        return None;
+    }
+    let mut lower = [0u8; BIP39_MAX_WORD_LEN];
+    for (i, &b) in word.iter().enumerate() {
+        lower[i] = b.to_ascii_lowercase();
+    }
+    let key = core::str::from_utf8(&lower[..word.len()]).ok()?;
+    match BIP39_WORDLIST.binary_search(&key) {
+        Ok(idx) => Some(idx as u16),
+        Err(_) => None,
+    }
+}
+
+// First 8 bits of SHA-256(entropy) -- the BIP-39 checksum for 256-bit entropy.
+fn sha256_checksum_byte(entropy: &[u8]) -> u8 {
+    let mut h = Sha256::new();
+    h.update(entropy);
+    h.finalize()[0]
+}
+
+// Map a 264-bit buffer (entropy || checksum) to 24 space-joined words, MSB-first
+// 11 bits per word. Shared by bip39_encode + the self-test (which feeds a
+// deliberately-wrong checksum to exercise the reject path deterministically).
+fn bip39_words_from_bits(bits: &[u8; RECOVERY_ENTROPY_BYTES + 1]) -> Vec<u8> {
+    let mut out: Vec<u8> = Vec::with_capacity(RECOVERY_PHRASE_MAX);
+    for w in 0..RECOVERY_WORD_COUNT {
+        let mut idx: u16 = 0;
+        for b in 0..BIP39_WORD_BITS {
+            let p = w * BIP39_WORD_BITS + b;
+            let bit = (bits[p / 8] >> (7 - (p % 8))) & 1;
+            idx = (idx << 1) | bit as u16;
+        }
+        if w > 0 {
+            out.push(b' ');
+        }
+        out.extend_from_slice(BIP39_WORDLIST[idx as usize].as_bytes());
+    }
+    out
+}
+
+// Encode 256-bit entropy as a 24-word space-joined BIP-39 phrase.
+fn bip39_encode(entropy: &[u8; RECOVERY_ENTROPY_BYTES]) -> Vec<u8> {
+    let mut bits = [0u8; RECOVERY_ENTROPY_BYTES + 1];
+    bits[..RECOVERY_ENTROPY_BYTES].copy_from_slice(entropy);
+    bits[RECOVERY_ENTROPY_BYTES] = sha256_checksum_byte(entropy);
+    let words = bip39_words_from_bits(&bits);
+    wipe(&mut bits); // the buffer holds the entropy bytes
+    words
+}
+
+// Decode a 24-word phrase to 256-bit entropy. None on: not exactly 24 words, an
+// unknown word, or a checksum mismatch (a typo). Splitting is on ASCII
+// whitespace (runs collapsed), so leading/trailing/multiple/tab/newline
+// separators are all accepted.
+fn bip39_decode(phrase: &[u8]) -> Option<[u8; RECOVERY_ENTROPY_BYTES]> {
+    let mut bits = [0u8; RECOVERY_ENTROPY_BYTES + 1];
+    let mut bitpos: usize = 0;
+    let mut nwords: usize = 0;
+    for word in phrase.split(|&c| c == b' ' || c == b'\t' || c == b'\n' || c == b'\r') {
+        if word.is_empty() {
+            continue;
+        }
+        nwords += 1;
+        if nwords > RECOVERY_WORD_COUNT {
+            wipe(&mut bits);
+            return None;
+        }
+        let idx = match bip39_word_index(word) {
+            Some(i) => i,
+            None => {
+                wipe(&mut bits);
+                return None;
+            }
+        };
+        for b in 0..BIP39_WORD_BITS {
+            let bit = ((idx >> (BIP39_WORD_BITS - 1 - b)) & 1) as u8;
+            if bit != 0 {
+                bits[bitpos / 8] |= 1 << (7 - (bitpos % 8));
+            }
+            bitpos += 1;
+        }
+    }
+    if nwords != RECOVERY_WORD_COUNT {
+        wipe(&mut bits);
+        return None;
+    }
+    let mut entropy = [0u8; RECOVERY_ENTROPY_BYTES];
+    entropy.copy_from_slice(&bits[..RECOVERY_ENTROPY_BYTES]);
+    let cs_ok = sha256_checksum_byte(&entropy) == bits[RECOVERY_ENTROPY_BYTES];
+    wipe(&mut bits);
+    if !cs_ok {
+        wipe(&mut entropy);
+        return None;
+    }
+    Some(entropy)
+}
+
+// AD for the recovery-keyslot AEAD: prefix || subject || domain-byte. The prefix
+// domain-separates it from the passphrase-wrap AD.
+fn build_recovery_ad(subject: &[u8], out: &mut Vec<u8>) {
+    out.clear();
+    out.extend_from_slice(RECOVERY_AD_PREFIX);
+    out.extend_from_slice(subject);
+    out.push(RECOVERY_AD_DOMAIN_BYTE);
+}
+
+// The recovery wrap on disk -- the same CRVS v1 layout (TOTAL_LEN) as
+// hybrid.corvus, distinct only by AD + KEK source.
+struct RecoveryWrap {
+    t_cost: u32,
+    m_cost_kib: u32,
+    parallelism: u32,
+    salt: [u8; ARGON2_SALT_LEN],
+    nonce: [u8; AEGIS256_NONCE_LEN],
+    ciphertext: [u8; KEYPAIR_LEN],
+    tag: [u8; AEGIS256_TAG_LEN],
+}
+
+impl RecoveryWrap {
+    fn to_bytes(&self) -> [u8; TOTAL_LEN] {
+        let mut out = [0u8; TOTAL_LEN];
+        out[0..4].copy_from_slice(&CORVUS_MAGIC.to_le_bytes());
+        out[4..8].copy_from_slice(&CORVUS_STATE_VERSION.to_le_bytes());
+        out[8..12].copy_from_slice(&self.t_cost.to_le_bytes());
+        out[12..20].copy_from_slice(&(self.m_cost_kib as u64).to_le_bytes());
+        out[20..24].copy_from_slice(&self.parallelism.to_le_bytes());
+        out[24..40].copy_from_slice(&self.salt);
+        out[40..72].copy_from_slice(&self.nonce);
+        out[72..72 + KEYPAIR_LEN].copy_from_slice(&self.ciphertext);
+        out[72 + KEYPAIR_LEN..72 + KEYPAIR_LEN + AEGIS256_TAG_LEN].copy_from_slice(&self.tag);
+        out
+    }
+
+    fn from_bytes(blob: &[u8]) -> Option<RecoveryWrap> {
+        if blob.len() != TOTAL_LEN {
+            return None;
+        }
+        let magic = u32::from_le_bytes([blob[0], blob[1], blob[2], blob[3]]);
+        let version = u32::from_le_bytes([blob[4], blob[5], blob[6], blob[7]]);
+        if magic != CORVUS_MAGIC || version != CORVUS_STATE_VERSION {
+            return None;
+        }
+        let t_cost = u32::from_le_bytes([blob[8], blob[9], blob[10], blob[11]]);
+        let m64 = u64::from_le_bytes([
+            blob[12], blob[13], blob[14], blob[15], blob[16], blob[17], blob[18], blob[19],
+        ]);
+        if m64 > u32::MAX as u64 {
+            return None;
+        }
+        let parallelism = u32::from_le_bytes([blob[20], blob[21], blob[22], blob[23]]);
+        let mut salt = [0u8; ARGON2_SALT_LEN];
+        let mut nonce = [0u8; AEGIS256_NONCE_LEN];
+        let mut ciphertext = [0u8; KEYPAIR_LEN];
+        let mut tag = [0u8; AEGIS256_TAG_LEN];
+        salt.copy_from_slice(&blob[24..40]);
+        nonce.copy_from_slice(&blob[40..72]);
+        ciphertext.copy_from_slice(&blob[72..72 + KEYPAIR_LEN]);
+        tag.copy_from_slice(&blob[72 + KEYPAIR_LEN..72 + KEYPAIR_LEN + AEGIS256_TAG_LEN]);
+        Some(RecoveryWrap {
+            t_cost,
+            m_cost_kib: m64 as u32,
+            parallelism,
+            salt,
+            nonce,
+            ciphertext,
+            tag,
+        })
+    }
+}
+
+// Wrap a keypair under a FRESH recovery keyslot for `subject`, keyed by the
+// decoded 256-bit `entropy`. getrandom salt + nonce, derive the recovery KEK,
+// AEAD-seal. None on RNG/KDF failure.
+unsafe fn make_recovery_wrap(
+    subject: &[u8],
+    entropy: &[u8; RECOVERY_ENTROPY_BYTES],
+    keypair: &[u8; KEYPAIR_LEN],
+) -> Option<RecoveryWrap> {
+    let mut salt = [0u8; ARGON2_SALT_LEN];
+    if t_getrandom(salt.as_mut_ptr(), ARGON2_SALT_LEN, 0) != ARGON2_SALT_LEN as i64 {
+        return None;
+    }
+    let mut nonce = [0u8; AEGIS256_NONCE_LEN];
+    if t_getrandom(nonce.as_mut_ptr(), AEGIS256_NONCE_LEN, 0) != AEGIS256_NONCE_LEN as i64 {
+        return None;
+    }
+    let mut kek = argon2id_kek(
+        entropy,
+        &salt,
+        RECOVERY_ARGON2_T_COST,
+        RECOVERY_ARGON2_M_COST_KIB,
+        RECOVERY_ARGON2_PARALLELISM,
+    )?;
+    let mut ad: Vec<u8> = Vec::new();
+    build_recovery_ad(subject, &mut ad);
+    let mut ciphertext = [0u8; KEYPAIR_LEN];
+    let tag = aegis_wrap(&kek, &nonce, &ad, keypair, &mut ciphertext);
+    wipe(&mut kek);
+    Some(RecoveryWrap {
+        t_cost: RECOVERY_ARGON2_T_COST,
+        m_cost_kib: RECOVERY_ARGON2_M_COST_KIB,
+        parallelism: RECOVERY_ARGON2_PARALLELISM,
+        salt,
+        nonce,
+        ciphertext,
+        tag,
+    })
+}
+
+// Unwrap a recovery keyslot with `entropy`. None on KDF failure or AEAD tag
+// mismatch (wrong phrase). The recovered keypair value EQUALS the passphrase
+// wrap's plaintext (same keypair, two keyslots) -- the invariant the DEK
+// envelopes depend on.
+unsafe fn unwrap_recovery(
+    subject: &[u8],
+    entropy: &[u8; RECOVERY_ENTROPY_BYTES],
+    rw: &RecoveryWrap,
+) -> Option<[u8; KEYPAIR_LEN]> {
+    let mut kek = argon2id_kek(entropy, &rw.salt, rw.t_cost, rw.m_cost_kib, rw.parallelism)?;
+    let mut ad: Vec<u8> = Vec::new();
+    build_recovery_ad(subject, &mut ad);
+    let res = aegis_unwrap(&kek, &rw.nonce, &ad, &rw.ciphertext, &rw.tag);
+    wipe(&mut kek);
+    let mut plain = res?;
+    if plain.len() != KEYPAIR_LEN {
+        wipe(&mut plain);
+        return None;
+    }
+    let mut kp = [0u8; KEYPAIR_LEN];
+    kp.copy_from_slice(&plain);
+    wipe(&mut plain);
+    Some(kp)
+}
+
+// Shared "wrap the keypair under a passphrase" path -- USER_CREATE's initial
+// wrap AND RECOVER's re-wrap under a new passphrase. One code path keeps the AD
+// + nonce discipline identical at both sites. None on RNG/KDF failure.
+struct KeypairWrap {
+    salt: [u8; ARGON2_SALT_LEN],
+    nonce: [u8; AEGIS256_NONCE_LEN],
+    ciphertext: [u8; KEYPAIR_LEN],
+    tag: [u8; AEGIS256_TAG_LEN],
+}
+
+unsafe fn wrap_keypair_passphrase(
+    subject: &[u8],
+    passphrase: &[u8],
+    keypair: &[u8; KEYPAIR_LEN],
+) -> Option<KeypairWrap> {
+    let mut salt = [0u8; ARGON2_SALT_LEN];
+    if t_getrandom(salt.as_mut_ptr(), ARGON2_SALT_LEN, 0) != ARGON2_SALT_LEN as i64 {
+        return None;
+    }
+    let mut nonce = [0u8; AEGIS256_NONCE_LEN];
+    if t_getrandom(nonce.as_mut_ptr(), AEGIS256_NONCE_LEN, 0) != AEGIS256_NONCE_LEN as i64 {
+        return None;
+    }
+    let mut kek = argon2id_kek(
+        passphrase,
+        &salt,
+        ARGON2_T_COST,
+        ARGON2_M_COST_KIB,
+        ARGON2_PARALLELISM,
+    )?;
+    let mut ad: Vec<u8> = Vec::new();
+    ad.extend_from_slice(AD_PREFIX);
+    ad.extend_from_slice(subject);
+    ad.push(BACKEND_ID_PASSPHRASE);
+    let mut ciphertext = [0u8; KEYPAIR_LEN];
+    let tag = aegis_wrap(&kek, &nonce, &ad, keypair, &mut ciphertext);
+    wipe(&mut kek);
+    Some(KeypairWrap {
+        salt,
+        nonce,
+        ciphertext,
+        tag,
+    })
+}
+
+// Boot-time self-test of the recovery codec + wrap layout (A-5c). FAST -- no
+// argon2 (a fixed test KEK exercises the AEAD + AD + CRVS layout); the argon2-
+// backed full RECOVER round-trip is the A-5c-c boot E2E. Validates: BIP-39
+// round-trip; a deterministic wrong-checksum reject; an unknown-word reject; the
+// recovery-wrap byte round-trip; AD domain-separation (a foreign subject's AD
+// and the passphrase-wrap AD both fail to open it). Returns true on PASS.
+unsafe fn recovery_selftest() -> bool {
+    let mut ent = [0u8; RECOVERY_ENTROPY_BYTES];
+    for i in 0..RECOVERY_ENTROPY_BYTES {
+        ent[i] = i as u8;
+    }
+
+    // 1. BIP-39 round-trip.
+    let phrase = bip39_encode(&ent);
+    let nwords = phrase
+        .split(|&c| c == b' ')
+        .filter(|w| !w.is_empty())
+        .count();
+    if nwords != RECOVERY_WORD_COUNT {
+        return false;
+    }
+    match bip39_decode(&phrase) {
+        Some(d) if d == ent => {}
+        _ => return false,
+    }
+
+    // 2. Deterministic checksum-reject: 24 valid words whose checksum byte is
+    //    flipped -> decode must reject.
+    let mut badbits = [0u8; RECOVERY_ENTROPY_BYTES + 1];
+    badbits[..RECOVERY_ENTROPY_BYTES].copy_from_slice(&ent);
+    badbits[RECOVERY_ENTROPY_BYTES] = sha256_checksum_byte(&ent) ^ 0xff;
+    let badphrase = bip39_words_from_bits(&badbits);
+    if bip39_decode(&badphrase).is_some() {
+        return false;
+    }
+
+    // 3. Unknown-word reject (a non-wordlist token).
+    let mut unk: Vec<u8> = Vec::new();
+    for i in 0..RECOVERY_WORD_COUNT {
+        if i > 0 {
+            unk.push(b' ');
+        }
+        if i == RECOVERY_WORD_COUNT - 1 {
+            unk.extend_from_slice(b"notaword");
+        } else {
+            unk.extend_from_slice(b"abandon");
+        }
+    }
+    if bip39_decode(&unk).is_some() {
+        return false;
+    }
+
+    // 4. Recovery-wrap byte round-trip + AD separation, with a FIXED test KEK.
+    let test_key = [0x5au8; AEGIS256_KEY_LEN];
+    let test_nonce = [0xa5u8; AEGIS256_NONCE_LEN];
+    let subject = b"selftest";
+    let mut keypair = [0u8; KEYPAIR_LEN];
+    for i in 0..KEYPAIR_LEN {
+        keypair[i] = (i & 0xff) as u8;
+    }
+    let mut ad: Vec<u8> = Vec::new();
+    build_recovery_ad(subject, &mut ad);
+    let mut ct = [0u8; KEYPAIR_LEN];
+    let tag = aegis_wrap(&test_key, &test_nonce, &ad, &keypair, &mut ct);
+    let rw = RecoveryWrap {
+        t_cost: 1,
+        m_cost_kib: 8,
+        parallelism: 1,
+        salt: [0u8; ARGON2_SALT_LEN],
+        nonce: test_nonce,
+        ciphertext: ct,
+        tag,
+    };
+    let blob = rw.to_bytes();
+    let rw2 = match RecoveryWrap::from_bytes(&blob) {
+        Some(r) => r,
+        None => return false,
+    };
+    match aegis_unwrap(&test_key, &rw2.nonce, &ad, &rw2.ciphertext, &rw2.tag) {
+        Some(o) if o.as_slice() == &keypair[..] => {}
+        _ => return false,
+    }
+    // Foreign-subject AD must fail.
+    let mut ad_other: Vec<u8> = Vec::new();
+    build_recovery_ad(b"other", &mut ad_other);
+    if aegis_unwrap(&test_key, &rw2.nonce, &ad_other, &rw2.ciphertext, &rw2.tag).is_some() {
+        return false;
+    }
+    // Passphrase-wrap AD (same subject, different prefix) must fail.
+    let mut ad_pass: Vec<u8> = Vec::new();
+    ad_pass.extend_from_slice(AD_PREFIX);
+    ad_pass.extend_from_slice(subject);
+    ad_pass.push(BACKEND_ID_PASSPHRASE);
+    if aegis_unwrap(&test_key, &rw2.nonce, &ad_pass, &rw2.ciphertext, &rw2.tag).is_some() {
+        return false;
+    }
+    wipe(&mut keypair);
+    wipe(&mut ent);
+    true
+}
+
+// =============================================================================
 // User state vector + dataset ownership table — in-memory at v1.0.
 // =============================================================================
 
@@ -671,6 +1133,39 @@ unsafe fn user_states_insert(record: CorvusUserState) -> bool {
     true
 }
 
+// Replace the wrap fields (params + salt + nonce + ciphertext + tag) of an
+// existing user in place, keeping identity fields. RECOVER calls this after the
+// hybrid.corvus rename-swap so a subsequent AUTH (new passphrase) succeeds
+// without a reboot. Returns false if the user is absent.
+unsafe fn user_states_update_wrap(
+    user: &[u8],
+    t_cost: u32,
+    m_cost_kib: u32,
+    parallelism: u32,
+    salt: &[u8; ARGON2_SALT_LEN],
+    nonce: &[u8; AEGIS256_NONCE_LEN],
+    ciphertext: &[u8; KEYPAIR_LEN],
+    tag: &[u8; AEGIS256_TAG_LEN],
+) -> bool {
+    let states = match (*core::ptr::addr_of_mut!(USER_STATES)).as_mut() {
+        Some(s) => s,
+        None => return false,
+    };
+    for s in states.iter_mut() {
+        if s.user == user {
+            s.t_cost = t_cost;
+            s.m_cost_kib = m_cost_kib;
+            s.parallelism = parallelism;
+            s.salt = *salt;
+            s.nonce = *nonce;
+            s.ciphertext = *ciphertext;
+            s.tag = *tag;
+            return true;
+        }
+    }
+    false
+}
+
 unsafe fn user_states_find_by_id(principal_id: u32) -> Option<CorvusUserState> {
     let states = (*core::ptr::addr_of!(USER_STATES)).as_ref()?;
     for s in states {
@@ -729,6 +1224,71 @@ unsafe fn dataset_owner_register(dataset: &[u8], owner: &[u8]) -> bool {
 }
 
 // =============================================================================
+// RECOVER rate limit — in-memory, per-subject (A-5c). See RECOVER_FAIL_MAX.
+// =============================================================================
+//
+// Counts checksum-VALID-but-unwrap-FAILED RECOVER attempts per subject (a typo
+// fails the cheap checksum first and is NOT counted; only a crafted/guessed
+// phrase that reaches -- and fails -- the AEAD unwrap is). A legitimate holder's
+// real phrase succeeds on the first try, so this never locks them out. Cleared
+// on success. The full time-windowed, Stratum-persisted C-16 (covering AUTH) is
+// tracked separately.
+
+struct RecoverFail {
+    subject: Vec<u8>,
+    count: u32,
+}
+
+static mut RECOVER_FAILS: Option<Vec<RecoverFail>> = None;
+
+unsafe fn recover_fails_init() {
+    core::ptr::write(core::ptr::addr_of_mut!(RECOVER_FAILS), Some(Vec::new()));
+}
+
+unsafe fn recover_fail_count(subject: &[u8]) -> u32 {
+    match (*core::ptr::addr_of!(RECOVER_FAILS)).as_ref() {
+        Some(v) => v
+            .iter()
+            .find(|r| r.subject == subject)
+            .map(|r| r.count)
+            .unwrap_or(0),
+        None => 0,
+    }
+}
+
+unsafe fn recover_fail_inc(subject: &[u8]) {
+    let v = match (*core::ptr::addr_of_mut!(RECOVER_FAILS)).as_mut() {
+        Some(v) => v,
+        None => return,
+    };
+    for r in v.iter_mut() {
+        if r.subject == subject {
+            r.count = r.count.saturating_add(1);
+            return;
+        }
+    }
+    // Bound the table (only EXISTING users ever reach this, so it is naturally
+    // <= MAX_USERS; the cap is belt-and-suspenders).
+    if v.len() >= MAX_USERS {
+        return;
+    }
+    let mut s = Vec::new();
+    s.extend_from_slice(subject);
+    v.push(RecoverFail { subject: s, count: 1 });
+}
+
+unsafe fn recover_fail_reset(subject: &[u8]) {
+    if let Some(v) = (*core::ptr::addr_of_mut!(RECOVER_FAILS)).as_mut() {
+        for r in v.iter_mut() {
+            if r.subject == subject {
+                r.count = 0;
+                return;
+            }
+        }
+    }
+}
+
+// =============================================================================
 // On-disk persistence — A-1b (CORVUS-DESIGN.md §16.4 / §16.5 / §16.6).
 // =============================================================================
 //
@@ -742,6 +1302,10 @@ const IDB: &[u8] = b"identity.db";
 const IDB_TMP: &[u8] = b"identity.db.tmp";
 const USERS_DIR: &[u8] = b"users";
 const HYBRID: &[u8] = b"hybrid.corvus";
+const HYBRID_TMP: &[u8] = b"hybrid.corvus.tmp";
+// A-5c recovery keyslot, alongside hybrid.corvus under users/<name>/.
+const RECOVERY_FILE: &[u8] = b"recovery.corvus";
+const RECOVERY_TMP: &[u8] = b"recovery.corvus.tmp";
 
 const FS_IO_CHUNK: usize = 2048; // bounded per-call read/write (<= SYS_RW_MAX)
 const IDENTITY_DB_MAX: usize = 256 * 1024; // read cap; ~36 KiB worst case at 256 users
@@ -1010,6 +1574,81 @@ unsafe fn persist_keypair_wrap(users_fd: i64, name: &[u8], rec: &CorvusUserState
     let _ = t_close(udir);
     let users_dir_synced = t_fsync(users_fd, 0) == 0;
     wrote && file_synced && wrap_dir_synced && users_dir_synced
+}
+
+// Write the per-user recovery keyslot (A-5c; write-once at USER_CREATE, fsync'd)
+// to users/<name>/recovery.corvus, creating the per-user dir if absent. A stale
+// orphan from a prior crashed create is unlinked first. Returns false on any
+// failure (caller aborts the create BEFORE committing identity.db). Mirrors
+// persist_keypair_wrap.
+unsafe fn persist_recovery_wrap(users_fd: i64, name: &[u8], rw: &RecoveryWrap) -> bool {
+    let udir = mkdir_opath(users_fd, name);
+    if udir < 0 {
+        return false;
+    }
+    let _ = t_unlink(udir, RECOVERY_FILE.as_ptr(), RECOVERY_FILE.len(), 0);
+    let wf = t_walk_create(udir, RECOVERY_FILE.as_ptr(), RECOVERY_FILE.len(), T_OWRITE, 0o600);
+    if wf < 0 {
+        let _ = t_close(udir);
+        return false;
+    }
+    let blob = rw.to_bytes();
+    let wrote = write_all_fd(wf, &blob);
+    let file_synced = t_fsync(wf, 0) == 0;
+    let _ = t_close(wf);
+    let wrap_dir_synced = t_fsync(udir, 0) == 0;
+    let _ = t_close(udir);
+    let users_dir_synced = t_fsync(users_fd, 0) == 0;
+    wrote && file_synced && wrap_dir_synced && users_dir_synced
+}
+
+// Open users/<name>/recovery.corvus and parse the recovery keyslot. None if
+// absent (a user predating A-5c enrollment) or corrupt. Read-only -- the wrap is
+// consulted only during RECOVER, never at boot.
+unsafe fn load_recovery_wrap(users_fd: i64, name: &[u8]) -> Option<RecoveryWrap> {
+    let udir = t_walk_open(users_fd, name.as_ptr(), name.len(), T_OPATH);
+    if udir < 0 {
+        return None;
+    }
+    let rf = t_walk_open(udir, RECOVERY_FILE.as_ptr(), RECOVERY_FILE.len(), T_OREAD);
+    let _ = t_close(udir);
+    if rf < 0 {
+        return None;
+    }
+    let mut blob: Vec<u8> = Vec::new();
+    let ok = read_to_end_fd(rf, &mut blob, TOTAL_LEN + 64);
+    let _ = t_close(rf);
+    if !ok {
+        return None;
+    }
+    RecoveryWrap::from_bytes(&blob)
+}
+
+// Atomic rename-swap of a per-user wrap file (RECOVER re-wrap of an EXISTING
+// hybrid.corvus / recovery.corvus): write tmp -> fsync(tmp) -> rename(tmp ->
+// real) -> fsync(dir). Atomicity matters here (unlike the write-once create
+// paths) because the old file must never be lost to a partial write -- both
+// keyslots wrap the same keypair, but a torn file would be unreadable. `udir`
+// is the caller-owned per-user O_PATH dir handle (not closed here).
+unsafe fn persist_wrap_swap(udir: i64, real: &[u8], tmp: &[u8], blob: &[u8]) -> bool {
+    let _ = t_unlink(udir, tmp.as_ptr(), tmp.len(), 0);
+    let tf = t_walk_create(udir, tmp.as_ptr(), tmp.len(), T_OWRITE, 0o600);
+    if tf < 0 {
+        return false;
+    }
+    let wrote = write_all_fd(tf, blob);
+    let synced = t_fsync(tf, 0) == 0;
+    let _ = t_close(tf);
+    if !wrote || !synced {
+        let _ = t_unlink(udir, tmp.as_ptr(), tmp.len(), 0);
+        return false;
+    }
+    if t_rename(udir, tmp.as_ptr(), tmp.len(), udir, real.as_ptr(), real.len()) != 0 {
+        let _ = t_unlink(udir, tmp.as_ptr(), tmp.len(), 0);
+        return false;
+    }
+    let _ = t_fsync(udir, 0);
+    true
 }
 
 // Atomic rewrite-swap of identity.db (§16.6 step 2): write tmp -> fsync(tmp) ->
@@ -1454,6 +2093,9 @@ const VERB_SESSION_CLOSE: u8 = 3;
 const VERB_UNWRAP: u8 = 4;
 const VERB_USER_CREATE: u8 = 5;
 const VERB_ADMIN_ELEVATE: u8 = 7;
+// A-5c recovery: reset a subject's passphrase via the paper recovery phrase.
+// subject_kind discriminates user (1; A-5c-a) vs system/hostowner-c (0; A-5c-b).
+const VERB_RECOVER: u8 = 8;
 const VERB_WRAP: u8 = 10;
 // A-1b identity verbs (CORVUS-DESIGN.md §16.7). RESOLVE_* are ungated
 // (getpwuid/getpwnam equivalents -- an id<->name map is not secret).
@@ -1491,7 +2133,6 @@ const STATUS_OK: u8 = 0;
 const STATUS_BAD_AUTH: u8 = 1;
 const STATUS_PERMISSION_DENIED: u8 = 2;
 const STATUS_NOT_FOUND: u8 = 3;
-#[allow(dead_code)]
 const STATUS_RATE_LIMITED: u8 = 4;
 const STATUS_BAD_FORMAT: u8 = 5;
 const STATUS_INTERNAL_ERROR: u8 = 6;
@@ -1514,6 +2155,18 @@ const MAX_PAYLOAD_LEN: usize = TOKEN_LEN + 1 + MAX_DATASET_LEN + 8 + 2 + MAX_WRA
 const _: () = assert!(
     MAX_PAYLOAD_LEN >= 1 + MAX_USER_LEN + 2 + MAX_PASS_LEN + 1 + 1 + 4 * PROC_SUPP_GIDS_MAX,
     "extended USER_CREATE payload must fit MAX_PAYLOAD_LEN"
+);
+// RECOVER(user): subject_kind(1) + user_len(1) + user + phrase_len(2) + phrase
+// + new_pass_len(2) + new_passphrase.
+const _: () = assert!(
+    MAX_PAYLOAD_LEN >= 1 + 1 + MAX_USER_LEN + 2 + RECOVERY_PHRASE_MAX + 2 + MAX_PASS_LEN,
+    "RECOVER(user) payload must fit MAX_PAYLOAD_LEN"
+);
+// USER_CREATE OK (id + gid + phrase_len + phrase) and RECOVER OK (phrase_len +
+// phrase) must fit the staged response frame.
+const _: () = assert!(
+    MAX_RESPONSE_FRAME >= RESP_HDR_LEN + 8 + 2 + RECOVERY_PHRASE_MAX,
+    "phrase-bearing OK responses must fit MAX_RESPONSE_FRAME"
 );
 
 // 4-byte request header (verb + protocol_version + len_lo + len_hi).
@@ -1937,52 +2590,50 @@ unsafe fn handle_user_create(handle: i64, payload: &[u8], response: &mut Vec<u8>
         return stage_response(response, STATUS_INTERNAL_ERROR, &[]);
     }
 
-    let mut salt = [0u8; ARGON2_SALT_LEN];
-    if t_getrandom(salt.as_mut_ptr(), ARGON2_SALT_LEN, 0) != ARGON2_SALT_LEN as i64 {
-        return stage_response(response, STATUS_INTERNAL_ERROR, &[]);
-    }
-    let mut nonce = [0u8; AEGIS256_NONCE_LEN];
-    if t_getrandom(nonce.as_mut_ptr(), AEGIS256_NONCE_LEN, 0) != AEGIS256_NONCE_LEN as i64 {
-        return stage_response(response, STATUS_INTERNAL_ERROR, &[]);
-    }
+    let mut user_vec: Vec<u8> = Vec::new();
+    user_vec.extend_from_slice(user_slice);
 
     let mut keypair_plain = match generate_hybrid_keypair() {
         Some(kp) => kp,
         None => return stage_response(response, STATUS_INTERNAL_ERROR, &[]),
     };
 
-    let mut kek = match argon2id_kek(
-        passphrase,
-        &salt,
-        ARGON2_T_COST,
-        ARGON2_M_COST_KIB,
-        ARGON2_PARALLELISM,
-    ) {
+    // Wrap the keypair under the passphrase (hybrid.corvus) AND mint the A-5c
+    // recovery keyslot (recovery.corvus) over the SAME keypair -- mandatory
+    // enrollment. The 24-word phrase is returned once in the OK response.
+    let kw = match wrap_keypair_passphrase(user_slice, passphrase, &keypair_plain) {
         Some(k) => k,
         None => {
             wipe(&mut keypair_plain);
             return stage_response(response, STATUS_INTERNAL_ERROR, &[]);
         }
     };
-
-    let mut ad: Vec<u8> = Vec::new();
-    let mut user_vec: Vec<u8> = Vec::new();
-    user_vec.extend_from_slice(user_slice);
-    ad.extend_from_slice(AD_PREFIX);
-    ad.extend_from_slice(&user_vec);
-    ad.push(BACKEND_ID_PASSPHRASE);
-
-    let mut ciphertext = [0u8; KEYPAIR_LEN];
-    let tag = aegis_wrap(&kek, &nonce, &ad, &keypair_plain, &mut ciphertext);
-
-    wipe(&mut kek);
+    let mut recovery_entropy = [0u8; RECOVERY_ENTROPY_BYTES];
+    if t_getrandom(recovery_entropy.as_mut_ptr(), RECOVERY_ENTROPY_BYTES, 0)
+        != RECOVERY_ENTROPY_BYTES as i64
+    {
+        wipe(&mut keypair_plain);
+        wipe(&mut recovery_entropy);
+        return stage_response(response, STATUS_INTERNAL_ERROR, &[]);
+    }
+    let recovery_rw = match make_recovery_wrap(user_slice, &recovery_entropy, &keypair_plain) {
+        Some(r) => r,
+        None => {
+            wipe(&mut keypair_plain);
+            wipe(&mut recovery_entropy);
+            return stage_response(response, STATUS_INTERNAL_ERROR, &[]);
+        }
+    };
     wipe(&mut keypair_plain);
 
     // UPG: principal_id == primary_gid == next_auto_id++ (§16.3). A burned id
     // (counter bumped but a later step fails) is never reused -- monotonic.
     let principal_id = match alloc_auto_id() {
         Some(id) => id,
-        None => return stage_response(response, STATUS_INTERNAL_ERROR, &[]),
+        None => {
+            wipe(&mut recovery_entropy);
+            return stage_response(response, STATUS_INTERNAL_ERROR, &[]);
+        }
     };
     let primary_gid = principal_id;
 
@@ -1995,22 +2646,25 @@ unsafe fn handle_user_create(handle: i64, payload: &[u8], response: &mut Vec<u8>
         t_cost: ARGON2_T_COST,
         m_cost_kib: ARGON2_M_COST_KIB,
         parallelism: ARGON2_PARALLELISM,
-        salt,
-        nonce,
-        ciphertext,
-        tag,
+        salt: kw.salt,
+        nonce: kw.nonce,
+        ciphertext: kw.ciphertext,
+        tag: kw.tag,
     };
 
-    // Persist (§16.6): keypair wrap (write-once, fsync'd) BEFORE the identity.db
-    // commit, so a crash between them leaves an orphan wrap (harmless), never an
-    // identity record pointing at a missing wrap. Open users/ once.
+    // Persist (§16.6): BOTH wraps (write-once, fsync'd) BEFORE the identity.db
+    // commit, so a crash leaves orphan wrap(s) (harmless), never an identity
+    // record pointing at a missing wrap. Open users/ once.
     let users_fd = mkdir_opath(T_WALK_OPEN_FROM_ROOT, USERS_DIR);
     if users_fd < 0 {
+        wipe(&mut recovery_entropy);
         return stage_response(response, STATUS_INTERNAL_ERROR, &[]);
     }
-    let wrap_ok = persist_keypair_wrap(users_fd, &user_vec, &record);
+    let wrap_ok = persist_keypair_wrap(users_fd, &user_vec, &record)
+        && persist_recovery_wrap(users_fd, &user_vec, &recovery_rw);
     let _ = t_close(users_fd);
     if !wrap_ok {
+        wipe(&mut recovery_entropy);
         return stage_response(response, STATUS_INTERNAL_ERROR, &[]);
     }
 
@@ -2018,15 +2672,18 @@ unsafe fn handle_user_create(handle: i64, payload: &[u8], response: &mut Vec<u8>
     // atomic commit point). On swap failure, roll back the appends -- the new
     // user is then neither in identity.db nor in the live table.
     if !user_states_insert(record) {
+        wipe(&mut recovery_entropy);
         return stage_response(response, STATUS_INTERNAL_ERROR, &[]);
     }
     if !groups_push(principal_id, &user_vec) {
         user_states_pop_last();
+        wipe(&mut recovery_entropy);
         return stage_response(response, STATUS_INTERNAL_ERROR, &[]);
     }
     if !identity_persist() {
         groups_pop_last();
         user_states_pop_last();
+        wipe(&mut recovery_entropy);
         return stage_response(response, STATUS_INTERNAL_ERROR, &[]);
     }
 
@@ -2038,10 +2695,236 @@ unsafe fn handle_user_create(handle: i64, payload: &[u8], response: &mut Vec<u8>
     dataset.extend_from_slice(&user_vec);
     dataset_owner_register(&dataset, &user_vec);
 
-    let mut ok = [0u8; 8];
-    ok[0..4].copy_from_slice(&principal_id.to_le_bytes());
-    ok[4..8].copy_from_slice(&primary_gid.to_le_bytes());
+    // OK reply: principal_id u32 + primary_gid u32 + phrase_len u16 + phrase
+    // (A-5c mandatory enrollment; the caller displays the phrase once).
+    let mut phrase = bip39_encode(&recovery_entropy);
+    wipe(&mut recovery_entropy);
+    let mut ok: Vec<u8> = Vec::with_capacity(8 + 2 + phrase.len());
+    ok.extend_from_slice(&principal_id.to_le_bytes());
+    ok.extend_from_slice(&primary_gid.to_le_bytes());
+    ok.push((phrase.len() & 0xff) as u8);
+    ok.push(((phrase.len() >> 8) & 0xff) as u8);
+    ok.extend_from_slice(&phrase);
     stage_response(response, STATUS_OK, &ok);
+    wipe(&mut phrase);
+    wipe(&mut ok);
+}
+
+// handle_recover — RECOVER verb (verb_id=8; A-5c). subject_kind=1 (user): reset
+// a user's passphrase from their paper recovery phrase, with NO session token
+// and NO capability -- the user lost the passphrase, so phrase-knowledge + the
+// rate limit are the entire gate. On success the keypair is re-wrapped under the
+// new passphrase AND a FRESH recovery phrase is rolled (the used one retired);
+// the fresh phrase is returned. The keypair value is unchanged, so every DEK
+// envelope stays valid (no Stratum/kernel surface). subject_kind=0 (system /
+// hostowner-c) is A-5c-b and is rejected here.
+//
+// Payload (subject_kind=1):
+//   [0]              subject_kind u8 (1)
+//   [1]              user_len u8 (1..=MAX_USER_LEN)
+//   [2..2+ul]        user
+//   [2+ul..4+ul]     phrase_len u16 LE (1..=RECOVERY_PHRASE_MAX)
+//   [4+ul..]         phrase (phrase_len)
+//   [..2]            new_pass_len u16 LE (1..=MAX_PASS_LEN)
+//   [..]             new_passphrase (new_pass_len)
+//
+// OK reply: phrase_len u16 LE + fresh_phrase.
+unsafe fn handle_recover(
+    _handle: i64,
+    _peer: &TSrvPeerInfo,
+    payload: &[u8],
+    response: &mut Vec<u8>,
+) {
+    if payload.is_empty() {
+        return stage_response(response, STATUS_BAD_FORMAT, &[]);
+    }
+    if payload[0] != 1 {
+        // subject_kind=0 (system / hostowner-c) lands in A-5c-b.
+        return stage_response(response, STATUS_BAD_FORMAT, &[]);
+    }
+    if payload.len() < 2 {
+        return stage_response(response, STATUS_BAD_FORMAT, &[]);
+    }
+    let user_len = payload[1] as usize;
+    if user_len == 0 || user_len > MAX_USER_LEN {
+        return stage_response(response, STATUS_BAD_FORMAT, &[]);
+    }
+    let user_off = 2;
+    if payload.len() < user_off + user_len + 2 {
+        return stage_response(response, STATUS_BAD_FORMAT, &[]);
+    }
+    let user = &payload[user_off..user_off + user_len];
+    let phrase_len_off = user_off + user_len;
+    let phrase_len =
+        (payload[phrase_len_off] as usize) | ((payload[phrase_len_off + 1] as usize) << 8);
+    if phrase_len == 0 || phrase_len > RECOVERY_PHRASE_MAX {
+        return stage_response(response, STATUS_BAD_FORMAT, &[]);
+    }
+    let phrase_off = phrase_len_off + 2;
+    if payload.len() < phrase_off + phrase_len + 2 {
+        return stage_response(response, STATUS_BAD_FORMAT, &[]);
+    }
+    let phrase = &payload[phrase_off..phrase_off + phrase_len];
+    let np_len_off = phrase_off + phrase_len;
+    let new_pass_len = (payload[np_len_off] as usize) | ((payload[np_len_off + 1] as usize) << 8);
+    if new_pass_len == 0 || new_pass_len > MAX_PASS_LEN {
+        return stage_response(response, STATUS_BAD_FORMAT, &[]);
+    }
+    let np_off = np_len_off + 2;
+    if payload.len() != np_off + new_pass_len {
+        return stage_response(response, STATUS_BAD_FORMAT, &[]);
+    }
+    let new_passphrase = &payload[np_off..np_off + new_pass_len];
+
+    // The subject must exist. A nonexistent user fails cheap (no KDF, no rate-
+    // limit charge), so a name-probe cannot DoS or distinguish on cost.
+    let state = match user_states_find(user) {
+        Some(s) => s,
+        None => return stage_response(response, STATUS_BAD_AUTH, &[]),
+    };
+
+    // Rate-limit the EXPENSIVE path BEFORE any KDF.
+    if recover_fail_count(user) >= RECOVER_FAIL_MAX {
+        return stage_response(response, STATUS_RATE_LIMITED, &[]);
+    }
+
+    let users_fd = mkdir_opath(T_WALK_OPEN_FROM_ROOT, USERS_DIR);
+    if users_fd < 0 {
+        return stage_response(response, STATUS_INTERNAL_ERROR, &[]);
+    }
+
+    // Load the recovery keyslot. Absent -> the user predates A-5c enrollment (or
+    // a corrupt wrap) -> BadAuth (cheap; no charge).
+    let rw = match load_recovery_wrap(users_fd, user) {
+        Some(r) => r,
+        None => {
+            let _ = t_close(users_fd);
+            return stage_response(response, STATUS_BAD_AUTH, &[]);
+        }
+    };
+
+    // Decode + checksum-verify the phrase. A typo aborts BEFORE the KDF and is
+    // NOT charged to the rate limit.
+    let mut entropy = match bip39_decode(phrase) {
+        Some(e) => e,
+        None => {
+            let _ = t_close(users_fd);
+            return stage_response(response, STATUS_BAD_AUTH, &[]);
+        }
+    };
+
+    // Derive the recovery KEK + unwrap (the expensive, charged step).
+    let unwrap = unwrap_recovery(user, &entropy, &rw);
+    wipe(&mut entropy);
+    let mut keypair = match unwrap {
+        Some(kp) => kp,
+        None => {
+            // Checksum-valid but wrong phrase: a crafted/guessed attempt.
+            recover_fail_inc(user);
+            let _ = t_close(users_fd);
+            return stage_response(response, STATUS_BAD_AUTH, &[]);
+        }
+    };
+
+    // SUCCESS. Build BOTH new wraps in memory before touching disk, so the only
+    // failure points are the two rename-swaps.
+    let kw = match wrap_keypair_passphrase(user, new_passphrase, &keypair) {
+        Some(k) => k,
+        None => {
+            wipe(&mut keypair);
+            let _ = t_close(users_fd);
+            return stage_response(response, STATUS_INTERNAL_ERROR, &[]);
+        }
+    };
+    let mut new_rec = state;
+    new_rec.t_cost = ARGON2_T_COST;
+    new_rec.m_cost_kib = ARGON2_M_COST_KIB;
+    new_rec.parallelism = ARGON2_PARALLELISM;
+    new_rec.salt = kw.salt;
+    new_rec.nonce = kw.nonce;
+    new_rec.ciphertext = kw.ciphertext;
+    new_rec.tag = kw.tag;
+    let new_hybrid_blob = new_rec.to_bytes();
+
+    let mut new_entropy = [0u8; RECOVERY_ENTROPY_BYTES];
+    if t_getrandom(new_entropy.as_mut_ptr(), RECOVERY_ENTROPY_BYTES, 0)
+        != RECOVERY_ENTROPY_BYTES as i64
+    {
+        wipe(&mut keypair);
+        wipe(&mut new_entropy);
+        let _ = t_close(users_fd);
+        return stage_response(response, STATUS_INTERNAL_ERROR, &[]);
+    }
+    let new_rw = match make_recovery_wrap(user, &new_entropy, &keypair) {
+        Some(r) => r,
+        None => {
+            wipe(&mut keypair);
+            wipe(&mut new_entropy);
+            let _ = t_close(users_fd);
+            return stage_response(response, STATUS_INTERNAL_ERROR, &[]);
+        }
+    };
+    wipe(&mut keypair);
+    let new_recovery_blob = new_rw.to_bytes();
+
+    let udir = mkdir_opath(users_fd, user);
+    if udir < 0 {
+        wipe(&mut new_entropy);
+        let _ = t_close(users_fd);
+        return stage_response(response, STATUS_INTERNAL_ERROR, &[]);
+    }
+    // Commit order: hybrid.corvus (the passphrase reset, the user's primary
+    // goal) FIRST, then recovery.corvus (the rolled phrase). Because BOTH
+    // keyslots wrap the SAME keypair, no crash can strand the user: whichever
+    // file survives independently recovers the keypair. A crash after the hybrid
+    // swap but before the recovery swap leaves the new passphrase live AND the
+    // OLD recovery phrase still valid (recovery.corvus untouched) -- the user can
+    // log in and re-run recovery. We return a fresh phrase only once it is on
+    // disk.
+    if !persist_wrap_swap(udir, HYBRID, HYBRID_TMP, &new_hybrid_blob) {
+        wipe(&mut new_entropy);
+        let _ = t_close(udir);
+        let _ = t_close(users_fd);
+        return stage_response(response, STATUS_INTERNAL_ERROR, &[]);
+    }
+    // The passphrase wrap is committed; reflect it in the live table NOW so a
+    // subsequent AUTH (new passphrase) works without a reboot.
+    user_states_update_wrap(
+        user,
+        ARGON2_T_COST,
+        ARGON2_M_COST_KIB,
+        ARGON2_PARALLELISM,
+        &kw.salt,
+        &kw.nonce,
+        &kw.ciphertext,
+        &kw.tag,
+    );
+    if !persist_wrap_swap(udir, RECOVERY_FILE, RECOVERY_TMP, &new_recovery_blob) {
+        // Passphrase reset succeeded; the phrase roll did not. The OLD phrase is
+        // still valid (recovery.corvus untouched) -> no data loss, but we did not
+        // produce a durable fresh phrase, so report error rather than hand back a
+        // phrase that is not on disk.
+        wipe(&mut new_entropy);
+        let _ = t_close(udir);
+        let _ = t_close(users_fd);
+        return stage_response(response, STATUS_INTERNAL_ERROR, &[]);
+    }
+    let _ = t_fsync(users_fd, 0);
+    let _ = t_close(udir);
+    let _ = t_close(users_fd);
+
+    recover_fail_reset(user);
+
+    // OK reply: phrase_len u16 LE + fresh_phrase.
+    let mut phrase_out = bip39_encode(&new_entropy);
+    wipe(&mut new_entropy);
+    let mut out: Vec<u8> = Vec::with_capacity(2 + phrase_out.len());
+    out.push((phrase_out.len() & 0xff) as u8);
+    out.push(((phrase_out.len() >> 8) & 0xff) as u8);
+    out.extend_from_slice(&phrase_out);
+    stage_response(response, STATUS_OK, &out);
+    wipe(&mut phrase_out);
+    wipe(&mut out);
 }
 
 // handle_resolve_id — RESOLVE_ID verb (verb_id=11; UNGATED). The getpwuid
@@ -2922,6 +3805,8 @@ unsafe fn try_dispatch_verb(conn: &mut Conn) {
                                                    &mut conn.pending_response),
             VERB_ADMIN_ELEVATE => handle_admin_elevate(&conn_peer, &payload_owned,
                                                        &mut conn.pending_response),
+            VERB_RECOVER => handle_recover(conn_handle, &conn_peer, &payload_owned,
+                                           &mut conn.pending_response),
             VERB_WRAP => handle_wrap(&payload_owned, &mut conn.pending_response),
             VERB_RESOLVE_ID => handle_resolve_id(&payload_owned, &mut conn.pending_response),
             VERB_RESOLVE_NAME => handle_resolve_name(&payload_owned, &mut conn.pending_response),
@@ -3580,6 +4465,7 @@ pub extern "C" fn rs_main() -> i64 {
         dataset_owners_init();
         groups_init();
         clearance_init();
+        recover_fails_init();
     }
 
     let rc = unsafe { t_mlockall(0) };
@@ -3604,6 +4490,18 @@ pub extern "C" fn rs_main() -> i64 {
             t_putstr("corvus: storage capability OK (confined; /thylacine-version unreachable)\n");
         } else {
             t_putstr("corvus: storage capability smoke FAILED\n");
+            return 1;
+        }
+    }
+
+    // A-5c: self-test the recovery codec + wrap layout before serving. Fast (no
+    // argon2); a codec bug here would silently brick recovery, so corvus refuses
+    // to start on failure.
+    unsafe {
+        if recovery_selftest() {
+            t_putstr("corvus: recovery self-test OK (bip39 + keyslot)\n");
+        } else {
+            t_putstr("corvus: FATAL recovery self-test FAILED\n");
             return 1;
         }
     }

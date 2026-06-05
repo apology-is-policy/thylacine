@@ -533,7 +533,7 @@ A **recovery keyslot** is a second wrap of a subject's hybrid keypair under a *r
 - **system** (the admin keypair): `system-recovery-wrap` alongside `system-wrap`. This is **P5-hostowner-c** -- resets the system passphrase when the hostowner forgets it.
 - **user** (each user's keypair, A-5c): `recovery.corvus` alongside `hybrid.corvus`. Resets a user's passphrase when the user forgets it. **Minted mandatorily at USER_CREATE** (the phrase is returned in the OK response, displayed once).
 
-Both wraps use the CRVS v1 wrap layout (section 4.3, 3752 B), Argon2id-**sensitive** params, and a **domain-separated AD** -- `"thylacine-corvus-recovery-v1" || subject_name || 0x00` -- so a recovery wrap can never be confused with or substituted for a passphrase wrap. The phrase is a 24-word BIP-39-style mnemonic (256 bits of CSPRNG entropy + an 8-bit checksum); corvus embeds the 2048-word English wordlist. At recovery, corvus BIP-39-decodes + checksum-verifies the phrase (a typo aborts before the KDF), then `argon2id(canonicalized_phrase, recovery_salt, sensitive_params) -> recovery_KEK`.
+Both wraps use the CRVS v1 wrap layout (section 4.3, 3752 B), the Argon2id **recovery preset** (`t_cost=8, m_cost=16 MiB, p=1` -- the time cost raised over the interactive `t_cost=2`; the libsodium "sensitive" 1 GiB `m_cost` is bounded out by the 24 MiB static heap, a v1.x heap-resize seam -- the 256-bit phrase entropy, not the KDF cost, is the security floor), and a **domain-separated AD** -- `"thylacine-corvus-recovery-v1" || subject_name || 0x00` -- so a recovery wrap can never be confused with or substituted for a passphrase wrap. The phrase is a 24-word BIP-39 mnemonic (256 bits of CSPRNG entropy + an 8-bit checksum); corvus embeds the canonical 2048-word English wordlist. At recovery, corvus BIP-39-decodes + checksum-verifies the phrase (a typo aborts before the KDF), then `argon2id(decoded_entropy, recovery_salt, recovery_preset) -> recovery_KEK` -- the KEK derives from the decoded 256-bit entropy (the canonical form), NOT the phrase text, so whitespace/case never affect derivation.
 
 **The unified flow** (verb 8 RECOVER, section 6.4; `subject_kind = 0` system / `1` user):
 
@@ -543,7 +543,7 @@ Both wraps use the CRVS v1 wrap layout (section 4.3, 3752 B), Argon2id-**sensiti
        v
 [corvus]
        |  BIP-39 decode + checksum-verify the phrase     (typo -> BadFormat, no KDF)
-       |  argon2id(phrase, recovery_salt, sensitive_params) -> recovery_KEK
+       |  argon2id(decoded_entropy, recovery_salt, recovery_preset) -> recovery_KEK
        |  AEAD-unwrap the recovery wrap (system-recovery-wrap | users/<name>/recovery.corvus)
        |       -> the keypair (SAME keypair as the passphrase wrap; bad phrase -> tag fail -> BadAuth)
        |  explicit_bzero(recovery_KEK)

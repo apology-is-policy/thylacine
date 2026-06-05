@@ -2224,9 +2224,9 @@ cites: **LUKS** (one volume key, up to 8 keyslots -- the load-bearing analogy), 
 an explicit deployment choice, never a default), **ZFS/fscrypt** (keep-your-key, no recovery).
 **Fit** -- purely additive to corvus: same primitives (Argon2id + AEGIS-256), same atomic
 rename-swap persistence (A-1.6), same mlock/wipe discipline; CORVUS-DESIGN section D5 already
-commits the "24-word BIP-39-style, Argon2id-sensitive, displayed-once, re-wraps the keypair"
-pattern for the *system* phrase -- A-5c generalizes that exact pattern to users and wires the
-verb.
+commits the "24-word BIP-39, Argon2id (recovery preset -- heap-bounded; section 5.6),
+displayed-once, re-wraps the keypair" pattern for the *system* phrase -- A-5c generalizes that
+exact pattern to users and wires the verb.
 
 *The two votes (2026-06-05).*
 - **Trust model = user-held only** (NOT hostowner escrow). The recovery phrase is the sole

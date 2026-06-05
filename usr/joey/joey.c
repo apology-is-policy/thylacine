@@ -864,15 +864,25 @@ static int do_corvus_bringup(long storage_dup_fd) {
         return 1;
     }
     if (st == 0) {
-        if (rlen != 8) {
-            t_putstr("joey: USER_CREATE michael OK but missing {id,gid} payload\n");
+        /* A-5c: USER_CREATE OK grew to id(4) + gid(4) + phrase_len(2) + phrase
+         * (mandatory recovery enrollment). Tolerate the longer frame; verify the
+         * phrase is present + self-consistent. */
+        if (rlen < 10) {
+            t_putstr("joey: USER_CREATE michael OK but missing {id,gid,phrase} payload\n");
             return 1;
         }
         if (rd_u32_le(rx, 3) != 1000u || rd_u32_le(rx, 7) != 1000u) {
             t_putstr("joey: USER_CREATE michael unexpected id/gid (want 1000/1000)\n");
             return 1;
         }
-        t_putstr("joey: USER_CREATE michael ok (bootstrap; id=1000 gid=1000)\n");
+        {
+            size_t plen = (size_t)rx[11] | ((size_t)rx[12] << 8);
+            if (plen == 0 || rlen != 10 + plen) {
+                t_putstr("joey: USER_CREATE michael recovery phrase malformed\n");
+                return 1;
+            }
+        }
+        t_putstr("joey: USER_CREATE michael ok (bootstrap; id=1000 gid=1000; recovery phrase enrolled)\n");
     } else if (st == 2) {
         t_putstr("joey: USER_CREATE michael already provisioned (persistent pool)\n");
     } else {
@@ -972,15 +982,23 @@ static int do_corvus_bringup(long storage_dup_fd) {
         return 1;
     }
     if (st == 0) {
-        if (rlen != 8) {
-            t_putstr("joey: USER_CREATE susan OK but missing {id,gid} payload\n");
+        /* A-5c: tolerate the grown OK frame (id + gid + phrase_len + phrase). */
+        if (rlen < 10) {
+            t_putstr("joey: USER_CREATE susan OK but missing {id,gid,phrase} payload\n");
             return 1;
         }
         if (rd_u32_le(rx, 3) != 1001u) {
             t_putstr("joey: USER_CREATE susan unexpected id (want 1001)\n");
             return 1;
         }
-        t_putstr("joey: USER_CREATE susan ok (id=1001; supp_gids [100,200]; gated)\n");
+        {
+            size_t plen = (size_t)rx[11] | ((size_t)rx[12] << 8);
+            if (plen == 0 || rlen != 10 + plen) {
+                t_putstr("joey: USER_CREATE susan recovery phrase malformed\n");
+                return 1;
+            }
+        }
+        t_putstr("joey: USER_CREATE susan ok (id=1001; supp_gids [100,200]; gated; recovery phrase enrolled)\n");
     } else if (st == 2) {
         t_putstr("joey: USER_CREATE susan already provisioned (persistent pool)\n");
     } else {
