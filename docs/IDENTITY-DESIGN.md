@@ -2278,6 +2278,43 @@ hard: phrase brute-force vs the rate-limit, the no-escrow property, mlock/wipe o
 the no-session bypass, the console gate on system recovery, the rename-swap atomicity of the
 twin wraps.
 
+*A-5c-b provisioning -- host-bake the system identity (user-voted 2026-06-05).* The A-5c-b
+system path needs a real system identity -- an admin hybrid keypair + `system-wrap` (the keypair
+wrapped under the system passphrase) + `system-recovery-wrap` (the keypair wrapped under a system
+recovery phrase). None exists today: `ADMIN_ELEVATE` byte-compares the passphrase against the
+hardcoded `SYSTEM_PASSPHRASE = b"thylacine"` placeholder. The user chose **host-bake** (over a
+first-boot console prompt and over keeping the placeholder): the system identity is minted at
+BUILD time and baked into the pool's `/var/lib/corvus/` -- mirroring how `pool.img`, `system.key`,
+and the boot corpus are already host-baked (CLAUDE.md "Thylacine mkfs RNG seed pinning";
+build.sh `build_stratum_pool_fixture`). Host-bake is deterministic, reproducible, and adds no
+interactive boot step; corvus-at-first-boot auto-mint (non-reproducible) and an interactive
+prompt were rejected.
+
+*Mechanism.* corvus's crypto crates are all pure-Rust (`argon2`, `aegis` pure-rust, `ml-kem`,
+`x25519-dalek`, `sha2`) -- host-buildable. corvus is `no_std`/aarch64 and cannot run on the host,
+so the system identity is minted by a small **host-target `corvus-mint` tool** that reuses the
+corvus crypto verbatim through a **shared `no_std` `corvus-crypto` lib** (extracted from
+`usr/corvus/src/main.rs`: the CRVS wrap layout + `argon2id_kek` + the AEGIS wrap/unwrap + the
+BIP-39 codec + keypair generation, parameterized over an RNG -- corvus supplies a `t_getrandom`
+RNG, `corvus-mint` supplies the host `OsRng`). One crypto source, two link targets: the host
+minter and the on-device corvus produce/consume **byte-identical** wraps -- no drift (the
+compile-time-invariant / no-second-implementation discipline). `build.sh` builds `corvus-mint`
+for the host triple (the `build_stratum_host_tools` precedent), runs it to emit the three files,
+then creates the `/var/lib/corvus` dir-chain in the pool top-down (stratum-fs `mkdir` is
+single-level, no `mkdir -p`) and writes them SYSTEM-owned (`--bake-owner-uid` =
+`PRINCIPAL_SYSTEM`); joey's runtime `mkdir_or_open` of the same chain then no-ops (idempotent).
+
+*The build-time system passphrase stays the known `thylacine` constant at v1.0.* The WRAP is now
+cryptographically real (`argon2id(passphrase, system_salt) -> KEK -> AEGIS-unwrap system-wrap ->
+tag-verify`, the section 5.5 flow that was always the design), but the SECRET is the source-pinned
+constant -- so joey's `ADMIN_ELEVATE` boot E2E (which sends `thylacine`) stays green and the build
+is reproducible. This is strictly NOT a regression (the same known secret, now wrapped instead of
+byte-compared) and is consistent with every other host-baked secret. The v1.x installer supplies a
+real per-install system passphrase + displays the system recovery phrase once; only the
+source-pinned constant changes. The host minter emits the system recovery phrase to the build log
+(forensic, like the mkfs seed) at v1.0. `ADMIN_ELEVATE`'s real-unwrap is a **privilege surface --
+audit-bearing** (A-5c-c's focused round).
+
 *Seams (foreseeable, additive).* hostowner co-sign of a high-stakes recovery
 (`AUTH_REQ_HOSTOWNER_COSIGN`, composing with the A-4c SAK trusted path); forced first-login
 enrollment (operator-never-sees-the-phrase); Shamir k-of-n multi-hostowner recovery (D5 already

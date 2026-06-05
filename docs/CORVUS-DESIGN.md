@@ -136,7 +136,7 @@ The "hostowner" is whoever holds the system passphrase. They can:
 
 `corvus` gates these operations via `CAP_HOSTOWNER`, granted to a Proc only after the system passphrase is verified through a console-attached corvus session. Remote sessions (future sshd) cannot acquire `CAP_HOSTOWNER` without an explicit per-session grant from a console-attached hostowner.
 
-**Recovery phrase** (audit F6 resolution): at install time, corvus generates a fresh 24-word BIP-39-style recovery phrase. The phrase derives a backup KEK via Argon2id; the backup KEK re-wraps the corvus admin keypair. The phrase is **displayed once to the install operator and never persisted**. If the system passphrase is lost, the recovery phrase resets it:
+**Recovery phrase** (audit F6 resolution): a fresh 24-word BIP-39 recovery phrase derives a backup KEK via Argon2id; the backup KEK re-wraps the corvus admin keypair (`system-recovery-wrap`). The phrase is **displayed once and never persisted**. (v1.0 realization, A-5c-b: the admin keypair + `system-wrap` + `system-recovery-wrap` are **host-baked at build time** by a host `corvus-mint` tool -- §5.5.1 -- and the system phrase is emitted to the build log; a real installer mints + displays them once at first boot. The wrap chain is identical either way.) If the system passphrase is lost, the recovery phrase resets it:
 
 ```
 corvus admin recover --recovery-phrase '<24 words>' --new-system-passphrase '<new>'
@@ -526,11 +526,13 @@ A session without `CAP_HOSTOWNER` cannot execute admin verbs; verb authorization
 
 **Heritage and originality.** The two-phase register/redeem shape is Plan 9's `cap(3)`. The Thylacine adaptation is substantive: Plan 9's device changed a process's *user identity* (uid strings), but Thylacine has no uid 0 (D5) — the `cap` device grants a *capability bit* and binds the grant to the unforgeable per-Proc identity tag (§6.2). And Plan 9 used an HMAC over a factotum↔kernel shared secret because factotum's registration channel was untrusted; here the `grant` write is itself `CAP_GRANT_HOSTOWNER`-gated, so the kernel trusts the channel directly — no token and no kernel-side cryptography.
 
+**v1.0 realization of the system-passphrase verifier (A-5c-b; host-bake, user-voted 2026-06-05).** The flow above shows corvus running `argon2id(system_passphrase, system_salt) -> system_KEK; AEAD-unwrap system-wrap; verify magic + tag` — this is the design, and A-5c-b implements it. The system identity it reads (the admin hybrid keypair, `system-wrap`, `system-recovery-wrap`) is **minted at host-build time and baked into `/var/lib/corvus/`**, mirroring `pool.img` / `system.key`. The minting runs on the host via a `corvus-mint` tool that reuses corvus's exact crypto through a shared `no_std` `corvus-crypto` lib (the same CRVS wrap layout / Argon2id / AEGIS the on-device corvus uses, parameterized over the RNG), so host-minted and device-read wraps are byte-identical (no second implementation to drift). The build-time system passphrase stays the known `thylacine` constant at v1.0 so joey's `ADMIN_ELEVATE` boot E2E (which sends `thylacine`) stays green and the build is reproducible; the verifier is now a real Argon2id+AEGIS unwrap (no more byte-compare placeholder), and a v1.x installer supplies a real per-install secret by changing only the source-pinned constant. `ADMIN_ELEVATE`'s real unwrap is a privilege surface (A-5c-c's focused audit).
+
 ### 5.6 Recovery phrase (the recovery keyslot; A-5c)
 
 A **recovery keyslot** is a second wrap of a subject's hybrid keypair under a *recovery-phrase*-derived KEK, alongside the passphrase wrap. Same keypair, two independent factors (the LUKS keyslot model). It exists for two subjects:
 
-- **system** (the admin keypair): `system-recovery-wrap` alongside `system-wrap`. This is **P5-hostowner-c** -- resets the system passphrase when the hostowner forgets it.
+- **system** (the admin keypair): `system-recovery-wrap` alongside `system-wrap` (both host-baked at build time; §5.5.1). This is **P5-hostowner-c** -- resets the system passphrase when the hostowner forgets it.
 - **user** (each user's keypair, A-5c): `recovery.corvus` alongside `hybrid.corvus`. Resets a user's passphrase when the user forgets it. **Minted mandatorily at USER_CREATE** (the phrase is returned in the OK response, displayed once).
 
 Both wraps use the CRVS v1 wrap layout (section 4.3, 3752 B), the Argon2id **recovery preset** (`t_cost=8, m_cost=16 MiB, p=1` -- the time cost raised over the interactive `t_cost=2`; the libsodium "sensitive" 1 GiB `m_cost` is bounded out by the 24 MiB static heap, a v1.x heap-resize seam -- the 256-bit phrase entropy, not the KDF cost, is the security floor), and a **domain-separated AD** -- `"thylacine-corvus-recovery-v1" || subject_name || 0x00` -- so a recovery wrap can never be confused with or substituted for a passphrase wrap. The phrase is a 24-word BIP-39 mnemonic (256 bits of CSPRNG entropy + an 8-bit checksum); corvus embeds the canonical 2048-word English wordlist. At recovery, corvus BIP-39-decodes + checksum-verifies the phrase (a typo aborts before the KDF), then `argon2id(decoded_entropy, recovery_salt, recovery_preset) -> recovery_KEK` -- the KEK derives from the decoded 256-bit entropy (the canonical form), NOT the phrase text, so whitespace/case never affect derivation.
@@ -833,8 +835,8 @@ thylacine                              [pool]
 │   │   ├── lib
 │   │   │   └── corvus
 │   │   │       ├── config             ... daemon config
-│   │   │       ├── system-wrap        ... admin keypair wrapped by system passphrase
-│   │   │       ├── system-recovery-wrap ... admin keypair wrapped by recovery phrase
+│   │   │       ├── system-wrap        ... admin keypair wrapped by system passphrase (host-baked, A-5c-b)
+│   │   │       ├── system-recovery-wrap ... admin keypair wrapped by recovery phrase (host-baked, A-5c-b)
 │   │   │       ├── datasets/          ... dataset-ownership table
 │   │   │       └── users
 │   │   │           └── <name>

@@ -1236,6 +1236,27 @@ kill = BOTH the namespace `/proc/<pid>/ctl` surface AND a narrow elevation-only 
   argon2-backed reset -> re-login -> home decrypts) is **A-5c-c**; the persistent C-16 rate-limit
   (AUTH + RECOVER, Stratum-backed) is **#876**. **NEXT = A-5c-b (#874).**
 
+- **A-5c-b PROVISIONING DESIGN RESOLVED 2026-06-05 (user-voted host-bake); scripture landed (no
+  code).** The A-5c-b system path needs a real system identity (admin keypair + `system-wrap` +
+  `system-recovery-wrap`); none exists -- `ADMIN_ELEVATE` byte-compares `b"thylacine"`. User chose
+  **host-bake** (over a first-boot prompt / keeping the placeholder): the identity is minted at
+  build time into the pool's `/var/lib/corvus/`, mirroring `pool.img` / `system.key`. Mechanism: a
+  host-target **`corvus-mint`** tool reuses corvus's pure-Rust crypto through a shared `no_std`
+  **`corvus-crypto`** lib (CRVS layout + Argon2id + AEGIS + BIP-39 + keypair-gen, parameterized over
+  the RNG -- corvus supplies a `t_getrandom` RNG, the minter `OsRng`), so host-minted + device-read
+  wraps are byte-identical (no drift). `build.sh` builds it host-side, runs it, creates the
+  `/var/lib/corvus` dir-chain top-down (stratum-fs `mkdir`, no `-p`) + writes the files SYSTEM-owned
+  (`--bake-owner-uid`); joey's runtime `mkdir_or_open` then no-ops. The build-time system passphrase
+  stays the known `thylacine` constant at v1.0 (keeps joey's `ADMIN_ELEVATE` E2E green + reproducible)
+  -- the WRAP is now real (`argon2id -> KEK -> AEGIS-unwrap system-wrap -> tag-verify`, section 5.5);
+  a v1.x installer swaps in a real secret by changing one source constant. `ADMIN_ELEVATE`'s real
+  unwrap is a privilege surface (A-5c-c audit). Scripture: IDENTITY-DESIGN 9.9 (the A-5c-b provisioning
+  + mechanism beat), CORVUS-DESIGN D5 + 5.5.1 (host-bake realization) + 5.6 + 8 (host-baked notes),
+  CLAUDE.md + ARCH 25.4 (the A-5c audit row += ADMIN_ELEVATE real-unwrap + corvus-crypto/corvus-mint).
+  Impl plan: corvus-crypto extraction (pure refactor; independently landable) -> corvus-mint +
+  build.sh bake + corvus runtime (load system-wrap + real ADMIN_ELEVATE + RECOVER(system) console
+  gate). **NEXT = A-5c-b impl.**
+
 ---
 
 ## Cross-stop sequencing
