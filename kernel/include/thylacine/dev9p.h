@@ -118,4 +118,12 @@ void dev9p_init(void);
 //   - SLUB OOM (spoor_alloc or kmalloc)
 struct Spoor *dev9p_attach_client(struct p9_client *client, u32 root_fid);
 
+// Resolve a dev9p-backed Spoor to its (p9_client, 9P fid) -- the Loom
+// submit-time pin (I-30; docs/LOOM.md §8.5) reads these to dispatch an async op
+// directly to the engine. Returns 0 on success (*out_client + *out_fid set), -1
+// if `c` is not a dev9p Spoor (dc != DEV9P_DC) or its priv is missing/corrupt.
+// The returned client pointer is valid only while the caller holds a ref on `c`
+// (a live dev9p Spoor implies a live client -- dev9p's lifecycle invariant).
+int dev9p_client_fid(struct Spoor *c, struct p9_client **out_client, u32 *out_fid);
+
 #endif  // THYLACINE_DEV9P_H

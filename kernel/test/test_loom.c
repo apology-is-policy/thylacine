@@ -15,6 +15,7 @@
 
 #include <thylacine/loom.h>
 #include <thylacine/burrow.h>
+#include <thylacine/errno.h>
 #include <thylacine/exec.h>
 #include <thylacine/handle.h>
 #include <thylacine/proc.h>
@@ -32,6 +33,9 @@ void test_loom_register_replaces(void);
 void test_loom_post_cqe_back_pressure(void);
 void test_loom_post_cqe_ignores_hostile_header(void);
 void test_loom_dup_rejected(void);
+void test_loom_enter_nop(void);
+void test_loom_enter_submit_rejects(void);
+void test_loom_enter_flags_and_bad_index(void);
 
 // The testable syscall inners live in kernel/syscall.c (declared in loom.h);
 // sys_pipe_for_proc is the KOBJ_SPOOR-pair maker (declared nowhere public --
@@ -348,6 +352,110 @@ void test_loom_post_cqe_ignores_hostile_header(void) {
     TEST_EXPECT_EQ(cqes[0].user_data, (u64)0xABCDu, "CQE at kernel-private idx 0 (not the hostile idx)");
     // The kernel mirrored its own private tail (1), overwriting the hostile value.
     TEST_EXPECT_EQ((u64)h->cq_tail, (u64)1, "kernel mirrored its private tail (1), clobbering the hostile cq_tail");
+
+    loom_unref(l);
+}
+
+// ---------------------------------------------------------------------------
+// Loom-3 SYS_LOOM_ENTER: the SQ consume + SQE dispatch + the inline-completion
+// paths (no 9P engine needed). The engine-driven FSYNC dispatch + the
+// submit-time rights pin + the #898 quiesce live in test_9p_client.c (they need
+// the loopback client harness). Maps to specs/loom.tla Consume + Dispatch +
+// PostCqe (the inline branch) + the SQ-index ring TOCTOU bounding.
+// ---------------------------------------------------------------------------
+
+// Stage one SQE into the ring at `slot` (identity SQ-index indirection: the SQ
+// ring slot `slot` points at SQE `slot`). Writes via the kernel direct map.
+static void loom_stage_sqe(struct Loom *l, u32 slot, u8 opcode, u8 flags,
+                           u32 handle_idx, u32 len, u64 user_data) {
+    struct loom_sqe *sqes = (struct loom_sqe *)(l->ring_kva + l->sqe_off);
+    u32 *sqa = (u32 *)(l->ring_kva + l->sq_array_off);
+    struct loom_sqe *s = &sqes[slot];
+    for (u32 i = 0; i < sizeof(*s); i++) ((u8 *)s)[i] = 0;
+    s->opcode     = opcode;
+    s->flags      = flags;
+    s->handle_idx = handle_idx;
+    s->len        = len;
+    s->user_data  = user_data;
+    sqa[slot] = slot;
+}
+
+// NOP: the io_uring smoke op completes inline with result 0 (no engine, no
+// handle). Also pins the SQ consume + the kernel-private sq_head mirror.
+void test_loom_enter_nop(void) {
+    struct Loom *l = loom_create(8, 16);
+    TEST_ASSERT(l != NULL, "loom_create(8,16)");
+    struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+    struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
+
+    loom_stage_sqe(l, 0, LOOM_OP_NOP, 0, 0, 0, 0x4E4F50ULL /* "NOP" */);
+    __atomic_store_n(&h->sq_tail, 1u, __ATOMIC_RELEASE);
+
+    int n = loom_enter(l, 1, 1, 0);
+    TEST_EXPECT_EQ(n, 1, "one SQE consumed");
+    TEST_EXPECT_EQ((u64)l->cq_tail, (u64)1, "NOP completes inline -> 1 CQE");
+    TEST_EXPECT_EQ(cqes[0].user_data, (u64)0x4E4F50ULL, "CQE user_data echoed");
+    TEST_EXPECT_EQ((u64)(s64)cqes[0].result, (u64)0, "NOP result 0");
+    TEST_EXPECT_EQ((u64)h->sq_head, (u64)1, "sq_head advanced + mirrored to the shared header");
+    TEST_EXPECT_EQ((u64)l->sq_head, (u64)1, "kernel-private sq_head advanced");
+    TEST_EXPECT_EQ((u64)l->async_inflight, (u64)0, "NOP never goes in flight");
+
+    loom_unref(l);
+}
+
+// The submit-time reject paths each post an error CQE (the SQE is still consumed
+// -- io_uring semantics), never a dropped/lost SQE: a bad handle_idx (-EINVAL),
+// an empty registered slot (-EBADF), an unimplemented-but-in-range opcode that
+// needs a registered buffer (-ENOSYS, lands with Loom-6), and an out-of-range
+// opcode (-EINVAL).
+void test_loom_enter_submit_rejects(void) {
+    struct Loom *l = loom_create(8, 16);
+    TEST_ASSERT(l != NULL, "loom_create(8,16)");
+    struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+    struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
+
+    loom_stage_sqe(l, 0, LOOM_OP_FSYNC, 0, 99u, 0, 0xAAu);  // handle_idx out of range
+    loom_stage_sqe(l, 1, LOOM_OP_FSYNC, 0, 0u,  0, 0xBBu);  // reg[0] empty (no register call)
+    loom_stage_sqe(l, 2, LOOM_OP_READ,  0, 0u,  0, 0xCCu);  // in-range, needs a buffer (Loom-6)
+    loom_stage_sqe(l, 3, LOOM_OP_COUNT, 0, 0u,  0, 0xDDu);  // out-of-range opcode
+    __atomic_store_n(&h->sq_tail, 4u, __ATOMIC_RELEASE);
+
+    int n = loom_enter(l, 4, 0, LOOM_ENTER_NONBLOCK);
+    TEST_EXPECT_EQ(n, 4, "four SQEs consumed (none dropped)");
+    TEST_EXPECT_EQ((u64)l->cq_tail, (u64)4, "four error CQEs posted");
+    TEST_EXPECT_EQ((u64)l->async_inflight, (u64)0, "no op dispatched (all rejected at submit)");
+    // CQEs land in submit order (cq slot i = SQE i for the first pass).
+    TEST_EXPECT_EQ(cqes[0].user_data, (u64)0xAAu, "cqe0 echoed");
+    TEST_EXPECT_EQ((u64)(s64)cqes[0].result, (u64)(s64)(-(s32)T_E_INVAL), "bad handle_idx -> -EINVAL");
+    TEST_EXPECT_EQ((u64)(s64)cqes[1].result, (u64)(s64)(-(s32)T_E_BADF),  "empty reg slot -> -EBADF");
+    TEST_EXPECT_EQ((u64)(s64)cqes[2].result, (u64)(s64)(-(s32)T_E_NOSYS), "unimplemented opcode -> -ENOSYS");
+    TEST_EXPECT_EQ((u64)(s64)cqes[3].result, (u64)(s64)(-(s32)T_E_INVAL), "out-of-range opcode -> -EINVAL");
+
+    loom_unref(l);
+}
+
+// A reserved SQE flag is rejected (-EINVAL) so a future LINK/DRAIN/MULTISHOT is
+// never silently ignored; an out-of-range SQ-index indirection is DROPPED (the
+// diagnostic counter bumps, the SQE array is never indexed out of bounds -- the
+// SA-1 discipline on the SQ side).
+void test_loom_enter_flags_and_bad_index(void) {
+    struct Loom *l = loom_create(8, 16);
+    TEST_ASSERT(l != NULL, "loom_create(8,16)");
+    struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+    struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
+    u32 *sqa = (u32 *)(l->ring_kva + l->sq_array_off);
+
+    loom_stage_sqe(l, 0, LOOM_OP_NOP, LOOM_SQE_LINK, 0, 0, 0x11u);  // reserved flag set
+    loom_stage_sqe(l, 1, LOOM_OP_NOP, 0, 0, 0, 0x22u);
+    sqa[1] = 999u;   // out-of-range SQ-index indirection -> dropped, never indexes sqes[]
+    __atomic_store_n(&h->sq_tail, 2u, __ATOMIC_RELEASE);
+
+    int n = loom_enter(l, 2, 0, LOOM_ENTER_NONBLOCK);
+    TEST_EXPECT_EQ(n, 1, "one SQE consumed (the flag-reject); the bad-index one was dropped");
+    TEST_EXPECT_EQ((u64)h->dropped, (u64)1, "bad SQ indirection counted as dropped");
+    TEST_EXPECT_EQ((u64)l->cq_tail, (u64)1, "one CQE (the reserved-flag reject)");
+    TEST_EXPECT_EQ((u64)(s64)cqes[0].result, (u64)(s64)(-(s32)T_E_INVAL), "reserved flag -> -EINVAL");
+    TEST_EXPECT_EQ((u64)h->sq_head, (u64)2, "sq_head consumed both ring slots");
 
     loom_unref(l);
 }

@@ -368,6 +368,19 @@ int p9_client_reader_pump_once(struct p9_client *c);
 // regression; the reader loop uses the internal locked form.
 void p9_client_handoff_reader(struct p9_client *c);
 
+// Abandon ONE in-flight async op (Loom ring teardown / #898). The async analog
+// of client_run's CLIENT_WAIT_DIED Tflush-on-abandon (#845): UNDER c->lock, if
+// `rpc` is still registered (its reply has not been demuxed) drop the
+// registration -- so no future demux / mark_dead can fire rpc->on_complete --
+// and Tflush the op (reserving its tag awaiting_flush so a late original reply
+// is discarded ownerless, the I-10 reuse guard). If `rpc` already completed
+// (inflight slot cleared / reused), this is a no-op. After it returns, `rpc` is
+// unreachable from inflight[] and the caller owns the container teardown with no
+// concurrent completer. Idempotent on a NULL/foreign rpc. Best-effort: a failed
+// Tflush build/send latches the session dead (no regression vs the pre-#845
+// reclaim). The caller must NOT touch the engine for `rpc` afterward.
+void p9_client_abandon_async(struct p9_client *c, struct p9_rpc *rpc);
+
 // =============================================================================
 // Errno convention.
 //

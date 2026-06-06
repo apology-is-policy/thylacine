@@ -1291,9 +1291,23 @@ enum {
     // fd in the list.
     SYS_LOOM_REGISTER = 67,  // arg: loom_fd (x0), op (x1), arg_va (x2), nargs (x3)
 
-    // 68 -- RESERVED for SYS_LOOM_ENTER(loom_fd, to_submit, min_complete, flags)
-    // (submit N / reap M). Defined + dispatched at Loom-3 (the batch-enter
-    // core); the number is reserved here so the Loom ABI block is contiguous.
+    // SYS_LOOM_ENTER(loom_fd, to_submit, min_complete, flags) -> n / -1  (Loom-3)
+    //   x0 = loom_fd      : a KObj_Loom handle.
+    //   x1 = to_submit    : consume up to this many SQEs from the SQ (in SQ-index
+    //                       order), dispatch each to the 9P engine (async submit
+    //                       + the submit-time pin, docs/LOOM.md 8.5).
+    //   x2 = min_complete : after submitting, drive the engine reader until at
+    //                       least this many CQEs are available to reap (bounded
+    //                       by in-flight ops -- never blocks for completions that
+    //                       cannot arrive). The wait is death-interruptible (#811).
+    //   x3 = flags        : LOOM_ENTER_* (LOOM_ENTER_GETEVENTS / _NONBLOCK).
+    // Returns the number of SQEs consumed (>= 0), or -1 on bad args. Per-op
+    // failures (bad opcode / handle / rights) surface as an error CQE (result <
+    // 0), NOT a syscall error -- the SQE was still consumed. v1.0 dispatches the
+    // no-payload opcodes (NOP / FSYNC); the payload opcodes (READ/WRITE/GETATTR/
+    // ...) land with Loom-6's registered-buffer surface and post -ENOSYS until
+    // then (docs/LOOM.md 10).
+    SYS_LOOM_ENTER   = 68,   // arg: loom_fd (x0), to_submit (x1), min_complete (x2), flags (x3)
 };
 
 // SYS_WALK_OPEN's FROM_ROOT sentinel: when passed as the spoor_fd, the

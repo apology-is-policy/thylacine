@@ -15,9 +15,13 @@
 #include <thylacine/9p_transport.h>
 #include <thylacine/9p_transport_loopback.h>
 #include <thylacine/9p_wire.h>
+#include <thylacine/dev9p.h>
+#include <thylacine/errno.h>
+#include <thylacine/handle.h>
 #include <thylacine/loom.h>
 #include <thylacine/rendez.h>
 #include <thylacine/spinlock.h>
+#include <thylacine/spoor.h>
 #include <thylacine/types.h>
 
 void test_9p_client_init_destroy(void);
@@ -37,6 +41,9 @@ void test_9p_client_lock_released_between_ops(void);
 void test_9p_client_async_op_posts_cqe(void);
 void test_9p_client_async_session_death_posts_error_cqe(void);
 void test_9p_client_async_handoff_skips_async(void);
+void test_9p_client_loom_fsync_e2e(void);
+void test_9p_client_loom_rights_deny(void);
+void test_9p_client_loom_quiesce_abandons_inflight(void);
 
 // File-scope buffers (kernel test stack is 16 KiB — client struct is
 // ~4 KiB; multiple in one frame is fine but file-scope is cleaner).
@@ -92,8 +99,10 @@ static int canonical_responder(void *ctx, const u8 *req, size_t req_len,
     }
     if (type == P9_TCLUNK || type == P9_TSETATTR || type == P9_TFSYNC ||
         type == P9_TRENAME || type == P9_TRENAMEAT || type == P9_TLINK ||
-        type == P9_TUNLINKAT) {
-        // Empty body.
+        type == P9_TUNLINKAT || type == P9_TFLUSH) {
+        // Empty body (Rflush is header-only too -- P9_RFLUSH == P9_TFLUSH+1, so
+        // the type+1 reply below is a valid Rflush; the Loom-3 quiesce test
+        // exercises the abandon Tflush -> Rflush path).
         size_t total = P9_HDR_LEN;
         if (resp_cap < total) return -1;
         resp[0] = 7; resp[1] = 0; resp[2] = 0; resp[3] = 0;
@@ -714,6 +723,147 @@ void test_9p_client_async_handoff_skips_async(void) {
     g_client.inflight[30] = NULL;
     g_client.inflight[31] = NULL;
     spin_unlock(&g_client.lock);
+
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}
+
+// =============================================================================
+// Loom-3 engine-driven tests: the full SYS_LOOM_ENTER path against the loopback
+// 9P client -- register a dev9p Spoor in a Loom, stage an FSYNC SQE, loom_enter
+// submits (Tfsync via the submit-time pin) + pumps the reply (Rfsync) + posts a
+// CQE. Plus the I-30 rights gate (a read-only handle denies fsync) and the #898
+// quiesce (a loom torn down with an op in flight abandons it cleanly).
+// =============================================================================
+
+// Stage one SQE into a Loom's ring (kernel direct map), identity SQ-index
+// indirection (ring slot `slot` -> SQE `slot`). Mirrors test_loom.c's helper.
+static void cl_stage_sqe(struct Loom *l, u32 slot, u8 opcode, u32 handle_idx,
+                         u32 len, u64 user_data) {
+    struct loom_sqe *sqes = (struct loom_sqe *)(l->ring_kva + l->sqe_off);
+    u32 *sqa = (u32 *)(l->ring_kva + l->sq_array_off);
+    struct loom_sqe *s = &sqes[slot];
+    for (u32 i = 0; i < sizeof(*s); i++) ((u8 *)s)[i] = 0;
+    s->opcode     = opcode;
+    s->handle_idx = handle_idx;
+    s->len        = len;
+    s->user_data  = user_data;
+    sqa[slot] = slot;
+}
+
+// FSYNC end-to-end: the SQE dispatches a Tfsync against the registered dev9p
+// Spoor's (client, fid); the elected reader pumps the Rfsync; on_complete posts
+// a success CQE. Exercises Consume + the submit-time pin + Dispatch +
+// ReplyArrives + PostCqe + the reap.
+void test_9p_client_loom_fsync_e2e(void) {
+    drive_client_open(&g_client, &g_loopback);   // handshake; root_fid 0 bound, OPEN
+
+    struct Spoor *sp = dev9p_attach_client(&g_client, 0);   // root Spoor (fid 0)
+    TEST_ASSERT(sp != NULL, "dev9p_attach_client");
+
+    struct Loom *l = loom_create(8, 16);
+    TEST_ASSERT(l != NULL, "loom_create(8,16)");
+    rights_t rt = RIGHT_READ | RIGHT_WRITE;
+    TEST_ASSERT(loom_register_handles(l, &sp, &rt, 1) == 0, "register dev9p spoor (adopts ref)");
+
+    struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+    struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
+
+    cl_stage_sqe(l, 0, LOOM_OP_FSYNC, /*handle_idx=*/0, /*len=datasync*/0,
+                 0xF00DCAFE12345678ULL);
+    __atomic_store_n(&h->sq_tail, 1u, __ATOMIC_RELEASE);
+
+    int n = loom_enter(l, /*to_submit=*/1, /*min_complete=*/1, /*flags=*/0);
+    TEST_EXPECT_EQ(n, 1, "one SQE consumed");
+    TEST_EXPECT_EQ((u64)l->cq_tail, (u64)1, "one CQE posted (fsync completed)");
+    TEST_EXPECT_EQ(cqes[0].user_data, 0xF00DCAFE12345678ULL, "CQE user_data echoed");
+    TEST_EXPECT_EQ((u64)(s64)cqes[0].result, (u64)0, "fsync success -> result 0");
+    TEST_EXPECT_EQ((u64)h->sq_head, (u64)1, "sq_head advanced + mirrored");
+    TEST_EXPECT_EQ((u64)l->async_inflight, (u64)0, "op completed + reaped");
+    TEST_ASSERT(l->inflight_ops == NULL, "container reclaimed by loom_reap_terminal");
+
+    loom_unref(l);                  // clunks the registered spoor (fid_owned=false -> client untouched)
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}
+
+// I-30 submit-time rights pin: an FSYNC against a registered handle whose rights
+// snapshot lacks RIGHT_WRITE is denied at submit (-EACCES CQE) and NEVER
+// dispatched -- the op does not go in flight, so the gate cannot be bypassed by
+// a later re-resolve at completion.
+void test_9p_client_loom_rights_deny(void) {
+    drive_client_open(&g_client, &g_loopback);
+
+    struct Spoor *sp = dev9p_attach_client(&g_client, 0);
+    TEST_ASSERT(sp != NULL, "dev9p_attach_client");
+
+    struct Loom *l = loom_create(8, 16);
+    TEST_ASSERT(l != NULL, "loom_create(8,16)");
+    rights_t rt = RIGHT_READ;       // NO RIGHT_WRITE -> fsync denied
+    TEST_ASSERT(loom_register_handles(l, &sp, &rt, 1) == 0, "register read-only handle");
+
+    struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+    struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
+
+    cl_stage_sqe(l, 0, LOOM_OP_FSYNC, 0, 0, 0xDEADBEEFu);
+    __atomic_store_n(&h->sq_tail, 1u, __ATOMIC_RELEASE);
+
+    int n = loom_enter(l, 1, 1, 0);
+    TEST_EXPECT_EQ(n, 1, "SQE consumed");
+    TEST_EXPECT_EQ((u64)l->cq_tail, (u64)1, "one (error) CQE");
+    TEST_EXPECT_EQ((u64)(s64)cqes[0].result, (u64)(s64)(-(s32)T_E_ACCES),
+                   "read-only handle -> fsync -EACCES (I-30 rights pin)");
+    TEST_EXPECT_EQ((u64)l->async_inflight, (u64)0, "denied at submit -> never dispatched");
+
+    loom_unref(l);
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}
+
+// #898 quiesce: a Loom torn down with an async op in flight must abandon it --
+// Tflush on the client (clearing inflight[tag] so a late reply is discarded
+// ownerless), release the submit-time pin, and free the container -- with no
+// hang, no leak, and no use-after-free. Submit WITHOUT pumping (the reply is
+// staged but not demuxed), then loom_unref drives loom_free's quiesce.
+void test_9p_client_loom_quiesce_abandons_inflight(void) {
+    drive_client_open(&g_client, &g_loopback);
+
+    struct Spoor *sp = dev9p_attach_client(&g_client, 0);
+    TEST_ASSERT(sp != NULL, "dev9p_attach_client");
+
+    struct Loom *l = loom_create(8, 16);
+    TEST_ASSERT(l != NULL, "loom_create(8,16)");
+    rights_t rt = RIGHT_READ | RIGHT_WRITE;
+    TEST_ASSERT(loom_register_handles(l, &sp, &rt, 1) == 0, "register dev9p spoor");
+
+    struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+    cl_stage_sqe(l, 0, LOOM_OP_FSYNC, 0, 0, 0x5151515151515151ULL);
+    __atomic_store_n(&h->sq_tail, 1u, __ATOMIC_RELEASE);
+
+    // Submit-only (min_complete 0, NONBLOCK): the Tfsync is sent + the op is in
+    // flight, but the reply is NOT demuxed (no pump) -- so it sits non-terminal.
+    int n = loom_enter(l, 1, 0, LOOM_ENTER_NONBLOCK);
+    TEST_EXPECT_EQ(n, 1, "one SQE submitted");
+    TEST_EXPECT_EQ((u64)l->async_inflight, (u64)1, "op is in flight (not pumped)");
+    TEST_ASSERT(l->inflight_ops != NULL, "container linked");
+    TEST_EXPECT_EQ((u64)l->cq_tail, (u64)0, "no CQE (op not completed)");
+
+    u64 freed0     = spoor_total_freed();
+    u64 destroyed0 = loom_total_destroyed();
+
+    // Tear the ring down with the op in flight (#898). loom_free quiesces: the
+    // abandon clears inflight[tag] + Tflushes, the pin is clunked, the container
+    // freed. The dev9p root spoor (reg ref + the op's pin ref = 2) is fully
+    // released; the loom is destroyed exactly once. No hang / leak / UAF.
+    loom_unref(l);
+    TEST_EXPECT_EQ(loom_total_destroyed() - destroyed0, (u64)1, "loom freed once");
+    TEST_EXPECT_EQ(spoor_total_freed() - freed0, (u64)1, "dev9p spoor freed (both refs released)");
+
+    // A late reply (the original Rfsync was staged, then overwritten by the
+    // abandon's Rflush) now arrives. The abandon cleared inflight[tag], so demux
+    // discards it ownerless -- it must NOT touch the freed container. No UAF.
+    int pumped = p9_client_reader_pump_once(&g_client);
+    TEST_ASSERT(pumped == 1 || pumped == -P9_E_IO, "late reply drained ownerless (no UAF)");
 
     p9_client_destroy(&g_client);
     p9_loopback_destroy(&g_loopback);

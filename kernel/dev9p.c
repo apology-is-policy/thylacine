@@ -120,6 +120,22 @@ struct Spoor *dev9p_attach_client(struct p9_client *client, u32 root_fid) {
     return c;
 }
 
+int dev9p_client_fid(struct Spoor *c, struct p9_client **out_client, u32 *out_fid) {
+    // Loom submit-time pin (I-30): resolve a registered dev9p Spoor to the
+    // (client, fid) the engine dispatches an async op against. priv_of gates on
+    // dc == DEV9P_DC + the priv magic, so a non-dev9p Spoor (devsrv conn,
+    // devramfs, ...) is rejected -- Loom rejects such a registered handle at
+    // submit. The returned client is valid only while the caller holds a ref on
+    // `c`: a live dev9p Spoor implies a live client (dev9p's lifecycle invariant
+    // -- the Spoor's own ops dereference the same pointer), and Loom holds an
+    // independent spoor_ref pin across the op's lifetime.
+    struct dev9p_priv *p = priv_of(c);
+    if (!p) return -1;
+    if (out_client) *out_client = p->client;
+    if (out_fid)    *out_fid    = p->fid;
+    return 0;
+}
+
 // =============================================================================
 // Dev vtable ops.
 // =============================================================================

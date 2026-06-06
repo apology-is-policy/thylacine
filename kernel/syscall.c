@@ -2895,6 +2895,30 @@ static s64 sys_loom_register_handler(u64 loom_fd_raw, u64 op_raw,
                                            n > 0 ? fds : NULL, n);
 }
 
+int sys_loom_enter_for_proc(struct Proc *p, hidx_t loom_fd, u32 to_submit,
+                            u32 min_complete, u32 flags) {
+    if (!p) return -1;
+    // handle_get holds a loom ref (loom_ref via handle_acquire_obj) for the whole
+    // call, so loom_free cannot run concurrently with loom_enter -- the reap +
+    // any submit run against a live ring; the abandon-before-free quiesce only
+    // happens once this ref (and the table's) drop. handle_put drops it after.
+    struct Handle lh;
+    if (handle_get(p, loom_fd, &lh) != 0)  return -1;
+    if (lh.kind != KOBJ_LOOM)              { handle_put(&lh); return -1; }
+    int rc = loom_enter((struct Loom *)lh.obj, to_submit, min_complete, flags);
+    handle_put(&lh);
+    return rc;
+}
+
+static s64 sys_loom_enter_handler(u64 loom_fd_raw, u64 to_submit_raw,
+                                  u64 min_complete_raw, u64 flags_raw) {
+    struct Thread *t = current_thread();
+    if (!t || !t->proc)                              return -1;
+    return (s64)sys_loom_enter_for_proc(t->proc, (hidx_t)loom_fd_raw,
+                                        (u32)to_submit_raw, (u32)min_complete_raw,
+                                        (u32)flags_raw);
+}
+
 // P6-pouch-wait-addr (sub-chunk 8): SYS_TORPOR_WAIT / SYS_TORPOR_WAKE
 // SVC handlers — thin `current_thread()` wrappers over the testable
 // `_for_proc` inners in `kernel/torpor.c`. timeout_us is signed s64
@@ -5160,6 +5184,11 @@ void syscall_dispatch(struct exception_context *ctx) {
     case SYS_LOOM_REGISTER:
         ctx->regs[0] = (u64)sys_loom_register_handler(ctx->regs[0], ctx->regs[1],
                                                       ctx->regs[2], ctx->regs[3]);
+        return;
+
+    case SYS_LOOM_ENTER:
+        ctx->regs[0] = (u64)sys_loom_enter_handler(ctx->regs[0], ctx->regs[1],
+                                                   ctx->regs[2], ctx->regs[3]);
         return;
 
     case SYS_TORPOR_WAIT:

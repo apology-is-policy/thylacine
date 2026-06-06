@@ -207,6 +207,9 @@ void test_loom_register_replaces(void);
 void test_loom_post_cqe_back_pressure(void);
 void test_loom_post_cqe_ignores_hostile_header(void);
 void test_loom_dup_rejected(void);
+void test_loom_enter_nop(void);
+void test_loom_enter_submit_rejects(void);
+void test_loom_enter_flags_and_bad_index(void);
 void test_thread_create_user_ctx_layout(void);
 void test_thread_exit_self_marks_exiting(void);
 void test_thread_exit_self_last_thread_zombies(void);
@@ -551,6 +554,9 @@ void test_9p_client_lock_released_between_ops(void);
 void test_9p_client_async_op_posts_cqe(void);
 void test_9p_client_async_session_death_posts_error_cqe(void);
 void test_9p_client_async_handoff_skips_async(void);
+void test_9p_client_loom_fsync_e2e(void);
+void test_9p_client_loom_rights_deny(void);
+void test_9p_client_loom_quiesce_abandons_inflight(void);
 void test_dev9p_registered(void);
 void test_dev9p_attach_client_root_spoor(void);
 void test_dev9p_walk_one_component(void);
@@ -1035,6 +1041,9 @@ struct test_case g_tests[] = {
     { "loom.post_cqe_back_pressure",     test_loom_post_cqe_back_pressure,     false, NULL },
     { "loom.post_cqe_ignores_hostile_header", test_loom_post_cqe_ignores_hostile_header, false, NULL },
     { "loom.dup_rejected",               test_loom_dup_rejected,               false, NULL },
+    { "loom.enter_nop",                  test_loom_enter_nop,                  false, NULL },
+    { "loom.enter_submit_rejects",       test_loom_enter_submit_rejects,       false, NULL },
+    { "loom.enter_flags_and_bad_index",  test_loom_enter_flags_and_bad_index,  false, NULL },
     { "thread.create_user_ctx_layout",         test_thread_create_user_ctx_layout,         false, NULL },
     { "thread.exit_self_marks_exiting",        test_thread_exit_self_marks_exiting,        false, NULL },
     { "thread.exit_self_last_thread_zombies",  test_thread_exit_self_last_thread_zombies,  false, NULL },
@@ -1480,6 +1489,11 @@ struct test_case g_tests[] = {
                                                                            false, NULL },
     { "9p_client.async_handoff_skips_async",
                                        test_9p_client_async_handoff_skips_async,
+                                                                           false, NULL },
+    { "9p_client.loom_fsync_e2e",      test_9p_client_loom_fsync_e2e,      false, NULL },
+    { "9p_client.loom_rights_deny",    test_9p_client_loom_rights_deny,    false, NULL },
+    { "9p_client.loom_quiesce_abandons_inflight",
+                                       test_9p_client_loom_quiesce_abandons_inflight,
                                                                            false, NULL },
     { "dev9p.registered",              test_dev9p_registered,              false, NULL },
     { "dev9p.attach_client_root_spoor",test_dev9p_attach_client_root_spoor,false, NULL },

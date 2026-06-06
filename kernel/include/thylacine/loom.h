@@ -34,6 +34,7 @@
 struct Burrow;
 struct Spoor;
 struct Proc;
+struct loom_async_op;   // Loom-3: one in-flight async op (defined in kernel/loom.c)
 
 #define LOOM_MAGIC 0x4C4F4F4D52494E47ULL   // "LOOMRING"
 
@@ -205,6 +206,15 @@ enum {
 #define LOOM_SETUP_CQSIZE   (1u << 1)   // caller-chosen cq size (later)
 #define LOOM_SETUP_VALID    (LOOM_SETUP_SQPOLL | LOOM_SETUP_CQSIZE)
 
+// =============================================================================
+// SYS_LOOM_ENTER flags (Loom-3). The wait is driven by min_complete; NONBLOCK
+// suppresses it. GETEVENTS is the io_uring-compat "wait" signal, accepted but
+// informational at v1.0 (min_complete drives the wait).
+// =============================================================================
+#define LOOM_ENTER_GETEVENTS  (1u << 0)   // wait for min_complete (informational)
+#define LOOM_ENTER_NONBLOCK   (1u << 1)   // never block; reap only what is posted
+#define LOOM_ENTER_VALID      (LOOM_ENTER_GETEVENTS | LOOM_ENTER_NONBLOCK)
+
 // SYS_LOOM_REGISTER ops.
 enum {
     LOOM_REGISTER_HANDLES = 0,   // install KObj_Spoor handles into the fixed table
@@ -228,7 +238,7 @@ struct loom_reg_handle {
 struct Loom {
     u64                  magic;        // LOOM_MAGIC; offset 0 (SLUB-free UAF defense)
     int                  refcount;     // atomic ACQ_REL; 1 at create (the handle's ref)
-    spin_lock_t          lock;         // protects reg[] + cq_tail (geometry is immutable post-setup)
+    spin_lock_t          lock;         // protects reg[] + cq_tail + sq_head + inflight_ops + async_inflight (geometry is immutable post-setup)
     u32                  _pad;
     struct Burrow       *ring;         // the SQ/CQ ring Burrow (handle_count ref held)
     u8                  *ring_kva;     // kernel direct-map base of `ring` (stable for life)
@@ -248,6 +258,20 @@ struct Loom {
     // computes its write index from THIS + the private `cq_entries` mask, NEVER
     // from the shared header (which userspace can corrupt -> an OOB kernel write).
     u32 cq_tail;
+    // Loom-3. Kernel-PRIVATE authoritative submission-queue head (under `lock`):
+    // the SQ-index ring slot the kernel consumes next. The shared
+    // loom_ring_hdr.sq_head is a userspace-READABLE mirror; the consume index is
+    // computed from THIS + the private sq_entries mask, NEVER the shared header
+    // (the SA-1 discipline generalized to the SQ -- a userspace-corrupted
+    // sq_head/sq_mask must not drive the kernel's read index).
+    u32 sq_head;
+    // In-flight async ops (Loom-3). Singly-linked via loom_async_op.next; mutated
+    // under `lock` (submit links, reap/quiesce unlink). async_inflight counts the
+    // submitted-not-yet-terminal ops -- when it is 0 a SYS_LOOM_ENTER wait knows
+    // no more completions can arrive. The loom owns each op; loom_free quiesces
+    // any still in flight (the #898 abandon-before-free).
+    struct loom_async_op *inflight_ops;
+    u32                   async_inflight;
     // The registered-handle table.
     struct loom_reg_handle reg[LOOM_MAX_REG_HANDLES];
 };
@@ -314,5 +338,27 @@ int sys_loom_setup_for_proc(struct Proc *p, u32 entries, u32 flags,
 // Returns 0 / -1.
 int sys_loom_register_for_proc(struct Proc *p, hidx_t loom_fd, u32 op,
                                const hidx_t *fds, u32 n);
+
+// Loom-3 batch-enter core. Consume up to `to_submit` SQEs from the SQ index ring
+// (in SQ-index order), copy each to kernel memory (ring TOCTOU), and dispatch:
+//   - LOOM_OP_NOP completes inline (CQE result 0);
+//   - LOOM_OP_FSYNC resolves handle_idx -> the registered Spoor, snapshots+pins
+//     rights (the I-30 submit-time pin), checks RIGHT_WRITE, resolves (client,
+//     fid), and submits an async Tfsync to the 9P engine (reply -> CQE later);
+//   - every other in-range opcode posts -ENOSYS (the payload opcodes land with
+//     Loom-6's registered-buffer surface), out-of-range posts -EINVAL.
+// Then, if min_complete > 0 and not LOOM_ENTER_NONBLOCK, drive the elected reader
+// (blocking on recv, death-interruptible #811) until at least min_complete CQEs
+// are available OR no async op remains in flight. Finally reap completed-op
+// containers. Returns the number of SQEs consumed (>= 0), or -1 on bad args
+// (NULL/corrupt l, invalid flags). The caller (SYS_LOOM_ENTER handler) holds a
+// loom ref across this call, so loom_free cannot run concurrently.
+int loom_enter(struct Loom *l, u32 to_submit, u32 min_complete, u32 flags);
+
+// Testable enter inner. Resolves `loom_fd` -> KObj_Loom in `p` (holding a loom
+// ref for the call), runs loom_enter, and returns its result. -1 on a bad fd /
+// wrong kind. The SVC handler is a thin current_thread() wrapper.
+int sys_loom_enter_for_proc(struct Proc *p, hidx_t loom_fd, u32 to_submit,
+                            u32 min_complete, u32 flags);
 
 #endif // THYLACINE_LOOM_H

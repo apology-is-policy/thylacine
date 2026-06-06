@@ -12,8 +12,11 @@ R-messages return as completion-queue entries. No new opcode namespace — 9P *i
 the uniform vocabulary, so the async batching layer covers files, `/net`, `/proc`,
 `/srv`, and devices uniformly. Spec-first is **re-enabled** for this surface:
 `specs/loom.tla` is TLC-green and gates every impl sub-chunk. **Loom-1 (the
-model), Loom-2a (the ring substrate), and Loom-2b (the pluggable-completion
-engine seam) are COMPLETE.**
+model), Loom-2a (the ring substrate), Loom-2b (the pluggable-completion engine
+seam), and Loom-3 (the batch-enter core — `SYS_LOOM_ENTER` + SQE dispatch + the
+I-30 submit-time pin + the async-op container + the `loom_free` quiesce) are
+COMPLETE.** v1.0 dispatches the no-payload opcodes (NOP / FSYNC); the payload
+opcodes land with Loom-6's registered-buffer surface.
 
 ## Landed sub-chunks
 
@@ -23,6 +26,7 @@ engine seam) are COMPLETE.**
 | `7983794` | **Loom-1** | `specs/loom.tla` — the SQ/CQ op-lifecycle state machine + the cfg matrix. Pins **I-29** (completion integrity: no-lost / no-double / no-stale) + **I-30** (submit-time capability pin) + ring TOCTOU + CQ back-pressure. 12 safety invariants + 1 liveness property; clean cfg + a liveness cfg + 5 buggy-cfg counterexamples (live_sqe_reread → `ArgPinnedToSnapshot`, recheck_at_completion → `ObjPinnedToSnapshot`, double_post → `NoDoubleCompletion`, lost_on_full → `CqNeverOverfull`, stale_after_teardown → `NoStaleCompletion`). **TLC-green gates Loom-2..6.** | clean 582 distinct states; liveness (`EventuallyCompletes`) 678; each of the 5 buggy cfgs violates exactly its targeted invariant |
 | `61ae877` | **Loom-2a** | the ring **substrate**: `kernel/include/thylacine/loom.h` (the ABI — `loom_sqe`/`loom_cqe`/`loom_ring_hdr`/`loom_params` + `_Static_assert`s + `struct Loom`), `kernel/loom.c` (`KObj_Loom`: `loom_create` + the geometry + the refcount + the registered-handle table), `SYS_LOOM_SETUP` (=66) + `SYS_LOOM_REGISTER` (=67) inners + SVC handlers + dispatch, `KOBJ_LOOM` (the fourth partition mask + acquire/release), ARCH §28 I-29/I-30 + §25.4/CLAUDE.md audit-trigger row, `docs/reference/107-loom.md`. The #847 dual-refcount keeps the ring pages alive while the kernel (direct map) OR the user mapping holds a ref. **No op flows yet** — the seam + dispatch are 2b/3. | default 729/729 (+8 `loom.*`) + TCG 729/729 + 0 EXTINCTION; `loom.cfg` re-run green (pre-commit gate) |
 | `ac0bda1` + `b857ead` (close) | **Loom-2b** | the **pluggable-completion 9P-engine seam** (audit-bearing): `struct p9_rpc.on_complete` (NULL = sync `WAKE_RENDEZ` / set = async `POST_CQE`); the 3 engine sites (`demux_frame_locked` async dispatch + `map_error` + `on_complete`; `client_mark_dead_locked` async error-CQE; `client_handoff_reader_locked` skips async); `p9_client_submit_async` (no wait, takes ownership); `p9_client_reader_pump_once`; `p9_client_handoff_reader`; `loom_post_cqe` (the CQ writer — `CqNeverOverfull`). Tests in `test_9p_client.c` (the seam, over the loopback) + `test_loom.c` (`loom_post_cqe`). `loom.tla` **unchanged** (`Consume`/`Dispatch`/`ReplyArrives`/`PostCqe` already model it). The production async-op container + the ref-holding / quiesce-before-free lifetime are Loom-3. **Audit closed (one Opus prosecutor 0/0/0/3 + self-audit): self caught SA-1 [P1] the agent missed -- `loom_post_cqe` trusted the shared userspace-writable `cq_mask`/`cq_tail` for its write index (an OOB kernel write in Loom-3); FIXED with a kernel-private `cq_tail` + `l->cq_entries` mask. F2/F3/SA-2 [P3] fixed; F1 [P3] async-op Proc-death quiesce deferred to Loom-3 (#898).** | default + UBSan 735/735 (+6: 3 `9p_client.async*` + `loom.{post_cqe_back_pressure,post_cqe_ignores_hostile_header,dup_rejected}`) under TCG + 0 EXTINCTION; `loom.cfg` clean + liveness + 5 buggy cfgs green |
+| *(pending)* (close *(pending)*) | **Loom-3** | the **batch-enter core** (audit-bearing): `SYS_LOOM_ENTER` (=68) + `loom_enter` (SQ-index consume with the kernel-private `sq_head` + the TOCTOU SQE copy + the SQ-index range check); `loom_submit_one` SQE dispatch — `LOOM_OP_NOP` (inline) + `LOOM_OP_FSYNC` (the I-30 submit-time pin: `spoor_ref` + `RIGHT_WRITE` gate + `dev9p_client_fid` → async Tfsync) + reserved/payload opcodes → `-ENOSYS`/`-EINVAL` error CQEs; the production `struct loom_async_op` container (`rpc`@0, the pin, owned by `l->inflight_ops`); `loom_async_complete` (CQE post + terminal under `l->lock`, no sleep); `loom_reap_terminal`; the **`loom_free` quiesce-before-free (#898)** via the new `p9_client_abandon_async` (Tflush + clear `inflight[tag]` under `c->lock`, #845). v1.0 = no-payload opcodes only (payload → Loom-6 registered buffers). `loom.tla` **unchanged** (Loom-3 = `Consume`/`Dispatch`/`Reap`/`Teardown`, already modeled); `9p_client.tla` re-run clean (the engine `abandon_async`). | default + UBSan 741/741 (+6: 3 `loom.enter_*` + 3 `9p_client.loom_*`) under TCG + 0 EXTINCTION; `loom.cfg` clean + liveness + 5 buggy + `9p_client.cfg` clean + 4 buggy green |
 
 ## Remaining work (Loom-2..6 — each spec-gated + audited)
 
@@ -41,10 +45,14 @@ engine seam) are COMPLETE.**
   nonexistent rendez). The production async-op container + the ref-holding /
   quiesce-before-free lifetime are Loom-3 (where `SYS_LOOM_ENTER`'s destroy path
   keeps the op off the last-ref-drop-under-lock path).
-- **Loom-3 — batch-enter core**: `SYS_LOOM_ENTER` (submit N / reap M) + SQE →
-  `p9_client_<op>` dispatch + the submit-time pin (LOOM.md §8.5) + the
-  production async-op container + the quiesce-before-free lifetime +
-  out-of-order completion. The core. Audit.
+- **Loom-3 — batch-enter core** (DONE, **audit-bearing**): `SYS_LOOM_ENTER`
+  (submit N / reap M) + the SQE → `p9_client_<op>` dispatch (NOP / FSYNC; payload
+  opcodes → `-ENOSYS` until Loom-6) + the submit-time pin (LOOM.md §8.5: an
+  independent `spoor_ref` + the `RIGHT_WRITE` gate, never re-resolved) + the
+  production `loom_async_op` container + the `loom_free` quiesce-before-free
+  (#898, via `p9_client_abandon_async` Tflush) + out-of-order completion. **One
+  focused audit over Loom-3 is the next step** (it must verify #898 + add the
+  deterministic multi-in-flight / Proc-death harness owed since #841).
 - **Loom-4 — SQPOLL**: the kernel poll-thread (zero-syscall hot path;
   `cpu_pinned`-able) — wait/wake + lifetime surface. Audit.
 - **Loom-5 — multishot + linked ops**: one SQE → many CQEs (the `/srv` accept

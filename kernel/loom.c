@@ -16,13 +16,51 @@
 // holds a reference.
 
 #include <thylacine/loom.h>
+#include <thylacine/9p_client.h>
+#include <thylacine/9p_session.h>
 #include <thylacine/burrow.h>
+#include <thylacine/dev9p.h>
+#include <thylacine/errno.h>
+#include <thylacine/handle.h>
 #include <thylacine/page.h>
 #include <thylacine/spoor.h>
 #include <thylacine/spinlock.h>
 #include <thylacine/types.h>
 
 #include "../mm/slub.h"
+
+// =============================================================================
+// One in-flight async (Loom) op. Heap-allocated per dispatched SQE; owned by the
+// Loom (linked into l->inflight_ops). `rpc` is at OFFSET 0 so the engine's
+// completion callback recovers the container with a single cast from the
+// struct p9_rpc * it is handed (the same offset-0 idiom the seam tests use).
+//
+// Lifetime (Loom-3): the op holds an INDEPENDENT spoor_ref on `pinned` -- the
+// I-30 submit-time pin, held for the op's whole lifetime so a concurrent
+// re-register / clunk of the registered-handle slot cannot make completion act
+// against a different object (the io_uring credential-vs-work CVE class). The op
+// does NOT hold a loom ref: the loom outlives all its ops via the handle ref
+// during SYS_LOOM_ENTER + the loom_free quiesce (which abandons any still in
+// flight before freeing -- #898). `client` is borrowed (valid while `pinned` is
+// held: a live dev9p Spoor implies a live client). `terminal` is set by
+// loom_async_complete under l->lock and read by the reap sweep under l->lock.
+// =============================================================================
+struct loom_async_op {
+    struct p9_rpc          rpc;        // OFFSET 0 -- on_complete casts (loom_async_op *)rpc
+    struct Loom           *loom;       // owning ring (no ref held; see lifetime note)
+    struct p9_client      *client;     // engine this op rides (valid while `pinned` held)
+    struct Spoor          *pinned;     // the I-30 submit-time pin (independent spoor_ref)
+    u64                    user_data;  // echoed verbatim into the CQE
+    u32                    op_fid;      // resolved 9P fid (from `pinned`, at submit)
+    u32                    op_arg;      // opcode-specific scalar (FSYNC: datasync 0/1)
+    u8                     opcode;      // LOOM_OP_*
+    bool                   terminal;    // CQE posted (set under l->lock by completion)
+    struct loom_async_op  *next;        // l->inflight_ops chain (under l->lock)
+};
+
+_Static_assert(__builtin_offsetof(struct loom_async_op, rpc) == 0,
+               "p9_rpc must be at offset 0 -- loom_async_complete recovers the "
+               "container by casting the struct p9_rpc * the engine hands it");
 
 _Static_assert(LOOM_MAGIC == 0x4C4F4F4D52494E47ULL, "loom magic drift");
 _Static_assert((LOOM_MAX_ENTRIES & (LOOM_MAX_ENTRIES - 1u)) == 0,
@@ -108,6 +146,34 @@ struct Loom *loom_create(u32 sq_entries, u32 cq_entries) {
 // is already gone (mapping_count == 0) the pages free here, else the VMA
 // teardown frees them later (dual-refcount, #847).
 static void loom_free(struct Loom *l) {
+    // #898: quiesce any in-flight async op BEFORE freeing the ring. refcount hit
+    // 0 -> no SYS_LOOM_ENTER is in progress (an enter holds a loom ref via
+    // handle_get), so the inflight_ops list is not being mutated here (only
+    // submit/reap mutate it, both inside an enter). on_complete (from a demux /
+    // mark_dead on a SHARED client, driven by another Proc) does NOT touch the
+    // list -- it only sets terminal + posts a CQE under l->lock. So reading +
+    // clearing the list lock-free is safe.
+    //
+    // For each op: p9_client_abandon_async runs UNDER the client's c->lock, so it
+    // is mutually exclusive with that demux/mark_dead. If the reply has not been
+    // demuxed it clears inflight[tag] (no future on_complete can fire) + Tflushes
+    // (#845; a late original reply is discarded ownerless). If it already
+    // completed, the abandon is a no-op. A racing demux that wins c->lock first
+    // posts at-most-one CQE into the still-allocated ring (we free it only AFTER
+    // this loop), then this abandon sees the slot cleared -- no double, no stale,
+    // no UAF (the loom is alive throughout; I-29). The pin is released + the
+    // container freed only after abandon severs the engine link.
+    struct loom_async_op *op = l->inflight_ops;
+    l->inflight_ops = NULL;
+    l->async_inflight = 0;
+    while (op) {
+        struct loom_async_op *next = op->next;
+        p9_client_abandon_async(op->client, &op->rpc);
+        spoor_clunk(op->pinned);
+        kfree(op);
+        op = next;
+    }
+
     for (u32 i = 0; i < LOOM_MAX_REG_HANDLES; i++) {
         if (l->reg[i].spoor) {
             spoor_clunk(l->reg[i].spoor);
@@ -204,4 +270,255 @@ int loom_post_cqe(struct Loom *l, u64 user_data, s32 result, u32 flags) {
     __atomic_store_n(&h->cq_tail, l->cq_tail, __ATOMIC_RELEASE);
     spin_unlock(&l->lock);
     return 0;
+}
+
+// =============================================================================
+// Loom-3: SQE dispatch + the submit-time pin (I-30) + SYS_LOOM_ENTER.
+// =============================================================================
+
+// Map an engine completion to the CQE result for a scalar-result op (NOP /
+// FSYNC). `status` from the engine is already 0 (success) or -errno (Rlerror /
+// transport). Payload opcodes (Loom-6) will read dr->read_count etc. when
+// status == 0; for the scalar ops dr is unused.
+static s32 loom_scalar_result(int status) {
+    if (status > 0) return 0;          // defensive: scalar ops carry no positive payload
+    return (s32)status;
+}
+
+// The async completion callback (the POST_CQE front-end). Runs UNDER the 9P
+// client's c->lock (invoked from demux_frame_locked / client_mark_dead_locked),
+// so it MUST NOT sleep or re-enter the p9_client_* API (the seam contract in
+// 9p_client.h). It posts exactly one CQE (loom_post_cqe -- a leaf lock, the
+// c->lock -> l->lock order) and marks the op terminal + drops the in-flight
+// count under l->lock. It does NOT free the container or clunk the pin (both may
+// sleep); the reap sweep (loom_reap_terminal, run outside any lock from the
+// SYS_LOOM_ENTER caller) does that.
+static void loom_async_complete(struct p9_rpc *rpc, int status,
+                                struct p9_dispatch_result *dr) {
+    (void)dr;
+    struct loom_async_op *op = (struct loom_async_op *)rpc;   // rpc at offset 0
+    (void)loom_post_cqe(op->loom, op->user_data, loom_scalar_result(status), 0);
+    // Mark terminal + decrement the in-flight count under l->lock so the reap
+    // sweep (also under l->lock) observes a consistent (terminal, count) pair.
+    // The CQE was already posted above, so a reaper that sees terminal will not
+    // lose the completion.
+    spin_lock(&op->loom->lock);
+    op->terminal = true;
+    if (op->loom->async_inflight > 0) op->loom->async_inflight--;
+    spin_unlock(&op->loom->lock);
+}
+
+// Tmsg builder thunk for LOOM_OP_FSYNC. Invoked by p9_client_submit_async under
+// the client's c->lock; allocates the 9P tag + marks outstanding. `ctx` is the
+// loom_async_op (it carries the resolved fid + datasync).
+static int loom_build_fsync(struct p9_session *s, u8 *out, size_t cap, void *ctx) {
+    struct loom_async_op *op = (struct loom_async_op *)ctx;
+    return p9_session_send_fsync(s, out, cap, op->op_fid, op->op_arg);
+}
+
+// Post a terminal error CQE for an op that fails the submit-time gate (bad
+// opcode / handle / rights / OOM). The SQE was consumed; userspace learns the
+// failure via the CQE result, not a dropped SQE (io_uring semantics).
+static void loom_fail_cqe(struct Loom *l, u64 user_data, s32 err) {
+    (void)loom_post_cqe(l, user_data, err, 0);
+}
+
+// Dispatch ONE already-copied-to-kernel SQE (`sqe` is a kernel-private snapshot,
+// NEVER the shared ring slot -- ring TOCTOU, LOOM.md 6.1). Either completes
+// inline (NOP / a rejected op posts a CQE) or submits an async 9P op whose reply
+// drives loom_async_complete later. Never re-reads the shared ring.
+static void loom_submit_one(struct Loom *l, const struct loom_sqe *sqe) {
+    u64 ud = sqe->user_data;
+
+    // Reserved SQE flags (LINK / DRAIN / CQE_SKIP / MULTISHOT) land at Loom-5;
+    // reject any set flag now so a future flag is never silently ignored.
+    if (sqe->flags != 0) { loom_fail_cqe(l, ud, -(s32)T_E_INVAL); return; }
+
+    switch (sqe->opcode) {
+    case LOOM_OP_NOP:
+        // The io_uring smoke op: completes immediately, no engine, no handle.
+        loom_fail_cqe(l, ud, 0);
+        return;
+
+    case LOOM_OP_FSYNC: {
+        if (sqe->handle_idx >= LOOM_MAX_REG_HANDLES) {
+            loom_fail_cqe(l, ud, -(s32)T_E_INVAL);
+            return;
+        }
+        // Resolve + PIN the registered handle under l->lock so a concurrent
+        // LOOM_REGISTER_HANDLES re-install cannot free the Spoor between the read
+        // and the ref. The independent spoor_ref is the I-30 pin (held for the
+        // op's lifetime); `rights` is the snapshot the submit-time gate reads.
+        struct Spoor *sp; rights_t rt;
+        spin_lock(&l->lock);
+        sp = l->reg[sqe->handle_idx].spoor;
+        rt = l->reg[sqe->handle_idx].rights;
+        if (sp) spoor_ref(sp);
+        spin_unlock(&l->lock);
+
+        if (!sp) { loom_fail_cqe(l, ud, -(s32)T_E_BADF); return; }   // empty slot
+        // Submit-time rights gate (I-2 / I-6; the spec's reg in AllowedObjs).
+        // Fsync is a durability barrier on written data, so it requires the
+        // handle to have been opened for write (RIGHT_WRITE, omode-derived at
+        // open -- A-3 F1). A read-only registered handle is denied here, never
+        // re-checked at completion (I-30).
+        if (!(rt & RIGHT_WRITE)) {
+            spoor_clunk(sp);
+            loom_fail_cqe(l, ud, -(s32)T_E_ACCES);
+            return;
+        }
+        struct p9_client *cl; u32 fid;
+        if (dev9p_client_fid(sp, &cl, &fid) != 0) {
+            // Not a dev9p-backed Spoor (devsrv conn / devramfs / ...): no 9P
+            // engine to dispatch against.
+            spoor_clunk(sp);
+            loom_fail_cqe(l, ud, -(s32)T_E_INVAL);
+            return;
+        }
+        struct loom_async_op *op = kmalloc(sizeof(*op), KP_ZERO);
+        if (!op) { spoor_clunk(sp); loom_fail_cqe(l, ud, -(s32)T_E_NOMEM); return; }
+        op->loom        = l;
+        op->client      = cl;
+        op->pinned      = sp;               // adopt the pin ref
+        op->user_data   = ud;
+        op->op_fid      = fid;
+        op->op_arg      = (sqe->len != 0) ? 1u : 0u;   // FSYNC: len != 0 -> datasync
+        op->opcode      = LOOM_OP_FSYNC;
+        op->terminal    = false;
+        op->rpc.on_complete = loom_async_complete;
+        // Link + count before submitting: a synchronous submit failure fires
+        // loom_async_complete (which decrements the count + marks terminal), so
+        // the op must already be counted + linked for that to be consistent. The
+        // reap sweep then reclaims it.
+        spin_lock(&l->lock);
+        op->next = l->inflight_ops;
+        l->inflight_ops = op;
+        l->async_inflight++;
+        spin_unlock(&l->lock);
+        // Hands ownership of &op->rpc to the engine: exactly one on_complete will
+        // fire (now, on failure, or later at demux). No further touch of `op`
+        // here -- a fast failure may already have marked it terminal.
+        (void)p9_client_submit_async(cl, &op->rpc, loom_build_fsync, op);
+        return;
+    }
+
+    default:
+        // In-range payload opcodes (READ / WRITE / GETATTR / WALK / ...) need a
+        // registered-buffer destination/source -- that surface is Loom-6
+        // (LOOM.md 10), so they post -ENOSYS until then. WIRE_PASSTHROUGH stays
+        // reserved (LOOM.md 7). Out-of-range opcodes are -EINVAL.
+        if (sqe->opcode < LOOM_OP_COUNT)
+            loom_fail_cqe(l, ud, -(s32)T_E_NOSYS);
+        else
+            loom_fail_cqe(l, ud, -(s32)T_E_INVAL);
+        return;
+    }
+}
+
+// Count of posted-unreaped CQEs (kernel-private cq_tail minus the user-owned
+// cq_head). The kernel-private cq_tail is authoritative (the SA-1 discipline);
+// a hostile cq_head can only make this READ smaller or larger, never drive an
+// OOB -- it gates the SYS_LOOM_ENTER wait only, so a corrupt value just makes
+// the caller wait wrong (it hurts only itself). Clamped to cq_entries.
+static u32 loom_cq_ready(struct Loom *l) {
+    struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+    u32 tail = l->cq_tail;                                       // kernel-private
+    u32 head = __atomic_load_n(&h->cq_head, __ATOMIC_ACQUIRE);   // user-owned
+    u32 d = tail - head;
+    return (d > l->cq_entries) ? l->cq_entries : d;
+}
+
+// The client of the first still-in-flight (non-terminal) async op, or NULL when
+// none remain (no further completion can arrive). The returned client is valid
+// to pump because the op holds a pin on a dev9p Spoor whose client this is, and
+// the op is not reclaimed until loom_reap_terminal (same SYS_LOOM_ENTER caller,
+// after the wait). Under l->lock.
+static struct p9_client *loom_first_inflight_client(struct Loom *l) {
+    struct p9_client *cl = NULL;
+    spin_lock(&l->lock);
+    for (struct loom_async_op *op = l->inflight_ops; op; op = op->next) {
+        if (!op->terminal) { cl = op->client; break; }
+    }
+    spin_unlock(&l->lock);
+    return cl;
+}
+
+// Reclaim terminal async ops: unlink each under l->lock, then release the pin +
+// free the container OUTSIDE the lock (spoor_clunk may sleep). Idempotent; safe
+// to call when nothing is terminal.
+static void loom_reap_terminal(struct Loom *l) {
+    struct loom_async_op *done = NULL;
+    spin_lock(&l->lock);
+    struct loom_async_op **pp = &l->inflight_ops;
+    while (*pp) {
+        struct loom_async_op *op = *pp;
+        if (op->terminal) {
+            *pp = op->next;          // unlink
+            op->next = done;
+            done = op;
+        } else {
+            pp = &op->next;
+        }
+    }
+    spin_unlock(&l->lock);
+    while (done) {
+        struct loom_async_op *next = done->next;
+        spoor_clunk(done->pinned);   // release the I-30 pin (may sleep)
+        kfree(done);
+        done = next;
+    }
+}
+
+int loom_enter(struct Loom *l, u32 to_submit, u32 min_complete, u32 flags) {
+    if (!l || l->magic != LOOM_MAGIC) return -1;
+    if (flags & ~LOOM_ENTER_VALID)    return -1;
+
+    struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+    u32 *sq_array         = (u32 *)(l->ring_kva + l->sq_array_off);
+    struct loom_sqe *sqes = (struct loom_sqe *)(l->ring_kva + l->sqe_off);
+
+    // --- SUBMIT phase. Consume up to `to_submit` SQEs in SQ-index order. ---
+    // sq_tail is user-owned (advisory): bound the work against it but never trust
+    // it for indexing. The consume position is the kernel-private sq_head; the
+    // SQ-index ring slot it points at is user-written, so it is range-checked
+    // before it indexes the SQE array (the SA-1 discipline on the SQ side).
+    u32 sq_tail = __atomic_load_n(&h->sq_tail, __ATOMIC_ACQUIRE);
+    u32 avail = sq_tail - l->sq_head;                  // free-running u32 diff
+    if (avail > l->sq_entries) avail = l->sq_entries;  // clamp a hostile sq_tail
+    u32 n = (to_submit < avail) ? to_submit : avail;
+    u32 submitted = 0;
+    for (u32 i = 0; i < n; i++) {
+        u32 ring_pos = l->sq_head & (l->sq_entries - 1u);   // kernel-private mask
+        l->sq_head++;
+        u32 sqe_idx = __atomic_load_n(&sq_array[ring_pos], __ATOMIC_ACQUIRE);
+        if (sqe_idx >= l->sq_entries) {
+            // Out-of-range indirection: drop it (diagnostic), do not index sqes[].
+            __atomic_store_n(&h->dropped, h->dropped + 1u, __ATOMIC_RELEASE);
+            continue;
+        }
+        struct loom_sqe ksqe = sqes[sqe_idx];   // COPY to kernel memory (TOCTOU)
+        loom_submit_one(l, &ksqe);
+        submitted++;
+    }
+    __atomic_store_n(&h->sq_head, l->sq_head, __ATOMIC_RELEASE);   // publish (user-readable mirror)
+
+    // --- WAIT / REAP phase. Drive the elected reader until min_complete CQEs are
+    // posted or no completion can arrive. The blocking wait IS the reader's recv
+    // (death-interruptible, #811) -- no separate wait primitive. A concurrent
+    // SYS_LOOM_ENTER on the same ring whose pump finds another reader active
+    // returns what is posted; the full multi-waiter coordination is Loom-4
+    // (SQPOLL). ---
+    if (min_complete > 0 && !(flags & LOOM_ENTER_NONBLOCK)) {
+        for (;;) {
+            if (loom_cq_ready(l) >= min_complete) break;
+            struct p9_client *cl = loom_first_inflight_client(l);
+            if (!cl) break;                              // nothing in flight -> no more CQEs
+            int rc = p9_client_reader_pump_once(cl);
+            if (rc == 1) continue;                       // demuxed a frame -> re-check
+            break;                                       // rc==0 (other reader) / rc<0 (dead/dying)
+        }
+    }
+
+    loom_reap_terminal(l);
+    return (int)submitted;
 }

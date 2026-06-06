@@ -551,6 +551,52 @@ void p9_client_handoff_reader(struct p9_client *c) {
     spin_unlock(&c->lock);
 }
 
+void p9_client_abandon_async(struct p9_client *c, struct p9_rpc *rpc) {
+    // Quiesce ONE in-flight async op (Loom teardown / #898). This is the async
+    // analog of client_run's CLIENT_WAIT_DIED path (#845): the Loom is being
+    // destroyed with `rpc` possibly still in flight, so the engine must drop the
+    // registration -- after which NO future demux / mark_dead can fire
+    // rpc->on_complete -- and Tflush the op so the server releases the request
+    // and the tag is reclaimed by the Rflush (a late original reply is then
+    // discarded ownerless by demux_frame_locked, never mis-attributed to a
+    // reused tag: 9P forbids reusing oldtag until the Rflush -- the I-10
+    // reuse-race guard).
+    //
+    // Crucially this runs UNDER c->lock, so it is mutually exclusive with the
+    // demux / mark_dead that also touch c->inflight[tag]. The check
+    // `c->inflight[tag] == rpc` is the authoritative state:
+    //   - STILL ours: the reply has not been demuxed; we clear + Tflush, and the
+    //     caller (loom_free) then tears down the container with NO on_complete
+    //     having fired (the op is "abandoned", no CQE -- the spec's Teardown).
+    //   - NOT ours (NULL or a reused tag): the reply was already demuxed (or the
+    //     session died), so on_complete ALREADY fired (terminal); this is a
+    //     no-op and the caller just reclaims the container.
+    // Either way, after this returns rpc is unreachable from inflight[] -> the
+    // caller owns the container's teardown with no concurrent completer.
+    if (!c || c->magic != P9_CLIENT_MAGIC || !rpc) return;
+    spin_lock(&c->lock);
+    u16 tag = rpc->tag;
+    if (tag < P9_SESSION_MAX_OUTSTANDING && c->inflight[tag] == rpc) {
+        c->inflight[tag] = NULL;
+        // Reaching here, the reply never arrived (inflight still ours), so the
+        // op never completed: c->dead would have fired mark_dead (clearing the
+        // slot). Send the Tflush only on a live, open session. send_flush leaves
+        // session.outstanding[tag] reserved (awaiting_flush). A failed
+        // build/send means the byte stream is broken -> latch dead (no
+        // regression vs the pre-#845 reclaim; the tag is then moot). The send is
+        // a non-blocking ring write reusing out_buf under c->lock.
+        if (!c->dead && p9_session_is_open(&c->session)) {
+            int flen = p9_session_send_flush(&c->session, c->out_buf,
+                                             sizeof(c->out_buf), tag);
+            if (flen > 0) {
+                if (p9_transport_send(&c->transport, c->out_buf, (size_t)flen) < 0)
+                    client_mark_dead_locked(c);
+            }
+        }
+    }
+    spin_unlock(&c->lock);
+}
+
 // =============================================================================
 // Lifecycle.
 // =============================================================================
