@@ -19,7 +19,7 @@ model) is COMPLETE.**
 | Commit | Sub-chunk | What | Verification |
 |---|---|---|---|
 | `ebd1f7b` | **Loom-0** | scripture — `docs/LOOM.md` + the NOVEL.md promotion + the ROADMAP §8.0a/§12.2 registration. No code. | (docs only) |
-| *(pending)* | **Loom-1** | `specs/loom.tla` — the SQ/CQ op-lifecycle state machine + the cfg matrix. Pins **I-29** (completion integrity: no-lost / no-double / no-stale) + **I-30** (submit-time capability pin) + ring TOCTOU + CQ back-pressure. 12 safety invariants + 1 liveness property; clean cfg + a liveness cfg + 5 buggy-cfg counterexamples (live_sqe_reread → `ArgPinnedToSnapshot`, recheck_at_completion → `ObjPinnedToSnapshot`, double_post → `NoDoubleCompletion`, lost_on_full → `CqNeverOverfull`, stale_after_teardown → `NoStaleCompletion`). **TLC-green gates Loom-2..6.** | clean 582 distinct states; liveness (`EventuallyCompletes`) 678; each of the 5 buggy cfgs violates exactly its targeted invariant |
+| `7983794` | **Loom-1** | `specs/loom.tla` — the SQ/CQ op-lifecycle state machine + the cfg matrix. Pins **I-29** (completion integrity: no-lost / no-double / no-stale) + **I-30** (submit-time capability pin) + ring TOCTOU + CQ back-pressure. 12 safety invariants + 1 liveness property; clean cfg + a liveness cfg + 5 buggy-cfg counterexamples (live_sqe_reread → `ArgPinnedToSnapshot`, recheck_at_completion → `ObjPinnedToSnapshot`, double_post → `NoDoubleCompletion`, lost_on_full → `CqNeverOverfull`, stale_after_teardown → `NoStaleCompletion`). **TLC-green gates Loom-2..6.** | clean 582 distinct states; liveness (`EventuallyCompletes`) 678; each of the 5 buggy cfgs violates exactly its targeted invariant |
 
 ## Remaining work (Loom-2..6 — each spec-gated + audited)
 
