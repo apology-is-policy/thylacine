@@ -1,4 +1,4 @@
-// ARM Generic Interrupt Controller — v3 driver + v2 detect-only stub.
+// ARM Generic Interrupt Controller — v2 + v3 driver.
 //
 // Per ARCHITECTURE.md §12.3 and invariant I-15 (DTB-driven hardware
 // discovery).
@@ -33,13 +33,22 @@
 // source. Once IRQs are unmasked at PSTATE (msr daifclr, #2), the IRQ
 // vector path picks them up.
 //
-// Why GICv3 only at P1-G: QEMU virt with run-vm.sh's gic-version=3 +
-// Pi 5 are both v3. v2 (Pi 4, older boards) needs separate distributor
-// MMIO + CPU interface MMIO + different acknowledge/EOI register layout.
-// Implementing v2 untested would risk silent bugs; the autodetect
-// commitment from ARCH §12 is preserved by extincting cleanly when v2
-// is detected, with a diagnostic that points at the deferred work. v2
-// support lands when there's a Pi 4 testbed.
+// GICv2 (Lazarus W2): the v2 CPU interface is a banked MMIO region (GICC)
+// rather than the v3 ICC_* system registers, SGI/PPI config lives in the
+// distributor's per-CPU-banked low region (no redistributor), and IPIs go
+// through GICD_SGIR rather than ICC_SGI1R_EL1. The MMIO CPU interface is
+// precisely what sidesteps the HVF-on-Apple GICv3-distributor MMIO `isv`
+// assertion (PORTABILITY.md §2) -- so v2 is the convergent enabler for the
+// fast HVF dev loop and for the Pi 4 / GIC-400 bare-metal target. v3 stays
+// QEMU virt's gic-version=3 default + the CI baseline; gic_init autodetects
+// from the DTB compatible (I-15).
+//
+// GICv2 reference: ARM IHI 0048B. The two SGI-EOI subtleties the driver
+// must honor: (1) GICC_IAR returns the source CPUID in bits [12:10] for an
+// SGI and GICC_EOIR must be written back with that same CPUID field, so the
+// raw IAR is preserved per-CPU between acknowledge and EOI; (2) SGI/PPI
+// enable + priority + the timer PPI config live in the distributor's banked
+// low region, which must be programmed from each CPU for its own bank.
 
 #include "gic.h"
 
@@ -65,13 +74,46 @@
 #define GICD_ICENABLER(n)     (0x0180 + ((n)*4))
 #define GICD_ISPENDR(n)       (0x0200 + ((n)*4))
 #define GICD_ICPENDR(n)       (0x0280 + ((n)*4))
+#define GICD_ICACTIVER(n)     (0x0380 + ((n)*4))
 #define GICD_IPRIORITYR(n)    (0x0400 + ((n)*4))
 #define GICD_ITARGETSR(n)     (0x0800 + ((n)*4))    // GICv2 only
 #define GICD_ICFGR(n)         (0x0C00 + ((n)*4))
+#define GICD_SGIR             0x0F00                 // GICv2 IPI (write-only)
 #define GICD_IROUTER(n)       (0x6000 + ((n)*8))    // GICv3 only (per-INTID 64-bit)
 
 #define GICD_CTLR_ENABLE_GRP1NS    (1u << 1)
 #define GICD_CTLR_ARE_NS           (1u << 4)
+// GICv2 single-security-state distributor enable: bit 0 (the only group on a
+// GIC with no security extensions, as QEMU virt's gic-version=2 presents).
+#define GICD_CTLR_V2_ENABLE        (1u << 0)
+
+// GICv2 GICD_SGIR fields (ARM IHI 0048B §4.3.15). TargetListFilter 0b00 ==
+// "use the CPUTargetList byte"; the byte is a per-cluster CPU-interface
+// bitmask indexed by Aff0 (== cpu_idx on QEMU virt / GIC-400, max 8 CPUs).
+#define GICD_SGIR_TGT_LIST_SHIFT   16
+#define GICD_SGIR_MAX_TARGET       7
+
+// ---------------------------------------------------------------------------
+// GICv2 CPU-interface (GICC) register offsets (relative to the GICC base,
+// DTB reg[1] for a v2 GIC). ARM IHI 0048B §4.4. The interface is banked
+// per accessing CPU, so every CPU uses the same GICC VA for its own bank.
+// ---------------------------------------------------------------------------
+
+#define GICC_CTLR             0x0000
+#define GICC_PMR              0x0004
+#define GICC_BPR              0x0008
+#define GICC_IAR              0x000C
+#define GICC_EOIR             0x0010
+#define GICC_IIDR             0x00FC
+#define GICC_DIR              0x1000      // split-EOI deactivate (EOImode=1; unused at v1.0)
+
+#define GICC_CTLR_V2_ENABLE   (1u << 0)   // bit 0 = enable; EOImode (bit 9) = 0 (one-step EOI)
+#define GICC_PMR_ADMIT_ALL    0xF0u       // mask admits every priority below 0xF0 (default 0xa0)
+
+// GICC_IAR / GICC_EOIR field widths (ARM IHI 0048B §4.4.4). INTID is 10 bits
+// (0..1023; 1023 = spurious); for an SGI, bits [12:10] carry the source
+// CPUID that GICC_EOIR must echo back.
+#define GICC_IAR_INTID_MASK   0x3FFu
 
 // GICD_TYPER.ITLinesNumber field: bits [4:0]; max INTID = 32 * (N + 1) - 1.
 #define GICD_TYPER_ITLINES(t)      (((t) & 0x1f) + 1)
@@ -126,6 +168,17 @@ static u64 g_dist_pa;          // PA discovered from DTB (banner / debug)
 static u64 g_redist_pa;
 static u32 g_max_intid;        // from GICD_TYPER
 
+// GICv2 CPU interface (GICC). g_cpu_base is the kernel VA from mmu_map_mmio
+// of DTB reg[1]; banked per accessing CPU. Both zero on v3 (sysreg CPU
+// interface). g_v2_eoi_token holds, per CPU, the raw GICC_IAR last
+// acknowledged -- so gic_eoi can echo the SGI source CPUID back to GICC_EOIR
+// (ARM IHI 0048B §4.4.5). Indexed by smp_cpu_idx_self(); written + read with
+// IRQs masked between a CPU's acknowledge and its EOI (no nesting), and each
+// CPU touches only its own slot -- no cross-CPU race.
+static u64 g_cpu_base;
+static u64 g_cpu_pa;
+static u32 g_v2_eoi_token[DTB_MAX_CPUS];
+
 // GICv3 redistributor region stride. Each CPU's redistributor frame is
 // 0x20000 bytes (RD_base 0x0..0xFFFF + SGI_base 0x10000..0x1FFFF). Per
 // IHI 0069 §12.3.1 the redistributor region is contiguous; CPU N's
@@ -166,6 +219,33 @@ static inline u64 mmio_r64(u64 base, u32 off) {
 
 static inline void mmio_w64(u64 base, u32 off, u64 val) {
     *(volatile u64 *)(uintptr_t)(base + off) = val;
+}
+
+// GICv2-only MMIO accessors that drain with `dsb sy` after every access.
+//
+// PORTABILITY.md §5 (HVF-MMIO mitigation): under QEMU/HVF on Apple Silicon,
+// rapid back-to-back GIC distributor MMIO can trap into Hypervisor.framework
+// with ESR.ISV=0 (no instruction syndrome), which QEMU cannot decode and
+// asserts on. The empirical mitigation from the assessment is a barrier
+// between consecutive GIC MMIO accesses; a `dsb sy` after each access drains
+// it to completion before the next, pacing the trap rate. Device-nGnRnE
+// memory is already strongly ordered architecturally, so the barrier is for
+// the emulator's benefit, not for correctness on real silicon. Confined to
+// the v2 path (the only path taken under HVF + GIC-400); v3 keeps the plain
+// accessors. The cost is a drain per GIC access on the IRQ/IPI path -- a
+// handful per interrupt, negligible at interrupt rates.
+static inline void v2_w32(u64 base, u32 off, u32 val) {
+    *(volatile u32 *)(uintptr_t)(base + off) = val;
+    __asm__ __volatile__("dsb sy" ::: "memory");
+}
+static inline u32 v2_r32(u64 base, u32 off) {
+    u32 v = *(volatile u32 *)(uintptr_t)(base + off);
+    __asm__ __volatile__("dsb sy" ::: "memory");
+    return v;
+}
+static inline void v2_w8(u64 base, u32 off, u8 val) {
+    *(volatile u8 *)(uintptr_t)(base + off) = val;
+    __asm__ __volatile__("dsb sy" ::: "memory");
 }
 
 // Counter accessors for bounded-poll timeouts. cntfrq_el0 is set by
@@ -339,27 +419,138 @@ static void cpu_iface_init(void) {
 }
 
 // ---------------------------------------------------------------------------
+// Distributor + CPU-interface init (GICv2).
+//
+// v2 has no redistributor: SGI/PPI config lives in the distributor's banked
+// low region (INTIDs 0..31 -- each CPU sees its own bank at the same offset),
+// and the CPU interface is the GICC MMIO block (also banked per accessing
+// CPU). dist_init_v2 runs once on the boot CPU for the global SPI config;
+// gic_cpu_config_v2 + cpu_iface_init_v2 run on EACH CPU for its own bank.
+// ---------------------------------------------------------------------------
+
+static void dist_init_v2(void) {
+    // 1. Disable the distributor while we program it.
+    v2_w32(g_dist_base, GICD_CTLR, 0);
+
+    // 2. Discover the max INTID (same TYPER.ITLinesNumber field as v3).
+    u32 typer   = v2_r32(g_dist_base, GICD_TYPER);
+    u32 itlines = GICD_TYPER_ITLINES(typer);
+    u32 max     = itlines * 32u - 1u;
+    if (max >= GIC_NUM_INTIDS) max = GIC_NUM_INTIDS - 1;
+    g_max_intid = max;
+
+    // 3. SPIs (intid >= 32): disable, clear pending + active, level config.
+    //    The 32-INTID group n maps to ICFGR(2n) + ICFGR(2n+1) (16 INTIDs,
+    //    2 bits each). No IGROUPR programming: QEMU virt's gic-version=2 has
+    //    no security extensions, so there is a single group and IGROUPR is
+    //    RAZ/WI (Linux's gic-v2 driver likewise leaves it untouched).
+    for (u32 n = 1; n * 32u <= max; n++) {
+        v2_w32(g_dist_base, GICD_ICENABLER(n), 0xFFFFFFFFu);
+        v2_w32(g_dist_base, GICD_ICPENDR(n),   0xFFFFFFFFu);
+        v2_w32(g_dist_base, GICD_ICACTIVER(n), 0xFFFFFFFFu);
+        v2_w32(g_dist_base, GICD_ICFGR(n * 2),     0);
+        v2_w32(g_dist_base, GICD_ICFGR(n * 2 + 1), 0);
+    }
+
+    // 4. SPI priority (byte stores; same atomicity rationale as v3) + route
+    //    every SPI to CPU interface 0 via ITARGETSR (byte = target bitmask,
+    //    0x01 = interface 0). ITARGETSR for INTIDs 0..31 is banked + RO, so
+    //    only 32.. is written -- matching v3's IROUTER<n>=0 (route to CPU 0).
+    for (u32 n = 32; n <= max; n++)
+        v2_w8(g_dist_base, GICD_IPRIORITYR(0) + n, DEFAULT_PRIORITY);
+    for (u32 n = 32; n <= max; n++)
+        v2_w8(g_dist_base, GICD_ITARGETSR(0) + n, 0x01u);
+
+    // 5. Enable the distributor (single security state -> bit 0).
+    v2_w32(g_dist_base, GICD_CTLR, GICD_CTLR_V2_ENABLE);
+}
+
+// Per-CPU banked SGI/PPI config. Runs on the local CPU so the banked low
+// distributor registers hit ITS bank. Mirrors v3's redist_init_cpu minus the
+// redistributor wake (v2 has none).
+static void gic_cpu_config_v2(void) {
+    // Disable all SGI/PPI + clear stale pending/active. SGI enable bits
+    // (0..15) are IMPLEMENTATION DEFINED -- often RAO/WI (SGIs always
+    // enabled), in which case these writes are no-ops for the SGI half and
+    // the PPI half is cleared; either way the only later-enabled SGI/PPI are
+    // those passed to gic_enable_irq (IPI_RESCHED + the timer PPI).
+    v2_w32(g_dist_base, GICD_ICENABLER(0), 0xFFFFFFFFu);
+    v2_w32(g_dist_base, GICD_ICPENDR(0),   0xFFFFFFFFu);
+    v2_w32(g_dist_base, GICD_ICACTIVER(0), 0xFFFFFFFFu);
+    for (u32 n = 0; n < 32; n++)
+        v2_w8(g_dist_base, GICD_IPRIORITYR(0) + n, DEFAULT_PRIORITY);
+    // PPI config (ICFGR(1) covers INTIDs 16..31): level (timer is level).
+    // ICFGR(0) (SGIs) is RO/always-edge -- not touched.
+    v2_w32(g_dist_base, GICD_ICFGR(1), 0);
+}
+
+static void cpu_iface_init_v2(void) {
+    // Priority mask first (admit all), then enable the interface last so the
+    // CPU starts admitting IRQs only once the mask is set. BPR 0 = full
+    // priority comparison (no sub-priority preemption grouping).
+    v2_w32(g_cpu_base, GICC_PMR,  GICC_PMR_ADMIT_ALL);
+    v2_w32(g_cpu_base, GICC_BPR,  0);
+    v2_w32(g_cpu_base, GICC_CTLR, GICC_CTLR_V2_ENABLE);
+}
+
+// ---------------------------------------------------------------------------
 // gic_init.
 // ---------------------------------------------------------------------------
 
+// GICv2 bring-up: discover GICD (reg[0]) + GICC (reg[1]) from DTB, map both
+// Device-nGnRnE, and init the distributor + this (boot) CPU's banked SGI/PPI
+// + its GICC interface. `compat` is the matched v2 compatible string.
+static bool gic_init_v2(const char *compat) {
+    u64 dbase = 0, dsize = 0, cbase = 0, csize = 0;
+    if (!dtb_get_compat_reg_n(compat, 0, &dbase, &dsize)) {
+        extinction("gic_init: GICv2 DTB node has no reg[0] (distributor)");
+    }
+    if (!dtb_get_compat_reg_n(compat, 1, &cbase, &csize)) {
+        extinction("gic_init: GICv2 DTB node has no reg[1] (CPU interface)");
+    }
+    g_dist_pa = dbase;
+    g_cpu_pa  = cbase;
+
+    void *dist_kva = mmu_map_mmio((paddr_t)dbase, dsize);
+    if (!dist_kva) {
+        extinction("gic_init: mmu_map_mmio(GICv2 dist) returned NULL (vmalloc exhausted?)");
+    }
+    void *cpu_kva = mmu_map_mmio((paddr_t)cbase, csize);
+    if (!cpu_kva) {
+        extinction("gic_init: mmu_map_mmio(GICv2 cpuif) returned NULL (vmalloc exhausted?)");
+    }
+    g_dist_base = (u64)(uintptr_t)dist_kva;
+    g_cpu_base  = (u64)(uintptr_t)cpu_kva;
+
+    // Distributor (global SPI config) -> this CPU's banked SGI/PPI -> this
+    // CPU's GICC interface (enabled last, so IRQs are admitted only after
+    // both distributor + bank are armed).
+    dist_init_v2();
+    gic_cpu_config_v2();
+    cpu_iface_init_v2();
+    return true;
+}
+
 bool gic_init(void) {
-    // Step 1: detect version from DTB.
+    // Step 1: detect version from DTB (I-15). Remember the matched compatible
+    // so the reg discovery below uses the right node.
+    const char *gic_compat = NULL;
     if (dtb_has_compat("arm,gic-v3")) {
-        g_version = GIC_VERSION_V3;
-    } else if (dtb_has_compat("arm,cortex-a15-gic") ||
-               dtb_has_compat("arm,gic-400")) {
-        g_version = GIC_VERSION_V2;
+        g_version  = GIC_VERSION_V3;
+        gic_compat = "arm,gic-v3";
+    } else if (dtb_has_compat("arm,gic-400")) {
+        g_version  = GIC_VERSION_V2;
+        gic_compat = "arm,gic-400";
+    } else if (dtb_has_compat("arm,cortex-a15-gic")) {
+        g_version  = GIC_VERSION_V2;
+        gic_compat = "arm,cortex-a15-gic";
     } else {
         g_version = GIC_VERSION_NONE;
-        extinction("gic_init: no GIC compat in DTB (need arm,gic-v3 or arm,cortex-a15-gic)");
+        extinction("gic_init: no GIC compat in DTB (need arm,gic-v3 or arm,cortex-a15-gic/arm,gic-400)");
     }
 
     if (g_version == GIC_VERSION_V2) {
-        // v2 path is real but unverified; ARCH §12 commits to autodetect
-        // at v1.0 and we honor that by failing loudly rather than running
-        // untested code on misconfigured hardware. v2 implementation lands
-        // when there's a Pi 4 (or similar) testbed.
-        extinction("gic_init: GICv2 detected; v2 path deferred (no test target). Run QEMU virt with gic-version=3.");
+        return gic_init_v2(gic_compat);
     }
 
     // Step 2: discover MMIO regions from DTB (compat = "arm,gic-v3").
@@ -421,8 +612,19 @@ bool gic_init(void) {
 }
 
 bool gic_init_secondary(unsigned cpu_idx) {
-    if (g_version != GIC_VERSION_V3) return false;
     if (cpu_idx == 0 || cpu_idx >= 64) return false;
+
+    if (g_version == GIC_VERSION_V2) {
+        // v2: no redistributor. Configure THIS CPU's banked SGI/PPI region of
+        // the distributor + bring up its GICC interface. Both touch banked
+        // state, so this MUST run on the secondary itself (the caller's
+        // contract) -- same constraint as the v3 sysreg interface.
+        gic_cpu_config_v2();
+        cpu_iface_init_v2();
+        return true;
+    }
+
+    if (g_version != GIC_VERSION_V3) return false;
 
     // Per-CPU redistributor wake + SGI/PPI bank config.
     redist_init_cpu(cpu_idx);
@@ -447,6 +649,18 @@ bool gic_send_ipi(unsigned target_cpu_idx, u32 sgi_intid) {
     // Same observable behavior as before for all in-range callers; closes
     // the silent-drop hazard for forward-looking out-of-range loops.
     if (target_cpu_idx >= smp_cpu_count()) return false;
+
+    if (g_version == GIC_VERSION_V2) {
+        // GICD_SGIR (ARM IHI 0048B §4.3.15): TargetListFilter 0b00 (bits
+        // [25:24] = 0, "use the CPUTargetList byte"), CPUTargetList [23:16] =
+        // 1 << target (CPU-interface bitmap, Aff0-indexed), SGIINTID [3:0].
+        // GICv2 supports at most 8 CPUs, so the 8-bit list bounds the target.
+        if (target_cpu_idx > GICD_SGIR_MAX_TARGET) return false;
+        u32 sgir = (1u << (GICD_SGIR_TGT_LIST_SHIFT + target_cpu_idx)) |
+                   (sgi_intid & 0xFu);
+        v2_w32(g_dist_base, GICD_SGIR, sgir);
+        return true;
+    }
 
     // ICC_SGI1R_EL1 encoding (ARM ARM C5.2.18):
     //   [55:48]  Aff3
@@ -508,6 +722,14 @@ void gic_dispatch(u32 intid) {
 
 bool gic_enable_irq(u32 intid) {
     if (intid >= GIC_NUM_INTIDS) return false;
+    if (g_version == GIC_VERSION_V2) {
+        // v2: SGI/PPI (0..31) live in the distributor's per-CPU-banked low
+        // region; SPIs are global. GICD_ISENABLER(intid/32) covers both --
+        // the low register (n=0) is banked to the calling CPU.
+        u32 n = intid / 32, bit = intid % 32;
+        v2_w32(g_dist_base, GICD_ISENABLER(n), 1u << bit);
+        return true;
+    }
     if (intid < 32) {
         u64 base = cpu_redist_base(smp_cpu_idx_self());
         mmio_w32(base, GICR_ISENABLER0, 1u << intid);
@@ -611,6 +833,11 @@ bool gic_set_pending_spi(u32 intid) {
 
 bool gic_disable_irq(u32 intid) {
     if (intid >= GIC_NUM_INTIDS) return false;
+    if (g_version == GIC_VERSION_V2) {
+        u32 n = intid / 32, bit = intid % 32;
+        v2_w32(g_dist_base, GICD_ICENABLER(n), 1u << bit);
+        return true;
+    }
     if (intid < 32) {
         u64 base = cpu_redist_base(smp_cpu_idx_self());
         mmio_w32(base, GICR_ICENABLER0, 1u << intid);
@@ -627,6 +854,16 @@ bool gic_disable_irq(u32 intid) {
 // ---------------------------------------------------------------------------
 
 u32 gic_acknowledge(void) {
+    if (g_version == GIC_VERSION_V2) {
+        // GICC_IAR: [9:0] INTID, [12:10] source CPUID (SGIs). Save the raw
+        // value for this CPU so gic_eoi can echo the CPUID back to GICC_EOIR
+        // (ARM IHI 0048B §4.4.5). No nesting between this and the matching
+        // EOI (IRQs masked in the handler), so the slot is single-writer.
+        u32 iar = v2_r32(g_cpu_base, GICC_IAR);
+        unsigned cpu = smp_cpu_idx_self();
+        if (cpu < DTB_MAX_CPUS) g_v2_eoi_token[cpu] = iar;
+        return iar & GICC_IAR_INTID_MASK;     // 1023 == spurious (filtered upstream)
+    }
     u64 iar = read_icc_iar1_el1();
     return (u32)(iar & 0xFFFFFFu);
 }
@@ -637,6 +874,20 @@ void gic_eoi(u32 intid) {
     // before reaching here, but defend the API call too in case a
     // future caller (manual EOI in a handler) passes a stale IAR.
     if (intid >= GIC_NUM_INTIDS) {
+        return;
+    }
+    if (g_version == GIC_VERSION_V2) {
+        // Echo the saved raw IAR (with the SGI source CPUID) when its INTID
+        // matches what we're EOI'ing -- the normal ack->eoi pairing. Fall
+        // back to the bare INTID for a defensive/manual EOI whose token we
+        // never captured (CPUID 0; correct for non-SGI INTIDs anyway).
+        unsigned cpu = smp_cpu_idx_self();
+        u32 token = intid;
+        if (cpu < DTB_MAX_CPUS &&
+            (g_v2_eoi_token[cpu] & GICC_IAR_INTID_MASK) == intid) {
+            token = g_v2_eoi_token[cpu];
+        }
+        v2_w32(g_cpu_base, GICC_EOIR, token);
         return;
     }
     write_icc_eoir1_el1((u64)intid);
@@ -651,6 +902,10 @@ u64 gic_dist_base(void)         { return g_dist_base; }
 u64 gic_redist_base(void)       { return g_redist_base; }
 u64 gic_dist_pa(void)           { return g_dist_pa; }
 u64 gic_redist_pa(void)         { return g_redist_pa; }
+
+// GICv2 CPU-interface (GICC) bases; zero on v3 (sysreg interface).
+u64 gic_cpu_iface_base(void)    { return g_cpu_base; }
+u64 gic_cpu_iface_pa(void)      { return g_cpu_pa; }
 
 // R12-gic-edge audit close (F205 P3): expose the runtime-discovered
 // maximum dispatchable INTID, sourced from GICD_TYPER.ITLinesNumber at

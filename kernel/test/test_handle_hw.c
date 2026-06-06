@@ -18,7 +18,7 @@
 #include <thylacine/types.h>
 
 #include "../../arch/arm64/uart.h"
-#include "../../arch/arm64/timer.h" // TIMER_INTID_EL1_PHYS_NS (R9 F142 test)
+#include "../../arch/arm64/timer.h" // TIMER_INTID_EL1_VIRT (R9 F142 test)
 #include "../../arch/arm64/gic.h"   // gic_max_intid (R12-gic-edge F205 test)
 
 void test_handle_hw_mmio_dup_rejected(void);
@@ -100,16 +100,16 @@ void test_handle_hw_mmio_close_releases_claim(void) {
 
 // R9 F142 (P0) regression: kobj_irq_create rejects kernel-reserved
 // INTIDs. irqfwd_init pre-marks IPI_RESCHED (SGI 0) and
-// TIMER_INTID_EL1_PHYS_NS (PPI 30) in g_intid_claimed[]. A caller
+// TIMER_INTID_EL1_VIRT (PPI 27) in g_intid_claimed[]. A caller
 // (kernel or syscall path with CAP_HW_CREATE) attempting either MUST
 // receive NULL. Without this, any cap-holding userspace driver could
 // overwrite the timer handler or IPI dispatch entry.
 void test_handle_hw_irq_kernel_reserved_rejected(void) {
     struct KObj_IRQ *k0 = kobj_irq_create(IPI_RESCHED);
     TEST_ASSERT(k0 == NULL, "kobj_irq_create(IPI_RESCHED=0) must be rejected");
-    struct KObj_IRQ *k30 = kobj_irq_create(TIMER_INTID_EL1_PHYS_NS);
-    TEST_ASSERT(k30 == NULL,
-                "kobj_irq_create(TIMER=30) must be rejected");
+    struct KObj_IRQ *ktimer = kobj_irq_create(TIMER_INTID_EL1_VIRT);
+    TEST_ASSERT(ktimer == NULL,
+                "kobj_irq_create(TIMER=27) must be rejected");
 }
 
 // handle_close on a KOBJ_IRQ handle releases the INTID claim: a fresh

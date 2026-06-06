@@ -1,12 +1,14 @@
-// ARM Generic Timer — EL1 non-secure physical timer at fixed Hz (P1-G).
+// ARM Generic Timer — EL1 virtual timer at fixed Hz (Lazarus W2; physical
+// at P1-G -- see timer.h for why virtual: the physical timer is hypervisor-
+// reserved under HVF on Apple Silicon).
 //
 // Driven by:
-//   CNTFRQ_EL0   — counter frequency (Hz)
-//   CNTPCT_EL0   — physical counter (always running)
-//   CNTP_TVAL_EL0 — 32-bit signed decrementer; IRQ fires when it goes <= 0
-//   CNTP_CTL_EL0  — bit 0 ENABLE, bit 1 IMASK, bit 2 ISTATUS (RO)
+//   CNTFRQ_EL0   — counter frequency (Hz; shared by both timers)
+//   CNTVCT_EL0   — virtual counter (always running)
+//   CNTV_TVAL_EL0 — 32-bit signed decrementer; IRQ fires when it goes <= 0
+//   CNTV_CTL_EL0  — bit 0 ENABLE, bit 1 IMASK, bit 2 ISTATUS (RO)
 //
-// The IRQ does not auto-clear — writing CNTP_TVAL_EL0 with a fresh
+// The IRQ does not auto-clear — writing CNTV_TVAL_EL0 with a fresh
 // reload value re-arms it; the GIC EOI handles the priority drop.
 // IMASK stays clear; ENABLE stays set. ISTATUS reads as 1 while
 // the timer is firing (we don't poll it because the GIC ack/EOI
@@ -26,10 +28,10 @@
 #include <thylacine/smp.h>
 #include <thylacine/types.h>
 
-// Compile-time sanity: PPI 14 → INTID 30 (architectural per ARMv8 ARM
+// Compile-time sanity: PPI 11 → INTID 27 (architectural per ARMv8 ARM
 // D11.2.4). Catches a regression to GIC_PPI_TO_INTID's offset.
-_Static_assert(TIMER_INTID_EL1_PHYS_NS == 30,
-               "TIMER_INTID_EL1_PHYS_NS must be 30 (PPI 14 + offset 16)");
+_Static_assert(TIMER_INTID_EL1_VIRT == 27,
+               "TIMER_INTID_EL1_VIRT must be 27 (PPI 11 + offset 16)");
 
 // ---------------------------------------------------------------------------
 // CNT* system-register accessors.
@@ -41,31 +43,25 @@ static inline u64 read_cntfrq_el0(void) {
     return v;
 }
 
-static inline u64 read_cntpct_el0(void) {
+static inline u64 read_cntvct_el0(void) {
     u64 v;
     // isb before the read so any prior store has retired before we
     // take the timestamp (per ARMv8 generic-timer access ordering).
-    __asm__ __volatile__("isb\nmrs %0, cntpct_el0\n" : "=r"(v));
+    __asm__ __volatile__("isb\nmrs %0, cntvct_el0\n" : "=r"(v));
     return v;
 }
 
-static inline void write_cntp_tval_el0(u64 v) {
-    __asm__ __volatile__("msr cntp_tval_el0, %0" :: "r"(v));
+static inline void write_cntv_tval_el0(u64 v) {
+    __asm__ __volatile__("msr cntv_tval_el0, %0" :: "r"(v));
 }
 
-static inline u64 read_cntp_ctl_el0(void) {
-    u64 v;
-    __asm__ __volatile__("mrs %0, cntp_ctl_el0" : "=r"(v));
-    return v;
+static inline void write_cntv_ctl_el0(u64 v) {
+    __asm__ __volatile__("msr cntv_ctl_el0, %0\nisb\n" :: "r"(v));
 }
 
-static inline void write_cntp_ctl_el0(u64 v) {
-    __asm__ __volatile__("msr cntp_ctl_el0, %0\nisb\n" :: "r"(v));
-}
-
-#define CNTP_CTL_ENABLE     (1u << 0)
-#define CNTP_CTL_IMASK      (1u << 1)
-#define CNTP_CTL_ISTATUS    (1u << 2)
+#define CNTV_CTL_ENABLE     (1u << 0)
+#define CNTV_CTL_IMASK      (1u << 1)
+#define CNTV_CTL_ISTATUS    (1u << 2)
 
 // ---------------------------------------------------------------------------
 // State.
@@ -133,7 +129,7 @@ bool timer_init(u32 hz) {
 }
 
 // Arm THIS CPU's banked physical timer using the reload computed by
-// timer_init. CNTP_TVAL_EL0 / CNTP_CTL_EL0 are per-CPU banked, so the boot
+// timer_init. CNTV_TVAL_EL0 / CNTV_CTL_EL0 are per-CPU banked, so the boot
 // CPU's timer_init does NOT arm secondaries -- each CPU must call this to
 // receive the preemptive scheduler tick. A secondary with no armed timer
 // never preempts: a CPU-bound EL0 thread there monopolizes the CPU and
@@ -143,8 +139,8 @@ bool timer_init(u32 hz) {
 void timer_arm_this_cpu(void) {
     if (g_reload == 0)
         extinction("timer_arm_this_cpu before timer_init (g_reload unset)");
-    write_cntp_tval_el0(g_reload);
-    write_cntp_ctl_el0(CNTP_CTL_ENABLE);
+    write_cntv_tval_el0(g_reload);
+    write_cntv_ctl_el0(CNTV_CTL_ENABLE);
 }
 
 // ---------------------------------------------------------------------------
@@ -154,9 +150,9 @@ void timer_arm_this_cpu(void) {
 void timer_irq_handler(u32 intid, void *arg) {
     (void)intid;
     (void)arg;
-    // Re-arm THIS CPU's timer (CNTP_TVAL_EL0 is per-CPU banked; every CPU
-    // with an armed timer re-arms its own). CNTP_CTL stays at ENABLE.
-    write_cntp_tval_el0(g_reload);
+    // Re-arm THIS CPU's timer (CNTV_TVAL_EL0 is per-CPU banked; every CPU
+    // with an armed timer re-arms its own). CNTV_CTL stays at ENABLE.
+    write_cntv_tval_el0(g_reload);
 
     // g_ticks is the boot CPU's single-writer monotonic counter (the
     // timer_busy_wait_ticks timebase + diagnostics). Secondaries now also
@@ -177,7 +173,7 @@ void timer_irq_handler(u32 intid, void *arg) {
 // ---------------------------------------------------------------------------
 
 u64 timer_get_ticks(void)   { return g_ticks; }
-u64 timer_get_counter(void) { return read_cntpct_el0(); }
+u64 timer_get_counter(void) { return read_cntvct_el0(); }
 u32 timer_get_freq(void)    { return (u32)g_freq; }
 
 // P5-tsleep: counter <-> nanosecond conversion. Both use the split
@@ -188,7 +184,7 @@ u32 timer_get_freq(void)    { return (u32)g_freq; }
 // factor). g_freq == 0 only before timer_init — fail soft to 0.
 u64 timer_now_ns(void) {
     if (g_freq == 0) return 0;
-    u64 cnt = read_cntpct_el0();
+    u64 cnt = read_cntvct_el0();
     return (cnt / g_freq) * 1000000000ull
          + (cnt % g_freq) * 1000000000ull / g_freq;
 }
@@ -206,17 +202,21 @@ void timer_busy_wait_ticks(u64 n) {
     }
 }
 
-// CNTKCTL_EL1.EL0PCTEN — bit 0. Reset value undefined; ARM ARM D13.2.34
-// reset to 0 on warm reset means EL0 reads of CNTPCT_EL0 trap to EL1
-// (EC=0x18 trapped MSR/MRS). EL0VCTEN (bit 1) gates CNTVCT_EL0
-// similarly; we enable physical only since CNTVOFF_EL2 = 0 on direct-
-// EL1 boot makes virtual == physical, and the kernel side uses
-// cntpct_el0 for `timer_get_counter`. Single source of truth.
+// CNTKCTL_EL1: EL0PCTEN (bit 0) gates EL0 reads of CNTPCT_EL0; EL0VCTEN
+// (bit 1) gates CNTVCT_EL0. Reset value undefined; reset-to-0 on warm
+// reset means an EL0 counter read traps to EL1 (EC=0x18) without the bit.
+// We enable BOTH: the kernel timebase is now the virtual counter (the
+// virtual timer is hypervisor-safe -- see the file header), so userspace
+// should read CNTVCT_EL0 (EL0VCTEN); EL0PCTEN stays set too since the
+// physical counter is readable at EL1/EL0 where available and costs
+// nothing. Under HVF the virtual counter may carry a non-zero CNTVOFF, so
+// EL0 + kernel must agree on the same (virtual) timebase -- they do.
 #define CNTKCTL_EL0PCTEN  (1ull << 0)
+#define CNTKCTL_EL0VCTEN  (1ull << 1)
 
 void timer_enable_el0_counter_access(void) {
     u64 v;
     __asm__ __volatile__("mrs %0, cntkctl_el1" : "=r"(v));
-    v |= CNTKCTL_EL0PCTEN;
+    v |= CNTKCTL_EL0PCTEN | CNTKCTL_EL0VCTEN;
     __asm__ __volatile__("msr cntkctl_el1, %0\nisb\n" :: "r"(v));
 }

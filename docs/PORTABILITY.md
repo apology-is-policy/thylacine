@@ -237,6 +237,54 @@ the HVF-on-M2 deliverable.
 **Audit-bearing** (scheduler / IPI surface; I-18 IPI ordering). Follows the
 CLAUDE.md audit-trigger discipline for `kernel/smp.c` + the new gic v2 path.
 
+### Implemented (Lazarus W2)
+
+The GICv2 path is built and the v2 detection no longer extincts. As-built:
+
+- **GICC MMIO CPU interface** (`gic_init_v2` maps DTB reg[1]; `gic_acknowledge`
+  reads `GICC_IAR`, `gic_eoi` writes `GICC_EOIR`). The GICv2 SGI subtlety:
+  `GICC_IAR` carries the **source CPUID** in bits[12:10] for an SGI and
+  `GICC_EOIR` must echo it back (ARM IHI 0048B §4.4.5), so the raw IAR is saved
+  per-CPU (`g_v2_eoi_token[]`) between ack + EOI. There is exactly one in-flight
+  IAR per CPU (handlers run PSTATE.I-masked -- no nesting), so the slot is
+  single-writer with no cross-CPU race.
+- **SGI/PPI live in the distributor's banked low region** (no redistributor);
+  `gic_cpu_config_v2` + `cpu_iface_init_v2` run on each CPU for its own bank.
+  `gic_enable_irq`/`gic_disable_irq` route both SGI/PPI and SPI through
+  `GICD_ISENABLER(intid/32)`.
+- **IPI via `GICD_SGIR`** (TargetListFilter=0, `1 << target` in the
+  CPUTargetList byte; v2 caps at 8 CPUs). `kernel/smp.c`'s `smp_resched_others`
+  per-target loop is unchanged.
+- **HVF-MMIO mitigation**: `v2_w32`/`v2_r32`/`v2_w8` issue a `dsb sy` after every
+  GIC access, pacing the trap rate so QEMU/HVF does not see the `isv=0`
+  data-abort. **Empirically validated under HVF on M-series**: `gic_init`,
+  the timer, IRQ delivery, and the full kernel boot run clean under
+  `-accel hvf -machine virt,gic-version=2`.
+- **I-5 reservation**: `kobj_mmio_reserve_kernel_ranges` now reserves the GICC
+  region for both `arm,cortex-a15-gic` (QEMU virt) and `arm,gic-400` (Pi 4), so
+  a CAP_HW_CREATE driver cannot claim the kernel's IRQ ack/EOI registers.
+
+**Virtual-timer switch pulled in (the HVF dev loop needs it too; task #889).**
+Reaching `timer_init` under HVF surfaced a second blocker: the EL1 **physical**
+timer (CNTP_*) is hypervisor-reserved on Apple Silicon, so an EL1 guest
+`CNTP_TVAL_EL0` write reflects as an `EC=0` undefined-instruction exception. The
+fix is the architecturally-correct EL1-guest choice -- the **virtual timer**
+(`CNTV_CTL/TVAL_EL0`, `CNTVCT_EL0`, INTID 27 / PPI 11), which works on every
+substrate (TCG, HVF, and a direct-EL1 bare-metal boot where CNTVOFF=0 makes the
+virtual counter equal the physical). One timebase everywhere; `timer.c` reads
+`CNTVCT_EL0` and EL0 gets `CNTKCTL_EL1.EL0VCTEN`. (Bare metal W4 inherits this:
+the virtual timer is correct there too.)
+
+**Validation**: default (v3, TCG) 716/716; GICv2 (TCG, smp4) 716/716; the SMP
+soundness gate (default + UBSan x smp4/smp8) clean; HVF+GICv2 boots the kernel +
+runs deep into the userspace suite on real M-series silicon.
+
+**Owed follow-up (#890)**: under HVF the *userspace* virtio-mmio driver
+(virtio-blk-probe) trips the same `isv` assert on its back-to-back register
+sequence -- a different layer (userspace driver codegen, not the kernel GIC).
+The kernel GIC + timer are HVF-proven; #890 is the remaining gap to a
+100%-green HVF boot and is tracked separately.
+
 ---
 
 ## 6. W3 — the software-RNG fallback (the owed seam)

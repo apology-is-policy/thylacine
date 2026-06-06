@@ -4,12 +4,11 @@
 //   - DTB-driven version detection ("arm,gic-v3" / "arm,cortex-a15-gic" /
 //     "arm,gic-400") per invariant I-15.
 //   - GICv3 distributor + redistributor + system-register CPU interface.
-//   - GICv2 detection that extinctions cleanly with a deferred-to-future-
-//     chunk diagnostic. The v2 path is real on Pi 4 and other older
-//     boards but neither QEMU virt (with run-vm.sh's gic-version=3) nor
-//     Pi 5 exercise it; we hold off on implementing it until there's a
-//     test target. v1.0's autodetect commitment is preserved by failing
-//     loudly rather than silently.
+//   - GICv2 distributor + GICC MMIO CPU interface + GICD_SGIR IPI (Lazarus
+//     W2). The v2 MMIO CPU interface is the HVF-on-Apple enabler (sidesteps
+//     the GICv3-distributor `isv` assertion) and the Pi 4 / GIC-400 target.
+//     QEMU virt's gic-version=3 stays the default + CI baseline; gic_init
+//     autodetects from the DTB compatible.
 //   - IRQ enable / disable / acknowledge / EOI.
 //   - Per-INTID handler dispatch table (16 KiB BSS at INTID_MAX = 1020).
 //
@@ -59,8 +58,8 @@ _Static_assert(GIC_PPI_TO_INTID(15) == 31,
 
 typedef enum {
     GIC_VERSION_NONE = 0,    // pre-init / detection failed
-    GIC_VERSION_V2   = 2,    // arm,cortex-a15-gic / arm,gic-400 (deferred)
-    GIC_VERSION_V3   = 3,    // arm,gic-v3 (live at P1-G)
+    GIC_VERSION_V2   = 2,    // arm,cortex-a15-gic / arm,gic-400 (live, Lazarus W2)
+    GIC_VERSION_V3   = 3,    // arm,gic-v3 (live since P1-G)
 } gic_version_t;
 
 // ---------------------------------------------------------------------------
@@ -77,8 +76,8 @@ typedef enum {
 // Must run AFTER dtb_init and AFTER exception_init (so an unexpected
 // IRQ during bring-up routes through the vector table cleanly).
 //
-// On v3 detection: configures and returns true.
-// On v2 detection: extinctions (deferred path).
+// On v2 or v3 detection: configures and returns true (extincts only on a
+// malformed DTB GIC node or vmalloc exhaustion mapping the MMIO).
 // On no GIC compat in DTB: extinctions ("no GIC compat in DTB").
 //
 // Idempotent only in the trivial "do not call twice" sense.
@@ -97,6 +96,11 @@ u64 gic_dist_base(void);
 u64 gic_redist_base(void);
 u64 gic_dist_pa(void);
 u64 gic_redist_pa(void);
+
+// GICv2 CPU-interface (GICC) KVA + PA. Both zero on v3 (the CPU interface is
+// the ICC_* system registers, not MMIO) and before gic_init runs.
+u64 gic_cpu_iface_base(void);
+u64 gic_cpu_iface_pa(void);
 
 // R12-gic-edge audit close (F205): runtime-discovered maximum
 // dispatchable INTID, from GICD_TYPER.ITLinesNumber at gic_init.
@@ -125,16 +129,23 @@ bool gic_attach(u32 intid, gic_irq_handler_t handler, void *arg);
 bool gic_enable_irq(u32 intid);
 bool gic_disable_irq(u32 intid);
 
-// Acknowledge the highest-priority pending INTID. Reads ICC_IAR1_EL1.
-// Returns the INTID portion (lower 24 bits); the caller dispatches and
-// then issues gic_eoi(intid). If no IRQ is pending or the IRQ is
-// spurious, returns GIC_INTID_SPURIOUS — caller MUST NOT EOI in that
-// case (per GICv3 SR conventions).
+// Acknowledge the highest-priority pending INTID. On v3 reads ICC_IAR1_EL1
+// (returns the INTID portion, lower 24 bits); on v2 reads GICC_IAR (returns
+// the lower 10-bit INTID and stashes the raw IAR per-CPU so gic_eoi can echo
+// the SGI source CPUID). The caller dispatches and then issues
+// gic_eoi(intid). If no IRQ is pending or the IRQ is spurious, returns an
+// INTID >= GIC_NUM_INTIDS — caller MUST NOT EOI in that case.
+//
+// MUST be paired with exactly one gic_eoi (or no EOI on spurious) on the same
+// CPU before the next gic_acknowledge: the v2 per-CPU EOI-token slot holds a
+// single in-flight IAR (the kernel never nests IRQ handlers — they run with
+// PSTATE.I masked).
 u32 gic_acknowledge(void);
 
-// Signal end-of-interrupt for the given INTID via ICC_EOIR1_EL1. With
-// ICC_CTLR_EL1.EOImode = 0 (default at P1-G), this both drops the
-// running priority and deactivates the interrupt.
+// Signal end-of-interrupt for the given INTID. On v3 writes ICC_EOIR1_EL1;
+// on v2 writes GICC_EOIR with the saved raw IAR (echoing the SGI source
+// CPUID, as ARM IHI 0048B §4.4.5 requires). With EOImode = 0 (the v1.0
+// default on both versions) this drops the running priority + deactivates.
 void gic_eoi(u32 intid);
 
 // Internal: dispatch the IRQ to the registered handler. Called from
@@ -143,13 +154,15 @@ void gic_eoi(u32 intid);
 // alternative would be to move dispatch into the IRQ handler itself.
 void gic_dispatch(u32 intid);
 
-// P2-Cdc: per-CPU GIC bring-up for secondaries. Wakes this CPU's
+// P2-Cdc: per-CPU GIC bring-up for secondaries. On v3: wakes this CPU's
 // redistributor (clear ProcessorSleep, wait ChildrenAsleep), configures
 // the SGI/PPI bank (group 1 NS, default priority, all disabled), and
 // brings up the system-register CPU interface (ICC_SRE/PMR/BPR/CTLR/
-// IGRPEN1). Must be called from the secondary CPU itself — the
-// redistributor MMIO is per-CPU-banked and the CPU interface is
-// system-register-only-from-this-EL.
+// IGRPEN1). On v2: configures this CPU's banked SGI/PPI region of the
+// distributor + brings up its GICC MMIO interface (no redistributor).
+// Either way it MUST be called from the secondary CPU itself — the v3
+// CPU interface is system-register-only-from-this-EL, and the v2 SGI/PPI
+// + GICC state is banked to the accessing CPU.
 //
 // Preconditions: gic_init() has run on the boot CPU (distributor +
 // CPU 0's redistributor + CPU 0's interface are live). cpu_idx is in
@@ -203,8 +216,10 @@ void gic_set_spi_edge_triggered(u32 intid);
 // gic_attach'd).
 //
 // On QEMU virt (and similar flat-Aff0 boards) all CPUs share Aff{1,2,3}
-// = 0 and have Aff0 = 0..N-1. ICC_SGI1R_EL1 is encoded with TargetList =
-// 1 << target_cpu_idx (bitmap within the cluster).
+// = 0 and have Aff0 = 0..N-1. On v3 this is ICC_SGI1R_EL1 with TargetList
+// = 1 << target_cpu_idx (bitmap within the cluster). On v2 it is a write
+// to GICD_SGIR with TargetListFilter=0 + CPUTargetList = 1 << target
+// (GICv2 caps at 8 CPUs, so the target must be 0..7).
 //
 // sgi_intid must be in [0, GIC_SGI_MAX]. target_cpu_idx must be a valid
 // CPU (caller's responsibility — not validated against

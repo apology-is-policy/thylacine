@@ -331,7 +331,7 @@ void boot_main(void) {
     exception_init();
 
     // Phase 5: bring up the GIC, ARM generic timer, and route the
-    // timer IRQ (PPI 14 → INTID 30) through. After this the kernel
+    // timer IRQ (PPI 11 → INTID 27, the virtual timer) through. After this the kernel
     // receives 1000 Hz ticks; tick observation below confirms the
     // interrupt path is live.
     //
@@ -344,10 +344,10 @@ void boot_main(void) {
     if (!timer_init(1000)) {
         extinction("timer_init failed (CNTFRQ_EL0 = 0 or hz out of range)");
     }
-    if (!gic_attach(TIMER_INTID_EL1_PHYS_NS, timer_irq_handler, NULL)) {
+    if (!gic_attach(TIMER_INTID_EL1_VIRT, timer_irq_handler, NULL)) {
         extinction("gic_attach(timer) failed");
     }
-    if (!gic_enable_irq(TIMER_INTID_EL1_PHYS_NS)) {
+    if (!gic_enable_irq(TIMER_INTID_EL1_VIRT)) {
         extinction("gic_enable_irq(timer) failed");
     }
     // #868: make cpu0 a full IPI_RESCHED peer (attach the handler + enable SGI 0
@@ -368,15 +368,23 @@ void boot_main(void) {
     uart_puthex64(gic_dist_pa());
     uart_puts(" KVA=");
     uart_puthex64(gic_dist_base());
-    uart_puts(" redist PA=");
-    uart_puthex64(gic_redist_pa());
-    uart_puts(" KVA=");
-    uart_puthex64(gic_redist_base());
+    if (gic_version() == GIC_VERSION_V2) {
+        // v2 has no redistributor; report the GICC CPU-interface frame.
+        uart_puts(" cpuif PA=");
+        uart_puthex64(gic_cpu_iface_pa());
+        uart_puts(" KVA=");
+        uart_puthex64(gic_cpu_iface_base());
+    } else {
+        uart_puts(" redist PA=");
+        uart_puthex64(gic_redist_pa());
+        uart_puts(" KVA=");
+        uart_puthex64(gic_redist_base());
+    }
     uart_puts("\n");
 
     uart_puts("  timer: ");
     uart_putdec(timer_get_freq() / 1000UL);
-    uart_puts(" kHz freq, 1000 Hz tick (PPI 14 / INTID 30)\n");
+    uart_puts(" kHz freq, 1000 Hz tick (virtual timer, PPI 11 / INTID 27)\n");
 
     // Phase 6: process / thread bring-up (P2-A entry).
     //
@@ -528,7 +536,9 @@ void boot_main(void) {
 
     uart_puts("  exception: uniform EL1h (SPSel=1; exception frames on the per-thread kernel stack)\n");
 
-    uart_puts("  ipi:  GICv3 SGIs live (IPI_RESCHED=SGI 0; per-CPU GIC redist + IRQ unmask on secondaries)\n");
+    uart_puts(gic_version() == GIC_VERSION_V2
+              ? "  ipi:  GICv2 SGIs live (IPI_RESCHED=SGI 0 via GICD_SGIR; banked SGI/PPI + IRQ unmask on secondaries)\n"
+              : "  ipi:  GICv3 SGIs live (IPI_RESCHED=SGI 0; per-CPU GIC redist + IRQ unmask on secondaries)\n");
 
     uart_puts("  kproc:   pid=");
     uart_putdec((u64)kproc()->pid);

@@ -1,8 +1,10 @@
 # 11 — ARM generic timer (as-built reference)
 
-The kernel's first IRQ source. ARMv8 generic timer at EL1 non-secure physical, programmed at 1000 Hz. Each fire increments a global tick counter; the IRQ is acknowledged via the GIC and re-armed by writing `CNTP_TVAL_EL0` with the cached reload value.
+The kernel's first IRQ source. ARMv8 generic **virtual** timer (Lazarus W2; physical at P1-G), programmed at 1000 Hz. Each fire increments a global tick counter; the IRQ is acknowledged via the GIC and re-armed by writing `CNTV_TVAL_EL0` with the cached reload value.
 
-P1-G deliverable. The tick counter is visible in the boot banner ("ticks: N") to confirm IRQ delivery is live.
+> **Lazarus W2 (virtual-timer switch, task #889).** The driver now uses the **virtual** timer, not the EL1 physical timer: `CNTV_CTL_EL0` / `CNTV_TVAL_EL0` / `CNTVCT_EL0` (was `CNTP_*` / `CNTPCT_EL0`) and **INTID 27 (virtual PPI 11)** (was INTID 30 / PPI 14); EL0 counter access adds `CNTKCTL_EL1.EL0VCTEN`. Why: under a hypervisor (HVF on Apple Silicon, the Lazarus fast-dev target) the physical timer is reserved, and an EL1-guest `CNTP_TVAL_EL0` write reflects as an `EC=0` undefined-instruction exception. The virtual timer is the EL1-guest timer on every substrate (TCG, HVF, and direct-EL1 bare-metal where `CNTVOFF=0` makes the virtual counter equal the physical) -- one timebase everywhere. **The mechanism described below is identical with the `V`-variant registers** (some interior pseudocode still names the `CNTP_*` forms -- read them as their `CNTV_*` counterparts; the headline facts here are authoritative). The physical *counter* `CNTPCT_EL0` remains readable at EL1 for entropy (kaslr/canary); only the physical *timer control* is hypervisor-reserved. `PORTABILITY.md §5`.
+
+P1-G deliverable (physical); virtual-timer switch at Lazarus W2. The tick counter is visible in the boot banner ("ticks: N") to confirm IRQ delivery is live.
 
 Scope: `arch/arm64/timer.{h,c}`, `kernel/main.c`'s `timer_init` slot in `boot_main`, banner `ticks:` line. Cross-cuts the GIC driver (registration via `gic_attach`) and the IRQ vector path (dispatch via `gic_dispatch`).
 
@@ -14,7 +16,7 @@ Reference: `ARCHITECTURE.md §12.3` (interrupt handling), ARMv8-A ARM section D1
 
 Timer ticks are the kernel's heartbeat. At P1-G the tick is a passive observation — the boot path waits 5 ticks before printing the count, demonstrating the IRQ delivery path is alive. Phase 2 adds a real scheduler tick driving EEVDF deadline updates; Phase 3 adds high-resolution timeouts via `CNTP_CVAL_EL0` deadlines for I/O completions.
 
-The ARMv8 generic timer is a system-register peripheral (no MMIO). Each PE has a banked physical + virtual timer pair; we use the EL1 non-secure physical timer. The timer counts down a 32-bit signed `CNTP_TVAL_EL0` value (set by software); when it reaches zero the timer fires an IRQ on PPI 14 (architecturally fixed; INTID 30 in GICv3 numbering). Re-arming is one MSR write.
+The ARMv8 generic timer is a system-register peripheral (no MMIO). Each PE has a banked physical + virtual timer pair; we use the **virtual** timer (Lazarus W2). The timer counts down a 32-bit signed `CNTV_TVAL_EL0` value (set by software); when it reaches zero the timer fires an IRQ on PPI 11 (architecturally fixed; INTID 27 in GIC numbering). Re-arming is one MSR write.
 
 ---
 
@@ -216,7 +218,7 @@ CPU overhead at 1000 Hz is negligible. Phase 2's scheduler tick adds a few hundr
 - `timer_get_ticks()`, `timer_get_counter()`, `timer_get_freq()` — observation API.
 - `timer_busy_wait_ticks(n)` — WFI-based wait for N ticks.
 - IRQ wired through GIC: `gic_attach(TIMER_INTID_EL1_PHYS_NS, timer_irq_handler, NULL)` + `gic_enable_irq`.
-- Banner: `timer: <freq_kHz> kHz freq, 1000 Hz tick (PPI 14 / INTID 30)` + `ticks: N (kernel breathing)`.
+- Banner: `timer: <freq_kHz> kHz freq, 1000 Hz tick (virtual timer, PPI 11 / INTID 27)` + `ticks: N (kernel breathing)`.
 - Test: `timer.tick_increments` (end-to-end IRQ delivery smoke).
 
 **Not yet implemented**:

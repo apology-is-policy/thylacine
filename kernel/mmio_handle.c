@@ -352,14 +352,22 @@ void kobj_mmio_reserve_kernel_ranges(void) {
     if (dtb_get_compat_reg_n("arm,gic-v3", 1, &gic_pa, &gic_size)) {
         reserve_kernel_range(gic_pa, (size_t)gic_size, "arm,gic-v3 redist");
     }
-    // GIC v2 fallback (some platforms): two reg pairs (distributor +
-    // cpu-interface). At v1.0 QEMU virt is v3; v2 reservation is
-    // forward-compat for platforms that downshift.
-    if (dtb_get_compat_reg_n("arm,cortex-a15-gic", 0, &gic_pa, &gic_size)) {
-        reserve_kernel_range(gic_pa, (size_t)gic_size, "gic-v2 dist");
-    }
-    if (dtb_get_compat_reg_n("arm,cortex-a15-gic", 1, &gic_pa, &gic_size)) {
-        reserve_kernel_range(gic_pa, (size_t)gic_size, "gic-v2 cpu-iface");
+    // GIC v2: two reg pairs (distributor + GICC cpu-interface). The GICC
+    // region carries the kernel's IRQ ack/EOI registers, so reserving it is
+    // load-bearing under v2 -- a CAP_HW_CREATE driver that claimed it could
+    // scribble on live IRQ state (I-5). Both QEMU virt's gic-version=2
+    // (arm,cortex-a15-gic) and real GIC-400 hardware (arm,gic-400, the Pi 4)
+    // are covered; gic_init's autodetect accepts the same pair of compats.
+    static const char *const gicv2_compats[] = {
+        "arm,cortex-a15-gic", "arm,gic-400",
+    };
+    for (size_t i = 0; i < sizeof(gicv2_compats) / sizeof(gicv2_compats[0]); i++) {
+        if (dtb_get_compat_reg_n(gicv2_compats[i], 0, &gic_pa, &gic_size)) {
+            reserve_kernel_range(gic_pa, (size_t)gic_size, "gic-v2 dist");
+        }
+        if (dtb_get_compat_reg_n(gicv2_compats[i], 1, &gic_pa, &gic_size)) {
+            reserve_kernel_range(gic_pa, (size_t)gic_size, "gic-v2 cpu-iface");
+        }
     }
 
     // PL011 UART: kernel diagnostic console. A userspace driver could

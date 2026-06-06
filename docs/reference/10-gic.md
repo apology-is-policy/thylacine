@@ -1,8 +1,8 @@
-# 10 — GIC v3 driver (as-built reference)
+# 10 — GIC v2 + v3 driver (as-built reference)
 
-The kernel's interrupt controller driver. Detects ARM Generic Interrupt Controller version from DTB ("arm,gic-v3" → live; "arm,cortex-a15-gic" / "arm,gic-400" → extinctions cleanly), brings up the distributor + redistributor + system-register CPU interface, exposes IRQ enable / disable / acknowledge / EOI, and dispatches INTIDs to registered handlers.
+The kernel's interrupt controller driver. Detects ARM Generic Interrupt Controller version from DTB ("arm,gic-v3" → v3; "arm,cortex-a15-gic" / "arm,gic-400" → v2; both live), brings up the distributor + (v3) redistributor + system-register CPU interface OR (v2) the GICC MMIO CPU interface + banked SGI/PPI, exposes IRQ enable / disable / acknowledge / EOI, and dispatches INTIDs to registered handlers.
 
-P1-G deliverable. The first IRQ source wired through is the ARM generic timer (PPI 14 → INTID 30; see `docs/reference/11-timer.md`).
+P1-G deliverable (v3); **the GICv2 path landed at Lazarus W2** (`PORTABILITY.md §5`) -- the HVF-on-Apple enabler. The first IRQ source wired through is the ARM generic timer (virtual timer PPI 11 → INTID 27 since Lazarus W2; see `docs/reference/11-timer.md`).
 
 Scope: `arch/arm64/gic.{h,c}`, the IRQ slot in `arch/arm64/vectors.S` (P1-G repoint), `arch/arm64/exception.c`'s `exception_irq_curr_el`, `kernel/main.c`'s `gic_init` slot in `boot_main`, banner updates.
 
@@ -18,7 +18,7 @@ Until P1-G, the kernel's IRQ vector slot routed to `exception_unexpected` — an
 - Receive device IRQs (PL011 IRQ-driven TX, virtio devices) — though P1-G wires only the timer; UART IRQ-driven mode is post-v1.0.
 - Send inter-processor interrupts (SGIs) — Phase 2 with SMP.
 
-GICv3-only at P1-G. ARCH §12 commits to v2/v3 autodetect at v1.0; the autodetect mechanism IS implemented (DTB compat probe), but the v2 path extinctions cleanly with a deferred-to-future-chunk diagnostic. Rationale in [Caveats](#caveats).
+Both v2 and v3 are live (DTB compat probe selects). v3 was the P1-G deliverable; **the GICv2 path landed at Lazarus W2** because the v2 MMIO CPU interface (GICC) is what lets the kernel run under HVF on Apple Silicon -- the GICv3 distributor MMIO trips a QEMU/HVF `isv=0` assertion that the MMIO CPU interface + a `dsb`-between-accesses mitigation sidestep. v2 is also the Pi 4 / GIC-400 target. See [The GICv2 path](#the-gicv2-path-lazarus-w2).
 
 ---
 
@@ -61,7 +61,7 @@ void gic_eoi(u32 intid);
 void gic_dispatch(u32 intid);   // called by exception_irq_curr_el
 ```
 
-`gic_init` is one-time — autodetects version, maps MMIO, brings up distributor + this CPU's redistributor + CPU interface. Must run after `dtb_init` and `exception_init` (so unexpected IRQs during bring-up route through the vector table cleanly). Returns `true` on success; on detection failure or v2 detection, it `extinction`s.
+`gic_init` is one-time — autodetects version, maps MMIO, brings up the distributor + (v3) this CPU's redistributor / (v2) its banked SGI/PPI, + the CPU interface (v3 system registers / v2 GICC MMIO). Must run after `dtb_init` and `exception_init` (so unexpected IRQs during bring-up route through the vector table cleanly). Returns `true` on success; extincts only on a malformed DTB GIC node or vmalloc exhaustion mapping the MMIO.
 
 `gic_attach(intid, handler, arg)` registers `handler` for `intid`. The handler runs in IRQ context (PSTATE.I masked) on the existing SP_EL1; it must complete in bounded time and must not block. Replacing an existing handler is allowed (no return slot for the previous handler at v1.0; if the caller needs to chain, they cache the previous from elsewhere).
 
@@ -88,23 +88,42 @@ dtb_init                 (boot_main step 1)
 exception_init           (boot_main step 4)
 gic_init:                (boot_main step 5)
    detect_version_from_dtb
-   if v2: extinction (deferred path)
+   if v2:                          (gic_init_v2, Lazarus W2)
+      dist_base = dtb_get_compat_reg_n(<v2 compat>, 0)   // GICD
+      cpu_base  = dtb_get_compat_reg_n(<v2 compat>, 1)   // GICC
+      mmu_map_mmio(dist_base); mmu_map_mmio(cpu_base)
+      dist_init_v2                 (one-time, CPU 0; GICD_CTLR/SPI config)
+      gic_cpu_config_v2            (per-CPU, banked SGI/PPI in GICD low region)
+      cpu_iface_init_v2            (per-CPU, GICC PMR/BPR/CTLR)
+      return true
    if v3:
       dist_base, dist_size  = dtb_get_compat_reg_n("arm,gic-v3", 0)
       redist_base, redist_size = dtb_get_compat_reg_n("arm,gic-v3", 1)
-      mmu_map_device(dist_base, dist_size)
-      mmu_map_device(redist_base, redist_size)
+      mmu_map_mmio(dist_base); mmu_map_mmio(redist_base)
       dist_init                   (one-time, CPU 0)
       redist_init_cpu0            (per-CPU, banked SGI/PPI)
       cpu_iface_init              (per-CPU, system regs)
    return true
 timer_init(1000)
-gic_attach(INTID 30, timer_irq_handler, NULL)
-gic_enable_irq(INTID 30)
+gic_attach(INTID 27, timer_irq_handler, NULL)   // virtual timer PPI 11
+gic_enable_irq(INTID 27)
 msr daifclr, #2          (PSTATE.I = 0)
 ```
 
 After this sequence the timer fires at 1000 Hz and `exception_irq_curr_el` dispatches each interrupt to `timer_irq_handler`.
+
+### The GICv2 path (Lazarus W2)
+
+`PORTABILITY.md §5`. v2 differs from v3 in four register surfaces; the public API (`gic_acknowledge` / `gic_eoi` / `gic_send_ipi` / `gic_enable_irq` / `gic_disable_irq` / `gic_init_secondary`) is unchanged -- each branches on `g_version`.
+
+- **CPU interface = GICC MMIO** (DTB reg[1]), not the `ICC_*` system registers. `gic_acknowledge` reads `GICC_IAR`, `gic_eoi` writes `GICC_EOIR`. The GICv2 SGI subtlety (ARM IHI 0048B §4.4.5): `GICC_IAR` carries the **source CPUID** in bits[12:10] for an SGI, and `GICC_EOIR` must echo it back. The raw IAR is saved per-CPU in `g_v2_eoi_token[]` at acknowledge and replayed at EOI. There is exactly one in-flight IAR per CPU (handlers run PSTATE.I-masked -- no nesting), and each CPU writes only its own slot, so there is no cross-CPU race. A spurious acknowledge (INTID ≥ 1020) leaves a stale token that the next acknowledge overwrites before any EOI consumes it.
+- **SGI/PPI live in the distributor's per-CPU-banked low region** (INTID 0..31), not a redistributor. `gic_cpu_config_v2` + `cpu_iface_init_v2` run on each CPU for its own bank; `gic_enable_irq`/`gic_disable_irq` route both SGI/PPI and SPI through `GICD_ISENABLER(intid/32)` (the n=0 register is banked).
+- **IPI via `GICD_SGIR`**: TargetListFilter=0 + `1 << target` in the CPUTargetList byte + the SGI INTID. GICv2 caps at 8 CPUs (the target is double-bounded by `smp_cpu_count()` and 7).
+- **SPI routing via `GICD_ITARGETSR`** (8-bit per-INTID CPU bitmask) -- `dist_init_v2` routes every SPI to CPU 0 (0x01), the v2 analog of v3's `GICD_IROUTER<n>=0`.
+
+**HVF-MMIO mitigation.** `v2_w32`/`v2_r32`/`v2_w8` issue a `dsb sy` after every GIC access. Under QEMU/HVF on Apple Silicon, rapid back-to-back GIC MMIO can trap with `ESR.ISV=0` (no instruction syndrome), which QEMU cannot decode and asserts on; the barrier paces the trap rate so the access is decodable. Device-nGnRnE memory is already strongly ordered architecturally, so the barrier is for the emulator, not for correctness on silicon. Confined to the v2 path; v3 keeps the plain accessors. **Empirically validated under HVF on M-series** (`gic_init`, the timer, IRQ delivery, and the full kernel boot run clean under `-accel hvf -machine virt,gic-version=2`).
+
+**No IGROUPR.** QEMU virt's gic-version=2 presents no security extensions, so there is a single interrupt group and `GICD_IGROUPR` is RAZ/WI -- `dist_init_v2` leaves it untouched (matching Linux's gic-v2 driver). A security-ext GIC-400 accessed from the non-secure world is a W4 (Pi 4) concern.
 
 ### Distributor init (`dist_init`, one-time)
 
@@ -256,7 +275,7 @@ P1-I will add a sanitizer matrix run that exercises the IRQ path under ASan / UB
 | Condition | Behavior |
 |---|---|
 | DTB has no GIC compat string | `gic_init` extinctions: `"gic_init: no GIC compat in DTB ..."` |
-| DTB advertises v2 (`arm,cortex-a15-gic` / `arm,gic-400`) | `gic_init` extinctions: `"gic_init: GICv2 detected; v2 path deferred ..."` |
+| DTB advertises v2 (`arm,cortex-a15-gic` / `arm,gic-400`) | `gic_init_v2` runs (Lazarus W2); extincts only if the v2 node lacks reg[0] (GICD) or reg[1] (GICC), or the MMIO map fails |
 | DTB advertises v3 but `reg[0]` (distributor) absent | `gic_init` extinctions: `"gic_init: DTB arm,gic-v3 has no reg[0] (distributor)"` |
 | DTB advertises v3 but `reg[1]` (redistributor) absent | `gic_init` extinctions: `"gic_init: DTB arm,gic-v3 has no reg[1] (redistributor)"` |
 | MMIO region above 4 GiB (Pi 5) | `gic_init` extinctions: `"gic_init: mmu_map_device(...) failed (>4 GiB?)"` (deferred — TTBR0 extension at Pi 5 port) |
@@ -299,9 +318,12 @@ VISION §4.5's IRQ-to-userspace handler p99 budget is < 5 µs. Kernel-internal I
 - `mmu_map_device` integration: GIC distributor + redistributor mapped Device-nGnRnE in TTBR0 from DTB.
 - Tests: `gic.init_smoke` (autodetect + base addresses).
 
+**Landed at Lazarus W2** (`PORTABILITY.md §5`):
+
+- GICv2 path (distributor + GICC MMIO CPU interface + CPUID-preserving GICC ack/EOI + `GICD_SGIR` IPI + banked SGI/PPI). The HVF-on-Apple enabler -- empirically validated under `-accel hvf -machine virt,gic-version=2`. Owed: #890 (the userspace virtio-mmio driver trips the same `isv` assert under HVF -- a different layer).
+
 **Not yet implemented**:
 
-- GICv2 path (distributor + MMIO CPU interface + GICC ack/EOI). Deferred until there's a Pi 4 / similar testbed.
 - SMP redistributor walk for secondary CPUs. Phase 2 with thread machinery.
 - SGI (inter-processor interrupt) generation via ICC_SGI1R_EL1. Phase 2 scheduler.
 - Per-IRQ priority hierarchy. Post-v1.0 hardening.
@@ -321,15 +343,9 @@ VISION §4.5's IRQ-to-userspace handler p99 budget is < 5 µs. Kernel-internal I
 
 ## Caveats
 
-### v2 detection extincts; doesn't run
+### v2 vs v3 ABI deltas (both live)
 
-ARCH §12 commits to v2/v3 autodetect. The autodetect mechanism IS in place — `gic_init` probes `arm,gic-v3`, then `arm,cortex-a15-gic` / `arm,gic-400`. v2 is NOT implemented at v1.0 because:
-
-1. No test target. QEMU virt with `tools/run-vm.sh` defaults to `gic-version=3`. Pi 5 ships GICv3.
-2. v2 is a different ABI: distributor + MMIO CPU interface (vs system-register on v3); GICC_IAR / GICC_EOIR (vs ICC_IAR1_EL1 / ICC_EOIR1_EL1); different end-of-interrupt semantics.
-3. Implementing untested code risks silent regression. The v2 path lands cleanly when there's a Pi 4 (or older board) testbed driving it.
-
-The autodetect commitment is preserved by extinguishing cleanly with a deferred-to-future-chunk diagnostic, rather than running untested code on misconfigured hardware. The user-facing experience is "this kernel doesn't run on v2-only hardware yet" — which is honest. v3-on-v2 silent run would be much worse.
+ARCH §12 commits to v2/v3 autodetect; both are now implemented. `gic_init` probes `arm,gic-v3`, then `arm,gic-400` / `arm,cortex-a15-gic`. The v2 ABI deltas the driver handles (see [The GICv2 path](#the-gicv2-path-lazarus-w2)): the CPU interface is GICC MMIO (`GICC_IAR`/`GICC_EOIR`) vs v3's `ICC_IAR1_EL1`/`ICC_EOIR1_EL1`; SGI/PPI are in the distributor's banked low region vs a redistributor; IPIs go through `GICD_SGIR` vs `ICC_SGI1R_EL1`; and the GICC EOI must echo the SGI source CPUID. The default + CI run on `gic-version=3` (`tools/run-vm.sh`); `THYLACINE_GIC=2` exercises v2, and `THYLACINE_ACCEL=hvf THYLACINE_GIC=2` is the HVF dev loop the v2 path was built to enable.
 
 ### Pi 5 GIC at PA > 4 GiB needs TTBR0 extension
 
@@ -373,7 +389,7 @@ We use group 1 non-secure exclusively. Group 0 (secure) and group 1 secure are n
 - `docs/reference/03-mmu.md` — `mmu_map_device` API used to map GIC regions Device-nGnRnE.
 - `docs/reference/02-dtb.md` — `dtb_get_compat_reg_n`, `dtb_has_compat` used for autodetect + region discovery.
 - `docs/reference/08-exception.md` — `exception_irq_curr_el` calls into `gic_dispatch`; `.Lexception_return` trampoline.
-- `docs/reference/11-timer.md` — first IRQ source wired through (PPI 14 → INTID 30).
+- `docs/reference/11-timer.md` — first IRQ source wired through (virtual timer PPI 11 → INTID 27 since Lazarus W2).
 - `docs/ARCHITECTURE.md §12.3` — design intent for the GIC autodetect commitment.
 - ARM IHI 0069 (current rev H.b) — GICv3 + GICv4 architecture specification.
 - Linux `drivers/irqchip/irq-gic-v3.c` — reference implementation; we reference its register map but not its code.

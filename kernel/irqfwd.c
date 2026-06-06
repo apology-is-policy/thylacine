@@ -27,7 +27,7 @@
 #include <thylacine/smp.h>                  // IPI_RESCHED (P4-Ib R9 F142)
 
 #include "../arch/arm64/gic.h"
-#include "../arch/arm64/timer.h"            // TIMER_INTID_EL1_PHYS_NS
+#include "../arch/arm64/timer.h"            // TIMER_INTID_EL1_VIRT
 #include "../arch/arm64/uart.h"
 #include "../mm/slub.h"
 
@@ -88,7 +88,7 @@ static void intid_release(u32 intid) {
 // R9 F142 (P0) close: reserve INTIDs owned by kernel-internal callers
 // that bypass kobj_irq_create + the intid_try_claim guard. At v1.0:
 //   - SGI 0 (IPI_RESCHED): cross-CPU wake; attached at smp_per_cpu_main.
-//   - PPI 30 (TIMER_INTID_EL1_PHYS_NS): timer tick; attached at
+//   - PPI 27 (TIMER_INTID_EL1_VIRT): timer tick; attached at
 //     boot_main via gic_attach directly.
 // Without reservation, a syscall caller with CAP_HW_CREATE could pass
 // either INTID to SYS_IRQ_CREATE and overwrite the kernel's handler.
@@ -99,14 +99,14 @@ static void intid_release(u32 intid) {
 void irqfwd_init(void) {
     irq_state_t s = spin_lock_irqsave(&g_intid_lock);
     g_intid_claimed[IPI_RESCHED]             = true;     // SGI 0
-    g_intid_claimed[TIMER_INTID_EL1_PHYS_NS] = true;     // PPI 30
+    g_intid_claimed[TIMER_INTID_EL1_VIRT]    = true;     // PPI 27 (virtual timer)
     g_intid_claimed[UART_INTID_PL011]        = true;     // A-4c-1: kernel cons RX
     spin_unlock_irqrestore(&g_intid_lock, s);
 
     uart_puts("irqfwd: reserved kernel INTIDs ");
     uart_putdec((u64)IPI_RESCHED);
     uart_puts(",");
-    uart_putdec((u64)TIMER_INTID_EL1_PHYS_NS);
+    uart_putdec((u64)TIMER_INTID_EL1_VIRT);
     uart_puts(",");
     uart_putdec((u64)UART_INTID_PL011);
     uart_puts("\n");

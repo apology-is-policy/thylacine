@@ -16,7 +16,7 @@
 //   3. This child calls t_irq_create(96, T_RIGHT_SIGNAL) — the
 //      gic_enable_irq inside causes the pending IRQ to deliver
 //      immediately on CPU 0.
-//   4. Loop: t_irq_wait → read CNTPCT_EL0 → store user_ts[i] →
+//   4. Loop: t_irq_wait → read CNTVCT_EL0 → store user_ts[i] →
 //      bump completed. Kernel side polls `completed` to drive the
 //      next iteration's gic_set_pending_spi.
 //   5. After all iterations, exit cleanly.
@@ -25,15 +25,13 @@
 //      deltas against kernel_t_arm[i] (captured around each
 //      gic_set_pending_spi call), sorts, reports p50/p99/max.
 //
-// CNTPCT_EL0 access from EL0 is gated by CNTKCTL_EL1.EL0PCTEN; the
+// CNTVCT_EL0 access from EL0 is gated by CNTKCTL_EL1.EL0VCTEN; the
 // kernel sets this bit on every CPU at bringup (boot_main +
 // per_cpu_main → timer_enable_el0_counter_access). Without the bit,
-// this binary would take a Sync EC=0x18 (Trapped MSR/MRS).
-//
-// Both CPUs read the SAME architectural counter — CNTPCT_EL0 is a
-// system-global register on AArch64 (ARM ARM D11.1), so kernel-side
-// timer_get_counter and userspace-side cntpct_el0 reads are directly
-// comparable regardless of CPU affinity.
+// this binary would take a Sync EC=0x18 (Trapped MSR/MRS). We read the
+// VIRTUAL counter to share the kernel's virtual-timer timebase (Lazarus
+// W2); the kernel's timer_get_counter likewise reads CNTVCT_EL0, so the
+// deltas line up on every substrate (incl. HVF, where CNTVOFF != 0).
 //
 // The kernel side does NOT read user_ts[i] iteration-by-iteration —
 // only `completed` is polled. The user_ts array is read in bulk after
@@ -73,12 +71,12 @@ const OFF_USER_TS:   u64 = 32;
 const N_MAX: u64 = 1020;
 
 #[inline(always)]
-fn read_cntpct() -> u64 {
+fn read_cntvct() -> u64 {
     let v: u64;
     unsafe {
         core::arch::asm!(
             "isb",
-            "mrs {0}, cntpct_el0",
+            "mrs {0}, cntvct_el0",
             out(reg) v,
             options(nomem, nostack, preserves_flags),
         );
@@ -131,7 +129,7 @@ pub extern "C" fn rs_main() -> i64 {
             }
         }
 
-        let ts = read_cntpct();
+        let ts = read_cntvct();
         let ts_va = SHARED_USER_VA + OFF_USER_TS + i * 8;
         unsafe { write_u64(ts_va, ts); }
 

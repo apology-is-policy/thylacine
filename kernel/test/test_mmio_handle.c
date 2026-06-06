@@ -17,6 +17,7 @@
 #include <thylacine/page.h>
 #include <thylacine/types.h>
 
+#include "../../arch/arm64/gic.h"
 #include "../../arch/arm64/uart.h"
 
 void test_mmio_handle_create_basic(void);
@@ -134,12 +135,22 @@ void test_mmio_handle_create_kernel_reserved_rejected(void) {
     TEST_ASSERT(k2 == NULL,
                 "kobj_mmio_create on PL011 UART PA must be rejected");
 
-    // Partial overlap with GIC redistributor — start of redist range
-    // is 0x080a0000. A create at 0x08090000 (NOT in redist) + size
-    // 0x20000 would overlap the redist start. Should be rejected.
-    struct KObj_MMIO *k3 = kobj_mmio_create(0x08090000ull, 0x20000ull);
-    TEST_ASSERT(k3 == NULL,
-                "kobj_mmio_create overlapping GIC redist must be rejected");
+    // CPU-side GIC region rejection. The region differs by GIC version:
+    //   - v3: the redistributor (start 0x080a0000 on QEMU virt). A create at
+    //     0x08090000 + 0x20000 starts OUTSIDE it but extends INTO it -- the
+    //     partial-overlap case R10 F154 is about.
+    //   - v2: the GICC CPU interface (the kernel's IRQ ack/EOI registers). A
+    //     create overlapping it must be rejected too, or a CAP_HW_CREATE
+    //     driver could scribble on kernel IRQ state -- same I-5 hazard.
+    if (gic_version() == GIC_VERSION_V2) {
+        struct KObj_MMIO *k3 = kobj_mmio_create(gic_cpu_iface_pa(), PAGE_SIZE);
+        TEST_ASSERT(k3 == NULL,
+                    "kobj_mmio_create on GICv2 cpu-interface PA must be rejected");
+    } else {
+        struct KObj_MMIO *k3 = kobj_mmio_create(0x08090000ull, 0x20000ull);
+        TEST_ASSERT(k3 == NULL,
+                    "kobj_mmio_create overlapping GIC redist must be rejected");
+    }
 }
 
 // P4-Ic5b1a refinement of R10 F154: virtio-mmio slots are NOT in the

@@ -465,12 +465,12 @@ void per_cpu_main(int cpu_idx) {
     // quiescent (no self-wake, no work-stealing) during the deterministic test
     // phase, while production gets the preemptive tick on every CPU (I-8/I-17).
     // The timer + PPI registers are per-CPU banked, so each secondary must arm
-    // its own (gic_enable_irq enables INTID 30 on THIS CPU's redistributor).
+    // its own (gic_enable_irq enables INTID 27 on THIS CPU's redistributor).
     bool timer_armed = false;
     for (;;) {
         if (!timer_armed &&
             __atomic_load_n(&g_secondary_preempt_enabled, __ATOMIC_ACQUIRE)) {
-            if (!gic_enable_irq(TIMER_INTID_EL1_PHYS_NS))
+            if (!gic_enable_irq(TIMER_INTID_EL1_VIRT))
                 extinction("per_cpu_main: gic_enable_irq(timer PPI) failed");
             timer_arm_this_cpu();
             timer_armed = true;
