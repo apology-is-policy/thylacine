@@ -260,14 +260,21 @@ refcount 0) before taking each op's `c->lock` via `p9_client_abandon_async`.
 
 ### SYS_LOOM_ENTER: dispatch + the submit-time pin + the async-op lifetime (Loom-3)
 
-`loom_enter` (`kernel/loom.c`) is the batch-enter core. **Submit phase**: it
-reads the user-owned `sq_tail` (advisory — bounded, never trusted for indexing),
-then for each of up to `to_submit` slots reads the SQ-index ring at the
-**kernel-private** `sq_head & (sq_entries-1)` (the SA-1 discipline on the SQ
-side), range-checks the user-written indirection (`>= sq_entries` → bump
-`dropped`, never index `sqes[]`), and **copies the whole SQE to a kernel-local
-`struct loom_sqe`** (ring TOCTOU, §6.1) before acting only on the copy.
-`loom_submit_one` dispatches the copy:
+`loom_enter` (`kernel/loom.c`) is the batch-enter core. **Submit phase**: for
+each of up to `min(to_submit, sq_entries)` slots, **under `l->lock`** it reads
+the user-owned `sq_tail` (advisory; `sq_tail == sq_head` → drained → stop),
+applies **submit-time CQ admission** (`loom_cq_ready(l) + async_inflight >=
+cq_entries` → stop, leaving the SQE for the next enter — io_uring's model, so a
+non-reaping consumer back-pressures here instead of dropping a completion at post
+time; F2 / I-29), claims one slot by reading + advancing the **kernel-private**
+`sq_head & (sq_entries-1)` (the SA-1 discipline on the SQ side — the per-iteration
+`l->lock` also serializes two concurrent enters so neither double-dispatches a
+slot nor loses an `sq_head` update; F1), range-checks the user-written
+indirection (`>= sq_entries` → bump `dropped`, never index `sqes[]`), and
+**copies the whole SQE to a kernel-local `struct loom_sqe`** (ring TOCTOU, §6.1).
+Then — **outside** the lock — `loom_submit_one` dispatches the copy (it re-takes
+`l->lock` for the FSYNC pin + the in-flight link, a separate non-nested
+acquisition):
 
 - **`LOOM_OP_NOP`** — completes inline (`loom_post_cqe` result 0); no engine, no
   handle.

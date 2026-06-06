@@ -163,9 +163,18 @@ static void loom_free(struct Loom *l) {
     // this loop), then this abandon sees the slot cleared -- no double, no stale,
     // no UAF (the loom is alive throughout; I-29). The pin is released + the
     // container freed only after abandon severs the engine link.
+    //
+    // F3: snapshot + clear the list under l->lock. refcount is 0 so this Loom's
+    // lock is uncontended for any SUBMIT/REAP (those only run inside a live enter,
+    // which holds a ref), but the lock SERIALIZES against a concurrent
+    // loom_async_complete on a SHARED client (which mutates async_inflight + posts
+    // a CQE under l->lock) -- removing the data race the lock-free clear would
+    // otherwise have on the shared-client path (it was UAF-safe but TSan-dirty).
+    spin_lock(&l->lock);
     struct loom_async_op *op = l->inflight_ops;
     l->inflight_ops = NULL;
     l->async_inflight = 0;
+    spin_unlock(&l->lock);
     while (op) {
         struct loom_async_op *next = op->next;
         p9_client_abandon_async(op->client, &op->rpc);
@@ -316,11 +325,12 @@ static int loom_build_fsync(struct p9_session *s, u8 *out, size_t cap, void *ctx
     return p9_session_send_fsync(s, out, cap, op->op_fid, op->op_arg);
 }
 
-// Post a terminal error CQE for an op that fails the submit-time gate (bad
-// opcode / handle / rights / OOM). The SQE was consumed; userspace learns the
-// failure via the CQE result, not a dropped SQE (io_uring semantics).
-static void loom_fail_cqe(struct Loom *l, u64 user_data, s32 err) {
-    (void)loom_post_cqe(l, user_data, err, 0);
+// Post a terminal CQE inline (no engine round-trip): the NOP success (result 0)
+// and every submit-time-gate failure (bad opcode / handle / rights / OOM ->
+// -errno). The SQE was consumed; userspace learns the result via the CQE, not a
+// dropped SQE (io_uring semantics).
+static void loom_complete_inline(struct Loom *l, u64 user_data, s32 result) {
+    (void)loom_post_cqe(l, user_data, result, 0);
 }
 
 // Dispatch ONE already-copied-to-kernel SQE (`sqe` is a kernel-private snapshot,
@@ -332,17 +342,17 @@ static void loom_submit_one(struct Loom *l, const struct loom_sqe *sqe) {
 
     // Reserved SQE flags (LINK / DRAIN / CQE_SKIP / MULTISHOT) land at Loom-5;
     // reject any set flag now so a future flag is never silently ignored.
-    if (sqe->flags != 0) { loom_fail_cqe(l, ud, -(s32)T_E_INVAL); return; }
+    if (sqe->flags != 0) { loom_complete_inline(l, ud, -(s32)T_E_INVAL); return; }
 
     switch (sqe->opcode) {
     case LOOM_OP_NOP:
         // The io_uring smoke op: completes immediately, no engine, no handle.
-        loom_fail_cqe(l, ud, 0);
+        loom_complete_inline(l, ud, 0);
         return;
 
     case LOOM_OP_FSYNC: {
         if (sqe->handle_idx >= LOOM_MAX_REG_HANDLES) {
-            loom_fail_cqe(l, ud, -(s32)T_E_INVAL);
+            loom_complete_inline(l, ud, -(s32)T_E_INVAL);
             return;
         }
         // Resolve + PIN the registered handle under l->lock so a concurrent
@@ -356,7 +366,7 @@ static void loom_submit_one(struct Loom *l, const struct loom_sqe *sqe) {
         if (sp) spoor_ref(sp);
         spin_unlock(&l->lock);
 
-        if (!sp) { loom_fail_cqe(l, ud, -(s32)T_E_BADF); return; }   // empty slot
+        if (!sp) { loom_complete_inline(l, ud, -(s32)T_E_BADF); return; }   // empty slot
         // Submit-time rights gate (I-2 / I-6; the spec's reg in AllowedObjs).
         // Fsync is a durability barrier on written data, so it requires the
         // handle to have been opened for write (RIGHT_WRITE, omode-derived at
@@ -364,7 +374,7 @@ static void loom_submit_one(struct Loom *l, const struct loom_sqe *sqe) {
         // re-checked at completion (I-30).
         if (!(rt & RIGHT_WRITE)) {
             spoor_clunk(sp);
-            loom_fail_cqe(l, ud, -(s32)T_E_ACCES);
+            loom_complete_inline(l, ud, -(s32)T_E_ACCES);
             return;
         }
         struct p9_client *cl; u32 fid;
@@ -372,11 +382,11 @@ static void loom_submit_one(struct Loom *l, const struct loom_sqe *sqe) {
             // Not a dev9p-backed Spoor (devsrv conn / devramfs / ...): no 9P
             // engine to dispatch against.
             spoor_clunk(sp);
-            loom_fail_cqe(l, ud, -(s32)T_E_INVAL);
+            loom_complete_inline(l, ud, -(s32)T_E_INVAL);
             return;
         }
         struct loom_async_op *op = kmalloc(sizeof(*op), KP_ZERO);
-        if (!op) { spoor_clunk(sp); loom_fail_cqe(l, ud, -(s32)T_E_NOMEM); return; }
+        if (!op) { spoor_clunk(sp); loom_complete_inline(l, ud, -(s32)T_E_NOMEM); return; }
         op->loom        = l;
         op->client      = cl;
         op->pinned      = sp;               // adopt the pin ref
@@ -408,9 +418,9 @@ static void loom_submit_one(struct Loom *l, const struct loom_sqe *sqe) {
         // (LOOM.md 10), so they post -ENOSYS until then. WIRE_PASSTHROUGH stays
         // reserved (LOOM.md 7). Out-of-range opcodes are -EINVAL.
         if (sqe->opcode < LOOM_OP_COUNT)
-            loom_fail_cqe(l, ud, -(s32)T_E_NOSYS);
+            loom_complete_inline(l, ud, -(s32)T_E_NOSYS);
         else
-            loom_fail_cqe(l, ud, -(s32)T_E_INVAL);
+            loom_complete_inline(l, ud, -(s32)T_E_INVAL);
         return;
     }
 }
@@ -482,34 +492,62 @@ int loom_enter(struct Loom *l, u32 to_submit, u32 min_complete, u32 flags) {
     // it for indexing. The consume position is the kernel-private sq_head; the
     // SQ-index ring slot it points at is user-written, so it is range-checked
     // before it indexes the SQE array (the SA-1 discipline on the SQ side).
-    u32 sq_tail = __atomic_load_n(&h->sq_tail, __ATOMIC_ACQUIRE);
-    u32 avail = sq_tail - l->sq_head;                  // free-running u32 diff
-    if (avail > l->sq_entries) avail = l->sq_entries;  // clamp a hostile sq_tail
-    u32 n = (to_submit < avail) ? to_submit : avail;
+    //
+    // F1: each per-slot claim (the sq_head read + advance + the SQE read+copy)
+    // runs under l->lock so two concurrent SYS_LOOM_ENTERs on the same ring (a
+    // multi-thread Proc) never read the same sq_head -> never double-dispatch a
+    // slot or lose an sq_head update; each iteration atomically claims exactly one
+    // slot. loom_submit_one runs OUTSIDE the lock (it re-takes l->lock for the
+    // FSYNC pin + the inflight link -- a separate, non-nested acquisition).
+    u32 budget = (to_submit < l->sq_entries) ? to_submit : l->sq_entries;  // bound a hostile to_submit
     u32 submitted = 0;
-    for (u32 i = 0; i < n; i++) {
+    for (u32 i = 0; i < budget; i++) {
+        struct loom_sqe ksqe;
+        bool have;
+        spin_lock(&l->lock);
+        u32 sq_tail = __atomic_load_n(&h->sq_tail, __ATOMIC_ACQUIRE);
+        if (sq_tail == l->sq_head) { spin_unlock(&l->lock); break; }   // drained
+        // F2 / I-29 submit-time CQ admission (io_uring's model): consume an SQE
+        // only when the CQ can still hold one more completion beyond every
+        // already-posted-unreaped CQE AND every in-flight op's eventual CQE. This
+        // makes loom_post_cqe's full-CQ drop unreachable for a single consumer
+        // (then `overflow` is the pure diagnostic the comment promises); a
+        // non-reaping user back-pressures HERE (the SQE waits for the next enter)
+        // instead of losing a completion. (Concurrent enters can over-admit by at
+        // most a few -- async_inflight is bumped in loom_submit_one after this
+        // lock drops -- and loom_post_cqe's CqNeverOverfull guard is the backstop;
+        // exact concurrent admission is the Loom-4 coordination.)
+        if (loom_cq_ready(l) + l->async_inflight >= l->cq_entries) {
+            spin_unlock(&l->lock);
+            break;
+        }
         u32 ring_pos = l->sq_head & (l->sq_entries - 1u);   // kernel-private mask
         l->sq_head++;
+        __atomic_store_n(&h->sq_head, l->sq_head, __ATOMIC_RELEASE);   // publish (user-readable mirror)
         u32 sqe_idx = __atomic_load_n(&sq_array[ring_pos], __ATOMIC_ACQUIRE);
-        if (sqe_idx >= l->sq_entries) {
-            // Out-of-range indirection: drop it (diagnostic), do not index sqes[].
-            __atomic_store_n(&h->dropped, h->dropped + 1u, __ATOMIC_RELEASE);
-            continue;
-        }
-        struct loom_sqe ksqe = sqes[sqe_idx];   // COPY to kernel memory (TOCTOU)
+        have = (sqe_idx < l->sq_entries);
+        if (have) ksqe = sqes[sqe_idx];                     // COPY to kernel memory (TOCTOU)
+        else __atomic_store_n(&h->dropped, h->dropped + 1u, __ATOMIC_RELEASE);
+        spin_unlock(&l->lock);
+        if (!have) continue;                                // bad indirection -> dropped
         loom_submit_one(l, &ksqe);
         submitted++;
     }
-    __atomic_store_n(&h->sq_head, l->sq_head, __ATOMIC_RELEASE);   // publish (user-readable mirror)
 
     // --- WAIT / REAP phase. Drive the elected reader until min_complete CQEs are
     // posted or no completion can arrive. The blocking wait IS the reader's recv
     // (death-interruptible, #811) -- no separate wait primitive. A concurrent
     // SYS_LOOM_ENTER on the same ring whose pump finds another reader active
     // returns what is posted; the full multi-waiter coordination is Loom-4
-    // (SQPOLL). ---
+    // (SQPOLL). F4: cap the pumps per enter so a buggy/hostile server flooding
+    // ownerless frames (each makes reader_pump_once return 1 without completing
+    // our op) cannot spin a CPU unbounded inside one syscall -- a trusted v1.0
+    // server (stratumd / dev9p) completes within a frame per in-flight op, so the
+    // generous cap is never the limiter; an untrusted server is bounded + the
+    // wait is death-interruptible regardless. ---
     if (min_complete > 0 && !(flags & LOOM_ENTER_NONBLOCK)) {
-        for (;;) {
+        u32 pump_budget = (u32)submitted + (u32)P9_SESSION_MAX_OUTSTANDING + 1u;
+        for (u32 pumps = 0; pumps < pump_budget; pumps++) {
             if (loom_cq_ready(l) >= min_complete) break;
             struct p9_client *cl = loom_first_inflight_client(l);
             if (!cl) break;                              // nothing in flight -> no more CQEs

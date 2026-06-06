@@ -210,6 +210,7 @@ void test_loom_dup_rejected(void);
 void test_loom_enter_nop(void);
 void test_loom_enter_submit_rejects(void);
 void test_loom_enter_flags_and_bad_index(void);
+void test_loom_enter_cq_admission_backpressure(void);
 void test_thread_create_user_ctx_layout(void);
 void test_thread_exit_self_marks_exiting(void);
 void test_thread_exit_self_last_thread_zombies(void);
@@ -1044,6 +1045,7 @@ struct test_case g_tests[] = {
     { "loom.enter_nop",                  test_loom_enter_nop,                  false, NULL },
     { "loom.enter_submit_rejects",       test_loom_enter_submit_rejects,       false, NULL },
     { "loom.enter_flags_and_bad_index",  test_loom_enter_flags_and_bad_index,  false, NULL },
+    { "loom.enter_cq_admission_backpressure", test_loom_enter_cq_admission_backpressure, false, NULL },
     { "thread.create_user_ctx_layout",         test_thread_create_user_ctx_layout,         false, NULL },
     { "thread.exit_self_marks_exiting",        test_thread_exit_self_marks_exiting,        false, NULL },
     { "thread.exit_self_last_thread_zombies",  test_thread_exit_self_last_thread_zombies,  false, NULL },

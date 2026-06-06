@@ -36,6 +36,7 @@ void test_loom_dup_rejected(void);
 void test_loom_enter_nop(void);
 void test_loom_enter_submit_rejects(void);
 void test_loom_enter_flags_and_bad_index(void);
+void test_loom_enter_cq_admission_backpressure(void);
 
 // The testable syscall inners live in kernel/syscall.c (declared in loom.h);
 // sys_pipe_for_proc is the KOBJ_SPOOR-pair maker (declared nowhere public --
@@ -456,6 +457,46 @@ void test_loom_enter_flags_and_bad_index(void) {
     TEST_EXPECT_EQ((u64)l->cq_tail, (u64)1, "one CQE (the reserved-flag reject)");
     TEST_EXPECT_EQ((u64)(s64)cqes[0].result, (u64)(s64)(-(s32)T_E_INVAL), "reserved flag -> -EINVAL");
     TEST_EXPECT_EQ((u64)h->sq_head, (u64)2, "sq_head consumed both ring slots");
+
+    loom_unref(l);
+}
+
+// F2 regression: submit-time CQ admission back-pressures (never silently drops a
+// completion -- I-29). Fill the CQ via inline NOPs without reaping; a further
+// enter with work available must consume 0 (admission blocks) and NOT bump
+// overflow; after reaping, a re-enter consumes again. Maps to specs/loom.tla's
+// "an admitted op always reaches a CQE" -- the impl back-pressures at submit
+// instead of dropping at completion.
+void test_loom_enter_cq_admission_backpressure(void) {
+    struct Loom *l = loom_create(4, 4);   // sq 4, cq 4 (cq == sq exercises the cap fast)
+    TEST_ASSERT(l != NULL, "loom_create(4,4)");
+    struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+
+    // Stage 4 NOPs (slots 0..3); enter consumes all 4 (cq_ready 0..3 < cq_entries
+    // 4 at each admission check) -> CQ now full (cq_ready == 4).
+    for (u32 i = 0; i < 4; i++) loom_stage_sqe(l, i, LOOM_OP_NOP, 0, 0, 0, 0x100u + i);
+    __atomic_store_n(&h->sq_tail, 4u, __ATOMIC_RELEASE);
+    int n1 = loom_enter(l, 4, 0, LOOM_ENTER_NONBLOCK);
+    TEST_EXPECT_EQ(n1, 4, "first enter consumes all 4 NOPs");
+    TEST_EXPECT_EQ((u64)l->cq_tail, (u64)4, "CQ full (4 CQEs)");
+    TEST_EXPECT_EQ((u64)h->overflow, (u64)0, "no overflow");
+
+    // More work available (re-bump sq_tail to 8, reusing the ring slots), but the
+    // CQ is full -> admission blocks BEFORE consuming -> 0 submitted, 0 dropped,
+    // 0 overflow (the completion is NOT lost -- the SQE waits for the next enter).
+    for (u32 i = 0; i < 4; i++) loom_stage_sqe(l, i, LOOM_OP_NOP, 0, 0, 0, 0x200u + i);
+    __atomic_store_n(&h->sq_tail, 8u, __ATOMIC_RELEASE);
+    int n2 = loom_enter(l, 4, 0, LOOM_ENTER_NONBLOCK);
+    TEST_EXPECT_EQ(n2, 0, "second enter consumes 0 (CQ-full admission back-pressure)");
+    TEST_EXPECT_EQ((u64)l->cq_tail, (u64)4, "cq_tail unchanged (no completion posted/dropped)");
+    TEST_EXPECT_EQ((u64)h->overflow, (u64)0, "no overflow -- back-pressured at submit, not dropped");
+    TEST_EXPECT_EQ((u64)h->sq_head, (u64)4, "sq_head unchanged (no SQE consumed)");
+
+    // Reap all 4 (advance cq_head) -> CQ drains -> a re-enter consumes the waiting 4.
+    __atomic_store_n(&h->cq_head, 4u, __ATOMIC_RELEASE);
+    int n3 = loom_enter(l, 4, 0, LOOM_ENTER_NONBLOCK);
+    TEST_EXPECT_EQ(n3, 4, "after reap, the waiting SQEs are consumed");
+    TEST_EXPECT_EQ((u64)h->overflow, (u64)0, "still no overflow across the whole sequence");
 
     loom_unref(l);
 }
