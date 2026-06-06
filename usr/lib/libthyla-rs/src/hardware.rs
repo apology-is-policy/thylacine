@@ -39,11 +39,13 @@
 // kernel/handle.c handle_acquire_obj); the type system makes the same
 // invariant visible at the Rust level by not providing the operation.
 //
-// Volatile MMIO accesses. `Mmio::read_u32` / `write_u32` use
-// `core::ptr::read_volatile` / `write_volatile` so the compiler does
-// not coalesce or reorder them. The kernel-installed PTE carries the
-// MAIR_IDX_DEVICE (nGnRnE) attribute so the hardware ALSO does not
-// reorder; both layers are needed.
+// MMIO accesses. `Mmio::read_u32` / `write_u32` funnel through the
+// ISV-safe `mmio_read32` / `mmio_write32` primitives (single-instruction
+// `ldr`/`str` via inline asm) so the compiler does not coalesce or
+// reorder them AND the emitted instruction is hypervisor-decodable
+// (ESR.ISV=1 -- see the primitives' note; #890). The kernel-installed
+// PTE carries the MAIR_IDX_DEVICE (nGnRnE) attribute so the hardware
+// ALSO does not reorder; all layers are needed.
 //
 // Bounds + alignment checks. read_u32 / write_u32 assert offset + 4
 // <= len AND offset % 4 == 0 at runtime; a misuse panics via
@@ -96,6 +98,125 @@ fn hw_error(rc: i64) -> Error {
     // typed wrapper picks up the right variant. Today the path below
     // is unreachable (every syscall returns either rc >= 0 or -1).
     Error::from_syscall_return(rc).err().unwrap_or(Error::Io)
+}
+
+// =============================================================================
+// ISV-safe device-MMIO primitives -- the single MMIO accessor in the tree.
+// =============================================================================
+//
+// Every device-MMIO access -- the typed `Mmio` methods below AND every
+// virtio-* driver's local register helpers -- funnels through these.
+// Each emits a single general-register, non-writeback, base-only
+// `ldr`/`str`; the register offset is pre-applied to `addr` in Rust, so
+// the instruction carries no displacement.
+//
+// WHY the inline asm rather than `read_volatile`/`write_volatile`: a
+// plain volatile access is functionally correct but lets LLVM choose the
+// addressing mode. When the `#[inline(always)]` driver helpers fold into
+// a caller that pokes several nearby registers off one base, LLVM emits
+// a PRE-INDEXED WRITEBACK (`str w, [x, #imm]!`) and unscaled `stur`/
+// `ldur`. On a stage-2 / MMIO abort the ARM ARM leaves ESR_EL1.ISS
+// UNKNOWN for those forms -- ESR_EL1.ISV (Instruction Syndrome Valid) is
+// 0 -- so a hypervisor cannot reconstruct the emulated access (size +
+// target register + direction) and QEMU's HVF backend `assert(isv)`s
+// (hvf.c). `read_volatile` constrains elision + ordering, NOT the
+// addressing mode, so the volatile contract holds while the instruction
+// is still undecodable. A bare `ldr/str {reg}, [{base}]` cannot become
+// writeback / pre-post-index / unscaled / paired / SIMD, so ISV is
+// always 1. (#890; PORTABILITY.md section 8.)
+//
+// Reads are deliberately NOT `readonly`/`pure`: a device read is
+// side-effecting (it can pop a FIFO or clear a latch). The default
+// memory-clobbering asm options preserve every volatile guarantee and
+// add a compiler barrier -- strictly stronger than `read_volatile`. The
+// `dsb`/`dmb` ordering barriers stay the caller's responsibility.
+
+/// Single-instruction 32-bit MMIO load (ISV=1). `addr` is the final VA.
+///
+/// # Safety
+/// `addr` must be a mapped, 4-byte-aligned device-MMIO address.
+#[inline]
+pub unsafe fn mmio_read32(addr: u64) -> u32 {
+    let v: u32;
+    core::arch::asm!("ldr {v:w}, [{a}]", v = out(reg) v, a = in(reg) addr,
+                     options(nostack, preserves_flags));
+    v
+}
+
+/// Single-instruction 32-bit MMIO store (ISV=1). `addr` is the final VA.
+///
+/// # Safety
+/// `addr` must be a mapped, 4-byte-aligned device-MMIO address.
+#[inline]
+pub unsafe fn mmio_write32(addr: u64, value: u32) {
+    core::arch::asm!("str {v:w}, [{a}]", v = in(reg) value, a = in(reg) addr,
+                     options(nostack, preserves_flags));
+}
+
+/// Single-instruction 16-bit MMIO load (ISV=1). `addr` is the final VA.
+///
+/// # Safety
+/// `addr` must be a mapped, 2-byte-aligned device-MMIO address.
+#[inline]
+pub unsafe fn mmio_read16(addr: u64) -> u16 {
+    let v: u32;
+    core::arch::asm!("ldrh {v:w}, [{a}]", v = out(reg) v, a = in(reg) addr,
+                     options(nostack, preserves_flags));
+    v as u16
+}
+
+/// Single-instruction 16-bit MMIO store (ISV=1). `addr` is the final VA.
+///
+/// # Safety
+/// `addr` must be a mapped, 2-byte-aligned device-MMIO address.
+#[inline]
+pub unsafe fn mmio_write16(addr: u64, value: u16) {
+    core::arch::asm!("strh {v:w}, [{a}]", v = in(reg) u32::from(value), a = in(reg) addr,
+                     options(nostack, preserves_flags));
+}
+
+/// Single-instruction 64-bit MMIO load (ISV=1). `addr` is the final VA.
+///
+/// # Safety
+/// `addr` must be a mapped, 8-byte-aligned device-MMIO address.
+#[inline]
+pub unsafe fn mmio_read64(addr: u64) -> u64 {
+    let v: u64;
+    core::arch::asm!("ldr {v:x}, [{a}]", v = out(reg) v, a = in(reg) addr,
+                     options(nostack, preserves_flags));
+    v
+}
+
+/// Single-instruction 64-bit MMIO store (ISV=1). `addr` is the final VA.
+///
+/// # Safety
+/// `addr` must be a mapped, 8-byte-aligned device-MMIO address.
+#[inline]
+pub unsafe fn mmio_write64(addr: u64, value: u64) {
+    core::arch::asm!("str {v:x}, [{a}]", v = in(reg) value, a = in(reg) addr,
+                     options(nostack, preserves_flags));
+}
+
+/// Single-instruction 8-bit MMIO load (ISV=1). `addr` is the final VA.
+///
+/// # Safety
+/// `addr` must be a mapped device-MMIO address.
+#[inline]
+pub unsafe fn mmio_read8(addr: u64) -> u8 {
+    let v: u32;
+    core::arch::asm!("ldrb {v:w}, [{a}]", v = out(reg) v, a = in(reg) addr,
+                     options(nostack, preserves_flags));
+    v as u8
+}
+
+/// Single-instruction 8-bit MMIO store (ISV=1). `addr` is the final VA.
+///
+/// # Safety
+/// `addr` must be a mapped device-MMIO address.
+#[inline]
+pub unsafe fn mmio_write8(addr: u64, value: u8) {
+    core::arch::asm!("strb {v:w}, [{a}]", v = in(reg) u32::from(value), a = in(reg) addr,
+                     options(nostack, preserves_flags));
 }
 
 // =============================================================================
@@ -221,7 +342,7 @@ impl Mmio {
         assert!(offset % 4 == 0, "Mmio::read_u32 misaligned");
         // SAFETY: bounds + alignment asserted above; base_va is a
         // valid mapped user VA per the constructor's invariant.
-        unsafe { core::ptr::read_volatile(self.base_va.add(offset) as *const u32) }
+        unsafe { mmio_read32(self.base_va.add(offset) as u64) }
     }
 
     /// Volatile 32-bit register write at `offset`.
@@ -234,7 +355,7 @@ impl Mmio {
         assert!(offset % 4 == 0, "Mmio::write_u32 misaligned");
         // SAFETY: bounds + alignment asserted above; base_va is a
         // valid mapped user VA per the constructor's invariant.
-        unsafe { core::ptr::write_volatile(self.base_va.add(offset) as *mut u32, value) }
+        unsafe { mmio_write32(self.base_va.add(offset) as u64, value) }
     }
 }
 

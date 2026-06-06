@@ -213,39 +213,25 @@ const MAX_EVENTS_TO_PROCESS: u32 = 32;
 // =============================================================================
 
 #[inline(always)]
-unsafe fn read32(addr: u64) -> u32 {
-    core::ptr::read_volatile(addr as *const u32)
-}
+unsafe fn read32(addr: u64) -> u32 { libthyla_rs::hardware::mmio_read32(addr) }
 
 #[inline(always)]
-unsafe fn write32(addr: u64, val: u32) {
-    core::ptr::write_volatile(addr as *mut u32, val)
-}
+unsafe fn write32(addr: u64, val: u32) { libthyla_rs::hardware::mmio_write32(addr, val) }
 
 #[inline(always)]
-unsafe fn read16(addr: u64) -> u16 {
-    core::ptr::read_volatile(addr as *const u16)
-}
+unsafe fn read16(addr: u64) -> u16 { libthyla_rs::hardware::mmio_read16(addr) }
 
 #[inline(always)]
-unsafe fn write16(addr: u64, val: u16) {
-    core::ptr::write_volatile(addr as *mut u16, val)
-}
+unsafe fn write16(addr: u64, val: u16) { libthyla_rs::hardware::mmio_write16(addr, val) }
 
 #[inline(always)]
-unsafe fn write64(addr: u64, val: u64) {
-    core::ptr::write_volatile(addr as *mut u64, val)
-}
+unsafe fn write64(addr: u64, val: u64) { libthyla_rs::hardware::mmio_write64(addr, val) }
 
 #[inline(always)]
-unsafe fn read_u8(addr: u64) -> u8 {
-    core::ptr::read_volatile(addr as *const u8)
-}
+unsafe fn read_u8(addr: u64) -> u8 { libthyla_rs::hardware::mmio_read8(addr) }
 
 #[inline(always)]
-unsafe fn write_u8(addr: u64, val: u8) {
-    core::ptr::write_volatile(addr as *mut u8, val)
-}
+unsafe fn write_u8(addr: u64, val: u8) { libthyla_rs::hardware::mmio_write8(addr, val) }
 
 #[inline(always)]
 fn dsb_sy() {

@@ -163,50 +163,40 @@ const STATUS_OFF: u64 = 0x600;
 const DATA_LEN: u32 = 512;              // one block
 
 // =============================================================================
-// Volatile MMIO + memory access helpers.
+// MMIO + memory access helpers.
 // =============================================================================
 //
 // MMIO: kernel installs Device-nGnRnE PTEs (MAIR_IDX_DEVICE) for
 // BURROW_TYPE_MMIO regions, so the hardware guarantees non-gathering
-// + non-reordering access. We still need volatile in Rust to defeat
-// compiler-level coalescing.
+// + non-reordering access. Register access funnels through
+// libthyla_rs::hardware::mmio_* (single-instruction ldr/str via inline
+// asm) -- ISV-safe so an MMIO abort is hypervisor-decodable under HVF
+// (#890), and a compiler barrier so accesses are not coalesced.
 //
 // DMA: kernel installs Normal cacheable PTEs (MAIR_IDX_NORMAL_WB) for
 // BURROW_TYPE_DMA regions. Coherency between CPU and device is
 // guaranteed on QEMU virt's modeled VirtIO transports (the device
-// participates in the cache-coherency domain). We use volatile to
-// defeat compiler reorder + explicit dsb-sy barriers around the
-// notify-and-wait window.
+// participates in the cache-coherency domain). The descriptor/ring
+// writes below reuse the same helpers (harmless on Normal memory) plus
+// explicit dsb-sy barriers around the notify-and-wait window.
 
 #[inline(always)]
-unsafe fn read32(addr: u64) -> u32 {
-    core::ptr::read_volatile(addr as *const u32)
-}
+unsafe fn read32(addr: u64) -> u32 { libthyla_rs::hardware::mmio_read32(addr) }
 
 #[inline(always)]
-unsafe fn write32(addr: u64, val: u32) {
-    core::ptr::write_volatile(addr as *mut u32, val);
-}
+unsafe fn write32(addr: u64, val: u32) { libthyla_rs::hardware::mmio_write32(addr, val) }
 
 #[inline(always)]
-unsafe fn write16(addr: u64, val: u16) {
-    core::ptr::write_volatile(addr as *mut u16, val);
-}
+unsafe fn write16(addr: u64, val: u16) { libthyla_rs::hardware::mmio_write16(addr, val) }
 
 #[inline(always)]
-unsafe fn read16(addr: u64) -> u16 {
-    core::ptr::read_volatile(addr as *const u16)
-}
+unsafe fn read16(addr: u64) -> u16 { libthyla_rs::hardware::mmio_read16(addr) }
 
 #[inline(always)]
-unsafe fn write64(addr: u64, val: u64) {
-    core::ptr::write_volatile(addr as *mut u64, val);
-}
+unsafe fn write64(addr: u64, val: u64) { libthyla_rs::hardware::mmio_write64(addr, val) }
 
 #[inline(always)]
-unsafe fn read_u8(addr: u64) -> u8 {
-    core::ptr::read_volatile(addr as *const u8)
-}
+unsafe fn read_u8(addr: u64) -> u8 { libthyla_rs::hardware::mmio_read8(addr) }
 
 #[inline(always)]
 fn dsb_sy() {

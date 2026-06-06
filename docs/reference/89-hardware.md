@@ -93,9 +93,11 @@ In practice every native driver creates these handles once at startup and never 
 
 The kernel statically rejects `SYS_TRANSFER` for `KOBJ_MMIO` / `KOBJ_IRQ` / `KOBJ_DMA` at the syscall layer (per `kernel/handle.c::handle_acquire_obj`). The Rust type system makes the same invariant visible by NOT implementing any future `Transfer` trait on `Mmio` / `Irq` / `Dma`.
 
-### Volatile MMIO accesses
+### ISV-safe MMIO accesses
 
-`Mmio::read_u32` / `write_u32` use `core::ptr::read_volatile` / `write_volatile` so the compiler does not coalesce or reorder them. The kernel-installed PTE carries the MAIR_IDX_DEVICE (nGnRnE) attribute so the hardware also does not reorder; both layers are needed.
+`Mmio::read_u32` / `write_u32` funnel through the module-level `mmio_read32` / `mmio_write32` primitives -- a single-instruction `ldr`/`str` via inline asm, with the register offset pre-applied to the address in Rust so the instruction is base-only (`[xN]`, no displacement). This guarantees two things at once: the compiler does not coalesce or reorder the access (the default memory-clobbering asm options are strictly stronger than `read_volatile`), AND the emitted instruction sets `ESR_EL1.ISV=1` (Instruction Syndrome Valid) on an MMIO abort, so a hypervisor (HVF) can decode the emulated access. A plain `read_volatile`/`write_volatile` is functionally correct but lets LLVM pick the addressing mode; once the `#[inline(always)]` driver helpers fold into a register-dense caller it emits pre-indexed writeback (`str w, [x, #imm]!`) and unscaled `stur`/`ldur` -- both ISV=0, which trips QEMU's HVF backend `assert(isv)` (this was #890; the kernel's out-of-line accessors stayed ISV=1, which is why kernel virtio worked under HVF while userspace tripped). The kernel-installed PTE carries the MAIR_IDX_DEVICE (nGnRnE) attribute so the hardware also does not reorder; all layers are needed.
+
+The primitives ship for all four widths -- `mmio_read8`/`16`/`32`/`64` + `mmio_write8`/`16`/`32`/`64` -- and are the single ISV-safe MMIO accessor in the tree: every native virtio-* driver's local register helper delegates to them (see PORTABILITY.md section 8).
 
 ### Bounds + alignment checks
 
@@ -175,7 +177,7 @@ Every accessor (`read_u32`, `write_u32`) panics on bounds-overflow or misalignme
 ## Known caveats / footguns
 
 - **`base_va` outlives the wrapper**: extracting `mmio.base_va()` and then dropping the `Mmio` leaves a `*mut u8` that still points to a valid mapping (the Burrow keeps the mapping alive until proc exit) — accessing the pointer after Drop is technically defined but conceptually wrong. The borrow checker doesn't catch this because raw pointers have no lifetime. Drivers should hold the typed wrapper for as long as they need the mapping.
-- **No `Mmio::read_u8 / u16 / u64`**: only u32 helpers ship at v1.0. Most VirtIO and ARM MMIO surfaces use 32-bit registers; u8/u16/u64 helpers can be added as consumers surface. For now, callers needing other widths use `as_slice()` (for Dma) or `base_va()` + manual volatile access (for Mmio).
+- **No `Mmio::read_u8 / u16 / u64` methods**: the typed `Mmio` struct exposes only the u32 accessor methods at v1.0 (most VirtIO and ARM MMIO surfaces use 32-bit registers). Callers needing other widths use the module-level `mmio_read8`/`16`/`64` + `mmio_write8`/`16`/`64` primitives on `base_va() + offset` -- NOT `read_volatile` on a raw pointer, which can compile to an ISV=0 form and trip HVF (see "ISV-safe MMIO accesses" above). The native virtio-* drivers do exactly this through their local helper wrappers.
 - **No `Mmio::write_u32` exclusivity**: the method takes `&self`, not `&mut self`. MMIO write is a side-effect at the device; multiple `&Mmio` references can concurrently write (Rust borrow checker allows it because there's no aliasable in-memory state). If a future driver wants to enforce "only one writer at a time" at the type level, it can wrap `Mmio` in a `Mutex` (single-threaded today). The kernel-side rights gating already prevents cross-Proc concurrent access (the handle is non-transferable).
 - **Compiler fence vs hardware barrier**: `Dma::read_u32` / `write_u32` insert compiler fences but NOT hardware barriers. Drivers interacting with VirtIO devices MUST use `virtio_rmb()` (from `lib.rs`) for cross-CPU + cross-device-visibility ordering. The compiler fence prevents compiler reorderings but is not sufficient on its own.
 
