@@ -1,17 +1,22 @@
 // Kernel CSPRNG public API (P5-corvus-syscalls).
 //
 // Per CORVUS-DESIGN.md §4.1.1 + C-15. SYS_GETRANDOM consumes this
-// surface. The implementation lives in kernel/random.c and uses the
-// ARM RNDR instruction (FEAT_RNG) on v1.0. Pre-existing devrandom_*
-// surface (Plan 9 /dev/random style) continues to work and is now
-// implemented as a thin wrapper over this API.
+// surface. The implementation lives in kernel/random.c: a ChaCha20
+// forward-secure CSPRNG (the arc4random construction) seeded from a
+// mixed entropy pool (DTB boot seed + CNTPCT jitter + RNDR-when-present
+// + a kernel virtio-rng pull). The Plan 9 /dev/random Dev surface is a
+// thin wrapper over this API. Lazarus W3 (PORTABILITY.md §6) replaced
+// the RNDR-only baseline so the same path runs on RNDR-less targets.
 //
-// v1.0 invariants:
-//   - If RNDR is available (g_rndr_available), reads are always-
-//     seeded — the hardware CSPRNG is its own entropy source.
-//   - kern_random_seeded() returns the readiness signal — false iff
-//     hardware support is absent. v1.x with software CSPRNG mixing
-//     extends to a real seeding state machine.
+// Invariants:
+//   - kern_random_seeded() is the readiness signal: false until a
+//     strong entropy source has ever contributed (DTB boot seed, RNDR,
+//     or a virtio-rng pull), monotonic true thereafter. While false,
+//     kern_random_bytes returns -1 (fail closed) and SYS_GETRANDOM
+//     refuses -- the same contract the RNDR-only baseline held.
+//   - The CSPRNG re-keys on every keystream-buffer drain (fast key
+//     erasure -> backtracking resistance) and pulls fresh entropy every
+//     ~1 MiB served (state-compromise recovery).
 
 #ifndef THYLACINE_RANDOM_H
 #define THYLACINE_RANDOM_H

@@ -89,6 +89,7 @@ set(KERNEL_SRCS
     zero.c
     full.c
     random.c
+    chacha20.c
     devproc.c
     devctl.c
     devramfs.c
@@ -125,6 +126,7 @@ set(KERNEL_SRCS
     test/test_devsrv.c
     test/test_devcap.c
     test/test_virtio.c
+    test/test_random.c
     test/test_virtio_pci.c
     test/test_irqfwd.c
     test/test_userspace2.c

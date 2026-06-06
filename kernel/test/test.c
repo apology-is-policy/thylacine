@@ -647,6 +647,10 @@ void test_sys_set_traceable_one_way_to_zero(void);
 void test_sys_corvus_caps_kproc_has_new_caps(void);
 void test_kern_random_seeded_returns_true_on_qemu(void);
 void test_kern_random_bytes_produces_nonzero(void);
+void test_chacha20_block_vector(void);
+void test_chacha20_keystream_continuity(void);
+void test_kern_random_two_reads_differ(void);
+void test_kern_random_large_read_nonzero(void);
 void test_sys_spawn_happy_path(void);
 void test_sys_spawn_rejects_null_name(void);
 void test_sys_spawn_rejects_zero_len(void);
@@ -1568,6 +1572,10 @@ struct test_case g_tests[] = {
     { "sys_corvus_caps.kproc_has_new_caps",            test_sys_corvus_caps_kproc_has_new_caps,            false, NULL },
     { "kern_random.seeded_returns_true_on_qemu",       test_kern_random_seeded_returns_true_on_qemu,       false, NULL },
     { "kern_random.bytes_produces_nonzero",            test_kern_random_bytes_produces_nonzero,            false, NULL },
+    { "chacha20.block_vector",                         test_chacha20_block_vector,                         false, NULL },
+    { "chacha20.keystream_continuity",                 test_chacha20_keystream_continuity,                 false, NULL },
+    { "kern_random.two_reads_differ",                  test_kern_random_two_reads_differ,                  false, NULL },
+    { "kern_random.large_read_nonzero",                test_kern_random_large_read_nonzero,                false, NULL },
     { "sys_spawn.happy_path",                          test_sys_spawn_happy_path,                          false, NULL },
     { "sys_spawn.rejects_null_name",                   test_sys_spawn_rejects_null_name,                   false, NULL },
     { "sys_spawn.rejects_zero_len",                    test_sys_spawn_rejects_zero_len,                    false, NULL },
