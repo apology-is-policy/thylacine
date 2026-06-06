@@ -1,13 +1,17 @@
 # PORTABILITY.md — the bare-metal portability arc ("Lazarus")
 
-**Status: binding design -- SIGNED OFF + SEQUENCED 2026-06-05.** The section-9
-forks are resolved (name "Lazarus" kept; PAC/BTI/LSE -> runtime-conditional
-approved, incl. the boot-banner ABI; M1 = W1+W2+W3 as a pre-Utopia arc, W4
-post-v1.0). M1 is the **first of two pre-Utopia arcs** (Lazarus M1, then Loom)
-that land before Phase 7 (Utopia) resumes at U-6d-b; per-workstream impl detail
-is authored at implementation time. Authored 2026-05-30 after the HW-accel
-assessment mini-detour (see `tools/run-vm.sh` commit `52d5663` for the empirical
-HVF findings).
+**Status: binding design -- SIGNED OFF + SEQUENCED 2026-06-05; atomics approach
+amended 2026-06-06.** The section-9 forks are resolved (name "Lazarus" kept;
+PAC/BTI/LSE -> runtime-conditional approved, incl. the boot-banner ABI; M1 =
+W1 + W1.5 + W2 + W3 as a pre-Utopia arc, W4 post-v1.0). The **2026-06-06
+amendment** (user-voted): W1 ships the inline LL/SC v8.0 floor (not
+`-moutline-atomics` -- no kernel uses outline-atomics in-kernel) and a new
+**W1.5** builds the Linux-style boot-time LSE alternatives-patcher to restore LSE
+on capable cores at zero runtime cost (§4 + §4.5 + §9). M1 is the **first of two
+pre-Utopia arcs** (Lazarus M1, then Loom) that land before Phase 7 (Utopia)
+resumes at U-6d-b; per-workstream impl detail is authored at implementation time.
+Authored 2026-05-30 after the HW-accel assessment mini-detour (see
+`tools/run-vm.sh` commit `52d5663` for the empirical HVF findings).
 
 **Working name: "Lazarus"** — the Lazarus-species motif (an extinct taxon
 rediscovered alive; CLAUDE.md's naming sources). The thylacine leaves the
@@ -77,13 +81,27 @@ deterministic); HVF + bare metal use GICv2.
 ## 4. W1 — ISA retarget to the v8.0 floor + the hardening-posture change
 
 **Toolchain** (`cmake/Toolchain-aarch64-thylacine.cmake`):
-- `-march=armv8-a` (drop `+lse`) + `-moutline-atomics` → atomics emit LL/SC
-  (`LDXR`/`STXR`), which run on every v8.0+ core. **LSE is the only true `#UD`
-  wall on A72**; everything else degrades to NOPs.
+- `-march=armv8-a` (drop `+lse+pauth+bti`), **keep** `-mno-outline-atomics`.
+  Without `+lse` and with outline-atomics off, the compiler inlines **LL/SC**
+  (`ldaxr`/`stlxr`) for every C11 `__atomic_*` op — which runs on every v8.0+
+  core (A72 included). **LSE is the only true `#UD` wall on A72**; everything
+  else degrades to NOPs.
+  - **Why LL/SC inline and NOT `-moutline-atomics`** (this corrects the original
+    flag wording; user-voted 2026-06-06 after the kernel-idiom research):
+    outline-atomics turns every atomic into a `__aarch64_*` **function call**
+    that runtime-branches on a `__aarch64_have_lse_atomics` global. That is a
+    *userspace* portability technique (glibc / distro binaries that must run on
+    any ARMv8 part) — **no serious kernel uses it in-kernel.** The Linux ARM64
+    kernel explicitly passes `-mno-outline-atomics` and does its own boot-time
+    LSE patching instead (Thylacine already matched Linux here). A kernel that
+    detects its CPU at boot should not pay a call+branch on every atomic hot
+    path. So the floor is plain inline LL/SC; LSE is restored — with **zero**
+    steady-state runtime branch — by the **W1.5** boot-time patcher (§4.5).
 - **Keep** `-mbranch-protection=pac-ret+bti`. PAC (`paciasp`/`autiasp`) and BTI
-  markers are **HINT-space**: NOP on v8.0 (A72), **active** on v8.3/v8.5+ (M2).
-  So one binary gets full PAC/BTI on capable hardware and harmless NOPs on A72 —
-  **no hardening loss on the M2 dev/accel platform.**
+  markers are **HINT-space** (they do not need the `+pauth`/`+bti` arch
+  extensions to emit): NOP on v8.0 (A72), **active** on v8.3/v8.5+ (M2). So one
+  binary gets full PAC/BTI on capable hardware and harmless NOPs on A72 — **no
+  hardening loss on the M2 dev/accel platform.**
 
 **Runtime gating** (the v8.3/v8.5 sysregs that *do* trap on A72):
 - The `APIAKey*` MSR programming + `SCTLR_EL1.{EnIA,EnIB,EnDA,EnDB}` → gate on
@@ -107,7 +125,79 @@ the PAC/BTI exploit mitigations are unavailable — that is a property of that
 silicon, not a regression on M2/QEMU. Documented, not hidden.
 
 Scope: bounded (toolchain + start.S gating + one test file + the banner string +
-the doc reconciliations).
+the doc reconciliations). W1 is **independently sound** — the LL/SC floor runs on
+every v8.0+ target with no further work — and lands before W1.5.
+
+---
+
+## 4.5 W1.5 — boot-time LSE alternatives-patching (restore LSE, zero runtime cost)
+
+W1's floor inlines LL/SC for every atomic, which costs LSE-capable cores (M2,
+A76, Pi 5) their faster single-instruction atomics. W1.5 restores LSE **with no
+steady-state runtime branch and no function call** — the Linux ARM64 model:
+compile the LL/SC baseline, then **rewrite the atomic sites to single LSE
+instructions at boot** on cores that implement FEAT_LSE. One binary; A72 keeps
+LL/SC; capable cores run native LSE; after the boot pass the code is exactly as
+if compiled for that CPU.
+
+**What gets patched.** Only the read-modify-write atomics benefit: `exchange`,
+`compare_exchange`, `fetch_{add,sub,and,or,xor}` (u32 + u64) — each is an LL/SC
+*loop* on v8.0 and a single `swp`/`cas`/`ldadd`/`ldclr`/`ldeor`/`ldset` on LSE.
+Plain `load`/`store` are already single `ldar`/`stlr` on v8.0 and are left as
+compiler builtins (no LSE benefit, nothing to patch). The RMW primitives are
+re-authored (a small `arch/arm64/atomic_lse.h`) as an LL/SC default with the LSE
+form recorded in an `.altinstructions`-style table; the spinlock + refcounts +
+scheduler RMW sites route through them.
+
+**The framework.** A Thylacine "alternatives" section + a boot-time patcher
+(`arch/arm64/alternatives.{c,S}`). Each table entry records (orig_site,
+lse_replacement, orig_len, alt_len, feature = FEAT_LSE). The patcher iterates the
+table; for each entry, **iff `g_hw_features.atomic`**, it copies the single LSE
+instruction over the LL/SC site and NOP-pads the tail to `orig_len` (the LL/SC
+sequence is the longer of the two, so the replacement always fits). On an A72
+(`!g_hw_features.atomic`) the pass is a no-op and every site stays LL/SC.
+
+**Ordering.** The pass runs in `boot_main` after `hw_features_detect()` and after
+the VM allocator is up (it maps a scratch page), and **before `smp_init()`**.
+That makes it single-CPU: no other core can be executing a patched site while it
+is being rewritten, and secondaries start later with cold I-caches, so they fetch
+the already-patched bytes. The primary may have executed the LL/SC form before
+the pass and the LSE form after — both are correct on an LSE-capable primary.
+
+**W^X / I-12 — the soundness crux.** The patcher self-modifies `.text` but
+**never makes an executable page writable.** It writes through a *transient
+RW-not-X alias* of the target page (a fresh scratch VA mapped `RW + PXN/UXN`,
+torn down immediately after); the canonical `.text` mapping stays `RO + X` and
+the P3-Bb direct-map alias stays `RO + XN` throughout. So **no page is ever
+simultaneously writable and executable — I-12 holds at mapping granularity, never
+violated, not even momentarily.** After the writes, the pass does the
+ARM-ARM-B2-mandated instruction-cache maintenance on each modified line — `dc
+cvau` (clean to PoU) → `dsb ish` → `ic ivau` (I-cache invalidate to PoU) → `dsb
+ish` → `isb` — so the primary's fetch stream sees the new instructions. The pass
+runs IRQ-masked.
+
+**Correctness + fallback.** LL/SC is the always-correct default: an unpatched
+site (A72, or any entry the pass skips) is correct by construction, so a patcher
+bug fails *safe* (slower, never wrong). The pass is idempotent (run once; a
+re-run would re-copy identical bytes). The per-op LL/SC ↔ LSE equivalence is a
+local argument (same acquire/release memory-order semantics, same operand
+register, same width).
+
+**Audit-bearing.** Self-modifying `.text` + the I-12 interaction. A focused round
+prosecutes: the RW-not-X-alias bound (no W&X window at any instant), the
+cache-maintenance completeness (every modified line; the point-of-unification
+reasoning), the per-op LL/SC ↔ LSE equivalence (memory ordering + width), the
+NOP-pad fit (`orig_len ≥ alt_len`), idempotency, and the strictly-pre-`smp_init`
+ordering. The `ARCHITECTURE.md §25.4` + `CLAUDE.md` audit-trigger rows land **with
+the W1.5 impl** (the W2/W3 pattern; §10). **No new TLA+ spec** — the pass is
+sequential boot-time code, its soundness a per-op equivalence + a bounded-window
+argument, validated by prose + the audit per the 2026-05-23 spec-to-code
+broadening.
+
+**Deferred detail.** The exact op/size/order table, the `atomic_lse.h` macro
+shape, and the mmu scratch-map helper are authored at W1.5 implementation time
+(the `POUCH-DESIGN.md` deferred-per-chunk-detail pattern). W1.5 is its own
+sub-chunk with its own audit; it lands after W1 and before W2.
 
 ---
 
@@ -187,10 +277,11 @@ under QEMU (TCG + HVF) without any of W4.
 
 ## 8. Milestones + sequencing
 
-- **M1 = W1 + W2 + W3.** The same binary boots **QEMU-TCG** (gic-version=3 or 2)
-  **AND HVF-on-M2** (gic-version=2, sidestepping the `ICC_*` wall) **AND is
-  A72-ISA-ready**. Delivers the faster-iteration win + the bare-metal groundwork.
-  Bounded; fully testable under QEMU.
+- **M1 = W1 + W1.5 + W2 + W3.** The same binary boots **QEMU-TCG** (gic-version=3
+  or 2) **AND HVF-on-M2** (gic-version=2, sidestepping the `ICC_*` wall) **AND is
+  A72-ISA-ready**. W1 is the LL/SC v8.0 floor (independently sound); W1.5 patches
+  LSE back in at boot on capable cores (§4.5). Delivers the faster-iteration win +
+  the bare-metal groundwork. Bounded; fully testable under QEMU.
 - **M2 = W4.** Actual RPi 400 hardware boot. The culminating, post-v1.0-sized
   platform port.
 
@@ -216,9 +307,20 @@ is the natural first impl (scripture mostly written, the near-term dev-loop win)
   (I-16), stack canaries, vectors, IRQ-safety, and extinction stay
   **unconditional** on every target. The A72/Pi400 PAC/BTI gap is a property of
   that silicon, documented not hidden.
-- **M1 scope + roadmap slot**: **M1 = W1 + W2 + W3 lands now as a pre-Utopia
-  arc** (ROADMAP §8.0a); **W4 stays post-v1.0** (ROADMAP §12.1). M1 is fully
-  testable under QEMU (TCG + HVF).
+- **Atomics lowering (W1 + W1.5) — amended 2026-06-06** (supersedes the original
+  `-moutline-atomics` wording in §4). After grounding in the kernel (200+ C11
+  `__atomic_*` sites, no compiler-rt linked) + the kernel-idiom research:
+  outline-atomics is a *userspace* technique (a call+branch per atomic) that no
+  serious kernel uses in-kernel — Linux explicitly passes `-mno-outline-atomics`
+  and patches LSE at boot instead. **Resolved (user-voted 2026-06-06):** W1 ships
+  the inline **LL/SC v8.0 floor**; **W1.5 builds the Linux-style boot-time LSE
+  alternatives-patcher** (§4.5) to restore LSE on capable cores with zero runtime
+  cost. The "build the patcher now" path was chosen over "floor now, patcher
+  later" per the deeper-build directive ("we don't care about cost or scope, only
+  the system").
+- **M1 scope + roadmap slot**: **M1 = W1 + W1.5 + W2 + W3 lands now as a
+  pre-Utopia arc** (ROADMAP §8.0a); **W4 stays post-v1.0** (ROADMAP §12.1). M1 is
+  fully testable under QEMU (TCG + HVF).
 - **Board reconciliation**: v8.0 floor + **Pi 400 first** (the board-agnostic
   v8.0 baseline → widest compatibility; both Pis are GIC-400/GICv2). ARCH §4.4
   reconciled at W1 / W4.
@@ -247,8 +349,10 @@ is the natural first impl (scripture mostly written, the near-term dev-loop win)
   runtime-feature-reflective (lands with W1). The `run-vm.sh`
   `THYLACINE_ACCEL`/`THYLACINE_CPU`/`THYLACINE_GIC` toggles already landed
   (`52d5663`).
-- **`CLAUDE.md`**: the audit-trigger surface table gains the GICv2 driver (W2)
-  + the software-RNG (W3) rows when those land.
+- **`CLAUDE.md`** + **`ARCHITECTURE.md` §25.4**: the audit-trigger surface table
+  gains the boot-time LSE-patcher (W1.5), the GICv2 driver (W2), and the
+  software-RNG (W3) rows — each in the PR that lands that workstream (the W1.5
+  patcher is audit-bearing: self-modifying `.text` vs W^X / I-12, §4.5).
 
 No code in this commit. Per-workstream detailed design (especially W2's GICv2
 register map + W4's board layout) is authored at implementation time, the way

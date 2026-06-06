@@ -745,15 +745,21 @@ fast IO should exist before the apps that consume it.
   Binding design `docs/PORTABILITY.md` (signed off + sequenced 2026-06-05). The
   *same* kernel binary runs QEMU-TCG (CI baseline, unchanged), QEMU-HVF on Apple
   Silicon (the fast dev loop — TCG boots take 16-26 s, HVF is near-native), and
-  is ARMv8.0-A-ISA-ready for bare metal. **M1 = W1** (v8.0 ISA floor; PAC/BTI/LSE
-  → runtime-conditional, the rest of the hardening unconditional on every target)
-  **+ W2** (the real GICv2 driver — MMIO CPU interface, no `ICC_*` sysregs; the
-  HVF-on-Apple enabler *and* what the Pi's GIC-400 needs; **audit-bearing**,
-  scheduler/IPI surface, I-18) **+ W3** (a chacha20 software-RNG seeded by a
-  kernel virtio-rng driver + DTB `rng-seed` + `cntpct`, RNDR stirs when present —
-  the "software-backed RNDR"; **audit-bearing**, CSPRNG quality). Fully
-  QEMU-testable (TCG + HVF). **W4** (the actual RPi-400 board bring-up: EL2→EL1
-  drop, BCM mailbox, a new SD/EMMC block backend) stays post-v1.0 (§12.1).
+  is ARMv8.0-A-ISA-ready for bare metal. **M1 = W1** (v8.0 ISA floor: inline
+  LL/SC atomics — *not* outline-atomics, which no kernel uses in-kernel;
+  PAC/BTI/LSE → runtime-conditional, the rest of the hardening unconditional on
+  every target) **+ W1.5** (boot-time LSE alternatives-patching — the Linux-style
+  patcher restores single-instruction LSE atomics on FEAT_LSE cores at zero
+  runtime cost, self-modifying `.text` through a transient RW-not-X alias so
+  W^X / I-12 is never violated; **audit-bearing**; amended 2026-06-06,
+  PORTABILITY §4.5) **+ W2** (the real GICv2 driver — MMIO CPU interface, no
+  `ICC_*` sysregs; the HVF-on-Apple enabler *and* what the Pi's GIC-400 needs;
+  **audit-bearing**, scheduler/IPI surface, I-18) **+ W3** (a chacha20
+  software-RNG seeded by a kernel virtio-rng driver + DTB `rng-seed` + `cntpct`,
+  RNDR stirs when present — the "software-backed RNDR"; **audit-bearing**, CSPRNG
+  quality). Fully QEMU-testable (TCG + HVF). **W4** (the actual RPi-400 board
+  bring-up: EL2→EL1 drop, BCM mailbox, a new SD/EMMC block backend) stays
+  post-v1.0 (§12.1).
 - **Loom — the io_uring-inverted Burrow-backed 9P ring transport.** Binding
   design `docs/LOOM.md` (signed off 2026-06-05). Scheduled as the second
   pre-Utopia arc, **pulled forward from its documented post-v1.0 slot** (§12.2)
