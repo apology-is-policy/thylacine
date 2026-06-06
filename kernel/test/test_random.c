@@ -18,6 +18,7 @@ void test_chacha20_block_vector(void);
 void test_chacha20_keystream_continuity(void);
 void test_kern_random_two_reads_differ(void);
 void test_kern_random_large_read_nonzero(void);
+void test_kern_random_virtio_reseed(void);
 
 static bool bytes_eq(const u8 *a, const u8 *b, u32 n) {
     for (u32 i = 0; i < n; i++) if (a[i] != b[i]) return false;
@@ -90,4 +91,19 @@ void test_kern_random_large_read_nonzero(void) {
     bool any_nonzero = false;
     for (long i = 0; i < n; i++) if (g_big_read[i] != 0) { any_nonzero = true; break; }
     TEST_ASSERT(any_nonzero, "large CSPRNG read is not all-zero");
+}
+
+// The kernel virtio-rng driver: a full bring-up -> pull -> teardown on
+// QEMU's attached virtio-rng device. Boot already did one pull (main.c
+// after virtio_init); this re-exercises the device cycle the threshold
+// reseed depends on, and confirms the pool still serves afterward.
+void test_kern_random_virtio_reseed(void) {
+    size_t got = random_seed_from_virtio();
+    TEST_ASSERT(got > 0, "virtio-rng pull returns entropy");
+    TEST_ASSERT(kern_random_virtio_contributed(),
+                "a virtio-rng pull has contributed to the pool");
+
+    u8 buf[32] = {0};
+    TEST_EXPECT_EQ(kern_random_bytes(buf, (long)sizeof(buf)), (long)sizeof(buf),
+                   "CSPRNG serves after a virtio reseed");
 }

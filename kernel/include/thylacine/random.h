@@ -38,9 +38,18 @@
 // buffer + uaccess_store_u8 per byte for user-VA targets.
 long kern_random_bytes(void *out, long len);
 
-// Is the kernel CSPRNG ready to deliver bytes? Returns true iff
-// kern_random_bytes is expected to succeed on a typical call.
-// v1.0: true iff ARM FEAT_RNG is present (no software fallback).
+// Is the kernel CSPRNG ready to deliver bytes? Returns true iff a strong
+// entropy source has ever seeded the pool (DTB boot seed, RNDR, or a
+// virtio-rng pull); monotonic. kern_random_bytes returns -1 while false.
 bool kern_random_seeded(void);
+
+// Pull strong entropy from the kernel virtio-rng device and re-key the
+// CSPRNG. Called once at boot (after virtio_init, from kernel/main.c) and
+// on the reseed cadence. Returns the number of virtio-rng bytes obtained
+// (0 if no RNG device is present -- the CSPRNG keeps its prior seed).
+size_t random_seed_from_virtio(void);
+
+// True iff a virtio-rng pull has ever contributed entropy to the pool.
+bool kern_random_virtio_contributed(void);
 
 #endif // THYLACINE_RANDOM_H

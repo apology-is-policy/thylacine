@@ -424,6 +424,21 @@ void kobj_mmio_reserve_kernel_ranges(void) {
     // higher-level mechanism that enforces "you must own this VirtIO
     // device" semantics.
     //
+    // Lazarus W3 exception (the virtio-rng slot): the kernel CSPRNG
+    // (kernel/random.c) now DRIVES the virtio-rng slot -- not just the
+    // boot probe -- so "dormant after virtio_init" is no longer strictly
+    // true for that one slot. It is still NOT page-reserved, because the
+    // slot shares a 4 KiB page with up to 7 sibling slots that userspace
+    // legitimately drives (net / input / gpu); a page-granular kernel
+    // reservation would lock those out. The RNG slot stays under the
+    // same v1.0 posture: kproc-only CAP_HW_CREATE; the kobj_mmio overlap
+    // check; the kernel touches it transiently (reset-to-dormant between
+    // pulls, serialized by random.c's g_rng_dev_lock); and no userspace
+    // driver targets device-id RNG. A misbehaving CAP_HW_CREATE holder
+    // writing the RNG slot is the SAME residual the virtio-blk slot
+    // already carries -- the Phase-5+ revisit above (re-reserve + a
+    // per-device-ownership kobj) closes both uniformly.
+    //
     // GIC / PL011 / ECAM reservations stay — those are actively
     // accessed by the running kernel and a userspace claim would
     // produce real concurrent-access bugs (UART register clobber, GIC

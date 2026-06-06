@@ -51,6 +51,7 @@
 #include <thylacine/dev.h>
 #include <thylacine/dev9p.h>
 #include <thylacine/pipe.h>
+#include <thylacine/random.h>  // random_seed_from_virtio (Lazarus W3b)
 #include <thylacine/types.h>
 #include <thylacine/virtio.h>
 #include <thylacine/virtio_pci.h>
@@ -453,6 +454,23 @@ void boot_main(void) {
     // after dev_init since virtio_init prints to UART (cons must be
     // up) and after slub_init since virtqueue_create uses kmalloc.
     virtio_init();
+
+    // Lazarus W3b: pull strong entropy from the kernel virtio-rng device
+    // now that the MMIO transport is probed. Upgrades the CSPRNG from its
+    // boot-time DTB/cntpct seed (devrandom_init, during dev_init) to real
+    // host entropy. Best-effort: if no RNG device is attached, the chacha
+    // pool keeps the DTB seed and this prints "unavailable".
+    {
+        size_t rng_bytes = random_seed_from_virtio();
+        uart_puts("  random: virtio-rng reseed ");
+        if (rng_bytes) {
+            uart_puts("OK (");
+            uart_putdec((u64)rng_bytes);
+            uart_puts(" bytes mixed)\n");
+        } else {
+            uart_puts("unavailable (no RNG device; chacha keeps the boot seed)\n");
+        }
+    }
 
     // P4-Ib R9 F142: reserve kernel-owned INTIDs in g_intid_claimed
     // so that subsequent kobj_irq_create (via SYS_IRQ_CREATE syscall

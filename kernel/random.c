@@ -25,12 +25,15 @@
 #include <thylacine/chacha20.h>
 #include <thylacine/dev.h>
 #include <thylacine/dtb.h>
+#include <thylacine/page.h>
 #include <thylacine/random.h>
 #include <thylacine/spinlock.h>
 #include <thylacine/spoor.h>
 #include <thylacine/types.h>
+#include <thylacine/virtio.h>
 
 #include "../arch/arm64/uart.h"
+#include "../mm/phys.h"
 
 // =============================================================================
 // ChaCha20 forward-secure CSPRNG state.
@@ -47,6 +50,12 @@
 // backtracking resistance independent of this.
 #define RNG_RESEED_BYTES (1u << 20)
 
+// Bounded poll budget for a virtio-rng completion (no IRQ path on the
+// kernel virtio substrate). The device fills near-instantly under QEMU/
+// HVF; the cap bounds a wedged device -- on timeout the CSPRNG keeps its
+// prior state (never blocks, never serves stale-but-still-secure bytes).
+#define RNG_VIRTIO_POLL_MAX (1u << 22)
+
 static spin_lock_t   g_random_lock = SPIN_LOCK_INIT;
 static struct chacha_ctx g_rng;            // BSS-zero until the first stir
 static u8            g_rng_buf[RNG_BUFSZ];  // keystream pool; served from the tail
@@ -54,6 +63,15 @@ static size_t        g_rng_have;           // bytes still available in g_rng_buf
 static u64           g_rng_count;          // bytes until the next strong stir
 static bool          g_rng_seeded;         // a strong entropy source contributed
 static bool          g_rndr_available;     // FEAT_RNG present (a stir source)
+
+// virtio-rng device access is serialized independently of the chacha
+// state: the device bring-up/pull/teardown runs OUTSIDE g_random_lock
+// (it allocs pages + spins on the used ring), so two concurrent reseeds
+// can't both drive queue 0. Lock order: g_rng_dev_lock is never held
+// while taking g_random_lock (the pull completes, then the absorb takes
+// g_random_lock separately).
+static spin_lock_t   g_rng_dev_lock = SPIN_LOCK_INIT;
+static bool          g_rng_virtio_ok;      // a virtio-rng pull has ever succeeded
 
 // =============================================================================
 // Low-level entropy sources.
@@ -203,6 +221,137 @@ static void rng_buf_consume_locked(u8 *out, size_t n) {
 }
 
 // =============================================================================
+// virtio-rng -- the strong/real entropy source.
+// =============================================================================
+
+// Bring up the kernel virtio-rng device, pull up to `want` bytes of host
+// entropy into `out`, tear the device back down to dormant. Returns the
+// number of bytes obtained (0 if no RNG device / negotiation /
+// allocation / poll-timeout). Self-contained: serialized by
+// g_rng_dev_lock; resets the device on every exit path so it composes
+// with the test_virtio queue-0 exercises and with repeated reseeds.
+//
+// I-5 note: the kernel now drives this one virtio-mmio slot (transiently
+// -- reset-to-dormant between pulls). The slot shares a 4 KiB page with
+// up to 7 sibling slots that userspace legitimately drives, so a
+// page-granular kernel reservation is infeasible; the RNG slot inherits
+// the v1.0 virtio-mmio trust posture (kproc-only CAP_HW_CREATE; the
+// kobj_mmio overlap check; no userspace driver targets device-id RNG).
+// See kernel/mmio_handle.c for the full rationale + the Phase-5+ seam.
+static size_t random_virtio_pull(u8 *out, size_t want) {
+    if (!out || want == 0) return 0;
+    if (want > PAGE_SIZE) want = PAGE_SIZE;
+
+    spin_lock(&g_rng_dev_lock);
+
+    struct virtio_mmio_dev *dev = virtio_mmio_find_by_device_id(VIRTIO_DEVICE_ID_RNG);
+    if (!dev) { spin_unlock(&g_rng_dev_lock); return 0; }
+
+    // VIRTIO 1.2 §3.1.1 steps 1-6 (reset -> ACK -> DRIVER -> features ->
+    // FEATURES_OK). virtio-rng negotiates no required features (mask 0).
+    if (!virtio_negotiate_features(dev, 0)) {
+        virtio_reset(dev);
+        spin_unlock(&g_rng_dev_lock);
+        return 0;
+    }
+
+    struct virtio_virtqueue *vq = virtio_virtqueue_create(dev, 0);
+    if (!vq) {
+        virtio_reset(dev);
+        spin_unlock(&g_rng_dev_lock);
+        return 0;
+    }
+
+    // §3.1.1 step 8: DRIVER_OK once the queue is armed -- the device
+    // won't process buffers before this.
+    virtio_add_status(dev, VIRTIO_STATUS_DRIVER_OK);
+
+    struct page *pg = alloc_pages(0, KP_ZERO);
+    if (!pg) {
+        virtio_virtqueue_destroy(vq);
+        virtio_reset(dev);
+        spin_unlock(&g_rng_dev_lock);
+        return 0;
+    }
+    paddr_t pa  = page_to_pa(pg);
+    u8     *kva = (u8 *)pa_to_kva(pa);
+
+    // One device-writable descriptor on the requestq (queue 0).
+    vq->desc[0].addr  = (u64)pa;
+    vq->desc[0].len   = (u32)want;
+    vq->desc[0].flags = VRING_DESC_F_WRITE;
+    vq->desc[0].next  = 0;
+
+    // Publish into the available ring. avail->idx is the running entry
+    // count; ring[idx % size] carries the head descriptor index.
+    u16 head = vq->avail->idx;
+    vq->avail->ring[head % vq->size] = 0;
+    __asm__ __volatile__("dsb sy" ::: "memory");
+    vq->avail->idx = (u16)(head + 1);
+    __asm__ __volatile__("dsb sy" ::: "memory");
+
+    virtio_vq_notify(vq);
+
+    size_t got = 0;
+    for (u64 spin = 0; spin < RNG_VIRTIO_POLL_MAX; spin++) {
+        if (vq->used->idx != 0) {
+            // Order the used-ring observation before the buffer read.
+            __asm__ __volatile__("dsb sy" ::: "memory");
+            u32 wrote = vq->used->ring[0].len;
+            if (wrote > want) wrote = (u32)want;
+            for (u32 i = 0; i < wrote; i++) out[i] = kva[i];
+            got = wrote;
+            break;
+        }
+        __asm__ __volatile__("yield" ::: "memory");
+    }
+
+    // Stop the device before touching/freeing the buffer it could write.
+    virtio_virtqueue_destroy(vq);
+    virtio_reset(dev);
+    rng_secure_zero(kva, want);
+    free_pages(pg, 0);
+
+    spin_unlock(&g_rng_dev_lock);
+
+    if (got) __atomic_store_n(&g_rng_virtio_ok, true, __ATOMIC_RELEASE);
+    return got;
+}
+
+// Strong reseed: pull virtio-rng entropy (the real source) + a fresh
+// cheap collection, then re-key. The device pull runs OUTSIDE
+// g_random_lock; the absorb takes it. A successful virtio pull marks the
+// pool seeded even on a target with no DTB seed and no RNDR. Returns the
+// virtio byte count (0 if the device was unavailable).
+static size_t random_reseed_strong(void) {
+    u8 vbuf[RNG_SEEDSZ];
+    size_t vn = random_virtio_pull(vbuf, sizeof(vbuf));
+
+    u8 cbuf[RNG_SEEDSZ];
+    bool cheap_strong = false;
+    size_t cn = rng_collect_cheap(cbuf, sizeof(cbuf), &cheap_strong);
+
+    spin_lock(&g_random_lock);
+    if (vn) rng_rekey_locked(vbuf, vn);
+    rng_rekey_locked(cbuf, cn);
+    if (vn || cheap_strong) __atomic_store_n(&g_rng_seeded, true, __ATOMIC_RELEASE);
+    g_rng_count = RNG_RESEED_BYTES;
+    spin_unlock(&g_random_lock);
+
+    rng_secure_zero(vbuf, sizeof(vbuf));
+    rng_secure_zero(cbuf, sizeof(cbuf));
+    return vn;
+}
+
+size_t random_seed_from_virtio(void) {
+    return random_reseed_strong();
+}
+
+bool kern_random_virtio_contributed(void) {
+    return __atomic_load_n(&g_rng_virtio_ok, __ATOMIC_ACQUIRE);
+}
+
+// =============================================================================
 // Public API (random.h) -- contracts unchanged from the RNDR-only baseline.
 // =============================================================================
 
@@ -215,7 +364,19 @@ long kern_random_bytes(void *buf, long n) {
     // the old "RNDR absent -> -1" contract; SYS_GETRANDOM gates on this.
     if (!__atomic_load_n(&g_rng_seeded, __ATOMIC_ACQUIRE)) return -1;
 
+    // Strong-reseed cadence: once ~RNG_RESEED_BYTES have been served, pull
+    // fresh virtio-rng entropy. The device I/O runs OUTSIDE g_random_lock
+    // (it allocs + spins); decide under the lock, reseed without it.
+    bool want_reseed;
     spin_lock(&g_random_lock);
+    want_reseed = (g_rng_count <= (u64)n);
+    spin_unlock(&g_random_lock);
+    if (want_reseed) random_reseed_strong();
+
+    spin_lock(&g_random_lock);
+    // If the strong reseed was skipped or the device was unavailable and
+    // we are still over the threshold, fall back to a cheap stir so the
+    // pool never serves unboundedly without re-keying from fresh entropy.
     if (g_rng_count <= (u64)n) {
         rng_stir_locked();
     }
