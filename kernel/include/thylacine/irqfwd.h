@@ -54,7 +54,7 @@ struct KObj_IRQ {
 
 // One-time setup: pre-reserve INTIDs owned by kernel-internal callers
 // (those that bypass kobj_irq_create and call gic_attach directly —
-// timer at INTID 30, IPI_RESCHED at SGI 0). Without this reservation,
+// virtual timer at INTID 27, IPI_RESCHED at SGI 0). Without this reservation,
 // a userspace caller with CAP_HW_CREATE could call kobj_irq_create on
 // the same INTID and clobber the kernel's handler slot (R9 F142, P0).
 //

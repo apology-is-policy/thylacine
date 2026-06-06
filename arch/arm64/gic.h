@@ -14,11 +14,11 @@
 //
 // GICv3 INTID encoding (ARM IHI 0069 §2.2.1):
 //   0..15        SGI (software-generated, per-CPU; cross-CPU IPI)
-//   16..31       PPI (private peripheral, per-CPU; timer at INTID 30)
+//   16..31       PPI (private peripheral, per-CPU; virtual timer at INTID 27)
 //   32..1019     SPI (shared peripheral; UART, virtio devices, ...)
 //   1020..1023   special (1023 = spurious; do not EOI)
 //
-// At P1-G: only the timer PPI (INTID 30) and the UART SPI (PL011 IRQ; in
+// At P1-G: only the timer PPI (INTID 27, virtual timer) and the UART SPI (PL011 IRQ; in
 // the future) are wired. Phase 2 adds SGIs for SMP IPI; Phase 3 adds
 // SPIs for userspace virtio drivers.
 

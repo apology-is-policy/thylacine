@@ -797,8 +797,16 @@ void gic_set_spi_edge_triggered(u32 intid) {
     u32 bit_off = (intid % 16) * 2;
     u32 mask    = 0x3u << bit_off;
     u32 val     = 0x2u << bit_off;  // 0b10 = edge-triggered
-    u32 cur     = mmio_r32(g_dist_base, reg);
-    mmio_w32(g_dist_base, reg, (cur & ~mask) | val);
+    // The read+write to GICD_ICFGR is a back-to-back distributor access; on
+    // v2 it MUST drain (v2_r32/v2_w32) like every other v2 GIC MMIO, or under
+    // HVF the pair can trap with ESR.ISV=0. v3 uses the plain accessors.
+    if (g_version == GIC_VERSION_V2) {
+        u32 cur = v2_r32(g_dist_base, reg);
+        v2_w32(g_dist_base, reg, (cur & ~mask) | val);
+    } else {
+        u32 cur = mmio_r32(g_dist_base, reg);
+        mmio_w32(g_dist_base, reg, (cur & ~mask) | val);
+    }
 
     // R12-gic-edge audit close (F200 P2): ensure the ICFGR write has
     // been observed by the GIC distributor's internal state BEFORE any
@@ -827,7 +835,11 @@ bool gic_set_pending_spi(u32 intid) {
     if (g_dist_base == 0)                              return false;
     u32 n = intid / 32;
     u32 bit = intid % 32;
-    mmio_w32(g_dist_base, GICD_ISPENDR(n), 1u << bit);
+    // v2 distributor writes drain (HVF ISV mitigation); v3 uses the plain form.
+    if (g_version == GIC_VERSION_V2)
+        v2_w32(g_dist_base, GICD_ISPENDR(n), 1u << bit);
+    else
+        mmio_w32(g_dist_base, GICD_ISPENDR(n), 1u << bit);
     return true;
 }
 
@@ -878,9 +890,13 @@ void gic_eoi(u32 intid) {
     }
     if (g_version == GIC_VERSION_V2) {
         // Echo the saved raw IAR (with the SGI source CPUID) when its INTID
-        // matches what we're EOI'ing -- the normal ack->eoi pairing. Fall
-        // back to the bare INTID for a defensive/manual EOI whose token we
-        // never captured (CPUID 0; correct for non-SGI INTIDs anyway).
+        // matches what we're EOI'ing -- the normal ack->eoi pairing, which is
+        // the ONLY reachable path (the exception handler always EOIs the INTID
+        // it just acknowledged on the same CPU; see gic_acknowledge's contract
+        // note). The bare-INTID branch (CPUID 0) is dead for that pairing; it
+        // would only fire for an out-of-contract manual EOI of an INTID never
+        // acknowledged here, and CPUID 0 is correct for any non-SGI INTID. A
+        // manual EOI of a cross-CPU SGI (CPUID != 0) is unsupported.
         unsigned cpu = smp_cpu_idx_self();
         u32 token = intid;
         if (cpu < DTB_MAX_CPUS &&
