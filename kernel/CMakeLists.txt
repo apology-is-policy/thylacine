@@ -75,6 +75,7 @@ set(KERNEL_SRCS
     territory.c
     handle.c
     burrow.c
+    loom.c
     vma.c
     elf.c
     exec.c
@@ -177,6 +178,7 @@ set(KERNEL_SRCS
     test/test_sys_spawn_full_argv.c
     test/test_sys_burrow.c
     test/test_torpor.c
+    test/test_loom.c
     test/test_notes.c
     test/test_thread_spawn.c
     test/test_pipe_probe.c

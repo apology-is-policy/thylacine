@@ -43,6 +43,7 @@
 #include <thylacine/extinction.h>
 #include <thylacine/handle.h>
 #include <thylacine/irqfwd.h>
+#include <thylacine/loom.h>
 #include <thylacine/mmio_handle.h>
 #include <thylacine/proc.h>
 #include <thylacine/spoor.h>
@@ -203,6 +204,13 @@ static void handle_release_obj(enum kobj_kind kind, void *obj) {
         // (Phase 5+); KOBJ_INTERRUPT lands with the Phase 5+
         // interrupt-eventfd surface.
         break;
+    case KOBJ_LOOM:
+        // Loom-2a: the last handle drop tears down the ring. loom_unref's last
+        // ref clunks every registered Spoor + burrow_unref's the ring Burrow
+        // (releasing the kernel's handle_count; a lingering user mapping's
+        // mapping_count independently keeps the pages until its VMA tears down).
+        loom_unref((struct Loom *)obj);
+        break;
     default:
         extinction("handle_release_obj: out-of-enum kobj_kind (memory corruption?)");
     }
@@ -256,6 +264,14 @@ static void handle_acquire_obj(enum kobj_kind kind, void *obj) {
     case KOBJ_THREAD:
     case KOBJ_INTERRUPT:
     case KOBJ_KIND_COUNT:
+        break;
+    case KOBJ_LOOM:
+        // Loom-2a: KObj_Loom is non-dup-able (not in TRANSFERABLE_MASK, so
+        // handle_dup rejects it), but handle_GET also acquires -- it holds a
+        // ref so the snapshot's obj stays alive across the borrow, paired with
+        // handle_put's loom_unref. So this MUST bump (a no-op would underflow
+        // the refcount on the get/put pairing and free the ring early).
+        loom_ref((struct Loom *)obj);
         break;
     default:
         extinction("handle_acquire_obj: out-of-enum kobj_kind (memory corruption?)");

@@ -22,6 +22,7 @@
 #include <thylacine/extinction.h>
 #include <thylacine/handle.h>
 #include <thylacine/irqfwd.h>
+#include <thylacine/loom.h>
 #include <thylacine/mmio_handle.h>
 #include <thylacine/notes.h>
 #include <thylacine/page.h>
@@ -2721,6 +2722,179 @@ static s64 sys_burrow_detach_handler(u64 vaddr_raw, u64 length_raw) {
     return sys_burrow_detach_for_proc(t->proc, vaddr_raw, length_raw);
 }
 
+// =============================================================================
+// Loom -- the io_uring-inverted 9P ring transport (Loom-2a). kernel/loom.c owns
+// the KObj_Loom + the ring substrate; these inners wire a ring into a Proc's
+// address space + handle table (the sys_burrow_attach_for_proc factoring). The
+// SQE dispatch + the submit-time pin + the CQE post (SYS_LOOM_ENTER) are Loom-3.
+// =============================================================================
+
+int sys_loom_setup_for_proc(struct Proc *p, u32 entries, u32 flags,
+                            struct loom_params *out, hidx_t *out_fd) {
+    if (!p || !out || !out_fd)                       return -1;
+    if (flags != 0)                                  return -1;  // Loom-2a: no flags
+    if (entries == 0 || entries > LOOM_MAX_ENTRIES)  return -1;
+    if ((entries & (entries - 1u)) != 0)             return -1;  // power of two
+
+    // io_uring default: CQ twice the SQ. `entries` is a power of two <=
+    // LOOM_MAX_ENTRIES, so cq_entries is a power of two <= 2*LOOM_MAX_ENTRIES.
+    u32 cq_entries = entries * 2u;
+
+    struct Loom *l = loom_create(entries, cq_entries);
+    if (!l)                                          return -1;
+
+    // Map the ring RW into the burrow-attach window. burrow_map takes its OWN
+    // mapping_count ref (vma_alloc -> burrow_acquire_mapping); the Loom keeps
+    // its handle_count ref, so the ring stays alive while EITHER side holds it
+    // (the #847 dual-refcount). vma_find_gap + burrow_map under one vma_lock so
+    // a sibling thread cannot claim the same gap.
+    spin_lock(&p->vma_lock);
+    u64 vaddr;
+    if (vma_find_gap(p, (size_t)l->ring_size, EXEC_USER_BURROW_BASE,
+                     EXEC_USER_BURROW_TOP, &vaddr) != 0) {
+        spin_unlock(&p->vma_lock);
+        loom_unref(l);
+        return -1;
+    }
+    if (burrow_map(p, l->ring, vaddr, (size_t)l->ring_size, VMA_PROT_RW) != 0) {
+        spin_unlock(&p->vma_lock);
+        loom_unref(l);
+        return -1;
+    }
+    spin_unlock(&p->vma_lock);
+
+    // Install the handle. It ADOPTS the Loom's creation refcount (=1): a later
+    // handle_close -> handle_release_obj(KOBJ_LOOM) -> loom_unref drops it. On
+    // alloc failure, unmap + loom_unref fully reclaims (handle_count to 0 via
+    // loom_free's burrow_unref, mapping_count to 0 via burrow_unmap).
+    hidx_t fd = handle_alloc(p, KOBJ_LOOM, RIGHT_READ | RIGHT_WRITE, l);
+    if (fd < 0) {
+        spin_lock(&p->vma_lock);
+        (void)burrow_unmap(p, vaddr, (size_t)l->ring_size);
+        spin_unlock(&p->vma_lock);
+        loom_unref(l);
+        return -1;
+    }
+
+    out->flags         = 0;
+    out->sq_entries    = l->sq_entries;
+    out->cq_entries    = l->cq_entries;
+    out->ring_size     = l->ring_size;
+    out->ring_va       = vaddr;
+    out->hdr_off       = l->hdr_off;
+    out->sq_array_off  = l->sq_array_off;
+    out->sqe_off       = l->sqe_off;
+    out->cqe_off       = l->cqe_off;
+    out->sq_array_size = l->sq_array_size;
+    out->sqe_size      = l->sqe_size;
+    out->cqe_size      = l->cqe_size;
+    out->_resv0        = 0;
+    out->_resv1[0] = out->_resv1[1] = out->_resv1[2] = out->_resv1[3] = 0;
+    *out_fd = fd;
+    return 0;
+}
+
+int sys_loom_register_for_proc(struct Proc *p, hidx_t loom_fd, u32 op,
+                               const hidx_t *fds, u32 n) {
+    if (!p)                            return -1;
+    if (op != LOOM_REGISTER_HANDLES)   return -1;   // BUFFERS reserved (Loom-6)
+    if (n > LOOM_MAX_REG_HANDLES)      return -1;
+    if (n > 0 && !fds)                 return -1;
+
+    struct Handle lh;
+    if (handle_get(p, loom_fd, &lh) != 0)  return -1;
+    if (lh.kind != KOBJ_LOOM)              { handle_put(&lh); return -1; }
+    struct Loom *l = (struct Loom *)lh.obj;
+
+    // Resolve each fd -> KOBJ_SPOOR, taking the table's OWN ref + snapshotting
+    // rights. handle_get holds a ref under the table lock; we spoor_ref a
+    // SECOND, independent ref for the ring then handle_put the get's ref -- so
+    // the ring's ref is decoupled from the caller's fd (the caller may close
+    // it; the ring keeps the Spoor alive -- the I-30 submit-time-pin substrate).
+    struct Spoor *spoors[LOOM_MAX_REG_HANDLES];
+    rights_t      rights[LOOM_MAX_REG_HANDLES];
+    u32 got = 0;
+    for (u32 i = 0; i < n; i++) {
+        struct Handle sh;
+        if (handle_get(p, fds[i], &sh) != 0)   goto rollback;
+        if (sh.kind != KOBJ_SPOOR)             { handle_put(&sh); goto rollback; }
+        spoor_ref((struct Spoor *)sh.obj);
+        spoors[got] = (struct Spoor *)sh.obj;
+        rights[got] = sh.rights;
+        got++;
+        handle_put(&sh);
+    }
+
+    // loom_register_handles ADOPTS the `got` refs on success (it cannot fail
+    // here: got <= n <= LOOM_MAX_REG_HANDLES).
+    if (loom_register_handles(l, spoors, rights, got) != 0) goto rollback;
+    handle_put(&lh);
+    return 0;
+
+rollback:
+    for (u32 i = 0; i < got; i++) spoor_clunk(spoors[i]);
+    handle_put(&lh);
+    return -1;
+}
+
+static s64 sys_loom_setup_handler(u64 entries_raw, u64 params_va) {
+    struct Thread *t = current_thread();
+    if (!t || !t->proc)                              return -1;
+    struct Proc *p = t->proc;
+    if (!sys_validate_user_buf(params_va, sizeof(struct loom_params))) return -1;
+
+    // Read the one IN field (params.flags, u32 at offset 0); the rest is OUT.
+    u8 fb[4];
+    for (int i = 0; i < 4; i++)
+        if (uaccess_load_u8(params_va + (u64)i, &fb[i]) != 0) return -1;
+    u32 flags = (u32)fb[0] | ((u32)fb[1] << 8) | ((u32)fb[2] << 16) | ((u32)fb[3] << 24);
+
+    struct loom_params kp;
+    hidx_t fd;
+    if (sys_loom_setup_for_proc(p, (u32)entries_raw, flags, &kp, &fd) != 0) return -1;
+
+    // Copy the geometry back. A fault mid-writeback fully rolls back the setup
+    // (handle_close -> loom_unref drops the ring's handle_count; burrow_unmap
+    // drops mapping_count to 0 -> the pages free) so a faulting caller never
+    // leaks a ring it cannot see. ring_va / ring_size come from kp.
+    const u8 *src = (const u8 *)&kp;
+    for (u64 i = 0; i < sizeof(struct loom_params); i++) {
+        if (uaccess_store_u8(params_va + i, src[i]) != 0) {
+            (void)handle_close(p, fd);
+            spin_lock(&p->vma_lock);
+            (void)burrow_unmap(p, kp.ring_va, (size_t)kp.ring_size);
+            spin_unlock(&p->vma_lock);
+            return -1;
+        }
+    }
+    return (s64)fd;
+}
+
+static s64 sys_loom_register_handler(u64 loom_fd_raw, u64 op_raw,
+                                     u64 arg_va, u64 nargs_raw) {
+    struct Thread *t = current_thread();
+    if (!t || !t->proc)                              return -1;
+    struct Proc *p = t->proc;
+    u32 op = (u32)op_raw;
+    u32 n  = (u32)nargs_raw;
+    if (n > LOOM_MAX_REG_HANDLES)                    return -1;
+
+    hidx_t fds[LOOM_MAX_REG_HANDLES];
+    if (n > 0) {
+        if (!sys_validate_user_buf(arg_va, (u64)n * sizeof(u32))) return -1;
+        for (u32 i = 0; i < n; i++) {
+            u8 fb[4];
+            for (int b = 0; b < 4; b++)
+                if (uaccess_load_u8(arg_va + (u64)i * 4u + (u64)b, &fb[b]) != 0)
+                    return -1;
+            u32 v = (u32)fb[0] | ((u32)fb[1] << 8) | ((u32)fb[2] << 16) | ((u32)fb[3] << 24);
+            fds[i] = (hidx_t)v;
+        }
+    }
+    return (s64)sys_loom_register_for_proc(p, (hidx_t)loom_fd_raw, op,
+                                           n > 0 ? fds : NULL, n);
+}
+
 // P6-pouch-wait-addr (sub-chunk 8): SYS_TORPOR_WAIT / SYS_TORPOR_WAKE
 // SVC handlers — thin `current_thread()` wrappers over the testable
 // `_for_proc` inners in `kernel/torpor.c`. timeout_us is signed s64
@@ -4977,6 +5151,15 @@ void syscall_dispatch(struct exception_context *ctx) {
     case SYS_BURROW_DETACH:
         ctx->regs[0] = (u64)sys_burrow_detach_handler(ctx->regs[0],
                                                       ctx->regs[1]);
+        return;
+
+    case SYS_LOOM_SETUP:
+        ctx->regs[0] = (u64)sys_loom_setup_handler(ctx->regs[0], ctx->regs[1]);
+        return;
+
+    case SYS_LOOM_REGISTER:
+        ctx->regs[0] = (u64)sys_loom_register_handler(ctx->regs[0], ctx->regs[1],
+                                                      ctx->regs[2], ctx->regs[3]);
         return;
 
     case SYS_TORPOR_WAIT:

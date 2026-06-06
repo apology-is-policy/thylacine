@@ -1258,6 +1258,42 @@ enum {
     //                   selects a walk-only (unopened) handle.
     // Returns an opened (or O_PATH walkable) KOBJ_SPOOR fd (>= 0) or -1.
     SYS_OPEN = 65,
+
+    // Loom -- the io_uring-inverted shared-memory ring transport for 9P
+    // (docs/LOOM.md; ABI in <thylacine/loom.h>). Userspace posts 9P-shaped ops
+    // into a submission ring living in a shared Burrow; the kernel's #841
+    // elected-reader 9P client drives them; R-messages return as completion
+    // queue entries. The opcodes ARE the p9_client_* surface -- no new opcode
+    // namespace.
+
+    // SYS_LOOM_SETUP(entries, params_va) -> loom_fd / -1   (Loom-2a)
+    //   x0 = entries   : SQ entries; power of two, 1..LOOM_MAX_ENTRIES.
+    //   x1 = params_va : user-VA of a `struct loom_params`. IN: params.flags
+    //                    (LOOM_SETUP_*; must be 0 at Loom-2a -- SQPOLL/CQSIZE
+    //                    land later). OUT: the ring geometry (ring_va + the
+    //                    per-region offsets/sizes) the caller maps.
+    // Allocates the ring Burrow, maps it RW into the caller (the burrow-attach
+    // window), installs a KObj_Loom handle, fills params, returns the fd. -1 on
+    // bad args / non-zero flags / OOM / handle-table-full.
+    SYS_LOOM_SETUP   = 66,   // arg: entries (x0), params_va (x1)
+
+    // SYS_LOOM_REGISTER(loom_fd, op, arg_va, nargs) -> 0 / -1   (Loom-2a)
+    //   x0 = loom_fd : a KObj_Loom handle.
+    //   x1 = op      : LOOM_REGISTER_HANDLES (install the fixed-handle table)
+    //                  at Loom-2a; LOOM_REGISTER_BUFFERS is reserved (Loom-6).
+    //   x2 = arg_va  : LOOM_REGISTER_HANDLES -> user-VA of a u32[nargs] of fds
+    //                  (each must be a KOBJ_SPOOR handle in the caller). The
+    //                  call REPLACES the whole table (IORING_REGISTER_FILES
+    //                  semantics); each registered handle is resolved + its
+    //                  rights snapshotted (the I-30 submit-time-pin substrate).
+    //   x3 = nargs   : 0..LOOM_MAX_REG_HANDLES.
+    // -1 on bad loom_fd / unsupported op / nargs out of range / a non-KOBJ_SPOOR
+    // fd in the list.
+    SYS_LOOM_REGISTER = 67,  // arg: loom_fd (x0), op (x1), arg_va (x2), nargs (x3)
+
+    // 68 -- RESERVED for SYS_LOOM_ENTER(loom_fd, to_submit, min_complete, flags)
+    // (submit N / reap M). Defined + dispatched at Loom-3 (the batch-enter
+    // core); the number is reserved here so the Loom ABI block is contiguous.
 };
 
 // SYS_WALK_OPEN's FROM_ROOT sentinel: when passed as the spoor_fd, the

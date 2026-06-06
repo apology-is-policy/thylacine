@@ -59,18 +59,19 @@ enum kobj_kind {
     KOBJ_DMA        = 7,    // a DMA buffer, non-transferable
     KOBJ_INTERRUPT  = 8,    // an eventfd-like interrupt, non-transferable
     KOBJ_SRV        = 9,    // a /srv service or connection object, non-transferable (P5-corvus-srv)
-    KOBJ_KIND_COUNT = 10,
+    KOBJ_LOOM       = 10,   // a Loom ring (KObj_Loom), non-transferable (Loom-2a)
+    KOBJ_KIND_COUNT = 11,
 };
 
 // _Static_assert pins KIND_COUNT — adding a new kind requires bumping
-// this constant + extending the transferable/hw masks below + reviewing
-// every switch over kobj_kind in the kernel (per ARCH §18.3 typed
+// this constant + extending the transferable/hw/srv/loom masks below +
+// reviewing every switch over kobj_kind in the kernel (per ARCH §18.3 typed
 // transferability).
-_Static_assert(KOBJ_KIND_COUNT == 10,
+_Static_assert(KOBJ_KIND_COUNT == 11,
                "kobj_kind drift: when adding a new kind, update "
                "KOBJ_KIND_TRANSFERABLE_MASK / KOBJ_KIND_HW_MASK / "
-               "KOBJ_KIND_SRV_MASK + every switch over kobj_kind "
-               "(handle_release_obj, handle_acquire_obj).");
+               "KOBJ_KIND_SRV_MASK / KOBJ_KIND_LOOM_MASK + every switch over "
+               "kobj_kind (handle_release_obj, handle_acquire_obj).");
 
 // Per ARCH §28 I-4 + I-5 + §18.2: handles are partitioned into three
 // disjoint sets — transferable (Process / Thread / BURROW / Spoor —
@@ -98,17 +99,30 @@ _Static_assert(KOBJ_KIND_COUNT == 10,
 #define KOBJ_KIND_SRV_MASK \
     (1u << KOBJ_SRV)
 
+// Loom-2a: KObj_Loom is non-transferable + non-hardware — a fourth
+// partition. A Loom ring is pinned to the Proc whose address space holds
+// the ring Burrow + whose handle table the registered handles name, so it
+// is meaningless to pass to another Proc (and is never dup-able).
+#define KOBJ_KIND_LOOM_MASK \
+    (1u << KOBJ_LOOM)
+
 _Static_assert((KOBJ_KIND_TRANSFERABLE_MASK & KOBJ_KIND_HW_MASK) == 0,
                "transferable + hw kind masks must be disjoint");
 _Static_assert((KOBJ_KIND_TRANSFERABLE_MASK & KOBJ_KIND_SRV_MASK) == 0,
                "transferable + srv kind masks must be disjoint");
 _Static_assert((KOBJ_KIND_HW_MASK & KOBJ_KIND_SRV_MASK) == 0,
                "hw + srv kind masks must be disjoint");
+_Static_assert((KOBJ_KIND_TRANSFERABLE_MASK & KOBJ_KIND_LOOM_MASK) == 0,
+               "transferable + loom kind masks must be disjoint");
+_Static_assert((KOBJ_KIND_HW_MASK & KOBJ_KIND_LOOM_MASK) == 0,
+               "hw + loom kind masks must be disjoint");
+_Static_assert((KOBJ_KIND_SRV_MASK & KOBJ_KIND_LOOM_MASK) == 0,
+               "srv + loom kind masks must be disjoint");
 _Static_assert((KOBJ_KIND_TRANSFERABLE_MASK | KOBJ_KIND_HW_MASK |
-                KOBJ_KIND_SRV_MASK)
+                KOBJ_KIND_SRV_MASK | KOBJ_KIND_LOOM_MASK)
                    == (((1u << KOBJ_KIND_COUNT) - 1u) & ~(1u << KOBJ_INVALID)),
                "every kobj_kind except KOBJ_INVALID must be classified "
-               "into exactly one of the three partitions");
+               "into exactly one of the four partitions");
 
 // Per ARCH §18.2. Handle rights — bitmask of what the holder can do.
 typedef u32 rights_t;
