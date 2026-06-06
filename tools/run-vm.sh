@@ -261,22 +261,37 @@ if [[ -n "$snapshot" ]]; then
     echo "Snapshot restore not yet implemented (Phase 5+ deliverable)." >&2
 fi
 
-# Hardware-acceleration toggle. Default tcg (portable + deterministic; -cpu max
-# emulates the full v8.5 feature set incl. RNDR). THYLACINE_ACCEL=hvf uses the
-# macOS Hypervisor.framework on Apple Silicon for a much faster boot -- but the
-# guest then sees the HOST CPU's real features via -cpu host: Apple cores have
-# LSE+PAC+BTI but NOT FEAT_RNG/RNDR, so the kernel RNG falls back (DTB seed drives
-# KASLR + the stack canary; SYS_GETRANDOM returns -1 until the software-RNG
-# fallback lands). THYLACINE_CPU overrides the -cpu model explicitly.
-accel="${THYLACINE_ACCEL:-tcg}"
+# Hardware-acceleration toggle. DEFAULT: HVF on a capable host (Apple Silicon
+# with Hypervisor.framework), else TCG. This is the Lazarus M1 end-state -- HVF
+# is the fast dev/test loop; TCG is the portable compat reference (PORTABILITY.md
+# section 8). Auto-detection probes the host AND the qemu build, so the launcher
+# still works on a non-Apple box (it falls back to TCG). Force either explicitly:
+#   THYLACINE_ACCEL=hvf tools/run-vm.sh     # require HVF
+#   THYLACINE_ACCEL=tcg tools/test.sh       # the full-emulation compat run
+# Under HVF the guest sees the HOST CPU via -cpu host: Apple cores have
+# LSE+PAC+BTI but NOT FEAT_RNG/RNDR, so the kernel CSPRNG seeds from the
+# virtio-rng device (Lazarus W3) -- one software path on every target.
+detect_accel() {
+    if [[ "$(uname -s)" == "Darwin" \
+       && "$(sysctl -n kern.hv_support 2>/dev/null)" == "1" ]] \
+       && qemu-system-aarch64 -accel help 2>/dev/null | grep -qw hvf; then
+        echo hvf
+    else
+        echo tcg
+    fi
+}
+accel="${THYLACINE_ACCEL:-$(detect_accel)}"
+
+# -cpu model + GIC version default off the chosen accel. HVF wants -cpu host +
+# GICv2: its emulated GICv3 distributor MMIO trips an `isv` data-abort assert,
+# and the GICv2 MMIO CPU interface is the HVF-on-Apple enabler (Lazarus W2). TCG
+# wants -cpu max (full ISA incl. RNDR) + GICv3 (QEMU virt's modern default; the
+# kernel autodetects v2-vs-v3 from DTB). THYLACINE_CPU / THYLACINE_GIC override.
 case "$accel" in
-    hvf) cpu="${THYLACINE_CPU:-host}" ;;
-    *)   cpu="${THYLACINE_CPU:-max}"  ;;
+    hvf) cpu="${THYLACINE_CPU:-host}"; gicv="${THYLACINE_GIC:-2}" ;;
+    *)   cpu="${THYLACINE_CPU:-max}";  gicv="${THYLACINE_GIC:-3}" ;;
 esac
-# GIC version. Default 3 (QEMU virt's modern default; the kernel autodetects
-# v2-vs-v3 from DTB). THYLACINE_GIC=2 forces GICv2 -- a probe path for HVF, whose
-# emulated GICv3 distributor MMIO can trip an `isv` data-abort assertion.
-gicv="${THYLACINE_GIC:-3}"
+echo "==> qemu: accel=$accel cpu=$cpu gic=v$gicv smp=$cpus" >&2
 
 # Canonical QEMU flags per TOOLING.md §3.
 #

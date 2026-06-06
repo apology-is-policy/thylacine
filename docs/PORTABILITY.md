@@ -279,11 +279,13 @@ the virtual timer is correct there too.)
 soundness gate (default + UBSan x smp4/smp8) clean; HVF+GICv2 boots the kernel +
 runs deep into the userspace suite on real M-series silicon.
 
-**Owed follow-up (#890)**: under HVF the *userspace* virtio-mmio driver
-(virtio-blk-probe) trips the same `isv` assert on its back-to-back register
+**Owed follow-up (#890) -- CLOSED @0124a8f (W3.5):** under HVF the *userspace*
+virtio-mmio drivers tripped the same `isv` assert on their back-to-back register
 sequence -- a different layer (userspace driver codegen, not the kernel GIC).
-The kernel GIC + timer are HVF-proven; #890 is the remaining gap to a
-100%-green HVF boot and is tracked separately.
+Fixed by routing every userspace device-MMIO access through an ISV-safe
+single-instruction `ldr`/`str` primitive (see section 8). The HVF boot now
+reaches `Thylacine boot OK` (721/721, 0 isv); it was the last gap to a
+100%-green HVF boot.
 
 ---
 
@@ -402,19 +404,30 @@ under QEMU (TCG + HVF) without any of W4.
   reference*. TCG is not retired -- it is the only path that exercises RNDR,
   GICv3, and the full `-cpu max` ISA, so it stays the portable, deterministic,
   full-feature check (run before pushes / on GIC / RNDR / atomics-touching
-  changes, and on any non-Apple host). The remaining workstream (**W3.5**):
-  - **#890 -- the hard gate.** The HVF boot must reach `Thylacine boot OK`;
-    today it trips QEMU's `isv` assert on the **userspace** virtio-mmio driver
-    (the kernel's virtio-mmio path already works under HVF -- W3). Root-cause +
-    fix the userspace accessor codegen (the emitted load/store form must give
-    ISV=1 so HVF can emulate the MMIO access, as the kernel's already does).
-  - **the default flip** -- `tools/run-vm.sh` / `test.sh` / `ci-smp-gate.sh`
-    default to `accel=hvf` + `gic-version=2`; a one-flag `THYLACINE_ACCEL=tcg`
-    (+ a `make test-tcg`) restores the compat reference.
-  - **validate full-green HVF** -- the suite + the SMP multi-boot gate under
-    HVF. HVF's real-core timing is looser than TCG's, so the soundness gate
-    leans on the multi-boot + soft-warn discipline (#865), not single-boot
-    determinism.
+  changes, and on any non-Apple host). **W3.5 -- LANDED 2026-06-06:**
+  - **#890 -- the hard gate (FIXED @0124a8f).** The HVF boot now reaches
+    `Thylacine boot OK`. The userspace virtio-mmio accessors were emitting
+    ISV=0 load/store forms -- pre-indexed writeback (`str wzr,[x13,#0x6c]!`, the
+    VirtIO RESET write) + unscaled `stur`/`ldur` -- once LLVM folded the
+    `#[inline(always)]` helpers into a register-dense caller; HVF can only
+    emulate an MMIO access when `ESR_EL1.ISV=1`. Routed every device-MMIO access
+    through a new single-instruction base-only `ldr`/`str` primitive in
+    `libthyla_rs::hardware` (the kernel's out-of-line accessors were already
+    ISV=1, which is why kernel virtio worked under HVF while userspace tripped).
+    721/721 under HVF, 0 isv, 0 EXTINCTION; TCG regression 721/721.
+  - **the default flip (DONE).** `tools/run-vm.sh` auto-detects HVF on a capable
+    host (Apple Silicon + `kern.hv_support` + qemu-built-with-hvf) and defaults
+    to `accel=hvf` + `gic-version=2` + `-cpu host`; every other repo launcher
+    (`test.sh` / `ci-smp-gate.sh` / `test-cross-reboot.sh` / `test-fault.sh` /
+    `verify-kaslr.sh`) delegates to `run-vm.sh` and inherits the default with no
+    change of their own. `THYLACINE_ACCEL=tcg` (+ `make test-tcg` / `make
+    run-tcg`) forces the full-emulation compat reference; a non-Apple host
+    auto-falls-back to TCG.
+  - **full-green HVF validated.** The suite (721/721) + the SMP multi-boot
+    soundness gate -- default+UBSan x smp4/smp8, N=10, 40 boots -- run **0
+    corruption** under HVF's real-core concurrency, a stronger #860-class race
+    test than TCG's round-robin. The gate leans on the multi-boot + soft-warn
+    discipline (#865), not single-boot determinism. **M1 is COMPLETE.**
   Deliberately **host-specific** (HVF needs Apple Silicon + macOS) -- the right
   trade for a solo-on-this-host project; TCG remains the fallback for any other
   host / CI.
@@ -462,14 +475,16 @@ is the natural first impl (scripture mostly written, the near-term dev-loop win)
   (blocker 1, the GICv2-MMIO `ISV=0` timing heisenbug); framed as "expected to
   work, validated empirically at W2," not a hard guarantee.
 - **W4 storage** (SD-EMMC driver vs USB-MSC vs netboot): deferred to W4 design.
-- **CI baseline (REVERSED 2026-06-06):** the original decision -- "stays
-  `-cpu max` + GICv3; HVF + bare metal as additional matrices" -- is superseded
-  by the M1 end-state above (§8). **HVF-on-this-host (`-cpu host` + GICv2)
-  becomes the DEFAULT dev/test loop** once #890 is fixed; **TCG (`-cpu max` +
-  GICv3) is demoted to the occasional compat reference** (the unique exerciser
-  of RNDR / GICv3 / full-`-cpu max` ISA, and the only host-portable path). The
-  W3.5 workstream (§8) executes the reversal: #890 -> the default flip -> full
-  HVF validation.
+- **CI baseline (REVERSED 2026-06-06; EXECUTED via W3.5):** the original
+  decision -- "stays `-cpu max` + GICv3; HVF + bare metal as additional
+  matrices" -- is superseded by the M1 end-state above (§8). **HVF-on-this-host
+  (`-cpu host` + GICv2) is now the DEFAULT dev/test loop** (the W3.5 default
+  flip landed 2026-06-06: `run-vm.sh` auto-detects HVF, every launcher inherits
+  it); **TCG (`-cpu max` + GICv3) is demoted to the occasional compat
+  reference** (the unique exerciser of RNDR / GICv3 / full-`-cpu max` ISA, and
+  the only host-portable path -- `THYLACINE_ACCEL=tcg` / `make test-tcg`). The
+  W3.5 workstream (§8) executed the reversal in full: #890 fixed -> the default
+  flip -> full HVF validation (suite + 40-boot SMP gate, 0 corruption).
 
 ---
 

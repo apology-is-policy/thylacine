@@ -69,7 +69,9 @@ qemu-system-aarch64 \
   -device virtio-net-pci,netdev=net0    # VirtIO network
 ```
 
-**`-cpu max`** is preferred over `-cpu cortex-a76` for development: it exposes every ARMv8.5+ extension QEMU emulates (PAC, MTE, BTI, LSE, SVE), which the hardening stack relies on per `ARCHITECTURE.md §24`. For Pi 5 hardware testing, the actual Pi 5 CPU (Cortex-A76, ARMv8.2) provides PAC+LSE but not MTE/BTI; the kernel detects and adapts at boot.
+**Accel default (since Lazarus W3.5, 2026-06-06):** `run-vm.sh` **auto-detects HVF** on a capable host (Apple Silicon + `kern.hv_support` + a qemu built with hvf) and defaults to `accel=hvf` + `gic-version=2` + `-cpu host` — the fast dev/test loop, the M1 end-state (`PORTABILITY.md §8`). The `-machine virt,gic-version=3 -cpu max` (TCG) flags shown above are now the **occasional full-emulation compat reference** (the unique exerciser of RNDR / GICv3 / full-ISA, and the only host-portable path); force it with `THYLACINE_ACCEL=tcg` (or `make test-tcg` / `make run-tcg`). A non-Apple host auto-falls-back to TCG. `THYLACINE_ACCEL` / `THYLACINE_CPU` / `THYLACINE_GIC` override explicitly.
+
+**`-cpu max`** is preferred over `-cpu cortex-a76` for the TCG compat reference: it exposes every ARMv8.5+ extension QEMU emulates (PAC, MTE, BTI, LSE, SVE), which the hardening stack relies on per `ARCHITECTURE.md §24`. Under HVF the guest sees the host CPU via `-cpu host` (Apple cores: LSE+PAC+BTI, no RNDR — the kernel CSPRNG seeds from virtio-rng instead, Lazarus W3). For Pi 5 hardware testing, the actual Pi 5 CPU (Cortex-A76, ARMv8.2) provides PAC+LSE but not MTE/BTI; the kernel detects and adapts at boot.
 
 **Flags to add as phases progress:**
 

@@ -73,7 +73,11 @@ BOOT_TIMEOUT="${BOOT_TIMEOUT:-90}"          # seconds -- wallclock max,
                                             # concurrent host load (the
                                             # original >45 s timeouts were
                                             # slow-mode + a concurrent build/
-                                            # agent). THYLACINE_TEST_CPUS=1 is
+                                            # agent). HVF -- the default accel
+                                            # since W3.5 -- boots far faster;
+                                            # the 90 s bound is sized for the
+                                            # slower TCG compat run.
+                                            # THYLACINE_TEST_CPUS=1 is
                                             # fast + has no boot-time variance,
                                             # but DO NOT rely on it for CI yet:
                                             # at -smp 1 joey exits non-zero in
