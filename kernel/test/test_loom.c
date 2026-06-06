@@ -29,6 +29,7 @@ void test_loom_setup_rejects(void);
 void test_loom_register_handles(void);
 void test_loom_register_rejects(void);
 void test_loom_register_replaces(void);
+void test_loom_post_cqe_back_pressure(void);
 
 // The testable syscall inners live in kernel/syscall.c (declared in loom.h);
 // sys_pipe_for_proc is the KOBJ_SPOOR-pair maker (declared nowhere public --
@@ -275,4 +276,50 @@ void test_loom_register_replaces(void) {
     handle_put(&h);
 
     test_proc_drop(p);
+}
+
+// ---------------------------------------------------------------------------
+// loom_post_cqe back-pressure (Loom-2b): the POST_CQE front-end's CQ writer
+// never overwrites an unreaped completion (CqNeverOverfull, I-29). A full CQ
+// refuses the post (-1) + bumps the overflow counter; a user-side reap frees
+// slots so later posts succeed (wrapping). Maps to specs/loom.tla PostCqe's
+// `Cardinality(cq) < CQ_CAP` guard + CqNeverOverfull.
+// ---------------------------------------------------------------------------
+void test_loom_post_cqe_back_pressure(void) {
+    struct Loom *l = loom_create(4, 4);   // cq_entries = 4 (smallest exercising wrap)
+    TEST_ASSERT(l != NULL, "loom_create(4,4)");
+    struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+    struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
+
+    // Fill the CQ to capacity: every post within capacity succeeds.
+    for (u32 i = 0; i < 4; i++) {
+        TEST_EXPECT_EQ(loom_post_cqe(l, (u64)(0x1000u + i), (s32)i, 0), 0,
+                       "post within capacity succeeds");
+    }
+    TEST_EXPECT_EQ((u64)h->cq_tail, (u64)4, "cq_tail = 4 (full)");
+    TEST_EXPECT_EQ((u64)h->overflow, (u64)0, "no overflow while posts fit");
+
+    // Full CQ: the post is REFUSED, overflow bumped, and -- critically -- no
+    // staged CQE is overwritten (CqNeverOverfull).
+    TEST_EXPECT_EQ(loom_post_cqe(l, 0x9999u, 42, 0), -1, "post into full CQ refused");
+    TEST_EXPECT_EQ((u64)h->cq_tail, (u64)4, "cq_tail unchanged (no overwrite)");
+    TEST_EXPECT_EQ((u64)h->overflow, (u64)1, "overflow counter bumped");
+    for (u32 i = 0; i < 4; i++) {
+        TEST_EXPECT_EQ(cqes[i].user_data, (u64)(0x1000u + i), "staged CQE intact");
+        TEST_EXPECT_EQ((u64)(u32)cqes[i].result, (u64)i, "staged CQE result intact");
+    }
+
+    // Userspace reaps 2 (advances cq_head) -> 2 slots free -> 2 more posts land
+    // in the wrapped slots; the 3rd is refused again.
+    __atomic_store_n(&h->cq_head, 2u, __ATOMIC_RELEASE);
+    TEST_EXPECT_EQ(loom_post_cqe(l, 0x2000u, 7, 0), 0, "post after reap succeeds");
+    TEST_EXPECT_EQ(loom_post_cqe(l, 0x2001u, 8, 0), 0, "second post after reap succeeds");
+    TEST_EXPECT_EQ(loom_post_cqe(l, 0x2002u, 9, 0), -1, "CQ full again");
+    TEST_EXPECT_EQ((u64)h->cq_tail, (u64)6, "two more posted (tail 4 -> 6)");
+    TEST_EXPECT_EQ((u64)h->overflow, (u64)2, "overflow bumped once more");
+    // tail 4 -> slot (4 & 3) = 0; tail 5 -> slot (5 & 3) = 1.
+    TEST_EXPECT_EQ(cqes[4u & h->cq_mask].user_data, (u64)0x2000u, "wrapped slot holds new CQE");
+    TEST_EXPECT_EQ(cqes[5u & h->cq_mask].user_data, (u64)0x2001u, "wrapped slot holds new CQE");
+
+    loom_unref(l);
 }

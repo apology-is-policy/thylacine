@@ -204,6 +204,7 @@ void test_loom_setup_rejects(void);
 void test_loom_register_handles(void);
 void test_loom_register_rejects(void);
 void test_loom_register_replaces(void);
+void test_loom_post_cqe_back_pressure(void);
 void test_thread_create_user_ctx_layout(void);
 void test_thread_exit_self_marks_exiting(void);
 void test_thread_exit_self_last_thread_zombies(void);
@@ -545,6 +546,9 @@ void test_9p_client_readlink(void);
 void test_9p_client_rlerror_propagates_to_negative_errno(void);
 void test_9p_client_op_before_handshake_returns_ebusy(void);
 void test_9p_client_lock_released_between_ops(void);
+void test_9p_client_async_op_posts_cqe(void);
+void test_9p_client_async_session_death_posts_error_cqe(void);
+void test_9p_client_async_handoff_skips_async(void);
 void test_dev9p_registered(void);
 void test_dev9p_attach_client_root_spoor(void);
 void test_dev9p_walk_one_component(void);
@@ -1026,6 +1030,7 @@ struct test_case g_tests[] = {
     { "loom.register_handles",           test_loom_register_handles,           false, NULL },
     { "loom.register_rejects",           test_loom_register_rejects,           false, NULL },
     { "loom.register_replaces",          test_loom_register_replaces,          false, NULL },
+    { "loom.post_cqe_back_pressure",     test_loom_post_cqe_back_pressure,     false, NULL },
     { "thread.create_user_ctx_layout",         test_thread_create_user_ctx_layout,         false, NULL },
     { "thread.exit_self_marks_exiting",        test_thread_exit_self_marks_exiting,        false, NULL },
     { "thread.exit_self_last_thread_zombies",  test_thread_exit_self_last_thread_zombies,  false, NULL },
@@ -1464,6 +1469,13 @@ struct test_case g_tests[] = {
                                                                            false, NULL },
     { "9p_client.lock_released_between_ops",
                                        test_9p_client_lock_released_between_ops,
+                                                                           false, NULL },
+    { "9p_client.async_op_posts_cqe",  test_9p_client_async_op_posts_cqe,  false, NULL },
+    { "9p_client.async_session_death_posts_error_cqe",
+                                       test_9p_client_async_session_death_posts_error_cqe,
+                                                                           false, NULL },
+    { "9p_client.async_handoff_skips_async",
+                                       test_9p_client_async_handoff_skips_async,
                                                                            false, NULL },
     { "dev9p.registered",              test_dev9p_registered,              false, NULL },
     { "dev9p.attach_client_root_spoor",test_dev9p_attach_client_root_spoor,false, NULL },

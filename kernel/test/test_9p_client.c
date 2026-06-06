@@ -15,6 +15,9 @@
 #include <thylacine/9p_transport.h>
 #include <thylacine/9p_transport_loopback.h>
 #include <thylacine/9p_wire.h>
+#include <thylacine/loom.h>
+#include <thylacine/rendez.h>
+#include <thylacine/spinlock.h>
 #include <thylacine/types.h>
 
 void test_9p_client_init_destroy(void);
@@ -31,6 +34,9 @@ void test_9p_client_readlink(void);
 void test_9p_client_rlerror_propagates_to_negative_errno(void);
 void test_9p_client_op_before_handshake_returns_ebusy(void);
 void test_9p_client_lock_released_between_ops(void);
+void test_9p_client_async_op_posts_cqe(void);
+void test_9p_client_async_session_death_posts_error_cqe(void);
+void test_9p_client_async_handoff_skips_async(void);
 
 // File-scope buffers (kernel test stack is 16 KiB — client struct is
 // ~4 KiB; multiple in one frame is fine but file-scope is cleaner).
@@ -543,6 +549,158 @@ void test_9p_client_lock_released_between_ops(void) {
     (void)p9_client_inflight(&g_client);
     TEST_EXPECT_EQ((u64)g_client.lock.value, (u64)0,
                     "lock released after inflight");
+
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}
+
+// =============================================================================
+// Loom-2b: the pluggable-completion seam (POST_CQE).
+//
+// An async op embeds a p9_rpc with on_complete set. The engine never blocks a
+// submitter on it -- when the reply is demuxed (or the session dies) the engine
+// invokes on_complete, which posts a CQE into a Loom's CQ ring. These tests
+// exercise the seam end-to-end over the loopback: submit_async (no wait) ->
+// reader_pump_once (demux) -> on_complete -> loom_post_cqe.
+//
+// The test OWNS the Loom ref for the whole test (so the callback's lifetime is
+// trivial: post + record, never loom_unref). The production async-op container
+// + the ref-holding / quiesce-before-free lifetime are Loom-3, where
+// SYS_LOOM_ENTER makes the op's ref-drop safe outside the lock.
+// =============================================================================
+
+struct test_async_op {
+    struct p9_rpc rpc;       // FIRST member -> the callback recovers it by cast
+    struct Loom  *loom;
+    u64           user_data;
+    s32           last_result;
+    bool          completed;
+};
+_Static_assert(__builtin_offsetof(struct test_async_op, rpc) == 0,
+               "rpc must be first: the on_complete callback casts rpc -> op");
+
+static struct test_async_op g_async_op;
+
+static void test_async_on_complete(struct p9_rpc *rpc, int status,
+                                   struct p9_dispatch_result *dr) {
+    struct test_async_op *op = (struct test_async_op *)rpc;   // rpc is first
+    (void)dr;   // clunk carries no payload; `status` is the mapped result
+    op->last_result = (s32)status;
+    op->completed   = true;
+    (void)loom_post_cqe(op->loom, op->user_data, (s32)status, 0);
+}
+
+// Build thunk for submit_async: a Tclunk on the fid passed via ctx.
+static int test_build_clunk(struct p9_session *s, u8 *out, size_t cap, void *ctx) {
+    u32 fid = *(u32 *)ctx;
+    return p9_session_send_clunk(s, out, cap, fid);
+}
+
+// A demuxed reply drives on_complete, which posts a CQE carrying the op's
+// user_data + the mapped (success = 0) result.
+void test_9p_client_async_op_posts_cqe(void) {
+    struct Loom *l = loom_create(8, 16);
+    TEST_ASSERT(l != NULL, "loom_create(8,16)");
+    struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+    struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
+
+    drive_client_open(&g_client, &g_loopback);
+    p9_client_walk_one(&g_client, 0, 20, (const u8 *)"f", 1, NULL);  // bind fid 20
+
+    g_async_op.loom        = l;
+    g_async_op.user_data   = 0xCAFEBABE12345678ULL;
+    g_async_op.last_result = 0x7fffffff;
+    g_async_op.completed   = false;
+    g_async_op.rpc.on_complete = test_async_on_complete;
+
+    u32 fid = 20;
+    int rc = p9_client_submit_async(&g_client, &g_async_op.rpc, test_build_clunk, &fid);
+    TEST_EXPECT_EQ(rc, 0, "submit_async(clunk) succeeds (op in flight)");
+    TEST_ASSERT(!g_async_op.completed, "not completed before the reader pumps");
+    TEST_EXPECT_EQ((u64)h->cq_tail, (u64)0, "no CQE before pump");
+
+    int pumped = p9_client_reader_pump_once(&g_client);   // recv Rclunk + demux
+    TEST_EXPECT_EQ(pumped, 1, "pump demuxed one frame");
+    TEST_ASSERT(g_async_op.completed, "on_complete fired");
+    TEST_EXPECT_EQ(g_async_op.last_result, 0, "clunk success -> result 0");
+
+    TEST_EXPECT_EQ((u64)h->cq_tail, (u64)1, "exactly one CQE posted");
+    TEST_EXPECT_EQ(cqes[0].user_data, 0xCAFEBABE12345678ULL, "CQE user_data echoed");
+    TEST_EXPECT_EQ((u64)(s64)cqes[0].result, (u64)0, "CQE result = 0 (success)");
+
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+    loom_unref(l);
+}
+
+// A session death (transport error) completes an in-flight async op with an
+// error CQE -- there is no submitter rendez to wake (mark_dead's async arm).
+void test_9p_client_async_session_death_posts_error_cqe(void) {
+    struct Loom *l = loom_create(8, 16);
+    TEST_ASSERT(l != NULL, "loom_create(8,16)");
+    struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+
+    drive_client_open(&g_client, &g_loopback);
+    p9_client_walk_one(&g_client, 0, 21, (const u8 *)"f", 1, NULL);
+
+    g_async_op.loom        = l;
+    g_async_op.user_data   = 0xABCDEF01;
+    g_async_op.last_result = 0x7fffffff;
+    g_async_op.completed   = false;
+    g_async_op.rpc.on_complete = test_async_on_complete;
+
+    u32 fid = 21;
+    int rc = p9_client_submit_async(&g_client, &g_async_op.rpc, test_build_clunk, &fid);
+    TEST_EXPECT_EQ(rc, 0, "submit_async succeeds (op in flight)");
+    TEST_ASSERT(!g_async_op.completed, "not yet completed");
+
+    // Break the transport: destroy clears the loopback magic, so the next recv
+    // returns -1 -> the reader marks the session dead -> the in-flight async op
+    // completes with -EIO (no staged reply is consumed).
+    p9_loopback_destroy(&g_loopback);
+    int pumped = p9_client_reader_pump_once(&g_client);
+    TEST_EXPECT_EQ(pumped, -P9_E_IO, "pump sees the dead transport");
+    TEST_ASSERT(g_async_op.completed, "async op completed on session death");
+    TEST_EXPECT_EQ((u64)(s64)g_async_op.last_result, (u64)(s64)(-P9_E_IO),
+                    "error CQE result = -EIO");
+    TEST_EXPECT_EQ((u64)h->cq_tail, (u64)1, "exactly one (error) CQE posted");
+
+    p9_client_destroy(&g_client);   // loopback already destroyed
+    loom_unref(l);
+}
+
+// The elected-reader handoff hands the role to a pending SYNC op and SKIPS an
+// async op (which has no thread to run the reader loop). White-box: inject one
+// of each into inflight[] and assert which one is flagged be_reader.
+void test_9p_client_async_handoff_skips_async(void) {
+    drive_client_open(&g_client, &g_loopback);
+
+    struct p9_rpc async_rpc;
+    async_rpc.tag = 30; async_rpc.done = false; async_rpc.dead = false;
+    async_rpc.be_reader = false; async_rpc.reply_len = 0; async_rpc.reply_buf = NULL;
+    async_rpc.on_complete = test_async_on_complete;   // async -> must be skipped
+    rendez_init(&async_rpc.rendez);
+
+    struct p9_rpc sync_rpc;
+    sync_rpc.tag = 31; sync_rpc.done = false; sync_rpc.dead = false;
+    sync_rpc.be_reader = false; sync_rpc.reply_len = 0; sync_rpc.reply_buf = NULL;
+    sync_rpc.on_complete = NULL;                      // sync -> the handoff target
+    rendez_init(&sync_rpc.rendez);
+
+    spin_lock(&g_client.lock);
+    g_client.inflight[30] = &async_rpc;
+    g_client.inflight[31] = &sync_rpc;
+    spin_unlock(&g_client.lock);
+
+    p9_client_handoff_reader(&g_client);
+
+    TEST_ASSERT(!async_rpc.be_reader, "async op NOT chosen as the elected reader");
+    TEST_ASSERT(sync_rpc.be_reader, "sync op chosen as the elected reader");
+
+    spin_lock(&g_client.lock);
+    g_client.inflight[30] = NULL;
+    g_client.inflight[31] = NULL;
+    spin_unlock(&g_client.lock);
 
     p9_client_destroy(&g_client);
     p9_loopback_destroy(&g_loopback);

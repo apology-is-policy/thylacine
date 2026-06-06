@@ -162,3 +162,34 @@ int loom_register_handles(struct Loom *l, struct Spoor **spoors,
     }
     return 0;
 }
+
+int loom_post_cqe(struct Loom *l, u64 user_data, s32 result, u32 flags) {
+    if (!l || l->magic != LOOM_MAGIC) return -1;
+
+    spin_lock(&l->lock);
+    struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+    u32 tail = h->cq_tail;                                       // kernel-owned
+    u32 head = __atomic_load_n(&h->cq_head, __ATOMIC_ACQUIRE);   // user-owned
+
+    // (tail - head) is the count of posted-unreaped CQEs (free-running u32 --
+    // the subtraction is correct across wrap). cq_entries is the capacity.
+    if ((u32)(tail - head) >= l->cq_entries) {
+        // CQ full: never overwrite an unreaped CQE (CqNeverOverfull, I-29).
+        // Count the dropped post; Loom-3's submit-time admission makes this
+        // unreachable in production (then `overflow` is a pure diagnostic).
+        __atomic_store_n(&h->overflow, h->overflow + 1u, __ATOMIC_RELEASE);
+        spin_unlock(&l->lock);
+        return -1;
+    }
+
+    struct loom_cqe *cqe = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
+    u32 idx = tail & h->cq_mask;
+    cqe[idx].user_data = user_data;
+    cqe[idx].result    = result;
+    cqe[idx].flags     = flags;
+    // Publish the CQE bytes BEFORE the tail bump (release): a user-side
+    // load-acquire of cq_tail then observes a fully-written slot.
+    __atomic_store_n(&h->cq_tail, tail + 1u, __ATOMIC_RELEASE);
+    spin_unlock(&l->lock);
+    return 0;
+}

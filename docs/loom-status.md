@@ -12,7 +12,8 @@ R-messages return as completion-queue entries. No new opcode namespace — 9P *i
 the uniform vocabulary, so the async batching layer covers files, `/net`, `/proc`,
 `/srv`, and devices uniformly. Spec-first is **re-enabled** for this surface:
 `specs/loom.tla` is TLC-green and gates every impl sub-chunk. **Loom-1 (the
-model) + Loom-2a (the ring substrate) are COMPLETE.**
+model), Loom-2a (the ring substrate), and Loom-2b (the pluggable-completion
+engine seam) are COMPLETE.**
 
 ## Landed sub-chunks
 
@@ -21,6 +22,7 @@ model) + Loom-2a (the ring substrate) are COMPLETE.**
 | `ebd1f7b` | **Loom-0** | scripture — `docs/LOOM.md` + the NOVEL.md promotion + the ROADMAP §8.0a/§12.2 registration. No code. | (docs only) |
 | `7983794` | **Loom-1** | `specs/loom.tla` — the SQ/CQ op-lifecycle state machine + the cfg matrix. Pins **I-29** (completion integrity: no-lost / no-double / no-stale) + **I-30** (submit-time capability pin) + ring TOCTOU + CQ back-pressure. 12 safety invariants + 1 liveness property; clean cfg + a liveness cfg + 5 buggy-cfg counterexamples (live_sqe_reread → `ArgPinnedToSnapshot`, recheck_at_completion → `ObjPinnedToSnapshot`, double_post → `NoDoubleCompletion`, lost_on_full → `CqNeverOverfull`, stale_after_teardown → `NoStaleCompletion`). **TLC-green gates Loom-2..6.** | clean 582 distinct states; liveness (`EventuallyCompletes`) 678; each of the 5 buggy cfgs violates exactly its targeted invariant |
 | `61ae877` | **Loom-2a** | the ring **substrate**: `kernel/include/thylacine/loom.h` (the ABI — `loom_sqe`/`loom_cqe`/`loom_ring_hdr`/`loom_params` + `_Static_assert`s + `struct Loom`), `kernel/loom.c` (`KObj_Loom`: `loom_create` + the geometry + the refcount + the registered-handle table), `SYS_LOOM_SETUP` (=66) + `SYS_LOOM_REGISTER` (=67) inners + SVC handlers + dispatch, `KOBJ_LOOM` (the fourth partition mask + acquire/release), ARCH §28 I-29/I-30 + §25.4/CLAUDE.md audit-trigger row, `docs/reference/107-loom.md`. The #847 dual-refcount keeps the ring pages alive while the kernel (direct map) OR the user mapping holds a ref. **No op flows yet** — the seam + dispatch are 2b/3. | default 729/729 (+8 `loom.*`) + TCG 729/729 + 0 EXTINCTION; `loom.cfg` re-run green (pre-commit gate) |
+| *(pending)* | **Loom-2b** | the **pluggable-completion 9P-engine seam** (audit-bearing): `struct p9_rpc.on_complete` (NULL = sync `WAKE_RENDEZ` / set = async `POST_CQE`); the 3 engine sites (`demux_frame_locked` async dispatch + `map_error` + `on_complete`; `client_mark_dead_locked` async error-CQE; `client_handoff_reader_locked` skips async); `p9_client_submit_async` (no wait, takes ownership); `p9_client_reader_pump_once`; `p9_client_handoff_reader`; `loom_post_cqe` (the CQ writer — `CqNeverOverfull`). Tests in `test_9p_client.c` (the seam, over the loopback) + `test_loom.c` (`loom_post_cqe`). `loom.tla` **unchanged** (`Consume`/`Dispatch`/`ReplyArrives`/`PostCqe` already model it). The production async-op container + the ref-holding / quiesce-before-free lifetime are Loom-3. | default + UBSan 733/733 (+4: 3 `9p_client.async*` + 1 `loom.post_cqe_back_pressure`) under TCG + 0 EXTINCTION; `loom.cfg` clean + liveness + 5 buggy cfgs green (pre-commit gate) |
 
 ## Remaining work (Loom-2..6 — each spec-gated + audited)
 
@@ -29,15 +31,19 @@ model) + Loom-2a (the ring substrate) are COMPLETE.**
   (`SYS_LOOM_REGISTER`). Self-contained; no 9P-engine change. (A finer split of
   §10's Loom-2 — commit granularity, not deferral: 2a + 2b both land + are
   audited before Loom-3.)
-- **Loom-2b — the engine seam** (NEXT, **audit-bearing**): the
+- **Loom-2b — the engine seam** (DONE, **audit-bearing**): the
   pluggable-completion refactor of the #841 client (POST_CQE vs WAKE_RENDEZ on
-  the in-flight `p9_rpc`; one engine, two front-ends) + the async submit entry,
-  landed with its first real test. **Then one focused audit over 2a + 2b.** The
-  seam touches the audited #841 surface; the LOOM completion path has no blocked
-  submitter, so the elected-reader handoff must skip a LOOM op + a session death
-  must complete it with an error CQE (not wake a nonexistent rendez).
+  the in-flight `p9_rpc`; one engine, two front-ends) + the async submit entry +
+  `loom_post_cqe`, landed with its first real tests. **One focused audit over
+  2a + 2b is the next step.** The seam touches the audited #841 surface; the
+  LOOM completion path has no blocked submitter, so the elected-reader handoff
+  skips a LOOM op + a session death completes it with an error CQE (not waking a
+  nonexistent rendez). The production async-op container + the ref-holding /
+  quiesce-before-free lifetime are Loom-3 (where `SYS_LOOM_ENTER`'s destroy path
+  keeps the op off the last-ref-drop-under-lock path).
 - **Loom-3 — batch-enter core**: `SYS_LOOM_ENTER` (submit N / reap M) + SQE →
-  `p9_client_<op>` dispatch + the submit-time pin (LOOM.md §8.5) + CQE post +
+  `p9_client_<op>` dispatch + the submit-time pin (LOOM.md §8.5) + the
+  production async-op container + the quiesce-before-free lifetime +
   out-of-order completion. The core. Audit.
 - **Loom-4 — SQPOLL**: the kernel poll-thread (zero-syscall hot path;
   `cpu_pinned`-able) — wait/wake + lifetime surface. Audit.

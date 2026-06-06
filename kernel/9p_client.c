@@ -160,8 +160,15 @@ static void client_mark_dead_locked(struct p9_client *c) {
     c->dead = true;
     for (u32 tag = 0; tag < P9_SESSION_MAX_OUTSTANDING; tag++) {
         struct p9_rpc *r = c->inflight[tag];
-        if (r) {
-            r->dead = true;
+        if (!r) continue;
+        r->dead = true;
+        if (r->on_complete) {
+            // Async (POST_CQE, Loom): there is no submitter to wake. Clear the
+            // slot + complete the op with an error CQE. The callback runs under
+            // c->lock and MUST NOT sleep (the seam contract in 9p_client.h).
+            c->inflight[tag] = NULL;
+            r->on_complete(r, -P9_E_IO, NULL);
+        } else {
             wakeup(&r->rendez);
         }
     }
@@ -176,7 +183,12 @@ static void client_handoff_reader_locked(struct p9_client *c,
                                          struct p9_rpc *departing) {
     for (u32 tag = 0; tag < P9_SESSION_MAX_OUTSTANDING; tag++) {
         struct p9_rpc *r = c->inflight[tag];
-        if (r && r != departing && !r->done && !r->dead && !r->be_reader) {
+        if (r && r != departing && !r->done && !r->dead && !r->be_reader &&
+            !r->on_complete) {
+            // Skip async (POST_CQE) ops: they have no submitter thread to run
+            // the reader loop. An async op's reply is demuxed by the
+            // SYS_LOOM_ENTER reap / SQPOLL kthread / p9_client_reader_pump_once
+            // caller, never by becoming the elected reader (Loom §8.4).
             r->be_reader = true;
             wakeup(&r->rendez);
             return;
@@ -241,6 +253,23 @@ static void demux_frame_locked(struct p9_client *c, size_t len) {
     }
     struct p9_rpc *owner = c->inflight[tag];
     if (owner) {
+        if (owner->on_complete) {
+            // Async (POST_CQE, Loom): there is no submitter to dispatch +
+            // extract the reply, so the engine does it HERE, under c->lock,
+            // and hands the mapped result to on_complete. dispatch_rmsg clears
+            // session.outstanding[tag] + applies fid state -- exactly what
+            // client_run does for a sync op after CLIENT_WAIT_DONE. `dr` aliases
+            // the recv buffer and is valid only for the callback's duration. The
+            // callback runs under c->lock and MUST NOT sleep (seam contract).
+            c->inflight[tag] = NULL;
+            struct p9_dispatch_result dr;
+            int drc = p9_session_dispatch_rmsg(&c->session, c->transport.recv_buf,
+                                               len, &dr);
+            int result = map_error(0, drc, &dr);
+            owner->done = true;                       // set before the callback;
+            owner->on_complete(owner, result, &dr);   // may free owner -> last use
+            return;
+        }
         if (len > c->recv_cap) { client_mark_dead_locked(c); return; }  // defensive
         client_copy(owner->reply_buf, c->transport.recv_buf, len);
         owner->reply_len = (int)len;
@@ -345,11 +374,12 @@ static int client_run(struct p9_client *c, size_t built_len,
         return -P9_E_IO;                 // the session never allocates such a tag
 
     struct p9_rpc rpc;
-    rpc.tag       = (u16)tag;
-    rpc.done      = false;
-    rpc.dead      = false;
-    rpc.be_reader = false;
-    rpc.reply_len = 0;
+    rpc.tag         = (u16)tag;
+    rpc.done        = false;
+    rpc.dead        = false;
+    rpc.be_reader   = false;
+    rpc.reply_len   = 0;
+    rpc.on_complete = NULL;          // sync (WAKE_RENDEZ): the submitter waits
     rendez_init(&rpc.rendez);
     rpc.reply_buf = kmalloc(c->recv_cap, KP_ZERO);
     if (!rpc.reply_buf)
@@ -416,6 +446,104 @@ static int client_run(struct p9_client *c, size_t built_len,
     if (c->done_reply_buf) kfree(c->done_reply_buf);
     c->done_reply_buf = rpc.reply_buf;
     return map_error(0, drc, out);
+}
+
+// =============================================================================
+// Asynchronous (Loom) front-end -- the pluggable-completion seam (Loom-2b).
+//
+// submit_async sends an op + registers it WITHOUT blocking; the reply is
+// demuxed later by reader_pump_once / the SYS_LOOM_ENTER reap / the SQPOLL
+// kthread, which invokes rpc->on_complete (the POST_CQE front-end). The
+// elected-reader / demux machinery is unchanged; only the completion ACTION is
+// pluggable (one engine, two front-ends -- LOOM.md §8.4).
+// =============================================================================
+
+int p9_client_submit_async(struct p9_client *c, struct p9_rpc *rpc,
+                           p9_session_build_fn build, void *build_ctx) {
+    // Reject WITHOUT firing on_complete: nothing was taken over yet, and an
+    // absent on_complete is precisely what we'd need to complete the op.
+    if (!c || c->magic != P9_CLIENT_MAGIC)     return -P9_E_INVAL;
+    if (!rpc || !rpc->on_complete || !build)   return -P9_E_INVAL;
+
+    spin_lock(&c->lock);
+    if (c->dead || !p9_session_is_open(&c->session)) {
+        spin_unlock(&c->lock);
+        rpc->on_complete(rpc, -P9_E_IO, NULL);   // own it: complete + bail
+        return -P9_E_IO;
+    }
+    // Build the Tmsg into the shared out_buf under the lock (allocating the tag
+    // + marking session.outstanding[tag]); a >0 return is a well-formed frame.
+    int built = build(&c->session, c->out_buf, sizeof(c->out_buf), build_ctx);
+    if (built <= 0) {
+        spin_unlock(&c->lock);
+        rpc->on_complete(rpc, -P9_E_IO, NULL);
+        return -P9_E_IO;
+    }
+    u32 size; u8 type; u16 tag;
+    if (p9_peek_header(c->out_buf, (size_t)built, &size, &type, &tag) < 0 ||
+        tag == P9_NOTAG || tag >= P9_SESSION_MAX_OUTSTANDING) {
+        // Unreachable for a well-formed `built` frame; defensive. (Async ops are
+        // always tagged -- Tversion/NOTAG is the serial handshake path only.)
+        spin_unlock(&c->lock);
+        rpc->on_complete(rpc, -P9_E_IO, NULL);
+        return -P9_E_IO;
+    }
+    rpc->tag       = (u16)tag;
+    rpc->done      = false;
+    rpc->dead      = false;
+    rpc->be_reader = false;
+    rpc->reply_len = 0;
+    rpc->reply_buf = NULL;          // async: demux dispatches from recv_buf
+    rendez_init(&rpc->rendez);      // unused for async, but kept inert
+    c->inflight[tag] = rpc;
+
+    int src = p9_transport_send(&c->transport, c->out_buf, (size_t)built);
+    if (src < 0) {
+        // The byte stream is broken: latch dead + complete every in-flight op.
+        // `rpc` is registered, so mark_dead fires its on_complete (error CQE).
+        client_mark_dead_locked(c);
+        spin_unlock(&c->lock);
+        return -P9_E_IO;
+    }
+    c->total_ops++;
+    spin_unlock(&c->lock);
+    return 0;
+}
+
+int p9_client_reader_pump_once(struct p9_client *c) {
+    if (!c || c->magic != P9_CLIENT_MAGIC) return -P9_E_INVAL;
+    spin_lock(&c->lock);
+    if (c->dead)          { spin_unlock(&c->lock); return -P9_E_IO; }
+    if (c->reader_active) { spin_unlock(&c->lock); return 0; }   // another reader
+    c->reader_active = true;
+    spin_unlock(&c->lock);
+
+    int rr = reader_recv_frame(c);    // blocks; c->lock dropped (single reader)
+
+    spin_lock(&c->lock);
+    int ret;
+    if (rr > 0) {
+        demux_frame_locked(c, (size_t)rr);
+        ret = 1;
+    } else if (client_self_dying()) {
+        // Death-interrupt: the caller's Proc is dying. Do NOT mark the shared
+        // session dead (it serves survivors). Unwind after handing the role on.
+        ret = -P9_E_IO;
+    } else {
+        client_mark_dead_locked(c);   // EOF / recv error: session gone
+        ret = -P9_E_IO;
+    }
+    c->reader_active = false;
+    client_handoff_reader_locked(c, NULL);
+    spin_unlock(&c->lock);
+    return ret;
+}
+
+void p9_client_handoff_reader(struct p9_client *c) {
+    if (!c || c->magic != P9_CLIENT_MAGIC) return;
+    spin_lock(&c->lock);
+    client_handoff_reader_locked(c, NULL);
+    spin_unlock(&c->lock);
 }
 
 // =============================================================================

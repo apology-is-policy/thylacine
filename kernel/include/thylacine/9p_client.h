@@ -67,24 +67,58 @@
 
 #define P9_CLIENT_MAGIC        0x50394354u   // "P9CT" little-endian
 
-// One in-flight steady-state op (ARCH §21.3 "Request" / §21.10). The
-// submitter allocates a p9_rpc on its OWN stack, registers it in
-// c->inflight[tag] under c->lock, and blocks on its own `rendez` until
-// the elected reader copies the matching reply frame into `reply_buf`
-// and sets `done`. SINGLE-WAITER: exactly one thread (the submitter)
-// ever sleeps on `rendez` -- the struct Rendez single-waiter convention
-// holds because each rpc has its own. The three flags are mutated only
-// under c->lock, and every mutation is followed by wakeup(&rpc->rendez)
-// (the I-9 register-then-observe discipline; rpc_wait_cond reads ONLY
-// these flags, never cross-lock client state).
+struct p9_rpc;   // forward (the completion callback takes one)
+
+// Pluggable completion front-end (Loom §8.4 / I-29). `on_complete == NULL` is
+// the synchronous WAKE_RENDEZ path: the submitter sleeps on `rendez` and the
+// reader copies the reply into `reply_buf` + wakes it. `on_complete != NULL` is
+// the asynchronous POST_CQE (Loom) path: there is NO blocked submitter, so the
+// engine invokes `on_complete` directly when the op reaches a terminal state.
+//   `status` is the MAPPED result code: 0 on success, -errno on error -- an
+//            Rlerror reply (the reply WAS demuxed) OR a terminal transport /
+//            submit failure both surface here.
+//   `dr`     is the parsed dispatch result when a reply was demuxed (it aliases
+//            the transport recv buffer + is valid ONLY for the callback's
+//            duration -- extract op-specific payloads, e.g. a read count,
+//            synchronously). It is NULL on the terminal-failure paths (session
+//            dead / submit error), where `status` alone is the result.
+// A no-payload op (clunk, fsync, ...) posts `status` verbatim; a payload op
+// (read, walk, ...) reads its count from `dr` when status == 0 (Loom-3). The
+// callback maps the result to a CQE and posts it (loom_post_cqe).
+//
+// CONTRACT -- the callback runs UNDER c->lock (it is invoked from
+// demux_frame_locked AND from client_mark_dead_locked, both lock-held), so it
+// MUST NOT sleep and MUST NOT re-enter the p9_client_* API. Posting a CQE
+// (loom_post_cqe takes a leaf lock) and kfree are fine; dropping a Loom ref
+// (loom_unref may free -> spoor_clunk may sleep) is NOT -- a production async
+// op defers that to an outside-the-lock pass (Loom-3, where SYS_LOOM_ENTER's
+// quiesce-before-free keeps the op from ever holding the Loom's last ref).
+typedef void (*p9_rpc_complete_fn)(struct p9_rpc *rpc, int status,
+                                   struct p9_dispatch_result *dr);
+
+// One in-flight steady-state op (ARCH §21.3 "Request" / §21.10). For a SYNC op
+// the submitter allocates a p9_rpc on its OWN stack, registers it in
+// c->inflight[tag] under c->lock, and blocks on its own `rendez` until the
+// elected reader copies the matching reply frame into `reply_buf` and sets
+// `done`. SINGLE-WAITER: exactly one thread (the submitter) ever sleeps on
+// `rendez` -- the struct Rendez single-waiter convention holds because each rpc
+// has its own. The flags are mutated only under c->lock, and every mutation is
+// followed by wakeup(&rpc->rendez) (the I-9 register-then-observe discipline;
+// rpc_wait_cond reads ONLY these flags, never cross-lock client state).
+//
+// An ASYNC op (Loom, `on_complete != NULL`) is instead embedded in a
+// heap-allocated container the caller owns; it has no submitter, never sleeps
+// on `rendez`, and leaves `reply_buf` NULL (the engine dispatches directly from
+// the transport recv buffer at demux + hands the result to `on_complete`).
 struct p9_rpc {
     u16            tag;        // 9P tag (0..P9_SESSION_MAX_OUTSTANDING-1)
     bool           done;       // reply copied into reply_buf (reply_len valid)
     bool           dead;       // session torn down under me -> -P9_E_IO
     bool           be_reader;  // a departing reader handed me the reader role
     int            reply_len;  // bytes in reply_buf (valid iff done)
-    u8            *reply_buf;  // kmalloc'd recv_cap bytes; reader copies frame here
-    struct Rendez  rendez;     // the submitter sleeps here; reader wakes it
+    u8            *reply_buf;  // SYNC: kmalloc'd recv_cap bytes; ASYNC: NULL
+    struct Rendez  rendez;     // SYNC: the submitter sleeps here; reader wakes it
+    p9_rpc_complete_fn on_complete;  // NULL = sync WAKE_RENDEZ; set = async POST_CQE
 };
 
 struct p9_client {
@@ -286,6 +320,53 @@ u32 p9_client_alloc_fid(struct p9_client *c);
 
 bool   p9_client_is_open(const struct p9_client *c);
 size_t p9_client_inflight(const struct p9_client *c);
+
+// =============================================================================
+// Asynchronous (Loom) front-end (Loom-2b; the pluggable-completion seam).
+//
+// The synchronous p9_client_* ops above block their caller until the reply.
+// The async surface submits an op WITHOUT blocking: the reply is demuxed later
+// by whichever thread drives the reader (SYS_LOOM_ENTER's reap, the SQPOLL
+// kthread, or p9_client_reader_pump_once), which invokes rpc->on_complete to
+// post a CQE. One engine (the #841 elected reader), two completion front-ends.
+// =============================================================================
+
+// A Tmsg builder: call exactly one p9_session_send_* into `out` (cap bytes),
+// allocating the 9P tag, and return the framed length (>0) or <=0 on failure.
+// Invoked by p9_client_submit_async under c->lock.
+typedef int (*p9_session_build_fn)(struct p9_session *s, u8 *out, size_t cap,
+                                   void *ctx);
+
+// Submit an asynchronous op. `rpc->on_complete` MUST be set (the POST_CQE
+// front-end). Under c->lock: build the Tmsg via `build` (which allocates the
+// tag), register `rpc` as an async in-flight op, and send -- then return
+// WITHOUT waiting. Returns 0 if the op is in flight (its reply will drive
+// on_complete), or -P9_E_IO / -P9_E_INVAL on failure.
+//
+// TAKES OWNERSHIP of `rpc`: on EVERY return exactly one on_complete has fired
+// or will fire -- a build/peek/send failure fires on_complete(rpc, -errno,
+// NULL) before returning; success fires it later via demux / mark_dead. The
+// caller must not touch `rpc` after this returns (the callback may already have
+// freed its container). `rpc->on_complete` NULL or a NULL `build` is rejected
+// (-P9_E_INVAL) WITHOUT firing a callback -- nothing was taken over.
+int p9_client_submit_async(struct p9_client *c, struct p9_rpc *rpc,
+                           p9_session_build_fn build, void *build_ctx);
+
+// Drive the elected reader for ONE frame, then release the reader role. For
+// async ops there is no blocked submitter, so completions are pumped by the
+// reap caller. Becomes the reader (if none is active), recv's one frame (lock
+// dropped), demuxes it (posting any async CQE / waking any sync owner), clears
+// the reader role + hands it on. Returns 1 (one frame demuxed), 0 (a reader is
+// already active -- nothing done), -P9_E_IO (session dead / recv error), or
+// -P9_E_INVAL. PRECONDITION: a reply is expected (>=1 in-flight op) -- on a
+// real transport recv blocks for a frame; on a synchronous test loopback the
+// frame must already be staged (else recv's EOF latches the session dead).
+int p9_client_reader_pump_once(struct p9_client *c);
+
+// Hand the elected-reader role to a pending SYNC op (async ops are skipped --
+// they have no thread to run the reader loop). Exposed for the handoff-skip
+// regression; the reader loop uses the internal locked form.
+void p9_client_handoff_reader(struct p9_client *c);
 
 // =============================================================================
 // Errno convention.

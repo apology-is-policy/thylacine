@@ -275,6 +275,22 @@ void loom_unref(struct Loom *l);
 int loom_register_handles(struct Loom *l, struct Spoor **spoors,
                           const rights_t *rights, u32 n);
 
+// Post one completion into the CQ ring (the POST_CQE front-end's terminal
+// action; Loom-2b). Writes a loom_cqe {user_data, result, flags} at the kernel
+// cq_tail and publishes the bump with a release store (so a user-side
+// load-acquire of cq_tail sees the CQE bytes). Under l->lock. Returns 0 on a
+// successful post.
+//
+// CQ back-pressure (I-29 CqNeverOverfull): if the CQ is FULL the kernel does
+// NOT overwrite an unreaped CQE -- it increments the shared `overflow` counter
+// and returns -1. The no-LOST-completion liveness (hold the completion until a
+// slot frees) is realized by Loom-3's submit-time admission (consume an SQE
+// only when the CQ can hold its completion = io_uring's model), which makes a
+// full CQ at completion unreachable -- at which point `overflow` is a pure
+// diagnostic. Safe to call from a completion callback running under the 9P
+// client's lock (l->lock is a leaf; no sleep, no nesting with c->lock).
+int loom_post_cqe(struct Loom *l, u64 user_data, s32 result, u32 flags);
+
 // Diagnostics (tests).
 u64 loom_total_created(void);
 u64 loom_total_destroyed(void);

@@ -5,11 +5,13 @@
 integrity) + I-30 (submit-time capability pin). **Audit-trigger surface**: ARCH
 §25.4 + CLAUDE.md.
 
-> **Status (Loom-2a):** the ring **substrate** — `KObj_Loom`, the SQ/CQ ring
-> memory + geometry, `SYS_LOOM_SETUP`, the registered-handle table
-> (`SYS_LOOM_REGISTER`), and the kobj refcount lifecycle. **No op flows yet.**
-> The pluggable-completion 9P-engine seam is Loom-2b; `SYS_LOOM_ENTER` + the
-> SQE→`p9_client_*` dispatch + the submit-time pin + the CQE post are Loom-3;
+> **Status (Loom-2a + Loom-2b):** the ring **substrate** (2a — `KObj_Loom`, the
+> SQ/CQ ring memory + geometry, `SYS_LOOM_SETUP`, the registered-handle table
+> via `SYS_LOOM_REGISTER`, the kobj refcount lifecycle) **plus the
+> pluggable-completion 9P-engine seam** (2b — `p9_rpc.on_complete`, the async
+> submit entry `p9_client_submit_async`, the reader pump `p9_client_reader_pump_once`,
+> and the CQ writer `loom_post_cqe`). `SYS_LOOM_ENTER` + the SQE→`p9_client_*`
+> dispatch + the submit-time pin + the production async-op container are Loom-3;
 > SQPOLL is Loom-4; multishot + LINK/DRAIN is Loom-5; registered buffers + the
 > native libthyla-rs API + the benchmark are Loom-6.
 
@@ -89,6 +91,20 @@ int  sys_loom_register_for_proc(struct Proc *p, hidx_t loom_fd, u32 op,
                                 const hidx_t *fds, u32 n);
 ```
 
+### The async engine front-end (`kernel/9p_client.{c,h}`, Loom-2b)
+
+```c
+int  loom_post_cqe(struct Loom *l, u64 user_data, s32 result, u32 flags);
+// the pluggable-completion seam on the in-flight op:
+typedef void (*p9_rpc_complete_fn)(struct p9_rpc *rpc, int status,
+                                   struct p9_dispatch_result *dr);  // in struct p9_rpc
+typedef int  (*p9_session_build_fn)(struct p9_session *s, u8 *out, size_t cap, void *ctx);
+int  p9_client_submit_async(struct p9_client *c, struct p9_rpc *rpc,
+                            p9_session_build_fn build, void *build_ctx);
+int  p9_client_reader_pump_once(struct p9_client *c);
+void p9_client_handoff_reader(struct p9_client *c);
+```
+
 ---
 
 ## Implementation
@@ -152,6 +168,67 @@ clunking them **outside** the lock (`spoor_clunk` may sleep). The held
 dispatch resolves `(client, fid)` from `reg[idx].spoor` at submit and the held
 ref pins the object for the op's lifetime.
 
+### The pluggable-completion seam (Loom-2b)
+
+Every synchronous `p9_client_*` op blocks its submitter on a stack `rendez`
+until the matching reply; the #841 pipelining (`inflight[tag]`, the elected
+reader, the demux — lock dropped across recv) is internal + reusable. Loom-2b
+adds a **completion front-end** to the in-flight `struct p9_rpc`:
+
+- `on_complete == NULL` — **WAKE_RENDEZ** (the existing synchronous path). The
+  reader copies the reply into the submitter's `reply_buf` + `wakeup`s its
+  `rendez`; the submitter dispatches + extracts. Unchanged.
+- `on_complete != NULL` — **POST_CQE** (async / Loom). There is no submitter, so
+  the engine *itself* dispatches the reply at demux time (under `c->lock`) and
+  hands the mapped result to `on_complete`, which writes a `loom_cqe`.
+
+The elected-reader / demux machinery is **unchanged** — only the completion
+*action* is pluggable (one engine, two front-ends; LOOM.md §8.4). Three sites
+branch on `on_complete`:
+
+- **`demux_frame_locked`** (owned tag): async → clear `inflight[tag]`,
+  `p9_session_dispatch_rmsg` (clears `session.outstanding[tag]` + applies fid
+  state, as `client_run` does for a sync op), `map_error`, then `on_complete`
+  with the result + the dispatch result (`dr` aliases the recv buffer, valid
+  only for the callback). Sync → the existing copy-into-`reply_buf` + `wakeup`.
+- **`client_mark_dead_locked`** (transport EOF / error): async → clear
+  `inflight[tag]` + `on_complete(rpc, -P9_E_IO, NULL)` (an error CQE — there is
+  no rendez to wake). Sync → `dead = true` + `wakeup`.
+- **`client_handoff_reader_locked`**: **skips** async ops as handoff targets —
+  an async op has no thread to run the reader loop. Its reply is demuxed by the
+  reap caller (`p9_client_reader_pump_once` / `SYS_LOOM_ENTER` / SQPOLL),
+  never by becoming the elected reader.
+
+`p9_client_submit_async(c, rpc, build, ctx)` builds the Tmsg under `c->lock`
+(via the `build` thunk, which allocates the tag), registers `rpc` as async
+in-flight, sends, and returns **without** waiting. It **takes ownership** of
+`rpc`: exactly one `on_complete` fires on every path — a build/peek/send failure
+fires it immediately (`-P9_E_IO`); success fires it later via demux / mark_dead.
+`p9_client_reader_pump_once(c)` becomes the reader for one frame (drops `c->lock`
+across recv, demuxes, hands the role on) — the reap-side drive for async ops.
+
+`loom_post_cqe(l, user_data, result, flags)` writes a `loom_cqe` at the kernel
+`cq_tail` and publishes the bump with a release store. **CQ back-pressure
+(`CqNeverOverfull`, I-29):** a full CQ is *not* overwritten — the post is
+refused (`-1`) and the shared `overflow` counter is bumped. The no-LOST-completion
+liveness (hold until a slot frees) is realized by Loom-3's submit-time admission
+(consume an SQE only when the CQ can hold its completion = io_uring's model),
+which makes a full CQ at completion unreachable in production.
+
+> **The seam contract — `on_complete` runs under `c->lock`** (from `demux`
+> *and* from `mark_dead`), so it MUST NOT sleep and MUST NOT re-enter the
+> `p9_client_*` API. `loom_post_cqe` (a leaf `l->lock`) + `kfree` are fine;
+> dropping the Loom's last ref (`loom_unref` → `spoor_clunk` may sleep) is NOT.
+> Loom-2b's only async submitter is the test (kernel-internal), and the test
+> owns the Loom ref throughout, so the last-ref-drop-under-lock path is
+> unreachable. The **production** async-op container + its ref-holding /
+> quiesce-before-free lifetime are **Loom-3**, where `SYS_LOOM_ENTER`'s destroy
+> path quiesces in-flight ops so the op never holds the Loom's last ref (the
+> spec's `Teardown` quiesce), keeping the ref-drop off the locked path.
+
+Lock order: `c->lock → l->lock` (the only direction; `loom.c` never calls into
+`p9_client_*`, so it is acyclic).
+
 ---
 
 ## Data structures
@@ -174,15 +251,23 @@ so it is never transferable and never dup-able (`handle_dup` rejects it).
 
 `specs/loom.tla` models the op-lifecycle (`empty → posted → snap → inflight →
 completed → cqd → reaped`, `+ abandoned` on teardown). Loom-2a implements the
-spec's substrate: the registered-object table (`UserRegister`), the ring + CQ
-(`cq`), and teardown's quiesce obligation (`Teardown`). I-29 (`NoDoubleCompletion`
-/ `NoStaleCompletion` / `CqNeverOverfull` / `EventuallyCompletes`) + I-30
-(`ArgPinnedToSnapshot` / `ObjPinnedToSnapshot` / `ActedUnderAdmittedRights`) are
-enforced by the dispatch landing at Loom-2b/3. See `specs/SPEC-TO-CODE.md`.
+spec's substrate (the registered-object table `UserRegister`, the ring + CQ
+`cq`); **Loom-2b implements the `PostCqe` completion action** — the seam's async
+front-end maps to `Dispatch → ReplyArrives → PostCqe`, and `loom_post_cqe`'s
+full-CQ refusal is the spec's `Cardinality(cq) < CQ_CAP` guard (`CqNeverOverfull`
+holds at runtime, verified by `loom.post_cqe_back_pressure`). The session-death
+arm is a `PostCqe` with a negative result (the spec models the phase + the
+exactly-once count, not the result value). The ring-teardown `abandoned` quiesce
+(the no-stale obligation `NoStaleCompletion`) + the I-30 submit-time pin
+(`ObjPinnedToSnapshot` / `ActedUnderAdmittedRights`) land with `SYS_LOOM_ENTER`'s
+dispatch at **Loom-3**. **Loom-2b adds no new spec mechanism** — `loom.tla` is
+unchanged and remains the pre-commit gate. See `specs/SPEC-TO-CODE.md`.
 
 ---
 
-## Tests (`kernel/test/test_loom.c`, 8 cases)
+## Tests
+
+### Substrate (`kernel/test/test_loom.c`, 9 cases)
 
 - `loom.create_geometry` — the ring layout is consistent (64-aligned,
   non-overlapping, page-rounded), the header is stamped (masks + counts; heads /
@@ -202,10 +287,25 @@ enforced by the dispatch landing at Loom-2b/3. See `specs/SPEC-TO-CODE.md`.
   non-KOBJ_SPOOR fd / bogus loom_fd rejected.
 - `loom.register_replaces` — re-register fewer (whole-table replace; old slots
   cleared + clunked); clear (n = 0) releases all.
+- `loom.post_cqe_back_pressure` (Loom-2b) — fill the CQ; a post into a full CQ
+  is refused (`-1`), bumps `overflow`, and does **not** overwrite a staged CQE
+  (`CqNeverOverfull`); a user reap frees slots so later posts land (wrapping).
+
+### The seam (`kernel/test/test_9p_client.c`, 3 cases, Loom-2b)
+
+- `9p_client.async_op_posts_cqe` — `submit_async(clunk)` (no wait) →
+  `reader_pump_once` demuxes the Rclunk → `on_complete` posts a CQE with the
+  op's `user_data` + result 0.
+- `9p_client.async_session_death_posts_error_cqe` — an in-flight async op
+  completes with an error CQE (`-P9_E_IO`) when the transport dies (the
+  `mark_dead` async arm; no rendez to wake).
+- `9p_client.async_handoff_skips_async` — the elected-reader handoff picks a
+  pending sync op and **skips** an async op (white-box: one of each in
+  `inflight[]`).
 
 The full `SYS_LOOM_SETUP` user copy-in/out is trivial handler glue (E2E coverage
-lands with the native API at Loom-6); the SQE dispatch + CQE post arrive at
-Loom-3.
+lands with the native API at Loom-6); the SQE dispatch + the submit-time pin
+arrive at Loom-3.
 
 ---
 
@@ -227,8 +327,8 @@ rolled back via `spoor_clunk`); a user-VA fault reading the fd array.
 | Sub-chunk | What | State |
 |---|---|---|
 | Loom-2a | the ring substrate (this doc) | **landed** |
-| Loom-2b | the pluggable-completion 9P-engine seam + async submit | pending |
-| Loom-3 | `SYS_LOOM_ENTER` + dispatch + submit-time pin + CQE post | pending |
+| Loom-2b | the pluggable-completion 9P-engine seam + async submit + `loom_post_cqe` | **landed** |
+| Loom-3 | `SYS_LOOM_ENTER` + dispatch + submit-time pin + the production async-op lifetime | pending |
 | Loom-4 | SQPOLL kthread | pending |
 | Loom-5 | multishot + LINK/DRAIN | pending |
 | Loom-6 | registered buffers + native libthyla-rs API + benchmark | pending |
@@ -243,3 +343,21 @@ rolled back via `spoor_clunk`); a user-VA fault reading the fd array.
 - `KObj_Loom`'s `handle_acquire_obj` branch **must** be `loom_ref` (not a no-op):
   it is reached via `handle_get`, not only `handle_dup`. A no-op there would
   underflow the refcount on the get/put pairing and free the ring early.
+- **`p9_rpc.on_complete` runs under `c->lock`** (from `demux_frame_locked` AND
+  `client_mark_dead_locked`) and MUST NOT sleep / re-enter `p9_client_*`. The
+  Loom-3 production async-op callback therefore CANNOT drop the Loom's last ref
+  inline (`loom_unref` → `spoor_clunk` may sleep) — it must either defer the
+  drop outside the lock OR rely on the `SYS_LOOM_ENTER` destroy path quiescing
+  in-flight ops so the op never holds the last ref (the spec's `Teardown`
+  quiesce). Loom-2b's test callback is no-sleep + the test owns the ref, so the
+  hazard is unreachable in 2b — but it is a hard Loom-3 obligation.
+- **`p9_client_reader_pump_once` precondition**: call it only when a reply is
+  expected (≥1 in-flight async op). On a real transport recv blocks for a frame;
+  on a synchronous test loopback the frame must already be staged — pumping an
+  idle client recv's EOF and latches the session dead. Loom-3's reap pumps only
+  while in-flight async ops remain.
+- **Async completions are reap-driven, not perpetually-read.** If the only
+  in-flight ops are async and no thread pumps the reader, their replies sit
+  un-demuxed (the handoff skips them). This is the io_uring model — userspace
+  reaps by `SYS_LOOM_ENTER` (Loom-3) / the SQPOLL kthread (Loom-4). Not a hang:
+  nothing is lost, the completion just waits for a pump.
