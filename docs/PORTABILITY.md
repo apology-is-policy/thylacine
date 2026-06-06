@@ -395,6 +395,30 @@ under QEMU (TCG + HVF) without any of W4.
 - **M2 = W4.** Actual RPi 400 hardware boot. The culminating, post-v1.0-sized
   platform port.
 
+- **M1's declared END-STATE -- HVF-on-this-host BY DEFAULT (user-decided
+  2026-06-06).** The arc is prolonged past W3 to the goal it was always reaching
+  for: **the default dev/test loop runs under HVF on the development host (Apple
+  Silicon)**, with TCG (`-cpu max` + GICv3) demoted to an *occasional compat
+  reference*. TCG is not retired -- it is the only path that exercises RNDR,
+  GICv3, and the full `-cpu max` ISA, so it stays the portable, deterministic,
+  full-feature check (run before pushes / on GIC / RNDR / atomics-touching
+  changes, and on any non-Apple host). The remaining workstream (**W3.5**):
+  - **#890 -- the hard gate.** The HVF boot must reach `Thylacine boot OK`;
+    today it trips QEMU's `isv` assert on the **userspace** virtio-mmio driver
+    (the kernel's virtio-mmio path already works under HVF -- W3). Root-cause +
+    fix the userspace accessor codegen (the emitted load/store form must give
+    ISV=1 so HVF can emulate the MMIO access, as the kernel's already does).
+  - **the default flip** -- `tools/run-vm.sh` / `test.sh` / `ci-smp-gate.sh`
+    default to `accel=hvf` + `gic-version=2`; a one-flag `THYLACINE_ACCEL=tcg`
+    (+ a `make test-tcg`) restores the compat reference.
+  - **validate full-green HVF** -- the suite + the SMP multi-boot gate under
+    HVF. HVF's real-core timing is looser than TCG's, so the soundness gate
+    leans on the multi-boot + soft-warn discipline (#865), not single-boot
+    determinism.
+  Deliberately **host-specific** (HVF needs Apple Silicon + macOS) -- the right
+  trade for a solo-on-this-host project; TCG remains the fallback for any other
+  host / CI.
+
 **Implementation sequencing (user-decided 2026-05-30; re-sequenced 2026-06-05):**
 the identity / access / privilege convergence detour (A-2..A-5c) is **complete**.
 Lazarus **M1** is now sequenced as the **first of two pre-Utopia arcs** -- Lazarus
@@ -438,8 +462,14 @@ is the natural first impl (scripture mostly written, the near-term dev-loop win)
   (blocker 1, the GICv2-MMIO `ISV=0` timing heisenbug); framed as "expected to
   work, validated empirically at W2," not a hard guarantee.
 - **W4 storage** (SD-EMMC driver vs USB-MSC vs netboot): deferred to W4 design.
-- **CI baseline**: stays `-cpu max` + GICv3 (deterministic, full-feature); HVF +
-  bare metal exercise the GICv2 + v8.0 paths as additional matrices.
+- **CI baseline (REVERSED 2026-06-06):** the original decision -- "stays
+  `-cpu max` + GICv3; HVF + bare metal as additional matrices" -- is superseded
+  by the M1 end-state above (§8). **HVF-on-this-host (`-cpu host` + GICv2)
+  becomes the DEFAULT dev/test loop** once #890 is fixed; **TCG (`-cpu max` +
+  GICv3) is demoted to the occasional compat reference** (the unique exerciser
+  of RNDR / GICv3 / full-`-cpu max` ISA, and the only host-portable path). The
+  W3.5 workstream (§8) executes the reversal: #890 -> the default flip -> full
+  HVF validation.
 
 ---
 

@@ -7,11 +7,15 @@ The **first of two pre-Utopia arcs** (Lazarus M1, then Loom). Binding design:
 ## TL;DR
 
 Lazarus makes the **same kernel binary** run on three substrates — QEMU `virt`
-under TCG (the CI baseline, unchanged), QEMU `virt` under HVF on Apple Silicon
-(the fast dev loop), and bare-metal ARM64 (first board: Raspberry Pi 400) — by
-targeting the **ARMv8.0-A ISA floor** and lighting later features up at runtime.
-**M1 = W1 + W1.5 + W2 + W3** (all QEMU-testable); **W4** (the actual Pi 400
-board port) stays post-v1.0 (`ROADMAP.md §12.1`).
+under TCG (the portable, full-feature compat reference), QEMU `virt` under HVF on
+Apple Silicon (**the default dev loop -- the declared M1 end-state**), and
+bare-metal ARM64 (first board: Raspberry Pi 400) — by targeting the **ARMv8.0-A
+ISA floor** and lighting later features up at runtime. **M1 = W1 + W1.5 + W2 + W3
+(kernel, DONE) + W3.5 (HVF-by-default: #890 + the default flip).** The arc is
+prolonged past W3 to its destination: HVF runs the boot/test loop by default,
+TCG becomes the occasional compat check (PORTABILITY.md §8, user-decided
+2026-06-06). **W4** (the actual Pi 400 board port) stays post-v1.0
+(`ROADMAP.md §12.1`).
 
 ## Landed sub-chunks
 
@@ -25,6 +29,19 @@ board port) stays post-v1.0 (`ROADMAP.md §12.1`).
 
 ## Remaining work
 
+- **W3.5 — HVF-on-this-host by default** (the prolonged-arc goal; user-decided
+  2026-06-06; `PORTABILITY.md §8`). The kernel is already HVF-proven (W2 GIC +
+  timer, W3 virtio-rng); this is the userspace + tooling mile to make HVF the
+  default boot/test loop:
+  1. **#890** — fix the userspace virtio-mmio accessor so the HVF boot reaches
+     `Thylacine boot OK` (today it trips QEMU's `isv` assert at
+     `userspace.virtio_blk_probe`; the emitted load/store form must give ISV=1,
+     as the kernel's already does). The load-bearing gate.
+  2. **Flip the defaults** — `tools/run-vm.sh` / `test.sh` / `ci-smp-gate.sh`
+     default to `accel=hvf` + `gic-version=2`; a `THYLACINE_ACCEL=tcg` flag
+     (+ `make test-tcg`) keeps the compat reference one keystroke away.
+  3. **Validate full-green HVF** — the suite + the SMP multi-boot gate under
+     HVF; reconcile `TOOLING.md` / `CLAUDE.md` build-command docs.
 - **W4 — RPi 400 board bring-up** (post-v1.0; `ROADMAP.md §12.1`). EL2→EL1 drop,
   BCM mailbox, a new SD/EMMC block backend (the load-bearing gap), USB input,
   mailbox framebuffer. `arch/arm64/rpi400/`. Storage-backend fork open
