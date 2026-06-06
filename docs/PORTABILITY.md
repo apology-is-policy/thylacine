@@ -331,7 +331,7 @@ stir source, not the gate. As-built:
   consumer of the P4-F virtio substrate to do a real virtqueue transfer (find
   device-id RNG, negotiate features=0, create queue 0, DRIVER_OK, submit one
   device-writable descriptor, notify, bounded-poll the used ring, copy, then
-  destroy + reset to dormant). Serialized by `g_rng_dev_lock`, run OUTSIDE the
+  reset + destroy to dormant). Serialized by `g_rng_dev_lock`, run OUTSIDE the
   chacha lock. An **all-zero pull is rejected** (treated as a coherency/failure
   signal -> the pool keeps its prior DTB seed), so a non-coherent DMA transport
   fails *safe* (weaker-but-seeded), never silently to zero entropy.
@@ -348,10 +348,14 @@ virtio-mmio (ARM virt). A non-coherent bare-metal transport (W4) would add a
 cache-invalidate; until then the all-zero guard makes a coherency miss fail safe
 rather than silently weak.
 
-**Validation**: default (TCG) 721/721 (+ `chacha20.block_vector` against the RFC
-vector + `kern_random.virtio_reseed` driving the device); boot log shows
-`random: virtio-rng reseed OK (40 bytes mixed)`; the SMP soundness gate (default
-+ UBSan x smp4/smp8) clean; 0 EXTINCTION.
+**Validation**: default (TCG) 721/721 + UBSan 721/721 (+ `chacha20.block_vector`
+against the RFC vector + `kern_random.virtio_reseed` driving the device); boot
+log shows `random: virtio-rng reseed OK (40 bytes mixed)`; the SMP soundness gate
+(default + UBSan x smp4/smp8) clean / 0 corruption; 0 EXTINCTION. **HVF**: the
+kernel virtio-rng pull is confirmed working under HVF on M-series (`primed...
+awaiting` -> `reseed OK`, since `-cpu host` has no RNDR) and every kernel virtio
+test passes; the full-green HVF boot is gated only by the pre-existing #890
+(the userspace virtio-blk-probe's `isv` trip, a different layer).
 
 ---
 

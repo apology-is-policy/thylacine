@@ -48,12 +48,15 @@ The construction is OpenBSD `arc4random` (`kernel/random.c`):
   at the tail. The rekey material is never served.
 - **`rng_buf_consume_locked(out, n)`**: serve from `g_rng_buf + (1024 - have)`
   (i.e. bytes `[40..1024)`), zeroing each served byte; rekey to refill on drain.
-- **`rng_collect_cheap(out, cap, &strong)`**: non-blocking entropy — DTB
-  `kaslr-seed`/`rng-seed` (each sets `strong`), one RNDR word if present (sets
-  `strong`), then CNTPCT samples (with a short variable-latency spin between
-  samples) to fill the remainder. CNTPCT alone is never `strong`.
+- **`rng_collect_cheap(out, cap, &has_unobserved)`**: non-blocking entropy —
+  DTB `kaslr-seed`/`rng-seed` (domain-separated via `rng_mix64` so the CSPRNG
+  key does not correlate with the disclosed KASLR offset), one RNDR word if
+  present (sets `has_unobserved`), then CNTPCT samples to fill the remainder.
+  The DTB seeds + CNTPCT are key **material** only; they never gate readiness
+  (the DTB seed is also KASLR's and partially disclosed). `has_unobserved` is
+  set only by RNDR — an unobserved strong source.
 - **`rng_stir_locked`**: collect cheap entropy + rekey + reset
-  `g_rng_count = 1 MiB`; set `g_rng_seeded` if a strong source contributed.
+  `g_rng_count = 1 MiB`; flip `g_rng_seeded` only if `has_unobserved` (RNDR).
 - **`random_virtio_pull(out, want)`**: the virtio-rng driver (below).
 - **`random_reseed_strong`**: pull virtio-rng entropy (OUTSIDE `g_random_lock`)
   + a cheap collection, then take `g_random_lock` and rekey from both. A
@@ -80,8 +83,9 @@ caller to do a real virtqueue data transfer. Steps (VIRTIO 1.2 §3.1.1):
    completion `dsb`, copy `min(used.len, want)` bytes out.
 6. **All-zero guard**: if the copied bytes are all zero, treat as failure
    (`got = 0`) — a coherency miss or a dead device must not pass as entropy.
-7. Stop the device (`virtio_virtqueue_destroy` → `virtio_reset`) **before**
-   scrubbing + freeing the page.
+7. Stop the device fully — `virtio_reset(dev)` **then** `virtio_virtqueue_destroy(vq)`
+   (reset before the queue/buffer pages are freed, so a slow device cannot post
+   a late used-ring write into freed memory) — then scrub + free the page.
 
 Serialized by `g_rng_dev_lock` (released before `g_random_lock` is taken in the
 caller — no nesting). Lock order: `g_rng_dev_lock → buddy` (alloc/free);
@@ -96,15 +100,18 @@ caller — no nesting). Lock order: `g_rng_dev_lock → buddy` (alloc/free);
 ## State machine (seeding)
 
 ```
-BSS-zero --devrandom_init--> seeded-from-DTB+cntpct(+rndr)  (g_rng_seeded=true on QEMU)
-         --main.c after virtio_init--> strong-reseed-from-virtio (g_rng_virtio_ok=true)
+BSS-zero --devrandom_init--> primed-from-DTB+cntpct; seeded IFF RNDR present
+         --main.c after virtio_init--> strong-reseed-from-virtio -> g_rng_seeded=true
          --every ~1 MiB served--> strong-reseed (virtio + cheap)
          --every buffer drain (984 B)--> rekey (fast key erasure)
 ```
 
-The DTB seed shared with KASLR carries the pre-virtio window only; the virtio
-reseed (independent host entropy) lands before any userspace `SYS_GETRANDOM`,
-and 16 of the 32 key bytes in that window are RNDR/CNTPCT-derived.
+`g_rng_seeded` flips ONLY on an unobserved strong source — RNDR (at
+`devrandom_init`) or a non-zero virtio-rng pull (the `main.c` reseed). The DTB
+seed + CNTPCT prime the pool as material but never gate readiness, so a
+KASLR-correlated key is never served: `kern_random_bytes` fails closed (-1)
+until a strong source contributes. On QEMU the virtio reseed lands before any
+consumer (joey's first AT_RANDOM is well after `virtio_init`).
 
 ## Tests
 
