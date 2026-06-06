@@ -690,3 +690,45 @@ ARCH §23.3.
 ## pty.tla — Phase 5 (planned)
 
 (Stub. Will pin: master/slave atomicity, termios state transitions — ARCH §28 I-20.)
+
+---
+
+## loom.tla — Loom-1 (the SQ/CQ ring transport; spec-first re-enabled)
+
+Status: **TLC-green; impl pending Loom-2..6.** Models the Loom submission /
+completion ring op-lifecycle and pins the two reserved ARCH §28 invariants —
+**I-29** (completion integrity: no-lost / no-double / no-stale) and **I-30**
+(submit-time capability pin) — plus the docs/LOOM.md §6 soundness obligations
+(ring TOCTOU, CQ back-pressure). Spec-first is re-enabled for this surface
+(docs/LOOM.md §7); TLC-green on `loom.cfg` gates every Loom impl sub-chunk. The
+spec-action↔source mapping below is populated as Loom-2..6 land; today every row
+is "impl pending".
+
+Safety: TLC-clean at `Ops = {o1, o2}, CQ_CAP = 1, MAX_INFLIGHT = 2` — 582 distinct states.
+Liveness: TLC-clean (`EventuallyCompletes`, `ALLOW_TEARDOWN = FALSE`) at the same universe — 678 distinct states.
+
+| Config | Flag | Invariant / Property | Result | Distinct |
+|---|---|---|---|---|
+| `loom.cfg`                              | all FALSE, teardown on        | `Invariants` (12)       | clean | 582 |
+| `loom_liveness.cfg`                     | Spec_Live, no teardown        | `EventuallyCompletes`   | clean | 678 |
+| `loom_buggy_live_sqe_reread.cfg`        | `BUGGY_LIVE_SQE_REREAD`       | `ArgPinnedToSnapshot`   | violation | — |
+| `loom_buggy_recheck_at_completion.cfg`  | `BUGGY_RECHECK_AT_COMPLETION` | `ObjPinnedToSnapshot`   | violation | — |
+| `loom_buggy_double_post.cfg`            | `BUGGY_DOUBLE_POST`           | `NoDoubleCompletion`    | violation | — |
+| `loom_buggy_lost_on_full.cfg`           | `BUGGY_LOST_ON_FULL_CQ`       | `CqNeverOverfull`       | violation | — |
+| `loom_buggy_stale_after_teardown.cfg`   | `BUGGY_STALE_AFTER_TEARDOWN`  | `NoStaleCompletion`     | violation | — |
+
+| Spec action | Source location | Notes |
+|---|---|---|
+| `UserProduce` / `UserMutateSqe` | (impl pending Loom-2) | userspace fills / mutates an SQE slot in the shared Burrow and bumps the SQ tail; the mutate models a thread racing the kernel's ring read. |
+| `UserRegister` | (impl pending Loom-2: `SYS_LOOM_REGISTER` LOOM_REGISTER_HANDLES) | install / replace a registered-handle table slot (a clunk + reuse is a replace). |
+| `Consume` | (impl pending Loom-3: SQE-consume in `SYS_LOOM_ENTER` / the SQPOLL kthread) | the submit-time snapshot + pin: copy SQE fields to kernel memory, resolve + rights-check the handle (I-2 / I-6), snapshot via the #844 by-value handle snapshot, allocate a 9P tag (I-10 bound). |
+| `Dispatch` | (impl pending Loom-3: SQE → `p9_client_<op>` dispatch) | issue the 9P Tmsg on the pinned (client, fid) + the snapshot args. |
+| `ReplyArrives` | (impl pending Loom-2: the #841 elected-reader demux, POST_CQE completion-kind) | the demux fires the pluggable POST_CQE action instead of WAKE_RENDEZ (docs/LOOM.md §8.4). |
+| `PostCqe` | (impl pending Loom-3: CQE write + CQ-tail bump) | write the `loom_cqe` (user_data + mapped result) into the CQ ring; back-pressure on a full CQ. |
+| `Reap` | (impl pending Loom-2: userspace CQ-head bump) | userspace consumes a CQE; permitted post-teardown for already-posted CQEs. |
+| `Teardown` | (impl pending Loom-2: `KObj_Loom` close → quiesce via the #811 death-interruptible unwind) | quiesce every in-flight op before freeing the ring Burrow. |
+| `BuggyDoublePost` / the five `BUGGY_*` flags | (none — these are the disciplines the impl upholds) | snapshot-not-reread; pin-not-re-resolve-at-completion; one-CQE-per-op; never-post-into-a-full-CQ; quiesce-on-teardown. |
+
+cfgs run with `-deadlock`; `loom.tla`'s `Done` self-loop keeps the
+torn-and-drained terminal state from tripping the deadlock check. See
+docs/LOOM.md + ARCH §28 (I-29, I-30 reserved at impl).
