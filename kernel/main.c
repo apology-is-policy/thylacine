@@ -15,6 +15,7 @@
 // `TOOLING.md`.
 
 #include "uart.h"
+#include "../arch/arm64/alternatives.h"  // apply_alternatives (W1.5 LSE patcher)
 #include "../arch/arm64/asid.h"
 #include "../arch/arm64/exception.h"
 #include "../arch/arm64/gic.h"
@@ -468,6 +469,17 @@ void boot_main(void) {
     // VirtIO PCI device (vendor 0x1AF4 + device IDs 0x1000..0x107F).
     // Silent skip when no PCIe root is present in DTB.
     virtio_pci_init();
+
+    // W1.5: boot-time LSE alternatives-patching. Rewrites the LL/SC atomic
+    // sites (the spinlock test-and-set, the Spoor/SrvConn refcounts, the
+    // scheduler steal-rotate) to single-instruction LSE on FEAT_LSE cores.
+    // Runs HERE -- after hw_features_detect + the MMU/allocator are up, and
+    // strictly BEFORE smp_init -- so it executes single-CPU (no peer runs a
+    // site mid-patch; secondaries start later with cold I-caches and fetch
+    // already-patched bytes). No-op on a non-LSE core (A72). It self-modifies
+    // .text through a transient RW-not-X alias, so W^X / I-12 holds
+    // throughout (PORTABILITY.md 4.5; audit-trigger surface, ARCH 25.4).
+    apply_alternatives();
 
     // SMP secondary bring-up (P2-Ca). Reads /psci/method, brings up
     // each /cpus/cpu@N (N>0) via PSCI_CPU_ON pointing at the asm

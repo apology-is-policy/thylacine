@@ -178,12 +178,15 @@ static u64 l3_vmalloc2[ENTRIES_PER_TABLE]  __attribute__((aligned(PAGE_SIZE)));
 
 // Compile-time guard: the pool MUST back the declared CPU max. Worst-case
 // boot MMIO = ECAM(1 MiB=256) + GIC dist(64 KiB=16) + GIC redist(32 pages/CPU
-// * DTB_MAX_CPUS) + virtio/uart slack(64). If DTB_MAX_CPUS is ever raised
-// past what the pool backs, this fires -- add another l3_vmalloc L3 table.
+// * DTB_MAX_CPUS) + virtio/uart slack(64) + 1 permanently-reserved W1.5
+// patch-scratch slot (patch_scratch_init bumps the cursor once + never
+// returns it). If DTB_MAX_CPUS is ever raised past what the pool backs, this
+// fires -- add another l3_vmalloc L3 table.
 _Static_assert(VMALLOC_MMIO_ENTRIES >=
-                   256u + 16u + 32u * (unsigned)DTB_MAX_CPUS + 64u,
+                   256u + 16u + 32u * (unsigned)DTB_MAX_CPUS + 64u + 1u,
                "MMIO vmalloc pool too small to map all GIC redistributors at "
-               "DTB_MAX_CPUS; add another l3_vmalloc L3 table");
+               "DTB_MAX_CPUS (+ the W1.5 patch-scratch slot); add another "
+               "l3_vmalloc L3 table");
 
 // P3-Bb-hardening: direct-map demotion for the kernel image's 1 GiB.
 //
@@ -832,6 +835,125 @@ void *mmu_map_mmio(paddr_t pa, size_t size) {
     __asm__ __volatile__("isb"            ::: "memory");
 
     return (void *)(uintptr_t)(VMALLOC_BASE + ((u64)start_idx << PAGE_SHIFT));
+}
+
+// ---------------------------------------------------------------------------
+// W1.5: boot-time .text patching for the alternatives framework.
+//
+// mmu_patch_text writes `n` bytes from `src` over kernel .text at `dst` (a
+// canonical RO+X high VA) WITHOUT ever making an executable page writable.
+// It maps a transient RW-not-X alias of the target page at a dedicated
+// scratch VA, writes through the alias, does the ARM-ARM-B2 instruction-
+// cache maintenance, and tears the alias down. The canonical RO+X mapping
+// and the RO+XN direct-map alias are untouched throughout, so no page is
+// ever writable AND executable -- I-12 holds at mapping granularity
+// (PORTABILITY.md 4.5).
+//
+// Boot-only, single-CPU, DAIF-masked (apply_alternatives holds the mask), so
+// no other agent executes `dst` during the [write .. isb] window and the
+// dedicated scratch slot needs no lock. A region spanning a page boundary
+// is handled by looping per page. extincts on an AT translation failure
+// (dst not mapped) -- a patch entry not pointing into mapped .text is a
+// build/link bug, not a runtime condition.
+//
+// Coverage note: at W1.5 every routed site is 4-aligned and <= 16 bytes,
+// none within 16 bytes of a page end, so the cross-page chunk loop is
+// correct-by-construction but UNEXERCISED. A future replacement that
+// straddles a page (a multi-instruction LSE form) is its first live use and
+// owes a targeted unit test.
+// ---------------------------------------------------------------------------
+
+// One reserved L3 vmalloc entry, used only by the patch pass. Lazily
+// claimed on first use (a single bump of the boot-time cursor) and reused
+// for every page, so the whole pass consumes exactly one vmalloc slot.
+static u64 *g_patch_l3_slot;
+static u64  g_patch_scratch_va;
+
+static void patch_scratch_init(void) {
+    if (g_patch_scratch_va) return;
+    if (g_vmalloc_next_idx >= VMALLOC_MMIO_ENTRIES)
+        extinction("mmu_patch: vmalloc pool exhausted reserving patch scratch");
+    u32 idx = g_vmalloc_next_idx++;
+    u64 *tbl = (idx < ENTRIES_PER_TABLE) ? l3_vmalloc : l3_vmalloc2;
+    g_patch_l3_slot    = &tbl[idx % ENTRIES_PER_TABLE];
+    g_patch_scratch_va = VMALLOC_BASE + ((u64)idx << PAGE_SHIFT);
+}
+
+// VA -> PA via the hardware stage-1 EL1-read translation. Works for any
+// alias and any KASLR slide (no assumption about the link-VA -> load-PA
+// delta). .text is readable (RX), so s1e1r succeeds.
+static paddr_t patch_kva_to_pa(uintptr_t va) {
+    u64 par;
+    __asm__ __volatile__(
+        "at s1e1r, %1\n"
+        "isb\n"
+        "mrs %0, par_el1\n"
+        : "=r"(par) : "r"(va) : "memory");
+    if (par & 1ull)                       // PAR_EL1.F = 1 -> translation fault
+        extinction("mmu_patch: AT s1e1r translation fault on .text VA");
+    return (paddr_t)((par & 0x0000FFFFFFFFF000ull) | (va & 0xFFFull));
+}
+
+// Map the 4 KiB page containing `page_pa` RW+PXN+UXN at the scratch VA. The
+// slot was invalidated (+ TLB-flushed) by the prior patch_unmap, so this
+// invalid->valid transition needs no break-before-make.
+static u8 *patch_map(paddr_t page_pa) {
+    patch_scratch_init();
+    *g_patch_l3_slot = make_page_pte_l3(page_pa, PTE_KERN_RW);
+    dsb_ishst();
+    __asm__ __volatile__("isb" ::: "memory");
+    return (u8 *)(uintptr_t)g_patch_scratch_va;
+}
+
+static void patch_unmap(void) {
+    *g_patch_l3_slot = 0;
+    // Break: invalidate the PTE then drop any cached translation for the
+    // scratch VA so the next patch_map's fresh PA is not shadowed by the
+    // stale entry. vmalle1is matches the codebase idiom (inner-shareable
+    // broadcast); cost is irrelevant at boot.
+    dsb_ishst();
+    __asm__ __volatile__("tlbi vmalle1is" ::: "memory");
+    dsb_ish();
+    __asm__ __volatile__("isb" ::: "memory");
+}
+
+// Instruction-cache maintenance to PoU for the modified range (ARM ARM
+// B2.4). The write landed in the D-cache via `scratch`; clean it to the
+// point-of-unification, then invalidate the I-cache for the canonical VA.
+// Both alias the same PA -> the same physical PoU line (D/I caches are PIPT
+// on ARMv8). Stride by the implemented line sizes from CTR_EL0.
+static void patch_sync_icache(const void *scratch, const void *canon, u32 len) {
+    u64 ctr;
+    __asm__ __volatile__("mrs %0, ctr_el0" : "=r"(ctr));
+    u32 dline = 4u << ((u32)(ctr >> 16) & 0xF);   // DminLine (words -> bytes)
+    u32 iline = 4u << ((u32)ctr & 0xF);           // IminLine
+    uintptr_t s = (uintptr_t)scratch, send = s + len;
+    for (uintptr_t p = s & ~(uintptr_t)(dline - 1); p < send; p += dline)
+        __asm__ __volatile__("dc cvau, %0" :: "r"(p) : "memory");
+    dsb_ish();
+    uintptr_t c = (uintptr_t)canon, cend = c + len;
+    for (uintptr_t p = c & ~(uintptr_t)(iline - 1); p < cend; p += iline)
+        __asm__ __volatile__("ic ivau, %0" :: "r"(p) : "memory");
+    dsb_ish();
+    __asm__ __volatile__("isb" ::: "memory");
+}
+
+void mmu_patch_text(void *dst, const void *src, u32 n) {
+    const u8 *s = (const u8 *)src;
+    u8 *d = (u8 *)dst;
+    while (n) {
+        uintptr_t va = (uintptr_t)d;
+        u32 page_off = (u32)(va & (PAGE_SIZE - 1));
+        u32 chunk = (u32)(PAGE_SIZE - page_off);
+        if (chunk > n) chunk = n;
+        paddr_t pa = patch_kva_to_pa(va);
+        u8 *scratch = patch_map(pa & ~(paddr_t)(PAGE_SIZE - 1));
+        u8 *wp = scratch + page_off;
+        for (u32 i = 0; i < chunk; i++) wp[i] = s[i];
+        patch_sync_icache(wp, d, chunk);
+        patch_unmap();
+        d += chunk; s += chunk; n -= chunk;
+    }
 }
 
 // ---------------------------------------------------------------------------

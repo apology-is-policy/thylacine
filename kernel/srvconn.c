@@ -15,6 +15,7 @@
 #include <thylacine/spinlock.h>
 #include <thylacine/srvconn.h>
 #include <thylacine/types.h>
+#include <atomic_lse.h>   // t_atomic_fetch_{add_relaxed,sub_acqrel}_int (W1.5 LSE-patchable refcount)
 
 #include "../mm/slub.h"
 
@@ -174,7 +175,7 @@ struct SrvConn *srvconn_create(u64 peer_stripes, int peer_pid,
 void srvconn_ref(struct SrvConn *cn) {
     if (!cn || cn->magic != SRV_CONN_MAGIC)
         extinction("srvconn_ref: NULL or corrupted SrvConn");
-    int pre = __atomic_fetch_add(&cn->ref, 1, __ATOMIC_RELAXED);
+    int pre = t_atomic_fetch_add_relaxed_int(&cn->ref, 1);
     if (pre <= 0)
         extinction("srvconn_ref: refcount was <= 0 (use-after-free?)");
 }
@@ -227,7 +228,7 @@ void srvconn_unref(struct SrvConn *cn) {
 
     // ACQ_REL so the last unref's frees are ordered after every prior
     // holder's writes (mirrors pipe.c's ring refcount discipline).
-    int pre = __atomic_fetch_sub(&cn->ref, 1, __ATOMIC_ACQ_REL);
+    int pre = t_atomic_fetch_sub_acqrel_int(&cn->ref, 1);
     if (pre <= 0)
         extinction("srvconn_unref: refcount underflow");
     if (pre != 1) return;

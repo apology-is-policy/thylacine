@@ -10,6 +10,7 @@
 #include <thylacine/spinlock.h>
 #include <thylacine/spoor.h>
 #include <thylacine/types.h>
+#include <atomic_lse.h>   // t_atomic_fetch_{add,sub}_acqrel_int (W1.5 LSE-patchable refcount)
 
 #include "../mm/slub.h"
 
@@ -98,7 +99,7 @@ void spoor_ref(struct Spoor *c) {
     // use-after-free in the caller — extinct). The increment has
     // already happened by the time we extinct, but that's fine since
     // extinction halts.
-    int pre = __atomic_fetch_add(&c->ref, 1, __ATOMIC_ACQ_REL);
+    int pre = t_atomic_fetch_add_acqrel_int(&c->ref, 1);
     if (pre <= 0)
         extinction("spoor_ref of zero-ref Spoor (already freed?)");
 }
@@ -118,7 +119,7 @@ void spoor_unref(struct Spoor *c) {
     // R15 F233 close: atomic decrement. fetch_sub returns the PRE
     // value; pre == 1 means we were the last holder (post == 0) and
     // own the free. pre <= 0 is the use-after-free diagnostic case.
-    int pre = __atomic_fetch_sub(&c->ref, 1, __ATOMIC_ACQ_REL);
+    int pre = t_atomic_fetch_sub_acqrel_int(&c->ref, 1);
     if (pre <= 0)
         extinction("spoor_unref of zero-ref Spoor");
     if (pre == 1) {
@@ -202,7 +203,7 @@ void spoor_clunk(struct Spoor *c) {
     // from two CPUs. The dev->close runs AFTER the decrement (so
     // post == 0); the storage is still valid (no spoor_free_internal
     // yet), the hook can safely inspect c->aux, c->dev, c->qid.
-    int pre = __atomic_fetch_sub(&c->ref, 1, __ATOMIC_ACQ_REL);
+    int pre = t_atomic_fetch_sub_acqrel_int(&c->ref, 1);
     if (pre <= 0)
         extinction("spoor_clunk of zero-ref Spoor");
     if (pre == 1) {

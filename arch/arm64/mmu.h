@@ -190,6 +190,12 @@
 // the new entries were previously invalid (no stale entries to flush).
 void *mmu_map_mmio(paddr_t pa, size_t size);
 
+// W1.5: write `n` bytes from `src` over kernel .text at `dst` (a canonical
+// RO+X high VA), via a transient RW-not-X scratch alias + ARM-ARM-B2
+// I-cache maintenance. Never makes an executable page writable (W^X / I-12
+// holds). Boot-only, single-CPU, IRQ-masked. Used by apply_alternatives().
+void mmu_patch_text(void *dst, const void *src, u32 n);
+
 // Build the page tables in BSS and program MAIR / TCR / TTBR / SCTLR.
 //
 // At P1-C-extras Part B, this builds two parallel mappings:

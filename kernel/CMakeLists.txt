@@ -29,6 +29,7 @@ set(KERNEL_SRCS
     ../arch/arm64/gic.c
     ../arch/arm64/timer.c
     ../arch/arm64/hwfeat.c
+    ../arch/arm64/alternatives.c
     ../arch/arm64/context.S
     ../arch/arm64/userland.S
     ../arch/arm64/psci.c
@@ -46,6 +47,7 @@ set(KERNEL_SRCS
     test/test_gic.c
     test/test_timer.c
     test/test_hardening.c
+    test/test_alternatives.c
     test/test_context.c
     test/test_fp.c
     test/test_sched.c

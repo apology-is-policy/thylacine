@@ -22,12 +22,14 @@
 #define THYLACINE_SPINLOCK_H
 
 #include <thylacine/types.h>
+#include <atomic_lse.h>   // t_atomic_xchg_acq_u32 (W1.5 LSE-patchable test-and-set)
 
 typedef struct spin_lock {
-    // 0 = unlocked, 1 = locked. Operated on with C11 atomic builtins
-    // — clang lowers to ARMv8.1 LSE (`swpa`) under -mcpu=cortex-a72 or
-    // newer with +lse, falling back to LL/SC (`ldaxr`/`stxr`) on
-    // ARMv8.0. Both forms preserve acquire/release semantics.
+    // 0 = unlocked, 1 = locked. The test-and-set goes through the
+    // W1.5 patchable atomic (t_atomic_xchg_acq_u32): the kernel compiles
+    // to the ARMv8.0 LL/SC form (`ldaxr`/`stxr`), and apply_alternatives
+    // rewrites it to single-instruction LSE (`swpa`) at boot on FEAT_LSE
+    // cores. Both forms preserve acquire/release semantics.
     u32 value;
 } spin_lock_t;
 
@@ -42,7 +44,7 @@ static inline void spin_lock(spin_lock_t *l) {
     // when the lock is held (avoids a stream of LL/SC traffic into
     // the contended cacheline). Yield in the inner spin so the
     // host scheduler under emulation gets a hint we're idle-spinning.
-    while (__atomic_exchange_n(&l->value, 1u, __ATOMIC_ACQUIRE) != 0u) {
+    while (t_atomic_xchg_acq_u32(&l->value, 1u) != 0u) {
         while (__atomic_load_n(&l->value, __ATOMIC_RELAXED) != 0u) {
             __asm__ __volatile__("yield" ::: "memory");
         }
@@ -58,7 +60,7 @@ static inline void spin_unlock(spin_lock_t *l) {
 // a peer CPU's run tree without blocking — if try_lock fails, the
 // stealer moves to the next peer.
 static inline bool spin_trylock(spin_lock_t *l) {
-    return __atomic_exchange_n(&l->value, 1u, __ATOMIC_ACQUIRE) == 0u;
+    return t_atomic_xchg_acq_u32(&l->value, 1u) == 0u;
 }
 
 // IRQ-disabling variants — REAL implementation (P1-I audit F30 close).

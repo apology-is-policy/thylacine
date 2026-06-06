@@ -18,18 +18,11 @@ board port) stays post-v1.0 (`ROADMAP.md §12.1`).
 | Commit | Sub-chunk | What | Tests |
 |---|---|---|---|
 | `29c0492` | scripture | Atomics amendment: LL/SC floor (drop `-moutline-atomics`) + new W1.5 boot-time LSE-patcher design. `PORTABILITY.md §4` + new §4.5 + `ROADMAP.md §8.0a`. | (docs only) |
-| *(this)* | **W1** | v8.0 ISA floor + hardening posture. Toolchain `-march=armv8-a` (drop `+lse+pauth+bti`; keep `-mno-outline-atomics` + `pac-ret+bti`) → inline LL/SC atomics, runs on every v8.0 core. `start.S` `.arch_extension pauth` + FEAT_PAuth/FEAT_BTI runtime gating of the PAC-key MSRs + SCTLR enables (kept leaf). `halls_strip_pac` `xpaci` gated on a direct `ID_AA64ISAR1_EL1` read (latent UNDEF-on-v8.0 bug surfaced + fixed). `test_hardening` softened to enabled-iff-CPU (F25 anti-performative preserved). Runtime-reflective boot banner. ARCH §15.5/§24.4 + TOOLING §10 + CLAUDE banner + ref 01-boot/12-hardening reconciled. | 714/714 default; SMP gate 40/40 (default+UBSan × smp4/smp8) 0 corruption; 0 EXTINCTION |
+| `9a43a9d` | **W1** | v8.0 ISA floor + hardening posture. Toolchain `-march=armv8-a` (drop `+lse+pauth+bti`; keep `-mno-outline-atomics` + `pac-ret+bti`) → inline LL/SC atomics, runs on every v8.0 core. `start.S` `.arch_extension pauth` + FEAT_PAuth/FEAT_BTI runtime gating of the PAC-key MSRs + SCTLR enables (kept leaf). `halls_strip_pac` `xpaci` gated on a direct `ID_AA64ISAR1_EL1` read (latent UNDEF-on-v8.0 bug surfaced + fixed). `test_hardening` softened to enabled-iff-CPU (F25 anti-performative preserved). Runtime-reflective boot banner. ARCH §15.5/§24.4 + TOOLING §10 + CLAUDE banner + ref 01-boot/12-hardening reconciled. | 714/714 default; SMP gate 40/40 (default+UBSan × smp4/smp8) 0 corruption; 0 EXTINCTION |
+| *(this)* | **W1.5** | Boot-time LSE alternatives-patcher. Restores single-instruction LSE on FEAT_LSE cores at zero steady-state cost (the Linux `apply_alternatives` model). New `arch/arm64/alternatives.{c,h}` (the `ALTERNATIVE()` macro + the `apply_alternatives()` boot pass) + `arch/arm64/atomic_lse.h` (LL/SC-default patchable RMW primitives) + `mmu_patch_text` (writes `.text` via a transient RW-not-X alias → W^X / I-12 never violated) + the `.altinstructions`/`.altinstr_replacement` `.rodata` sections (reloc-free, KASLR-independent). Routes the spinlock test-and-set + the Spoor/SrvConn refcounts + the scheduler steal-rotate. `apply_alternatives` runs single-CPU, full-DAIF-masked, before `smp_init`. Routes every spinlock/refcount/scheduler RMW site (`g_alt_total`, a few hundred inlined); on `-cpu max` all patched to LSE. Audit-bearing (ARCH §25.4 + CLAUDE.md rows added). | 716/716 default (+`alternatives.patch_applied` + `alternatives.atomics_correct`); SMP gate (default+UBSan × smp4/smp8) 0 corruption; 0 EXTINCTION |
 
 ## Remaining work
 
-- **W1.5 — boot-time LSE alternatives-patcher** (audit-bearing). `PORTABILITY.md
-  §4.5`. Restore single-instruction LSE on FEAT_LSE cores at zero runtime cost:
-  `arch/arm64/atomic_lse.h` (RMW ops LL/SC-default + `.altinstructions` table) +
-  `arch/arm64/alternatives.{c,S}` (the boot patcher, after `hw_features_detect`,
-  before `smp_init`) + a transient RW-not-X scratch-map mmu helper. Writes
-  through an RW-not-X alias so W^X / I-12 is never violated; cache maintenance
-  (`dc cvau` / `ic ivau` / `dsb` / `isb`). Add the ARCH §25.4 + CLAUDE.md
-  audit-trigger rows. Focused audit. No new TLA+ spec.
 - **W2 — the GICv2 driver** (audit-bearing; scheduler/IPI, I-18). `PORTABILITY.md
   §5`. Real GICv2 path in `arch/arm64/gic.c` (today extincts on v2): MMIO GICC
   (`GICC_IAR`/`EOIR`/`PMR`/`CTLR`), `GICD_ITARGETSR` routing, `GICD_SGIR` IPI in

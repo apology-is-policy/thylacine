@@ -132,6 +132,16 @@ every v8.0+ target with no further work — and lands before W1.5.
 
 ## 4.5 W1.5 — boot-time LSE alternatives-patching (restore LSE, zero runtime cost)
 
+> **Implemented.** As-built: `docs/lazarus-status.md` (the W1.5 row) +
+> `docs/reference/12-hardening.md` (the atomics-patching section). A few
+> hundred patch sites (`g_alt_total`); `arch/arm64/alternatives.{c,h}` +
+> `arch/arm64/atomic_lse.h` +
+> `mmu_patch_text`. The deferred-detail choices below were resolved as: the
+> scratch map is a single reserved vmalloc L3 slot (no per-patch allocation);
+> the table is C-struct `alt_instr` (12 B, packed) with PC-relative offsets;
+> `at s1e1r`+PAR_EL1 gives the site VA->PA. Audit-trigger rows landed
+> (ARCH §25.4 + CLAUDE.md).
+
 W1's floor inlines LL/SC for every atomic, which costs LSE-capable cores (M2,
 A76, Pi 5) their faster single-instruction atomics. W1.5 restores LSE **with no
 steady-state runtime branch and no function call** — the Linux ARM64 model:

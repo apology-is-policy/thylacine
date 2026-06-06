@@ -97,6 +97,20 @@ SECTIONS
         _uaccess_fixup_start = .;
         KEEP(*(.uaccess_fixup))
         _uaccess_fixup_end = .;
+
+        /* W1.5 boot-time alternatives (LSE-patching). Both sections are
+         * READ-ONLY metadata the patcher consumes: .altinstructions is the
+         * (PC-relative-offset) patch table, .altinstr_replacement holds the
+         * single-instruction LSE replacements (copied OUT, never executed in
+         * place). RO+NX here keeps them W^X-clean; PC-relative .word offsets
+         * keep them reloc-free / KASLR-independent (cf. .uaccess_fixup, the
+         * Halls symtab). apply_alternatives walks [start,end). */
+        . = ALIGN(8);
+        _alt_instructions_start = .;
+        KEEP(*(.altinstructions))
+        _alt_instructions_end = .;
+        . = ALIGN(4);
+        KEEP(*(.altinstr_replacement))
     }
     . = ALIGN(PAGE_SIZE);
     _rodata_end = .;

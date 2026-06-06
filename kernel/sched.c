@@ -38,6 +38,7 @@
 #include <thylacine/spinlock.h>
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
+#include <atomic_lse.h>   // t_atomic_fetch_add_relaxed_u32 (W1.5 LSE-patchable)
 
 #include "../arch/arm64/gic.h"      // P3-G: gic_send_ipi for ready/wakeup wake-idle-peer.
 #include "../arch/arm64/timer.h"    // P5-tsleep: counter read + ns->counter conversion.
@@ -752,7 +753,7 @@ static volatile u32 g_try_steal_rotate;
 static struct Thread *try_steal(struct CpuSched *cs, bool *contended_out) {
     if (contended_out) *contended_out = false;
     unsigned self = (unsigned)(cs - g_cpu_sched);
-    u32 base = __atomic_fetch_add(&g_try_steal_rotate, 1u, __ATOMIC_RELAXED);
+    u32 base = t_atomic_fetch_add_relaxed_u32((u32 *)&g_try_steal_rotate, 1u);
 
     for (unsigned k = 0; k < DTB_MAX_CPUS; k++) {
         unsigned i = (unsigned)((base + k) % DTB_MAX_CPUS);

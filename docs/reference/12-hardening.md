@@ -18,9 +18,9 @@ What's enabled vs deferred at v1.0:
 |---|---|---|
 | Stack canaries (`-fstack-protector-strong`) | **live** | `__stack_chk_guard` initialized from KASLR entropy; `__stack_chk_fail` extincts. |
 | Stack-clash protection (`-fstack-clash-protection`) | live | Compile-time only; probes guard pages on large frames. Mostly inert in our codebase. |
-| PAC return-address signing (`-mbranch-protection=pac-ret`) | live | APIA key set in start.S from cntpct; SCTLR_EL1.EnIA enabled. NOPs on ARMv8.0 hardware. |
-| BTI indirect-branch guards (`-mbranch-protection=bti`) | live | SCTLR_EL1.BT0 set; kernel text pages have PTE.GP=1. NOPs on ARMv8.0..8.4 hardware. |
-| LSE atomics permission (`-march=armv8-a+lse`) | partial | Compile-time permission. No atomic ops in kernel today; runtime patching deferred to Phase 2 spinlocks. |
+| PAC return-address signing (`-mbranch-protection=pac-ret`) | live (conditional) | `paciasp`/`autiasp` are HINT-space (emit under `pac-ret` with no arch extension). Lazarus W1: the APIA key + `SCTLR_EL1.EnIA` are programmed only on FEAT_PAuth hardware (`start.S` runtime gate); NOPs + unset SCTLR on the v8.0 floor (A72). |
+| BTI indirect-branch guards (`-mbranch-protection=bti`) | live (conditional) | `bti` markers are HINT-space; kernel text pages have PTE.GP=1. Lazarus W1: `SCTLR_EL1.BT0` set only on FEAT_BTI hardware. NOPs on ARMv8.0..8.4. |
+| LSE atomics (`-march=armv8-a` LL/SC floor + W1.5 boot patch) | **live (conditional)** | Lazarus W1 drops `+lse`: the kernel compiles inline LL/SC (`ldaxr`/`stxr`) for every atomic, running on every v8.0 core. Lazarus W1.5: `apply_alternatives` rewrites the spinlock / refcount / scheduler RMW sites to single-instruction LSE on FEAT_LSE cores at boot (`arch/arm64/alternatives.{c,h}` + `atomic_lse.h`; PORTABILITY.md §4.5). |
 | NX stack (`-Wl,-z,noexecstack`) | live | Explicit linker assertion. |
 | KASLR (P1-C-extras Part B) | live | Kernel base randomized per boot. |
 | W^X (P1-C, I-12) | live | PTE constructors `_Static_assert`'d. |
@@ -84,10 +84,11 @@ unsigned hw_features_describe(char *buf, unsigned cap);
 Compile flags added at P1-H:
 
 ```
--march=armv8-a+lse+pauth+bti      ; permit LSE / PAuth / BTI instructions
+-march=armv8-a                    ; v8.0 ISA floor (Lazarus W1) -- runs on every v8.0+ core (A72)
+-mno-outline-atomics              ; inline LL/SC atomics, NOT the call+branch userspace form
 -fstack-protector-strong          ; canaries on functions with arrays / addr-taken locals
 -fstack-clash-protection          ; probe guard pages on large frames
--mbranch-protection=pac-ret+bti   ; emit paciasp/autiasp + bti markers
+-mbranch-protection=pac-ret+bti   ; emit paciasp/autiasp + bti markers (HINT-space; NOP on v8.0)
 ```
 
 Link flags added:
@@ -96,7 +97,7 @@ Link flags added:
 -Wl,-z,noexecstack                ; NX stack (explicit, even though static-pie has no PT_GNU_STACK by default)
 ```
 
-`-march=armv8-a+lse+pauth+bti` is the assembler/compiler permission flag — enables emitting LSE / PAuth / BTI instructions where appropriate. The runtime hardware may or may not implement these features; emitted PAC instructions are NOPs on pre-ARMv8.3 hardware (HINT space), and BTI markers are NOPs on pre-ARMv8.5.
+Lazarus W1 targets the **ARMv8.0-A ISA floor** (`-march=armv8-a`) so one binary runs on every v8.0+ core (A72 included). PAC (`paciasp`/`autiasp`) and BTI markers are HINT-space — they emit under `-mbranch-protection=pac-ret+bti` with **no** `+pauth`/`+bti` arch extension, NOP on v8.0 and active on v8.3/v8.5+ — so the binary keeps full PAC/BTI on capable silicon. LSE is the only hard `#UD` wall on A72, so `+lse` is dropped and `-mno-outline-atomics` makes the compiler inline LL/SC; W1.5's boot-time patcher restores single-instruction LSE on FEAT_LSE cores (`apply_alternatives`; PORTABILITY.md §4.5). A FEAT_PAuth/PAuth instruction the kernel hand-writes (`xpaci` in halls, the `AP*KEY*` MSRs in start.S) needs `.arch_extension pauth` to *assemble* under the v8.0 floor and a runtime gate to not UNDEF.
 
 ### Stack canary cookie initialization
 
