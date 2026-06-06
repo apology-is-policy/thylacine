@@ -411,6 +411,14 @@ _torpor:
 // ---------------------------------------------------------------------------
 
 .section ".text", "ax"
+
+// Lazarus W1: the kernel compiles to the ARMv8.0-A floor (-march=armv8-a),
+// under which the assembler would reject the FEAT_PAuth key-register MSRs
+// below. This directive re-permits them for ENCODING only; their EXECUTION
+// is runtime-gated on FEAT_PAuth in pac_apply_this_cpu (UNDEF on a v8.0 core
+// like the A72, so a guard is mandatory, not cosmetic).
+.arch_extension pauth
+
 .globl pac_derive_keys
 .type pac_derive_keys, %function
 pac_derive_keys:
@@ -439,6 +447,18 @@ pac_derive_keys:
 pac_apply_this_cpu:
     bti     c                       // safe landing
 
+    // Lazarus W1: PAC + BTI are runtime-conditional. Gate the PAuth work on
+    // the running CPU's ID registers. The AP*KEY*_EL1 MSRs below are UNDEF on
+    // a core without FEAT_PAuth (the A72 / v8.0 floor) -- a write there traps,
+    // so this guard is load-bearing, not cosmetic. The SCTLR PAC-enable bits
+    // are RES0 there (harmless), but we gate them too so the enabled set
+    // always matches the silicon. Leaf function (no bl / no paciasp): the
+    // SCTLR write here is what TURNS PAC ON, so its own prologue must not sign
+    // a return address with a key that is not yet loaded.
+    mrs     x10, id_aa64isar1_el1
+    ubfx    x11, x10, #4, #8        // [11:4] = API:APA -> FEAT_PAuth presence
+    cbz     x11, .Lpac_no_pauth
+
     adrp    x9, g_pac_keys
     add     x9, x9, :lo12:g_pac_keys
 
@@ -458,16 +478,28 @@ pac_apply_this_cpu:
     msr     apdbkeyhi_el1, x6
     msr     apdbkeylo_el1, x7
 
-    // SCTLR_EL1: set EnIA (31), EnIB (30), EnDA (27), EnDB (13), BT0 (35).
-    //   bits = 0x0000_0008_c800_2000
+    // SCTLR_EL1 PAC-enable bits: EnIA (31), EnIB (30), EnDA (27), EnDB (13).
+    //   bits = 0x0000_0000_c800_2000  (BT0 is set separately, below)
     mrs     x0, sctlr_el1
     movz    x1, #0x2000, lsl #0
     movk    x1, #0xc800, lsl #16
-    movk    x1, #0x0008, lsl #32
     orr     x0, x0, x1
     msr     sctlr_el1, x0
     isb
 
+.Lpac_no_pauth:
+    // SCTLR_EL1.BT0 (bit 35): gate on FEAT_BTI (ID_AA64PFR1_EL1.BT [3:0]).
+    // RES0-safe without BTI, but gated for symmetry with the capability.
+    mrs     x12, id_aa64pfr1_el1
+    ubfx    x13, x12, #0, #4
+    cbz     x13, .Lpac_done
+    mrs     x0, sctlr_el1
+    movz    x1, #0x0008, lsl #32    // BT0 = bit 35
+    orr     x0, x0, x1
+    msr     sctlr_el1, x0
+    isb
+
+.Lpac_done:
     ret
 .size pac_apply_this_cpu, . - pac_apply_this_cpu
 

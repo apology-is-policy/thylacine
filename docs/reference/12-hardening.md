@@ -176,12 +176,12 @@ The feature is "present" iff the field is non-zero. `hw_features_describe` produ
 `boot_main` adds three lines:
 
 ```
-  hardening: MMU+W^X+extinction+KASLR+vectors+IRQ+canaries+PAC+BTI+LSE (P1-H)
+  hardening: MMU+W^X+extinction+KASLR+vectors+IRQ+canaries (unconditional); PAC/BTI/LSE conditional (P1-H; Lazarus W1)
   features: PAC,BTI,MTE1,LSE,CRC32 (CPU-implemented)
   canary: initialized (fold 0x<16-bit>)
 ```
 
-The hardening line lists what was *compiled in*; the features line lists what the *CPU implements*. They diverge gracefully on older hardware (ARMv8.0 → "compiled with PAC/BTI but CPU lacks them, so they're harmless NOPs").
+Since Lazarus W1 (`PORTABILITY.md §4`) the hardening line lists the features that hold **unconditionally** on every target and marks PAC / BTI / LSE **runtime-conditional**; the features line lists what the *CPU implements*. On the ARMv8.0 floor (A72 / Pi 400) PAC + BTI are absent — their HINT-space markers are harmless NOPs, and `start.S` (`pac_apply_this_cpu`) leaves the SCTLR enables off via the FEAT_PAuth / FEAT_BTI gate — and LSE atomics are the inline LL/SC floor (the W1.5 boot-time patcher swaps in single-instruction LSE where FEAT_LSE is present). On capable hardware (M2 / QEMU `-cpu max`) all three are active.
 
 ---
 
@@ -295,13 +295,13 @@ The hardening overhead is dominated by canary checks; PAC + BTI are essentially 
 
 **Implemented at P1-H**:
 
-- Toolchain hardening flags: `-fstack-protector-strong`, `-fstack-clash-protection`, `-mbranch-protection=pac-ret+bti`, `-march=armv8-a+lse+pauth+bti`, `-Wl,-z,noexecstack`.
+- Toolchain hardening flags: `-fstack-protector-strong`, `-fstack-clash-protection`, `-mbranch-protection=pac-ret+bti`, `-march=armv8-a` (the Lazarus W1 v8.0 floor; was `+lse+pauth+bti` at P1-H), `-mno-outline-atomics`, `-Wl,-z,noexecstack`.
 - Stack canary infrastructure: `__stack_chk_guard` (BSS, volatile u64) + `__stack_chk_fail` (extincts) in `kernel/canary.c`. `canary_init(seed)` from `kernel/include/thylacine/canary.h`. Initialized in `kaslr_init` (marked `no_stack_protector`).
-- PAC keys + SCTLR enable in `arch/arm64/start.S` between BSS clear and `bl kaslr_init`. APIA / APIB / APDA / APDB keys from `cntpct_el0` rotations. SCTLR_EL1.{EnIA, EnIB, EnDA, EnDB, BT0} = 1.
+- PAC keys + SCTLR enable in `arch/arm64/start.S` between BSS clear and `bl kaslr_init`. APIA / APIB / APDA / APDB keys from `cntpct_el0` rotations. SCTLR_EL1.{EnIA, EnIB, EnDA, EnDB} set iff FEAT_PAuth, BT0 set iff FEAT_BTI (Lazarus W1 runtime gate in `pac_apply_this_cpu`; the AP\*KEY\*_EL1 MSRs are UNDEF on a v8.0 core, so the guard is mandatory — `.arch_extension pauth` lets them assemble under `-march=armv8-a`).
 - BTI on kernel text: PTE_GP (bit 50) added to `PTE_KERN_TEXT` in `arch/arm64/mmu.h`.
 - Long-branch into TTBR1 changed from BR to BLR in `start.S` (PSTATE.BTYPE=01 matches compiler-emitted `bti c`).
 - HW feature detection: `arch/arm64/hwfeat.{h,c}` with ID-register inspection.
-- Banner: `hardening:` line lists static features; `features:` line lists CPU-implemented features; `canary:` line shows the live cookie.
+- Banner: `hardening:` line lists the unconditional set + marks PAC/BTI/LSE runtime-conditional (Lazarus W1); `features:` line lists CPU-implemented features; `canary:` line shows the live cookie.
 - Test: `hardening.detect_smoke` (canary cookie + ID-register self-check + PAC/BTI presence assertion).
 
 **Not yet implemented** (deferred with explicit rationale):
@@ -312,7 +312,7 @@ The hardening overhead is dominated by canary checks; PAC + BTI are essentially 
 - **Hardened malloc / Scudo**: userspace; Phase 5 with musl port.
 - **Deliberate-fault test target**: P1-I deliverable. Each protection (canary, PAC, BTI, W^X) gets a dedicated build flag that triggers the fault and verifies the right `EXTINCTION:` message.
 - **PAC poisoned-address recognition** in fault handler: P1-I refinement (currently shows `"unhandled translation fault"` for PAC failures). The hardware behavior is "ret to a high-bit address that triggers translation fault"; the diagnostic would inspect the FAR and emit `"PAC auth failure on return"`.
-- **Atomic primitives with LSE / LL/SC runtime patching**: Phase 2 with spinlocks. The compile flag `+lse` is already set; the patching mechanism (`apply_alternatives()`) lands when atomics arrive.
+- ~~**Atomic primitives with LSE / LL/SC runtime patching**~~: **superseded by Lazarus W1 + W1.5.** The kernel now compiles the LL/SC v8.0 floor (`-march=armv8-a`, no `+lse`); W1.5 is the boot-time alternatives-patcher that restores single-instruction LSE on FEAT_LSE cores (`PORTABILITY.md §4.5`).
 
 **Landed**: P1-H at commit `e8c9c5c`.
 
@@ -343,9 +343,9 @@ For v1.0 this is acceptable: PAC's threat model is "attacker has corrupted a ret
 
 Our codebase has no functions with stack frames > 4 KiB (the boot stack is 16 KiB total but no single function consumes that much). The flag is enabled defensively + future-proof — Phase 2's process model may introduce larger frames; the flag will start being relevant then.
 
-### LSE atomics permission without runtime fallback
+### LSE atomics: the v8.0 floor (Lazarus W1) + the boot-time patcher (W1.5)
 
-`-march=armv8-a+lse+pauth+bti` permits the compiler to emit LSE atomic instructions. Our codebase has no atomic operations today (spinlock.h is a no-op stub at v1.0; Phase 2 introduces real spinlocks). If a future change introduces `__atomic_*` builtins or `_Atomic` types BEFORE Phase 2's atomic primitive layer lands, the compiler may emit LSE ops that trap on ARMv8.0 hardware. Mitigation: Phase 2's `arch/arm64/atomic.S` will provide LL/SC fallback patched at boot via `apply_alternatives()` (per ARCH §24.4).
+**Resolved.** At P1-H the toolchain set `-march=armv8-a+lse+pauth+bti`, which let the compiler inline LSE atomic instructions that would `#UD` on an ARMv8.0 core (the A72 / Pi 400) — the exact hazard this caveat warned of, since realized as the kernel grew real atomics (spinlock, refcounts, the scheduler). Lazarus W1 drops to `-march=armv8-a` (no `+lse`, `-mno-outline-atomics`): every `__atomic_*` op inlines LL/SC, which runs on every v8.0 core. LSE is restored, with zero steady-state runtime cost, by the W1.5 boot-time alternatives-patcher (`arch/arm64/alternatives.{c,S}` + `atomic_lse.h`; `PORTABILITY.md §4.5`) — *not* outline-atomics (the userspace call+branch form no kernel uses in-kernel).
 
 ### CFI deferral is intentional
 

@@ -444,12 +444,13 @@ Thylacine vX.Y-dev booting...
   cpus: N
   mem:  XXXX MiB
   dtb:  0xADDR
-  hardening: KASLR+ASLR+W^X+CFI+PAC+MTE+BTI+LSE+canaries
+  hardening: MMU+W^X+extinction+KASLR+vectors+IRQ+canaries (unconditional); PAC/BTI/LSE conditional
+  features:  PAC,BTI,LSE,CRC32 (CPU-implemented)
   kernel base: 0xADDR (KASLR offset 0xADDR)
 Thylacine boot OK
 ```
 
-The multi-line header is printed by `boot_main()` (`kernel/main.c`) during late bring-up, before it enters the init process (joey).
+The multi-line header is printed by `boot_main()` (`kernel/main.c`) during late bring-up, before it enters the init process (joey). The `hardening:` and `features:` lines are **informational** — the agentic-loop tooling matches only `Thylacine boot OK` and the `EXTINCTION:` prefix (below), so these lines are free to evolve. Since Lazarus W1 (`PORTABILITY.md §4`) the `hardening:` line lists the features that hold on **every** target and marks PAC / BTI / LSE **runtime-conditional** (best-effort on capable silicon; absent on the ARMv8.0 floor), while the `features:` line reports what the running CPU actually implements.
 
 The final line `Thylacine boot OK` is the agent's boot-success signal. Since A-5a (login + session), it is printed by `boot_mark_complete()` when **init signals `SYS_BOOT_COMPLETE`** -- after joey's boot-test asserts pass and just before joey transitions to the persistent session supervisor (it getty-loops `/sbin/login`). The banner no longer rides joey's exit: joey is the long-running init and does not exit on success. It must:
 - Appear on a line by itself.

@@ -254,9 +254,9 @@ The delta from QEMU `virt` to Pi 5 bare metal: EL2→EL1 drop sequence, mailbox 
 > strict common subset of A72 / A76 (Pi 5) / Apple M-series, so one binary runs
 > on QEMU-TCG, QEMU-HVF-on-Apple, and bare metal. Pi 5 (A76/v8.2) is covered by
 > the same v8.0 base as a secondary target. The hardening posture (PAC/BTI/LSE)
-> moves to **runtime-conditional** (best-effort on capable hardware) — see
-> `PORTABILITY.md §4` + the §28 follow-up owed at Lazarus W1. **Sequencing: after
-> the identity detour (A-2..A-5).**
+> is **runtime-conditional** (best-effort on capable hardware) — see
+> `PORTABILITY.md §4` + the §15.5 / §24.4 reconciliation landed at Lazarus W1.
+> **Sequencing: after the identity detour (A-2..A-5).**
 
 ### 4.5 RISC-V (long horizon, v2.x)
 
@@ -2332,7 +2332,7 @@ Per §7.7. Coarse-grained, on two axes (per CORVUS-DESIGN.md §3 D5, §5.5.1):
 
 ### 15.5 Hardening (CPU + compiler features)
 
-Detailed in §24. **Actually enabled at v1.0** (matches the `kernel/main.c` boot banner): MMU, W^X (enforced as invariant, via per-PTE PXN/UXN), KASLR, exception vectors, IRQ hardening, stack canaries, ARM PAC, ARM BTI, LSE atomics. **Deferred — NOT on at v1.0** (reconciled 2026-05-28, IDENTITY-DESIGN.md §8.4): CFI (`-fsanitize=cfi`; post-v1.0) and ARM MTE (Phase 8). PAC is on; its key entropy is being upgraded off `CNTPCT_EL0` (§8.4 BUILD). Userspace ASLR lands with the loader-randomization work.
+Detailed in §24. **Unconditional at v1.0 on every target** (matches the `kernel/main.c` boot banner): MMU, W^X (enforced as invariant, via per-PTE PXN/UXN), KASLR, exception vectors, IRQ hardening, stack canaries, extinction. **Runtime-conditional** (Lazarus W1, `PORTABILITY.md §4`): ARM PAC + ARM BTI (HINT-space markers — active only where the CPU implements FEAT_PAuth / FEAT_BTI *and* `start.S` enabled them; a NOP on the A72 / v8.0 floor) and LSE atomics (the kernel compiles the LL/SC floor; W1.5 patches single-instruction LSE in at boot where FEAT_LSE is present). The honest delta: on bare v8.0 silicon (A72 / Pi 400) the PAC/BTI exploit mitigations are unavailable — a property of that hardware, not a regression on capable targets (M2 / QEMU). **Deferred — NOT on at v1.0** (reconciled 2026-05-28, IDENTITY-DESIGN.md §8.4): CFI (`-fsanitize=cfi`; post-v1.0) and ARM MTE (Phase 8). PAC key entropy is derived off `CNTPCT_EL0` (§8.4 BUILD). Userspace ASLR lands with the loader-randomization work.
 
 ### 15.6 Open design questions
 
@@ -3337,25 +3337,23 @@ add_link_options(
 
 ARMv8.1+ Large System Extensions provide hardware atomic instructions (`LDADD`, `STADD`, `CAS`, etc.) that don't require LL/SC retry loops. Performance benefit is significant on multi-core (LL/SC retries scale poorly).
 
-Runtime detection at boot via `ID_AA64ISAR0_EL1.Atomic`. The kernel's atomic primitive header (`include/atomic.h`) does runtime patching: on first call, branches to either LSE or LL/SC implementation based on detected support.
+**Lazarus W1 + W1.5 (`PORTABILITY.md` §4 + §4.5).** The kernel compiles to the ARMv8.0-A floor (`-march=armv8-a`, no `+lse`), so every C11 `__atomic_*` op inlines LL/SC (`ldaxr`/`stlxr`) — correct on every v8.0 core, the A72 / Pi 400 included. **LSE is restored with zero steady-state runtime cost** by a boot-time alternatives-patcher (W1.5): the read-modify-write atomic primitives are authored LL/SC-default with the single-instruction LSE form recorded in an `.altinstructions`-style table, and a one-shot pass in `boot_main` — after `hw_features_detect()` (which reads `ID_AA64ISAR0_EL1.Atomic`), before `smp_init()` — rewrites each site to LSE iff `g_hw_features.atomic`. This is *not* a first-call branch and *not* outline-atomics (the userspace call+branch form, which no kernel uses in-kernel); it is the Linux ARM64 model — after boot the code is exactly as if compiled for that CPU.
 
-```c
-/* arch/arm64/atomic.S */
-ENTRY(atomic_add)
-    HWCAP_ALTERNATIVE  // patched at boot to one of:
-    /* LSE path */
-    ldaddal x1, x0, [x2]
-    ret
-    /* LL/SC fallback */
-1:  ldaxr x0, [x2]
-    add   x3, x0, x1
-    stlxr w4, x3, [x2]
-    cbnz  w4, 1b
-    ret
-ENDPROC
+```asm
+/* arch/arm64/atomic_lse.h: each RMW primitive, LL/SC default, with an
+   .altinstructions entry recording the single-instruction LSE replacement.
+   alternatives.c's boot pass copies the LSE form over the LL/SC site (NOP-
+   padding the tail to the LL/SC length) iff FEAT_LSE is present. */
+    /* default: LL/SC (runs everywhere) */
+1:  ldaxr   x0, [x2]
+    add     x3, x0, x1
+    stlxr   w4, x3, [x2]
+    cbnz    w4, 1b
+    /* boot-patched, where FEAT_LSE present, to: */
+    ldaddal x1, x0, [x2]   /* + NOP pad to the LL/SC length */
 ```
 
-Hardware patching at boot (`apply_alternatives()`).
+The patcher writes through a transient RW-not-X alias of the target `.text` page (the canonical mapping stays RO+X), so W^X (I-12) is never violated; ARM-ARM-B2 cache maintenance (`dc cvau` / `ic ivau` / `dsb` / `isb`) follows. LL/SC is the always-correct fallback — a patcher early-out, or any v8.0 core, simply keeps LL/SC. Audit-bearing; full design in `PORTABILITY.md` §4.5.
 
 ### 24.5 KASAN-equivalent in userspace
 

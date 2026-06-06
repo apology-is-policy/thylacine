@@ -229,14 +229,16 @@ void boot_main(void) {
     }
     uart_puts("\n");
 
-    // P1-H: detect hardware-supported hardening features. The compile-
-    // time flags (canaries, PAC, BTI, LSE) are always emitted; this
-    // detection tells the operator which of those will actually be
-    // enforced by the running CPU. Set up `g_hw_features` early so the
-    // banner can report it accurately.
+    // P1-H + Lazarus W1: detect hardware hardening features. The
+    // unconditional set (MMU, W^X, KASLR, vectors, IRQ, canaries,
+    // extinction) holds on every target. PAC + BTI are runtime-conditional
+    // (HINT-space markers, active only where start.S enabled them); LSE is
+    // the LL/SC floor, patched to single-instruction LSE at boot by W1.5
+    // where FEAT_LSE is present. The `features:` line below reports what the
+    // running CPU actually implements. Set up `g_hw_features` early.
     hw_features_detect();
 
-    uart_puts("  hardening: MMU+W^X+extinction+KASLR+vectors+IRQ+canaries+PAC+BTI+LSE (P1-H)\n");
+    uart_puts("  hardening: MMU+W^X+extinction+KASLR+vectors+IRQ+canaries (unconditional); PAC/BTI/LSE conditional (P1-H; Lazarus W1)\n");
 
     // Per-feature live-status banner line. Reports what the CPU
     // *implements* (different from the static "we compiled with X"

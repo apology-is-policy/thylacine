@@ -77,14 +77,25 @@ set(THYLACINE_TARGET_TRIPLE "aarch64-none-elf"
 # produce PC-relative code; only the absolute-pointer-in-.data
 # relocations (R_AARCH64_RELATIVE) participate in KASLR sliding.
 #
-# P1-H hardening additions:
-#   -march=armv8-a+lse             — permit LSE atomic instructions where
-#                                    the compiler chooses to emit them.
-#                                    Today the kernel has no atomic builtins
-#                                    so no LSE ops are emitted; Phase 2's
-#                                    spinlocks land their atomics in a
-#                                    dedicated TU with runtime fallback.
-#                                    Forward-compatible.
+# Lazarus W1 (v8.0 ISA floor; PORTABILITY.md §4):
+#   -march=armv8-a                 — the ARMv8.0-A floor (drop +lse+pauth+bti).
+#                                    The strict common subset of Cortex-A72
+#                                    (Pi 400), A76 (Pi 5), and Apple M-series, so
+#                                    ONE binary runs on QEMU-TCG, QEMU-HVF, and
+#                                    bare metal. Without +lse the compiler inlines
+#                                    LL/SC (ldaxr/stlxr) for every __atomic_* op,
+#                                    which runs on every v8.0 core (LSE is the
+#                                    only true #UD wall on A72). LSE is restored
+#                                    at boot, with zero runtime cost, by the W1.5
+#                                    alternatives-patcher (PORTABILITY §4.5).
+#                                    start.S adds `.arch_extension pauth` locally
+#                                    so the hand-written PAC-key MSRs still
+#                                    assemble; their EXECUTION is runtime-gated on
+#                                    FEAT_PAuth (UNDEF-safe on A72).
+#   -mno-outline-atomics           — keep the compiler from lowering atomics to
+#                                    __aarch64_* call+branch helpers (the
+#                                    userspace portability form; no kernel uses
+#                                    it in-kernel -- Linux passes the same flag).
 #   -fstack-protector-strong       — stack canaries on functions with
 #                                    address-taken locals or arrays. We
 #                                    provide __stack_chk_guard and
@@ -102,14 +113,17 @@ set(THYLACINE_TARGET_TRIPLE "aarch64-none-elf"
 #                                  — pac-ret: emit paciasp / autiasp around
 #                                    every non-leaf function so return
 #                                    addresses get signed at entry and
-#                                    verified at exit. NOPs on ARMv8.0
-#                                    hardware (HINT space); start.S sets
-#                                    APIA key + SCTLR_EL1.EnIA=1 so the
-#                                    instructions sign/auth on ARMv8.3+.
+#                                    verified at exit. These are HINT-space
+#                                    (they need NO +pauth arch extension to
+#                                    emit): NOPs on ARMv8.0 (A72), active on
+#                                    ARMv8.3+ where start.S has loaded APIA +
+#                                    set SCTLR_EL1.EnIA (both runtime-gated on
+#                                    FEAT_PAuth at Lazarus W1).
 #                                  — bti: emit `bti j/c/jc` markers at
-#                                    indirect-branch landing pads. NOPs on
-#                                    ARMv8.0; start.S sets SCTLR_EL1.BT0
-#                                    so ARMv8.5+ enforces guard.
+#                                    indirect-branch landing pads (HINT-space,
+#                                    no +bti needed). NOPs on ARMv8.0; active
+#                                    where start.S sets SCTLR_EL1.BT0
+#                                    (runtime-gated on FEAT_BTI).
 #
 # DEFERRED to post-v1.0 (per CLAUDE.md "complexity is permitted only where
 # it is verified"):
@@ -124,7 +138,7 @@ set(THYLACINE_TARGET_TRIPLE "aarch64-none-elf"
 #                                    N/A in freestanding kernel.
 set(THYLACINE_KERNEL_C_FLAGS
     "--target=${THYLACINE_TARGET_TRIPLE}"
-    "-march=armv8-a+lse+pauth+bti"
+    "-march=armv8-a"
     "-ffreestanding"
     "-fno-builtin"
     "-fno-common"

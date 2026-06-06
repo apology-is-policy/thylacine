@@ -690,10 +690,13 @@ Thylacine vX.Y-dev booting...
   cpus: N
   mem:  XXXX MiB
   dtb:  0xADDR
-  hardening: MMU+W^X+extinction+KASLR+vectors+IRQ+canaries+PAC+BTI+LSE (P1-H)
+  hardening: MMU+W^X+extinction+KASLR+vectors+IRQ+canaries (unconditional); PAC/BTI/LSE conditional (P1-H; Lazarus W1)
+  features: PAC,BTI,LSE,CRC32 (CPU-implemented)
   kernel base: 0xADDR (KASLR offset 0xADDR)
 Thylacine boot OK
 ```
+
+The `hardening:` / `features:` lines are informational (only `Thylacine boot OK` + the `EXTINCTION:` prefix are the binding tooling ABI). Since Lazarus W1 (`PORTABILITY.md §4`) the `hardening:` line lists the unconditional set and marks PAC/BTI/LSE runtime-conditional; the `features:` line reports what the running CPU implements.
 
 A kernel **extinction** (ELE — Extinction Level Event; the thematic name for kernel panic) prints `EXTINCTION: <message>` as a recognizable prefix. Use `extinction(msg)` or `extinction_with_addr(msg, addr)` from `kernel/extinction.c`; `ASSERT_OR_DIE(expr, msg)` for assert-style checks. These two strings (boot banner success line + EXTINCTION prefix) are part of the kernel ABI with the development tooling. They do not change without updating `tools/run-vm.sh`, `tools/test.sh`, `tools/agent-protocol.md`, and this document in the same commit.
 

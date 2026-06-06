@@ -100,15 +100,25 @@ u64 halls_link_addr(u64 addr, u64 kaslr_offset) {
     return addr - kaslr_offset;
 }
 
-// Return addresses spilled to the kernel stack are PAC-signed (FEAT_PAuth;
-// the kernel ships hardening=PAC, signing with paciasp on entry). The raw
-// stack word carries the pointer-auth code in the unused high VA bits; xpaci
-// strips it, restoring the canonical VA so halls_link_addr + addr2line
-// resolve the frame. xpaci is in the hint encoding space -- a NOP on a CPU
-// without FEAT_PAuth -- and only strips (never authenticates), so it is safe
-// on any value including an unsigned canonical address (idempotent).
+// Return addresses spilled to the kernel stack are PAC-signed on a FEAT_PAuth
+// core (the kernel signs with paciasp on entry where start.S enabled PAC). The
+// raw stack word carries the pointer-auth code in the unused high VA bits;
+// xpaci strips it, restoring the canonical VA so halls_link_addr + addr2line
+// resolve the frame. Lazarus W1: xpaci (register form) is a FEAT_PAuth
+// instruction -- NOT hint-space (only xpaclri is), so it UNDEFs on a v8.0 core
+// like the A72. It is therefore (a) assembled under a local .arch_extension and
+// (b) runtime-gated on FEAT_PAuth: on a core without PAC the return addresses
+// are unsigned, so there is nothing to strip and the raw value is returned. The
+// gate reads ID_AA64ISAR1_EL1 DIRECTLY (always valid at EL1, no boot-init
+// dependency) rather than g_hw_features -- this runs on the dying-machine dump
+// path, which may fire before hw_features_detect, so it must not depend on
+// initialized global state. Strip-only (never authenticates) -> idempotent on
+// an already-canonical address.
 static u64 halls_strip_pac(u64 addr) {
-    __asm__ ("xpaci %0" : "+r"(addr));
+    u64 isar1;
+    __asm__ ("mrs %0, id_aa64isar1_el1" : "=r"(isar1));
+    if (((isar1 >> 4) & 0xFFu) == 0) return addr;   // APA|API == 0 -> no FEAT_PAuth
+    __asm__ (".arch_extension pauth\n\txpaci %0" : "+r"(addr));
     return addr;
 }
 

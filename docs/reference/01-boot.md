@@ -128,7 +128,7 @@ Thylacine v0.1.0-dev booting...
   mem:  2048 MiB at 0x0000000040000000
   dtb:  0x0000000048000000 (parsed)
   uart: 0x0000000009000000 (DTB-driven)
-  hardening: MMU+W^X+extinction+KASLR+vectors+IRQ+canaries+PAC+BTI+LSE (P1-H)
+  hardening: MMU+W^X+extinction+KASLR+vectors+IRQ+canaries (unconditional); PAC/BTI/LSE conditional (P1-H; Lazarus W1)
   features: PAC,BTI,MTE1,LSE,CRC32 (CPU-implemented)
   canary: initialized (fold 0x000000000000a9ba)
   kernel base: 0xffffa00032680000 (KASLR offset 0x0000000032600000, seed: DTB /chosen/kaslr-seed)
