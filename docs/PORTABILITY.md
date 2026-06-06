@@ -305,6 +305,54 @@ entropy. ROADMAP already specs "RNDR + chacha20 stir"; W3 implements it.
 **Audit-bearing** (CSPRNG quality; the secret-on-disk consumers). The seed
 sources + the reseed cadence get a focused round.
 
+### Implemented (Lazarus W3)
+
+A ChaCha20 forward-secure CSPRNG (the OpenBSD arc4random construction) replaces
+the RNDR-only baseline. The *same* path runs on every substrate; RNDR is one
+stir source, not the gate. As-built:
+
+- **The cipher** (`kernel/chacha20.{c,h}`): a pure, allocation-free ChaCha20
+  keystream primitive (DJB reference; the spec name is kept like virtio / 9P).
+  Pinned by a unit test against the canonical zero-key/nonce/counter vector, so
+  the primitive is proven correct independent of any RNG behavior.
+- **The CSPRNG** (`kernel/random.c`): a ChaCha20 context re-keys on every
+  keystream-buffer drain (fast key erasure -> backtracking resistance; the
+  rekey material is zeroed + never served), serves the buffer tail (each byte
+  zeroed in place), and pulls a fresh strong stir every ~1 MiB. `g_rng_seeded`
+  is the readiness gate -- false until a strong source has ever contributed,
+  monotonic, `kern_random_bytes` returns -1 while false (the prior fail-closed
+  contract; `SYS_GETRANDOM` is unchanged).
+- **Seed sources**: DTB `/chosen` `kaslr-seed` + `rng-seed` (host boot entropy),
+  CNTPCT jitter, RNDR when present (stir only), and the kernel **virtio-rng**
+  driver (the strong/real source). The boot path seeds the pool early
+  (`devrandom_init`, DTB + cntpct) then strong-reseeds from virtio-rng right
+  after `virtio_init` (`kernel/main.c`).
+- **The kernel virtio-rng driver** (`random_virtio_pull`): the first kernel
+  consumer of the P4-F virtio substrate to do a real virtqueue transfer (find
+  device-id RNG, negotiate features=0, create queue 0, DRIVER_OK, submit one
+  device-writable descriptor, notify, bounded-poll the used ring, copy, then
+  destroy + reset to dormant). Serialized by `g_rng_dev_lock`, run OUTSIDE the
+  chacha lock. An **all-zero pull is rejected** (treated as a coherency/failure
+  signal -> the pool keeps its prior DTB seed), so a non-coherent DMA transport
+  fails *safe* (weaker-but-seeded), never silently to zero entropy.
+- **I-5**: the kernel now drives the virtio-rng MMIO slot transiently
+  (reset-to-dormant between pulls). It is not page-reserved -- the slot shares a
+  4 KiB page with up to 7 sibling slots userspace drives -- so it inherits the
+  v1.0 virtio-mmio trust posture (kproc-only CAP_HW_CREATE; the kobj_mmio
+  overlap check; no userspace driver targets device-id RNG), the same residual
+  virtio-blk carries. Documented in `kernel/mmio_handle.c`.
+
+**DMA coherency**: the entropy buffer is Normal cacheable; a `dsb` orders the
+used-ring observation before the buffer read -- correct for dma-coherent
+virtio-mmio (ARM virt). A non-coherent bare-metal transport (W4) would add a
+cache-invalidate; until then the all-zero guard makes a coherency miss fail safe
+rather than silently weak.
+
+**Validation**: default (TCG) 721/721 (+ `chacha20.block_vector` against the RFC
+vector + `kern_random.virtio_reseed` driving the device); boot log shows
+`random: virtio-rng reseed OK (40 bytes mixed)`; the SMP soundness gate (default
++ UBSan x smp4/smp8) clean; 0 EXTINCTION.
+
 ---
 
 ## 7. W4 — RPi 400 board bring-up (the culminating milestone; post-v1.0-sized)

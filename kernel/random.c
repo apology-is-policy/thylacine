@@ -62,7 +62,7 @@ static u8            g_rng_buf[RNG_BUFSZ];  // keystream pool; served from the t
 static size_t        g_rng_have;           // bytes still available in g_rng_buf
 static u64           g_rng_count;          // bytes until the next strong stir
 static bool          g_rng_seeded;         // a strong entropy source contributed
-static bool          g_rndr_available;     // FEAT_RNG present (a stir source)
+static bool          g_rndr_available;     // FEAT_RNG present (atomic: set at init, read cross-CPU)
 
 // virtio-rng device access is serialized independently of the chacha
 // state: the device bring-up/pull/teardown runs OUTSIDE g_random_lock
@@ -106,7 +106,7 @@ static bool rndr_supported(void) {
 // success. Used only as a stir source -- never the sole entropy.
 #define RNDR_RETRY_MAX 10
 static bool rndr64(u64 *out) {
-    if (!g_rndr_available) return false;
+    if (!__atomic_load_n(&g_rndr_available, __ATOMIC_ACQUIRE)) return false;
     for (int i = 0; i < RNDR_RETRY_MAX; i++) {
         u64 val;
         u32 ok;
@@ -130,36 +130,52 @@ static size_t put_u64(u8 *out, size_t off, size_t cap, u64 v) {
     return i;
 }
 
-// Collect cheap, non-blocking entropy into `out` (up to `cap` bytes).
-// Sets *strong iff a high-quality independent source contributed (DTB
-// boot seed present, or RNDR) -- this gates kern_random_seeded(). CNTPCT
-// jitter fills any remainder as defense-in-depth, never as a strong
-// source on its own. W3b extends the strong set with a virtio-rng pull.
-static size_t rng_collect_cheap(u8 *out, size_t cap, bool *strong) {
-    size_t off = 0;
-    bool got_strong = false;
+// splitmix64 finalizer -- a public avalanche, used to DOMAIN-SEPARATE the
+// DTB seeds from KASLR. KASLR derives the (publicly-disclosed) kernel
+// offset from the SAME /chosen seeds via its own mix64 (MurmurHash3
+// constants), so feeding the raw seed into the CSPRNG key would make the
+// key correlate with the exposed offset. Distinct constants + a per-use
+// domain tag (XORed in before mixing) decorrelate the two derivations.
+static u64 rng_mix64(u64 x) {
+    x ^= x >> 30; x *= 0xbf58476d1ce4e5b9ULL;
+    x ^= x >> 27; x *= 0x94d049bb133111ebULL;
+    x ^= x >> 31;
+    return x;
+}
+#define RNG_DOMAIN_KASLR_SEED  0x9e3779b97f4a7c15ULL
+#define RNG_DOMAIN_RNG_SEED    0xc2b2ae3d27d4eb4fULL
 
-    // DTB boot entropy: /chosen/kaslr-seed (UEFI/bare-metal) +
-    // /chosen/rng-seed (QEMU direct boot; host-provided). Either being
-    // non-zero is a real, independent entropy source.
+// Collect cheap, non-blocking entropy into `out` (up to `cap` bytes).
+//
+// Sets *has_unobserved iff an UNOBSERVED strong source contributed --
+// RNDR here; the caller treats a virtio-rng pull the same way. Only an
+// unobserved source flips kern_random_seeded(): the DTB seeds are
+// host-provided real entropy but are also consumed (and partially
+// disclosed) by KASLR, and CNTPCT is weak -- so both are mixed as
+// material that strengthens the key but does NOT gate readiness on its
+// own. This closes the pre-virtio-reseed window in which a KASLR-
+// correlated key could otherwise be served on an RNDR-less target.
+static size_t rng_collect_cheap(u8 *out, size_t cap, bool *has_unobserved) {
+    size_t off = 0;
+    bool unobserved = false;
+
+    // DTB boot entropy, domain-separated from KASLR (see rng_mix64).
     u64 ks = dtb_get_chosen_kaslr_seed();
     u64 rs = dtb_get_chosen_rng_seed();
-    if (ks) { got_strong = true; off += put_u64(out, off, cap, ks); }
-    if (rs) { got_strong = true; off += put_u64(out, off, cap, rs); }
+    if (ks) off += put_u64(out, off, cap, rng_mix64(ks ^ RNG_DOMAIN_KASLR_SEED));
+    if (rs) off += put_u64(out, off, cap, rng_mix64(rs ^ RNG_DOMAIN_RNG_SEED));
 
-    // RNDR hardware CSPRNG (v8.5+): stirs when present.
+    // RNDR hardware CSPRNG (v8.5+): an unobserved strong source; gates
+    // readiness when present.
     u64 r;
-    if (rndr64(&r)) { got_strong = true; off += put_u64(out, off, cap, r); }
+    if (rndr64(&r)) { unobserved = true; off += put_u64(out, off, cap, r); }
 
-    // CNTPCT jitter fills the remainder. A short variable-latency spin
-    // between samples (bounded by the sampled low bits) widens the
-    // timing variance the low bits capture.
+    // CNTPCT samples fill the remainder as supplementary material (never a
+    // readiness-gating source on its own). Distinct samples carry some
+    // sampling jitter on real hardware; no data-dependent spin -- that
+    // added latency without adding cryptographic entropy on an emulator.
     while (off + sizeof(u64) <= cap) {
-        u64 t = read_cntpct();
-        off += put_u64(out, off, cap, t);
-        for (volatile int i = 0; i < (int)(t & 0x1F); i++) {
-            __asm__ __volatile__("" ::: "memory");
-        }
+        off += put_u64(out, off, cap, read_cntpct());
     }
     // Byte-granular tail (cap not a multiple of 8).
     if (off < cap) {
@@ -167,7 +183,7 @@ static size_t rng_collect_cheap(u8 *out, size_t cap, bool *strong) {
         for (size_t i = 0; off < cap; i++) out[off++] = (u8)(t >> (8 * (i & 7)));
     }
 
-    if (strong) *strong = got_strong;
+    if (has_unobserved) *has_unobserved = unobserved;
     return off;
 }
 
@@ -194,15 +210,17 @@ static void rng_rekey_locked(const u8 *dat, size_t datlen) {
     g_rng_have = RNG_BUFSZ - RNG_SEEDSZ;
 }
 
-// Collect fresh entropy + rekey + reset the reseed countdown. Sets
-// g_rng_seeded once a strong source has ever contributed (monotonic).
+// Collect cheap entropy + rekey + reset the reseed countdown. Flips
+// g_rng_seeded only if an unobserved strong source (RNDR) contributed --
+// the DTB/CNTPCT material strengthens the key but does not gate readiness
+// (the virtio-rng reseed is the other path that flips it). Monotonic.
 static void rng_stir_locked(void) {
     u8 seed[RNG_SEEDSZ];
-    bool strong = false;
-    size_t n = rng_collect_cheap(seed, sizeof(seed), &strong);
+    bool unobserved = false;
+    size_t n = rng_collect_cheap(seed, sizeof(seed), &unobserved);
     rng_rekey_locked(seed, n);
     rng_secure_zero(seed, sizeof(seed));
-    if (strong) __atomic_store_n(&g_rng_seeded, true, __ATOMIC_RELEASE);
+    if (unobserved) __atomic_store_n(&g_rng_seeded, true, __ATOMIC_RELEASE);
     g_rng_count = RNG_RESEED_BYTES;
 }
 
@@ -230,6 +248,16 @@ static void rng_buf_consume_locked(u8 *out, size_t n) {
 // allocation / poll-timeout). Self-contained: serialized by
 // g_rng_dev_lock; resets the device on every exit path so it composes
 // with the test_virtio queue-0 exercises and with repeated reseeds.
+//
+// Process-context only: g_rng_dev_lock is a plain (non-IRQ-masking) lock
+// held across alloc_pages/free_pages (which take the IRQ-masked buddy
+// zone->lock), giving the order g_rng_dev_lock -> zone->lock. That is
+// acyclic only while no IRQ handler can take g_rng_dev_lock -- so this
+// must never be called from IRQ/deferred context. The two current
+// callers (boot main.c + the SYS_GETRANDOM threshold path) are both
+// process context. A future IRQ-context consumer must revisit this
+// (switch to spin_lock_irqsave, but then the bounded poll cannot be held
+// IRQ-masked -- it would need to drop the lock differently).
 //
 // I-5 note: the kernel now drives this one virtio-mmio slot (transiently
 // -- reset-to-dormant between pulls). The slot shares a 4 KiB page with
@@ -306,13 +334,28 @@ static size_t random_virtio_pull(u8 *out, size_t want) {
         __asm__ __volatile__("yield" ::: "memory");
     }
 
-    // Stop the device before touching/freeing the buffer it could write.
-    virtio_virtqueue_destroy(vq);
+    // Reset the device (full halt) BEFORE freeing any ring or buffer page.
+    // virtio_virtqueue_destroy frees the ring pages, so reset must precede
+    // it -- otherwise a slow device could post a late used-ring write into
+    // freed memory between QUEUE_READY=0 and the reset.
     virtio_reset(dev);
+    virtio_virtqueue_destroy(vq);
     rng_secure_zero(kva, want);
     free_pages(pg, 0);
 
     spin_unlock(&g_rng_dev_lock);
+
+    // An all-zero pull is a coherency-miss / dead-device signal, not
+    // entropy -- reject it so a non-coherent transport fails SAFE (the
+    // CSPRNG keeps its prior seed) rather than silently mixing zero. This
+    // is a guard, not a live path: virtio-rng is a QEMU-only, dma-coherent
+    // device (the `dsb` ordering above suffices there); bare-metal entropy
+    // is the BCM2711 HW RNG register read (no DMA) -- W4.
+    if (got) {
+        u8 acc = 0;
+        for (size_t i = 0; i < got; i++) acc |= out[i];
+        if (acc == 0) got = 0;
+    }
 
     if (got) __atomic_store_n(&g_rng_virtio_ok, true, __ATOMIC_RELEASE);
     return got;
@@ -328,13 +371,13 @@ static size_t random_reseed_strong(void) {
     size_t vn = random_virtio_pull(vbuf, sizeof(vbuf));
 
     u8 cbuf[RNG_SEEDSZ];
-    bool cheap_strong = false;
-    size_t cn = rng_collect_cheap(cbuf, sizeof(cbuf), &cheap_strong);
+    bool cheap_unobserved = false;
+    size_t cn = rng_collect_cheap(cbuf, sizeof(cbuf), &cheap_unobserved);
 
     spin_lock(&g_random_lock);
     if (vn) rng_rekey_locked(vbuf, vn);
     rng_rekey_locked(cbuf, cn);
-    if (vn || cheap_strong) __atomic_store_n(&g_rng_seeded, true, __ATOMIC_RELEASE);
+    if (vn || cheap_unobserved) __atomic_store_n(&g_rng_seeded, true, __ATOMIC_RELEASE);
     g_rng_count = RNG_RESEED_BYTES;
     spin_unlock(&g_random_lock);
 
@@ -397,18 +440,21 @@ bool kern_random_seeded(void) {
 static void devrandom_reset(void) { /* no-op */ }
 
 static void devrandom_init(void) {
-    g_rndr_available = rndr_supported();
+    __atomic_store_n(&g_rndr_available, rndr_supported(), __ATOMIC_RELEASE);
 
     spin_lock(&g_random_lock);
     rng_stir_locked();
     bool seeded = __atomic_load_n(&g_rng_seeded, __ATOMIC_ACQUIRE);
     spin_unlock(&g_random_lock);
 
+    // Only an unobserved strong source flips "seeded" -- RNDR here; the
+    // virtio-rng reseed in main.c is the other path. The DTB seed + cntpct
+    // prime the pool as material but do not gate readiness (the DTB seed is
+    // also KASLR's, and partially disclosed). Reads fail closed until a
+    // strong source contributes.
     uart_puts("  random: chacha20 CSPRNG ");
-    uart_puts(seeded ? "seeded (dtb-seed + cntpct" : "UNSEEDED (no strong source");
-    if (seeded && g_rndr_available) uart_puts(" + rndr");
-    uart_puts(seeded ? "); virtio-rng reseed pending\n"
-                     : "); /dev/random reads fail until reseeded\n");
+    if (seeded) uart_puts("seeded via RNDR (virtio-rng reseed to follow)\n");
+    else        uart_puts("primed from DTB+cntpct; awaiting virtio-rng reseed\n");
 }
 
 static void devrandom_shutdown(void) { /* no-op */ }

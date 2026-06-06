@@ -96,10 +96,12 @@ void test_kern_random_large_read_nonzero(void) {
 // The kernel virtio-rng driver: a full bring-up -> pull -> teardown on
 // QEMU's attached virtio-rng device. Boot already did one pull (main.c
 // after virtio_init); this re-exercises the device cycle the threshold
-// reseed depends on, and confirms the pool still serves afterward.
+// reseed depends on, and confirms the pool still serves afterward. With
+// the all-zero guard in random_virtio_pull, `got > 0` also asserts the
+// pulled bytes are non-degenerate (a stale/coherency-miss read returns 0).
 void test_kern_random_virtio_reseed(void) {
     size_t got = random_seed_from_virtio();
-    TEST_ASSERT(got > 0, "virtio-rng pull returns entropy");
+    TEST_ASSERT(got > 0, "virtio-rng pull returns non-zero entropy");
     TEST_ASSERT(kern_random_virtio_contributed(),
                 "a virtio-rng pull has contributed to the pool");
 
