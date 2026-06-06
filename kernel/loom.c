@@ -83,6 +83,7 @@ struct Loom *loom_create(u32 sq_entries, u32 cq_entries) {
     l->sqe_size      = sqe_size;
     l->cqe_size      = cqe_size;
     l->ring_size     = ring_size;
+    l->cq_tail       = 0;   // kernel-private authoritative CQ tail (the shared mirror starts 0 too)
 
     // Stamp the immutable geometry into the shared ring header. The Burrow pages
     // are KP_ZERO, so the head/tail/flags/diagnostics start at 0; only the masks
@@ -168,11 +169,20 @@ int loom_post_cqe(struct Loom *l, u64 user_data, s32 result, u32 flags) {
 
     spin_lock(&l->lock);
     struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
-    u32 tail = h->cq_tail;                                       // kernel-owned
-    u32 head = __atomic_load_n(&h->cq_head, __ATOMIC_ACQUIRE);   // user-owned
+    // The write position comes ONLY from kernel-private state -- never from the
+    // shared header, which userspace can corrupt. Reading `h->cq_tail` / `h->cq_mask`
+    // (both userspace-writable) to compute the index would let a hostile Proc
+    // (under Loom-3, when the ring is userspace-controlled) drive an out-of-bounds
+    // kernel write: e.g. cq_mask = 0xFFFFFFFF + cq_tail = 0x10000 -> idx far past
+    // the cqe array. cq_entries is a power of two (loom_create), so its mask is
+    // exact. (The ring-TOCTOU discipline, docs/LOOM.md §6.1, applied to the CQ.)
+    u32 tail = l->cq_tail;                                       // kernel-private
+    u32 head = __atomic_load_n(&h->cq_head, __ATOMIC_ACQUIRE);   // user-owned (advisory)
 
     // (tail - head) is the count of posted-unreaped CQEs (free-running u32 --
-    // the subtraction is correct across wrap). cq_entries is the capacity.
+    // the subtraction is correct across wrap). A hostile `head` can only make
+    // userspace overwrite its OWN claimed-reaped CQE (the ring is the Proc's own
+    // Burrow) -- the masked index below is always in-bounds, so never an OOB.
     if ((u32)(tail - head) >= l->cq_entries) {
         // CQ full: never overwrite an unreaped CQE (CqNeverOverfull, I-29).
         // Count the dropped post; Loom-3's submit-time admission makes this
@@ -183,13 +193,15 @@ int loom_post_cqe(struct Loom *l, u64 user_data, s32 result, u32 flags) {
     }
 
     struct loom_cqe *cqe = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
-    u32 idx = tail & h->cq_mask;
+    u32 idx = tail & (l->cq_entries - 1u);   // kernel-private mask -- NEVER h->cq_mask
     cqe[idx].user_data = user_data;
     cqe[idx].result    = result;
     cqe[idx].flags     = flags;
-    // Publish the CQE bytes BEFORE the tail bump (release): a user-side
-    // load-acquire of cq_tail then observes a fully-written slot.
-    __atomic_store_n(&h->cq_tail, tail + 1u, __ATOMIC_RELEASE);
+    // Advance the private tail, then publish it to the shared mirror with a
+    // release store (so a user-side load-acquire of cq_tail sees a fully-written
+    // slot). The mirror also overwrites any hostile value userspace wrote.
+    l->cq_tail = tail + 1u;
+    __atomic_store_n(&h->cq_tail, l->cq_tail, __ATOMIC_RELEASE);
     spin_unlock(&l->lock);
     return 0;
 }

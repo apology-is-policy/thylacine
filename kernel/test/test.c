@@ -205,6 +205,8 @@ void test_loom_register_handles(void);
 void test_loom_register_rejects(void);
 void test_loom_register_replaces(void);
 void test_loom_post_cqe_back_pressure(void);
+void test_loom_post_cqe_ignores_hostile_header(void);
+void test_loom_dup_rejected(void);
 void test_thread_create_user_ctx_layout(void);
 void test_thread_exit_self_marks_exiting(void);
 void test_thread_exit_self_last_thread_zombies(void);
@@ -1031,6 +1033,8 @@ struct test_case g_tests[] = {
     { "loom.register_rejects",           test_loom_register_rejects,           false, NULL },
     { "loom.register_replaces",          test_loom_register_replaces,          false, NULL },
     { "loom.post_cqe_back_pressure",     test_loom_post_cqe_back_pressure,     false, NULL },
+    { "loom.post_cqe_ignores_hostile_header", test_loom_post_cqe_ignores_hostile_header, false, NULL },
+    { "loom.dup_rejected",               test_loom_dup_rejected,               false, NULL },
     { "thread.create_user_ctx_layout",         test_thread_create_user_ctx_layout,         false, NULL },
     { "thread.exit_self_marks_exiting",        test_thread_exit_self_marks_exiting,        false, NULL },
     { "thread.exit_self_last_thread_zombies",  test_thread_exit_self_last_thread_zombies,  false, NULL },

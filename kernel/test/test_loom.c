@@ -30,6 +30,8 @@ void test_loom_register_handles(void);
 void test_loom_register_rejects(void);
 void test_loom_register_replaces(void);
 void test_loom_post_cqe_back_pressure(void);
+void test_loom_post_cqe_ignores_hostile_header(void);
+void test_loom_dup_rejected(void);
 
 // The testable syscall inners live in kernel/syscall.c (declared in loom.h);
 // sys_pipe_for_proc is the KOBJ_SPOOR-pair maker (declared nowhere public --
@@ -322,4 +324,46 @@ void test_loom_post_cqe_back_pressure(void) {
     TEST_EXPECT_EQ(cqes[5u & h->cq_mask].user_data, (u64)0x2001u, "wrapped slot holds new CQE");
 
     loom_unref(l);
+}
+
+// SA-1 regression: loom_post_cqe must compute its write index from KERNEL-PRIVATE
+// geometry, never from the shared (userspace-writable) ring header. A hostile
+// cq_mask + cq_tail would otherwise drive an out-of-bounds kernel write (a
+// Loom-3 trap, since the ring is userspace-controlled there). Here we corrupt
+// the shared header and assert the CQE still lands at the kernel-private index.
+void test_loom_post_cqe_ignores_hostile_header(void) {
+    struct Loom *l = loom_create(4, 4);
+    TEST_ASSERT(l != NULL, "loom_create(4,4)");
+    struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+    struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
+
+    // Simulate a hostile / corrupt userspace mutation of the shared control words.
+    __atomic_store_n(&h->cq_mask, 0xFFFFFFFFu, __ATOMIC_RELEASE);
+    __atomic_store_n(&h->cq_tail, 0x10000u, __ATOMIC_RELEASE);   // would be idx 0x10000 if trusted
+
+    int rc = loom_post_cqe(l, 0xABCDu, 7, 0);
+    TEST_EXPECT_EQ(rc, 0, "post succeeds on kernel-private geometry");
+    // The CQE landed at the kernel-private index (priv cq_tail 0 & (cq_entries-1) = 0),
+    // NOT at the hostile (0x10000 & 0xFFFFFFFF) which would be far out of bounds.
+    TEST_EXPECT_EQ(cqes[0].user_data, (u64)0xABCDu, "CQE at kernel-private idx 0 (not the hostile idx)");
+    // The kernel mirrored its own private tail (1), overwriting the hostile value.
+    TEST_EXPECT_EQ((u64)h->cq_tail, (u64)1, "kernel mirrored its private tail (1), clobbering the hostile cq_tail");
+
+    loom_unref(l);
+}
+
+// SA-2: KOBJ_LOOM is non-transferable, so handle_dup must reject a loom fd (the
+// same gate as the hardware / srv kinds). Pins the non-dup-ability explicitly.
+void test_loom_dup_rejected(void) {
+    struct Proc *p = test_proc_make();
+    TEST_ASSERT(p != NULL, "proc_alloc returned NULL");
+
+    struct loom_params kp;
+    hidx_t fd = -1;
+    TEST_ASSERT(sys_loom_setup_for_proc(p, 8, 0, &kp, &fd) == 0, "setup");
+
+    hidx_t dup = handle_dup(p, fd, RIGHT_READ | RIGHT_WRITE);
+    TEST_EXPECT_EQ((int)dup, -1, "handle_dup(loom_fd) rejected (KOBJ_LOOM non-transferable)");
+
+    test_proc_drop(p);
 }

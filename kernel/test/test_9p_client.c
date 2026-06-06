@@ -590,6 +590,17 @@ static void test_async_on_complete(struct p9_rpc *rpc, int status,
     (void)loom_post_cqe(op->loom, op->user_data, (s32)status, 0);
 }
 
+// NULL-safe recorder for the handoff-skip test: it must NEVER fire (the handoff
+// skips async ops), so it records the invocation without dereferencing a
+// container -- a skip regression becomes a clean assertion failure, not a wild
+// deref of a bare p9_rpc cast to a test_async_op.
+static bool g_handoff_async_fired;
+static void test_handoff_async_recorder(struct p9_rpc *rpc, int status,
+                                        struct p9_dispatch_result *dr) {
+    (void)rpc; (void)status; (void)dr;
+    g_handoff_async_fired = true;
+}
+
 // Build thunk for submit_async: a Tclunk on the fid passed via ctx.
 static int test_build_clunk(struct p9_session *s, u8 *out, size_t cap, void *ctx) {
     u32 fid = *(u32 *)ctx;
@@ -675,10 +686,11 @@ void test_9p_client_async_session_death_posts_error_cqe(void) {
 void test_9p_client_async_handoff_skips_async(void) {
     drive_client_open(&g_client, &g_loopback);
 
+    g_handoff_async_fired = false;
     struct p9_rpc async_rpc;
     async_rpc.tag = 30; async_rpc.done = false; async_rpc.dead = false;
     async_rpc.be_reader = false; async_rpc.reply_len = 0; async_rpc.reply_buf = NULL;
-    async_rpc.on_complete = test_async_on_complete;   // async -> must be skipped
+    async_rpc.on_complete = test_handoff_async_recorder;   // async -> must be skipped
     rendez_init(&async_rpc.rendez);
 
     struct p9_rpc sync_rpc;
@@ -695,6 +707,7 @@ void test_9p_client_async_handoff_skips_async(void) {
     p9_client_handoff_reader(&g_client);
 
     TEST_ASSERT(!async_rpc.be_reader, "async op NOT chosen as the elected reader");
+    TEST_ASSERT(!g_handoff_async_fired, "async op's callback NOT invoked (it was skipped)");
     TEST_ASSERT(sync_rpc.be_reader, "sync op chosen as the elected reader");
 
     spin_lock(&g_client.lock);

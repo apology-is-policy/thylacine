@@ -482,8 +482,13 @@ int p9_client_submit_async(struct p9_client *c, struct p9_rpc *rpc,
     u32 size; u8 type; u16 tag;
     if (p9_peek_header(c->out_buf, (size_t)built, &size, &type, &tag) < 0 ||
         tag == P9_NOTAG || tag >= P9_SESSION_MAX_OUTSTANDING) {
-        // Unreachable for a well-formed `built` frame; defensive. (Async ops are
-        // always tagged -- Tversion/NOTAG is the serial handshake path only.)
+        // Unreachable for a conforming builder (a session_send_* writes a valid
+        // tagged frame). If it ever fires, `build` already marked an outstanding
+        // tag we cannot track (the header is unparseable / NOTAG / out of range),
+        // so latch the session dead -- fail closed; the orphaned outstanding tag
+        // is then moot (the session is unusable) -- and complete this op. `rpc`
+        // is not yet registered, so mark_dead does not double-fire it.
+        client_mark_dead_locked(c);
         spin_unlock(&c->lock);
         rpc->on_complete(rpc, -P9_E_IO, NULL);
         return -P9_E_IO;

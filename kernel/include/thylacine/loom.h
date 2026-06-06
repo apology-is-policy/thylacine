@@ -228,7 +228,7 @@ struct loom_reg_handle {
 struct Loom {
     u64                  magic;        // LOOM_MAGIC; offset 0 (SLUB-free UAF defense)
     int                  refcount;     // atomic ACQ_REL; 1 at create (the handle's ref)
-    spin_lock_t          lock;         // protects reg[] (geometry is immutable post-setup)
+    spin_lock_t          lock;         // protects reg[] + cq_tail (geometry is immutable post-setup)
     u32                  _pad;
     struct Burrow       *ring;         // the SQ/CQ ring Burrow (handle_count ref held)
     u8                  *ring_kva;     // kernel direct-map base of `ring` (stable for life)
@@ -243,6 +243,11 @@ struct Loom {
     u32 sqe_size;
     u32 cqe_size;
     u32 ring_size;
+    // Kernel-PRIVATE authoritative completion-queue tail (under `lock`). The
+    // shared `loom_ring_hdr.cq_tail` is a userspace-READABLE mirror; loom_post_cqe
+    // computes its write index from THIS + the private `cq_entries` mask, NEVER
+    // from the shared header (which userspace can corrupt -> an OOB kernel write).
+    u32 cq_tail;
     // The registered-handle table.
     struct loom_reg_handle reg[LOOM_MAX_REG_HANDLES];
 };

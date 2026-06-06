@@ -207,13 +207,23 @@ fires it immediately (`-P9_E_IO`); success fires it later via demux / mark_dead.
 `p9_client_reader_pump_once(c)` becomes the reader for one frame (drops `c->lock`
 across recv, demuxes, hands the role on) — the reap-side drive for async ops.
 
-`loom_post_cqe(l, user_data, result, flags)` writes a `loom_cqe` at the kernel
-`cq_tail` and publishes the bump with a release store. **CQ back-pressure
+`loom_post_cqe(l, user_data, result, flags)` writes a `loom_cqe` and publishes
+the tail bump with a release store. **It computes its write index from
+KERNEL-PRIVATE geometry only** — `l->cq_tail` (a kernel-private authoritative
+tail; the shared `loom_ring_hdr.cq_tail` is a userspace-readable *mirror*) and
+the private `l->cq_entries` mask — **never** from the shared `cq_mask` / `cq_tail`
+(both userspace-writable). Trusting the shared header would let a hostile Proc
+(under Loom-3, where the ring is userspace-controlled) set `cq_mask = 0xFFFFFFFF`
++ `cq_tail = 0x10000` and drive an out-of-bounds kernel write — the CQ-side of
+the ring-TOCTOU discipline (LOOM.md §6.1). **CQ back-pressure
 (`CqNeverOverfull`, I-29):** a full CQ is *not* overwritten — the post is
-refused (`-1`) and the shared `overflow` counter is bumped. The no-LOST-completion
-liveness (hold until a slot frees) is realized by Loom-3's submit-time admission
-(consume an SQE only when the CQ can hold its completion = io_uring's model),
-which makes a full CQ at completion unreachable in production.
+refused (`-1`) and the shared `overflow` counter is bumped. The `cq_head` is
+read from the shared header for the fullness check (userspace owns it); a
+hostile `head` can only make a Proc overwrite its OWN claimed-reaped CQE (the
+masked index stays in-bounds — never OOB), the io_uring self-trust model. The
+no-LOST-completion liveness (hold until a slot frees) is realized by Loom-3's
+submit-time admission (consume an SQE only when the CQ can hold its completion =
+io_uring's model), which makes a full CQ at completion unreachable in production.
 
 > **The seam contract — `on_complete` runs under `c->lock`** (from `demux`
 > *and* from `mark_dead`), so it MUST NOT sleep and MUST NOT re-enter the
@@ -267,7 +277,7 @@ unchanged and remains the pre-commit gate. See `specs/SPEC-TO-CODE.md`.
 
 ## Tests
 
-### Substrate (`kernel/test/test_loom.c`, 9 cases)
+### Substrate (`kernel/test/test_loom.c`, 11 cases)
 
 - `loom.create_geometry` — the ring layout is consistent (64-aligned,
   non-overlapping, page-rounded), the header is stamped (masks + counts; heads /
@@ -290,6 +300,12 @@ unchanged and remains the pre-commit gate. See `specs/SPEC-TO-CODE.md`.
 - `loom.post_cqe_back_pressure` (Loom-2b) — fill the CQ; a post into a full CQ
   is refused (`-1`), bumps `overflow`, and does **not** overwrite a staged CQE
   (`CqNeverOverfull`); a user reap frees slots so later posts land (wrapping).
+- `loom.post_cqe_ignores_hostile_header` (Loom-2b, the SA-1 regression) —
+  corrupt the shared `cq_mask` + `cq_tail` to hostile values; `loom_post_cqe`
+  still writes at the **kernel-private** index (idx 0), proving it never trusts
+  the userspace-writable header for its write position (no OOB).
+- `loom.dup_rejected` (Loom-2b) — `handle_dup(loom_fd)` is rejected (KOBJ_LOOM
+  is non-transferable, the same gate as the hardware / srv kinds).
 
 ### The seam (`kernel/test/test_9p_client.c`, 3 cases, Loom-2b)
 
