@@ -541,19 +541,29 @@ dispatched (via `loom_submit_one`, which for an async op carries a back-pointer
     (`LinkAdmits`).
   - **Drain gates** (`loom_chain_drain_admits`, `DrainAdmits`) — a post-drain op
     waits behind every earlier drain; a drain op itself waits until every earlier
-    chain entry is done AND `async_inflight == 0`. The `async_inflight == 0` is the
-    load-bearing catch for prior FAST async ops not in the chain — once the chain is
-    non-empty all later ops route to it, so when every chain-before entry is done
-    `async_inflight` counts only ops submitted before the chain started.
+    chain entry is done AND `async_inflight == 0` AND `rearm_pending == 0`. The
+    `async_inflight == 0` is the load-bearing catch for prior FAST async ops not in
+    the chain (once the chain is non-empty all later ops route to it, so when every
+    chain-before entry is done `async_inflight` counts only ops submitted before the
+    chain started); the `rearm_pending == 0` (audit F1) catches a prior FAST
+    **multishot** op that is back-pressured between a MORE shot and its re-arm —
+    momentarily out of `async_inflight` but its stream not done — so a drain
+    admitted via `loom_enter`'s submit-phase `loom_admit_chain` (which has no
+    preceding `loom_rearm_pending`) cannot jump ahead of a live multishot stream.
   - All gates open → claim the entry `INFLIGHT` under `l->lock` (so a concurrent
-    admit never double-dispatches), then `loom_submit_one` sets the real terminal
+    admit never double-dispatches; `loom_chain_done` also writes `chain->state`
+    under `l->lock` — audit F3), then `loom_submit_one` sets the real terminal
     (inline) or leaves it INFLIGHT (async, until the reply, when `loom_async_complete`
     records `DONE_OK`/`DONE_FAIL` from the status).
   - Every action posts one CQE, so it needs CQ admission room
     (`loom_cq_ready + async_inflight < cq_entries`) — no room HOLDS the whole chain
     (back-pressure), exactly like `loom_rearm_pending`. On an SQPOLL ring,
     `loom_sqpoll_park_cond` also wakes on a non-empty chain so a CQ-back-pressured
-    held op resumes after the user reaps + ENTER-wakes.
+    held op resumes after the user reaps + ENTER-wakes. A **cancel** whose
+    `-ECANCELED` post fails (the CQ filled between the room check and the post under
+    a concurrent driver — the inherited Loom-3 over-admit window) reverts the victim
+    to HELD and retries on the next admit pass, so a cancel is never lost, only
+    deferred (audit F2 cancel leg, `EveryDoneOpPosted`).
 
 - **Reclamation** (`loom_reclaim_chain`): frees terminal entries, but ONLY when NO
   entry is HELD — a HELD entry may still read a predecessor's terminal result, so a
@@ -712,7 +722,7 @@ a-real-sibling-reader interleaving needs a second kernel thread + the loopback a
 lands with the deferred multi-in-flight / cross-Proc-death SMP harness, OWED since
 #841.)
 
-### The seam + Loom-3 engine dispatch + Loom-5a multishot + Loom-5b LINK/DRAIN (`kernel/test/test_9p_client.c`, 12 cases)
+### The seam + Loom-3 engine dispatch + Loom-5a multishot + Loom-5b LINK/DRAIN (`kernel/test/test_9p_client.c`, 13 cases)
 
 - `9p_client.async_op_posts_cqe` — `submit_async(clunk)` (no wait) →
   `reader_pump_once` demuxes the Rclunk → `on_complete` posts a CQE with the
@@ -764,6 +774,12 @@ lands with the deferred multi-in-flight / cross-Proc-death SMP harness, OWED sin
   [NOP C]`: B is A's held linked successor; C is independent (B does not link to it),
   so C admits IMMEDIATELY out of order while B is held — CQE0 = C (before A and B),
   then A, then B (the head→tail `continue`-not-`break` admission).
+- `9p_client.loom_drain_waits_for_rearm_pending` (Loom-5b, the audit F1 regression) —
+  a FAST `MULTISHOT` op (`cq=2`, `shot_limit=3`) left rearm-pending (back-pressured,
+  `async_inflight==0` but its stream not done) + a `DRAIN` submitted in a NONBLOCK
+  enter: the drain HOLDS (`cq_tail` stays 2 — pre-fix it would admit early to 3),
+  then completes only after the multishot terminal once driven (`DrainOrdered`; the
+  `rearm_pending` term in the drain gate).
 
 The full `SYS_LOOM_SETUP` / `SYS_LOOM_ENTER` user copy-in/out is trivial handler
 glue (E2E coverage lands with the native API at Loom-6); the payload-opcode
@@ -793,11 +809,38 @@ rolled back via `spoor_clunk`); a user-VA fault reading the fd array.
 | Loom-3 | `SYS_LOOM_ENTER` + SQE dispatch (NOP/FSYNC; payload ops → -ENOSYS until Loom-6) + the I-30 submit-time pin + the async-op container + the `loom_free` quiesce (#898) | **landed** |
 | Loom-4 | SQPOLL kthread (4a recv-deadline + 4b CQ wait-list + 4c kthread + 4d audit) | **landed** |
 | Loom-5a | multishot streams (`LOOM_SQE_MULTISHOT` → `LOOM_CQE_MORE` shots + terminal) | **landed** |
-| Loom-5b | LINK/DRAIN held-submission chain (`l->chain` + `loom_admit_chain`) | **landed** (focused audit pending) |
+| Loom-5b | LINK/DRAIN held-submission chain (`l->chain` + `loom_admit_chain`) | **landed** (Loom-5 audit closed 0/0/2/4) |
 | Loom-6 | registered buffers + native libthyla-rs API + benchmark | pending |
 
 ## Known caveats / footguns
 
+- **LINK/DRAIN concurrency contract (Loom-5b; audit F4).** The chain scheduler
+  assumes *effectively one admitter per ring* — the SQPOLL kthread is the sole
+  admitter on an SQPOLL ring, and a non-SQPOLL ring follows the io_uring
+  single-producer SQ contract (one submitting thread). The chain is **memory-safe
+  even under concurrent non-SQPOLL drivers** (the INFLIGHT claim under `l->lock`
+  prevents UAF / double-dispatch / double-CQE), and the **cancel** leg is hardened
+  (revert-to-HELD + retry, so a cancel is never lost). The residual under
+  *concurrent* non-SQPOLL drivers is the inherited Loom-3 over-admit window
+  (`loom_cq_ready + async_inflight` transiently exceeding `cq_entries` because the
+  room check and the `async_inflight` bump are not atomic): a chain op's **terminal**
+  CQE can be dropped — the chain still *continues* (its `chain->state` is set
+  regardless), so only that op's completion *notification* is missed, the same
+  bounded residual the Loom-3 close documented. The exact-concurrent-admission
+  coordination is **OWED to Loom-6** with the deterministic two-thread-same-`loom_fd`
+  SMP harness (carried since #841 / Loom-2b/3/4; TSan is also restored there). v1.0
+  has no userspace Loom consumer, so concurrent chained ENTERs cannot fire it.
+- **LINK group = single-producer submission (audit F6).** A LINK/DRAIN group must be
+  submitted by ONE thread (the SQ single-producer contract). Under a hostile
+  multi-thread submitter on one non-SQPOLL ring, `loom_drain_sq` can append a LINK
+  group out of SQ-index order (the chain uses chain-order, not SQ-index, for the
+  predecessor), mis-ordering that app's own links — self-harm, never a kernel-safety
+  violation (no UAF: the chain ops are order-relative, not index-relative).
+- **OOM degrades LINK ordering (audit F5).** If `kmalloc` of a `loom_chain_op` fails
+  while enqueuing a LINK predecessor, the op posts `-ENOMEM` (not lost) but is not
+  appended; its linked successor then routes as a fresh chain head and runs
+  *without* waiting for / being cancelled by the failed predecessor. Best-effort
+  under memory pressure; no safety issue (the predecessor's failure CQE still posts).
 - A closed `loom_fd` whose user mapping was not detached leaves a zeroed RW
   region mapped (the `mapping_count` lingers until `proc_free` or an explicit
   `SYS_BURROW_DETACH`). Harmless (the dual-refcount keeps the pages alive; no

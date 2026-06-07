@@ -510,12 +510,16 @@ static void loom_complete_inline(struct Loom *l, u64 user_data, s32 result) {
 // Loom-5b: record a chain entry's INLINE-completion result (a fast-path op passes
 // chain == NULL -> no-op). The async path does NOT call this -- it sets the back-
 // pointer + leaves the entry INFLIGHT, and loom_async_complete records the result
-// on the reply. Same-thread-visible to the admit pass's re-walk (loom_admit_chain
-// runs loom_submit_one then re-reads under l->lock in the same drive thread); the
-// single-drainer model (one ENTER thread or the SQPOLL kthread) means no
-// concurrent admit reads this entry between the write and the re-walk.
-static void loom_chain_done(struct loom_chain_op *chain, bool ok) {
-    if (chain) chain->state = ok ? LOOM_CHAIN_DONE_OK : LOOM_CHAIN_DONE_FAIL;
+// on the reply (under l->lock). The write is UNDER l->lock (audit F3) to match the
+// locked readers (loom_admit_chain's walk + loom_chain_drain_admits) + the locked
+// writer (loom_async_complete's chain->state store) -- a data-race-free single-
+// writer per entry (the INFLIGHT claim under l->lock serializes which driver
+// dispatches an entry, so only that driver reaches here for it).
+static void loom_chain_done(struct Loom *l, struct loom_chain_op *chain, bool ok) {
+    if (!chain) return;
+    spin_lock(&l->lock);
+    chain->state = ok ? LOOM_CHAIN_DONE_OK : LOOM_CHAIN_DONE_FAIL;
+    spin_unlock(&l->lock);
 }
 
 // Dispatch ONE already-copied-to-kernel SQE (`sqe` is a kernel-private snapshot,
@@ -538,7 +542,7 @@ static void loom_submit_one(struct Loom *l, const struct loom_sqe *sqe,
     // EveryDoneOpPosted; it needs a spec carve-out first) + any unknown bit, so a
     // future flag is never silently ignored.
     if (sqe->flags & ~(u32)(LOOM_SQE_MULTISHOT | LOOM_SQE_LINK | LOOM_SQE_DRAIN)) {
-        loom_chain_done(chain, false);
+        loom_chain_done(l, chain, false);
         loom_complete_inline(l, ud, -(s32)T_E_INVAL);
         return;
     }
@@ -549,7 +553,7 @@ static void loom_submit_one(struct Loom *l, const struct loom_sqe *sqe,
     // a non-empty chain. Deterministic for one batch; mixing the two across enters
     // is the unspecced usage this declines (LOOM.md 10).
     if (chain && multishot) {
-        loom_chain_done(chain, false);
+        loom_chain_done(l, chain, false);
         loom_complete_inline(l, ud, -(s32)T_E_INVAL);
         return;
     }
@@ -559,13 +563,13 @@ static void loom_submit_one(struct Loom *l, const struct loom_sqe *sqe,
         // The io_uring smoke op: completes immediately, no engine, no handle. An
         // inline op cannot re-arm (no async reply), so MULTISHOT degrades to a
         // single terminal CQE here -- the mechanism is async-only (the FSYNC path).
-        loom_chain_done(chain, true);
+        loom_chain_done(l, chain, true);
         loom_complete_inline(l, ud, 0);
         return;
 
     case LOOM_OP_FSYNC: {
         if (sqe->handle_idx >= LOOM_MAX_REG_HANDLES) {
-            loom_chain_done(chain, false);
+            loom_chain_done(l, chain, false);
             loom_complete_inline(l, ud, -(s32)T_E_INVAL);
             return;
         }
@@ -581,7 +585,7 @@ static void loom_submit_one(struct Loom *l, const struct loom_sqe *sqe,
         spin_unlock(&l->lock);
 
         if (!sp) {                                                          // empty slot
-            loom_chain_done(chain, false);
+            loom_chain_done(l, chain, false);
             loom_complete_inline(l, ud, -(s32)T_E_BADF);
             return;
         }
@@ -592,7 +596,7 @@ static void loom_submit_one(struct Loom *l, const struct loom_sqe *sqe,
         // re-checked at completion (I-30).
         if (!(rt & RIGHT_WRITE)) {
             spoor_clunk(sp);
-            loom_chain_done(chain, false);
+            loom_chain_done(l, chain, false);
             loom_complete_inline(l, ud, -(s32)T_E_ACCES);
             return;
         }
@@ -601,14 +605,14 @@ static void loom_submit_one(struct Loom *l, const struct loom_sqe *sqe,
             // Not a dev9p-backed Spoor (devsrv conn / devramfs / ...): no 9P
             // engine to dispatch against.
             spoor_clunk(sp);
-            loom_chain_done(chain, false);
+            loom_chain_done(l, chain, false);
             loom_complete_inline(l, ud, -(s32)T_E_INVAL);
             return;
         }
         struct loom_async_op *op = kmalloc(sizeof(*op), KP_ZERO);
         if (!op) {
             spoor_clunk(sp);
-            loom_chain_done(chain, false);
+            loom_chain_done(l, chain, false);
             loom_complete_inline(l, ud, -(s32)T_E_NOMEM);
             return;
         }
@@ -654,7 +658,7 @@ static void loom_submit_one(struct Loom *l, const struct loom_sqe *sqe,
         // registered-buffer destination/source -- that surface is Loom-6
         // (LOOM.md 10), so they post -ENOSYS until then. WIRE_PASSTHROUGH stays
         // reserved (LOOM.md 7). Out-of-range opcodes are -EINVAL.
-        loom_chain_done(chain, false);
+        loom_chain_done(l, chain, false);
         if (sqe->opcode < LOOM_OP_COUNT)
             loom_complete_inline(l, ud, -(s32)T_E_NOSYS);
         else
@@ -796,7 +800,21 @@ static bool loom_chain_drain_admits(struct Loom *l, struct loom_chain_op *e) {
         if (j->drain && !j_done)   return false;   // after-drain: wait behind an earlier barrier
         if (e_is_drain && !j_done) return false;   // drain-self: wait for every chain-before op
     }
-    if (e_is_drain && l->async_inflight != 0) return false;  // drain-self: wait for prior FAST async ops
+    // Drain-self: wait for the prior FAST async ops. async_inflight counts ops with
+    // an outstanding request; rearm_pending counts a FAST MULTISHOT op that posted a
+    // MORE shot and is awaiting re-issue (a multishot op is never in the chain, so a
+    // rearm-pending op is always a prior FAST op, submitted before the chain started
+    // -- once the chain is non-empty every later op routes to it). A rearm-pending op
+    // is logically still in flight (its stream is not done), but it is momentarily
+    // NOT in async_inflight (async_inflight-- at the MORE completion, ++ at re-arm;
+    // their SUM is the op's reservation, invariant across the transition). Without
+    // the rearm_pending term a drain admitted via loom_enter's submit-phase
+    // loom_admit_chain (which has no preceding loom_rearm_pending) could jump ahead
+    // of a live FAST multishot stream (DrainOrdered violation; audit F1). The park
+    // cond reads rearm_pending the same way.
+    if (e_is_drain && (l->async_inflight != 0 ||
+                       __atomic_load_n(&l->rearm_pending, __ATOMIC_ACQUIRE) != 0u))
+        return false;
     return true;
 }
 
@@ -860,6 +878,22 @@ static void loom_reclaim_chain(struct Loom *l) {
 // real terminal (inline) or leaves INFLIGHT (async). The cancel-cascade is a
 // single head->tail walk: a just-cancelled victim becomes the non-ok predecessor
 // of the next iteration's walk.
+//
+// CONCURRENCY CONTRACT (audit F4): the chain scheduler assumes EFFECTIVELY ONE
+// admitter per ring -- the SQPOLL kthread is the sole admitter on an SQPOLL ring,
+// and a non-SQPOLL ring follows the io_uring single-producer SQ contract (one
+// submitting thread). The INFLIGHT claim makes the chain memory-safe even under
+// concurrent non-SQPOLL drivers (no UAF / double-dispatch / double-CQE), but two
+// concurrent admitters can still over-reserve the CQ (the inherited Loom-3 over-
+// admit window: the room check at the top of this loop and the async_inflight bump
+// in loom_submit_one are not atomic). The cancel leg is hardened (revert-to-HELD +
+// retry below, so a cancel is never lost); the dispatch leg's amplified residual --
+// a dropped chain-op TERMINAL CQE under concurrent over-admission (the chain still
+// continues; only that op's completion notification is missed) -- is the SAME
+// accepted Loom-3 residual, whose exact-concurrent-admission coordination is OWED
+// to Loom-6 (with the deterministic two-thread-same-loom_fd SMP harness, carried
+// since #841). v1.0 has no userspace Loom consumer, so concurrent chained ENTERs
+// cannot fire it. See docs/reference/107-loom.md "Known caveats".
 static void loom_admit_chain(struct Loom *l) {
     for (;;) {
         struct loom_chain_op *to_dispatch = NULL;
@@ -901,7 +935,18 @@ static void loom_admit_chain(struct Loom *l) {
         spin_unlock(&l->lock);
 
         if (to_cancel) {
-            (void)loom_post_cqe(l, cancel_ud, -(s32)T_E_CANCELED, 0);
+            if (loom_post_cqe(l, cancel_ud, -(s32)T_E_CANCELED, 0) != 0) {
+                // The CQ filled between the top-of-loop room check and this post
+                // (a concurrent driver consumed the reserved slot -- the inherited
+                // Loom-3 over-admit window). Do NOT drop the -ECANCELED: revert the
+                // victim to HELD so a later admit pass re-cancels + retries the post
+                // once userspace reaps a slot (EveryDoneOpPosted -- a cancel is
+                // never lost, only deferred). audit F2 (cancel leg).
+                spin_lock(&l->lock);
+                to_cancel->state = LOOM_CHAIN_HELD;
+                spin_unlock(&l->lock);
+                break;
+            }
             continue;
         }
         if (to_dispatch) {

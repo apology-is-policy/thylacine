@@ -1278,3 +1278,61 @@ void test_9p_client_loom_independent_past_held(void) {
     p9_client_destroy(&g_client);
     p9_loopback_destroy(&g_loopback);
 }
+
+// DRAIN waits for a rearm-pending FAST multishot (audit F1 regression, DrainOrdered):
+// a FAST (chain-empty) MULTISHOT stream that is BACK-PRESSURED (rearm-pending,
+// async_inflight==0 but its stream not done) must still hold a later DRAIN. The
+// drain is submitted in a NONBLOCK enter whose submit-phase loom_admit_chain has no
+// preceding loom_rearm_pending -- so without the rearm_pending term in the drain
+// gate, the drain would admit early (cq_tail bumps to 3 here). With the fix it
+// HOLDS (cq_tail stays 2) until the multishot terminates.
+void test_9p_client_loom_drain_waits_for_rearm_pending(void) {
+    drive_client_open(&g_client, &g_loopback);
+    struct Spoor *sp = dev9p_attach_client(&g_client, 0);
+    TEST_ASSERT(sp != NULL, "dev9p_attach_client");
+
+    struct Loom *l = loom_create(2, 2);   // cq=2 forces the multishot to back-pressure
+    TEST_ASSERT(l != NULL, "loom_create(2,2)");
+    rights_t rt = RIGHT_READ | RIGHT_WRITE;
+    TEST_ASSERT(loom_register_handles(l, &sp, &rt, 1) == 0, "register dev9p spoor");
+
+    struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+    struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
+
+    // FAST multishot (no LINK/DRAIN, chain empty): shot_limit=3 (2 MORE + terminal).
+    cl_stage_multishot_fsync(l, 0, /*handle_idx=*/0, /*shot_limit=*/3, 0x3EA10001u);
+    __atomic_store_n(&h->sq_tail, 1u, __ATOMIC_RELEASE);
+    int n = loom_enter(l, 1, /*min_complete=*/2, 0);
+    TEST_EXPECT_EQ(n, 1, "multishot SQE consumed");
+    TEST_EXPECT_EQ((u64)l->cq_tail, (u64)2, "CQ filled with 2 MORE shots");
+    TEST_EXPECT_EQ((u64)l->rearm_pending, (u64)1, "multishot HELD rearm-pending (back-pressured)");
+    TEST_EXPECT_EQ((u64)l->async_inflight, (u64)0, "no request in flight (rearm-pending)");
+
+    // Reap the 2 shots so the CQ has room (else the drain's own CQ gate would mask
+    // the bug). The multishot stays rearm-pending.
+    __atomic_store_n(&h->cq_head, 2u, __ATOMIC_RELEASE);
+
+    // Submit a DRAIN, NONBLOCK: the submit-phase admit runs but does NOT wait. The
+    // drain must HOLD (the rearm-pending multishot is a prior FAST op, not done).
+    cl_stage_sqe_flags(l, 1, LOOM_OP_NOP, LOOM_SQE_DRAIN, 0, 0x3EA10002u);
+    __atomic_store_n(&h->sq_tail, 2u, __ATOMIC_RELEASE);
+    n = loom_enter(l, 1, /*min_complete=*/0, LOOM_ENTER_NONBLOCK);
+    TEST_EXPECT_EQ(n, 1, "DRAIN SQE consumed");
+    TEST_EXPECT_EQ((u64)l->cq_tail, (u64)2,
+                   "DRAIN HELD -- did NOT admit early past the rearm-pending multishot (F1)");
+    TEST_ASSERT(l->chain != NULL, "DRAIN still in the chain (held)");
+
+    // Drive to completion: the multishot re-arms + terminates, THEN the drain admits.
+    n = loom_enter(l, 0, /*min_complete=*/2, 0);
+    TEST_EXPECT_EQ((u64)l->cq_tail, (u64)4, "multishot terminal (cq 3) then DRAIN (cq 4)");
+    TEST_ASSERT((cqes[0].flags & LOOM_CQE_MORE) == 0, "cq3 (slot 0) = multishot terminal");
+    TEST_EXPECT_EQ(cqes[0].user_data, 0x3EA10001u, "terminal is the multishot");
+    TEST_EXPECT_EQ(cqes[1].user_data, 0x3EA10002u, "cq4 (slot 1) = the DRAIN, AFTER the terminal");
+    TEST_EXPECT_EQ((u64)l->async_inflight, (u64)0, "all done");
+    TEST_ASSERT(l->inflight_ops == NULL, "multishot reaped");
+    TEST_ASSERT(l->chain == NULL, "DRAIN reclaimed");
+
+    loom_unref(l);
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}
