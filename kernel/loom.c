@@ -518,10 +518,13 @@ static u32 loom_cq_ready(struct Loom *l) {
 // the client -> a UAF in the pump. The single Loom-3 reaper (same caller, after
 // its own wait) made this safe before; Loom-4's second concurrent reaper does
 // not. The caller MUST spoor_clunk(*pin_out) after the pump (process context, may
-// sleep). *pin_out is written only when a non-NULL client is returned. Under l->lock.
+// sleep). *pin_out is ALWAYS written (NULL when no in-flight op; the pin + its ref
+// are set together when a client is returned), so a caller need not pre-init it.
+// Under l->lock.
 static struct p9_client *loom_first_inflight_client(struct Loom *l,
                                                     struct Spoor **pin_out) {
     struct p9_client *cl = NULL;
+    *pin_out = NULL;   // R2-F1: define the out-param unconditionally (footgun-proof for future callers)
     spin_lock(&l->lock);
     for (struct loom_async_op *op = l->inflight_ops; op; op = op->next) {
         if (!op->terminal) {
