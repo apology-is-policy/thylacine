@@ -28,6 +28,7 @@
 #define THYLACINE_LOOM_H
 
 #include <thylacine/handle.h>     // rights_t
+#include <thylacine/poll.h>       // struct poll_waiter_list (the Loom-4 CQ wait-list)
 #include <thylacine/spinlock.h>
 #include <thylacine/types.h>
 
@@ -238,7 +239,7 @@ struct loom_reg_handle {
 struct Loom {
     u64                  magic;        // LOOM_MAGIC; offset 0 (SLUB-free UAF defense)
     int                  refcount;     // atomic ACQ_REL; 1 at create (the handle's ref)
-    spin_lock_t          lock;         // protects reg[] + cq_tail + sq_head + inflight_ops + async_inflight (geometry is immutable post-setup)
+    spin_lock_t          lock;         // protects reg[] + cq_tail + sq_head + inflight_ops + async_inflight (geometry is immutable post-setup); cq_waiters carries its OWN lock
     u32                  _pad;
     struct Burrow       *ring;         // the SQ/CQ ring Burrow (handle_count ref held)
     u8                  *ring_kva;     // kernel direct-map base of `ring` (stable for life)
@@ -272,6 +273,18 @@ struct Loom {
     // any still in flight (the #898 abandon-before-free).
     struct loom_async_op *inflight_ops;
     u32                   async_inflight;
+    // Loom-4 (LOOM.md 8.6): the CQ wait-list. A thread in SYS_LOOM_ENTER with
+    // min_complete >= 1 that finds a sibling thread already holding the elected-
+    // reader role installs a poll_waiter here and sleeps; loom_post_cqe wakes the
+    // list after publishing a CQE (the SQPOLL kthread / a peer ENTER's demux is
+    // the producer). The list owns its own lock -- the register-then-observe
+    // discipline is poll.tla's (object lock = l->lock for the readiness sample;
+    // the list lock serializes the hook walk). Lock order: l->lock -> cq_waiters
+    // list -> g_timerwait -> rendez -> cpu_sched (the poll.h global order, with
+    // l->lock as the "object"). specs/loom.tla: CqWaitRegister / PostCqe-wake /
+    // CqWaitCommitOrSleep; invariants CqFlagTracksCq + NoMissedCqWake (I-9 on the
+    // CQ wait-list) + NoStrandedWaiter + CqWaitFlagSound.
+    struct poll_waiter_list cq_waiters;
     // The registered-handle table.
     struct loom_reg_handle reg[LOOM_MAX_REG_HANDLES];
 };
@@ -318,6 +331,12 @@ int loom_register_handles(struct Loom *l, struct Spoor **spoors,
 // full CQ at completion unreachable -- at which point `overflow` is a pure
 // diagnostic. Safe to call from a completion callback running under the 9P
 // client's lock (l->lock is a leaf; no sleep, no nesting with c->lock).
+//
+// Loom-4: after a successful post the CQ becomes non-empty -- this wakes the
+// ring's CQ wait-list (poll_waiter_list_wake) so a SYS_LOOM_ENTER thread sleeping
+// for min_complete re-evaluates. The wake runs AFTER l->lock is released (the
+// pipe.c producer precedent) and does NOT sleep or re-enter p9_client_*, so it
+// composes with the c->lock the async-completion path holds (the seam contract).
 int loom_post_cqe(struct Loom *l, u64 user_data, s32 result, u32 flags);
 
 // Diagnostics (tests).
@@ -347,10 +366,14 @@ int sys_loom_register_for_proc(struct Proc *p, hidx_t loom_fd, u32 op,
 //     fid), and submits an async Tfsync to the 9P engine (reply -> CQE later);
 //   - every other in-range opcode posts -ENOSYS (the payload opcodes land with
 //     Loom-6's registered-buffer surface), out-of-range posts -EINVAL.
-// Then, if min_complete > 0 and not LOOM_ENTER_NONBLOCK, drive the elected reader
-// (blocking on recv, death-interruptible #811) until at least min_complete CQEs
-// are available OR no async op remains in flight. Finally reap completed-op
-// containers. Returns the number of SQEs consumed (>= 0), or -1 on bad args
+// Then, if min_complete > 0 and not LOOM_ENTER_NONBLOCK, wait for completions:
+// the caller either DRIVES the elected reader itself (blocking on recv, death-
+// interruptible #811) or -- when a sibling thread of the same Proc already holds
+// the reader role -- sleeps on the ring's CQ wait-list until that reader posts a
+// CQE (Loom-4; resolves the Loom-3 "concurrent ENTER returns what's posted"
+// limitation). Waits until at least min_complete CQEs are available OR no async
+// op remains in flight. Finally reap completed-op containers. Returns the number
+// of SQEs consumed (>= 0), or -1 on bad args
 // (NULL/corrupt l, invalid flags). The caller (SYS_LOOM_ENTER handler) holds a
 // loom ref across this call, so loom_free cannot run concurrently.
 int loom_enter(struct Loom *l, u32 to_submit, u32 min_complete, u32 flags);

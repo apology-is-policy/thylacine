@@ -5,18 +5,22 @@
 integrity) + I-30 (submit-time capability pin). **Audit-trigger surface**: ARCH
 §25.4 + CLAUDE.md.
 
-> **Status (Loom-2a + Loom-2b + Loom-3):** the ring **substrate** (2a —
-> `KObj_Loom`, the SQ/CQ ring memory + geometry, `SYS_LOOM_SETUP`, the
+> **Status (Loom-2a + Loom-2b + Loom-3 + Loom-4a/4b):** the ring **substrate**
+> (2a — `KObj_Loom`, the SQ/CQ ring memory + geometry, `SYS_LOOM_SETUP`, the
 > registered-handle table via `SYS_LOOM_REGISTER`, the kobj refcount lifecycle),
 > the **pluggable-completion 9P-engine seam** (2b — `p9_rpc.on_complete`,
 > `p9_client_submit_async`, `p9_client_reader_pump_once`, the CQ writer
-> `loom_post_cqe`), and the **batch-enter core** (3 — `SYS_LOOM_ENTER`, the
+> `loom_post_cqe`), the **batch-enter core** (3 — `SYS_LOOM_ENTER`, the
 > SQE→`p9_client_*` dispatch, the submit-time capability pin I-30, the production
-> async-op container, and the `loom_free` quiesce-before-free, #898). v1.0
-> dispatches the no-payload opcodes (`NOP` / `FSYNC`); the payload opcodes
-> (READ/WRITE/GETATTR/...) land with Loom-6's registered-buffer surface and post
-> `-ENOSYS` until then. SQPOLL is Loom-4; multishot + LINK/DRAIN is Loom-5;
-> registered buffers + the native libthyla-rs API + the benchmark are Loom-6.
+> async-op container, and the `loom_free` quiesce-before-free, #898), and the
+> first SQPOLL sub-chunks (4a — the transport recv-deadline + a deadline-aware
+> reader pump; 4b — the **CQ wait-list** `l->cq_waiters` + the `loom_enter`
+> wait-phase rework, so a concurrent enter that finds a sibling holding the reader
+> role sleeps until a CQE is posted). v1.0 dispatches the no-payload opcodes
+> (`NOP` / `FSYNC`); the payload opcodes (READ/WRITE/GETATTR/...) land with
+> Loom-6's registered-buffer surface and post `-ENOSYS` until then. The SQPOLL
+> kthread itself is Loom-4c; multishot + LINK/DRAIN is Loom-5; registered buffers
+> + the native libthyla-rs API + the benchmark are Loom-6.
 
 ---
 
@@ -77,9 +81,11 @@ ABI; dispatched at Loom-3..5.
   (`IORING_REGISTER_FILES` semantics).
 - `SYS_LOOM_ENTER(loom_fd, to_submit, min_complete, flags) → n / -1` (=68,
   Loom-3). Consume up to `to_submit` SQEs (SQ-index order), dispatch each, then —
-  if `min_complete > 0` and not `LOOM_ENTER_NONBLOCK` — drive the elected reader
-  (blocking on recv, death-interruptible #811) until ≥ `min_complete` CQEs are
-  available or no async op remains in flight; finally reap completed-op
+  if `min_complete > 0` and not `LOOM_ENTER_NONBLOCK` — wait for completions:
+  drive the elected reader itself (blocking on recv, death-interruptible #811) or,
+  when a sibling thread already holds the reader role, sleep on the ring's CQ
+  wait-list until that reader posts a CQE (Loom-4b), until ≥ `min_complete` CQEs
+  are available or no async op remains in flight; finally reap completed-op
   containers. Returns the count of SQEs consumed. Per-op failures (bad opcode /
   handle / rights) surface as an **error CQE** (`result < 0`), not a syscall
   error — the SQE is still consumed (io_uring semantics). `flags`:
@@ -293,13 +299,45 @@ acquisition):
   ignored). Each posts an error CQE inline; the SQE is still consumed.
 
 **Wait/reap phase** (only if `min_complete > 0` and not `LOOM_ENTER_NONBLOCK`):
-the blocking wait *is* the elected reader's `recv` — `loom_enter` pumps
-`p9_client_reader_pump_once` on the client of the first in-flight op until
-≥ `min_complete` CQEs are posted or `async_inflight` hits 0 (no more completions
-possible) or the pump returns 0 (another reader active — Loom-4/SQPOLL adds the
-shared-reader wait; a concurrent enter returns what is posted) or < 0 (session
-dead / death-interrupt #811). Then `loom_reap_terminal` unlinks every terminal op
-(under `l->lock`) and releases its pin + frees the container (outside the lock).
+`loom_wait_for_completions` loops until ≥ `min_complete` CQEs are posted,
+`async_inflight` hits 0 (no more completions possible), the session dies, or the
+caller's Proc is dying. Each iteration the caller tries to become the elected
+reader and drive one frame (`p9_client_reader_pump_once`):
+
+- pump returns 1 — a frame was demuxed; re-sample (bounded by the flood budget so
+  a Byzantine server flooding ownerless frames cannot spin a CPU unbounded in one
+  syscall);
+- pump returns < 0 — session dead / death-interrupt (#811) → stop;
+- pump returns 0 — a **sibling thread of the same Proc** already holds the reader
+  role. The caller then **sleeps on the ring's CQ wait-list** (`l->cq_waiters`)
+  until that reader's demux posts a CQE (Loom-4b — this resolves the Loom-3
+  limitation where a concurrent enter merely returned what was posted).
+
+The sleep is **register-then-observe** (poll.tla lineage): under `l->lock` the
+caller installs a `struct poll_waiter` on `l->cq_waiters` AND re-samples
+`loom_cq_ready` — a CQE posted just before the hook went live is caught by the
+sample, one posted after is caught by the wake flag the sleep's cond reads (under
+its own Rendez lock). The producer (`loom_post_cqe`, after publishing the CQE +
+releasing `l->lock`) calls `poll_waiter_list_wake` — the pipe.c release-then-wake
+precedent; it takes only the list + rendez locks (below `l->lock` in the global
+order) and never sleeps / re-enters `p9_client_*`, so it composes with the
+`c->lock` the async-completion path holds (the seam contract). The sleep is
+death-interruptible: a `SLEEP_INTR` return (#811) unwinds at the EL0-return
+die-check. `loom.tla`: `CqWaitRegister` ↔ the register + sample; `PostCqe`-wake ↔
+`loom_post_cqe`'s wake; `CqWaitCommitOrSleep` ↔ the flag/give-up/sleep decision;
+invariants `CqFlagTracksCq` + `NoMissedCqWake` (I-9 on the CQ wait-list) +
+`CqWaitFlagSound`.
+
+**NoStrandedWaiter holds vacuously at Loom-4b**: `SYS_LOOM_ENTER` holds a loom ref
+for its whole duration, so `loom_free` cannot run while a waiter sleeps; and a
+Loom ring is mapped into exactly one Proc (`KObj_Loom` is non-transferable), so
+every concurrent enter is a sibling thread of that one Proc — if the Proc
+group-terminates, all of them are death-interrupted together. The explicit
+teardown-wakes-waiter the spec models (`Teardown` waking the wait-list) is the
+SQPOLL-kthread surface (Loom-4c), where a kthread reads on the ring's behalf.
+
+Then `loom_reap_terminal` unlinks every terminal op (under `l->lock`) and releases
+its pin + frees the container (outside the lock).
 
 **Completion** (`loom_async_complete`, the `on_complete` callback): runs under
 `c->lock` from the demux / `mark_dead`; it posts the op's CQE (`loom_post_cqe`)
@@ -332,8 +370,11 @@ Burrow, `handle_count` ref held), `ring_kva` (cached direct-map base), the
 geometry fields (mirror `loom_params`), the kernel-private `cq_tail` (Loom-2b) +
 `sq_head` (Loom-3) authoritative ring indices (the shared-header copies are
 userspace-readable mirrors — the SA-1 discipline), `inflight_ops` + `async_inflight`
-(Loom-3, the in-flight async-op list), and `reg[LOOM_MAX_REG_HANDLES]`. The ABI
-structs are byte-pinned by `_Static_assert` (sqe 64, cqe 16, hdr 64, params 88).
+(Loom-3, the in-flight async-op list), `cq_waiters` (Loom-4b, the CQ wait-list — a
+`struct poll_waiter_list` carrying its **own** lock; a `SYS_LOOM_ENTER` thread that
+finds a sibling holding the reader role sleeps here, woken by `loom_post_cqe`), and
+`reg[LOOM_MAX_REG_HANDLES]`. The ABI structs are byte-pinned by `_Static_assert`
+(sqe 64, cqe 16, hdr 64, params 88).
 
 `struct loom_async_op` (`kernel/loom.c`, Loom-3): one in-flight async op,
 heap-allocated per dispatched SQE, owned by the Loom (in `inflight_ops`). `rpc`
@@ -415,6 +456,23 @@ See `specs/SPEC-TO-CODE.md`.
 - `loom.enter_flags_and_bad_index` (Loom-3) — a reserved SQE flag → `-EINVAL`;
   an out-of-range SQ-index indirection is **dropped** (bumps `dropped`, never
   indexes `sqes[]` — the SA-1 discipline on the SQ side).
+- `loom.cq_waiter_wake` (Loom-4b) — register a `poll_waiter` on `l->cq_waiters`;
+  a successful `loom_post_cqe` sets its `ready` flag (PostCqe-wake → `NoMissedCqWake`).
+- `loom.cq_waiter_no_spurious_wake_on_full` (Loom-4b) — fill the CQ, register a
+  waiter; a **refused** post (CQ full) does NOT set the flag (`CqWaitFlagSound`).
+- `loom.enter_inline_min_complete` (Loom-4b) — a BLOCKING `loom_enter` with inline
+  NOPs and `min_complete` == the NOP count returns without sleeping (the first
+  sample sees the CQ satisfied; `CqWaitCommitOrSleep`'s satisfied arm).
+- `loom.enter_min_complete_no_inflight` (Loom-4b) — a BLOCKING `loom_enter` with
+  `min_complete > 0` but no work staged returns at once (the give-up arm —
+  `async_inflight == 0` → nothing more can complete; must not hang).
+
+(The reworked wait phase's reader-drive path is also exercised end-to-end by
+`9p_client.loom_fsync_e2e` below, which calls `loom_enter(1, 1, 0)` — a blocking
+`min_complete = 1` enter that pumps the elected reader. The full sleep → woken-by-
+a-real-sibling-reader interleaving needs a second kernel thread + the loopback and
+lands with the deferred multi-in-flight / cross-Proc-death SMP harness, OWED since
+#841.)
 
 ### The seam + Loom-3 engine dispatch (`kernel/test/test_9p_client.c`, 6 cases)
 

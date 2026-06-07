@@ -23,6 +23,8 @@
 #include <thylacine/errno.h>
 #include <thylacine/handle.h>
 #include <thylacine/page.h>
+#include <thylacine/poll.h>
+#include <thylacine/rendez.h>
 #include <thylacine/spoor.h>
 #include <thylacine/spinlock.h>
 #include <thylacine/types.h>
@@ -105,6 +107,7 @@ struct Loom *loom_create(u32 sq_entries, u32 cq_entries) {
     l->magic    = LOOM_MAGIC;
     l->refcount = 1;
     spin_lock_init(&l->lock);
+    poll_waiter_list_init(&l->cq_waiters);   // Loom-4 CQ wait-list (its own lock)
     l->ring     = r;
     // The ring Burrow is anonymous + physically contiguous (alloc_pages chunk);
     // its direct-map base is stable for the Burrow's lifetime (the Loom holds a
@@ -278,6 +281,18 @@ int loom_post_cqe(struct Loom *l, u64 user_data, s32 result, u32 flags) {
     l->cq_tail = tail + 1u;
     __atomic_store_n(&h->cq_tail, l->cq_tail, __ATOMIC_RELEASE);
     spin_unlock(&l->lock);
+
+    // Loom-4 (specs/loom.tla PostCqe-wake): the CQ is now non-empty -- wake any
+    // SYS_LOOM_ENTER thread sleeping for min_complete on the CQ wait-list. Wake
+    // AFTER releasing l->lock (the pipe.c producer precedent): the cq_tail bump
+    // above happened-before this under l->lock, so a concurrent CqWaitRegister's
+    // sample (also under l->lock) either observes the bumped CQ (and does not
+    // sleep) or is found by this list walk (and is woken) -- no missed wake
+    // (CqFlagTracksCq + NoMissedCqWake, I-9). poll_waiter_list_wake takes only the
+    // list + rendez locks (below l->lock in the global order) and does NOT sleep
+    // or re-enter p9_client_*, so it is safe under the c->lock loom_async_complete
+    // holds (the seam contract).
+    poll_waiter_list_wake(&l->cq_waiters);
     return 0;
 }
 
@@ -479,6 +494,100 @@ static void loom_reap_terminal(struct Loom *l) {
     }
 }
 
+// Loom-4 CQ-waiter sleep predicate (specs/loom.tla CqWaitCommitOrSleep). Returns
+// 1 once the waiter's wake flag is set -- a CQE was posted (or the session died)
+// while this hook was installed on l->cq_waiters. Reads ONLY pw->ready, which
+// poll_waiter_list_wake sets under the wait-list lock and follows with
+// wakeup(pw->rendez); since this cond runs under that SAME rendez's lock (sleep's
+// discipline), the flag write is visible and no wake is lost between the flag set
+// and the sleep transition (I-9; poll.c::poll_cond_any_flagged for one waiter).
+// Reading the FLAG (not the live cq_tail, which lives behind l->lock) is the
+// cross-lock hand-off the spec pins -- and it cannot take l->lock here (the rendez
+// lock is BELOW l->lock; doing so would invert the order).
+static int loom_cqw_cond(void *arg) {
+    const struct poll_waiter *pw = (const struct poll_waiter *)arg;
+    return pw->ready ? 1 : 0;
+}
+
+// Loom-4 wait/reap phase. Block until min_complete CQEs are available, no async
+// op remains in flight, or the caller's Proc is dying. The caller either DRIVES
+// the elected reader itself (the Loom-3 behavior) or -- when a sibling thread of
+// the SAME Proc already holds the reader role -- sleeps on the ring's CQ wait-list
+// until that reader's demux posts a CQE (resolving the Loom-3 concurrent-ENTER
+// limitation). register-then-observe (poll.tla lineage) + death-interruptible
+// (#811). l->lock NOT held on entry/exit.
+//
+// Why no waiter strands at v1.0/Loom-4b: a Loom ring is mapped into exactly ONE
+// Proc (KObj_Loom is non-transferable, audited), so every concurrent ENTER is a
+// sibling THREAD of that one Proc. If the Proc group-terminates, ALL of them are
+// death-interrupted together (the sleep returns SLEEP_INTR -> break). If the 9P
+// SESSION dies, the active reader's client_mark_dead_locked posts an error CQE for
+// every in-flight async op (loom_async_complete -> loom_post_cqe -> wake), so a
+// sleeper is woken and observes async_inflight drain to 0. The explicit teardown-
+// wakes-waiter the spec models (NoStrandedWaiter) is the SQPOLL-kthread surface
+// (Loom-4c): a loom_enter caller holds a loom ref for the whole call, so loom_free
+// cannot run while a waiter sleeps here -- NoStrandedWaiter holds vacuously now.
+static void loom_wait_for_completions(struct Loom *l, u32 min_complete,
+                                      u32 submitted) {
+    // Bound the active reader's recv spin so a hostile/buggy server flooding
+    // ownerless frames cannot burn a CPU unbounded inside one syscall (Loom-3
+    // audit F4). A trusted v1.0 server (stratumd / dev9p) completes within a
+    // frame per in-flight op, so the budget is never the limiter.
+    u32 pump_budget = submitted + (u32)P9_SESSION_MAX_OUTSTANDING + 1u;
+    u32 pumps = 0;
+
+    struct Rendez r;
+    rendez_init(&r);
+    struct poll_waiter pw;
+    poll_waiter_init(&pw, &r);
+
+    for (;;) {
+        // CqWaitCommitOrSleep (the give-up arms): enough completions, or nothing
+        // more can ever complete. Sampled under l->lock (cq_tail + async_inflight).
+        spin_lock(&l->lock);
+        u32 ready    = loom_cq_ready(l);
+        u32 inflight = l->async_inflight;
+        spin_unlock(&l->lock);
+        if (ready >= min_complete) break;
+        if (inflight == 0)         break;
+
+        // Try to become the elected reader and drive one frame.
+        struct p9_client *cl = loom_first_inflight_client(l);
+        if (!cl) continue;                     // raced: the op completed/reaped -> re-check
+        int rc = p9_client_reader_pump_once(cl);
+        if (rc == 1) {                         // demuxed a frame
+            if (++pumps >= pump_budget) {
+                // Flood budget hit. Hand the reader baton to any sleeping sibling
+                // (so it retries instead of stranding), then return what is posted
+                // (io_uring-style degradation under a Byzantine server). Death-
+                // interruptible regardless; trusted servers never reach here.
+                poll_waiter_list_wake(&l->cq_waiters);
+                break;
+            }
+            continue;
+        }
+        if (rc < 0) break;                     // session dead / self-dying -> stop
+
+        // rc == 0: a sibling thread holds the reader role. Sleep on the CQ wait-
+        // list until it posts a CQE. CqWaitRegister: install the hook AND re-sample
+        // under l->lock, so a CQE posted just before the hook went live is caught
+        // (register-then-observe -- the live edge before register is the sample,
+        // the edge after register is the wake-flag the cond reads).
+        pw.ready = false;   // safe: pw is off all lists here (never/last-unregistered)
+        bool do_sleep;
+        spin_lock(&l->lock);
+        poll_waiter_list_register(&l->cq_waiters, &pw);
+        do_sleep = (loom_cq_ready(l) < min_complete) && (l->async_inflight > 0);
+        spin_unlock(&l->lock);
+        if (!do_sleep) { poll_waiter_list_unregister(&pw); continue; }
+        int s = sleep(&r, loom_cqw_cond, &pw);
+        poll_waiter_list_unregister(&pw);
+        if (s == SLEEP_INTR) break;            // #811: Proc group-terminating -> unwind
+        // woken by a posted CQE -> loop, re-sample.
+    }
+    pw.magic = 0;   // defense-in-depth before the stack frame pops (poll.c idiom)
+}
+
 int loom_enter(struct Loom *l, u32 to_submit, u32 min_complete, u32 flags) {
     if (!l || l->magic != LOOM_MAGIC) return -1;
     if (flags & ~LOOM_ENTER_VALID)    return -1;
@@ -534,27 +643,15 @@ int loom_enter(struct Loom *l, u32 to_submit, u32 min_complete, u32 flags) {
         submitted++;
     }
 
-    // --- WAIT / REAP phase. Drive the elected reader until min_complete CQEs are
-    // posted or no completion can arrive. The blocking wait IS the reader's recv
-    // (death-interruptible, #811) -- no separate wait primitive. A concurrent
-    // SYS_LOOM_ENTER on the same ring whose pump finds another reader active
-    // returns what is posted; the full multi-waiter coordination is Loom-4
-    // (SQPOLL). F4: cap the pumps per enter so a buggy/hostile server flooding
-    // ownerless frames (each makes reader_pump_once return 1 without completing
-    // our op) cannot spin a CPU unbounded inside one syscall -- a trusted v1.0
-    // server (stratumd / dev9p) completes within a frame per in-flight op, so the
-    // generous cap is never the limiter; an untrusted server is bounded + the
-    // wait is death-interruptible regardless. ---
+    // --- WAIT / REAP phase (Loom-4). Block until min_complete CQEs are posted or
+    // no completion can arrive. The caller drives the elected reader itself, or --
+    // when a sibling thread of the same Proc already holds the reader role --
+    // sleeps on the ring's CQ wait-list until that reader's demux posts a CQE
+    // (loom_wait_for_completions; the multi-waiter coordination that resolves the
+    // Loom-3 "concurrent ENTER returns what's posted" limitation). The wait is
+    // death-interruptible (#811) and the reader spin is flood-bounded. ---
     if (min_complete > 0 && !(flags & LOOM_ENTER_NONBLOCK)) {
-        u32 pump_budget = (u32)submitted + (u32)P9_SESSION_MAX_OUTSTANDING + 1u;
-        for (u32 pumps = 0; pumps < pump_budget; pumps++) {
-            if (loom_cq_ready(l) >= min_complete) break;
-            struct p9_client *cl = loom_first_inflight_client(l);
-            if (!cl) break;                              // nothing in flight -> no more CQEs
-            int rc = p9_client_reader_pump_once(cl);
-            if (rc == 1) continue;                       // demuxed a frame -> re-check
-            break;                                       // rc==0 (other reader) / rc<0 (dead/dying)
-        }
+        loom_wait_for_completions(l, min_complete, (u32)submitted);
     }
 
     loom_reap_terminal(l);

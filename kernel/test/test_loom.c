@@ -18,7 +18,9 @@
 #include <thylacine/errno.h>
 #include <thylacine/exec.h>
 #include <thylacine/handle.h>
+#include <thylacine/poll.h>
 #include <thylacine/proc.h>
+#include <thylacine/rendez.h>
 #include <thylacine/types.h>
 #include <thylacine/vma.h>
 
@@ -37,6 +39,10 @@ void test_loom_enter_nop(void);
 void test_loom_enter_submit_rejects(void);
 void test_loom_enter_flags_and_bad_index(void);
 void test_loom_enter_cq_admission_backpressure(void);
+void test_loom_cq_waiter_wake(void);
+void test_loom_cq_waiter_no_spurious_wake_on_full(void);
+void test_loom_enter_inline_min_complete(void);
+void test_loom_enter_min_complete_no_inflight(void);
 
 // The testable syscall inners live in kernel/syscall.c (declared in loom.h);
 // sys_pipe_for_proc is the KOBJ_SPOOR-pair maker (declared nowhere public --
@@ -515,4 +521,105 @@ void test_loom_dup_rejected(void) {
     TEST_EXPECT_EQ((int)dup, -1, "handle_dup(loom_fd) rejected (KOBJ_LOOM non-transferable)");
 
     test_proc_drop(p);
+}
+
+// ---------------------------------------------------------------------------
+// Loom-4b: the CQ wait-list. A SYS_LOOM_ENTER thread that finds a sibling
+// already holding the reader role installs a poll_waiter here and sleeps;
+// loom_post_cqe wakes it after publishing a CQE. These tests pin the wake
+// MECHANISM + the new wait-phase early-outs deterministically (white-box).
+// The full sleep -> woken-by-a-real-sibling-reader interleaving needs a second
+// kernel thread + the loopback client and lands with the deferred multi-in-
+// flight / cross-Proc-death SMP harness (shared with #841/#907). Maps to
+// specs/loom.tla: PostCqe-wake (NoMissedCqWake, I-9) + CqWaitFlagSound +
+// CqWaitCommitOrSleep's give-up arms.
+// ---------------------------------------------------------------------------
+
+// PostCqe-wake (NoMissedCqWake): a successful CQE post sets the registered
+// CQ-waiter's wake flag, so a thread sleeping in loom_wait_for_completions
+// re-evaluates. poll_waiter_list_wake writes pw->ready before signalling, so
+// the flag is the cross-lock hand-off loom_cqw_cond reads under the rendez lock.
+void test_loom_cq_waiter_wake(void) {
+    struct Loom *l = loom_create(4, 8);
+    TEST_ASSERT(l != NULL, "loom_create(4,8)");
+
+    struct Rendez r;
+    rendez_init(&r);
+    struct poll_waiter pw;
+    poll_waiter_init(&pw, &r);
+
+    // Register-then-observe install on the ring's CQ wait-list.
+    poll_waiter_list_register(&l->cq_waiters, &pw);
+    TEST_ASSERT(pw.ready == false, "fresh CQ-waiter not ready before any post");
+
+    // A successful post wakes the registered waiter.
+    TEST_EXPECT_EQ(loom_post_cqe(l, 0xCAFEu, 0, 0), 0, "CQE post succeeds");
+    TEST_ASSERT(pw.ready == true, "post sets the registered CQ-waiter's wake flag");
+
+    poll_waiter_list_unregister(&pw);
+    pw.magic = 0;
+    loom_unref(l);
+}
+
+// CqWaitFlagSound: a REFUSED post (CQ full -> no completion became available)
+// must NOT set the wake flag -- a sleeping waiter is not spuriously woken to
+// re-sample an unchanged (already-full) CQ. (The wake lives only on the
+// success path, after the cq_tail bump; the CQ-full path returns -1 first.)
+void test_loom_cq_waiter_no_spurious_wake_on_full(void) {
+    struct Loom *l = loom_create(4, 4);   // cq_entries = 4
+    TEST_ASSERT(l != NULL, "loom_create(4,4)");
+
+    for (u32 i = 0; i < 4; i++) {
+        TEST_EXPECT_EQ(loom_post_cqe(l, 0x10u + i, 0, 0), 0, "fill CQ");
+    }
+
+    struct Rendez r;
+    rendez_init(&r);
+    struct poll_waiter pw;
+    poll_waiter_init(&pw, &r);
+    poll_waiter_list_register(&l->cq_waiters, &pw);
+
+    TEST_EXPECT_EQ(loom_post_cqe(l, 0x99u, 0, 0), -1, "post refused (CQ full)");
+    TEST_ASSERT(pw.ready == false, "a refused post does not wake (no spurious flag)");
+
+    poll_waiter_list_unregister(&pw);
+    pw.magic = 0;
+    loom_unref(l);
+}
+
+// The reworked wait phase must NOT hang on the common no-sibling path. With
+// inline NOPs (which complete during submit), a BLOCKING enter with
+// min_complete == the NOP count sees the CQ already satisfied at the first
+// sample and returns without ever sleeping (async_inflight stays 0 -- there is
+// no reader to drive). CqWaitCommitOrSleep: flag/level satisfied -> return.
+void test_loom_enter_inline_min_complete(void) {
+    struct Loom *l = loom_create(8, 16);
+    TEST_ASSERT(l != NULL, "loom_create(8,16)");
+    struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+
+    for (u32 i = 0; i < 3; i++) loom_stage_sqe(l, i, LOOM_OP_NOP, 0, 0, 0, 0x300u + i);
+    __atomic_store_n(&h->sq_tail, 3u, __ATOMIC_RELEASE);
+
+    int n = loom_enter(l, 3, 3, 0);   // min_complete = 3, BLOCKING (no NONBLOCK)
+    TEST_EXPECT_EQ(n, 3, "3 NOPs consumed");
+    TEST_EXPECT_EQ((u64)l->cq_tail, (u64)3, "3 inline CQEs; wait returned without sleeping");
+    TEST_EXPECT_EQ((u64)l->async_inflight, (u64)0, "nothing went in flight (no reader to drive)");
+
+    loom_unref(l);
+}
+
+// CqWaitCommitOrSleep give-up arm: min_complete > 0 but nothing is (or can be)
+// in flight -> the wait returns immediately rather than blocking for CQEs that
+// can never arrive. A blocking enter with no SQEs staged and async_inflight == 0
+// must NOT hang.
+void test_loom_enter_min_complete_no_inflight(void) {
+    struct Loom *l = loom_create(8, 16);
+    TEST_ASSERT(l != NULL, "loom_create(8,16)");
+
+    int n = loom_enter(l, 0, 5, 0);   // min_complete = 5, BLOCKING, but no work
+    TEST_EXPECT_EQ(n, 0, "no SQEs consumed");
+    TEST_EXPECT_EQ((u64)l->cq_tail, (u64)0, "no CQEs; wait returned without hanging");
+    TEST_EXPECT_EQ((u64)l->async_inflight, (u64)0, "nothing in flight");
+
+    loom_unref(l);
 }
