@@ -777,7 +777,14 @@ fast IO should exist before the apps that consume it.
   sub-chunk; reserves invariants **I-29** (completion integrity) + **I-30**
   (submit-time pin); audit-bearing. Sub-chunks Loom-0 (this scripture) →
   Loom-1 (model) → Loom-2..6 (impl). The liburing-compat shim stays out of core
-  (§12.2).
+  (§12.2). **Loom-5/6 are shaped by their first concrete consumer — Tapestry, the
+  graphics fast-path** (`docs/TAPESTRY.md`, signed off 2026-06-07): present =
+  `LOOM_OP_WRITE`, input/vsync = a multishot `LOOM_OP_READ`, the framebuffer a
+  zero-copy shared Burrow — zero new Loom core. Graphics is the Loom-5/6 benchmark
+  workload (a present+input+vsync loop). The graphics *half* (virtio-gpu scanout +
+  the `tapestryd` display server + an SDL backend) is a **post-Loom graphics
+  phase**, NOVEL #2/#4 territory feeding Halcyon — additive over the textual OS,
+  not gating the v1.0-rc.
 
 Phase 7 then resumes at **U-6d-b** (redirects), on a sound + accelerated
 foundation.

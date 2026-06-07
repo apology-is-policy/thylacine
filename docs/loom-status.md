@@ -118,12 +118,31 @@ registered-buffer surface.
     harness is **STILL OWED** (the 4c/4d tests are NOP-only; F1 is reasoned +
     round-2-audited, not test-reproduced) -- needs dev9p-loopback-in-loom infra +
     real SMP + restored TSan; carried to Loom-6 + #841/#907.
-- **Loom-5 — multishot + linked ops**: one SQE → many CQEs (the `/srv` accept
-  loop) + LINK/DRAIN per-fid ordering. Audit.
-- **Loom-6 — registered buffers + native API + bench**: pinned Burrow regions
-  (zero-copy payload) + the libthyla-rs Loom wrapper + a latency benchmark on a
-  high-fanout workload. The `LOOM_OP_WIRE_PASSTHROUGH` seam stays reserved
+- **Loom-5 — the multishot MECHANISM + linked ops**: one SQE → many CQEs
+  (re-arm + `LOOM_CQE_MORE` + terminal-exactly-once + back-pressure-holds-a-shot
+  + cancel — the I-29 generalization to a stream) + LINK/DRAIN per-fid ordering.
+  Its real consumers (the **Tapestry** event-fd stream + the `/srv` accept-loop —
+  the same mechanism) are payload ops that land at Loom-6, so the mechanism is
+  modeled (`loom.tla` multishot + ordering actors, extended FIRST) + built +
+  audited against **synthetic NOP/FSYNC multishot vehicles** (user-voted
+  2026-06-07 "mechanism at Loom-5, real ops at Loom-6"). Audit.
+- **Loom-6 — registered buffers + payload ops + native API + bench**: pinned
+  Burrow regions (zero-copy payload) + the real payload-op dispatch (the event-fd
+  multishot `LOOM_OP_READ` + the present `LOOM_OP_WRITE` + READ/WRITE/WALK/…) the
+  Loom-5 mechanism rides + the libthyla-rs Loom wrapper (the native userspace API
+  — the backend the libtapestry `Loom` seam trait targets) + a latency benchmark
+  on a high-fanout workload (the **Tapestry** present+input+vsync loop; globbing /
+  many-connection server). The `LOOM_OP_WIRE_PASSTHROUGH` seam stays reserved
   (designed, not built). Final audit + arc close.
+
+**Consumer (shapes Loom-5/6):** Tapestry, the graphics fast-path
+(`docs/TAPESTRY.md`, signed off 2026-06-07) — present = `LOOM_OP_WRITE`,
+input/vsync = multishot `LOOM_OP_READ`, the framebuffer a zero-copy shared Burrow
+(host DMA-read out of band, not a Loom regbuf). Adds the **T-1 no-torn-scanout**
+graphics-layer invariant (the #847 dual-refcount + #898 quiesce are the
+mechanism), audited at the post-Loom graphics phase (virtio-gpu scanout +
+`tapestryd`), not in the Loom arc. A native POC compiles on the aux track
+(`usr/apps/libtapestry` + `usr/apps/tapestry-demo`).
 
 The ARCH §28 invariant-table edit reserving **I-29 + I-30** lands **with the
 impl** (Loom-2), the way Lazarus deferred its §28 edit to W1 (docs/LOOM.md §9).

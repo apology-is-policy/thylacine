@@ -52,6 +52,24 @@ These are not v1.0 angles — they're recorded so a future direction isn't lost.
   built up front; `specs/loom.tla` gates impl; reserves invariants I-29 + I-30).
   Audit-bearing. (Renamed from "Warren" 2026-06-05.)
 
+- **Tapestry — a graphics fast-path woven on Loom** (`docs/TAPESTRY.md`, signed
+  off 2026-06-07). The concrete consumer that shapes Loom-5 (multishot) + Loom-6
+  (registered buffers + native API) and the demonstration that Loom's generality
+  reaches the display — the last subsystem Plan 9 itself never fully folded into
+  9P (Angle #1). A native client (`libtapestry`) operates a Loom ring against a
+  display server (`tapestryd`, the stratumd-as-driver pattern, Angle #2) to
+  present framebuffer surfaces with **zero new Loom core**: present = a generic
+  `LOOM_OP_WRITE`; input + vsync = a multishot `LOOM_OP_READ`; the framebuffer is
+  a zero-copy shared Burrow (Angle #2) the host DMA-reads out of band. So
+  present / input / audio are all *the same shape* — a 9P server + multishot +
+  registered buffers — capability-safe across the untrusted-app → trusted-server
+  boundary by I-29/I-30, which neither io_uring (no capability model) nor a raw
+  shared-memory ring (no safety) can claim. The kernel/transport half is the Loom
+  arc; the graphics half (virtio-gpu scanout + `tapestryd` + an SDL backend that
+  ports Quake/DOSBox) is a post-Loom graphics phase feeding Halcyon (Angle #4). A
+  native proof-of-concept compiles on the auxiliary track (`usr/apps/libtapestry`
+  + `usr/apps/tapestry-demo`).
+
 ---
 
 ## 3. Per-angle scope

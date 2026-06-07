@@ -447,13 +447,56 @@ hazard class.
   CQE / teardown — the multi-waiter coordination Loom-3 deferred). `loom.tla`
   extended FIRST with the CQ-waiter (I-9: `CqFlagTracksCq` + `NoMissedCqWake` +
   `NoStrandedWaiter`; +2 buggy cfgs). Wait/wake + kthread-lifetime surface. Audit.
-- **Loom-5 — multishot + linked ops**: one SQE → many CQEs (the `/srv`
-  accept-loop) + LINK/DRAIN per-fid ordering. Audit.
-- **Loom-6 — registered buffers + native API + bench**: pinned Burrow regions
-  (zero-copy payload) + the libthyla-rs Loom wrapper (the native userspace API) +
-  a latency benchmark on a high-fanout workload (globbing / many-connection
-  server) showing the trap-amortization win. The `LOOM_OP_WIRE_PASSTHROUGH` seam
-  stays reserved (designed, not built). Final audit + arc close.
+- **Loom-5 — the multishot MECHANISM + linked ops**: one SQE → many CQEs +
+  LINK/DRAIN per-fid ordering. Multishot is built as a generic op-property
+  (re-arm-after-each-completion; `LOOM_CQE_MORE` on every non-terminal shot,
+  cleared on the terminal; the I-30 pin held across all shots + released once;
+  CQ back-pressure HOLDS a shot when full; cancel/error yields exactly one
+  terminal CQE — the I-29 generalization to a stream). Its real consumers (the
+  Tapestry event-fd stream and the `/srv` accept-loop — *the same mechanism*) are
+  payload ops that light up at Loom-6, so the mechanism is modeled
+  (`specs/loom.tla` multishot + ordering actors) + built + audited at Loom-5
+  against **synthetic NOP/FSYNC multishot vehicles** (no real re-armable 9P op
+  exists until Loom-6's payload surface; user-voted 2026-06-07 "mechanism at
+  Loom-5, real ops at Loom-6"). LINK/DRAIN's real dependent ops (walk→open→read,
+  write→read same fid) likewise light up at Loom-6. Audit.
+- **Loom-6 — registered buffers + payload ops + native API + bench**: pinned
+  Burrow regions (zero-copy payload) + the real payload-op dispatch (the event-fd
+  multishot `LOOM_OP_READ` + the present `LOOM_OP_WRITE` + the READ/WRITE/WALK/…
+  surface) the Loom-5 mechanism rides + the libthyla-rs Loom wrapper (the native
+  userspace API — the backend the libtapestry `Loom` seam trait targets:
+  `impl tapestry::Loom for libthyla_rs::loom::Ring`) + a latency benchmark on a
+  high-fanout workload (the Tapestry present+input+vsync interactive loop; also
+  globbing / many-connection server) showing the trap-amortization win. The
+  `LOOM_OP_WIRE_PASSTHROUGH` seam stays reserved (designed, not built). Final
+  audit + arc close.
+
+### Loom's first consumer: Tapestry (graphics)
+
+The concrete consumer that shapes Loom-5/6 is the **graphics fast-path**
+(`docs/TAPESTRY.md`, signed off 2026-06-07): a native client (`libtapestry`)
+operates a Loom ring against a display server (`tapestryd`, the stratumd-as-driver
+pattern) to present framebuffer surfaces. It needs **zero new Loom core** — the
+proof of Loom's generality:
+
+- **present** = `LOOM_OP_WRITE` of a rect descriptor to a present-fid (no
+  `LOOM_OP_PRESENT`; the opcode set stays pure 9P). The framebuffer is a separate
+  `tapestryd`-owned Burrow the host DMA-reads out of band — **not** a Loom
+  payload buffer — so present imposes no large-regbuf requirement.
+- **input + vsync** = a **multishot `LOOM_OP_READ`** on an event-fid (Loom-5's
+  mechanism, Loom-6's real op): arm once, a CQE per event forever.
+- the present CQE is the **buffer-recycle gate**; Vsync is a separate event for
+  pacing (triple-buffered, back-pressured — never op-cancellation).
+
+So **present / input / audio are all the same shape — a 9P server + multishot +
+registered buffers — capability-safe across the untrusted-app → trusted-server
+boundary by I-29/I-30.** Graphics is therefore the canonical Loom-5/6 **benchmark
+workload** (the API is shaped to fit the present+input+vsync loop), and it adds
+one graphics-layer invariant — **T-1, no torn scanout** (a present's framebuffer
+pages stay backed from submit to its terminal CQE; the #847 dual-refcount + #898
+quiesce are the mechanism) — audited when the post-Loom graphics phase
+(virtio-gpu scanout + `tapestryd`) lands, not in the Loom arc itself. See
+`docs/TAPESTRY.md` §7 for the full requirements graph.
 
 ---
 
