@@ -696,30 +696,35 @@ ARCH §23.3.
 ## loom.tla — Loom-1 (the SQ/CQ ring transport; spec-first re-enabled)
 
 Status: **TLC-green; Loom-2a + Loom-2b + Loom-3 landed (substrate + the
-pluggable-completion seam + the batch-enter core); Loom-4..6 pending.** Models the Loom submission /
-completion ring op-lifecycle and pins the two reserved ARCH §28 invariants —
-**I-29** (completion integrity: no-lost / no-double / no-stale) and **I-30**
-(submit-time capability pin) — plus the docs/LOOM.md §6 soundness obligations
-(ring TOCTOU, CQ back-pressure). Spec-first is re-enabled for this surface
-(docs/LOOM.md §7); TLC-green on `loom.cfg` gates every Loom impl sub-chunk. The
-spec-action↔source mapping below is populated as Loom-2..6 land. **Loom-3 added
-no new spec mechanism** — its actions (`Consume` / `Dispatch` / `Reap` /
-`Teardown`) were already modeled; `loom.tla` is unchanged and re-runs clean as
-the pre-commit gate, and the engine-touching `p9_client_abandon_async` re-runs
-`9p_client.tla` clean.
+pluggable-completion seam + the batch-enter core); Loom-4 design signed off +
+`loom.tla` extended (CQ-waiter), impl pending; Loom-5..6 pending.** Models the
+Loom submission / completion ring op-lifecycle and pins the two reserved ARCH §28
+invariants — **I-29** (completion integrity: no-lost / no-double / no-stale) and
+**I-30** (submit-time capability pin) — plus the docs/LOOM.md §6 soundness
+obligations (ring TOCTOU, CQ back-pressure) and, since Loom-4, **I-9 on the CQ
+wait-list** (the SQPOLL completion wait/wake). Spec-first is re-enabled for this
+surface (docs/LOOM.md §7); TLC-green on `loom.cfg` gates every Loom impl
+sub-chunk. The spec-action↔source mapping below is populated as Loom-2..6 land.
+**Loom-3 added no new spec mechanism** (its `Consume` / `Dispatch` / `Reap` /
+`Teardown` were already modeled). **Loom-4 DID** — the CQ-waiter actor
+(`CqWaitRegister` / `CqWaitCommitOrSleep` + the `PostCqe` / `Teardown` wake) +
+`CqFlagTracksCq` / `NoMissedCqWake` / `NoStrandedWaiter` / `CqWaiterReturns` + the
+two `BUGGY_CQWAIT_*` cfgs, extended FIRST (docs/LOOM.md §8.6) before the impl.
 
-Safety: TLC-clean at `Ops = {o1, o2}, CQ_CAP = 1, MAX_INFLIGHT = 2` — 582 distinct states.
-Liveness: TLC-clean (`EventuallyCompletes`, `ALLOW_TEARDOWN = FALSE`) at the same universe — 678 distinct states.
+Safety: TLC-clean at `Ops = {o1, o2}, CQ_CAP = 1, MAX_INFLIGHT = 2` — 2429 distinct states (Loom-4 CQ-waiter dimension).
+Liveness: TLC-clean (`EventuallyCompletes` + `CqWaiterReturns`, `ALLOW_TEARDOWN = FALSE`) at the same universe — 1457 distinct states.
 
 | Config | Flag | Invariant / Property | Result | Distinct |
 |---|---|---|---|---|
-| `loom.cfg`                              | all FALSE, teardown on        | `Invariants` (12)       | clean | 582 |
-| `loom_liveness.cfg`                     | Spec_Live, no teardown        | `EventuallyCompletes`   | clean | 678 |
+| `loom.cfg`                              | all FALSE, teardown on        | `Invariants` (15)       | clean | 2429 |
+| `loom_liveness.cfg`                     | Spec_Live, no teardown        | `EventuallyCompletes` + `CqWaiterReturns` | clean | 1457 |
 | `loom_buggy_live_sqe_reread.cfg`        | `BUGGY_LIVE_SQE_REREAD`       | `ArgPinnedToSnapshot`   | violation | — |
 | `loom_buggy_recheck_at_completion.cfg`  | `BUGGY_RECHECK_AT_COMPLETION` | `ObjPinnedToSnapshot`   | violation | — |
 | `loom_buggy_double_post.cfg`            | `BUGGY_DOUBLE_POST`           | `NoDoubleCompletion`    | violation | — |
 | `loom_buggy_lost_on_full.cfg`           | `BUGGY_LOST_ON_FULL_CQ`       | `CqNeverOverfull`       | violation | — |
 | `loom_buggy_stale_after_teardown.cfg`   | `BUGGY_STALE_AFTER_TEARDOWN`  | `NoStaleCompletion`     | violation | — |
+| `loom_buggy_cqwait_no_wake.cfg`         | `BUGGY_CQWAIT_NO_WAKE`        | `NoMissedCqWake`        | violation | — |
+| `loom_buggy_cqwait_check_early.cfg`     | `BUGGY_CQWAIT_CHECK_EARLY`    | `NoMissedCqWake`        | violation | — |
 
 | Spec action | Source location | Notes |
 |---|---|---|
@@ -730,8 +735,10 @@ Liveness: TLC-clean (`EventuallyCompletes`, `ALLOW_TEARDOWN = FALSE`) at the sam
 | `ReplyArrives` | **Loom-2b**: `kernel/9p_client.c::demux_frame_locked` (the async `on_complete != NULL` branch) → **Loom-3** `kernel/loom.c::loom_async_complete` | the #841 elected-reader demux fires the pluggable POST_CQE action (`on_complete` = `loom_async_complete`) instead of WAKE_RENDEZ (docs/LOOM.md §8.4); the reap-side reader is `p9_client_reader_pump_once`, driven by `loom_enter`. |
 | `PostCqe` | **Loom-2b** (the writer): `kernel/loom.c::loom_post_cqe`; **Loom-3** call site: `loom_async_complete` (async) + `loom_submit_one` (inline error/NOP CQEs) | write the `loom_cqe` (user_data + mapped result) into the CQ ring; back-pressure on a full CQ (`overflow` counter, never overwrite). The op never re-resolves the registered handle at completion (`ObjPinnedToSnapshot`). |
 | `Reap` | **Loom-3**: userspace CQ-head bump (native API at Loom-6) + the kernel container reclaim `kernel/loom.c::loom_reap_terminal` (run by `loom_enter` after the wait) | userspace consumes a CQE; permitted post-teardown for already-posted CQEs. The kernel reaps terminal-op containers (clunk pin + free) outside `l->lock`. |
-| `Teardown` | **Loom-3**: `kernel/loom.c::loom_free` quiesce → `kernel/9p_client.c::p9_client_abandon_async` (the #845 Tflush-on-abandon, #898) | quiesce every in-flight async op before freeing the ring Burrow: under the client's `c->lock`, clear `inflight[tag]` (no future `on_complete`) + Tflush (a late reply is discarded ownerless); then clunk the pin + free the container; free the loom last (`NoStaleCompletion`). |
-| `BuggyDoublePost` / the five `BUGGY_*` flags | (none — these are the disciplines the impl upholds) | snapshot-not-reread; pin-not-re-resolve-at-completion; one-CQE-per-op; never-post-into-a-full-CQ; quiesce-on-teardown. |
+| `Teardown` | **Loom-3**: `kernel/loom.c::loom_free` quiesce → `kernel/9p_client.c::p9_client_abandon_async` (the #845 Tflush-on-abandon, #898); **Loom-4** adds the CQ wait-list wake (loom teardown / session death wakes any blocked `ENTER` waiter so none strands — `NoStrandedWaiter`) | quiesce every in-flight async op before freeing the ring Burrow: under the client's `c->lock`, clear `inflight[tag]` (no future `on_complete`) + Tflush (a late reply is discarded ownerless); then clunk the pin + free the container; free the loom last (`NoStaleCompletion`). |
+| `CqWaitRegister` / `BuggyCqWaitCheck` / `BuggyCqWaitRegisterLate` | **Loom-4** (pending impl): `kernel/loom.c::loom_enter` CQ-wait path — install a `poll_waiter` on the Loom's CQ wait-list AND sample `loom_cq_ready` in one locked step (register-then-observe), then `tsleep` (death-interruptible, #811) | the `ENTER` waiter (`min_complete >= 1`) blocks for completions; the cross-lock flag is the wait-list hook. `BuggyCqWait*` model the check-before-register order (the bug `CqFlagTracksCq` forbids). |
+| `CqWaitCommitOrSleep` | **Loom-4** (pending impl): the `tsleep` cond + the `async_inflight == 0 -> return what is posted` early return in `loom_enter` | the evaluate point: flag set -> return; nothing more can complete -> return; else sleep on the CQ wait-list. The wake co-fires with `PostCqe` (`loom_async_complete` walks the wait-list after `loom_post_cqe`) and `Teardown` (`NoMissedCqWake`). |
+| `BuggyDoublePost` / the seven `BUGGY_*` flags | (none — these are the disciplines the impl upholds) | snapshot-not-reread; pin-not-re-resolve-at-completion; one-CQE-per-op; never-post-into-a-full-CQ; quiesce-on-teardown; **register-the-wait-hook-before-sampling-the-CQ**; **wake-the-wait-list-on-every-post-and-on-teardown** (`CqFlagTracksCq` / `NoMissedCqWake` / `NoStrandedWaiter`). |
 
 cfgs run with `-deadlock`; `loom.tla`'s `Done` self-loop keeps the
 torn-and-drained terminal state from tripping the deadlock check. See

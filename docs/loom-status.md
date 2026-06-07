@@ -53,8 +53,17 @@ opcodes land with Loom-6's registered-buffer surface.
   (#898, via `p9_client_abandon_async` Tflush) + out-of-order completion. **One
   focused audit over Loom-3 is the next step** (it must verify #898 + add the
   deterministic multi-in-flight / Proc-death harness owed since #841).
-- **Loom-4 — SQPOLL**: the kernel poll-thread (zero-syscall hot path;
-  `cpu_pinned`-able) — wait/wake + lifetime surface. Audit.
+- **Loom-4 — SQPOLL** (**design signed off + `loom.tla` extended**; impl
+  pending): the `kproc()` poll-thread (zero-syscall hot path; `cpu_pinned`-able) +
+  the frame-boundary idle-deadline (the #841-safe interruptible recv; a new
+  NULL-permitted transport `set_recv_deadline` + a deadline-aware reader pump) +
+  the CQ wait-list (an `ENTER` waiter sleeps for `min_complete`, woken by a posted
+  CQE / teardown). Option 1 of the user-voted design fork (LOOM.md §8.6); the
+  owning-Proc-member-thread + submission-only alternatives were rejected. `loom.tla`
+  extended FIRST (the CQ-waiter actor: `CqFlagTracksCq` + `NoMissedCqWake` +
+  `NoStrandedWaiter` + `CqWaiterReturns`; +2 buggy cfgs `cqwait_no_wake` /
+  `cqwait_check_early`; clean 2429 states, all 9 cfgs green). Wait/wake +
+  kthread-lifetime surface. Audit.
 - **Loom-5 — multishot + linked ops**: one SQE → many CQEs (the `/srv` accept
   loop) + LINK/DRAIN per-fid ordering. Audit.
 - **Loom-6 — registered buffers + native API + bench**: pinned Burrow regions

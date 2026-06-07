@@ -322,6 +322,82 @@ concurrent `clunk`/`close` cannot race it. The buffer slice is validated against
 the registered-buffer table at submit and the Burrow held (#847) for the op's
 lifetime.
 
+### 8.6 SQPOLL — the poll-thread + the CQ wait-list (Loom-4)
+
+**The design (Option 1, user-voted 2026-06-07).** With `LOOM_SETUP_SQPOLL`,
+`SYS_LOOM_SETUP` starts a per-ring kernel poll-thread so steady-state submission
+is **zero syscalls** — userspace writes SQEs + bumps `sq_tail`, the kthread drains
+them. The two SQPOLL forks the design conversation resolved:
+
+1. **The poll-thread's recv-wake + lifetime.** The kthread must drive the elected
+   reader (recv → demux → CQE) so async completions appear without an `ENTER`
+   syscall — but the reader's recv is a *blocking, frame-atomic byte stream*, and
+   #841 proved a deadline that fires **mid-frame** desyncs it. Option 1: the
+   kthread is a `kproc()` thread (the `console_mgr` precedent), `cpu_pinned`-able,
+   woken at idle/teardown by a **frame-boundary idle-deadline** — armed only when
+   the recv is at a frame boundary (no bytes buffered for the current frame, where
+   a timeout consumes nothing = #841-safe) and disarmed once mid-frame. This keeps
+   the kthread lifetime simple (a stop-flag + join, **no Proc-lifecycle
+   entanglement**) — rejected: an owning-Proc member thread (io_uring-faithful but
+   new kernel-thread-reaping territory on the deepest-stakes surface) and a
+   submission-only SQPOLL (half-delivers — completions would still need an `ENTER`).
+
+2. **Completion waiting.** A **CQ wait-list** on the `struct Loom`: a thread in
+   `SYS_LOOM_ENTER` (`min_complete >= 1`) that finds the CQ short of its target
+   registers a `poll_waiter` on the list and sleeps; `loom_async_complete`, after
+   `loom_post_cqe`, walks the list and wakes. This is the multi-waiter
+   coordination Loom-3 deferred (Loom-3's wait drove the reader inline and a
+   concurrent `ENTER` "returned what's posted"); it serves both the SQPOLL ring
+   (the kthread is the reader, the `ENTER` caller sleeps) and the non-SQPOLL
+   multi-waiter case (one `ENTER` drives the reader, peers sleep on the list).
+
+**The new primitive.** A NULL-permitted transport-vtable op
+`set_recv_deadline(ctx, deadline_ns)` (srvconn → `client_deadline_ns`; the
+loopback test transport → no-op) + a deadline-aware reader pump
+(`p9_client_reader_pump_once_deadline`) that arms the deadline at the frame
+boundary and returns a distinct **idle** code (no bytes consumed, stream still
+synced) when it fires there — vs the EOF/error code that latches the session
+dead. Teardown reuses `set_recv_deadline(now)` to force the recv to return
+(mid-frame abandonment is sound here — the ring is dying and #898 quiesces every
+in-flight op).
+
+**The poll-thread loop** (`loom_sqpoll_main`):
+
+```
+loop:
+  drain SQ -> loom_submit_one      (zero-syscall submit; NOP inline, FSYNC async)
+  if async_inflight > 0:
+     arm the frame-boundary idle deadline
+     rc = reader_pump_once_deadline(cl)
+     rc > 0   -> demuxed a frame; loom_async_complete posted a CQE + woke the
+                 CQ wait-list; re-check the SQ
+     rc IDLE  -> deadline fired at a boundary; re-check `stopping` + the SQ
+     rc < 0   -> session dead/dying; stop
+  else if SQ idle:
+     set LOOM_RING_SQ_NEED_WAKEUP; park on the kthread's Rendez
+       (woken by an ENTER wake-up or by stop)
+  if stopping: mark the session dead, exit
+```
+
+**Lifetime.** The Loom owns the kthread; `loom_free` sets `stopping`, arms the
+deadline + wakes the park Rendez, and **joins** the kthread before freeing the
+ring (the kthread only ever touches the still-allocated `struct Loom`). A CQ
+waiter holds a loom ref for its `ENTER`, so the ring cannot free under a live
+waiter; teardown / session death wakes the wait-list so no waiter strands.
+
+**`SYS_LOOM_ENTER` on an SQPOLL ring** does **not** submit (the kthread owns
+submission); it wakes the idled kthread (clearing `LOOM_RING_SQ_NEED_WAKEUP`) and,
+if `min_complete > 0`, sleeps on the CQ wait-list (death-interruptible, #811)
+until the target is met or nothing more can complete.
+
+**Invariant.** The CQ wait-list adds **I-9 specialized to the CQ wait-list** —
+no wakeup lost between a waiter's CQ check and its sleep (`CqFlagTracksCq` +
+`NoMissedCqWake`) and no waiter stranded past teardown (`NoStrandedWaiter`),
+modeled in `specs/loom.tla` (the register-then-observe `poll.tla` lineage; the
+`BUGGY_CQWAIT_CHECK_EARLY` + `BUGGY_CQWAIT_NO_WAKE` counterexamples). The SQPOLL
+kthread's submit + reader-drive reuse the audited Consume / Dispatch /
+ReplyArrives / PostCqe path; only the wait/wake is the new modeled surface.
+
 ---
 
 ## 9. Invariants + audit-trigger surface
@@ -363,8 +439,14 @@ hazard class.
 - **Loom-3 — batch-enter core**: `SYS_LOOM_ENTER` (submit N / reap M) + SQE →
   `p9_client_<op>` dispatch + the submit-time pin (§8.5) + CQE post +
   out-of-order completion. The core. Audit.
-- **Loom-4 — SQPOLL**: the kernel poll-thread (zero-syscall hot path;
-  `cpu_pinned`-able) — wait/wake + lifetime surface. Audit.
+- **Loom-4 — SQPOLL** (§8.6; design Option 1, user-voted 2026-06-07): the
+  `kproc()` poll-thread (zero-syscall hot path; `cpu_pinned`-able) + the
+  frame-boundary idle-deadline (the #841-safe interruptible recv: a new
+  NULL-permitted transport `set_recv_deadline` + a deadline-aware reader pump) +
+  the CQ wait-list (an `ENTER` waiter sleeps for `min_complete`, woken by a posted
+  CQE / teardown — the multi-waiter coordination Loom-3 deferred). `loom.tla`
+  extended FIRST with the CQ-waiter (I-9: `CqFlagTracksCq` + `NoMissedCqWake` +
+  `NoStrandedWaiter`; +2 buggy cfgs). Wait/wake + kthread-lifetime surface. Audit.
 - **Loom-5 — multishot + linked ops**: one SQE → many CQEs (the `/srv`
   accept-loop) + LINK/DRAIN per-fid ordering. Audit.
 - **Loom-6 — registered buffers + native API + bench**: pinned Burrow regions
