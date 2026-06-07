@@ -15,10 +15,12 @@
 #include <thylacine/9p_transport.h>
 #include <thylacine/9p_transport_loopback.h>
 #include <thylacine/9p_wire.h>
+#include <thylacine/burrow.h>     // Loom-6 white-box registered-buffer install
 #include <thylacine/dev9p.h>
 #include <thylacine/errno.h>
 #include <thylacine/handle.h>
 #include <thylacine/loom.h>
+#include <thylacine/page.h>       // pa_to_kva / page_to_pa (the buffer direct map)
 #include <thylacine/rendez.h>
 #include <thylacine/spinlock.h>
 #include <thylacine/spoor.h>
@@ -50,6 +52,9 @@ void test_9p_client_loom_rights_deny(void);
 void test_9p_client_loom_quiesce_abandons_inflight(void);
 void test_9p_client_loom_multishot_stream(void);
 void test_9p_client_loom_multishot_backpressure(void);
+void test_9p_client_loom_read_e2e(void);
+void test_9p_client_loom_write_e2e(void);
+void test_9p_client_loom_rw_rejects(void);
 
 // File-scope buffers (kernel test stack is 16 KiB — client struct is
 // ~4 KiB; multiple in one frame is fine but file-scope is cleaner).
@@ -1332,6 +1337,204 @@ void test_9p_client_loom_drain_waits_for_rearm_pending(void) {
     TEST_ASSERT(l->inflight_ops == NULL, "multishot reaped");
     TEST_ASSERT(l->chain == NULL, "DRAIN reclaimed");
 
+    loom_unref(l);
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}
+
+// =============================================================================
+// Loom-6a: the registered-buffer data-path ops (READ / WRITE) over the loopback
+// 9P client. White-box buffer install (Proc-less, like the FSYNC e2e installs
+// the handle directly): a fresh anon Burrow's create ref IS the table's pin; the
+// test takes ONE EXTRA ref so it can observe the op's I-30 buffer pin being
+// taken + released around the dispatch.
+// =============================================================================
+
+// Stage a READ/WRITE SQE (all the data-path fields the scalar cl_stage_sqe omits).
+static void cl_stage_rw(struct Loom *l, u32 slot, u8 opcode, u32 handle_idx,
+                        u64 offset, u32 count, u32 bidx, u64 buf_off, u64 user_data) {
+    struct loom_sqe *sqes = (struct loom_sqe *)(l->ring_kva + l->sqe_off);
+    u32 *sqa = (u32 *)(l->ring_kva + l->sq_array_off);
+    struct loom_sqe *s = &sqes[slot];
+    for (u32 i = 0; i < sizeof(*s); i++) ((u8 *)s)[i] = 0;
+    s->opcode        = opcode;
+    s->handle_idx    = handle_idx;
+    s->offset        = offset;
+    s->len           = count;
+    s->buf_idx_or_off = bidx;
+    s->_resv1[0]     = buf_off;     // LOOM_SQE_BUF_OFF
+    s->user_data     = user_data;
+    sqa[slot] = slot;
+}
+
+// Install a fresh anon Burrow of `len` into l->reg_buf[idx] (its create ref is
+// the table's pin) + take one extra ref for the test to observe lifetime.
+static void loom_install_test_buf(struct Loom *l, u32 idx, u32 len,
+                                  struct Burrow **out_b, u8 **out_kva) {
+    struct Burrow *b = burrow_create_anon(len);
+    u8 *kva = (u8 *)pa_to_kva(page_to_pa(b->pages));
+    spin_lock(&l->lock);
+    l->reg_buf[idx].burrow = b;
+    l->reg_buf[idx].kva    = kva;
+    l->reg_buf[idx].len    = len;
+    if (idx + 1u > l->n_reg_buf) l->n_reg_buf = idx + 1u;
+    spin_unlock(&l->lock);
+    burrow_ref(b);   // the test's observation ref (on top of the table pin)
+    *out_b = b; *out_kva = kva;
+}
+
+// Capture responder: stash the Twrite payload (to prove the build read the
+// pinned buffer), then delegate every reply (incl. the Rwrite count-echo) to
+// canonical_responder.
+static u8  g_loom_wcap[64];
+static u32 g_loom_wcap_len;
+static int loom_write_capture_responder(void *ctx, const u8 *req, size_t req_len,
+                                        u8 *resp, size_t cap) {
+    u32 size; u8 type; u16 tag;
+    if (p9_peek_header(req, req_len, &size, &type, &tag) >= 0 && type == P9_TWRITE &&
+        req_len >= P9_HDR_LEN + 16) {
+        u32 count = (u32)req[P9_HDR_LEN + 12] | ((u32)req[P9_HDR_LEN + 13] << 8)
+                  | ((u32)req[P9_HDR_LEN + 14] << 16) | ((u32)req[P9_HDR_LEN + 15] << 24);
+        u32 nn = count > (u32)sizeof(g_loom_wcap) ? (u32)sizeof(g_loom_wcap) : count;
+        for (u32 i = 0; i < nn; i++) g_loom_wcap[i] = req[P9_HDR_LEN + 16 + i];
+        g_loom_wcap_len = nn;
+    }
+    return canonical_responder(ctx, req, req_len, resp, cap);
+}
+
+// READ end-to-end: the SQE dispatches a Tread; the loopback replies Rread with
+// "hello" (5 bytes); loom_async_complete copies the reply payload INTO the
+// registered buffer; the CQE result is the byte count. Exercises the new
+// completion-time wire->buffer copy + the I-30 buffer pin lifecycle.
+void test_9p_client_loom_read_e2e(void) {
+    drive_client_open(&g_client, &g_loopback);
+    struct Spoor *sp = dev9p_attach_client(&g_client, 0);
+    TEST_ASSERT(sp != NULL, "dev9p_attach_client");
+
+    struct Loom *l = loom_create(8, 16);
+    TEST_ASSERT(l != NULL, "loom_create");
+    rights_t rt = RIGHT_READ | RIGHT_WRITE;
+    TEST_ASSERT(loom_register_handles(l, &sp, &rt, 1) == 0, "register dev9p handle");
+
+    struct Burrow *b; u8 *bkva;
+    loom_install_test_buf(l, 0, PAGE_SIZE, &b, &bkva);
+    int hc0 = burrow_handle_count(b);          // test ref + table pin
+    bkva[0] = bkva[1] = bkva[2] = bkva[3] = bkva[4] = 0xAA;   // poison
+
+    struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+    struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
+
+    cl_stage_rw(l, 0, LOOM_OP_READ, /*handle=*/0, /*offset=*/0, /*count=*/5,
+                /*bidx=*/0, /*buf_off=*/0, 0xBEEF000000000005ULL);
+    __atomic_store_n(&h->sq_tail, 1u, __ATOMIC_RELEASE);
+
+    int n = loom_enter(l, 1, 1, 0);
+    TEST_EXPECT_EQ(n, 1, "one SQE consumed");
+    TEST_EXPECT_EQ((u64)l->cq_tail, (u64)1, "one CQE posted");
+    TEST_EXPECT_EQ(cqes[0].user_data, 0xBEEF000000000005ULL, "user_data echoed");
+    TEST_EXPECT_EQ((u64)(s64)cqes[0].result, (u64)5, "READ result = 5 bytes read");
+    TEST_ASSERT(bkva[0]=='h' && bkva[1]=='e' && bkva[2]=='l' && bkva[3]=='l' && bkva[4]=='o',
+                "Rread payload copied into the registered buffer");
+    TEST_EXPECT_EQ((u64)l->async_inflight, (u64)0, "op reaped");
+    TEST_EXPECT_EQ(burrow_handle_count(b), hc0, "op buffer pin balanced (released at reap)");
+
+    burrow_unref(b);                // drop the observation ref (table pin remains)
+    loom_unref(l);                  // releases the table pin -> the buffer frees
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}
+
+// WRITE end-to-end: the SQE dispatches a Twrite whose data is read FROM the
+// registered buffer in the build thunk; the capture responder proves the buffer
+// bytes reached the wire; the CQE result is the server-accepted count.
+void test_9p_client_loom_write_e2e(void) {
+    g_loom_wcap_len = 0;
+    int rc = p9_loopback_init(&g_loopback, g_loopback_resp, sizeof(g_loopback_resp),
+                              loom_write_capture_responder, NULL);
+    TEST_EXPECT_EQ(rc, 0, "loopback init (capture responder)");
+    rc = p9_client_init(&g_client, /*root_fid=*/0, /*msize=*/8192,
+                        p9_loopback_ops_for(&g_loopback), g_recv_buf, sizeof(g_recv_buf));
+    TEST_EXPECT_EQ(rc, 0, "client init");
+    const u8 uname[] = {'r','o','o','t'};
+    const u8 aname[] = {'/'};
+    TEST_EXPECT_EQ(p9_client_handshake(&g_client, uname, sizeof(uname), aname, sizeof(aname), 0),
+                   0, "handshake");
+
+    struct Spoor *sp = dev9p_attach_client(&g_client, 0);
+    TEST_ASSERT(sp != NULL, "dev9p_attach_client");
+
+    struct Loom *l = loom_create(8, 16);
+    TEST_ASSERT(l != NULL, "loom_create");
+    rights_t rt = RIGHT_READ | RIGHT_WRITE;
+    TEST_ASSERT(loom_register_handles(l, &sp, &rt, 1) == 0, "register dev9p handle");
+
+    struct Burrow *b; u8 *bkva;
+    loom_install_test_buf(l, 0, PAGE_SIZE, &b, &bkva);
+    int hc0 = burrow_handle_count(b);
+    const u8 payload[] = {'W','O','R','L','D','!'};
+    for (u32 i = 0; i < sizeof(payload); i++) bkva[i] = payload[i];
+
+    struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+    struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
+
+    cl_stage_rw(l, 0, LOOM_OP_WRITE, /*handle=*/0, /*offset=*/0, /*count=*/(u32)sizeof(payload),
+                /*bidx=*/0, /*buf_off=*/0, 0xF00D000000000006ULL);
+    __atomic_store_n(&h->sq_tail, 1u, __ATOMIC_RELEASE);
+
+    int n = loom_enter(l, 1, 1, 0);
+    TEST_EXPECT_EQ(n, 1, "one SQE consumed");
+    TEST_EXPECT_EQ((u64)(s64)cqes[0].result, (u64)sizeof(payload), "WRITE result = accepted count");
+    TEST_EXPECT_EQ((u64)g_loom_wcap_len, (u64)sizeof(payload), "server saw the full payload");
+    TEST_ASSERT(g_loom_wcap[0]=='W' && g_loom_wcap[1]=='O' && g_loom_wcap[2]=='R' &&
+                g_loom_wcap[3]=='L' && g_loom_wcap[4]=='D' && g_loom_wcap[5]=='!',
+                "buffer bytes copied build-time onto the wire");
+    TEST_EXPECT_EQ((u64)l->async_inflight, (u64)0, "op reaped");
+    TEST_EXPECT_EQ(burrow_handle_count(b), hc0, "op buffer pin balanced");
+
+    burrow_unref(b);
+    loom_unref(l);
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}
+
+// Submit-time rejections (inline CQEs; the op NEVER goes in flight): a bad
+// registered-buffer index, an out-of-bounds slice, and a READ against a handle
+// whose rights snapshot lacks RIGHT_READ. The I-30 gates run at submit and a
+// rejected op is never dispatched, so it cannot be bypassed by a later mutation.
+void test_9p_client_loom_rw_rejects(void) {
+    drive_client_open(&g_client, &g_loopback);
+    struct Spoor *sp = dev9p_attach_client(&g_client, 0);
+    TEST_ASSERT(sp != NULL, "dev9p_attach_client");
+
+    struct Loom *l = loom_create(8, 16);
+    TEST_ASSERT(l != NULL, "loom_create");
+    rights_t rt = RIGHT_WRITE;          // NO RIGHT_READ -> a READ is denied
+    TEST_ASSERT(loom_register_handles(l, &sp, &rt, 1) == 0, "register write-only handle");
+
+    struct Burrow *b; u8 *bkva;
+    loom_install_test_buf(l, 0, PAGE_SIZE, &b, &bkva);
+
+    struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+    struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
+
+    // (1) bad buffer index (n_reg_buf == 1, ask for slot 5) -> -EINVAL.
+    cl_stage_rw(l, 0, LOOM_OP_WRITE, 0, 0, 4, /*bidx=*/5, 0, 0x1111u);
+    // (2) OOB slice (buf_off at the buffer end, count 1) -> -EINVAL.
+    cl_stage_rw(l, 1, LOOM_OP_WRITE, 0, 0, 1, /*bidx=*/0, /*buf_off=*/PAGE_SIZE, 0x2222u);
+    // (3) READ against the write-only handle -> -EACCES.
+    cl_stage_rw(l, 2, LOOM_OP_READ, 0, 0, 4, /*bidx=*/0, 0, 0x3333u);
+    __atomic_store_n(&h->sq_tail, 3u, __ATOMIC_RELEASE);
+
+    int n = loom_enter(l, 3, 0, LOOM_ENTER_NONBLOCK);
+    TEST_EXPECT_EQ(n, 3, "three SQEs consumed (all rejected inline)");
+    TEST_EXPECT_EQ((u64)l->cq_tail, (u64)3, "three inline CQEs");
+    TEST_EXPECT_EQ((u64)(s64)cqes[0].result, (u64)(s64)(-(s32)T_E_INVAL), "bad buf idx -> -EINVAL");
+    TEST_EXPECT_EQ((u64)(s64)cqes[1].result, (u64)(s64)(-(s32)T_E_INVAL), "OOB slice -> -EINVAL");
+    TEST_EXPECT_EQ((u64)(s64)cqes[2].result, (u64)(s64)(-(s32)T_E_ACCES), "READ on write-only -> -EACCES");
+    TEST_EXPECT_EQ((u64)l->async_inflight, (u64)0, "no op ever went in flight");
+    TEST_ASSERT(l->inflight_ops == NULL, "no async container allocated");
+
+    burrow_unref(b);
     loom_unref(l);
     p9_client_destroy(&g_client);
     p9_loopback_destroy(&g_loopback);

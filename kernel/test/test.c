@@ -204,6 +204,9 @@ void test_loom_setup_rejects(void);
 void test_loom_register_handles(void);
 void test_loom_register_rejects(void);
 void test_loom_register_replaces(void);
+void test_loom_register_buffers(void);
+void test_loom_register_buffers_rejects(void);
+void test_loom_register_buffers_replace(void);
 void test_loom_post_cqe_back_pressure(void);
 void test_loom_post_cqe_ignores_hostile_header(void);
 void test_loom_dup_rejected(void);
@@ -577,6 +580,9 @@ void test_9p_client_loom_link_success_ordering(void);
 void test_9p_client_loom_drain_barrier(void);
 void test_9p_client_loom_independent_past_held(void);
 void test_9p_client_loom_drain_waits_for_rearm_pending(void);
+void test_9p_client_loom_read_e2e(void);
+void test_9p_client_loom_write_e2e(void);
+void test_9p_client_loom_rw_rejects(void);
 void test_dev9p_registered(void);
 void test_dev9p_attach_client_root_spoor(void);
 void test_dev9p_walk_one_component(void);
@@ -1059,6 +1065,9 @@ struct test_case g_tests[] = {
     { "loom.register_handles",           test_loom_register_handles,           false, NULL },
     { "loom.register_rejects",           test_loom_register_rejects,           false, NULL },
     { "loom.register_replaces",          test_loom_register_replaces,          false, NULL },
+    { "loom.register_buffers",           test_loom_register_buffers,           false, NULL },
+    { "loom.register_buffers_rejects",   test_loom_register_buffers_rejects,   false, NULL },
+    { "loom.register_buffers_replace",   test_loom_register_buffers_replace,   false, NULL },
     { "loom.post_cqe_back_pressure",     test_loom_post_cqe_back_pressure,     false, NULL },
     { "loom.post_cqe_ignores_hostile_header", test_loom_post_cqe_ignores_hostile_header, false, NULL },
     { "loom.dup_rejected",               test_loom_dup_rejected,               false, NULL },
@@ -1550,6 +1559,9 @@ struct test_case g_tests[] = {
                                        test_9p_client_loom_independent_past_held, false, NULL },
     { "9p_client.loom_drain_waits_for_rearm_pending",
                                        test_9p_client_loom_drain_waits_for_rearm_pending, false, NULL },
+    { "9p_client.loom_read_e2e",       test_9p_client_loom_read_e2e,       false, NULL },
+    { "9p_client.loom_write_e2e",      test_9p_client_loom_write_e2e,      false, NULL },
+    { "9p_client.loom_rw_rejects",     test_9p_client_loom_rw_rejects,     false, NULL },
     { "dev9p.registered",              test_dev9p_registered,              false, NULL },
     { "dev9p.attach_client_root_spoor",test_dev9p_attach_client_root_spoor,false, NULL },
     { "dev9p.walk_one_component",      test_dev9p_walk_one_component,      false, NULL },

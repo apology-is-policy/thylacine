@@ -54,6 +54,13 @@ struct loom_chain_op;   // Loom-5b: one held LINK/DRAIN chain entry (defined in 
 // PROC_HANDLE_MAX -- a ring need name no more handles than its Proc can hold.
 #define LOOM_MAX_REG_HANDLES    64u
 
+// Max registered buffers per ring (the "fixed buffers" / zero-copy analog;
+// io_uring IORING_REGISTER_BUFFERS -- Loom-6). A handful suffices for the v1.0
+// consumers (Tapestry's triple-buffered framebuffers + an event buffer); 64 is
+// generous + cheap (LOOM_MAX_REG_BUFFERS * sizeof(struct loom_reg_buffer) on
+// struct Loom).
+#define LOOM_MAX_REG_BUFFERS    64u
+
 // =============================================================================
 // SQE -- one submission entry (a native 9P op-descriptor). Fixed 64 bytes (one
 // cache line; the io_uring SQE size). LOOM.md 7: native descriptor dispatched
@@ -77,6 +84,21 @@ struct loom_sqe {
 _Static_assert(sizeof(struct loom_sqe) == 64, "loom_sqe ABI pinned at 64 bytes");
 _Static_assert(__builtin_offsetof(struct loom_sqe, opcode) == 0, "opcode at 0");
 _Static_assert(__builtin_offsetof(struct loom_sqe, user_data) == 24, "user_data at 24");
+
+// Per-opcode SQE field usage (Loom-6). The data-path ops carry a registered-
+// buffer reference; the reserved tail names the buffer sub-offset without an
+// ABI break (the field already exists):
+//   LOOM_OP_READ:  handle_idx = registered file fid; offset = FILE offset;
+//                  len = byte count; buf_idx_or_off = registered-buffer index;
+//                  _resv1[0] = byte offset WITHIN that registered buffer.
+//                  The reply data is copied INTO buffer[buf_off .. buf_off+len);
+//                  the CQE result is the byte count actually read.
+//   LOOM_OP_WRITE: same fields; the data is copied FROM buffer[buf_off ..
+//                  buf_off+len) onto the wire; the CQE result is the accepted
+//                  count. Both require buf_off + len <= the registered buffer's
+//                  length (bounds-checked at submit, against the kernel
+//                  snapshot -- never re-read from the shared ring).
+#define LOOM_SQE_BUF_OFF(sqe)  ((sqe)->_resv1[0])
 
 // =============================================================================
 // CQE -- one completion entry. 16 bytes. result >= 0 = byte count / packed qid
@@ -151,6 +173,23 @@ struct loom_params {
 
 _Static_assert(sizeof(struct loom_params) == 88, "loom_params ABI pinned at 88 bytes");
 _Static_assert(__builtin_offsetof(struct loom_params, ring_va) == 16, "ring_va at 16");
+
+// =============================================================================
+// loom_buf_reg -- one SYS_LOOM_REGISTER(LOOM_REGISTER_BUFFERS) array element
+// (Loom-6; the io_uring iovec analog). Userspace passes an array of these (an
+// in-ring or scratch buffer of `n` entries); the kernel resolves each `va`
+// range to its backing anonymous Burrow, validates the range lies within one
+// RW VMA, and pins the Burrow (#847 handle_count) for the registration's
+// lifetime. The pinned Burrow's contiguous direct-map base is the zero-copy
+// payload region. 16 bytes.
+// =============================================================================
+struct loom_buf_reg {
+    u64 va;              // base user-VA of the buffer (within one anon RW VMA)
+    u64 len;             // byte length (the whole registered region)
+};
+
+_Static_assert(sizeof(struct loom_buf_reg) == 16, "loom_buf_reg ABI pinned at 16 bytes");
+_Static_assert(__builtin_offsetof(struct loom_buf_reg, va) == 0, "va at 0");
 
 // =============================================================================
 // Opcodes -- the p9_client_* surface (LOOM.md 8.3). Defined now as the fixed
@@ -238,10 +277,26 @@ struct loom_reg_handle {
     rights_t      rights;
 };
 
+// One registered-buffer table slot (Loom-6; the "fixed buffer" / zero-copy
+// analog). `burrow` is an INDEPENDENT handle_count ref (burrow_ref) on the
+// anonymous Burrow that backs the registered VA range -- the #847 dual-refcount
+// keeps the pages alive even after userspace munmaps the VA. `kva` is the
+// kernel direct-map base of the registered slice (stable: a BURROW_TYPE_ANON
+// Burrow is one contiguous alloc_pages chunk), `len` its byte length. A
+// data-path op (READ / WRITE) resolves buf_idx -> this slot at submit, takes
+// its OWN burrow_ref (the I-30 buffer pin held for the op's lifetime), and
+// bounds-checks its slice against `len`. `burrow == NULL` => empty slot.
+struct loom_reg_buffer {
+    struct Burrow *burrow;
+    u8            *kva;
+    u32            len;
+    u32            _pad;
+};
+
 struct Loom {
     u64                  magic;        // LOOM_MAGIC; offset 0 (SLUB-free UAF defense)
     int                  refcount;     // atomic ACQ_REL; 1 at create (the handle's ref)
-    spin_lock_t          lock;         // protects reg[] + cq_tail + sq_head + inflight_ops + async_inflight + chain/chain_tail/chain_len (geometry is immutable post-setup); cq_waiters carries its OWN lock
+    spin_lock_t          lock;         // protects reg[] + reg_buf[]/n_reg_buf + cq_tail + sq_head + inflight_ops + async_inflight + chain/chain_tail/chain_len (geometry is immutable post-setup); cq_waiters carries its OWN lock
     u32                  _pad;
     struct Burrow       *ring;         // the SQ/CQ ring Burrow (handle_count ref held)
     u8                  *ring_kva;     // kernel direct-map base of `ring` (stable for life)
@@ -332,6 +387,12 @@ struct Loom {
     struct Rendez           sqpoll_park;     // kthread parks here when idle; woken by ENTER / stop
     // The registered-handle table.
     struct loom_reg_handle reg[LOOM_MAX_REG_HANDLES];
+    // Loom-6: the registered-buffer table (zero-copy payload). `n_reg_buf` is
+    // the count of valid slots [0..n_reg_buf); resolve + (re)install + the
+    // per-op pin all run under `l->lock`. Like reg[], a re-register clunks the
+    // prior pins OUTSIDE the lock.
+    struct loom_reg_buffer reg_buf[LOOM_MAX_REG_BUFFERS];
+    u32                    n_reg_buf;
 };
 
 _Static_assert(__builtin_offsetof(struct Loom, magic) == 0,
@@ -361,6 +422,18 @@ void loom_unref(struct Loom *l);
 // lock). Returns 0 / -1.
 int loom_register_handles(struct Loom *l, struct Spoor **spoors,
                           const rights_t *rights, u32 n);
+
+// Loom-6: replace the registered-BUFFER table with the `n` (<= LOOM_MAX_REG_BUFFERS)
+// VA ranges in `bufs`. Each `bufs[i]` is resolved against `p`'s address space
+// (vma_lookup under p->vma_lock): the range MUST lie within a single anonymous
+// (BURROW_TYPE_ANON), writable (VMA_PROT_WRITE) VMA, whose backing Burrow is
+// pinned (burrow_ref) and whose contiguous direct-map slice becomes the
+// registered buffer. On SUCCESS any previously-registered buffers are unref'd
+// (outside the lock) and the new set installed atomically; on FAILURE (any
+// range invalid / OOB / non-anon / not writable / n out of range) NOTHING is
+// changed and every Burrow ref taken so far is rolled back. Returns 0 / -1.
+int loom_register_buffers(struct Loom *l, struct Proc *p,
+                          const struct loom_buf_reg *bufs, u32 n);
 
 // Post one completion into the CQ ring (the POST_CQE front-end's terminal
 // action; Loom-2b). Writes a loom_cqe {user_data, result, flags} at the kernel
@@ -414,6 +487,12 @@ int sys_loom_setup_for_proc(struct Proc *p, u32 entries, u32 flags,
 // Returns 0 / -1.
 int sys_loom_register_for_proc(struct Proc *p, hidx_t loom_fd, u32 op,
                                const hidx_t *fds, u32 n);
+
+// Loom-6: testable register inner for LOOM_REGISTER_BUFFERS. Resolves the `n`
+// VA ranges in `bufs[]` (each within one anon RW VMA of `p`) into `loom_fd`'s
+// registered-buffer table via loom_register_buffers. Returns 0 / -1.
+int sys_loom_register_buffers_for_proc(struct Proc *p, hidx_t loom_fd,
+                                       const struct loom_buf_reg *bufs, u32 n);
 
 // Loom-3 batch-enter core. Consume up to `to_submit` SQEs from the SQ index ring
 // (in SQ-index order), copy each to kernel memory (ring TOCTOU), and dispatch:

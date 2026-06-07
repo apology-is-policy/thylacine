@@ -5,7 +5,7 @@
 integrity) + I-30 (submit-time capability pin). **Audit-trigger surface**: ARCH
 §25.4 + CLAUDE.md.
 
-> **Status (Loom-2a + Loom-2b + Loom-3 + Loom-4a/4b/4c/4d + Loom-5a + Loom-5b):** the ring **substrate**
+> **Status (Loom-2a + Loom-2b + Loom-3 + Loom-4a/4b/4c/4d + Loom-5a + Loom-5b + Loom-6a):** the ring **substrate**
 > (2a — `KObj_Loom`, the SQ/CQ ring memory + geometry, `SYS_LOOM_SETUP`, the
 > registered-handle table via `SYS_LOOM_REGISTER`, the kobj refcount lifecycle),
 > the **pluggable-completion 9P-engine seam** (2b — `p9_rpc.on_complete`,
@@ -591,6 +591,70 @@ INFLIGHT entry's backing `loom_async_op` was already abandoned by the #898 quies
 
 ---
 
+### Registered buffers + the READ/WRITE data path (Loom-6a)
+
+`LOOM_REGISTER_BUFFERS` (the io_uring `IORING_REGISTER_BUFFERS` analog) installs a
+table of pinned payload regions; `LOOM_OP_READ` / `LOOM_OP_WRITE` move bytes
+between a registered file fid and a registered-buffer slice with zero per-op
+allocation.
+
+**The registered-buffer table** (`loom_register_buffers`, `loom_resolve_buf`).
+Userspace passes an array of `struct loom_buf_reg { u64 va; u64 len; }`. For each
+entry the kernel, under `p->vma_lock`, `vma_lookup`s `va` and requires the
+`[va, va+len)` range to lie within ONE writable (`VMA_PROT_WRITE`), anonymous
+(`BURROW_TYPE_ANON`) VMA. A `BURROW_TYPE_ANON` Burrow is a single contiguous
+`alloc_pages` chunk, so its direct-map base `pa_to_kva(page_to_pa(burrow->pages))`
+plus the in-Burrow byte offset is a stable kernel address across the whole slice.
+The table slot (`struct loom_reg_buffer`) holds an INDEPENDENT `burrow_ref` (the
+pin) + that kva + the length. The install is all-or-nothing: the whole set is
+resolved + pinned into a stack staging array first (rolling back every ref taken
+on any failure), then swapped into `l->reg_buf[]` under `l->lock`, and the
+displaced pins are `burrow_unref`'d OUTSIDE the lock. The pin is the I-30
+substrate + decouples the buffer's lifetime from the user mapping: a later
+`munmap` drops `mapping_count` but the table's `handle_count` ref keeps the pages
+alive (the #847 dual-refcount), so a registered buffer stays valid for the ring's
+life.
+
+**Dispatch** (`loom_submit_rw`). A `LOOM_OP_READ`/`WRITE` SQE names a registered
+file fid (`handle_idx`), a registered buffer (`buf_idx_or_off`), a file offset
+(`offset`), a byte count (`len`), and a buffer sub-offset (`_resv1[0]`,
+`LOOM_SQE_BUF_OFF`). Under `l->lock` the kernel resolves + pins BOTH the file
+handle (`spoor_ref`) and the buffer (a second, independent `burrow_ref`) — two
+I-30 submit-time pins held for the op's whole lifetime — bounds-checks
+`buf_off + len <= reg_buf.len` against the KERNEL snapshot (never the shared
+ring), and rights-gates (READ → `RIGHT_READ`, WRITE → `RIGHT_WRITE`). Every
+early-return path releases whatever it pinned. Single-shot only: a real multishot
+READ needs an event-source dev (post-Loom graphics), so MULTISHOT on a data-path
+op is rejected `-EINVAL`.
+
+**The payload copies.** WRITE's data is read FROM the pinned buffer slice in the
+build thunk (`loom_build_write`, under the client's `c->lock`); READ's reply is
+copied INTO the slice at completion (`loom_payload_result`, called from
+`loom_async_complete` under `c->lock`). Both ends are pinned kernel memory, so
+both copies are non-sleeping memcpys that compose with the seam contract. The READ
+copy is bounded by `min(dr->read_count, op->op_count)` — it never writes past the
+registered slice. The CQE `result` is the byte count read / the server-accepted
+write count.
+
+**Lifetime.** The op's buffer pin (`pinned_buf`) is released — symmetric with the
+spoor pin — at reap (`loom_reap_terminal`), at the #898 quiesce (`loom_free`'s
+abandon), and `loom_free` additionally `burrow_unref`s every `reg_buf[]` table
+pin.
+
+**Spec.** `loom.tla` is **unchanged**: the registered-buffer pin + the
+slice-validation ARE the abstract `reg` slot + the `sqe_arg`/`ValidArgs` model the
+Loom-1 spec reserved from day one (its comment explicitly names "a malformed /
+out-of-bounds buffer descriptor"). `ObjPinnedToSnapshot` covers the buffer-table
+pin (resolve once at submit, never re-resolve at completion); `ArgPinnedToSnapshot`
+covers the slice descriptor (act on the snapshot, never re-read the shared ring);
+`ActedArgValidated` covers the bounds gate — the Loom-3 precedent (the model
+covered the FSYNC dispatch + pin). `specs/SPEC-TO-CODE.md` records the Loom-6
+source map. **Untrusted-server caveat:** the READ copy trusts the 9P dispatch's
+`read_count` to bound `dr->read_data` (the same trusted-server assumption #841 /
+Loom-4-F4 carry); a hostile server is the documented v1.x seam.
+
+---
+
 ## Data structures
 
 `struct Loom` (`kernel/loom.c`): `magic` (`LOOM_MAGIC`, offset 0 — SLUB-free UAF
@@ -810,7 +874,10 @@ rolled back via `spoor_clunk`); a user-VA fault reading the fd array.
 | Loom-4 | SQPOLL kthread (4a recv-deadline + 4b CQ wait-list + 4c kthread + 4d audit) | **landed** |
 | Loom-5a | multishot streams (`LOOM_SQE_MULTISHOT` → `LOOM_CQE_MORE` shots + terminal) | **landed** |
 | Loom-5b | LINK/DRAIN held-submission chain (`l->chain` + `loom_admit_chain`) | **landed** (Loom-5 audit closed 0/0/2/4) |
-| Loom-6 | registered buffers + native libthyla-rs API + benchmark | pending |
+| Loom-6a | registered buffers (`LOOM_REGISTER_BUFFERS`) + the READ/WRITE data path | **landed** (self-audit clean; formal audit at 6c) |
+| Loom-6b | the remaining payload opcodes (the uniform `p9_client_*` surface) | pending |
+| Loom-6c | the multi-in-flight SMP harness + the focused Opus audit + close | pending |
+| Loom-6d | the native libthyla-rs Loom API + the latency benchmark | pending |
 
 ## Known caveats / footguns
 

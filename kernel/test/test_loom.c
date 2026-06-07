@@ -49,10 +49,15 @@ void test_loom_sqpoll_setup_and_teardown(void);
 void test_loom_sqpoll_drains_sq(void);
 void test_loom_sqpoll_parks_on_cq_full(void);
 
+void test_loom_register_buffers(void);
+void test_loom_register_buffers_rejects(void);
+void test_loom_register_buffers_replace(void);
+
 // The testable syscall inners live in kernel/syscall.c (declared in loom.h);
 // sys_pipe_for_proc is the KOBJ_SPOOR-pair maker (declared nowhere public --
 // forward-declare it like test_sys_burrow.c does for its inner).
 extern int sys_pipe_for_proc(struct Proc *p, hidx_t *out_rd, hidx_t *out_wr);
+extern s64 sys_burrow_attach_for_proc(struct Proc *p, u64 length_raw);
 
 static struct Proc *test_proc_make(void) {
     return proc_alloc();
@@ -299,6 +304,119 @@ void test_loom_register_replaces(void) {
 }
 
 // ---------------------------------------------------------------------------
+// SYS_LOOM_REGISTER(LOOM_REGISTER_BUFFERS) (Loom-6): a VA range resolves to its
+// backing anon Burrow, which the table pins (an independent burrow_ref -- the
+// I-30 buffer-pin substrate), exposing its contiguous direct-map slice for
+// zero-copy payload. Mirrors specs/loom.tla's `reg` slot + ObjPinnedToSnapshot.
+// ---------------------------------------------------------------------------
+void test_loom_register_buffers(void) {
+    struct Proc *p = test_proc_make();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+
+    struct loom_params kp;
+    hidx_t loom_fd = -1;
+    TEST_ASSERT(sys_loom_setup_for_proc(p, 8, 0, &kp, &loom_fd) == 0, "setup");
+
+    s64 bva = sys_burrow_attach_for_proc(p, PAGE_SIZE);
+    TEST_ASSERT(bva > 0, "burrow-attach a buffer page");
+    struct Vma *bvma = vma_lookup(p, (u64)bva);
+    TEST_ASSERT(bvma != NULL && bvma->burrow != NULL, "buffer VMA + Burrow");
+    int hc0 = burrow_handle_count(bvma->burrow);
+
+    struct loom_buf_reg br = { .va = (u64)bva, .len = PAGE_SIZE };
+    TEST_EXPECT_EQ(sys_loom_register_buffers_for_proc(p, loom_fd, &br, 1), 0,
+                   "register one buffer");
+
+    struct Handle h;
+    TEST_ASSERT(handle_get(p, loom_fd, &h) == 0, "handle_get(loom)");
+    struct Loom *l = (struct Loom *)h.obj;
+    TEST_EXPECT_EQ((u64)l->n_reg_buf, (u64)1, "n_reg_buf == 1");
+    TEST_ASSERT(l->reg_buf[0].burrow == bvma->burrow, "slot 0 -> the buffer Burrow");
+    TEST_EXPECT_EQ((u64)l->reg_buf[0].len, (u64)PAGE_SIZE, "slot 0 len");
+    TEST_ASSERT(l->reg_buf[0].kva != NULL, "slot 0 kva set");
+    TEST_ASSERT(l->reg_buf[1].burrow == NULL, "slot 1 empty");
+    handle_put(&h);
+
+    // The table holds its OWN handle_count ref (the pin) on top of the mapping.
+    TEST_EXPECT_EQ(burrow_handle_count(bvma->burrow), hc0 + 1, "table holds its own ref");
+
+    test_proc_drop(p);   // clears the table -> drops the pin; frees everything
+}
+
+void test_loom_register_buffers_rejects(void) {
+    struct Proc *p = test_proc_make();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+
+    struct loom_params kp;
+    hidx_t loom_fd = -1;
+    TEST_ASSERT(sys_loom_setup_for_proc(p, 8, 0, &kp, &loom_fd) == 0, "setup");
+
+    s64 bva = sys_burrow_attach_for_proc(p, PAGE_SIZE);
+    TEST_ASSERT(bva > 0, "buffer page");
+    int hc0 = burrow_handle_count(vma_lookup(p, (u64)bva)->burrow);   // baseline (just the mapping)
+
+    struct loom_buf_reg one  = { .va = (u64)bva, .len = PAGE_SIZE };
+    struct loom_buf_reg zlen = { .va = (u64)bva, .len = 0 };
+    struct loom_buf_reg oob  = { .va = (u64)bva, .len = 2u * PAGE_SIZE };  // region is 1 page
+    struct loom_buf_reg um   = { .va = 0x1000,   .len = PAGE_SIZE };       // unmapped low VA
+
+    TEST_EXPECT_EQ(sys_loom_register_buffers_for_proc(p, loom_fd, &one,
+                   LOOM_MAX_REG_BUFFERS + 1u), -1, "n over cap rejected");
+    TEST_EXPECT_EQ(sys_loom_register_buffers_for_proc(p, loom_fd, &zlen, 1), -1, "len 0 rejected");
+    TEST_EXPECT_EQ(sys_loom_register_buffers_for_proc(p, loom_fd, &oob, 1), -1, "OOB len rejected");
+    TEST_EXPECT_EQ(sys_loom_register_buffers_for_proc(p, loom_fd, &um, 1), -1, "unmapped VA rejected");
+    TEST_EXPECT_EQ(sys_loom_register_buffers_for_proc(p, (hidx_t)999, &one, 1), -1, "bad loom_fd rejected");
+
+    // Every reject is atomic: the table stays empty + no ref leaked.
+    struct Handle h;
+    TEST_ASSERT(handle_get(p, loom_fd, &h) == 0, "handle_get(loom)");
+    struct Loom *l = (struct Loom *)h.obj;
+    TEST_EXPECT_EQ((u64)l->n_reg_buf, (u64)0, "table untouched by rejects");
+    TEST_ASSERT(l->reg_buf[0].burrow == NULL, "slot 0 still empty");
+    handle_put(&h);
+    TEST_EXPECT_EQ(burrow_handle_count(vma_lookup(p, (u64)bva)->burrow), hc0,
+                   "no ref leaked into the buffer Burrow by the rejected attempts");
+
+    test_proc_drop(p);
+}
+
+void test_loom_register_buffers_replace(void) {
+    struct Proc *p = test_proc_make();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+
+    struct loom_params kp;
+    hidx_t loom_fd = -1;
+    TEST_ASSERT(sys_loom_setup_for_proc(p, 8, 0, &kp, &loom_fd) == 0, "setup");
+
+    s64 bva = sys_burrow_attach_for_proc(p, PAGE_SIZE);
+    TEST_ASSERT(bva > 0, "buffer page");
+    struct Burrow *b = vma_lookup(p, (u64)bva)->burrow;
+    int hc0 = burrow_handle_count(b);
+
+    struct loom_buf_reg br = { .va = (u64)bva, .len = PAGE_SIZE };
+    TEST_ASSERT(sys_loom_register_buffers_for_proc(p, loom_fd, &br, 1) == 0, "register");
+    TEST_EXPECT_EQ(burrow_handle_count(b), hc0 + 1, "one pin after register");
+
+    // Re-register the SAME region: the prior pin is released, a fresh one taken
+    // (net unchanged -- IORING_REGISTER_BUFFERS replace semantics).
+    TEST_ASSERT(sys_loom_register_buffers_for_proc(p, loom_fd, &br, 1) == 0, "re-register");
+    TEST_EXPECT_EQ(burrow_handle_count(b), hc0 + 1, "still one pin (replace freed the old)");
+
+    // Clear (n == 0) releases the pin.
+    TEST_ASSERT(sys_loom_register_buffers_for_proc(p, loom_fd, NULL, 0) == 0, "clear");
+    TEST_EXPECT_EQ(burrow_handle_count(b), hc0, "pin released on clear");
+
+    struct Handle h;
+    TEST_ASSERT(handle_get(p, loom_fd, &h) == 0, "handle_get(loom)");
+    struct Loom *l = (struct Loom *)h.obj;
+    TEST_EXPECT_EQ((u64)l->n_reg_buf, (u64)0, "n_reg_buf 0 after clear");
+    TEST_ASSERT(l->reg_buf[0].burrow == NULL, "slot 0 cleared");
+    handle_put(&h);
+
+    test_proc_drop(p);
+}
+
+// ---------------------------------------------------------------------------
 // loom_post_cqe back-pressure (Loom-2b): the POST_CQE front-end's CQ writer
 // never overwrites an unreaped completion (CqNeverOverfull, I-29). A full CQ
 // refuses the post (-1) + bumps the overflow counter; a user-side reap frees
@@ -419,19 +537,18 @@ void test_loom_enter_nop(void) {
 
 // The submit-time reject paths each post an error CQE (the SQE is still consumed
 // -- io_uring semantics), never a dropped/lost SQE: a bad handle_idx (-EINVAL),
-// an empty registered slot (-EBADF), an unimplemented-but-in-range opcode that
-// needs a registered buffer (-ENOSYS, lands with Loom-6), and an out-of-range
-// opcode (-EINVAL).
+// an empty registered slot (-EBADF), a still-unimplemented-but-in-range opcode
+// (-ENOSYS, lands with Loom-6b), and an out-of-range opcode (-EINVAL).
 void test_loom_enter_submit_rejects(void) {
     struct Loom *l = loom_create(8, 16);
     TEST_ASSERT(l != NULL, "loom_create(8,16)");
     struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
     struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
 
-    loom_stage_sqe(l, 0, LOOM_OP_FSYNC, 0, 99u, 0, 0xAAu);  // handle_idx out of range
-    loom_stage_sqe(l, 1, LOOM_OP_FSYNC, 0, 0u,  0, 0xBBu);  // reg[0] empty (no register call)
-    loom_stage_sqe(l, 2, LOOM_OP_READ,  0, 0u,  0, 0xCCu);  // in-range, needs a buffer (Loom-6)
-    loom_stage_sqe(l, 3, LOOM_OP_COUNT, 0, 0u,  0, 0xDDu);  // out-of-range opcode
+    loom_stage_sqe(l, 0, LOOM_OP_FSYNC,   0, 99u, 0, 0xAAu);  // handle_idx out of range
+    loom_stage_sqe(l, 1, LOOM_OP_FSYNC,   0, 0u,  0, 0xBBu);  // reg[0] empty (no register call)
+    loom_stage_sqe(l, 2, LOOM_OP_GETATTR, 0, 0u,  0, 0xCCu);  // in-range, unimplemented (Loom-6b)
+    loom_stage_sqe(l, 3, LOOM_OP_COUNT,   0, 0u,  0, 0xDDu);  // out-of-range opcode
     __atomic_store_n(&h->sq_tail, 4u, __ATOMIC_RELEASE);
 
     int n = loom_enter(l, 4, 0, LOOM_ENTER_NONBLOCK);

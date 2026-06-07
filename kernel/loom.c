@@ -32,6 +32,7 @@
 #include <thylacine/spinlock.h>
 #include <thylacine/thread.h>     // thread_create_with_arg / thread_free / THREAD_EXITING
 #include <thylacine/types.h>
+#include <thylacine/vma.h>        // vma_lookup / VMA_PROT_* (Loom-6 registered buffers)
 
 #include "../mm/slub.h"
 #include "../arch/arm64/timer.h"  // timer_now_ns (the SQPOLL frame-boundary idle deadline)
@@ -61,6 +62,19 @@ struct loom_async_op {
     u64                    user_data;  // echoed verbatim into the CQE
     u32                    op_fid;      // resolved 9P fid (from `pinned`, at submit)
     u32                    op_arg;      // opcode-specific scalar (FSYNC: datasync 0/1)
+    // Loom-6 payload ops (READ / WRITE). op_offset is the FILE offset, op_count
+    // the byte count. pinned_buf is an INDEPENDENT burrow_ref on the registered
+    // buffer's Burrow -- the I-30 buffer pin, symmetric with `pinned` for the fid:
+    // held for the op's whole lifetime so a concurrent LOOM_REGISTER_BUFFERS
+    // re-install / munmap cannot free the pages under an in-flight copy. Dropped
+    // (burrow_unref) at reap / abandon, never re-resolved. buf_kva points at the
+    // pinned slice in the Burrow's stable, contiguous direct map; the build thunk
+    // (WRITE) reads it, loom_async_complete (READ) writes it -- both under a lock,
+    // both pinned kernel memory (no fault, no sleep). NULL for scalar ops.
+    u64                    op_offset;   // READ/WRITE: file offset
+    u32                    op_count;    // READ/WRITE: requested byte count
+    struct Burrow         *pinned_buf;  // READ/WRITE: the I-30 buffer pin (burrow_ref)
+    u8                    *buf_kva;     // READ/WRITE: the pinned buffer slice base
     // Multishot (Loom-5; specs/loom_multishot.tla). A multishot op re-arms after
     // each NON-terminal reply: loom_async_complete posts a LOOM_CQE_MORE CQE +
     // sets `rearm`; the drive loop (loom_rearm_pending, OUTSIDE c->lock) re-issues
@@ -272,6 +286,7 @@ static void loom_free(struct Loom *l) {
     while (op) {
         struct loom_async_op *next = op->next;
         p9_client_abandon_async(op->client, &op->rpc);
+        if (op->pinned_buf) burrow_unref(op->pinned_buf);   // Loom-6: release the buffer pin
         spoor_clunk(op->pinned);
         kfree(op);
         op = next;
@@ -298,6 +313,13 @@ static void loom_free(struct Loom *l) {
         if (l->reg[i].spoor) {
             spoor_clunk(l->reg[i].spoor);
             l->reg[i].spoor = NULL;
+        }
+    }
+    // Loom-6: release every registered-buffer pin (the table's burrow_refs).
+    for (u32 i = 0; i < LOOM_MAX_REG_BUFFERS; i++) {
+        if (l->reg_buf[i].burrow) {
+            burrow_unref(l->reg_buf[i].burrow);
+            l->reg_buf[i].burrow = NULL;
         }
     }
     if (l->ring) {
@@ -364,6 +386,81 @@ int loom_register_handles(struct Loom *l, struct Spoor **spoors,
 
     for (u32 i = 0; i < LOOM_MAX_REG_HANDLES; i++) {
         if (old[i]) spoor_clunk(old[i]);
+    }
+    return 0;
+}
+
+// Loom-6: resolve + PIN one registered-buffer VA range into *out. On success
+// fills *out (with a burrow_ref HELD on out->burrow) and returns 0; on any
+// validation failure returns -1 having taken NO ref and left *out untouched.
+// Caller holds p->vma_lock (vma_lookup needs it; lock order vma_lock ->
+// burrow->lock matches burrow_map). The range must lie within ONE anonymous
+// (CPU-accessible, contiguous), writable VMA -- the same posture io_uring's
+// IORING_REGISTER_BUFFERS pins. The kva is computed from the Burrow's stable
+// direct-map base, NOT the VA, so the pin keeps it valid past a later munmap
+// (the #847 dual-refcount).
+static int loom_resolve_buf(struct Proc *p, const struct loom_buf_reg *b,
+                            struct loom_reg_buffer *out) {
+    u64 va = b->va, len = b->len;
+    if (len == 0 || len > 0xFFFFFFFFull)              return -1;  // u32 slot; empty useless
+    if (va + len < va)                               return -1;  // VA-range wrap
+    struct Vma *vma = vma_lookup(p, va);
+    if (!vma || !vma->burrow)                        return -1;  // unmapped / guard VMA
+    if (vma->burrow->type != BURROW_TYPE_ANON)       return -1;  // device mem (MMIO/DMA): no
+    if ((vma->prot & VMA_PROT_WRITE) == 0)           return -1;  // need RW (READ writes into it)
+    if (va < vma->vaddr_start || va + len > vma->vaddr_end) return -1;  // within ONE VMA
+    // Byte offset of the slice into the backing Burrow + its contiguous direct-map
+    // base. A BURROW_TYPE_ANON Burrow is a single alloc_pages chunk, so base + off
+    // is a valid kernel address across the whole [va, va+len) span.
+    u64 boff = vma->burrow_offset + (va - vma->vaddr_start);
+    if (boff + len > vma->burrow->size)              return -1;  // defensive (VMA invariant implies)
+    u8 *base = (u8 *)pa_to_kva(page_to_pa(vma->burrow->pages));
+    out->burrow = vma->burrow;
+    out->kva    = base + boff;
+    out->len    = (u32)len;
+    out->_pad   = 0;
+    burrow_ref(vma->burrow);     // the table's pin (released at re-register / loom_unref)
+    return 0;
+}
+
+int loom_register_buffers(struct Loom *l, struct Proc *p,
+                          const struct loom_buf_reg *bufs, u32 n) {
+    if (!l || l->magic != LOOM_MAGIC || !p)  return -1;
+    if (n > LOOM_MAX_REG_BUFFERS)            return -1;
+    if (n > 0 && !bufs)                      return -1;
+
+    // Resolve + pin the WHOLE new set first (all-or-nothing, like
+    // loom_register_handles): under p->vma_lock so vma_lookup is stable. On any
+    // failure roll back the refs taken so far and leave the live table untouched.
+    struct loom_reg_buffer fresh[LOOM_MAX_REG_BUFFERS];
+    for (u32 i = 0; i < LOOM_MAX_REG_BUFFERS; i++) {
+        fresh[i].burrow = NULL; fresh[i].kva = NULL; fresh[i].len = 0; fresh[i]._pad = 0;
+    }
+    spin_lock(&p->vma_lock);
+    u32 done = 0;
+    int rc = 0;
+    for (; done < n; done++) {
+        if (loom_resolve_buf(p, &bufs[done], &fresh[done]) != 0) { rc = -1; break; }
+    }
+    spin_unlock(&p->vma_lock);
+    if (rc != 0) {
+        for (u32 i = 0; i < done; i++) burrow_unref(fresh[i].burrow);   // roll back
+        return -1;
+    }
+
+    // Install: swap the table under l->lock, then unref the displaced pins OUTSIDE
+    // the lock (burrow_unref may free the Burrow -> never under a spin_lock).
+    struct Burrow *old[LOOM_MAX_REG_BUFFERS];
+    spin_lock(&l->lock);
+    for (u32 i = 0; i < LOOM_MAX_REG_BUFFERS; i++) {
+        old[i]        = l->reg_buf[i].burrow;
+        l->reg_buf[i] = fresh[i];
+    }
+    l->n_reg_buf = n;
+    spin_unlock(&l->lock);
+
+    for (u32 i = 0; i < LOOM_MAX_REG_BUFFERS; i++) {
+        if (old[i]) burrow_unref(old[i]);
     }
     return 0;
 }
@@ -435,6 +532,42 @@ static s32 loom_scalar_result(int status) {
     return (s32)status;
 }
 
+// Byte copy (the 9p_client.c client_copy precedent; no freestanding memcpy
+// symbol). Both ends are pinned kernel memory in the only caller.
+static void loom_bufcopy(u8 *dst, const u8 *src, u32 n) {
+    for (u32 i = 0; i < n; i++) dst[i] = src[i];
+}
+
+// Loom-6: the CQE result for a completed op + (for READ) the wire->buffer copy.
+// Runs UNDER c->lock from loom_async_complete; `dr` aliases the transport recv
+// buffer and is valid ONLY for that callback, so the READ copy MUST happen here.
+// The destination is the op's submit-time-pinned, contiguous direct-map slice
+// (no fault, no sleep), so the copy composes with the seam contract. An error
+// completion (status < 0) copies nothing and passes the -errno through.
+//   READ  -> copy min(reply count, the op's slice) into the buffer; result is
+//            the byte count actually read.
+//   WRITE -> result is the server-accepted byte count; the data already went out
+//            in the build thunk.
+//   else  -> the scalar mapping (NOP / FSYNC).
+static s32 loom_payload_result(struct loom_async_op *op, int status,
+                               struct p9_dispatch_result *dr) {
+    if (status < 0) return (s32)status;        // error reply: -errno, no payload
+    switch (op->opcode) {
+    case LOOM_OP_READ: {
+        if (!dr) return 0;
+        u32 got = dr->read_count;
+        if (got > op->op_count) got = op->op_count;   // never overrun the pinned slice
+        if (got != 0 && dr->read_data && op->buf_kva)
+            loom_bufcopy(op->buf_kva, dr->read_data, got);
+        return (s32)got;
+    }
+    case LOOM_OP_WRITE:
+        return dr ? (s32)dr->write_count : 0;
+    default:
+        return loom_scalar_result(status);            // NOP / FSYNC
+    }
+}
+
 // The async completion callback (the POST_CQE front-end). Runs UNDER the 9P
 // client's c->lock (invoked from demux_frame_locked / client_mark_dead_locked),
 // so it MUST NOT sleep or re-enter the p9_client_* API (the seam contract in
@@ -445,9 +578,14 @@ static s32 loom_scalar_result(int status) {
 // SYS_LOOM_ENTER caller) does that.
 static void loom_async_complete(struct p9_rpc *rpc, int status,
                                 struct p9_dispatch_result *dr) {
-    (void)dr;
     struct loom_async_op *op = (struct loom_async_op *)rpc;   // rpc at offset 0
     struct Loom *l = op->loom;
+
+    // Compute the CQE result + (READ) copy the reply payload into the pinned
+    // buffer NOW, while `dr` is valid (it aliases the recv buffer for this call
+    // only). For a multishot stream this runs once per shot. Scalar ops (NOP /
+    // FSYNC) fall through to the scalar mapping.
+    s32 result = loom_payload_result(op, status, dr);
 
     // MORE vs terminal (specs/loom_multishot.tla ReplyArrives). A single-shot op
     // (Loom-3) always terminates. A multishot op posts a LOOM_CQE_MORE shot and
@@ -463,7 +601,7 @@ static void loom_async_complete(struct p9_rpc *rpc, int status,
     else                                       term = false;  // a MORE shot -> re-arm
 
     u32 cqe_flags = term ? 0u : LOOM_CQE_MORE;
-    int posted = loom_post_cqe(l, op->user_data, loom_scalar_result(status), cqe_flags);
+    int posted = loom_post_cqe(l, op->user_data, result, cqe_flags);
 
     // Update op state under l->lock so the reap / re-arm sweeps observe a
     // consistent (terminal | rearm, async_inflight) pair. The CQE was already
@@ -499,6 +637,22 @@ static int loom_build_fsync(struct p9_session *s, u8 *out, size_t cap, void *ctx
     return p9_session_send_fsync(s, out, cap, op->op_fid, op->op_arg);
 }
 
+// Tmsg builder thunks for the data-path ops (Loom-6). Invoked by
+// p9_client_submit_async under c->lock. READ carries no payload (the reply
+// brings the data); WRITE's payload is read FROM the pinned registered buffer
+// slice (op->buf_kva, pinned kernel memory -- no fault, no sleep). An over-msize
+// count makes p9_session_send_* return < 0, which submit_async turns into one
+// -P9_E_IO error CQE (the op is single-frame; userspace splits large I/O).
+static int loom_build_read(struct p9_session *s, u8 *out, size_t cap, void *ctx) {
+    struct loom_async_op *op = (struct loom_async_op *)ctx;
+    return p9_session_send_read(s, out, cap, op->op_fid, op->op_offset, op->op_count);
+}
+static int loom_build_write(struct p9_session *s, u8 *out, size_t cap, void *ctx) {
+    struct loom_async_op *op = (struct loom_async_op *)ctx;
+    return p9_session_send_write(s, out, cap, op->op_fid, op->op_offset,
+                                 op->op_count, op->buf_kva);
+}
+
 // Post a terminal CQE inline (no engine round-trip): the NOP success (result 0)
 // and every submit-time-gate failure (bad opcode / handle / rights / OOM ->
 // -errno). The SQE was consumed; userspace learns the result via the CQE, not a
@@ -520,6 +674,119 @@ static void loom_chain_done(struct Loom *l, struct loom_chain_op *chain, bool ok
     spin_lock(&l->lock);
     chain->state = ok ? LOOM_CHAIN_DONE_OK : LOOM_CHAIN_DONE_FAIL;
     spin_unlock(&l->lock);
+}
+
+// Dispatch a data-path op (LOOM_OP_READ / LOOM_OP_WRITE; Loom-6). Resolves +
+// PINS the registered file handle (spoor_ref) AND the registered buffer
+// (burrow_ref) -- two independent I-30 submit-time pins held for the op's whole
+// lifetime so a concurrent re-register / clunk / munmap cannot make completion
+// act against a different object or freed pages. Bounds-checks the buffer slice,
+// rights-gates (READ -> RIGHT_READ, WRITE -> RIGHT_WRITE), and submits the async
+// Tread/Twrite. Single-shot only: a real multishot READ needs an event-source
+// dev (post-Loom graphics), so MULTISHOT on a data-path op is rejected by the
+// caller. Every early-return path releases whatever it pinned + posts one CQE.
+static void loom_submit_rw(struct Loom *l, const struct loom_sqe *sqe,
+                           struct loom_chain_op *chain) {
+    u64  ud       = sqe->user_data;
+    bool is_write = (sqe->opcode == LOOM_OP_WRITE);
+
+    if (sqe->handle_idx >= LOOM_MAX_REG_HANDLES) {
+        loom_chain_done(l, chain, false);
+        loom_complete_inline(l, ud, -(s32)T_E_INVAL);
+        return;
+    }
+    u64 buf_off = LOOM_SQE_BUF_OFF(sqe);
+    u32 count   = sqe->len;
+    u32 bidx    = sqe->buf_idx_or_off;
+
+    // Resolve + pin the file handle AND the registered buffer TOGETHER under
+    // l->lock, so a concurrent LOOM_REGISTER_HANDLES / LOOM_REGISTER_BUFFERS
+    // re-install cannot free either object between the read and the ref.
+    struct Spoor  *sp = NULL; rights_t rt = 0;
+    struct Burrow *buf = NULL; u8 *buf_kva = NULL;
+    bool buf_bad = false;
+    spin_lock(&l->lock);
+    sp = l->reg[sqe->handle_idx].spoor;
+    rt = l->reg[sqe->handle_idx].rights;
+    if (sp) spoor_ref(sp);
+    if (bidx < l->n_reg_buf && l->reg_buf[bidx].burrow) {
+        struct loom_reg_buffer *rb = &l->reg_buf[bidx];
+        // Slice bounds (no overflow: rb->len is u32, buf_off u64): the op's
+        // [buf_off, buf_off+count) must lie within the registered buffer.
+        if (buf_off <= (u64)rb->len && (u64)count <= (u64)rb->len - buf_off) {
+            buf     = rb->burrow;
+            buf_kva = rb->kva + buf_off;
+            burrow_ref(buf);                 // the I-30 buffer pin
+        } else {
+            buf_bad = true;
+        }
+    } else {
+        buf_bad = true;
+    }
+    spin_unlock(&l->lock);
+
+    if (!sp) {                                              // empty handle slot
+        if (buf) burrow_unref(buf);
+        loom_chain_done(l, chain, false);
+        loom_complete_inline(l, ud, -(s32)T_E_BADF);
+        return;
+    }
+    if (buf_bad) {                                          // bad buf idx / OOB slice
+        spoor_clunk(sp);
+        loom_chain_done(l, chain, false);
+        loom_complete_inline(l, ud, -(s32)T_E_INVAL);
+        return;
+    }
+    // Submit-time rights gate (I-2 / I-6; the spec's reg in AllowedObjs).
+    // Snapshot at submit, never re-checked at completion (I-30).
+    rights_t need = is_write ? RIGHT_WRITE : RIGHT_READ;
+    if (!(rt & need)) {
+        burrow_unref(buf);
+        spoor_clunk(sp);
+        loom_chain_done(l, chain, false);
+        loom_complete_inline(l, ud, -(s32)T_E_ACCES);
+        return;
+    }
+    struct p9_client *cl; u32 fid;
+    if (dev9p_client_fid(sp, &cl, &fid) != 0) {             // not a dev9p Spoor
+        burrow_unref(buf);
+        spoor_clunk(sp);
+        loom_chain_done(l, chain, false);
+        loom_complete_inline(l, ud, -(s32)T_E_INVAL);
+        return;
+    }
+    struct loom_async_op *op = kmalloc(sizeof(*op), KP_ZERO);
+    if (!op) {
+        burrow_unref(buf);
+        spoor_clunk(sp);
+        loom_chain_done(l, chain, false);
+        loom_complete_inline(l, ud, -(s32)T_E_NOMEM);
+        return;
+    }
+    op->loom        = l;
+    op->client      = cl;
+    op->pinned      = sp;                 // adopt the handle pin
+    op->build       = is_write ? loom_build_write : loom_build_read;
+    op->user_data   = ud;
+    op->op_fid      = fid;
+    op->op_offset   = sqe->offset;        // FILE offset
+    op->op_count    = count;
+    op->pinned_buf  = buf;                // adopt the buffer pin
+    op->buf_kva     = buf_kva;
+    op->opcode      = sqe->opcode;
+    op->terminal    = false;
+    op->multishot   = false;              // single-shot (no event-source dev yet)
+    op->shot_limit  = 1u;
+    op->chain       = chain;
+    op->rpc.on_complete = loom_async_complete;
+    // Link + count BEFORE submitting (the FSYNC discipline): a synchronous submit
+    // failure fires loom_async_complete, which needs the op counted + linked.
+    spin_lock(&l->lock);
+    op->next = l->inflight_ops;
+    l->inflight_ops = op;
+    l->async_inflight++;
+    spin_unlock(&l->lock);
+    (void)p9_client_submit_async(cl, &op->rpc, op->build, op);
 }
 
 // Dispatch ONE already-copied-to-kernel SQE (`sqe` is a kernel-private snapshot,
@@ -653,11 +920,24 @@ static void loom_submit_one(struct Loom *l, const struct loom_sqe *sqe,
         return;
     }
 
+    case LOOM_OP_READ:
+    case LOOM_OP_WRITE:
+        // Data-path ops (Loom-6a). MULTISHOT needs a real event-source dev (a
+        // file fid replies once, so a multishot file READ would just spin
+        // re-issuing the same Tread) -- reject the combo until that dev exists;
+        // the multishot mechanism stays validated by the synthetic FSYNC vehicle.
+        if (multishot) {
+            loom_chain_done(l, chain, false);
+            loom_complete_inline(l, ud, -(s32)T_E_INVAL);
+            return;
+        }
+        loom_submit_rw(l, sqe, chain);
+        return;
+
     default:
-        // In-range payload opcodes (READ / WRITE / GETATTR / WALK / ...) need a
-        // registered-buffer destination/source -- that surface is Loom-6
-        // (LOOM.md 10), so they post -ENOSYS until then. WIRE_PASSTHROUGH stays
-        // reserved (LOOM.md 7). Out-of-range opcodes are -EINVAL.
+        // The remaining in-range payload opcodes (GETATTR / WALK / READDIR / ...)
+        // land with Loom-6b, so they post -ENOSYS until then. WIRE_PASSTHROUGH
+        // stays reserved (LOOM.md 7). Out-of-range opcodes are -EINVAL.
         loom_chain_done(l, chain, false);
         if (sqe->opcode < LOOM_OP_COUNT)
             loom_complete_inline(l, ud, -(s32)T_E_NOSYS);
@@ -731,6 +1011,7 @@ static void loom_reap_terminal(struct Loom *l) {
     spin_unlock(&l->lock);
     while (done) {
         struct loom_async_op *next = done->next;
+        if (done->pinned_buf) burrow_unref(done->pinned_buf);   // Loom-6: buffer pin
         spoor_clunk(done->pinned);   // release the I-30 pin (may sleep)
         kfree(done);
         done = next;

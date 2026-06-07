@@ -2855,6 +2855,26 @@ rollback:
     return -1;
 }
 
+int sys_loom_register_buffers_for_proc(struct Proc *p, hidx_t loom_fd,
+                                       const struct loom_buf_reg *bufs, u32 n) {
+    if (!p)                            return -1;
+    if (n > LOOM_MAX_REG_BUFFERS)      return -1;
+    if (n > 0 && !bufs)               return -1;
+
+    struct Handle lh;
+    if (handle_get(p, loom_fd, &lh) != 0)  return -1;
+    if (lh.kind != KOBJ_LOOM)              { handle_put(&lh); return -1; }
+    struct Loom *l = (struct Loom *)lh.obj;
+
+    // handle_get holds a ref on the Loom across the call (the #844 by-value
+    // snapshot with the obj ref held, table lock released), so loom_free cannot
+    // run while loom_register_buffers walks p->vma_lock -- no lock nesting between
+    // the handle-table lock and p->vma_lock.
+    int rc = loom_register_buffers(l, p, bufs, n);
+    handle_put(&lh);
+    return rc;
+}
+
 static s64 sys_loom_setup_handler(u64 entries_raw, u64 params_va) {
     struct Thread *t = current_thread();
     if (!t || !t->proc)                              return -1;
@@ -2895,22 +2915,52 @@ static s64 sys_loom_register_handler(u64 loom_fd_raw, u64 op_raw,
     struct Proc *p = t->proc;
     u32 op = (u32)op_raw;
     u32 n  = (u32)nargs_raw;
-    if (n > LOOM_MAX_REG_HANDLES)                    return -1;
 
-    hidx_t fds[LOOM_MAX_REG_HANDLES];
-    if (n > 0) {
-        if (!sys_validate_user_buf(arg_va, (u64)n * sizeof(u32))) return -1;
-        for (u32 i = 0; i < n; i++) {
-            u8 fb[4];
-            for (int b = 0; b < 4; b++)
-                if (uaccess_load_u8(arg_va + (u64)i * 4u + (u64)b, &fb[b]) != 0)
-                    return -1;
-            u32 v = (u32)fb[0] | ((u32)fb[1] << 8) | ((u32)fb[2] << 16) | ((u32)fb[3] << 24);
-            fds[i] = (hidx_t)v;
+    if (op == LOOM_REGISTER_HANDLES) {
+        if (n > LOOM_MAX_REG_HANDLES)                return -1;
+        hidx_t fds[LOOM_MAX_REG_HANDLES];
+        if (n > 0) {
+            if (!sys_validate_user_buf(arg_va, (u64)n * sizeof(u32))) return -1;
+            for (u32 i = 0; i < n; i++) {
+                u8 fb[4];
+                for (int b = 0; b < 4; b++)
+                    if (uaccess_load_u8(arg_va + (u64)i * 4u + (u64)b, &fb[b]) != 0)
+                        return -1;
+                u32 v = (u32)fb[0] | ((u32)fb[1] << 8) | ((u32)fb[2] << 16) | ((u32)fb[3] << 24);
+                fds[i] = (hidx_t)v;
+            }
         }
+        return (s64)sys_loom_register_for_proc(p, (hidx_t)loom_fd_raw, op,
+                                               n > 0 ? fds : NULL, n);
     }
-    return (s64)sys_loom_register_for_proc(p, (hidx_t)loom_fd_raw, op,
-                                           n > 0 ? fds : NULL, n);
+
+    if (op == LOOM_REGISTER_BUFFERS) {
+        if (n > LOOM_MAX_REG_BUFFERS)                return -1;
+        struct loom_buf_reg bufs[LOOM_MAX_REG_BUFFERS];
+        if (n > 0) {
+            if (!sys_validate_user_buf(arg_va, (u64)n * sizeof(struct loom_buf_reg)))
+                return -1;
+            // Copy each {u64 va; u64 len} byte-by-byte (TOCTOU-safe; never re-read
+            // after the kernel snapshot) and assemble little-endian.
+            for (u32 i = 0; i < n; i++) {
+                u64 base = arg_va + (u64)i * (u64)sizeof(struct loom_buf_reg);
+                u8 raw[16];
+                for (int b = 0; b < 16; b++)
+                    if (uaccess_load_u8(base + (u64)b, &raw[b]) != 0) return -1;
+                u64 va = 0, len = 0;
+                for (int b = 0; b < 8; b++) {
+                    va  |= (u64)raw[b]      << (8 * b);
+                    len |= (u64)raw[8 + b]  << (8 * b);
+                }
+                bufs[i].va  = va;
+                bufs[i].len = len;
+            }
+        }
+        return (s64)sys_loom_register_buffers_for_proc(p, (hidx_t)loom_fd_raw,
+                                                       n > 0 ? bufs : NULL, n);
+    }
+
+    return -1;   // unknown register op
 }
 
 int sys_loom_enter_for_proc(struct Proc *p, hidx_t loom_fd, u32 to_submit,
