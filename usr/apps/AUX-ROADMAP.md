@@ -74,11 +74,15 @@ gaps are in `DOC-GAP-REPORT.md`. NEVER run anything.
   - [done] `sleep` (time::sleep, s/m/h/d, summed), `uname` (static G16),
     `env` (degenerate G15), `which` (degenerate G15/G07), `seq`,
     `yes` (broken-pipe safe), `hexdump` (canonical), `uniq` (-c, adjacent).
-  - [ ] batch 2: `sort` `cut` `tr` `grep` (simple) `xargs` (xargs exercises
-    process::Command spawn -- good gap-finder). Pure text/compute; low gap
-    yield except xargs.
+  - [done] batch 2 text tools: `sort` (-rnu), `grep` (-ivnc, literal
+    substring -- no regex engine), `tr` (translate / -d, a-z ranges),
+    `cut` (-f/-c with N-M ranges, -d delim).
+  - [ ] `xargs` -- DEFERRED (exercises process::Command spawn; a good
+    gap-finder, but more involved). Build it next or fold into A4's spawn
+    coverage.
   - [blocked] `date` -- no wall/monotonic clock (G13). `id`/`whoami` -- no
     self-identity/getpid accessor (G14). Not built.
+  - **A3 effectively COMPLETE** (13 built; xargs deferred; 3 blocked).
   - New gaps: G13 (no clock, P2), G14 (no self-identity/getpid, P2 API-GAP),
     G15 (no env vars, P2 API-GAP), G16 (no uname/sysinfo, P3).
   - All built compile + clippy clean (0 warnings).

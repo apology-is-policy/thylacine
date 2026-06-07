@@ -42,6 +42,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "cut"
+version = "0.1.0"
+dependencies = [
+ "aux-rt",
+ "libthyla-rs",
+]
+
+[[package]]
 name = "dirname"
 version = "0.1.0"
 dependencies = [
@@ -67,6 +75,14 @@ dependencies = [
 
 [[package]]
 name = "false_"
+version = "0.1.0"
+dependencies = [
+ "aux-rt",
+ "libthyla-rs",
+]
+
+[[package]]
+name = "grep"
 version = "0.1.0"
 dependencies = [
  "aux-rt",
@@ -200,6 +216,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "sort"
+version = "0.1.0"
+dependencies = [
+ "aux-rt",
+ "libthyla-rs",
+]
+
+[[package]]
 name = "spinning_top"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -234,6 +258,14 @@ dependencies = [
 
 [[package]]
 name = "touch"
+version = "0.1.0"
+dependencies = [
+ "aux-rt",
+ "libthyla-rs",
+]
+
+[[package]]
+name = "tr"
 version = "0.1.0"
 dependencies = [
  "aux-rt",
