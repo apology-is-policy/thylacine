@@ -788,6 +788,17 @@ Operational implications:
 
 ---
 
+## Parallel auxiliary track — native userspace apps (worktree-isolated)
+
+A **parallel auxiliary agent** runs in a separate git worktree (sibling dir, typically `../thylacine-aux`) on branch **`aux/userspace-apps`**, established 2026-06-07 to use spare quota in parallel with the main (kernel) track. Its mission: **author NATIVE `libthyla-rs` userspace applications from the system documentation, build them to compile (never run), and produce a per-app test plan + a documentation-completeness gap report.** Every session reads this file, so the boundary is common knowledge:
+
+- **The aux track owns `usr/apps/**` only** (its apps + a vendored `usr/apps/vendor/` for native crate forks like ratatui→nora). Its constitution is `usr/apps/AUX-DIRECTIVE.md`; its worklist + across-compaction memory is `usr/apps/AUX-ROADMAP.md`; its top deliverable is `usr/apps/DOC-GAP-REPORT.md`.
+- **It never touches the main track's surface:** no `kernel/` / `arch/` / `mm/` / `specs/` / `tools/`, no edits to `docs/reference/*` (it only READS them and RECORDS gaps), and it never extends `libthyla-rs`. **It never boots QEMU** — `cargo build` is its verification ceiling (so it never contends with the main track's QEMU boots, the host-oversubscription flake source).
+- **For the MAIN (this) agent:** don't edit `usr/apps/**` — it's the aux branch's domain (avoid a cross-branch collision). When `aux/userspace-apps` merges (clean — disjoint trees), its `usr/apps/<app>/TEST-PLAN.md` files become a ready-to-run in-VM test backlog, and its `DOC-GAP-REPORT.md` is the input for a docs pass: **fold verified findings into `docs/reference/*`** (the main agent owns the real reference docs). The only shared-file touchpoint is the `libthyla-rs` module list at Loom-6 (when the aux track adopts the native Loom API for its Phase-B server apps) — a trivial members-list merge.
+- Roadmap shape (in `AUX-ROADMAP.md`): Phase A = native coreutils + the Thylacine-distinctive `ns`/`bind`/`srv`/`9p`/`ps`/`cap` tools + the **nora** editor arc (ratatui forked native); Phase B = Loom/network apps (design+skeleton+test-plan until Loom-6 + the net stack land); Phase C = ports (Zig/SDL) as feasibility/gap-analysis only (ports are pouch, not native, and need execution to verify).
+
+---
+
 ## Ship-and-fallback structure (Halcyon-as-last-phase)
 
 Per `ROADMAP.md §10` and `§11`:
