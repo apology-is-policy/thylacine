@@ -57,8 +57,17 @@ gaps are in `DOC-GAP-REPORT.md`. NEVER run anything.
     ALL of A2.
 
 ### A2 -- coreutils, fs mutation + metadata
-- [ ] `mkdir` `rmdir` `rm` `cp` `mv` `ln` `touch` `stat` `ls` `readlink`
-  `realpath`
+- [wip] 9/11 built on aux-rt::fs; 2 blocked (no kernel surface).
+  - [done] `mkdir` (-p), `rmdir`, `rm` (-rRf, recursive), `cp` (-r,
+    multi-src-into-dir), `mv` (rename + cross-session copy+unlink fallback),
+    `touch` (-c; create-only, mtime bump unsupported G12), `stat`,
+    `ls` (-la1; long format), `realpath` (lexical-only, G11/G07).
+  - [blocked] `ln`, `readlink` -- NO kernel link/symlink/readlink surface
+    (G11). Not built (nothing to hand-roll against; unlike G09 there is no
+    raw wrapper). Revisit if a t_symlink/t_link/t_readlink lands.
+  - New gaps: G11 (no link/symlink/readlink surface, P2 API-GAP),
+    G12 (no atime/mtime setter, P2).
+  - All built apps compile + clippy clean (0 warnings), W^X-clean.
 
 ### A3 -- coreutils, process / env / text
 - [ ] `env` `which` `sleep` `seq` `yes` `date` `uname` `id` `whoami`

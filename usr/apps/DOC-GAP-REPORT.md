@@ -237,3 +237,34 @@ Append one entry per gap. Keep them specific (cite the file + section). Severity
 - Suggested doc fix: state the encoding of the t_readdir `type` byte in the
   wrapper contract (and in docs/reference/96-fs-mutation.md) -- e.g. "the
   Linux DT_* values per 9P2000.L Rreaddir".
+
+### G11 [P2][API-GAP] No link / symlink / readlink surface (blocks ln, readlink)
+- App / task: A2 `ln`, `readlink` (BLOCKED, not built); partial `realpath`.
+- Doc consulted: libthyla-rs public API (no `t_link`/`t_symlink`/`t_readlink`
+  wrappers; no `SYS_LINK`/`SYS_SYMLINK`/`SYS_READLINK` constants), vs
+  `Metadata::is_symlink()` (which EXISTS -- symlinks are observable).
+- Gap: symlinks are a first-class concept (Metadata can report one, and 9P /
+  Stratum support Tsymlink/Treadlink/Tlink per CLAUDE.md), but libthyla-rs
+  exposes NO way to CREATE a hard link, CREATE a symlink, or READ a symlink
+  target. So `ln` and `readlink` have no native path at all, and `realpath`
+  cannot resolve symlinks (it degrades to lexical-only).
+- Workaround: `ln` and `readlink` are NOT built (no surface to hand-roll
+  against -- there is no raw wrapper, unlike G09). `realpath` is lexical-only.
+- Suggested doc fix / API: add `t_link`/`t_symlink`/`t_readlink` raw wrappers
+  + the kernel syscalls (or document that links are deferred to a named
+  phase), and an `fs::symlink`/`fs::read_link`/`fs::hard_link` safe layer.
+
+### G12 [P2] No atime/mtime setter (touch cannot refresh timestamps)
+- App / task: A2 `touch` (partial); `cp`/`mv` cannot preserve times.
+- Doc consulted: `t_wstat(fd, valid, mode, uid, gid)` (lib.rs:1660) + the
+  `T_WSTAT_*` mask bits (MODE/UID/GID only).
+- Gap: `t_wstat`'s valid mask is mode/uid/gid ONLY -- there are no
+  atime/mtime bits, though the kernel's SYS_WSTAT maps to 9P Tsetattr (which
+  DOES have ATIME/MTIME fields per 9P2000.L). So `touch` can create an
+  absent file but cannot update the mtime of an existing one (it no-ops),
+  and `cp -p`/`mv` cannot preserve timestamps.
+- Workaround: touch creates absent files empty and no-ops on existing ones
+  (documented per-app); cp/mv drop timestamps.
+- Suggested doc fix / API: extend `t_wstat`'s valid mask + the wrapper with
+  ATIME/MTIME (T_WSTAT_ATIME/MTIME mapping to P9_SETATTR_ATIME/MTIME), which
+  the underlying Tsetattr already supports.

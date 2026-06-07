@@ -34,6 +34,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "cp"
+version = "0.1.0"
+dependencies = [
+ "aux-rt",
+ "libthyla-rs",
+]
+
+[[package]]
 name = "dirname"
 version = "0.1.0"
 dependencies = [
@@ -98,7 +106,55 @@ dependencies = [
 ]
 
 [[package]]
+name = "ls"
+version = "0.1.0"
+dependencies = [
+ "aux-rt",
+ "libthyla-rs",
+]
+
+[[package]]
+name = "mkdir"
+version = "0.1.0"
+dependencies = [
+ "aux-rt",
+ "libthyla-rs",
+]
+
+[[package]]
+name = "mv"
+version = "0.1.0"
+dependencies = [
+ "aux-rt",
+ "libthyla-rs",
+]
+
+[[package]]
 name = "pwd"
+version = "0.1.0"
+dependencies = [
+ "aux-rt",
+ "libthyla-rs",
+]
+
+[[package]]
+name = "realpath"
+version = "0.1.0"
+dependencies = [
+ "aux-rt",
+ "libthyla-rs",
+]
+
+[[package]]
+name = "rm"
+version = "0.1.0"
+dependencies = [
+ "aux-rt",
+ "libthyla-rs",
+]
+
+[[package]]
+name = "rmdir"
 version = "0.1.0"
 dependencies = [
  "aux-rt",
@@ -121,6 +177,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "stat"
+version = "0.1.0"
+dependencies = [
+ "aux-rt",
+ "libthyla-rs",
+]
+
+[[package]]
 name = "tail"
 version = "0.1.0"
 dependencies = [
@@ -130,6 +194,14 @@ dependencies = [
 
 [[package]]
 name = "tee"
+version = "0.1.0"
+dependencies = [
+ "aux-rt",
+ "libthyla-rs",
+]
+
+[[package]]
+name = "touch"
 version = "0.1.0"
 dependencies = [
  "aux-rt",
