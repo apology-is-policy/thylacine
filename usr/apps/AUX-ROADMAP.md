@@ -12,6 +12,39 @@ gaps are in `DOC-GAP-REPORT.md`. NEVER run anything.
 
 ---
 
+## CURRENT STATE (pickup summary -- keep this current)
+
+- **36 native apps built** (compile + clippy clean, 0 warnings, W^X-clean),
+  each with a TEST-PLAN.md. NONE executed (the track never boots QEMU).
+- **Foundation: `usr/apps/aux-rt`** -- argv (naked rs_main SP-capture; the G03
+  workaround, disassembly-verified), stdio (Stdin/Stdout/Stderr +
+  print!/println!/eprintln!), `copy`/`slurp`, and the `fs` submodule
+  (OwnedFd + open/create/mkdir/remove_file/remove_dir/rename/read_dir over
+  raw syscall wrappers -- the G09 workaround). Apps depend on it + libthyla-rs.
+- **DONE: A0** (hello) + **A1** (echo true false pwd basename dirname cat wc
+  head tail tee cmp) + **A2** (mkdir rmdir rm cp mv touch stat ls realpath;
+  ln/readlink BLOCKED G11) + **A3** (sleep uname env which seq yes hexdump uniq
+  sort grep tr cut; date/id/whoami BLOCKED G13/G14; xargs deferred) + **A4 seed**
+  (bind, unmount; ns BLOCKED G17, cap-inspect BLOCKED G18).
+- **18 gaps logged (G01-G18)** in DOC-GAP-REPORT.md -- the TOP deliverable.
+  Highlights: G03 argv (worked-around), G05/G06 stdio + no terminal fd 0/1/2,
+  G09 fs has no create/readdir (worked-around), G11 no link/symlink, G13 no
+  clock, G14 no self-identity/getpid, G15 no env, G17 no namespace-read,
+  G18 no self-caps. G14/G17/G18 all point at a missing "/proc/self"
+  introspection surface.
+- **Build**: `( cd usr/apps && cargo build --release )`; clippy:
+  `cargo clippy --release`. Target inherited from usr/.cargo/config.toml;
+  `usr/apps/scripts -> ../scripts` symlink makes the W^X linker script
+  reachable from this workspace root.
+- **NEXT**: finish A4 (the richest gap territory) -- FIRST probe whether
+  /proc, /srv, /ctl are read_dir/open-able from a native app (see the A4
+  notes below), then build srv/ps/kill/9p/sysinfo/mount accordingly. Then
+  xargs (A3 leftover, exercises process::Command spawn). Then A5 (nora, the
+  flagship editor arc) -- a large multi-sub-chunk effort; needs the
+  console/PTY surface, which G06 already flags as absent.
+
+---
+
 ## Phase A -- native, build-to-compile, fully parallel-safe (DO THIS NOW)
 
 ### A0 -- bootstrap (do FIRST; de-risks the toolchain + the first gap batch)
@@ -91,13 +124,38 @@ gaps are in `DOC-GAP-REPORT.md`. NEVER run anything.
 These exercise the surfaces a generic coreutil author would not know how to use
 without good docs -- the per-Proc namespace, capabilities, and the synthetic
 introspection trees. Expect the richest gap findings here.
-- [ ] `ns` -- print the calling Proc's namespace (mounts/binds; Plan 9 `ns`)
-- [ ] `bind` / `mount` / `unmount` -- namespace composition (Plan 9 / SYS_MOUNT)
-- [ ] `srv` -- list the per-territory `/srv` services
-- [ ] `9p` -- walk / read / write a 9P tree (Plan 9 `9p`; the libthyla-rs 9P client)
-- [ ] `ps` / `kill` / a `/proc` browser -- the process surface (+ CAP_KILL)
-- [ ] `cap` -- inspect / grant capabilities via the `cap` device (clearance/legate)
-- [ ] `sysinfo` (a.k.a. `doctor`) -- read `/proc` + the kernel `/ctl` admin surface
+SEEDED this session (bind/unmount built; introspection gaps found). The KEY
+unresolved question for the rest of A4: **are the synthetic trees /proc, /srv,
+/ctl READABLE from a native app via `aux_rt::fs::read_dir` / `File::open`?**
+If yes, srv/ps/sysinfo are buildable as read_dir+open consumers. If they are
+not reachable in a default namespace, they are blocked (a namespace seam).
+NEXT SESSION: probe by writing `read_dir("/srv")` / `read_dir("/proc")` apps
+(compile here; the MAIN agent runs them to confirm reachability). Also read
+docs/reference 32-devproc, 70-devsrv, 104-stalk, 33-devctl, 88-* for the
+mount/reachability model, and ninep.rs for the 9P-client API shape.
+
+- [done] `bind` -- territory::mount via File-as-AsFd; -abr flags.
+- [done] `unmount` -- territory::unmount.
+- [blocked] `ns` -- NO namespace-read API (territory is write-only); the Plan
+  9 signature tool is unbuildable (gap G17). Needs /proc/self/ns or a
+  territory::mounts() accessor.
+- [ ] `mount` (9P-SERVICE mount, distinct from bind) -- needs a srv-conn fd +
+  SYS_ATTACH_9P_SRV (t_attach_9p_srv exists, lib.rs); investigate how a CLI
+  obtains the service fd. Different from `bind` (which binds a path tree).
+- [ ] `srv` -- list /srv services. Feasible IFF read_dir("/srv") works (probe).
+- [ ] `9p` -- walk/read/write a 9P tree via ninep.rs. Map ninep.rs pub API
+  first (it was NOT yet investigated; could be a client builder or raw).
+- [ ] `ps` / `kill` -- /proc browser + kill. `kill` likely works by WRITING
+  `/proc/<pid>/ctl` ("kill"/"killgrp"; A-4b) IF /proc is reachable; `ps` needs
+  read_dir("/proc") + per-pid stat_native. Self-`ps` is also limited by G14
+  (no getpid). Probe /proc reachability first.
+- [partial] `cap` -- grant/use verbs build on cap::grant/use_grant, but the
+  INSPECT verb is blocked: no self-caps read (gap G18).
+- [ ] `sysinfo`/`doctor` -- read /proc + kernel /ctl (devctl, doc 33). Feasible
+  IFF those trees are readable (same probe).
+- Gaps found: G17 (no namespace-read -> ns blocked, P2 API-GAP), G18 (no
+  self-caps read -> cap-inspect blocked, P2 API-GAP). Both fold into a wished
+  "/proc/self" introspection surface (with G14 self-identity).
 
 ### A5 -- nora: the native modal editor (FLAGSHIP arc)
 A ratatui-based, Helix-modal editor, made native-forever. Seed inputs (NOT

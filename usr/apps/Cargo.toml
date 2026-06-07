@@ -25,7 +25,7 @@
 
 [workspace]
 resolver = "2"
-members = ["aux-rt", "hello", "echo", "true", "false", "pwd", "basename", "dirname", "cat", "wc", "head", "tail", "cmp", "tee", "mkdir", "rmdir", "touch", "stat", "realpath", "rm", "cp", "mv", "ls", "sleep", "uname", "env", "which", "seq", "yes", "hexdump", "uniq", "sort", "grep", "tr", "cut"]
+members = ["aux-rt", "hello", "echo", "true", "false", "pwd", "basename", "dirname", "cat", "wc", "head", "tail", "cmp", "tee", "mkdir", "rmdir", "touch", "stat", "realpath", "rm", "cp", "mv", "ls", "sleep", "uname", "env", "which", "seq", "yes", "hexdump", "uniq", "sort", "grep", "tr", "cut", "bind", "unmount"]
 
 [workspace.package]
 edition = "2021"

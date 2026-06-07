@@ -18,6 +18,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "bind"
+version = "0.1.0"
+dependencies = [
+ "aux-rt",
+ "libthyla-rs",
+]
+
+[[package]]
 name = "cat"
 version = "0.1.0"
 dependencies = [
@@ -290,6 +298,14 @@ dependencies = [
 
 [[package]]
 name = "uniq"
+version = "0.1.0"
+dependencies = [
+ "aux-rt",
+ "libthyla-rs",
+]
+
+[[package]]
+name = "unmount"
 version = "0.1.0"
 dependencies = [
  "aux-rt",

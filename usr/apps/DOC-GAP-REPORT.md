@@ -325,3 +325,34 @@ Append one entry per gap. Keep them specific (cite the file + section). Severity
 - Workaround: uname hardcodes Thylacine / 1.0-dev / aarch64 / (none).
 - Suggested doc fix / API: a small `t_uname`/sysinfo syscall (or a readable
   /proc/version) so uname reports the true running version.
+
+### G17 [P2][API-GAP] No namespace-read (blocks ns; the Plan 9 signature tool)
+- App / task: A4 `ns` (print the calling Proc's namespace -- Plan 9's
+  signature introspection command). BLOCKED, not built.
+- Doc consulted: `libthyla-rs::territory` -- the public surface is
+  mount/bind_replace/bind_before/bind_after/unmount/chroot/pivot_root. Every
+  one MUTATES the namespace; there is NO read/list/enumerate.
+- Gap: a Proc can compose its namespace but cannot OBSERVE it -- there is no
+  way to list the current mounts/binds. Plan 9 exposes this via `/proc/n/ns`
+  (and the `ns` command reads it); Thylacine has no equivalent native API.
+  So `ns` -- arguably THE defining Plan 9 userspace tool -- cannot be built.
+- Workaround: `ns` is NOT built (nothing to read).
+- Suggested doc fix / API: a namespace-read surface -- e.g. a readable
+  `/proc/self/ns` (the Plan 9 form) or a `territory::mounts()` accessor that
+  enumerates the per-Proc mount table. This is the single highest-leverage
+  introspection gap for the Plan 9 toolset.
+
+### G18 [P2][API-GAP] No self-capability read (cap can grant/use but not inspect)
+- App / task: A4 `cap` (inspect/grant capabilities). PARTIAL.
+- Doc consulted: `libthyla-rs::cap` -- `grant`, `grant_clearance`,
+  `use_grant`, and `Caps` query helpers (contains/intersects on a value you
+  ALREADY hold), but no `self_caps()` / getcaps to read the caller's CURRENT
+  cap set.
+- Gap: like identity (G14), a Proc cannot introspect its OWN capabilities.
+  So a `cap` tool can perform grant/use operations but cannot DISPLAY what
+  the calling Proc holds -- the "inspect" half is impossible.
+- Workaround: a `cap` tool (when built) is limited to grant/use verbs; the
+  inspect verb is blocked.
+- Suggested doc fix / API: a `cap::current()` / `t_getcaps` accessor (or a
+  readable `/proc/self/caps`). Pairs naturally with the G14 self-identity
+  accessor under a single "/proc/self" introspection surface.
