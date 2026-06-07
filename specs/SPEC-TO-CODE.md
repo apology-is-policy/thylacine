@@ -752,7 +752,7 @@ cfgs run with `-deadlock`; `loom.tla`'s `Done` self-loop keeps the
 torn-and-drained terminal state from tripping the deadlock check. See
 docs/LOOM.md + ARCH §28 (I-29, I-30 reserved at impl).
 
-### Loom-6a source map (registered buffers + READ/WRITE; `loom.tla` unchanged)
+### Loom-6a/6b-1 source map (registered buffers + READ/WRITE + read-shaped ops; `loom.tla` unchanged)
 
 **Loom-6a adds no new spec mechanism** — the registered-buffer pin + the
 slice-validation are the abstract `reg` slot + the `sqe_arg` / `ValidArgs` model
@@ -763,13 +763,22 @@ resolution maps onto the existing actions + invariants (the Loom-3 precedent):
 | Spec action / invariant | Loom-6a source location | Notes |
 |---|---|---|
 | `UserRegister(obj)` → `reg` slot | `kernel/loom.c::loom_register_buffers` / `loom_resolve_buf` | the registered-buffer TABLE is a second concrete realization of the abstract `reg` slot: `vma_lookup` → one writable anon Burrow → `burrow_ref` the pin + snapshot the contiguous-direct-map kva + len; all-or-nothing install (resolve under `p->vma_lock`, swap under `l->lock`, unref displaced outside both). |
-| `Consume(o)`: `sqe_arg ∈ ValidArgs` + pin `reg` | `kernel/loom.c::loom_submit_rw` | the submit gate: resolve + pin the file handle (`spoor_ref`) AND the registered buffer (an independent `burrow_ref`) together under `l->lock`; bounds-check the `[buf_off, buf_off+len)` slice against the KERNEL snapshot (`ActedArgValidated` — an OOB slice is `arg_bad` → rejected); rights-gate (READ→`RIGHT_READ`/WRITE→`RIGHT_WRITE`). |
-| `Dispatch(o)`: act on `snap_arg` + `snap_obj` (`ArgPinnedToSnapshot` + `ObjPinnedToSnapshot`) | `kernel/loom.c::loom_build_read`/`loom_build_write` | WRITE reads the pinned buffer slice (`op->buf_kva`) under `c->lock`; both act on the submit-time snapshot — never re-read the shared SQE buf fields, never re-resolve `buf_idx`. |
-| `PostCqe(o)`: no re-resolve (`ObjPinnedToSnapshot`) | `kernel/loom.c::loom_payload_result` in `loom_async_complete` | READ copies `dr->read_data` → the pinned buffer (`min(read_count, op_count)`, under `c->lock`); the result is the byte count. The buffer pin is never re-resolved at completion. |
+| `Consume(o)`: `sqe_arg ∈ ValidArgs` + pin `reg` | `kernel/loom.c::loom_submit_payload` (was `loom_submit_rw`; generalized at 6b-1) | the submit gate: resolve + pin the file handle (`spoor_ref`) AND the registered buffer (an independent `burrow_ref`) together under `l->lock`; bounds-check the `[buf_off, buf_off+len)` slice against the KERNEL snapshot (`ActedArgValidated` — an OOB slice is `arg_bad` → rejected); rights-gate (the *builder* + the *required right* are opcode-selected: WRITE→`RIGHT_WRITE`, every read-shaped op→`RIGHT_READ`). |
+| `Dispatch(o)`: act on `snap_arg` + `snap_obj` (`ArgPinnedToSnapshot` + `ObjPinnedToSnapshot`) | `kernel/loom.c::loom_build_read`/`write`/`readdir`/`readlink`/`getattr`/`statfs` | the builder reads only the op's submit-time snapshot (`op->op_fid`/`op_offset`/`op_count`/`buf_kva`) under `c->lock`; WRITE reads the pinned buffer slice; never re-reads the shared SQE fields, never re-resolves `buf_idx`. |
+| `PostCqe(o)`: no re-resolve (`ObjPinnedToSnapshot`) | `kernel/loom.c::loom_payload_result` in `loom_async_complete` | the read-shaped ops copy the reply INTO the pinned buffer (`min(reply_len, op_count)`, under `c->lock`): READ/READDIR/READLINK stream bytes; GETATTR/STATFS copy the fixed `struct p9_attr`/`p9_statfs` (the Loom output ABI, `_Static_assert`-pinned). The result is the byte count; the pin is never re-resolved at completion. |
 | `Teardown` quiesce (`NoStaleCompletion`) | `loom_reap_terminal` / the #898 `loom_free` abandon / `loom_free`'s `reg_buf[]` sweep | the op's `pinned_buf` `burrow_ref` is released exactly once on reap / quiesce; `loom_free` releases every table pin (the #847 dual-refcount frees the pages once both counts hit 0). |
 
-The untrusted-server READ-count bound is the documented v1.x seam (shared with
-#841 / Loom-4-F4). The 3-module suite is re-run clean as the Loom-6a pre-commit
+**Loom-6b-1 (read-shaped ops: READDIR / READLINK / GETATTR / STATFS)** adds no new
+spec mechanism either: each is one more `Dispatch` against a pinned `reg` slot
+with a `ValidArgs`-checked `sqe_arg` dest slice, mapping onto the SAME rows above
+(generalized `Consume`/`Dispatch`/`PostCqe`). The fid-lifecycle ops (WALK / LOPEN
+/ LCREATE / CLUNK) are the deferred direct-descriptor seam (task #916) — they
+would add a `reg`-slot install/release from the completion path, a genuinely new
+mechanism that gets its own model when it lands.
+
+The untrusted-server payload-count bound is the documented v1.x seam (shared with
+#841 / Loom-4-F4; the `min(reply_len, op_count)` clamp makes a hostile count safe
+regardless). The 3-module suite is re-run clean as the Loom-6a/6b-1 pre-commit
 gate; the formal focused audit lands at Loom-6c over the whole 6a+6b surface.
 
 ---

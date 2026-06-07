@@ -55,6 +55,11 @@ void test_9p_client_loom_multishot_backpressure(void);
 void test_9p_client_loom_read_e2e(void);
 void test_9p_client_loom_write_e2e(void);
 void test_9p_client_loom_rw_rejects(void);
+void test_9p_client_loom_readdir_e2e(void);
+void test_9p_client_loom_readlink_e2e(void);
+void test_9p_client_loom_getattr_e2e(void);
+void test_9p_client_loom_statfs_e2e(void);
+void test_9p_client_loom_metaread_rejects(void);
 
 // File-scope buffers (kernel test stack is 16 KiB — client struct is
 // ~4 KiB; multiple in one frame is fine but file-scope is cleaner).
@@ -1531,6 +1536,232 @@ void test_9p_client_loom_rw_rejects(void) {
     TEST_EXPECT_EQ((u64)(s64)cqes[0].result, (u64)(s64)(-(s32)T_E_INVAL), "bad buf idx -> -EINVAL");
     TEST_EXPECT_EQ((u64)(s64)cqes[1].result, (u64)(s64)(-(s32)T_E_INVAL), "OOB slice -> -EINVAL");
     TEST_EXPECT_EQ((u64)(s64)cqes[2].result, (u64)(s64)(-(s32)T_E_ACCES), "READ on write-only -> -EACCES");
+    TEST_EXPECT_EQ((u64)l->async_inflight, (u64)0, "no op ever went in flight");
+    TEST_ASSERT(l->inflight_ops == NULL, "no async container allocated");
+
+    burrow_unref(b);
+    loom_unref(l);
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}
+
+// =============================================================================
+// Loom-6b-1: the read-shaped payload ops over the registered-buffer machinery.
+// READDIR / READLINK stream bytes into the dest buffer (the READ pattern);
+// GETATTR / STATFS copy a fixed parsed record. All single-fid, RIGHT_READ.
+// =============================================================================
+
+// Responder that returns a known 8-byte Rreaddir dirent stream (the canonical
+// responder returns count=0, which wouldn't exercise the completion copy).
+// Every other reply delegates to canonical_responder.
+static int loom_readdir_responder(void *ctx, const u8 *req, size_t req_len,
+                                  u8 *resp, size_t cap) {
+    u32 size; u8 type; u16 tag;
+    if (p9_peek_header(req, req_len, &size, &type, &tag) >= 0 && type == P9_TREADDIR) {
+        const u8 blob[] = {0xD1,0xD2,0xD3,0xD4,0xD5,0xD6,0xD7,0xD8};
+        size_t total = P9_HDR_LEN + 4 + sizeof(blob);
+        if (cap < total) return -1;
+        resp[0] = (u8)(total & 0xff); resp[1] = 0; resp[2] = 0; resp[3] = 0;
+        resp[4] = P9_RREADDIR;
+        resp[5] = (u8)(tag & 0xff); resp[6] = (u8)((tag >> 8) & 0xff);
+        resp[7] = (u8)sizeof(blob); resp[8] = 0; resp[9] = 0; resp[10] = 0;  // count = 8
+        for (size_t i = 0; i < sizeof(blob); i++) resp[11 + i] = blob[i];
+        return (int)total;
+    }
+    return canonical_responder(ctx, req, req_len, resp, cap);
+}
+
+// READDIR end-to-end: an Rreaddir dirent stream is copied INTO the registered
+// buffer (the READ pattern with op_offset = dir read offset); result = byte
+// count. Uses the custom responder so the stream is non-empty.
+void test_9p_client_loom_readdir_e2e(void) {
+    int rc = p9_loopback_init(&g_loopback, g_loopback_resp, sizeof(g_loopback_resp),
+                              loom_readdir_responder, NULL);
+    TEST_EXPECT_EQ(rc, 0, "loopback init (readdir responder)");
+    rc = p9_client_init(&g_client, /*root_fid=*/0, /*msize=*/8192,
+                        p9_loopback_ops_for(&g_loopback), g_recv_buf, sizeof(g_recv_buf));
+    TEST_EXPECT_EQ(rc, 0, "client init");
+    const u8 uname[] = {'r','o','o','t'}; const u8 aname[] = {'/'};
+    TEST_EXPECT_EQ(p9_client_handshake(&g_client, uname, sizeof(uname), aname, sizeof(aname), 0),
+                   0, "handshake");
+
+    struct Spoor *sp = dev9p_attach_client(&g_client, 0);
+    TEST_ASSERT(sp != NULL, "dev9p_attach_client");
+    struct Loom *l = loom_create(8, 16);
+    TEST_ASSERT(l != NULL, "loom_create");
+    rights_t rt = RIGHT_READ;
+    TEST_ASSERT(loom_register_handles(l, &sp, &rt, 1) == 0, "register dev9p handle");
+
+    struct Burrow *b; u8 *bkva;
+    loom_install_test_buf(l, 0, PAGE_SIZE, &b, &bkva);
+    int hc0 = burrow_handle_count(b);
+    for (int i = 0; i < 8; i++) bkva[i] = 0;
+
+    struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+    struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
+
+    cl_stage_rw(l, 0, LOOM_OP_READDIR, /*handle=*/0, /*offset=*/0, /*count=*/64,
+                /*bidx=*/0, /*buf_off=*/0, 0xD11D000000000008ULL);
+    __atomic_store_n(&h->sq_tail, 1u, __ATOMIC_RELEASE);
+
+    int n = loom_enter(l, 1, 1, 0);
+    TEST_EXPECT_EQ(n, 1, "one SQE consumed");
+    TEST_EXPECT_EQ((u64)(s64)cqes[0].result, (u64)8, "READDIR result = 8 dirent bytes");
+    TEST_ASSERT(bkva[0]==0xD1 && bkva[3]==0xD4 && bkva[7]==0xD8,
+                "Rreaddir stream copied into the registered buffer");
+    TEST_EXPECT_EQ((u64)l->async_inflight, (u64)0, "op reaped");
+    TEST_EXPECT_EQ(burrow_handle_count(b), hc0, "op buffer pin balanced");
+
+    burrow_unref(b);
+    loom_unref(l);
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}
+
+// READLINK end-to-end: the link target ("/tmp") is copied INTO the dest buffer;
+// result = its length. op_count is the dest capacity (no request count).
+void test_9p_client_loom_readlink_e2e(void) {
+    drive_client_open(&g_client, &g_loopback);
+    struct Spoor *sp = dev9p_attach_client(&g_client, 0);
+    TEST_ASSERT(sp != NULL, "dev9p_attach_client");
+    struct Loom *l = loom_create(8, 16);
+    TEST_ASSERT(l != NULL, "loom_create");
+    rights_t rt = RIGHT_READ;
+    TEST_ASSERT(loom_register_handles(l, &sp, &rt, 1) == 0, "register dev9p handle");
+
+    struct Burrow *b; u8 *bkva;
+    loom_install_test_buf(l, 0, PAGE_SIZE, &b, &bkva);
+    int hc0 = burrow_handle_count(b);
+    for (int i = 0; i < 4; i++) bkva[i] = 0;
+
+    struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+    struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
+
+    cl_stage_rw(l, 0, LOOM_OP_READLINK, /*handle=*/0, /*offset=*/0, /*cap=*/64,
+                /*bidx=*/0, /*buf_off=*/0, 0x1117000000000004ULL);
+    __atomic_store_n(&h->sq_tail, 1u, __ATOMIC_RELEASE);
+
+    int n = loom_enter(l, 1, 1, 0);
+    TEST_EXPECT_EQ(n, 1, "one SQE consumed");
+    TEST_EXPECT_EQ((u64)(s64)cqes[0].result, (u64)4, "READLINK result = 4 bytes (/tmp)");
+    TEST_ASSERT(bkva[0]=='/' && bkva[1]=='t' && bkva[2]=='m' && bkva[3]=='p',
+                "link target copied into the registered buffer");
+    TEST_EXPECT_EQ(burrow_handle_count(b), hc0, "op buffer pin balanced");
+
+    burrow_unref(b);
+    loom_unref(l);
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}
+
+// GETATTR end-to-end: the parsed struct p9_attr is copied into the dest buffer
+// (op_offset = request_mask); result = sizeof(struct p9_attr). The canonical
+// responder fills mode=0644 / size=128 / valid=BASIC -- assert they round-trip.
+void test_9p_client_loom_getattr_e2e(void) {
+    drive_client_open(&g_client, &g_loopback);
+    struct Spoor *sp = dev9p_attach_client(&g_client, 0);
+    TEST_ASSERT(sp != NULL, "dev9p_attach_client");
+    struct Loom *l = loom_create(8, 16);
+    TEST_ASSERT(l != NULL, "loom_create");
+    rights_t rt = RIGHT_READ;
+    TEST_ASSERT(loom_register_handles(l, &sp, &rt, 1) == 0, "register dev9p handle");
+
+    struct Burrow *b; u8 *bkva;
+    loom_install_test_buf(l, 0, PAGE_SIZE, &b, &bkva);
+    int hc0 = burrow_handle_count(b);
+
+    struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+    struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
+
+    cl_stage_rw(l, 0, LOOM_OP_GETATTR, /*handle=*/0, /*request_mask=*/P9_GETATTR_BASIC,
+                /*cap=*/(u32)sizeof(struct p9_attr), /*bidx=*/0, /*buf_off=*/0,
+                0x6E11000000000000ULL);
+    __atomic_store_n(&h->sq_tail, 1u, __ATOMIC_RELEASE);
+
+    int n = loom_enter(l, 1, 1, 0);
+    TEST_EXPECT_EQ(n, 1, "one SQE consumed");
+    TEST_EXPECT_EQ((u64)(s64)cqes[0].result, (u64)sizeof(struct p9_attr),
+                   "GETATTR result = sizeof(struct p9_attr)");
+    struct p9_attr *a = (struct p9_attr *)bkva;
+    TEST_EXPECT_EQ((u64)a->valid, (u64)P9_GETATTR_BASIC, "getattr valid mask copied");
+    TEST_EXPECT_EQ((u64)a->mode, (u64)0x1A4u, "getattr mode copied (0644)");
+    TEST_EXPECT_EQ((u64)a->size, (u64)128u, "getattr size copied");
+    TEST_EXPECT_EQ(burrow_handle_count(b), hc0, "op buffer pin balanced");
+
+    burrow_unref(b);
+    loom_unref(l);
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}
+
+// STATFS end-to-end: the parsed struct p9_statfs is copied into the dest buffer;
+// result = sizeof(struct p9_statfs). The canonical responder fills bsize=4096.
+void test_9p_client_loom_statfs_e2e(void) {
+    drive_client_open(&g_client, &g_loopback);
+    struct Spoor *sp = dev9p_attach_client(&g_client, 0);
+    TEST_ASSERT(sp != NULL, "dev9p_attach_client");
+    struct Loom *l = loom_create(8, 16);
+    TEST_ASSERT(l != NULL, "loom_create");
+    rights_t rt = RIGHT_READ;
+    TEST_ASSERT(loom_register_handles(l, &sp, &rt, 1) == 0, "register dev9p handle");
+
+    struct Burrow *b; u8 *bkva;
+    loom_install_test_buf(l, 0, PAGE_SIZE, &b, &bkva);
+    int hc0 = burrow_handle_count(b);
+
+    struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+    struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
+
+    cl_stage_rw(l, 0, LOOM_OP_STATFS, /*handle=*/0, /*offset=*/0,
+                /*cap=*/(u32)sizeof(struct p9_statfs), /*bidx=*/0, /*buf_off=*/0,
+                0x57F5000000000000ULL);
+    __atomic_store_n(&h->sq_tail, 1u, __ATOMIC_RELEASE);
+
+    int n = loom_enter(l, 1, 1, 0);
+    TEST_EXPECT_EQ(n, 1, "one SQE consumed");
+    TEST_EXPECT_EQ((u64)(s64)cqes[0].result, (u64)sizeof(struct p9_statfs),
+                   "STATFS result = sizeof(struct p9_statfs)");
+    struct p9_statfs *st = (struct p9_statfs *)bkva;
+    TEST_EXPECT_EQ((u64)st->bsize, (u64)4096u, "statfs bsize copied");
+    TEST_EXPECT_EQ(burrow_handle_count(b), hc0, "op buffer pin balanced");
+
+    burrow_unref(b);
+    loom_unref(l);
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}
+
+// Submit-time rejection on the read-shaped ops: GETATTR (and every read-shaped
+// op) requires RIGHT_READ on the registered handle, and a bad registered-buffer
+// index is rejected -- proving the 6a I-30 gates apply uniformly to the 6b ops.
+void test_9p_client_loom_metaread_rejects(void) {
+    drive_client_open(&g_client, &g_loopback);
+    struct Spoor *sp = dev9p_attach_client(&g_client, 0);
+    TEST_ASSERT(sp != NULL, "dev9p_attach_client");
+    struct Loom *l = loom_create(8, 16);
+    TEST_ASSERT(l != NULL, "loom_create");
+    rights_t rt = RIGHT_WRITE;          // NO RIGHT_READ -> a read-shaped op is denied
+    TEST_ASSERT(loom_register_handles(l, &sp, &rt, 1) == 0, "register write-only handle");
+
+    struct Burrow *b; u8 *bkva;
+    loom_install_test_buf(l, 0, PAGE_SIZE, &b, &bkva);
+
+    struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+    struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
+
+    // (1) GETATTR on the write-only handle -> -EACCES.
+    cl_stage_rw(l, 0, LOOM_OP_GETATTR, 0, P9_GETATTR_BASIC,
+                (u32)sizeof(struct p9_attr), /*bidx=*/0, 0, 0x1u);
+    // (2) READDIR with a bad registered-buffer index -> -EINVAL.
+    cl_stage_rw(l, 1, LOOM_OP_READDIR, 0, 0, 64, /*bidx=*/9, 0, 0x2u);
+    __atomic_store_n(&h->sq_tail, 2u, __ATOMIC_RELEASE);
+
+    int n = loom_enter(l, 2, 0, LOOM_ENTER_NONBLOCK);
+    TEST_EXPECT_EQ(n, 2, "two SQEs consumed (both rejected inline)");
+    TEST_EXPECT_EQ((u64)(s64)cqes[0].result, (u64)(s64)(-(s32)T_E_ACCES),
+                   "GETATTR without RIGHT_READ -> -EACCES");
+    TEST_EXPECT_EQ((u64)(s64)cqes[1].result, (u64)(s64)(-(s32)T_E_INVAL),
+                   "READDIR bad buf idx -> -EINVAL");
     TEST_EXPECT_EQ((u64)l->async_inflight, (u64)0, "no op ever went in flight");
     TEST_ASSERT(l->inflight_ops == NULL, "no async container allocated");
 

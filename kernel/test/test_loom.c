@@ -547,7 +547,7 @@ void test_loom_enter_submit_rejects(void) {
 
     loom_stage_sqe(l, 0, LOOM_OP_FSYNC,   0, 99u, 0, 0xAAu);  // handle_idx out of range
     loom_stage_sqe(l, 1, LOOM_OP_FSYNC,   0, 0u,  0, 0xBBu);  // reg[0] empty (no register call)
-    loom_stage_sqe(l, 2, LOOM_OP_GETATTR, 0, 0u,  0, 0xCCu);  // in-range, unimplemented (Loom-6b)
+    loom_stage_sqe(l, 2, LOOM_OP_SETATTR, 0, 0u,  0, 0xCCu);  // in-range, unimplemented (Loom-6b-2)
     loom_stage_sqe(l, 3, LOOM_OP_COUNT,   0, 0u,  0, 0xDDu);  // out-of-range opcode
     __atomic_store_n(&h->sq_tail, 4u, __ATOMIC_RELEASE);
 

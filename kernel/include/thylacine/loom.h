@@ -85,19 +85,47 @@ _Static_assert(sizeof(struct loom_sqe) == 64, "loom_sqe ABI pinned at 64 bytes")
 _Static_assert(__builtin_offsetof(struct loom_sqe, opcode) == 0, "opcode at 0");
 _Static_assert(__builtin_offsetof(struct loom_sqe, user_data) == 24, "user_data at 24");
 
-// Per-opcode SQE field usage (Loom-6). The data-path ops carry a registered-
-// buffer reference; the reserved tail names the buffer sub-offset without an
-// ABI break (the field already exists):
-//   LOOM_OP_READ:  handle_idx = registered file fid; offset = FILE offset;
+// Per-opcode SQE field usage (Loom-6). The buffer-backed ops carry a
+// registered-buffer reference; the reserved tail names the buffer sub-offset
+// without an ABI break (the field already exists). Every one requires
+// buf_off + len <= the registered buffer's length (bounds-checked at submit
+// against the kernel snapshot -- never re-read from the shared ring), so a
+// short or hostile descriptor can never drive an out-of-bounds copy.
+//
+//   LOOM_OP_READ (6a):  handle_idx = registered file fid; offset = FILE offset;
 //                  len = byte count; buf_idx_or_off = registered-buffer index;
 //                  _resv1[0] = byte offset WITHIN that registered buffer.
 //                  The reply data is copied INTO buffer[buf_off .. buf_off+len);
 //                  the CQE result is the byte count actually read.
-//   LOOM_OP_WRITE: same fields; the data is copied FROM buffer[buf_off ..
+//   LOOM_OP_WRITE (6a): same fields; the data is copied FROM buffer[buf_off ..
 //                  buf_off+len) onto the wire; the CQE result is the accepted
-//                  count. Both require buf_off + len <= the registered buffer's
-//                  length (bounds-checked at submit, against the kernel
-//                  snapshot -- never re-read from the shared ring).
+//                  count.
+//   LOOM_OP_READDIR (6b): same shape as READ -- offset = the directory read
+//                  offset; the dirent byte stream is copied INTO the buffer;
+//                  result = bytes placed (the consumer parses dirents). len is
+//                  the requested/dest byte count.
+//   LOOM_OP_READLINK (6b): handle_idx = symlink fid; buf_idx_or_off + _resv1[0]
+//                  + len name the dest slice; the link target is copied INTO it
+//                  (truncated to len); result = bytes placed.
+//   LOOM_OP_GETATTR (6b): handle_idx = fid; offset = request_mask (P9_GETATTR_*);
+//                  the dest slice receives a `struct p9_attr` record (160 bytes;
+//                  len should be >= that for a full record -- a shorter dest
+//                  truncates, never overruns); result = bytes placed.
+//   LOOM_OP_STATFS (6b): handle_idx = fid; the dest slice receives a
+//                  `struct p9_statfs` record (64 bytes); result = bytes placed.
+//
+// The read-shaped 6b ops require RIGHT_READ on the registered handle (the
+// SYS_FSTAT gate); WRITE requires RIGHT_WRITE. The GETATTR / STATFS output
+// layout IS struct p9_attr / struct p9_statfs (pinned by _Static_assert in
+// loom.c; the native libthyla_rs::loom side mirrors them at Loom-6d).
+//
+// NOT YET DISPATCHED (post-6b): the fid-mutation / direct-descriptor ops
+// (LOOM_OP_WALK / LOPEN / LCREATE / CLUNK) mint, open, or release a fid. Our
+// registered handles wrap ALREADY-OPEN fids, so these need a registered-slot
+// install/release surface (the io_uring direct-descriptor analog) + their own
+// audit -- a documented seam (LOOM.md, task #916). The metadata-MUTATION ops
+// (SETATTR / MKDIR / SYMLINK / MKNOD / UNLINKAT / RENAMEAT / RENAME / LINK) land
+// with Loom-6b-2. All post -ENOSYS until their sub-chunk lands.
 #define LOOM_SQE_BUF_OFF(sqe)  ((sqe)->_resv1[0])
 
 // =============================================================================

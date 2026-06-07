@@ -5,7 +5,7 @@
 integrity) + I-30 (submit-time capability pin). **Audit-trigger surface**: ARCH
 §25.4 + CLAUDE.md.
 
-> **Status (Loom-2a + Loom-2b + Loom-3 + Loom-4a/4b/4c/4d + Loom-5a + Loom-5b + Loom-6a):** the ring **substrate**
+> **Status (Loom-2a + Loom-2b + Loom-3 + Loom-4a/4b/4c/4d + Loom-5a + Loom-5b + Loom-6a + Loom-6b-1):** the ring **substrate**
 > (2a — `KObj_Loom`, the SQ/CQ ring memory + geometry, `SYS_LOOM_SETUP`, the
 > registered-handle table via `SYS_LOOM_REGISTER`, the kobj refcount lifecycle),
 > the **pluggable-completion 9P-engine seam** (2b — `p9_rpc.on_complete`,
@@ -653,6 +653,62 @@ source map. **Untrusted-server caveat:** the READ copy trusts the 9P dispatch's
 `read_count` to bound `dr->read_data` (the same trusted-server assumption #841 /
 Loom-4-F4 carry); a hostile server is the documented v1.x seam.
 
+### The read-shaped metadata ops (Loom-6b-1)
+
+Loom-6b generalizes the 6a buffer-backed dispatch to the rest of the
+`p9_client_*` surface, opcode by opcode -- the NOVEL uniformity claim ("the
+opcodes ARE `p9_client_*`"). Loom-6b-1 lands the **read-shaped** ops --
+`LOOM_OP_READDIR`, `LOOM_OP_READLINK`, `LOOM_OP_GETATTR`, `LOOM_OP_STATFS` --
+which all reply with data the kernel copies INTO a registered buffer, exactly
+like `LOOM_OP_READ`.
+
+**Uniform dispatch.** `loom_submit_rw` was generalized to `loom_submit_payload`:
+the resolve+pin (file `spoor_ref` + buffer `burrow_ref` -- the two I-30 pins),
+the `[buf_off, buf_off+len)` slice bounds-check, and the async submit are shared;
+only the *builder* and the *required right* are selected per opcode. The
+read-shaped ops require `RIGHT_READ` (the `SYS_FSTAT` gate); WRITE requires
+`RIGHT_WRITE`. So the 6a I-30 gates apply uniformly to every 6b op with no new
+gate code (the `loom_metaread_rejects` test proves a read-shaped op without
+`RIGHT_READ` is denied `-EACCES`, and a bad buffer index `-EINVAL`).
+
+**SQE field reuse.** Each read-shaped op carries `handle_idx` (the fid),
+`buf_idx_or_off` + `_resv1[0]` + `len` (the registered-buffer dest slice), and:
+READDIR uses `offset` as the directory read offset and `len` as the byte count
+(the READ shape); GETATTR uses `offset` as the `request_mask`; READLINK / STATFS
+take no input beyond the fid and treat `len` purely as the dest capacity.
+
+**The completion copy** (`loom_payload_result`, under `c->lock`). READDIR copies
+the dirent byte stream and READLINK the link target -- both `min(reply_len,
+op_count)` into the pinned slice, exactly the READ path (the byte count is
+clamped to the dest cap, so a hostile server count can never overrun). GETATTR
+and STATFS copy a fixed parsed record: the **Loom output ABI for GETATTR is
+`struct p9_attr` (160 bytes) and for STATFS `struct p9_statfs` (64 bytes)** --
+the kernel copies the parsed record verbatim, pinned by `_Static_assert` in
+`loom.c` so a future kernel field add trips the build rather than silently
+shifting the ABI. The field set mirrors 9P2000.L `Rgetattr` / `Rstatfs` (a stable
+wire ABI); the native `libthyla_rs::loom` side mirrors the layout at Loom-6d. A
+short dest truncates (copies `min(sizeof, len)`), never overruns. The CQE
+`result` is the byte count placed in the buffer. `dr->attr` / `dr->statfs` are
+by-value in the dispatch result (no rmsg-lifetime dependency); `dr->readdir_data`
+/ `dr->readlink_target` alias the recv buffer during the callback, like READ's
+`read_data`.
+
+**Deferred (the direct-descriptor seam, task #916).** The fid-lifecycle ops --
+`LOOM_OP_WALK` (mint a fid), `LOOM_OP_LOPEN` (open an unopened fid),
+`LOOM_OP_LCREATE` (create+open+rebind), `LOOM_OP_CLUNK` (release a fid) -- are
+NOT in 6b. Loom's registered handles wrap ALREADY-OPEN fids (from `walk_open`),
+so these four mint, open, or destroy a fid and need a registered-slot
+install/release surface (the io_uring direct-descriptor analog: a WALK whose
+completion installs a new `reg[]` slot, a CLOSE that releases one) plus its own
+audit. They post `-ENOSYS` until that sub-chunk lands. The metadata-MUTATION ops
+(`SETATTR` / `MKDIR` / `SYMLINK` / `MKNOD` / `UNLINKAT` / `RENAMEAT` / `RENAME` /
+`LINK` -- names read FROM a buffer + the multi-fid ops) land with Loom-6b-2.
+
+**Spec.** `loom.tla` is **unchanged** for 6b-1 (same reasoning as 6a: every
+read-shaped op is one more `Dispatch` against a pinned `reg` slot whose
+`sqe_arg` dest slice is `ValidArgs`-checked at submit). `specs/SPEC-TO-CODE.md`
+extends the Loom-6 source map.
+
 ---
 
 ## Data structures
@@ -875,7 +931,11 @@ rolled back via `spoor_clunk`); a user-VA fault reading the fd array.
 | Loom-5a | multishot streams (`LOOM_SQE_MULTISHOT` → `LOOM_CQE_MORE` shots + terminal) | **landed** |
 | Loom-5b | LINK/DRAIN held-submission chain (`l->chain` + `loom_admit_chain`) | **landed** (Loom-5 audit closed 0/0/2/4) |
 | Loom-6a | registered buffers (`LOOM_REGISTER_BUFFERS`) + the READ/WRITE data path | **landed** (self-audit clean; formal audit at 6c) |
-| Loom-6b | the remaining payload opcodes (the uniform `p9_client_*` surface) | pending |
+| Loom-6b-1 | the read-shaped ops (READDIR / READLINK / GETATTR / STATFS) over the 6a machinery | **landed** (self-audit clean; formal audit at 6c) |
+| Loom-6b-2 | the metadata-mutation ops (SETATTR / MKDIR / SYMLINK / MKNOD / UNLINKAT / RENAMEAT / RENAME / LINK -- names-from-buffer + multi-fid) | pending |
+| Loom-6c | the SMP multi-in-flight harness + the focused Opus audit over the whole 6a+6b kernel surface + close | pending |
+| Loom-6d | the native `libthyla_rs::loom` API + the latency bench | pending |
+| (direct-descriptor) | WALK / LOPEN / LCREATE / CLUNK -- fid mint/open/release from the op path (the io_uring direct-descriptor analog) | deferred (task #916; post-6 seam) |
 | Loom-6c | the multi-in-flight SMP harness + the focused Opus audit + close | pending |
 | Loom-6d | the native libthyla-rs Loom API + the latency benchmark | pending |
 

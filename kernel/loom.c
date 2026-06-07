@@ -549,6 +549,15 @@ static void loom_bufcopy(u8 *dst, const u8 *src, u32 n) {
 //   WRITE -> result is the server-accepted byte count; the data already went out
 //            in the build thunk.
 //   else  -> the scalar mapping (NOP / FSYNC).
+// The Loom GETATTR / STATFS output ABI: the kernel copies the parsed record
+// verbatim into the registered buffer, so struct p9_attr / struct p9_statfs ARE
+// the userspace-visible output layout (the native libthyla_rs::loom side mirrors
+// them at Loom-6d). The field set mirrors 9P2000.L Rgetattr / Rstatfs (itself a
+// stable wire ABI); these asserts pin the size so a future kernel field add
+// cannot silently shift the Loom output ABI -- it trips the build instead.
+_Static_assert(sizeof(struct p9_attr) == 160, "Loom GETATTR output ABI pinned at 160 bytes");
+_Static_assert(sizeof(struct p9_statfs) == 64, "Loom STATFS output ABI pinned at 64 bytes");
+
 static s32 loom_payload_result(struct loom_async_op *op, int status,
                                struct p9_dispatch_result *dr) {
     if (status < 0) return (s32)status;        // error reply: -errno, no payload
@@ -563,6 +572,42 @@ static s32 loom_payload_result(struct loom_async_op *op, int status,
     }
     case LOOM_OP_WRITE:
         return dr ? (s32)dr->write_count : 0;
+    // Loom-6b read-shaped output: copy the reply payload INTO the pinned dest
+    // slice, bounded by op_count (the dest capacity) so a short buffer can never
+    // overrun. READDIR / READLINK stream bytes; GETATTR / STATFS copy the parsed
+    // fixed record. The CQE result is the byte count placed in the buffer.
+    case LOOM_OP_READDIR: {
+        if (!dr) return 0;
+        u32 got = dr->readdir_count;
+        if (got > op->op_count) got = op->op_count;
+        if (got != 0 && dr->readdir_data && op->buf_kva)
+            loom_bufcopy(op->buf_kva, dr->readdir_data, got);
+        return (s32)got;
+    }
+    case LOOM_OP_READLINK: {
+        if (!dr) return 0;
+        u32 got = dr->readlink_target_len;
+        if (got > op->op_count) got = op->op_count;
+        if (got != 0 && dr->readlink_target && op->buf_kva)
+            loom_bufcopy(op->buf_kva, dr->readlink_target, got);
+        return (s32)got;
+    }
+    case LOOM_OP_GETATTR: {
+        if (!dr) return 0;
+        u32 got = (u32)sizeof(struct p9_attr);
+        if (got > op->op_count) got = op->op_count;   // honor a short dest (no overrun)
+        if (got != 0 && op->buf_kva)
+            loom_bufcopy(op->buf_kva, (const u8 *)&dr->attr, got);
+        return (s32)got;
+    }
+    case LOOM_OP_STATFS: {
+        if (!dr) return 0;
+        u32 got = (u32)sizeof(struct p9_statfs);
+        if (got > op->op_count) got = op->op_count;
+        if (got != 0 && op->buf_kva)
+            loom_bufcopy(op->buf_kva, (const u8 *)&dr->statfs, got);
+        return (s32)got;
+    }
     default:
         return loom_scalar_result(status);            // NOP / FSYNC
     }
@@ -653,6 +698,28 @@ static int loom_build_write(struct p9_session *s, u8 *out, size_t cap, void *ctx
                                  op->op_count, op->buf_kva);
 }
 
+// Loom-6b read-shaped builders. READDIR mirrors READ (op_offset = dir offset,
+// op_count = byte count -> a dirent stream reply). READLINK / GETATTR / STATFS
+// carry no request count (the reply size is server-chosen): the registered
+// buffer is purely the completion-time destination, and op_count is the dest
+// capacity that bounds the copy. GETATTR's op_offset carries the request_mask.
+static int loom_build_readdir(struct p9_session *s, u8 *out, size_t cap, void *ctx) {
+    struct loom_async_op *op = (struct loom_async_op *)ctx;
+    return p9_session_send_readdir(s, out, cap, op->op_fid, op->op_offset, op->op_count);
+}
+static int loom_build_readlink(struct p9_session *s, u8 *out, size_t cap, void *ctx) {
+    struct loom_async_op *op = (struct loom_async_op *)ctx;
+    return p9_session_send_readlink(s, out, cap, op->op_fid);
+}
+static int loom_build_getattr(struct p9_session *s, u8 *out, size_t cap, void *ctx) {
+    struct loom_async_op *op = (struct loom_async_op *)ctx;
+    return p9_session_send_getattr(s, out, cap, op->op_fid, op->op_offset);
+}
+static int loom_build_statfs(struct p9_session *s, u8 *out, size_t cap, void *ctx) {
+    struct loom_async_op *op = (struct loom_async_op *)ctx;
+    return p9_session_send_statfs(s, out, cap, op->op_fid);
+}
+
 // Post a terminal CQE inline (no engine round-trip): the NOP success (result 0)
 // and every submit-time-gate failure (bad opcode / handle / rights / OOM ->
 // -errno). The SQE was consumed; userspace learns the result via the CQE, not a
@@ -676,19 +743,40 @@ static void loom_chain_done(struct Loom *l, struct loom_chain_op *chain, bool ok
     spin_unlock(&l->lock);
 }
 
-// Dispatch a data-path op (LOOM_OP_READ / LOOM_OP_WRITE; Loom-6). Resolves +
-// PINS the registered file handle (spoor_ref) AND the registered buffer
-// (burrow_ref) -- two independent I-30 submit-time pins held for the op's whole
-// lifetime so a concurrent re-register / clunk / munmap cannot make completion
-// act against a different object or freed pages. Bounds-checks the buffer slice,
-// rights-gates (READ -> RIGHT_READ, WRITE -> RIGHT_WRITE), and submits the async
-// Tread/Twrite. Single-shot only: a real multishot READ needs an event-source
-// dev (post-Loom graphics), so MULTISHOT on a data-path op is rejected by the
-// caller. Every early-return path releases whatever it pinned + posts one CQE.
-static void loom_submit_rw(struct Loom *l, const struct loom_sqe *sqe,
-                           struct loom_chain_op *chain) {
-    u64  ud       = sqe->user_data;
-    bool is_write = (sqe->opcode == LOOM_OP_WRITE);
+// Dispatch a buffer-backed payload op (READ / WRITE / READDIR / READLINK /
+// GETATTR / STATFS; Loom-6a + Loom-6b-1). Resolves + PINS the registered file
+// handle (spoor_ref) AND the registered buffer (burrow_ref) -- two independent
+// I-30 submit-time pins held for the op's whole lifetime so a concurrent
+// re-register / clunk / munmap cannot make completion act against a different
+// object or freed pages. Bounds-checks the buffer slice, rights-gates (WRITE ->
+// RIGHT_WRITE; the read-shaped ops -> RIGHT_READ), and submits the async Tmsg.
+// The builder + the required right are selected per-opcode; the rest of the
+// pin / bounds / submit machinery is shared. Single-shot only: a real multishot
+// payload op needs an event-source dev (post-Loom graphics), so MULTISHOT here
+// is rejected by the caller. Every early-return path releases whatever it
+// pinned + posts one CQE.
+static void loom_submit_payload(struct Loom *l, const struct loom_sqe *sqe,
+                                struct loom_chain_op *chain) {
+    u64 ud = sqe->user_data;
+
+    // Opcode -> (Tmsg builder, required handle right). The dest/src buffer slice
+    // + the offset/count semantics are uniform (the builder interprets op_offset
+    // / op_count); only these two differ. loom_submit_one routes exactly the six
+    // buffer-backed opcodes here, so the default is unreachable (defensive).
+    p9_session_build_fn build;
+    rights_t            need;
+    switch (sqe->opcode) {
+    case LOOM_OP_WRITE:    build = loom_build_write;    need = RIGHT_WRITE; break;
+    case LOOM_OP_READ:     build = loom_build_read;     need = RIGHT_READ;  break;
+    case LOOM_OP_READDIR:  build = loom_build_readdir;  need = RIGHT_READ;  break;
+    case LOOM_OP_READLINK: build = loom_build_readlink; need = RIGHT_READ;  break;
+    case LOOM_OP_GETATTR:  build = loom_build_getattr;  need = RIGHT_READ;  break;
+    case LOOM_OP_STATFS:   build = loom_build_statfs;   need = RIGHT_READ;  break;
+    default:
+        loom_chain_done(l, chain, false);
+        loom_complete_inline(l, ud, -(s32)T_E_INVAL);
+        return;
+    }
 
     if (sqe->handle_idx >= LOOM_MAX_REG_HANDLES) {
         loom_chain_done(l, chain, false);
@@ -738,8 +826,8 @@ static void loom_submit_rw(struct Loom *l, const struct loom_sqe *sqe,
         return;
     }
     // Submit-time rights gate (I-2 / I-6; the spec's reg in AllowedObjs).
-    // Snapshot at submit, never re-checked at completion (I-30).
-    rights_t need = is_write ? RIGHT_WRITE : RIGHT_READ;
+    // Snapshot at submit, never re-checked at completion (I-30). `need` was
+    // selected from the opcode above.
     if (!(rt & need)) {
         burrow_unref(buf);
         spoor_clunk(sp);
@@ -766,11 +854,11 @@ static void loom_submit_rw(struct Loom *l, const struct loom_sqe *sqe,
     op->loom        = l;
     op->client      = cl;
     op->pinned      = sp;                 // adopt the handle pin
-    op->build       = is_write ? loom_build_write : loom_build_read;
+    op->build       = build;              // opcode-selected (above)
     op->user_data   = ud;
     op->op_fid      = fid;
-    op->op_offset   = sqe->offset;        // FILE offset
-    op->op_count    = count;
+    op->op_offset   = sqe->offset;        // file/dir offset, or GETATTR request_mask
+    op->op_count    = count;              // wire count (READ/READDIR/WRITE) or dest cap
     op->pinned_buf  = buf;                // adopt the buffer pin
     op->buf_kva     = buf_kva;
     op->opcode      = sqe->opcode;
@@ -922,22 +1010,35 @@ static void loom_submit_one(struct Loom *l, const struct loom_sqe *sqe,
 
     case LOOM_OP_READ:
     case LOOM_OP_WRITE:
-        // Data-path ops (Loom-6a). MULTISHOT needs a real event-source dev (a
-        // file fid replies once, so a multishot file READ would just spin
-        // re-issuing the same Tread) -- reject the combo until that dev exists;
-        // the multishot mechanism stays validated by the synthetic FSYNC vehicle.
+    case LOOM_OP_READDIR:
+    case LOOM_OP_READLINK:
+    case LOOM_OP_GETATTR:
+    case LOOM_OP_STATFS:
+        // Buffer-backed payload ops (Loom-6a READ/WRITE + Loom-6b-1 read-shaped
+        // metadata). Each names a registered file fid + a registered buffer;
+        // loom_submit_payload pins both (two I-30 pins) and bounds-checks the
+        // slice. MULTISHOT needs a real event-source dev (a file fid replies
+        // once, so a multishot file op would spin re-issuing the same Tmsg) --
+        // reject the combo until that dev exists; the multishot mechanism stays
+        // validated by the synthetic FSYNC vehicle.
         if (multishot) {
             loom_chain_done(l, chain, false);
             loom_complete_inline(l, ud, -(s32)T_E_INVAL);
             return;
         }
-        loom_submit_rw(l, sqe, chain);
+        loom_submit_payload(l, sqe, chain);
         return;
 
     default:
-        // The remaining in-range payload opcodes (GETATTR / WALK / READDIR / ...)
-        // land with Loom-6b, so they post -ENOSYS until then. WIRE_PASSTHROUGH
-        // stays reserved (LOOM.md 7). Out-of-range opcodes are -EINVAL.
+        // The remaining in-range opcodes split two ways. The fid-lifecycle /
+        // direct-descriptor ops (WALK / LOPEN / LCREATE / CLUNK) mint, open, or
+        // release a fid -- our registered handles wrap already-OPEN fids, so
+        // these need the registered-slot install/release surface (the io_uring
+        // direct-descriptor analog) + its own audit: a documented post-6b seam
+        // (LOOM.md, task #916). The mutation ops (SETATTR / MKDIR / SYMLINK /
+        // MKNOD / UNLINKAT / RENAMEAT / RENAME / LINK) land with Loom-6b-2. Both
+        // post -ENOSYS until then. WIRE_PASSTHROUGH stays reserved (LOOM.md 7).
+        // Out-of-range opcodes are -EINVAL.
         loom_chain_done(l, chain, false);
         if (sqe->opcode < LOOM_OP_COUNT)
             loom_complete_inline(l, ud, -(s32)T_E_NOSYS);

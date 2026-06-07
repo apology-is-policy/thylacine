@@ -583,6 +583,11 @@ void test_9p_client_loom_drain_waits_for_rearm_pending(void);
 void test_9p_client_loom_read_e2e(void);
 void test_9p_client_loom_write_e2e(void);
 void test_9p_client_loom_rw_rejects(void);
+void test_9p_client_loom_readdir_e2e(void);
+void test_9p_client_loom_readlink_e2e(void);
+void test_9p_client_loom_getattr_e2e(void);
+void test_9p_client_loom_statfs_e2e(void);
+void test_9p_client_loom_metaread_rejects(void);
 void test_dev9p_registered(void);
 void test_dev9p_attach_client_root_spoor(void);
 void test_dev9p_walk_one_component(void);
@@ -1562,6 +1567,12 @@ struct test_case g_tests[] = {
     { "9p_client.loom_read_e2e",       test_9p_client_loom_read_e2e,       false, NULL },
     { "9p_client.loom_write_e2e",      test_9p_client_loom_write_e2e,      false, NULL },
     { "9p_client.loom_rw_rejects",     test_9p_client_loom_rw_rejects,     false, NULL },
+    { "9p_client.loom_readdir_e2e",    test_9p_client_loom_readdir_e2e,    false, NULL },
+    { "9p_client.loom_readlink_e2e",   test_9p_client_loom_readlink_e2e,   false, NULL },
+    { "9p_client.loom_getattr_e2e",    test_9p_client_loom_getattr_e2e,    false, NULL },
+    { "9p_client.loom_statfs_e2e",     test_9p_client_loom_statfs_e2e,     false, NULL },
+    { "9p_client.loom_metaread_rejects",
+                                       test_9p_client_loom_metaread_rejects, false, NULL },
     { "dev9p.registered",              test_dev9p_registered,              false, NULL },
     { "dev9p.attach_client_root_spoor",test_dev9p_attach_client_root_spoor,false, NULL },
     { "dev9p.walk_one_component",      test_dev9p_walk_one_component,      false, NULL },
