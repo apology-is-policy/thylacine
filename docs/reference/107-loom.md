@@ -5,7 +5,7 @@
 integrity) + I-30 (submit-time capability pin). **Audit-trigger surface**: ARCH
 §25.4 + CLAUDE.md.
 
-> **Status (Loom-2a + Loom-2b + Loom-3 + Loom-4a/4b/4c/4d + Loom-5a + Loom-5b + Loom-6a + Loom-6b-1):** the ring **substrate**
+> **Status (Loom-2a + Loom-2b + Loom-3 + Loom-4a/4b/4c/4d + Loom-5a + Loom-5b + Loom-6a + Loom-6b-1 + Loom-6b-2):** the ring **substrate**
 > (2a — `KObj_Loom`, the SQ/CQ ring memory + geometry, `SYS_LOOM_SETUP`, the
 > registered-handle table via `SYS_LOOM_REGISTER`, the kobj refcount lifecycle),
 > the **pluggable-completion 9P-engine seam** (2b — `p9_rpc.on_complete`,
@@ -18,10 +18,12 @@ integrity) + I-30 (submit-time capability pin). **Audit-trigger surface**: ARCH
 > so a concurrent enter that finds a sibling holding the reader role sleeps until a
 > CQE is posted; 4c — the **SQPOLL poll-thread** `loom_sqpoll_main`, a per-ring
 > `kproc()` kthread that drains the SQ zero-syscall + drives the reader, started by
-> `SYS_LOOM_SETUP(LOOM_SETUP_SQPOLL)` and joined by `loom_free`). v1.0 dispatches
-> the no-payload opcodes (`NOP` / `FSYNC`); the payload opcodes
-> (READ/WRITE/GETATTR/...) land with Loom-6's registered-buffer surface and post
-> `-ENOSYS` until then. **4d** is the focused SQPOLL audit + close (one Opus
+> `SYS_LOOM_SETUP(LOOM_SETUP_SQPOLL)` and joined by `loom_free`). The dispatch now
+> covers `NOP` / `FSYNC` + the **whole buffer-backed surface** -- READ / WRITE
+> (6a), the read-shaped metadata READDIR / READLINK / GETATTR / STATFS (6b-1), and
+> the mutations SETATTR / MKDIR / MKNOD / SYMLINK / UNLINKAT / RENAMEAT / LINK
+> (6b-2); only the fid-lifecycle ops (WALK / LOPEN / LCREATE / CLUNK -- the #916
+> direct-descriptor seam) + `WIRE_PASSTHROUGH` still post `-ENOSYS`. **4d** is the focused SQPOLL audit + close (one Opus
 > prosecutor 0/1/1/3 + a concurrent self-audit; the core cruxes SOUND): **F1 [P1]**
 > the `loom_first_inflight_client` borrowed-client UAF (a concurrent reap +
 > re-register could free the Spoor → the `p9_client` while the kthread/ENTER held
@@ -709,6 +711,83 @@ read-shaped op is one more `Dispatch` against a pinned `reg` slot whose
 `sqe_arg` dest slice is `ValidArgs`-checked at submit). `specs/SPEC-TO-CODE.md`
 extends the Loom-6 source map.
 
+### The metadata-mutation ops (Loom-6b-2)
+
+Loom-6b-2 completes the uniform `p9_client_*` surface with the **mutation** ops:
+`LOOM_OP_SETATTR`, `LOOM_OP_MKDIR`, `LOOM_OP_MKNOD`, `LOOM_OP_SYMLINK`,
+`LOOM_OP_UNLINKAT`, `LOOM_OP_RENAMEAT`, `LOOM_OP_LINK`. Unlike the read-shaped
+ops, these read their **input** (name(s) / a `struct p9_setattr`) FROM the pinned
+registered buffer in the build thunk -- the WRITE-payload discipline -- and reply
+**scalar** (`Rsetattr` empty / `Rmkdir` with the returned qid dropped at v1.0 /
+`Runlinkat` / ...), so `loom_payload_result` maps them through its `default`
+(`0` success / `-errno`). No completion-time copy.
+
+**The principled 6b boundary.** Every op that acts on an ALREADY-OPEN registered
+fid is now in (read, write, the read-shaped metadata, the mutations). The only
+deferred ops are the four fid-lifecycle / direct-descriptor ops (WALK / LOPEN /
+LCREATE / CLUNK -- they mint, open, or release a fid; the #916 seam) plus the
+reserved `WIRE_PASSTHROUGH`. So after 6b-2 the deferred set is exactly "ops that
+create or destroy a registered fid," which is the direct-descriptor follow-on.
+
+**Names from the buffer + the per-op SQE field map.** `loom_submit_payload` pins
+ONE registered-buffer region `[buf_off, buf_off+len)` (the same machinery as
+6a/6b-1) that holds the name bytes (or the SETATTR struct); `len` is the TOTAL
+region span the pin bounds-checks. The mutation build thunks decode their
+op-specific scalars + name sub-lengths from a TOCTOU-safe SQE snapshot carried on
+the op (`op->sqe`, copied at submit -- never re-read from the shared ring) and
+read the name bytes from `op->buf_kva`. The full per-op map (which `_resv1[i]`
+holds mode / gid / flags / major / minor / the name split / the second fid) is in
+`kernel/include/thylacine/loom.h`. Two **memory-safety gates** run at submit, on
+the kernel snapshot, before any build-thunk dereference: a two-name op's split
+sub-length (`_resv1[1]`) must be `<= len` (else `buf_kva + sub` leaves the slice
+or `len - sub` underflows), and SETATTR's `len` must be `>= sizeof(struct
+p9_setattr)` (56 bytes -- the **Loom SETATTR input ABI**, `_Static_assert`-pinned
+in `loom.c`). SETATTR copies the struct out align-safely (the wire encoder reads
+u64 fields).
+
+**Two-fid ops (RENAMEAT / LINK) -- a second I-30 pin.** `RENAMEAT` (olddir +
+newdir) and `LINK` (target dir + source inode) name a SECOND registered handle,
+uniformly in `LOOM_SQE_FID2(sqe)` = `_resv1[3]`. `loom_submit_payload` resolves +
+pins BOTH handles (and the buffer) under one `l->lock` acquisition -- two
+independent `spoor_ref` I-30 pins, `op->pinned` + `op->pinned2`, released
+symmetrically at reap / abandon / `loom_free`. Both fids MUST be in the SAME 9P
+session (`dev9p_client_fid` returns the same `p9_client` -- a 9P renameat/link
+names two fids in one fid namespace; the cross-session pair is rejected `-EINVAL`,
+mirroring `sys_rename`'s same-Dev/same-`p9_client` gate). The elected-reader
+borrow-guard (`loom_first_inflight_client`) refs only `op->pinned`; that suffices
+because `cl1 == cl2`, so the single guard ref keeps the shared client alive
+across the pump while the (non-terminal) op holds `pinned2`.
+
+**Rights mirror the kernel-syscall handle gates.** Each mutation op requires on
+its primary handle exactly the right `SYS_WALK_CREATE` / `SYS_RENAME` /
+`SYS_UNLINK` / `SYS_WSTAT` require for the equivalent op: `RIGHT_WRITE` on a
+mutated directory (create / unlink / rename) or file (setattr); `RENAMEAT`
+requires it on BOTH dirs; `LINK` requires `RIGHT_WRITE` on the target dir and
+`RIGHT_READ` on the source. This is the **capability axis**; the **identity axis**
+(who may create / chmod) stays the dev9p server's, exactly as for the 6a data
+ops -- Loom dispatches below the syscall-layer `perm_check`, and the registered
+handle already passed `perm_check` at open time.
+
+**Tests** (`kernel/test/test_9p_client.c`, over the loopback 9P client, +4). A
+mutation capture responder stashes the on-wire names / struct fields the build
+thunk read out of the pinned buffer: `9p_client.loom_mkdir_e2e` (name + mode reach
+the wire, scalar `result == 0`, buffer pin balanced), `loom_setattr_e2e` (the
+`struct p9_setattr` valid + mode reach the wire), `loom_renameat_e2e` (the TWO-FID
+op: olddir + newdir registered, oldname ++ newname split at `_resv1[1]`, both
+names on the wire, both pins released at reap), and `loom_mutation_rejects` (the
+RIGHT_WRITE gate `-EACCES`, a bad second-handle index `-EINVAL`, the two-name
+overrun guard `-EINVAL`, the SETATTR span guard `-EINVAL` -- all inline, no op
+goes async). `loom.enter_submit_rejects`'s `-ENOSYS` probe was repointed from
+SETATTR to WALK (a still-deferred direct-descriptor op).
+
+**Spec.** `loom.tla` stays **unchanged** for 6b-2 as well. A two-fid op pins two
+`reg` slots, but that is the SAME I-30 pin mechanism applied to a second object
+(resolve + snapshot at submit, hold for the op's lifetime, never re-resolve at
+completion) -- the spec's single-`reg` model is a faithful abstraction of N
+independent pins, and I-29 / I-30 are per-object properties the uniform mechanism
+upholds for both. Not a new mechanism, so the spec-first re-enable does not
+require a new module; `specs/SPEC-TO-CODE.md` extends the Loom-6 source map.
+
 ---
 
 ## Data structures
@@ -932,7 +1011,9 @@ rolled back via `spoor_clunk`); a user-VA fault reading the fd array.
 | Loom-5b | LINK/DRAIN held-submission chain (`l->chain` + `loom_admit_chain`) | **landed** (Loom-5 audit closed 0/0/2/4) |
 | Loom-6a | registered buffers (`LOOM_REGISTER_BUFFERS`) + the READ/WRITE data path | **landed** (self-audit clean; formal audit at 6c) |
 | Loom-6b-1 | the read-shaped ops (READDIR / READLINK / GETATTR / STATFS) over the 6a machinery | **landed** (self-audit clean; formal audit at 6c) |
-| Loom-6b-2 | the metadata-mutation ops (SETATTR / MKDIR / SYMLINK / MKNOD / UNLINKAT / RENAMEAT / RENAME / LINK -- names-from-buffer + multi-fid) | pending |
+| Loom-6b-2 | the metadata-mutation ops (SETATTR / MKDIR / SYMLINK / MKNOD / UNLINKAT / RENAMEAT / LINK -- names-from-buffer + the second-fid I-30 pin) | **landed** (self-audit clean; formal audit at 6c) |
+| Loom-6c | the OWED multi-in-flight SMP harness + the formal Opus audit over 6a+6b + the SMP gate + close | pending |
+| #916 | the direct-descriptor ops (WALK / LOPEN / LCREATE / CLUNK -- mint/open/release a registered fid) | deferred (post-Loom-6 seam) |
 | Loom-6c | the SMP multi-in-flight harness + the focused Opus audit over the whole 6a+6b kernel surface + close | pending |
 | Loom-6d | the native `libthyla_rs::loom` API + the latency bench | pending |
 | (direct-descriptor) | WALK / LOPEN / LCREATE / CLUNK -- fid mint/open/release from the op path (the io_uring direct-descriptor analog) | deferred (task #916; post-6 seam) |

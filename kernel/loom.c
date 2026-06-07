@@ -75,6 +75,19 @@ struct loom_async_op {
     u32                    op_count;    // READ/WRITE: requested byte count
     struct Burrow         *pinned_buf;  // READ/WRITE: the I-30 buffer pin (burrow_ref)
     u8                    *buf_kva;     // READ/WRITE: the pinned buffer slice base
+    // Loom-6b-2 metadata-MUTATION ops. The pinned buffer region (buf_kva,
+    // op_count bytes) holds the name(s) the build thunk reads (the WRITE-payload
+    // discipline) or the input struct p9_setattr. `sqe` is the TOCTOU-safe SQE
+    // snapshot the mutation build thunks decode their op-specific scalars + name
+    // sub-lengths from (they carry more fields than op_offset/op_count hold). The
+    // two-fid ops (RENAMEAT / LINK) additionally pin a SECOND registered fid:
+    // `pinned2` is its independent I-30 spoor_ref (NULL for single-fid ops),
+    // `op_fid2` its resolved 9P fid. Both fids are in the SAME p9_client (checked
+    // at submit -- a 9P renameat/link is within one session). `pinned2` is
+    // released symmetric with `pinned` at reap / abandon / loom_free.
+    struct Spoor          *pinned2;     // RENAMEAT/LINK: second I-30 pin (NULL otherwise)
+    u32                    op_fid2;      // RENAMEAT/LINK: resolved second fid
+    struct loom_sqe        sqe;          // TOCTOU snapshot (mutation build-thunk decode)
     // Multishot (Loom-5; specs/loom_multishot.tla). A multishot op re-arms after
     // each NON-terminal reply: loom_async_complete posts a LOOM_CQE_MORE CQE +
     // sets `rearm`; the drive loop (loom_rearm_pending, OUTSIDE c->lock) re-issues
@@ -287,6 +300,7 @@ static void loom_free(struct Loom *l) {
         struct loom_async_op *next = op->next;
         p9_client_abandon_async(op->client, &op->rpc);
         if (op->pinned_buf) burrow_unref(op->pinned_buf);   // Loom-6: release the buffer pin
+        if (op->pinned2)    spoor_clunk(op->pinned2);        // Loom-6b-2: second fid pin
         spoor_clunk(op->pinned);
         kfree(op);
         op = next;
@@ -557,6 +571,10 @@ static void loom_bufcopy(u8 *dst, const u8 *src, u32 n) {
 // cannot silently shift the Loom output ABI -- it trips the build instead.
 _Static_assert(sizeof(struct p9_attr) == 160, "Loom GETATTR output ABI pinned at 160 bytes");
 _Static_assert(sizeof(struct p9_statfs) == 64, "Loom STATFS output ABI pinned at 64 bytes");
+// Loom-6b-2 SETATTR INPUT ABI: userspace writes a struct p9_setattr into the
+// registered buffer; the build thunk reads it (align-safe copy). Pinned so a
+// future kernel field add cannot silently shift the input layout.
+_Static_assert(sizeof(struct p9_setattr) == 56, "Loom SETATTR input ABI pinned at 56 bytes");
 
 static s32 loom_payload_result(struct loom_async_op *op, int status,
                                struct p9_dispatch_result *dr) {
@@ -720,6 +738,64 @@ static int loom_build_statfs(struct p9_session *s, u8 *out, size_t cap, void *ct
     return p9_session_send_statfs(s, out, cap, op->op_fid);
 }
 
+// Loom-6b-2 metadata-MUTATION builders. Each reads its name(s) FROM the pinned
+// buffer region (op->buf_kva, op->op_count bytes -- the WRITE-payload discipline)
+// and decodes its op-specific scalars + name sub-lengths from the TOCTOU SQE
+// snapshot (op->sqe). The submit gate validated every sub-length <= the pinned
+// span and SETATTR's struct span, so these reads never overrun the slice. The
+// two-fid builders pass op->op_fid2 (the second resolved fid). The reply is
+// scalar (Rsetattr / Rmkdir-with-qid-dropped / Runlinkat / ... -> the default
+// 0/-errno mapping in loom_payload_result).
+static int loom_build_setattr(struct p9_session *s, u8 *out, size_t cap, void *ctx) {
+    struct loom_async_op *op = (struct loom_async_op *)ctx;
+    // Copy the input out of the (possibly unaligned) pinned slice into a local:
+    // the wire encoder reads u64 fields, which need natural alignment. The submit
+    // gate checked op_count >= sizeof(struct p9_setattr), so the copy is in-bounds.
+    struct p9_setattr attr;
+    loom_bufcopy((u8 *)&attr, op->buf_kva, (u32)sizeof(attr));
+    return p9_session_send_setattr(s, out, cap, op->op_fid, &attr);
+}
+static int loom_build_unlinkat(struct p9_session *s, u8 *out, size_t cap, void *ctx) {
+    struct loom_async_op *op = (struct loom_async_op *)ctx;
+    return p9_session_send_unlinkat(s, out, cap, op->op_fid,
+                                    op->buf_kva, op->op_count, (u32)op->sqe.offset);
+}
+static int loom_build_mkdir(struct p9_session *s, u8 *out, size_t cap, void *ctx) {
+    struct loom_async_op *op = (struct loom_async_op *)ctx;
+    return p9_session_send_mkdir(s, out, cap, op->op_fid,
+                                 op->buf_kva, op->op_count,
+                                 (u32)op->sqe._resv1[1], (u32)op->sqe._resv1[2]);
+}
+static int loom_build_mknod(struct p9_session *s, u8 *out, size_t cap, void *ctx) {
+    struct loom_async_op *op = (struct loom_async_op *)ctx;
+    return p9_session_send_mknod(s, out, cap, op->op_fid,
+                                 op->buf_kva, op->op_count,
+                                 (u32)op->sqe._resv1[1], (u32)op->sqe._resv1[2],
+                                 (u32)op->sqe._resv1[3], (u32)op->sqe.offset);
+}
+static int loom_build_symlink(struct p9_session *s, u8 *out, size_t cap, void *ctx) {
+    struct loom_async_op *op = (struct loom_async_op *)ctx;
+    u32 name_len = (u32)op->sqe._resv1[1];          // the split (<= op_count, submit-checked)
+    return p9_session_send_symlink(s, out, cap, op->op_fid,
+                                   op->buf_kva, name_len,
+                                   op->buf_kva + name_len, op->op_count - name_len,
+                                   (u32)op->sqe._resv1[2]);
+}
+static int loom_build_renameat(struct p9_session *s, u8 *out, size_t cap, void *ctx) {
+    struct loom_async_op *op = (struct loom_async_op *)ctx;
+    u32 oldname_len = (u32)op->sqe._resv1[1];       // the split (<= op_count, submit-checked)
+    return p9_session_send_renameat(s, out, cap,
+                                    op->op_fid,  op->buf_kva, oldname_len,
+                                    op->op_fid2, op->buf_kva + oldname_len,
+                                    op->op_count - oldname_len);
+}
+static int loom_build_link(struct p9_session *s, u8 *out, size_t cap, void *ctx) {
+    struct loom_async_op *op = (struct loom_async_op *)ctx;
+    // dfid = op_fid (where the link lands); source inode = op_fid2; name = region.
+    return p9_session_send_link(s, out, cap, op->op_fid, op->op_fid2,
+                                op->buf_kva, op->op_count);
+}
+
 // Post a terminal CQE inline (no engine round-trip): the NOP success (result 0)
 // and every submit-time-gate failure (bad opcode / handle / rights / OOM ->
 // -errno). The SQE was consumed; userspace learns the result via the CQE, not a
@@ -744,59 +820,102 @@ static void loom_chain_done(struct Loom *l, struct loom_chain_op *chain, bool ok
 }
 
 // Dispatch a buffer-backed payload op (READ / WRITE / READDIR / READLINK /
-// GETATTR / STATFS; Loom-6a + Loom-6b-1). Resolves + PINS the registered file
+// GETATTR / STATFS -- Loom-6a + 6b-1; SETATTR / MKDIR / MKNOD / SYMLINK /
+// UNLINKAT / RENAMEAT / LINK -- Loom-6b-2). Resolves + PINS the registered file
 // handle (spoor_ref) AND the registered buffer (burrow_ref) -- two independent
 // I-30 submit-time pins held for the op's whole lifetime so a concurrent
 // re-register / clunk / munmap cannot make completion act against a different
-// object or freed pages. Bounds-checks the buffer slice, rights-gates (WRITE ->
-// RIGHT_WRITE; the read-shaped ops -> RIGHT_READ), and submits the async Tmsg.
-// The builder + the required right are selected per-opcode; the rest of the
-// pin / bounds / submit machinery is shared. Single-shot only: a real multishot
-// payload op needs an event-source dev (post-Loom graphics), so MULTISHOT here
-// is rejected by the caller. Every early-return path releases whatever it
-// pinned + posts one CQE.
+// object or freed pages. The two-fid mutation ops (RENAMEAT / LINK) pin a THIRD
+// object -- a second registered handle (the same I-30 mechanism applied again),
+// required in the SAME 9P session as the first. Bounds-checks the buffer slice +
+// (mutation) the name sub-lengths / the SETATTR struct span, rights-gates per
+// opcode (mirroring the kernel-syscall handle-rights for the equivalent op), and
+// submits the async Tmsg. The builder + the required rights are selected
+// per-opcode; the rest of the pin / bounds / submit machinery is shared.
+// Single-shot only: a real multishot payload op needs an event-source dev
+// (post-Loom graphics), so MULTISHOT here is rejected by the caller. Every
+// failure path routes through `fail` -> releases whatever it pinned + posts one
+// CQE.
 static void loom_submit_payload(struct Loom *l, const struct loom_sqe *sqe,
                                 struct loom_chain_op *chain) {
     u64 ud = sqe->user_data;
 
-    // Opcode -> (Tmsg builder, required handle right). The dest/src buffer slice
-    // + the offset/count semantics are uniform (the builder interprets op_offset
-    // / op_count); only these two differ. loom_submit_one routes exactly the six
-    // buffer-backed opcodes here, so the default is unreachable (defensive).
-    p9_session_build_fn build;
-    rights_t            need;
-    switch (sqe->opcode) {
-    case LOOM_OP_WRITE:    build = loom_build_write;    need = RIGHT_WRITE; break;
-    case LOOM_OP_READ:     build = loom_build_read;     need = RIGHT_READ;  break;
-    case LOOM_OP_READDIR:  build = loom_build_readdir;  need = RIGHT_READ;  break;
-    case LOOM_OP_READLINK: build = loom_build_readlink; need = RIGHT_READ;  break;
-    case LOOM_OP_GETATTR:  build = loom_build_getattr;  need = RIGHT_READ;  break;
-    case LOOM_OP_STATFS:   build = loom_build_statfs;   need = RIGHT_READ;  break;
-    default:
-        loom_chain_done(l, chain, false);
-        loom_complete_inline(l, ud, -(s32)T_E_INVAL);
-        return;
-    }
-
-    if (sqe->handle_idx >= LOOM_MAX_REG_HANDLES) {
-        loom_chain_done(l, chain, false);
-        loom_complete_inline(l, ud, -(s32)T_E_INVAL);
-        return;
-    }
-    u64 buf_off = LOOM_SQE_BUF_OFF(sqe);
-    u32 count   = sqe->len;
-    u32 bidx    = sqe->buf_idx_or_off;
-
-    // Resolve + pin the file handle AND the registered buffer TOGETHER under
-    // l->lock, so a concurrent LOOM_REGISTER_HANDLES / LOOM_REGISTER_BUFFERS
-    // re-install cannot free either object between the read and the ref.
-    struct Spoor  *sp = NULL; rights_t rt = 0;
+    // All resolve locals declared before the first `goto fail` (no
+    // jump-bypasses-init). `fail` releases whatever is non-NULL, so the
+    // before-pin early checks route through it harmlessly (all NULL there).
+    // All locals (incl. the sqe-derived ones) declared + initialized BEFORE the
+    // first `goto fail`, so no goto bypasses an initializer (-Wjump-misses-init
+    // clean). `fail` releases whatever is non-NULL, so a before-pin early check
+    // routes through it harmlessly (sp / sp2 / buf all still NULL there).
+    p9_session_build_fn build = NULL;
+    rights_t            need1 = 0;
+    rights_t            need2 = 0;          // 0 => single-fid op
+    bool                has_second = false;
+    struct Spoor  *sp  = NULL, *sp2 = NULL; rights_t rt = 0, rt2 = 0;
     struct Burrow *buf = NULL; u8 *buf_kva = NULL;
+    struct p9_client *cl = NULL; u32 fid = 0, fid2 = 0;
+    struct loom_async_op *op = NULL;
     bool buf_bad = false;
+    s32  err = 0;
+    u32  idx2    = LOOM_SQE_FID2(sqe);
+    u64  buf_off = LOOM_SQE_BUF_OFF(sqe);
+    u32  count   = sqe->len;                // total pinned-region span
+    u32  bidx    = sqe->buf_idx_or_off;
+
+    // Opcode -> (Tmsg builder, primary right, secondary right). need2 != 0 marks
+    // a two-fid op (RENAMEAT / LINK) whose SECOND registered-handle index lives in
+    // LOOM_SQE_FID2(sqe). The rights mirror the kernel-syscall handle gates:
+    // RIGHT_WRITE on a mutated directory / file (create / unlink / rename / wstat),
+    // RIGHT_READ on a merely-referenced source (LINK's). loom_submit_one routes
+    // exactly the buffer-backed opcodes here, so the default is unreachable.
+    switch (sqe->opcode) {
+    case LOOM_OP_WRITE:    build = loom_build_write;    need1 = RIGHT_WRITE; break;
+    case LOOM_OP_READ:     build = loom_build_read;     need1 = RIGHT_READ;  break;
+    case LOOM_OP_READDIR:  build = loom_build_readdir;  need1 = RIGHT_READ;  break;
+    case LOOM_OP_READLINK: build = loom_build_readlink; need1 = RIGHT_READ;  break;
+    case LOOM_OP_GETATTR:  build = loom_build_getattr;  need1 = RIGHT_READ;  break;
+    case LOOM_OP_STATFS:   build = loom_build_statfs;   need1 = RIGHT_READ;  break;
+    case LOOM_OP_SETATTR:  build = loom_build_setattr;  need1 = RIGHT_WRITE; break;
+    case LOOM_OP_MKDIR:    build = loom_build_mkdir;    need1 = RIGHT_WRITE; break;
+    case LOOM_OP_MKNOD:    build = loom_build_mknod;    need1 = RIGHT_WRITE; break;
+    case LOOM_OP_SYMLINK:  build = loom_build_symlink;  need1 = RIGHT_WRITE; break;
+    case LOOM_OP_UNLINKAT: build = loom_build_unlinkat; need1 = RIGHT_WRITE; break;
+    case LOOM_OP_RENAMEAT: build = loom_build_renameat; need1 = RIGHT_WRITE; need2 = RIGHT_WRITE; break;
+    case LOOM_OP_LINK:     build = loom_build_link;     need1 = RIGHT_WRITE; need2 = RIGHT_READ;  break;
+    default: err = -(s32)T_E_INVAL; goto fail;
+    }
+    has_second = (need2 != 0);
+
+    if (sqe->handle_idx >= LOOM_MAX_REG_HANDLES) { err = -(s32)T_E_INVAL; goto fail; }
+    if (has_second && idx2 >= LOOM_MAX_REG_HANDLES) { err = -(s32)T_E_INVAL; goto fail; }
+
+    // Submit-time descriptor validation on the kernel SNAPSHOT (ring TOCTOU --
+    // never re-read the shared ring after this). These are MEMORY-SAFETY gates
+    // that bound the build thunk's reads into the pinned region:
+    //   - a two-name op (SYMLINK / RENAMEAT) splits the region at _resv1[1]; that
+    //     sub-length must be <= the span (else buf_kva + sub leaves the slice or
+    //     span - sub underflows to a huge length);
+    //   - SETATTR's region must hold a whole struct p9_setattr.
+    // (A merely-over-msize name is caught later by the builder returning < 0 -> one
+    // error CQE; THIS check is the memory-safety gate, not the protocol one.)
+    if ((sqe->opcode == LOOM_OP_SYMLINK || sqe->opcode == LOOM_OP_RENAMEAT) &&
+        (u32)sqe->_resv1[1] > count) { err = -(s32)T_E_INVAL; goto fail; }
+    if (sqe->opcode == LOOM_OP_SETATTR &&
+        count < (u32)sizeof(struct p9_setattr)) { err = -(s32)T_E_INVAL; goto fail; }
+
+    // Resolve + pin the primary handle, the SECOND handle (two-fid ops), AND the
+    // registered buffer TOGETHER under one l->lock, so a concurrent
+    // LOOM_REGISTER_HANDLES / LOOM_REGISTER_BUFFERS re-install cannot free any of
+    // them between the read and the ref.
     spin_lock(&l->lock);
     sp = l->reg[sqe->handle_idx].spoor;
     rt = l->reg[sqe->handle_idx].rights;
     if (sp) spoor_ref(sp);
+    if (has_second) {
+        sp2 = l->reg[idx2].spoor;
+        rt2 = l->reg[idx2].rights;
+        if (sp2) spoor_ref(sp2);
+    }
     if (bidx < l->n_reg_buf && l->reg_buf[bidx].burrow) {
         struct loom_reg_buffer *rb = &l->reg_buf[bidx];
         // Slice bounds (no overflow: rb->len is u32, buf_off u64): the op's
@@ -813,54 +932,40 @@ static void loom_submit_payload(struct Loom *l, const struct loom_sqe *sqe,
     }
     spin_unlock(&l->lock);
 
-    if (!sp) {                                              // empty handle slot
-        if (buf) burrow_unref(buf);
-        loom_chain_done(l, chain, false);
-        loom_complete_inline(l, ud, -(s32)T_E_BADF);
-        return;
+    // Failure ladder -> the single cleanup epilogue. The success path adopts
+    // sp / sp2 / buf into the op and returns BEFORE `fail`.
+    if (!sp)                          { err = -(s32)T_E_BADF;  goto fail; }   // empty primary slot
+    if (has_second && !sp2)           { err = -(s32)T_E_BADF;  goto fail; }   // empty second slot
+    if (buf_bad)                      { err = -(s32)T_E_INVAL; goto fail; }   // bad buf idx / OOB slice
+    // Submit-time rights gates (I-2 / I-6; reg in AllowedObjs). Snapshot at
+    // submit, NEVER re-checked at completion (I-30). need1/need2 were selected
+    // from the opcode above.
+    if (!(rt & need1))                { err = -(s32)T_E_ACCES; goto fail; }
+    if (has_second && !(rt2 & need2)) { err = -(s32)T_E_ACCES; goto fail; }
+    if (dev9p_client_fid(sp, &cl, &fid) != 0) { err = -(s32)T_E_INVAL; goto fail; }   // not a dev9p Spoor
+    if (has_second) {
+        struct p9_client *cl2; u32 f2;
+        if (dev9p_client_fid(sp2, &cl2, &f2) != 0) { err = -(s32)T_E_INVAL; goto fail; }
+        // A 9P renameat/link names two fids in ONE fid namespace -- reject a
+        // cross-session pair (mirrors sys_rename's same-Dev/same-p9_client gate).
+        if (cl2 != cl)                             { err = -(s32)T_E_INVAL; goto fail; }
+        fid2 = f2;
     }
-    if (buf_bad) {                                          // bad buf idx / OOB slice
-        spoor_clunk(sp);
-        loom_chain_done(l, chain, false);
-        loom_complete_inline(l, ud, -(s32)T_E_INVAL);
-        return;
-    }
-    // Submit-time rights gate (I-2 / I-6; the spec's reg in AllowedObjs).
-    // Snapshot at submit, never re-checked at completion (I-30). `need` was
-    // selected from the opcode above.
-    if (!(rt & need)) {
-        burrow_unref(buf);
-        spoor_clunk(sp);
-        loom_chain_done(l, chain, false);
-        loom_complete_inline(l, ud, -(s32)T_E_ACCES);
-        return;
-    }
-    struct p9_client *cl; u32 fid;
-    if (dev9p_client_fid(sp, &cl, &fid) != 0) {             // not a dev9p Spoor
-        burrow_unref(buf);
-        spoor_clunk(sp);
-        loom_chain_done(l, chain, false);
-        loom_complete_inline(l, ud, -(s32)T_E_INVAL);
-        return;
-    }
-    struct loom_async_op *op = kmalloc(sizeof(*op), KP_ZERO);
-    if (!op) {
-        burrow_unref(buf);
-        spoor_clunk(sp);
-        loom_chain_done(l, chain, false);
-        loom_complete_inline(l, ud, -(s32)T_E_NOMEM);
-        return;
-    }
+    op = kmalloc(sizeof(*op), KP_ZERO);
+    if (!op) { err = -(s32)T_E_NOMEM; goto fail; }
     op->loom        = l;
     op->client      = cl;
-    op->pinned      = sp;                 // adopt the handle pin
+    op->pinned      = sp;                 // adopt the primary pin
+    op->pinned2     = sp2;                // adopt the second pin (NULL for single-fid)
     op->build       = build;              // opcode-selected (above)
     op->user_data   = ud;
     op->op_fid      = fid;
-    op->op_offset   = sqe->offset;        // file/dir offset, or GETATTR request_mask
-    op->op_count    = count;              // wire count (READ/READDIR/WRITE) or dest cap
+    op->op_fid2     = fid2;
+    op->op_offset   = sqe->offset;        // file/dir offset / GETATTR request_mask / op scalar
+    op->op_count    = count;              // wire count / dest cap / pinned-region span
     op->pinned_buf  = buf;                // adopt the buffer pin
     op->buf_kva     = buf_kva;
+    op->sqe         = *sqe;               // TOCTOU snapshot (mutation build-thunk decode)
     op->opcode      = sqe->opcode;
     op->terminal    = false;
     op->multishot   = false;              // single-shot (no event-source dev yet)
@@ -875,6 +980,14 @@ static void loom_submit_payload(struct Loom *l, const struct loom_sqe *sqe,
     l->async_inflight++;
     spin_unlock(&l->lock);
     (void)p9_client_submit_async(cl, &op->rpc, op->build, op);
+    return;
+
+fail:
+    if (buf) burrow_unref(buf);
+    if (sp2) spoor_clunk(sp2);
+    if (sp)  spoor_clunk(sp);
+    loom_chain_done(l, chain, false);
+    loom_complete_inline(l, ud, err);
 }
 
 // Dispatch ONE already-copied-to-kernel SQE (`sqe` is a kernel-private snapshot,
@@ -1014,10 +1127,19 @@ static void loom_submit_one(struct Loom *l, const struct loom_sqe *sqe,
     case LOOM_OP_READLINK:
     case LOOM_OP_GETATTR:
     case LOOM_OP_STATFS:
+    case LOOM_OP_SETATTR:
+    case LOOM_OP_MKDIR:
+    case LOOM_OP_MKNOD:
+    case LOOM_OP_SYMLINK:
+    case LOOM_OP_UNLINKAT:
+    case LOOM_OP_RENAMEAT:
+    case LOOM_OP_LINK:
         // Buffer-backed payload ops (Loom-6a READ/WRITE + Loom-6b-1 read-shaped
-        // metadata). Each names a registered file fid + a registered buffer;
-        // loom_submit_payload pins both (two I-30 pins) and bounds-checks the
-        // slice. MULTISHOT needs a real event-source dev (a file fid replies
+        // metadata + Loom-6b-2 metadata mutation). Each names a registered file/
+        // dir fid + a registered buffer (the names / the input struct); the
+        // two-fid ops name a second registered fid too. loom_submit_payload pins
+        // all of them (the I-30 submit-time pins) and bounds-checks every slice +
+        // sub-length. MULTISHOT needs a real event-source dev (a file fid replies
         // once, so a multishot file op would spin re-issuing the same Tmsg) --
         // reject the combo until that dev exists; the multishot mechanism stays
         // validated by the synthetic FSYNC vehicle.
@@ -1030,15 +1152,13 @@ static void loom_submit_one(struct Loom *l, const struct loom_sqe *sqe,
         return;
 
     default:
-        // The remaining in-range opcodes split two ways. The fid-lifecycle /
-        // direct-descriptor ops (WALK / LOPEN / LCREATE / CLUNK) mint, open, or
-        // release a fid -- our registered handles wrap already-OPEN fids, so
+        // The remaining in-range opcodes are the fid-lifecycle / direct-
+        // descriptor ops (WALK / LOPEN / LCREATE / CLUNK) -- they mint, open, or
+        // release a fid, but our registered handles wrap already-OPEN fids, so
         // these need the registered-slot install/release surface (the io_uring
         // direct-descriptor analog) + its own audit: a documented post-6b seam
-        // (LOOM.md, task #916). The mutation ops (SETATTR / MKDIR / SYMLINK /
-        // MKNOD / UNLINKAT / RENAMEAT / RENAME / LINK) land with Loom-6b-2. Both
-        // post -ENOSYS until then. WIRE_PASSTHROUGH stays reserved (LOOM.md 7).
-        // Out-of-range opcodes are -EINVAL.
+        // (LOOM.md, task #916). WIRE_PASSTHROUGH stays reserved (LOOM.md 7). All
+        // post -ENOSYS; out-of-range opcodes are -EINVAL.
         loom_chain_done(l, chain, false);
         if (sqe->opcode < LOOM_OP_COUNT)
             loom_complete_inline(l, ud, -(s32)T_E_NOSYS);
@@ -1113,6 +1233,7 @@ static void loom_reap_terminal(struct Loom *l) {
     while (done) {
         struct loom_async_op *next = done->next;
         if (done->pinned_buf) burrow_unref(done->pinned_buf);   // Loom-6: buffer pin
+        if (done->pinned2)    spoor_clunk(done->pinned2);        // Loom-6b-2: second fid pin
         spoor_clunk(done->pinned);   // release the I-30 pin (may sleep)
         kfree(done);
         done = next;

@@ -60,6 +60,10 @@ void test_9p_client_loom_readlink_e2e(void);
 void test_9p_client_loom_getattr_e2e(void);
 void test_9p_client_loom_statfs_e2e(void);
 void test_9p_client_loom_metaread_rejects(void);
+void test_9p_client_loom_mkdir_e2e(void);
+void test_9p_client_loom_setattr_e2e(void);
+void test_9p_client_loom_renameat_e2e(void);
+void test_9p_client_loom_mutation_rejects(void);
 
 // File-scope buffers (kernel test stack is 16 KiB — client struct is
 // ~4 KiB; multiple in one frame is fine but file-scope is cleaner).
@@ -1762,6 +1766,316 @@ void test_9p_client_loom_metaread_rejects(void) {
                    "GETATTR without RIGHT_READ -> -EACCES");
     TEST_EXPECT_EQ((u64)(s64)cqes[1].result, (u64)(s64)(-(s32)T_E_INVAL),
                    "READDIR bad buf idx -> -EINVAL");
+    TEST_EXPECT_EQ((u64)l->async_inflight, (u64)0, "no op ever went in flight");
+    TEST_ASSERT(l->inflight_ops == NULL, "no async container allocated");
+
+    burrow_unref(b);
+    loom_unref(l);
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}
+
+// =============================================================================
+// Loom-6b-2: the metadata-MUTATION ops (SETATTR / MKDIR / MKNOD / SYMLINK /
+// UNLINKAT / RENAMEAT / LINK). Each reads its name(s) / input struct FROM the
+// pinned registered buffer (the WRITE-payload discipline); the two-fid ops
+// (RENAMEAT / LINK) pin a SECOND registered handle. The reply is scalar
+// (0 / -errno). White-box install of the registered handle(s) + buffer, like the
+// 6a/6b-1 e2e tests.
+// =============================================================================
+
+// Install `sp` into l->reg[idx] with `rights`, taking ONE extra ref so the test
+// can register the same Spoor in two slots (the two-fid ops) without
+// double-adopting dev9p_attach_client's single ref. loom_unref clunks both.
+static void loom_install_test_handle(struct Loom *l, u32 idx, struct Spoor *sp,
+                                     rights_t rights) {
+    spoor_ref(sp);
+    spin_lock(&l->lock);
+    l->reg[idx].spoor  = sp;
+    l->reg[idx].rights = rights;
+    spin_unlock(&l->lock);
+}
+
+// Stage a mutation SQE: the full field set incl. the reserved-tail scalars +
+// name sub-lengths (_resv1[1]/_resv1[2]) + the second-handle index (_resv1[3]).
+static void cl_stage_mut(struct Loom *l, u32 slot, u8 opcode, u32 handle_idx,
+                         u64 offset, u32 len, u32 bidx, u64 buf_off,
+                         u64 r1, u64 r2, u64 r3, u64 user_data) {
+    struct loom_sqe *sqes = (struct loom_sqe *)(l->ring_kva + l->sqe_off);
+    u32 *sqa = (u32 *)(l->ring_kva + l->sq_array_off);
+    struct loom_sqe *s = &sqes[slot];
+    for (u32 i = 0; i < sizeof(*s); i++) ((u8 *)s)[i] = 0;
+    s->opcode         = opcode;
+    s->handle_idx     = handle_idx;
+    s->offset         = offset;
+    s->len            = len;
+    s->buf_idx_or_off = bidx;
+    s->_resv1[0]      = buf_off;     // LOOM_SQE_BUF_OFF
+    s->_resv1[1]      = r1;
+    s->_resv1[2]      = r2;
+    s->_resv1[3]      = r3;          // LOOM_SQE_FID2 (two-fid ops)
+    s->user_data      = user_data;
+    sqa[slot] = slot;
+}
+
+// Capture responder for the mutation tests: stash the on-wire name(s) / struct
+// fields the build thunk read out of the pinned buffer (proving the buffer bytes
+// reached the wire), then delegate every reply to canonical_responder.
+static u8  g_loom_mname[64];  static u32 g_loom_mname_len;
+static u32 g_loom_mname_mode;
+static u8  g_loom_mname2[64]; static u32 g_loom_mname2_len;
+static u32 g_loom_msetattr_valid; static u32 g_loom_msetattr_mode;
+static u32 loom_rd_le16(const u8 *p) { return (u32)p[0] | ((u32)p[1] << 8); }
+static u32 loom_rd_le32(const u8 *p) {
+    return (u32)p[0] | ((u32)p[1] << 8) | ((u32)p[2] << 16) | ((u32)p[3] << 24);
+}
+static void loom_cap_name(u8 *dst, u32 *dlen, const u8 *src, u32 n) {
+    if (n > 64) n = 64;
+    for (u32 i = 0; i < n; i++) dst[i] = src[i];
+    *dlen = n;
+}
+static int loom_mut_capture_responder(void *ctx, const u8 *req, size_t req_len,
+                                      u8 *resp, size_t cap) {
+    u32 size; u8 type; u16 tag;
+    if (p9_peek_header(req, req_len, &size, &type, &tag) >= 0) {
+        if (type == P9_TMKDIR && req_len >= (size_t)P9_HDR_LEN + 6) {
+            u32 nl = loom_rd_le16(req + P9_HDR_LEN + 4);              // name s len
+            if (req_len >= (size_t)P9_HDR_LEN + 6 + nl + 4) {
+                loom_cap_name(g_loom_mname, &g_loom_mname_len, req + P9_HDR_LEN + 6, nl);
+                g_loom_mname_mode = loom_rd_le32(req + P9_HDR_LEN + 6 + nl);  // mode after name
+            }
+        } else if (type == P9_TSETATTR && req_len >= (size_t)P9_HDR_LEN + 12) {
+            g_loom_msetattr_valid = loom_rd_le32(req + P9_HDR_LEN + 4);   // valid u32
+            g_loom_msetattr_mode  = loom_rd_le32(req + P9_HDR_LEN + 8);   // mode u32
+        } else if (type == P9_TRENAMEAT && req_len >= (size_t)P9_HDR_LEN + 6) {
+            u32 onl = loom_rd_le16(req + P9_HDR_LEN + 4);            // oldname s len
+            size_t after_old = (size_t)P9_HDR_LEN + 6 + onl;        // -> newdirfid
+            if (req_len >= after_old)
+                loom_cap_name(g_loom_mname, &g_loom_mname_len, req + P9_HDR_LEN + 6, onl);
+            if (req_len >= after_old + 6) {
+                u32 nnl = loom_rd_le16(req + after_old + 4);         // newname s len
+                if (req_len >= after_old + 6 + nnl)
+                    loom_cap_name(g_loom_mname2, &g_loom_mname2_len, req + after_old + 6, nnl);
+            }
+        }
+    }
+    return canonical_responder(ctx, req, req_len, resp, cap);
+}
+
+// MKDIR end-to-end: the name + mode are read FROM the pinned buffer / the SQE;
+// the capture responder proves both reached the wire; the scalar Rmkdir (qid
+// dropped at v1.0) -> result 0. Exercises the name-from-buffer mechanism + the
+// per-op scalar decode + the RIGHT_WRITE dir gate.
+void test_9p_client_loom_mkdir_e2e(void) {
+    g_loom_mname_len = 0; g_loom_mname_mode = 0;
+    int rc = p9_loopback_init(&g_loopback, g_loopback_resp, sizeof(g_loopback_resp),
+                              loom_mut_capture_responder, NULL);
+    TEST_EXPECT_EQ(rc, 0, "loopback init (mut capture)");
+    // Drive the open MANUALLY (not drive_client_open, which would reset the
+    // loopback to the canonical responder + clobber the capture): the handshake
+    // rides the capture responder, which delegates Tversion/Tattach to canonical.
+    rc = p9_client_init(&g_client, /*root_fid=*/0, /*msize=*/8192,
+                        p9_loopback_ops_for(&g_loopback), g_recv_buf, sizeof(g_recv_buf));
+    TEST_EXPECT_EQ(rc, 0, "client init");
+    const u8 uname[] = {'r','o','o','t'};
+    const u8 aname[] = {'/'};
+    TEST_EXPECT_EQ(p9_client_handshake(&g_client, uname, sizeof(uname), aname, sizeof(aname), 0),
+                   0, "handshake");
+    struct Spoor *sp = dev9p_attach_client(&g_client, 0);
+    TEST_ASSERT(sp != NULL, "dev9p_attach_client");
+    struct Loom *l = loom_create(8, 16);
+    TEST_ASSERT(l != NULL, "loom_create");
+    rights_t rt = RIGHT_WRITE;          // create requires RIGHT_WRITE on the dir
+    TEST_ASSERT(loom_register_handles(l, &sp, &rt, 1) == 0, "register write dir handle");
+
+    struct Burrow *b; u8 *bkva;
+    loom_install_test_buf(l, 0, PAGE_SIZE, &b, &bkva);
+    int hc0 = burrow_handle_count(b);
+    const char *nm = "subdir";
+    for (u32 i = 0; i < 6; i++) bkva[i] = (u8)nm[i];
+
+    struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+    struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
+
+    // MKDIR: handle=0 (dir); region [0,6) = the name; _resv1[1]=mode 0755, _resv1[2]=gid.
+    cl_stage_mut(l, 0, LOOM_OP_MKDIR, /*handle=*/0, /*offset=*/0, /*len=*/6,
+                 /*bidx=*/0, /*buf_off=*/0, /*mode=*/0755u, /*gid=*/0, /*fid2=*/0,
+                 0xD1D0000000000000ULL);
+    __atomic_store_n(&h->sq_tail, 1u, __ATOMIC_RELEASE);
+
+    int n = loom_enter(l, 1, 1, 0);
+    TEST_EXPECT_EQ(n, 1, "one SQE consumed");
+    TEST_EXPECT_EQ((u64)(s64)cqes[0].result, (u64)0, "MKDIR result = 0 (scalar success)");
+    TEST_EXPECT_EQ((u64)g_loom_mname_len, (u64)6, "mkdir name length on wire");
+    TEST_ASSERT(g_loom_mname[0]=='s' && g_loom_mname[3]=='d' && g_loom_mname[5]=='r',
+                "mkdir name bytes read from the pinned buffer");
+    TEST_EXPECT_EQ((u64)g_loom_mname_mode, (u64)0755u, "mkdir mode decoded from the SQE");
+    TEST_EXPECT_EQ((u64)l->async_inflight, (u64)0, "op reaped");
+    TEST_EXPECT_EQ(burrow_handle_count(b), hc0, "op buffer pin balanced");
+
+    burrow_unref(b);
+    loom_unref(l);
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}
+
+// SETATTR end-to-end: the input struct p9_setattr is read FROM the pinned buffer
+// (align-safe copy); the capture responder proves valid + mode reached the wire;
+// Rsetattr (empty) -> result 0. Exercises the struct-from-buffer input path.
+void test_9p_client_loom_setattr_e2e(void) {
+    g_loom_msetattr_valid = 0; g_loom_msetattr_mode = 0;
+    int rc = p9_loopback_init(&g_loopback, g_loopback_resp, sizeof(g_loopback_resp),
+                              loom_mut_capture_responder, NULL);
+    TEST_EXPECT_EQ(rc, 0, "loopback init (mut capture)");
+    // Drive the open MANUALLY (not drive_client_open, which would reset the
+    // loopback to the canonical responder + clobber the capture): the handshake
+    // rides the capture responder, which delegates Tversion/Tattach to canonical.
+    rc = p9_client_init(&g_client, /*root_fid=*/0, /*msize=*/8192,
+                        p9_loopback_ops_for(&g_loopback), g_recv_buf, sizeof(g_recv_buf));
+    TEST_EXPECT_EQ(rc, 0, "client init");
+    const u8 uname[] = {'r','o','o','t'};
+    const u8 aname[] = {'/'};
+    TEST_EXPECT_EQ(p9_client_handshake(&g_client, uname, sizeof(uname), aname, sizeof(aname), 0),
+                   0, "handshake");
+    struct Spoor *sp = dev9p_attach_client(&g_client, 0);
+    TEST_ASSERT(sp != NULL, "dev9p_attach_client");
+    struct Loom *l = loom_create(8, 16);
+    TEST_ASSERT(l != NULL, "loom_create");
+    rights_t rt = RIGHT_WRITE;          // setattr mutates metadata -> RIGHT_WRITE
+    TEST_ASSERT(loom_register_handles(l, &sp, &rt, 1) == 0, "register write handle");
+
+    struct Burrow *b; u8 *bkva;
+    loom_install_test_buf(l, 0, PAGE_SIZE, &b, &bkva);
+    int hc0 = burrow_handle_count(b);
+    // Write a struct p9_setattr into the registered buffer (valid=MODE, mode=0600).
+    struct p9_setattr *sa = (struct p9_setattr *)bkva;
+    for (u32 i = 0; i < sizeof(*sa); i++) ((u8 *)sa)[i] = 0;
+    sa->valid = P9_SETATTR_MODE; sa->mode = 0600u;
+
+    struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+    struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
+
+    cl_stage_mut(l, 0, LOOM_OP_SETATTR, /*handle=*/0, /*offset=*/0,
+                 /*len=*/(u32)sizeof(struct p9_setattr), /*bidx=*/0, /*buf_off=*/0,
+                 0, 0, 0, 0x5E77000000000000ULL);
+    __atomic_store_n(&h->sq_tail, 1u, __ATOMIC_RELEASE);
+
+    int n = loom_enter(l, 1, 1, 0);
+    TEST_EXPECT_EQ(n, 1, "one SQE consumed");
+    TEST_EXPECT_EQ((u64)(s64)cqes[0].result, (u64)0, "SETATTR result = 0 (scalar success)");
+    TEST_EXPECT_EQ((u64)g_loom_msetattr_valid, (u64)P9_SETATTR_MODE, "setattr valid mask on wire");
+    TEST_EXPECT_EQ((u64)g_loom_msetattr_mode, (u64)0600u, "setattr mode read from the buffer");
+    TEST_EXPECT_EQ((u64)l->async_inflight, (u64)0, "op reaped");
+    TEST_EXPECT_EQ(burrow_handle_count(b), hc0, "op buffer pin balanced");
+
+    burrow_unref(b);
+    loom_unref(l);
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}
+
+// RENAMEAT end-to-end: a TWO-FID op. olddir = reg slot 0, newdir = reg slot 1
+// (the same Spoor registered twice). The buffer holds oldname ++ newname; the
+// split rides _resv1[1]; the second handle index rides _resv1[3]. The capture
+// responder proves BOTH names reached the wire; Rrenameat (empty) -> result 0.
+// Exercises the second-fid resolve+pin (two I-30 pins) + the two-name split.
+void test_9p_client_loom_renameat_e2e(void) {
+    g_loom_mname_len = 0; g_loom_mname2_len = 0;
+    int rc = p9_loopback_init(&g_loopback, g_loopback_resp, sizeof(g_loopback_resp),
+                              loom_mut_capture_responder, NULL);
+    TEST_EXPECT_EQ(rc, 0, "loopback init (mut capture)");
+    // Drive the open MANUALLY (not drive_client_open, which would reset the
+    // loopback to the canonical responder + clobber the capture): the handshake
+    // rides the capture responder, which delegates Tversion/Tattach to canonical.
+    rc = p9_client_init(&g_client, /*root_fid=*/0, /*msize=*/8192,
+                        p9_loopback_ops_for(&g_loopback), g_recv_buf, sizeof(g_recv_buf));
+    TEST_EXPECT_EQ(rc, 0, "client init");
+    const u8 uname[] = {'r','o','o','t'};
+    const u8 aname[] = {'/'};
+    TEST_EXPECT_EQ(p9_client_handshake(&g_client, uname, sizeof(uname), aname, sizeof(aname), 0),
+                   0, "handshake");
+    struct Spoor *sp = dev9p_attach_client(&g_client, 0);
+    TEST_ASSERT(sp != NULL, "dev9p_attach_client");
+    struct Loom *l = loom_create(8, 16);
+    TEST_ASSERT(l != NULL, "loom_create");
+    rights_t rt = RIGHT_WRITE;
+    TEST_ASSERT(loom_register_handles(l, &sp, &rt, 1) == 0, "register olddir (slot 0)");
+    loom_install_test_handle(l, 1, sp, RIGHT_WRITE);   // newdir (slot 1; same Spoor)
+
+    struct Burrow *b; u8 *bkva;
+    loom_install_test_buf(l, 0, PAGE_SIZE, &b, &bkva);
+    int hc0 = burrow_handle_count(b);
+    bkva[0]='o'; bkva[1]='l'; bkva[2]='d'; bkva[3]='n'; bkva[4]='e'; bkva[5]='w';
+
+    struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+    struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
+
+    // RENAMEAT: handle=0 (olddir); region [0,6) = oldname ++ newname; _resv1[1]=3
+    // (oldname_len split); _resv1[3]=1 (newdir handle index).
+    cl_stage_mut(l, 0, LOOM_OP_RENAMEAT, /*handle=*/0, /*offset=*/0, /*len=*/6,
+                 /*bidx=*/0, /*buf_off=*/0, /*oldname_len=*/3, /*r2=*/0, /*fid2=*/1,
+                 0xBE77000000000000ULL);
+    __atomic_store_n(&h->sq_tail, 1u, __ATOMIC_RELEASE);
+
+    int n = loom_enter(l, 1, 1, 0);
+    TEST_EXPECT_EQ(n, 1, "one SQE consumed");
+    TEST_EXPECT_EQ((u64)(s64)cqes[0].result, (u64)0, "RENAMEAT result = 0 (scalar success)");
+    TEST_EXPECT_EQ((u64)g_loom_mname_len, (u64)3, "oldname length on wire");
+    TEST_ASSERT(g_loom_mname[0]=='o' && g_loom_mname[1]=='l' && g_loom_mname[2]=='d',
+                "oldname bytes from the pinned buffer [0,3)");
+    TEST_EXPECT_EQ((u64)g_loom_mname2_len, (u64)3, "newname length on wire");
+    TEST_ASSERT(g_loom_mname2[0]=='n' && g_loom_mname2[1]=='e' && g_loom_mname2[2]=='w',
+                "newname bytes from the pinned buffer [3,6)");
+    TEST_EXPECT_EQ((u64)l->async_inflight, (u64)0, "op reaped");
+    TEST_ASSERT(l->inflight_ops == NULL, "both fid pins released at reap");
+    TEST_EXPECT_EQ(burrow_handle_count(b), hc0, "op buffer pin balanced");
+
+    burrow_unref(b);
+    loom_unref(l);
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}
+
+// Submit-time rejections for the mutation ops -- the rights gate + the
+// memory-safety guards, all inline (no op goes async):
+//   (1) MKDIR on a RIGHT_READ-only dir -> -EACCES (mirrors the create gate);
+//   (2) RENAMEAT with a second-handle index out of range -> -EINVAL;
+//   (3) SYMLINK with name_len (_resv1[1]) > the pinned span -> -EINVAL (the
+//       two-name split overrun guard);
+//   (4) SETATTR with a span shorter than struct p9_setattr -> -EINVAL.
+void test_9p_client_loom_mutation_rejects(void) {
+    drive_client_open(&g_client, &g_loopback);   // canonical responder
+    struct Spoor *sp = dev9p_attach_client(&g_client, 0);
+    TEST_ASSERT(sp != NULL, "dev9p_attach_client");
+    struct Loom *l = loom_create(8, 16);
+    TEST_ASSERT(l != NULL, "loom_create");
+    rights_t rt = RIGHT_READ;            // READ-only: a mutation op is denied
+    TEST_ASSERT(loom_register_handles(l, &sp, &rt, 1) == 0, "register read-only handle");
+
+    struct Burrow *b; u8 *bkva;
+    loom_install_test_buf(l, 0, PAGE_SIZE, &b, &bkva);
+
+    struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+    struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
+
+    cl_stage_mut(l, 0, LOOM_OP_MKDIR, 0, 0, /*len=*/4, /*bidx=*/0, 0, 0755u, 0, 0, 0x1u);
+    cl_stage_mut(l, 1, LOOM_OP_RENAMEAT, 0, 0, /*len=*/4, /*bidx=*/0, 0,
+                 /*oldname_len=*/2, 0, /*fid2=*/LOOM_MAX_REG_HANDLES, 0x2u);
+    cl_stage_mut(l, 2, LOOM_OP_SYMLINK, 0, 0, /*len=*/4, /*bidx=*/0, 0,
+                 /*name_len=*/9, 0, 0, 0x3u);   // name_len > span
+    cl_stage_mut(l, 3, LOOM_OP_SETATTR, 0, 0, /*len=*/8, /*bidx=*/0, 0, 0, 0, 0, 0x4u);
+    __atomic_store_n(&h->sq_tail, 4u, __ATOMIC_RELEASE);
+
+    int n = loom_enter(l, 4, 0, LOOM_ENTER_NONBLOCK);
+    TEST_EXPECT_EQ(n, 4, "four SQEs consumed (all rejected inline)");
+    TEST_EXPECT_EQ((u64)(s64)cqes[0].result, (u64)(s64)(-(s32)T_E_ACCES),
+                   "MKDIR without RIGHT_WRITE -> -EACCES");
+    TEST_EXPECT_EQ((u64)(s64)cqes[1].result, (u64)(s64)(-(s32)T_E_INVAL),
+                   "RENAMEAT bad second-handle index -> -EINVAL");
+    TEST_EXPECT_EQ((u64)(s64)cqes[2].result, (u64)(s64)(-(s32)T_E_INVAL),
+                   "SYMLINK name_len > span -> -EINVAL (overrun guard)");
+    TEST_EXPECT_EQ((u64)(s64)cqes[3].result, (u64)(s64)(-(s32)T_E_INVAL),
+                   "SETATTR span < struct -> -EINVAL");
     TEST_EXPECT_EQ((u64)l->async_inflight, (u64)0, "no op ever went in flight");
     TEST_ASSERT(l->inflight_ops == NULL, "no async container allocated");
 

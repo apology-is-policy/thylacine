@@ -119,14 +119,50 @@ _Static_assert(__builtin_offsetof(struct loom_sqe, user_data) == 24, "user_data 
 // layout IS struct p9_attr / struct p9_statfs (pinned by _Static_assert in
 // loom.c; the native libthyla_rs::loom side mirrors them at Loom-6d).
 //
-// NOT YET DISPATCHED (post-6b): the fid-mutation / direct-descriptor ops
+// Metadata-MUTATION ops (Loom-6b-2). Each reads its name(s) FROM the pinned
+// buffer region (the WRITE-payload discipline) -- `len` is the TOTAL region
+// span the kernel bounds-checks + pins, and the build thunk reads names within
+// it. The per-op scalars ride the reserved tail; the two-fid ops name a SECOND
+// registered handle uniformly in LOOM_SQE_FID2 (= _resv1[3]). Each mirrors the
+// kernel-syscall handle-rights gate for the equivalent op (RIGHT_WRITE on a
+// mutated directory / file; the identity axis stays the dev9p server's, as for
+// the 6a data ops). All are single-shot + scalar-result (0 success / -errno);
+// the create ops drop the returned qid at v1.0.
+//
+//   LOOM_OP_SETATTR:  handle_idx = file fid (RIGHT_WRITE); the pinned region is
+//                  a `struct p9_setattr` (len >= sizeof, 56 bytes) the build
+//                  reads as the input.
+//   LOOM_OP_UNLINKAT: handle_idx = dir fid (RIGHT_WRITE); region = the name
+//                  (len = name_len); offset = flags (P9_UNLINK_AT_REMOVEDIR).
+//   LOOM_OP_MKDIR:    handle_idx = dir fid (RIGHT_WRITE); region = name;
+//                  _resv1[1] = mode; _resv1[2] = gid.
+//   LOOM_OP_MKNOD:    handle_idx = dir fid (RIGHT_WRITE); region = name;
+//                  _resv1[1] = mode; _resv1[2] = major; _resv1[3] = minor;
+//                  offset = gid.
+//   LOOM_OP_SYMLINK:  handle_idx = dir fid (RIGHT_WRITE); region = name ++
+//                  symtgt (len = total span); _resv1[1] = name_len (the split,
+//                  <= len); symtgt = region[name_len .. len); _resv1[2] = gid.
+//   LOOM_OP_RENAMEAT: handle_idx = olddir fid (RIGHT_WRITE); _resv1[3] = newdir
+//                  fid (RIGHT_WRITE); region = oldname ++ newname (len = span);
+//                  _resv1[1] = oldname_len (<= len); newname = region[oldname_len
+//                  .. len). Both fids MUST be in the same 9P session.
+//   LOOM_OP_LINK:     handle_idx = dir fid (RIGHT_WRITE, where the link lands);
+//                  _resv1[3] = source fid (RIGHT_READ); region = the link name
+//                  (len = name_len). Both fids in the same 9P session.
+//
+// NOT YET DISPATCHED (post-6b): the fid-lifecycle / direct-descriptor ops
 // (LOOM_OP_WALK / LOPEN / LCREATE / CLUNK) mint, open, or release a fid. Our
 // registered handles wrap ALREADY-OPEN fids, so these need a registered-slot
 // install/release surface (the io_uring direct-descriptor analog) + their own
-// audit -- a documented seam (LOOM.md, task #916). The metadata-MUTATION ops
-// (SETATTR / MKDIR / SYMLINK / MKNOD / UNLINKAT / RENAMEAT / RENAME / LINK) land
-// with Loom-6b-2. All post -ENOSYS until their sub-chunk lands.
+// audit -- a documented seam (LOOM.md, task #916). LOOM_OP_WIRE_PASSTHROUGH
+// stays reserved. All post -ENOSYS until their sub-chunk lands.
 #define LOOM_SQE_BUF_OFF(sqe)  ((sqe)->_resv1[0])
+
+// The second registered-handle index for the two-fid mutation ops (RENAMEAT
+// newdir, LINK source). Uniform across both so the submit path reads it from
+// one place; ignored for every single-fid op (which may reuse _resv1[3] for an
+// unrelated scalar, e.g. MKNOD's minor -- the field is opcode-tagged).
+#define LOOM_SQE_FID2(sqe)     ((u32)(sqe)->_resv1[3])
 
 // =============================================================================
 // CQE -- one completion entry. 16 bytes. result >= 0 = byte count / packed qid

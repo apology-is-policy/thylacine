@@ -752,7 +752,7 @@ cfgs run with `-deadlock`; `loom.tla`'s `Done` self-loop keeps the
 torn-and-drained terminal state from tripping the deadlock check. See
 docs/LOOM.md + ARCH §28 (I-29, I-30 reserved at impl).
 
-### Loom-6a/6b-1 source map (registered buffers + READ/WRITE + read-shaped ops; `loom.tla` unchanged)
+### Loom-6a/6b source map (registered buffers + READ/WRITE + read-shaped + mutation ops; `loom.tla` unchanged)
 
 **Loom-6a adds no new spec mechanism** — the registered-buffer pin + the
 slice-validation are the abstract `reg` slot + the `sqe_arg` / `ValidArgs` model
@@ -776,9 +776,25 @@ with a `ValidArgs`-checked `sqe_arg` dest slice, mapping onto the SAME rows abov
 would add a `reg`-slot install/release from the completion path, a genuinely new
 mechanism that gets its own model when it lands.
 
+**Loom-6b-2 (metadata-mutation ops: SETATTR / MKDIR / MKNOD / SYMLINK / UNLINKAT /
+RENAMEAT / LINK)** adds no new spec mechanism either. Each is one more `Dispatch`
+against a pinned `reg` slot: the name(s) / input struct are read FROM the pinned
+buffer slice in the build thunk (the `Dispatch`-acts-on-`snap_arg` row, the WRITE
+precedent), bounded at submit by the two memory-safety gates (the two-name split
+sub-length `<= len`; SETATTR's `len >= sizeof(struct p9_setattr)`) which realize
+`ActedArgValidated` (a malformed descriptor is `arg_bad` → rejected at `Consume`).
+The **two-fid ops (RENAMEAT / LINK)** pin a SECOND `reg` slot (`op->pinned2`): the
+spec models ONE representative `reg`/`snap_obj` per op, but the I-30 properties
+(`ObjPinnedToSnapshot` + `ActedUnderAdmittedRights`) are PER-OBJECT, and the
+second pin is the identical mechanism (resolve + snapshot at `Consume`, never
+re-resolve at `PostCqe`) applied to a second object — the single-`reg` model is a
+faithful abstraction of N independent pins, so no module extension is needed (the
+same reasoning as a multi-fid op being one `Dispatch`). The mutation reply is
+scalar, so `PostCqe` copies nothing (the `loom_scalar_result` default).
+
 The untrusted-server payload-count bound is the documented v1.x seam (shared with
 #841 / Loom-4-F4; the `min(reply_len, op_count)` clamp makes a hostile count safe
-regardless). The 3-module suite is re-run clean as the Loom-6a/6b-1 pre-commit
+regardless). The 3-module suite is re-run clean as the Loom-6a/6b pre-commit
 gate; the formal focused audit lands at Loom-6c over the whole 6a+6b surface.
 
 ---

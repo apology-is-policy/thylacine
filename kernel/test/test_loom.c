@@ -538,7 +538,7 @@ void test_loom_enter_nop(void) {
 // The submit-time reject paths each post an error CQE (the SQE is still consumed
 // -- io_uring semantics), never a dropped/lost SQE: a bad handle_idx (-EINVAL),
 // an empty registered slot (-EBADF), a still-unimplemented-but-in-range opcode
-// (-ENOSYS, lands with Loom-6b), and an out-of-range opcode (-EINVAL).
+// (-ENOSYS -- the direct-descriptor seam #916), and an out-of-range opcode (-EINVAL).
 void test_loom_enter_submit_rejects(void) {
     struct Loom *l = loom_create(8, 16);
     TEST_ASSERT(l != NULL, "loom_create(8,16)");
@@ -547,7 +547,7 @@ void test_loom_enter_submit_rejects(void) {
 
     loom_stage_sqe(l, 0, LOOM_OP_FSYNC,   0, 99u, 0, 0xAAu);  // handle_idx out of range
     loom_stage_sqe(l, 1, LOOM_OP_FSYNC,   0, 0u,  0, 0xBBu);  // reg[0] empty (no register call)
-    loom_stage_sqe(l, 2, LOOM_OP_SETATTR, 0, 0u,  0, 0xCCu);  // in-range, unimplemented (Loom-6b-2)
+    loom_stage_sqe(l, 2, LOOM_OP_WALK,    0, 0u,  0, 0xCCu);  // in-range, unimplemented (direct-descriptor #916)
     loom_stage_sqe(l, 3, LOOM_OP_COUNT,   0, 0u,  0, 0xDDu);  // out-of-range opcode
     __atomic_store_n(&h->sq_tail, 4u, __ATOMIC_RELEASE);
 
