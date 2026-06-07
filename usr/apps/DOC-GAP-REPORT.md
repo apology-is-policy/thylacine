@@ -268,3 +268,60 @@ Append one entry per gap. Keep them specific (cite the file + section). Severity
 - Suggested doc fix / API: extend `t_wstat`'s valid mask + the wrapper with
   ATIME/MTIME (T_WSTAT_ATIME/MTIME mapping to P9_SETATTR_ATIME/MTIME), which
   the underlying Tsetattr already supports.
+
+### G13 [P2] No wall clock / monotonic clock (blocks date; no timestamps)
+- App / task: A3 `date` (BLOCKED, not built); cp/mv/ls cannot show real times.
+- Doc consulted: `libthyla-rs::time` (time.rs:5-19): "At v1.0 the kernel
+  exposes NO native SYS_CLOCK_GETTIME / SYS_NANOSLEEP surface"; `now()`,
+  `Instant`, `SystemTime` are all listed as v1.x.
+- Gap: there is no way to read the current time (wall clock) or a monotonic
+  clock from a native program. `sleep` works (it rides a torpor timeout),
+  but `date` has no time source at all. (The hardware counter CNTPCT_EL0 is
+  EL0-readable per irq-bench, but it is a tickless monotonic counter with no
+  libthyla-rs wrapper and no epoch mapping.)
+- Workaround: `date` is NOT built. `stat`/`ls -l` show the raw second
+  fields from Metadata but cannot format them as dates.
+- Suggested doc fix / API: add `time::now()` (wall + monotonic) over a
+  kernel clock syscall; until then, document "no clock at v1.0" in the
+  user manual.
+
+### G14 [P2][API-GAP] No self-identity accessor (no getpid/getuid; blocks id, whoami)
+- App / task: A3 `id`, `whoami` (BLOCKED, not built).
+- Doc consulted: full libthyla-rs public API -- there is no `t_getpid`,
+  `t_getuid`, or any "read my own principal_id / primary_gid / pid". The
+  identity surface only SETS a child's identity (spawn) or READS a PEER's
+  (srv_peer, server-side).
+- Gap: a native process cannot learn its OWN pid, principal_id, or gid.
+  So `id`/`whoami` have no data source. (Even routing through
+  /proc/self/stat_native is blocked: it needs getpid AND /proc reachability,
+  a namespace seam.)
+- Workaround: `id`, `whoami` are NOT built.
+- Suggested doc fix / API: add `t_getpid` + a self-identity accessor
+  (principal_id / primary_gid / supp_gids), or a readable /proc/self. This
+  is a notable hole -- even non-coreutil daemons often need their own pid.
+
+### G15 [P2][API-GAP] No environment variables (envp not exposed)
+- App / task: A3 `env` (degenerate), `which` (degenerate).
+- Doc consulted: `libthyla-rs::process` (process.rs:38-40): "env /
+  environment variables: SYS_SPAWN_FULL_ARGV's `_pad_envp` ... v1.0. Until
+  the envp surface lands, environment is inherited"; no getenv/environ.
+- Gap: there is no environment. The kernel reserves `_pad_envp` in the spawn
+  ABI but does not pass envp; no native accessor exists; the startup frame's
+  envp slot is a single NULL. So `env` has nothing to print, `which` has no
+  PATH to search, and no program can read a config var.
+- Workaround: `env` prints nothing (correct: the env IS empty) + errors on
+  set/exec; `which` only probes explicit '/'-paths.
+- Suggested doc fix / API: implement envp pass-through (the `_pad_envp` slot)
+  + a getenv/environ accessor + populate the startup frame's envp; document
+  the v1.0 "no environment" reality meanwhile.
+
+### G16 [P3] No uname/sysinfo syscall (uname fields hardcoded)
+- App / task: A3 `uname`.
+- Doc consulted: libthyla-rs public API -- no `t_uname`/sysinfo/version.
+- Gap: there is no syscall returning the OS name/release/version/machine.
+  The boot banner prints "Thylacine vX.Y-dev" but no syscall exposes it, so
+  `uname` must hardcode every field (and the release string will silently
+  drift from the real kernel version).
+- Workaround: uname hardcodes Thylacine / 1.0-dev / aarch64 / (none).
+- Suggested doc fix / API: a small `t_uname`/sysinfo syscall (or a readable
+  /proc/version) so uname reports the true running version.

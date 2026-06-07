@@ -70,8 +70,18 @@ gaps are in `DOC-GAP-REPORT.md`. NEVER run anything.
   - All built apps compile + clippy clean (0 warnings), W^X-clean.
 
 ### A3 -- coreutils, process / env / text
-- [ ] `env` `which` `sleep` `seq` `yes` `date` `uname` `id` `whoami`
-  `sort` (simple) `uniq` `cut` `tr` `grep` (simple) `xargs` `hexdump`
+- [wip] batch 1 (8) done; batch 2 (text tools) + blocked ones remain.
+  - [done] `sleep` (time::sleep, s/m/h/d, summed), `uname` (static G16),
+    `env` (degenerate G15), `which` (degenerate G15/G07), `seq`,
+    `yes` (broken-pipe safe), `hexdump` (canonical), `uniq` (-c, adjacent).
+  - [ ] batch 2: `sort` `cut` `tr` `grep` (simple) `xargs` (xargs exercises
+    process::Command spawn -- good gap-finder). Pure text/compute; low gap
+    yield except xargs.
+  - [blocked] `date` -- no wall/monotonic clock (G13). `id`/`whoami` -- no
+    self-identity/getpid accessor (G14). Not built.
+  - New gaps: G13 (no clock, P2), G14 (no self-identity/getpid, P2 API-GAP),
+    G15 (no env vars, P2 API-GAP), G16 (no uname/sysinfo, P3).
+  - All built compile + clippy clean (0 warnings).
 
 ### A4 -- Thylacine-DISTINCTIVE native tools (the BEST doc-gap finders)
 These exercise the surfaces a generic coreutil author would not know how to use
