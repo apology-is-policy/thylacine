@@ -48,6 +48,8 @@ void test_9p_client_pump_deadline_busy_when_reader_active(void);
 void test_9p_client_loom_fsync_e2e(void);
 void test_9p_client_loom_rights_deny(void);
 void test_9p_client_loom_quiesce_abandons_inflight(void);
+void test_9p_client_loom_multishot_stream(void);
+void test_9p_client_loom_multishot_backpressure(void);
 
 // File-scope buffers (kernel test stack is 16 KiB — client struct is
 // ~4 KiB; multiple in one frame is fine but file-scope is cleaner).
@@ -973,6 +975,122 @@ void test_9p_client_loom_quiesce_abandons_inflight(void) {
     int pumped = p9_client_reader_pump_once(&g_client);
     TEST_ASSERT(pumped == 1 || pumped == -P9_E_IO, "late reply drained ownerless (no UAF)");
 
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}
+
+// Stage one MULTISHOT FSYNC SQE: LOOM_SQE_MULTISHOT + the synthetic shot_limit
+// (total CQEs in the stream) carried in sqe->offset (FSYNC ignores the offset).
+static void cl_stage_multishot_fsync(struct Loom *l, u32 slot, u32 handle_idx,
+                                     u64 shot_limit, u64 user_data) {
+    struct loom_sqe *sqes = (struct loom_sqe *)(l->ring_kva + l->sqe_off);
+    u32 *sqa = (u32 *)(l->ring_kva + l->sq_array_off);
+    struct loom_sqe *s = &sqes[slot];
+    for (u32 i = 0; i < sizeof(*s); i++) ((u8 *)s)[i] = 0;
+    s->opcode     = LOOM_OP_FSYNC;
+    s->flags      = LOOM_SQE_MULTISHOT;
+    s->handle_idx = handle_idx;
+    s->offset     = shot_limit;
+    s->user_data  = user_data;
+    sqa[slot] = slot;
+}
+
+// Multishot stream (specs/loom_multishot.tla): ONE LOOM_SQE_MULTISHOT FSYNC SQE
+// produces a STREAM of CQEs -- (N-1) LOOM_CQE_MORE shots that each RE-ARM the op
+// + ONE MORE-clear terminal -- driven by repeated Tfsync->Rfsync round-trips in a
+// SINGLE loom_enter. The submit-time pin (the dev9p spoor) is held across ALL
+// shots + released exactly once at the terminal (ObjPinnedAcrossShots;
+// ExactlyOneTerminal; TerminalEndsStream).
+void test_9p_client_loom_multishot_stream(void) {
+    drive_client_open(&g_client, &g_loopback);
+    struct Spoor *sp = dev9p_attach_client(&g_client, 0);
+    TEST_ASSERT(sp != NULL, "dev9p_attach_client");
+
+    struct Loom *l = loom_create(8, 16);
+    TEST_ASSERT(l != NULL, "loom_create(8,16)");
+    rights_t rt = RIGHT_READ | RIGHT_WRITE;
+    TEST_ASSERT(loom_register_handles(l, &sp, &rt, 1) == 0, "register dev9p spoor");
+
+    struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+    struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
+
+    cl_stage_multishot_fsync(l, 0, /*handle_idx=*/0, /*shot_limit=*/3,
+                             0xA5A5000012345678ULL);
+    __atomic_store_n(&h->sq_tail, 1u, __ATOMIC_RELEASE);
+
+    // min_complete=3: drive 2 MORE shots + the terminal in one enter.
+    int n = loom_enter(l, /*to_submit=*/1, /*min_complete=*/3, /*flags=*/0);
+    TEST_EXPECT_EQ(n, 1, "one SQE consumed (the stream is one op)");
+    TEST_EXPECT_EQ((u64)l->cq_tail, (u64)3, "3 CQEs posted (2 MORE + 1 terminal)");
+    TEST_ASSERT((cqes[0].flags & LOOM_CQE_MORE) != 0, "shot 0 sets LOOM_CQE_MORE");
+    TEST_ASSERT((cqes[1].flags & LOOM_CQE_MORE) != 0, "shot 1 sets LOOM_CQE_MORE");
+    TEST_ASSERT((cqes[2].flags & LOOM_CQE_MORE) == 0, "terminal clears LOOM_CQE_MORE");
+    for (u32 i = 0; i < 3; i++) {
+        TEST_EXPECT_EQ(cqes[i].user_data, 0xA5A5000012345678ULL, "every CQE echoes user_data");
+        TEST_EXPECT_EQ((u64)(s64)cqes[i].result, (u64)0, "every shot succeeds (result 0)");
+    }
+    TEST_EXPECT_EQ((u64)l->async_inflight, (u64)0, "stream terminal -> nothing in flight");
+    TEST_ASSERT(l->inflight_ops == NULL, "terminal op reaped (one container, whole stream)");
+    TEST_EXPECT_EQ((u64)h->overflow, (u64)0, "no shot dropped (CqNeverOverfull)");
+
+    u64 freed0 = spoor_total_freed();
+    loom_unref(l);                  // releases the reg ref (the pin was released at the terminal)
+    TEST_EXPECT_EQ(spoor_total_freed() - freed0, (u64)1,
+                   "dev9p spoor freed once (pin held across all shots, released exactly once)");
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}
+
+// Multishot back-pressure (CqNeverOverfull, NOT BUGGY_SHOT_LOST_ON_FULL): a MORE
+// shot is HELD -- never dropped -- when the CQ is full, and the stream RESUMES
+// when userspace reaps a slot + re-enters. cq_entries=2, shot_limit=4 (3 MORE + 1
+// terminal): the first enter fills the 2-slot CQ with 2 MORE shots then the op
+// stays rearm-pending (held, not reaped); after reaping both, the second enter
+// re-arms + drains the rest. `overflow` stays 0 throughout (the shot was held, not
+// dropped into a full CQ).
+void test_9p_client_loom_multishot_backpressure(void) {
+    drive_client_open(&g_client, &g_loopback);
+    struct Spoor *sp = dev9p_attach_client(&g_client, 0);
+    TEST_ASSERT(sp != NULL, "dev9p_attach_client");
+
+    struct Loom *l = loom_create(2, 2);   // cq_entries = 2 (smallest exercising the hold)
+    TEST_ASSERT(l != NULL, "loom_create(2,2)");
+    rights_t rt = RIGHT_READ | RIGHT_WRITE;
+    TEST_ASSERT(loom_register_handles(l, &sp, &rt, 1) == 0, "register dev9p spoor");
+
+    struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+    struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
+
+    cl_stage_multishot_fsync(l, 0, 0, /*shot_limit=*/4, 0xBACE000087654321ULL);
+    __atomic_store_n(&h->sq_tail, 1u, __ATOMIC_RELEASE);
+
+    // Enter 1: fills the 2-slot CQ with 2 MORE shots, then the 3rd shot cannot
+    // admit -- the op HOLDS (rearm-pending, not terminal, not reaped).
+    int n = loom_enter(l, 1, /*min_complete=*/2, 0);
+    TEST_EXPECT_EQ(n, 1, "one SQE consumed");
+    TEST_EXPECT_EQ((u64)l->cq_tail, (u64)2, "CQ filled with 2 MORE shots");
+    TEST_ASSERT((cqes[0].flags & LOOM_CQE_MORE) != 0, "shot 0 MORE");
+    TEST_ASSERT((cqes[1].flags & LOOM_CQE_MORE) != 0, "shot 1 MORE");
+    TEST_ASSERT(l->inflight_ops != NULL, "op HELD (rearm-pending), not reaped");
+    TEST_EXPECT_EQ((u64)l->async_inflight, (u64)0, "no request in flight (held for CQ room)");
+    TEST_EXPECT_EQ((u64)h->overflow, (u64)0, "no shot dropped -- held, not overflowed");
+
+    // Userspace reaps both CQEs (advance cq_head): the CQ now has room.
+    __atomic_store_n(&h->cq_head, 2u, __ATOMIC_RELEASE);
+
+    // Enter 2: re-arms the held op + drives the remaining MORE shot + the terminal.
+    // The CQ wraps (cq_entries=2): tail 2->slot 0 (shot 2, MORE), tail 3->slot 1
+    // (terminal, MORE-clear) -- both over already-reaped slots.
+    n = loom_enter(l, 0, /*min_complete=*/2, 0);
+    TEST_EXPECT_EQ(n, 0, "no new SQE (the resume re-arms the held op)");
+    TEST_EXPECT_EQ((u64)l->cq_tail, (u64)4, "stream resumed: shot 2 + terminal posted");
+    TEST_ASSERT((cqes[0].flags & LOOM_CQE_MORE) != 0, "shot 2 MORE (slot 0 wrapped)");
+    TEST_ASSERT((cqes[1].flags & LOOM_CQE_MORE) == 0, "terminal clears MORE (slot 1 wrapped)");
+    TEST_EXPECT_EQ((u64)l->async_inflight, (u64)0, "stream done");
+    TEST_ASSERT(l->inflight_ops == NULL, "terminal op reaped");
+    TEST_EXPECT_EQ((u64)h->overflow, (u64)0, "overflow still 0 -- back-pressure, never dropped");
+
+    loom_unref(l);
     p9_client_destroy(&g_client);
     p9_loopback_destroy(&g_loopback);
 }

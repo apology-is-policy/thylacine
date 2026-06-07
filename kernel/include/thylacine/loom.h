@@ -274,6 +274,15 @@ struct Loom {
     // any still in flight (the #898 abandon-before-free).
     struct loom_async_op *inflight_ops;
     u32                   async_inflight;
+    // Loom-5 (specs/loom_multishot.tla): count of ops in the MORE-pending re-arm
+    // state (op->rearm == true) -- a multishot op that posted a MORE shot and is
+    // awaiting re-issue. Mutated under `lock` (++ in loom_async_complete, -- in
+    // loom_rearm_pending when an op is claimed for re-arm), but READ LOCK-FREE by
+    // the SQPOLL park cond (which cannot take `lock`): a non-zero count with CQ
+    // room means the kthread has deferred re-arm work, so it must NOT stay parked
+    // on a reap-only wake (the back-pressure-resume liveness). Atomic for the
+    // cross-lock read.
+    u32                   rearm_pending;
     // Loom-4 (LOOM.md 8.6): the CQ wait-list. A thread in SYS_LOOM_ENTER with
     // min_complete >= 1 that finds a sibling thread already holding the elected-
     // reader role installs a poll_waiter here and sleeps; loom_post_cqe wakes the

@@ -570,6 +570,8 @@ void test_9p_client_pump_deadline_busy_when_reader_active(void);
 void test_9p_client_loom_fsync_e2e(void);
 void test_9p_client_loom_rights_deny(void);
 void test_9p_client_loom_quiesce_abandons_inflight(void);
+void test_9p_client_loom_multishot_stream(void);
+void test_9p_client_loom_multishot_backpressure(void);
 void test_dev9p_registered(void);
 void test_dev9p_attach_client_root_spoor(void);
 void test_dev9p_walk_one_component(void);
@@ -1530,6 +1532,10 @@ struct test_case g_tests[] = {
     { "9p_client.loom_quiesce_abandons_inflight",
                                        test_9p_client_loom_quiesce_abandons_inflight,
                                                                            false, NULL },
+    { "9p_client.loom_multishot_stream",
+                                       test_9p_client_loom_multishot_stream, false, NULL },
+    { "9p_client.loom_multishot_backpressure",
+                                       test_9p_client_loom_multishot_backpressure, false, NULL },
     { "dev9p.registered",              test_dev9p_registered,              false, NULL },
     { "dev9p.attach_client_root_spoor",test_dev9p_attach_client_root_spoor,false, NULL },
     { "dev9p.walk_one_component",      test_dev9p_walk_one_component,      false, NULL },

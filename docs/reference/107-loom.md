@@ -5,7 +5,7 @@
 integrity) + I-30 (submit-time capability pin). **Audit-trigger surface**: ARCH
 §25.4 + CLAUDE.md.
 
-> **Status (Loom-2a + Loom-2b + Loom-3 + Loom-4a/4b/4c/4d):** the ring **substrate**
+> **Status (Loom-2a + Loom-2b + Loom-3 + Loom-4a/4b/4c/4d + Loom-5a):** the ring **substrate**
 > (2a — `KObj_Loom`, the SQ/CQ ring memory + geometry, `SYS_LOOM_SETUP`, the
 > registered-handle table via `SYS_LOOM_REGISTER`, the kobj refcount lifecycle),
 > the **pluggable-completion 9P-engine seam** (2b — `p9_rpc.on_complete`,
@@ -29,9 +29,12 @@ integrity) + I-30 (submit-time capability pin). **Audit-trigger surface**: ARCH
 > **F2 [P2]** the SQPOLL park busy-loop on CQ-full backpressure → the park cond
 > gates on CQ admittability; **SA-2/F3/F5 [P3]** the `P9_PUMP_BUSY` yield + the
 > NULL-deadline-transport comment + the test `cq_tail` mirror; **F4 [P3]** the
-> mid-frame-recv-unbounded v1.x untrusted-server seam. multishot + LINK/DRAIN
-> is Loom-5; registered buffers + the native libthyla-rs API + the benchmark are
-> Loom-6.
+> mid-frame-recv-unbounded v1.x untrusted-server seam. **5a** adds **multishot**
+> (`LOOM_SQE_MULTISHOT`): one SQE produces a STREAM of CQEs — a `LOOM_CQE_MORE`-set
+> shot per reply that RE-ARMS the op, then exactly one MORE-clear terminal — built
+> against the synthetic FSYNC vehicle (a real re-armable op is Loom-6's event-fd
+> READ). LINK/DRAIN is Loom-5b; registered buffers + the native libthyla-rs API +
+> the benchmark are Loom-6.
 
 ---
 
@@ -446,6 +449,60 @@ called from `sys_loom_setup_for_proc` after the map, before `handle_alloc`):
 Spawning before `handle_alloc` means a `handle_alloc` failure reclaims the kthread
 through the same `loom_unref` → `loom_free` join.
 
+### Multishot streams (Loom-5a)
+
+A `LOOM_SQE_MULTISHOT` op produces a STREAM of CQEs rather than a single
+completion: a `LOOM_CQE_MORE`-set shot per reply (the op RE-ARMS after each) then
+exactly one MORE-clear terminal CQE, and nothing after the terminal. It is the
+I-29 "exactly one terminal completion" property generalised from a single CQE to a
+stream (`specs/loom_multishot.tla`: `ExactlyOneTerminal` + `TerminalEndsStream`).
+A single-shot op (Loom-3) is the 1-shot special case. v1.0 exercises the mechanism
+against the synthetic FSYNC vehicle (re-fsync until a per-op `shot_limit`); Loom-6's
+event-fd READ is the real re-armable consumer (its terminal is the event source's
+EOF/error, not a count).
+
+The mechanism lives entirely in three places:
+
+- **Submit** (`loom_submit_one`): the FSYNC case parses `LOOM_SQE_MULTISHOT`, sets
+  `op->multishot` + `op->shot_limit` (the synthetic bound, carried in `sqe->offset`),
+  and stores `op->build` (the Tmsg builder, re-run verbatim on each re-arm). The
+  I-30 pin (`spoor_ref`) + the tag are taken ONCE at submit and held for the whole
+  stream — never re-resolved per shot (`ObjPinnedAcrossShots`; the io_uring
+  credential-vs-work race amplified by the long multishot lifetime). An inline op
+  (`NOP`) ignores `MULTISHOT` and posts a single terminal CQE — the mechanism is
+  async-only.
+
+- **Completion** (`loom_async_complete`, UNDER `c->lock`): decides MORE vs terminal
+  (`term = !multishot || status < 0 || shots+1 >= shot_limit`), posts the CQE
+  (MORE-set for a shot, clear for the terminal), then under `l->lock` drops the op's
+  `async_inflight` reservation and EITHER flags `op->rearm` + `rearm_pending++` (a
+  MORE shot) OR sets `op->terminal` (the terminal). It does NOT re-submit — the seam
+  contract forbids re-entering `p9_client_*` under `c->lock`.
+
+- **Re-arm** (`loom_rearm_pending`, in BOTH drive loops — `loom_wait_for_completions`
+  at the loop top + `loom_sqpoll_main` after the SQ drain, OUTSIDE `c->lock`): for
+  each `op->rearm` op the CQ can admit (`loom_cq_ready + async_inflight < cq_entries`
+  — the Loom-3 submit-time admission, now per shot, which makes a MORE shot ALWAYS
+  have a slot when it completes → `CqNeverOverfull`), it clears `rearm`, reserves the
+  next slot (`async_inflight++`), and re-issues `op->build` on the SAME pinned
+  `(client, fid)`. A claim is atomic under `l->lock`, so two concurrent drivers (a
+  sibling ENTER + the SQPOLL kthread) never double-issue. The claim releases `l->lock`
+  BEFORE `submit_async` (which takes `c->lock`), so the seam's `c->lock → l->lock`
+  order is never inverted. A back-pressured shot (CQ full at re-arm) stays `rearm`-
+  flagged and HELD — never dropped — until userspace reaps a slot.
+
+**SQPOLL back-pressure resume**: a held re-arm on an SQPOLL ring would strand if the
+kthread parked (the user reaps without a new SQE, so the SQE-only park cond never
+re-fires). `loom_sqpoll_park_cond` therefore also wakes on `rearm_pending > 0 && CQ
+has room`, so the user's post-reap ENTER (which wakes the park) resumes the stream.
+`rearm_pending` is mutated under `l->lock` but read lock-free by the park cond (the
+cond cannot take `l->lock`; it is atomic for the cross-lock read).
+
+**Teardown** is unchanged: an armed (or `rearm`-pending) multishot op is quiesced by
+`loom_free`'s #898 abandon (`p9_client_abandon_async` — a no-op when the op holds no
+outstanding tag, e.g. a `rearm`-pending op between shots) + the pin clunk, so no late
+shot posts a stale CQE (`NoStaleAfterTeardown`).
+
 ---
 
 ## Data structures
@@ -579,7 +636,7 @@ a-real-sibling-reader interleaving needs a second kernel thread + the loopback a
 lands with the deferred multi-in-flight / cross-Proc-death SMP harness, OWED since
 #841.)
 
-### The seam + Loom-3 engine dispatch (`kernel/test/test_9p_client.c`, 6 cases)
+### The seam + Loom-3 engine dispatch + Loom-5a multishot (`kernel/test/test_9p_client.c`, 8 cases)
 
 - `9p_client.async_op_posts_cqe` — `submit_async(clunk)` (no wait) →
   `reader_pump_once` demuxes the Rclunk → `on_complete` posts a CQE with the
@@ -602,6 +659,18 @@ lands with the deferred multi-in-flight / cross-Proc-death SMP harness, OWED sin
   `loom_free` abandons the op (Tflush + pin clunked + container freed), the loom
   + the dev9p Spoor are freed exactly once, and a late reply pumped afterward is
   discarded ownerless (no UAF on the freed container).
+- `9p_client.loom_multishot_stream` (Loom-5a) — one `LOOM_SQE_MULTISHOT` FSYNC SQE
+  (`shot_limit=3`) drives 3 Tfsync/Rfsync round-trips in ONE `loom_enter(1,3,0)`:
+  CQEs 0+1 set `LOOM_CQE_MORE`, CQE 2 clears it (the terminal); all echo the
+  `user_data`; the single container is reaped after the terminal; the dev9p Spoor
+  is freed exactly once (the pin held across all shots, released once);
+  `overflow == 0` (`ExactlyOneTerminal` / `TerminalEndsStream` / `ObjPinnedAcrossShots`).
+- `9p_client.loom_multishot_backpressure` (Loom-5a) — `cq_entries=2`, `shot_limit=4`:
+  the first `loom_enter` fills the CQ with 2 MORE shots then the op HOLDS (rearm-
+  pending, not reaped, `async_inflight==0`, `overflow==0` — the shot was held, not
+  dropped); after userspace reaps both (advance `cq_head`), the second `loom_enter`
+  re-arms + drains the remaining MORE shot + the terminal, `overflow` still 0
+  (`CqNeverOverfull`, the no-`BUGGY_SHOT_LOST_ON_FULL` discipline).
 
 The full `SYS_LOOM_SETUP` / `SYS_LOOM_ENTER` user copy-in/out is trivial handler
 glue (E2E coverage lands with the native API at Loom-6); the payload-opcode

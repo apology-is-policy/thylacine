@@ -57,9 +57,23 @@ struct loom_async_op {
     struct Loom           *loom;       // owning ring (no ref held; see lifetime note)
     struct p9_client      *client;     // engine this op rides (valid while `pinned` held)
     struct Spoor          *pinned;     // the I-30 submit-time pin (independent spoor_ref)
+    p9_session_build_fn    build;       // the Tmsg builder -- re-run verbatim on re-arm (Loom-5)
     u64                    user_data;  // echoed verbatim into the CQE
     u32                    op_fid;      // resolved 9P fid (from `pinned`, at submit)
     u32                    op_arg;      // opcode-specific scalar (FSYNC: datasync 0/1)
+    // Multishot (Loom-5; specs/loom_multishot.tla). A multishot op re-arms after
+    // each NON-terminal reply: loom_async_complete posts a LOOM_CQE_MORE CQE +
+    // sets `rearm`; the drive loop (loom_rearm_pending, OUTSIDE c->lock) re-issues
+    // `build` on the SAME pinned (client, fid) -- the pin is reused, NEVER
+    // re-resolved (ObjPinnedAcrossShots). `shot_limit` is the SYNTHETIC terminal
+    // bound for the FSYNC vehicle (total CQEs in the stream; Loom-6's real
+    // event-fd READ terminates on the source's EOF/error instead). `shots` counts
+    // the MORE CQEs posted so far (< shot_limit). `multishot == false` is the
+    // Loom-3 single-shot op (its lone CQE is its terminal).
+    u32                    shot_limit;  // multishot: total CQEs before the terminal (>= 1)
+    u32                    shots;       // multishot: MORE CQEs posted so far
+    bool                   multishot;   // re-arms after each non-terminal reply
+    bool                   rearm;       // a MORE shot posted; the drive loop must re-issue
     u8                     opcode;      // LOOM_OP_*
     bool                   terminal;    // CQE posted (set under l->lock by completion)
     struct loom_async_op  *next;        // l->inflight_ops chain (under l->lock)
@@ -375,15 +389,38 @@ static void loom_async_complete(struct p9_rpc *rpc, int status,
                                 struct p9_dispatch_result *dr) {
     (void)dr;
     struct loom_async_op *op = (struct loom_async_op *)rpc;   // rpc at offset 0
-    (void)loom_post_cqe(op->loom, op->user_data, loom_scalar_result(status), 0);
-    // Mark terminal + decrement the in-flight count under l->lock so the reap
-    // sweep (also under l->lock) observes a consistent (terminal, count) pair.
-    // The CQE was already posted above, so a reaper that sees terminal will not
-    // lose the completion.
-    spin_lock(&op->loom->lock);
-    op->terminal = true;
-    if (op->loom->async_inflight > 0) op->loom->async_inflight--;
-    spin_unlock(&op->loom->lock);
+    struct Loom *l = op->loom;
+
+    // MORE vs terminal (specs/loom_multishot.tla ReplyArrives). A single-shot op
+    // (Loom-3) always terminates. A multishot op posts a LOOM_CQE_MORE shot and
+    // RE-ARMS on a successful non-terminal reply, and TERMINATES on an error reply
+    // (the stream ends on error), on reaching its shot bound, or -- defensively --
+    // if the shot CQE cannot post (submit-time admission makes that unreachable;
+    // fail-safe to terminal rather than re-arm into a lost shot). The terminal CQE
+    // clears LOOM_CQE_MORE (TerminalEndsStream -- the Tapestry recycle gate).
+    bool term;
+    if (!op->multishot)                        term = true;
+    else if (status < 0)                       term = true;   // error ends the stream
+    else if (op->shots + 1u >= op->shot_limit) term = true;   // synthetic FSYNC bound
+    else                                       term = false;  // a MORE shot -> re-arm
+
+    u32 cqe_flags = term ? 0u : LOOM_CQE_MORE;
+    int posted = loom_post_cqe(l, op->user_data, loom_scalar_result(status), cqe_flags);
+
+    // Update op state under l->lock so the reap / re-arm sweeps observe a
+    // consistent (terminal | rearm, async_inflight) pair. The CQE was already
+    // posted above. This op's reservation is resolved EITHER WAY: a MORE shot
+    // re-acquires its next slot in loom_rearm_pending; a terminal needs none.
+    spin_lock(&l->lock);
+    if (l->async_inflight > 0) l->async_inflight--;
+    if (!term && posted == 0) {
+        op->shots++;
+        op->rearm = true;          // the drive loop re-issues `build` (outside c->lock)
+        __atomic_fetch_add(&l->rearm_pending, 1u, __ATOMIC_RELEASE);  // SQPOLL park-cond hint
+    } else {
+        op->terminal = true;       // terminal (or a failed MORE post -> end the stream)
+    }
+    spin_unlock(&l->lock);
 }
 
 // Tmsg builder thunk for LOOM_OP_FSYNC. Invoked by p9_client_submit_async under
@@ -409,13 +446,20 @@ static void loom_complete_inline(struct Loom *l, u64 user_data, s32 result) {
 static void loom_submit_one(struct Loom *l, const struct loom_sqe *sqe) {
     u64 ud = sqe->user_data;
 
-    // Reserved SQE flags (LINK / DRAIN / CQE_SKIP / MULTISHOT) land at Loom-5;
-    // reject any set flag now so a future flag is never silently ignored.
-    if (sqe->flags != 0) { loom_complete_inline(l, ud, -(s32)T_E_INVAL); return; }
+    // Loom-5a accepts LOOM_SQE_MULTISHOT (the multishot stream flag); LINK /
+    // DRAIN / CQE_SKIP land at Loom-5b -- reject any other set flag now so a
+    // future flag is never silently ignored.
+    if (sqe->flags & ~(u32)LOOM_SQE_MULTISHOT) {
+        loom_complete_inline(l, ud, -(s32)T_E_INVAL);
+        return;
+    }
+    bool multishot = (sqe->flags & LOOM_SQE_MULTISHOT) != 0;
 
     switch (sqe->opcode) {
     case LOOM_OP_NOP:
-        // The io_uring smoke op: completes immediately, no engine, no handle.
+        // The io_uring smoke op: completes immediately, no engine, no handle. An
+        // inline op cannot re-arm (no async reply), so MULTISHOT degrades to a
+        // single terminal CQE here -- the mechanism is async-only (the FSYNC path).
         loom_complete_inline(l, ud, 0);
         return;
 
@@ -459,11 +503,22 @@ static void loom_submit_one(struct Loom *l, const struct loom_sqe *sqe) {
         op->loom        = l;
         op->client      = cl;
         op->pinned      = sp;               // adopt the pin ref
+        op->build       = loom_build_fsync; // re-run verbatim on each re-arm (multishot)
         op->user_data   = ud;
         op->op_fid      = fid;
         op->op_arg      = (sqe->len != 0) ? 1u : 0u;   // FSYNC: len != 0 -> datasync
         op->opcode      = LOOM_OP_FSYNC;
         op->terminal    = false;
+        op->multishot   = multishot;
+        // SYNTHETIC terminal bound for the FSYNC multishot vehicle: the total
+        // number of CQEs (>= 1) the stream emits before its terminal. Carried in
+        // sqe->offset (FSYNC ignores the offset). Loom-6's real event-fd READ
+        // terminates on the event source's EOF/error, not a count.
+        op->shot_limit  = multishot
+            ? (sqe->offset == 0          ? 1u
+               : sqe->offset > 0xFFFFFFFFull ? 0xFFFFFFFFu
+               : (u32)sqe->offset)
+            : 1u;
         op->rpc.on_complete = loom_async_complete;
         // Link + count before submitting: a synchronous submit failure fires
         // loom_async_complete (which decrements the count + marks terminal), so
@@ -564,6 +619,46 @@ static void loom_reap_terminal(struct Loom *l) {
     }
 }
 
+// Re-arm (re-issue) every MORE-pending multishot op the CQ can admit (Loom-5;
+// specs/loom_multishot.tla PostShot -> re-arm). Runs in the drive loop OUTSIDE
+// c->lock and l->lock: p9_client_submit_async takes c->lock, and the seam
+// contract forbids loom_async_complete (which runs UNDER c->lock) from
+// re-entering it -- so the re-issue is deferred to here.
+//
+// Each re-arm reserves one CQ slot (async_inflight++) under l->lock -- the same
+// submit-time admission as loom_drain_sq -- so a MORE shot ALWAYS has a slot when
+// it completes (CqNeverOverfull; loom_post_cqe's full-CQ drop stays unreachable).
+// A rearm op the CQ cannot yet admit stays flagged (back-pressure): the next
+// enter / SQPOLL iteration re-arms it once userspace reaps a slot -- the shot is
+// HELD, never dropped.
+//
+// The pin (op->pinned) is held throughout: the op is NON-terminal here (rearm,
+// not terminal), so loom_reap_terminal never reclaims it and loom_free cannot run
+// (the drive-loop caller holds a loom ref), so the borrowed op->client stays
+// valid across the submit -- no F1 borrow-guard ref is needed. The claim (clear
+// rearm + bump async_inflight) is atomic under l->lock, so two concurrent drivers
+// (a sibling ENTER + the SQPOLL kthread) never double-issue the same op. A
+// synchronous submit failure fires loom_async_complete (status < 0 -> terminal),
+// which releases the reservation -- consistent.
+static void loom_rearm_pending(struct Loom *l) {
+    for (;;) {
+        struct loom_async_op *op = NULL;
+        spin_lock(&l->lock);
+        for (struct loom_async_op *o = l->inflight_ops; o; o = o->next) {
+            if (!o->rearm) continue;
+            if (loom_cq_ready(l) + l->async_inflight >= l->cq_entries) continue; // back-pressure
+            o->rearm = false;
+            __atomic_fetch_sub(&l->rearm_pending, 1u, __ATOMIC_RELEASE);  // claimed for re-arm
+            l->async_inflight++;        // reserve the next shot's CQE slot
+            op = o;
+            break;
+        }
+        spin_unlock(&l->lock);
+        if (!op) break;                 // nothing admittable -> held (or none pending)
+        (void)p9_client_submit_async(op->client, &op->rpc, op->build, op);
+    }
+}
+
 // Loom-4 CQ-waiter sleep predicate (specs/loom.tla CqWaitCommitOrSleep). Returns
 // 1 once the waiter's wake flag is set -- a CQE was posted (or the session died)
 // while this hook was installed on l->cq_waiters. Reads ONLY pw->ready, which
@@ -612,6 +707,12 @@ static void loom_wait_for_completions(struct Loom *l, u32 min_complete,
     poll_waiter_init(&pw, &r);
 
     for (;;) {
+        // Re-arm any MORE-pending multishot op (Loom-5) BEFORE the give-up sample:
+        // a stream that posted a MORE shot last pump (async_inflight--, rearm set)
+        // must re-issue (async_inflight++) here, else the inflight==0 give-up arm
+        // would prematurely abandon a live stream. Re-issue is outside l->lock.
+        loom_rearm_pending(l);
+
         // CqWaitCommitOrSleep (the give-up arms): enough completions, or nothing
         // more can ever complete. Sampled under l->lock (cq_tail + async_inflight).
         spin_lock(&l->lock);
@@ -778,33 +879,43 @@ int loom_enter(struct Loom *l, u32 to_submit, u32 min_complete, u32 flags) {
 
 // Park predicate (runs under the park Rendez lock during sleep -- MUST NOT take
 // l->lock, which is above the rendez in the global order). Wake when stopping is
-// set OR there is ADMITTABLE work: a pending SQE AND CQ room for its completion.
-// The inflight count is deliberately NOT consulted: the kthread parks ONLY when
-// async_inflight == 0 (it drained everything), and nothing else adds an inflight
-// op while it sleeps (only the kthread's own loom_drain_sq does), so inflight
-// stays 0 until the kthread wakes -- there is nothing to wake FOR but new SQEs (an
-// ENTER bumps sq_tail + wakes) or stop.
+// set OR there is ADMITTABLE work AND CQ room for its completion. "Work" is a
+// pending SQE (a new submission) OR a deferred re-arm (a back-pressured multishot
+// MORE shot, Loom-5). The inflight count is deliberately NOT consulted: the
+// kthread parks ONLY when async_inflight == 0 (it drained everything), and nothing
+// adds an inflight op while it sleeps (only the kthread's own loom_drain_sq /
+// loom_rearm_pending do) -- so at park time there is no in-flight request, hence no
+// concurrent loom_async_complete writing l->cq_tail; the kthread is the SOLE
+// cq_tail writer here (a back-pressured rearm op is QUIESCENT -- its reply was
+// already demuxed, it holds no tag). There is nothing to wake FOR but new SQEs, a
+// CQ slot freeing for a held re-arm, or stop.
 //
 // F2: gating on "SQ non-empty" ALONE busy-loops when the CQ is full and sq_tail is
 // pinned ahead (a non-reaping / bursting user) -- loom_drain_sq breaks on the
 // admission check, submits 0, the cond fires again, sleep returns WITHOUT blocking
 // (it never sched()s), repeat: a tight 100%-CPU spin. A full CQ frees only when the
 // user reaps (advances cq_head) and ENTER-wakes us (the NEED_WAKEUP contract), so
-// park until an admittable slot exists. Both reads are race-free HERE: in the park
-// branch async_inflight == 0, so the kthread is the SOLE writer of l->cq_tail
-// (inline NOP/error CQEs) -- no concurrent loom_post_cqe -- and sq_head is the
-// kthread's own single-writer field. cq_head is user-owned (advisory); loom_cq_ready
-// clamps it, so a hostile value only makes the kthread fill-to-cq_entries then park,
-// never an OOB or an unbounded spin. Register-then-observe: an ENTER that bumped
-// sq_tail before this sample is caught here; one after is caught by the ENTER's
-// wakeup of the park (and a wake while still CQ-full re-evaluates to 0 -> re-sleep,
-// NOT a spin).
+// park until an admittable slot exists. Loom-5: the same admission gate covers a
+// held re-arm -- a back-pressured multishot op (rearm_pending > 0, async_inflight
+// 0) would otherwise strand, because the user reaps without a new SQE so the
+// SQE-only cond stays 0 forever; gating ALSO on rearm_pending lets the post-reap
+// ENTER-wake resume the stream. Both reads are race-free HERE: in the park branch
+// async_inflight == 0, so the kthread is the SOLE writer of l->cq_tail -- no
+// concurrent loom_post_cqe -- and sq_head is the kthread's own single-writer field.
+// cq_head is user-owned (advisory); loom_cq_ready clamps it, so a hostile value
+// only makes the kthread fill-to-cq_entries then park, never an OOB or unbounded
+// spin. Register-then-observe: an ENTER that bumped sq_tail / a completion that set
+// rearm_pending before this sample is caught here; one after is caught by the
+// ENTER's wakeup of the park (and a wake while still CQ-full re-evaluates to 0 ->
+// re-sleep, NOT a spin).
 static int loom_sqpoll_park_cond(void *arg) {
     struct Loom *l = (struct Loom *)arg;
     if (__atomic_load_n(&l->sqpoll_stopping, __ATOMIC_ACQUIRE)) return 1;
     struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
-    if (__atomic_load_n(&h->sq_tail, __ATOMIC_ACQUIRE) == l->sq_head) return 0;  // SQ drained
-    return (loom_cq_ready(l) < l->cq_entries) ? 1 : 0;   // pending SQE -> wake iff the CQ can admit
+    bool has_sqe   = __atomic_load_n(&h->sq_tail, __ATOMIC_ACQUIRE) != l->sq_head;
+    bool has_rearm = __atomic_load_n(&l->rearm_pending, __ATOMIC_ACQUIRE) != 0u;
+    if (!has_sqe && !has_rearm) return 0;                // nothing to do -> stay parked
+    return (loom_cq_ready(l) < l->cq_entries) ? 1 : 0;   // work pending -> wake iff the CQ can admit
 }
 
 void loom_sqpoll_main(void *arg) {
@@ -817,6 +928,12 @@ void loom_sqpoll_main(void *arg) {
         // Zero-syscall submit: drain whatever SQEs userspace produced. NOPs
         // complete inline; FSYNCs go async (added to inflight_ops).
         (void)loom_drain_sq(l, l->sq_entries);
+
+        // Re-arm any MORE-pending multishot op (Loom-5): a stream that posted a
+        // MORE shot last iteration re-issues here (the kthread is the driver). Like
+        // the loom_wait_for_completions loop top, before the inflight sample so a
+        // re-armed op is seen as inflight + pumped this iteration.
+        loom_rearm_pending(l);
 
         bool inflight;
         spin_lock(&l->lock);
