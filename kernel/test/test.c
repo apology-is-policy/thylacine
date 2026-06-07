@@ -217,6 +217,7 @@ void test_loom_enter_inline_min_complete(void);
 void test_loom_enter_min_complete_no_inflight(void);
 void test_loom_sqpoll_setup_and_teardown(void);
 void test_loom_sqpoll_drains_sq(void);
+void test_loom_sqpoll_parks_on_cq_full(void);
 void test_thread_create_user_ctx_layout(void);
 void test_thread_exit_self_marks_exiting(void);
 void test_thread_exit_self_last_thread_zombies(void);
@@ -1064,6 +1065,7 @@ struct test_case g_tests[] = {
     { "loom.enter_min_complete_no_inflight", test_loom_enter_min_complete_no_inflight, false, NULL },
     { "loom.sqpoll_setup_and_teardown",  test_loom_sqpoll_setup_and_teardown,  false, NULL },
     { "loom.sqpoll_drains_sq",           test_loom_sqpoll_drains_sq,           false, NULL },
+    { "loom.sqpoll_parks_on_cq_full",    test_loom_sqpoll_parks_on_cq_full,    false, NULL },
     { "thread.create_user_ctx_layout",         test_thread_create_user_ctx_layout,         false, NULL },
     { "thread.exit_self_marks_exiting",        test_thread_exit_self_marks_exiting,        false, NULL },
     { "thread.exit_self_last_thread_zombies",  test_thread_exit_self_last_thread_zombies,  false, NULL },

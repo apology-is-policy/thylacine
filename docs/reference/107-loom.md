@@ -5,7 +5,7 @@
 integrity) + I-30 (submit-time capability pin). **Audit-trigger surface**: ARCH
 §25.4 + CLAUDE.md.
 
-> **Status (Loom-2a + Loom-2b + Loom-3 + Loom-4a/4b/4c):** the ring **substrate**
+> **Status (Loom-2a + Loom-2b + Loom-3 + Loom-4a/4b/4c/4d):** the ring **substrate**
 > (2a — `KObj_Loom`, the SQ/CQ ring memory + geometry, `SYS_LOOM_SETUP`, the
 > registered-handle table via `SYS_LOOM_REGISTER`, the kobj refcount lifecycle),
 > the **pluggable-completion 9P-engine seam** (2b — `p9_rpc.on_complete`,
@@ -21,7 +21,15 @@ integrity) + I-30 (submit-time capability pin). **Audit-trigger surface**: ARCH
 > `SYS_LOOM_SETUP(LOOM_SETUP_SQPOLL)` and joined by `loom_free`). v1.0 dispatches
 > the no-payload opcodes (`NOP` / `FSYNC`); the payload opcodes
 > (READ/WRITE/GETATTR/...) land with Loom-6's registered-buffer surface and post
-> `-ENOSYS` until then. The focused SQPOLL audit is Loom-4d; multishot + LINK/DRAIN
+> `-ENOSYS` until then. **4d** is the focused SQPOLL audit + close (one Opus
+> prosecutor 0/1/1/3 + a concurrent self-audit; the core cruxes SOUND): **F1 [P1]**
+> the `loom_first_inflight_client` borrowed-client UAF (a concurrent reap +
+> re-register could free the Spoor → the `p9_client` while the kthread/ENTER held
+> the bare `cl`) → fixed with a borrow-guard `spoor_ref` clunked after the pump;
+> **F2 [P2]** the SQPOLL park busy-loop on CQ-full backpressure → the park cond
+> gates on CQ admittability; **SA-2/F3/F5 [P3]** the `P9_PUMP_BUSY` yield + the
+> NULL-deadline-transport comment + the test `cq_tail` mirror; **F4 [P3]** the
+> mid-frame-recv-unbounded v1.x untrusted-server seam. multishot + LINK/DRAIN
 > is Loom-5; registered buffers + the native libthyla-rs API + the benchmark are
 > Loom-6.
 
@@ -378,21 +386,28 @@ steady-state submission is **zero syscalls**: userspace writes SQEs + bumps
 1. check `sqpoll_stopping` (acquire) → break to the terminal;
 2. `loom_drain_sq(l, sq_entries)` — the submit loop factored out of `loom_enter`
    (NOPs complete inline; FSYNCs go async, linked into `inflight_ops`);
-3. if any op is in flight, drive the elected reader with a
+3. if any op is in flight, `loom_first_inflight_client` returns that op's client
+   AND a **borrow-guard `spoor_ref`** on its pin (F1 — so a concurrent reap +
+   re-register cannot free the Spoor → the client while the kthread derefs it in
+   the pump; clunked after the pump); drive the elected reader with a
    `timer_now_ns() + LOOM_SQPOLL_IDLE_NS` (10 ms) **frame-boundary idle-deadline**
    (the 4a `p9_client_reader_pump_once_deadline`): `PROGRESS` posts a CQE +
    wakes `cq_waiters`; `IDLE` (the deadline lapsed at a frame boundary, no bytes
    consumed → stream still synced, #841-safe) re-checks the stop flag; `DEAD`
    lets the session-death error-CQEs drain `inflight` to 0; `BUSY` (a peer ENTER
-   momentarily holds the reader) defers — all loop;
+   momentarily holds the reader) **yields (`sched()`, SA-2)** so it does not
+   tight-loop — all loop;
 4. else (SQ empty + nothing in flight) announce `LOOM_RING_SQ_NEED_WAKEUP` and
    `sleep` on the new `sqpoll_park` Rendez. The park cond is lock-free
-   (`stopping || sq_tail != sq_head`) — sound because `async_inflight` is always
-   0 at park time (only the kthread adds in-flight ops, and it is parked), so the
-   only thing to wake for is a new SQE (an ENTER bumps `sq_tail` + wakes the park)
-   or stop. `sq_head` is the kthread's own single-writer field (on an SQPOLL ring
-   `loom_enter` does **not** submit — it only wakes the park), so reading it in
-   the cond is same-thread.
+   (`stopping || (sq_tail != sq_head && loom_cq_ready(l) < cq_entries)`, F2) —
+   sound because `async_inflight` is always 0 at park time (only the kthread adds
+   in-flight ops, and it is parked), so the kthread is the sole `cq_tail`/`sq_head`
+   writer and the reads are race-free. Gating on CQ **admittability** (not "SQ
+   non-empty" alone) is what keeps a CQ-full + pinned-`sq_tail` ring from
+   busy-looping: with the CQ full the kthread parks until the user reaps (advances
+   `cq_head`) + ENTER-wakes it (the NEED_WAKEUP contract). `sq_head` is the
+   kthread's own single-writer field (on an SQPOLL ring `loom_enter` does **not**
+   submit — it only wakes the park), so reading it in the cond is same-thread.
 
 **`SYS_LOOM_ENTER` on an SQPOLL ring** does not consume SQEs (the kthread owns
 submission); it clears `NEED_WAKEUP` + wakes `sqpoll_park`, then — if
@@ -401,11 +416,15 @@ submission); it clears `NEED_WAKEUP` + wakes `sqpoll_park`, then — if
 
 **Deadline-capable gate.** The kthread block-recvs in process context with **no**
 death-interrupt (kproc never group-terminates), so it relies on the idle-deadline
-to re-check `stopping`. A NULL-deadline transport (e.g. the loopback test backend)
-would block it un-interruptibly → hang teardown. `loom_register_handles` therefore
+to re-check `stopping`. A NULL-deadline transport (the **spoor** pipe-pair backend,
+`SYS_ATTACH_9P`; srvconn + the loopback test backend ARE deadline-capable) would
+block it un-interruptibly → hang teardown. `loom_register_handles` therefore
 rejects a NULL-deadline dev9p client (`p9_client_recv_is_deadline_capable`) into an
 SQPOLL ring; a non-dev9p Spoor is allowed (it can never go async, so the kthread
-never recvs on it).
+never recvs on it). A mid-frame (post-header) recv is NOT deadline-bounded (a
+mid-frame timeout would desync the stream, #841), so a Byzantine server that stalls
+a frame body can delay the join until the body arrives / the connection EOFs — a
+v1.x untrusted-server seam (F4); v1.0 servers complete frames promptly.
 
 **Lifetime + the join.** The kthread holds **no** loom ref (a ref would deadlock
 `loom_free`'s join). The Loom owns it; the join is the sole lifetime authority.
@@ -489,7 +508,7 @@ See `specs/SPEC-TO-CODE.md`.
 
 ## Tests
 
-### Substrate (`kernel/test/test_loom.c`, 16 cases)
+### Substrate (`kernel/test/test_loom.c`, 22 cases)
 
 - `loom.create_geometry` — the ring layout is consistent (64-aligned,
   non-overlapping, page-rounded), the header is stamped (masks + counts; heads /
@@ -546,6 +565,12 @@ See `specs/SPEC-TO-CODE.md`.
   `sq_tail`, `ENTER(to_submit=0)` wakes the kthread (it never submits on SQPOLL);
   a bounded cooperative-`sched()` wait observes `cq_tail` reach 3 — the kthread
   drained + posted zero-syscall.
+- `loom.sqpoll_parks_on_cq_full` (Loom-4d, the F2 regression) — fill the CQ to
+  `cq_entries` in `sq_entries`-sized batches (no reaping), stage one more pending
+  NOP: the kthread cannot admit it and must reach `THREAD_SLEEPING` (the park),
+  not busy-loop (pre-F2 the park cond fired on `sq_tail != sq_head` alone and
+  `sleep` returned without `sched()`ing → a 100% spin); reap + ENTER-wake and the
+  extra NOP drains (the park releases on the NEED_WAKEUP contract).
 
 (The reworked wait phase's reader-drive path is also exercised end-to-end by
 `9p_client.loom_fsync_e2e` below, which calls `loom_enter(1, 1, 0)` — a blocking

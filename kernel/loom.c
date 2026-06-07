@@ -508,15 +508,28 @@ static u32 loom_cq_ready(struct Loom *l) {
 }
 
 // The client of the first still-in-flight (non-terminal) async op, or NULL when
-// none remain (no further completion can arrive). The returned client is valid
-// to pump because the op holds a pin on a dev9p Spoor whose client this is, and
-// the op is not reclaimed until loom_reap_terminal (same SYS_LOOM_ENTER caller,
-// after the wait). Under l->lock.
-static struct p9_client *loom_first_inflight_client(struct Loom *l) {
+// none remain (no further completion can arrive). To keep the borrowed client
+// alive across the caller's pump -- which runs AFTER l->lock is dropped -- this
+// takes an EXTRA ref on that op's pinned Spoor (the I-30 pin substrate: a live
+// dev9p Spoor implies a live client). F1: without it, between this unlock and the
+// caller's deref a concurrent reaper (a sibling SYS_LOOM_ENTER, or -- new at
+// Loom-4 -- the SQPOLL kthread's own next iteration) that finds the op terminal
+// AND a re-register that drops the registered-table ref could free the Spoor ->
+// the client -> a UAF in the pump. The single Loom-3 reaper (same caller, after
+// its own wait) made this safe before; Loom-4's second concurrent reaper does
+// not. The caller MUST spoor_clunk(*pin_out) after the pump (process context, may
+// sleep). *pin_out is written only when a non-NULL client is returned. Under l->lock.
+static struct p9_client *loom_first_inflight_client(struct Loom *l,
+                                                    struct Spoor **pin_out) {
     struct p9_client *cl = NULL;
     spin_lock(&l->lock);
     for (struct loom_async_op *op = l->inflight_ops; op; op = op->next) {
-        if (!op->terminal) { cl = op->client; break; }
+        if (!op->terminal) {
+            cl = op->client;
+            *pin_out = op->pinned;
+            spoor_ref(op->pinned);   // borrow-guard: keep the Spoor (=> client) alive past the unlock
+            break;
+        }
     }
     spin_unlock(&l->lock);
     return cl;
@@ -605,10 +618,14 @@ static void loom_wait_for_completions(struct Loom *l, u32 min_complete,
         if (ready >= min_complete) break;
         if (inflight == 0)         break;
 
-        // Try to become the elected reader and drive one frame.
-        struct p9_client *cl = loom_first_inflight_client(l);
+        // Try to become the elected reader and drive one frame. The borrow-guard
+        // ref (F1) keeps the client alive across the pump even if a concurrent
+        // reaper + a re-register drop the op's own pin + the registered-table ref.
+        struct Spoor *cl_pin = NULL;
+        struct p9_client *cl = loom_first_inflight_client(l, &cl_pin);
         if (!cl) continue;                     // raced: the op completed/reaped -> re-check
         int rc = p9_client_reader_pump_once(cl);
+        spoor_clunk(cl_pin);                   // cl not derefed below -> release the guard now
         if (rc == 1) {                         // demuxed a frame
             if (++pumps >= pump_budget) {
                 // Flood budget hit. Hand the reader baton to any sleeping sibling
@@ -724,10 +741,13 @@ int loom_enter(struct Loom *l, u32 to_submit, u32 min_complete, u32 flags) {
     // no completion can arrive. On a non-SQPOLL ring the caller drives the elected
     // reader itself, or -- when a sibling thread of the same Proc already holds the
     // reader role -- sleeps on the ring's CQ wait-list until that reader posts a
-    // CQE. On an SQPOLL ring the kthread is always the reader, so a min_complete
-    // wait always takes the sleep arm (loom_wait_for_completions tries the pump,
+    // CQE. On an SQPOLL ring the kthread is USUALLY the reader, so a min_complete
+    // wait usually takes the sleep arm (loom_wait_for_completions tries the pump,
     // gets P9_PUMP_BUSY=0 from the kthread's reader_active, and sleeps on
-    // cq_waiters). The wait is death-interruptible (#811) and flood-bounded. ---
+    // cq_waiters); in the narrow window where the kthread is between frames an ENTER
+    // caller may briefly win the reader role + drive a frame itself (the kthread
+    // then yields on BUSY, SA-2). Either way a posted CQE wakes the sleeper. The
+    // wait is death-interruptible (#811) and flood-bounded. ---
     if (min_complete > 0 && !(flags & LOOM_ENTER_NONBLOCK)) {
         loom_wait_for_completions(l, min_complete, submitted);
     }
@@ -755,19 +775,33 @@ int loom_enter(struct Loom *l, u32 to_submit, u32 min_complete, u32 flags) {
 
 // Park predicate (runs under the park Rendez lock during sleep -- MUST NOT take
 // l->lock, which is above the rendez in the global order). Wake when stopping is
-// set OR the SQ is non-empty. The inflight count is deliberately NOT consulted:
-// the kthread parks ONLY when async_inflight == 0 (it drained everything), and
-// nothing else adds an inflight op while it sleeps (only the kthread's own
-// loom_drain_sq does), so inflight stays 0 until the kthread wakes -- there is
-// nothing to wake FOR but new SQEs (an ENTER bumps sq_tail + wakes) or stop.
-// sq_head is the kthread's own single-writer field (read here lock-free, same
-// thread). Register-then-observe: an ENTER that bumped sq_tail before this sample
-// is caught here; one after is caught by the ENTER's wakeup of the park.
+// set OR there is ADMITTABLE work: a pending SQE AND CQ room for its completion.
+// The inflight count is deliberately NOT consulted: the kthread parks ONLY when
+// async_inflight == 0 (it drained everything), and nothing else adds an inflight
+// op while it sleeps (only the kthread's own loom_drain_sq does), so inflight
+// stays 0 until the kthread wakes -- there is nothing to wake FOR but new SQEs (an
+// ENTER bumps sq_tail + wakes) or stop.
+//
+// F2: gating on "SQ non-empty" ALONE busy-loops when the CQ is full and sq_tail is
+// pinned ahead (a non-reaping / bursting user) -- loom_drain_sq breaks on the
+// admission check, submits 0, the cond fires again, sleep returns WITHOUT blocking
+// (it never sched()s), repeat: a tight 100%-CPU spin. A full CQ frees only when the
+// user reaps (advances cq_head) and ENTER-wakes us (the NEED_WAKEUP contract), so
+// park until an admittable slot exists. Both reads are race-free HERE: in the park
+// branch async_inflight == 0, so the kthread is the SOLE writer of l->cq_tail
+// (inline NOP/error CQEs) -- no concurrent loom_post_cqe -- and sq_head is the
+// kthread's own single-writer field. cq_head is user-owned (advisory); loom_cq_ready
+// clamps it, so a hostile value only makes the kthread fill-to-cq_entries then park,
+// never an OOB or an unbounded spin. Register-then-observe: an ENTER that bumped
+// sq_tail before this sample is caught here; one after is caught by the ENTER's
+// wakeup of the park (and a wake while still CQ-full re-evaluates to 0 -> re-sleep,
+// NOT a spin).
 static int loom_sqpoll_park_cond(void *arg) {
     struct Loom *l = (struct Loom *)arg;
     if (__atomic_load_n(&l->sqpoll_stopping, __ATOMIC_ACQUIRE)) return 1;
     struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
-    return (__atomic_load_n(&h->sq_tail, __ATOMIC_ACQUIRE) != l->sq_head) ? 1 : 0;
+    if (__atomic_load_n(&h->sq_tail, __ATOMIC_ACQUIRE) == l->sq_head) return 0;  // SQ drained
+    return (loom_cq_ready(l) < l->cq_entries) ? 1 : 0;   // pending SQE -> wake iff the CQ can admit
 }
 
 void loom_sqpoll_main(void *arg) {
@@ -792,17 +826,20 @@ void loom_sqpoll_main(void *arg) {
             // gated to a deadline-capable transport (register gate), so a
             // between-frames recv returns IDLE at the boundary within
             // LOOM_SQPOLL_IDLE_NS, letting this loop re-check sqpoll_stopping.
-            struct p9_client *cl = loom_first_inflight_client(l);
+            struct Spoor *cl_pin = NULL;
+            struct p9_client *cl = loom_first_inflight_client(l, &cl_pin);
             if (cl) {
                 u64 deadline = timer_now_ns() + LOOM_SQPOLL_IDLE_NS;
                 int rc = p9_client_reader_pump_once_deadline(cl, deadline);
+                spoor_clunk(cl_pin);   // release the F1 borrow-guard (cl not derefed below)
                 // PROGRESS: demuxed a frame (a CQE may have posted). IDLE: the
-                // boundary deadline lapsed, stream still synced. BUSY: a peer
-                // ENTER momentarily holds the reader. DEAD: the session died --
-                // client_mark_dead_locked already error-completed every inflight
-                // op (CQEs posted + cq_waiters woken), so the loop drains
-                // async_inflight to 0 next iteration and parks. All cases: loop.
-                (void)rc;
+                // boundary deadline lapsed, stream still synced. BUSY: a peer ENTER
+                // momentarily holds the reader -- yield (SA-2) instead of tight-
+                // looping until it releases the role / the frame arrives. DEAD: the
+                // session died -- client_mark_dead_locked already error-completed
+                // every inflight op (CQEs posted + cq_waiters woken), so the loop
+                // drains async_inflight to 0 next iteration and parks. All cases: loop.
+                if (rc == P9_PUMP_BUSY) sched();
             }
             // cl == NULL: raced (the op was reaped) -> loop, re-sample.
         } else {

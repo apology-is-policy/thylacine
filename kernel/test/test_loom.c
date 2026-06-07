@@ -22,6 +22,7 @@
 #include <thylacine/proc.h>
 #include <thylacine/rendez.h>
 #include <thylacine/sched.h>   // sched() -- cooperative yield to the SQPOLL kthread
+#include <thylacine/thread.h>  // THREAD_SLEEPING -- the F2 park observation
 #include <thylacine/types.h>
 #include <thylacine/vma.h>
 
@@ -46,6 +47,7 @@ void test_loom_enter_inline_min_complete(void);
 void test_loom_enter_min_complete_no_inflight(void);
 void test_loom_sqpoll_setup_and_teardown(void);
 void test_loom_sqpoll_drains_sq(void);
+void test_loom_sqpoll_parks_on_cq_full(void);
 
 // The testable syscall inners live in kernel/syscall.c (declared in loom.h);
 // sys_pipe_for_proc is the KOBJ_SPOOR-pair maker (declared nowhere public --
@@ -703,10 +705,89 @@ void test_loom_sqpoll_drains_sq(void) {
     // kthread fails the test rather than wedging the whole suite.
     bool drained = false;
     for (u32 round = 0; round < 100000u; round++) {
-        if (__atomic_load_n(&l->cq_tail, __ATOMIC_ACQUIRE) >= 3u) { drained = true; break; }
+        // Read the shared-header mirror (loom_post_cqe publishes it with a release
+        // store), NOT the kernel-private l->cq_tail (a plain store under l->lock) --
+        // the mirror read is a clean acquire with no plain-write/atomic-read race (F5).
+        if (__atomic_load_n(&hdr->cq_tail, __ATOMIC_ACQUIRE) >= 3u) { drained = true; break; }
         sched();   // cooperative yield -> the kthread gets the CPU at -smp 1
     }
     TEST_ASSERT(drained, "SQPOLL kthread drained the SQ zero-syscall (3 CQEs posted)");
+
+    handle_put(&h);
+    test_proc_drop(p);
+}
+
+// F2 regression: on CQ-full backpressure the SQPOLL kthread PARKS (state ==
+// THREAD_SLEEPING) -- it does NOT busy-loop. cq_entries == 2*sq_entries (the
+// io_uring default), so the CQ fills only after MORE NOPs than the SQ ring holds --
+// submit cq_entries NOPs in sq_entries-sized batches (refilling the ring), draining
+// each batch zero-syscall, WITHOUT reaping. Then one more NOP, pending, with the CQ
+// full: the kthread cannot admit it. Pre-F2 the park cond fired on sq_tail != sq_head
+// alone, sleep() returned WITHOUT sched()ing, and the kthread spun at 100% CPU (on
+// -smp 1 it would never yield -> this test would HANG); post-F2 the cond also gates on
+// CQ room, so the kthread parks. Then reap (advance cq_head) + ENTER-wake and the
+// extra NOP drains -- proving the park RELEASES on the reap+ENTER path (the
+// NEED_WAKEUP contract).
+void test_loom_sqpoll_parks_on_cq_full(void) {
+    struct Proc *p = test_proc_make();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+
+    struct loom_params kp;
+    hidx_t fd = -1;
+    TEST_EXPECT_EQ(sys_loom_setup_for_proc(p, 4, LOOM_SETUP_SQPOLL, &kp, &fd), 0, "SQPOLL setup");
+    struct Handle h;
+    TEST_ASSERT(handle_get(p, fd, &h) == 0, "handle_get");
+    struct Loom *l = (struct Loom *)h.obj;
+    struct loom_ring_hdr *hdr = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+    u32 cqe = l->cq_entries;   // = 2 * sq_entries (8); the SQ ring holds only sq_entries (4)
+    u32 sqe = l->sq_entries;
+
+    // Fill the CQ to cq_entries WITHOUT reaping, in sqe-sized batches (each fully
+    // drained before the next, so the kthread parks-on-SQ-drained between them).
+    u32 produced = 0;
+    while (produced < cqe) {
+        u32 batch = (cqe - produced < sqe) ? (cqe - produced) : sqe;
+        for (u32 i = 0; i < batch; i++)
+            loom_stage_sqe(l, i, LOOM_OP_NOP, 0, 0, 0, 0xA00u + produced + i);
+        produced += batch;
+        __atomic_store_n(&hdr->sq_tail, produced, __ATOMIC_RELEASE);
+        TEST_EXPECT_EQ(sys_loom_enter_for_proc(p, fd, 0, 0, 0), 0, "ENTER (fill batch)");
+        bool got = false;
+        for (u32 r = 0; r < 100000u && !got; r++) {
+            if (__atomic_load_n(&hdr->cq_tail, __ATOMIC_ACQUIRE) >= produced) got = true; else sched();
+        }
+        TEST_ASSERT(got, "batch drained into the CQ");
+    }
+    TEST_EXPECT_EQ(__atomic_load_n(&hdr->cq_tail, __ATOMIC_ACQUIRE), cqe, "CQ full (cq_entries unreaped)");
+
+    // One more NOP, pending, with the CQ full + NOT reaped -> the kthread cannot
+    // admit it and must PARK. Stage into ring slot (produced & (sqe-1)).
+    loom_stage_sqe(l, produced & (sqe - 1u), LOOM_OP_NOP, 0, 0, 0, 0xAFFu);
+    __atomic_store_n(&hdr->sq_tail, produced + 1u, __ATOMIC_RELEASE);
+    TEST_EXPECT_EQ(sys_loom_enter_for_proc(p, fd, 0, 0, 0), 0, "ENTER (still CQ-full)");
+
+    // l->sqpoll->state is scheduler-written (a best-effort coarse poll -- no clean
+    // atomic accessor exists; the hardware load is atomic and TSan-pedantry aside
+    // this is a liveness observation). Pre-F2 the kthread never reaches SLEEPING (the
+    // always-true cond early-returns from sleep without sched()).
+    bool parked = false;
+    for (u32 r = 0; r < 100000u && !parked; r++) {
+        if (__atomic_load_n(&l->sqpoll->state, __ATOMIC_ACQUIRE) == THREAD_SLEEPING) parked = true;
+        else sched();
+    }
+    TEST_ASSERT(parked, "kthread parks on CQ-full backpressure (no busy-loop)");
+    TEST_EXPECT_EQ(__atomic_load_n(&hdr->cq_tail, __ATOMIC_ACQUIRE), cqe,
+                   "extra NOP NOT admitted while CQ full");
+
+    // Reap everything + ENTER-wake: the park releases (cond now sees CQ room) -> the
+    // extra NOP drains.
+    __atomic_store_n(&hdr->cq_head, cqe, __ATOMIC_RELEASE);
+    TEST_EXPECT_EQ(sys_loom_enter_for_proc(p, fd, 0, 0, 0), 0, "ENTER after reap");
+    bool resumed = false;
+    for (u32 r = 0; r < 100000u && !resumed; r++) {
+        if (__atomic_load_n(&hdr->cq_tail, __ATOMIC_ACQUIRE) >= cqe + 1u) resumed = true; else sched();
+    }
+    TEST_ASSERT(resumed, "kthread resumes + drains the extra NOP after reap+ENTER");
 
     handle_put(&h);
     test_proc_drop(p);

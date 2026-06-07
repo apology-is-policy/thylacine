@@ -567,8 +567,9 @@ bool p9_client_recv_is_deadline_capable(struct p9_client *c) {
     if (!c || c->magic != P9_CLIENT_MAGIC) return false;
     // The transport ops are immutable post-init, so this is a stable property of
     // the client (no lock needed). NULL => the recv blocks unbounded at a frame
-    // boundary (the loopback test backend); non-NULL => an armed deadline lets a
-    // boundary recv return (srvconn -> client_deadline_ns).
+    // boundary (the spoor pipe-pair transport, SYS_ATTACH_9P); non-NULL => an armed
+    // deadline lets a boundary recv return (srvconn -> client_deadline_ns; the
+    // loopback test backend also models the deadline).
     return c->transport.ops.set_recv_deadline != NULL;
 }
 

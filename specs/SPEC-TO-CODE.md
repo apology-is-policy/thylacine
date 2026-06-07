@@ -695,12 +695,15 @@ ARCH §23.3.
 
 ## loom.tla — Loom-1 (the SQ/CQ ring transport; spec-first re-enabled)
 
-Status: **TLC-green; Loom-2a + Loom-2b + Loom-3 + Loom-4a/4b/4c landed (substrate +
-the pluggable-completion seam + the batch-enter core + the SQPOLL transport-
-deadline substrate + the CQ wait-list + the SQPOLL poll-thread); Loom-4d (the
-focused SQPOLL audit) + Loom-5..6 pending. Loom-4c added NO new spec mechanism --
-the kthread is one `PostCqe` producer + the `Teardown` actor the `d48a8da`
-CQ-waiter model already covers; `loom.cfg` re-run clean (2429) is the gate.** Models the
+Status: **TLC-green; Loom-2a + Loom-2b + Loom-3 + Loom-4 (4a/4b/4c/4d) landed
+(substrate + the pluggable-completion seam + the batch-enter core + the SQPOLL
+transport-deadline substrate + the CQ wait-list + the SQPOLL poll-thread + the
+focused SQPOLL audit close); Loom-5..6 pending. Loom-4d (the audit close) added NO
+new spec mechanism -- the F1 borrow-guard `spoor_ref`, the F2 admittability park
+cond, and the SA-2 `P9_PUMP_BUSY` yield are impl refinements WITHIN the `d48a8da`
+CQ-waiter + Teardown model (the kthread is one `PostCqe` producer + the `Teardown`
+actor); `loom.cfg` re-run clean (2429) + liveness (1457) + all 7 buggy cfgs violate
+their target is the gate.** Models the
 Loom submission / completion ring op-lifecycle and pins the two reserved ARCH §28
 invariants — **I-29** (completion integrity: no-lost / no-double / no-stale) and
 **I-30** (submit-time capability pin) — plus the docs/LOOM.md §6 soundness
