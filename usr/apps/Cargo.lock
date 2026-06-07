@@ -10,7 +10,55 @@ dependencies = [
 ]
 
 [[package]]
+name = "basename"
+version = "0.1.0"
+dependencies = [
+ "aux-rt",
+ "libthyla-rs",
+]
+
+[[package]]
+name = "cat"
+version = "0.1.0"
+dependencies = [
+ "aux-rt",
+ "libthyla-rs",
+]
+
+[[package]]
+name = "cmp"
+version = "0.1.0"
+dependencies = [
+ "aux-rt",
+ "libthyla-rs",
+]
+
+[[package]]
+name = "dirname"
+version = "0.1.0"
+dependencies = [
+ "aux-rt",
+ "libthyla-rs",
+]
+
+[[package]]
 name = "echo"
+version = "0.1.0"
+dependencies = [
+ "aux-rt",
+ "libthyla-rs",
+]
+
+[[package]]
+name = "false_"
+version = "0.1.0"
+dependencies = [
+ "aux-rt",
+ "libthyla-rs",
+]
+
+[[package]]
+name = "head"
 version = "0.1.0"
 dependencies = [
  "aux-rt",
@@ -50,6 +98,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "pwd"
+version = "0.1.0"
+dependencies = [
+ "aux-rt",
+ "libthyla-rs",
+]
+
+[[package]]
 name = "scopeguard"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -62,4 +118,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5b9eb1a2f4c41445a3a0ff9abc5221c5fcd28e1f13cd7c0397706f9ac938ddb0"
 dependencies = [
  "lock_api",
+]
+
+[[package]]
+name = "tail"
+version = "0.1.0"
+dependencies = [
+ "aux-rt",
+ "libthyla-rs",
+]
+
+[[package]]
+name = "true_"
+version = "0.1.0"
+dependencies = [
+ "aux-rt",
+ "libthyla-rs",
+]
+
+[[package]]
+name = "wc"
+version = "0.1.0"
+dependencies = [
+ "aux-rt",
+ "libthyla-rs",
 ]

@@ -35,10 +35,20 @@ gaps are in `DOC-GAP-REPORT.md`. NEVER run anything.
     + `aux_rt::main!` entry macro + print!/println!/eprintln!. This unblocks
     the entire argv-taking arc. G03 stays P1 (DOC/API gap) but is RESOLVED
     for authoring.
-  - [done] `echo` -- compiles; argv chain disassembly-verified; TEST-PLAN
-    written; gaps G05 (stdio handles) + G06 (fd-0/1/2 model undocumented).
-  - [ ] next: `true` `false` `pwd` (no argv) then `cat` `wc` `head` `tail`
-    `tee` `cmp` `basename` `dirname` (argv + fs/io).
+  - [done] `echo` -- argv chain disassembly-verified; gaps G05/G06.
+  - [done] `true` `false` -- trivial (exit 0 / 1).
+  - [done] `pwd` -- degenerate "/" (no cwd at v1.0; gap G07).
+  - [done] `basename` `dirname` -- exercise Path::file_name/parent; gap G08
+    (POSIX-divergence recovered in-app).
+  - [done] `cat` -- File::open + io::Read + aux-rt copy; stdin/"-"; absolute
+    paths only.
+  - [done] `wc` `head` `tail` `cmp` -- File read + counting/line logic;
+    head streams (early-stop), tail/cmp/wc slurp. All clippy-clean, W^X-clean.
+  - [ ] `tee` -- DEFERRED to the next chunk (needs file CREATE, which the
+    safe fs API lacks: gap G09). Lands with the aux-rt `OwnedFd` + `create`
+    extension that also unblocks A2 (cp/mv/touch/mkdir/rm/ls).
+  - New gaps this batch: G07 (no cwd, P2), G08 (Path/POSIX divergence, P3),
+    G09 (fs has no create/append/readdir though the kernel does, P2 API-GAP).
 
 ### A2 -- coreutils, fs mutation + metadata
 - [ ] `mkdir` `rmdir` `rm` `cp` `mv` `ln` `touch` `stat` `ls` `readlink`

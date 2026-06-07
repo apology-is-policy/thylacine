@@ -247,6 +247,31 @@ pub fn err(buf: &[u8]) {
     let _ = stderr().write_all(buf);
 }
 
+/// Stream every byte of `r` into `w` using a 4 KiB buffer. Returns the total
+/// bytes copied. The workhorse for cat/tee-style apps. (libthyla-rs::io has
+/// no `copy` free fn -- DOC-GAP G05's family.)
+pub fn copy<R: Read + ?Sized, W: Write + ?Sized>(r: &mut R, w: &mut W) -> Result<u64> {
+    let mut buf = [0u8; 4096];
+    let mut total = 0u64;
+    loop {
+        match r.read(&mut buf)? {
+            0 => return Ok(total),
+            n => {
+                w.write_all(&buf[..n])?;
+                total += n as u64;
+            }
+        }
+    }
+}
+
+/// Read all of `r` into a fresh `Vec` (thin wrapper over the io::Read
+/// `read_to_end` default method).
+pub fn slurp<R: Read + ?Sized>(r: &mut R) -> Result<alloc_crate::vec::Vec<u8>> {
+    let mut v = alloc_crate::vec::Vec::new();
+    r.read_to_end(&mut v)?;
+    Ok(v)
+}
+
 // =============================================================================
 // Entry + print macros.
 // =============================================================================
@@ -261,11 +286,14 @@ pub fn err(buf: &[u8]) {
 #[macro_export]
 macro_rules! main {
     ($run:path) => {
+        /// # Safety
+        /// Called only by aux-rt's `rs_main`, which delivers `argc`/`argv`
+        /// from a valid Shape-B startup frame. Not for direct invocation.
         #[no_mangle]
-        pub extern "C" fn aux_main(argc: usize, argv: *const *const u8) -> i64 {
-            // SAFETY: argc/argv are exactly what aux-rt's rs_main marshalled
-            // from the Shape-B frame.
-            let args = unsafe { $crate::Args::from_raw(argc, argv) };
+        pub unsafe extern "C" fn aux_main(argc: usize, argv: *const *const u8) -> i64 {
+            // In an `unsafe fn`, the unsafe `from_raw` call needs no block
+            // (2021 edition). argc/argv are exactly what rs_main marshalled.
+            let args = $crate::Args::from_raw(argc, argv);
             $run(args)
         }
     };

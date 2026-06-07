@@ -164,3 +164,59 @@ Append one entry per gap. Keep them specific (cite the file + section). Severity
   via t_putstr is the diagnostic channel; fd 1 is pipeline/redirect/inherit
   only; the console/PTY surface that backs interactive stdout is future
   work. This is also the central question the A5 nora editor will hit.
+
+### G07 [P2] No per-Proc current directory (cwd / getcwd / chdir)
+- App / task: A1 `pwd` (degenerate); affects every relative-path use.
+- Doc consulted: `libthyla-rs::fs::File` module header (file.rs:25-28) +
+  `libthyla-rs::territory` (mount/bind take absolute paths).
+- Gap: there is no cwd concept at v1.0. `File::open` rejects relative paths
+  with `InvalidArgument` ("The current-directory concept isn't part of v1;
+  callers compose absolute paths"), and there is no getcwd/chdir. So `pwd`
+  has nothing to read -- it prints "/" (the territory root, the only
+  working-directory anchor). Plan 9 tracks a per-proc dot; Thylacine v1
+  doesn't. This is correctly stated in the File module header, but it is not
+  surfaced as a user-facing "no cwd at v1.0; use absolute paths" note in the
+  manual, and a coreutil author expects `pwd`/relative paths to work.
+- Workaround: pwd prints "/"; all apps use absolute paths.
+- Suggested doc fix: a manual note "Thylacine v1.0 has no per-process cwd:
+  paths are absolute; there is no cd/pwd/getcwd. The namespace root is the
+  working anchor." Plus, when a cwd lands, update pwd + File to honor it.
+
+### G08 [P3] Path::file_name()/parent() diverge from POSIX basename/dirname
+- App / task: A1 `basename`, `dirname`.
+- Doc consulted: `libthyla-rs::fs::path` (path.rs:120-176, well-documented
+  with examples).
+- Gap: the methods are correctly documented, but their edge behavior differs
+  from the POSIX `basename`/`dirname` utilities, so an author must map them:
+  `file_name()` returns `None` for `/`, `.`, `..` (POSIX basename wants `/`,
+  `.`, `..`); `parent()` returns `None` for `/` and `""`, and `Some("")` for
+  a bare relative name (POSIX dirname wants `/`, `.`, and `.`). Not a defect
+  -- the methods mirror std::path -- just a recovery step the coreutils do.
+- Workaround: basename/dirname map the None/Some("") cases to the POSIX
+  answer in-app (and a direct `posix_base` fallback).
+- Suggested doc fix: optional -- a one-line "for POSIX basename/dirname
+  semantics, handle the None cases" note near these methods, or ship
+  `basename`/`dirname` helpers in libthyla-rs::fs.
+
+### G09 [P2][API-GAP] fs has no create/append/readdir, though the kernel does
+- App / task: A1 `tee` (deferred); A2 `cp`/`mv`/`touch`/`mkdir`/`rm`/`ls`.
+- Doc consulted: `libthyla-rs::fs::options` (create/create_new/append all
+  return `Error::NotImplemented`), `fs::file` (File::create only truncates
+  an EXISTING file), `fs/mod.rs` (no `read_dir`), vs the raw wrappers in
+  `lib.rs`.
+- Gap: the safe `fs` layer cannot create a file, append, or read a
+  directory -- `OpenOptions::create(true).open()` -> `NotImplemented`, and
+  there is no `ReadDir`. YET the kernel exposes the syscalls and libthyla-rs
+  ships the RAW wrappers: `t_walk_create` (54), `t_fsync` (55), `t_readdir`
+  (56), `t_rename` (57), `t_unlink` (58). So the std-like `fs` API is
+  incomplete relative to the kernel surface that already exists. Worse,
+  `File::from_raw_handle` is `pub(crate)`, so even after `t_walk_create`
+  returns a raw fd, a caller cannot wrap it as a `File` to use io::Write
+  (the G05 from_raw_fd gap again).
+- Workaround: aux-rt will add an `OwnedFd` (io::Read/Write over a raw fd) +
+  `create`/`unlink`/`mkdir`/`rename`/`read_dir` helpers built on the raw
+  wrappers; `tee` and the A2 coreutils use those. The safe `fs` API is
+  skipped for mutation.
+- Suggested doc fix / API: wire `OpenOptions::create` to `t_walk_create`,
+  add `fs::ReadDir` over `t_readdir`, and make a public `File::from_raw_fd`.
+  These all have kernel support already; only the safe Rust layer is missing.
