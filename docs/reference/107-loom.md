@@ -788,6 +788,78 @@ independent pins, and I-29 / I-30 are per-object properties the uniform mechanis
 upholds for both. Not a new mechanism, so the spec-first re-enable does not
 require a new module; `specs/SPEC-TO-CODE.md` extends the Loom-6 source map.
 
+### The multi-in-flight harness + the 6c audit close (Loom-6c)
+
+Loom-6c closes the whole 6a+6b surface: a deterministic **multi-in-flight** test
+harness plus the formal Opus audit.
+
+**The coverage gap.** Every Loom audit since #841 carried the same caveat -- the
+multi-in-flight window was reasoned-by-inspection, never test-reproduced. The
+reason is structural: the single-slot `p9_loopback` (`9p_transport_loopback.c`)
+*refuses* a second `send` while a prior reply is undrained, so it can hold only
+ONE 9P RPC in flight. The synchronous `p9_client_*` API never needs more, but the
+Loom elected-reader path (submit N async ops, then demux N replies) is exactly a
+multi-in-flight pattern the single-slot transport cannot stage.
+
+**The queueing transport** (`kernel/9p_transport_mq.{c,h}`) closes it. It is a
+byte-stream FIFO -- like a real srvconn byte ring, not a single slot: each `send`
+synthesizes a reply (via the same responder type as `p9_loopback`) and *appends*
+it to a ring; `recv` drains the ring front (a contiguous run; the client's frame
+assembler loops). So N async submits stage N replies and the elected reader
+demuxes them frame by frame. `recv` is non-blocking (an empty ring returns 0 = EOF
+exactly like `p9_loopback`), so a test that submits N and completes N never
+over-pumps into a spurious session death. Every access takes a leaf `lock` so a
+future concurrent driver can share one transport.
+
+**The two tests** (`kernel/test/test_9p_client.c`):
+- `9p_client.loom_multi_inflight_e2e` -- six FSYNC ops, all in flight at once,
+  then all completed. Each `Tfsync` carries a distinct tag; the transport stages
+  six `Rfsync`; the reader demuxes each to its op by tag and posts six CQEs. A
+  bitmask over the echoed `user_data` asserts every op completed exactly once
+  (tag-demux), plus the multi-entry `loom_reap_terminal` and the pin balance. The
+  `loom_first_inflight_client` **borrow-guard** balance is asserted deterministically
+  by "the registered Spoor frees exactly once" at `loom_unref` -- a leaked guard
+  ref would prevent the free (delta 0), a double would have freed it early.
+- `9p_client.loom_multi_inflight_read_e2e` -- four READ ops in flight, each into a
+  distinct slice of one registered buffer; the completion-time wire->buffer copy
+  (`loom_payload_result`) runs four times concurrently, each clamped to its slice,
+  with no crosstalk (each slice gets its own `"hello"`, the inter-slice gap stays
+  poison).
+
+This drives the multi-entry `inflight_ops` list, `async_inflight > 1`, the
+borrow-guard across a *real* pump, and the multi-op reap -- none of which the
+single-op / synthetic-NOP tests reached.
+
+**The CONCURRENT dimension is owed to Loom-6d.** The two-thread-same-`loom_fd`
+reap-vs-pump race + cross-Proc-death stress harness is the documented home of the
+OWED item across all five Loom closed lists: it lands with the native
+`libthyla_rs::loom` API (the first REAL multi-in-flight async driver) and restored
+TSan, where it is a genuine test rather than synthetic blocking-transport
+scaffolding. The 6c harness delivers the deterministic single-reader multi-in-flight
+coverage; 6d delivers the concurrent coverage.
+
+**The 6c audit** (one Opus prosecutor + a concurrent self-audit; SOUND-set
+cross-confirmed) closed **0 P0 / 0 P1 / 1 P2 / 3 P3**, all fixed:
+- **F1 [P2]** -- a byte-count CQE result `(s32)got` could wrap negative if a count
+  exceeds `INT32_MAX` (WRITE's unclamped server `write_count` the realistic leg),
+  aliasing a success onto `-errno`. Fixed: `loom_count_result` clamps every count
+  arm to `0x7FFFFFFF` so the cast stays non-negative (the data was already
+  placed/accepted; only the reported magnitude caps).
+- **F2 [P3]** -- the two-name split gate allowed `name_len == len` (an empty second
+  name), which SYMLINK accepted but RENAMEAT rejected. Fixed: the gate is now
+  `0 < split < len` (both names non-empty), rejected uniformly at submit.
+- **F3 [P3]** -- `loom_resolve_buf`'s single-base kva math rests on the
+  `BURROW_TYPE_ANON` contiguity guarantee, which lived only in a comment. Fixed: an
+  explicit "do not widen this type gate without making the kva math
+  chunk-walking" anchor.
+- **F4 [P3]** -- the ABI `_Static_assert`s pinned `sizeof` but not field offsets for
+  `p9_setattr` / `p9_attr` / `p9_statfs` (a same-size field reorder would silently
+  shift the Loom ABI). Fixed: `__builtin_offsetof` asserts on the load-bearing
+  fields.
+
+NOT a dirty close (0 P0/P1; a clamp + a gate constant + a comment + asserts -- no
+wait/wake-predicate change). `memory/audit_loom_closed_list.md` Loom-6 section.
+
 ---
 
 ## Data structures
@@ -1009,16 +1081,12 @@ rolled back via `spoor_clunk`); a user-VA fault reading the fd array.
 | Loom-4 | SQPOLL kthread (4a recv-deadline + 4b CQ wait-list + 4c kthread + 4d audit) | **landed** |
 | Loom-5a | multishot streams (`LOOM_SQE_MULTISHOT` → `LOOM_CQE_MORE` shots + terminal) | **landed** |
 | Loom-5b | LINK/DRAIN held-submission chain (`l->chain` + `loom_admit_chain`) | **landed** (Loom-5 audit closed 0/0/2/4) |
-| Loom-6a | registered buffers (`LOOM_REGISTER_BUFFERS`) + the READ/WRITE data path | **landed** (self-audit clean; formal audit at 6c) |
-| Loom-6b-1 | the read-shaped ops (READDIR / READLINK / GETATTR / STATFS) over the 6a machinery | **landed** (self-audit clean; formal audit at 6c) |
-| Loom-6b-2 | the metadata-mutation ops (SETATTR / MKDIR / SYMLINK / MKNOD / UNLINKAT / RENAMEAT / LINK -- names-from-buffer + the second-fid I-30 pin) | **landed** (self-audit clean; formal audit at 6c) |
-| Loom-6c | the OWED multi-in-flight SMP harness + the formal Opus audit over 6a+6b + the SMP gate + close | pending |
-| #916 | the direct-descriptor ops (WALK / LOPEN / LCREATE / CLUNK -- mint/open/release a registered fid) | deferred (post-Loom-6 seam) |
-| Loom-6c | the SMP multi-in-flight harness + the focused Opus audit over the whole 6a+6b kernel surface + close | pending |
-| Loom-6d | the native `libthyla_rs::loom` API + the latency bench | pending |
-| (direct-descriptor) | WALK / LOPEN / LCREATE / CLUNK -- fid mint/open/release from the op path (the io_uring direct-descriptor analog) | deferred (task #916; post-6 seam) |
-| Loom-6c | the multi-in-flight SMP harness + the focused Opus audit + close | pending |
-| Loom-6d | the native libthyla-rs Loom API + the latency benchmark | pending |
+| Loom-6a | registered buffers (`LOOM_REGISTER_BUFFERS`) + the READ/WRITE data path | **landed** (formal audit closed at 6c) |
+| Loom-6b-1 | the read-shaped ops (READDIR / READLINK / GETATTR / STATFS) over the 6a machinery | **landed** (formal audit closed at 6c) |
+| Loom-6b-2 | the metadata-mutation ops (SETATTR / MKDIR / SYMLINK / MKNOD / UNLINKAT / RENAMEAT / LINK -- names-from-buffer + the second-fid I-30 pin) | **landed** (formal audit closed at 6c) |
+| Loom-6c | the deterministic multi-in-flight harness (`9p_transport_mq` + 2 tests) + the formal Opus audit over the whole 6a+6b surface + the SMP gate + close | **landed** (audit closed 0/0/1/3) |
+| Loom-6d | the native `libthyla_rs::loom` API + the latency bench + the CONCURRENT two-thread SMP stress harness (its documented home; needs the native driver + restored TSan) | pending |
+| #916 | the direct-descriptor ops (WALK / LOPEN / LCREATE / CLUNK -- mint/open/release a registered fid from the op path) | deferred (post-Loom-6 seam) |
 
 ## Known caveats / footguns
 

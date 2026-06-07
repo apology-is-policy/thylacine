@@ -420,12 +420,19 @@ static int loom_resolve_buf(struct Proc *p, const struct loom_buf_reg *b,
     if (va + len < va)                               return -1;  // VA-range wrap
     struct Vma *vma = vma_lookup(p, va);
     if (!vma || !vma->burrow)                        return -1;  // unmapped / guard VMA
-    if (vma->burrow->type != BURROW_TYPE_ANON)       return -1;  // device mem (MMIO/DMA): no
+    // BURROW_TYPE_ANON is LOAD-BEARING beyond the device-mem reject: it is the sole
+    // guarantee that the Burrow is one physically-contiguous alloc_pages chunk, which
+    // is what makes the single-base `pa_to_kva(page_to_pa(pages)) + boff` kva valid
+    // across the whole [va, va+len) span below. 6c audit F3: do NOT widen this type
+    // gate to admit a CPU-accessible-but-scatter-gather Burrow type (a future
+    // file-backed / sg-list successor) without first making the kva computation
+    // chunk-walking -- else boff past the first physical chunk yields a wrong/OOB
+    // kernel address with no tripwire.
+    if (vma->burrow->type != BURROW_TYPE_ANON)       return -1;  // device mem (MMIO/DMA) / non-contiguous: no
     if ((vma->prot & VMA_PROT_WRITE) == 0)           return -1;  // need RW (READ writes into it)
     if (va < vma->vaddr_start || va + len > vma->vaddr_end) return -1;  // within ONE VMA
     // Byte offset of the slice into the backing Burrow + its contiguous direct-map
-    // base. A BURROW_TYPE_ANON Burrow is a single alloc_pages chunk, so base + off
-    // is a valid kernel address across the whole [va, va+len) span.
+    // base (valid because of the BURROW_TYPE_ANON contiguity guarantee above).
     u64 boff = vma->burrow_offset + (va - vma->vaddr_start);
     if (boff + len > vma->burrow->size)              return -1;  // defensive (VMA invariant implies)
     u8 *base = (u8 *)pa_to_kva(page_to_pa(vma->burrow->pages));
@@ -575,6 +582,35 @@ _Static_assert(sizeof(struct p9_statfs) == 64, "Loom STATFS output ABI pinned at
 // registered buffer; the build thunk reads it (align-safe copy). Pinned so a
 // future kernel field add cannot silently shift the input layout.
 _Static_assert(sizeof(struct p9_setattr) == 56, "Loom SETATTR input ABI pinned at 56 bytes");
+// 6c audit F4: pin the load-bearing field OFFSETS too, not just the size -- a
+// same-size field reorder (e.g. swapping two u32s) leaves sizeof unchanged but
+// silently shifts the byte-pinned Loom ABI the native libthyla_rs::loom mirror
+// reads/writes. Catch that drift at build time (CLAUDE.md compile-time invariants).
+_Static_assert(__builtin_offsetof(struct p9_attr, valid) == 0,  "Loom p9_attr.valid ABI offset");
+_Static_assert(__builtin_offsetof(struct p9_attr, mode)  == 24, "Loom p9_attr.mode ABI offset");
+_Static_assert(__builtin_offsetof(struct p9_attr, uid)   == 28, "Loom p9_attr.uid ABI offset");
+_Static_assert(__builtin_offsetof(struct p9_attr, gid)   == 32, "Loom p9_attr.gid ABI offset");
+_Static_assert(__builtin_offsetof(struct p9_attr, size)  == 56, "Loom p9_attr.size ABI offset");
+_Static_assert(__builtin_offsetof(struct p9_setattr, valid) == 0,  "Loom p9_setattr.valid ABI offset");
+_Static_assert(__builtin_offsetof(struct p9_setattr, mode)  == 4,  "Loom p9_setattr.mode ABI offset");
+_Static_assert(__builtin_offsetof(struct p9_setattr, uid)   == 8,  "Loom p9_setattr.uid ABI offset");
+_Static_assert(__builtin_offsetof(struct p9_setattr, gid)   == 12, "Loom p9_setattr.gid ABI offset");
+_Static_assert(__builtin_offsetof(struct p9_setattr, size)  == 16, "Loom p9_setattr.size ABI offset");
+_Static_assert(__builtin_offsetof(struct p9_statfs, type)    == 0,  "Loom p9_statfs.type ABI offset");
+_Static_assert(__builtin_offsetof(struct p9_statfs, bsize)   == 4,  "Loom p9_statfs.bsize ABI offset");
+_Static_assert(__builtin_offsetof(struct p9_statfs, blocks)  == 8,  "Loom p9_statfs.blocks ABI offset");
+_Static_assert(__builtin_offsetof(struct p9_statfs, namelen) == 56, "Loom p9_statfs.namelen ABI offset");
+
+// 6c audit F1: map a byte COUNT to a CQE result without aliasing the error
+// region. The CQE ABI is result >= 0 = byte count, result < 0 = -errno; a count
+// that would set the sign bit (> INT32_MAX -- a multi-GiB registered buffer, or
+// an over-large server-reported write/read count) must NOT wrap to a spurious
+// -errno. The data was already placed (READ) / accepted (WRITE); only the
+// reported magnitude caps. Clamp so the s32 cast stays non-negative.
+static s32 loom_count_result(u32 got) {
+    if (got > 0x7FFFFFFFu) got = 0x7FFFFFFFu;
+    return (s32)got;
+}
 
 static s32 loom_payload_result(struct loom_async_op *op, int status,
                                struct p9_dispatch_result *dr) {
@@ -586,10 +622,10 @@ static s32 loom_payload_result(struct loom_async_op *op, int status,
         if (got > op->op_count) got = op->op_count;   // never overrun the pinned slice
         if (got != 0 && dr->read_data && op->buf_kva)
             loom_bufcopy(op->buf_kva, dr->read_data, got);
-        return (s32)got;
+        return loom_count_result(got);
     }
     case LOOM_OP_WRITE:
-        return dr ? (s32)dr->write_count : 0;
+        return dr ? loom_count_result(dr->write_count) : 0;
     // Loom-6b read-shaped output: copy the reply payload INTO the pinned dest
     // slice, bounded by op_count (the dest capacity) so a short buffer can never
     // overrun. READDIR / READLINK stream bytes; GETATTR / STATFS copy the parsed
@@ -600,7 +636,7 @@ static s32 loom_payload_result(struct loom_async_op *op, int status,
         if (got > op->op_count) got = op->op_count;
         if (got != 0 && dr->readdir_data && op->buf_kva)
             loom_bufcopy(op->buf_kva, dr->readdir_data, got);
-        return (s32)got;
+        return loom_count_result(got);
     }
     case LOOM_OP_READLINK: {
         if (!dr) return 0;
@@ -608,7 +644,7 @@ static s32 loom_payload_result(struct loom_async_op *op, int status,
         if (got > op->op_count) got = op->op_count;
         if (got != 0 && dr->readlink_target && op->buf_kva)
             loom_bufcopy(op->buf_kva, dr->readlink_target, got);
-        return (s32)got;
+        return loom_count_result(got);
     }
     case LOOM_OP_GETATTR: {
         if (!dr) return 0;
@@ -616,7 +652,7 @@ static s32 loom_payload_result(struct loom_async_op *op, int status,
         if (got > op->op_count) got = op->op_count;   // honor a short dest (no overrun)
         if (got != 0 && op->buf_kva)
             loom_bufcopy(op->buf_kva, (const u8 *)&dr->attr, got);
-        return (s32)got;
+        return loom_count_result(got);
     }
     case LOOM_OP_STATFS: {
         if (!dr) return 0;
@@ -624,7 +660,7 @@ static s32 loom_payload_result(struct loom_async_op *op, int status,
         if (got > op->op_count) got = op->op_count;
         if (got != 0 && op->buf_kva)
             loom_bufcopy(op->buf_kva, (const u8 *)&dr->statfs, got);
-        return (s32)got;
+        return loom_count_result(got);
     }
     default:
         return loom_scalar_result(status);            // NOP / FSYNC
@@ -893,13 +929,19 @@ static void loom_submit_payload(struct Loom *l, const struct loom_sqe *sqe,
     // never re-read the shared ring after this). These are MEMORY-SAFETY gates
     // that bound the build thunk's reads into the pinned region:
     //   - a two-name op (SYMLINK / RENAMEAT) splits the region at _resv1[1]; that
-    //     sub-length must be <= the span (else buf_kva + sub leaves the slice or
-    //     span - sub underflows to a huge length);
+    //     sub-length must lie strictly inside the span -- 0 < split < count -- so
+    //     buf_kva+split stays in the slice AND both halves are non-empty (6c audit
+    //     F2: the old `> count` gate let split == count through, sending an empty
+    //     second name that SYMLINK accepted but RENAMEAT rejected -- inconsistent;
+    //     and a valid two-name op has two non-empty names, so reject both degenerate
+    //     splits uniformly here rather than diverging per-op deep in the builders);
     //   - SETATTR's region must hold a whole struct p9_setattr.
     // (A merely-over-msize name is caught later by the builder returning < 0 -> one
     // error CQE; THIS check is the memory-safety gate, not the protocol one.)
     if ((sqe->opcode == LOOM_OP_SYMLINK || sqe->opcode == LOOM_OP_RENAMEAT) &&
-        (u32)sqe->_resv1[1] > count) { err = -(s32)T_E_INVAL; goto fail; }
+        ((u32)sqe->_resv1[1] == 0 || (u32)sqe->_resv1[1] >= count)) {
+        err = -(s32)T_E_INVAL; goto fail;
+    }
     if (sqe->opcode == LOOM_OP_SETATTR &&
         count < (u32)sizeof(struct p9_setattr)) { err = -(s32)T_E_INVAL; goto fail; }
 

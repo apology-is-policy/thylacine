@@ -14,6 +14,7 @@
 #include <thylacine/9p_session.h>
 #include <thylacine/9p_transport.h>
 #include <thylacine/9p_transport_loopback.h>
+#include <thylacine/9p_transport_mq.h>   // Loom-6c multi-in-flight queueing transport
 #include <thylacine/9p_wire.h>
 #include <thylacine/burrow.h>     // Loom-6 white-box registered-buffer install
 #include <thylacine/dev9p.h>
@@ -2083,4 +2084,147 @@ void test_9p_client_loom_mutation_rejects(void) {
     loom_unref(l);
     p9_client_destroy(&g_client);
     p9_loopback_destroy(&g_loopback);
+}
+
+// =============================================================================
+// Loom-6c: multi-in-flight. The single-slot p9_loopback refuses a second send
+// while a reply is undrained, so it can hold only ONE 9P RPC in flight -- the
+// reason the prior Loom tests are single-op / synthetic-NOP and the multi-in-
+// flight window stayed reasoned-by-inspection, never test-reproduced (the gap the
+// Loom audits carried since #841). The queueing p9_mq_loopback (a byte FIFO that
+// stages N replies) closes it: these tests submit N async ops that ALL go in
+// flight at once, then complete them all -- driving the multi-entry inflight_ops
+// list, async_inflight > 1, the loom_first_inflight_client borrow-guard across a
+// real pump, and the multi-entry loom_reap_terminal. The borrow-guard balance is
+// asserted deterministically by "the registered Spoor frees exactly once" -- a
+// missing guard clunk would leak it (delta 0), a double would have freed it early.
+// (The CONCURRENT two-thread reap-vs-pump race + cross-Proc death is the Loom-6d
+// native-driver + restored-TSan harness; here the single elected reader drains a
+// deterministically-staged multi-in-flight queue.)
+// =============================================================================
+static struct p9_mq_loopback g_mq;
+
+// N FSYNC ops, all in flight, then all completed. Each Tfsync carries a distinct
+// tag; the queueing transport stages N Rfsync; the elected reader demuxes each to
+// its op by tag and posts N CQEs. Asserts every op completed exactly once (a
+// bitmask over the echoed user_data) + the multi-op reap + the pin balance.
+void test_9p_client_loom_multi_inflight_e2e(void) {
+    int rc = p9_mq_loopback_init(&g_mq, canonical_responder, NULL);
+    TEST_EXPECT_EQ(rc, 0, "mq loopback init");
+    rc = p9_client_init(&g_client, /*root_fid=*/0, /*msize=*/8192,
+                        p9_mq_loopback_ops_for(&g_mq), g_recv_buf, sizeof(g_recv_buf));
+    TEST_EXPECT_EQ(rc, 0, "client init over mq transport");
+    const u8 uname[] = {'r','o','o','t'};
+    const u8 aname[] = {'/'};
+    TEST_EXPECT_EQ(p9_client_handshake(&g_client, uname, sizeof(uname), aname, sizeof(aname), 0),
+                   0, "handshake over mq transport");
+
+    struct Spoor *sp = dev9p_attach_client(&g_client, 0);
+    TEST_ASSERT(sp != NULL, "dev9p_attach_client");
+    struct Loom *l = loom_create(8, 16);
+    TEST_ASSERT(l != NULL, "loom_create(8,16)");
+    rights_t rt = RIGHT_READ | RIGHT_WRITE;
+    TEST_ASSERT(loom_register_handles(l, &sp, &rt, 1) == 0, "register dev9p spoor");
+
+    struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+    struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
+
+    const u32 N = 6;            // <= cq_entries (16); all admit, all in flight at once
+    const u64 base = 0xA1F00000ULL;
+    for (u32 i = 0; i < N; i++)
+        cl_stage_sqe(l, i, LOOM_OP_FSYNC, /*handle=*/0, /*len=datasync*/0, base + i);
+    __atomic_store_n(&h->sq_tail, N, __ATOMIC_RELEASE);
+
+    int n = loom_enter(l, /*to_submit=*/N, /*min_complete=*/N, /*flags=*/0);
+    TEST_EXPECT_EQ(n, (int)N, "all N SQEs consumed in one enter");
+    TEST_EXPECT_EQ((u64)l->cq_tail, (u64)N, "N CQEs posted (all in-flight ops completed)");
+    TEST_EXPECT_EQ((u64)l->async_inflight, (u64)0, "all ops reaped");
+    TEST_ASSERT(l->inflight_ops == NULL, "all async containers reclaimed");
+    // Each op completed EXACTLY once: collect the echoed user_data into a bitmask.
+    // A lost reply (demux miss) leaves a bit clear; a double-complete is caught by
+    // cq_tail == N above (no extra CQE).
+    u32 seen = 0;
+    for (u32 i = 0; i < N; i++) {
+        u64 ud = cqes[i].user_data;
+        TEST_ASSERT(ud >= base && ud < base + N, "CQE user_data in the submitted range");
+        TEST_EXPECT_EQ((u64)(s64)cqes[i].result, (u64)0, "fsync success -> result 0");
+        seen |= (1u << (u32)(ud - base));
+    }
+    TEST_EXPECT_EQ((u64)seen, (u64)((1u << N) - 1u),
+                   "every one of the N distinct ops completed exactly once (tag-demux)");
+
+    // Pin balance: the registered ref + each of the N in-flight op pins + every
+    // borrow-guard ref taken during the pump must all be released. The dev9p root
+    // Spoor frees EXACTLY once at loom_unref -- a leaked guard ref would prevent it.
+    u64 freed0 = spoor_total_freed();
+    loom_unref(l);
+    TEST_EXPECT_EQ(spoor_total_freed() - freed0, (u64)1,
+                   "dev9p root spoor freed once (all pins + borrow-guards balanced)");
+    p9_client_destroy(&g_client);
+    p9_mq_loopback_destroy(&g_mq);
+}
+
+// N READ ops in flight at once, each into a distinct slice of ONE registered
+// buffer. The queueing transport replies Rread("hello") to each; the elected
+// reader copies each payload into its op's pinned slice at completion. Drives the
+// completion-time wire->buffer copy (loom_payload_result) under multi-in-flight:
+// N independent buffer pins, N copies, each clamped to its slice -- and asserts no
+// crosstalk (each slice gets its own "hello", the inter-slice gap stays poison).
+void test_9p_client_loom_multi_inflight_read_e2e(void) {
+    int rc = p9_mq_loopback_init(&g_mq, canonical_responder, NULL);
+    TEST_EXPECT_EQ(rc, 0, "mq loopback init");
+    rc = p9_client_init(&g_client, /*root_fid=*/0, /*msize=*/8192,
+                        p9_mq_loopback_ops_for(&g_mq), g_recv_buf, sizeof(g_recv_buf));
+    TEST_EXPECT_EQ(rc, 0, "client init over mq transport");
+    const u8 uname[] = {'r','o','o','t'};
+    const u8 aname[] = {'/'};
+    TEST_EXPECT_EQ(p9_client_handshake(&g_client, uname, sizeof(uname), aname, sizeof(aname), 0),
+                   0, "handshake over mq transport");
+
+    struct Spoor *sp = dev9p_attach_client(&g_client, 0);
+    TEST_ASSERT(sp != NULL, "dev9p_attach_client");
+    struct Loom *l = loom_create(8, 16);
+    TEST_ASSERT(l != NULL, "loom_create(8,16)");
+    rights_t rt = RIGHT_READ | RIGHT_WRITE;
+    TEST_ASSERT(loom_register_handles(l, &sp, &rt, 1) == 0, "register dev9p spoor");
+
+    struct Burrow *b; u8 *bkva;
+    loom_install_test_buf(l, 0, PAGE_SIZE, &b, &bkva);
+    int hc0 = burrow_handle_count(b);
+    for (u32 i = 0; i < 64; i++) bkva[i] = 0xAA;     // poison the whole region
+
+    struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+    struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
+
+    const u32 N = 4;
+    const u32 STRIDE = 8;       // distinct 8-byte slices (5-byte "hello" + a poison gap)
+    const u64 base = 0xBEAD0000ULL;
+    for (u32 i = 0; i < N; i++)
+        cl_stage_rw(l, i, LOOM_OP_READ, /*handle=*/0, /*offset=*/0, /*count=*/5,
+                    /*bidx=*/0, /*buf_off=*/(u64)i * STRIDE, base + i);
+    __atomic_store_n(&h->sq_tail, N, __ATOMIC_RELEASE);
+
+    int n = loom_enter(l, N, N, 0);
+    TEST_EXPECT_EQ(n, (int)N, "all N READ SQEs consumed");
+    TEST_EXPECT_EQ((u64)l->cq_tail, (u64)N, "N CQEs posted");
+    TEST_EXPECT_EQ((u64)l->async_inflight, (u64)0, "all ops reaped");
+    for (u32 i = 0; i < N; i++) {
+        u64 ud = cqes[i].user_data;
+        TEST_ASSERT(ud >= base && ud < base + N, "CQE user_data in range");
+        TEST_EXPECT_EQ((u64)(s64)cqes[i].result, (u64)5, "each READ copied 5 bytes");
+    }
+    // Each slice got its own "hello"; the inter-slice gap stayed poison (no copy
+    // crosstalk between the N concurrent in-flight buffer pins).
+    for (u32 i = 0; i < N; i++) {
+        u8 *s = bkva + (u32)i * STRIDE;
+        TEST_ASSERT(s[0]=='h' && s[1]=='e' && s[2]=='l' && s[3]=='l' && s[4]=='o',
+                    "slice received its own Rread payload");
+        TEST_EXPECT_EQ((u64)s[5], (u64)0xAA, "inter-slice gap unmodified (no copy overrun)");
+    }
+    TEST_EXPECT_EQ(burrow_handle_count(b), hc0, "all N buffer pins balanced (released at reap)");
+
+    burrow_unref(b);
+    loom_unref(l);
+    p9_client_destroy(&g_client);
+    p9_mq_loopback_destroy(&g_mq);
 }

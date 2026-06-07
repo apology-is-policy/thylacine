@@ -106,6 +106,7 @@ set(KERNEL_SRCS
     9p_session.c
     9p_transport.c
     9p_transport_loopback.c
+    9p_transport_mq.c
     9p_client.c
     dev9p.c
     9p_attach.c

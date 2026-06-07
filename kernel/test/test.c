@@ -592,6 +592,8 @@ void test_9p_client_loom_mkdir_e2e(void);
 void test_9p_client_loom_setattr_e2e(void);
 void test_9p_client_loom_renameat_e2e(void);
 void test_9p_client_loom_mutation_rejects(void);
+void test_9p_client_loom_multi_inflight_e2e(void);
+void test_9p_client_loom_multi_inflight_read_e2e(void);
 void test_dev9p_registered(void);
 void test_dev9p_attach_client_root_spoor(void);
 void test_dev9p_walk_one_component(void);
@@ -1582,6 +1584,10 @@ struct test_case g_tests[] = {
     { "9p_client.loom_renameat_e2e",   test_9p_client_loom_renameat_e2e,   false, NULL },
     { "9p_client.loom_mutation_rejects",
                                        test_9p_client_loom_mutation_rejects, false, NULL },
+    { "9p_client.loom_multi_inflight_e2e",
+                                       test_9p_client_loom_multi_inflight_e2e, false, NULL },
+    { "9p_client.loom_multi_inflight_read_e2e",
+                                       test_9p_client_loom_multi_inflight_read_e2e, false, NULL },
     { "dev9p.registered",              test_dev9p_registered,              false, NULL },
     { "dev9p.attach_client_root_spoor",test_dev9p_attach_client_root_spoor,false, NULL },
     { "dev9p.walk_one_component",      test_dev9p_walk_one_component,      false, NULL },
