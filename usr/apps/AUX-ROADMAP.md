@@ -14,8 +14,14 @@ gaps are in `DOC-GAP-REPORT.md`. NEVER run anything.
 
 ## CURRENT STATE (pickup summary -- keep this current)
 
-- **36 native apps built** (compile + clippy clean, 0 warnings, W^X-clean),
-  each with a TEST-PLAN.md. NONE executed (the track never boots QEMU).
+- **36 coreutils/tools + the Tapestry POC** built (compile + clippy clean, 0
+  warnings, W^X-clean), each with a TEST-PLAN.md. NONE executed (never boots).
+- **Tapestry (Phase B0)**: a user-directed co-design of Loom's graphics
+  fast-path -- `usr/apps/TAPESTRY-DESIGN.md` + `usr/apps/libtapestry`
+  (client model, `Loom` seam + MockLoom) + `usr/apps/tapestry-demo` (XOR-plasma
+  renderer). Compiles against the future Loom-6 surface; HAND TO MAIN AGENT for
+  the Loom arc. Key result: graphics needs zero new Loom core (Loom-5+6 + a 9P
+  server). See Phase B0 below.
 - **Foundation: `usr/apps/aux-rt`** -- argv (naked rs_main SP-capture; the G03
   workaround, disassembly-verified), stdio (Stdin/Stdout/Stderr +
   print!/println!/eprintln!), `copy`/`slurp`, and the `fs` submodule
@@ -185,6 +191,20 @@ backend, the ctl-tree editing, the namespace) -- that is where the gaps will be.
 The deliverable here is NOT a compiling app -- it is a design doc + an
 API-shaped skeleton (written against the documented FUTURE Loom/net surface) + a
 test plan + a "what it needs to be unblocked" list. No execution.
+- [done-skeleton] **B0 -- Tapestry: the graphics fast-path woven on Loom**
+  (user-directed co-design, this session). `usr/apps/TAPESTRY-DESIGN.md` (the
+  full design: present/event protocol, the no-torn-scanout invariant, the
+  Loom-5/6 requirements, `tapestryd` sketch, the SDL seam, the unblock list) +
+  `usr/apps/libtapestry` (the client model: Display/Tapestry/Event + the `Loom`
+  seam trait + MockLoom; compiles against the documented future Loom surface) +
+  `usr/apps/tapestry-demo` (a software XOR-plasma renderer driving it;
+  compile-only via MockLoom). Naming: Loom = the instrument the client
+  operates; Tapestry = the woven framebuffer surface. KEY RESULT: graphics
+  needs ZERO new Loom core -- it falls out of Loom-5 (multishot) + Loom-6
+  (regbuf) + a 9P server. Decisions D1-D4 agreed with the user. UNBLOCK: the
+  Loom-6 native API (implement `impl tapestry::Loom for libthyla_rs::loom`),
+  virtio-gpu scanout, `tapestryd`, virtio-sound (audio). HAND TO MAIN AGENT
+  to fold into the Loom arc.
 - [blocked] B1 -- `httpd`: an HTTP/1.1 server using **Loom** (blocked on the
   Loom-6 native Loom API + the network stack). Showcases the Loom trap-
   amortization win.

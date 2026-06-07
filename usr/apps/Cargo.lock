@@ -121,6 +121,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "libtapestry"
+version = "0.1.0"
+dependencies = [
+ "libthyla-rs",
+]
+
+[[package]]
 name = "libthyla-rs"
 version = "0.1.0"
 dependencies = [
@@ -253,6 +260,15 @@ name = "tail"
 version = "0.1.0"
 dependencies = [
  "aux-rt",
+ "libthyla-rs",
+]
+
+[[package]]
+name = "tapestry-demo"
+version = "0.1.0"
+dependencies = [
+ "aux-rt",
+ "libtapestry",
  "libthyla-rs",
 ]
 

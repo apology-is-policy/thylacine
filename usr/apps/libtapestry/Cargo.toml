@@ -1,0 +1,18 @@
+[package]
+name = "libtapestry"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lib]
+name = "tapestry"
+path = "src/lib.rs"
+
+[dependencies]
+# libtapestry is the client-side weave: it operates a Loom ring to present a
+# Tapestry (the framebuffer surface). It depends on libthyla-rs only for the
+# shared error type today; when the real Loom native API lands (Loom-6) the
+# `Loom` seam trait below is implemented by `libthyla_rs::loom` and the mock
+# is dropped. It does NOT extend libthyla-rs.
+libthyla-rs = { path = "../../lib/libthyla-rs" }
