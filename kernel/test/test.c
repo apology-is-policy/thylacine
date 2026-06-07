@@ -538,6 +538,7 @@ void test_9p_transport_backend_error_transitions_to_error(void);
 void test_9p_transport_close_idempotent(void);
 void test_9p_transport_exchange_drives_session_handshake(void);
 void test_9p_transport_exchange_drives_session_walk(void);
+void test_9p_transport_deadline_idle_vs_eof(void);
 void test_9p_client_init_destroy(void);
 void test_9p_client_handshake(void);
 void test_9p_client_walk_and_clunk(void);
@@ -555,6 +556,10 @@ void test_9p_client_lock_released_between_ops(void);
 void test_9p_client_async_op_posts_cqe(void);
 void test_9p_client_async_session_death_posts_error_cqe(void);
 void test_9p_client_async_handoff_skips_async(void);
+void test_9p_client_pump_deadline_idle(void);
+void test_9p_client_pump_deadline_data_ready_progresses(void);
+void test_9p_client_pump_deadline_chunked_frame_completes(void);
+void test_9p_client_pump_deadline_busy_when_reader_active(void);
 void test_9p_client_loom_fsync_e2e(void);
 void test_9p_client_loom_rights_deny(void);
 void test_9p_client_loom_quiesce_abandons_inflight(void);
@@ -600,6 +605,7 @@ void test_9p_srvconn_transport_large_frame_roundtrip(void);
 void test_9p_srvconn_transport_close_drops_srvconn_ref(void);
 void test_9p_srvconn_transport_kernel_attached_skips_teardown_on_handle_close(void);
 void test_9p_srvconn_transport_send_preserves_caller_deadline(void);
+void test_9p_srvconn_transport_deadline_vtable_routes(void);
 void test_territory_pivot_root_smoke(void);
 void test_territory_pivot_root_rejects_no_initial_root(void);
 void test_territory_pivot_root_idempotent_same_spoor(void);
@@ -1465,6 +1471,9 @@ struct test_case g_tests[] = {
     { "9p_transport.exchange_drives_session_walk",
                                        test_9p_transport_exchange_drives_session_walk,
                                                                            false, NULL },
+    { "9p_transport.deadline_idle_vs_eof",
+                                       test_9p_transport_deadline_idle_vs_eof,
+                                                                           false, NULL },
     { "9p_client.init_destroy",        test_9p_client_init_destroy,        false, NULL },
     { "9p_client.handshake",           test_9p_client_handshake,           false, NULL },
     { "9p_client.walk_and_clunk",      test_9p_client_walk_and_clunk,      false, NULL },
@@ -1491,6 +1500,16 @@ struct test_case g_tests[] = {
                                                                            false, NULL },
     { "9p_client.async_handoff_skips_async",
                                        test_9p_client_async_handoff_skips_async,
+                                                                           false, NULL },
+    { "9p_client.pump_deadline_idle",  test_9p_client_pump_deadline_idle,  false, NULL },
+    { "9p_client.pump_deadline_data_ready_progresses",
+                                       test_9p_client_pump_deadline_data_ready_progresses,
+                                                                           false, NULL },
+    { "9p_client.pump_deadline_chunked_frame_completes",
+                                       test_9p_client_pump_deadline_chunked_frame_completes,
+                                                                           false, NULL },
+    { "9p_client.pump_deadline_busy_when_reader_active",
+                                       test_9p_client_pump_deadline_busy_when_reader_active,
                                                                            false, NULL },
     { "9p_client.loom_fsync_e2e",      test_9p_client_loom_fsync_e2e,      false, NULL },
     { "9p_client.loom_rights_deny",    test_9p_client_loom_rights_deny,    false, NULL },
@@ -1558,6 +1577,7 @@ struct test_case g_tests[] = {
     { "9p_srvconn_transport.close_drops_srvconn_ref",       test_9p_srvconn_transport_close_drops_srvconn_ref,       false, NULL },
     { "9p_srvconn_transport.kernel_attached_skips_teardown_on_handle_close", test_9p_srvconn_transport_kernel_attached_skips_teardown_on_handle_close, false, NULL },
     { "9p_srvconn_transport.send_preserves_caller_deadline", test_9p_srvconn_transport_send_preserves_caller_deadline, false, NULL },
+    { "9p_srvconn_transport.deadline_vtable_routes",        test_9p_srvconn_transport_deadline_vtable_routes,        false, NULL },
     { "pipe.smoke",                                         test_pipe_smoke,                                         false, NULL },
     { "pipe.read_on_empty_returns_zero",                    test_pipe_read_on_empty_returns_zero,                    false, NULL },
     { "pipe.write_to_full_returns_zero",                    test_pipe_write_to_full_returns_zero,                    false, NULL },

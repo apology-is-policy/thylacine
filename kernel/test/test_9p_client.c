@@ -41,6 +41,10 @@ void test_9p_client_lock_released_between_ops(void);
 void test_9p_client_async_op_posts_cqe(void);
 void test_9p_client_async_session_death_posts_error_cqe(void);
 void test_9p_client_async_handoff_skips_async(void);
+void test_9p_client_pump_deadline_idle(void);
+void test_9p_client_pump_deadline_data_ready_progresses(void);
+void test_9p_client_pump_deadline_chunked_frame_completes(void);
+void test_9p_client_pump_deadline_busy_when_reader_active(void);
 void test_9p_client_loom_fsync_e2e(void);
 void test_9p_client_loom_rights_deny(void);
 void test_9p_client_loom_quiesce_abandons_inflight(void);
@@ -723,6 +727,110 @@ void test_9p_client_async_handoff_skips_async(void) {
     g_client.inflight[30] = NULL;
     g_client.inflight[31] = NULL;
     spin_unlock(&g_client.lock);
+
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}
+
+// =============================================================================
+// Loom-4 (LOOM.md §8.6): the deadline-aware reader pump. The loopback models a
+// frame-boundary deadline (an armed deadline + an empty staged response returns
+// -1 + recv_timed_out, instead of 0 = EOF), so the IDLE / PROGRESS / atomicity
+// paths are driven deterministically without real time. `deadline_ns` is opaque
+// to the loopback -- any non-zero value arms its knob.
+// =============================================================================
+
+static bool g_pump_async_completed;
+static s32  g_pump_async_result;
+static struct p9_rpc g_pump_rpc;
+
+static void pump_async_on_complete(struct p9_rpc *rpc, int status,
+                                   struct p9_dispatch_result *dr) {
+    (void)rpc; (void)dr;
+    g_pump_async_result    = (s32)status;
+    g_pump_async_completed = true;
+}
+
+// The idle deadline lapses at a frame boundary (empty stream): the pump returns
+// P9_PUMP_IDLE, the session stays alive + synced, and a subsequent op succeeds.
+void test_9p_client_pump_deadline_idle(void) {
+    drive_client_open(&g_client, &g_loopback);   // handshake drains the loopback
+
+    const u64 deadline = 1;   // any non-zero value arms the loopback's knob
+    int r = p9_client_reader_pump_once_deadline(&g_client, deadline);
+    TEST_EXPECT_EQ(r, (int)P9_PUMP_IDLE, "empty stream + armed deadline -> IDLE");
+    TEST_ASSERT(!g_client.dead, "IDLE must NOT mark the session dead");
+    TEST_ASSERT(p9_client_is_open(&g_client), "session still open after IDLE");
+
+    // The stream stayed synced: a normal op still works (the IDLE consumed no
+    // bytes, so the next reply is not mis-framed).
+    int wrc = p9_client_walk_one(&g_client, 0, 31, (const u8 *)"f", 1, NULL);
+    TEST_EXPECT_EQ(wrc, 0, "walk succeeds after IDLE (session reusable)");
+
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}
+
+// A reply already on the wire beats the deadline: the first recv returns bytes
+// (never a timeout), so the pump demuxes the frame -> P9_PUMP_PROGRESS.
+void test_9p_client_pump_deadline_data_ready_progresses(void) {
+    drive_client_open(&g_client, &g_loopback);
+    p9_client_walk_one(&g_client, 0, 32, (const u8 *)"f", 1, NULL);   // bind fid 32
+
+    g_pump_rpc.on_complete = pump_async_on_complete;
+    g_pump_async_completed = false;
+    g_pump_async_result    = 0x7fffffff;
+    u32 fid = 32;
+    int rc = p9_client_submit_async(&g_client, &g_pump_rpc, test_build_clunk, &fid);
+    TEST_EXPECT_EQ(rc, 0, "submit_async stages an Rclunk on the wire");
+
+    const u64 deadline = 1;
+    int r = p9_client_reader_pump_once_deadline(&g_client, deadline);
+    TEST_EXPECT_EQ(r, (int)P9_PUMP_PROGRESS, "data ready -> PROGRESS (not IDLE)");
+    TEST_ASSERT(g_pump_async_completed, "on_complete fired");
+    TEST_EXPECT_EQ(g_pump_async_result, 0, "clunk success -> result 0");
+
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}
+
+// Frame atomicity: with the frame delivered in sub-header chunks AND a deadline
+// armed, the deadline is disarmed after the FIRST recv (one byte in hand = mid-
+// frame), so aggregation completes and the whole frame demuxes -> PROGRESS. The
+// deadline never fires mid-frame.
+void test_9p_client_pump_deadline_chunked_frame_completes(void) {
+    drive_client_open(&g_client, &g_loopback);
+    p9_client_walk_one(&g_client, 0, 33, (const u8 *)"f", 1, NULL);
+
+    p9_loopback_set_chunk_size(&g_loopback, 3);   // < the 7-byte Rclunk frame
+
+    g_pump_rpc.on_complete = pump_async_on_complete;
+    g_pump_async_completed = false;
+    u32 fid = 33;
+    int rc = p9_client_submit_async(&g_client, &g_pump_rpc, test_build_clunk, &fid);
+    TEST_EXPECT_EQ(rc, 0, "submit_async stages a chunked Rclunk");
+
+    const u64 deadline = 1;
+    int r = p9_client_reader_pump_once_deadline(&g_client, deadline);
+    TEST_EXPECT_EQ(r, (int)P9_PUMP_PROGRESS, "chunked frame under a deadline -> PROGRESS");
+    TEST_ASSERT(g_pump_async_completed, "on_complete fired for the aggregated frame");
+
+    p9_loopback_set_chunk_size(&g_loopback, 0);
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}
+
+// Another thread already holds the reader role: the pump defers (P9_PUMP_BUSY)
+// without touching the stream. White-box: set reader_active directly.
+void test_9p_client_pump_deadline_busy_when_reader_active(void) {
+    drive_client_open(&g_client, &g_loopback);
+
+    g_client.reader_active = true;     // simulate a concurrent elected reader
+    const u64 deadline = 1;
+    int r = p9_client_reader_pump_once_deadline(&g_client, deadline);
+    TEST_EXPECT_EQ(r, (int)P9_PUMP_BUSY, "reader already active -> BUSY (no-op)");
+    TEST_ASSERT(!g_client.dead, "BUSY must not mark the session dead");
+    g_client.reader_active = false;    // release so destroy is clean
 
     p9_client_destroy(&g_client);
     p9_loopback_destroy(&g_loopback);

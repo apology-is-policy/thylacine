@@ -35,6 +35,8 @@ struct p9_transport_ops {
     int  (*send)(void *ctx, const u8 *buf, size_t len);
     int  (*recv)(void *ctx, u8 *buf, size_t cap);
     int  (*close)(void *ctx);
+    void (*set_recv_deadline)(void *ctx, u64 deadline_ns);  // NULL-permitted (Loom-4)
+    bool (*recv_timed_out)(void *ctx);                      // NULL-permitted (Loom-4)
     void *ctx;
 };
 
@@ -61,7 +63,28 @@ int  p9_transport_exchange(struct p9_transport *t,
 // Query.
 bool   p9_transport_is_open(const struct p9_transport *t);
 size_t p9_transport_last_recv_len(const struct p9_transport *t);
+
+// Optional recv deadline (Loom-4; NULL-safe shims over the vtable ops).
+void p9_transport_set_recv_deadline(struct p9_transport *t, u64 deadline_ns);
+bool p9_transport_recv_timed_out(const struct p9_transport *t);
 ```
+
+### Optional recv deadline (Loom-4)
+
+The two NULL-permitted vtable ops (`set_recv_deadline` / `recv_timed_out`) let a
+caller bound a single blocking recv and tell a deadline lapse from EOF/error.
+`set_recv_deadline(ctx, ns)` arms an absolute-ns deadline for the NEXT recv
+(`0` = no deadline = block indefinitely) and clears the timed-out signal;
+`recv_timed_out(ctx)` reports whether the most recent recv returned `<= 0`
+because the deadline lapsed (vs EOF / error / death). A backend that leaves both
+NULL gets the unbounded behavior (the shim arming is a no-op; `recv_timed_out`
+is always false). The shims do NOT touch the transport state machine, so they
+compose with the frame-aware reader that bypasses `p9_transport_recv`'s ERROR
+latch. Backends: **srvconn** routes to `srvconn_set_client_deadline` /
+`srvconn_client_timed_out`; the **loopback** test backend models a frame-boundary
+timeout (armed + empty staged response returns `-1` + timed_out, instead of
+`0` = EOF); the **spoor** backend leaves both NULL (no deadline mechanism at
+v1.0). This is the substrate for the SQPOLL idle pump (LOOM.md §8.6 / Loom-4).
 
 ### Error convention
 
@@ -108,7 +131,7 @@ The loopback struct holds a pointer to a caller-provided response staging buffer
 
 ## Tests
 
-9 tests in `kernel/test/test_9p_transport.c`:
+10 tests in `kernel/test/test_9p_transport.c`:
 
 | Test | Covers |
 |---|---|
@@ -121,6 +144,7 @@ The loopback struct holds a pointer to a caller-provided response staging buffer
 | `9p_transport.close_idempotent` | Second close returns 0 (idempotent); state stays CLOSED |
 | `9p_transport.exchange_drives_session_handshake` | End-to-end Tversion → Rversion → Tattach → Rattach through transport + session.dispatch |
 | `9p_transport.exchange_drives_session_walk` | Full handshake + Twalk → Rwalk; new_fid bound; qid extracted |
+| `9p_transport.deadline_idle_vs_eof` | Loom-4: armed deadline + empty → `-1` + `recv_timed_out`; disarmed + empty → `0` (EOF) + signal cleared |
 
 The loopback's "session-aware" responder synthesizes correct Rversion / Rattach / Rwalk replies based on the request opcode, letting tests verify the full composition without an external server.
 

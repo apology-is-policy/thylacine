@@ -56,6 +56,14 @@ struct p9_loopback {
     u32                    sends;
     u32                    recvs;
     bool                   closed;
+    // Deadline test knob (Loom-4). A real transport blocks recv on an
+    // empty pipe until data / the deadline; the synchronous loopback has
+    // no blocking, so it MODELS a frame-boundary deadline: when a deadline
+    // is armed AND the staged response is empty, recv returns -1 + sets
+    // `timed_out` (instead of 0 = EOF). Lets the deadline-aware reader-pump
+    // tests drive the IDLE return deterministically without real time.
+    bool                   deadline_armed;
+    bool                   timed_out;       // last recv hit the armed deadline
 };
 
 // Initialize a loopback. `response_buf` / `response_cap` is the

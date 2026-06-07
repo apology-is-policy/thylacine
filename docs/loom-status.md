@@ -53,17 +53,33 @@ opcodes land with Loom-6's registered-buffer surface.
   (#898, via `p9_client_abandon_async` Tflush) + out-of-order completion. **One
   focused audit over Loom-3 is the next step** (it must verify #898 + add the
   deterministic multi-in-flight / Proc-death harness owed since #841).
-- **Loom-4 — SQPOLL** (**design signed off + `loom.tla` extended**; impl
-  pending): the `kproc()` poll-thread (zero-syscall hot path; `cpu_pinned`-able) +
-  the frame-boundary idle-deadline (the #841-safe interruptible recv; a new
-  NULL-permitted transport `set_recv_deadline` + a deadline-aware reader pump) +
-  the CQ wait-list (an `ENTER` waiter sleeps for `min_complete`, woken by a posted
-  CQE / teardown). Option 1 of the user-voted design fork (LOOM.md §8.6); the
-  owning-Proc-member-thread + submission-only alternatives were rejected. `loom.tla`
-  extended FIRST (the CQ-waiter actor: `CqFlagTracksCq` + `NoMissedCqWake` +
-  `NoStrandedWaiter` + `CqWaiterReturns`; +2 buggy cfgs `cqwait_no_wake` /
-  `cqwait_check_early`; clean 2429 states, all 9 cfgs green). Wait/wake +
-  kthread-lifetime surface. Audit.
+- **Loom-4 — SQPOLL** (**design signed off + `loom.tla` extended**; impl in
+  progress, split 4a..4d): the `kproc()` poll-thread (zero-syscall hot path;
+  `cpu_pinned`-able) + the frame-boundary idle-deadline (the #841-safe
+  interruptible recv; a new NULL-permitted transport `set_recv_deadline` + a
+  deadline-aware reader pump) + the CQ wait-list (an `ENTER` waiter sleeps for
+  `min_complete`, woken by a posted CQE / teardown). Option 1 of the user-voted
+  design fork (LOOM.md §8.6); the owning-Proc-member-thread + submission-only
+  alternatives were rejected. `loom.tla` extended FIRST (the CQ-waiter actor:
+  `CqFlagTracksCq` + `NoMissedCqWake` + `NoStrandedWaiter` + `CqWaiterReturns`;
+  +2 buggy cfgs `cqwait_no_wake` / `cqwait_check_early`; clean 2429 states, all 9
+  cfgs green). Wait/wake + kthread-lifetime surface. Audit.
+  - **Loom-4a — transport deadline + deadline-aware pump** (DONE): the two
+    NULL-permitted `p9_transport_ops` ops `set_recv_deadline` / `recv_timed_out`
+    (+ NULL-safe shims) wired into srvconn (`srvconn_set_client_deadline` /
+    `srvconn_client_timed_out`), the loopback test backend (a deterministic
+    frame-boundary-timeout knob), and spoor (NULL); `reader_recv_frame` arms the
+    deadline on ONLY the first recv (frame boundary) and disarms mid-frame;
+    `p9_client_reader_pump_once_deadline` + `enum p9_pump_result`
+    (`DEAD`/`IDLE`/`PROGRESS`/`BUSY`). 6 tests (4 `9p_client.pump_deadline_*` + 1
+    `9p_transport.deadline_idle_vs_eof` + 1 `9p_srvconn_transport.deadline_vtable_routes`).
+    `loom.tla` unchanged (4a is transport plumbing below the CQ-waiter model).
+  - **Loom-4b** — the CQ wait-list on `struct Loom` + `loom_enter` rework
+    (SQPOLL + non-SQPOLL multi-waiter). PENDING.
+  - **Loom-4c** — the SQPOLL kthread + `SYS_LOOM_SETUP(LOOM_SETUP_SQPOLL)` +
+    the stop/join lifetime. PENDING.
+  - **Loom-4d** — the focused audit (kthread lifetime + CQ wait/wake) + close.
+    PENDING.
 - **Loom-5 — multishot + linked ops**: one SQE → many CQEs (the `/srv` accept
   loop) + LINK/DRAIN per-fid ordering. Audit.
 - **Loom-6 — registered buffers + native API + bench**: pinned Burrow regions

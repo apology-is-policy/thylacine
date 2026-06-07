@@ -200,18 +200,37 @@ static void client_handoff_reader_locked(struct p9_client *c,
 // 9p_transport.c::do_recv's framing (header -> peek size -> body) but calling
 // ops.recv DIRECTLY: it must NOT latch transport.state=ERROR (a death-interrupt
 // has to leave the transport reusable by the next reader). Returns the frame
-// length (>0) or -1 on EOF / truncation / malformed / death-interrupt -- the
-// caller calls client_self_dying() to tell a death-interrupt (unwind) from a
-// genuine error (mark dead). c->lock NOT held (this blocks); the single-reader
-// election guarantees only one thread is here at a time, so the shared recv_buf
-// is safe.
-static int reader_recv_frame(struct p9_client *c) {
+// length (>0) or -1 on EOF / truncation / malformed / death-interrupt / idle
+// deadline -- the caller calls client_self_dying() to tell a death-interrupt
+// (unwind) from a genuine error (mark dead). c->lock NOT held (this blocks);
+// the single-reader election guarantees only one thread is here at a time, so
+// the shared recv_buf is safe.
+//
+// Loom-4 (LOOM.md §8.6): when `deadline_ns != 0`, the FIRST recv (the frame
+// boundary, got==0) is deadline-bounded; a timeout THERE consumes no bytes, so
+// the shared stream stays synced (#841) and *idle (if non-NULL) is set so the
+// caller can distinguish the idle case from EOF/error (both return -1). The
+// deadline is disarmed for the rest of the frame -- once any byte of the frame
+// is in hand, a mid-frame timeout would desync the stream, so the body blocks
+// unconditionally. `deadline_ns == 0` + `idle == NULL` is the original
+// unbounded behavior. A backend with no set_recv_deadline op (NULL) ignores the
+// deadline entirely (the recv just blocks).
+static int reader_recv_frame(struct p9_client *c, u64 deadline_ns, bool *idle) {
     struct p9_transport *t = &c->transport;
     u8 *buf = t->recv_buf;
     size_t cap = t->recv_cap;
     size_t got = 0;
+    if (idle) *idle = false;
     while (got < P9_HDR_LEN) {
+        if (got == 0 && deadline_ns)
+            p9_transport_set_recv_deadline(t, deadline_ns);
         int n = t->ops.recv(t->ops.ctx, buf + got, P9_HDR_LEN - got);
+        if (got == 0 && deadline_ns) {
+            // Read the timeout signal BEFORE disarming (disarm resets it),
+            // then disarm so the rest of THIS frame blocks indefinitely.
+            if (n <= 0 && idle && p9_transport_recv_timed_out(t)) *idle = true;
+            p9_transport_set_recv_deadline(t, 0);
+        }
         if (n <= 0) return -1;
         if ((size_t)n > P9_HDR_LEN - got) return -1;
         got += (size_t)n;
@@ -314,7 +333,7 @@ static int client_wait(struct p9_client *c, struct p9_rpc *rpc) {
                 if (rpc->done || rpc->dead) break;
                 if (client_self_dying())    break;
                 spin_unlock(&c->lock);
-                int rr = reader_recv_frame(c);
+                int rr = reader_recv_frame(c, 0, NULL);
                 spin_lock(&c->lock);
                 if (rr > 0) {
                     demux_frame_locked(c, (size_t)rr);
@@ -523,7 +542,7 @@ int p9_client_reader_pump_once(struct p9_client *c) {
     c->reader_active = true;
     spin_unlock(&c->lock);
 
-    int rr = reader_recv_frame(c);    // blocks; c->lock dropped (single reader)
+    int rr = reader_recv_frame(c, 0, NULL); // blocks; c->lock dropped (single reader)
 
     spin_lock(&c->lock);
     int ret;
@@ -537,6 +556,41 @@ int p9_client_reader_pump_once(struct p9_client *c) {
     } else {
         client_mark_dead_locked(c);   // EOF / recv error: session gone
         ret = -P9_E_IO;
+    }
+    c->reader_active = false;
+    client_handoff_reader_locked(c, NULL);
+    spin_unlock(&c->lock);
+    return ret;
+}
+
+int p9_client_reader_pump_once_deadline(struct p9_client *c, u64 deadline_ns) {
+    if (!c || c->magic != P9_CLIENT_MAGIC) return -P9_E_INVAL;
+    spin_lock(&c->lock);
+    if (c->dead)          { spin_unlock(&c->lock); return P9_PUMP_DEAD; }
+    if (c->reader_active) { spin_unlock(&c->lock); return P9_PUMP_BUSY; }
+    c->reader_active = true;
+    spin_unlock(&c->lock);
+
+    bool idle = false;
+    int rr = reader_recv_frame(c, deadline_ns, &idle); // blocks; c->lock dropped
+
+    spin_lock(&c->lock);
+    int ret;
+    if (rr > 0) {
+        demux_frame_locked(c, (size_t)rr);
+        ret = P9_PUMP_PROGRESS;
+    } else if (idle) {
+        // The idle deadline lapsed at the frame boundary: no bytes consumed, the
+        // byte stream stays synced. NOT an error -- leave the session alive; the
+        // SQPOLL kthread parks + retries (LOOM.md §8.6).
+        ret = P9_PUMP_IDLE;
+    } else if (client_self_dying()) {
+        // Death-interrupt: the caller's Proc is dying. Do NOT mark the shared
+        // session dead (it serves survivors). Unwind after handing the role on.
+        ret = P9_PUMP_DEAD;
+    } else {
+        client_mark_dead_locked(c);   // EOF / recv error: session gone
+        ret = P9_PUMP_DEAD;
     }
     c->reader_active = false;
     client_handoff_reader_locked(c, NULL);

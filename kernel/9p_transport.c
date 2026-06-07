@@ -222,3 +222,16 @@ size_t p9_transport_last_recv_len(const struct p9_transport *t) {
     if (t->magic != P9_TRANSPORT_MAGIC) return 0;
     return t->last_recv_len;
 }
+
+void p9_transport_set_recv_deadline(struct p9_transport *t, u64 deadline_ns) {
+    if (!t || t->magic != P9_TRANSPORT_MAGIC) return;
+    if (t->ops.set_recv_deadline)
+        t->ops.set_recv_deadline(t->ops.ctx, deadline_ns);
+}
+
+bool p9_transport_recv_timed_out(const struct p9_transport *t) {
+    if (!t || t->magic != P9_TRANSPORT_MAGIC) return false;
+    if (t->ops.recv_timed_out)
+        return t->ops.recv_timed_out(t->ops.ctx);
+    return false;
+}

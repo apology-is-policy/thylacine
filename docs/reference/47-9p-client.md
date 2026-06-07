@@ -74,7 +74,38 @@ int  p9_client_unlinkat(...);
 // Query.
 bool   p9_client_is_open(const struct p9_client *c);
 size_t p9_client_inflight(const struct p9_client *c);
+
+// Async (Loom) front-end -- the pluggable-completion seam (Loom-2b/3/4).
+int  p9_client_submit_async(struct p9_client *c, struct p9_rpc *rpc,
+                            p9_session_build_fn build, void *build_ctx);
+int  p9_client_reader_pump_once(struct p9_client *c);          // 1 / 0 / -EIO
+int  p9_client_reader_pump_once_deadline(struct p9_client *c,  // enum p9_pump_result
+                                         u64 deadline_ns);
+void p9_client_handoff_reader(struct p9_client *c);
+void p9_client_abandon_async(struct p9_client *c, struct p9_rpc *rpc);
+
+enum p9_pump_result {            // signed: DEAD is the only negative
+    P9_PUMP_DEAD     = -1,       // EOF/recv error (marked dead) or death-interrupt
+    P9_PUMP_IDLE     =  0,       // idle deadline lapsed at a frame boundary
+    P9_PUMP_PROGRESS =  1,       // demuxed one reply frame
+    P9_PUMP_BUSY     =  2,       // another thread holds the reader role
+};
 ```
+
+### Deadline-aware reader pump (Loom-4)
+
+`p9_client_reader_pump_once_deadline` is the SQPOLL idle pump (LOOM.md §8.6): it
+drives the elected reader for one frame, but arms `deadline_ns` on ONLY the FIRST
+recv -- the frame boundary, where a timeout consumes no bytes so the shared byte
+stream stays synced (#841). The rest of the frame blocks unconditionally (a
+mid-frame timeout would desync). It returns `P9_PUMP_PROGRESS` (demuxed a frame),
+`P9_PUMP_IDLE` (the deadline lapsed at the boundary; the session stays alive +
+synced -- the kthread parks + retries), `P9_PUMP_BUSY` (another reader holds the
+role; the caller defers), or `P9_PUMP_DEAD` (EOF/error marks the session dead, or
+a death-interrupt unwinds leaving it for survivors). On a backend with no
+`set_recv_deadline` op (e.g. spoor) the deadline is inert and it blocks like the
+plain pump. The mechanism rides the transport `set_recv_deadline`/`recv_timed_out`
+vtable ops (reference 46).
 
 ### Composition pattern
 
@@ -144,7 +175,11 @@ The as-built client is **pipelined and multi-Proc-shared** (a single `p9_client`
 
 ## Tests
 
-13 tests in `kernel/test/test_9p_client.c`. The canonical responder handles every op type with a sensible canned response; the rlerror responder always returns `Rlerror{ecode=2}` (ENOENT). One representative test per op category:
+24 tests in `kernel/test/test_9p_client.c` (the sync ops below, plus the
+`lock_released_between_ops` reentrancy test, 3 async-seam tests, 3 Loom-engine
+tests, and 4 Loom-4 deadline-pump tests). The canonical responder handles every
+op type with a sensible canned response; the rlerror responder always returns
+`Rlerror{ecode=2}` (ENOENT). One representative test per op category:
 
 | Test | Covers |
 |---|---|
@@ -161,6 +196,10 @@ The as-built client is **pipelined and multi-Proc-shared** (a single `p9_client`
 | `9p_client.readlink` | walk → readlink; target string surfaced (caller-cap-bounded copy) |
 | `9p_client.rlerror_propagates_to_negative_errno` | Server returns Rlerror{ecode=2}; client returns -2 |
 | `9p_client.op_before_handshake_returns_ebusy` | Op before handshake → -EBUSY |
+| `9p_client.pump_deadline_idle` | Loom-4: empty stream + armed deadline → `P9_PUMP_IDLE`; session stays open + reusable |
+| `9p_client.pump_deadline_data_ready_progresses` | Reply on the wire beats the deadline → `P9_PUMP_PROGRESS` + on_complete |
+| `9p_client.pump_deadline_chunked_frame_completes` | Frame atomicity: chunked frame under a deadline aggregates → `P9_PUMP_PROGRESS` |
+| `9p_client.pump_deadline_busy_when_reader_active` | Another reader holds the role → `P9_PUMP_BUSY` (no-op) |
 
 The canonical responder is intentionally permissive — it accepts every standard 9P2000.L op and returns a fixed canned response. This lets a single test fixture verify any client op without per-test responder customization. Tests that need specific behavior (Rlerror) supply their own responder.
 

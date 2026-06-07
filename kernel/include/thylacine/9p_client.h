@@ -363,6 +363,31 @@ int p9_client_submit_async(struct p9_client *c, struct p9_rpc *rpc,
 // frame must already be staged (else recv's EOF latches the session dead).
 int p9_client_reader_pump_once(struct p9_client *c);
 
+// Result of p9_client_reader_pump_once_deadline (a SIGNED enum: DEAD is the
+// only negative; the caller backs off on IDLE/BUSY and stops on DEAD).
+enum p9_pump_result {
+    P9_PUMP_DEAD     = -1,  // session error / EOF (marked dead) OR death-interrupt
+    P9_PUMP_IDLE     =  0,  // the idle deadline lapsed at a frame boundary
+    P9_PUMP_PROGRESS =  1,  // demuxed exactly one reply frame
+    P9_PUMP_BUSY     =  2,  // another thread holds the reader role; caller defers
+};
+
+// The deadline-aware reader pump (Loom-4 SQPOLL; LOOM.md §8.6). Like
+// p9_client_reader_pump_once, but arms `deadline_ns` (absolute ns; 0 = no
+// deadline) on ONLY the FIRST recv of the frame -- the frame boundary, where a
+// timeout consumes no bytes and the shared byte stream stays synced (#841). The
+// rest of the frame blocks unconditionally (a mid-frame timeout would desync).
+// On a backend with no set_recv_deadline (NULL vtable op) the deadline is inert
+// and the recv blocks like the plain pump. Returns enum p9_pump_result:
+//   P9_PUMP_PROGRESS -- demuxed one frame (the SQPOLL kthread pumps again);
+//   P9_PUMP_IDLE     -- the deadline lapsed at the frame boundary, nothing
+//                       arrived, the stream is synced + the session is NOT
+//                       marked dead (the kthread parks + retries);
+//   P9_PUMP_BUSY     -- another thread is the reader (the caller defers);
+//   P9_PUMP_DEAD     -- a genuine EOF / recv error (session marked dead) or a
+//                       death-interrupt unwind (session left for survivors).
+int p9_client_reader_pump_once_deadline(struct p9_client *c, u64 deadline_ns);
+
 // Hand the elected-reader role to a pending SYNC op (async ops are skipped --
 // they have no thread to run the reader loop). Exposed for the handoff-skip
 // regression; the reader loop uses the internal locked form.

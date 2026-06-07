@@ -21,10 +21,12 @@ int p9_loopback_init(struct p9_loopback *lb,
     lb->response_cap = response_cap;
     lb->response_len = 0;
     lb->response_pos = 0;
-    lb->chunk_size   = 0;
-    lb->sends        = 0;
-    lb->recvs        = 0;
-    lb->closed       = false;
+    lb->chunk_size     = 0;
+    lb->sends          = 0;
+    lb->recvs          = 0;
+    lb->closed         = false;
+    lb->deadline_armed = false;
+    lb->timed_out      = false;
     return 0;
 }
 
@@ -80,7 +82,13 @@ static int loopback_recv(void *ctx, u8 *buf, size_t cap) {
     if (lb->magic != P9_LOOPBACK_MAGIC) return -1;
     if (lb->closed) return -1;
     size_t available = lb->response_len - lb->response_pos;
-    if (available == 0) return 0;       // EOF (the responder produced nothing)
+    if (available == 0) {
+        // Nothing staged. With a deadline armed, MODEL a frame-boundary
+        // timeout (-1 + timed_out) so the deadline-aware reader pump can be
+        // driven to its IDLE return deterministically; otherwise EOF.
+        if (lb->deadline_armed) { lb->timed_out = true; return -1; }
+        return 0;                       // EOF (the responder produced nothing)
+    }
     size_t to_copy = (available < cap) ? available : cap;
     if (lb->chunk_size > 0 && to_copy > lb->chunk_size) {
         to_copy = lb->chunk_size;
@@ -101,11 +109,28 @@ static int loopback_close(void *ctx) {
     return 0;
 }
 
+static void loopback_set_recv_deadline(void *ctx, u64 deadline_ns) {
+    struct p9_loopback *lb = (struct p9_loopback *)ctx;
+    if (!lb) return;
+    if (lb->magic != P9_LOOPBACK_MAGIC) return;
+    lb->deadline_armed = (deadline_ns != 0);
+    lb->timed_out      = false;          // arming/disarming clears the signal
+}
+
+static bool loopback_recv_timed_out(void *ctx) {
+    struct p9_loopback *lb = (struct p9_loopback *)ctx;
+    if (!lb) return false;
+    if (lb->magic != P9_LOOPBACK_MAGIC) return false;
+    return lb->timed_out;
+}
+
 struct p9_transport_ops p9_loopback_ops_for(struct p9_loopback *lb) {
     struct p9_transport_ops ops;
-    ops.send  = loopback_send;
-    ops.recv  = loopback_recv;
-    ops.close = loopback_close;
-    ops.ctx   = lb;
+    ops.send              = loopback_send;
+    ops.recv              = loopback_recv;
+    ops.close             = loopback_close;
+    ops.set_recv_deadline = loopback_set_recv_deadline;
+    ops.recv_timed_out    = loopback_recv_timed_out;
+    ops.ctx               = lb;
     return ops;
 }

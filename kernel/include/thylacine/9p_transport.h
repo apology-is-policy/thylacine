@@ -102,6 +102,22 @@ struct p9_transport_ops {
     // the transport has transitioned to CLOSED.
     int (*close)(void *ctx);
 
+    // Arm or disarm a deadline for the NEXT blocking recv (absolute ns;
+    // 0 = no deadline = block indefinitely). NULL-permitted: a backend
+    // with no deadline mechanism leaves this NULL, and the deadline-aware
+    // reader pump simply blocks (it never observes the idle return).
+    // Arming also clears the recv_timed_out signal (mirrors
+    // srvconn_set_client_deadline). Loom-4 (SQPOLL) uses this to make the
+    // poll-thread's reader recv frame-boundary-interruptible without
+    // desyncing the byte stream (LOOM.md §8.6).
+    void (*set_recv_deadline)(void *ctx, u64 deadline_ns);
+
+    // True iff the MOST RECENT recv returned <= 0 because the armed
+    // deadline lapsed (vs EOF / error / death-interrupt). NULL-permitted
+    // (treated as false). Read it BEFORE the next set_recv_deadline --
+    // arming resets the signal.
+    bool (*recv_timed_out)(void *ctx);
+
     // Opaque pointer the backend uses for its state (e.g., a pointer
     // to a `struct p9_loopback`).
     void *ctx;
@@ -161,6 +177,14 @@ int  p9_transport_send(struct p9_transport *t,
 // error (truncation, frame > recv_cap, backend failure). Transitions
 // to ERROR on backend failure.
 int  p9_transport_recv(struct p9_transport *t);
+
+// NULL-safe shims over the optional deadline vtable ops. A backend that
+// leaves set_recv_deadline / recv_timed_out NULL gets the no-deadline
+// behavior (arming is a no-op; timed_out is always false). Neither shim
+// touches the transport state machine -- they are safe to call from the
+// frame-aware reader that bypasses p9_transport_recv's ERROR latch.
+void p9_transport_set_recv_deadline(struct p9_transport *t, u64 deadline_ns);
+bool p9_transport_recv_timed_out(const struct p9_transport *t);
 
 // Convenience: send a request, then receive the response. Equivalent
 // to p9_transport_send + p9_transport_recv. Returns the response

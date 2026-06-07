@@ -51,6 +51,7 @@ void test_9p_srvconn_transport_recv_routes_from_s2c_ring(void);
 void test_9p_srvconn_transport_close_drops_srvconn_ref(void);
 void test_9p_srvconn_transport_kernel_attached_skips_teardown_on_handle_close(void);
 void test_9p_srvconn_transport_send_preserves_caller_deadline(void);
+void test_9p_srvconn_transport_deadline_vtable_routes(void);
 
 // =============================================================================
 // Helpers (mirror test_srv_client.c's pattern).
@@ -352,6 +353,56 @@ void test_9p_srvconn_transport_send_preserves_caller_deadline(void) {
                 "send does not re-arm a deadline (steady-state blocks)");
 
     (void)ops.close(ops.ctx);
+    p9_srvconn_transport_destroy(&st);
+    cleanup_byte_mode_pair(server, client, conn_h);
+}
+
+// =============================================================================
+// 9p_srvconn_transport.deadline_vtable_routes (Loom-4, LOOM.md §8.6)
+//
+// The NULL-permitted set_recv_deadline / recv_timed_out vtable ops route to
+// srvconn_set_client_deadline / srvconn_client_timed_out. A fresh deadline
+// clears the signal; a PAST deadline makes the very next recv on an empty s2c
+// ring time out promptly (tsleep returns TSLEEP_TIMEDOUT once now >= deadline),
+// and the timed-out signal surfaces back through the recv_timed_out shim -- the
+// mechanism the SQPOLL idle pump reads to tell IDLE from EOF over a real
+// SrvConn-backed client.
+// =============================================================================
+
+void test_9p_srvconn_transport_deadline_vtable_routes(void) {
+    srv_registry_reset();
+
+    struct Proc *server = NULL;
+    struct Proc *client = NULL;
+    int svc_h = -1, conn_h = -1;
+    struct SrvConn *cn = open_byte_mode_pair(&server, &client, &svc_h, &conn_h);
+    TEST_ASSERT(cn != NULL, "open_byte_mode_pair");
+
+    struct p9_srvconn_transport st;
+    TEST_EXPECT_EQ(p9_srvconn_transport_init(&st, cn), 0, "init");
+    struct p9_transport_ops ops = p9_srvconn_transport_ops(&st);
+    TEST_ASSERT(ops.set_recv_deadline != NULL, "set_recv_deadline wired");
+    TEST_ASSERT(ops.recv_timed_out != NULL, "recv_timed_out wired");
+
+    u8 rbuf[64];
+    struct p9_transport t;
+    TEST_EXPECT_EQ(p9_transport_init(&t, ops, rbuf, sizeof(rbuf)), 0, "transport init");
+
+    // A fresh (future) deadline routes through + clears the signal.
+    p9_transport_set_recv_deadline(&t, timer_now_ns() + 1000000000ull);
+    TEST_ASSERT(!p9_transport_recv_timed_out(&t), "freshly armed -> not yet timed out");
+
+    // A past deadline + empty s2c -> the recv times out promptly, and the signal
+    // surfaces through the recv_timed_out shim.
+    p9_transport_set_recv_deadline(&t, timer_now_ns());
+    u8 buf[16];
+    int n = t.ops.recv(t.ops.ctx, buf, sizeof(buf));
+    TEST_EXPECT_EQ(n, -1, "recv on empty s2c past the deadline -> -1");
+    TEST_ASSERT(p9_transport_recv_timed_out(&t),
+                "recv_timed_out routes to srvconn_client_timed_out (true)");
+
+    (void)ops.close(ops.ctx);
+    p9_transport_destroy(&t);
     p9_srvconn_transport_destroy(&st);
     cleanup_byte_mode_pair(server, client, conn_h);
 }

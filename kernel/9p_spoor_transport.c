@@ -121,7 +121,12 @@ struct p9_transport_ops p9_spoor_transport_ops(struct p9_spoor_transport *st) {
     ops.send  = spoor_transport_send;
     ops.recv  = spoor_transport_recv;
     ops.close = spoor_transport_close;
-    ops.ctx   = (void *)st;
+    // No deadline mechanism: a Spoor read blocks until data / EOF. The
+    // deadline-aware reader pump (Loom SQPOLL) over a Spoor-backed client
+    // simply blocks (never observes the idle return). NULL-permitted.
+    ops.set_recv_deadline = NULL;
+    ops.recv_timed_out    = NULL;
+    ops.ctx               = (void *)st;
     return ops;
 }
 
