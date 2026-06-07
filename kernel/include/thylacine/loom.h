@@ -37,6 +37,7 @@ struct Burrow;
 struct Spoor;
 struct Proc;
 struct loom_async_op;   // Loom-3: one in-flight async op (defined in kernel/loom.c)
+struct loom_chain_op;   // Loom-5b: one held LINK/DRAIN chain entry (defined in kernel/loom.c)
 
 #define LOOM_MAGIC 0x4C4F4F4D52494E47ULL   // "LOOMRING"
 
@@ -240,7 +241,7 @@ struct loom_reg_handle {
 struct Loom {
     u64                  magic;        // LOOM_MAGIC; offset 0 (SLUB-free UAF defense)
     int                  refcount;     // atomic ACQ_REL; 1 at create (the handle's ref)
-    spin_lock_t          lock;         // protects reg[] + cq_tail + sq_head + inflight_ops + async_inflight (geometry is immutable post-setup); cq_waiters carries its OWN lock
+    spin_lock_t          lock;         // protects reg[] + cq_tail + sq_head + inflight_ops + async_inflight + chain/chain_tail/chain_len (geometry is immutable post-setup); cq_waiters carries its OWN lock
     u32                  _pad;
     struct Burrow       *ring;         // the SQ/CQ ring Burrow (handle_count ref held)
     u8                  *ring_kva;     // kernel direct-map base of `ring` (stable for life)
@@ -283,6 +284,21 @@ struct Loom {
     // on a reap-only wake (the back-pressure-resume liveness). Atomic for the
     // cross-lock read.
     u32                   rearm_pending;
+    // Loom-5b (specs/loom_order.tla): the LINK/DRAIN held-submission chain. An
+    // ordering-relevant SQE (LINK or DRAIN set, or any SQE consumed while the
+    // chain is already non-empty) is enqueued HELD here instead of dispatched
+    // immediately; loom_admit_chain walks head->tail and dispatches each entry
+    // once its ordering gates open (a linked successor after its predecessor is
+    // done ok; a drain barrier after all prior are done), cancelling the rest of
+    // a chain when a link member fails (each cancelled op posts exactly one
+    // -ECANCELED CQE -- EveryDoneOpPosted). The chain is bounded (chain_len capped
+    // at cq_entries) so a drain-blocked burst can't grow it unbounded. All three
+    // fields are mutated under `lock`. chain_tail gives O(1) append; chain_len
+    // is the back-pressure bound. Invariants LinkOrdered / DrainOrdered /
+    // EveryDoneOpPosted / NoOrphanCancel.
+    struct loom_chain_op *chain;
+    struct loom_chain_op *chain_tail;
+    u32                   chain_len;
     // Loom-4 (LOOM.md 8.6): the CQ wait-list. A thread in SYS_LOOM_ENTER with
     // min_complete >= 1 that finds a sibling thread already holding the elected-
     // reader role installs a poll_waiter here and sleeps; loom_post_cqe wakes the

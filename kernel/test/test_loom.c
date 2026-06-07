@@ -448,10 +448,12 @@ void test_loom_enter_submit_rejects(void) {
     loom_unref(l);
 }
 
-// A reserved SQE flag is rejected (-EINVAL) so a future LINK/DRAIN/MULTISHOT is
-// never silently ignored; an out-of-range SQ-index indirection is DROPPED (the
+// A still-reserved SQE flag is rejected (-EINVAL) so a future flag is never
+// silently ignored; an out-of-range SQ-index indirection is DROPPED (the
 // diagnostic counter bumps, the SQE array is never indexed out of bounds -- the
-// SA-1 discipline on the SQ side).
+// SA-1 discipline on the SQ side). LINK/DRAIN/MULTISHOT are now IMPLEMENTED
+// (Loom-5), so CQE_SKIP is the remaining reserved flag (deferred out of Loom-5b
+// -- it suppresses a success CQE, which needs a loom_order.tla carve-out first).
 void test_loom_enter_flags_and_bad_index(void) {
     struct Loom *l = loom_create(8, 16);
     TEST_ASSERT(l != NULL, "loom_create(8,16)");
@@ -459,7 +461,7 @@ void test_loom_enter_flags_and_bad_index(void) {
     struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
     u32 *sqa = (u32 *)(l->ring_kva + l->sq_array_off);
 
-    loom_stage_sqe(l, 0, LOOM_OP_NOP, LOOM_SQE_LINK, 0, 0, 0x11u);  // reserved flag set
+    loom_stage_sqe(l, 0, LOOM_OP_NOP, LOOM_SQE_CQE_SKIP, 0, 0, 0x11u);  // reserved flag set
     loom_stage_sqe(l, 1, LOOM_OP_NOP, 0, 0, 0, 0x22u);
     sqa[1] = 999u;   // out-of-range SQ-index indirection -> dropped, never indexes sqes[]
     __atomic_store_n(&h->sq_tail, 2u, __ATOMIC_RELEASE);

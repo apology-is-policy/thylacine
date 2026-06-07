@@ -572,6 +572,10 @@ void test_9p_client_loom_rights_deny(void);
 void test_9p_client_loom_quiesce_abandons_inflight(void);
 void test_9p_client_loom_multishot_stream(void);
 void test_9p_client_loom_multishot_backpressure(void);
+void test_9p_client_loom_link_cancel_cascade(void);
+void test_9p_client_loom_link_success_ordering(void);
+void test_9p_client_loom_drain_barrier(void);
+void test_9p_client_loom_independent_past_held(void);
 void test_dev9p_registered(void);
 void test_dev9p_attach_client_root_spoor(void);
 void test_dev9p_walk_one_component(void);
@@ -1536,6 +1540,13 @@ struct test_case g_tests[] = {
                                        test_9p_client_loom_multishot_stream, false, NULL },
     { "9p_client.loom_multishot_backpressure",
                                        test_9p_client_loom_multishot_backpressure, false, NULL },
+    { "9p_client.loom_link_cancel_cascade",
+                                       test_9p_client_loom_link_cancel_cascade, false, NULL },
+    { "9p_client.loom_link_success_ordering",
+                                       test_9p_client_loom_link_success_ordering, false, NULL },
+    { "9p_client.loom_drain_barrier",  test_9p_client_loom_drain_barrier,  false, NULL },
+    { "9p_client.loom_independent_past_held",
+                                       test_9p_client_loom_independent_past_held, false, NULL },
     { "dev9p.registered",              test_dev9p_registered,              false, NULL },
     { "dev9p.attach_client_root_spoor",test_dev9p_attach_client_root_spoor,false, NULL },
     { "dev9p.walk_one_component",      test_dev9p_walk_one_component,      false, NULL },

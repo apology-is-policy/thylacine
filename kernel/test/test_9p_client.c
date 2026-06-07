@@ -1094,3 +1094,187 @@ void test_9p_client_loom_multishot_backpressure(void) {
     p9_client_destroy(&g_client);
     p9_loopback_destroy(&g_loopback);
 }
+
+// =============================================================================
+// Loom-5b LINK/DRAIN chain (specs/loom_order.tla): an SQE with LINK/DRAIN (or any
+// op consumed while the chain is non-empty) is HELD until its ordering gates open.
+// These tests drive the full loom_enter path against the loopback 9P client:
+// FSYNC against a write handle is async (a Rfsync drives completion); FSYNC
+// against a read-only handle fails inline (-EACCES) -- the deterministic head-
+// failure for the cancel-cascade; NOP completes inline. CQ order (cq index +
+// user_data) witnesses the admission order.
+// =============================================================================
+
+// Stage one SQE with explicit flags (LINK / DRAIN). Identity SQ-index indirection.
+static void cl_stage_sqe_flags(struct Loom *l, u32 slot, u8 opcode, u8 flags,
+                               u32 handle_idx, u64 user_data) {
+    struct loom_sqe *sqes = (struct loom_sqe *)(l->ring_kva + l->sqe_off);
+    u32 *sqa = (u32 *)(l->ring_kva + l->sq_array_off);
+    struct loom_sqe *s = &sqes[slot];
+    for (u32 i = 0; i < sizeof(*s); i++) ((u8 *)s)[i] = 0;
+    s->opcode     = opcode;
+    s->flags      = flags;
+    s->handle_idx = handle_idx;
+    s->user_data  = user_data;
+    sqa[slot] = slot;
+}
+
+// LINK cancel-cascade (LinkOrdered + EveryDoneOpPosted + NoOrphanCancel): a chain
+// [FSYNC(read-only, LINK)][NOP] -- the head fails inline (-EACCES), so the linked
+// NOP successor is CANCELLED with exactly ONE -ECANCELED CQE and is NEVER
+// dispatched. The cancel is not silently dropped (EveryDoneOpPosted).
+void test_9p_client_loom_link_cancel_cascade(void) {
+    drive_client_open(&g_client, &g_loopback);
+    struct Spoor *sp = dev9p_attach_client(&g_client, 0);
+    TEST_ASSERT(sp != NULL, "dev9p_attach_client");
+
+    struct Loom *l = loom_create(8, 16);
+    TEST_ASSERT(l != NULL, "loom_create(8,16)");
+    rights_t rt = RIGHT_READ;            // NO RIGHT_WRITE -> the head FSYNC fails inline
+    TEST_ASSERT(loom_register_handles(l, &sp, &rt, 1) == 0, "register read-only handle");
+
+    struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+    struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
+
+    cl_stage_sqe_flags(l, 0, LOOM_OP_FSYNC, LOOM_SQE_LINK, /*handle=*/0, 0xC0DE0001u);
+    cl_stage_sqe_flags(l, 1, LOOM_OP_NOP, 0, 0, 0xC0DE0002u);
+    __atomic_store_n(&h->sq_tail, 2u, __ATOMIC_RELEASE);
+
+    int n = loom_enter(l, /*to_submit=*/2, /*min_complete=*/2, 0);
+    TEST_EXPECT_EQ(n, 2, "two SQEs consumed (both routed to the chain)");
+    TEST_EXPECT_EQ((u64)l->cq_tail, (u64)2, "two CQEs (head fail + successor cancel)");
+    TEST_EXPECT_EQ(cqes[0].user_data, 0xC0DE0001u, "CQE0 = the head FSYNC");
+    TEST_EXPECT_EQ((u64)(s64)cqes[0].result, (u64)(s64)(-(s32)T_E_ACCES),
+                   "head FSYNC denied (-EACCES), DONE_FAIL");
+    TEST_EXPECT_EQ(cqes[1].user_data, 0xC0DE0002u, "CQE1 = the cancelled successor");
+    TEST_EXPECT_EQ((u64)(s64)cqes[1].result, (u64)(s64)(-(s32)T_E_CANCELED),
+                   "linked successor CANCELLED (-ECANCELED), exactly one CQE");
+    TEST_EXPECT_EQ((u64)l->async_inflight, (u64)0, "nothing in flight (head failed inline)");
+    TEST_ASSERT(l->inflight_ops == NULL, "no async op (cascade is all inline)");
+
+    loom_unref(l);
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}
+
+// LINK success ordering (LinkOrdered): a chain [FSYNC(write, LINK)][NOP] -- the
+// linked NOP runs ONLY after the FSYNC's Rfsync completes. Witness: the FSYNC CQE
+// (async) is posted BEFORE the NOP CQE; if the link gate were dropped the NOP
+// (inline) would post first.
+void test_9p_client_loom_link_success_ordering(void) {
+    drive_client_open(&g_client, &g_loopback);
+    struct Spoor *sp = dev9p_attach_client(&g_client, 0);
+    TEST_ASSERT(sp != NULL, "dev9p_attach_client");
+
+    struct Loom *l = loom_create(8, 16);
+    TEST_ASSERT(l != NULL, "loom_create(8,16)");
+    rights_t rt = RIGHT_READ | RIGHT_WRITE;
+    TEST_ASSERT(loom_register_handles(l, &sp, &rt, 1) == 0, "register write handle");
+
+    struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+    struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
+
+    cl_stage_sqe_flags(l, 0, LOOM_OP_FSYNC, LOOM_SQE_LINK, /*handle=*/0, 0x11110001u);
+    cl_stage_sqe_flags(l, 1, LOOM_OP_NOP, 0, 0, 0x11110002u);
+    __atomic_store_n(&h->sq_tail, 2u, __ATOMIC_RELEASE);
+
+    int n = loom_enter(l, 2, /*min_complete=*/2, 0);
+    TEST_EXPECT_EQ(n, 2, "two SQEs consumed");
+    TEST_EXPECT_EQ((u64)l->cq_tail, (u64)2, "two CQEs");
+    TEST_EXPECT_EQ(cqes[0].user_data, 0x11110001u, "CQE0 = FSYNC (the predecessor, async)");
+    TEST_EXPECT_EQ((u64)(s64)cqes[0].result, (u64)0, "FSYNC succeeded");
+    TEST_EXPECT_EQ(cqes[1].user_data, 0x11110002u, "CQE1 = NOP (admitted only AFTER FSYNC done)");
+    TEST_EXPECT_EQ((u64)(s64)cqes[1].result, (u64)0, "NOP succeeded");
+    TEST_EXPECT_EQ((u64)l->async_inflight, (u64)0, "all done + reaped");
+    TEST_ASSERT(l->inflight_ops == NULL, "async container reclaimed");
+
+    loom_unref(l);
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}
+
+// DRAIN barrier (DrainOrdered): a chain [FSYNC A][NOP DRAIN B][NOP C] -- A is a
+// FAST async op (no flags, dispatched before the chain starts); the DRAIN op B
+// must wait for A's async completion (async_inflight -> 0, the load-bearing
+// drain-self gate that catches prior non-chain async ops) before it admits; the
+// post-drain op C waits for B. Witness: B's CQE is at index 1 (AFTER A, not
+// inline-first), C's at index 2. (One prior async op, not two: the loopback test
+// transport is strictly single-in-flight -- it refuses a send while a prior
+// response is unread -- so a second concurrent async op would fail the loopback's
+// own discipline, not the drain gate. The async_inflight==0 gate is identical for
+// one or many prior ops; the multi-op barrier is covered by loom_order.tla.)
+void test_9p_client_loom_drain_barrier(void) {
+    drive_client_open(&g_client, &g_loopback);
+    struct Spoor *sp = dev9p_attach_client(&g_client, 0);
+    TEST_ASSERT(sp != NULL, "dev9p_attach_client");
+
+    struct Loom *l = loom_create(8, 16);
+    TEST_ASSERT(l != NULL, "loom_create(8,16)");
+    rights_t rt = RIGHT_READ | RIGHT_WRITE;
+    TEST_ASSERT(loom_register_handles(l, &sp, &rt, 1) == 0, "register write handle");
+
+    struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+    struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
+
+    cl_stage_sqe_flags(l, 0, LOOM_OP_FSYNC, 0, /*handle=*/0, 0xAAAA0001u);  // A (fast async)
+    cl_stage_sqe_flags(l, 1, LOOM_OP_NOP, LOOM_SQE_DRAIN, 0, 0xBBBB0002u);  // B (drain barrier)
+    cl_stage_sqe_flags(l, 2, LOOM_OP_NOP, 0, 0, 0xCCCC0003u);               // C (post-drain)
+    __atomic_store_n(&h->sq_tail, 3u, __ATOMIC_RELEASE);
+
+    int n = loom_enter(l, 3, /*min_complete=*/3, 0);
+    TEST_EXPECT_EQ(n, 3, "three SQEs consumed");
+    TEST_EXPECT_EQ((u64)l->cq_tail, (u64)3, "three CQEs");
+    // A posts first (its async Rfsync), then the barrier B, then C.
+    TEST_EXPECT_EQ(cqes[0].user_data, 0xAAAA0001u, "CQE0 = A (the prior async op)");
+    TEST_EXPECT_EQ(cqes[1].user_data, 0xBBBB0002u,
+                   "CQE1 = DRAIN B -- AFTER A (not inline-first; the barrier held)");
+    TEST_EXPECT_EQ(cqes[2].user_data, 0xCCCC0003u, "CQE2 = C -- after the drain");
+    for (u32 i = 0; i < 3; i++)
+        TEST_EXPECT_EQ((u64)(s64)cqes[i].result, (u64)0, "every op succeeded");
+    TEST_EXPECT_EQ((u64)l->async_inflight, (u64)0, "all done + reaped");
+    TEST_ASSERT(l->inflight_ops == NULL, "async container reclaimed");
+
+    loom_unref(l);
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}
+
+// Independent op admits past a HELD linked op (the loom_order.tla head->tail
+// continue-not-break admission): a chain [FSYNC A (LINK)][NOP B][NOP C] -- B is
+// A's linked successor (held until A's Rfsync); C is INDEPENDENT (B does not link
+// to it), so C admits IMMEDIATELY, out of order, while B is still held. Witness:
+// C's CQE is index 0 (before A and B); then A, then B.
+void test_9p_client_loom_independent_past_held(void) {
+    drive_client_open(&g_client, &g_loopback);
+    struct Spoor *sp = dev9p_attach_client(&g_client, 0);
+    TEST_ASSERT(sp != NULL, "dev9p_attach_client");
+
+    struct Loom *l = loom_create(8, 16);
+    TEST_ASSERT(l != NULL, "loom_create(8,16)");
+    rights_t rt = RIGHT_READ | RIGHT_WRITE;
+    TEST_ASSERT(loom_register_handles(l, &sp, &rt, 1) == 0, "register write handle");
+
+    struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+    struct loom_cqe *cqes = (struct loom_cqe *)(l->ring_kva + l->cqe_off);
+
+    cl_stage_sqe_flags(l, 0, LOOM_OP_FSYNC, LOOM_SQE_LINK, /*handle=*/0, 0xA0000001u);  // A (links to B)
+    cl_stage_sqe_flags(l, 1, LOOM_OP_NOP, 0, 0, 0xB0000002u);   // B (A's held successor)
+    cl_stage_sqe_flags(l, 2, LOOM_OP_NOP, 0, 0, 0xC0000003u);   // C (independent of B)
+    __atomic_store_n(&h->sq_tail, 3u, __ATOMIC_RELEASE);
+
+    int n = loom_enter(l, 3, /*min_complete=*/3, 0);
+    TEST_EXPECT_EQ(n, 3, "three SQEs consumed");
+    TEST_EXPECT_EQ((u64)l->cq_tail, (u64)3, "three CQEs");
+    TEST_EXPECT_EQ(cqes[0].user_data, 0xC0000003u,
+                   "CQE0 = C -- the independent op admitted PAST the held B");
+    TEST_EXPECT_EQ(cqes[1].user_data, 0xA0000001u, "CQE1 = A (the linked predecessor)");
+    TEST_EXPECT_EQ(cqes[2].user_data, 0xB0000002u, "CQE2 = B (admitted only after A done)");
+    for (u32 i = 0; i < 3; i++)
+        TEST_EXPECT_EQ((u64)(s64)cqes[i].result, (u64)0, "every op succeeded");
+    TEST_EXPECT_EQ((u64)l->async_inflight, (u64)0, "all done + reaped");
+    TEST_ASSERT(l->inflight_ops == NULL, "async container reclaimed");
+
+    loom_unref(l);
+    p9_client_destroy(&g_client);
+    p9_loopback_destroy(&g_loopback);
+}

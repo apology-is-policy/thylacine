@@ -5,7 +5,7 @@
 integrity) + I-30 (submit-time capability pin). **Audit-trigger surface**: ARCH
 §25.4 + CLAUDE.md.
 
-> **Status (Loom-2a + Loom-2b + Loom-3 + Loom-4a/4b/4c/4d + Loom-5a):** the ring **substrate**
+> **Status (Loom-2a + Loom-2b + Loom-3 + Loom-4a/4b/4c/4d + Loom-5a + Loom-5b):** the ring **substrate**
 > (2a — `KObj_Loom`, the SQ/CQ ring memory + geometry, `SYS_LOOM_SETUP`, the
 > registered-handle table via `SYS_LOOM_REGISTER`, the kobj refcount lifecycle),
 > the **pluggable-completion 9P-engine seam** (2b — `p9_rpc.on_complete`,
@@ -33,8 +33,13 @@ integrity) + I-30 (submit-time capability pin). **Audit-trigger surface**: ARCH
 > (`LOOM_SQE_MULTISHOT`): one SQE produces a STREAM of CQEs — a `LOOM_CQE_MORE`-set
 > shot per reply that RE-ARMS the op, then exactly one MORE-clear terminal — built
 > against the synthetic FSYNC vehicle (a real re-armable op is Loom-6's event-fd
-> READ). LINK/DRAIN is Loom-5b; registered buffers + the native libthyla-rs API +
-> the benchmark are Loom-6.
+> READ). **5b** adds **LINK/DRAIN** (`LOOM_SQE_LINK` / `LOOM_SQE_DRAIN`): an
+> ordering-relevant SQE is HELD in a per-ring chain (`l->chain`) and dispatched
+> only once its gates open — a linked successor after its predecessor is done ok
+> (a failed link member cancels the rest of the chain, each posting one `-ECANCELED`
+> CQE); a drain barrier after all prior ops are done. `CQE_SKIP` is deferred (it
+> needs a `loom_order.tla` carve-out). Registered buffers + the native libthyla-rs
+> API + the benchmark are Loom-6.
 
 ---
 
@@ -503,13 +508,84 @@ cond cannot take `l->lock`; it is atomic for the cross-lock read).
 outstanding tag, e.g. a `rearm`-pending op between shots) + the pin clunk, so no late
 shot posts a stale CQE (`NoStaleAfterTeardown`).
 
+### LINK / DRAIN chains (Loom-5b)
+
+`LOOM_SQE_LINK` and `LOOM_SQE_DRAIN` impose ORDER on otherwise-concurrent ring ops
+(`specs/loom_order.tla`). LINK chains a successor behind its predecessor's success;
+DRAIN is a full pipeline barrier. The mechanism is a per-ring **held-submission
+chain** (`l->chain`, an ordered singly-linked list under `l->lock`) **layered on top
+of** the audited Loom-3/4 `loom_async_op` lifecycle — a chain entry (`struct
+loom_chain_op`) is a kernel SQE copy + the `link`/`drain` flags + a `state`, and is
+dispatched (via `loom_submit_one`, which for an async op carries a back-pointer
+`op->chain`) only once its ordering gates open.
+
+- **Routing** (`loom_drain_sq`): an SQE is ordering-relevant — HELD in `l->chain`
+  rather than dispatched immediately — iff it sets LINK/DRAIN, OR the chain is
+  already non-empty (a pending drain/link forces every subsequent op to order after
+  it; an independent op so routed just admits immediately). The chain only GROWS
+  during a drain call (admit/reclaim run between calls), so routing is monotone
+  within a batch: once non-empty, every later SQE in the batch joins it — which
+  keeps a LINK group together. Independent fast-path ops (chain empty, no flags)
+  dispatch exactly as Loom-3.
+
+- **Admission** (`loom_admit_chain`, in the drive loops — `loom_enter` after the
+  submit, `loom_wait_for_completions` + `loom_sqpoll_main` at the loop top, OUTSIDE
+  `c->lock`): walk head→tail, take ONE action per pass, loop until nothing is
+  actionable, then reclaim. The gates (`loom_order.tla`):
+  - **Link cancel-cascade** — a HELD op whose immediate predecessor LINKs to it and
+    finished non-ok (`DONE_FAIL` / `CANCELLED`) is CANCELLED with exactly one
+    `-ECANCELED` CQE, never dispatched (`EveryDoneOpPosted` + `NoOrphanCancel`). The
+    cascade is a single head→tail walk: a just-cancelled victim becomes the non-ok
+    predecessor of the next.
+  - **Link gate** — a linked successor waits until its predecessor is `DONE_OK`
+    (`LinkAdmits`).
+  - **Drain gates** (`loom_chain_drain_admits`, `DrainAdmits`) — a post-drain op
+    waits behind every earlier drain; a drain op itself waits until every earlier
+    chain entry is done AND `async_inflight == 0`. The `async_inflight == 0` is the
+    load-bearing catch for prior FAST async ops not in the chain — once the chain is
+    non-empty all later ops route to it, so when every chain-before entry is done
+    `async_inflight` counts only ops submitted before the chain started.
+  - All gates open → claim the entry `INFLIGHT` under `l->lock` (so a concurrent
+    admit never double-dispatches), then `loom_submit_one` sets the real terminal
+    (inline) or leaves it INFLIGHT (async, until the reply, when `loom_async_complete`
+    records `DONE_OK`/`DONE_FAIL` from the status).
+  - Every action posts one CQE, so it needs CQ admission room
+    (`loom_cq_ready + async_inflight < cq_entries`) — no room HOLDS the whole chain
+    (back-pressure), exactly like `loom_rearm_pending`. On an SQPOLL ring,
+    `loom_sqpoll_park_cond` also wakes on a non-empty chain so a CQ-back-pressured
+    held op resumes after the user reaps + ENTER-wakes.
+
+- **Reclamation** (`loom_reclaim_chain`): frees terminal entries, but ONLY when NO
+  entry is HELD — a HELD entry may still read a predecessor's terminal result, so a
+  terminal predecessor under a live HELD successor must not be freed. With no HELD
+  entry, every entry is INFLIGHT (already admitted; never re-consults predecessors)
+  or terminal → freeing the terminal ones is safe, and the chain returning to empty
+  restores fast-path routing. The chain is bounded at `cq_entries` entries
+  (`loom_drain_sq` stops consuming at the cap) so a drain-blocked flood can't grow it
+  unbounded (held ops don't count in `async_inflight`, so CQ admission alone would
+  not bound them).
+
+A chain member is never multishot — the combo is rejected (`-EINVAL`); a chain
+member must be single-completion (`loom_order.tla` models one CQE per op).
+`LOOM_SQE_CQE_SKIP` is rejected too (deferred: suppressing a success CQE breaks
+`EveryDoneOpPosted`; it needs a `loom_order.tla` carve-out first). **Single-producer
+note:** link integrity holds for the io_uring single-producer SQ contract (one
+submitting thread / the SQPOLL kthread); a hostile multi-thread submitter on one
+ring may see its own links mis-ordered, but never a kernel-safety violation (no UAF
+— a reclaimed predecessor is simply gone from the list; a successor links to
+whatever survives).
+
+**Teardown** (`loom_free`): with `refcount == 0` and the SQPOLL kthread joined, the
+chain is freed silently — a HELD entry never started (no pin/tag/async op), an
+INFLIGHT entry's backing `loom_async_op` was already abandoned by the #898 quiesce.
+
 ---
 
 ## Data structures
 
 `struct Loom` (`kernel/loom.c`): `magic` (`LOOM_MAGIC`, offset 0 — SLUB-free UAF
 defense), atomic `refcount`, `lock` (protects `reg[]` + `cq_tail` + `sq_head` +
-`inflight_ops` + `async_inflight`; geometry is immutable post-setup), `ring` (the
+`inflight_ops` + `async_inflight` + `rearm_pending` (Loom-5a) + `chain`/`chain_tail`/`chain_len` (Loom-5b); geometry is immutable post-setup), `ring` (the
 Burrow, `handle_count` ref held), `ring_kva` (cached direct-map base), the
 geometry fields (mirror `loom_params`), the kernel-private `cq_tail` (Loom-2b) +
 `sq_head` (Loom-3) authoritative ring indices (the shared-header copies are
@@ -636,7 +712,7 @@ a-real-sibling-reader interleaving needs a second kernel thread + the loopback a
 lands with the deferred multi-in-flight / cross-Proc-death SMP harness, OWED since
 #841.)
 
-### The seam + Loom-3 engine dispatch + Loom-5a multishot (`kernel/test/test_9p_client.c`, 8 cases)
+### The seam + Loom-3 engine dispatch + Loom-5a multishot + Loom-5b LINK/DRAIN (`kernel/test/test_9p_client.c`, 12 cases)
 
 - `9p_client.async_op_posts_cqe` — `submit_async(clunk)` (no wait) →
   `reader_pump_once` demuxes the Rclunk → `on_complete` posts a CQE with the
@@ -671,6 +747,23 @@ lands with the deferred multi-in-flight / cross-Proc-death SMP harness, OWED sin
   dropped); after userspace reaps both (advance `cq_head`), the second `loom_enter`
   re-arms + drains the remaining MORE shot + the terminal, `overflow` still 0
   (`CqNeverOverfull`, the no-`BUGGY_SHOT_LOST_ON_FULL` discipline).
+- `9p_client.loom_link_cancel_cascade` (Loom-5b) — a chain `[FSYNC(read-only, LINK)]
+  [NOP]`: the head fails inline (`-EACCES`, `DONE_FAIL`); the linked NOP successor is
+  CANCELLED with exactly one `-ECANCELED` CQE and never dispatched (`LinkOrdered` +
+  `EveryDoneOpPosted` + `NoOrphanCancel`).
+- `9p_client.loom_link_success_ordering` (Loom-5b) — a chain `[FSYNC(write, LINK)]
+  [NOP]`: the FSYNC's async Rfsync CQE is posted BEFORE the NOP CQE (CQE0 = FSYNC,
+  CQE1 = NOP) — the linked successor admits only after the predecessor is done ok
+  (`LinkAdmits`; a dropped gate would post the inline NOP first).
+- `9p_client.loom_drain_barrier` (Loom-5b) — a chain `[FSYNC A][NOP DRAIN B][NOP C]`:
+  A is a FAST async op (before the chain); the DRAIN B waits for A's async completion
+  (`async_inflight -> 0`, the drain-self gate's catch for prior non-chain async ops)
+  → CQE1 = B (after A, not inline-first), CQE2 = C after B (`DrainOrdered`). One prior
+  async op, since the loopback test transport is single-in-flight.
+- `9p_client.loom_independent_past_held` (Loom-5b) — a chain `[FSYNC A (LINK)][NOP B]
+  [NOP C]`: B is A's held linked successor; C is independent (B does not link to it),
+  so C admits IMMEDIATELY out of order while B is held — CQE0 = C (before A and B),
+  then A, then B (the head→tail `continue`-not-`break` admission).
 
 The full `SYS_LOOM_SETUP` / `SYS_LOOM_ENTER` user copy-in/out is trivial handler
 glue (E2E coverage lands with the native API at Loom-6); the payload-opcode
@@ -698,8 +791,9 @@ rolled back via `spoor_clunk`); a user-VA fault reading the fd array.
 | Loom-2a | the ring substrate (this doc) | **landed** |
 | Loom-2b | the pluggable-completion 9P-engine seam + async submit + `loom_post_cqe` | **landed** |
 | Loom-3 | `SYS_LOOM_ENTER` + SQE dispatch (NOP/FSYNC; payload ops → -ENOSYS until Loom-6) + the I-30 submit-time pin + the async-op container + the `loom_free` quiesce (#898) | **landed** |
-| Loom-4 | SQPOLL kthread | pending |
-| Loom-5 | multishot + LINK/DRAIN | pending |
+| Loom-4 | SQPOLL kthread (4a recv-deadline + 4b CQ wait-list + 4c kthread + 4d audit) | **landed** |
+| Loom-5a | multishot streams (`LOOM_SQE_MULTISHOT` → `LOOM_CQE_MORE` shots + terminal) | **landed** |
+| Loom-5b | LINK/DRAIN held-submission chain (`l->chain` + `loom_admit_chain`) | **landed** (focused audit pending) |
 | Loom-6 | registered buffers + native libthyla-rs API + benchmark | pending |
 
 ## Known caveats / footguns

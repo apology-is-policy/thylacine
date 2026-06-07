@@ -144,6 +144,13 @@
 // condition. POSIX: ETIMEDOUT.
 #define T_E_TIMEDOUT   110
 
+// Operation cancelled. The Loom LINK cancel-cascade posts this as a
+// completion result for a chain op whose linked predecessor failed:
+// the op never ran, but it is not silently dropped (it posts exactly
+// one terminal CQE, the io_uring -ECANCELED convention). POSIX:
+// ECANCELED.
+#define T_E_CANCELED   125
+
 // ABI pins: changing a value here is an ABI break. The boundary-line
 // patch (and any future POSIX-aware userspace) depends on these
 // matching the AArch64 POSIX errno numbers.
@@ -163,5 +170,6 @@ _Static_assert(T_E_PIPE      == 32,  "T_E_PIPE ABI pin (POSIX EPIPE)");
 _Static_assert(T_E_RANGE     == 34,  "T_E_RANGE ABI pin (POSIX ERANGE)");
 _Static_assert(T_E_NOSYS     == 38,  "T_E_NOSYS ABI pin (POSIX ENOSYS)");
 _Static_assert(T_E_TIMEDOUT  == 110, "T_E_TIMEDOUT ABI pin (POSIX ETIMEDOUT)");
+_Static_assert(T_E_CANCELED  == 125, "T_E_CANCELED ABI pin (POSIX ECANCELED)");
 
 #endif  // THYLACINE_ERRNO_H
