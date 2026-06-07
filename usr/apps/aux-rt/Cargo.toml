@@ -1,0 +1,18 @@
+[package]
+name = "aux-rt"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lib]
+name = "aux_rt"
+path = "src/lib.rs"
+
+[dependencies]
+# aux-rt is the auxiliary track's tiny shared runtime. It hand-rolls ONLY
+# the two surfaces libthyla-rs does not expose to a native app today
+# (DOC-GAP-REPORT G03 + G05): (1) callee-side argv access, and (2) fd-0/1/2
+# stdio. Everything else (alloc, t_read/t_write, io traits, err) comes from
+# libthyla-rs unchanged -- aux-rt does NOT fork or extend it.
+libthyla-rs = { path = "../../lib/libthyla-rs" }

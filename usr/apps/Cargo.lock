@@ -3,6 +3,21 @@
 version = 4
 
 [[package]]
+name = "aux-rt"
+version = "0.1.0"
+dependencies = [
+ "libthyla-rs",
+]
+
+[[package]]
+name = "echo"
+version = "0.1.0"
+dependencies = [
+ "aux-rt",
+ "libthyla-rs",
+]
+
+[[package]]
 name = "hello"
 version = "0.1.0"
 dependencies = [

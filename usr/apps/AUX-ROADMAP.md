@@ -27,8 +27,18 @@ gaps are in `DOC-GAP-REPORT.md`. NEVER run anything.
   Notes below). TEST-PLAN written. Toolchain: cargo/rustc 1.94.1.
 
 ### A1 -- coreutils, io/fs basics (broad doc coverage; warm-up)
-- [ ] `echo` `cat` `true` `false` `pwd` `basename` `dirname` `wc` `head` `tail`
+- [wip] `echo` `cat` `true` `false` `pwd` `basename` `dirname` `wc` `head` `tail`
   `tee` `cmp`
+  - **Foundation: `usr/apps/aux-rt`** (shared crate) -- hand-rolls the argv
+    accessor (G03 workaround: a naked `rs_main` SP-capture, BYTE-VERIFIED in
+    echo's disassembly) + fd-0/1/2 stdio (G05 workaround over t_read/t_write)
+    + `aux_rt::main!` entry macro + print!/println!/eprintln!. This unblocks
+    the entire argv-taking arc. G03 stays P1 (DOC/API gap) but is RESOLVED
+    for authoring.
+  - [done] `echo` -- compiles; argv chain disassembly-verified; TEST-PLAN
+    written; gaps G05 (stdio handles) + G06 (fd-0/1/2 model undocumented).
+  - [ ] next: `true` `false` `pwd` (no argv) then `cat` `wc` `head` `tail`
+    `tee` `cmp` `basename` `dirname` (argv + fs/io).
 
 ### A2 -- coreutils, fs mutation + metadata
 - [ ] `mkdir` `rmdir` `rm` `cp` `mv` `ln` `touch` `stat` `ls` `readlink`
@@ -120,3 +130,15 @@ roadmap input.)
   `rs_main(argc, argv)` entry -- main-agent territory, recorded as API-GAP.
   No action needed from you unless you want to redirect; proceeding under
   autonomy.
+  - **UPDATE (A1):** RESOLVED with an in-app workaround -- `usr/apps/aux-rt`'s
+    naked `rs_main` reads the Shape-B frame; byte-verified in echo's
+    disassembly. The arc is unblocked. The clean upstream fix (a libthyla-rs
+    `args()` accessor) is still owed and tracked as G03 (API-GAP) for the
+    main agent.
+- **[P1] No terminal-backed fd 0/1/2 for native apps at v1.0** (DOC-GAP G06).
+  Native stdout/stdin only exist when wired (pipeline/redirect/inherit); the
+  shell prints via the UART (t_putstr). Coreutils are authored POSIX-shaped
+  (read fd0 / write fd1) so they compose in pipelines; standalone visibility
+  needs the console/PTY surface that does not exist yet. This is THE question
+  the A5 nora editor will hit head-on (it needs raw terminal I/O). Flagging
+  early; no redirect needed.

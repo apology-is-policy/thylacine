@@ -25,7 +25,7 @@
 
 [workspace]
 resolver = "2"
-members = ["hello"]
+members = ["aux-rt", "hello", "echo"]
 
 [workspace.package]
 edition = "2021"

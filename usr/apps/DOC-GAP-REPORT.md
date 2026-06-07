@@ -83,15 +83,19 @@ Append one entry per gap. Keep them specific (cite the file + section). Severity
   run, the original sp (which pointed at argc) is gone. The SPAWN side
   exists (`process::Command::arg()` builds an argv buffer for a CHILD), but
   the CALLEE side (reading one's OWN argv) has no API.
-- Workaround: TBD -- to be investigated at A1. Candidate: a hand-rolled
-  `#[unsafe(naked)]` entry shim INSIDE the app that captures sp before any
-  prologue, then parses the frame. Feasibility is uncertain because
-  libthyla-rs already defines `.globl _start` in one codegen unit, so an
-  app-side `_start` would collide at link (the app references other
-  libthyla-rs symbols, pulling the `_start`-bearing object). If no in-app
-  workaround holds, argv-taking apps are SKIPPED or built without argv and
-  the limitation is documented per app. (Severity stays P1: there is no
-  way to do this from docs + the public API as they stand.)
+- Workaround: **RESOLVED with an in-app workaround (byte-verified).** The
+  `_start`-collision fear was unfounded: libthyla-rs defines `_start` (not
+  `rs_main`) -- it only *references* `rs_main`. So an app (or a shared app
+  crate) may define `rs_main` itself. `usr/apps/aux-rt` provides a
+  `#[unsafe(naked)] #[no_mangle] rs_main` that captures sp before any
+  prologue and tail-calls the app's `aux_main(argc, argv)`. Disassembly of
+  `echo` confirms it is exactly right: `_start: bl rs_main` (sp untouched)
+  -> `rs_main: bti c; ldr x0,[sp]; add x1,sp,#8; b aux_main` -> `aux_main`
+  prologue (argc/argv already in x0/x1). The argv strings live in the
+  'static initial frame above the live stack, so a `&'static [u8]` view is
+  sound. Severity STAYS P1: nothing in the docs or the public API tells an
+  author this is possible or how -- the workaround required reading the
+  kernel frame layout (doc 27 + doc 86) and hand-rolling asm.
 - Suggested doc fix: this is primarily an API gap to surface to the main
   agent -- libthyla-rs should expose an `args()` accessor (the kernel frame
   already exists), OR `_start` should capture sp and pass (argc, argv) to a
@@ -116,3 +120,47 @@ Append one entry per gap. Keep them specific (cite the file + section). Severity
 - Suggested doc fix: update doc 38 lines 189-193 to the as-built state:
   the kernel populates the SysV/auxv frame (P6), but libthyla-rs's `_start`
   does not consume it and no callee-side argv accessor is exposed yet.
+
+### G05 [P2][API-GAP] No Stdout/Stdin/Stderr handles; File has no from_raw_fd
+- App / task: A1 `echo` (and every coreutil) -- "write to stdout".
+- Doc consulted: `libthyla-rs::io` (public traits) + `libthyla-rs::fs::File`
+  (public signatures) + the `t_read`/`t_write` wrappers.
+- Gap: `io.rs` provides the `Read`/`Write`/`Seek`/`BufRead` traits and
+  `fs::File` implements `Read`+`Write`, but there is NO concrete
+  `Stdout`/`Stdin`/`Stderr` handle and no `File::from_raw_fd`. So the
+  std-idiomatic `io::stdout().write_all(...)` has no analog -- there is no
+  public type that wraps an already-open inherited fd (0/1/2) as a
+  Read/Write. The raw `t_read(fd,..)`/`t_write(fd,..)` SVC wrappers DO exist
+  (lib.rs:687/708, `pub unsafe fn`), so the capability is present; only the
+  safe handle is missing.
+- Workaround: `usr/apps/aux-rt` defines `Stdin`/`Stdout`/`Stderr` unit
+  structs that impl `io::Read`/`io::Write` over `t_read(0)`/`t_write(1)`/
+  `t_write(2)`, mapping the return via `Error::from_syscall_return`. Plus
+  `print!`/`println!`/`eprintln!` macros.
+- Suggested doc fix / API: libthyla-rs should expose `io::stdout()` /
+  `stdin()` / `stderr()` returning Read/Write handles (and/or
+  `File::from_raw_fd`). Until then, doc the `t_read`/`t_write` raw path as
+  the native stdio mechanism.
+
+### G06 [P1] The fd-0/1/2 / terminal output model for native apps is undocumented
+- App / task: A1 `echo` -- "where does my output actually go?"
+- Doc consulted: searched `docs/reference/` + `docs/manual/` for a
+  description of fd 0/1/2 / stdout / console for native programs; found none.
+  The only statement of the model is a CODE COMMENT in
+  `usr/utopia/libutopia/src/eval/stmt.rs:61-72,289`.
+- Gap: at v1.0 a native app has **no terminal-backed fd 0/1/2**. The shell
+  (`ut`) prints via `t_putstr` (the kernel UART), and fd 1 is meaningful
+  ONLY when wired -- a pipeline element, a redirect, or a parent-inherited
+  fd. An author whose program's whole job is to "print to stdout" gets no
+  doc explaining: (a) that `t_write(1,..)` silently goes nowhere when run
+  standalone, (b) that `t_putstr` is the UART (a diagnostic channel, not a
+  redirectable stdout), (c) when to use which. This is a genuine authoring
+  trap discovered only by reading the shell's source.
+- Workaround: author coreutils POSIX-shaped (read fd 0, write fd 1) so they
+  compose in pipelines (the case where fd 1 IS wired), and document per-app
+  that standalone visibility needs the not-yet-built terminal-fd surface.
+- Suggested doc fix: add a "Userspace I/O model" section to the reference
+  (or doc 38) stating the v1.0 reality -- no terminal-backed fd 0/1/2; UART
+  via t_putstr is the diagnostic channel; fd 1 is pipeline/redirect/inherit
+  only; the console/PTY surface that backs interactive stdout is future
+  work. This is also the central question the A5 nora editor will hit.
