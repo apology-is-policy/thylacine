@@ -1,0 +1,53 @@
+# Thylacine auxiliary native userspace apps -- a SEPARATE cargo workspace.
+#
+# Disjoint from the main usr/ workspace (usr/Cargo.toml) so the auxiliary
+# track never edits the main manifest's member list. Apps here are native
+# no_std libthyla-rs programs (the CLAUDE.md "Native vs ported userspace"
+# split -- no musl, no pouch). They depend on libthyla-rs by relative path
+# (../../lib/libthyla-rs).
+#
+# Build target (aarch64-unknown-none) + the W^X linker flags are INHERITED
+# from usr/.cargo/config.toml: cargo discovers that config by walking up
+# from this workspace root (usr/apps/ -> usr/). The linker script path in
+# those flags (-Tscripts/aarch64-userspace.ld) resolves relative to the
+# cargo workspace-root CWD, which for THIS workspace is usr/apps/; the
+# symlink usr/apps/scripts -> ../scripts makes it reachable (see
+# DOC-GAP-REPORT.md G02). Build from usr/apps/:
+#
+#   ( cd usr/apps && cargo build --release )
+#
+# Output lands in build/usr-rs/aarch64-unknown-none/release/ (shared with
+# the main usr/ workspace via the inherited target-dir; crate names are
+# disjoint so there is no collision).
+#
+# VERIFICATION CEILING: cargo build / check / clippy only. These apps are
+# NEVER booted or executed by the auxiliary track (the main agent owns QEMU).
+
+[workspace]
+resolver = "2"
+members = ["hello"]
+
+[workspace.package]
+edition = "2021"
+publish = false
+license = "0BSD"
+
+# Mirror usr/Cargo.toml's release profile so libthyla-rs builds with the
+# same fingerprint (maximizes artifact reuse in the shared target-dir) and
+# so the native binaries match the shipping posture. panic = "abort" is
+# REQUIRED: aarch64-unknown-none has no unwinder and libthyla-rs's
+# #[panic_handler] aborts via t_exits(1).
+[profile.release]
+opt-level = "z"
+debug = false
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = false
+overflow-checks = true
+
+# Debug profile also aborts on panic so `cargo build` (no --release) links
+# without an eh_personality. The auxiliary track builds --release to match
+# the shipping pipeline, but keep dev sound for `cargo check`.
+[profile.dev]
+panic = "abort"

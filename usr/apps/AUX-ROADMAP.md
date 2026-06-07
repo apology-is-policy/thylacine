@@ -15,10 +15,16 @@ gaps are in `DOC-GAP-REPORT.md`. NEVER run anything.
 ## Phase A -- native, build-to-compile, fully parallel-safe (DO THIS NOW)
 
 ### A0 -- bootstrap (do FIRST; de-risks the toolchain + the first gap batch)
-- [ ] `hello` -- the minimal native libthyla-rs app: print a line, exit 0.
-  Goal: stand up `usr/apps/Cargo.toml` (workspace) + the target/linker config +
-  prove `cargo build` works for the native target. Document the ENTIRE build
-  setup as a gap if it is not in the docs (it likely is not -- a P1 finding).
+- [done] `hello` -- the minimal native libthyla-rs app: print a line, exit 0.
+  Landed `usr/apps/Cargo.toml` (separate workspace) + `usr/apps/hello/` +
+  `usr/apps/scripts -> ../scripts` symlink (linker-script reachability).
+  `cargo build --release` clean; ELF static aarch64, `_start`@0x400000,
+  `rs_main`@0x400018, W^X-clean (one R+E PT_LOAD; no RW needed). Build setup
+  turned out to be DOCUMENTED (docs/reference/38-userspace.md) -- contrary
+  to the roadmap's P1 expectation; recorded as discoverability/staleness
+  gaps instead (G01 P3, G04 P2) + the sub-workspace path trap (G02 P2).
+  **BIG FINDING: G03 [P1] -- native apps cannot read their own argv** (see
+  Notes below). TEST-PLAN written. Toolchain: cargo/rustc 1.94.1.
 
 ### A1 -- coreutils, io/fs basics (broad doc coverage; warm-up)
 - [ ] `echo` `cat` `true` `false` `pwd` `basename` `dirname` `wc` `head` `tail`
@@ -101,4 +107,16 @@ roadmap input.)
 ---
 
 ## Notes / open questions for the user (the aux agent appends here)
-- (none yet)
+- **[P1, roadmap-affecting] Native apps cannot read their own argv/argc**
+  (DOC-GAP G03). libthyla-rs's `_start` does `bl rs_main` with no SP capture
+  and no callee-side argv accessor exists, though the kernel already
+  populates a SysV/auxv frame on the stack (P6). This blocks the
+  argument-taking half of A1-A3 (`echo`, `cat FILE`, `cp`, `mv`, `seq`,
+  `grep`, ...) as authored-from-docs. A1's FIRST task is to test a
+  hand-rolled in-app `#[unsafe(naked)]` SP-capture workaround; if it links
+  cleanly it unblocks the arc (and is a great documented workaround), if not
+  those apps ship without argv (stdin-only forms) + the limitation is logged
+  per app. The clean fix is a libthyla-rs `args()` accessor or an
+  `rs_main(argc, argv)` entry -- main-agent territory, recorded as API-GAP.
+  No action needed from you unless you want to redirect; proceeding under
+  autonomy.
