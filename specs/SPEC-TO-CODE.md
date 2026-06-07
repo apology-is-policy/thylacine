@@ -698,7 +698,9 @@ ARCH §23.3.
 Status: **TLC-green; Loom-2a + Loom-2b + Loom-3 + Loom-4 (4a/4b/4c/4d) landed
 (substrate + the pluggable-completion seam + the batch-enter core + the SQPOLL
 transport-deadline substrate + the CQ wait-list + the SQPOLL poll-thread + the
-focused SQPOLL audit close); Loom-5..6 pending. Loom-4d (the audit close) added NO
+focused SQPOLL audit close); the Loom-5 SPEC landed as two new focused modules
+(`loom_multishot.tla` + `loom_order.tla`, documented below) -- the Loom-5 IMPL +
+Loom-6 pending. Loom-4d (the audit close) added NO
 new spec mechanism -- the F1 borrow-guard `spoor_ref`, the F2 admittability park
 cond, and the SA-2 `P9_PUMP_BUSY` yield are impl refinements WITHIN the `d48a8da`
 CQ-waiter + Teardown model (the kthread is one `PostCqe` producer + the `Teardown`
@@ -749,3 +751,87 @@ Liveness: TLC-clean (`EventuallyCompletes` + `CqWaiterReturns`, `ALLOW_TEARDOWN 
 cfgs run with `-deadlock`; `loom.tla`'s `Done` self-loop keeps the
 torn-and-drained terminal state from tripping the deadlock check. See
 docs/LOOM.md + ARCH §28 (I-29, I-30 reserved at impl).
+
+---
+
+## loom_multishot.tla — Loom-5 (the multishot op lifecycle; spec-first)
+
+Status: **TLC-green; the Loom-5 SPEC is landed, the Loom-5 IMPL is pending
+(#909).** A NEW focused module (not an extension of `loom.tla`): the audited
+core models the CQ as `cq \subseteq Ops` (at most one unreaped CQE per op),
+which is gate-tied for its 8 cfgs and structurally cannot represent multishot's
+MULTISET CQ (several unreaped CQEs from one op). Refactoring the frozen,
+already-audited core to a count-CQ would invalidate its landed counterexamples;
+instead multishot gets its own module with a COUNT CQ (`cq[o] \in Nat`), the
+scheduler-suite precedent (`sched_oncpu.tla` + `sched_alpha.tla`).
+
+Models a multishot op as one SQE -> MANY CQEs: arm once, a `LOOM_CQE_MORE`-set
+CQE per event (the op re-arms), then EXACTLY ONE terminal (MORE-clear) CQE, and
+NOTHING after. Pins **I-29 generalized to a stream** (`ExactlyOneTerminal` +
+`TerminalEndsStream`), the **I-30 pin held ACROSS shots** (`ObjPinnedAcrossShots`
+— the clunk+reuse-between-shots amplification), per-shot **CQ back-pressure**
+(`CqNeverOverfull`), and **teardown-quiesce** (`NoStaleAfterTeardown`). A
+single-shot op is the 1-shot special case (its lone CQE is its terminal).
+
+Safety: TLC-clean at `Ops = {o1, o2}, CQ_CAP = 2, MAX_INFLIGHT = 2,
+MAX_SHOTS = 2` — 2940 distinct states.
+Liveness: TLC-clean (`EventuallyTerminal`, `ALLOW_TEARDOWN = FALSE`) — 1633 states.
+
+| Config | Flag | Invariant / Property | Result |
+|---|---|---|---|
+| `loom_multishot.cfg`                          | all FALSE, teardown on       | `Invariants` (13)        | clean (2940) |
+| `loom_multishot_liveness.cfg`                 | Spec_Live, no teardown       | `EventuallyTerminal`     | clean (1633) |
+| `loom_multishot_buggy_double_terminal.cfg`    | `BUGGY_DOUBLE_TERMINAL`      | `ExactlyOneTerminal`     | violation |
+| `loom_multishot_buggy_shot_lost_on_full.cfg`  | `BUGGY_SHOT_LOST_ON_FULL`    | `CqNeverOverfull`        | violation |
+| `loom_multishot_buggy_resolve_at_shot.cfg`    | `BUGGY_RESOLVE_AT_SHOT`      | `ObjPinnedAcrossShots`   | violation |
+| `loom_multishot_buggy_more_after_terminal.cfg`| `BUGGY_MORE_AFTER_TERMINAL`  | `TerminalEndsStream`     | violation |
+| `loom_multishot_buggy_stale_after_teardown.cfg`| `BUGGY_STALE_AFTER_TEARDOWN`| `NoStaleAfterTeardown`   | violation |
+
+| Spec action | Source location (Loom-5 impl, #909) | Notes |
+|---|---|---|
+| `UserProduce(o, ms)` / `Consume` | `kernel/loom.c::loom_submit_one` (the `LOOM_SQE_MULTISHOT` flag in `loom_sqe.flags`) | a multishot SQE is admitted once: the I-30 pin (`spoor_ref`) + tag are taken at submit and held for the WHOLE stream (released at the terminal). |
+| `ReplyArrives` / `PostShot` | `kernel/loom.c::loom_async_complete` (the multishot branch: post a `LOOM_CQE_MORE`-set CQE, RE-ARM the op instead of reaping it) | each non-terminal reply posts a MORE CQE under `l->lock` (no sleep) and re-issues the request; the pin is reused, never re-resolved (`ObjPinnedAcrossShots`). |
+| `PostTerminal` | `kernel/loom.c::loom_async_complete` (the terminal branch: clear MORE, move to terminal, reap the container) | the terminal reply (EOF / error / cancel) posts the MORE-clear CQE + ends the stream (`ExactlyOneTerminal`, `TerminalEndsStream`); back-pressure holds it on a full CQ. |
+| `Teardown` | `kernel/loom.c::loom_free` quiesce + `p9_client_abandon_async` | an armed multishot op is quiesced (no late shot) — the #898 / #845 path, now covering a re-armable op (`NoStaleAfterTeardown`). |
+| the five `BUGGY_*` flags | (none — disciplines the impl upholds) | exactly-one-terminal; never-post-a-shot-into-a-full-CQ; pin-not-re-resolved-per-shot; no-MORE-after-terminal (the Tapestry recycle-gate); quiesce-the-armed-op-on-teardown. |
+
+---
+
+## loom_order.tla — Loom-5 (LINK / DRAIN inter-op ordering; spec-first)
+
+Status: **TLC-green; the Loom-5 SPEC is landed, the Loom-5 IMPL is pending
+(#909).** A NEW focused module: LINK/DRAIN is an ADMISSION-ORDERING concern over
+an ORDERED chain of ops (submission order = SQ-index order), modeled with integer
+indices + a `Pred(i)` predecessor set (empty for `i = 1`, so no index leaves
+DOMAIN) — orthogonal to the multishot stream lifecycle and the core CQ shape.
+
+LINK (chain): a linked op starts only after its predecessor completes
+SUCCESSFULLY; a link member's FAILURE cancels the rest of the chain, each
+cancelled op posting EXACTLY ONE -ECANCELED CQE. DRAIN (barrier): a drain op
+waits for ALL prior; post-drain ops wait for the drain. Pins `LinkOrdered`,
+`DrainOrdered`, `EveryDoneOpPosted` (I-29 no-lost: a cancelled op is never
+silently dropped), `NoOrphanCancel`, and the liveness `EverySubmittedPosts` (a
+failed link must cancel its successors so they don't strand).
+
+Safety: TLC-clean at `N = 3` (link/drain flags + completion result chosen
+nondeterministically -> all 2^N x 2^N topologies) — 1505 distinct states.
+Liveness: TLC-clean (`EverySubmittedPosts`) — 1505 states.
+
+| Config | Flag | Invariant / Property | Result |
+|---|---|---|---|
+| `loom_order.cfg`                          | all FALSE                  | `Invariants` (7)        | clean (1505) |
+| `loom_order_liveness.cfg`                 | Spec_Live                  | `EverySubmittedPosts`   | clean (1505) |
+| `loom_order_buggy_link_reorder.cfg`       | `BUGGY_LINK_REORDER`       | `LinkOrdered`           | violation |
+| `loom_order_buggy_drain_jumps_ahead.cfg`  | `BUGGY_DRAIN_JUMPS_AHEAD`  | `DrainOrdered`          | violation |
+| `loom_order_buggy_cancel_no_cqe.cfg`      | `BUGGY_CANCEL_NO_CQE`      | `EveryDoneOpPosted`     | violation |
+| `loom_order_buggy_cancel_skips.cfg`       | `BUGGY_CANCEL_SKIPS`       | `EverySubmittedPosts` (temporal) | violation |
+
+| Spec action | Source location (Loom-5 impl, #909) | Notes |
+|---|---|---|
+| `Submit` / `Start` | `kernel/loom.c::loom_submit_one` (the `LOOM_SQE_LINK` / `LOOM_SQE_DRAIN` flags) + the admission gate | a linked successor is held until its predecessor's terminal CQE; a drain barrier until all prior terminal (`LinkOrdered` / `DrainOrdered`). |
+| `Complete` / `CancelVictim` | `kernel/loom.c::loom_async_complete` (on a link member's terminal CQE: dispatch the next link, or cancel the chain) | a non-ok link member cancels its successors, each posting one -ECANCELED CQE (`EveryDoneOpPosted` / `NoOrphanCancel`); no successor strands (`EverySubmittedPosts`). |
+| the four `BUGGY_*` flags | (none — disciplines the impl upholds) | link-ordering; drain-ordering; a-cancelled-op-still-posts-a-CQE; the-cancel-actually-fires (no strand). |
+
+cfgs run with `-deadlock`; each module's `Done` self-loop keeps the
+all-terminal state from tripping the deadlock check. The three modules together
+are the Loom-5 pre-commit gate; see docs/LOOM.md §7 + §10.

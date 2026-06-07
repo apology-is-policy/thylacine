@@ -242,13 +242,18 @@ structured client API the design rests on):
 - **Scope = the maximal build.** SQPOLL (the zero-syscall poll-thread) and
   multishot (one SQE → many CQEs, e.g. a `/srv` accept loop) are built **up
   front**, each as its own spec'd + audited sub-chunk (§10), not deferred. The
-  invariant surface each adds is *modeled in `specs/loom.tla`* and audited, not
-  hand-waved.
-- **Spec-first = re-enabled for this surface.** `specs/loom.tla` (clean +
-  buggy-cfg counterexamples) is the gate before each impl sub-chunk — the
-  SMP-scheduler model-first pattern (2026-06-05 precedent). The shared-memory
-  async boundary is precisely what spec-first exists for. This is a case-(a)
-  re-enabling of the broadly-suspended spec-to-code policy (CLAUDE.md).
+  invariant surface each adds is *modeled in the Loom spec suite* and audited, not
+  hand-waved (the suite is `specs/loom.tla` + the Loom-5 additions
+  `specs/loom_multishot.tla` + `specs/loom_order.tla`).
+- **Spec-first = re-enabled for this surface.** The Loom spec suite (`loom.tla` +
+  `loom_multishot.tla` + `loom_order.tla`; each clean + liveness + per-bug
+  counterexample cfgs) is the gate before each impl sub-chunk — the SMP-scheduler
+  model-first pattern (2026-06-05 precedent). A NEW mechanism extends the suite
+  FIRST (a new focused module when the mechanism's state shape diverges from the
+  core — e.g. multishot's multiset CQ vs the core's single-CQE-per-op `cq`), then
+  the impl. The shared-memory async boundary is precisely what spec-first exists
+  for. This is a case-(a) re-enabling of the broadly-suspended spec-to-code
+  policy (CLAUDE.md).
 - **Name = Loom** (§12). **liburing-compat shim = out of the v1.x core** (§9).
 
 ---
@@ -408,7 +413,10 @@ Lazarus defers its §28 edit to W1):
 - **I-29 — Loom completion integrity.** Every *submitted* SQE produces *exactly
   one* terminal CQE (no lost, no double); no CQE is posted whose `user_data`
   correlation is stale (an abandoned/torn-down op never surfaces as a live
-  completion). Modeled in `specs/loom.tla`.
+  completion). Modeled in `specs/loom.tla`; GENERALIZED to a stream (one SQE ->
+  many CQEs, exactly one terminal) in `specs/loom_multishot.tla`, and to a
+  cancellation-complete dependency chain (a cancelled linked op is never silently
+  dropped) in `specs/loom_order.tla` (Loom-5).
 - **I-30 — Loom submit-time capability pin.** The rights governing an op are
   evaluated + snapshotted at *submission* and held for the op's lifetime; never
   re-evaluated at completion. Enforced by the #844 snapshot + the
@@ -454,8 +462,10 @@ hazard class.
   CQ back-pressure HOLDS a shot when full; cancel/error yields exactly one
   terminal CQE — the I-29 generalization to a stream). Its real consumers (the
   Tapestry event-fd stream and the `/srv` accept-loop — *the same mechanism*) are
-  payload ops that light up at Loom-6, so the mechanism is modeled
-  (`specs/loom.tla` multishot + ordering actors) + built + audited at Loom-5
+  payload ops that light up at Loom-6, so the mechanism is modeled (two NEW
+  focused modules `specs/loom_multishot.tla` + `specs/loom_order.tla`, leaving the
+  audited `specs/loom.tla` untouched — its single-CQE-per-op `cq` is gate-tied and
+  cannot represent multishot's multiset CQ) + built + audited at Loom-5
   against **synthetic NOP/FSYNC multishot vehicles** (no real re-armable 9P op
   exists until Loom-6's payload surface; user-voted 2026-06-07 "mechanism at
   Loom-5, real ops at Loom-6"). LINK/DRAIN's real dependent ops (walk→open→read,
