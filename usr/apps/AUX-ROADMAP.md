@@ -44,11 +44,17 @@ gaps are in `DOC-GAP-REPORT.md`. NEVER run anything.
     paths only.
   - [done] `wc` `head` `tail` `cmp` -- File read + counting/line logic;
     head streams (early-stop), tail/cmp/wc slurp. All clippy-clean, W^X-clean.
-  - [ ] `tee` -- DEFERRED to the next chunk (needs file CREATE, which the
-    safe fs API lacks: gap G09). Lands with the aux-rt `OwnedFd` + `create`
-    extension that also unblocks A2 (cp/mv/touch/mkdir/rm/ls).
+  - [done] `tee` -- uses the new aux-rt::fs shim; -a degrades to truncate
+    with a warning (append unsupported, G09).
   - New gaps this batch: G07 (no cwd, P2), G08 (Path/POSIX divergence, P3),
-    G09 (fs has no create/append/readdir though the kernel does, P2 API-GAP).
+    G09 (fs has no create/append/readdir though the kernel does, P2 API-GAP),
+    G10 (t_readdir type-byte encoding unspecified, P3).
+  - **A1 COMPLETE (12/12 apps).**
+  - **Foundation extended: `aux-rt::fs`** -- OwnedFd (io::Read/Write/Seek +
+    Drop-close over a raw fd; the File::from_raw_fd libthyla-rs withholds) +
+    open/create/mkdir/remove_file/remove_dir/rename/read_dir over the raw
+    t_open/t_walk_create/t_unlink/t_rename/t_readdir wrappers. This unblocks
+    ALL of A2.
 
 ### A2 -- coreutils, fs mutation + metadata
 - [ ] `mkdir` `rmdir` `rm` `cp` `mv` `ln` `touch` `stat` `ls` `readlink`

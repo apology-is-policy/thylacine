@@ -129,6 +129,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "tee"
+version = "0.1.0"
+dependencies = [
+ "aux-rt",
+ "libthyla-rs",
+]
+
+[[package]]
 name = "true_"
 version = "0.1.0"
 dependencies = [

@@ -25,7 +25,7 @@
 
 [workspace]
 resolver = "2"
-members = ["aux-rt", "hello", "echo", "true", "false", "pwd", "basename", "dirname", "cat", "wc", "head", "tail", "cmp"]
+members = ["aux-rt", "hello", "echo", "true", "false", "pwd", "basename", "dirname", "cat", "wc", "head", "tail", "cmp", "tee"]
 
 [workspace.package]
 edition = "2021"

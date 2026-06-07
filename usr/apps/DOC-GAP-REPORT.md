@@ -220,3 +220,20 @@ Append one entry per gap. Keep them specific (cite the file + section). Severity
 - Suggested doc fix / API: wire `OpenOptions::create` to `t_walk_create`,
   add `fs::ReadDir` over `t_readdir`, and make a public `File::from_raw_fd`.
   These all have kernel support already; only the safe Rust layer is missing.
+
+### G10 [P3] t_readdir's per-entry `type` byte encoding is unspecified
+- App / task: A2 `ls` (the aux-rt::fs::read_dir parser).
+- Doc consulted: the `t_readdir` wrapper contract (lib.rs:1553-1557).
+- Gap: the contract pins the byte layout precisely -- "qid(13) + offset(8
+  LE) + type(1) + name_len(2 LE) + name" -- but does not say what the
+  standalone `type(1)` byte encodes: the Linux/9P2000.L DT_* family
+  (DT_DIR=4) or something else. The qid's first byte (qid.type, QTDIR=0x80)
+  is a second, redundant signal. An author cannot tell from the contract
+  which to trust for "is this entry a directory".
+- Workaround: aux-rt::fs::read_dir captures BOTH the standalone `type` byte
+  AND the qid type byte, and `DirEntry::is_dir()` returns true if EITHER
+  indicates a directory (DT_DIR or the QTDIR bit). Robust to whichever the
+  kernel actually emits.
+- Suggested doc fix: state the encoding of the t_readdir `type` byte in the
+  wrapper contract (and in docs/reference/96-fs-mutation.md) -- e.g. "the
+  Linux DT_* values per 9P2000.L Rreaddir".

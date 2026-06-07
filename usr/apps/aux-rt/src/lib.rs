@@ -38,6 +38,10 @@ pub use libthyla_rs::io::{Read, Write};
 
 use libthyla_rs::{t_read, t_write};
 
+// The file-creation / mutation / directory shim (the G09 workaround). Kept
+// in its own module so apps that only need argv+stdio do not pull it in.
+pub mod fs;
+
 // The application binary defines this (typically via aux_rt::main!). aux-rt
 // only DECLARES it; `sym aux_main` in the naked rs_main emits a relocation
 // resolved at final link, exactly as libthyla-rs's _start references the
