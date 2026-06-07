@@ -563,6 +563,15 @@ int p9_client_reader_pump_once(struct p9_client *c) {
     return ret;
 }
 
+bool p9_client_recv_is_deadline_capable(struct p9_client *c) {
+    if (!c || c->magic != P9_CLIENT_MAGIC) return false;
+    // The transport ops are immutable post-init, so this is a stable property of
+    // the client (no lock needed). NULL => the recv blocks unbounded at a frame
+    // boundary (the loopback test backend); non-NULL => an armed deadline lets a
+    // boundary recv return (srvconn -> client_deadline_ns).
+    return c->transport.ops.set_recv_deadline != NULL;
+}
+
 int p9_client_reader_pump_once_deadline(struct p9_client *c, u64 deadline_ns) {
     if (!c || c->magic != P9_CLIENT_MAGIC) return -P9_E_INVAL;
     spin_lock(&c->lock);

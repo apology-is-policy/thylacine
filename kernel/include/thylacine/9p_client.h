@@ -388,6 +388,14 @@ enum p9_pump_result {
 //                       death-interrupt unwind (session left for survivors).
 int p9_client_reader_pump_once_deadline(struct p9_client *c, u64 deadline_ns);
 
+// Whether this client's transport implements set_recv_deadline (a frame-boundary
+// recv timeout). The Loom SQPOLL kthread (Loom-4c) block-recvs in process context
+// with no death-interrupt (kproc never group-terminates), so it relies on the
+// idle-deadline to re-check its stop flag -- a NULL-deadline transport (e.g. the
+// loopback test backend) would block it un-interruptibly, hanging teardown. Used
+// to gate registering such a handle into an SQPOLL ring (loom_register_handles).
+bool p9_client_recv_is_deadline_capable(struct p9_client *c);
+
 // Hand the elected-reader role to a pending SYNC op (async ops are skipped --
 // they have no thread to run the reader loop). Exposed for the handoff-skip
 // regression; the reader loop uses the internal locked form.

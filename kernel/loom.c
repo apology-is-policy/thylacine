@@ -21,15 +21,20 @@
 #include <thylacine/burrow.h>
 #include <thylacine/dev9p.h>
 #include <thylacine/errno.h>
+#include <thylacine/extinction.h>
 #include <thylacine/handle.h>
 #include <thylacine/page.h>
 #include <thylacine/poll.h>
+#include <thylacine/proc.h>       // kproc (the SQPOLL kthread parent)
 #include <thylacine/rendez.h>
+#include <thylacine/sched.h>      // ready / sched (the SQPOLL kthread lifecycle)
 #include <thylacine/spoor.h>
 #include <thylacine/spinlock.h>
+#include <thylacine/thread.h>     // thread_create_with_arg / thread_free / THREAD_EXITING
 #include <thylacine/types.h>
 
 #include "../mm/slub.h"
+#include "../arch/arm64/timer.h"  // timer_now_ns (the SQPOLL frame-boundary idle deadline)
 
 // =============================================================================
 // One in-flight async (Loom) op. Heap-allocated per dispatched SQE; owned by the
@@ -108,6 +113,7 @@ struct Loom *loom_create(u32 sq_entries, u32 cq_entries) {
     l->refcount = 1;
     spin_lock_init(&l->lock);
     poll_waiter_list_init(&l->cq_waiters);   // Loom-4 CQ wait-list (its own lock)
+    rendez_init(&l->sqpoll_park);            // Loom-4c SQPOLL park (no kthread until loom_start_sqpoll)
     l->ring     = r;
     // The ring Burrow is anonymous + physically contiguous (alloc_pages chunk);
     // its direct-map base is stable for the Burrow's lifetime (the Loom holds a
@@ -149,6 +155,36 @@ struct Loom *loom_create(u32 sq_entries, u32 cq_entries) {
 // is already gone (mapping_count == 0) the pages free here, else the VMA
 // teardown frees them later (dual-refcount, #847).
 static void loom_free(struct Loom *l) {
+    // Loom-4c: JOIN the SQPOLL kthread FIRST -- before the #898 quiesce. The
+    // kthread is the only other mutator of inflight_ops (it submits + reaps in
+    // its loop), so it must be fully stopped before this function touches the
+    // list. The join: set sqpoll_stopping (release) so the kthread's next loop
+    // top / park-cond observes it, wake the park Rendez (an idle kthread is
+    // sleeping there; a kthread mid-recv self-returns at its frame-boundary
+    // idle-deadline and re-checks stopping -- the gate guarantees a deadline-
+    // capable transport so this terminates), then spin until the kthread signals
+    // sqpoll_exited (release; pairs with this acquire -> the kthread's
+    // state=EXITING write is visible) and thread_free it (which internally spins
+    // on on_cpu, the wait_pid reap discipline). refcount is 0 so no ENTER runs;
+    // the kthread holds no loom ref, so this join is the sole lifetime authority.
+    if (l->sqpoll) {
+        __atomic_store_n(&l->sqpoll_stopping, true, __ATOMIC_RELEASE);
+        wakeup(&l->sqpoll_park);
+        while (!__atomic_load_n(&l->sqpoll_exited, __ATOMIC_ACQUIRE)) {
+            __asm__ __volatile__("yield" ::: "memory");
+        }
+        thread_free(l->sqpoll);
+        l->sqpoll = NULL;
+    }
+
+    // specs/loom.tla Teardown-wakes-waiters (NoStrandedWaiter). VACUOUS in the
+    // impl: a SYS_LOOM_ENTER caller sleeping on cq_waiters holds a loom ref for
+    // its whole call (handle_get), so refcount cannot reach 0 -- this function
+    // cannot run -- while any cq_waiter sleeps; the list is empty here. The wake
+    // is the spec's teardown action made literal (a no-op walk of an empty list),
+    // kept as defense if that ref invariant ever weakens.
+    poll_waiter_list_wake(&l->cq_waiters);
+
     // #898: quiesce any in-flight async op BEFORE freeing the ring. refcount hit
     // 0 -> no SYS_LOOM_ENTER is in progress (an enter holds a loom ref via
     // handle_get), so the inflight_ops list is not being mutated here (only
@@ -219,6 +255,24 @@ int loom_register_handles(struct Loom *l, struct Spoor **spoors,
     if (!l || l->magic != LOOM_MAGIC)  return -1;
     if (n > LOOM_MAX_REG_HANDLES)      return -1;
     if (n > 0 && (!spoors || !rights)) return -1;
+
+    // Loom-4c SQPOLL deadline-capable gate. On an SQPOLL ring the poll-thread
+    // block-recvs on the dev9p client of any in-flight async op, in process
+    // context with no death-interrupt (kproc never group-terminates) -- so a
+    // NULL-deadline transport would block it un-interruptibly and HANG teardown's
+    // join. Reject registering such a handle. A non-dev9p Spoor (dev9p_client_fid
+    // fails) is allowed: it can never go async (loom_submit_one -EINVALs it
+    // inline), so the kthread never recvs on it. Checked BEFORE any ref is
+    // adopted, so the caller's rollback (it retains its refs on failure) holds.
+    if (l->sqpoll) {
+        for (u32 i = 0; i < n; i++) {
+            struct p9_client *cl; u32 fid;
+            if (dev9p_client_fid(spoors[i], &cl, &fid) == 0 &&
+                !p9_client_recv_is_deadline_capable(cl)) {
+                return -1;
+            }
+        }
+    }
 
     // Replace the whole table (IORING_REGISTER_FILES semantics). Snapshot the
     // old Spoors + install the new under the lock, then clunk the old OUTSIDE
@@ -588,27 +642,29 @@ static void loom_wait_for_completions(struct Loom *l, u32 min_complete,
     pw.magic = 0;   // defense-in-depth before the stack frame pops (poll.c idiom)
 }
 
-int loom_enter(struct Loom *l, u32 to_submit, u32 min_complete, u32 flags) {
-    if (!l || l->magic != LOOM_MAGIC) return -1;
-    if (flags & ~LOOM_ENTER_VALID)    return -1;
-
+// Consume up to `budget` SQEs from the SQ index ring in SQ-index order, copying
+// each to kernel memory (ring TOCTOU) and dispatching via loom_submit_one.
+// Returns the number consumed. Shared by SYS_LOOM_ENTER (the non-SQPOLL submit
+// phase) and the SQPOLL kthread (zero-syscall submit). l->lock NOT held on entry.
+//
+// sq_tail is user-owned (advisory): bound the work against it but never trust it
+// for indexing. The consume position is the kernel-private sq_head; the SQ-index
+// ring slot it points at is user-written, so it is range-checked before it
+// indexes the SQE array (the SA-1 discipline on the SQ side).
+//
+// F1: each per-slot claim (the sq_head read + advance + the SQE read+copy) runs
+// under l->lock so two concurrent consumers on the same ring (two ENTERs of a
+// multi-thread Proc, or an ENTER racing the SQPOLL kthread) never read the same
+// sq_head -> never double-dispatch a slot or lose an sq_head update; each
+// iteration atomically claims exactly one slot. loom_submit_one runs OUTSIDE the
+// lock (it re-takes l->lock for the FSYNC pin + the inflight link -- a separate,
+// non-nested acquisition).
+static u32 loom_drain_sq(struct Loom *l, u32 budget) {
     struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
     u32 *sq_array         = (u32 *)(l->ring_kva + l->sq_array_off);
     struct loom_sqe *sqes = (struct loom_sqe *)(l->ring_kva + l->sqe_off);
 
-    // --- SUBMIT phase. Consume up to `to_submit` SQEs in SQ-index order. ---
-    // sq_tail is user-owned (advisory): bound the work against it but never trust
-    // it for indexing. The consume position is the kernel-private sq_head; the
-    // SQ-index ring slot it points at is user-written, so it is range-checked
-    // before it indexes the SQE array (the SA-1 discipline on the SQ side).
-    //
-    // F1: each per-slot claim (the sq_head read + advance + the SQE read+copy)
-    // runs under l->lock so two concurrent SYS_LOOM_ENTERs on the same ring (a
-    // multi-thread Proc) never read the same sq_head -> never double-dispatch a
-    // slot or lose an sq_head update; each iteration atomically claims exactly one
-    // slot. loom_submit_one runs OUTSIDE the lock (it re-takes l->lock for the
-    // FSYNC pin + the inflight link -- a separate, non-nested acquisition).
-    u32 budget = (to_submit < l->sq_entries) ? to_submit : l->sq_entries;  // bound a hostile to_submit
+    if (budget > l->sq_entries) budget = l->sq_entries;   // bound a hostile to_submit
     u32 submitted = 0;
     for (u32 i = 0; i < budget; i++) {
         struct loom_sqe ksqe;
@@ -642,18 +698,158 @@ int loom_enter(struct Loom *l, u32 to_submit, u32 min_complete, u32 flags) {
         loom_submit_one(l, &ksqe);
         submitted++;
     }
+    return submitted;
+}
+
+int loom_enter(struct Loom *l, u32 to_submit, u32 min_complete, u32 flags) {
+    if (!l || l->magic != LOOM_MAGIC) return -1;
+    if (flags & ~LOOM_ENTER_VALID)    return -1;
+
+    // --- SUBMIT phase. ---
+    // On an SQPOLL ring the poll-thread OWNS submission (LOOM.md 8.6): ENTER does
+    // NOT consume SQEs -- it WAKES the (possibly idled) kthread so it drains the
+    // SQ the caller just produced into, clearing NEED_WAKEUP. `submitted` is
+    // reported 0 (the kthread, not this call, consumes). On a non-SQPOLL ring,
+    // ENTER consumes inline.
+    u32 submitted = 0;
+    if (l->sqpoll) {
+        struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+        __atomic_fetch_and(&h->flags, ~(u32)LOOM_RING_SQ_NEED_WAKEUP, __ATOMIC_RELEASE);
+        wakeup(&l->sqpoll_park);
+    } else {
+        submitted = loom_drain_sq(l, to_submit);
+    }
 
     // --- WAIT / REAP phase (Loom-4). Block until min_complete CQEs are posted or
-    // no completion can arrive. The caller drives the elected reader itself, or --
-    // when a sibling thread of the same Proc already holds the reader role --
-    // sleeps on the ring's CQ wait-list until that reader's demux posts a CQE
-    // (loom_wait_for_completions; the multi-waiter coordination that resolves the
-    // Loom-3 "concurrent ENTER returns what's posted" limitation). The wait is
-    // death-interruptible (#811) and the reader spin is flood-bounded. ---
+    // no completion can arrive. On a non-SQPOLL ring the caller drives the elected
+    // reader itself, or -- when a sibling thread of the same Proc already holds the
+    // reader role -- sleeps on the ring's CQ wait-list until that reader posts a
+    // CQE. On an SQPOLL ring the kthread is always the reader, so a min_complete
+    // wait always takes the sleep arm (loom_wait_for_completions tries the pump,
+    // gets P9_PUMP_BUSY=0 from the kthread's reader_active, and sleeps on
+    // cq_waiters). The wait is death-interruptible (#811) and flood-bounded. ---
     if (min_complete > 0 && !(flags & LOOM_ENTER_NONBLOCK)) {
-        loom_wait_for_completions(l, min_complete, (u32)submitted);
+        loom_wait_for_completions(l, min_complete, submitted);
     }
 
     loom_reap_terminal(l);
     return (int)submitted;
+}
+
+// =============================================================================
+// Loom-4c: the SQPOLL poll-thread (LOOM.md 8.6). A per-ring kproc() kthread that
+// drains the SQ + drives the elected reader so steady-state submission is
+// zero-syscall. Spawned by loom_start_sqpoll at SYS_LOOM_SETUP; joined by
+// loom_free. Touches only the still-allocated `struct Loom` (the join is the
+// lifetime guarantee; it holds no loom ref).
+// =============================================================================
+
+// The frame-boundary idle deadline the kthread arms while draining replies: it
+// bounds how long a between-frames recv blocks before the kthread re-checks
+// sqpoll_stopping + the SQ. Short enough that teardown is prompt; long enough
+// that a busy ring isn't waking spuriously. (A mid-frame recv is NOT deadline-
+// bounded -- the body must complete to keep the stream synced, #841 -- so a
+// Byzantine server mid-frame can delay a stop until the frame finishes / EOFs;
+// the trusted v1.0 servers always complete promptly.)
+#define LOOM_SQPOLL_IDLE_NS  (10ull * 1000ull * 1000ull)   // 10 ms
+
+// Park predicate (runs under the park Rendez lock during sleep -- MUST NOT take
+// l->lock, which is above the rendez in the global order). Wake when stopping is
+// set OR the SQ is non-empty. The inflight count is deliberately NOT consulted:
+// the kthread parks ONLY when async_inflight == 0 (it drained everything), and
+// nothing else adds an inflight op while it sleeps (only the kthread's own
+// loom_drain_sq does), so inflight stays 0 until the kthread wakes -- there is
+// nothing to wake FOR but new SQEs (an ENTER bumps sq_tail + wakes) or stop.
+// sq_head is the kthread's own single-writer field (read here lock-free, same
+// thread). Register-then-observe: an ENTER that bumped sq_tail before this sample
+// is caught here; one after is caught by the ENTER's wakeup of the park.
+static int loom_sqpoll_park_cond(void *arg) {
+    struct Loom *l = (struct Loom *)arg;
+    if (__atomic_load_n(&l->sqpoll_stopping, __ATOMIC_ACQUIRE)) return 1;
+    struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+    return (__atomic_load_n(&h->sq_tail, __ATOMIC_ACQUIRE) != l->sq_head) ? 1 : 0;
+}
+
+void loom_sqpoll_main(void *arg) {
+    struct Loom *l = (struct Loom *)arg;
+    struct loom_ring_hdr *h = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+
+    for (;;) {
+        if (__atomic_load_n(&l->sqpoll_stopping, __ATOMIC_ACQUIRE)) break;
+
+        // Zero-syscall submit: drain whatever SQEs userspace produced. NOPs
+        // complete inline; FSYNCs go async (added to inflight_ops).
+        (void)loom_drain_sq(l, l->sq_entries);
+
+        bool inflight;
+        spin_lock(&l->lock);
+        inflight = (l->async_inflight > 0);
+        spin_unlock(&l->lock);
+
+        if (inflight) {
+            // Drive the elected reader so async replies become CQEs (each post
+            // wakes cq_waiters -- a min_complete ENTER caller). The reader is
+            // gated to a deadline-capable transport (register gate), so a
+            // between-frames recv returns IDLE at the boundary within
+            // LOOM_SQPOLL_IDLE_NS, letting this loop re-check sqpoll_stopping.
+            struct p9_client *cl = loom_first_inflight_client(l);
+            if (cl) {
+                u64 deadline = timer_now_ns() + LOOM_SQPOLL_IDLE_NS;
+                int rc = p9_client_reader_pump_once_deadline(cl, deadline);
+                // PROGRESS: demuxed a frame (a CQE may have posted). IDLE: the
+                // boundary deadline lapsed, stream still synced. BUSY: a peer
+                // ENTER momentarily holds the reader. DEAD: the session died --
+                // client_mark_dead_locked already error-completed every inflight
+                // op (CQEs posted + cq_waiters woken), so the loop drains
+                // async_inflight to 0 next iteration and parks. All cases: loop.
+                (void)rc;
+            }
+            // cl == NULL: raced (the op was reaped) -> loop, re-sample.
+        } else {
+            // No work: announce NEED_WAKEUP so userspace knows to ENTER-wake us,
+            // then park. The cond re-samples the SQ under the park Rendez lock
+            // (register-then-observe) so an SQE produced + ENTER-woken in the
+            // announce..sleep window is not missed. kproc never group-terminates,
+            // so this never returns SLEEP_INTR -- only stopping / new SQEs wake it.
+            __atomic_fetch_or(&h->flags, LOOM_RING_SQ_NEED_WAKEUP, __ATOMIC_RELEASE);
+            (void)sleep(&l->sqpoll_park, loom_sqpoll_park_cond, l);
+            __atomic_fetch_and(&h->flags, ~(u32)LOOM_RING_SQ_NEED_WAKEUP, __ATOMIC_RELEASE);
+        }
+
+        // Reclaim terminal ops so async_inflight + the container list stay bounded.
+        loom_reap_terminal(l);
+    }
+
+    // Terminal: the ring is being torn down (loom_free set sqpoll_stopping).
+    // Reap any stragglers (loom_free's #898 quiesce abandons whatever remains),
+    // then hand off to the joiner via the EXITING handshake. IRQs are masked
+    // (the idle-loop idiom, sched.c bootcpu_idle_main) across the state=EXITING
+    // write + the sqpoll_exited release so no preempt can fire between them: the
+    // joiner, on observing sqpoll_exited (acquire, pairing this release), is
+    // guaranteed to see state==EXITING and so thread_free's not-RUNNING gate
+    // holds. sched() then switches away permanently (EXITING is never
+    // re-enqueued); the joiner's thread_free spins on on_cpu (cleared by the
+    // next thread's finish-task-switch) before reclaiming. This is the wait_pid
+    // reap terminal minus the Proc-zombie bookkeeping a kproc thread cannot run
+    // (thread_exit_self extincts from kproc).
+    loom_reap_terminal(l);
+
+    (void)spin_lock_irqsave(NULL);           // mask preempt for the terminal window
+    current_thread()->state = THREAD_EXITING;
+    __atomic_store_n(&l->sqpoll_exited, true, __ATOMIC_RELEASE);
+    sched();
+    extinction("loom_sqpoll_main: returned from terminal sched");
+}
+
+int loom_start_sqpoll(struct Loom *l) {
+    if (!l || l->magic != LOOM_MAGIC) return -1;
+    // Spawn the kthread under kproc() (PID 0; immortal -- so the thread never
+    // group-terminates and its only exit is the stop-flag terminal above). Set
+    // l->sqpoll BEFORE ready() so the (not-yet-running) join logic in loom_free
+    // would observe it; ready() then makes it runnable.
+    struct Thread *kt = thread_create_with_arg(kproc(), loom_sqpoll_main, l);
+    if (!kt) return -1;
+    l->sqpoll = kt;
+    ready(kt);
+    return 0;
 }

@@ -2732,7 +2732,9 @@ static s64 sys_burrow_detach_handler(u64 vaddr_raw, u64 length_raw) {
 int sys_loom_setup_for_proc(struct Proc *p, u32 entries, u32 flags,
                             struct loom_params *out, hidx_t *out_fd) {
     if (!p || !out || !out_fd)                       return -1;
-    if (flags != 0)                                  return -1;  // Loom-2a: no flags
+    // Loom-4c accepts LOOM_SETUP_SQPOLL; LOOM_SETUP_CQSIZE (caller-chosen cq)
+    // is still reserved until its sub-chunk lands, so reject it + any unknown bit.
+    if (flags & ~LOOM_SETUP_SQPOLL)                  return -1;
     if (entries == 0 || entries > LOOM_MAX_ENTRIES)  return -1;
     if ((entries & (entries - 1u)) != 0)             return -1;  // power of two
 
@@ -2763,10 +2765,26 @@ int sys_loom_setup_for_proc(struct Proc *p, u32 entries, u32 flags,
     }
     spin_unlock(&p->vma_lock);
 
+    // Loom-4c: spawn the SQPOLL poll-thread BEFORE installing the handle, so
+    // every failure path below reclaims it through loom_unref -> loom_free's
+    // join (loom_free sees l->sqpoll set and stops + reaps the kthread). The
+    // earlier failure paths (above) ran with l->sqpoll == NULL, so loom_free
+    // skipped the join there. The kthread immediately parks (no SQEs yet).
+    if (flags & LOOM_SETUP_SQPOLL) {
+        if (loom_start_sqpoll(l) != 0) {
+            spin_lock(&p->vma_lock);
+            (void)burrow_unmap(p, vaddr, (size_t)l->ring_size);
+            spin_unlock(&p->vma_lock);
+            loom_unref(l);
+            return -1;
+        }
+    }
+
     // Install the handle. It ADOPTS the Loom's creation refcount (=1): a later
     // handle_close -> handle_release_obj(KOBJ_LOOM) -> loom_unref drops it. On
     // alloc failure, unmap + loom_unref fully reclaims (handle_count to 0 via
-    // loom_free's burrow_unref, mapping_count to 0 via burrow_unmap).
+    // loom_free's burrow_unref -- which first JOINS any spawned SQPOLL kthread --
+    // mapping_count to 0 via burrow_unmap).
     hidx_t fd = handle_alloc(p, KOBJ_LOOM, RIGHT_READ | RIGHT_WRITE, l);
     if (fd < 0) {
         spin_lock(&p->vma_lock);
@@ -2776,7 +2794,7 @@ int sys_loom_setup_for_proc(struct Proc *p, u32 entries, u32 flags,
         return -1;
     }
 
-    out->flags         = 0;
+    out->flags         = flags;   // echo the granted setup flags (LOOM_SETUP_SQPOLL)
     out->sq_entries    = l->sq_entries;
     out->cq_entries    = l->cq_entries;
     out->ring_size     = l->ring_size;

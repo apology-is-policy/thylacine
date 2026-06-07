@@ -21,6 +21,7 @@
 #include <thylacine/poll.h>
 #include <thylacine/proc.h>
 #include <thylacine/rendez.h>
+#include <thylacine/sched.h>   // sched() -- cooperative yield to the SQPOLL kthread
 #include <thylacine/types.h>
 #include <thylacine/vma.h>
 
@@ -43,6 +44,8 @@ void test_loom_cq_waiter_wake(void);
 void test_loom_cq_waiter_no_spurious_wake_on_full(void);
 void test_loom_enter_inline_min_complete(void);
 void test_loom_enter_min_complete_no_inflight(void);
+void test_loom_sqpoll_setup_and_teardown(void);
+void test_loom_sqpoll_drains_sq(void);
 
 // The testable syscall inners live in kernel/syscall.c (declared in loom.h);
 // sys_pipe_for_proc is the KOBJ_SPOOR-pair maker (declared nowhere public --
@@ -182,8 +185,10 @@ void test_loom_setup_rejects(void) {
     TEST_EXPECT_EQ(sys_loom_setup_for_proc(p, 3, 0, &kp, &fd), -1, "non-pow2 rejected");
     TEST_EXPECT_EQ(sys_loom_setup_for_proc(p, LOOM_MAX_ENTRIES * 2u, 0, &kp, &fd), -1,
                    "over-max rejected");
-    TEST_EXPECT_EQ(sys_loom_setup_for_proc(p, 8, LOOM_SETUP_SQPOLL, &kp, &fd), -1,
-                   "unsupported flag rejected at Loom-2a");
+    TEST_EXPECT_EQ(sys_loom_setup_for_proc(p, 8, LOOM_SETUP_CQSIZE, &kp, &fd), -1,
+                   "still-reserved LOOM_SETUP_CQSIZE flag rejected");
+    TEST_EXPECT_EQ(sys_loom_setup_for_proc(p, 8, 0x80000000u, &kp, &fd), -1,
+                   "unknown high setup-flag bit rejected");
     TEST_EXPECT_EQ(sys_loom_setup_for_proc(NULL, 8, 0, &kp, &fd), -1, "NULL proc rejected");
 
     test_proc_drop(p);
@@ -622,4 +627,87 @@ void test_loom_enter_min_complete_no_inflight(void) {
     TEST_EXPECT_EQ((u64)l->async_inflight, (u64)0, "nothing in flight");
 
     loom_unref(l);
+}
+
+// ---------------------------------------------------------------------------
+// Loom-4c: the SQPOLL poll-thread. LOOM_SETUP_SQPOLL spawns a per-ring kproc()
+// kthread that drains the SQ zero-syscall + drives the elected reader; loom_free
+// joins it. These pin the spawn -> park -> stop -> join lifecycle + the zero-
+// syscall drain DETERMINISTICALLY (white-box). The full kthread-vs-ENTER-vs-
+// Proc-death interleaving over a live dev9p client lands with the deferred SMP
+// harness (#907). Maps to LOOM.md 8.6; the kthread reuses the audited
+// specs/loom.tla Consume / Dispatch / PostCqe path -- only the park wait/wake is
+// the new modeled surface (CqWaitRegister already covered by 4b).
+// ---------------------------------------------------------------------------
+
+// Spawn + clean join. Setting up an SQPOLL ring spawns the kthread (l->sqpoll
+// set; out.flags echoes the grant); tearing the ring down (proc_free -> the last
+// handle close -> loom_unref -> loom_free) stops + JOINS the kthread and frees
+// the ring EXACTLY once -- no hang, no leak. With no SQEs the kthread parks
+// immediately, so the join exercises the wake-park -> observe-stopping ->
+// EXITING-terminal -> thread_free path end to end.
+void test_loom_sqpoll_setup_and_teardown(void) {
+    struct Proc *p = test_proc_make();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+    u64 destroyed0 = loom_total_destroyed();
+
+    struct loom_params kp;
+    hidx_t fd = -1;
+    int rc = sys_loom_setup_for_proc(p, 8, LOOM_SETUP_SQPOLL, &kp, &fd);
+    TEST_EXPECT_EQ(rc, 0, "SQPOLL setup succeeds");
+    TEST_ASSERT(fd >= 0, "setup returned a valid fd");
+    TEST_EXPECT_EQ(kp.flags, (u32)LOOM_SETUP_SQPOLL, "out.flags echoes the SQPOLL grant");
+
+    struct Handle h;
+    TEST_ASSERT(handle_get(p, fd, &h) == 0, "handle_get(loom fd)");
+    struct Loom *l = (struct Loom *)h.obj;
+    TEST_ASSERT(l->sqpoll != NULL, "SQPOLL kthread spawned");
+    handle_put(&h);
+
+    // proc_free closes the handle -> loom_unref -> loom_free joins the kthread +
+    // frees the ring exactly once. A hang here would mean the join never
+    // converged (the whole point of the test).
+    test_proc_drop(p);
+    TEST_EXPECT_EQ(loom_total_destroyed() - destroyed0, (u64)1,
+                   "ring freed (kthread joined) exactly once on teardown");
+}
+
+// Zero-syscall drain. On an SQPOLL ring the user stages SQEs + bumps sq_tail; an
+// ENTER(to_submit=0) WAKES the kthread (it never submits on SQPOLL), which drains
+// the SQ + posts the inline NOP CQEs. cq_tail reaching the staged count proves
+// the kthread -- not this call -- consumed. The test cooperatively sched()s so
+// the kthread runs even at -smp 1 (the test_torpor.c yield idiom); the spin is
+// bounded so a real failure terminates rather than hangs.
+void test_loom_sqpoll_drains_sq(void) {
+    struct Proc *p = test_proc_make();
+    TEST_ASSERT(p != NULL, "proc_alloc");
+
+    struct loom_params kp;
+    hidx_t fd = -1;
+    TEST_EXPECT_EQ(sys_loom_setup_for_proc(p, 8, LOOM_SETUP_SQPOLL, &kp, &fd), 0,
+                   "SQPOLL setup");
+    struct Handle h;
+    TEST_ASSERT(handle_get(p, fd, &h) == 0, "handle_get");
+    struct Loom *l = (struct Loom *)h.obj;
+    struct loom_ring_hdr *hdr = (struct loom_ring_hdr *)(l->ring_kva + l->hdr_off);
+
+    for (u32 i = 0; i < 3; i++) loom_stage_sqe(l, i, LOOM_OP_NOP, 0, 0, 0, 0x700u + i);
+    __atomic_store_n(&hdr->sq_tail, 3u, __ATOMIC_RELEASE);
+
+    // ENTER(to_submit=0, min_complete=0) on an SQPOLL ring submits nothing -- it
+    // just wakes the (parked) kthread to drain.
+    TEST_EXPECT_EQ(sys_loom_enter_for_proc(p, fd, 0, 0, 0), 0,
+                   "ENTER on SQPOLL submits nothing (kthread owns submission)");
+
+    // Yield to the kthread until it has drained the 3 NOPs. Bounded so a hung
+    // kthread fails the test rather than wedging the whole suite.
+    bool drained = false;
+    for (u32 round = 0; round < 100000u; round++) {
+        if (__atomic_load_n(&l->cq_tail, __ATOMIC_ACQUIRE) >= 3u) { drained = true; break; }
+        sched();   // cooperative yield -> the kthread gets the CPU at -smp 1
+    }
+    TEST_ASSERT(drained, "SQPOLL kthread drained the SQ zero-syscall (3 CQEs posted)");
+
+    handle_put(&h);
+    test_proc_drop(p);
 }

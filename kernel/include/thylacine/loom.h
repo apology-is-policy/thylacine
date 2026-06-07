@@ -29,6 +29,7 @@
 
 #include <thylacine/handle.h>     // rights_t
 #include <thylacine/poll.h>       // struct poll_waiter_list (the Loom-4 CQ wait-list)
+#include <thylacine/rendez.h>     // struct Rendez (the Loom-4c SQPOLL park)
 #include <thylacine/spinlock.h>
 #include <thylacine/types.h>
 
@@ -285,6 +286,25 @@ struct Loom {
     // CqWaitCommitOrSleep; invariants CqFlagTracksCq + NoMissedCqWake (I-9 on the
     // CQ wait-list) + NoStrandedWaiter + CqWaitFlagSound.
     struct poll_waiter_list cq_waiters;
+    // Loom-4c (LOOM.md 8.6): the SQPOLL poll-thread. NULL unless the ring was
+    // set up with LOOM_SETUP_SQPOLL. A per-ring kproc() kthread (the console_mgr
+    // precedent) that drains the SQ + drives the elected reader so steady-state
+    // submission is zero-syscall. The Loom OWNS the kthread: loom_free sets
+    // `sqpoll_stopping`, wakes `sqpoll_park`, and JOINS (spins on `sqpoll_exited`,
+    // then thread_free) BEFORE freeing the ring -- the kthread only ever touches
+    // the still-allocated `struct Loom`, guaranteed by the join (the kthread
+    // holds NO loom ref; a ref would deadlock loom_free's join). `sqpoll` is set
+    // once at setup (before the handle is returned to userspace) and never
+    // rewritten while alive. `sqpoll_stopping` / `sqpoll_exited` are the
+    // single-writer flags of the join handshake (release/acquire paired). The
+    // kthread is gated to a deadline-capable transport (loom_register_handles
+    // rejects a NULL-deadline dev9p client into an SQPOLL ring) so its
+    // frame-boundary idle-deadline always lets it re-check `sqpoll_stopping` ->
+    // the join always terminates.
+    struct Thread          *sqpoll;          // the kthread (NULL = no SQPOLL)
+    bool                    sqpoll_stopping; // loom_free sets (release); kthread reads (acquire)
+    bool                    sqpoll_exited;   // kthread sets at terminal (release); joiner reads (acquire)
+    struct Rendez           sqpoll_park;     // kthread parks here when idle; woken by ENTER / stop
     // The registered-handle table.
     struct loom_reg_handle reg[LOOM_MAX_REG_HANDLES];
 };
@@ -343,12 +363,24 @@ int loom_post_cqe(struct Loom *l, u64 user_data, s32 result, u32 flags);
 u64 loom_total_created(void);
 u64 loom_total_destroyed(void);
 
+// Loom-4c: the SQPOLL poll-thread entry + its lifecycle (LOOM.md 8.6). The
+// kthread is a kproc() thread (the console_mgr precedent) that drains the SQ +
+// drives the elected reader. loom_start_sqpoll spawns + readies it (sets
+// l->sqpoll on success); loom_free joins it. loom_sqpoll_main is the kthread
+// body (noreturn -- it exits via the EXITING terminal handshake, never returns
+// to its caller). Both touch only the still-allocated `struct Loom`.
+void loom_sqpoll_main(void *arg);
+int  loom_start_sqpoll(struct Loom *l);
+
 // Testable setup inner (the spoor_stat_native pattern -- fills a KERNEL
 // loom_params; the SVC handler does the user copy-in/out). Creates the Loom,
 // maps the ring into `p` (RW, in the burrow-attach window), installs a
-// KObj_Loom handle in p, fills `*out` + `*out_fd`. `flags` must be 0 at
-// Loom-2a. Returns 0 on success, -1 on bad args / OOM / handle-table-full
-// (rolling back the map + the Loom on any failure).
+// KObj_Loom handle in p, fills `*out` + `*out_fd`. `flags` accepts
+// LOOM_SETUP_SQPOLL (Loom-4c: spawns the poll-thread before the handle is
+// returned); other LOOM_SETUP_* bits reject until their sub-chunk lands.
+// Returns 0 on success, -1 on bad args / OOM / handle-table-full / SQPOLL
+// spawn failure (rolling back the map + the Loom -- which joins any spawned
+// kthread -- on any failure).
 int sys_loom_setup_for_proc(struct Proc *p, u32 entries, u32 flags,
                             struct loom_params *out, hidx_t *out_fd);
 
