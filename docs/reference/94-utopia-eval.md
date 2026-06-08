@@ -383,14 +383,76 @@ test in isolation).
 
 ---
 
-## 9. Open questions deferred to later sub-chunks
+## 9. Background jobs — the `jobs` module + `&` (U-7a)
+
+`eval::jobs` (`jobs.rs`) is the **pure** half of job control: it records the
+pids of `&`-launched jobs, decides when a job is "done", and formats the
+`[N]+ Done` line. It performs **no syscalls** — the actual reaping
+(`wait_pid_for` WNOHANG) is driven by the `ut` REPL's prompt-cycle reaper
+(`Repl::reap_jobs`, `docs/reference/108-utopia-repl.md`), which feeds results
+back via `mark_reaped`. Keeping the table pure makes it host-testable against
+injected `(pid, status)` pairs. The table lives in `Env` (`jobs()` /
+`jobs_mut()`), alongside the function table + note-handler registry.
+
+### 9.1 The bash model, minus process groups
+
+A `&`-launched **pipeline** (`a | b &`) is ONE job tracking N pids. The
+`[N] pid` launch announcement prints the LAST element's pid (bash's `$!`); the
+job is "done" only when EVERY element has been reaped. Process-group machinery
+(`setpgid`, the controlling-terminal foreground pgid, `SIGTSTP`/`SIGCONT`
+stop/resume) is U-PTY territory; at U-7a a job is just a set of pids the shell
+reaps in the background. `JobTable::add` assigns `max(specs)+1`, or 1 when the
+table is empty — numbers climb while jobs coexist and reset to 1 once the table
+drains (bash-like); no spec is reused while its job is live.
+
+### 9.2 `JobTable` API
+
+```rust
+pub fn add(&mut self, pids: Vec<i32>, cmd: String) -> u32;   // -> [N] spec
+pub fn mark_reaped(&mut self, pid: i32, status: i32);        // idempotent; unknown pid ignored
+pub fn live_pids(&self) -> Vec<i32>;                          // unreaped pids, for the WNOHANG poll
+pub fn take_done_notifications(&mut self) -> Vec<String>;     // "[N]+ Done  cmd" + removes done jobs
+pub fn is_empty(&self) -> bool;  pub fn len(&self) -> usize;  pub fn iter(&self) -> ...;
+```
+
+### 9.3 `&` spawn + the foreground demux
+
+`eval_pipeline` routes `p.background` to `eval_background_pipeline`, which
+shares the spawn phase with the foreground path via `spawn_pipeline_elements`
+(validate external-simple-only / resolve redirects / allocate the N-1 pipes /
+spawn-all / feed heredocs — works for n == 1). The background path registers
+ONE job, prints `[N] PID`, and sets `$status` 0; it does NOT wait.
+
+The **foreground demux** is pid-precise: both `exec_pipeline` and
+`capture_external_pipeline` reap each spawned element with
+`wait_pid_for(pid, 0)` (the U-7-pre by-pid primitive) instead of the old
+wait-any loop, and `exec_external` / `exec_external_redirected` use
+`Child::wait` (also by-pid since U-7-pre). So a foreground command NEVER reaps
+a coexisting background zombie — `cmd & ; producer | consumer` cannot lose the
+bg child's exit to the pipeline's reap.
+
+### 9.4 Reaping cadence + the U-7c seam
+
+`Repl::reap_jobs` runs once per accepted line (after `run_line`, before the
+fresh prompt — bash's `[N]+ Done`-before-prompt ordering, catching jobs that
+finished while a foreground command was waiting). It is ONE WNOHANG poll per
+live pid (never a busy-loop → cannot starve a child; U-7-pre F1). A bg job that
+finishes while the user is idle at the prompt is reported at the next accepted
+line; the **async-while-idle** path (the notes fd in the poll set + `on note` /
+`mask note` runtime delivery + Ctrl-C foreground forwarding) lands coherently
+at **U-7c** — the WNOHANG poll is the complete ground truth, so deferring the
+notes machinery loses no correctness, only idle-time promptness.
+
+---
+
+## 10. Open questions deferred to later sub-chunks
 
 | Question | Owning sub-chunk |
 |---|---|
 | `$(cmd)` substitution: how is the subshell forked, stdout captured? | U-6f |
 | ~~Redirects (`>` `<` `>>` `<<`)~~ -- **LANDED at U-6d-b** (resolve_redirects + the libthyla_rs::fs create-or-open/append lift) | ~~U-6d-b~~ done |
 | Redirect on an in-process command (fn / BraceBlock); large-heredoc-to-non-reader; atomic O_APPEND | U-6f / v1.x |
-| Job control: `&` background, `jobs` / `fg` / `bg`, note-fd polling | U-7 |
+| Job control: ~~`&` background~~ **LANDED at U-7a** (§9; `eval::jobs` + `eval_background_pipeline` + the by-pid demux + `Repl::reap_jobs`); `jobs`/`fg`/`bg`/`wait`/`kill` builtins (U-7b); note-fd polling + `on`/`mask` delivery + Ctrl-C (U-7c) | ~~U-7~~ U-7b / U-7c |
 | ~~Glob expansion at argv-time: file-tree walk, no-match → empty (rc nullglob)~~ -- **LANDED at U-6e-b** (-b-1 `fs::read_dir`; -b-2 `glob::expand` + `evaluate_argv`, §6.3). Recursive `**` semantics + trailing-slash dirs-only + for-list/let-RHS expansion (expr context) remain v1.x | ~~U-6e-b~~ done |
 | `set` / `export` (no envp to children yet), `alias`/`unalias` (alias table), `read` (terminal fd 0), `jobs`/`fg`/`bg`/`wait` (job control), `history`, `kill`/`note` -- deferred builtins | U-6f / U-6g / U-7 |
 | Subshell `( cmds )`: fork + isolated env (libthyla-rs has spawn-then-exec, not fork) | U-6f or later |
@@ -403,10 +465,11 @@ test in isolation).
 
 ---
 
-## 10. Status
+## 11. Status
 
 | Sub-chunk | Commit | What |
 |---|---|---|
+| **U-7a** | `*(pending)*` | Background jobs (§9). New pure `eval::jobs` (`JobTable` + `Job` in `Env`); `eval_pipeline` routes `&` -> `eval_background_pipeline`; the shared `spawn_pipeline_elements` helper factored out of `exec_pipeline`; both `exec_pipeline` + `capture_external_pipeline` reaps converted wait-any -> **by-pid** (the pid-precise foreground demux); `render_pipeline_cmd`; `Repl::reap_jobs` (the prompt-cycle WNOHANG reaper, §9.4). `cmd &` / `a | b &` register ONE job, print `[N] PID`, status 0; finished jobs emit `[N]+ Done  cmd` before the next prompt. A bg builtin/fn (needs fork) stays NotImplemented. **PURE USERSPACE** -- zero kernel files; built on the U-7-pre `wait_pid_for` primitive -> NOT a formal-audit-trigger surface (self-reviewed: no-spin reaps, by-pid demux, no orphaned bg children, JobTable borrow-clean). The notes-fd / multi-fd-poll integration (async `[N]+ Done` while idle, on/mask delivery, Ctrl-C) is U-7c. New `/u-job-test` (registration, one-job-per-pipeline, reap-to-`Done`, spec-reset, the by-pid foreground demux, bg-builtin rejection, the integrated `Repl` reaper) + `u-test` probes 4/7 updated (`&` now WORKS + reaps, was the stale U-6 `NotImplemented` assertion). Verified: `make test-tcg` x2 + `u-job-test: all OK` + `joey: /u-job-test reaped status=0; U-7a background jobs verified` + `u-test: all OK` + `Thylacine boot OK`, **0 EXTINCTION** both boots. |
 | **U-6-test** | `e4b5100` | The U-6 evaluator arc **cumulative integration smoke** (§8.4) -- **closes the U-6 arc**. New dedicated pre-pivot `/u-6-test` (joey-gated; 7 composed flows weaving subst-capture + `for`/`case`/arith, glob->spawn->capture, var-interp pipelines, builtin->special-var->control flow, var-fed heredoc redirect, and the whole stack through the real `Repl::feed` loop + error recovery). Proves the U-6 surfaces COMPOSE (vs the per-sub-chunk probes' isolation), landing assertions on Env state / `$status` / substitution-captured output. PURE USERSPACE -- zero kernel files (784/784 unchanged); no SMP gate, not a formal-audit-trigger surface (self-reviewed: no-spin loops, bounds-safe, borrow-clean). Verified: kernel **784/784**, `make test-tcg` x2 + `u-6-test: all OK` + `joey: /u-6-test reaped status=0; U-6 evaluator arc integration verified` + login E2E + `Thylacine boot OK`, **0 EXTINCTION** both boots. |
 | **U-6f** | `e9e0aa9` | Command substitution `$(cmd)` / `` `{cmd}` `` (§5.8) + its kernel prerequisite **#926** (a single-thread Proc closes its fds at EXIT, not reap — `docs/reference/14-process-model.md`). `stmt::run_command_substitution[_script]` + `capture_external_pipeline` (drain-before-reap, deadlock-free) + `split_fields` + `trim_trailing_newlines`; `$status` -> `Cell<i32>` (interior mutability so the `&Env` evaluator can record the inner exit, §8.7); the `eval_value_token` Subst/Backtick arms + `eval_dq_in_word`/`render_heredoc_body` DqPart::Subst + the `expr.rs` Subst/Backtick arms; `eval_command`/`eval_let`/`eval_assign` status-before-eval. v1.0 scope = a single redirect-free EXTERNAL pipeline; builtin/fn/control-flow/multi-statement bodies + `<(cmd)`/`>(cmd)` procsub are `NotImplemented` (documented). Bare → whitespace field-split (rc `$ifs`); `"$(cmd)"`/heredoc → inline. **#926 is the audit-bearing death-path surface** (ARCH §25.4): SMP-gated (default+UBSan x smp4/smp8 N=10, 0 corruption) + a focused Opus prosecutor round CLEAN (0 P0 / 0 P1 / 0 P2 / 3 P3 doc); `memory/audit_926_u6f_closed_list.md`. New `/u-subst-test` (9 probes: capture+trim, bare split, `seq` newline-split, `"[$(…)]"` inline, `echo|tr` pipeline capture, backtick form, `$status` propagation, builtin-in-subst NotImplemented, procsub NotImplemented, script-mode implicit-fail) + the `u-test::flow_process_pipe` part-(c) #926 regression (read child stdout to EOF before reap) + the rewritten `test_sys_spawn_with_fds_child_rights_subset_of_parent`. Verified: kernel **784/784**, `u-subst-test: all OK`, login E2E + `Thylacine boot OK`, 0 EXTINCTION. |
 | **U-6e-b-2** | `aba3b7d` | Glob argv fs-expansion. `glob::expand(env, pattern) -> Vec<String>` (§6.3) -- splits on `/`, accumulates the meta-free literal prefix as the start dir, walks one segment per level via `fs::read_dir` + `matches` (descending only matching dirs for non-final segments; recursion bounded by segment count, not tree depth), applies the POSIX dotfile rule, returns the SORTED match set or the EMPTY vec (rc nullglob -- never the literal). `stmt::evaluate_argv` gains a `glob_candidate(w)` gate: only a bare `Word::Single(TokenKind::Word)` with `has_meta` expands (quoted / `$var` / `^`-concat stay literal); an empty match set drops the word entirely. `**` stays per-segment (== `*`); recursive `**`, trailing-slash dirs-only, and expr-context (for-list / let-RHS) globbing are v1.x. PURE USERSPACE -- zero kernel files; rides the audited U-6e-b-1 `read_dir` surface; not formal-audit-bearing (bounded read-only enumeration; self-audited: bounded recursion, owned strings across recursion, nullglob, sort-once determinism). New pre-pivot `/u-glob-test` (joey-gated; §8.2). Verified: kernel 784/784 (unchanged -- no kernel delta), `make test-tcg` x2 + `u-glob-test: all OK` + 0 EXTINCTION. |
@@ -419,13 +482,13 @@ test in isolation).
 
 ---
 
-## 11. Naming rationale
+## 12. Naming rationale
 
 The module is `eval`, not a thematic name. Per CLAUDE.md's thematic-naming discipline ("If the rename makes the code less obvious to a reader who doesn't know the project's identity, the standard name wins"), `eval` is the unambiguous Unix term and stays. The thematic moniker for the AST walker step in the U-6 main loop ("the shell stalks the AST") was considered (`stalk`, `hunt`) but rejected because the standard term is what readers expect.
 
 ---
 
-## 12. References
+## 13. References
 
 - `docs/UTOPIA-SHELL-DESIGN.md` §4 (data model), §6 (variables / interpolation / substitution), §7 (pattern matching / control flow), §8 (error handling).
 - `docs/reference/93-utopia-parser.md` — the AST taxonomy U-6 consumes.

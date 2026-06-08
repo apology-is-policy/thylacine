@@ -1,0 +1,21 @@
+[package]
+name = "u-job-test"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "u-job-test"
+path = "src/main.rs"
+
+[dependencies]
+# u-job-test is the U-7a background-job boot probe. It runs PRE-pivot
+# (flat devramfs root, where echo/seq/tr spawn by name) and drives the REAL
+# `&` background-launch + reap lifecycle through libutopia::eval::eval_source
+# + Env + the Repl prompt-cycle reaper: it asserts job registration, the
+# one-job-per-pipeline model, reap-to-completion + the `[N]+ Done`
+# notification, the foreground pid-demux (a bg job is not reaped by a fg
+# wait), bg-builtin rejection, and the integrated Repl reaper.
+libthyla-rs = { path = "../lib/libthyla-rs" }
+libutopia = { path = "../utopia/libutopia" }

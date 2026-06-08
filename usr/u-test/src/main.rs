@@ -46,7 +46,7 @@ use libthyla_rs::process::{Command, Stdio};
 use libthyla_rs::thread;
 use libthyla_rs::time::{self, Duration};
 use libthyla_rs::torpor::{self, WaitResult};
-use libthyla_rs::{t_putstr, T_PROT_READ, T_PROT_WRITE};
+use libthyla_rs::{t_putstr, t_wait_pid_for, T_PROT_READ, T_PROT_WRITE};
 use libutopia::line_editor::{
     EditorAction, LineEditor, StaticCompletionSource,
 };
@@ -2871,7 +2871,7 @@ fn flow_eval_stmt() -> Result<(), i64> {
 // Flow 14 -- eval external spawn: SimpleCommand whose argv[0] isn't a
 // defined fn spawns via libthyla_rs::process::Command. Trace echo
 // closes the U-6b deferral. Spawn failure -> $status=127 + $errstr.
-// Subshell + background still NotImplemented at U-6c.
+// Subshell still NotImplemented at U-6c; background `&` landed at U-7a.
 // =============================================================================
 //
 // Probes:
@@ -2882,8 +2882,8 @@ fn flow_eval_stmt() -> Result<(), i64> {
 //   3. trace { hello-rs } executes the body (trace echo emits to UART
 //      via t_putstr); $status reflects the child's exit and
 //      trace_depth restores to 0 post-trace.
-//   4. eval_source("hello-rs &") returns NotImplemented(background)
-//      -- the & background marker is still deferred to U-7.
+//   4. eval_source("hello-rs &") registers a background job (U-7a) +
+//      $status 0; the bg child is reaped by pid.
 //   5. eval_source("( hello-rs )") returns NotImplemented(subshell)
 //      -- Subshell forks are deferred to U-6f or later.
 //   6. fn name overrides external: defining `fn hello-rs { ... }`
@@ -2963,28 +2963,31 @@ fn flow_eval_exec() -> Result<(), i64> {
         }
     }
 
-    // Probe 4: background `&` still NotImplemented. The eval call
-    // surfaces an EvalError; flow is irrelevant.
+    // Probe 4: background `&` registers a job (U-7a; was NotImplemented
+    // through U-6). `hello-rs &` spawns detached, registers one job, sets
+    // $status 0. We then reap the bg child by pid -- a leaked bg child would
+    // reparent to joey on /u-test exit and trip joey's reap-any wrong-pid.
     {
         let mut env = Env::new();
         env.interactive = true;
-        match eval_source(&mut env, "hello-rs &") {
-            Err(e) => {
-                if !matches!(
-                    e.kind,
-                    EvalErrorKind::NotImplemented(s)
-                        if s.contains("background")
-                ) {
-                    t_putstr(
-                        "u-test: flow_eval_exec: probe 4 wrong NotImplemented kind FAILED\n",
-                    );
-                    return Err(1);
-                }
-            }
-            Ok(_) => {
-                t_putstr("u-test: flow_eval_exec: probe 4 background not rejected FAILED\n");
-                return Err(1);
-            }
+        if eval_source(&mut env, "hello-rs &").is_err() {
+            t_putstr("u-test: flow_eval_exec: probe 4 background eval errored FAILED\n");
+            return Err(1);
+        }
+        if env.status() != 0 {
+            t_putstr("u-test: flow_eval_exec: probe 4 background status != 0 FAILED\n");
+            return Err(1);
+        }
+        if env.jobs().len() != 1 {
+            t_putstr("u-test: flow_eval_exec: probe 4 background job not registered FAILED\n");
+            return Err(1);
+        }
+        // Reap the bg child (blocking by-pid; hello-rs exits immediately).
+        for pid in env.jobs().live_pids() {
+            let mut st: i32 = 0;
+            // SAFETY: t_wait_pid_for is the SYS_WAIT_PID SVC wrapper; &mut st
+            // is a valid writable i32.
+            let _ = unsafe { t_wait_pid_for(pid, 0, &mut st as *mut i32) };
         }
     }
 
@@ -3185,24 +3188,28 @@ fn flow_eval_pipe() -> Result<(), i64> {
         }
     }
 
-    // Probe 7: background pipeline still NotImplemented.
+    // Probe 7: background pipeline registers ONE job tracking both pids
+    // (U-7a; was NotImplemented through U-6). Reap both bg children by pid so
+    // neither orphans to joey.
     {
         let mut env = Env::new();
         env.interactive = true;
-        match eval_source(&mut env, "hello-rs | hello-rs &") {
-            Err(e) => {
-                if !matches!(
-                    e.kind,
-                    EvalErrorKind::NotImplemented(s) if s.contains("background")
-                ) {
-                    t_putstr("u-test: flow_eval_pipe: probe 7 wrong kind FAILED\n");
-                    return Err(1);
-                }
-            }
-            Ok(_) => {
-                t_putstr("u-test: flow_eval_pipe: probe 7 background not rejected FAILED\n");
-                return Err(1);
-            }
+        if eval_source(&mut env, "hello-rs | hello-rs &").is_err() {
+            t_putstr("u-test: flow_eval_pipe: probe 7 background eval errored FAILED\n");
+            return Err(1);
+        }
+        if env.status() != 0 {
+            t_putstr("u-test: flow_eval_pipe: probe 7 background status != 0 FAILED\n");
+            return Err(1);
+        }
+        if env.jobs().len() != 1 || env.jobs().live_pids().len() != 2 {
+            t_putstr("u-test: flow_eval_pipe: probe 7 bg pipeline not one 2-pid job FAILED\n");
+            return Err(1);
+        }
+        for pid in env.jobs().live_pids() {
+            let mut st: i32 = 0;
+            // SAFETY: SVC wrapper; &mut st is a valid writable i32.
+            let _ = unsafe { t_wait_pid_for(pid, 0, &mut st as *mut i32) };
         }
     }
 

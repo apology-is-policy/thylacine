@@ -50,9 +50,10 @@ use libutopia::{ansi, palette, GLYPH};
 static GLOBAL_ALLOCATOR: ThylaAlloc = ThylaAlloc;
 
 /// The current `ut` version. Bumped at every U-* chunk that expands the
-/// shell's surface. `0.6-dev` == the U-6 evaluator arc (read-parse-eval
-/// REPL; built-ins; pipes; redirection; substitution).
-const UT_VERSION: &str = "0.6-dev";
+/// shell's surface. `0.7-dev` == U-7a: the U-6 evaluator arc (read-parse-eval
+/// REPL; built-ins; pipes; redirection; substitution) plus background jobs
+/// (`&` + the job table + prompt-cycle `[N]+ Done` reaping).
+const UT_VERSION: &str = "0.7-dev";
 
 /// Emit the Pale Fire version banner. Three composed segments per
 /// UTOPIA-VISUAL.md section 3: the glyph-orange right-tack, white version

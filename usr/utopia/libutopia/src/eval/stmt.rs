@@ -136,7 +136,7 @@ use crate::parser::Span;
 use libthyla_rs::fs::{File, OpenOptions};
 use libthyla_rs::io::{Read as IoRead, Write as IoWrite};
 use libthyla_rs::process::{pipe, Stdio};
-use libthyla_rs::{t_putstr, t_wait_pid};
+use libthyla_rs::{t_putstr, t_wait_pid_for};
 
 use super::builtin;
 use super::env::Env;
@@ -240,18 +240,20 @@ fn should_propagate_failure(env: &Env, stmt: &Statement) -> bool {
 // ---------------------------------------------------------------------
 
 fn eval_pipeline(env: &mut Env, p: &Pipeline) -> EvalResult<StatementFlow> {
-    if p.background {
-        return Err(EvalError::new(
-            EvalErrorKind::NotImplemented("background pipeline (&)"),
-            p.span,
-        ));
-    }
     if p.elements.is_empty() {
         // Empty pipeline shouldn't reach here -- parser rejects.
         return Err(EvalError::new(
             EvalErrorKind::Internal("empty pipeline"),
             p.span,
         ));
+    }
+    if p.background {
+        // `cmd &` / `a | b &` (U-7a). Spawn detached, register a background
+        // job, announce `[N] PID`, status 0; the REPL prompt-cycle reaper
+        // reclaims + reports it. Same external-only element restriction as a
+        // foreground pipeline (a fn / builtin / in-process form needs fork
+        // -> NotImplemented, via the shared spawn helper).
+        return eval_background_pipeline(env, p);
     }
     if p.elements.len() > 1 {
         // Multi-element pipeline (U-6d-a).
@@ -620,22 +622,47 @@ fn exec_bare_redirect(env: &mut Env, redirects: &[Redirect]) -> EvalResult<State
 // producer fills the pipe buffer and blocks on write while we block
 // waiting for it, never having spawned consumer to drain the pipe.
 //
-// === Reaping (wait-any + pid match) ===
+// === Reaping (by pid -- U-7a) ===
 //
-// SYS_WAIT_PID reaps ANY of the caller's zombie children, not a
-// specific pid. We spawn N, collect their pids, then wait N times and
-// match each reaped pid back to its element index to record the right
-// status. At v1.0 the shell has no background children (U-7), so the
-// only outstanding children are this pipeline's -- exactly N waits
-// reap them all. A reaped pid not in our set (impossible at v1.0) is
-// ignored.
+// We spawn N, collect their pids, then `wait_pid_for(pid, 0)` each one
+// (the U-7-pre by-pid primitive). A by-pid wait reaps exactly that element
+// and NEVER a coexisting background zombie, so the foreground demux is
+// pid-precise once `&` jobs exist: `cmd & ; producer | consumer` cannot
+// lose the bg child's exit to this pipeline's reap. (Through U-6d-a this was
+// a wait-any loop, sound only because there were no background children.)
 //
 // === Pipefail (scripture 8.4) ===
 //
 // The pipeline's $status is the rightmost non-zero exit among elements
 // NOT marked `?|` (tolerate_failure), or 0 if all (non-tolerated)
 // elements succeeded. See `aggregate_pipefail`.
-fn exec_pipeline(env: &mut Env, p: &Pipeline) -> EvalResult<StatementFlow> {
+/// The outcome of spawning a pipeline's elements -- the phase shared by the
+/// foreground reap-and-aggregate path (`exec_pipeline`) and the `&`
+/// background-register path (`eval_background_pipeline`).
+enum PipelineSpawn {
+    /// Elements launched. `pids` are the spawned element pids in element
+    /// order (LEN may be < n on a mid-pipeline spawn failure, in which case
+    /// `spawn_err` is Some). `argvs` is every element's evaluated argv (n
+    /// entries) for command rendering + pipefail tolerate-flag pairing by
+    /// index.
+    Spawned {
+        pids: Vec<i32>,
+        argvs: Vec<Vec<String>>,
+        spawn_err: Option<&'static str>,
+    },
+    /// A pre-spawn failure (redirect-target open / `pipe()` alloc) already
+    /// set `$status` + `$errstr`; the caller returns `Ok(Normal)`.
+    Aborted,
+}
+
+/// Spawn a pipeline's elements: validate (external-simple-only), resolve
+/// per-element redirects, allocate the N-1 connecting pipes, spawn all N
+/// concurrently (spawn-all-before-wait), and feed any heredoc bodies. Does
+/// NOT wait -- the caller decides foreground (reap-by-pid + aggregate) vs
+/// background (register a job). Shared by `exec_pipeline` (foreground) and
+/// `eval_background_pipeline` (`&`); works for n == 1 (a single command:
+/// zero pipes, one element).
+fn spawn_pipeline_elements(env: &mut Env, p: &Pipeline) -> EvalResult<PipelineSpawn> {
     let n = p.elements.len();
 
     // Validate + evaluate every element's argv AND resolve its redirects
@@ -685,7 +712,7 @@ fn exec_pipeline(env: &mut Env, p: &Pipeline) -> EvalResult<StatementFlow> {
             Err(RedirError::Runtime(msg)) => {
                 env.errstr_set(msg);
                 env.status_set(1);
-                return Ok(StatementFlow::Normal);
+                return Ok(PipelineSpawn::Aborted);
             }
         };
         argvs.push(argv);
@@ -715,7 +742,7 @@ fn exec_pipeline(env: &mut Env, p: &Pipeline) -> EvalResult<StatementFlow> {
                 let _ = write!(&mut s, "pipe() failed: {:?}", e);
                 env.errstr_set(s);
                 env.status_set(1);
-                return Ok(StatementFlow::Normal);
+                return Ok(PipelineSpawn::Aborted);
             }
         }
     }
@@ -801,33 +828,45 @@ fn exec_pipeline(env: &mut Env, p: &Pipeline) -> EvalResult<StatementFlow> {
         drop(wr);
     }
 
-    // Reap every spawned child (wait-any + pid match). statuses[i]
-    // holds element i's exit status once reaped. NB: at v1.0 the kernel
-    // normalizes any non-zero child exit to 1 (sys_exits_handler:
-    // x0==0 -> "ok"/0; x0!=0 -> "fail"/1; richer u64 status is a Phase
-    // 5+ deferral), so each status here is 0 or 1 -- the literal exit
-    // code is not observable. aggregate_pipefail still computes the
-    // rightmost-non-zero correctly over whatever statuses it gets; the
-    // value-distinction is moot while the kernel collapses to 0/1.
+    Ok(PipelineSpawn::Spawned {
+        pids,
+        argvs,
+        spawn_err,
+    })
+}
+
+/// Foreground multi-element pipeline (U-6d-a): spawn all elements, reap each
+/// BY PID, aggregate pipefail (scripture 8.4).
+fn exec_pipeline(env: &mut Env, p: &Pipeline) -> EvalResult<StatementFlow> {
+    let (pids, _argvs, spawn_err) = match spawn_pipeline_elements(env, p)? {
+        PipelineSpawn::Aborted => return Ok(StatementFlow::Normal),
+        PipelineSpawn::Spawned {
+            pids,
+            argvs,
+            spawn_err,
+        } => (pids, argvs, spawn_err),
+    };
+
+    // Reap each spawned element BY PID (U-7-pre `wait_pid_for`). A by-pid
+    // wait never reaps a coexisting BACKGROUND zombie, so the foreground
+    // demux is pid-precise: `cmd & ; producer | consumer` cannot lose the
+    // bg child's exit to this pipeline's reap (closes the U-6d-a wait-any
+    // limitation). statuses[i] holds element i's exit. NB: at v1.0 the
+    // kernel collapses any non-zero child exit to 1, so each status is 0
+    // or 1; aggregate_pipefail computes rightmost-non-zero regardless.
     let mut statuses: Vec<i32> = (0..pids.len()).map(|_| 0i32).collect();
-    let mut reaped: Vec<bool> = (0..pids.len()).map(|_| false).collect();
-    for _ in 0..pids.len() {
+    for (i, &pid) in pids.iter().enumerate() {
         let mut st: i32 = 0;
-        // SAFETY: t_wait_pid is the SYS_WAIT_PID SVC wrapper; &mut st
+        // SAFETY: t_wait_pid_for is the SYS_WAIT_PID SVC wrapper; &mut st
         // is a valid writable i32.
-        let rc = unsafe { t_wait_pid(&mut st as *mut i32) };
+        let rc = unsafe { t_wait_pid_for(pid, 0, &mut st as *mut i32) };
         if rc < 0 {
-            break; // no more children (shouldn't happen with live pids)
+            // The pid is no longer our child (already reaped / vanished --
+            // not expected for a just-spawned element). Leave status 0;
+            // never spin.
+            continue;
         }
-        let reaped_pid = rc as i32;
-        if let Some(idx) = pids.iter().position(|&pp| pp == reaped_pid) {
-            if !reaped[idx] {
-                statuses[idx] = st;
-                reaped[idx] = true;
-            }
-        }
-        // else: a reaped pid not in our set -- impossible at v1.0
-        // (no background children); ignore.
+        statuses[i] = st;
     }
 
     if let Some(tag) = spawn_err {
@@ -837,7 +876,8 @@ fn exec_pipeline(env: &mut Env, p: &Pipeline) -> EvalResult<StatementFlow> {
     }
 
     // Pipefail aggregation. Pair each element's status with its
-    // tolerate_failure flag (`?|` sets it on the LEFT element).
+    // tolerate_failure flag (`?|` sets it on the LEFT element). No spawn_err
+    // here means pids.len() == n, so the index is in bounds.
     let pairs: Vec<(i32, bool)> = statuses
         .iter()
         .enumerate()
@@ -845,6 +885,71 @@ fn exec_pipeline(env: &mut Env, p: &Pipeline) -> EvalResult<StatementFlow> {
         .collect();
     env.status_set(aggregate_pipefail(&pairs));
     Ok(StatementFlow::Normal)
+}
+
+/// Background pipeline (`cmd &` / `a | b &`, U-7a): spawn all elements
+/// detached, register ONE job tracking every element pid, announce
+/// `[N] PID` (the last element's pid -- bash's `$!`), set `$status` 0. The
+/// REPL prompt-cycle reaper (`Repl::reap_jobs`) reclaims the zombies + emits
+/// the `[N]+ Done` line. The spawned children are NOT waited here.
+fn eval_background_pipeline(env: &mut Env, p: &Pipeline) -> EvalResult<StatementFlow> {
+    let (pids, argvs, spawn_err) = match spawn_pipeline_elements(env, p)? {
+        PipelineSpawn::Aborted => return Ok(StatementFlow::Normal),
+        PipelineSpawn::Spawned {
+            pids,
+            argvs,
+            spawn_err,
+        } => (pids, argvs, spawn_err),
+    };
+
+    if pids.is_empty() {
+        // The first element failed to spawn -- nothing to background.
+        env.errstr_set(spawn_err.unwrap_or("background spawn failed"));
+        env.status_set(127);
+        return Ok(StatementFlow::Normal);
+    }
+
+    // Register ONE job for the whole pipeline (bash's model). On a partial
+    // spawn failure we still register the launched pids so the reaper
+    // reclaims their zombies -- the dropped pipe ends EOF them into exit.
+    let last_pid = pids[pids.len() - 1];
+    let cmd = render_pipeline_cmd(&argvs);
+    let spec = env.jobs_mut().add(pids, cmd);
+
+    // `[N] PID` -- the background-launch announcement (bash). Via t_putstr
+    // (the shell's v1.0 diagnostic sink; same convention as trace_echo + the
+    // banner -- there is no terminal-backed fd 1 yet).
+    let mut line = String::new();
+    let _ = write!(&mut line, "[{}] {}\n", spec, last_pid);
+    t_putstr(&line);
+
+    // status 0 on a clean launch; 127 if a mid-pipeline element failed (the
+    // launched ones still background + reap normally).
+    if spawn_err.is_some() {
+        env.status_set(127);
+    } else {
+        env.status_set(0);
+    }
+    Ok(StatementFlow::Normal)
+}
+
+/// Render a pipeline's evaluated argvs to a display command line: each
+/// element's argv space-joined, elements joined by ` | `. Used for the
+/// `[N] PID` launch line + the `[N]+ Done` notification.
+fn render_pipeline_cmd(argvs: &[Vec<String>]) -> String {
+    let mut s = String::new();
+    for (i, argv) in argvs.iter().enumerate() {
+        if i > 0 {
+            s.push_str(" | ");
+        }
+        for (j, a) in argv.iter().enumerate() {
+            if j > 0 {
+                s.push(' ');
+            }
+            s.push_str(a);
+        }
+    }
+    s
 }
 
 /// Aggregate pipeline element exit statuses per scripture 8.4
@@ -1383,11 +1488,8 @@ pub(crate) fn run_command_substitution_script(
 /// unblocked by our read (the same discipline `exec_pipeline` uses for
 /// spawn-all-before-wait). EOF arrives when the last element exits and
 /// its write end -- the only remaining copy, ours was consumed into the
-/// child by `spawn` -- closes. Reaping is wait-any + pid-match, sound
-/// here because the only outstanding children are this substitution's:
-/// every prior command was reaped synchronously and the outer command
-/// has not spawned yet (all argv -- including nested substitutions -- is
-/// evaluated before the outer spawn).
+/// child by `spawn` -- closes. Reaping is BY PID (U-7-pre `wait_pid_for`),
+/// so a coexisting background `&` job's zombie is never reaped here.
 fn capture_external_pipeline(
     env: &Env,
     argvs: &[Vec<String>],
@@ -1474,24 +1576,20 @@ fn capture_external_pipeline(
         let _ = rd.read_to_end(&mut out_bytes);
     }
 
-    // Reap every spawned child (wait-any + pid match).
+    // Reap each spawned child BY PID (U-7-pre `wait_pid_for`). The output
+    // was already drained to EOF above, so each element has exited (or is
+    // exiting); a by-pid wait reaps exactly this substitution's children and
+    // never a coexisting BACKGROUND zombie.
     let mut statuses: Vec<i32> = (0..pids.len()).map(|_| 0i32).collect();
-    let mut reaped: Vec<bool> = (0..pids.len()).map(|_| false).collect();
-    for _ in 0..pids.len() {
+    for (i, &pid) in pids.iter().enumerate() {
         let mut st: i32 = 0;
-        // SAFETY: t_wait_pid is the SYS_WAIT_PID SVC wrapper; &mut st is a
-        // valid writable i32.
-        let rc = unsafe { t_wait_pid(&mut st as *mut i32) };
+        // SAFETY: t_wait_pid_for is the SYS_WAIT_PID SVC wrapper; &mut st is
+        // a valid writable i32.
+        let rc = unsafe { t_wait_pid_for(pid, 0, &mut st as *mut i32) };
         if rc < 0 {
-            break;
+            continue;
         }
-        let reaped_pid = rc as i32;
-        if let Some(idx) = pids.iter().position(|&pp| pp == reaped_pid) {
-            if !reaped[idx] {
-                statuses[idx] = st;
-                reaped[idx] = true;
-            }
-        }
+        statuses[i] = st;
     }
 
     if spawn_failed {

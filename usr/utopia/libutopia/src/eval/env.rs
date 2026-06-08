@@ -65,6 +65,7 @@ use core::cell::Cell;
 
 use crate::parser::ast::{FnDecl, Statement};
 
+use super::jobs::JobTable;
 use super::value::Value;
 
 /// The evaluator's runtime state. One Env per shell process / per
@@ -123,6 +124,10 @@ pub struct Env {
     /// reads it to terminate. `None` = no exit pending. One-shot: the
     /// first `exit` wins.
     pending_exit: Option<i32>,
+    /// Background-job registry (U-7a). `&`-launched pipelines register
+    /// here; the REPL prompt-cycle reaper polls + reports them. Pure
+    /// state (no syscalls); the syscall-driven reaping lives in `ut`.
+    jobs: JobTable,
 }
 
 impl Env {
@@ -142,6 +147,7 @@ impl Env {
             implicit_fail_suppressed: 0,
             trace_depth: 0,
             pending_exit: None,
+            jobs: JobTable::new(),
         }
     }
 
@@ -361,6 +367,20 @@ impl Env {
     /// short-circuit the statement stack.
     pub fn exit_requested(&self) -> Option<i32> {
         self.pending_exit
+    }
+
+    // === Background jobs (U-7a) ===
+
+    /// Borrow the background-job table (the `jobs` builtin + the reaper's
+    /// `live_pids` read).
+    pub fn jobs(&self) -> &JobTable {
+        &self.jobs
+    }
+
+    /// Mutable background-job table (the `&` register path + the reaper's
+    /// `mark_reaped` / `take_done_notifications`).
+    pub fn jobs_mut(&mut self) -> &mut JobTable {
+        &mut self.jobs
     }
 }
 

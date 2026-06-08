@@ -502,6 +502,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "u-job-test"
+version = "0.1.0"
+dependencies = [
+ "libthyla-rs",
+ "libutopia",
+]
+
+[[package]]
 name = "u-readdir-test"
 version = "0.1.0"
 dependencies = [

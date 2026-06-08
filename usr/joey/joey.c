@@ -2015,6 +2015,30 @@ int main(void) {
     }
     t_putstr("joey: /u-6-test reaped status=0; U-6 evaluator arc integration verified\n");
 
+    // === /u-job-test orchestration (Phase 7 U-7a -- background jobs) ===
+    // Job control part 1: `&` background launch + the job table + the
+    // foreground pid-demux + prompt-cycle reaping. Runs PRE-pivot (echo/seq/
+    // tr spawn by name) and drives the REAL `&` -> register -> reap-to-Done
+    // lifecycle through libutopia::eval + the Repl reaper: job registration,
+    // one-job-per-pipeline, `[N]+ Done` on completion, the by-pid foreground
+    // demux (a fg wait does not reap a coexisting bg job), and bg-builtin
+    // rejection. The keystroke->job interactive path needs /dev/cons key
+    // injection (the A-4c constraint blocks the harness), so it is exercised
+    // via the fd-agnostic Repl::feed here. status==0 gates the boot.
+    const char u_job_name[] = "u-job-test";
+    long ujb_pid = t_spawn(u_job_name, sizeof(u_job_name) - 1);
+    if (ujb_pid <= 0) {
+        t_putstr("joey: t_spawn(\"u-job-test\") FAILED\n");
+        return 1;
+    }
+    int ujb_status = -1;
+    long ujb_reaped = t_wait_pid(&ujb_status);
+    if (ujb_reaped != ujb_pid || ujb_status != 0) {
+        t_putstr("joey: /u-job-test orchestration FAILED\n");
+        return 1;
+    }
+    t_putstr("joey: /u-job-test reaped status=0; U-7a background jobs verified\n");
+
     // === /ut orchestration (Phase 7 U-6g -- Utopia shell REPL) ===
     // `ut` is the Utopia shell binary. Through U-6g it is a working
     // read-parse-eval REPL: it prints the Pale Fire banner, draws the

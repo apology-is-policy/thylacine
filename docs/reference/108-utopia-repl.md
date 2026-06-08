@@ -111,7 +111,7 @@ so the loop body may freely take `&mut self`) and dispatches each action:
 |---|---|
 | `NoChange` | nothing |
 | `Redraw` | `render(prompt)` → sink |
-| `Accept(line)` | `\r\n` → sink; push non-empty line to history; `run_line`; if `env.exit_requested()` → return `Some(code)`; else fresh prompt |
+| `Accept(line)` | `\r\n` → sink; push non-empty line to history; `run_line`; if `env.exit_requested()` → return `Some(code)`; else `reap_jobs` (U-7a) then fresh prompt |
 | `Cancel` (Ctrl-C) | `\r\n` + fresh prompt (the editor already reset its buffer) |
 | `Eof` (Ctrl-D, empty buffer) | `\r\n`; return `Some(env.status())` |
 | `ClearScreen` (Ctrl-L) | `\x1b[2J\x1b[H` + render |
@@ -162,6 +162,22 @@ When joey spawns `/ut` bare for the boot smoke, the child has **no fd 0**
 banner. That is the link + boot + banner smoke; the real loop is exercised
 deterministically by `/u-repl-test`.
 
+### 3.6 Background-job reaping (U-7a)
+
+`Repl::reap_jobs(&mut self)` is the **syscall-driven** half of job tracking
+(the `JobTable` in `Env` is pure — `docs/reference/94-utopia-eval.md` §9). It
+runs in the `Accept` branch after `run_line` and before the fresh prompt
+(bash's `[N]+ Done`-before-prompt ordering, so a job that finished while the
+just-run foreground command was waiting is reported now). For each
+`env.jobs().live_pids()` it does ONE `wait_pid_for(pid, T_WAIT_WNOHANG)` —
+reaped → `mark_reaped`, `-1` (gone) → `mark_reaped(pid, 0)` so the job still
+completes, `0` (alive) → leave it — then `t_putstr`s each
+`take_done_notifications()` line. One poll per live pid per prompt, never a
+busy-loop (U-7-pre F1: a hot WNOHANG loop can starve the awaited child). It is
+`pub` so the `/u-job-test` probe can drive the real reap path. A bg job that
+finishes while the user is idle at the prompt is reported at the next accepted
+line; the async-while-idle path (the notes fd in the poll set) is U-7c.
+
 ## 4. Exit semantics
 
 `exit` (builtin, U-6e) calls `env.request_exit(code)`; `feed` returns
@@ -192,7 +208,10 @@ with `repl.exit_code()` = `exit_requested().unwrap_or(env.status())`.
 | Line editor + parser + evaluator wired | DONE |
 | Ctrl-D / `exit` / EOF exit; interactive error survival | DONE |
 | Default prompt (cwd + glyph) | DONE |
-| Multi-fd job-control `poll()`; Ctrl-C/Ctrl-Z; jobs | U-7 |
+| Background `&` + the job table + prompt-cycle `[N]+ Done` reaping (`reap_jobs`, §3.6) | DONE (U-7a) |
+| `jobs`/`fg`/`bg`/`wait`/`kill` builtins | U-7b |
+| Multi-fd job-control `poll()` (notes fd); Ctrl-C forwarding; `on`/`mask` delivery | U-7c |
+| Ctrl-Z (stop) + termios | U-PTY |
 | Pollable cons + termios (raw/ECHO) + per-Proc fd 0/1/2 | U-PTY |
 | `prompt`-shell-function capture | later U-* |
 
