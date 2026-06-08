@@ -257,15 +257,24 @@ enum {
     // cap-mask argument lands at P5-spawn-caps when needed.
     SYS_SPAWN        = 21,   // arg: name_va (x0), name_len (x1)
 
-    // SYS_WAIT_PID(status_out_va) → reaped_pid / -1
-    //   x0 = status_out_va (user-VA; 4-byte int destination, or 0 to
-    //                       skip the write)
-    // Block until a child Proc enters ZOMBIE, then reap. Writes the
-    // child's exit_status to *status_out_va if non-zero. Returns the
-    // reaped PID. Returns -1 immediately if the caller has no children.
-    // Mirrors kernel/proc.c::wait_pid (Plan 9 wait(2) shape; no waitpid
-    // selector at v1.0).
-    SYS_WAIT_PID     = 22,   // arg: status_out_va (x0)
+    // SYS_WAIT_PID(want_pid, flags, status_out_va) → reaped_pid / 0 / -1
+    //   x0 = want_pid (-1 = any child; >0 = that child; 0/<-1 reserved →
+    //                  match nothing → -1)
+    //   x1 = flags (WAIT_WNOHANG = 1: do not block — return 0 if no
+    //               matching zombie is ready; any other bit set → -1)
+    //   x2 = status_out_va (user-VA; 4-byte int destination, or 0 to skip)
+    // Reap a ZOMBIE child, optionally filtered by pid and/or non-blocking.
+    // Writes the child's exit_status to *status_out_va (if non-zero) on a
+    // successful reap. Returns the reaped PID (>0); 0 under WAIT_WNOHANG
+    // when a matching child is alive but not yet a zombie (0 is never a
+    // valid child pid); -1 if there is no matching child OR a flag bit
+    // outside WAIT_WNOHANG is set. Mirrors kernel/proc.c::wait_pid_for
+    // (POSIX waitpid(pid, flags) shape; the WAIT_WNOHANG value lives in
+    // proc.h, mirrored by the userspace libs). NB (v2 ABI): x1/x2 are NEW —
+    // any caller not going through the libt / libthyla-rs wrapper MUST set
+    // (zero) them; a stale-register x1/x2 from a pre-v2 binary is rejected
+    // (garbage flags → -1) rather than silently reaping the wrong child.
+    SYS_WAIT_PID     = 22,   // args: want_pid (x0), flags (x1), status_out_va (x2)
 
     // SYS_SPAWN_WITH_FDS(name_va, name_len, fd_list_va, fd_count) → child_pid / -1
     //   x0 = name_va        user-VA pointer to the binary name

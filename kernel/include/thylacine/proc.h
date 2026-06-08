@@ -609,23 +609,48 @@ void        proc_table_lock_release(irq_state_t s);
 // g_proc_table_lock. `self` may be NULL to count all live Threads.
 int proc_count_live_peers_locked(struct Proc *p, struct Thread *self);
 
-// P2-D: wait_pid — reap a zombie child.
+// WAIT_WNOHANG — wait_pid_for flag: do not block; if no matching zombie
+// is ready, return 0 immediately. Mirrors POSIX WNOHANG. Userspace passes
+// this in the SYS_WAIT_PID flags arg (x1); the libt / libthyla-rs mirrors
+// (WAIT_WNOHANG / T_WAIT_WNOHANG) MUST hold the same value.
+#define WAIT_WNOHANG 1
+
+// wait_pid_for — reap a ZOMBIE child, optionally filtered by pid and/or
+// non-blocking. The selection-and-blocking generalization underlying
+// SYS_WAIT_PID and the wait_pid wrapper.
 //
-// Blocks until any child enters ZOMBIE state. On wake, picks the oldest
-// zombie child (head of children list with state == ZOMBIE), unlinks
-// it from the parent's children list, copies exit_status to *status_out
-// (if non-NULL), and calls thread_free + proc_free to release the
-// child's resources.
+//   want_pid == -1     : any child (the original wait_pid semantics).
+//   want_pid  >  0     : only the child with that pid.
+//   want_pid  == 0/<-1 : POSIX process-group selectors — no v1.0 meaning;
+//                        match nothing (→ -1). Reserved for a future lift.
+//   flags & WAIT_WNOHANG : do not block (see WAIT_WNOHANG).
 //
-// Returns the reaped child's PID on success. Returns -1 (with errno-
-// equivalent semantics deferred to Phase 5+ syscall surface) if there
-// are no children at all (live or zombie) — never blocks indefinitely
-// when nothing can wake us.
+// Returns:
+//   > 0 : reaped child's pid; *status_out (if non-NULL) holds its status.
+//   0   : WAIT_WNOHANG set and a matching child is alive but not yet a
+//         zombie. 0 is never a valid child pid (g_next_pid starts at 1),
+//         so it is an unambiguous "not ready" sentinel.
+//   -1  : no matching child (none at all, or none with want_pid), OR the
+//         caller's Proc is group-terminating (#811 SLEEP_INTR).
 //
-// At v1.0 P2-D, this is a kernel-internal primitive; callers are kernel
-// test code that rfork'd children and want to reap them. The full
-// wait(*WaitMsg) syscall surface (per ARCH §7.9) lands at Phase 5 with
-// the syscall layer.
+// CALLER NOTE (WAIT_WNOHANG progress): a WNOHANG poll loop MUST yield between
+// calls — block on a notes fd (the kernel posts a `child_exit` note on every
+// child exit), `torpor_wait`, or `sched` — never hot-busy-spin on the 0
+// return. `while (wait_pid_for(pid, WAIT_WNOHANG, …) == 0) {}` with no yield
+// can starve the very child it awaits on a constrained CPU set (EEVDF bounds
+// it — it is not a deadlock — but it is still wrong). Job control composes
+// WNOHANG with `poll()` on the shell's notes fd, not a hot loop.
+//
+// Picks the first matching zombie in the children list, unlinks it,
+// copies exit_status, and runs the standard thread_free + proc_free
+// teardown. The teardown + lock discipline are byte-for-byte identical to
+// the legacy wait_pid; only the selection (pid filter) and the blocking
+// decision (WNOHANG) differ.
+int wait_pid_for(int want_pid, int flags, int *status_out);
+
+// wait_pid — reap ANY zombie child, blocking. The pervasive case;
+// equivalent to wait_pid_for(-1, 0, status_out). Plan 9 wait(2) shape.
+// Most kernel callers (test harness rfork-then-reap) use this form.
 int wait_pid(int *status_out);
 
 // Diagnostic.

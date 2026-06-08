@@ -4513,11 +4513,19 @@ static s64 sys_spawn_with_fds_handler(u64 name_va, u64 name_len_raw,
 // On success, writes the child's exit_status (sizeof(int) = 4 bytes)
 // via per-byte uaccess_store_u8 if status_out_va is non-zero.
 
-static s64 sys_wait_pid_handler(u64 status_out_va) {
+static s64 sys_wait_pid_handler(u64 want_pid_u, u64 flags_u, u64 status_out_va) {
     struct Thread *t = current_thread();
     if (!t)                                            return -1;
     struct Proc *p = t->proc;
     if (!p)                                            return -1;
+
+    int want_pid = (int)(s64)want_pid_u;   // -1 (any) or a specific pid
+    // Reject unknown/garbage flag bits (the full x1, before narrowing) so the
+    // flag space stays clean for future additions and a fat-fingered flags
+    // value fails loudly rather than silently behaving as blocking. Matches
+    // the unknown-bit-reject discipline of the spawn / wstat surfaces.
+    if (flags_u & ~(u64)WAIT_WNOHANG)                  return -1;
+    int flags    = (int)flags_u;
 
     // Validate the destination buffer up-front (skipping if NULL) so a
     // bad user-VA doesn't cause a reap-then-fault hazard.
@@ -4526,8 +4534,9 @@ static s64 sys_wait_pid_handler(u64 status_out_va) {
     }
 
     int status = 0;
-    int reaped = wait_pid(&status);
+    int reaped = wait_pid_for(want_pid, flags, &status);
     if (reaped < 0)                                    return -1;
+    if (reaped == 0)                                   return 0;  // WAIT_WNOHANG: no zombie ready
 
     if (status_out_va != 0) {
         // exit_status is int (4 bytes); host endianness on AArch64 is LE.
@@ -5073,7 +5082,7 @@ void syscall_dispatch(struct exception_context *ctx) {
         return;
 
     case SYS_WAIT_PID:
-        ctx->regs[0] = (u64)sys_wait_pid_handler(ctx->regs[0]);
+        ctx->regs[0] = (u64)sys_wait_pid_handler(ctx->regs[0], ctx->regs[1], ctx->regs[2]);
         return;
 
     case SYS_SPAWN_WITH_FDS:

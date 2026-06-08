@@ -87,6 +87,9 @@ void test_proc_identity_spawn_set_accepted_with_cap(void);
 void test_proc_identity_set_rejects_reserved(void);
 void test_proc_identity_set_rejects_system_supp_gid(void);
 void test_proc_identity_peer_snapshot_by_stripes(void);
+void test_proc_wait_pid_for_no_match(void);
+void test_proc_wait_pid_for_wnohang_alive_then_reap(void);
+void test_proc_wait_pid_for_selects_target(void);
 void test_namespace_bind_smoke(void);
 void test_namespace_cycle_rejected(void);
 void test_namespace_fork_isolated(void);
@@ -899,6 +902,11 @@ struct test_case g_tests[] = {
                                        test_proc_legate_teardown_except_and_zero, false, NULL },
     { "proc.legate_teardown_from_zombie_chokepoint",
                                        test_proc_legate_teardown_from_zombie_chokepoint, false, NULL },
+    { "proc.wait_pid_for_no_match",    test_proc_wait_pid_for_no_match,    false, NULL },
+    { "proc.wait_pid_for_wnohang_alive_then_reap",
+                                       test_proc_wait_pid_for_wnohang_alive_then_reap, false, NULL },
+    { "proc.wait_pid_for_selects_target",
+                                       test_proc_wait_pid_for_selects_target, false, NULL },
     { "proc_identity.kproc_is_system", test_proc_identity_kproc_is_system, false, NULL },
     { "proc_identity.rfork_inherits",  test_proc_identity_rfork_inherits,  false, NULL },
     { "proc_identity.apply_sets_fields",

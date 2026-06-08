@@ -774,3 +774,94 @@ void test_proc_legate_teardown_from_zombie_chokepoint(void) {
     legate_drop_linked(root);
     legate_drop_linked(mem);
 }
+
+// =============================================================================
+// U-7-pre: SYS_WAIT_PID v2 — wait_pid_for (pid filter + WAIT_WNOHANG)
+// =============================================================================
+//
+// wait_pid_for generalizes wait_pid: select a specific child (want_pid > 0)
+// and/or poll without blocking (WAIT_WNOHANG). These tests prosecute the
+// selection logic + the WNOHANG sentinel; the teardown path is shared with
+// wait_pid and exercised by the rfork/exits tests above.
+
+static volatile u32 g_wpf_release;   // parent sets → the spinner child exits
+
+static void wpf_spinner_thunk(void *arg) {
+    (void)arg;
+    // Stay alive until the parent releases us, yielding cooperatively so we
+    // never starve a peer on an oversubscribed CPU set. This keeps the child
+    // reliably ALIVE (not a zombie) at the parent's WNOHANG poll.
+    while (__atomic_load_n(&g_wpf_release, __ATOMIC_ACQUIRE) == 0u)
+        sched();
+    exits("ok");
+}
+
+static void wpf_exiter_thunk(void *arg) {
+    (void)arg;
+    exits("ok");                     // exits immediately → becomes a zombie
+}
+
+// A want_pid that is not a child returns -1 immediately under BOTH blocking
+// and WNOHANG modes — it must NOT block waiting for a child that can never
+// appear (the `!any_match → -1` path).
+void test_proc_wait_pid_for_no_match(void) {
+    int st = -42;
+    int r1 = wait_pid_for(0x7ffffff0, 0, &st);
+    TEST_EXPECT_EQ(r1, -1, "wait_pid_for(absent pid, blocking) returns -1 (no block)");
+    int r2 = wait_pid_for(0x7ffffff0, WAIT_WNOHANG, &st);
+    TEST_EXPECT_EQ(r2, -1, "wait_pid_for(absent pid, WNOHANG) returns -1");
+}
+
+// WAIT_WNOHANG reports a live-but-not-yet-zombie child as 0 (not ready),
+// then a blocking wait_pid_for reaps it once released.
+void test_proc_wait_pid_for_wnohang_alive_then_reap(void) {
+    __atomic_store_n(&g_wpf_release, 0u, __ATOMIC_RELEASE);
+    int pid = rfork(RFPROC, wpf_spinner_thunk, NULL);
+    TEST_ASSERT(pid > 0, "rfork spinner failed");
+
+    int st = -42;
+    int r = wait_pid_for(pid, WAIT_WNOHANG, &st);
+    TEST_EXPECT_EQ(r, 0, "WNOHANG on a live child returns 0 (not ready)");
+
+    __atomic_store_n(&g_wpf_release, 1u, __ATOMIC_RELEASE);   // let it exit
+    int reaped = wait_pid_for(pid, 0, &st);
+    TEST_EXPECT_EQ(reaped, pid, "blocking wait_pid_for reaps the released child");
+    TEST_EXPECT_EQ(st, 0, "spinner exit status");
+}
+
+// The pid filter selects the named child even when ANOTHER child is a ready
+// zombie: WNOHANG on the live spinner returns 0 (it IGNORES the exited
+// child's zombie), then each child is reaped by its own pid. A reap-any bug
+// would return exit_pid from the WNOHANG poll once the exiter zombies — the
+// SMP gate amplifies that window.
+void test_proc_wait_pid_for_selects_target(void) {
+    __atomic_store_n(&g_wpf_release, 0u, __ATOMIC_RELEASE);
+    int spin_pid = rfork(RFPROC, wpf_spinner_thunk, NULL);
+    TEST_ASSERT(spin_pid > 0, "rfork spinner failed");
+    int exit_pid = rfork(RFPROC, wpf_exiter_thunk, NULL);
+    TEST_ASSERT(exit_pid > 0, "rfork exiter failed");
+
+    // Drive until the exiter is a ready zombie (its own WNOHANG poll reaps it).
+    // Each iteration polls the SPINNER with WNOHANG *first* and asserts 0 —
+    // with NO sched() between the two polls. So on the final iteration (the one
+    // where the exiter poll reaps it, proving it was a present zombie) the
+    // spinner poll ran with that zombie present: a reap-any-WNOHANG bug would
+    // return exit_pid there; a correct pid filter returns 0. This makes the
+    // "ignore a present zombie" case DETERMINISTIC (audit F4), not best-effort.
+    int st = -42;
+    int reaped_exit;
+    for (;;) {
+        int r_spin = wait_pid_for(spin_pid, WAIT_WNOHANG, &st);
+        TEST_EXPECT_EQ(r_spin, 0, "WNOHANG selects the live spinner, never the exiter zombie");
+        reaped_exit = wait_pid_for(exit_pid, WAIT_WNOHANG, &st);
+        if (reaped_exit == exit_pid) break;     // exiter was a zombie this iter → reaped
+        TEST_EXPECT_EQ(reaped_exit, 0, "exiter WNOHANG is 0 (alive) or its pid (reaped)");
+        sched();                                 // let the exiter make progress to exits()
+    }
+    TEST_EXPECT_EQ(st, 0, "exiter status");
+
+    __atomic_store_n(&g_wpf_release, 1u, __ATOMIC_RELEASE);
+    int reaped_spin = wait_pid_for(spin_pid, 0, &st);
+    TEST_EXPECT_EQ(reaped_spin, spin_pid, "reap the spinner by its own pid");
+    TEST_EXPECT_EQ(st, 0, "spinner status");
+}

@@ -768,22 +768,39 @@ static inline long t_spawn(const char *name, size_t name_len) {
     return x0;
 }
 
-// t_wait_pid — block until one of the caller's children enters ZOMBIE
-// and reap it. If `status_out` is non-NULL, the child's exit_status is
-// written there. Returns the reaped PID on success, -1 immediately if
-// the caller has no children at all. Plan 9 wait(2) shape (no PID
-// selector at v1.0).
+// WAIT_WNOHANG — t_wait_pid_for flag: do not block; return 0 if no
+// matching zombie is ready. Mirrors POSIX WNOHANG and the kernel's
+// WAIT_WNOHANG (proc.h); the value MUST match.
+#define WAIT_WNOHANG 1
+
+// t_wait_pid_for — reap a ZOMBIE child, filtered by pid and/or flags.
+//   want_pid: -1 = any child; >0 = that specific child.
+//   flags:    WAIT_WNOHANG = do not block.
+// Returns the reaped PID (>0); 0 (WAIT_WNOHANG set + a matching child is
+// alive but not yet a zombie); -1 (no matching child). Writes the child's
+// exit_status to *status_out on a successful reap if non-NULL. Mirrors
+// kernel/proc.c::wait_pid_for (POSIX waitpid(pid, flags) shape).
 __attribute__((always_inline))
-static inline long t_wait_pid(int *status_out) {
-    register long x0 __asm__("x0") = (long)(unsigned long)status_out;
+static inline long t_wait_pid_for(int want_pid, int flags, int *status_out) {
+    register long x0 __asm__("x0") = (long)want_pid;
+    register long x1 __asm__("x1") = (long)flags;
+    register long x2 __asm__("x2") = (long)(unsigned long)status_out;
     register long x8 __asm__("x8") = T_SYS_WAIT_PID;
     __asm__ volatile (
         "svc #0"
         : "+r"(x0)
-        : "r"(x8)
+        : "r"(x1), "r"(x2), "r"(x8)
         : "memory", "cc"
     );
     return x0;
+}
+
+// t_wait_pid — reap ANY zombie child, blocking. Equivalent to
+// t_wait_pid_for(-1, 0, status_out). Plan 9 wait(2) shape. Most callers
+// (single-child rfork-then-reap) use this form.
+__attribute__((always_inline))
+static inline long t_wait_pid(int *status_out) {
+    return t_wait_pid_for(-1, 0, status_out);
 }
 
 // t_spawn_with_fds — like t_spawn, but pre-install the listed fds in

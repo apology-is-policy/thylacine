@@ -1753,22 +1753,39 @@ pub unsafe fn t_spawn_full_argv(req_va: *const TSpawnArgs) -> i64 {
     x0
 }
 
-// t_wait_pid — block until one of the caller's children enters ZOMBIE,
-// then reap it. On success returns the child's pid (positive) and
-// populates `*status_out` with the child's exit status. On failure
-// (no children / unmapped status pointer) returns -1.
-//
-// Backs t::process::Child::wait (U-2d).
+/// `WAIT_WNOHANG` — `t_wait_pid_for` flag: do not block; return 0 if no
+/// matching zombie is ready. Mirrors POSIX `WNOHANG` and the kernel's
+/// `WAIT_WNOHANG` (proc.h); the value MUST match.
+pub const T_WAIT_WNOHANG: i32 = 1;
+
+// t_wait_pid_for — reap a ZOMBIE child, filtered by pid and/or flags.
+//   want_pid: -1 = any child; >0 = that specific child.
+//   flags:    T_WAIT_WNOHANG = do not block.
+// Returns the reaped pid (>0); 0 (WNOHANG set + a matching child is alive
+// but not yet a zombie); -1 (no matching child). On a successful reap,
+// writes the child's exit status to *status_out (if non-null). Mirrors
+// kernel/proc.c::wait_pid_for (POSIX waitpid(pid, flags) shape).
 #[inline(always)]
-pub unsafe fn t_wait_pid(status_out: *mut i32) -> i64 {
-    let mut x0: i64 = status_out as i64;
+pub unsafe fn t_wait_pid_for(want_pid: i32, flags: i32, status_out: *mut i32) -> i64 {
+    let mut x0: i64 = want_pid as i64;
     asm!(
         "svc #0",
         inlateout("x0") x0,
+        in("x1") flags as i64,
+        in("x2") status_out as i64,
         in("x8") T_SYS_WAIT_PID,
         options(nostack)
     );
     x0
+}
+
+// t_wait_pid — reap ANY zombie child, blocking. Equivalent to
+// t_wait_pid_for(-1, 0, status_out). Plan 9 wait(2) shape.
+//
+// Backs t::process::Child::wait (U-2d) for the legacy any-reap callers.
+#[inline(always)]
+pub unsafe fn t_wait_pid(status_out: *mut i32) -> i64 {
+    t_wait_pid_for(-1, 0, status_out)
 }
 
 // =============================================================================

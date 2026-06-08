@@ -57,7 +57,9 @@ int           rfork(unsigned flags,
                     void (*entry)(void *), void *arg);
 __attribute__((noreturn))
 void          exits(const char *msg);
-int           wait_pid(int *status_out);
+int           wait_pid(int *status_out);                       // = wait_pid_for(-1, 0, ·)
+int           wait_pid_for(int want_pid, int flags, int *status_out);  // U-7-pre
+#define WAIT_WNOHANG 1
 
 #define RFPROC      0x0001    // create new Proc (only RFPROC supported at P2-Da)
 #define RFMEM       0x0002    // share address space (Phase 5+)
@@ -112,18 +114,27 @@ At v1.0 P2-Da, `exits` requires `thread_count == 1` (single-thread Procs only). 
 
 **fd-close-at-exit (#926).** A `Proc`'s handle table is normally closed + freed by `proc_free` at *reap* (step 4 of `wait_pid`). Since #926 (U-6f command-substitution prerequisite, user-voted 2026-06-08), a **single-thread** `Proc` instead closes its handle table at *exit* — at the very top of `exits()`, before the `g_proc_table_lock` acquire, gated on `thread_count == 1`, via `proc_close_handles_at_exit(p)`. The effect is correct Unix/Plan 9 semantics: a process's inherited fds (pipe write ends, sockets, /srv connections) close when the **process terminates**, not when the parent later reaps it — so a peer reading the dying process's stdout pipe sees EOF immediately rather than blocking until reap (the bug that hung shell `$(cmd)` capture). The top-of-`exits()` placement is the only sound one: the calling Thread is still `THREAD_RUNNING` (a sleep-capable close hook — a 9P clunk — is legal there; sleeping after the EXITING mark would trip `sched()`'s "current is not RUNNING" assert), the `Proc` is still `ALIVE` (so `wait_pid` cannot reap+`thread_free` it mid-close — the reaper only touches ZOMBIE Procs), and `thread_count == 1` means no peer shares the table. `proc_free`'s `handle_table_free(p->handles)` then no-ops on the already-NULL table (and remains the real close for **multi-thread** Procs — which keep close-at-reap, since their last-Thread `EXITING` mark is atomic-under-lock with the last-Thread determination, leaving no RUNNING window for a sleeping close — and for the direct `state=ZOMBIE; proc_free()` orphan/rollback paths). The handle-close-at-exit / vma-drain-at-reap ordering inversion is safe by the #847 per-Burrow dual refcount (a Burrow frees only when `handle_count == 0 && mapping_count == 0`). Audit-trigger surface (ARCH §25.4); SMP-gated; focused audit 0 P0/P1/P2.
 
-#### `wait_pid(*status_out)` (P2-Da)
+#### `wait_pid_for(want_pid, flags, *status_out)` / `wait_pid(*status_out)` (P2-Da; U-7-pre generalization)
 
-Reaps a zombie child. Blocks on the parent's `child_done` Rendez until any child enters ZOMBIE state, then:
-1. Unlinks the zombie from parent's children list.
+`wait_pid_for` reaps a ZOMBIE child, optionally filtered by pid and/or non-blocking; `wait_pid(status_out)` is the thin `wait_pid_for(-1, 0, status_out)` wrapper (the pervasive "any child, blocking" case, used by the rfork-then-reap kernel tests and the userspace `t_wait_pid`). The reap teardown is shared and unchanged:
+1. Unlinks the (matching) zombie from parent's children list.
 2. Copies `exit_status` to `*status_out` (if non-NULL).
-3. `thread_free`s the zombie's Thread (EXITING state accepted) — also releases the kstack pages.
+3. `thread_free`s the zombie's Thread(s) (EXITING state accepted, on_cpu-spun first per #788) — also releases the kstack pages.
 4. `proc_free`s the zombie Proc.
 5. Returns the zombie's PID.
 
-Returns -1 if the parent has no children at all (live or zombie) — never blocks indefinitely with no possible wakeup.
+Selection + blocking (`want_pid`/`flags`):
+- `want_pid == -1` matches any child; `want_pid > 0` selects only that child; `want_pid == 0` or `< -1` (POSIX process-group selectors) have no v1.0 meaning and match nothing (reserved for a future lift).
+- `flags & WAIT_WNOHANG` makes the call non-blocking.
 
-The cond predicate for the Rendez sleep is "any child in ZOMBIE state OR no children" — the second clause covers the edge case where children exit between the loop's outer scan and the sleep. `scheduler.tla`'s `WaitOnCond`/`WakeAll` discipline (NoMissedWakeup invariant) covers the wait/wake atomicity here at the spec level.
+Return values:
+- `> 0` — the reaped child's pid (status written).
+- `0` — `WAIT_WNOHANG` set and a matching child is alive but not yet a zombie ("not ready"). **`0` is never a valid child pid** (`g_next_pid` starts at 1, `proc.c`), so it is an unambiguous sentinel.
+- `-1` — no matching child (none at all, or none with `want_pid`; returns immediately, never blocks waiting for a child that cannot appear), OR the caller's Proc is group-terminating (#811 `SLEEP_INTR`).
+
+Why the generalization (U-7-pre, user-voted 2026-06-08): the legacy reap-any `wait_pid` was a latent soundness hazard with an existing pouch workaround — `joey.c` documented "kproc.wait_pid sees stratumd first, extincting on [wrong pid]" and the right fix as "a kernel `wait_pid_for(pid)`". The by-pid filter lets a multi-child Proc (a job-control shell; init coexisting with a long-running stratumd) reap a SPECIFIC child without accidentally consuming a sibling's exit status, and `WAIT_WNOHANG` is the non-blocking reap that prompt-time `[N]+ Done` background reaping needs (Utopia U-7). It backs `libthyla_rs::process::Child::wait` (now by-pid) + `Child::try_wait` (WNOHANG; closes #856) and the POSIX `waitpid(pid, …, WNOHANG)` mapping for ported code.
+
+The cond predicate for the Rendez sleep (`wait_pid_cond`) applies the SAME `want_pid` filter: it wakes when a matching child is ZOMBIE OR no matching child exists (the second clause covers a child exiting between the outer scan and the sleep, and the immediate `-1` for an absent `want_pid`). The pid filter only reads `c->pid`, which is set once at `proc_alloc` and never mutated, so it adds nothing to the lock/visibility reasoning below — the three `wait_pid_cond` soundness invariants hold unchanged. `scheduler.tla`'s `WaitOnCond`/`WakeAll` discipline (NoMissedWakeup invariant) covers the wait/wake atomicity at the spec level. Audit-trigger surface (ARCH §25.4 / CLAUDE.md); SMP-gated + focused audit.
 
 ### `<thylacine/thread.h>`
 
@@ -295,6 +306,8 @@ The reverse order (`r->lock → proc_table_lock`) is **forbidden**. `wait_pid_co
 1. **Single-writer children list**: at v1.0 single-thread Procs, only the parent's own thread mutates the children list. When the parent is in `wait_pid_cond` (called from `sleep` on the parent's thread), it is not concurrently in `exits` or `rfork`. The list is structurally stable.
 2. **State visibility via wakeup→sleep handshake**: per-child `state` is mutated under `proc_table_lock` in the child's `exits`; the child's subsequent `wakeup(&parent->child_done)` performs a release on `r->lock`; the parent's sleep-resume re-acquires `r->lock` (acquire-pairs). Plain reads of `c->state` in `wait_pid_cond` see the post-wakeup state via the acquire/release transitivity.
 3. **First-call tolerance**: the very first cond evaluation at sleep entry (before any wakeup) may see stale state — but that's correct; if no zombie visible, sleep; the next wakeup re-evaluates.
+
+**U-7-pre note (`wait_pid_for` pid filter)**: since U-7-pre, `wait_pid_cond` takes a `struct wait_cond_ctx { parent, want_pid }` (by address; stack-local to `wait_pid_for`, which outlives the `sleep`) and additionally skips children whose `c->pid != want_pid` (when `want_pid != -1`). This does **not** touch the three invariants above: `c->pid` is set once at `proc_alloc` and never mutated, so the filter is a stable read requiring no extra synchronization. The wake-set semantics generalize cleanly — wake on "a *matching* zombie OR no *matching* child" — so a `want_pid > 0` sleeper woken by a *different* child's `exits()` re-filters and re-sleeps (no lost wake: the rendez is per-parent and every child exit wakes it; the cond is the filter).
 
 **Phase 5+ trip-hazard**: when multi-thread Procs land, invariant (1) weakens (sibling threads can mutate the parent's children list concurrently). At that point `wait_pid_cond` MUST acquire `proc_table_lock` AND the sleep protocol must be refactored to break the resulting `r->lock → proc_table_lock` cycle. Documented in `docs/handoffs/014-p2h-r5h.md` and `docs/handoffs/015-p3a-f75.md`.
 

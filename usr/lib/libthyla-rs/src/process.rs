@@ -50,8 +50,8 @@ use crate::err::{Error, Result};
 use crate::fs::File;
 use crate::handle::{Handle, Rights};
 use crate::{
-    t_pipe, t_spawn_full_argv, t_wait_pid, TSpawnArgs, T_SPAWN_IDENTITY_SET, T_SPAWN_NAME_MAX,
-    T_SYS_SPAWN_ARGV_DATA_MAX, T_SYS_SPAWN_ARGV_MAX,
+    t_pipe, t_spawn_full_argv, t_wait_pid_for, TSpawnArgs, T_SPAWN_IDENTITY_SET, T_SPAWN_NAME_MAX,
+    T_SYS_SPAWN_ARGV_DATA_MAX, T_SYS_SPAWN_ARGV_MAX, T_WAIT_WNOHANG,
 };
 use alloc_crate::string::String;
 use alloc_crate::vec::Vec;
@@ -426,17 +426,36 @@ impl Child {
         self.pid
     }
 
-    /// Block until the child exits; reap and return its exit status.
-    ///
-    /// V1 limitation: `SYS_WAIT_PID` reaps *any* zombie child, not a
-    /// specific pid. If the parent has multiple children, the reaped
-    /// pid may not be `self.pid`; we accept whatever the kernel
-    /// returns. Multi-child shells will need a wait-by-pid surface.
+    /// Block until *this* child exits; reap it and return its exit
+    /// status. Reaps by pid (`SYS_WAIT_PID` with `want_pid == self.pid`),
+    /// so a coexisting background child is never reaped in its place
+    /// (closes the U-2d any-reap limitation; #856).
     pub fn wait(&mut self) -> Result<ExitStatus> {
         let mut status: i32 = 0;
-        let rc = unsafe { t_wait_pid(&mut status as *mut i32) };
+        let rc = unsafe { t_wait_pid_for(self.pid, 0, &mut status as *mut i32) };
         let _reaped = Error::from_syscall_return(rc)?;
         Ok(ExitStatus(status))
+    }
+
+    /// Reap *this* child if it has already exited, without blocking.
+    /// Returns `Ok(Some(status))` if it was reaped, `Ok(None)` if it is
+    /// still alive (`SYS_WAIT_PID` WNOHANG returned 0), or `Err` if it is
+    /// not a child (already reaped / never existed). This is the non-
+    /// blocking reap primitive job control needs (U-7).
+    ///
+    /// Do NOT hot-loop `while child.try_wait()?.is_none() {}` — that can
+    /// starve the very child you are awaiting on a constrained CPU set.
+    /// Compose it with a block: poll the shell's notes fd (the kernel posts
+    /// a `child_exit` note on every child exit) and `try_wait` only when the
+    /// poll wakes, or fall back to a blocking `wait()`.
+    pub fn try_wait(&mut self) -> Result<Option<ExitStatus>> {
+        let mut status: i32 = 0;
+        let rc = unsafe { t_wait_pid_for(self.pid, T_WAIT_WNOHANG, &mut status as *mut i32) };
+        if rc == 0 {
+            return Ok(None); // alive, not yet a zombie
+        }
+        let _reaped = Error::from_syscall_return(rc)?;
+        Ok(Some(ExitStatus(status)))
     }
 }
 

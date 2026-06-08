@@ -1746,22 +1746,44 @@ void el0_return_die_check(void) {
 //      re-evaluation under (2)'s chain on each subsequent wakeup.
 //
 // See g_proc_table_lock's header for the full chain.
+// cond predicate for wait_pid_for's sleep: a child MATCHING want_pid is
+// in ZOMBIE state, OR no matching child exists at all (-1 return path).
+// `want_pid == -1` matches any child (the original wait_pid semantics);
+// `want_pid > 0` selects that one child.
+//
+// CALLED FROM `sleep` UNDER r->lock. P3-A: deliberately does NOT acquire
+// g_proc_table_lock — that would create a r->lock → g_proc_table_lock
+// nesting that, combined with exits's g_proc_table_lock → r->lock-via-
+// wakeup discipline, deadlocks. The pid filter only compares `c->pid`
+// (set once at proc_alloc, never mutated), so it adds nothing to the
+// lock/visibility reasoning — the same three invariants documented at
+// g_proc_table_lock's declaration hold unchanged.
+struct wait_cond_ctx {
+    struct Proc *parent;
+    int          want_pid;
+};
+
 static int wait_pid_cond(void *arg) {
-    struct Proc *parent = arg;
-    if (!parent->children) return 1;          // no children → wake to return -1
+    struct wait_cond_ctx *ctx = arg;
+    struct Proc *parent = ctx->parent;
+    bool any_match = false;
     for (struct Proc *c = parent->children; c; c = c->sibling) {
-        if (c->state == PROC_STATE_ZOMBIE) return 1;
+        if (ctx->want_pid != -1 && c->pid != ctx->want_pid) continue;
+        any_match = true;
+        if (c->state == PROC_STATE_ZOMBIE) return 1;   // matching zombie → wake to reap
     }
-    return 0;
+    return any_match ? 0 : 1;   // no matching child → wake to return -1; else sleep
 }
 
-int wait_pid(int *status_out) {
+int wait_pid_for(int want_pid, int flags, int *status_out) {
     struct Thread *t = current_thread();
     if (!t)                  extinction("wait_pid with no current thread");
     struct Proc *p = t->proc;
     if (!p)                  extinction("wait_pid with no proc");
     if (p->magic != PROC_MAGIC)
                              extinction("wait_pid with corrupted proc");
+
+    const bool nohang = (flags & WAIT_WNOHANG) != 0;
 
     for (;;) {
         // P3-A: walk + unlink + state capture under g_proc_table_lock.
@@ -1771,18 +1793,29 @@ int wait_pid(int *status_out) {
         // transition state (zombie ready to reap).
         irq_state_t s = spin_lock_irqsave(&g_proc_table_lock);
 
-        if (!p->children) {
-            // No children at all (live or zombie). Nothing to wait for.
-            spin_unlock_irqrestore(&g_proc_table_lock, s);
-            return -1;
-        }
-
+        // Single scan: find a MATCHING zombie to reap; also note whether
+        // any matching child exists at all (alive or zombie). No matching
+        // child → -1; matching-but-alive → sleep (or 0 under WNOHANG).
         struct Proc *zombie = NULL;
+        bool any_match = false;
         for (struct Proc *c = p->children; c; c = c->sibling) {
+            // want_pid -1 = any; >0 = that child. A child's pid is in
+            // [1, INT_MAX) (proc_alloc: g_next_pid starts at 1), and pid 0
+            // is kproc (never a child of a user Proc), so want_pid 0 / < -1
+            // (POSIX pgroup selectors) match no child here -> any_match stays
+            // false -> -1. Reserved for a future process-group lift.
+            if (want_pid != -1 && c->pid != want_pid) continue;
+            any_match = true;
             if (c->state == PROC_STATE_ZOMBIE) {
                 zombie = c;
                 break;
             }
+        }
+
+        if (!any_match) {
+            // No matching child (none at all, or none with want_pid).
+            spin_unlock_irqrestore(&g_proc_table_lock, s);
+            return -1;
         }
 
         if (zombie) {
@@ -1853,20 +1886,31 @@ int wait_pid(int *status_out) {
             return pid;
         }
 
-        // No zombie yet, but live children exist. Release the lock and
-        // sleep on child_done. exits() in any of our children will
-        // wakeup this Rendez. The cond predicate re-evaluates "any
-        // zombie? or no children?" under r->lock + g_proc_table_lock;
-        // sleep is atomic with the cond check (see scheduler.tla
-        // NoMissedWakeup proof).
+        // A matching child is alive but not yet a zombie. Release the lock.
         spin_unlock_irqrestore(&g_proc_table_lock, s);
+
+        if (nohang)
+            return 0;        // WAIT_WNOHANG: report "not ready" without blocking.
+
+        // Sleep on child_done; exits() in a matching child wakes us. The
+        // cond re-evaluates the SAME pid filter under r->lock; sleep is
+        // atomic with the cond check (see scheduler.tla NoMissedWakeup
+        // proof). `ctx` is stack-local to this frame, which outlives the
+        // sleep call.
+        struct wait_cond_ctx ctx = { .parent = p, .want_pid = want_pid };
         // #811 (ARCH §8.8.1): a death-interrupted sleep means THIS Proc is
         // group-terminating (a peer / kill flagged it while we waited on a
         // child). Return so the waiting Thread unwinds to its EL0-return
         // die-check; do NOT loop (re-sleep would re-INTR = livelock).
-        if (sleep(&p->child_done, wait_pid_cond, p) == SLEEP_INTR)
+        if (sleep(&p->child_done, wait_pid_cond, &ctx) == SLEEP_INTR)
             return -1;
     }
+}
+
+// wait_pid — reap ANY zombie child, blocking. The pervasive (any,
+// blocking) case; thin wrapper over wait_pid_for. Plan 9 wait(2) shape.
+int wait_pid(int *status_out) {
+    return wait_pid_for(-1, 0, status_out);
 }
 
 // =============================================================================
