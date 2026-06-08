@@ -998,8 +998,8 @@ fn eval_command(env: &mut Env, cmd: &Command) -> EvalResult<StatementFlow> {
                 return invoke_function(env, &decl, &argv);
             }
             // Then built-ins (cd / pwd / exit / unset / eval / source /
-            // type / true / false) -- they run in-process and mutate
-            // the shell's own state (U-6e-a).
+            // type / true / false -- U-6e-a; jobs / fg / bg / wait / kill --
+            // U-7b) -- they run in-process and mutate the shell's own state.
             if let Some(result) = builtin::try_builtin(env, &argv) {
                 return result;
             }

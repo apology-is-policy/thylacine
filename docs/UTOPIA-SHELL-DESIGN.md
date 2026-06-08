@@ -600,7 +600,25 @@ Spawns the command; the shell prints `[N] PID` where N is the jobspec; adds the 
 - `fg N` — un-suspend and resume in foreground; shell waits.
 - `bg N` — un-suspend and continue async.
 - `wait N` — block until child N exits.
-- `kill N [snare:NAME]` — post a note to child N. Default note: `snare:term`.
+- `kill N [snare:NAME]` — post a note to child N.
+
+**As-built (U-7b) jobspec + note conventions** (a refinement of the bare-`N`
+sketch above, toward the bash standard the shell emulates):
+
+- **Jobspec syntax**: `%N` / `%%` / `%+` (current job) / `%-` (previous) are
+  the bash jobspecs. A bare decimal `N` is a job NUMBER for `fg`/`bg` and a
+  child PID for `wait`/`kill` (bash's split). `%N` lexes because `%` is a
+  command-context word char (U-7b lexer fix); the no-arg `fg`/`bg`/`wait` form
+  targets the current job / all jobs.
+- **`kill` default note** is `interrupt`, NOT `snare:term`. The kernel's
+  userspace-postable note set is `{interrupt, kill}` only — `snare:*` is
+  reserved for kernel-synthetic fault posters and `notes_post` rejects a
+  userspace `snare:`-prefixed name. `interrupt` is the catchable Ctrl-C
+  analogue (the note the shell's own Ctrl-C path delivers at U-7c); `kill` is
+  the non-catchable force. Syntax: `kill {%N | pid} [interrupt | kill]`.
+- **STOPPED-job resume** (`bg` / `fg` of a Ctrl-Z'd job) needs a kernel stopped
+  thread-state, which is **U-PTY**; v1.0 has no stopped jobs, so `bg` reports
+  the named job is already running in the background.
 
 ### 10.7 The `on note` construct
 

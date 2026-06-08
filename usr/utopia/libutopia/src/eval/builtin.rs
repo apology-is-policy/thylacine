@@ -32,6 +32,33 @@
 // output uses -- the shell has no terminal-backed fd 1 until U-6g/PTY,
 // at which point this switches to `io::stdout()`.
 //
+// === Implemented at U-7b (job control) ===
+//
+// The job-control set, over the U-7a `JobTable` (in `Env`) + the U-7-pre
+// `wait_pid_for` primitive (UTOPIA-SHELL-DESIGN.md section 10.6):
+//
+//   jobs        list tracked background jobs as `[N]{+|-} Running|Done cmd`
+//               (refreshes against current truth via a WNOHANG poll, then
+//               consumes the reported-Done jobs so the prompt cycle does
+//               not re-announce them).
+//   wait [id...] block until the named jobs/pids finish, or all jobs with
+//               no argument. Blocking by-pid `wait_pid_for(pid, 0)`.
+//   fg [%N]     block on a RUNNING job to completion (it becomes the
+//               foreground command) + remove it silently. Resuming a
+//               STOPPED job (Ctrl-Z + SIGCONT) needs a kernel stopped
+//               thread-state -- that is U-PTY (a Phase-7 exit criterion);
+//               v1.0 has no stopped jobs.
+//   bg [%N]     v1.0 has no stopped jobs to resume, so `bg` reports the
+//               named job is already running in the background (bash-
+//               faithful); the real resume path lands with U-PTY.
+//   kill {%N|pid} [interrupt|kill]
+//               post a note to a job's pids / a pid. Default `interrupt`
+//               (the catchable Ctrl-C analogue); `kill` is the non-
+//               catchable force. The kernel's userspace-postable set is
+//               {interrupt, kill} -- `snare:*` is kernel-synthetic-only,
+//               so scripture's `snare:term` default is unsendable from
+//               userspace and `interrupt` is the graceful default.
+//
 // === Deferred (need substrate absent at v1.0) ===
 //
 //   set / export        -- envp passing to children does not exist
@@ -40,9 +67,9 @@
 //   alias / unalias     -- needs an alias table + pre-dispatch
 //                          expansion (a later U-6 sub-chunk).
 //   read                -- needs a terminal-backed fd 0 (U-6g/PTY).
-//   wait / jobs / fg / bg -- job control (U-7).
 //   history             -- needs the line editor's history (U-6g).
-//   kill / note         -- the notes argv surface.
+//   note                -- `note send/list/wait`, the richer notes argv
+//                          surface (U-7c); `kill` already covers posting.
 //   echo / printf / test / [ / time / palette / bind / mount / ... --
 //                          their own surfaces; echo/printf already
 //                          exist as external coreutils.
@@ -53,12 +80,14 @@
 // `type` answers truthfully about what the shell actually intercepts.
 
 use alloc::string::{String, ToString};
+use alloc::vec;
 use alloc::vec::Vec;
 use core::fmt::Write as _;
 
 use libthyla_rs::fs::{self, Component, Path};
 use libthyla_rs::io::Read as _;
-use libthyla_rs::t_putstr;
+use libthyla_rs::notes::{self, NoteTarget};
+use libthyla_rs::{t_putstr, t_wait_pid_for, T_WAIT_WNOHANG};
 
 use super::env::Env;
 use super::error::EvalResult;
@@ -71,8 +100,21 @@ use super::value::Value;
 pub fn is_builtin(name: &str) -> bool {
     matches!(
         name,
-        "cd" | "pwd" | "exit" | "true" | "false" | "unset" | "eval" | "source" | "." | "type"
+        "cd" | "pwd"
+            | "exit"
+            | "true"
+            | "false"
+            | "unset"
+            | "eval"
+            | "source"
+            | "."
+            | "type"
             | "whence"
+            | "jobs"
+            | "fg"
+            | "bg"
+            | "wait"
+            | "kill"
     )
 }
 
@@ -109,6 +151,11 @@ pub fn try_builtin(env: &mut Env, argv: &[String]) -> Option<EvalResult<Statemen
         "eval" => bi_eval(env, args),
         "source" | "." => bi_source(env, args),
         "type" | "whence" => bi_type(env, args),
+        "jobs" => bi_jobs(env, args),
+        "fg" => bi_fg(env, args),
+        "bg" => bi_bg(env, args),
+        "wait" => bi_wait(env, args),
+        "kill" => bi_kill(env, args),
         _ => return None,
     };
     Some(r)
@@ -324,6 +371,294 @@ fn bi_type(env: &mut Env, args: &[String]) -> EvalResult<StatementFlow> {
             let _ = write!(&mut line, "{} is external\n", name);
         }
         t_putstr(&line);
+    }
+    env.status_set(0);
+    Ok(StatementFlow::Normal)
+}
+
+// ---------------------------------------------------------------------
+// Job control (U-7b): jobs / fg / bg / wait / kill
+// ---------------------------------------------------------------------
+
+/// WNOHANG-poll every live background pid and feed the result into the job
+/// table (the U-7-pre `wait_pid_for` ground truth). Marks reaped pids; does
+/// NOT drain `[N]+ Done` notifications -- the REPL prompt cycle (`reap_jobs`)
+/// and the `jobs` builtin own that, so a job is announced exactly once.
+/// Shared by `Repl::reap_jobs` and the `jobs` refresh. ONE poll per pid --
+/// never a busy-loop (U-7-pre F1: a hot WNOHANG loop can starve the awaited
+/// child).
+pub fn reap_background(env: &mut Env) {
+    for pid in env.jobs().live_pids() {
+        let mut st: i32 = 0;
+        // SAFETY: t_wait_pid_for is the SYS_WAIT_PID SVC wrapper; &mut st is a
+        // valid writable i32. WNOHANG -> pid (reaped) / 0 (alive) / -1 (gone).
+        let rc = unsafe { t_wait_pid_for(pid, T_WAIT_WNOHANG, &mut st as *mut i32) };
+        if rc > 0 {
+            env.jobs_mut().mark_reaped(pid, st);
+        } else if rc < 0 {
+            // No longer our child (already gone). Treat as reaped so the job
+            // can complete + be removed -- never left dangling.
+            env.jobs_mut().mark_reaped(pid, 0);
+        }
+        // rc == 0: still running -- leave it for a later poll.
+    }
+}
+
+/// Block (by-pid `wait_pid_for(pid, 0)`) on each pid in order, feeding reaps
+/// into the table. Returns the LAST successfully-waited element's status (the
+/// job's reported exit, bash semantics); 0 if none was waited. An already-
+/// reaped / vanished pid returns -1 from the kernel and is marked reaped +
+/// skipped (never spins). `pids` is an owned snapshot, so the `&mut Env`
+/// reborrow inside the loop is sound.
+fn wait_pids_blocking(env: &mut Env, pids: &[i32]) -> i32 {
+    let mut last = 0;
+    for &pid in pids {
+        let mut st: i32 = 0;
+        // SAFETY: SYS_WAIT_PID SVC wrapper; &mut st is a valid writable i32.
+        let rc = unsafe { t_wait_pid_for(pid, 0, &mut st as *mut i32) };
+        if rc > 0 {
+            env.jobs_mut().mark_reaped(pid, st);
+            last = st;
+        } else if rc < 0 {
+            env.jobs_mut().mark_reaped(pid, 0);
+        }
+    }
+    last
+}
+
+/// Resolve a `%`-prefixed jobspec to an EXISTING job's `[N]` spec. Accepts
+/// `%N`, `%%`/`%+` (current job), `%-` (previous job). Err carries a
+/// user-facing reason WITHOUT a builtin-name prefix (the caller adds it).
+fn resolve_jobspec(env: &Env, arg: &str) -> Result<u32, String> {
+    let rest = arg.strip_prefix('%').unwrap_or(arg);
+    let spec = match rest {
+        "" | "%" | "+" => env
+            .jobs()
+            .current_spec()
+            .ok_or_else(|| "no current job".to_string())?,
+        "-" => env
+            .jobs()
+            .previous_spec()
+            .ok_or_else(|| "no previous job".to_string())?,
+        n => n.parse::<u32>().map_err(|_| {
+            let mut s = String::new();
+            let _ = write!(&mut s, "invalid jobspec: {}", arg);
+            s
+        })?,
+    };
+    if env.jobs().spec_pids(spec).is_some() {
+        Ok(spec)
+    } else {
+        let mut s = String::new();
+        let _ = write!(&mut s, "no such job: %{}", spec);
+        Err(s)
+    }
+}
+
+/// Resolve `fg`/`bg`'s optional argument to an existing job spec. No argument
+/// -> the current job. A `%`-prefixed arg goes through `resolve_jobspec`; a
+/// bare decimal is a job NUMBER (bash treats fg/bg bare numbers as jobspecs,
+/// unlike wait/kill where a bare number is a pid). The returned Err is already
+/// builtin-name-prefixed.
+fn resolve_target_job(env: &Env, arg: Option<&str>, builtin: &str) -> Result<u32, String> {
+    let prefix = |m: &str| {
+        let mut s = String::new();
+        let _ = write!(&mut s, "{}: {}", builtin, m);
+        s
+    };
+    match arg {
+        None => env
+            .jobs()
+            .current_spec()
+            .ok_or_else(|| prefix("no current job")),
+        Some(a) if a.starts_with('%') => resolve_jobspec(env, a).map_err(|m| prefix(&m)),
+        Some(a) => match a.parse::<u32>() {
+            Ok(spec) if env.jobs().spec_pids(spec).is_some() => Ok(spec),
+            Ok(spec) => {
+                let mut s = String::new();
+                let _ = write!(&mut s, "{}: no such job: {}", builtin, spec);
+                Err(s)
+            }
+            Err(_) => {
+                let mut s = String::new();
+                let _ = write!(&mut s, "{}: invalid jobspec: {}", builtin, a);
+                Err(s)
+            }
+        },
+    }
+}
+
+/// `jobs` -- list the tracked background jobs. Refreshes against current truth
+/// (a WNOHANG poll) so a job that finished since the last prompt shows as Done,
+/// then CONSUMES the reported-Done jobs (one-shot `notified`) so the prompt
+/// cycle does not re-announce them -- exactly-once reporting whether observed
+/// here or at the prompt (bash semantics).
+fn bi_jobs(env: &mut Env, _args: &[String]) -> EvalResult<StatementFlow> {
+    reap_background(env);
+    let current = env.jobs().current_spec();
+    let previous = env.jobs().previous_spec();
+    let mut out = String::new();
+    for job in env.jobs().iter() {
+        let mark = if Some(job.spec()) == current {
+            '+'
+        } else if Some(job.spec()) == previous {
+            '-'
+        } else {
+            ' '
+        };
+        let state = if job.is_running() { "Running" } else { "Done" };
+        let _ = write!(&mut out, "[{}]{}  {:7}  {}\n", job.spec(), mark, state, job.cmd());
+    }
+    if !out.is_empty() {
+        t_putstr(&out);
+    }
+    // Consume the Done jobs we just listed (discard the formatted lines -- the
+    // listing above already reported them) so the prompt cycle stays quiet.
+    let _ = env.jobs_mut().take_done_notifications();
+    env.status_set(0);
+    Ok(StatementFlow::Normal)
+}
+
+/// `fg [%N]` -- bring a background job to the foreground. v1.0 has no STOPPED
+/// thread-state (Ctrl-Z stop/resume is U-PTY), so `fg` blocks on a RUNNING job
+/// to completion -- the job becomes the foreground command -- then removes it
+/// silently (its completion is this command's result, not a `[N]+ Done`
+/// event). $status is the job's exit (bash).
+fn bi_fg(env: &mut Env, args: &[String]) -> EvalResult<StatementFlow> {
+    if args.len() > 1 {
+        return fail(env, "fg: too many arguments".to_string(), 1);
+    }
+    let spec = match resolve_target_job(env, args.first().map(|s| s.as_str()), "fg") {
+        Ok(s) => s,
+        Err(m) => return fail(env, m, 1),
+    };
+    // Echo the command being foregrounded (bash prints the job's command line).
+    if let Some(cmd) = env.jobs().cmd_of(spec) {
+        let mut line = cmd.to_string();
+        line.push('\n');
+        t_putstr(&line);
+    }
+    let pids = env.jobs().spec_pids(spec).unwrap_or_default();
+    let status = wait_pids_blocking(env, &pids);
+    env.jobs_mut().remove(spec);
+    env.status_set(status);
+    Ok(StatementFlow::Normal)
+}
+
+/// `bg [%N]` -- v1.0 has no stopped jobs to resume (Ctrl-Z + SIGCONT needs a
+/// kernel stopped thread-state = U-PTY). A `&`-launched job is already running
+/// in the background, so `bg` reports that (bash-faithful), status 0. The real
+/// resume path lands with U-PTY.
+fn bi_bg(env: &mut Env, args: &[String]) -> EvalResult<StatementFlow> {
+    if args.len() > 1 {
+        return fail(env, "bg: too many arguments".to_string(), 1);
+    }
+    let spec = match resolve_target_job(env, args.first().map(|s| s.as_str()), "bg") {
+        Ok(s) => s,
+        Err(m) => return fail(env, m, 1),
+    };
+    let mut line = String::new();
+    let _ = write!(&mut line, "bg: job [{}] already running in background\n", spec);
+    t_putstr(&line);
+    env.status_set(0);
+    Ok(StatementFlow::Normal)
+}
+
+/// `wait [id...]` -- block until the named jobs/pids finish, or ALL background
+/// jobs with no argument. A `%`-prefixed id is a jobspec; a bare decimal is a
+/// child pid (bash). $status is the last id's reported exit (0 for the
+/// wait-all form). The completed jobs stay in the table; the prompt cycle (or
+/// a later `jobs`) emits their `[N]+ Done` lines -- bash prints those after
+/// `wait` too.
+fn bi_wait(env: &mut Env, args: &[String]) -> EvalResult<StatementFlow> {
+    if args.is_empty() {
+        let pids = env.jobs().live_pids();
+        wait_pids_blocking(env, &pids);
+        env.status_set(0);
+        return Ok(StatementFlow::Normal);
+    }
+    let mut last = 0;
+    for arg in args {
+        let pids = if arg.starts_with('%') {
+            let spec = match resolve_jobspec(env, arg) {
+                Ok(s) => s,
+                Err(m) => {
+                    let mut s = String::new();
+                    let _ = write!(&mut s, "wait: {}", m);
+                    return fail(env, s, 1);
+                }
+            };
+            env.jobs().spec_pids(spec).unwrap_or_default()
+        } else {
+            match arg.parse::<i32>() {
+                Ok(p) if p > 0 => vec![p],
+                _ => {
+                    let mut s = String::new();
+                    let _ = write!(&mut s, "wait: invalid target: {}", arg);
+                    return fail(env, s, 1);
+                }
+            }
+        };
+        last = wait_pids_blocking(env, &pids);
+    }
+    env.status_set(last);
+    Ok(StatementFlow::Normal)
+}
+
+/// `kill {%N | pid} [interrupt | kill]` -- post a note to a job's element pids
+/// or to a single pid. Default note `interrupt` (the catchable Ctrl-C
+/// analogue); `kill` is the non-catchable force. The kernel's userspace-
+/// postable set is {interrupt, kill}; `snare:*` is kernel-synthetic-only, so
+/// scripture's `snare:term` default is unsendable from userspace -- `interrupt`
+/// is the graceful default.
+fn bi_kill(env: &mut Env, args: &[String]) -> EvalResult<StatementFlow> {
+    if args.is_empty() || args.len() > 2 {
+        return fail(
+            env,
+            "kill: usage: kill {%job | pid} [interrupt | kill]".to_string(),
+            1,
+        );
+    }
+    let target = &args[0];
+    let name = if args.len() == 2 { args[1].as_str() } else { "interrupt" };
+    if name.starts_with("snare:") {
+        return fail(env, "kill: snare:* notes are kernel-reserved".to_string(), 1);
+    }
+    let pids = if target.starts_with('%') {
+        let spec = match resolve_jobspec(env, target) {
+            Ok(s) => s,
+            Err(m) => {
+                let mut s = String::new();
+                let _ = write!(&mut s, "kill: {}", m);
+                return fail(env, s, 1);
+            }
+        };
+        env.jobs().spec_pids(spec).unwrap_or_default()
+    } else {
+        match target.parse::<i32>() {
+            Ok(p) if p > 0 => vec![p],
+            _ => {
+                let mut s = String::new();
+                let _ = write!(&mut s, "kill: invalid target: {}", target);
+                return fail(env, s, 1);
+            }
+        }
+    };
+    if pids.is_empty() {
+        return fail(env, "kill: no matching processes".to_string(), 1);
+    }
+    let mut send_err = false;
+    for pid in pids {
+        if notes::send(NoteTarget::Pid(pid), name).is_err() {
+            send_err = true;
+        }
+    }
+    if send_err {
+        return fail(
+            env,
+            "kill: send failed (no such process or not a child)".to_string(),
+            1,
+        );
     }
     env.status_set(0);
     Ok(StatementFlow::Normal)

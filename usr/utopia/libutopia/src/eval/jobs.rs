@@ -211,6 +211,57 @@ impl JobTable {
     pub fn iter(&self) -> impl Iterator<Item = &Job> {
         self.jobs.iter()
     }
+
+    /// The `[N]` spec of the "current" job -- bash's `+` / `%%` / `%+`, the
+    /// most-recently-added (highest spec). `None` if the table is empty. The
+    /// no-argument default for `fg`/`bg` (U-7b).
+    #[must_use]
+    pub fn current_spec(&self) -> Option<u32> {
+        self.jobs.iter().map(|j| j.spec).max()
+    }
+
+    /// The `[N]` spec of the "previous" job -- bash's `-` / `%-`, the
+    /// second-most-recently-added. `None` if fewer than two jobs.
+    #[must_use]
+    pub fn previous_spec(&self) -> Option<u32> {
+        let mut specs: Vec<u32> = self.jobs.iter().map(|j| j.spec).collect();
+        specs.sort_unstable();
+        if specs.len() >= 2 {
+            Some(specs[specs.len() - 2])
+        } else {
+            None
+        }
+    }
+
+    /// Every element pid (reaped or not, in element order) of the job with
+    /// spec `spec`, or `None` if no such job. The `%N` -> pids mapping for
+    /// `wait`/`fg`/`kill` (U-7b). A by-pid wait on an already-reaped element
+    /// returns -1 from the kernel and is handled by the caller, so returning
+    /// every pid (not just the live ones) is safe.
+    #[must_use]
+    pub fn spec_pids(&self, spec: u32) -> Option<Vec<i32>> {
+        self.jobs
+            .iter()
+            .find(|j| j.spec == spec)
+            .map(|j| j.pids.iter().map(|p| p.pid).collect())
+    }
+
+    /// The rendered command line of job `spec`, or `None` if no such job
+    /// (`fg` echoes it before foregrounding, U-7b).
+    #[must_use]
+    pub fn cmd_of(&self, spec: u32) -> Option<&str> {
+        self.jobs.iter().find(|j| j.spec == spec).map(|j| j.cmd())
+    }
+
+    /// Remove job `spec` WITHOUT emitting a `[N]+ Done` notification; returns
+    /// whether a job was removed. `fg` uses this: a foregrounded job's
+    /// completion is the foreground command's result, not a background event,
+    /// so it is consumed silently (no lazy Done line at the next prompt).
+    pub fn remove(&mut self, spec: u32) -> bool {
+        let before = self.jobs.len();
+        self.jobs.retain(|j| j.spec != spec);
+        self.jobs.len() != before
+    }
 }
 
 #[cfg(test)]
@@ -336,5 +387,44 @@ mod tests {
         assert!(t.iter().next().unwrap().is_running());
         t.mark_reaped(81, 0);
         assert!(!t.iter().next().unwrap().is_running());
+    }
+
+    #[test]
+    fn current_and_previous_spec_track_recency() {
+        let mut t = JobTable::new();
+        assert_eq!(t.current_spec(), None);
+        assert_eq!(t.previous_spec(), None);
+        t.add(vec![10], "a".to_string()); // [1]
+        assert_eq!(t.current_spec(), Some(1));
+        assert_eq!(t.previous_spec(), None);
+        t.add(vec![20], "b".to_string()); // [2]
+        assert_eq!(t.current_spec(), Some(2));
+        assert_eq!(t.previous_spec(), Some(1));
+    }
+
+    #[test]
+    fn spec_pids_and_cmd_of_resolve_a_job() {
+        let mut t = JobTable::new();
+        t.add(vec![30, 31], "p | q".to_string()); // [1]
+        assert_eq!(t.spec_pids(1), Some(vec![30, 31]));
+        assert_eq!(t.cmd_of(1), Some("p | q"));
+        // A reaped element is still returned (the caller's by-pid wait copes).
+        t.mark_reaped(30, 0);
+        assert_eq!(t.spec_pids(1), Some(vec![30, 31]));
+        // No such job.
+        assert_eq!(t.spec_pids(99), None);
+        assert_eq!(t.cmd_of(99), None);
+    }
+
+    #[test]
+    fn remove_drops_silently() {
+        let mut t = JobTable::new();
+        t.add(vec![40], "x".to_string()); // [1]
+        assert!(t.remove(1));
+        assert!(t.is_empty());
+        // A removed job emits NO Done line (fg consumed it).
+        assert!(t.take_done_notifications().is_empty());
+        // Removing a non-existent spec is a no-op false.
+        assert!(!t.remove(7));
     }
 }

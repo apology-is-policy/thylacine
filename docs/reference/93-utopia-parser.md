@@ -513,7 +513,7 @@ The arith path implements precedence climbing for the integer math operators. Pr
 
 ### Arith retokenization
 
-The lexer at U-5a treats `+ - * /` as word chars (so `1+2` is one Word, and `1 + 2` is three Words: Word("1") Word("+") Word("2")). The arith parser receives these tokens and the Pratt climbing needs to see proper operator tokens.
+The lexer treats `+ - * / %` as word chars (so `1+2` is one Word, and `1 + 2` is three Words: Word("1") Word("+") Word("2")). The arith parser receives these tokens and the Pratt climbing needs to see proper operator tokens. (`%` was added to the command-context word set at U-7b — it was previously a hard `UnexpectedChar` — so a `%N` jobspec and a literal `%` argument lex as words; the retokenization below recovers the `Percent` operator in arith context, so modulo is unaffected.)
 
 Solution: when an `ExprParser` is constructed with `ExprContext::Arith`, the entire token stream is preprocessed by `retokenize_arith_stream`. For each non-integer Word token, the helper `retokenize_arith_word` walks the text and emits per-char operator tokens (`+` → Plus, `-` → Minus, `*` → Star, `/` → Slash, `%` → Percent) interleaved with digit-runs (each digit run remains a Word that the integer-literal path parses to `Integer(N)`). Pure integer Words pass through unchanged so the primary path consumes them as integer literals; Words that contain non-digit non-operator chars (e.g., `"hello"`, `"1.5"`) pass through unchanged and the primary path errors with `InvalidArithLiteral`.
 

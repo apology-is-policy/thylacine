@@ -383,7 +383,7 @@ test in isolation).
 
 ---
 
-## 9. Background jobs — the `jobs` module + `&` (U-7a)
+## 9. Background jobs + job-control builtins (U-7a / U-7b)
 
 `eval::jobs` (`jobs.rs`) is the **pure** half of job control: it records the
 pids of `&`-launched jobs, decides when a job is "done", and formats the
@@ -413,6 +413,12 @@ pub fn mark_reaped(&mut self, pid: i32, status: i32);        // idempotent; unkn
 pub fn live_pids(&self) -> Vec<i32>;                          // unreaped pids, for the WNOHANG poll
 pub fn take_done_notifications(&mut self) -> Vec<String>;     // "[N]+ Done  cmd" + removes done jobs
 pub fn is_empty(&self) -> bool;  pub fn len(&self) -> usize;  pub fn iter(&self) -> ...;
+// U-7b jobspec resolution:
+pub fn current_spec(&self) -> Option<u32>;   // %% / %+ -- highest spec (most recent)
+pub fn previous_spec(&self) -> Option<u32>;  // %-     -- second-highest
+pub fn spec_pids(&self, spec: u32) -> Option<Vec<i32>>;  // %N -> the job's element pids
+pub fn cmd_of(&self, spec: u32) -> Option<&str>;         // for `fg`'s command echo
+pub fn remove(&mut self, spec: u32) -> bool;             // `fg` consumes a job silently (no Done line)
 ```
 
 ### 9.3 `&` spawn + the foreground demux
@@ -443,6 +449,39 @@ line; the **async-while-idle** path (the notes fd in the poll set + `on note` /
 at **U-7c** — the WNOHANG poll is the complete ground truth, so deferring the
 notes machinery loses no correctness, only idle-time promptness.
 
+### 9.5 Job-control builtins (U-7b)
+
+`jobs` / `fg` / `bg` / `wait` / `kill` are dispatched through
+`builtin::try_builtin` (the same `fn → builtin → external` order as the
+U-6e-a builtins) and operate on `env.jobs_mut()` + the U-7-pre `wait_pid_for`
+primitive. `builtin::reap_background(env)` is the shared WNOHANG poll-and-mark
+half of reaping — `Repl::reap_jobs` and the `jobs` refresh both call it (the
+table is pure, so the syscall-driven poll lives here, not in `jobs.rs`).
+
+| Builtin | Behavior |
+|---|---|
+| `jobs` | Refresh (WNOHANG poll), list each job `[N]{+|-}  Running\|Done  cmd`, then CONSUME the reported-Done jobs — so a job is announced exactly once whether observed by `jobs` or by the prompt cycle (bash). |
+| `wait [id...]` | Block (by-pid `wait_pid_for(pid, 0)`) on the named jobs/pids, or ALL jobs with no argument. `$status` = the last id's exit (0 for wait-all). Completed jobs stay in the table; the prompt cycle emits their Done lines (bash prints those after `wait` too). |
+| `fg [%N]` | Block on a RUNNING job to completion (it becomes the foreground command), echo its cmd first (bash), then `remove` it silently — no `[N]+ Done`. `$status` = the job's exit. v1.0 has no STOPPED-job resume (U-PTY). |
+| `bg [%N]` | v1.0 has no stopped jobs to resume (Ctrl-Z + SIGCONT = U-PTY), so it reports the named job is already running in the background (bash-faithful), `$status` 0. |
+| `kill {%N\|pid} [interrupt\|kill]` | Post a note to a job's element pids / a pid. Default `interrupt` (catchable Ctrl-C analogue); `kill` is the non-catchable force. |
+
+**Jobspec syntax.** `%N` / `%%` / `%+` (current) / `%-` (previous) are the
+bash jobspecs; for `fg`/`bg` a bare decimal is also a job number, and for
+`wait`/`kill` a bare decimal is a child pid (bash's split). `%N` lexes because
+`%` is a command-context word char (`lexer.rs::is_word_char_byte`); it was a
+hard `UnexpectedChar` before U-7b, so the addition is purely additive and also
+fixes literal `%` arguments (`echo 100%`). Arith `%` (modulo) is unaffected —
+the expression parser re-lexes word TEXT (`retokenize_arith_word`), splitting a
+word on `%` back into the `Percent` operator in arith context.
+
+**`kill` note set.** The kernel's userspace-postable note names are
+`{interrupt, kill}` only — `snare:*` is reserved for kernel-synthetic fault
+posters (`notes_post` rejects a userspace `snare:`-prefixed name). So
+scripture §10.6's `snare:term` default is unsendable from userspace; `kill`
+defaults to `interrupt` (the same note the shell's own Ctrl-C path will deliver
+at U-7c), with `kill` for the non-catchable force.
+
 ---
 
 ## 10. Open questions deferred to later sub-chunks
@@ -452,9 +491,9 @@ notes machinery loses no correctness, only idle-time promptness.
 | `$(cmd)` substitution: how is the subshell forked, stdout captured? | U-6f |
 | ~~Redirects (`>` `<` `>>` `<<`)~~ -- **LANDED at U-6d-b** (resolve_redirects + the libthyla_rs::fs create-or-open/append lift) | ~~U-6d-b~~ done |
 | Redirect on an in-process command (fn / BraceBlock); large-heredoc-to-non-reader; atomic O_APPEND | U-6f / v1.x |
-| Job control: ~~`&` background~~ **LANDED at U-7a** (§9; `eval::jobs` + `eval_background_pipeline` + the by-pid demux + `Repl::reap_jobs`); `jobs`/`fg`/`bg`/`wait`/`kill` builtins (U-7b); note-fd polling + `on`/`mask` delivery + Ctrl-C (U-7c) | ~~U-7~~ U-7b / U-7c |
+| Job control: ~~`&` background~~ **LANDED at U-7a** (§9; `eval::jobs` + `eval_background_pipeline` + the by-pid demux + `Repl::reap_jobs`); ~~`jobs`/`fg`/`bg`/`wait`/`kill` builtins~~ **LANDED at U-7b** (§9.5); note-fd polling + `on`/`mask` delivery + Ctrl-C (U-7c) | ~~U-7 / U-7b~~ U-7c |
 | ~~Glob expansion at argv-time: file-tree walk, no-match → empty (rc nullglob)~~ -- **LANDED at U-6e-b** (-b-1 `fs::read_dir`; -b-2 `glob::expand` + `evaluate_argv`, §6.3). Recursive `**` semantics + trailing-slash dirs-only + for-list/let-RHS expansion (expr context) remain v1.x | ~~U-6e-b~~ done |
-| `set` / `export` (no envp to children yet), `alias`/`unalias` (alias table), `read` (terminal fd 0), `jobs`/`fg`/`bg`/`wait` (job control), `history`, `kill`/`note` -- deferred builtins | U-6f / U-6g / U-7 |
+| `set` / `export` (no envp to children yet), `alias`/`unalias` (alias table), `read` (terminal fd 0), `history`, `note` (`note send/list/wait`) -- deferred builtins. ~~`jobs`/`fg`/`bg`/`wait`/`kill`~~ LANDED U-7b (§9.5) | U-6g / U-7c / v1.x |
 | Subshell `( cmds )`: fork + isolated env (libthyla-rs has spawn-then-exec, not fork) | U-6f or later |
 | In-process pipeline elements (fn / BraceBlock / Arith as a stage) -- need fork | U-6f or later |
 | Richer child exit status (literal code, not kernel's binary 0/1) -- needs kernel `exit_status` u64 | Phase 5+ kernel work (deferred) |

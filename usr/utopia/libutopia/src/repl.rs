@@ -50,10 +50,10 @@
 use alloc::string::String;
 
 use libthyla_rs::io::Write as IoWrite;
-use libthyla_rs::{t_putstr, t_wait_pid_for, T_WAIT_WNOHANG};
+use libthyla_rs::t_putstr;
 
 use crate::ansi;
-use crate::eval::{eval_source, Env};
+use crate::eval::{builtin, eval_source, Env};
 use crate::line_editor::{EditorAction, LineEditor};
 use crate::palette::Role;
 
@@ -228,21 +228,10 @@ impl Repl {
     /// Public so a non-interactive probe can drive the real reap path
     /// (`/u-job-test`); the interactive shell calls it from `feed`.
     pub fn reap_jobs(&mut self) {
-        for pid in self.env.jobs().live_pids() {
-            let mut st: i32 = 0;
-            // SAFETY: t_wait_pid_for is the SYS_WAIT_PID SVC wrapper; &mut st
-            // is a valid writable i32. WNOHANG -> returns the pid (reaped),
-            // 0 (still alive), or -1 (not our child / vanished).
-            let rc = unsafe { t_wait_pid_for(pid, T_WAIT_WNOHANG, &mut st as *mut i32) };
-            if rc > 0 {
-                self.env.jobs_mut().mark_reaped(pid, st);
-            } else if rc < 0 {
-                // No longer our child (already gone). Treat as reaped so the
-                // job can complete + be removed -- never left dangling.
-                self.env.jobs_mut().mark_reaped(pid, 0);
-            }
-            // rc == 0: still running -- leave it for a later prompt cycle.
-        }
+        // The WNOHANG poll-and-mark half is shared with the `jobs` builtin's
+        // refresh (`builtin::reap_background`); the drain-and-print half is the
+        // prompt-cycle's own. One poll per live pid -- never a busy-loop.
+        builtin::reap_background(&mut self.env);
         for line in self.env.jobs_mut().take_done_notifications() {
             t_putstr(&line);
         }

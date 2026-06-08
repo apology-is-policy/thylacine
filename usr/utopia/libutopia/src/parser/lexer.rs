@@ -826,6 +826,11 @@ impl<'a> Lexer<'a> {
 /// advances by whole UTF-8 chars so multibyte sequences are
 /// preserved verbatim into Word tokens.
 fn is_word_char_byte(b: u8) -> bool {
+    // `%` is a word char in command context so a jobspec (`%1`) and a literal
+    // `%` argument (`echo 100%`, `printf %d`) lex as words rather than erroring
+    // as UnexpectedChar. Arith `%` (modulo) is unaffected: the expression
+    // parser re-lexes word TEXT (retokenize_arith_word in expr.rs), splitting
+    // a word on `%` back into the Percent operator in arith context.
     matches!(
         b,
         b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9'
@@ -837,6 +842,7 @@ fn is_word_char_byte(b: u8) -> bool {
             | b':'
             | b'@'
             | b','
+            | b'%'
             | b'*'
             | b'['
             | b']'

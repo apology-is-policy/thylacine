@@ -162,16 +162,18 @@ When joey spawns `/ut` bare for the boot smoke, the child has **no fd 0**
 banner. That is the link + boot + banner smoke; the real loop is exercised
 deterministically by `/u-repl-test`.
 
-### 3.6 Background-job reaping (U-7a)
+### 3.6 Background-job reaping (U-7a; reaper shared at U-7b)
 
 `Repl::reap_jobs(&mut self)` is the **syscall-driven** half of job tracking
 (the `JobTable` in `Env` is pure — `docs/reference/94-utopia-eval.md` §9). It
 runs in the `Accept` branch after `run_line` and before the fresh prompt
 (bash's `[N]+ Done`-before-prompt ordering, so a job that finished while the
-just-run foreground command was waiting is reported now). For each
+just-run foreground command was waiting is reported now). The poll-and-mark
+half is `builtin::reap_background(env)` (extracted at U-7b and shared with the
+`jobs` builtin's refresh — `94-utopia-eval.md` §9.5): for each
 `env.jobs().live_pids()` it does ONE `wait_pid_for(pid, T_WAIT_WNOHANG)` —
 reaped → `mark_reaped`, `-1` (gone) → `mark_reaped(pid, 0)` so the job still
-completes, `0` (alive) → leave it — then `t_putstr`s each
+completes, `0` (alive) → leave it. `reap_jobs` then `t_putstr`s each
 `take_done_notifications()` line. One poll per live pid per prompt, never a
 busy-loop (U-7-pre F1: a hot WNOHANG loop can starve the awaited child). It is
 `pub` so the `/u-job-test` probe can drive the real reap path. A bg job that
