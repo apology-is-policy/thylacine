@@ -285,11 +285,19 @@ void handle_table_free(struct HandleTable *t) {
     // per-kind release path so underlying refcounts (KOBJ_BURROW at P2-Fd)
     // are decremented correctly even on orphan-table cleanup.
     //
-    // #844: NO table lock here -- this is the teardown path, reached only at
-    // proc_free (thread_count == 0) or orphan-table cleanup, so no sibling
-    // thread can race the table (the same single-threaded-by-construction
-    // guarantee as vma_drain). The release MUST run lockless anyway (it may
-    // sleep). The slot-zeroing is belt-and-suspenders before the cache free.
+    // #844: NO table lock here -- this is the teardown path. It is reached at
+    // proc_free (thread_count == 0), at orphan-table cleanup, AND (since #926)
+    // at SINGLE-thread exit (exits(), thread_count == 1, Proc still ALIVE).
+    // It is lockless-safe because at EVERY one of those call sites the Proc
+    // has at most ONE live thread (thread_count <= 1) AND no production path
+    // ever touches a FOREIGN ALIVE Proc's handle table -- every handle op
+    // derives its Proc from current_thread()->proc (self). So the sole thread
+    // freeing the table cannot race a sibling. (The release MUST run lockless
+    // regardless -- it may sleep.) FOOTGUN: a future cross-Proc handle
+    // accessor -- e.g. a /proc/<pid>/fd surface inspecting a LIVE peer's
+    // table -- breaks premise (b) and would need the table lock here AND
+    // coordination with the #926 at-exit close. The slot-zeroing is
+    // belt-and-suspenders before the cache free.
     for (int i = 0; i < PROC_HANDLE_MAX; i++) {
         if (t->slots[i].magic == HANDLE_MAGIC) {
             handle_release_obj(t->slots[i].kind, t->slots[i].obj);

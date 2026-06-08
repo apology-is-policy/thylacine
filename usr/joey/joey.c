@@ -1950,6 +1950,28 @@ int main(void) {
     }
     t_putstr("joey: /u-glob-test reaped status=0; U-6e-b-2 glob verified\n");
 
+    // === /u-subst-test orchestration (Phase 7 U-6f) ===
+    // Command substitution: $(cmd) / `{cmd} capture an external redirect-free
+    // pipeline's stdout (drain-to-EOF-before-reap), trim trailing newlines,
+    // and substitute it -- field-split in bare context, inline in "...".
+    // Runs PRE-pivot (echo/seq/tr/true/false all spawn by name) and asserts
+    // capture+trim, split vs no-split, pipeline-body capture, the backtick
+    // form, $status propagation (scripture 8.7), and that <(cmd) process
+    // substitution stays NotImplemented. status==0 gates the boot.
+    const char u_subst_name[] = "u-subst-test";
+    long usb_pid = t_spawn(u_subst_name, sizeof(u_subst_name) - 1);
+    if (usb_pid <= 0) {
+        t_putstr("joey: t_spawn(\"u-subst-test\") FAILED\n");
+        return 1;
+    }
+    int usb_status = -1;
+    long usb_reaped = t_wait_pid(&usb_status);
+    if (usb_reaped != usb_pid || usb_status != 0) {
+        t_putstr("joey: /u-subst-test orchestration FAILED\n");
+        return 1;
+    }
+    t_putstr("joey: /u-subst-test reaped status=0; U-6f command substitution verified\n");
+
     // === /ut orchestration (Phase 7 U-3 -- Utopia shell skeleton) ===
     // `ut` is the Utopia shell binary; at U-3 its scope is the Pale
     // Fire version banner via libutopia + clean exit. The U-4..U-Z

@@ -1,0 +1,21 @@
+[package]
+name = "u-subst-test"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "u-subst-test"
+path = "src/main.rs"
+
+[dependencies]
+# u-subst-test is the U-6f command-substitution boot probe. It runs
+# PRE-pivot (flat devramfs root, where echo/seq/tr/true/false all spawn)
+# and drives libutopia::eval::eval_source + Env: it asserts $(cmd) capture
+# + trailing-newline trim, bare-context whitespace field-split, "$(cmd)"
+# inline no-split, pipeline-body capture, the `{cmd} backtick form, $status
+# propagation (scripture 8.7), and that <(cmd) process substitution stays
+# NotImplemented.
+libthyla-rs = { path = "../lib/libthyla-rs" }
+libutopia = { path = "../utopia/libutopia" }

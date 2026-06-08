@@ -381,12 +381,18 @@ void proc_free(struct Proc *p) {
     territory_unref(p->territory);
     p->territory = NULL;
 
-    // P2-Fc: release the handle table. Closes any in-use slots first
-    // (defensive — well-behaved Procs close all handles before exits;
-    // but a Proc that crashed mid-session leaves stragglers). The
-    // handle-close cascade includes any open devnotes Spoors — those run
-    // devnotes_close which clears Spoor state without touching p->notes,
-    // so the queue is still valid for the notes_queue_free that follows.
+    // P2-Fc: release the handle table. #926: normally ALREADY closed at
+    // exit (proc_close_handles_at_exit on the exits()/thread_exit_self
+    // zombie path NULLs p->handles), so this is a handle_table_free(NULL)
+    // no-op for the common case -- a Proc's fds close at process exit, not
+    // here at reap. This call remains the fallback for the direct
+    // `state=ZOMBIE; proc_free()` paths (orphan re-parent / early-boot
+    // alloc rollback) that never run the at-exit close, so p->handles is
+    // still set there. The handle-close cascade includes any open devnotes
+    // Spoors -- devnotes_close clears Spoor state without touching
+    // p->notes, so the queue stays valid for the notes_queue_free below
+    // (and the at-exit close preserves the same close-before-free order:
+    // exit precedes reap).
     handle_table_free(p->handles);
     p->handles = NULL;
 
@@ -1194,6 +1200,59 @@ static void proc_become_zombie_locked(struct Proc *p, int status, const char *ms
     }
 }
 
+// #926 (U-6f command-substitution prerequisite): close + free a SINGLE-thread
+// Proc's handle table at process exit, NOT deferred to reap. A process's
+// inherited file descriptors -- pipe write ends, sockets, /srv connections --
+// thus close when the PROCESS terminates, which is the correct Unix / Plan 9
+// semantics: a peer reading the dying process's pipe sees EOF immediately,
+// instead of blocking until the (possibly much later) parent wait_pid reaps
+// it. Before this, a shell draining `$(cmd)`'s stdout to EOF would hang --
+// the child's pipe write end stayed open in the zombie until reap, so
+// write_eof was never delivered (kernel/pipe.c).
+//
+// CALLED FROM exits() at the TOP, BEFORE the g_proc_table_lock acquire +
+// the ZOMBIE transition, and ONLY when p->thread_count == 1. Three
+// properties make this the sound place:
+//   - t is still RUNNING (EXITING is not set until under the lock below), so
+//     a sleep-capable close hook (a 9P clunk's Tclunk/Rclunk wait,
+//     srvconn teardown) is LEGAL -- sleeping while EXITING trips sched()'s
+//     "current is not RUNNING" assertion.
+//   - p is still ALIVE (not yet ZOMBIE), so wait_pid cannot reap it -- there
+//     is no risk that the reaper thread_free's this Thread while it sleeps
+//     mid-close (a UAF). The reaper only ever touches ZOMBIE Procs.
+//   - thread_count == 1, so there are NO peer Threads sharing this handle
+//     table -- closing it cannot pull an fd out from under a live peer.
+//
+// MULTI-thread Procs (thread_count > 1) keep the close at reap (proc_free):
+// their last-Thread ZOMBIE transition marks the Thread EXITING ATOMICALLY
+// (under the lock) with the last-Thread determination, leaving no RUNNING
+// window in which the dying Thread could do a sleeping close. Closing the
+// shared table earlier would race live peers. Multi-thread fds-close-at-exit
+// is a v1.x refinement (needs an EXITING-protocol restructure); at v1.0 they
+// retain the historical close-at-reap, so this is a strict improvement with
+// no regression.
+//
+// ORDERING vs proc_free's vma_drain (which still runs at reap): inverted
+// (handle close at exit precedes vma_drain at reap), but SAFE by the #847
+// per-Burrow dual refcount -- a Burrow frees only when BOTH handle_count==0
+// AND mapping_count==0, so dropping handle_count here while a VMA still maps
+// it (mapping_count>0) does not free it; vma_drain at reap drops the last
+// mapping ref and frees. The handle-before-notes order (devnotes_close
+// before notes_queue_free) is preserved: this close happens-before
+// proc_free's notes_queue_free (exit precedes reap).
+//
+// IDEMPOTENT: a Proc that does NOT pass through here (multi-thread, or a
+// direct `state=ZOMBIE; proc_free()` orphan/rollback path) keeps p->handles
+// set and proc_free's handle_table_free closes it; this path NULLs p->handles
+// so proc_free's handle_table_free(NULL) no-ops. No double-free either way.
+static void proc_close_handles_at_exit(struct Proc *p) {
+    if (!p) return;
+    if (p->handles) {
+        handle_table_free(p->handles);
+        p->handles = NULL;
+    }
+}
+
 // Internal: count peer Threads that are NOT in THREAD_EXITING state
 // (i.e. still live — RUNNING / RUNNABLE / SLEEPING / etc.) AND are not
 // `self`. MUST be called UNDER g_proc_table_lock.
@@ -1362,6 +1421,22 @@ void exits(const char *msg) {
     // stripes, no accidental elevation), but cleanup frees the table slot.
     cap_proc_exit_notify(p);
 
+    // #926: a SINGLE-thread Proc closes its fds HERE -- at exit, while still
+    // RUNNING + ALIVE + peerless -- so inherited pipe write ends (and other
+    // fds) close at process termination, delivering pipe EOF immediately to a
+    // peer reading them (a shell draining `$(cmd)` no longer hangs). This is
+    // the ONLY sound spot: t is still RUNNING (a sleep-capable close hook,
+    // e.g. a 9P clunk, is legal -- it would trip sched()'s "not RUNNING"
+    // assert after the EXITING mark below); p is still ALIVE so wait_pid
+    // cannot reap+thread_free us mid-close; and thread_count==1 means no peer
+    // shares this table. Multi-thread Procs keep the close at reap (proc_free)
+    // -- their last-Thread EXITING mark is atomic-under-lock with the
+    // last-Thread determination, leaving no RUNNING window for a sleeping
+    // close (v1.x refinement). See proc_close_handles_at_exit.
+    if (p->thread_count == 1) {
+        proc_close_handles_at_exit(p);
+    }
+
     // P3-A (R5-H F75 close): all lineage mutations + parent wakeup
     // happen UNDER g_proc_table_lock atomically. The previous code did
     // these without synchronization, allowing a parallel parent's
@@ -1514,6 +1589,19 @@ void thread_exit_self(void) {
     if (become_zombie) {
         srv_proc_exit_notify(p);
         cap_proc_exit_notify(p);
+        // #926: NO at-exit handle close here. A multi-thread Proc's fds close
+        // at reap (proc_free) -- the EXITING mark above is atomic-under-lock
+        // with the last-Thread determination, so there is no RUNNING window
+        // in which this dying Thread could safely run a sleep-capable close;
+        // and the table was shared with peers until just now. Multi-thread
+        // fds-close-at-exit is a v1.x refinement. Single-thread Procs that exit
+        // VOLUNTARILY (return from main -> exits()) DO close at exit. KNOWN
+        // ASYMMETRY: a single-thread Proc that is KILLED (proc_group_terminate
+        // -> el0_return_die_check -> thread_exit_self) reaches HERE, so its fds
+        // also defer to reap -- the EOF-on-death contract is complete for
+        // voluntary exit but not yet for the kill path. The v1.x EXITING-
+        // protocol restructure (which enables multi-thread at-exit close)
+        // closes the kill path too. See proc_close_handles_at_exit.
     }
 
     sched();

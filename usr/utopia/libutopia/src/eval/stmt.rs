@@ -134,7 +134,7 @@ use crate::parser::token::{DqPart, Token, TokenKind};
 use crate::parser::Span;
 
 use libthyla_rs::fs::{File, OpenOptions};
-use libthyla_rs::io::Write as IoWrite;
+use libthyla_rs::io::{Read as IoRead, Write as IoWrite};
 use libthyla_rs::process::{pipe, Stdio};
 use libthyla_rs::{t_putstr, t_wait_pid};
 
@@ -436,7 +436,8 @@ fn redir_open_err(op: &str, path: &str, e: impl core::fmt::Debug) -> String {
 /// Render a heredoc body (`Vec<DqPart>`) to bytes. Mirrors
 /// `eval_dq_in_word`: literals copy through, `$var` interpolates (only
 /// present when the heredoc was interpolating), `$#var` -> length,
-/// `$(cmd)` is NotImplemented (U-6f).
+/// `$(cmd)` substitutes the command's stdout verbatim (no field split --
+/// a heredoc body is text, like a double-quoted string).
 fn render_heredoc_body(env: &Env, parts: &[DqPart], span: Span) -> EvalResult<String> {
     let mut out = String::new();
     for part in parts {
@@ -446,11 +447,8 @@ fn render_heredoc_body(env: &Env, parts: &[DqPart], span: Span) -> EvalResult<St
             DqPart::VarLen(name) => {
                 let _ = write!(out, "{}", env.get(name).len());
             }
-            DqPart::Subst(_) => {
-                return Err(EvalError::new(
-                    EvalErrorKind::NotImplemented("$(cmd) in heredoc (U-6f)"),
-                    span,
-                ));
+            DqPart::Subst(body) => {
+                out.push_str(&run_command_substitution(env, body, span)?);
             }
         }
     }
@@ -876,11 +874,16 @@ pub fn aggregate_pipefail(elements: &[(i32, bool)]) -> i32 {
 fn eval_command(env: &mut Env, cmd: &Command) -> EvalResult<StatementFlow> {
     match &cmd.kind {
         CommandKind::Simple(simple) => {
+            // Default this command to success BEFORE expanding argv. A
+            // command substitution in the words sets $status to the
+            // inner exit (scripture 8.7); a bare `$(cmd)` line that
+            // expands to nothing must then PRESERVE that exit, while a
+            // substitution-free empty expansion ($undef-only line) still
+            // reports 0. (Setting 0 up front + not resetting on the
+            // empty-argv path achieves both.)
+            env.status_set(0);
             let argv = evaluate_argv(env, &simple.words)?;
             if argv.is_empty() {
-                // All words evaluated to empty (e.g., $undef-only
-                // line). rc convention: status 0.
-                env.status_set(0);
                 return Ok(StatementFlow::Normal);
             }
             // Resolution order (scripture 9.1): fn -> builtin ->
@@ -1186,20 +1189,18 @@ fn eval_value_token(env: &Env, tok: &Token) -> EvalResult<Value> {
             let v = env.get(name);
             Ok(Value::scalar(v.joined(" ")))
         }
-        TokenKind::Subst(_) => Err(EvalError::new(
-            EvalErrorKind::NotImplemented("$(cmd) substitution"),
-            tok.span,
-        )),
-        TokenKind::Backtick(_) => Err(EvalError::new(
-            EvalErrorKind::NotImplemented("`{cmd} substitution"),
-            tok.span,
-        )),
-        TokenKind::ProcSubIn(_) => Err(EvalError::new(
-            EvalErrorKind::NotImplemented("<(cmd) process substitution"),
-            tok.span,
-        )),
-        TokenKind::ProcSubOut(_) => Err(EvalError::new(
-            EvalErrorKind::NotImplemented(">(cmd) process substitution"),
+        // Bare-word context: a command substitution's output is split on
+        // whitespace into a list (rc's default $ifs -- scripture 6.3 +
+        // 6.6). `$(echo a b)` is two words; `for f in $(ls)` iterates.
+        TokenKind::Subst(body) | TokenKind::Backtick(body) => {
+            let captured = run_command_substitution(env, body, tok.span)?;
+            Ok(Value::list(split_fields(&captured)))
+        }
+        TokenKind::ProcSubIn(_) | TokenKind::ProcSubOut(_) => Err(EvalError::new(
+            // Process substitution needs a `/proc/self/fd/N` namespace
+            // surface (scripture 6.12) the kernel does not expose yet; a
+            // separable v1.x feature, not a dependency of `$(cmd)`.
+            EvalErrorKind::NotImplemented("process substitution <(cmd) / >(cmd)"),
             tok.span,
         )),
         _ => Err(EvalError::new(
@@ -1220,11 +1221,10 @@ fn eval_dq_in_word(env: &Env, parts: &[DqPart], tok: &Token) -> EvalResult<Value
             DqPart::VarLen(name) => {
                 let _ = write!(out, "{}", env.get(name).len());
             }
-            DqPart::Subst(_) => {
-                return Err(EvalError::new(
-                    EvalErrorKind::NotImplemented("$(cmd) substitution"),
-                    tok.span,
-                ));
+            // Inside `"..."` a substitution is inserted verbatim (no
+            // field split) -- the surrounding quotes make it one word.
+            DqPart::Subst(body) => {
+                out.push_str(&run_command_substitution(env, body, tok.span)?);
             }
         }
     }
@@ -1232,20 +1232,322 @@ fn eval_dq_in_word(env: &Env, parts: &[DqPart], tok: &Token) -> EvalResult<Value
 }
 
 // ---------------------------------------------------------------------
+// Command substitution (U-6f)
+// ---------------------------------------------------------------------
+//
+// `$(cmd)` and `` `{cmd} `` run `cmd` and substitute its stdout, trimmed
+// of trailing newlines (scripture 6.6), at the call site. A bare-word
+// substitution whitespace-splits the result into a list (rc's default
+// $ifs); one inside `"..."` (or a heredoc body) is inserted verbatim
+// with no split.
+//
+// v1.0 scope: the body must parse to a SINGLE redirect-free pipeline of
+// EXTERNAL simple commands (1+ elements). The common forms -- `$(echo
+// x)`, `$(date)`, `$(seq 1 9)`, `$(cmd | filter)` -- all fit. Anything
+// else (a builtin / function / control-flow / multi-statement body / a
+// per-element redirect) is NotImplemented for two reasons: capturing an
+// IN-PROCESS command's output would need a fork (or a redirect of the
+// shell's own UART sink) that v1.0 lacks; AND running an in-process body
+// here would leak its env mutations into the parent shell, which a
+// substitution must not do (scripture 6.6: "run cmd in a subshell").
+// Restricting to a pure external pipeline keeps the capture deadlock-free
+// (drain-before-reap) AND keeps the parent env untouched. Process
+// substitution `<(cmd)`/`>(cmd)` stays NotImplemented (scripture 6.12
+// wants a `/proc/self/fd/N` namespace surface the kernel does not expose
+// yet -- a separable v1.x feature).
+//
+// Status (scripture 8.7: "inside $(cmd) a non-zero exit DOES propagate
+// up"): the inner pipeline's pipefail-aggregated exit becomes `$status`.
+// This is why `$status` is a `Cell` (env.rs) -- the substitution runs
+// inside the `&Env` expression evaluator. A spawn failure reports 127
+// (command-not-found convention); `$errstr` is left unchanged (a v1.0
+// simplification -- substitution failure is observable via `$status`).
+// `$(cmd?)` / `$(try { } catch { })` (scripture 8.7 tolerate forms)
+// imply a multi-statement / in-process body and are NotImplemented at
+// v1.0; tolerate the failure at the OUTER level (`||`, an enclosing
+// `try`) instead.
+
+/// Run a command-substitution body (raw source) and return its stdout,
+/// trimmed of trailing newlines. Used by the token/DqPart layer, where a
+/// substitution body is stored as raw bytes (`TokenKind::Subst(String)`,
+/// `DqPart::Subst(String)`) and re-parsed here. Sets `$status` to the
+/// inner command's exit. Takes `&Env` (it sets `$status` through the
+/// `Cell`), so it composes with nested substitution under the immutable
+/// expression evaluator.
+pub(crate) fn run_command_substitution(
+    env: &Env,
+    body: &str,
+    span: Span,
+) -> EvalResult<String> {
+    use crate::parser::parse;
+
+    let script = parse(body).map_err(|_e| {
+        EvalError::new(
+            EvalErrorKind::Internal("command substitution parse failed"),
+            span,
+        )
+    })?;
+    run_command_substitution_script(env, &script, span)
+}
+
+/// The substitution core, over an already-parsed `Script`. The expr-layer
+/// (`ExprKind::Subst(Box<Script>)`) holds a pre-parsed body and calls here
+/// directly; the raw-body wrapper above parses first. See the section
+/// header for the v1.0 body-shape restriction + status semantics.
+pub(crate) fn run_command_substitution_script(
+    env: &Env,
+    script: &Script,
+    span: Span,
+) -> EvalResult<String> {
+    // Empty body (`$()` or all-whitespace): a no-op -- empty output, success.
+    if script.statements.is_empty() {
+        env.status_set(0);
+        return Ok(String::new());
+    }
+    if script.statements.len() != 1 {
+        return Err(EvalError::new(
+            EvalErrorKind::NotImplemented("command substitution body must be a single pipeline (v1.0)"),
+            span,
+        ));
+    }
+    let p = match &script.statements[0].kind {
+        StatementKind::Pipeline(p) => p,
+        _ => {
+            return Err(EvalError::new(
+                EvalErrorKind::NotImplemented("command substitution body must be a command (v1.0)"),
+                span,
+            ));
+        }
+    };
+    if p.background {
+        return Err(EvalError::new(
+            EvalErrorKind::NotImplemented("background in command substitution"),
+            span,
+        ));
+    }
+
+    // Every element must be a redirect-free EXTERNAL simple command.
+    let mut argvs: Vec<Vec<String>> = Vec::with_capacity(p.elements.len());
+    for elem in &p.elements {
+        let cmd = &elem.command;
+        if !cmd.redirects.is_empty() {
+            return Err(EvalError::new(
+                EvalErrorKind::NotImplemented("redirect in command substitution (v1.0)"),
+                span,
+            ));
+        }
+        let simple = match &cmd.kind {
+            CommandKind::Simple(s) => s,
+            _ => {
+                return Err(EvalError::new(
+                    EvalErrorKind::NotImplemented("non-simple command in command substitution (v1.0)"),
+                    span,
+                ));
+            }
+        };
+        let argv = evaluate_argv(env, &simple.words)?;
+        if argv.is_empty() {
+            // An element that expands to nothing ($undef). With one
+            // element this is an empty command (no output, success); a
+            // multi-element pipeline with an empty element is degenerate.
+            // Either way produce empty output + success rather than
+            // spawning a nameless child.
+            env.status_set(0);
+            return Ok(String::new());
+        }
+        if env.fn_get(&argv[0]).is_some() {
+            return Err(EvalError::new(
+                EvalErrorKind::NotImplemented("function in command substitution (v1.0)"),
+                span,
+            ));
+        }
+        if builtin::is_builtin(&argv[0]) {
+            return Err(EvalError::new(
+                EvalErrorKind::NotImplemented("builtin in command substitution (v1.0)"),
+                span,
+            ));
+        }
+        argvs.push(argv);
+    }
+
+    let tolerate: Vec<bool> = p.elements.iter().map(|e| e.tolerate_failure).collect();
+    Ok(capture_external_pipeline(env, &argvs, &tolerate))
+}
+
+/// Spawn an external pipeline (1+ elements), capturing the last element's
+/// stdout and returning it trimmed of trailing newlines. Sets `$status`
+/// to the pipefail-aggregated exit (127 on spawn failure).
+///
+/// Deadlock-free by drain-before-reap: the capture read end is drained to
+/// EOF BEFORE any `wait`, so an element stalled on a full pipe is
+/// unblocked by our read (the same discipline `exec_pipeline` uses for
+/// spawn-all-before-wait). EOF arrives when the last element exits and
+/// its write end -- the only remaining copy, ours was consumed into the
+/// child by `spawn` -- closes. Reaping is wait-any + pid-match, sound
+/// here because the only outstanding children are this substitution's:
+/// every prior command was reaped synchronously and the outer command
+/// has not spawned yet (all argv -- including nested substitutions -- is
+/// evaluated before the outer spawn).
+fn capture_external_pipeline(
+    env: &Env,
+    argvs: &[Vec<String>],
+    tolerate: &[bool],
+) -> String {
+    let n = argvs.len();
+
+    // The capture pipe: the last element writes here; we hold + drain the
+    // read end. On allocation failure, report failure with empty output.
+    let (cap_rd, cap_wr) = match pipe() {
+        Ok(p) => p,
+        Err(_) => {
+            env.status_set(1);
+            return String::new();
+        }
+    };
+
+    // N-1 internal pipes: element j's stdout -> element j+1's stdin.
+    let mut stdin_files: Vec<Option<File>> = (0..n).map(|_| None).collect();
+    let mut stdout_files: Vec<Option<File>> = (0..n).map(|_| None).collect();
+    for j in 0..n - 1 {
+        match pipe() {
+            Ok((rd, wr)) => {
+                stdout_files[j] = Some(wr);
+                stdin_files[j + 1] = Some(rd);
+            }
+            Err(_) => {
+                env.status_set(1);
+                return String::new();
+            }
+        }
+    }
+    // The last element's stdout is the capture write end.
+    stdout_files[n - 1] = Some(cap_wr);
+
+    // Spawn each element. Stdio::File ends are consumed into the child by
+    // spawn(); the outer stdin (element 0) + every stderr take the v1.0
+    // Piped+immediate-drop convention (the shell has no terminal-backed
+    // fd). A mid-pipeline spawn failure stops spawning; we still drain +
+    // reap what launched (their ends + the un-spawned ends drop at return).
+    let mut pids: Vec<i32> = Vec::with_capacity(n);
+    let mut spawn_failed = false;
+    for i in 0..n {
+        let argv = &argvs[i];
+        let mut spawn_cmd = libthyla_rs::process::Command::new(argv[0].clone());
+        if argv.len() > 1 {
+            spawn_cmd.args(argv[1..].iter().cloned());
+        }
+        match stdin_files[i].take() {
+            Some(f) => {
+                spawn_cmd.stdin(Stdio::File(f));
+            }
+            None => {
+                spawn_cmd.stdin(Stdio::Piped);
+            }
+        }
+        match stdout_files[i].take() {
+            Some(f) => {
+                spawn_cmd.stdout(Stdio::File(f));
+            }
+            None => {
+                spawn_cmd.stdout(Stdio::Piped);
+            }
+        }
+        spawn_cmd.stderr(Stdio::Piped);
+        match spawn_cmd.spawn() {
+            Ok(mut child) => {
+                drop(child.stdin.take());
+                drop(child.stdout.take());
+                drop(child.stderr.take());
+                pids.push(child.pid());
+            }
+            Err(_) => {
+                spawn_failed = true;
+                break;
+            }
+        }
+    }
+
+    // Drain the capture read end to EOF (before reaping -- see fn note).
+    let mut out_bytes: Vec<u8> = Vec::new();
+    {
+        let mut rd = cap_rd;
+        let _ = rd.read_to_end(&mut out_bytes);
+    }
+
+    // Reap every spawned child (wait-any + pid match).
+    let mut statuses: Vec<i32> = (0..pids.len()).map(|_| 0i32).collect();
+    let mut reaped: Vec<bool> = (0..pids.len()).map(|_| false).collect();
+    for _ in 0..pids.len() {
+        let mut st: i32 = 0;
+        // SAFETY: t_wait_pid is the SYS_WAIT_PID SVC wrapper; &mut st is a
+        // valid writable i32.
+        let rc = unsafe { t_wait_pid(&mut st as *mut i32) };
+        if rc < 0 {
+            break;
+        }
+        let reaped_pid = rc as i32;
+        if let Some(idx) = pids.iter().position(|&pp| pp == reaped_pid) {
+            if !reaped[idx] {
+                statuses[idx] = st;
+                reaped[idx] = true;
+            }
+        }
+    }
+
+    if spawn_failed {
+        env.status_set(127);
+    } else {
+        // pids.len() == n here (no early break), so tolerate[i] is in
+        // bounds for every status.
+        let pairs: Vec<(i32, bool)> = statuses
+            .iter()
+            .enumerate()
+            .map(|(i, &st)| (st, tolerate[i]))
+            .collect();
+        env.status_set(aggregate_pipefail(&pairs));
+    }
+
+    trim_trailing_newlines(out_bytes)
+}
+
+/// Lossy-decode captured bytes to a String, stripping every trailing
+/// newline (scripture 6.6). Lossy (like ReadDir) because command output
+/// need not be valid UTF-8.
+fn trim_trailing_newlines(bytes: Vec<u8>) -> String {
+    let mut s = String::from_utf8_lossy(&bytes).into_owned();
+    while s.ends_with('\n') {
+        s.pop();
+    }
+    s
+}
+
+/// Split a captured substitution string on whitespace into fields,
+/// dropping empties (rc's default `$ifs` = space/tab/newline). The
+/// bare-word substitution path; the quoted path inserts the string whole.
+pub(crate) fn split_fields(s: &str) -> Vec<String> {
+    s.split_whitespace().map(String::from).collect()
+}
+
+// ---------------------------------------------------------------------
 // Assignment + declarations
 // ---------------------------------------------------------------------
 
 fn eval_let(env: &mut Env, stmt: &LetStmt) -> EvalResult<StatementFlow> {
+    // An assignment succeeds (status 0) UNLESS a command substitution in
+    // the RHS fails -- in which case the substitution's non-zero exit
+    // propagates (scripture 8.7: `let output = $(cmd)`). Set the default
+    // 0 BEFORE evaluating, let a substitution override it, and do NOT
+    // reset afterward (a post-eval reset would mask the failure).
+    env.status_set(0);
     let v = eval_expr(env, &stmt.value)?;
     env.let_set(stmt.name.clone(), v);
-    env.status_set(0);
     Ok(StatementFlow::Normal)
 }
 
 fn eval_assign(env: &mut Env, stmt: &AssignStmt) -> EvalResult<StatementFlow> {
+    env.status_set(0);
     let v = eval_expr(env, &stmt.value)?;
     env.assign(stmt.name.clone(), v);
-    env.status_set(0);
     Ok(StatementFlow::Normal)
 }
 

@@ -86,6 +86,7 @@ use crate::parser::token::DqPart;
 use super::env::Env;
 use super::error::{EvalError, EvalErrorKind, EvalResult};
 use super::glob;
+use super::stmt::{run_command_substitution, run_command_substitution_script, split_fields};
 use super::value::Value;
 
 /// Evaluate an `Expr` against an `Env`. Pure function with respect
@@ -121,21 +122,21 @@ pub fn eval_expr(env: &Env, expr: &Expr) -> EvalResult<Value> {
             Ok(slice_inclusive(&v, lo, hi))
         }
 
-        // === Deferred substitutions ===
-        ExprKind::Subst(_) => Err(EvalError::new(
-            EvalErrorKind::NotImplemented("$(cmd) substitution"),
-            expr.span,
-        )),
-        ExprKind::Backtick(_) => Err(EvalError::new(
-            EvalErrorKind::NotImplemented("`{cmd} substitution"),
-            expr.span,
-        )),
-        ExprKind::ProcSubIn(_) => Err(EvalError::new(
-            EvalErrorKind::NotImplemented("<(cmd) process substitution"),
-            expr.span,
-        )),
-        ExprKind::ProcSubOut(_) => Err(EvalError::new(
-            EvalErrorKind::NotImplemented(">(cmd) process substitution"),
+        // === Substitutions (U-6f) ===
+        // The expr layer holds a PRE-PARSED body (`Box<Script>`); run it
+        // directly. Value context whitespace-splits the captured output
+        // into a list (rc $ifs), like the bare-word path. See
+        // stmt::run_command_substitution_script for the v1.0 body-shape
+        // restriction + the $status semantics (scripture 6.6 + 8.7).
+        ExprKind::Subst(script) | ExprKind::Backtick(script) => {
+            let captured = run_command_substitution_script(env, script, expr.span)?;
+            Ok(Value::list(split_fields(&captured)))
+        }
+        ExprKind::ProcSubIn(_) | ExprKind::ProcSubOut(_) => Err(EvalError::new(
+            // Process substitution needs a `/proc/self/fd/N` namespace
+            // surface (scripture 6.12) the kernel does not expose yet --
+            // a separable v1.x feature, not a dependency of `$(cmd)`.
+            EvalErrorKind::NotImplemented("process substitution <(cmd) / >(cmd)"),
             expr.span,
         )),
         ExprKind::Regex(pat) => Ok(Value::scalar(pat.clone())),
@@ -176,11 +177,11 @@ fn eval_dq(env: &Env, parts: &[DqPart], outer: &Expr) -> EvalResult<Value> {
             DqPart::VarLen(name) => {
                 let _ = write!(out, "{}", env.get(name).len());
             }
-            DqPart::Subst(_) => {
-                return Err(EvalError::new(
-                    EvalErrorKind::NotImplemented("$(cmd) substitution"),
-                    outer.span,
-                ));
+            // Inside `"..."` a substitution is inserted verbatim (no field
+            // split). The DqPart body is raw source, so re-parse via the
+            // string entry point.
+            DqPart::Subst(body) => {
+                out.push_str(&run_command_substitution(env, body, outer.span)?);
             }
         }
     }
@@ -651,10 +652,15 @@ mod tests {
         assert_eq!(v.as_scalar(), "count=2");
     }
 
+    // Command substitution `$(cmd)` is implemented (U-6f) -- it spawns the
+    // inner command, so it cannot be exercised by a host `cargo test` (no
+    // syscall surface). The boot probe /u-subst-test covers it in-VM.
+    // Process substitution `<(cmd)` / `>(cmd)` remains NotImplemented
+    // (needs a /proc/self/fd/N surface); assert that here.
     #[test]
-    fn subst_not_implemented() {
+    fn procsub_not_implemented() {
         let env = Env::new();
-        let err = eval_str(&env, "$(echo hi)", ExprContext::Value).unwrap_err();
+        let err = eval_str(&env, "<(echo hi)", ExprContext::Value).unwrap_err();
         assert!(matches!(err.kind, EvalErrorKind::NotImplemented(_)));
     }
 

@@ -250,6 +250,68 @@ fn flow_process_pipe() -> Result<(), i64> {
         return Err(1);
     }
 
+    // (c) #926 regression: read a child's stdout to EOF BEFORE reaping it.
+    // This is exactly the pattern the (b) comment called "block forever" --
+    // it works now because a Proc's fds close at EXIT (the zombie
+    // transition), so pipe-src's fd 1 (the pipe write end) closes when
+    // pipe-src exits, delivering write_eof to our read end immediately
+    // rather than deferring it to wait_pid. A pre-#926 kernel would block
+    // forever here (the write end stayed open in the zombie until reap).
+    // pipe-src writes a fixed 13-byte payload to fd 1 then exits 0.
+    let mut srcchild = match Command::new("pipe-src")
+        .stdin(Stdio::Piped)
+        .stdout(Stdio::Piped)
+        .stderr(Stdio::Piped)
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(_) => {
+            t_putstr("u-test: flow_process_pipe: spawn(pipe-src) FAILED\n");
+            return Err(1);
+        }
+    };
+    drop(srcchild.stdin.take());
+    drop(srcchild.stderr.take());
+    let mut out = match srcchild.stdout.take() {
+        Some(f) => f,
+        None => {
+            t_putstr("u-test: flow_process_pipe: no child stdout FAILED\n");
+            return Err(1);
+        }
+    };
+    let mut capbuf = [0u8; 64];
+    let mut got = 0usize;
+    loop {
+        if got >= capbuf.len() {
+            t_putstr("u-test: flow_process_pipe: child stdout overflow FAILED\n");
+            return Err(1);
+        }
+        match out.read(&mut capbuf[got..]) {
+            Ok(0) => break, // EOF -- pipe-src exited, write end closed at exit
+            Ok(n) => got += n,
+            Err(_) => {
+                t_putstr("u-test: flow_process_pipe: child stdout read FAILED\n");
+                return Err(1);
+            }
+        }
+    }
+    drop(out);
+    if &capbuf[..got] != b"PIPE-DATA-OK\n" {
+        t_putstr("u-test: flow_process_pipe: child stdout payload FAILED\n");
+        return Err(1);
+    }
+    let srcstatus = match srcchild.wait() {
+        Ok(s) => s,
+        Err(_) => {
+            t_putstr("u-test: flow_process_pipe: pipe-src wait FAILED\n");
+            return Err(1);
+        }
+    };
+    if !srcstatus.success() {
+        t_putstr("u-test: flow_process_pipe: pipe-src exited non-zero FAILED\n");
+        return Err(1);
+    }
+
     t_putstr("u-test: process + pipe OK\n");
     Ok(())
 }
@@ -2170,7 +2232,7 @@ fn flow_parser_full() -> Result<(), i64> {
 //   12. Concat with var interpolation
 //   13. DoubleQuoted interpolation ($var + $#var)
 //   14. case-as-expression first-match-wins
-//   15. Subst / Regex deferred -> NotImplemented
+//   15. Subst captures (U-6f) ; Regex deferred -> NotImplemented
 fn flow_eval_expr() -> Result<(), i64> {
     // Lex + parse + eval helper. The library exposes parse_expr_tokens
     // directly so the test can pin the context (Arith vs Value vs
@@ -2457,17 +2519,20 @@ fn flow_eval_expr() -> Result<(), i64> {
         }
     }
 
-    // Probe 15: $(cmd) substitution + =~ regex -> NotImplemented.
+    // Probe 15: $(cmd) substitution now CAPTURES (U-6f) -- it spawns echo,
+    // captures its stdout, trims the trailing newline -> "hi" (one word).
+    // (The =~ regex match below stays NotImplemented.)
     {
         let env = Env::new();
         match ev(&env, "$(echo hi)", ExprContext::Value) {
-            Ok(_) => {
-                t_putstr("u-test: flow_eval_expr: probe 15 subst should error FAILED\n");
-                return Err(1);
+            Ok(v) => {
+                if v.as_scalar() != "hi" {
+                    t_putstr("u-test: flow_eval_expr: probe 15 subst value FAILED\n");
+                    return Err(1);
+                }
             }
-            Err(e) if matches!(e.kind, EvalErrorKind::NotImplemented(_)) => {}
             Err(_) => {
-                t_putstr("u-test: flow_eval_expr: probe 15 wrong subst error FAILED\n");
+                t_putstr("u-test: flow_eval_expr: probe 15 subst should succeed FAILED\n");
                 return Err(1);
             }
         }

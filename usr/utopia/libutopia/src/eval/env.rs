@@ -61,6 +61,7 @@ use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
+use core::cell::Cell;
 
 use crate::parser::ast::{FnDecl, Statement};
 
@@ -81,8 +82,15 @@ pub struct Env {
     /// runtime delivery wires at U-7 alongside note-fd polling.
     note_handlers: BTreeMap<String, Vec<Statement>>,
     /// $status -- exit code of the last command. Initialized to 0
-    /// at construction.
-    status: i32,
+    /// at construction. A `Cell` so a command substitution (the first
+    /// side-effecting expression atom -- it spawns a child + captures
+    /// its stdout) can record the inner command's exit through the
+    /// `&Env` expression evaluator (scripture 8.7: a non-zero exit
+    /// inside `$(cmd)` propagates), without rippling `&mut Env` through
+    /// the whole expression tree. $status is the shell's result
+    /// register, not a scope binding -- interior mutability models
+    /// "every evaluated command updates the register".
+    status: Cell<i32>,
     /// $errstr -- last command's error string (rc tradition;
     /// scripture 8.5). Initialized to "".
     errstr: String,
@@ -127,7 +135,7 @@ impl Env {
             scopes: vec![BTreeMap::new()],
             fns: BTreeMap::new(),
             note_handlers: BTreeMap::new(),
-            status: 0,
+            status: Cell::new(0),
             errstr: String::new(),
             cwd: "/".to_string(),
             interactive: false,
@@ -275,11 +283,16 @@ impl Env {
     // === Special variables ===
 
     pub fn status(&self) -> i32 {
-        self.status
+        self.status.get()
     }
 
-    pub fn status_set(&mut self, code: i32) {
-        self.status = code;
+    /// Set `$status`. Takes `&self` (not `&mut self`) because `$status`
+    /// is a `Cell`: a command substitution running inside the `&Env`
+    /// expression evaluator must be able to record the inner command's
+    /// exit (scripture 8.7). `&mut self` callers coerce to `&self`
+    /// transparently, so every existing call site is unaffected.
+    pub fn status_set(&self, code: i32) {
+        self.status.set(code);
     }
 
     pub fn errstr(&self) -> &str {
@@ -303,7 +316,7 @@ impl Env {
     /// for any other name (the caller then searches scope frames).
     fn special_get(&self, name: &str) -> Option<Value> {
         match name {
-            "status" => Some(Value::from(self.status as i64)),
+            "status" => Some(Value::from(self.status.get() as i64)),
             "errstr" => Some(Value::scalar(self.errstr.clone())),
             "cwd" => Some(Value::scalar(self.cwd.clone())),
             _ => None,
@@ -317,7 +330,7 @@ impl Env {
     fn special_set(&mut self, name: &str, value: &Value) -> bool {
         match name {
             "status" => {
-                self.status = value.as_int().unwrap_or(0) as i32;
+                self.status.set(value.as_int().unwrap_or(0) as i32);
                 true
             }
             "errstr" => {

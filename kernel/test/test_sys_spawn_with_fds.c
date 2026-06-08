@@ -29,6 +29,7 @@
 #include "test.h"
 
 #include <thylacine/burrow.h>
+#include <thylacine/dev.h>
 #include <thylacine/handle.h>
 #include <thylacine/pipe.h>
 #include <thylacine/proc.h>
@@ -129,14 +130,20 @@ void test_sys_spawn_with_fds_zero_count_succeeds(void) {
 // R15 F231 close: regression for the rights-elevation bug.
 // Pre-fix, the child's handle_alloc hardcoded RIGHT_READ|WRITE|TRANSFER
 // regardless of the parent's slot rights. This test creates a Spoor
-// with RIGHT_READ only in the parent, spawns /hello with that fd in
+// with RIGHT_READ only in the parent, spawns a child with that fd in
 // the inheritance list, and inspects the child's slot rights via
 // proc_find_by_pid + polling for the thunk's handle_alloc to complete.
 //
-// The poll-loop is bounded; if the child finishes its handle_alloc on
-// another CPU before we observe it, we still see the installed slot
-// (handle table isn't freed until wait_pid). The test inspects the
-// child BEFORE wait_pid so the handle table is live.
+// The child is pipe-sink (NOT /hello): pipe-sink BLOCKS reading fd 0
+// until EOF, so its handle table -- and the inherited fd 0 -- stays live
+// for inspection. This matters since #926: a Proc's fds now close at
+// EXIT (the zombie transition), so a fast-exiting child like /hello would
+// close fd 0 before this poll could observe it. A child blocked on its
+// inherited fd 0 keeps it live deterministically. We hold the write end
+// (no data), so pipe-sink blocks; once the thunk's handle_alloc installs
+// fd 0 the slot stays put. Inspect rights, then feed the payload + close
+// the write end so pipe-sink reads EOF and exits 0 -- which additionally
+// proves the inherited RIGHT_READ fd 0 is actually readable by the child.
 void test_sys_spawn_with_fds_child_rights_subset_of_parent(void) {
     drain_zombies();
     struct Thread *t = current_thread();
@@ -152,15 +159,17 @@ void test_sys_spawn_with_fds_child_rights_subset_of_parent(void) {
     TEST_ASSERT(parent_fd >= 0, "handle_alloc with RIGHT_READ only");
 
     u32 fds[1] = { (u32)parent_fd };
-    int pid = sys_spawn_with_fds_for_proc(t->proc, "hello", 5, fds, 1);
+    int pid = sys_spawn_with_fds_for_proc(t->proc, "pipe-sink", 9, fds, 1);
     TEST_ASSERT(pid > 0, "spawn with 1 inherited fd returns pid");
 
     struct Proc *child = proc_find_by_pid(pid);
     TEST_ASSERT(child != NULL, "proc_find_by_pid for spawned child");
 
     // Poll for the child's slot to appear (thunk's handle_alloc runs
-    // async on child's CPU). Bounded to 1024 sched yields; in practice
-    // the child reaches its handle_alloc within a handful of yields.
+    // async on the child's CPU). Bounded to 1024 sched yields. pipe-sink
+    // then blocks reading fd 0 (we hold wr, no data yet), so once the slot
+    // is installed it stays live and the child cannot exit-and-close it
+    // underneath us -- the poll catches it deterministically.
     struct Handle child_slot;
     bool got_child = false;
     for (int i = 0; i < 1024; i++) {
@@ -180,12 +189,18 @@ void test_sys_spawn_with_fds_child_rights_subset_of_parent(void) {
         "child slot rights == parent slot rights (R15 F231)");
     handle_put(&child_slot);
 
+    // Feed pipe-sink the exact payload it expects, then close the write
+    // end so its next read returns EOF -- it then exits 0. This unblocks
+    // the child + proves the inherited fd 0 is readable with RIGHT_READ.
+    const char payload[] = "PIPE-DATA-OK\n";
+    wr->dev->write(wr, payload, (long)(sizeof(payload) - 1), 0);
+    spoor_clunk(wr); // deliver EOF; releases the write end
+
     int status = -1;
     int reaped = wait_pid(&status);
     TEST_EXPECT_EQ(reaped, pid, "wait_pid reaps the spawned child");
-    TEST_EXPECT_EQ(status, 0, "/hello exits status=0");
+    TEST_EXPECT_EQ(status, 0, "pipe-sink exits status=0 (read inherited fd 0)");
 
-    // Clean up parent-side handle + boot's pointer on wr.
+    // Clean up parent-side handle (wr already clunked above).
     handle_close(t->proc, parent_fd);
-    spoor_clunk(wr);
 }
