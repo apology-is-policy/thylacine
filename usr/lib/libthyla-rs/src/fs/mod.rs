@@ -8,17 +8,19 @@
 //   ├── metadata.rs         Metadata (U-2c-fs)
 //   ├── options.rs          OpenOptions builder (U-2c-fs)
 //   ├── path.rs             Path, PathBuf (U-2c-path)
-//   └── dir.rs              ReadDir, DirEntry (deferred -- kernel
-//                            directory-read mechanism not yet exposed)
+//   └── dir.rs              ReadDir, DirEntry, read_dir (U-6e-b-1, over
+//                            SYS_READDIR)
 //
 // The fs module re-exports its sub-module types at this level so
 // callers write `use libthyla_rs::fs::{Path, PathBuf, File, ...}`.
 
+pub mod dir;
 pub mod file;
 pub mod metadata;
 pub mod options;
 pub mod path;
 
+pub use self::dir::{read_dir, DirEntry, ReadDir};
 pub use self::file::File;
 pub use self::metadata::Metadata;
 pub use self::options::OpenOptions;

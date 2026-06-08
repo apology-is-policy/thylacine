@@ -105,9 +105,16 @@ cookie and stores THAT in the Spoor offset (mirrors Linux v9fs). A NULL
 `.readdir` slot -> -1.
 
 Two new `Dev` vtable slots (NULL-permitted, like `.poll` / `.stat_native`):
-`int (*fsync)(c, datasync)` and `long (*readdir)(c, buf, n, off)`. Only `dev9p`
-sets a real `.readdir`; `dev9p` + `devramfs` (no-op) set `.fsync`. libt:
-`t_fsync` / `t_readdir`. libthyla-rs: `t_fsync` / `t_readdir`.
+`int (*fsync)(c, datasync)` and `long (*readdir)(c, buf, n, off)`. `dev9p`
+(Stratum) and, since U-6e-b-1, `devramfs` (flat-root enumeration) set a real
+`.readdir`; `dev9p` + `devramfs` (no-op) set `.fsync`. (`devramfs_readdir`
+returns -1 -- not 0 -- when the first entry of a run cannot fit the caller's
+buffer, the getdents/EINVAL convention, so a too-small buffer is not mistaken
+for EOD; see `docs/reference/34-devramfs.md`. Enumerating a *mounted* `/srv` or
+`/proc` needs devsrv/devproc `.readdir` -- task #932.) libt: `t_fsync` /
+`t_readdir`. libthyla-rs: `t_fsync` / `t_readdir` + the `fs::read_dir` /
+`ReadDir` / `DirEntry` streaming iterator (U-6e-b-1, over the stalk resolver so
+it opens the root `/` and multi-component paths).
 
 ### `SYS_RENAME = 57` + `SYS_UNLINK = 58` (FS-gamma)
 

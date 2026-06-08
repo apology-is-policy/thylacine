@@ -443,6 +443,96 @@ static int devramfs_fsync(struct Spoor *c, u32 datasync) {
     return 0;
 }
 
+// devramfs_readdir -- enumerate the directory backed by `c`. The boot ramfs is
+// a FLAT namespace: the root lists every cpio file plus the synthetic mount-
+// point dirs (srv, proc); every file is a leaf, and the synthetic dirs are
+// empty mount points. Emits the Thylacine 9P2000.L dirent wire format the
+// SYS_READDIR handler parses (kernel/syscall.c sys_readdir_handler):
+//
+//   qid(13) + offset(8 LE) + type(1) + name_len(2 LE) + name(name_len)
+//
+// The `offset` field is a RESUME COOKIE, not a byte position: a 1-based ordinal
+// over the concatenated [files | synth-dirs] list. `off` (the cookie of the last
+// entry the previous call handed out, or 0 to start) selects where to resume, so
+// successive calls walk forward with no duplication and no skip -- mirroring
+// dev9p's server-cookie semantics. The handler stores the last emitted entry's
+// cookie back into c->offset for the next call. Whole entries only: emit until
+// the next would not fit `n`, leaving the rest for the next call. Returns the
+// byte count (>= 0; 0 == end-of-directory), -1 on a non-directory Spoor.
+//
+// `n` is the handler's user buf_len, already bounded to (0, SYS_RW_MAX] and to
+// the kernel scratch size, so writing up to `n` bytes into `buf` is in-bounds.
+// If the FIRST entry of a run does not fit `n`, returns -1 (not 0): 0 means
+// end-of-directory per the ABI, so reporting it would silently truncate the
+// listing -- instead we signal "buffer too small" the way Linux getdents does
+// with EINVAL, and the caller must enlarge its buffer. libthyla_rs::fs::ReadDir
+// stages 4 KiB, far above 24 + any name, so it never trips this.
+static long devramfs_readdir(struct Spoor *c, void *buf, long n, s64 off) {
+    if (!c || !buf) return -1;
+    if (n <= 0) return 0;
+
+    // Only directories enumerate. A regular-file Spoor is not a directory; a
+    // synthetic mount-point dir (srv/proc) is a directory but empty (EOD).
+    bool is_root  = (c->qid.path == RAMFS_QID_ROOT_PATH);
+    bool is_synth = ramfs_qid_is_synth(c->qid.path);
+    if (!is_root && !is_synth) return -1;
+    if (is_synth) return 0;
+
+    u8 *out = (u8 *)buf;
+    long cap = n;
+    long pos = 0;
+
+    int nfiles = g_ramfs_count;
+    int nsynth = (int)(sizeof(g_ramfs_synth_dirs) / sizeof(g_ramfs_synth_dirs[0]));
+    u64 total  = (u64)nfiles + (u64)nsynth;
+
+    u64 start = (off < 0) ? 0 : (u64)off;     // 0 = from the beginning
+    for (u64 ord = start + 1; ord <= total; ord++) {
+        const char *name;
+        u8  qtype;
+        u64 qpath;
+        if (ord <= (u64)nfiles) {
+            name  = g_ramfs_files[ord - 1].name;
+            qtype = QTFILE;
+            qpath = ramfs_qid_for_index((int)(ord - 1));
+        } else {
+            const struct ramfs_synth_dir *sd = &g_ramfs_synth_dirs[ord - 1 - (u64)nfiles];
+            name  = sd->name;
+            qtype = QTDIR;
+            qpath = sd->qid_path;
+        }
+
+        u64 nlen = 0;
+        while (name[nlen] != '\0') nlen++;
+        if (nlen > 0xffffu) return -1;        // name_len is a u16 field (cold: cpio names are short)
+        long entry = 24 + (long)nlen;
+        if (pos + entry > cap) {
+            // The first entry of this run does not fit the caller's buffer:
+            // signal "too small" (-1) rather than 0, which the handler would
+            // pass up as a (silently truncating) EOD. A later entry not fitting
+            // just resumes on the next call.
+            if (pos == 0) return -1;
+            break;
+        }
+
+        // qid(13): type(1) + version(4 LE, 0) + path(8 LE).
+        out[pos + 0] = qtype;
+        out[pos + 1] = 0; out[pos + 2] = 0; out[pos + 3] = 0; out[pos + 4] = 0;
+        for (int b = 0; b < 8; b++) out[pos + 5 + b]  = (u8)(qpath >> (8 * b));
+        // offset(8 LE): the resume cookie = this entry's ordinal.
+        for (int b = 0; b < 8; b++) out[pos + 13 + b] = (u8)(ord >> (8 * b));
+        // type(1): the d_type byte (we mirror the qid type bits).
+        out[pos + 21] = qtype;
+        // name_len(2 LE).
+        out[pos + 22] = (u8)(nlen & 0xffu);
+        out[pos + 23] = (u8)((nlen >> 8) & 0xffu);
+        // name.
+        for (u64 i = 0; i < nlen; i++) out[pos + 24 + (long)i] = (u8)name[i];
+        pos += entry;
+    }
+    return pos;        // 0 iff start >= total (EOD) or the first entry did not fit
+}
+
 static void devramfs_remove(struct Spoor *c) {
     (void)c;
 }
@@ -483,8 +573,10 @@ struct Dev devramfs = {
     .write    = devramfs_write,
     .bwrite   = devramfs_bwrite,
     .fsync    = devramfs_fsync,
-    // .readdir left NULL at v1.0 -- ramfs enumeration is a deferred nicety;
-    // the load-bearing readdir is dev9p (the disk-backed Stratum FS).
+    // U-6e-b-1: the boot ramfs enumerates so read_dir / ls / glob work on the
+    // pre-pivot FS the user stands in (the synthetic root + srv/proc dirs). The
+    // disk-backed Stratum FS (dev9p) is the post-pivot readdir target.
+    .readdir  = devramfs_readdir,
 
     .remove   = devramfs_remove,
     .wstat    = devramfs_wstat,

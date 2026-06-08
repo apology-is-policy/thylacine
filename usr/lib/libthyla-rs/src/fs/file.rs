@@ -61,7 +61,7 @@ use crate::err::{Error, Result};
 use crate::handle::{Handle, Rights};
 use crate::io::{Read, Seek, SeekFrom, Write};
 use crate::{
-    t_close, t_lseek, t_read, t_walk_create, t_walk_open, t_write, T_OREAD, T_OTRUNC,
+    t_close, t_lseek, t_open, t_read, t_walk_create, t_walk_open, t_write, T_OREAD, T_OTRUNC,
     T_OWRITE, T_SEEK_CUR, T_SEEK_END, T_SEEK_SET, T_WALK_OPEN_FROM_ROOT,
     T_WALK_OPEN_NAME_MAX,
 };
@@ -171,6 +171,28 @@ impl File {
         Self::open_create_at_path(path, omode, false, false, 0)
     }
 
+    /// Open `path` via the kernel `stalk` resolver (SYS_OPEN) in one syscall,
+    /// from the Territory root. Unlike the per-component `t_walk_open` walk in
+    /// `open_create_at_path`, stalk resolves the full multi-component path
+    /// including the root `/` and `.` / `..` segments (kernel-side containment
+    /// keeps `..` from escaping the root). The kernel derives the handle rights
+    /// from `omode` (`rights_for_omode`, identical to SYS_WALK_OPEN), so the
+    /// userspace `Rights` here are the same hint the walk path records.
+    ///
+    /// `fs::read_dir` uses this to open a directory (the root and multi-
+    /// component paths both work); the root case of `open_create_at_path`'s
+    /// plain-open path routes here too (#929).
+    pub(crate) fn open_stalk(path: &Path, omode: u32) -> Result<File> {
+        let s = path.as_str();
+        // SAFETY: s is a valid &str (ptr+len); FROM_ROOT resolves from the
+        // Territory root; omode is within the SYS_OPEN omode-valid mask.
+        let rc = unsafe { t_open(T_WALK_OPEN_FROM_ROOT, s.as_ptr(), s.len(), omode) };
+        let fd = Error::from_syscall_return(rc)?;
+        Ok(File {
+            handle: Handle::from_raw(fd as i32, Rights::READ | Rights::WRITE | Rights::TRANSFER),
+        })
+    }
+
     /// Walk `path` and open-or-create its final component.
     ///
     /// The intermediate components are walked with `OREAD` (they are
@@ -214,8 +236,15 @@ impl File {
             .collect::<Result<Vec<&str>>>()?;
 
         if names.is_empty() {
-            // Path was "/" with only RootDir + (optional) CurDirs.
-            return Err(Error::InvalidArgument);
+            // Path was "/" (RootDir + optional CurDirs). The per-component walk
+            // has no component to open, but the root IS openable: the `stalk`
+            // resolver (SYS_OPEN) returns the Territory root Spoor for "/"
+            // (#929 -- File::open("/") / metadata("/") / is_dir("/") now work).
+            // Creating or exclusively-creating the root is nonsensical.
+            if create || create_new {
+                return Err(Error::InvalidArgument);
+            }
+            return Self::open_stalk(Path::new("/"), base_omode);
         }
 
         // Walk the parent chain (`names[0..last]`) with OREAD. `parent`

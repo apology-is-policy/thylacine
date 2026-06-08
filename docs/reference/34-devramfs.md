@@ -202,7 +202,7 @@ Future Phase 5+ Stratum integration adds an invariant on initrd lifetime ("freed
 
 Tests build synthetic cpio newc archives byte-by-byte using inline `emit_hdr` / `emit_name` / `emit_data` helpers — no host file I/O, no QEMU plumbing required.
 
-### devramfs (`test_devramfs.c`, 10 tests)
+### devramfs (`test_devramfs.c`, 15 tests)
 
 - `devramfs.bestiary_smoke` — registration + lookup by dc/name.
 - `devramfs.initialized_with_files` — devramfs_initialized + count >= 2.
@@ -212,8 +212,14 @@ Tests build synthetic cpio newc archives byte-by-byte using inline `emit_hdr` / 
 - `devramfs.read_welcome` — content contains "Welcome" + "Thylacine".
 - `devramfs.read_version` — content contains "Thylacine" + "0.1-dev".
 - `devramfs.read_partial_offset` — partial slice + EOF semantics.
-- `devramfs.read_dir_returns_neg1` — dir read returns -1 (readdir held).
+- `devramfs.read_dir_returns_neg1` — plain `read()` on a directory returns -1 (use `readdir`).
 - `devramfs.write_rejected` — write returns -1 (read-only).
+- `devramfs.stat_native_system_owned` — A-2a: every entry SYSTEM-owned.
+- `devramfs.readdir_enumerates_root` (U-6e-b-1) — root lists welcome/version + the synthetic srv/proc dirs; the qid type byte marks files QTFILE and srv/proc QTDIR.
+- `devramfs.readdir_file_returns_neg1` (U-6e-b-1) — readdir on a regular-file Spoor returns -1.
+- `devramfs.readdir_buffer_too_small_errs` (U-6e-b-1) — a buffer too small for the first entry returns -1 (not 0/EOD).
+- `devramfs.readdir_synth_dir_empty` (U-6e-b-1) — readdir on the bare srv synthetic dir returns 0 (empty).
+- `devramfs.readdir_paginates_no_dup_no_skip` (U-6e-b-1) — a small buffer paginates the whole root via the resume cookie with strictly-increasing cookies and exactly `files + 2` entries (no dup, no skip).
 
 Tests skip gracefully when `devramfs_file_count() < N` — environments without `-initrd` (e.g., a future bare-board boot) keep the bestiary tests valid even when the file-content tests can't run.
 
@@ -230,7 +236,8 @@ Tests skip gracefully when `devramfs_file_count() < N` — environments without 
 | `dtb_get_chosen_initrd` | Landed (P4-E) |
 | `phys_init` initrd reservation | Landed (P4-E) — closes the buddy-clobbers-cpio bug |
 | `kernel/devramfs.c` + devramfs Dev (dc='m') | Landed (P4-E) |
-| In-kernel tests | 17 (7 cpio unit + 10 devramfs integration) |
+| In-kernel tests | 22 (7 cpio unit + 15 devramfs integration) |
+| `devramfs_readdir` (dc='m' `.readdir` slot) | Landed (U-6e-b-1) — flat-root enumeration over `SYS_READDIR` |
 | Bestiary count | 8 (devnone + cons + null + zero + random + proc + ctl + ramfs) |
 | Boot banner: `ramfs: N files loaded from initrd (B bytes)` | Landed (P4-E) |
 | /joey blob loaded from ramfs | Held — joey.c currently builds the blob inline; future chunk swaps to ramfs lookup |
@@ -242,17 +249,21 @@ Tests skip gracefully when `devramfs_file_count() < N` — environments without 
 
 ## Known caveats / footguns
 
-### `RAMFS_FILE_MAX = 32`
+### `RAMFS_FILE_MAX = 128`
 
-A cpio archive with > 32 entries truncates at boot. Banner notes "TRUNCATED". For v1.0 the archive contains 2 files; comfortable headroom. Phase 5+ when driver binaries land may need to bump or switch to a dynamic table.
+A cpio archive with > 128 entries truncates at boot. Banner notes "TRUNCATED" and the `perm.devramfs_enforced_real_metadata` test (it walks `/welcome`) catches a silent drop. The live Phase 7 corpus is ~72 entries; comfortable headroom. Bump or switch to a dynamic table if it grows.
 
 ### Initrd memory lives forever at v1.0
 
 ROADMAP §6.1 wording is "freed once persistent FS is mounted" — Phase 5+ Stratum landing adds the freeing. v1.0 the cpio bytes occupy initrd PA permanently. With the small archive (< 1 KiB) this is negligible.
 
-### Read on a directory qid returns -1
+### Directory enumeration (`readdir`, U-6e-b-1)
 
-Same as devproc + devctl: readdir is held until 9P readdir or in-kernel readdir helper lands.
+`devramfs_readdir` enumerates the flat root: every cpio file (QTFILE) plus the synthetic `srv`/`proc` mount-point dirs (QTDIR). It emits the Thylacine 9P2000.L dirent wire format the `SYS_READDIR` handler parses — `qid(13) + offset(8 LE) + type(1) + name_len(2 LE) + name` — with the `offset` field a 1-based ordinal RESUME COOKIE (the handler round-trips it via `c->offset`, so successive calls walk forward with no dup/skip). It emits whole entries only, stopping before one that won't fit; a regular-file Spoor returns -1 (not a directory); a synthetic dir is empty (0/EOD). If the FIRST entry of a run does not fit the caller's buffer it returns -1 (the getdents/EINVAL convention) rather than 0 — 0 would silently truncate the listing as a spurious EOD. The data it reads (`g_ramfs_files`, the synth-dir table) is immutable after init, so no lock is needed.
+
+A plain `read()` on a directory qid still returns -1 (as on devproc + devctl) — directory bytes are obtained via `readdir`, not `read`.
+
+The userspace consumer is `libthyla_rs::fs::read_dir` / `ReadDir` / `DirEntry` (it stages a 4 KiB buffer, far above any single entry, so it never trips the too-small case). Enumerating a *mounted* `/srv` (devsrv) or `/proc` (devproc) is a separate Dev-readdir feature (task #932) — those Devs do not yet implement `.readdir`.
 
 ### Writes are rejected (read-only fs)
 

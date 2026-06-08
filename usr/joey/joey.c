@@ -1906,6 +1906,28 @@ int main(void) {
     }
     t_putstr("joey: /u-builtin-test reaped status=0; U-6e-a builtins verified\n");
 
+    // === /u-readdir-test orchestration (Phase 7 U-6e-b-1) ===
+    // Directory enumeration: the kernel devramfs_readdir + libthyla_rs
+    // fs::read_dir/ReadDir + the #929 root-open fix. Runs PRE-pivot: it
+    // enumerates the flat boot ramfs root (welcome / version / srv / proc /
+    // itself), checks the per-entry qid type (srv/proc are dirs, welcome a
+    // file), confirms fs::is_dir("/") / metadata("/") resolve the root, that
+    // an empty synth dir enumerates to zero, and that read_dir on a file +
+    // on a missing path fail correctly. status==0 gates the boot.
+    const char u_readdir_name[] = "u-readdir-test";
+    long urd_pid = t_spawn(u_readdir_name, sizeof(u_readdir_name) - 1);
+    if (urd_pid <= 0) {
+        t_putstr("joey: t_spawn(\"u-readdir-test\") FAILED\n");
+        return 1;
+    }
+    int urd_status = -1;
+    long urd_reaped = t_wait_pid(&urd_status);
+    if (urd_reaped != urd_pid || urd_status != 0) {
+        t_putstr("joey: /u-readdir-test orchestration FAILED\n");
+        return 1;
+    }
+    t_putstr("joey: /u-readdir-test reaped status=0; U-6e-b-1 readdir verified\n");
+
     // === /ut orchestration (Phase 7 U-3 -- Utopia shell skeleton) ===
     // `ut` is the Utopia shell binary; at U-3 its scope is the Pale
     // Fire version banner via libutopia + clean exit. The U-4..U-Z

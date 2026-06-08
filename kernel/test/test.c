@@ -336,6 +336,11 @@ void test_devramfs_read_partial_offset(void);
 void test_devramfs_read_dir_returns_neg1(void);
 void test_devramfs_write_rejected(void);
 void test_devramfs_stat_native_system_owned(void);
+void test_devramfs_readdir_enumerates_root(void);
+void test_devramfs_readdir_file_returns_neg1(void);
+void test_devramfs_readdir_buffer_too_small_errs(void);
+void test_devramfs_readdir_synth_dir_empty(void);
+void test_devramfs_readdir_paginates_no_dup_no_skip(void);
 void test_perm_check_owner_group_other(void);
 void test_perm_check_owner_first_authoritative(void);
 void test_perm_check_hostowner_override(void);
@@ -1219,6 +1224,16 @@ struct test_case g_tests[] = {
     { "devramfs.stat_native_system_owned",
                                        test_devramfs_stat_native_system_owned, false, NULL },
     { "devramfs.write_rejected",       test_devramfs_write_rejected,       false, NULL },
+    { "devramfs.readdir_enumerates_root",
+                                       test_devramfs_readdir_enumerates_root, false, NULL },
+    { "devramfs.readdir_file_returns_neg1",
+                                       test_devramfs_readdir_file_returns_neg1, false, NULL },
+    { "devramfs.readdir_buffer_too_small_errs",
+                                       test_devramfs_readdir_buffer_too_small_errs, false, NULL },
+    { "devramfs.readdir_synth_dir_empty",
+                                       test_devramfs_readdir_synth_dir_empty, false, NULL },
+    { "devramfs.readdir_paginates_no_dup_no_skip",
+                                       test_devramfs_readdir_paginates_no_dup_no_skip, false, NULL },
     { "devsrv.registered",             test_devsrv_registered,             false, NULL },
     { "devsrv.post_gate",              test_devsrv_post_gate,              false, NULL },
     { "devsrv.post_basic",             test_devsrv_post_basic,             false, NULL },

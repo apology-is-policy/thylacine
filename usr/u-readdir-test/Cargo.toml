@@ -1,0 +1,20 @@
+[package]
+name = "u-readdir-test"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "u-readdir-test"
+path = "src/main.rs"
+
+[dependencies]
+# u-readdir-test is the U-6e-b-1 directory-enumeration boot probe. It runs
+# PRE-pivot (devramfs root) and drives libthyla_rs::fs::read_dir against the
+# flat boot ramfs: it asserts the root enumerates (welcome / version / srv /
+# proc / itself), that srv/proc type as directories and welcome as a file,
+# that #929 is closed (fs::is_dir("/") / fs::metadata("/") resolve the root),
+# that an empty synthetic dir enumerates to zero entries, that read_dir on a
+# regular file errors on the first item, and that a missing path fails to open.
+libthyla-rs = { path = "../lib/libthyla-rs" }

@@ -486,6 +486,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "u-readdir-test"
+version = "0.1.0"
+dependencies = [
+ "libthyla-rs",
+]
+
+[[package]]
 name = "u-redir-test"
 version = "0.1.0"
 dependencies = [
