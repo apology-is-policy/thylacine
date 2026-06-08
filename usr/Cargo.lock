@@ -281,6 +281,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "loom-bench"
+version = "0.1.0"
+dependencies = [
+ "libthyla-rs",
+]
+
+[[package]]
 name = "loom-smoke"
 version = "0.1.0"
 dependencies = [

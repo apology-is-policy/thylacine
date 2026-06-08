@@ -2508,6 +2508,29 @@ int main(void) {
                 t_putstr("joey: /loom-stress reaped status=0; concurrent + cross-Proc-death loom stress verified\n");
             }
 
+            // === /loom-bench orchestration (Loom-6d-3) ===
+            // The trap-amortization + present-path latency bench for the native
+            // loom ring API (docs/LOOM.md section 5). Informational: it logs per-op
+            // numbers (the ring overhead via a NOP batch; FSYNC serial-syscall vs
+            // Loom-batched + the speedup; the present-proxy WRITE round-trip) to the
+            // boot UART; joey gates only on status 0 (the Loom batches must reap
+            // correctly). Runs post-pivot (dev9p live), loaded from the ramfs.
+            {
+                const char lb_name[] = "loom-bench";
+                long lb_pid = t_spawn(lb_name, sizeof(lb_name) - 1);
+                if (lb_pid <= 0) {
+                    t_putstr("joey: t_spawn(\"loom-bench\") FAILED\n");
+                    return 1;
+                }
+                int lb_status = -1;
+                long lb_reaped = t_wait_pid(&lb_status);
+                if (lb_reaped != lb_pid || lb_status != 0) {
+                    t_putstr("joey: /loom-bench orchestration FAILED\n");
+                    return 1;
+                }
+                t_putstr("joey: /loom-bench reaped status=0; loom latency bench ran\n");
+            }
+
             // === stalk-1 E2E (multi-component SYS_OPEN on the real FS) ===
             // Resolve a 2-component absolute path through the kernel `stalk`
             // resolver (A-5b-0; docs/STALK-DESIGN.md) on the persistent Stratum

@@ -862,6 +862,79 @@ wait/wake-predicate change). `memory/audit_loom_closed_list.md` Loom-6 section.
 
 ---
 
+### The native `libthyla_rs::loom` API + the Tapestry seam (Loom-6d)
+
+`usr/lib/libthyla-rs/src/loom.rs` is the native userspace API -- the first
+EL0 consumer of the Loom syscalls, and the surface the libtapestry `Loom` seam
+trait targets. It is a thin, memory-model-correct view over the shared ring; a
+buggy producer can corrupt only its own ring view (the kernel copies every SQE
+to private memory and keeps `sq_head` / `cq_tail` kernel-private), so this layer
+is NOT a privilege surface -- it introduces no kernel mechanism, and the
+three-module spec suite gates it unchanged.
+
+**The `Ring` lifecycle.** `Ring::setup(entries, flags)` issues `SYS_LOOM_SETUP`,
+which in one call returns the `KObj_Loom` fd AND maps the SQ/CQ Burrow into the
+Proc (`params.ring_va`); the `Ring` owns both and caches the geometry +
+kernel-private masks. `register_handles(&[i32])` / `register_buffers(&[BufReg])`
+drive `SYS_LOOM_REGISTER` (the I-30 pin substrate). `try_submit` / `enter` /
+`reap` are the SQ-produce / kernel-enter / CQ-consume primitives;
+`submit_one_wait` is the synchronous request/response convenience. `Drop`
+detaches the ring VA then closes the fd (the #847 dual-refcount frees the pages
+once both the mapping and the handle are gone).
+
+**The SPSC memory model** (the audit-sensitive part) is the textbook liburing
+discipline, paired field-for-field with the kernel's `__atomic_*`: userspace
+owns `sq_tail` + `cq_head`, the kernel owns `sq_head` + `cq_tail`. `try_submit`
+writes the SQE body + the indirection index, then **release**-stores `sq_tail`
+(ordering both prior writes before the kernel's acquire-load in `loom_drain_sq`,
+which then copies the SQE to private memory -- ring-TOCTOU-safe). `reap`
+**acquire**-loads `cq_tail` (pairing with the kernel's release after it wrote the
+CQE body), reads the CQE, then **release**-stores `cq_head` (so the kernel cannot
+reuse a slot still being read). The `Sqe` reserved fields are private, so a
+malformed SQE cannot be constructed outside the module -- only the per-opcode
+constructors (`Sqe::nop` / `fsync` / `read` / `write` / `with_flags`).
+`libthyla_rs::loom::Ring` is `!Sync` by default: the SQ is single-producer and
+the CQ single-consumer, so a multi-thread consumer (e.g. `loom-stress`) must
+serialize SQ/CQ access externally and may only call `enter()` lock-free.
+
+**The Tapestry seam** (`docs/TAPESTRY.md`). The libtapestry `Loom` trait (defined
+on the `aux/userspace-apps` branch) maps onto this surface with a one-line
+handoff -- `impl tapestry::Loom for libthyla_rs::loom::Ring`:
+
+| libtapestry call | maps to |
+|---|---|
+| `present(rect)` | `ring.try_submit(&Sqe::write(present_fid, 0, rect_len, buf_idx, 0, id))` + `enter` -- present = a generic `LOOM_OP_WRITE` of a rect descriptor (TAPESTRY.md D3; the opcode set stays pure 9P). The completion CQE is the buffer-recycle gate. |
+| `arm_events()` | `ring.try_submit(&Sqe::read(event_fid, 0, len, buf_idx, 0, id).with_flags(sqe_flag::MULTISHOT))` -- input/vsync = one multishot `LOOM_OP_READ` on an event-fid: arm once, a CQE per event. |
+| `reap()` | `while let Some(cqe) = ring.reap() { ... }` -- drain the CQ; under SQPOLL submission is syscall-free, `enter(0, n, GETEVENTS)` waits. |
+
+The framebuffer itself is a separate `tapestryd`-owned Burrow the host DMA-reads
+out of band (NOT a Loom payload buffer), so present imposes no large-regbuf
+requirement. The graphics integration (virtio-gpu scanout + `tapestryd`) is
+post-Loom; `libthyla_rs::loom` is the stable backend it will weave onto.
+
+**The trap-amortization bench** (`usr/loom-bench`, Loom-6d-3). joey spawns it
+post-pivot; it logs three numbers (CNTVCT_EL0-timed, the irq-bench idiom). The
+clean result is the **NOP trap-amortization** (I/O-free -- NOPs complete inline,
+so the only variable is the trap count): under QEMU-TCG, 64 NOPs cost ~3030 ns
+per op via one-enter-per-op (64 traps) vs ~390 ns per op batched into one enter
+(1 trap) -- a **~7.7x** speedup, the `LOOM.md` section 5 thesis cashed in. The
+**FSYNC** number is the honest counterpoint: ~1.0x, because a 9P fsync is
+commit-dominated (~1.8 ms) so the trap (~3 us) is invisible -- the
+trap-amortization win materializes for trap-dominated / pipelinable workloads and
+on SQPOLL's zero-syscall hot path, not for a single commit-bound op. The
+**present-proxy** (a single `LOOM_OP_WRITE` of a rect descriptor) round-trips in
+~214 us. Absolute numbers are noisy under QEMU + host load and are not a budget
+gate (the VISION.md budgets are for real hardware); joey gates only on the bench
+completing correctly.
+
+The native harness `loom-stress` (Loom-6d-2) is the first real multi-in-flight
+async driver: two sibling threads share one `loom_fd` and hammer it with
+concurrent async FSYNCs over the shared dev9p client, then the Proc dies with ops
+in flight (the #898 quiesce). It runs every ci-smp-gate boot under -smp 4/8 --
+the multi-boot 0-corruption verdict is the concurrency witness.
+
+---
+
 ## Data structures
 
 `struct Loom` (`kernel/loom.c`): `magic` (`LOOM_MAGIC`, offset 0 — SLUB-free UAF
@@ -1087,7 +1160,7 @@ rolled back via `spoor_clunk`); a user-VA fault reading the fd array.
 | Loom-6c | the deterministic multi-in-flight harness (`9p_transport_mq` + 2 tests) + the formal Opus audit over the whole 6a+6b surface + the SMP gate + close | **landed** (audit closed 0/0/1/3) |
 | Loom-6d-1 | the native `libthyla_rs::loom` module (`Ring` over SYS_LOOM_SETUP/REGISTER/ENTER; the `repr(C)` SQE/CQE/BufReg byte-pinned to `loom.h`; the SPSC release/acquire ring model; register handles/buffers; submit/enter/reap) + `usr/loom-smoke` (NOP round-trip + register + non-9P payload-op rejection; joey-gated) | **landed** |
 | Loom-6d-2 | `usr/loom-stress` -- the CONCURRENT two-thread-same-`loom_fd` + cross-Proc-death SMP stress harness (the OWED item) + the positive dev9p async round-trip, joey-spawned post-pivot; the ci-smp-gate multi-boot under -smp 4/8 is the concurrency witness | **landed** |
-| Loom-6d-3 | the latency bench (trap-amortization + the Tapestry present/input/vsync shape) + the Tapestry seam doc | pending |
+| Loom-6d-3 | `usr/loom-bench` -- the trap-amortization latency bench (NOP one-enter-per-op vs batched ~7.7x; FSYNC commit-dominated ~1.0x; the present-proxy WRITE) + the native-API + Tapestry seam doc (the section above) | **landed** |
 | Loom-6d-4 | the focused audit over the 6d surface + the Loom arc close | pending |
 | #916 | the direct-descriptor ops (WALK / LOPEN / LCREATE / CLUNK -- mint/open/release a registered fid from the op path) | deferred (post-Loom-6 seam) |
 
