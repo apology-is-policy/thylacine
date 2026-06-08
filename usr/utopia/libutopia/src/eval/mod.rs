@@ -64,6 +64,7 @@
 // reference for this module. Per-sub-chunk extensions append rows
 // to its Status section.
 
+pub mod builtin;
 pub mod env;
 pub mod error;
 pub mod expr;

@@ -138,6 +138,7 @@ use libthyla_rs::io::Write as IoWrite;
 use libthyla_rs::process::{pipe, Stdio};
 use libthyla_rs::{t_putstr, t_wait_pid};
 
+use super::builtin;
 use super::env::Env;
 use super::error::{EvalError, EvalErrorKind, EvalResult};
 use super::expr::eval_expr;
@@ -172,6 +173,14 @@ pub fn eval_script(env: &mut Env, script: &Script) -> EvalResult<StatementFlow> 
 pub fn eval_block(env: &mut Env, stmts: &[Statement]) -> EvalResult<StatementFlow> {
     for stmt in stmts {
         let flow = eval_statement(env, stmt)?;
+        // `exit` requested anywhere in this statement (directly, or via
+        // a called function / sourced / eval'd sub-script) unwinds the
+        // whole statement stack: short-circuit to Return so every
+        // enclosing block / loop / function returns, and the top-level
+        // driver reads `env.exit_requested()` to terminate (U-6e-a).
+        if env.exit_requested().is_some() {
+            return Ok(StatementFlow::Return);
+        }
         match flow {
             StatementFlow::Normal => {
                 if env.status() != 0 && should_propagate_failure(env, stmt) {
@@ -269,6 +278,15 @@ fn eval_pipeline(env: &mut Env, p: &Pipeline) -> EvalResult<StatementFlow> {
             if env.fn_get(&argv[0]).is_some() {
                 return Err(EvalError::new(
                     EvalErrorKind::NotImplemented("redirect on function (U-6f)"),
+                    cmd.span,
+                ));
+            }
+            if builtin::is_builtin(&argv[0]) {
+                // A built-in runs in-process with no spawned fd to
+                // retarget; redirecting its stdio needs the same fork /
+                // fd-dup surface as a redirected function (U-6f).
+                return Err(EvalError::new(
+                    EvalErrorKind::NotImplemented("redirect on builtin (U-6f)"),
                     cmd.span,
                 ));
             }
@@ -651,6 +669,14 @@ fn exec_pipeline(env: &mut Env, p: &Pipeline) -> EvalResult<StatementFlow> {
                 cmd.span,
             ));
         }
+        if builtin::is_builtin(&argv[0]) {
+            // A built-in has no spawned fd to wire to a pipe; like a
+            // function pipeline element, this needs fork (U-6f+).
+            return Err(EvalError::new(
+                EvalErrorKind::NotImplemented("builtin as pipeline element"),
+                cmd.span,
+            ));
+        }
         // Per-element redirects (U-6d-b): they OVERRIDE the pipe wiring
         // for the redirected fd (e.g. `cmd > f | next` sends cmd's stdout
         // to f, not the pipe, so next reads EOF). A redirect-target open
@@ -857,13 +883,19 @@ fn eval_command(env: &mut Env, cmd: &Command) -> EvalResult<StatementFlow> {
                 env.status_set(0);
                 return Ok(StatementFlow::Normal);
             }
-            // Look up argv[0] in fns; clone the FnDecl so we don't
-            // hold an Env borrow across mutation.
+            // Resolution order (scripture 9.1): fn -> builtin ->
+            // external. Look up argv[0] in fns first; clone the FnDecl
+            // so we don't hold an Env borrow across mutation.
             if let Some(decl) = env.fn_get(&argv[0]).cloned() {
                 return invoke_function(env, &decl, &argv);
             }
-            // Not a fn -- external spawn. Built-ins land at U-6e
-            // (they'll be tried ahead of spawn).
+            // Then built-ins (cd / pwd / exit / unset / eval / source /
+            // type / true / false) -- they run in-process and mutate
+            // the shell's own state (U-6e-a).
+            if let Some(result) = builtin::try_builtin(env, &argv) {
+                return result;
+            }
+            // Otherwise an external binary spawn.
             exec_external(env, &argv, cmd.span)
         }
         CommandKind::BraceBlock(stmts) => {
@@ -921,6 +953,14 @@ fn invoke_function(
 
     let result = eval_block(env, &decl.body);
     env.pop_scope();
+
+    // A pending `exit` must NOT be normalized away at the function
+    // boundary -- it unwinds the entire stack (U-6e-a). Propagate the
+    // flow (Return) straight up so the next eval_block re-observes the
+    // exit request and keeps unwinding.
+    if env.exit_requested().is_some() {
+        return result;
+    }
 
     // Normalize control-flow that escaped the function body:
     //   Return -> Normal at the call site (function returned;

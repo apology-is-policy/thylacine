@@ -108,6 +108,13 @@ pub struct Env {
     /// alongside a coherent argv-to-stderr path. Tests can
     /// introspect `trace_depth` to verify scoping.
     pub trace_depth: u32,
+    /// Pending `exit` request (U-6e-a). Set by the `exit` builtin to
+    /// the requested exit code; once set, `eval_block` short-circuits
+    /// every enclosing block/function/loop to `Return` so the whole
+    /// statement stack unwinds, and the driver (REPL or script runner)
+    /// reads it to terminate. `None` = no exit pending. One-shot: the
+    /// first `exit` wins.
+    pending_exit: Option<i32>,
 }
 
 impl Env {
@@ -126,6 +133,7 @@ impl Env {
             interactive: false,
             implicit_fail_suppressed: 0,
             trace_depth: 0,
+            pending_exit: None,
         }
     }
 
@@ -158,11 +166,17 @@ impl Env {
 
     // === Variable read/write ===
 
-    /// Look up a variable by name. Searches the scope stack from
-    /// innermost to outermost; returns the first frame's binding.
-    /// Undefined names return `Value::empty()` per rc convention
-    /// (see value.rs module docs).
+    /// Look up a variable by name. The special variables `$status`,
+    /// `$errstr`, and `$cwd` bridge to their dedicated Env fields
+    /// (scripture 8.5 requires them queryable after every command);
+    /// they cannot be shadowed by an ordinary binding. All other names
+    /// search the scope stack from innermost to outermost and return
+    /// the first frame's binding. Undefined names return
+    /// `Value::empty()` per rc convention (see value.rs module docs).
     pub fn get(&self, name: &str) -> Value {
+        if let Some(v) = self.special_get(name) {
+            return v;
+        }
         for frame in self.scopes.iter().rev() {
             if let Some(v) = frame.get(name) {
                 return v.clone();
@@ -180,16 +194,27 @@ impl Env {
 
     /// `let name = value` -- create a binding in the TOPMOST frame
     /// (innermost scope), shadowing any outer binding. Scripture 6.2.
+    /// Assignment to a special variable (`status`/`errstr`/`cwd`)
+    /// routes to its dedicated field rather than a scope binding, so
+    /// the read bridge stays coherent.
     pub fn let_set<S: Into<String>>(&mut self, name: S, value: Value) {
+        let name = name.into();
+        if self.special_set(&name, &value) {
+            return;
+        }
         let frame = self.scopes.last_mut().expect("global frame present");
-        frame.insert(name.into(), value);
+        frame.insert(name, value);
     }
 
     /// `name = value` -- bare assignment. Writes to the topmost
     /// frame that already has the name; if no frame has it, writes
-    /// to the global (bottom) frame. Scripture 6.2.
+    /// to the global (bottom) frame. Scripture 6.2. A special
+    /// variable routes to its dedicated field (see `let_set`).
     pub fn assign<S: Into<String>>(&mut self, name: S, value: Value) {
         let name = name.into();
+        if self.special_set(&name, &value) {
+            return;
+        }
         // Walk top-down looking for an existing binding.
         for frame in self.scopes.iter_mut().rev() {
             if frame.contains_key(&name) {
@@ -271,6 +296,58 @@ impl Env {
 
     pub fn cwd_set<S: Into<String>>(&mut self, p: S) {
         self.cwd = p.into();
+    }
+
+    /// Read bridge for the special variables. Returns `Some` for
+    /// `status`/`errstr`/`cwd` (their dedicated field value), `None`
+    /// for any other name (the caller then searches scope frames).
+    fn special_get(&self, name: &str) -> Option<Value> {
+        match name {
+            "status" => Some(Value::from(self.status as i64)),
+            "errstr" => Some(Value::scalar(self.errstr.clone())),
+            "cwd" => Some(Value::scalar(self.cwd.clone())),
+            _ => None,
+        }
+    }
+
+    /// Write bridge for the special variables. Routes a write to
+    /// `status`/`errstr`/`cwd` into its dedicated field and returns
+    /// `true`; returns `false` for any other name (the caller then
+    /// writes a scope binding).
+    fn special_set(&mut self, name: &str, value: &Value) -> bool {
+        match name {
+            "status" => {
+                self.status = value.as_int().unwrap_or(0) as i32;
+                true
+            }
+            "errstr" => {
+                self.errstr = value.as_scalar();
+                true
+            }
+            "cwd" => {
+                self.cwd = value.as_scalar();
+                true
+            }
+            _ => false,
+        }
+    }
+
+    // === Pending exit (U-6e-a) ===
+
+    /// Request shell termination with `code` (the `exit` builtin).
+    /// One-shot: the first request wins (a nested `exit` while one is
+    /// already pending does not overwrite it).
+    pub fn request_exit(&mut self, code: i32) {
+        if self.pending_exit.is_none() {
+            self.pending_exit = Some(code);
+        }
+    }
+
+    /// The pending exit code, if `exit` has fired. The driver checks
+    /// this after evaluation to terminate; `eval_block` checks it to
+    /// short-circuit the statement stack.
+    pub fn exit_requested(&self) -> Option<i32> {
+        self.pending_exit
     }
 }
 

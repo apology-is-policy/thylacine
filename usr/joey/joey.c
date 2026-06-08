@@ -1884,6 +1884,28 @@ int main(void) {
     }
     t_putstr("joey: /u-test reaped status=0; U-2 arc integration verified\n");
 
+    // === /u-builtin-test orchestration (Phase 7 U-6e-a) ===
+    // The shell built-in dispatch + the must-be-internal builtins
+    // (cd / pwd / exit / unset / eval / source / type / true / false).
+    // Runs PRE-pivot: cd validates the synthetic devramfs dirs (/, /srv,
+    // /proc), source reads the /builtin-test.rc cpio fixture, and the
+    // rest act purely on the evaluator Env. 12 probes; status==0 gates
+    // the boot. Also exercises the $status / $errstr / $cwd special-var
+    // read bridge folded in at U-6e-a.
+    const char u_builtin_name[] = "u-builtin-test";
+    long ubt_pid = t_spawn(u_builtin_name, sizeof(u_builtin_name) - 1);
+    if (ubt_pid <= 0) {
+        t_putstr("joey: t_spawn(\"u-builtin-test\") FAILED\n");
+        return 1;
+    }
+    int ubt_status = -1;
+    long ubt_reaped = t_wait_pid(&ubt_status);
+    if (ubt_reaped != ubt_pid || ubt_status != 0) {
+        t_putstr("joey: /u-builtin-test orchestration FAILED\n");
+        return 1;
+    }
+    t_putstr("joey: /u-builtin-test reaped status=0; U-6e-a builtins verified\n");
+
     // === /ut orchestration (Phase 7 U-3 -- Utopia shell skeleton) ===
     // `ut` is the Utopia shell binary; at U-3 its scope is the Pale
     // Fire version banner via libutopia + clean exit. The U-4..U-Z

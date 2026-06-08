@@ -259,6 +259,13 @@ EOF
     cat > "$ramfs_src/version" <<'EOF'
 Thylacine v0.1-dev
 EOF
+    # U-6e-a: the `source` builtin's read fixture (/u-builtin-test sources
+    # this and asserts the assignment + fn registration persist into the
+    # caller's Env).
+    cat > "$ramfs_src/builtin-test.rc" <<'EOF'
+let sourced_var = ok
+fn sourced_fn { true }
+EOF
 
     # P4-Ia1: copy any built C-side userspace binaries from build/usr
     # into the cpio root. The list is curated below (not glob) so an
@@ -276,7 +283,7 @@ EOF
     # P4-Ia2: copy any built Rust-side userspace binaries from
     # build/usr-rs/<target>/release/. Same curation discipline.
     # Binary name = crate's [[bin]] name = directory under usr/.
-    local usr_rs_bins=( "hello-rs" "mmio-probe" "irq-probe" "virtio-blk-probe" "virtio-blk-rw" "virtio-net-probe" "virtio-net-arp" "virtio-net-loop" "virtio-input" "virtio-gpu" "irq-bench" "corvus" "alloc-smoke" "burrow-torture" "u-test" "u-redir-test" "argv-smoke" "coreutil-smoke" "echo" "cat" "wc" "head" "tail" "true" "false" "seq" "sort" "uniq" "tr" "cut" "grep" "basename" "dirname" "pwd" "pipe-src" "pipe-sink" "legate-prover" "login" "ut" "loom-smoke" "loom-stress" "loom-bench" )
+    local usr_rs_bins=( "hello-rs" "mmio-probe" "irq-probe" "virtio-blk-probe" "virtio-blk-rw" "virtio-net-probe" "virtio-net-arp" "virtio-net-loop" "virtio-input" "virtio-gpu" "irq-bench" "corvus" "alloc-smoke" "burrow-torture" "u-test" "u-redir-test" "u-builtin-test" "argv-smoke" "coreutil-smoke" "echo" "cat" "wc" "head" "tail" "true" "false" "seq" "sort" "uniq" "tr" "cut" "grep" "basename" "dirname" "pwd" "pipe-src" "pipe-sink" "legate-prover" "login" "ut" "loom-smoke" "loom-stress" "loom-bench" )
     local rs_release="$USR_RS_BUILD/$USR_RS_TARGET/release"
     for bin in "${usr_rs_bins[@]}"; do
         local src="$rs_release/$bin"

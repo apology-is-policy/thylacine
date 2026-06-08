@@ -1,0 +1,21 @@
+[package]
+name = "u-builtin-test"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "u-builtin-test"
+path = "src/main.rs"
+
+[dependencies]
+# u-builtin-test is the U-6e-a built-in dispatch + builtins boot probe.
+# It runs PRE-pivot (devramfs root) -- it needs no writable FS: `cd`
+# validates the synthetic devramfs directories (/, /srv, /proc), `source`
+# reads the /builtin-test.rc cpio fixture, and the rest (true/false/unset/
+# eval/type/exit) act purely on the Env. Each probe drives eval_source on
+# a fresh Env and asserts $status / $cwd / the special-var bridge / fn
+# registration / exit semantics.
+libthyla-rs = { path = "../lib/libthyla-rs" }
+libutopia   = { path = "../utopia/libutopia" }
