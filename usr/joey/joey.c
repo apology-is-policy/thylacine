@@ -2803,6 +2803,30 @@ int main(void) {
                 t_putstr("joey: fs-gamma rmdir(REMOVEDIR) OK\n");
             }
 
+            // === U-6d-b: post-pivot redirect round-trip (/u-redir-test) ===
+            // On the writable, SYSTEM-owned dev9p root, exercise the
+            // `>` / `>>` / `<` redirect round-trip end to end. u-test runs
+            // PRE-pivot (read-only devramfs root) so it covers only the
+            // heredoc + failure forms; this proves the write side against a
+            // real file. u-redir-test spawns pipe-src / pipe-sink (resolved
+            // from the devramfs cpio regardless of pivot) and writes
+            // /u-redir-out on the post-pivot root.
+            {
+                const char urt_name[] = "u-redir-test";
+                long urt_pid = t_spawn(urt_name, sizeof(urt_name) - 1);
+                if (urt_pid <= 0) {
+                    t_putstr("joey: t_spawn(\"u-redir-test\") FAILED\n");
+                    return 1;
+                }
+                int urt_status = -1;
+                long urt_reaped = t_wait_pid(&urt_status);
+                if (urt_reaped != urt_pid || urt_status != 0) {
+                    t_putstr("joey: /u-redir-test FAILED\n");
+                    return 1;
+                }
+                t_putstr("joey: /u-redir-test reaped status=0; U-6d-b redirects verified\n");
+            }
+
             (void)t_close(sd_rd);
         }
     }

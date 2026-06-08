@@ -10,23 +10,30 @@
 //   - write=true alone -> OWRITE (plus OTRUNC if truncate=true)
 //   - read=true + write=true -> ORDWR (plus OTRUNC if truncate=true)
 //   - truncate=true requires write=true (POSIX semantics)
+//   - create / create_new -> SYS_WALK_CREATE (the FS-alpha surface) via
+//     File::open_create_at_path (U-6d-b). `create` is create-or-open;
+//     `create_new` is exclusive. The new file's POSIX mode is `.mode(m)`
+//     (default 0644).
+//   - append -> the file is opened/created for write and positioned at
+//     end (Plan 9 omode has no O_APPEND; this seek-to-end-at-open is the
+//     single-writer approximation -- exact for the shell-redirect case,
+//     concurrent atomic-append is a v1.x kernel surface).
 //
-// NOT YET SUPPORTED (kernel surface doesn't exist; methods either
-// return error at .open() or warn at compile time of intent):
-//   - create -- needs a SYS_TLCREATE-equivalent. Will land alongside
-//     the directory-create + file-create surface. Until then, calling
-//     `.create(true).open(...)` returns `Error::NotImplemented`.
-//   - create_new -- same.
-//   - append -- Plan 9's open flags don't include O_APPEND directly;
-//     append-mode writes need an explicit lseek-then-write loop or
-//     a new kernel flag. Returns `Error::NotImplemented` if requested.
-//   - custom permission bits at create -- needs the create surface.
+// CONSTRAINTS:
+//   - truncate / append / create_new require write.
+//   - append + truncate together is rejected (contradictory).
+//   - NB: devramfs is read-only at v1.0, so create only succeeds on the
+//     dev9p (Stratum-backed) FS; on devramfs the create leg errors.
 
 use crate::err::{Error, Result};
 use crate::{T_ORDWR, T_OREAD, T_OTRUNC, T_OWRITE};
 
 use super::file::File;
 use super::path::Path;
+
+/// Default POSIX mode for a file created via `OpenOptions` when
+/// `.mode()` is not called: `rw-r--r--`.
+const DEFAULT_CREATE_MODE: u32 = 0o644;
 
 /// Builder for fine-grained file-open semantics.
 ///
@@ -51,11 +58,13 @@ pub struct OpenOptions {
     append: bool,
     create: bool,
     create_new: bool,
+    mode: u32,
 }
 
 impl OpenOptions {
-    /// A fresh builder with every flag at its default (`false`).
-    /// At least one of `read` / `write` must be set before `.open()`.
+    /// A fresh builder with every flag at its default (`false`) and the
+    /// create mode at 0644. At least one of `read` / `write` must be set
+    /// before `.open()`.
     #[inline]
     #[must_use]
     pub const fn new() -> Self {
@@ -66,6 +75,7 @@ impl OpenOptions {
             append: false,
             create: false,
             create_new: false,
+            mode: DEFAULT_CREATE_MODE,
         }
     }
 
@@ -129,16 +139,17 @@ impl OpenOptions {
         self
     }
 
+    /// Set the POSIX mode bits for a file created via `create` /
+    /// `create_new`. Ignored when no creation happens. Default 0644.
+    #[inline]
+    #[must_use]
+    pub const fn mode(mut self, m: u32) -> Self {
+        self.mode = m;
+        self
+    }
+
     /// Open `path` using the current settings.
     pub fn open<P: AsRef<Path>>(self, path: P) -> Result<File> {
-        // V1.0 unsupported flag rejections.
-        if self.create || self.create_new {
-            return Err(Error::NotImplemented);
-        }
-        if self.append {
-            return Err(Error::NotImplemented);
-        }
-
         // Read-or-write must be requested.
         let omode = match (self.read, self.write) {
             (true, true) => T_ORDWR,
@@ -147,18 +158,45 @@ impl OpenOptions {
             (false, false) => return Err(Error::InvalidArgument),
         };
 
-        // truncate requires write.
+        // truncate / append / create_new require write; append+truncate
+        // is contradictory.
         if self.truncate && !self.write {
             return Err(Error::InvalidArgument);
         }
+        if self.append && !self.write {
+            return Err(Error::InvalidArgument);
+        }
+        if self.create_new && !self.write {
+            return Err(Error::InvalidArgument);
+        }
+        if self.append && self.truncate {
+            return Err(Error::InvalidArgument);
+        }
 
-        let omode = if self.truncate {
+        // append never truncates (it positions at end below).
+        let base_omode = if self.truncate {
             omode | T_OTRUNC
         } else {
             omode
         };
 
-        File::open_with_omode(path.as_ref(), omode)
+        let mut file = File::open_create_at_path(
+            path.as_ref(),
+            base_omode,
+            self.create,
+            self.create_new,
+            self.mode,
+        )?;
+
+        if self.append {
+            // Position at end so subsequent writes append. (Plan 9 omode
+            // has no O_APPEND; this seek-to-end-at-open is the
+            // single-writer approximation -- module header.)
+            use crate::io::{Seek, SeekFrom};
+            file.seek(SeekFrom::End(0))?;
+        }
+
+        Ok(file)
     }
 }
 

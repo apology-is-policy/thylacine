@@ -516,20 +516,33 @@ pub extern "C" fn rs_main() -> i64 {
         }
     }
 
-    // OpenOptions: create requested -> NotImplemented (v1 lacks kernel surface).
+    // OpenOptions: create is now WIRED (U-6d-b, via SYS_WALK_CREATE) -- no
+    // longer the NotImplemented stub. On the read-only devramfs root the
+    // create reaches the FS and fails with a real error (devramfs.create
+    // returns NULL); the post-pivot SUCCESS path is in /u-redir-test.
     match OpenOptions::new().write(true).create(true).open("/no-such") {
-        Err(Error::NotImplemented) => {}
-        _ => {
-            t_putstr("alloc-smoke: OpenOptions::create did not return NotImplemented\n");
+        Err(Error::NotImplemented) => {
+            t_putstr("alloc-smoke: OpenOptions::create still stubbed NotImplemented\n");
+            return 1;
+        }
+        Err(_) => {}
+        Ok(_) => {
+            t_putstr("alloc-smoke: OpenOptions::create unexpectedly succeeded on read-only devramfs\n");
             return 1;
         }
     }
 
-    // OpenOptions: append requested -> NotImplemented.
-    match OpenOptions::new().write(true).append(true).open("/system.key") {
-        Err(Error::NotImplemented) => {}
-        _ => {
-            t_putstr("alloc-smoke: OpenOptions::append did not return NotImplemented\n");
+    // OpenOptions: append is now WIRED (seek-to-end at open) -- no longer
+    // NotImplemented. Append-without-create on an absent file fails
+    // NotFound, proving the surface reaches the FS rather than the stub.
+    match OpenOptions::new().write(true).append(true).open("/no-such-append") {
+        Err(Error::NotImplemented) => {
+            t_putstr("alloc-smoke: OpenOptions::append still stubbed NotImplemented\n");
+            return 1;
+        }
+        Err(_) => {}
+        Ok(_) => {
+            t_putstr("alloc-smoke: OpenOptions::append unexpectedly succeeded on absent file\n");
             return 1;
         }
     }

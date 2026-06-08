@@ -111,6 +111,9 @@ pub extern "C" fn rs_main() -> i64 {
     if let Err(rc) = flow_eval_pipe() {
         return rc;
     }
+    if let Err(rc) = flow_eval_redirect() {
+        return rc;
+    }
 
     t_putstr("u-test: all OK\n");
     0
@@ -3162,5 +3165,159 @@ fn flow_eval_pipe() -> Result<(), i64> {
     }
 
     t_putstr("u-test: eval pipe OK\n");
+    Ok(())
+}
+
+// =============================================================================
+// Flow 16 -- eval redirects (U-6d-b): < > >> heredoc
+// =============================================================================
+//
+// Validates the redirect mechanism end-to-end. u-test runs PRE-PIVOT
+// (devramfs root, read-only), so the positive coverage here uses the
+// no-writable-FS forms -- heredoc (fed through a kernel pipe) + the
+// failure/NotImplemented paths. The `>` / `>>` / `<` round-trip against
+// a real writable file is in /u-redir-test (post-pivot, dev9p).
+//
+// pipe-sink reads fd 0 to EOF and exits 0 iff it got exactly the 13-byte
+// payload "PIPE-DATA-OK\n" -- so a heredoc whose rendered body is that
+// payload, delivered to pipe-sink's fd 0, exits 0 and proves the full
+// chain: resolve -> pipe -> spawn -> feed body -> child reads fd 0.
+fn flow_eval_redirect() -> Result<(), i64> {
+    // Probe 1: heredoc -> pipe-sink, exact body. The body line
+    // "PIPE-DATA-OK" + its newline = the 13-byte payload.
+    {
+        let mut env = Env::new();
+        env.interactive = true;
+        let src = "pipe-sink << EOF\nPIPE-DATA-OK\nEOF\n";
+        match eval_source(&mut env, src) {
+            Ok(StatementFlow::Normal) => {}
+            _ => {
+                t_putstr("u-test: flow_eval_redirect: probe 1 heredoc eval FAILED\n");
+                return Err(1);
+            }
+        }
+        if env.status() != 0 {
+            t_putstr("u-test: flow_eval_redirect: probe 1 heredoc status != 0 FAILED\n");
+            return Err(1);
+        }
+    }
+
+    // Probe 2: heredoc interpolation. `$x` in the body expands; with
+    // x="DATA" the rendered body is "PIPE-DATA-OK\n" -> pipe-sink 0.
+    {
+        let mut env = Env::new();
+        env.interactive = true;
+        let src = "let x = 'DATA'\npipe-sink << EOF\nPIPE-$x-OK\nEOF\n";
+        if eval_source(&mut env, src).is_err() {
+            t_putstr("u-test: flow_eval_redirect: probe 2 interp eval FAILED\n");
+            return Err(1);
+        }
+        if env.status() != 0 {
+            t_putstr("u-test: flow_eval_redirect: probe 2 interp status != 0 FAILED\n");
+            return Err(1);
+        }
+    }
+
+    // Probe 3: no-interp heredoc (<<"EOF") delivers the literal body.
+    {
+        let mut env = Env::new();
+        env.interactive = true;
+        let src = "pipe-sink << \"EOF\"\nPIPE-DATA-OK\nEOF\n";
+        if eval_source(&mut env, src).is_err() {
+            t_putstr("u-test: flow_eval_redirect: probe 3 no-interp eval FAILED\n");
+            return Err(1);
+        }
+        if env.status() != 0 {
+            t_putstr("u-test: flow_eval_redirect: probe 3 no-interp status != 0 FAILED\n");
+            return Err(1);
+        }
+    }
+
+    // Probe 4: a redirect on a fn is NotImplemented (fns run in-process;
+    // no fd to retarget without fork).
+    {
+        let mut env = Env::new();
+        env.interactive = true;
+        let src = "fn myfn { let x = 'y' }\nmyfn > /tmp/x";
+        match eval_source(&mut env, src) {
+            Err(e) => {
+                if !matches!(
+                    e.kind,
+                    EvalErrorKind::NotImplemented(s) if s.contains("redirect on function")
+                ) {
+                    t_putstr("u-test: flow_eval_redirect: probe 4 wrong kind FAILED\n");
+                    return Err(1);
+                }
+            }
+            Ok(_) => {
+                t_putstr("u-test: flow_eval_redirect: probe 4 fn-redirect not rejected FAILED\n");
+                return Err(1);
+            }
+        }
+    }
+
+    // Probe 5: an ambiguous redirect (target expands to != 1 word) is a
+    // runtime failure: status non-zero + errstr mentions "ambiguous".
+    {
+        let mut env = Env::new();
+        env.interactive = true;
+        let src = "let xs = (a b)\npipe-sink < $xs";
+        if eval_source(&mut env, src).is_err() {
+            t_putstr("u-test: flow_eval_redirect: probe 5 ambiguous eval FAILED\n");
+            return Err(1);
+        }
+        if env.status() == 0 {
+            t_putstr("u-test: flow_eval_redirect: probe 5 ambiguous status==0 FAILED\n");
+            return Err(1);
+        }
+        if !env.errstr().contains("ambiguous") {
+            t_putstr("u-test: flow_eval_redirect: probe 5 ambiguous errstr FAILED\n");
+            return Err(1);
+        }
+    }
+
+    // Probe 6: `>` to a target that cannot be created (devramfs is
+    // read-only at v1.0) is a runtime failure: status non-zero + errstr
+    // mentions "open failed". Proves the create-failure path aborts
+    // before spawn.
+    {
+        let mut env = Env::new();
+        env.interactive = true;
+        let src = "pipe-src > /u-redir-nope-xyz";
+        if eval_source(&mut env, src).is_err() {
+            t_putstr("u-test: flow_eval_redirect: probe 6 create-fail eval FAILED\n");
+            return Err(1);
+        }
+        if env.status() == 0 {
+            t_putstr("u-test: flow_eval_redirect: probe 6 create-fail status==0 FAILED\n");
+            return Err(1);
+        }
+        if !env.errstr().contains("open failed") {
+            t_putstr("u-test: flow_eval_redirect: probe 6 create-fail errstr FAILED\n");
+            return Err(1);
+        }
+    }
+
+    // Probe 7: a bare redirect with no command (empty argv via an
+    // undefined var) reaches exec_bare_redirect; the heredoc body is
+    // discarded, status 0.
+    {
+        let mut env = Env::new();
+        env.interactive = true;
+        let src = "$nodef << EOF\nhi\nEOF\n";
+        match eval_source(&mut env, src) {
+            Ok(StatementFlow::Normal) => {}
+            _ => {
+                t_putstr("u-test: flow_eval_redirect: probe 7 bare-redirect eval FAILED\n");
+                return Err(1);
+            }
+        }
+        if env.status() != 0 {
+            t_putstr("u-test: flow_eval_redirect: probe 7 bare-redirect status != 0 FAILED\n");
+            return Err(1);
+        }
+    }
+
+    t_putstr("u-test: eval redirect OK\n");
     Ok(())
 }

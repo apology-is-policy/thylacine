@@ -127,13 +127,14 @@ use core::fmt::Write as _;
 
 use crate::parser::ast::{
     AssignStmt, CaseStmt, Command, CommandKind, Expr, FnDecl, ForStmt, IfStmt, LetStmt,
-    MaskNoteStmt, OnNoteStmt, Pipeline, Script, Statement, StatementKind, TraceStmt, TryStmt,
-    WhileStmt, Word,
+    MaskNoteStmt, OnNoteStmt, Pipeline, Redirect, RedirectKind, Script, Statement,
+    StatementKind, TraceStmt, TryStmt, WhileStmt, Word,
 };
 use crate::parser::token::{DqPart, Token, TokenKind};
 use crate::parser::Span;
 
-use libthyla_rs::fs::File;
+use libthyla_rs::fs::{File, OpenOptions};
+use libthyla_rs::io::Write as IoWrite;
 use libthyla_rs::process::{pipe, Stdio};
 use libthyla_rs::{t_putstr, t_wait_pid};
 
@@ -249,13 +250,312 @@ fn eval_pipeline(env: &mut Env, p: &Pipeline) -> EvalResult<StatementFlow> {
     }
     let elem = &p.elements[0];
     let cmd = &elem.command;
-    if !cmd.redirects.is_empty() {
-        return Err(EvalError::new(
-            EvalErrorKind::NotImplemented("redirects"),
-            elem.span,
-        ));
+    if cmd.redirects.is_empty() {
+        return eval_command(env, cmd);
     }
-    eval_command(env, cmd)
+    // Redirects present (U-6d-b). Only an external Simple command has
+    // fds to redirect at v1.0; a fn / brace-block / arith / subshell
+    // runs IN-PROCESS in this shell with no stdin/stdout fd to retarget
+    // without fork (same constraint as in-process pipeline stages).
+    match &cmd.kind {
+        CommandKind::Simple(simple) => {
+            let argv = evaluate_argv(env, &simple.words)?;
+            if argv.is_empty() {
+                // Bare redirect (`> file`) -- no command: the redirect
+                // targets are still opened/created/truncated (the side
+                // effect), then nothing runs. status 0 (rc convention).
+                return exec_bare_redirect(env, &cmd.redirects);
+            }
+            if env.fn_get(&argv[0]).is_some() {
+                return Err(EvalError::new(
+                    EvalErrorKind::NotImplemented("redirect on function (U-6f)"),
+                    cmd.span,
+                ));
+            }
+            exec_external_redirected(env, &argv, &cmd.redirects, cmd.span)
+        }
+        _ => Err(EvalError::new(
+            EvalErrorKind::NotImplemented("redirect on in-process command (U-6f)"),
+            cmd.span,
+        )),
+    }
+}
+
+// ---------------------------------------------------------------------
+// Redirects (U-6d-b)
+// ---------------------------------------------------------------------
+//
+// A command's redirects retarget its stdin (fd 0) and/or stdout (fd 1).
+// The parser models four kinds (no fd-numbered `2>` at v1.0):
+//   - `< file`   (RedirectKind::Stdin)   -- fd 0 from an existing file.
+//   - `> file`   (RedirectKind::Stdout)  -- fd 1 to a file (create-or-
+//                                           open + truncate).
+//   - `>> file`  (RedirectKind::Append)  -- fd 1 to a file (create-or-
+//                                           open + append).
+//   - `<< TAG`   (RedirectKind::Heredoc) -- fd 0 from an inline body fed
+//                                           through a kernel pipe.
+//
+// Source order matters only as last-wins-per-fd: two stdin redirects
+// (or two stdout redirects) keep the last; the earlier file is opened
+// (its side effect, e.g. `> a > b` truncates a) then closed when its
+// `Stdio::File` is dropped on reassignment.
+//
+// The shell OPENS the target and HANDS the fd to the child (Stdio::File);
+// it does no bulk I/O itself (so Loom -- the async 9P data path -- is not
+// the right layer here; that is the child's concern). The one exception
+// is the heredoc body, which the shell writes into a pipe whose read end
+// the child gets as fd 0; a pipe is a kernel-local object, not a 9P fid,
+// so that write is a plain SYS_WRITE.
+
+/// The resolved stdio overrides a command's redirects impose. `None`
+/// means "use the caller's default for this slot" (Piped for a lone
+/// command; the pipe end for a pipeline element).
+struct ResolvedStdio {
+    stdin: Option<Stdio>,
+    stdout: Option<Stdio>,
+    /// For a heredoc: the pipe WRITE end + the rendered body. The body
+    /// is fed AFTER the child spawns (so it is draining fd 0), then the
+    /// write end is dropped to deliver EOF.
+    heredoc: Option<(File, String)>,
+}
+
+/// A redirect-resolution failure. `Eval` propagates as an eval error
+/// (NotImplemented / Internal); `Runtime` is a per-command runtime
+/// failure (target open failed, ambiguous target) reflected via
+/// `$status` + `$errstr`, not an eval error.
+enum RedirError {
+    Eval(EvalError),
+    Runtime(String),
+}
+
+/// Open every redirect target in source order, producing the stdio
+/// overrides. Files are opened UP FRONT so a failure aborts before any
+/// spawn (consistent with the pipeline's up-front validation).
+fn resolve_redirects(env: &Env, redirects: &[Redirect]) -> Result<ResolvedStdio, RedirError> {
+    let mut out = ResolvedStdio {
+        stdin: None,
+        stdout: None,
+        heredoc: None,
+    };
+    for r in redirects {
+        match &r.kind {
+            RedirectKind::Stdin => {
+                let path = redir_target_path(env, r)?;
+                let f = File::open(&path)
+                    .map_err(|e| RedirError::Runtime(redir_open_err("<", &path, e)))?;
+                // A `<` after a `<<` (or vice versa) wins; drop the
+                // earlier heredoc pipe so it doesn't leak.
+                out.heredoc = None;
+                out.stdin = Some(Stdio::File(f));
+            }
+            RedirectKind::Stdout => {
+                let path = redir_target_path(env, r)?;
+                let f = OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .truncate(true)
+                    .open(&path)
+                    .map_err(|e| RedirError::Runtime(redir_open_err(">", &path, e)))?;
+                out.stdout = Some(Stdio::File(f));
+            }
+            RedirectKind::Append => {
+                let path = redir_target_path(env, r)?;
+                let f = OpenOptions::new()
+                    .write(true)
+                    .create(true)
+                    .append(true)
+                    .open(&path)
+                    .map_err(|e| RedirError::Runtime(redir_open_err(">>", &path, e)))?;
+                out.stdout = Some(Stdio::File(f));
+            }
+            RedirectKind::Heredoc { body, .. } => {
+                // `strip_tabs` was applied by the lexer when it captured
+                // the body, and `interp` is reflected in the DqPart
+                // structure (non-interp bodies are a single Literal), so
+                // rendering just walks the parts.
+                let rendered =
+                    render_heredoc_body(env, body, r.span).map_err(RedirError::Eval)?;
+                let (rd, wr) = pipe().map_err(|e| {
+                    let mut s = String::new();
+                    let _ = write!(&mut s, "heredoc pipe() failed: {:?}", e);
+                    RedirError::Runtime(s)
+                })?;
+                out.heredoc = Some((wr, rendered));
+                out.stdin = Some(Stdio::File(rd));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Evaluate a redirect's target Word to a single path. A target that
+/// expands to zero or many words is an "ambiguous redirect" (rc / bash
+/// behaviour).
+fn redir_target_path(env: &Env, r: &Redirect) -> Result<String, RedirError> {
+    let word = r.target.as_ref().ok_or_else(|| {
+        RedirError::Eval(EvalError::new(
+            EvalErrorKind::Internal("redirect missing target"),
+            r.span,
+        ))
+    })?;
+    let v = eval_word(env, word).map_err(RedirError::Eval)?;
+    if v.0.len() != 1 {
+        return Err(RedirError::Runtime(String::from(
+            "ambiguous redirect (target must expand to exactly one word)",
+        )));
+    }
+    Ok(v.0[0].clone())
+}
+
+/// `<op> <path>: open failed: <Error>` -- the `$errstr` for a failed
+/// redirect-target open.
+fn redir_open_err(op: &str, path: &str, e: impl core::fmt::Debug) -> String {
+    let mut s = String::new();
+    let _ = write!(&mut s, "{} {}: open failed: {:?}", op, path, e);
+    s
+}
+
+/// Render a heredoc body (`Vec<DqPart>`) to bytes. Mirrors
+/// `eval_dq_in_word`: literals copy through, `$var` interpolates (only
+/// present when the heredoc was interpolating), `$#var` -> length,
+/// `$(cmd)` is NotImplemented (U-6f).
+fn render_heredoc_body(env: &Env, parts: &[DqPart], span: Span) -> EvalResult<String> {
+    let mut out = String::new();
+    for part in parts {
+        match part {
+            DqPart::Literal(s) => out.push_str(s),
+            DqPart::Var(name) => out.push_str(&env.get(name).as_scalar()),
+            DqPart::VarLen(name) => {
+                let _ = write!(out, "{}", env.get(name).len());
+            }
+            DqPart::Subst(_) => {
+                return Err(EvalError::new(
+                    EvalErrorKind::NotImplemented("$(cmd) in heredoc (U-6f)"),
+                    span,
+                ));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Best-effort write of `buf` to `f` (a pipe write end). Partial writes
+/// loop; an error or zero-progress write stops (the child closed its
+/// read end -- a normal early exit, not our problem).
+fn feed_pipe(f: &mut File, mut buf: &[u8]) {
+    while !buf.is_empty() {
+        match f.write(buf) {
+            Ok(0) => break,
+            Ok(n) => buf = &buf[n..],
+            Err(_) => break,
+        }
+    }
+}
+
+/// Spawn an external command with redirects applied. Non-redirected
+/// slots take the U-6c v1.0 convention (`Stdio::Piped` + immediate
+/// parent-side drop -- the shell has no terminal-backed fd 0/1/2 yet).
+fn exec_external_redirected(
+    env: &mut Env,
+    argv: &[String],
+    redirects: &[Redirect],
+    _span: Span,
+) -> EvalResult<StatementFlow> {
+    let ResolvedStdio {
+        stdin,
+        stdout,
+        heredoc,
+    } = match resolve_redirects(env, redirects) {
+        Ok(r) => r,
+        Err(RedirError::Eval(e)) => return Err(e),
+        Err(RedirError::Runtime(msg)) => {
+            env.errstr_set(msg);
+            env.status_set(1);
+            return Ok(StatementFlow::Normal);
+        }
+    };
+
+    if env.trace_depth > 0 {
+        trace_echo(argv);
+    }
+
+    let mut spawn_cmd = libthyla_rs::process::Command::new(argv[0].clone());
+    if argv.len() > 1 {
+        spawn_cmd.args(argv[1..].iter().cloned());
+    }
+    match stdin {
+        Some(s) => {
+            spawn_cmd.stdin(s);
+        }
+        None => {
+            spawn_cmd.stdin(Stdio::Piped);
+        }
+    }
+    match stdout {
+        Some(s) => {
+            spawn_cmd.stdout(s);
+        }
+        None => {
+            spawn_cmd.stdout(Stdio::Piped);
+        }
+    }
+    spawn_cmd.stderr(Stdio::Piped);
+
+    match spawn_cmd.spawn() {
+        Ok(mut child) => {
+            // Drop any Piped parent ends immediately (File ends were
+            // consumed inside spawn). For a heredoc-driven stdin the
+            // child holds the pipe read end; feed the body now that it
+            // is draining, then drop the write end to deliver EOF.
+            drop(child.stdin.take());
+            drop(child.stdout.take());
+            drop(child.stderr.take());
+            if let Some((mut wr, body)) = heredoc {
+                feed_pipe(&mut wr, body.as_bytes());
+                drop(wr);
+            }
+            match child.wait() {
+                Ok(status) => {
+                    env.status_set(status.raw());
+                    Ok(StatementFlow::Normal)
+                }
+                Err(e) => {
+                    let mut s = String::new();
+                    let _ = write!(&mut s, "wait failed: {:?}", e);
+                    env.errstr_set(s);
+                    env.status_set(1);
+                    Ok(StatementFlow::Normal)
+                }
+            }
+        }
+        Err(e) => {
+            let mut s = String::new();
+            let _ = write!(&mut s, "spawn failed: {:?}", e);
+            env.errstr_set(s);
+            env.status_set(127);
+            Ok(StatementFlow::Normal)
+        }
+    }
+}
+
+/// A bare redirect with no command (`> file`): resolve the redirects
+/// (the open/create/truncate side effect happens), then drop everything
+/// and report success. A heredoc with no command discards its body.
+fn exec_bare_redirect(env: &mut Env, redirects: &[Redirect]) -> EvalResult<StatementFlow> {
+    match resolve_redirects(env, redirects) {
+        Ok(_resolved) => {
+            // _resolved drops here: opened files close, heredoc pipe ends
+            // close (body never written -- discarded, matching bash).
+            env.status_set(0);
+            Ok(StatementFlow::Normal)
+        }
+        Err(RedirError::Eval(e)) => Err(e),
+        Err(RedirError::Runtime(msg)) => {
+            env.errstr_set(msg);
+            env.status_set(1);
+            Ok(StatementFlow::Normal)
+        }
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -322,17 +622,13 @@ fn eval_pipeline(env: &mut Env, p: &Pipeline) -> EvalResult<StatementFlow> {
 fn exec_pipeline(env: &mut Env, p: &Pipeline) -> EvalResult<StatementFlow> {
     let n = p.elements.len();
 
-    // Validate + evaluate every element's argv up front. Any
-    // NotImplemented / empty-argv aborts before a single spawn.
+    // Validate + evaluate every element's argv AND resolve its redirects
+    // up front. Any NotImplemented / empty-argv / redirect-open failure
+    // aborts before a single spawn (no half-spawned state).
     let mut argvs: Vec<Vec<String>> = Vec::with_capacity(n);
+    let mut redirs: Vec<ResolvedStdio> = Vec::with_capacity(n);
     for elem in &p.elements {
         let cmd = &elem.command;
-        if !cmd.redirects.is_empty() {
-            return Err(EvalError::new(
-                EvalErrorKind::NotImplemented("redirect on pipeline element (U-6d-b)"),
-                elem.span,
-            ));
-        }
         let simple = match &cmd.kind {
             CommandKind::Simple(s) => s,
             _ => {
@@ -355,7 +651,21 @@ fn exec_pipeline(env: &mut Env, p: &Pipeline) -> EvalResult<StatementFlow> {
                 cmd.span,
             ));
         }
+        // Per-element redirects (U-6d-b): they OVERRIDE the pipe wiring
+        // for the redirected fd (e.g. `cmd > f | next` sends cmd's stdout
+        // to f, not the pipe, so next reads EOF). A redirect-target open
+        // failure aborts the whole pipeline before any spawn.
+        let rr = match resolve_redirects(env, &cmd.redirects) {
+            Ok(r) => r,
+            Err(RedirError::Eval(e)) => return Err(e),
+            Err(RedirError::Runtime(msg)) => {
+                env.errstr_set(msg);
+                env.status_set(1);
+                return Ok(StatementFlow::Normal);
+            }
+        };
         argvs.push(argv);
+        redirs.push(rr);
     }
 
     if env.trace_depth > 0 {
@@ -394,29 +704,53 @@ fn exec_pipeline(env: &mut Env, p: &Pipeline) -> EvalResult<StatementFlow> {
     // via the Vecs at fn return.
     let mut pids: Vec<i32> = Vec::with_capacity(n);
     let mut spawn_err: Option<&'static str> = None;
+    // Heredoc write ends + bodies, fed after every child is spawned (so
+    // each is draining its fd 0), then dropped to deliver EOF.
+    let mut heredoc_writes: Vec<(File, String)> = Vec::new();
     for i in 0..n {
         let argv = &argvs[i];
         let mut spawn_cmd = libthyla_rs::process::Command::new(argv[0].clone());
         if argv.len() > 1 {
             spawn_cmd.args(argv[1..].iter().cloned());
         }
-        match stdin_files[i].take() {
-            Some(f) => {
-                spawn_cmd.stdin(Stdio::File(f));
+        // stdin: a per-element redirect (`< f` / `<<`) wins over the pipe
+        // read end (which is dropped so the upstream sees the right EOF
+        // behaviour). Otherwise the pipe read end (Some for i in 1..n) or
+        // the outer Piped default (element 0).
+        match redirs[i].stdin.take() {
+            Some(s) => {
+                drop(stdin_files[i].take());
+                spawn_cmd.stdin(s);
             }
-            None => {
-                spawn_cmd.stdin(Stdio::Piped);
-            }
+            None => match stdin_files[i].take() {
+                Some(f) => {
+                    spawn_cmd.stdin(Stdio::File(f));
+                }
+                None => {
+                    spawn_cmd.stdin(Stdio::Piped);
+                }
+            },
         }
-        match stdout_files[i].take() {
-            Some(f) => {
-                spawn_cmd.stdout(Stdio::File(f));
+        // stdout: a per-element redirect (`> f` / `>> f`) wins over the
+        // pipe write end (dropped so the downstream reader sees EOF).
+        match redirs[i].stdout.take() {
+            Some(s) => {
+                drop(stdout_files[i].take());
+                spawn_cmd.stdout(s);
             }
-            None => {
-                spawn_cmd.stdout(Stdio::Piped);
-            }
+            None => match stdout_files[i].take() {
+                Some(f) => {
+                    spawn_cmd.stdout(Stdio::File(f));
+                }
+                None => {
+                    spawn_cmd.stdout(Stdio::Piped);
+                }
+            },
         }
         spawn_cmd.stderr(Stdio::Piped);
+        if let Some(h) = redirs[i].heredoc.take() {
+            heredoc_writes.push(h);
+        }
 
         match spawn_cmd.spawn() {
             Ok(mut child) => {
@@ -433,6 +767,14 @@ fn exec_pipeline(env: &mut Env, p: &Pipeline) -> EvalResult<StatementFlow> {
                 break;
             }
         }
+    }
+
+    // Feed heredoc bodies (best-effort; small bodies at v1.0 -- a body
+    // exceeding the pipe buffer fed to a non-reading element would block,
+    // a documented v1.0 limitation), then drop the write ends for EOF.
+    for (mut wr, body) in heredoc_writes {
+        feed_pipe(&mut wr, body.as_bytes());
+        drop(wr);
     }
 
     // Reap every spawned child (wait-any + pid match). statuses[i]

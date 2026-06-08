@@ -1,0 +1,23 @@
+[package]
+name = "u-redir-test"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "u-redir-test"
+path = "src/main.rs"
+
+[dependencies]
+# u-redir-test is the U-6d-b post-pivot redirect round-trip. u-test runs
+# PRE-pivot (devramfs root, read-only) so it can only cover the no-write
+# redirect forms (heredoc + failure paths). This binary runs POST-pivot
+# (joey-spawned, dev9p root is writable + SYSTEM-owned) and exercises the
+# `>` / `>>` / `<` round-trip end-to-end: pipe-src writes a payload to a
+# file via `>`, libthyla-rs reads it back, `>>` appends, `>` truncates,
+# and `pipe-sink < file` validates stdin-from-file. pipe-src/pipe-sink
+# resolve from the devramfs cpio (spawn name lookup is devramfs-backed
+# regardless of pivot), so no pool bake is needed.
+libthyla-rs = { path = "../lib/libthyla-rs" }
+libutopia   = { path = "../utopia/libutopia" }

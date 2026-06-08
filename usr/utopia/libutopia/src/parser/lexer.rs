@@ -635,6 +635,13 @@ impl<'a> Lexer<'a> {
             strip_tabs = true;
             self.pos += 1;
         }
+        // Allow optional horizontal whitespace between `<<` / `<<-` and the
+        // tag, so `cat << EOF` works as well as `cat <<EOF` (the universal
+        // heredoc form). A newline before a tag still falls through to the
+        // InvalidHeredocStart / var-name-start check below.
+        while matches!(self.peek_byte(), Some(b' ') | Some(b'\t')) {
+            self.pos += 1;
+        }
         // Tag follows. Either `"TAG"` (quoted) or TAG (unquoted).
         if self.peek_byte() == Some(b'"') {
             interp = false;
