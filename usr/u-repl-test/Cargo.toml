@@ -1,0 +1,20 @@
+[package]
+name = "u-repl-test"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "u-repl-test"
+path = "src/main.rs"
+
+[dependencies]
+# u-repl-test is the U-6g REPL-loop boot probe. It drives libutopia::repl::Repl
+# with scripted in-memory byte streams + a Vec sink (the harness cannot inject
+# /dev/cons keystrokes -- the A-4c constraint), asserting the read-parse-eval
+# cycle: Accept -> eval_source -> Env state, multi-read line accumulation,
+# `exit N` + Ctrl-D session termination, Ctrl-C edit-discard + recovery,
+# Redraw rendering, and parse-error survival (interactive, scripture 8.9).
+libthyla-rs = { path = "../lib/libthyla-rs" }
+libutopia = { path = "../utopia/libutopia" }

@@ -38,6 +38,7 @@ pub mod line_editor;
 pub mod palette;
 pub mod parser;
 pub mod path;
+pub mod repl;
 
 // Re-export the canonical Pale Fire glyph -- `⊢` U+22A2 RIGHT TACK
 // (UTOPIA-VISUAL.md section 2). Programs that want to emit it in

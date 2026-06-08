@@ -173,6 +173,22 @@ impl<W: Write + ?Sized> Write for &mut W {
     }
 }
 
+// An in-memory sink: appending to a `Vec<u8>` always succeeds (modulo
+// allocation). Mirrors `std::io::Write for Vec<u8>`. Useful for buffering
+// composed output before a single syscall, and for capturing a writer's
+// bytes in tests (the U-6g `Repl::feed` sink).
+impl Write for Vec<u8> {
+    #[inline]
+    fn write(&mut self, buf: &[u8]) -> Result<usize> {
+        self.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    #[inline]
+    fn flush(&mut self) -> Result<()> {
+        Ok(())
+    }
+}
+
 // =============================================================================
 // Seek.
 // =============================================================================

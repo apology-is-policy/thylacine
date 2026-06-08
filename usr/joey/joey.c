@@ -1972,16 +1972,40 @@ int main(void) {
     }
     t_putstr("joey: /u-subst-test reaped status=0; U-6f command substitution verified\n");
 
-    // === /ut orchestration (Phase 7 U-3 -- Utopia shell skeleton) ===
-    // `ut` is the Utopia shell binary; at U-3 its scope is the Pale
-    // Fire version banner via libutopia + clean exit. The U-4..U-Z
-    // arc fills in the line editor, parser, evaluator, builtins,
-    // job control, coreutils, and PTY support. Booting /ut here
-    // proves the new usr/utopia/ workspace builds, the binary links
-    // against libutopia + libthyla-rs, and the Pale Fire ANSI
-    // escapes emit to the boot UART without dirtying the log
-    // (terminals that don't grok 24-bit colour degrade gracefully
-    // per UTOPIA-VISUAL.md section 4.4).
+    // === /u-repl-test orchestration (Phase 7 U-6g) ===
+    // The read-parse-eval main loop: libutopia::repl::Repl drives the line
+    // editor (U-4) + parser (U-5) + evaluator (U-6) over scripted in-memory
+    // byte streams (the harness cannot inject /dev/cons keystrokes -- the
+    // A-4c constraint -- but `feed` is fd-agnostic). Asserts Accept->eval->
+    // Env state, multi-read line accumulation, `exit N` + Ctrl-D session
+    // termination, Ctrl-C edit-discard + recovery, Redraw rendering, and
+    // parse-error survival (interactive, scripture 8.9). status==0 gates boot.
+    const char u_repl_name[] = "u-repl-test";
+    long urp_pid = t_spawn(u_repl_name, sizeof(u_repl_name) - 1);
+    if (urp_pid <= 0) {
+        t_putstr("joey: t_spawn(\"u-repl-test\") FAILED\n");
+        return 1;
+    }
+    int urp_status = -1;
+    long urp_reaped = t_wait_pid(&urp_status);
+    if (urp_reaped != urp_pid || urp_status != 0) {
+        t_putstr("joey: /u-repl-test orchestration FAILED\n");
+        return 1;
+    }
+    t_putstr("joey: /u-repl-test reaped status=0; U-6g REPL main loop verified\n");
+
+    // === /ut orchestration (Phase 7 U-6g -- Utopia shell REPL) ===
+    // `ut` is the Utopia shell binary. Through U-6g it is a working
+    // read-parse-eval REPL: it prints the Pale Fire banner, draws the
+    // prompt, and loops reading fd 0. Spawned bare here it has NO fd 0
+    // (rfork RFPROC gives a fresh empty handle table), so the first read
+    // returns an error and `ut` exits 0 -- a link + boot + banner smoke
+    // (the real read-parse-eval loop is exercised deterministically by
+    // /u-repl-test above). The banner emits to the UART via t_putstr, so
+    // it shows regardless of fd 1; the 24-bit-colour ANSI degrades
+    // gracefully on terminals that don't grok it (UTOPIA-VISUAL.md 4.4).
+    // The live interactive REPL runs when login spawns `ut` with the
+    // console handle inherited as fd 0/1/2 (A-5 session path).
     const char ut_name[] = "ut";
     long ut_shell_pid = t_spawn(ut_name, sizeof(ut_name) - 1);
     if (ut_shell_pid <= 0) {
@@ -1994,7 +2018,7 @@ int main(void) {
         t_putstr("joey: /ut orchestration FAILED\n");
         return 1;
     }
-    t_putstr("joey: /ut reaped status=0; Utopia shell skeleton verified\n");
+    t_putstr("joey: /ut reaped status=0; Utopia shell REPL verified\n");
 
     // === pouch hello smoke (P6-pouch-hello-smoke) ===
     // The first POSIX C programs Thylacine runs, built against the pouch
