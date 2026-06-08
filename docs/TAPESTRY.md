@@ -268,6 +268,241 @@ design notes; **this document is the binding scripture** it was folded into.
 
 ---
 
+> **Sections 13-17 added 2026-06-08** (design session; NOVEL/ARCH/ROADMAP
+> companion commit). Sections 1-12 are the present/event *transport* (the Loom op
+> mapping). Sections 13-17 are the *compositor + Halcyon UX + agentic enablement +
+> sequencing* — the graphics phase elevated `tapestryd` from a present server to
+> the compositor, and Halcyon's UI model evolved from the Phase-0 "scroll buffer
+> as the sole primitive" to an anti-window tiling environment. This is
+> **vision-sketch altitude** for Phase-10 detail (the §28 invariants reserve, like
+> T-1 in §6, and land at impl); the *binding decisions* are mirrored into
+> NOVEL.md (Angle #4 evolution + Angle #1 extension), ARCH §17, and ROADMAP.
+
+## 13. The compositor — `tapestryd` elevated, and placement-transparent surfaces
+
+**Decision (2026-06-08): `tapestryd` is not merely a present server; it is the
+compositor / display server.** Sections 1-12 describe its present/event transport
+(alloc a framebuffer Burrow, present a rect, stream events). The graphics phase
+elevates it to own *layout* and *input routing* too, because Halcyon (Angle #4) is
+an anti-window environment (section 14) and the compositor is what makes "inline
+vs split vs tab" one mechanism. The monolith-vs-server fork resolves to
+server+clients: it is the Plan 9 way (the window system is a file server,
+section 15), the robust way (a fullscreen Quake crash must not take the desktop),
+and it makes placement-transparency fall out.
+
+- **D5 — surfaces are placement-transparent.** A client is handed a surface (a
+  framebuffer Burrow + a present-fid + an event-fid) and an input channel. It does
+  **not** know, and cannot observe, whether the compositor draws it inline in a
+  scroll buffer, in a split pane, as a fullscreen tab, or docked in a corner.
+  Placement is the compositor's business. This collapses Halcyon's display modes
+  (section 14) into one mechanism, and it is why an SDL/Quake client (section 9)
+  "just made a window" while Halcyon places it as a tab.
+- **D6 — surfaces re-parent live.** Because placement is invisible to the client,
+  the compositor moves a *running* surface between placement states without the
+  client restarting or knowing. Start a game inline as a thumbnail, promote it to a
+  fullscreen tab; the client renders the same surface throughout. Live promotion
+  (section 14) is an emergent property of D5, not a separate feature.
+- **D7 — the compositor stays a pure surface + pixels + input router.** It deals in
+  framebuffer Burrows and input streams, never glyphs, fonts, or text. Text
+  rasterization (TTF; section 14) and modal editing (the Helix transcript) are
+  *client* concerns — Halcyon rasterizes its own panes; a non-text client (Quake)
+  never drags in the font stack. This is the Wayland-style render-in-the-client
+  discipline; it keeps the compositor protocol minimal.
+
+The two transports stay split (present-on-Loom / control-on-9P, section 15):
+pixels fly over the Loom ring (section 5) for latency; structure and input are 9P.
+`tapestryd` owning the GPU remains the stratumd-as-driver `CAP_HW_CREATE`
+precedent (section 3).
+
+## 14. Halcyon — the anti-window environment (the compositor's first client)
+
+**This section EVOLVES NOVEL.md Angle #4** (2026-06-08). The Phase-0 model was "a
+scroll buffer with inline graphics as the sole UI primitive." That insight is
+*preserved and subsumed*: a Halcyon shell pane **is** a scroll buffer whose
+transcript can hold inline graphical surfaces. The evolution adds the layer
+*around* the pane — a tiling, anti-window compositor — turning "the scroll buffer
+is the UI" into "the terminal is the desktop."
+
+**Thesis: the floating, overlapping window is obsolete; the terminal is the
+desktop.** Grounding: Plan 9's acme (text-first tiled columns, "run anything in a
+pane") + `/dev/draw`-as-a-file surface multiplexing; the modern tiling-WM
+convergence (i3 / sway / zellij); and the mainstream's own concession — 40 years
+of overlap-*management* UI (taskbars, alt-tab, Expose, virtual desktops, now
+Windows 11 Snap Layouts + macOS Sequoia tiling) are all workarounds for a problem
+tiling deletes. Most work happens in one or two surfaces at a time; a tiling split
+handles that without windows. Heritage and SOTA both point here.
+
+The model:
+
+- **Uniform container, layout-mode per container (the i3 model).** One structural
+  primitive: a container, whose layout mode is `split-h | split-v | tabbed |
+  stacked`. "Tabs" and "splits" are not separate levels — they are layout modes of
+  the same container, nestable arbitrarily. The screen is the root container; a
+  taskbar is simply `root = vsplit[ working-area(tabbed), status-bar(thin) ]`.
+- **Placement states (all D6 live-reparent transitions):** `{ inline-live,
+  pinned(scope, policy), pane-filling, pane-zoomed, tab-filling }`. "Fullscreen" is
+  pane-zoom (fill the split pane, tmux-`zoom` style) or tab-fill.
+- **pin = minimize = widget, one mechanism.** A pinned surface is a running surface
+  docked out of the flow. A widget (a clock) is *born* pinned by `halcyon.rc`; a
+  minimized app is *promoted* to pinned. Two parameters distinguish the cases:
+  `scope` (pane | screen — a clock docks to a screen-level chrome pane so it
+  survives a pane close and does not multiply per-split; a minimized app docks to
+  its origin pane) and `policy` (overlay | reserve-strip — a clock reserves a
+  status strip; a minimized video overlays a corner). Multiple pins tile into a
+  corner dock / a designated pin-target pane.
+- **Mechanism / policy split.** Panes are one primitive; the special-ness — `role`
+  (content | chrome | pin-target), `focusable` (false for chrome so Super+arrows
+  skips the clock) — is `halcyon.rc` *policy*, not new primitives. This is what
+  lets "everything is a pane" hold up without twelve widget types. Pure Plan 9
+  mechanism/policy discipline.
+- **Inline-surface lifetime is resolved by the focus boundary.** While an inline
+  app is focused you cannot scroll the shell (focus is in the app); handing control
+  back resolves the surface to *close* or *pin* immediately. So a live inline rect
+  never strands "scrolled half off-screen" — app-focused and shell-scrolling are
+  mutually exclusive, with close/pin as the transition.
+
+Input is two orthogonal layers:
+
+- **Layer 1 — compositor control, a reserved Super/Hyper modifier (the i3/sway
+  model).** Super+arrows move focus, Super+N switches tab, Super+m minimizes —
+  addressable *always*, even through a greedy app (Quake, vim) that eats every
+  other key. This is how you talk to the compositor without a tmux-style prefix.
+- **Layer 2 — the focused surface's own input.** For a shell pane it is a
+  **Helix-flavored modal transcript** (selection-first matches the copy-centric
+  nature of terminal work): Esc -> normal mode, navigate/select/`y`ank anywhere in
+  the (read-only) scrollback, `i` jumps to the (only writable) prompt. Navigation +
+  selection + yank are global; insert/paste/edit resolve to the prompt. A free gift
+  falls out: select any past command, tweak, resubmit — acme's "text is
+  executable," modal. For an app client, layer 2 is raw input. Mouse is secondary
+  (selection, focus, layout drag); keyboard is primary.
+
+**TTF is foundational, not a nicety** (the Phase-0 fontdue note becomes
+load-bearing). A native `no_std` TrueType rasterizer (fontdue / swash-class;
+aux-forkable like ratatui->nora) with AA + hinting; complex-script shaping (CJK /
+ligatures / RTL; HarfBuzz-class) is deferred — a monospace Latin + box-drawing
+terminal does not need it initially.
+
+**The eyes-open cost.** No-floating-window is a deliberate break. Terminals, TUIs,
+and single-surface games map perfectly; multi-window / popup toolkit apps (GTK/Qt
+menus, tooltips, dialogs, multiple top-levels) map awkwardly — a menu is a
+transient floating window by nature. Accepted: the porting target is games / TUIs,
+not the Linux desktop-app ecosystem.
+
+## 15. Layout-as-9P — the compositor is a file server
+
+**Decision (2026-06-08): the compositor exposes its layout as a 9P tree** (the
+maximal acme realization — acme exposes each window as files `ctl`/`body`/`tag`/
+`addr`; rio serves `/dev/draw`, `/dev/cons`, `/dev/mouse`). `halcyon.rc` is then
+*a shell script writing files*, not a config DSL; a program reads its own geometry,
+requests promotion, or pins itself by file ops — the identical interface a human
+uses, and the same interface the agent uses (section 16). Present-on-Loom /
+control-on-9P made concrete: pixels over the Loom ring, structure over 9P.
+
+Tree sketch (names provisional):
+
+```
+/dev/halcyon/
+  ctl                 # global: new-tab, focus <id>, ...
+  layout              # read: the container tree as text; write: mutate
+  event               # read: a stream of compositor events (focus, resize, retitle)
+  pane/
+    new               # read/write: allocate a container, yields its <id>
+    <id>/
+      ctl             # split, close, set-mode, promote-fullscreen, pin
+      mode            # split-h | split-v | tabbed | stacked
+      role            # content | chrome | pin-target   (+ focusable bit)
+      geometry        # read: x,y,w,h px (and rows,cols for a text pane)
+      tag             # acme-style title / command line
+      surface         # read: a Loom present-handle for this pane's pixels
+      input           # read (when focused): keystrokes + mouse for this pane
+```
+
+The three planes that *are* the architecture: **structure/control -> 9P** (this
+tree; scriptable, introspectable), **pixels -> Loom** (`surface` yields a
+present-handle; the firehose never touches the filesystem), **input -> the
+per-pane `input` stream** (focus-routed, with the Super-chord layer 1 intercepted
+above it). Every hard mechanism lives on exactly one plane — the test that the
+layering is clean.
+
+Forward-compat: **surfaces carry an alpha channel (RGBA) from day one** even
+though blending starts at 1.0 — adding alpha later is an ABI break on the hot
+path. Translucent chrome (a clock over scrollback) is the eventual payoff; content
+apps (Quake) never want it, so transparency pairs with the chrome/widget role.
+
+## 16. Agentic enablement — the graphical agentic-loop ABI
+
+**Decision (2026-06-08): the graphics phase ships a perceive / act / assert API
+for the agent, designed in from the fbcon (stage 0, section 17), not bolted on.**
+Load-bearing for the *development methodology*: every existing agentic loop is
+textual (`Thylacine boot OK`, `tests: N/M PASS`, `EXTINCTION:`); a compositor
+emits pixels, so without this the post-Utopia agent-primary model regresses to
+human-primary exactly when the work turns visual. It is a new agentic-loop ABI,
+sibling to the boot-banner ABI (`TOOLING.md` §10), which gains the concrete
+contract when the fbcon lands.
+
+- **Structural perception = free** — the agent is just another 9P client of the
+  section-15 layout tree; it `cat`s `/dev/halcyon/layout` over the serial console
+  it already drives. No new mechanism.
+- **Visual perception, two planes.** Host-side, immediate: QEMU `screendump` over
+  QMP writes the scanout to a PNG the agent reads *visually* (the Read tool ingests
+  images) — works the instant virtio-gpu scans out anything. In-band, later: a 9P
+  `screen` / `pane/<id>/snapshot` the compositor renders to an image (per-pane,
+  structurally correlated, works on real hardware).
+- **The oracle / ground-truth pairing is why both are needed**, not two loose
+  features. The 9P tree says what *should* be on screen; the screendump shows what
+  *is*. Structure alone can lie about whether something rendered; pixels alone have
+  no oracle. Cross-checking the two makes graphical agentic testing rigorous.
+- **Action** mirrors it: QMP `input-send-event` host-side (prior art: the #896
+  virtio-input key-injection harness) + an in-band inject file later.
+- **Determinism is the hard part** (not capture). Vsync timing, cursor blink, the
+  ticking clock, glyph jitter make golden-image assertions flaky (the project
+  already feels the milder version at #887 / #896 / #894). Required hooks: a
+  *hold-this-frame* present mode, a test mode that freezes animations + cursor
+  blink, deterministic glyph rendering.
+- **Gate the in-band capture / inject files to dev/test builds** — a screen
+  readback or input-injection file is screenshot-spyware / control-hijack in
+  production (the strip-for-production class of #880). The host-side QMP path needs
+  no guest gating (it is the host's own capability).
+
+## 17. Sequencing, tiers, and the two axes
+
+**The investment ramps; it does not switch on.** Design (this doc) matures cheaply
+through Phase 7-8; the build is staged so the API is proven by real-but-simple
+consumers before Halcyon — the highest-risk, last-phase client — commits to it.
+
+- **fbcon = Tapestry stage 0.** The shell on a real monitor: the compositor with
+  exactly one fullscreen surface (a shell pane). It is the forcing function for the
+  bottom of the stack (scanout + raster + bitmap text + input), the first real
+  consumer that hardens the green virtio-gpu / virtio-input drivers, and the one
+  graphics piece with a v1.0-rc claim ("a real OS on a monitor, not just a serial
+  console"). The agentic capture/inject loop (section 16) wires in *here*, so
+  graphics is never developed blind — and it is the first time the agent literally
+  `Read`s a screenshot of Thylacine. Late Phase 9 (`ROADMAP.md`).
+- **Compositor API + SDL / software-Quake = the acceptance gate, BEFORE Halcyon.**
+  Grow the protocol (pane-tree, placement-transparency, re-parenting) and prove it
+  under a demanding non-Halcyon client. Original Quake shipped a *software*
+  rasterizer — software-Quake is a 2D milestone gated only on the SDL->Tapestry
+  backend (section 9), no GL. If SDL/Quake maps cleanly, the API is proven *before*
+  the riskiest client is built. Phase 10 on-ramp.
+- **Halcyon = the headline client** on the now-proven protocol. Phase 10.
+- **Two tiers, and Halcyon is pure 2D.** A textual-heritage graphical shell (scroll
+  buffer, image display, video) is decode-then-blit — Halcyon never needs OpenGL.
+  **GL is exclusively for ported third-party apps** (off Halcyon's critical path),
+  and the system-optimal route is *port Mesa* (swrast / llvmpipe via Pouch), not a
+  hand-rolled GL; a native GL pipeline is a NOVEL research angle, not a roadmap
+  dependency. GL is v1.1+ and never blocks Halcyon.
+- **Two axes — decouple them.** (A) the Tapestry API stack (compositor -> present
+  -> driver -> scanout) is entirely QEMU-validatable (virtio-gpu + virtio-input) —
+  build and perfect the whole API + fbcon + Halcyon there. (B) bare-metal
+  enablement is Lazarus work (`PORTABILITY.md`) that plugs in *under* the finished
+  API: the RPi framebuffer (output, moderate) and — the long pole — **USB-HID for
+  the keyboard** (a USB host stack, one of the largest driver subsystems).
+  "Operable on bare metal through keyboard + monitor" is the A∩B intersection; the
+  input half is gated on USB, so build QEMU-first (virtio-input) and let the
+  bare-metal backends land independently on Lazarus.
+
+---
+
 ## Cross-references
 
 - `docs/LOOM.md` — the ring transport Tapestry operates (§8 the ABI, §9

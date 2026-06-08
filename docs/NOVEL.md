@@ -68,7 +68,12 @@ These are not v1.0 angles — they're recorded so a future direction isn't lost.
   arc; the graphics half (virtio-gpu scanout + `tapestryd` + an SDL backend that
   ports Quake/DOSBox) is a post-Loom graphics phase feeding Halcyon (Angle #4). A
   native proof-of-concept compiles on the auxiliary track (`usr/apps/libtapestry`
-  + `usr/apps/tapestry-demo`).
+  + `usr/apps/tapestry-demo`). **Deepened 2026-06-08**: TAPESTRY.md §13-17 elevate
+  `tapestryd` to the compositor (placement-transparent surfaces + live promotion),
+  give Halcyon its anti-window UX model + layout-as-9P, add the agentic-enablement
+  ABI, and fix the graphics sequencing (fbcon = stage 0 -> compositor + SDL /
+  software-Quake acceptance gate -> Halcyon; GL = Mesa via Pouch, v1.1+, off the
+  critical path). Angle #4 (§3.4) evolves in step.
 
 ---
 
@@ -87,6 +92,8 @@ Thylacine's totalization:
 - **Stratum is a 9P server** mounted as the root FS.
 - **janus is a 9P server** mounted as `/dev/janus/`.
 - **Signals as a synthetic filesystem** *(novel inversion vs. Plan 9 and Linux)*. Every Proc has a fd-readable note Spoor (`SYS_NOTE_OPEN`); the fd-first path is the documented default, with async handlers (`SYS_NOTIFY` / `SYS_NOTED`) as an explicit opt-in for libc compatibility. Plan 9 had `/proc/<pid>/note` readable too but kept async-handler as the documented model; Linux's `signalfd(2)` is a bolted-on afterthought. Thylacine inverts the priority — modern daemons (stratumd, libsodium-shaped code) read notes from `poll`'d fds in their normal event loop, never write async-cancel-safe handler code. The historically nastiest part of POSIX signal programming becomes the rare path. Design in ARCH §7.6.1-§7.6.8.
+- **The network is a 9P filesystem** *(the last big surface to totalize)*. `/net/tcp`, `/net/cs`, dial by writing `/net/tcp/clone` — the Plan 9 model. A consequence falls out: **network I/O rides Loom for free** — a `LOOM_OP_READ`/`WRITE` on a `/net` connection's data fid *is* recv/send, and a multishot read on the listen file *is* an async accept loop — with **no socket opcodes added to Loom** (the opcodes stay pure 9P). The realization is a userspace `/net` 9P server (`netd`, the stratumd-as-driver precedent); Loom is what makes a userspace network stack fast enough (it amortizes the app<->server hops). See ROADMAP Phase 8. (Added 2026-06-08.)
+- **Introspectable-as-9P, including the agent** *(the totalization's payoff for the development methodology)*. Because every subsystem is a 9P tree, the *human*, a *program*, and the *coding agent* all drive and observe the system through one interface — `cat`/`echo` on files. The agent is just another 9P client (it reads `/proc`, `/net`, and the Halcyon layout tree over the console it already drives; `docs/TAPESTRY.md` §16). This keeps the post-Utopia agent-primary loop alive into the graphical phase, where it would otherwise go blind on pixels. "9P everywhere" is simultaneously the Plan 9 thesis and the agentic API. (Added 2026-06-08.)
 
 **Scope — in**:
 - Kernel `Dev` vtable + `Spoor` + `Walkqid` + `attach` / `walk` / `open` / `read` / `write` / `clunk` / etc. as the unified resource interface.
@@ -281,6 +288,24 @@ The model:
 
 ### 3.4 Angle #4 — Halcyon: shell as the graphical environment
 
+> **EVOLVED 2026-06-08 — the anti-window compositor.** The model described below
+> is the Phase-0 vision ("a scroll buffer with inline graphics as the *sole* UI
+> primitive"). It is now *preserved and subsumed*, not discarded: a Halcyon shell
+> pane **is** a scroll buffer whose transcript holds inline graphical surfaces, and
+> the evolution adds the layer *around* the pane — a tiling, anti-window
+> compositor (uniform containers with split/tabbed/stacked layout modes;
+> placement-transparent surfaces with live promotion; pin = minimize = widget;
+> layout-as-9P; a Helix-modal transcript). "The scroll buffer is the UI" becomes
+> "the terminal is the desktop." Grounding: acme + Plan 9 `/dev/draw`, the modern
+> tiling-WM convergence (i3/sway/zellij), and the mainstream's own 40-year drift
+> into overlap-*management* UI (Windows 11 Snap Layouts, macOS Sequoia tiling) —
+> heritage and SOTA both point here. **The authoritative model is now
+> `docs/TAPESTRY.md` §13-17** (the compositor, Halcyon UX, layout-as-9P, agentic
+> enablement, sequencing). This callout supersedes the specific scope lines below
+> that forbade splits/tabs; overlapping / floating / z-ordered windows remain out —
+> that *is* the thesis. The risk profile (medium-high, last-phase, fallback to a
+> textual v1.0-rc) is unchanged and re-affirmed.
+
 **Why it's novel**: every modern OS uses some compositor / window manager / display server (Wayland, X11, Scenic, AppKit, DWM). Plan 9's Rio + 8½ is the closest comparison — a tile-based windowing system without compositing — but it's still a windowing system, with its own protocol and event loop. **No production OS uses a scroll buffer with inline graphics as the sole UI primitive.** Smalltalk environments and some Lisp machines came close in the 1980s but never with modern hardware acceleration. Notebook UIs (Jupyter, Mathematica) achieve something similar but inside another OS's windowing system.
 
 Halcyon is the bet that, for shell-driven development workflows, this is enough.
@@ -326,7 +351,7 @@ The Rust implementation matters: parsing bash-subset syntax, managing the scroll
 
 **Scope — out**:
 - Overlapping windows of any kind.
-- Side-by-side panes (no `tmux`-style splits in Halcyon proper; `tmux` runs inside Halcyon as a normal program with no special integration).
+- ~~Side-by-side panes~~ — **superseded 2026-06-08**: tiling splits + tabs are now CORE (uniform containers; `docs/TAPESTRY.md` §14), not out. (`tmux` still runs inside a pane as an ordinary program.) Overlapping / floating / z-ordered windows and user-draggable free placement remain out — that is the anti-window thesis.
 - Pop-up dialogs, modal prompts, transient panels. (Password prompts are line-oriented reads from `janus`; confirmation is `[Y/n]`.)
 - Mouse-driven UI affordances (Halcyon supports mouse for selection / scrolling, not as a primary input model).
 - Multi-monitor.

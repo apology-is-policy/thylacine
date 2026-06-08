@@ -1661,6 +1661,8 @@ There is no separate IPC mechanism. All inter-process communication is mediated 
 
 This is the Plan 9 model, adopted unchanged.
 
+**The network is 9P too** (the totalization completes; NOVEL.md Angle #1, added 2026-06-08). The stack is `/net`-as-9P (`/net/tcp`, `/net/cs`, dial by writing `/net/tcp/clone` — the Plan 9 model), realized as a userspace `/net` 9P server (`netd`, the stratumd-as-driver precedent — a `CAP_HW_CREATE` Proc owning virtio-net). A consequence falls out: **network I/O rides Loom with no socket opcodes** — a `LOOM_OP_READ`/`LOOM_OP_WRITE` on a `/net` connection's data fid *is* recv/send, and a multishot read on the listen file *is* an async accept loop; Loom's vocabulary stays pure 9P (no `LOOM_OP_SEND`/`ACCEPT` à la io_uring), and Loom is what makes the userspace stack fast enough (it amortizes the app↔`netd` hops). The native remote-access story is therefore `import`/`exportfs` over authenticated 9P (corvus as the auth agent, the Plan 9 `cpu(1)` model), not sshd — though sshd stays a portable Pouch option for ecosystem compatibility. Lands ROADMAP Phase 8 (Linux compat + network); design matures then.
+
 ### 10.2 9P dialect: 9P2000.L + Stratum extensions
 
 **Dialect**: 9P2000.L (the Linux-extended dialect; the `.L` distinguishes it from Plan 9's 9P2000). Includes the L-extension messages: `Tlopen`, `Tlcreate`, `Tsymlink`, `Tmknod`, `Trename`, `Treaddir`, `Tlock`, `Tgetlock`, `Tlink`, `Tmkdir`, `Trenameat`, `Tunlinkat`, `Tgetattr`, `Tsetattr`, `Treadlink`, `Tstatfs`, `Tfsync`, `Tflush`, `Txattrwalk`, `Txattrcreate`. Covers POSIX file modes properly (vs vanilla 9P2000's restricted set); the `.L` is what Linux's v9fs speaks to userspace 9P servers and what Stratum's `stratumd` exposes per `stratum/v2/docs/reference/20-9p.md`.
@@ -2462,59 +2464,48 @@ musl port (Tier 1 native); Linux syscall shim (Tier 2 static); container-as-terr
 
 ## 17. Halcyon integration
 
-**STATUS**: COMMITTED
+**STATUS**: COMMITTED (EVOLVED 2026-06-08 — the compositor / client architecture)
 
-### 17.1 Kernel surface Halcyon depends on
+> The Phase-0 §17 held that "Halcyon does not require a compositor or display
+> server, beyond raw framebuffer write." That is **superseded**: the graphics phase
+> (`docs/TAPESTRY.md`, signed off 2026-06-07) introduced `tapestryd` as the display
+> server, and the 2026-06-08 design session elevated it to the **compositor** and
+> evolved Halcyon into an anti-window tiling environment. This section records the
+> *foundational decisions* at ARCH altitude; the full model is **`docs/TAPESTRY.md`
+> §13-17** + **`NOVEL.md` Angle #4**.
 
-Halcyon requires from the kernel:
-- **Framebuffer**: `/dev/fb/image` (BURROW handle), `/dev/fb/ctl` (resolution, format, flush).
-- **Input**: `/dev/cons` (keyboard via UART or VirtIO input); `/dev/mouse` (if mouse connected).
-- **Processes**: `rfork`, `exec`, `pipe`, `wait` for command execution.
-- **9P mounts**: standard `mount` syscall to bring up video servers, image servers, etc.
-- **Notes**: terminal-resize note (`winch`); `interrupt` for Ctrl-C.
+### 17.1 The compositor / client architecture
 
-Halcyon does not require a compositor, a display server, or any graphics API beyond raw framebuffer write.
+- **Tapestry (`tapestryd`) is the compositor / display server** — it owns the GPU (a `CAP_HW_CREATE` userspace driver, the stratumd-as-driver precedent), the surface set, layout, and input routing. **Halcyon is its first client**, as are ported apps (an SDL/Quake surface is just another client). Monolith-vs-server resolved to server+clients: the Plan 9 way (the window system is a file server, §17.2), the robust way (a client crash does not take the screen), and the way that makes placement-transparency fall out.
+- **Surfaces are placement-transparent** (TAPESTRY.md D5): a client is handed a surface + input channel and cannot observe whether it is drawn inline, in a split, as a tab, or docked. The three display modes are one mechanism; a running surface re-parents live (D6 — the "live promotion" gift).
+- **Two transports, never crossed: present-on-Loom, control-on-9P.** Pixels fly over the Loom ring (present is `LOOM_OP_WRITE`; TAPESTRY.md §5); structure + input are 9P (the `/dev/halcyon` layout tree; §17.2). This is the I-30-pinned, capability-safe path no raw shared-memory compositor can claim.
 
-### 17.2 Framebuffer device
+### 17.2 Kernel surface — still no graphics-specific API
 
-The framebuffer device is a userspace VirtIO-GPU driver exposing:
+The evolution *strengthens* the original claim: the kernel grows **no graphics-specific API**. Everything Halcyon and `tapestryd` need already exists:
 
-```
-/dev/fb/
-    ctl       ← write: "res <width> <height> <depth>", "flush"
-    image     ← BURROW handle to ARGB32 pixel buffer (zero-copy)
-    info      ← read: current resolution and format
-```
+- **Present**: the **Loom** ring (the io_uring-inverted 9P transport) — present is a generic `LOOM_OP_WRITE`; the framebuffer is a zero-copy shared BURROW (Angle #2).
+- **Layout + control + introspection**: **9P** — `tapestryd` serves the `/dev/halcyon` tree (uniform containers; per-pane `ctl` / `mode` / `role` / `geometry` / `tag` / `surface` / `input`); `halcyon.rc` is a shell script writing those files (TAPESTRY.md §15).
+- **Scanout**: a userspace **virtio-gpu** driver (the deferred scanout half: `CREATE_2D` / `ATTACH_BACKING` / `SET_SCANOUT` / `TRANSFER_TO_HOST_2D` / `RESOURCE_FLUSH`).
+- **Input**: **virtio-input** (QEMU) / USB-HID (bare metal, a Lazarus arc) -> `tapestryd` -> the per-pane `input` 9P stream; a reserved Super/Hyper modifier is the compositor-control layer, intercepted above the focused surface's own input (TAPESTRY.md §14).
+- **Processes**: `rfork` / `exec` / `pipe` / `wait` — Halcyon spawns commands into panes.
+- **Notes**: resize (`winch`), `interrupt` (Ctrl-C).
 
-Halcyon receives the BURROW handle on first open of `/dev/fb/image`; maps it; writes pixels directly to the mapped region; issues `flush` via `/dev/fb/ctl`. The VirtIO-GPU driver handles the DMA transfer to the host GPU.
+### 17.3 Agentic enablement (the graphical agentic-loop ABI)
 
-For bare metal Apple Silicon (post-v2.0), the framebuffer device speaks to the AGX driver (via Asahi) via the same 9P interface. Halcyon does not change.
+The graphics phase ships a perceive / act / assert API for the coding agent, designed in from the fbcon (TAPESTRY.md §16): structural perception is free (the agent is a 9P client of the `/dev/halcyon` tree, `cat` over the serial console it already drives); visual perception is QEMU `screendump` -> the agent reads the PNG visually (host-side, now) then an in-band per-pane snapshot (later); action is QMP `input-send-event` (+ an in-band inject file later); and the oracle/ground-truth pairing (9P structure vs. captured pixels) makes graphical testing rigorous. This keeps the post-Utopia agent-primary loop alive into the graphical phase, where it would otherwise go blind on pixels. It is a new agentic-loop ABI sibling to the boot-banner ABI (`TOOLING.md` §10, which gains the concrete contract at fbcon-time); the in-band capture / inject files are dev/test-build-only (the #880 strip-for-production class).
 
-### 17.3 Input
+### 17.4 Sequencing (pointer)
 
-Keyboard input via `/dev/cons` (line- or character-mode based on `consctl` settings). Halcyon reads keystrokes; no kernel-level translation beyond raw character delivery.
-
-Mouse via `/dev/mouse` (if VirtIO input device is present). Halcyon uses mouse for selection and scrolling; not as a primary input model.
-
-### 17.4 Process management
-
-Halcyon is the user's primary launcher. When the user types `cmd args`, Halcyon:
-1. Parses the command line.
-2. `rfork(RFPROC | RFFDG | RFNAMEG)` — new process, share fd table briefly to set up redirections, share territory (so mounted servers are visible).
-3. In the child: set up file redirections via `dup`; `exec(cmd, args)`.
-4. In the parent: `wait` for the child; collect exit status.
-
-Pipelines (`cmd1 | cmd2`) handled by chaining pipes between the children.
-
-Job control (`Ctrl-Z`, `bg`, `fg`) handled via process groups + `stop`/`cont` notes.
+fbcon = Tapestry stage 0 (the shell on a monitor; late Phase 9; the one graphics piece with a v1.0-rc claim) -> compositor API + SDL / software-Quake as the acceptance gate -> Halcyon (Phase 10) on the proven protocol. Halcyon is pure 2D; OpenGL (Mesa swrast via Pouch) is app-compat only, v1.1+, off Halcyon's critical path. The Tapestry API is QEMU-validatable (axis A); bare-metal output (RPi framebuffer) + input (USB-HID, the long pole) is Lazarus work (axis B) plugging in beneath it. Full detail: TAPESTRY.md §17 + ROADMAP Phase 9/10.
 
 ### 17.5 Open design questions
 
-None at Gate 3.
+- The Phase-10 detail (the exact `/dev/halcyon` schema, the present/recycle protocol's Halcyon-side surface, the determinism-mode wire for agentic testing) firms up at the graphics-phase design pass; vision-sketch altitude until then (the §28 invariants reserve, not enumerate — see §28 "Reserved invariants").
 
 ### 17.6 Summary
 
-Halcyon is a 9P client that mounts framebuffer + input + video + Stratum and renders the scroll-buffer UI. Kernel provides standard syscalls and the `/dev/fb/`, `/dev/cons`, `/dev/mouse`, `/dev/video/` device interfaces. No graphics-specific kernel API.
+Halcyon is the first client of `tapestryd`, the compositor. It presents pixels over Loom and drives layout + input over the `/dev/halcyon` 9P tree; the kernel provides no graphics-specific API (Loom + 9P + virtio-gpu / virtio-input already suffice). The anti-window tiling model (uniform containers, placement-transparent surfaces, layout-as-9P, the Helix-modal transcript, pin = minimize = widget) lives in `docs/TAPESTRY.md` §13-17.
 
 ---
 
@@ -3581,6 +3572,8 @@ These are the project's promises. Every one has a spec or a runtime check or a c
 **Corvus invariants (C-1..C-23)** are enumerated separately in `CORVUS-DESIGN.md §9` — they govern the key agent's runtime + audit guarantees (mlock'd pages, session ownership monotonicity, audit log encryption, the kernel-stamped per-connection `/srv` transport identity, etc.). Cross-referenced here so the global invariant surface is discoverable; the canonical text lives in CORVUS-DESIGN.
 
 **Pouch invariants (P-1..P-4)** are enumerated separately in `POUCH-DESIGN.md §11` — they govern the Phase-6 POSIX environment's boundary guarantees: **P-1** no foreign syscall number ever enters the kernel (the structural form of `ROADMAP.md §3.6` — the kernel is never modified to accommodate POSIX); **P-2** pouch is the sole POSIX path to the kernel; **P-3** no silently-wrong POSIX surface (every surface either maps to a defined Thylacine behavior or returns a documented errno); **P-4** the pouch upper/lower boundary line holds (vendored musl above, Thylacine-native below). Cross-referenced here so the global invariant surface is discoverable; the canonical text lives in POUCH-DESIGN.
+
+**Reserved invariants (graphics phase; land at impl, per the T-1 precedent in `docs/TAPESTRY.md` §6).** The compositor + agentic-enablement design (TAPESTRY.md §13-17 + ARCH §17, added 2026-06-08) *reserves* — but does not yet enumerate as enforced — a small set that takes its §28 numbers when the graphics phase builds (the way Loom deferred I-29/I-30's §28 edit to its impl, and Tapestry deferred T-1): **T-1** no torn scanout (the framebuffer Burrow stays backed from present-submit to its terminal CQE; TAPESTRY.md §6); **placement-transparency** (a surface's placement — inline / split / tab / pinned — is invisible to and unforgeable by its client; TAPESTRY.md D5); **layout-tree integrity** (the `/dev/halcyon` 9P tree is the single source of layout truth — control is 9P, pixels are Loom, the two transports never crossed); **agentic-capture gating** (the in-band screen-readback / input-injection files are dev/test-build-only — the #880 strip-for-production class). Reserving (not enumerating) keeps Phase-10 detail at vision-sketch altitude; the audit-trigger rows (`tapestryd`, `netd`, the agentic capture/inject surface) join §25.4 the same way, at impl.
 
 ---
 

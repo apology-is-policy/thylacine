@@ -949,6 +949,7 @@ No new formal specs. Per the 2026-05-23 spec-to-code suspension (`CLAUDE.md`), t
 - VirtIO-net driver in userspace (Phase 3 deliverable, validated here under load).
 - Exposes `/net/tcp/`, `/net/udp/`, `/net/ipifc/<n>/` for compatibility with Plan 9-style network access.
 - Linux-compat sockets API mapped via the syscall shim.
+- **Network I/O rides Loom** (added 2026-06-08; `docs/LOOM.md` + `NOVEL.md` Angle #1 + `ARCHITECTURE.md` §10.1). Because `/net` is 9P, a `LOOM_OP_READ`/`LOOM_OP_WRITE` on a connection's data fid *is* recv/send and a multishot read on the listen file *is* an async accept loop -- so **no socket opcodes are added to Loom** (the vocabulary stays pure 9P). The userspace `net/` server is exactly `netd` (the stratumd-as-driver precedent), and Loom is what makes a userspace network stack fast enough -- it amortizes the app<->netd hops the way it does for stratumd. The native remote-access story is `import`/`exportfs` over authenticated 9P (corvus auth, the Plan 9 `cpu(1)` model); sshd stays a portable Pouch option for ecosystem compatibility.
 
 **Integration tests**:
 - A pre-built Linux ARM64 static binary (e.g., curl, wget, redis-cli) runs and performs network operations.
@@ -1051,6 +1052,10 @@ None mandatory. Network protocol correctness is smoltcp's responsibility (it's b
 **Kernel preemption**:
 - Kernel preemption enabled (the Phase 2 deferral). Audit-gated.
 
+**Framebuffer console (fbcon) -- Tapestry stage 0** (added 2026-06-08; `docs/TAPESTRY.md` §17):
+- The shell on a real monitor: the compositor with exactly one fullscreen surface (a shell pane), over virtio-gpu scanout + virtio-input. The forcing function for the bottom of the graphics stack (scanout + raster + bitmap text + input) and the first real consumer that hardens the green virtio-gpu / virtio-input drivers. **The one graphics piece with a v1.0-rc claim** ("a real OS on a monitor, not just a serial console") -- but **optional**: if it slips it becomes v1.1, like Halcyon, and never blocks the rc.
+- The **agentic-enablement capture/inject loop** (TAPESTRY.md §16) wires in HERE, so graphics is never developed blind: QEMU `screendump` -> the agent reads the PNG; QMP `input-send-event`; the 9P structural view (`cat /dev/halcyon/layout`); dev/test-build-gated in-band variants. This keeps the agent-primary loop alive into the graphical phase (TOOLING.md §10 gains the concrete ABI here).
+
 **v1.0-rc release**:
 - Git tag `v1.0-rc.1`.
 - Release notes describing the textual + compat OS.
@@ -1123,6 +1128,33 @@ Other v1.1+ candidates:
 **Goal**: Halcyon is the primary user interface. Images render inline. Video plays inline. The development workflow moves from UART debug shell to Halcyon. The hardened substrate from Phase 7 + Halcyon + a focused Halcyon-surface audit pass + final release tasks = **v1.0 final**.
 
 This is the last phase of v1.0 and the highest-risk angle (`NOVEL.md` Angle #4 — medium-high risk). Halcyon is held to the end deliberately so its risk does not endanger the rest of the OS. If Halcyon hits a wall, Phase 7's v1.0-rc.1 becomes v1.0 final and Halcyon becomes v1.1.
+
+> **EVOLVED 2026-06-08 — the compositor / client architecture.** The §11.1
+> deliverables below are the Phase-0 model (a monolithic scroll-buffer Halcyon
+> writing raw `/dev/fb`, with a bash-subset parser). They are **reframed** by the
+> graphics-phase design (`docs/TAPESTRY.md` §13-17 + `NOVEL.md` Angle #4 +
+> `ARCHITECTURE.md` §17): Halcyon is the first **client** of `tapestryd` (the
+> compositor), presents pixels over **Loom**, drives layout + input over the
+> `/dev/halcyon` **9P** tree, runs the **Utopia `ut`** shell (not a bash-subset
+> parser), and renders an **anti-window tiling** UI (uniform containers;
+> placement-transparent surfaces; a Helix-modal transcript) rather than a
+> scroll-buffer-only primitive. New Phase-10 sequencing:
+>
+> - **On-ramp, BEFORE Halcyon: the compositor API + an SDL backend + software-Quake
+>   as the API acceptance gate.** Prove the protocol under a demanding non-Halcyon
+>   client first (original Quake's *software* rasterizer needs no GL). fbcon
+>   (Tapestry stage 0) lands earlier, in Phase 9 (§10.1).
+> - **Halcyon is pure 2D.** OpenGL is app-compat only (Mesa swrast via Pouch),
+>   **v1.1+**, off Halcyon's critical path -- it never blocks v1.0.
+> - **Two axes:** the Tapestry API is QEMU-validatable (virtio-gpu + virtio-input);
+>   bare-metal output (RPi framebuffer) + input (USB-HID, the long pole) is Lazarus
+>   work (`PORTABILITY.md`) plugging in beneath the finished API.
+> - **Agentic enablement** (TAPESTRY.md §16) keeps the agent-primary loop alive
+>   through this phase (it wires in at fbcon, §10.1).
+>
+> The risk profile (highest-risk, last-phase, fallback to the Phase-9 v1.0-rc) is
+> unchanged and re-affirmed. The §11.1 bullets firm up at the graphics-phase design
+> pass; **`docs/TAPESTRY.md` §13-17 is authoritative**.
 
 ### 11.1 Deliverables
 
