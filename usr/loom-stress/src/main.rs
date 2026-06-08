@@ -272,9 +272,18 @@ pub extern "C" fn rs_main() -> i64 {
     t_putstr("loom-stress: phase2 concurrent two-thread FSYNC stress ok (every op completed once)\n");
 
     // --- Phase 3: cross-Proc-death quiesce. Submit K FSYNCs + dispatch them async
-    // (NONBLOCK, no reap) so they are in flight, then LEAK the ring + exit. The
-    // Proc teardown closes the leaked loom handle -> loom_free quiesces the K
-    // in-flight ops (#898 abandon-on-death). A clean reap by joey is the witness.
+    // (NONBLOCK, no reap), then LEAK the ring (mem::forget) + exit. The K ops are
+    // in flight when the Proc tears down; the teardown closes the leaked loom
+    // handle -> loom_free quiesces them (#898 abandon-on-death). joey reaping
+    // loom-stress status 0 + 0 EXTINCTION across the SMP gate is the witness.
+    //
+    // BEST-EFFORT coverage (Loom-6d audit F3): nothing *enforces* an op is still
+    // outstanding at exit -- it relies on the dev9p FSYNC round-trip (measured
+    // ~1.8 ms by loom-bench) being orders of magnitude larger than the few-us
+    // exit path, so the K ops are reliably in flight at teardown (a ~1000x
+    // margin). The deterministic single-reader multi-in-flight coverage of #898
+    // is the 6c kernel harness (9p_transport_mq); this is the cross-PROC-death
+    // exercise on a live client.
     let mut s = 0u32;
     while s < INFLIGHT_AT_DEATH {
         if shared.ring.try_submit(&Sqe::fsync(0, 0xDEAD_0000 | s as u64)).is_err() {

@@ -202,9 +202,17 @@ pub extern "C" fn rs_main() -> i64 {
         let mut i = 0u32;
         while i < N_NOP {
             let _ = ring.try_submit(&Sqe::nop(i as u64));
-            let _ = ring.enter(1, 1, ENTER_GETEVENTS);
+            if ring.enter(1, 1, ENTER_GETEVENTS).is_err() {
+                fail("loom-bench: FAIL -- NOP indiv enter\n");
+            }
+            let mut g = 0u32;
             while ring.reap().is_none() {
-                let _ = ring.enter(0, 1, ENTER_GETEVENTS);
+                // Guard + propagate enter errors so a kernel regression FAILS the
+                // bench rather than hanging the boot (the loom_fsync_batch policy).
+                if g >= 100_000 || ring.enter(0, 1, ENTER_GETEVENTS).is_err() {
+                    fail("loom-bench: FAIL -- NOP indiv reap stuck\n");
+                }
+                g += 1;
             }
             i += 1;
         }
@@ -224,13 +232,18 @@ pub extern "C" fn rs_main() -> i64 {
             }
             i += 1;
         }
-        let _ = ring.enter(N_NOP, N_NOP, ENTER_GETEVENTS);
+        if ring.enter(N_NOP, N_NOP, ENTER_GETEVENTS).is_err() {
+            fail("loom-bench: FAIL -- NOP batch enter\n");
+        }
         let mut reaped = 0u32;
+        let mut g = 0u32;
         while reaped < N_NOP {
             if ring.reap().is_some() {
                 reaped += 1;
+            } else if g >= 100_000 || ring.enter(0, 1, ENTER_GETEVENTS).is_err() {
+                fail("loom-bench: FAIL -- NOP batch reap stuck\n");
             } else {
-                let _ = ring.enter(0, 1, ENTER_GETEVENTS);
+                g += 1;
             }
         }
         *s = read_cntvct().wrapping_sub(t0) / N_NOP as u64;

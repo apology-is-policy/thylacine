@@ -103,6 +103,18 @@ pub struct Sqe {
 }
 
 const _: () = assert!(core::mem::size_of::<Sqe>() == 64);
+// Field offsets pinned to kernel loom.h. The size assert alone would miss a
+// same-size field reorder (e.g. swapping two u32s) that silently shifts the
+// byte-pinned Loom ABI -- the C side carries the matching `__builtin_offsetof`
+// asserts (6c audit F4); this mirror must too (6d audit F1 / SA-2).
+const _: () = assert!(core::mem::offset_of!(Sqe, opcode) == 0);
+const _: () = assert!(core::mem::offset_of!(Sqe, flags) == 1);
+const _: () = assert!(core::mem::offset_of!(Sqe, handle_idx) == 4);
+const _: () = assert!(core::mem::offset_of!(Sqe, offset) == 8);
+const _: () = assert!(core::mem::offset_of!(Sqe, len) == 16);
+const _: () = assert!(core::mem::offset_of!(Sqe, buf_idx_or_off) == 20);
+const _: () = assert!(core::mem::offset_of!(Sqe, user_data) == 24);
+const _: () = assert!(core::mem::offset_of!(Sqe, _resv1) == 32);
 
 /// One completion entry (`struct loom_cqe`, 16 bytes).
 #[repr(C)]
@@ -117,6 +129,9 @@ pub struct Cqe {
 }
 
 const _: () = assert!(core::mem::size_of::<Cqe>() == 16);
+const _: () = assert!(core::mem::offset_of!(Cqe, user_data) == 0);
+const _: () = assert!(core::mem::offset_of!(Cqe, result) == 8);
+const _: () = assert!(core::mem::offset_of!(Cqe, flags) == 12);
 
 /// One registered-buffer descriptor (`struct loom_buf_reg`, 16 bytes): a VA range
 /// within one anonymous RW VMA the kernel pins for zero-copy payload.
@@ -128,6 +143,8 @@ pub struct BufReg {
 }
 
 const _: () = assert!(core::mem::size_of::<BufReg>() == 16);
+const _: () = assert!(core::mem::offset_of!(BufReg, va) == 0);
+const _: () = assert!(core::mem::offset_of!(BufReg, len) == 8);
 
 /// `SYS_LOOM_SETUP` in/out struct (`struct loom_params`, 88 bytes). `flags` is the
 /// only IN field; the kernel fills the rest with the mapped ring geometry.
@@ -151,6 +168,10 @@ struct Params {
 }
 
 const _: () = assert!(core::mem::size_of::<Params>() == 88);
+const _: () = assert!(core::mem::offset_of!(Params, flags) == 0);
+const _: () = assert!(core::mem::offset_of!(Params, ring_va) == 16);
+const _: () = assert!(core::mem::offset_of!(Params, sqe_off) == 32);
+const _: () = assert!(core::mem::offset_of!(Params, cqe_off) == 36);
 
 impl Sqe {
     /// An all-zero SQE (opcode NOP, no flags). The base every helper builds on.

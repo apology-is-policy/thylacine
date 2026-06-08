@@ -1161,7 +1161,7 @@ rolled back via `spoor_clunk`); a user-VA fault reading the fd array.
 | Loom-6d-1 | the native `libthyla_rs::loom` module (`Ring` over SYS_LOOM_SETUP/REGISTER/ENTER; the `repr(C)` SQE/CQE/BufReg byte-pinned to `loom.h`; the SPSC release/acquire ring model; register handles/buffers; submit/enter/reap) + `usr/loom-smoke` (NOP round-trip + register + non-9P payload-op rejection; joey-gated) | **landed** |
 | Loom-6d-2 | `usr/loom-stress` -- the CONCURRENT two-thread-same-`loom_fd` + cross-Proc-death SMP stress harness (the OWED item) + the positive dev9p async round-trip, joey-spawned post-pivot; the ci-smp-gate multi-boot under -smp 4/8 is the concurrency witness | **landed** |
 | Loom-6d-3 | `usr/loom-bench` -- the trap-amortization latency bench (NOP one-enter-per-op vs batched ~7.7x; FSYNC commit-dominated ~1.0x; the present-proxy WRITE) + the native-API + Tapestry seam doc (the section above) | **landed** |
-| Loom-6d-4 | the focused audit over the 6d surface + the Loom arc close | pending |
+| Loom-6d-4 | the focused Opus audit over the 6d userspace surface + the Loom arc close -- **0 P0 / 0 P1 / 3 P3, all fixed** (F1 `offset_of!` ABI-drift asserts, F2 loom-bench reap-loop guards, F3 phase-3 in-flight-at-death best-effort doc; 2/3 cross-confirmed by self-audit). **The Loom arc is COMPLETE.** | **landed** |
 | #916 | the direct-descriptor ops (WALK / LOPEN / LCREATE / CLUNK -- mint/open/release a registered fid from the op path) | deferred (post-Loom-6 seam) |
 
 ## Known caveats / footguns
