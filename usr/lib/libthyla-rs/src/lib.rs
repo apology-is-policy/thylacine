@@ -73,6 +73,7 @@ pub mod err;
 pub mod handle;
 pub mod alloc;
 pub mod cap;
+pub mod env;
 pub mod fs;
 pub mod hardware;
 pub mod io;
@@ -1799,21 +1800,30 @@ pub fn virtio_rmb() {
 // _start — entry point.
 // =============================================================================
 //
-// The kernel's userland_enter delivers control here with sp pointing at
-// the System V startup frame's argc word (EXEC_USER_STACK_TOP -
-// EXEC_INIT_STACK_SIZE; P6-pouch-kernel-auxv). libthyla-rs's _start does
-// not consume the frame — it calls rs_main() directly. Defined in asm
-// for full control over BTI marker + branch sequence; mirrors
+// The kernel's userland_enter delivers control here with sp pointing at the
+// System V startup frame's argc word (EXEC_USER_STACK_TOP - frame_size;
+// kernel/include/thylacine/exec.h "Shape A / Shape B"). _start captures the
+// argv frame for env::args() (DOC-GAP G03) BEFORE any prologue runs — a
+// function prologue moves sp, so the capture has to be the very first thing
+// _start does — then calls the app's rs_main() through a tiny Rust shim that
+// stashes (argc, argv) into process-global statics. Defined in asm for full
+// control over the BTI marker + the pre-prologue sp read; mirrors
 // usr/lib/libt/src/start.S (the C side's _start).
 //
+// Both startup shapes are handled by the SAME capture: argc lives at [sp]
+// and argv[] begins at sp + 8 in both Shape A (argc = 0; env::args() then
+// reports no operands) and Shape B (real argc + argv).
+//
 // Flow:
-//   bti c                  — BTI landing pad for indirect entry.
-//   bl rs_main             — x0 := rs_main()
-//   mov x8, T_SYS_EXITS    — syscall number
-//   svc #0                 — never returns
-//   wfe + b 1b             — defensive: SYS_EXITS doesn't return, but
-//                            if the kernel were to deliver us back
-//                            (impossible at v1.0), park forever.
+//   bti c                       — BTI landing pad for indirect entry.
+//   ldr x0, [sp]                — x0 := argc       (startup frame[0])
+//   add x1, sp, #8              — x1 := &argv[0]   (startup frame + 8)
+//   bl __libthyla_rt_start      — stash (argc, argv); x0 := rs_main()
+//   mov x8, T_SYS_EXITS         — syscall number
+//   svc #0                      — never returns
+//   wfe + b 1b                  — defensive: SYS_EXITS doesn't return, but
+//                                 if the kernel were to deliver us back
+//                                 (impossible at v1.0), park forever.
 //
 // ENTRY(_start) in usr/scripts/aarch64-userspace.ld keeps _start as a
 // liveness root, so the linker pulls this symbol from libthyla-rs.rlib
@@ -1823,14 +1833,57 @@ global_asm!(
     ".globl _start",
     ".type _start, %function",
     "_start:",
-    "    bti     c",                  // BTI landing pad for indirect entry
-    "    bl      rs_main",            // x0 := rs_main()
-    "    mov     x8, #0",             // T_SYS_EXITS
-    "    svc     #0",                 // never returns
-    "1:  wfe",                        // defensive; SYS_EXITS doesn't return
+    "    bti     c",                       // BTI landing pad for indirect entry
+    "    ldr     x0, [sp]",                // x0 := argc        (startup frame[0])
+    "    add     x1, sp, #8",              // x1 := &argv[0]    (startup frame + 8)
+    "    bl      __libthyla_rt_start",     // stash (argc, argv); x0 := rs_main()
+    "    mov     x8, #0",                  // T_SYS_EXITS
+    "    svc     #0",                      // never returns
+    "1:  wfe",                             // defensive; SYS_EXITS doesn't return
     "    b       1b",
     ".size _start, .-_start",
 );
+
+// =============================================================================
+// Native runtime argv capture (DOC-GAP G03).
+// =============================================================================
+//
+// _start hands (argc, &argv[0]) to this shim, which records them for
+// env::args() and then calls the app's rs_main(). A non-naked fn is correct
+// here because _start already captured argc/argv into x0/x1 before this
+// shim's prologue could move sp; the values arrive as ordinary C arguments.
+//
+// The stores are Release and rt_raw_args' loads are Acquire so a peer thread
+// (which gets its own stack but shares this address space) observes the
+// values; in practice they are written exactly once at startup before any
+// thread is spawned, but the ordering makes the cross-thread read
+// unimpeachable rather than relying on the spawn syscall's barrier.
+
+use core::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
+
+static RT_ARGC: AtomicUsize = AtomicUsize::new(0);
+static RT_ARGV: AtomicPtr<*const u8> = AtomicPtr::new(core::ptr::null_mut());
+
+extern "C" {
+    fn rs_main() -> i64;
+}
+
+#[no_mangle]
+unsafe extern "C" fn __libthyla_rt_start(argc: usize, argv: *const *const u8) -> i64 {
+    RT_ARGC.store(argc, Ordering::Release);
+    RT_ARGV.store(argv as *mut *const u8, Ordering::Release);
+    rs_main()
+}
+
+/// The captured (argc, &argv[0]) from process startup. Returns `(0, null)`
+/// shaped values only before `_start` runs (never observable from app code).
+/// Backs `env::args()`.
+#[inline]
+pub(crate) fn rt_raw_args() -> (usize, *const *const u8) {
+    let argc = RT_ARGC.load(Ordering::Acquire);
+    let argv = RT_ARGV.load(Ordering::Acquire) as *const *const u8;
+    (argc, argv)
+}
 
 // =============================================================================
 // Panic handler.
@@ -1842,4 +1895,64 @@ global_asm!(
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
     unsafe { t_exits(1) }
+}
+
+// =============================================================================
+// Best-effort stdout/stderr formatting macros (DOC-GAP G05).
+// =============================================================================
+//
+// `print!`/`println!`/`eprint!`/`eprintln!` format to fd 1 / fd 2 via the
+// io::{Stdout, Stderr} handles. They are BEST-EFFORT: a write error (e.g. an
+// unwired fd 1 on a standalone run -- DOC-GAP G06) is swallowed, so a program
+// whose output is optional does not spuriously fail. A program that must know
+// whether output reached its sink uses `io::stdout().write_all(...)?` directly.
+//
+// Exported at the crate root, so callers write `libthyla_rs::println!(...)`.
+// `$crate` keeps the expansion hygienic without the caller importing the io
+// traits.
+
+/// Format to standard output (fd 1), best-effort. See the module note.
+#[macro_export]
+macro_rules! print {
+    ($($arg:tt)*) => {{
+        let _ = <$crate::io::Stdout as $crate::io::Write>::write_fmt(
+            &mut $crate::io::stdout(), core::format_args!($($arg)*));
+    }};
+}
+
+/// Format to standard output (fd 1) followed by a newline, best-effort.
+#[macro_export]
+macro_rules! println {
+    () => {{
+        let _ = <$crate::io::Stdout as $crate::io::Write>::write_all(
+            &mut $crate::io::stdout(), b"\n");
+    }};
+    ($($arg:tt)*) => {{
+        $crate::print!($($arg)*);
+        let _ = <$crate::io::Stdout as $crate::io::Write>::write_all(
+            &mut $crate::io::stdout(), b"\n");
+    }};
+}
+
+/// Format to standard error (fd 2), best-effort.
+#[macro_export]
+macro_rules! eprint {
+    ($($arg:tt)*) => {{
+        let _ = <$crate::io::Stderr as $crate::io::Write>::write_fmt(
+            &mut $crate::io::stderr(), core::format_args!($($arg)*));
+    }};
+}
+
+/// Format to standard error (fd 2) followed by a newline, best-effort.
+#[macro_export]
+macro_rules! eprintln {
+    () => {{
+        let _ = <$crate::io::Stderr as $crate::io::Write>::write_all(
+            &mut $crate::io::stderr(), b"\n");
+    }};
+    ($($arg:tt)*) => {{
+        $crate::eprint!($($arg)*);
+        let _ = <$crate::io::Stderr as $crate::io::Write>::write_all(
+            &mut $crate::io::stderr(), b"\n");
+    }};
 }

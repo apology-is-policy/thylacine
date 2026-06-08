@@ -36,6 +36,7 @@
 //     synchronous-only; vectored I/O is a v1.x consideration.
 
 use crate::err::{Error, Result};
+use crate::{t_read, t_write};
 use alloc_crate::string::String;
 use alloc_crate::vec::Vec;
 use core::cmp;
@@ -448,5 +449,116 @@ impl<T: AsRef<[u8]>> Seek for Cursor<T> {
         };
         self.pos = new;
         Ok(new)
+    }
+}
+
+// =============================================================================
+// Standard streams — fd-0/1/2 handles (DOC-GAP G05).
+// =============================================================================
+//
+// `Stdin`/`Stdout`/`Stderr` wrap the inherited fds 0/1/2 over the raw
+// `t_read`/`t_write` SVC wrappers. They are zero-sized and do NOT own the
+// fd: dropping one does NOT close 0/1/2 (unlike `fs::File`, whose Drop
+// closes its handle). This matters -- a `File` over fd 1 would close the
+// inherited stdout on drop.
+//
+// v1.0 CAVEAT (DOC-GAP G06): a standalone native program has no
+// terminal-backed fd 0/1/2. A read/write succeeds only when a parent wired
+// the fd (a pipeline element, a redirect, or an inherited fd). A write to an
+// unwired fd 1 returns an error (callers that must not fail standalone use
+// the best-effort `print!`/`println!` macros, which swallow the error). For
+// an always-on diagnostic channel use `crate::t_putstr` (the kernel UART).
+
+const FD_STDIN: i64 = 0;
+const FD_STDOUT: i64 = 1;
+const FD_STDERR: i64 = 2;
+
+/// Handle to the process's standard input (fd 0). Non-owning; see the
+/// module's "Standard streams" note for the v1.0 unwired-fd caveat.
+pub struct Stdin;
+/// Handle to the process's standard output (fd 1). Non-owning.
+pub struct Stdout;
+/// Handle to the process's standard error (fd 2). Non-owning.
+pub struct Stderr;
+
+/// A handle to fd 0 (standard input).
+#[inline]
+pub fn stdin() -> Stdin {
+    Stdin
+}
+/// A handle to fd 1 (standard output).
+#[inline]
+pub fn stdout() -> Stdout {
+    Stdout
+}
+/// A handle to fd 2 (standard error).
+#[inline]
+pub fn stderr() -> Stderr {
+    Stderr
+}
+
+impl Read for Stdin {
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
+        // SAFETY: buf is a valid user-VA byte slice; fd 0 is read-only here.
+        let rc = unsafe { t_read(FD_STDIN, buf.as_mut_ptr(), buf.len()) };
+        Error::from_syscall_return(rc).map(|n| n as usize)
+    }
+}
+
+impl Write for Stdout {
+    fn write(&mut self, buf: &[u8]) -> Result<usize> {
+        // SAFETY: buf is a valid user-VA byte slice.
+        let rc = unsafe { t_write(FD_STDOUT, buf.as_ptr(), buf.len()) };
+        Error::from_syscall_return(rc).map(|n| n as usize)
+    }
+    fn flush(&mut self) -> Result<()> {
+        // Unbuffered: every write is an immediate SYS_WRITE.
+        Ok(())
+    }
+}
+
+impl Write for Stderr {
+    fn write(&mut self, buf: &[u8]) -> Result<usize> {
+        let rc = unsafe { t_write(FD_STDERR, buf.as_ptr(), buf.len()) };
+        Error::from_syscall_return(rc).map(|n| n as usize)
+    }
+    fn flush(&mut self) -> Result<()> {
+        Ok(())
+    }
+}
+
+impl crate::poll::AsFd for Stdin {
+    #[inline]
+    fn as_raw_fd(&self) -> i32 {
+        FD_STDIN as i32
+    }
+}
+impl crate::poll::AsFd for Stdout {
+    #[inline]
+    fn as_raw_fd(&self) -> i32 {
+        FD_STDOUT as i32
+    }
+}
+impl crate::poll::AsFd for Stderr {
+    #[inline]
+    fn as_raw_fd(&self) -> i32 {
+        FD_STDERR as i32
+    }
+}
+
+/// Copy the entire contents of `reader` into `writer` using an 8 KiB
+/// staging buffer. Returns the total number of bytes copied. The workhorse
+/// for `cat`/`tee`-style filters. Mirrors `std::io::copy`.
+pub fn copy<R: Read + ?Sized, W: Write + ?Sized>(reader: &mut R, writer: &mut W) -> Result<u64> {
+    let mut buf = [0u8; 8 * 1024];
+    let mut total = 0u64;
+    loop {
+        match reader.read(&mut buf)? {
+            0 => return Ok(total),
+            n => {
+                writer.write_all(&buf[..n])?;
+                total += n as u64;
+            }
+        }
     }
 }

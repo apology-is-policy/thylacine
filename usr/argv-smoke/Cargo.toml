@@ -1,0 +1,22 @@
+[package]
+name = "argv-smoke"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "argv-smoke"
+path = "src/main.rs"
+
+[dependencies]
+# argv-smoke is the U-6e-pre-a milestone probe: the FIRST runtime exercise
+# of the native-argv path (DOC-GAP G03) + the std-stream handles (G05).
+# joey spawns it via SYS_SPAWN_FULL_ARGV with argv = [argv-smoke, alpha,
+# beta-2] and a pipe wired as fd 0+1; the binary reads its own argv through
+# libthyla_rs::env::args(), echoes each entry to stdout (fd 1, the pipe),
+# and exits 0 iff the argv it received matches what joey passed. joey
+# content-checks the per-position markers AND the exit status -- proving
+# argv read + stdout write end to end through libthyla-rs (no aux-rt, no
+# pouch/musl).
+libthyla-rs = { path = "../lib/libthyla-rs" }

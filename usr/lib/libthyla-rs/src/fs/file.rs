@@ -144,6 +144,26 @@ impl File {
         File { handle }
     }
 
+    /// Adopt an already-open raw fd (a KOBJ_SPOOR / pipe-end index this
+    /// Proc owns) as an OWNING `File`: `Drop` will `t_close(fd)`. `rights`
+    /// records the capability axis for the userspace `Handle` (the kernel
+    /// enforces the real rights; this is the local hint -- see the module
+    /// header's RIGHTS note). Closes DOC-GAP G05/G09: lets a caller wrap a
+    /// fd returned by a raw wrapper (`t_walk_create`, `t_pipe`) and drive it
+    /// through `Read`/`Write`/`Seek`.
+    ///
+    /// Do NOT pass an inherited standard fd (0/1/2) here -- the resulting
+    /// File would close it on drop. For fd 0/1/2 use the non-owning
+    /// `io::{stdin, stdout, stderr}` handles.
+    ///
+    /// # Safety
+    /// `fd` must be a live handle index this Proc owns and that no other
+    /// `File`/owner will also close (single-owner, to avoid a double-close).
+    #[inline]
+    pub unsafe fn from_raw_fd(fd: i32, rights: Rights) -> File {
+        File { handle: Handle::from_raw(fd, rights) }
+    }
+
     /// Open `path` at the given omode without creating (the read /
     /// open-existing path). Equivalent to `open_create_at_path` with
     /// `create == create_new == false`.

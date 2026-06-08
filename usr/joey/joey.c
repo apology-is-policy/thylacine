@@ -750,6 +750,45 @@ static int do_pouch_hello_smoke(void) {
     return 0;
 }
 
+// do_native_argv_smoke — U-6e-pre-a: the FIRST runtime exercise of the
+// native libthyla-rs argv path (env::args, DOC-GAP G03) + the std-stream
+// handles (io::stdout, G05). argv-smoke is a NATIVE no_std libthyla-rs
+// binary -- NOT pouch/musl -- so it stresses the path the pouch argv probe
+// could not: libthyla-rs's own _start now captures the kernel-built Shape-B
+// startup frame (argc at [sp], &argv[0] at sp+8) before any prologue runs,
+// and env::args() reads it back. We spawn it with
+//   argv = ["argv-smoke", "alpha", "beta-2"]   (argc = 3)
+// and a pipe wired as fd 0 + fd 1 (the binary-agnostic pouch_smoke_one_argv
+// harness). Per-position markers prove every argv[i] pointer was placed AND
+// read AND echoed to stdout; the "native argv OK" marker + a zero exit prove
+// the binary's own argv self-check passed. Returns 0 on success, -1 on any
+// failure (which makes joey fail the boot -- the milestone is a boot gate).
+static int do_native_argv_smoke(void) {
+    static const char as_name[] = "argv-smoke";
+    static const char as_argv[] = "argv-smoke\0alpha\0beta-2";
+    static const char as_m0[]   = "argv-smoke: argc=3";
+    static const char as_m1[]   = "argv-smoke: argv[0]=argv-smoke";
+    static const char as_m2[]   = "argv-smoke: argv[1]=alpha";
+    static const char as_m3[]   = "argv-smoke: argv[2]=beta-2";
+    static const char as_m4[]   = "argv-smoke: native argv OK";
+    static const struct argv_marker as_markers[] = {
+        { as_m0, sizeof(as_m0) - 1 },
+        { as_m1, sizeof(as_m1) - 1 },
+        { as_m2, sizeof(as_m2) - 1 },
+        { as_m3, sizeof(as_m3) - 1 },
+        { as_m4, sizeof(as_m4) - 1 },
+    };
+    if (pouch_smoke_one_argv(as_name, sizeof(as_name) - 1,
+                             as_argv, sizeof(as_argv),
+                             /*argc=*/3u,
+                             as_markers,
+                             sizeof(as_markers) / sizeof(as_markers[0]),
+                             /*cap_mask=*/0ul, /*perm_flags=*/0ul) != 0)
+        return -1;
+    t_putstr("joey: argv-smoke ok (native env::args + io::stdout; first native-argv exercise)\n");
+    return 0;
+}
+
 // connect_corvus — bounded retry to t_srv_connect("corvus", "ctl"),
 // yielding between attempts so corvus's startup can race in.
 //
@@ -1846,6 +1885,11 @@ int main(void) {
     // libc. Placed here, beside the /hello orchestration, so the two
     // spawn-and-verify milestones sit together on the boot path.
     if (do_pouch_hello_smoke() != 0) return 1;
+
+    // === native libthyla-rs argv + stdio milestone (U-6e-pre-a) ===
+    // First runtime exercise of the native-argv path (env::args, G03) +
+    // the std-stream handles (io::stdout, G05). Gates the boot.
+    if (do_native_argv_smoke() != 0) return 1;
 
     // === torpor SVC-dispatch smoke (P6-pouch-wait-addr, sub-chunk 8) ===
     // The kernel-side `torpor` wait-on-address primitive (the futex-

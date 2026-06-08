@@ -100,12 +100,26 @@ global_asm!(
     ".globl _start",
     "_start:",
     "    bti     c",
-    "    bl      rs_main",     // x0 := rs_main() (extern "C" return)
-    "    mov     x8, #0",      // T_SYS_EXITS
+    "    ldr     x0, [sp]",            // x0 := argc      (startup frame[0])
+    "    add     x1, sp, #8",          // x1 := &argv[0]  (startup frame + 8)
+    "    bl      __libthyla_rt_start", // stash (argc,argv); x0 := rs_main()
+    "    mov     x8, #0",              // T_SYS_EXITS
     "    svc     #0",
     "1:  wfe; b 1b",
 );
 ```
+
+Since U-6e-pre-a `_start` captures the kernel-built System-V startup
+frame (`kernel/include/thylacine/exec.h` "Shape A / Shape B") so a native
+program can read its own argv. argc lives at `[sp]` and `argv[]` begins at
+`sp + 8` in BOTH shapes (Shape A puts argc = 0 there), so the same two
+instructions handle both. The capture has to be the very first thing
+`_start` does — a function prologue moves `sp`, so by the time any normal
+fn runs, the frame pointer is gone. `_start` reads argc/argv into x0/x1
+and tail-calls a tiny Rust shim, `__libthyla_rt_start(argc, argv)`, which
+records them into process-global statics and then calls `rs_main()`.
+`libthyla_rs::env::args()` reads those statics back (see "Native argv +
+std streams" below).
 
 The linker script `usr/scripts/aarch64-userspace.ld` has `ENTRY(_start)`,
 which keeps `_start` alive across the rlib boundary — the linker pulls
@@ -114,10 +128,39 @@ binary references it directly. The binary still needs `#![no_std]
 #![no_main]` (Rust requires the binary itself to opt out of `main`),
 but the actual entry sequence lives in the runtime crate.
 
-Same contract as the C side: kernel delivers control with sp set,
-x0..x30 unspecified; `_start` calls Rust-side `rs_main()` and SYS_EXITS
-with its return value. The `rs_main` symbol must be declared `#[no_mangle]
-pub extern "C"` so the AArch64 PCS applies (x0 = return).
+Same contract as the C side: kernel delivers control with sp pointing at
+the startup frame; `_start` calls Rust-side `rs_main()` and SYS_EXITS with
+its return value. The `rs_main` symbol must be declared `#[no_mangle] pub
+extern "C"` so the AArch64 PCS applies (x0 = return). Existing binaries
+that ignore argv keep their `rs_main() -> i64` signature unchanged — the
+captured argv is reached only through `env::args()`, never via `rs_main`
+parameters, so the entry contract is backward-compatible.
+
+### Native argv + std streams (U-6e-pre-a)
+
+Two surfaces close the DOC-GAP-REPORT G03/G05 holes that blocked native
+argv-taking programs (the coreutils):
+
+- **`libthyla_rs::env::args() -> Args`** — the calling process's argv,
+  read from the captured startup frame. `argv[0]` is the program name
+  (the spawn convention); `args.operands()` iterates `argv[1..]`. Entries
+  are `&'static [u8]` (the frame lives at the top of the user stack, above
+  the initial sp, for the whole process lifetime). On a Shape-A ("no
+  argv") frame `args()` reports zero operands.
+- **`libthyla_rs::io::{stdin, stdout, stderr}`** — non-owning handles to
+  fds 0/1/2 over `t_read`/`t_write`. Unlike `fs::File`, dropping one does
+  NOT close the fd (a `File` over fd 1 would close the inherited stdout).
+  Plus `io::copy(reader, writer)` and the best-effort `print!` /
+  `println!` / `eprint!` / `eprintln!` macros. v1.0 caveat (G06): a
+  standalone program has no terminal-backed fd 0/1/2 — output is visible
+  only when a parent wires the fd (a pipeline, a redirect, an inherited
+  fd); for an always-on diagnostic channel use `t_putstr` (the UART).
+
+The first runtime exercise of this path is the `argv-smoke` boot probe
+(joey spawns it with `argv = [argv-smoke, alpha, beta-2]` and a pipe as
+fd 0/1; the binary echoes each argv[i] back through `io::stdout` and
+self-checks). Before U-6e-pre-a the capture had only been
+disassembly-verified.
 
 ### libthyla-rs runtime crate (P4-Ic4)
 
@@ -187,10 +230,13 @@ control via `eret` with:
 - `PSTATE.M = EL0t`
 
 `_start`'s contract: call `main()`, exit with `main()`'s return value.
-At v1.0 P4-Ia1 `main()` takes no arguments (no argc/argv/envp); when
-the exec syscall surface lands in Phase 5+ the kernel will populate
-the auxv on the user stack before transferring control, and `_start`
-will become an actual argc/argv loader.
+The kernel ALREADY populates the System-V startup frame on the user stack
+(`kernel/include/thylacine/exec.h` "Shape A / Shape B"; argc + argv + a
+NULL envp + the auxv), but the C-side `_start` above does not yet consume
+it — there is no C-side `argv` accessor at v1.0. (The Rust runtime DOES
+capture it since U-6e-pre-a; see the Rust `_start` + `env::args()` above.
+A C-side `main(argc, argv)` loader is a future libt addition; envp is
+still a single NULL — no environment at v1.0.)
 
 ### Stack-canary stubs
 
