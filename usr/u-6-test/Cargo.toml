@@ -1,0 +1,21 @@
+[package]
+name = "u-6-test"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "u-6-test"
+path = "src/main.rs"
+
+[dependencies]
+# u-6-test is the U-6 evaluator arc CUMULATIVE integration smoke. Where the
+# per-sub-chunk probes (u-builtin/glob/subst/repl-test + u-test's flow_eval_*
+# blocks) prove each U-6 surface in isolation, this probe proves they COMPOSE:
+# realistic multi-feature scripts -- subst-capture + for/case/arith, glob ->
+# spawn -> capture, var-interp pipelines, builtin -> special-var -> control
+# flow, var-fed heredoc redirects -- driven through eval_source and (the
+# capstone) the real read-parse-eval loop via libutopia::repl::Repl::feed.
+libthyla-rs = { path = "../lib/libthyla-rs" }
+libutopia = { path = "../utopia/libutopia" }

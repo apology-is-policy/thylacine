@@ -341,6 +341,46 @@ On success, prints `u-test: eval expr OK` between `u-test: parser full OK` and `
 
 The boot probe's `ev(env, s, ctx)` helper tokenizes the source fragment, **strips the trailing `Eof` token** (the same discipline parse.rs uses at each placeholder site — `parse_expr_tokens` reports `TrailingTokensInExpr` if Eof is present), parses to an `Expr`, and evaluates. The `cfg(test)` helper in `eval/expr.rs::tests::eval_str` follows the same pattern.
 
+### 8.4 The cumulative arc-close smoke (`/u-6-test`, U-6-test)
+
+Where §8.1/§8.2 + the per-sub-chunk probes prove each U-6 surface in
+ISOLATION, `/u-6-test` (the last sub-chunk of the U-6 arc; joey-gated,
+pre-pivot, pure userspace) proves they **compose**: realistic
+multi-feature scripts in one evaluation pass. The only pre-PTY
+observables are `Env` state, `$status`, and -- the key integration lever
+-- command substitution, which captures a real spawned/piped/globbed
+command's stdout into a variable. Seven flows, each weaving >=3 features:
+
+1. **subst-capture -> `for` -> `case` -> arith** -- `$(echo a.c b.rs c.c
+   d.h)` captures + splits into a 4-element list; a `for`/`case`/`(( ))`
+   counts the `*.c` matches.
+2. **glob -> spawn -> subst-capture** -- `$(echo u-*)` runs the glob in
+   echo's argv (the `evaluate_argv` fs-walk), captures the printed
+   matches, splits them; asserts the full glob->argv->spawn->stdout->
+   capture->split chain, including the `u-6-test` self-reference.
+3. **var-interp -> pipeline -> subst** -- `$(echo hello $phrase | tr a-z
+   A-Z)` -> `(HELLO WORLD)` (two externals, var in the upstream argv,
+   bare-context field-split).
+4. **builtin -> special-var -> control flow** -- `cd /srv` then `if
+   ($status == 0) { let loc = "now at $cwd" }` (the §4.4 bridge read in
+   both Cond and Dq contexts).
+5. **var -> heredoc-interp -> redirect -> spawn** -- a `let mid = DATA`
+   defined in the same script feeds an interpolated `<< EOF` body to
+   pipe-sink's fd 0 (exits 0 iff the 13-byte payload arrives intact).
+6. **the capstone: `Repl::feed` end-to-end** -- a multi-statement session
+   driven through the REAL read-parse-eval loop (not `eval_source`):
+   `let name`, `let up = $(echo $name | tr a-z A-Z)`, `let tag = "[$up]"`,
+   `exit 0` -> the whole U-6 stack through the U-6g entrypoint, state
+   carried across feeds.
+7. **`Repl::feed` error survival + subst** -- a parse-error line draws a
+   diagnostic but does not end the session (§8.9), and a subsequent
+   `$(echo recovered)` line still evaluates.
+
+Prints `u-6-test: all OK`; joey reports `U-6 evaluator arc integration
+verified`. This is a dedicated probe (composition-focused, cleanly
+revertable) rather than a `u-test` extension (whose `flow_eval_*` blocks
+test in isolation).
+
 ---
 
 ## 9. Open questions deferred to later sub-chunks
@@ -367,6 +407,7 @@ The boot probe's `ev(env, s, ctx)` helper tokenizes the source fragment, **strip
 
 | Sub-chunk | Commit | What |
 |---|---|---|
+| **U-6-test** | *(pending)* | The U-6 evaluator arc **cumulative integration smoke** (§8.4) -- **closes the U-6 arc**. New dedicated pre-pivot `/u-6-test` (joey-gated; 7 composed flows weaving subst-capture + `for`/`case`/arith, glob->spawn->capture, var-interp pipelines, builtin->special-var->control flow, var-fed heredoc redirect, and the whole stack through the real `Repl::feed` loop + error recovery). Proves the U-6 surfaces COMPOSE (vs the per-sub-chunk probes' isolation), landing assertions on Env state / `$status` / substitution-captured output. PURE USERSPACE -- zero kernel files (784/784 unchanged); no SMP gate, not a formal-audit-trigger surface (self-reviewed: no-spin loops, bounds-safe, borrow-clean). Verified: kernel **784/784**, `make test-tcg` x2 + `u-6-test: all OK` + `joey: /u-6-test reaped status=0; U-6 evaluator arc integration verified` + login E2E + `Thylacine boot OK`, **0 EXTINCTION** both boots. |
 | **U-6f** | `e9e0aa9` | Command substitution `$(cmd)` / `` `{cmd}` `` (§5.8) + its kernel prerequisite **#926** (a single-thread Proc closes its fds at EXIT, not reap — `docs/reference/14-process-model.md`). `stmt::run_command_substitution[_script]` + `capture_external_pipeline` (drain-before-reap, deadlock-free) + `split_fields` + `trim_trailing_newlines`; `$status` -> `Cell<i32>` (interior mutability so the `&Env` evaluator can record the inner exit, §8.7); the `eval_value_token` Subst/Backtick arms + `eval_dq_in_word`/`render_heredoc_body` DqPart::Subst + the `expr.rs` Subst/Backtick arms; `eval_command`/`eval_let`/`eval_assign` status-before-eval. v1.0 scope = a single redirect-free EXTERNAL pipeline; builtin/fn/control-flow/multi-statement bodies + `<(cmd)`/`>(cmd)` procsub are `NotImplemented` (documented). Bare → whitespace field-split (rc `$ifs`); `"$(cmd)"`/heredoc → inline. **#926 is the audit-bearing death-path surface** (ARCH §25.4): SMP-gated (default+UBSan x smp4/smp8 N=10, 0 corruption) + a focused Opus prosecutor round CLEAN (0 P0 / 0 P1 / 0 P2 / 3 P3 doc); `memory/audit_926_u6f_closed_list.md`. New `/u-subst-test` (9 probes: capture+trim, bare split, `seq` newline-split, `"[$(…)]"` inline, `echo|tr` pipeline capture, backtick form, `$status` propagation, builtin-in-subst NotImplemented, procsub NotImplemented, script-mode implicit-fail) + the `u-test::flow_process_pipe` part-(c) #926 regression (read child stdout to EOF before reap) + the rewritten `test_sys_spawn_with_fds_child_rights_subset_of_parent`. Verified: kernel **784/784**, `u-subst-test: all OK`, login E2E + `Thylacine boot OK`, 0 EXTINCTION. |
 | **U-6e-b-2** | `aba3b7d` | Glob argv fs-expansion. `glob::expand(env, pattern) -> Vec<String>` (§6.3) -- splits on `/`, accumulates the meta-free literal prefix as the start dir, walks one segment per level via `fs::read_dir` + `matches` (descending only matching dirs for non-final segments; recursion bounded by segment count, not tree depth), applies the POSIX dotfile rule, returns the SORTED match set or the EMPTY vec (rc nullglob -- never the literal). `stmt::evaluate_argv` gains a `glob_candidate(w)` gate: only a bare `Word::Single(TokenKind::Word)` with `has_meta` expands (quoted / `$var` / `^`-concat stay literal); an empty match set drops the word entirely. `**` stays per-segment (== `*`); recursive `**`, trailing-slash dirs-only, and expr-context (for-list / let-RHS) globbing are v1.x. PURE USERSPACE -- zero kernel files; rides the audited U-6e-b-1 `read_dir` surface; not formal-audit-bearing (bounded read-only enumeration; self-audited: bounded recursion, owned strings across recursion, nullglob, sort-once determinism). New pre-pivot `/u-glob-test` (joey-gated; §8.2). Verified: kernel 784/784 (unchanged -- no kernel delta), `make test-tcg` x2 + `u-glob-test: all OK` + 0 EXTINCTION. |
 | **U-6e-a** | `fbba6d2` | Built-in dispatch + the must-be-internal builtins (scripture §9.1). New `eval::builtin` module: `try_builtin(env, &argv) -> Option<EvalResult<StatementFlow>>` (Some = handled in-process; None = fall through to external spawn) + `is_builtin(name) -> bool`. `eval_command`'s Simple arm resolves argv[0] in the order **fn -> builtin -> external** (a user `fn cd { ... }` shadows the builtin). Implemented: **`cd`** (validates the target dir via `fs::is_dir`, lexically normalizes `..`/`.` against `$cwd` via `normalize_abs`, sets `$cwd` + `$oldpwd`; `cd` no-arg -> `$home` falling back to `/`; `cd -` toggles + echoes; the root `/` bypasses the fstat probe -- it is the territory root_spoor, a directory by construction, and libthyla_rs `File::open` cannot open a zero-component path anyway, #929), **`pwd`** (prints `$cwd` to the UART -- the v1.0 no-terminal-fd1 convention, like trace), **`exit [code]`** (sets the `Env::pending_exit` one-shot + `$status`; `eval_block` short-circuits the whole statement stack to `Return`, and `invoke_function` does NOT normalize the exit-Return away at the function boundary; no-arg = exit with current `$status`; non-numeric arg -> 2), **`true`/`false`** (`$status` 0/1), **`unset NAME...`**, **`eval ARGS...`** (joins + `eval_source` in the CURRENT scope), **`source FILE` / `.`** (reads FILE + `eval_source` in the current scope -- the assignment + fn registration persist into the caller's Env), **`type`/`whence`** (reports builtin / function / external). A built-in with a redirect or as a pipeline element -> `NotImplemented` (no spawned fd to retarget; honest, not a confusing 127). **Folded-in fix**: the `$status`/`$errstr`/`$cwd` special-var read/write bridge (§4.4) -- a pre-existing U-6b gap that `cd`'s `$cwd` observability surfaced. **Deferred** (own substrate): `set`/`export` (no envp), `alias`/`unalias`, `read`, `jobs`/`fg`/`bg`/`wait`, `history`, `kill`/`note`, `echo`/`printf`/`test`/`palette`/`bind`/`mount` (the namespace + coreutil surfaces). New pre-pivot `/u-builtin-test` (12 probes: true/false, cd to a synthetic dir + the `$cwd` bridge, normalize + root-clamp, `cd -` toggle, missing-dir fail + `$errstr`, unset, eval-in-scope, `$status` bridge, type, source-of-`/builtin-test.rc` [assignment + fn persist], `exit 7` flow + pending, exit-through-a-function unwind); joey gates the boot on status==0. **Surfaced + tracked**: #929 (libthyla_rs `File::open`/`metadata`/`is_dir` cannot open the root `/`). |

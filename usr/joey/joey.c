@@ -1994,6 +1994,27 @@ int main(void) {
     }
     t_putstr("joey: /u-repl-test reaped status=0; U-6g REPL main loop verified\n");
 
+    // === /u-6-test orchestration (Phase 7 U-6-test -- U-6 evaluator arc close) ===
+    // The CUMULATIVE integration smoke for the whole U-6 evaluator arc. Where
+    // the per-sub-chunk probes prove each U-6 surface in isolation, u-6-test
+    // proves they COMPOSE: subst-capture + for/case/arith, glob -> spawn ->
+    // capture, var-interp pipelines, builtin -> special-var -> control flow,
+    // var-fed heredoc redirects, and (the capstone) the whole stack driven
+    // through the real read-parse-eval loop via Repl::feed. status==0 gates boot.
+    const char u_six_name[] = "u-6-test";
+    long usix_pid = t_spawn(u_six_name, sizeof(u_six_name) - 1);
+    if (usix_pid <= 0) {
+        t_putstr("joey: t_spawn(\"u-6-test\") FAILED\n");
+        return 1;
+    }
+    int usix_status = -1;
+    long usix_reaped = t_wait_pid(&usix_status);
+    if (usix_reaped != usix_pid || usix_status != 0) {
+        t_putstr("joey: /u-6-test orchestration FAILED\n");
+        return 1;
+    }
+    t_putstr("joey: /u-6-test reaped status=0; U-6 evaluator arc integration verified\n");
+
     // === /ut orchestration (Phase 7 U-6g -- Utopia shell REPL) ===
     // `ut` is the Utopia shell binary. Through U-6g it is a working
     // read-parse-eval REPL: it prints the Pale Fire banner, draws the
