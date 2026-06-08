@@ -1097,13 +1097,42 @@ fn trace_echo(argv: &[String]) {
 /// scripture 6.3: a list interpolates as N separate words). The
 /// `$"var` form is the only way to collapse a multi-element value
 /// into one argv element.
+///
+/// A bare unquoted word carrying a glob meta char is expanded against
+/// the filesystem (scripture 6.10, U-6e-b-2): it contributes the SORTED
+/// list of matching paths, or -- if nothing matches -- NO argv element
+/// at all (rc nullglob: a no-match glob expands to the empty list, never
+/// the literal). Quoted strings, `$var`, and `^`-concat words are taken
+/// literally and never expand.
 fn evaluate_argv(env: &Env, words: &[Word]) -> EvalResult<Vec<String>> {
     let mut argv = Vec::new();
     for w in words {
+        if let Some(pat) = glob_candidate(w) {
+            let hits = glob::expand(env, pat);
+            // rc nullglob (scripture 6.10): an empty match set drops the
+            // word entirely rather than passing the literal pattern.
+            argv.extend(hits);
+            continue;
+        }
         let v = eval_word(env, w)?;
         argv.extend(v.0);
     }
     Ok(argv)
+}
+
+/// If `w` is a bare unquoted word carrying a glob meta char, return its
+/// pattern for filesystem expansion; otherwise `None` (the word is taken
+/// via normal value evaluation). Only `Word::Single(TokenKind::Word)`
+/// qualifies -- a single/double-quoted string, a `$var`, and a `^`-concat
+/// word are rc-literal (`echo "*.c"` and `echo a^*` do not glob).
+fn glob_candidate(w: &Word) -> Option<&str> {
+    match w {
+        Word::Single(Token {
+            kind: TokenKind::Word(s),
+            ..
+        }) if glob::has_meta(s) => Some(s.as_str()),
+        _ => None,
+    }
 }
 
 /// Evaluate a single Word. `Word::Single(tok)` evaluates the token;

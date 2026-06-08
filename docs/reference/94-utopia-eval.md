@@ -1,6 +1,6 @@
 # 94 — `libutopia::eval`
 
-**Status:** U-6a..U-6e-a LANDED (evaluator scaffold + value model + expression eval; statement eval + control flow; external command spawn; multi-element pipeline + pipefail; I/O redirection `<` `>` `>>` heredoc; built-in dispatch `fn -> builtin -> external` + the must-be-internal builtins `cd`/`pwd`/`exit`/`true`/`false`/`unset`/`eval`/`source`/`type`). Glob argv expansion (U-6e-b, needs `fs::read_dir`), substitution/process-sub (U-6f), and the poll() main loop (U-6g) follow.
+**Status:** U-6a..U-6e-a LANDED (evaluator scaffold + value model + expression eval; statement eval + control flow; external command spawn; multi-element pipeline + pipefail; I/O redirection `<` `>` `>>` heredoc; built-in dispatch `fn -> builtin -> external` + the must-be-internal builtins `cd`/`pwd`/`exit`/`true`/`false`/`unset`/`eval`/`source`/`type`). Glob argv expansion (U-6e-b: the directory-enumeration foundation `fs::read_dir` at -b-1, the `glob::expand` fs-walk + `evaluate_argv` wiring at -b-2) LANDED. Substitution/process-sub (U-6f) and the poll() main loop (U-6g) follow.
 
 ---
 
@@ -157,7 +157,7 @@ Pure with respect to the AST. Side effects limited to errors raised through `Eva
 
 | ExprKind | At U-6a | Notes |
 |---|---|---|
-| `Word(s)` | implemented | scalar; argv-time glob expansion deferred to U-6e |
+| `Word(s)` | implemented | scalar in expr context; at argv-time a bare meta-bearing Word fs-expands via `glob::expand` (U-6e-b-2, see §6.3) |
 | `SingleQuoted(s)` | implemented | literal scalar |
 | `DoubleQuoted(parts)` | implemented | $var + $#var interp; `DqPart::Subst` → NotImplemented |
 | `Integer(n)` | implemented | scalar via `core::fmt` |
@@ -229,9 +229,9 @@ Per scripture §7.2: each arm produces a single VALUE expression. First match wi
 
 ---
 
-## 6. `glob` — the rc/POSIX-shape pattern matcher
+## 6. `glob` — the rc/POSIX-shape pattern matcher + fs expansion
 
-Pure pattern matching against a single input string. NO filesystem walks. Used by case-as-expression and the `matches` operator at U-6a; will be reused by argv-time expansion at U-6e.
+`matches` / `has_meta` are pure pattern matching against a single input string (NO filesystem I/O) — used by case-as-expression and the `matches` operator. `expand` (§6.3, U-6e-b-2) is the argv-time **filesystem walk** that drives the matcher across a directory tree; it is the one entry that touches `fs::read_dir`.
 
 ### 6.1 Pattern syntax (per scripture §6.10)
 
@@ -240,9 +240,9 @@ Pure pattern matching against a single input string. NO filesystem walks. Used b
 - `[abc]` — character class.
 - `[!abc]` — negated character class.
 - `[a-z]` — range within a class.
-- `**` — recursive (crosses `/`); only valid as a complete path segment. Not special-cased at U-6a (case-arm and `matches` rarely match paths); the U-6e filesystem expansion will lift it.
+- `**` — recursive (crosses `/`); only valid as a complete path segment. Still NOT special-cased at U-6e-b-2: a `**` segment matches exactly one path component (behaves as `*`), so `expand` does single-level descent per segment; recursive `**` is a v1.x refinement.
 
-### 6.2 API
+### 6.2 Matcher API
 
 ```rust
 pub fn matches(pattern: &str, input: &str) -> bool
@@ -251,6 +251,23 @@ pub fn match_any(pattern: &str, candidates: &[String]) -> Vec<usize>  // unused 
 ```
 
 Bytewise matching; UTF-8 is self-synchronizing so partial-byte matches cannot occur on valid UTF-8 input.
+
+### 6.3 Filesystem expansion — `expand` (U-6e-b-2)
+
+```rust
+pub fn expand(env: &Env, pattern: &str) -> Vec<String>
+```
+
+The argv-time filesystem walk. `stmt::evaluate_argv` calls it for a bare unquoted word that carries a meta char (a single/double-quoted string, a `$var`, and a `^`-concat word are NOT candidates — rc-lineage: `echo "*.c"` and `echo a^*` stay literal). Algorithm:
+
+1. **Split** the pattern on `/` (dropping empty segments, so `//`, leading `/`, and trailing `/` normalize away; a trailing-slash "directories only" refinement is a v1.x item) and record `leading_slash`.
+2. **Literal prefix** — the leading run of meta-free segments is the start directory (named exactly once, not readdir-matched). The walk begins at the first segment with a meta char (the caller's `has_meta` gate guarantees one exists).
+3. **Walk** one segment per level: `fs::read_dir(dir)` (resolved against `$cwd` for a relative pattern; the cwd only LOCATES the start dir — it is never prefixed onto the result), then for each entry `matches(seg, name)`. For the final segment, matches are pushed; for a non-final segment, only matching **directories** are descended (`DirEntry::is_dir`). Recursion depth is bounded by the segment count (not the tree depth) — no unbounded descent.
+4. **Dotfile rule** (POSIX): a leading-`.` name is skipped unless the segment itself begins with `.`. (`.`/`..` are not emitted by any Dev's readdir, so no special-casing.)
+5. **rc nullglob** (scripture §6.10): the match set is the result; if it is **empty** (no match, or an unreadable directory along the way), `expand` returns the empty `Vec` and `evaluate_argv` contributes no argv element — the literal is NEVER substituted.
+6. **Sort** the full result once (bash whole-string order; a per-level sort would diverge around the `/` boundary).
+
+The result preserves the pattern's shape: a relative pattern yields relative matches, an absolute pattern yields absolute matches.
 
 ---
 
@@ -307,6 +324,8 @@ These can't run on host directly (libutopia is `no_std`; cargo test wants `std` 
 
 On success, prints `u-test: eval expr OK` between `u-test: parser full OK` and `u-test: all OK`. u-test now reports **12 cross-module flows**; flow_eval_expr is the new tail.
 
+**`/u-glob-test` (U-6e-b-2).** A dedicated pre-pivot probe (joey-gated on status==0) drives `glob::expand` directly against the flat devramfs root — the load-bearing fs-walk — since argv echoes to a dropped pipe at v1.0 (no terminal-backed fd 1 until U-PTY). It asserts prefix-star (`u-*`), bare-star (`*`: count, sortedness, no `/` on a flat dir, no dotfile leak), single-char (`versio?`), char-class (`[vw]*`), absolute (`/u-*`), and rc nullglob (`no-match-* -> []`). The `evaluate_argv` wiring is then observed via `$status`: a bare glob matching nothing nullglobs to an empty command (`status 0`), while the same pattern quoted is a literal arg spawned NotFound (`status 127`) — the delta proves the bare branch globbed and the quoted branch did not. Prints `u-glob-test: all OK`.
+
 ### 8.3 Helper discipline
 
 The boot probe's `ev(env, s, ctx)` helper tokenizes the source fragment, **strips the trailing `Eof` token** (the same discipline parse.rs uses at each placeholder site — `parse_expr_tokens` reports `TrailingTokensInExpr` if Eof is present), parses to an `Expr`, and evaluates. The `cfg(test)` helper in `eval/expr.rs::tests::eval_str` follows the same pattern.
@@ -321,7 +340,7 @@ The boot probe's `ev(env, s, ctx)` helper tokenizes the source fragment, **strip
 | ~~Redirects (`>` `<` `>>` `<<`)~~ -- **LANDED at U-6d-b** (resolve_redirects + the libthyla_rs::fs create-or-open/append lift) | ~~U-6d-b~~ done |
 | Redirect on an in-process command (fn / BraceBlock); large-heredoc-to-non-reader; atomic O_APPEND | U-6f / v1.x |
 | Job control: `&` background, `jobs` / `fg` / `bg`, note-fd polling | U-7 |
-| Glob expansion at argv-time: file-tree walk, `**` semantics, no-match → empty (rc nullglob) | U-6e-b |
+| ~~Glob expansion at argv-time: file-tree walk, no-match → empty (rc nullglob)~~ -- **LANDED at U-6e-b** (-b-1 `fs::read_dir`; -b-2 `glob::expand` + `evaluate_argv`, §6.3). Recursive `**` semantics + trailing-slash dirs-only + for-list/let-RHS expansion (expr context) remain v1.x | ~~U-6e-b~~ done |
 | `set` / `export` (no envp to children yet), `alias`/`unalias` (alias table), `read` (terminal fd 0), `jobs`/`fg`/`bg`/`wait` (job control), `history`, `kill`/`note` -- deferred builtins | U-6f / U-6g / U-7 |
 | Subshell `( cmds )`: fork + isolated env (libthyla-rs has spawn-then-exec, not fork) | U-6f or later |
 | In-process pipeline elements (fn / BraceBlock / Arith as a stage) -- need fork | U-6f or later |
@@ -337,6 +356,7 @@ The boot probe's `ev(env, s, ctx)` helper tokenizes the source fragment, **strip
 
 | Sub-chunk | Commit | What |
 |---|---|---|
+| **U-6e-b-2** | `*(pending)*` | Glob argv fs-expansion. `glob::expand(env, pattern) -> Vec<String>` (§6.3) -- splits on `/`, accumulates the meta-free literal prefix as the start dir, walks one segment per level via `fs::read_dir` + `matches` (descending only matching dirs for non-final segments; recursion bounded by segment count, not tree depth), applies the POSIX dotfile rule, returns the SORTED match set or the EMPTY vec (rc nullglob -- never the literal). `stmt::evaluate_argv` gains a `glob_candidate(w)` gate: only a bare `Word::Single(TokenKind::Word)` with `has_meta` expands (quoted / `$var` / `^`-concat stay literal); an empty match set drops the word entirely. `**` stays per-segment (== `*`); recursive `**`, trailing-slash dirs-only, and expr-context (for-list / let-RHS) globbing are v1.x. PURE USERSPACE -- zero kernel files; rides the audited U-6e-b-1 `read_dir` surface; not formal-audit-bearing (bounded read-only enumeration; self-audited: bounded recursion, owned strings across recursion, nullglob, sort-once determinism). New pre-pivot `/u-glob-test` (joey-gated; §8.2). Verified: kernel 784/784 (unchanged -- no kernel delta), `make test-tcg` x2 + `u-glob-test: all OK` + 0 EXTINCTION. |
 | **U-6e-a** | `fbba6d2` | Built-in dispatch + the must-be-internal builtins (scripture §9.1). New `eval::builtin` module: `try_builtin(env, &argv) -> Option<EvalResult<StatementFlow>>` (Some = handled in-process; None = fall through to external spawn) + `is_builtin(name) -> bool`. `eval_command`'s Simple arm resolves argv[0] in the order **fn -> builtin -> external** (a user `fn cd { ... }` shadows the builtin). Implemented: **`cd`** (validates the target dir via `fs::is_dir`, lexically normalizes `..`/`.` against `$cwd` via `normalize_abs`, sets `$cwd` + `$oldpwd`; `cd` no-arg -> `$home` falling back to `/`; `cd -` toggles + echoes; the root `/` bypasses the fstat probe -- it is the territory root_spoor, a directory by construction, and libthyla_rs `File::open` cannot open a zero-component path anyway, #929), **`pwd`** (prints `$cwd` to the UART -- the v1.0 no-terminal-fd1 convention, like trace), **`exit [code]`** (sets the `Env::pending_exit` one-shot + `$status`; `eval_block` short-circuits the whole statement stack to `Return`, and `invoke_function` does NOT normalize the exit-Return away at the function boundary; no-arg = exit with current `$status`; non-numeric arg -> 2), **`true`/`false`** (`$status` 0/1), **`unset NAME...`**, **`eval ARGS...`** (joins + `eval_source` in the CURRENT scope), **`source FILE` / `.`** (reads FILE + `eval_source` in the current scope -- the assignment + fn registration persist into the caller's Env), **`type`/`whence`** (reports builtin / function / external). A built-in with a redirect or as a pipeline element -> `NotImplemented` (no spawned fd to retarget; honest, not a confusing 127). **Folded-in fix**: the `$status`/`$errstr`/`$cwd` special-var read/write bridge (§4.4) -- a pre-existing U-6b gap that `cd`'s `$cwd` observability surfaced. **Deferred** (own substrate): `set`/`export` (no envp), `alias`/`unalias`, `read`, `jobs`/`fg`/`bg`/`wait`, `history`, `kill`/`note`, `echo`/`printf`/`test`/`palette`/`bind`/`mount` (the namespace + coreutil surfaces). New pre-pivot `/u-builtin-test` (12 probes: true/false, cd to a synthetic dir + the `$cwd` bridge, normalize + root-clamp, `cd -` toggle, missing-dir fail + `$errstr`, unset, eval-in-scope, `$status` bridge, type, source-of-`/builtin-test.rc` [assignment + fn persist], `exit 7` flow + pending, exit-through-a-function unwind); joey gates the boot on status==0. **Surfaced + tracked**: #929 (libthyla_rs `File::open`/`metadata`/`is_dir` cannot open the root `/`). |
 | **U-6d-b** | `cc8b88d` | I/O redirection (`<` `>` `>>` heredoc), lone-command + per-pipeline-element. New `resolve_redirects(env, &[Redirect]) -> Result<ResolvedStdio, RedirError>` opens every target UP FRONT (any failure aborts before a spawn), producing per-fd `Stdio` overrides: `< f` -> `File::open` at stdin; `> f` -> `OpenOptions::write+create+truncate`; `>> f` -> `...+append`; `<< TAG` -> render the body + a kernel pipe (rd at stdin, wr fed post-spawn then dropped for EOF). The shell OPENS-and-HANDS-OFF (`Stdio::File`); it does no redirect I/O itself, so Loom (the async 9P data path) is not this layer's concern (the child's; #916 FS-open-via-Loom stays a tracked v1.x seam). Last-wins per fd (a later same-fd redirect drops the earlier `Stdio::File`). `exec_external_redirected` (lone command) + `exec_bare_redirect` (no command -> open/truncate the target, run nothing, status 0); `exec_pipeline` per-element redirects OVERRIDE the pipe wiring for that fd (the displaced pipe end is dropped). `RedirError::Eval` propagates as an eval error (a redirect on a fn -> `NotImplemented("redirect on function")`; on a non-Simple in-process command -> `NotImplemented("redirect on in-process command")` -- defensive, the parser only attaches redirects to Simple); `RedirError::Runtime` (ambiguous multi-word target / open failure) -> `$status`+`$errstr`. **Dependency pulled forward**: `libthyla_rs::fs` create-or-open + append -- `OpenOptions::{create,create_new,append}` were `NotImplemented` stubs, now `File::open_create_at_path` drives `SYS_WALK_CREATE` (CREATE-FIRST, mirroring joey's `mkdir_or_open`: `t_walk_create` is exclusive + the kernel walk_open has no distinguishable not-found code, so "try create; on failure open existing with truncate" -- never depends on a missing-file errno); `File::create` becomes std-shaped; `append` = seek-to-end-at-open (the Spoor offset is shared into the child via the handle bump). **Lexer fix folded in**: `<<`/`<<-` now skip horizontal whitespace before the tag, so `cat << EOF` works as well as `cat <<EOF`. `/u-test::flow_eval_redirect` (7 pre-pivot probes: 3 heredoc forms + fn-redirect-NotImplemented + ambiguous-target + create-failure + bare-redirect) + the new post-pivot `/u-redir-test` (the real `>`/`>>`/`<` round-trip on the writable dev9p root: create+write -> read-back, append -> 2x, truncate -> 1x, `pipe-sink < f` -> 0). u-test now reports **16 cross-module flows** (`u-test: eval redirect OK`). |
 | **U-6d-a** | `24eafac` | Multi-element pipeline. Lifts `eval_pipeline`'s `p.elements.len() > 1` NotImplemented branch via new `exec_pipeline(env, p)`. For `cmd1 | cmd2 | ... | cmdN`: validates every element is a redirect-free EXTERNAL Simple command (a fn / BraceBlock / Arith / Subshell as a stage -> NotImplemented, since in-process eval has no fd to wire to a pipe without fork; per-element redirect -> NotImplemented, U-6d-b), evaluates all argvs up front (any rejection aborts before a single spawn), then allocates N-1 pipes via `libthyla_rs::process::pipe()`, assigns each pipe's write end to the upstream element's stdout slot (`Stdio::File`) and read end to the downstream element's stdin slot, gives the OUTER ends (element 0 stdin, element N-1 stdout, all stderr) the U-6c v1.0 convention (`Stdio::Piped` + immediate drop -- the shell has no terminal-backed fd 0/1/2 yet), spawns ALL elements before the first wait (waiting between spawns would deadlock a `producer | consumer` -- producer blocks on a full pipe while the parent blocks before spawning the consumer that drains it), then reaps via wait-any + pid-match (SYS_WAIT_PID reaps any zombie; we collect the N spawned pids and match each reaped pid to its element index; at v1.0 there are no background children so exactly N waits reap the pipeline), and finally aggregates `$status` per pipefail. **Pipefail (scripture 8.4)** = new pure `pub fn aggregate_pipefail(&[(i32, bool)]) -> i32`: the RIGHTMOST non-zero exit among elements NOT marked `?|` (the `?|` modifier sets `tolerate_failure` on the LEFT element, whose status is then ignored), or 0 if every non-tolerated element succeeded. **v1.0 binary exit status**: the kernel's `sys_exits_handler` normalizes any non-zero child exit to `exit_status = 1` (x0==0 -> "ok"/0; x0!=0 -> "fail"/1; the literal code is lost -- a richer u64 status is a Phase 5+ deferral). So a real pipeline element's reaped status is 0 or 1; the rightmost-VALUE distinction in `aggregate_pipefail` is exercised by the pure-function probe (synthetic statuses 7/3), not by real binaries. **Stdio direction**: `Stdio::File(end)` installs a specific pipe end at the child's slot, then libthyla-rs drops the parent's copy after the spawn -- so once the upstream exits, the downstream reader sees EOF (the parent holds no write-end copy). **Two new test fixtures**: `pipe-src` (writes the fixed payload `"PIPE-DATA-OK\n"` to fd 1) + `pipe-sink` (reads fd 0 to EOF, exits 0 iff it got exactly that payload, else 1). cpio 40 -> 42 entries. **Deferred at U-6d-a**: redirects (U-6d-b), background `&` (U-7), in-process pipeline stages (U-6f+). ~150 LOC stmt.rs (exec_pipeline + aggregate_pipefail) + 2 fixtures (~40 + ~55 LOC) + ~170 LOC u-test extension (8 probes). New `/u-test::flow_eval_pipe`: `hello-rs \| hello-rs` -> 0 (2-element mechanics); 3-element -> 0; `pipe-src \| pipe-sink` -> 0 (REAL byte transfer + correct wiring direction); `hello-rs \| pipe-sink` -> 1 (EOF + real non-zero through pipefail, kernel-normalized); aggregate_pipefail rightmost-non-zero (synthetic 7/3 -> 3); aggregate_pipefail `?|` tolerate; background pipeline -> NotImplemented; fn-in-pipeline -> NotImplemented. u-test now reports **15 cross-module flows**; new `u-test: eval pipe OK` line. |

@@ -1928,6 +1928,28 @@ int main(void) {
     }
     t_putstr("joey: /u-readdir-test reaped status=0; U-6e-b-1 readdir verified\n");
 
+    // === /u-glob-test orchestration (Phase 7 U-6e-b-2) ===
+    // Glob argv expansion: libutopia::eval::glob::expand fs-walk +
+    // stmt::evaluate_argv wiring. Runs PRE-pivot: it expands patterns
+    // (u-* / * / versio? / [vw]* / /u-*) against the flat boot ramfs and
+    // asserts the sorted match sets, single-level containment, rc nullglob
+    // (no-match -> empty list), absolute-pattern display, and -- via
+    // $status -- that a bare glob expands in argv while the same pattern
+    // quoted stays literal. status==0 gates the boot.
+    const char u_glob_name[] = "u-glob-test";
+    long ugl_pid = t_spawn(u_glob_name, sizeof(u_glob_name) - 1);
+    if (ugl_pid <= 0) {
+        t_putstr("joey: t_spawn(\"u-glob-test\") FAILED\n");
+        return 1;
+    }
+    int ugl_status = -1;
+    long ugl_reaped = t_wait_pid(&ugl_status);
+    if (ugl_reaped != ugl_pid || ugl_status != 0) {
+        t_putstr("joey: /u-glob-test orchestration FAILED\n");
+        return 1;
+    }
+    t_putstr("joey: /u-glob-test reaped status=0; U-6e-b-2 glob verified\n");
+
     // === /ut orchestration (Phase 7 U-3 -- Utopia shell skeleton) ===
     // `ut` is the Utopia shell binary; at U-3 its scope is the Pale
     // Fire version banner via libutopia + clean exit. The U-4..U-Z

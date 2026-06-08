@@ -1,0 +1,20 @@
+[package]
+name = "u-glob-test"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "u-glob-test"
+path = "src/main.rs"
+
+[dependencies]
+# u-glob-test is the U-6e-b-2 glob-argv-expansion boot probe. It runs
+# PRE-pivot (flat devramfs root) and drives libutopia::eval::glob::expand
+# directly (the load-bearing fs-walk) plus the evaluate_argv wiring via
+# eval_source + $status: it asserts prefix/?/[class] matching, sortedness,
+# rc nullglob (no-match -> empty list), absolute-pattern display, and that
+# a bare glob expands in argv while the same pattern quoted does not.
+libthyla-rs = { path = "../lib/libthyla-rs" }
+libutopia = { path = "../utopia/libutopia" }
