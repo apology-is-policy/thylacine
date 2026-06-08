@@ -1086,7 +1086,7 @@ rolled back via `spoor_clunk`); a user-VA fault reading the fd array.
 | Loom-6b-2 | the metadata-mutation ops (SETATTR / MKDIR / SYMLINK / MKNOD / UNLINKAT / RENAMEAT / LINK -- names-from-buffer + the second-fid I-30 pin) | **landed** (formal audit closed at 6c) |
 | Loom-6c | the deterministic multi-in-flight harness (`9p_transport_mq` + 2 tests) + the formal Opus audit over the whole 6a+6b surface + the SMP gate + close | **landed** (audit closed 0/0/1/3) |
 | Loom-6d-1 | the native `libthyla_rs::loom` module (`Ring` over SYS_LOOM_SETUP/REGISTER/ENTER; the `repr(C)` SQE/CQE/BufReg byte-pinned to `loom.h`; the SPSC release/acquire ring model; register handles/buffers; submit/enter/reap) + `usr/loom-smoke` (NOP round-trip + register + non-9P payload-op rejection; joey-gated) | **landed** |
-| Loom-6d-2 | the CONCURRENT two-thread-same-`loom_fd` + cross-Proc-death SMP stress harness (the OWED item; the native driver + the SMP gate) + the positive dev9p async round-trip | pending |
+| Loom-6d-2 | `usr/loom-stress` -- the CONCURRENT two-thread-same-`loom_fd` + cross-Proc-death SMP stress harness (the OWED item) + the positive dev9p async round-trip, joey-spawned post-pivot; the ci-smp-gate multi-boot under -smp 4/8 is the concurrency witness | **landed** |
 | Loom-6d-3 | the latency bench (trap-amortization + the Tapestry present/input/vsync shape) + the Tapestry seam doc | pending |
 | Loom-6d-4 | the focused audit over the 6d surface + the Loom arc close | pending |
 | #916 | the direct-descriptor ops (WALK / LOPEN / LCREATE / CLUNK -- mint/open/release a registered fid from the op path) | deferred (post-Loom-6 seam) |

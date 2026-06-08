@@ -2477,6 +2477,37 @@ int main(void) {
                 t_putstr(" bytes)\n");
             }
 
+            // === /loom-stress orchestration (Loom-6d-2) ===
+            // The concurrent + cross-Proc-death SMP stress harness for the native
+            // loom ring API. Runs HERE (post-pivot) because Loom payload ops are
+            // dev9p-only (the kernel 9P client drives them) and the disk FS is now
+            // live (the fs-mut probe above just proved it). Two sibling threads
+            // hammer ONE shared loom_fd with async FSYNCs over the shared dev9p
+            // client (the #841 elected-reader + the per-ring borrow-guard + the
+            // Loom-4b CQ wait-list), then the Proc dies with ops in flight (the
+            // #898 quiesce-on-Proc-death). Sandwiched BEFORE corvus bringup so the
+            // subsequent FS-dependent bringup (corvus + login on the SAME shared
+            // client) doubles as a "client still healthy after the stress" check.
+            // The binary loads from the ramfs (devramfs_lookup), its file I/O
+            // resolves against the disk root. Gates the boot on status 0; the
+            // ci-smp-gate multi-boot under -smp 4/8 is the real concurrency
+            // assertion.
+            {
+                const char ls_name[] = "loom-stress";
+                long ls_pid = t_spawn(ls_name, sizeof(ls_name) - 1);
+                if (ls_pid <= 0) {
+                    t_putstr("joey: t_spawn(\"loom-stress\") FAILED\n");
+                    return 1;
+                }
+                int ls_status = -1;
+                long ls_reaped = t_wait_pid(&ls_status);
+                if (ls_reaped != ls_pid || ls_status != 0) {
+                    t_putstr("joey: /loom-stress orchestration FAILED (concurrent/death stress)\n");
+                    return 1;
+                }
+                t_putstr("joey: /loom-stress reaped status=0; concurrent + cross-Proc-death loom stress verified\n");
+            }
+
             // === stalk-1 E2E (multi-component SYS_OPEN on the real FS) ===
             // Resolve a 2-component absolute path through the kernel `stalk`
             // resolver (A-5b-0; docs/STALK-DESIGN.md) on the persistent Stratum
