@@ -562,3 +562,26 @@ pub fn copy<R: Read + ?Sized, W: Write + ?Sized>(reader: &mut R, writer: &mut W)
         }
     }
 }
+
+/// Best-effort write of all of `buf` to stdout (fd 1); errors swallowed.
+/// The unconditional-output workhorse for the coreutils -- a standalone run
+/// with an unwired fd 1 (G06) should not spuriously fail. Pairs with the
+/// `print!` / `println!` macros for the byte-slice (non-formatted) case.
+#[inline]
+pub fn out(buf: &[u8]) {
+    let _ = stdout().write_all(buf);
+}
+
+/// Best-effort write of all of `buf` to stderr (fd 2); errors swallowed.
+#[inline]
+pub fn err(buf: &[u8]) {
+    let _ = stderr().write_all(buf);
+}
+
+/// Read all of `reader` into a fresh `Vec` (thin wrapper over the `Read`
+/// default `read_to_end`). The "load the whole file" helper for `wc`/`sort`.
+pub fn slurp<R: Read + ?Sized>(reader: &mut R) -> Result<Vec<u8>> {
+    let mut v = Vec::new();
+    reader.read_to_end(&mut v)?;
+    Ok(v)
+}

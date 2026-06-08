@@ -789,6 +789,34 @@ static int do_native_argv_smoke(void) {
     return 0;
 }
 
+// do_native_coreutil_smoke — U-6e-pre-b: the FIRST runtime exercise of the
+// adopted native coreutils (echo/cat/wc/head/tail/seq/sort/uniq/tr/cut/grep/
+// basename/dirname/pwd/true/false). coreutil-smoke is itself a native
+// libthyla-rs binary: it spawns each coreutil via
+// libthyla_rs::process::Command with a piped stdin (fed a known input) +
+// piped stdout (captured), then asserts the output bytes + exit status and
+// reports per-check markers to the UART. It exits 0 iff every check passed.
+// All coreutils resolve from the devramfs cpio (spawn lookup is devramfs-
+// backed regardless of pivot), and the file-read checks use the read-only
+// devramfs /version, so this runs PRE-pivot. Returns 0 on success, -1 on
+// any failure (which fails the boot -- the suite is a boot gate).
+static int do_native_coreutil_smoke(void) {
+    static const char cs_name[] = "coreutil-smoke";
+    long cs_pid = t_spawn(cs_name, sizeof(cs_name) - 1);
+    if (cs_pid <= 0) {
+        t_putstr("joey: t_spawn(\"coreutil-smoke\") FAILED\n");
+        return -1;
+    }
+    int cs_status = -1;
+    long cs_reaped = t_wait_pid(&cs_status);
+    if (cs_reaped != cs_pid || cs_status != 0) {
+        t_putstr("joey: /coreutil-smoke FAILED\n");
+        return -1;
+    }
+    t_putstr("joey: coreutil-smoke ok (native coreutils spawned + I/O-verified via the shell's process surface)\n");
+    return 0;
+}
+
 // connect_corvus — bounded retry to t_srv_connect("corvus", "ctl"),
 // yielding between attempts so corvus's startup can race in.
 //
@@ -1890,6 +1918,11 @@ int main(void) {
     // First runtime exercise of the native-argv path (env::args, G03) +
     // the std-stream handles (io::stdout, G05). Gates the boot.
     if (do_native_argv_smoke() != 0) return 1;
+
+    // === native coreutils suite (U-6e-pre-b) ===
+    // First runtime exercise of the adopted coreutils, each spawned +
+    // I/O-verified by coreutil-smoke. Gates the boot.
+    if (do_native_coreutil_smoke() != 0) return 1;
 
     // === torpor SVC-dispatch smoke (P6-pouch-wait-addr, sub-chunk 8) ===
     // The kernel-side `torpor` wait-on-address primitive (the futex-

@@ -1,0 +1,20 @@
+# Thylacine native coreutils -- a single crate, one binary per tool.
+#
+# Each src/bin/<name>.rs is auto-discovered by cargo as a separate binary
+# (named after the file) -- a no_std libthyla-rs program with its own
+# rs_main + #[global_allocator]. Bundling them in ONE crate (vs a crate per
+# tool) keeps the workspace + build wiring small for a 16-tool suite.
+#
+# Adopted (U-6e-pre-b) from the auxiliary track's usr/apps/* coreutils,
+# rewritten off the aux-rt workaround onto the promoted libthyla-rs surface
+# (env::args [G03] + io::{stdin,stdout,stderr,out,copy,slurp} + the
+# print/eprintln macros [G05]). These are the shell's real tools.
+[package]
+name = "coreutils"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+libthyla-rs = { path = "../lib/libthyla-rs" }

@@ -1,0 +1,20 @@
+[package]
+name = "coreutil-smoke"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "coreutil-smoke"
+path = "src/main.rs"
+
+[dependencies]
+# coreutil-smoke is the U-6e-pre-b runtime verification driver for the
+# adopted native coreutils. joey spawns it; it spawns each coreutil via
+# libthyla_rs::process::Command with a piped stdin (fed a known input) +
+# piped stdout (captured), then asserts the output bytes + exit status.
+# This is the first RUNTIME exercise of the coreutils (the aux track only
+# compiled them) AND a second exercise of the native-argv path (the tools
+# read their argv via env::args). Reports per-check markers + gates the boot.
+libthyla-rs = { path = "../lib/libthyla-rs" }

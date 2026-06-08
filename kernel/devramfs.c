@@ -42,9 +42,13 @@
 // =============================================================================
 
 // Sized to hold the ramfs binaries Phase 6 ships (33+ entries by sub-chunk
-// 14) with headroom for sub-chunks 15-16 (stratumd) and Phase 7 (Utopia
-// userspace). 24 bytes per slot; the static array sits in BSS.
-#define RAMFS_FILE_MAX 64
+// 14) plus the Phase 7 Utopia userspace -- the U-6e-pre coreutils adoption
+// pushed the live cpio to ~69 entries (it had been ~51), so the prior cap of
+// 64 silently TRUNCATED the load (dropping /welcome et al.). 128 restores
+// comfortable headroom for the deferred coreutils + future tools. 24 bytes
+// per slot; the static array sits in BSS (~3 KiB), well below the synth-dir
+// qid base (RAMFS_QID_SYNTH_BASE) so file indices never collide.
+#define RAMFS_FILE_MAX 128
 
 struct ramfs_file {
     const char *name;        // NUL-terminated; lives in the cpio blob
@@ -72,7 +76,7 @@ static bool              g_ramfs_initialized;
 // directories to mount onto -- a Spoor-identity-keyed mount cannot graft onto a
 // path that does not resolve. These dirs are EMPTY (a walk into them misses;
 // only `..` -> root succeeds) and exist purely as mount points. The qid.path
-// range is well above any plausible file index (RAMFS_FILE_MAX = 64), so it
+// range is well above any plausible file index (RAMFS_FILE_MAX = 128), so it
 // never collides with a real file's qid.
 #define RAMFS_QID_SYNTH_BASE  0x1000000000000000ULL
 #define RAMFS_QID_SYNTH_SRV   (RAMFS_QID_SYNTH_BASE + 1ULL)   // /srv
