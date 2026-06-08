@@ -76,6 +76,7 @@ pub mod cap;
 pub mod fs;
 pub mod hardware;
 pub mod io;
+pub mod loom;
 pub mod ninep;
 pub mod notes;
 pub mod poll;
@@ -208,6 +209,13 @@ pub const T_SYS_WSTAT: u64            = 59;
 pub const T_SYS_EXIT_GROUP: u64       = 60;
 pub const T_SYS_CAP_GRANT_CLEARANCE: u64 = 61;  // A-4a clearance grant-side bridge
 pub const T_SYS_OPEN: u64             = 65;     // A-5b-0/stalk-1 multi-component open
+// Loom -- the io_uring-inverted 9P ring transport (docs/LOOM.md). Backs the
+// native t::loom::Ring API (Loom-6d). SETUP maps the SQ/CQ Burrow + reports
+// geometry; REGISTER installs fixed handles / pins buffers; ENTER submits +
+// reaps.
+pub const T_SYS_LOOM_SETUP: u64       = 66;
+pub const T_SYS_LOOM_REGISTER: u64    = 67;
+pub const T_SYS_LOOM_ENTER: u64       = 68;
 // SYS_UNLINK flags: rmdir an empty directory vs unlink a non-directory.
 // Mirrors the kernel's SYS_UNLINK_REMOVEDIR / wire P9_UNLINK_AT_REMOVEDIR.
 pub const T_UNLINK_REMOVEDIR: u32     = 0x200;
@@ -1454,6 +1462,59 @@ pub unsafe fn t_burrow_detach(vaddr: u64, length: u64) -> i64 {
         inlateout("x0") x0,
         in("x1") length,
         in("x8") T_SYS_BURROW_DETACH,
+        options(nostack)
+    );
+    x0
+}
+
+// t_loom_setup — create a Loom ring with `entries` SQ slots; the kernel maps the
+// SQ/CQ Burrow into this Proc and fills the `struct loom_params` at `params_va`
+// with the ring geometry (ring_va + region offsets/sizes). Returns the loom_fd
+// (>= 0) or -1. Backs t::loom::Ring::setup (Loom-6d).
+#[inline(always)]
+pub unsafe fn t_loom_setup(entries: u64, params_va: u64) -> i64 {
+    let mut x0: i64 = entries as i64;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") params_va,
+        in("x8") T_SYS_LOOM_SETUP,
+        options(nostack)
+    );
+    x0
+}
+
+// t_loom_register — install fixed handles (op = 0) or pin buffers (op = 1) for a
+// ring. `arg_va` points at `nargs` elements (u32 fd indices, or struct
+// loom_buf_reg). Returns 0 / -1. Backs t::loom::Ring::register_*.
+#[inline(always)]
+pub unsafe fn t_loom_register(loom_fd: u64, op: u64, arg_va: u64, nargs: u64) -> i64 {
+    let mut x0: i64 = loom_fd as i64;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") op,
+        in("x2") arg_va,
+        in("x3") nargs,
+        in("x8") T_SYS_LOOM_REGISTER,
+        options(nostack)
+    );
+    x0
+}
+
+// t_loom_enter — consume up to `to_submit` queued SQEs, then block until at least
+// `min_complete` CQEs are available (unless LOOM_ENTER_NONBLOCK in `flags`).
+// Returns the SQEs consumed (>= 0) or -1. Backs t::loom::Ring::enter.
+#[inline(always)]
+pub unsafe fn t_loom_enter(loom_fd: u64, to_submit: u64, min_complete: u64, flags: u64) -> i64 {
+    let mut x0: i64 = loom_fd as i64;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") to_submit,
+        in("x2") min_complete,
+        in("x3") flags,
+        in("x8") T_SYS_LOOM_ENTER,
         options(nostack)
     );
     x0

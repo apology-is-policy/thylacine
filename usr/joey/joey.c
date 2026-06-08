@@ -1759,6 +1759,28 @@ int main(void) {
     }
     t_putstr("joey: /burrow-torture reaped status=0 (kernel burrow path clean: single-threaded x3 sizes + multi-threaded SMP)\n");
 
+    // === /loom-smoke orchestration (Loom-6d-1) ===
+    // First EL0 consumer of the native libthyla_rs::loom ring API: a NOP
+    // round-trip + register a buffer + a /system.key handle + a byte-correct
+    // READ over the ring + an FSYNC-on-read-only rejection (the I-30 gate from
+    // userspace). Proves SYS_LOOM_SETUP/REGISTER/ENTER drive end-to-end from a
+    // native binary -- the ring memory model, the registered-handle/buffer pin,
+    // and the async 9P dispatch. On success "loom-smoke: PASS" + exit 0; any
+    // failed check prints a tagged FAIL + exits 1 (gates the boot).
+    const char loom_smoke_name[] = "loom-smoke";
+    long ls_pid = t_spawn(loom_smoke_name, sizeof(loom_smoke_name) - 1);
+    if (ls_pid <= 0) {
+        t_putstr("joey: t_spawn(\"loom-smoke\") FAILED\n");
+        return 1;
+    }
+    int ls_status = -1;
+    long ls_reaped = t_wait_pid(&ls_status);
+    if (ls_reaped != ls_pid || ls_status != 0) {
+        t_putstr("joey: /loom-smoke orchestration FAILED\n");
+        return 1;
+    }
+    t_putstr("joey: /loom-smoke reaped status=0; native loom ring API verified\n");
+
     // === /pouch-hello-mallocng-torture (EBADTAG DFS; report-only) ===
     // The kernel burrow path tested clean, so the "AEGIS corruption" /
     // STM_EBADTAG is musl mallocng-specific. This pouch binary replicates
