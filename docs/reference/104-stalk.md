@@ -227,6 +227,53 @@ no-op for every current caller (no API yields a mount-point fd once walks cross,
 and the Territory root is never a mount-table entry) -- it is present for exact
 one-component-stalk symmetry + correctness if a mount-point fd ever exists.
 
+### Per-Proc cwd (LS-4)
+
+`stalk()` only ever resolves an absolute-from-root path; the per-Proc current
+directory ("dot", the Plan 9 concept) lives a layer ABOVE it as a **name-based**
+cleaned path string on the Territory (`Territory.dot_path`; `NULL` == `"/"`,
+heap-allocated lazily, freed at `territory_unref`). A relative path is joined to
+`dot_path` and lexically cleaned into an absolute path BEFORE `stalk` runs --
+exactly POSIX `openat(AT_FDCWD, ...)`. So **I-28 containment is unchanged and
+gains no new mechanism**: `stalk` is still handed an absolute-from-root path and
+re-clamps `..` at `root_spoor`, so even a hostile un-cleaned join cannot escape.
+
+- **`territory.c::cwd_lexical_resolve(dot, input, inlen, out, outcap)`** -- the
+  pure (no-lock, no-alloc) join + clean: an absolute `input` ignores `dot`; a
+  relative one is seeded with `dot`'s components; `.` is dropped, `//` collapsed,
+  `..` pops the last component (clamped at `/`); an empty result -> `"/"`.
+  Returns the output length or -1 if it would not fit `outcap`. Unit-tested in
+  isolation (`territory.cwd_lexical`).
+- **`territory_resolve_cwd(p, ...)`** -- the locked wrapper: reads `dot_path`
+  under the per-Territory leaf `dot_lock` (the lexical resolve is bounded CPU, so
+  holding the lock across it is safe) and calls `cwd_lexical_resolve`. The
+  SYS_CHDIR + SYS_OPEN-relative-join entry point.
+- **`territory_getdot` / `territory_setdot`** -- read / replace `dot_path` under
+  `dot_lock`. `setdot` kmalloc's the new copy BEFORE taking the lock, swaps, then
+  frees the old OUTSIDE the lock (readers copy under the lock and never retain
+  the pointer -> no UAF). `"/"` is stored as the `NULL` sentinel.
+
+`SYS_CHDIR = 69`(path, len) resolves the cleaned target from `root_spoor`,
+requires it to be a directory (`QTDIR`) the caller can SEARCH (the open-path
+`perm_check(PERM_X)`, gated on `Dev.perm_enforced`), then swaps `dot_path`.
+`SYS_GETCWD = 70`(buf, len) copies `dot_path` out NUL-terminated (`-1` if the
+path + NUL does not fit). `sys_open_handler` applies the join ONLY for the
+FROM_ROOT sentinel + a relative path; an absolute path or an explicit dirfd is
+unchanged.
+
+`dot_path` lives on the per-Proc `Territory`, so a Proc's threads SHARE it (POSIX
+per-process cwd, serialized by `dot_lock`) and a child INHERITS an independent
+snapshot via `territory_clone`. `dot_lock` is the first per-Territory lock;
+extending it to cover `root_spoor` would close the dormant pivot-vs-walk race
+(#848).
+
+**v1.0 is name-based** (a string). A handle-based dot Spoor -- the rename-robust
+Plan 9/Linux form -- is the v1.x upgrade, landing WITH symlinks (which force it:
+a live-dot start would strand `cd ..` unless `..` becomes a device parent-walk, a
+new mechanism on the I-28 surface, and the symlink/`..` interaction is the only
+correctness argument that justifies that cost). See LIFE-SUPPORT.md LS-4 +
+STALK-DESIGN.md 4.3.
+
 ## Data structures
 
 The mount-table entry (`struct PgrpMount`, `kernel/include/thylacine/territory.h`)
@@ -314,6 +361,13 @@ allocation in the resolver beyond the Spoor clones, which are SLUB).
   invariant-detection gates green; boot + login + both joey E2Es green.
 - **stalk-3 (pending)**: devsrv per-territory + namespace-resident `/srv` +
   retire `SYS_SRV_CONNECT` / `SYS_POST_SERVICE`.
+- **LS-4a (landed)**: the per-Proc cwd substrate -- `Territory.dot_path` +
+  `dot_lock`, `cwd_lexical_resolve` / `territory_resolve_cwd` / `getdot` /
+  `setdot`, `SYS_CHDIR = 69` / `SYS_GETCWD = 70`, and the `sys_open_handler`
+  relative->cwd join. Name-based (a cleaned path string); I-28 preserved (no new
+  mechanism). Kernel tests `territory.cwd_lexical` + `territory.cwd_dot`. The
+  userspace wiring (libthyla-rs `chdir`/`getcwd` + the shell `cd` + the LS-CI
+  relative-`cat` E2E) is LS-4b.
 
 ## Known caveats / footguns
 

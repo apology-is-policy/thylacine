@@ -149,3 +149,101 @@ void test_namespace_fork_isolated(void) {
     territory_unref(parent);
     territory_unref(child);
 }
+
+// --- LS-4: per-Proc cwd ("dot") --------------------------------------------
+
+static int cwd_streq(const char *a, const char *b) {
+    u64 i = 0;
+    while (a[i] != '\0' && b[i] != '\0') { if (a[i] != b[i]) return 0; i++; }
+    return a[i] == b[i];
+}
+
+void test_territory_cwd_lexical(void);
+void test_territory_cwd_dot(void);
+
+// territory.cwd_lexical -- the pure join/clean resolver (cwd_lexical_resolve).
+void test_territory_cwd_lexical(void) {
+    char out[256];
+    int r;
+
+    r = cwd_lexical_resolve("/home/michael", "foo.txt", 7, out, sizeof(out));
+    TEST_ASSERT(r > 0 && cwd_streq(out, "/home/michael/foo.txt"),
+        "relative join against cwd");
+
+    r = cwd_lexical_resolve("/home/michael", "/etc/passwd", 11, out, sizeof(out));
+    TEST_ASSERT(r > 0 && cwd_streq(out, "/etc/passwd"),
+        "absolute path ignores cwd");
+
+    r = cwd_lexical_resolve("/a", "./b//c", 6, out, sizeof(out));
+    TEST_ASSERT(r > 0 && cwd_streq(out, "/a/b/c"),
+        "dot skipped + double-slash collapsed");
+
+    r = cwd_lexical_resolve("/a/b/c", "../x", 4, out, sizeof(out));
+    TEST_ASSERT(r > 0 && cwd_streq(out, "/a/b/x"),
+        "dotdot pops one component");
+
+    // ".." can never escape above "/" (the I-28-adjacent lexical clamp; stalk
+    // ALSO re-clamps at root_spoor, so this is belt-and-suspenders).
+    r = cwd_lexical_resolve("/a", "../../../etc", 12, out, sizeof(out));
+    TEST_ASSERT(r > 0 && cwd_streq(out, "/etc"),
+        "dotdot clamped at root");
+
+    r = cwd_lexical_resolve((const char *)0, "foo", 3, out, sizeof(out));
+    TEST_ASSERT(r > 0 && cwd_streq(out, "/foo"),
+        "NULL cwd treated as root");
+
+    r = cwd_lexical_resolve("/a", "..", 2, out, sizeof(out));
+    TEST_ASSERT(r == 1 && cwd_streq(out, "/"),
+        "dotdot from /a nets back to /");
+
+    r = cwd_lexical_resolve("/home", "/", 1, out, sizeof(out));
+    TEST_ASSERT(r == 1 && cwd_streq(out, "/"),
+        "absolute / yields /");
+
+    // A result that does not fit the output buffer is rejected (no overflow).
+    char tiny[4];
+    r = cwd_lexical_resolve("/aaaa", "bbbb", 4, tiny, sizeof(tiny));
+    TEST_ASSERT(r == -1, "over-capacity result rejected");
+}
+
+// territory.cwd_dot -- getdot / setdot / resolve_cwd + clone snapshot isolation.
+void test_territory_cwd_dot(void) {
+    struct Territory *p = territory_alloc();
+    TEST_ASSERT(p != NULL, "territory_alloc returned NULL");
+
+    char buf[256];
+    int len = territory_getdot(p, buf, sizeof(buf));
+    TEST_ASSERT(len == 1 && cwd_streq(buf, "/"), "fresh cwd is /");
+
+    TEST_EXPECT_EQ(territory_setdot(p, "/home/michael"), 0, "setdot ok");
+    len = territory_getdot(p, buf, sizeof(buf));
+    TEST_ASSERT(len == 13 && cwd_streq(buf, "/home/michael"), "cwd round-trips");
+
+    int r = territory_resolve_cwd(p, "x", 1, buf, sizeof(buf));
+    TEST_ASSERT(r > 0 && cwd_streq(buf, "/home/michael/x"),
+        "resolve_cwd joins relative against the stored dot");
+
+    // The "/" sentinel resets dot_path to NULL; getdot reads "/" again.
+    TEST_EXPECT_EQ(territory_setdot(p, "/"), 0, "setdot / ok");
+    len = territory_getdot(p, buf, sizeof(buf));
+    TEST_ASSERT(len == 1 && cwd_streq(buf, "/"), "cwd back to / after setdot(/)");
+
+    TEST_EXPECT_EQ(territory_setdot(p, "/abcdef"), 0, "setdot /abcdef ok");
+    char small[4];
+    TEST_EXPECT_EQ(territory_getdot(p, small, sizeof(small)), -1,
+        "getdot rejects a too-small buffer");
+
+    // A clone inherits the cwd snapshot; the parent's later setdot does NOT
+    // affect the child (independent kmalloc'd copy -- POSIX fork semantics).
+    struct Territory *child = territory_clone(p);
+    TEST_ASSERT(child != NULL, "territory_clone returned NULL");
+    len = territory_getdot(child, buf, sizeof(buf));
+    TEST_ASSERT(len == 7 && cwd_streq(buf, "/abcdef"), "child inherits cwd");
+    TEST_EXPECT_EQ(territory_setdot(p, "/changed"), 0, "parent setdot ok");
+    len = territory_getdot(child, buf, sizeof(buf));
+    TEST_ASSERT(len == 7 && cwd_streq(buf, "/abcdef"),
+        "child cwd unaffected by parent setdot (snapshot isolation)");
+
+    territory_unref(child);
+    territory_unref(p);
+}

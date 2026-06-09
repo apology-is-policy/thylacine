@@ -61,6 +61,8 @@ static void territory_init_fields(struct Territory *p) {
     p->nbinds     = 0;
     p->nmounts    = 0;
     p->root_spoor = NULL;
+    spin_lock_init(&p->dot_lock);
+    p->dot_path   = NULL;   // NULL == cwd "/" (allocated lazily on first chdir)
     // KP_ZERO already cleared binds[] and mounts[]; nothing more to do.
 }
 
@@ -141,6 +143,28 @@ struct Territory *territory_clone(struct Territory *parent) {
     if (child->root_spoor) {
         spoor_ref(child->root_spoor);
     }
+
+    // LS-4: copy the cwd snapshot (POSIX fork semantics -- the child inherits
+    // the parent's cwd, independent thereafter). Take the PARENT's dot_lock so
+    // a concurrent chdir on a parent thread cannot free dot_path under us; a
+    // race is benign (either pre- or post-chdir cwd is a valid snapshot).
+    // kmalloc UNDER the leaf lock is OK -- SLUB alloc is bounded + non-sleeping.
+    // On OOM, territory_unref the child (drops the mount/root refs just taken)
+    // and fail; the parent is unchanged.
+    spin_lock(&parent->dot_lock);
+    if (parent->dot_path) {
+        u64 len = 0;
+        while (parent->dot_path[len] != '\0') len++;
+        char *dup = kmalloc(len + 1, 0);
+        if (!dup) {
+            spin_unlock(&parent->dot_lock);
+            territory_unref(child);
+            return NULL;
+        }
+        for (u64 i = 0; i <= len; i++) dup[i] = parent->dot_path[i];
+        child->dot_path = dup;
+    }
+    spin_unlock(&parent->dot_lock);
     return child;
 }
 
@@ -203,9 +227,129 @@ void territory_unref(struct Territory *p) {
             spoor_clunk(r);
         }
 
+        // LS-4: free the cwd string (NULL == "/", no-op). Final release:
+        // ref == 0, no concurrent accessor, so no dot_lock is needed.
+        if (p->dot_path) {
+            kfree(p->dot_path);
+            p->dot_path = NULL;
+        }
+
         kmem_cache_free(g_pgrp_cache, p);
         __atomic_fetch_add(&g_pgrp_destroyed, 1u, __ATOMIC_RELAXED);
     }
+}
+
+// =============================================================================
+// Per-Proc cwd ("dot") -- LS-4. See <thylacine/territory.h> + LIFE-SUPPORT.md
+// LS-4 + STALK-DESIGN.md 4.3. Name-based: dot_path is a cleaned absolute path
+// string, NULL == "/". The lexical resolver keeps stalk's I-28 containment
+// untouched -- it always hands stalk an absolute-from-root path; ".." is
+// resolved here lexically and re-clamped at root_spoor by stalk regardless.
+// =============================================================================
+
+int cwd_lexical_resolve(const char *dot, const char *input, u64 inlen,
+                        char *out, u64 outcap) {
+    if (!input || !out || outcap < 2) return -1;
+
+    u64 olen = 0;       // length of the absolute path built so far; 0 == "/"
+    out[0] = '\0';
+
+    // A relative input is seeded with the cwd's components; an absolute input
+    // ignores the cwd. `dot` is already a cleaned absolute path (or NULL/"/").
+    int absolute = (inlen > 0 && input[0] == '/');
+    if (!absolute && dot && dot[0] == '/') {
+        u64 i = 0;
+        while (dot[i] != '\0') {
+            while (dot[i] == '/') i++;
+            if (dot[i] == '\0') break;
+            u64 s = i;
+            while (dot[i] != '\0' && dot[i] != '/') i++;
+            u64 clen = i - s;
+            // dot is pre-cleaned: every component is real. Append "/comp".
+            if (olen + 1 + clen + 1 > outcap) return -1;
+            out[olen++] = '/';
+            for (u64 k = 0; k < clen; k++) out[olen++] = dot[s + k];
+            out[olen] = '\0';
+        }
+    }
+
+    // Process the input's components, resolving "." / ".." lexically.
+    u64 i = 0;
+    while (i < inlen) {
+        while (i < inlen && input[i] == '/') i++;
+        if (i >= inlen) break;
+        u64 s = i;
+        while (i < inlen && input[i] != '/') i++;
+        u64 clen = i - s;
+
+        if (clen == 1 && input[s] == '.') continue;                  // "."
+        if (clen == 2 && input[s] == '.' && input[s + 1] == '.') {   // ".."
+            // Pop the last component; clamped at root (olen never goes < 0).
+            while (olen > 0 && out[olen - 1] != '/') olen--;
+            if (olen > 0) olen--;            // drop the separating '/'
+            out[olen] = '\0';
+            continue;
+        }
+        if (olen + 1 + clen + 1 > outcap) return -1;                 // "/comp\0"
+        out[olen++] = '/';
+        for (u64 k = 0; k < clen; k++) out[olen++] = input[s + k];
+        out[olen] = '\0';
+    }
+
+    if (olen == 0) { out[0] = '/'; out[1] = '\0'; olen = 1; }        // "/" root
+    return (int)olen;
+}
+
+int territory_resolve_cwd(struct Territory *p, const char *input, u64 inlen,
+                          char *out, u64 outcap) {
+    if (!p)                       return -1;
+    if (p->magic != PGRP_MAGIC)   extinction("territory_resolve_cwd of corrupted Territory");
+    // Read dot_path UNDER the leaf lock; the lexical resolve is bounded CPU
+    // (no alloc, no block), so holding dot_lock across it is safe.
+    spin_lock(&p->dot_lock);
+    int r = cwd_lexical_resolve(p->dot_path, input, inlen, out, outcap);
+    spin_unlock(&p->dot_lock);
+    return r;
+}
+
+int territory_getdot(struct Territory *p, char *buf, u64 cap) {
+    if (!p || !buf || cap == 0)   return -1;
+    if (p->magic != PGRP_MAGIC)   extinction("territory_getdot of corrupted Territory");
+    spin_lock(&p->dot_lock);
+    const char *src = (p->dot_path && p->dot_path[0]) ? p->dot_path : "/";
+    u64 len = 0;
+    while (src[len] != '\0') len++;
+    if (len + 1 > cap) { spin_unlock(&p->dot_lock); return -1; }
+    for (u64 i = 0; i < len; i++) buf[i] = src[i];
+    buf[len] = '\0';
+    spin_unlock(&p->dot_lock);
+    return (int)len;
+}
+
+int territory_setdot(struct Territory *p, const char *cleaned) {
+    if (!p || !cleaned)           return -1;
+    if (p->magic != PGRP_MAGIC)   extinction("territory_setdot of corrupted Territory");
+
+    // "/" is stored as the NULL sentinel -- no allocation. kmalloc the new copy
+    // BEFORE taking dot_lock (the dup is private until installed).
+    char *dup = NULL;
+    if (!(cleaned[0] == '/' && cleaned[1] == '\0')) {
+        u64 len = 0;
+        while (cleaned[len] != '\0') len++;
+        dup = kmalloc(len + 1, 0);
+        if (!dup) return -1;
+        for (u64 i = 0; i <= len; i++) dup[i] = cleaned[i];
+    }
+
+    spin_lock(&p->dot_lock);
+    char *old = p->dot_path;
+    p->dot_path = dup;
+    spin_unlock(&p->dot_lock);
+
+    // Free the old string OUTSIDE the lock. Safe: readers copy dot_path under
+    // dot_lock and never retain the pointer past their critical section.
+    if (old) kfree(old);
+    return 0;
 }
 
 int territory_nbinds(struct Territory *p) {

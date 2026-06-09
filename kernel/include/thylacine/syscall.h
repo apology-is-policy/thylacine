@@ -1317,6 +1317,25 @@ enum {
     // ...) land with Loom-6's registered-buffer surface and post -ENOSYS until
     // then (docs/LOOM.md 10).
     SYS_LOOM_ENTER   = 68,   // arg: loom_fd (x0), to_submit (x1), min_complete (x2), flags (x3)
+
+    // SYS_CHDIR(path_va, path_len) -> 0 / -1  (LS-4)
+    //   Set the caller's Territory per-Proc cwd ("dot") to `path`. A relative
+    //   path resolves against the current cwd; an absolute path against the
+    //   Territory root. The target must resolve, be a directory, and the caller
+    //   must hold search (X) permission on it (a perm_enforced Dev). On success
+    //   the cwd becomes the cleaned absolute path; a subsequent SYS_OPEN of a
+    //   relative path (with the FROM_ROOT sentinel) resolves against it -- POSIX
+    //   openat(AT_FDCWD, ...). dot is SHARED by a Proc's threads (per-process
+    //   cwd) and INHERITED by children at spawn (an independent snapshot).
+    //   Name-based at v1.0 (a cleaned path string; LIFE-SUPPORT.md LS-4): a
+    //   handle-based dot Spoor is the v1.x upgrade, landing with symlinks.
+    SYS_CHDIR  = 69,   // arg: path_va (x0), path_len (x1)
+
+    // SYS_GETCWD(buf_va, buf_len) -> len / -1  (LS-4)
+    //   Copy the caller's cwd (a cleaned absolute path; "/" until the first
+    //   chdir) into the user buffer, NUL-terminated. Returns the path length
+    //   (excluding the NUL), or -1 if buf_len is too small for path + NUL.
+    SYS_GETCWD = 70,   // arg: buf_va (x0), buf_len (x1)
 };
 
 // SYS_WALK_OPEN's FROM_ROOT sentinel: when passed as the spoor_fd, the

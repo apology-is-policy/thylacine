@@ -93,6 +93,8 @@ void test_proc_wait_pid_for_selects_target(void);
 void test_namespace_bind_smoke(void);
 void test_namespace_cycle_rejected(void);
 void test_namespace_fork_isolated(void);
+void test_territory_cwd_lexical(void);
+void test_territory_cwd_dot(void);
 void test_territory_mount_smoke(void);
 void test_territory_mount_idempotent_same_source(void);
 void test_territory_mount_mrepl_replaces(void);
@@ -934,6 +936,8 @@ struct test_case g_tests[] = {
     { "territory.bind_smoke",          test_namespace_bind_smoke,          false, NULL },
     { "territory.cycle_rejected",      test_namespace_cycle_rejected,      false, NULL },
     { "territory.fork_isolated",       test_namespace_fork_isolated,       false, NULL },
+    { "territory.cwd_lexical",         test_territory_cwd_lexical,         false, NULL },
+    { "territory.cwd_dot",             test_territory_cwd_dot,             false, NULL },
     { "territory_mount.smoke",                            test_territory_mount_smoke,                            false, NULL },
     { "territory_mount.idempotent_same_source",           test_territory_mount_idempotent_same_source,           false, NULL },
     { "territory_mount.mrepl_replaces",                   test_territory_mount_mrepl_replaces,                   false, NULL },

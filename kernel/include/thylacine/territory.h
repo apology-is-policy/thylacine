@@ -40,6 +40,7 @@
 #ifndef THYLACINE_PGRP_H
 #define THYLACINE_PGRP_H
 
+#include <thylacine/spinlock.h>
 #include <thylacine/types.h>
 
 struct Spoor;
@@ -125,6 +126,18 @@ struct Territory {
     struct Spoor        *root_spoor;
     struct PgrpBind      binds[PGRP_MAX_BINDS];
     struct PgrpMount     mounts[PGRP_MAX_MOUNTS];
+    // LS-4: per-Proc cwd (the Plan 9 "dot"), name-based. A cleaned absolute
+    // path string; NULL means "/" (the common case -- heap-allocated lazily
+    // only when a Proc chdir's away from root, kfree'd at territory_unref).
+    // dot_lock is a LEAF lock guarding ONLY dot_path: held for the short
+    // copy/swap, NEVER across stalk (which may block on 9P). Placed AFTER
+    // mounts[] so root_spoor / binds[] / mounts[] offsets are unchanged.
+    // Threads of a Proc SHARE dot_path (POSIX per-process cwd); a child gets an
+    // independent snapshot via territory_clone. A handle-based dot Spoor is the
+    // v1.x upgrade (landing with symlinks). See LIFE-SUPPORT.md LS-4 +
+    // STALK-DESIGN.md 4.3.
+    spin_lock_t          dot_lock;
+    char                *dot_path;
 };
 
 _Static_assert(sizeof(struct PgrpMount) == 32,
@@ -133,10 +146,10 @@ _Static_assert(sizeof(struct PgrpMount) == 32,
                "the abstract path_id_t target to the (dc, devno, qid.path) "
                "mount-point identity; the deliberate +16/entry growth.");
 _Static_assert(sizeof(struct Territory)
-               == 32 + 8 * PGRP_MAX_BINDS + 32 * PGRP_MAX_MOUNTS,
+               == 32 + 8 * PGRP_MAX_BINDS + 32 * PGRP_MAX_MOUNTS + 16,
                "struct Territory size pinned (stalk-2: 24 header + 8 root_spoor "
-               "+ 8*PGRP_MAX_BINDS + 32*PGRP_MAX_MOUNTS -- mounts[] entry grew "
-               "16->32 with the Spoor-identity re-key).");
+               "+ 8*PGRP_MAX_BINDS + 32*PGRP_MAX_MOUNTS; LS-4 appended "
+               "dot_lock[4] + pad[4] + dot_path[8] = 16 after mounts[]).");
 _Static_assert(__builtin_offsetof(struct Territory, magic) == 0,
                "magic must be at offset 0 (SLUB freelist write "
                "clobbers it on free, double-free defense)");
@@ -153,6 +166,13 @@ _Static_assert(__builtin_offsetof(struct Territory, binds) == 32,
 _Static_assert(__builtin_offsetof(struct Territory, mounts)
                == 32 + 8 * PGRP_MAX_BINDS,
                "mounts[] pinned after binds[]");
+// LS-4: the cwd fields trail mounts[] so the offsets above stay fixed.
+_Static_assert(__builtin_offsetof(struct Territory, dot_lock)
+               == 32 + 8 * PGRP_MAX_BINDS + 32 * PGRP_MAX_MOUNTS,
+               "dot_lock pinned after mounts[] (LS-4)");
+_Static_assert(__builtin_offsetof(struct Territory, dot_path)
+               == 32 + 8 * PGRP_MAX_BINDS + 32 * PGRP_MAX_MOUNTS + 8,
+               "dot_path pinned after dot_lock (4B lock + 4B pad)");
 
 // Bring up the territory subsystem. Allocates the Territory SLUB cache
 // and kproc's initial Territory (empty bindings, empty mounts; ref=1).
@@ -178,6 +198,38 @@ struct Territory *territory_clone(struct Territory *parent);
 // Both are safe to call on NULL.
 void territory_ref(struct Territory *p);
 void territory_unref(struct Territory *p);
+
+// =============================================================================
+// Per-Proc cwd ("dot") -- LS-4. Name-based: a cleaned absolute path string,
+// NULL == "/". All three take dot_lock internally where they touch dot_path
+// (the leaf lock). See LIFE-SUPPORT.md LS-4 + STALK-DESIGN.md 4.3.
+// =============================================================================
+
+// Copy the current cwd (or "/" when dot_path is NULL) into `buf`,
+// NUL-terminated, bounded by `cap`. Returns the path length (excluding the
+// NUL), or -1 on bad args / buffer too small.
+int territory_getdot(struct Territory *p, char *buf, u64 cap);
+
+// Resolve `input` (len `inlen`, NOT NUL-terminated) against `p`'s cwd into a
+// cleaned absolute path written to `out` (NUL-terminated, capacity `outcap`).
+// An absolute `input` ignores the cwd; a relative one is joined to it. Reads
+// dot_path UNDER dot_lock (the lexical resolve is bounded CPU -- no alloc, no
+// block -- so it is safe under the leaf lock). Returns the output length
+// (excluding NUL) or -1 if it would not fit. This is the SYS_CHDIR + the
+// SYS_OPEN-relative-join entry point.
+int territory_resolve_cwd(struct Territory *p, const char *input, u64 inlen,
+                          char *out, u64 outcap);
+
+// Replace dot_path with a kmalloc'd copy of `cleaned` (which MUST be a cleaned
+// absolute path) under dot_lock, freeing the old. "/" is stored as the NULL
+// sentinel (no allocation). Returns 0, or -1 on OOM (dot_path unchanged).
+int territory_setdot(struct Territory *p, const char *cleaned);
+
+// Pure lexical resolver (no locks, no allocation) -- the testable core of
+// territory_resolve_cwd. `dot` is the cwd string (NULL or "/" == root). Exposed
+// for unit tests; production callers use territory_resolve_cwd.
+int cwd_lexical_resolve(const char *dot, const char *input, u64 inlen,
+                        char *out, u64 outcap);
 
 // =============================================================================
 // Bind (path-to-path).

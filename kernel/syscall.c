@@ -1651,6 +1651,82 @@ static s64 sys_walk_open_handler(u64 spoor_fd_raw, u64 name_va,
 // mount-crossing is stalk-2). The arg validation + rights derivation mirror
 // sys_walk_open_handler; the resolution itself is stalk().
 // =============================================================================
+// SYS_CHDIR(path, len) -- set the per-Proc cwd (LS-4; LIFE-SUPPORT.md LS-4).
+// Resolves `path` against the current cwd (relative) or the Territory root
+// (absolute), requires the target to be a directory the caller can SEARCH (X),
+// then swaps the Territory dot_path. dot is shared by a Proc's threads and
+// inherited by children at spawn.
+static s64 sys_chdir_handler(u64 path_va, u64 path_len_raw, u64 a2, u64 a3) {
+    (void)a2; (void)a3;
+    struct Thread *t = current_thread();             if (!t) return -1;
+    struct Proc *p = t->proc;                        if (!p || !p->territory) return -1;
+    if (path_len_raw == 0)                           return -1;
+    if (path_len_raw > SYS_OPEN_PATH_MAX)            return -1;
+    if (!sys_validate_user_buf(path_va, path_len_raw)) return -1;
+
+    char path_scratch[SYS_OPEN_PATH_MAX + 1];
+    for (u64 i = 0; i < path_len_raw; i++) {
+        u8 b;
+        if (uaccess_load_u8(path_va + i, &b) != 0)   return -1;
+        if (b == '\0')                               return -1;   // no embedded NUL
+        path_scratch[i] = (char)b;
+    }
+    path_scratch[path_len_raw] = '\0';
+
+    // Resolve + clean against the cwd (relative) or root (absolute).
+    char cleaned[SYS_OPEN_PATH_MAX + 1];
+    int cl = territory_resolve_cwd(p->territory, path_scratch, path_len_raw,
+                                   cleaned, sizeof(cleaned));
+    if (cl < 0)                                      return -1;
+
+    // Resolve the cleaned absolute path from the Territory root to verify it
+    // exists, is a directory, and the caller holds X (search). stalk borrows
+    // root (never refs/clunks it); we hold a ref across the call for the uniform
+    // exit clunk (survives a concurrent pivot_root, like sys_open_handler).
+    struct Spoor *root = p->territory->root_spoor;
+    if (!root)                                       return -1;
+    spoor_ref(root);
+    struct Spoor *q = stalk(p, root, cleaned, (u64)cl, STALK_WALK, 0);
+    spoor_clunk(root);
+    if (!q)                                          return -1;
+
+    s64 rc = -1;
+    if (q->qid.type & QTDIR) {
+        int ok = 1;
+        // Mirror stalk's gating: a perm_enforced Dev gates the search on X for
+        // the caller's principal; a non-enforced Dev has no rwx to check.
+        if (q->dev && q->dev->perm_enforced) {
+            struct t_stat st;
+            ok = (spoor_stat_native(q, &st) == 0 && perm_check(p, &st, PERM_X) == 0);
+        }
+        if (ok) rc = territory_setdot(p->territory, cleaned);
+    }
+    spoor_clunk(q);
+    return rc;
+}
+
+// SYS_GETCWD(buf, len) -- copy the per-Proc cwd into the user buffer (LS-4),
+// NUL-terminated. Returns the path length (excluding NUL), or -1 if the path +
+// NUL does not fit `len`.
+static s64 sys_getcwd_handler(u64 buf_va, u64 buf_len_raw, u64 a2, u64 a3) {
+    (void)a2; (void)a3;
+    struct Thread *t = current_thread();             if (!t) return -1;
+    struct Proc *p = t->proc;                        if (!p || !p->territory) return -1;
+    if (buf_len_raw == 0)                            return -1;
+    if (buf_len_raw > SYS_OPEN_PATH_MAX + 1)         return -1;
+    if (!sys_validate_user_buf(buf_va, buf_len_raw)) return -1;
+
+    char scratch[SYS_OPEN_PATH_MAX + 1];
+    int len = territory_getdot(p->territory, scratch, sizeof(scratch));
+    if (len < 0)                                     return -1;
+    if ((u64)len + 1 > buf_len_raw)                  return -1;   // path + NUL must fit
+
+    for (int i = 0; i <= len; i++) {                 // include the trailing NUL
+        if (uaccess_store_u8(buf_va + (u64)i, (u8)scratch[i]) != 0) return -1;
+    }
+    return (s64)len;
+}
+
 static s64 sys_open_handler(u64 start_fd_raw, u64 path_va,
                             u64 path_len_raw, u64 omode_raw) {
     struct Thread *t = current_thread();
@@ -1692,8 +1768,25 @@ static s64 sys_open_handler(u64 start_fd_raw, u64 path_va,
     }
     path_scratch[path_len_raw] = '\0';
 
+    // LS-4: a RELATIVE path with the FROM_ROOT sentinel resolves against the
+    // Territory cwd (dot) -- POSIX openat(AT_FDCWD, ...). Join + lexically clean
+    // dot + path into an absolute path, then resolve from root (start is already
+    // root_spoor). An explicit start-fd (a dirfd) or an absolute path is
+    // unchanged. stalk still re-clamps ".." at root_spoor, so the join cannot
+    // escape containment (I-28 preserved; no new mechanism).
+    char joined[SYS_OPEN_PATH_MAX + 1];
+    const char *rpath = path_scratch;
+    u64 rlen = path_len_raw;
+    if (start_fd_raw == SYS_WALK_OPEN_FROM_ROOT && path_scratch[0] != '/') {
+        int jl = territory_resolve_cwd(p->territory, path_scratch, path_len_raw,
+                                       joined, sizeof(joined));
+        if (jl < 0) { spoor_clunk(start); return -1; }
+        rpath = joined;
+        rlen  = (u64)jl;
+    }
+
     int amode = (omode_raw & SYS_WALK_OPEN_OPATH) ? STALK_WALK : STALK_OPEN;
-    struct Spoor *quarry = stalk(p, start, path_scratch, path_len_raw,
+    struct Spoor *quarry = stalk(p, start, rpath, rlen,
                                  amode, (u32)omode_raw);
     // #844: start (BORROWED by stalk -- it never refs/clunks it) is done now;
     // release the borrow. quarry owns its own ref from stalk.
@@ -5262,6 +5355,20 @@ void syscall_dispatch(struct exception_context *ctx) {
                                              ctx->regs[1],
                                              ctx->regs[2],
                                              ctx->regs[3]);
+        return;
+
+    case SYS_CHDIR:
+        ctx->regs[0] = (u64)sys_chdir_handler(ctx->regs[0],
+                                              ctx->regs[1],
+                                              ctx->regs[2],
+                                              ctx->regs[3]);
+        return;
+
+    case SYS_GETCWD:
+        ctx->regs[0] = (u64)sys_getcwd_handler(ctx->regs[0],
+                                               ctx->regs[1],
+                                               ctx->regs[2],
+                                               ctx->regs[3]);
         return;
 
     case SYS_WALK_CREATE:
