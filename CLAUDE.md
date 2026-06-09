@@ -672,6 +672,13 @@ tools/test.sh
 tools/ci-smp-gate.sh                    # full matrix, N=10 (or: make smp-gate)
 SMP_GATE_CONFIGS="default-smp4 ubsan-smp4" tools/ci-smp-gate.sh   # amplifier subset
 
+# Interactive E2E regression net (LS-CI): expect/PTY drives a REAL console --
+# login + assert rendered command output (the test that would have caught LS-1).
+# Optional gate (SKIPs without `expect`). THYLACINE_ACCEL=tcg default; bounded
+# retry (LS_CI_ATTEMPTS=3) tolerates host-timing flakes.
+tools/test-interactive.sh               # full set (or: make test-interactive)
+tools/test-interactive.sh ls-ci         # one scenario by name
+
 # Launch a dev VM
 tools/run-vm.sh
 

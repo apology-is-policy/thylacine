@@ -36,7 +36,7 @@ What is **missing or broken** for real human use (the LS arc):
 | Gap | Effect on the human | Chunk |
 |---|---|---|
 | ~~External command stdout is **dropped** (`Stdio::Piped`-then-drop)~~ stdout/stderr inherit the console (`env.stdio_inherit`) -- DONE | `echo`/`cat`/`grep`/coreutils output is now **visible** | **LS-2 [done]** |
-| No interactive regression net | the UARTEN bug shipped silently; no test drives a keyboard | **LS-CI** |
+| ~~No interactive regression net~~ `tools/test-interactive.sh` (expect/PTY) logs in + asserts output -- DONE | the LS-1/LS-2 class is now regression-tested from a real keyboard | **LS-CI [done]** |
 | No `ls`/`stat`/`clear` | can't list a directory or inspect a file | **LS-3a** |
 | No `mkdir`/`rm`/`cp`/`mv`/`touch`/`tee` | can't create/delete/copy/move files by command | **LS-3b** |
 | Relative paths don't resolve for externals (no per-Proc cwd; G07) | `cat foo.txt` from a cwd fails; only absolute paths work | **LS-4** |
@@ -93,17 +93,42 @@ without it the coreutils are mute. Comments at `stmt.rs:71-81` already note
 "this whole block flips to `Stdio::Inherit` cleanly." Tests: a probe + LS-CI
 (`echo HELLO` shows `HELLO`; `cat /welcome` shows the file).
 
-### LS-CI — Interactive E2E harness (the regression net)
+### LS-CI — Interactive E2E harness (the regression net) [DONE @*(pending)*, closes #945]
 
-**Host tooling** (`tools/test-interactive.sh` + an `expect` driver;
-non-audit-bearing). Boot under TCG, drive a real PTY via `expect`: log in as the
-seeded user (`michael`), run a scripted human sequence, assert the rendered
-output. The `expect`/PTY method (proven in LS-1) is the ONLY way to inject real
-console input — piped stdin hits EOF and closes QEMU's `mon:stdio` chardev. This
-is the test that would have caught LS-1. Land it EARLY (right after LS-2) so
-every later LS chunk gets an interactive assertion. Wire it as an optional gate
-(it needs `expect`; degrade gracefully if absent). Deliver an `expect` library
-of helpers (login, send-line, expect-output, logout).
+**As-built**: `tools/test-interactive.sh` (the wrapper) + `tools/interactive/lib.exp`
+(the reusable `expect` helper library: `lc_boot`/`lc_login`/`lc_send`/`lc_expect`/
+`lc_run_expect`/`lc_quit`) + `tools/interactive/ls-ci.exp` (the headline scenario);
+`make test-interactive`. Optional gate -- SKIPs (exit 0) without `expect`. Default
+`THYLACINE_ACCEL=tcg` (portable compat run); `THYLACINE_ACCEL=hvf` is the fast local
+override. The `ls-ci` scenario proves **LS-1** (reaching the shell banner requires
+login to have received every keystroke) + **LS-2** three ways: `echo` stdout
+(`exec_external`), `echo | tr a-z A-Z` upper-cased stdout (`spawn_pipeline_elements`),
+and `cat /missing` -> `cat:` stderr.
+
+Three hard-won portability facts are encoded in the harness (and matter for every
+future LS-CI scenario):
+- **Run `expect` under `script(1)`** -- macOS expect 5.45 corrupts its own std
+  channels inside `spawn` when its stdout is not a tty (a `>file` redirect OR a
+  pipe), aborting with "Tcl_RegisterChannel: duplicate channel names" (SIGABRT) or
+  breaking `puts` with "bad file number". `script -q <file> <cmd>` gives a PTY,
+  captures the transcript, and propagates the exit code.
+- **`global spawn_id`** in any proc that `spawn`s -- else the spawn is proc-local and
+  later procs' expect/send see a spurious immediate EOF.
+- **Match command OUTPUT, never typed input** -- the `ut` line editor redraws the
+  prompt per keystroke via cursor positioning and does NOT emit the typed line as
+  plain bytes, so only the command's output (clean text on its own line) is matchable.
+
+The kernel is proven stable at idle (a no-input boot survives indefinitely), so an
+unexpected qemu exit before a terminal result is a host-timing artifact
+(TCG-under-oversubscription); the wrapper retries each scenario up to
+`LS_CI_ATTEMPTS` (default 3). A real regression fails every attempt deterministically,
+so the retry tolerates flakes without masking a break. Reference: `docs/reference/09-test-harness.md`
+"Interactive E2E harness (LS-CI)".
+
+The `expect`/PTY method is the ONLY way to inject real console input -- piped stdin
+hits EOF and closes QEMU's `mon:stdio` chardev, which is why CI never exercised the
+interactive path and LS-1 shipped silently. Every later LS chunk lands an `ls-ci`-style
+scenario here.
 
 ### LS-3 — Essential coreutils (adopt from the aux branch)
 
@@ -209,7 +234,7 @@ surface; mostly v1.x.
 ## Sequencing + the MVP line
 
 ```
-LS-1 [done] ─► LS-2 ─► LS-CI ─► LS-3a ─► LS-4 ─► LS-5    ◄── MVP: usable shell
+LS-1 [done] ─► LS-2 [done] ─► LS-CI [done] ─► LS-3a ─► LS-4 ─► LS-5    ◄── MVP: usable shell
                                   │
                                   ├─► LS-3b ─► LS-6 ─► LS-3c ─► LS-7 ─► LS-K   ◄── breadth
                                   │

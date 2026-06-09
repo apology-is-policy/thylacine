@@ -312,6 +312,28 @@ To test the static `mix64` from outside `kaslr.c`, we expose `kaslr_test_mix64` 
 
 ---
 
+## Interactive E2E harness (LS-CI) — host/PTY, distinct from the in-kernel harness above
+
+The harness above runs *inside* the kernel at boot. It structurally cannot exercise the **interactive console**: CI feeds QEMU a piped stdin, which hits EOF and closes the `mon:stdio` chardev, so no keystroke is ever delivered. That blind spot let two interactive regressions ship silently — LS-1 (the UART was never master-enabled for RX) and LS-2 (external command stdout/stderr were dropped). **LS-CI** closes it: a host-side `expect`/PTY harness that drives a *real* terminal into the live console.
+
+Layout (added by LS-CI, closes #945):
+
+- `tools/test-interactive.sh` — the wrapper. Optional gate: SKIPs (exit 0) if `expect` is absent. Builds the kernel/ramfs/pool if missing, then runs each `tools/interactive/*.exp` scenario (or one named on the CLI). `make test-interactive`.
+- `tools/interactive/lib.exp` — the reusable helper library: `lc_boot` (spawn the VM), `lc_login user pass`, `lc_send line`, `lc_expect pat phase`, `lc_run_expect cmd expected`, `lc_quit`, plus `lc_step`/`lc_pass`/`lc_fail`.
+- `tools/interactive/ls-ci.exp` — the headline scenario: login as `michael` (proves LS-1 — reaching the shell banner means every keystroke was received), then assert LS-2 three ways: `echo` stdout (`exec_external`), `echo | tr a-z A-Z` upper-cased stdout (`spawn_pipeline_elements`), `cat /missing` -> `cat:` stderr.
+
+**Three portability facts are load-bearing** (encoded in `lib.exp` + the wrapper; honor them in every new scenario):
+
+1. **Run `expect` under `script(1)`.** macOS expect 5.45 corrupts its own std channels inside `spawn` when its stdout is not a tty (a `>file` redirect OR a pipe) — it aborts with `Tcl_RegisterChannel: duplicate channel names` (SIGABRT) or breaks `puts` with `bad file number`. The wrapper runs `script -q "$transcript" expect -f "$scen" < /dev/null`, which gives expect a controlling PTY, captures the session to the transcript, and propagates the exit code.
+2. **`global spawn_id` in any proc that `spawn`s.** `spawn` writes `spawn_id` in the *current* scope; without the `global` declaration in `lc_boot`, the spawn is proc-local and every later proc's `expect`/`send` finds no open spawn and reports a spurious immediate EOF.
+3. **Match command OUTPUT, never typed input.** The `ut` line editor redraws the prompt on every keystroke via cursor positioning (`ESC[K` + the colored `/ ⊢ ` + a cursor-forward) and does NOT emit the typed line as plain contiguous bytes. So the typed command is unmatchable; only the command's output (clean text on its own line after Enter) is. Prefer an output token that cannot appear in the typed line anyway — a `tr a-z A-Z` upper-cased token, or a `cat:` stderr prefix.
+
+**Determinism + host timing.** The kernel is stable at idle: a no-input boot survives indefinitely (verified — a 75 s idle boot stays at the login prompt). So an unexpected qemu exit *before* a terminal PASS/FAIL is a host-timing artifact — the TCG-under-oversubscription flake class (e.g. a heavy concurrent host process competing with the 4-vCPU TCG guest), never a kernel fault. The wrapper therefore retries each scenario up to `LS_CI_ATTEMPTS` (default 3); a scenario fails only if ALL attempts fail. A real regression fails every attempt deterministically (the asserted output is missing each time), so the retry tolerates flakes without masking a break. Default accel is `THYLACINE_ACCEL=tcg` (portable; matches the LS-1/LS-2 proofs); `hvf` is the fast local override. Env: `LS_CI_BOOT_TIMEOUT` (default 180), `LS_CI_CMD_TIMEOUT` (default 30), `LS_CI_ATTEMPTS` (default 3).
+
+Not audit-bearing (host test tooling; no kernel surface). Binding design: `docs/LIFE-SUPPORT.md` "LS-CI".
+
+---
+
 ## See also
 
 - `docs/reference/00-overview.md` — system-wide layer cake.

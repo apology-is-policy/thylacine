@@ -4,7 +4,7 @@
 # Per ARCHITECTURE.md §3: real build system is CMake (kernel) + Cargo (Rust).
 # This Makefile is just for muscle memory (`make kernel`, `make test`, etc.).
 
-.PHONY: all kernel sysroot userspace disk pool clean test test-tcg test-cross-reboot smp-gate run run-tcg gdb specs help
+.PHONY: all kernel sysroot userspace disk pool clean test test-tcg test-cross-reboot test-interactive smp-gate run run-tcg gdb specs help
 
 all:
 	@tools/build.sh all
@@ -38,6 +38,12 @@ test-tcg:
 test-cross-reboot:
 	@tools/test-cross-reboot.sh
 
+# Interactive E2E regression net (LS-CI): drive a real PTY into the console via
+# `expect`, log in, assert rendered output. Optional gate -- SKIPs without
+# `expect`. THYLACINE_ACCEL=tcg by default (deterministic compat run).
+test-interactive:
+	@tools/test-interactive.sh
+
 smp-gate:
 	@tools/ci-smp-gate.sh
 
@@ -65,6 +71,8 @@ help:
 	@echo "  test       — run-vm + boot-banner verify (HVF on a capable host; W3.5)"
 	@echo "  test-tcg   — same, forced to full-emulation TCG (-cpu max + GICv3) compat run"
 	@echo "  test-cross-reboot — A-1b corvus persistence: boot twice on one pool"
+	@echo "  test-interactive — LS-CI: expect/PTY interactive E2E (login + see output);"
+	@echo "               optional gate, SKIPs without 'expect'. THYLACINE_ACCEL=tcg default."
 	@echo "  smp-gate   — SMP soundness CI gate: multi-boot the smp4/smp8 x default/UBSan"
 	@echo "               matrix N>=10 (single boots lie). SMP_GATE_N / SMP_GATE_CONFIGS env."
 	@echo "  run        — launch a dev VM (interactive UART)"

@@ -1,0 +1,150 @@
+# tools/interactive/lib.exp -- reusable expect helpers for the LS-CI
+# interactive regression net (docs/LIFE-SUPPORT.md, "LS-CI"). Sourced by the
+# tools/interactive/*.exp scenarios; the scenarios stay short + declarative.
+#
+# This drives a REAL PTY into QEMU's `-serial mon:stdio` console -- the ONLY
+# way to inject console keystrokes. A piped stdin hits EOF and closes the
+# chardev, which is exactly why CI never exercised the interactive path and
+# why LS-1 (UART RX master-disabled) and LS-2 (external output dropped) both
+# shipped silently. This harness is the standing guard against that class.
+#
+# Echo discipline (the central gotcha, ground-truthed against the real console):
+# the ut line editor REDRAWS THE PROMPT on every keystroke (`ESC[K` + the colored
+# `/ ⊢ ` + a cursor-forward), and renders the typed text via terminal screen
+# state -- it does NOT emit the typed line as plain contiguous bytes. So the
+# typed command CANNOT be matched from the byte stream; only the command's
+# OUTPUT, which prints as clean plain text on its own line after Enter, is
+# matchable. Every matcher here therefore asserts on OUTPUT only. To stay robust
+# even if the editor ever changes to echo input verbatim, prefer an output token
+# that cannot appear in the typed line anyway -- a `tr a-z A-Z` upper-cased token,
+# or a `cat: ` stderr prefix.
+#
+# Env knobs (set by tools/test-interactive.sh):
+#   LS_CI_BOOT_TIMEOUT  seconds to reach the shell after spawn (default 180)
+#   LS_CI_CMD_TIMEOUT   seconds for a single command's output (default 30)
+#   LS_CI_STEPS         flush-immune step-marker file (optional)
+#   THYLACINE_ACCEL     hvf|tcg (forwarded to run-vm.sh; default tcg here)
+#
+# The full session transcript is captured by the wrapper redirecting expect's
+# stdout to a file (log_user stays on). We deliberately do NOT use expect's
+# `log_file FILENAME` -- it aborts on macOS expect 5.45 with "Tcl_RegisterChannel:
+# duplicate channel names" (the opened log channel collides with the spawn pty).
+
+# Pure-Tcl repo-root derivation -- NO `exec` (an exec before spawn is one of
+# several macOS expect 5.45 footguns; this file lives at tools/interactive/).
+set ::lc_repo [file normalize [file join [file dirname [info script]] .. ..]]
+set ::lc_boot_timeout [expr {[info exists ::env(LS_CI_BOOT_TIMEOUT)] ? $::env(LS_CI_BOOT_TIMEOUT) : 180}]
+set ::lc_cmd_timeout  [expr {[info exists ::env(LS_CI_CMD_TIMEOUT)]  ? $::env(LS_CI_CMD_TIMEOUT)  : 30}]
+
+# Flush-immune progress marker: open/puts/close flushes on close, so the file
+# is current even though expect's own stdout is block-buffered.
+proc lc_step {msg} {
+    if {[info exists ::env(LS_CI_STEPS)]} {
+        catch {
+            set fh [open $::env(LS_CI_STEPS) a]
+            puts $fh $msg
+            close $fh
+        }
+    }
+}
+
+proc lc_fail {msg} {
+    lc_step "FAIL: $msg"
+    send_user "\nLS-CI FAIL: $msg\n"
+    exit 1
+}
+
+proc lc_pass {msg} {
+    lc_step "PASS: $msg"
+    send_user "\nLS-CI PASS: $msg\n"
+}
+
+# Spawn the VM via the canonical launcher. log_user stays on (default) so the
+# wrapper's stdout redirect captures the full boot+session as the transcript;
+# the steps file is the flush-immune live view.
+proc lc_boot {} {
+    # `global spawn_id` is load-bearing: `spawn` writes spawn_id in the CURRENT
+    # scope, so without this the spawn would be local to lc_boot and every later
+    # proc's expect/send would find no open spawn (instant spurious EOF).
+    global lc_repo lc_boot_timeout timeout spawn_id
+    set accel [expr {[info exists ::env(THYLACINE_ACCEL)] ? $::env(THYLACINE_ACCEL) : "tcg"}]
+    set timeout $lc_boot_timeout
+    lc_step "BOOT spawn accel=$accel timeout=${lc_boot_timeout}s"
+    spawn env THYLACINE_ACCEL=$accel $lc_repo/tools/run-vm.sh
+}
+
+# Wait for an EXACT string, with extinction / timeout / eof as hard failures.
+# `phase` is a label for the failure message. Uses the command timeout.
+proc lc_expect {pat phase} {
+    global lc_cmd_timeout timeout
+    set timeout $lc_cmd_timeout
+    expect {
+        -ex $pat        { lc_step "saw: $phase" }
+        -re {EXTINCTION:} { lc_fail "kernel extinction during '$phase'" }
+        timeout         { lc_fail "timeout (${lc_cmd_timeout}s) waiting for \[$pat\] during '$phase'" }
+        eof             { lc_fail "unexpected EOF during '$phase'" }
+    }
+}
+
+# Type a command line + Enter (CR -- a raw terminal sends CR; LS-1 made login +
+# the editor accept it).
+proc lc_send {line} {
+    lc_step "send: $line"
+    send "$line\r"
+}
+
+# Run `cmd` and assert its OUTPUT contains `expected` (exact). The editor does
+# not emit typed input as plain text (see "Echo discipline" above), so we match
+# the OUTPUT directly -- no echo-consume step. Choose `expected` so it cannot
+# appear in the typed line (e.g. a value the command computes, not echoes).
+proc lc_run_expect {cmd expected} {
+    lc_send $cmd
+    lc_expect $expected "output-of: $cmd"
+}
+
+# Log in over the console. Reaching the shell banner proves the kernel received
+# every keystroke (the LS-1 regression) and that login authenticated.
+proc lc_login {user pass} {
+    global lc_boot_timeout timeout
+    set timeout $lc_boot_timeout
+    expect {
+        -ex "Thylacine login: " { lc_step "login prompt" }
+        -re {EXTINCTION:}       { lc_fail "extinction before login prompt" }
+        timeout                 { lc_fail "no login prompt within ${lc_boot_timeout}s" }
+        eof                     { lc_fail "qemu exited before login prompt" }
+    }
+    lc_step "send user: $user"
+    send "$user\r"
+    expect {
+        -ex "password: "  { lc_step "password prompt" }
+        -re {EXTINCTION:} { lc_fail "extinction at password prompt" }
+        timeout           { lc_fail "no password prompt (username not received?)" }
+        eof               { lc_fail "qemu exited at password prompt" }
+    }
+    lc_step "send password (masked)"
+    send "$pass\r"
+    expect {
+        -ex "Thylacine textual shell" { lc_step "shell up -- login OK (LS-1)" }
+        -ex "login incorrect"         { lc_fail "auth rejected for $user" }
+        -re {EXTINCTION:}             { lc_fail "extinction during login/provision" }
+        timeout                       { lc_fail "shell never came up after auth (login/provision stall?)" }
+        eof                           { lc_fail "qemu exited during login" }
+    }
+    # Let the first prompt settle before driving commands.
+    sleep 1
+}
+
+# Clean shutdown: leave the shell, then quit qemu via the monitor escape
+# (Ctrl-A x). The wrapper reaps any lingering qemu regardless.
+proc lc_quit {} {
+    global lc_cmd_timeout timeout
+    set timeout $lc_cmd_timeout
+    lc_send "exit"
+    sleep 1
+    lc_step "quit qemu (Ctrl-A x)"
+    send "\001x"
+    expect {
+        eof     { lc_step "EOF clean" }
+        timeout { lc_step "EOF timeout (wrapper will reap qemu)" }
+    }
+}

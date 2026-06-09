@@ -1,0 +1,46 @@
+#!/usr/bin/expect -f
+# tools/interactive/ls-ci.exp -- the LS-CI headline regression net.
+#
+# Proves, over a real PTY, the two interactive gaps that shipped silently
+# because CI structurally could not drive a keyboard:
+#   LS-1  the kernel console RECEIVES keystrokes  -> reaching the shell banner
+#         requires login (username + password) to have been received char-for-
+#         char; if RX is dead (the LS-1 bug) we never get past the prompt.
+#   LS-2  external command OUTPUT reaches the console -> three independent,
+#         echo-ambiguity-proof assertions across both LS-2 code paths:
+#           (a) exec_external stdout : `echo` output (double-expect).
+#           (b) pipeline stdout      : `... | tr a-z A-Z` upper-cased token
+#                                      (appears ONLY in output).
+#           (c) exec_external stderr : `cat: /missing` (the `cat: ` prefix
+#                                      appears ONLY in stderr).
+# Pre-LS-2 all three were dropped by the U-6c "Piped-then-drop" convention.
+
+source [file join [file dirname [info script]] lib.exp]
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+
+# (a) exec_external stdout -- the headline LS-2 path.
+lc_run_expect "echo lsci-stdout-9421" "lsci-stdout-9421"
+lc_pass "LS-2(a): external stdout visible (exec_external)"
+
+# (b) pipeline stdout -- spawn_pipeline_elements. The upper-cased token cannot
+# appear in the editor's lower-case echo of the typed line, so a single exact
+# match is unambiguous.
+lc_send "echo lsci-pipe-low | tr a-z A-Z"
+lc_expect "LSCI-PIPE-LOW" "pipeline stdout"
+lc_pass "LS-2(b): pipeline stdout visible (spawn_pipeline_elements + tr)"
+
+# (c) exec_external stderr -- `cat` of a missing file prints `cat: <path>: ...`
+# to stderr. Match only the `cat:` prefix: it is stderr-only (the typed line is
+# `cat /...`, no colon) and contiguous at the line start. We do NOT require the
+# whole `cat: <path>` contiguously -- the line editor's per-keystroke prompt
+# redraw interleaves the byte stream, so longer spans aren't guaranteed
+# contiguous. (Verified: the session survives a missing-file cat.)
+lc_send "cat /lsci-no-such-file"
+lc_expect "cat:" "stderr"
+lc_pass "LS-2(c): external stderr visible (cat error)"
+
+lc_quit
+lc_pass "LS-CI ls-ci: login (LS-1) + stdout/pipeline/stderr (LS-2) all verified"
+exit 0
