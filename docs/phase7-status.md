@@ -152,9 +152,13 @@ external stdout/stderr inherit the console via `env.stdio_inherit`] -> LS-CI [do
 #945] -> LS-3a [done @`4edf665`; adopted `ls`/`stat`/`clear` (native libthyla-rs,
 from `usr/apps/{ls,stat}` + native `clear`) into `usr/coreutils/src/bin/`, wired
 `tools/build.sh` + the cpio + LS-CI `ls-3a.exp`; `ls`/`stat`/`clear` verified
-(`ls /var`->lib, `stat /thylacine-version`, `clear`). KNOWN GAP: `ls /` (pivot
-root) lists nothing -> #955, a pre-existing kernel<->Stratum readdir-of-
-namespace-root bug (subdir readdir works), depth-first NEXT] -> LS-3b/c (fs-mut +
+(`ls /var`->lib, `ls /`->thylacine-version, `stat /thylacine-version`, `clear`).
+#955 FIXED in the same close: `ls` was the first consumer to readdir the pivot
+ROOT in a paginating loop, surfacing a kernel readdir-cookie sign-truncation
+(Stratum cookies > INT64_MAX wrapped negative in the s64 Spoor.offset; dev9p
+clamped to 0 -> re-fetched batch 0 forever). Fixed (opaque-u64 cookie + a
+non-advancing-cursor EOD guard) + a regression test + the `ls /` LS-CI
+assertion] -> LS-3b/c (fs-mut +
 misc coreutils) -> LS-4 (relative paths) -> LS-5 (Ctrl-C) form the MVP; then LS-6/7/K (login
 UX, a minimal editor, id/whoami/date) for breadth and LS-8 (U-PTY: pollable cons +
 termios + async) for depth. Tasks #944-#953. Supersedes the loose U-9..N / U-PTY

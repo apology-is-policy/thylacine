@@ -50,6 +50,15 @@ static u32 g_setattr_valid, g_setattr_mode, g_setattr_uid, g_setattr_gid;
 static u32 le32_at(const u8 *p) {
     return (u32)p[0] | ((u32)p[1] << 8) | ((u32)p[2] << 16) | ((u32)p[3] << 24);
 }
+static u64 le64_at(const u8 *p) {
+    u64 v = 0;
+    for (int i = 0; i < 8; i++) v |= (u64)p[i] << (8 * i);
+    return v;
+}
+// #955: capture the Treaddir request's `offset` (the opaque resume cookie) so a
+// test can assert dev9p_readdir forwards a high-bit (>INT64_MAX) cookie verbatim
+// rather than sign-clamping it to 0.
+static u64 g_readdir_req_offset;
 
 // Canonical responder — synthesizes valid Rmsgs for every op type
 // dev9p might issue. Mirrors the responder used in test_9p_client.c
@@ -193,6 +202,9 @@ static int dev9p_responder(void *ctx, const u8 *req, size_t req_len,
         return (int)P9_HDR_LEN;
     }
     if (type == P9_TREADDIR) {
+        // Capture the request offset (Treaddir body: fid@7, offset@11, count@19).
+        if (req_len >= P9_HDR_LEN + 4 + 8 + 4)
+            g_readdir_req_offset = le64_at(req + 11);
         // Rreaddir = count(4 LE) + data. One dirent "foo":
         //   qid(13) + offset(8 LE, cookie=1) + dtype(1) + name_len(2 LE=3) + "foo"
         // = 27 bytes.
@@ -527,6 +539,28 @@ void test_dev9p_readdir(void) {
     TEST_EXPECT_EQ((u64)buf[22], (u64)3, "dirent name_len == 3");
     TEST_ASSERT(buf[24] == 'f' && buf[25] == 'o' && buf[26] == 'o',
                 "dirent name is 'foo'");
+    teardown(root);
+}
+
+// #955 regression: the Treaddir `offset` is an OPAQUE resume cookie. Stratum's
+// cookies for real dirents are hash-derived u64 values that routinely exceed
+// INT64_MAX (bit 63 set); the kernel carries the cookie through the s64
+// Spoor.offset, so dev9p_readdir MUST reinterpret the bits straight back to u64
+// rather than sign-clamping a "negative" value to 0. Pre-fix, the clamp restarted
+// enumeration at 0 -> a paginating reader re-fetched the first batch forever.
+void test_dev9p_readdir_cookie_high_bit(void) {
+    struct Spoor *root = make_open_client_and_root();
+    TEST_ASSERT(root != NULL, "root");
+
+    u8 buf[128];
+    // A cookie with bit 63 set: as an s64 this is negative; the pre-fix clamp
+    // would forward 0 on the wire instead.
+    s64 hi_cookie = (s64)0xC123456789ABCDEFULL;
+    g_readdir_req_offset = 0xdeadbeefu;   // sentinel; the responder overwrites it
+    long got = dev9p.readdir(root, buf, (long)sizeof(buf), hi_cookie);
+    TEST_EXPECT_EQ((u64)got, (u64)27, "readdir still returns the dirent run");
+    TEST_EXPECT_EQ(g_readdir_req_offset, 0xC123456789ABCDEFULL,
+                   "dev9p_readdir forwards the high-bit cookie verbatim (no sign-clamp)");
     teardown(root);
 }
 

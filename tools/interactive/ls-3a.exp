@@ -12,10 +12,10 @@
 #          the shell survived (clear's own output is escape codes, unmatchable
 #          cleanly, so we assert liveness-after).
 #
-# KNOWN GAP (#955): `ls /` (the pivot ROOT itself) currently lists nothing --
-# a pre-existing kernel<->Stratum readdir-of-the-namespace-root bug, NOT an ls
-# bug (ls is correct: `ls /var`, `ls /home` enumerate fine). When #955 lands,
-# add an `ls /` assertion here.
+# `ls /` (the pivot ROOT) enumerates too -- guards the #955 regression: a
+# Stratum dirent resume-cookie > INT64_MAX wrapped negative in the kernel's s64
+# readdir cursor and dev9p clamped it to 0, so a paginating reader re-fetched
+# offset 0 forever (the root showed nothing / hung). Asserted below.
 #
 # Honors the three LS-CI portability facts (see lib.exp): run under script(1)
 # (the wrapper), global spawn_id (lc_boot), match OUTPUT not typed input.
@@ -30,6 +30,13 @@ lc_login michael correct-horse-battery-staple-v1
 lc_send "ls /var"
 lc_expect "lib" "ls /var output"
 lc_pass "LS-3a(a): ls enumerates a directory (ls /var -> lib)"
+
+# ls the pivot ROOT itself (#955 regression): /thylacine-version is the stable
+# host-baked root sentinel. Pre-fix this spun re-fetching offset 0 and rendered
+# nothing; post-fix the cookie advances to EOD and the entry appears.
+lc_send "ls /"
+lc_expect "thylacine-version" "ls / output (#955 root readdir cookie)"
+lc_pass "LS-3a(a2): ls enumerates the pivot root (ls / -> thylacine-version)"
 
 # stat the host-baked root sentinel (world-readable: cat reads it). "regular
 # file" is stat's type line.

@@ -616,6 +616,7 @@ void test_dev9p_create_file(void);
 void test_dev9p_create_dir(void);
 void test_dev9p_fsync(void);
 void test_dev9p_readdir(void);
+void test_dev9p_readdir_cookie_high_bit(void);
 void test_dev9p_rename(void);
 void test_dev9p_unlink(void);
 void test_dev9p_stat_native_maps_getattr(void);
@@ -1632,6 +1633,7 @@ struct test_case g_tests[] = {
     { "dev9p.create_dir",              test_dev9p_create_dir,              false, NULL },
     { "dev9p.fsync",                   test_dev9p_fsync,                   false, NULL },
     { "dev9p.readdir",                 test_dev9p_readdir,                 false, NULL },
+    { "dev9p.readdir_cookie_high_bit", test_dev9p_readdir_cookie_high_bit, false, NULL },
     { "dev9p.rename",                  test_dev9p_rename,                  false, NULL },
     { "dev9p.unlink",                  test_dev9p_unlink,                  false, NULL },
     { "dev9p.stat_native_maps_getattr",

@@ -1910,6 +1910,7 @@ static s64 sys_readdir_handler(u64 fd_raw, u64 buf_va, u64 buf_len_raw) {
     if (!c->dev || !c->dev->readdir)               { spoor_clunk(c); return -1; }
 
     u8 scratch[SYS_RW_MAX];
+    u64 in_cookie = (u64)c->offset;   // the opaque resume cookie we ask to resume FROM
     long got = c->dev->readdir(c, scratch, (long)buf_len_raw, c->offset);
     if (got < 0)                                   { spoor_clunk(c); return -1; }
     if (got == 0)                                  { spoor_clunk(c); return 0; }   // EOD
@@ -1934,6 +1935,26 @@ static s64 sys_readdir_handler(u64 fd_raw, u64 buf_va, u64 buf_len_raw) {
         pos += entry;
     }
     if (!advanced)                                 { spoor_clunk(c); return -1; }   // malformed run
+
+    // Defense-in-depth (#955): a non-empty run whose last cookie == the cookie
+    // we resumed from means the cursor did not advance -- a paginating reader
+    // would re-fetch this same batch forever. Those entries were already
+    // delivered by the call that produced this cursor, so report EOD instead of
+    // re-delivering + spinning. The primary #955 fix (opaque-u64 cookie
+    // round-trip in dev9p_readdir) keeps a correct server from reaching here;
+    // this bounds a buggy/hostile one (the v1.x untrusted-server posture).
+    //
+    // CONTRACT (load-bearing): this never truncates a real listing ONLY because
+    // a correct server's per-entry cookie is STRICTLY MONOTONIC across a resumed
+    // enumeration -- the first entry of any non-empty resume batch has a cookie
+    // > in_cookie. Stratum satisfies this (unique per-entry cookies, sorted
+    // ascending, strict-`<` resume filter); devramfs satisfies it (1-based
+    // ordinals). The `in_cookie != 0` carve-out keeps the FIRST call (offset 0,
+    // never-yet-advanced) always delivering -- no on-wire cookie is ever 0
+    // (Stratum + devramfs both start at 1). A server that re-emits the resume
+    // entry with an EQUAL cookie would have its listing truncated here -- that
+    // is the untrusted-server seam, not a correct-server case.
+    if (last_cookie == in_cookie && in_cookie != 0) { spoor_clunk(c); return 0; }
 
     // Copy the dirent bytes to user-VA FIRST, THEN advance the Spoor offset
     // (F3 audit). If a uaccess store faults, we return -1 with the offset

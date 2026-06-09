@@ -495,7 +495,15 @@ static long dev9p_readdir(struct Spoor *c, void *buf, long n, s64 off) {
     if (!p) return -1;
     if (n <= 0) return 0;
     u32 count = (n > 0x7fffffffL) ? 0x7fffffffu : (u32)n;
-    u64 offset = (off < 0) ? 0 : (u64)off;
+    // The Treaddir `offset` is an OPAQUE resume cookie, not a byte position:
+    // Stratum derives it from an entry hash, so real dirents routinely exceed
+    // INT64_MAX (bit 63 set). The Spoor's s64 `offset` carries the cookie
+    // through the sign bit; reinterpret the bits straight back to u64. Do NOT
+    // clamp a "negative" cookie to 0 -- that restarts enumeration and a
+    // paginating reader (ls) re-fetches the first batch forever (#955). Byte
+    // Devs (dev9p_read/write) keep their non-negative clamp; a dir cursor is
+    // not a byte offset.
+    u64 offset = (u64)off;
     u32 got = 0;
     int rc = p9_client_readdir(p->client, p->fid, offset, count, (u8 *)buf, &got);
     if (rc != 0) return -1;

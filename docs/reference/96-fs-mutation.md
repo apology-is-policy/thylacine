@@ -104,6 +104,16 @@ byte position, so the handler parses the returned run for the last entry's
 cookie and stores THAT in the Spoor offset (mirrors Linux v9fs). A NULL
 `.readdir` slot -> -1.
 
+The cookie is an **opaque u64** carried through the SIGNED `s64 Spoor.offset`
+field: Stratum derives cookies from an entry hash, so real dirents routinely
+exceed `INT64_MAX` (bit 63 set). `dev9p_readdir` therefore reinterprets the
+stored bits straight back to `u64` (`(u64)off`) and does **not** apply the
+`(off < 0) ? 0` clamp that the byte-offset Devs (`dev9p_read`/`_write`) use --
+clamping a high-bit cookie to 0 restarts enumeration and a paginating reader
+re-fetches batch 0 forever (#955). The handler also reports EOD if a non-empty
+run's last cookie equals the resume cookie (a non-advancing cursor would
+otherwise spin a reader) -- defense-in-depth against a buggy/hostile server.
+
 Two new `Dev` vtable slots (NULL-permitted, like `.poll` / `.stat_native`):
 `int (*fsync)(c, datasync)` and `long (*readdir)(c, buf, n, off)`. `dev9p`
 (Stratum) and, since U-6e-b-1, `devramfs` (flat-root enumeration) set a real
@@ -270,6 +280,10 @@ equality.
   datasync) returns 0.
 - `kernel/test/test_dev9p.c::test_dev9p_readdir` — `dev9p_readdir` -> `Treaddir`
   returns the responder's 27-byte dirent ("foo"); asserts the dirent layout.
+- `kernel/test/test_dev9p.c::test_dev9p_readdir_cookie_high_bit` (#955 regression)
+  — drives `dev9p_readdir` with a resume cookie that has bit 63 set (negative as
+  `s64`) and asserts the responder saw the cookie **verbatim** on the wire (not
+  sign-clamped to 0). Fails on the pre-fix `(off < 0) ? 0` clamp.
 - The loopback responder (`dev9p_responder`) gained `Tlcreate` / `Tmkdir` /
   `Tfsync` / `Treaddir` cases.
 - **joey end-to-end probe** (`usr/joey/joey.c`, post-pivot) — against the REAL
@@ -303,6 +317,13 @@ equality.
   `OREAD` on the new directory (you `readdir` it; you never write it).
 - **A failed directory create can leave the directory on disk** with no fd (if
   the post-`Tmkdir` walk/open fails). Benign partial-success; the caller sees -1.
+- **Readdir cookies are opaque u64; never sign-clamp them** (#955). The Spoor's
+  `offset` field is `s64` and shared with byte I/O, but for a directory it holds
+  a resume cookie that may have bit 63 set -- reinterpret, don't clamp. The
+  non-advancing-cursor EOD guard bounds a *stuck* cursor, but a hostile/buggy
+  server with an unbounded synthetic directory (cookies that strictly advance
+  forever, never reaching EOD) can still spin a reader. At v1.0 stratumd is
+  trusted; a bounded-readdir posture for untrusted servers is a v1.x seam.
 - **`SYS_RENAME` / `SYS_UNLINK` deliberately do NOT clone-walk** (unlike
   `SYS_WALK_CREATE`). `Trenameat` / `Tunlinkat` act on the dirfid by name and
   never transition it, so the direct form is both simpler and correct — and it

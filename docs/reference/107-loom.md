@@ -1166,6 +1166,17 @@ rolled back via `spoor_clunk`); a user-VA fault reading the fd array.
 
 ## Known caveats / footguns
 
+- **Loom `READDIR` cursors are caller-managed and unguarded.** `loom_build_readdir`
+  passes the SQE `offset` (a `u64` the userspace client owns) straight to
+  `p9_session_send_readdir` -- it never transits the `s64 Spoor.offset` nor
+  `dev9p_readdir`, so it is immune to the #955 sign-clamp bug AND not covered by
+  the `SYS_READDIR` handler's anti-spin guard (the non-advancing-cursor EOD
+  check). In the io_uring-shaped model the client feeds back the resume cookie
+  itself; a client that mishandles the cookie (re-submits a stale or
+  non-advancing offset) re-fetches a batch -- that is the client's bug, bounded
+  to its own ring. Drive Loom readdir with the `offset` from the last CQE's
+  returned cookie, exactly as the synchronous `SYS_READDIR` path advances
+  `c->offset` internally.
 - **LINK/DRAIN concurrency contract (Loom-5b; audit F4).** The chain scheduler
   assumes *effectively one admitter per ring* — the SQPOLL kthread is the sole
   admitter on an SQPOLL ring, and a non-SQPOLL ring follows the io_uring
