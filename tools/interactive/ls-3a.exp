@@ -1,0 +1,47 @@
+#!/usr/bin/expect -f
+# tools/interactive/ls-3a.exp -- the LS-3a navigate+inspect coreutils.
+#
+# Proves, over a real PTY, that the three coreutils adopted in LS-3a resolve
+# from the session shell and produce correct output:
+#   ls     enumerate a populated directory: `ls /var` -> `lib` (host-baked
+#          /var/lib/corvus chain). This fully exercises ls (readdir + sort +
+#          output) on the live Stratum pivot FS.
+#   stat   `stat /thylacine-version` reports metadata for the host-baked root
+#          sentinel; asserts the type line "regular file".
+#   clear  runs the ANSI screen-clear without error; a follow-up echo proves
+#          the shell survived (clear's own output is escape codes, unmatchable
+#          cleanly, so we assert liveness-after).
+#
+# KNOWN GAP (#955): `ls /` (the pivot ROOT itself) currently lists nothing --
+# a pre-existing kernel<->Stratum readdir-of-the-namespace-root bug, NOT an ls
+# bug (ls is correct: `ls /var`, `ls /home` enumerate fine). When #955 lands,
+# add an `ls /` assertion here.
+#
+# Honors the three LS-CI portability facts (see lib.exp): run under script(1)
+# (the wrapper), global spawn_id (lc_boot), match OUTPUT not typed input.
+
+source [file join [file dirname [info script]] lib.exp]
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+
+# ls a populated directory -- readdir + sort + output, end to end. /var is
+# host-baked (the corvus dir chain), so `lib` is a stable, distinctive entry.
+lc_send "ls /var"
+lc_expect "lib" "ls /var output"
+lc_pass "LS-3a(a): ls enumerates a directory (ls /var -> lib)"
+
+# stat the host-baked root sentinel (world-readable: cat reads it). "regular
+# file" is stat's type line.
+lc_send "stat /thylacine-version"
+lc_expect "regular file" "stat output"
+lc_pass "LS-3a(b): stat reports file metadata"
+
+# clear runs (ANSI), then the shell must still execute commands.
+lc_send "clear"
+lc_run_expect "echo ls3a-screen-ok-9461" "ls3a-screen-ok-9461"
+lc_pass "LS-3a(c): clear runs; shell alive afterwards"
+
+lc_quit
+lc_pass "LS-CI ls-3a: ls + stat + clear all verified"
+exit 0

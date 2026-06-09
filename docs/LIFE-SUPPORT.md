@@ -37,7 +37,7 @@ What is **missing or broken** for real human use (the LS arc):
 |---|---|---|
 | ~~External command stdout is **dropped** (`Stdio::Piped`-then-drop)~~ stdout/stderr inherit the console (`env.stdio_inherit`) -- DONE | `echo`/`cat`/`grep`/coreutils output is now **visible** | **LS-2 [done]** |
 | ~~No interactive regression net~~ `tools/test-interactive.sh` (expect/PTY) logs in + asserts output -- DONE | the LS-1/LS-2 class is now regression-tested from a real keyboard | **LS-CI [done]** |
-| No `ls`/`stat`/`clear` | can't list a directory or inspect a file | **LS-3a** |
+| ~~No `ls`/`stat`/`clear`~~ adopted from the aux branch (native libthyla-rs) -- DONE | can list a directory (`ls /var`) + inspect a file (`stat`) + clear the screen. (`ls /` itself is empty pending #955 -- a pre-existing kernel<->Stratum readdir-of-namespace-root bug, NOT an ls bug) | **LS-3a [done]** |
 | No `mkdir`/`rm`/`cp`/`mv`/`touch`/`tee` | can't create/delete/copy/move files by command | **LS-3b** |
 | Relative paths don't resolve for externals (no per-Proc cwd; G07) | `cat foo.txt` from a cwd fails; only absolute paths work | **LS-4** |
 | Interactive Ctrl-C unverified | unknown whether Ctrl-C interrupts a runaway command | **LS-5** |
@@ -140,7 +140,7 @@ wire `tools/build.sh usr_rs_bins` + the cpio. Their deps already exist
 (`fs::read_dir`, `SYS_WALK_CREATE`, `SYS_UNLINK`, `SYS_RENAME`, `SYS_FSTAT`).
 Closes most of #925. Split:
 
-- **LS-3a — navigate + inspect**: `ls` (the headline; uses `fs::read_dir`), `stat` (uses `t_fstat`), `clear` (ANSI). Verify `cat`/`head`/`tail`/`wc` against real files.
+- **LS-3a — navigate + inspect [done]**: `ls` (uses `fs::read_dir`), `stat` (uses `t_fstat`), `clear` (ANSI), adopted from `usr/apps/{ls,stat}` (aux branch) onto the libthyla-rs surface; `clear` authored native. Built into the cpio + LS-CI `ls-3a.exp` (`ls /var`->lib, `stat /thylacine-version`->regular file, `clear`+alive). **`ls /` (the pivot ROOT) lists nothing -> #955**: a pre-existing kernel<->Stratum readdir-of-the-namespace-root bug (subdir readdir works -- `ls /var`/`ls /home` enumerate; the attach-root fid's readdir returns clean-EOD). `ls` is the first consumer to ever readdir `/`. NOT an ls defect; tracked as #955 (depth-first next). `cat`/`head`/`tail`/`wc` already verified against real files (coreutil-smoke).
 - **LS-3b — fs-mutation**: `mkdir`, `rmdir`, `rm`, `touch`, `cp`, `mv`, `tee`.
 - **LS-3c — misc**: `sleep`, `hexdump`, `cmp`, `yes`, `realpath` (lexical), `which`, `env` (degenerate, no envp yet), `uname` (static).
 
@@ -234,7 +234,7 @@ surface; mostly v1.x.
 ## Sequencing + the MVP line
 
 ```
-LS-1 [done] ─► LS-2 [done] ─► LS-CI [done] ─► LS-3a ─► LS-4 ─► LS-5    ◄── MVP: usable shell
+LS-1 [done] ─► LS-2 [done] ─► LS-CI [done] ─► LS-3a [done] ─► LS-4 ─► LS-5    ◄── MVP: usable shell
                                   │
                                   ├─► LS-3b ─► LS-6 ─► LS-3c ─► LS-7 ─► LS-K   ◄── breadth
                                   │
