@@ -105,6 +105,16 @@ pub struct Env {
     /// NOT propagate as Return. The U-6g main loop sets this true;
     /// script execution sets it false.
     pub interactive: bool,
+    /// External-command stdout/stderr inherit the shell's fd 1/2 (LS-2).
+    /// True only when the shell holds a terminal-backed fd 1 (a session
+    /// `ut`, which login spawns with the console inherited as fd 0/1/2);
+    /// `ut::main` probes fd 1 and sets it. Default false: a fd-less
+    /// boot-check/test harness has no 0/1/2 to inherit, so externals keep
+    /// the U-6c `Stdio::Piped`-then-drop convention (Inherit would fail
+    /// their spawns). Read by `exec_external` / `exec_external_redirected`
+    /// / `spawn_pipeline_elements`. stdin stays Piped-drop regardless at
+    /// LS-2 -- interactive child stdin is LS-5/LS-8.
+    pub stdio_inherit: bool,
     /// Nesting depth of `try { ... }` blocks. While > 0, implicit-
     /// fail is suppressed regardless of `interactive` -- the
     /// enclosing try will pick up the failure via its post-body
@@ -168,6 +178,7 @@ impl Env {
             errstr: String::new(),
             cwd: "/".to_string(),
             interactive: false,
+            stdio_inherit: false,
             implicit_fail_suppressed: 0,
             trace_depth: 0,
             pending_exit: None,

@@ -513,6 +513,20 @@ pub fn stderr() -> Stderr {
     Stderr
 }
 
+/// Probe whether fd 1 (stdout) is a live, writable handle. A zero-length
+/// `SYS_WRITE` validates the handle without emitting bytes: the kernel
+/// checks the fd even for len 0 (POSIX "bad fd is EBADF regardless of
+/// len"), and `devcons_write` / pipe writes short-circuit n==0. Returns
+/// true iff fd 1 can be inherited by a spawned child -- the signal a shell
+/// uses to decide whether external commands inherit the console (visible
+/// output) or get the fd-less `Stdio::Piped`-then-drop convention. Cheaper
+/// + more universal than `fstat` (the console Dev has no `stat_native`).
+#[inline]
+pub fn stdout_is_live() -> bool {
+    let mut s = Stdout;
+    s.write(&[]).is_ok()
+}
+
 impl Read for Stdin {
     fn read(&mut self, buf: &mut [u8]) -> Result<usize> {
         // SAFETY: buf is a valid user-VA byte slice; fd 0 is read-only here.

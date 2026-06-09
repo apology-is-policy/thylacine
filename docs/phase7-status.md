@@ -145,8 +145,9 @@ kernel UART console **never received keystrokes** (LS-1, root-caused + fixed
 @`6e533d6`, closes #943). The full arc design — making Thylacine usable for
 standard human-driven workflows (log in, navigate, list, inspect, create/edit/
 delete files, search, pipe, interrupt, jobs) — is binding scripture at
-**`docs/LIFE-SUPPORT.md`**. Chunks LS-1 [done] -> LS-2 (see command output) ->
-LS-CI (the expect/PTY interactive regression net) -> LS-3 (adopt ls/mkdir/rm/
+**`docs/LIFE-SUPPORT.md`**. Chunks LS-1 [done @`6e533d6`] -> LS-2 [done; external
+stdout/stderr inherit the console via `env.stdio_inherit`] -> LS-CI (the
+expect/PTY interactive regression net) -> LS-3 (adopt ls/mkdir/rm/
 cp/mv/stat/... from the aux branch; closes most of #925) -> LS-4 (relative
 paths) -> LS-5 (Ctrl-C) form the MVP; then LS-6/7/K (login UX, a minimal editor,
 id/whoami/date) for breadth and LS-8 (U-PTY: pollable cons + termios + async)

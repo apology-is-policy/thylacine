@@ -35,7 +35,7 @@ What is **missing or broken** for real human use (the LS arc):
 
 | Gap | Effect on the human | Chunk |
 |---|---|---|
-| External command stdout is **dropped** (`Stdio::Piped`-then-drop) | `echo`/`cat`/`grep`/coreutils run but you **see no output** | **LS-2** |
+| ~~External command stdout is **dropped** (`Stdio::Piped`-then-drop)~~ stdout/stderr inherit the console (`env.stdio_inherit`) -- DONE | `echo`/`cat`/`grep`/coreutils output is now **visible** | **LS-2 [done]** |
 | No interactive regression net | the UARTEN bug shipped silently; no test drives a keyboard | **LS-CI** |
 | No `ls`/`stat`/`clear` | can't list a directory or inspect a file | **LS-3a** |
 | No `mkdir`/`rm`/`cp`/`mv`/`touch`/`tee` | can't create/delete/copy/move files by command | **LS-3b** |
@@ -65,7 +65,18 @@ never master-enabled, so QEMU received nothing); login's `read_line` accepts CR
 as well as LF (a raw terminal sends CR on Enter). Regression guard:
 `uart.rx_path_enabled`. Proven over a PTY. **Without LS-1 nothing below works.**
 
-### LS-2 — See command output (external stdio inherits the console)
+### LS-2 — See command output (external stdio inherits the console) [DONE @pending, closes #944]
+
+**As-built**: `Env::stdio_inherit` (default false), set by `ut::main` via
+`io::stdout_is_live()` (a zero-length `SYS_WRITE` to fd 1 -- the kernel validates
+the handle even for len 0; the design fork "has-tty flag vs fd-1 probe" collapsed
+to "the entry point probes once, threads a bool" -- the probe lives in `ut::main`,
+the flag on `Env`, so fd-less test harnesses default false). When true, the
+non-redirected stdout/stderr slots use `Stdio::Inherit` (the `out_stdio` helper) in
+`exec_external` / `exec_external_redirected` / `spawn_pipeline_elements`, plus
+`capture_external_pipeline`'s stderr. **stdin stays Piped-drop** at LS-2 (interactive
+child stdin is LS-5/LS-8). Proven via expect/PTY (`echo` output visible; `cat` error
+visible). The original design notes (below) record the fork that was resolved.
 
 **Userspace** (`usr/utopia/libutopia/src/eval/stmt.rs`). Today `exec_external` /
 `exec_external_redirected` / `exec_pipeline` set `Stdio::Piped` on the child's

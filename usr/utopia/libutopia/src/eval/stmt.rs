@@ -64,21 +64,25 @@
 // switch to fd 2. Quoting of args with embedded whitespace is a
 // v1.x refinement; bash's set -x style quoting is the target.
 //
-// === Stdio model at U-6c ===
+// === Stdio model (U-6c convention; LS-2 console inherit) ===
 //
-// The shell at v1.0 has no terminal-backed fd 0/1/2 (those will
-// land with U-PTY + U-6g; until then ut/u-test/joey all write via
-// SYS_PUTS direct to the kernel UART). Stdio::Inherit would tell
-// the kernel to install the parent's fd-0/1/2 into the child's
-// handle table, but the parent has none, and SYS_SPAWN_FULL_ARGV
-// would reject the spawn. Until PTY lands, exec_external uses the
-// established v1.0 convention (matches alloc-smoke + u-test's
-// flow_process_pipe): Stdio::Piped on all three slots followed by
-// an immediate drop of every parent-side pipe end. The child has
-// pipes installed at 0/1/2 (so the kernel's fd_count=3 path
-// succeeds), but native binaries write via SYS_PUTS and don't
-// read fd 0, so the pipes are functionally inert. When PTY lands,
-// this whole block flips to Stdio::Inherit cleanly.
+// A session `ut` DOES hold a terminal-backed fd 0/1/2 (login spawns it
+// with Stdio::Inherit over the SYS_CONSOLE_OPEN handle). LS-2 keys off
+// `env.stdio_inherit` (set by `ut::main` via an fd-1 liveness probe):
+//   - stdio_inherit == true: external stdout/stderr use Stdio::Inherit,
+//     so the kernel installs the shell's fd 1/2 into the child and its
+//     output reaches the terminal. See `out_stdio`.
+//   - stdio_inherit == false: the U-6c v1.0 convention (matches
+//     alloc-smoke + u-test's flow_process_pipe + every fd-less boot-check
+//     / test harness, which has no 0/1/2 to inherit -- Inherit would make
+//     SYS_SPAWN_FULL_ARGV reject the spawn): Stdio::Piped on the slot
+//     followed by an immediate drop of the parent-side pipe end. The
+//     child gets a (functionally inert) pipe; native binaries write via
+//     their fd 1 and don't read fd 0.
+// stdin stays Piped-drop in BOTH modes at LS-2 -- a foreground external
+// does not yet read the console (interactive child stdin is LS-5/LS-8);
+// the shell's wait loop owns fd 0. Command substitution ($(cmd)) keeps
+// its captured stdout Piped regardless (the shell reads it).
 //
 // === StatementFlow ===
 //
@@ -472,9 +476,28 @@ fn feed_pipe(f: &mut File, mut buf: &[u8]) {
     }
 }
 
+/// The stdout/stderr `Stdio` for a non-redirected slot (LS-2). When the
+/// shell holds a terminal-backed fd 1/2 (`env.stdio_inherit` -- a session
+/// `ut`, which login spawns with the console inherited as fd 0/1/2), the
+/// child inherits it so its output reaches the terminal. Otherwise the
+/// U-6c convention: `Stdio::Piped` then an immediate parent-side drop (a
+/// fd-less boot-check / test harness has no 0/1/2 to inherit, so Inherit
+/// would fail the spawn). The `drop(child.std*.take())` epilogues stay
+/// correct under Inherit -- `resolve_stdio(Inherit)` keeps no parent end,
+/// so the take() yields None and the drop is a no-op. stdin keeps
+/// Piped-drop either way at LS-2 (interactive child stdin is LS-5/LS-8).
+fn out_stdio(inherit: bool) -> Stdio {
+    if inherit {
+        Stdio::Inherit
+    } else {
+        Stdio::Piped
+    }
+}
+
 /// Spawn an external command with redirects applied. Non-redirected
-/// slots take the U-6c v1.0 convention (`Stdio::Piped` + immediate
-/// parent-side drop -- the shell has no terminal-backed fd 0/1/2 yet).
+/// stdout/stderr inherit the console when the shell holds one
+/// (`env.stdio_inherit`, LS-2); otherwise the U-6c `Stdio::Piped` +
+/// immediate parent-side drop. Non-redirected stdin is always Piped-drop.
 fn exec_external_redirected(
     env: &mut Env,
     argv: &[String],
@@ -516,10 +539,10 @@ fn exec_external_redirected(
             spawn_cmd.stdout(s);
         }
         None => {
-            spawn_cmd.stdout(Stdio::Piped);
+            spawn_cmd.stdout(out_stdio(env.stdio_inherit));
         }
     }
-    spawn_cmd.stderr(Stdio::Piped);
+    spawn_cmd.stderr(out_stdio(env.stdio_inherit));
 
     match spawn_cmd.spawn() {
         Ok(mut child) => {
@@ -790,11 +813,16 @@ fn spawn_pipeline_elements(env: &mut Env, p: &Pipeline) -> EvalResult<PipelineSp
                     spawn_cmd.stdout(Stdio::File(f));
                 }
                 None => {
-                    spawn_cmd.stdout(Stdio::Piped);
+                    // The last element's outer stdout: inherit the console
+                    // when the shell holds one (LS-2) so the pipeline's
+                    // result is visible; else the U-6c Piped-drop.
+                    spawn_cmd.stdout(out_stdio(env.stdio_inherit));
                 }
             },
         }
-        spawn_cmd.stderr(Stdio::Piped);
+        // Every element's stderr goes to the terminal (not the pipe), so it
+        // inherits the console under LS-2 -- a mid-pipeline error is visible.
+        spawn_cmd.stderr(out_stdio(env.stdio_inherit));
         if let Some(h) = redirs[i].heredoc.take() {
             heredoc_writes.push(h);
         }
@@ -1117,13 +1145,14 @@ fn exec_external(
     if argv.len() > 1 {
         spawn_cmd.args(argv[1..].iter().cloned());
     }
-    // v1.0 stdio convention: Piped + immediate drop. The shell has
-    // no terminal-backed 0/1/2 yet (see module-level note). When
-    // U-PTY + U-6g wire fd 0/1/2 to PTY-slave, drop these three
-    // setters and let the Stdio::Inherit defaults take over.
+    // stdout/stderr inherit the console when the shell holds one
+    // (env.stdio_inherit, LS-2) so output is visible; else the U-6c
+    // Piped + immediate-drop convention (a fd-less harness has nothing
+    // to inherit). stdin stays Piped-drop at LS-2 (interactive child
+    // stdin is LS-5/LS-8). See out_stdio + the module-level note.
     spawn_cmd.stdin(Stdio::Piped);
-    spawn_cmd.stdout(Stdio::Piped);
-    spawn_cmd.stderr(Stdio::Piped);
+    spawn_cmd.stdout(out_stdio(env.stdio_inherit));
+    spawn_cmd.stderr(out_stdio(env.stdio_inherit));
 
     match spawn_cmd.spawn() {
         Ok(mut child) => {
@@ -1508,10 +1537,11 @@ fn capture_external_pipeline(
     stdout_files[n - 1] = Some(cap_wr);
 
     // Spawn each element. Stdio::File ends are consumed into the child by
-    // spawn(); the outer stdin (element 0) + every stderr take the v1.0
-    // Piped+immediate-drop convention (the shell has no terminal-backed
-    // fd). A mid-pipeline spawn failure stops spawning; we still drain +
-    // reap what launched (their ends + the un-spawned ends drop at return).
+    // spawn(); the outer stdin (element 0) takes the v1.0 Piped+immediate-
+    // drop convention; stderr inherits the console under LS-2 (env.stdio_-
+    // inherit) so a failing substitution's error is visible, else Piped-drop.
+    // A mid-pipeline spawn failure stops spawning; we still drain + reap what
+    // launched (their ends + the un-spawned ends drop at return).
     let mut pids: Vec<i32> = Vec::with_capacity(n);
     let mut spawn_failed = false;
     for i in 0..n {
@@ -1533,10 +1563,16 @@ fn capture_external_pipeline(
                 spawn_cmd.stdout(Stdio::File(f));
             }
             None => {
+                // Unreachable: every element's stdout is a Some (an internal
+                // pipe, or the capture write end for the last) -- the captured
+                // stream is NEVER inherited. Kept Piped as a safe fallback.
                 spawn_cmd.stdout(Stdio::Piped);
             }
         }
-        spawn_cmd.stderr(Stdio::Piped);
+        // stderr is NOT captured ($(cmd) captures stdout only); it goes to the
+        // terminal, so it inherits the console under LS-2 (a failing
+        // substitution's error is visible) -- else the U-6c Piped-drop.
+        spawn_cmd.stderr(out_stdio(env.stdio_inherit));
         match spawn_cmd.spawn() {
             Ok(mut child) => {
                 drop(child.stdin.take());

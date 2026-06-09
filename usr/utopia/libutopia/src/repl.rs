@@ -81,6 +81,16 @@ impl Repl {
         }
     }
 
+    /// Set whether external commands inherit the shell's fd 1/2 (LS-2).
+    /// The session `ut` calls this with `io::stdout_is_live()` after
+    /// startup -- it holds the console (login spawned it with fd 0/1/2
+    /// inherited), so externals should write there (visible output). A
+    /// fd-less harness leaves it false (the default), keeping the
+    /// `Stdio::Piped`-then-drop convention.
+    pub fn set_stdio_inherit(&mut self, v: bool) {
+        self.env.stdio_inherit = v;
+    }
+
     /// Borrow the evaluator state (tests + callers that inspect `$status`).
     pub fn env(&self) -> &Env {
         &self.env

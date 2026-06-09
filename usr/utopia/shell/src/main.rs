@@ -76,6 +76,14 @@ pub extern "C" fn rs_main() -> i64 {
     print_banner();
 
     let mut repl = Repl::new();
+    // LS-2: a session `ut` holds the console as fd 0/1/2 (login spawned it
+    // with Stdio::Inherit), so external commands should inherit fd 1/2 -- their
+    // output then reaches the terminal. The probe (a zero-length write to fd 1)
+    // confirms a live writable stdout. A bare-spawned `ut` (the boot check) has
+    // no fd 1 -> the probe is false and externals keep the Piped-then-drop
+    // convention (and that `ut` exits before any spawn anyway: it breaks on the
+    // fd-0 read error below).
+    repl.set_stdio_inherit(io::stdout_is_live());
     let mut out = io::stdout();
     // Draw the first prompt (no-op to the UART if fd 1 is absent).
     repl.draw_prompt(&mut out);
