@@ -138,6 +138,21 @@ The U-2 work was reframed in U-2 scripture amendment from a single "libthyla-rs 
 
 Rough scale: 27-37 sessions across the arc. The libthyla-rs uplift (U-2..U-2-test) is the heaviest sub-arc — ~9-12 sessions — and is investment in the library every subsequent chunk builds on.
 
+### The Life Support arc (LS) — interactive human usability
+
+Scoped 2026-06-09 after the first hands-on interactive test surfaced that the
+kernel UART console **never received keystrokes** (LS-1, root-caused + fixed
+@`6e533d6`, closes #943). The full arc design — making Thylacine usable for
+standard human-driven workflows (log in, navigate, list, inspect, create/edit/
+delete files, search, pipe, interrupt, jobs) — is binding scripture at
+**`docs/LIFE-SUPPORT.md`**. Chunks LS-1 [done] -> LS-2 (see command output) ->
+LS-CI (the expect/PTY interactive regression net) -> LS-3 (adopt ls/mkdir/rm/
+cp/mv/stat/... from the aux branch; closes most of #925) -> LS-4 (relative
+paths) -> LS-5 (Ctrl-C) form the MVP; then LS-6/7/K (login UX, a minimal editor,
+id/whoami/date) for breadth and LS-8 (U-PTY: pollable cons + termios + async)
+for depth. Tasks #944-#953. Supersedes the loose U-9..N / U-PTY rows above with
+a workflow-driven sequence.
+
 ## Exit criteria status
 
 Per `docs/UTOPIA-SHELL-DESIGN.md §18` / `docs/ROADMAP.md §8.2`. Twelve headline checks.
