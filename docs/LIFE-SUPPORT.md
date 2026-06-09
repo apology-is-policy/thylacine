@@ -146,18 +146,63 @@ Closes most of #925. Split:
 
 Each verified by `coreutil-smoke` + an LS-CI assertion (`ls /` lists the root).
 
-### LS-4 — Relative paths (the cwd)
+### LS-4 — Relative paths (the kernel per-Proc cwd) [KERNEL + audit-bearing]
 
-**Userspace MVP** (G07). The shell tracks cwd in `Env` (`cd` updates it), but
-externals receive raw args and the kernel has **no per-Proc cwd**, so a relative
-path (`cat foo.txt`, `ls subdir`) cannot resolve. MVP: the shell **resolves
-relative path arguments against `Env.cwd`** (expand to absolute) before spawning
-externals, and builtins resolve against `Env.cwd`. **Design decision to
-surface**: shell-side resolution (userspace, MVP, ~one chunk) vs a kernel
-per-Proc cwd + `getcwd`/`chdir` syscalls (deeper, correct-for-all-Procs, kernel,
-audit-light). Recommend the userspace MVP first; the kernel cwd is LS-9/v1.x.
-Tests: LS-CI (`cd /home/michael; echo hi > f; cat f` round-trips with relative
-`f`).
+**Kernel** (G07; ABI = two syscalls + a resolution-semantics change). The shell
+already tracks cwd in `Env` (`cd`/`pwd`/glob/the prompt use it), but externals
+receive raw args and the kernel has **no per-Proc cwd**, so a relative path
+(`cat foo.txt`, `./config`, *a child program's own internal relative open*)
+cannot resolve. **Design decision RESOLVED 2026-06-09 (user-voted "kernel
+per-Proc cwd"):** the kernel owns one authoritative cwd per Proc that *every*
+program shares — not a shell-side argv-expansion (which can't reliably tell
+which argv tokens are paths — `grep foo bar.txt` — and never fixes a child's
+*internal* relative open). This is the Plan 9 model (kernel "dot" +
+`chdir`/`getwd`), correct-for-all-Procs by construction, and the only option
+that doesn't confuse users and developers with a cwd that works for some opens
+but not others.
+
+As-built design:
+- **`Territory` gains `dot_path`** — a cleaned, absolute cwd path *string*
+  (`NULL` == `"/"`; heap-allocated only once `cd`'d away from root; bounded by
+  `SYS_OPEN_PATH_MAX`). It lives on the per-Proc `Territory` beside `root_spoor`,
+  so a Proc's threads **share** it (POSIX: cwd is per-process) and a child
+  **inherits** the parent snapshot via `territory_clone` (independent
+  thereafter); freed at `territory_unref` final release.
+- **`SYS_CHDIR = 69`**`(path, len)`: form the candidate `clean(path[0]=='/' ?
+  path : join(dot_path, path))`, resolve it from `root_spoor` via `stalk`,
+  require it is a **directory** (`QTDIR`) the caller has **X** (search) on (the
+  open-path `perm_check`), then swap `dot_path` under the territory lock (like
+  `pivot_root`) and clunk the verification Spoor. Errors:
+  `ENOTDIR`/`ENOENT`/`EACCES`.
+- **`SYS_GETCWD = 70`**`(buf, len)`: copy out `dot_path`; `-ERANGE` if too small.
+- **Resolution:** for a path-taking syscall (`SYS_OPEN`) with the sentinel
+  start-fd and a **relative** path, the handler joins `clean(join(dot_path,
+  path))` before `stalk` — exactly POSIX `openat(AT_FDCWD, …)`. Absolute paths
+  and an explicit start-fd are unchanged. `..` falls out of the lexical clean.
+  **I-28 is PRESERVED with zero new mechanism**: `stalk` is *always* handed an
+  absolute-from-`root_spoor` path and clamps `..` at `root_spoor` itself, so a
+  maliciously un-cleaned join cannot escape. Native `libthyla-rs` `fs::`
+  mutations (which navigate parent dirs single-hop) join via `SYS_GETCWD`; the
+  kernel `SYS_OPEN` join covers `File::open` + every ported (musl) program's
+  `AT_FDCWD`-relative open.
+
+**Why name-based (a string), not handle-based (a `dot` Spoor), for v1.0:**
+holding cwd as a live Spoor is the deeper Plan 9/Linux form (rename-robust; cwd
+follows the *directory*, not the name), BUT (a) `stalk` contains `..` at its
+`start` trail-floor, so a handle-`dot` start would strand `cd ..` (can't pop
+above dot) unless `..` becomes a device parent-walk — a *new mechanism on the
+I-28 containment surface*, where bugs are CVEs; and (b) the strongest
+correctness argument for handle-based — the symlink/`..` interaction — is
+**moot in v1.0** (no `t_symlink`/`t_readlink`; G11/LS-9). So name-based reuses
+the fully-audited `stalk`-from-root verbatim, adds no I-28 mechanism, and fully
+delivers the requirement. **Handle-based is the v1.x upgrade, landing with
+symlinks** (which force it). The only v1.0 compromise: renaming an ancestor of a
+live cwd makes the `dot_path` stale (the Proc re-`cd`s) — rare, and not the
+confusion this chunk fixes.
+
+Tests: kernel unit (`chdir`/`getcwd` round-trip; relative `SYS_OPEN` resolves
+against dot; `..` clamps at root; X-search enforced; `ENOTDIR`/`EACCES`) + LS-CI
+(`cd /home/michael; echo hi > f; cat f` round-trips with relative `f`).
 
 ### LS-5 — Interactive Ctrl-C (verify + prompt-cancel)
 
@@ -225,9 +270,10 @@ composes for a real workflow. Closes the LS arc.
 ### LS-9 — The long tail [v1.x]
 
 `ln`/`readlink` (no `t_link`/`t_symlink`/`t_readlink`; G11), `export`/`env`-real
-(no envp at spawn; G15), kernel per-Proc cwd (full G07), `find -exec`,
-atime/mtime setter (G12), `uname`-real sysinfo (G16). Each a named kernel/lib
-surface; mostly v1.x.
+(no envp at spawn; G15), handle-based cwd (a rename-robust `dot` Spoor; LS-4
+ships the name-based form, and the handle-based upgrade lands *with* symlinks/G11
+— they force it), `find -exec`, atime/mtime setter (G12), `uname`-real sysinfo
+(G16). Each a named kernel/lib surface; mostly v1.x.
 
 ---
 
@@ -252,7 +298,7 @@ editors, eventually Ctrl-Z).
 ## Design decisions to surface (per chunk, before coding)
 
 - **LS-2**: how to detect a terminal-backed fd 1 for the conditional `Inherit` (Env/Repl has-tty flag vs fd-1 probe).
-- **LS-4**: shell-side relative-path resolution (MVP) vs kernel per-Proc cwd (deeper).
+- **LS-4**: RESOLVED 2026-06-09 — kernel per-Proc cwd (name-based `dot_path` for v1.0; `SYS_CHDIR`=69 / `SYS_GETCWD`=70; handle-based `dot` Spoor is the v1.x upgrade, landing with symlinks). Chosen over shell-side argv-expansion (can't tell which args are paths; never fixes a child's internal open).
 - **LS-8**: the IRQ-safe poll-waiter wake design + the `specs/pty.tla` model (spec-first re-enable) + the consctl-vs-ioctl termios surface.
 
 ## References

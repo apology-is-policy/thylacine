@@ -221,6 +221,19 @@ return quarry
   generalizes it to N hops and is audited as such.
 - **Mount crossing is the first live read of `mounts[]`.** `cross_mounts` runs on
   the start Spoor and after every hop.
+- **Relative-path / cwd resolution is a handler-level join (LS-4), not a `stalk`
+  change.** `stalk` is *always* handed an absolute-from-`root_spoor` path. A
+  Proc's cwd is a cleaned absolute string (`Territory.dot_path`, `NULL`==`"/"`);
+  for a relative path the syscall handler forms `clean(join(dot_path, relpath))`
+  *before* calling `stalk` — exactly POSIX `openat(AT_FDCWD, …)`. So I-28
+  containment is unchanged and gains **no new mechanism**: even a hostile
+  un-cleaned join is re-clamped at `root_spoor` by the `..` rule above.
+  `SYS_CHDIR` resolves + X-checks the target directory and swaps `dot_path`
+  under the territory lock; `SYS_GETCWD` returns it. **Name-based for v1.0**; a
+  handle-based `dot` Spoor that starts the walk mid-tree — the rename-robust
+  Plan 9/Linux form — is the v1.x upgrade, landing *with* symlinks (which force
+  it, since it would require `..` to become a device parent-walk rather than the
+  trail-pop above).
 
 ---
 
