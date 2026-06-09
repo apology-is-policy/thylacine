@@ -93,7 +93,7 @@ without it the coreutils are mute. Comments at `stmt.rs:71-81` already note
 "this whole block flips to `Stdio::Inherit` cleanly." Tests: a probe + LS-CI
 (`echo HELLO` shows `HELLO`; `cat /welcome` shows the file).
 
-### LS-CI — Interactive E2E harness (the regression net) [DONE @*(pending)*, closes #945]
+### LS-CI — Interactive E2E harness (the regression net) [DONE @6ea7452, closes #945]
 
 **As-built**: `tools/test-interactive.sh` (the wrapper) + `tools/interactive/lib.exp`
 (the reusable `expect` helper library: `lc_boot`/`lc_login`/`lc_send`/`lc_expect`/
