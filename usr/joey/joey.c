@@ -1173,6 +1173,32 @@ static int do_corvus_bringup(long storage_dup_fd) {
         return 1;
     }
 
+    // === USER_CREATE cora === (dev convenience, requested 2026-06-09: a
+    // short-password test user for hands-on interactive login. Created here in
+    // the post-ADMIN_ELEVATE window, so joey holds CAP_HOSTOWNER and the
+    // table-non-empty cap gate is satisfied (same as susan). Lenient: created
+    // (0) or already-present on a persistent pool (2) are both fine; the A-5c
+    // recovery phrase in the OK frame is ignored (cora is not in the RECOVER
+    // E2E). The "kora" passphrase is deliberately short for human memorability
+    // -- a local-VM affordance, NOT a security posture; cora joins michael/susan
+    // in the baked test-identity set stripped for production builds (#880).
+    // login provisions cora's encrypted home on her first interactive login.
+    pl = build_user_create(tx, "cora", 4, "kora", 4);
+    if (corvus_exchange(conn_fd, 5, tx, pl, rx, sizeof(rx), &st, &rlen) != 0) {
+        t_putstr("joey: USER_CREATE cora transport FAILED\n");
+        return 1;
+    }
+    if (st == 0) {
+        t_putstr("joey: USER_CREATE cora ok (dev login user; passphrase 'kora')\n");
+    } else if (st == 2) {
+        t_putstr("joey: USER_CREATE cora already provisioned (persistent pool)\n");
+    } else {
+        t_putstr("joey: USER_CREATE cora unexpected status=");
+        t_putstr(itoa_dec(st, buf, sizeof(buf)));
+        t_putstr("\n");
+        return 1;
+    }
+
     // === A-5c-c audit F1: USER_CREATE "system" is REJECTED (reserved AD subject) ===
     // The system identity wraps (system-wrap / system-recovery-wrap) key their
     // AEAD AD on the fixed subject b"system"; a user named "system" would mint
