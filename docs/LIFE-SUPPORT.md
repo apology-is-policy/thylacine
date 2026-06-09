@@ -218,17 +218,96 @@ Tests: kernel unit (`chdir`/`getcwd` round-trip; relative `SYS_OPEN` resolves
 against dot; `..` clamps at root; X-search enforced; `ENOTDIR`/`EACCES`) + LS-CI
 (`cd /home/michael; echo hi > f; cat f` round-trips with relative `f`).
 
-### LS-5 — Interactive Ctrl-C (verify + prompt-cancel)
+### LS-5 — Interactive Ctrl-C: `interrupt` as a real note [KERNEL + audit-bearing]
 
-**Userspace + verification.** The machinery exists: the console owner is the
-session shell (set via `SYS_CONSOLE_OWNER` at login), Ctrl-C is cooked to an
-`interrupt` note, and U-7c forwards it to the running foreground command. LS-1
-unblocked the input. LS-5 = (a) **verify via LS-CI** that Ctrl-C interrupts a
-runaway foreground command interactively; (b) ensure Ctrl-C at the idle prompt
-**cancels the line + redraws** (the editor's `Cancel` action). The *reactive
-mid-line-edit* Ctrl-C (clear the line while still typing) needs the pollable cons
--> **LS-8**; note that boundary. Tests: LS-CI (`sleep 50` then Ctrl-C returns to
-the prompt).
+**Ground-truth correction (2026-06-09).** The original premise — "the machinery
+exists; LS-5 = verify + idle-cancel" — was FALSE. A live probe (log in, run
+`yes`, hit Ctrl-C) flooded 1.9M lines unfazed. Three independent gaps, all
+confirmed in code; foreground Ctrl-C is **fully dead** today:
+
+1. **No console owner in the session.** `proc_console_post_interrupt` posts the
+   `interrupt` note to `g_console_owner`, set only by joey at bringup + the SAK
+   re-grant to corvus. joey *relinquishes* it at the bringup->session boundary;
+   login spawns `ut` WITHOUT re-taking it -> `g_console_owner == NULL` all session
+   -> every Ctrl-C is dropped at a NULL owner.
+2. **An uncaught `interrupt` doesn't terminate.** `notes_deliver_at_el0_return`
+   (notes.c) LEAVES an uncaught non-`kill` note QUEUED (Thylacine is NOT Plan 9's
+   "uncaught note kills"). So even forwarded, a dumb coreutil just queues it.
+3. **Blocked children aren't note-interruptible.** A child in `SYS_TORPOR_WAIT`
+   (`sleep`) or a blocking read wakes only on death (`*_INTR`, #811) — not a
+   regular note; notes deliver only at the EL0-return tail. So `sleep 50` ignores
+   Ctrl-C until it finishes (the old `sleep 50` example was wrong for v1.0).
+
+**The proper systemic fix — make `interrupt` a real (catchable) note**, not the
+hard-kill workaround. The notes subsystem IS the Plan 9 note mechanism; LS-5 makes
+`interrupt` behave like a real Plan 9 note / Unix SIGINT, in three properties (the
+canonical statement is ARCH §8.8.2):
+
+- **P1 — delivery.** The session shell owns the console (`g_console_owner = ut`)
+  via a new **`SPAWN_PERM_CONSOLE_OWNER`** spawn perm, conferred by trusted login.
+  This is console-*owner* ("who receives Ctrl-C"), strictly DISTINCT from
+  console-*attach* (I-27, the SAK/elevation gate) — a per-bit separation like
+  `SPAWN_PERM_MAY_POST_SERVICE`; the owner bit NEVER confers attach, so I-27 is
+  untouched. The shell forwards `interrupt` to its foreground child (the existing
+  U-7c-b `wait_pids_interruptible` notes-fd poll). Real process groups +
+  controlling terminal are Phase-8 job control; shell-forwards is the v1.0 interim.
+- **P2 — default disposition: uncaught `interrupt` terminates.** Generalize the
+  `snare:*` default-terminate to `interrupt`: an `interrupt` with NO registered
+  handler, NOT masked, on a NON-self-managing Proc default-terminates the Proc at
+  the EL0-return tail (SIGINT's "default = die, catchable"). The **self-managing
+  gate** is the discriminator the fd-read note model needs: a Proc that has opened
+  its notes fd (`devnotes`) has declared it consumes its own notes -> exempt (the
+  shell qualifies via `open_notes`; a dumb coreutil never opens it -> dies). A
+  program catches Ctrl-C by registering an `on note interrupt` handler or masking.
+- **P3-terminate — a terminate-disposition `interrupt` wakes a blocked child,
+  reusing #811.** §8.8.1's wake machinery (per-Thread `wait_lock` +
+  `rendez_blocked_on`, every rendez site, unwind at the EL0-return tail) is widened
+  from "group-exit death" to "death OR a pending terminate-disposition
+  `interrupt`." A single-threaded blocked child with no handler / no notes-fd /
+  unmasked cannot change its disposition while blocked (it is not running to call
+  `notify()`), so the disposition is decided at post time and it takes the #811
+  death path: wake + terminate. One more trigger on an already-audited mechanism —
+  NOT a parallel kill path, and not the uncatchable-`kill` collapse.
+
+Composed (P1 + P2 + P3-terminate): **Ctrl-C terminates any foreground command —
+CPU-bound, output-bound, OR blocked in sleep/read — catchably.** The complete,
+correct v1.0 model.
+
+**Why NOT the hard-kill shortcut (forward `kill`):** it "works" but makes Ctrl-C
+permanently uncatchable, collapses the deliberate `interrupt`(catchable) /
+`kill`(N-4 non-catchable) distinction, and leaves P2/P3 unfixed — so "uncaught
+notes silently queue forever" stays a system-wide footgun for every future note
+consumer. The proper fix removes that footgun.
+
+**The LS-5 / LS-8 boundary (corrected).** Deferred to **LS-8** (U-PTY: pollable
+cons + termios ISIG): **P3-deliver** — promptly delivering a *caught* (handler-
+bearing / self-managing) `interrupt` to a *blocked* program via an interrupted-
+syscall (`-EINTR`) return WITHOUT terminating it. Its sole v1.0 consumer is
+**idle-prompt-cancel** (the shell's own blocked cons-read returning so the line
+editor's `Cancel` fires) + the reactive *mid-edit* Ctrl-C — both inherently LS-8
+(the editor never sees a `0x03` byte today; the kernel cooks it to the note). So
+idle-cancel moves wholly to LS-8; LS-5 delivers the foreground-command interrupt.
+
+**Sub-chunks (DFS-inserted at this roadmap point; build all, then emerge):**
+- **LS-5a — P1 console owner.** `SPAWN_PERM_CONSOLE_OWNER` (kernel: a new
+  spawn-perm bit + `g_console_owner = child` at spawn, gated like
+  `MAY_POST_SERVICE`); login spawns `ut` with it; joey's relinquish unchanged.
+  Verify Ctrl-C reaches the shell (an `on note interrupt` probe fires).
+- **LS-5b — P2 default disposition.** `interrupt` default-terminate at the
+  EL0-return tail + the self-managing-fd gate; the shell exempt. Notes-delivery
+  change (I-19).
+- **LS-5c — P3-terminate.** Widen the #811 wake predicate to
+  death-or-terminate-interrupt; the blocked single-thread child wakes + dies.
+  Re-validate every #811 site (I-9 generalized).
+- **LS-5-audit** — one focused adversarial round over the whole surface (the
+  death-path + notes lineage — #788/#806/#807/#808/#860/#809/#811/#926, the most
+  bug-prone in the tree), then the LS-CI `ls-5` scenario (`yes` + Ctrl-C ->
+  prompt; `sleep 30` + Ctrl-C -> prompt; an `on note interrupt` catch survives).
+
+Scripture: this section + ARCH §8.8.2 (the model + invariants) + ARCH §25.4 (the
+audit row) + CLAUDE.md (mirror). Spec-reasoned in prose per the 2026-05-23
+suspension; the rigor is the focused audit + the #811 per-site re-validation +
+LS-CI.
 
 ### LS-6 — Login + prompt UX (echo username, mask password)
 
