@@ -65,7 +65,7 @@ never master-enabled, so QEMU received nothing); login's `read_line` accepts CR
 as well as LF (a raw terminal sends CR on Enter). Regression guard:
 `uart.rx_path_enabled`. Proven over a PTY. **Without LS-1 nothing below works.**
 
-### LS-2 — See command output (external stdio inherits the console) [DONE @pending, closes #944]
+### LS-2 — See command output (external stdio inherits the console) [DONE @8d3c13b, closes #944]
 
 **As-built**: `Env::stdio_inherit` (default false), set by `ut::main` via
 `io::stdout_is_live()` (a zero-length `SYS_WRITE` to fd 1 -- the kernel validates
