@@ -48,6 +48,8 @@ Pinned in `<thylacine/syscall.h>`; mirror constants in `<thyla/syscall.h>` (C-si
 | Bit | Constant | Effect |
 |---|---|---|
 | 1<<0 | `SPAWN_PERM_MAY_POST_SERVICE` | Stamps `PROC_FLAG_MAY_POST_SERVICE` on the child. The child may then call `SYS_POST_SERVICE` to register as a `/srv/<name>` 9P server (CORVUS-DESIGN.md §6.1). |
+| 1<<1 | `SPAWN_PERM_CONSOLE_TRUSTED` | (A-4c-2) Records the child as the trusted login authority (`g_console_trusted_proc`) — the Proc a kernel SAK re-grants the console to. joey grants it to `/sbin/corvus`. The SAK/elevation anchor; console-attach-only (never delegable). |
+| 1<<2 | `SPAWN_PERM_CONSOLE_OWNER` | (LS-5) Records the child as the console OWNER (`g_console_owner`) — the Proc that receives the `interrupt` note on Ctrl-C. Console-*owner* ("who receives Ctrl-C"), strictly distinct from console-*attach* (the owner bit never confers attach, so I-27 is untouched). joey-trusted `/sbin/login` confers it on the session shell `ut`. |
 
 `SPAWN_PERM_ALL` is the OR of all valid bits — used by the kernel + userspace wrappers for the validity check.
 
@@ -57,15 +59,22 @@ Adding a new `SPAWN_PERM_*` bit is additive: existing callers (passing 0 or only
 2. Add a case to the spawn thunk's bit dispatch.
 3. Extend `SPAWN_PERM_ALL`.
 4. Mirror the bit in libt + libthyla-rs.
-5. Pin the gate: any new bit gating user-visible authority should require the calling Proc to be console-attached (same rule as the v1.0 bit), unless the design explicitly justifies a different gate.
+5. Pin the gate in `spawn_perm_grant_check`: choose console-attach-only (the SAK-anchor rule, like `CONSOLE_TRUSTED`) or the holder-delegable rule (console-attached OR holds `MAY_POST_SERVICE`, like `MAY_POST_SERVICE` / `CONSOLE_OWNER`), per the design's trust model.
 
 ---
 
-## Console-attachment gate
+## The grant gate (`spawn_perm_grant_check`)
 
-Any `perm_flags != 0` is rejected unless the calling Proc holds `PROC_FLAG_CONSOLE_ATTACHED`. The check fires in `sys_spawn_with_perms_for_proc` (kernel/syscall.c) BEFORE any user-VA reads, so a hostile caller cannot probe the gate behavior with arbitrary side effects.
+The grant authority is per-bit, in `spawn_perm_grant_check` (kernel/syscall.c) — the single site both spawn entry points (`SYS_SPAWN_WITH_PERMS` and `SYS_SPAWN_FULL_ARGV`) route through. It runs BEFORE any user-VA reads, so a hostile caller cannot probe gate behavior with side effects, and any bit outside `SPAWN_PERM_ALL` is rejected outright.
 
-At v1.0 the only console-attached Proc is joey (stamped in `joey_thunk`, kernel/joey.c). joey is the trust anchor: ARCHITECTURE §5.5 calls it "the local-console root of the trust chain." Any future Proc that wants to confer `SPAWN_PERM_*` bits on its children must first become console-attached (`proc_mark_console_attached` is kernel-only at v1.0; the design defers a user-visible "I have the console" syscall to v1.x).
+Per-bit rules:
+
+- **`CONSOLE_TRUSTED`** — console-attach-only (`proc_is_console_attached`). NEVER delegable: a service-poster must not be able to confer the console-trust used for hostowner elevation (I-27).
+- **`MAY_POST_SERVICE`** and **`CONSOLE_OWNER`** — granted by a console-attached Proc OR by a Proc that already holds `MAY_POST_SERVICE` (the A-5b #827b one-hop delegation). joey (console-attached, stamped in `joey_thunk`) is the trust root; it confers `MAY_POST_SERVICE` on `/sbin/login`, which — now a holder — re-confers `MAY_POST_SERVICE` on the per-user proxy and (LS-5) `CONSOLE_OWNER` on the session shell `ut`.
+
+joey is the trust anchor: ARCHITECTURE §5.5 calls it "the local-console root of the trust chain." `proc_mark_console_attached` is kernel-only at v1.0; a user-visible "I have the console" syscall is deferred to v1.x. None of these bits is `rfork`-propagated — each is a `perm_flags` spawn-time decision, not a `cap_mask` bit, so I-2 (the fork-grantable cap set only reduces) is unaffected.
+
+The thunk applies the granted bits via `apply_spawn_perms` (kernel/syscall.c) — the shared bit→`proc_mark_*`/`proc_set_*` mapping both spawn thunks call in the child's context, before `exec_setup`, so the child's first user-mode instruction observes the final state.
 
 A `perm_flags = 0` call is equivalent to `SYS_SPAWN_FULL` and does NOT require console-attachment — kept as a single entry point so callers conferring no permissions don't need a separate syscall.
 
@@ -102,20 +111,24 @@ pub unsafe fn t_spawn_with_perms(name: *const u8, name_len: usize,
                                  cap_mask: u64, perm_flags: u64) -> i64;
 ```
 
-Both wrappers also expose the bit-mask constants (`T_SPAWN_PERM_MAY_POST_SERVICE`).
+Both wrappers also expose the bit-mask constants (`T_SPAWN_PERM_MAY_POST_SERVICE` / `T_SPAWN_PERM_CONSOLE_TRUSTED` / `T_SPAWN_PERM_CONSOLE_OWNER`).
 
 ---
 
 ## Tests
 
-`kernel/test/test_sys_spawn_with_perms.c` — 4 tests:
+`kernel/test/test_sys_spawn_with_perms.c` — 8 tests:
 
 - `sys_spawn_with_perms.zero_perm_is_spawn_full` — `perm_flags=0` from kproc → positive pid, child has no may-post stamp, exits clean.
 - `sys_spawn_with_perms.console_attached_grants_may_post` — marks kproc console-attached, spawns with `SPAWN_PERM_MAY_POST_SERVICE`; verifies child spawns clean and does NOT inherit `PROC_FLAG_CONSOLE_ATTACHED` (rfork strips it; the spawn thunk does NOT re-stamp it).
 - `sys_spawn_with_perms.rejects_non_console_attached_parent` — fresh non-console-attached Proc as parent → -1.
 - `sys_spawn_with_perms.rejects_unknown_perm_bits` — even a console-attached parent passing garbage high bits → -1.
+- `sys_spawn_with_perms.holder_delegates_may_post` (A-5b #827b) — a Proc that already holds `MAY_POST_SERVICE` but is NOT console-attached delegates it one hop; the control (non-attached non-holder) is still rejected.
+- `sys_spawn_with_perms.console_trusted_not_delegable` (A-5b #827b) — a `MAY_POST_SERVICE` holder cannot confer `CONSOLE_TRUSTED` (alone or combined); a console-attached Proc grants both.
+- `sys_spawn_with_perms.console_owner_grant_gate` (LS-5) — `CONSOLE_OWNER` is granted by a `MAY_POST_SERVICE` holder (trusted login) OR a console-attached Proc, rejected from a non-attached non-holder, and never unlocks `CONSOLE_TRUSTED` for a mere holder (I-27).
+- `sys_spawn_with_perms.console_owner_set_wiring` (LS-5) — drives `apply_spawn_perms` directly: `CONSOLE_OWNER` makes the child `g_console_owner` (and does NOT confer console-attach); `MAY_POST_SERVICE` alone leaves the owner untouched. (A real spawn races the child's exit clearing the owner, so the wiring is driven on a synthetic Proc.)
 
-Test count: 507 → 511 PASS × default + UBSan.
+All run × default + UBSan.
 
 The console_attached_grants_may_post test marks kproc console-attached as a one-way side effect. Post-test boot path is unaffected: rfork does not propagate the console bit, so joey starts un-attached and self-stamps in `joey_thunk` (the existing pattern). kproc carrying the bit after the test is benign.
 
@@ -125,18 +138,18 @@ The console_attached_grants_may_post test marks kproc console-attached as a one-
 
 | Aspect | Status |
 |---|---|
-| Kernel implementation | LANDED at P5-corvus-srv-impl-b3a *(pending)* |
-| libt wrapper | LANDED |
-| libthyla-rs wrapper | LANDED |
-| Tests | 4 PASS × default + UBSan |
-| Audit | self-audit clean; formal audit at P5-corvus-srv-impl audit (#525) |
-| Production caller | joey at P5-corvus-srv-impl-b3b (#543) |
+| Kernel implementation | LANDED at P5-corvus-srv-impl-b3a; extended `CONSOLE_TRUSTED` (A-4c-2), one-hop delegation (A-5b #827b), `CONSOLE_OWNER` (LS-5a) |
+| libt wrapper | LANDED (`MAY_POST_SERVICE` / `CONSOLE_TRUSTED` / `CONSOLE_OWNER`) |
+| libthyla-rs wrapper | LANDED (+ `Command::perm`) |
+| Tests | 8 PASS × default + UBSan |
+| Audit | formal audit at P5-corvus-srv-impl (#525); `CONSOLE_OWNER` rides the LS-5-audit round (#963) |
+| Production callers | joey → corvus (`MAY_POST_SERVICE` + `CONSOLE_TRUSTED`); joey → /sbin/login (`MAY_POST_SERVICE`); /sbin/login → ut (`CONSOLE_OWNER`) + per-user proxy (`MAY_POST_SERVICE`) |
 
 ---
 
 ## Known caveats / footguns
 
-- **The thunk's bit dispatch is open-coded**, not a generic loop. Adding a new `SPAWN_PERM_*` bit means modifying the thunk's `if`-ladder. The defense is the `if (perm_flags & ~SPAWN_PERM_ALL) extinction(...)` guard at the tail of the dispatch: an unknown bit at thunk time is a kernel invariant violation (the parent path must have rejected it).
+- **The bit dispatch is open-coded** in `apply_spawn_perms` (shared by both spawn thunks), not a generic loop. Adding a new `SPAWN_PERM_*` bit means modifying that `if`-ladder. The defense is the `if (perm_flags & ~SPAWN_PERM_ALL) extinction(...)` guard at its tail: an unknown bit at thunk time is a kernel invariant violation (the parent's `spawn_perm_grant_check` must have rejected it).
 - **Console-attachment is a permanent one-way set.** A Proc that becomes console-attached cannot un-set the bit. v1.0 has only joey as the console anchor; future remote-login / multi-console designs need to revisit this.
 - **The kproc-stamp side effect in tests is intentional.** Tests deliberately stamp kproc console-attached to exercise the happy path. Subsequent tests must not assume kproc is NOT console-attached.
 

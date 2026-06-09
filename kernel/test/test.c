@@ -753,6 +753,8 @@ void test_sys_spawn_with_perms_rejects_non_console_attached_parent(void);
 void test_sys_spawn_with_perms_rejects_unknown_perm_bits(void);
 void test_sys_spawn_with_perms_holder_delegates_may_post(void);
 void test_sys_spawn_with_perms_console_trusted_not_delegable(void);
+void test_sys_spawn_with_perms_console_owner_grant_gate(void);
+void test_sys_spawn_with_perms_console_owner_set_wiring(void);
 void test_sys_spawn_full_argv_no_argv_acts_as_spawn_with_perms(void);
 void test_sys_spawn_full_argv_golden_argc4(void);
 void test_sys_spawn_full_argv_rejects_argc_over_max(void);
@@ -1782,6 +1784,8 @@ struct test_case g_tests[] = {
     { "sys_spawn_with_perms.rejects_unknown_perm_bits", test_sys_spawn_with_perms_rejects_unknown_perm_bits, false, NULL },
     { "sys_spawn_with_perms.holder_delegates_may_post", test_sys_spawn_with_perms_holder_delegates_may_post, false, NULL },
     { "sys_spawn_with_perms.console_trusted_not_delegable", test_sys_spawn_with_perms_console_trusted_not_delegable, false, NULL },
+    { "sys_spawn_with_perms.console_owner_grant_gate",  test_sys_spawn_with_perms_console_owner_grant_gate,  false, NULL },
+    { "sys_spawn_with_perms.console_owner_set_wiring",  test_sys_spawn_with_perms_console_owner_set_wiring,  false, NULL },
     { "sys_spawn_full_argv.no_argv_acts_as_spawn_with_perms", test_sys_spawn_full_argv_no_argv_acts_as_spawn_with_perms, false, NULL },
     { "sys_spawn_full_argv.golden_argc4",              test_sys_spawn_full_argv_golden_argc4,              false, NULL },
     { "sys_spawn_full_argv.rejects_argc_over_max",     test_sys_spawn_full_argv_rejects_argc_over_max,     false, NULL },

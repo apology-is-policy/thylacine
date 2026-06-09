@@ -57,12 +57,21 @@ extern int sys_spawn_with_perms_for_proc(struct Proc *p,
 // directly on synthetic Procs (decoupled from the heavyweight spawn body).
 extern int spawn_perm_grant_check(struct Proc *p, u32 perm_flags);
 
+// LS-5: the perm-application helper (the bit->action mapping both spawn thunks
+// run) + the console-owner accessor, exported so the owner-set WIRING can be
+// driven deterministically — a real spawn races the child's fast exit clearing
+// g_console_owner, so the wiring is unobservable through a full spawn.
+extern void apply_spawn_perms(struct Proc *p, u32 perm_flags);
+extern struct Proc *proc_test_console_owner(void);
+
 void test_sys_spawn_with_perms_zero_perm_is_spawn_full(void);
 void test_sys_spawn_with_perms_console_attached_grants_may_post(void);
 void test_sys_spawn_with_perms_rejects_non_console_attached_parent(void);
 void test_sys_spawn_with_perms_rejects_unknown_perm_bits(void);
 void test_sys_spawn_with_perms_holder_delegates_may_post(void);
 void test_sys_spawn_with_perms_console_trusted_not_delegable(void);
+void test_sys_spawn_with_perms_console_owner_grant_gate(void);
+void test_sys_spawn_with_perms_console_owner_set_wiring(void);
 
 static void drain_zombies(void) {
     int status = 0;
@@ -237,4 +246,86 @@ void test_sys_spawn_with_perms_console_trusted_not_delegable(void) {
     TEST_EXPECT_EQ(spawn_perm_grant_check(t->proc,
         SPAWN_PERM_MAY_POST_SERVICE | SPAWN_PERM_CONSOLE_TRUSTED), 0,
         "console-attached grants both bits");
+}
+
+// LS-5 (P1 console owner): SPAWN_PERM_CONSOLE_OWNER is gated the SAME way as
+// MAY_POST_SERVICE (a console-attached granter OR a Proc that already holds
+// MAY_POST_SERVICE), so trusted /sbin/login -- holding the bit from joey --
+// confers console ownership on the session shell. But it is NOT a back door to
+// CONSOLE_TRUSTED: a mere holder still cannot grant console-trust (I-27).
+void test_sys_spawn_with_perms_console_owner_grant_gate(void) {
+    drain_zombies();
+
+    struct Proc *holder = proc_alloc();
+    TEST_ASSERT(holder != NULL, "proc_alloc holder Proc");
+    TEST_ASSERT(!proc_is_console_attached(holder),
+        "holder is not console-attached");
+
+    // Control: a non-attached, non-holding Proc cannot grant CONSOLE_OWNER.
+    TEST_EXPECT_EQ(spawn_perm_grant_check(holder, SPAWN_PERM_CONSOLE_OWNER), -1,
+        "non-attached non-holder cannot grant CONSOLE_OWNER");
+
+    // A MAY_POST_SERVICE holder (trusted /sbin/login) confers CONSOLE_OWNER --
+    // gated identically to MAY_POST_SERVICE.
+    proc_mark_may_post_service(holder);
+    TEST_EXPECT_EQ(spawn_perm_grant_check(holder, SPAWN_PERM_CONSOLE_OWNER), 0,
+        "a MAY_POST_SERVICE holder confers CONSOLE_OWNER (LS-5 trusted login)");
+    TEST_EXPECT_EQ(spawn_perm_grant_check(holder,
+        SPAWN_PERM_MAY_POST_SERVICE | SPAWN_PERM_CONSOLE_OWNER), 0,
+        "the holder confers MAY_POST_SERVICE + CONSOLE_OWNER together");
+
+    // CONSOLE_OWNER never unlocks CONSOLE_TRUSTED for a mere holder (I-27): the
+    // SAK/elevation anchor stays console-attach-only.
+    TEST_EXPECT_EQ(spawn_perm_grant_check(holder,
+        SPAWN_PERM_CONSOLE_OWNER | SPAWN_PERM_CONSOLE_TRUSTED), -1,
+        "CONSOLE_OWNER does not unlock CONSOLE_TRUSTED for a holder (I-27)");
+
+    holder->state = PROC_STATE_ZOMBIE;
+    proc_free(holder);
+
+    // A console-attached Proc grants CONSOLE_OWNER (the boot/joey path).
+    struct Thread *t = current_thread();
+    TEST_ASSERT(t && t->proc, "current thread has Proc");
+    proc_mark_console_attached(t->proc);
+    TEST_EXPECT_EQ(spawn_perm_grant_check(t->proc, SPAWN_PERM_CONSOLE_OWNER), 0,
+        "console-attached grants CONSOLE_OWNER");
+}
+
+// LS-5 (P1 console owner): the bit->action WIRING. apply_spawn_perms is what
+// both spawn thunks run in the child's context; CONSOLE_OWNER must make the
+// child the g_console_owner (the Proc that receives the Ctrl-C `interrupt`
+// note), and NOTHING else must touch the owner pointer. Driven on a synthetic
+// Proc because a real spawn races the child's exit clearing the owner.
+void test_sys_spawn_with_perms_console_owner_set_wiring(void) {
+    drain_zombies();
+
+    // Save the live owner so the test leaves the boot/session state untouched
+    // (NULL during the suite -- joey has not relinquished, no session yet).
+    struct Proc *saved = proc_test_console_owner();
+
+    struct Proc *shell = proc_alloc();
+    TEST_ASSERT(shell != NULL, "proc_alloc synthetic shell Proc");
+
+    // A perm set WITHOUT CONSOLE_OWNER must not touch the owner pointer.
+    proc_set_console_owner(NULL);
+    apply_spawn_perms(shell, SPAWN_PERM_MAY_POST_SERVICE);
+    TEST_EXPECT_EQ(proc_test_console_owner(), (struct Proc *)NULL,
+        "MAY_POST_SERVICE alone does not set the console owner");
+    TEST_ASSERT(proc_may_post_service(shell),
+        "apply_spawn_perms stamped MAY_POST_SERVICE");
+
+    // CONSOLE_OWNER makes the child the console owner (the LS-5 P1 wiring) and
+    // must NOT confer console-attach (I-27).
+    apply_spawn_perms(shell, SPAWN_PERM_CONSOLE_OWNER);
+    TEST_EXPECT_EQ(proc_test_console_owner(), shell,
+        "CONSOLE_OWNER set the child as g_console_owner");
+    TEST_ASSERT(!proc_is_console_attached(shell),
+        "CONSOLE_OWNER must NOT confer console-attach (I-27)");
+
+    // Clear the owner BEFORE freeing so g_console_owner never dangles, then
+    // restore the saved owner.
+    proc_set_console_owner(NULL);
+    shell->state = PROC_STATE_ZOMBIE;
+    proc_free(shell);
+    proc_set_console_owner(saved);
 }

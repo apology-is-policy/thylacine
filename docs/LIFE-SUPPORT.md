@@ -289,10 +289,12 @@ editor's `Cancel` fires) + the reactive *mid-edit* Ctrl-C — both inherently LS
 idle-cancel moves wholly to LS-8; LS-5 delivers the foreground-command interrupt.
 
 **Sub-chunks (DFS-inserted at this roadmap point; build all, then emerge):**
-- **LS-5a — P1 console owner.** `SPAWN_PERM_CONSOLE_OWNER` (kernel: a new
+- **LS-5a — P1 console owner. [done]** `SPAWN_PERM_CONSOLE_OWNER` (kernel: a new
   spawn-perm bit + `g_console_owner = child` at spawn, gated like
   `MAY_POST_SERVICE`); login spawns `ut` with it; joey's relinquish unchanged.
-  Verify Ctrl-C reaches the shell (an `on note interrupt` probe fires).
+  Owner-set wiring + the grant gate are kernel-unit-tested (795/795); the
+  interactive "Ctrl-C reaches the shell" proof rides the `ls-5.exp` LS-CI at
+  LS-5-audit (needs P2/P3 for a visible effect).
 - **LS-5b — P2 default disposition.** `interrupt` default-terminate at the
   EL0-return tail + the self-managing-fd gate; the shell exempt. Notes-delivery
   change (I-19).

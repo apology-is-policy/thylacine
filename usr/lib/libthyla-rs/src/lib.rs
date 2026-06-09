@@ -336,6 +336,11 @@ pub const T_SPAWN_PERM_MAY_POST_SERVICE: u64 = 1 << 0;
 // A-4c-2: records the spawned child as the trusted login authority (the SAK
 // re-grant target). Granting it requires the parent to be console-attached.
 pub const T_SPAWN_PERM_CONSOLE_TRUSTED: u64 = 1 << 1;
+// LS-5: records the spawned child as the console OWNER -- the Proc that receives
+// the `interrupt` note on Ctrl-C. Distinct from CONSOLE_TRUSTED (never confers
+// console-attach, I-27); gated like MAY_POST_SERVICE, so trusted /sbin/login
+// confers it on the session shell `ut`.
+pub const T_SPAWN_PERM_CONSOLE_OWNER: u64 = 1 << 2;
 
 // poll event bits — MUST mirror POLL* in kernel/include/thylacine/poll.h.
 // Linux values; the future musl shim is a no-op.

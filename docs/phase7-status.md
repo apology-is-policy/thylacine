@@ -185,6 +185,30 @@ UX, a minimal editor, id/whoami/date) for breadth and LS-8 (U-PTY: pollable cons
 termios + async) for depth. Tasks #944-#953. Supersedes the loose U-9..N / U-PTY
 rows above with a workflow-driven sequence.
 
+**LS-5a [done] (P1 console owner; KERNEL -- audit-bearing surface, the formal
+round rides LS-5-audit #963).** `SPAWN_PERM_CONSOLE_OWNER` (1<<2; mirrored in
+libt + libthyla-rs `T_SPAWN_PERM_CONSOLE_OWNER`) -- a new spawn-perm bit that
+records the spawned child as `g_console_owner`, the Proc that receives the
+`interrupt` note on Ctrl-C. Console-*owner* is strictly distinct from
+console-*attach* (I-27): the owner bit NEVER confers attach, so the SAK /
+hostowner-elevation anchor is untouched. Gated in `spawn_perm_grant_check` the
+SAME way as `MAY_POST_SERVICE` (console-attached OR a `MAY_POST_SERVICE`
+holder), so trusted `/sbin/login` -- holding the bit from joey -- confers it on
+the session shell `ut` (`Command::perm(T_SPAWN_PERM_CONSOLE_OWNER)`). The two
+spawn thunks' identical perm-application blocks were DRY'd into one
+`apply_spawn_perms` helper (the bit->`proc_mark_*`/`proc_set_*` mapping), which
+also yields a deterministic owner-set test (a real spawn races the child's exit
+clearing `g_console_owner`). Kernel tests
+`sys_spawn_with_perms.console_owner_grant_gate` + `.console_owner_set_wiring`;
+**795/795** (HVF + TCG), the login E2E shows "ut spawned stamped + reaped",
+`make test-tcg` EXIT=0, **0 EXTINCTION**. (The lone HVF `test.sh` failure is the
+pre-existing **#896** virtio-input QMP-injection probe -- unrelated to
+spawn-perms; tracked.) Reference doc `73-sys-spawn-with-perms.md` refreshed
+(also folded in the long-missing `CONSOLE_TRUSTED` + #827b one-hop-delegation
+rows the doc had drifted past). LS-5a just wires the owner; **P2
+default-terminate (LS-5b #961) + P3-terminate wake (LS-5c #962) + the
+interactive `ls-5.exp` (LS-5-audit #963) follow.**
+
 **LS-4 [done] (kernel per-Proc cwd; user-voted over shell-side argv-expansion
 2026-06-09; scripture `43ce24e`).** Split LS-4a (kernel, audit-bearing) +
 LS-4b (userspace). LS-4a `@c6b0ff2`: `Territory.dot_path` (a cleaned absolute

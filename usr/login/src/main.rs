@@ -43,8 +43,8 @@ use libthyla_rs::{
     t_attach_9p_srv, t_close, t_explicit_bzero, t_mount, t_open, t_poll, t_putstr, t_read,
     t_readdir, t_set_dumpable, t_set_traceable, t_torpor_wait, t_unmount, t_walk_create,
     t_walk_open, t_write, TPollFd, T_CAP_CSPRNG_READ, T_CAP_LOCK_PAGES, T_MREPL, T_OPATH, T_OREAD,
-    T_ORDWR, T_OWRITE, T_POLLIN, T_SPAWN_PERM_MAY_POST_SERVICE, T_WALK_CREATE_DMDIR,
-    T_WALK_OPEN_FROM_ROOT,
+    T_ORDWR, T_OWRITE, T_POLLIN, T_SPAWN_PERM_CONSOLE_OWNER, T_SPAWN_PERM_MAY_POST_SERVICE,
+    T_WALK_CREATE_DMDIR, T_WALK_OPEN_FROM_ROOT,
 };
 
 const VERB_AUTH: u8 = 1;
@@ -1006,10 +1006,14 @@ pub extern "C" fn rs_main() -> i64 {
     // Spawn the shell AS the user. fd 0/1/2 inherit login's (the tty), so the
     // shell reads + writes the same console. The shell gets the user's identity
     // (SPAWN_IDENTITY_SET) but NOT CAP_SET_IDENTITY. It inherits the /home/<user>
-    // bind established above.
+    // bind established above. LS-5 (P1): confer CONSOLE_OWNER so the kernel makes
+    // `ut` the g_console_owner -- the Proc that receives the `interrupt` note on
+    // Ctrl-C. login holds MAY_POST_SERVICE (from joey), which is the gate for
+    // CONSOLE_OWNER; the owner bit never confers console-attach (I-27 untouched).
     let mut child = match Command::new(SHELL)
         .identity(pid, gid, &supp)
         .caps(SHELL_CAPS)
+        .perm(T_SPAWN_PERM_CONSOLE_OWNER)
         .stdin(Stdio::Inherit)
         .stdout(Stdio::Inherit)
         .stderr(Stdio::Inherit)

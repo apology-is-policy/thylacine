@@ -3657,6 +3657,10 @@ struct spawn_with_fds_args {
     u32            perm_flags;
 };
 
+// Both spawn thunks call apply_spawn_perms (defined below, next to the grant
+// gate); forward-declared here for the first caller.
+void apply_spawn_perms(struct Proc *p, u32 perm_flags);
+
 __attribute__((noreturn))
 static void sys_spawn_with_fds_thunk(void *arg) {
     struct spawn_with_fds_args *sa = (struct spawn_with_fds_args *)arg;
@@ -3679,22 +3683,12 @@ static void sys_spawn_with_fds_thunk(void *arg) {
 
     // P5-corvus-srv-impl-b3a: apply parent-vetted SPAWN_PERM_* bits BEFORE
     // anything user-observable. Done here (in the child thread's context,
-    // before exec_setup) rather than in the parent path so the child
-    // never sees an un-stamped intermediate state — its very first user-
-    // mode instruction observes the final proc_flags. The parent already
-    // gate-checked every bit (sys_spawn_with_perms_for_proc); the thunk
-    // just translates each bit to the kernel mark function. Fail-closed:
-    // an unknown bit at this point is a kernel invariant violation (the
-    // parent must have stripped it).
-    if (perm_flags & SPAWN_PERM_MAY_POST_SERVICE) {
-        proc_mark_may_post_service(p);
-    }
-    if (perm_flags & SPAWN_PERM_CONSOLE_TRUSTED) {
-        proc_set_console_trusted(p);   // A-4c-2: the SAK re-grant target
-    }
-    if (perm_flags & ~SPAWN_PERM_ALL) {
-        extinction("sys_spawn_with_fds_thunk: unknown SPAWN_PERM_* bit");
-    }
+    // before exec_setup) rather than in the parent path so the child never
+    // sees an un-stamped intermediate state — its very first user-mode
+    // instruction observes the final state. The parent already gate-checked
+    // every bit (sys_spawn_with_perms_for_proc); apply_spawn_perms maps each
+    // surviving bit to its one-way kernel mark.
+    apply_spawn_perms(p, perm_flags);
 
     // Install each Spoor in the child's handle table at the lowest
     // free slot. Post-rfork, the table is empty, so the first install
@@ -3989,13 +3983,17 @@ int sys_spawn_full_for_proc(struct Proc *p, const char *name, size_t name_len,
 // a console-attached granter OR by a Proc that ALREADY holds the bit -- the
 // one-hop delegation (joey, console-attached, spawns /sbin/login WITH the bit;
 // login confers it on a per-user --role client proxy that posts /srv/home-<user>
-// in the session's private per-territory /srv). The bit is still never
-// rfork-propagated: it is a perm_flags spawn-time decision, not a cap_mask bit,
-// so I-2 (the fork-grantable cap set only reduces) is unaffected. Returns 0 iff
-// every requested bit may be granted by p; -1 otherwise. Both spawn entry points
-// (SYS_SPAWN_WITH_PERMS and SYS_SPAWN_FULL_ARGV) route through here so the grant
-// authority lives in exactly one place. Non-static so the kernel test suite can
-// drive the per-bit decision directly on synthetic Procs.
+// in the session's private per-territory /srv). SPAWN_PERM_CONSOLE_OWNER (LS-5)
+// is gated the SAME way as MAY_POST_SERVICE (console-attached OR a MAY_POST_SERVICE
+// holder) so trusted /sbin/login confers console ownership on the session shell;
+// it is strictly distinct from CONSOLE_TRUSTED (the owner bit never confers attach,
+// so I-27 is untouched -- see the SPAWN_PERM_CONSOLE_OWNER comment in syscall.h).
+// Every bit is rfork-non-propagating: a perm_flags spawn-time decision, not a
+// cap_mask bit, so I-2 (the fork-grantable cap set only reduces) is unaffected.
+// Returns 0 iff every requested bit may be granted by p; -1 otherwise. Both spawn
+// entry points (SYS_SPAWN_WITH_PERMS and SYS_SPAWN_FULL_ARGV) route through here so
+// the grant authority lives in exactly one place. Non-static so the kernel test
+// suite can drive the per-bit decision directly on synthetic Procs.
 int spawn_perm_grant_check(struct Proc *p, u32 perm_flags) {
     if (perm_flags & ~SPAWN_PERM_ALL)                              return -1;
     if ((perm_flags & SPAWN_PERM_CONSOLE_TRUSTED)
@@ -4003,7 +4001,36 @@ int spawn_perm_grant_check(struct Proc *p, u32 perm_flags) {
     if ((perm_flags & SPAWN_PERM_MAY_POST_SERVICE)
             && !proc_is_console_attached(p)
             && !proc_may_post_service(p))                          return -1;
+    if ((perm_flags & SPAWN_PERM_CONSOLE_OWNER)
+            && !proc_is_console_attached(p)
+            && !proc_may_post_service(p))                          return -1;
     return 0;
+}
+
+// apply_spawn_perms — translate the parent-vetted SPAWN_PERM_* bits into their
+// one-way kernel marks on the freshly-spawned child `p`. Called from both spawn
+// thunks (sys_spawn_with_fds_thunk + sys_spawn_full_argv_thunk) in the CHILD
+// thread's context, BEFORE exec_setup, so the child's first user-mode instruction
+// observes the final state and never an un-stamped intermediate. The parent
+// already gate-checked every bit (spawn_perm_grant_check); a bit outside
+// SPAWN_PERM_ALL surviving to here is a kernel invariant violation. proc_set_*
+// take g_proc_table_lock -- safe in the thunk (no lock held at this point).
+// Non-static so the kernel test suite can drive the bit->action mapping directly
+// (a real spawn races the child's exit clearing g_console_owner, so the owner-set
+// wiring is unobservable through a full spawn).
+void apply_spawn_perms(struct Proc *p, u32 perm_flags) {
+    if (perm_flags & SPAWN_PERM_MAY_POST_SERVICE) {
+        proc_mark_may_post_service(p);
+    }
+    if (perm_flags & SPAWN_PERM_CONSOLE_TRUSTED) {
+        proc_set_console_trusted(p);   // A-4c-2: the SAK re-grant target
+    }
+    if (perm_flags & SPAWN_PERM_CONSOLE_OWNER) {
+        proc_set_console_owner(p);     // LS-5: the session shell receives Ctrl-C
+    }
+    if (perm_flags & ~SPAWN_PERM_ALL) {
+        extinction("apply_spawn_perms: unknown SPAWN_PERM_* bit");
+    }
 }
 
 // SYS_SPAWN_WITH_PERMS — P5-corvus-srv-impl-b3a kernel body. The grant gate
@@ -4234,20 +4261,10 @@ static void sys_spawn_full_argv_thunk(void *arg) {
     struct Proc *p = t->proc;
     if (!p) extinction("sys_spawn_full_argv_thunk: no proc");
 
-    // Apply parent-vetted SPAWN_PERM_* bits BEFORE anything user-
-    // observable; the parent gate-checked the bits in sys_spawn_full_
-    // argv_for_proc (R1 F5 fix: was incorrectly attributed to sys_spawn_
-    // with_perms_for_proc). Same pattern as sys_spawn_with_fds_thunk's
-    // perm-application block.
-    if (perm_flags & SPAWN_PERM_MAY_POST_SERVICE) {
-        proc_mark_may_post_service(p);
-    }
-    if (perm_flags & SPAWN_PERM_CONSOLE_TRUSTED) {
-        proc_set_console_trusted(p);   // A-4c-2: the SAK re-grant target
-    }
-    if (perm_flags & ~SPAWN_PERM_ALL) {
-        extinction("sys_spawn_full_argv_thunk: unknown SPAWN_PERM_* bit");
-    }
+    // Apply parent-vetted SPAWN_PERM_* bits BEFORE anything user-observable;
+    // the parent gate-checked them in sys_spawn_full_argv_for_proc. Same
+    // one-way mapping as sys_spawn_with_fds_thunk (apply_spawn_perms).
+    apply_spawn_perms(p, perm_flags);
 
     // A-1a: apply the parent-vetted identity override BEFORE any user-
     // observable state (fd install / exec / userland_enter). The parent

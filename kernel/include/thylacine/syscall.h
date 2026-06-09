@@ -1361,8 +1361,21 @@ enum {
 // chain can designate the SAK re-grant target. NOT a cap (rfork does not
 // propagate it).
 #define SPAWN_PERM_CONSOLE_TRUSTED   (1u << 1)
+// SPAWN_PERM_CONSOLE_OWNER (LS-5) records the spawned child as the console
+// OWNER (g_console_owner) -- the Proc that receives the `interrupt` note when
+// the human hits Ctrl-C on /dev/cons. This is console-*owner* ("who receives
+// Ctrl-C"), strictly DISTINCT from console-*attach* (PROC_FLAG_CONSOLE_ATTACHED
+// / SPAWN_PERM_CONSOLE_TRUSTED, the SAK + hostowner-elevation gate, I-27): the
+// owner bit NEVER confers attach, so I-27 is untouched. Gated like
+// MAY_POST_SERVICE (a console-attached granter OR a Proc that already holds
+// MAY_POST_SERVICE), so trusted /sbin/login -- holding MAY_POST_SERVICE from
+// joey -- confers it on the session shell `ut`. NOT a cap (rfork does not
+// propagate it); the child becomes the owner but, lacking MAY_POST_SERVICE,
+// cannot itself re-designate the owner.
+#define SPAWN_PERM_CONSOLE_OWNER     (1u << 2)
 #define SPAWN_PERM_ALL               (SPAWN_PERM_MAY_POST_SERVICE | \
-                                      SPAWN_PERM_CONSOLE_TRUSTED)
+                                      SPAWN_PERM_CONSOLE_TRUSTED | \
+                                      SPAWN_PERM_CONSOLE_OWNER)
 
 // A-1a (docs/IDENTITY-DESIGN.md §9.1): sys_spawn_args.identity_flags bits.
 // SPAWN_IDENTITY_SET requests that the child be born with the principal_id

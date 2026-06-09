@@ -201,6 +201,11 @@ static inline long t_torpor_wake(unsigned int *addr_va, unsigned int count) {
 // login authority (the SAK re-grant target); joey grants it to /sbin/corvus.
 // Like every perm bit, granting it requires the parent to be console-attached.
 #define T_SPAWN_PERM_CONSOLE_TRUSTED   (1u << 1)
+// T_SPAWN_PERM_CONSOLE_OWNER (LS-5) records the spawned child as the console
+// OWNER -- the Proc that receives the `interrupt` note on Ctrl-C. Distinct from
+// CONSOLE_TRUSTED (it never confers console-attach, I-27); gated like
+// MAY_POST_SERVICE so trusted /sbin/login confers it on the session shell.
+#define T_SPAWN_PERM_CONSOLE_OWNER     (1u << 2)
 
 // SYS_SPAWN_FULL_ARGV bounds — must mirror SYS_SPAWN_ARGV_MAX +
 // SYS_SPAWN_ARGV_DATA_MAX in kernel/include/thylacine/syscall.h.
