@@ -28,6 +28,15 @@
 //   11. `kill` error paths (usage / no-such-job / snare:* reserved).
 //   12. `kill %N` posts a note to a LIVE child's pid (the %N -> pid mapping).
 //
+//   U-7c-a (note runtime delivery):
+//   13. `on note 'interrupt' { ... }` registers a handler that fires when the
+//       note is drained from the shell's own queue (NOT at registration).
+//   14. An unhandled note delivered with no handler is benign (drained +
+//       dropped; deliver is a clean, repeatable no-op afterwards).
+//   15. `mask note 'interrupt' { ... }` defers a queued `interrupt` across the
+//       body (the kernel Thread mask holds it) and the handler fires only at
+//       the post-block drain (scripture 10.8).
+//
 // The harness cannot inject /dev/cons keystrokes (the A-4c constraint), so
 // the interactive keystroke->job path is exercised via the fd-agnostic
 // `Repl::feed` + the directly-driven reaper here. joey gates the boot on
@@ -47,10 +56,11 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use libthyla_rs::alloc::ThylaAlloc;
+use libthyla_rs::notes::{self, NoteClass, NoteTarget};
 use libthyla_rs::process::{Command, Stdio};
 use libthyla_rs::time::{self, Duration};
 use libthyla_rs::{t_putstr, t_wait_pid_for, T_WAIT_WNOHANG};
-use libutopia::eval::{eval_source, Env};
+use libutopia::eval::{deliver_pending_notes, eval_source, Env};
 use libutopia::repl::Repl;
 
 #[global_allocator]
@@ -361,6 +371,119 @@ pub extern "C" fn rs_main() -> i64 {
             let _ = child.wait();
         }
         Err(_) => return fail("kill: could not spawn the `tr` blocker"),
+    }
+
+    // ----- U-7c-a: `on note` / `mask note` runtime delivery -----
+    //
+    // These drive the REAL delivery path: a self-opened note queue + the
+    // libutopia `deliver_pending_notes` drain that the REPL prompt cycle
+    // calls. The earlier job scenarios reaped ~a dozen children, each of
+    // which posted a `child_exit` note to THIS proc's (shared, per-Proc)
+    // queue; every note scenario opens its fd then drains those leftovers
+    // first (no handler -> dropped), so the assertions see only the note it
+    // posts.
+
+    // 13. `on note 'interrupt'` fires on DELIVERY, not registration.
+    let mut env_n = Env::new();
+    env_n.interactive = true;
+    match notes::Notes::open_self() {
+        Ok(nq) => env_n.set_notes(Some(nq)),
+        Err(_) => return fail("on note: could not open the self note queue"),
+    }
+    deliver_pending_notes(&mut env_n); // clear leftover child_exit notes
+    if eval_source(&mut env_n, "on note 'interrupt' { let caught = yes }").is_err() {
+        return fail("on note: registering the handler errored");
+    }
+    if env_n.defined("caught") {
+        return fail("on note: handler ran at registration (must fire only on delivery)");
+    }
+    if notes::send(NoteTarget::SelfProc, "interrupt").is_err() {
+        return fail("on note: self-post of `interrupt` failed");
+    }
+    deliver_pending_notes(&mut env_n);
+    if env_n.get("caught").as_scalar() != "yes" {
+        return fail("on note: handler did not fire on delivery");
+    }
+    // A second drain is a clean no-op (the note was consumed) -- the handler
+    // must NOT fire twice for one note.
+    env_n.assign("caught", libutopia::eval::Value::scalar("no"));
+    deliver_pending_notes(&mut env_n);
+    if env_n.get("caught").as_scalar() != "no" {
+        return fail("on note: handler re-fired with no new note (exactly-once)");
+    }
+
+    // 14. An unhandled note is benign: drained + dropped, no crash, and a
+    //     repeat drain is a clean no-op.
+    let mut env_u = Env::new();
+    env_u.interactive = true;
+    match notes::Notes::open_self() {
+        Ok(nq) => env_u.set_notes(Some(nq)),
+        Err(_) => return fail("unhandled-note: could not open the self note queue"),
+    }
+    deliver_pending_notes(&mut env_u);
+    if notes::send(NoteTarget::SelfProc, "interrupt").is_err() {
+        return fail("unhandled-note: self-post failed");
+    }
+    deliver_pending_notes(&mut env_u); // drains the unhandled note (no panic)
+    deliver_pending_notes(&mut env_u); // empty queue -> clean no-op
+
+    // 15a. `mask note 'interrupt' { ... }` (the parsed path): a pre-posted
+    //      `interrupt` is held across the masked body and the handler fires
+    //      only at the post-block drain (scripture 10.8).
+    let mut env_m = Env::new();
+    env_m.interactive = true;
+    match notes::Notes::open_self() {
+        Ok(nq) => env_m.set_notes(Some(nq)),
+        Err(_) => return fail("mask note: could not open the self note queue"),
+    }
+    deliver_pending_notes(&mut env_m);
+    if eval_source(&mut env_m, "on note 'interrupt' { let drained = yes }").is_err() {
+        return fail("mask note: registering the handler errored");
+    }
+    if notes::send(NoteTarget::SelfProc, "interrupt").is_err() {
+        return fail("mask note: self-post failed");
+    }
+    if env_m.defined("drained") {
+        return fail("mask note: handler fired before any delivery point");
+    }
+    if eval_source(&mut env_m, "mask note 'interrupt' { let inbody = yes }").is_err() {
+        return fail("mask note: evaluating the masked block errored");
+    }
+    if env_m.get("inbody").as_scalar() != "yes" {
+        return fail("mask note: masked body did not run");
+    }
+    if env_m.get("drained").as_scalar() != "yes" {
+        return fail("mask note: deferred handler did not fire at block exit");
+    }
+
+    // 15b. The mask MECHANISM directly: with `interrupt` masked, a posted
+    //      note is dequeue-deferred (a drain does NOT fire the handler);
+    //      unmasking then draining fires it. Proves the kernel Thread mask
+    //      (set by `mask note`) actually holds the note back.
+    let mut env_d = Env::new();
+    env_d.interactive = true;
+    match notes::Notes::open_self() {
+        Ok(nq) => env_d.set_notes(Some(nq)),
+        Err(_) => return fail("mask-mech: could not open the self note queue"),
+    }
+    deliver_pending_notes(&mut env_d);
+    if eval_source(&mut env_d, "on note 'interrupt' { let fired = yes }").is_err() {
+        return fail("mask-mech: registering the handler errored");
+    }
+    let added = env_d.note_mask_add(NoteClass::Interrupt);
+    if notes::send(NoteTarget::SelfProc, "interrupt").is_err() {
+        return fail("mask-mech: self-post failed");
+    }
+    deliver_pending_notes(&mut env_d); // masked -> must NOT fire
+    if env_d.defined("fired") {
+        return fail("mask-mech: a masked note was delivered (mask did not defer)");
+    }
+    if added {
+        env_d.note_mask_remove(NoteClass::Interrupt);
+    }
+    deliver_pending_notes(&mut env_d); // unmasked -> now fires
+    if env_d.get("fired").as_scalar() != "yes" {
+        return fail("mask-mech: unmasked note did not deliver after the mask lifted");
     }
 
     t_putstr("u-job-test: all OK\n");

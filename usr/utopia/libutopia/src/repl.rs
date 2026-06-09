@@ -53,7 +53,7 @@ use libthyla_rs::io::Write as IoWrite;
 use libthyla_rs::t_putstr;
 
 use crate::ansi;
-use crate::eval::{builtin, eval_source, Env};
+use crate::eval::{builtin, deliver_pending_notes, eval_source, Env};
 use crate::line_editor::{EditorAction, LineEditor};
 use crate::palette::Role;
 
@@ -148,6 +148,12 @@ impl Repl {
                     // was foreground-waiting), bash-style: `[N]+ Done` BEFORE
                     // the fresh prompt.
                     self.reap_jobs();
+                    // U-7c: drain the shell's note queue + fire any `on note`
+                    // handlers whose note arrived since the last prompt cycle.
+                    // The cons fd is not pollable at v1.0 (the line-edit read
+                    // stays blocking until U-PTY), so notes are delivered at
+                    // this sync point rather than asynchronously mid-edit.
+                    self.deliver_notes();
                     self.emit_prompt(out);
                 }
                 EditorAction::Cancel => {
@@ -235,6 +241,28 @@ impl Repl {
         for line in self.env.jobs_mut().take_done_notifications() {
             t_putstr(&line);
         }
+    }
+
+    /// Open the shell's own note queue so `on note` / `mask note` handlers
+    /// fire and (U-7c-b) Ctrl-C can be forwarded. Best-effort: a failed open
+    /// simply leaves note delivery inert (the shell degrades to U-7b
+    /// behaviour). Called by the consumer ON-TARGET after `new()` -- `new()`
+    /// stays syscall-free so host tests + the bare-spawn boot check pay
+    /// nothing. Idempotent in effect (a second open replaces the fd).
+    pub fn open_notes(&mut self) {
+        if let Ok(n) = libthyla_rs::notes::Notes::open_self() {
+            self.env.set_notes(Some(n));
+        }
+    }
+
+    /// Drain the shell's note queue + fire any `on note` handler whose note
+    /// arrived since the last prompt cycle (U-7c). Sits beside `reap_jobs`
+    /// in the prompt cycle: notes are delivered at this sync point because
+    /// the cons fd is not pollable at v1.0 (the interactive line-edit read
+    /// stays blocking until U-PTY). No-op until `open_notes` runs. Public so
+    /// a probe can drive delivery directly.
+    pub fn deliver_notes(&mut self) {
+        deliver_pending_notes(&mut self.env);
     }
 }
 

@@ -78,6 +78,7 @@ pub use error::{EvalError, EvalErrorKind, EvalResult};
 pub use expr::eval_expr;
 pub use jobs::{Job, JobTable};
 pub use stmt::{
-    aggregate_pipefail, eval_block, eval_script, eval_source, eval_statement, StatementFlow,
+    aggregate_pipefail, deliver_pending_notes, eval_block, eval_script, eval_source,
+    eval_statement, StatementFlow,
 };
 pub use value::Value;

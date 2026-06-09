@@ -437,17 +437,24 @@ wait-any loop, and `exec_external` / `exec_external_redirected` use
 a coexisting background zombie — `cmd & ; producer | consumer` cannot lose the
 bg child's exit to the pipeline's reap.
 
-### 9.4 Reaping cadence + the U-7c seam
+### 9.4 Reaping cadence + the note-delivery sync point
 
 `Repl::reap_jobs` runs once per accepted line (after `run_line`, before the
 fresh prompt — bash's `[N]+ Done`-before-prompt ordering, catching jobs that
 finished while a foreground command was waiting). It is ONE WNOHANG poll per
 live pid (never a busy-loop → cannot starve a child; U-7-pre F1). A bg job that
 finishes while the user is idle at the prompt is reported at the next accepted
-line; the **async-while-idle** path (the notes fd in the poll set + `on note` /
-`mask note` runtime delivery + Ctrl-C foreground forwarding) lands coherently
-at **U-7c** — the WNOHANG poll is the complete ground truth, so deferring the
-notes machinery loses no correctness, only idle-time promptness.
+line. `Repl::deliver_notes` (§9.6) runs immediately after, at the SAME sync
+point — the cons fd has no `.poll` hook until U-PTY, so notes are delivered
+between commands rather than asynchronously mid-edit. The WNOHANG poll is the
+complete reap ground truth, so this sync-point cadence loses no correctness,
+only idle-time promptness.
+
+The remaining U-7c-b piece — forwarding a `interrupt` note to a RUNNING
+foreground command (the interruptible foreground wait) — is split out: it
+reworks the foreground reap loops (`exec_pipeline` + the single-command wait)
+to poll the notes fd, which is death-path-adjacent and lands as its own focused
+chunk.
 
 ### 9.5 Job-control builtins (U-7b)
 
@@ -482,6 +489,62 @@ scripture §10.6's `snare:term` default is unsendable from userspace; `kill`
 defaults to `interrupt` (the same note the shell's own Ctrl-C path will deliver
 at U-7c), with `kill` for the non-catchable force.
 
+### 9.6 `on note` / `mask note` runtime delivery (U-7c-a)
+
+The `on note 'name' { body }` handler registry (`Env::note_handlers`,
+registered since U-6b) is fired at runtime by `deliver_pending_notes(env)`
+(`eval::stmt`, re-exported from `eval`). The REPL prompt cycle calls it (via
+`Repl::deliver_notes`) at the same sync point as `reap_jobs`.
+
+```rust
+// eval::stmt — re-exported as eval::deliver_pending_notes
+pub fn deliver_pending_notes(env: &mut Env);   // drain + fire handlers; no-op if no note fd
+
+// Env note-queue API (the consumer opens the fd on-target):
+fn set_notes(&mut self, notes: Option<libthyla_rs::notes::Notes>);
+fn notes(&self) -> Option<&libthyla_rs::notes::Notes>;
+fn note_mask(&self) -> NoteMask;
+fn note_mask_add(&mut self, class: NoteClass) -> bool;  // true = newly masked
+fn note_mask_remove(&mut self, class: NoteClass);
+```
+
+**Delivery.** `deliver_pending_notes` drains the shell's own note queue via
+`Notes::try_read` (a `poll(timeout=0)` + `read`, so an empty OR masked-only
+queue returns `None` and the drain stops — never blocks, never spins). Each
+note: a registered `on note` handler wins (its body is `eval_block`'d
+synchronously, best-effort — a body error is swallowed but recorded in
+`$errstr`); an unhandled note takes its built-in disposition (an `interrupt`
+with no handler is benign at the sync point — the running-foreground forward is
+U-7c-b; `child_exit` is informational, the WNOHANG reaper is the ground truth).
+Delivery is **transparent to `$status`** (saved + restored around the drain,
+like bash saving `$?` around a trap), so a handler firing between commands
+never clobbers the next prompt's status. The drain is unbounded (it runs until
+the queue empties); a handler that re-posts its OWN note to self would loop —
+the same user-pathology bash's `trap 'kill -INT $$' INT` has, and not reachable
+today (no shell verb posts an arbitrary note to self; `kill` needs a pid/jobspec
+target). The kernel note queue is otherwise bounded (it coalesces `child_exit`),
+so the drain terminates.
+
+**`mask note 'name' { body }`** (scripture §10.8) maps the name to a kernel
+`NoteClass` (`note_class_for_name`: only `interrupt`/`pipe`/`child_exit` map;
+`kill` is non-catchable, `snare:*`/user names cannot arrive) and, while the
+shell's note fd is open, sets the per-Thread kernel mask via
+`t::notes::set_mask` for the body's duration. A matching note arriving mid-body
+is dequeue-deferred (`devnotes_poll` advertises POLLIN only for a mask-permitted
+note, so a held note cannot spin a polled wait); on block exit the mask is
+restored and `deliver_pending_notes` fires any held handler. Without an open fd
+the mask is pure book-keeping and delivery is governed by sync-point timing
+alone.
+
+**The note fd is opened lazily.** `Repl::open_notes` (`Notes::open_self`) is
+called by the `ut` main loop only after the first successful read confirms a
+real input stream. A bare-spawned `ut` (the boot check) has an EMPTY handle
+table, so opening the note fd eagerly would mint it at **fd 0** — the read loop
+would then block on the note queue instead of EOFing. A session `ut` already
+holds fd 0/1/2 from login, so its note fd lands at 3+. The note fd is NOT added
+to the main poll set (the cons fd is unpollable until U-PTY, so it would
+short-circuit any multi-fd poll there).
+
 ---
 
 ## 10. Open questions deferred to later sub-chunks
@@ -491,7 +554,7 @@ at U-7c), with `kill` for the non-catchable force.
 | `$(cmd)` substitution: how is the subshell forked, stdout captured? | U-6f |
 | ~~Redirects (`>` `<` `>>` `<<`)~~ -- **LANDED at U-6d-b** (resolve_redirects + the libthyla_rs::fs create-or-open/append lift) | ~~U-6d-b~~ done |
 | Redirect on an in-process command (fn / BraceBlock); large-heredoc-to-non-reader; atomic O_APPEND | U-6f / v1.x |
-| Job control: ~~`&` background~~ **LANDED at U-7a** (§9; `eval::jobs` + `eval_background_pipeline` + the by-pid demux + `Repl::reap_jobs`); ~~`jobs`/`fg`/`bg`/`wait`/`kill` builtins~~ **LANDED at U-7b** (§9.5); note-fd polling + `on`/`mask` delivery + Ctrl-C (U-7c) | ~~U-7 / U-7b~~ U-7c |
+| Job control: ~~`&` background~~ **LANDED at U-7a** (§9; `eval::jobs` + `eval_background_pipeline` + the by-pid demux + `Repl::reap_jobs`); ~~`jobs`/`fg`/`bg`/`wait`/`kill` builtins~~ **LANDED at U-7b** (§9.5); ~~`on note`/`mask note` runtime delivery~~ **LANDED at U-7c-a** (§9.6; `deliver_pending_notes` + the `Env` note-queue API); Ctrl-C foreground forwarding (U-7c-b) | ~~U-7 / U-7b / U-7c-a~~ U-7c-b |
 | ~~Glob expansion at argv-time: file-tree walk, no-match → empty (rc nullglob)~~ -- **LANDED at U-6e-b** (-b-1 `fs::read_dir`; -b-2 `glob::expand` + `evaluate_argv`, §6.3). Recursive `**` semantics + trailing-slash dirs-only + for-list/let-RHS expansion (expr context) remain v1.x | ~~U-6e-b~~ done |
 | `set` / `export` (no envp to children yet), `alias`/`unalias` (alias table), `read` (terminal fd 0), `history`, `note` (`note send/list/wait`) -- deferred builtins. ~~`jobs`/`fg`/`bg`/`wait`/`kill`~~ LANDED U-7b (§9.5) | U-6g / U-7c / v1.x |
 | Subshell `( cmds )`: fork + isolated env (libthyla-rs has spawn-then-exec, not fork) | U-6f or later |
@@ -508,6 +571,7 @@ at U-7c), with `kill` for the non-catchable force.
 
 | Sub-chunk | Commit | What |
 |---|---|---|
+| **U-7c-a** | *(pending)* | `on note` / `mask note` runtime delivery (§9.6). New `deliver_pending_notes(env)` (`eval::stmt`, re-exported) drains the shell's own note queue (`Notes::try_read`) at the REPL prompt-cycle sync point (`Repl::deliver_notes`, beside `reap_jobs`) and fires registered `on note` handlers (`eval_block`, best-effort, `$status`-transparent). `eval_mask_note` rewritten from a U-6b body-only pass-through to set the per-Thread kernel mask (`t::notes::set_mask` via the new `Env::note_mask_add/remove`) for the body's duration -> a matching note is dequeue-deferred (`devnotes_poll` POLLIN gates on mask) and fires at the post-block drain (scripture §10.8). `note_class_for_name` maps `interrupt`/`pipe`/`child_exit` -> `NoteClass` (`kill`/`snare:*`/user names don't map). New `Env` note-queue API (`set_notes`/`notes`/`note_mask*`); the note fd is `Option<Notes>`, opened lazily by `Repl::open_notes` from the `ut` main loop AFTER the first read (a bare-spawn `ut` has an empty handle table -> eager open would mint the note fd at fd 0 and the read loop would block on it). **PURE USERSPACE** (libutopia + `ut` + `/u-job-test`; built on the U-2e `t::notes` substrate) -> NOT a formal-audit-trigger surface (self-reviewed: try_read non-blocking drain never spins, masked-queue returns None, borrow-clean drain/dispatch, `$status` save/restore, no fd-0 clobber). The running-foreground Ctrl-C forward is split to **U-7c-b**. `/u-job-test` +3 scenarios (13 on-note-fires-on-delivery + exactly-once; 14 unhandled-note-benign; 15a parsed `mask note` defer+drain, 15b the mask mechanism directly). Verified: `make test-tcg` x2 + `u-job-test: all OK` (15 scenarios) + `Thylacine boot OK` + login E2E OK, **0 EXTINCTION** both boots. |
 | **U-7a** | `4808ea0` | Background jobs (§9). New pure `eval::jobs` (`JobTable` + `Job` in `Env`); `eval_pipeline` routes `&` -> `eval_background_pipeline`; the shared `spawn_pipeline_elements` helper factored out of `exec_pipeline`; both `exec_pipeline` + `capture_external_pipeline` reaps converted wait-any -> **by-pid** (the pid-precise foreground demux); `render_pipeline_cmd`; `Repl::reap_jobs` (the prompt-cycle WNOHANG reaper, §9.4). `cmd &` / `a | b &` register ONE job, print `[N] PID`, status 0; finished jobs emit `[N]+ Done  cmd` before the next prompt. A bg builtin/fn (needs fork) stays NotImplemented. **PURE USERSPACE** -- zero kernel files; built on the U-7-pre `wait_pid_for` primitive -> NOT a formal-audit-trigger surface (self-reviewed: no-spin reaps, by-pid demux, no orphaned bg children, JobTable borrow-clean). The notes-fd / multi-fd-poll integration (async `[N]+ Done` while idle, on/mask delivery, Ctrl-C) is U-7c. New `/u-job-test` (registration, one-job-per-pipeline, reap-to-`Done`, spec-reset, the by-pid foreground demux, bg-builtin rejection, the integrated `Repl` reaper) + `u-test` probes 4/7 updated (`&` now WORKS + reaps, was the stale U-6 `NotImplemented` assertion). Verified: `make test-tcg` x2 + `u-job-test: all OK` + `joey: /u-job-test reaped status=0; U-7a background jobs verified` + `u-test: all OK` + `Thylacine boot OK`, **0 EXTINCTION** both boots. |
 | **U-6-test** | `e4b5100` | The U-6 evaluator arc **cumulative integration smoke** (§8.4) -- **closes the U-6 arc**. New dedicated pre-pivot `/u-6-test` (joey-gated; 7 composed flows weaving subst-capture + `for`/`case`/arith, glob->spawn->capture, var-interp pipelines, builtin->special-var->control flow, var-fed heredoc redirect, and the whole stack through the real `Repl::feed` loop + error recovery). Proves the U-6 surfaces COMPOSE (vs the per-sub-chunk probes' isolation), landing assertions on Env state / `$status` / substitution-captured output. PURE USERSPACE -- zero kernel files (784/784 unchanged); no SMP gate, not a formal-audit-trigger surface (self-reviewed: no-spin loops, bounds-safe, borrow-clean). Verified: kernel **784/784**, `make test-tcg` x2 + `u-6-test: all OK` + `joey: /u-6-test reaped status=0; U-6 evaluator arc integration verified` + login E2E + `Thylacine boot OK`, **0 EXTINCTION** both boots. |
 | **U-6f** | `e9e0aa9` | Command substitution `$(cmd)` / `` `{cmd}` `` (§5.8) + its kernel prerequisite **#926** (a single-thread Proc closes its fds at EXIT, not reap — `docs/reference/14-process-model.md`). `stmt::run_command_substitution[_script]` + `capture_external_pipeline` (drain-before-reap, deadlock-free) + `split_fields` + `trim_trailing_newlines`; `$status` -> `Cell<i32>` (interior mutability so the `&Env` evaluator can record the inner exit, §8.7); the `eval_value_token` Subst/Backtick arms + `eval_dq_in_word`/`render_heredoc_body` DqPart::Subst + the `expr.rs` Subst/Backtick arms; `eval_command`/`eval_let`/`eval_assign` status-before-eval. v1.0 scope = a single redirect-free EXTERNAL pipeline; builtin/fn/control-flow/multi-statement bodies + `<(cmd)`/`>(cmd)` procsub are `NotImplemented` (documented). Bare → whitespace field-split (rc `$ifs`); `"$(cmd)"`/heredoc → inline. **#926 is the audit-bearing death-path surface** (ARCH §25.4): SMP-gated (default+UBSan x smp4/smp8 N=10, 0 corruption) + a focused Opus prosecutor round CLEAN (0 P0 / 0 P1 / 0 P2 / 3 P3 doc); `memory/audit_926_u6f_closed_list.md`. New `/u-subst-test` (9 probes: capture+trim, bare split, `seq` newline-split, `"[$(…)]"` inline, `echo|tr` pipeline capture, backtick form, `$status` propagation, builtin-in-subst NotImplemented, procsub NotImplemented, script-mode implicit-fail) + the `u-test::flow_process_pipe` part-(c) #926 regression (read child stdout to EOF before reap) + the rewritten `test_sys_spawn_with_fds_child_rights_subset_of_parent`. Verified: kernel **784/784**, `u-subst-test: all OK`, login E2E + `Thylacine boot OK`, 0 EXTINCTION. |

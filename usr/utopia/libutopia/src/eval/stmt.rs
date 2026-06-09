@@ -136,6 +136,7 @@ use crate::parser::Span;
 use libthyla_rs::fs::{File, OpenOptions};
 use libthyla_rs::io::{Read as IoRead, Write as IoWrite};
 use libthyla_rs::process::{pipe, Stdio};
+use libthyla_rs::notes::{Note, NoteClass};
 use libthyla_rs::{t_putstr, t_wait_pid_for};
 
 use super::builtin;
@@ -1798,12 +1799,90 @@ fn eval_on_note(env: &mut Env, stmt: &OnNoteStmt) -> EvalResult<StatementFlow> {
 }
 
 fn eval_mask_note(env: &mut Env, stmt: &MaskNoteStmt) -> EvalResult<StatementFlow> {
-    // U-6b: mask is a pass-through that records intent via the body
-    // executing. Actual note-delivery deferral wires at U-7 alongside
-    // the note-fd polling main loop. The note_name expression is
-    // still evaluated so any side-effects (var lookups, etc.) fire.
-    let _name = eval_expr(env, &stmt.note_name)?;
-    eval_block(env, &stmt.body)
+    let name = eval_expr(env, &stmt.note_name)?.as_scalar();
+    // Defer the named class for the body's duration (scripture 10.8). The
+    // kernel Thread mask holds matching notes in the queue (when the shell
+    // has opened its note fd) so a note arriving mid-body is dequeue-
+    // deferred -- a polled wait inside the body sees no POLLIN for it and
+    // cannot spin. Without an open fd this is pure book-keeping and
+    // delivery is governed by sync-point timing alone. `note_mask_add`
+    // returns false for an already-masked class (a nested re-mask), which
+    // we must NOT unwind.
+    let masked = note_class_for_name(&name).filter(|c| env.note_mask_add(*c));
+    let flow = eval_block(env, &stmt.body);
+    if let Some(c) = masked {
+        env.note_mask_remove(c);
+    }
+    // Notes held during the mask are now deliverable (scripture 10.8:
+    // "pending notes drain when the block exits"); fire their handlers.
+    deliver_pending_notes(env);
+    flow
+}
+
+/// Map a note name to its kernel-maskable class, for `mask note`. Only the
+/// maskable kernel-known classes map; `kill` (non-catchable -- the kernel
+/// ignores its mask bit), `snare:*` (kernel-synthetic faults that terminate
+/// rather than enqueue), and user-defined names return `None` -- a
+/// `mask note` over those is a body-only no-op (they either cannot be
+/// deferred or cannot arrive at a userspace queue).
+fn note_class_for_name(name: &str) -> Option<NoteClass> {
+    match name {
+        "interrupt" => Some(NoteClass::Interrupt),
+        "pipe" => Some(NoteClass::Pipe),
+        "child_exit" => Some(NoteClass::ChildExit),
+        _ => None,
+    }
+}
+
+/// Drain + dispatch every immediately-available note from the shell's own
+/// queue (U-7c; scripture 10.7). Called at each REPL sync point (the prompt
+/// cycle) and at a `mask note` block exit. Bounded + non-blocking:
+/// `Notes::try_read` polls with timeout 0, so an empty (or masked-only)
+/// queue returns `None` and the drain stops -- this never blocks and never
+/// spins. A registered `on note` handler fires synchronously here (main-loop
+/// context, no async-signal constraints); an unhandled note takes its
+/// built-in disposition. No-op until the consumer opens the note fd
+/// (`Repl::open_notes`); the host + bare-spawn paths leave it inert.
+pub fn deliver_pending_notes(env: &mut Env) {
+    if env.notes().is_none() {
+        return;
+    }
+    // Note delivery is transparent to `$status` (bash saves `$?` around a
+    // trap): a handler firing between commands must not clobber the status
+    // the next prompt reports. Capture + restore around the whole drain.
+    let saved_status = env.status();
+    loop {
+        // The immutable borrow of `env` for `notes()` lives only across the
+        // `try_read` call; `next` is owned, so `env` is free for dispatch.
+        let next = match env.notes() {
+            Some(n) => n.try_read(),
+            None => break,
+        };
+        match next {
+            Ok(Some(note)) => dispatch_note(env, &note),
+            // Empty/masked-only queue (Ok(None)) or a transient read error
+            // -> stop draining; the next sync point retries.
+            _ => break,
+        }
+    }
+    env.status_set(saved_status);
+}
+
+/// Dispatch one delivered note (U-7c). A registered `on note` handler wins
+/// (scripture 10.7); otherwise the built-in disposition applies. At a sync
+/// point no foreground job is running, so an unhandled `interrupt` is benign
+/// (the running-foreground forward is U-7c-b); `child_exit` is informational
+/// (the WNOHANG reaper is the reap ground truth); other classes are ignored.
+fn dispatch_note(env: &mut Env, note: &Note) {
+    if let Some(body) = env.note_handler_get(&note.name).cloned() {
+        // A handler is best-effort, like an rc `on note` body / a bash trap:
+        // evaluate it for its side effects, swallowing a body error (the
+        // failing statement records it in $errstr). The body runs to
+        // completion before the next note is drained, so handlers for
+        // distinct notes never interleave (N-3-style serialization at the
+        // shell layer).
+        let _ = eval_block(env, &body);
+    }
 }
 
 // ---------------------------------------------------------------------

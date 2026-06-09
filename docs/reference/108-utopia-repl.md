@@ -33,7 +33,9 @@ The loop lives in two pieces:
 | Concern | Chunk | Why |
 |---|---|---|
 | Read-parse-eval cycle; Ctrl-D/`exit`/EOF exit; prompt render | **U-6g** (here) | The loop itself |
-| Multi-fd `poll()` across notes fds; Ctrl-C/Ctrl-Z; `&`; jobs/fg/bg; `on note`/`mask note` | **U-7** | §10.2 routes `snare:int` to the notes fd via PTY line discipline; the U-7 loop adds those fds to the poll set |
+| `&`; jobs/fg/bg/wait/kill | **U-7a/b** | §10.5 / §10.6 (LANDED) |
+| `on note`/`mask note` runtime delivery (sync-point, §3.7) | **U-7c-a** | LANDED — drained at the prompt cycle; the cons fd is unpollable until U-PTY |
+| Ctrl-C foreground forwarding; Ctrl-Z; multi-fd `poll()` across a pollable cons + notes fds | **U-7c-b / U-PTY** | §10.2 forward to the running fg job; the pollable cons is U-PTY |
 | Pollable cons (`.poll` hook) + termios (raw/cooked, ECHO, ISIG) + per-Proc fd 0/1/2 | **U-PTY** | The line-discipline substrate |
 
 At v1.0 `/dev/cons` is a blocking-read-only Dev with **no `.poll` hook**
@@ -93,7 +95,8 @@ buffering composed output before a single syscall.
 3. A `PollSet` with fd 0 (`io::stdin()`) added for `READ`.
 4. Loop: `poll.poll(Block)` → `io::stdin().read(&mut buf)`:
    - `Ok(0) | Err(_)` → `break repl.exit_code()` (EOF / no fd 0 / error).
-   - `Ok(n)` → `repl.feed(&buf[..n], &mut out)`; if it returns `Some(code)`,
+   - `Ok(n)` → on the FIRST such read, `repl.open_notes()` (U-7c; lazy, see
+     below); then `repl.feed(&buf[..n], &mut out)`; if it returns `Some(code)`,
      `break code`.
 5. Return the exit code as the process status.
 
@@ -101,6 +104,17 @@ The `poll()` is correct on a pipe (real readiness) and harmless on cons
 (no `.poll` → always-ready → the subsequent blocking `read` waits). It
 cannot spin: `read` returning `Ok(0)`/`Err` breaks; only `Ok(n>0)` (genuine
 input) continues.
+
+**Lazy note-fd open (U-7c).** `open_notes` (`Notes::open_self`) is deferred to
+the first successful read instead of running before the loop. A bare-spawned
+`ut` (joey's boot check, which verifies `ut` runs + exits 0) has an EMPTY handle
+table — an eager open would mint the note fd at **fd 0**, and the read loop
+would then block on the note queue forever instead of EOFing. Deferring to a
+confirmed input stream means the boot-check `ut` never opens notes (it EOFs on
+the first read and exits 0), while a session `ut` (login gives it fd 0/1/2)
+opens its note fd at 3+. The note fd is deliberately NOT added to the `PollSet`:
+the cons fd is unpollable until U-PTY, so notes are delivered at the prompt-cycle
+sync point (§3.7), not via this poll.
 
 ### 3.2 `Repl::feed` action dispatch
 
@@ -111,7 +125,7 @@ so the loop body may freely take `&mut self`) and dispatches each action:
 |---|---|
 | `NoChange` | nothing |
 | `Redraw` | `render(prompt)` → sink |
-| `Accept(line)` | `\r\n` → sink; push non-empty line to history; `run_line`; if `env.exit_requested()` → return `Some(code)`; else `reap_jobs` (U-7a) then fresh prompt |
+| `Accept(line)` | `\r\n` → sink; push non-empty line to history; `run_line`; if `env.exit_requested()` → return `Some(code)`; else `reap_jobs` (U-7a) then `deliver_notes` (U-7c, §3.7) then fresh prompt |
 | `Cancel` (Ctrl-C) | `\r\n` + fresh prompt (the editor already reset its buffer) |
 | `Eof` (Ctrl-D, empty buffer) | `\r\n`; return `Some(env.status())` |
 | `ClearScreen` (Ctrl-L) | `\x1b[2J\x1b[H` + render |
@@ -178,7 +192,20 @@ completes, `0` (alive) → leave it. `reap_jobs` then `t_putstr`s each
 busy-loop (U-7-pre F1: a hot WNOHANG loop can starve the awaited child). It is
 `pub` so the `/u-job-test` probe can drive the real reap path. A bg job that
 finishes while the user is idle at the prompt is reported at the next accepted
-line; the async-while-idle path (the notes fd in the poll set) is U-7c.
+line; the async-while-idle path (a pollable cons + the notes fd in the poll
+set) is U-PTY / U-7c-b.
+
+### 3.7 Note delivery (U-7c-a)
+
+`Repl::deliver_notes(&mut self)` runs in the `Accept` branch right after
+`reap_jobs` (the same prompt-cycle sync point) and delegates to
+`eval::deliver_pending_notes(&mut self.env)` — see `94-utopia-eval.md` §9.6.
+It drains the shell's own note queue (opened lazily by `open_notes`, §3.1) and
+fires any registered `on note` handler; `mask note` defers a class for its
+body via the kernel Thread mask. Delivery is at this sync point (not async)
+because the cons fd is unpollable until U-PTY. `deliver_notes` is `pub` so the
+`/u-job-test` probe drives delivery directly; it is a no-op when the note fd is
+unopened (host tests, the bare-spawn boot check).
 
 ## 4. Exit semantics
 
@@ -211,8 +238,10 @@ with `repl.exit_code()` = `exit_requested().unwrap_or(env.status())`.
 | Ctrl-D / `exit` / EOF exit; interactive error survival | DONE |
 | Default prompt (cwd + glyph) | DONE |
 | Background `&` + the job table + prompt-cycle `[N]+ Done` reaping (`reap_jobs`, §3.6) | DONE (U-7a) |
-| `jobs`/`fg`/`bg`/`wait`/`kill` builtins | U-7b |
-| Multi-fd job-control `poll()` (notes fd); Ctrl-C forwarding; `on`/`mask` delivery | U-7c |
+| `jobs`/`fg`/`bg`/`wait`/`kill` builtins | DONE (U-7b) |
+| `on note`/`mask note` runtime delivery (`deliver_notes`/`open_notes`, §3.7) | DONE (U-7c-a) |
+| Ctrl-C foreground forwarding (interruptible foreground wait) | U-7c-b |
+| Multi-fd job-control `poll()` over a pollable cons | U-PTY |
 | Ctrl-Z (stop) + termios | U-PTY |
 | Pollable cons + termios (raw/ECHO) + per-Proc fd 0/1/2 | U-PTY |
 | `prompt`-shell-function capture | later U-* |

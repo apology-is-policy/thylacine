@@ -78,9 +78,9 @@ pub struct Env {
     /// function defs are globally scoped.
     fns: BTreeMap<String, FnDecl>,
     /// `on note 'name' { body }` handler registry (scripture 9.5 +
-    /// 10.7). The body is invoked at the next main-loop tick after
-    /// the named note arrives. At U-6b only registration is wired;
-    /// runtime delivery wires at U-7 alongside note-fd polling.
+    /// 10.7). The body is invoked synchronously at the next main-loop
+    /// sync point after the named note arrives -- `deliver_pending_notes`
+    /// (U-7c) drains the queue and fires the matching body.
     note_handlers: BTreeMap<String, Vec<Statement>>,
     /// $status -- exit code of the last command. Initialized to 0
     /// at construction. A `Cell` so a command substitution (the first
@@ -128,6 +128,21 @@ pub struct Env {
     /// here; the REPL prompt-cycle reaper polls + reports them. Pure
     /// state (no syscalls); the syscall-driven reaping lives in `ut`.
     jobs: JobTable,
+    /// The shell's own note queue, fd-shaped (U-7c; scripture 10.1 +
+    /// 10.7). Opened on-target by the consumer (`Repl::open_notes` or a
+    /// probe) AFTER construction -- `Env::new` stays syscall-free so host
+    /// construction and the bare-spawn boot check pay nothing. `None`
+    /// until opened; while `None`, `deliver_pending_notes` is inert and
+    /// `mask note` skips the kernel Thread mask (delivery is then governed
+    /// purely by sync-point timing).
+    notes: Option<libthyla_rs::notes::Notes>,
+    /// The shell's intended note mask (U-7c; scripture 10.8). A
+    /// `mask note 'name' { ... }` block adds the named class for the
+    /// body's duration; a polled foreground wait (U-7c-b) consults it to
+    /// defer forwarding a masked note. Mirrored into the per-Thread kernel
+    /// mask via `t::notes::set_mask` only while `notes` is open, so a held
+    /// note is dequeue-deferred (no busy poll).
+    note_mask: libthyla_rs::notes::NoteMask,
 }
 
 impl Env {
@@ -148,6 +163,8 @@ impl Env {
             trace_depth: 0,
             pending_exit: None,
             jobs: JobTable::new(),
+            notes: None,
+            note_mask: libthyla_rs::notes::NoteMask::NONE,
         }
     }
 
@@ -284,6 +301,54 @@ impl Env {
     /// Whether a handler is registered for the given note name.
     pub fn note_handler_defined(&self, name: &str) -> bool {
         self.note_handlers.contains_key(name)
+    }
+
+    // === Note delivery (U-7c) ===
+
+    /// Install the shell's own note queue. The consumer opens it on-target
+    /// (`Notes::open_self`) once after construction; host tests and
+    /// note-less probes leave it `None`. Replacing an existing queue drops
+    /// the prior fd (closing it).
+    pub fn set_notes(&mut self, notes: Option<libthyla_rs::notes::Notes>) {
+        self.notes = notes;
+    }
+
+    /// Borrow the shell's note queue, if opened. `None` => note delivery is
+    /// inert (the pre-U-7c / host path).
+    pub fn notes(&self) -> Option<&libthyla_rs::notes::Notes> {
+        self.notes.as_ref()
+    }
+
+    /// The shell's current note mask (U-7c).
+    pub fn note_mask(&self) -> libthyla_rs::notes::NoteMask {
+        self.note_mask
+    }
+
+    /// Add `class` to the shell note mask (a `mask note` block entry) and,
+    /// when the queue is open, push the new mask to the kernel Thread so the
+    /// class is dequeue-deferred (a held note advertises no POLLIN, so a
+    /// polled wait cannot spin on it). Returns `true` iff the class was
+    /// newly added -- the caller pairs a `true` with `note_mask_remove` on
+    /// block exit and must NOT unwind a `false` (an already-masked re-entry).
+    pub fn note_mask_add(&mut self, class: libthyla_rs::notes::NoteClass) -> bool {
+        if self.note_mask.contains(class) {
+            return false;
+        }
+        self.note_mask = self.note_mask.with(class);
+        if self.notes.is_some() {
+            let _ = libthyla_rs::notes::set_mask(self.note_mask);
+        }
+        true
+    }
+
+    /// Remove `class` from the shell note mask (a `mask note` block exit) and
+    /// restore the kernel Thread mask when the queue is open. Pairs with a
+    /// `true` from `note_mask_add`.
+    pub fn note_mask_remove(&mut self, class: libthyla_rs::notes::NoteClass) {
+        self.note_mask = self.note_mask.without(class);
+        if self.notes.is_some() {
+            let _ = libthyla_rs::notes::set_mask(self.note_mask);
+        }
     }
 
     // === Special variables ===

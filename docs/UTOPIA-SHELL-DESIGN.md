@@ -644,6 +644,8 @@ mask note 'snare:int' {
 
 Suppresses delivery of the named note class during the body. Pending notes drain when the block exits (the handler for that class fires, if any, immediately after `mask` returns).
 
+**As-built (U-7c-a).** Runtime delivery landed in `libutopia::eval::deliver_pending_notes`, fired at the REPL prompt-cycle sync point (`Repl::deliver_notes`, beside `reap_jobs`) rather than from a multi-fd `poll()` — at v1.0 the cons fd has no `.poll` hook (U-PTY), so notes are delivered between commands, not asynchronously mid-edit. The `snare:int` in the §10.7/§10.8 examples is **illustrative, not as-built**: a `snare:*` note is kernel-synthetic (a fault) and terminates the Proc rather than enqueueing to a userspace fd, and `notes_post` rejects a userspace `snare:`-prefixed post — so the receivable, maskable note for Ctrl-C is `interrupt` (the example should read `on note 'interrupt' { ... }`). `mask note` engages the per-Thread kernel mask (`t::notes::set_mask`) for the body's duration so a held note is dequeue-deferred (`devnotes_poll` advertises POLLIN only for a mask-permitted note); the deferred handler fires at the post-block drain. Only `interrupt`/`pipe`/`child_exit` map to a maskable class; `kill` is non-catchable and user/`snare:` names cannot arrive. The forward of `interrupt` to a *running foreground command* (the interruptible foreground wait) is the U-7c-b follow-on.
+
 ### 10.9 The Plan 9 spirit
 
 This entire surface is "Thylacine's notes substrate, exposed at the shell." Programs that consume notes via the kernel substrate (libthyla-rs's `t::notes::Notes` API) see exactly the same model. The shell is not novel; it's idiomatic on top of what's already there.

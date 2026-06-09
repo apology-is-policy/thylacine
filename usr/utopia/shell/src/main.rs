@@ -91,6 +91,16 @@ pub extern "C" fn rs_main() -> i64 {
     poll.add(&io::stdin(), PollEvents::READ);
 
     let mut buf = [0u8; 256];
+    // U-7c: the shell's own note queue (for `on note` / `mask note` handlers,
+    // delivered at each prompt cycle) is opened LAZILY -- only after the first
+    // successful read proves a real input stream exists. The bare-spawn boot
+    // check has an EMPTY handle table, so `Notes::open_self` would mint the
+    // note fd as fd 0 and the read below would then block on the note queue
+    // instead of EOFing; deferring the open to a confirmed session avoids that
+    // collision (a session `ut` already holds fd 0/1/2 from login, so its note
+    // fd lands at 3+). The cons fd has no `.poll` hook until U-PTY, so notes
+    // stay sync-point delivered -- the note fd is NOT added to this poll set.
+    let mut notes_opened = false;
     let exit_code: i32 = loop {
         // A poll error (e.g. no fd 0 on the bare-spawn boot check) is
         // ignored; the read below then surfaces the same EOF/error and
@@ -100,6 +110,10 @@ pub extern "C" fn rs_main() -> i64 {
         match io::stdin().read(&mut buf) {
             Ok(0) | Err(_) => break repl.exit_code(),
             Ok(n) => {
+                if !notes_opened {
+                    repl.open_notes();
+                    notes_opened = true;
+                }
                 if let Some(code) = repl.feed(&buf[..n], &mut out) {
                     break code;
                 }
