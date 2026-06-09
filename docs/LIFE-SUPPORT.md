@@ -281,6 +281,15 @@ log in -> `ls` -> `cd` -> `mkdir` -> `touch`/`cp`/`mv` -> `echo > f` -> `cat`/`g
 -> pipe -> edit (LS-7) -> Ctrl-C -> `jobs`/`fg` -> logout. Proves the whole arc
 composes for a real workflow. Closes the LS arc.
 
+> **Scheduled revisit at arc close: Imperium** (`docs/IMPERIUM-DESIGN.md`,
+> accepted 2026-06-08). Once LS-test closes the arc and the shell is *usable*,
+> the next capstone is **imperium** -- the fork-propagating legate scope +
+> trusted-path `lex curiata` that turns the A-4 clearance substrate into a
+> `sudo -s`-style power-user mode (an elevated shell *safer* than a root shell:
+> abdication de-escalates the whole subtree atomically). It is a post-LS
+> identity-arc + Utopia capstone (scripture fold-in + spec-first kernel lift +
+> corvus per-level keys + shell builtins + a hard audit), NOT LS-arc work.
+
 ### LS-9 — The long tail [v1.x]
 
 `ln`/`readlink` (no `t_link`/`t_symlink`/`t_readlink`; G11), `export`/`env`-real
