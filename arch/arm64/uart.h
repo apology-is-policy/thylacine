@@ -16,6 +16,7 @@
 #ifndef THYLACINE_ARCH_ARM64_UART_H
 #define THYLACINE_ARCH_ARM64_UART_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -59,6 +60,11 @@ void uart_puts(const char *s);
 // clearing any stale RX raw-interrupt state. boot_main() calls this once,
 // then gic_attach(UART_INTID_PL011, uart_rx_handler, ...) + gic_enable_irq.
 void uart_rx_init(void);
+
+// True iff the PL011 RX path is live (CR.UARTEN + CR.RXE both set). QEMU's
+// PL011 resets UARTEN clear, so this is false until uart_rx_init() runs --
+// the #943 regression guard for "the console silently never receives".
+bool uart_rx_path_enabled(void);
 
 // PL011 RX IRQ handler (GIC dispatch target; runs in IRQ context). Drains
 // the RX FIFO, splitting each 12-bit DR entry into a data byte + a break

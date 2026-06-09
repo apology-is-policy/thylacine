@@ -114,8 +114,11 @@ fn read_line(fd: i64, out: &mut Vec<u8>) -> bool {
             return !out.is_empty();
         }
         match b[0] {
-            b'\n' => return true,
-            b'\r' => {}
+            // A raw console (no line discipline at v1.0) delivers CR (0x0d) on
+            // Enter, not LF -- accept either as the line terminator. ut's line
+            // editor already accepts both; login's hand-rolled reader must too,
+            // or a real keypress at the getty prompt never completes a line.
+            b'\n' | b'\r' => return true,
             c => {
                 if out.len() < MAX_LINE {
                     out.push(c);

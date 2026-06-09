@@ -42,6 +42,9 @@
 #define PL011_IMSC_RTIM   (1u << 6)    // RX-timeout interrupt mask
 #define PL011_ICR_RXIC    (1u << 4)    // clear RX interrupt
 #define PL011_ICR_RTIC    (1u << 6)    // clear RX-timeout interrupt
+#define PL011_CR          0x030        // control register (UARTEN/TXE/RXE)
+#define PL011_CR_UARTEN   (1u << 0)    // UART master enable
+#define PL011_CR_RXE      (1u << 9)    // receive enable
 
 // Active PL011 base. Defaults to QEMU virt fallback so prints work
 // during early boot (before DTB parsing). uart_set_base() updates this
@@ -94,15 +97,29 @@ void uart_putc(char c) {
     mmio_write32(base, PL011_DR, (uint32_t)(unsigned char)c);
 }
 
-// A-4c-1: unmask the PL011 RX path. Clear any stale RX raw-interrupt state,
-// then set IMSC.RXIM | RTIM so a received byte (or an RX-FIFO-timeout with
-// data pending) raises the UART SPI. CR (UARTEN/TXE/RXE) is left as QEMU's
-// default brings it up -- touching CR risks disrupting the live TX path.
+// A-4c-1: enable the PL011 RX path. QEMU's virt PL011 comes up in its reset
+// state (CR=0x300: TXE|RXE set, UARTEN clear) and is lenient about TX without
+// UARTEN -- which is why kernel prints work even though the UART is master-
+// disabled -- but it does NOT receive bytes or raise the RX IRQ until UARTEN
+// is set. So set UARTEN|RXE first (a pure OR: preserves TXE + cannot disturb
+// the live TX path), then clear stale RX raw-interrupt state + unmask
+// IMSC.RXIM|RTIM so a received byte (or an RX-FIFO-timeout with data pending)
+// raises the UART SPI.
 void uart_rx_init(void) {
     uintptr_t base = pl011_base;
+    uint32_t cr = mmio_read32(base, PL011_CR);
+    mmio_write32(base, PL011_CR, cr | PL011_CR_UARTEN | PL011_CR_RXE);
     mmio_write32(base, PL011_ICR, PL011_ICR_RXIC | PL011_ICR_RTIC);
     uint32_t imsc = mmio_read32(base, PL011_IMSC);
     mmio_write32(base, PL011_IMSC, imsc | PL011_IMSC_RXIM | PL011_IMSC_RTIM);
+}
+
+// Regression guard (#943): the RX path is live iff the UART is master-enabled
+// (CR.UARTEN) AND receive-enabled (CR.RXE). QEMU's PL011 resets with UARTEN
+// clear; before uart_rx_init set it, the console silently never received.
+bool uart_rx_path_enabled(void) {
+    uint32_t cr = mmio_read32(pl011_base, PL011_CR);
+    return (cr & PL011_CR_UARTEN) != 0u && (cr & PL011_CR_RXE) != 0u;
 }
 
 // A-4c-1: PL011 RX IRQ handler. Runs in IRQ context (IRQs masked at PSTATE).

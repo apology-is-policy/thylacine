@@ -55,6 +55,7 @@ void test_cons_sak_via_console_mgr(void);
 void test_proc_console_relinquish(void);              // A-5a (I-27)
 void test_proc_console_relinquish_other_owner(void);  // A-5a (self-only)
 void test_cons_console_open(void);                    // A-5a (SYS_CONSOLE_OPEN)
+void test_uart_rx_path_enabled(void);                 // #943 console-RX guard
 
 // cons.c test hooks + the extern Dev (read slot ignores the Spoor arg, so the
 // tests pass NULL). proc.c test helpers (the test_proc.c / test_devproc.c pattern).
@@ -68,6 +69,18 @@ extern struct Proc *proc_test_console_owner(void);   // A-4c-2 SAK assertions
 // global ring, so the opened handle is a valid console reader.
 extern hidx_t sys_console_open_for_proc(struct Proc *p);
 extern s64 sys_read_for_proc(struct Proc *p, hidx_t h, u8 *kbuf, u64 len);
+
+// #943: the PL011 RX path lives in arch/arm64/uart.c.
+extern bool uart_rx_path_enabled(void);
+
+// #943 regression: the PL011 RX path must be live after boot (CR.UARTEN|RXE).
+// QEMU's PL011 resets with UARTEN clear, so this FAILS on the pre-fix kernel
+// where uart_rx_init never set it -- the bug that made the console silently
+// never receive a keystroke (interactive login impossible). uart_rx_init ran
+// during boot; this reads the real PL011 CR directly.
+void test_uart_rx_path_enabled(void) {
+    TEST_ASSERT(uart_rx_path_enabled(), "PL011 RX path live (CR.UARTEN|RXE)");
+}
 
 // 16-byte-bounded name equality against a literal.
 static bool name_eq(const char *name, const char *lit) {
