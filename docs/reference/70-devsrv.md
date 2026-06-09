@@ -260,16 +260,23 @@ bool proc_may_post_service(const struct Proc *p);
 `dev_init()`. The live vtable slots are `init` (stamps the type
 tag on every registry entry), `attach` (yields the `/srv` root QTDIR
 Spoor), `walk` (the `/srv` root, one component deep, to a service
-Spoor), `open` (stalk-3b-β = **connect**: a `/srv/<name>` service-ref Spoor
-mints a `SrvConn` and returns the connection endpoint — a dev9p root Spoor for
-9p-mode, a `CSRVCLIENT` byte-conn Spoor for byte-mode; the slot resolves the
-connecting Proc from `current_thread()->proc` and calls `devsrv_open_connect`),
-and `read` / `write` / `close` (real for a connection Spoor — `read`/`write`
-mirror by the `CSRVCLIENT` direction, `close` honors
-`srvconn_is_kernel_attached`; see Implementation). The remaining slots
-(`stat`, `create`, `bread`, `bwrite`, `remove`, `wstat`, `power`) are
-graceful-fail stubs (`create`=post rides the dedicated `devsrv_post_listener`
-handler branch, not the vtable slot).
+Spoor), `open` (stalk-3b-β = **connect** for a `/srv/<name>` service-ref Spoor: mints a
+`SrvConn` and returns the connection endpoint — a dev9p root Spoor for 9p-mode, a
+`CSRVCLIENT` byte-conn Spoor for byte-mode; the slot resolves the connecting Proc
+from `current_thread()->proc` and calls `devsrv_open_connect`. **#957:** opening
+the registry ROOT — `aux == SRV_REGISTRY_MAGIC`, reached by crossing into `/srv`
+via stalk or the single-hop `SYS_WALK_OPEN` `domount` — is instead a plain
+**directory open** in place: set `COPEN`, return the root. So `cd /srv` / `ls
+/srv` / `fs::is_dir("/srv")` see a directory rather than a connect-fail), `read`
+/ `write` / `close` (real for a connection Spoor — `read`/`write` mirror by the
+`CSRVCLIENT` direction, `close` honors `srvconn_is_kernel_attached`; see
+Implementation), and `stat_native` (**#957:** reports the registry root as a
+`QTDIR` 0555 SYSTEM-owned directory, a service node as a `QTFILE` — derived from
+`c->qid.type`; devsrv is NOT `perm_enforced`, so the per-territory `/srv` mount
+visibility, not rwx, is the I-1 boundary. This is the open+stat prerequisite of
+#932's `/srv` readdir). The remaining slots (`stat`, `create`, `bread`, `bwrite`,
+`remove`, `wstat`, `power`) are graceful-fail stubs (`create`=post rides the
+dedicated `devsrv_post_listener` handler branch, not the vtable slot).
 
 ---
 

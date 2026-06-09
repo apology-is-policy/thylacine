@@ -166,7 +166,20 @@ The parent-walk opens intermediates `T_OPATH` (R|W since A-3b), which ALSO fixed
 a latent `File::create` depth>=2 bug (old `T_OREAD` -> RIGHT_READ-only parent that
 SYS_WALK_CREATE rejects -- pulled forward). `rm -r`/`cp -r` skip `.`/`..`. New
 always-on `fs-mut-smoke` (joey post-pivot, 13 checks incl. depth-3 File::create)
-+ `ls-3b.exp` LS-CI; 789/789, ci-smp-gate 0 corruption] -> LS-3c (misc
++ `ls-3b.exp` LS-CI; 789/789, ci-smp-gate 0 corruption] -> **#957 [done] (kernel,
+audit-bearing)**: LS-3b surfaced that a logged-in user could NOT write to their own
+`/home/<user>` -- the single-hop `SYS_WALK_OPEN` (which libthyla-rs `fs::` mutations
+navigate parent dirs with) did NOT cross mounts (only multi-component `stalk`/SYS_OPEN
+did), so create/rename/unlink resolved the SYSTEM-owned placeholder under the mount, not
+the user-owned mounted root. FIX: `sys_walk_open_handler` crosses at the source + result
+via the now-public `stalk_cross_mounts` (Plan 9: all walking crosses); crossing into
+`/srv` required making the devsrv registry root openable+stat-able as a directory
+(`devsrv_open` root branch + `devsrv_stat_native`, the #932 readdir prerequisite).
+Verified: 791/791 (+2 devsrv tests), boot + u-builtin cd /srv + ls-3b(a) /home-write
+PASS, ci-smp-gate 0 corruption; focused Opus audit 0 P0/1 P1/0 P2/2 P3 (F1 pre-existing
+open-return-bool, devsrv connect via single-hop walk leaked the endpoint -> adopt
+open()'s return like stalk; F2 ls /srv -> #932; F3 comment). #958 = the ls-3b multi-step
+LS-CI net is PTY-render-flaky (harness, not #957) -> LS-3c (misc
 coreutils) -> LS-4 (relative paths) -> LS-5 (Ctrl-C) form the MVP; then LS-6/7/K (login
 UX, a minimal editor, id/whoami/date) for breadth and LS-8 (U-PTY: pollable cons +
 termios + async) for depth. Tasks #944-#953. Supersedes the loose U-9..N / U-PTY

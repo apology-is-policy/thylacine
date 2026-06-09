@@ -75,4 +75,17 @@ struct Spoor;
 struct Spoor *stalk(struct Proc *p, struct Spoor *start,
                     const char *path, u64 pathlen, int amode, u32 omode);
 
+// stalk_cross_mounts -- Plan 9 `domount`, exposed for the single-hop walk
+// syscalls (SYS_WALK_OPEN) so they cross mounts identically to stalk()/SYS_OPEN.
+// Tests `probe`'s (dc, devno, qid.path) identity against `p`'s mount table; if
+// it is a mount point, mints an INDEPENDENT clone-walk of the mounted source and
+// follows a mount-over-mount chain to the leaf. `probe` is NOT consumed -- the
+// caller decides whether to clunk it.
+//
+//   *out == NULL, return 0 : probe is not a mount point (no crossing).
+//   *out != NULL, return 0 : crossed; *out is OWNED (caller clunks it).
+//   return -1              : probe IS a mount point but minting the crossed
+//                            Spoor failed; *out == NULL; probe still owned.
+int stalk_cross_mounts(struct Proc *p, struct Spoor *probe, struct Spoor **out);
+
 #endif // THYLACINE_STALK_H

@@ -376,6 +376,8 @@ void test_stalk_mount_amode_no_cross(void);
 void test_stalk_cross_mount_chain(void);
 void test_stalk_cross_mount_no_leak(void);
 void test_devsrv_registered(void);
+void test_devsrv_open_root_dir(void);
+void test_devsrv_stat_native_root(void);
 void test_devsrv_post_gate(void);
 void test_devsrv_post_basic(void);
 void test_devsrv_tombstone(void);
@@ -1246,6 +1248,8 @@ struct test_case g_tests[] = {
     { "devramfs.readdir_paginates_no_dup_no_skip",
                                        test_devramfs_readdir_paginates_no_dup_no_skip, false, NULL },
     { "devsrv.registered",             test_devsrv_registered,             false, NULL },
+    { "devsrv.open_root_dir",          test_devsrv_open_root_dir,          false, NULL },
+    { "devsrv.stat_native_root",       test_devsrv_stat_native_root,       false, NULL },
     { "devsrv.post_gate",              test_devsrv_post_gate,              false, NULL },
     { "devsrv.post_basic",             test_devsrv_post_basic,             false, NULL },
     { "devsrv.tombstone",              test_devsrv_tombstone,              false, NULL },

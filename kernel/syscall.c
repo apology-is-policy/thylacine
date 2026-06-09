@@ -1421,6 +1421,22 @@ static s64 sys_walk_open_handler(u64 spoor_fd_raw, u64 name_va,
         src = sys_lookup_spoor(p, (hidx_t)spoor_fd_raw, RIGHT_READ);   // ref-held
         if (!src)                                     return -1;
     }
+
+    // #957: cross the SOURCE if it is a mount point (Plan 9 domount on the
+    // directory we walk THROUGH) -- walk INTO + X-check the mounted root, not
+    // the shadowed mount point. Mirrors stalk's base cross so a single-hop
+    // SYS_WALK_OPEN behaves exactly like a one-component stalk. The crossed
+    // clone is OWNED (its own fid); clunk the original src and adopt it. In
+    // practice every fd reaching here is already post-cross (the result cross
+    // below crosses every walk/open output) and the Territory root is never a
+    // mount-table entry -- so this is a no-op for current callers -- but it is
+    // correct if a mount-point fd ever exists. stalk_cross_mounts uses only
+    // src's identity (dc/devno/qid), not src->dev, so it precedes the dev-check.
+    {
+        struct Spoor *crossed = NULL;
+        if (stalk_cross_mounts(p, src, &crossed) < 0)    { spoor_clunk(src); return -1; }
+        if (crossed) { spoor_clunk(src); src = crossed; }
+    }
     if (!src->dev || !src->dev->walk || !src->dev->open) { spoor_clunk(src); return -1; }
 
     // A-2d (IDENTITY-DESIGN.md 3.7.1): search (X) permission on the source
@@ -1532,6 +1548,23 @@ static s64 sys_walk_open_handler(u64 spoor_fd_raw, u64 name_va,
     // returned in w->qid[] — the next open() will refresh nc->qid).
     walkqid_free(w);
 
+    // #957: cross the walked RESULT. If nc is a mount point, yield the MOUNTED
+    // ROOT (Plan 9 domount on the resolved node), so a single-hop SYS_WALK_OPEN
+    // onto a mount point opens/returns the mounted tree -- identical to stalk's
+    // final-element cross (kernel/stalk.c) + SYS_OPEN. THE FIX: libthyla-rs fs::
+    // navigates parent dirs component-by-component via SYS_WALK_OPEN
+    // (file::with_parent_dir), so without this a create/rename/unlink into a
+    // per-user /home/<user> 9P mount resolved the shadowed SYSTEM-owned
+    // placeholder and denied the write (the owner -- the logged-in user -- saw
+    // `other` on the placeholder's 0755). The crossed clone is OWNED (own fid);
+    // the perm_check + Dev.open below then run on the mounted root, and the
+    // installed handle's rights are derived from it.
+    {
+        struct Spoor *crossed = NULL;
+        if (stalk_cross_mounts(p, nc, &crossed) < 0)  { spoor_clunk(nc); return -1; }
+        if (crossed) { spoor_clunk(nc); nc = crossed; }
+    }
+
     // FS-delta (IDENTITY-DESIGN.md §9.4): SYS_WALK_OPEN_OPATH skips the
     // open. nc is walked (dev9p_walk set its fid + qid) but NOT Tlopen'd,
     // yielding a non-opened, walkable handle -- the valid base for
@@ -1542,8 +1575,11 @@ static s64 sys_walk_open_handler(u64 spoor_fd_raw, u64 name_va,
         // A-2d: R and/or W permission on the walked target per the open mode
         // (OREAD->R, OWRITE->W, ORDWR->R|W, OEXEC->X; OTRUNC adds W). O_PATH is
         // exempt from this gate (a walk-only handle has no access semantics --
-        // FS-delta 9.4) but NOT from the src X-search above. nc->dev == src->dev
-        // so perm_enforced matches; re-checked on nc for clarity.
+        // FS-delta 9.4) but NOT from the src X-search above. #957-audit F3:
+        // after the result-cross `nc` may be a crossed MOUNTED ROOT with a
+        // DIFFERENT Dev than src (a per-user dev9p session, or the devsrv->dev9p
+        // boundary), so read `perm_enforced` + stat off `nc` itself -- the node
+        // actually opened -- not off src.
         if (nc->dev->perm_enforced) {
             struct t_stat nc_st;
             if (spoor_stat_native(nc, &nc_st) != 0)  { spoor_clunk(nc); return -1; }
@@ -1552,13 +1588,25 @@ static s64 sys_walk_open_handler(u64 spoor_fd_raw, u64 name_va,
                 return -1;
             }
         }
-        // Issue the open. dev9p_open returns nc itself (state mutated:
-        // COPEN flag set, mode + offset reset, qid refreshed from Rlopen).
-        // On failure nc still has its own walk-allocated fid; spoor_clunk
-        // runs dev->close → p9_client_clunk on that fid + frees the priv.
-        if (!nc->dev->open(nc, (int)omode_raw)) {
+        // Issue the open. Dev.open returns EITHER nc opened in place (dev9p /
+        // devramfs: state mutated -- COPEN, mode/offset reset, qid refreshed)
+        // OR a DIFFERENT owned Spoor that REPLACES nc (devsrv open=connect on a
+        // /srv/<name> leaf: the service-ref is consumed + the connection
+        // endpoint returned). #957-audit F1: the single-hop walk now crosses
+        // into /srv, so File::open("/srv/<name>") (non-O_PATH) reaches a service
+        // leaf here -- this handler MUST adopt the returned Spoor like stalk
+        // (kernel/stalk.c) does, else it installs the spent service-ref + leaks
+        // the connection endpoint + its SrvConn + a poster backlog slot. On
+        // failure nc still has its own walk-allocated fid; spoor_clunk runs
+        // dev->close -> p9_client_clunk on that fid + frees the priv.
+        struct Spoor *opened = nc->dev->open(nc, (int)omode_raw);
+        if (!opened) {
             spoor_clunk(nc);
             return -1;
+        }
+        if (opened != nc) {
+            spoor_clunk(nc);   // the old nc (service-ref) is spent; open did not consume it
+            nc = opened;       // adopt the connection endpoint (one owned ref)
         }
     }
 

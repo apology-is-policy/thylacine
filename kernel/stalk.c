@@ -70,7 +70,9 @@ static struct Spoor *clone_walk_zero(struct Spoor *src) {
     return q;
 }
 
-// cross_mounts -- Plan 9 domount. Test `probe`'s (dc, devno, qid.path) identity
+// stalk_cross_mounts -- Plan 9 domount (public; also used by the single-hop
+// SYS_WALK_OPEN handler so it crosses identically to stalk). Test `probe`'s
+// (dc, devno, qid.path) identity
 // against `p`'s Territory mount table; if it is a mount point, mint an
 // independent clone-walk of the mounted source and (looping) follow a
 // mount-over-a-mount chain to the leaf. `probe` is NOT consumed -- the caller
@@ -80,8 +82,8 @@ static struct Spoor *clone_walk_zero(struct Spoor *src) {
 //   return -1              : probe IS a mount point but minting the crossed
 //                            Spoor failed (OOM / walk error); *out == NULL and
 //                            probe is still owned -- the caller fails the walk.
-static int cross_mounts(struct Proc *p, struct Spoor *probe,
-                        struct Spoor **out) {
+int stalk_cross_mounts(struct Proc *p, struct Spoor *probe,
+                       struct Spoor **out) {
     *out = NULL;
     if (!p || !p->territory || !probe) return 0;
 
@@ -130,7 +132,7 @@ struct Spoor *stalk(struct Proc *p, struct Spoor *start,
     // place; the crossed clone goes on the trail instead.
     {
         struct Spoor *crossed = NULL;
-        if (cross_mounts(p, start, &crossed) < 0) goto fail;
+        if (stalk_cross_mounts(p, start, &crossed) < 0) goto fail;
         if (crossed) trail[depth++] = crossed;
     }
 
@@ -168,7 +170,7 @@ struct Spoor *stalk(struct Proc *p, struct Spoor *start,
         struct Spoor *parent;
         if (depth > 0) {
             struct Spoor *crossed = NULL;
-            if (cross_mounts(p, trail[depth - 1], &crossed) < 0) goto fail;
+            if (stalk_cross_mounts(p, trail[depth - 1], &crossed) < 0) goto fail;
             if (crossed) {
                 spoor_clunk(trail[depth - 1]);
                 trail[depth - 1] = crossed;
@@ -252,7 +254,7 @@ struct Spoor *stalk(struct Proc *p, struct Spoor *start,
     // is still owned -> the fail path clunks it.
     if (amode != STALK_MOUNT) {
         struct Spoor *crossed = NULL;
-        if (cross_mounts(p, quarry, &crossed) < 0) goto fail;
+        if (stalk_cross_mounts(p, quarry, &crossed) < 0) goto fail;
         if (crossed) {
             spoor_clunk(quarry);
             quarry = crossed;

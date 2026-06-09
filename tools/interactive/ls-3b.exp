@@ -1,0 +1,51 @@
+#!/usr/bin/expect -f
+# LS-3b: fs-mutation coreutils over a real PTY -- mkdir / touch / cp / mv / tee /
+# rm. Proves the interactive human path for creating, copying, moving, and
+# deleting files (the LS-3b companion to fs-mut-smoke's non-interactive gate).
+#
+# Discipline (see lib.exp): match command OUTPUT, never typed input (the ut line
+# editor redraws the prompt per keystroke and does not emit the typed line as
+# plain bytes). Each step is one self-synchronizing `cmd -> token` round.
+#
+# Scratch lives under the user's OWN home (/home/michael, 0700, michael-owned):
+# the session user is uid 1000, and the pivot root `/` is PRINCIPAL_SYSTEM-owned
+# 0755, so a non-system user (correctly, per A-3b rwx enforcement) cannot create
+# under `/`. (fs-mut-smoke runs as joey=SYSTEM and uses `/`; an interactive user
+# works in their home.) Idempotent: step (a) `rm -rf` reclaims any stale tree
+# (the pool persists across boots).
+
+source [file join [file dirname [info script]] lib.exp]
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+
+# (a) clean start + mkdir + create a file in the new dir (a depth-2 redirect
+# create under home) + read it back. One command, verified by the content token.
+lc_run_expect "rm -rf /home/michael/l3b; mkdir /home/michael/l3b; echo cu-mk-3b71 > /home/michael/l3b/src3b; cat /home/michael/l3b/src3b" "cu-mk-3b71"
+lc_pass "LS-3b(a): mkdir + create-in-dir + cat"
+
+# (b) cp the file; the copy has the same content.
+lc_run_expect "cp /home/michael/l3b/src3b /home/michael/l3b/cpy3b; cat /home/michael/l3b/cpy3b" "cu-mk-3b71"
+lc_pass "LS-3b(b): cp file"
+
+# (c) mv the copy; the moved file has the content.
+lc_run_expect "mv /home/michael/l3b/cpy3b /home/michael/l3b/mvd3b; cat /home/michael/l3b/mvd3b" "cu-mk-3b71"
+lc_pass "LS-3b(c): mv file"
+
+# (d) touch a new empty file; ls shows it among the dir's entries.
+lc_send "touch /home/michael/l3b/tch3b"
+lc_run_expect "ls /home/michael/l3b" "tch3b"
+lc_pass "LS-3b(d): touch + ls enumerates it"
+
+# (e) tee writes to stdout AND to the file.
+lc_run_expect "echo tee-3b91 | tee /home/michael/l3b/tee3b" "tee-3b91"
+lc_run_expect "cat /home/michael/l3b/tee3b" "tee-3b91"
+lc_pass "LS-3b(e): tee (stdout + file)"
+
+# (f) rm -r removes the whole tree; ls of the gone dir errors.
+lc_run_expect "rm -r /home/michael/l3b; ls /home/michael/l3b" "ls:"
+lc_pass "LS-3b(f): rm -r removes the tree"
+
+lc_quit
+lc_pass "LS-CI ls-3b: mkdir + touch + cp + mv + tee + rm all verified"
+exit 0

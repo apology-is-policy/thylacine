@@ -40,6 +40,7 @@
 #include <thylacine/handle.h>
 #include <thylacine/proc.h>
 #include <thylacine/spoor.h>
+#include <thylacine/syscall.h>
 #include <thylacine/types.h>
 
 // Test-support registry wipe (non-static; defined in kernel/devsrv.c;
@@ -47,6 +48,8 @@
 extern void srv_registry_reset(void);
 
 void test_devsrv_registered(void);
+void test_devsrv_open_root_dir(void);
+void test_devsrv_stat_native_root(void);
 void test_devsrv_post_gate(void);
 void test_devsrv_post_basic(void);
 void test_devsrv_tombstone(void);
@@ -99,6 +102,38 @@ void test_devsrv_registered(void) {
     TEST_EXPECT_EQ((int)root->qid.type, (int)QTDIR,
         "/srv root Spoor is a directory (QTDIR)");
     TEST_EXPECT_EQ(root->dc, 's', "/srv root Spoor carries dc='s'");
+    spoor_clunk(root);
+}
+
+// #957: crossing into /srv (stalk OR single-hop SYS_WALK_OPEN domount) lands on
+// the registry root; cd / ls / fs::is_dir need it to OPEN as a plain directory
+// (in place), NOT to connect. Pre-fix devsrv.open returned NULL for the root
+// (connect-only), so File::open("/srv") failed once crossing reached the root.
+void test_devsrv_open_root_dir(void) {
+    struct Spoor *root = devsrv.attach(NULL);
+    TEST_ASSERT(root != NULL, "devsrv.attach yields a root Spoor");
+    struct Spoor *opened = devsrv.open(root, 0 /* OREAD */);
+    TEST_EXPECT_EQ(opened, root,
+        "devsrv.open(root) opens the registry root in place (dir open, not connect)");
+    TEST_ASSERT((root->flag & COPEN) != 0, "the dir open sets COPEN on the root");
+    spoor_clunk(root);
+}
+
+// #957: the registry root reports as a directory via stat_native so SYS_FSTAT /
+// fs::is_dir / cd see a directory. devsrv is system-owned + world-r/x (0555);
+// the per-territory /srv visibility (the mount table), not rwx, is the I-1
+// boundary. Pre-fix devsrv had no stat_native slot, so the fstat failed.
+void test_devsrv_stat_native_root(void) {
+    struct Spoor *root = devsrv.attach(NULL);
+    TEST_ASSERT(root != NULL, "devsrv.attach yields a root Spoor");
+    TEST_ASSERT(devsrv.stat_native != NULL, "devsrv has a stat_native slot");
+    struct t_stat st;
+    TEST_EXPECT_EQ(devsrv.stat_native(root, &st), 0, "stat_native(root) succeeds");
+    TEST_EXPECT_EQ((int)(st.mode & T_S_IFDIR), (int)T_S_IFDIR,
+        "registry root mode carries S_IFDIR (a directory)");
+    TEST_EXPECT_EQ((int)(st.mode & 0777u), 0555, "registry root mode is 0555");
+    TEST_EXPECT_EQ((int)st.uid, (int)PRINCIPAL_SYSTEM, "registry root owned by SYSTEM");
+    TEST_EXPECT_EQ((int)(st.qid_type & QTDIR), (int)QTDIR, "registry root qid_type is QTDIR");
     spoor_clunk(root);
 }
 

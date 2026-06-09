@@ -1,10 +1,12 @@
 # 104 - stalk: the per-Proc pathname resolver
 
-> **Layer**: kernel namespace / path resolution. **Status**: stalk-1 + stalk-2
-> landed (multi-component absolute paths + Plan 9 `domount` mount crossing keyed
-> by the full `(dc, devno, qid.path)` Spoor identity). stalk-3 (namespace-resident
-> `/srv`) is pending. Binding design: `docs/STALK-DESIGN.md`. Invariant **I-28**
-> (ARCHITECTURE.md section 28).
+> **Layer**: kernel namespace / path resolution. **Status**: stalk-1 + stalk-2 +
+> stalk-3 landed (multi-component absolute paths + Plan 9 `domount` mount crossing
+> keyed by the full `(dc, devno, qid.path)` Spoor identity + namespace-resident
+> `/srv`). #957 extended crossing to the single-hop `SYS_WALK_OPEN` (see "Single-hop
+> walks cross too" below) so the libthyla-rs `fs::` mutation path crosses into
+> per-user `/home/<user>` mounts. Binding design: `docs/STALK-DESIGN.md`. Invariant
+> **I-28** (ARCHITECTURE.md section 28).
 
 ## Purpose
 
@@ -166,7 +168,8 @@ optimization. Cost: a deep dev9p path is N x [Tgetattr + Twalk].
 
 The mount table (`Territory.mounts[]`, `kernel/territory.c`) is keyed by the
 mount point's full Plan 9 identity `(dc, devno, qid.path)` -- the
-`(type, dev, qid)` triple. `cross_mounts(p, probe, &out)` tests `probe`'s identity
+`(type, dev, qid)` triple. `stalk_cross_mounts(p, probe, &out)` (public since #957;
+was the static `cross_mounts`) tests `probe`'s identity
 against the table (`mount_lookup`); on a match it mints an INDEPENDENT clone of
 the mounted source via `clone_walk_zero` (a zero-element `Dev.walk`, which for
 dev9p allocates a fresh fid so the crossed Spoor does not share the table's
@@ -199,6 +202,30 @@ no-op, so stalk-1 behavior is preserved exactly.
 `/srv` + `/proc` directories (empty, world-r/x, SYSTEM-owned; qid range above any
 file index) so the boot root has walkable mount points; the disk FS provides its
 own (host-baked).
+
+### Single-hop walks cross too (#957)
+
+`stalk()` is not the only path resolver: the single-hop `SYS_WALK_OPEN`
+(`sys_walk_open_handler`, "walk ONE component from a parent fd") and its
+create/rename/unlink siblings are the lower-level primitive that libthyla-rs
+`fs::` navigates with (`file::with_parent_dir` walks the parent chain
+component-by-component via `t_walk_open`; `File::open` / `create_dir` / `rename`
+build paths this way). Plan 9 has no non-crossing walk -- ALL walking crosses
+mounts -- so `sys_walk_open_handler` calls `stalk_cross_mounts` at BOTH the
+**source** (before the X-search + walk: walk INTO the mounted root if the parent
+fd is a mount point -- mirrors stalk's base cross) and the **result** (after the
+walk, before open: a walked mount point yields the mounted root -- mirrors stalk's
+quarry cross). The crossed clone is OWNED (its own fid); the handler clunks the
+shadowed Spoor and adopts it, so the X-search / `perm_check` / `Dev.open` / the
+installed handle's rights all run on the MOUNTED root.
+
+Before #957 the single-hop walk did NOT cross, so a logged-in user's
+`mkdir`/`touch`/`cp` into their own `/home/<user>` (a per-user dev9p mount over a
+SYSTEM-owned placeholder dir) resolved the shadowed placeholder and was denied by
+A-3 rwx (the user is `other` on the placeholder's 0755). The source cross is a
+no-op for every current caller (no API yields a mount-point fd once walks cross,
+and the Territory root is never a mount-table entry) -- it is present for exact
+one-component-stalk symmetry + correctness if a mount-point fd ever exists.
 
 ## Data structures
 

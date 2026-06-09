@@ -51,6 +51,7 @@
 #include <thylacine/spinlock.h>
 #include <thylacine/spoor.h>
 #include <thylacine/srvconn.h>
+#include <thylacine/syscall.h>
 #include <thylacine/thread.h>
 #include <thylacine/types.h>
 
@@ -778,6 +779,29 @@ static int devsrv_stat(struct Spoor *c, u8 *dp, int n) {
     return -1;
 }
 
+// stat_native — the Thylacine-native fstat surface (#957). Crossing into /srv
+// (stalk / SYS_WALK_OPEN domount) yields the registry root, which `cd` / `ls` /
+// `fs::is_dir` stat via SYS_FSTAT; without a stat_native slot the fstat fails
+// and a navigating shell sees /srv as "not a directory". The registry root
+// presents as a directory; a /srv/<name> service node as a file (derived from
+// the Spoor's own qid.type, set by devsrv_walk). devsrv is system-owned +
+// world-r/x (0555/0444); the per-territory /srv visibility (the mount table),
+// not rwx, is the isolation boundary (I-1) -- devsrv is NOT perm_enforced.
+static int devsrv_stat_native(struct Spoor *c, struct t_stat *out) {
+    if (!c || c->dc != 's' || !out) return -1;
+    for (size_t i = 0; i < sizeof(*out); i++) ((u8 *)out)[i] = 0;
+    bool is_dir   = (c->qid.type & QTDIR) != 0;
+    out->mode     = is_dir ? (T_S_IFDIR | 0555u) : (T_S_IFREG | 0444u);
+    out->nlink    = 1;
+    out->qid_path = c->qid.path;
+    out->qid_vers = c->qid.vers;
+    out->qid_type = c->qid.type;
+    out->blksize  = 4096;
+    out->uid      = PRINCIPAL_SYSTEM;
+    out->gid      = GID_SYSTEM;
+    return 0;
+}
+
 // devsrv_open_connect — the connect core (stalk-3b-β; STALK-DESIGN.md §5.2 / D5).
 // Testable with an explicit Proc; the Dev.open vtable slot (devsrv_open) calls it
 // with current_thread()->proc. `c` is a /srv/<name> service-ref Spoor
@@ -884,6 +908,19 @@ struct Spoor *devsrv_open_connect(struct Proc *p, struct Spoor *c, int omode) {
 // connecting Proc from the running Thread (stalk runs in syscall context on the
 // caller's Thread). stalk-3b-β; STALK-DESIGN.md §5.2.
 static struct Spoor *devsrv_open(struct Spoor *c, int omode) {
+    // #957: opening the registry ROOT (a directory) is a plain dir open -- the
+    // navigation / readdir / metadata base -- NOT a connect. Crossing into /srv
+    // (stalk OR the single-hop SYS_WALK_OPEN domount) lands here on the root, so
+    // `cd /srv`, `ls /srv`, and `fs::is_dir("/srv")` need it to open as a dir
+    // (paired with devsrv_stat_native reporting QTDIR). Only a /srv/<name>
+    // service leaf (DEVSRV_SVC_MAGIC) connects (devsrv_open_connect). The clone-
+    // walk that crossing produced (devsrv_walk nname==0) carries aux=registry.
+    if (c && c->dc == 's' && c->aux &&
+        *(const u64 *)c->aux == SRV_REGISTRY_MAGIC) {
+        c->flag  |= COPEN;
+        c->offset = 0;
+        return c;
+    }
     struct Thread *t = current_thread();
     if (!t || !t->proc) return NULL;
     return devsrv_open_connect(t->proc, c, omode);
@@ -1167,6 +1204,7 @@ struct Dev devsrv = {
     .attach   = devsrv_attach,
     .walk     = devsrv_walk,
     .stat     = devsrv_stat,
+    .stat_native = devsrv_stat_native,
 
     .open     = devsrv_open,
     .create   = devsrv_create,
