@@ -246,6 +246,8 @@ void test_notes_post_child_exit_helper(void);
 void test_notes_post_pipe_helper(void);
 void test_notes_proc_lifecycle(void);
 void test_notes_peek_does_not_pop(void);
+void test_notes_interrupt_terminate_gate(void);
+void test_notes_self_managing_flag(void);
 void test_directmap_kva_round_trip(void);
 void test_directmap_alloc_through_directmap(void);
 void test_directmap_vmalloc_mmio_smoke(void);
@@ -1136,6 +1138,8 @@ struct test_case g_tests[] = {
     { "notes.post_pipe_helper",                test_notes_post_pipe_helper,                false, NULL },
     { "notes.proc_lifecycle",                  test_notes_proc_lifecycle,                  false, NULL },
     { "notes.peek_does_not_pop",               test_notes_peek_does_not_pop,               false, NULL },
+    { "notes.interrupt_terminate_gate",        test_notes_interrupt_terminate_gate,        false, NULL },
+    { "notes.self_managing_flag",              test_notes_self_managing_flag,              false, NULL },
     { "directmap.kva_round_trip",      test_directmap_kva_round_trip,      false, NULL },
     { "directmap.alloc_through_directmap",
                                        test_directmap_alloc_through_directmap,

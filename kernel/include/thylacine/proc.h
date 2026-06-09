@@ -380,6 +380,16 @@ struct Proc {
 // its scope on every death path (clean exit AND kill / group-terminate;
 // A-4a audit F1). I-25.
 #define PROC_FLAG_LEGATE_ROOT       (1u << 5)
+// LS-5 (P2 default disposition, ARCH 8.8.2): marks a Proc that opened its
+// notes fd (devnotes, via SYS_NOTE_OPEN) -- it has declared it consumes its
+// OWN notes (the shell's wait_pids_interruptible notes-fd poll). The
+// discriminator the EL0-return-tail uncaught-`interrupt` default-terminate
+// uses: a self-managing Proc is EXEMPT (it reads + acts on its notes), while a
+// non-self-managing Proc with no async handler default-terminates on an
+// uncaught, unmasked interrupt. One-way (a Proc that ever opened its notes fd
+// stays self-managing for life); NOT propagated by rfork (a spawned child
+// starts fresh -- a dumb coreutil never opens it, so Ctrl-C terminates it).
+#define PROC_FLAG_SELF_MANAGING_NOTES (1u << 6)
 
 _Static_assert(sizeof(struct Proc) == 264,
                "struct Proc size pinned at 264 bytes (SYS_EXIT_GROUP baseline "
@@ -874,5 +884,31 @@ void proc_mark_may_post_service(struct Proc *p);
 // proc_may_post_service — true iff `p` carries PROC_FLAG_MAY_POST_SERVICE.
 // Returns false for a NULL / corrupted `p` (fail-closed).
 bool proc_may_post_service(const struct Proc *p);
+
+// =============================================================================
+// LS-5: the self-managing-notes mark (P2 default disposition, ARCH 8.8.2).
+// =============================================================================
+//
+// PROC_FLAG_SELF_MANAGING_NOTES marks a Proc that opened its notes fd
+// (SYS_NOTE_OPEN). The uncaught-`interrupt` default-terminate
+// (notes_deliver_at_el0_return) exempts such a Proc -- it consumes its own
+// notes via the fd-read path -- and terminates only a NON-self-managing Proc
+// that registered no async handler. The shell qualifies; a dumb coreutil does
+// not. Strictly distinct from the console-OWNER / console-ATTACH marks (this
+// is "I read my own notes", not "I receive Ctrl-C" or "I am the SAK anchor").
+
+// proc_mark_self_managing_notes — stamp PROC_FLAG_SELF_MANAGING_NOTES on `p`.
+// One-way: idempotent, never cleared, never propagated by rfork. v1.0 caller:
+// sys_note_open_handler, on the Proc that opened its notes fd. Atomic OR (the
+// proc_flags word is multi-writer post-A-4c-2). Extincts on a NULL / corrupted
+// / non-ALIVE Proc (mirrors proc_mark_may_post_service -- a Proc running
+// SYS_NOTE_OPEN is always ALIVE).
+void proc_mark_self_managing_notes(struct Proc *p);
+
+// proc_is_self_managing_notes — true iff `p` carries
+// PROC_FLAG_SELF_MANAGING_NOTES. Fail-closed: a NULL / corrupted `p` reads as
+// NOT self-managing -- the SAFE default (an unverifiable Proc does not dodge
+// the interrupt default-terminate). Atomic load (multi-writer word).
+bool proc_is_self_managing_notes(const struct Proc *p);
 
 #endif // THYLACINE_PROC_H

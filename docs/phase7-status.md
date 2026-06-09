@@ -185,6 +185,41 @@ UX, a minimal editor, id/whoami/date) for breadth and LS-8 (U-PTY: pollable cons
 termios + async) for depth. Tasks #944-#953. Supersedes the loose U-9..N / U-PTY
 rows above with a workflow-driven sequence.
 
+**LS-5b [done] (P2 default disposition; KERNEL -- audit-bearing death-path +
+notes surface, the formal round rides LS-5-audit #963).** An uncaught `interrupt`
+now default-terminates a NON-self-managing, handler-less Proc at the EL0-return
+tail (SIGINT's "default = die, catchable"). New `PROC_FLAG_SELF_MANAGING_NOTES`
+(proc_flags bit 6; atomic-OR set by `SYS_NOTE_OPEN`, atomic-load read --
+fail-closed; mirrors `proc_mark_may_post_service`) -- a Proc that opened its
+notes fd consumes its own notes, so it is exempt. `notes_deliver_at_el0_return`'s
+`handler_va == 0` arm calls a pure, header-exposed decision
+`notes_interrupt_should_terminate_locked` (no handler + not self-managing + a
+deliverable [queued AND unmasked] `interrupt` -- a queue SCAN so an interrupt
+behind another unconsumed note still fires) and, on true, drops `q->lock` and
+`exits(NOTE_NAME_INTERRUPT)` -- the SAME primitive the `kill` branch uses
+(single-thread -> ZOMBIE status 1; multi-thread -> the audited #811
+`proc_group_terminate` cascade). Only `interrupt` newly terminates: child_exit /
+pipe stay queued for the fd-read path; `kill`/N-4 unchanged; a handler-bearing
+or masked Proc is exempt. I-19 extension; no struct-size change (reuses the
+proc_flags word). Tests +2 (`notes.interrupt_terminate_gate` truth table +
+`notes.self_managing_flag`): **797/797** (HVF + TCG), boot OK, 0 EXTINCTION,
+login E2E OK. **Semantic ripple (intended, surfaced as a regression first):** the
+shell's `wait_pids_interruptible` forwards a Ctrl-C to its foreground child
+(U-7c-b `drain_fg_wait_notes`); pre-LS-5 that forwarded `interrupt` was a no-op
+on a dumb coreutil (`echo` exited 0), so the U-7 probes pinned the forwarded
+child's status to 0. LS-5b makes that forward TERMINATE the child (status 1) --
+which is the whole point of Ctrl-C -- so `u-7-test` (flow 2) + `u-job-test`
+(item 17) were relaxed from `status == 0` to "reaped (no hang)", their stated
+intent; the load-bearing forward-not-handle assertion is untouched. Ground
+truth: base @2a6c9ed green, the change is causal + correct (proven by
+stash+rebuild). Files: `kernel/include/thylacine/proc.h` (flag + 2 helper
+decls), `kernel/proc.c` (helper impls), `kernel/syscall.c::sys_note_open_handler`
+(mark), `kernel/include/thylacine/notes.h` (`NOTE_NAME_INTERRUPT` + decl),
+`kernel/notes.c` (scan + decision + dispatcher arm), `kernel/test/test_notes.c`
++ `test.c` (the 2 tests), `usr/u-7-test` + `usr/u-job-test` (assertion relax).
+NEXT = LS-5c (#962): widen the #811 death-wake to also fire on a pending
+terminate-disposition `interrupt`, so a BLOCKED child (sleep/read) wakes + dies.
+
 **LS-5a [done] (P1 console owner; KERNEL -- audit-bearing surface, the formal
 round rides LS-5-audit #963).** `SPAWN_PERM_CONSOLE_OWNER` (1<<2; mirrored in
 libt + libthyla-rs `T_SPAWN_PERM_CONSOLE_OWNER`) -- a new spawn-perm bit that

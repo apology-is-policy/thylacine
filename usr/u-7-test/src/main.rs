@@ -189,7 +189,14 @@ fn flow_forward_vs_handle() -> Result<(), i64> {
                 return fail("flow 2: self-post of the foreground interrupt failed");
             }
             let statuses = wait_pids_interruptible(&mut env, &[pid]);
-            if statuses.len() != 1 || statuses[0] != 0 {
+            // LS-5 (ARCH 8.8.2): the forwarded interrupt may now TERMINATE
+            // `echo x` (a non-self-managing handler-less coreutil -> status 1)
+            // if it reaches echo's EL0-return tail before echo exits 0 -- that
+            // termination IS the point of Ctrl-C. So the reaped status is no
+            // longer pinned to 0; the invariant here is that the wait reaps the
+            // child and returns (no hang). The load-bearing flow-2 assertion is
+            // below (the shell handler must NOT fire mid-wait -- it forwards).
+            if statuses.len() != 1 {
                 return fail("flow 2: the foreground wait did not reap `echo x`");
             }
         }

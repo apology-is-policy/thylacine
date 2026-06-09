@@ -2509,6 +2509,13 @@ static s64 sys_note_open_handler(void) {
         spoor_clunk(opened);
         return -1;
     }
+    // LS-5 (P2 default disposition, ARCH 8.8.2): this Proc has declared it
+    // consumes its own notes via the fd-read path -- mark it self-managing so
+    // the EL0-return-tail uncaught-`interrupt` default-terminate EXEMPTS it
+    // (a self-managing Proc reads + acts on its interrupt; only a non-self-
+    // managing handler-less Proc auto-terminates). One-way; set only after the
+    // fd exists (the declaration is "I successfully obtained a notes fd").
+    proc_mark_self_managing_notes(p);
     return (s64)fd;
 }
 

@@ -532,10 +532,17 @@ pub extern "C" fn rs_main() -> i64 {
 
     // 17. `wait_pids_interruptible` with a pre-queued `interrupt`: the wait
     //     drains the note (the path that forwards a Ctrl-C) and reaps the child
-    //     by pid, returning its status -- it must NOT hang. A quick `echo`
-    //     terminates the wait without external help; the pre-posted interrupt
-    //     exercises the poll+drain arm whenever the child is still live at the
-    //     first sweep (else the immediate reap wins -- both are correct).
+    //     by pid -- it must NOT hang. A quick `echo` terminates the wait without
+    //     external help; the pre-posted interrupt exercises the poll+drain arm
+    //     whenever the child is still live at the first sweep (else the
+    //     immediate reap wins). The reaped STATUS is no longer pinned to 0:
+    //     since LS-5 (ARCH 8.8.2) a forwarded `interrupt` to a non-self-managing
+    //     handler-less child (a coreutil like `echo`) TERMINATES it (status 1),
+    //     which is the whole point of Ctrl-C. So the two arms now diverge in
+    //     status -- fast-reap arm: echo exits 0; forwarded arm: echo is
+    //     interrupt-terminated -- and BOTH are correct. The invariant under
+    //     test is "the wait reaps the child and returns (no hang)", not the
+    //     child's exit code.
     let mut env_fw = Env::new();
     env_fw.interactive = true;
     match notes::Notes::open_self() {
@@ -559,8 +566,10 @@ pub extern "C" fn rs_main() -> i64 {
                 return fail("fg-wait: self-post of `interrupt` failed");
             }
             let statuses = wait_pids_interruptible(&mut env_fw, &[pid]);
-            if statuses.len() != 1 || statuses[0] != 0 {
-                return fail("fg-wait: did not reap `echo x` with status 0");
+            // LS-5: a forwarded interrupt may terminate `echo x` (status 1) or
+            // it may have exited 0 first -- both correct. Require only the reap.
+            if statuses.len() != 1 {
+                return fail("fg-wait: did not reap `echo x`");
             }
         }
         Err(_) => return fail("fg-wait: could not spawn `echo`"),

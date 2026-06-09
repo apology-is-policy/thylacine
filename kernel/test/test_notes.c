@@ -51,6 +51,8 @@ void test_notes_post_child_exit_helper(void);
 void test_notes_post_pipe_helper(void);
 void test_notes_proc_lifecycle(void);
 void test_notes_peek_does_not_pop(void);
+void test_notes_interrupt_terminate_gate(void);
+void test_notes_self_managing_flag(void);
 
 // ---------------------------------------------------------------------------
 // queue_alloc_free_smoke
@@ -531,6 +533,112 @@ void test_notes_peek_does_not_pop(void) {
     spin_unlock(&p->notes->lock);
     TEST_EXPECT_EQ(has, 1, "second peek still returns 1");
     TEST_EXPECT_EQ(p->notes->count, 1u, "count still 1");
+
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+}
+
+// ---------------------------------------------------------------------------
+// interrupt_terminate_gate (LS-5 P2)
+// ---------------------------------------------------------------------------
+//
+// The full truth table of notes_interrupt_should_terminate_locked -- the pure
+// decision the EL0-return-tail uses to default-terminate an uncaught
+// `interrupt`. The dispatcher itself calls the noreturn exits() on a `true`
+// result, so the unit test drives the decision function directly.
+
+void test_notes_interrupt_terminate_gate(void) {
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc succeeded");
+    TEST_ASSERT(p->notes != NULL, "notes queue present");
+
+    // Fresh Proc: no async handler (KP_ZERO handler_va), not self-managing,
+    // empty queue -> nothing to terminate for.
+    spin_lock(&p->notes->lock);
+    int d = notes_interrupt_should_terminate_locked(p, NULL);
+    spin_unlock(&p->notes->lock);
+    TEST_EXPECT_EQ(d, 0, "empty queue -> no terminate");
+
+    // A non-interrupt note alone (child_exit) does NOT terminate -- only
+    // `interrupt` newly default-terminates; child_exit stays queued.
+    notes_post(p, "child_exit", 0u, NULL, true);
+    spin_lock(&p->notes->lock);
+    d = notes_interrupt_should_terminate_locked(p, NULL);
+    spin_unlock(&p->notes->lock);
+    TEST_EXPECT_EQ(d, 0, "only child_exit -> no terminate");
+
+    // Queue an `interrupt` BEHIND the child_exit. The scan finds it regardless
+    // of FIFO position -> an unmanaged, handler-less Proc terminates.
+    notes_post(p, "interrupt", 0u, NULL, true);
+    spin_lock(&p->notes->lock);
+    d = notes_interrupt_should_terminate_locked(p, NULL);
+    spin_unlock(&p->notes->lock);
+    TEST_EXPECT_EQ(d, 1, "unmanaged + queued interrupt -> terminate");
+
+    // A registered async handler catches interrupt (the async-delivery path
+    // runs it) -> never auto-terminate.
+    p->handler_va = 0x1000u;
+    spin_lock(&p->notes->lock);
+    d = notes_interrupt_should_terminate_locked(p, NULL);
+    spin_unlock(&p->notes->lock);
+    TEST_EXPECT_EQ(d, 0, "handler registered -> no terminate");
+    p->handler_va = 0u;
+
+    // A Thread with `interrupt` masked: not deliverable -> no terminate.
+    struct Thread fake_t;
+    fake_t.note_mask = (1u << NOTE_BIT_INTERRUPT);
+    spin_lock(&p->notes->lock);
+    d = notes_interrupt_should_terminate_locked(p, &fake_t);
+    spin_unlock(&p->notes->lock);
+    TEST_EXPECT_EQ(d, 0, "masked interrupt -> no terminate");
+
+    // Same Thread, mask cleared: deliverable again -> terminate.
+    fake_t.note_mask = 0u;
+    spin_lock(&p->notes->lock);
+    d = notes_interrupt_should_terminate_locked(p, &fake_t);
+    spin_unlock(&p->notes->lock);
+    TEST_EXPECT_EQ(d, 1, "unmasked thread + queued interrupt -> terminate");
+
+    // A self-managing Proc (opened its notes fd) consumes its own notes ->
+    // exempt even with an interrupt queued and no handler.
+    p->state = PROC_STATE_ALIVE;
+    proc_mark_self_managing_notes(p);
+    spin_lock(&p->notes->lock);
+    d = notes_interrupt_should_terminate_locked(p, NULL);
+    spin_unlock(&p->notes->lock);
+    TEST_EXPECT_EQ(d, 0, "self-managing -> exempt from terminate");
+
+    p->state = PROC_STATE_ZOMBIE;
+    proc_free(p);
+}
+
+// ---------------------------------------------------------------------------
+// self_managing_flag (LS-5 P2)
+// ---------------------------------------------------------------------------
+//
+// proc_mark_self_managing_notes / proc_is_self_managing_notes round-trip.
+
+void test_notes_self_managing_flag(void) {
+    // Fail-closed: a NULL Proc reads as NOT self-managing.
+    TEST_EXPECT_EQ(proc_is_self_managing_notes(NULL) ? 1 : 0, 0,
+                   "NULL Proc is not self-managing (fail-closed)");
+
+    struct Proc *p = proc_alloc();
+    TEST_ASSERT(p != NULL, "proc_alloc succeeded");
+
+    // Fresh Proc: not self-managing (KP_ZERO proc_flags).
+    TEST_EXPECT_EQ(proc_is_self_managing_notes(p) ? 1 : 0, 0,
+                   "fresh Proc is not self-managing");
+
+    p->state = PROC_STATE_ALIVE;
+    proc_mark_self_managing_notes(p);
+    TEST_EXPECT_EQ(proc_is_self_managing_notes(p) ? 1 : 0, 1,
+                   "after mark, Proc is self-managing");
+
+    // One-way + idempotent: a second mark is a no-op (stays set).
+    proc_mark_self_managing_notes(p);
+    TEST_EXPECT_EQ(proc_is_self_managing_notes(p) ? 1 : 0, 1,
+                   "mark is idempotent");
 
     p->state = PROC_STATE_ZOMBIE;
     proc_free(p);

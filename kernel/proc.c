@@ -910,6 +910,36 @@ bool proc_may_post_service(const struct Proc *p) {
             & PROC_FLAG_MAY_POST_SERVICE) != 0;
 }
 
+// LS-5 (P2 default disposition): the self-managing-notes mark. A Proc that
+// opens its notes fd declares it consumes its own notes; the uncaught-
+// `interrupt` default-terminate exempts it (notes_deliver_at_el0_return).
+void proc_mark_self_managing_notes(struct Proc *p) {
+    if (!p)                    extinction("proc_mark_self_managing_notes(NULL)");
+    if (p->magic != PROC_MAGIC)
+        extinction("proc_mark_self_managing_notes on corrupted Proc");
+    // The sole caller (sys_note_open_handler) runs on the Proc's own thread
+    // mid-syscall, so the Proc is always ALIVE -- a non-ALIVE Proc here is a
+    // caller bug; surface it loudly (mirrors proc_mark_may_post_service).
+    if (p->state != PROC_STATE_ALIVE)
+        extinction("proc_mark_self_managing_notes on non-ALIVE Proc");
+    // One-way, idempotent — never cleared, never propagated by rfork
+    // (rfork_internal does not copy proc_flags). Atomic OR: the proc_flags
+    // word is multi-writer post-A-4c-2 (the SAK kthread mutates the console
+    // bit), so every RMW on it must be atomic. RELAXED: the bit is a
+    // standalone predicate with no ordering dependency.
+    __atomic_or_fetch(&p->proc_flags, PROC_FLAG_SELF_MANAGING_NOTES, __ATOMIC_RELAXED);
+}
+
+bool proc_is_self_managing_notes(const struct Proc *p) {
+    // Fail-closed: a NULL or corrupted Proc reads as NOT self-managing — the
+    // SAFE default, since this query gates the uncaught-interrupt default-
+    // terminate (an unverifiable Proc must not dodge it). Atomic load (the
+    // word is multi-writer post-A-4c-2).
+    if (!p || p->magic != PROC_MAGIC) return false;
+    return (__atomic_load_n(&p->proc_flags, __ATOMIC_RELAXED)
+            & PROC_FLAG_SELF_MANAGING_NOTES) != 0;
+}
+
 // =============================================================================
 // P5-corvus-srv: per-Proc identity tag.
 // =============================================================================

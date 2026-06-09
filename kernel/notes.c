@@ -487,9 +487,14 @@ int notes_name_is_kill(const char *name) {
 // before vectors.S erets). The kernel holds no locks at this point.
 //
 // Pops the next deliverable note for the calling Thread, optionally
-// terminates the Proc (`kill` non-catchable), or rewrites ctx to land the
-// async handler. Notes are LEFT QUEUED when:
-//   - no handler is registered (the fd-read path is the only consumer)
+// terminates the Proc (`kill` non-catchable; LS-5: an uncaught `interrupt`),
+// or rewrites ctx to land the async handler. Notes are LEFT QUEUED when:
+//   - no handler is registered (the fd-read path is the only consumer) --
+//     EXCEPT an uncaught, unmasked `interrupt` on a NON-self-managing Proc,
+//     which default-terminates the Proc (LS-5 P2, ARCH 8.8.2: SIGINT's
+//     "default = die, catchable"). A self-managing Proc (opened its notes fd)
+//     or one with a registered handler is exempt -- it consumes / catches
+//     the interrupt itself.
 //   - the thread is already in a handler (re-entrancy guard, N-3)
 //   - every queued note is in the thread's mask (deferred)
 
@@ -498,6 +503,48 @@ int notes_name_is_kill(const char *name) {
 
 // Forward-declare exits() — defined in kernel/proc.c.
 __attribute__((noreturn)) extern void exits(const char *msg);
+
+// LS-5 (P2 default disposition): is there an `interrupt` note in `q`
+// deliverable to `t` -- present in the ring AND not masked for `t`? Caller
+// MUST hold q->lock. A masked interrupt is NOT deliverable (the program chose
+// to defer it), matching the disposition's "NOT masked" clause. The scan (vs.
+// just inspecting the dispatcher candidate) is deliberate: a queued interrupt
+// behind another unconsumed note must still trigger the terminate -- a non-
+// self-managing handler-less Proc never drains its queue, so relying on FIFO
+// position would let a leading child_exit/pipe mask the interrupt forever.
+static int notes_interrupt_pending_locked(struct NoteQueue *q,
+                                          struct Thread *t) {
+    u32 mask = (t != NULL) ? t->note_mask : 0u;
+    if (mask & (1u << NOTE_BIT_INTERRUPT)) return 0;   // masked -> not deliverable
+    u32 idx = q->head;
+    for (u32 n = 0; n < q->count; n++) {
+        if (notes_name_to_bit(q->ring[idx].name) == (int)NOTE_BIT_INTERRUPT)
+            return 1;
+        idx = (idx + 1) % NOTE_QUEUE_DEPTH;
+    }
+    return 0;
+}
+
+// LS-5 P2 (ARCH 8.8.2): would an uncaught `interrupt` default-terminate this
+// Proc at the EL0-return tail? True iff (a) no async handler is registered (a
+// handler catches interrupt via the async-delivery path), (b) the Proc is not
+// self-managing (has not opened its notes fd -- a self-managing Proc consumes
+// its own notes via devnotes_read), and (c) a deliverable interrupt (queued
+// AND unmasked for `t`) is present. Pure decision; no side effects. The
+// dispatcher calls this under q->lock and, on true, drops the lock + calls
+// exits(NOTE_NAME_INTERRUPT). Non-static + header-declared so the unit test
+// exercises the full decision without driving the noreturn exits(). Caller
+// MUST hold p->notes->lock.
+int notes_interrupt_should_terminate_locked(struct Proc *p, struct Thread *t) {
+    if (!p || !p->notes) return 0;
+    // A registered handler catches interrupt (the async-delivery path runs it);
+    // never auto-terminate a handler-bearing Proc. Acquire-load pairs with
+    // SYS_NOTIFY's release-store (F9 audit close).
+    if (__atomic_load_n(&p->handler_va, __ATOMIC_ACQUIRE) != 0) return 0;
+    // A self-managing Proc (opened its notes fd) consumes its own notes.
+    if (proc_is_self_managing_notes(p)) return 0;
+    return notes_interrupt_pending_locked(p->notes, t);
+}
 
 void notes_deliver_at_el0_return(struct exception_context *ctx);
 void notes_deliver_at_el0_return(struct exception_context *ctx) {
@@ -597,9 +644,29 @@ void notes_deliver_at_el0_return(struct exception_context *ctx) {
         return;
     }
 
-    // No async handler registered: leave the note queued for the fd-read
-    // path. The Proc that did SYS_NOTE_OPEN + read on the fd will see it.
+    // No async handler registered.
     if (handler_va == 0) {
+        // LS-5 P2 (ARCH 8.8.2): an uncaught `interrupt` default-terminates a
+        // NON-self-managing Proc -- SIGINT's "default = die, catchable". A
+        // self-managing Proc (opened its notes fd) consumes its own notes via
+        // devnotes_read, so it is exempt; a program catches interrupt by
+        // registering a handler (handler_va != 0, handled below) or masking it
+        // (then it is not "deliverable" here). Only `interrupt` newly default-
+        // terminates: other uncaught notes (child_exit / pipe) stay queued for
+        // the fd-read path as before, and `kill` (N-4) was handled above.
+        if (notes_interrupt_should_terminate_locked(p, t)) {
+            spin_unlock(&q->lock);
+            // exits() handles single-thread (-> ZOMBIE, status 1) AND multi-
+            // thread (-> the #811 proc_group_terminate cascade); it is
+            // noreturn. The interrupt note is left in the about-to-be-freed
+            // queue -- no consume needed; the Proc is dying. Same terminate
+            // primitive the `kill` branch uses (exits("killed")).
+            exits(NOTE_NAME_INTERRUPT);
+            // unreachable
+        }
+        // Otherwise leave the note queued for the fd-read path (a self-managing
+        // Proc, or a non-interrupt note). The Proc that did SYS_NOTE_OPEN +
+        // read on the fd will see it.
         spin_unlock(&q->lock);
         return;
     }

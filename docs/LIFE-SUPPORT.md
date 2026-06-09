@@ -295,9 +295,24 @@ idle-cancel moves wholly to LS-8; LS-5 delivers the foreground-command interrupt
   Owner-set wiring + the grant gate are kernel-unit-tested (795/795); the
   interactive "Ctrl-C reaches the shell" proof rides the `ls-5.exp` LS-CI at
   LS-5-audit (needs P2/P3 for a visible effect).
-- **LS-5b — P2 default disposition.** `interrupt` default-terminate at the
-  EL0-return tail + the self-managing-fd gate; the shell exempt. Notes-delivery
-  change (I-19).
+- **LS-5b — P2 default disposition. [done]** `interrupt` default-terminate at
+  the EL0-return tail + the self-managing-fd gate. New `PROC_FLAG_SELF_MANAGING_-
+  NOTES` (proc_flags bit 6) set by `SYS_NOTE_OPEN` (the shell qualifies); the
+  EL0-return dispatcher's `handler_va == 0` arm now calls a pure decision
+  `notes_interrupt_should_terminate_locked` (no handler + not self-managing +
+  a deliverable [queued AND unmasked] `interrupt` present) and, on true, drops
+  the queue lock and `exits(NOTE_NAME_INTERRUPT)` -- the same primitive the
+  `kill` branch uses, which already routes single-thread -> ZOMBIE and multi-
+  thread -> the #811 `proc_group_terminate` cascade. A self-managing Proc, a
+  handler-bearing Proc, or a masked interrupt is exempt; only `interrupt` newly
+  default-terminates (child_exit / pipe stay queued; `kill`/N-4 unchanged).
+  I-19 extension. Kernel-unit-tested (`notes.interrupt_terminate_gate` truth
+  table + `notes.self_managing_flag`); **797/797** (HVF + TCG), u-7-test +
+  u-job-test all OK, boot OK, 0 EXTINCTION. **Semantic ripple (intended):** a
+  forwarded Ctrl-C to a dumb foreground coreutil (e.g. `echo`) now TERMINATES
+  it (status 1) instead of being a no-op -- the two U-7 arc probes that pinned
+  the forwarded child's status to 0 were relaxed to "reaped (no hang)" (their
+  stated intent); the forward-not-handle assertion is untouched.
 - **LS-5c — P3-terminate.** Widen the #811 wake predicate to
   death-or-terminate-interrupt; the blocked single-thread child wakes + dies.
   Re-validate every #811 site (I-9 generalized).

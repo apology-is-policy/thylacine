@@ -191,6 +191,12 @@ struct NoteQueue {
 // re-typing the literal.
 #define NOTE_NAME_KILL "kill"
 
+// LS-5 (P2 default disposition): the cooked-Ctrl-C note. A .rodata string
+// literal -- safe to pass to exits() (whose by-reference exit_msg capture
+// requires program-lifetime storage; F10 audit close). Used by the EL0-
+// return-tail uncaught-interrupt default-terminate.
+#define NOTE_NAME_INTERRUPT "interrupt"
+
 // `snare:*` family — kernel-synthetic notes posted on EL0 unhandled
 // fault. Per docs/ERRORS.md "Fault-note naming". Each name fits within
 // NOTE_NAME_MAX = 16 bytes including NUL. The `snare:` prefix is
@@ -317,6 +323,16 @@ int notes_name_is_kill(const char *name);
 // p->notes->lock. Returns 0 on success. Cannot fail at v1.0 since the
 // caller just popped (so there is space).
 int notes_reenqueue_head_locked(struct NoteQueue *q, const struct Note *n);
+
+// LS-5 P2 (ARCH 8.8.2): would an uncaught `interrupt` default-terminate `p` at
+// the EL0-return tail? True iff no async handler is registered, `p` is not
+// self-managing (has not opened its notes fd), and a deliverable interrupt
+// (queued AND unmasked for `t`) is present. Pure decision; no side effects.
+// notes_deliver_at_el0_return calls it under q->lock and, on true, drops the
+// lock + calls exits(NOTE_NAME_INTERRUPT). Exposed so the unit test can drive
+// the full decision without the noreturn exits() path. Caller MUST hold
+// p->notes->lock.
+int notes_interrupt_should_terminate_locked(struct Proc *p, struct Thread *t);
 
 // =============================================================================
 // Synthetic posters — kernel-internal callers (proc.c::exits, pipe.c write
