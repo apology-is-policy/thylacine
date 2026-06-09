@@ -143,6 +143,15 @@ pub struct Env {
     /// mask via `t::notes::set_mask` only while `notes` is open, so a held
     /// note is dequeue-deferred (no busy poll).
     note_mask: libthyla_rs::notes::NoteMask,
+    /// Notes consumed during an interruptible foreground wait (U-7c-b) that are
+    /// neither `interrupt` (forwarded to the running job) nor `child_exit` (the
+    /// reap wake): held here so their `on note` handlers fire at the next
+    /// `deliver_pending_notes` sync point rather than being lost. `try_read`
+    /// consumes the kernel queue front, so a note the foreground drain reads
+    /// past -- to reach a possible `interrupt` queued behind it -- must be
+    /// retained somewhere; this is that somewhere. Drained FIFO, before the
+    /// live queue, by `deliver_pending_notes`.
+    deferred_notes: Vec<libthyla_rs::notes::Note>,
 }
 
 impl Env {
@@ -165,6 +174,7 @@ impl Env {
             jobs: JobTable::new(),
             notes: None,
             note_mask: libthyla_rs::notes::NoteMask::NONE,
+            deferred_notes: Vec::new(),
         }
     }
 
@@ -349,6 +359,22 @@ impl Env {
         if self.notes.is_some() {
             let _ = libthyla_rs::notes::set_mask(self.note_mask);
         }
+    }
+
+    /// Hold a note consumed during an interruptible foreground wait (U-7c-b)
+    /// for delivery at the next sync point. Used for notes that are neither
+    /// `interrupt` (forwarded to the running job) nor `child_exit` (the reap
+    /// wake), so a handler-bearing note read past during the foreground drain
+    /// is not lost.
+    pub fn defer_note(&mut self, note: libthyla_rs::notes::Note) {
+        self.deferred_notes.push(note);
+    }
+
+    /// Take (and clear) the notes deferred during a foreground wait, oldest
+    /// first. `deliver_pending_notes` fires these before draining the live
+    /// kernel queue, preserving arrival order.
+    pub fn take_deferred_notes(&mut self) -> Vec<libthyla_rs::notes::Note> {
+        core::mem::take(&mut self.deferred_notes)
     }
 
     // === Special variables ===

@@ -136,8 +136,9 @@ use crate::parser::Span;
 use libthyla_rs::fs::{File, OpenOptions};
 use libthyla_rs::io::{Read as IoRead, Write as IoWrite};
 use libthyla_rs::process::{pipe, Stdio};
-use libthyla_rs::notes::{Note, NoteClass};
-use libthyla_rs::{t_putstr, t_wait_pid_for};
+use libthyla_rs::notes::{send, Note, NoteClass, NoteTarget};
+use libthyla_rs::poll::{PollEvents, PollSet, PollTimeout};
+use libthyla_rs::{t_putstr, t_wait_pid_for, T_WAIT_WNOHANG};
 
 use super::builtin;
 use super::env::Env;
@@ -533,19 +534,13 @@ fn exec_external_redirected(
                 feed_pipe(&mut wr, body.as_bytes());
                 drop(wr);
             }
-            match child.wait() {
-                Ok(status) => {
-                    env.status_set(status.raw());
-                    Ok(StatementFlow::Normal)
-                }
-                Err(e) => {
-                    let mut s = String::new();
-                    let _ = write!(&mut s, "wait failed: {:?}", e);
-                    env.errstr_set(s);
-                    env.status_set(1);
-                    Ok(StatementFlow::Normal)
-                }
-            }
+            // Interruptible foreground wait (U-7c-b): reap by pid while
+            // forwarding a Ctrl-C `interrupt` to the running child (see
+            // exec_external for the by-pid / vanished-pid rationale).
+            let pid = child.pid();
+            let statuses = wait_pids_interruptible(env, &[pid]);
+            env.status_set(statuses[0]);
+            Ok(StatementFlow::Normal)
         }
         Err(e) => {
             let mut s = String::new();
@@ -855,20 +850,10 @@ fn exec_pipeline(env: &mut Env, p: &Pipeline) -> EvalResult<StatementFlow> {
     // limitation). statuses[i] holds element i's exit. NB: at v1.0 the
     // kernel collapses any non-zero child exit to 1, so each status is 0
     // or 1; aggregate_pipefail computes rightmost-non-zero regardless.
-    let mut statuses: Vec<i32> = (0..pids.len()).map(|_| 0i32).collect();
-    for (i, &pid) in pids.iter().enumerate() {
-        let mut st: i32 = 0;
-        // SAFETY: t_wait_pid_for is the SYS_WAIT_PID SVC wrapper; &mut st
-        // is a valid writable i32.
-        let rc = unsafe { t_wait_pid_for(pid, 0, &mut st as *mut i32) };
-        if rc < 0 {
-            // The pid is no longer our child (already reaped / vanished --
-            // not expected for a just-spawned element). Leave status 0;
-            // never spin.
-            continue;
-        }
-        statuses[i] = st;
-    }
+    // The reap is the interruptible foreground wait (U-7c-b): a Ctrl-C while
+    // the pipeline runs forwards `interrupt` to its still-live elements. A
+    // vanished pid yields status 0 (never spins; see the helper).
+    let statuses = wait_pids_interruptible(env, &pids);
 
     if let Some(tag) = spawn_err {
         env.errstr_set(tag);
@@ -1154,19 +1139,15 @@ fn exec_external(
             drop(child.stdin.take());
             drop(child.stdout.take());
             drop(child.stderr.take());
-            match child.wait() {
-                Ok(status) => {
-                    env.status_set(status.raw());
-                    Ok(StatementFlow::Normal)
-                }
-                Err(e) => {
-                    let mut s = String::new();
-                    let _ = write!(&mut s, "wait failed: {:?}", e);
-                    env.errstr_set(s);
-                    env.status_set(1);
-                    Ok(StatementFlow::Normal)
-                }
-            }
+            // Interruptible foreground wait (U-7c-b): reap by pid while
+            // forwarding a Ctrl-C `interrupt` to the running child. Child::Drop
+            // does not reap, so this by-pid wait is the sole reap. A vanished
+            // pid yields 0 (the prior `wait failed -> status 1` arm was
+            // unreachable for a just-spawned child -- nothing else reaps it).
+            let pid = child.pid();
+            let statuses = wait_pids_interruptible(env, &[pid]);
+            env.status_set(statuses[0]);
+            Ok(StatementFlow::Normal)
         }
         Err(e) => {
             let mut s = String::new();
@@ -1844,13 +1825,21 @@ fn note_class_for_name(name: &str) -> Option<NoteClass> {
 /// built-in disposition. No-op until the consumer opens the note fd
 /// (`Repl::open_notes`); the host + bare-spawn paths leave it inert.
 pub fn deliver_pending_notes(env: &mut Env) {
-    if env.notes().is_none() {
+    // Notes deferred during an interruptible foreground wait (U-7c-b) fire
+    // first: they arrived before anything still sitting in the live queue.
+    // Always drained -- even with the fd closed -- so a prior wait's residue
+    // is never stranded.
+    let deferred = env.take_deferred_notes();
+    if deferred.is_empty() && env.notes().is_none() {
         return;
     }
     // Note delivery is transparent to `$status` (bash saves `$?` around a
     // trap): a handler firing between commands must not clobber the status
     // the next prompt reports. Capture + restore around the whole drain.
     let saved_status = env.status();
+    for note in &deferred {
+        dispatch_note(env, note);
+    }
     loop {
         // The immutable borrow of `env` for `notes()` lives only across the
         // `try_read` call; `next` is owned, so `env` is free for dispatch.
@@ -1866,6 +1855,152 @@ pub fn deliver_pending_notes(env: &mut Env) {
         }
     }
     env.status_set(saved_status);
+}
+
+// ---------------------------------------------------------------------
+// Interruptible foreground wait (U-7c-b)
+// ---------------------------------------------------------------------
+//
+// A foreground command holds the shell until it exits. While it runs the
+// shell is NOT reading the console (the line editor is idle), so a Ctrl-C
+// cannot reach the shell as keystrokes -- the kernel console owner instead
+// posts an `interrupt` note to the shell's own queue. `wait_pids_interruptible`
+// turns the otherwise-blocking reap into a poll on that queue so the note is
+// seen the moment it arrives and FORWARDED to the running job's pids
+// (scripture 10.2: a foreground job present -> forward, do NOT run the shell's
+// own `on note` handler).
+//
+// The reap ground truth stays the by-pid `wait_pid_for` (U-7-pre): each wake
+// WNOHANG-reaps every still-live pid. The `child_exit` note (posted on every
+// child exit) is the immediate poll wake; a bounded backstop timeout is the
+// safety net for a coalesced / lost / mask-deferred child_exit so the wait can
+// never hang. A note that is neither `interrupt` nor `child_exit` is deferred
+// (Env::defer_note) to the post-command `deliver_pending_notes` -- `try_read`
+// consumes the queue front, so a note read past while looking for an interrupt
+// must be retained, not dropped, or its handler would be lost.
+//
+// DEGRADES to a plain blocking by-pid wait when the shell has no note queue
+// open (host tests / the bare-spawn boot check / pre-`open_notes`): there is no
+// console to deliver a Ctrl-C and nothing to forward.
+//
+// SCOPE at v1.0: the three direct foreground command waits route here. The
+// command-substitution capture (`$(cmd)`) stays a blocking drain-before-reap
+// (it polls a capture pipe, not the note fd) and the `wait` builtin stays a
+// blocking bg-job reap; both gain forwarding when process groups land (U-PTY).
+
+/// Backstop poll timeout for the foreground wait. The `child_exit` note is the
+/// real wake (near-zero latency); this only bounds the rare case where that
+/// note is coalesced / lost / mask-deferred, so a modest value keeps the wait
+/// responsive while the kernel poll never becomes a busy loop.
+const FG_WAIT_BACKSTOP_MS: u32 = 100;
+
+/// Wait for every pid in `pids` to exit -- reaping each by pid -- while
+/// forwarding any `interrupt` note (Ctrl-C) to the still-live foreground pids.
+/// Returns the per-pid exit statuses in `pids` order (a vanished / not-our-
+/// child pid yields 0, matching the prior reap loops). See the section note.
+///
+/// Re-exported from `eval` for the boot probe; the three foreground exec paths
+/// (`exec_external`, `exec_external_redirected`, `exec_pipeline`) are its
+/// in-tree callers.
+pub fn wait_pids_interruptible(env: &mut Env, pids: &[i32]) -> Vec<i32> {
+    let mut statuses: Vec<i32> = (0..pids.len()).map(|_| 0i32).collect();
+
+    // DEGRADE: no note queue -> a plain blocking by-pid wait, no forwarding.
+    if env.notes().is_none() {
+        for (i, &pid) in pids.iter().enumerate() {
+            let mut st: i32 = 0;
+            // SAFETY: t_wait_pid_for is the SYS_WAIT_PID SVC wrapper; &mut st
+            // is a valid writable i32.
+            let rc = unsafe { t_wait_pid_for(pid, 0, &mut st as *mut i32) };
+            statuses[i] = if rc < 0 { 0 } else { st };
+        }
+        return statuses;
+    }
+
+    let mut reaped: Vec<bool> = (0..pids.len()).map(|_| false).collect();
+    let mut remaining = pids.len();
+    while remaining > 0 {
+        // 1. WNOHANG-reap every still-live pid (the reap ground truth).
+        for (i, &pid) in pids.iter().enumerate() {
+            if reaped[i] {
+                continue;
+            }
+            let mut st: i32 = 0;
+            // SAFETY: SVC wrapper; &mut st is a valid writable i32.
+            let rc = unsafe { t_wait_pid_for(pid, T_WAIT_WNOHANG, &mut st as *mut i32) };
+            if rc == 0 {
+                continue; // still alive
+            }
+            // rc > 0: reaped -> st. rc < 0: not our child (vanished) -> 0.
+            statuses[i] = if rc < 0 { 0 } else { st };
+            reaped[i] = true;
+            remaining -= 1;
+        }
+        if remaining == 0 {
+            break;
+        }
+        // 2. Block on the note queue until a note arrives or the backstop fires.
+        poll_notes_once(env);
+        // 3. Drain the wake: forward interrupt, swallow child_exit, defer rest.
+        drain_fg_wait_notes(env, pids, &reaped);
+    }
+    statuses
+}
+
+/// Block on the shell's note fd until a note is ready or `FG_WAIT_BACKSTOP_MS`
+/// elapses. No-op (returns at once) if the queue is not open. A poll error
+/// (closed fd / kernel reject) falls through to another WNOHANG sweep -- never
+/// a hang, never a spin.
+fn poll_notes_once(env: &Env) {
+    let notes = match env.notes() {
+        Some(n) => n,
+        None => return,
+    };
+    let mut set = PollSet::with_capacity(1);
+    set.add(notes, PollEvents::READ);
+    let _ = set.poll(PollTimeout::Millis(FG_WAIT_BACKSTOP_MS));
+}
+
+/// Drain every immediately-available note during a foreground wait. `interrupt`
+/// forwards to the still-live foreground pids; `child_exit` is swallowed (the
+/// WNOHANG loop reaps, and consuming the note clears the fd's POLLIN so the
+/// next poll genuinely blocks rather than spinning); any other note is deferred
+/// to the post-command `deliver_pending_notes`. Bounded + non-blocking
+/// (`try_read` polls with timeout 0).
+fn drain_fg_wait_notes(env: &mut Env, pids: &[i32], reaped: &[bool]) {
+    loop {
+        // The immutable borrow for `notes()` ends with `try_read`; `note` is
+        // owned, freeing `env` for `defer_note`.
+        let next = match env.notes() {
+            Some(n) => n.try_read(),
+            None => return,
+        };
+        let note = match next {
+            Ok(Some(note)) => note,
+            // Empty / masked-only queue or a transient read error -> done.
+            _ => return,
+        };
+        match note.name.as_str() {
+            "interrupt" => {
+                for (i, &pid) in pids.iter().enumerate() {
+                    if !reaped[i] {
+                        // Permission-gated to the shell's children (these pids
+                        // are). Result ignored: a forward to an already-exited
+                        // or native non-reader child is inert -- it matters to a
+                        // pouch/musl child (async SIGINT).
+                        let _ = send(NoteTarget::Pid(pid), "interrupt");
+                    }
+                }
+            }
+            // The poll wake; the WNOHANG loop is the reap truth. Swallow so the
+            // fd stops advertising POLLIN.
+            "child_exit" => {}
+            // A handler-bearing note (user note / `pipe`): hold it for the
+            // post-command drain so its `on note` body fires at the next sync
+            // point -- we never run shell handlers mid-wait.
+            _ => env.defer_note(note),
+        }
+    }
 }
 
 /// Dispatch one delivered note (U-7c). A registered `on note` handler wins

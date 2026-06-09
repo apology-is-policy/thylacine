@@ -37,10 +37,21 @@
 //       body (the kernel Thread mask holds it) and the handler fires only at
 //       the post-block drain (scripture 10.8).
 //
-// The harness cannot inject /dev/cons keystrokes (the A-4c constraint), so
-// the interactive keystroke->job path is exercised via the fd-agnostic
-// `Repl::feed` + the directly-driven reaper here. joey gates the boot on
-// this binary's status == 0.
+//   U-7c-b (interruptible foreground wait + Ctrl-C forward):
+//   16. The forward primitive: `interrupt` can be posted to a LIVE foreground
+//       child's pid (the permission-gated child-target path the wait uses).
+//   17. `wait_pids_interruptible` with a pre-queued `interrupt` reaps the child
+//       by pid + returns its status -- it drains the note without hanging.
+//   18. DEGRADE path: with no note queue open, the wait is a plain blocking
+//       by-pid reap (the host / boot-check / pre-open path).
+//   19. A non-interrupt note arriving during a foreground wait is NOT lost --
+//       its `on note` handler fires at the post-command drain, never mid-wait.
+//
+// The harness cannot inject /dev/cons keystrokes (the A-4c constraint), so the
+// interactive keystroke->job path is exercised via the fd-agnostic `Repl::feed`
+// + the directly-driven reaper here, and the Ctrl-C forward (16-19) is driven
+// by self-posting the `interrupt` the kernel console owner would post. joey
+// gates the boot on this binary's status == 0.
 //
 // The reap loops are bounded (echo/seq/tr exit in microseconds; the bound is
 // a safety net, never the steady state) and yield via time::sleep between
@@ -60,7 +71,7 @@ use libthyla_rs::notes::{self, NoteClass, NoteTarget};
 use libthyla_rs::process::{Command, Stdio};
 use libthyla_rs::time::{self, Duration};
 use libthyla_rs::{t_putstr, t_wait_pid_for, T_WAIT_WNOHANG};
-use libutopia::eval::{deliver_pending_notes, eval_source, Env};
+use libutopia::eval::{deliver_pending_notes, eval_source, wait_pids_interruptible, Env};
 use libutopia::repl::Repl;
 
 #[global_allocator]
@@ -484,6 +495,142 @@ pub extern "C" fn rs_main() -> i64 {
     deliver_pending_notes(&mut env_d); // unmasked -> now fires
     if env_d.get("fired").as_scalar() != "yes" {
         return fail("mask-mech: unmasked note did not deliver after the mask lifted");
+    }
+
+    // ----- U-7c-b: interruptible foreground wait + Ctrl-C forward -----
+    //
+    // A foreground command runs while the shell is NOT reading the console, so
+    // a Ctrl-C reaches the shell as an `interrupt` NOTE (posted by the kernel
+    // console owner), not keystrokes; the foreground wait forwards it to the
+    // running job's pids. The harness cannot inject a real Ctrl-C, so the
+    // `interrupt` is self-posted (the same note the console owner would post).
+
+    // 16. The forward SEND primitive: `interrupt` can be posted to a LIVE
+    //     foreground child's pid (the permission-gated child-target path the
+    //     wait uses). Spawn `tr` holding its stdin open so it blocks (stays
+    //     alive), post `interrupt` to its pid (must succeed), then EOF + reap.
+    match Command::new("tr")
+        .arg("a-z")
+        .arg("A-Z")
+        .stdin(Stdio::Piped)
+        .stdout(Stdio::Piped)
+        .stderr(Stdio::Piped)
+        .spawn()
+    {
+        Ok(mut child) => {
+            drop(child.stdout.take());
+            drop(child.stderr.take());
+            let pid = child.pid();
+            if notes::send(NoteTarget::Pid(pid), "interrupt").is_err() {
+                return fail("fg-forward: interrupt to a live child pid failed");
+            }
+            drop(child.stdin.take()); // EOF -> tr exits regardless of the note
+            let _ = child.wait();
+        }
+        Err(_) => return fail("fg-forward: could not spawn the `tr` blocker"),
+    }
+
+    // 17. `wait_pids_interruptible` with a pre-queued `interrupt`: the wait
+    //     drains the note (the path that forwards a Ctrl-C) and reaps the child
+    //     by pid, returning its status -- it must NOT hang. A quick `echo`
+    //     terminates the wait without external help; the pre-posted interrupt
+    //     exercises the poll+drain arm whenever the child is still live at the
+    //     first sweep (else the immediate reap wins -- both are correct).
+    let mut env_fw = Env::new();
+    env_fw.interactive = true;
+    match notes::Notes::open_self() {
+        Ok(nq) => env_fw.set_notes(Some(nq)),
+        Err(_) => return fail("fg-wait: could not open the self note queue"),
+    }
+    deliver_pending_notes(&mut env_fw); // clear leftover child_exit notes
+    match Command::new("echo")
+        .arg("x")
+        .stdin(Stdio::Piped)
+        .stdout(Stdio::Piped)
+        .stderr(Stdio::Piped)
+        .spawn()
+    {
+        Ok(mut child) => {
+            drop(child.stdin.take());
+            drop(child.stdout.take());
+            drop(child.stderr.take());
+            let pid = child.pid();
+            if notes::send(NoteTarget::SelfProc, "interrupt").is_err() {
+                return fail("fg-wait: self-post of `interrupt` failed");
+            }
+            let statuses = wait_pids_interruptible(&mut env_fw, &[pid]);
+            if statuses.len() != 1 || statuses[0] != 0 {
+                return fail("fg-wait: did not reap `echo x` with status 0");
+            }
+        }
+        Err(_) => return fail("fg-wait: could not spawn `echo`"),
+    }
+    deliver_pending_notes(&mut env_fw); // drop any interrupt the fast path left
+
+    // 18. DEGRADE path: with no note queue open, the wait is a plain blocking
+    //     by-pid reap (the host / boot-check / pre-`open_notes` path). A quick
+    //     child reaps to status 0, no forwarding machinery engaged.
+    let mut env_dg = Env::new();
+    env_dg.interactive = true; // notes deliberately NOT opened
+    match Command::new("echo")
+        .arg("y")
+        .stdin(Stdio::Piped)
+        .stdout(Stdio::Piped)
+        .stderr(Stdio::Piped)
+        .spawn()
+    {
+        Ok(mut child) => {
+            drop(child.stdin.take());
+            drop(child.stdout.take());
+            drop(child.stderr.take());
+            let pid = child.pid();
+            let statuses = wait_pids_interruptible(&mut env_dg, &[pid]);
+            if statuses.len() != 1 || statuses[0] != 0 {
+                return fail("degrade: blocking by-pid reap did not return status 0");
+            }
+        }
+        Err(_) => return fail("degrade: could not spawn `echo`"),
+    }
+
+    // 19. A non-interrupt, non-child_exit note arriving during a foreground
+    //     wait is NOT lost: whether the wait deferred it (Env::defer_note) or
+    //     left it queued, the handler fires at the POST-command drain and never
+    //     mid-wait. (`pipe` stands in for any handler-bearing note.)
+    let mut env_df = Env::new();
+    env_df.interactive = true;
+    match notes::Notes::open_self() {
+        Ok(nq) => env_df.set_notes(Some(nq)),
+        Err(_) => return fail("fg-defer: could not open the self note queue"),
+    }
+    deliver_pending_notes(&mut env_df); // clear leftovers
+    if eval_source(&mut env_df, "on note 'pipe' { let pipe_seen = yes }").is_err() {
+        return fail("fg-defer: registering the `pipe` handler errored");
+    }
+    match Command::new("echo")
+        .arg("z")
+        .stdin(Stdio::Piped)
+        .stdout(Stdio::Piped)
+        .stderr(Stdio::Piped)
+        .spawn()
+    {
+        Ok(mut child) => {
+            drop(child.stdin.take());
+            drop(child.stdout.take());
+            drop(child.stderr.take());
+            let pid = child.pid();
+            if notes::send(NoteTarget::SelfProc, "pipe").is_err() {
+                return fail("fg-defer: self-post of `pipe` failed");
+            }
+            let _ = wait_pids_interruptible(&mut env_df, &[pid]);
+        }
+        Err(_) => return fail("fg-defer: could not spawn `echo`"),
+    }
+    if env_df.defined("pipe_seen") {
+        return fail("fg-defer: handler fired DURING the wait (must defer to sync point)");
+    }
+    deliver_pending_notes(&mut env_df);
+    if env_df.get("pipe_seen").as_scalar() != "yes" {
+        return fail("fg-defer: deferred `pipe` handler did not fire post-wait");
     }
 
     t_putstr("u-job-test: all OK\n");

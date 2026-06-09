@@ -79,6 +79,6 @@ pub use expr::eval_expr;
 pub use jobs::{Job, JobTable};
 pub use stmt::{
     aggregate_pipefail, deliver_pending_notes, eval_block, eval_script, eval_source,
-    eval_statement, StatementFlow,
+    eval_statement, wait_pids_interruptible, StatementFlow,
 };
 pub use value::Value;

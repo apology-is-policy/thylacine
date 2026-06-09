@@ -35,7 +35,8 @@ The loop lives in two pieces:
 | Read-parse-eval cycle; Ctrl-D/`exit`/EOF exit; prompt render | **U-6g** (here) | The loop itself |
 | `&`; jobs/fg/bg/wait/kill | **U-7a/b** | §10.5 / §10.6 (LANDED) |
 | `on note`/`mask note` runtime delivery (sync-point, §3.7) | **U-7c-a** | LANDED — drained at the prompt cycle; the cons fd is unpollable until U-PTY |
-| Ctrl-C foreground forwarding; Ctrl-Z; multi-fd `poll()` across a pollable cons + notes fds | **U-7c-b / U-PTY** | §10.2 forward to the running fg job; the pollable cons is U-PTY |
+| Ctrl-C foreground forwarding | **U-7c-b** | LANDED — `eval::wait_pids_interruptible` forwards `interrupt` to the running fg job (§10.2 as-built) |
+| Ctrl-Z; multi-fd `poll()` across a pollable cons + notes fds | **U-PTY** | needs a kernel stopped thread-state + a pollable cons `.poll` hook |
 | Pollable cons (`.poll` hook) + termios (raw/cooked, ECHO, ISIG) + per-Proc fd 0/1/2 | **U-PTY** | The line-discipline substrate |
 
 At v1.0 `/dev/cons` is a blocking-read-only Dev with **no `.poll` hook**
@@ -205,7 +206,13 @@ fires any registered `on note` handler; `mask note` defers a class for its
 body via the kernel Thread mask. Delivery is at this sync point (not async)
 because the cons fd is unpollable until U-PTY. `deliver_notes` is `pub` so the
 `/u-job-test` probe drives delivery directly; it is a no-op when the note fd is
-unopened (host tests, the bare-spawn boot check).
+unopened (host tests, the bare-spawn boot check) AND no notes are deferred.
+
+Since U-7c-b, `deliver_pending_notes` also fires the notes **deferred** during
+an interruptible foreground wait (a handler-bearing note that arrived while a
+foreground command ran — `94-utopia-eval.md` §9.7) — drained FIFO, before the
+live queue. So a `pipe`/user note arriving mid-command runs its handler at this
+prompt-cycle sync point, never mid-command.
 
 ## 4. Exit semantics
 
@@ -240,7 +247,7 @@ with `repl.exit_code()` = `exit_requested().unwrap_or(env.status())`.
 | Background `&` + the job table + prompt-cycle `[N]+ Done` reaping (`reap_jobs`, §3.6) | DONE (U-7a) |
 | `jobs`/`fg`/`bg`/`wait`/`kill` builtins | DONE (U-7b) |
 | `on note`/`mask note` runtime delivery (`deliver_notes`/`open_notes`, §3.7) | DONE (U-7c-a) |
-| Ctrl-C foreground forwarding (interruptible foreground wait) | U-7c-b |
+| Ctrl-C foreground forwarding (interruptible foreground wait) | DONE (U-7c-b) |
 | Multi-fd job-control `poll()` over a pollable cons | U-PTY |
 | Ctrl-Z (stop) + termios | U-PTY |
 | Pollable cons + termios (raw/ECHO) + per-Proc fd 0/1/2 | U-PTY |
