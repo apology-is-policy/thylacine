@@ -1,0 +1,48 @@
+#!/usr/bin/expect -f
+# tools/interactive/ls-3c.exp -- the LS-3c misc coreutils.
+#
+# Proves, over a real PTY, that the LS-3c tools resolve from the session shell
+# and compose through pipes:
+#   uname     `uname -a` -> the static fields, asserted via "#1-thylacine"
+#             (a token that cannot appear in the typed line).
+#   realpath  `realpath /a/b/../c` -> "/a/c" (lexical .. collapse).
+#   yes       `yes z9q7 | head -2` -> "z9q7". This is the headline: yes is an
+#             UNBOUNDED producer, so it is deliberately NOT in coreutil-smoke
+#             (the capture harness holds the read-end open -> no BrokenPipe ->
+#             yes never exits -> wait() deadlocks). The shell pipe is the
+#             correct exerciser: head reads 2 lines then closes the pipe, yes
+#             gets BrokenPipe on its next write and exits. This proves the
+#             producer/consumer pipe teardown end to end.
+#   hexdump   `echo Hi | hexdump` -> the hex of 'H','i' ("48 69"), proving the
+#             stdin-filter path through a pipe.
+#
+# Honors the three LS-CI portability facts (see lib.exp): run under script(1)
+# (the wrapper), global spawn_id (lc_boot), match OUTPUT not typed input -- all
+# tokens here (#1-thylacine, /a/c, z9q7, 48 69) are command OUTPUT and cannot
+# appear in the typed command line.
+
+source [file join [file dirname [info script]] lib.exp]
+
+lc_boot
+lc_login michael correct-horse-battery-staple-v1
+
+# uname: static system info resolves + composes its fields.
+lc_run_expect "uname -a" "#1-thylacine"
+lc_pass "LS-3c(a): uname -a prints the static fields"
+
+# realpath: lexical canonicalization (.. collapse), cwd-independent (absolute).
+lc_run_expect "realpath /a/b/../c" "/a/c"
+lc_pass "LS-3c(b): realpath collapses .. lexically"
+
+# yes | head: the unbounded-producer + BrokenPipe-exit path the capture harness
+# cannot smoke. head closes the pipe after 2 lines; yes must then exit cleanly.
+lc_run_expect "yes z9q7 | head -2" "z9q7"
+lc_pass "LS-3c(c): yes | head composes (producer exits on BrokenPipe)"
+
+# hexdump as a stdin filter through a pipe ('H'=0x48 'i'=0x69).
+lc_run_expect "echo Hi | hexdump" "48 69"
+lc_pass "LS-3c(d): hexdump dumps piped stdin"
+
+lc_quit
+lc_pass "LS-CI ls-3c: uname + realpath + yes|head + hexdump all verified"
+exit 0

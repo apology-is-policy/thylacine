@@ -203,8 +203,25 @@ the shell `cd` calling `SYS_CHDIR` so spawned children inherit the cwd. Proven
 by `fs-mut-smoke` (joey post-pivot, boot-gated): 21/21 incl. relative
 create+write+read, `..`-relative clean, getcwd round-trip. Name-based for v1.0;
 handle-based dot is the v1.x upgrade (lands with symlinks). **Unblocks the
-relative-path interactive MVP** (`cat foo.txt` after `cd`). NEXT on the MVP
-line: LS-5 (Ctrl-C), with LS-3c (misc coreutils) as breadth.
+relative-path interactive MVP** (`cat foo.txt` after `cd`).
+
+**LS-3c [done] (misc coreutils; pure userspace).** Adopted 8 tools from the
+aux branch (`aux/userspace-apps`) onto the libthyla-rs surface (the LS-3a/3b
+pattern -- `aux-rt` -> `env::args` + `io::` + the print macros, one
+`coreutils/src/bin/<name>.rs` each, cpio-wired): `sleep` (rides
+`libthyla-rs::time::sleep` -> `SYS_TORPOR_WAIT`; magnitude-guarded against a
+`from_secs_f64` overflow), `hexdump`, `cmp`, `yes`, `realpath`, `which`, `env`
+(degenerate, no envp -- G15), `uname` (static -- G16). Two LS-4-now-satisfied
+deps folded in: **realpath** anchors a relative input against
+`env::current_dir()` (was: rejected); **which**'s `fs::exists` probe resolves
+relative-to-cwd. Verified `coreutil-smoke` 41/41 (+13 LS-3c checks) + `ls-3c`
+LS-CI (`uname -a`, `realpath`, `yes | head`, `echo | hexdump` through the real
+shell). **`yes` excluded from `coreutil-smoke`** (unbounded producer would
+deadlock the capture harness -- no BrokenPipe; covered interactively by
+`yes | head`). No new libthyla-rs surface, no kernel change -> NOT
+audit-bearing; floor = `make test-tcg` x2 (both clean: 793/793 + boot OK + 0
+EXTINCTION). NEXT on the MVP line: LS-5 (Ctrl-C); remaining breadth: LS-6
+(login UX) / LS-7 (editor) / LS-K (id/whoami/date).
 
 ## Exit criteria status
 

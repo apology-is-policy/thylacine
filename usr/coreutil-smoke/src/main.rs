@@ -157,6 +157,26 @@ pub extern "C" fn rs_main() -> i64 {
     c.expect("grep no-match", "grep", &["zzz"], b"foo\nbar\n", b"", 1);
     c.expect("grep -c", "grep", &["-c", "ba"], b"foo\nbar\nbaz\n", b"2\n", 0);
 
+    // --- LS-3c misc coreutils ---
+    // The kernel collapses any non-zero child exit to 1, so env's 125 and
+    // cmp's 2 both arrive as 1. `yes` is intentionally NOT smoked here: it is
+    // an unbounded producer, and the capture harness holds the read-end open
+    // (no BrokenPipe), so its write never errors and wait() would deadlock --
+    // `yes` is covered interactively (`yes | head`) in the LS-CI ls-3c scenario.
+    c.expect("uname", "uname", &[], b"", b"Thylacine\n", 0);
+    c.expect("uname -m", "uname", &["-m"], b"", b"aarch64\n", 0);
+    c.expect("uname -a", "uname", &["-a"], b"", b"Thylacine (none) 1.0-dev #1-thylacine aarch64\n", 0);
+    c.expect("env empty", "env", &[], b"", b"", 0);
+    c.expect("realpath abs", "realpath", &["/a/b/../c"], b"", b"/a/c\n", 0);
+    c.expect("realpath rel", "realpath", &["x/../y"], b"", b"/y\n", 0); // cwd "/" -> "/y"
+    c.expect("sleep 0", "sleep", &["0"], b"", b"", 0);
+    c.expect_contains("hexdump hex", "hexdump", &[], b"Hi", b"48 69", 0); // 'H'=0x48 'i'=0x69
+    c.expect_contains("hexdump ascii", "hexdump", &[], b"Hi", b"|Hi|", 0);
+    c.expect("which miss", "which", &["nope"], b"", b"", 1); // bare name, no PATH (G15)
+    c.expect("which path", "which", &["/version"], b"", b"/version\n", 0);
+    c.expect("cmp equal", "cmp", &["/version", "/version"], b"", b"", 0);
+    c.expect_contains("cmp differ", "cmp", &["/version", "/welcome"], b"", b"differ", 1);
+
     // --- file read via File::open (devramfs /version is read-only, present) ---
     c.expect("cat FILE", "cat", &["/version"], b"", b"Thylacine v0.1-dev\n", 0);
     c.expect_contains("wc FILE", "wc", &["-l", "/version"], b"", b"/version", 0);
