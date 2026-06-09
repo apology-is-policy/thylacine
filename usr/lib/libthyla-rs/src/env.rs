@@ -24,7 +24,35 @@
 // There is therefore no `var()` / `vars()` yet; it lands when the envp
 // surface does (DOC-GAP G15).
 
+use crate::err::{Error, Result};
 use crate::rt_raw_args;
+use alloc_crate::string::String;
+
+// The kernel's SYS_OPEN_PATH_MAX (1024) + NUL. dot_path is bounded by it, so a
+// stack buffer of this size always holds the full cwd.
+const CWD_BUF: usize = 1025;
+
+/// The current working directory (LS-4), as an owned absolute path String.
+/// Mirrors `std::env::current_dir`. The kernel tracks one cwd per Proc (the
+/// Plan 9 "dot"); a relative `fs::`/open path resolves against it.
+pub fn current_dir() -> Result<String> {
+    let mut buf = [0u8; CWD_BUF];
+    // SAFETY: buf is a valid writable byte buffer of len CWD_BUF.
+    let rc = unsafe { crate::t_getcwd(buf.as_mut_ptr(), buf.len()) };
+    let len = Error::from_syscall_return(rc)? as usize;
+    let s = core::str::from_utf8(&buf[..len]).map_err(|_| Error::InvalidArgument)?;
+    Ok(String::from(s))
+}
+
+/// Set the per-Proc cwd to `path` (LS-4). Mirrors `std::env::set_current_dir`.
+/// The kernel requires `path` to resolve to a directory the caller can search
+/// (X); spawned children inherit the new cwd.
+pub fn set_current_dir(path: &str) -> Result<()> {
+    // SAFETY: path is a valid &str (ptr + len).
+    let rc = unsafe { crate::t_chdir(path.as_ptr(), path.len()) };
+    Error::from_syscall_return(rc)?;
+    Ok(())
+}
 
 /// The process's command-line arguments, read from the kernel-populated
 /// initial stack frame. `argv[0]` is the program name (the spawn convention

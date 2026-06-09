@@ -146,7 +146,7 @@ Closes most of #925. Split:
 
 Each verified by `coreutil-smoke` + an LS-CI assertion (`ls /` lists the root).
 
-### LS-4 — Relative paths (the kernel per-Proc cwd) [KERNEL + audit-bearing]
+### LS-4 — Relative paths (the kernel per-Proc cwd) [done; KERNEL + audit-bearing]
 
 **Kernel** (G07; ABI = two syscalls + a resolution-semantics change). The shell
 already tracks cwd in `Env` (`cd`/`pwd`/glob/the prompt use it), but externals
@@ -280,7 +280,7 @@ ships the name-based form, and the handle-based upgrade lands *with* symlinks/G1
 ## Sequencing + the MVP line
 
 ```
-LS-1 [done] ─► LS-2 [done] ─► LS-CI [done] ─► LS-3a [done] ─► LS-4 ─► LS-5    ◄── MVP: usable shell
+LS-1 [done] ─► LS-2 [done] ─► LS-CI [done] ─► LS-3a [done] ─► LS-4 [done] ─► LS-5    ◄── MVP: usable shell
                                   │
                                   ├─► LS-3b ─► LS-6 ─► LS-3c ─► LS-7 ─► LS-K   ◄── breadth
                                   │

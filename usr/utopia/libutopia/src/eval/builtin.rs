@@ -204,6 +204,17 @@ fn bi_cd(env: &mut Env, args: &[String]) -> EvalResult<StatementFlow> {
         return fail(env, s, 1);
     }
 
+    // LS-4: tell the KERNEL (SYS_CHDIR) so spawned children inherit this cwd and
+    // resolve their relative paths against it. `target` is already absolute
+    // (normalize_abs). The kernel re-validates (directory + search/X); a failure
+    // here (e.g. no X on the target itself, which the is_dir probe above does not
+    // catch) aborts the cd. On success $cwd mirrors the same target.
+    if libthyla_rs::env::set_current_dir(&target).is_err() {
+        let mut s = String::new();
+        let _ = write!(&mut s, "cd: {}: cannot change directory", target);
+        return fail(env, s, 1);
+    }
+
     // Commit: $oldpwd <- the directory we are leaving; $cwd <- target.
     let old = env.cwd().to_string();
     env.cwd_set(target.clone());

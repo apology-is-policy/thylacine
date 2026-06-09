@@ -376,6 +376,15 @@ allocation in the resolver beyond the Spoor clones, which are SLUB).
   Spoor you were handed). This is over-restrictive vs POSIX `openat` (safe -- it
   cannot escape) and is the v1.0 containment choice; full cross-mount `..`
   fidelity (Plan 9 `Chan->mh` back-pointers) is a v1.x refinement.
+- **The per-Proc cwd is name-based + combined-length-bounded (LS-4; audit F1).**
+  `cwd_lexical_resolve` joins `dot_path` (<= `SYS_OPEN_PATH_MAX`) with the
+  relative input into one buffer; a deep cwd + a long relative path whose
+  *joined* length exceeds `SYS_OPEN_PATH_MAX` is rejected (`-1`) even though it
+  would resolve from root. This is the same combined-length bound the
+  single-component surfaces carry; there is no overflow (every write is
+  capacity-guarded). Separately, renaming an ancestor of a live cwd makes
+  `dot_path` stale (the Proc re-`cd`s) -- the name-based v1.0 limitation; the
+  handle-based dot (v1.x, lands with symlinks) removes it.
 - **Mount crossing is in-call only; `..` does not un-cross.** stalk-2 crosses
   mounts forward (Plan 9 `domount`), and `..` pops the in-call trail (contained
   at the base). Full Plan-9 cross-mount `..` fidelity (a `..` at a mounted root

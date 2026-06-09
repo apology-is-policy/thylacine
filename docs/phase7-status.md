@@ -185,6 +185,27 @@ UX, a minimal editor, id/whoami/date) for breadth and LS-8 (U-PTY: pollable cons
 termios + async) for depth. Tasks #944-#953. Supersedes the loose U-9..N / U-PTY
 rows above with a workflow-driven sequence.
 
+**LS-4 [done] (kernel per-Proc cwd; user-voted over shell-side argv-expansion
+2026-06-09; scripture `43ce24e`).** Split LS-4a (kernel, audit-bearing) +
+LS-4b (userspace). LS-4a `@c6b0ff2`: `Territory.dot_path` (a cleaned absolute
+cwd string, name-based; NULL=="/") + a leaf `dot_lock`, `cwd_lexical_resolve` /
+`territory_resolve_cwd` / `getdot` / `setdot`, `SYS_CHDIR`=69 / `SYS_GETCWD`=70,
+and the `sys_open_handler` relative->cwd join (POSIX `openat(AT_FDCWD)`). I-28
+PRESERVED with NO new mechanism (the join always hands stalk an
+absolute-from-root path; stalk re-clamps `..`). Focused Opus audit **CLEAN 0 P0
+/ 0 P1 / 0 P2 / 3 P3** (all doc/cosmetic; F1 combined-length-bound doc + F2 a
+"cleaned is pre-resolved" comment FIXED, F3 pre-existing `source_is_valid` no-op
+out of scope) -- arch SOUND. Kernel tests `territory.cwd_lexical` +
+`territory.cwd_dot`; 793/793. LS-4b (userspace): `libthyla-rs` `t_chdir`/
+`t_getcwd` + `env::current_dir`/`set_current_dir`, the `fs::` relative-mutation
+absolutize (`cwd_join_clean` in `with_parent_dir` + `open_create_at_path`), and
+the shell `cd` calling `SYS_CHDIR` so spawned children inherit the cwd. Proven
+by `fs-mut-smoke` (joey post-pivot, boot-gated): 21/21 incl. relative
+create+write+read, `..`-relative clean, getcwd round-trip. Name-based for v1.0;
+handle-based dot is the v1.x upgrade (lands with symlinks). **Unblocks the
+relative-path interactive MVP** (`cat foo.txt` after `cd`). NEXT on the MVP
+line: LS-5 (Ctrl-C), with LS-3c (misc coreutils) as breadth.
+
 ## Exit criteria status
 
 Per `docs/UTOPIA-SHELL-DESIGN.md §18` / `docs/ROADMAP.md §8.2`. Twelve headline checks.

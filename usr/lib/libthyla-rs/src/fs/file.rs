@@ -70,6 +70,7 @@ use crate::{
     T_OTRUNC, T_OWRITE, T_SEEK_CUR, T_SEEK_END, T_SEEK_SET, T_WALK_OPEN_FROM_ROOT,
     T_WALK_OPEN_NAME_MAX,
 };
+use alloc_crate::string::String;
 use alloc_crate::vec::Vec;
 
 use super::path::{Component, Path};
@@ -225,11 +226,16 @@ impl File {
         if path.is_empty() {
             return Err(Error::InvalidArgument);
         }
-        if path.is_relative() {
-            // V1: only absolute paths. Future File::open_at(&Spoor, name)
-            // will let callers walk from a held Spoor.
-            return Err(Error::InvalidArgument);
-        }
+        // LS-4: a RELATIVE create/open path resolves against the per-Proc cwd
+        // (the same absolutize `with_parent_dir` uses for the fs:: mutations).
+        // The holder outlives the rest of the call.
+        let abs_holder: String;
+        let path: &Path = if path.is_relative() {
+            abs_holder = cwd_join_clean(path)?;
+            Path::new(&abs_holder)
+        } else {
+            path
+        };
 
         // Collect Normal components; reject ParentDir; skip CurDir +
         // the leading RootDir.
@@ -391,6 +397,41 @@ fn last_open_or_create(
 /// parent would be rejected. Per-component the kernel checks search (X)
 /// permission only (POSIX traversal), not read.
 ///
+/// LS-4: join a relative path onto the per-Proc cwd and lexically clean it into
+/// an owned absolute String. Mirrors the kernel `cwd_lexical_resolve` (the
+/// kernel joins SYS_OPEN paths, but the single-hop mutation walk starts from a
+/// fd, so the join is done here). `.` skipped, `//` collapsed, `..` pops the
+/// last component (clamped at `/`). Reads the cwd via `env::current_dir`
+/// (SYS_GETCWD), so it sees the same dot the kernel resolves opens against.
+fn cwd_join_clean(rel: &Path) -> Result<String> {
+    let cwd = crate::env::current_dir()?; // an absolute, already-clean path
+    let mut stack: Vec<&str> = Vec::new();
+    for c in Path::new(&cwd).components() {
+        if let Component::Normal(s) = c {
+            stack.push(s);
+        }
+    }
+    for c in rel.components() {
+        match c {
+            Component::Normal(s) => stack.push(s),
+            Component::ParentDir => {
+                stack.pop();
+            }
+            Component::CurDir | Component::RootDir => {}
+        }
+    }
+    let mut out = String::new();
+    if stack.is_empty() {
+        out.push('/');
+    } else {
+        for s in &stack {
+            out.push('/');
+            out.push_str(s);
+        }
+    }
+    Ok(out)
+}
+
 /// `parent_fd` is the `T_WALK_OPEN_FROM_ROOT` sentinel for a single-component
 /// path (the mutation syscalls resolve it to the caller's Territory root);
 /// otherwise it is an owned handle this function closes after `f` returns --
@@ -405,9 +446,23 @@ pub(crate) fn with_parent_dir<T>(
     path: &Path,
     f: impl FnOnce(i64, &str) -> Result<T>,
 ) -> Result<T> {
-    if path.is_empty() || path.is_relative() {
+    if path.is_empty() {
         return Err(Error::InvalidArgument);
     }
+    // LS-4: a RELATIVE mutation path resolves against the per-Proc cwd. Join +
+    // lexically clean against current_dir() into an owned absolute String, then
+    // proceed exactly as for an absolute path -- so ".." in the relative part is
+    // resolved HERE, not rejected by the `..` filter below. (The kernel SYS_OPEN
+    // join handles relative *opens*; the single-hop mutation walk starts from a
+    // fd, so the join is done here. Both consult the same kernel cwd.) The holder
+    // outlives the rest of the call; the kernel re-validates rights per walked dir.
+    let abs_holder: String;
+    let path: &Path = if path.is_relative() {
+        abs_holder = cwd_join_clean(path)?;
+        Path::new(&abs_holder)
+    } else {
+        path
+    };
     // Collect the Normal components; reject `..`; skip `.` and the leading
     // root separator (mirrors open_create_at_path).
     let names: Vec<&str> = path

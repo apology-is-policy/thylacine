@@ -217,6 +217,8 @@ pub const T_SYS_OPEN: u64             = 65;     // A-5b-0/stalk-1 multi-componen
 pub const T_SYS_LOOM_SETUP: u64       = 66;
 pub const T_SYS_LOOM_REGISTER: u64    = 67;
 pub const T_SYS_LOOM_ENTER: u64       = 68;
+pub const T_SYS_CHDIR: u64            = 69;     // LS-4 per-Proc cwd: set dot
+pub const T_SYS_GETCWD: u64           = 70;     // LS-4 per-Proc cwd: read dot
 // SYS_UNLINK flags: rmdir an empty directory vs unlink a non-directory.
 // Mirrors the kernel's SYS_UNLINK_REMOVEDIR / wire P9_UNLINK_AT_REMOVEDIR.
 pub const T_UNLINK_REMOVEDIR: u32     = 0x200;
@@ -1568,6 +1570,37 @@ pub unsafe fn t_open(start_fd: i64, path: *const u8, path_len: usize, omode: u32
         in("x2") path_len as u64,
         in("x3") omode as u64,
         in("x8") T_SYS_OPEN,
+        options(nostack)
+    );
+    x0
+}
+
+// t_chdir -- set the per-Proc cwd ("dot") to `path` (LS-4). Returns 0 / -1.
+// See env::set_current_dir for the safe wrapper.
+#[inline(always)]
+pub unsafe fn t_chdir(path: *const u8, path_len: usize) -> i64 {
+    let mut x0: i64 = path as i64;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") path_len as u64,
+        in("x8") T_SYS_CHDIR,
+        options(nostack)
+    );
+    x0
+}
+
+// t_getcwd -- copy the per-Proc cwd into `buf` (NUL-terminated) (LS-4). Returns
+// the path length (excluding NUL) / -1 if buf is too small. See
+// env::current_dir for the safe wrapper.
+#[inline(always)]
+pub unsafe fn t_getcwd(buf: *mut u8, buf_len: usize) -> i64 {
+    let mut x0: i64 = buf as i64;
+    asm!(
+        "svc #0",
+        inlateout("x0") x0,
+        in("x1") buf_len as u64,
+        in("x8") T_SYS_GETCWD,
         options(nostack)
     );
     x0

@@ -1686,6 +1686,9 @@ static s64 sys_chdir_handler(u64 path_va, u64 path_len_raw, u64 a2, u64 a3) {
     struct Spoor *root = p->territory->root_spoor;
     if (!root)                                       return -1;
     spoor_ref(root);
+    // `cleaned` is already an absolute, lexically-resolved path (no `.`/`..`
+    // remain), so stalk's own `..` clamp at root_spoor is a redundant safety net
+    // here -- the containment was already established by cwd_lexical_resolve.
     struct Spoor *q = stalk(p, root, cleaned, (u64)cl, STALK_WALK, 0);
     spoor_clunk(root);
     if (!q)                                          return -1;

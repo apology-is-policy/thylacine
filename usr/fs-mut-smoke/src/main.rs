@@ -84,6 +84,48 @@ pub extern "C" fn rs_main() -> i64 {
     // then creates under the RIGHT_WRITE-bearing parent).
     c.ok("create_dir sub (depth 2)", fs::create_dir(SUB).is_ok());
 
+    // --- LS-4: per-Proc cwd (relative paths resolve against dot) ---
+    // chdir into the dir we own, then prove a RELATIVE create + open + a
+    // "../"-bearing mutation all resolve against the cwd (not the root).
+    c.ok("set_current_dir(ROOT)", libthyla_rs::env::set_current_dir(ROOT).is_ok());
+    c.ok(
+        "current_dir == ROOT",
+        libthyla_rs::env::current_dir().ok().as_deref() == Some(ROOT),
+    );
+    // relative create -> /fs-mut-smoke/rel.txt (the with_parent_dir absolutize).
+    let rel_wrote = match File::create("rel.txt") {
+        Ok(mut f) => f.write_all(PAYLOAD).is_ok(),
+        Err(_) => false,
+    };
+    c.ok("File::create relative + write", rel_wrote);
+    // relative open -> resolves via the kernel SYS_OPEN cwd-join.
+    c.ok(
+        "relative read-back matches",
+        read_all("rel.txt").as_deref() == Some(PAYLOAD),
+    );
+    // ...and it landed at the expected ABSOLUTE path.
+    c.ok(
+        "relative create landed at /fs-mut-smoke/rel.txt",
+        read_all("/fs-mut-smoke/rel.txt").as_deref() == Some(PAYLOAD),
+    );
+    // a "../"-bearing relative mutation cleans against the cwd: from
+    // /fs-mut-smoke/sub, "../rel2.txt" -> /fs-mut-smoke/rel2.txt.
+    c.ok("set_current_dir(SUB)", libthyla_rs::env::set_current_dir(SUB).is_ok());
+    let dd_wrote = match File::create("../rel2.txt") {
+        Ok(mut f) => f.write_all(PAYLOAD).is_ok(),
+        Err(_) => false,
+    };
+    c.ok("File::create ../rel2.txt + write", dd_wrote);
+    c.ok(
+        "dotdot-relative landed at /fs-mut-smoke/rel2.txt",
+        read_all("/fs-mut-smoke/rel2.txt").as_deref() == Some(PAYLOAD),
+    );
+    // restore cwd to root + reclaim the relative scratch (so ROOT can rmdir).
+    let _ = libthyla_rs::env::set_current_dir("/");
+    let _ = fs::remove_file("/fs-mut-smoke/rel.txt");
+    let _ = fs::remove_file("/fs-mut-smoke/rel2.txt");
+    // --- end LS-4 ---
+
     // create-new must fail on an existing dir (exclusive create).
     c.ok("create_dir existing -> err", fs::create_dir(ROOT).is_err());
 
