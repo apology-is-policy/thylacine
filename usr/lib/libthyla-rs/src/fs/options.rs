@@ -107,9 +107,9 @@ impl OpenOptions {
 
     /// Append-mode writes (each write goes to the end of file).
     ///
-    /// **V1.0: not implemented at the kernel layer.** Returning
-    /// `Error::NotImplemented` from `.open()` if set. Documented
-    /// here so callers can plan for it.
+    /// Implemented as seek-to-end-at-open (Plan 9 omode has no O_APPEND);
+    /// exact for the single-writer case, concurrent atomic-append is a v1.x
+    /// kernel surface. Requires `write(true)`.
     #[inline]
     #[must_use]
     pub const fn append(mut self, b: bool) -> Self {
@@ -117,12 +117,10 @@ impl OpenOptions {
         self
     }
 
-    /// Create the file if it doesn't exist (opens otherwise).
-    ///
-    /// **V1.0: not implemented (no kernel `SYS_TLCREATE`).** Returns
-    /// `Error::NotImplemented` from `.open()` if set. Method is
-    /// available for forward-compat so callers can write the
-    /// canonical create-or-open pattern today.
+    /// Create the file if it doesn't exist (opens it otherwise). Backed by
+    /// `SYS_WALK_CREATE` (create-or-open; the new file's mode is `.mode(m)`,
+    /// default 0644). Only the Stratum-backed (dev9p) FS accepts creation;
+    /// devramfs is read-only.
     #[inline]
     #[must_use]
     pub const fn create(mut self, b: bool) -> Self {
@@ -130,8 +128,8 @@ impl OpenOptions {
         self
     }
 
-    /// Create the file only if it doesn't already exist; error if it
-    /// does. Same v1.0 limitation as `create`.
+    /// Create the file only if it doesn't already exist; `Exists` if it does
+    /// (exclusive `SYS_WALK_CREATE`). Requires `write(true)`.
     #[inline]
     #[must_use]
     pub const fn create_new(mut self, b: bool) -> Self {

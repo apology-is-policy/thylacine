@@ -3110,6 +3110,29 @@ int main(void) {
                 t_putstr("joey: /u-redir-test reaped status=0; U-6d-b redirects verified\n");
             }
 
+            // === LS-3b: fs-mutation API smoke (/fs-mut-smoke) ===
+            // First runtime exercise of the libthyla-rs fs-mutation surface
+            // (fs::create_dir / remove_file / remove_dir / rename) + the
+            // depth>=2 File::create fix, against the writable post-pivot
+            // Stratum FS (devramfs is read-only). The always-on, no-expect
+            // regression for the layer the LS-3b coreutils call; idempotent
+            // (it reclaims a stale scratch tree before building a fresh one).
+            {
+                const char fms_name[] = "fs-mut-smoke";
+                long fms_pid = t_spawn(fms_name, sizeof(fms_name) - 1);
+                if (fms_pid <= 0) {
+                    t_putstr("joey: t_spawn(\"fs-mut-smoke\") FAILED\n");
+                    return 1;
+                }
+                int fms_status = -1;
+                long fms_reaped = t_wait_pid(&fms_status);
+                if (fms_reaped != fms_pid || fms_status != 0) {
+                    t_putstr("joey: /fs-mut-smoke FAILED\n");
+                    return 1;
+                }
+                t_putstr("joey: /fs-mut-smoke reaped status=0; LS-3b fs-mutation API verified\n");
+            }
+
             (void)t_close(sd_rd);
         }
     }

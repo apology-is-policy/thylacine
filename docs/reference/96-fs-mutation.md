@@ -308,6 +308,59 @@ equality.
   rename(atomic-replace) + unlink OK` + `fs-gamma rmdir(REMOVEDIR) OK`. This is
   the first end-to-end exercise of `p9_client_renameat` / `unlinkat`.
 
+## libthyla-rs userspace wrappers (LS-3b)
+
+The path-based, `std::fs`-shaped wrappers the native coreutils call. They live in
+`usr/lib/libthyla-rs/src/fs/mod.rs` and drive the kernel syscalls above:
+
+```rust
+fs::create_dir(path)   -> SYS_WALK_CREATE(parent, name, OREAD, DMDIR|0o755)
+fs::remove_file(path)  -> SYS_UNLINK(parent, name, 0)
+fs::remove_dir(path)   -> SYS_UNLINK(parent, name, REMOVEDIR)
+fs::rename(from, to)   -> SYS_RENAME(from_parent, from_name, to_parent, to_name)
+```
+
+All four resolve the parent directory through one shared helper,
+`fs::file::with_parent_dir(path, |parent_fd, basename| ...)`, which walks the
+parent chain and hands the closure the parent dir fd + the final component name
+(the `(parent, name)` shape these syscalls take). **The intermediates are walked
+with `T_OPATH`, not `T_OREAD`** — two reasons, both load-bearing:
+
+1. **RIGHT_WRITE on the parent.** `sys_walk_create_handler` / `sys_unlink_handler`
+   / `sys_rename_handler` resolve the parent fd with `RIGHT_WRITE` (the directory
+   is mutated). Since A-3b an `T_OREAD` open yields a `RIGHT_READ`-only handle,
+   which those handlers reject; `T_OPATH` is born `RIGHT_READ | RIGHT_WRITE` (the
+   navigation/capability base), so the final parent is a valid mutation target.
+2. **X-only traversal.** `T_OPATH` is exempt from the open-mode R/W `perm_check`
+   but still X-searched per component (POSIX: you need search, not read, to
+   traverse a directory). `T_OREAD` would wrongly require read on each ancestor.
+
+This is the same discipline `File::open_create_at_path` uses, and switching *its*
+intermediate walk from `T_OREAD` to `T_OPATH` (same chunk) **fixed a latent
+`File::create` depth>=2 bug**: a `File::create("/a/b/c")` previously walked `/a/b`
+with `T_OREAD` (RIGHT_READ-only) and then failed the `SYS_WALK_CREATE` parent
+`RIGHT_WRITE` gate. The fix was pulled forward as a proper-completion dependency
+of `touch`/`cp`/`tee` (which create files, often at depth).
+
+`with_parent_dir` closes the owned parent handle after the closure returns (success
+or error); `FROM_ROOT` is used for a single-component path (the syscalls resolve it
+to the Territory root). `fs::rename` nests two `with_parent_dir` calls so both
+parents are held open across the rename. **Recursion footgun for callers**:
+`fs::read_dir` yields `.` and `..` (Stratum returns them as cookies 1/2), so a
+recursive `rm -r` / `cp -r` MUST skip them — the coreutils do.
+
+**Coreutils (`usr/coreutils/src/bin/`)**: `mkdir` (`-p`), `rmdir`, `rm` (`-r`/`-f`),
+`touch`, `cp` (`-r`), `mv`, `tee` (`-a`). `touch` uses `OpenOptions{write,create}`
+(create-or-open, no truncate). `mv` is `fs::rename` (same-Dev only at v1.0; a
+cross-Dev move would need copy+remove — not emulated).
+
+**Always-on regression**: `usr/fs-mut-smoke` — joey spawns it post-pivot (the
+writable Stratum FS) and gates the boot on a 0 exit. 13 checks: `create_dir` at
+depth, **depth-3 `File::create` + write + read-back** (the fix), `rename`
+atomic-replace, `remove_file` / `remove_dir`, and `NotFound` on a removed path.
+Idempotent (reclaims a stale `/fs-mut-smoke` tree before building a fresh one, since
+the pool persists). The interactive companion is `tools/interactive/ls-3b.exp`.
+
 ## Known caveats / footguns
 
 - **Ownership-on-create is a seam at this layer.** Only `primary_gid` is carried

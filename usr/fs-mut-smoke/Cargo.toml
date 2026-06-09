@@ -1,0 +1,19 @@
+[package]
+name = "fs-mut-smoke"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "fs-mut-smoke"
+path = "src/main.rs"
+
+[dependencies]
+# fs-mut-smoke is the LS-3b runtime verification driver for the libthyla-rs
+# fs-mutation surface (fs::create_dir / remove_file / remove_dir / rename) +
+# the depth>=2 File::create fix. joey spawns it POST-pivot (the writable
+# Stratum FS; devramfs is read-only) and gates the boot on its exit. This is
+# the always-on (no-expect) regression for the fs:: layer the LS-3b coreutils
+# call -- the LS-CI ls-3b scenario is the interactive companion.
+libthyla-rs = { path = "../lib/libthyla-rs" }

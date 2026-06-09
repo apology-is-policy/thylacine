@@ -158,8 +158,16 @@ ROOT in a paginating loop, surfacing a kernel readdir-cookie sign-truncation
 (Stratum cookies > INT64_MAX wrapped negative in the s64 Spoor.offset; dev9p
 clamped to 0 -> re-fetched batch 0 forever). Fixed (opaque-u64 cookie + a
 non-advancing-cursor EOD guard) + a regression test + the `ls /` LS-CI
-assertion] -> LS-3b/c (fs-mut +
-misc coreutils) -> LS-4 (relative paths) -> LS-5 (Ctrl-C) form the MVP; then LS-6/7/K (login
+assertion] -> LS-3b [done @`<pending>`; `mkdir`(+`-p`)/`rmdir`/`rm`(+`-r`/`-f`)/
+`touch`/`cp`(+`-r`)/`mv`/`tee`(+`-a`) authored native on a NEW libthyla-rs `fs::`
+mutation surface (`create_dir`/`remove_file`/`remove_dir`/`rename` + a shared
+`with_parent_dir` parent-walk over the audited SYS_WALK_CREATE/UNLINK/RENAME).
+The parent-walk opens intermediates `T_OPATH` (R|W since A-3b), which ALSO fixed
+a latent `File::create` depth>=2 bug (old `T_OREAD` -> RIGHT_READ-only parent that
+SYS_WALK_CREATE rejects -- pulled forward). `rm -r`/`cp -r` skip `.`/`..`. New
+always-on `fs-mut-smoke` (joey post-pivot, 13 checks incl. depth-3 File::create)
++ `ls-3b.exp` LS-CI; 789/789, ci-smp-gate 0 corruption] -> LS-3c (misc
+coreutils) -> LS-4 (relative paths) -> LS-5 (Ctrl-C) form the MVP; then LS-6/7/K (login
 UX, a minimal editor, id/whoami/date) for breadth and LS-8 (U-PTY: pollable cons +
 termios + async) for depth. Tasks #944-#953. Supersedes the loose U-9..N / U-PTY
 rows above with a workflow-driven sequence.

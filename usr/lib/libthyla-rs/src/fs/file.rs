@@ -12,15 +12,20 @@
 //   The kernel's SYS_WALK_OPEN walks one path component at a time.
 //   `File::open("/etc/hosts")` walks two components:
 //
-//     SYS_WALK_OPEN(FROM_ROOT, "etc",   OREAD)  -> etc_fd
-//     SYS_WALK_OPEN(etc_fd,    "hosts", OREAD)  -> hosts_fd
+//     SYS_WALK_OPEN(FROM_ROOT, "etc",   T_OPATH)  -> etc_fd
+//     SYS_WALK_OPEN(etc_fd,    "hosts", omode)    -> hosts_fd
 //     close(etc_fd)
 //     return hosts_fd
 //
-//   Intermediate components are walked with OREAD (since they are
-//   directories we traverse); the final component takes the requested
-//   omode. Intermediate fds are closed before the final fd is
-//   returned to the caller -- no leakage.
+//   Intermediate components are walked with T_OPATH -- the directory
+//   navigation / capability base, born RIGHT_READ | RIGHT_WRITE (kernel
+//   A-3b). Two reasons it must be T_OPATH and not T_OREAD: (1) traversal
+//   is the POSIX X-search (T_OPATH is exempt from the R/W perm gate, so a
+//   path through a `--x` dir resolves), and (2) the final parent must carry
+//   RIGHT_WRITE for a `File::create` at depth >= 2 -- SYS_WALK_CREATE gates
+//   the parent on RIGHT_WRITE, which an T_OREAD (RIGHT_READ-only since A-3b)
+//   intermediate would fail. The final component takes the requested omode.
+//   Intermediate fds are closed before the final fd is returned -- no leakage.
 //
 // PATH SUPPORT (v1 scope):
 //   - Absolute paths only. Relative paths return Error::InvalidArgument.
@@ -61,8 +66,8 @@ use crate::err::{Error, Result};
 use crate::handle::{Handle, Rights};
 use crate::io::{Read, Seek, SeekFrom, Write};
 use crate::{
-    t_close, t_lseek, t_open, t_read, t_walk_create, t_walk_open, t_write, T_OREAD, T_OTRUNC,
-    T_OWRITE, T_SEEK_CUR, T_SEEK_END, T_SEEK_SET, T_WALK_OPEN_FROM_ROOT,
+    t_close, t_lseek, t_open, t_read, t_walk_create, t_walk_open, t_write, T_OPATH, T_OREAD,
+    T_OTRUNC, T_OWRITE, T_SEEK_CUR, T_SEEK_END, T_SEEK_SET, T_WALK_OPEN_FROM_ROOT,
     T_WALK_OPEN_NAME_MAX,
 };
 use alloc_crate::vec::Vec;
@@ -195,8 +200,10 @@ impl File {
 
     /// Walk `path` and open-or-create its final component.
     ///
-    /// The intermediate components are walked with `OREAD` (they are
-    /// directories we traverse); the final component is opened at
+    /// The intermediate components are walked with `T_OPATH` (the directory
+    /// navigation base; see the module header -- born R|W so a depth >= 2
+    /// `create` reaches a `RIGHT_WRITE` parent, and traversal is X-search
+    /// only); the final component is opened at
     /// `base_omode`, creating it (mode `perm`) when `create` /
     /// `create_new` request it. `create_new` is exclusive (it always
     /// uses `t_walk_create` and fails if the file exists). `create`
@@ -247,7 +254,7 @@ impl File {
             return Self::open_stalk(Path::new("/"), base_omode);
         }
 
-        // Walk the parent chain (`names[0..last]`) with OREAD. `parent`
+        // Walk the parent chain (`names[0..last]`) with T_OPATH. `parent`
         // starts as the FROM_ROOT sentinel; later iterations replace it
         // with the freshly-opened intermediate handle. `parent_owned`
         // tracks whether we must close it (FROM_ROOT is a kernel
@@ -272,9 +279,11 @@ impl File {
             }
 
             // SAFETY: name is a valid &str slice (len + ptr); parent is
-            // either FROM_ROOT or a Spoor fd this Proc owns; OREAD is in
-            // the SYS_WALK_OPEN_OMODE_VALID mask.
-            let rc = unsafe { t_walk_open(parent, name.as_ptr(), name.len(), T_OREAD) };
+            // either FROM_ROOT or a Spoor fd this Proc owns; T_OPATH is in
+            // the SYS_WALK_OPEN_OMODE_VALID mask. T_OPATH (not T_OREAD) so the
+            // final parent carries RIGHT_WRITE for a depth >= 2 create and
+            // traversal is X-search only -- see the module header.
+            let rc = unsafe { t_walk_open(parent, name.as_ptr(), name.len(), T_OPATH) };
 
             // Always close the prior owned handle before checking for
             // errors -- it's no longer needed regardless of
@@ -365,6 +374,90 @@ fn last_open_or_create(
     // Plain open (no create).
     let rc = unsafe { t_walk_open(parent, last.as_ptr(), last.len(), base_omode) };
     Error::from_syscall_return(rc)
+}
+
+/// Walk `path`'s parent-directory chain and invoke `f(parent_fd, basename)`
+/// with the parent dir handle and the final path component. The foundation
+/// for the path-based mutation free-functions (`fs::create_dir` /
+/// `remove_file` / `remove_dir` / `rename`), which act on a parent dir fd +
+/// a single-component name -- the SYS_WALK_CREATE / SYS_UNLINK / SYS_RENAME
+/// shape -- rather than on an already-open File.
+///
+/// Intermediate directories are walked with `T_OPATH` (the navigation /
+/// capability base, born `RIGHT_READ | RIGHT_WRITE` since kernel A-3b), the
+/// same discipline `open_create_at_path` uses: `parent_fd` then carries the
+/// `RIGHT_WRITE` those mutation syscalls gate the parent on, and every
+/// intermediate is walkable (`RIGHT_READ`); a `T_OREAD` (`RIGHT_READ`-only)
+/// parent would be rejected. Per-component the kernel checks search (X)
+/// permission only (POSIX traversal), not read.
+///
+/// `parent_fd` is the `T_WALK_OPEN_FROM_ROOT` sentinel for a single-component
+/// path (the mutation syscalls resolve it to the caller's Territory root);
+/// otherwise it is an owned handle this function closes after `f` returns --
+/// on success OR error -- so `f` must not retain it past its own return.
+/// `basename` is a `Normal` component (never the root, `.`, or `..`).
+///
+/// Path rules match `File::open`: absolute-only; `.` skipped; `..` rejected;
+/// an empty path or one with no final name component (e.g. `/`) ->
+/// `InvalidArgument`; a component over `T_WALK_OPEN_NAME_MAX` ->
+/// `InvalidArgument`.
+pub(crate) fn with_parent_dir<T>(
+    path: &Path,
+    f: impl FnOnce(i64, &str) -> Result<T>,
+) -> Result<T> {
+    if path.is_empty() || path.is_relative() {
+        return Err(Error::InvalidArgument);
+    }
+    // Collect the Normal components; reject `..`; skip `.` and the leading
+    // root separator (mirrors open_create_at_path).
+    let names: Vec<&str> = path
+        .components()
+        .filter_map(|c| match c {
+            Component::Normal(s) => Some(Ok(s)),
+            Component::ParentDir => Some(Err(Error::InvalidArgument)),
+            Component::RootDir | Component::CurDir => None,
+        })
+        .collect::<Result<Vec<&str>>>()?;
+    if names.is_empty() {
+        // "/" (root + optional "."): there is no final name to act on.
+        return Err(Error::InvalidArgument);
+    }
+    // Validate every component length up front so a reject needs no cleanup.
+    for name in &names {
+        if name.is_empty() || name.len() > T_WALK_OPEN_NAME_MAX {
+            return Err(Error::InvalidArgument);
+        }
+    }
+    let last_idx = names.len() - 1;
+
+    // Walk the parent chain with T_OPATH. `parent` starts at the FROM_ROOT
+    // sentinel (a kernel sentinel, never closed); each step replaces it with
+    // the freshly-walked intermediate, closing the prior owned handle first
+    // (regardless of this step's success).
+    let mut parent: i64 = T_WALK_OPEN_FROM_ROOT;
+    let mut parent_owned = false;
+    for name in &names[..last_idx] {
+        // SAFETY: name is a valid &str (ptr+len); parent is FROM_ROOT or a
+        // Spoor fd this Proc owns; T_OPATH is in the SYS_WALK_OPEN omode mask.
+        let rc = unsafe { t_walk_open(parent, name.as_ptr(), name.len(), T_OPATH) };
+        if parent_owned {
+            // SAFETY: prior parent was a Spoor fd this Proc owns.
+            unsafe {
+                let _ = t_close(parent);
+            }
+        }
+        parent = Error::from_syscall_return(rc)?;
+        parent_owned = true;
+    }
+
+    let result = f(parent, names[last_idx]);
+    if parent_owned {
+        // SAFETY: parent was returned by a prior SYS_WALK_OPEN on this Proc.
+        unsafe {
+            let _ = t_close(parent);
+        }
+    }
+    result
 }
 
 impl Read for File {
