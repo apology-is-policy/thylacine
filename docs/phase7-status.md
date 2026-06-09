@@ -158,7 +158,7 @@ ROOT in a paginating loop, surfacing a kernel readdir-cookie sign-truncation
 (Stratum cookies > INT64_MAX wrapped negative in the s64 Spoor.offset; dev9p
 clamped to 0 -> re-fetched batch 0 forever). Fixed (opaque-u64 cookie + a
 non-advancing-cursor EOD guard) + a regression test + the `ls /` LS-CI
-assertion] -> LS-3b [done @`<pending>`; `mkdir`(+`-p`)/`rmdir`/`rm`(+`-r`/`-f`)/
+assertion] -> LS-3b [done @`89650da`; `mkdir`(+`-p`)/`rmdir`/`rm`(+`-r`/`-f`)/
 `touch`/`cp`(+`-r`)/`mv`/`tee`(+`-a`) authored native on a NEW libthyla-rs `fs::`
 mutation surface (`create_dir`/`remove_file`/`remove_dir`/`rename` + a shared
 `with_parent_dir` parent-walk over the audited SYS_WALK_CREATE/UNLINK/RENAME).
