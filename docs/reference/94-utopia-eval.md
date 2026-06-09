@@ -381,6 +381,54 @@ verified`. This is a dedicated probe (composition-focused, cleanly
 revertable) rather than a `u-test` extension (whose `flow_eval_*` blocks
 test in isolation).
 
+### 8.5 The cumulative arc-close smoke (`/u-7-test`, U-7-test)
+
+The U-7 analog of §8.4: where `/u-job-test` (19 scenarios) proves each
+U-7 surface in ISOLATION -- the `&` background launch + the job table,
+the jobs/fg/bg/wait/kill builtins, `on note`/`mask note` delivery, and
+the interruptible foreground wait -- `/u-7-test` (the U-7 arc's last
+sub-chunk; joey-gated, pre-pivot, pure userspace) proves they
+**compose**, the way a real interactive session weaves them. Four flows,
+each weaving >=2 U-7 surfaces:
+
+1. **bg-demux + builtins (U-7a + U-7b)** -- two `echo &` jobs are
+   registered; a foreground `seq` (exits 1) runs, and the U-7-pre by-pid
+   foreground wait reaps ITS pid only, so both background jobs survive
+   the demux with the foreground `$status` intact. `wait` (no args) then
+   reaps every job and `jobs` consumes the now-Done entries exactly once,
+   draining the table. No note queue is opened, so the foreground wait
+   takes the DEGRADE path (a plain blocking by-pid reap).
+2. **forward-vs-handle by fg-presence (U-7c-a + U-7c-b)** -- ONE
+   `on note 'interrupt'` handler over one counter, observed in two
+   contexts: at the idle prompt an `interrupt` runs the shell handler
+   (`deliver_pending_notes`, the counter increments); during a foreground
+   command the same note is FORWARDED to the child by
+   `wait_pids_interruptible` and NEVER dispatched to the handler (the
+   counter is unchanged across the wait -- deterministic in both the
+   immediate-reap and the poll-and-forward timing arms, since
+   `wait_pids_interruptible` has no `on note` dispatch).
+3. **mask + reap (U-7c-a mask + U-7a/U-7b)** -- a background job is
+   registered and an `interrupt` queued; a `mask note 'interrupt'` body
+   then runs `wait %1`, reaping the job WHILE the note is held back by
+   the kernel Thread mask. The deferred handler fires only at the
+   post-block drain (scripture 10.8), AFTER the job-control op completed
+   inside the masked region.
+4. **the capstone: integrated `Repl::feed`** -- the whole stack driven
+   through the REAL prompt cycle (`run_line` -> `reap_jobs` ->
+   `deliver_notes`): `open_notes` arms the integrated note-delivery half,
+   an `on note` handler is registered + delivered through feeds, a `&`
+   job is backgrounded and drained by the integrated reaper, and `exit 0`
+   ends the session -- all through the U-6g entrypoint, state carried
+   across feeds.
+
+The harness cannot inject a real `/dev/cons` Ctrl-C (A-4c), so a
+foreground interrupt is self-posted (the `interrupt` the kernel console
+owner would post); every spawned child is reaped so none orphans to joey.
+Prints `u-7-test: all OK`; joey reports `U-7 job-control arc integration
+verified`. A dedicated probe (matches the per-sub-chunk pattern, cleanly
+revertable) rather than a `/u-job-test` extension (whose 19 scenarios
+test in isolation).
+
 ---
 
 ## 9. Background jobs + job-control builtins (U-7a / U-7b)
@@ -619,6 +667,7 @@ would post (`/u-job-test` scenarios 16-19).
 
 | Sub-chunk | Commit | What |
 |---|---|---|
+| **U-7-test** | *(pending)* | The U-7 job-control arc **cumulative composition smoke** (§8.5) -- **closes the U-7 arc**. New dedicated pre-pivot `/u-7-test` (joey-gated on status==0; 4 composed flows, each weaving >=2 U-7 surfaces): (1) bg-demux + builtins -- two `echo &` jobs survive a foreground `seq`'s by-pid demux, then `wait` + `jobs` drain them (the foreground wait takes the no-note-queue DEGRADE path); (2) forward-vs-handle -- ONE `on note 'interrupt'` handler + counter, fired at the idle prompt (`deliver_pending_notes`) but NOT during a foreground wait, where the same note is forwarded to the child by `wait_pids_interruptible` (the counter is unchanged across the wait in both timing arms); (3) mask + reap -- a `mask note 'interrupt'` body runs `wait %1` while the note is deferred, the handler firing only at block exit AFTER the reap; (4) the capstone -- the whole stack through the real prompt cycle via `Repl::feed` (`open_notes` + handler register/deliver + a backgrounded job drained by the integrated reaper + `exit 0`). Where `/u-job-test` (19 scenarios) tests each U-7 surface in ISOLATION, this proves they COMPOSE the way a real session weaves them. A foreground interrupt is self-posted (A-4c blocks `/dev/cons` injection); every spawned child is reaped. PURE USERSPACE -- zero kernel files (kernel binary byte-identical); no SMP gate, not a formal-audit-trigger surface (self-reviewed: every flow's timing arms traced deterministic, no orphaned children, bounded reap loops). Verified: `make test-tcg` x2 + `u-7-test: all OK` (4 flows) + `joey: /u-7-test reaped status=0; U-7 job-control arc integration verified` + `u-test`/`u-6-test`/`u-job-test`/all probes `all OK` + login E2E + `Thylacine boot OK`, **0 EXTINCTION** both boots. |
 | **U-7c-b** | `1218615` | **Interruptible foreground wait + Ctrl-C forward** (§9.7) -- the second half of U-7c. New `wait_pids_interruptible(env, &[pid])` (`eval::stmt`, re-exported) replaces the blocking by-pid reap in all THREE foreground command waits (`exec_external`, `exec_external_redirected`, `exec_pipeline` -- the handoff named two; the bare-`cmd` path is the most common Ctrl-C case, so completeness took all three). Each iteration WNOHANG-reaps every still-live pid (the U-7-pre by-pid `wait_pid_for` ground truth) then, if any remain, blocks on the note fd for up to `FG_WAIT_BACKSTOP_MS` (100 ms) and drains the wake: `interrupt` -> `send(Pid(pid), "interrupt")` to each still-live fg pid (scripture §10.2: forward, don't run the shell handler); `child_exit` -> swallow (clears POLLIN so the next poll blocks, not spins); any other note -> `Env::defer_note` (new deferred-note queue) so its handler fires at the post-command `deliver_pending_notes` (which now drains deferred FIFO before the live queue) rather than being lost (`try_read` consumes the queue front). DEGRADES to a plain blocking by-pid wait when `env.notes() == None` (host / boot-check / pre-open). **PURE USERSPACE** (libutopia + `/u-job-test`; built on U-2e `t::notes` + U-7-pre `wait_pid_for`) -> NOT a formal-audit-trigger surface (self-reviewed: backstop bounds every coalesced/lost/mask-deferred `child_exit` so no hang + the kernel poll never spins; swallowing `child_exit` is consistent with the bg reaper, which WNOHANG-polls `live_pids` not notes; degrade path identical to the prior blocking reap; borrow-clean drain/defer). **Scope**: command-substitution capture + the `wait` builtin stay blocking (no forward) at v1.0 -- both gain forwarding with process groups (U-PTY). `/u-job-test` +4 scenarios (16 forward-to-live-child SEND; 17 `wait_pids_interruptible` drains a pre-queued interrupt + reaps without hanging; 18 the degrade path; 19 a non-interrupt note deferred-not-lost). Verified: `make test-tcg` x2 + `u-job-test: all OK` (19 scenarios) + `u-test`/`u-6-test`/all probes `all OK` + `Thylacine boot OK` + login E2E OK, **0 EXTINCTION** both boots. The U-7c arc is COMPLETE; the U-7 arc closes at U-7-test. |
 | **U-7c-a** | `377b866` | `on note` / `mask note` runtime delivery (§9.6). New `deliver_pending_notes(env)` (`eval::stmt`, re-exported) drains the shell's own note queue (`Notes::try_read`) at the REPL prompt-cycle sync point (`Repl::deliver_notes`, beside `reap_jobs`) and fires registered `on note` handlers (`eval_block`, best-effort, `$status`-transparent). `eval_mask_note` rewritten from a U-6b body-only pass-through to set the per-Thread kernel mask (`t::notes::set_mask` via the new `Env::note_mask_add/remove`) for the body's duration -> a matching note is dequeue-deferred (`devnotes_poll` POLLIN gates on mask) and fires at the post-block drain (scripture §10.8). `note_class_for_name` maps `interrupt`/`pipe`/`child_exit` -> `NoteClass` (`kill`/`snare:*`/user names don't map). New `Env` note-queue API (`set_notes`/`notes`/`note_mask*`); the note fd is `Option<Notes>`, opened lazily by `Repl::open_notes` from the `ut` main loop AFTER the first read (a bare-spawn `ut` has an empty handle table -> eager open would mint the note fd at fd 0 and the read loop would block on it). **PURE USERSPACE** (libutopia + `ut` + `/u-job-test`; built on the U-2e `t::notes` substrate) -> NOT a formal-audit-trigger surface (self-reviewed: try_read non-blocking drain never spins, masked-queue returns None, borrow-clean drain/dispatch, `$status` save/restore, no fd-0 clobber). The running-foreground Ctrl-C forward is split to **U-7c-b**. `/u-job-test` +3 scenarios (13 on-note-fires-on-delivery + exactly-once; 14 unhandled-note-benign; 15a parsed `mask note` defer+drain, 15b the mask mechanism directly). Verified: `make test-tcg` x2 + `u-job-test: all OK` (15 scenarios) + `Thylacine boot OK` + login E2E OK, **0 EXTINCTION** both boots. |
 | **U-7a** | `4808ea0` | Background jobs (§9). New pure `eval::jobs` (`JobTable` + `Job` in `Env`); `eval_pipeline` routes `&` -> `eval_background_pipeline`; the shared `spawn_pipeline_elements` helper factored out of `exec_pipeline`; both `exec_pipeline` + `capture_external_pipeline` reaps converted wait-any -> **by-pid** (the pid-precise foreground demux); `render_pipeline_cmd`; `Repl::reap_jobs` (the prompt-cycle WNOHANG reaper, §9.4). `cmd &` / `a | b &` register ONE job, print `[N] PID`, status 0; finished jobs emit `[N]+ Done  cmd` before the next prompt. A bg builtin/fn (needs fork) stays NotImplemented. **PURE USERSPACE** -- zero kernel files; built on the U-7-pre `wait_pid_for` primitive -> NOT a formal-audit-trigger surface (self-reviewed: no-spin reaps, by-pid demux, no orphaned bg children, JobTable borrow-clean). The notes-fd / multi-fd-poll integration (async `[N]+ Done` while idle, on/mask delivery, Ctrl-C) is U-7c. New `/u-job-test` (registration, one-job-per-pipeline, reap-to-`Done`, spec-reset, the by-pid foreground demux, bg-builtin rejection, the integrated `Repl` reaper) + `u-test` probes 4/7 updated (`&` now WORKS + reaps, was the stale U-6 `NotImplemented` assertion). Verified: `make test-tcg` x2 + `u-job-test: all OK` + `joey: /u-job-test reaped status=0; U-7a background jobs verified` + `u-test: all OK` + `Thylacine boot OK`, **0 EXTINCTION** both boots. |

@@ -2039,6 +2039,29 @@ int main(void) {
     }
     t_putstr("joey: /u-job-test reaped status=0; U-7a background jobs verified\n");
 
+    // === /u-7-test orchestration (Phase 7 U-7-test -- U-7 job-control arc close) ===
+    // The CUMULATIVE composition smoke for the whole U-7 job-control arc. Where
+    // /u-job-test proves each U-7 surface in isolation (19 scenarios), u-7-test
+    // proves they COMPOSE the way a real session weaves them: a background job
+    // surviving a foreground command's by-pid demux then drained by wait/jobs;
+    // ONE `interrupt` handler forwarded to a running foreground child vs fired
+    // at the idle prompt; a `mask note` body reaping a job mid-defer; and the
+    // whole stack driven through the real prompt cycle via Repl::feed. Runs
+    // PRE-pivot (echo/seq/tr spawn by name). status==0 gates the boot.
+    const char u_seven_name[] = "u-7-test";
+    long usev_pid = t_spawn(u_seven_name, sizeof(u_seven_name) - 1);
+    if (usev_pid <= 0) {
+        t_putstr("joey: t_spawn(\"u-7-test\") FAILED\n");
+        return 1;
+    }
+    int usev_status = -1;
+    long usev_reaped = t_wait_pid(&usev_status);
+    if (usev_reaped != usev_pid || usev_status != 0) {
+        t_putstr("joey: /u-7-test orchestration FAILED\n");
+        return 1;
+    }
+    t_putstr("joey: /u-7-test reaped status=0; U-7 job-control arc integration verified\n");
+
     // === /ut orchestration (Phase 7 U-6g -- Utopia shell REPL) ===
     // `ut` is the Utopia shell binary. Through U-6g it is a working
     // read-parse-eval REPL: it prints the Pale Fire banner, draws the

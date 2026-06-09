@@ -1,0 +1,22 @@
+[package]
+name = "u-7-test"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "u-7-test"
+path = "src/main.rs"
+
+[dependencies]
+# u-7-test is the U-7 job-control arc CUMULATIVE composition probe -- the U-7
+# analog of u-6-test. Where /u-job-test proves each U-7 surface in ISOLATION
+# (bg launch, the builtins, note delivery, the interruptible fg wait), this
+# probe proves they COMPOSE: a bg job surviving a foreground demux then drained
+# by the builtins; one `interrupt` handler observed forwarding-during-fg vs
+# firing-at-the-prompt; a mask-note body reaping a job mid-defer; and the whole
+# stack driven through the real prompt cycle via Repl::feed. Runs PRE-pivot
+# (flat devramfs root, where echo/seq/tr spawn by name).
+libthyla-rs = { path = "../lib/libthyla-rs" }
+libutopia = { path = "../utopia/libutopia" }

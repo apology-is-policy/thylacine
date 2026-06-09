@@ -486,6 +486,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "u-7-test"
+version = "0.1.0"
+dependencies = [
+ "libthyla-rs",
+ "libutopia",
+]
+
+[[package]]
 name = "u-builtin-test"
 version = "0.1.0"
 dependencies = [
