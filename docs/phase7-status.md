@@ -149,7 +149,7 @@ delete files, search, pipe, interrupt, jobs) — is binding scripture at
 external stdout/stderr inherit the console via `env.stdio_inherit`] -> LS-CI [done
 @6ea7452; `tools/test-interactive.sh` + `tools/interactive/{lib.exp,ls-ci.exp}`
 -- the expect/PTY interactive regression net that drives a real keyboard, closes
-#945] -> LS-3a [done @`*(pending)*`; adopted `ls`/`stat`/`clear` (native libthyla-rs,
+#945] -> LS-3a [done @`4edf665`; adopted `ls`/`stat`/`clear` (native libthyla-rs,
 from `usr/apps/{ls,stat}` + native `clear`) into `usr/coreutils/src/bin/`, wired
 `tools/build.sh` + the cpio + LS-CI `ls-3a.exp`; `ls`/`stat`/`clear` verified
 (`ls /var`->lib, `stat /thylacine-version`, `clear`). KNOWN GAP: `ls /` (pivot
