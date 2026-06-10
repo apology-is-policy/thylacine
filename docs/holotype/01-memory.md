@@ -1,9 +1,13 @@
 # HOLOTYPE RW-1 — Memory (FULL)
 
-**Status: IN PROGRESS** (the ASID rollover sub-chunk is mid-flight; finalize
-this report + close at the RW-1 close). Full finding catalog + dispositions:
-`docs/holotype/00-register.md` (HT01.*). Closed-list (do-not-re-report,
-written at close): `memory/audit_holotype_rw1_closed_list.md`.
+**Status: CLOSED** (`@cb99514`). 0 P0 across the whole memory surface; every
+P1/P2 fixed in-arc with the ASID generation-rollover redesign landed (spec +
+impl + focused Fable audit + SMP gate) and the C-F2/F3/F4 + B-F3/C-F6 residuals
+closed. Full finding catalog + dispositions: `docs/holotype/00-register.md`
+(HT01.* — all rows FIXED/ACCEPTED/REGISTERED). Closed-list (do-not-re-report):
+`memory/audit_holotype_rw1_closed_list.md`. Perf/SOTA rows (A-H/T, B-F6,
+C-F5/F7/F8/F9) REGISTERED for RW-11/RW-12. One tracked follow-up: the systemic
+DTB MPIDR->dense-CPU-index map (audit F3; whole-scheduler portability).
 
 ## Scope + method
 Sub-surfaces: A = `mm/phys+buddy+magazines+slub`; B = `arch/arm64/mmu.c` +
@@ -58,22 +62,24 @@ corruption. Extensive verified-sound lists (see the register's RW-1 footer).
      SA-2 [P3] g_asid_rollovers++ vs the lockless diagnostic load; SA-3 [P3/doc]
      per-CPU ASIDBits uniformity assumption. All HELD to merge with the Fable
      reviewer's findings, fix AFTER the SMP gate, re-gate, then close.
-   - **Fable `holotype-reviewer` audit IN FLIGHT** on d742ffa (the full SMP-race
-     prosecution). NEXT: merge findings + SA-1/2/3, fix, re-build/test/gate,
-     append `audit_holotype_rw1_closed_list.md`, then the remaining items below.
+   - **Fable `holotype-reviewer` audit DONE** (`@d40dbbb`; MODEL start=end=
+     `claude-fable-5`, no fallback): 0 P0 / 1 P1 / 1 P2 / 2 P3, all fixed. The P1
+     (F1) was a SPEC-fidelity defect (ownerless reservation reclaim the impl
+     never had); fixed with the `rproc` ownership model + cfg bounds >=4 Procs.
+     F2/SA-1 atomic gen write; F3 unbounded cpu index (fail-fast assert +
+     tracked); SA-2/SA-3. Dispositions: `audit_holotype_rw1_closed_list.md`.
+     **SMP gate re-run on the close: 0 corruption.** [DONE]
    Design: ARCH §6.2.1 + `memory/project_asid_rollover_design.md`.
-2. **C-F2 [P2]** — add the `p->vma_lock` precondition to the `burrow_map` /
-   `burrow_unmap` header doc blocks (`burrow.h:258-300`). Trivial.
-3. **C-F3 [P3]** — `vma_alloc` reject `WRITE && !READ` (mirror syscall.c:391/544).
-4. **C-F4 [P3]** — `burrow_acquire_mapping`: move the both-counts-zero guard +
-   liveness read inside `v->lock` (mirror `burrow_ref`).
-5. **Doc-folds**: `03-mmu.md` (B-F3) + `20-burrow.md` (C-F6) — both actively
-   misdescribe post-fix behavior; refresh.
+2. **C-F2 [P2]** — `p->vma_lock` precondition on `burrow_map`/`burrow_unmap`. **DONE `@cb99514`**.
+3. **C-F3 [P3]** — `vma_alloc` reject `WRITE && !READ`. **DONE `@cb99514`**.
+4. **C-F4 [P3]** — `burrow_acquire_mapping` zero-zero guard + liveness under `v->lock`. **DONE `@cb99514`**.
+5. **Doc-folds**: `03-mmu.md` (B-F3) + `20-burrow.md` (C-F6) + `22-asid.md` (asid rewrite). **DONE `@cb99514`**.
 6. **Register/perf**: the RW-1 perf/SOTA rows (A-H/T, B-F6, C-F5/F7/F8/F9) are
    already in the register, REGISTERED for RW-11/RW-12 — no in-arc fix.
-7. **Close**: finalize this report, write `audit_holotype_rw1_closed_list.md`,
-   add the RW-1 status row to `docs/HOLOTYPE.md` §10, run the SMP gate
-   (default+UBSan × smp4/smp8) over the landed death-path + ASID changes.
+7. **Close** — **DONE**: this report finalized (Status: CLOSED above);
+   `audit_holotype_rw1_closed_list.md` written; the RW-1 row added to
+   `docs/HOLOTYPE.md` §10; the SMP gate (default+UBSan × smp4/smp8) re-run on the
+   close commit -> 0 corruption. **RW-1 CLOSED.**
 
 ## Seam self-review (Opus, parallel to the reviewers) — verified sound
 Reap ordering (vma_drain → asid_free → pgtable_destroy; pages freed at drain

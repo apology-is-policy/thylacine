@@ -221,7 +221,7 @@ Imperium (#959), re-sequenced by whatever Holotype found.
 | RW | Scope | Status |
 |---|---|---|
 | RW-0 | LS-5 audit fold-in (#963) | **done** — 1 P1 (ut eager note-queue open, `f145ce8`) + 3 P3 (F3 kproc latch guard fixed; F2/F4 accepted + doc); `ls-5.exp` landed; register seeded (HT00.F1–F4) |
-| RW-1 | Memory | **in progress** — 0 P0; FIXED: A-F1/A-F2/A-F-S1 (3 P2) + B mmu 3 P3 + **C-F1 multi-thread-fault extinction (P1)**; **B-F1 ASID exhaustion (P1)** mid-flight (fail-soft `ef29456` + scripture `83bd74e`; spec→impl→audit owed); OWED at close: C-F2/C-F3/C-F4 + 03-mmu/20-burrow doc-folds. Catalog: `docs/holotype/{00-register,01-memory}.md` |
+| RW-1 | Memory | **CLOSED `@cb99514`** — 0 P0 across the surface; every P1/P2 fixed in-arc. A-F1/A-F2/A-F-S1 (3 P2) + B mmu 3 P3 + **C-F1 multi-thread-fault extinction (P1)** + C-F2/C-F3/C-F4 + B-F3/C-F6 doc-folds. **B-F1 ASID exhaustion (P1)** closed via the generation-rollover redesign: fail-soft `ef29456` → scripture `83bd74e` → spec `4fe50f7` (`specs/asid.tla`, model-first) → impl `d742ffa` → focused Fable audit `d40dbbb` (0 P0 / 1 P1 / 1 P2 / 2 P3; the P1 was a SPEC-fidelity defect, the kernel was always sound). 806/806; SMP gate 0 corruption. Catalog: `docs/holotype/{00-register,01-memory}.md` + `audit_holotype_rw1_closed_list.md`. Perf/SOTA → RW-11/RW-12; one tracked follow-up (DTB CPU-index map, F3). |
 | RW-2 | Sched/SMP/threads/death/wait-wake | pending |
 | RW-3 | Exception entry + syscall surface | pending |
 | RW-4 | Namespace/FS + 9P + Loom(DELTA) | pending |
