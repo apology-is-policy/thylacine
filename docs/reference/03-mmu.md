@@ -41,22 +41,20 @@ void mmu_enable(u64 slide);
 // "extinction: PTE violates W^X".
 bool pte_violates_wxe(u64 pte);
 
-// Convert MMIO region [pa, pa+size) in TTBR0's identity map from
-// Normal-WB cacheable to Device-nGnRnE attributes. Granularity is
-// the 2 MiB block (TTBR0's L2 entries cover the kernel-image GiB as
-// 2 MiB blocks). Caller must guarantee no kernel code holds a cached
-// value of any address in [pa, pa+size) before calling — used at
-// boot_main time for GIC bring-up (P1-G), virtio devices (Phase 3).
-//
-// Implemented as break-before-make per ARM ARM B2.7: invalidate L2
-// entries, dsb ishst + tlbi vmalle1is + dsb ish + isb (break), then
-// write Device descriptors + dsb ishst + isb (make).
-//
-// Constraint: pa + size must fit in [0, 4 GiB) — TTBR0's identity
-// covers only the low 4 GiB at v1.0. Returns false if unaligned or
-// out of range; true on success.
-bool mmu_map_device(paddr_t pa, u64 size);
+// Map a device-region MMIO range [pa, pa+size) into the kernel vmalloc
+// area. Returns a kernel VA (pass to mmio_w32 etc.) with Device-nGnRnE
+// attributes (ARM ARM B2.7.2 — strongly-ordered; no gathering, reorder,
+// or early write-ack). pa/size need not be page-aligned (pa rounded down,
+// size rounded up to PAGE_SIZE). Returns NULL on out-of-vmalloc-space;
+// extincts on misuse (pa+size overflow). Idempotent in the sense that two
+// calls with the same (pa, size) return two DIFFERENT kvas, both mapping
+// the same PA — the caller caches the kva (typically a driver `g_xxx_base`).
+// Cost: a few PTE writes + dsb_ishst + isb; no TLB flush (the new entries
+// were previously invalid).
+void *mmu_map_mmio(paddr_t pa, size_t size);
 ```
+
+The runtime per-Proc PTE surface (`mmu_install_user_pte` / `mmu_uninstall_user_pte` / `mmu_uninstall_user_range`) installs and tears down user leaf PTEs in a Proc's TTBR0 tree on demand-page and detach; the `u16 asid` parameter on those is **vestigial** (the install/uninstall issue an all-ASID `tlbi vaae1is`) since the RW-1 B-F1 rolling-ASID redesign — callers pass 0, and `mmu_program_this_cpu` sets `TCR_EL1.AS` from `ID_AA64MMFR0_EL1.ASIDBits`. See `docs/reference/22-asid.md`.
 
 The header also exposes the PTE bit constants (`PTE_VALID`, `PTE_AF`, `PTE_AP_*`, `PTE_PXN`, `PTE_UXN`, etc.), the MAIR attribute indices (`MAIR_IDX_DEVICE`, `MAIR_IDX_NORMAL_WB`, ...), and the canonical W^X-safe constructors (`PTE_KERN_TEXT`, `PTE_KERN_RO`, `PTE_KERN_RW`, `PTE_KERN_RW_BLOCK`, `PTE_DEVICE_RW_BLOCK`).
 
@@ -211,7 +209,7 @@ P1-C measurements on QEMU virt under Hypervisor.framework:
 |---|---|---|
 | Kernel ELF size (debug) | 95 KB | +4 KB from P1-B; mostly mmu.c code + bigger BSS for page tables |
 | Kernel flat binary | 8.2 KB | unchanged (BSS doesn't go in flat binary) |
-| Page-table footprint at runtime | 28 KiB | BSS-allocated, page-aligned |
+| Page-table footprint at runtime | 44 KiB | BSS-allocated, page-aligned (11 × 4 KiB; up from 28 KiB at P1-C — +TTBR1 L0/L1/L2, +`l3_kernel` at P5-kernel-l3-4mib) |
 | `mmu_enable()` total cost | ~0.05 ms | one-shot at boot; dominated by TLB invalidation + cache enable |
 | Boot to UART banner | ~50 ms (informal) | unchanged from P1-B; MMU adds < 0.1 ms |
 

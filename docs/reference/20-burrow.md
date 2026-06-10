@@ -132,7 +132,7 @@ The arg validation in step 1 is duplicated from `vma_alloc`'s checks for cheap e
 3. Verify the VMA exactly matches `[vaddr, vaddr + length)` — otherwise return -1.
 4. `vma_remove + vma_free` — symmetric tear-down releasing the mapping ref.
 
-PTE installation / teardown is NOT performed by either entry. PTEs are installed lazily by demand paging (P3-Dc); the per-Proc TTBR0 tree starts empty and grows on faults.
+PTE *installation* is NOT performed by `burrow_map` -- PTEs are installed lazily by demand paging (P3-Dc); the per-Proc TTBR0 tree starts empty and grows on faults. PTE *teardown* IS performed by `burrow_unmap` (RW-1 C-F6 doc-fold; the p6 hardening #2 / F1 fix): `vma_free`'s teardown calls `mmu_uninstall_user_range` over the VMA's range, clearing the leaf PTEs + broadcasting `tlbi vaae1is` BEFORE the backing pages are freed -- without it, stale PTEs/TLB entries would persist after detach (the suspected AEGIS-256/mallocng corruption class). The clear is idempotent on never-faulted-in pages.
 
 ### Order computation
 
@@ -258,9 +258,9 @@ Tests use cumulative counters (`burrow_total_destroyed`) to verify free transiti
 
 Page count is `ceil(size / PAGE_SIZE)`; allocation is a single `alloc_pages(order, KP_ZERO)` chunk where `order = ceil_log2(page_count)`. A BURROW of 5 pages allocates 8 (waste of 3 pages). Acceptable for v1.0; per-page allocation can be added later.
 
-### Anonymous VMOs only at v1.0
+### Burrow types
 
-`BURROW_TYPE_PHYS` (DMA/MMIO-backed) requires ARCH §19's CMA allocator + driver-startup integration; lands at Phase 3.
+`BURROW_TYPE_ANON` (anonymous, demand-paged) is the P3-Db type. `BURROW_TYPE_MMIO` (`burrow_create_mmio`, P4-Ic1) and `BURROW_TYPE_DMA` (`burrow_create_dma`, P4-Ic5b1b) back device-MMIO and DMA buffers respectively -- both landed in Phase 4 (the `BURROW_TYPE_PHYS` placeholder this section once named was superseded by the MMIO/DMA split).
 
 `BURROW_TYPE_FILE` (Stratum page cache) requires the 9P client + the page cache; post-v1.0.
 
@@ -272,9 +272,9 @@ At v1.0 P3-Db the entry point creates a VMA via `vma_alloc + vma_insert` and sto
 
 Partial unmap (a sub-range of an existing VMA) is post-v1.0. The v1.0 entry compares VMA `vaddr_start == vaddr` AND `vaddr_end == vaddr + length` and returns -1 on mismatch. Splitting a VMA into two halves with a hole would require allocating a fresh Vma + reordering the sorted list; that work is deferred until userspace `munmap` is wired (Phase 5+).
 
-### Single-CPU lifecycle
+### SMP-safe refcount lifecycle (#847)
 
-`burrow_ref` / `burrow_unref` / `burrow_acquire_mapping` / `burrow_release_mapping` and the high-level `burrow_map` / `burrow_unmap` paths are not internally synchronized. At v1.0 P3-Db only the boot CPU mutates per-Proc VMA state from outside the running thread (single-thread-Proc invariant from P2-D). Phase 5+ adds atomic operations on `handle_count` / `mapping_count` (the struct field types are already `int`; will become `atomic_int` or use `__atomic_*` builtins) when SMP syscalls go live, plus a per-Proc lock around `vma_insert`/`vma_remove` to handle concurrent multi-thread `mmap`/`munmap` callers.
+`burrow_ref` / `burrow_unref` / `burrow_acquire_mapping` / `burrow_release_mapping` run the `handle_count` + `mapping_count` mutations AND the `both-counts-zero` free decision under a **per-Burrow `spin_lock` (`v->lock`)** -- the #847 fix. A multi-thread Proc reaches these from concurrent CPUs (e.g. a sibling `handle_close` racing a mapping teardown), so the dual refcount had to become intrinsically SMP-safe: a torn count or two paths racing the free decision was a latent UAF/double-free. `burrow_free_internal` runs OUTSIDE `v->lock` (leaf discipline -- it takes the buddy / mmio / dma locks). `burrow_acquire_mapping` additionally carries the both-counts-zero resurrection guard + the per-type liveness read inside the lock (RW-1 C-F4). The per-Proc VMA-list mutators (`burrow_map` / `burrow_unmap` via `vma_insert`/`vma_remove`) serialize on the caller-held `p->vma_lock` (#713; lock order `vma_lock -> v->lock -> buddy zone->lock`).
 
 ### `_Static_assert` on `struct Burrow` size is intentionally absent
 

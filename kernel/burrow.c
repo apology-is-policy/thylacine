@@ -311,31 +311,45 @@ void burrow_unref(struct Burrow *v) {
 void burrow_acquire_mapping(struct Burrow *v) {
     if (!v)                       extinction("burrow_acquire_mapping(NULL)");
     if (v->magic != VMO_MAGIC)    extinction("burrow_acquire_mapping of corrupted BURROW");
-    // P4-Ic1: per-type liveness check. ANON: pages must still be alive.
-    // MMIO: kobj_mmio must still be held (the equivalent "backing
-    // resource" for MMIO Burrows).
+
+    // #847 / RW-1 C-F4: the both-counts-zero resurrection guard + the per-type
+    // liveness read + the count mutation ALL run under v->lock, mirroring
+    // burrow_ref. (Previously the liveness switch read create-immutable fields
+    // outside the lock -- safe at v1.0 because the sole caller holds a handle,
+    // but a latent race once a sibling can free the backing resource. Moving it
+    // inside the lock + adding the zero-zero guard closes it.)
+    spin_lock(&v->lock);
+    // Defensive: both counts 0 means already-freed; acquiring resurrects a dead
+    // identity (UAF-class). Coherent under the lock (mirror burrow_ref).
+    if (v->handle_count == 0 && v->mapping_count == 0) {
+        spin_unlock(&v->lock);
+        extinction("burrow_acquire_mapping on BURROW with both counts=0 (already freed?)");
+    }
+    // P4-Ic1: per-type liveness. ANON: pages alive; MMIO/DMA: the kobj held.
     switch (v->type) {
     case BURROW_TYPE_ANON:
-        if (!v->pages)
+        if (!v->pages) {
+            spin_unlock(&v->lock);
             extinction("burrow_acquire_mapping of ANON BURROW with NULL pages (UAF)");
+        }
         break;
     case BURROW_TYPE_MMIO:
-        if (!v->kobj_mmio)
+        if (!v->kobj_mmio) {
+            spin_unlock(&v->lock);
             extinction("burrow_acquire_mapping of MMIO BURROW with NULL kobj_mmio (UAF)");
+        }
         break;
     case BURROW_TYPE_DMA:
-        if (!v->kobj_dma)
+        if (!v->kobj_dma) {
+            spin_unlock(&v->lock);
             extinction("burrow_acquire_mapping of DMA BURROW with NULL kobj_dma (UAF)");
+        }
         break;
     case BURROW_TYPE_INVALID:
     default:
+        spin_unlock(&v->lock);
         extinction("burrow_acquire_mapping: invalid burrow type");
     }
-
-    // #847: the type-liveness switch above reads create-immutable fields
-    // (safe outside the lock; the caller holds a handle keeping pages alive);
-    // only the count mutation needs serialization.
-    spin_lock(&v->lock);
     v->mapping_count++;
     spin_unlock(&v->lock);
 }

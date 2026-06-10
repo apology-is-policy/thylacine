@@ -279,6 +279,12 @@ void burrow_release_mapping(struct Burrow *v);
 //
 // At v1.0 P3-Db, burrow_offset is implicitly 0 (the VMA covers the head of
 // the BURROW). Phase 5+ extends with an explicit offset for shared VMOs.
+//
+// PRECONDITION (#713 / RW-1 C-F2): the caller MUST hold `p->vma_lock` -- this
+// is a `p->vmas` mutator (via vma_insert), and every vmas mutator + the
+// demand-page reader serialize on vma_lock for multi-thread-Proc SMP safety.
+// Lock order: vma_lock -> buddy zone->lock. (exec_setup is exempt -- single-
+// threaded by construction.)
 int burrow_map(struct Proc *p, struct Burrow *v, u64 vaddr, size_t length, u32 prot);
 
 // burrow_unmap: remove the VMA at user-VA range [vaddr, vaddr + length)
@@ -294,9 +300,15 @@ int burrow_map(struct Proc *p, struct Burrow *v, u64 vaddr, size_t length, u32 p
 //   -1 on no matching VMA (no VMA starts at `vaddr` with the requested
 //      length).
 //
-// Does NOT touch PTEs (no PTEs were installed for the unmapped range
-// pre-P3-Dc, since demand paging hadn't fired yet; once P3-Dc lands,
-// burrow_unmap will additionally tear down installed PTEs in the range).
+// DOES tear down PTEs (RW-1 C-F6 doc-fold; the p6 hardening #2 / F1 fix):
+// burrow_unmap calls mmu_uninstall_user_range over the VMA's range, clearing
+// the leaf PTEs + broadcasting `tlbi vaae1is` BEFORE the backing pages are
+// freed -- without it, stale PTEs/TLB entries would persist after detach (the
+// suspected AEGIS-256/mallocng corruption class). Idempotent on never-faulted-
+// in pages.
+//
+// PRECONDITION (#713 / RW-1 C-F2): the caller MUST hold `p->vma_lock` (a
+// `p->vmas` mutator; same discipline as burrow_map).
 int burrow_unmap(struct Proc *p, u64 vaddr, size_t length);
 
 // Diagnostic accessors. Safe to call on a non-NULL, non-freed BURROW.

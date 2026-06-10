@@ -1,12 +1,12 @@
-# Reference: ASID allocator (P3-Ba)
+# Reference: ASID allocator — rolling generation-rollover (RW-1 B-F1)
 
 ## Purpose
 
-The ASID (Address Space Identifier) allocator manages the 8-bit hardware ASID space for per-Proc TTBR0 page-table tagging. It exists so that context switches between Procs do not require a full TLB flush: each Proc's user-mappings are tagged with its assigned ASID, and TLB lookups match against the current TTBR0_EL1.ASID at hardware level. The allocator is the foundation for P3-Bb (per-Proc page tables), P3-Bc (cpu_switch_context TTBR0 swap), and Phase 3+ exec / userspace.
+The ASID (Address Space Identifier) allocator manages the hardware ASID space for per-Proc TTBR0 page-table tagging, so context switches between Procs do not require a full TLB flush: each Proc's user mappings are tagged with a hardware ASID, and TLB lookups match against the current `TTBR0_EL1.ASID`.
 
-At v1.0 P3-Ba the allocator is **forward-looking** — no Proc actually consumes an ASID yet. P3-Bb wires the call sites in `proc_alloc` / `proc_free`; P3-Bc loads the ASID into TTBR0_EL1 on context switch.
+Since RW-1 B-F1 (ARCH §6.2.1), ASIDs are a **recycled cache keyed by a global generation counter** — the Linux arm64 rolling-ASID model (`arch/arm64/mm/context.c`) — **not** a per-Proc permanent allocation. The prior per-Proc-permanent design assigned one ASID per Proc for its lifetime and **extincted the kernel on the (ASID-space + 1)th concurrent Proc** (8-bit space, no rollover) — an unprivileged whole-system DoS (RW-1 B-F1, graded P1). The rolling design removes exhaustion entirely: the concurrent-Proc ceiling is gone.
 
-ARCH §6.2: "nG bit set in user mappings (no global TLB entry); kernel mappings global with ASID 0." This allocator owns the user-side ASID space (1..255).
+ASID 0 is reserved for the kernel's global (TTBR1) mappings and the kernel TTBR0; user ASID values run `[1, (1<<ASID_BITS)-1]`.
 
 ## Public API
 
@@ -15,197 +15,163 @@ ARCH §6.2: "nG bit set in user mappings (no global TLB entry); kernel mappings 
 ```c
 #define ASID_RESERVED_KERNEL  0u
 #define ASID_USER_FIRST       1u
-#define ASID_USER_LAST        255u
-#define ASID_USER_MAX         (ASID_USER_LAST - ASID_USER_FIRST + 1u)
+#define ASID_TTBR0_SHIFT      48u   // TTBR0_EL1 ASID field is bits [63:48]
+
+static inline unsigned asid_hw_bits(void);   // 8 or 16 from ID_AA64MMFR0_EL1.ASIDBits
 
 void asid_init(void);
-u16  asid_alloc(void);
-void asid_free(u16 asid);
-void asid_tlb_flush(u16 asid);
+u64  asid_resolve(u64 *context_id, unsigned cpu);
 
-u64       asid_total_allocated(void);
-u64       asid_total_freed(void);
-unsigned  asid_inflight(void);
+unsigned asid_bits(void);            // 8 or 16
+u64      asid_generation_now(void);  // current generation value
+u64      asid_rollover_count(void);  // rollovers since boot
 ```
+
+#### `asid_hw_bits(void) → unsigned`
+
+Reads `ID_AA64MMFR0_EL1.ASIDBits` (bits [7:4]): `0b0010` → 16-bit, else 8-bit. Used by `asid_init` (bitmap + generation sizing) **and** `mmu.c` (`TCR_EL1.AS`) — both read the register directly, so there is no init-ordering dependency on a shared global. ARM requires a system-wide-uniform ASID width, so the boot-CPU width governs all CPUs.
 
 #### `asid_init(void)`
 
-Boot-time initialization. Sets `g_next_asid = ASID_USER_FIRST`; clears all counters and the free-list. Idempotent on first call; extincts on second call to surface bootstrap-order bugs. Must be called once after `slub_init` (the discipline matches main.c bootstrap order; no SLUB dependency at v1.0 since state lives in BSS).
+Boot-time init: reads the ASID width, sizes the bitmap + generation, zeroes the per-CPU `active`/`reserved`/`flush_pending` state, and stamps the generation to **#1** (so a `context_id` of 0 — "never assigned" — always misses). Runs after the MMU is up, before any context switch calls `asid_resolve`. Extincts on a second call.
 
-#### `asid_alloc(void) → u16`
+#### `asid_resolve(u64 *context_id, unsigned cpu) → u64`
 
-Returns a fresh ASID in `[ASID_USER_FIRST, ASID_USER_LAST]`. Two paths:
+The context-switch core. Resolves the current-generation ASID for the Proc whose `context_id` is `*context_id`, running on logical CPU `cpu`, updating `*context_id` and the per-CPU/rollover state as needed. Returns the **hardware ASID value** (not the full `context_id`) for the TTBR0 compose. The caller (the scheduler pre-hook `sched_install_asid_ttbr0`) composes `ttbr0 = (asid << ASID_TTBR0_SHIFT) | pgtable_root`.
 
-1. **Free-list pop (LIFO)**: if `g_asid_free_count > 0`, pops the most-recently-freed ASID. Cache-locality benefit: the slot's metadata is warm; its TLB was already flushed at free time.
-2. **Monotonic fresh**: otherwise, returns `g_next_asid++` if it's still ≤ `ASID_USER_LAST`.
+Two paths:
 
-If both paths are unavailable (free-list empty AND monotonic counter past last), extincts with the message `"asid_alloc: 8-bit ASID space exhausted at v1.0 (generation rollover deferred to Phase 5+)"`. Unreachable under v1.0 test scales.
+1. **Fast path (lockless)** — taken iff this CPU's active slot is non-zero AND the Proc's generation matches the global generation. An atomic `cmpxchg` publishes the `context_id` into `g_active_asids[cpu]` and **fails** if a concurrent rollover zeroed the slot (→ slow path). No lock, no flush.
+2. **Slow path (under `g_asid_lock`)** — a miss (stale generation or never-assigned). `new_context` claims a free ASID from the bitmap; if none is free, it **rolls over** (below). Then it honors this CPU's pending local flush and publishes.
 
-#### `asid_free(u16 asid)`
-
-Returns `asid` to the free-list. **Issues a TLB-invalidate-by-ASID (inner-shareable) BEFORE pushing to the pool**, ensuring the next caller of `asid_alloc` that pops this slot sees a globally-flushed TLB. Out-of-range (`< ASID_USER_FIRST` or `> ASID_USER_LAST`) extincts. Inflight underflow (free-without-alloc, or double-free) extincts. Free-list overflow extincts (catches alloc/free imbalance — should be unreachable if the API is used correctly).
-
-#### `asid_tlb_flush(u16 asid)`
-
-Issues the broadcast TLB-invalidate sequence:
-```
-dsb ishst       — make pending stores visible to TLB walkers.
-tlbi aside1is   — broadcast invalidate-by-ASID across all PEs.
-dsb ish         — wait for completion across all PEs in the IS domain.
-isb             — discard speculative translations on this PE.
-```
-Matches Linux's `flush_tlb_mm(mm)` and the ARM ARM D5.10 recommended sequence. Used internally by `asid_free`; exposed for callers that have torn down a Proc's user mappings while keeping the ASID alive (Phase 3+ may use this for `mprotect`-style flushes).
+MUST be called with IRQs masked on the CPU `cpu` names (the pre-hook satisfies this: rq lock held / IRQs masked). NEVER called for kproc / kernel threads (`pgtable_root == 0` → kernel TTBR0, ASID 0, bypassing the allocator). `context_id` is a plain `u64` accessed via `__atomic_*`; the fast path is lockless.
 
 #### Diagnostics
 
-`asid_total_allocated`, `asid_total_freed`, and `asid_inflight` return atomic snapshots of the running totals. Useful for leak detection in tests; the sum `total_allocated - total_freed - inflight == 0` invariant is maintained.
+`asid_bits` / `asid_generation_now` / `asid_rollover_count` return atomic snapshots.
 
-## Implementation
+## Implementation (`arch/arm64/asid.c`)
 
-### State (`arch/arm64/asid.c`)
+### State
 
 ```c
-static spin_lock_t g_asid_lock = SPIN_LOCK_INIT;
-static u16  g_next_asid;
-static u16  g_asid_free_list[ASID_USER_MAX];
-static u32  g_asid_free_count;
-static u32  g_asid_inflight;
-static u64  g_asid_total_allocated;
-static u64  g_asid_total_freed;
-static bool g_asid_initialized;
+static spin_lock_t g_asid_lock;          // a LEAF lock (no nested lock)
+static unsigned g_asid_bits;             // 8 or 16
+static u64 g_asid_val_mask, g_asid_gen_unit, g_asid_last;
+static u64 g_asid_generation;            // high bits; lockless atomic reads, under-lock atomic writes
+static u64 g_asid_map[1024];             // claimed-this-generation bitmap (16-bit ceiling, 8 KiB)
+static u64 g_asid_cur_idx;               // round-robin search hint
+static u64  g_active_asids[DTB_MAX_CPUS];   // per-CPU published context_id (0 = none)
+static u64  g_reserved_asids[DTB_MAX_CPUS]; // per-CPU reserved-across-rollover context_id
+static bool g_flush_pending[DTB_MAX_CPUS];  // per-CPU local-flush-owed
 ```
 
-All state lives in BSS. The lock is `spin_lock_irqsave`-paired throughout — at v1.0 the lock is uncontested (single-threaded boot allocates ASIDs sequentially via rfork from kthread); Phase 3+ exec on secondaries can introduce contention.
+### `context_id` bit layout
 
-### Lock discipline
+```
+bits [ASID_BITS-1 : 0]   the hardware ASID value (1 .. (1<<ASID_BITS)-1)
+bits [63 : ASID_BITS]    the generation (a multiple of ASID_GEN_UNIT = 1<<ASID_BITS)
+```
 
-- `asid_alloc`: lock → check free-list → pop or monotonic fresh → counter ++ → unlock.
-- `asid_free`: TLB flush (no lock) → lock → push free-list → counter -- → unlock.
-- TLB flush is OUTSIDE the lock because the `tlbi` + `dsb ish` is multi-cycle and would unnecessarily extend lock-hold time. The flush is ordered before the push (program order on this CPU); the lock ensures the push is atomic; the next allocator who pops the slot sees the post-flush state via the lock's release/acquire synchronization.
+`context_id == 0` is "never assigned" (generation 0; `gen_match(0)` is false because the global generation starts at #1).
 
-### Free-list as LIFO
+### `asid_resolve` — the fast path and the rollover race
 
-The free-list is a stack (top-of-stack = most recently pushed). The LIFO discipline is deliberate:
+The fast path has **two** guards, both load-bearing:
 
-- **Cache locality**: a recently-freed ASID's slot is warm in the cache hierarchy on the freeing CPU; reusing it benefits L1/L2 reuse.
-- **TLB warmth**: even though the TLB was invalidated for this ASID, the page-table entries that built up around it remain in caches; if the new owner happens to map similar VAs, walks are faster.
-- **Simplicity**: a stack is simpler than a queue.
+1. **generation-match** (`gen_match(cid)`): the Proc's ASID is still valid this generation. After a rollover bumps the generation, a stale-generation Proc fails this and is forced to the slow path (re-stamp + flush).
+2. **no-pending-flush** (`old_active != 0`): the CPU has no un-flushed stale TLB from before a rollover. `flush_context` zeroes `g_active_asids[all]` on rollover, so a peer's next switch finds active == 0, fails the fast-path test, takes the slow path, and there honors `flush_pending`. This is Linux's `old_active_asid != 0` guard.
 
-A FIFO discipline would distribute reuse more uniformly across recently-freed entries (avoiding the LIFO "hot stack top"); not measurably better at v1.0 scales.
+The **rollover race** — the famous, subtle rolling-ASID hazard — is between the lockless fast-path `cmpxchg` and `flush_context`'s per-CPU `xchg`, both on `g_active_asids[cpu]`. They are serialized by that single location: a fast publish either lands **before** the rollover's xchg (which then reads and RESERVES it) or **after** (the cmpxchg sees 0 and FAILS → slow path). There is no interleaving where a Proc publishes an ASID the rollover then reassigns. (Modeled exhaustively in `specs/asid.tla`; see Spec cross-reference.)
 
-### TLB flush sequence
+### `new_context` + `flush_context` (the rollover)
 
-`asid_tlb_flush` issues `tlbi aside1is, x0` where `x0[63:48] = ASID, x0[47:0] = 0`. Per ARM ARM D5.10:
+`new_context(old_cid)` (under `g_asid_lock`):
+- If `old_cid != 0` and the Proc owns a reservation of its value (`check_update_reserved`, a **full-`context_id`** compare — this is the load-bearing ownership distinction), re-stamp and keep the same ASID.
+- Else if the old value is still free this generation, keep it.
+- Else claim a free ASID; if none, **roll over**.
 
-- `aside1is` invalidates **all stage-1 TLB entries (EL1 + EL0) matching the ASID**, broadcast across the **inner-shareable** domain.
-- The `dsb ishst` before `tlbi` ensures any pending stores (e.g., to page-table entries that the TLB walker would consult) are committed before the invalidate.
-- The `dsb ish` after `tlbi` waits for the broadcast to complete — i.e., all PEs in the IS domain have observed the invalidate.
-- The `isb` discards any speculative translations the issuing PE may have prefetched.
+`flush_context` (the rollover): bump the generation, reset the bitmap, and for every CPU `xchg` its active slot to 0 — preserving each CPU's active ASID (or, if idle, its existing reserved one) into `g_reserved_asids[cpu]` and re-marking the bitmap — then arm `flush_pending` for every CPU. **NOSTEAL**: a running CPU's ASID is never reassigned (the reservation), so two address spaces never alias one ASID (invariant I-31).
 
-The encoding `(u64)asid << 48` puts the ASID in bits [63:48]. Per ARM ARM C5.5.1, `tlbi aside1is` uses bits [63:48] for the ASID input regardless of TCR_EL1.AS (which only affects TTBR0/1's storage width). So the same encoding works for 8-bit and 16-bit ASIDs.
+### `check_update_reserved` — the ownership guard
 
-## Data structures
+```c
+if (g_reserved_asids[i] != 0 && g_reserved_asids[i] == old_cid) { ...reclaim... }
+```
 
-### `g_asid_free_list[ASID_USER_MAX]`
+The compare is the **full** `context_id` (generation + value), not just the value. Because `(generation, value)` is unique per Proc-instance, this is an **ownership** check: a Proc reclaims **only its own** reservation, never another live Proc's ASID that happens to share the value. (The HOLOTYPE RW-1 audit F1 found the model originally abstracted this as ownerless value-membership — an unsafe algorithm the impl does not have; the spec was corrected to the `rproc` ownership model. The impl was always correct.)
 
-A 255 × 2-byte = 510-byte BSS array. Simple stack: `g_asid_free_list[0..g_asid_free_count - 1]` are the live entries; `g_asid_free_count` is the next free slot.
+### Teardown TLB-safety (no per-Proc `asid_free`)
 
-The size is set to `ASID_USER_MAX` (255) which is the maximum possible inflight count — at this scale, every Proc could free its ASID without overflow. Sizing larger would be defensive but pointless; sizing smaller would risk overflow.
+There is no per-Proc ASID free. At `proc_free`, the `context_id` is simply dropped; the hardware ASID value stays reserved in the current generation until the next rollover. This is TLB-safe: the leaf user mappings were already invalidated by `vma_drain`'s all-ASID `tlbi vaae1is` (runs before `proc_pgtable_destroy`); no live CPU holds a dead Proc's TTBR0 (every Thread is reaped + `on_cpu`-spun before reap), so no CPU translates under its ASID; and any eventual reuse of the value is gated by the rollover's per-CPU `flush_pending` local flush. (Matches Linux: no TLB flush at mm teardown; reclaim at rollover.)
 
-### Counters
+### Context-switch wiring
 
-- `g_next_asid` (u16): monotonic counter. Increments only on the monotonic-fresh path of `asid_alloc`. Capped at `ASID_USER_LAST + 1` (the post-increment value when we're about to overflow).
-- `g_asid_inflight` (u32): running balance of allocated minus freed.
-- `g_asid_total_allocated`, `g_asid_total_freed` (u64): cumulative over kernel lifetime.
+`struct Proc` carries `u64 context_id` (replacing the old `u16 asid`; `sizeof(struct Proc)` unchanged at 264). The pre-hook `sched_install_asid_ttbr0(next)` runs at both `cpu_switch_context` call sites (`kernel/sched.c`, `kernel/thread.c`), composing `next->ctx.ttbr0` before the asm switch loads it; a no-op for kproc / kernel threads. `thread_create` bakes the kernel TTBR0 (ASID 0) as the initial value, so a never-reached missing-pre-hook path faults safely rather than aliasing ASID 0 onto a user root. `mmu.c::mmu_program_this_cpu` sets `TCR_EL1.AS = 1` when the CPU reports 16-bit ASIDs.
+
+### Lock order
+
+`asid_resolve` takes `g_asid_lock` while the caller holds the run-queue lock → `rq_lock -> g_asid_lock`. `g_asid_lock` is a true **leaf** (its critical section touches only the bitmap + per-CPU arrays + a local TLBI; no nested lock), so the order is acyclic.
 
 ## State machines
 
-### ASID lifecycle
+### Per-Proc context_id lifecycle
 
 ```
-[free / never allocated]
-    ↓ asid_alloc (monotonic fresh: g_next_asid++)
-[in use by Proc P]
-    ↓ Proc P transitions ZOMBIE → reaped → asid_free
-[on the free-list, TLB-flushed]
-    ↓ asid_alloc (free-list pop)
-[in use by Proc Q]
-    ↓ ...
+[context_id = 0, "never assigned"]
+    → asid_resolve slow path (new_context claims a free ASID)
+[stamped gen|value; ACTIVE on some CPU]
+    → fast path reuse (gen matches) | deschedule (stays claimed)
+    → rollover bumps gen: reserved if active (kept), else freed at the bitmap reset
+[stale generation]
+    → asid_resolve slow path: reclaim own reservation (same value) OR claim fresh
 ```
 
-The TLB-flushed-on-free invariant is the key correctness property: at any moment when an ASID is on the free-list, its TLB entries are guaranteed-flushed across all PEs.
+## Spec cross-reference
 
-### Spec cross-reference
+`specs/asid.tla` (model-first; spec-first re-enabled for this surface per the SMP precedent in ARCH §8.4). Invariant **I-31** (ARCH §28). The clean cfg is TLC-GREEN at the F1 exposing bound (≥ 4 Procs); five buggy cfgs are executable documentation, each violating a targeted invariant:
 
-ASID management is "config parsing" territory per CLAUDE.md spec-first guidance — counter management with no concurrent state machine. No formal spec at P3-Ba.
+| cfg | violates | the modeled bug |
+|---|---|---|
+| `asid_buggy_rollover_steals_active` | ActiveClaimed | rollover resets the bitmap without reserving active ASIDs |
+| `asid_buggy_fast_no_regen` | NoActiveAlias | fast path drops the generation recheck |
+| `asid_buggy_no_flush_pending` | NoStaleTLB | rollover skips `flush_pending` for peers |
+| `asid_buggy_fast_no_flush_check` | NoStaleTLB | fast path runs while `flush_pending` set |
+| `asid_buggy_reserve_value_only` | NoActiveAlias | ownerless reservation reclaim (the audit-F1 bug) |
 
-The TLB-flush-before-reuse invariant is enforced structurally by `asid_free`'s ordering (flush → lock → push); inspected by code review at P3-Ba and the upcoming P3-B closing audit (will likely fold into a Phase 3 closing audit covering per-Proc TTBR0 + page-fault handler + exec).
+Spec actions ↔ source: `FastSwitch`/`SlowSwitch` ↔ `asid_resolve`; the rollover branch ↔ `new_context` + `flush_context`; `OwnsReservedValue` ↔ `check_update_reserved`.
 
-## Tests
+## Tests (`kernel/test/test_asid.c`)
 
-### `kernel/test/test_asid.c`
+- `asid.width_valid` — `asid_bits()` is 8 or 16; the generation is non-zero.
+- `asid.resolve_reuse` — re-resolving a Proc's `context_id` returns the same (valid) ASID (the fast path).
+- `asid.distinct_active` — two distinct Procs active on two CPUs hold distinct ASIDs (no alias).
+- `asid.rollover_preserves` — fills the full ASID space, forces a real rollover, and asserts a running Proc keeps its ASID across it (NOSTEAL / I-31).
 
-#### `asid.alloc_unique`
-
-Allocate 8 ASIDs. Verify:
-- Each is in `[ASID_USER_FIRST, ASID_USER_LAST]`.
-- All are pairwise distinct.
-- `asid_total_allocated` advances by 8.
-- `asid_inflight` advances by 8.
-
-Free in reverse order (exercises the LIFO free-list). Verify:
-- `asid_total_freed` advances by 8.
-- `asid_inflight` returns to pre-test baseline.
-
-#### `asid.free_reuses`
-
-Alloc → free → alloc. Verify the second alloc reuses the freed ASID via the LIFO free-list pop. Confirms the free-list discipline.
-
-#### `asid.inflight_count`
-
-Verify `asid_inflight()` reports the running balance accurately across alloc + free.
-
-### Tests deliberately omitted
-
-**Exhaustion**: allocating > 255 ASIDs would extinct the kernel. Could be exercised via the fault matrix (`tools/test-fault.sh`) but not as a smoke test. v1.0 deferred.
+`test_proc_pgtable.c::proc.ttbr0_swap_smoke` additionally verifies the pre-hook installs a valid rolling `(asid << 48) | pgtable_root` with distinct ASIDs for two concurrently-live children.
 
 ## Error paths
 
 | Path | Trigger | Message |
 |---|---|---|
 | `asid_init` re-entry | calling twice | `"asid_init called twice"` |
-| `asid_alloc` pre-init | calling before `asid_init` | `"asid_alloc before asid_init"` |
-| `asid_alloc` exhaustion | free-list empty AND `g_next_asid > ASID_USER_LAST` | `"asid_alloc: 8-bit ASID space exhausted at v1.0 (generation rollover deferred to Phase 5+)"` |
-| `asid_free` pre-init | calling before `asid_init` | `"asid_free before asid_init"` |
-| `asid_free` out-of-range | `asid < ASID_USER_FIRST` or `> ASID_USER_LAST` | `"asid_free: out-of-range ASID"` |
-| `asid_free` underflow | `g_asid_inflight == 0` | `"asid_free: inflight count would underflow (double-free or free-without-alloc?)"` |
-| `asid_free` overflow | `g_asid_free_count >= ASID_USER_MAX` | `"asid_free: free-list overflow (impossible if alloc/free are balanced — corruption?)"` |
-
-All are extincts (kernel halt) — there is no graceful return path for these errors at v1.0; they all signify either bootstrap-order bugs or memory corruption.
+| `asid_resolve` pre-init | before `asid_init` | `"asid_resolve before asid_init"` |
+| `asid_resolve` bad cpu | `cpu >= DTB_MAX_CPUS` | `"asid_resolve: cpu index out of range"` (RW-1 audit F3 fail-fast) |
+| rollover with no free ASID | unreachable (`flush_context` reserves ≤ `DTB_MAX_CPUS` < ASID space) | `"asid: no free ASID after rollover"` |
 
 ## Performance characteristics
 
-- `asid_alloc`: lock acquire + counter check + (free-list pop OR monotonic increment) + counter ++ + lock release. ~10 instructions hot path; the lock is the dominant cost.
-- `asid_free`: TLB flush (multi-cycle; involves cross-CPU broadcast) + lock + push + lock. The TLB flush is the dominant cost — a `tlbi aside1is` + `dsb ish` round-trips through the inner-shareable barrier coordinator (~10-50 cycles depending on platform).
-- `asid_tlb_flush`: ~10-50 cycles.
-- Read accessors: single atomic load each.
+- Fast path: a lockless atomic read + `gen_match` + an atomic `cmpxchg` — the common case, no lock, no flush.
+- Slow path: `g_asid_lock` + a bitmap search (amortized O(1) via the `cur_idx` hint) + (rare) a rollover. A rollover is O(`DTB_MAX_CPUS`) reservation + a local TLB flush per CPU at its next switch. 16-bit ASIDs make rollovers rare (65535 vs 255 user ASIDs before one is forced).
 
 ## Status
 
-**Implemented at P3-Ba** (this chunk):
-- Allocator + free-list + TLB flush.
-- Boot-time init via `asid_init()` in main.c.
-- 3 smoke tests (`asid.alloc_unique`, `asid.free_reuses`, `asid.inflight_count`).
-- Reference doc (this file).
-
-**Wired by future sub-chunks**:
-- P3-Bb: `proc_alloc` calls `asid_alloc`; `proc_free` calls `asid_free`. struct Proc gains `asid` field.
-- P3-Bc: `cpu_switch_context` writes `(asid << 48) | pgtable_root_pa` into TTBR0_EL1.
+**Landed (RW-1 B-F1):** the rolling allocator (`@d742ffa`), the model-first spec (`@4fe50f7`), the focused audit close (`@d40dbbb`). 806/806 PASS; SMP gate 0 corruption. The fail-soft interim (`@ef29456`) and the scripture (`@83bd74e`) preceded it.
 
 ## Known caveats / footguns
 
-- **No rollover at v1.0**: `asid_alloc` extincts on exhaustion (>= 256 lifetime allocations + zero frees outpacing). v1.0 test scales (≤ ~30 alive Procs at once; cumulative bounded by test count) don't approach this. Phase 5+ adds Linux-style generation rollover with full TLB flush + per-Proc generation match.
-- **Reserved ASID 0**: must remain reserved; assigning ASID 0 to a user Proc would conflict with the kernel's TTBR1 entries (which use ASID 0 with nG=0). The allocator structurally excludes ASID 0 from `asid_alloc` returns.
-- **TLB flush is global, not local**: `tlbi aside1is` is inner-shareable. On a many-core system this could be expensive; v1.0 has 4 vCPUs, fine. Future scaling concern.
-- **Free-list ordering is LIFO, not FIFO**: a recently-freed ASID is reused soonest. Could create thrashing patterns in pathological workloads; not a v1.0 concern.
-- **No Proc → ASID linkage at P3-Ba**: this chunk only provides the allocator. P3-Bb wires it.
+- **The fast path needs BOTH guards.** generation-match alone is insufficient — `~flush_pending` (`old_active != 0`) is equally load-bearing (a rollover leaves un-flushed stale TLB on peers). The model surfaced this before the impl.
+- **`check_update_reserved` must compare the FULL `context_id`.** A value-only compare reintroduces the audit-F1 alias. The `asid_buggy_reserve_value_only.cfg` is the durable counterexample.
+- **Reserved ASID 0.** Never handed out (the bitmap search starts at `ASID_USER_FIRST`); a user Proc with ASID 0 would alias the kernel's global TTBR1 entries.
+- **Per-CPU `cpu` index assumption.** `asid_resolve` (like the whole scheduler) assumes `smp_cpu_idx_self()` is a dense `< DTB_MAX_CPUS` index. The fail-fast assert catches an out-of-range value; the durable DTB MPIDR→dense-index map is a tracked whole-scheduler portability item (RW-1 audit F3).
+- **No `u64` generation-overflow guard.** Wrap is ~2^48 rollovers (16-bit) — millennia; Linux carries the identical property.

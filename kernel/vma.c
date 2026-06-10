@@ -62,6 +62,11 @@ struct Vma *vma_alloc(u64 vaddr_start, u64 vaddr_end, u32 prot,
     // ARCH §28 I-12.
     if ((prot & VMA_PROT_WRITE) && (prot & VMA_PROT_EXEC)) return NULL;
 
+    // RW-1 C-F3: reject write-without-read. AArch64 has no write-only AP, so a
+    // W-only prot would map RW (readable) -- a rights/PTE mismatch the MMIO/DMA
+    // syscalls already guard. Reject it here so the VMA prot matches the PTE.
+    if ((prot & VMA_PROT_WRITE) && !(prot & VMA_PROT_READ)) return NULL;
+
     struct Vma *v = kmem_cache_alloc(g_vma_cache, KP_ZERO);
     if (!v) return NULL;
 
