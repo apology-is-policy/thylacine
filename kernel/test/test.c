@@ -376,6 +376,8 @@ void test_perm_devramfs_enforced_real_metadata(void);
 void test_perm_dev_flags(void);
 void test_perm_check_dac_override_cap(void);
 void test_perm_wstat_chown_cap(void);
+void test_perm_check_want_zero_denied(void);
+void test_perm_wstat_rejects_unknown_valid_bit(void);
 void test_stalk_resolve_multi(void);
 void test_stalk_resolve_deep(void);
 void test_stalk_leading_and_double_slash(void);
@@ -1963,6 +1965,9 @@ struct test_case g_tests[] = {
     { "perm.dev_flags",                test_perm_dev_flags,                false, NULL },
     { "perm.check_dac_override_cap",   test_perm_check_dac_override_cap,   false, NULL },
     { "perm.wstat_chown_cap",          test_perm_wstat_chown_cap,          false, NULL },
+    { "perm.check_want_zero_denied",   test_perm_check_want_zero_denied,   false, NULL },
+    { "perm.wstat_rejects_unknown_valid_bit",
+                                       test_perm_wstat_rejects_unknown_valid_bit, false, NULL },
     { "stalk.resolve_multi",           test_stalk_resolve_multi,           false, NULL },
     { "stalk.resolve_deep",            test_stalk_resolve_deep,            false, NULL },
     { "stalk.leading_and_double_slash", test_stalk_leading_and_double_slash, false, NULL },

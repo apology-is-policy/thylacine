@@ -32,6 +32,8 @@ void test_perm_devramfs_enforced_real_metadata(void);
 void test_perm_dev_flags(void);
 void test_perm_check_dac_override_cap(void);
 void test_perm_wstat_chown_cap(void);
+void test_perm_check_want_zero_denied(void);
+void test_perm_wstat_rejects_unknown_valid_bit(void);
 
 // =============================================================================
 // Helpers.
@@ -346,4 +348,45 @@ void test_perm_wstat_chown_cap(void) {
     mkproc(&p, 999u, 200u, CAP_DAC_OVERRIDE);
     TEST_EXPECT_EQ(perm_wstat_check(&p, 100u, T_WSTAT_UID, 0u), -1,
                    "CAP_DAC_OVERRIDE does NOT grant chown");
+}
+
+// RW-5 R4-F1 regression: perm_check with want == 0 (after the rwx mask) is a
+// "check for no permission" -- it must fail CLOSED, not vacuously ALLOW via
+// `(bits & 0) == 0`. Pre-fix it returned 0 (allow) for everyone AND short-
+// circuited before the cap-bypass; post-fix it returns -1, even for a
+// CAP_HOSTOWNER holder (the deny is placed before the DAC-override).
+void test_perm_check_want_zero_denied(void) {
+    struct t_stat st = mkstat(0777u, 100u, 200u);   // owner rwx
+    struct Proc p;
+
+    mkproc(&p, 100u, 200u, CAP_NONE);
+    TEST_EXPECT_EQ(perm_check(&p, &st, 0u), -1,
+                   "perm_check(want==0) fails closed (not a vacuous allow)");
+
+    // Only non-rwx bits -> masks to 0 -> same fail-closed result.
+    mkproc(&p, 100u, 200u, CAP_NONE);
+    TEST_EXPECT_EQ(perm_check(&p, &st, ~(unsigned)(PERM_R | PERM_W | PERM_X)), -1,
+                   "perm_check(non-rwx bits only) masks to 0 and fails closed");
+
+    // CAP_HOSTOWNER does NOT rescue want==0: the deny precedes the DAC-override.
+    mkproc(&p, 555u, 888u, CAP_HOSTOWNER);
+    TEST_EXPECT_EQ(perm_check(&p, &st, 0u), -1,
+                   "want==0 denied even for CAP_HOSTOWNER (deny precedes the bypass)");
+}
+
+// RW-5 R4-F2 regression: perm_wstat_check gates exactly {MODE,UID,GID}. A `valid`
+// bit outside that set must be rejected by the policy itself (self-defend), not
+// pass ungated. Pre-fix an unknown bit fell through all three checks to return 0
+// (allow); post-fix it returns -1 -- before the caps are even read, so even
+// CAP_HOSTOWNER does not rescue it.
+void test_perm_wstat_rejects_unknown_valid_bit(void) {
+    struct Proc p;
+    u32 unknown = (1u << 3);   // outside T_WSTAT_VALID (MODE|UID|GID = bits 0-2)
+
+    mkproc(&p, 100u, 200u, CAP_HOSTOWNER);
+    TEST_EXPECT_EQ(perm_wstat_check(&p, 100u, unknown, 0u), -1,
+                   "perm_wstat_check rejects an unknown valid bit (self-defend)");
+    // A known|unknown combination is also rejected (the unknown bit taints it).
+    TEST_EXPECT_EQ(perm_wstat_check(&p, 100u, T_WSTAT_MODE | unknown, 0u), -1,
+                   "perm_wstat_check rejects known|unknown valid bits");
 }

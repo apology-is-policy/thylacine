@@ -18,13 +18,20 @@ bool proc_in_group(const struct Proc *p, u32 gid) {
 int perm_check(const struct Proc *p, const struct t_stat *st, unsigned want) {
     if (!p || !st)           return -1;
     want &= (PERM_R | PERM_W | PERM_X);
+    // RW-5 R4-F1: a check for NO specific permission must fail CLOSED, not
+    // short-circuit to ALLOW (`(bits & 0) == 0` is vacuously true). No caller
+    // passes want == 0 (perm_want_for_omode never returns 0), so this only
+    // hardens the default polarity of the security gate against a future caller.
+    if (want == 0) return -1;
 
     // The DAC-override: a capability, NEVER an identity (I-22). No principal_id
     // -- not even PRINCIPAL_SYSTEM -- is special-cased here. CAP_HOSTOWNER is
     // the unified fs-admin authority; CAP_DAC_OVERRIDE (A-4a) is the finer
     // rwx-bypass split out of it, conferred via a legate clearance grant. Either
-    // bypasses the rwx check.
-    if (p->caps & (CAP_HOSTOWNER | CAP_DAC_OVERRIDE)) return 0;
+    // bypasses the rwx check. caps is read ATOMICALLY (RW-5 F2): proc_become_legate
+    // is a cross-thread writer of p->caps since A-4a (a plain load is C11-racy).
+    caps_t caps = __atomic_load_n(&p->caps, __ATOMIC_ACQUIRE);
+    if (caps & (CAP_HOSTOWNER | CAP_DAC_OVERRIDE)) return 0;
 
     // Owner-first POSIX: an owner is judged on owner bits ONLY (even when group/
     // other would grant more -- it can always chmod itself the bit). The file's
@@ -78,14 +85,22 @@ rights_t rights_for_omode(u32 omode) {
 
 int perm_wstat_check(const struct Proc *p, u32 cur_uid, u32 valid, u32 new_gid) {
     if (!p) return -1;
+    // RW-5 R4-F2: self-defend. This policy gates exactly {MODE,UID,GID}; a future
+    // T_WSTAT_* growth must not pass ungated through here just because the syscall
+    // layer happens to reject unknown bits upstream. Fail closed on any bit outside
+    // the set this function actually adjudicates.
+    if (valid & ~(u32)T_WSTAT_VALID) return -1;
+    // caps read ATOMICALLY (RW-5 F2): proc_become_legate is a cross-thread writer
+    // of p->caps since A-4a; a plain load is C11-racy.
+    caps_t caps = __atomic_load_n(&p->caps, __ATOMIC_ACQUIRE);
     // chmod-any authority: CAP_HOSTOWNER only. There is no finer CAP_FOWNER
     // split at v1.0 -- chmod-by-non-owner stays in the unified authority (the
     // A-4a clearance set is DAC_OVERRIDE/CHOWN/KILL, none of which is chmod).
-    bool fowner    = (p->caps & CAP_HOSTOWNER) != 0;
+    bool fowner    = (caps & CAP_HOSTOWNER) != 0;
     // chown/chgrp-to-any authority: CAP_HOSTOWNER OR the A-4a CAP_CHOWN (the
     // finer no-give-away chown right split out of CAP_HOSTOWNER, conferable via
     // a legate clearance grant).
-    bool chown_any = (p->caps & (CAP_HOSTOWNER | CAP_CHOWN)) != 0;
+    bool chown_any = (caps & (CAP_HOSTOWNER | CAP_CHOWN)) != 0;
     bool owner     = (p->principal_id == cur_uid);
     // chmod: only the owner may change a file's mode bits (or chmod-any authority).
     if ((valid & T_WSTAT_MODE) && !owner && !fowner)     return -1;

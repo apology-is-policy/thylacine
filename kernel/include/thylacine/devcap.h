@@ -67,6 +67,24 @@ struct Spoor;
 // cap_mask escapes this mask is rejected at register.
 #define CAP_GRANTABLE_CLEARANCE  (CAP_DAC_OVERRIDE | CAP_CHOWN | CAP_KILL)
 
+// RW-5 SA-2 -- pin the I-25 member-unelevated invariant at compile time. BOTH
+// grantable sets MUST be entirely elevation-only. The load-bearing consequence:
+// a clearance grant can confer ONLY rfork-stripped caps, so a legate scope
+// MEMBER (it inherits scope_id but rfork strips the elevated caps) is always
+// UNELEVATED -- which is exactly why a teardown-missed straggler is benign (a4a)
+// and why I-25's "no elevated Proc outlives the scope" rests on the ROOT alone.
+// A future FORK-GRANTABLE cap added to either set would let a legate confer it,
+// a child inherit it (not stripped), and an elevated straggler survive the
+// sweep -- silently breaking I-25. The runtime register-gates (cap_mask & ~MASK)
+// bound the VALUES; these asserts bound the MASKS themselves.
+_Static_assert((CAP_GRANTABLE & ~(caps_t)CAP_ELEVATION_ONLY) == 0,
+               "CAP_GRANTABLE must be a subset of CAP_ELEVATION_ONLY -- a "
+               "hostowner grant may confer only elevation-only (rfork-stripped) caps.");
+_Static_assert((CAP_GRANTABLE_CLEARANCE & ~(caps_t)CAP_ELEVATION_ONLY) == 0,
+               "CAP_GRANTABLE_CLEARANCE must be a subset of CAP_ELEVATION_ONLY so "
+               "legate scope members stay UNELEVATED (I-25). Adding a fork-grantable "
+               "cap here would let an elevated scope member outlive the scope.");
+
 // /grant write payload -- hostowner form, fixed-size 16-byte message:
 //   bytes [0..8)   cap_mask        u64 LE
 //   bytes [8..16)  target_stripes  u64 LE

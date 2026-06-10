@@ -321,10 +321,16 @@ long cap_redeem_grant_for_writer(struct Proc *writer, caps_t cap_mask) {
 
     spin_unlock_irqrestore(&g_cap_grants.lock, s);
 
-    // The capability lands on the WRITER's Proc. v1.0 hostowner redeemers
-    // (corvus / login) make the non-atomic OR benign in practice; the
-    // clearance path above uses proc_become_legate's __atomic_fetch_or.
-    writer->caps |= to_or;
+    // The capability lands on the WRITER's Proc. ATOMIC OR (RW-5 F1): p->caps is
+    // a cross-thread-mutable word since A-4a -- the clearance arm above ORs it
+    // atomically via proc_become_legate's __atomic_fetch_or. A plain |= here
+    // races that writer: this arm runs AFTER the one-shot consume freed the
+    // grant slot + AFTER the lock release, so corvus may re-register a CLEARANCE
+    // grant for these same stripes and a SIBLING thread redeem it concurrently;
+    // a plain LDR/ORR/STR would clobber the sibling's atomic OR (lost cap).
+    // Fail-safe today (v1.0 hostowner redeemers corvus/login are single-thread)
+    // but the same multi-thread-lift class as the proc_flags sweep -- close it.
+    __atomic_fetch_or(&writer->caps, to_or, __ATOMIC_ACQ_REL);
     return (long)CAP_USE_WRITE_LEN;
 }
 

@@ -1083,7 +1083,10 @@ struct peer_snapshot_ctx {
 static int peer_snapshot_cb(struct Proc *p, void *arg) {
     struct peer_snapshot_ctx *c = arg;
     if (p->state == PROC_STATE_ALIVE && p->stripes == c->stripes) {
-        c->caps         = p->caps;
+        // caps read ATOMICALLY (RW-5 F2): proc_become_legate is a cross-thread
+        // writer of p->caps since A-4a (it does not hold g_proc_table_lock), so
+        // even under this locked walk a plain load is C11-racy vs the legate OR.
+        c->caps         = __atomic_load_n(&p->caps, __ATOMIC_ACQUIRE);
         c->principal_id = p->principal_id;
         c->primary_gid  = p->primary_gid;
         c->found        = true;

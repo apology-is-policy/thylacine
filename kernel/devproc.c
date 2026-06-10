@@ -485,7 +485,10 @@ static struct Block *devproc_bread(struct Spoor *c, long n, s64 off) {
 bool devproc_kill_authorized(const struct Proc *caller, const struct Proc *target) {
     if (!caller || !target)                            return false;
     if (caller->principal_id == target->principal_id)  return true;   // owner-rwx on 0600
-    if (caller->caps & (CAP_HOSTOWNER | CAP_KILL))     return true;   // admin OR kill-anyone
+    // caps read ATOMICALLY (RW-5 F2): proc_become_legate is a cross-thread writer
+    // of caller->caps since A-4a; a plain load is C11-racy (CAP_KILL is clearance-grantable).
+    if (__atomic_load_n(&caller->caps, __ATOMIC_ACQUIRE) & (CAP_HOSTOWNER | CAP_KILL))
+        return true;   // admin OR kill-anyone
     return false;
 }
 

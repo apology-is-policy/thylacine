@@ -254,10 +254,15 @@ static void handle_acquire_obj(enum kobj_kind kind, void *obj) {
         spoor_ref((struct Spoor *)obj);
         break;
     case KOBJ_SRV:
-        // P5-corvus-srv: handle_dup rejects KObj_Srv (see handle_dup,
-        // NoSrvDup), so handle_acquire_obj is never reached for it.
-        // The case is present so the switch stays exhaustive over
-        // kobj_kind — the KOBJ_KIND_COUNT _Static_assert's discipline.
+        // RW-5 R1-F1: handle_GET reaches this (the #844 snapshot bumps the obj
+        // refcount under the table lock); handle_dup does NOT (NoSrvDup rejects).
+        // The no-op acquire is BALANCED with handle_release_obj's KOBJ_SRV arm
+        // ONLY because post-stalk-3c a KObj_Srv handle is always a SERVICE
+        // listener (SRV_SERVICE_MAGIC -> no-op release). If a KObj_Srv handle
+        // ever again named a ref-counted SrvConn (SRV_CONN_MAGIC -> teardown +
+        // srvconn_unref), this no-op would underflow the get/put pairing (a UAF)
+        // -- it would then need a real srvconn_ref here (cf. the KOBJ_LOOM arm,
+        // which DOES ref because a Loom obj is ref-counted).
         break;
     case KOBJ_INVALID:
     case KOBJ_PROCESS:
@@ -385,6 +390,20 @@ hidx_t handle_alloc(struct Proc *p, enum kobj_kind kind,
             extinction("handle_alloc(KOBJ_BURROW): caller has not accounted for "
                        "the slot's reference (call burrow_ref first, or use the "
                        "burrow_create_anon-consumed-reference convention)");
+    }
+
+    // RW-5 R1-F2: the KOBJ_LOOM analog of the KOBJ_BURROW guard above. Like a
+    // Burrow, a Loom carries the consumed-ref convention (loom_create returns
+    // refcount = 1, the handle's ref). A caller installing a Loom with no
+    // accounted ref would underflow the get/put + close refcount. Defense in
+    // depth (the sole loom caller is correct), matching the burrow arm.
+    if (kind == KOBJ_LOOM && obj) {
+        struct Loom *l = (struct Loom *)obj;
+        if (l->magic != LOOM_MAGIC)
+            extinction("handle_alloc(KOBJ_LOOM): obj has bad magic (not a Loom or UAF)");
+        if (__atomic_load_n(&l->refcount, __ATOMIC_ACQUIRE) <= 0)
+            extinction("handle_alloc(KOBJ_LOOM): caller has not accounted for the "
+                       "slot's reference (loom_create's initial refcount=1 convention)");
     }
 
     // #844 audit F1: scan + install UNDER the table lock, via the same

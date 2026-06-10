@@ -206,11 +206,10 @@ static s64 sys_mmio_create_handler(u64 pa, u64 size, u64 rights) {
 
     // P4-Ib HwHandleImpliesCap: require CAP_HW_CREATE. The bug class
     // BuggyHwCreateNoCap is rejected here.
-    // R9 F146 (P2) close: atomic load of p->caps. At v1.0 there's no
-    // cross-thread writer of p->caps (no ReduceCaps syscall yet); the
-    // plain load is currently safe. Using __atomic_load_n + ACQUIRE
-    // future-proofs against Phase 5+ paths where another thread may
-    // mutate caps. Negligible cost on aarch64 (ldar single instruction).
+    // R9 F146 / RW-5 R3-F4: atomic load of p->caps. There IS a cross-thread
+    // writer now -- proc_become_legate (the A-4a clearance redeem) does an
+    // __atomic_fetch_or on a sibling thread's caps -- so the ACQUIRE load is
+    // load-bearing, not just future-proofing. ldar is one instruction on aarch64.
     if ((__atomic_load_n(&p->caps, __ATOMIC_ACQUIRE) & CAP_HW_CREATE) == 0)
         return -1;
 
@@ -248,11 +247,10 @@ static s64 sys_irq_create_handler(u64 intid, u64 rights) {
     struct Proc *p = t->proc;
     if (!p)                                          return -1;
 
-    // R9 F146 (P2) close: atomic load of p->caps. At v1.0 there's no
-    // cross-thread writer of p->caps (no ReduceCaps syscall yet); the
-    // plain load is currently safe. Using __atomic_load_n + ACQUIRE
-    // future-proofs against Phase 5+ paths where another thread may
-    // mutate caps. Negligible cost on aarch64 (ldar single instruction).
+    // R9 F146 / RW-5 R3-F4: atomic load of p->caps. There IS a cross-thread
+    // writer now -- proc_become_legate (the A-4a clearance redeem) does an
+    // __atomic_fetch_or on a sibling thread's caps -- so the ACQUIRE load is
+    // load-bearing, not just future-proofing. ldar is one instruction on aarch64.
     if ((__atomic_load_n(&p->caps, __ATOMIC_ACQUIRE) & CAP_HW_CREATE) == 0)
         return -1;
     if (rights == 0 || (rights & ~(u64)RIGHT_ALL))   return -1;
