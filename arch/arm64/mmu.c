@@ -255,8 +255,14 @@ bool pte_violates_wxe(u64 pte) {
     // (PTE_AP_RO_EL1 sets bit 7; PTE_AP_RO_ANY sets bits 7+6. Bit 7 is the
     // "RO" indicator — if it's clear, AP[2:1] is 0b00 (RW EL1) or 0b01
     // (RW any), which means writable.)
+    // RW-1 F5: W^X is violated by writable + executable at EITHER EL. The
+    // EL0 leg (UXN clear) matters for any future caller that validates a
+    // user PTE: user PTEs always set PXN, so an EL1-only check would miss a
+    // writable + user-executable page. Checking both keeps the function
+    // true to its name (a full W^X check, not EL1-only).
     bool exec_el1 = !(pte & PTE_PXN);
-    return writable && exec_el1;
+    bool exec_el0 = !(pte & PTE_UXN);
+    return writable && (exec_el1 || exec_el0);
 }
 
 // ---------------------------------------------------------------------------
@@ -800,6 +806,14 @@ void *mmu_map_mmio(paddr_t pa, size_t size) {
     if (pa >> 40) {
         extinction("mmu_map_mmio: PA exceeds TCR.IPS=40 (1 TiB)");
     }
+    // RW-1 F4: the page-round below wraps for size within PAGE_SIZE-1 of
+    // SIZE_MAX (aligned_size -> tiny, n_pages -> tiny), mapping far fewer
+    // pages than asked. The pa+size guard above catches only the pa+size
+    // wrap, not this one. Mirror burrow_create_anon's guard. Dormant
+    // (callers are boot-time DTB-derived sizes) but a real wrap.
+    if (size > SIZE_MAX - (PAGE_SIZE - 1)) {
+        extinction("mmu_map_mmio: size overflow");
+    }
 
     size_t aligned_size = (size + PAGE_SIZE - 1) & ~(size_t)(PAGE_SIZE - 1);
     u32 n_pages = (u32)(aligned_size >> PAGE_SHIFT);
@@ -973,11 +987,14 @@ void mmu_patch_text(void *dst, const void *src, u32 n) {
 // must be enforced at that translation. P3-Bd will retire TTBR0
 // identity entirely.
 //
-// At v1.0 these are called single-threaded from the boot CPU. SMP-safe
-// demote at Phase 5+ when multi-thread Procs make concurrent thread_create
-// possible — a global mmu_lock plus careful break-before-make across
-// CPUs (DSB ISH + TLB flush + DSB ISH; tlbi vmalle1is is already
-// inner-shareable so all CPUs see the invalidation).
+// SMP-safety (RW-1 F2): the block->table demote below (the only BBM step
+// here) is reached ONLY at boot, single-CPU. At runtime #808
+// (mmu_pagemap_directmap) has already demoted the whole buddy zone to L3,
+// so the kstack-guard path finds a present L3 and does only a distinct-
+// index leaf flip -- no runtime demote, no block->table BBM. Multi-thread
+// Procs drive concurrent thread_create, but those concurrent calls only
+// flip distinct leaves (single-copy-atomic, each with its own broadcast
+// tlbi), so no global mmu_lock is needed and none exists.
 // ---------------------------------------------------------------------------
 
 #include <thylacine/page.h>

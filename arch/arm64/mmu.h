@@ -237,8 +237,9 @@ void mmu_enable(u64 slide);
 void mmu_program_this_cpu(void);
 
 // Inspect a PTE for W^X compliance. Returns true iff the PTE is writable
-// AND executable-at-EL1, which is the forbidden combination. Used by the
-// audit-trigger surface verifier (and by tests at P1-I+).
+// AND executable at EITHER EL (PXN clear for EL1, or UXN clear for EL0) --
+// the forbidden combination (I-12). Used by the audit-trigger surface
+// verifier (and by tests at P1-I+).
 bool pte_violates_wxe(u64 pte);
 
 // P3-Bda: retire the TTBR0 identity map. Zeros every L2 entry in
@@ -285,10 +286,15 @@ void mmu_retire_ttbr0_identity(void);
 // map (PTE_KERN_RW). Called on thread_free before the underlying pages
 // are returned to buddy.
 //
-// At v1.0 P3-Bca these are called single-threaded from the boot CPU
-// (thread_create / thread_free are not yet SMP-safe). Phase 5+ adds a
-// global mmu_lock when multi-thread Procs make concurrent thread_create
-// possible.
+// SMP-safe without a lock (RW-1 F2): #808 (mmu_pagemap_directmap)
+// pre-demotes the entire buddy zone to L3 at boot, so every runtime call
+// here finds an already-present L3 and performs only a distinct-index leaf
+// flip on the shared global tables -- never a block->table BBM. Each kstack
+// PA lies in [zone_base, zone_end) (fully covered by the pagemap loop), and
+// concurrent flips of distinct 8-byte-aligned slots are single-copy-atomic,
+// each with its own broadcast tlbi. Multi-thread Procs (stratumd) do drive
+// concurrent thread_create -> these calls from multiple CPUs; no mmu_lock
+// is needed and none exists.
 //
 // Returns false on OOM (L2 / L3 table allocation failed) or if the PA
 // is outside the direct-map range (PA < 1 GiB or PA >= 9 GiB at v1.0).
